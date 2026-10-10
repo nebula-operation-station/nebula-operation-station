@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Enabled with: git config core.hooksPath .githooks
+#
+# 1. Agent commits (author nos-coder@localhost) must not touch protected paths.
+# 2. Every commit: gofmt clean on staged Go files.
+#
+# Hooks can be bypassed locally; CI enforces the same rules.
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+author_email="$(git var GIT_AUTHOR_IDENT | sed -E 's/.*<([^>]+)>.*/\1/')"
+
+if [[ "$author_email" == "nos-coder@localhost" ]]; then
+  git diff --cached --name-only --diff-filter=ACDMR | "$root/scripts/check-protected-paths.sh"
+fi
+
+mapfile -t gofiles < <(git diff --cached --name-only --diff-filter=ACM -- '*.go')
+if (( ${#gofiles[@]} > 0 )); then
+  unformatted=$(gofmt -l "${gofiles[@]}")
+  if [[ -n "$unformatted" ]]; then
+    echo "gofmt needed:" >&2
+    echo "$unformatted" >&2
+    exit 1
+  fi
+fi

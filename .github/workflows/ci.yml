@@ -1,0 +1,79 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.x"
+      - run: make fmt-check
+      - run: go vet ./...
+      - run: make test
+      - name: Privileged security tests (multi-UID)
+        run: sudo -E env "PATH=$PATH" make test-privileged
+
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.9"
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+      - name: staticcheck and buf lint
+        run: make lint LINT_TOOLCHAIN=local
+      - name: Generated code up to date
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+          make generate-check
+
+  vuln:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.x"
+      - run: make vuln
+
+  protected-paths:
+    # Agent branches must not touch protected paths unless a maintainer has
+    # added the label "protected-change-approved" after review.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Check
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'protected-change-approved') }}
+        run: |
+          agent_commits=$(git log --format='%ae' "$BASE_SHA..HEAD" | grep -c '^nos-coder@localhost$' || true)
+          if [[ "$HEAD_REF" != agent/* && "$agent_commits" -eq 0 ]]; then
+            echo "not an agent change"; exit 0
+          fi
+          if [[ "$APPROVED" == "true" ]]; then
+            echo "protected change approved by label"; exit 0
+          fi
+          git diff --name-only "$BASE_SHA...HEAD" | scripts/check-protected-paths.sh

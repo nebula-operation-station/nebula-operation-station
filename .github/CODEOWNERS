@@ -1,0 +1,17 @@
+# Replace @nos-maintainers with the GitHub team or user after creating the
+# organization. Branch protection must require code-owner review on main.
+*                               @nos-maintainers
+/AGENTS.md                      @nos-maintainers
+/.github/                       @nos-maintainers
+/docs/spec/                     @nos-maintainers
+/docs/adr/                      @nos-maintainers
+/proto/                         @nos-maintainers
+/internal/canonical/            @nos-maintainers
+/internal/permit/               @nos-maintainers
+/internal/peercred/             @nos-maintainers
+/internal/keyring/              @nos-maintainers
+/internal/webauthnverify/       @nos-maintainers
+/internal/fsguard/              @nos-maintainers
+/internal/executor/roles.go     @nos-maintainers
+/test/security/                 @nos-maintainers
+/deploy/systemd/                @nos-maintainers

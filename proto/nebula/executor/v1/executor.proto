@@ -1,0 +1,211 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+syntax = "proto3";
+
+package nebula.executor.v1;
+
+option go_package = "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1;executorv1";
+
+// ExecutorService is served by nebula-executor on a Unix domain socket only.
+// Every method is authorized by the caller's kernel-reported UID
+// (SO_PEERCRED); see internal/peercred for the method-to-role table.
+//
+// Compatibility rules: fields are never renumbered or reused; removed fields
+// are reserved. New methods require an explicit entry in the role table,
+// otherwise they are denied for everyone.
+service ExecutorService {
+  // Role: server, admin.
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+
+  // Role: server. Submits a fully resolved execution request. The executor
+  // canonicalizes it (RFC 8785), computes the digest itself and returns the
+  // approval challenge. For LOW risk inside an active privileged session the
+  // permit is issued immediately.
+  rpc ProposeExecution(ProposeExecutionRequest) returns (ProposeExecutionResponse);
+
+  // Role: server. Relays a WebAuthn assertion over the challenge returned by
+  // ProposeExecution. The executor verifies it on its own.
+  rpc SubmitAssertion(SubmitAssertionRequest) returns (SubmitAssertionResponse);
+
+  // Role: server. Starts and completes the privileged web session, which
+  // requires a user-verified assertion.
+  rpc BeginPrivilegedSession(BeginPrivilegedSessionRequest) returns (BeginPrivilegedSessionResponse);
+  rpc CompletePrivilegedSession(CompletePrivilegedSessionRequest) returns (CompletePrivilegedSessionResponse);
+
+  // Role: server. Asks whether one host run is covered by an issued permit.
+  // The executor hashes the artifact and parameters itself. In Milestone 0
+  // this only authorizes; SSH execution arrives in Milestone 4.
+  rpc AuthorizeRun(AuthorizeRunRequest) returns (AuthorizeRunResponse);
+
+  // Role: admin. Decrypts the SSH keys into the in-process keyring.
+  rpc Unlock(UnlockRequest) returns (UnlockResponse);
+
+  // Role: server, admin. Wipes the keyring and ends the privileged session.
+  // Locking is always permitted because it only reduces capability.
+  rpc Lock(LockRequest) returns (LockResponse);
+
+  // Role: admin. Lists pending permits with the executor's own view of them,
+  // so that `nebula approve` never relies on what the web UI displayed.
+  rpc ListPending(ListPendingRequest) returns (ListPendingResponse);
+
+  // Role: admin. Hardened approval path.
+  rpc ApproveCLI(ApproveCLIRequest) returns (ApproveCLIResponse);
+}
+
+enum RiskClass {
+  RISK_CLASS_UNSPECIFIED = 0;
+  RISK_CLASS_LOW = 1;
+  RISK_CLASS_MEDIUM = 2;
+  RISK_CLASS_HIGH = 3;
+  RISK_CLASS_CRITICAL = 4;
+}
+
+enum ApprovalRequirement {
+  APPROVAL_REQUIREMENT_UNSPECIFIED = 0;
+  // Issued immediately because a privileged session is active (LOW).
+  APPROVAL_REQUIREMENT_NONE = 1;
+  // WebAuthn assertion with user presence (MEDIUM).
+  APPROVAL_REQUIREMENT_ASSERTION_PRESENCE = 2;
+  // WebAuthn assertion with user verification (HIGH).
+  APPROVAL_REQUIREMENT_ASSERTION_VERIFIED = 3;
+  // User-verified assertion plus the typed number of targets (CRITICAL).
+  APPROVAL_REQUIREMENT_ASSERTION_VERIFIED_TYPED_COUNT = 4;
+  // Only `nebula approve` on the executor host (hardened mode).
+  APPROVAL_REQUIREMENT_CLI_ONLY = 5;
+}
+
+enum PermitState {
+  PERMIT_STATE_UNSPECIFIED = 0;
+  PERMIT_STATE_PENDING = 1;
+  PERMIT_STATE_APPROVED = 2;
+}
+
+message Target {
+  string host_id = 1;
+  // OpenSSH fingerprint of the pinned host key, "SHA256:<base64>".
+  string host_key_fingerprint = 2;
+}
+
+// ExecutionRequest is the fully resolved request that a permit binds to.
+// Field semantics are defined in docs/spec/07-execution-model.md.
+message ExecutionRequest {
+  string execution_id = 1;
+  string action_id = 2;
+  string module_version = 3;
+  string artifact_sha256 = 4;
+  string parameters_hash = 5;
+  repeated string credential_refs = 6;
+  RiskClass risk_class = 7;
+  string stage_plan_hash = 8;
+  int64 expiry_unix = 9;
+  repeated Target resolved_targets = 10;
+}
+
+message GetStatusRequest {}
+
+message GetStatusResponse {
+  bool unlocked = 1;
+  bool privileged_session_active = 2;
+  int64 privileged_session_expiry_unix = 3;
+  bool hardened_mode = 4;
+  uint32 pending_permits = 5;
+  uint32 approved_permits = 6;
+  repeated string loaded_credential_refs = 7;
+}
+
+message ProposeExecutionRequest {
+  ExecutionRequest request = 1;
+}
+
+message ProposeExecutionResponse {
+  // Hex SHA-256 of the canonical request; also the permit identifier.
+  string execution_digest = 1;
+  // Exact canonical bytes that were hashed, for display and audit.
+  bytes canonical_request = 2;
+  ApprovalRequirement approval_requirement = 3;
+  // WebAuthn challenge = SHA-256(digest || nonce || expiry). Empty when no
+  // assertion is required.
+  bytes challenge = 4;
+  int64 challenge_expiry_unix = 5;
+  PermitState state = 6;
+}
+
+message SubmitAssertionRequest {
+  string execution_digest = 1;
+  // PublicKeyCredential JSON as produced by navigator.credentials.get().
+  bytes assertion_json = 2;
+  // Required for CRITICAL: the number of targets the operator typed.
+  uint32 typed_target_count = 3;
+}
+
+message SubmitAssertionResponse {
+  PermitState state = 1;
+}
+
+message BeginPrivilegedSessionRequest {}
+
+message BeginPrivilegedSessionResponse {
+  bytes challenge = 1;
+  int64 challenge_expiry_unix = 2;
+  string rp_id = 3;
+}
+
+message CompletePrivilegedSessionRequest {
+  bytes assertion_json = 1;
+}
+
+message CompletePrivilegedSessionResponse {
+  int64 session_expiry_unix = 1;
+}
+
+message AuthorizeRunRequest {
+  string execution_digest = 1;
+  string host_id = 2;
+  string host_key_fingerprint = 3;
+  string action_id = 4;
+  string module_version = 5;
+  // Raw artifact bytes; the executor hashes them itself.
+  bytes artifact = 6;
+  // Parameters as a JSON object; the executor canonicalizes and hashes it.
+  bytes parameters_json = 7;
+  string credential_ref = 8;
+}
+
+message AuthorizeRunResponse {
+  bool authorized = 1;
+}
+
+message UnlockRequest {
+  bytes passphrase = 1;
+}
+
+message UnlockResponse {
+  repeated string loaded_credential_refs = 1;
+}
+
+message LockRequest {}
+
+message LockResponse {}
+
+message ListPendingRequest {}
+
+message PendingPermit {
+  string execution_digest = 1;
+  ExecutionRequest request = 2;
+  ApprovalRequirement approval_requirement = 3;
+  int64 approval_expiry_unix = 4;
+}
+
+message ListPendingResponse {
+  repeated PendingPermit permits = 1;
+}
+
+message ApproveCLIRequest {
+  string execution_digest = 1;
+  // Required for CRITICAL.
+  uint32 typed_target_count = 2;
+}
+
+message ApproveCLIResponse {
+  PermitState state = 1;
+}

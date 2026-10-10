@@ -1,0 +1,12 @@
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
+.DS_Store
+.idea/
+.vscode/
+# never commit secrets or local keys
+*.key
+*.pem
+.env

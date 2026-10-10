@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Reference unit for nebula-executor. Adjust -rp-id, -origin and -admin-users.
+[Unit]
+Description=Nebula Operation Station executor (credential holder)
+Documentation=https://github.com/nebula-operation-station/nebula-operation-station/tree/main/docs
+After=network.target
+
+[Service]
+Type=simple
+User=nebula-executor
+Group=nebula-executor
+SupplementaryGroups=nebula-rpc
+ExecStart=/usr/bin/nebula-executor \
+  -data-dir /var/lib/nebula/executor \
+  -socket /run/nebula/executor.sock \
+  -socket-group nebula-rpc \
+  -server-user nebula-server \
+  -admin-users CHANGE_ME \
+  -rp-id nebula.example.org \
+  -origin https://nebula.example.org
+Restart=on-failure
+
+# The executor starts locked after every restart; `nebula unlock` is needed.
+StateDirectory=nebula/executor
+StateDirectoryMode=0700
+RuntimeDirectory=nebula
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+UMask=0077
+
+# Hardening
+LimitCORE=0
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Unix socket for RPC; outbound IPv4/IPv6 for SSH from Milestone 4 on.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

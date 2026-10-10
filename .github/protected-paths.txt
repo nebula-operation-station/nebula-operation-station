@@ -1,0 +1,24 @@
+# Paths that need human review. One prefix per line; a path is protected if
+# it equals a line or starts with a line that ends in "/".
+# Used by .githooks/pre-commit and the CI job "protected-paths".
+AGENTS.md
+CODEOWNERS
+.github/
+.githooks/
+Makefile
+go.mod
+go.sum
+docs/spec/
+docs/adr/
+docs/threat-model.md
+proto/
+internal/canonical/
+internal/permit/
+internal/peercred/
+internal/keyring/
+internal/webauthnverify/
+internal/fsguard/
+internal/executor/roles.go
+test/security/
+deploy/systemd/
+scripts/check-protected-paths.sh
