@@ -150,7 +150,7 @@ func (Credentials) Info() credentials.ProtocolInfo {
 func (pc Credentials) Clone() credentials.TransportCredentials { return pc }
 
 // OverrideServerName implements credentials.TransportCredentials.
-func (Credentials) OverrideServerName(string) error { return nil } //nolint:staticcheck // required by interface
+func (Credentials) OverrideServerName(string) error { return nil }
 
 // Policy maps UIDs to roles and full gRPC method names to allowed roles.
 type Policy struct {

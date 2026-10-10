@@ -168,7 +168,7 @@ func TestLegacyPEMEncryptionRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	//nolint:staticcheck // deliberately produce the weak legacy format
+	//lint:ignore SA1019 the test deliberately produces the weak legacy format
 	blk, err := x509.EncryptPEMBlock(rand.Reader, "RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(k), []byte(pass), x509.PEMCipherDES)
 	if err != nil {
 		t.Fatal(err)

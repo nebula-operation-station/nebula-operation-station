@@ -248,4 +248,7 @@ func TestM0Privileged_UnknownUIDIsRejectedAcrossProcesses(t *testing.T) {
 			}
 		})
 	}
+	// The stranger's rejection must come from the executor's handshake, not
+	// from an unrelated connection failure.
+	h.requireHandshakeRejection(uidStranger)
 }

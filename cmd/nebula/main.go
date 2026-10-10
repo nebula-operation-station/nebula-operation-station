@@ -28,6 +28,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/version"
@@ -196,7 +197,7 @@ func approve(ctx context.Context, c pb.ExecutorServiceClient, prefix string) err
 	fmt.Printf("  action         %s @ %s\n", r.GetActionId(), r.GetModuleVersion())
 	fmt.Printf("  artifact       sha256:%s\n", r.GetArtifactSha256())
 	fmt.Printf("  parameters     sha256:%s\n", r.GetParametersHash())
-	fmt.Printf("                 %s\n", displaySafe(match.GetCanonicalParameters(), 4096))
+	fmt.Printf("                 %s\n", displaySafe(match.GetCanonicalParameters(), canonical.MaxParametersSize))
 	fmt.Printf("  stage plan     sha256:%s\n", r.GetStagePlanHash())
 	fmt.Printf("  credentials    %s\n", strings.Join(r.GetCredentialRefs(), ", "))
 	fmt.Printf("  permit expiry  %s\n", time.Unix(r.GetExpiryUnix(), 0).Format(time.RFC3339))
@@ -235,7 +236,9 @@ func envOr(key, def string) string {
 	return def
 }
 
-// displaySafe renders bytes for a terminal: printable runes as they are,
+// displaySafe renders bytes for a terminal. The approval screen passes the
+// full parameter size limit so nothing is ever cut off; canonical JSON sorts
+// keys, so truncation would let a proposer hide trailing members.: printable runes as they are,
 // everything else (control characters, C1 codes such as CSI, invalid UTF-8)
 // escaped, so that crafted parameters cannot rewrite the approval screen.
 func displaySafe(b []byte, limit int) string {

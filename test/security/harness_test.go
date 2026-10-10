@@ -14,11 +14,11 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -55,6 +55,7 @@ var (
 
 type harness struct {
 	t      *testing.T
+	logs   *syncBuffer
 	socket string
 	client pb.ExecutorServiceClient
 	rp     virtualwebauthn.RelyingParty
@@ -94,7 +95,8 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h.logs = &syncBuffer{}
+	log := slog.New(slog.NewJSONHandler(h.logs, nil))
 	auth, err := permit.New(permit.Options{Mode: o.mode, Verifier: verifier, Audit: executor.AuditLogger(log)})
 	if err != nil {
 		t.Fatal(err)
@@ -224,6 +226,34 @@ func run(digest, host, fp string) *pb.AuthorizeRunRequest {
 		ExecutionDigest: digest, HostId: host, HostKeyFingerprint: fp,
 		ActionId: "patching.install_security", ModuleVersion: "1.0.0",
 		Artifact: script, ParametersJson: params, CredentialRef: credRef,
+	}
+}
+
+// syncBuffer collects executor log lines for assertions.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// requireHandshakeRejection asserts that the executor itself logged the
+// rejection, so the test cannot pass on an unrelated connection failure.
+func (h *harness) requireHandshakeRejection(uid uint32) {
+	h.t.Helper()
+	want := fmt.Sprintf(`"kind":"connection_rejected","uid":%d`, uid)
+	if !strings.Contains(h.logs.String(), want) {
+		h.t.Fatalf("executor did not log a handshake rejection for uid %d; log:\n%s", uid, h.logs.String())
 	}
 }
 

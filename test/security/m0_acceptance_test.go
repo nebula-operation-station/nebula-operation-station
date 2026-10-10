@@ -28,6 +28,7 @@ func TestM0_UnknownUIDIsRejected(t *testing.T) {
 	wantRejectedPeer(t, err)
 	_, err = h.client.Unlock(h.ctx(), &pb.UnlockRequest{Passphrase: []byte(passphrase)})
 	wantRejectedPeer(t, err)
+	h.requireHandshakeRejection(uint32(os.Getuid()))
 }
 
 func TestM0_ServerRoleCannotUseAdminMethods(t *testing.T) {
