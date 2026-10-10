@@ -199,7 +199,7 @@ func (h *harness) request(risk pb.RiskClass) *pb.ExecutionRequest {
 
 func (h *harness) propose(r *pb.ExecutionRequest) *pb.ProposeExecutionResponse {
 	h.t.Helper()
-	resp, err := h.client.ProposeExecution(h.ctx(), &pb.ProposeExecutionRequest{Request: r})
+	resp, err := h.client.ProposeExecution(h.ctx(), &pb.ProposeExecutionRequest{Request: r, ParametersJson: params})
 	if err != nil {
 		h.t.Fatalf("propose: %v", err)
 	}
@@ -224,6 +224,15 @@ func run(digest, host, fp string) *pb.AuthorizeRunRequest {
 		ExecutionDigest: digest, HostId: host, HostKeyFingerprint: fp,
 		ActionId: "patching.install_security", ModuleVersion: "1.0.0",
 		Artifact: script, ParametersJson: params, CredentialRef: credRef,
+	}
+}
+
+// wantRejectedPeer accepts both ways an unauthorized UID is turned away:
+// closed during the handshake (Unavailable) or denied per method.
+func wantRejectedPeer(t *testing.T, err error) {
+	t.Helper()
+	if c := status.Code(err); c != codes.Unavailable && c != codes.PermissionDenied {
+		t.Fatalf("want connection rejected or permission denied, got %v", err)
 	}
 }
 

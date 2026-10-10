@@ -20,10 +20,15 @@ import (
 	"strings"
 	"time"
 
+	"net"
+	"unicode"
+	"unicode/utf8"
+
 	"golang.org/x/term"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/version"
 )
@@ -39,7 +44,8 @@ commands:
   version             print version
 
 environment:
-  NEBULA_EXECUTOR_SOCKET   default /run/nebula/executor.sock`
+  NEBULA_EXECUTOR_SOCKET   default /run/nebula/executor.sock
+  NEBULA_EXECUTOR_USER     default nebula-executor (the socket must be served by this user)`
 
 func main() {
 	if len(os.Args) < 2 {
@@ -57,11 +63,21 @@ func run(cmd string, args []string) error {
 		fmt.Println(version.String())
 		return nil
 	}
-	sock := os.Getenv("NEBULA_EXECUTOR_SOCKET")
-	if sock == "" {
-		sock = "/run/nebula/executor.sock"
+	sock := envOr("NEBULA_EXECUTOR_SOCKET", "/run/nebula/executor.sock")
+	execUser := envOr("NEBULA_EXECUTOR_USER", "nebula-executor")
+	wantUID, err := peercred.LookupUID(execUser)
+	if err != nil {
+		return fmt.Errorf("executor user %q: %w", execUser, err)
 	}
-	conn, err := grpc.NewClient("unix://"+sock, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// Verify who serves the socket before sending anything, the unlock
+	// passphrase in particular.
+	conn, err := grpc.NewClient("passthrough:///executor",
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return peercred.DialVerified(ctx, sock, wantUID)
+		}),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(64<<20)),
+	)
 	if err != nil {
 		return err
 	}
@@ -180,6 +196,7 @@ func approve(ctx context.Context, c pb.ExecutorServiceClient, prefix string) err
 	fmt.Printf("  action         %s @ %s\n", r.GetActionId(), r.GetModuleVersion())
 	fmt.Printf("  artifact       sha256:%s\n", r.GetArtifactSha256())
 	fmt.Printf("  parameters     sha256:%s\n", r.GetParametersHash())
+	fmt.Printf("                 %s\n", displaySafe(match.GetCanonicalParameters(), 4096))
 	fmt.Printf("  stage plan     sha256:%s\n", r.GetStagePlanHash())
 	fmt.Printf("  credentials    %s\n", strings.Join(r.GetCredentialRefs(), ", "))
 	fmt.Printf("  permit expiry  %s\n", time.Unix(r.GetExpiryUnix(), 0).Format(time.RFC3339))
@@ -209,6 +226,32 @@ func approve(ctx context.Context, c pb.ExecutorServiceClient, prefix string) err
 	}
 	fmt.Println("approved")
 	return nil
+}
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// displaySafe renders bytes for a terminal: printable runes as they are,
+// everything else (control characters, C1 codes such as CSI, invalid UTF-8)
+// escaped, so that crafted parameters cannot rewrite the approval screen.
+func displaySafe(b []byte, limit int) string {
+	var sb strings.Builder
+	for i, r := range string(b) {
+		if i >= limit {
+			sb.WriteString(fmt.Sprintf(" ... [%d more bytes]", len(b)-i))
+			break
+		}
+		if r == utf8.RuneError || !unicode.IsPrint(r) {
+			sb.WriteString(fmt.Sprintf("\\u%04x", r))
+			continue
+		}
+		sb.WriteRune(r)
+	}
+	return sb.String()
 }
 
 func shortRisk(r pb.RiskClass) string {

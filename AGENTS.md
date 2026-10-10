@@ -24,7 +24,7 @@ If the task is unclear, contradicts the spec, or seems to need a change in a pro
 
 ## Hard rules
 
-1. **Never modify protected paths** (list below). The pre-commit hook and CI reject it. If your task needs such a change, stop and explain why in your summary.
+1. **Never modify protected paths** (list below), and never move, rename or delete files there. The pre-commit hook and CI flag it and every such change gets a maintainer review. If your task needs one, stop and explain why in your summary.
 2. **Never weaken, skip or delete a test** to make the build green. No `t.Skip`, no loosened assertions, no changed golden values, no commented-out tests.
 3. **No new dependencies** unless the issue explicitly allows the named module. Never edit `go.mod` or `go.sum` otherwise.
 4. **No self-written cryptography.** Use `crypto/*`, `golang.org/x/crypto`, and the libraries listed in `docs/adr/0002-m0-libraries.md`.
@@ -42,8 +42,9 @@ Changes here need a human. The authoritative list is `.github/protected-paths.tx
 - `AGENTS.md`, `.github/`, `.githooks/`, `Makefile`, `go.mod`, `go.sum`
 - `docs/spec/`, `docs/adr/`, `docs/threat-model.md`
 - `proto/`
-- `internal/canonical/`, `internal/permit/`, `internal/peercred/`, `internal/keyring/`, `internal/webauthnverify/`, `internal/fsguard/`, `internal/executor/roles.go`
-- `test/security/`
+- `internal/canonical/`, `internal/permit/`, `internal/peercred/`, `internal/keyring/`, `internal/webauthnverify/`, `internal/fsguard/`, `internal/executor/`
+- `cmd/nebula-executor/`, `cmd/nebula/`
+- `test/security/`, `scripts/`
 - `deploy/systemd/`
 
 ## Definition of done

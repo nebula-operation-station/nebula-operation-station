@@ -166,9 +166,13 @@ const (
 
 // Permit is one execution permit.
 type Permit struct {
-	Digest         canonical.Digest
-	Request        canonical.Request
-	Canonical      []byte
+	Digest    canonical.Digest
+	Request   canonical.Request
+	Canonical []byte
+	// Parameters is the RFC 8785 form of the approved parameters, kept so
+	// that the CLI can show what is being approved and later milestones can
+	// hand exactly these bytes to the host.
+	Parameters     []byte
 	Requirement    Requirement
 	State          State
 	Challenge      []byte
@@ -186,6 +190,7 @@ func (p *Permit) TargetCount() int { return len(p.Request.ResolvedTargets) }
 func (p *Permit) clone() Permit {
 	c := *p
 	c.Canonical = slices.Clone(p.Canonical)
+	c.Parameters = slices.Clone(p.Parameters)
 	c.Challenge = slices.Clone(p.Challenge)
 	c.used = nil
 	return c
@@ -260,9 +265,15 @@ type ProposeResult struct {
 	Permit Permit // copy
 }
 
-// Propose registers an execution request and returns its permit. LOW risk is
+// Propose registers an execution request and returns its permit. The
+// parameters document must hash to the request's parameters_hash; the
+// executor keeps its canonical form for display and execution. LOW risk is
 // approved immediately when a privileged session is active.
-func (a *Authority) Propose(r canonical.Request) (ProposeResult, error) {
+//
+// An execution ID is single-use: once its permit is gone (expired, discarded
+// or revoked by Lock), proposing it again is rejected and the caller must
+// create a new execution.
+func (a *Authority) Propose(r canonical.Request, parametersJSON []byte) (ProposeResult, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := a.now()
@@ -272,13 +283,24 @@ func (a *Authority) Propose(r canonical.Request) (ProposeResult, error) {
 	if err != nil {
 		return ProposeResult{}, fail(CodeInvalidRequest, "%v", err)
 	}
-
-	if prev, ok := a.executions[norm.ExecutionID]; ok && prev != digest {
-		a.emit(Event{Kind: "rejected", Digest: digest.String(), Code: CodeExecutionIDReused})
-		return ProposeResult{}, fail(CodeExecutionIDReused, "execution_id %s already bound to another request", norm.ExecutionID)
+	params, paramsHash, err := canonical.CanonicalParameters(parametersJSON)
+	if err != nil {
+		return ProposeResult{}, fail(CodeInvalidRequest, "%v", err)
 	}
-	if p, ok := a.permits[digest]; ok {
-		return ProposeResult{Permit: p.clone()}, nil
+	if paramsHash != norm.ParametersHash {
+		return ProposeResult{}, fail(CodeInvalidRequest, "parameters do not hash to parameters_hash")
+	}
+
+	if prev, ok := a.executions[norm.ExecutionID]; ok {
+		if prev != digest {
+			a.emit(Event{Kind: "rejected", Digest: digest.String(), Code: CodeExecutionIDReused})
+			return ProposeResult{}, fail(CodeExecutionIDReused, "execution_id %s already bound to another request", norm.ExecutionID)
+		}
+		if p, live := a.permits[digest]; live {
+			return ProposeResult{Permit: p.clone()}, nil
+		}
+		a.emit(Event{Kind: "rejected", Digest: digest.String(), Code: CodeExecutionIDReused, Detail: "execution already ended"})
+		return ProposeResult{}, fail(CodeExecutionIDReused, "execution_id %s has ended; create a new execution", norm.ExecutionID)
 	}
 
 	req := RequirementFor(norm.RiskClass, a.mode)
@@ -300,6 +322,7 @@ func (a *Authority) Propose(r canonical.Request) (ProposeResult, error) {
 		Digest:      digest,
 		Request:     norm,
 		Canonical:   canon,
+		Parameters:  params,
 		Requirement: req,
 		used:        map[string]struct{}{},
 	}

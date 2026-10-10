@@ -118,7 +118,7 @@ func (e *env) request(risk canonical.Risk) canonical.Request {
 
 func (e *env) propose(r canonical.Request) Permit {
 	e.t.Helper()
-	res, err := e.auth.Propose(r)
+	res, err := e.auth.Propose(r, params)
 	if err != nil {
 		e.t.Fatalf("propose: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestRequirementTable(t *testing.T) {
 
 func TestLowNeedsSession(t *testing.T) {
 	e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
-	_, err := e.auth.Propose(e.request(canonical.RiskLow))
+	_, err := e.auth.Propose(e.request(canonical.RiskLow), params)
 	wantCode(t, err, CodeSessionRequired)
 	e.openSession()
 	p := e.propose(e.request(canonical.RiskLow))
@@ -373,8 +373,45 @@ func TestExecutionIDCannotBeRebound(t *testing.T) {
 		t.Fatal("identical proposal must be idempotent")
 	}
 	r.ResolvedTargets = append(r.ResolvedTargets, canonical.Target{HostID: "netbird-vps", HostKeyFingerprint: fpA})
-	_, err := e.auth.Propose(r)
+	_, err := e.auth.Propose(r, params)
 	wantCode(t, err, CodeExecutionIDReused)
+}
+
+func TestEndedExecutionCannotBeProposedAgain(t *testing.T) {
+	e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
+	e.openSession()
+	r := e.request(canonical.RiskLow)
+	p := e.propose(r)
+	if err := e.auth.Authorize(p.Digest, goodRun("dockerflux", fpA)); err != nil {
+		t.Fatal(err)
+	}
+	e.auth.Lock("test")
+	e.openSession()
+	// Identical request after Lock: would otherwise get a fresh "used" set
+	// and run dockerflux a second time under the same execution ID.
+	_, err := e.auth.Propose(r, params)
+	wantCode(t, err, CodeExecutionIDReused)
+
+	// Discarded after too many failures: the failure budget is per execution.
+	m := e.request(canonical.RiskMedium)
+	pm := e.propose(m)
+	for range MaxFailedAssertions {
+		_, _ = e.auth.SubmitAssertion(pm.Digest, []byte(`{}`), 0)
+	}
+	_, err = e.auth.Propose(m, params)
+	wantCode(t, err, CodeExecutionIDReused)
+}
+
+func TestParametersMustMatchHash(t *testing.T) {
+	e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
+	_, err := e.auth.Propose(e.request(canonical.RiskMedium), []byte(`{"packages":["openssh-server"]}`))
+	wantCode(t, err, CodeInvalidRequest)
+	_, err = e.auth.Propose(e.request(canonical.RiskMedium), []byte(`{"n":1.0}`))
+	wantCode(t, err, CodeInvalidRequest)
+	p := e.propose(e.request(canonical.RiskMedium))
+	if string(p.Parameters) != `{"packages":["openssl"]}` {
+		t.Fatalf("stored parameters %q", p.Parameters)
+	}
 }
 
 func TestLockRevokesEverything(t *testing.T) {
@@ -429,7 +466,7 @@ func TestPendingLimit(t *testing.T) {
 	for range MaxPending {
 		e.propose(e.request(canonical.RiskMedium))
 	}
-	_, err := e.auth.Propose(e.request(canonical.RiskMedium))
+	_, err := e.auth.Propose(e.request(canonical.RiskMedium), params)
 	wantCode(t, err, CodeLimit)
 }
 
@@ -437,7 +474,7 @@ func TestInvalidRequestRejected(t *testing.T) {
 	e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
 	r := e.request(canonical.RiskMedium)
 	r.ArtifactSHA256 = "nope"
-	_, err := e.auth.Propose(r)
+	_, err := e.auth.Propose(r, params)
 	wantCode(t, err, CodeInvalidRequest)
 }
 

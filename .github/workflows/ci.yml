@@ -55,8 +55,12 @@ jobs:
       - run: make vuln
 
   protected-paths:
-    # Agent branches must not touch protected paths unless a maintainer has
-    # added the label "protected-change-approved" after review.
+    # Tripwire for agent branches. The rules and the checker are taken from
+    # the BASE commit, so a PR cannot edit the list it is checked against.
+    # The binding protection is branch protection on main with required
+    # code-owner review and "dismiss stale approvals on new commits"; the
+    # label below only silences this check and must be re-applied after
+    # every push by a maintainer.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     steps:
@@ -76,4 +80,13 @@ jobs:
           if [[ "$APPROVED" == "true" ]]; then
             echo "protected change approved by label"; exit 0
           fi
-          git diff --name-only "$BASE_SHA...HEAD" | scripts/check-protected-paths.sh
+          tmp=$(mktemp -d)
+          if git cat-file -e "$BASE_SHA:.github/protected-paths.txt" 2>/dev/null; then
+            git show "$BASE_SHA:.github/protected-paths.txt" > "$tmp/paths.txt"
+            git show "$BASE_SHA:scripts/check-protected-paths.sh" > "$tmp/check.sh"
+          else
+            echo "::warning::base has no protected-paths list; using the PR's copy"
+            cp .github/protected-paths.txt "$tmp/paths.txt"
+            cp scripts/check-protected-paths.sh "$tmp/check.sh"
+          fi
+          git diff --name-only --no-renames "$BASE_SHA...HEAD" | PROTECTED_PATHS_FILE="$tmp/paths.txt" bash "$tmp/check.sh"

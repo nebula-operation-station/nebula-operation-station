@@ -153,7 +153,7 @@ func TestHashParameters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := HashParameters([]byte(" {\n \"a\": [1,2,{\"x\":null,\"y\":true}], \"b\": 1.0 }"))
+	b, err := HashParameters([]byte(" {\n \"a\": [1,2,{\"x\":null,\"y\":true}], \"b\": 1 }"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,6 +174,12 @@ func TestHashParameters(t *testing.T) {
 		"invalid":       `{"a":}`,
 		"deep":          strings.Repeat(`{"a":`, 40) + "1" + strings.Repeat("}", 40),
 		"deep in array": `{"a":` + strings.Repeat("[", 40) + strings.Repeat("]", 40) + `}`,
+		"float alias":   `{"n":1.0}`,
+		"exponent":      `{"n":1e0}`,
+		"negative zero": `{"n":-0}`,
+		"beyond 2^53":   `{"n":9007199254740993}`,
+		"huge":          `{"n":1e400}`,
+		"nested number": `{"a":[{"n":2.50}]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := HashParameters([]byte(in)); err == nil {
@@ -183,6 +189,26 @@ func TestHashParameters(t *testing.T) {
 	}
 	if _, err := HashParameters([]byte(`{"a":"` + strings.Repeat("x", MaxParametersSize) + `"}`)); err == nil {
 		t.Fatal("expected size limit error")
+	}
+}
+
+func TestCanonicalNumbersAccepted(t *testing.T) {
+	for _, in := range []string{`{"n":1}`, `{"n":-2.5}`, `{"n":9007199254740992}`, `{"n":1e+21}`, `{"n":0.000001}`, `{"n":1e-7}`} {
+		if _, err := HashParameters([]byte(in)); err != nil {
+			t.Errorf("%s rejected: %v", in, err)
+		}
+	}
+}
+
+func TestOneHashOneMeaning(t *testing.T) {
+	// Each pair denotes the same double but different text; only the
+	// canonical spelling may be accepted, so no two inputs share a hash.
+	for _, pair := range [][2]string{{`{"n":1}`, `{"n":1.0}`}, {`{"n":0}`, `{"n":-0}`}, {`{"n":9007199254740992}`, `{"n":9007199254740993}`}} {
+		_, errA := HashParameters([]byte(pair[0]))
+		_, errB := HashParameters([]byte(pair[1]))
+		if errA != nil || errB == nil {
+			t.Errorf("%s / %s: want canonical accepted and alias rejected, got %v / %v", pair[0], pair[1], errA, errB)
+		}
 	}
 }
 

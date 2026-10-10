@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -227,23 +228,54 @@ const MaxParametersSize = 64 << 10
 
 // HashParameters canonicalizes a JSON parameters object with RFC 8785 and
 // returns the lowercase hex SHA-256. An empty input is treated as {}.
-// The top level must be a JSON object; duplicate keys are rejected.
+// See CanonicalParameters for the accepted input.
 func HashParameters(raw []byte) (string, error) {
+	_, h, err := CanonicalParameters(raw)
+	return h, err
+}
+
+// CanonicalParameters returns the RFC 8785 form of a JSON parameters object
+// and its lowercase hex SHA-256. Rules beyond plain JSON, so that one hash
+// can never stand for two meanings:
+//
+//   - the top level must be an object; empty input means {},
+//   - duplicate member names are rejected at any depth,
+//   - numbers must already be in canonical form and exactly representable as
+//     IEEE-754 doubles (1.0, 1e0, -0 and 9007199254740993 are rejected),
+//   - at most MaxParametersSize bytes and 32 levels of nesting.
+//
+// Callers must pass the returned canonical bytes, not the raw input, to
+// anything that executes.
+func CanonicalParameters(raw []byte) ([]byte, string, error) {
 	if len(raw) > MaxParametersSize {
-		return "", fmt.Errorf("parameters exceed %d bytes", MaxParametersSize)
+		return nil, "", fmt.Errorf("parameters exceed %d bytes", MaxParametersSize)
 	}
 	if len(bytes.TrimSpace(raw)) == 0 {
 		raw = []byte("{}")
 	}
 	if err := requireObjectWithoutDuplicates(raw); err != nil {
-		return "", err
+		return nil, "", err
 	}
 	c, err := jcs.Transform(raw)
 	if err != nil {
-		return "", fmt.Errorf("canonicalize parameters: %w", err)
+		return nil, "", fmt.Errorf("canonicalize parameters: %w", err)
 	}
 	sum := sha256.Sum256(c)
-	return hex.EncodeToString(sum[:]), nil
+	return c, hex.EncodeToString(sum[:]), nil
+}
+
+// checkNumber accepts a JSON number only if its literal equals the RFC 8785
+// serialization of the double it denotes.
+func checkNumber(n json.Number) error {
+	f, err := strconv.ParseFloat(string(n), 64)
+	if err != nil {
+		return fmt.Errorf("parameters: number %s out of range", n)
+	}
+	canon, err := jcs.NumberToJSON(f)
+	if err != nil || canon != string(n) {
+		return fmt.Errorf("parameters: number %s must be written as %s or as a string", n, canon)
+	}
+	return nil
 }
 
 // requireObjectWithoutDuplicates rejects documents whose top level is not an
@@ -301,6 +333,9 @@ func walkValue(dec *json.Decoder, depth int) error {
 	tok, err := dec.Token()
 	if err != nil {
 		return fmt.Errorf("parameters: %w", err)
+	}
+	if n, ok := tok.(json.Number); ok {
+		return checkNumber(n)
 	}
 	d, ok := tok.(json.Delim)
 	if !ok {

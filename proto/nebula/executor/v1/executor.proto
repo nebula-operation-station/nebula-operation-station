@@ -115,6 +115,10 @@ message GetStatusResponse {
 
 message ProposeExecutionRequest {
   ExecutionRequest request = 1;
+  // Parameters as a JSON object. Must hash (RFC 8785, SHA-256) to
+  // request.parameters_hash. The executor keeps the canonical form so that
+  // `nebula approve` can show it and execution uses exactly these bytes.
+  bytes parameters_json = 2;
 }
 
 message ProposeExecutionResponse {
@@ -194,6 +198,8 @@ message PendingPermit {
   ExecutionRequest request = 2;
   ApprovalRequirement approval_requirement = 3;
   int64 approval_expiry_unix = 4;
+  // Canonical (RFC 8785) parameters as held by the executor.
+  bytes canonical_parameters = 5;
 }
 
 message ListPendingResponse {

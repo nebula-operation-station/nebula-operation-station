@@ -490,10 +490,14 @@ func (x *GetStatusResponse) GetLoadedCredentialRefs() []string {
 }
 
 type ProposeExecutionRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Request       *ExecutionRequest      `protobuf:"bytes,1,opt,name=request,proto3" json:"request,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Request *ExecutionRequest      `protobuf:"bytes,1,opt,name=request,proto3" json:"request,omitempty"`
+	// Parameters as a JSON object. Must hash (RFC 8785, SHA-256) to
+	// request.parameters_hash. The executor keeps the canonical form so that
+	// `nebula approve` can show it and execution uses exactly these bytes.
+	ParametersJson []byte `protobuf:"bytes,2,opt,name=parameters_json,json=parametersJson,proto3" json:"parameters_json,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ProposeExecutionRequest) Reset() {
@@ -529,6 +533,13 @@ func (*ProposeExecutionRequest) Descriptor() ([]byte, []int) {
 func (x *ProposeExecutionRequest) GetRequest() *ExecutionRequest {
 	if x != nil {
 		return x.Request
+	}
+	return nil
+}
+
+func (x *ProposeExecutionRequest) GetParametersJson() []byte {
+	if x != nil {
+		return x.ParametersJson
 	}
 	return nil
 }
@@ -1259,6 +1270,8 @@ type PendingPermit struct {
 	Request             *ExecutionRequest      `protobuf:"bytes,2,opt,name=request,proto3" json:"request,omitempty"`
 	ApprovalRequirement ApprovalRequirement    `protobuf:"varint,3,opt,name=approval_requirement,json=approvalRequirement,proto3,enum=nebula.executor.v1.ApprovalRequirement" json:"approval_requirement,omitempty"`
 	ApprovalExpiryUnix  int64                  `protobuf:"varint,4,opt,name=approval_expiry_unix,json=approvalExpiryUnix,proto3" json:"approval_expiry_unix,omitempty"`
+	// Canonical (RFC 8785) parameters as held by the executor.
+	CanonicalParameters []byte `protobuf:"bytes,5,opt,name=canonical_parameters,json=canonicalParameters,proto3" json:"canonical_parameters,omitempty"`
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
 }
@@ -1319,6 +1332,13 @@ func (x *PendingPermit) GetApprovalExpiryUnix() int64 {
 		return x.ApprovalExpiryUnix
 	}
 	return 0
+}
+
+func (x *PendingPermit) GetCanonicalParameters() []byte {
+	if x != nil {
+		return x.CanonicalParameters
+	}
+	return nil
 }
 
 type ListPendingResponse struct {
@@ -1492,9 +1512,10 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\rhardened_mode\x18\x04 \x01(\bR\fhardenedMode\x12'\n" +
 	"\x0fpending_permits\x18\x05 \x01(\rR\x0ependingPermits\x12)\n" +
 	"\x10approved_permits\x18\x06 \x01(\rR\x0fapprovedPermits\x124\n" +
-	"\x16loaded_credential_refs\x18\a \x03(\tR\x14loadedCredentialRefs\"Y\n" +
+	"\x16loaded_credential_refs\x18\a \x03(\tR\x14loadedCredentialRefs\"\x82\x01\n" +
 	"\x17ProposeExecutionRequest\x12>\n" +
-	"\arequest\x18\x01 \x01(\v2$.nebula.executor.v1.ExecutionRequestR\arequest\"\xd7\x02\n" +
+	"\arequest\x18\x01 \x01(\v2$.nebula.executor.v1.ExecutionRequestR\arequest\x12'\n" +
+	"\x0fparameters_json\x18\x02 \x01(\fR\x0eparametersJson\"\xd7\x02\n" +
 	"\x18ProposeExecutionResponse\x12)\n" +
 	"\x10execution_digest\x18\x01 \x01(\tR\x0fexecutionDigest\x12+\n" +
 	"\x11canonical_request\x18\x02 \x01(\fR\x10canonicalRequest\x12Z\n" +
@@ -1538,12 +1559,13 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x16loaded_credential_refs\x18\x01 \x03(\tR\x14loadedCredentialRefs\"\r\n" +
 	"\vLockRequest\"\x0e\n" +
 	"\fLockResponse\"\x14\n" +
-	"\x12ListPendingRequest\"\x88\x02\n" +
+	"\x12ListPendingRequest\"\xbb\x02\n" +
 	"\rPendingPermit\x12)\n" +
 	"\x10execution_digest\x18\x01 \x01(\tR\x0fexecutionDigest\x12>\n" +
 	"\arequest\x18\x02 \x01(\v2$.nebula.executor.v1.ExecutionRequestR\arequest\x12Z\n" +
 	"\x14approval_requirement\x18\x03 \x01(\x0e2'.nebula.executor.v1.ApprovalRequirementR\x13approvalRequirement\x120\n" +
-	"\x14approval_expiry_unix\x18\x04 \x01(\x03R\x12approvalExpiryUnix\"R\n" +
+	"\x14approval_expiry_unix\x18\x04 \x01(\x03R\x12approvalExpiryUnix\x121\n" +
+	"\x14canonical_parameters\x18\x05 \x01(\fR\x13canonicalParameters\"R\n" +
 	"\x13ListPendingResponse\x12;\n" +
 	"\apermits\x18\x01 \x03(\v2!.nebula.executor.v1.PendingPermitR\apermits\"l\n" +
 	"\x11ApproveCLIRequest\x12)\n" +

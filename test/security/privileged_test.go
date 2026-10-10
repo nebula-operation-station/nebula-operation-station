@@ -87,7 +87,9 @@ func helper(mode, arg string) int {
 			// Unauthenticated: the handler rejected the dummy passphrase,
 			// so authorization by UID passed.
 			return 0
-		case codes.PermissionDenied:
+		case codes.PermissionDenied, codes.Unavailable:
+			// Unavailable: the executor closed the connection during the
+			// handshake because the UID holds no role.
 			return 10
 		default:
 			fmt.Fprintln(os.Stderr, err)

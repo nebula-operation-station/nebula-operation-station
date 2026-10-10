@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
@@ -51,33 +52,37 @@ func (AuthInfo) AuthType() string { return "peercred" }
 
 // Credentials is a gRPC TransportCredentials implementation for Unix
 // sockets. On the server side it records SO_PEERCRED; it adds no encryption
-// (the kernel is the transport).
-type Credentials struct{}
+// (the kernel is the transport). If Policy is set, connections from UIDs
+// that hold no role are closed during the handshake, before any request
+// bytes are read.
+type Credentials struct {
+	Policy   *Policy
+	OnReject func(uid uint32, pid int32)
+}
 
 var _ credentials.TransportCredentials = Credentials{}
+
+// ErrUnknownPeer is returned by ServerHandshake for UIDs without any role.
+var ErrUnknownPeer = errors.New("peercred: peer UID holds no role")
 
 // ErrNotUnix is returned for connections that are not Unix sockets.
 var ErrNotUnix = errors.New("peercred: connection is not a Unix domain socket")
 
 // ServerHandshake reads the peer's credentials.
-func (Credentials) ServerHandshake(c net.Conn) (net.Conn, credentials.AuthInfo, error) {
+func (pc Credentials) ServerHandshake(c net.Conn) (net.Conn, credentials.AuthInfo, error) {
 	uc, ok := c.(*net.UnixConn)
 	if !ok {
 		return nil, nil, ErrNotUnix
 	}
-	raw, err := uc.SyscallConn()
+	cred, err := ucred(uc)
 	if err != nil {
 		return nil, nil, err
 	}
-	var cred *unix.Ucred
-	var credErr error
-	if err := raw.Control(func(fd uintptr) {
-		cred, credErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
-	}); err != nil {
-		return nil, nil, err
-	}
-	if credErr != nil {
-		return nil, nil, fmt.Errorf("peercred: SO_PEERCRED: %w", credErr)
+	if pc.Policy != nil && !pc.Policy.Known(cred.Uid) {
+		if pc.OnReject != nil {
+			pc.OnReject(cred.Uid, cred.Pid)
+		}
+		return nil, nil, ErrUnknownPeer
 	}
 	return c, AuthInfo{
 		CommonAuthInfo: credentials.CommonAuthInfo{SecurityLevel: credentials.PrivacyAndIntegrity},
@@ -85,6 +90,50 @@ func (Credentials) ServerHandshake(c net.Conn) (net.Conn, credentials.AuthInfo, 
 		GID:            cred.Gid,
 		PID:            cred.Pid,
 	}, nil
+}
+
+func ucred(uc *net.UnixConn) (*unix.Ucred, error) {
+	raw, err := uc.SyscallConn()
+	if err != nil {
+		return nil, err
+	}
+	var cred *unix.Ucred
+	var credErr error
+	if err := raw.Control(func(fd uintptr) {
+		cred, credErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
+	}); err != nil {
+		return nil, err
+	}
+	if credErr != nil {
+		return nil, fmt.Errorf("peercred: SO_PEERCRED: %w", credErr)
+	}
+	return cred, nil
+}
+
+// DialVerified connects to a Unix socket and checks that the listening
+// process runs as wantUID. Clients that send secrets (nebula unlock) use it
+// so that a socket planted by another user never receives them.
+func DialVerified(ctx context.Context, path string, wantUID uint32) (net.Conn, error) {
+	var d net.Dialer
+	c, err := d.DialContext(ctx, "unix", path)
+	if err != nil {
+		return nil, err
+	}
+	uc, ok := c.(*net.UnixConn)
+	if !ok {
+		c.Close()
+		return nil, ErrNotUnix
+	}
+	cred, err := ucred(uc)
+	if err != nil {
+		c.Close()
+		return nil, err
+	}
+	if cred.Uid != wantUID {
+		c.Close()
+		return nil, fmt.Errorf("peercred: socket %s is served by uid %d, expected %d; refusing to talk to it", path, cred.Uid, wantUID)
+	}
+	return c, nil
 }
 
 // ClientHandshake is a no-op; clients are identified by the server.
@@ -98,7 +147,7 @@ func (Credentials) Info() credentials.ProtocolInfo {
 }
 
 // Clone implements credentials.TransportCredentials.
-func (Credentials) Clone() credentials.TransportCredentials { return Credentials{} }
+func (pc Credentials) Clone() credentials.TransportCredentials { return pc }
 
 // OverrideServerName implements credentials.TransportCredentials.
 func (Credentials) OverrideServerName(string) error { return nil } //nolint:staticcheck // required by interface
@@ -135,6 +184,9 @@ func (p *Policy) Allowed(uid uint32, method string) (Role, bool) {
 	}
 	return "", false
 }
+
+// Known reports whether uid holds any role.
+func (p *Policy) Known(uid uint32) bool { return len(p.uidRoles[uid]) > 0 }
 
 // HasRole reports whether uid holds role.
 func (p *Policy) HasRole(uid uint32, role Role) bool {
@@ -215,16 +267,25 @@ type ListenOptions struct {
 }
 
 // Listen creates the Unix socket. A stale socket file is removed, but any
-// other kind of file at the path is an error. The parent directory must not
-// be writable by group or others, so that the socket cannot be replaced.
+// other kind of file at the path is an error. The parent directory must be a
+// real directory (not a symlink) owned by this process's UID or root and not
+// writable by group or others, so that nobody else can replace the socket.
+//
+// Listen changes the process umask briefly; call it during startup only.
 func Listen(o ListenOptions) (*net.UnixListener, error) {
 	dir := filepath.Dir(o.Path)
-	fi, err := os.Stat(dir)
+	fi, err := os.Lstat(dir)
 	if err != nil {
 		return nil, fmt.Errorf("peercred: socket directory: %w", err)
 	}
+	if !fi.IsDir() {
+		return nil, fmt.Errorf("peercred: socket directory %s is not a directory", dir)
+	}
 	if fi.Mode().Perm()&0o022 != 0 {
 		return nil, fmt.Errorf("peercred: socket directory %s is writable by group or others", dir)
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); !ok || (int(st.Uid) != os.Geteuid() && st.Uid != 0) {
+		return nil, fmt.Errorf("peercred: socket directory %s must be owned by this user or root", dir)
 	}
 	if st, err := os.Lstat(o.Path); err == nil {
 		if st.Mode()&os.ModeSocket == 0 {

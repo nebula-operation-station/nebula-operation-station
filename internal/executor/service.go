@@ -31,6 +31,14 @@ import (
 // exceed permit.MaxArtifactSize plus framing.
 const MaxMessageSize = permit.MaxArtifactSize + 1<<20
 
+// MaxResponseSize bounds responses. ListPending with the maximum number of
+// pending permits and targets must fit, or a flood of proposals could make
+// the CLI approval path unusable.
+const MaxResponseSize = 64 << 20
+
+// MaxConcurrentStreams bounds parallel calls per connection.
+const MaxConcurrentStreams = 16
+
 // Service implements pb.ExecutorServiceServer.
 type Service struct {
 	pb.UnimplementedExecutorServiceServer
@@ -60,11 +68,16 @@ func NewGRPCServer(svc *Service, policy *peercred.Policy, log *slog.Logger) *grp
 		log.Warn("audit", "kind", "rpc_denied", "uid", uid, "pid", pid, "method", method)
 	}
 	s := grpc.NewServer(
-		grpc.Creds(peercred.Credentials{}),
+		// Unknown UIDs are dropped during the handshake, before any request
+		// is read; the interceptors then enforce the per-method table.
+		grpc.Creds(peercred.Credentials{Policy: policy, OnReject: func(uid uint32, pid int32) {
+			log.Warn("audit", "kind", "connection_rejected", "uid", uid, "pid", pid)
+		}}),
+		grpc.MaxConcurrentStreams(MaxConcurrentStreams),
 		grpc.UnaryInterceptor(policy.UnaryInterceptor(denied)),
 		grpc.StreamInterceptor(policy.StreamInterceptor(denied)),
 		grpc.MaxRecvMsgSize(MaxMessageSize),
-		grpc.MaxSendMsgSize(4<<20),
+		grpc.MaxSendMsgSize(MaxResponseSize),
 	)
 	pb.RegisterExecutorServiceServer(s, svc)
 	return s
@@ -113,7 +126,7 @@ func (s *Service) ProposeExecution(_ context.Context, req *pb.ProposeExecutionRe
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	res, err := s.auth.Propose(r)
+	res, err := s.auth.Propose(r, req.GetParametersJson())
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -203,8 +216,10 @@ func (s *Service) Unlock(ctx context.Context, req *pb.UnlockRequest) (*pb.Unlock
 
 func (s *Service) Lock(ctx context.Context, _ *pb.LockRequest) (*pb.LockResponse, error) {
 	who := callerName(ctx)
-	s.keys.Lock()
+	// Revoke permits before wiping keys so that no AuthorizeRun can succeed
+	// in between.
 	s.auth.Lock(who)
+	s.keys.Lock()
 	return &pb.LockResponse{}, nil
 }
 
@@ -216,6 +231,7 @@ func (s *Service) ListPending(_ context.Context, _ *pb.ListPendingRequest) (*pb.
 			Request:             toProto(p.Request),
 			ApprovalRequirement: requirementToProto(p.Requirement),
 			ApprovalExpiryUnix:  p.ApprovalExpiry.Unix(),
+			CanonicalParameters: p.Parameters,
 		})
 	}
 	return out, nil

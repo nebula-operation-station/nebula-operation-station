@@ -25,9 +25,9 @@ func TestM0_UnknownUIDIsRejected(t *testing.T) {
 	other := uint32(os.Getuid()) + 1
 	h := newHarness(t, harnessOptions{uidRoles: map[uint32][]peercred.Role{other: {peercred.RoleServer, peercred.RoleAdmin}}})
 	_, err := h.client.GetStatus(h.ctx(), &pb.GetStatusRequest{})
-	wantCode(t, err, codes.PermissionDenied, "may not call")
+	wantRejectedPeer(t, err)
 	_, err = h.client.Unlock(h.ctx(), &pb.UnlockRequest{Passphrase: []byte(passphrase)})
-	wantCode(t, err, codes.PermissionDenied, "")
+	wantRejectedPeer(t, err)
 }
 
 func TestM0_ServerRoleCannotUseAdminMethods(t *testing.T) {
@@ -46,7 +46,7 @@ func TestM0_ServerRoleCannotUseAdminMethods(t *testing.T) {
 
 func TestM0_AdminRoleCannotUseServerMethods(t *testing.T) {
 	h := newHarness(t, harnessOptions{uidRoles: map[uint32][]peercred.Role{uint32(os.Getuid()): {peercred.RoleAdmin}}})
-	_, err := h.client.ProposeExecution(h.ctx(), &pb.ProposeExecutionRequest{Request: h.request(pb.RiskClass_RISK_CLASS_MEDIUM)})
+	_, err := h.client.ProposeExecution(h.ctx(), &pb.ProposeExecutionRequest{Request: h.request(pb.RiskClass_RISK_CLASS_MEDIUM), ParametersJson: params})
 	wantCode(t, err, codes.PermissionDenied, "")
 	_, err = h.client.AuthorizeRun(h.ctx(), run("00", "dockerflux", fpA))
 	wantCode(t, err, codes.PermissionDenied, "")
@@ -110,7 +110,7 @@ func TestM0_ChangedRequestNeedsNewApproval(t *testing.T) {
 
 	// Same execution ID with one more host: refused outright.
 	r.ResolvedTargets = append(r.ResolvedTargets, &pb.Target{HostId: "netbird-vps", HostKeyFingerprint: fpA})
-	_, err := h.client.ProposeExecution(h.ctx(), &pb.ProposeExecutionRequest{Request: r})
+	_, err := h.client.ProposeExecution(h.ctx(), &pb.ProposeExecutionRequest{Request: r, ParametersJson: params})
 	wantCode(t, err, codes.AlreadyExists, "")
 
 	// A new request with a new ID gets a new digest and a new challenge, and
@@ -208,6 +208,9 @@ func TestM0_HardenedModeWithholdsBrowserChallenge(t *testing.T) {
 	if got := pending.GetPermits()[0].GetRequest().GetResolvedTargets(); len(got) != 2 {
 		t.Fatalf("CLI must see the executor's own target list, got %v", got)
 	}
+	if got := string(pending.GetPermits()[0].GetCanonicalParameters()); got != `{"packages":["openssl"]}` {
+		t.Fatalf("CLI must see the executor's canonical parameters, got %q", got)
+	}
 	if _, err := h.client.ApproveCLI(h.ctx(), &pb.ApproveCLIRequest{ExecutionDigest: p.GetExecutionDigest()}); err != nil {
 		t.Fatal(err)
 	}
@@ -215,8 +218,35 @@ func TestM0_HardenedModeWithholdsBrowserChallenge(t *testing.T) {
 
 func TestM0_LowRiskNeedsPrivilegedSession(t *testing.T) {
 	h := newHarness(t, harnessOptions{})
-	_, err := h.client.ProposeExecution(h.ctx(), &pb.ProposeExecutionRequest{Request: h.request(pb.RiskClass_RISK_CLASS_LOW)})
+	_, err := h.client.ProposeExecution(h.ctx(), &pb.ProposeExecutionRequest{Request: h.request(pb.RiskClass_RISK_CLASS_LOW), ParametersJson: params})
 	wantCode(t, err, codes.FailedPrecondition, string(permit.CodeSessionRequired))
-	_, err = h.client.ProposeExecution(h.ctx(), &pb.ProposeExecutionRequest{Request: h.request(pb.RiskClass_RISK_CLASS_UNSPECIFIED)})
+	_, err = h.client.ProposeExecution(h.ctx(), &pb.ProposeExecutionRequest{Request: h.request(pb.RiskClass_RISK_CLASS_UNSPECIFIED), ParametersJson: params})
 	wantCode(t, err, codes.InvalidArgument, "")
+}
+
+func TestM0_ParametersAreBoundAtProposal(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	r := h.request(pb.RiskClass_RISK_CLASS_MEDIUM)
+	_, err := h.client.ProposeExecution(h.ctx(), &pb.ProposeExecutionRequest{Request: r, ParametersJson: []byte(`{"packages":["openssh-server"]}`)})
+	wantCode(t, err, codes.InvalidArgument, "parameters")
+	_, err = h.client.ProposeExecution(h.ctx(), &pb.ProposeExecutionRequest{Request: r})
+	wantCode(t, err, codes.InvalidArgument, "parameters")
+}
+
+func TestM0_EndedExecutionCannotRunAgain(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	h.unlock()
+	h.openSession()
+	r := h.request(pb.RiskClass_RISK_CLASS_LOW)
+	p := h.propose(r)
+	if _, err := h.client.AuthorizeRun(h.ctx(), run(p.GetExecutionDigest(), "dockerflux", fpA)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.client.Lock(h.ctx(), &pb.LockRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	h.unlock()
+	h.openSession()
+	_, err := h.client.ProposeExecution(h.ctx(), &pb.ProposeExecutionRequest{Request: r, ParametersJson: params})
+	wantCode(t, err, codes.AlreadyExists, "ended")
 }

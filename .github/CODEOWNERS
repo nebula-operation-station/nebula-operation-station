@@ -12,6 +12,9 @@
 /internal/keyring/              @nos-maintainers
 /internal/webauthnverify/       @nos-maintainers
 /internal/fsguard/              @nos-maintainers
-/internal/executor/roles.go     @nos-maintainers
+/internal/executor/              @nos-maintainers
+/cmd/nebula-executor/            @nos-maintainers
+/cmd/nebula/                     @nos-maintainers
+/scripts/                        @nos-maintainers
 /test/security/                 @nos-maintainers
 /deploy/systemd/                @nos-maintainers

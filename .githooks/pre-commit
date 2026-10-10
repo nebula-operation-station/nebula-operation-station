@@ -4,14 +4,15 @@
 # 1. Agent commits (author nos-coder@localhost) must not touch protected paths.
 # 2. Every commit: gofmt clean on staged Go files.
 #
-# Hooks can be bypassed locally; CI enforces the same rules.
+# Hooks can be bypassed locally (--no-verify). They are a tripwire, not the
+# protection; the binding control is code-owner review on main.
 set -euo pipefail
 
 root="$(git rev-parse --show-toplevel)"
 author_email="$(git var GIT_AUTHOR_IDENT | sed -E 's/.*<([^>]+)>.*/\1/')"
 
 if [[ "$author_email" == "nos-coder@localhost" ]]; then
-  git diff --cached --name-only --diff-filter=ACDMR | "$root/scripts/check-protected-paths.sh"
+  git diff --cached --name-only --no-renames | "$root/scripts/check-protected-paths.sh"
 fi
 
 mapfile -t gofiles < <(git diff --cached --name-only --diff-filter=ACM -- '*.go')

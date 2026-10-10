@@ -46,13 +46,18 @@ func (r *recorder) fn(uid uint32, pid int32, method string) {
 
 func serve(t *testing.T, p *Policy, rec *recorder) pb.ExecutorServiceClient {
 	t.Helper()
+	return serveWith(t, p, rec, Credentials{})
+}
+
+func serveWith(t *testing.T, p *Policy, rec *recorder, creds Credentials) pb.ExecutorServiceClient {
+	t.Helper()
 	path := filepath.Join(socketDir(t), "executor.sock")
 	l, err := Listen(ListenOptions{Path: path, Mode: 0o600})
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv := grpc.NewServer(
-		grpc.Creds(Credentials{}),
+		grpc.Creds(creds),
 		grpc.UnaryInterceptor(p.UnaryInterceptor(rec.fn)),
 		grpc.StreamInterceptor(p.StreamInterceptor(rec.fn)),
 	)
@@ -114,6 +119,58 @@ func TestUnknownUIDRejected(t *testing.T) {
 	}
 }
 
+func TestUnknownUIDDroppedAtHandshake(t *testing.T) {
+	me := uint32(os.Getuid())
+	p := NewPolicy(
+		map[uint32][]Role{me + 1: {RoleServer}},
+		map[string][]Role{mStatus: {RoleServer}},
+	)
+	var mu sync.Mutex
+	var rejected []uint32
+	c := serveWith(t, p, &recorder{}, Credentials{Policy: p, OnReject: func(uid uint32, _ int32) {
+		mu.Lock()
+		rejected = append(rejected, uid)
+		mu.Unlock()
+	}})
+	_, err := c.GetStatus(ctx(t), &pb.GetStatusRequest{})
+	if code(err) != codes.Unavailable {
+		t.Fatalf("unknown uid should be dropped at handshake, got %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(rejected) == 0 || rejected[0] != me {
+		t.Fatalf("rejection not reported: %v", rejected)
+	}
+}
+
+func TestDialVerifiedChecksServerUID(t *testing.T) {
+	dir := socketDir(t)
+	path := filepath.Join(dir, "v.sock")
+	l, err := Listen(ListenOptions{Path: path, Mode: 0o600})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	me := uint32(os.Getuid())
+	c, err := DialVerified(ctx(t), path, me)
+	if err != nil {
+		t.Fatalf("own socket rejected: %v", err)
+	}
+	c.Close()
+	if _, err := DialVerified(ctx(t), path, me+1); err == nil {
+		t.Fatal("socket served by an unexpected UID was accepted")
+	}
+}
+
 func TestListenSocketSafety(t *testing.T) {
 	dir := socketDir(t)
 	path := filepath.Join(dir, "s.sock")
@@ -154,6 +211,15 @@ func TestListenSocketSafety(t *testing.T) {
 	}
 	if _, err := Listen(ListenOptions{Path: filepath.Join(loose, "s.sock"), Mode: 0o600}); err == nil {
 		t.Fatal("socket in group-writable directory accepted")
+	}
+
+	// A symlinked directory is refused.
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Listen(ListenOptions{Path: filepath.Join(link, "s.sock"), Mode: 0o600}); err == nil {
+		t.Fatal("socket in symlinked directory accepted")
 	}
 }
 

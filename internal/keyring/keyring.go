@@ -16,6 +16,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rsa"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -45,6 +46,9 @@ var (
 	ErrUnknownRef    = errors.New("keyring: credential reference not loaded")
 	ErrNoKeys        = errors.New("keyring: no key files found")
 	ErrWrongPassword = errors.New("keyring: passphrase does not decrypt every key")
+	// ErrLockedDuringUnlock means Lock was called while Unlock was running;
+	// Lock wins.
+	ErrLockedDuringUnlock = errors.New("keyring: locked while unlocking; nothing loaded")
 )
 
 // Keyring is safe for concurrent use.
@@ -55,6 +59,9 @@ type Keyring struct {
 	agent    agent.Agent
 	refs     map[string][]byte // ref -> marshalled public key
 	unlocked bool
+	// gen increases on every Lock. An Unlock that started before a Lock
+	// must not install its keys afterwards.
+	gen uint64
 }
 
 // New returns a locked keyring reading key files from dir.
@@ -70,6 +77,9 @@ func (k *Keyring) Unlock(passphrase []byte) ([]string, error) {
 	if len(passphrase) == 0 {
 		return nil, errors.New("keyring: empty passphrase")
 	}
+	k.mu.Lock()
+	startGen := k.gen
+	k.mu.Unlock()
 
 	entries, err := os.ReadDir(k.dir)
 	if err != nil {
@@ -90,6 +100,11 @@ func (k *Keyring) Unlock(passphrase []byte) ([]string, error) {
 		raw, err := readKeyFile(filepath.Join(k.dir, e.Name()))
 		if err != nil {
 			return nil, err
+		}
+		// Only the OpenSSH format (bcrypt KDF) is accepted. Legacy PEM
+		// encryption (MD5-based KDF, DES/AES-CBC) is cheap to brute-force.
+		if blk, _ := pem.Decode(raw); blk == nil || blk.Type != "OPENSSH PRIVATE KEY" {
+			return nil, fmt.Errorf("keyring: %s is not an OpenSSH-format private key; convert with ssh-keygen -p -o", e.Name())
 		}
 		if _, err := ssh.ParseRawPrivateKey(raw); err == nil {
 			return nil, fmt.Errorf("keyring: %s is not passphrase-protected; refusing to use it", e.Name())
@@ -129,6 +144,10 @@ func (k *Keyring) Unlock(passphrase []byte) ([]string, error) {
 
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if k.gen != startGen {
+		_ = fresh.RemoveAll()
+		return nil, ErrLockedDuringUnlock
+	}
 	_ = k.agent.RemoveAll()
 	k.agent, k.refs, k.unlocked = fresh, refs, true
 	return sortedKeys(refs), nil
@@ -142,6 +161,7 @@ func (k *Keyring) Lock() {
 	k.agent = agent.NewKeyring()
 	k.refs = map[string][]byte{}
 	k.unlocked = false
+	k.gen++
 }
 
 // Unlocked reports whether keys are loaded.

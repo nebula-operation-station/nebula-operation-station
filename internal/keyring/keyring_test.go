@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -158,6 +160,51 @@ func TestWeakRSARefused(t *testing.T) {
 	if _, err := New(dir).Unlock([]byte(pass)); err == nil || !strings.Contains(err.Error(), "bits") {
 		t.Fatalf("2048-bit RSA accepted: %v", err)
 	}
+}
+
+func TestLegacyPEMEncryptionRefused(t *testing.T) {
+	dir := t.TempDir()
+	k, err := rsa.GenerateKey(rand.Reader, 3072)
+	if err != nil {
+		t.Fatal(err)
+	}
+	//nolint:staticcheck // deliberately produce the weak legacy format
+	blk, err := x509.EncryptPEMBlock(rand.Reader, "RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(k), []byte(pass), x509.PEMCipherDES)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "legacy.key"), pem.EncodeToMemory(blk), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(dir).Unlock([]byte(pass)); err == nil || !strings.Contains(err.Error(), "OpenSSH-format") {
+		t.Fatalf("legacy PEM-encrypted key accepted: %v", err)
+	}
+}
+
+func TestLockWinsOverRunningUnlock(t *testing.T) {
+	dir := t.TempDir()
+	writeKey(t, dir, "a", ed(t), pass, 0o600)
+	// bcrypt key derivation takes far longer than the delay below, so the
+	// Lock lands while Unlock is decrypting. Retry if scheduling made the
+	// goroutine start late (then the attempt proves nothing).
+	for attempt := 0; attempt < 5; attempt++ {
+		k := New(dir)
+		done := make(chan error, 1)
+		go func() { _, err := k.Unlock([]byte(pass)); done <- err }()
+		time.Sleep(20 * time.Millisecond)
+		k.Lock()
+		err := <-done
+		if errors.Is(err, ErrLockedDuringUnlock) {
+			if k.Unlocked() {
+				t.Fatal("keyring unlocked after Lock")
+			}
+			return
+		}
+		if err != nil {
+			t.Fatalf("unexpected error %v", err)
+		}
+	}
+	t.Fatal("could not observe Lock during Unlock in 5 attempts")
 }
 
 func TestEmptyDirAndEmptyPassphrase(t *testing.T) {
