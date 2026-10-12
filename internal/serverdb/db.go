@@ -3,21 +3,24 @@
 // Package serverdb opens the Nebula server SQLite database and applies
 // forward-only, embedded migrations.
 //
-// Migrations are SQL files named NNNN_name.sql embedded in the binary. They
-// are applied in version order, each in its own transaction, and recorded in
-// the schema_migrations table. A failing migration rolls back completely and
-// Open returns an error naming the version. Opening a database whose schema
-// version is newer than the newest migration this binary knows fails with a
-// clear error.
+// Migrations are SQL files named NNNN_name.sql embedded in the binary.
+// Every .sql file in migrations/ must match that pattern; anything else is
+// an error at startup. They are applied in version order, each in its own
+// transaction, and recorded in the schema_migrations table. A failing
+// migration rolls back completely and Open returns an error naming the
+// version. Opening a database whose schema version is newer than the newest
+// migration this binary knows fails with a clear error.
 package serverdb
 
 import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"io/fs"
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -53,7 +56,14 @@ func Open(path string) (*sql.DB, error) {
 }
 
 // OpenWithOptions is like Open but uses the provided options.
+//
+// path must not contain '?' or '#': the pragmas are appended to the path
+// as a DSN query string, so either character in the path would silently
+// change which pragmas apply.
 func OpenWithOptions(path string, opts Options) (*sql.DB, error) {
+	if strings.ContainsAny(path, "#?") {
+		return nil, fmt.Errorf("serverdb: open %s: path must not contain '?' or '#'", path)
+	}
 	now := opts.Now
 	if now == nil {
 		now = time.Now
@@ -182,10 +192,18 @@ func applyMigration(db *sql.DB, m migration, now func() time.Time) error {
 // version.
 var migrationName = regexp.MustCompile(`^(\d{4})_.+\.sql$`)
 
-// loadMigrations reads the embedded migration files, parses their versions,
-// and returns them sorted by version. Duplicate versions are an error.
+// loadMigrations reads the embedded migration files.
 func loadMigrations() ([]migration, error) {
-	entries, err := migrationFS.ReadDir("migrations")
+	return loadMigrationsFrom(migrationFS, "migrations")
+}
+
+// loadMigrationsFrom reads the migration files in dir of fsys, parses
+// their versions, and returns them sorted by version. Any file that does
+// not match NNNN_name.sql is an error, as is a duplicate version:
+// silently ignoring either would let a migration sit in the release tree
+// without ever being applied.
+func loadMigrationsFrom(fsys fs.FS, dir string) ([]migration, error) {
+	entries, err := fs.ReadDir(fsys, dir)
 	if err != nil {
 		return nil, fmt.Errorf("serverdb: read migrations: %w", err)
 	}
@@ -198,15 +216,13 @@ func loadMigrations() ([]migration, error) {
 		}
 		m, ok := parseMigrationName(e.Name())
 		if !ok {
-			// Non-conforming files are ignored, not an error: the directory
-			// may hold notes or examples.
-			continue
+			return nil, fmt.Errorf("serverdb: migration file %s does not match NNNN_name.sql", e.Name())
 		}
 		if prev, dup := seen[m.version]; dup {
 			return nil, fmt.Errorf("serverdb: duplicate migration version %04d (%s and %s)", m.version, prev, e.Name())
 		}
 		seen[m.version] = e.Name()
-		data, err := migrationFS.ReadFile("migrations/" + e.Name())
+		data, err := fs.ReadFile(fsys, dir+"/"+e.Name())
 		if err != nil {
 			return nil, fmt.Errorf("serverdb: read migration %s: %w", e.Name(), err)
 		}

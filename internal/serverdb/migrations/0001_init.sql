@@ -53,6 +53,12 @@ CREATE TABLE tags (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE host_tags (
+    host_id INTEGER NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+    tag_id  INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (host_id, tag_id)
+);
+
 CREATE TABLE audit_events (
     id          INTEGER PRIMARY KEY,
     actor       TEXT NOT NULL,

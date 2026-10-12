@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 )
 
@@ -97,6 +98,19 @@ func TestOpenBusyTimeoutConfigurable(t *testing.T) {
 	}
 	if bt != 1000 {
 		t.Errorf("busy_timeout = %d, want 1000", bt)
+	}
+}
+
+// A path containing '?' or '#' would be mis-parsed as DSN query/fragment
+// once the pragmas are appended, so Open must reject it up front.
+func TestOpenRejectsPathWithQueryOrFragment(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"nebula?x.db", "nebula#x.db", "nebula?#x.db"} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Open(filepath.Join(dir, name)); err == nil {
+				t.Fatal("Open accepted a path containing '?' or '#'")
+			}
+		})
 	}
 }
 
@@ -243,7 +257,7 @@ func TestNewerVersionRefused(t *testing.T) {
 // --- Acceptance criterion 5: the first migration's schema. ---
 
 var initTables = []string{
-	"users", "hosts", "host_endpoints", "groups", "host_groups", "tags", "audit_events",
+	"users", "hosts", "host_endpoints", "groups", "host_groups", "tags", "host_tags", "audit_events",
 }
 
 // secretish are column-name fragments that must never appear: the server
@@ -303,3 +317,83 @@ func TestHostsHaveCredentialRef(t *testing.T) {
 }
 
 // --- more tests below ---
+
+// A .sql file in migrations/ that does not match NNNN_name.sql must be an
+// error, not silently ignored: an ignored file would be applied by no
+// binary while still sitting in the release tree.
+func TestLoadMigrationsRejectsNonConformingName(t *testing.T) {
+	fsys := fstest.MapFS{
+		"migrations/0001_ok.sql": &fstest.MapFile{Data: []byte(`CREATE TABLE a (x INTEGER);`)},
+		"migrations/notes.sql":   &fstest.MapFile{Data: []byte("-- notes")},
+	}
+	if _, err := loadMigrationsFrom(fsys, "migrations"); err == nil {
+		t.Fatal("loadMigrations accepted a non-conforming .sql file")
+	}
+}
+
+func TestLoadMigrationsRejectsDuplicateVersion(t *testing.T) {
+	fsys := fstest.MapFS{
+		"migrations/0001_a.sql": &fstest.MapFile{Data: []byte(`CREATE TABLE a (x INTEGER);`)},
+		"migrations/0001_b.sql": &fstest.MapFile{Data: []byte(`CREATE TABLE b (x INTEGER);`)},
+	}
+	if _, err := loadMigrationsFrom(fsys, "migrations"); err == nil {
+		t.Fatal("loadMigrations accepted duplicate migration versions")
+	}
+}
+
+// host_tags links hosts to tags with ON DELETE CASCADE on both sides and a
+// composite primary key.
+func TestHostTagsSchema(t *testing.T) {
+	db := openTemp(t)
+	const ts = "2026-01-01T00:00:00Z"
+	mustExec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.Exec(query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	mustExec(`INSERT INTO hosts (name, created_at, updated_at) VALUES ('h1', ?, ?)`, ts, ts)
+	mustExec(`INSERT INTO tags (name, created_at) VALUES ('t1', ?)`, ts)
+	var hostID, tagID int
+	if err := db.QueryRow(`SELECT id FROM hosts WHERE name = 'h1'`).Scan(&hostID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT id FROM tags WHERE name = 't1'`).Scan(&tagID); err != nil {
+		t.Fatal(err)
+	}
+
+	mustExec(`INSERT INTO host_tags (host_id, tag_id) VALUES (?, ?)`, hostID, tagID)
+	if _, err := db.Exec(`INSERT INTO host_tags (host_id, tag_id) VALUES (?, ?)`, hostID, tagID); err == nil {
+		t.Error("duplicate host_tags row was accepted; composite primary key is missing")
+	}
+	if _, err := db.Exec(`INSERT INTO host_tags (host_id, tag_id) VALUES (9999, ?)`, tagID); err == nil {
+		t.Error("host_tags row for a missing host was accepted; foreign keys are not enforced")
+	}
+	if _, err := db.Exec(`INSERT INTO host_tags (host_id, tag_id) VALUES (?, 9999)`, hostID); err == nil {
+		t.Error("host_tags row for a missing tag was accepted; foreign keys are not enforced")
+	}
+
+	// ON DELETE CASCADE: deleting the host removes the tag link.
+	mustExec(`DELETE FROM hosts WHERE id = ?`, hostID)
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM host_tags WHERE tag_id = ?`, tagID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Error("host_tags row survived host deletion; ON DELETE CASCADE is missing")
+	}
+
+	// ON DELETE CASCADE: deleting the tag removes the tag link.
+	mustExec(`INSERT INTO hosts (name, created_at, updated_at) VALUES ('h2', ?, ?)`, ts, ts)
+	if err := db.QueryRow(`SELECT id FROM hosts WHERE name = 'h2'`).Scan(&hostID); err != nil {
+		t.Fatal(err)
+	}
+	mustExec(`INSERT INTO host_tags (host_id, tag_id) VALUES (?, ?)`, hostID, tagID)
+	mustExec(`DELETE FROM tags WHERE id = ?`, tagID)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM host_tags WHERE host_id = ?`, hostID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Error("host_tags row survived tag deletion; ON DELETE CASCADE is missing")
+	}
+}
