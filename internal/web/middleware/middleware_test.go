@@ -152,6 +152,43 @@ func TestOriginCheck(t *testing.T) {
 	}
 }
 
+// An empty PublicOrigin must fail closed: every state-changing request is
+// rejected, even one with no Origin header at all ("" == "" must not pass).
+// This test calls Handler directly, because newTestHandler substitutes
+// testOrigin for an empty PublicOrigin.
+func TestEmptyPublicOriginRejectsStateChanging(t *testing.T) {
+	h := Handler(Options{}, okHandler())
+	cases := []struct {
+		name   string
+		method string
+		origin string
+		want   int
+	}{
+		{"post without origin", http.MethodPost, "", http.StatusForbidden},
+		{"put without origin", http.MethodPut, "", http.StatusForbidden},
+		{"patch without origin", http.MethodPatch, "", http.StatusForbidden},
+		{"delete without origin", http.MethodDelete, "", http.StatusForbidden},
+		{"post with any origin", http.MethodPost, "https://nebula.example.org", http.StatusForbidden},
+		{"get without origin", http.MethodGet, "", http.StatusOK},
+		{"head without origin", http.MethodHead, "", http.StatusOK},
+		{"options without origin", http.MethodOptions, "", http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := do(h, tc.method, "/", tc.origin, nil)
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.want)
+			}
+			if tc.want == http.StatusOK && rec.Header().Get("X-Test") != "reached" {
+				t.Error("handler was not reached")
+			}
+			if tc.want == http.StatusForbidden && rec.Header().Get("X-Test") != "" {
+				t.Error("handler was reached for a rejected request")
+			}
+		})
+	}
+}
+
 // --- Acceptance criterion 2: body limit. ---
 
 func TestBodyLimitDefault(t *testing.T) {

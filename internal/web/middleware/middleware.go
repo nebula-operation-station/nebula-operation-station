@@ -67,7 +67,10 @@ func Handler(opts Options, next http.Handler) http.Handler {
 		max = DefaultMaxBodyBytes
 	}
 	return securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if stateChanging(r.Method) && r.Header.Get("Origin") != opts.PublicOrigin {
+		// An empty PublicOrigin must fail closed: reject every
+		// state-changing request, including ones with no Origin header
+		// ("" == "" must not pass).
+		if stateChanging(r.Method) && (opts.PublicOrigin == "" || r.Header.Get("Origin") != opts.PublicOrigin) {
 			http.Error(w, "origin not allowed", http.StatusForbidden)
 			return
 		}
