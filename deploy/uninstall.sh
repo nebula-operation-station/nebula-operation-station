@@ -43,7 +43,14 @@ for unit in "${script_dir}"/systemd/*.service; do
 done
 shopt -u nullglob
 
-if [[ ${removed_units} -eq 1 ]]; then
+# Remove the drop-in written by install.sh.
+drop_in_removed=0
+if [[ -d "${systemd_dir}/nebula-executor.service.d" ]]; then
+  rm -rf -- "${systemd_dir}/nebula-executor.service.d"
+  drop_in_removed=1
+fi
+
+if [[ ${removed_units} -eq 1 || ${drop_in_removed} -eq 1 ]]; then
   systemctl daemon-reload
 fi
 
