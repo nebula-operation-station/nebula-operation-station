@@ -71,8 +71,9 @@ type Config struct {
 	Listen string `json:"listen"`
 	// AllowRemoteListen permits a non-loopback listen address.
 	AllowRemoteListen bool `json:"allow_remote_listen"`
-	// PublicOrigin is the https URL the browser uses, e.g.
-	// "https://nebula.example.org".
+	// PublicOrigin is the https origin the browser uses, e.g.
+	// "https://nebula.example.org". It must be lowercase: browsers send
+	// the Origin header lowercased and the middleware compares exactly.
 	PublicOrigin string `json:"public_origin"`
 	// DataDir is where the server stores its data.
 	DataDir string `json:"data_dir"`
@@ -146,7 +147,11 @@ func (c Config) Validate() error {
 	}
 
 	if !isValidHTTPSOrigin(c.PublicOrigin) {
-		problems = append(problems, fmt.Sprintf("public_origin: %q must be a bare https origin (scheme, host, optional port)", c.PublicOrigin))
+		if strings.ToLower(c.PublicOrigin) != c.PublicOrigin {
+			problems = append(problems, fmt.Sprintf("public_origin: %q must be lowercase (browsers send the Origin header lowercased and the middleware compares exactly)", c.PublicOrigin))
+		} else {
+			problems = append(problems, fmt.Sprintf("public_origin: %q must be a bare https origin (scheme, host, optional port)", c.PublicOrigin))
+		}
 	}
 
 	if c.DataDir == "" {
@@ -182,7 +187,9 @@ func isLoopback(host string) bool {
 
 // isValidHTTPSOrigin reports whether s is a bare https origin: scheme
 // https, a host, and an optional port — with no path (not even "/"),
-// query, fragment, or userinfo.
+// query, fragment, userinfo, or uppercase character (browsers send the
+// Origin header with a lowercase scheme and host and the middleware
+// compares exactly).
 func isValidHTTPSOrigin(s string) bool {
 	if s == "" {
 		return false
@@ -195,6 +202,11 @@ func isValidHTTPSOrigin(s string) bool {
 	// url.Parse lowercases the scheme, so "HTTPS://..." would pass a
 	// u.Scheme check; require the literal lowercase prefix.
 	if !strings.HasPrefix(s, "https://") {
+		return false
+	}
+	// Browsers send the Origin header lowercased and the middleware
+	// compares exactly, so any uppercase character is invalid.
+	if strings.ToLower(s) != s {
 		return false
 	}
 	u, err := url.Parse(s)

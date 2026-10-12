@@ -8,8 +8,12 @@ import (
 	"os"
 )
 
-// RegisterFlags registers a flag on fs for every Config field, using the
-// field's zero value as the default. Call it before fs.Parse.
+// RegisterFlags registers a flag on fs for every Config field except
+// Token, using the field's zero value as the default. Call it before
+// fs.Parse.
+//
+// The token has no flag on purpose: a secret on the command line is
+// visible in ps and /proc. It comes from the config file only.
 //
 // The flags override the file: LoadWithFlags applies only the flags the
 // user explicitly set, so an unset flag leaves the file value (or the
@@ -23,12 +27,10 @@ func RegisterFlags(fs *flag.FlagSet) {
 	var zero Config
 	fs.StringVar(&zero.Listen, "listen", zero.Listen, "listen address (host:port)")
 	fs.BoolVar(&zero.AllowRemoteListen, "allow_remote_listen", zero.AllowRemoteListen, "permit a non-loopback listen address")
-	fs.StringVar(&zero.PublicOrigin, "public_origin", zero.PublicOrigin, "public origin (bare https origin, e.g. https://nebula.example.org)")
+	fs.StringVar(&zero.PublicOrigin, "public_origin", zero.PublicOrigin, "public origin (bare lowercase https origin, e.g. https://nebula.example.org)")
 	fs.StringVar(&zero.DataDir, "data_dir", zero.DataDir, "data directory (absolute path)")
 	fs.StringVar(&zero.ExecutorSocket, "executor_socket", zero.ExecutorSocket, "executor unix socket path (absolute path)")
 	fs.StringVar(&zero.ExecutorUser, "executor_user", zero.ExecutorUser, "executor OS user")
-	var token string
-	fs.StringVar(&token, "token", token, "server token (secret; never logged)")
 }
 
 // LoadWithFlags reads the config from path, applies every flag that was
@@ -72,8 +74,6 @@ func applyFlags(cfg *Config, fs *flag.FlagSet) {
 			cfg.ExecutorSocket = f.Value.String()
 		case "executor_user":
 			cfg.ExecutorUser = f.Value.String()
-		case "token":
-			cfg.Token = Token(f.Value.String())
 		}
 	})
 }

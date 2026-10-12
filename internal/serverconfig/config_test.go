@@ -210,7 +210,10 @@ func TestFlagFixesBadFileValue(t *testing.T) {
 }
 
 func TestFlagOverridesEveryField(t *testing.T) {
-	path := writeConfigFile(t, validJSON)
+	// The token has no flag: it is a secret and comes from the config
+	// file only, so the file carries the token and the flags must leave
+	// it in place.
+	path := writeConfigFile(t, tokenJSON)
 	// The bool flag must use the -flag=value form: a bare bool flag does
 	// not consume a value argument, so "-allow_remote_listen true" would
 	// treat "true" as a positional argument and stop flag parsing.
@@ -221,7 +224,6 @@ func TestFlagOverridesEveryField(t *testing.T) {
 		"-data_dir=/other/data",
 		"-executor_socket=/other/sock",
 		"-executor_user=other-user",
-		"-token=flag-token",
 	)
 	cfg, err := LoadWithFlags(path, fs)
 	if err != nil {
@@ -229,9 +231,27 @@ func TestFlagOverridesEveryField(t *testing.T) {
 	}
 	if cfg.Listen != "127.0.0.1:9999" || !cfg.AllowRemoteListen ||
 		cfg.PublicOrigin != "https://other.example" || cfg.DataDir != "/other/data" ||
-		cfg.ExecutorSocket != "/other/sock" || cfg.ExecutorUser != "other-user" ||
-		cfg.Token != "flag-token" {
+		cfg.ExecutorSocket != "/other/sock" || cfg.ExecutorUser != "other-user" {
 		t.Errorf("flags not all applied: %+v", cfg)
+	}
+	if cfg.Token != tokenSecret {
+		t.Errorf("token from the file was lost: %q", cfg.Token)
+	}
+}
+
+func TestRegisterFlagsHasNoTokenFlag(t *testing.T) {
+	// The token is a secret: it must never be passable on the command
+	// line, where arguments are visible in ps and /proc. It comes from
+	// the config file only.
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	RegisterFlags(fs)
+	fs.VisitAll(func(f *flag.Flag) {
+		if f.Name == "token" {
+			t.Errorf("RegisterFlags defines a %q flag; the token must not be a command-line argument", f.Name)
+		}
+	})
+	if err := fs.Parse([]string{"-token=abc"}); err == nil {
+		t.Error("parsing -token succeeded; the flag must not exist")
 	}
 }
 
@@ -259,6 +279,8 @@ func TestPublicOriginRejections(t *testing.T) {
 		{"empty", ""},
 		{"http scheme", "http://n.example"},
 		{"uppercase scheme", "HTTPS://n.example"},
+		{"uppercase host", "https://Nebula.example.org"},
+		{"uppercase host with port", "https://NEBULA.EXAMPLE:8443"},
 		{"no host", "https://"},
 		{"path", "https://n.example/path"},
 		{"trailing slash", "https://n.example/"},
@@ -289,6 +311,20 @@ func TestPublicOriginAccepts(t *testing.T) {
 		if !isValidHTTPSOrigin(origin) {
 			t.Errorf("isValidHTTPSOrigin(%q) = false, want true", origin)
 		}
+	}
+}
+
+func TestPublicOriginUppercaseClearMessage(t *testing.T) {
+	// Browsers send the Origin header lowercased and the middleware
+	// compares exactly, so an uppercase origin must be rejected with a
+	// message that says it must be lowercase.
+	bad := `{"public_origin":"https://Nebula.example.org","data_dir":"/d","executor_socket":"/s","executor_user":"u"}`
+	_, err := Parse([]byte(bad))
+	if err == nil {
+		t.Fatal("Parse accepted an uppercase public_origin")
+	}
+	if !strings.Contains(err.Error(), "lowercase") {
+		t.Errorf("error does not say public_origin must be lowercase: %v", err)
 	}
 }
 
