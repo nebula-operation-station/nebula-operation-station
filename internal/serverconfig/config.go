@@ -1,19 +1,66 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package serverconfig loads and validates the nebula-server configuration
-// from a JSON file, and provides a structured JSON logger that never logs
-// secrets.
+// from a JSON file, with command-line flags that override the file, and
+// provides a structured JSON logger that never logs secrets.
 package serverconfig
 
 import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 )
+
+// redacted is what a Token prints in every formatting, logging, and
+// serialization context.
+const redacted = "[redacted]"
+
+// Token is the server's secret token. It is a dedicated type so that no
+// formatting, logging, or serialization path can print the value: String,
+// GoString, Format, MarshalJSON, and slog's LogValue all print
+// "[redacted]".
+type Token string
+
+// String always redacts the token.
+func (t Token) String() string { return redacted }
+
+// GoString always redacts the token.
+func (t Token) GoString() string { return redacted }
+
+// Format always redacts the token, for every verb.
+func (t Token) Format(s fmt.State, verb rune) {
+	switch verb {
+	case 'v':
+		if s.Flag('#') {
+			fmt.Fprint(s, "serverconfig.Token("+redacted+")")
+			return
+		}
+		fmt.Fprint(s, redacted)
+	case 's':
+		fmt.Fprint(s, redacted)
+	case 'q':
+		fmt.Fprint(s, `"`+redacted+`"`)
+	default:
+		fmt.Fprintf(s, "%%!%c(serverconfig.Token)", verb)
+	}
+}
+
+// MarshalJSON redacts the token so it never appears in serialized output.
+func (t Token) MarshalJSON() ([]byte, error) {
+	return []byte(`"` + redacted + `"`), nil
+}
+
+// LogValue implements slog.LogValuer and always redacts the token.
+func (t Token) LogValue() slog.Value {
+	return slog.StringValue(redacted)
+}
 
 // DefaultListen is the default listen address.
 const DefaultListen = "127.0.0.1:8080"
@@ -33,9 +80,9 @@ type Config struct {
 	ExecutorSocket string `json:"executor_socket"`
 	// ExecutorUser is the OS user the executor runs as.
 	ExecutorUser string `json:"executor_user"`
-	// Token is a secret. It must never be logged; use LogAttrs or
-	// NewLogger to log the configuration.
-	Token string `json:"token"`
+	// Token is the server's secret token. The Token type redacts the
+	// value in every formatting, logging, and serialization path.
+	Token Token `json:"token"`
 }
 
 // Load reads the config from path, applies defaults, and validates it.
@@ -48,17 +95,30 @@ func Load(path string) (Config, error) {
 }
 
 // Parse parses the JSON config, applies defaults, and validates it.
-// Unknown keys are an error.
+// Unknown keys and trailing data after the JSON object are errors.
 func Parse(data []byte) (Config, error) {
+	cfg, err := decode(data)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.applyDefaults()
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// decode parses the JSON config. Unknown keys and any trailing data after
+// the JSON object are errors.
+func decode(data []byte) (Config, error) {
 	var cfg Config
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("serverconfig: parse: %w", err)
 	}
-	cfg.applyDefaults()
-	if err := cfg.Validate(); err != nil {
-		return Config{}, err
+	if _, err := dec.Token(); err != io.EOF {
+		return Config{}, fmt.Errorf("serverconfig: parse: trailing data after JSON object")
 	}
 	return cfg, nil
 }
@@ -86,14 +146,18 @@ func (c Config) Validate() error {
 	}
 
 	if !isValidHTTPSOrigin(c.PublicOrigin) {
-		problems = append(problems, fmt.Sprintf("public_origin: %q must be an https URL", c.PublicOrigin))
+		problems = append(problems, fmt.Sprintf("public_origin: %q must be a bare https origin (scheme, host, optional port)", c.PublicOrigin))
 	}
 
 	if c.DataDir == "" {
 		problems = append(problems, "data_dir: required")
+	} else if !filepath.IsAbs(c.DataDir) {
+		problems = append(problems, fmt.Sprintf("data_dir: %q must be an absolute path", c.DataDir))
 	}
 	if c.ExecutorSocket == "" {
 		problems = append(problems, "executor_socket: required")
+	} else if !filepath.IsAbs(c.ExecutorSocket) {
+		problems = append(problems, fmt.Sprintf("executor_socket: %q must be an absolute path", c.ExecutorSocket))
 	}
 	if c.ExecutorUser == "" {
 		problems = append(problems, "executor_user: required")
@@ -116,15 +180,26 @@ func isLoopback(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// isValidHTTPSOrigin reports whether s is a well-formed https URL with a
-// host.
+// isValidHTTPSOrigin reports whether s is a bare https origin: scheme
+// https, a host, and an optional port — with no path (not even "/"),
+// query, fragment, or userinfo.
 func isValidHTTPSOrigin(s string) bool {
 	if s == "" {
+		return false
+	}
+	// A bare origin never contains a query or fragment delimiter, not
+	// even with an empty query or fragment ("https://n.example?").
+	if strings.ContainsAny(s, "?#") {
+		return false
+	}
+	// url.Parse lowercases the scheme, so "HTTPS://..." would pass a
+	// u.Scheme check; require the literal lowercase prefix.
+	if !strings.HasPrefix(s, "https://") {
 		return false
 	}
 	u, err := url.Parse(s)
 	if err != nil {
 		return false
 	}
-	return u.Scheme == "https" && u.Host != ""
+	return u.Scheme == "https" && u.Host != "" && u.User == nil && u.Path == ""
 }

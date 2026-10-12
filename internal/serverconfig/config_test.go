@@ -7,6 +7,8 @@
 package serverconfig
 
 import (
+	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +23,27 @@ const validJSON = `{
 	"executor_socket": "/run/nebula/executor.sock",
 	"executor_user": "nebula-exec"
 }`
+
+func writeConfigFile(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "server.json")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// parseFlags builds a FlagSet with every config flag registered and
+// parsed from args.
+func parseFlags(t *testing.T, args ...string) *flag.FlagSet {
+	t.Helper()
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	RegisterFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		t.Fatal(err)
+	}
+	return fs
+}
 
 func TestParseUnknownKeyError(t *testing.T) {
 	// An unknown key must be an error, not silently ignored.
@@ -148,21 +171,167 @@ func TestValidationClean(t *testing.T) {
 }
 
 func TestFlagOverride(t *testing.T) {
-	// The flag-override pattern: load, set a field, re-validate.
-	cfg, err := Parse([]byte(validJSON))
+	// The flag-override pattern: load the file, apply explicitly set
+	// flags, validate once.
+	path := writeConfigFile(t, validJSON)
+	cfg, err := LoadWithFlags(path, parseFlags(t, "-listen", "127.0.0.1:9090"))
 	if err != nil {
 		t.Fatal(err)
-	}
-	cfg.Listen = "127.0.0.1:9090"
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("re-validate after override: %v", err)
 	}
 	if cfg.Listen != "127.0.0.1:9090" {
 		t.Errorf("override not applied: %q", cfg.Listen)
 	}
-	// A bad override must be caught by re-validation.
-	cfg.Listen = "0.0.0.0:9090"
-	if err := cfg.Validate(); err == nil {
+	// Flags the user did not set leave the file value in place.
+	if cfg.PublicOrigin != "https://nebula.example.org" {
+		t.Errorf("unset flag changed file value: %q", cfg.PublicOrigin)
+	}
+	// A bad override must be caught by validation.
+	if _, err := LoadWithFlags(path, parseFlags(t, "-listen", "0.0.0.0:9090")); err == nil {
 		t.Error("expected validation error for non-loopback override")
+	}
+}
+
+func TestFlagFixesBadFileValue(t *testing.T) {
+	// A file value that fails validation must be fixable by a flag:
+	// validation runs once, after the flags are applied.
+	bad := `{"public_origin":"http://n.example","data_dir":"/d","executor_socket":"/s","executor_user":"u"}`
+	path := writeConfigFile(t, bad)
+
+	if _, err := LoadWithFlags(path, parseFlags(t)); err == nil {
+		t.Fatal("LoadWithFlags accepted an invalid file value")
+	}
+	cfg, err := LoadWithFlags(path, parseFlags(t, "-public_origin", "https://n.example"))
+	if err != nil {
+		t.Fatalf("flag did not fix the bad file value: %v", err)
+	}
+	if cfg.PublicOrigin != "https://n.example" {
+		t.Errorf("PublicOrigin = %q", cfg.PublicOrigin)
+	}
+}
+
+func TestFlagOverridesEveryField(t *testing.T) {
+	path := writeConfigFile(t, validJSON)
+	// The bool flag must use the -flag=value form: a bare bool flag does
+	// not consume a value argument, so "-allow_remote_listen true" would
+	// treat "true" as a positional argument and stop flag parsing.
+	fs := parseFlags(t,
+		"-listen=127.0.0.1:9999",
+		"-allow_remote_listen=true",
+		"-public_origin=https://other.example",
+		"-data_dir=/other/data",
+		"-executor_socket=/other/sock",
+		"-executor_user=other-user",
+		"-token=flag-token",
+	)
+	cfg, err := LoadWithFlags(path, fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Listen != "127.0.0.1:9999" || !cfg.AllowRemoteListen ||
+		cfg.PublicOrigin != "https://other.example" || cfg.DataDir != "/other/data" ||
+		cfg.ExecutorSocket != "/other/sock" || cfg.ExecutorUser != "other-user" ||
+		cfg.Token != "flag-token" {
+		t.Errorf("flags not all applied: %+v", cfg)
+	}
+}
+
+func TestFlagUnknownKeyStillError(t *testing.T) {
+	bad := `{"listen":"127.0.0.1:8080","public_origin":"https://n.example","data_dir":"/d","executor_socket":"/s","executor_user":"u","bogus_key":1}`
+	path := writeConfigFile(t, bad)
+	if _, err := LoadWithFlags(path, parseFlags(t)); err == nil {
+		t.Fatal("LoadWithFlags accepted an unknown key")
+	}
+}
+
+func TestLoadWithFlagsMissingFile(t *testing.T) {
+	if _, err := LoadWithFlags(filepath.Join(t.TempDir(), "nope.json"), parseFlags(t)); err == nil {
+		t.Fatal("LoadWithFlags accepted a missing file")
+	}
+}
+
+func TestPublicOriginRejections(t *testing.T) {
+	// public_origin must be a bare origin: scheme https, host, optional
+	// port. No path (not even "/"), query, fragment or userinfo.
+	cases := []struct {
+		name   string
+		origin string
+	}{
+		{"empty", ""},
+		{"http scheme", "http://n.example"},
+		{"uppercase scheme", "HTTPS://n.example"},
+		{"no host", "https://"},
+		{"path", "https://n.example/path"},
+		{"trailing slash", "https://n.example/"},
+		{"query", "https://n.example?x=1"},
+		{"empty query", "https://n.example?"},
+		{"fragment", "https://n.example#frag"},
+		{"empty fragment", "https://n.example#"},
+		{"userinfo", "https://user:pass@n.example"},
+		{"userinfo without password", "https://user@n.example"},
+		{"trailing slash after port", "https://n.example:8443/"},
+		{"query after port", "https://n.example:8443?x=1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if isValidHTTPSOrigin(tc.origin) {
+				t.Errorf("isValidHTTPSOrigin(%q) = true, want false", tc.origin)
+			}
+			bad := fmt.Sprintf(`{"public_origin":%q,"data_dir":"/d","executor_socket":"/s","executor_user":"u"}`, tc.origin)
+			if _, err := Parse([]byte(bad)); err == nil {
+				t.Errorf("Parse accepted public_origin %q", tc.origin)
+			}
+		})
+	}
+}
+
+func TestPublicOriginAccepts(t *testing.T) {
+	for _, origin := range []string{"https://n.example", "https://n.example:8443"} {
+		if !isValidHTTPSOrigin(origin) {
+			t.Errorf("isValidHTTPSOrigin(%q) = false, want true", origin)
+		}
+	}
+}
+
+func TestDataDirMustBeAbsolute(t *testing.T) {
+	for _, dir := range []string{"relative/dir", "./dir", "dir"} {
+		bad := fmt.Sprintf(`{"public_origin":"https://n.example","data_dir":%q,"executor_socket":"/s","executor_user":"u"}`, dir)
+		if _, err := Parse([]byte(bad)); err == nil {
+			t.Errorf("Parse accepted relative data_dir %q", dir)
+		}
+	}
+}
+
+func TestExecutorSocketMustBeAbsolute(t *testing.T) {
+	for _, sock := range []string{"relative/sock", "./sock", "sock"} {
+		bad := fmt.Sprintf(`{"public_origin":"https://n.example","data_dir":"/d","executor_socket":%q,"executor_user":"u"}`, sock)
+		if _, err := Parse([]byte(bad)); err == nil {
+			t.Errorf("Parse accepted relative executor_socket %q", sock)
+		}
+	}
+}
+
+func TestParseRejectsTrailingData(t *testing.T) {
+	cases := []struct {
+		name string
+		data string
+	}{
+		{"second object", validJSON + "{}"},
+		{"object after whitespace", validJSON + " {}"},
+		{"garbage after object", validJSON + " garbage"},
+		{"stray closing brace", validJSON + "}"},
+		{"trailing string", validJSON + ` "x"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Parse([]byte(tc.data)); err == nil {
+				t.Error("Parse accepted trailing data after the JSON object")
+			}
+		})
+	}
+}
+
+func TestParseAllowsTrailingWhitespace(t *testing.T) {
+	if _, err := Parse([]byte(validJSON + "\n	 ")); err != nil {
+		t.Fatalf("Parse rejected trailing whitespace: %v", err)
 	}
 }
