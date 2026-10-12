@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -279,5 +280,67 @@ func TestStaticPathTraversalIsRejected(t *testing.T) {
 		if rec.Code == http.StatusOK && strings.Contains(string(body), "define") {
 			t.Errorf("GET %s: served file outside static/", path)
 		}
+	}
+}
+
+// rawExecutorError is a realistic GetStatus failure containing details
+// (socket path, syscall text) that must never reach the page.
+const rawExecutorError = "rpc error: code = Unavailable desc = dial unix /run/nebula/executor.sock: connect: connection refused"
+
+func TestDashboardHidesRawExecutorError(t *testing.T) {
+	var logged bytes.Buffer
+	h := newTestHandler(t, ui.Options{
+		PublicOrigin: "https://nebula.example.org",
+		Status:       fakeStatus{err: errors.New(rawExecutorError)},
+		Log:          slog.New(slog.NewTextHandler(&logged, nil)),
+	})
+	rec := httptest.NewRecorder()
+	h.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /dashboard: status %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, fragment := range []string{
+		"Unavailable", "dial unix", "connection refused", "/run/nebula/executor.sock",
+	} {
+		if strings.Contains(body, fragment) {
+			t.Errorf("dashboard body contains raw executor error fragment %q", fragment)
+		}
+	}
+	if !strings.Contains(body, "Executor unavailable") {
+		t.Error("dashboard missing 'Executor unavailable'")
+	}
+}
+
+func TestDashboardLogsExecutorErrorDetail(t *testing.T) {
+	var logged bytes.Buffer
+	h := newTestHandler(t, ui.Options{
+		PublicOrigin: "https://nebula.example.org",
+		Status:       fakeStatus{err: errors.New(rawExecutorError)},
+		Log:          slog.New(slog.NewTextHandler(&logged, nil)),
+	})
+	rec := httptest.NewRecorder()
+	h.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /dashboard: status %d, want 200", rec.Code)
+	}
+	if !strings.Contains(logged.String(), rawExecutorError) {
+		t.Errorf("logger did not receive the executor error detail; got %q", logged.String())
+	}
+}
+
+func TestDashboardNilLoggerUsesSlogDefault(t *testing.T) {
+	// Log is nil: New must fall back to slog.Default() and the request
+	// must still succeed without the raw error leaking to the page.
+	h := newTestHandler(t, ui.Options{
+		PublicOrigin: "https://nebula.example.org",
+		Status:       fakeStatus{err: errors.New("boom-secret-detail")},
+	})
+	body := getBody(t, h.Handler(), "/dashboard")
+	if !strings.Contains(body, "Executor unavailable") {
+		t.Error("dashboard missing 'Executor unavailable'")
+	}
+	if strings.Contains(body, "boom-secret-detail") {
+		t.Error("dashboard body contains the raw executor error")
 	}
 }

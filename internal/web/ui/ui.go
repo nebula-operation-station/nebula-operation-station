@@ -14,11 +14,13 @@
 package ui
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"html/template"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -56,6 +58,9 @@ type Options struct {
 	// Nil means no hosts. Values are untrusted host data and are
 	// rendered as text only.
 	HostNames func(ctx context.Context) []string
+	// Log receives executor status errors (the page itself only shows
+	// "Executor unavailable"). Nil means slog.Default().
+	Log *slog.Logger
 }
 
 // Handler renders the UI pages and serves the embedded static assets.
@@ -67,6 +72,7 @@ type Handler struct {
 	staticFS  fs.FS
 	status    StatusProvider
 	hostNames func(ctx context.Context) []string
+	log       *slog.Logger
 }
 
 // New parses the embedded templates and builds a Handler.
@@ -86,12 +92,17 @@ func New(o Options) (*Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ui: static assets: %w", err)
 	}
+	log := o.Log
+	if log == nil {
+		log = slog.Default()
+	}
 	return &Handler{
 		publicOrigin: o.PublicOrigin,
 		pages:        pages,
 		staticFS:     staticFS,
 		status:       o.Status,
 		hostNames:    o.HostNames,
+		log:          log,
 	}, nil
 }
 
@@ -144,9 +155,8 @@ type pageData struct {
 	// Content is the content template name to render inside the layout.
 	Content string
 	// Dashboard only:
-	Status      *statusView
-	StatusError string
-	Hosts       []string
+	Status *statusView
+	Hosts  []string
 }
 
 // statusView is the dashboard's executor status, pre-formatted for
@@ -177,12 +187,13 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		st, err := h.status.GetStatus(ctx, &pb.GetStatusRequest{})
 		if err != nil {
-			data.StatusError = err.Error()
+			// The page shows a fixed "Executor unavailable" message;
+			// the error detail (which can contain paths or other
+			// internal state) goes to the log only.
+			h.log.Error("executor status", "error", err)
 		} else {
 			data.Status = viewStatus(st)
 		}
-	} else {
-		data.StatusError = "executor not configured"
 	}
 	if h.hostNames != nil {
 		data.Hosts = h.hostNames(r.Context())
@@ -221,15 +232,22 @@ func viewStatus(st *pb.GetStatusResponse) *statusView {
 }
 
 func (h *Handler) render(w http.ResponseWriter, data pageData) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	set, ok := h.pages[data.Content]
 	if !ok {
 		http.Error(w, "internal error: unknown page", http.StatusInternalServerError)
 		return
 	}
-	if err := set.ExecuteTemplate(w, "layout", data); err != nil {
-		// The response headers are already sent; the connection is
-		// aborted by the client. There is no logger here and the error
-		// is not actionable, so this is the end of the request.
+	// Render into a buffer first so an execution error answers 500
+	// without any partial page having been written.
+	var buf bytes.Buffer
+	if err := set.ExecuteTemplate(&buf, "layout", data); err != nil {
+		h.log.Error("render page", "page", data.Content, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if _, err := w.Write(buf.Bytes()); err != nil {
+		// The client went away; nothing left to do.
+		h.log.Debug("write page", "page", data.Content, "error", err)
 	}
 }
