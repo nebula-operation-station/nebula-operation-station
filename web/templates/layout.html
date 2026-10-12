@@ -1,0 +1,26 @@
+{{define "layout"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} — Nebula Operation Station</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <nav class="nav" aria-label="Main navigation">
+    <a class="nav__brand" href="/dashboard">Nebula</a>
+    <a class="nav__item{{if eq .Active "dashboard"}} nav__item--active{{end}}" href="/dashboard">Dashboard</a>
+    <a class="nav__item{{if eq .Active "inventory"}} nav__item--active{{end}}" href="/inventory">Inventory</a>
+    <a class="nav__item{{if eq .Active "network"}} nav__item--active{{end}}" href="/network">Network</a>
+    <a class="nav__item{{if eq .Active "operations"}} nav__item--active{{end}}" href="/operations">Operations</a>
+    <a class="nav__item{{if eq .Active "runbooks"}} nav__item--active{{end}}" href="/runbooks">Runbooks / Modules</a>
+    <a class="nav__item{{if eq .Active "history"}} nav__item--active{{end}}" href="/history">History</a>
+    <a class="nav__item{{if eq .Active "settings"}} nav__item--active{{end}}" href="/settings">Settings</a>
+  </nav>
+  <main class="content">
+    {{template "content" .}}
+  </main>
+  <script src="/static/htmx.min.js"></script>
+</body>
+</html>
+{{end}}
