@@ -39,6 +39,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnreg"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
 )
 
@@ -120,7 +121,11 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := executor.NewService(auth, keyring.New(keysDir), db, discardLogger())
+	reg, err := webauthnreg.New(webauthnreg.Config{RPID: rpID, Origins: []string{origin}}, verifier, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := executor.NewService(auth, keyring.New(keysDir), db, reg, discardLogger())
 
 	sockDir := t.TempDir()
 	if err := os.Chmod(sockDir, 0o755); err != nil {

@@ -4,7 +4,8 @@
 // privileged action. It serves gRPC on a Unix socket only and never opens a
 // network listener.
 //
-// Milestone 0 scope: authorization, permits, WebAuthn verification, keyring.
+// Scope so far: authorization, permits, WebAuthn registration and verification,
+// executor-side risk floor, keyring.
 // SSH execution arrives in Milestone 4.
 package main
 
@@ -30,6 +31,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/version"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnreg"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
 )
 
@@ -111,15 +113,15 @@ func run() error {
 	}
 	policy := peercred.NewPolicy(uidRoles, executor.MethodRoles())
 
-	creds, err := executor.LoadWebAuthnCredentials(*dataDir)
+	creds, err := executor.LoadCredentials(db, *dataDir, log)
 	if err != nil {
 		return err
 	}
 	if len(creds) == 0 {
-		log.Warn("no WebAuthn credentials registered; browser approval is unavailable, `nebula approve` still works")
+		log.Warn("no WebAuthn credentials registered; browser approval is unavailable, `nebula approve` still works; register one with `nebula webauthn code`")
 	}
 	if db.Created() && len(creds) > 0 {
-		log.Warn("executor.db was created although WebAuthn credentials are registered: stored signature counters and spent execution IDs are gone (deleted file or restore without executor.db); counters restart from the credentials file")
+		log.Warn("executor.db was created and WebAuthn credentials were imported from the legacy credentials file: stored signature counters and spent execution IDs are gone (deleted file or restore without executor.db)")
 	}
 	verifier, err := webauthnverify.New(webauthnverify.Config{RPID: *rpID, Origins: origins, Counters: db}, creds)
 	if err != nil {
@@ -145,8 +147,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	reg, err := webauthnreg.New(webauthnreg.Config{
+		RPID: *rpID, Origins: origins, Audit: executor.RegistrationAuditLogger(log),
+	}, verifier, db)
+	if err != nil {
+		return err
+	}
 	keys := keyring.New(keysDir)
-	svc := executor.NewService(auth, keys, db, log)
+	svc := executor.NewService(auth, keys, db, reg, log)
 
 	lis, err := peercred.Listen(peercred.ListenOptions{Path: *socketPath, Mode: 0o660, Group: *socketGroup})
 	if err != nil {

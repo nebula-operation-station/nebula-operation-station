@@ -17,6 +17,7 @@ internal/permit/
 internal/peercred/
 internal/keyring/
 internal/webauthnverify/
+internal/webauthnreg/
 internal/fsguard/
 internal/executor/
 internal/executordb/

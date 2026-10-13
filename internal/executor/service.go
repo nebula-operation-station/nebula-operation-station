@@ -7,12 +7,8 @@ package executor
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strconv"
 
 	"google.golang.org/grpc"
@@ -25,7 +21,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnreg"
 )
 
 // MaxMessageSize is the largest gRPC message the executor accepts. It must
@@ -47,16 +43,18 @@ type Service struct {
 	auth *permit.Authority
 	keys *keyring.Keyring
 	db   *executordb.DB
+	reg  *webauthnreg.Registrar
 	log  *slog.Logger
 }
 
-// NewService wires the service. db holds the executor's risk data, which
-// the admin RPCs change; all arguments are required.
-func NewService(auth *permit.Authority, keys *keyring.Keyring, db *executordb.DB, log *slog.Logger) *Service {
-	if auth == nil || keys == nil || db == nil || log == nil {
-		panic("executor: NewService needs authority, keyring, database and logger")
+// NewService wires the service. db holds the executor's risk data and
+// credentials, which the admin RPCs change; reg runs WebAuthn
+// registrations. All arguments are required.
+func NewService(auth *permit.Authority, keys *keyring.Keyring, db *executordb.DB, reg *webauthnreg.Registrar, log *slog.Logger) *Service {
+	if auth == nil || keys == nil || db == nil || reg == nil || log == nil {
+		panic("executor: NewService needs authority, keyring, database, registrar and logger")
 	}
-	return &Service{auth: auth, keys: keys, db: db, log: log}
+	return &Service{auth: auth, keys: keys, db: db, reg: reg, log: log}
 }
 
 // AuditLogger returns a permit audit hook that writes structured log lines.
@@ -87,24 +85,6 @@ func NewGRPCServer(svc *Service, policy *peercred.Policy, log *slog.Logger) *grp
 	)
 	pb.RegisterExecutorServiceServer(s, svc)
 	return s
-}
-
-// LoadWebAuthnCredentials reads the executor's credential file. A missing
-// file yields no credentials (browser approval impossible, CLI still works).
-func LoadWebAuthnCredentials(dataDir string) ([]webauthnverify.Credential, error) {
-	path := filepath.Join(dataDir, "webauthn-credentials.json")
-	b, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var creds []webauthnverify.Credential
-	if err := json.Unmarshal(b, &creds); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
-	}
-	return creds, nil
 }
 
 func (s *Service) GetStatus(_ context.Context, _ *pb.GetStatusRequest) (*pb.GetStatusResponse, error) {
@@ -226,6 +206,7 @@ func (s *Service) Lock(ctx context.Context, _ *pb.LockRequest) (*pb.LockResponse
 	// in between.
 	s.auth.Lock(who)
 	s.keys.Lock()
+	s.reg.Reset("executor locked")
 	return &pb.LockResponse{}, nil
 }
 

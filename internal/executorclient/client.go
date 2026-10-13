@@ -245,6 +245,46 @@ func (c *Client) ListHostCriticality(ctx context.Context, in *pb.ListHostCritica
 	return resp, mapError(err)
 }
 
+// CreateRegistrationCode: Creates a one-time registration code (admin role only).
+func (c *Client) CreateRegistrationCode(ctx context.Context, in *pb.CreateRegistrationCodeRequest, opts ...grpc.CallOption) (*pb.CreateRegistrationCodeResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.CreateRegistrationCode(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// BeginRegistration: Starts a WebAuthn registration.
+func (c *Client) BeginRegistration(ctx context.Context, in *pb.BeginRegistrationRequest, opts ...grpc.CallOption) (*pb.BeginRegistrationResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.BeginRegistration(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// FinishRegistration: Completes a WebAuthn registration.
+func (c *Client) FinishRegistration(ctx context.Context, in *pb.FinishRegistrationRequest, opts ...grpc.CallOption) (*pb.FinishRegistrationResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.FinishRegistration(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// ListWebAuthnCredentials: Lists registered credentials (admin role only).
+func (c *Client) ListWebAuthnCredentials(ctx context.Context, in *pb.ListWebAuthnCredentialsRequest, opts ...grpc.CallOption) (*pb.ListWebAuthnCredentialsResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ListWebAuthnCredentials(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// RemoveWebAuthnCredential: Removes a credential and locks the executor (admin role only).
+func (c *Client) RemoveWebAuthnCredential(ctx context.Context, in *pb.RemoveWebAuthnCredentialRequest, opts ...grpc.CallOption) (*pb.RemoveWebAuthnCredentialResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.RemoveWebAuthnCredential(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
 // Compile-time check: the client must implement the generated interface so
 // that a generated-code change breaks the build here.
 var _ pb.ExecutorServiceClient = (*Client)(nil)

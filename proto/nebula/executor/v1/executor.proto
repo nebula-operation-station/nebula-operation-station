@@ -77,6 +77,31 @@ service ExecutorService {
 
   // Role: admin.
   rpc ListHostCriticality(ListHostCriticalityRequest) returns (ListHostCriticalityResponse);
+
+  // WebAuthn registration (H03). Every registration starts with a one-time
+  // code that an admin created on the executor host. Once a credential is
+  // registered, further ones must also be confirmed by a user-verified
+  // assertion of a registered credential. The executor verifies the
+  // attestation itself and keeps the public key.
+
+  // Role: admin. Creates a single-use code for the next registration
+  // (15 minutes); replaces an unused earlier code.
+  rpc CreateRegistrationCode(CreateRegistrationCodeRequest) returns (CreateRegistrationCodeResponse);
+
+  // Role: server. Starts a registration and returns the WebAuthn options.
+  rpc BeginRegistration(BeginRegistrationRequest) returns (BeginRegistrationResponse);
+
+  // Role: server. Completes a registration. Single use: the registration is
+  // consumed whether or not it succeeds.
+  rpc FinishRegistration(FinishRegistrationRequest) returns (FinishRegistrationResponse);
+
+  // Role: admin.
+  rpc ListWebAuthnCredentials(ListWebAuthnCredentialsRequest) returns (ListWebAuthnCredentialsResponse);
+
+  // Role: admin. Removes a credential and locks the executor (ends the
+  // privileged session, revokes every permit, cancels pending
+  // registrations and the outstanding code).
+  rpc RemoveWebAuthnCredential(RemoveWebAuthnCredentialRequest) returns (RemoveWebAuthnCredentialResponse);
 }
 
 enum RiskClass {
@@ -315,4 +340,78 @@ message HostCriticality {
 
 message ListHostCriticalityResponse {
   repeated HostCriticality hosts = 1;
+}
+
+message CreateRegistrationCodeRequest {
+  // Account name shown by the authenticator; default "admin".
+  string user_name = 1;
+  // Label of the new credential, shown by `nebula webauthn list`.
+  string label = 2;
+}
+
+message CreateRegistrationCodeResponse {
+  // Format XXXX-XXXX-XXXX-XXXX-XXXX (Crockford base32, 100 bits).
+  string code = 1;
+  int64 expiry_unix = 2;
+}
+
+message BeginRegistrationRequest {
+  // One-time code from `nebula webauthn code` (required).
+  string code = 1;
+}
+
+message BeginRegistrationResponse {
+  string registration_id = 1;
+  // CredentialCreationOptions JSON ({"publicKey": ...}) for
+  // navigator.credentials.create(); binary members are base64url.
+  bytes creation_options_json = 2;
+  // CredentialRequestOptions JSON for navigator.credentials.get(), present
+  // when credentials are already registered: one of them must confirm the
+  // new one with a user-verified assertion.
+  bytes authorization_options_json = 3;
+  int64 expiry_unix = 4;
+}
+
+message FinishRegistrationRequest {
+  string registration_id = 1;
+  // PublicKeyCredential JSON from navigator.credentials.create().
+  bytes attestation_json = 2;
+  // PublicKeyCredential JSON from navigator.credentials.get(); required
+  // exactly when BeginRegistration returned authorization options.
+  bytes assertion_json = 3;
+}
+
+message FinishRegistrationResponse {
+  // base64url credential ID.
+  string credential_id = 1;
+  string label = 2;
+}
+
+message ListWebAuthnCredentialsRequest {}
+
+message WebAuthnCredential {
+  // base64url credential ID.
+  string credential_id = 1;
+  string user_name = 2;
+  string label = 3;
+  // Hex AAGUID (authenticator model), empty if not reported.
+  string aaguid = 4;
+  string attestation_format = 5;
+  int64 created_at_unix = 6;
+  // "code:<admin>", "code:<admin>+webauthn:<hex confirming credential>"
+  // or "import:<file>".
+  string created_by = 7;
+}
+
+message ListWebAuthnCredentialsResponse {
+  repeated WebAuthnCredential credentials = 1;
+}
+
+message RemoveWebAuthnCredentialRequest {
+  // base64url credential ID (exact).
+  string credential_id = 1;
+}
+
+message RemoveWebAuthnCredentialResponse {
+  bool removed = 1;
 }
