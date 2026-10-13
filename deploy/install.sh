@@ -38,7 +38,8 @@ Usage: install.sh --admin-users USER[,USER...] --rp-id HOST
 
   --admin-users  comma-separated OS users allowed to unlock and approve
                  (each must exist on this system; not root, not the
-                 nebula-server/nebula-executor system users)
+                 nebula-server/nebula-executor system users; each entry
+                 must match ^[a-z_][a-z0-9_-]{0,31}$)
   --rp-id        WebAuthn RP ID: the fixed hostname Nebula is served
                  under (lowercase hostname)
 
@@ -116,6 +117,12 @@ for user in "${raw_users[@]}"; do
   user="${user%"${user##*[![:space:]]}"}"
   if [[ -z "$user" ]]; then
     echo "install.sh: --admin-users contains an empty entry" >&2
+    exit 1
+  fi
+  # Entries must look like OS usernames. The pattern rejects numeric UIDs
+  # (getent would resolve them) and '%' (systemd expands it in ExecStart).
+  if [[ ! "$user" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+    echo "install.sh: admin user must match ^[a-z_][a-z0-9_-]{0,31}$ (got: $user)" >&2
     exit 1
   fi
   if ! getent passwd "$user" >/dev/null; then
@@ -268,6 +275,13 @@ if systemctl is-active --quiet nebula-executor.service; then
   fi
 elif printf '%s\n' "${installed_units[@]}" | grep -qx 'nebula-executor.service'; then
   systemctl enable --now nebula-executor.service
+elif [[ -e "${systemd_dir}/nebula-executor.service" ]]; then
+  # The unit exists from an earlier install but is not active (for
+  # example it failed to start before this run): enable it and start it
+  # now that the drop-in is in place.
+  systemctl enable nebula-executor.service
+  systemctl restart nebula-executor.service
+  echo "install.sh: enabled and restarted nebula-executor (was not active)"
 fi
 
 # --- Next steps --------------------------------------------------------------
@@ -293,6 +307,8 @@ Next steps:
   3. Check the status:
        nebula status
 
-Further changes to the executor flags go into the drop-in
-${drop_in}, then: systemctl daemon-reload && systemctl restart nebula-executor
+Further changes to the executor flags go into a separate drop-in
+${drop_in_dir}/20-local.conf, because ${drop_in} is rewritten by
+install.sh on every run. After editing it:
+  systemctl daemon-reload && systemctl restart nebula-executor
 EOF
