@@ -113,10 +113,18 @@ func TestHostCriticalityCommand(t *testing.T) {
 	if !f.host.GetClear() || f.host.GetCriticality() != pb.RiskClass_RISK_CLASS_UNSPECIFIED {
 		t.Fatalf("clear sent %v", f.host)
 	}
+	// Without a fingerprint the executor binds the record to the pinned key
+	// (and refuses if the host is not pinned).
+	if err := hostCmd(context.Background(), f, []string{"criticality", "dockerflux", "low"}); err != nil {
+		t.Fatal(err)
+	}
+	if f.host.GetHostKeyFingerprint() != "" || f.host.GetCriticality() != pb.RiskClass_RISK_CLASS_LOW {
+		t.Fatalf("sent %v", f.host)
+	}
 	f.host = nil
 	for _, args := range [][]string{
 		{"criticality", "dockerflux", fp, "huge"},
-		{"criticality", "dockerflux", "critical"}, // fingerprint missing
+		{"criticality", "dockerflux"}, // level missing
 	} {
 		if err := hostCmd(context.Background(), f, args); err == nil {
 			t.Errorf("%v accepted", args)

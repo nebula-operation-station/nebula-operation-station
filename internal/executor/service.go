@@ -21,6 +21,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnreg"
 )
 
@@ -45,6 +46,8 @@ type Service struct {
 	db   *executordb.DB
 	reg  *webauthnreg.Registrar
 	log  *slog.Logger
+	// transport is the SSH client configuration (spec 08 defaults).
+	transport sshtransport.Config
 }
 
 // NewService wires the service. db holds the executor's risk data and

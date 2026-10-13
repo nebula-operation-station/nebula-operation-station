@@ -98,12 +98,12 @@ func (s *Service) SetHostCriticality(ctx context.Context, req *pb.SetHostCritica
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	fp := req.GetHostKeyFingerprint()
-	if err := s.db.SetHostCriticality(host, fp, c, who); err != nil {
+	fp, err := s.db.SetHostCriticality(host, req.GetHostKeyFingerprint(), c, who)
+	if err != nil {
 		return nil, s.adminStoreError("set_host_criticality", err)
 	}
 	s.log.Info("audit", "kind", "host_criticality_set", "by", who, "host", host, "fingerprint", fp, "criticality", string(c))
-	return &pb.SetHostCriticalityResponse{Changed: true}, nil
+	return &pb.SetHostCriticalityResponse{Changed: true, HostKeyFingerprint: fp}, nil
 }
 
 func (s *Service) ListHostCriticality(_ context.Context, _ *pb.ListHostCriticalityRequest) (*pb.ListHostCriticalityResponse, error) {

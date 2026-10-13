@@ -102,6 +102,32 @@ service ExecutorService {
   // privileged session, revokes every permit, cancels pending
   // registrations and the outstanding code).
   rpc RemoveWebAuthnCredential(RemoveWebAuthnCredentialRequest) returns (RemoveWebAuthnCredentialResponse);
+
+  // SSH host keys (H05). The executor pins one key per host; every endpoint
+  // of the host must present it. Pins are made on the executor host after
+  // the admin confirmed the fingerprint (or imported known_hosts), never by
+  // the server.
+
+  // Role: admin. Reads the host key of one endpoint without sending a user
+  // name or credential.
+  rpc ProbeHostKey(ProbeHostKeyRequest) returns (ProbeHostKeyResponse);
+
+  // Role: admin. Pins a host key and binds the host to one SSH user and one
+  // credential reference. A host that is already pinned must be unpinned
+  // first.
+  rpc PinHostKey(PinHostKeyRequest) returns (PinHostKeyResponse);
+
+  // Role: admin. Removes a pin (and a mismatch block with it); the host
+  // cannot be connected until it is pinned again.
+  rpc UnpinHostKey(UnpinHostKeyRequest) returns (UnpinHostKeyResponse);
+
+  // Role: server, admin. Lists the pins; public data only.
+  rpc ListHostKeys(ListHostKeysRequest) returns (ListHostKeysResponse);
+
+  // Role: admin. Connects to a pinned host with its credential (the keyring
+  // must be unlocked) over the given endpoints, in order, and disconnects.
+  // A host key mismatch blocks the host.
+  rpc TestConnection(TestConnectionRequest) returns (TestConnectionResponse);
 }
 
 enum RiskClass {
@@ -317,7 +343,8 @@ message SetHostCriticalityRequest {
   string host_id = 1;
   // Required unless clear is set.
   RiskClass criticality = 2;
-  // Pinned host key, "SHA256:<base64>". Required unless clear is set.
+  // Host key, "SHA256:<base64>". Optional if the host has a pinned key
+  // (then it must equal the pin); required otherwise, unless clear is set.
   string host_key_fingerprint = 3;
   // Remove the record instead; the host counts as unrecorded again.
   bool clear = 4;
@@ -326,6 +353,9 @@ message SetHostCriticalityRequest {
 message SetHostCriticalityResponse {
   // False when clear was sent for a host without a record.
   bool changed = 1;
+  // The fingerprint the record is bound to (the pinned key if the host has
+  // one).
+  string host_key_fingerprint = 2;
 }
 
 message ListHostCriticalityRequest {}
@@ -414,4 +444,98 @@ message RemoveWebAuthnCredentialRequest {
 
 message RemoveWebAuthnCredentialResponse {
   bool removed = 1;
+}
+
+enum HostKeySource {
+  HOST_KEY_SOURCE_UNSPECIFIED = 0;
+  // The admin confirmed the fingerprint the executor read (ProbeHostKey).
+  HOST_KEY_SOURCE_PROBE = 1;
+  // Imported from an OpenSSH known_hosts file.
+  HOST_KEY_SOURCE_KNOWN_HOSTS = 2;
+}
+
+message ProbeHostKeyRequest {
+  // "host", "host:port", "[v6]:port".
+  string endpoint = 1;
+}
+
+message ProbeHostKeyResponse {
+  string endpoint = 1;
+  string key_type = 2;
+  string fingerprint = 3;
+  // authorized_keys form, "ssh-ed25519 AAAA...".
+  string authorized_key = 4;
+}
+
+message PinHostKeyRequest {
+  string host_id = 1;
+  // authorized_keys form, as ProbeHostKey returned it.
+  string authorized_key = 2;
+  // The fingerprint the admin confirmed; must match authorized_key.
+  string expected_fingerprint = 3;
+  string ssh_user = 4;
+  // Keyring reference of the key used for this host.
+  string credential_ref = 5;
+  HostKeySource source = 6;
+}
+
+message HostKeyPin {
+  string host_id = 1;
+  string key_type = 2;
+  string fingerprint = 3;
+  string ssh_user = 4;
+  string credential_ref = 5;
+  HostKeySource source = 6;
+  int64 pinned_at_unix = 7;
+  string pinned_by = 8;
+  // Set after a host key mismatch; connections are refused until re-pin.
+  bool blocked = 9;
+  int64 blocked_at_unix = 10;
+  // The key the endpoint presented, empty if it offered no key of the
+  // pinned type.
+  string blocked_fingerprint = 11;
+  string blocked_endpoint = 12;
+}
+
+message PinHostKeyResponse {
+  HostKeyPin pin = 1;
+}
+
+message UnpinHostKeyRequest {
+  string host_id = 1;
+  // Must equal the current pin, so a stale view cannot remove another key.
+  string expected_fingerprint = 2;
+}
+
+message UnpinHostKeyResponse {
+  bool removed = 1;
+}
+
+message ListHostKeysRequest {}
+
+message ListHostKeysResponse {
+  repeated HostKeyPin hosts = 1;
+}
+
+message TestConnectionRequest {
+  string host_id = 1;
+  // In order; at most 8.
+  repeated string endpoints = 2;
+}
+
+message ConnectionAttempt {
+  string endpoint = 1;
+  // "tcp", "handshake", "host_key" or "auth".
+  string stage = 2;
+  string error = 3;
+}
+
+message TestConnectionResponse {
+  bool ok = 1;
+  // The endpoint that answered (ok).
+  string endpoint = 2;
+  // "unreachable", "host_key_mismatch", "auth_failed", "blocked", ...
+  string failure_class = 3;
+  string detail = 4;
+  repeated ConnectionAttempt attempts = 5;
 }

@@ -20,7 +20,8 @@ Nebula Operation Station holds the keys that give root on a whole homelab. This 
 | Unauthenticated or replayed WebAuthn registration | Every registration needs a one-time code from the executor host, further ones also a user-verified assertion of a registered credential; executor verifies the attestation (origin, RP ID, UV, challenge, key), registrations are single-use | `internal/webauthnreg` |
 | Another local user talking to the executor | `SO_PEERCRED` UID check per method; deny by default | `internal/peercred`, `internal/executor/roles.go` |
 | Malicious managed host | Host output is untrusted: schemas, size limits, text-only rendering | Milestones 4 and 10 |
-| Silent host-key change | Pinned per host; mismatch is a hard stop and a notification | Milestone 3 |
+| Silent host-key change, man in the middle | Pinned per host on the executor host after fingerprint confirmation; every endpoint must present the pin (only its key type is offered); a mismatch stops before authentication, blocks the host until re-pinned and is logged (notification: later milestone) | `internal/sshtransport`, `internal/executor/hostkeys.go` |
+| Key spraying across endpoints, fail2ban lockout | One key per host (IdentitiesOnly); an authentication failure stops, no other endpoint is tried | `internal/sshtransport` |
 
 ## Not protected
 

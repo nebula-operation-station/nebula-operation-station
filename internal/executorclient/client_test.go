@@ -155,7 +155,7 @@ func trustForTests(t *testing.T, db *executordb.DB) {
 		t.Fatal(err)
 	}
 	for h, fp := range map[string]string{"dockerflux": fpA, "strompi": fpB} {
-		if err := db.SetHostCriticality(h, fp, canonical.RiskLow, "test"); err != nil {
+		if _, err := db.SetHostCriticality(h, fp, canonical.RiskLow, "test"); err != nil {
 			t.Fatal(err)
 		}
 	}

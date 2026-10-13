@@ -9,7 +9,7 @@
 //	nebula pending
 //	nebula approve <digest-prefix>
 //	nebula artifact trust|untrust|list
-//	nebula host criticality|list
+//	nebula host probe|pin|unpin|keys|test|criticality|clear|list
 //	nebula webauthn code|list|remove
 package main
 
@@ -49,7 +49,15 @@ commands:
                       trust a script for one action; LEVEL becomes its minimum risk
   artifact untrust --action ID --version X.Y.Z SHA256
   artifact list       list trusted artifacts (anything else needs at least HIGH)
-  host criticality HOST SHA256:FINGERPRINT LEVEL
+  host probe ENDPOINT...
+                      show the SSH host key of endpoints (sends no credential)
+  host pin [--user U] [--key REF] [--known-hosts FILE] HOST ENDPOINT...
+                      pin a host's key after you confirmed the fingerprint
+  host unpin HOST     remove a pin (needed to re-pin a changed or blocked host)
+  host keys           list pinned host keys and blocked hosts
+  host test HOST ENDPOINT...
+                      connect to a pinned host and log in (keys must be unlocked)
+  host criticality HOST [SHA256:FINGERPRINT] LEVEL
                       set the executor's criticality of a host, bound to its key
   host clear HOST     remove a host record (unrecorded hosts count as HIGH)
   host list           list host criticality records

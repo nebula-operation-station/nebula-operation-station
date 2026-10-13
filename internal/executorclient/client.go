@@ -285,6 +285,46 @@ func (c *Client) RemoveWebAuthnCredential(ctx context.Context, in *pb.RemoveWebA
 	return resp, mapError(err)
 }
 
+// ProbeHostKey: Reads a host key for enrollment (admin role only).
+func (c *Client) ProbeHostKey(ctx context.Context, in *pb.ProbeHostKeyRequest, opts ...grpc.CallOption) (*pb.ProbeHostKeyResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ProbeHostKey(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// PinHostKey: Pins a host key (admin role only).
+func (c *Client) PinHostKey(ctx context.Context, in *pb.PinHostKeyRequest, opts ...grpc.CallOption) (*pb.PinHostKeyResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.PinHostKey(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// UnpinHostKey: Removes a host key pin (admin role only).
+func (c *Client) UnpinHostKey(ctx context.Context, in *pb.UnpinHostKeyRequest, opts ...grpc.CallOption) (*pb.UnpinHostKeyResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.UnpinHostKey(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// ListHostKeys: Lists the pinned host keys.
+func (c *Client) ListHostKeys(ctx context.Context, in *pb.ListHostKeysRequest, opts ...grpc.CallOption) (*pb.ListHostKeysResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ListHostKeys(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// TestConnection: Tests the SSH connection to a pinned host (admin role only).
+func (c *Client) TestConnection(ctx context.Context, in *pb.TestConnectionRequest, opts ...grpc.CallOption) (*pb.TestConnectionResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.TestConnection(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
 // Compile-time check: the client must implement the generated interface so
 // that a generated-code change breaks the build here.
 var _ pb.ExecutorServiceClient = (*Client)(nil)
