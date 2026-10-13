@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping. Please read `AGENTS.md` first: its rules apply to human contributors as well as to AI agents.
+Thanks for helping. Please read `AGENTS.md` first: its rules apply to human contributors as well as to AI agents. New here? Start with the [getting-started guide](docs/dev/getting-started.md): toolchain, `make hooks`, `make check`, the privileged tests, and running the executor locally.
 
 1. Open or pick an issue. Issues carry the spec references and acceptance criteria.
 2. Branch from `main`, write tests first, keep changes small.

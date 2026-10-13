@@ -29,6 +29,12 @@ sudo -E make test-privileged   # multi-UID security tests
 
 Requires Go 1.26 or later and `buf` for code generation.
 
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) and the
+[getting-started guide](docs/dev/getting-started.md) for the toolchain,
+`make check`, the privileged tests and running the executor locally.
+
 ## License
 
 AGPL-3.0-or-later. See [`LICENSE`](LICENSE).
