@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Builds the static linux binaries (CGO off, -trimpath) into a tarball
+# that also carries deploy/, so a release can be installed with
+# `sudo ./deploy/install.sh` from the extracted archive.
+#
+# There is deliberately no signing section: the release signing key is
+# an offline Ed25519 root key that is never present in CI
+# (docs/adr/0001-frozen-decisions-v2.2.md). Release publishing is
+# disabled for the same reason; publishing and signing happen offline.
+
+version: 2
+
+project_name: nebula
+
+env:
+  - CGO_ENABLED=0
+
+builds:
+  - id: nebula
+    main: ./cmd/nebula
+    binary: nebula
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/nebula-operation-station/nebula-operation-station/internal/version.Version={{.Version}}
+      - -X github.com/nebula-operation-station/nebula-operation-station/internal/version.Commit={{.ShortCommit}}
+  - id: nebula-server
+    main: ./cmd/nebula-server
+    binary: nebula-server
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/nebula-operation-station/nebula-operation-station/internal/version.Version={{.Version}}
+      - -X github.com/nebula-operation-station/nebula-operation-station/internal/version.Commit={{.ShortCommit}}
+  - id: nebula-executor
+    main: ./cmd/nebula-executor
+    binary: nebula-executor
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/nebula-operation-station/nebula-operation-station/internal/version.Version={{.Version}}
+      - -X github.com/nebula-operation-station/nebula-operation-station/internal/version.Commit={{.ShortCommit}}
+  - id: nebula-discovery
+    main: ./cmd/nebula-discovery
+    binary: nebula-discovery
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/nebula-operation-station/nebula-operation-station/internal/version.Version={{.Version}}
+      - -X github.com/nebula-operation-station/nebula-operation-station/internal/version.Commit={{.ShortCommit}}
+
+archives:
+  - id: nebula
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - src: deploy/**
+        dst: deploy/
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+
+release:
+  # Offline key (ADR 0001): CI neither signs nor publishes.
+  disable: true
