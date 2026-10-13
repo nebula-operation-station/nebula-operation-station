@@ -35,9 +35,10 @@ var (
 	// ErrSessionRequired: the executor needs an active privileged session.
 	ErrSessionRequired = &Error{Code: string(permit.CodeSessionRequired)}
 	// ErrPolicyBlocked: the executor refused the run for policy reasons: the
-	// target is not in the permit, the host was already authorized, or the
+	// target is not in the permit, the host was already authorized, the
 	// artifact, parameters, action or credential does not match the
-	// approved request.
+	// approved request, or the executor's minimum risk for the host is now
+	// above the approved risk.
 	ErrPolicyBlocked = &Error{Code: codePolicyBlocked}
 	// ErrPermitNotFound: no permit with that digest exists.
 	ErrPermitNotFound = &Error{Code: string(permit.CodeNotFound)}
@@ -128,6 +129,7 @@ var policyBlockedCodes = map[string]bool{
 	string(permit.CodeParametersMismatch): true,
 	string(permit.CodeActionMismatch):     true,
 	string(permit.CodeCredentialMismatch): true,
+	string(permit.CodeRiskAboveApproval):  true,
 }
 
 // knownCodes are the failure codes the executor may send in a status message.
@@ -152,6 +154,7 @@ var knownCodes = func() map[string]bool {
 		string(permit.CodeLimit),
 		string(permit.CodeNoChallenge),
 		string(permit.CodeStorage),
+		string(permit.CodeRiskAboveApproval),
 		codeVaultLocked,
 		codeCredentialMissing,
 	} {

@@ -8,6 +8,8 @@
 //	nebula lock
 //	nebula pending
 //	nebula approve <digest-prefix>
+//	nebula artifact trust|untrust|list
+//	nebula host criticality|list
 package main
 
 import (
@@ -42,6 +44,14 @@ commands:
   lock                wipe keys, end the privileged session, revoke all permits
   pending             list permits waiting for approval
   approve <digest>    approve a pending permit (hardened path); a unique prefix is enough
+  artifact trust --action ID --version X.Y.Z --risk LEVEL [--label TEXT] FILE
+                      trust a script for one action; LEVEL becomes its minimum risk
+  artifact untrust --action ID --version X.Y.Z SHA256
+  artifact list       list trusted artifacts (anything else needs at least HIGH)
+  host criticality HOST SHA256:FINGERPRINT LEVEL
+                      set the executor's criticality of a host, bound to its key
+  host clear HOST     remove a host record (unrecorded hosts count as HIGH)
+  host list           list host criticality records
   version             print version
 
 environment:
@@ -105,6 +115,10 @@ func run(cmd string, args []string) error {
 			return errors.New("usage: nebula approve <digest-prefix>")
 		}
 		return approve(ctx, c, args[0])
+	case "artifact":
+		return artifactCmd(ctx, c, args)
+	case "host":
+		return hostCmd(ctx, c, args)
 	default:
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(64)

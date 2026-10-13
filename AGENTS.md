@@ -42,7 +42,7 @@ Changes here need a human. The authoritative list is `.github/protected-paths.tx
 - `AGENTS.md`, `.github/`, `.githooks/`, `Makefile`, `go.mod`, `go.sum`
 - `docs/spec/`, `docs/adr/`, `docs/threat-model.md`
 - `proto/`
-- `internal/canonical/`, `internal/permit/`, `internal/peercred/`, `internal/keyring/`, `internal/webauthnverify/`, `internal/fsguard/`, `internal/executor/`
+- `internal/canonical/`, `internal/permit/`, `internal/peercred/`, `internal/keyring/`, `internal/webauthnverify/`, `internal/fsguard/`, `internal/executor/`, `internal/executordb/`, `internal/riskpolicy/`
 - `cmd/nebula-executor/`, `cmd/nebula/`
 - `test/security/`, `scripts/`
 - `deploy/systemd/`

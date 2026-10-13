@@ -14,6 +14,7 @@
 /internal/fsguard/              @Garm82
 /internal/executor/              @Garm82
 /internal/executordb/            @Garm82
+/internal/riskpolicy/            @Garm82
 /cmd/nebula-executor/            @Garm82
 /cmd/nebula/                     @Garm82
 /scripts/                        @Garm82

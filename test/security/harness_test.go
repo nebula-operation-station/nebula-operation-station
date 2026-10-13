@@ -36,6 +36,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
 )
@@ -47,6 +48,9 @@ const (
 	credRef    = "nebula-default"
 	fpA        = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	fpB        = "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+
+	testAction  = "patching.install_security"
+	testVersion = "1.0.0"
 )
 
 var (
@@ -79,6 +83,11 @@ type harnessOptions struct {
 	dataDir string
 	// identity reuses an authenticator and credential across a restart.
 	identity *identity
+	// untrusted skips the default risk data. By default the test script is
+	// trusted as LOW for its action and both test hosts are LOW, so that the
+	// proposed risk_class alone selects the approval path (the Milestone 0
+	// tests rely on that). H01 tests set up their own risk data.
+	untrusted bool
 }
 
 // identity is a virtual authenticator with one registered credential.
@@ -142,11 +151,18 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 	}
 	h.logs = &syncBuffer{}
 	log := slog.New(slog.NewJSONHandler(h.logs, nil))
-	auth, err := permit.New(permit.Options{Mode: o.mode, Verifier: verifier, Store: db, Audit: executor.AuditLogger(log)})
+	if !o.untrusted {
+		trustDefaults(t, db)
+	}
+	risk, err := riskpolicy.New(db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := executor.NewService(auth, keyring.New(keysDir), log)
+	auth, err := permit.New(permit.Options{Mode: o.mode, Verifier: verifier, Store: db, RiskPolicy: risk, Audit: executor.AuditLogger(log)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := executor.NewService(auth, keyring.New(keysDir), db, log)
 	policy := peercred.NewPolicy(o.uidRoles, executor.MethodRoles())
 
 	sockDir := t.TempDir()
@@ -172,6 +188,22 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 	t.Cleanup(func() { conn.Close() })
 	h.client = pb.NewExecutorServiceClient(conn)
 	return h
+}
+
+// trustDefaults writes the default risk data directly into executor.db.
+func trustDefaults(t *testing.T, db *executordb.DB) {
+	t.Helper()
+	if err := db.TrustArtifact(executordb.TrustedArtifact{
+		SHA256: hexSum(script), ActionID: testAction, ModuleVersion: testVersion,
+		Risk: canonical.RiskLow, TrustedBy: "test-harness",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for h, fp := range map[string]string{"dockerflux": fpA, "strompi": fpB} {
+		if err := db.SetHostCriticality(h, fp, canonical.RiskLow, "test-harness"); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func writeEncryptedKey(t *testing.T, dir, ref string) {
@@ -230,8 +262,8 @@ func (h *harness) request(risk pb.RiskClass) *pb.ExecutionRequest {
 	}
 	return &pb.ExecutionRequest{
 		ExecutionId:    fmt.Sprintf("00000000-0000-4000-8000-%012d", execCounter.Add(1)),
-		ActionId:       "patching.install_security",
-		ModuleVersion:  "1.0.0",
+		ActionId:       testAction,
+		ModuleVersion:  testVersion,
 		ArtifactSha256: hexSum(script),
 		ParametersHash: ph,
 		CredentialRefs: []string{credRef},
@@ -270,7 +302,7 @@ func (h *harness) approvedMedium() *pb.ProposeExecutionResponse {
 func run(digest, host, fp string) *pb.AuthorizeRunRequest {
 	return &pb.AuthorizeRunRequest{
 		ExecutionDigest: digest, HostId: host, HostKeyFingerprint: fp,
-		ActionId: "patching.install_security", ModuleVersion: "1.0.0",
+		ActionId: testAction, ModuleVersion: testVersion,
 		Artifact: script, ParametersJson: params, CredentialRef: credRef,
 	}
 }

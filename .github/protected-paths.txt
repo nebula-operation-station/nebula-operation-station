@@ -20,6 +20,7 @@ internal/webauthnverify/
 internal/fsguard/
 internal/executor/
 internal/executordb/
+internal/riskpolicy/
 cmd/nebula-executor/
 cmd/nebula/
 test/security/

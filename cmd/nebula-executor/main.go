@@ -28,6 +28,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/version"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
 )
@@ -129,10 +130,15 @@ func run() error {
 	if *hardened {
 		mode = permit.ModeHardened
 	}
+	risk, err := riskpolicy.New(db)
+	if err != nil {
+		return err
+	}
 	auth, err := permit.New(permit.Options{
 		Mode:          mode,
 		Verifier:      verifier,
 		Store:         db,
+		RiskPolicy:    risk,
 		SessionLength: time.Duration(*sessionMin) * time.Minute,
 		Audit:         executor.AuditLogger(log),
 	})
@@ -140,7 +146,7 @@ func run() error {
 		return err
 	}
 	keys := keyring.New(keysDir)
-	svc := executor.NewService(auth, keys, log)
+	svc := executor.NewService(auth, keys, db, log)
 
 	lis, err := peercred.Listen(peercred.ListenOptions{Path: *socketPath, Mode: 0o660, Group: *socketGroup})
 	if err != nil {

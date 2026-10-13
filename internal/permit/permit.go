@@ -13,6 +13,8 @@
 //   - Artifact and parameters are hashed by the executor at run time and must
 //     match the approved request.
 //   - Locking revokes the privileged session and every permit.
+//   - The proposed risk class is never below the minimum the executor derives
+//     from its own data (RiskPolicy); every host run re-checks it.
 //   - An execution ID is bound durably (Store) before its permit exists, so
 //     a restart can never revive or re-bind it. Permits and the privileged
 //     session are never persisted: a restart revokes them all.
@@ -129,6 +131,10 @@ const (
 	CodeLimit              Code = "limit_exceeded"
 	CodeNoChallenge        Code = "no_session_challenge"
 	CodeStorage            Code = "storage_error"
+	// CodeRiskAboveApproval: the executor's minimum risk for this host run
+	// is now higher than the risk the permit was approved at (trust was
+	// withdrawn or a host became more critical after approval).
+	CodeRiskAboveApproval Code = "risk_above_approval"
 )
 
 // Error is an authorization failure.
@@ -221,6 +227,17 @@ type Store interface {
 	LookupExecution(executionID string) (d canonical.Digest, ok bool, err error)
 }
 
+// RiskPolicy derives the minimum risk class from data the executor holds
+// itself (internal/riskpolicy implements it). The server's risk_class is
+// never trusted below it.
+type RiskPolicy interface {
+	// MinimumRisk returns the lowest acceptable risk class for running r on
+	// targets and a reason for the audit log (it may name hosts and trust
+	// entries, so it is never returned to the caller). An error means the
+	// floor is unknown.
+	MinimumRisk(r canonical.Request, targets []canonical.Target) (canonical.Risk, string, error)
+}
+
 // ErrExecutionBound is returned by Store.BindExecution for an execution ID
 // that is already bound.
 var ErrExecutionBound = errors.New("permit: execution ID already bound")
@@ -234,6 +251,8 @@ type Options struct {
 	Audit         func(Event)
 	// Store persists execution ID bindings. Required.
 	Store Store
+	// RiskPolicy is the executor's minimum risk. Required.
+	RiskPolicy RiskPolicy
 }
 
 // Authority owns all permits and the privileged session. It is safe for
@@ -245,6 +264,7 @@ type Authority struct {
 	now      func() time.Time
 	audit    func(Event)
 	store    Store
+	risk     RiskPolicy
 
 	mu          sync.Mutex
 	permits     map[canonical.Digest]*Permit
@@ -265,6 +285,9 @@ func New(o Options) (*Authority, error) {
 	if o.Store == nil {
 		return nil, errors.New("permit: a persistent store is required")
 	}
+	if o.RiskPolicy == nil {
+		return nil, errors.New("permit: a risk policy is required")
+	}
 	if o.Now == nil {
 		o.Now = time.Now
 	}
@@ -281,6 +304,7 @@ func New(o Options) (*Authority, error) {
 		now:        o.Now,
 		audit:      o.Audit,
 		store:      o.Store,
+		risk:       o.RiskPolicy,
 		permits:    map[canonical.Digest]*Permit{},
 		executions: map[string]canonical.Digest{},
 	}, nil
@@ -339,6 +363,21 @@ func (a *Authority) Propose(r canonical.Request, parametersJSON []byte) (Propose
 		}
 		a.emit(Event{Kind: "rejected", Digest: digest.String(), Code: CodeExecutionIDReused, Detail: "execution already ended"})
 		return ProposeResult{}, fail(CodeExecutionIDReused, "execution_id %s has ended; create a new execution", norm.ExecutionID)
+	}
+
+	// The server's risk_class may raise the approval strength, never lower
+	// it below what the executor derives itself.
+	floor, why, err := a.risk.MinimumRisk(norm, norm.ResolvedTargets)
+	if err != nil {
+		return ProposeResult{}, a.storageFailure(digest.String(), err)
+	}
+	if floor.Rank() == 0 {
+		return ProposeResult{}, a.storageFailure(digest.String(), fmt.Errorf("risk policy returned unknown risk %q", floor))
+	}
+	if norm.RiskClass.Rank() < floor.Rank() {
+		a.emit(Event{Kind: "rejected", Digest: digest.String(), Code: CodeInvalidRequest,
+			Detail: fmt.Sprintf("risk_class %s below executor minimum %s (%s)", norm.RiskClass, floor, why)})
+		return ProposeResult{}, fail(CodeInvalidRequest, "risk_class %s is below the executor's minimum %s", norm.RiskClass, floor)
 	}
 
 	req := RequirementFor(norm.RiskClass, a.mode)
@@ -544,6 +583,19 @@ func (a *Authority) Authorize(d canonical.Digest, run Run) error {
 	}
 	if !slices.Contains(p.Request.CredentialRefs, run.CredentialRef) {
 		return a.deny(d, run.HostID, CodeCredentialMismatch, "")
+	}
+	// Risk authorization per host run (spec 07): trust withdrawn or a host
+	// made more critical after approval stops the run.
+	floor, why, err := a.risk.MinimumRisk(p.Request, p.Request.ResolvedTargets[idx:idx+1])
+	if err != nil || floor.Rank() == 0 {
+		detail := fmt.Sprintf("risk policy: %v (floor %q)", err, floor)
+		a.emit(Event{Kind: "denied", Digest: d.String(), Host: run.HostID, Code: CodeStorage, Detail: detail})
+		return fail(CodeStorage, "executor state store unavailable")
+	}
+	if p.Request.RiskClass.Rank() < floor.Rank() {
+		a.emit(Event{Kind: "denied", Digest: d.String(), Host: run.HostID, Code: CodeRiskAboveApproval,
+			Detail: fmt.Sprintf("approved as %s, executor minimum is now %s (%s)", p.Request.RiskClass, floor, why)})
+		return fail(CodeRiskAboveApproval, "approved as %s, executor minimum for this host is now %s", p.Request.RiskClass, floor)
 	}
 
 	p.used[run.HostID] = struct{}{}

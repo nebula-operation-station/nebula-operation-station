@@ -43,6 +43,7 @@ func TestMapErrorPermitCodes(t *testing.T) {
 		{permit.CodeParametersMismatch, ErrPolicyBlocked},
 		{permit.CodeActionMismatch, ErrPolicyBlocked},
 		{permit.CodeCredentialMismatch, ErrPolicyBlocked},
+		{permit.CodeRiskAboveApproval, ErrPolicyBlocked},
 		{permit.CodeLimit, ErrLimitExceeded},
 		{permit.CodeNoChallenge, ErrNoChallenge},
 		{permit.CodeStorage, ErrStorage},

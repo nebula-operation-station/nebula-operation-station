@@ -37,6 +37,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
 )
@@ -107,11 +108,19 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	auth, err := permit.New(permit.Options{Verifier: verifier, Store: db})
+	// The executor's own risk data: the test script is trusted as LOW and
+	// both hosts are LOW, so the proposed risk_class decides the approval
+	// path as in Milestone 0. test/security covers the risk floor itself.
+	trustForTests(t, db)
+	risk, err := riskpolicy.New(db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := executor.NewService(auth, keyring.New(keysDir), discardLogger())
+	auth, err := permit.New(permit.Options{Verifier: verifier, Store: db, RiskPolicy: risk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := executor.NewService(auth, keyring.New(keysDir), db, discardLogger())
 
 	sockDir := t.TempDir()
 	if err := os.Chmod(sockDir, 0o755); err != nil {
@@ -130,6 +139,22 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 }
 
 func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
+
+func trustForTests(t *testing.T, db *executordb.DB) {
+	t.Helper()
+	sum := sha256.Sum256(script)
+	if err := db.TrustArtifact(executordb.TrustedArtifact{
+		SHA256: hex.EncodeToString(sum[:]), ActionID: "patching.install_security", ModuleVersion: "1.0.0",
+		Risk: canonical.RiskLow, TrustedBy: "test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for h, fp := range map[string]string{"dockerflux": fpA, "strompi": fpB} {
+		if err := db.SetHostCriticality(h, fp, canonical.RiskLow, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
 
 func writeEncryptedKey(t *testing.T, dir, ref string) {
 	t.Helper()

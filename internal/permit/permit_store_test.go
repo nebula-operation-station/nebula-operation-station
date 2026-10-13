@@ -93,7 +93,7 @@ func TestNewRequiresStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New(Options{Verifier: v}); err == nil {
+	if _, err := New(Options{Verifier: v, RiskPolicy: newFakePolicy()}); err == nil {
 		t.Fatal("authority without a persistent store accepted")
 	}
 }

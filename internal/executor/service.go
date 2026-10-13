@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
@@ -45,12 +46,17 @@ type Service struct {
 
 	auth *permit.Authority
 	keys *keyring.Keyring
+	db   *executordb.DB
 	log  *slog.Logger
 }
 
-// NewService wires the service.
-func NewService(auth *permit.Authority, keys *keyring.Keyring, log *slog.Logger) *Service {
-	return &Service{auth: auth, keys: keys, log: log}
+// NewService wires the service. db holds the executor's risk data, which
+// the admin RPCs change; all arguments are required.
+func NewService(auth *permit.Authority, keys *keyring.Keyring, db *executordb.DB, log *slog.Logger) *Service {
+	if auth == nil || keys == nil || db == nil || log == nil {
+		panic("executor: NewService needs authority, keyring, database and logger")
+	}
+	return &Service{auth: auth, keys: keys, db: db, log: log}
 }
 
 // AuditLogger returns a permit audit hook that writes structured log lines.
@@ -273,7 +279,7 @@ func toStatus(err error) error {
 		c = codes.Unavailable
 	case permit.CodeWrongState, permit.CodeSessionRequired, permit.CodeCLIRequired, permit.CodeNoChallenge, permit.CodeExpired:
 		c = codes.FailedPrecondition
-	case permit.CodeAssertionRejected, permit.CodeTypedCountMismatch,
+	case permit.CodeAssertionRejected, permit.CodeTypedCountMismatch, permit.CodeRiskAboveApproval,
 		permit.CodeTargetNotPermitted, permit.CodeHostAlreadyRun, permit.CodeArtifactMismatch,
 		permit.CodeParametersMismatch, permit.CodeActionMismatch, permit.CodeCredentialMismatch:
 		c = codes.PermissionDenied

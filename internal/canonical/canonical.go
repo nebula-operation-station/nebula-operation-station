@@ -112,6 +112,45 @@ var (
 	fingerprintRe = regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{43}$`)
 )
 
+// ValidActionID reports whether s is a well-formed action_id.
+func ValidActionID(s string) bool { return actionRe.MatchString(s) }
+
+// ValidModuleVersion reports whether s is a well-formed module_version.
+func ValidModuleVersion(s string) bool { return semverRe.MatchString(s) }
+
+// ValidHostID reports whether s is a well-formed host_id.
+func ValidHostID(s string) bool { return hostIDRe.MatchString(s) }
+
+// ValidHostKeyFingerprint reports whether s is an OpenSSH SHA256 fingerprint.
+func ValidHostKeyFingerprint(s string) bool { return fingerprintRe.MatchString(s) }
+
+// ValidSHA256Hex reports whether s is 64 lowercase hex characters.
+func ValidSHA256Hex(s string) bool { return hex64.MatchString(s) }
+
+// RiskFromRank is the inverse of Risk.Rank; it returns "" for an unknown rank.
+func RiskFromRank(n int) Risk {
+	switch n {
+	case 1:
+		return RiskLow
+	case 2:
+		return RiskMedium
+	case 3:
+		return RiskHigh
+	case 4:
+		return RiskCritical
+	default:
+		return ""
+	}
+}
+
+// MaxRisk returns the higher of two risk classes.
+func MaxRisk(a, b Risk) Risk {
+	if b.Rank() > a.Rank() {
+		return b
+	}
+	return a
+}
+
 // ValidationError lists every problem found in a request.
 type ValidationError struct{ Problems []string }
 
