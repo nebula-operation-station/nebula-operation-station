@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Dependency updates arrive as PRs and go through the same review as any
+# other change. Actions stay pinned to commit SHAs; Dependabot updates the
+# SHA and the version comment together.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      golang-x:
+        patterns: ["golang.org/x/*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

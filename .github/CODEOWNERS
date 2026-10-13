@@ -1,20 +1,20 @@
-# Replace @nos-maintainers with the GitHub team or user after creating the
-# organization. Branch protection must require code-owner review on main.
-*                               @nos-maintainers
-/AGENTS.md                      @nos-maintainers
-/.github/                       @nos-maintainers
-/docs/spec/                     @nos-maintainers
-/docs/adr/                      @nos-maintainers
-/proto/                         @nos-maintainers
-/internal/canonical/            @nos-maintainers
-/internal/permit/               @nos-maintainers
-/internal/peercred/             @nos-maintainers
-/internal/keyring/              @nos-maintainers
-/internal/webauthnverify/       @nos-maintainers
-/internal/fsguard/              @nos-maintainers
-/internal/executor/              @nos-maintainers
-/cmd/nebula-executor/            @nos-maintainers
-/cmd/nebula/                     @nos-maintainers
-/scripts/                        @nos-maintainers
-/test/security/                 @nos-maintainers
-/deploy/systemd/                @nos-maintainers
+# Code owners. Enforced by branch protection once the repository is public
+# (see scripts in scripts/enable-protection.sh); until then advisory.
+*                               @Garm82
+/AGENTS.md                      @Garm82
+/.github/                       @Garm82
+/docs/spec/                     @Garm82
+/docs/adr/                      @Garm82
+/proto/                         @Garm82
+/internal/canonical/            @Garm82
+/internal/permit/               @Garm82
+/internal/peercred/             @Garm82
+/internal/keyring/              @Garm82
+/internal/webauthnverify/       @Garm82
+/internal/fsguard/              @Garm82
+/internal/executor/              @Garm82
+/cmd/nebula-executor/            @Garm82
+/cmd/nebula/                     @Garm82
+/scripts/                        @Garm82
+/test/security/                 @Garm82
+/deploy/systemd/                @Garm82
