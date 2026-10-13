@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package webauthnreg implements the WebAuthn registration ceremony inside
-// the executor (H03, docs/spec/05-authentication.md).
+// the executor (H03, docs/spec/05-authentication.md), and the web login
+// ceremony (M2, login.go) over the same credentials.
 //
 // There is no unauthenticated registration, and the browser alone can never
 // add a credential. Every registration starts with a one-time code that an
@@ -142,6 +143,7 @@ type Registrar struct {
 	code     *oneTimeCode
 	failures int
 	pending  map[string]*registration
+	logins   map[string]*pendingLogin
 }
 
 type oneTimeCode struct {
@@ -182,7 +184,7 @@ func New(cfg Config, v *webauthnverify.Verifier, store Store) (*Registrar, error
 	if cfg.Audit == nil {
 		cfg.Audit = func(Event) {}
 	}
-	return &Registrar{cfg: cfg, verifier: v, store: store, pending: map[string]*registration{}}, nil
+	return &Registrar{cfg: cfg, verifier: v, store: store, pending: map[string]*registration{}, logins: map[string]*pendingLogin{}}, nil
 }
 
 var codeEncoding = base32.NewEncoding("0123456789ABCDEFGHJKMNPQRSTVWXYZ").WithPadding(base32.NoPadding)
@@ -534,6 +536,7 @@ func (r *Registrar) resetLocked(reason string) {
 	}
 	r.code, r.failures = nil, 0
 	clear(r.pending)
+	clear(r.logins)
 }
 
 func (r *Registrar) reject(reg *registration, code Code, format string, args ...any) error {

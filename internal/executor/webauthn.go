@@ -3,6 +3,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
@@ -152,6 +153,34 @@ func (s *Service) RemoveWebAuthnCredential(ctx context.Context, req *pb.RemoveWe
 	return &pb.RemoveWebAuthnCredentialResponse{Removed: removed}, nil
 }
 
+// BeginLogin starts a web login (M2).
+func (s *Service) BeginLogin(_ context.Context, _ *pb.BeginLoginRequest) (*pb.BeginLoginResponse, error) {
+	l, err := s.reg.BeginLogin()
+	if err != nil {
+		return nil, regStatus(err)
+	}
+	return &pb.BeginLoginResponse{LoginId: l.ID, RequestOptionsJson: l.OptionsJSON, ExpiryUnix: l.Expiry.Unix()}, nil
+}
+
+// FinishLogin verifies a web login assertion and names the credential.
+func (s *Service) FinishLogin(ctx context.Context, req *pb.FinishLoginRequest) (*pb.FinishLoginResponse, error) {
+	id, err := s.reg.FinishLogin(req.GetLoginId(), req.GetAssertionJson())
+	if err != nil {
+		s.log.Warn("audit", "kind", "login_failed", "by", callerName(ctx), "code", string(webauthnreg.CodeOf(err)))
+		return nil, regStatus(err)
+	}
+	resp := &pb.FinishLoginResponse{CredentialId: base64.RawURLEncoding.EncodeToString(id)}
+	if list, err := s.db.ListWebAuthnCredentials(); err == nil {
+		for _, c := range list {
+			if bytes.Equal(c.ID, id) {
+				resp.UserName, resp.Label = c.UserName, c.Label
+			}
+		}
+	}
+	s.log.Info("audit", "kind", "login_succeeded", "by", callerName(ctx), "credential", hex.EncodeToString(id), "user", resp.UserName)
+	return resp, nil
+}
+
 func regStatus(err error) error {
 	var c codes.Code
 	switch webauthnreg.CodeOf(err) {
@@ -167,8 +196,14 @@ func regStatus(err error) error {
 		c = codes.PermissionDenied
 	case webauthnreg.CodeExists:
 		c = codes.AlreadyExists
-	case webauthnreg.CodeLimit:
+	case webauthnreg.CodeLimit, webauthnreg.CodeLoginLimit:
 		c = codes.ResourceExhausted
+	case webauthnreg.CodeNoCredentials:
+		c = codes.FailedPrecondition
+	case webauthnreg.CodeLoginNotFound:
+		c = codes.NotFound
+	case webauthnreg.CodeLoginRejected:
+		c = codes.Unauthenticated
 	case webauthnreg.CodeStorage:
 		c = codes.Unavailable
 	default:

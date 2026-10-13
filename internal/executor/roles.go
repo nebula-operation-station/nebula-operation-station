@@ -34,6 +34,8 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_FinishRegistration_FullMethodName:        {server},
 		pb.ExecutorService_ListWebAuthnCredentials_FullMethodName:   {admin},
 		pb.ExecutorService_RemoveWebAuthnCredential_FullMethodName:  {admin},
+		pb.ExecutorService_BeginLogin_FullMethodName:                {server},
+		pb.ExecutorService_FinishLogin_FullMethodName:               {server},
 		pb.ExecutorService_ProbeHostKey_FullMethodName:              {admin},
 		pb.ExecutorService_PinHostKey_FullMethodName:                {admin},
 		pb.ExecutorService_UnpinHostKey_FullMethodName:              {admin},

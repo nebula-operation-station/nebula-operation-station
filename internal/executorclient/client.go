@@ -325,6 +325,22 @@ func (c *Client) TestConnection(ctx context.Context, in *pb.TestConnectionReques
 	return resp, mapError(err)
 }
 
+// BeginLogin: Starts a web login (server role).
+func (c *Client) BeginLogin(ctx context.Context, in *pb.BeginLoginRequest, opts ...grpc.CallOption) (*pb.BeginLoginResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.BeginLogin(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// FinishLogin: Completes a web login (server role).
+func (c *Client) FinishLogin(ctx context.Context, in *pb.FinishLoginRequest, opts ...grpc.CallOption) (*pb.FinishLoginResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.FinishLogin(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
 // Compile-time check: the client must implement the generated interface so
 // that a generated-code change breaks the build here.
 var _ pb.ExecutorServiceClient = (*Client)(nil)

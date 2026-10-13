@@ -103,6 +103,17 @@ service ExecutorService {
   // registrations and the outstanding code).
   rpc RemoveWebAuthnCredential(RemoveWebAuthnCredentialRequest) returns (RemoveWebAuthnCredentialResponse);
 
+  // Web login (M2). The server relays; the executor verifies the
+  // user-verified assertion against the registered credentials. A login
+  // grants nothing on the executor.
+
+  // Role: server. Starts a login (single-use challenge, 2 minutes).
+  rpc BeginLogin(BeginLoginRequest) returns (BeginLoginResponse);
+
+  // Role: server. Completes a login; the login is consumed whether or not
+  // it succeeds.
+  rpc FinishLogin(FinishLoginRequest) returns (FinishLoginResponse);
+
   // SSH host keys (H05). The executor pins one key per host; every endpoint
   // of the host must present it. Pins are made on the executor host after
   // the admin confirmed the fingerprint (or imported known_hosts), never by
@@ -538,4 +549,25 @@ message TestConnectionResponse {
   string failure_class = 3;
   string detail = 4;
   repeated ConnectionAttempt attempts = 5;
+}
+
+message BeginLoginRequest {}
+
+message BeginLoginResponse {
+  string login_id = 1;
+  // PublicKeyCredentialRequestOptions for navigator.credentials.get().
+  bytes request_options_json = 2;
+  int64 expiry_unix = 3;
+}
+
+message FinishLoginRequest {
+  string login_id = 1;
+  bytes assertion_json = 2;
+}
+
+message FinishLoginResponse {
+  // base64url credential ID that made the assertion.
+  string credential_id = 1;
+  string user_name = 2;
+  string label = 3;
 }
