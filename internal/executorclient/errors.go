@@ -60,6 +60,11 @@ var (
 	ErrTypedCountMismatch = &Error{Code: string(permit.CodeTypedCountMismatch)}
 	// ErrNoChallenge: no session challenge is pending.
 	ErrNoChallenge = &Error{Code: string(permit.CodeNoChallenge)}
+	// ErrStorage: the executor could not read or write its state store
+	// (executor.db). Nothing was approved. A retry with the same execution
+	// ID may get ErrExecutionIDReused if the binding reached the disk
+	// before the error; then create a new execution.
+	ErrStorage = &Error{Code: string(permit.CodeStorage)}
 	// ErrCredentialUnavailable: the requested credential is not loaded.
 	ErrCredentialUnavailable = &Error{Code: codeCredentialMissing}
 	// ErrPrecondition: the executor state does not allow the call and no
@@ -146,6 +151,7 @@ var knownCodes = func() map[string]bool {
 		string(permit.CodeCredentialMismatch),
 		string(permit.CodeLimit),
 		string(permit.CodeNoChallenge),
+		string(permit.CodeStorage),
 		codeVaultLocked,
 		codeCredentialMissing,
 	} {

@@ -23,6 +23,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/fsguard"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
@@ -85,6 +86,19 @@ func run() error {
 	if err := fsguard.CheckPrivateDir(*dataDir); err != nil {
 		return err
 	}
+	// executor.db: spent execution IDs and WebAuthn signature counters.
+	// Permits and the privileged session are never stored, so this process
+	// starts with none, whatever happened before the restart.
+	db, err := executordb.Open(*dataDir)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	pruned, err := db.PruneExecutions(time.Now())
+	if err != nil {
+		return err
+	}
+
 	keysDir := filepath.Join(*dataDir, "keys")
 	if err := fsguard.EnsurePrivateDir(keysDir); err != nil {
 		return err
@@ -103,7 +117,10 @@ func run() error {
 	if len(creds) == 0 {
 		log.Warn("no WebAuthn credentials registered; browser approval is unavailable, `nebula approve` still works")
 	}
-	verifier, err := webauthnverify.New(webauthnverify.Config{RPID: *rpID, Origins: origins}, creds)
+	if db.Created() && len(creds) > 0 {
+		log.Warn("executor.db was created although WebAuthn credentials are registered: stored signature counters and spent execution IDs are gone (deleted file or restore without executor.db); counters restart from the credentials file")
+	}
+	verifier, err := webauthnverify.New(webauthnverify.Config{RPID: *rpID, Origins: origins, Counters: db}, creds)
 	if err != nil {
 		return err
 	}
@@ -115,6 +132,7 @@ func run() error {
 	auth, err := permit.New(permit.Options{
 		Mode:          mode,
 		Verifier:      verifier,
+		Store:         db,
 		SessionLength: time.Duration(*sessionMin) * time.Minute,
 		Audit:         executor.AuditLogger(log),
 	})
@@ -140,7 +158,8 @@ func run() error {
 	}()
 
 	log.Info("started", "version", version.String(), "socket", *socketPath, "mode", modeName(mode),
-		"rp_id", *rpID, "webauthn_credentials", len(creds), "locked", true)
+		"rp_id", *rpID, "webauthn_credentials", len(creds), "locked", true,
+		"permits", 0, "spent_execution_ids_pruned", pruned)
 	return srv.Serve(lis)
 }
 

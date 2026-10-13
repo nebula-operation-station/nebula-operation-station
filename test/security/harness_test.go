@@ -32,6 +32,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
@@ -59,13 +60,47 @@ type harness struct {
 	socket string
 	client pb.ExecutorServiceClient
 	rp     virtualwebauthn.RelyingParty
-	dev    virtualwebauthn.Authenticator
-	cred   virtualwebauthn.Credential
+	id     *identity
+	db     *executordb.DB
+	stopFn func()
+	once   sync.Once
 }
+
+// stop shuts the executor down and releases executor.db. It is safe to call
+// more than once; tests call it explicitly before a simulated restart.
+func (h *harness) stop() { h.once.Do(h.stopFn) }
 
 type harnessOptions struct {
 	uidRoles map[uint32][]peercred.Role
 	mode     permit.Mode
+	// dataDir holds executor.db. Empty means a fresh private directory; a
+	// test simulates a restart by starting a second harness on the same
+	// directory after stopping the first.
+	dataDir string
+	// identity reuses an authenticator and credential across a restart.
+	identity *identity
+}
+
+// identity is a virtual authenticator with one registered credential.
+type identity struct {
+	dev  virtualwebauthn.Authenticator
+	cred virtualwebauthn.Credential
+}
+
+func newIdentity() *identity {
+	id := &identity{dev: virtualwebauthn.NewAuthenticator(), cred: virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2)}
+	id.dev.AddCredential(id.cred)
+	return id
+}
+
+// privateDir returns a fresh 0700 directory, as the executor requires.
+func privateDir(t *testing.T) string {
+	t.Helper()
+	d := t.TempDir()
+	if err := os.Chmod(d, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return d
 }
 
 // newHarness starts an executor in-process. By default the test's own UID
@@ -76,13 +111,23 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 	if o.uidRoles == nil {
 		o.uidRoles = map[uint32][]peercred.Role{uint32(os.Getuid()): {peercred.RoleServer, peercred.RoleAdmin}}
 	}
-	h := &harness{
-		t:    t,
-		rp:   virtualwebauthn.RelyingParty{Name: "Nebula", ID: rpID, Origin: origin},
-		dev:  virtualwebauthn.NewAuthenticator(),
-		cred: virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2),
+	if o.identity == nil {
+		o.identity = newIdentity()
 	}
-	h.dev.AddCredential(h.cred)
+	if o.dataDir == "" {
+		o.dataDir = privateDir(t)
+	}
+	h := &harness{
+		t:  t,
+		rp: virtualwebauthn.RelyingParty{Name: "Nebula", ID: rpID, Origin: origin},
+		id: o.identity,
+	}
+
+	db, err := executordb.Open(o.dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.db = db
 
 	keysDir := t.TempDir()
 	if err := os.Chmod(keysDir, 0o700); err != nil {
@@ -90,14 +135,14 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 	}
 	writeEncryptedKey(t, keysDir, credRef)
 
-	verifier, err := webauthnverify.New(webauthnverify.Config{RPID: rpID, Origins: []string{origin}},
-		[]webauthnverify.Credential{{ID: h.cred.ID, PublicKey: h.cred.Key.AttestationData()}})
+	verifier, err := webauthnverify.New(webauthnverify.Config{RPID: rpID, Origins: []string{origin}, Counters: db},
+		[]webauthnverify.Credential{{ID: h.id.cred.ID, PublicKey: h.id.cred.Key.AttestationData()}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.logs = &syncBuffer{}
 	log := slog.New(slog.NewJSONHandler(h.logs, nil))
-	auth, err := permit.New(permit.Options{Mode: o.mode, Verifier: verifier, Audit: executor.AuditLogger(log)})
+	auth, err := permit.New(permit.Options{Mode: o.mode, Verifier: verifier, Store: db, Audit: executor.AuditLogger(log)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +160,8 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 	}
 	srv := executor.NewGRPCServer(svc, policy, log)
 	go func() { _ = srv.Serve(lis) }()
-	t.Cleanup(srv.Stop)
+	h.stopFn = func() { srv.Stop(); _ = db.Close() }
+	t.Cleanup(h.stop)
 
 	conn, err := grpc.NewClient("unix://"+h.socket,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -150,7 +196,7 @@ func (h *harness) ctx() context.Context {
 }
 
 func (h *harness) sign(challenge []byte) []byte {
-	return []byte(virtualwebauthn.CreateAssertionResponse(h.rp, h.dev, h.cred,
+	return []byte(virtualwebauthn.CreateAssertionResponse(h.rp, h.id.dev, h.id.cred,
 		virtualwebauthn.AssertionOptions{Challenge: challenge, RelyingPartyID: rpID}))
 }
 

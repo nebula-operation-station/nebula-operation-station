@@ -19,6 +19,7 @@ internal/keyring/
 internal/webauthnverify/
 internal/fsguard/
 internal/executor/
+internal/executordb/
 cmd/nebula-executor/
 cmd/nebula/
 test/security/

@@ -269,6 +269,8 @@ func toStatus(err error) error {
 		c = codes.AlreadyExists
 	case permit.CodeLimit:
 		c = codes.ResourceExhausted
+	case permit.CodeStorage:
+		c = codes.Unavailable
 	case permit.CodeWrongState, permit.CodeSessionRequired, permit.CodeCLIRequired, permit.CodeNoChallenge, permit.CodeExpired:
 		c = codes.FailedPrecondition
 	case permit.CodeAssertionRejected, permit.CodeTypedCountMismatch,

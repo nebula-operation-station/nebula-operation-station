@@ -13,6 +13,9 @@
 //   - Artifact and parameters are hashed by the executor at run time and must
 //     match the approved request.
 //   - Locking revokes the privileged session and every permit.
+//   - An execution ID is bound durably (Store) before its permit exists, so
+//     a restart can never revive or re-bind it. Permits and the privileged
+//     session are never persisted: a restart revokes them all.
 package permit
 
 import (
@@ -125,6 +128,7 @@ const (
 	CodeCredentialMismatch Code = "credential_not_permitted"
 	CodeLimit              Code = "limit_exceeded"
 	CodeNoChallenge        Code = "no_session_challenge"
+	CodeStorage            Code = "storage_error"
 )
 
 // Error is an authorization failure.
@@ -206,6 +210,21 @@ type Event struct {
 	Detail string
 }
 
+// Store durably records execution ID bindings (internal/executordb
+// implements it). Execution IDs are single-use across restarts.
+type Store interface {
+	// BindExecution records that executionID is bound to digest. It must be
+	// durable when it returns nil, and return ErrExecutionBound if the ID is
+	// already bound, to any digest.
+	BindExecution(executionID string, d canonical.Digest, expiresAt time.Time) error
+	// LookupExecution returns the digest an execution ID is bound to.
+	LookupExecution(executionID string) (d canonical.Digest, ok bool, err error)
+}
+
+// ErrExecutionBound is returned by Store.BindExecution for an execution ID
+// that is already bound.
+var ErrExecutionBound = errors.New("permit: execution ID already bound")
+
 // Options configure an Authority.
 type Options struct {
 	Mode          Mode
@@ -213,6 +232,8 @@ type Options struct {
 	SessionLength time.Duration
 	Now           func() time.Time
 	Audit         func(Event)
+	// Store persists execution ID bindings. Required.
+	Store Store
 }
 
 // Authority owns all permits and the privileged session. It is safe for
@@ -223,6 +244,7 @@ type Authority struct {
 	sessLen  time.Duration
 	now      func() time.Time
 	audit    func(Event)
+	store    Store
 
 	mu          sync.Mutex
 	permits     map[canonical.Digest]*Permit
@@ -232,10 +254,16 @@ type Authority struct {
 	sessChalExp time.Time
 }
 
-// New returns an Authority. A verifier is required.
+// New returns an Authority. A verifier and a store are required. A new
+// Authority holds no permits and no privileged session, whatever happened
+// before: restarting the executor revokes everything except the spent
+// execution IDs in the store.
 func New(o Options) (*Authority, error) {
 	if o.Verifier == nil {
 		return nil, errors.New("permit: WebAuthn verifier is required")
+	}
+	if o.Store == nil {
+		return nil, errors.New("permit: a persistent store is required")
 	}
 	if o.Now == nil {
 		o.Now = time.Now
@@ -252,6 +280,7 @@ func New(o Options) (*Authority, error) {
 		sessLen:    o.SessionLength,
 		now:        o.Now,
 		audit:      o.Audit,
+		store:      o.Store,
 		permits:    map[canonical.Digest]*Permit{},
 		executions: map[string]canonical.Digest{},
 	}, nil
@@ -291,7 +320,16 @@ func (a *Authority) Propose(r canonical.Request, parametersJSON []byte) (Propose
 		return ProposeResult{}, fail(CodeInvalidRequest, "parameters do not hash to parameters_hash")
 	}
 
-	if prev, ok := a.executions[norm.ExecutionID]; ok {
+	prev, bound := a.executions[norm.ExecutionID]
+	if !bound {
+		// Not bound by this process; it may have been bound before a restart.
+		d, ok, err := a.store.LookupExecution(norm.ExecutionID)
+		if err != nil {
+			return ProposeResult{}, a.storageFailure(digest.String(), err)
+		}
+		prev, bound = d, ok
+	}
+	if bound {
 		if prev != digest {
 			a.emit(Event{Kind: "rejected", Digest: digest.String(), Code: CodeExecutionIDReused})
 			return ProposeResult{}, fail(CodeExecutionIDReused, "execution_id %s already bound to another request", norm.ExecutionID)
@@ -338,6 +376,15 @@ func (a *Authority) Propose(r canonical.Request, parametersJSON []byte) (Propose
 			return ProposeResult{}, err
 		}
 		p.Challenge = ch
+	}
+	// Bind durably before the permit exists. If the binding cannot be
+	// stored, no permit is created and nothing is bound in memory.
+	if err := a.store.BindExecution(norm.ExecutionID, digest, time.Unix(norm.ExpiryUnix, 0)); err != nil {
+		if errors.Is(err, ErrExecutionBound) {
+			a.emit(Event{Kind: "rejected", Digest: digest.String(), Code: CodeExecutionIDReused})
+			return ProposeResult{}, fail(CodeExecutionIDReused, "execution_id %s already bound", norm.ExecutionID)
+		}
+		return ProposeResult{}, a.storageFailure(digest.String(), err)
 	}
 	a.permits[digest] = p
 	a.executions[norm.ExecutionID] = digest
@@ -391,6 +438,12 @@ func (a *Authority) SubmitAssertion(d canonical.Digest, assertionJSON []byte, ty
 
 	uv := p.Requirement >= RequireAssertionVerified
 	credID, err := a.verifier.Verify(assertionJSON, p.Challenge, webauthnverify.Requirement{UserVerification: uv})
+	if errors.Is(err, webauthnverify.ErrCounterStore) {
+		// The assertion may be valid; the executor could not record its
+		// counter. Not the approver's fault, so it is not counted as a
+		// failed approval, and the store detail stays in the audit log.
+		return Permit{}, a.storageFailure(d.String(), err)
+	}
 	if err != nil {
 		return Permit{}, a.countFailure(p, CodeAssertionRejected, "%v", err)
 	}
@@ -528,6 +581,9 @@ func (a *Authority) CompleteSession(assertionJSON []byte) (time.Time, error) {
 		return time.Time{}, fail(CodeExpired, "session challenge expired")
 	}
 	credID, err := a.verifier.Verify(assertionJSON, ch, webauthnverify.Requirement{UserVerification: true})
+	if errors.Is(err, webauthnverify.ErrCounterStore) {
+		return time.Time{}, a.storageFailure("", err)
+	}
 	if err != nil {
 		a.emit(Event{Kind: "rejected", Code: CodeAssertionRejected, Detail: "privileged session: " + err.Error()})
 		return time.Time{}, fail(CodeAssertionRejected, "%v", err)
@@ -619,6 +675,13 @@ func (a *Authority) reject(p *Permit, code Code, format string, args ...any) err
 	return err
 }
 
+// storageFailure records a store error in the audit trail and returns a
+// generic error: store details (paths, OS errors) stay on the executor.
+func (a *Authority) storageFailure(digest string, err error) error {
+	a.emit(Event{Kind: "rejected", Digest: digest, Code: CodeStorage, Detail: err.Error()})
+	return fail(CodeStorage, "executor state store unavailable")
+}
+
 func (a *Authority) deny(d canonical.Digest, host string, code Code, detail string) error {
 	a.emit(Event{Kind: "denied", Digest: d.String(), Host: host, Code: code, Detail: detail})
 	return &Error{Code: code, Detail: detail}
@@ -650,8 +713,8 @@ func (a *Authority) gcLocked(now time.Time) {
 			delete(a.permits, d)
 		}
 	}
-	// Execution IDs are kept for the lifetime of the process; the server DB
-	// guarantees uniqueness across restarts (Milestone 1).
+	// Execution IDs stay in memory for the lifetime of the process and are
+	// persisted in the store, so they stay spent across restarts.
 }
 
 func (a *Authority) emit(e Event) {

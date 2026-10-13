@@ -45,6 +45,7 @@ func TestMapErrorPermitCodes(t *testing.T) {
 		{permit.CodeCredentialMismatch, ErrPolicyBlocked},
 		{permit.CodeLimit, ErrLimitExceeded},
 		{permit.CodeNoChallenge, ErrNoChallenge},
+		{permit.CodeStorage, ErrStorage},
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.code), func(t *testing.T) {

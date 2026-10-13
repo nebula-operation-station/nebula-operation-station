@@ -33,6 +33,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
@@ -91,12 +92,22 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 	}
 	writeEncryptedKey(t, keysDir, credRef)
 
-	verifier, err := webauthnverify.New(webauthnverify.Config{RPID: rpID, Origins: []string{origin}},
+	dataDir := t.TempDir()
+	if err := os.Chmod(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := executordb.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	verifier, err := webauthnverify.New(webauthnverify.Config{RPID: rpID, Origins: []string{origin}, Counters: db},
 		[]webauthnverify.Credential{{ID: h.cred.ID, PublicKey: h.cred.Key.AttestationData()}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	auth, err := permit.New(permit.Options{Verifier: verifier})
+	auth, err := permit.New(permit.Options{Verifier: verifier, Store: db})
 	if err != nil {
 		t.Fatal(err)
 	}
