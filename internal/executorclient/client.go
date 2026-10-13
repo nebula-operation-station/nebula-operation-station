@@ -201,6 +201,50 @@ func (c *Client) ApproveCLI(ctx context.Context, in *pb.ApproveCLIRequest, opts 
 	return resp, mapError(err)
 }
 
+// The risk-data methods below are admin-only on the executor (H01); the
+// server's UID is denied. They exist so that Client implements the full
+// generated interface.
+
+// TrustArtifact trusts an artifact at a declared risk (admin role only).
+func (c *Client) TrustArtifact(ctx context.Context, in *pb.TrustArtifactRequest, opts ...grpc.CallOption) (*pb.TrustArtifactResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.authorizeTimeout)
+	defer cancel()
+	resp, err := c.rpc.TrustArtifact(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// UntrustArtifact withdraws trust (admin role only).
+func (c *Client) UntrustArtifact(ctx context.Context, in *pb.UntrustArtifactRequest, opts ...grpc.CallOption) (*pb.UntrustArtifactResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.UntrustArtifact(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// ListTrustedArtifacts lists trusted artifacts (admin role only).
+func (c *Client) ListTrustedArtifacts(ctx context.Context, in *pb.ListTrustedArtifactsRequest, opts ...grpc.CallOption) (*pb.ListTrustedArtifactsResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ListTrustedArtifacts(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// SetHostCriticality sets or clears a host's criticality (admin role only).
+func (c *Client) SetHostCriticality(ctx context.Context, in *pb.SetHostCriticalityRequest, opts ...grpc.CallOption) (*pb.SetHostCriticalityResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.SetHostCriticality(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// ListHostCriticality lists host criticality records (admin role only).
+func (c *Client) ListHostCriticality(ctx context.Context, in *pb.ListHostCriticalityRequest, opts ...grpc.CallOption) (*pb.ListHostCriticalityResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ListHostCriticality(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
 // Compile-time check: the client must implement the generated interface so
 // that a generated-code change breaks the build here.
 var _ pb.ExecutorServiceClient = (*Client)(nil)

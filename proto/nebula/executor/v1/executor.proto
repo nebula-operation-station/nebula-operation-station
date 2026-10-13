@@ -50,6 +50,33 @@ service ExecutorService {
 
   // Role: admin. Hardened approval path.
   rpc ApproveCLI(ApproveCLIRequest) returns (ApproveCLIResponse);
+
+  // Executor-held risk data (H01). ProposeExecution rejects a risk_class
+  // below the minimum the executor derives from it: the declared risk of a
+  // trusted (artifact, action, version), HIGH for anything untrusted, and
+  // for actions above LOW the criticality of every target (HIGH for hosts
+  // without a matching record; LOW actions need MEDIUM on CRITICAL or
+  // unrecorded hosts). AuthorizeRun re-checks it for each host. Only the
+  // admin role may read or change it; the server cannot.
+
+  // Role: admin. Trusts an artifact for one action and version at a
+  // declared risk. The executor hashes the bytes itself. Replaces an
+  // earlier entry for the same artifact, action and version.
+  rpc TrustArtifact(TrustArtifactRequest) returns (TrustArtifactResponse);
+
+  // Role: admin. Withdraws trust; the artifact is HIGH again.
+  rpc UntrustArtifact(UntrustArtifactRequest) returns (UntrustArtifactResponse);
+
+  // Role: admin.
+  rpc ListTrustedArtifacts(ListTrustedArtifactsRequest) returns (ListTrustedArtifactsResponse);
+
+  // Role: admin. Sets the executor's criticality of a host, bound to its
+  // pinned key fingerprint, or removes the record (clear). A target counts
+  // as recorded only if host ID and fingerprint both match.
+  rpc SetHostCriticality(SetHostCriticalityRequest) returns (SetHostCriticalityResponse);
+
+  // Role: admin.
+  rpc ListHostCriticality(ListHostCriticalityRequest) returns (ListHostCriticalityResponse);
 }
 
 enum RiskClass {
@@ -214,4 +241,78 @@ message ApproveCLIRequest {
 
 message ApproveCLIResponse {
   PermitState state = 1;
+}
+
+message TrustArtifactRequest {
+  string action_id = 1;
+  string module_version = 2;
+  // Declared risk; becomes the minimum risk_class for this artifact.
+  RiskClass risk_class = 3;
+  // Raw artifact bytes; the executor hashes them itself.
+  bytes artifact = 4;
+  // Free text shown by `nebula artifact list` (printable, at most 200 bytes).
+  string label = 5;
+  // Optional lowercase hex SHA-256 the caller computed; if set, the
+  // executor refuses to store anything when its own hash differs.
+  string expected_sha256 = 6;
+}
+
+message TrustArtifactResponse {
+  // Lowercase hex SHA-256 the executor computed.
+  string artifact_sha256 = 1;
+}
+
+message UntrustArtifactRequest {
+  string artifact_sha256 = 1;
+  string action_id = 2;
+  string module_version = 3;
+}
+
+message UntrustArtifactResponse {
+  bool removed = 1;
+}
+
+message ListTrustedArtifactsRequest {}
+
+message TrustedArtifact {
+  string artifact_sha256 = 1;
+  string action_id = 2;
+  string module_version = 3;
+  RiskClass risk_class = 4;
+  string label = 5;
+  int64 trusted_at_unix = 6;
+  string trusted_by = 7;
+}
+
+message ListTrustedArtifactsResponse {
+  repeated TrustedArtifact artifacts = 1;
+}
+
+message SetHostCriticalityRequest {
+  string host_id = 1;
+  // Required unless clear is set.
+  RiskClass criticality = 2;
+  // Pinned host key, "SHA256:<base64>". Required unless clear is set.
+  string host_key_fingerprint = 3;
+  // Remove the record instead; the host counts as unrecorded again.
+  bool clear = 4;
+}
+
+message SetHostCriticalityResponse {
+  // False when clear was sent for a host without a record.
+  bool changed = 1;
+}
+
+message ListHostCriticalityRequest {}
+
+message HostCriticality {
+  string host_id = 1;
+  RiskClass criticality = 2;
+  int64 updated_at_unix = 3;
+  string updated_by = 4;
+  string host_key_fingerprint = 5;
+}
+
+message ListHostCriticalityResponse {
+  repeated HostCriticality hosts = 1;
 }

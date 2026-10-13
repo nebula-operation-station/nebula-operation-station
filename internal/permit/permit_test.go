@@ -46,9 +46,18 @@ type env struct {
 	cred  virtualwebauthn.Credential
 	evts  []Event
 	evtMu sync.Mutex
+	risk  *fakePolicy
 }
 
 func newEnv(t *testing.T, mode Mode, devOpts virtualwebauthn.AuthenticatorOptions) *env {
+	t.Helper()
+	return newEnvWithStores(t, mode, devOpts, newMemStore(), newMemCounters())
+}
+
+// newEnvWithStores builds an environment on the given persistent stores, so
+// that a test can simulate an executor restart by building a second
+// environment on the same stores.
+func newEnvWithStores(t *testing.T, mode Mode, devOpts virtualwebauthn.AuthenticatorOptions, store *memStore, counters *memCounters) *env {
 	t.Helper()
 	e := &env{
 		t:    t,
@@ -56,15 +65,16 @@ func newEnv(t *testing.T, mode Mode, devOpts virtualwebauthn.AuthenticatorOption
 		rp:   virtualwebauthn.RelyingParty{Name: "Nebula", ID: rpID, Origin: origin},
 		dev:  virtualwebauthn.NewAuthenticatorWithOptions(devOpts),
 		cred: virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2),
+		risk: newFakePolicy(),
 	}
 	e.dev.AddCredential(e.cred)
-	v, err := webauthnverify.New(webauthnverify.Config{RPID: rpID, Origins: []string{origin}},
+	v, err := webauthnverify.New(webauthnverify.Config{RPID: rpID, Origins: []string{origin}, Counters: counters},
 		[]webauthnverify.Credential{{ID: e.cred.ID, PublicKey: e.cred.Key.AttestationData()}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	e.auth, err = New(Options{
-		Mode: mode, Verifier: v, Now: e.clk.Now,
+		Mode: mode, Verifier: v, Now: e.clk.Now, Store: store, RiskPolicy: e.risk,
 		Audit: func(ev Event) { e.evtMu.Lock(); e.evts = append(e.evts, ev); e.evtMu.Unlock() },
 	})
 	if err != nil {

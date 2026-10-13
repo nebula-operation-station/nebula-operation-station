@@ -25,15 +25,23 @@ type fixture struct {
 
 func newFixture(t *testing.T, opts virtualwebauthn.AuthenticatorOptions) *fixture {
 	t.Helper()
+	return newFixtureWith(t, opts, newMemCounters(), 0)
+}
+
+// newFixtureWith builds a verifier on the given counter store; fileCount is
+// the sign counter recorded in the credential file.
+func newFixtureWith(t *testing.T, opts virtualwebauthn.AuthenticatorOptions, counters CounterStore, fileCount uint32) *fixture {
+	t.Helper()
 	f := &fixture{
 		rp:   virtualwebauthn.RelyingParty{Name: "Nebula", ID: rpID, Origin: origin},
 		auth: virtualwebauthn.NewAuthenticatorWithOptions(opts),
 		cred: virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2),
 	}
 	f.auth.AddCredential(f.cred)
-	v, err := New(Config{RPID: rpID, Origins: []string{origin}}, []Credential{{
+	v, err := New(Config{RPID: rpID, Origins: []string{origin}, Counters: counters}, []Credential{{
 		ID:        f.cred.ID,
 		PublicKey: f.cred.Key.AttestationData(),
+		SignCount: fileCount,
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -172,21 +180,22 @@ func TestGarbageInputRejected(t *testing.T) {
 }
 
 func TestConfigValidation(t *testing.T) {
-	if _, err := New(Config{Origins: []string{origin}}, nil); err == nil {
+	m := newMemCounters()
+	if _, err := New(Config{Origins: []string{origin}, Counters: m}, nil); err == nil {
 		t.Fatal("missing RP ID accepted")
 	}
-	if _, err := New(Config{RPID: rpID}, nil); err == nil {
+	if _, err := New(Config{RPID: rpID, Counters: m}, nil); err == nil {
 		t.Fatal("missing origins accepted")
 	}
 	c := Credential{ID: []byte{1}, PublicKey: []byte{2}}
-	if _, err := New(Config{RPID: rpID, Origins: []string{origin}}, []Credential{c, c}); err == nil {
+	if _, err := New(Config{RPID: rpID, Origins: []string{origin}, Counters: m}, []Credential{c, c}); err == nil {
 		t.Fatal("duplicate credential accepted")
 	}
 }
 
 func FuzzVerifyNeverPanics(f *testing.F) {
 	f.Add([]byte(`{"id":"AA","rawId":"AA","type":"public-key","response":{}}`))
-	v, err := New(Config{RPID: rpID, Origins: []string{origin}}, nil)
+	v, err := New(Config{RPID: rpID, Origins: []string{origin}, Counters: newMemCounters()}, nil)
 	if err != nil {
 		f.Fatal(err)
 	}

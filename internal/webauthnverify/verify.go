@@ -31,12 +31,25 @@ type Credential struct {
 	Label      string `json:"label,omitempty"`
 }
 
+// CounterStore persists signature counters so that a restart cannot reset
+// them (internal/executordb implements it).
+type CounterStore interface {
+	// LoadCounters returns the stored counter of every credential, keyed by
+	// the raw credential ID.
+	LoadCounters() (map[string]uint32, error)
+	// SaveCounter durably stores a new counter value. It must never lower a
+	// stored value. Verify calls it before it reports success.
+	SaveCounter(credentialID []byte, count uint32) error
+}
+
 // Config describes the relying party as the executor knows it.
 type Config struct {
 	// RPID is the fixed hostname Nebula is served under (never an IP).
 	RPID string
 	// Origins are the exact allowed origins, e.g. "https://nebula.example.org".
 	Origins []string
+	// Counters persists signature counters. Required.
+	Counters CounterStore
 }
 
 // Requirement selects the flags an assertion must carry.
@@ -50,18 +63,23 @@ var (
 	ErrUnknownCredential = errors.New("webauthn: unknown credential")
 	ErrInvalidAssertion  = errors.New("webauthn: assertion invalid")
 	ErrCounterRegression = errors.New("webauthn: signature counter did not increase (possible cloned authenticator or replay)")
+	ErrCounterStore      = errors.New("webauthn: signature counter could not be stored")
 )
 
 // Verifier holds the credentials and verifies assertions. It is safe for
 // concurrent use; verification of the same credential is serialized so that
 // counter checks cannot race.
 type Verifier struct {
-	cfg   Config
-	mu    sync.Mutex
-	creds map[string]*Credential
+	cfg    Config
+	mu     sync.Mutex
+	creds  map[string]*Credential
+	stored map[string]uint32 // counters loaded from the store at startup
 }
 
-// New returns a verifier. RPID and at least one origin are required.
+// New returns a verifier. RPID, at least one origin and a counter store are
+// required. Each credential starts at the higher of the counter in creds and
+// the stored counter, so neither a stale credential file nor a lost store
+// can lower it.
 func New(cfg Config, creds []Credential) (*Verifier, error) {
 	if cfg.RPID == "" {
 		return nil, errors.New("webauthn: RP ID is required")
@@ -69,7 +87,14 @@ func New(cfg Config, creds []Credential) (*Verifier, error) {
 	if len(cfg.Origins) == 0 {
 		return nil, errors.New("webauthn: at least one origin is required")
 	}
-	v := &Verifier{cfg: cfg, creds: make(map[string]*Credential, len(creds))}
+	if cfg.Counters == nil {
+		return nil, errors.New("webauthn: a counter store is required")
+	}
+	stored, err := cfg.Counters.LoadCounters()
+	if err != nil {
+		return nil, fmt.Errorf("webauthn: load signature counters: %w", err)
+	}
+	v := &Verifier{cfg: cfg, creds: make(map[string]*Credential, len(creds)), stored: stored}
 	for i := range creds {
 		if err := v.add(creds[i]); err != nil {
 			return nil, err
@@ -99,6 +124,9 @@ func (v *Verifier) add(c Credential) error {
 	cp.ID = bytes.Clone(c.ID)
 	cp.PublicKey = bytes.Clone(c.PublicKey)
 	cp.UserHandle = bytes.Clone(c.UserHandle)
+	if n := v.stored[k]; n > cp.SignCount {
+		cp.SignCount = n
+	}
 	v.creds[k] = &cp
 	return nil
 }
@@ -168,6 +196,14 @@ func (v *Verifier) Verify(assertionJSON, challenge []byte, req Requirement) ([]b
 			return nil, ErrCounterRegression
 		}
 	}
-	cred.SignCount = newCount
+	// Persist before reporting success, and advance the in-memory value only
+	// after the store accepted it: an assertion whose counter cannot be
+	// recorded is rejected, so a restart can never re-accept it.
+	if newCount != cred.SignCount {
+		if err := v.cfg.Counters.SaveCounter(cred.ID, newCount); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrCounterStore, err)
+		}
+		cred.SignCount = newCount
+	}
 	return bytes.Clone(cred.ID), nil
 }

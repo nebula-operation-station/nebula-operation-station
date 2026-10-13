@@ -1482,6 +1482,688 @@ func (x *ApproveCLIResponse) GetState() PermitState {
 	return PermitState_PERMIT_STATE_UNSPECIFIED
 }
 
+type TrustArtifactRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ActionId      string                 `protobuf:"bytes,1,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"`
+	ModuleVersion string                 `protobuf:"bytes,2,opt,name=module_version,json=moduleVersion,proto3" json:"module_version,omitempty"`
+	// Declared risk; becomes the minimum risk_class for this artifact.
+	RiskClass RiskClass `protobuf:"varint,3,opt,name=risk_class,json=riskClass,proto3,enum=nebula.executor.v1.RiskClass" json:"risk_class,omitempty"`
+	// Raw artifact bytes; the executor hashes them itself.
+	Artifact []byte `protobuf:"bytes,4,opt,name=artifact,proto3" json:"artifact,omitempty"`
+	// Free text shown by `nebula artifact list` (printable, at most 200 bytes).
+	Label string `protobuf:"bytes,5,opt,name=label,proto3" json:"label,omitempty"`
+	// Optional lowercase hex SHA-256 the caller computed; if set, the
+	// executor refuses to store anything when its own hash differs.
+	ExpectedSha256 string `protobuf:"bytes,6,opt,name=expected_sha256,json=expectedSha256,proto3" json:"expected_sha256,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *TrustArtifactRequest) Reset() {
+	*x = TrustArtifactRequest{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TrustArtifactRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TrustArtifactRequest) ProtoMessage() {}
+
+func (x *TrustArtifactRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TrustArtifactRequest.ProtoReflect.Descriptor instead.
+func (*TrustArtifactRequest) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *TrustArtifactRequest) GetActionId() string {
+	if x != nil {
+		return x.ActionId
+	}
+	return ""
+}
+
+func (x *TrustArtifactRequest) GetModuleVersion() string {
+	if x != nil {
+		return x.ModuleVersion
+	}
+	return ""
+}
+
+func (x *TrustArtifactRequest) GetRiskClass() RiskClass {
+	if x != nil {
+		return x.RiskClass
+	}
+	return RiskClass_RISK_CLASS_UNSPECIFIED
+}
+
+func (x *TrustArtifactRequest) GetArtifact() []byte {
+	if x != nil {
+		return x.Artifact
+	}
+	return nil
+}
+
+func (x *TrustArtifactRequest) GetLabel() string {
+	if x != nil {
+		return x.Label
+	}
+	return ""
+}
+
+func (x *TrustArtifactRequest) GetExpectedSha256() string {
+	if x != nil {
+		return x.ExpectedSha256
+	}
+	return ""
+}
+
+type TrustArtifactResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Lowercase hex SHA-256 the executor computed.
+	ArtifactSha256 string `protobuf:"bytes,1,opt,name=artifact_sha256,json=artifactSha256,proto3" json:"artifact_sha256,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *TrustArtifactResponse) Reset() {
+	*x = TrustArtifactResponse{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TrustArtifactResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TrustArtifactResponse) ProtoMessage() {}
+
+func (x *TrustArtifactResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TrustArtifactResponse.ProtoReflect.Descriptor instead.
+func (*TrustArtifactResponse) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *TrustArtifactResponse) GetArtifactSha256() string {
+	if x != nil {
+		return x.ArtifactSha256
+	}
+	return ""
+}
+
+type UntrustArtifactRequest struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	ArtifactSha256 string                 `protobuf:"bytes,1,opt,name=artifact_sha256,json=artifactSha256,proto3" json:"artifact_sha256,omitempty"`
+	ActionId       string                 `protobuf:"bytes,2,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"`
+	ModuleVersion  string                 `protobuf:"bytes,3,opt,name=module_version,json=moduleVersion,proto3" json:"module_version,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *UntrustArtifactRequest) Reset() {
+	*x = UntrustArtifactRequest{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UntrustArtifactRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UntrustArtifactRequest) ProtoMessage() {}
+
+func (x *UntrustArtifactRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UntrustArtifactRequest.ProtoReflect.Descriptor instead.
+func (*UntrustArtifactRequest) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *UntrustArtifactRequest) GetArtifactSha256() string {
+	if x != nil {
+		return x.ArtifactSha256
+	}
+	return ""
+}
+
+func (x *UntrustArtifactRequest) GetActionId() string {
+	if x != nil {
+		return x.ActionId
+	}
+	return ""
+}
+
+func (x *UntrustArtifactRequest) GetModuleVersion() string {
+	if x != nil {
+		return x.ModuleVersion
+	}
+	return ""
+}
+
+type UntrustArtifactResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Removed       bool                   `protobuf:"varint,1,opt,name=removed,proto3" json:"removed,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UntrustArtifactResponse) Reset() {
+	*x = UntrustArtifactResponse{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UntrustArtifactResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UntrustArtifactResponse) ProtoMessage() {}
+
+func (x *UntrustArtifactResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UntrustArtifactResponse.ProtoReflect.Descriptor instead.
+func (*UntrustArtifactResponse) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *UntrustArtifactResponse) GetRemoved() bool {
+	if x != nil {
+		return x.Removed
+	}
+	return false
+}
+
+type ListTrustedArtifactsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListTrustedArtifactsRequest) Reset() {
+	*x = ListTrustedArtifactsRequest{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListTrustedArtifactsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListTrustedArtifactsRequest) ProtoMessage() {}
+
+func (x *ListTrustedArtifactsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListTrustedArtifactsRequest.ProtoReflect.Descriptor instead.
+func (*ListTrustedArtifactsRequest) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{27}
+}
+
+type TrustedArtifact struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	ArtifactSha256 string                 `protobuf:"bytes,1,opt,name=artifact_sha256,json=artifactSha256,proto3" json:"artifact_sha256,omitempty"`
+	ActionId       string                 `protobuf:"bytes,2,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"`
+	ModuleVersion  string                 `protobuf:"bytes,3,opt,name=module_version,json=moduleVersion,proto3" json:"module_version,omitempty"`
+	RiskClass      RiskClass              `protobuf:"varint,4,opt,name=risk_class,json=riskClass,proto3,enum=nebula.executor.v1.RiskClass" json:"risk_class,omitempty"`
+	Label          string                 `protobuf:"bytes,5,opt,name=label,proto3" json:"label,omitempty"`
+	TrustedAtUnix  int64                  `protobuf:"varint,6,opt,name=trusted_at_unix,json=trustedAtUnix,proto3" json:"trusted_at_unix,omitempty"`
+	TrustedBy      string                 `protobuf:"bytes,7,opt,name=trusted_by,json=trustedBy,proto3" json:"trusted_by,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *TrustedArtifact) Reset() {
+	*x = TrustedArtifact{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TrustedArtifact) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TrustedArtifact) ProtoMessage() {}
+
+func (x *TrustedArtifact) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TrustedArtifact.ProtoReflect.Descriptor instead.
+func (*TrustedArtifact) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *TrustedArtifact) GetArtifactSha256() string {
+	if x != nil {
+		return x.ArtifactSha256
+	}
+	return ""
+}
+
+func (x *TrustedArtifact) GetActionId() string {
+	if x != nil {
+		return x.ActionId
+	}
+	return ""
+}
+
+func (x *TrustedArtifact) GetModuleVersion() string {
+	if x != nil {
+		return x.ModuleVersion
+	}
+	return ""
+}
+
+func (x *TrustedArtifact) GetRiskClass() RiskClass {
+	if x != nil {
+		return x.RiskClass
+	}
+	return RiskClass_RISK_CLASS_UNSPECIFIED
+}
+
+func (x *TrustedArtifact) GetLabel() string {
+	if x != nil {
+		return x.Label
+	}
+	return ""
+}
+
+func (x *TrustedArtifact) GetTrustedAtUnix() int64 {
+	if x != nil {
+		return x.TrustedAtUnix
+	}
+	return 0
+}
+
+func (x *TrustedArtifact) GetTrustedBy() string {
+	if x != nil {
+		return x.TrustedBy
+	}
+	return ""
+}
+
+type ListTrustedArtifactsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Artifacts     []*TrustedArtifact     `protobuf:"bytes,1,rep,name=artifacts,proto3" json:"artifacts,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListTrustedArtifactsResponse) Reset() {
+	*x = ListTrustedArtifactsResponse{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListTrustedArtifactsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListTrustedArtifactsResponse) ProtoMessage() {}
+
+func (x *ListTrustedArtifactsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListTrustedArtifactsResponse.ProtoReflect.Descriptor instead.
+func (*ListTrustedArtifactsResponse) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *ListTrustedArtifactsResponse) GetArtifacts() []*TrustedArtifact {
+	if x != nil {
+		return x.Artifacts
+	}
+	return nil
+}
+
+type SetHostCriticalityRequest struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	HostId string                 `protobuf:"bytes,1,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	// Required unless clear is set.
+	Criticality RiskClass `protobuf:"varint,2,opt,name=criticality,proto3,enum=nebula.executor.v1.RiskClass" json:"criticality,omitempty"`
+	// Pinned host key, "SHA256:<base64>". Required unless clear is set.
+	HostKeyFingerprint string `protobuf:"bytes,3,opt,name=host_key_fingerprint,json=hostKeyFingerprint,proto3" json:"host_key_fingerprint,omitempty"`
+	// Remove the record instead; the host counts as unrecorded again.
+	Clear         bool `protobuf:"varint,4,opt,name=clear,proto3" json:"clear,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetHostCriticalityRequest) Reset() {
+	*x = SetHostCriticalityRequest{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetHostCriticalityRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetHostCriticalityRequest) ProtoMessage() {}
+
+func (x *SetHostCriticalityRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetHostCriticalityRequest.ProtoReflect.Descriptor instead.
+func (*SetHostCriticalityRequest) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *SetHostCriticalityRequest) GetHostId() string {
+	if x != nil {
+		return x.HostId
+	}
+	return ""
+}
+
+func (x *SetHostCriticalityRequest) GetCriticality() RiskClass {
+	if x != nil {
+		return x.Criticality
+	}
+	return RiskClass_RISK_CLASS_UNSPECIFIED
+}
+
+func (x *SetHostCriticalityRequest) GetHostKeyFingerprint() string {
+	if x != nil {
+		return x.HostKeyFingerprint
+	}
+	return ""
+}
+
+func (x *SetHostCriticalityRequest) GetClear() bool {
+	if x != nil {
+		return x.Clear
+	}
+	return false
+}
+
+type SetHostCriticalityResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// False when clear was sent for a host without a record.
+	Changed       bool `protobuf:"varint,1,opt,name=changed,proto3" json:"changed,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetHostCriticalityResponse) Reset() {
+	*x = SetHostCriticalityResponse{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetHostCriticalityResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetHostCriticalityResponse) ProtoMessage() {}
+
+func (x *SetHostCriticalityResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetHostCriticalityResponse.ProtoReflect.Descriptor instead.
+func (*SetHostCriticalityResponse) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *SetHostCriticalityResponse) GetChanged() bool {
+	if x != nil {
+		return x.Changed
+	}
+	return false
+}
+
+type ListHostCriticalityRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListHostCriticalityRequest) Reset() {
+	*x = ListHostCriticalityRequest{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListHostCriticalityRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListHostCriticalityRequest) ProtoMessage() {}
+
+func (x *ListHostCriticalityRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListHostCriticalityRequest.ProtoReflect.Descriptor instead.
+func (*ListHostCriticalityRequest) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{32}
+}
+
+type HostCriticality struct {
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	HostId             string                 `protobuf:"bytes,1,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	Criticality        RiskClass              `protobuf:"varint,2,opt,name=criticality,proto3,enum=nebula.executor.v1.RiskClass" json:"criticality,omitempty"`
+	UpdatedAtUnix      int64                  `protobuf:"varint,3,opt,name=updated_at_unix,json=updatedAtUnix,proto3" json:"updated_at_unix,omitempty"`
+	UpdatedBy          string                 `protobuf:"bytes,4,opt,name=updated_by,json=updatedBy,proto3" json:"updated_by,omitempty"`
+	HostKeyFingerprint string                 `protobuf:"bytes,5,opt,name=host_key_fingerprint,json=hostKeyFingerprint,proto3" json:"host_key_fingerprint,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *HostCriticality) Reset() {
+	*x = HostCriticality{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HostCriticality) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HostCriticality) ProtoMessage() {}
+
+func (x *HostCriticality) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HostCriticality.ProtoReflect.Descriptor instead.
+func (*HostCriticality) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *HostCriticality) GetHostId() string {
+	if x != nil {
+		return x.HostId
+	}
+	return ""
+}
+
+func (x *HostCriticality) GetCriticality() RiskClass {
+	if x != nil {
+		return x.Criticality
+	}
+	return RiskClass_RISK_CLASS_UNSPECIFIED
+}
+
+func (x *HostCriticality) GetUpdatedAtUnix() int64 {
+	if x != nil {
+		return x.UpdatedAtUnix
+	}
+	return 0
+}
+
+func (x *HostCriticality) GetUpdatedBy() string {
+	if x != nil {
+		return x.UpdatedBy
+	}
+	return ""
+}
+
+func (x *HostCriticality) GetHostKeyFingerprint() string {
+	if x != nil {
+		return x.HostKeyFingerprint
+	}
+	return ""
+}
+
+type ListHostCriticalityResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Hosts         []*HostCriticality     `protobuf:"bytes,1,rep,name=hosts,proto3" json:"hosts,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListHostCriticalityResponse) Reset() {
+	*x = ListHostCriticalityResponse{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListHostCriticalityResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListHostCriticalityResponse) ProtoMessage() {}
+
+func (x *ListHostCriticalityResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListHostCriticalityResponse.ProtoReflect.Descriptor instead.
+func (*ListHostCriticalityResponse) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *ListHostCriticalityResponse) GetHosts() []*HostCriticality {
+	if x != nil {
+		return x.Hosts
+	}
+	return nil
+}
+
 var File_nebula_executor_v1_executor_proto protoreflect.FileDescriptor
 
 const file_nebula_executor_v1_executor_proto_rawDesc = "" +
@@ -1572,7 +2254,53 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x10execution_digest\x18\x01 \x01(\tR\x0fexecutionDigest\x12,\n" +
 	"\x12typed_target_count\x18\x02 \x01(\rR\x10typedTargetCount\"K\n" +
 	"\x12ApproveCLIResponse\x125\n" +
-	"\x05state\x18\x01 \x01(\x0e2\x1f.nebula.executor.v1.PermitStateR\x05state*\x80\x01\n" +
+	"\x05state\x18\x01 \x01(\x0e2\x1f.nebula.executor.v1.PermitStateR\x05state\"\xf3\x01\n" +
+	"\x14TrustArtifactRequest\x12\x1b\n" +
+	"\taction_id\x18\x01 \x01(\tR\bactionId\x12%\n" +
+	"\x0emodule_version\x18\x02 \x01(\tR\rmoduleVersion\x12<\n" +
+	"\n" +
+	"risk_class\x18\x03 \x01(\x0e2\x1d.nebula.executor.v1.RiskClassR\triskClass\x12\x1a\n" +
+	"\bartifact\x18\x04 \x01(\fR\bartifact\x12\x14\n" +
+	"\x05label\x18\x05 \x01(\tR\x05label\x12'\n" +
+	"\x0fexpected_sha256\x18\x06 \x01(\tR\x0eexpectedSha256\"@\n" +
+	"\x15TrustArtifactResponse\x12'\n" +
+	"\x0fartifact_sha256\x18\x01 \x01(\tR\x0eartifactSha256\"\x85\x01\n" +
+	"\x16UntrustArtifactRequest\x12'\n" +
+	"\x0fartifact_sha256\x18\x01 \x01(\tR\x0eartifactSha256\x12\x1b\n" +
+	"\taction_id\x18\x02 \x01(\tR\bactionId\x12%\n" +
+	"\x0emodule_version\x18\x03 \x01(\tR\rmoduleVersion\"3\n" +
+	"\x17UntrustArtifactResponse\x12\x18\n" +
+	"\aremoved\x18\x01 \x01(\bR\aremoved\"\x1d\n" +
+	"\x1bListTrustedArtifactsRequest\"\x99\x02\n" +
+	"\x0fTrustedArtifact\x12'\n" +
+	"\x0fartifact_sha256\x18\x01 \x01(\tR\x0eartifactSha256\x12\x1b\n" +
+	"\taction_id\x18\x02 \x01(\tR\bactionId\x12%\n" +
+	"\x0emodule_version\x18\x03 \x01(\tR\rmoduleVersion\x12<\n" +
+	"\n" +
+	"risk_class\x18\x04 \x01(\x0e2\x1d.nebula.executor.v1.RiskClassR\triskClass\x12\x14\n" +
+	"\x05label\x18\x05 \x01(\tR\x05label\x12&\n" +
+	"\x0ftrusted_at_unix\x18\x06 \x01(\x03R\rtrustedAtUnix\x12\x1d\n" +
+	"\n" +
+	"trusted_by\x18\a \x01(\tR\ttrustedBy\"a\n" +
+	"\x1cListTrustedArtifactsResponse\x12A\n" +
+	"\tartifacts\x18\x01 \x03(\v2#.nebula.executor.v1.TrustedArtifactR\tartifacts\"\xbd\x01\n" +
+	"\x19SetHostCriticalityRequest\x12\x17\n" +
+	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12?\n" +
+	"\vcriticality\x18\x02 \x01(\x0e2\x1d.nebula.executor.v1.RiskClassR\vcriticality\x120\n" +
+	"\x14host_key_fingerprint\x18\x03 \x01(\tR\x12hostKeyFingerprint\x12\x14\n" +
+	"\x05clear\x18\x04 \x01(\bR\x05clear\"6\n" +
+	"\x1aSetHostCriticalityResponse\x12\x18\n" +
+	"\achanged\x18\x01 \x01(\bR\achanged\"\x1c\n" +
+	"\x1aListHostCriticalityRequest\"\xe4\x01\n" +
+	"\x0fHostCriticality\x12\x17\n" +
+	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12?\n" +
+	"\vcriticality\x18\x02 \x01(\x0e2\x1d.nebula.executor.v1.RiskClassR\vcriticality\x12&\n" +
+	"\x0fupdated_at_unix\x18\x03 \x01(\x03R\rupdatedAtUnix\x12\x1d\n" +
+	"\n" +
+	"updated_by\x18\x04 \x01(\tR\tupdatedBy\x120\n" +
+	"\x14host_key_fingerprint\x18\x05 \x01(\tR\x12hostKeyFingerprint\"X\n" +
+	"\x1bListHostCriticalityResponse\x129\n" +
+	"\x05hosts\x18\x01 \x03(\v2#.nebula.executor.v1.HostCriticalityR\x05hosts*\x80\x01\n" +
 	"\tRiskClass\x12\x1a\n" +
 	"\x16RISK_CLASS_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eRISK_CLASS_LOW\x10\x01\x12\x15\n" +
@@ -1589,7 +2317,7 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\vPermitState\x12\x1c\n" +
 	"\x18PERMIT_STATE_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14PERMIT_STATE_PENDING\x10\x01\x12\x19\n" +
-	"\x15PERMIT_STATE_APPROVED\x10\x022\x8e\b\n" +
+	"\x15PERMIT_STATE_APPROVED\x10\x022\xc8\f\n" +
 	"\x0fExecutorService\x12X\n" +
 	"\tGetStatus\x12$.nebula.executor.v1.GetStatusRequest\x1a%.nebula.executor.v1.GetStatusResponse\x12m\n" +
 	"\x10ProposeExecution\x12+.nebula.executor.v1.ProposeExecutionRequest\x1a,.nebula.executor.v1.ProposeExecutionResponse\x12j\n" +
@@ -1601,7 +2329,12 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x04Lock\x12\x1f.nebula.executor.v1.LockRequest\x1a .nebula.executor.v1.LockResponse\x12^\n" +
 	"\vListPending\x12&.nebula.executor.v1.ListPendingRequest\x1a'.nebula.executor.v1.ListPendingResponse\x12[\n" +
 	"\n" +
-	"ApproveCLI\x12%.nebula.executor.v1.ApproveCLIRequest\x1a&.nebula.executor.v1.ApproveCLIResponseBaZ_github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1;executorv1b\x06proto3"
+	"ApproveCLI\x12%.nebula.executor.v1.ApproveCLIRequest\x1a&.nebula.executor.v1.ApproveCLIResponse\x12d\n" +
+	"\rTrustArtifact\x12(.nebula.executor.v1.TrustArtifactRequest\x1a).nebula.executor.v1.TrustArtifactResponse\x12j\n" +
+	"\x0fUntrustArtifact\x12*.nebula.executor.v1.UntrustArtifactRequest\x1a+.nebula.executor.v1.UntrustArtifactResponse\x12y\n" +
+	"\x14ListTrustedArtifacts\x12/.nebula.executor.v1.ListTrustedArtifactsRequest\x1a0.nebula.executor.v1.ListTrustedArtifactsResponse\x12s\n" +
+	"\x12SetHostCriticality\x12-.nebula.executor.v1.SetHostCriticalityRequest\x1a..nebula.executor.v1.SetHostCriticalityResponse\x12v\n" +
+	"\x13ListHostCriticality\x12..nebula.executor.v1.ListHostCriticalityRequest\x1a/.nebula.executor.v1.ListHostCriticalityResponseBaZ_github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1;executorv1b\x06proto3"
 
 var (
 	file_nebula_executor_v1_executor_proto_rawDescOnce sync.Once
@@ -1616,7 +2349,7 @@ func file_nebula_executor_v1_executor_proto_rawDescGZIP() []byte {
 }
 
 var file_nebula_executor_v1_executor_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_nebula_executor_v1_executor_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
+var file_nebula_executor_v1_executor_proto_msgTypes = make([]protoimpl.MessageInfo, 35)
 var file_nebula_executor_v1_executor_proto_goTypes = []any{
 	(RiskClass)(0),                            // 0: nebula.executor.v1.RiskClass
 	(ApprovalRequirement)(0),                  // 1: nebula.executor.v1.ApprovalRequirement
@@ -1644,6 +2377,18 @@ var file_nebula_executor_v1_executor_proto_goTypes = []any{
 	(*ListPendingResponse)(nil),               // 23: nebula.executor.v1.ListPendingResponse
 	(*ApproveCLIRequest)(nil),                 // 24: nebula.executor.v1.ApproveCLIRequest
 	(*ApproveCLIResponse)(nil),                // 25: nebula.executor.v1.ApproveCLIResponse
+	(*TrustArtifactRequest)(nil),              // 26: nebula.executor.v1.TrustArtifactRequest
+	(*TrustArtifactResponse)(nil),             // 27: nebula.executor.v1.TrustArtifactResponse
+	(*UntrustArtifactRequest)(nil),            // 28: nebula.executor.v1.UntrustArtifactRequest
+	(*UntrustArtifactResponse)(nil),           // 29: nebula.executor.v1.UntrustArtifactResponse
+	(*ListTrustedArtifactsRequest)(nil),       // 30: nebula.executor.v1.ListTrustedArtifactsRequest
+	(*TrustedArtifact)(nil),                   // 31: nebula.executor.v1.TrustedArtifact
+	(*ListTrustedArtifactsResponse)(nil),      // 32: nebula.executor.v1.ListTrustedArtifactsResponse
+	(*SetHostCriticalityRequest)(nil),         // 33: nebula.executor.v1.SetHostCriticalityRequest
+	(*SetHostCriticalityResponse)(nil),        // 34: nebula.executor.v1.SetHostCriticalityResponse
+	(*ListHostCriticalityRequest)(nil),        // 35: nebula.executor.v1.ListHostCriticalityRequest
+	(*HostCriticality)(nil),                   // 36: nebula.executor.v1.HostCriticality
+	(*ListHostCriticalityResponse)(nil),       // 37: nebula.executor.v1.ListHostCriticalityResponse
 }
 var file_nebula_executor_v1_executor_proto_depIdxs = []int32{
 	0,  // 0: nebula.executor.v1.ExecutionRequest.risk_class:type_name -> nebula.executor.v1.RiskClass
@@ -1656,31 +2401,47 @@ var file_nebula_executor_v1_executor_proto_depIdxs = []int32{
 	1,  // 7: nebula.executor.v1.PendingPermit.approval_requirement:type_name -> nebula.executor.v1.ApprovalRequirement
 	22, // 8: nebula.executor.v1.ListPendingResponse.permits:type_name -> nebula.executor.v1.PendingPermit
 	2,  // 9: nebula.executor.v1.ApproveCLIResponse.state:type_name -> nebula.executor.v1.PermitState
-	5,  // 10: nebula.executor.v1.ExecutorService.GetStatus:input_type -> nebula.executor.v1.GetStatusRequest
-	7,  // 11: nebula.executor.v1.ExecutorService.ProposeExecution:input_type -> nebula.executor.v1.ProposeExecutionRequest
-	9,  // 12: nebula.executor.v1.ExecutorService.SubmitAssertion:input_type -> nebula.executor.v1.SubmitAssertionRequest
-	11, // 13: nebula.executor.v1.ExecutorService.BeginPrivilegedSession:input_type -> nebula.executor.v1.BeginPrivilegedSessionRequest
-	13, // 14: nebula.executor.v1.ExecutorService.CompletePrivilegedSession:input_type -> nebula.executor.v1.CompletePrivilegedSessionRequest
-	15, // 15: nebula.executor.v1.ExecutorService.AuthorizeRun:input_type -> nebula.executor.v1.AuthorizeRunRequest
-	17, // 16: nebula.executor.v1.ExecutorService.Unlock:input_type -> nebula.executor.v1.UnlockRequest
-	19, // 17: nebula.executor.v1.ExecutorService.Lock:input_type -> nebula.executor.v1.LockRequest
-	21, // 18: nebula.executor.v1.ExecutorService.ListPending:input_type -> nebula.executor.v1.ListPendingRequest
-	24, // 19: nebula.executor.v1.ExecutorService.ApproveCLI:input_type -> nebula.executor.v1.ApproveCLIRequest
-	6,  // 20: nebula.executor.v1.ExecutorService.GetStatus:output_type -> nebula.executor.v1.GetStatusResponse
-	8,  // 21: nebula.executor.v1.ExecutorService.ProposeExecution:output_type -> nebula.executor.v1.ProposeExecutionResponse
-	10, // 22: nebula.executor.v1.ExecutorService.SubmitAssertion:output_type -> nebula.executor.v1.SubmitAssertionResponse
-	12, // 23: nebula.executor.v1.ExecutorService.BeginPrivilegedSession:output_type -> nebula.executor.v1.BeginPrivilegedSessionResponse
-	14, // 24: nebula.executor.v1.ExecutorService.CompletePrivilegedSession:output_type -> nebula.executor.v1.CompletePrivilegedSessionResponse
-	16, // 25: nebula.executor.v1.ExecutorService.AuthorizeRun:output_type -> nebula.executor.v1.AuthorizeRunResponse
-	18, // 26: nebula.executor.v1.ExecutorService.Unlock:output_type -> nebula.executor.v1.UnlockResponse
-	20, // 27: nebula.executor.v1.ExecutorService.Lock:output_type -> nebula.executor.v1.LockResponse
-	23, // 28: nebula.executor.v1.ExecutorService.ListPending:output_type -> nebula.executor.v1.ListPendingResponse
-	25, // 29: nebula.executor.v1.ExecutorService.ApproveCLI:output_type -> nebula.executor.v1.ApproveCLIResponse
-	20, // [20:30] is the sub-list for method output_type
-	10, // [10:20] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	0,  // 10: nebula.executor.v1.TrustArtifactRequest.risk_class:type_name -> nebula.executor.v1.RiskClass
+	0,  // 11: nebula.executor.v1.TrustedArtifact.risk_class:type_name -> nebula.executor.v1.RiskClass
+	31, // 12: nebula.executor.v1.ListTrustedArtifactsResponse.artifacts:type_name -> nebula.executor.v1.TrustedArtifact
+	0,  // 13: nebula.executor.v1.SetHostCriticalityRequest.criticality:type_name -> nebula.executor.v1.RiskClass
+	0,  // 14: nebula.executor.v1.HostCriticality.criticality:type_name -> nebula.executor.v1.RiskClass
+	36, // 15: nebula.executor.v1.ListHostCriticalityResponse.hosts:type_name -> nebula.executor.v1.HostCriticality
+	5,  // 16: nebula.executor.v1.ExecutorService.GetStatus:input_type -> nebula.executor.v1.GetStatusRequest
+	7,  // 17: nebula.executor.v1.ExecutorService.ProposeExecution:input_type -> nebula.executor.v1.ProposeExecutionRequest
+	9,  // 18: nebula.executor.v1.ExecutorService.SubmitAssertion:input_type -> nebula.executor.v1.SubmitAssertionRequest
+	11, // 19: nebula.executor.v1.ExecutorService.BeginPrivilegedSession:input_type -> nebula.executor.v1.BeginPrivilegedSessionRequest
+	13, // 20: nebula.executor.v1.ExecutorService.CompletePrivilegedSession:input_type -> nebula.executor.v1.CompletePrivilegedSessionRequest
+	15, // 21: nebula.executor.v1.ExecutorService.AuthorizeRun:input_type -> nebula.executor.v1.AuthorizeRunRequest
+	17, // 22: nebula.executor.v1.ExecutorService.Unlock:input_type -> nebula.executor.v1.UnlockRequest
+	19, // 23: nebula.executor.v1.ExecutorService.Lock:input_type -> nebula.executor.v1.LockRequest
+	21, // 24: nebula.executor.v1.ExecutorService.ListPending:input_type -> nebula.executor.v1.ListPendingRequest
+	24, // 25: nebula.executor.v1.ExecutorService.ApproveCLI:input_type -> nebula.executor.v1.ApproveCLIRequest
+	26, // 26: nebula.executor.v1.ExecutorService.TrustArtifact:input_type -> nebula.executor.v1.TrustArtifactRequest
+	28, // 27: nebula.executor.v1.ExecutorService.UntrustArtifact:input_type -> nebula.executor.v1.UntrustArtifactRequest
+	30, // 28: nebula.executor.v1.ExecutorService.ListTrustedArtifacts:input_type -> nebula.executor.v1.ListTrustedArtifactsRequest
+	33, // 29: nebula.executor.v1.ExecutorService.SetHostCriticality:input_type -> nebula.executor.v1.SetHostCriticalityRequest
+	35, // 30: nebula.executor.v1.ExecutorService.ListHostCriticality:input_type -> nebula.executor.v1.ListHostCriticalityRequest
+	6,  // 31: nebula.executor.v1.ExecutorService.GetStatus:output_type -> nebula.executor.v1.GetStatusResponse
+	8,  // 32: nebula.executor.v1.ExecutorService.ProposeExecution:output_type -> nebula.executor.v1.ProposeExecutionResponse
+	10, // 33: nebula.executor.v1.ExecutorService.SubmitAssertion:output_type -> nebula.executor.v1.SubmitAssertionResponse
+	12, // 34: nebula.executor.v1.ExecutorService.BeginPrivilegedSession:output_type -> nebula.executor.v1.BeginPrivilegedSessionResponse
+	14, // 35: nebula.executor.v1.ExecutorService.CompletePrivilegedSession:output_type -> nebula.executor.v1.CompletePrivilegedSessionResponse
+	16, // 36: nebula.executor.v1.ExecutorService.AuthorizeRun:output_type -> nebula.executor.v1.AuthorizeRunResponse
+	18, // 37: nebula.executor.v1.ExecutorService.Unlock:output_type -> nebula.executor.v1.UnlockResponse
+	20, // 38: nebula.executor.v1.ExecutorService.Lock:output_type -> nebula.executor.v1.LockResponse
+	23, // 39: nebula.executor.v1.ExecutorService.ListPending:output_type -> nebula.executor.v1.ListPendingResponse
+	25, // 40: nebula.executor.v1.ExecutorService.ApproveCLI:output_type -> nebula.executor.v1.ApproveCLIResponse
+	27, // 41: nebula.executor.v1.ExecutorService.TrustArtifact:output_type -> nebula.executor.v1.TrustArtifactResponse
+	29, // 42: nebula.executor.v1.ExecutorService.UntrustArtifact:output_type -> nebula.executor.v1.UntrustArtifactResponse
+	32, // 43: nebula.executor.v1.ExecutorService.ListTrustedArtifacts:output_type -> nebula.executor.v1.ListTrustedArtifactsResponse
+	34, // 44: nebula.executor.v1.ExecutorService.SetHostCriticality:output_type -> nebula.executor.v1.SetHostCriticalityResponse
+	37, // 45: nebula.executor.v1.ExecutorService.ListHostCriticality:output_type -> nebula.executor.v1.ListHostCriticalityResponse
+	31, // [31:46] is the sub-list for method output_type
+	16, // [16:31] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_nebula_executor_v1_executor_proto_init() }
@@ -1694,7 +2455,7 @@ func file_nebula_executor_v1_executor_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_nebula_executor_v1_executor_proto_rawDesc), len(file_nebula_executor_v1_executor_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   23,
+			NumMessages:   35,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

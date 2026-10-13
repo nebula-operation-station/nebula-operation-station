@@ -31,6 +31,11 @@ const (
 	ExecutorService_Lock_FullMethodName                      = "/nebula.executor.v1.ExecutorService/Lock"
 	ExecutorService_ListPending_FullMethodName               = "/nebula.executor.v1.ExecutorService/ListPending"
 	ExecutorService_ApproveCLI_FullMethodName                = "/nebula.executor.v1.ExecutorService/ApproveCLI"
+	ExecutorService_TrustArtifact_FullMethodName             = "/nebula.executor.v1.ExecutorService/TrustArtifact"
+	ExecutorService_UntrustArtifact_FullMethodName           = "/nebula.executor.v1.ExecutorService/UntrustArtifact"
+	ExecutorService_ListTrustedArtifacts_FullMethodName      = "/nebula.executor.v1.ExecutorService/ListTrustedArtifacts"
+	ExecutorService_SetHostCriticality_FullMethodName        = "/nebula.executor.v1.ExecutorService/SetHostCriticality"
+	ExecutorService_ListHostCriticality_FullMethodName       = "/nebula.executor.v1.ExecutorService/ListHostCriticality"
 )
 
 // ExecutorServiceClient is the client API for ExecutorService service.
@@ -73,6 +78,20 @@ type ExecutorServiceClient interface {
 	ListPending(ctx context.Context, in *ListPendingRequest, opts ...grpc.CallOption) (*ListPendingResponse, error)
 	// Role: admin. Hardened approval path.
 	ApproveCLI(ctx context.Context, in *ApproveCLIRequest, opts ...grpc.CallOption) (*ApproveCLIResponse, error)
+	// Role: admin. Trusts an artifact for one action and version at a
+	// declared risk. The executor hashes the bytes itself. Replaces an
+	// earlier entry for the same artifact, action and version.
+	TrustArtifact(ctx context.Context, in *TrustArtifactRequest, opts ...grpc.CallOption) (*TrustArtifactResponse, error)
+	// Role: admin. Withdraws trust; the artifact is HIGH again.
+	UntrustArtifact(ctx context.Context, in *UntrustArtifactRequest, opts ...grpc.CallOption) (*UntrustArtifactResponse, error)
+	// Role: admin.
+	ListTrustedArtifacts(ctx context.Context, in *ListTrustedArtifactsRequest, opts ...grpc.CallOption) (*ListTrustedArtifactsResponse, error)
+	// Role: admin. Sets the executor's criticality of a host, bound to its
+	// pinned key fingerprint, or removes the record (clear). A target counts
+	// as recorded only if host ID and fingerprint both match.
+	SetHostCriticality(ctx context.Context, in *SetHostCriticalityRequest, opts ...grpc.CallOption) (*SetHostCriticalityResponse, error)
+	// Role: admin.
+	ListHostCriticality(ctx context.Context, in *ListHostCriticalityRequest, opts ...grpc.CallOption) (*ListHostCriticalityResponse, error)
 }
 
 type executorServiceClient struct {
@@ -183,6 +202,56 @@ func (c *executorServiceClient) ApproveCLI(ctx context.Context, in *ApproveCLIRe
 	return out, nil
 }
 
+func (c *executorServiceClient) TrustArtifact(ctx context.Context, in *TrustArtifactRequest, opts ...grpc.CallOption) (*TrustArtifactResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TrustArtifactResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_TrustArtifact_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) UntrustArtifact(ctx context.Context, in *UntrustArtifactRequest, opts ...grpc.CallOption) (*UntrustArtifactResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UntrustArtifactResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_UntrustArtifact_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ListTrustedArtifacts(ctx context.Context, in *ListTrustedArtifactsRequest, opts ...grpc.CallOption) (*ListTrustedArtifactsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListTrustedArtifactsResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ListTrustedArtifacts_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) SetHostCriticality(ctx context.Context, in *SetHostCriticalityRequest, opts ...grpc.CallOption) (*SetHostCriticalityResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetHostCriticalityResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_SetHostCriticality_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ListHostCriticality(ctx context.Context, in *ListHostCriticalityRequest, opts ...grpc.CallOption) (*ListHostCriticalityResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListHostCriticalityResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ListHostCriticality_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExecutorServiceServer is the server API for ExecutorService service.
 // All implementations must embed UnimplementedExecutorServiceServer
 // for forward compatibility.
@@ -223,6 +292,20 @@ type ExecutorServiceServer interface {
 	ListPending(context.Context, *ListPendingRequest) (*ListPendingResponse, error)
 	// Role: admin. Hardened approval path.
 	ApproveCLI(context.Context, *ApproveCLIRequest) (*ApproveCLIResponse, error)
+	// Role: admin. Trusts an artifact for one action and version at a
+	// declared risk. The executor hashes the bytes itself. Replaces an
+	// earlier entry for the same artifact, action and version.
+	TrustArtifact(context.Context, *TrustArtifactRequest) (*TrustArtifactResponse, error)
+	// Role: admin. Withdraws trust; the artifact is HIGH again.
+	UntrustArtifact(context.Context, *UntrustArtifactRequest) (*UntrustArtifactResponse, error)
+	// Role: admin.
+	ListTrustedArtifacts(context.Context, *ListTrustedArtifactsRequest) (*ListTrustedArtifactsResponse, error)
+	// Role: admin. Sets the executor's criticality of a host, bound to its
+	// pinned key fingerprint, or removes the record (clear). A target counts
+	// as recorded only if host ID and fingerprint both match.
+	SetHostCriticality(context.Context, *SetHostCriticalityRequest) (*SetHostCriticalityResponse, error)
+	// Role: admin.
+	ListHostCriticality(context.Context, *ListHostCriticalityRequest) (*ListHostCriticalityResponse, error)
 	mustEmbedUnimplementedExecutorServiceServer()
 }
 
@@ -262,6 +345,21 @@ func (UnimplementedExecutorServiceServer) ListPending(context.Context, *ListPend
 }
 func (UnimplementedExecutorServiceServer) ApproveCLI(context.Context, *ApproveCLIRequest) (*ApproveCLIResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ApproveCLI not implemented")
+}
+func (UnimplementedExecutorServiceServer) TrustArtifact(context.Context, *TrustArtifactRequest) (*TrustArtifactResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method TrustArtifact not implemented")
+}
+func (UnimplementedExecutorServiceServer) UntrustArtifact(context.Context, *UntrustArtifactRequest) (*UntrustArtifactResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UntrustArtifact not implemented")
+}
+func (UnimplementedExecutorServiceServer) ListTrustedArtifacts(context.Context, *ListTrustedArtifactsRequest) (*ListTrustedArtifactsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListTrustedArtifacts not implemented")
+}
+func (UnimplementedExecutorServiceServer) SetHostCriticality(context.Context, *SetHostCriticalityRequest) (*SetHostCriticalityResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetHostCriticality not implemented")
+}
+func (UnimplementedExecutorServiceServer) ListHostCriticality(context.Context, *ListHostCriticalityRequest) (*ListHostCriticalityResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListHostCriticality not implemented")
 }
 func (UnimplementedExecutorServiceServer) mustEmbedUnimplementedExecutorServiceServer() {}
 func (UnimplementedExecutorServiceServer) testEmbeddedByValue()                         {}
@@ -464,6 +562,96 @@ func _ExecutorService_ApproveCLI_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_TrustArtifact_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TrustArtifactRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).TrustArtifact(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_TrustArtifact_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).TrustArtifact(ctx, req.(*TrustArtifactRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_UntrustArtifact_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UntrustArtifactRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).UntrustArtifact(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_UntrustArtifact_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).UntrustArtifact(ctx, req.(*UntrustArtifactRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ListTrustedArtifacts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListTrustedArtifactsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ListTrustedArtifacts(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ListTrustedArtifacts_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ListTrustedArtifacts(ctx, req.(*ListTrustedArtifactsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_SetHostCriticality_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetHostCriticalityRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).SetHostCriticality(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_SetHostCriticality_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).SetHostCriticality(ctx, req.(*SetHostCriticalityRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ListHostCriticality_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListHostCriticalityRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ListHostCriticality(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ListHostCriticality_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ListHostCriticality(ctx, req.(*ListHostCriticalityRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ExecutorService_ServiceDesc is the grpc.ServiceDesc for ExecutorService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -510,6 +698,26 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ApproveCLI",
 			Handler:    _ExecutorService_ApproveCLI_Handler,
+		},
+		{
+			MethodName: "TrustArtifact",
+			Handler:    _ExecutorService_TrustArtifact_Handler,
+		},
+		{
+			MethodName: "UntrustArtifact",
+			Handler:    _ExecutorService_UntrustArtifact_Handler,
+		},
+		{
+			MethodName: "ListTrustedArtifacts",
+			Handler:    _ExecutorService_ListTrustedArtifacts_Handler,
+		},
+		{
+			MethodName: "SetHostCriticality",
+			Handler:    _ExecutorService_SetHostCriticality_Handler,
+		},
+		{
+			MethodName: "ListHostCriticality",
+			Handler:    _ExecutorService_ListHostCriticality_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

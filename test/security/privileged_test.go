@@ -26,6 +26,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/fsguard"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
@@ -58,6 +59,20 @@ func helper(mode, arg string) int {
 			return 10
 		}
 		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	case "open-executordb":
+		db, err := executordb.Open(arg)
+		if errors.Is(err, os.ErrPermission) {
+			return 10
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		if err := db.Close(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
@@ -251,4 +266,43 @@ func TestM0Privileged_UnknownUIDIsRejectedAcrossProcesses(t *testing.T) {
 	// The stranger's rejection must come from the executor's handshake, not
 	// from an unrelated connection failure.
 	h.requireHandshakeRejection(uidStranger)
+}
+
+// H02: executor.db is created by the executor UID inside its private
+// directory, mode 0600, and the server UID can neither open nor read it.
+func TestH02Privileged_ExecutorDBIsPrivateToTheExecutor(t *testing.T) {
+	requireRoot(t)
+	bin := helperBinary(t)
+
+	base := publicTempDir(t)
+	execDir := filepath.Join(base, "executor")
+	if err := os.Mkdir(execDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(execDir, uidExecutor, uidExecutor); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := runAs(t, bin, uidExecutor, "open-executordb", execDir); got != 0 {
+		t.Fatalf("executor could not create its database (exit %d)", got)
+	}
+	dbPath := filepath.Join(execDir, executordb.FileName)
+	fi, err := os.Lstat(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := fi.Sys().(*syscall.Stat_t)
+	if fi.Mode().Perm() != 0o600 || st.Uid != uidExecutor {
+		t.Fatalf("%s: mode %o uid %d; want 0600 owned by %d", executordb.FileName, fi.Mode().Perm(), st.Uid, uidExecutor)
+	}
+	// Reopening as the executor works (migrations already applied).
+	if got := runAs(t, bin, uidExecutor, "open-executordb", execDir); got != 0 {
+		t.Fatalf("executor could not reopen its database (exit %d)", got)
+	}
+	if got := runAs(t, bin, uidServer, "read", dbPath); got != 10 {
+		t.Fatalf("server UID read executor.db (exit %d)", got)
+	}
+	if got := runAs(t, bin, uidServer, "open-executordb", execDir); got == 0 {
+		t.Fatal("server UID opened executor.db")
+	}
 }
