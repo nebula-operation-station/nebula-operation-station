@@ -43,11 +43,17 @@ for unit in "${script_dir}"/systemd/*.service; do
 done
 shopt -u nullglob
 
-# Remove the drop-in written by install.sh.
+# Remove only the drop-in written by install.sh. Other drop-ins in the
+# directory (for example a 20-local.conf with local flag changes) are
+# left in place, and the directory is removed only if it is then empty.
 drop_in_removed=0
-if [[ -d "${systemd_dir}/nebula-executor.service.d" ]]; then
-  rm -rf -- "${systemd_dir}/nebula-executor.service.d"
+drop_in_dir="${systemd_dir}/nebula-executor.service.d"
+if [[ -f "${drop_in_dir}/10-local.conf" ]]; then
+  rm -f -- "${drop_in_dir}/10-local.conf"
   drop_in_removed=1
+fi
+if [[ -d "${drop_in_dir}" && -z "$(ls -A -- "${drop_in_dir}")" ]]; then
+  rmdir -- "${drop_in_dir}"
 fi
 
 if [[ ${removed_units} -eq 1 || ${drop_in_removed} -eq 1 ]]; then

@@ -9,6 +9,10 @@
 #
 #   ./deploy/install_test.sh
 #
+# The last two cases run the real scripts (unit recovery on install,
+# drop-in handling on uninstall) and are therefore gated on root plus a
+# running systemd; they are skipped with a message everywhere else.
+#
 # Exit status: 0 if all cases pass, 1 otherwise.
 
 set -u
@@ -40,6 +44,28 @@ run_rc() {
     pass=$((pass + 1))
   else
     echo "FAIL ${name}: exit ${rc}, want ${want}"
+    printf '%s\n' "$out" | sed 's/^/     /'
+    fail=$((fail + 1))
+  fi
+}
+
+# run_msg <want_rc> <name> <substring> -- <args...>
+# Like run_rc, but also requires the output to contain <substring>. Used to
+# prove which check rejected an input (pattern vs. unknown user).
+run_msg() {
+  local want="$1" name="$2" want_msg="$3"
+  shift 3
+  if [[ "${1:-}" == "--" ]]; then
+    shift
+  fi
+  local out rc
+  out=$(NEBULA_INSTALL_DRY_RUN=1 bash "$install_sh" "$@" 2>&1)
+  rc=$?
+  if [[ "$rc" -eq "$want" && "$out" == *"$want_msg"* ]]; then
+    echo "ok   ${name}"
+    pass=$((pass + 1))
+  else
+    echo "FAIL ${name}: exit ${rc}, want ${want} with message containing ${want_msg}"
     printf '%s\n' "$out" | sed 's/^/     /'
     fail=$((fail + 1))
   fi
@@ -91,6 +117,18 @@ run_rc 1 "nebula-server rejected as admin user" -- --admin-users nebula-server -
 run_rc 1 "empty entry in admin list rejected" -- --admin-users "${test_user},,${test_user}" --rp-id nebula.example.org
 run_rc 1 "second of two users missing" -- --admin-users "$test_user,definitely-not-a-user-12345" --rp-id nebula.example.org
 
+# Admin entries must match ^[a-z_][a-z0-9_-]{0,31}$: no numeric UIDs (which
+# getent would resolve), no '%' (which systemd expands in ExecStart), no
+# uppercase, at most 32 characters.
+run_msg 1 "numeric UID rejected by the pattern" "must match" -- --admin-users 1000 --rp-id nebula.example.org
+run_msg 1 "root UID 0 rejected by the pattern" "must match" -- --admin-users 0 --rp-id nebula.example.org
+run_msg 1 "percent sign rejected by the pattern" "must match" -- --admin-users '%' --rp-id nebula.example.org
+run_msg 1 "uppercase admin user rejected by the pattern" "must match" -- --admin-users Alice --rp-id nebula.example.org
+run_msg 1 "33-char admin user rejected by the pattern" "must match" -- --admin-users "$(printf 'a%.0s' {1..33})" --rp-id nebula.example.org
+# A 32-char name passes the pattern and is rejected only because it does
+# not exist: this pins the boundary at 32 characters.
+run_msg 1 "32-char admin user passes the pattern" "does not exist" -- --admin-users "$(printf 'a%.0s' {1..32})" --rp-id nebula.example.org
+
 # --- Valid options pass in dry-run mode -------------------------------------
 run_rc 0 "valid single user" -- --admin-users "$test_user" --rp-id nebula.example.org
 run_rc 0 "valid multi-label rp-id" -- --admin-users "$test_user" --rp-id sub.domain.example.org
@@ -114,6 +152,80 @@ if [[ "$before" == "$after" ]]; then
 else
   echo "FAIL dry run changed the drop-in (before: ${before:-absent}, after: ${after:-absent})"
   fail=$((fail + 1))
+fi
+
+# --- Root-gated: real runs of install.sh and uninstall.sh -------------------
+# These two cases exercise the systemd handling, which the dry-run mode
+# exits before reaching. They need root and a running systemd; the first
+# also needs the release-tarball layout (binaries next to deploy/). They
+# are skipped with a message everywhere else.
+uninstall_sh="${script_dir}/uninstall.sh"
+systemd_root=0
+if [[ ${EUID} -eq 0 ]] && [[ -d /run/systemd/system ]]; then
+  systemd_root=1
+fi
+
+if [[ ${systemd_root} -eq 1 ]] && [[ -f "$(dirname -- "$script_dir")/nebula-executor" ]]; then
+  # Leave the unit in place, as an earlier install would have, but not
+  # active, so install.sh must take the recovery branch.
+  if [[ ! -e /etc/systemd/system/nebula-executor.service ]]; then
+    install -m 0644 "${script_dir}/systemd/nebula-executor.service" /etc/systemd/system/
+  fi
+  systemctl stop nebula-executor 2>/dev/null || true
+  # Reuse the rp-id the host already has, so the test does not change the
+  # origin of a live install.
+  rp="lab.local"
+  if [[ -f /etc/systemd/system/nebula-executor.service.d/10-local.conf ]]; then
+    rp=$(sed -n 's/.*-rp-id \([^ ]*\).*/\1/p' /etc/systemd/system/nebula-executor.service.d/10-local.conf | head -n 1)
+  fi
+  rp="${rp:-lab.local}"
+  out=$(bash "$install_sh" --admin-users "$test_user" --rp-id "$rp" 2>&1)
+  rc=$?
+  for _ in 1 2 3 4 5; do
+    systemctl is-active --quiet nebula-executor.service && break
+    sleep 1
+  done
+  if [[ $rc -eq 0 && "$out" == *"enabled and restarted nebula-executor (was not active)"* ]] \
+     && systemctl is-active --quiet nebula-executor.service; then
+    echo "ok   inactive unit enabled and restarted"
+    pass=$((pass + 1))
+  else
+    echo "FAIL inactive unit recovery: exit ${rc}"
+    printf '%s\n' "$out" | sed 's/^/     /'
+    fail=$((fail + 1))
+  fi
+else
+  echo "skip inactive-unit recovery (needs root, systemd and the tarball layout)"
+fi
+
+if [[ ${systemd_root} -eq 1 ]]; then
+  # uninstall.sh also removes the units and binaries; on a test machine
+  # that is the intended end state.
+  drop_dir=/etc/systemd/system/nebula-executor.service.d
+  mkdir -p "$drop_dir"
+  printf '[Service]\nEnvironment=INSTALL_TEST=1\n' > "$drop_dir/10-local.conf"
+  printf '[Service]\nEnvironment=KEEP=1\n' > "$drop_dir/20-local.conf"
+  bash "$uninstall_sh" >/dev/null 2>&1
+  if [[ ! -f "$drop_dir/10-local.conf" && -f "$drop_dir/20-local.conf" && -d "$drop_dir" ]]; then
+    echo "ok   uninstall preserves other drop-ins"
+    pass=$((pass + 1))
+  else
+    echo "FAIL uninstall did not preserve other drop-ins"
+    fail=$((fail + 1))
+  fi
+  # With only the install.sh drop-in left, the directory must go away.
+  rm -f "$drop_dir/20-local.conf"
+  printf '[Service]\nEnvironment=INSTALL_TEST=1\n' > "$drop_dir/10-local.conf"
+  bash "$uninstall_sh" >/dev/null 2>&1
+  if [[ ! -d "$drop_dir" ]]; then
+    echo "ok   uninstall removes an empty drop-in directory"
+    pass=$((pass + 1))
+  else
+    echo "FAIL drop-in directory not removed when empty"
+    fail=$((fail + 1))
+  fi
+else
+  echo "skip uninstall drop-in cases (needs root and systemd)"
 fi
 
 echo
