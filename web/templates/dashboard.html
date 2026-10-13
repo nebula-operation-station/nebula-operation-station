@@ -1,0 +1,24 @@
+{{define "content"}}
+<h1>Dashboard</h1>
+<section class="panel" aria-label="Executor status">
+  <h2>Executor</h2>
+  {{if .Status}}
+  <p class="status">State: {{.Status.LockText}}</p>
+  <p class="status">Privileged session: {{.Status.Session}}</p>
+  {{else}}
+  <p class="status status--error">Executor unavailable</p>
+  {{end}}
+</section>
+<section class="panel" aria-label="Managed hosts">
+  <h2>Managed hosts</h2>
+  {{if .Hosts}}
+  <ul class="hosts">
+    {{range .Hosts}}
+    <li>{{.}}</li>
+    {{end}}
+  </ul>
+  {{else}}
+  <p>No managed hosts yet.</p>
+  {{end}}
+</section>
+{{end}}
