@@ -117,6 +117,66 @@ func TestValidateRequiresAtLeastOneEndpoint(t *testing.T) {
 	}
 }
 
+// TestValidateDuplicateEndpoints checks that the duplicate endpoint check
+// compares the lowercased address together with the effective port (0
+// means 22).
+func TestValidateDuplicateEndpoints(t *testing.T) {
+	cases := []struct {
+		name      string
+		endpoints []Endpoint
+		wantDup   bool
+	}{
+		{
+			"case-insensitive, default vs explicit 22",
+			[]Endpoint{{Address: "Srv1.lan"}, {Address: "srv1.lan", Port: 22}},
+			true,
+		},
+		{
+			"case-insensitive, both default",
+			[]Endpoint{{Address: "Srv1.lan"}, {Address: "SRV1.LAN"}},
+			true,
+		},
+		{
+			"ipv6 case-insensitive",
+			[]Endpoint{{Address: "FD00::1"}, {Address: "fd00::1"}},
+			true,
+		},
+		{
+			"different ports are not duplicates",
+			[]Endpoint{{Address: "srv1.lan", Port: 22}, {Address: "srv1.lan", Port: 2222}},
+			false,
+		},
+		{
+			"default port vs 2222 are not duplicates",
+			[]Endpoint{{Address: "srv1.lan"}, {Address: "srv1.lan", Port: 2222}},
+			false,
+		},
+		{
+			"different addresses are not duplicates",
+			[]Endpoint{{Address: "a.lan", Port: 22}, {Address: "b.lan", Port: 22}},
+			false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := validHost()
+			h.Endpoints = tc.endpoints
+			err := Validate(h)
+			var ve *ValidationError
+			if !errors.As(err, &ve) {
+				if tc.wantDup {
+					t.Fatalf("Validate = %v, want a duplicate endpoint problem", err)
+				}
+				return
+			}
+			gotDup := contains(ve.Problems, `is duplicated (first at`)
+			if gotDup != tc.wantDup {
+				t.Fatalf("duplicate endpoint problem = %v, want %v (problems: %v)", gotDup, tc.wantDup, ve.Problems)
+			}
+		})
+	}
+}
+
 func contains(problems []string, sub string) bool {
 	for _, p := range problems {
 		if strings.Contains(p, sub) {

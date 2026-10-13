@@ -22,6 +22,7 @@ import (
 	"net"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -170,10 +171,17 @@ func Validate(h Host) error {
 		case e.Port < 1 || e.Port > 65535:
 			add("endpoint %d: port %d out of range", i, e.Port)
 		}
-		if first, dup := seenAddr[e.Address]; dup {
+		// Duplicates are compared by lowercased address and effective
+		// port (0 means the default SSH port 22).
+		port := e.Port
+		if port == 0 {
+			port = defaultSSHPort
+		}
+		key := strings.ToLower(e.Address) + ":" + strconv.Itoa(port)
+		if first, dup := seenAddr[key]; dup {
 			add("endpoint %d: %q is duplicated (first at %d)", i, e.Address, first)
 		} else {
-			seenAddr[e.Address] = i
+			seenAddr[key] = i
 		}
 	}
 
