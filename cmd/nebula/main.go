@@ -10,6 +10,7 @@
 //	nebula approve <digest-prefix>
 //	nebula artifact trust|untrust|list
 //	nebula host criticality|list
+//	nebula webauthn code|list|remove
 package main
 
 import (
@@ -52,6 +53,10 @@ commands:
                       set the executor's criticality of a host, bound to its key
   host clear HOST     remove a host record (unrecorded hosts count as HIGH)
   host list           list host criticality records
+  webauthn code [--user NAME] [--label TEXT]
+                      one-time code to register a security key in the web UI
+  webauthn list       list registered WebAuthn credentials
+  webauthn remove ID  remove a credential (locks the executor)
   version             print version
 
 environment:
@@ -119,6 +124,8 @@ func run(cmd string, args []string) error {
 		return artifactCmd(ctx, c, args)
 	case "host":
 		return hostCmd(ctx, c, args)
+	case "webauthn":
+		return webauthnCmd(ctx, c, args)
 	default:
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(64)

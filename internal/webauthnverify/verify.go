@@ -94,6 +94,9 @@ func New(cfg Config, creds []Credential) (*Verifier, error) {
 	if err != nil {
 		return nil, fmt.Errorf("webauthn: load signature counters: %w", err)
 	}
+	if stored == nil {
+		stored = map[string]uint32{}
+	}
 	v := &Verifier{cfg: cfg, creds: make(map[string]*Credential, len(creds)), stored: stored}
 	for i := range creds {
 		if err := v.add(creds[i]); err != nil {
@@ -129,6 +132,47 @@ func (v *Verifier) add(c Credential) error {
 	}
 	v.creds[k] = &cp
 	return nil
+}
+
+// Remove unregisters a credential and reports whether it was registered.
+// Its stored counter is kept, so a re-registered credential cannot start
+// below it.
+func (v *Verifier) Remove(id []byte) bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	k := string(id)
+	c, ok := v.creds[k]
+	if !ok {
+		return false
+	}
+	if c.SignCount > v.stored[k] {
+		v.stored[k] = c.SignCount
+	}
+	delete(v.creds, k)
+	return true
+}
+
+// Has reports whether a credential is registered.
+func (v *Verifier) Has(id []byte) bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	_, ok := v.creds[string(id)]
+	return ok
+}
+
+// Credentials returns copies of all registered credentials.
+func (v *Verifier) Credentials() []Credential {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	out := make([]Credential, 0, len(v.creds))
+	for _, c := range v.creds {
+		cp := *c
+		cp.ID = bytes.Clone(c.ID)
+		cp.PublicKey = bytes.Clone(c.PublicKey)
+		cp.UserHandle = bytes.Clone(c.UserHandle)
+		out = append(out, cp)
+	}
+	return out
 }
 
 // Count returns the number of registered credentials.
@@ -204,6 +248,9 @@ func (v *Verifier) Verify(assertionJSON, challenge []byte, req Requirement) ([]b
 			return nil, fmt.Errorf("%w: %v", ErrCounterStore, err)
 		}
 		cred.SignCount = newCount
+		if newCount > v.stored[string(cred.ID)] {
+			v.stored[string(cred.ID)] = newCount // a later Remove and Add must not start lower
+		}
 	}
 	return bytes.Clone(cred.ID), nil
 }

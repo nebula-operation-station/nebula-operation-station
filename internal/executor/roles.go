@@ -29,5 +29,10 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_ListTrustedArtifacts_FullMethodName:      {admin},
 		pb.ExecutorService_SetHostCriticality_FullMethodName:        {admin},
 		pb.ExecutorService_ListHostCriticality_FullMethodName:       {admin},
+		pb.ExecutorService_CreateRegistrationCode_FullMethodName:    {admin},
+		pb.ExecutorService_BeginRegistration_FullMethodName:         {server},
+		pb.ExecutorService_FinishRegistration_FullMethodName:        {server},
+		pb.ExecutorService_ListWebAuthnCredentials_FullMethodName:   {admin},
+		pb.ExecutorService_RemoveWebAuthnCredential_FullMethodName:  {admin},
 	}
 }

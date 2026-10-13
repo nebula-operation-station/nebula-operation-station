@@ -11,6 +11,7 @@
 /internal/peercred/             @Garm82
 /internal/keyring/              @Garm82
 /internal/webauthnverify/       @Garm82
+/internal/webauthnreg/          @Garm82
 /internal/fsguard/              @Garm82
 /internal/executor/              @Garm82
 /internal/executordb/            @Garm82

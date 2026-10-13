@@ -177,3 +177,29 @@ func TestCounterSaveFailureRejectsAssertion(t *testing.T) {
 		t.Fatalf("stored counter %d, want 5", got)
 	}
 }
+
+func TestRemoveAndReAddKeepsCounter(t *testing.T) {
+	f := newFixture(t, virtualwebauthn.AuthenticatorOptions{})
+	f.cred.Counter = 7
+	c := challenge(t)
+	if _, err := f.v.Verify(f.sign(f.rp, c), c, Requirement{}); err != nil {
+		t.Fatal(err)
+	}
+	if !f.v.Has(f.cred.ID) || len(f.v.Credentials()) != 1 {
+		t.Fatal("credential not listed")
+	}
+	if !f.v.Remove(f.cred.ID) || f.v.Has(f.cred.ID) {
+		t.Fatal("remove failed")
+	}
+	if f.v.Remove(f.cred.ID) {
+		t.Fatal("second remove reported success")
+	}
+	// Re-adding with a stale counter starts at the highest value seen.
+	if err := f.v.Add(Credential{ID: f.cred.ID, PublicKey: f.cred.Key.AttestationData()}); err != nil {
+		t.Fatal(err)
+	}
+	c = challenge(t)
+	if _, err := f.v.Verify(f.sign(f.rp, c), c, Requirement{}); !errors.Is(err, ErrCounterRegression) {
+		t.Fatalf("counter 7 accepted again after remove and re-add: %v", err)
+	}
+}

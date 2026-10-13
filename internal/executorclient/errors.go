@@ -9,6 +9,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnreg"
 )
 
 // Failure codes that the client defines itself. The permit codes come from
@@ -66,6 +67,20 @@ var (
 	// ID may get ErrExecutionIDReused if the binding reached the disk
 	// before the error; then create a new execution.
 	ErrStorage = &Error{Code: string(permit.CodeStorage)}
+	// ErrRegistrationCodeInvalid: the one-time registration code is wrong,
+	// used or expired; create a new one with `nebula webauthn code`.
+	ErrRegistrationCodeInvalid = &Error{Code: string(webauthnreg.CodeCodeInvalid)}
+	// ErrRegistrationNotAllowed: no credential exists yet (use a code), or
+	// hardened mode forbids browser-authorized registration.
+	ErrRegistrationNotAllowed = &Error{Code: string(webauthnreg.CodeNotAllowed)}
+	// ErrRegistrationNotFound: the registration does not exist or was used.
+	ErrRegistrationNotFound = &Error{Code: string(webauthnreg.CodeNotFound)}
+	// ErrRegistrationExpired: the registration expired; start a new one.
+	ErrRegistrationExpired = &Error{Code: string(webauthnreg.CodeExpired)}
+	// ErrAttestationRejected: the new credential's attestation did not verify.
+	ErrAttestationRejected = &Error{Code: string(webauthnreg.CodeAttestation)}
+	// ErrCredentialExists: the credential is already registered.
+	ErrCredentialExists = &Error{Code: string(webauthnreg.CodeExists)}
 	// ErrCredentialUnavailable: the requested credential is not loaded.
 	ErrCredentialUnavailable = &Error{Code: codeCredentialMissing}
 	// ErrPrecondition: the executor state does not allow the call and no
@@ -134,7 +149,7 @@ var policyBlockedCodes = map[string]bool{
 
 // knownCodes are the failure codes the executor may send in a status message.
 var knownCodes = func() map[string]bool {
-	m := make(map[string]bool, 20)
+	m := make(map[string]bool, 32)
 	for _, c := range []string{
 		string(permit.CodeInvalidRequest),
 		string(permit.CodeExecutionIDReused),
@@ -155,6 +170,13 @@ var knownCodes = func() map[string]bool {
 		string(permit.CodeNoChallenge),
 		string(permit.CodeStorage),
 		string(permit.CodeRiskAboveApproval),
+		string(webauthnreg.CodeCodeInvalid),
+		string(webauthnreg.CodeNotAllowed),
+		string(webauthnreg.CodeNotFound),
+		string(webauthnreg.CodeExpired),
+		string(webauthnreg.CodeAttestation),
+		string(webauthnreg.CodeAssertion),
+		string(webauthnreg.CodeExists),
 		codeVaultLocked,
 		codeCredentialMissing,
 	} {

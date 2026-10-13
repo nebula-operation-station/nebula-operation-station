@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -38,6 +39,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnreg"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
 )
 
@@ -59,15 +61,16 @@ var (
 )
 
 type harness struct {
-	t      *testing.T
-	logs   *syncBuffer
-	socket string
-	client pb.ExecutorServiceClient
-	rp     virtualwebauthn.RelyingParty
-	id     *identity
-	db     *executordb.DB
-	stopFn func()
-	once   sync.Once
+	t        *testing.T
+	logs     *syncBuffer
+	socket   string
+	client   pb.ExecutorServiceClient
+	rp       virtualwebauthn.RelyingParty
+	id       *identity
+	db       *executordb.DB
+	verifier *webauthnverify.Verifier
+	stopFn   func()
+	once     sync.Once
 }
 
 // stop shuts the executor down and releases executor.db. It is safe to call
@@ -88,6 +91,8 @@ type harnessOptions struct {
 	// proposed risk_class alone selects the approval path (the Milestone 0
 	// tests rely on that). H01 tests set up their own risk data.
 	untrusted bool
+	// noCredential starts without the harness identity registered (H03).
+	noCredential bool
 }
 
 // identity is a virtual authenticator with one registered credential.
@@ -144,13 +149,27 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 	}
 	writeEncryptedKey(t, keysDir, credRef)
 
-	verifier, err := webauthnverify.New(webauthnverify.Config{RPID: rpID, Origins: []string{origin}, Counters: db},
-		[]webauthnverify.Credential{{ID: h.id.cred.ID, PublicKey: h.id.cred.Key.AttestationData()}})
+	h.logs = &syncBuffer{}
+	log := slog.New(slog.NewJSONHandler(h.logs, nil))
+	// The harness identity is registered as if through H03 (unless a test
+	// starts without credentials); credentials are then loaded from
+	// executor.db exactly as the executor does.
+	if !o.noCredential {
+		err := db.AddWebAuthnCredential(executordb.WebAuthnCredential{
+			ID: h.id.cred.ID, PublicKey: h.id.cred.Key.AttestationData(), UserName: "admin", CreatedBy: "test-harness",
+		})
+		if err != nil && !errors.Is(err, executordb.ErrCredentialExists) {
+			t.Fatal(err)
+		}
+	}
+	creds, err := executor.LoadCredentials(db, o.dataDir, log)
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.logs = &syncBuffer{}
-	log := slog.New(slog.NewJSONHandler(h.logs, nil))
+	verifier, err := webauthnverify.New(webauthnverify.Config{RPID: rpID, Origins: []string{origin}, Counters: db}, creds)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !o.untrusted {
 		trustDefaults(t, db)
 	}
@@ -162,7 +181,14 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := executor.NewService(auth, keyring.New(keysDir), db, log)
+	reg, err := webauthnreg.New(webauthnreg.Config{
+		RPID: rpID, Origins: []string{origin}, Audit: executor.RegistrationAuditLogger(log),
+	}, verifier, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.verifier = verifier
+	svc := executor.NewService(auth, keyring.New(keysDir), db, reg, log)
 	policy := peercred.NewPolicy(o.uidRoles, executor.MethodRoles())
 
 	sockDir := t.TempDir()

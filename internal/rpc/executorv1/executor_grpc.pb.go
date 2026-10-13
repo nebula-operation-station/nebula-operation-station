@@ -36,6 +36,11 @@ const (
 	ExecutorService_ListTrustedArtifacts_FullMethodName      = "/nebula.executor.v1.ExecutorService/ListTrustedArtifacts"
 	ExecutorService_SetHostCriticality_FullMethodName        = "/nebula.executor.v1.ExecutorService/SetHostCriticality"
 	ExecutorService_ListHostCriticality_FullMethodName       = "/nebula.executor.v1.ExecutorService/ListHostCriticality"
+	ExecutorService_CreateRegistrationCode_FullMethodName    = "/nebula.executor.v1.ExecutorService/CreateRegistrationCode"
+	ExecutorService_BeginRegistration_FullMethodName         = "/nebula.executor.v1.ExecutorService/BeginRegistration"
+	ExecutorService_FinishRegistration_FullMethodName        = "/nebula.executor.v1.ExecutorService/FinishRegistration"
+	ExecutorService_ListWebAuthnCredentials_FullMethodName   = "/nebula.executor.v1.ExecutorService/ListWebAuthnCredentials"
+	ExecutorService_RemoveWebAuthnCredential_FullMethodName  = "/nebula.executor.v1.ExecutorService/RemoveWebAuthnCredential"
 )
 
 // ExecutorServiceClient is the client API for ExecutorService service.
@@ -92,6 +97,20 @@ type ExecutorServiceClient interface {
 	SetHostCriticality(ctx context.Context, in *SetHostCriticalityRequest, opts ...grpc.CallOption) (*SetHostCriticalityResponse, error)
 	// Role: admin.
 	ListHostCriticality(ctx context.Context, in *ListHostCriticalityRequest, opts ...grpc.CallOption) (*ListHostCriticalityResponse, error)
+	// Role: admin. Creates a single-use code for the next registration
+	// (15 minutes); replaces an unused earlier code.
+	CreateRegistrationCode(ctx context.Context, in *CreateRegistrationCodeRequest, opts ...grpc.CallOption) (*CreateRegistrationCodeResponse, error)
+	// Role: server. Starts a registration and returns the WebAuthn options.
+	BeginRegistration(ctx context.Context, in *BeginRegistrationRequest, opts ...grpc.CallOption) (*BeginRegistrationResponse, error)
+	// Role: server. Completes a registration. Single use: the registration is
+	// consumed whether or not it succeeds.
+	FinishRegistration(ctx context.Context, in *FinishRegistrationRequest, opts ...grpc.CallOption) (*FinishRegistrationResponse, error)
+	// Role: admin.
+	ListWebAuthnCredentials(ctx context.Context, in *ListWebAuthnCredentialsRequest, opts ...grpc.CallOption) (*ListWebAuthnCredentialsResponse, error)
+	// Role: admin. Removes a credential and locks the executor (ends the
+	// privileged session, revokes every permit, cancels pending
+	// registrations and the outstanding code).
+	RemoveWebAuthnCredential(ctx context.Context, in *RemoveWebAuthnCredentialRequest, opts ...grpc.CallOption) (*RemoveWebAuthnCredentialResponse, error)
 }
 
 type executorServiceClient struct {
@@ -252,6 +271,56 @@ func (c *executorServiceClient) ListHostCriticality(ctx context.Context, in *Lis
 	return out, nil
 }
 
+func (c *executorServiceClient) CreateRegistrationCode(ctx context.Context, in *CreateRegistrationCodeRequest, opts ...grpc.CallOption) (*CreateRegistrationCodeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateRegistrationCodeResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_CreateRegistrationCode_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) BeginRegistration(ctx context.Context, in *BeginRegistrationRequest, opts ...grpc.CallOption) (*BeginRegistrationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BeginRegistrationResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_BeginRegistration_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) FinishRegistration(ctx context.Context, in *FinishRegistrationRequest, opts ...grpc.CallOption) (*FinishRegistrationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FinishRegistrationResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_FinishRegistration_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ListWebAuthnCredentials(ctx context.Context, in *ListWebAuthnCredentialsRequest, opts ...grpc.CallOption) (*ListWebAuthnCredentialsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListWebAuthnCredentialsResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ListWebAuthnCredentials_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) RemoveWebAuthnCredential(ctx context.Context, in *RemoveWebAuthnCredentialRequest, opts ...grpc.CallOption) (*RemoveWebAuthnCredentialResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RemoveWebAuthnCredentialResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_RemoveWebAuthnCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExecutorServiceServer is the server API for ExecutorService service.
 // All implementations must embed UnimplementedExecutorServiceServer
 // for forward compatibility.
@@ -306,6 +375,20 @@ type ExecutorServiceServer interface {
 	SetHostCriticality(context.Context, *SetHostCriticalityRequest) (*SetHostCriticalityResponse, error)
 	// Role: admin.
 	ListHostCriticality(context.Context, *ListHostCriticalityRequest) (*ListHostCriticalityResponse, error)
+	// Role: admin. Creates a single-use code for the next registration
+	// (15 minutes); replaces an unused earlier code.
+	CreateRegistrationCode(context.Context, *CreateRegistrationCodeRequest) (*CreateRegistrationCodeResponse, error)
+	// Role: server. Starts a registration and returns the WebAuthn options.
+	BeginRegistration(context.Context, *BeginRegistrationRequest) (*BeginRegistrationResponse, error)
+	// Role: server. Completes a registration. Single use: the registration is
+	// consumed whether or not it succeeds.
+	FinishRegistration(context.Context, *FinishRegistrationRequest) (*FinishRegistrationResponse, error)
+	// Role: admin.
+	ListWebAuthnCredentials(context.Context, *ListWebAuthnCredentialsRequest) (*ListWebAuthnCredentialsResponse, error)
+	// Role: admin. Removes a credential and locks the executor (ends the
+	// privileged session, revokes every permit, cancels pending
+	// registrations and the outstanding code).
+	RemoveWebAuthnCredential(context.Context, *RemoveWebAuthnCredentialRequest) (*RemoveWebAuthnCredentialResponse, error)
 	mustEmbedUnimplementedExecutorServiceServer()
 }
 
@@ -360,6 +443,21 @@ func (UnimplementedExecutorServiceServer) SetHostCriticality(context.Context, *S
 }
 func (UnimplementedExecutorServiceServer) ListHostCriticality(context.Context, *ListHostCriticalityRequest) (*ListHostCriticalityResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListHostCriticality not implemented")
+}
+func (UnimplementedExecutorServiceServer) CreateRegistrationCode(context.Context, *CreateRegistrationCodeRequest) (*CreateRegistrationCodeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateRegistrationCode not implemented")
+}
+func (UnimplementedExecutorServiceServer) BeginRegistration(context.Context, *BeginRegistrationRequest) (*BeginRegistrationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BeginRegistration not implemented")
+}
+func (UnimplementedExecutorServiceServer) FinishRegistration(context.Context, *FinishRegistrationRequest) (*FinishRegistrationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method FinishRegistration not implemented")
+}
+func (UnimplementedExecutorServiceServer) ListWebAuthnCredentials(context.Context, *ListWebAuthnCredentialsRequest) (*ListWebAuthnCredentialsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListWebAuthnCredentials not implemented")
+}
+func (UnimplementedExecutorServiceServer) RemoveWebAuthnCredential(context.Context, *RemoveWebAuthnCredentialRequest) (*RemoveWebAuthnCredentialResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RemoveWebAuthnCredential not implemented")
 }
 func (UnimplementedExecutorServiceServer) mustEmbedUnimplementedExecutorServiceServer() {}
 func (UnimplementedExecutorServiceServer) testEmbeddedByValue()                         {}
@@ -652,6 +750,96 @@ func _ExecutorService_ListHostCriticality_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_CreateRegistrationCode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateRegistrationCodeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).CreateRegistrationCode(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_CreateRegistrationCode_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).CreateRegistrationCode(ctx, req.(*CreateRegistrationCodeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_BeginRegistration_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BeginRegistrationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).BeginRegistration(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_BeginRegistration_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).BeginRegistration(ctx, req.(*BeginRegistrationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_FinishRegistration_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FinishRegistrationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).FinishRegistration(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_FinishRegistration_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).FinishRegistration(ctx, req.(*FinishRegistrationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ListWebAuthnCredentials_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListWebAuthnCredentialsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ListWebAuthnCredentials(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ListWebAuthnCredentials_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ListWebAuthnCredentials(ctx, req.(*ListWebAuthnCredentialsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_RemoveWebAuthnCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveWebAuthnCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).RemoveWebAuthnCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_RemoveWebAuthnCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).RemoveWebAuthnCredential(ctx, req.(*RemoveWebAuthnCredentialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ExecutorService_ServiceDesc is the grpc.ServiceDesc for ExecutorService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -718,6 +906,26 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListHostCriticality",
 			Handler:    _ExecutorService_ListHostCriticality_Handler,
+		},
+		{
+			MethodName: "CreateRegistrationCode",
+			Handler:    _ExecutorService_CreateRegistrationCode_Handler,
+		},
+		{
+			MethodName: "BeginRegistration",
+			Handler:    _ExecutorService_BeginRegistration_Handler,
+		},
+		{
+			MethodName: "FinishRegistration",
+			Handler:    _ExecutorService_FinishRegistration_Handler,
+		},
+		{
+			MethodName: "ListWebAuthnCredentials",
+			Handler:    _ExecutorService_ListWebAuthnCredentials_Handler,
+		},
+		{
+			MethodName: "RemoveWebAuthnCredential",
+			Handler:    _ExecutorService_RemoveWebAuthnCredential_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
