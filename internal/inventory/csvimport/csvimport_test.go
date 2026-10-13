@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 )
 
 // fixedMapping is the mapping used by most tests: id, display name, two
@@ -247,6 +249,111 @@ func TestParseRowValidationErrors(t *testing.T) {
 			joined := strings.Join(res.Rows[0].Errors, "; ")
 			if !strings.Contains(joined, tc.wantSub) {
 				t.Fatalf("errors = %q, want substring %q", joined, tc.wantSub)
+			}
+		})
+	}
+}
+
+// TestParseEndpointCells checks that endpoint cells may carry a port (or
+// be a bare IPv6 address) and are parsed with sshtransport.ParseEndpoint.
+func TestParseEndpointCells(t *testing.T) {
+	cases := []struct {
+		name    string
+		cell    string
+		want    inventory.Endpoint
+		wantSub string
+	}{
+		{"ipv4 bare", "10.0.0.5", inventory.Endpoint{Address: "10.0.0.5", Port: 0}, ""},
+		{"ipv4 with port", "10.0.0.5:2222", inventory.Endpoint{Address: "10.0.0.5", Port: 2222}, ""},
+		{"hostname with port", "srv1.lan:2200", inventory.Endpoint{Address: "srv1.lan", Port: 2200}, ""},
+		{"ipv6 bracketed with port", "[fd00::1]:2222", inventory.Endpoint{Address: "fd00::1", Port: 2222}, ""},
+		{"bare ipv6", "fd00::1", inventory.Endpoint{Address: "fd00::1", Port: 0}, ""},
+		{"bad port", "10.0.0.5:99999", inventory.Endpoint{}, "endpoint 1"},
+		{"bad host", "not an ip", inventory.Endpoint{}, "endpoint 1"},
+		{"brackets around ipv4", "[10.0.0.5]", inventory.Endpoint{}, "endpoint 1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := parseOK(t, "id,ip,env,crit\nweb-1,"+tc.cell+",DEV,LOW\n",
+				Mapping{FieldID: "id", EndpointField(1): "ip", FieldEnvironment: "env", FieldCriticality: "crit"})
+			if len(res.Rows) != 1 {
+				t.Fatalf("rows = %d", len(res.Rows))
+			}
+			row := res.Rows[0]
+			if tc.wantSub != "" {
+				joined := strings.Join(row.Errors, "; ")
+				if !strings.Contains(joined, tc.wantSub) {
+					t.Fatalf("errors = %q, want substring %q", joined, tc.wantSub)
+				}
+				if len(row.Host.Endpoints) != 0 {
+					t.Fatalf("endpoints = %+v, want none for a failing cell", row.Host.Endpoints)
+				}
+				return
+			}
+			if len(row.Errors) != 0 {
+				t.Fatalf("errors = %v, want none", row.Errors)
+			}
+			if len(row.Host.Endpoints) != 1 || row.Host.Endpoints[0] != tc.want {
+				t.Fatalf("endpoints = %+v, want %+v", row.Host.Endpoints, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseDuplicateIDs checks that later rows with an already-seen host
+// ID get the duplicate error (case-sensitive, empty IDs not compared).
+func TestParseDuplicateIDs(t *testing.T) {
+	cases := []struct {
+		name string
+		data string
+		// want maps the 1-based row number to the exact duplicate error
+		// that row must carry; rows not listed must not carry one.
+		want map[int]string
+	}{
+		{
+			"no duplicates",
+			fixedHeader + "\nweb-1,One,10.0.0.11,,,,\nweb-2,Two,10.0.0.12,,,,\n",
+			map[int]string{},
+		},
+		{
+			"second row duplicates",
+			fixedHeader + "\nweb-1,One,10.0.0.11,,,,\nweb-1,Again,10.0.0.12,,,,\n",
+			map[int]string{2: `id "web-1" is duplicated (first at row 1)`},
+		},
+		{
+			"both later rows duplicate",
+			fixedHeader + "\nweb-1,One,10.0.0.11,,,,\nweb-1,Again,10.0.0.12,,,,\nweb-1,Third,10.0.0.13,,,,\n",
+			map[int]string{
+				2: `id "web-1" is duplicated (first at row 1)`,
+				3: `id "web-1" is duplicated (first at row 1)`,
+			},
+		},
+		{
+			"comparison is case-sensitive",
+			fixedHeader + "\nweb-1,One,10.0.0.11,,,,\nWEB-1,Other,10.0.0.12,,,,\n",
+			map[int]string{},
+		},
+		{
+			"empty ids are not compared",
+			fixedHeader + "\n,,10.0.0.11,,,,\n,,10.0.0.12,,,,\n",
+			map[int]string{},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := parseOK(t, tc.data, fixedMapping)
+			for i, row := range res.Rows {
+				n := i + 1
+				joined := strings.Join(row.Errors, "; ")
+				want, ok := tc.want[n]
+				has := strings.Contains(joined, "is duplicated (first at row")
+				if has != ok {
+					t.Errorf("row %d: duplicate error present = %v, want %v (errors = %v)", n, has, ok, row.Errors)
+					continue
+				}
+				if ok && !strings.Contains(joined, want) {
+					t.Errorf("row %d: errors = %q, want the exact error %q", n, joined, want)
+				}
 			}
 		})
 	}

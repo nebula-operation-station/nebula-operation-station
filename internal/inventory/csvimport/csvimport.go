@@ -25,6 +25,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
 )
 
 // Limits (spec 09: maximum payload size, maximum object count, maximum
@@ -178,6 +179,7 @@ func Parse(data []byte, mapping Mapping) (*Result, error) {
 	}
 
 	res := &Result{Columns: header, Rows: []Row{}}
+	seenID := map[string]int{} // host ID -> 1-based row number of first occurrence
 	for {
 		rec, err := r.Read()
 		if errors.Is(err, io.EOF) {
@@ -209,6 +211,15 @@ func Parse(data []byte, mapping Mapping) (*Result, error) {
 		if i, ok := fieldCol[FieldID]; ok {
 			h.ID = rec[i]
 		}
+		if h.ID != "" {
+			// IDs are compared case-sensitively (they are lowercase by
+			// validation anyway); empty IDs are not compared.
+			if first, dup := seenID[h.ID]; dup {
+				row.Errors = append(row.Errors, fmt.Sprintf("id %q is duplicated (first at row %d)", h.ID, first))
+			} else {
+				seenID[h.ID] = row.Number
+			}
+		}
 		if i, ok := fieldCol[FieldDisplayName]; ok {
 			h.DisplayName = rec[i]
 		}
@@ -221,7 +232,12 @@ func Parse(data []byte, mapping Mapping) (*Result, error) {
 		h.Endpoints = []inventory.Endpoint{}
 		for n := 1; n <= MaxEndpoints; n++ {
 			if i, ok := fieldCol[EndpointField(n)]; ok && rec[i] != "" {
-				h.Endpoints = append(h.Endpoints, inventory.Endpoint{Address: rec[i]})
+				ep, err := sshtransport.ParseEndpoint(rec[i])
+				if err != nil {
+					row.Errors = append(row.Errors, fmt.Sprintf("endpoint %d: %v", n, err))
+					continue
+				}
+				h.Endpoints = append(h.Endpoints, inventory.Endpoint{Address: ep.Host, Port: int(ep.Port)})
 			}
 		}
 		if i, ok := fieldCol[FieldTags]; ok && rec[i] != "" {
