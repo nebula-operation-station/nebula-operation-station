@@ -163,18 +163,35 @@ func hostCmd(ctx context.Context, c pb.ExecutorServiceClient, args []string) err
 	switch {
 	case len(args) == 1 && args[0] == "list":
 		return hostList(ctx, c, os.Stdout)
-	case len(args) == 4 && args[0] == "criticality":
-		rc, err := parseRisk(args[3])
+	case (len(args) == 3 || len(args) == 4) && args[0] == "criticality":
+		// HOST LEVEL binds to the pinned key; HOST FINGERPRINT LEVEL for a
+		// host that is not pinned yet (or to check the pin).
+		fp := ""
+		if len(args) == 4 {
+			fp = args[2]
+		}
+		rc, err := parseRisk(args[len(args)-1])
 		if err != nil {
 			return err
 		}
-		if _, err := c.SetHostCriticality(ctx, &pb.SetHostCriticalityRequest{
-			HostId: args[1], HostKeyFingerprint: args[2], Criticality: rc,
-		}); err != nil {
+		resp, err := c.SetHostCriticality(ctx, &pb.SetHostCriticalityRequest{
+			HostId: args[1], HostKeyFingerprint: fp, Criticality: rc,
+		})
+		if err != nil {
 			return err
 		}
-		fmt.Printf("%s (%s): criticality %s\n", args[1], args[2], shortRisk(rc))
+		fmt.Printf("%s (%s): criticality %s\n", args[1], displaySafe([]byte(resp.GetHostKeyFingerprint()), 60), shortRisk(rc))
 		return nil
+	case len(args) >= 1 && args[0] == "probe":
+		return hostProbe(ctx, c, args[1:], os.Stdout)
+	case len(args) >= 1 && args[0] == "pin":
+		return hostPin(ctx, c, args[1:], os.Stdin, os.Stdout)
+	case len(args) >= 1 && args[0] == "unpin":
+		return hostUnpin(ctx, c, args[1:], os.Stdin, os.Stdout)
+	case len(args) == 1 && args[0] == "keys":
+		return hostKeys(ctx, c, os.Stdout)
+	case len(args) >= 1 && args[0] == "test":
+		return hostTest(ctx, c, args[1:], os.Stdout)
 	case len(args) == 2 && args[0] == "clear":
 		resp, err := c.SetHostCriticality(ctx, &pb.SetHostCriticalityRequest{HostId: args[1], Clear: true})
 		if err != nil {
@@ -191,12 +208,15 @@ func hostCmd(ctx context.Context, c pb.ExecutorServiceClient, args []string) err
 	}
 }
 
-const hostUsage = `usage: nebula host criticality HOST SHA256:FINGERPRINT LOW|MEDIUM|HIGH|CRITICAL
+const hostUsage = `usage: nebula host criticality HOST [SHA256:FINGERPRINT] LOW|MEDIUM|HIGH|CRITICAL
        nebula host clear HOST
        nebula host list
-FINGERPRINT is the host's pinned key as the executor sees it: copy it from the
-targets shown by "nebula approve" and check it on the host itself with
-ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub (not with ssh-keyscan)`
+For a pinned host (nebula host keys) the record binds to the pinned key and the
+fingerprint can be left out. Otherwise FINGERPRINT is the host's key: check it on
+the host itself with ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+(not with ssh-keyscan).
+
+` + hostKeysUsage
 
 func hostList(ctx context.Context, c pb.ExecutorServiceClient, w io.Writer) error {
 	resp, err := c.ListHostCriticality(ctx, &pb.ListHostCriticalityRequest{})

@@ -41,6 +41,11 @@ const (
 	ExecutorService_FinishRegistration_FullMethodName        = "/nebula.executor.v1.ExecutorService/FinishRegistration"
 	ExecutorService_ListWebAuthnCredentials_FullMethodName   = "/nebula.executor.v1.ExecutorService/ListWebAuthnCredentials"
 	ExecutorService_RemoveWebAuthnCredential_FullMethodName  = "/nebula.executor.v1.ExecutorService/RemoveWebAuthnCredential"
+	ExecutorService_ProbeHostKey_FullMethodName              = "/nebula.executor.v1.ExecutorService/ProbeHostKey"
+	ExecutorService_PinHostKey_FullMethodName                = "/nebula.executor.v1.ExecutorService/PinHostKey"
+	ExecutorService_UnpinHostKey_FullMethodName              = "/nebula.executor.v1.ExecutorService/UnpinHostKey"
+	ExecutorService_ListHostKeys_FullMethodName              = "/nebula.executor.v1.ExecutorService/ListHostKeys"
+	ExecutorService_TestConnection_FullMethodName            = "/nebula.executor.v1.ExecutorService/TestConnection"
 )
 
 // ExecutorServiceClient is the client API for ExecutorService service.
@@ -111,6 +116,22 @@ type ExecutorServiceClient interface {
 	// privileged session, revokes every permit, cancels pending
 	// registrations and the outstanding code).
 	RemoveWebAuthnCredential(ctx context.Context, in *RemoveWebAuthnCredentialRequest, opts ...grpc.CallOption) (*RemoveWebAuthnCredentialResponse, error)
+	// Role: admin. Reads the host key of one endpoint without sending a user
+	// name or credential.
+	ProbeHostKey(ctx context.Context, in *ProbeHostKeyRequest, opts ...grpc.CallOption) (*ProbeHostKeyResponse, error)
+	// Role: admin. Pins a host key and binds the host to one SSH user and one
+	// credential reference. A host that is already pinned must be unpinned
+	// first.
+	PinHostKey(ctx context.Context, in *PinHostKeyRequest, opts ...grpc.CallOption) (*PinHostKeyResponse, error)
+	// Role: admin. Removes a pin (and a mismatch block with it); the host
+	// cannot be connected until it is pinned again.
+	UnpinHostKey(ctx context.Context, in *UnpinHostKeyRequest, opts ...grpc.CallOption) (*UnpinHostKeyResponse, error)
+	// Role: server, admin. Lists the pins; public data only.
+	ListHostKeys(ctx context.Context, in *ListHostKeysRequest, opts ...grpc.CallOption) (*ListHostKeysResponse, error)
+	// Role: admin. Connects to a pinned host with its credential (the keyring
+	// must be unlocked) over the given endpoints, in order, and disconnects.
+	// A host key mismatch blocks the host.
+	TestConnection(ctx context.Context, in *TestConnectionRequest, opts ...grpc.CallOption) (*TestConnectionResponse, error)
 }
 
 type executorServiceClient struct {
@@ -321,6 +342,56 @@ func (c *executorServiceClient) RemoveWebAuthnCredential(ctx context.Context, in
 	return out, nil
 }
 
+func (c *executorServiceClient) ProbeHostKey(ctx context.Context, in *ProbeHostKeyRequest, opts ...grpc.CallOption) (*ProbeHostKeyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProbeHostKeyResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ProbeHostKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) PinHostKey(ctx context.Context, in *PinHostKeyRequest, opts ...grpc.CallOption) (*PinHostKeyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PinHostKeyResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_PinHostKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) UnpinHostKey(ctx context.Context, in *UnpinHostKeyRequest, opts ...grpc.CallOption) (*UnpinHostKeyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UnpinHostKeyResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_UnpinHostKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ListHostKeys(ctx context.Context, in *ListHostKeysRequest, opts ...grpc.CallOption) (*ListHostKeysResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListHostKeysResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ListHostKeys_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) TestConnection(ctx context.Context, in *TestConnectionRequest, opts ...grpc.CallOption) (*TestConnectionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TestConnectionResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_TestConnection_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExecutorServiceServer is the server API for ExecutorService service.
 // All implementations must embed UnimplementedExecutorServiceServer
 // for forward compatibility.
@@ -389,6 +460,22 @@ type ExecutorServiceServer interface {
 	// privileged session, revokes every permit, cancels pending
 	// registrations and the outstanding code).
 	RemoveWebAuthnCredential(context.Context, *RemoveWebAuthnCredentialRequest) (*RemoveWebAuthnCredentialResponse, error)
+	// Role: admin. Reads the host key of one endpoint without sending a user
+	// name or credential.
+	ProbeHostKey(context.Context, *ProbeHostKeyRequest) (*ProbeHostKeyResponse, error)
+	// Role: admin. Pins a host key and binds the host to one SSH user and one
+	// credential reference. A host that is already pinned must be unpinned
+	// first.
+	PinHostKey(context.Context, *PinHostKeyRequest) (*PinHostKeyResponse, error)
+	// Role: admin. Removes a pin (and a mismatch block with it); the host
+	// cannot be connected until it is pinned again.
+	UnpinHostKey(context.Context, *UnpinHostKeyRequest) (*UnpinHostKeyResponse, error)
+	// Role: server, admin. Lists the pins; public data only.
+	ListHostKeys(context.Context, *ListHostKeysRequest) (*ListHostKeysResponse, error)
+	// Role: admin. Connects to a pinned host with its credential (the keyring
+	// must be unlocked) over the given endpoints, in order, and disconnects.
+	// A host key mismatch blocks the host.
+	TestConnection(context.Context, *TestConnectionRequest) (*TestConnectionResponse, error)
 	mustEmbedUnimplementedExecutorServiceServer()
 }
 
@@ -458,6 +545,21 @@ func (UnimplementedExecutorServiceServer) ListWebAuthnCredentials(context.Contex
 }
 func (UnimplementedExecutorServiceServer) RemoveWebAuthnCredential(context.Context, *RemoveWebAuthnCredentialRequest) (*RemoveWebAuthnCredentialResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RemoveWebAuthnCredential not implemented")
+}
+func (UnimplementedExecutorServiceServer) ProbeHostKey(context.Context, *ProbeHostKeyRequest) (*ProbeHostKeyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ProbeHostKey not implemented")
+}
+func (UnimplementedExecutorServiceServer) PinHostKey(context.Context, *PinHostKeyRequest) (*PinHostKeyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PinHostKey not implemented")
+}
+func (UnimplementedExecutorServiceServer) UnpinHostKey(context.Context, *UnpinHostKeyRequest) (*UnpinHostKeyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UnpinHostKey not implemented")
+}
+func (UnimplementedExecutorServiceServer) ListHostKeys(context.Context, *ListHostKeysRequest) (*ListHostKeysResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListHostKeys not implemented")
+}
+func (UnimplementedExecutorServiceServer) TestConnection(context.Context, *TestConnectionRequest) (*TestConnectionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method TestConnection not implemented")
 }
 func (UnimplementedExecutorServiceServer) mustEmbedUnimplementedExecutorServiceServer() {}
 func (UnimplementedExecutorServiceServer) testEmbeddedByValue()                         {}
@@ -840,6 +942,96 @@ func _ExecutorService_RemoveWebAuthnCredential_Handler(srv interface{}, ctx cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_ProbeHostKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProbeHostKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ProbeHostKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ProbeHostKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ProbeHostKey(ctx, req.(*ProbeHostKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_PinHostKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PinHostKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).PinHostKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_PinHostKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).PinHostKey(ctx, req.(*PinHostKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_UnpinHostKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UnpinHostKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).UnpinHostKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_UnpinHostKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).UnpinHostKey(ctx, req.(*UnpinHostKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ListHostKeys_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListHostKeysRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ListHostKeys(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ListHostKeys_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ListHostKeys(ctx, req.(*ListHostKeysRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_TestConnection_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TestConnectionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).TestConnection(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_TestConnection_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).TestConnection(ctx, req.(*TestConnectionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ExecutorService_ServiceDesc is the grpc.ServiceDesc for ExecutorService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -926,6 +1118,26 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RemoveWebAuthnCredential",
 			Handler:    _ExecutorService_RemoveWebAuthnCredential_Handler,
+		},
+		{
+			MethodName: "ProbeHostKey",
+			Handler:    _ExecutorService_ProbeHostKey_Handler,
+		},
+		{
+			MethodName: "PinHostKey",
+			Handler:    _ExecutorService_PinHostKey_Handler,
+		},
+		{
+			MethodName: "UnpinHostKey",
+			Handler:    _ExecutorService_UnpinHostKey_Handler,
+		},
+		{
+			MethodName: "ListHostKeys",
+			Handler:    _ExecutorService_ListHostKeys_Handler,
+		},
+		{
+			MethodName: "TestConnection",
+			Handler:    _ExecutorService_TestConnection_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

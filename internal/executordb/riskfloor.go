@@ -162,33 +162,48 @@ func (db *DB) ArtifactRisk(sha256Hex, actionID, moduleVersion string) (canonical
 
 // SetHostCriticality records the criticality of a host and binds it to the
 // host's key fingerprint, replacing an earlier record for the host. A key
-// already recorded for another host is refused.
-func (db *DB) SetHostCriticality(hostID, fingerprint string, c canonical.Risk, by string) error {
+// already recorded for another host is refused. If the host has a pinned
+// key (H05), the record is bound to it: an empty fingerprint means the
+// pinned one, and a different fingerprint is refused. It returns the
+// fingerprint the record was bound to.
+func (db *DB) SetHostCriticality(hostID, fingerprint string, c canonical.Risk, by string) (string, error) {
 	if !canonical.ValidHostID(hostID) {
-		return fmt.Errorf("executordb: %w: host_id %q is malformed", ErrInvalid, hostID)
+		return "", fmt.Errorf("executordb: %w: host_id %q is malformed", ErrInvalid, hostID)
 	}
-	if !canonical.ValidHostKeyFingerprint(fingerprint) {
-		return fmt.Errorf("executordb: %w: host key fingerprint %q is malformed", ErrInvalid, fingerprint)
+	if fingerprint != "" && !canonical.ValidHostKeyFingerprint(fingerprint) {
+		return "", fmt.Errorf("executordb: %w: host key fingerprint %q is malformed", ErrInvalid, fingerprint)
 	}
 	if c.Rank() == 0 {
-		return fmt.Errorf("executordb: %w: criticality %q is unknown", ErrInvalid, c)
+		return "", fmt.Errorf("executordb: %w: criticality %q is unknown", ErrInvalid, c)
 	}
 	if err := checkText("actor", by, maxActorLen, false); err != nil {
-		return err
+		return "", err
 	}
 	tx, err := db.sql.Begin()
 	if err != nil {
-		return fmt.Errorf("executordb: set host criticality: %w", err)
+		return "", fmt.Errorf("executordb: set host criticality: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }() // no-op after Commit
+	var pinned string
+	err = tx.QueryRow(`SELECT fingerprint FROM host_keys WHERE host_id = ?`, hostID).Scan(&pinned)
+	switch {
+	case err == nil && fingerprint == "":
+		fingerprint = pinned
+	case err == nil && fingerprint != pinned:
+		return "", fmt.Errorf("executordb: %w: host %s is pinned to %s, not %s", ErrInvalid, hostID, pinned, fingerprint)
+	case errors.Is(err, sql.ErrNoRows) && fingerprint == "":
+		return "", fmt.Errorf("executordb: %w: host %s has no pinned key; give its fingerprint", ErrInvalid, hostID)
+	case err != nil && !errors.Is(err, sql.ErrNoRows):
+		return "", fmt.Errorf("executordb: set host criticality: %w", err)
+	}
 	var other string
 	err = tx.QueryRow(`SELECT host_id FROM host_criticality WHERE host_key_fingerprint = ? AND host_id != ?`,
 		fingerprint, hostID).Scan(&other)
 	switch {
 	case err == nil:
-		return fmt.Errorf("executordb: %w: key %s is already recorded for host %s", ErrInvalid, fingerprint, other)
+		return "", fmt.Errorf("executordb: %w: key %s is already recorded for host %s", ErrInvalid, fingerprint, other)
 	case !errors.Is(err, sql.ErrNoRows):
-		return fmt.Errorf("executordb: set host criticality: %w", err)
+		return "", fmt.Errorf("executordb: set host criticality: %w", err)
 	}
 	_, err = tx.Exec(`INSERT INTO host_criticality (host_id, host_key_fingerprint, criticality, updated_at, updated_by)
 		VALUES (?, ?, ?, ?, ?)
@@ -199,9 +214,9 @@ func (db *DB) SetHostCriticality(hostID, fingerprint string, c canonical.Risk, b
 		err = tx.Commit()
 	}
 	if err != nil {
-		return fmt.Errorf("executordb: set host criticality: %w", err)
+		return "", fmt.Errorf("executordb: set host criticality: %w", err)
 	}
-	return nil
+	return fingerprint, nil
 }
 
 // ClearHostCriticality removes the record of a host (it then counts as

@@ -69,6 +69,8 @@ type harness struct {
 	id       *identity
 	db       *executordb.DB
 	verifier *webauthnverify.Verifier
+	svc      *executor.Service
+	userKey  ssh.PublicKey // public half of the credRef key (H05)
 	stopFn   func()
 	once     sync.Once
 }
@@ -147,7 +149,7 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 	if err := os.Chmod(keysDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writeEncryptedKey(t, keysDir, credRef)
+	h.userKey = writeEncryptedKey(t, keysDir, credRef)
 
 	h.logs = &syncBuffer{}
 	log := slog.New(slog.NewJSONHandler(h.logs, nil))
@@ -189,6 +191,7 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 	}
 	h.verifier = verifier
 	svc := executor.NewService(auth, keyring.New(keysDir), db, reg, log)
+	h.svc = svc
 	policy := peercred.NewPolicy(o.uidRoles, executor.MethodRoles())
 
 	sockDir := t.TempDir()
@@ -226,15 +229,15 @@ func trustDefaults(t *testing.T, db *executordb.DB) {
 		t.Fatal(err)
 	}
 	for h, fp := range map[string]string{"dockerflux": fpA, "strompi": fpB} {
-		if err := db.SetHostCriticality(h, fp, canonical.RiskLow, "test-harness"); err != nil {
+		if _, err := db.SetHostCriticality(h, fp, canonical.RiskLow, "test-harness"); err != nil {
 			t.Fatal(err)
 		}
 	}
 }
 
-func writeEncryptedKey(t *testing.T, dir, ref string) {
+func writeEncryptedKey(t *testing.T, dir, ref string) ssh.PublicKey {
 	t.Helper()
-	_, k, err := ed25519.GenerateKey(rand.Reader)
+	pub, k, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,6 +248,11 @@ func writeEncryptedKey(t *testing.T, dir, ref string) {
 	if err := os.WriteFile(filepath.Join(dir, ref+".key"), pem.EncodeToMemory(block), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	sp, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sp
 }
 
 func (h *harness) ctx() context.Context {

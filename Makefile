@@ -11,7 +11,7 @@ LDFLAGS       := -s -w \
   -X github.com/nebula-operation-station/nebula-operation-station/internal/version.Version=$(VERSION) \
   -X github.com/nebula-operation-station/nebula-operation-station/internal/version.Commit=$(COMMIT)
 
-.PHONY: all build test test-privileged lint fmt fmt-check generate generate-check vuln fuzz check hooks clean
+.PHONY: all build test test-privileged test-integration lint fmt fmt-check generate generate-check vuln fuzz check hooks clean
 
 all: check build
 
@@ -25,6 +25,10 @@ test:
 test-privileged:
 	$(GO) test -tags privileged -run 'Privileged' -count=1 ./test/security/...
 
+# Needs the SSH test VMs (spec 08, H05); configuration in test/integration.
+test-integration:
+	$(GO) test -tags integration -count=1 -v ./test/integration/...
+
 fmt:
 	gofmt -w $$(git ls-files '*.go')
 
@@ -34,8 +38,10 @@ fmt-check:
 lint: fmt-check
 	$(GO) vet ./...
 	$(GO) vet -tags privileged ./test/security/...
+	$(GO) vet -tags integration ./test/integration/...
 	GOTOOLCHAIN=$(LINT_TOOLCHAIN) $(GO) run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) ./...
 	GOTOOLCHAIN=$(LINT_TOOLCHAIN) $(GO) run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) -tags privileged ./test/security/...
+	GOTOOLCHAIN=$(LINT_TOOLCHAIN) $(GO) run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) -tags integration ./test/integration/...
 	buf lint
 
 generate:

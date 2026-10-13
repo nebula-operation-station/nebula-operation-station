@@ -118,13 +118,13 @@ func TestTrustArtifactValidation(t *testing.T) {
 func TestHostCriticalityDurable(t *testing.T) {
 	dir := privateDir(t)
 	db := openT(t, dir)
-	if err := db.SetHostCriticality("dockerflux", fpA, canonical.RiskCritical, "admin:uid1000"); err != nil {
+	if _, err := db.SetHostCriticality("dockerflux", fpA, canonical.RiskCritical, "admin:uid1000"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SetHostCriticality("strompi", fpB, canonical.RiskLow, "admin:uid1000"); err != nil {
+	if _, err := db.SetHostCriticality("strompi", fpB, canonical.RiskLow, "admin:uid1000"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SetHostCriticality("strompi", fpB, canonical.RiskMedium, "admin:uid1001"); err != nil {
+	if _, err := db.SetHostCriticality("strompi", fpB, canonical.RiskMedium, "admin:uid1001"); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
@@ -165,8 +165,9 @@ func TestHostCriticalityValidation(t *testing.T) {
 		"md5 fingerprint": {"dockerflux", "MD5:aa:bb", canonical.RiskLow, "a"},
 		"unknown crit":    {"dockerflux", fpA, "", "a"},
 		"no actor":        {"dockerflux", fpA, canonical.RiskLow, ""},
+		"no fp, no pin":   {"dockerflux", "", canonical.RiskLow, "a"},
 	} {
-		err := db.SetHostCriticality(c.host, c.fp, c.crit, c.actor)
+		_, err := db.SetHostCriticality(c.host, c.fp, c.crit, c.actor)
 		if !errors.Is(err, ErrInvalid) {
 			t.Errorf("%s: want ErrInvalid, got %v", name, err)
 		}
@@ -188,10 +189,10 @@ func TestRiskConstraintsInSchema(t *testing.T) {
 // host: the server cannot relabel a critical host as a harmless one.
 func TestHostRecordIsBoundToItsKey(t *testing.T) {
 	db := openT(t, privateDir(t))
-	if err := db.SetHostCriticality("dockerflux", fpA, canonical.RiskLow, "admin"); err != nil {
+	if _, err := db.SetHostCriticality("dockerflux", fpA, canonical.RiskLow, "admin"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SetHostCriticality("strompi", fpB, canonical.RiskCritical, "admin"); err != nil {
+	if _, err := db.SetHostCriticality("strompi", fpB, canonical.RiskCritical, "admin"); err != nil {
 		t.Fatal(err)
 	}
 	// A partial match is not exact; it reports the highest related record.
@@ -205,12 +206,12 @@ func TestHostRecordIsBoundToItsKey(t *testing.T) {
 		t.Fatalf("unrelated target: %q %v", got, exact)
 	}
 	// One key, one record: a second host name for strompi's key is refused.
-	err := db.SetHostCriticality("strompi-alias", fpB, canonical.RiskLow, "admin")
+	_, err := db.SetHostCriticality("strompi-alias", fpB, canonical.RiskLow, "admin")
 	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "strompi") {
 		t.Fatalf("key reused for another host: %v", err)
 	}
 	// Re-keying a host (after a legitimate key change) replaces its record.
-	if err := db.SetHostCriticality("dockerflux", fpC, canonical.RiskMedium, "admin"); err != nil {
+	if _, err := db.SetHostCriticality("dockerflux", fpC, canonical.RiskMedium, "admin"); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, _ := db.HostCriticality("dockerflux", fpA); ok {
