@@ -51,6 +51,7 @@
         <th>Environment</th>
         <th>Criticality</th>
         <th>Endpoints</th>
+        <th>State</th>
         <th>SSH key</th>
         <th>Updates</th>
         {{if .InventoryEditable}}<th>Actions</th>{{end}}
@@ -65,6 +66,7 @@
         <td>{{.Environment}}</td>
         <td>{{.Criticality}}</td>
         <td>{{range $i, $e := .Endpoints}}{{if $i}}, {{end}}{{$e}}{{end}}</td>
+        <td><span class="ops ops--{{.OpsState}}">{{.OpsState}}</span> <span class="hint">{{.OpsReason}}</span></td>
         <td>{{.KeyStatus}}</td>
         <td>{{if .UpdatesAlert}}<span class="status--error">{{.Updates}}</span>{{else}}{{.Updates}}{{end}}</td>
         {{if $.InventoryEditable}}

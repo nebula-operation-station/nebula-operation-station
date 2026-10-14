@@ -296,6 +296,10 @@ type hostView struct {
 	// <fingerprint>", "BLOCKED (host key mismatch)", "not enrolled" or
 	// "executor unavailable".
 	KeyStatus string
+	// OpsState is READY, WARNING, UNREACHABLE or UNKNOWN (spec 12) and
+	// OpsReason its "time · reason" text.
+	OpsState  string
+	OpsReason string
 	// Updates summarizes the latest update check, "" if none.
 	Updates string
 	// UpdatesAlert marks pending security updates or a required reboot.
@@ -396,9 +400,13 @@ func (h *Handler) handleInventory(w http.ResponseWriter, r *http.Request) {
 	}
 	keys, keysUnavailable := h.hostKeyStatuses(ctx)
 	var updates map[string]executions.HostUpdates
+	var states map[string]executions.OpsState
 	if h.operations != nil {
 		if updates, err = h.operations.AllUpdates(ctx); err != nil {
 			h.log.Error("list host updates", "error", err)
+		}
+		if states, err = h.operations.AllOpsStates(ctx); err != nil {
+			h.log.Error("list ops states", "error", err)
 		}
 	}
 	for _, host := range hosts {
@@ -409,6 +417,7 @@ func (h *Handler) handleInventory(w http.ResponseWriter, r *http.Request) {
 		if u, ok := updates[host.ID]; ok {
 			v.Updates, v.UpdatesAlert = updatesSummary(u)
 		}
+		v.OpsState, v.OpsReason = opsStateView(states[host.ID], v.KeyStatus)
 		data.Inventory = append(data.Inventory, v)
 	}
 	h.render(w, data)

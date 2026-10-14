@@ -30,6 +30,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
@@ -93,6 +94,8 @@ type Service struct {
 	hosts Hosts
 	log   *slog.Logger
 	now   func() time.Time
+
+	notifier *notify.Notifier
 
 	mu      sync.Mutex
 	running map[string]bool // executions with a dispatcher in this process
@@ -462,6 +465,7 @@ func (s *Service) finishHost(id, actionID, host, class, detail string, exit int,
 	}
 	s.log.Info("audit", "kind", "execution_host_finished", "execution", id, "host", host, "class", class, "exit", exit)
 	s.observe(id, actionID, host, class, result)
+	s.refreshOpsState(s.ctx, host, lastRun{action: actionID, class: class, at: s.now(), ok: true})
 }
 
 func boolInt(b bool) int {

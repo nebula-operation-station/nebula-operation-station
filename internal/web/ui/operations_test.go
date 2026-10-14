@@ -56,6 +56,10 @@ func (f *fakeOps) AllUpdates(context.Context) (map[string]executions.HostUpdates
 	return map[string]executions.HostUpdates{"web": {HostID: "web", Total: 3, Security: 1, RebootRequired: true, ObservedAt: time.Unix(1791960000, 0)}}, nil
 }
 
+func (f *fakeOps) AllOpsStates(context.Context) (map[string]executions.OpsState, error) {
+	return map[string]executions.OpsState{"web": {State: "WARNING", Reason: "1 security updates", ObservedAt: time.Unix(1791960000, 0)}}, nil
+}
+
 func (f *fakeOps) List(context.Context, int) ([]executions.Summary, error) {
 	return []executions.Summary{{ID: opID, ActionID: "core.facts", Risk: "HIGH", State: "finished", CreatedBy: "axel", CreatedAt: time.Unix(1791960000, 0), Hosts: 1}}, nil
 }
@@ -203,7 +207,8 @@ func TestUpdatesAreShownAsText(t *testing.T) {
 	o := ui.Options{PublicOrigin: "https://nebula.example.org", Operations: f,
 		Hosts: func(context.Context) ([]inventory.Host, error) { return []inventory.Host{{ID: "web"}}, nil }}
 	inv := getBody(t, newTestHandler(t, o).Handler(), "/inventory")
-	if !strings.Contains(inv, "1 security / 3 total, reboot required, checked 2026-10-14") {
+	if !strings.Contains(inv, "1 security / 3 total, reboot required, checked 2026-10-14") || !strings.Contains(inv, ">WARNING</span>") ||
+		!strings.Contains(inv, "· 1 security updates") {
 		t.Fatalf("inventory: %s", inv)
 	}
 }

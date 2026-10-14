@@ -21,6 +21,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 )
@@ -318,5 +319,66 @@ func TestSuccessfulUpdateListsAreKept(t *testing.T) {
 	}
 	if _, err := s.Updates(context.Background(), "new"); !errors.Is(err, ErrNoUpdates) {
 		t.Fatal(err)
+	}
+}
+
+func TestEvaluateOpsState(t *testing.T) {
+	at := time.Unix(1791960000, 0)
+	for name, tc := range map[string]struct {
+		run  lastRun
+		upd  *HostUpdates
+		want string
+	}{
+		"never":       {want: StateUnknown},
+		"reachable":   {run: lastRun{action: "core.facts", class: "success", at: at, ok: true}, want: StateReady},
+		"unreachable": {run: lastRun{action: "core.facts", class: "network_unreachable", at: at, ok: true}, want: StateUnreachable},
+		"not back":    {run: lastRun{action: "system.reboot", class: "host_not_returned", at: at, ok: true}, want: StateUnreachable},
+		"failed":      {run: lastRun{action: "package.install_all", class: "postcheck_failed", at: at, ok: true}, want: StateWarning},
+		"security":    {upd: &HostUpdates{Total: 3, Security: 1, ObservedAt: at}, want: StateWarning},
+		"reboot":      {upd: &HostUpdates{RebootRequired: true, ObservedAt: at}, want: StateWarning},
+		"clean":       {run: lastRun{action: "package.list_updates", class: "success", at: at, ok: true}, upd: &HostUpdates{Total: 2, ObservedAt: at}, want: StateReady},
+	} {
+		if got := evaluate(tc.run, tc.upd); got.State != tc.want {
+			t.Errorf("%s: %+v", name, got)
+		}
+	}
+}
+
+type sentEvents struct{ events []notify.Event }
+
+func (s *sentEvents) Name() string { return "test" }
+func (s *sentEvents) Send(_ context.Context, e notify.Event) error {
+	s.events = append(s.events, e)
+	return nil
+}
+
+func TestOpsStateTransitionsNotifyOnce(t *testing.T) {
+	f := &fakeExec{approved: true}
+	s, _ := setup(t, f)
+	sent := &sentEvents{}
+	s.SetNotifier(notify.NewWithSenders(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, sent))
+	run := func() {
+		c, err := s.Create(context.Background(), "axel", "core.facts", []string{"web"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		waitState(t, s, c.ID, "finished")
+	}
+	run() // first state: READY, no transition to notify
+	f.mu.Lock()
+	f.attachErr = status.Error(codes.Unavailable, "x")
+	f.mu.Unlock()
+	run() // not_executed -> UNKNOWN
+	run() // same state again: no repeat
+	f.mu.Lock()
+	f.attachErr = nil
+	f.mu.Unlock()
+	run() // recovered
+	states, err := s.AllOpsStates(context.Background())
+	if err != nil || states["web"].State != StateReady {
+		t.Fatalf("%v %v", states, err)
+	}
+	if len(sent.events) != 2 || sent.events[0].State != StateUnknown || !strings.Contains(sent.events[1].Reason, "recovered") {
+		t.Fatalf("%+v", sent.events)
 	}
 }

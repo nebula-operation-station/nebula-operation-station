@@ -141,3 +141,23 @@ body {
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+.ops {
+  font-weight: 600;
+}
+
+.ops--READY {
+  color: #1b7a3a;
+}
+
+.ops--WARNING {
+  color: #9a6400;
+}
+
+.ops--UNREACHABLE {
+  color: #b3261e;
+}
+
+.ops--UNKNOWN {
+  color: #5f6470;
+}

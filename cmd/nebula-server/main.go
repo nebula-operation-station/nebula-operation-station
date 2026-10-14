@@ -182,6 +182,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 
 	// Operations (M4): planned here, decided and run by the executor.
 	ops := executions.New(connCtx, exec, db, store, log)
+	ops.SetNotifier(notifier)
 	if err := ops.Resume(connCtx); err != nil {
 		log.Error("resume executions", "error", err)
 	}

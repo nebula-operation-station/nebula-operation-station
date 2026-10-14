@@ -36,6 +36,7 @@ import (
 const (
 	KindHostKeyMismatch = "host_key_mismatch"
 	KindTest            = "test"
+	KindOpsState        = "ops_state"
 )
 
 // Event is one notification.
@@ -88,6 +89,8 @@ func (e Event) Title() string {
 		return "Nebula: host key mismatch on " + e.Host
 	case KindTest:
 		return "Nebula: test notification"
+	case KindOpsState:
+		return "Nebula: " + e.Host + " is " + e.State
 	}
 	return "Nebula: " + e.Kind + " " + e.Host
 }

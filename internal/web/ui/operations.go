@@ -29,6 +29,7 @@ type Operations interface {
 	Get(ctx context.Context, id string) (executions.Execution, error)
 	List(ctx context.Context, limit int) ([]executions.Summary, error)
 	AllUpdates(ctx context.Context) (map[string]executions.HostUpdates, error)
+	AllOpsStates(ctx context.Context) (map[string]executions.OpsState, error)
 }
 
 // updatesSummary is the inventory text of an update list and whether it
@@ -381,4 +382,23 @@ func viewUpdates(u osdebian.Updates) *updatesView {
 		v.Packages = v.Packages[:maxShownPackages]
 	}
 	return v
+}
+
+// opsStateView is the inventory text of a host's Ops State. A blocked pin
+// is UNREACHABLE whatever the last run said.
+func opsStateView(o executions.OpsState, keyStatus string) (string, string) {
+	if strings.HasPrefix(keyStatus, "BLOCKED") {
+		return executions.StateUnreachable, "host key mismatch: blocked until re-pinned"
+	}
+	if keyStatus == "not enrolled" {
+		return executions.StateUnknown, "not enrolled"
+	}
+	if o.State == "" {
+		return executions.StateUnknown, "not checked yet"
+	}
+	reason := o.Reason
+	if !o.ObservedAt.IsZero() {
+		reason = o.ObservedAt.UTC().Format("2006-01-02 15:04 MST") + " · " + reason
+	}
+	return o.State, reason
 }
