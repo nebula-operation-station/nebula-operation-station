@@ -100,6 +100,9 @@ type Options struct {
 	// Operations plans and follows executions. Nil leaves the
 	// operations page empty.
 	Operations Operations
+	// Repin re-pins hosts blocked by a host key mismatch. Nil leaves only
+	// the CLI instructions on the dashboard.
+	Repin Repinner
 	// Log receives executor status errors (the page itself only shows
 	// "Executor unavailable"). Nil means slog.Default().
 	Log *slog.Logger
@@ -119,6 +122,7 @@ type Handler struct {
 	inventory  InventoryStore
 	operations Operations
 	log        *slog.Logger
+	repin      Repinner
 }
 
 // New parses the embedded templates and builds a Handler.
@@ -152,6 +156,7 @@ func New(o Options) (*Handler, error) {
 		hostKeys:     o.HostKeys,
 		inventory:    o.Inventory,
 		operations:   o.Operations,
+		repin:        o.Repin,
 		log:          log,
 	}, nil
 }
@@ -193,6 +198,8 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("GET /operations/{id}", h.handleOperation)
 	mux.HandleFunc("POST /operations/create", h.handleOperationCreate)
 	mux.HandleFunc("POST /operations/approve", h.handleOperationApprove)
+	mux.HandleFunc("POST /hostkeys/repin/propose", h.handleRepinPropose)
+	mux.HandleFunc("POST /hostkeys/repin/commit", h.handleRepinCommit)
 	// The login and setup pages only render; the endpoints they call and
 	// the session check live in internal/web/auth.
 	mux.HandleFunc("/login", h.handleBare("Log in", "login", "login.js"))
@@ -247,6 +254,8 @@ type pageData struct {
 	Blocked []blockedView
 	// BlockedUnknown is true when the executor could not be asked.
 	BlockedUnknown bool
+	// RepinEnabled shows the re-pin controls for blocked hosts.
+	RepinEnabled bool
 	// Ops is the data of the operations pages.
 	Ops *operationsData
 	// InventoryEditable is true when Options.Inventory is set; the
@@ -324,7 +333,11 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	data := pageData{Title: "Dashboard", Active: "dashboard", Content: "dashboard", Scripts: []string{"webauthn.js", "dashboard.js"}}
+	data := pageData{Title: "Dashboard", Active: "dashboard", Content: "dashboard", Scripts: []string{"webauthn.js", "dashboard.js"},
+		RepinEnabled: h.repin != nil}
+	if h.repin != nil {
+		data.Scripts = append(data.Scripts, "repin.js")
+	}
 	if h.status != nil {
 		ctx, cancel := context.WithTimeout(r.Context(), statusCallTimeout)
 		defer cancel()

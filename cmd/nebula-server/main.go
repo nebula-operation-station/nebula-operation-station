@@ -207,6 +207,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		HostKeys:     hostKeys,
 		Inventory:    store,
 		Operations:   ops,
+		Repin:        exec,
 		Log:          log,
 	})
 	if err != nil {

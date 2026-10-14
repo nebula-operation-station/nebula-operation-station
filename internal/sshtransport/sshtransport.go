@@ -452,6 +452,17 @@ func keepalive(c *Client, interval time.Duration, max int) {
 // handshake as soon as the key is known, so no user name and no credential
 // is ever sent. The key is checked with CheckHostKey.
 func (c Config) Probe(ctx context.Context, ep Endpoint) (ssh.PublicKey, error) {
+	return c.probe(ctx, ep, preferredAlgorithms)
+}
+
+// ProbeAs is Probe offering only the key type of like, the way a pinned
+// host is connected: a host's new key of the pinned type is what a
+// mismatch block records, whatever other key types the host has.
+func (c Config) ProbeAs(ctx context.Context, ep Endpoint, like ssh.PublicKey) (ssh.PublicKey, error) {
+	return c.probe(ctx, ep, pinnedAlgorithms(like))
+}
+
+func (c Config) probe(ctx context.Context, ep Endpoint, algorithms []string) (ssh.PublicKey, error) {
 	conn, err := c.dialTCP(ctx, ep)
 	if err != nil {
 		return nil, &Error{Class: ClassUnreachable, Attempts: []Attempt{{Endpoint: ep, Stage: StageTCP, Err: err}}}
@@ -463,7 +474,7 @@ func (c Config) Probe(ctx context.Context, ep Endpoint) (ssh.PublicKey, error) {
 			key = k
 			return errProbeDone
 		},
-		HostKeyAlgorithms: preferredAlgorithms,
+		HostKeyAlgorithms: algorithms,
 	}
 	_, err = c.handshake(ctx, conn, ep, cfg)
 	if key == nil {

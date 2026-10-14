@@ -114,6 +114,22 @@ function check(cond, what) {
   await page.fill('label.param[data-action="service.restart"] input', 'cron.service');
   await Promise.all([page.waitForURL(/\/operations\/[0-9a-f-]{36}$/, { timeout: 15000 }), page.click('#operation-create')]);
   check(/service\.restart .*with \{"unit":"cron\.service"\}/.test(await page.textContent('main')), 'the planned service operation shows its parameters');
+  // Re-pin a host whose key changed, from the dashboard, with the key (UV).
+  await page.goto(base + '/dashboard');
+  check(/e2e-moved/.test(await page.textContent('section[aria-label="Host key mismatch"]')), 'the dashboard shows the host with a changed key');
+  await page.click('.repin-start[data-host="e2e-moved"]');
+  await page.waitForSelector('#repin-panel:not([hidden])', { timeout: 15000 });
+  check(/SHA256:/.test(await page.textContent('#repin-presented')) && /HIGH|CRITICAL/.test(await page.textContent('#repin-risk')),
+    'the re-pin proposal shows the new key and a HIGH risk');
+  await page.click('#repin-approve');
+  await page.waitForFunction(() => /compared the fingerprint/.test(document.getElementById('message').textContent), null, { timeout: 15000 });
+  check(true, 're-pin needs the fingerprint comparison to be confirmed');
+  await page.check('#repin-confirm');
+  await page.click('#repin-approve');
+  await page.waitForFunction(() => /Re-pinned|failed|refused|not accepted/.test(document.getElementById('message').textContent), null, { timeout: 30000 });
+  check(/Re-pinned e2e-moved/.test(await page.textContent('#message')), 'host re-pinned after the security key approval');
+  await page.goto(base + '/dashboard');
+  check(!/e2e-moved/.test(await page.textContent('main')), 'the re-pinned host is no longer blocked');
   await page.goto(base + '/dashboard');
   await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('#executor-lock')]);
   check(/Privileged session: none/.test(await page.textContent('main')), 'lock ends the privileged session');

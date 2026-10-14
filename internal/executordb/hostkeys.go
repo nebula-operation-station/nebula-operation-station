@@ -227,3 +227,75 @@ func (db *DB) BlockHost(hostID, presentedFingerprint, endpoint string) (bool, er
 	}
 	return n > 0, nil
 }
+
+// ErrRepinStale is returned by RepinHostKey when the host is no longer in
+// the approved state: not pinned to the approved key, not blocked, or
+// blocked by another event or key.
+var ErrRepinStale = errors.New("executordb: the host is no longer in the approved state")
+
+// RepinHostKey replaces the pin of a blocked host with newKey, in one
+// transaction, only if the host is still pinned to oldFingerprint and
+// blocked by exactly the approved event (blockedAt) with newKey's
+// fingerprint. The host's criticality record moves to the new key, so the
+// risk floor does not change. The block is cleared.
+func (db *DB) RepinHostKey(hostID, oldFingerprint string, blockedAt time.Time, newKey []byte, by string) (HostKey, error) {
+	pk, err := ssh.ParsePublicKey(newKey)
+	if err != nil {
+		return HostKey{}, fmt.Errorf("executordb: %w: host key: %v", ErrInvalid, err)
+	}
+	if len(newKey) > maxHostKeyLen || string(pk.Marshal()) != string(newKey) {
+		return HostKey{}, fmt.Errorf("executordb: %w: host key is not in canonical wire format", ErrInvalid)
+	}
+	if err := sshtransport.CheckHostKey(pk); err != nil {
+		return HostKey{}, fmt.Errorf("executordb: %w: %v", ErrInvalid, err)
+	}
+	if err := checkText("pinned_by", by, maxActorLen, false); err != nil {
+		return HostKey{}, err
+	}
+	newFP := ssh.FingerprintSHA256(pk)
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return HostKey{}, fmt.Errorf("executordb: repin host key: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }() // no-op after Commit
+	k, err := scanHostKey(tx.QueryRow(`SELECT `+hostKeyColumns+` FROM host_keys WHERE host_id = ?`, hostID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return HostKey{}, ErrRepinStale
+	}
+	if err != nil {
+		return HostKey{}, fmt.Errorf("executordb: repin host key: %w", err)
+	}
+	if k.Fingerprint != oldFingerprint || k.Blocked == nil || k.Blocked.At.Unix() != blockedAt.Unix() || k.Blocked.Fingerprint != newFP {
+		return HostKey{}, ErrRepinStale
+	}
+	var other string
+	err = tx.QueryRow(`SELECT host_id FROM host_keys WHERE fingerprint = ? AND host_id != ?`, newFP, hostID).Scan(&other)
+	switch {
+	case err == nil:
+		return HostKey{}, fmt.Errorf("executordb: %w: key %s is already pinned for host %s", ErrInvalid, newFP, other)
+	case !errors.Is(err, sql.ErrNoRows):
+		return HostKey{}, fmt.Errorf("executordb: repin host key: %w", err)
+	}
+	err = tx.QueryRow(`SELECT host_id FROM host_criticality WHERE host_key_fingerprint = ? AND host_id != ?`, newFP, hostID).Scan(&other)
+	switch {
+	case err == nil:
+		return HostKey{}, fmt.Errorf("executordb: %w: key %s is recorded for host %s", ErrInvalid, newFP, other)
+	case !errors.Is(err, sql.ErrNoRows):
+		return HostKey{}, fmt.Errorf("executordb: repin host key: %w", err)
+	}
+	now := db.now().Truncate(time.Second)
+	if _, err := tx.Exec(`UPDATE host_keys SET public_key = ?, fingerprint = ?, source = ?, pinned_at = ?, pinned_by = ?,
+			blocked_at = NULL, blocked_fingerprint = NULL, blocked_endpoint = NULL WHERE host_id = ?`,
+		newKey, newFP, SourceProbe, now.Unix(), by, hostID); err != nil {
+		return HostKey{}, fmt.Errorf("executordb: repin host key: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE host_criticality SET host_key_fingerprint = ?, updated_at = ?, updated_by = ?
+			WHERE host_id = ? AND host_key_fingerprint = ?`, newFP, now.Unix(), by, hostID, oldFingerprint); err != nil {
+		return HostKey{}, fmt.Errorf("executordb: repin host key: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return HostKey{}, fmt.Errorf("executordb: repin host key: %w", err)
+	}
+	k.PublicKey, k.Fingerprint, k.Source, k.PinnedAt, k.PinnedBy, k.Blocked = newKey, newFP, SourceProbe, now, by, nil
+	return k, nil
+}

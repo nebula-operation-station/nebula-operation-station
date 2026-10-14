@@ -52,6 +52,13 @@ import (
 // test/security.
 type direct struct{ s *executor.Service }
 
+func (d direct) ProposeRepin(ctx context.Context, in *pb.ProposeRepinRequest, _ ...grpc.CallOption) (*pb.ProposeRepinResponse, error) {
+	return d.s.ProposeRepin(ctx, in)
+}
+func (d direct) CommitRepin(ctx context.Context, in *pb.CommitRepinRequest, _ ...grpc.CallOption) (*pb.CommitRepinResponse, error) {
+	return d.s.CommitRepin(ctx, in)
+}
+
 func (d direct) BeginLogin(ctx context.Context, in *pb.BeginLoginRequest, _ ...grpc.CallOption) (*pb.BeginLoginResponse, error) {
 	return d.s.BeginLogin(ctx, in)
 }
@@ -161,6 +168,19 @@ func main() {
 	_, err = svc.PinHostKey(context.Background(), &pb.PinHostKeyRequest{HostId: "e2e-host", AuthorizedKey: probe.GetAuthorizedKey(),
 		ExpectedFingerprint: probe.GetFingerprint(), SshUser: "nebula", CredentialRef: "nebula-default", Source: pb.HostKeySource_HOST_KEY_SOURCE_PROBE})
 	must(err)
+	// A host whose key changed: pinned on one server, then reached at
+	// another one, which blocks it (re-pin from the dashboard).
+	movedOld, _, err := hostruntest.Serve(sshPub)
+	must(err)
+	movedNew, _, err := hostruntest.Serve(sshPub)
+	must(err)
+	mp, err := svc.ProbeHostKey(context.Background(), &pb.ProbeHostKeyRequest{Endpoint: movedOld.Addr})
+	must(err)
+	_, err = svc.PinHostKey(context.Background(), &pb.PinHostKeyRequest{HostId: "e2e-moved", AuthorizedKey: mp.GetAuthorizedKey(),
+		ExpectedFingerprint: mp.GetFingerprint(), SshUser: "nebula", CredentialRef: "nebula-default", Source: pb.HostKeySource_HOST_KEY_SOURCE_PROBE})
+	must(err)
+	_, err = svc.TestConnection(context.Background(), &pb.TestConnectionRequest{HostId: "e2e-moved", Endpoints: []string{movedNew.Addr}})
+	must(err)
 	hostAddr, hostPort, err := net.SplitHostPort(host.Addr)
 	must(err)
 	portNum, err := strconv.Atoi(hostPort)
@@ -179,7 +199,7 @@ func main() {
 		r, err := svc.ListHostKeys(ctx, &pb.ListHostKeysRequest{})
 		return r.GetHosts(), err
 	}
-	u, err := ui.New(ui.Options{PublicOrigin: origin, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Log: log})
+	u, err := ui.New(ui.Options{PublicOrigin: origin, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Repin: direct{svc}, Log: log})
 	must(err)
 	mux := http.NewServeMux()
 	// Test hook: issue a one-time code like `nebula webauthn code`.

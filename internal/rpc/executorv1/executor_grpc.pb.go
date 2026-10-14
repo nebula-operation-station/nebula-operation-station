@@ -57,6 +57,8 @@ const (
 	ExecutorService_PinHostKey_FullMethodName                = "/nebula.executor.v1.ExecutorService/PinHostKey"
 	ExecutorService_UnpinHostKey_FullMethodName              = "/nebula.executor.v1.ExecutorService/UnpinHostKey"
 	ExecutorService_ListHostKeys_FullMethodName              = "/nebula.executor.v1.ExecutorService/ListHostKeys"
+	ExecutorService_ProposeRepin_FullMethodName              = "/nebula.executor.v1.ExecutorService/ProposeRepin"
+	ExecutorService_CommitRepin_FullMethodName               = "/nebula.executor.v1.ExecutorService/CommitRepin"
 	ExecutorService_GetSSHPublicKey_FullMethodName           = "/nebula.executor.v1.ExecutorService/GetSSHPublicKey"
 	ExecutorService_TestConnection_FullMethodName            = "/nebula.executor.v1.ExecutorService/TestConnection"
 	ExecutorService_InitVault_FullMethodName                 = "/nebula.executor.v1.ExecutorService/InitVault"
@@ -189,6 +191,17 @@ type ExecutorServiceClient interface {
 	UnpinHostKey(ctx context.Context, in *UnpinHostKeyRequest, opts ...grpc.CallOption) (*UnpinHostKeyResponse, error)
 	// Role: server, admin. Lists the pins; public data only.
 	ListHostKeys(ctx context.Context, in *ListHostKeysRequest, opts ...grpc.CallOption) (*ListHostKeysResponse, error)
+	// Role: server. Proposes re-pinning a host blocked by a host key
+	// mismatch to the key it presented (spec 08: a HIGH action with user
+	// verification). The executor builds the request from its own block
+	// record (host, pinned and presented fingerprint, endpoint, block time);
+	// the caller names only the host. Approve it like any permit
+	// (SubmitAssertion or `nebula approve`), then call CommitRepin.
+	ProposeRepin(ctx context.Context, in *ProposeRepinRequest, opts ...grpc.CallOption) (*ProposeRepinResponse, error)
+	// Role: server. Carries out an approved re-pin: the block must still be
+	// the approved one, and the endpoint must still present the approved
+	// key, which then replaces the pin (with the host's criticality record).
+	CommitRepin(ctx context.Context, in *CommitRepinRequest, opts ...grpc.CallOption) (*CommitRepinResponse, error)
 	// Role: admin. Returns the public half of a loaded SSH key (the keyring
 	// must be unlocked), for the enrollment script.
 	GetSSHPublicKey(ctx context.Context, in *GetSSHPublicKeyRequest, opts ...grpc.CallOption) (*GetSSHPublicKeyResponse, error)
@@ -577,6 +590,26 @@ func (c *executorServiceClient) ListHostKeys(ctx context.Context, in *ListHostKe
 	return out, nil
 }
 
+func (c *executorServiceClient) ProposeRepin(ctx context.Context, in *ProposeRepinRequest, opts ...grpc.CallOption) (*ProposeRepinResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProposeRepinResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ProposeRepin_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) CommitRepin(ctx context.Context, in *CommitRepinRequest, opts ...grpc.CallOption) (*CommitRepinResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitRepinResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_CommitRepin_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *executorServiceClient) GetSSHPublicKey(ctx context.Context, in *GetSSHPublicKeyRequest, opts ...grpc.CallOption) (*GetSSHPublicKeyResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetSSHPublicKeyResponse)
@@ -761,6 +794,17 @@ type ExecutorServiceServer interface {
 	UnpinHostKey(context.Context, *UnpinHostKeyRequest) (*UnpinHostKeyResponse, error)
 	// Role: server, admin. Lists the pins; public data only.
 	ListHostKeys(context.Context, *ListHostKeysRequest) (*ListHostKeysResponse, error)
+	// Role: server. Proposes re-pinning a host blocked by a host key
+	// mismatch to the key it presented (spec 08: a HIGH action with user
+	// verification). The executor builds the request from its own block
+	// record (host, pinned and presented fingerprint, endpoint, block time);
+	// the caller names only the host. Approve it like any permit
+	// (SubmitAssertion or `nebula approve`), then call CommitRepin.
+	ProposeRepin(context.Context, *ProposeRepinRequest) (*ProposeRepinResponse, error)
+	// Role: server. Carries out an approved re-pin: the block must still be
+	// the approved one, and the endpoint must still present the approved
+	// key, which then replaces the pin (with the host's criticality record).
+	CommitRepin(context.Context, *CommitRepinRequest) (*CommitRepinResponse, error)
 	// Role: admin. Returns the public half of a loaded SSH key (the keyring
 	// must be unlocked), for the enrollment script.
 	GetSSHPublicKey(context.Context, *GetSSHPublicKeyRequest) (*GetSSHPublicKeyResponse, error)
@@ -896,6 +940,12 @@ func (UnimplementedExecutorServiceServer) UnpinHostKey(context.Context, *UnpinHo
 }
 func (UnimplementedExecutorServiceServer) ListHostKeys(context.Context, *ListHostKeysRequest) (*ListHostKeysResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListHostKeys not implemented")
+}
+func (UnimplementedExecutorServiceServer) ProposeRepin(context.Context, *ProposeRepinRequest) (*ProposeRepinResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ProposeRepin not implemented")
+}
+func (UnimplementedExecutorServiceServer) CommitRepin(context.Context, *CommitRepinRequest) (*CommitRepinResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CommitRepin not implemented")
 }
 func (UnimplementedExecutorServiceServer) GetSSHPublicKey(context.Context, *GetSSHPublicKeyRequest) (*GetSSHPublicKeyResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetSSHPublicKey not implemented")
@@ -1584,6 +1634,42 @@ func _ExecutorService_ListHostKeys_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_ProposeRepin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProposeRepinRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ProposeRepin(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ProposeRepin_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ProposeRepin(ctx, req.(*ProposeRepinRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_CommitRepin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommitRepinRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).CommitRepin(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_CommitRepin_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).CommitRepin(ctx, req.(*CommitRepinRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ExecutorService_GetSSHPublicKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetSSHPublicKeyRequest)
 	if err := dec(in); err != nil {
@@ -1842,6 +1928,14 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListHostKeys",
 			Handler:    _ExecutorService_ListHostKeys_Handler,
+		},
+		{
+			MethodName: "ProposeRepin",
+			Handler:    _ExecutorService_ProposeRepin_Handler,
+		},
+		{
+			MethodName: "CommitRepin",
+			Handler:    _ExecutorService_CommitRepin_Handler,
 		},
 		{
 			MethodName: "GetSSHPublicKey",
