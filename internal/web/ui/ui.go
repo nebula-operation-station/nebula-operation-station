@@ -111,6 +111,8 @@ func New(o Options) (*Handler, error) {
 var pageFiles = map[string]string{
 	"dashboard": "dashboard.html",
 	"empty":     "empty.html",
+	"login":     "login.html",
+	"setup":     "setup.html",
 }
 
 // Handler returns the UI's http.Handler without the security middleware
@@ -119,6 +121,10 @@ func (h *Handler) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", h.handleRoot)
 	mux.HandleFunc("/dashboard", h.handleDashboard)
+	// The login and setup pages only render; the endpoints they call and
+	// the session check live in internal/web/auth.
+	mux.HandleFunc("/login", h.handleBare("Log in", "login", "login.js"))
+	mux.HandleFunc("/setup", h.handleBare("Register a security key", "setup", "setup.js"))
 	for _, p := range emptyPages {
 		path := p.path
 		mux.HandleFunc(path, h.handleEmpty(path))
@@ -154,6 +160,10 @@ type pageData struct {
 	Active string
 	// Content is the content template name to render inside the layout.
 	Content string
+	// Bare pages (login, setup) are shown without the navigation.
+	Bare bool
+	// Scripts are extra files under /static/ loaded after htmx.
+	Scripts []string
 	// Dashboard only:
 	Status *statusView
 	Hosts  []string
@@ -199,6 +209,16 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		data.Hosts = h.hostNames(r.Context())
 	}
 	h.render(w, data)
+}
+
+func (h *Handler) handleBare(title, content, script string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.render(w, pageData{Title: title, Content: content, Bare: true, Scripts: []string{"webauthn.js", script}})
+	}
 }
 
 func (h *Handler) handleEmpty(path string) http.HandlerFunc {

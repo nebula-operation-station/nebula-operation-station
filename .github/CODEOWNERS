@@ -13,6 +13,7 @@
 /internal/webauthnverify/       @Garm82
 /internal/webauthnreg/          @Garm82
 /internal/sshtransport/         @Garm82
+/internal/web/auth/             @Garm82
 /internal/fsguard/              @Garm82
 /internal/executor/              @Garm82
 /internal/executordb/            @Garm82
@@ -22,4 +23,5 @@
 /scripts/                        @Garm82
 /test/security/                 @Garm82
 /test/integration/              @Garm82
+/test/browser/                  @Garm82
 /deploy/systemd/                @Garm82

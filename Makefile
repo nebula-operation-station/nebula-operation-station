@@ -11,7 +11,7 @@ LDFLAGS       := -s -w \
   -X github.com/nebula-operation-station/nebula-operation-station/internal/version.Version=$(VERSION) \
   -X github.com/nebula-operation-station/nebula-operation-station/internal/version.Commit=$(COMMIT)
 
-.PHONY: all build test test-privileged test-integration lint fmt fmt-check generate generate-check vuln fuzz check hooks clean
+.PHONY: all build test test-privileged test-integration test-browser lint fmt fmt-check generate generate-check vuln fuzz check hooks clean
 
 all: check build
 
@@ -28,6 +28,10 @@ test-privileged:
 # Needs the SSH test VMs (spec 08, H05); configuration in test/integration.
 test-integration:
 	$(GO) test -tags integration -count=1 -v ./test/integration/...
+
+# Needs Node.js with Playwright and Chromium; see test/browser/run.sh.
+test-browser:
+	test/browser/run.sh
 
 fmt:
 	gofmt -w $$(git ls-files '*.go')
