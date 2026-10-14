@@ -13,6 +13,8 @@
 //	NEBULA_IT_KEY_PASSPHRASE  its passphrase, if any (read from the environment,
 //	                   never from the command line)
 //	NEBULA_IT_USER     login user on the VMs (default nebula)
+//	NEBULA_IT_DURABLE  set to 1 to also run a harmless durable job (needs the
+//	                   enrollment's NOPASSWD sudo and systemd on the VMs)
 //
 // Each target gets exactly one failed authentication (a fresh random key) per
 // run. Put the dev VM's address into fail2ban `ignoreip` on the test VMs.
@@ -22,6 +24,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -30,6 +33,10 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/osdebian"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
 )
 
@@ -134,6 +141,8 @@ func TestRealOpenSSH(t *testing.T) {
 			if _, _, err := c.SendRequest("keepalive@openssh.com", true, nil); err != nil {
 				t.Fatalf("keepalive: %v", err)
 			}
+			// Built-in read-only actions over the real transport.
+			runActions(t, ctx, c.Client)
 			c.Close()
 
 			// TCP failure on the first endpoint falls back.
@@ -160,5 +169,67 @@ func TestRealOpenSSH(t *testing.T) {
 				t.Fatalf("unknown key: %v", err)
 			}
 		})
+	}
+}
+
+var itExecCounter int
+
+func runActions(t *testing.T, ctx context.Context, c *ssh.Client) {
+	t.Helper()
+	next := func() string {
+		itExecCounter++
+		return fmt.Sprintf("00000000-0000-4000-9000-%012d", itExecCounter)
+	}
+	facts, _ := actions.Lookup("core.facts")
+	r, err := hostrun.Attached(ctx, c, next(), []byte(`{}`), facts.Script, time.Minute)
+	if err != nil || r.Class != hostrun.ClassSuccess {
+		t.Fatalf("core.facts: %+v %v (log %q)", r, err, r.Log)
+	}
+	f := executions.DecodeFacts(r.Result)
+	if len(f) == 0 {
+		t.Fatalf("core.facts result unreadable: %q", r.Result)
+	}
+	for _, x := range f {
+		t.Logf("  %s: %s", x.Name, x.Value)
+	}
+	lu, _ := actions.Lookup("package.list_updates")
+	r, err = hostrun.Attached(ctx, c, next(), []byte(`{}`), lu.Script, 2*time.Minute)
+	if err != nil || r.Class != hostrun.ClassSuccess {
+		t.Fatalf("package.list_updates: %+v %v (log %q)", r, err, r.Log)
+	}
+	u, err := osdebian.ParseUpdates(r.Result)
+	if err != nil {
+		t.Fatalf("update list unreadable: %v", err)
+	}
+	t.Logf("  updates: %d (%d security, %d kernel), reboot required %v", len(u.Packages), u.Security, u.Kernel, u.RebootRequired)
+
+	if os.Getenv("NEBULA_IT_DURABLE") != "1" {
+		return
+	}
+	id := next()
+	out, detail, err := hostrun.Dispatch(ctx, c, hostrun.DefaultJobConfig, id, []byte(`{"x":1}`), []byte("echo durable >&2\ncat \"$NEBULA_PARAMS\"\n"), time.Minute)
+	if err != nil || out != hostrun.Dispatched {
+		t.Fatalf("durable dispatch: %v %s %v", out, detail, err)
+	}
+	deadline := time.Now().Add(time.Minute)
+	for {
+		st, err := hostrun.Check(ctx, c, hostrun.DefaultJobConfig, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Phase == "finished" {
+			res, err := hostrun.Collect(ctx, c, hostrun.DefaultJobConfig, id, st.ExitCode)
+			if err != nil || res.Class != hostrun.ClassSuccess || string(res.Result) != `{"x":1}` {
+				t.Fatalf("durable result: %+v %v", res, err)
+			}
+			if err := hostrun.Remove(ctx, c, hostrun.DefaultJobConfig, id); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("durable job still %s", st.Phase)
+		}
+		time.Sleep(time.Second)
 	}
 }
