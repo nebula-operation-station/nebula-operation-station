@@ -111,6 +111,13 @@ func (l *lazyExecutor) CompletePrivilegedSession(ctx context.Context, in *pb.Com
 	return nil, errNotConnected
 }
 
+func (l *lazyExecutor) ListHostKeys(ctx context.Context, in *pb.ListHostKeysRequest, opts ...grpc.CallOption) (*pb.ListHostKeysResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ListHostKeys(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
 func (l *lazyExecutor) Lock(ctx context.Context, in *pb.LockRequest, opts ...grpc.CallOption) (*pb.LockResponse, error) {
 	if c := l.c.Load(); c != nil {
 		return c.Lock(ctx, in, opts...)

@@ -95,3 +95,19 @@ body {
   gap: 0.5rem;
   margin-top: 0.75rem;
 }
+
+.inventory {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.inventory th,
+.inventory td {
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid #d9dce6;
+  text-align: left;
+}
+
+.inventory th {
+  background: #f0f2f8;
+}

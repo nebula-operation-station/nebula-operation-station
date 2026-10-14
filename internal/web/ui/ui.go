@@ -21,11 +21,14 @@ import (
 	"html/template"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"google.golang.org/grpc"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/middleware"
 	"github.com/nebula-operation-station/nebula-operation-station/web/static"
@@ -35,6 +38,14 @@ import (
 // statusCallTimeout bounds the GetStatus call made while rendering the
 // dashboard.
 const statusCallTimeout = 5 * time.Second
+
+// inventoryCallTimeout bounds the Hosts and HostKeys calls made while
+// rendering the inventory page.
+const inventoryCallTimeout = 5 * time.Second
+
+// defaultSSHPort is shown for endpoints that omit their port (the
+// inventory stores it explicitly, but a zero port means the default).
+const defaultSSHPort = 22
 
 // StatusProvider returns the executor's status.
 //
@@ -58,6 +69,15 @@ type Options struct {
 	// Nil means no hosts. Values are untrusted host data and are
 	// rendered as text only.
 	HostNames func(ctx context.Context) []string
+	// Hosts returns the managed hosts for the inventory page. Nil means
+	// no hosts. Values are untrusted host data and are rendered as text
+	// only. An error makes the page show "Inventory unavailable"; the
+	// error detail goes to the log only.
+	Hosts func(ctx context.Context) ([]inventory.Host, error)
+	// HostKeys returns the executor's host key pins for the inventory
+	// page. Nil (or an error) makes the SSH key column show "executor
+	// unavailable"; the error detail goes to the log only.
+	HostKeys func(ctx context.Context) ([]*pb.HostKeyPin, error)
 	// Log receives executor status errors (the page itself only shows
 	// "Executor unavailable"). Nil means slog.Default().
 	Log *slog.Logger
@@ -72,6 +92,8 @@ type Handler struct {
 	staticFS  fs.FS
 	status    StatusProvider
 	hostNames func(ctx context.Context) []string
+	hosts     func(ctx context.Context) ([]inventory.Host, error)
+	hostKeys  func(ctx context.Context) ([]*pb.HostKeyPin, error)
 	log       *slog.Logger
 }
 
@@ -102,6 +124,8 @@ func New(o Options) (*Handler, error) {
 		staticFS:     staticFS,
 		status:       o.Status,
 		hostNames:    o.HostNames,
+		hosts:        o.Hosts,
+		hostKeys:     o.HostKeys,
 		log:          log,
 	}, nil
 }
@@ -111,6 +135,7 @@ func New(o Options) (*Handler, error) {
 var pageFiles = map[string]string{
 	"dashboard": "dashboard.html",
 	"empty":     "empty.html",
+	"inventory": "inventory.html",
 	"login":     "login.html",
 	"setup":     "setup.html",
 }
@@ -121,6 +146,7 @@ func (h *Handler) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", h.handleRoot)
 	mux.HandleFunc("/dashboard", h.handleDashboard)
+	mux.HandleFunc("/inventory", h.handleInventory)
 	// The login and setup pages only render; the endpoints they call and
 	// the session check live in internal/web/auth.
 	mux.HandleFunc("/login", h.handleBare("Log in", "login", "login.js"))
@@ -144,7 +170,6 @@ var emptyPages = []struct {
 	path  string
 	title string
 }{
-	{"/inventory", "Inventory"},
 	{"/network", "Network"},
 	{"/operations", "Operations"},
 	{"/runbooks", "Runbooks / Modules"},
@@ -167,6 +192,12 @@ type pageData struct {
 	// Dashboard only:
 	Status *statusView
 	Hosts  []string
+	// Inventory page:
+	// InventoryUnavailable is true when the hosts could not be listed;
+	// the page then shows "Inventory unavailable".
+	InventoryUnavailable bool
+	// Inventory is the table of managed hosts, in ID order.
+	Inventory []hostView
 }
 
 // statusView is the dashboard's executor status, pre-formatted for
@@ -176,6 +207,25 @@ type statusView struct {
 	LockText string
 	// Session is "none" or "active, expires <UTC time>".
 	Session string
+}
+
+// hostView is one row of the inventory table, pre-formatted for
+// display. Every field is untrusted host data, rendered as text only.
+type hostView struct {
+	// ID is the host ID.
+	ID string
+	// DisplayName is the host's display name.
+	DisplayName string
+	// Environment is DEV, QA or PROD.
+	Environment string
+	// Criticality is LOW, MEDIUM, HIGH or CRITICAL.
+	Criticality string
+	// Endpoints are "address:port" strings in stored order.
+	Endpoints []string
+	// KeyStatus is the host's SSH key status: "pinned <key type>
+	// <fingerprint>", "BLOCKED (host key mismatch)", "not enrolled" or
+	// "executor unavailable".
+	KeyStatus string
 }
 
 func (h *Handler) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -209,6 +259,102 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		data.Hosts = h.hostNames(r.Context())
 	}
 	h.render(w, data)
+}
+
+func (h *Handler) handleInventory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	data := pageData{Title: "Inventory", Active: "inventory", Content: "inventory"}
+	if h.hosts == nil {
+		h.render(w, data)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), inventoryCallTimeout)
+	defer cancel()
+	hosts, err := h.hosts(ctx)
+	if err != nil {
+		// The page shows a fixed "Inventory unavailable" message; the
+		// error detail (which can contain internal state) goes to the
+		// log only.
+		h.log.Error("list inventory hosts", "error", err)
+		data.InventoryUnavailable = true
+		h.render(w, data)
+		return
+	}
+	keys, keysUnavailable := h.hostKeyStatuses(ctx)
+	for _, host := range hosts {
+		v := viewHost(host, keys)
+		if keysUnavailable {
+			v.KeyStatus = "executor unavailable"
+		}
+		data.Inventory = append(data.Inventory, v)
+	}
+	h.render(w, data)
+}
+
+// hostKeyStatuses maps a host ID to its SSH key status text. The second
+// return value is true when the executor's pins could not be read (the
+// column then shows "executor unavailable").
+func (h *Handler) hostKeyStatuses(ctx context.Context) (map[string]string, bool) {
+	if h.hostKeys == nil {
+		return nil, true
+	}
+	pins, err := h.hostKeys(ctx)
+	if err != nil {
+		// The column shows a fixed "executor unavailable" message; the
+		// error detail goes to the log only.
+		h.log.Error("list host key pins", "error", err)
+		return nil, true
+	}
+	// The executor pins one key per host; if a host ever has several
+	// pins, the blocked one wins, since it is the state that refuses
+	// connections.
+	byHost := make(map[string]*pb.HostKeyPin, len(pins))
+	for _, pin := range pins {
+		if pin == nil {
+			continue
+		}
+		id := pin.GetHostId()
+		if cur, ok := byHost[id]; !ok || (pin.GetBlocked() && !cur.GetBlocked()) {
+			byHost[id] = pin
+		}
+	}
+	statuses := make(map[string]string, len(byHost))
+	for id, pin := range byHost {
+		if pin.GetBlocked() {
+			statuses[id] = "BLOCKED (host key mismatch)"
+			continue
+		}
+		statuses[id] = "pinned " + pin.GetKeyType() + " " + pin.GetFingerprint()
+	}
+	return statuses, false
+}
+
+// viewHost formats one inventory host for the table.
+func viewHost(host inventory.Host, keys map[string]string) hostView {
+	endpoints := make([]string, len(host.Endpoints))
+	for i, e := range host.Endpoints {
+		port := e.Port
+		if port == 0 {
+			port = defaultSSHPort
+		}
+		// JoinHostPort brackets IPv6 addresses ("[fd00::1]:22").
+		endpoints[i] = net.JoinHostPort(e.Address, strconv.Itoa(port))
+	}
+	keyStatus := "not enrolled"
+	if s, ok := keys[host.ID]; ok {
+		keyStatus = s
+	}
+	return hostView{
+		ID:          host.ID,
+		DisplayName: host.DisplayName,
+		Environment: string(host.Environment),
+		Criticality: string(host.Criticality),
+		Endpoints:   endpoints,
+		KeyStatus:   keyStatus,
+	}
 }
 
 func (h *Handler) handleBare(title, content, script string) http.HandlerFunc {

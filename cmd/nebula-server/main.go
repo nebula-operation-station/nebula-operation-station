@@ -23,6 +23,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executorclient"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
+	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/version"
@@ -138,11 +139,20 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		}
 		return names
 	}
+	hostKeys := func(ctx context.Context) ([]*pb.HostKeyPin, error) {
+		resp, err := exec.ListHostKeys(ctx, &pb.ListHostKeysRequest{})
+		if err != nil {
+			return nil, err
+		}
+		return resp.GetHosts(), nil
+	}
 
 	h, err := ui.New(ui.Options{
 		PublicOrigin: cfg.PublicOrigin,
 		Status:       exec,
 		HostNames:    hostNames,
+		Hosts:        store.List,
+		HostKeys:     hostKeys,
 		Log:          log,
 	})
 	if err != nil {
