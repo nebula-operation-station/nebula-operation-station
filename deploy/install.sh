@@ -20,9 +20,14 @@
 # edited. Each admin user is added to the nebula-rpc group (idempotent)
 # and must log in again for the membership to take effect.
 #
+# The server configuration /etc/nebula/server.json (listen address,
+# public origin, data dir, executor socket) is written only if it does
+# not exist yet; later runs leave it untouched. It contains no secrets.
+#
 # The script is idempotent: re-running it updates the binaries and
-# rewrites the drop-in, but never overwrites unit files you have edited
-# and never touches the data directories.
+# rewrites the drop-in, but never overwrites unit files you have edited,
+# never touches the data directories, and never overwrites an existing
+# /etc/nebula/server.json.
 #
 # Dry run (no root needed, changes nothing):
 #
@@ -142,7 +147,7 @@ admin_users_norm=$(IFS=','; printf '%s' "${admin_list[*]}")
 # --- Dry run: options parsed and validated, nothing is touched --------------
 if [[ "${NEBULA_INSTALL_DRY_RUN:-0}" == "1" ]]; then
   echo "install.sh: dry run: options valid (admin users: ${admin_users_norm}; rp-id: ${rp_id})"
-  echo "install.sh: dry run: would install binaries, units and the executor drop-in; no changes made"
+  echo "install.sh: dry run: would install binaries, units, the executor drop-in and the server config; no changes made"
   exit 0
 fi
 
@@ -258,6 +263,28 @@ fi
 install -m 0644 -o root -g root "${tmp_drop_in}" "${drop_in}"
 rm -f "${tmp_drop_in}"
 
+# --- Server config (created only if absent: never clobber admin edits) -----
+# /etc/nebula/server.json is the nebula-server configuration. It contains
+# no secrets. Re-runs never overwrite it: edit it by hand and restart
+# nebula-server after changing it.
+install -d -m 0755 -o root -g root /etc/nebula
+if [[ -e /etc/nebula/server.json ]]; then
+  echo "install.sh: /etc/nebula/server.json already exists; leaving it untouched"
+else
+  tmp_server_json=$(mktemp)
+  cat > "${tmp_server_json}" <<EOF
+{
+  "listen": "127.0.0.1:8080",
+  "public_origin": "https://${rp_id}",
+  "data_dir": "/var/lib/nebula/server",
+  "executor_socket": "/run/nebula/executor.sock",
+  "executor_user": "nebula-executor"
+}
+EOF
+  install -m 0640 -o root -g nebula-server "${tmp_server_json}" /etc/nebula/server.json
+  rm -f "${tmp_server_json}"
+fi
+
 # --- Start/restart (only after the drop-in is in place) ---------------------
 systemctl daemon-reload
 
@@ -295,16 +322,26 @@ effect.
 
 Next steps:
 
-  1. Create the SSH key for the managed hosts (passphrase from your
+  1. Put a TLS reverse proxy in front of the server (it listens on
+     127.0.0.1:8080 by default) and serve it under https://${rp_id}.
+
+  2. Make sure both services are enabled and running:
+       systemctl enable --now nebula-executor nebula-server
+
+  3. Create the SSH key for the managed hosts (passphrase from your
      password manager):
        sudo -u nebula-executor mkdir -p ${var_lib}/executor/keys
-       sudo -u nebula-executor ssh-keygen -t ed25519 -C nebula-default \\
+       sudo -u nebula-executor ssh-keygen -t ed25519 -C nebula-default \
          -f ${var_lib}/executor/keys/nebula-default.key
 
-  2. Unlock the executor (it starts locked after every restart):
+  4. Unlock the executor (it starts locked after every restart):
        nebula unlock
 
-  3. Check the status:
+  5. Register the first security key: open https://${rp_id}/setup and
+     enter the one-time code from
+       nebula webauthn code
+
+  6. Check the status:
        nebula status
 
 Further changes to the executor flags go into a separate drop-in

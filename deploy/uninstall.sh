@@ -7,12 +7,13 @@
 #   sudo ./deploy/uninstall.sh
 #
 # Deliberately conservative: it stops and removes the units and the
-# binaries, but leaves the system users, group and data directories
-# (/var/lib/nebula) in place. Back up the databases and keys first if
-# you want to keep them (docs/spec/15); remove them manually afterwards
-# if you really want a clean slate:
+# binaries, but leaves the system users, group, the data directories
+# (/var/lib/nebula) and the server configuration (/etc/nebula) in
+# place. Back up the databases and keys first if you want to keep them
+# (docs/spec/15); remove them manually afterwards if you really want a
+# clean slate:
 #
-#   sudo rm -rf /var/lib/nebula
+#   sudo rm -rf /var/lib/nebula /etc/nebula
 #   sudo userdel nebula-server
 #   sudo userdel nebula-executor
 #   sudo groupdel nebula-rpc
@@ -68,6 +69,7 @@ for bin in nebula nebula-server nebula-executor; do
 done
 
 echo "Nebula Operation Station binaries and units removed."
-echo "The users (nebula-server, nebula-executor), the group (nebula-rpc)"
-echo "and the data directories under /var/lib/nebula were left in place."
+echo "The users (nebula-server, nebula-executor), the group (nebula-rpc),"
+echo "the data directories under /var/lib/nebula and the server"
+echo "configuration under /etc/nebula were left in place."
 echo "See the header of this script for manual cleanup."

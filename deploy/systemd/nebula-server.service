@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Reference unit for nebula-server. Listens on 127.0.0.1:8080 by default
+# (see /etc/nebula/server.json); put a TLS reverse proxy in front serving
+# https://<rp-id>.
+[Unit]
+Description=Nebula Operation Station server (web UI)
+Documentation=https://github.com/nebula-operation-station/nebula-operation-station/tree/main/docs
+After=network.target nebula-executor.service
+Wants=nebula-executor.service
+
+[Service]
+Type=simple
+User=nebula-server
+Group=nebula-server
+# nebula-rpc: read access to /run/nebula/executor.sock (SO_PEERCRED).
+SupplementaryGroups=nebula-rpc
+ExecStart=/usr/bin/nebula-server -config /etc/nebula/server.json
+Restart=on-failure
+
+StateDirectory=nebula/server
+StateDirectoryMode=0750
+UMask=0027
+
+# Hardening
+LimitCORE=0
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Unix socket for the executor RPC; TCP for the web UI (loopback only,
+# behind a TLS reverse proxy).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
