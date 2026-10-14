@@ -21,6 +21,7 @@ import (
 	"html/template"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -339,7 +340,8 @@ func viewHost(host inventory.Host, keys map[string]string) hostView {
 		if port == 0 {
 			port = defaultSSHPort
 		}
-		endpoints[i] = e.Address + ":" + strconv.Itoa(port)
+		// JoinHostPort brackets IPv6 addresses ("[fd00::1]:22").
+		endpoints[i] = net.JoinHostPort(e.Address, strconv.Itoa(port))
 	}
 	keyStatus := "not enrolled"
 	if s, ok := keys[host.ID]; ok {

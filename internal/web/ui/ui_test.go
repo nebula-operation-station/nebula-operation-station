@@ -367,7 +367,7 @@ func inventoryHosts() []inventory.Host {
 			DisplayName: "NAS",
 			Environment: inventory.EnvDev,
 			Criticality: inventory.CriticalityLow,
-			Endpoints:   []inventory.Endpoint{{Address: "10.0.0.7", Port: 22}},
+			Endpoints:   []inventory.Endpoint{{Address: "10.0.0.7", Port: 22}, {Address: "fd00::7", Port: 2222}},
 		},
 	}
 }
@@ -397,7 +397,7 @@ func TestInventoryShowsHostsWithKeyStatus(t *testing.T) {
 		"BLOCKED (host key mismatch)",
 		// Not-enrolled host.
 		"nas-01", "NAS", "DEV", "LOW",
-		"10.0.0.7:22",
+		"10.0.0.7:22, [fd00::7]:2222", // IPv6 bracketed, so the port is unambiguous
 		"not enrolled",
 	} {
 		if !strings.Contains(body, want) {
