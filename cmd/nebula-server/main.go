@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Command nebula-server serves the web UI, inventory and planning
-// (Milestone 1). It loads its configuration from a JSON file (flags
-// override the file), opens the server database, connects to the
-// executor over the SO_PEERCRED Unix socket and serves the UI on the
+// Command nebula-server serves the web UI, inventory and planning. It
+// loads its configuration from a JSON file (flags override the file),
+// opens the server database, connects to the executor over the
+// SO_PEERCRED Unix socket (retrying in the background until it is up) and
+// serves the UI behind the WebAuthn login (internal/web/auth) on the
 // configured address until it receives a termination signal.
 package main
 
@@ -12,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"os/signal"
@@ -24,6 +26,8 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/version"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/middleware"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
 
@@ -33,6 +37,26 @@ const DefaultConfigPath = "/etc/nebula/server.json"
 
 // shutdownTimeout bounds the graceful HTTP shutdown after a signal.
 const shutdownTimeout = 10 * time.Second
+
+// pruneInterval is how often expired web sessions are deleted.
+const pruneInterval = time.Hour
+
+func pruneSessions(ctx context.Context, s *auth.Store, log *slog.Logger) {
+	t := time.NewTicker(pruneInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if n, err := s.Prune(ctx); err != nil {
+				log.Error("prune sessions", "error", err)
+			} else if n > 0 {
+				log.Info("pruned expired sessions", "count", n)
+			}
+		}
+	}
+}
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -79,26 +103,22 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 	defer db.Close()
 
-	// An unreachable executor is not fatal: the dashboard shows
-	// "Executor unavailable" until it comes back. A locked executor is
-	// the normal state and is reported on the dashboard as such.
-	var client *executorclient.Client
-	client, err = executorclient.New(ctx, executorclient.Options{
-		SocketPath:   cfg.ExecutorSocket,
-		ExecutorUser: cfg.ExecutorUser,
-	})
-	if err != nil {
-		log.Warn("executor unreachable at startup; the dashboard will show 'Executor unavailable'", "error", err)
-	} else {
-		defer client.Close()
-	}
+	// An unreachable executor is not fatal: the server connects in the
+	// background (and pages show "Executor unavailable" until then). A
+	// locked executor is the normal state after a reboot.
+	exec := &lazyExecutor{}
+	connCtx, stopConnect := context.WithCancel(ctx)
+	defer stopConnect()
+	go exec.connect(connCtx, executorclient.Options{SocketPath: cfg.ExecutorSocket, ExecutorUser: cfg.ExecutorUser}, log)
+	defer exec.close()
 
-	// A nil *executorclient.Client must not be wrapped in the
-	// StatusProvider interface: a typed nil would not compare equal to
-	// nil, and the dashboard would then call it.
-	var status ui.StatusProvider
-	if client != nil {
-		status = client
+	// Web sessions (M2): every page except login, setup and static assets
+	// needs one; logins are verified by the executor.
+	sessions := auth.NewStore(db, nil)
+	go pruneSessions(connCtx, sessions, log)
+	login, err := auth.New(auth.Options{Executor: exec, Sessions: sessions, Log: log})
+	if err != nil {
+		return err
 	}
 
 	store := inventory.New(db)
@@ -121,14 +141,16 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 
 	h, err := ui.New(ui.Options{
 		PublicOrigin: cfg.PublicOrigin,
-		Status:       status,
+		Status:       exec,
 		HostNames:    hostNames,
 		Log:          log,
 	})
 	if err != nil {
 		return err
 	}
-	srv, err := h.Server()
+	// Security middleware first (headers, origin check, body limit), then
+	// the session check, then the pages.
+	srv, err := middleware.NewServer(middleware.Options{PublicOrigin: cfg.PublicOrigin}, login.Wrap(h.Handler()))
 	if err != nil {
 		return err
 	}

@@ -88,8 +88,8 @@ func TestRunServesUIAndShutsDown(t *testing.T) {
 		t.Fatalf("current user: %v", err)
 	}
 	listen := freeListenAddr(t)
-	// The executor socket does not exist: startup must not fail, the
-	// dashboard must show "Executor unavailable".
+	// The executor socket does not exist: startup must not fail; the
+	// server keeps retrying in the background.
 	path := writeConfig(t, dir, map[string]any{
 		"listen":          listen,
 		"public_origin":   "https://nebula.example.org",
@@ -108,14 +108,14 @@ func TestRunServesUIAndShutsDown(t *testing.T) {
 	deadline := time.Now().Add(15 * time.Second)
 	var lastErr error
 	for {
-		resp, err := http.Get(base + "/dashboard")
+		resp, err := http.Get(base + "/login")
 		if err == nil {
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				break
 			}
-			lastErr = fmt.Errorf("GET /dashboard: status %d", resp.StatusCode)
+			lastErr = fmt.Errorf("GET /login: status %d", resp.StatusCode)
 		} else {
 			lastErr = err
 		}
@@ -125,9 +125,34 @@ func TestRunServesUIAndShutsDown(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// The dashboard and a static asset are served with the security
+	// Without a session the dashboard redirects to the login.
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := noRedirect.Get(base + "/dashboard")
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != "/login" {
+		t.Fatalf("GET /dashboard without session: %d %q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	// Login with the executor down: a fixed message, no detail.
+	req, _ := http.NewRequest("POST", base+"/login/begin", strings.NewReader("{}"))
+	req.Header.Set("Origin", "https://nebula.example.org")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable || strings.Contains(string(body), "sock") {
+		t.Fatalf("login with executor down: %d %s", resp.StatusCode, body)
+	}
+
+	// Public pages and a static asset are served with the security
 	// headers from the middleware chain.
-	for _, p := range []string{"/dashboard", "/static/htmx.min.js"} {
+	for _, p := range []string{"/login", "/setup", "/static/htmx.min.js"} {
 		resp, err := http.Get(base + p)
 		if err != nil {
 			t.Fatalf("GET %s: %v", p, err)
@@ -164,4 +189,19 @@ func TestRunServesUIAndShutsDown(t *testing.T) {
 	if !strings.Contains(logged, `"public_origin":"https://nebula.example.org"`) {
 		t.Errorf("startup log missing config attributes; got %s", logged)
 	}
+}
+
+func TestLazyExecutorWithoutConnection(t *testing.T) {
+	var l lazyExecutor
+	ctx := context.Background()
+	if _, err := l.GetStatus(ctx, nil); err != errNotConnected {
+		t.Fatalf("GetStatus: %v", err)
+	}
+	if _, err := l.BeginLogin(ctx, nil); err != errNotConnected {
+		t.Fatalf("BeginLogin: %v", err)
+	}
+	if _, err := l.FinishRegistration(ctx, nil); err != errNotConnected {
+		t.Fatalf("FinishRegistration: %v", err)
+	}
+	l.close() // no client: no panic
 }
