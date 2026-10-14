@@ -205,3 +205,10 @@ func TestLazyExecutorWithoutConnection(t *testing.T) {
 	}
 	l.close() // no client: no panic
 }
+
+func TestLazyExecutorListHostKeysWithoutConnection(t *testing.T) {
+	var l lazyExecutor
+	if _, err := l.ListHostKeys(context.Background(), nil); err != errNotConnected {
+		t.Fatalf("ListHostKeys: %v", err)
+	}
+}

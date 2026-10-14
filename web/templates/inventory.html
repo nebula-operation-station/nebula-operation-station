@@ -1,0 +1,35 @@
+{{define "content"}}
+<h1>Inventory</h1>
+<section class="panel" aria-label="Managed hosts">
+  {{if .InventoryUnavailable}}
+  <p class="status status--error">Inventory unavailable</p>
+  {{else if .Inventory}}
+  <table class="inventory">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Display name</th>
+        <th>Environment</th>
+        <th>Criticality</th>
+        <th>Endpoints</th>
+        <th>SSH key</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Inventory}}
+      <tr>
+        <td>{{.ID}}</td>
+        <td>{{.DisplayName}}</td>
+        <td>{{.Environment}}</td>
+        <td>{{.Criticality}}</td>
+        <td>{{range $i, $e := .Endpoints}}{{if $i}}, {{end}}{{$e}}{{end}}</td>
+        <td>{{.KeyStatus}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p>No managed hosts yet. CSV import and enrollment follow.</p>
+  {{end}}
+</section>
+{{end}}

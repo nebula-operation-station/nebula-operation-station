@@ -20,6 +20,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 	"github.com/nebula-operation-station/nebula-operation-station/web/static"
@@ -342,5 +343,163 @@ func TestDashboardNilLoggerUsesSlogDefault(t *testing.T) {
 	}
 	if strings.Contains(body, "boom-secret-detail") {
 		t.Error("dashboard body contains the raw executor error")
+	}
+}
+
+func inventoryHosts() []inventory.Host {
+	return []inventory.Host{
+		{
+			ID:          "web-01",
+			DisplayName: "Web server 1",
+			Environment: inventory.EnvProd,
+			Criticality: inventory.CriticalityHigh,
+			Endpoints:   []inventory.Endpoint{{Address: "10.0.0.5", Port: 22}, {Address: "10.0.0.5", Port: 2222}},
+		},
+		{
+			ID:          "db-01",
+			DisplayName: "Database 1",
+			Environment: inventory.EnvProd,
+			Criticality: inventory.CriticalityCritical,
+			Endpoints:   []inventory.Endpoint{{Address: "10.0.0.6", Port: 22}},
+		},
+		{
+			ID:          "nas-01",
+			DisplayName: "NAS",
+			Environment: inventory.EnvDev,
+			Criticality: inventory.CriticalityLow,
+			Endpoints:   []inventory.Endpoint{{Address: "10.0.0.7", Port: 22}},
+		},
+	}
+}
+
+func inventoryPins() []*pb.HostKeyPin {
+	return []*pb.HostKeyPin{
+		{HostId: "web-01", KeyType: "ssh-ed25519", Fingerprint: "SHA256:AAAA"},
+		{HostId: "db-01", KeyType: "ssh-ed25519", Fingerprint: "SHA256:BBBB", Blocked: true},
+	}
+}
+
+func TestInventoryShowsHostsWithKeyStatus(t *testing.T) {
+	h := newTestHandler(t, ui.Options{
+		PublicOrigin: "https://nebula.example.org",
+		Hosts:        func(ctx context.Context) ([]inventory.Host, error) { return inventoryHosts(), nil },
+		HostKeys:     func(ctx context.Context) ([]*pb.HostKeyPin, error) { return inventoryPins(), nil },
+	})
+	body := getBody(t, h.Handler(), "/inventory")
+	for _, want := range []string{
+		// Pinned host: all columns, endpoints in stored order.
+		"web-01", "Web server 1", "PROD", "HIGH",
+		"10.0.0.5:22, 10.0.0.5:2222",
+		"pinned ssh-ed25519 SHA256:AAAA",
+		// Blocked host.
+		"db-01", "Database 1", "CRITICAL",
+		"10.0.0.6:22",
+		"BLOCKED (host key mismatch)",
+		// Not-enrolled host.
+		"nas-01", "NAS", "DEV", "LOW",
+		"10.0.0.7:22",
+		"not enrolled",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("inventory missing %q", want)
+		}
+	}
+}
+
+func TestInventoryEmptyShowsHint(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		hosts func(ctx context.Context) ([]inventory.Host, error)
+	}{
+		{name: "empty list", hosts: func(ctx context.Context) ([]inventory.Host, error) { return nil, nil }},
+		{name: "no provider", hosts: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHandler(t, ui.Options{
+				PublicOrigin: "https://nebula.example.org",
+				Hosts:        tc.hosts,
+			})
+			body := getBody(t, h.Handler(), "/inventory")
+			if !strings.Contains(body, "No managed hosts yet. CSV import and enrollment follow.") {
+				t.Errorf("inventory missing empty hint")
+			}
+		})
+	}
+}
+
+func TestInventoryHostsErrorShowsUnavailable(t *testing.T) {
+	var logged bytes.Buffer
+	h := newTestHandler(t, ui.Options{
+		PublicOrigin: "https://nebula.example.org",
+		Hosts:        func(ctx context.Context) ([]inventory.Host, error) { return nil, errors.New(rawExecutorError) },
+		Log:          slog.New(slog.NewTextHandler(&logged, nil)),
+	})
+	body := getBody(t, h.Handler(), "/inventory")
+	if !strings.Contains(body, "Inventory unavailable") {
+		t.Error("inventory missing 'Inventory unavailable'")
+	}
+	for _, fragment := range []string{
+		"Unavailable", "dial unix", "connection refused", "/run/nebula/executor.sock",
+	} {
+		if strings.Contains(body, fragment) {
+			t.Errorf("inventory body contains raw error fragment %q", fragment)
+		}
+	}
+	if !strings.Contains(logged.String(), rawExecutorError) {
+		t.Errorf("logger did not receive the hosts error detail; got %q", logged.String())
+	}
+}
+
+func TestInventoryHostKeysErrorShowsExecutorUnavailable(t *testing.T) {
+	var logged bytes.Buffer
+	h := newTestHandler(t, ui.Options{
+		PublicOrigin: "https://nebula.example.org",
+		Hosts:        func(ctx context.Context) ([]inventory.Host, error) { return inventoryHosts(), nil },
+		HostKeys:     func(ctx context.Context) ([]*pb.HostKeyPin, error) { return nil, errors.New(rawExecutorError) },
+		Log:          slog.New(slog.NewTextHandler(&logged, nil)),
+	})
+	body := getBody(t, h.Handler(), "/inventory")
+	// Every host row shows the fixed column text.
+	if n := strings.Count(body, "executor unavailable"); n != len(inventoryHosts()) {
+		t.Errorf("inventory has %d 'executor unavailable' cells, want %d", n, len(inventoryHosts()))
+	}
+	for _, fragment := range []string{
+		"Unavailable", "dial unix", "connection refused", "/run/nebula/executor.sock",
+	} {
+		if strings.Contains(body, fragment) {
+			t.Errorf("inventory body contains raw error fragment %q", fragment)
+		}
+	}
+	if !strings.Contains(logged.String(), rawExecutorError) {
+		t.Errorf("logger did not receive the host keys error detail; got %q", logged.String())
+	}
+}
+
+func TestInventoryNilHostKeysShowsExecutorUnavailable(t *testing.T) {
+	h := newTestHandler(t, ui.Options{
+		PublicOrigin: "https://nebula.example.org",
+		Hosts:        func(ctx context.Context) ([]inventory.Host, error) { return inventoryHosts(), nil },
+	})
+	body := getBody(t, h.Handler(), "/inventory")
+	if n := strings.Count(body, "executor unavailable"); n != len(inventoryHosts()) {
+		t.Errorf("inventory has %d 'executor unavailable' cells, want %d", n, len(inventoryHosts()))
+	}
+}
+
+func TestInventoryEscapesHostDisplayName(t *testing.T) {
+	malicious := "<script>x</script>"
+	hosts := inventoryHosts()
+	hosts[0].DisplayName = malicious
+	h := newTestHandler(t, ui.Options{
+		PublicOrigin: "https://nebula.example.org",
+		Hosts:        func(ctx context.Context) ([]inventory.Host, error) { return hosts, nil },
+		HostKeys:     func(ctx context.Context) ([]*pb.HostKeyPin, error) { return inventoryPins(), nil },
+	})
+	body := getBody(t, h.Handler(), "/inventory")
+	if strings.Contains(body, malicious) {
+		t.Fatal("host display name rendered unescaped")
+	}
+	if !strings.Contains(body, "&lt;script&gt;x&lt;/script&gt;") {
+		t.Fatal("host display name not rendered escaped")
 	}
 }
