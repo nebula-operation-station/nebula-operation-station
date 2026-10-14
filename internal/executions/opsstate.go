@@ -82,6 +82,8 @@ func evaluate(run lastRun, upd *HostUpdates) OpsState {
 // refreshOpsState recomputes a host's state after the run that just
 // finished and notifies a transition (worse or recovered), never a repeat.
 func (s *Service) refreshOpsState(ctx context.Context, host string, run lastRun) {
+	s.opsMu.Lock()
+	defer s.opsMu.Unlock()
 	var upd *HostUpdates
 	if u, err := s.Updates(ctx, host); err == nil {
 		upd = &u

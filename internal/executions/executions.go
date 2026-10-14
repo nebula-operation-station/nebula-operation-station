@@ -96,6 +96,9 @@ type Service struct {
 	now   func() time.Time
 
 	notifier *notify.Notifier
+	// opsMu serializes Ops State evaluations, so two runs finishing at
+	// once on one host cannot both see the old state and notify twice.
+	opsMu sync.Mutex
 
 	mu      sync.Mutex
 	running map[string]bool // executions with a dispatcher in this process

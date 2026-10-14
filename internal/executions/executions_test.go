@@ -382,3 +382,38 @@ func TestOpsStateTransitionsNotifyOnce(t *testing.T) {
 		t.Fatalf("%+v", sent.events)
 	}
 }
+
+type lockedSender struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (l *lockedSender) Name() string { return "locked" }
+func (l *lockedSender) Send(context.Context, notify.Event) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.n++
+	return nil
+}
+
+// Runs finishing at once on one host must not both report the same
+// transition (Hermes review).
+func TestConcurrentRunsNotifyATransitionOnce(t *testing.T) {
+	s, _ := setup(t, &fakeExec{approved: true})
+	sent := &lockedSender{}
+	s.SetNotifier(notify.NewWithSenders(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, sent))
+	ctx := context.Background()
+	s.refreshOpsState(ctx, "web", lastRun{action: "core.facts", class: "success", at: s.now(), ok: true})
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.refreshOpsState(ctx, "web", lastRun{action: "core.facts", class: "not_executed", at: s.now(), ok: true})
+		}()
+	}
+	wg.Wait()
+	if sent.n != 1 {
+		t.Fatalf("%d notifications for one transition", sent.n)
+	}
+}
