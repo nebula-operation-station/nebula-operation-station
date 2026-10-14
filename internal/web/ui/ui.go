@@ -31,6 +31,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
@@ -295,6 +296,10 @@ type hostView struct {
 	// <fingerprint>", "BLOCKED (host key mismatch)", "not enrolled" or
 	// "executor unavailable".
 	KeyStatus string
+	// Updates summarizes the latest update check, "" if none.
+	Updates string
+	// UpdatesAlert marks pending security updates or a required reboot.
+	UpdatesAlert bool
 }
 
 func (h *Handler) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -390,10 +395,19 @@ func (h *Handler) handleInventory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	keys, keysUnavailable := h.hostKeyStatuses(ctx)
+	var updates map[string]executions.HostUpdates
+	if h.operations != nil {
+		if updates, err = h.operations.AllUpdates(ctx); err != nil {
+			h.log.Error("list host updates", "error", err)
+		}
+	}
 	for _, host := range hosts {
 		v := viewHost(host, keys)
 		if keysUnavailable {
 			v.KeyStatus = "executor unavailable"
+		}
+		if u, ok := updates[host.ID]; ok {
+			v.Updates, v.UpdatesAlert = updatesSummary(u)
 		}
 		data.Inventory = append(data.Inventory, v)
 	}

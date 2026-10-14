@@ -18,6 +18,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/osdebian"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
 )
 
@@ -27,6 +28,26 @@ type Operations interface {
 	Approve(ctx context.Context, user, id string, assertion []byte, typedTargets uint32) error
 	Get(ctx context.Context, id string) (executions.Execution, error)
 	List(ctx context.Context, limit int) ([]executions.Summary, error)
+	AllUpdates(ctx context.Context) (map[string]executions.HostUpdates, error)
+}
+
+// updatesSummary is the inventory text of an update list and whether it
+// needs attention (security updates or a reboot).
+func updatesSummary(u executions.HostUpdates) (string, bool) {
+	var parts []string
+	if u.Total == 0 {
+		parts = append(parts, "up to date")
+	} else {
+		parts = append(parts, strconv.Itoa(u.Security)+" security / "+strconv.Itoa(u.Total)+" total")
+		if u.Kernel > 0 {
+			parts = append(parts, "kernel")
+		}
+	}
+	if u.RebootRequired {
+		parts = append(parts, "reboot required")
+	}
+	parts = append(parts, "checked "+u.ObservedAt.UTC().Format("2006-01-02 15:04 MST"))
+	return strings.Join(parts, ", "), u.Security > 0 || u.RebootRequired
 }
 
 const (
@@ -72,9 +93,11 @@ type execView struct {
 type execHostView struct {
 	ID, State, Class, Detail, Exit string
 	Facts                          []executions.Fact
-	Result, Log                    string
-	ResultCut, LogCut, LogTrunc    bool
-	OK                             bool
+	// Updates is the parsed package.list_updates result.
+	Updates                     *updatesView
+	Result, Log                 string
+	ResultCut, LogCut, LogTrunc bool
+	OK                          bool
 }
 
 func (h *Handler) operationsEnabled(w http.ResponseWriter, r *http.Request) bool {
@@ -202,6 +225,11 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 		if e.ActionID == "core.facts" && x.Class == "success" {
 			hv.Facts = executions.DecodeFacts(x.Result)
 		}
+		if e.ActionID == "package.list_updates" && x.Class == "success" {
+			if u, err := osdebian.ParseUpdates(x.Result); err == nil {
+				hv.Updates = viewUpdates(u)
+			}
+		}
 		res := x.Result
 		var pretty bytes.Buffer
 		if len(res) > 0 && json.Indent(&pretty, res, "", "  ") == nil {
@@ -320,4 +348,30 @@ func (h *Handler) handleOperationApprove(w http.ResponseWriter, r *http.Request)
 			writeJSONError(w, http.StatusBadGateway, "executor unavailable")
 		}
 	}
+}
+
+// maxShownPackages bounds the update table on the page.
+const maxShownPackages = 500
+
+type updatesView struct {
+	Total, Security, Kernel int
+	Reboot                  bool
+	RebootPackages          string
+	ListsUpdated            string
+	Packages                []osdebian.Package
+	More                    int
+}
+
+func viewUpdates(u osdebian.Updates) *updatesView {
+	v := &updatesView{Total: len(u.Packages), Security: u.Security, Kernel: u.Kernel, Reboot: u.RebootRequired,
+		RebootPackages: strings.Join(u.RebootPackages, ", ")}
+	if !u.ListsUpdated.IsZero() {
+		v.ListsUpdated = u.ListsUpdated.UTC().Format("2006-01-02 15:04 MST")
+	}
+	v.Packages = u.Packages
+	if len(v.Packages) > maxShownPackages {
+		v.More = len(v.Packages) - maxShownPackages
+		v.Packages = v.Packages[:maxShownPackages]
+	}
+	return v
 }

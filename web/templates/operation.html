@@ -46,7 +46,7 @@
   </table>
 </section>
 {{range .Hosts}}
-{{if or .Facts .Result .Log}}
+{{if or .Facts .Updates .Result .Log}}
 <section class="panel" aria-label="Output of {{.ID}}">
   <h2>{{.ID}}</h2>
   {{if .Facts}}
@@ -55,6 +55,18 @@
       {{range .Facts}}<tr><th>{{.Name}}</th><td>{{.Value}}</td></tr>{{end}}
     </tbody>
   </table>
+  {{end}}
+  {{with .Updates}}
+  <p class="status">{{.Total}} updates, {{.Security}} security, {{.Kernel}} kernel{{if .Reboot}}, <span class="status--error">reboot required</span>{{if .RebootPackages}} ({{.RebootPackages}}){{end}}{{end}}{{if .ListsUpdated}}. Package lists from {{.ListsUpdated}}.{{end}}</p>
+  {{if .Packages}}
+  <table class="inventory">
+    <thead><tr><th>Package</th><th>Installed</th><th>New</th><th>From</th><th></th></tr></thead>
+    <tbody>
+      {{range .Packages}}<tr><td>{{.Name}}</td><td>{{.From}}</td><td>{{.To}}</td><td>{{range $i, $a := .Archives}}{{if $i}}, {{end}}{{$a}}{{end}}</td><td>{{if .Security}}<span class="status--error">security</span>{{end}}{{if .Kernel}} kernel{{end}}</td></tr>{{end}}
+    </tbody>
+  </table>
+  {{if .More}}<p class="hint">{{.More}} more not shown.</p>{{end}}
+  {{end}}
   {{end}}
   {{if .Result}}
   <details>

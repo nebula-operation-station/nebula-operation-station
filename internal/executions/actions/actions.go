@@ -39,12 +39,28 @@ func (a Action) SHA256() string {
 //go:embed scripts/core_facts.sh
 var coreFacts []byte
 
+//go:embed scripts/package_list_updates.sh
+var packageListUpdates []byte
+
+//go:embed scripts/package_refresh.sh
+var packageRefresh []byte
+
 // Builtin lists the built-in actions in display order.
 var Builtin = []Action{
 	{
 		ID: "core.facts", Version: "1.0.0", Title: "Collect facts",
 		Description: "Reads /etc/os-release, kernel, hostname, uptime and whether the host is a Proxmox VE node. Read-only.",
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 30 * time.Second, ReadOnly: true, Script: coreFacts,
+	},
+	{
+		ID: "package.list_updates", Version: "1.0.0", Title: "Check updates",
+		Description: "Lists pending package updates (security, other, kernel) and whether a reboot is required, from the host's current package lists. Read-only (apt simulation, no root).",
+		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 2 * time.Minute, ReadOnly: true, Script: packageListUpdates,
+	},
+	{
+		ID: "package.refresh", Version: "1.0.0", Title: "Refresh package lists",
+		Description: "Runs apt-get update (with sudo). Changes only the package lists; waits up to 8 minutes for the apt lock.",
+		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 10 * time.Minute, Script: packageRefresh,
 	},
 }
 

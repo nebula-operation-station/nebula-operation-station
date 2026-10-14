@@ -37,6 +37,7 @@ type fakeExec struct {
 	durable   []*pb.StartDurableRequest
 	polls     int
 	released  bool
+	result    []byte
 }
 
 func (f *fakeExec) ListHostKeys(context.Context, *pb.ListHostKeysRequest, ...grpc.CallOption) (*pb.ListHostKeysResponse, error) {
@@ -69,7 +70,11 @@ func (f *fakeExec) RunAttached(_ context.Context, in *pb.RunAttachedRequest, _ .
 	if f.attachErr != nil {
 		return nil, f.attachErr
 	}
-	return &pb.RunAttachedResponse{Class: "success", ExitCode: 0, Result: []byte(`{"ok":true}`), Log: []byte("log")}, nil
+	res := []byte(`{"ok":true}`)
+	if f.result != nil {
+		res = f.result
+	}
+	return &pb.RunAttachedResponse{Class: "success", ExitCode: 0, Result: res, Log: []byte("log")}, nil
 }
 
 func (f *fakeExec) StartDurable(_ context.Context, in *pb.StartDurableRequest, _ ...grpc.CallOption) (*pb.StartDurableResponse, error) {
@@ -290,5 +295,28 @@ func TestDecodeFacts(t *testing.T) {
 	}
 	if DecodeFacts([]byte("not json")) != nil {
 		t.Error("garbage decoded")
+	}
+}
+
+func TestSuccessfulUpdateListsAreKept(t *testing.T) {
+	f := &fakeExec{approved: true}
+	s, _ := setup(t, f)
+	sim := base64.StdEncoding.EncodeToString([]byte("Inst openssl [1] (2 Debian-Security:12/stable-security [amd64])\nInst vim [1] (2 Debian:12/stable [amd64])\n"))
+	f.result = []byte(`{"format":"apt-simulate-v1","mode":"upgrade","simulate":"` + sim + `","reboot_required":false,"reboot_pkgs":"","lists_mtime":1791960000,"proxmox":false}`)
+	c, err := s.Create(context.Background(), "axel", "package.list_updates", []string{"web"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, s, c.ID, "finished")
+	all, err := s.AllUpdates(context.Background())
+	if err != nil || all["web"].Total != 2 || all["web"].Security != 1 {
+		t.Fatalf("%+v %v", all, err)
+	}
+	u, err := s.Updates(context.Background(), "web")
+	if err != nil || len(u.Packages) != 2 || u.Packages[0].Name != "openssl" {
+		t.Fatalf("%+v %v", u, err)
+	}
+	if _, err := s.Updates(context.Background(), "new"); !errors.Is(err, ErrNoUpdates) {
+		t.Fatal(err)
 	}
 }

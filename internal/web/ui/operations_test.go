@@ -4,6 +4,7 @@ package ui_test
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -49,6 +50,10 @@ func (f *fakeOps) Get(_ context.Context, id string) (executions.Execution, error
 		return executions.Execution{}, executions.ErrNotFound
 	}
 	return f.exec, nil
+}
+
+func (f *fakeOps) AllUpdates(context.Context) (map[string]executions.HostUpdates, error) {
+	return map[string]executions.HostUpdates{"web": {HostID: "web", Total: 3, Security: 1, RebootRequired: true, ObservedAt: time.Unix(1791960000, 0)}}, nil
 }
 
 func (f *fakeOps) List(context.Context, int) ([]executions.Summary, error) {
@@ -182,5 +187,23 @@ func TestOperationErrorsAreSafeForTheBrowser(t *testing.T) {
 				t.Fatalf("%d %s", code, resp)
 			}
 		})
+	}
+}
+
+func TestUpdatesAreShownAsText(t *testing.T) {
+	sim := base64.StdEncoding.EncodeToString([]byte("Inst open<b>ssl [1] (2 Debian-Security:12/stable-security [amd64])\nInst openssl [3.0.1] (3.0.2 Debian-Security:12/stable-security [amd64])\n"))
+	f := &fakeOps{exec: executions.Execution{ID: opID, ActionID: "package.list_updates", State: "finished", CreatedAt: time.Unix(1791960000, 0),
+		Hosts: []executions.Host{{HostID: "web", State: "finished", Class: "success",
+			Result: []byte(`{"format":"apt-simulate-v1","mode":"upgrade","simulate":"` + sim + `","reboot_required":true,"reboot_pkgs":"","lists_mtime":0,"proxmox":false}`)}}}}
+	h := opsHandler(t, f, nil)
+	page := getBody(t, h, "/operations/"+opID)
+	if !strings.Contains(page, "1 updates, 1 security") || !strings.Contains(page, "<td>openssl</td><td>3.0.1</td><td>3.0.2</td>") || strings.Contains(page, "open<b>") {
+		t.Fatalf("page: %s", page)
+	}
+	o := ui.Options{PublicOrigin: "https://nebula.example.org", Operations: f,
+		Hosts: func(context.Context) ([]inventory.Host, error) { return []inventory.Host{{ID: "web"}}, nil }}
+	inv := getBody(t, newTestHandler(t, o).Handler(), "/inventory")
+	if !strings.Contains(inv, "1 security / 3 total, reboot required, checked 2026-10-14") {
+		t.Fatalf("inventory: %s", inv)
 	}
 }
