@@ -830,8 +830,11 @@ type BeginPrivilegedSessionResponse struct {
 	Challenge           []byte                 `protobuf:"bytes,1,opt,name=challenge,proto3" json:"challenge,omitempty"`
 	ChallengeExpiryUnix int64                  `protobuf:"varint,2,opt,name=challenge_expiry_unix,json=challengeExpiryUnix,proto3" json:"challenge_expiry_unix,omitempty"`
 	RpId                string                 `protobuf:"bytes,3,opt,name=rp_id,json=rpId,proto3" json:"rp_id,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// CredentialRequestOptions JSON for navigator.credentials.get() over the
+	// challenge (registered credentials, user verification required).
+	RequestOptionsJson []byte `protobuf:"bytes,4,opt,name=request_options_json,json=requestOptionsJson,proto3" json:"request_options_json,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *BeginPrivilegedSessionResponse) Reset() {
@@ -883,6 +886,13 @@ func (x *BeginPrivilegedSessionResponse) GetRpId() string {
 		return x.RpId
 	}
 	return ""
+}
+
+func (x *BeginPrivilegedSessionResponse) GetRequestOptionsJson() []byte {
+	if x != nil {
+		return x.RequestOptionsJson
+	}
+	return nil
 }
 
 type CompletePrivilegedSessionRequest struct {
@@ -3838,11 +3848,12 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x12typed_target_count\x18\x03 \x01(\rR\x10typedTargetCount\"P\n" +
 	"\x17SubmitAssertionResponse\x125\n" +
 	"\x05state\x18\x01 \x01(\x0e2\x1f.nebula.executor.v1.PermitStateR\x05state\"\x1f\n" +
-	"\x1dBeginPrivilegedSessionRequest\"\x87\x01\n" +
+	"\x1dBeginPrivilegedSessionRequest\"\xb9\x01\n" +
 	"\x1eBeginPrivilegedSessionResponse\x12\x1c\n" +
 	"\tchallenge\x18\x01 \x01(\fR\tchallenge\x122\n" +
 	"\x15challenge_expiry_unix\x18\x02 \x01(\x03R\x13challengeExpiryUnix\x12\x13\n" +
-	"\x05rp_id\x18\x03 \x01(\tR\x04rpId\"I\n" +
+	"\x05rp_id\x18\x03 \x01(\tR\x04rpId\x120\n" +
+	"\x14request_options_json\x18\x04 \x01(\fR\x12requestOptionsJson\"I\n" +
 	" CompletePrivilegedSessionRequest\x12%\n" +
 	"\x0eassertion_json\x18\x01 \x01(\fR\rassertionJson\"S\n" +
 	"!CompletePrivilegedSessionResponse\x12.\n" +

@@ -52,6 +52,22 @@ func (d direct) FinishRegistration(ctx context.Context, in *pb.FinishRegistratio
 	return d.s.FinishRegistration(ctx, in)
 }
 
+func (d direct) BeginPrivilegedSession(ctx context.Context, in *pb.BeginPrivilegedSessionRequest, _ ...grpc.CallOption) (*pb.BeginPrivilegedSessionResponse, error) {
+	return d.s.BeginPrivilegedSession(ctx, in)
+}
+
+func (d direct) CompletePrivilegedSession(ctx context.Context, in *pb.CompletePrivilegedSessionRequest, _ ...grpc.CallOption) (*pb.CompletePrivilegedSessionResponse, error) {
+	return d.s.CompletePrivilegedSession(ctx, in)
+}
+
+func (d direct) Lock(ctx context.Context, in *pb.LockRequest, _ ...grpc.CallOption) (*pb.LockResponse, error) {
+	return d.s.Lock(ctx, in)
+}
+
+func (d direct) GetStatus(ctx context.Context, in *pb.GetStatusRequest, _ ...grpc.CallOption) (*pb.GetStatusResponse, error) {
+	return d.s.GetStatus(ctx, in)
+}
+
 func must(err error) {
 	if err != nil {
 		panic(err)
@@ -84,7 +100,7 @@ func main() {
 	must(err)
 	ah, err := auth.New(auth.Options{Executor: direct{svc}, Sessions: auth.NewStore(sdb, nil), Log: log})
 	must(err)
-	u, err := ui.New(ui.Options{PublicOrigin: origin, Log: log})
+	u, err := ui.New(ui.Options{PublicOrigin: origin, Status: direct{svc}, Log: log})
 	must(err)
 	mux := http.NewServeMux()
 	// Test hook: issue a one-time code like `nebula webauthn code`.

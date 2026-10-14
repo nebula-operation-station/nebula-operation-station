@@ -241,6 +241,9 @@ message BeginPrivilegedSessionResponse {
   bytes challenge = 1;
   int64 challenge_expiry_unix = 2;
   string rp_id = 3;
+  // CredentialRequestOptions JSON for navigator.credentials.get() over the
+  // challenge (registered credentials, user verification required).
+  bytes request_options_json = 4;
 }
 
 message CompletePrivilegedSessionRequest {

@@ -4,11 +4,8 @@ package webauthnreg
 
 import (
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"time"
-
-	"github.com/go-webauthn/webauthn/protocol"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
 )
@@ -66,17 +63,7 @@ func (r *Registrar) BeginLogin() (LoginStart, error) {
 	if challenge == nil || idb == nil {
 		return LoginStart{}, errNoRandom
 	}
-	var allow []protocol.CredentialDescriptor
-	for _, c := range r.verifier.Credentials() {
-		allow = append(allow, protocol.CredentialDescriptor{Type: protocol.PublicKeyCredentialType, CredentialID: c.ID})
-	}
-	opts, err := json.Marshal(protocol.CredentialAssertion{Response: protocol.PublicKeyCredentialRequestOptions{
-		Challenge:          challenge,
-		Timeout:            int(LoginTTL / time.Millisecond),
-		RelyingPartyID:     r.cfg.RPID,
-		AllowedCredentials: allow,
-		UserVerification:   protocol.VerificationRequired,
-	}})
+	opts, err := r.RequestOptions(challenge, LoginTTL)
 	if err != nil {
 		return LoginStart{}, err
 	}

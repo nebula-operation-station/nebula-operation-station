@@ -365,13 +365,21 @@ func (r *Registrar) creationOptions(reg *registration) ([]byte, error) {
 }
 
 func (r *Registrar) requestOptions(challenge []byte) ([]byte, error) {
+	return r.RequestOptions(challenge, RegistrationTTL)
+}
+
+// RequestOptions returns CredentialRequestOptions JSON for
+// navigator.credentials.get(): the challenge, every registered credential,
+// and user verification required. The privileged session (permit) uses it
+// for its own challenge.
+func (r *Registrar) RequestOptions(challenge []byte, timeout time.Duration) ([]byte, error) {
 	var allow []protocol.CredentialDescriptor
 	for _, c := range r.verifier.Credentials() {
 		allow = append(allow, protocol.CredentialDescriptor{Type: protocol.PublicKeyCredentialType, CredentialID: c.ID})
 	}
 	return json.Marshal(protocol.CredentialAssertion{Response: protocol.PublicKeyCredentialRequestOptions{
 		Challenge:          challenge,
-		Timeout:            int(RegistrationTTL / time.Millisecond),
+		Timeout:            int(timeout / time.Millisecond),
 		RelyingPartyID:     r.cfg.RPID,
 		AllowedCredentials: allow,
 		UserVerification:   protocol.VerificationRequired,

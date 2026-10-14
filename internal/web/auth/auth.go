@@ -53,6 +53,9 @@ type Executor interface {
 	FinishLogin(ctx context.Context, in *pb.FinishLoginRequest, opts ...grpc.CallOption) (*pb.FinishLoginResponse, error)
 	BeginRegistration(ctx context.Context, in *pb.BeginRegistrationRequest, opts ...grpc.CallOption) (*pb.BeginRegistrationResponse, error)
 	FinishRegistration(ctx context.Context, in *pb.FinishRegistrationRequest, opts ...grpc.CallOption) (*pb.FinishRegistrationResponse, error)
+	BeginPrivilegedSession(ctx context.Context, in *pb.BeginPrivilegedSessionRequest, opts ...grpc.CallOption) (*pb.BeginPrivilegedSessionResponse, error)
+	CompletePrivilegedSession(ctx context.Context, in *pb.CompletePrivilegedSessionRequest, opts ...grpc.CallOption) (*pb.CompletePrivilegedSessionResponse, error)
+	Lock(ctx context.Context, in *pb.LockRequest, opts ...grpc.CallOption) (*pb.LockResponse, error)
 }
 
 // Options configure the Handler.
@@ -109,6 +112,12 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 	mux.HandleFunc("POST /setup/finish", h.setupFinish)
 	mux.HandleFunc("POST /logout", h.logout)
 	api := map[string]bool{"/login/begin": true, "/login/finish": true, "/setup/begin": true, "/setup/finish": true, "/logout": true}
+	// Endpoints that need a session, served here after the session check.
+	protected := http.NewServeMux()
+	protected.HandleFunc("POST /privileged/begin", h.privilegedBegin)
+	protected.HandleFunc("POST /privileged/finish", h.privilegedFinish)
+	protected.HandleFunc("POST /executor/lock", h.executorLock)
+	protectedAPI := map[string]bool{"/privileged/begin": true, "/privileged/finish": true, "/executor/lock": true}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if api[r.URL.Path] {
 			mux.ServeHTTP(w, r)
@@ -132,7 +141,12 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 			h.unauthenticated(w, r)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, sess)))
+		r = r.WithContext(context.WithValue(r.Context(), ctxKey{}, sess))
+		if protectedAPI[r.URL.Path] {
+			protected.ServeHTTP(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

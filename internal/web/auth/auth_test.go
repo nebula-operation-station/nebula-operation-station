@@ -37,6 +37,10 @@ type fakeExec struct {
 	gotCode     string
 	gotFinish   *pb.FinishLoginRequest
 	gotRegister *pb.FinishRegistrationRequest
+
+	gotPrivileged *pb.CompletePrivilegedSessionRequest
+	privErr       error
+	locked        int
 }
 
 func (f *fakeExec) BeginLogin(context.Context, *pb.BeginLoginRequest, ...grpc.CallOption) (*pb.BeginLoginResponse, error) {
@@ -68,6 +72,27 @@ func (f *fakeExec) BeginRegistration(_ context.Context, in *pb.BeginRegistration
 func (f *fakeExec) FinishRegistration(_ context.Context, in *pb.FinishRegistrationRequest, _ ...grpc.CallOption) (*pb.FinishRegistrationResponse, error) {
 	f.gotRegister = in
 	return &pb.FinishRegistrationResponse{}, nil
+}
+
+func (f *fakeExec) BeginPrivilegedSession(context.Context, *pb.BeginPrivilegedSessionRequest, ...grpc.CallOption) (*pb.BeginPrivilegedSessionResponse, error) {
+	return &pb.BeginPrivilegedSessionResponse{RequestOptionsJson: []byte(`{"publicKey":{"challenge":"BBBB"}}`)}, nil
+}
+
+func (f *fakeExec) CompletePrivilegedSession(_ context.Context, in *pb.CompletePrivilegedSessionRequest, _ ...grpc.CallOption) (*pb.CompletePrivilegedSessionResponse, error) {
+	f.mu.Lock()
+	f.gotPrivileged = in
+	f.mu.Unlock()
+	if f.privErr != nil {
+		return nil, f.privErr
+	}
+	return &pb.CompletePrivilegedSessionResponse{SessionExpiryUnix: 1234}, nil
+}
+
+func (f *fakeExec) Lock(context.Context, *pb.LockRequest, ...grpc.CallOption) (*pb.LockResponse, error) {
+	f.mu.Lock()
+	f.locked++
+	f.mu.Unlock()
+	return &pb.LockResponse{}, nil
 }
 
 type clock struct {
@@ -345,5 +370,38 @@ func TestStorePruneAndDeleteAll(t *testing.T) {
 	}
 	if _, err := e.store.Lookup(ctx, "not-a-token"); err != auth.ErrNoSession {
 		t.Fatalf("malformed token: %v", err)
+	}
+}
+
+func TestPrivilegedSessionAndLockNeedAWebSession(t *testing.T) {
+	e := newEnv(t)
+	for _, p := range []string{"/privileged/begin", "/privileged/finish", "/executor/lock"} {
+		if res := e.do("POST", p, `{}`, nil); res.StatusCode != http.StatusUnauthorized {
+			t.Errorf("POST %s without session: %d", p, res.StatusCode)
+		}
+	}
+	if e.exec.locked != 0 || e.exec.gotPrivileged != nil {
+		t.Fatal("executor called without a web session")
+	}
+	c := e.login()
+	res := e.do("POST", "/privileged/begin", `{}`, c)
+	if m := jsonBody(t, res); res.StatusCode != 200 || m["options"] == nil {
+		t.Fatalf("begin: %d %v", res.StatusCode, m)
+	}
+	res = e.do("POST", "/privileged/finish", `{"assertion":{"id":"k"}}`, c)
+	if m := jsonBody(t, res); res.StatusCode != 200 || m["expiry_unix"] != float64(1234) || string(e.exec.gotPrivileged.GetAssertionJson()) != `{"id":"k"}` {
+		t.Fatalf("finish: %d %v", res.StatusCode, m)
+	}
+	e.exec.privErr = status.Error(codes.PermissionDenied, "assertion_rejected: detail")
+	res = e.do("POST", "/privileged/finish", `{"assertion":{}}`, c)
+	if m := jsonBody(t, res); res.StatusCode != 400 || m["error"] != "security key not accepted" {
+		t.Fatalf("rejected: %d %v", res.StatusCode, m)
+	}
+	if res := e.do("POST", "/executor/lock", `{}`, c); res.StatusCode != 200 || e.exec.locked != 1 {
+		t.Fatalf("lock: %d %d", res.StatusCode, e.exec.locked)
+	}
+	// GET is not allowed on these endpoints.
+	if res := e.do("GET", "/executor/lock", "", c); res.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("GET lock: %d", res.StatusCode)
 	}
 }

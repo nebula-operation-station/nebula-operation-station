@@ -191,7 +191,7 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	data := pageData{Title: "Dashboard", Active: "dashboard", Content: "dashboard"}
+	data := pageData{Title: "Dashboard", Active: "dashboard", Content: "dashboard", Scripts: []string{"webauthn.js", "dashboard.js"}}
 	if h.status != nil {
 		ctx, cancel := context.WithTimeout(r.Context(), statusCallTimeout)
 		defer cancel()
