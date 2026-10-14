@@ -128,22 +128,41 @@ the spec) and a cleanup rule for old job directories. **Read it**, copy it
 to the host and run it there as root. If you use fail2ban, add the Nebula
 addresses to `ignoreip` (as IPs, not hostnames).
 
-Then pin the host key, after comparing the fingerprint with
+Then pin the host keys. Compare every fingerprint with
 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the host's console
-(or import it from a `known_hosts` file you trust with `--known-hosts`):
+first: that comparison is what protects you from a machine in between.
+
+**In the web UI (many hosts at once):** Inventory → **Enroll hosts**
+lists the hosts without a pinned key. Select hosts, pick the endpoint and
+SSH user, **Read host keys**: the executor connects to each endpoint and
+shows the key it got (no credential is sent). Compare, tick the
+confirmation and approve with your security key (an open privileged
+session is needed). The executor reads every key once more, pins only
+unchanged ones and tries a login, so the table tells you whether the
+enrollment script ran. Hosts pinned this way count as HIGH until you set
+their criticality on the executor host (below).
+
+**On the executor host (one host, or from a `known_hosts` file you trust
+with `--known-hosts`):**
 
 ```
 nebula host pin --criticality HIGH web-01 192.168.0.21 100.64.0.21
 nebula host test web-01 192.168.0.21
 ```
 
-The criticality you set here is the one the executor uses to decide how
-strong an approval must be; the inventory's value is only for display.
+The criticality set on the executor (`nebula host pin --criticality` or
+`nebula host criticality HOST LEVEL`) is the one the executor uses to
+decide how strong an approval must be; the inventory's value is only for
+display.
 
 **Changed host key.** If a host presents another key (reinstall, or an
 attack), Nebula stops using it, shows it on the dashboard and notifies.
-After you checked the new key: `nebula host unpin web-01`, then pin
-again.
+Check the new key on the host's console, then press **Re-pin…** next to
+the host on the dashboard: it shows the pinned and the presented key,
+asks you to confirm the comparison and needs your security key with user
+verification. Nebula reads the key again before it pins it; the host's
+criticality stays. On the executor host the same is
+`nebula host unpin web-01`, then `nebula host pin` again.
 
 ## 6. Trust the built-in actions (recommended)
 
@@ -207,6 +226,7 @@ found locked after a restart. Messages never contain host output.
 | --- | --- |
 | Nebula machine rebooted | `nebula unlock` |
 | Leaving the UI | Dashboard → **Lock** (or `nebula lock`): wipes keys, ends the session, revokes permits |
+| A host key changed | Compare on the host console, then dashboard → **Re-pin…** |
 | A security key is lost | `nebula webauthn list`, `nebula webauthn remove ID` (locks the executor) |
 | Operation shows `precheck_failed` | Read the reason on the operation page; nothing was installed |
 | Host `UNREACHABLE` | Check the endpoints; `nebula host test HOST ENDPOINT` |
