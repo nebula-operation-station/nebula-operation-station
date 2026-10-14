@@ -8,6 +8,7 @@ import (
 	"crypto/rsa"
 	"errors"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -149,5 +150,55 @@ func TestCriticalityBindsToPinnedKey(t *testing.T) {
 	}
 	if got, err := db.SetHostCriticality("dockerflux", fp, canonical.RiskLow, "admin"); err != nil || got != fp {
 		t.Fatalf("pinned fingerprint: %q %v", got, err)
+	}
+}
+
+func TestRepinHostKeyOnlyForTheApprovedBlock(t *testing.T) {
+	db := openAtT(t, privateDir(t), t0)
+	oldKey, newKey, other := hostPub(t), hostPub(t), hostPub(t)
+	oldFP, newFP := ssh.FingerprintSHA256(oldKey), ssh.FingerprintSHA256(newKey)
+	if _, err := db.PinHostKey(pin("dockerflux", oldKey)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SetHostCriticality("dockerflux", "", canonical.RiskCritical, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	// Not blocked: nothing to re-pin.
+	if _, err := db.RepinHostKey("dockerflux", oldFP, t0, newKey.Marshal(), "web:axel"); !errors.Is(err, ErrRepinStale) {
+		t.Fatalf("unblocked host: %v", err)
+	}
+	if _, err := db.BlockHost("dockerflux", newFP, "192.168.0.10:22"); err != nil {
+		t.Fatal(err)
+	}
+	k, _, _ := db.HostKey("dockerflux")
+	at := k.Blocked.At
+	for name, tc := range map[string]struct {
+		old string
+		at  int64
+		key ssh.PublicKey
+	}{
+		"other presented key": {oldFP, at.Unix(), other},
+		"other block event":   {oldFP, at.Unix() + 1, newKey},
+		"stale pin":           {newFP, at.Unix(), newKey},
+	} {
+		if _, err := db.RepinHostKey("dockerflux", tc.old, time.Unix(tc.at, 0), tc.key.Marshal(), "web:axel"); !errors.Is(err, ErrRepinStale) {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	got, err := db.RepinHostKey("dockerflux", oldFP, at, newKey.Marshal(), "web:axel")
+	if err != nil || got.Fingerprint != newFP || got.Blocked != nil || got.PinnedBy != "web:axel" {
+		t.Fatalf("repin %+v %v", got, err)
+	}
+	k, _, _ = db.HostKey("dockerflux")
+	if k.Fingerprint != newFP || k.Blocked != nil || k.User != "nebula" || k.CredentialRef != "default" {
+		t.Fatalf("stored %+v", k)
+	}
+	// The criticality moved with the key: still exactly CRITICAL.
+	if c, exact, err := db.HostCriticality("dockerflux", newFP); err != nil || !exact || c != canonical.RiskCritical {
+		t.Fatalf("criticality %v %v %v", c, exact, err)
+	}
+	// Done once: the same approval cannot be applied again.
+	if _, err := db.RepinHostKey("dockerflux", oldFP, at, newKey.Marshal(), "web:axel"); !errors.Is(err, ErrRepinStale) {
+		t.Fatalf("second repin: %v", err)
 	}
 }

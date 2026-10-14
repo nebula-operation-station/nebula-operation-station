@@ -317,6 +317,23 @@ func (c *Client) ListHostKeys(ctx context.Context, in *pb.ListHostKeysRequest, o
 	return resp, mapError(err)
 }
 
+// ProposeRepin: Proposes re-pinning a blocked host (server role only).
+func (c *Client) ProposeRepin(ctx context.Context, in *pb.ProposeRepinRequest, opts ...grpc.CallOption) (*pb.ProposeRepinResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ProposeRepin(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// CommitRepin: Carries out an approved re-pin (server role only). It
+// probes the host, so it gets a longer timeout.
+func (c *Client) CommitRepin(ctx context.Context, in *pb.CommitRepinRequest, opts ...grpc.CallOption) (*pb.CommitRepinResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout+30*time.Second)
+	defer cancel()
+	resp, err := c.rpc.CommitRepin(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
 // TestConnection: Tests the SSH connection to a pinned host (admin role only).
 func (c *Client) TestConnection(ctx context.Context, in *pb.TestConnectionRequest, opts ...grpc.CallOption) (*pb.TestConnectionResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)

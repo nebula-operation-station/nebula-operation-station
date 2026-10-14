@@ -111,6 +111,20 @@ func (l *lazyExecutor) CompletePrivilegedSession(ctx context.Context, in *pb.Com
 	return nil, errNotConnected
 }
 
+func (l *lazyExecutor) ProposeRepin(ctx context.Context, in *pb.ProposeRepinRequest, opts ...grpc.CallOption) (*pb.ProposeRepinResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ProposeRepin(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) CommitRepin(ctx context.Context, in *pb.CommitRepinRequest, opts ...grpc.CallOption) (*pb.CommitRepinResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.CommitRepin(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
 func (l *lazyExecutor) ListHostKeys(ctx context.Context, in *pb.ListHostKeysRequest, opts ...grpc.CallOption) (*pb.ListHostKeysResponse, error) {
 	if c := l.c.Load(); c != nil {
 		return c.ListHostKeys(ctx, in, opts...)

@@ -430,6 +430,16 @@ func TestProbeSendsNoCredentialAndPrefersEd25519(t *testing.T) {
 		t.Fatal("probe sent a user name")
 	}
 
+	// ProbeAs reads the key of the pinned type, not the preferred one.
+	k, err = fast.ProbeAs(context.Background(), s.ep(), rs.PublicKey())
+	if err != nil || Fingerprint(k) != Fingerprint(rs.PublicKey()) {
+		t.Fatalf("probe as RSA chose %v, %v", k, err)
+	}
+	k, err = fast.ProbeAs(context.Background(), s.ep(), ec.PublicKey())
+	if err != nil || Fingerprint(k) != Fingerprint(ec.PublicKey()) {
+		t.Fatalf("probe as ECDSA chose %v, %v", k, err)
+	}
+
 	// Without ed25519, ECDSA beats RSA.
 	s2 := newServer(t, modeSSH, nil, rs, ec)
 	k, err = fast.Probe(context.Background(), s2.ep())

@@ -188,6 +188,19 @@ service ExecutorService {
   // Role: server, admin. Lists the pins; public data only.
   rpc ListHostKeys(ListHostKeysRequest) returns (ListHostKeysResponse);
 
+  // Role: server. Proposes re-pinning a host blocked by a host key
+  // mismatch to the key it presented (spec 08: a HIGH action with user
+  // verification). The executor builds the request from its own block
+  // record (host, pinned and presented fingerprint, endpoint, block time);
+  // the caller names only the host. Approve it like any permit
+  // (SubmitAssertion or `nebula approve`), then call CommitRepin.
+  rpc ProposeRepin(ProposeRepinRequest) returns (ProposeRepinResponse);
+
+  // Role: server. Carries out an approved re-pin: the block must still be
+  // the approved one, and the endpoint must still present the approved
+  // key, which then replaces the pin (with the host's criticality record).
+  rpc CommitRepin(CommitRepinRequest) returns (CommitRepinResponse);
+
   // Role: admin. Returns the public half of a loaded SSH key (the keyring
   // must be unlocked), for the enrollment script.
   rpc GetSSHPublicKey(GetSSHPublicKeyRequest) returns (GetSSHPublicKeyResponse);
@@ -640,6 +653,26 @@ message ListHostKeysRequest {}
 
 message ListHostKeysResponse {
   repeated HostKeyPin hosts = 1;
+}
+
+message ProposeRepinRequest {
+  string host_id = 1;
+}
+
+message ProposeRepinResponse {
+  // The permit, as for ProposeExecution.
+  ProposeExecutionResponse permit = 1;
+  // What will be pinned, from the executor's own records.
+  HostKeyPin pin = 2;
+}
+
+message CommitRepinRequest {
+  string execution_digest = 1;
+  string host_id = 2;
+}
+
+message CommitRepinResponse {
+  HostKeyPin pin = 1;
 }
 
 message TestConnectionRequest {

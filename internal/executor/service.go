@@ -10,6 +10,7 @@ import (
 	"errors"
 	"log/slog"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,6 +67,16 @@ type Service struct {
 	// reconciliation leaves them alone (after a restart the set is empty).
 	dispatchMu  sync.Mutex
 	dispatching map[string]bool
+	// Now is the clock for request expiries the executor sets itself
+	// (re-pin, enrollment); nil means time.Now. Tests set it.
+	Now func() time.Time
+}
+
+func (s *Service) clock() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
 }
 
 // NewService wires the service. db holds the executor's risk data and
@@ -148,6 +159,11 @@ func (s *Service) ProposeExecution(_ context.Context, req *pb.ProposeExecutionRe
 	r, err := fromProto(req.GetRequest())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	// Executor-internal actions (re-pin) have their own RPCs that build the
+	// request from the executor's records.
+	if strings.HasPrefix(r.ActionID, reservedActionPrefix) {
+		return nil, status.Errorf(codes.InvalidArgument, "action_id %q is reserved for the executor", r.ActionID)
 	}
 	propose := s.auth.Propose
 	if req.GetRaiseToMinimum() {

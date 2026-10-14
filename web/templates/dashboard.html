@@ -6,11 +6,34 @@
   <p class="status status--error">These hosts presented a different SSH host key than the pinned one. Nebula does not connect to them until you re-pin.</p>
   <ul class="hosts">
     {{range .Blocked}}
-    <li><strong>{{.HostID}}</strong>: {{.Endpoint}} presented {{.Fingerprint}}{{if .Since}} ({{.Since}}){{end}}</li>
+    <li><strong>{{.HostID}}</strong>: {{.Endpoint}} presented {{.Fingerprint}}{{if .Since}} ({{.Since}}){{end}}
+      {{if $.RepinEnabled}}<button type="button" class="button repin-start" data-host="{{.HostID}}">Re-pin…</button>{{end}}</li>
     {{end}}
   </ul>
-  <p class="hint">Check the host on its console (<code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code>). If the change is legitimate, run
-     <code>nebula host unpin HOST</code> and <code>nebula host pin HOST ENDPOINT...</code> on the executor host.</p>
+  <p class="hint">Check the host on its console (<code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code>) before you accept a new key.
+     {{if .RepinEnabled}}Re-pin here with your security key (user verification), or on the executor host with{{else}}If the change is legitimate, run{{end}}
+     <code>nebula host unpin HOST</code> and <code>nebula host pin HOST ENDPOINT...</code>.</p>
+  {{if .RepinEnabled}}
+  <div id="repin-panel" class="panel" hidden>
+    <h3>Re-pin <span id="repin-host"></span></h3>
+    <table class="inventory"><tbody>
+      <tr><th>Pinned key</th><td id="repin-pinned"></td></tr>
+      <tr><th>New key (presented)</th><td><strong id="repin-presented"></strong></td></tr>
+      <tr><th>Endpoint</th><td id="repin-endpoint"></td></tr>
+      <tr><th>Blocked since</th><td id="repin-since"></td></tr>
+      <tr><th>Risk</th><td id="repin-risk"></td></tr>
+    </tbody></table>
+    <p class="status status--error">Only continue if the new fingerprint matches what the host shows on its own console. An attacker
+       between Nebula and the host can cause exactly this block.</p>
+    <label class="choice"><input type="checkbox" id="repin-confirm"> I compared the new fingerprint on the host's console</label>
+    <label id="repin-typed-label" hidden>Number of hosts (1) <input type="number" id="repin-typed" min="0" max="1"></label>
+    <p id="repin-cli" class="hint" hidden>Hardened mode: approve on the executor host with <code id="repin-cli-cmd"></code>, then press Re-pin.</p>
+    <div class="actions">
+      <button type="button" id="repin-approve" class="button">Re-pin with security key</button>
+      <button type="button" id="repin-cancel" class="button">Cancel</button>
+    </div>
+  </div>
+  {{end}}
 </section>
 {{else if .BlockedUnknown}}
 <p class="status status--error">Host key status unavailable</p>

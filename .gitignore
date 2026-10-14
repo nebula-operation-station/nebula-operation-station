@@ -10,3 +10,4 @@ coverage.*
 *.key
 *.pem
 .env
+/harness
