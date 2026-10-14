@@ -164,6 +164,9 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// Durable runs (spec 07): reconciled in the background, also those
+	// left open by an earlier process, once the keyring is unlocked.
+	go svc.Reconcile(ctx, reconcileInterval)
 	go func() {
 		<-ctx.Done()
 		keys.Lock()
@@ -176,6 +179,9 @@ func run() error {
 		"permits", 0, "spent_execution_ids_pruned", pruned)
 	return srv.Serve(lis)
 }
+
+// reconcileInterval is how often open durable runs are checked.
+const reconcileInterval = 15 * time.Second
 
 func resolveRoles(serverUser, adminUsers string) (map[uint32][]peercred.Role, error) {
 	self := uint32(os.Getuid())

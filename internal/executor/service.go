@@ -10,6 +10,7 @@ import (
 	"errors"
 	"log/slog"
 	"strconv"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
@@ -56,6 +58,14 @@ type Service struct {
 	vault *vault.Vault
 	// vaultParams are the Argon2id parameters for InitVault.
 	vaultParams vault.Params
+	// jobs describes how durable jobs start on hosts.
+	jobs hostrun.JobConfig
+	// reconcileMu serializes reconciliation passes.
+	reconcileMu sync.Mutex
+	// dispatching holds runs whose dispatch is in flight in this process;
+	// reconciliation leaves them alone (after a restart the set is empty).
+	dispatchMu  sync.Mutex
+	dispatching map[string]bool
 }
 
 // NewService wires the service. db holds the executor's risk data and
@@ -65,8 +75,13 @@ func NewService(auth *permit.Authority, keys *keyring.Keyring, db *executordb.DB
 	if auth == nil || keys == nil || db == nil || reg == nil || log == nil {
 		panic("executor: NewService needs authority, keyring, database, registrar and logger")
 	}
-	return &Service{auth: auth, keys: keys, db: db, reg: reg, log: log, vault: vault.New(db), vaultParams: vault.DefaultParams}
+	return &Service{auth: auth, keys: keys, db: db, reg: reg, log: log, vault: vault.New(db), vaultParams: vault.DefaultParams,
+		jobs: hostrun.DefaultJobConfig}
 }
+
+// SetJobConfig changes how durable jobs start on hosts (tests run them
+// without sudo and systemd).
+func (s *Service) SetJobConfig(c hostrun.JobConfig) { s.jobs = c }
 
 // SetVaultParams changes the Argon2id parameters InitVault uses. Tests use
 // it to avoid 256 MiB per derivation; production keeps the defaults.
