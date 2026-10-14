@@ -533,12 +533,26 @@ type Run struct {
 // MaxArtifactSize bounds the artifact bytes hashed per run.
 const MaxArtifactSize = 8 << 20
 
-// Authorize checks one host run against an approved permit and, if every
-// check passes, marks the host as used. Nothing is marked on failure.
+// Grant is what an authorized host run may use. Parameters are the
+// canonical bytes the executor held since the proposal: Milestone 4 hands
+// exactly these to the host, never the bytes of the run request.
+type Grant struct {
+	ExecutionID string
+	Parameters  []byte
+}
+
+// Authorize is AuthorizeGrant without the grant.
 func (a *Authority) Authorize(d canonical.Digest, run Run) error {
+	_, err := a.AuthorizeGrant(d, run)
+	return err
+}
+
+// AuthorizeGrant checks one host run against an approved permit and, if
+// every check passes, marks the host as used. Nothing is marked on failure.
+func (a *Authority) AuthorizeGrant(d canonical.Digest, run Run) (Grant, error) {
 	// Hash outside the lock; artifacts can be large.
 	if len(run.Artifact) == 0 || len(run.Artifact) > MaxArtifactSize {
-		return fail(CodeArtifactMismatch, "artifact size %d outside 1..%d", len(run.Artifact), MaxArtifactSize)
+		return Grant{}, fail(CodeArtifactMismatch, "artifact size %d outside 1..%d", len(run.Artifact), MaxArtifactSize)
 	}
 	artSum := sha256.Sum256(run.Artifact)
 	paramHash, perr := canonical.HashParameters(run.ParametersJSON)
@@ -550,39 +564,39 @@ func (a *Authority) Authorize(d canonical.Digest, run Run) error {
 
 	p, ok := a.permits[d]
 	if !ok {
-		return a.deny(d, run.HostID, CodeNotFound, "")
+		return Grant{}, a.deny(d, run.HostID, CodeNotFound, "")
 	}
 	if p.State != StateApproved {
-		return a.deny(d, run.HostID, CodeWrongState, "permit is not approved")
+		return Grant{}, a.deny(d, run.HostID, CodeWrongState, "permit is not approved")
 	}
 	if !now.Before(time.Unix(p.Request.ExpiryUnix, 0)) {
-		return a.deny(d, run.HostID, CodeExpired, "")
+		return Grant{}, a.deny(d, run.HostID, CodeExpired, "")
 	}
 
 	idx := slices.IndexFunc(p.Request.ResolvedTargets, func(t canonical.Target) bool { return t.HostID == run.HostID })
 	if idx < 0 {
-		return a.deny(d, run.HostID, CodeTargetNotPermitted, "host not in permit")
+		return Grant{}, a.deny(d, run.HostID, CodeTargetNotPermitted, "host not in permit")
 	}
 	if subtle.ConstantTimeCompare([]byte(p.Request.ResolvedTargets[idx].HostKeyFingerprint), []byte(run.HostKeyFingerprint)) != 1 {
-		return a.deny(d, run.HostID, CodeTargetNotPermitted, "host key fingerprint differs from approval")
+		return Grant{}, a.deny(d, run.HostID, CodeTargetNotPermitted, "host key fingerprint differs from approval")
 	}
 	if _, done := p.used[run.HostID]; done {
-		return a.deny(d, run.HostID, CodeHostAlreadyRun, "")
+		return Grant{}, a.deny(d, run.HostID, CodeHostAlreadyRun, "")
 	}
 	if run.ActionID != p.Request.ActionID || run.ModuleVersion != p.Request.ModuleVersion {
-		return a.deny(d, run.HostID, CodeActionMismatch, "")
+		return Grant{}, a.deny(d, run.HostID, CodeActionMismatch, "")
 	}
 	if hex.EncodeToString(artSum[:]) != p.Request.ArtifactSHA256 {
-		return a.deny(d, run.HostID, CodeArtifactMismatch, "artifact bytes do not hash to the approved value")
+		return Grant{}, a.deny(d, run.HostID, CodeArtifactMismatch, "artifact bytes do not hash to the approved value")
 	}
 	if perr != nil {
-		return a.deny(d, run.HostID, CodeParametersMismatch, perr.Error())
+		return Grant{}, a.deny(d, run.HostID, CodeParametersMismatch, perr.Error())
 	}
 	if paramHash != p.Request.ParametersHash {
-		return a.deny(d, run.HostID, CodeParametersMismatch, "parameters do not hash to the approved value")
+		return Grant{}, a.deny(d, run.HostID, CodeParametersMismatch, "parameters do not hash to the approved value")
 	}
 	if !slices.Contains(p.Request.CredentialRefs, run.CredentialRef) {
-		return a.deny(d, run.HostID, CodeCredentialMismatch, "")
+		return Grant{}, a.deny(d, run.HostID, CodeCredentialMismatch, "")
 	}
 	// Risk authorization per host run (spec 07): trust withdrawn or a host
 	// made more critical after approval stops the run.
@@ -590,17 +604,17 @@ func (a *Authority) Authorize(d canonical.Digest, run Run) error {
 	if err != nil || floor.Rank() == 0 {
 		detail := fmt.Sprintf("risk policy: %v (floor %q)", err, floor)
 		a.emit(Event{Kind: "denied", Digest: d.String(), Host: run.HostID, Code: CodeStorage, Detail: detail})
-		return fail(CodeStorage, "executor state store unavailable")
+		return Grant{}, fail(CodeStorage, "executor state store unavailable")
 	}
 	if p.Request.RiskClass.Rank() < floor.Rank() {
 		a.emit(Event{Kind: "denied", Digest: d.String(), Host: run.HostID, Code: CodeRiskAboveApproval,
 			Detail: fmt.Sprintf("approved as %s, executor minimum is now %s (%s)", p.Request.RiskClass, floor, why)})
-		return fail(CodeRiskAboveApproval, "approved as %s, executor minimum for this host is now %s", p.Request.RiskClass, floor)
+		return Grant{}, fail(CodeRiskAboveApproval, "approved as %s, executor minimum for this host is now %s", p.Request.RiskClass, floor)
 	}
 
 	p.used[run.HostID] = struct{}{}
 	a.emit(Event{Kind: "authorized", Digest: d.String(), Host: run.HostID})
-	return nil
+	return Grant{ExecutionID: p.Request.ExecutionID, Parameters: slices.Clone(p.Parameters)}, nil
 }
 
 // BeginSession returns a fresh challenge for opening the privileged session.

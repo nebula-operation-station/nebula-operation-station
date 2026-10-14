@@ -27,6 +27,7 @@ const (
 	ExecutorService_BeginPrivilegedSession_FullMethodName    = "/nebula.executor.v1.ExecutorService/BeginPrivilegedSession"
 	ExecutorService_CompletePrivilegedSession_FullMethodName = "/nebula.executor.v1.ExecutorService/CompletePrivilegedSession"
 	ExecutorService_AuthorizeRun_FullMethodName              = "/nebula.executor.v1.ExecutorService/AuthorizeRun"
+	ExecutorService_RunAttached_FullMethodName               = "/nebula.executor.v1.ExecutorService/RunAttached"
 	ExecutorService_Unlock_FullMethodName                    = "/nebula.executor.v1.ExecutorService/Unlock"
 	ExecutorService_Lock_FullMethodName                      = "/nebula.executor.v1.ExecutorService/Lock"
 	ExecutorService_ListPending_FullMethodName               = "/nebula.executor.v1.ExecutorService/ListPending"
@@ -92,6 +93,13 @@ type ExecutorServiceClient interface {
 	// The executor hashes the artifact and parameters itself. In Milestone 0
 	// this only authorizes; SSH execution arrives in Milestone 4.
 	AuthorizeRun(ctx context.Context, in *AuthorizeRunRequest, opts ...grpc.CallOption) (*AuthorizeRunResponse, error)
+	// Role: server. Authorizes one host run exactly like AuthorizeRun and
+	// runs it attached on the pinned host (spec 07, Milestone 4): the
+	// executor connects with the pin's credential (which must be the run's),
+	// sends the parameters it holds from the proposal and the artifact, and
+	// returns the bounded result and log. The permit's host is used once the
+	// run is authorized, whatever the outcome.
+	RunAttached(ctx context.Context, in *RunAttachedRequest, opts ...grpc.CallOption) (*RunAttachedResponse, error)
 	// Role: admin. Decrypts the SSH keys into the in-process keyring and,
 	// once initialized, the vault's master key (spec 06: one passphrase is
 	// tried on both; the scope retries one of them alone).
@@ -252,6 +260,16 @@ func (c *executorServiceClient) AuthorizeRun(ctx context.Context, in *AuthorizeR
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AuthorizeRunResponse)
 	err := c.cc.Invoke(ctx, ExecutorService_AuthorizeRun_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) RunAttached(ctx context.Context, in *RunAttachedRequest, opts ...grpc.CallOption) (*RunAttachedResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RunAttachedResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_RunAttached_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -618,6 +636,13 @@ type ExecutorServiceServer interface {
 	// The executor hashes the artifact and parameters itself. In Milestone 0
 	// this only authorizes; SSH execution arrives in Milestone 4.
 	AuthorizeRun(context.Context, *AuthorizeRunRequest) (*AuthorizeRunResponse, error)
+	// Role: server. Authorizes one host run exactly like AuthorizeRun and
+	// runs it attached on the pinned host (spec 07, Milestone 4): the
+	// executor connects with the pin's credential (which must be the run's),
+	// sends the parameters it holds from the proposal and the artifact, and
+	// returns the bounded result and log. The permit's host is used once the
+	// run is authorized, whatever the outcome.
+	RunAttached(context.Context, *RunAttachedRequest) (*RunAttachedResponse, error)
 	// Role: admin. Decrypts the SSH keys into the in-process keyring and,
 	// once initialized, the vault's master key (spec 06: one passphrase is
 	// tried on both; the scope retries one of them alone).
@@ -741,6 +766,9 @@ func (UnimplementedExecutorServiceServer) CompletePrivilegedSession(context.Cont
 }
 func (UnimplementedExecutorServiceServer) AuthorizeRun(context.Context, *AuthorizeRunRequest) (*AuthorizeRunResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AuthorizeRun not implemented")
+}
+func (UnimplementedExecutorServiceServer) RunAttached(context.Context, *RunAttachedRequest) (*RunAttachedResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RunAttached not implemented")
 }
 func (UnimplementedExecutorServiceServer) Unlock(context.Context, *UnlockRequest) (*UnlockResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Unlock not implemented")
@@ -966,6 +994,24 @@ func _ExecutorService_AuthorizeRun_Handler(srv interface{}, ctx context.Context,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ExecutorServiceServer).AuthorizeRun(ctx, req.(*AuthorizeRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_RunAttached_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RunAttachedRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).RunAttached(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_RunAttached_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).RunAttached(ctx, req.(*RunAttachedRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1594,6 +1640,10 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AuthorizeRun",
 			Handler:    _ExecutorService_AuthorizeRun_Handler,
+		},
+		{
+			MethodName: "RunAttached",
+			Handler:    _ExecutorService_RunAttached_Handler,
 		},
 		{
 			MethodName: "Unlock",

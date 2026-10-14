@@ -22,6 +22,7 @@ internal/sshtransport/
 internal/web/auth/
 internal/totp/
 internal/vault/
+internal/hostrun/
 internal/fsguard/
 internal/executor/
 internal/executordb/

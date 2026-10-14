@@ -37,6 +37,14 @@ service ExecutorService {
   // this only authorizes; SSH execution arrives in Milestone 4.
   rpc AuthorizeRun(AuthorizeRunRequest) returns (AuthorizeRunResponse);
 
+  // Role: server. Authorizes one host run exactly like AuthorizeRun and
+  // runs it attached on the pinned host (spec 07, Milestone 4): the
+  // executor connects with the pin's credential (which must be the run's),
+  // sends the parameters it holds from the proposal and the artifact, and
+  // returns the bounded result and log. The permit's host is used once the
+  // run is authorized, whatever the outcome.
+  rpc RunAttached(RunAttachedRequest) returns (RunAttachedResponse);
+
   // Role: admin. Decrypts the SSH keys into the in-process keyring and,
   // once initialized, the vault's master key (spec 06: one passphrase is
   // tried on both; the scope retries one of them alone).
@@ -758,3 +766,29 @@ message DeleteSecretRequest {
 }
 
 message DeleteSecretResponse {}
+
+message RunAttachedRequest {
+  AuthorizeRunRequest run = 1;
+  // Endpoints to try in order (from the inventory); the pin decides
+  // whether a host is the right one.
+  repeated string endpoints = 2;
+  // 0 means 60 s; at most 600 s.
+  uint32 timeout_seconds = 3;
+}
+
+message RunAttachedResponse {
+  // success, script_failed, script_interrupted, execution_timeout,
+  // result_missing, precheck_failed, or a connection class:
+  // network_unreachable, authentication_failed, host_key_mismatch.
+  string class = 1;
+  string detail = 2;
+  int32 exit_code = 3;
+  // Untrusted host output: one JSON document of at most 1 MiB (empty
+  // unless class is success or the script failed after printing it).
+  bytes result = 4;
+  // Untrusted host output: stderr, at most 10 MiB plus a marker.
+  bytes log = 5;
+  bool log_truncated = 6;
+  string endpoint = 7;
+  int64 duration_ms = 8;
+}
