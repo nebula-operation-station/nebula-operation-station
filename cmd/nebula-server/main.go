@@ -179,6 +179,18 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	// Host key mismatches notify (spec 13: always sent, cannot be muted).
 	watcher := &notify.HostKeyWatcher{Notifier: notifier, List: hostKeys, DB: db, Interval: hostKeyPollInterval, Log: log}
 	go watcher.Run(connCtx)
+	// A locked executor after a restart pauses all runs (spec 13).
+	lockWatcher := &notify.ExecutorWatcher{Notifier: notifier, Interval: hostKeyPollInterval, Log: log,
+		Unlocked: func(ctx context.Context) (bool, error) {
+			ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			st, err := exec.GetStatus(ctx, &pb.GetStatusRequest{})
+			if err != nil {
+				return false, err
+			}
+			return st.GetUnlocked(), nil
+		}}
+	go lockWatcher.Run(connCtx)
 
 	// Operations (M4): planned here, decided and run by the executor.
 	ops := executions.New(connCtx, exec, db, store, log)
