@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -403,7 +404,7 @@ func TestInventoryAuditLogged(t *testing.T) {
 		t.Fatalf("create: status %d (body %s)", code, body)
 	}
 	out := logged.String()
-	for _, want := range []string{"host_created", "web-02", "user=anonymous"} {
+	for _, want := range []string{"host_created", "web-02", "user=unknown"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("audit log %q missing %q", out, want)
 		}
@@ -415,5 +416,54 @@ func TestInventoryAuditLogged(t *testing.T) {
 	out = logged.String()
 	if !strings.Contains(out, "host_deleted") || !strings.Contains(out, "web-02") {
 		t.Errorf("audit log %q missing the delete line", out)
+	}
+}
+
+func TestInventoryNeedsJSONContentTypeAndRejectsDuplicates(t *testing.T) {
+	store := newFakeInventory()
+	h := newTestHandler(t, ui.Options{PublicOrigin: "https://nebula.example.org", Inventory: store})
+	for _, ct := range []string{"", "application/x-www-form-urlencoded", "text/plain", "multipart/form-data; boundary=x"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/inventory/hosts", strings.NewReader(validHostBody))
+		if ct != "" {
+			req.Header.Set("Content-Type", ct)
+		}
+		h.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnsupportedMediaType || len(store.created) != 0 {
+			t.Fatalf("content type %q: status %d, created %d", ct, rec.Code, len(store.created))
+		}
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/inventory/hosts", strings.NewReader(validHostBody))
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	h.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("charset parameter: %d %s", rec.Code, rec.Body.String())
+	}
+	code, body := postJSON(t, h.Handler(), "/inventory/hosts", validHostBody)
+	if code != http.StatusConflict || !strings.Contains(body, "already exists") {
+		t.Fatalf("duplicate: %d %s", code, body)
+	}
+}
+
+// Every script a page references is embedded: a missing one would turn
+// the host form into a plain GET form and break the page silently.
+func TestPagesOnlyReferenceEmbeddedScripts(t *testing.T) {
+	h := newTestHandler(t, ui.Options{PublicOrigin: "https://nebula.example.org", Inventory: newFakeInventory(),
+		Hosts: func(context.Context) ([]inventory.Host, error) { return nil, nil }})
+	src := regexp.MustCompile(`<script src="(/static/[^"]+)"`)
+	for _, page := range []string{"/inventory", "/dashboard", "/login", "/setup"} {
+		body := getBody(t, h.Handler(), page)
+		matches := src.FindAllStringSubmatch(body, -1)
+		if len(matches) == 0 {
+			t.Fatalf("%s references no scripts", page)
+		}
+		for _, m := range matches {
+			rec := httptest.NewRecorder()
+			h.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, m[1], nil))
+			if rec.Code != http.StatusOK {
+				t.Errorf("%s: %s answers %d", page, m[1], rec.Code)
+			}
+		}
 	}
 }

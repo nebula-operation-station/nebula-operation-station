@@ -26,6 +26,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -477,6 +478,8 @@ func (h *Handler) answerStoreError(w http.ResponseWriter, action, id string, err
 		writeJSONError(w, http.StatusBadRequest, verr.Error())
 	case errors.Is(err, inventory.ErrHostNotFound):
 		writeJSONError(w, http.StatusNotFound, "host not found")
+	case errors.Is(err, inventory.ErrHostExists):
+		writeJSONError(w, http.StatusConflict, "a host with this ID already exists")
 	default:
 		h.log.Error(action, "host", id, "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "inventory unavailable")
@@ -486,11 +489,11 @@ func (h *Handler) answerStoreError(w http.ResponseWriter, action, id string, err
 // audit logs one line per inventory change: the kind, the host ID and
 // the web user.
 func (h *Handler) audit(r *http.Request, kind, hostID string) {
-	user := "anonymous"
+	user := "unknown"
 	if s, ok := auth.SessionFrom(r.Context()); ok {
 		user = s.UserName
 	}
-	h.log.Info("inventory change", "kind", kind, "host", hostID, "user", user)
+	h.log.Info("audit", "kind", kind, "host", hostID, "user", user)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -515,13 +518,28 @@ func answerDecodeError(w http.ResponseWriter, err error) {
 	writeJSONError(w, http.StatusBadRequest, err.Error())
 }
 
-func (h *Handler) handleHostCreate(w http.ResponseWriter, r *http.Request) {
+// hostChangeAllowed answers the request itself unless it is a JSON POST
+// to a configured inventory. Requiring application/json is defence in
+// depth next to the Origin check: no plain HTML form can send it.
+func (h *Handler) hostChangeAllowed(w http.ResponseWriter, r *http.Request) bool {
 	if h.inventory == nil {
 		http.NotFound(w, r)
-		return
+		return false
 	}
 	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return false
+	}
+	if ct, _, _ := strings.Cut(r.Header.Get("Content-Type"), ";"); !strings.EqualFold(strings.TrimSpace(ct), "application/json") {
+		writeJSONError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		return false
+	}
+	return true
+}
+
+func (h *Handler) handleHostCreate(w http.ResponseWriter, r *http.Request) {
+	if !h.hostChangeAllowed(w, r) {
 		return
 	}
 	host, err := decodeHostRequest(w, r)
@@ -540,12 +558,7 @@ func (h *Handler) handleHostCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleHostUpdate(w http.ResponseWriter, r *http.Request) {
-	if h.inventory == nil {
-		http.NotFound(w, r)
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !h.hostChangeAllowed(w, r) {
 		return
 	}
 	host, err := decodeHostRequest(w, r)
@@ -569,12 +582,7 @@ type deleteRequest struct {
 }
 
 func (h *Handler) handleHostDelete(w http.ResponseWriter, r *http.Request) {
-	if h.inventory == nil {
-		http.NotFound(w, r)
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !h.hostChangeAllowed(w, r) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxHostBodyBytes)

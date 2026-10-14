@@ -72,6 +72,33 @@ function check(cond, what) {
   await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('#executor-lock')]);
   check(/Privileged session: none/.test(await page.textContent('main')), 'lock ends the privileged session');
 
+  // Inventory: add, edit, reject a duplicate, delete (JSON POSTs with a real Origin).
+  await page.goto(base + '/inventory');
+  await page.fill('#host-id', 'web-01');
+  await page.fill('#host-display-name', 'Web 1');
+  await page.selectOption('#host-environment', 'PROD');
+  await page.fill('#host-endpoints', '192.168.0.10\n[fd00::10]:2222');
+  await page.fill('#host-tags', 'role=web');
+  await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('#host-submit')]);
+  const row = () => page.locator('tr[data-id="web-01"]');
+  check(/Web 1/.test(await row().textContent()) && /\[fd00::10\]:2222/.test(await row().textContent()), 'host added from the inventory page');
+  await row().locator('.inventory__edit').click();
+  check(await page.inputValue('#host-tags') === 'role=web' && await page.$eval('#host-id', (e) => e.readOnly), 'edit fills the form and locks the ID');
+  await page.fill('#host-display-name', 'Web one');
+  await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('#host-submit')]);
+  check(/Web one/.test(await row().textContent()), 'host edited');
+  await page.fill('#host-id', 'web-01');
+  await page.fill('#host-endpoints', '192.168.0.11');
+  await page.click('#host-submit');
+  await page.waitForFunction(() => /already exists/.test(document.getElementById('message').textContent), null, { timeout: 15000 });
+  check(true, 'a duplicate host ID is refused');
+  await row().locator('.inventory__delete').click();
+  await page.waitForFunction(() => /Type the host ID/.test(document.getElementById('message').textContent));
+  await row().locator('.inventory__delete-confirm').fill('web-01');
+  await Promise.all([page.waitForNavigation({ timeout: 15000 }), row().locator('.inventory__delete').click()]);
+  check(await row().count() === 0, 'host deleted after typing its ID');
+  await page.goto(base + '/dashboard');
+
   const cookies = await ctx.cookies();
   const sc = cookies.find((c) => c.name === '__Host-nebula_session');
   check(sc && sc.secure && sc.httpOnly && sc.sameSite === 'Strict', 'session cookie is __Host-, Secure, HttpOnly, SameSite=Strict');
