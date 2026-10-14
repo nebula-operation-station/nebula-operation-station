@@ -113,6 +113,7 @@ Then check the state and unlock:
 ```
 nebula status
 nebula unlock        # passphrase-protected; the executor starts locked
+nebula vault init    # optional: secret vault for API tokens (same passphrase recommended)
 ```
 
 `nebula-server` has no systemd unit yet; run it directly for

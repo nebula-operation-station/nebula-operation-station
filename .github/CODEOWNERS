@@ -15,6 +15,7 @@
 /internal/sshtransport/         @Garm82
 /internal/web/auth/             @Garm82
 /internal/totp/                 @Garm82
+/internal/vault/                @Garm82
 /internal/fsguard/              @Garm82
 /internal/executor/              @Garm82
 /internal/executordb/            @Garm82

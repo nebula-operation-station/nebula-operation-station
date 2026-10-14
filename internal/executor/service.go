@@ -23,6 +23,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vault"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnreg"
 )
 
@@ -51,6 +52,10 @@ type Service struct {
 	transport sshtransport.Config
 	// recovery limits wrong TOTP recovery codes.
 	recovery recoveryLimiter
+	// vault holds the secrets that are not SSH keys (spec 06).
+	vault *vault.Vault
+	// vaultParams are the Argon2id parameters for InitVault.
+	vaultParams vault.Params
 }
 
 // NewService wires the service. db holds the executor's risk data and
@@ -60,8 +65,12 @@ func NewService(auth *permit.Authority, keys *keyring.Keyring, db *executordb.DB
 	if auth == nil || keys == nil || db == nil || reg == nil || log == nil {
 		panic("executor: NewService needs authority, keyring, database, registrar and logger")
 	}
-	return &Service{auth: auth, keys: keys, db: db, reg: reg, log: log}
+	return &Service{auth: auth, keys: keys, db: db, reg: reg, log: log, vault: vault.New(db), vaultParams: vault.DefaultParams}
 }
+
+// SetVaultParams changes the Argon2id parameters InitVault uses. Tests use
+// it to avoid 256 MiB per derivation; production keeps the defaults.
+func (s *Service) SetVaultParams(p vault.Params) { s.vaultParams = p }
 
 // AuditLogger returns a permit audit hook that writes structured log lines.
 func AuditLogger(log *slog.Logger) func(permit.Event) {
@@ -107,6 +116,7 @@ func (s *Service) GetStatus(_ context.Context, _ *pb.GetStatusRequest) (*pb.GetS
 	if _, pending, err := s.db.RecoveryPending(); err == nil && pending {
 		resp.RecoveryPending = true
 	}
+	resp.VaultState = s.vaultState()
 	if active {
 		resp.PrivilegedSessionExpiryUnix = till.Unix()
 	}
@@ -208,18 +218,60 @@ func (s *Service) AuthorizeRun(_ context.Context, req *pb.AuthorizeRunRequest) (
 	return &pb.AuthorizeRunResponse{Authorized: true}, nil
 }
 
+// Unlock tries the passphrase on the SSH keys and, once initialized, on
+// the vault (spec 06: one unlock). It fails only if nothing it tried was
+// unlocked; the response tells the CLI which part needs another passphrase.
 func (s *Service) Unlock(ctx context.Context, req *pb.UnlockRequest) (*pb.UnlockResponse, error) {
-	refs, err := s.keys.Unlock(req.GetPassphrase())
 	who := callerName(ctx)
-	if err != nil {
-		s.log.Warn("audit", "kind", "unlock_failed", "by", who, "detail", err.Error())
-		if errors.Is(err, keyring.ErrWrongPassword) {
-			return nil, status.Error(codes.Unauthenticated, err.Error())
+	scope := req.GetScope()
+	resp := &pb.UnlockResponse{}
+	var keysErr, vaultErr error
+	tryKeys := scope != pb.UnlockScope_UNLOCK_SCOPE_VAULT
+	tryVault := scope != pb.UnlockScope_UNLOCK_SCOPE_KEYS
+	if tryVault {
+		st := s.vaultState()
+		if st == pb.VaultState_VAULT_STATE_NOT_INITIALIZED {
+			tryVault = false
+			if scope == pb.UnlockScope_UNLOCK_SCOPE_VAULT {
+				return nil, status.Error(codes.FailedPrecondition, vault.ErrNotInitialized.Error())
+			}
 		}
-		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
-	s.log.Info("audit", "kind", "unlocked", "by", who, "credentials", refs)
-	return &pb.UnlockResponse{LoadedCredentialRefs: refs}, nil
+	// keyring.Unlock wipes the passphrase it gets; the vault needs its own copy.
+	vaultPass := append([]byte(nil), req.GetPassphrase()...)
+	defer clear(vaultPass)
+	if tryKeys {
+		refs, err := s.keys.Unlock(req.GetPassphrase())
+		if err != nil {
+			keysErr = err
+			resp.KeysError = err.Error()
+			resp.KeysWrongPassphrase = errors.Is(err, keyring.ErrWrongPassword)
+			s.log.Warn("audit", "kind", "unlock_failed", "by", who, "detail", err.Error())
+		} else {
+			resp.KeysUnlocked, resp.LoadedCredentialRefs = true, refs
+			s.log.Info("audit", "kind", "unlocked", "by", who, "credentials", refs)
+		}
+	}
+	if tryVault {
+		if err := s.vault.Unlock(vaultPass); err != nil {
+			vaultErr = err
+			resp.VaultWrongPassphrase = errors.Is(err, vault.ErrWrongPassphrase)
+			s.log.Warn("audit", "kind", "vault_unlock_failed", "by", who, "detail", err.Error())
+		} else {
+			s.log.Info("audit", "kind", "vault_unlocked", "by", who)
+		}
+	}
+	resp.VaultState = s.vaultState()
+	if resp.KeysUnlocked || (tryVault && vaultErr == nil) {
+		return resp, nil
+	}
+	if errors.Is(keysErr, keyring.ErrWrongPassword) || resp.VaultWrongPassphrase {
+		return nil, status.Error(codes.Unauthenticated, "the passphrase does not unlock anything")
+	}
+	if keysErr != nil {
+		return nil, status.Error(codes.FailedPrecondition, keysErr.Error())
+	}
+	return nil, status.Error(codes.FailedPrecondition, "vault: "+vaultErr.Error())
 }
 
 func (s *Service) Lock(ctx context.Context, _ *pb.LockRequest) (*pb.LockResponse, error) {
@@ -228,6 +280,7 @@ func (s *Service) Lock(ctx context.Context, _ *pb.LockRequest) (*pb.LockResponse
 	// in between.
 	s.auth.Lock(who)
 	s.keys.Lock()
+	s.vault.Lock()
 	s.reg.Reset("executor locked")
 	return &pb.LockResponse{}, nil
 }

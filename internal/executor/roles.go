@@ -49,5 +49,9 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_ListHostKeys_FullMethodName:              {server, admin},
 		pb.ExecutorService_TestConnection_FullMethodName:            {admin},
 		pb.ExecutorService_GetSSHPublicKey_FullMethodName:           {admin},
+		pb.ExecutorService_InitVault_FullMethodName:                 {admin},
+		pb.ExecutorService_SetSecret_FullMethodName:                 {admin},
+		pb.ExecutorService_ListSecrets_FullMethodName:               {admin},
+		pb.ExecutorService_DeleteSecret_FullMethodName:              {admin},
 	}
 }

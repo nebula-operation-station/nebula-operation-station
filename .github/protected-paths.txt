@@ -21,6 +21,7 @@ internal/webauthnreg/
 internal/sshtransport/
 internal/web/auth/
 internal/totp/
+internal/vault/
 internal/fsguard/
 internal/executor/
 internal/executordb/
