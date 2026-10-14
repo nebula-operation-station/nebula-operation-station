@@ -34,6 +34,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
@@ -148,11 +149,25 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 	}
 	h.db = db
 
-	keysDir := t.TempDir()
-	if err := os.Chmod(keysDir, 0o700); err != nil {
-		t.Fatal(err)
+	// The SSH key lives with the data directory, so a restarted harness
+	// (same dataDir) is the same Nebula instance to the test hosts.
+	keysDir := filepath.Join(o.dataDir, "testkeys")
+	if pemBytes, err := os.ReadFile(filepath.Join(keysDir, credRef+".key")); err == nil {
+		k, err := ssh.ParseRawPrivateKeyWithPassphrase(pemBytes, []byte(passphrase))
+		if err != nil {
+			t.Fatal(err)
+		}
+		signer, err := ssh.NewSignerFromKey(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.userKey = signer.PublicKey()
+	} else {
+		if err := os.Mkdir(keysDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		h.userKey = writeEncryptedKey(t, keysDir, credRef)
 	}
-	h.userKey = writeEncryptedKey(t, keysDir, credRef)
 
 	h.logs = &syncBuffer{}
 	log := slog.New(slog.NewJSONHandler(h.logs, nil))
@@ -195,6 +210,9 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 	h.verifier = verifier
 	svc := executor.NewService(auth, keyring.New(keysDir), db, reg, log)
 	svc.SetVaultParams(vault.Params{Time: 1, MemoryKiB: 64, Threads: 1})
+	// Durable jobs on the test hosts (local processes) go below the data
+	// directory, without sudo and systemd.
+	svc.SetJobConfig(hostrun.JobConfig{JobRoot: filepath.Join(o.dataDir, "remote", "jobs"), RunRoot: filepath.Join(o.dataDir, "remote", "run")})
 	h.svc = svc
 	policy := peercred.NewPolicy(o.uidRoles, executor.MethodRoles())
 

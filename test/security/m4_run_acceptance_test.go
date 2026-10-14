@@ -43,6 +43,12 @@ func (h *harness) pinnedRunHost(id string) runHost {
 // is HIGH) and approves it with the browser assertion.
 func (h *harness) approvedRun(host runHost, credRefs ...string) string {
 	h.t.Helper()
+	return h.approvedScript(host, runScript, credRefs...)
+}
+
+// approvedScript is approvedRun for any script.
+func (h *harness) approvedScript(host runHost, script []byte, credRefs ...string) string {
+	h.t.Helper()
 	if len(credRefs) == 0 {
 		credRefs = []string{credRef}
 	}
@@ -53,7 +59,7 @@ func (h *harness) approvedRun(host runHost, credRefs ...string) string {
 	req := &pb.ExecutionRequest{
 		ExecutionId: fmt.Sprintf("00000000-0000-4000-8000-%012d", execCounter.Add(1)),
 		ActionId:    "test.run", ModuleVersion: "1.0.0",
-		ArtifactSha256:  hexSum(runScript),
+		ArtifactSha256:  hexSum(script),
 		ParametersHash:  ph,
 		CredentialRefs:  credRefs,
 		RiskClass:       pb.RiskClass_RISK_CLASS_HIGH,

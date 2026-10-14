@@ -45,6 +45,17 @@ service ExecutorService {
   // run is authorized, whatever the outcome.
   rpc RunAttached(RunAttachedRequest) returns (RunAttachedResponse);
 
+  // Role: server. Authorizes one host run like RunAttached and starts it
+  // as a durable job (spec 07): recorded in executor.db before anything
+  // is sent, dispatched once, then only observed. The executor reconciles
+  // open runs in the background (also after a restart, once unlocked) and
+  // never dispatches a run again.
+  rpc StartDurable(StartDurableRequest) returns (StartDurableResponse);
+
+  // Role: server. The state of a durable run; with release, a finished
+  // run's result and log are dropped from executor.db after this answer.
+  rpc GetRun(GetRunRequest) returns (GetRunResponse);
+
   // Role: admin. Decrypts the SSH keys into the in-process keyring and,
   // once initialized, the vault's master key (spec 06: one passphrase is
   // tried on both; the scope retries one of them alone).
@@ -791,4 +802,45 @@ message RunAttachedResponse {
   bool log_truncated = 6;
   string endpoint = 7;
   int64 duration_ms = 8;
+}
+
+message StartDurableRequest {
+  AuthorizeRunRequest run = 1;
+  repeated string endpoints = 2;
+  // 0 means 3600 s; at most 21600 s (6 h).
+  uint32 timeout_seconds = 3;
+}
+
+message StartDurableResponse {
+  RunStatus run = 1;
+}
+
+message GetRunResponse {
+  RunStatus run = 1;
+}
+
+message GetRunRequest {
+  string execution_id = 1;
+  string host_id = 2;
+  bool release = 3;
+}
+
+message RunStatus {
+  string execution_id = 1;
+  string host_id = 2;
+  // dispatching, running or finished.
+  string state = 3;
+  // Set when finished: a spec 07 class, plus not_executed (nothing ran)
+  // and unknown (the outcome cannot be known; never re-run).
+  string class = 4;
+  string detail = 5;
+  int32 exit_code = 6;
+  // Untrusted host output, as in RunAttachedResponse.
+  bytes result = 7;
+  bytes log = 8;
+  bool log_truncated = 9;
+  string endpoint = 10;
+  int64 dispatched_at_unix = 11;
+  int64 finished_at_unix = 12;
+  bool released = 13;
 }

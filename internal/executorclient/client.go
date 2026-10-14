@@ -450,6 +450,22 @@ func (c *Client) RunAttached(ctx context.Context, in *pb.RunAttachedRequest, opt
 	return resp, mapError(err)
 }
 
+// StartDurable: Starts one authorized host run as a durable job (server role).
+func (c *Client) StartDurable(ctx context.Context, in *pb.StartDurableRequest, opts ...grpc.CallOption) (*pb.StartDurableResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	resp, err := c.rpc.StartDurable(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// GetRun: The state of a durable run (server role).
+func (c *Client) GetRun(ctx context.Context, in *pb.GetRunRequest, opts ...grpc.CallOption) (*pb.GetRunResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.GetRun(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
 // Compile-time check: the client must implement the generated interface so
 // that a generated-code change breaks the build here.
 var _ pb.ExecutorServiceClient = (*Client)(nil)

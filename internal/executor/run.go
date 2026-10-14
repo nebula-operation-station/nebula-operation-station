@@ -27,49 +27,46 @@ const (
 	classUnknown               = "unknown"
 )
 
-// RunAttached authorizes one host run and runs it attached (spec 07).
-// Everything that can be checked without using up the permit's host is
-// checked first; after AuthorizeGrant every outcome is a response class.
-func (s *Service) RunAttached(ctx context.Context, req *pb.RunAttachedRequest) (*pb.RunAttachedResponse, error) {
-	r := req.GetRun()
+// prepareRun checks everything about a run that needs no permit, so that a
+// refused run does not use up the permit's host.
+func (s *Service) prepareRun(r *pb.AuthorizeRunRequest, endpoints []string) (canonical.Digest, []sshtransport.Endpoint, error) {
 	if r == nil {
-		return nil, status.Error(codes.InvalidArgument, "run is required")
+		return canonical.Digest{}, nil, status.Error(codes.InvalidArgument, "run is required")
 	}
 	d, err := canonical.ParseDigest(r.GetExecutionDigest())
 	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
+		return canonical.Digest{}, nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	eps, err := parseEndpoints(req.GetEndpoints())
+	eps, err := parseEndpoints(endpoints)
 	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-	timeout := time.Duration(req.GetTimeoutSeconds()) * time.Second
-	if timeout > hostrun.MaxTimeout {
-		return nil, status.Errorf(codes.InvalidArgument, "timeout above %s; long work is a durable job", hostrun.MaxTimeout)
+		return canonical.Digest{}, nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	if !s.keys.Unlocked() {
-		return nil, status.Error(codes.FailedPrecondition, "vault_locked: run `nebula unlock` on the executor host")
+		return canonical.Digest{}, nil, status.Error(codes.FailedPrecondition, "vault_locked: run `nebula unlock` on the executor host")
 	}
 	hk, ok, err := s.db.HostKey(r.GetHostId())
 	if err != nil {
-		return nil, s.adminStoreError("run_attached", err)
+		return canonical.Digest{}, nil, s.adminStoreError("run", err)
 	}
 	if !ok {
-		return nil, status.Error(codes.FailedPrecondition, ErrHostNotPinned.Error())
+		return canonical.Digest{}, nil, status.Error(codes.FailedPrecondition, ErrHostNotPinned.Error())
 	}
 	if hk.Blocked != nil {
-		return nil, status.Error(codes.FailedPrecondition, "host_key_mismatch: "+ErrHostBlocked.Error())
+		return canonical.Digest{}, nil, status.Error(codes.FailedPrecondition, "host_key_mismatch: "+ErrHostBlocked.Error())
 	}
 	// The connection uses the pin's credential, so it must be the one the
 	// permit allows for this run.
 	if hk.CredentialRef != r.GetCredentialRef() {
-		return nil, status.Error(codes.PermissionDenied, "credential_mismatch: the host's pinned credential is not the run's")
+		return canonical.Digest{}, nil, status.Error(codes.PermissionDenied, "credential_mismatch: the host's pinned credential is not the run's")
 	}
 	if _, err := s.keys.Signer(hk.CredentialRef); err != nil {
-		return nil, status.Errorf(codes.FailedPrecondition, "credential_unavailable: %s", hk.CredentialRef)
+		return canonical.Digest{}, nil, status.Errorf(codes.FailedPrecondition, "credential_unavailable: %s", hk.CredentialRef)
 	}
+	return d, eps, nil
+}
 
-	grant, err := s.auth.AuthorizeGrant(d, permit.Run{
+func authorizeRequest(r *pb.AuthorizeRunRequest) permit.Run {
+	return permit.Run{
 		HostID:             r.GetHostId(),
 		HostKeyFingerprint: r.GetHostKeyFingerprint(),
 		ActionID:           r.GetActionId(),
@@ -77,7 +74,24 @@ func (s *Service) RunAttached(ctx context.Context, req *pb.RunAttachedRequest) (
 		Artifact:           r.GetArtifact(),
 		ParametersJSON:     r.GetParametersJson(),
 		CredentialRef:      r.GetCredentialRef(),
-	})
+	}
+}
+
+// RunAttached authorizes one host run and runs it attached (spec 07).
+// Everything that can be checked without using up the permit's host is
+// checked first; after AuthorizeGrant every outcome is a response class.
+func (s *Service) RunAttached(ctx context.Context, req *pb.RunAttachedRequest) (*pb.RunAttachedResponse, error) {
+	r := req.GetRun()
+	timeout := time.Duration(req.GetTimeoutSeconds()) * time.Second
+	if timeout > hostrun.MaxTimeout {
+		return nil, status.Errorf(codes.InvalidArgument, "timeout above %s; long work is a durable job", hostrun.MaxTimeout)
+	}
+	d, eps, err := s.prepareRun(r, req.GetEndpoints())
+	if err != nil {
+		return nil, err
+	}
+
+	grant, err := s.auth.AuthorizeGrant(d, authorizeRequest(r))
 	if err != nil {
 		return nil, toStatus(err)
 	}

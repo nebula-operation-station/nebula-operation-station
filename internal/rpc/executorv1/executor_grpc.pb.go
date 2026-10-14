@@ -28,6 +28,8 @@ const (
 	ExecutorService_CompletePrivilegedSession_FullMethodName = "/nebula.executor.v1.ExecutorService/CompletePrivilegedSession"
 	ExecutorService_AuthorizeRun_FullMethodName              = "/nebula.executor.v1.ExecutorService/AuthorizeRun"
 	ExecutorService_RunAttached_FullMethodName               = "/nebula.executor.v1.ExecutorService/RunAttached"
+	ExecutorService_StartDurable_FullMethodName              = "/nebula.executor.v1.ExecutorService/StartDurable"
+	ExecutorService_GetRun_FullMethodName                    = "/nebula.executor.v1.ExecutorService/GetRun"
 	ExecutorService_Unlock_FullMethodName                    = "/nebula.executor.v1.ExecutorService/Unlock"
 	ExecutorService_Lock_FullMethodName                      = "/nebula.executor.v1.ExecutorService/Lock"
 	ExecutorService_ListPending_FullMethodName               = "/nebula.executor.v1.ExecutorService/ListPending"
@@ -100,6 +102,15 @@ type ExecutorServiceClient interface {
 	// returns the bounded result and log. The permit's host is used once the
 	// run is authorized, whatever the outcome.
 	RunAttached(ctx context.Context, in *RunAttachedRequest, opts ...grpc.CallOption) (*RunAttachedResponse, error)
+	// Role: server. Authorizes one host run like RunAttached and starts it
+	// as a durable job (spec 07): recorded in executor.db before anything
+	// is sent, dispatched once, then only observed. The executor reconciles
+	// open runs in the background (also after a restart, once unlocked) and
+	// never dispatches a run again.
+	StartDurable(ctx context.Context, in *StartDurableRequest, opts ...grpc.CallOption) (*StartDurableResponse, error)
+	// Role: server. The state of a durable run; with release, a finished
+	// run's result and log are dropped from executor.db after this answer.
+	GetRun(ctx context.Context, in *GetRunRequest, opts ...grpc.CallOption) (*GetRunResponse, error)
 	// Role: admin. Decrypts the SSH keys into the in-process keyring and,
 	// once initialized, the vault's master key (spec 06: one passphrase is
 	// tried on both; the scope retries one of them alone).
@@ -270,6 +281,26 @@ func (c *executorServiceClient) RunAttached(ctx context.Context, in *RunAttached
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(RunAttachedResponse)
 	err := c.cc.Invoke(ctx, ExecutorService_RunAttached_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) StartDurable(ctx context.Context, in *StartDurableRequest, opts ...grpc.CallOption) (*StartDurableResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StartDurableResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_StartDurable_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) GetRun(ctx context.Context, in *GetRunRequest, opts ...grpc.CallOption) (*GetRunResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetRunResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_GetRun_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -643,6 +674,15 @@ type ExecutorServiceServer interface {
 	// returns the bounded result and log. The permit's host is used once the
 	// run is authorized, whatever the outcome.
 	RunAttached(context.Context, *RunAttachedRequest) (*RunAttachedResponse, error)
+	// Role: server. Authorizes one host run like RunAttached and starts it
+	// as a durable job (spec 07): recorded in executor.db before anything
+	// is sent, dispatched once, then only observed. The executor reconciles
+	// open runs in the background (also after a restart, once unlocked) and
+	// never dispatches a run again.
+	StartDurable(context.Context, *StartDurableRequest) (*StartDurableResponse, error)
+	// Role: server. The state of a durable run; with release, a finished
+	// run's result and log are dropped from executor.db after this answer.
+	GetRun(context.Context, *GetRunRequest) (*GetRunResponse, error)
 	// Role: admin. Decrypts the SSH keys into the in-process keyring and,
 	// once initialized, the vault's master key (spec 06: one passphrase is
 	// tried on both; the scope retries one of them alone).
@@ -769,6 +809,12 @@ func (UnimplementedExecutorServiceServer) AuthorizeRun(context.Context, *Authori
 }
 func (UnimplementedExecutorServiceServer) RunAttached(context.Context, *RunAttachedRequest) (*RunAttachedResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RunAttached not implemented")
+}
+func (UnimplementedExecutorServiceServer) StartDurable(context.Context, *StartDurableRequest) (*StartDurableResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method StartDurable not implemented")
+}
+func (UnimplementedExecutorServiceServer) GetRun(context.Context, *GetRunRequest) (*GetRunResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetRun not implemented")
 }
 func (UnimplementedExecutorServiceServer) Unlock(context.Context, *UnlockRequest) (*UnlockResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Unlock not implemented")
@@ -1012,6 +1058,42 @@ func _ExecutorService_RunAttached_Handler(srv interface{}, ctx context.Context, 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ExecutorServiceServer).RunAttached(ctx, req.(*RunAttachedRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_StartDurable_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StartDurableRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).StartDurable(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_StartDurable_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).StartDurable(ctx, req.(*StartDurableRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_GetRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRunRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).GetRun(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_GetRun_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).GetRun(ctx, req.(*GetRunRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1644,6 +1726,14 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RunAttached",
 			Handler:    _ExecutorService_RunAttached_Handler,
+		},
+		{
+			MethodName: "StartDurable",
+			Handler:    _ExecutorService_StartDurable_Handler,
+		},
+		{
+			MethodName: "GetRun",
+			Handler:    _ExecutorService_GetRun_Handler,
 		},
 		{
 			MethodName: "Unlock",
