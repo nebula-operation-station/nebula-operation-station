@@ -24,7 +24,7 @@ import (
 
 const hostKeysUsage = `usage: nebula host enroll-script --from ADDR[,ADDR...] [--user nebula] [--key nebula-default] [--no-sudo]
        nebula host probe ENDPOINT...
-       nebula host pin [--user nebula] [--key nebula-default] [--known-hosts FILE] HOST ENDPOINT...
+       nebula host pin [--user nebula] [--key nebula-default] [--known-hosts FILE] [--criticality LEVEL] HOST ENDPOINT...
        nebula host unpin HOST
        nebula host keys
        nebula host test HOST ENDPOINT...
@@ -55,8 +55,16 @@ func hostPin(ctx context.Context, c pb.ExecutorServiceClient, args []string, std
 	user := fs.String("user", "nebula", "SSH user on the host")
 	keyRef := fs.String("key", "nebula-default", "keyring reference of the key for this host")
 	knownHosts := fs.String("known-hosts", "", "take the key from this OpenSSH known_hosts file instead of probing")
+	crit := fs.String("criticality", "", "also set the executor's criticality of the host (LOW, MEDIUM, HIGH, CRITICAL), bound to this key")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	var rc pb.RiskClass
+	if *crit != "" {
+		var err error
+		if rc, err = parseRisk(*crit); err != nil {
+			return err
+		}
 	}
 	if fs.NArg() < 2 {
 		return errors.New(hostKeysUsage)
@@ -117,8 +125,12 @@ func hostPin(ctx context.Context, c pb.ExecutorServiceClient, args []string, std
 		fmt.Fprintln(w, "Compare this fingerprint with the output of, on the host's console:")
 		fmt.Fprintln(w, "    ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub   (or the ecdsa/rsa key of that type)")
 	}
-	fmt.Fprintf(w, "Pin %s for host %s, log in as %q with key %q? Type 'yes': ", displaySafe([]byte(fp), 60),
-		displaySafe([]byte(host), 63), displaySafe([]byte(*user), 32), displaySafe([]byte(*keyRef), 64))
+	critText := ""
+	if rc != pb.RiskClass_RISK_CLASS_UNSPECIFIED {
+		critText = ", criticality " + shortRisk(rc)
+	}
+	fmt.Fprintf(w, "Pin %s for host %s, log in as %q with key %q%s? Type 'yes': ", displaySafe([]byte(fp), 60),
+		displaySafe([]byte(host), 63), displaySafe([]byte(*user), 32), displaySafe([]byte(*keyRef), 64), critText)
 	line, _ := bufio.NewReader(stdin).ReadString('\n')
 	if strings.TrimSpace(line) != "yes" {
 		return errors.New("not pinned")
@@ -131,6 +143,13 @@ func hostPin(ctx context.Context, c pb.ExecutorServiceClient, args []string, std
 		return err
 	}
 	fmt.Fprintf(w, "pinned: %s %s\n", displaySafe([]byte(r.GetPin().GetHostId()), 63), displaySafe([]byte(r.GetPin().GetFingerprint()), 60))
+	if rc != pb.RiskClass_RISK_CLASS_UNSPECIFIED {
+		if _, err := c.SetHostCriticality(ctx, &pb.SetHostCriticalityRequest{HostId: host, HostKeyFingerprint: fp, Criticality: rc}); err != nil {
+			return fmt.Errorf("pinned, but setting the criticality failed (retry with `nebula host criticality %s %s`): %w",
+				displaySafe([]byte(host), 63), shortRisk(rc), err)
+		}
+		fmt.Fprintf(w, "criticality: %s\n", shortRisk(rc))
+	}
 	fmt.Fprintf(w, "next: nebula host test %s %s\n", displaySafe([]byte(host), 63), strings.Join(epArgs, " "))
 	return nil
 }

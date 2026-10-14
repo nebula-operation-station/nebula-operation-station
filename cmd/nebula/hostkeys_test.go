@@ -36,6 +36,12 @@ type fakeHosts struct {
 	pinReq *pb.PinHostKeyRequest
 	unpin  *pb.UnpinHostKeyRequest
 	pins   []*pb.HostKeyPin
+	crit   *pb.SetHostCriticalityRequest
+}
+
+func (f *fakeHosts) SetHostCriticality(_ context.Context, in *pb.SetHostCriticalityRequest, _ ...grpc.CallOption) (*pb.SetHostCriticalityResponse, error) {
+	f.crit = in
+	return &pb.SetHostCriticalityResponse{Changed: true, HostKeyFingerprint: in.GetHostKeyFingerprint()}, nil
 }
 
 func (f *fakeHosts) ProbeHostKey(_ context.Context, in *pb.ProbeHostKeyRequest, _ ...grpc.CallOption) (*pb.ProbeHostKeyResponse, error) {
@@ -126,5 +132,25 @@ func TestHostKeysListEscapesHostData(t *testing.T) {
 	}
 	if strings.ContainsAny(out.String(), "\x1b\x07") || !strings.Contains(out.String(), "BLOCKED") {
 		t.Fatalf("output %q", out.String())
+	}
+}
+
+func TestHostPinSetsCriticalityBoundToThePin(t *testing.T) {
+	k := pubKey(t)
+	f := &fakeHosts{keys: map[string]ssh.PublicKey{"192.168.0.10:22": k}}
+	var out strings.Builder
+	if err := hostPin(context.Background(), f, []string{"--criticality", "BOGUS", "dockerflux", "192.168.0.10"}, strings.NewReader("yes\n"), &out); err == nil || f.pinReq != nil {
+		t.Fatal("invalid criticality accepted or pinned anyway")
+	}
+	if err := hostPin(context.Background(), f, []string{"--criticality", "high", "dockerflux", "192.168.0.10"}, strings.NewReader("yes\n"), &out); err != nil {
+		t.Fatal(err)
+	}
+	if f.crit.GetHostId() != "dockerflux" || f.crit.GetHostKeyFingerprint() != ssh.FingerprintSHA256(k) || f.crit.GetCriticality() != pb.RiskClass_RISK_CLASS_HIGH ||
+		!strings.Contains(out.String(), "criticality HIGH?") {
+		t.Fatalf("criticality %v output %q", f.crit, out.String())
+	}
+	f.crit = nil
+	if err := hostPin(context.Background(), f, []string{"dockerflux", "192.168.0.10"}, strings.NewReader("yes\n"), &out); err != nil || f.crit != nil {
+		t.Fatalf("criticality set without the flag: %v", err)
 	}
 }

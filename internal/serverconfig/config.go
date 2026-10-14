@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -81,6 +82,10 @@ type Config struct {
 	ExecutorSocket string `json:"executor_socket"`
 	// ExecutorUser is the OS user the executor runs as.
 	ExecutorUser string `json:"executor_user"`
+	// Notifications configures the providers (spec 13). Their tokens are
+	// low-privilege and live here, not in the executor vault; a config
+	// with any of them must not be readable by others.
+	Notifications Notifications `json:"notifications"`
 	// Token is the server's secret token. The Token type redacts the
 	// value in every formatting, logging, and serialization path.
 	Token Token `json:"token"`
@@ -92,7 +97,14 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("serverconfig: read %s: %w", path, err)
 	}
-	return Parse(data)
+	cfg, err := Parse(data)
+	if err != nil {
+		return Config{}, err
+	}
+	if err := checkSecretFileMode(path, cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
 }
 
 // Parse parses the JSON config, applies defaults, and validates it.
@@ -168,6 +180,8 @@ func (c Config) Validate() error {
 		problems = append(problems, "executor_user: required")
 	}
 
+	problems = append(problems, c.Notifications.problems()...)
+
 	if len(problems) == 0 {
 		return nil
 	}
@@ -177,6 +191,80 @@ func (c Config) Validate() error {
 // isLoopback reports whether host names a loopback address. Only explicit
 // loopback IPs and the literal "localhost" are treated as loopback; any
 // other hostname is treated as non-loopback (no DNS resolution).
+// Notifications are the notification providers. Each is optional.
+type Notifications struct {
+	Webhook  *WebhookConfig  `json:"webhook,omitempty"`
+	Ntfy     *NtfyConfig     `json:"ntfy,omitempty"`
+	Telegram *TelegramConfig `json:"telegram,omitempty"`
+}
+
+// WebhookConfig sends JSON, HMAC-SHA256 signed with Secret.
+type WebhookConfig struct {
+	URL    string `json:"url"`
+	Secret Token  `json:"secret"`
+}
+
+// NtfyConfig publishes to Topic on the ntfy server URL, with an optional
+// access token.
+type NtfyConfig struct {
+	URL   string `json:"url"`
+	Topic string `json:"topic"`
+	Token Token  `json:"token,omitempty"`
+}
+
+// TelegramConfig sends through a bot to one chat.
+type TelegramConfig struct {
+	BotToken Token  `json:"bot_token"`
+	ChatID   string `json:"chat_id"`
+}
+
+// HasSecrets reports whether any provider carries a token or secret.
+func (n Notifications) HasSecrets() bool {
+	return (n.Webhook != nil && n.Webhook.Secret != "") || (n.Ntfy != nil && n.Ntfy.Token != "") ||
+		(n.Telegram != nil && n.Telegram.BotToken != "")
+}
+
+var (
+	ntfyTopicRe  = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	chatIDRe     = regexp.MustCompile(`^(-?[0-9]{1,20}|@[A-Za-z0-9_]{5,32})$`)
+	botTokenRe   = regexp.MustCompile(`^[0-9]{1,20}:[A-Za-z0-9_-]{20,64}$`)
+	minSecretLen = 32
+)
+
+func (n Notifications) problems() []string {
+	var p []string
+	if w := n.Webhook; w != nil {
+		if !isHTTPURL(w.URL) {
+			p = append(p, "notifications.webhook.url: must be an absolute http(s) URL without credentials")
+		}
+		if len(w.Secret) < minSecretLen {
+			p = append(p, fmt.Sprintf("notifications.webhook.secret: at least %d characters", minSecretLen))
+		}
+	}
+	if t := n.Ntfy; t != nil {
+		if !isHTTPURL(t.URL) {
+			p = append(p, "notifications.ntfy.url: must be an absolute http(s) URL without credentials")
+		}
+		if !ntfyTopicRe.MatchString(t.Topic) {
+			p = append(p, "notifications.ntfy.topic: 1-64 characters A-Z, a-z, 0-9, '_' or '-'")
+		}
+	}
+	if t := n.Telegram; t != nil {
+		if !botTokenRe.MatchString(string(t.BotToken)) {
+			p = append(p, "notifications.telegram.bot_token: not a bot token (digits:characters)")
+		}
+		if !chatIDRe.MatchString(t.ChatID) {
+			p = append(p, "notifications.telegram.chat_id: a numeric chat ID or @channelname")
+		}
+	}
+	return p
+}
+
+func isHTTPURL(s string) bool {
+	u, err := url.Parse(s)
+	return err == nil && (u.Scheme == "https" || u.Scheme == "http") && u.Host != "" && u.User == nil && u.Fragment == ""
+}
+
 func isLoopback(host string) bool {
 	if host == "localhost" {
 		return true
