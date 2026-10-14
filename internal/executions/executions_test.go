@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
@@ -141,14 +142,14 @@ func setup(t *testing.T, f *fakeExec) (*Service, *sql.DB) {
 func TestCreateRefusesUnusableHosts(t *testing.T) {
 	s, _ := setup(t, &fakeExec{})
 	ctx := context.Background()
-	if _, err := s.Create(ctx, "axel", "nope", []string{"web"}); !errors.Is(err, ErrUnknownAction) {
+	if _, err := s.Create(ctx, "axel", "nope", []string{"web"}, nil); !errors.Is(err, ErrUnknownAction) {
 		t.Fatal(err)
 	}
-	if _, err := s.Create(ctx, "axel", "core.facts", nil); !errors.Is(err, ErrNoHosts) {
+	if _, err := s.Create(ctx, "axel", "core.facts", nil, nil); !errors.Is(err, ErrNoHosts) {
 		t.Fatal(err)
 	}
 	for host, want := range map[string]string{"ghost": "not in the inventory", "new": "not enrolled", "bad": "blocked"} {
-		_, err := s.Create(ctx, "axel", "core.facts", []string{host})
+		_, err := s.Create(ctx, "axel", "core.facts", []string{host}, nil)
 		var he *HostError
 		if !errors.As(err, &he) || !strings.Contains(he.Reason, want) {
 			t.Errorf("%s: %v", host, err)
@@ -160,7 +161,7 @@ func TestCreateProposesAndApprovalRuns(t *testing.T) {
 	f := &fakeExec{}
 	s, _ := setup(t, f)
 	ctx := context.Background()
-	c, err := s.Create(ctx, "axel", "core.facts", []string{"web", "web"})
+	c, err := s.Create(ctx, "axel", "core.facts", []string{"web", "web"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +218,7 @@ func waitState(t *testing.T, s *Service, id, want string) {
 func TestAutoApprovedRunsAndRefusalsAreRecorded(t *testing.T) {
 	f := &fakeExec{approved: true, risk: pb.RiskClass_RISK_CLASS_LOW, attachErr: status.Error(codes.PermissionDenied, "host_already_run")}
 	s, _ := setup(t, f)
-	c, err := s.Create(context.Background(), "axel", "core.facts", []string{"web"})
+	c, err := s.Create(context.Background(), "axel", "core.facts", []string{"web"}, nil)
 	if err != nil || c.State != "approved" {
 		t.Fatalf("%+v %v", c, err)
 	}
@@ -235,7 +236,7 @@ func TestDurableRunsArePolledAndReleased(t *testing.T) {
 		Durable: true, Timeout: time.Minute, Script: []byte("true\n")})
 	f := &fakeExec{approved: true}
 	s, _ := setup(t, f)
-	c, err := s.Create(context.Background(), "axel", "test.durable", []string{"web"})
+	c, err := s.Create(context.Background(), "axel", "test.durable", []string{"web"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +260,7 @@ func TestDurableRunsArePolledAndReleased(t *testing.T) {
 func TestResumeMarksInterruptedAttachedRunsUnknown(t *testing.T) {
 	f := &fakeExec{}
 	s, db := setup(t, f)
-	c, err := s.Create(context.Background(), "axel", "core.facts", []string{"web"})
+	c, err := s.Create(context.Background(), "axel", "core.facts", []string{"web"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +305,7 @@ func TestSuccessfulUpdateListsAreKept(t *testing.T) {
 	s, _ := setup(t, f)
 	sim := base64.StdEncoding.EncodeToString([]byte("Inst openssl [1] (2 Debian-Security:12/stable-security [amd64])\nInst vim [1] (2 Debian:12/stable [amd64])\n"))
 	f.result = []byte(`{"format":"apt-simulate-v1","mode":"upgrade","simulate":"` + sim + `","reboot_required":false,"reboot_pkgs":"","lists_mtime":1791960000,"proxmox":false}`)
-	c, err := s.Create(context.Background(), "axel", "package.list_updates", []string{"web"})
+	c, err := s.Create(context.Background(), "axel", "package.list_updates", []string{"web"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +359,7 @@ func TestOpsStateTransitionsNotifyOnce(t *testing.T) {
 	sent := &sentEvents{}
 	s.SetNotifier(notify.NewWithSenders(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, sent))
 	run := func() {
-		c, err := s.Create(context.Background(), "axel", "core.facts", []string{"web"})
+		c, err := s.Create(context.Background(), "axel", "core.facts", []string{"web"}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -380,6 +381,29 @@ func TestOpsStateTransitionsNotifyOnce(t *testing.T) {
 	}
 	if len(sent.events) != 2 || sent.events[0].State != StateUnknown || !strings.Contains(sent.events[1].Reason, "recovered") {
 		t.Fatalf("%+v", sent.events)
+	}
+}
+
+func TestParamsAreValidatedAndCarried(t *testing.T) {
+	f := &fakeExec{approved: true}
+	s, _ := setup(t, f)
+	ctx := context.Background()
+	var pe *ParamError
+	if _, err := s.Create(ctx, "axel", "service.restart", []string{"web"}, map[string]string{"unit": "-evil"}); !errors.As(err, &pe) {
+		t.Fatalf("bad unit: %v", err)
+	}
+	if _, err := s.Create(ctx, "axel", "core.facts", []string{"web"}, map[string]string{"x": "y"}); !errors.As(err, &pe) {
+		t.Fatalf("params for a parameterless action: %v", err)
+	}
+	c, err := s.Create(ctx, "axel", "service.restart", []string{"web"}, map[string]string{"unit": "nginx.service"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, s, c.ID, "finished")
+	ph, _ := canonical.HashParameters([]byte(`{"unit":"nginx.service"}`))
+	if f.proposed.GetRequest().GetParametersHash() != ph || string(f.proposed.GetParametersJson()) != `{"unit":"nginx.service"}` ||
+		string(f.attached[0].GetRun().GetParametersJson()) != `{"unit":"nginx.service"}` {
+		t.Fatalf("params not carried: %v %v", f.proposed, f.attached[0])
 	}
 }
 

@@ -101,6 +101,19 @@ function check(cond, what) {
   await page.goto(base + '/inventory');
   check(/checked \d{4}-\d{2}-\d{2}/.test(await page.textContent('tr[data-id="e2e-host"]')), 'the inventory shows the update status');
   check(/(READY|WARNING)/.test(await page.textContent('tr[data-id="e2e-host"]')), 'the inventory shows the Ops State');
+  // Service actions take a unit name; the server refuses anything but a plain unit name.
+  await page.goto(base + '/operations/new');
+  check(await page.locator('label.param[data-action="service.restart"]').isHidden(), 'parameter fields stay hidden until their action is chosen');
+  await page.check('input[name="action"][value="service.restart"]');
+  await page.check('input[name="host"][value="e2e-host"]');
+  check(await page.locator('label.param[data-action="service.restart"]').isVisible(), 'choosing a service action shows its unit field');
+  await page.fill('label.param[data-action="service.restart"] input', '-x');
+  await page.click('#operation-create');
+  await page.waitForFunction(() => /unit/.test(document.getElementById('message').textContent), null, { timeout: 15000 });
+  check(/\/operations\/new$/.test(page.url()), 'an invalid unit name is refused before anything is proposed');
+  await page.fill('label.param[data-action="service.restart"] input', 'cron.service');
+  await Promise.all([page.waitForURL(/\/operations\/[0-9a-f-]{36}$/, { timeout: 15000 }), page.click('#operation-create')]);
+  check(/service\.restart .*with \{"unit":"cron\.service"\}/.test(await page.textContent('main')), 'the planned service operation shows its parameters');
   await page.goto(base + '/dashboard');
   await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('#executor-lock')]);
   check(/Privileged session: none/.test(await page.textContent('main')), 'lock ends the privileged session');

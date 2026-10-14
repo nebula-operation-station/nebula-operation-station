@@ -2,7 +2,7 @@
 {{with .Ops.Exec}}
 <h1>Operation {{.ID}}</h1>
 <section class="panel" aria-label="Operation" id="operation" data-id="{{.ID}}" data-state="{{.State}}"{{if .Live}} data-live="1"{{end}}>
-  <p class="status">Action: {{.Action}} {{.Version}}</p>
+  <p class="status">Action: {{.Action}} {{.Version}}{{if .Params}} with <code>{{.Params}}</code>{{end}}</p>
   <p class="status">Risk (decided by the executor): {{.Risk}}</p>
   <p class="status">State: <strong>{{.State}}</strong>{{if .Detail}} — {{.Detail}}{{end}}</p>
   <p class="status">Created by {{.CreatedBy}} at {{.Created}}</p>
@@ -46,7 +46,7 @@
   </table>
 </section>
 {{range .Hosts}}
-{{if or .Facts .Updates .Install .Result .Log}}
+{{if or .Facts .Updates .Install .Units .Service .Result .Log}}
 <section class="panel" aria-label="Output of {{.ID}}">
   <h2>{{.ID}}</h2>
   {{if .Facts}}
@@ -55,6 +55,19 @@
       {{range .Facts}}<tr><th>{{.Name}}</th><td>{{.Value}}</td></tr>{{end}}
     </tbody>
   </table>
+  {{end}}
+  {{if .Units}}
+  <table class="inventory">
+    <thead><tr><th>Unit</th><th>Load</th><th>Active</th><th>Sub</th><th>Description</th></tr></thead>
+    <tbody>{{range .Units}}<tr><td>{{.Name}}</td><td>{{.Load}}</td><td>{{if eq .Active "failed"}}<span class="status--error">failed</span>{{else}}{{.Active}}{{end}}</td><td>{{.Sub}}</td><td>{{.Description}}</td></tr>{{end}}</tbody>
+  </table>
+  {{end}}
+  {{with .Service}}
+  {{if eq .Phase "precheck"}}<p class="status status--error">Precheck failed: {{.Reason}}</p>{{end}}
+  {{if .Verb}}<p class="status">systemctl {{.Verb}}: exit status {{.Exit}}</p>{{end}}
+  {{if .Props}}<table class="inventory"><tbody>{{range .Props}}<tr><th>{{.Name}}</th><td>{{.Value}}</td></tr>{{end}}</tbody></table>{{end}}
+  {{if .Journal}}<pre class="output">{{range .Journal}}{{.}}
+{{end}}</pre>{{end}}
   {{end}}
   {{with .Install}}
   {{if eq .Phase "precheck"}}

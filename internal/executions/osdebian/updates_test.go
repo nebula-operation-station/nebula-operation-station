@@ -79,3 +79,19 @@ func TestParseInstall(t *testing.T) {
 		t.Fatal("unknown phase accepted")
 	}
 }
+
+func TestParseSystemd(t *testing.T) {
+	enc := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	units, err := ParseUnits([]byte(`{"format":"systemd-units-v1","units":"` + enc("cron.service loaded active running Regular background program processing daemon\n-bad x y z\nnginx.service loaded failed failed A high performance web server\n") + `"}`))
+	if err != nil || len(units) != 2 || units[1].Active != "failed" || units[0].Description == "" {
+		t.Fatalf("%+v %v", units, err)
+	}
+	st, err := ParseServiceStatus([]byte(`{"format":"systemd-status-v1","phase":"done","verb":"restart","exit":0,"show":"` +
+		enc("Id=nginx.service\nActiveState=active\nExecStart=/bin/evil\n") + `","journal":"` + enc("line 1\nline 2\n") + `"}`))
+	if err != nil || len(st.Props) != 2 || len(st.Journal) != 2 || st.Verb != "restart" {
+		t.Fatalf("%+v %v", st, err)
+	}
+	if _, err := ParseServiceStatus([]byte(`{"format":"systemd-status-v1","phase":"other"}`)); err == nil {
+		t.Fatal("bad phase accepted")
+	}
+}

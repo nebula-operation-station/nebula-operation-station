@@ -151,6 +151,61 @@ func TestBuiltinScriptsAreDistinctAndValid(t *testing.T) {
 	}
 }
 
+func TestServiceParamsAreStrict(t *testing.T) {
+	a, _ := Lookup("service.restart")
+	for _, bad := range []map[string]string{nil, {}, {"unit": "-x"}, {"unit": "a b"}, {"unit": "x\"; rm -rf /"}, {"unit": "ok", "more": "x"}, {"other": "x"}} {
+		if a.ValidParams(bad) == nil {
+			t.Errorf("%v accepted", bad)
+		}
+	}
+	if err := a.ValidParams(map[string]string{"unit": "nginx.service"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServiceControlScript(t *testing.T) {
+	f := newFakeHost(t, "1")
+	f.write(t, "id", `echo 1000`)
+	f.write(t, "sudo", `[ "$1" = "-n" ] && shift; echo "sudo $*" >> "`+f.calls+`"; "$@"`)
+	f.write(t, "systemctl", `echo "systemctl $*" >> "`+f.calls+`"; [ "$1" = show ] && echo "ActiveState=active"; exit 0`)
+	f.write(t, "journalctl", `echo "journal line"`)
+	a, _ := Lookup("service.restart")
+	params := filepath.Join(f.dir, "params.json")
+	run := func(p string) (int, map[string]any) {
+		if err := os.WriteFile(params, []byte(p), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		script := filepath.Join(f.dir, "action.sh")
+		if err := os.WriteFile(script, a.Script, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("/bin/sh", script)
+		cmd.Dir = f.dir
+		cmd.Env = []string{"PATH=" + f.bin + ":/usr/bin:/bin", "NEBULA_PARAMS=" + params}
+		out, err := cmd.Output()
+		code := 0
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(out, &doc); err != nil {
+			t.Fatalf("%q: %v", out, err)
+		}
+		return code, doc
+	}
+	code, doc := run(`{"unit":"nginx.service"}`)
+	calls, _ := os.ReadFile(f.calls)
+	if code != 0 || doc["verb"] != "restart" || !strings.Contains(string(calls), "sudo systemctl restart -- nginx.service") {
+		t.Fatalf("%d %v\n%s", code, doc, calls)
+	}
+	// Anything but the canonical one-key document is refused by the script.
+	for _, p := range []string{`{"unit":"-x"}`, `{"unit":"a;b"}`, `{"unit":"x","y":"z"}`, `{"unit":"$(id)"}`} {
+		if code, doc := run(p); code != 10 || doc["phase"] != "precheck" {
+			t.Errorf("%s: %d %v", p, code, doc)
+		}
+	}
+}
+
 // The security package list comes from the host's apt output; a hostile
 // host must not turn it into apt-get options or a glob (Hermes review).
 func TestInstallSecurityRefusesHostileSimulationOutput(t *testing.T) {

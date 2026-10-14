@@ -24,7 +24,7 @@ import (
 
 // Operations plans and follows executions (executions.Service).
 type Operations interface {
-	Create(ctx context.Context, user, actionID string, hosts []string) (executions.Created, error)
+	Create(ctx context.Context, user, actionID string, hosts []string, params map[string]string) (executions.Created, error)
 	Approve(ctx context.Context, user, id string, assertion []byte, typedTargets uint32) error
 	Get(ctx context.Context, id string) (executions.Execution, error)
 	List(ctx context.Context, limit int) ([]executions.Summary, error)
@@ -75,6 +75,11 @@ type opsRow struct {
 type actionView struct {
 	ID, Title, Description, Risk string
 	ReadOnly                     bool
+	Params                       []paramView
+}
+
+type paramView struct {
+	Name, Label, Pattern string
 }
 
 type opsHostOption struct {
@@ -83,7 +88,7 @@ type opsHostOption struct {
 }
 
 type execView struct {
-	ID, Action, Version, Risk, Requirement, State, Detail, Digest, CreatedBy, Created string
+	ID, Action, Version, Risk, Requirement, State, Detail, Digest, CreatedBy, Created, Params string
 	// Options is the WebAuthn request options JSON while approval is
 	// pending (rendered into a data attribute, escaped by html/template).
 	Options                        string
@@ -97,7 +102,10 @@ type execHostView struct {
 	// Updates is the parsed package.list_updates result.
 	Updates *updatesView
 	// Install is the parsed package.install_* result.
-	Install                     *osdebian.Install
+	Install *osdebian.Install
+	// Units and Service are the parsed service.* results.
+	Units                       []osdebian.Unit
+	Service                     *osdebian.ServiceStatus
 	Result, Log                 string
 	ResultCut, LogCut, LogTrunc bool
 	OK                          bool
@@ -142,8 +150,12 @@ func (h *Handler) handleOperationNew(w http.ResponseWriter, r *http.Request) {
 	data := pageData{Title: "New operation", Active: "operations", Content: "operation_new", Scripts: []string{"webauthn.js", "operations.js"}}
 	ops := &operationsData{}
 	for _, a := range actions.Builtin {
-		ops.Actions = append(ops.Actions, actionView{ID: a.ID, Title: a.Title, Description: a.Description,
-			Risk: strings.TrimPrefix(a.Risk.String(), "RISK_CLASS_"), ReadOnly: a.ReadOnly})
+		v := actionView{ID: a.ID, Title: a.Title, Description: a.Description,
+			Risk: strings.TrimPrefix(a.Risk.String(), "RISK_CLASS_"), ReadOnly: a.ReadOnly}
+		for _, p := range a.Params {
+			v.Params = append(v.Params, paramView{Name: p.Name, Label: p.Label, Pattern: strings.TrimSuffix(strings.TrimPrefix(p.Pattern.String(), "^"), "$")})
+		}
+		ops.Actions = append(ops.Actions, v)
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), inventoryCallTimeout)
 	defer cancel()
@@ -217,6 +229,9 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 		Detail: e.Detail, Digest: e.Digest, CreatedBy: e.CreatedBy, Created: e.CreatedAt.UTC().Format("2006-01-02 15:04:05 MST"),
 		Pending: e.State == "pending", Live: e.State == "approved" || e.State == "running",
 		NeedsTypedCount: e.Requirement == "assertion_verified_typed_count"}
+	if e.Params != "" && e.Params != "{}" {
+		v.Params = e.Params
+	}
 	if v.Pending && len(e.Options) > 0 && json.Valid(e.Options) {
 		v.Options = string(e.Options)
 	}
@@ -231,6 +246,14 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(e.ActionID, "package.install_") && len(x.Result) > 0 {
 			if in, err := osdebian.ParseInstall(x.Result); err == nil {
 				hv.Install = &in
+			}
+		}
+		if e.ActionID == "service.list" && x.Class == "success" {
+			hv.Units, _ = osdebian.ParseUnits(x.Result)
+		}
+		if strings.HasPrefix(e.ActionID, "service.") && e.ActionID != "service.list" && len(x.Result) > 0 {
+			if st, err := osdebian.ParseServiceStatus(x.Result); err == nil {
+				hv.Service = &st
 			}
 		}
 		if e.ActionID == "package.list_updates" && x.Class == "success" {
@@ -298,20 +321,22 @@ func (h *Handler) handleOperationCreate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var in struct {
-		Action string   `json:"action"`
-		Hosts  []string `json:"hosts"`
+		Action string            `json:"action"`
+		Hosts  []string          `json:"hosts"`
+		Params map[string]string `json:"params"`
 	}
 	if !readOpsJSON(w, r, &in) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
 	defer cancel()
-	c, err := h.operations.Create(ctx, webUser(r), in.Action, in.Hosts)
+	c, err := h.operations.Create(ctx, webUser(r), in.Action, in.Hosts, in.Params)
 	var he *executions.HostError
+	var pe *executions.ParamError
 	switch {
 	case err == nil:
 		writeJSON(w, http.StatusOK, map[string]any{"id": c.ID, "state": c.State, "risk": c.Risk})
-	case errors.Is(err, executions.ErrUnknownAction), errors.Is(err, executions.ErrNoHosts), errors.Is(err, executions.ErrTooManyHosts), errors.As(err, &he):
+	case errors.Is(err, executions.ErrUnknownAction), errors.Is(err, executions.ErrNoHosts), errors.Is(err, executions.ErrTooManyHosts), errors.As(err, &he), errors.As(err, &pe):
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 	default:
 		if st, ok := status.FromError(err); ok && st.Code() != codes.Unknown {

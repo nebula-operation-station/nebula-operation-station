@@ -1,7 +1,7 @@
 {{define "content"}}
 <h1>New operation</h1>
 <section class="panel" aria-label="New operation">
-  <form id="operation-form" class="form">
+  <form id="operation-form" class="form" novalidate>
     <fieldset>
       <legend>Action</legend>
       {{range $i, $a := .Ops.Actions}}
@@ -10,6 +10,11 @@
         <strong>{{$a.Title}}</strong> ({{$a.ID}}, declared {{$a.Risk}}{{if $a.ReadOnly}}, read-only{{end}})
         <span class="hint">{{$a.Description}}</span>
       </label>
+      {{range $a.Params}}
+      <label class="param" data-action="{{$a.ID}}" hidden>{{.Label}}
+        <input type="text" data-param="{{.Name}}" pattern="{{.Pattern}}" autocomplete="off">
+      </label>
+      {{end}}
       {{end}}
     </fieldset>
     <fieldset>

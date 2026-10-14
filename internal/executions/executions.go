@@ -84,8 +84,10 @@ var stagePlanHash = func() string {
 	return s
 }()
 
-// emptyParams are the parameters of the built-in actions.
-var emptyParams = []byte(`{}`)
+// ParamError is an invalid action parameter (it describes the input).
+type ParamError struct{ Reason string }
+
+func (e *ParamError) Error() string { return e.Reason }
 
 // Service is safe for concurrent use.
 type Service struct {
@@ -144,10 +146,20 @@ type target struct {
 }
 
 // Create plans an execution of a built-in action on hosts and proposes it.
-func (s *Service) Create(ctx context.Context, user, actionID string, hostIDs []string) (Created, error) {
+func (s *Service) Create(ctx context.Context, user, actionID string, hostIDs []string, params map[string]string) (Created, error) {
 	a, ok := actions.Lookup(actionID)
 	if !ok {
 		return Created{}, ErrUnknownAction
+	}
+	if params == nil {
+		params = map[string]string{}
+	}
+	if err := a.ValidParams(params); err != nil {
+		return Created{}, &ParamError{Reason: err.Error()}
+	}
+	paramsJSON, err := json.Marshal(params)
+	if err != nil {
+		return Created{}, err
 	}
 	if len(hostIDs) == 0 {
 		return Created{}, ErrNoHosts
@@ -205,7 +217,7 @@ func (s *Service) Create(ctx context.Context, user, actionID string, hostIDs []s
 	if err != nil {
 		return Created{}, err
 	}
-	ph, err := canonical.HashParameters(emptyParams)
+	ph, err := canonical.HashParameters(paramsJSON)
 	if err != nil {
 		return Created{}, err
 	}
@@ -220,7 +232,7 @@ func (s *Service) Create(ctx context.Context, user, actionID string, hostIDs []s
 	for _, t := range targets {
 		req.ResolvedTargets = append(req.ResolvedTargets, &pb.Target{HostId: t.host, HostKeyFingerprint: t.fp})
 	}
-	p, err := s.exec.ProposeExecution(cctx, &pb.ProposeExecutionRequest{Request: req, ParametersJson: emptyParams, RaiseToMinimum: true})
+	p, err := s.exec.ProposeExecution(cctx, &pb.ProposeExecutionRequest{Request: req, ParametersJson: paramsJSON, RaiseToMinimum: true})
 	if err != nil {
 		return Created{}, err
 	}
@@ -235,9 +247,9 @@ func (s *Service) Create(ctx context.Context, user, actionID string, hostIDs []s
 	}
 	defer tx.Rollback() //nolint:errcheck
 	if _, err := tx.ExecContext(ctx, `INSERT INTO executions (id, digest, action_id, module_version, artifact_sha256, risk, requirement, state,
-			durable, timeout_s, options, approval_expiry, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			durable, timeout_s, options, approval_expiry, created_by, created_at, params) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, p.GetExecutionDigest(), a.ID, a.Version, a.SHA256(), c.Risk, c.Requirement, state, boolInt(a.Durable),
-		int64(a.Timeout/time.Second), p.GetRequestOptionsJson(), p.GetChallengeExpiryUnix(), user, s.now().Unix()); err != nil {
+		int64(a.Timeout/time.Second), p.GetRequestOptionsJson(), p.GetChallengeExpiryUnix(), user, s.now().Unix(), string(paramsJSON)); err != nil {
 		return Created{}, fmt.Errorf("store execution: %w", err)
 	}
 	for _, t := range targets {
@@ -381,7 +393,7 @@ func (s *Service) fail(id, detail string) {
 
 func (s *Service) runHost(ctx context.Context, e Execution, a actions.Action, h Host) {
 	run := &pb.AuthorizeRunRequest{ExecutionDigest: e.Digest, HostId: h.HostID, HostKeyFingerprint: h.Fingerprint,
-		ActionId: a.ID, ModuleVersion: a.Version, Artifact: a.Script, ParametersJson: emptyParams, CredentialRef: h.CredentialRef}
+		ActionId: a.ID, ModuleVersion: a.Version, Artifact: a.Script, ParametersJson: []byte(e.Params), CredentialRef: h.CredentialRef}
 	if h.State == "waiting" {
 		if _, err := s.db.ExecContext(ctx, `UPDATE execution_hosts SET state = 'running', started_at = ? WHERE execution_id = ? AND host_id = ?`,
 			s.now().Unix(), e.ID, h.HostID); err != nil {

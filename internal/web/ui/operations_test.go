@@ -32,7 +32,7 @@ type fakeOps struct {
 	exec       executions.Execution
 }
 
-func (f *fakeOps) Create(_ context.Context, user, action string, hosts []string) (executions.Created, error) {
+func (f *fakeOps) Create(_ context.Context, user, action string, hosts []string, _ map[string]string) (executions.Created, error) {
 	if f.createErr != nil {
 		return executions.Created{}, f.createErr
 	}
@@ -177,6 +177,8 @@ func TestOperationErrorsAreSafeForTheBrowser(t *testing.T) {
 			code: http.StatusInternalServerError, want: "operations unavailable", notWant: "server.db"},
 		"bad key": {approve: status.Error(codes.PermissionDenied, "assertion_invalid: signature does not verify"), path: "/operations/approve",
 			code: http.StatusForbidden, want: "security key not accepted", notWant: "signature"},
+		"bad parameter": {create: &executions.ParamError{Reason: "unit: not a valid value"}, path: "/operations/create",
+			code: http.StatusBadRequest, want: "unit: not a valid value"},
 		"not pending": {approve: executions.ErrNotPending, path: "/operations/approve", code: http.StatusConflict, want: "not waiting"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -228,6 +230,31 @@ func TestInstallResultsAreShown(t *testing.T) {
 		"Precheck failed: less than 500 MB free on /var. Nothing was installed."} {
 		if !strings.Contains(page, want) {
 			t.Errorf("page misses %q", want)
+		}
+	}
+}
+
+func TestServiceResultsAreShown(t *testing.T) {
+	enc := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	list := `{"format":"systemd-units-v1","units":"` + enc("nginx.service loaded failed failed Web <b>server</b>\n") + `"}`
+	f := &fakeOps{exec: executions.Execution{ID: opID, ActionID: "service.list", State: "finished", CreatedAt: time.Unix(1791960000, 0),
+		Hosts: []executions.Host{{HostID: "a", State: "finished", Class: "success", Result: []byte(list)}}}}
+	page := getBody(t, opsHandler(t, f, nil), "/operations/"+opID)
+	for _, want := range []string{"<td>nginx.service</td>", `<span class="status--error">failed</span>`, "Web &lt;b&gt;server&lt;/b&gt;"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("list page misses %q", want)
+		}
+	}
+	st := `{"format":"systemd-status-v1","phase":"done","verb":"restart","exit":0,"show":"` + enc("ActiveState=active\n") +
+		`","journal":"` + enc("started <script>\n") + `"}`
+	f.exec = executions.Execution{ID: opID, ActionID: "service.restart", State: "finished", CreatedAt: time.Unix(1791960000, 0),
+		Params: `{"unit":"nginx.service"}`,
+		Hosts:  []executions.Host{{HostID: "a", State: "finished", Class: "success", Result: []byte(st)}}}
+	page = getBody(t, opsHandler(t, f, nil), "/operations/"+opID)
+	for _, want := range []string{"systemctl restart: exit status 0", "<th>ActiveState</th><td>active</td>", "started &lt;script&gt;",
+		"nginx.service"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("status page misses %q", want)
 		}
 	}
 }
