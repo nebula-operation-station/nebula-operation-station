@@ -41,6 +41,8 @@ const (
 	ExecutorService_FinishRegistration_FullMethodName        = "/nebula.executor.v1.ExecutorService/FinishRegistration"
 	ExecutorService_ListWebAuthnCredentials_FullMethodName   = "/nebula.executor.v1.ExecutorService/ListWebAuthnCredentials"
 	ExecutorService_RemoveWebAuthnCredential_FullMethodName  = "/nebula.executor.v1.ExecutorService/RemoveWebAuthnCredential"
+	ExecutorService_BeginLogin_FullMethodName                = "/nebula.executor.v1.ExecutorService/BeginLogin"
+	ExecutorService_FinishLogin_FullMethodName               = "/nebula.executor.v1.ExecutorService/FinishLogin"
 	ExecutorService_ProbeHostKey_FullMethodName              = "/nebula.executor.v1.ExecutorService/ProbeHostKey"
 	ExecutorService_PinHostKey_FullMethodName                = "/nebula.executor.v1.ExecutorService/PinHostKey"
 	ExecutorService_UnpinHostKey_FullMethodName              = "/nebula.executor.v1.ExecutorService/UnpinHostKey"
@@ -116,6 +118,11 @@ type ExecutorServiceClient interface {
 	// privileged session, revokes every permit, cancels pending
 	// registrations and the outstanding code).
 	RemoveWebAuthnCredential(ctx context.Context, in *RemoveWebAuthnCredentialRequest, opts ...grpc.CallOption) (*RemoveWebAuthnCredentialResponse, error)
+	// Role: server. Starts a login (single-use challenge, 2 minutes).
+	BeginLogin(ctx context.Context, in *BeginLoginRequest, opts ...grpc.CallOption) (*BeginLoginResponse, error)
+	// Role: server. Completes a login; the login is consumed whether or not
+	// it succeeds.
+	FinishLogin(ctx context.Context, in *FinishLoginRequest, opts ...grpc.CallOption) (*FinishLoginResponse, error)
 	// Role: admin. Reads the host key of one endpoint without sending a user
 	// name or credential.
 	ProbeHostKey(ctx context.Context, in *ProbeHostKeyRequest, opts ...grpc.CallOption) (*ProbeHostKeyResponse, error)
@@ -342,6 +349,26 @@ func (c *executorServiceClient) RemoveWebAuthnCredential(ctx context.Context, in
 	return out, nil
 }
 
+func (c *executorServiceClient) BeginLogin(ctx context.Context, in *BeginLoginRequest, opts ...grpc.CallOption) (*BeginLoginResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BeginLoginResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_BeginLogin_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) FinishLogin(ctx context.Context, in *FinishLoginRequest, opts ...grpc.CallOption) (*FinishLoginResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FinishLoginResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_FinishLogin_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *executorServiceClient) ProbeHostKey(ctx context.Context, in *ProbeHostKeyRequest, opts ...grpc.CallOption) (*ProbeHostKeyResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ProbeHostKeyResponse)
@@ -460,6 +487,11 @@ type ExecutorServiceServer interface {
 	// privileged session, revokes every permit, cancels pending
 	// registrations and the outstanding code).
 	RemoveWebAuthnCredential(context.Context, *RemoveWebAuthnCredentialRequest) (*RemoveWebAuthnCredentialResponse, error)
+	// Role: server. Starts a login (single-use challenge, 2 minutes).
+	BeginLogin(context.Context, *BeginLoginRequest) (*BeginLoginResponse, error)
+	// Role: server. Completes a login; the login is consumed whether or not
+	// it succeeds.
+	FinishLogin(context.Context, *FinishLoginRequest) (*FinishLoginResponse, error)
 	// Role: admin. Reads the host key of one endpoint without sending a user
 	// name or credential.
 	ProbeHostKey(context.Context, *ProbeHostKeyRequest) (*ProbeHostKeyResponse, error)
@@ -545,6 +577,12 @@ func (UnimplementedExecutorServiceServer) ListWebAuthnCredentials(context.Contex
 }
 func (UnimplementedExecutorServiceServer) RemoveWebAuthnCredential(context.Context, *RemoveWebAuthnCredentialRequest) (*RemoveWebAuthnCredentialResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RemoveWebAuthnCredential not implemented")
+}
+func (UnimplementedExecutorServiceServer) BeginLogin(context.Context, *BeginLoginRequest) (*BeginLoginResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BeginLogin not implemented")
+}
+func (UnimplementedExecutorServiceServer) FinishLogin(context.Context, *FinishLoginRequest) (*FinishLoginResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method FinishLogin not implemented")
 }
 func (UnimplementedExecutorServiceServer) ProbeHostKey(context.Context, *ProbeHostKeyRequest) (*ProbeHostKeyResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ProbeHostKey not implemented")
@@ -942,6 +980,42 @@ func _ExecutorService_RemoveWebAuthnCredential_Handler(srv interface{}, ctx cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_BeginLogin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BeginLoginRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).BeginLogin(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_BeginLogin_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).BeginLogin(ctx, req.(*BeginLoginRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_FinishLogin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FinishLoginRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).FinishLogin(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_FinishLogin_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).FinishLogin(ctx, req.(*FinishLoginRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ExecutorService_ProbeHostKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ProbeHostKeyRequest)
 	if err := dec(in); err != nil {
@@ -1118,6 +1192,14 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RemoveWebAuthnCredential",
 			Handler:    _ExecutorService_RemoveWebAuthnCredential_Handler,
+		},
+		{
+			MethodName: "BeginLogin",
+			Handler:    _ExecutorService_BeginLogin_Handler,
+		},
+		{
+			MethodName: "FinishLogin",
+			Handler:    _ExecutorService_FinishLogin_Handler,
 		},
 		{
 			MethodName: "ProbeHostKey",

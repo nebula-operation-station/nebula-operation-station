@@ -161,9 +161,13 @@ func TestReopenIdempotent(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	// The repo ships two migrations (0001 init, 0002 inventory).
-	if n != 2 {
-		t.Errorf("schema_migrations rows = %d, want 2", n)
+	// One row per shipped migration, none applied twice.
+	shipped, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != len(shipped) {
+		t.Errorf("schema_migrations rows = %d, want %d", n, len(shipped))
 	}
 }
 

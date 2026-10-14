@@ -1,0 +1,15 @@
+{{define "content"}}
+<section class="panel panel--narrow" aria-label="Register a security key">
+  <h1>Register a security key</h1>
+  <p>On the executor host, run <code>nebula webauthn code</code> and enter the one-time code here.
+     If a key is registered already, you will also be asked to confirm with that key.</p>
+  <form id="setup" class="form">
+    <label for="code">One-time code</label>
+    <input id="code" name="code" autocomplete="one-time-code" spellcheck="false" required maxlength="40">
+    <button type="submit" class="button">Register</button>
+  </form>
+  <p id="message" class="message" role="status" aria-live="polite"></p>
+  <p class="hint">Afterwards check with <code>nebula webauthn list</code> on the executor host that exactly your key was added.</p>
+  <p><a href="/login">Back to login</a></p>
+</section>
+{{end}}

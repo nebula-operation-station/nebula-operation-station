@@ -42,9 +42,9 @@ Changes here need a human. The authoritative list is `.github/protected-paths.tx
 - `AGENTS.md`, `.github/`, `.githooks/`, `Makefile`, `go.mod`, `go.sum`
 - `docs/spec/`, `docs/adr/`, `docs/threat-model.md`
 - `proto/`
-- `internal/canonical/`, `internal/permit/`, `internal/peercred/`, `internal/keyring/`, `internal/webauthnverify/`, `internal/webauthnreg/`, `internal/sshtransport/`, `internal/fsguard/`, `internal/executor/`, `internal/executordb/`, `internal/riskpolicy/`
+- `internal/canonical/`, `internal/permit/`, `internal/peercred/`, `internal/keyring/`, `internal/webauthnverify/`, `internal/webauthnreg/`, `internal/sshtransport/`, `internal/web/auth/`, `internal/fsguard/`, `internal/executor/`, `internal/executordb/`, `internal/riskpolicy/`
 - `cmd/nebula-executor/`, `cmd/nebula/`
-- `test/security/`, `test/integration/`, `scripts/`
+- `test/security/`, `test/integration/`, `test/browser/`, `scripts/`
 - `deploy/systemd/`
 
 ## Definition of done

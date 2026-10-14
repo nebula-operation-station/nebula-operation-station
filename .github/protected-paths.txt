@@ -19,6 +19,7 @@ internal/keyring/
 internal/webauthnverify/
 internal/webauthnreg/
 internal/sshtransport/
+internal/web/auth/
 internal/fsguard/
 internal/executor/
 internal/executordb/
@@ -27,5 +28,6 @@ cmd/nebula-executor/
 cmd/nebula/
 test/security/
 test/integration/
+test/browser/
 deploy/systemd/
 scripts/

@@ -54,3 +54,37 @@ body {
   margin: 0;
   padding-left: 1.25rem;
 }
+
+.nav__logout {
+  margin-left: auto;
+}
+
+.panel--narrow {
+  max-width: 32rem;
+  margin: 3rem auto;
+}
+
+.button {
+  padding: 0.5rem 1rem;
+  font: inherit;
+  cursor: pointer;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-width: 20rem;
+}
+
+.message {
+  min-height: 1.5em;
+}
+
+.message--error {
+  color: #8a1f1f;
+}
+
+.hint {
+  color: #555b70;
+}
