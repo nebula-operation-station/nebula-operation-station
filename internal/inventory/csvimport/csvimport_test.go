@@ -520,3 +520,16 @@ func TestFuzzMappingIsValid(t *testing.T) {
 		t.Fatalf("fixed mapping invalid: %v", err)
 	}
 }
+
+func TestDefaultsFillEmptyFields(t *testing.T) {
+	data := []byte("id,ip,crit\nweb-01,10.0.0.1,\nweb-02,10.0.0.2,HIGH\n")
+	m := Mapping{FieldID: "id", EndpointField(1): "ip", FieldCriticality: "crit"}
+	res, err := ParseWithDefaults(data, m, Defaults{Environment: inventory.EnvDev, Criticality: inventory.CriticalityLow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rows[0].Errors) != 0 || res.Rows[0].Host.Criticality != inventory.CriticalityLow || res.Rows[0].Host.Environment != inventory.EnvDev ||
+		res.Rows[1].Host.Criticality != inventory.CriticalityHigh {
+		t.Fatalf("%+v", res.Rows)
+	}
+}

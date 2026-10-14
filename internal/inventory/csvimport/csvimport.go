@@ -134,6 +134,18 @@ func validField(f Field) bool {
 // problems (cell size, column count of the row, and everything the
 // inventory validation rejects) are reported per row.
 func Parse(data []byte, mapping Mapping) (*Result, error) {
+	return ParseWithDefaults(data, mapping, Defaults{})
+}
+
+// Defaults fill fields a row leaves empty (an unmapped column or an empty
+// cell) before validation.
+type Defaults struct {
+	Environment inventory.Environment
+	Criticality inventory.Criticality
+}
+
+// ParseWithDefaults is Parse with defaults for empty fields.
+func ParseWithDefaults(data []byte, mapping Mapping, def Defaults) (*Result, error) {
 	if len(data) > MaxFileSize {
 		return nil, fmt.Errorf("%w: %d bytes", ErrFileTooLarge, len(data))
 	}
@@ -228,6 +240,12 @@ func Parse(data []byte, mapping Mapping) (*Result, error) {
 		}
 		if i, ok := fieldCol[FieldCriticality]; ok {
 			h.Criticality = inventory.Criticality(rec[i])
+		}
+		if h.Environment == "" {
+			h.Environment = def.Environment
+		}
+		if h.Criticality == "" {
+			h.Criticality = def.Criticality
 		}
 		h.Endpoints = []inventory.Endpoint{}
 		for n := 1; n <= MaxEndpoints; n++ {

@@ -1,0 +1,52 @@
+{{define "content"}}
+<h1>Import hosts from CSV</h1>
+<section class="panel" aria-label="CSV file">
+  <p class="hint">The file is read in your browser and sent to the server for a preview; nothing is stored until you import
+     the rows you select. At most 768 KiB in the web import. Hosts are added to the inventory only; enroll them afterwards.</p>
+  <label>CSV file (first line: column names)
+    <input type="file" id="csv-file" accept=".csv,text/csv">
+  </label>
+  <p id="message" class="message" role="status" aria-live="polite"></p>
+</section>
+<section class="panel" aria-label="Column mapping" id="mapping-panel" hidden>
+  <h2>Columns</h2>
+  <div class="form" id="mapping">
+    <label>Host ID <select data-field="id"></select></label>
+    <label>Display name <select data-field="display_name"></select></label>
+    <label>Environment (DEV, QA, PROD) <select data-field="environment"></select></label>
+    <label>Criticality (LOW … CRITICAL) <select data-field="criticality"></select></label>
+    <label>Tags (key=value, comma-separated) <select data-field="tags"></select></label>
+    <label>Environment if empty
+      <select id="default-environment"><option value="">(none)</option><option>DEV</option><option>QA</option><option>PROD</option></select>
+    </label>
+    <label>Criticality if empty
+      <select id="default-criticality"><option value="">(none)</option><option>LOW</option><option selected>MEDIUM</option><option>HIGH</option><option>CRITICAL</option></select>
+    </label>
+    <label>Endpoint 1 <select data-field="endpoint1"></select></label>
+    <label>Endpoint 2 <select data-field="endpoint2"></select></label>
+    <label>Endpoint 3 <select data-field="endpoint3"></select></label>
+    <label>Endpoint 4 <select data-field="endpoint4"></select></label>
+  </div>
+  <div class="actions">
+    <button type="button" id="import-preview" class="button">Preview</button>
+  </div>
+</section>
+<section class="panel" aria-label="Preview" id="preview-panel" hidden>
+  <h2>Preview</h2>
+  <label class="choice"><input type="checkbox" id="select-all" checked> Select all importable rows</label>
+  <table class="inventory">
+    <thead>
+      <tr><th></th><th>Row</th><th>ID</th><th>Display name</th><th>Environment</th><th>Criticality</th><th>Endpoints</th><th>Tags</th><th>Problems</th></tr>
+    </thead>
+    <tbody id="preview-rows"></tbody>
+  </table>
+  <div class="actions">
+    <button type="button" id="import-commit" class="button">Import selected rows</button>
+  </div>
+</section>
+<section class="panel" aria-label="Result" id="result-panel" hidden>
+  <h2>Result</h2>
+  <ul id="results"></ul>
+  <p><a href="/inventory">Back to the inventory</a></p>
+</section>
+{{end}}

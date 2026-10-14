@@ -165,9 +165,10 @@ var pageFiles = map[string]string{
 	"login":     "login.html",
 	"setup":     "setup.html",
 
-	"operations":    "operations.html",
-	"operation_new": "operation_new.html",
-	"operation":     "operation.html",
+	"operations":       "operations.html",
+	"inventory_import": "inventory_import.html",
+	"operation_new":    "operation_new.html",
+	"operation":        "operation.html",
 }
 
 // Handler returns the UI's http.Handler without the security middleware
@@ -182,6 +183,10 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("/inventory/hosts", h.handleHostCreate)
 	mux.HandleFunc("/inventory/hosts/update", h.handleHostUpdate)
 	mux.HandleFunc("/inventory/hosts/delete", h.handleHostDelete)
+	// CSV import (spec 12): page, preview, import of the selected rows.
+	mux.HandleFunc("GET /inventory/import", h.handleImportPage)
+	mux.HandleFunc("POST /inventory/import/preview", h.handleImportPreview)
+	mux.HandleFunc("POST /inventory/import/commit", h.handleImportCommit)
 	// Operations (M4): pages and the JSON endpoints their script calls.
 	mux.HandleFunc("GET /operations", h.handleOperations)
 	mux.HandleFunc("GET /operations/new", h.handleOperationNew)

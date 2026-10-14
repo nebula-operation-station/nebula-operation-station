@@ -130,6 +130,24 @@ function check(cond, what) {
   await row().locator('.inventory__delete-confirm').fill('web-01');
   await Promise.all([page.waitForNavigation({ timeout: 15000 }), row().locator('.inventory__delete').click()]);
   check(await row().count() === 0, 'host deleted after typing its ID');
+
+  // CSV import: map columns, preview, import the importable rows.
+  await page.goto(base + '/inventory/import');
+  await page.setInputFiles('#csv-file', { name: 'hosts.csv', mimeType: 'text/csv',
+    buffer: Buffer.from('server_name,ip,vpn_ip,env\ncsv-01,10.0.0.1,10.8.0.1,PROD\ncsv-02,10.0.0.2,,DEV\ncsv-bad,not an ip,,DEV\n') });
+  await page.waitForSelector('#mapping-panel:not([hidden])', { timeout: 15000 });
+  await page.selectOption('select[data-field="id"]', 'server_name');
+  await page.selectOption('select[data-field="endpoint1"]', 'ip');
+  await page.selectOption('select[data-field="endpoint2"]', 'vpn_ip');
+  await page.selectOption('select[data-field="environment"]', 'env');
+  await page.click('#import-preview');
+  await page.waitForSelector('#preview-panel:not([hidden])', { timeout: 15000 });
+  check(await page.isDisabled('.import-row[value="3"]') && await page.isChecked('.import-row[value="1"]'), 'CSV preview marks the bad row as not importable');
+  await page.click('#import-commit');
+  await page.waitForSelector('#result-panel:not([hidden])', { timeout: 15000 });
+  check((await page.textContent('#results')).split('created').length === 3, 'two rows imported');
+  await page.goto(base + '/inventory');
+  check(await page.locator('tr[data-id="csv-01"]').count() === 1 && await page.locator('tr[data-id="csv-02"]').count() === 1, 'imported hosts are in the inventory');
   await page.goto(base + '/dashboard');
 
   const cookies = await ctx.cookies();
