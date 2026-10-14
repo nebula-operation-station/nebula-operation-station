@@ -49,6 +49,8 @@ type Service struct {
 	log  *slog.Logger
 	// transport is the SSH client configuration (spec 08 defaults).
 	transport sshtransport.Config
+	// recovery limits wrong TOTP recovery codes.
+	recovery recoveryLimiter
 }
 
 // NewService wires the service. db holds the executor's risk data and
@@ -102,6 +104,9 @@ func (s *Service) GetStatus(_ context.Context, _ *pb.GetStatusRequest) (*pb.GetS
 		ApprovedPermits:         uint32(approved),
 		LoadedCredentialRefs:    s.keys.Refs(),
 	}
+	if _, pending, err := s.db.RecoveryPending(); err == nil && pending {
+		resp.RecoveryPending = true
+	}
 	if active {
 		resp.PrivilegedSessionExpiryUnix = till.Unix()
 	}
@@ -139,6 +144,9 @@ func (s *Service) SubmitAssertion(_ context.Context, req *pb.SubmitAssertionRequ
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	if err := s.checkNotRecovering(); err != nil {
+		return nil, err
+	}
 	p, err := s.auth.SubmitAssertion(d, req.GetAssertionJson(), int(req.GetTypedTargetCount()))
 	if err != nil {
 		return nil, toStatus(err)
@@ -147,6 +155,9 @@ func (s *Service) SubmitAssertion(_ context.Context, req *pb.SubmitAssertionRequ
 }
 
 func (s *Service) BeginPrivilegedSession(_ context.Context, _ *pb.BeginPrivilegedSessionRequest) (*pb.BeginPrivilegedSessionResponse, error) {
+	if err := s.checkNotRecovering(); err != nil {
+		return nil, err
+	}
 	ch, exp, err := s.auth.BeginSession()
 	if err != nil {
 		return nil, status.Error(codes.Internal, "cannot create challenge")
@@ -159,6 +170,9 @@ func (s *Service) BeginPrivilegedSession(_ context.Context, _ *pb.BeginPrivilege
 }
 
 func (s *Service) CompletePrivilegedSession(_ context.Context, req *pb.CompletePrivilegedSessionRequest) (*pb.CompletePrivilegedSessionResponse, error) {
+	if err := s.checkNotRecovering(); err != nil {
+		return nil, err
+	}
 	till, err := s.auth.CompleteSession(req.GetAssertionJson())
 	if err != nil {
 		return nil, toStatus(err)

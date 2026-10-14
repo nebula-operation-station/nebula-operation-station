@@ -118,6 +118,28 @@ service ExecutorService {
   // server can end web sessions opened with a credential that was removed.
   rpc CheckCredential(CheckCredentialRequest) returns (CheckCredentialResponse);
 
+  // TOTP recovery (M2, spec 05). Recovery opens only a reading web session;
+  // privileged work stays blocked until a new WebAuthn credential is
+  // registered.
+
+  // Role: admin. Creates a new, not yet active TOTP secret (replaces an
+  // earlier one) and returns it for the authenticator app.
+  rpc BeginTOTPSetup(BeginTOTPSetupRequest) returns (BeginTOTPSetupResponse);
+
+  // Role: admin. Activates the new secret with one current code from the app.
+  rpc ConfirmTOTPSetup(ConfirmTOTPSetupRequest) returns (ConfirmTOTPSetupResponse);
+
+  // Role: admin.
+  rpc RemoveTOTP(RemoveTOTPRequest) returns (RemoveTOTPResponse);
+
+  // Role: admin.
+  rpc GetTOTPStatus(GetTOTPStatusRequest) returns (GetTOTPStatusResponse);
+
+  // Role: server. Verifies a recovery code (single use, rate limited). On
+  // success the executor ends the privileged session, revokes permits and
+  // enters the recovery state.
+  rpc RecoveryLogin(RecoveryLoginRequest) returns (RecoveryLoginResponse);
+
   // SSH host keys (H05). The executor pins one key per host; every endpoint
   // of the host must present it. Pins are made on the executor host after
   // the admin confirmed the fingerprint (or imported known_hosts), never by
@@ -204,6 +226,9 @@ message GetStatusResponse {
   uint32 pending_permits = 5;
   uint32 approved_permits = 6;
   repeated string loaded_credential_refs = 7;
+  // A TOTP recovery login happened and no new WebAuthn credential has been
+  // registered since: no privileged session or browser approval until then.
+  bool recovery_pending = 8;
 }
 
 message ProposeExecutionRequest {
@@ -587,3 +612,42 @@ message CheckCredentialRequest {
 message CheckCredentialResponse {
   bool registered = 1;
 }
+
+message BeginTOTPSetupRequest {
+  // Account label shown in the authenticator app, e.g. "admin@nebula.example.org".
+  string account = 1;
+}
+
+message BeginTOTPSetupResponse {
+  // Base32 secret for manual entry.
+  string secret_base32 = 1;
+  // otpauth:// URI for a QR code.
+  string uri = 2;
+}
+
+message ConfirmTOTPSetupRequest {
+  string code = 1;
+}
+
+message ConfirmTOTPSetupResponse {}
+
+message RemoveTOTPRequest {}
+
+message RemoveTOTPResponse {
+  bool removed = 1;
+}
+
+message GetTOTPStatusRequest {}
+
+message GetTOTPStatusResponse {
+  bool configured = 1;
+  bool activated = 2;
+  bool recovery_pending = 3;
+  int64 recovery_pending_since_unix = 4;
+}
+
+message RecoveryLoginRequest {
+  string code = 1;
+}
+
+message RecoveryLoginResponse {}

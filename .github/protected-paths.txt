@@ -20,6 +20,7 @@ internal/webauthnverify/
 internal/webauthnreg/
 internal/sshtransport/
 internal/web/auth/
+internal/totp/
 internal/fsguard/
 internal/executor/
 internal/executordb/

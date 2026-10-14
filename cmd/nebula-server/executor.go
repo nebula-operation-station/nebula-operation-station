@@ -131,3 +131,10 @@ func (l *lazyExecutor) CheckCredential(ctx context.Context, in *pb.CheckCredenti
 	}
 	return nil, errNotConnected
 }
+
+func (l *lazyExecutor) RecoveryLogin(ctx context.Context, in *pb.RecoveryLoginRequest, opts ...grpc.CallOption) (*pb.RecoveryLoginResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.RecoveryLogin(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}

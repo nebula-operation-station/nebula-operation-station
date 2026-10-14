@@ -31,7 +31,7 @@ type credentialChecks struct {
 // next request.
 func (h *Handler) credentialStillRegistered(ctx context.Context, token string, sess Session) bool {
 	key := sha256.Sum256([]byte(token))
-	now := time.Now()
+	now := h.sessions.now()
 	h.checks.mu.Lock()
 	if h.checks.last == nil {
 		h.checks.last = map[[sha256.Size]byte]time.Time{}

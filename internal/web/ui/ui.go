@@ -207,6 +207,8 @@ type statusView struct {
 	LockText string
 	// Session is "none" or "active, expires <UTC time>".
 	Session string
+	// Recovery is true while a TOTP recovery waits for a new security key.
+	Recovery bool
 }
 
 // hostView is one row of the inventory table, pre-formatted for
@@ -394,7 +396,7 @@ func viewStatus(st *pb.GetStatusResponse) *statusView {
 		exp := time.Unix(st.GetPrivilegedSessionExpiryUnix(), 0).UTC().Format("2006-01-02 15:04:05 MST")
 		session = "active, expires " + exp
 	}
-	return &statusView{LockText: lock, Session: session}
+	return &statusView{LockText: lock, Session: session, Recovery: st.GetRecoveryPending()}
 }
 
 func (h *Handler) render(w http.ResponseWriter, data pageData) {

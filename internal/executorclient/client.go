@@ -349,6 +349,46 @@ func (c *Client) CheckCredential(ctx context.Context, in *pb.CheckCredentialRequ
 	return resp, mapError(err)
 }
 
+// BeginTOTPSetup: Creates a new TOTP recovery secret (admin role only).
+func (c *Client) BeginTOTPSetup(ctx context.Context, in *pb.BeginTOTPSetupRequest, opts ...grpc.CallOption) (*pb.BeginTOTPSetupResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.BeginTOTPSetup(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// ConfirmTOTPSetup: Activates the TOTP secret (admin role only).
+func (c *Client) ConfirmTOTPSetup(ctx context.Context, in *pb.ConfirmTOTPSetupRequest, opts ...grpc.CallOption) (*pb.ConfirmTOTPSetupResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ConfirmTOTPSetup(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// RemoveTOTP: Removes the TOTP secret (admin role only).
+func (c *Client) RemoveTOTP(ctx context.Context, in *pb.RemoveTOTPRequest, opts ...grpc.CallOption) (*pb.RemoveTOTPResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.RemoveTOTP(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// GetTOTPStatus: Reports the TOTP and recovery state (admin role only).
+func (c *Client) GetTOTPStatus(ctx context.Context, in *pb.GetTOTPStatusRequest, opts ...grpc.CallOption) (*pb.GetTOTPStatusResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.GetTOTPStatus(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// RecoveryLogin: Verifies a TOTP recovery code (server role).
+func (c *Client) RecoveryLogin(ctx context.Context, in *pb.RecoveryLoginRequest, opts ...grpc.CallOption) (*pb.RecoveryLoginResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.RecoveryLogin(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
 // Compile-time check: the client must implement the generated interface so
 // that a generated-code change breaks the build here.
 var _ pb.ExecutorServiceClient = (*Client)(nil)

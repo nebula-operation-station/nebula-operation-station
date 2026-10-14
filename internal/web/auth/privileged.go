@@ -25,7 +25,9 @@ func (h *Handler) privilegedBegin(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	b, err := h.exec.BeginPrivilegedSession(ctx, &pb.BeginPrivilegedSessionRequest{})
 	if err != nil {
-		h.relayError(w, "begin_privileged_session", err, nil)
+		h.relayError(w, "begin_privileged_session", err, map[codes.Code]string{
+			codes.FailedPrecondition: "blocked after a recovery login: register a new security key first",
+		})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"options": json.RawMessage(b.GetRequestOptionsJson())})

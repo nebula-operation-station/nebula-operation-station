@@ -45,6 +45,9 @@ type fakeExec struct {
 	removed  map[string]bool
 	checks   int
 	checkErr error
+
+	recoveryCode string
+	recoveryErr  error
 }
 
 func (f *fakeExec) BeginLogin(context.Context, *pb.BeginLoginRequest, ...grpc.CallOption) (*pb.BeginLoginResponse, error) {
@@ -107,6 +110,16 @@ func (f *fakeExec) CheckCredential(_ context.Context, in *pb.CheckCredentialRequ
 		return nil, f.checkErr
 	}
 	return &pb.CheckCredentialResponse{Registered: !f.removed[in.GetCredentialId()]}, nil
+}
+
+func (f *fakeExec) RecoveryLogin(_ context.Context, in *pb.RecoveryLoginRequest, _ ...grpc.CallOption) (*pb.RecoveryLoginResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.recoveryCode = in.GetCode()
+	if f.recoveryErr != nil {
+		return nil, f.recoveryErr
+	}
+	return &pb.RecoveryLoginResponse{}, nil
 }
 
 type clock struct {
@@ -451,5 +464,36 @@ func TestRemovedCredentialEndsTheWebSession(t *testing.T) {
 	}
 	if res := e.do("GET", "/dashboard", "", c2); res.StatusCode != http.StatusSeeOther {
 		t.Fatal("revoked session came back")
+	}
+}
+
+func TestRecoveryLoginOpensASession(t *testing.T) {
+	e := newEnv(t)
+	e.exec.recoveryErr = status.Error(codes.Unauthenticated, "detail")
+	res := e.do("POST", "/login/recovery", `{"code":"000000"}`, nil)
+	if m := jsonBody(t, res); res.StatusCode != 400 || m["error"] != "recovery code not accepted" || sessionCookie(res) != nil {
+		t.Fatalf("wrong code: %d %v", res.StatusCode, m)
+	}
+	e.exec.recoveryErr = status.Error(codes.ResourceExhausted, "limited")
+	res = e.do("POST", "/login/recovery", `{"code":"000000"}`, nil)
+	if m := jsonBody(t, res); m["error"] != "too many wrong recovery codes; wait 15 minutes" {
+		t.Fatalf("limited: %v", m)
+	}
+	e.exec.recoveryErr = nil
+	res = e.do("POST", "/login/recovery", `{"code":"123456"}`, nil)
+	c := sessionCookie(res)
+	if res.StatusCode != 200 || c == nil || e.exec.recoveryCode != "123456" {
+		t.Fatalf("recovery login: %d %v", res.StatusCode, c)
+	}
+	if res := e.do("GET", "/dashboard", "", c); res.StatusCode != 200 {
+		t.Fatalf("dashboard with recovery session: %d", res.StatusCode)
+	}
+	// The recovery session is checked like any other: TOTP removed -> gone.
+	e.exec.mu.Lock()
+	e.exec.removed = map[string]bool{auth.RecoveryCredentialID: true}
+	e.exec.mu.Unlock()
+	e.clk.add(auth.CredentialCheckInterval) // the earlier check is cached for this long
+	if res := e.do("GET", "/dashboard", "", c); res.StatusCode != http.StatusSeeOther {
+		t.Fatalf("recovery session after TOTP removal: %d", res.StatusCode)
 	}
 }

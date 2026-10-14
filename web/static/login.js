@@ -24,4 +24,22 @@
       button.disabled = false;
     }
   });
+
+  const recovery = document.getElementById('recovery');
+  if (recovery) {
+    recovery.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const submit = recovery.querySelector('button');
+      submit.disabled = true;
+      try {
+        const code = document.getElementById('recovery-code').value.trim();
+        const done = await w.post('/login/recovery', { code });
+        window.location.assign(done.redirect === '/dashboard' ? '/dashboard' : '/');
+      } catch (e) {
+        w.show(e.message || 'Recovery login failed.', true);
+      } finally {
+        submit.disabled = false;
+      }
+    });
+  }
 })();

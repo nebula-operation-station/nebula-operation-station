@@ -13,11 +13,13 @@ package main
 
 import (
 	"context"
+	"encoding/base32"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"google.golang.org/grpc"
 
@@ -28,6 +30,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/totp"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/middleware"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
@@ -72,6 +75,10 @@ func (d direct) CheckCredential(ctx context.Context, in *pb.CheckCredentialReque
 	return d.s.CheckCredential(ctx, in)
 }
 
+func (d direct) RecoveryLogin(ctx context.Context, in *pb.RecoveryLoginRequest, _ ...grpc.CallOption) (*pb.RecoveryLoginResponse, error) {
+	return d.s.RecoveryLogin(ctx, in)
+}
+
 func must(err error) {
 	if err != nil {
 		panic(err)
@@ -112,6 +119,20 @@ func main() {
 		c, err := svc.CreateRegistrationCode(r.Context(), &pb.CreateRegistrationCodeRequest{UserName: "axel", Label: "e2e"})
 		must(err)
 		fmt.Fprint(w, c.GetCode())
+	})
+	// Test hooks: set up TOTP recovery like `nebula totp setup`, and give
+	// the code for the next step (the current one is used by the setup).
+	var totpSecret []byte
+	mux.HandleFunc("/__totp/setup", func(w http.ResponseWriter, r *http.Request) {
+		b, err := svc.BeginTOTPSetup(r.Context(), &pb.BeginTOTPSetupRequest{})
+		must(err)
+		totpSecret, err = base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(b.GetSecretBase32())
+		must(err)
+		_, err = svc.ConfirmTOTPSetup(r.Context(), &pb.ConfirmTOTPSetupRequest{Code: totp.Code(totpSecret, time.Now())})
+		must(err)
+	})
+	mux.HandleFunc("/__totp/next", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, totp.Code(totpSecret, time.Now().Add(totp.Step)))
 	})
 	mux.Handle("/", middleware.Handler(middleware.Options{PublicOrigin: origin}, ah.Wrap(u.Handler())))
 	must(http.ListenAndServe("127.0.0.1:"+port, mux))

@@ -3,6 +3,10 @@
 <section class="panel" aria-label="Executor status">
   <h2>Executor</h2>
   {{if .Status}}
+  {{if .Status.Recovery}}
+  <p class="status status--error">Recovery login: privileged work is blocked until a new security key is registered.
+     Run <code>nebula webauthn code</code> on the executor host and register the key under <a href="/setup">Register a security key</a>.</p>
+  {{end}}
   <p class="status">State: {{.Status.LockText}}</p>
   <p class="status">Privileged session: {{.Status.Session}}</p>
   {{else}}
