@@ -130,13 +130,18 @@ func (c JobConfig) CheckCommand(executionID string) (string, error) {
 	body := `j=` + j + `
 [ -d "$j" ] || { echo missing; exit 0; }
 s=$(head -c 4096 "$j/state.json" 2>/dev/null)
-printf '%s\n' "$s"
 case "$s" in *'"state":"running"'*)
   pid=$(printf '%s' "$s" | sed -n 's/.*"pid":\([0-9]*\).*/\1/p')
   boot=$(printf '%s' "$s" | sed -n 's/.*"boot":"\([0-9a-f-]*\)".*/\1/p')
   now=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
-  if [ -n "$pid" ] && [ "$boot" = "$now" ] && kill -0 "$pid" 2>/dev/null; then echo alive; else echo dead; fi;;
+  if [ -n "$pid" ] && [ "$boot" = "$now" ] && kill -0 "$pid" 2>/dev/null; then printf '%s\nalive\n' "$s"; exit 0; fi
+  # The job may have ended between the read above and kill -0; the wrapper
+  # writes its final state before it exits, so a second read tells a
+  # finished job from a dead one.
+  s=$(head -c 4096 "$j/state.json" 2>/dev/null)
+  case "$s" in *'"state":"running"'*) printf '%s\ndead\n' "$s"; exit 0;; esac;;
 esac
+printf '%s\n' "$s"
 `
 	return c.program(body), nil
 }

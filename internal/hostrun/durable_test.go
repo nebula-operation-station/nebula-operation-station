@@ -5,6 +5,7 @@ package hostrun_test
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -180,5 +181,52 @@ func TestDurableJobWithSystemdRun(t *testing.T) {
 	args, _ := os.ReadFile(filepath.Join(bin, "args"))
 	if !strings.HasPrefix(string(args), "--quiet --collect --unit=nebula-job-"+execID+" --property=RuntimeMaxSec=90 /bin/sh -c ") {
 		t.Fatalf("systemd-run args %q", args)
+	}
+}
+
+// TestCheckRereadsAJobThatEndsDuringTheCheck covers the race between
+// reading state.json and probing the wrapper's PID: a job that finishes in
+// between must be reported finished (its result kept), not dead.
+func TestCheckRereadsAJobThatEndsDuringTheCheck(t *testing.T) {
+	realHead, err := exec.LookPath("head")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	// head prints the state, then the job "finishes" before kill -0 runs.
+	stub := "#!/bin/sh\nf=$3\n" + realHead + " \"$@\"\nif [ ! -e \"$f.done\" ]; then : > \"$f.done\"; printf '{\"state\":\"finished\",\"exit\":0,\"finished\":1}\\n' > \"$f\"; fi\n"
+	if err := os.WriteFile(filepath.Join(bin, "head"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	c := client(t)
+	cfg := jobConfig(t)
+	// A wrapper PID that is gone, on the current boot.
+	p := exec.Command("true")
+	if err := p.Run(); err != nil {
+		t.Fatal(err)
+	}
+	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := filepath.Join(cfg.JobRoot, execID)
+	if err := os.MkdirAll(j, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state := `{"state":"running","pid":` + strconv.Itoa(p.Process.Pid) + `,"boot":"` + strings.TrimSpace(string(boot)) + `","started":1}` + "\n"
+	if err := os.WriteFile(filepath.Join(j, "state.json"), []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := hostrun.Check(context.Background(), c, cfg, execID)
+	if err != nil || st.Phase != "finished" || st.ExitCode != 0 {
+		t.Fatalf("%+v %v", st, err)
+	}
+	// Without the race the same dead PID is reported dead.
+	if err := os.WriteFile(filepath.Join(j, "state.json"), []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := hostrun.Check(context.Background(), c, cfg, execID); err != nil || st.Phase != "dead" {
+		t.Fatalf("%+v %v", st, err)
 	}
 }
