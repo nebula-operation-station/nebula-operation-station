@@ -53,6 +53,19 @@ type Params struct {
 // DefaultParams are the spec 06 defaults.
 var DefaultParams = Params{Time: 3, MemoryKiB: 256 << 10, Threads: 4}
 
+// MinParams is the weakest Argon2id cost the vault accepts, both when it is
+// created and when stored parameters are read back: an attacker with a copy
+// of executor.db guesses offline at the cost these parameters set, so a
+// cheaper vault (a hand-edited or restored database, a future option) is
+// refused instead of used. Threads do not raise an attacker's cost and are
+// not part of the floor.
+var MinParams = Params{Time: 3, MemoryKiB: 256 << 10, Threads: 1}
+
+// below reports whether p is cheaper than the floor.
+func (p Params) below(floor Params) bool {
+	return p.Time < floor.Time || p.MemoryKiB < floor.MemoryKiB || p.Threads < max(floor.Threads, 1)
+}
+
 // Errors.
 var (
 	ErrNotInitialized   = errors.New("vault: not initialized; run `nebula vault init`")
@@ -65,6 +78,11 @@ var (
 	ErrNotFound         = errors.New("vault: secret not found")
 	ErrCorrupt          = errors.New("vault: stored data does not decrypt (corrupted or tampered)")
 	ErrConcurrentChange = errors.New("vault: secret changed concurrently; retry")
+	// ErrLockedDuringUnlock means Lock was called while Unlock was running;
+	// Lock wins and the vault stays locked (as in the keyring).
+	ErrLockedDuringUnlock = errors.New("vault: locked while unlocking; still locked")
+	// ErrWeakParams means Argon2id parameters below MinParams.
+	ErrWeakParams = errors.New("vault: Argon2id parameters below the minimum (3 passes, 256 MiB)")
 )
 
 var idRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
@@ -105,6 +123,11 @@ type Vault struct {
 	unlockMu sync.Mutex
 	mu       sync.RWMutex
 	master   []byte // nil while locked
+	// gen increases on every Lock (under mu); an Init or Unlock that started
+	// before a Lock does not install its master key.
+	gen uint64
+	// floor is MinParams unless a test lowered it.
+	floor Params
 }
 
 // New returns a locked vault on store.
@@ -112,7 +135,21 @@ func New(store Store) *Vault {
 	if store == nil {
 		panic("vault: New needs a store")
 	}
-	return &Vault{store: store}
+	return &Vault{store: store, floor: MinParams}
+}
+
+// SetMinParams lowers the parameter floor. Only tests use it, to keep
+// Argon2id fast; production code never calls it.
+func (v *Vault) SetMinParams(p Params) {
+	v.unlockMu.Lock()
+	v.floor = p
+	v.unlockMu.Unlock()
+}
+
+func (v *Vault) generation() uint64 {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.gen
 }
 
 // State reports whether the vault exists and is unlocked.
@@ -151,11 +188,12 @@ func (v *Vault) Init(passphrase []byte, p Params, by string) error {
 	if err := checkPassphrase(passphrase); err != nil {
 		return err
 	}
-	if p.Time == 0 || p.MemoryKiB < 8 || p.Threads == 0 {
-		return errors.New("vault: invalid Argon2id parameters")
-	}
 	v.unlockMu.Lock()
 	defer v.unlockMu.Unlock()
+	if p.Time == 0 || p.MemoryKiB < 8 || p.Threads == 0 || p.below(v.floor) {
+		return ErrWeakParams
+	}
+	gen := v.generation()
 	if _, err := v.store.GetVault(); err == nil {
 		return ErrInitialized
 	} else if !errors.Is(err, executordb.ErrNoVault) {
@@ -183,7 +221,8 @@ func (v *Vault) Init(passphrase []byte, p Params, by string) error {
 	if err != nil {
 		return err
 	}
-	v.setMaster(master)
+	// The vault exists now; a Lock issued meanwhile keeps it locked.
+	_ = v.setMaster(master, gen)
 	return nil
 }
 
@@ -195,6 +234,7 @@ func (v *Vault) Unlock(passphrase []byte) error {
 	}
 	v.unlockMu.Lock()
 	defer v.unlockMu.Unlock()
+	gen := v.generation()
 	m, err := v.store.GetVault()
 	if errors.Is(err, executordb.ErrNoVault) {
 		return ErrNotInitialized
@@ -205,22 +245,33 @@ func (v *Vault) Unlock(passphrase []byte) error {
 	if m.Format != format || len(m.Salt) != saltLen {
 		return ErrCorrupt
 	}
-	k := kek(passphrase, m.Salt, Params{Time: m.KDFTime, MemoryKiB: m.KDFMemoryKiB, Threads: m.KDFThreads})
+	p := Params{Time: m.KDFTime, MemoryKiB: m.KDFMemoryKiB, Threads: m.KDFThreads}
+	if p.below(v.floor) {
+		return ErrWeakParams
+	}
+	k := kek(passphrase, m.Salt, p)
 	master, err := open(k, m.WrappedMaster, masterAD)
 	wipe(k)
 	if err != nil || len(master) != keyLen {
 		return ErrWrongPassphrase
 	}
-	v.setMaster(master)
-	return nil
+	return v.setMaster(master, gen)
 }
 
-func (v *Vault) setMaster(master []byte) {
+// setMaster installs master unless a Lock happened after generation gen
+// was read; then it wipes master and returns ErrLockedDuringUnlock.
+func (v *Vault) setMaster(master []byte, gen uint64) error {
 	v.mu.Lock()
+	if v.gen != gen {
+		v.mu.Unlock()
+		wipe(master)
+		return ErrLockedDuringUnlock
+	}
 	old := v.master
 	v.master = master
 	v.mu.Unlock()
 	wipe(old)
+	return nil
 }
 
 // Lock drops the master key.
@@ -228,6 +279,7 @@ func (v *Vault) Lock() {
 	v.mu.Lock()
 	m := v.master
 	v.master = nil
+	v.gen++
 	v.mu.Unlock()
 	wipe(m)
 }

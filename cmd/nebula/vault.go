@@ -146,9 +146,12 @@ func readValue(r io.Reader) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	b = bytes.TrimSuffix(b, []byte("\n"))
-	b = bytes.TrimSuffix(b, []byte("\r"))
-	return b, nil
+	// One line ending (CRLF or LF) is the end of the input, not part of the
+	// value; a lone trailing CR is data and is kept.
+	if c, ok := bytes.CutSuffix(b, []byte("\r\n")); ok {
+		return c, nil
+	}
+	return bytes.TrimSuffix(b, []byte("\n")), nil
 }
 
 func secretCmd(ctx context.Context, c pb.ExecutorServiceClient, args []string, value func() ([]byte, error), stdin io.Reader, w io.Writer) error {

@@ -166,8 +166,8 @@ func TestSecretCommands(t *testing.T) {
 	}
 }
 
-func TestReadValueStripsOneNewline(t *testing.T) {
-	for in, want := range map[string]string{"tok\n": "tok", "tok\r\n": "tok", "tok\n\n": "tok\n", "tok": "tok"} {
+func TestReadValueStripsOneLineEndingOnly(t *testing.T) {
+	for in, want := range map[string]string{"tok\n": "tok", "tok\r\n": "tok", "tok\n\n": "tok\n", "tok": "tok", "tok\r": "tok\r", "tok\r\r\n": "tok\r"} {
 		got, err := readValue(strings.NewReader(in))
 		if err != nil || !bytes.Equal(got, []byte(want)) {
 			t.Errorf("%q -> %q %v", in, got, err)

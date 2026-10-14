@@ -34,7 +34,7 @@ func newDB(t *testing.T) (*executordb.DB, string) {
 func initVault(t *testing.T) (*Vault, *executordb.DB) {
 	t.Helper()
 	db, _ := newDB(t)
-	v := New(db)
+	v := newTestVault(db)
 	if err := v.Init([]byte(pass), testParams, "admin"); err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func state(t *testing.T, v *Vault) State {
 
 func TestLifecycle(t *testing.T) {
 	db, dir := newDB(t)
-	v := New(db)
+	v := newTestVault(db)
 	if state(t, v) != StateNotInitialized {
 		t.Fatal("fresh vault initialized")
 	}
@@ -105,7 +105,7 @@ func TestLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db2.Close()
-	v2 := New(db2)
+	v2 := newTestVault(db2)
 	if state(t, v2) != StateLocked {
 		t.Fatal("vault unlocked after restart")
 	}
@@ -129,7 +129,7 @@ func TestLifecycle(t *testing.T) {
 
 func TestNoPlaintextAtRest(t *testing.T) {
 	db, dir := newDB(t)
-	v := New(db)
+	v := newTestVault(db)
 	if err := v.Init([]byte(pass), testParams, "admin"); err != nil {
 		t.Fatal(err)
 	}
@@ -252,5 +252,50 @@ func TestConcurrentPutsKeepOneVersionEach(t *testing.T) {
 func TestDefaultParamsFollowSpec(t *testing.T) {
 	if DefaultParams.MemoryKiB != 256<<10 || DefaultParams.Time != 3 {
 		t.Fatalf("defaults %+v", DefaultParams)
+	}
+}
+
+func newTestVault(s Store) *Vault {
+	v := New(s)
+	v.SetMinParams(testParams)
+	return v
+}
+
+func TestWeakParamsAreRefused(t *testing.T) {
+	db, _ := newDB(t)
+	// The production floor refuses a cheap vault at creation ...
+	if err := New(db).Init([]byte(pass), testParams, "admin"); !errors.Is(err, ErrWeakParams) {
+		t.Fatalf("weak Init: %v", err)
+	}
+	if err := New(db).Init([]byte(pass), Params{Time: 3, MemoryKiB: 128 << 10, Threads: 4}, "admin"); !errors.Is(err, ErrWeakParams) {
+		t.Fatalf("128 MiB accepted: %v", err)
+	}
+	// ... and when cheap parameters are read back from the database.
+	if err := newTestVault(db).Init([]byte(pass), testParams, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := New(db).Unlock([]byte(pass)); !errors.Is(err, ErrWeakParams) {
+		t.Fatalf("weak stored parameters used: %v", err)
+	}
+	if DefaultParams.below(MinParams) || MinParams.below(MinParams) {
+		t.Fatal("the defaults must meet the floor")
+	}
+}
+
+func TestLockWinsOverAnUnlockInFlight(t *testing.T) {
+	v, _ := initVault(t)
+	v.Lock()
+	// An unlock reads the generation before its (slow) key derivation; a
+	// Lock in between makes it drop the derived key.
+	gen := v.generation()
+	v.Lock()
+	if err := v.setMaster(make([]byte, keyLen), gen); !errors.Is(err, ErrLockedDuringUnlock) {
+		t.Fatalf("stale unlock installed: %v", err)
+	}
+	if state(t, v) != StateLocked {
+		t.Fatal("vault unlocked after a Lock that came later")
+	}
+	if err := v.Unlock([]byte(pass)); err != nil || state(t, v) != StateUnlocked {
+		t.Fatalf("a fresh unlock must work: %v", err)
 	}
 }

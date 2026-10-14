@@ -70,7 +70,10 @@ func NewService(auth *permit.Authority, keys *keyring.Keyring, db *executordb.DB
 
 // SetVaultParams changes the Argon2id parameters InitVault uses. Tests use
 // it to avoid 256 MiB per derivation; production keeps the defaults.
-func (s *Service) SetVaultParams(p vault.Params) { s.vaultParams = p }
+func (s *Service) SetVaultParams(p vault.Params) {
+	s.vaultParams = p
+	s.vault.SetMinParams(p)
+}
 
 // AuditLogger returns a permit audit hook that writes structured log lines.
 func AuditLogger(log *slog.Logger) func(permit.Event) {
