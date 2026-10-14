@@ -199,3 +199,80 @@ func ParseList(result []byte) (List, error) {
 	})
 	return l, nil
 }
+
+// Logs is a parsed docker.logs result.
+type Logs struct {
+	Phase     string // done or precheck
+	Reason    string
+	Container string
+	State     string
+	Lines     []string
+}
+
+const (
+	maxLogLines   = 100
+	maxLogLineLen = 1000
+)
+
+// containerRe is the docker.logs parameter pattern.
+var containerRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+
+// logLine makes one log line safe to show: at most maxLogLineLen bytes,
+// valid UTF-8, unsafe characters (see unsafeRune) but tab replaced.
+func logLine(s string) string {
+	if len(s) > maxLogLineLen {
+		s = s[:maxLogLineLen]
+	}
+	s = strings.ToValidUTF8(s, "\uFFFD")
+	return strings.Map(func(r rune) rune {
+		if r != '\t' && unsafeRune(r) {
+			return '\uFFFD'
+		}
+		return r
+	}, s)
+}
+
+// ParseLogs reads a docker.logs result.
+func ParseLogs(result []byte) (Logs, error) {
+	var doc struct {
+		Format    string `json:"format"`
+		Phase     string `json:"phase"`
+		Reason    string `json:"reason"`
+		Container string `json:"container"`
+		State     string `json:"state"`
+		Logs      string `json:"logs"`
+	}
+	if json.Unmarshal(result, &doc) != nil || doc.Format != "docker-logs-v1" || (doc.Phase != "done" && doc.Phase != "precheck") {
+		return Logs{}, errors.New("dockerhost: not a docker.logs result")
+	}
+	l := Logs{Phase: doc.Phase}
+	if doc.Phase == "precheck" {
+		if printable(doc.Reason, 300) {
+			l.Reason = doc.Reason
+		}
+		return l, nil
+	}
+	if containerRe.MatchString(doc.Container) {
+		l.Container = doc.Container
+	}
+	if st, ok := decode(doc.State); ok && states[strings.TrimSpace(st)] {
+		l.State = strings.TrimSpace(st)
+	}
+	// Logs are any bytes (cut by the script at 256 KiB, maybe inside a
+	// UTF-8 sequence): invalid UTF-8 is replaced, not refused.
+	raw, err := base64.StdEncoding.DecodeString(doc.Logs)
+	if err != nil || len(raw) > maxRawSize {
+		return Logs{}, errors.New("dockerhost: not a docker.logs result")
+	}
+	text := string(raw)
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	if len(lines) > maxLogLines {
+		lines = lines[len(lines)-maxLogLines:]
+	}
+	for _, s := range lines {
+		if text != "" {
+			l.Lines = append(l.Lines, logLine(strings.TrimSuffix(s, "\r")))
+		}
+	}
+	return l, nil
+}

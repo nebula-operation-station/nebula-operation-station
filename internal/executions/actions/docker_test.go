@@ -3,6 +3,7 @@
 package actions
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -98,5 +99,61 @@ func (f *fakeHost) touch(t *testing.T, name string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(f.dir, name), nil, 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDockerLogsScript(t *testing.T) {
+	a, ok := Lookup("docker.logs")
+	if !ok || !a.ReadOnly || a.ValidParams(map[string]string{"container": "web-1"}) != nil {
+		t.Fatalf("docker.logs %+v", a)
+	}
+	for _, bad := range []map[string]string{nil, {"container": "-f"}, {"container": "a b"}, {"container": "a/b"}, {"container": `x"`},
+		{"container": strings.Repeat("a", 129)}, {"container": "ok", "tail": "5"}} {
+		if a.ValidParams(bad) == nil {
+			t.Errorf("%v accepted", bad)
+		}
+	}
+	run := func(t *testing.T, f *fakeHost, params string) (int, map[string]any) {
+		t.Helper()
+		p := filepath.Join(f.dir, "params")
+		if err := os.WriteFile(p, []byte(params), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("/bin/sh", "-c", string(a.Script))
+		cmd.Env = []string{"PATH=" + f.bin + ":/usr/bin:/bin", "NEBULA_PARAMS=" + p}
+		out, err := cmd.Output()
+		code := 0
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(out, &doc); err != nil {
+			t.Fatalf("result %q: %v", out, err)
+		}
+		return code, doc
+	}
+	f := newFakeHost(t, "1")
+	f.write(t, "id", `echo 1000`)
+	f.write(t, "sudo", `[ "$1" = "-n" ] || exit 1; shift; echo "sudo $*" >> "`+f.calls+`"; SUDO=1 exec "$@"`)
+	f.write(t, "docker", `[ -z "${SUDO:-}" ] && exit 1
+echo "$@" >> "`+f.calls+`"
+case "$1" in
+  version) echo 27 ;;
+  inspect) [ "$7" = web ] || exit 1; echo running ;;
+  logs) echo "out line"; echo "err line" >&2 ;;
+esac`)
+	code, doc := run(t, f, `{"container":"web"}`)
+	if code != 0 || doc["container"] != "web" || b64(t, doc, "state") != "running" || b64(t, doc, "logs") != "out line\nerr line\n" {
+		t.Fatalf("%d %v", code, doc)
+	}
+	if calls := f.readCalls(t); !strings.Contains(calls, "sudo docker logs --tail 100 --timestamps -- web") {
+		t.Fatalf("calls %q", calls)
+	}
+	for params, reason := range map[string]string{`{"container":"gone"}`: "no such container", `{"container":"-f"}`: "invalid",
+		`{"container":"web","x":1}`: "invalid", `{"container":"we b"}`: "invalid"} {
+		code, doc := run(t, f, params)
+		if code != 10 || !strings.Contains(doc["reason"].(string), reason) {
+			t.Errorf("%s: %d %v", params, code, doc)
+		}
 	}
 }

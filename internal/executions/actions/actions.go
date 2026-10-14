@@ -49,6 +49,12 @@ var unitRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9@._:-]{0,199}$`)
 
 var unitParam = []Param{{Name: "unit", Label: "Unit (e.g. nginx.service)", Pattern: unitRe}}
 
+// containerRe is a Docker container name or ID: no leading '-', no
+// spaces, quotes or slashes.
+var containerRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+
+var containerParam = []Param{{Name: "container", Label: "Container (name or ID)", Pattern: containerRe}}
+
 // ValidParams checks params against the action's parameters.
 func (a Action) ValidParams(params map[string]string) error {
 	if len(params) != len(a.Params) {
@@ -92,6 +98,9 @@ var serviceStatus []byte
 
 //go:embed scripts/docker_list.sh
 var dockerList []byte
+
+//go:embed scripts/docker_logs.sh
+var dockerLogs []byte
 
 //go:embed scripts/service_control.sh.tmpl
 var serviceControlTemplate string
@@ -170,6 +179,11 @@ var Builtin = []Action{
 		ID: "docker.list", Version: "1.0.0", Title: "List containers",
 		Description: "Lists all Docker containers with image, state, health, published ports and Compose project (docker group or sudo). A host without Docker reports that. Read-only.",
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: time.Minute, ReadOnly: true, Script: dockerList,
+	},
+	{
+		ID: "docker.logs", Version: "1.0.0", Title: "Container logs",
+		Description: "State and the last 100 log lines (stdout and stderr, with timestamps) of one container. Read-only.",
+		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: time.Minute, ReadOnly: true, Script: dockerLogs, Params: containerParam,
 	},
 }
 

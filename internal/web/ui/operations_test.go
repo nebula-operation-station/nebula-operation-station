@@ -280,3 +280,19 @@ func TestDockerResultsAreShown(t *testing.T) {
 		}
 	}
 }
+
+func TestDockerLogsAreShown(t *testing.T) {
+	enc := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	res := `{"format":"docker-logs-v1","phase":"done","container":"web","state":"` + enc("exited") + `","logs":"` +
+		enc("2026-10-14T10:00:00Z <script>alert(1)</script>\n") + `"}`
+	f := &fakeOps{exec: executions.Execution{ID: opID, ActionID: "docker.logs", State: "finished", CreatedAt: time.Unix(1791960000, 0),
+		Params: `{"container":"web"}`,
+		Hosts:  []executions.Host{{HostID: "a", State: "finished", Class: "success", Result: []byte(res)}}}}
+	page := getBody(t, opsHandler(t, f, nil), "/operations/"+opID)
+	for _, want := range []string{`Container web: <span class="status--error">exited</span>; 1 log lines`,
+		"2026-10-14T10:00:00Z &lt;script&gt;alert(1)&lt;/script&gt;"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page misses %q", want)
+		}
+	}
+}

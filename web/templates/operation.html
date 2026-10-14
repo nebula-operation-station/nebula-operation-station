@@ -46,7 +46,7 @@
   </table>
 </section>
 {{range .Hosts}}
-{{if or .Facts .Updates .Install .Units .Service .Docker .Result .Log}}
+{{if or .Facts .Updates .Install .Units .Service .Docker .DockerLogs .Result .Log}}
 <section class="panel" aria-label="Output of {{.ID}}">
   <h2>{{.ID}}</h2>
   {{if .Facts}}
@@ -73,6 +73,14 @@
     <tbody>{{range .Containers}}<tr><td title="{{.ID}}">{{.Name}}</td><td>{{if .Project}}<span title="{{.Dir}}">{{.Project}}{{if .Service}} / {{.Service}}{{end}}</span>{{end}}</td><td>{{.Image}}</td><td>{{if .Running}}{{.State}}{{else if or (eq .State "dead") (eq .State "restarting")}}<span class="status--error">{{.State}}</span>{{else}}{{.State}}{{end}}</td><td>{{if eq .Health "unhealthy"}}<span class="status--error">unhealthy</span>{{else}}{{.Health}}{{end}}</td><td>{{.Status}}</td><td>{{.Ports}}</td></tr>{{end}}</tbody>
   </table>
   {{end}}
+  {{end}}
+  {{end}}
+  {{with .DockerLogs}}
+  {{if eq .Phase "precheck"}}<p class="status status--error">Precheck failed: {{.Reason}}</p>
+  {{else}}
+  <p class="status">Container {{.Container}}{{if .State}}: {{if eq .State "running"}}running{{else}}<span class="status--error">{{.State}}</span>{{end}}{{end}}; {{len .Lines}} log lines</p>
+  {{if .Lines}}<pre class="output">{{range .Lines}}{{.}}
+{{end}}</pre>{{end}}
   {{end}}
   {{end}}
   {{with .Service}}

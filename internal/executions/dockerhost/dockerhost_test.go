@@ -101,3 +101,46 @@ func TestParseCapsTheList(t *testing.T) {
 		t.Fatalf("%d %v", len(l.Containers), err)
 	}
 }
+
+// testdata/docker29-logs.json is docker.logs on Docker 29.8.2 for a
+// container that wrote 150 lines, then a line with invalid UTF-8 and one
+// with an ANSI colour escape and a right-to-left override.
+func TestParseRealLogs(t *testing.T) {
+	b, err := os.ReadFile("testdata/docker29-logs.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := ParseLogs(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Container != "talker" || l.State != "running" || len(l.Lines) != maxLogLines {
+		t.Fatalf("%s %s %d", l.Container, l.State, len(l.Lines))
+	}
+	last := l.Lines[len(l.Lines)-1]
+	if !strings.HasSuffix(last, "warn: über \uFFFD[31mred\uFFFD[0m and \uFFFDgnp.exe") || !strings.HasSuffix(l.Lines[0], " line 53 ok") {
+		t.Fatalf("first %q last %q", l.Lines[0], last)
+	}
+}
+
+func TestParseLogsIsDefensive(t *testing.T) {
+	long := strings.Repeat("x", 5000)
+	res := `{"format":"docker-logs-v1","phase":"done","container":"-bad","state":"` + enc("zombie") + `","logs":"` +
+		base64.StdEncoding.EncodeToString([]byte(long+"\r\n\xff\x00tail\u0085\u200f\n")) + `"}`
+	l, err := ParseLogs([]byte(res))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Container != "" || l.State != "" || len(l.Lines) != 2 || len(l.Lines[0]) != maxLogLineLen || l.Lines[1] != "\uFFFD\uFFFDtail\uFFFD\uFFFD" {
+		t.Fatalf("%+v", l)
+	}
+	l, err = ParseLogs([]byte(`{"format":"docker-logs-v1","phase":"done","container":"c","state":"","logs":""}`))
+	if err != nil || len(l.Lines) != 0 {
+		t.Fatalf("empty logs %+v %v", l, err)
+	}
+	for _, bad := range []string{`{"format":"docker-ps-v1","phase":"done"}`, `{"format":"docker-logs-v1","phase":"done","logs":"%%"}`} {
+		if _, err := ParseLogs([]byte(bad)); err == nil {
+			t.Errorf("%s accepted", bad)
+		}
+	}
+}
