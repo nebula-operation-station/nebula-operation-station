@@ -220,7 +220,29 @@ You are notified about: a changed host key, an Ops State change (worse or
 recovered), an operation that finished with failed hosts, and the executor
 found locked after a restart. Messages never contain host output.
 
-## 9. Day-to-day
+## 9. Read-only API (Home Assistant, status pages)
+
+The API is off by default. Create a token on the Nebula machine:
+
+```
+nebula-server -api-token homeassistant:inventory.read
+```
+
+It prints the token once and a JSON entry. Add the entry to `server.json`
+under `"api": {"enabled": true, "tokens": [ ... ]}` (the file keeps only the
+token's hash) and restart `nebula-server`. Clients send
+`Authorization: Bearer <token>`:
+
+| Scope | Endpoints |
+| --- | --- |
+| `inventory.read` | `GET /api/v1/hosts`, `GET /api/v1/hosts/{id}`: Ops State, update counts, reboot required |
+| `operations.read` | `GET /api/v1/operations`, `GET /api/v1/operations/{id}`: action, state, result classes |
+| `execution_logs.read` | adds host output (result, log) to `/operations/{id}`; give it only where needed |
+
+The API cannot change anything. To revoke a token, remove its entry and
+restart.
+
+## 10. Day-to-day
 
 | Situation | What to do |
 | --- | --- |

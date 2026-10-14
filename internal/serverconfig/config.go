@@ -86,6 +86,8 @@ type Config struct {
 	// low-privilege and live here, not in the executor vault; a config
 	// with any of them must not be readable by others.
 	Notifications Notifications `json:"notifications"`
+	// API configures the read-only API (spec 13); disabled by default.
+	API APIConfig `json:"api"`
 	// Token is the server's secret token. The Token type redacts the
 	// value in every formatting, logging, and serialization path.
 	Token Token `json:"token"`
@@ -181,6 +183,7 @@ func (c Config) Validate() error {
 	}
 
 	problems = append(problems, c.Notifications.problems()...)
+	problems = append(problems, c.API.Problems()...)
 
 	if len(problems) == 0 {
 		return nil
@@ -302,4 +305,73 @@ func isValidHTTPSOrigin(s string) bool {
 		return false
 	}
 	return u.Scheme == "https" && u.Host != "" && u.User == nil && u.Path == ""
+}
+
+// API scopes (spec 13).
+const (
+	ScopeInventoryRead     = "inventory.read"
+	ScopeOperationsRead    = "operations.read"
+	ScopeExecutionLogsRead = "execution_logs.read"
+)
+
+// APIConfig configures the read-only API under /api/v1 (spec 13). It is
+// disabled by default; when enabled, every request needs a token.
+type APIConfig struct {
+	Enabled bool       `json:"enabled"`
+	Tokens  []APIToken `json:"tokens,omitempty"`
+}
+
+// APIToken is one API token. Only the SHA-256 of the token is stored, so
+// the configuration does not contain the token itself.
+type APIToken struct {
+	// Name identifies the token in the audit log.
+	Name string `json:"name"`
+	// SHA256 is the lowercase hex SHA-256 of the token string.
+	SHA256 string   `json:"sha256"`
+	Scopes []string `json:"scopes"`
+}
+
+var (
+	apiTokenNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	apiHashRe      = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	apiScopes      = map[string]bool{ScopeInventoryRead: true, ScopeOperationsRead: true, ScopeExecutionLogsRead: true}
+)
+
+// ValidAPIScope reports whether s is a known API scope.
+func ValidAPIScope(s string) bool { return apiScopes[s] }
+
+// Problems lists what is wrong with the API configuration.
+func (a APIConfig) Problems() []string {
+	var out []string
+	if a.Enabled && len(a.Tokens) == 0 {
+		out = append(out, "api: enabled needs at least one token")
+	}
+	names, hashes := map[string]bool{}, map[string]bool{}
+	for i, t := range a.Tokens {
+		if !apiTokenNameRe.MatchString(t.Name) {
+			out = append(out, fmt.Sprintf("api.tokens[%d].name: %q must match %s", i, t.Name, apiTokenNameRe))
+		} else if names[t.Name] {
+			out = append(out, fmt.Sprintf("api.tokens[%d].name: %q is used twice", i, t.Name))
+		}
+		names[t.Name] = true
+		if !apiHashRe.MatchString(t.SHA256) {
+			out = append(out, fmt.Sprintf("api.tokens[%d].sha256: must be 64 lowercase hex digits (nebula-server -api-token prints it)", i))
+		} else if hashes[t.SHA256] {
+			out = append(out, fmt.Sprintf("api.tokens[%d].sha256: the same token is listed twice", i))
+		}
+		hashes[t.SHA256] = true
+		if len(t.Scopes) == 0 {
+			out = append(out, fmt.Sprintf("api.tokens[%d].scopes: at least one scope", i))
+		}
+		seen := map[string]bool{}
+		for _, s := range t.Scopes {
+			if !apiScopes[s] {
+				out = append(out, fmt.Sprintf("api.tokens[%d].scopes: unknown scope %q", i, s))
+			} else if seen[s] {
+				out = append(out, fmt.Sprintf("api.tokens[%d].scopes: %q listed twice", i, s))
+			}
+			seen[s] = true
+		}
+	}
+	return out
 }
