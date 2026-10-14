@@ -83,11 +83,18 @@ func (f *fakeExec) GetRun(_ context.Context, in *pb.GetRunRequest, _ ...grpc.Cal
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.polls++
-	f.released = in.GetRelease()
+	if in.GetRelease() {
+		// Like the executor: the release drops the stored result.
+		f.released = true
+		return &pb.GetRunResponse{Run: &pb.RunStatus{State: "finished", Class: "success"}}, nil
+	}
 	if f.polls < 2 {
 		return &pb.GetRunResponse{Run: &pb.RunStatus{State: "running"}}, nil
 	}
-	return &pb.GetRunResponse{Run: &pb.RunStatus{State: "finished", Class: "success", Result: []byte(`{}`)}}, nil
+	if f.released {
+		return &pb.GetRunResponse{Run: &pb.RunStatus{State: "finished", Class: "success"}}, nil
+	}
+	return &pb.GetRunResponse{Run: &pb.RunStatus{State: "finished", Class: "success", Result: []byte(`{"kept":true}`)}}, nil
 }
 
 type fakeHosts map[string]inventory.Host
@@ -230,7 +237,8 @@ func TestDurableRunsArePolledAndReleased(t *testing.T) {
 	for {
 		e, _ := s.Get(context.Background(), c.ID)
 		if e.State == "finished" {
-			if e.Hosts[0].Class != "success" || !f.released || len(f.durable) != 1 {
+			// The result was stored before it was released.
+			if e.Hosts[0].Class != "success" || string(e.Hosts[0].Result) != `{"kept":true}` || !f.released || len(f.durable) != 1 {
 				t.Fatalf("%+v released=%v", e.Hosts[0], f.released)
 			}
 			return

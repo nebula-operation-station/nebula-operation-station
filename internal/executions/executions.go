@@ -404,16 +404,23 @@ func (s *Service) runHost(ctx context.Context, e Execution, a actions.Action, h 
 			return
 		}
 	}
-	// A durable run: follow it until the executor reports it finished.
+	// A durable run: follow it until the executor reports it finished. The
+	// result is fetched without releasing it, stored, and only then released
+	// in a second call, so a lost response never loses the result.
 	t := time.NewTicker(pollInterval)
 	defer t.Stop()
 	for {
 		cctx, cancel := context.WithTimeout(ctx, callTimeout)
-		r, err := s.exec.GetRun(cctx, &pb.GetRunRequest{ExecutionId: e.ID, HostId: h.HostID, Release: true})
+		r, err := s.exec.GetRun(cctx, &pb.GetRunRequest{ExecutionId: e.ID, HostId: h.HostID})
 		cancel()
 		if err == nil && r.GetRun().GetState() == "finished" {
 			st := r.GetRun()
 			s.finishHost(e.ID, h.HostID, st.GetClass(), st.GetDetail(), int(st.GetExitCode()), st.GetResult(), st.GetLog(), st.GetLogTruncated())
+			cctx, cancel := context.WithTimeout(ctx, callTimeout)
+			if _, err := s.exec.GetRun(cctx, &pb.GetRunRequest{ExecutionId: e.ID, HostId: h.HostID, Release: true}); err != nil {
+				s.log.Warn("release run", "execution", e.ID, "host", h.HostID, "error", err.Error())
+			}
+			cancel()
 			return
 		}
 		if status.Code(err) == codes.NotFound {
