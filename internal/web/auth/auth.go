@@ -56,7 +56,13 @@ type Executor interface {
 	BeginPrivilegedSession(ctx context.Context, in *pb.BeginPrivilegedSessionRequest, opts ...grpc.CallOption) (*pb.BeginPrivilegedSessionResponse, error)
 	CompletePrivilegedSession(ctx context.Context, in *pb.CompletePrivilegedSessionRequest, opts ...grpc.CallOption) (*pb.CompletePrivilegedSessionResponse, error)
 	Lock(ctx context.Context, in *pb.LockRequest, opts ...grpc.CallOption) (*pb.LockResponse, error)
+	CheckCredential(ctx context.Context, in *pb.CheckCredentialRequest, opts ...grpc.CallOption) (*pb.CheckCredentialResponse, error)
+	RecoveryLogin(ctx context.Context, in *pb.RecoveryLoginRequest, opts ...grpc.CallOption) (*pb.RecoveryLoginResponse, error)
 }
+
+// RecoveryCredentialID marks web sessions opened by a TOTP recovery login.
+// It equals executor.RecoveryCredentialID, which CheckCredential knows.
+const RecoveryCredentialID = "totp-recovery"
 
 // Options configure the Handler.
 type Options struct {
@@ -70,6 +76,7 @@ type Handler struct {
 	exec     Executor
 	sessions *Store
 	log      *slog.Logger
+	checks   credentialChecks
 }
 
 // New returns a Handler. Executor and Sessions are required.
@@ -95,7 +102,7 @@ func SessionFrom(ctx context.Context) (Session, bool) {
 // login and setup pages and their endpoints, and static assets.
 func publicPath(path string) bool {
 	switch path {
-	case "/login", "/login/begin", "/login/finish", "/setup", "/setup/begin", "/setup/finish":
+	case "/login", "/login/begin", "/login/finish", "/login/recovery", "/setup", "/setup/begin", "/setup/finish":
 		return true
 	}
 	return strings.HasPrefix(path, "/static/")
@@ -108,10 +115,11 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /login/begin", h.loginBegin)
 	mux.HandleFunc("POST /login/finish", h.loginFinish)
+	mux.HandleFunc("POST /login/recovery", h.loginRecovery)
 	mux.HandleFunc("POST /setup/begin", h.setupBegin)
 	mux.HandleFunc("POST /setup/finish", h.setupFinish)
 	mux.HandleFunc("POST /logout", h.logout)
-	api := map[string]bool{"/login/begin": true, "/login/finish": true, "/setup/begin": true, "/setup/finish": true, "/logout": true}
+	api := map[string]bool{"/login/begin": true, "/login/finish": true, "/login/recovery": true, "/setup/begin": true, "/setup/finish": true, "/logout": true}
 	// Endpoints that need a session, served here after the session check.
 	protected := http.NewServeMux()
 	protected.HandleFunc("POST /privileged/begin", h.privilegedBegin)
@@ -137,6 +145,16 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 			if !errors.Is(err, ErrNoSession) {
 				h.log.Error("session lookup", "error", err)
 			}
+			clearCookie(w)
+			h.unauthenticated(w, r)
+			return
+		}
+		if !h.credentialStillRegistered(r.Context(), c.Value, sess) {
+			if err := h.sessions.Delete(r.Context(), c.Value); err != nil {
+				h.log.Error("delete revoked session", "error", err)
+			}
+			h.log.Info("audit", "kind", "web_session_revoked", "user", sess.UserName, "credential", sess.CredentialID,
+				"reason", "credential no longer registered")
 			clearCookie(w)
 			h.unauthenticated(w, r)
 			return
@@ -252,6 +270,38 @@ func (h *Handler) loginFinish(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "redirect": "/dashboard"})
 }
 
+// loginRecovery opens a reading web session with a TOTP recovery code. The
+// executor rate-limits the codes and, on success, blocks privileged work
+// until a new security key is registered.
+func (h *Handler) loginRecovery(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Code string `json:"code"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), executorCallTimeout)
+	defer cancel()
+	if _, err := h.exec.RecoveryLogin(ctx, &pb.RecoveryLoginRequest{Code: req.Code}); err != nil {
+		h.relayError(w, "recovery_login", err, map[codes.Code]string{
+			codes.Unauthenticated:    "recovery code not accepted",
+			codes.InvalidArgument:    "recovery code not accepted",
+			codes.ResourceExhausted:  "too many wrong recovery codes; wait 15 minutes",
+			codes.FailedPrecondition: "recovery is not set up (nebula totp setup on the executor host)",
+		})
+		return
+	}
+	token, sess, err := h.sessions.Create(r.Context(), RecoveryCredentialID, "recovery")
+	if err != nil {
+		h.log.Error("create session", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "could not create session"})
+		return
+	}
+	h.log.Warn("audit", "kind", "web_recovery_login")
+	setCookie(w, token, sess.ExpiresAt)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "redirect": "/dashboard"})
+}
+
 func (h *Handler) setupBegin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Code string `json:"code"`
@@ -288,9 +338,10 @@ func (h *Handler) setupFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), executorCallTimeout)
 	defer cancel()
-	if _, err := h.exec.FinishRegistration(ctx, &pb.FinishRegistrationRequest{
+	res, err := h.exec.FinishRegistration(ctx, &pb.FinishRegistrationRequest{
 		RegistrationId: req.RegistrationID, AttestationJson: req.Attestation, AssertionJson: req.Assertion,
-	}); err != nil {
+	})
+	if err != nil {
 		h.relayError(w, "finish_registration", err, map[codes.Code]string{
 			codes.NotFound:           "registration expired, start again",
 			codes.FailedPrecondition: "registration expired, start again",
@@ -300,8 +351,9 @@ func (h *Handler) setupFinish(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	h.log.Info("audit", "kind", "web_registration_relayed")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "redirect": "/login"})
+	h.log.Info("audit", "kind", "web_registration_relayed", "recovery_confirmation_required", res.GetRecoveryConfirmationRequired())
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "redirect": "/login",
+		"recovery_confirmation_required": res.GetRecoveryConfirmationRequired()})
 }
 
 func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {

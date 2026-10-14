@@ -102,3 +102,9 @@ func (r *Registrar) FinishLogin(id string, assertionJSON []byte) ([]byte, error)
 	r.cfg.Audit(Event{Kind: "login_verified", Credential: hex.EncodeToString(credID)})
 	return credID, nil
 }
+
+// HasCredential reports whether a credential is registered (active in the
+// verifier). The server uses it to end web sessions of removed credentials.
+func (r *Registrar) HasCredential(id []byte) bool {
+	return r.verifier.Has(id)
+}

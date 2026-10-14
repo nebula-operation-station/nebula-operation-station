@@ -457,8 +457,11 @@ type GetStatusResponse struct {
 	PendingPermits              uint32                 `protobuf:"varint,5,opt,name=pending_permits,json=pendingPermits,proto3" json:"pending_permits,omitempty"`
 	ApprovedPermits             uint32                 `protobuf:"varint,6,opt,name=approved_permits,json=approvedPermits,proto3" json:"approved_permits,omitempty"`
 	LoadedCredentialRefs        []string               `protobuf:"bytes,7,rep,name=loaded_credential_refs,json=loadedCredentialRefs,proto3" json:"loaded_credential_refs,omitempty"`
-	unknownFields               protoimpl.UnknownFields
-	sizeCache                   protoimpl.SizeCache
+	// A TOTP recovery login happened and no new WebAuthn credential has been
+	// registered since: no privileged session or browser approval until then.
+	RecoveryPending bool `protobuf:"varint,8,opt,name=recovery_pending,json=recoveryPending,proto3" json:"recovery_pending,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *GetStatusResponse) Reset() {
@@ -538,6 +541,13 @@ func (x *GetStatusResponse) GetLoadedCredentialRefs() []string {
 		return x.LoadedCredentialRefs
 	}
 	return nil
+}
+
+func (x *GetStatusResponse) GetRecoveryPending() bool {
+	if x != nil {
+		return x.RecoveryPending
+	}
+	return false
 }
 
 type ProposeExecutionRequest struct {
@@ -2527,10 +2537,14 @@ func (x *FinishRegistrationRequest) GetAssertionJson() []byte {
 type FinishRegistrationResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// base64url credential ID.
-	CredentialId  string `protobuf:"bytes,1,opt,name=credential_id,json=credentialId,proto3" json:"credential_id,omitempty"`
-	Label         string `protobuf:"bytes,2,opt,name=label,proto3" json:"label,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	CredentialId string `protobuf:"bytes,1,opt,name=credential_id,json=credentialId,proto3" json:"credential_id,omitempty"`
+	Label        string `protobuf:"bytes,2,opt,name=label,proto3" json:"label,omitempty"`
+	// A recovery is pending and this credential was registered with the
+	// one-time code alone: the admin must confirm it on the executor host
+	// (`nebula totp finish-recovery`) before privileged work is possible.
+	RecoveryConfirmationRequired bool `protobuf:"varint,3,opt,name=recovery_confirmation_required,json=recoveryConfirmationRequired,proto3" json:"recovery_confirmation_required,omitempty"`
+	unknownFields                protoimpl.UnknownFields
+	sizeCache                    protoimpl.SizeCache
 }
 
 func (x *FinishRegistrationResponse) Reset() {
@@ -2575,6 +2589,13 @@ func (x *FinishRegistrationResponse) GetLabel() string {
 		return x.Label
 	}
 	return ""
+}
+
+func (x *FinishRegistrationResponse) GetRecoveryConfirmationRequired() bool {
+	if x != nil {
+		return x.RecoveryConfirmationRequired
+	}
+	return false
 }
 
 type ListWebAuthnCredentialsRequest struct {
@@ -3801,6 +3822,619 @@ func (x *FinishLoginResponse) GetLabel() string {
 	return ""
 }
 
+type CheckCredentialRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// base64url credential ID, as FinishLogin returned it.
+	CredentialId  string `protobuf:"bytes,1,opt,name=credential_id,json=credentialId,proto3" json:"credential_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CheckCredentialRequest) Reset() {
+	*x = CheckCredentialRequest{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[62]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CheckCredentialRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CheckCredentialRequest) ProtoMessage() {}
+
+func (x *CheckCredentialRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[62]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CheckCredentialRequest.ProtoReflect.Descriptor instead.
+func (*CheckCredentialRequest) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{62}
+}
+
+func (x *CheckCredentialRequest) GetCredentialId() string {
+	if x != nil {
+		return x.CredentialId
+	}
+	return ""
+}
+
+type CheckCredentialResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Registered    bool                   `protobuf:"varint,1,opt,name=registered,proto3" json:"registered,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CheckCredentialResponse) Reset() {
+	*x = CheckCredentialResponse{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[63]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CheckCredentialResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CheckCredentialResponse) ProtoMessage() {}
+
+func (x *CheckCredentialResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[63]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CheckCredentialResponse.ProtoReflect.Descriptor instead.
+func (*CheckCredentialResponse) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{63}
+}
+
+func (x *CheckCredentialResponse) GetRegistered() bool {
+	if x != nil {
+		return x.Registered
+	}
+	return false
+}
+
+type BeginTOTPSetupRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Account label shown in the authenticator app, e.g. "admin@nebula.example.org".
+	Account       string `protobuf:"bytes,1,opt,name=account,proto3" json:"account,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BeginTOTPSetupRequest) Reset() {
+	*x = BeginTOTPSetupRequest{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[64]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BeginTOTPSetupRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BeginTOTPSetupRequest) ProtoMessage() {}
+
+func (x *BeginTOTPSetupRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[64]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BeginTOTPSetupRequest.ProtoReflect.Descriptor instead.
+func (*BeginTOTPSetupRequest) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{64}
+}
+
+func (x *BeginTOTPSetupRequest) GetAccount() string {
+	if x != nil {
+		return x.Account
+	}
+	return ""
+}
+
+type BeginTOTPSetupResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Base32 secret for manual entry.
+	SecretBase32 string `protobuf:"bytes,1,opt,name=secret_base32,json=secretBase32,proto3" json:"secret_base32,omitempty"`
+	// otpauth:// URI for a QR code.
+	Uri           string `protobuf:"bytes,2,opt,name=uri,proto3" json:"uri,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BeginTOTPSetupResponse) Reset() {
+	*x = BeginTOTPSetupResponse{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[65]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BeginTOTPSetupResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BeginTOTPSetupResponse) ProtoMessage() {}
+
+func (x *BeginTOTPSetupResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[65]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BeginTOTPSetupResponse.ProtoReflect.Descriptor instead.
+func (*BeginTOTPSetupResponse) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{65}
+}
+
+func (x *BeginTOTPSetupResponse) GetSecretBase32() string {
+	if x != nil {
+		return x.SecretBase32
+	}
+	return ""
+}
+
+func (x *BeginTOTPSetupResponse) GetUri() string {
+	if x != nil {
+		return x.Uri
+	}
+	return ""
+}
+
+type ConfirmTOTPSetupRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Code          string                 `protobuf:"bytes,1,opt,name=code,proto3" json:"code,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConfirmTOTPSetupRequest) Reset() {
+	*x = ConfirmTOTPSetupRequest{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[66]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConfirmTOTPSetupRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConfirmTOTPSetupRequest) ProtoMessage() {}
+
+func (x *ConfirmTOTPSetupRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[66]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConfirmTOTPSetupRequest.ProtoReflect.Descriptor instead.
+func (*ConfirmTOTPSetupRequest) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{66}
+}
+
+func (x *ConfirmTOTPSetupRequest) GetCode() string {
+	if x != nil {
+		return x.Code
+	}
+	return ""
+}
+
+type ConfirmTOTPSetupResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConfirmTOTPSetupResponse) Reset() {
+	*x = ConfirmTOTPSetupResponse{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[67]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConfirmTOTPSetupResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConfirmTOTPSetupResponse) ProtoMessage() {}
+
+func (x *ConfirmTOTPSetupResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[67]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConfirmTOTPSetupResponse.ProtoReflect.Descriptor instead.
+func (*ConfirmTOTPSetupResponse) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{67}
+}
+
+type RemoveTOTPRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoveTOTPRequest) Reset() {
+	*x = RemoveTOTPRequest{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[68]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoveTOTPRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoveTOTPRequest) ProtoMessage() {}
+
+func (x *RemoveTOTPRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[68]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoveTOTPRequest.ProtoReflect.Descriptor instead.
+func (*RemoveTOTPRequest) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{68}
+}
+
+type RemoveTOTPResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Removed       bool                   `protobuf:"varint,1,opt,name=removed,proto3" json:"removed,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoveTOTPResponse) Reset() {
+	*x = RemoveTOTPResponse{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[69]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoveTOTPResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoveTOTPResponse) ProtoMessage() {}
+
+func (x *RemoveTOTPResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[69]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoveTOTPResponse.ProtoReflect.Descriptor instead.
+func (*RemoveTOTPResponse) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{69}
+}
+
+func (x *RemoveTOTPResponse) GetRemoved() bool {
+	if x != nil {
+		return x.Removed
+	}
+	return false
+}
+
+type GetTOTPStatusRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetTOTPStatusRequest) Reset() {
+	*x = GetTOTPStatusRequest{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[70]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetTOTPStatusRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetTOTPStatusRequest) ProtoMessage() {}
+
+func (x *GetTOTPStatusRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[70]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetTOTPStatusRequest.ProtoReflect.Descriptor instead.
+func (*GetTOTPStatusRequest) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{70}
+}
+
+type GetTOTPStatusResponse struct {
+	state                    protoimpl.MessageState `protogen:"open.v1"`
+	Configured               bool                   `protobuf:"varint,1,opt,name=configured,proto3" json:"configured,omitempty"`
+	Activated                bool                   `protobuf:"varint,2,opt,name=activated,proto3" json:"activated,omitempty"`
+	RecoveryPending          bool                   `protobuf:"varint,3,opt,name=recovery_pending,json=recoveryPending,proto3" json:"recovery_pending,omitempty"`
+	RecoveryPendingSinceUnix int64                  `protobuf:"varint,4,opt,name=recovery_pending_since_unix,json=recoveryPendingSinceUnix,proto3" json:"recovery_pending_since_unix,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
+}
+
+func (x *GetTOTPStatusResponse) Reset() {
+	*x = GetTOTPStatusResponse{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[71]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetTOTPStatusResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetTOTPStatusResponse) ProtoMessage() {}
+
+func (x *GetTOTPStatusResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[71]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetTOTPStatusResponse.ProtoReflect.Descriptor instead.
+func (*GetTOTPStatusResponse) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{71}
+}
+
+func (x *GetTOTPStatusResponse) GetConfigured() bool {
+	if x != nil {
+		return x.Configured
+	}
+	return false
+}
+
+func (x *GetTOTPStatusResponse) GetActivated() bool {
+	if x != nil {
+		return x.Activated
+	}
+	return false
+}
+
+func (x *GetTOTPStatusResponse) GetRecoveryPending() bool {
+	if x != nil {
+		return x.RecoveryPending
+	}
+	return false
+}
+
+func (x *GetTOTPStatusResponse) GetRecoveryPendingSinceUnix() int64 {
+	if x != nil {
+		return x.RecoveryPendingSinceUnix
+	}
+	return 0
+}
+
+type RecoveryLoginRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Code          string                 `protobuf:"bytes,1,opt,name=code,proto3" json:"code,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RecoveryLoginRequest) Reset() {
+	*x = RecoveryLoginRequest{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[72]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecoveryLoginRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecoveryLoginRequest) ProtoMessage() {}
+
+func (x *RecoveryLoginRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[72]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecoveryLoginRequest.ProtoReflect.Descriptor instead.
+func (*RecoveryLoginRequest) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{72}
+}
+
+func (x *RecoveryLoginRequest) GetCode() string {
+	if x != nil {
+		return x.Code
+	}
+	return ""
+}
+
+type RecoveryLoginResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RecoveryLoginResponse) Reset() {
+	*x = RecoveryLoginResponse{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[73]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecoveryLoginResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecoveryLoginResponse) ProtoMessage() {}
+
+func (x *RecoveryLoginResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[73]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecoveryLoginResponse.ProtoReflect.Descriptor instead.
+func (*RecoveryLoginResponse) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{73}
+}
+
+type FinishRecoveryRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// base64url credential ID.
+	CredentialId  string `protobuf:"bytes,1,opt,name=credential_id,json=credentialId,proto3" json:"credential_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FinishRecoveryRequest) Reset() {
+	*x = FinishRecoveryRequest{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[74]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FinishRecoveryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FinishRecoveryRequest) ProtoMessage() {}
+
+func (x *FinishRecoveryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[74]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FinishRecoveryRequest.ProtoReflect.Descriptor instead.
+func (*FinishRecoveryRequest) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{74}
+}
+
+func (x *FinishRecoveryRequest) GetCredentialId() string {
+	if x != nil {
+		return x.CredentialId
+	}
+	return ""
+}
+
+type FinishRecoveryResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FinishRecoveryResponse) Reset() {
+	*x = FinishRecoveryResponse{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[75]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FinishRecoveryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FinishRecoveryResponse) ProtoMessage() {}
+
+func (x *FinishRecoveryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[75]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FinishRecoveryResponse.ProtoReflect.Descriptor instead.
+func (*FinishRecoveryResponse) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{75}
+}
+
 var File_nebula_executor_v1_executor_proto protoreflect.FileDescriptor
 
 const file_nebula_executor_v1_executor_proto_rawDesc = "" +
@@ -3823,7 +4457,7 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"expiryUnix\x12E\n" +
 	"\x10resolved_targets\x18\n" +
 	" \x03(\v2\x1a.nebula.executor.v1.TargetR\x0fresolvedTargets\"\x12\n" +
-	"\x10GetStatusRequest\"\xdf\x02\n" +
+	"\x10GetStatusRequest\"\x8a\x03\n" +
 	"\x11GetStatusResponse\x12\x1a\n" +
 	"\bunlocked\x18\x01 \x01(\bR\bunlocked\x12:\n" +
 	"\x19privileged_session_active\x18\x02 \x01(\bR\x17privilegedSessionActive\x12C\n" +
@@ -3831,7 +4465,8 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\rhardened_mode\x18\x04 \x01(\bR\fhardenedMode\x12'\n" +
 	"\x0fpending_permits\x18\x05 \x01(\rR\x0ependingPermits\x12)\n" +
 	"\x10approved_permits\x18\x06 \x01(\rR\x0fapprovedPermits\x124\n" +
-	"\x16loaded_credential_refs\x18\a \x03(\tR\x14loadedCredentialRefs\"\x82\x01\n" +
+	"\x16loaded_credential_refs\x18\a \x03(\tR\x14loadedCredentialRefs\x12)\n" +
+	"\x10recovery_pending\x18\b \x01(\bR\x0frecoveryPending\"\x82\x01\n" +
 	"\x17ProposeExecutionRequest\x12>\n" +
 	"\arequest\x18\x01 \x01(\v2$.nebula.executor.v1.ExecutionRequestR\arequest\x12'\n" +
 	"\x0fparameters_json\x18\x02 \x01(\fR\x0eparametersJson\"\xd7\x02\n" +
@@ -3958,10 +4593,11 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x19FinishRegistrationRequest\x12'\n" +
 	"\x0fregistration_id\x18\x01 \x01(\tR\x0eregistrationId\x12)\n" +
 	"\x10attestation_json\x18\x02 \x01(\fR\x0fattestationJson\x12%\n" +
-	"\x0eassertion_json\x18\x03 \x01(\fR\rassertionJson\"W\n" +
+	"\x0eassertion_json\x18\x03 \x01(\fR\rassertionJson\"\x9d\x01\n" +
 	"\x1aFinishRegistrationResponse\x12#\n" +
 	"\rcredential_id\x18\x01 \x01(\tR\fcredentialId\x12\x14\n" +
-	"\x05label\x18\x02 \x01(\tR\x05label\" \n" +
+	"\x05label\x18\x02 \x01(\tR\x05label\x12D\n" +
+	"\x1erecovery_confirmation_required\x18\x03 \x01(\bR\x1crecoveryConfirmationRequired\" \n" +
 	"\x1eListWebAuthnCredentialsRequest\"\xfa\x01\n" +
 	"\x12WebAuthnCredential\x12#\n" +
 	"\rcredential_id\x18\x01 \x01(\tR\fcredentialId\x12\x1b\n" +
@@ -4042,7 +4678,38 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x13FinishLoginResponse\x12#\n" +
 	"\rcredential_id\x18\x01 \x01(\tR\fcredentialId\x12\x1b\n" +
 	"\tuser_name\x18\x02 \x01(\tR\buserName\x12\x14\n" +
-	"\x05label\x18\x03 \x01(\tR\x05label*\x80\x01\n" +
+	"\x05label\x18\x03 \x01(\tR\x05label\"=\n" +
+	"\x16CheckCredentialRequest\x12#\n" +
+	"\rcredential_id\x18\x01 \x01(\tR\fcredentialId\"9\n" +
+	"\x17CheckCredentialResponse\x12\x1e\n" +
+	"\n" +
+	"registered\x18\x01 \x01(\bR\n" +
+	"registered\"1\n" +
+	"\x15BeginTOTPSetupRequest\x12\x18\n" +
+	"\aaccount\x18\x01 \x01(\tR\aaccount\"O\n" +
+	"\x16BeginTOTPSetupResponse\x12#\n" +
+	"\rsecret_base32\x18\x01 \x01(\tR\fsecretBase32\x12\x10\n" +
+	"\x03uri\x18\x02 \x01(\tR\x03uri\"-\n" +
+	"\x17ConfirmTOTPSetupRequest\x12\x12\n" +
+	"\x04code\x18\x01 \x01(\tR\x04code\"\x1a\n" +
+	"\x18ConfirmTOTPSetupResponse\"\x13\n" +
+	"\x11RemoveTOTPRequest\".\n" +
+	"\x12RemoveTOTPResponse\x12\x18\n" +
+	"\aremoved\x18\x01 \x01(\bR\aremoved\"\x16\n" +
+	"\x14GetTOTPStatusRequest\"\xbf\x01\n" +
+	"\x15GetTOTPStatusResponse\x12\x1e\n" +
+	"\n" +
+	"configured\x18\x01 \x01(\bR\n" +
+	"configured\x12\x1c\n" +
+	"\tactivated\x18\x02 \x01(\bR\tactivated\x12)\n" +
+	"\x10recovery_pending\x18\x03 \x01(\bR\x0frecoveryPending\x12=\n" +
+	"\x1brecovery_pending_since_unix\x18\x04 \x01(\x03R\x18recoveryPendingSinceUnix\"*\n" +
+	"\x14RecoveryLoginRequest\x12\x12\n" +
+	"\x04code\x18\x01 \x01(\tR\x04code\"\x17\n" +
+	"\x15RecoveryLoginResponse\"<\n" +
+	"\x15FinishRecoveryRequest\x12#\n" +
+	"\rcredential_id\x18\x01 \x01(\tR\fcredentialId\"\x18\n" +
+	"\x16FinishRecoveryResponse*\x80\x01\n" +
 	"\tRiskClass\x12\x1a\n" +
 	"\x16RISK_CLASS_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eRISK_CLASS_LOW\x10\x01\x12\x15\n" +
@@ -4063,7 +4730,7 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\rHostKeySource\x12\x1f\n" +
 	"\x1bHOST_KEY_SOURCE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15HOST_KEY_SOURCE_PROBE\x10\x01\x12\x1f\n" +
-	"\x1bHOST_KEY_SOURCE_KNOWN_HOSTS\x10\x022\xe9\x16\n" +
+	"\x1bHOST_KEY_SOURCE_KNOWN_HOSTS\x10\x022\xbf\x1c\n" +
 	"\x0fExecutorService\x12X\n" +
 	"\tGetStatus\x12$.nebula.executor.v1.GetStatusRequest\x1a%.nebula.executor.v1.GetStatusResponse\x12m\n" +
 	"\x10ProposeExecution\x12+.nebula.executor.v1.ProposeExecutionRequest\x1a,.nebula.executor.v1.ProposeExecutionResponse\x12j\n" +
@@ -4088,7 +4755,15 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x18RemoveWebAuthnCredential\x123.nebula.executor.v1.RemoveWebAuthnCredentialRequest\x1a4.nebula.executor.v1.RemoveWebAuthnCredentialResponse\x12[\n" +
 	"\n" +
 	"BeginLogin\x12%.nebula.executor.v1.BeginLoginRequest\x1a&.nebula.executor.v1.BeginLoginResponse\x12^\n" +
-	"\vFinishLogin\x12&.nebula.executor.v1.FinishLoginRequest\x1a'.nebula.executor.v1.FinishLoginResponse\x12a\n" +
+	"\vFinishLogin\x12&.nebula.executor.v1.FinishLoginRequest\x1a'.nebula.executor.v1.FinishLoginResponse\x12j\n" +
+	"\x0fCheckCredential\x12*.nebula.executor.v1.CheckCredentialRequest\x1a+.nebula.executor.v1.CheckCredentialResponse\x12g\n" +
+	"\x0eBeginTOTPSetup\x12).nebula.executor.v1.BeginTOTPSetupRequest\x1a*.nebula.executor.v1.BeginTOTPSetupResponse\x12m\n" +
+	"\x10ConfirmTOTPSetup\x12+.nebula.executor.v1.ConfirmTOTPSetupRequest\x1a,.nebula.executor.v1.ConfirmTOTPSetupResponse\x12[\n" +
+	"\n" +
+	"RemoveTOTP\x12%.nebula.executor.v1.RemoveTOTPRequest\x1a&.nebula.executor.v1.RemoveTOTPResponse\x12d\n" +
+	"\rGetTOTPStatus\x12(.nebula.executor.v1.GetTOTPStatusRequest\x1a).nebula.executor.v1.GetTOTPStatusResponse\x12d\n" +
+	"\rRecoveryLogin\x12(.nebula.executor.v1.RecoveryLoginRequest\x1a).nebula.executor.v1.RecoveryLoginResponse\x12g\n" +
+	"\x0eFinishRecovery\x12).nebula.executor.v1.FinishRecoveryRequest\x1a*.nebula.executor.v1.FinishRecoveryResponse\x12a\n" +
 	"\fProbeHostKey\x12'.nebula.executor.v1.ProbeHostKeyRequest\x1a(.nebula.executor.v1.ProbeHostKeyResponse\x12[\n" +
 	"\n" +
 	"PinHostKey\x12%.nebula.executor.v1.PinHostKeyRequest\x1a&.nebula.executor.v1.PinHostKeyResponse\x12a\n" +
@@ -4109,7 +4784,7 @@ func file_nebula_executor_v1_executor_proto_rawDescGZIP() []byte {
 }
 
 var file_nebula_executor_v1_executor_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_nebula_executor_v1_executor_proto_msgTypes = make([]protoimpl.MessageInfo, 62)
+var file_nebula_executor_v1_executor_proto_msgTypes = make([]protoimpl.MessageInfo, 76)
 var file_nebula_executor_v1_executor_proto_goTypes = []any{
 	(RiskClass)(0),                            // 0: nebula.executor.v1.RiskClass
 	(ApprovalRequirement)(0),                  // 1: nebula.executor.v1.ApprovalRequirement
@@ -4177,6 +4852,20 @@ var file_nebula_executor_v1_executor_proto_goTypes = []any{
 	(*BeginLoginResponse)(nil),                // 63: nebula.executor.v1.BeginLoginResponse
 	(*FinishLoginRequest)(nil),                // 64: nebula.executor.v1.FinishLoginRequest
 	(*FinishLoginResponse)(nil),               // 65: nebula.executor.v1.FinishLoginResponse
+	(*CheckCredentialRequest)(nil),            // 66: nebula.executor.v1.CheckCredentialRequest
+	(*CheckCredentialResponse)(nil),           // 67: nebula.executor.v1.CheckCredentialResponse
+	(*BeginTOTPSetupRequest)(nil),             // 68: nebula.executor.v1.BeginTOTPSetupRequest
+	(*BeginTOTPSetupResponse)(nil),            // 69: nebula.executor.v1.BeginTOTPSetupResponse
+	(*ConfirmTOTPSetupRequest)(nil),           // 70: nebula.executor.v1.ConfirmTOTPSetupRequest
+	(*ConfirmTOTPSetupResponse)(nil),          // 71: nebula.executor.v1.ConfirmTOTPSetupResponse
+	(*RemoveTOTPRequest)(nil),                 // 72: nebula.executor.v1.RemoveTOTPRequest
+	(*RemoveTOTPResponse)(nil),                // 73: nebula.executor.v1.RemoveTOTPResponse
+	(*GetTOTPStatusRequest)(nil),              // 74: nebula.executor.v1.GetTOTPStatusRequest
+	(*GetTOTPStatusResponse)(nil),             // 75: nebula.executor.v1.GetTOTPStatusResponse
+	(*RecoveryLoginRequest)(nil),              // 76: nebula.executor.v1.RecoveryLoginRequest
+	(*RecoveryLoginResponse)(nil),             // 77: nebula.executor.v1.RecoveryLoginResponse
+	(*FinishRecoveryRequest)(nil),             // 78: nebula.executor.v1.FinishRecoveryRequest
+	(*FinishRecoveryResponse)(nil),            // 79: nebula.executor.v1.FinishRecoveryResponse
 }
 var file_nebula_executor_v1_executor_proto_depIdxs = []int32{
 	0,  // 0: nebula.executor.v1.ExecutionRequest.risk_class:type_name -> nebula.executor.v1.RiskClass
@@ -4223,40 +4912,54 @@ var file_nebula_executor_v1_executor_proto_depIdxs = []int32{
 	48, // 41: nebula.executor.v1.ExecutorService.RemoveWebAuthnCredential:input_type -> nebula.executor.v1.RemoveWebAuthnCredentialRequest
 	62, // 42: nebula.executor.v1.ExecutorService.BeginLogin:input_type -> nebula.executor.v1.BeginLoginRequest
 	64, // 43: nebula.executor.v1.ExecutorService.FinishLogin:input_type -> nebula.executor.v1.FinishLoginRequest
-	50, // 44: nebula.executor.v1.ExecutorService.ProbeHostKey:input_type -> nebula.executor.v1.ProbeHostKeyRequest
-	52, // 45: nebula.executor.v1.ExecutorService.PinHostKey:input_type -> nebula.executor.v1.PinHostKeyRequest
-	55, // 46: nebula.executor.v1.ExecutorService.UnpinHostKey:input_type -> nebula.executor.v1.UnpinHostKeyRequest
-	57, // 47: nebula.executor.v1.ExecutorService.ListHostKeys:input_type -> nebula.executor.v1.ListHostKeysRequest
-	59, // 48: nebula.executor.v1.ExecutorService.TestConnection:input_type -> nebula.executor.v1.TestConnectionRequest
-	7,  // 49: nebula.executor.v1.ExecutorService.GetStatus:output_type -> nebula.executor.v1.GetStatusResponse
-	9,  // 50: nebula.executor.v1.ExecutorService.ProposeExecution:output_type -> nebula.executor.v1.ProposeExecutionResponse
-	11, // 51: nebula.executor.v1.ExecutorService.SubmitAssertion:output_type -> nebula.executor.v1.SubmitAssertionResponse
-	13, // 52: nebula.executor.v1.ExecutorService.BeginPrivilegedSession:output_type -> nebula.executor.v1.BeginPrivilegedSessionResponse
-	15, // 53: nebula.executor.v1.ExecutorService.CompletePrivilegedSession:output_type -> nebula.executor.v1.CompletePrivilegedSessionResponse
-	17, // 54: nebula.executor.v1.ExecutorService.AuthorizeRun:output_type -> nebula.executor.v1.AuthorizeRunResponse
-	19, // 55: nebula.executor.v1.ExecutorService.Unlock:output_type -> nebula.executor.v1.UnlockResponse
-	21, // 56: nebula.executor.v1.ExecutorService.Lock:output_type -> nebula.executor.v1.LockResponse
-	24, // 57: nebula.executor.v1.ExecutorService.ListPending:output_type -> nebula.executor.v1.ListPendingResponse
-	26, // 58: nebula.executor.v1.ExecutorService.ApproveCLI:output_type -> nebula.executor.v1.ApproveCLIResponse
-	28, // 59: nebula.executor.v1.ExecutorService.TrustArtifact:output_type -> nebula.executor.v1.TrustArtifactResponse
-	30, // 60: nebula.executor.v1.ExecutorService.UntrustArtifact:output_type -> nebula.executor.v1.UntrustArtifactResponse
-	33, // 61: nebula.executor.v1.ExecutorService.ListTrustedArtifacts:output_type -> nebula.executor.v1.ListTrustedArtifactsResponse
-	35, // 62: nebula.executor.v1.ExecutorService.SetHostCriticality:output_type -> nebula.executor.v1.SetHostCriticalityResponse
-	38, // 63: nebula.executor.v1.ExecutorService.ListHostCriticality:output_type -> nebula.executor.v1.ListHostCriticalityResponse
-	40, // 64: nebula.executor.v1.ExecutorService.CreateRegistrationCode:output_type -> nebula.executor.v1.CreateRegistrationCodeResponse
-	42, // 65: nebula.executor.v1.ExecutorService.BeginRegistration:output_type -> nebula.executor.v1.BeginRegistrationResponse
-	44, // 66: nebula.executor.v1.ExecutorService.FinishRegistration:output_type -> nebula.executor.v1.FinishRegistrationResponse
-	47, // 67: nebula.executor.v1.ExecutorService.ListWebAuthnCredentials:output_type -> nebula.executor.v1.ListWebAuthnCredentialsResponse
-	49, // 68: nebula.executor.v1.ExecutorService.RemoveWebAuthnCredential:output_type -> nebula.executor.v1.RemoveWebAuthnCredentialResponse
-	63, // 69: nebula.executor.v1.ExecutorService.BeginLogin:output_type -> nebula.executor.v1.BeginLoginResponse
-	65, // 70: nebula.executor.v1.ExecutorService.FinishLogin:output_type -> nebula.executor.v1.FinishLoginResponse
-	51, // 71: nebula.executor.v1.ExecutorService.ProbeHostKey:output_type -> nebula.executor.v1.ProbeHostKeyResponse
-	54, // 72: nebula.executor.v1.ExecutorService.PinHostKey:output_type -> nebula.executor.v1.PinHostKeyResponse
-	56, // 73: nebula.executor.v1.ExecutorService.UnpinHostKey:output_type -> nebula.executor.v1.UnpinHostKeyResponse
-	58, // 74: nebula.executor.v1.ExecutorService.ListHostKeys:output_type -> nebula.executor.v1.ListHostKeysResponse
-	61, // 75: nebula.executor.v1.ExecutorService.TestConnection:output_type -> nebula.executor.v1.TestConnectionResponse
-	49, // [49:76] is the sub-list for method output_type
-	22, // [22:49] is the sub-list for method input_type
+	66, // 44: nebula.executor.v1.ExecutorService.CheckCredential:input_type -> nebula.executor.v1.CheckCredentialRequest
+	68, // 45: nebula.executor.v1.ExecutorService.BeginTOTPSetup:input_type -> nebula.executor.v1.BeginTOTPSetupRequest
+	70, // 46: nebula.executor.v1.ExecutorService.ConfirmTOTPSetup:input_type -> nebula.executor.v1.ConfirmTOTPSetupRequest
+	72, // 47: nebula.executor.v1.ExecutorService.RemoveTOTP:input_type -> nebula.executor.v1.RemoveTOTPRequest
+	74, // 48: nebula.executor.v1.ExecutorService.GetTOTPStatus:input_type -> nebula.executor.v1.GetTOTPStatusRequest
+	76, // 49: nebula.executor.v1.ExecutorService.RecoveryLogin:input_type -> nebula.executor.v1.RecoveryLoginRequest
+	78, // 50: nebula.executor.v1.ExecutorService.FinishRecovery:input_type -> nebula.executor.v1.FinishRecoveryRequest
+	50, // 51: nebula.executor.v1.ExecutorService.ProbeHostKey:input_type -> nebula.executor.v1.ProbeHostKeyRequest
+	52, // 52: nebula.executor.v1.ExecutorService.PinHostKey:input_type -> nebula.executor.v1.PinHostKeyRequest
+	55, // 53: nebula.executor.v1.ExecutorService.UnpinHostKey:input_type -> nebula.executor.v1.UnpinHostKeyRequest
+	57, // 54: nebula.executor.v1.ExecutorService.ListHostKeys:input_type -> nebula.executor.v1.ListHostKeysRequest
+	59, // 55: nebula.executor.v1.ExecutorService.TestConnection:input_type -> nebula.executor.v1.TestConnectionRequest
+	7,  // 56: nebula.executor.v1.ExecutorService.GetStatus:output_type -> nebula.executor.v1.GetStatusResponse
+	9,  // 57: nebula.executor.v1.ExecutorService.ProposeExecution:output_type -> nebula.executor.v1.ProposeExecutionResponse
+	11, // 58: nebula.executor.v1.ExecutorService.SubmitAssertion:output_type -> nebula.executor.v1.SubmitAssertionResponse
+	13, // 59: nebula.executor.v1.ExecutorService.BeginPrivilegedSession:output_type -> nebula.executor.v1.BeginPrivilegedSessionResponse
+	15, // 60: nebula.executor.v1.ExecutorService.CompletePrivilegedSession:output_type -> nebula.executor.v1.CompletePrivilegedSessionResponse
+	17, // 61: nebula.executor.v1.ExecutorService.AuthorizeRun:output_type -> nebula.executor.v1.AuthorizeRunResponse
+	19, // 62: nebula.executor.v1.ExecutorService.Unlock:output_type -> nebula.executor.v1.UnlockResponse
+	21, // 63: nebula.executor.v1.ExecutorService.Lock:output_type -> nebula.executor.v1.LockResponse
+	24, // 64: nebula.executor.v1.ExecutorService.ListPending:output_type -> nebula.executor.v1.ListPendingResponse
+	26, // 65: nebula.executor.v1.ExecutorService.ApproveCLI:output_type -> nebula.executor.v1.ApproveCLIResponse
+	28, // 66: nebula.executor.v1.ExecutorService.TrustArtifact:output_type -> nebula.executor.v1.TrustArtifactResponse
+	30, // 67: nebula.executor.v1.ExecutorService.UntrustArtifact:output_type -> nebula.executor.v1.UntrustArtifactResponse
+	33, // 68: nebula.executor.v1.ExecutorService.ListTrustedArtifacts:output_type -> nebula.executor.v1.ListTrustedArtifactsResponse
+	35, // 69: nebula.executor.v1.ExecutorService.SetHostCriticality:output_type -> nebula.executor.v1.SetHostCriticalityResponse
+	38, // 70: nebula.executor.v1.ExecutorService.ListHostCriticality:output_type -> nebula.executor.v1.ListHostCriticalityResponse
+	40, // 71: nebula.executor.v1.ExecutorService.CreateRegistrationCode:output_type -> nebula.executor.v1.CreateRegistrationCodeResponse
+	42, // 72: nebula.executor.v1.ExecutorService.BeginRegistration:output_type -> nebula.executor.v1.BeginRegistrationResponse
+	44, // 73: nebula.executor.v1.ExecutorService.FinishRegistration:output_type -> nebula.executor.v1.FinishRegistrationResponse
+	47, // 74: nebula.executor.v1.ExecutorService.ListWebAuthnCredentials:output_type -> nebula.executor.v1.ListWebAuthnCredentialsResponse
+	49, // 75: nebula.executor.v1.ExecutorService.RemoveWebAuthnCredential:output_type -> nebula.executor.v1.RemoveWebAuthnCredentialResponse
+	63, // 76: nebula.executor.v1.ExecutorService.BeginLogin:output_type -> nebula.executor.v1.BeginLoginResponse
+	65, // 77: nebula.executor.v1.ExecutorService.FinishLogin:output_type -> nebula.executor.v1.FinishLoginResponse
+	67, // 78: nebula.executor.v1.ExecutorService.CheckCredential:output_type -> nebula.executor.v1.CheckCredentialResponse
+	69, // 79: nebula.executor.v1.ExecutorService.BeginTOTPSetup:output_type -> nebula.executor.v1.BeginTOTPSetupResponse
+	71, // 80: nebula.executor.v1.ExecutorService.ConfirmTOTPSetup:output_type -> nebula.executor.v1.ConfirmTOTPSetupResponse
+	73, // 81: nebula.executor.v1.ExecutorService.RemoveTOTP:output_type -> nebula.executor.v1.RemoveTOTPResponse
+	75, // 82: nebula.executor.v1.ExecutorService.GetTOTPStatus:output_type -> nebula.executor.v1.GetTOTPStatusResponse
+	77, // 83: nebula.executor.v1.ExecutorService.RecoveryLogin:output_type -> nebula.executor.v1.RecoveryLoginResponse
+	79, // 84: nebula.executor.v1.ExecutorService.FinishRecovery:output_type -> nebula.executor.v1.FinishRecoveryResponse
+	51, // 85: nebula.executor.v1.ExecutorService.ProbeHostKey:output_type -> nebula.executor.v1.ProbeHostKeyResponse
+	54, // 86: nebula.executor.v1.ExecutorService.PinHostKey:output_type -> nebula.executor.v1.PinHostKeyResponse
+	56, // 87: nebula.executor.v1.ExecutorService.UnpinHostKey:output_type -> nebula.executor.v1.UnpinHostKeyResponse
+	58, // 88: nebula.executor.v1.ExecutorService.ListHostKeys:output_type -> nebula.executor.v1.ListHostKeysResponse
+	61, // 89: nebula.executor.v1.ExecutorService.TestConnection:output_type -> nebula.executor.v1.TestConnectionResponse
+	56, // [56:90] is the sub-list for method output_type
+	22, // [22:56] is the sub-list for method input_type
 	22, // [22:22] is the sub-list for extension type_name
 	22, // [22:22] is the sub-list for extension extendee
 	0,  // [0:22] is the sub-list for field type_name
@@ -4273,7 +4976,7 @@ func file_nebula_executor_v1_executor_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_nebula_executor_v1_executor_proto_rawDesc), len(file_nebula_executor_v1_executor_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   62,
+			NumMessages:   76,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

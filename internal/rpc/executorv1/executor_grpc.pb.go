@@ -43,6 +43,13 @@ const (
 	ExecutorService_RemoveWebAuthnCredential_FullMethodName  = "/nebula.executor.v1.ExecutorService/RemoveWebAuthnCredential"
 	ExecutorService_BeginLogin_FullMethodName                = "/nebula.executor.v1.ExecutorService/BeginLogin"
 	ExecutorService_FinishLogin_FullMethodName               = "/nebula.executor.v1.ExecutorService/FinishLogin"
+	ExecutorService_CheckCredential_FullMethodName           = "/nebula.executor.v1.ExecutorService/CheckCredential"
+	ExecutorService_BeginTOTPSetup_FullMethodName            = "/nebula.executor.v1.ExecutorService/BeginTOTPSetup"
+	ExecutorService_ConfirmTOTPSetup_FullMethodName          = "/nebula.executor.v1.ExecutorService/ConfirmTOTPSetup"
+	ExecutorService_RemoveTOTP_FullMethodName                = "/nebula.executor.v1.ExecutorService/RemoveTOTP"
+	ExecutorService_GetTOTPStatus_FullMethodName             = "/nebula.executor.v1.ExecutorService/GetTOTPStatus"
+	ExecutorService_RecoveryLogin_FullMethodName             = "/nebula.executor.v1.ExecutorService/RecoveryLogin"
+	ExecutorService_FinishRecovery_FullMethodName            = "/nebula.executor.v1.ExecutorService/FinishRecovery"
 	ExecutorService_ProbeHostKey_FullMethodName              = "/nebula.executor.v1.ExecutorService/ProbeHostKey"
 	ExecutorService_PinHostKey_FullMethodName                = "/nebula.executor.v1.ExecutorService/PinHostKey"
 	ExecutorService_UnpinHostKey_FullMethodName              = "/nebula.executor.v1.ExecutorService/UnpinHostKey"
@@ -123,6 +130,26 @@ type ExecutorServiceClient interface {
 	// Role: server. Completes a login; the login is consumed whether or not
 	// it succeeds.
 	FinishLogin(ctx context.Context, in *FinishLoginRequest, opts ...grpc.CallOption) (*FinishLoginResponse, error)
+	// Role: server. Reports whether a credential is still registered, so the
+	// server can end web sessions opened with a credential that was removed.
+	CheckCredential(ctx context.Context, in *CheckCredentialRequest, opts ...grpc.CallOption) (*CheckCredentialResponse, error)
+	// Role: admin. Creates a new, not yet active TOTP secret (replaces an
+	// earlier one) and returns it for the authenticator app.
+	BeginTOTPSetup(ctx context.Context, in *BeginTOTPSetupRequest, opts ...grpc.CallOption) (*BeginTOTPSetupResponse, error)
+	// Role: admin. Activates the new secret with one current code from the app.
+	ConfirmTOTPSetup(ctx context.Context, in *ConfirmTOTPSetupRequest, opts ...grpc.CallOption) (*ConfirmTOTPSetupResponse, error)
+	// Role: admin.
+	RemoveTOTP(ctx context.Context, in *RemoveTOTPRequest, opts ...grpc.CallOption) (*RemoveTOTPResponse, error)
+	// Role: admin.
+	GetTOTPStatus(ctx context.Context, in *GetTOTPStatusRequest, opts ...grpc.CallOption) (*GetTOTPStatusResponse, error)
+	// Role: server. Verifies a recovery code (single use, rate limited). On
+	// success the executor ends the privileged session, revokes permits and
+	// enters the recovery state.
+	RecoveryLogin(ctx context.Context, in *RecoveryLoginRequest, opts ...grpc.CallOption) (*RecoveryLoginResponse, error)
+	// Role: admin. Ends a pending recovery after the admin confirmed, on the
+	// executor host, that the given credential (registered after the
+	// recovery login) is their own new key.
+	FinishRecovery(ctx context.Context, in *FinishRecoveryRequest, opts ...grpc.CallOption) (*FinishRecoveryResponse, error)
 	// Role: admin. Reads the host key of one endpoint without sending a user
 	// name or credential.
 	ProbeHostKey(ctx context.Context, in *ProbeHostKeyRequest, opts ...grpc.CallOption) (*ProbeHostKeyResponse, error)
@@ -369,6 +396,76 @@ func (c *executorServiceClient) FinishLogin(ctx context.Context, in *FinishLogin
 	return out, nil
 }
 
+func (c *executorServiceClient) CheckCredential(ctx context.Context, in *CheckCredentialRequest, opts ...grpc.CallOption) (*CheckCredentialResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CheckCredentialResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_CheckCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) BeginTOTPSetup(ctx context.Context, in *BeginTOTPSetupRequest, opts ...grpc.CallOption) (*BeginTOTPSetupResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BeginTOTPSetupResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_BeginTOTPSetup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ConfirmTOTPSetup(ctx context.Context, in *ConfirmTOTPSetupRequest, opts ...grpc.CallOption) (*ConfirmTOTPSetupResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConfirmTOTPSetupResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ConfirmTOTPSetup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) RemoveTOTP(ctx context.Context, in *RemoveTOTPRequest, opts ...grpc.CallOption) (*RemoveTOTPResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RemoveTOTPResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_RemoveTOTP_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) GetTOTPStatus(ctx context.Context, in *GetTOTPStatusRequest, opts ...grpc.CallOption) (*GetTOTPStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetTOTPStatusResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_GetTOTPStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) RecoveryLogin(ctx context.Context, in *RecoveryLoginRequest, opts ...grpc.CallOption) (*RecoveryLoginResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RecoveryLoginResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_RecoveryLogin_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) FinishRecovery(ctx context.Context, in *FinishRecoveryRequest, opts ...grpc.CallOption) (*FinishRecoveryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FinishRecoveryResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_FinishRecovery_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *executorServiceClient) ProbeHostKey(ctx context.Context, in *ProbeHostKeyRequest, opts ...grpc.CallOption) (*ProbeHostKeyResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ProbeHostKeyResponse)
@@ -492,6 +589,26 @@ type ExecutorServiceServer interface {
 	// Role: server. Completes a login; the login is consumed whether or not
 	// it succeeds.
 	FinishLogin(context.Context, *FinishLoginRequest) (*FinishLoginResponse, error)
+	// Role: server. Reports whether a credential is still registered, so the
+	// server can end web sessions opened with a credential that was removed.
+	CheckCredential(context.Context, *CheckCredentialRequest) (*CheckCredentialResponse, error)
+	// Role: admin. Creates a new, not yet active TOTP secret (replaces an
+	// earlier one) and returns it for the authenticator app.
+	BeginTOTPSetup(context.Context, *BeginTOTPSetupRequest) (*BeginTOTPSetupResponse, error)
+	// Role: admin. Activates the new secret with one current code from the app.
+	ConfirmTOTPSetup(context.Context, *ConfirmTOTPSetupRequest) (*ConfirmTOTPSetupResponse, error)
+	// Role: admin.
+	RemoveTOTP(context.Context, *RemoveTOTPRequest) (*RemoveTOTPResponse, error)
+	// Role: admin.
+	GetTOTPStatus(context.Context, *GetTOTPStatusRequest) (*GetTOTPStatusResponse, error)
+	// Role: server. Verifies a recovery code (single use, rate limited). On
+	// success the executor ends the privileged session, revokes permits and
+	// enters the recovery state.
+	RecoveryLogin(context.Context, *RecoveryLoginRequest) (*RecoveryLoginResponse, error)
+	// Role: admin. Ends a pending recovery after the admin confirmed, on the
+	// executor host, that the given credential (registered after the
+	// recovery login) is their own new key.
+	FinishRecovery(context.Context, *FinishRecoveryRequest) (*FinishRecoveryResponse, error)
 	// Role: admin. Reads the host key of one endpoint without sending a user
 	// name or credential.
 	ProbeHostKey(context.Context, *ProbeHostKeyRequest) (*ProbeHostKeyResponse, error)
@@ -583,6 +700,27 @@ func (UnimplementedExecutorServiceServer) BeginLogin(context.Context, *BeginLogi
 }
 func (UnimplementedExecutorServiceServer) FinishLogin(context.Context, *FinishLoginRequest) (*FinishLoginResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method FinishLogin not implemented")
+}
+func (UnimplementedExecutorServiceServer) CheckCredential(context.Context, *CheckCredentialRequest) (*CheckCredentialResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CheckCredential not implemented")
+}
+func (UnimplementedExecutorServiceServer) BeginTOTPSetup(context.Context, *BeginTOTPSetupRequest) (*BeginTOTPSetupResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BeginTOTPSetup not implemented")
+}
+func (UnimplementedExecutorServiceServer) ConfirmTOTPSetup(context.Context, *ConfirmTOTPSetupRequest) (*ConfirmTOTPSetupResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ConfirmTOTPSetup not implemented")
+}
+func (UnimplementedExecutorServiceServer) RemoveTOTP(context.Context, *RemoveTOTPRequest) (*RemoveTOTPResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RemoveTOTP not implemented")
+}
+func (UnimplementedExecutorServiceServer) GetTOTPStatus(context.Context, *GetTOTPStatusRequest) (*GetTOTPStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetTOTPStatus not implemented")
+}
+func (UnimplementedExecutorServiceServer) RecoveryLogin(context.Context, *RecoveryLoginRequest) (*RecoveryLoginResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecoveryLogin not implemented")
+}
+func (UnimplementedExecutorServiceServer) FinishRecovery(context.Context, *FinishRecoveryRequest) (*FinishRecoveryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method FinishRecovery not implemented")
 }
 func (UnimplementedExecutorServiceServer) ProbeHostKey(context.Context, *ProbeHostKeyRequest) (*ProbeHostKeyResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ProbeHostKey not implemented")
@@ -1016,6 +1154,132 @@ func _ExecutorService_FinishLogin_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_CheckCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CheckCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).CheckCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_CheckCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).CheckCredential(ctx, req.(*CheckCredentialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_BeginTOTPSetup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BeginTOTPSetupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).BeginTOTPSetup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_BeginTOTPSetup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).BeginTOTPSetup(ctx, req.(*BeginTOTPSetupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ConfirmTOTPSetup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConfirmTOTPSetupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ConfirmTOTPSetup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ConfirmTOTPSetup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ConfirmTOTPSetup(ctx, req.(*ConfirmTOTPSetupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_RemoveTOTP_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveTOTPRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).RemoveTOTP(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_RemoveTOTP_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).RemoveTOTP(ctx, req.(*RemoveTOTPRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_GetTOTPStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetTOTPStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).GetTOTPStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_GetTOTPStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).GetTOTPStatus(ctx, req.(*GetTOTPStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_RecoveryLogin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecoveryLoginRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).RecoveryLogin(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_RecoveryLogin_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).RecoveryLogin(ctx, req.(*RecoveryLoginRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_FinishRecovery_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FinishRecoveryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).FinishRecovery(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_FinishRecovery_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).FinishRecovery(ctx, req.(*FinishRecoveryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ExecutorService_ProbeHostKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ProbeHostKeyRequest)
 	if err := dec(in); err != nil {
@@ -1200,6 +1464,34 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "FinishLogin",
 			Handler:    _ExecutorService_FinishLogin_Handler,
+		},
+		{
+			MethodName: "CheckCredential",
+			Handler:    _ExecutorService_CheckCredential_Handler,
+		},
+		{
+			MethodName: "BeginTOTPSetup",
+			Handler:    _ExecutorService_BeginTOTPSetup_Handler,
+		},
+		{
+			MethodName: "ConfirmTOTPSetup",
+			Handler:    _ExecutorService_ConfirmTOTPSetup_Handler,
+		},
+		{
+			MethodName: "RemoveTOTP",
+			Handler:    _ExecutorService_RemoveTOTP_Handler,
+		},
+		{
+			MethodName: "GetTOTPStatus",
+			Handler:    _ExecutorService_GetTOTPStatus_Handler,
+		},
+		{
+			MethodName: "RecoveryLogin",
+			Handler:    _ExecutorService_RecoveryLogin_Handler,
+		},
+		{
+			MethodName: "FinishRecovery",
+			Handler:    _ExecutorService_FinishRecovery_Handler,
 		},
 		{
 			MethodName: "ProbeHostKey",

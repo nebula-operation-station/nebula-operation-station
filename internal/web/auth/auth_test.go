@@ -41,6 +41,13 @@ type fakeExec struct {
 	gotPrivileged *pb.CompletePrivilegedSessionRequest
 	privErr       error
 	locked        int
+
+	removed  map[string]bool
+	checks   int
+	checkErr error
+
+	recoveryCode string
+	recoveryErr  error
 }
 
 func (f *fakeExec) BeginLogin(context.Context, *pb.BeginLoginRequest, ...grpc.CallOption) (*pb.BeginLoginResponse, error) {
@@ -93,6 +100,26 @@ func (f *fakeExec) Lock(context.Context, *pb.LockRequest, ...grpc.CallOption) (*
 	f.locked++
 	f.mu.Unlock()
 	return &pb.LockResponse{}, nil
+}
+
+func (f *fakeExec) CheckCredential(_ context.Context, in *pb.CheckCredentialRequest, _ ...grpc.CallOption) (*pb.CheckCredentialResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.checks++
+	if f.checkErr != nil {
+		return nil, f.checkErr
+	}
+	return &pb.CheckCredentialResponse{Registered: !f.removed[in.GetCredentialId()]}, nil
+}
+
+func (f *fakeExec) RecoveryLogin(_ context.Context, in *pb.RecoveryLoginRequest, _ ...grpc.CallOption) (*pb.RecoveryLoginResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.recoveryCode = in.GetCode()
+	if f.recoveryErr != nil {
+		return nil, f.recoveryErr
+	}
+	return &pb.RecoveryLoginResponse{}, nil
 }
 
 type clock struct {
@@ -403,5 +430,70 @@ func TestPrivilegedSessionAndLockNeedAWebSession(t *testing.T) {
 	// GET is not allowed on these endpoints.
 	if res := e.do("GET", "/executor/lock", "", c); res.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("GET lock: %d", res.StatusCode)
+	}
+}
+
+func TestRemovedCredentialEndsTheWebSession(t *testing.T) {
+	e := newEnv(t)
+	c := e.login()
+	if res := e.do("GET", "/dashboard", "", c); res.StatusCode != 200 {
+		t.Fatalf("dashboard: %d", res.StatusCode)
+	}
+	// Checked once, then cached for the interval.
+	e.do("GET", "/dashboard", "", c)
+	if e.exec.checks != 1 {
+		t.Fatalf("%d credential checks, want 1", e.exec.checks)
+	}
+
+	// Executor unreachable: the session stays.
+	e.exec.mu.Lock()
+	e.exec.checkErr = status.Error(codes.Unavailable, "down")
+	e.exec.mu.Unlock()
+	c2 := e.login()
+	if res := e.do("GET", "/dashboard", "", c2); res.StatusCode != 200 {
+		t.Fatalf("session dropped while the executor is down: %d", res.StatusCode)
+	}
+
+	// The credential is removed on the executor: the next check ends both sessions.
+	e.exec.mu.Lock()
+	e.exec.checkErr = nil
+	e.exec.removed = map[string]bool{"Y3JlZA": true}
+	e.exec.mu.Unlock()
+	if res := e.do("GET", "/dashboard", "", c2); res.StatusCode != http.StatusSeeOther {
+		t.Fatalf("session of a removed credential still valid: %d", res.StatusCode)
+	}
+	if res := e.do("GET", "/dashboard", "", c2); res.StatusCode != http.StatusSeeOther {
+		t.Fatal("revoked session came back")
+	}
+}
+
+func TestRecoveryLoginOpensASession(t *testing.T) {
+	e := newEnv(t)
+	e.exec.recoveryErr = status.Error(codes.Unauthenticated, "detail")
+	res := e.do("POST", "/login/recovery", `{"code":"000000"}`, nil)
+	if m := jsonBody(t, res); res.StatusCode != 400 || m["error"] != "recovery code not accepted" || sessionCookie(res) != nil {
+		t.Fatalf("wrong code: %d %v", res.StatusCode, m)
+	}
+	e.exec.recoveryErr = status.Error(codes.ResourceExhausted, "limited")
+	res = e.do("POST", "/login/recovery", `{"code":"000000"}`, nil)
+	if m := jsonBody(t, res); m["error"] != "too many wrong recovery codes; wait 15 minutes" {
+		t.Fatalf("limited: %v", m)
+	}
+	e.exec.recoveryErr = nil
+	res = e.do("POST", "/login/recovery", `{"code":"123456"}`, nil)
+	c := sessionCookie(res)
+	if res.StatusCode != 200 || c == nil || e.exec.recoveryCode != "123456" {
+		t.Fatalf("recovery login: %d %v", res.StatusCode, c)
+	}
+	if res := e.do("GET", "/dashboard", "", c); res.StatusCode != 200 {
+		t.Fatalf("dashboard with recovery session: %d", res.StatusCode)
+	}
+	// The recovery session is checked like any other: TOTP removed -> gone.
+	e.exec.mu.Lock()
+	e.exec.removed = map[string]bool{auth.RecoveryCredentialID: true}
+	e.exec.mu.Unlock()
+	e.clk.add(auth.CredentialCheckInterval) // the earlier check is cached for this long
+	if res := e.do("GET", "/dashboard", "", c); res.StatusCode != http.StatusSeeOther {
+		t.Fatalf("recovery session after TOTP removal: %d", res.StatusCode)
 	}
 }

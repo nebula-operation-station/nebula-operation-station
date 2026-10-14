@@ -119,3 +119,30 @@ func TestM2_PrivilegedSessionFromTheBrowser(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// The server asks whether a session's credential is still registered; a
+// removed credential reports false (M2-6).
+func TestM2_CheckCredentialFollowsRemoval(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	id := base64.RawURLEncoding.EncodeToString(h.id.cred.ID)
+	r, err := h.client.CheckCredential(h.ctx(), &pb.CheckCredentialRequest{CredentialId: id})
+	if err != nil || !r.GetRegistered() {
+		t.Fatalf("registered credential: %v %v", r, err)
+	}
+	r, err = h.client.CheckCredential(h.ctx(), &pb.CheckCredentialRequest{CredentialId: base64.RawURLEncoding.EncodeToString([]byte("other"))})
+	if err != nil || r.GetRegistered() {
+		t.Fatalf("unknown credential: %v %v", r, err)
+	}
+	_, err = h.client.CheckCredential(h.ctx(), &pb.CheckCredentialRequest{CredentialId: "not base64!"})
+	wantCode(t, err, codes.InvalidArgument, "")
+	if _, err := h.client.RemoveWebAuthnCredential(h.ctx(), &pb.RemoveWebAuthnCredentialRequest{CredentialId: id}); err != nil {
+		t.Fatal(err)
+	}
+	r, err = h.client.CheckCredential(h.ctx(), &pb.CheckCredentialRequest{CredentialId: id})
+	if err != nil || r.GetRegistered() {
+		t.Fatalf("removed credential still registered: %v %v", r, err)
+	}
+	admin := newHarness(t, harnessOptions{uidRoles: map[uint32][]peercred.Role{uint32(os.Getuid()): {peercred.RoleAdmin}}})
+	_, err = admin.client.CheckCredential(admin.ctx(), &pb.CheckCredentialRequest{CredentialId: id})
+	wantCode(t, err, codes.PermissionDenied, "")
+}

@@ -5,5 +5,15 @@
   <button type="button" id="login" class="button">Log in with security key</button>
   <p id="message" class="message" role="status" aria-live="polite"></p>
   <p class="hint">No key registered yet? <a href="/setup">Register a security key</a> with a one-time code from the executor host.</p>
+  <details class="recovery">
+    <summary>Lost your security key?</summary>
+    <p>Enter a code from your TOTP recovery app (set up with <code>nebula totp setup</code>). This opens a reading
+       session only; privileged work needs a newly registered security key.</p>
+    <form id="recovery" class="form">
+      <label for="recovery-code">Recovery code</label>
+      <input id="recovery-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required>
+      <button type="submit" class="button">Log in with recovery code</button>
+    </form>
+  </details>
 </section>
 {{end}}

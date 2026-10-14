@@ -11,6 +11,7 @@
 //	nebula artifact trust|untrust|list
 //	nebula host probe|pin|unpin|keys|test|criticality|clear|list
 //	nebula webauthn code|list|remove
+//	nebula totp setup|status|remove
 package main
 
 import (
@@ -65,6 +66,12 @@ commands:
                       one-time code to register a security key in the web UI
   webauthn list       list registered WebAuthn credentials
   webauthn remove ID  remove a credential (locks the executor)
+  totp setup [--account LABEL]
+                      set up TOTP recovery for the web login (asks for a code to confirm)
+  totp status         show TOTP recovery and whether a recovery is pending
+  totp remove         remove TOTP recovery
+  totp finish-recovery
+                      confirm the key registered after a recovery login (ends the recovery)
   version             print version
 
 environment:
@@ -134,6 +141,8 @@ func run(cmd string, args []string) error {
 		return hostCmd(ctx, c, args)
 	case "webauthn":
 		return webauthnCmd(ctx, c, args)
+	case "totp":
+		return totpCmd(ctx, c, args)
 	default:
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(64)

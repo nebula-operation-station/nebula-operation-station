@@ -78,5 +78,17 @@ function check(cond, what) {
   await Promise.all([page.waitForURL('**/login', { timeout: 10000 }), page.click('#logout')]);
   await page.goto(base + '/dashboard');
   check(new URL(page.url()).pathname === '/login', 'after logout the dashboard redirects to the login');
+
+  // TOTP recovery: reading session, privileged work blocked.
+  await page.request.get(base + '/__totp/setup');
+  const rcode = await (await page.request.get(base + '/__totp/next')).text();
+  await page.goto(base + '/login');
+  await page.click('details.recovery summary');
+  await page.fill('#recovery-code', rcode);
+  await Promise.all([page.waitForURL('**/dashboard', { timeout: 15000 }), page.click('#recovery button')]);
+  check(/Recovery login: privileged work is blocked/.test(await page.textContent('main')), 'recovery login opens the dashboard with the recovery notice');
+  await page.click('#session-open');
+  await page.waitForFunction(() => /blocked after a recovery login/.test(document.getElementById('message').textContent), null, { timeout: 15000 });
+  check(true, 'privileged session refused after a recovery login');
   await browser.close();
 })().catch(e => { console.error('E2E FAIL', e); process.exit(1); });

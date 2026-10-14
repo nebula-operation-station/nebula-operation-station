@@ -71,6 +71,7 @@ type harness struct {
 	verifier *webauthnverify.Verifier
 	svc      *executor.Service
 	userKey  ssh.PublicKey // public half of the credRef key (H05)
+	dataDir  string        // executor data directory, for restarts
 	stopFn   func()
 	once     sync.Once
 }
@@ -134,9 +135,10 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 		o.dataDir = privateDir(t)
 	}
 	h := &harness{
-		t:  t,
-		rp: virtualwebauthn.RelyingParty{Name: "Nebula", ID: rpID, Origin: origin},
-		id: o.identity,
+		dataDir: o.dataDir,
+		t:       t,
+		rp:      virtualwebauthn.RelyingParty{Name: "Nebula", ID: rpID, Origin: origin},
+		id:      o.identity,
 	}
 
 	db, err := executordb.Open(o.dataDir)
