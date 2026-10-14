@@ -86,10 +86,12 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		configPath  string
 		showVersion bool
 		notifyTest  bool
+		exportDir   string
 	)
 	fs.StringVar(&configPath, "config", DefaultConfigPath, "path to the server configuration file")
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 	fs.BoolVar(&notifyTest, "notify-test", false, "send a test notification to every configured provider and exit")
+	fs.StringVar(&exportDir, "export-actions", "", "write the built-in action scripts into this (new) directory, print the `nebula artifact trust` commands and exit")
 	serverconfig.RegisterFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -97,6 +99,9 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	if showVersion {
 		fmt.Fprintln(stderr, version.String())
 		return nil
+	}
+	if exportDir != "" {
+		return exportActions(exportDir, stderr)
 	}
 
 	cfg, err := serverconfig.LoadWithFlags(configPath, fs)
