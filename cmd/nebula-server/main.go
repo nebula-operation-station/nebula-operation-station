@@ -153,6 +153,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		HostNames:    hostNames,
 		Hosts:        store.List,
 		HostKeys:     hostKeys,
+		Inventory:    store,
 		Log:          log,
 	})
 	if err != nil {
