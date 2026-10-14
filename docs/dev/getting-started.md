@@ -119,6 +119,23 @@ nebula vault init    # optional: secret vault for API tokens (same passphrase re
 `nebula-server` has no systemd unit yet; run it directly for
 development (`bin/nebula-server`) if you need it.
 
+## Notifications (optional)
+
+Add a `notifications` block to `/etc/nebula/server.json` (any subset):
+
+```json
+"notifications": {
+  "webhook":  {"url": "https://hooks.example.org/nebula", "secret": "<at least 32 random characters>"},
+  "ntfy":     {"url": "https://ntfy.sh", "topic": "<random topic>", "token": "<optional access token>"},
+  "telegram": {"bot_token": "<123456:ABC...>", "chat_id": "<chat id>"}
+}
+```
+
+With tokens in it the file must not be readable by others (`chmod 0640`,
+owner `root:nebula-server`, as the installer creates it). Check with
+`nebula-server -config /etc/nebula/server.json -notify-test`. Today a host
+key mismatch is notified (once per block); more events follow.
+
 ## What exists and what does not
 
 Milestone 0 (security prototype) is implemented: UID separation,

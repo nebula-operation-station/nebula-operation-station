@@ -49,6 +49,9 @@ func LoadWithFlags(path string, fs *flag.FlagSet) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if err := checkSecretFileMode(path, cfg); err != nil {
+		return Config{}, err
+	}
 	applyFlags(&cfg, fs)
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
@@ -76,4 +79,21 @@ func applyFlags(cfg *Config, fs *flag.FlagSet) {
 			cfg.ExecutorUser = f.Value.String()
 		}
 	})
+}
+
+// checkSecretFileMode refuses a config with notification secrets that
+// others can read (spec 13: owner nebula-server, not world-readable; the
+// installer's 0640 root:nebula-server is fine).
+func checkSecretFileMode(path string, cfg Config) error {
+	if !cfg.Notifications.HasSecrets() {
+		return nil
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("serverconfig: stat %s: %w", path, err)
+	}
+	if fi.Mode().Perm()&0o007 != 0 {
+		return fmt.Errorf("serverconfig: %s contains notification secrets and is readable or writable by others (mode %04o); chmod o-rwx it", path, fi.Mode().Perm())
+	}
+	return nil
 }

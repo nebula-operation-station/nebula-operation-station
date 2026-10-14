@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executorclient"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
@@ -41,6 +43,10 @@ const shutdownTimeout = 10 * time.Second
 
 // pruneInterval is how often expired web sessions are deleted.
 const pruneInterval = time.Hour
+
+// hostKeyPollInterval is how often the server asks the executor for
+// blocked hosts to notify.
+const hostKeyPollInterval = 30 * time.Second
 
 func pruneSessions(ctx context.Context, s *auth.Store, log *slog.Logger) {
 	t := time.NewTicker(pruneInterval)
@@ -78,9 +84,11 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	var (
 		configPath  string
 		showVersion bool
+		notifyTest  bool
 	)
 	fs.StringVar(&configPath, "config", DefaultConfigPath, "path to the server configuration file")
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
+	fs.BoolVar(&notifyTest, "notify-test", false, "send a test notification to every configured provider and exit")
 	serverconfig.RegisterFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -97,6 +105,21 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	// Every record carries the non-secret config attributes; the token
 	// is never part of them.
 	log := serverconfig.NewLogger(stderr, cfg)
+
+	notifier := notify.New(cfg.Notifications, nil, log)
+	if notifyTest {
+		if !notifier.Enabled() {
+			return errors.New("no notification provider configured")
+		}
+		tctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+		e := notify.Event{Kind: notify.KindTest, Reason: "If you read this, notifications from this Nebula server work.", Time: time.Now()}
+		if n := notifier.Notify(tctx, e); n == 0 {
+			return errors.New("no provider accepted the test notification (see the log)")
+		}
+		fmt.Fprintln(stderr, "test notification sent")
+		return nil
+	}
 
 	db, err := serverdb.Open(filepath.Join(cfg.DataDir, "server.db"))
 	if err != nil {
@@ -146,6 +169,10 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		}
 		return resp.GetHosts(), nil
 	}
+
+	// Host key mismatches notify (spec 13: always sent, cannot be muted).
+	watcher := &notify.HostKeyWatcher{Notifier: notifier, List: hostKeys, DB: db, Interval: hostKeyPollInterval, Log: log}
+	go watcher.Run(connCtx)
 
 	h, err := ui.New(ui.Options{
 		PublicOrigin: cfg.PublicOrigin,
