@@ -260,3 +260,22 @@ func attemptsToProto(in []sshtransport.Attempt) []*pb.ConnectionAttempt {
 	}
 	return out
 }
+
+// GetSSHPublicKey returns the public half of a loaded key for the
+// enrollment script (`nebula host enroll-script`).
+func (s *Service) GetSSHPublicKey(_ context.Context, req *pb.GetSSHPublicKeyRequest) (*pb.GetSSHPublicKeyResponse, error) {
+	signer, err := s.keys.Signer(req.GetCredentialRef())
+	switch {
+	case errors.Is(err, keyring.ErrLocked):
+		return nil, status.Error(codes.FailedPrecondition, "keyring is locked; run `nebula unlock`")
+	case errors.Is(err, keyring.ErrUnknownRef):
+		return nil, status.Errorf(codes.NotFound, "credential reference %q is not loaded", req.GetCredentialRef())
+	case err != nil:
+		return nil, status.Error(codes.Internal, "keyring error")
+	}
+	pub := signer.PublicKey()
+	return &pb.GetSSHPublicKeyResponse{
+		AuthorizedKey: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub))),
+		Fingerprint:   sshtransport.Fingerprint(pub),
+	}, nil
+}

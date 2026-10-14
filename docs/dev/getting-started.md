@@ -103,9 +103,10 @@ What this gives you:
     -f /var/lib/nebula/executor/keys/nebula-default.key
   ```
 
-  The public key goes into the `nebula` user's `authorized_keys` on
-  managed hosts once enrollment exists (Milestone 3). Until then the key
-  is a placeholder for the unlock flow.
+  After `nebula unlock`, `nebula host enroll-script --from <Nebula IPs>`
+  prints a script that installs this key for a `nebula` user on a new
+  host (run it there as root after reading it); then pin the host with
+  `nebula host pin`.
 
 Then check the state and unlock:
 
@@ -125,6 +126,6 @@ permits, executor-side WebAuthn verification, and the CLI unlock flow.
 See `docs/implementation/m0.md` for the full status, known gaps and
 decisions.
 
-Not yet available: host enrollment and any real host management
+Not yet available: most host management beyond enrollment and pinning
 (Milestone 3+), packaging (Milestone 10), and the discovery service.
 Do not use this in production.

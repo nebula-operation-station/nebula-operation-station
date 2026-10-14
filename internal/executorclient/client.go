@@ -397,6 +397,14 @@ func (c *Client) FinishRecovery(ctx context.Context, in *pb.FinishRecoveryReques
 	return resp, mapError(err)
 }
 
+// GetSSHPublicKey: Returns a loaded SSH public key (admin role only).
+func (c *Client) GetSSHPublicKey(ctx context.Context, in *pb.GetSSHPublicKeyRequest, opts ...grpc.CallOption) (*pb.GetSSHPublicKeyResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.GetSSHPublicKey(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
 // Compile-time check: the client must implement the generated interface so
 // that a generated-code change breaks the build here.
 var _ pb.ExecutorServiceClient = (*Client)(nil)

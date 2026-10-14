@@ -166,6 +166,10 @@ service ExecutorService {
   // Role: server, admin. Lists the pins; public data only.
   rpc ListHostKeys(ListHostKeysRequest) returns (ListHostKeysResponse);
 
+  // Role: admin. Returns the public half of a loaded SSH key (the keyring
+  // must be unlocked), for the enrollment script.
+  rpc GetSSHPublicKey(GetSSHPublicKeyRequest) returns (GetSSHPublicKeyResponse);
+
   // Role: admin. Connects to a pinned host with its credential (the keyring
   // must be unlocked) over the given endpoints, in order, and disconnects.
   // A host key mismatch blocks the host.
@@ -667,3 +671,13 @@ message FinishRecoveryRequest {
 }
 
 message FinishRecoveryResponse {}
+
+message GetSSHPublicKeyRequest {
+  string credential_ref = 1;
+}
+
+message GetSSHPublicKeyResponse {
+  // "type base64", without comment.
+  string authorized_key = 1;
+  string fingerprint = 2;
+}

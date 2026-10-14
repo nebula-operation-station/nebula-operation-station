@@ -192,6 +192,8 @@ func hostCmd(ctx context.Context, c pb.ExecutorServiceClient, args []string) err
 		return hostKeys(ctx, c, os.Stdout)
 	case len(args) >= 1 && args[0] == "test":
 		return hostTest(ctx, c, args[1:], os.Stdout)
+	case len(args) >= 1 && args[0] == "enroll-script":
+		return hostEnrollScript(ctx, c, args[1:], os.Stdout)
 	case len(args) == 2 && args[0] == "clear":
 		resp, err := c.SetHostCriticality(ctx, &pb.SetHostCriticalityRequest{HostId: args[1], Clear: true})
 		if err != nil {
