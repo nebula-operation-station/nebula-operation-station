@@ -16,6 +16,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -30,6 +31,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/version"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/middleware"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
@@ -87,11 +89,13 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		showVersion bool
 		notifyTest  bool
 		exportDir   string
+		apiToken    string
 	)
 	fs.StringVar(&configPath, "config", DefaultConfigPath, "path to the server configuration file")
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 	fs.BoolVar(&notifyTest, "notify-test", false, "send a test notification to every configured provider and exit")
 	fs.StringVar(&exportDir, "export-actions", "", "write the built-in action scripts into this (new) directory, print the `nebula artifact trust` commands and exit")
+	fs.StringVar(&apiToken, "api-token", "", "create a read-only API token `NAME:SCOPE[,SCOPE]`, print it and its server.json entry, and exit")
 	serverconfig.RegisterFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -102,6 +106,9 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 	if exportDir != "" {
 		return exportActions(exportDir, stderr)
+	}
+	if apiToken != "" {
+		return newAPIToken(apiToken, stderr)
 	}
 
 	cfg, err := serverconfig.LoadWithFlags(configPath, fs)
@@ -215,8 +222,19 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		return err
 	}
 	// Security middleware first (headers, origin check, body limit), then
-	// the session check, then the pages.
-	srv, err := middleware.NewServer(middleware.Options{PublicOrigin: cfg.PublicOrigin}, login.Wrap(h.Handler()))
+	// the session check, then the pages. The read-only API (spec 13), when
+	// enabled, authenticates with tokens instead of sessions.
+	root := http.NewServeMux()
+	root.Handle("/", login.Wrap(h.Handler()))
+	if cfg.API.Enabled {
+		a, err := api.New(api.Options{Tokens: cfg.API.Tokens, Hosts: store.List, Operations: ops, Log: log})
+		if err != nil {
+			return err
+		}
+		root.Handle(api.Prefix, a)
+		log.Info("read-only API enabled", "tokens", len(cfg.API.Tokens))
+	}
+	srv, err := middleware.NewServer(middleware.Options{PublicOrigin: cfg.PublicOrigin}, root)
 	if err != nil {
 		return err
 	}

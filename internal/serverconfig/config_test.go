@@ -371,3 +371,28 @@ func TestParseAllowsTrailingWhitespace(t *testing.T) {
 		t.Fatalf("Parse rejected trailing whitespace: %v", err)
 	}
 }
+
+func TestAPIConfigValidation(t *testing.T) {
+	good := strings.Repeat("a", 64)
+	for name, tc := range map[string]struct {
+		api  APIConfig
+		want string
+	}{
+		"off":           {APIConfig{}, ""},
+		"no tokens":     {APIConfig{Enabled: true}, "at least one token"},
+		"ok":            {APIConfig{Enabled: true, Tokens: []APIToken{{Name: "ha", SHA256: good, Scopes: []string{ScopeInventoryRead}}}}, ""},
+		"bad name":      {APIConfig{Enabled: true, Tokens: []APIToken{{Name: "Home Assistant", SHA256: good, Scopes: []string{ScopeInventoryRead}}}}, "name"},
+		"bad hash":      {APIConfig{Enabled: true, Tokens: []APIToken{{Name: "ha", SHA256: "nos_plaintext", Scopes: []string{ScopeInventoryRead}}}}, "sha256"},
+		"no scope":      {APIConfig{Enabled: true, Tokens: []APIToken{{Name: "ha", SHA256: good}}}, "at least one scope"},
+		"unknown scope": {APIConfig{Enabled: true, Tokens: []APIToken{{Name: "ha", SHA256: good, Scopes: []string{"vault.read"}}}}, "unknown scope"},
+		"same name": {APIConfig{Enabled: true, Tokens: []APIToken{{Name: "ha", SHA256: good, Scopes: []string{ScopeInventoryRead}},
+			{Name: "ha", SHA256: strings.Repeat("b", 64), Scopes: []string{ScopeInventoryRead}}}}, "used twice"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := strings.Join(tc.api.Problems(), "; ")
+			if (tc.want == "") != (p == "") || !strings.Contains(p, tc.want) {
+				t.Fatalf("%q", p)
+			}
+		})
+	}
+}
