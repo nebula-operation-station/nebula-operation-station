@@ -201,6 +201,19 @@ service ExecutorService {
   // key, which then replaces the pin (with the host's criticality record).
   rpc CommitRepin(CommitRepinRequest) returns (CommitRepinResponse);
 
+  // Role: server. Bulk enrollment (spec 08): reads the host keys of new
+  // hosts and proposes pinning them, as one HIGH action with user
+  // verification. The executor probes the endpoints itself; the approval
+  // binds host, endpoint, fingerprint, SSH user and credential of every
+  // host. Hosts pinned this way get no criticality record (they count as
+  // HIGH until an admin sets one on the executor host).
+  rpc ProposeEnroll(ProposeEnrollRequest) returns (ProposeEnrollResponse);
+
+  // Role: server. Pins the hosts of an approved enrollment whose endpoint
+  // still presents the approved key, and tries a login when the keys are
+  // unlocked.
+  rpc CommitEnroll(CommitEnrollRequest) returns (CommitEnrollResponse);
+
   // Role: admin. Returns the public half of a loaded SSH key (the keyring
   // must be unlocked), for the enrollment script.
   rpc GetSSHPublicKey(GetSSHPublicKeyRequest) returns (GetSSHPublicKeyResponse);
@@ -673,6 +686,53 @@ message CommitRepinRequest {
 
 message CommitRepinResponse {
   HostKeyPin pin = 1;
+}
+
+// One host of a bulk enrollment.
+message EnrollHost {
+  string host_id = 1;
+  string endpoint = 2;
+  // Default "nebula".
+  string ssh_user = 3;
+  // Default "nebula-default".
+  string credential_ref = 4;
+  // Set by ProposeEnroll from the executor's probe.
+  string fingerprint = 5;
+  string key_type = 6;
+  // Why the host is not part of the proposal (empty if it is).
+  string error = 7;
+}
+
+message ProposeEnrollRequest {
+  // At most 50 hosts; host_id, endpoint, ssh_user and credential_ref.
+  repeated EnrollHost hosts = 1;
+}
+
+message ProposeEnrollResponse {
+  // Absent when no host could be probed.
+  ProposeExecutionResponse permit = 1;
+  // Every requested host, with fingerprint or error.
+  repeated EnrollHost hosts = 2;
+}
+
+message CommitEnrollRequest {
+  string execution_digest = 1;
+  // The hosts of the proposal without error, exactly as returned.
+  repeated EnrollHost hosts = 2;
+}
+
+message EnrollResult {
+  string host_id = 1;
+  bool pinned = 2;
+  string fingerprint = 3;
+  string error = 4;
+  // Set only when the keys were unlocked: the login worked.
+  bool login_ok = 5;
+  string login_detail = 6;
+}
+
+message CommitEnrollResponse {
+  repeated EnrollResult results = 1;
 }
 
 message TestConnectionRequest {

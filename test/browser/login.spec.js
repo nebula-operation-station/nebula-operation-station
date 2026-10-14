@@ -130,6 +130,19 @@ function check(cond, what) {
   check(/Re-pinned e2e-moved/.test(await page.textContent('#message')), 'host re-pinned after the security key approval');
   await page.goto(base + '/dashboard');
   check(!/e2e-moved/.test(await page.textContent('main')), 'the re-pinned host is no longer blocked');
+  // Bulk enrollment: read the new host's key, approve the table, pin.
+  await page.goto(base + '/inventory/enroll');
+  check(await page.locator('tr.enroll-row[data-host="e2e-new"]').count() === 1 &&
+    await page.locator('tr.enroll-row[data-host="e2e-host"]').count() === 0, 'the enrollment page lists only hosts without a pinned key');
+  await page.check('tr.enroll-row[data-host="e2e-new"] .enroll-pick');
+  await page.click('#enroll-read');
+  await page.waitForFunction(() => /SHA256:/.test(document.querySelector('tr.enroll-row[data-host="e2e-new"] .enroll-fp').textContent), null, { timeout: 30000 });
+  check(true, 'the executor read the new host key');
+  await page.check('#enroll-confirm');
+  await page.click('#enroll-approve');
+  await page.waitForFunction(() => /enrolled|failed|refused|not accepted/.test(document.getElementById('message').textContent), null, { timeout: 30000 });
+  check(/1 of 1 hosts enrolled/.test(await page.textContent('#message')) &&
+    /pinned, login works/.test(await page.textContent('tr.enroll-row[data-host="e2e-new"] .enroll-result')), 'host enrolled after the security key approval, login works');
   await page.goto(base + '/dashboard');
   await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('#executor-lock')]);
   check(/Privileged session: none/.test(await page.textContent('main')), 'lock ends the privileged session');

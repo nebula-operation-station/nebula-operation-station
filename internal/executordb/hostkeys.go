@@ -299,3 +299,16 @@ func (db *DB) RepinHostKey(hostID, oldFingerprint string, blockedAt time.Time, n
 	k.PublicKey, k.Fingerprint, k.Source, k.PinnedAt, k.PinnedBy, k.Blocked = newKey, newFP, SourceProbe, now, by, nil
 	return k, nil
 }
+
+// HostByFingerprint returns the host a key is pinned for, or "".
+func (db *DB) HostByFingerprint(fingerprint string) (string, error) {
+	var host string
+	err := db.sql.QueryRow(`SELECT host_id FROM host_keys WHERE fingerprint = ?`, fingerprint).Scan(&host)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("executordb: host by fingerprint: %w", err)
+	}
+	return host, nil
+}

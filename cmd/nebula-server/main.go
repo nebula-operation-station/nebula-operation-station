@@ -208,6 +208,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		Inventory:    store,
 		Operations:   ops,
 		Repin:        exec,
+		Enroll:       exec,
 		Log:          log,
 	})
 	if err != nil {

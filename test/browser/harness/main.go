@@ -55,6 +55,12 @@ type direct struct{ s *executor.Service }
 func (d direct) ProposeRepin(ctx context.Context, in *pb.ProposeRepinRequest, _ ...grpc.CallOption) (*pb.ProposeRepinResponse, error) {
 	return d.s.ProposeRepin(ctx, in)
 }
+func (d direct) ProposeEnroll(ctx context.Context, in *pb.ProposeEnrollRequest, _ ...grpc.CallOption) (*pb.ProposeEnrollResponse, error) {
+	return d.s.ProposeEnroll(ctx, in)
+}
+func (d direct) CommitEnroll(ctx context.Context, in *pb.CommitEnrollRequest, _ ...grpc.CallOption) (*pb.CommitEnrollResponse, error) {
+	return d.s.CommitEnroll(ctx, in)
+}
 func (d direct) CommitRepin(ctx context.Context, in *pb.CommitRepinRequest, _ ...grpc.CallOption) (*pb.CommitRepinResponse, error) {
 	return d.s.CommitRepin(ctx, in)
 }
@@ -194,12 +200,22 @@ func main() {
 	_, err = inv.Create(context.Background(), inventory.Host{ID: "e2e-host", DisplayName: "E2E host", Environment: inventory.EnvDev,
 		Criticality: inventory.CriticalityLow, Endpoints: []inventory.Endpoint{{Address: hostAddr, Port: portNum}}}, inventory.CreateOptions{})
 	must(err)
+	// A new host in the inventory, not yet enrolled (bulk enrollment).
+	fresh, _, err := hostruntest.Serve(sshPub)
+	must(err)
+	freshAddr, freshPort, err := net.SplitHostPort(fresh.Addr)
+	must(err)
+	freshPortNum, err := strconv.Atoi(freshPort)
+	must(err)
+	_, err = inv.Create(context.Background(), inventory.Host{ID: "e2e-new", DisplayName: "E2E new host", Environment: inventory.EnvDev,
+		Criticality: inventory.CriticalityLow, Endpoints: []inventory.Endpoint{{Address: freshAddr, Port: freshPortNum}}}, inventory.CreateOptions{})
+	must(err)
 	ops := executions.New(context.Background(), direct{svc}, sdb, inv, log)
 	hostKeys := func(ctx context.Context) ([]*pb.HostKeyPin, error) {
 		r, err := svc.ListHostKeys(ctx, &pb.ListHostKeysRequest{})
 		return r.GetHosts(), err
 	}
-	u, err := ui.New(ui.Options{PublicOrigin: origin, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Repin: direct{svc}, Log: log})
+	u, err := ui.New(ui.Options{PublicOrigin: origin, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Repin: direct{svc}, Enroll: direct{svc}, Log: log})
 	must(err)
 	mux := http.NewServeMux()
 	// Test hook: issue a one-time code like `nebula webauthn code`.

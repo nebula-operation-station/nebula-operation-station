@@ -103,6 +103,9 @@ type Options struct {
 	// Repin re-pins hosts blocked by a host key mismatch. Nil leaves only
 	// the CLI instructions on the dashboard.
 	Repin Repinner
+	// Enroll pins new hosts in bulk from the inventory. It needs
+	// Inventory; nil leaves enrollment to the CLI.
+	Enroll Enroller
 	// Log receives executor status errors (the page itself only shows
 	// "Executor unavailable"). Nil means slog.Default().
 	Log *slog.Logger
@@ -123,6 +126,7 @@ type Handler struct {
 	operations Operations
 	log        *slog.Logger
 	repin      Repinner
+	enroll     Enroller
 }
 
 // New parses the embedded templates and builds a Handler.
@@ -157,6 +161,7 @@ func New(o Options) (*Handler, error) {
 		inventory:    o.Inventory,
 		operations:   o.Operations,
 		repin:        o.Repin,
+		enroll:       o.Enroll,
 		log:          log,
 	}, nil
 }
@@ -172,6 +177,7 @@ var pageFiles = map[string]string{
 
 	"operations":       "operations.html",
 	"inventory_import": "inventory_import.html",
+	"inventory_enroll": "inventory_enroll.html",
 	"operation_new":    "operation_new.html",
 	"operation":        "operation.html",
 }
@@ -200,6 +206,9 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("POST /operations/approve", h.handleOperationApprove)
 	mux.HandleFunc("POST /hostkeys/repin/propose", h.handleRepinPropose)
 	mux.HandleFunc("POST /hostkeys/repin/commit", h.handleRepinCommit)
+	mux.HandleFunc("GET /inventory/enroll", h.handleEnrollPage)
+	mux.HandleFunc("POST /inventory/enroll/propose", h.handleEnrollPropose)
+	mux.HandleFunc("POST /inventory/enroll/commit", h.handleEnrollCommit)
 	// The login and setup pages only render; the endpoints they call and
 	// the session check live in internal/web/auth.
 	mux.HandleFunc("/login", h.handleBare("Log in", "login", "login.js"))
@@ -256,6 +265,10 @@ type pageData struct {
 	BlockedUnknown bool
 	// RepinEnabled shows the re-pin controls for blocked hosts.
 	RepinEnabled bool
+	// Enroll lists inventory hosts without a pinned key.
+	Enroll []enrollRow
+	// EnrollEnabled links the enrollment page from the inventory.
+	EnrollEnabled bool
 	// Ops is the data of the operations pages.
 	Ops *operationsData
 	// InventoryEditable is true when Options.Inventory is set; the
@@ -398,6 +411,7 @@ func (h *Handler) handleInventory(w http.ResponseWriter, r *http.Request) {
 	data := pageData{Title: "Inventory", Active: "inventory", Content: "inventory"}
 	if h.inventory != nil {
 		data.InventoryEditable = true
+		data.EnrollEnabled = h.enroll != nil && h.hosts != nil
 		data.Scripts = []string{"webauthn.js", "inventory.js"}
 	}
 	if h.hosts == nil {
