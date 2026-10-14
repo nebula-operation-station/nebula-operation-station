@@ -101,6 +101,12 @@ func (s *Service) RunAttached(ctx context.Context, req *pb.RunAttachedRequest) (
 	c, err := s.Connect(ctx, r.GetHostId(), r.GetHostKeyFingerprint(), eps)
 	if err != nil {
 		resp.Class, resp.Detail = connectClass(err)
+		// Unreachable means no endpoint got as far as the host key: no
+		// credential was offered and nothing ran, so the host stays
+		// unused in the permit and the run may be retried.
+		if resp.Class == classNetworkUnreachable && s.auth.ReleaseHost(d, r.GetHostId()) {
+			resp.Retryable = true
+		}
 		resp.DurationMs = time.Since(start).Milliseconds()
 		s.auditRun(d, r.GetHostId(), resp)
 		return resp, nil

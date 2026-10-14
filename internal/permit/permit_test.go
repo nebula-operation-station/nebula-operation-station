@@ -321,6 +321,35 @@ func TestAuthorizeEachHostOnce(t *testing.T) {
 	}
 }
 
+func TestReleaseHostOnlyUndoesAUsedHostOfALivePermit(t *testing.T) {
+	e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
+	p := approved(t, e, e.request(canonical.RiskMedium))
+	if e.auth.ReleaseHost(p.Digest, "dockerflux") {
+		t.Fatal("released a host that was never used")
+	}
+	if e.auth.ReleaseHost(p.Digest, "netbird-vps") {
+		t.Fatal("released a host outside the permit")
+	}
+	if err := e.auth.Authorize(p.Digest, goodRun("dockerflux", fpA)); err != nil {
+		t.Fatal(err)
+	}
+	if !e.auth.ReleaseHost(p.Digest, "dockerflux") {
+		t.Fatal("used host not released")
+	}
+	if err := e.auth.Authorize(p.Digest, goodRun("dockerflux", fpA)); err != nil {
+		t.Fatalf("released host not usable: %v", err)
+	}
+	wantCode(t, e.auth.Authorize(p.Digest, goodRun("dockerflux", fpA)), CodeHostAlreadyRun)
+	if e.auth.ReleaseHost(canonical.Digest{}, "dockerflux") {
+		t.Fatal("released on an unknown permit")
+	}
+	// A pending permit has nothing to release.
+	pending := e.propose(e.request(canonical.RiskHigh))
+	if pending.State != StatePending || e.auth.ReleaseHost(pending.Digest, "dockerflux") {
+		t.Fatal("released on a pending permit")
+	}
+}
+
 func TestAuthorizeRejectsSubstitution(t *testing.T) {
 	cases := map[string]struct {
 		mutate func(*Run)

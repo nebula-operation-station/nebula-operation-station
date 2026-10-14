@@ -77,6 +77,10 @@ const (
 	parallelHosts = 4
 )
 
+// retryDelays are the waits before retrying a safe action whose run never
+// reached the host (spec 07 retry class safe); tests shorten them.
+var retryDelays = []time.Duration{20 * time.Second, time.Minute}
+
 // stagePlanHash identifies the only plan there is so far: one stage, all
 // hosts (the stage engine is Milestone 6).
 var stagePlanHash = func() string {
@@ -455,14 +459,7 @@ func (s *Service) runHost(ctx context.Context, e Execution, a actions.Action, h 
 			return
 		}
 		if !a.Durable {
-			cctx, cancel := context.WithTimeout(ctx, a.Timeout+2*time.Minute)
-			r, err := s.exec.RunAttached(cctx, &pb.RunAttachedRequest{Run: run, Endpoints: h.Endpoints, TimeoutSeconds: uint32(a.Timeout / time.Second)})
-			cancel()
-			if err != nil {
-				s.finishHost(e.ID, a.ID, h.HostID, "not_executed", refusal(err), -1, nil, nil, false)
-				return
-			}
-			s.finishHost(e.ID, a.ID, h.HostID, r.GetClass(), r.GetDetail(), int(r.GetExitCode()), r.GetResult(), r.GetLog(), r.GetLogTruncated())
+			s.runAttached(ctx, e, a, h, run)
 			return
 		}
 		cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -536,6 +533,42 @@ func (s *Service) finishHost(id, actionID, host, class, detail string, exit int,
 	s.log.Info("audit", "kind", "execution_host_finished", "execution", id, "host", host, "class", class, "exit", exit)
 	s.observe(id, actionID, host, class, result)
 	s.refreshOpsState(s.ctx, host, lastRun{action: actionID, class: class, at: s.now(), ok: true})
+}
+
+// runAttached runs an attached action on one host. A safe action whose run
+// never reached the host (the executor reports it retryable and has left
+// the permit's host unused) is retried after retryDelays.
+func (s *Service) runAttached(ctx context.Context, e Execution, a actions.Action, h Host, run *pb.AuthorizeRunRequest) {
+	var last *pb.RunAttachedResponse
+	for attempt := 0; ; attempt++ {
+		cctx, cancel := context.WithTimeout(ctx, a.Timeout+2*time.Minute)
+		r, err := s.exec.RunAttached(cctx, &pb.RunAttachedRequest{Run: run, Endpoints: h.Endpoints, TimeoutSeconds: uint32(a.Timeout / time.Second)})
+		cancel()
+		switch {
+		case err != nil && last != nil:
+			// The retry was refused (permit expired, executor locked):
+			// report what the host did, which is nothing.
+			s.finishHost(e.ID, a.ID, h.HostID, last.GetClass(), last.GetDetail()+"; retry refused: "+refusal(err), -1, nil, nil, false)
+			return
+		case err != nil:
+			s.finishHost(e.ID, a.ID, h.HostID, "not_executed", refusal(err), -1, nil, nil, false)
+			return
+		}
+		if !r.GetRetryable() || a.Retry != actions.RetrySafe || attempt >= len(retryDelays) {
+			s.finishHost(e.ID, a.ID, h.HostID, r.GetClass(), r.GetDetail(), int(r.GetExitCode()), r.GetResult(), r.GetLog(), r.GetLogTruncated())
+			return
+		}
+		last = r
+		wait := retryDelays[attempt]
+		note := fmt.Sprintf("%s; retry %d of %d in %s", r.GetClass(), attempt+1, len(retryDelays), wait)
+		_, _ = s.db.ExecContext(ctx, `UPDATE execution_hosts SET detail = ? WHERE execution_id = ? AND host_id = ?`, note, e.ID, h.HostID)
+		s.log.Info("audit", "kind", "execution_host_retry", "execution", e.ID, "host", h.HostID, "attempt", attempt+1)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+	}
 }
 
 func boolInt(b bool) int {

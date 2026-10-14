@@ -903,6 +903,10 @@ message RunAttachedResponse {
   bool log_truncated = 6;
   string endpoint = 7;
   int64 duration_ms = 8;
+  // The run never reached the host (network_unreachable: no endpoint got
+  // as far as the host key), so the permit's host is unused again and the
+  // same run may be retried before the permit expires.
+  bool retryable = 9;
 }
 
 message StartDurableRequest {
