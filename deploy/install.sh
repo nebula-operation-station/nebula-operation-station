@@ -331,7 +331,7 @@ Next steps:
   3. Create the SSH key for the managed hosts (passphrase from your
      password manager):
        sudo -u nebula-executor mkdir -p ${var_lib}/executor/keys
-       sudo -u nebula-executor ssh-keygen -t ed25519 -C nebula-default \
+       sudo -u nebula-executor ssh-keygen -t ed25519 -C nebula-default \\
          -f ${var_lib}/executor/keys/nebula-default.key
 
   4. Unlock the executor (it starts locked after every restart):
