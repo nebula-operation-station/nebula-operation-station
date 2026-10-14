@@ -159,9 +159,27 @@ func (n *Notifier) Enabled() bool { return len(n.senders) > 0 }
 // Notify sends e to every provider, retrying each a few times. It reports
 // how many providers accepted it; failures are logged without secrets.
 func (n *Notifier) Notify(ctx context.Context, e Event) int {
-	e = e.cleaned()
-	ok := 0
+	return len(n.NotifyProviders(ctx, e, nil))
+}
+
+// Providers returns the names of the configured providers.
+func (n *Notifier) Providers() []string {
+	names := make([]string, 0, len(n.senders))
 	for _, s := range n.senders {
+		names = append(names, s.Name())
+	}
+	return names
+}
+
+// NotifyProviders sends e to every provider skip does not exclude (nil
+// skips none) and returns the names of those that accepted it.
+func (n *Notifier) NotifyProviders(ctx context.Context, e Event, skip func(provider string) bool) []string {
+	e = e.cleaned()
+	var ok []string
+	for _, s := range n.senders {
+		if skip != nil && skip(s.Name()) {
+			continue
+		}
 		var err error
 		for attempt := 0; ; attempt++ {
 			sctx, cancel := context.WithTimeout(ctx, sendTimeout)
@@ -179,7 +197,7 @@ func (n *Notifier) Notify(ctx context.Context, e Event) int {
 			n.log.Warn("notification failed", "provider", s.Name(), "kind", e.Kind, "host", e.Host, "error", err.Error())
 			continue
 		}
-		ok++
+		ok = append(ok, s.Name())
 		n.log.Info("notification sent", "provider", s.Name(), "kind", e.Kind, "host", e.Host)
 	}
 	return ok

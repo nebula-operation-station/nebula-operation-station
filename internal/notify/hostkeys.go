@@ -5,7 +5,6 @@ package notify
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -63,14 +62,16 @@ func (w *HostKeyWatcher) Poll(ctx context.Context) error {
 			continue
 		}
 		blocked[p.GetHostId()] = true
-		var one int
-		err := w.DB.QueryRowContext(ctx, `SELECT 1 FROM notified_host_key_blocks WHERE host_id = ? AND blocked_at = ?`,
-			p.GetHostId(), p.GetBlockedAtUnix()).Scan(&one)
-		if err == nil {
-			continue
+		done, err := w.delivered(ctx, p.GetHostId(), p.GetBlockedAtUnix())
+		if err != nil {
+			return err
 		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("read notified blocks: %w", err)
+		missing := false
+		for _, name := range w.Notifier.Providers() {
+			missing = missing || !done[name]
+		}
+		if !missing {
+			continue
 		}
 		fp := p.GetBlockedFingerprint()
 		if fp == "" {
@@ -80,12 +81,13 @@ func (w *HostKeyWatcher) Poll(ctx context.Context) error {
 			Reason: fmt.Sprintf("%s presented %s instead of the pinned %s. Nebula does not connect until the key is re-pinned.",
 				p.GetBlockedEndpoint(), fp, p.GetFingerprint()),
 			Time: time.Unix(p.GetBlockedAtUnix(), 0)}
-		if w.Notifier.Notify(ctx, e) == 0 {
-			continue // retried next poll
-		}
-		if _, err := w.DB.ExecContext(ctx, `INSERT OR IGNORE INTO notified_host_key_blocks (host_id, blocked_at, notified_at) VALUES (?, ?, ?)`,
-			p.GetHostId(), p.GetBlockedAtUnix(), now().Unix()); err != nil {
-			return fmt.Errorf("record notified block: %w", err)
+		// Providers that failed are retried on the next poll, each until it
+		// accepts the block (spec 13: always sent).
+		for _, name := range w.Notifier.NotifyProviders(ctx, e, func(n string) bool { return done[n] }) {
+			if _, err := w.DB.ExecContext(ctx, `INSERT OR IGNORE INTO notified_host_key_blocks (host_id, blocked_at, provider, notified_at) VALUES (?, ?, ?, ?)`,
+				p.GetHostId(), p.GetBlockedAtUnix(), name, now().Unix()); err != nil {
+				return fmt.Errorf("record notified block: %w", err)
+			}
 		}
 	}
 	// Forget hosts that are no longer blocked, so a new block notifies.
@@ -114,4 +116,22 @@ func (w *HostKeyWatcher) Poll(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// delivered returns the providers that already accepted a block.
+func (w *HostKeyWatcher) delivered(ctx context.Context, host string, blockedAt int64) (map[string]bool, error) {
+	rows, err := w.DB.QueryContext(ctx, `SELECT provider FROM notified_host_key_blocks WHERE host_id = ? AND blocked_at = ?`, host, blockedAt)
+	if err != nil {
+		return nil, fmt.Errorf("read notified blocks: %w", err)
+	}
+	defer rows.Close()
+	done := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("read notified blocks: %w", err)
+		}
+		done[name] = true
+	}
+	return done, rows.Err()
 }

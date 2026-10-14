@@ -15,9 +15,15 @@ import (
 type recorder struct {
 	events []Event
 	fail   bool
+	name   string
 }
 
-func (r *recorder) Name() string { return "rec" }
+func (r *recorder) Name() string {
+	if r.name != "" {
+		return r.name
+	}
+	return "rec"
+}
 func (r *recorder) Send(_ context.Context, e Event) error {
 	if r.fail {
 		return context.DeadlineExceeded
@@ -85,5 +91,37 @@ func TestHostKeyWatcherIdleWithoutProviders(t *testing.T) {
 	w.Run(ctx)
 	if called {
 		t.Fatal("polled without providers")
+	}
+}
+
+// A block every provider accepted is never repeated; a provider that was
+// down gets it once it is back, without repeating it to the others.
+func TestHostKeyWatcherDeliversToEveryProvider(t *testing.T) {
+	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	pins := []*pb.HostKeyPin{{HostId: "strompi", Fingerprint: "SHA256:old", Blocked: true, BlockedAtUnix: 100, BlockedEndpoint: "10.8.0.5:22", BlockedFingerprint: "SHA256:new"}}
+	telegram, webhook := &recorder{name: "telegram"}, &recorder{name: "webhook", fail: true}
+	w := &HostKeyWatcher{Notifier: NewWithSenders(quiet(), nil, telegram, webhook), DB: db, Log: quiet(), Interval: time.Hour,
+		List: func(context.Context) ([]*pb.HostKeyPin, error) { return pins, nil }}
+	ctx := context.Background()
+	for i := 0; i < 2; i++ {
+		if err := w.Poll(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(telegram.events) != 1 || len(webhook.events) != 0 {
+		t.Fatalf("telegram %d webhook %d", len(telegram.events), len(webhook.events))
+	}
+	webhook.fail = false
+	for i := 0; i < 2; i++ {
+		if err := w.Poll(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(telegram.events) != 1 || len(webhook.events) != 1 {
+		t.Fatalf("after recovery: telegram %d webhook %d", len(telegram.events), len(webhook.events))
 	}
 }
