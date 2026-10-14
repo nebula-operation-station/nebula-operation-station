@@ -242,6 +242,32 @@ token's hash) and restart `nebula-server`. Clients send
 The API cannot change anything. To revoke a token, remove its entry and
 restart.
 
+**Home Assistant example** (`configuration.yaml`, one host; repeat the
+block per host or use `/api/v1/hosts` with a template over the list):
+
+```yaml
+rest:
+  - resource: https://nebula.lab.example.org/api/v1/hosts/web-01
+    scan_interval: 300
+    headers:
+      Authorization: !secret nebula_api_auth
+    sensor:
+      - name: "web-01 Ops State"
+        value_template: "{{ value_json.ops_state }}"
+      - name: "web-01 security updates"
+        value_template: "{{ value_json.updates.security if value_json.updates is defined else 0 }}"
+        unit_of_measurement: "updates"
+    binary_sensor:
+      - name: "web-01 reboot required"
+        value_template: "{{ value_json.updates.reboot_required if value_json.updates is defined else false }}"
+```
+
+with `nebula_api_auth: "Bearer nos_..."` in `secrets.yaml`. Ops State is
+`READY`, `WARNING`, `UNREACHABLE` or `UNKNOWN`; an automation on
+`WARNING`/`UNREACHABLE` is a cheap second channel next to the
+notifications. The update counts are as fresh as the last **Check
+updates** run (`checked_at`).
+
 ## 10. Day-to-day
 
 | Situation | What to do |
