@@ -59,6 +59,8 @@ const (
 	ExecutorService_ListHostKeys_FullMethodName              = "/nebula.executor.v1.ExecutorService/ListHostKeys"
 	ExecutorService_ProposeRepin_FullMethodName              = "/nebula.executor.v1.ExecutorService/ProposeRepin"
 	ExecutorService_CommitRepin_FullMethodName               = "/nebula.executor.v1.ExecutorService/CommitRepin"
+	ExecutorService_ProposeEnroll_FullMethodName             = "/nebula.executor.v1.ExecutorService/ProposeEnroll"
+	ExecutorService_CommitEnroll_FullMethodName              = "/nebula.executor.v1.ExecutorService/CommitEnroll"
 	ExecutorService_GetSSHPublicKey_FullMethodName           = "/nebula.executor.v1.ExecutorService/GetSSHPublicKey"
 	ExecutorService_TestConnection_FullMethodName            = "/nebula.executor.v1.ExecutorService/TestConnection"
 	ExecutorService_InitVault_FullMethodName                 = "/nebula.executor.v1.ExecutorService/InitVault"
@@ -202,6 +204,17 @@ type ExecutorServiceClient interface {
 	// the approved one, and the endpoint must still present the approved
 	// key, which then replaces the pin (with the host's criticality record).
 	CommitRepin(ctx context.Context, in *CommitRepinRequest, opts ...grpc.CallOption) (*CommitRepinResponse, error)
+	// Role: server. Bulk enrollment (spec 08): reads the host keys of new
+	// hosts and proposes pinning them, as one HIGH action with user
+	// verification. The executor probes the endpoints itself; the approval
+	// binds host, endpoint, fingerprint, SSH user and credential of every
+	// host. Hosts pinned this way get no criticality record (they count as
+	// HIGH until an admin sets one on the executor host).
+	ProposeEnroll(ctx context.Context, in *ProposeEnrollRequest, opts ...grpc.CallOption) (*ProposeEnrollResponse, error)
+	// Role: server. Pins the hosts of an approved enrollment whose endpoint
+	// still presents the approved key, and tries a login when the keys are
+	// unlocked.
+	CommitEnroll(ctx context.Context, in *CommitEnrollRequest, opts ...grpc.CallOption) (*CommitEnrollResponse, error)
 	// Role: admin. Returns the public half of a loaded SSH key (the keyring
 	// must be unlocked), for the enrollment script.
 	GetSSHPublicKey(ctx context.Context, in *GetSSHPublicKeyRequest, opts ...grpc.CallOption) (*GetSSHPublicKeyResponse, error)
@@ -610,6 +623,26 @@ func (c *executorServiceClient) CommitRepin(ctx context.Context, in *CommitRepin
 	return out, nil
 }
 
+func (c *executorServiceClient) ProposeEnroll(ctx context.Context, in *ProposeEnrollRequest, opts ...grpc.CallOption) (*ProposeEnrollResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProposeEnrollResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ProposeEnroll_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) CommitEnroll(ctx context.Context, in *CommitEnrollRequest, opts ...grpc.CallOption) (*CommitEnrollResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitEnrollResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_CommitEnroll_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *executorServiceClient) GetSSHPublicKey(ctx context.Context, in *GetSSHPublicKeyRequest, opts ...grpc.CallOption) (*GetSSHPublicKeyResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetSSHPublicKeyResponse)
@@ -805,6 +838,17 @@ type ExecutorServiceServer interface {
 	// the approved one, and the endpoint must still present the approved
 	// key, which then replaces the pin (with the host's criticality record).
 	CommitRepin(context.Context, *CommitRepinRequest) (*CommitRepinResponse, error)
+	// Role: server. Bulk enrollment (spec 08): reads the host keys of new
+	// hosts and proposes pinning them, as one HIGH action with user
+	// verification. The executor probes the endpoints itself; the approval
+	// binds host, endpoint, fingerprint, SSH user and credential of every
+	// host. Hosts pinned this way get no criticality record (they count as
+	// HIGH until an admin sets one on the executor host).
+	ProposeEnroll(context.Context, *ProposeEnrollRequest) (*ProposeEnrollResponse, error)
+	// Role: server. Pins the hosts of an approved enrollment whose endpoint
+	// still presents the approved key, and tries a login when the keys are
+	// unlocked.
+	CommitEnroll(context.Context, *CommitEnrollRequest) (*CommitEnrollResponse, error)
 	// Role: admin. Returns the public half of a loaded SSH key (the keyring
 	// must be unlocked), for the enrollment script.
 	GetSSHPublicKey(context.Context, *GetSSHPublicKeyRequest) (*GetSSHPublicKeyResponse, error)
@@ -946,6 +990,12 @@ func (UnimplementedExecutorServiceServer) ProposeRepin(context.Context, *Propose
 }
 func (UnimplementedExecutorServiceServer) CommitRepin(context.Context, *CommitRepinRequest) (*CommitRepinResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CommitRepin not implemented")
+}
+func (UnimplementedExecutorServiceServer) ProposeEnroll(context.Context, *ProposeEnrollRequest) (*ProposeEnrollResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ProposeEnroll not implemented")
+}
+func (UnimplementedExecutorServiceServer) CommitEnroll(context.Context, *CommitEnrollRequest) (*CommitEnrollResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CommitEnroll not implemented")
 }
 func (UnimplementedExecutorServiceServer) GetSSHPublicKey(context.Context, *GetSSHPublicKeyRequest) (*GetSSHPublicKeyResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetSSHPublicKey not implemented")
@@ -1670,6 +1720,42 @@ func _ExecutorService_CommitRepin_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_ProposeEnroll_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProposeEnrollRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ProposeEnroll(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ProposeEnroll_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ProposeEnroll(ctx, req.(*ProposeEnrollRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_CommitEnroll_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommitEnrollRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).CommitEnroll(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_CommitEnroll_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).CommitEnroll(ctx, req.(*CommitEnrollRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ExecutorService_GetSSHPublicKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetSSHPublicKeyRequest)
 	if err := dec(in); err != nil {
@@ -1936,6 +2022,14 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CommitRepin",
 			Handler:    _ExecutorService_CommitRepin_Handler,
+		},
+		{
+			MethodName: "ProposeEnroll",
+			Handler:    _ExecutorService_ProposeEnroll_Handler,
+		},
+		{
+			MethodName: "CommitEnroll",
+			Handler:    _ExecutorService_CommitEnroll_Handler,
 		},
 		{
 			MethodName: "GetSSHPublicKey",

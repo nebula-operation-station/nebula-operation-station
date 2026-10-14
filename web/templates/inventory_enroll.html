@@ -1,0 +1,46 @@
+{{define "content"}}
+<h1>Enroll hosts</h1>
+<section class="panel" aria-label="Before you start">
+  <p class="hint">Run the enrollment script on each new host first (<code>nebula host enroll-script --from &lt;Nebula addresses&gt;</code> on the
+     executor host). Then read the host keys here, compare each fingerprint with the host's console
+     (<code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code>) and approve the table with your security key. Hosts pinned here have no
+     criticality record and count as HIGH until you set one with <code>nebula host criticality</code>.</p>
+  <p id="message" class="message" role="status" aria-live="polite"></p>
+</section>
+{{if .InventoryUnavailable}}
+<p class="status status--error">Inventory or executor unavailable</p>
+{{else if .Enroll}}
+<section class="panel" aria-label="Hosts without a pinned key">
+  <table class="inventory">
+    <thead><tr><th><input type="checkbox" id="enroll-all" aria-label="Select all"></th><th>Host</th><th>Endpoint</th><th>SSH user</th><th>Key</th>
+      <th>Fingerprint (read by the executor)</th><th>Result</th></tr></thead>
+    <tbody>
+      {{range .Enroll}}
+      <tr class="enroll-row" data-host="{{.ID}}">
+        <td><input type="checkbox" class="enroll-pick" aria-label="Enroll {{.ID}}"></td>
+        <td>{{.Name}}</td>
+        <td><select class="enroll-endpoint">{{range .Endpoints}}<option>{{.}}</option>{{end}}</select></td>
+        <td><input type="text" class="enroll-user" value="nebula" size="10" autocomplete="off"></td>
+        <td class="enroll-type"></td>
+        <td class="enroll-fp"></td>
+        <td class="enroll-result"></td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  <div class="actions">
+    <button type="button" id="enroll-read" class="button">Read host keys</button>
+  </div>
+  <div id="enroll-approval" hidden>
+    <p class="status">Risk: <span id="enroll-risk"></span></p>
+    <label class="choice"><input type="checkbox" id="enroll-confirm"> I compared every fingerprint above on the host's console</label>
+    <label id="enroll-typed-label" hidden>Number of hosts <input type="number" id="enroll-typed" min="0" max="50"></label>
+    <p id="enroll-cli" class="hint" hidden>Hardened mode: approve on the executor host with <code id="enroll-cli-cmd"></code>, then press Enroll.</p>
+    <div class="actions"><button type="button" id="enroll-approve" class="button">Enroll with security key</button></div>
+  </div>
+</section>
+{{else}}
+<p>Every host in the inventory has a pinned key.</p>
+{{end}}
+<p><a href="/inventory">Back to the inventory</a></p>
+{{end}}

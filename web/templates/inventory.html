@@ -3,7 +3,7 @@
 {{if .InventoryEditable}}
 <section class="panel" aria-label="Add host">
   <h2>Add host</h2>
-  <p class="hint">Many hosts at once: <a href="/inventory/import">Import CSV</a></p>
+  <p class="hint">Many hosts at once: <a href="/inventory/import">Import CSV</a>{{if .EnrollEnabled}} · <a href="/inventory/enroll">Enroll hosts (read and pin host keys)</a>{{end}}</p>
   <form id="host-form" class="form">
     <label>ID
       <input name="id" id="host-id" required pattern="[a-z0-9][a-z0-9._-]{0,62}" autocomplete="off">

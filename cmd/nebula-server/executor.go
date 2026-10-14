@@ -125,6 +125,20 @@ func (l *lazyExecutor) CommitRepin(ctx context.Context, in *pb.CommitRepinReques
 	return nil, errNotConnected
 }
 
+func (l *lazyExecutor) ProposeEnroll(ctx context.Context, in *pb.ProposeEnrollRequest, opts ...grpc.CallOption) (*pb.ProposeEnrollResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ProposeEnroll(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) CommitEnroll(ctx context.Context, in *pb.CommitEnrollRequest, opts ...grpc.CallOption) (*pb.CommitEnrollResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.CommitEnroll(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
 func (l *lazyExecutor) ListHostKeys(ctx context.Context, in *pb.ListHostKeysRequest, opts ...grpc.CallOption) (*pb.ListHostKeysResponse, error) {
 	if c := l.c.Load(); c != nil {
 		return c.ListHostKeys(ctx, in, opts...)

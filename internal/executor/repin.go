@@ -141,21 +141,9 @@ func (s *Service) ProposeRepin(_ context.Context, req *pb.ProposeRepinRequest) (
 		return nil, toStatus(err)
 	}
 	p := res.Permit
-	out := &pb.ProposeExecutionResponse{
-		ExecutionDigest:     p.Digest.String(),
-		CanonicalRequest:    p.Canonical,
-		ApprovalRequirement: requirementToProto(p.Requirement),
-		State:               stateToProto(p.State),
-		RiskClass:           riskToProto(p.Request.RiskClass),
-	}
-	if p.State == permit.StatePending && p.Requirement != permit.RequireCLI {
-		out.Challenge = p.Challenge
-		out.ChallengeExpiryUnix = p.ApprovalExpiry.Unix()
-		opts, err := s.reg.RequestOptions(p.Challenge, time.Until(p.ApprovalExpiry))
-		if err != nil {
-			return nil, status.Error(codes.Internal, "request options")
-		}
-		out.RequestOptionsJson = opts
+	out, err := s.permitResponse(p)
+	if err != nil {
+		return nil, err
 	}
 	s.log.Warn("audit", "kind", "repin_proposed", "host", hk.HostID, "digest", p.Digest.String(),
 		"pinned", hk.Fingerprint, "presented", hk.Blocked.Fingerprint, "endpoint", hk.Blocked.Endpoint, "risk", string(p.Request.RiskClass))
@@ -221,4 +209,25 @@ func (s *Service) CommitRepin(ctx context.Context, req *pb.CommitRepinRequest) (
 	s.log.Warn("audit", "kind", "host_key_repinned", "host", repinned.HostID, "digest", d.String(),
 		"old", hk.Fingerprint, "new", repinned.Fingerprint, "endpoint", hk.Blocked.Endpoint)
 	return &pb.CommitRepinResponse{Pin: pinToProto(repinned)}, nil
+}
+
+// permitResponse describes a proposed permit like ProposeExecution does.
+func (s *Service) permitResponse(p permit.Permit) (*pb.ProposeExecutionResponse, error) {
+	out := &pb.ProposeExecutionResponse{
+		ExecutionDigest:     p.Digest.String(),
+		CanonicalRequest:    p.Canonical,
+		ApprovalRequirement: requirementToProto(p.Requirement),
+		State:               stateToProto(p.State),
+		RiskClass:           riskToProto(p.Request.RiskClass),
+	}
+	if p.State == permit.StatePending && p.Requirement != permit.RequireCLI {
+		out.Challenge = p.Challenge
+		out.ChallengeExpiryUnix = p.ApprovalExpiry.Unix()
+		opts, err := s.reg.RequestOptions(p.Challenge, time.Until(p.ApprovalExpiry))
+		if err != nil {
+			return nil, status.Error(codes.Internal, "request options")
+		}
+		out.RequestOptionsJson = opts
+	}
+	return out, nil
 }
