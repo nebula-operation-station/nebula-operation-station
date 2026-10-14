@@ -437,6 +437,19 @@ func (c *Client) DeleteSecret(ctx context.Context, in *pb.DeleteSecretRequest, o
 	return resp, mapError(err)
 }
 
+// RunAttached: Runs one authorized host run attached (server role). The
+// call may take the run's timeout plus connection time.
+func (c *Client) RunAttached(ctx context.Context, in *pb.RunAttachedRequest, opts ...grpc.CallOption) (*pb.RunAttachedResponse, error) {
+	t := time.Duration(in.GetTimeoutSeconds()) * time.Second
+	if t <= 0 || t > 10*time.Minute {
+		t = 10 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(ctx, t+time.Minute)
+	defer cancel()
+	resp, err := c.rpc.RunAttached(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
 // Compile-time check: the client must implement the generated interface so
 // that a generated-code change breaks the build here.
 var _ pb.ExecutorServiceClient = (*Client)(nil)
