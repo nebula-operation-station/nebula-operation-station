@@ -1,6 +1,9 @@
-# Deployment (Milestone 0 prototype)
+# Deployment
 
-Only for trying the security prototype on a test machine. Packaging (APT, containers) comes in Milestone 10.
+Operators: use `deploy/install.sh` from a release tarball and follow the
+[operator guide](../docs/admin/guide.md). The manual steps below are for
+developers trying a build from source on a test machine. Packaging (APT,
+containers) comes in Milestone 10.
 
 ```
 sudo groupadd --system nebula-rpc
