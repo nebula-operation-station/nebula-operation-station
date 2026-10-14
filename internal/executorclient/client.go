@@ -341,6 +341,14 @@ func (c *Client) FinishLogin(ctx context.Context, in *pb.FinishLoginRequest, opt
 	return resp, mapError(err)
 }
 
+// CheckCredential: Reports whether a credential is still registered (server role).
+func (c *Client) CheckCredential(ctx context.Context, in *pb.CheckCredentialRequest, opts ...grpc.CallOption) (*pb.CheckCredentialResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.CheckCredential(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
 // Compile-time check: the client must implement the generated interface so
 // that a generated-code change breaks the build here.
 var _ pb.ExecutorServiceClient = (*Client)(nil)

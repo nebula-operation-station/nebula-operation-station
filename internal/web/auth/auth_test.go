@@ -41,6 +41,10 @@ type fakeExec struct {
 	gotPrivileged *pb.CompletePrivilegedSessionRequest
 	privErr       error
 	locked        int
+
+	removed  map[string]bool
+	checks   int
+	checkErr error
 }
 
 func (f *fakeExec) BeginLogin(context.Context, *pb.BeginLoginRequest, ...grpc.CallOption) (*pb.BeginLoginResponse, error) {
@@ -93,6 +97,16 @@ func (f *fakeExec) Lock(context.Context, *pb.LockRequest, ...grpc.CallOption) (*
 	f.locked++
 	f.mu.Unlock()
 	return &pb.LockResponse{}, nil
+}
+
+func (f *fakeExec) CheckCredential(_ context.Context, in *pb.CheckCredentialRequest, _ ...grpc.CallOption) (*pb.CheckCredentialResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.checks++
+	if f.checkErr != nil {
+		return nil, f.checkErr
+	}
+	return &pb.CheckCredentialResponse{Registered: !f.removed[in.GetCredentialId()]}, nil
 }
 
 type clock struct {
@@ -403,5 +417,39 @@ func TestPrivilegedSessionAndLockNeedAWebSession(t *testing.T) {
 	// GET is not allowed on these endpoints.
 	if res := e.do("GET", "/executor/lock", "", c); res.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("GET lock: %d", res.StatusCode)
+	}
+}
+
+func TestRemovedCredentialEndsTheWebSession(t *testing.T) {
+	e := newEnv(t)
+	c := e.login()
+	if res := e.do("GET", "/dashboard", "", c); res.StatusCode != 200 {
+		t.Fatalf("dashboard: %d", res.StatusCode)
+	}
+	// Checked once, then cached for the interval.
+	e.do("GET", "/dashboard", "", c)
+	if e.exec.checks != 1 {
+		t.Fatalf("%d credential checks, want 1", e.exec.checks)
+	}
+
+	// Executor unreachable: the session stays.
+	e.exec.mu.Lock()
+	e.exec.checkErr = status.Error(codes.Unavailable, "down")
+	e.exec.mu.Unlock()
+	c2 := e.login()
+	if res := e.do("GET", "/dashboard", "", c2); res.StatusCode != 200 {
+		t.Fatalf("session dropped while the executor is down: %d", res.StatusCode)
+	}
+
+	// The credential is removed on the executor: the next check ends both sessions.
+	e.exec.mu.Lock()
+	e.exec.checkErr = nil
+	e.exec.removed = map[string]bool{"Y3JlZA": true}
+	e.exec.mu.Unlock()
+	if res := e.do("GET", "/dashboard", "", c2); res.StatusCode != http.StatusSeeOther {
+		t.Fatalf("session of a removed credential still valid: %d", res.StatusCode)
+	}
+	if res := e.do("GET", "/dashboard", "", c2); res.StatusCode != http.StatusSeeOther {
+		t.Fatal("revoked session came back")
 	}
 }

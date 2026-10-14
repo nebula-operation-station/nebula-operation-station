@@ -68,6 +68,10 @@ func (d direct) GetStatus(ctx context.Context, in *pb.GetStatusRequest, _ ...grp
 	return d.s.GetStatus(ctx, in)
 }
 
+func (d direct) CheckCredential(ctx context.Context, in *pb.CheckCredentialRequest, _ ...grpc.CallOption) (*pb.CheckCredentialResponse, error) {
+	return d.s.CheckCredential(ctx, in)
+}
+
 func must(err error) {
 	if err != nil {
 		panic(err)

@@ -56,6 +56,7 @@ type Executor interface {
 	BeginPrivilegedSession(ctx context.Context, in *pb.BeginPrivilegedSessionRequest, opts ...grpc.CallOption) (*pb.BeginPrivilegedSessionResponse, error)
 	CompletePrivilegedSession(ctx context.Context, in *pb.CompletePrivilegedSessionRequest, opts ...grpc.CallOption) (*pb.CompletePrivilegedSessionResponse, error)
 	Lock(ctx context.Context, in *pb.LockRequest, opts ...grpc.CallOption) (*pb.LockResponse, error)
+	CheckCredential(ctx context.Context, in *pb.CheckCredentialRequest, opts ...grpc.CallOption) (*pb.CheckCredentialResponse, error)
 }
 
 // Options configure the Handler.
@@ -70,6 +71,7 @@ type Handler struct {
 	exec     Executor
 	sessions *Store
 	log      *slog.Logger
+	checks   credentialChecks
 }
 
 // New returns a Handler. Executor and Sessions are required.
@@ -137,6 +139,16 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 			if !errors.Is(err, ErrNoSession) {
 				h.log.Error("session lookup", "error", err)
 			}
+			clearCookie(w)
+			h.unauthenticated(w, r)
+			return
+		}
+		if !h.credentialStillRegistered(r.Context(), c.Value, sess) {
+			if err := h.sessions.Delete(r.Context(), c.Value); err != nil {
+				h.log.Error("delete revoked session", "error", err)
+			}
+			h.log.Info("audit", "kind", "web_session_revoked", "user", sess.UserName, "credential", sess.CredentialID,
+				"reason", "credential no longer registered")
 			clearCookie(w)
 			h.unauthenticated(w, r)
 			return

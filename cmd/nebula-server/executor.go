@@ -124,3 +124,10 @@ func (l *lazyExecutor) Lock(ctx context.Context, in *pb.LockRequest, opts ...grp
 	}
 	return nil, errNotConnected
 }
+
+func (l *lazyExecutor) CheckCredential(ctx context.Context, in *pb.CheckCredentialRequest, opts ...grpc.CallOption) (*pb.CheckCredentialResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.CheckCredential(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}

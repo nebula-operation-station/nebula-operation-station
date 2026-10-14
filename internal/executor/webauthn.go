@@ -181,6 +181,15 @@ func (s *Service) FinishLogin(ctx context.Context, req *pb.FinishLoginRequest) (
 	return resp, nil
 }
 
+// CheckCredential reports whether a credential is still registered (M2-6).
+func (s *Service) CheckCredential(_ context.Context, req *pb.CheckCredentialRequest) (*pb.CheckCredentialResponse, error) {
+	id, err := base64.RawURLEncoding.DecodeString(req.GetCredentialId())
+	if err != nil || len(id) == 0 || len(id) > 1023 {
+		return nil, status.Error(codes.InvalidArgument, "credential_id must be base64url")
+	}
+	return &pb.CheckCredentialResponse{Registered: s.reg.HasCredential(id)}, nil
+}
+
 func regStatus(err error) error {
 	var c codes.Code
 	switch webauthnreg.CodeOf(err) {
