@@ -205,9 +205,10 @@ and Restart/Start/Stop/Reload take a unit name such as `nginx.service`.
 
 **Docker:** List containers shows every container with image, state,
 health, published ports and its Compose project, and says when a host has
-no Docker. It reads through the `docker` group if the SSH user is in it,
-otherwise through `sudo -n`; both are root on the host. Nothing is
-started, stopped or updated.
+no Docker. Container logs takes a container name or ID and shows its
+state and last 100 log lines. Both read through the `docker` group if the
+SSH user is in it, otherwise through `sudo -n`; both are root on the host.
+Nothing is started, stopped or updated.
 
 ## 8. Notifications
 

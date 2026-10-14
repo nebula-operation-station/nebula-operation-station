@@ -108,7 +108,9 @@ type execHostView struct {
 	Units   []osdebian.Unit
 	Service *osdebian.ServiceStatus
 	// Docker is the parsed docker.list result.
-	Docker                      *dockerView
+	Docker *dockerView
+	// DockerLogs is the parsed docker.logs result.
+	DockerLogs                  *dockerhost.Logs
 	Result, Log                 string
 	ResultCut, LogCut, LogTrunc bool
 	OK                          bool
@@ -268,6 +270,11 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 		if e.ActionID == "docker.list" && len(x.Result) > 0 {
 			if l, err := dockerhost.ParseList(x.Result); err == nil {
 				hv.Docker = &dockerView{List: l, Summary: l.Summary()}
+			}
+		}
+		if e.ActionID == "docker.logs" && len(x.Result) > 0 {
+			if l, err := dockerhost.ParseLogs(x.Result); err == nil {
+				hv.DockerLogs = &l
 			}
 		}
 		if e.ActionID == "package.list_updates" && x.Class == "success" {
