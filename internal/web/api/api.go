@@ -328,9 +328,14 @@ func (h *Handler) getOperation(ctx context.Context, w http.ResponseWriter, id st
 	}
 	v := opJSON{opSummaryJSON: opSummaryJSON{ID: e.ID, Action: e.ActionID, Risk: e.Risk, State: e.State, CreatedBy: e.CreatedBy,
 		CreatedAt: rfc3339(e.CreatedAt), Hosts: len(e.Hosts)},
-		Version: e.ModuleVersion, Detail: e.Detail, FinishedAt: rfc3339(e.FinishedAt), HostsList: []opHostJSON{}}
-	if e.Params != "{}" {
-		v.Params = e.Params
+		Version: e.ModuleVersion, FinishedAt: rfc3339(e.FinishedAt), HostsList: []opHostJSON{}}
+	// Parameters and the operation's detail can carry operator input or
+	// executor text: like host output, only with execution_logs.read.
+	if logs {
+		v.Detail = e.Detail
+		if e.Params != "{}" {
+			v.Params = e.Params
+		}
 	}
 	for _, x := range e.Hosts {
 		hv := opHostJSON{Host: x.HostID, State: x.State, Class: x.Class, StartedAt: rfc3339(x.StartedAt), FinishedAt: rfc3339(x.FinishedAt)}

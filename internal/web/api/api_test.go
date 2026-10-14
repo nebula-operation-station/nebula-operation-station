@@ -28,7 +28,7 @@ func (fakeOps) Get(_ context.Context, id string) (executions.Execution, error) {
 		return executions.Execution{}, executions.ErrNotFound
 	}
 	return executions.Execution{ID: opID, ActionID: "core.facts", ModuleVersion: "1.0.0", Risk: "HIGH", State: "finished",
-		CreatedBy: "axel", CreatedAt: time.Unix(1791960000, 0), Params: "{}",
+		CreatedBy: "axel", CreatedAt: time.Unix(1791960000, 0), Params: `{"unit":"nginx.service"}`, Detail: "failed: op-detail",
 		Hosts: []executions.Host{{HostID: "web", State: "finished", Class: "script_failed", ExitCode: 3, Detail: "exit 3",
 			Result: []byte(`{"secret-ish":"<b>"}`), Log: []byte("host log line\xff")}}}, nil
 }
@@ -134,11 +134,13 @@ func TestAPIOperationsShowHostOutputOnlyWithTheLogsScope(t *testing.T) {
 	h := handler(t)
 	code, body := get(t, h, "GET", "/api/v1/operations/"+opID, opsTok)
 	if code != 200 || strings.Contains(body, "host log line") || strings.Contains(body, "secret-ish") || strings.Contains(body, "exit 3") ||
+		strings.Contains(body, "nginx.service") || strings.Contains(body, "op-detail") ||
 		!strings.Contains(body, `"class":"script_failed"`) || !strings.Contains(body, `"failed":1`) {
 		t.Fatalf("%d %s", code, body)
 	}
 	code, body = get(t, h, "GET", "/api/v1/operations/"+opID, logTok)
-	if code != 200 || !strings.Contains(body, "host log line�") || !strings.Contains(body, `secret-ish`) {
+	if code != 200 || !strings.Contains(body, "host log line�") || !strings.Contains(body, `secret-ish`) ||
+		!strings.Contains(body, "nginx.service") || !strings.Contains(body, "op-detail") {
 		t.Fatalf("%d %s", code, body)
 	}
 	if code, body := get(t, h, "GET", "/api/v1/operations?limit=500", opsTok); code != http.StatusBadRequest {
