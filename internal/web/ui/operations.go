@@ -94,7 +94,9 @@ type execHostView struct {
 	ID, State, Class, Detail, Exit string
 	Facts                          []executions.Fact
 	// Updates is the parsed package.list_updates result.
-	Updates                     *updatesView
+	Updates *updatesView
+	// Install is the parsed package.install_* result.
+	Install                     *osdebian.Install
 	Result, Log                 string
 	ResultCut, LogCut, LogTrunc bool
 	OK                          bool
@@ -224,6 +226,11 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 		}
 		if e.ActionID == "core.facts" && x.Class == "success" {
 			hv.Facts = executions.DecodeFacts(x.Result)
+		}
+		if strings.HasPrefix(e.ActionID, "package.install_") && len(x.Result) > 0 {
+			if in, err := osdebian.ParseInstall(x.Result); err == nil {
+				hv.Install = &in
+			}
 		}
 		if e.ActionID == "package.list_updates" && x.Class == "success" {
 			if u, err := osdebian.ParseUpdates(x.Result); err == nil {

@@ -62,3 +62,20 @@ func TestParseUpdatesRejectsOtherDocuments(t *testing.T) {
 		t.Error("over-long line parsed")
 	}
 }
+
+func TestParseInstall(t *testing.T) {
+	enc := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	in := `{"format":"apt-install-v1","phase":"done","mode":"install_security","apt_exit":0,"packages":"` + enc("openssl\nlibssl3\n<x>\n") +
+		`","dpkg_audit_clean":true,"reboot_required":true,"new_failed_units":"` + enc("nginx.service\nevil\u202eunit\n") + `","docker":"","proxmox":false}`
+	i, err := ParseInstall([]byte(in))
+	if err != nil || len(i.Packages) != 2 || !i.RebootRequired || len(i.NewFailedUnits) != 1 || !i.Warning() {
+		t.Fatalf("%+v %v", i, err)
+	}
+	p, err := ParseInstall([]byte(`{"format":"apt-install-v1","phase":"precheck","reason":"less than 500 MB free on /var"}`))
+	if err != nil || p.Phase != "precheck" || p.Reason != "less than 500 MB free on /var" || p.Warning() {
+		t.Fatalf("%+v %v", p, err)
+	}
+	if _, err := ParseInstall([]byte(`{"format":"apt-install-v1","phase":"other"}`)); err == nil {
+		t.Fatal("unknown phase accepted")
+	}
+}

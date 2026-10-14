@@ -461,9 +461,7 @@ func (s *Service) finishHost(id, actionID, host, class, detail string, exit int,
 		return
 	}
 	s.log.Info("audit", "kind", "execution_host_finished", "execution", id, "host", host, "class", class, "exit", exit)
-	if class == "success" {
-		s.observe(id, actionID, host, result)
-	}
+	s.observe(id, actionID, host, class, result)
 }
 
 func boolInt(b bool) int {

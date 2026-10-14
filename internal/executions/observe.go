@@ -30,9 +30,19 @@ type HostUpdates struct {
 }
 
 // observe keeps what successful read-only actions report about a host.
-func (s *Service) observe(execID, actionID, host string, result []byte) {
+func (s *Service) observe(execID, actionID, host, class string, result []byte) {
 	switch actionID {
+	case "package.install_security", "package.install_all":
+		// Packages may have changed: the stored update list is stale.
+		if class != "precheck_failed" && class != "not_executed" {
+			if _, err := s.db.ExecContext(s.ctx, `DELETE FROM host_updates WHERE host_id = ?`, host); err != nil {
+				s.log.Error("forget update list", "host", host, "error", err.Error())
+			}
+		}
 	case "package.list_updates":
+		if class != "success" {
+			return
+		}
 		u, err := osdebian.ParseUpdates(result)
 		if err != nil {
 			s.log.Warn("unreadable update list", "execution", execID, "host", host, "error", err.Error())

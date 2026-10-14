@@ -301,19 +301,29 @@ func Remove(ctx context.Context, client *ssh.Client, cfg JobConfig, executionID 
 	return err
 }
 
-// classify sets Class and Detail from the exit code and the result.
+// classify sets Class and Detail from the exit code and the result. A
+// result that is not one bounded UTF-8 JSON document is dropped.
 func classify(r *Result, resultTooLarge bool) {
+	empty := len(bytes.TrimSpace(r.Result)) == 0
+	validResult := !resultTooLarge && !empty && utf8.Valid(r.Result) && oneJSONDocument(r.Result)
+	if !validResult {
+		r.Result = nil
+	}
 	switch {
 	case r.ExitCode == 129 || r.ExitCode == 143 || r.ExitCode == 137:
 		r.Class, r.Detail = ClassScriptInterrupted, fmt.Sprintf("interrupted (exit %d)", r.ExitCode)
+	case r.ExitCode == ExitPrecheckFailed:
+		r.Class, r.Detail = ClassPrecheckFailed, "the action's precheck failed"
+	case r.ExitCode == ExitPostcheckFailed:
+		r.Class, r.Detail = ClassPostcheckFailed, "the action's postcheck failed"
 	case r.ExitCode != 0:
 		r.Class, r.Detail = ClassScriptFailed, fmt.Sprintf("exit status %d", r.ExitCode)
 	case resultTooLarge:
-		r.Class, r.Detail, r.Result = ClassScriptFailed, "the result exceeds 1 MiB", nil
-	case len(bytes.TrimSpace(r.Result)) == 0:
+		r.Class, r.Detail = ClassScriptFailed, "the result exceeds 1 MiB"
+	case empty:
 		r.Class, r.Detail = ClassResultMissing, "the script printed no result"
-	case !utf8.Valid(r.Result) || !oneJSONDocument(r.Result):
-		r.Class, r.Detail, r.Result = ClassScriptFailed, "stdout is not exactly one JSON document", nil
+	case !validResult:
+		r.Class, r.Detail = ClassScriptFailed, "stdout is not exactly one JSON document"
 	default:
 		r.Class = ClassSuccess
 	}

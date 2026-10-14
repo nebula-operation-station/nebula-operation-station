@@ -207,3 +207,22 @@ func TestUpdatesAreShownAsText(t *testing.T) {
 		t.Fatalf("inventory: %s", inv)
 	}
 }
+
+func TestInstallResultsAreShown(t *testing.T) {
+	enc := base64.StdEncoding.EncodeToString
+	res := `{"format":"apt-install-v1","phase":"done","mode":"install_security","apt_exit":0,"packages":"` + enc([]byte("openssl\n")) +
+		`","dpkg_audit_clean":true,"reboot_required":true,"new_failed_units":"` + enc([]byte("nginx<b>.service\n")) + `","docker":""}`
+	pre := `{"format":"apt-install-v1","phase":"precheck","reason":"less than 500 MB free on /var"}`
+	f := &fakeOps{exec: executions.Execution{ID: opID, ActionID: "package.install_security", State: "finished", CreatedAt: time.Unix(1791960000, 0),
+		Hosts: []executions.Host{
+			{HostID: "a", State: "finished", Class: "success", Result: []byte(res)},
+			{HostID: "b", State: "finished", Class: "precheck_failed", Result: []byte(pre)},
+		}}}
+	page := getBody(t, opsHandler(t, f, nil), "/operations/"+opID)
+	for _, want := range []string{"1 packages", "reboot required", "WARNING: units failed since the update: nginx&lt;b&gt;.service",
+		"Precheck failed: less than 500 MB free on /var. Nothing was installed."} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page misses %q", want)
+		}
+	}
+}

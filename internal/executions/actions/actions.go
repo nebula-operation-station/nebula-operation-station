@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
+	"strings"
 	"time"
 
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
@@ -45,6 +46,14 @@ var packageListUpdates []byte
 //go:embed scripts/package_refresh.sh
 var packageRefresh []byte
 
+//go:embed scripts/package_install.sh.tmpl
+var packageInstallTemplate string
+
+// installScript renders the install template for one mode.
+func installScript(mode string) []byte {
+	return []byte(strings.ReplaceAll(packageInstallTemplate, "@MODE@", mode))
+}
+
 // Builtin lists the built-in actions in display order.
 var Builtin = []Action{
 	{
@@ -61,6 +70,16 @@ var Builtin = []Action{
 		ID: "package.refresh", Version: "1.0.0", Title: "Refresh package lists",
 		Description: "Runs apt-get update (with sudo). Changes only the package lists; waits up to 8 minutes for the apt lock.",
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 10 * time.Minute, Script: packageRefresh,
+	},
+	{
+		ID: "package.install_security", Version: "1.0.0", Title: "Install security updates",
+		Description: "Installs the packages whose new version comes from the security archive (apt-get install --only-upgrade), as a durable job. Prechecks: free space, dpkg state, writable disk; postchecks: dpkg state, reboot required, newly failed units. No reboot.",
+		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Durable: true, Timeout: time.Hour, Script: installScript("install_security"),
+	},
+	{
+		ID: "package.install_all", Version: "1.0.0", Title: "Install all updates",
+		Description: "apt-get upgrade (full-upgrade on Proxmox VE), as a durable job, with the same pre- and postchecks. No reboot.",
+		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Durable: true, Timeout: 2 * time.Hour, Script: installScript("install_all"),
 	},
 }
 

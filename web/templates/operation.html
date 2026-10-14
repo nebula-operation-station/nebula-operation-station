@@ -46,7 +46,7 @@
   </table>
 </section>
 {{range .Hosts}}
-{{if or .Facts .Updates .Result .Log}}
+{{if or .Facts .Updates .Install .Result .Log}}
 <section class="panel" aria-label="Output of {{.ID}}">
   <h2>{{.ID}}</h2>
   {{if .Facts}}
@@ -55,6 +55,15 @@
       {{range .Facts}}<tr><th>{{.Name}}</th><td>{{.Value}}</td></tr>{{end}}
     </tbody>
   </table>
+  {{end}}
+  {{with .Install}}
+  {{if eq .Phase "precheck"}}
+  <p class="status status--error">Precheck failed: {{.Reason}}. Nothing was installed.</p>
+  {{else}}
+  <p class="status">apt exit status {{.AptExit}}; {{len .Packages}} packages{{if .RebootRequired}}; <span class="status--error">reboot required</span>{{end}}{{if not .AuditClean}}; <span class="status--error">dpkg reports unfinished packages</span>{{end}}</p>
+  {{if .NewFailedUnits}}<p class="status status--error">WARNING: units failed since the update: {{range $i, $u := .NewFailedUnits}}{{if $i}}, {{end}}{{$u}}{{end}}</p>{{end}}
+  {{if .Packages}}<p class="hint">{{range $i, $p := .Packages}}{{if $i}}, {{end}}{{$p}}{{end}}</p>{{end}}
+  {{end}}
   {{end}}
   {{with .Updates}}
   <p class="status">{{.Total}} updates, {{.Security}} security, {{.Kernel}} kernel{{if .Reboot}}, <span class="status--error">reboot required</span>{{if .RebootPackages}} ({{.RebootPackages}}){{end}}{{end}}{{if .ListsUpdated}}. Package lists from {{.ListsUpdated}}.{{end}}</p>
