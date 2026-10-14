@@ -312,6 +312,8 @@ func TestH05_OnlyTheAdminEnrolls(t *testing.T) {
 	wantCode(t, err, codes.PermissionDenied, "")
 	_, err = h.client.TestConnection(h.ctx(), &pb.TestConnectionRequest{HostId: "dockerflux", Endpoints: []string{d.endpoint()}})
 	wantCode(t, err, codes.PermissionDenied, "")
+	_, err = h.client.GetSSHPublicKey(h.ctx(), &pb.GetSSHPublicKeyRequest{CredentialRef: credRef})
+	wantCode(t, err, codes.PermissionDenied, "")
 	if d.conns.Load() != 0 {
 		t.Fatal("server role made the executor connect")
 	}
@@ -400,4 +402,23 @@ func TestH05_TargetFingerprintMustMatchThePin(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.Close()
+}
+
+// The enrollment helper gets Nebula's public key from the executor; the
+// private key never leaves it and a locked keyring yields nothing.
+func TestH05_PublicKeyForEnrollment(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	_, err := h.client.GetSSHPublicKey(h.ctx(), &pb.GetSSHPublicKeyRequest{CredentialRef: credRef})
+	wantCode(t, err, codes.FailedPrecondition, "locked")
+	h.unlock()
+	r, err := h.client.GetSSHPublicKey(h.ctx(), &pb.GetSSHPublicKeyRequest{CredentialRef: credRef})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(h.userKey)))
+	if r.GetAuthorizedKey() != want || r.GetFingerprint() != ssh.FingerprintSHA256(h.userKey) {
+		t.Fatalf("got %q %q", r.GetAuthorizedKey(), r.GetFingerprint())
+	}
+	_, err = h.client.GetSSHPublicKey(h.ctx(), &pb.GetSSHPublicKeyRequest{CredentialRef: "nope"})
+	wantCode(t, err, codes.NotFound, "")
 }

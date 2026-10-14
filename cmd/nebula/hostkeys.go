@@ -22,7 +22,8 @@ import (
 // SSH host key enrollment (H05). Pins are made here, on the executor host,
 // after the admin compared the fingerprint, never from the web UI.
 
-const hostKeysUsage = `usage: nebula host probe ENDPOINT...
+const hostKeysUsage = `usage: nebula host enroll-script --from ADDR[,ADDR...] [--user nebula] [--key nebula-default] [--no-sudo]
+       nebula host probe ENDPOINT...
        nebula host pin [--user nebula] [--key nebula-default] [--known-hosts FILE] HOST ENDPOINT...
        nebula host unpin HOST
        nebula host keys

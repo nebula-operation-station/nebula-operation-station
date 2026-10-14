@@ -50,6 +50,8 @@ commands:
                       trust a script for one action; LEVEL becomes its minimum risk
   artifact untrust --action ID --version X.Y.Z SHA256
   artifact list       list trusted artifacts (anything else needs at least HIGH)
+  host enroll-script --from ADDR[,ADDR] [--user nebula] [--key REF] [--no-sudo]
+                      print a script to run on a new host: user, restricted key, sudo
   host probe ENDPOINT...
                       show the SSH host key of endpoints (sends no credential)
   host pin [--user U] [--key REF] [--known-hosts FILE] HOST ENDPOINT...

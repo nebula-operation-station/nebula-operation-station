@@ -54,6 +54,7 @@ const (
 	ExecutorService_PinHostKey_FullMethodName                = "/nebula.executor.v1.ExecutorService/PinHostKey"
 	ExecutorService_UnpinHostKey_FullMethodName              = "/nebula.executor.v1.ExecutorService/UnpinHostKey"
 	ExecutorService_ListHostKeys_FullMethodName              = "/nebula.executor.v1.ExecutorService/ListHostKeys"
+	ExecutorService_GetSSHPublicKey_FullMethodName           = "/nebula.executor.v1.ExecutorService/GetSSHPublicKey"
 	ExecutorService_TestConnection_FullMethodName            = "/nebula.executor.v1.ExecutorService/TestConnection"
 )
 
@@ -162,6 +163,9 @@ type ExecutorServiceClient interface {
 	UnpinHostKey(ctx context.Context, in *UnpinHostKeyRequest, opts ...grpc.CallOption) (*UnpinHostKeyResponse, error)
 	// Role: server, admin. Lists the pins; public data only.
 	ListHostKeys(ctx context.Context, in *ListHostKeysRequest, opts ...grpc.CallOption) (*ListHostKeysResponse, error)
+	// Role: admin. Returns the public half of a loaded SSH key (the keyring
+	// must be unlocked), for the enrollment script.
+	GetSSHPublicKey(ctx context.Context, in *GetSSHPublicKeyRequest, opts ...grpc.CallOption) (*GetSSHPublicKeyResponse, error)
 	// Role: admin. Connects to a pinned host with its credential (the keyring
 	// must be unlocked) over the given endpoints, in order, and disconnects.
 	// A host key mismatch blocks the host.
@@ -506,6 +510,16 @@ func (c *executorServiceClient) ListHostKeys(ctx context.Context, in *ListHostKe
 	return out, nil
 }
 
+func (c *executorServiceClient) GetSSHPublicKey(ctx context.Context, in *GetSSHPublicKeyRequest, opts ...grpc.CallOption) (*GetSSHPublicKeyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetSSHPublicKeyResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_GetSSHPublicKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *executorServiceClient) TestConnection(ctx context.Context, in *TestConnectionRequest, opts ...grpc.CallOption) (*TestConnectionResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(TestConnectionResponse)
@@ -621,6 +635,9 @@ type ExecutorServiceServer interface {
 	UnpinHostKey(context.Context, *UnpinHostKeyRequest) (*UnpinHostKeyResponse, error)
 	// Role: server, admin. Lists the pins; public data only.
 	ListHostKeys(context.Context, *ListHostKeysRequest) (*ListHostKeysResponse, error)
+	// Role: admin. Returns the public half of a loaded SSH key (the keyring
+	// must be unlocked), for the enrollment script.
+	GetSSHPublicKey(context.Context, *GetSSHPublicKeyRequest) (*GetSSHPublicKeyResponse, error)
 	// Role: admin. Connects to a pinned host with its credential (the keyring
 	// must be unlocked) over the given endpoints, in order, and disconnects.
 	// A host key mismatch blocks the host.
@@ -733,6 +750,9 @@ func (UnimplementedExecutorServiceServer) UnpinHostKey(context.Context, *UnpinHo
 }
 func (UnimplementedExecutorServiceServer) ListHostKeys(context.Context, *ListHostKeysRequest) (*ListHostKeysResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListHostKeys not implemented")
+}
+func (UnimplementedExecutorServiceServer) GetSSHPublicKey(context.Context, *GetSSHPublicKeyRequest) (*GetSSHPublicKeyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetSSHPublicKey not implemented")
 }
 func (UnimplementedExecutorServiceServer) TestConnection(context.Context, *TestConnectionRequest) (*TestConnectionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method TestConnection not implemented")
@@ -1352,6 +1372,24 @@ func _ExecutorService_ListHostKeys_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_GetSSHPublicKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSSHPublicKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).GetSSHPublicKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_GetSSHPublicKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).GetSSHPublicKey(ctx, req.(*GetSSHPublicKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ExecutorService_TestConnection_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(TestConnectionRequest)
 	if err := dec(in); err != nil {
@@ -1508,6 +1546,10 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListHostKeys",
 			Handler:    _ExecutorService_ListHostKeys_Handler,
+		},
+		{
+			MethodName: "GetSSHPublicKey",
+			Handler:    _ExecutorService_GetSSHPublicKey_Handler,
 		},
 		{
 			MethodName: "TestConnection",
