@@ -37,10 +37,13 @@ service ExecutorService {
   // this only authorizes; SSH execution arrives in Milestone 4.
   rpc AuthorizeRun(AuthorizeRunRequest) returns (AuthorizeRunResponse);
 
-  // Role: admin. Decrypts the SSH keys into the in-process keyring.
+  // Role: admin. Decrypts the SSH keys into the in-process keyring and,
+  // once initialized, the vault's master key (spec 06: one passphrase is
+  // tried on both; the scope retries one of them alone).
   rpc Unlock(UnlockRequest) returns (UnlockResponse);
 
-  // Role: server, admin. Wipes the keyring and ends the privileged session.
+  // Role: server, admin. Wipes the keyring and the vault key and ends the
+  // privileged session.
   // Locking is always permitted because it only reduces capability.
   rpc Lock(LockRequest) returns (LockResponse);
 
@@ -174,6 +177,18 @@ service ExecutorService {
   // must be unlocked) over the given endpoints, in order, and disconnects.
   // A host key mismatch blocks the host.
   rpc TestConnection(TestConnectionRequest) returns (TestConnectionResponse);
+
+  // Vault (spec 06): secrets that are not SSH keys. No RPC returns a
+  // secret value; the executor decrypts them only for its own runs.
+  // Role: admin. Creates the vault under a passphrase (at least 32
+  // characters) and leaves it unlocked.
+  rpc InitVault(InitVaultRequest) returns (InitVaultResponse);
+  // Role: admin. Stores a secret as a new version (vault unlocked).
+  rpc SetSecret(SetSecretRequest) returns (SetSecretResponse);
+  // Role: admin. Lists secret IDs and versions, never values.
+  rpc ListSecrets(ListSecretsRequest) returns (ListSecretsResponse);
+  // Role: admin. Deletes a secret (vault unlocked).
+  rpc DeleteSecret(DeleteSecretRequest) returns (DeleteSecretResponse);
 }
 
 enum RiskClass {
@@ -238,6 +253,7 @@ message GetStatusResponse {
   // A TOTP recovery login happened and no new WebAuthn credential has been
   // registered since: no privileged session or browser approval until then.
   bool recovery_pending = 8;
+  VaultState vault_state = 9;
 }
 
 message ProposeExecutionRequest {
@@ -309,12 +325,38 @@ message AuthorizeRunResponse {
   bool authorized = 1;
 }
 
+enum UnlockScope {
+  // SSH keys and, if initialized, the vault.
+  UNLOCK_SCOPE_UNSPECIFIED = 0;
+  UNLOCK_SCOPE_KEYS = 1;
+  UNLOCK_SCOPE_VAULT = 2;
+}
+
+enum VaultState {
+  VAULT_STATE_UNSPECIFIED = 0;
+  VAULT_STATE_NOT_INITIALIZED = 1;
+  VAULT_STATE_LOCKED = 2;
+  VAULT_STATE_UNLOCKED = 3;
+}
+
+// Unlock fails with Unauthenticated only if nothing it tried could be
+// unlocked; otherwise the response says which part needs another
+// passphrase.
 message UnlockRequest {
   bytes passphrase = 1;
+  UnlockScope scope = 2;
 }
 
 message UnlockResponse {
   repeated string loaded_credential_refs = 1;
+  bool keys_unlocked = 2;
+  // Why the SSH keys stayed locked when they were tried (empty otherwise).
+  string keys_error = 3;
+  VaultState vault_state = 4;
+  // The vault was tried with this passphrase and it did not fit.
+  bool vault_wrong_passphrase = 5;
+  // The SSH keys were tried with this passphrase and it did not fit.
+  bool keys_wrong_passphrase = 6;
 }
 
 message LockRequest {}
@@ -681,3 +723,38 @@ message GetSSHPublicKeyResponse {
   string authorized_key = 1;
   string fingerprint = 2;
 }
+
+message InitVaultRequest {
+  bytes passphrase = 1;
+}
+
+message InitVaultResponse {}
+
+message SetSecretRequest {
+  string id = 1;
+  bytes value = 2;
+}
+
+message SetSecretResponse {
+  int64 version = 1;
+}
+
+message ListSecretsRequest {}
+
+message SecretInfo {
+  string id = 1;
+  int64 version = 2;
+  int64 updated_at_unix = 3;
+  string updated_by = 4;
+}
+
+message ListSecretsResponse {
+  repeated SecretInfo secrets = 1;
+  VaultState vault_state = 2;
+}
+
+message DeleteSecretRequest {
+  string id = 1;
+}
+
+message DeleteSecretResponse {}

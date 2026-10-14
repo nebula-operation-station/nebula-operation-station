@@ -405,6 +405,38 @@ func (c *Client) GetSSHPublicKey(ctx context.Context, in *pb.GetSSHPublicKeyRequ
 	return resp, mapError(err)
 }
 
+// InitVault: Creates the vault (admin role only).
+func (c *Client) InitVault(ctx context.Context, in *pb.InitVaultRequest, opts ...grpc.CallOption) (*pb.InitVaultResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.InitVault(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// SetSecret: Stores a vault secret (admin role only).
+func (c *Client) SetSecret(ctx context.Context, in *pb.SetSecretRequest, opts ...grpc.CallOption) (*pb.SetSecretResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.SetSecret(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// ListSecrets: Lists vault secret IDs (admin role only).
+func (c *Client) ListSecrets(ctx context.Context, in *pb.ListSecretsRequest, opts ...grpc.CallOption) (*pb.ListSecretsResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ListSecrets(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// DeleteSecret: Deletes a vault secret (admin role only).
+func (c *Client) DeleteSecret(ctx context.Context, in *pb.DeleteSecretRequest, opts ...grpc.CallOption) (*pb.DeleteSecretResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.DeleteSecret(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
 // Compile-time check: the client must implement the generated interface so
 // that a generated-code change breaks the build here.
 var _ pb.ExecutorServiceClient = (*Client)(nil)

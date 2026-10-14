@@ -39,6 +39,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vault"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnreg"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
 )
@@ -193,6 +194,7 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 	}
 	h.verifier = verifier
 	svc := executor.NewService(auth, keyring.New(keysDir), db, reg, log)
+	svc.SetVaultParams(vault.Params{Time: 1, MemoryKiB: 64, Threads: 1})
 	h.svc = svc
 	policy := peercred.NewPolicy(o.uidRoles, executor.MethodRoles())
 

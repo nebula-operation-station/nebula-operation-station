@@ -56,6 +56,10 @@ const (
 	ExecutorService_ListHostKeys_FullMethodName              = "/nebula.executor.v1.ExecutorService/ListHostKeys"
 	ExecutorService_GetSSHPublicKey_FullMethodName           = "/nebula.executor.v1.ExecutorService/GetSSHPublicKey"
 	ExecutorService_TestConnection_FullMethodName            = "/nebula.executor.v1.ExecutorService/TestConnection"
+	ExecutorService_InitVault_FullMethodName                 = "/nebula.executor.v1.ExecutorService/InitVault"
+	ExecutorService_SetSecret_FullMethodName                 = "/nebula.executor.v1.ExecutorService/SetSecret"
+	ExecutorService_ListSecrets_FullMethodName               = "/nebula.executor.v1.ExecutorService/ListSecrets"
+	ExecutorService_DeleteSecret_FullMethodName              = "/nebula.executor.v1.ExecutorService/DeleteSecret"
 )
 
 // ExecutorServiceClient is the client API for ExecutorService service.
@@ -88,9 +92,12 @@ type ExecutorServiceClient interface {
 	// The executor hashes the artifact and parameters itself. In Milestone 0
 	// this only authorizes; SSH execution arrives in Milestone 4.
 	AuthorizeRun(ctx context.Context, in *AuthorizeRunRequest, opts ...grpc.CallOption) (*AuthorizeRunResponse, error)
-	// Role: admin. Decrypts the SSH keys into the in-process keyring.
+	// Role: admin. Decrypts the SSH keys into the in-process keyring and,
+	// once initialized, the vault's master key (spec 06: one passphrase is
+	// tried on both; the scope retries one of them alone).
 	Unlock(ctx context.Context, in *UnlockRequest, opts ...grpc.CallOption) (*UnlockResponse, error)
-	// Role: server, admin. Wipes the keyring and ends the privileged session.
+	// Role: server, admin. Wipes the keyring and the vault key and ends the
+	// privileged session.
 	// Locking is always permitted because it only reduces capability.
 	Lock(ctx context.Context, in *LockRequest, opts ...grpc.CallOption) (*LockResponse, error)
 	// Role: admin. Lists pending permits with the executor's own view of them,
@@ -170,6 +177,17 @@ type ExecutorServiceClient interface {
 	// must be unlocked) over the given endpoints, in order, and disconnects.
 	// A host key mismatch blocks the host.
 	TestConnection(ctx context.Context, in *TestConnectionRequest, opts ...grpc.CallOption) (*TestConnectionResponse, error)
+	// Vault (spec 06): secrets that are not SSH keys. No RPC returns a
+	// secret value; the executor decrypts them only for its own runs.
+	// Role: admin. Creates the vault under a passphrase (at least 32
+	// characters) and leaves it unlocked.
+	InitVault(ctx context.Context, in *InitVaultRequest, opts ...grpc.CallOption) (*InitVaultResponse, error)
+	// Role: admin. Stores a secret as a new version (vault unlocked).
+	SetSecret(ctx context.Context, in *SetSecretRequest, opts ...grpc.CallOption) (*SetSecretResponse, error)
+	// Role: admin. Lists secret IDs and versions, never values.
+	ListSecrets(ctx context.Context, in *ListSecretsRequest, opts ...grpc.CallOption) (*ListSecretsResponse, error)
+	// Role: admin. Deletes a secret (vault unlocked).
+	DeleteSecret(ctx context.Context, in *DeleteSecretRequest, opts ...grpc.CallOption) (*DeleteSecretResponse, error)
 }
 
 type executorServiceClient struct {
@@ -530,6 +548,46 @@ func (c *executorServiceClient) TestConnection(ctx context.Context, in *TestConn
 	return out, nil
 }
 
+func (c *executorServiceClient) InitVault(ctx context.Context, in *InitVaultRequest, opts ...grpc.CallOption) (*InitVaultResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(InitVaultResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_InitVault_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) SetSecret(ctx context.Context, in *SetSecretRequest, opts ...grpc.CallOption) (*SetSecretResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetSecretResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_SetSecret_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ListSecrets(ctx context.Context, in *ListSecretsRequest, opts ...grpc.CallOption) (*ListSecretsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListSecretsResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ListSecrets_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) DeleteSecret(ctx context.Context, in *DeleteSecretRequest, opts ...grpc.CallOption) (*DeleteSecretResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteSecretResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_DeleteSecret_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExecutorServiceServer is the server API for ExecutorService service.
 // All implementations must embed UnimplementedExecutorServiceServer
 // for forward compatibility.
@@ -560,9 +618,12 @@ type ExecutorServiceServer interface {
 	// The executor hashes the artifact and parameters itself. In Milestone 0
 	// this only authorizes; SSH execution arrives in Milestone 4.
 	AuthorizeRun(context.Context, *AuthorizeRunRequest) (*AuthorizeRunResponse, error)
-	// Role: admin. Decrypts the SSH keys into the in-process keyring.
+	// Role: admin. Decrypts the SSH keys into the in-process keyring and,
+	// once initialized, the vault's master key (spec 06: one passphrase is
+	// tried on both; the scope retries one of them alone).
 	Unlock(context.Context, *UnlockRequest) (*UnlockResponse, error)
-	// Role: server, admin. Wipes the keyring and ends the privileged session.
+	// Role: server, admin. Wipes the keyring and the vault key and ends the
+	// privileged session.
 	// Locking is always permitted because it only reduces capability.
 	Lock(context.Context, *LockRequest) (*LockResponse, error)
 	// Role: admin. Lists pending permits with the executor's own view of them,
@@ -642,6 +703,17 @@ type ExecutorServiceServer interface {
 	// must be unlocked) over the given endpoints, in order, and disconnects.
 	// A host key mismatch blocks the host.
 	TestConnection(context.Context, *TestConnectionRequest) (*TestConnectionResponse, error)
+	// Vault (spec 06): secrets that are not SSH keys. No RPC returns a
+	// secret value; the executor decrypts them only for its own runs.
+	// Role: admin. Creates the vault under a passphrase (at least 32
+	// characters) and leaves it unlocked.
+	InitVault(context.Context, *InitVaultRequest) (*InitVaultResponse, error)
+	// Role: admin. Stores a secret as a new version (vault unlocked).
+	SetSecret(context.Context, *SetSecretRequest) (*SetSecretResponse, error)
+	// Role: admin. Lists secret IDs and versions, never values.
+	ListSecrets(context.Context, *ListSecretsRequest) (*ListSecretsResponse, error)
+	// Role: admin. Deletes a secret (vault unlocked).
+	DeleteSecret(context.Context, *DeleteSecretRequest) (*DeleteSecretResponse, error)
 	mustEmbedUnimplementedExecutorServiceServer()
 }
 
@@ -756,6 +828,18 @@ func (UnimplementedExecutorServiceServer) GetSSHPublicKey(context.Context, *GetS
 }
 func (UnimplementedExecutorServiceServer) TestConnection(context.Context, *TestConnectionRequest) (*TestConnectionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method TestConnection not implemented")
+}
+func (UnimplementedExecutorServiceServer) InitVault(context.Context, *InitVaultRequest) (*InitVaultResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method InitVault not implemented")
+}
+func (UnimplementedExecutorServiceServer) SetSecret(context.Context, *SetSecretRequest) (*SetSecretResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetSecret not implemented")
+}
+func (UnimplementedExecutorServiceServer) ListSecrets(context.Context, *ListSecretsRequest) (*ListSecretsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListSecrets not implemented")
+}
+func (UnimplementedExecutorServiceServer) DeleteSecret(context.Context, *DeleteSecretRequest) (*DeleteSecretResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteSecret not implemented")
 }
 func (UnimplementedExecutorServiceServer) mustEmbedUnimplementedExecutorServiceServer() {}
 func (UnimplementedExecutorServiceServer) testEmbeddedByValue()                         {}
@@ -1408,6 +1492,78 @@ func _ExecutorService_TestConnection_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_InitVault_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InitVaultRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).InitVault(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_InitVault_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).InitVault(ctx, req.(*InitVaultRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_SetSecret_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetSecretRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).SetSecret(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_SetSecret_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).SetSecret(ctx, req.(*SetSecretRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ListSecrets_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSecretsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ListSecrets(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ListSecrets_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ListSecrets(ctx, req.(*ListSecretsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_DeleteSecret_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteSecretRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).DeleteSecret(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_DeleteSecret_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).DeleteSecret(ctx, req.(*DeleteSecretRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ExecutorService_ServiceDesc is the grpc.ServiceDesc for ExecutorService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1554,6 +1710,22 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "TestConnection",
 			Handler:    _ExecutorService_TestConnection_Handler,
+		},
+		{
+			MethodName: "InitVault",
+			Handler:    _ExecutorService_InitVault_Handler,
+		},
+		{
+			MethodName: "SetSecret",
+			Handler:    _ExecutorService_SetSecret_Handler,
+		},
+		{
+			MethodName: "ListSecrets",
+			Handler:    _ExecutorService_ListSecrets_Handler,
+		},
+		{
+			MethodName: "DeleteSecret",
+			Handler:    _ExecutorService_DeleteSecret_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

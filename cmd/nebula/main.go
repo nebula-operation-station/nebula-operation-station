@@ -28,7 +28,6 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"golang.org/x/term"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -42,7 +41,7 @@ const usage = `usage: nebula <command>
 
 commands:
   status              show executor state
-  unlock              decrypt the SSH keys into the executor (asks for the passphrase)
+  unlock              decrypt the SSH keys and the vault (asks for the passphrase)
   lock                wipe keys, end the privileged session, revoke all permits
   pending             list permits waiting for approval
   approve <digest>    approve a pending permit (hardened path); a unique prefix is enough
@@ -74,6 +73,11 @@ commands:
   totp remove         remove TOTP recovery
   totp finish-recovery
                       confirm the key registered after a recovery login (ends the recovery)
+  vault init          create the secret vault (passphrase of at least 32 characters)
+  vault status        show whether the vault exists and is unlocked
+  secret set ID       store a secret (value from the terminal or stdin; never an argument)
+  secret list         list secret IDs and versions (never values)
+  secret rm ID        delete a secret
   version             print version
 
 environment:
@@ -145,6 +149,10 @@ func run(cmd string, args []string) error {
 		return webauthnCmd(ctx, c, args)
 	case "totp":
 		return totpCmd(ctx, c, args)
+	case "vault":
+		return vaultCmd(ctx, c, args, ttyPrompter, os.Stdout)
+	case "secret":
+		return secretCmd(ctx, c, args, func() ([]byte, error) { return readSecretValue(os.Stdin, ttyPrompter) }, os.Stdin, os.Stdout)
 	default:
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(64)
@@ -166,28 +174,12 @@ func status(ctx context.Context, c pb.ExecutorServiceClient) error {
 	fmt.Println()
 	fmt.Printf("mode:               %s\n", map[bool]string{true: "hardened", false: "standard"}[s.GetHardenedMode()])
 	fmt.Printf("permits:            %d pending, %d approved\n", s.GetPendingPermits(), s.GetApprovedPermits())
+	fmt.Printf("vault:              %s\n", vaultStateText(s.GetVaultState()))
 	return nil
 }
 
 func unlock(ctx context.Context, c pb.ExecutorServiceClient) error {
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	if err != nil {
-		return fmt.Errorf("unlock needs a terminal: %w", err)
-	}
-	defer tty.Close()
-	fmt.Fprint(tty, "Executor passphrase: ")
-	pass, err := term.ReadPassword(int(tty.Fd()))
-	fmt.Fprintln(tty)
-	if err != nil {
-		return err
-	}
-	resp, err := c.Unlock(ctx, &pb.UnlockRequest{Passphrase: pass})
-	clear(pass)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("unlocked: %s\n", strings.Join(resp.GetLoadedCredentialRefs(), ", "))
-	return nil
+	return unlockWith(ctx, c, ttyPrompter, os.Stdout)
 }
 
 func pending(ctx context.Context, c pb.ExecutorServiceClient) error {
