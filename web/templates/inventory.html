@@ -1,5 +1,44 @@
 {{define "content"}}
 <h1>Inventory</h1>
+{{if .InventoryEditable}}
+<section class="panel" aria-label="Add host">
+  <h2>Add host</h2>
+  <form id="host-form" class="form">
+    <label>ID
+      <input name="id" id="host-id" required pattern="[a-z0-9][a-z0-9._-]{0,62}" autocomplete="off">
+    </label>
+    <label>Display name
+      <input name="display_name" id="host-display-name" maxlength="128" autocomplete="off">
+    </label>
+    <label>Environment
+      <select name="environment" id="host-environment">
+        <option value="DEV">DEV</option>
+        <option value="QA">QA</option>
+        <option value="PROD">PROD</option>
+      </select>
+    </label>
+    <label>Criticality
+      <select name="criticality" id="host-criticality">
+        <option value="LOW">LOW</option>
+        <option value="MEDIUM">MEDIUM</option>
+        <option value="HIGH">HIGH</option>
+        <option value="CRITICAL">CRITICAL</option>
+      </select>
+    </label>
+    <label>Endpoints (one per line: host, host:port or [v6]:port)
+      <textarea name="endpoints" id="host-endpoints" rows="3"></textarea>
+    </label>
+    <label>Tags (one key=value per line)
+      <textarea name="tags" id="host-tags" rows="3"></textarea>
+    </label>
+    <div class="actions">
+      <button type="submit" id="host-submit" class="button">Add host</button>
+      <button type="button" id="host-cancel" class="button" hidden>Cancel</button>
+    </div>
+    <p id="message" class="message" role="status" aria-live="polite"></p>
+  </form>
+</section>
+{{end}}
 <section class="panel" aria-label="Managed hosts">
   {{if .InventoryUnavailable}}
   <p class="status status--error">Inventory unavailable</p>
@@ -13,17 +52,27 @@
         <th>Criticality</th>
         <th>Endpoints</th>
         <th>SSH key</th>
+        {{if .InventoryEditable}}<th>Actions</th>{{end}}
       </tr>
     </thead>
     <tbody>
       {{range .Inventory}}
-      <tr>
+      <tr data-id="{{.ID}}" data-display-name="{{.DisplayName}}" data-environment="{{.Environment}}"
+          data-criticality="{{.Criticality}}" data-endpoints="{{.EndpointsJSON}}" data-tags="{{.TagsJSON}}">
         <td>{{.ID}}</td>
         <td>{{.DisplayName}}</td>
         <td>{{.Environment}}</td>
         <td>{{.Criticality}}</td>
         <td>{{range $i, $e := .Endpoints}}{{if $i}}, {{end}}{{$e}}{{end}}</td>
         <td>{{.KeyStatus}}</td>
+        {{if $.InventoryEditable}}
+        <td class="inventory__actions">
+          <button type="button" class="button inventory__edit">Edit</button>
+          <input type="text" class="inventory__delete-confirm" placeholder="{{.ID}}"
+                 aria-label="Type {{.ID}} to confirm deletion" autocomplete="off">
+          <button type="button" class="button inventory__delete">Delete</button>
+        </td>
+        {{end}}
       </tr>
       {{end}}
     </tbody>

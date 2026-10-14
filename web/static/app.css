@@ -111,3 +111,14 @@ body {
 .inventory th {
   background: #f0f2f8;
 }
+
+.inventory__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: nowrap;
+}
+
+.inventory__delete-confirm {
+  min-width: 8rem;
+}
