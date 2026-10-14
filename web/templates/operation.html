@@ -46,7 +46,7 @@
   </table>
 </section>
 {{range .Hosts}}
-{{if or .Facts .Updates .Install .Units .Service .Result .Log}}
+{{if or .Facts .Updates .Install .Units .Service .Docker .Result .Log}}
 <section class="panel" aria-label="Output of {{.ID}}">
   <h2>{{.ID}}</h2>
   {{if .Facts}}
@@ -61,6 +61,19 @@
     <thead><tr><th>Unit</th><th>Load</th><th>Active</th><th>Sub</th><th>Description</th></tr></thead>
     <tbody>{{range .Units}}<tr><td>{{.Name}}</td><td>{{.Load}}</td><td>{{if eq .Active "failed"}}<span class="status--error">failed</span>{{else}}{{.Active}}{{end}}</td><td>{{.Sub}}</td><td>{{.Description}}</td></tr>{{end}}</tbody>
   </table>
+  {{end}}
+  {{with .Docker}}
+  {{if eq .Phase "precheck"}}<p class="status status--error">Precheck failed: {{.Reason}}</p>
+  {{else if not .Present}}<p class="status">Docker is not installed on this host.</p>
+  {{else}}
+  <p class="status">Docker {{.Version}}: {{.Summary.Total}} containers, {{.Summary.Running}} running, {{.Summary.Stopped}} stopped{{if .Summary.Unhealthy}}, <span class="status--error">{{.Summary.Unhealthy}} unhealthy</span>{{end}}{{if .Summary.Projects}}; Compose projects: {{range $i, $p := .Summary.Projects}}{{if $i}}, {{end}}{{$p}}{{end}}{{end}}</p>
+  {{if .Containers}}
+  <table class="inventory">
+    <thead><tr><th>Container</th><th>Compose</th><th>Image</th><th>State</th><th>Health</th><th>Status</th><th>Ports</th></tr></thead>
+    <tbody>{{range .Containers}}<tr><td title="{{.ID}}">{{.Name}}</td><td>{{if .Project}}<span title="{{.Dir}}">{{.Project}}{{if .Service}} / {{.Service}}{{end}}</span>{{end}}</td><td>{{.Image}}</td><td>{{if .Running}}{{.State}}{{else if or (eq .State "dead") (eq .State "restarting")}}<span class="status--error">{{.State}}</span>{{else}}{{.State}}{{end}}</td><td>{{if eq .Health "unhealthy"}}<span class="status--error">unhealthy</span>{{else}}{{.Health}}{{end}}</td><td>{{.Status}}</td><td>{{.Ports}}</td></tr>{{end}}</tbody>
+  </table>
+  {{end}}
+  {{end}}
   {{end}}
   {{with .Service}}
   {{if eq .Phase "precheck"}}<p class="status status--error">Precheck failed: {{.Reason}}</p>{{end}}

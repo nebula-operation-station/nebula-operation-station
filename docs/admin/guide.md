@@ -8,7 +8,8 @@ What 0.1 covers: inventory (manual, CSV import), SSH enrollment with host
 key pinning, update checks, installing security or all updates (durable
 jobs with pre- and postchecks), reboots that wait for the host, service
 status and restart, Ops State per host, notifications (webhook, ntfy,
-Telegram). Not in 0.1: stages and canaries, runbooks and modules, Docker,
+Telegram), listing Docker containers. Not in 0.1: stages and canaries,
+runbooks and modules, Docker actions beyond listing,
 IPAM, scheduled checks, packages (APT/containers).
 
 ## 1. Before you start
@@ -201,6 +202,12 @@ up the approval for that host: plan the operation again.
 
 **Services:** List services, Service status (unit plus last journal lines)
 and Restart/Start/Stop/Reload take a unit name such as `nginx.service`.
+
+**Docker:** List containers shows every container with image, state,
+health, published ports and its Compose project, and says when a host has
+no Docker. It reads through the `docker` group if the SSH user is in it,
+otherwise through `sudo -n`; both are root on the host. Nothing is
+started, stopped or updated.
 
 ## 8. Notifications
 

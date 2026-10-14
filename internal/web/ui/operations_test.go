@@ -258,3 +258,25 @@ func TestServiceResultsAreShown(t *testing.T) {
 		}
 	}
 }
+
+func TestDockerResultsAreShown(t *testing.T) {
+	enc := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	id := strings.Repeat("ab", 32)
+	list := `{"format":"docker-ps-v1","phase":"done","present":true,"version":"` + enc("27.3.1") + `","containers":"` +
+		enc(id+"\tweb\tnginx:<b>1</b>\trunning\tUp 2 hours (unhealthy)\t0.0.0.0:80->80/tcp\tsite\tweb\t/srv/site\n"+
+			id+"\tdb\tpostgres:16\texited\tExited (0) 1 hour ago\t\t\t\t\n") + `"}`
+	f := &fakeOps{exec: executions.Execution{ID: opID, ActionID: "docker.list", State: "finished", CreatedAt: time.Unix(1791960000, 0),
+		Hosts: []executions.Host{
+			{HostID: "a", State: "finished", Class: "success", Result: []byte(list)},
+			{HostID: "b", State: "finished", Class: "success", Result: []byte(`{"format":"docker-ps-v1","phase":"done","present":false}`)},
+			{HostID: "c", State: "finished", Class: "precheck_failed", Result: []byte(`{"format":"docker-ps-v1","phase":"precheck","reason":"docker ps failed"}`)},
+		}}}
+	page := getBody(t, opsHandler(t, f, nil), "/operations/"+opID)
+	for _, want := range []string{"Docker 27.3.1: 2 containers, 1 running, 1 stopped", `<span class="status--error">1 unhealthy</span>`,
+		"Compose projects: site", `<span title="/srv/site">site / web</span>`, "nginx:&lt;b&gt;1&lt;/b&gt;", "0.0.0.0:80-&gt;80/tcp",
+		"Docker is not installed on this host.", "Precheck failed: docker ps failed"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page misses %q", want)
+		}
+	}
+}
