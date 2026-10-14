@@ -90,3 +90,32 @@ func TestM2_OnlyTheServerRoleLogsIn(t *testing.T) {
 	_, err := h.client.BeginLogin(h.ctx(), &pb.BeginLoginRequest{})
 	wantCode(t, err, codes.PermissionDenied, "")
 }
+
+// The privileged session challenge comes with request options for the
+// browser; the session still opens only with a user-verified assertion.
+func TestM2_PrivilegedSessionFromTheBrowser(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	b, err := h.client.BeginPrivilegedSession(h.ctx(), &pb.BeginPrivilegedSessionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts, err := virtualwebauthn.ParseAssertionOptions(string(b.GetRequestOptionsJson()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(opts.Challenge) != string(b.GetChallenge()) || len(opts.AllowCredentials) != 1 {
+		t.Fatalf("options %+v", opts)
+	}
+	noUV := *h.id
+	noUV.dev.Options.UserNotVerified = true
+	as := virtualwebauthn.CreateAssertionResponse(h.rp, noUV.dev, noUV.cred, *opts)
+	if _, err := h.client.CompletePrivilegedSession(h.ctx(), &pb.CompletePrivilegedSessionRequest{AssertionJson: []byte(as)}); err == nil {
+		t.Fatal("privileged session opened without user verification")
+	}
+	b, _ = h.client.BeginPrivilegedSession(h.ctx(), &pb.BeginPrivilegedSessionRequest{})
+	opts, _ = virtualwebauthn.ParseAssertionOptions(string(b.GetRequestOptionsJson()))
+	as = virtualwebauthn.CreateAssertionResponse(h.rp, h.id.dev, h.id.cred, *opts)
+	if _, err := h.client.CompletePrivilegedSession(h.ctx(), &pb.CompletePrivilegedSessionRequest{AssertionJson: []byte(as)}); err != nil {
+		t.Fatal(err)
+	}
+}

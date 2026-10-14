@@ -10,6 +10,7 @@ import (
 	"errors"
 	"log/slog"
 	"strconv"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -150,7 +151,11 @@ func (s *Service) BeginPrivilegedSession(_ context.Context, _ *pb.BeginPrivilege
 	if err != nil {
 		return nil, status.Error(codes.Internal, "cannot create challenge")
 	}
-	return &pb.BeginPrivilegedSessionResponse{Challenge: ch, ChallengeExpiryUnix: exp.Unix()}, nil
+	opts, err := s.reg.RequestOptions(ch, time.Until(exp))
+	if err != nil {
+		return nil, status.Error(codes.Internal, "cannot build request options")
+	}
+	return &pb.BeginPrivilegedSessionResponse{Challenge: ch, ChallengeExpiryUnix: exp.Unix(), RequestOptionsJson: opts}, nil
 }
 
 func (s *Service) CompletePrivilegedSession(_ context.Context, req *pb.CompletePrivilegedSessionRequest) (*pb.CompletePrivilegedSessionResponse, error) {

@@ -8,6 +8,13 @@
   {{else}}
   <p class="status status--error">Executor unavailable</p>
   {{end}}
+  <div class="actions">
+    <button type="button" id="session-open" class="button">Open privileged session</button>
+    <button type="button" id="executor-lock" class="button">Lock executor</button>
+  </div>
+  <p id="message" class="message" role="status" aria-live="polite"></p>
+  <p class="hint">A privileged session needs your security key with user verification. Lock ends it,
+     revokes every permit and wipes the SSH keys until <code>nebula unlock</code>.</p>
 </section>
 <section class="panel" aria-label="Managed hosts">
   <h2>Managed hosts</h2>

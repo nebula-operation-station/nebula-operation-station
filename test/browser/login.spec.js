@@ -65,6 +65,13 @@ function check(cond, what) {
   await page.click('#login');
   await page.waitForURL('**/dashboard', { timeout: 15000 });
   check(true, 'login with the first key opens the dashboard');
+  // Privileged session from the dashboard, then lock.
+  check(/Privileged session: none/.test(await page.textContent('main')), 'no privileged session after login');
+  await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('#session-open')]);
+  check(/Privileged session: active/.test(await page.textContent('main')), 'privileged session opened with the security key');
+  await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('#executor-lock')]);
+  check(/Privileged session: none/.test(await page.textContent('main')), 'lock ends the privileged session');
+
   const cookies = await ctx.cookies();
   const sc = cookies.find((c) => c.name === '__Host-nebula_session');
   check(sc && sc.secure && sc.httpOnly && sc.sameSite === 'Strict', 'session cookie is __Host-, Secure, HttpOnly, SameSite=Strict');

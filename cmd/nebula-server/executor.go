@@ -96,3 +96,24 @@ func (l *lazyExecutor) FinishRegistration(ctx context.Context, in *pb.FinishRegi
 	}
 	return nil, errNotConnected
 }
+
+func (l *lazyExecutor) BeginPrivilegedSession(ctx context.Context, in *pb.BeginPrivilegedSessionRequest, opts ...grpc.CallOption) (*pb.BeginPrivilegedSessionResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.BeginPrivilegedSession(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) CompletePrivilegedSession(ctx context.Context, in *pb.CompletePrivilegedSessionRequest, opts ...grpc.CallOption) (*pb.CompletePrivilegedSessionResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.CompletePrivilegedSession(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) Lock(ctx context.Context, in *pb.LockRequest, opts ...grpc.CallOption) (*pb.LockResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.Lock(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
