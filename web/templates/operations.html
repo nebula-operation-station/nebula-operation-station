@@ -1,0 +1,40 @@
+{{define "content"}}
+<h1>Operations</h1>
+<section class="panel" aria-label="Operations">
+  <div class="actions">
+    <a class="button" href="/operations/new">New operation</a>
+  </div>
+  {{if .Ops.List}}
+  <table class="inventory">
+    <thead>
+      <tr>
+        <th>Operation</th>
+        <th>Action</th>
+        <th>Risk</th>
+        <th>State</th>
+        <th>Hosts</th>
+        <th>Not successful</th>
+        <th>By</th>
+        <th>Created</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Ops.List}}
+      <tr>
+        <td><a href="/operations/{{.ID}}">{{.Short}}</a></td>
+        <td>{{.Action}}</td>
+        <td>{{.Risk}}</td>
+        <td>{{.State}}</td>
+        <td>{{.Hosts}}</td>
+        <td>{{.Failed}}</td>
+        <td>{{.CreatedBy}}</td>
+        <td>{{.Created}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p>No operations yet.</p>
+  {{end}}
+</section>
+{{end}}

@@ -126,3 +126,18 @@ body {
 .panel--alert {
   border-left: 4px solid #b3261e;
 }
+
+.choice {
+  display: block;
+  margin: 0.25rem 0;
+}
+
+.output {
+  max-height: 30rem;
+  overflow: auto;
+  padding: 0.5rem;
+  background: #f6f7fb;
+  border: 1px solid #d9dce6;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

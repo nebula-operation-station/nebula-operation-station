@@ -281,6 +281,9 @@ message ProposeExecutionRequest {
   // request.parameters_hash. The executor keeps the canonical form so that
   // `nebula approve` can show it and execution uses exactly these bytes.
   bytes parameters_json = 2;
+  // Raise risk_class to the executor's minimum instead of rejecting a
+  // lower one. The response reports the class that was registered.
+  bool raise_to_minimum = 3;
 }
 
 message ProposeExecutionResponse {
@@ -294,6 +297,11 @@ message ProposeExecutionResponse {
   bytes challenge = 4;
   int64 challenge_expiry_unix = 5;
   PermitState state = 6;
+  // The registered risk class (raised if raise_to_minimum applied).
+  RiskClass risk_class = 7;
+  // CredentialRequestOptions JSON over the challenge for
+  // navigator.credentials.get(); empty when no assertion is required.
+  bytes request_options_json = 8;
 }
 
 message SubmitAssertionRequest {

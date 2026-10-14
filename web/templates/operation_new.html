@@ -1,0 +1,34 @@
+{{define "content"}}
+<h1>New operation</h1>
+<section class="panel" aria-label="New operation">
+  <form id="operation-form" class="form">
+    <fieldset>
+      <legend>Action</legend>
+      {{range $i, $a := .Ops.Actions}}
+      <label class="choice">
+        <input type="radio" name="action" value="{{$a.ID}}"{{if eq $i 0}} checked{{end}}>
+        <strong>{{$a.Title}}</strong> ({{$a.ID}}, declared {{$a.Risk}}{{if $a.ReadOnly}}, read-only{{end}})
+        <span class="hint">{{$a.Description}}</span>
+      </label>
+      {{end}}
+    </fieldset>
+    <fieldset>
+      <legend>Hosts</legend>
+      {{range .Ops.Hosts}}
+      <label class="choice">
+        <input type="checkbox" name="host" value="{{.ID}}"{{if not .Usable}} disabled{{end}}>
+        {{.Name}} <span class="hint">({{.ID}}, {{.Status}})</span>
+      </label>
+      {{else}}
+      <p>No hosts in the inventory.</p>
+      {{end}}
+    </fieldset>
+    <p class="hint">The executor decides the risk: a script it does not trust counts as at least HIGH, and a host's criticality
+       can raise it further. You approve with your security key on the next page.</p>
+    <div class="actions">
+      <button type="submit" id="operation-create" class="button">Plan operation</button>
+    </div>
+    <p id="message" class="message" role="status" aria-live="polite"></p>
+  </form>
+</section>
+{{end}}

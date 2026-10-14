@@ -13,18 +13,27 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base32"
+	"encoding/pem"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
+	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun/hostruntest"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
@@ -80,6 +89,30 @@ func (d direct) RecoveryLogin(ctx context.Context, in *pb.RecoveryLoginRequest, 
 	return d.s.RecoveryLogin(ctx, in)
 }
 
+func (d direct) ListHostKeys(ctx context.Context, in *pb.ListHostKeysRequest, _ ...grpc.CallOption) (*pb.ListHostKeysResponse, error) {
+	return d.s.ListHostKeys(ctx, in)
+}
+
+func (d direct) ProposeExecution(ctx context.Context, in *pb.ProposeExecutionRequest, _ ...grpc.CallOption) (*pb.ProposeExecutionResponse, error) {
+	return d.s.ProposeExecution(ctx, in)
+}
+
+func (d direct) SubmitAssertion(ctx context.Context, in *pb.SubmitAssertionRequest, _ ...grpc.CallOption) (*pb.SubmitAssertionResponse, error) {
+	return d.s.SubmitAssertion(ctx, in)
+}
+
+func (d direct) RunAttached(ctx context.Context, in *pb.RunAttachedRequest, _ ...grpc.CallOption) (*pb.RunAttachedResponse, error) {
+	return d.s.RunAttached(ctx, in)
+}
+
+func (d direct) StartDurable(ctx context.Context, in *pb.StartDurableRequest, _ ...grpc.CallOption) (*pb.StartDurableResponse, error) {
+	return d.s.StartDurable(ctx, in)
+}
+
+func (d direct) GetRun(ctx context.Context, in *pb.GetRunRequest, _ ...grpc.CallOption) (*pb.GetRunResponse, error) {
+	return d.s.GetRun(ctx, in)
+}
+
 func must(err error) {
 	if err != nil {
 		panic(err)
@@ -107,13 +140,46 @@ func main() {
 	kd := filepath.Join(dir, "keys")
 	must(os.MkdirAll(kd, 0o700))
 	svc := executor.NewService(a, keyring.New(kd), db, reg, log)
+	svc.SetJobConfig(hostrun.JobConfig{JobRoot: filepath.Join(dir, "remote", "jobs"), RunRoot: filepath.Join(dir, "remote", "run")})
+
+	// An enrolled test host: an in-process SSH server that runs commands
+	// locally, pinned like `nebula host pin`, with Nebula's key unlocked.
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	must(err)
+	const keyPass = "browser test passphrase, not a secret"
+	block, err := ssh.MarshalPrivateKeyWithPassphrase(priv, "nebula-default", []byte(keyPass))
+	must(err)
+	must(os.WriteFile(filepath.Join(kd, "nebula-default.key"), pem.EncodeToMemory(block), 0o600))
+	_, err = svc.Unlock(context.Background(), &pb.UnlockRequest{Passphrase: []byte(keyPass)})
+	must(err)
+	sshPub, err := ssh.NewPublicKey(pub)
+	must(err)
+	host, _, err := hostruntest.Serve(sshPub)
+	must(err)
+	probe, err := svc.ProbeHostKey(context.Background(), &pb.ProbeHostKeyRequest{Endpoint: host.Addr})
+	must(err)
+	_, err = svc.PinHostKey(context.Background(), &pb.PinHostKeyRequest{HostId: "e2e-host", AuthorizedKey: probe.GetAuthorizedKey(),
+		ExpectedFingerprint: probe.GetFingerprint(), SshUser: "nebula", CredentialRef: "nebula-default", Source: pb.HostKeySource_HOST_KEY_SOURCE_PROBE})
+	must(err)
+	hostAddr, hostPort, err := net.SplitHostPort(host.Addr)
+	must(err)
+	portNum, err := strconv.Atoi(hostPort)
+	must(err)
 
 	sdb, err := serverdb.Open(filepath.Join(dir, "server.db"))
 	must(err)
 	ah, err := auth.New(auth.Options{Executor: direct{svc}, Sessions: auth.NewStore(sdb, nil), Log: log})
 	must(err)
 	inv := inventory.New(sdb)
-	u, err := ui.New(ui.Options{PublicOrigin: origin, Status: direct{svc}, Hosts: inv.List, Inventory: inv, Log: log})
+	_, err = inv.Create(context.Background(), inventory.Host{ID: "e2e-host", DisplayName: "E2E host", Environment: inventory.EnvDev,
+		Criticality: inventory.CriticalityLow, Endpoints: []inventory.Endpoint{{Address: hostAddr, Port: portNum}}}, inventory.CreateOptions{})
+	must(err)
+	ops := executions.New(context.Background(), direct{svc}, sdb, inv, log)
+	hostKeys := func(ctx context.Context) ([]*pb.HostKeyPin, error) {
+		r, err := svc.ListHostKeys(ctx, &pb.ListHostKeysRequest{})
+		return r.GetHosts(), err
+	}
+	u, err := ui.New(ui.Options{PublicOrigin: origin, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Log: log})
 	must(err)
 	mux := http.NewServeMux()
 	// Test hook: issue a one-time code like `nebula webauthn code`.

@@ -149,7 +149,11 @@ func (s *Service) ProposeExecution(_ context.Context, req *pb.ProposeExecutionRe
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	res, err := s.auth.Propose(r, req.GetParametersJson())
+	propose := s.auth.Propose
+	if req.GetRaiseToMinimum() {
+		propose = s.auth.ProposeAtLeastMinimum
+	}
+	res, err := propose(r, req.GetParametersJson())
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -159,10 +163,16 @@ func (s *Service) ProposeExecution(_ context.Context, req *pb.ProposeExecutionRe
 		CanonicalRequest:    p.Canonical,
 		ApprovalRequirement: requirementToProto(p.Requirement),
 		State:               stateToProto(p.State),
+		RiskClass:           riskToProto(p.Request.RiskClass),
 	}
 	if p.State == permit.StatePending && p.Requirement != permit.RequireCLI {
 		out.Challenge = p.Challenge
 		out.ChallengeExpiryUnix = p.ApprovalExpiry.Unix()
+		opts, err := s.reg.RequestOptions(p.Challenge, time.Until(p.ApprovalExpiry))
+		if err != nil {
+			return nil, status.Error(codes.Internal, "request options")
+		}
+		out.RequestOptionsJson = opts
 	}
 	return out, nil
 }

@@ -667,6 +667,9 @@ type ProposeExecutionRequest struct {
 	// request.parameters_hash. The executor keeps the canonical form so that
 	// `nebula approve` can show it and execution uses exactly these bytes.
 	ParametersJson []byte `protobuf:"bytes,2,opt,name=parameters_json,json=parametersJson,proto3" json:"parameters_json,omitempty"`
+	// Raise risk_class to the executor's minimum instead of rejecting a
+	// lower one. The response reports the class that was registered.
+	RaiseToMinimum bool `protobuf:"varint,3,opt,name=raise_to_minimum,json=raiseToMinimum,proto3" json:"raise_to_minimum,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -715,6 +718,13 @@ func (x *ProposeExecutionRequest) GetParametersJson() []byte {
 	return nil
 }
 
+func (x *ProposeExecutionRequest) GetRaiseToMinimum() bool {
+	if x != nil {
+		return x.RaiseToMinimum
+	}
+	return false
+}
+
 type ProposeExecutionResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Hex SHA-256 of the canonical request; also the permit identifier.
@@ -727,8 +737,13 @@ type ProposeExecutionResponse struct {
 	Challenge           []byte      `protobuf:"bytes,4,opt,name=challenge,proto3" json:"challenge,omitempty"`
 	ChallengeExpiryUnix int64       `protobuf:"varint,5,opt,name=challenge_expiry_unix,json=challengeExpiryUnix,proto3" json:"challenge_expiry_unix,omitempty"`
 	State               PermitState `protobuf:"varint,6,opt,name=state,proto3,enum=nebula.executor.v1.PermitState" json:"state,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// The registered risk class (raised if raise_to_minimum applied).
+	RiskClass RiskClass `protobuf:"varint,7,opt,name=risk_class,json=riskClass,proto3,enum=nebula.executor.v1.RiskClass" json:"risk_class,omitempty"`
+	// CredentialRequestOptions JSON over the challenge for
+	// navigator.credentials.get(); empty when no assertion is required.
+	RequestOptionsJson []byte `protobuf:"bytes,8,opt,name=request_options_json,json=requestOptionsJson,proto3" json:"request_options_json,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *ProposeExecutionResponse) Reset() {
@@ -801,6 +816,20 @@ func (x *ProposeExecutionResponse) GetState() PermitState {
 		return x.State
 	}
 	return PermitState_PERMIT_STATE_UNSPECIFIED
+}
+
+func (x *ProposeExecutionResponse) GetRiskClass() RiskClass {
+	if x != nil {
+		return x.RiskClass
+	}
+	return RiskClass_RISK_CLASS_UNSPECIFIED
+}
+
+func (x *ProposeExecutionResponse) GetRequestOptionsJson() []byte {
+	if x != nil {
+		return x.RequestOptionsJson
+	}
+	return nil
 }
 
 type SubmitAssertionRequest struct {
@@ -5663,17 +5692,21 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x16loaded_credential_refs\x18\a \x03(\tR\x14loadedCredentialRefs\x12)\n" +
 	"\x10recovery_pending\x18\b \x01(\bR\x0frecoveryPending\x12?\n" +
 	"\vvault_state\x18\t \x01(\x0e2\x1e.nebula.executor.v1.VaultStateR\n" +
-	"vaultState\"\x82\x01\n" +
+	"vaultState\"\xac\x01\n" +
 	"\x17ProposeExecutionRequest\x12>\n" +
 	"\arequest\x18\x01 \x01(\v2$.nebula.executor.v1.ExecutionRequestR\arequest\x12'\n" +
-	"\x0fparameters_json\x18\x02 \x01(\fR\x0eparametersJson\"\xd7\x02\n" +
+	"\x0fparameters_json\x18\x02 \x01(\fR\x0eparametersJson\x12(\n" +
+	"\x10raise_to_minimum\x18\x03 \x01(\bR\x0eraiseToMinimum\"\xc7\x03\n" +
 	"\x18ProposeExecutionResponse\x12)\n" +
 	"\x10execution_digest\x18\x01 \x01(\tR\x0fexecutionDigest\x12+\n" +
 	"\x11canonical_request\x18\x02 \x01(\fR\x10canonicalRequest\x12Z\n" +
 	"\x14approval_requirement\x18\x03 \x01(\x0e2'.nebula.executor.v1.ApprovalRequirementR\x13approvalRequirement\x12\x1c\n" +
 	"\tchallenge\x18\x04 \x01(\fR\tchallenge\x122\n" +
 	"\x15challenge_expiry_unix\x18\x05 \x01(\x03R\x13challengeExpiryUnix\x125\n" +
-	"\x05state\x18\x06 \x01(\x0e2\x1f.nebula.executor.v1.PermitStateR\x05state\"\x98\x01\n" +
+	"\x05state\x18\x06 \x01(\x0e2\x1f.nebula.executor.v1.PermitStateR\x05state\x12<\n" +
+	"\n" +
+	"risk_class\x18\a \x01(\x0e2\x1d.nebula.executor.v1.RiskClassR\triskClass\x120\n" +
+	"\x14request_options_json\x18\b \x01(\fR\x12requestOptionsJson\"\x98\x01\n" +
 	"\x16SubmitAssertionRequest\x12)\n" +
 	"\x10execution_digest\x18\x01 \x01(\tR\x0fexecutionDigest\x12%\n" +
 	"\x0eassertion_json\x18\x02 \x01(\fR\rassertionJson\x12,\n" +
@@ -6188,120 +6221,121 @@ var file_nebula_executor_v1_executor_proto_depIdxs = []int32{
 	7,  // 3: nebula.executor.v1.ProposeExecutionRequest.request:type_name -> nebula.executor.v1.ExecutionRequest
 	1,  // 4: nebula.executor.v1.ProposeExecutionResponse.approval_requirement:type_name -> nebula.executor.v1.ApprovalRequirement
 	2,  // 5: nebula.executor.v1.ProposeExecutionResponse.state:type_name -> nebula.executor.v1.PermitState
-	2,  // 6: nebula.executor.v1.SubmitAssertionResponse.state:type_name -> nebula.executor.v1.PermitState
-	3,  // 7: nebula.executor.v1.UnlockRequest.scope:type_name -> nebula.executor.v1.UnlockScope
-	4,  // 8: nebula.executor.v1.UnlockResponse.vault_state:type_name -> nebula.executor.v1.VaultState
-	7,  // 9: nebula.executor.v1.PendingPermit.request:type_name -> nebula.executor.v1.ExecutionRequest
-	1,  // 10: nebula.executor.v1.PendingPermit.approval_requirement:type_name -> nebula.executor.v1.ApprovalRequirement
-	25, // 11: nebula.executor.v1.ListPendingResponse.permits:type_name -> nebula.executor.v1.PendingPermit
-	2,  // 12: nebula.executor.v1.ApproveCLIResponse.state:type_name -> nebula.executor.v1.PermitState
-	0,  // 13: nebula.executor.v1.TrustArtifactRequest.risk_class:type_name -> nebula.executor.v1.RiskClass
-	0,  // 14: nebula.executor.v1.TrustedArtifact.risk_class:type_name -> nebula.executor.v1.RiskClass
-	34, // 15: nebula.executor.v1.ListTrustedArtifactsResponse.artifacts:type_name -> nebula.executor.v1.TrustedArtifact
-	0,  // 16: nebula.executor.v1.SetHostCriticalityRequest.criticality:type_name -> nebula.executor.v1.RiskClass
-	0,  // 17: nebula.executor.v1.HostCriticality.criticality:type_name -> nebula.executor.v1.RiskClass
-	39, // 18: nebula.executor.v1.ListHostCriticalityResponse.hosts:type_name -> nebula.executor.v1.HostCriticality
-	48, // 19: nebula.executor.v1.ListWebAuthnCredentialsResponse.credentials:type_name -> nebula.executor.v1.WebAuthnCredential
-	5,  // 20: nebula.executor.v1.PinHostKeyRequest.source:type_name -> nebula.executor.v1.HostKeySource
-	5,  // 21: nebula.executor.v1.HostKeyPin.source:type_name -> nebula.executor.v1.HostKeySource
-	55, // 22: nebula.executor.v1.PinHostKeyResponse.pin:type_name -> nebula.executor.v1.HostKeyPin
-	55, // 23: nebula.executor.v1.ListHostKeysResponse.hosts:type_name -> nebula.executor.v1.HostKeyPin
-	62, // 24: nebula.executor.v1.TestConnectionResponse.attempts:type_name -> nebula.executor.v1.ConnectionAttempt
-	89, // 25: nebula.executor.v1.ListSecretsResponse.secrets:type_name -> nebula.executor.v1.SecretInfo
-	4,  // 26: nebula.executor.v1.ListSecretsResponse.vault_state:type_name -> nebula.executor.v1.VaultState
-	18, // 27: nebula.executor.v1.RunAttachedRequest.run:type_name -> nebula.executor.v1.AuthorizeRunRequest
-	18, // 28: nebula.executor.v1.StartDurableRequest.run:type_name -> nebula.executor.v1.AuthorizeRunRequest
-	99, // 29: nebula.executor.v1.StartDurableResponse.run:type_name -> nebula.executor.v1.RunStatus
-	99, // 30: nebula.executor.v1.GetRunResponse.run:type_name -> nebula.executor.v1.RunStatus
-	8,  // 31: nebula.executor.v1.ExecutorService.GetStatus:input_type -> nebula.executor.v1.GetStatusRequest
-	10, // 32: nebula.executor.v1.ExecutorService.ProposeExecution:input_type -> nebula.executor.v1.ProposeExecutionRequest
-	12, // 33: nebula.executor.v1.ExecutorService.SubmitAssertion:input_type -> nebula.executor.v1.SubmitAssertionRequest
-	14, // 34: nebula.executor.v1.ExecutorService.BeginPrivilegedSession:input_type -> nebula.executor.v1.BeginPrivilegedSessionRequest
-	16, // 35: nebula.executor.v1.ExecutorService.CompletePrivilegedSession:input_type -> nebula.executor.v1.CompletePrivilegedSessionRequest
-	18, // 36: nebula.executor.v1.ExecutorService.AuthorizeRun:input_type -> nebula.executor.v1.AuthorizeRunRequest
-	93, // 37: nebula.executor.v1.ExecutorService.RunAttached:input_type -> nebula.executor.v1.RunAttachedRequest
-	95, // 38: nebula.executor.v1.ExecutorService.StartDurable:input_type -> nebula.executor.v1.StartDurableRequest
-	98, // 39: nebula.executor.v1.ExecutorService.GetRun:input_type -> nebula.executor.v1.GetRunRequest
-	20, // 40: nebula.executor.v1.ExecutorService.Unlock:input_type -> nebula.executor.v1.UnlockRequest
-	22, // 41: nebula.executor.v1.ExecutorService.Lock:input_type -> nebula.executor.v1.LockRequest
-	24, // 42: nebula.executor.v1.ExecutorService.ListPending:input_type -> nebula.executor.v1.ListPendingRequest
-	27, // 43: nebula.executor.v1.ExecutorService.ApproveCLI:input_type -> nebula.executor.v1.ApproveCLIRequest
-	29, // 44: nebula.executor.v1.ExecutorService.TrustArtifact:input_type -> nebula.executor.v1.TrustArtifactRequest
-	31, // 45: nebula.executor.v1.ExecutorService.UntrustArtifact:input_type -> nebula.executor.v1.UntrustArtifactRequest
-	33, // 46: nebula.executor.v1.ExecutorService.ListTrustedArtifacts:input_type -> nebula.executor.v1.ListTrustedArtifactsRequest
-	36, // 47: nebula.executor.v1.ExecutorService.SetHostCriticality:input_type -> nebula.executor.v1.SetHostCriticalityRequest
-	38, // 48: nebula.executor.v1.ExecutorService.ListHostCriticality:input_type -> nebula.executor.v1.ListHostCriticalityRequest
-	41, // 49: nebula.executor.v1.ExecutorService.CreateRegistrationCode:input_type -> nebula.executor.v1.CreateRegistrationCodeRequest
-	43, // 50: nebula.executor.v1.ExecutorService.BeginRegistration:input_type -> nebula.executor.v1.BeginRegistrationRequest
-	45, // 51: nebula.executor.v1.ExecutorService.FinishRegistration:input_type -> nebula.executor.v1.FinishRegistrationRequest
-	47, // 52: nebula.executor.v1.ExecutorService.ListWebAuthnCredentials:input_type -> nebula.executor.v1.ListWebAuthnCredentialsRequest
-	50, // 53: nebula.executor.v1.ExecutorService.RemoveWebAuthnCredential:input_type -> nebula.executor.v1.RemoveWebAuthnCredentialRequest
-	64, // 54: nebula.executor.v1.ExecutorService.BeginLogin:input_type -> nebula.executor.v1.BeginLoginRequest
-	66, // 55: nebula.executor.v1.ExecutorService.FinishLogin:input_type -> nebula.executor.v1.FinishLoginRequest
-	68, // 56: nebula.executor.v1.ExecutorService.CheckCredential:input_type -> nebula.executor.v1.CheckCredentialRequest
-	70, // 57: nebula.executor.v1.ExecutorService.BeginTOTPSetup:input_type -> nebula.executor.v1.BeginTOTPSetupRequest
-	72, // 58: nebula.executor.v1.ExecutorService.ConfirmTOTPSetup:input_type -> nebula.executor.v1.ConfirmTOTPSetupRequest
-	74, // 59: nebula.executor.v1.ExecutorService.RemoveTOTP:input_type -> nebula.executor.v1.RemoveTOTPRequest
-	76, // 60: nebula.executor.v1.ExecutorService.GetTOTPStatus:input_type -> nebula.executor.v1.GetTOTPStatusRequest
-	78, // 61: nebula.executor.v1.ExecutorService.RecoveryLogin:input_type -> nebula.executor.v1.RecoveryLoginRequest
-	80, // 62: nebula.executor.v1.ExecutorService.FinishRecovery:input_type -> nebula.executor.v1.FinishRecoveryRequest
-	52, // 63: nebula.executor.v1.ExecutorService.ProbeHostKey:input_type -> nebula.executor.v1.ProbeHostKeyRequest
-	54, // 64: nebula.executor.v1.ExecutorService.PinHostKey:input_type -> nebula.executor.v1.PinHostKeyRequest
-	57, // 65: nebula.executor.v1.ExecutorService.UnpinHostKey:input_type -> nebula.executor.v1.UnpinHostKeyRequest
-	59, // 66: nebula.executor.v1.ExecutorService.ListHostKeys:input_type -> nebula.executor.v1.ListHostKeysRequest
-	82, // 67: nebula.executor.v1.ExecutorService.GetSSHPublicKey:input_type -> nebula.executor.v1.GetSSHPublicKeyRequest
-	61, // 68: nebula.executor.v1.ExecutorService.TestConnection:input_type -> nebula.executor.v1.TestConnectionRequest
-	84, // 69: nebula.executor.v1.ExecutorService.InitVault:input_type -> nebula.executor.v1.InitVaultRequest
-	86, // 70: nebula.executor.v1.ExecutorService.SetSecret:input_type -> nebula.executor.v1.SetSecretRequest
-	88, // 71: nebula.executor.v1.ExecutorService.ListSecrets:input_type -> nebula.executor.v1.ListSecretsRequest
-	91, // 72: nebula.executor.v1.ExecutorService.DeleteSecret:input_type -> nebula.executor.v1.DeleteSecretRequest
-	9,  // 73: nebula.executor.v1.ExecutorService.GetStatus:output_type -> nebula.executor.v1.GetStatusResponse
-	11, // 74: nebula.executor.v1.ExecutorService.ProposeExecution:output_type -> nebula.executor.v1.ProposeExecutionResponse
-	13, // 75: nebula.executor.v1.ExecutorService.SubmitAssertion:output_type -> nebula.executor.v1.SubmitAssertionResponse
-	15, // 76: nebula.executor.v1.ExecutorService.BeginPrivilegedSession:output_type -> nebula.executor.v1.BeginPrivilegedSessionResponse
-	17, // 77: nebula.executor.v1.ExecutorService.CompletePrivilegedSession:output_type -> nebula.executor.v1.CompletePrivilegedSessionResponse
-	19, // 78: nebula.executor.v1.ExecutorService.AuthorizeRun:output_type -> nebula.executor.v1.AuthorizeRunResponse
-	94, // 79: nebula.executor.v1.ExecutorService.RunAttached:output_type -> nebula.executor.v1.RunAttachedResponse
-	96, // 80: nebula.executor.v1.ExecutorService.StartDurable:output_type -> nebula.executor.v1.StartDurableResponse
-	97, // 81: nebula.executor.v1.ExecutorService.GetRun:output_type -> nebula.executor.v1.GetRunResponse
-	21, // 82: nebula.executor.v1.ExecutorService.Unlock:output_type -> nebula.executor.v1.UnlockResponse
-	23, // 83: nebula.executor.v1.ExecutorService.Lock:output_type -> nebula.executor.v1.LockResponse
-	26, // 84: nebula.executor.v1.ExecutorService.ListPending:output_type -> nebula.executor.v1.ListPendingResponse
-	28, // 85: nebula.executor.v1.ExecutorService.ApproveCLI:output_type -> nebula.executor.v1.ApproveCLIResponse
-	30, // 86: nebula.executor.v1.ExecutorService.TrustArtifact:output_type -> nebula.executor.v1.TrustArtifactResponse
-	32, // 87: nebula.executor.v1.ExecutorService.UntrustArtifact:output_type -> nebula.executor.v1.UntrustArtifactResponse
-	35, // 88: nebula.executor.v1.ExecutorService.ListTrustedArtifacts:output_type -> nebula.executor.v1.ListTrustedArtifactsResponse
-	37, // 89: nebula.executor.v1.ExecutorService.SetHostCriticality:output_type -> nebula.executor.v1.SetHostCriticalityResponse
-	40, // 90: nebula.executor.v1.ExecutorService.ListHostCriticality:output_type -> nebula.executor.v1.ListHostCriticalityResponse
-	42, // 91: nebula.executor.v1.ExecutorService.CreateRegistrationCode:output_type -> nebula.executor.v1.CreateRegistrationCodeResponse
-	44, // 92: nebula.executor.v1.ExecutorService.BeginRegistration:output_type -> nebula.executor.v1.BeginRegistrationResponse
-	46, // 93: nebula.executor.v1.ExecutorService.FinishRegistration:output_type -> nebula.executor.v1.FinishRegistrationResponse
-	49, // 94: nebula.executor.v1.ExecutorService.ListWebAuthnCredentials:output_type -> nebula.executor.v1.ListWebAuthnCredentialsResponse
-	51, // 95: nebula.executor.v1.ExecutorService.RemoveWebAuthnCredential:output_type -> nebula.executor.v1.RemoveWebAuthnCredentialResponse
-	65, // 96: nebula.executor.v1.ExecutorService.BeginLogin:output_type -> nebula.executor.v1.BeginLoginResponse
-	67, // 97: nebula.executor.v1.ExecutorService.FinishLogin:output_type -> nebula.executor.v1.FinishLoginResponse
-	69, // 98: nebula.executor.v1.ExecutorService.CheckCredential:output_type -> nebula.executor.v1.CheckCredentialResponse
-	71, // 99: nebula.executor.v1.ExecutorService.BeginTOTPSetup:output_type -> nebula.executor.v1.BeginTOTPSetupResponse
-	73, // 100: nebula.executor.v1.ExecutorService.ConfirmTOTPSetup:output_type -> nebula.executor.v1.ConfirmTOTPSetupResponse
-	75, // 101: nebula.executor.v1.ExecutorService.RemoveTOTP:output_type -> nebula.executor.v1.RemoveTOTPResponse
-	77, // 102: nebula.executor.v1.ExecutorService.GetTOTPStatus:output_type -> nebula.executor.v1.GetTOTPStatusResponse
-	79, // 103: nebula.executor.v1.ExecutorService.RecoveryLogin:output_type -> nebula.executor.v1.RecoveryLoginResponse
-	81, // 104: nebula.executor.v1.ExecutorService.FinishRecovery:output_type -> nebula.executor.v1.FinishRecoveryResponse
-	53, // 105: nebula.executor.v1.ExecutorService.ProbeHostKey:output_type -> nebula.executor.v1.ProbeHostKeyResponse
-	56, // 106: nebula.executor.v1.ExecutorService.PinHostKey:output_type -> nebula.executor.v1.PinHostKeyResponse
-	58, // 107: nebula.executor.v1.ExecutorService.UnpinHostKey:output_type -> nebula.executor.v1.UnpinHostKeyResponse
-	60, // 108: nebula.executor.v1.ExecutorService.ListHostKeys:output_type -> nebula.executor.v1.ListHostKeysResponse
-	83, // 109: nebula.executor.v1.ExecutorService.GetSSHPublicKey:output_type -> nebula.executor.v1.GetSSHPublicKeyResponse
-	63, // 110: nebula.executor.v1.ExecutorService.TestConnection:output_type -> nebula.executor.v1.TestConnectionResponse
-	85, // 111: nebula.executor.v1.ExecutorService.InitVault:output_type -> nebula.executor.v1.InitVaultResponse
-	87, // 112: nebula.executor.v1.ExecutorService.SetSecret:output_type -> nebula.executor.v1.SetSecretResponse
-	90, // 113: nebula.executor.v1.ExecutorService.ListSecrets:output_type -> nebula.executor.v1.ListSecretsResponse
-	92, // 114: nebula.executor.v1.ExecutorService.DeleteSecret:output_type -> nebula.executor.v1.DeleteSecretResponse
-	73, // [73:115] is the sub-list for method output_type
-	31, // [31:73] is the sub-list for method input_type
-	31, // [31:31] is the sub-list for extension type_name
-	31, // [31:31] is the sub-list for extension extendee
-	0,  // [0:31] is the sub-list for field type_name
+	0,  // 6: nebula.executor.v1.ProposeExecutionResponse.risk_class:type_name -> nebula.executor.v1.RiskClass
+	2,  // 7: nebula.executor.v1.SubmitAssertionResponse.state:type_name -> nebula.executor.v1.PermitState
+	3,  // 8: nebula.executor.v1.UnlockRequest.scope:type_name -> nebula.executor.v1.UnlockScope
+	4,  // 9: nebula.executor.v1.UnlockResponse.vault_state:type_name -> nebula.executor.v1.VaultState
+	7,  // 10: nebula.executor.v1.PendingPermit.request:type_name -> nebula.executor.v1.ExecutionRequest
+	1,  // 11: nebula.executor.v1.PendingPermit.approval_requirement:type_name -> nebula.executor.v1.ApprovalRequirement
+	25, // 12: nebula.executor.v1.ListPendingResponse.permits:type_name -> nebula.executor.v1.PendingPermit
+	2,  // 13: nebula.executor.v1.ApproveCLIResponse.state:type_name -> nebula.executor.v1.PermitState
+	0,  // 14: nebula.executor.v1.TrustArtifactRequest.risk_class:type_name -> nebula.executor.v1.RiskClass
+	0,  // 15: nebula.executor.v1.TrustedArtifact.risk_class:type_name -> nebula.executor.v1.RiskClass
+	34, // 16: nebula.executor.v1.ListTrustedArtifactsResponse.artifacts:type_name -> nebula.executor.v1.TrustedArtifact
+	0,  // 17: nebula.executor.v1.SetHostCriticalityRequest.criticality:type_name -> nebula.executor.v1.RiskClass
+	0,  // 18: nebula.executor.v1.HostCriticality.criticality:type_name -> nebula.executor.v1.RiskClass
+	39, // 19: nebula.executor.v1.ListHostCriticalityResponse.hosts:type_name -> nebula.executor.v1.HostCriticality
+	48, // 20: nebula.executor.v1.ListWebAuthnCredentialsResponse.credentials:type_name -> nebula.executor.v1.WebAuthnCredential
+	5,  // 21: nebula.executor.v1.PinHostKeyRequest.source:type_name -> nebula.executor.v1.HostKeySource
+	5,  // 22: nebula.executor.v1.HostKeyPin.source:type_name -> nebula.executor.v1.HostKeySource
+	55, // 23: nebula.executor.v1.PinHostKeyResponse.pin:type_name -> nebula.executor.v1.HostKeyPin
+	55, // 24: nebula.executor.v1.ListHostKeysResponse.hosts:type_name -> nebula.executor.v1.HostKeyPin
+	62, // 25: nebula.executor.v1.TestConnectionResponse.attempts:type_name -> nebula.executor.v1.ConnectionAttempt
+	89, // 26: nebula.executor.v1.ListSecretsResponse.secrets:type_name -> nebula.executor.v1.SecretInfo
+	4,  // 27: nebula.executor.v1.ListSecretsResponse.vault_state:type_name -> nebula.executor.v1.VaultState
+	18, // 28: nebula.executor.v1.RunAttachedRequest.run:type_name -> nebula.executor.v1.AuthorizeRunRequest
+	18, // 29: nebula.executor.v1.StartDurableRequest.run:type_name -> nebula.executor.v1.AuthorizeRunRequest
+	99, // 30: nebula.executor.v1.StartDurableResponse.run:type_name -> nebula.executor.v1.RunStatus
+	99, // 31: nebula.executor.v1.GetRunResponse.run:type_name -> nebula.executor.v1.RunStatus
+	8,  // 32: nebula.executor.v1.ExecutorService.GetStatus:input_type -> nebula.executor.v1.GetStatusRequest
+	10, // 33: nebula.executor.v1.ExecutorService.ProposeExecution:input_type -> nebula.executor.v1.ProposeExecutionRequest
+	12, // 34: nebula.executor.v1.ExecutorService.SubmitAssertion:input_type -> nebula.executor.v1.SubmitAssertionRequest
+	14, // 35: nebula.executor.v1.ExecutorService.BeginPrivilegedSession:input_type -> nebula.executor.v1.BeginPrivilegedSessionRequest
+	16, // 36: nebula.executor.v1.ExecutorService.CompletePrivilegedSession:input_type -> nebula.executor.v1.CompletePrivilegedSessionRequest
+	18, // 37: nebula.executor.v1.ExecutorService.AuthorizeRun:input_type -> nebula.executor.v1.AuthorizeRunRequest
+	93, // 38: nebula.executor.v1.ExecutorService.RunAttached:input_type -> nebula.executor.v1.RunAttachedRequest
+	95, // 39: nebula.executor.v1.ExecutorService.StartDurable:input_type -> nebula.executor.v1.StartDurableRequest
+	98, // 40: nebula.executor.v1.ExecutorService.GetRun:input_type -> nebula.executor.v1.GetRunRequest
+	20, // 41: nebula.executor.v1.ExecutorService.Unlock:input_type -> nebula.executor.v1.UnlockRequest
+	22, // 42: nebula.executor.v1.ExecutorService.Lock:input_type -> nebula.executor.v1.LockRequest
+	24, // 43: nebula.executor.v1.ExecutorService.ListPending:input_type -> nebula.executor.v1.ListPendingRequest
+	27, // 44: nebula.executor.v1.ExecutorService.ApproveCLI:input_type -> nebula.executor.v1.ApproveCLIRequest
+	29, // 45: nebula.executor.v1.ExecutorService.TrustArtifact:input_type -> nebula.executor.v1.TrustArtifactRequest
+	31, // 46: nebula.executor.v1.ExecutorService.UntrustArtifact:input_type -> nebula.executor.v1.UntrustArtifactRequest
+	33, // 47: nebula.executor.v1.ExecutorService.ListTrustedArtifacts:input_type -> nebula.executor.v1.ListTrustedArtifactsRequest
+	36, // 48: nebula.executor.v1.ExecutorService.SetHostCriticality:input_type -> nebula.executor.v1.SetHostCriticalityRequest
+	38, // 49: nebula.executor.v1.ExecutorService.ListHostCriticality:input_type -> nebula.executor.v1.ListHostCriticalityRequest
+	41, // 50: nebula.executor.v1.ExecutorService.CreateRegistrationCode:input_type -> nebula.executor.v1.CreateRegistrationCodeRequest
+	43, // 51: nebula.executor.v1.ExecutorService.BeginRegistration:input_type -> nebula.executor.v1.BeginRegistrationRequest
+	45, // 52: nebula.executor.v1.ExecutorService.FinishRegistration:input_type -> nebula.executor.v1.FinishRegistrationRequest
+	47, // 53: nebula.executor.v1.ExecutorService.ListWebAuthnCredentials:input_type -> nebula.executor.v1.ListWebAuthnCredentialsRequest
+	50, // 54: nebula.executor.v1.ExecutorService.RemoveWebAuthnCredential:input_type -> nebula.executor.v1.RemoveWebAuthnCredentialRequest
+	64, // 55: nebula.executor.v1.ExecutorService.BeginLogin:input_type -> nebula.executor.v1.BeginLoginRequest
+	66, // 56: nebula.executor.v1.ExecutorService.FinishLogin:input_type -> nebula.executor.v1.FinishLoginRequest
+	68, // 57: nebula.executor.v1.ExecutorService.CheckCredential:input_type -> nebula.executor.v1.CheckCredentialRequest
+	70, // 58: nebula.executor.v1.ExecutorService.BeginTOTPSetup:input_type -> nebula.executor.v1.BeginTOTPSetupRequest
+	72, // 59: nebula.executor.v1.ExecutorService.ConfirmTOTPSetup:input_type -> nebula.executor.v1.ConfirmTOTPSetupRequest
+	74, // 60: nebula.executor.v1.ExecutorService.RemoveTOTP:input_type -> nebula.executor.v1.RemoveTOTPRequest
+	76, // 61: nebula.executor.v1.ExecutorService.GetTOTPStatus:input_type -> nebula.executor.v1.GetTOTPStatusRequest
+	78, // 62: nebula.executor.v1.ExecutorService.RecoveryLogin:input_type -> nebula.executor.v1.RecoveryLoginRequest
+	80, // 63: nebula.executor.v1.ExecutorService.FinishRecovery:input_type -> nebula.executor.v1.FinishRecoveryRequest
+	52, // 64: nebula.executor.v1.ExecutorService.ProbeHostKey:input_type -> nebula.executor.v1.ProbeHostKeyRequest
+	54, // 65: nebula.executor.v1.ExecutorService.PinHostKey:input_type -> nebula.executor.v1.PinHostKeyRequest
+	57, // 66: nebula.executor.v1.ExecutorService.UnpinHostKey:input_type -> nebula.executor.v1.UnpinHostKeyRequest
+	59, // 67: nebula.executor.v1.ExecutorService.ListHostKeys:input_type -> nebula.executor.v1.ListHostKeysRequest
+	82, // 68: nebula.executor.v1.ExecutorService.GetSSHPublicKey:input_type -> nebula.executor.v1.GetSSHPublicKeyRequest
+	61, // 69: nebula.executor.v1.ExecutorService.TestConnection:input_type -> nebula.executor.v1.TestConnectionRequest
+	84, // 70: nebula.executor.v1.ExecutorService.InitVault:input_type -> nebula.executor.v1.InitVaultRequest
+	86, // 71: nebula.executor.v1.ExecutorService.SetSecret:input_type -> nebula.executor.v1.SetSecretRequest
+	88, // 72: nebula.executor.v1.ExecutorService.ListSecrets:input_type -> nebula.executor.v1.ListSecretsRequest
+	91, // 73: nebula.executor.v1.ExecutorService.DeleteSecret:input_type -> nebula.executor.v1.DeleteSecretRequest
+	9,  // 74: nebula.executor.v1.ExecutorService.GetStatus:output_type -> nebula.executor.v1.GetStatusResponse
+	11, // 75: nebula.executor.v1.ExecutorService.ProposeExecution:output_type -> nebula.executor.v1.ProposeExecutionResponse
+	13, // 76: nebula.executor.v1.ExecutorService.SubmitAssertion:output_type -> nebula.executor.v1.SubmitAssertionResponse
+	15, // 77: nebula.executor.v1.ExecutorService.BeginPrivilegedSession:output_type -> nebula.executor.v1.BeginPrivilegedSessionResponse
+	17, // 78: nebula.executor.v1.ExecutorService.CompletePrivilegedSession:output_type -> nebula.executor.v1.CompletePrivilegedSessionResponse
+	19, // 79: nebula.executor.v1.ExecutorService.AuthorizeRun:output_type -> nebula.executor.v1.AuthorizeRunResponse
+	94, // 80: nebula.executor.v1.ExecutorService.RunAttached:output_type -> nebula.executor.v1.RunAttachedResponse
+	96, // 81: nebula.executor.v1.ExecutorService.StartDurable:output_type -> nebula.executor.v1.StartDurableResponse
+	97, // 82: nebula.executor.v1.ExecutorService.GetRun:output_type -> nebula.executor.v1.GetRunResponse
+	21, // 83: nebula.executor.v1.ExecutorService.Unlock:output_type -> nebula.executor.v1.UnlockResponse
+	23, // 84: nebula.executor.v1.ExecutorService.Lock:output_type -> nebula.executor.v1.LockResponse
+	26, // 85: nebula.executor.v1.ExecutorService.ListPending:output_type -> nebula.executor.v1.ListPendingResponse
+	28, // 86: nebula.executor.v1.ExecutorService.ApproveCLI:output_type -> nebula.executor.v1.ApproveCLIResponse
+	30, // 87: nebula.executor.v1.ExecutorService.TrustArtifact:output_type -> nebula.executor.v1.TrustArtifactResponse
+	32, // 88: nebula.executor.v1.ExecutorService.UntrustArtifact:output_type -> nebula.executor.v1.UntrustArtifactResponse
+	35, // 89: nebula.executor.v1.ExecutorService.ListTrustedArtifacts:output_type -> nebula.executor.v1.ListTrustedArtifactsResponse
+	37, // 90: nebula.executor.v1.ExecutorService.SetHostCriticality:output_type -> nebula.executor.v1.SetHostCriticalityResponse
+	40, // 91: nebula.executor.v1.ExecutorService.ListHostCriticality:output_type -> nebula.executor.v1.ListHostCriticalityResponse
+	42, // 92: nebula.executor.v1.ExecutorService.CreateRegistrationCode:output_type -> nebula.executor.v1.CreateRegistrationCodeResponse
+	44, // 93: nebula.executor.v1.ExecutorService.BeginRegistration:output_type -> nebula.executor.v1.BeginRegistrationResponse
+	46, // 94: nebula.executor.v1.ExecutorService.FinishRegistration:output_type -> nebula.executor.v1.FinishRegistrationResponse
+	49, // 95: nebula.executor.v1.ExecutorService.ListWebAuthnCredentials:output_type -> nebula.executor.v1.ListWebAuthnCredentialsResponse
+	51, // 96: nebula.executor.v1.ExecutorService.RemoveWebAuthnCredential:output_type -> nebula.executor.v1.RemoveWebAuthnCredentialResponse
+	65, // 97: nebula.executor.v1.ExecutorService.BeginLogin:output_type -> nebula.executor.v1.BeginLoginResponse
+	67, // 98: nebula.executor.v1.ExecutorService.FinishLogin:output_type -> nebula.executor.v1.FinishLoginResponse
+	69, // 99: nebula.executor.v1.ExecutorService.CheckCredential:output_type -> nebula.executor.v1.CheckCredentialResponse
+	71, // 100: nebula.executor.v1.ExecutorService.BeginTOTPSetup:output_type -> nebula.executor.v1.BeginTOTPSetupResponse
+	73, // 101: nebula.executor.v1.ExecutorService.ConfirmTOTPSetup:output_type -> nebula.executor.v1.ConfirmTOTPSetupResponse
+	75, // 102: nebula.executor.v1.ExecutorService.RemoveTOTP:output_type -> nebula.executor.v1.RemoveTOTPResponse
+	77, // 103: nebula.executor.v1.ExecutorService.GetTOTPStatus:output_type -> nebula.executor.v1.GetTOTPStatusResponse
+	79, // 104: nebula.executor.v1.ExecutorService.RecoveryLogin:output_type -> nebula.executor.v1.RecoveryLoginResponse
+	81, // 105: nebula.executor.v1.ExecutorService.FinishRecovery:output_type -> nebula.executor.v1.FinishRecoveryResponse
+	53, // 106: nebula.executor.v1.ExecutorService.ProbeHostKey:output_type -> nebula.executor.v1.ProbeHostKeyResponse
+	56, // 107: nebula.executor.v1.ExecutorService.PinHostKey:output_type -> nebula.executor.v1.PinHostKeyResponse
+	58, // 108: nebula.executor.v1.ExecutorService.UnpinHostKey:output_type -> nebula.executor.v1.UnpinHostKeyResponse
+	60, // 109: nebula.executor.v1.ExecutorService.ListHostKeys:output_type -> nebula.executor.v1.ListHostKeysResponse
+	83, // 110: nebula.executor.v1.ExecutorService.GetSSHPublicKey:output_type -> nebula.executor.v1.GetSSHPublicKeyResponse
+	63, // 111: nebula.executor.v1.ExecutorService.TestConnection:output_type -> nebula.executor.v1.TestConnectionResponse
+	85, // 112: nebula.executor.v1.ExecutorService.InitVault:output_type -> nebula.executor.v1.InitVaultResponse
+	87, // 113: nebula.executor.v1.ExecutorService.SetSecret:output_type -> nebula.executor.v1.SetSecretResponse
+	90, // 114: nebula.executor.v1.ExecutorService.ListSecrets:output_type -> nebula.executor.v1.ListSecretsResponse
+	92, // 115: nebula.executor.v1.ExecutorService.DeleteSecret:output_type -> nebula.executor.v1.DeleteSecretResponse
+	74, // [74:116] is the sub-list for method output_type
+	32, // [32:74] is the sub-list for method input_type
+	32, // [32:32] is the sub-list for extension type_name
+	32, // [32:32] is the sub-list for extension extendee
+	0,  // [0:32] is the sub-list for field type_name
 }
 
 func init() { file_nebula_executor_v1_executor_proto_init() }

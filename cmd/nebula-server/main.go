@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executorclient"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
@@ -174,6 +175,12 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	watcher := &notify.HostKeyWatcher{Notifier: notifier, List: hostKeys, DB: db, Interval: hostKeyPollInterval, Log: log}
 	go watcher.Run(connCtx)
 
+	// Operations (M4): planned here, decided and run by the executor.
+	ops := executions.New(connCtx, exec, db, store, log)
+	if err := ops.Resume(connCtx); err != nil {
+		log.Error("resume executions", "error", err)
+	}
+
 	h, err := ui.New(ui.Options{
 		PublicOrigin: cfg.PublicOrigin,
 		Status:       exec,
@@ -181,6 +188,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		Hosts:        store.List,
 		HostKeys:     hostKeys,
 		Inventory:    store,
+		Operations:   ops,
 		Log:          log,
 	})
 	if err != nil {

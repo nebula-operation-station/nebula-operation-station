@@ -3,6 +3,7 @@
 package security
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"strings"
@@ -185,4 +186,41 @@ func TestM4_RunAttachedIsServerOnly(t *testing.T) {
 	h := newHarness(t, harnessOptions{uidRoles: map[uint32][]peercred.Role{uid: {peercred.RoleAdmin}}})
 	_, err := h.client.RunAttached(h.ctx(), &pb.RunAttachedRequest{})
 	wantCode(t, err, codes.PermissionDenied, "")
+}
+
+// The server may ask the executor to raise a too-low risk class to its
+// minimum (never to lower it); the browser gets request options over the
+// permit's challenge.
+func TestM4_ProposeCanRaiseToTheMinimum(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	h.unlock()
+	host := h.pinnedRunHost("runhost")
+	h.openSession()
+	ph, _ := canonical.HashParameters(runParamsProposed)
+	req := func() *pb.ExecutionRequest {
+		return &pb.ExecutionRequest{
+			ExecutionId: fmt.Sprintf("00000000-0000-4000-8000-%012d", execCounter.Add(1)), ActionId: "test.run", ModuleVersion: "1.0.0",
+			ArtifactSha256: hexSum(runScript), ParametersHash: ph, CredentialRefs: []string{credRef}, RiskClass: pb.RiskClass_RISK_CLASS_LOW,
+			StagePlanHash: strings.Repeat("c", 64), ExpiryUnix: time.Now().Add(time.Hour).Unix(),
+			ResolvedTargets: []*pb.Target{{HostId: host.id, HostKeyFingerprint: host.fp}},
+		}
+	}
+	_, err := h.client.ProposeExecution(h.ctx(), &pb.ProposeExecutionRequest{Request: req(), ParametersJson: runParamsProposed})
+	wantCode(t, err, codes.InvalidArgument, "minimum HIGH")
+	p, err := h.client.ProposeExecution(h.ctx(), &pb.ProposeExecutionRequest{Request: req(), ParametersJson: runParamsProposed, RaiseToMinimum: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.GetRiskClass() != pb.RiskClass_RISK_CLASS_HIGH || p.GetState() != pb.PermitState_PERMIT_STATE_PENDING ||
+		!strings.Contains(string(p.GetCanonicalRequest()), `"risk_class":"HIGH"`) ||
+		!strings.Contains(string(p.GetRequestOptionsJson()), base64.RawURLEncoding.EncodeToString(p.GetChallenge())) {
+		t.Fatalf("raised: %v %s %s", p.GetRiskClass(), p.GetCanonicalRequest(), p.GetRequestOptionsJson())
+	}
+	// A class above the minimum stays.
+	r := req()
+	r.RiskClass = pb.RiskClass_RISK_CLASS_CRITICAL
+	p, err = h.client.ProposeExecution(h.ctx(), &pb.ProposeExecutionRequest{Request: r, ParametersJson: runParamsProposed, RaiseToMinimum: true})
+	if err != nil || p.GetRiskClass() != pb.RiskClass_RISK_CLASS_CRITICAL {
+		t.Fatalf("critical: %v %v", p.GetRiskClass(), err)
+	}
 }
