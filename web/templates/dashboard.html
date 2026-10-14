@@ -1,5 +1,20 @@
 {{define "content"}}
 <h1>Dashboard</h1>
+{{if .Blocked}}
+<section class="panel panel--alert" aria-label="Host key mismatch">
+  <h2>Host key mismatch</h2>
+  <p class="status status--error">These hosts presented a different SSH host key than the pinned one. Nebula does not connect to them until you re-pin.</p>
+  <ul class="hosts">
+    {{range .Blocked}}
+    <li><strong>{{.HostID}}</strong>: {{.Endpoint}} presented {{.Fingerprint}}{{if .Since}} ({{.Since}}){{end}}</li>
+    {{end}}
+  </ul>
+  <p class="hint">Check the host on its console (<code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code>). If the change is legitimate, run
+     <code>nebula host unpin HOST</code> and <code>nebula host pin HOST ENDPOINT...</code> on the executor host.</p>
+</section>
+{{else if .BlockedUnknown}}
+<p class="status status--error">Host key status unavailable</p>
+{{end}}
 <section class="panel" aria-label="Executor status">
   <h2>Executor</h2>
   {{if .Status}}
@@ -9,6 +24,7 @@
   {{end}}
   <p class="status">State: {{.Status.LockText}}</p>
   <p class="status">Privileged session: {{.Status.Session}}</p>
+  <p class="status">Vault: {{.Status.Vault}}</p>
   {{else}}
   <p class="status status--error">Executor unavailable</p>
   {{end}}

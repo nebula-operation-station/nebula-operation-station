@@ -122,3 +122,7 @@ body {
 .inventory__delete-confirm {
   min-width: 8rem;
 }
+
+.panel--alert {
+  border-left: 4px solid #b3261e;
+}

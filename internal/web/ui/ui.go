@@ -223,6 +223,10 @@ type pageData struct {
 	InventoryUnavailable bool
 	// Inventory is the table of managed hosts, in ID order.
 	Inventory []hostView
+	// Blocked lists hosts blocked after a host key mismatch.
+	Blocked []blockedView
+	// BlockedUnknown is true when the executor could not be asked.
+	BlockedUnknown bool
 	// InventoryEditable is true when Options.Inventory is set; the
 	// page then shows the add-host form and the per-row edit and
 	// delete controls.
@@ -238,6 +242,17 @@ type statusView struct {
 	Session string
 	// Recovery is true while a TOTP recovery waits for a new security key.
 	Recovery bool
+	// Vault is "not set up", "locked", "unlocked" or "unknown".
+	Vault string
+}
+
+// blockedView is a host blocked after a host key mismatch (spec 08). The
+// endpoint and fingerprint come from the host side: text only.
+type blockedView struct {
+	HostID      string
+	Endpoint    string
+	Fingerprint string
+	Since       string
 }
 
 // hostView is one row of the inventory table, pre-formatted for
@@ -296,7 +311,40 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if h.hostNames != nil {
 		data.Hosts = h.hostNames(r.Context())
 	}
+	data.Blocked, data.BlockedUnknown = h.blockedHosts(r.Context())
 	h.render(w, data)
+}
+
+// blockedHosts lists hosts blocked after a host key mismatch, so the
+// dashboard shows them until notifications exist (Milestone 4). The
+// second result is true when the executor could not be asked.
+func (h *Handler) blockedHosts(ctx context.Context) ([]blockedView, bool) {
+	if h.hostKeys == nil {
+		return nil, false
+	}
+	ctx, cancel := context.WithTimeout(ctx, statusCallTimeout)
+	defer cancel()
+	pins, err := h.hostKeys(ctx)
+	if err != nil {
+		h.log.Error("list host keys", "error", err)
+		return nil, true
+	}
+	var out []blockedView
+	for _, p := range pins {
+		if !p.GetBlocked() {
+			continue
+		}
+		fp := p.GetBlockedFingerprint()
+		if fp == "" {
+			fp = "no key of the pinned type"
+		}
+		since := ""
+		if p.GetBlockedAtUnix() > 0 {
+			since = time.Unix(p.GetBlockedAtUnix(), 0).UTC().Format("2006-01-02 15:04:05 MST")
+		}
+		out = append(out, blockedView{HostID: p.GetHostId(), Endpoint: p.GetBlockedEndpoint(), Fingerprint: fp, Since: since})
+	}
+	return out, false
 }
 
 func (h *Handler) handleInventory(w http.ResponseWriter, r *http.Request) {
@@ -649,7 +697,16 @@ func viewStatus(st *pb.GetStatusResponse) *statusView {
 		exp := time.Unix(st.GetPrivilegedSessionExpiryUnix(), 0).UTC().Format("2006-01-02 15:04:05 MST")
 		session = "active, expires " + exp
 	}
-	return &statusView{LockText: lock, Session: session, Recovery: st.GetRecoveryPending()}
+	vault := "unknown"
+	switch st.GetVaultState() {
+	case pb.VaultState_VAULT_STATE_NOT_INITIALIZED:
+		vault = "not set up"
+	case pb.VaultState_VAULT_STATE_LOCKED:
+		vault = "locked"
+	case pb.VaultState_VAULT_STATE_UNLOCKED:
+		vault = "unlocked"
+	}
+	return &statusView{LockText: lock, Session: session, Recovery: st.GetRecoveryPending(), Vault: vault}
 }
 
 func (h *Handler) render(w http.ResponseWriter, data pageData) {
