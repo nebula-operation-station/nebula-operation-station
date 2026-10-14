@@ -389,6 +389,14 @@ func (c *Client) RecoveryLogin(ctx context.Context, in *pb.RecoveryLoginRequest,
 	return resp, mapError(err)
 }
 
+// FinishRecovery: Ends a pending recovery (admin role only).
+func (c *Client) FinishRecovery(ctx context.Context, in *pb.FinishRecoveryRequest, opts ...grpc.CallOption) (*pb.FinishRecoveryResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.FinishRecovery(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
 // Compile-time check: the client must implement the generated interface so
 // that a generated-code change breaks the build here.
 var _ pb.ExecutorServiceClient = (*Client)(nil)

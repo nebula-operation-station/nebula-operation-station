@@ -4,6 +4,7 @@ package security
 
 import (
 	"encoding/base32"
+	"encoding/base64"
 	"os"
 	"strings"
 	"testing"
@@ -148,5 +149,64 @@ func TestM2Recovery_RolesAndSessionCheck(t *testing.T) {
 	r, _ = h.client.CheckCredential(h.ctx(), &pb.CheckCredentialRequest{CredentialId: executor.RecoveryCredentialID})
 	if r.GetRegistered() {
 		t.Fatal("recovery session survives TOTP removal")
+	}
+}
+
+// All keys lost (Hermes review of M2-5, finding 1): the only credential is
+// removed, and the new key can only be registered with the one-time code.
+// A compromised server sees that code, so such a key ends the recovery
+// only after the admin confirms it on the executor host.
+func TestM2Recovery_CodeOnlyKeyNeedsConfirmationOnTheExecutorHost(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	secret := h.setupTOTP()
+	if _, err := h.client.RecoveryLogin(h.ctx(), &pb.RecoveryLoginRequest{Code: nextCode(secret)}); err != nil {
+		t.Fatal(err)
+	}
+	oldID := base64.RawURLEncoding.EncodeToString(h.id.cred.ID)
+	if _, err := h.client.RemoveWebAuthnCredential(h.ctx(), &pb.RemoveWebAuthnCredentialRequest{CredentialId: oldID}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := h.client.FinishRecovery(h.ctx(), &pb.FinishRecoveryRequest{CredentialId: oldID})
+	wantCode(t, err, codes.NotFound, "")
+
+	key := newKey(virtualwebauthn.AuthenticatorOptions{})
+	b := h.begin(h.code())
+	resp, err := h.finish(b, attest(t, b, h.rp, key), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.GetRecoveryConfirmationRequired() {
+		t.Fatal("code-only registration ended the recovery")
+	}
+	h.id = key
+	_, err = h.client.BeginPrivilegedSession(h.ctx(), &pb.BeginPrivilegedSessionRequest{})
+	wantCode(t, err, codes.FailedPrecondition, "recovery_pending")
+
+	// Only the admin role confirms, and only a key from after the recovery.
+	uid := uint32(os.Getuid())
+	server := newHarness(t, harnessOptions{uidRoles: map[uint32][]peercred.Role{uid: {peercred.RoleServer}}})
+	_, err = server.client.FinishRecovery(server.ctx(), &pb.FinishRecoveryRequest{CredentialId: resp.GetCredentialId()})
+	wantCode(t, err, codes.PermissionDenied, "")
+	if _, err := h.client.FinishRecovery(h.ctx(), &pb.FinishRecoveryRequest{CredentialId: resp.GetCredentialId()}); err != nil {
+		t.Fatal(err)
+	}
+	h.requireAudit("recovery_completed")
+	h.openSession()
+	_, err = h.client.FinishRecovery(h.ctx(), &pb.FinishRecoveryRequest{CredentialId: resp.GetCredentialId()})
+	wantCode(t, err, codes.FailedPrecondition, "no recovery")
+}
+
+// A recovery login cancels registrations in progress, like Lock (Hermes
+// review of M2-5, finding 3).
+func TestM2Recovery_LoginCancelsPendingRegistrations(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	secret := h.setupTOTP()
+	code := h.code()
+	if _, err := h.client.RecoveryLogin(h.ctx(), &pb.RecoveryLoginRequest{Code: nextCode(secret)}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := h.client.BeginRegistration(h.ctx(), &pb.BeginRegistrationRequest{Code: code})
+	if err == nil {
+		t.Fatal("a code from before the recovery login still works")
 	}
 }

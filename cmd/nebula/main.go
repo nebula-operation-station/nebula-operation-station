@@ -70,6 +70,8 @@ commands:
                       set up TOTP recovery for the web login (asks for a code to confirm)
   totp status         show TOTP recovery and whether a recovery is pending
   totp remove         remove TOTP recovery
+  totp finish-recovery
+                      confirm the key registered after a recovery login (ends the recovery)
   version             print version
 
 environment:

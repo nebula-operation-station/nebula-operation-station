@@ -3,7 +3,10 @@
 package executor
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"sync"
 	"time"
@@ -177,6 +180,45 @@ func (s *Service) RecoveryLogin(ctx context.Context, req *pb.RecoveryLoginReques
 	// A recovery login means a key may be lost: whatever was approved or
 	// opened before goes, as on credential removal.
 	s.auth.Lock(who + ":recovery")
+	s.reg.Reset("recovery login")
 	s.log.Warn("audit", "kind", "recovery_login", "by", who)
 	return &pb.RecoveryLoginResponse{}, nil
+}
+
+// FinishRecovery ends a pending recovery once the admin, on the executor
+// host, has picked the credential registered after the recovery login as
+// their own (spec 05; Hermes review of M2-5, finding 1).
+func (s *Service) FinishRecovery(ctx context.Context, req *pb.FinishRecoveryRequest) (*pb.FinishRecoveryResponse, error) {
+	since, pending, err := s.db.RecoveryPending()
+	if err != nil {
+		return nil, s.adminStoreError("recovery_pending", err)
+	}
+	if !pending {
+		return nil, status.Error(codes.FailedPrecondition, "no recovery is pending")
+	}
+	id, err := base64.RawURLEncoding.DecodeString(req.GetCredentialId())
+	if err != nil || len(id) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "credential_id must be base64url")
+	}
+	list, err := s.db.ListWebAuthnCredentials()
+	if err != nil {
+		return nil, s.adminStoreError("list_webauthn_credentials", err)
+	}
+	for _, c := range list {
+		if !bytes.Equal(c.ID, id) {
+			continue
+		}
+		if c.CreatedAt.Before(since) {
+			return nil, status.Error(codes.FailedPrecondition, "this credential is older than the recovery login; register a new key first")
+		}
+		if !s.reg.HasCredential(id) {
+			return nil, status.Error(codes.FailedPrecondition, "credential is not active")
+		}
+		if err := s.db.ClearRecoveryPending(); err != nil {
+			return nil, s.adminStoreError("clear_recovery_pending", err)
+		}
+		s.log.Warn("audit", "kind", "recovery_completed", "credential", hex.EncodeToString(id), "by", callerName(ctx))
+		return &pb.FinishRecoveryResponse{}, nil
+	}
+	return nil, status.Error(codes.NotFound, "no such credential")
 }

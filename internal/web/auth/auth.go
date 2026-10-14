@@ -338,9 +338,10 @@ func (h *Handler) setupFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), executorCallTimeout)
 	defer cancel()
-	if _, err := h.exec.FinishRegistration(ctx, &pb.FinishRegistrationRequest{
+	res, err := h.exec.FinishRegistration(ctx, &pb.FinishRegistrationRequest{
 		RegistrationId: req.RegistrationID, AttestationJson: req.Attestation, AssertionJson: req.Assertion,
-	}); err != nil {
+	})
+	if err != nil {
 		h.relayError(w, "finish_registration", err, map[codes.Code]string{
 			codes.NotFound:           "registration expired, start again",
 			codes.FailedPrecondition: "registration expired, start again",
@@ -350,8 +351,9 @@ func (h *Handler) setupFinish(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	h.log.Info("audit", "kind", "web_registration_relayed")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "redirect": "/login"})
+	h.log.Info("audit", "kind", "web_registration_relayed", "recovery_confirmation_required", res.GetRecoveryConfirmationRequired())
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "redirect": "/login",
+		"recovery_confirmation_required": res.GetRecoveryConfirmationRequired()})
 }
 
 func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {

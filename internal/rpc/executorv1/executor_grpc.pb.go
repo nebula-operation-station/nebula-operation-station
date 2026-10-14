@@ -49,6 +49,7 @@ const (
 	ExecutorService_RemoveTOTP_FullMethodName                = "/nebula.executor.v1.ExecutorService/RemoveTOTP"
 	ExecutorService_GetTOTPStatus_FullMethodName             = "/nebula.executor.v1.ExecutorService/GetTOTPStatus"
 	ExecutorService_RecoveryLogin_FullMethodName             = "/nebula.executor.v1.ExecutorService/RecoveryLogin"
+	ExecutorService_FinishRecovery_FullMethodName            = "/nebula.executor.v1.ExecutorService/FinishRecovery"
 	ExecutorService_ProbeHostKey_FullMethodName              = "/nebula.executor.v1.ExecutorService/ProbeHostKey"
 	ExecutorService_PinHostKey_FullMethodName                = "/nebula.executor.v1.ExecutorService/PinHostKey"
 	ExecutorService_UnpinHostKey_FullMethodName              = "/nebula.executor.v1.ExecutorService/UnpinHostKey"
@@ -145,6 +146,10 @@ type ExecutorServiceClient interface {
 	// success the executor ends the privileged session, revokes permits and
 	// enters the recovery state.
 	RecoveryLogin(ctx context.Context, in *RecoveryLoginRequest, opts ...grpc.CallOption) (*RecoveryLoginResponse, error)
+	// Role: admin. Ends a pending recovery after the admin confirmed, on the
+	// executor host, that the given credential (registered after the
+	// recovery login) is their own new key.
+	FinishRecovery(ctx context.Context, in *FinishRecoveryRequest, opts ...grpc.CallOption) (*FinishRecoveryResponse, error)
 	// Role: admin. Reads the host key of one endpoint without sending a user
 	// name or credential.
 	ProbeHostKey(ctx context.Context, in *ProbeHostKeyRequest, opts ...grpc.CallOption) (*ProbeHostKeyResponse, error)
@@ -451,6 +456,16 @@ func (c *executorServiceClient) RecoveryLogin(ctx context.Context, in *RecoveryL
 	return out, nil
 }
 
+func (c *executorServiceClient) FinishRecovery(ctx context.Context, in *FinishRecoveryRequest, opts ...grpc.CallOption) (*FinishRecoveryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FinishRecoveryResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_FinishRecovery_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *executorServiceClient) ProbeHostKey(ctx context.Context, in *ProbeHostKeyRequest, opts ...grpc.CallOption) (*ProbeHostKeyResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ProbeHostKeyResponse)
@@ -590,6 +605,10 @@ type ExecutorServiceServer interface {
 	// success the executor ends the privileged session, revokes permits and
 	// enters the recovery state.
 	RecoveryLogin(context.Context, *RecoveryLoginRequest) (*RecoveryLoginResponse, error)
+	// Role: admin. Ends a pending recovery after the admin confirmed, on the
+	// executor host, that the given credential (registered after the
+	// recovery login) is their own new key.
+	FinishRecovery(context.Context, *FinishRecoveryRequest) (*FinishRecoveryResponse, error)
 	// Role: admin. Reads the host key of one endpoint without sending a user
 	// name or credential.
 	ProbeHostKey(context.Context, *ProbeHostKeyRequest) (*ProbeHostKeyResponse, error)
@@ -699,6 +718,9 @@ func (UnimplementedExecutorServiceServer) GetTOTPStatus(context.Context, *GetTOT
 }
 func (UnimplementedExecutorServiceServer) RecoveryLogin(context.Context, *RecoveryLoginRequest) (*RecoveryLoginResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RecoveryLogin not implemented")
+}
+func (UnimplementedExecutorServiceServer) FinishRecovery(context.Context, *FinishRecoveryRequest) (*FinishRecoveryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method FinishRecovery not implemented")
 }
 func (UnimplementedExecutorServiceServer) ProbeHostKey(context.Context, *ProbeHostKeyRequest) (*ProbeHostKeyResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ProbeHostKey not implemented")
@@ -1240,6 +1262,24 @@ func _ExecutorService_RecoveryLogin_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_FinishRecovery_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FinishRecoveryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).FinishRecovery(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_FinishRecovery_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).FinishRecovery(ctx, req.(*FinishRecoveryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ExecutorService_ProbeHostKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ProbeHostKeyRequest)
 	if err := dec(in); err != nil {
@@ -1448,6 +1488,10 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RecoveryLogin",
 			Handler:    _ExecutorService_RecoveryLogin_Handler,
+		},
+		{
+			MethodName: "FinishRecovery",
+			Handler:    _ExecutorService_FinishRecovery_Handler,
 		},
 		{
 			MethodName: "ProbeHostKey",

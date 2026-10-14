@@ -394,6 +394,9 @@ type Result struct {
 	AAGUID       []byte
 	Format       string
 	By           string
+	// Confirmed is true when a registered credential confirmed this one
+	// with a user-verified assertion (not the one-time code alone).
+	Confirmed bool
 }
 
 // Finish completes a registration. The pending registration is consumed
@@ -501,7 +504,8 @@ func (r *Registrar) Finish(id string, attestationJSON, assertionJSON []byte) (Re
 	}
 	r.cfg.Audit(Event{Kind: "credential_registered", Credential: hex.EncodeToString(credID), By: by,
 		Detail: fmt.Sprintf("user %s, label %q, format %s, aaguid %x", reg.userName, reg.label, format, aaguid)})
-	return Result{CredentialID: credID, UserName: reg.userName, Label: reg.label, AAGUID: aaguid, Format: format, By: by}, nil
+	return Result{CredentialID: credID, UserName: reg.userName, Label: reg.label, AAGUID: aaguid, Format: format, By: by,
+		Confirmed: strings.Contains(by, "+webauthn:")}, nil
 }
 
 // Remove deactivates a credential and deletes it from the store. It is

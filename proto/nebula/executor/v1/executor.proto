@@ -140,6 +140,11 @@ service ExecutorService {
   // enters the recovery state.
   rpc RecoveryLogin(RecoveryLoginRequest) returns (RecoveryLoginResponse);
 
+  // Role: admin. Ends a pending recovery after the admin confirmed, on the
+  // executor host, that the given credential (registered after the
+  // recovery login) is their own new key.
+  rpc FinishRecovery(FinishRecoveryRequest) returns (FinishRecoveryResponse);
+
   // SSH host keys (H05). The executor pins one key per host; every endpoint
   // of the host must present it. Pins are made on the executor host after
   // the admin confirmed the fingerprint (or imported known_hosts), never by
@@ -458,6 +463,10 @@ message FinishRegistrationResponse {
   // base64url credential ID.
   string credential_id = 1;
   string label = 2;
+  // A recovery is pending and this credential was registered with the
+  // one-time code alone: the admin must confirm it on the executor host
+  // (`nebula totp finish-recovery`) before privileged work is possible.
+  bool recovery_confirmation_required = 3;
 }
 
 message ListWebAuthnCredentialsRequest {}
@@ -651,3 +660,10 @@ message RecoveryLoginRequest {
 }
 
 message RecoveryLoginResponse {}
+
+message FinishRecoveryRequest {
+  // base64url credential ID.
+  string credential_id = 1;
+}
+
+message FinishRecoveryResponse {}

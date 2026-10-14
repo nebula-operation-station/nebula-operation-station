@@ -42,6 +42,7 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_RemoveTOTP_FullMethodName:                {admin},
 		pb.ExecutorService_GetTOTPStatus_FullMethodName:             {admin},
 		pb.ExecutorService_RecoveryLogin_FullMethodName:             {server},
+		pb.ExecutorService_FinishRecovery_FullMethodName:            {admin},
 		pb.ExecutorService_ProbeHostKey_FullMethodName:              {admin},
 		pb.ExecutorService_PinHostKey_FullMethodName:                {admin},
 		pb.ExecutorService_UnpinHostKey_FullMethodName:              {admin},

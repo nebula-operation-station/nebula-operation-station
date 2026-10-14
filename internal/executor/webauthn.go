@@ -108,18 +108,27 @@ func (s *Service) FinishRegistration(_ context.Context, req *pb.FinishRegistrati
 	if err != nil {
 		return nil, regStatus(err)
 	}
-	// A new credential ends a pending recovery (spec 05).
-	if _, pending, err := s.db.RecoveryPending(); err == nil && pending {
-		if err := s.db.ClearRecoveryPending(); err != nil {
-			s.log.Error("audit", "kind", "store_error", "op", "clear_recovery_pending", "detail", err.Error())
-		} else {
-			s.log.Warn("audit", "kind", "recovery_completed", "credential", hex.EncodeToString(res.CredentialID))
-		}
-	}
-	return &pb.FinishRegistrationResponse{
+	out := &pb.FinishRegistrationResponse{
 		CredentialId: base64.RawURLEncoding.EncodeToString(res.CredentialID),
 		Label:        res.Label,
-	}, nil
+	}
+	// A new credential ends a pending recovery (spec 05), but only one
+	// confirmed by a registered credential. One registered with the code
+	// alone could be a compromised server's (it sees the code the admin
+	// types), so the admin confirms it on the executor host first.
+	if _, pending, err := s.db.RecoveryPending(); err != nil || pending {
+		if err == nil && res.Confirmed {
+			if err := s.db.ClearRecoveryPending(); err != nil {
+				s.log.Error("audit", "kind", "store_error", "op", "clear_recovery_pending", "detail", err.Error())
+			} else {
+				s.log.Warn("audit", "kind", "recovery_completed", "credential", hex.EncodeToString(res.CredentialID))
+			}
+		} else {
+			out.RecoveryConfirmationRequired = true
+			s.log.Warn("audit", "kind", "recovery_needs_confirmation", "credential", hex.EncodeToString(res.CredentialID))
+		}
+	}
+	return out, nil
 }
 
 func (s *Service) ListWebAuthnCredentials(_ context.Context, _ *pb.ListWebAuthnCredentialsRequest) (*pb.ListWebAuthnCredentialsResponse, error) {
@@ -193,7 +202,15 @@ func (s *Service) FinishLogin(ctx context.Context, req *pb.FinishLoginRequest) (
 func (s *Service) CheckCredential(_ context.Context, req *pb.CheckCredentialRequest) (*pb.CheckCredentialResponse, error) {
 	if req.GetCredentialId() == RecoveryCredentialID {
 		t, err := s.db.GetTOTP()
-		return &pb.CheckCredentialResponse{Registered: err == nil && t.Activated}, nil
+		if errors.Is(err, executordb.ErrNoTOTP) {
+			return &pb.CheckCredentialResponse{}, nil
+		}
+		if err != nil {
+			// Not "removed": the server keeps the session and asks again.
+			s.log.Error("audit", "kind", "store_error", "op", "get_totp", "detail", err.Error())
+			return nil, status.Error(codes.Unavailable, "storage_error")
+		}
+		return &pb.CheckCredentialResponse{Registered: t.Activated}, nil
 	}
 	id, err := base64.RawURLEncoding.DecodeString(req.GetCredentialId())
 	if err != nil || len(id) == 0 || len(id) > 1023 {

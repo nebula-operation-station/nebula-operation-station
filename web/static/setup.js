@@ -19,8 +19,12 @@
         const confirm = await navigator.credentials.get(w.requestOptions(begin.authorization_options));
         body.assertion = w.assertionJSON(confirm);
       }
-      await w.post('/setup/finish', body);
-      w.show('Security key registered. You can log in now.', false);
+      const done = await w.post('/setup/finish', body);
+      if (done.recovery_confirmation_required) {
+        w.show('Security key registered. To end the recovery, confirm it on the executor host: nebula totp finish-recovery', false);
+      } else {
+        w.show('Security key registered. You can log in now.', false);
+      }
       form.reset();
     } catch (e) {
       if (e.name === 'NotAllowedError') {
