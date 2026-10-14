@@ -327,6 +327,17 @@ type ProposeResult struct {
 // or revoked by Lock), proposing it again is rejected and the caller must
 // create a new execution.
 func (a *Authority) Propose(r canonical.Request, parametersJSON []byte) (ProposeResult, error) {
+	return a.propose(r, parametersJSON, false)
+}
+
+// ProposeAtLeastMinimum is Propose, but a risk_class below the executor's
+// minimum is raised to that minimum instead of being rejected. Raising
+// only makes the approval stricter; the permit records the raised class.
+func (a *Authority) ProposeAtLeastMinimum(r canonical.Request, parametersJSON []byte) (ProposeResult, error) {
+	return a.propose(r, parametersJSON, true)
+}
+
+func (a *Authority) propose(r canonical.Request, parametersJSON []byte, raise bool) (ProposeResult, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := a.now()
@@ -335,6 +346,18 @@ func (a *Authority) Propose(r canonical.Request, parametersJSON []byte) (Propose
 	norm, canon, digest, err := canonical.Canonicalize(r, now)
 	if err != nil {
 		return ProposeResult{}, fail(CodeInvalidRequest, "%v", err)
+	}
+	if raise {
+		floor, _, err := a.risk.MinimumRisk(norm, norm.ResolvedTargets)
+		if err != nil {
+			return ProposeResult{}, a.storageFailure(digest.String(), err)
+		}
+		if floor.Rank() > norm.RiskClass.Rank() {
+			r.RiskClass = floor
+			if norm, canon, digest, err = canonical.Canonicalize(r, now); err != nil {
+				return ProposeResult{}, fail(CodeInvalidRequest, "%v", err)
+			}
+		}
 	}
 	params, paramsHash, err := canonical.CanonicalParameters(parametersJSON)
 	if err != nil {
