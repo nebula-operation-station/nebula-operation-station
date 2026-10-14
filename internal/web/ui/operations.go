@@ -18,6 +18,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/dockerhost"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/osdebian"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
 )
@@ -104,11 +105,19 @@ type execHostView struct {
 	// Install is the parsed package.install_* result.
 	Install *osdebian.Install
 	// Units and Service are the parsed service.* results.
-	Units                       []osdebian.Unit
-	Service                     *osdebian.ServiceStatus
+	Units   []osdebian.Unit
+	Service *osdebian.ServiceStatus
+	// Docker is the parsed docker.list result.
+	Docker                      *dockerView
 	Result, Log                 string
 	ResultCut, LogCut, LogTrunc bool
 	OK                          bool
+}
+
+// dockerView is a docker.list result with its counts.
+type dockerView struct {
+	dockerhost.List
+	Summary dockerhost.Summary
 }
 
 func (h *Handler) operationsEnabled(w http.ResponseWriter, r *http.Request) bool {
@@ -254,6 +263,11 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(e.ActionID, "service.") && e.ActionID != "service.list" && len(x.Result) > 0 {
 			if st, err := osdebian.ParseServiceStatus(x.Result); err == nil {
 				hv.Service = &st
+			}
+		}
+		if e.ActionID == "docker.list" && len(x.Result) > 0 {
+			if l, err := dockerhost.ParseList(x.Result); err == nil {
+				hv.Docker = &dockerView{List: l, Summary: l.Summary()}
 			}
 		}
 		if e.ActionID == "package.list_updates" && x.Class == "success" {

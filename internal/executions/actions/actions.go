@@ -90,6 +90,9 @@ var serviceList []byte
 //go:embed scripts/service_status.sh
 var serviceStatus []byte
 
+//go:embed scripts/docker_list.sh
+var dockerList []byte
+
 //go:embed scripts/service_control.sh.tmpl
 var serviceControlTemplate string
 
@@ -162,6 +165,11 @@ var Builtin = []Action{
 	{
 		ID: "service.reload", Version: "1.0.0", Title: "Reload service", Description: "systemctl reload of one unit (sudo).",
 		Risk: pb.RiskClass_RISK_CLASS_MEDIUM, Timeout: 3 * time.Minute, Script: serviceScript("reload"), Params: unitParam,
+	},
+	{
+		ID: "docker.list", Version: "1.0.0", Title: "List containers",
+		Description: "Lists all Docker containers with image, state, health, published ports and Compose project (docker group or sudo). A host without Docker reports that. Read-only.",
+		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: time.Minute, ReadOnly: true, Script: dockerList,
 	},
 }
 

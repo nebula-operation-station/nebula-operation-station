@@ -52,13 +52,19 @@ func (f *fakeHost) write(t *testing.T, name, body string) {
 
 func (f *fakeHost) run(t *testing.T, script []byte) (int, map[string]any) {
 	t.Helper()
+	return f.runPath(t, script, f.bin+":/usr/bin:/bin")
+}
+
+// runPath runs script with PATH set to path.
+func (f *fakeHost) runPath(t *testing.T, script []byte, path string) (int, map[string]any) {
+	t.Helper()
 	p := filepath.Join(f.dir, "action.sh")
 	if err := os.WriteFile(p, script, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("/bin/sh", p)
 	cmd.Dir = f.dir
-	cmd.Env = []string{"PATH=" + f.bin + ":/usr/bin:/bin"}
+	cmd.Env = []string{"PATH=" + path}
 	out, err := cmd.Output()
 	code := 0
 	if ee, ok := err.(*exec.ExitError); ok {
