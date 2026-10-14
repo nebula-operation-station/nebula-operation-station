@@ -53,6 +53,9 @@ func TestParseDropsWhatDoesNotFit(t *testing.T) {
 		"XYZ\tbadid\timg\trunning\tUp\t\t\t\t",                      // id
 		id + "\tweird\timg\tzombie\tUp\t\t\t\t",                     // state
 		id + "\tctl\timg\u202e\trunning\tUp\t\t\t\t",                // bidi override in the image
+		id + "\trlm\timg\u200f\trunning\tUp\t\t\t\t",                // right-to-left mark
+		id + "\tc1\timg\trunning\tUp\u0085\t\t\t\t",                 // C1 control (NEL)
+		id + "\tsep\timg\trunning\tUp\t\u2028\t\t\t",                // line separator in the ports
 		id + "\tfew\timg\trunning",                                  // field count
 		id + "\tproj\timg\texited\tExited (0)\t\tBad Project\tx\t/", // project dropped, container kept
 	}, "\n")

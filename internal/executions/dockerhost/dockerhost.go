@@ -86,14 +86,29 @@ var (
 	states    = map[string]bool{"created": true, "running": true, "paused": true, "restarting": true, "removing": true, "exited": true, "dead": true}
 )
 
-// printable is one line of at most limit bytes without control or
-// bidirectional formatting characters.
+// unsafeRune reports control characters (C0, DEL, C1), line and
+// paragraph separators, bidirectional marks, embeddings, overrides and
+// isolates, and the byte order mark: characters that can make a value
+// look different from what it is.
+func unsafeRune(r rune) bool {
+	switch {
+	case r < 0x20, r >= 0x7f && r <= 0x9f:
+		return true
+	case r == 0x061c, r == 0x200e, r == 0x200f, r == 0x2028, r == 0x2029, r == 0xfeff:
+		return true
+	case r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x206f:
+		return true
+	}
+	return false
+}
+
+// printable is one line of at most limit bytes without unsafe characters.
 func printable(s string, limit int) bool {
 	if len(s) > limit || !utf8.ValidString(s) {
 		return false
 	}
 	for _, r := range s {
-		if r < 0x20 || r == 0x7f || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
+		if unsafeRune(r) {
 			return false
 		}
 	}
