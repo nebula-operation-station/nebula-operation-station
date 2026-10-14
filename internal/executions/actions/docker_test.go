@@ -157,3 +157,54 @@ esac`)
 		}
 	}
 }
+
+// docker.inspect reads only the fields of its template (never the
+// environment, command line or labels) and the image's repository digests.
+func TestDockerInspectScript(t *testing.T) {
+	a, ok := Lookup("docker.inspect")
+	if !ok || !a.ReadOnly || a.ValidParams(map[string]string{"container": "web"}) != nil || a.ValidParams(map[string]string{"container": "-f"}) == nil {
+		t.Fatalf("docker.inspect %+v", a)
+	}
+	for _, field := range []string{".Config.Env", ".Config.Cmd", ".Args", ".Config.Labels", ".Config.Entrypoint", ".Path", "{{json .}}"} {
+		if strings.Contains(string(a.Script), field) {
+			t.Fatalf("the script reads %s", field)
+		}
+	}
+	f := newFakeHost(t, "1")
+	f.write(t, "docker", `echo "$@" >> "`+f.calls+`"
+case "$1 $2" in
+  "version "*) echo 27 ;;
+  "inspect --type") for x in "$@"; do last=$x; done; [ "$last" = web ] || exit 1
+     case "$*" in *'{{.Image}}'*) echo sha256:abc ;; *'{{.Id}}'*) echo abc ;; *) echo '{"id":"abc"}' ;; esac ;;
+  "image inspect") echo '["repo@sha256:abc"]' ;;
+esac`)
+	p := filepath.Join(f.dir, "params")
+	run := func(params string) (int, map[string]any) {
+		if err := os.WriteFile(p, []byte(params), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("/bin/sh", "-c", string(a.Script))
+		cmd.Env = []string{"PATH=" + f.bin + ":/usr/bin:/bin", "NEBULA_PARAMS=" + p}
+		out, err := cmd.Output()
+		code := 0
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(out, &doc); err != nil {
+			t.Fatalf("result %q: %v", out, err)
+		}
+		return code, doc
+	}
+	code, doc := run(`{"container":"web"}`)
+	if code != 0 || doc["container"] != "web" || b64(t, doc, "inspect") != `{"id":"abc"}` || b64(t, doc, "digests") != "[\"repo@sha256:abc\"]\n" {
+		t.Fatalf("%d %v", code, doc)
+	}
+	if calls := f.readCalls(t); !strings.Contains(calls, "image inspect --format {{json .RepoDigests}} -- sha256:abc") {
+		t.Fatalf("calls %q", calls)
+	}
+	code, doc = run(`{"container":"gone"}`)
+	if code != 10 || doc["reason"] != "no such container" {
+		t.Fatalf("%d %v", code, doc)
+	}
+}
