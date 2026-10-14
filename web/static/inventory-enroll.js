@@ -41,6 +41,7 @@
         const row = rowOf(h.host);
         if (!row) continue;
         row.querySelector('.enroll-type').textContent = h.key_type || '';
+        row.querySelector('.enroll-cred').textContent = h.credential || '';
         row.querySelector('.enroll-fp').textContent = h.fingerprint || '';
         row.querySelector('.enroll-result').textContent = h.error ? 'not included: ' + h.error : 'to be approved';
       }

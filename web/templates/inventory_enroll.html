@@ -12,7 +12,7 @@
 {{else if .Enroll}}
 <section class="panel" aria-label="Hosts without a pinned key">
   <table class="inventory">
-    <thead><tr><th><input type="checkbox" id="enroll-all" aria-label="Select all"></th><th>Host</th><th>Endpoint</th><th>SSH user</th><th>Key</th>
+    <thead><tr><th><input type="checkbox" id="enroll-all" aria-label="Select all"></th><th>Host</th><th>Endpoint</th><th>SSH user</th><th>Credential</th><th>Key</th>
       <th>Fingerprint (read by the executor)</th><th>Result</th></tr></thead>
     <tbody>
       {{range .Enroll}}
@@ -21,6 +21,7 @@
         <td>{{.Name}}</td>
         <td><select class="enroll-endpoint">{{range .Endpoints}}<option>{{.}}</option>{{end}}</select></td>
         <td><input type="text" class="enroll-user" value="nebula" size="10" autocomplete="off"></td>
+        <td class="enroll-cred">nebula-default</td>
         <td class="enroll-type"></td>
         <td class="enroll-fp"></td>
         <td class="enroll-result"></td>

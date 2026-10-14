@@ -270,14 +270,14 @@ func (s *Service) CommitEnroll(ctx context.Context, req *pb.CommitEnrollRequest)
 	if err != nil {
 		return nil, status.Error(codes.Internal, "enroll parameters")
 	}
-	results := make([]*pb.EnrollResult, 0, len(entries))
+	results := make([]*pb.EnrollResult, len(entries))
 	by := "enroll:" + d.String()[:16]
+	// First authorize every host against the approval: the parameters
+	// (every host's endpoint, key, user and credential) must hash to the
+	// approved value, and each host can be used once.
+	authorized := make([]bool, len(entries))
 	for i, e := range entries {
-		res := &pb.EnrollResult{HostId: e.HostID}
-		results = append(results, res)
-		// Each host is authorized against the approval: the parameters
-		// (every host's endpoint, key, user and credential) must hash to
-		// the approved value, and each host can be used once.
+		results[i] = &pb.EnrollResult{HostId: e.HostID}
 		if _, err := s.auth.AuthorizeGrant(d, permit.Run{
 			HostID: e.HostID, HostKeyFingerprint: e.Fingerprint, ActionID: enrollAction, ModuleVersion: enrollVersion,
 			Artifact: enrollArtifact, ParametersJSON: params, CredentialRef: e.Credential,
@@ -286,47 +286,83 @@ func (s *Service) CommitEnroll(ctx context.Context, req *pb.CommitEnrollRequest)
 				// The whole list does not match the approval.
 				return nil, toStatus(err)
 			}
-			res.Error = "not authorized: " + status.Convert(toStatus(err)).Message()
+			results[i].Error = "not authorized: " + status.Convert(toStatus(err)).Message()
 			continue
 		}
-		k, err := s.probeKey(ctx, e.Endpoint)
-		if err != nil {
-			res.Error = "no host key: " + string(sshtransport.ClassOf(err)) + "; nothing pinned (enroll it again)"
+		authorized[i] = true
+	}
+	// Then read, pin and test the authorized hosts in parallel (bounded).
+	var (
+		wg       sync.WaitGroup
+		fatalMu  sync.Mutex
+		fatalErr error
+	)
+	sem := make(chan struct{}, enrollProbes)
+	for i, e := range entries {
+		if !authorized[i] {
 			continue
 		}
-		if got := sshtransport.Fingerprint(k); got != e.Fingerprint {
-			res.Error = "the endpoint now presents " + got + ", not the approved key; nothing pinned"
-			s.log.Error("audit", "kind", "enroll_key_changed", "host", e.HostID, "digest", d.String(), "approved", e.Fingerprint, "presented", got)
-			continue
-		}
-		pinned, err := s.db.PinHostKey(executordb.HostKey{HostID: e.HostID, PublicKey: k.Marshal(), User: e.User,
-			CredentialRef: e.Credential, Source: executordb.SourceProbe, PinnedBy: by})
-		switch {
-		case errors.Is(err, executordb.ErrHostPinned):
-			res.Error = "pinned meanwhile; left as it is"
-			continue
-		case errors.Is(err, executordb.ErrInvalid):
-			res.Error = "refused: " + err.Error()
-			continue
-		case err != nil:
-			return nil, s.adminStoreError("enroll", err)
-		}
-		res.Pinned, res.Fingerprint = true, pinned.Fingerprint
-		s.log.Info("audit", "kind", "host_key_pinned", "by", by, "host", pinned.HostID, "fingerprint", pinned.Fingerprint,
-			"user", pinned.User, "credential", pinned.CredentialRef, "source", "enroll")
-		// A first login shows that the enrollment script ran on the host.
-		if s.keys.Unlocked() {
-			ep, _ := sshtransport.ParseEndpoint(e.Endpoint)
-			lctx, cancel := context.WithTimeout(ctx, enrollProbeTimeout)
-			c, err := s.Connect(lctx, e.HostID, pinned.Fingerprint, []sshtransport.Endpoint{ep})
-			cancel()
-			if err == nil {
-				res.LoginOk = true
-				c.Close()
-			} else {
-				res.LoginDetail = "login failed: " + string(sshtransport.ClassOf(err)) + " (did the enrollment script run on the host?)"
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(res *pb.EnrollResult, e enrollEntry) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := s.enrollOne(ctx, d, by, e, res); err != nil {
+				fatalMu.Lock()
+				if fatalErr == nil {
+					fatalErr = err
+				}
+				fatalMu.Unlock()
 			}
-		}
+		}(results[i], e)
+	}
+	wg.Wait()
+	if fatalErr != nil {
+		return nil, s.adminStoreError("enroll", fatalErr)
 	}
 	return &pb.CommitEnrollResponse{Results: results}, nil
+}
+
+// enrollOne reads the key of one authorized host again, pins it if it is
+// the approved one and tries a login. It returns only store errors.
+func (s *Service) enrollOne(ctx context.Context, d canonical.Digest, by string, e enrollEntry, res *pb.EnrollResult) error {
+	k, err := s.probeKey(ctx, e.Endpoint)
+	if err != nil {
+		res.Error = "no host key: " + string(sshtransport.ClassOf(err)) + "; nothing pinned (enroll it again)"
+		return nil
+	}
+	if got := sshtransport.Fingerprint(k); got != e.Fingerprint {
+		res.Error = "the endpoint now presents " + got + ", not the approved key; nothing pinned"
+		s.log.Error("audit", "kind", "enroll_key_changed", "host", e.HostID, "digest", d.String(), "approved", e.Fingerprint, "presented", got)
+		return nil
+	}
+	pinned, err := s.db.PinHostKey(executordb.HostKey{HostID: e.HostID, PublicKey: k.Marshal(), User: e.User,
+		CredentialRef: e.Credential, Source: executordb.SourceProbe, PinnedBy: by})
+	switch {
+	case errors.Is(err, executordb.ErrHostPinned):
+		res.Error = "pinned meanwhile; left as it is"
+		return nil
+	case errors.Is(err, executordb.ErrInvalid):
+		res.Error = "refused: " + err.Error()
+		return nil
+	case err != nil:
+		return err
+	}
+	res.Pinned, res.Fingerprint = true, pinned.Fingerprint
+	s.log.Info("audit", "kind", "host_key_pinned", "by", by, "host", pinned.HostID, "fingerprint", pinned.Fingerprint,
+		"user", pinned.User, "credential", pinned.CredentialRef, "source", "enroll")
+	// A first login shows that the enrollment script ran on the host.
+	if s.keys.Unlocked() {
+		ep, _ := sshtransport.ParseEndpoint(e.Endpoint)
+		lctx, cancel := context.WithTimeout(ctx, enrollProbeTimeout)
+		c, err := s.Connect(lctx, e.HostID, pinned.Fingerprint, []sshtransport.Endpoint{ep})
+		cancel()
+		if err == nil {
+			res.LoginOk = true
+			c.Close()
+		} else {
+			res.LoginDetail = "login failed: " + string(sshtransport.ClassOf(err)) + " (did the enrollment script run on the host?)"
+		}
+	}
+	return nil
 }
