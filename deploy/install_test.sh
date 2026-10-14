@@ -9,9 +9,10 @@
 #
 #   ./deploy/install_test.sh
 #
-# The last two cases run the real scripts (unit recovery on install,
-# drop-in handling on uninstall) and are therefore gated on root plus a
-# running systemd; they are skipped with a message everywhere else.
+# The last cases run the real scripts (unit recovery and server.json
+# handling on install, drop-in handling on uninstall) and are therefore
+# gated on root plus a running systemd; they are skipped with a message
+# everywhere else.
 #
 # Exit status: 0 if all cases pass, 1 otherwise.
 
@@ -196,6 +197,69 @@ if [[ ${systemd_root} -eq 1 ]] && [[ -f "$(dirname -- "$script_dir")/nebula-exec
   fi
 else
   echo "skip inactive-unit recovery (needs root, systemd and the tarball layout)"
+fi
+
+# --- Root-gated: server.json handling ----------------------------------------
+# install.sh writes /etc/nebula/server.json only if it does not exist yet
+# (valid JSON, this host's public origin, mode 0640) and never overwrites
+# it afterwards.
+server_json=/etc/nebula/server.json
+if [[ ${systemd_root} -eq 1 ]] && [[ -f "$(dirname -- "$script_dir")/nebula-executor" ]]; then
+  # Reuse the rp-id the host already has, so the test does not change the
+  # origin of a live install.
+  rp="lab.local"
+  if [[ -f /etc/systemd/system/nebula-executor.service.d/10-local.conf ]]; then
+    rp=$(sed -n 's/.*-rp-id \([^ ]*\).*/\1/p' /etc/systemd/system/nebula-executor.service.d/10-local.conf | head -n 1)
+  fi
+  rp="${rp:-lab.local}"
+  had_server_json=0
+  if [[ -f "$server_json" ]]; then
+    had_server_json=1
+  fi
+  bash "$install_sh" --admin-users "$test_user" --rp-id "$rp" >/dev/null 2>&1
+  if [[ ${had_server_json} -eq 0 ]]; then
+    # First install: the file must be created, valid, with the right
+    # origin and mode.
+    ok_case=1
+    if [[ ! -f "$server_json" ]]; then
+      echo "FAIL install did not create ${server_json}"
+      ok_case=0
+    elif ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$server_json" 2>/dev/null; then
+      echo "FAIL ${server_json} is not valid JSON"
+      ok_case=0
+    elif ! grep -q "\"public_origin\": \"https://${rp}\"" "$server_json"; then
+      echo "FAIL server.json public_origin is not https://${rp}"
+      ok_case=0
+    elif [[ $(stat -c '%a' "$server_json") != "640" ]]; then
+      echo "FAIL server.json mode is $(stat -c '%a' "$server_json"), want 640"
+      ok_case=0
+    fi
+    if [[ ${ok_case} -eq 1 ]]; then
+      echo "ok   install creates a valid server.json (0640, right origin)"
+      pass=$((pass + 1))
+    else
+      fail=$((fail + 1))
+    fi
+  fi
+  # An existing server.json (for example one an admin edited by hand)
+  # must survive a re-run: put a sentinel in place and re-run.
+  if [[ -f "$server_json" ]]; then
+    saved=$(mktemp)
+    cp "$server_json" "$saved"
+    printf 'SENTINEL\n' > "$server_json"
+    bash "$install_sh" --admin-users "$test_user" --rp-id "$rp" >/dev/null 2>&1
+    if grep -q SENTINEL "$server_json"; then
+      echo "ok   install does not overwrite an existing server.json"
+      pass=$((pass + 1))
+    else
+      echo "FAIL install overwrote the existing server.json"
+      fail=$((fail + 1))
+    fi
+    cp "$saved" "$server_json"
+    rm -f "$saved"
+  fi
+else
+  echo "skip server.json cases (needs root, systemd and the tarball layout)"
 fi
 
 if [[ ${systemd_root} -eq 1 ]]; then
