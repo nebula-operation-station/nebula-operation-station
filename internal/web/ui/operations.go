@@ -110,7 +110,9 @@ type execHostView struct {
 	// Docker is the parsed docker.list result.
 	Docker *dockerView
 	// DockerLogs is the parsed docker.logs result.
-	DockerLogs                  *dockerhost.Logs
+	DockerLogs *dockerhost.Logs
+	// DockerInspect is the parsed docker.inspect result.
+	DockerInspect               *dockerhost.Inspect
 	Result, Log                 string
 	ResultCut, LogCut, LogTrunc bool
 	OK                          bool
@@ -275,6 +277,11 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 		if e.ActionID == "docker.logs" && len(x.Result) > 0 {
 			if l, err := dockerhost.ParseLogs(x.Result); err == nil {
 				hv.DockerLogs = &l
+			}
+		}
+		if e.ActionID == "docker.inspect" && len(x.Result) > 0 {
+			if in, err := dockerhost.ParseInspect(x.Result); err == nil {
+				hv.DockerInspect = &in
 			}
 		}
 		if e.ActionID == "package.list_updates" && x.Class == "success" {

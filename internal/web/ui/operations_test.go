@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -294,5 +295,28 @@ func TestDockerLogsAreShown(t *testing.T) {
 		if !strings.Contains(page, want) {
 			t.Errorf("page misses %q", want)
 		}
+	}
+}
+
+func TestDockerInspectIsShown(t *testing.T) {
+	b, err := os.ReadFile("../../executions/dockerhost/testdata/docker29-inspect.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeOps{exec: executions.Execution{ID: opID, ActionID: "docker.inspect", State: "finished", CreatedAt: time.Unix(1791960000, 0),
+		Params: `{"container":"full"}`,
+		Hosts: []executions.Host{{HostID: "a", State: "finished", Class: "success", Result: b},
+			{HostID: "b", State: "finished", Class: "precheck_failed", Result: []byte(`{"format":"docker-inspect-v1","phase":"precheck","reason":"no such container"}`)}}}}
+	page := getBody(t, opsHandler(t, f, nil), "/operations/"+opID)
+	for _, want := range []string{"<td>full <span class=\"hint\">b46feb47000b</span></td>", "nos-test/sleeper@sha256:1c39e3d3",
+		`<span class="status--error">unhealthy</span>`, "unless-stopped; 0 restarts", "bridge (172.17.0.2)",
+		"<td>90/tcp</td><td>127.0.0.1:9090</td>", "<td>/data</td><td>bind</td><td>/tmp</td><td>read-only</td>",
+		"<td>volume nosvol</td>", "Precheck failed: no such container"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page misses %q", want)
+		}
+	}
+	if strings.Contains(page, "hunter2") {
+		t.Fatal("secret on the page")
 	}
 }

@@ -102,6 +102,9 @@ var dockerList []byte
 //go:embed scripts/docker_logs.sh
 var dockerLogs []byte
 
+//go:embed scripts/docker_inspect.sh
+var dockerInspect []byte
+
 //go:embed scripts/service_control.sh.tmpl
 var serviceControlTemplate string
 
@@ -184,6 +187,11 @@ var Builtin = []Action{
 		ID: "docker.logs", Version: "1.0.0", Title: "Container logs",
 		Description: "State and the last 100 log lines (stdout and stderr, with timestamps) of one container. Read-only.",
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: time.Minute, ReadOnly: true, Script: dockerLogs, Params: containerParam,
+	},
+	{
+		ID: "docker.inspect", Version: "1.0.0", Title: "Container details",
+		Description: "Image and digest, state, restart policy, health, mounts, published ports and networks of one container. Environment, command line and labels are not read. Read-only.",
+		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: time.Minute, ReadOnly: true, Script: dockerInspect, Params: containerParam,
 	},
 }
 

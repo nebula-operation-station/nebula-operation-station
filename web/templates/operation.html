@@ -46,7 +46,7 @@
   </table>
 </section>
 {{range .Hosts}}
-{{if or .Facts .Updates .Install .Units .Service .Docker .DockerLogs .Result .Log}}
+{{if or .Facts .Updates .Install .Units .Service .Docker .DockerLogs .DockerInspect .Result .Log}}
 <section class="panel" aria-label="Output of {{.ID}}">
   <h2>{{.ID}}</h2>
   {{if .Facts}}
@@ -81,6 +81,34 @@
   <p class="status">Container {{.Container}}{{if .State}}: {{if eq .State "running"}}running{{else}}<span class="status--error">{{.State}}</span>{{end}}{{end}}; {{len .Lines}} log lines</p>
   {{if .Lines}}<pre class="output">{{range .Lines}}{{.}}
 {{end}}</pre>{{end}}
+  {{end}}
+  {{end}}
+  {{with .DockerInspect}}
+  {{if eq .Phase "precheck"}}<p class="status status--error">Precheck failed: {{.Reason}}</p>
+  {{else}}
+  <table class="inventory">
+    <tbody>
+      <tr><th>Container</th><td>{{.Name}} <span class="hint">{{.ID}}</span></td></tr>
+      <tr><th>Image</th><td>{{.Image}}{{if .ImageID}}<br><span class="hint">{{.ImageID}}</span>{{end}}</td></tr>
+      {{if .Digests}}<tr><th>Repository digests</th><td>{{range $i, $d := .Digests}}{{if $i}}<br>{{end}}{{$d}}{{end}}</td></tr>{{end}}
+      <tr><th>State</th><td>{{if eq .Status "running"}}running{{else}}<span class="status--error">{{.Status}}</span> (exit {{.ExitCode}}){{end}}{{if .Started}}; started {{.Started}}{{end}}{{if and .Finished (ne .Status "running")}}; finished {{.Finished}}{{end}}</td></tr>
+      {{if .Health}}<tr><th>Health</th><td>{{if eq .Health "unhealthy"}}<span class="status--error">unhealthy</span> ({{.FailingStreak}} failed checks in a row){{else}}{{.Health}}{{end}}</td></tr>{{end}}
+      <tr><th>Restart policy</th><td>{{if .RestartPolicy}}{{.RestartPolicy}}{{else}}no{{end}}; {{.Restarts}} restarts</td></tr>
+      {{if .Networks}}<tr><th>Networks</th><td>{{range $i, $n := .Networks}}{{if $i}}, {{end}}{{$n.Name}}{{if $n.IP}} ({{$n.IP}}){{end}}{{end}}</td></tr>{{end}}
+    </tbody>
+  </table>
+  {{if .Ports}}
+  <table class="inventory">
+    <thead><tr><th>Container port</th><th>Published on</th></tr></thead>
+    <tbody>{{range .Ports}}<tr><td>{{.Container}}</td><td>{{if .Host}}{{.Host}}{{else}}<span class="hint">not published</span>{{end}}</td></tr>{{end}}</tbody>
+  </table>
+  {{end}}
+  {{if .Mounts}}
+  <table class="inventory">
+    <thead><tr><th>Mount</th><th>Type</th><th>Source</th><th>Access</th></tr></thead>
+    <tbody>{{range .Mounts}}<tr><td>{{.Destination}}</td><td>{{.Type}}{{if .Name}} {{.Name}}{{end}}</td><td>{{.Source}}</td><td>{{if .ReadOnly}}read-only{{else}}read-write{{end}}</td></tr>{{end}}</tbody>
+  </table>
+  {{end}}
   {{end}}
   {{end}}
   {{with .Service}}
