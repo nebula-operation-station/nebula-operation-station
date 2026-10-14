@@ -268,7 +268,7 @@ func TestResumeMarksInterruptedAttachedRunsUnknown(t *testing.T) {
 func TestDecodeFacts(t *testing.T) {
 	b := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 	doc := `{"os_release":"` + b("PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\nID=debian\nVERSION_ID=\"12\"\n") + `","uname":"` + b("Linux 6.1.0 x86_64\n") +
-		`","hostname":"` + b("web‮01\n") + `","uptime":"` + b("172800.5\n") + `","proxmox":true}`
+		`","hostname":"` + b("web\u202e01\n") + `","uptime":"` + b("172800.5\n") + `","proxmox":true}`
 	got := DecodeFacts([]byte(doc))
 	want := map[string]string{"Operating system": "Debian GNU/Linux 12 (bookworm)", "OS ID": "debian 12", "Kernel": "Linux 6.1.0 x86_64",
 		"Hostname": "web�01", "Uptime": "2.0 days", "Proxmox VE": "yes"}

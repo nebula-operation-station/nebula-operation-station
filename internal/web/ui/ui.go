@@ -96,6 +96,9 @@ type Options struct {
 	// page. Nil leaves the page read-only: no form, no edit or delete
 	// buttons, and the change endpoints answer 404.
 	Inventory InventoryStore
+	// Operations plans and follows executions. Nil leaves the
+	// operations page empty.
+	Operations Operations
 	// Log receives executor status errors (the page itself only shows
 	// "Executor unavailable"). Nil means slog.Default().
 	Log *slog.Logger
@@ -106,14 +109,15 @@ type Handler struct {
 	publicOrigin string
 	// pages maps a content name to the parsed template set (layout +
 	// that page), so every page can define its own "content" block.
-	pages     map[string]*template.Template
-	staticFS  fs.FS
-	status    StatusProvider
-	hostNames func(ctx context.Context) []string
-	hosts     func(ctx context.Context) ([]inventory.Host, error)
-	hostKeys  func(ctx context.Context) ([]*pb.HostKeyPin, error)
-	inventory InventoryStore
-	log       *slog.Logger
+	pages      map[string]*template.Template
+	staticFS   fs.FS
+	status     StatusProvider
+	hostNames  func(ctx context.Context) []string
+	hosts      func(ctx context.Context) ([]inventory.Host, error)
+	hostKeys   func(ctx context.Context) ([]*pb.HostKeyPin, error)
+	inventory  InventoryStore
+	operations Operations
+	log        *slog.Logger
 }
 
 // New parses the embedded templates and builds a Handler.
@@ -146,6 +150,7 @@ func New(o Options) (*Handler, error) {
 		hosts:        o.Hosts,
 		hostKeys:     o.HostKeys,
 		inventory:    o.Inventory,
+		operations:   o.Operations,
 		log:          log,
 	}, nil
 }
@@ -158,6 +163,10 @@ var pageFiles = map[string]string{
 	"inventory": "inventory.html",
 	"login":     "login.html",
 	"setup":     "setup.html",
+
+	"operations":    "operations.html",
+	"operation_new": "operation_new.html",
+	"operation":     "operation.html",
 }
 
 // Handler returns the UI's http.Handler without the security middleware
@@ -172,6 +181,12 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("/inventory/hosts", h.handleHostCreate)
 	mux.HandleFunc("/inventory/hosts/update", h.handleHostUpdate)
 	mux.HandleFunc("/inventory/hosts/delete", h.handleHostDelete)
+	// Operations (M4): pages and the JSON endpoints their script calls.
+	mux.HandleFunc("GET /operations", h.handleOperations)
+	mux.HandleFunc("GET /operations/new", h.handleOperationNew)
+	mux.HandleFunc("GET /operations/{id}", h.handleOperation)
+	mux.HandleFunc("POST /operations/create", h.handleOperationCreate)
+	mux.HandleFunc("POST /operations/approve", h.handleOperationApprove)
 	// The login and setup pages only render; the endpoints they call and
 	// the session check live in internal/web/auth.
 	mux.HandleFunc("/login", h.handleBare("Log in", "login", "login.js"))
@@ -196,7 +211,6 @@ var emptyPages = []struct {
 	title string
 }{
 	{"/network", "Network"},
-	{"/operations", "Operations"},
 	{"/runbooks", "Runbooks / Modules"},
 	{"/history", "History"},
 	{"/settings", "Settings"},
@@ -227,6 +241,8 @@ type pageData struct {
 	Blocked []blockedView
 	// BlockedUnknown is true when the executor could not be asked.
 	BlockedUnknown bool
+	// Ops is the data of the operations pages.
+	Ops *operationsData
 	// InventoryEditable is true when Options.Inventory is set; the
 	// page then shows the add-host form and the per-row edit and
 	// delete controls.

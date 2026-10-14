@@ -138,3 +138,38 @@ func (l *lazyExecutor) RecoveryLogin(ctx context.Context, in *pb.RecoveryLoginRe
 	}
 	return nil, errNotConnected
 }
+
+func (l *lazyExecutor) ProposeExecution(ctx context.Context, in *pb.ProposeExecutionRequest, opts ...grpc.CallOption) (*pb.ProposeExecutionResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ProposeExecution(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) SubmitAssertion(ctx context.Context, in *pb.SubmitAssertionRequest, opts ...grpc.CallOption) (*pb.SubmitAssertionResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.SubmitAssertion(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) RunAttached(ctx context.Context, in *pb.RunAttachedRequest, opts ...grpc.CallOption) (*pb.RunAttachedResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.RunAttached(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) StartDurable(ctx context.Context, in *pb.StartDurableRequest, opts ...grpc.CallOption) (*pb.StartDurableResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.StartDurable(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) GetRun(ctx context.Context, in *pb.GetRunRequest, opts ...grpc.CallOption) (*pb.GetRunResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.GetRun(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}

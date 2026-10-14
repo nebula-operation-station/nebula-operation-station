@@ -69,6 +69,23 @@ function check(cond, what) {
   check(/Privileged session: none/.test(await page.textContent('main')), 'no privileged session after login');
   await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('#session-open')]);
   check(/Privileged session: active/.test(await page.textContent('main')), 'privileged session opened with the security key');
+
+  // Operation: collect facts on the enrolled test host, approved with the key.
+  await page.goto(base + '/operations/new');
+  await page.check('input[name="host"][value="e2e-host"]');
+  await Promise.all([page.waitForURL(/\/operations\/[0-9a-f-]{36}$/, { timeout: 15000 }), page.click('#operation-create')]);
+  check(/Risk \(decided by the executor\): HIGH/.test(await page.textContent('main')), 'the executor raises the untrusted built-in script to HIGH');
+  await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('#operation-approve')]);
+  let finished = false;
+  for (let i = 0; i < 30 && !finished; i++) {
+    finished = /State: finished/.test(await page.textContent('main'));
+    if (!finished) { await new Promise((r) => setTimeout(r, 500)); await page.reload(); }
+  }
+  const main = await page.textContent('main');
+  check(finished && /success/.test(main) && /Kernel/.test(main) && /Linux/.test(main), 'approved operation ran on the host and shows its facts');
+  await page.goto(base + '/operations');
+  check(/core\.facts/.test(await page.textContent('main')), 'the operation is listed');
+  await page.goto(base + '/dashboard');
   await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('#executor-lock')]);
   check(/Privileged session: none/.test(await page.textContent('main')), 'lock ends the privileged session');
 

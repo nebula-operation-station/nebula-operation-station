@@ -38,13 +38,24 @@ func (s *Server) Commands() []string {
 // Start serves until the test ends. authorized is the only accepted user key.
 func Start(t *testing.T, authorized ssh.PublicKey) *Server {
 	t.Helper()
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	s, stop, err := Serve(authorized)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(stop)
+	return s
+}
+
+// Serve starts a server on a loopback port; stop ends it. For test
+// programs that have no testing.T (the browser harness).
+func Serve(authorized ssh.PublicKey) (*Server, func(), error) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
 	hk, err := ssh.NewSignerFromKey(priv)
 	if err != nil {
-		t.Fatal(err)
+		return nil, nil, err
 	}
 	cfg := &ssh.ServerConfig{PublicKeyCallback: func(_ ssh.ConnMetadata, k ssh.PublicKey) (*ssh.Permissions, error) {
 		if authorized != nil && string(k.Marshal()) == string(authorized.Marshal()) {
@@ -55,16 +66,16 @@ func Start(t *testing.T, authorized ssh.PublicKey) *Server {
 	cfg.AddHostKey(hk)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatal(err)
+		return nil, nil, err
 	}
 	s := &Server{Addr: ln.Addr().String(), HostKey: hk}
 	var wg sync.WaitGroup
 	var conns sync.Map
-	t.Cleanup(func() {
+	stop := func() {
 		ln.Close()
 		conns.Range(func(k, _ any) bool { k.(net.Conn).Close(); return true })
 		wg.Wait()
-	})
+	}
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -79,7 +90,7 @@ func Start(t *testing.T, authorized ssh.PublicKey) *Server {
 			}()
 		}
 	}()
-	return s
+	return s, stop, nil
 }
 
 func (s *Server) serve(c net.Conn, cfg *ssh.ServerConfig) {
