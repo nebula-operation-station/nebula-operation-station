@@ -194,14 +194,33 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 		s.finishRun(executordb.Run{ExecutionID: run.ExecutionID, HostID: run.HostID, Class: classUnknown, Detail: "stored endpoints unusable", ExitCode: -1})
 		return
 	}
+	reboot, waiting, err := s.db.GetRunReboot(run.ExecutionID, run.HostID)
+	if err != nil {
+		s.log.Error("audit", "kind", "store_error", "op", "get_run_reboot", "detail", err.Error())
+		return
+	}
 	c, err := s.Connect(ctx, run.HostID, run.Fingerprint, eps)
 	if err != nil {
-		// Retried on the next pass; a blocked host waits for a re-pin.
 		_, detail := connectClass(err)
+		if waiting && time.Now().After(reboot.Deadline) {
+			s.finishReboot(run, reboot, classHostNotReturned, "the host did not come back from the reboot in time: "+detail, "")
+			return
+		}
+		// Retried on the next pass; a blocked host waits for a re-pin.
 		s.log.Warn("audit", "kind", "reconcile_unreachable", "execution", run.ExecutionID, "host", run.HostID, "detail", detail)
 		return
 	}
 	defer c.Close()
+	if waiting {
+		id, err := hostrun.BootID(ctx, c.Client, s.jobs)
+		switch {
+		case err == nil && id != reboot.OldBootID:
+			s.finishReboot(run, reboot, hostrun.ClassSuccess, "rebooted and back", c.Endpoint.String())
+		case time.Now().After(reboot.Deadline):
+			s.finishReboot(run, reboot, classHostNotReturned, "the host did not reboot in time", c.Endpoint.String())
+		}
+		return
+	}
 	st, err := hostrun.Check(ctx, c.Client, s.jobs, run.ExecutionID)
 	if err != nil {
 		s.log.Warn("audit", "kind", "reconcile_check_failed", "execution", run.ExecutionID, "host", run.HostID, "detail", err.Error())
@@ -247,11 +266,35 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 		}
 		fin.Class, fin.Detail, fin.ExitCode = res.Class, res.Detail, res.ExitCode
 		fin.Result, fin.Log, fin.LogTruncated = res.Result, res.Log, res.LogTruncated
-		s.finishRun(fin)
+		if old, ok := hostrun.AwaitReboot(res.Result); ok && res.Class == hostrun.ClassSuccess {
+			// The job scheduled a reboot: the run ends when the host is
+			// back with a new boot ID, or as host_not_returned.
+			// The action's timeout covers the job and the reboot.
+			deadline := since.Add(run.Timeout)
+			if err := s.db.AddRunReboot(executordb.RunReboot{ExecutionID: run.ExecutionID, HostID: run.HostID, OldBootID: old,
+				Deadline: deadline, ExitCode: res.ExitCode, Result: res.Result, Log: res.Log, LogTruncated: res.LogTruncated}); err != nil {
+				s.log.Error("audit", "kind", "store_error", "op", "add_run_reboot", "detail", err.Error())
+				return
+			}
+			s.log.Info("audit", "kind", "run_awaits_reboot", "execution", run.ExecutionID, "host", run.HostID, "deadline", deadline.UTC())
+		} else {
+			s.finishRun(fin)
+		}
 		// Stored: the job directory can go (the tmpfiles rule is the
 		// fallback, spec 07).
 		if err := hostrun.Remove(ctx, c.Client, s.jobs, run.ExecutionID); err != nil {
 			s.log.Warn("audit", "kind", "job_cleanup_failed", "execution", run.ExecutionID, "host", run.HostID, "detail", err.Error())
 		}
+	}
+}
+
+// classHostNotReturned: a rebooted host did not come back (spec 07/11).
+const classHostNotReturned = "host_not_returned"
+
+func (s *Service) finishReboot(run executordb.Run, r executordb.RunReboot, class, detail, endpoint string) {
+	s.finishRun(executordb.Run{ExecutionID: run.ExecutionID, HostID: run.HostID, Class: class, Detail: detail, ExitCode: r.ExitCode,
+		Result: r.Result, Log: r.Log, LogTruncated: r.LogTruncated, Endpoint: endpoint})
+	if err := s.db.DeleteRunReboot(run.ExecutionID, run.HostID); err != nil {
+		s.log.Error("audit", "kind", "store_error", "op", "delete_run_reboot", "detail", err.Error())
 	}
 }

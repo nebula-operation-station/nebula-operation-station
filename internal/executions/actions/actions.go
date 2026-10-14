@@ -46,6 +46,9 @@ var packageListUpdates []byte
 //go:embed scripts/package_refresh.sh
 var packageRefresh []byte
 
+//go:embed scripts/system_reboot.sh
+var systemReboot []byte
+
 //go:embed scripts/package_install.sh.tmpl
 var packageInstallTemplate string
 
@@ -80,6 +83,11 @@ var Builtin = []Action{
 		ID: "package.install_all", Version: "1.0.0", Title: "Install all updates",
 		Description: "apt-get upgrade (full-upgrade on Proxmox VE), as a durable job, with the same pre- and postchecks. No reboot.",
 		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Durable: true, Timeout: 2 * time.Hour, Script: installScript("install_all"),
+	},
+	{
+		ID: "system.reboot", Version: "1.0.0", Title: "Reboot",
+		Description: "Reboots the host (15 seconds after the job is stored) and waits until it is back with a new boot ID; after 20 minutes the result is host_not_returned.",
+		Risk:        pb.RiskClass_RISK_CLASS_HIGH, Durable: true, Timeout: 20 * time.Minute, Script: systemReboot,
 	},
 }
 

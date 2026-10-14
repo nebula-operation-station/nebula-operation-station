@@ -40,6 +40,9 @@ type JobConfig struct {
 	// Systemd starts the job as a transient unit (systemd-run); otherwise
 	// it is started with setsid in the background (tests).
 	Systemd bool
+	// BootIDFile is read to tell whether a host rebooted; empty means
+	// /proc/sys/kernel/random/boot_id (tests point it elsewhere).
+	BootIDFile string
 }
 
 // DefaultJobConfig is the Debian adapter's setup (spec 07).
@@ -51,7 +54,48 @@ func (c JobConfig) valid() error {
 	if !safePathRe.MatchString(c.JobRoot) || !safePathRe.MatchString(c.RunRoot) || strings.Contains(c.JobRoot+c.RunRoot, "..") {
 		return errors.New("hostrun: job directories must be simple absolute paths")
 	}
+	if c.BootIDFile != "" && (!safePathRe.MatchString(c.BootIDFile) || strings.Contains(c.BootIDFile, "..")) {
+		return errors.New("hostrun: the boot ID file must be a simple absolute path")
+	}
 	return nil
+}
+
+var bootIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// ValidBootID reports whether s looks like a Linux boot ID.
+func ValidBootID(s string) bool { return bootIDRe.MatchString(s) }
+
+// BootID reads the host's current boot ID (a fixed read-only command).
+func BootID(ctx context.Context, client *ssh.Client, cfg JobConfig) (string, error) {
+	if err := cfg.valid(); err != nil {
+		return "", err
+	}
+	f := cfg.BootIDFile
+	if f == "" {
+		f = "/proc/sys/kernel/random/boot_id"
+	}
+	out, err := output(ctx, client, "exec head -c 64 "+f, 128)
+	if err != nil {
+		return "", err
+	}
+	id := strings.TrimSpace(string(out))
+	if !ValidBootID(id) {
+		return "", errors.New("hostrun: unreadable boot ID")
+	}
+	return id, nil
+}
+
+// AwaitReboot reads a result that asks the executor to wait for a reboot:
+// {"await_reboot":true,"boot_id":"<id before>"}.
+func AwaitReboot(result []byte) (string, bool) {
+	var doc struct {
+		Await  bool   `json:"await_reboot"`
+		BootID string `json:"boot_id"`
+	}
+	if json.Unmarshal(result, &doc) != nil || !doc.Await || !ValidBootID(doc.BootID) {
+		return "", false
+	}
+	return doc.BootID, true
 }
 
 // MaxDurableTimeout bounds a durable job.

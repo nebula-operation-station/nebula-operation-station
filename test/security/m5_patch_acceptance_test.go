@@ -7,9 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/osdebian"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
 )
 
 // fakeAPT puts stand-ins for apt-get, dpkg, df, id and systemctl first in
@@ -65,5 +67,57 @@ func TestM5_InstallSecurityRunsAsDurableJob(t *testing.T) {
 	b, _ := os.ReadFile(calls)
 	if !strings.Contains(string(b), "-o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confold install --only-upgrade openssl") {
 		t.Fatalf("apt calls:\n%s", b)
+	}
+}
+
+// M5: a reboot ends when the host is back with a new boot ID; a host that
+// does not reboot in time is host_not_returned.
+func TestM5_RebootWaitsForANewBoot(t *testing.T) {
+	bin := t.TempDir()
+	for name, body := range map[string]string{"id": "echo 0", "systemd-run": "exit 0"} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	a, _ := actions.Lookup("system.reboot")
+
+	for name, tc := range map[string]struct {
+		newBoot bool
+		timeout uint32
+		class   string
+	}{
+		"back":         {newBoot: true, timeout: 120, class: "success"},
+		"not returned": {newBoot: false, timeout: 1, class: "host_not_returned"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := privateDir(t)
+			h := newHarness(t, harnessOptions{dataDir: dir})
+			boot := "/proc/sys/kernel/random/boot_id"
+			if tc.newBoot {
+				boot = filepath.Join(dir, "boot_id")
+				if err := os.WriteFile(boot, []byte("0b9c2f7e-4a51-4c8e-9a51-6f0d3c2b1a99\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h.svc.SetJobConfig(hostrun.JobConfig{JobRoot: filepath.Join(dir, "remote", "jobs"), RunRoot: filepath.Join(dir, "remote", "run"), BootIDFile: boot})
+			h.unlock()
+			host := h.pinnedRunHost("runhost")
+			d := h.approvedScript(host, a.Script)
+			req := durableReq(d, host, a.Script)
+			req.TimeoutSeconds = tc.timeout
+			r, err := h.client.StartDurable(h.ctx(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.newBoot {
+				time.Sleep(1500 * time.Millisecond)
+			}
+			st := h.reconcileUntil(r.GetRun().GetExecutionId(), "runhost")
+			if st.GetClass() != tc.class || !strings.Contains(string(st.GetResult()), `"await_reboot":true`) {
+				t.Fatalf("%+v", st)
+			}
+			h.requireAudit("run_awaits_reboot")
+		})
 	}
 }
