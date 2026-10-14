@@ -28,12 +28,14 @@ func newFakeHost(t *testing.T, availKB string) *fakeHost {
 	f.write(t, "id", `echo 0`)
 	f.write(t, "df", `echo "Filesystem 1K-blocks Used Available Use% Mounted"; echo "/dev/x 1 1 `+availKB+` 1% $2"`)
 	f.write(t, "systemctl", `exit 0`)
+	f.write(t, "dpkg-query", `cat "`+d+`/pkgstate" 2>/dev/null; echo "openssl 2 ii"`)
 	f.write(t, "dpkg", `[ -e "`+d+`/audit-dirty" ] && echo "broken: foo"; exit 0`)
 	f.write(t, "apt-get", `echo "$@" >> "`+f.calls+`"
 case "$*" in
   *" -s "*|-s*) printf '%s\n' "Inst openssl [1] (2 Debian-Security:12/stable-security [amd64])" "Inst vim [1] (2 Debian:12/stable [amd64])" ;;
   *install*|*upgrade*)
     [ -e "`+d+`/lock-held" ] && { echo "E: Could not get lock /var/lib/dpkg/lock-frontend" >&2; exit 100; }
+    [ -e "`+d+`/lock-after-change" ] && { echo "openssl 3" > "`+d+`/pkgstate"; echo "E: Could not get lock /var/lib/dpkg/lock" >&2; exit 100; }
     [ -e "`+d+`/break-after" ] && : > "`+d+`/audit-dirty"
     echo "Setting up openssl" ;;
 esac
@@ -111,6 +113,9 @@ func TestInstallChecks(t *testing.T) {
 		"dirty dpkg":   {avail: "9999999", marker: "audit-dirty", phase: "precheck", want: "dpkg --audit", code: 10},
 		"lock held":    {avail: "9999999", marker: "lock-held", phase: "precheck", want: "package lock", code: 10},
 		"broken after": {avail: "9999999", marker: "break-after", phase: "done", code: 11},
+		// apt changed packages, then failed with the lock text: not a
+		// precheck failure, the install is reported as it happened.
+		"lock text after a change": {avail: "9999999", marker: "lock-after-change", phase: "done", code: 100},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFakeHost(t, tc.avail)
@@ -143,5 +148,28 @@ func TestBuiltinScriptsAreDistinctAndValid(t *testing.T) {
 		if strings.Contains(string(a.Script), "@MODE@") {
 			t.Fatalf("%s: template not rendered", a.ID)
 		}
+	}
+}
+
+// The security package list comes from the host's apt output; a hostile
+// host must not turn it into apt-get options or a glob (Hermes review).
+func TestInstallSecurityRefusesHostileSimulationOutput(t *testing.T) {
+	for name, line := range map[string]string{
+		"option":     "Inst -o (x foo-security [amd64])",
+		"apt option": "Inst Dpkg::Pre-Install-Pkgs::=/tmp/evil (y foo-security [amd64])",
+		"glob":       "Inst * (1 Debian-Security:12/stable-security [amd64])",
+		"upper":      "Inst EVIL (1 Debian-Security:12/stable-security [amd64])",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeHost(t, "9999999")
+			f.write(t, "apt-get", `echo "$@" >> "`+f.calls+`"
+case "$*" in *" -s "*|-s*) printf '%s\n' '`+line+`' "Inst openssl [1] (2 Debian-Security:12/stable-security [amd64])" ;; esac
+exit 0`)
+			code, doc := f.run(t, installScript("install_security"))
+			calls, _ := os.ReadFile(f.calls)
+			if code != 10 || doc["phase"] != "precheck" || strings.Contains(string(calls), "only-upgrade") {
+				t.Fatalf("%d %v\n%s", code, doc, calls)
+			}
+		})
 	}
 }
