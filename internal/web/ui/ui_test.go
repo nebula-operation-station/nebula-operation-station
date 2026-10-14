@@ -503,3 +503,45 @@ func TestInventoryEscapesHostDisplayName(t *testing.T) {
 		t.Fatal("host display name not rendered escaped")
 	}
 }
+
+func TestDashboardShowsBlockedHostsAndVault(t *testing.T) {
+	pins := []*pb.HostKeyPin{
+		{HostId: "dockerflux", Fingerprint: "SHA256:old"},
+		{HostId: "strompi", Blocked: true, BlockedAtUnix: 1791960000, BlockedEndpoint: "10.8.0.5:22",
+			BlockedFingerprint: "SHA256:<script>alert(1)</script>"},
+	}
+	h := newTestHandler(t, ui.Options{
+		PublicOrigin: "https://nebula.example.org",
+		Status:       fakeStatus{resp: &pb.GetStatusResponse{VaultState: pb.VaultState_VAULT_STATE_LOCKED}},
+		HostKeys:     func(context.Context) ([]*pb.HostKeyPin, error) { return pins, nil },
+	})
+	body := getBody(t, h.Handler(), "/dashboard")
+	for _, want := range []string{"Host key mismatch", "strompi", "10.8.0.5:22", "&lt;script&gt;", "Vault: locked"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dashboard misses %q", want)
+		}
+	}
+	if strings.Contains(body, "<script>alert") || strings.Contains(body, "dockerflux") {
+		t.Error("unescaped host data or an unblocked host on the dashboard")
+	}
+
+	h = newTestHandler(t, ui.Options{
+		PublicOrigin: "https://nebula.example.org",
+		HostKeys:     func(context.Context) ([]*pb.HostKeyPin, error) { return pins[:1], nil },
+	})
+	if body := getBody(t, h.Handler(), "/dashboard"); strings.Contains(body, "Host key mismatch") || strings.Contains(body, "unavailable</p>\n<section") {
+		t.Error("alert without a blocked host")
+	}
+	var logged strings.Builder
+	h = newTestHandler(t, ui.Options{
+		PublicOrigin: "https://nebula.example.org",
+		HostKeys: func(context.Context) ([]*pb.HostKeyPin, error) {
+			return nil, errors.New("dial unix /run/nebula/executor.sock")
+		},
+		Log: slog.New(slog.NewTextHandler(&logged, nil)),
+	})
+	body = getBody(t, h.Handler(), "/dashboard")
+	if !strings.Contains(body, "Host key status unavailable") || strings.Contains(body, "executor.sock") || !strings.Contains(logged.String(), "executor.sock") {
+		t.Errorf("executor error: page %q log %q", body, logged.String())
+	}
+}
