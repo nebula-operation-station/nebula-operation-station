@@ -86,13 +86,18 @@ func TestClasses(t *testing.T) {
 		"too large":                {`printf '"'; head -c ` + strconv.Itoa(len(big)) + ` /dev/zero | tr '\0' x; printf '"'`, hostrun.ClassScriptFailed, 0},
 		"own 122 is not bootstrap": {`exit 122`, hostrun.ClassScriptFailed, 122},
 		"killed":                   {`kill -TERM $$`, hostrun.ClassScriptInterrupted, -1},
+		"precheck":                 {`echo '{"reason":"no space"}'; exit 10`, hostrun.ClassPrecheckFailed, 10},
+		"postcheck":                {`echo '{"x":1}'; exit 11`, hostrun.ClassPostcheckFailed, 11},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := run(t, c, `{}`, tc.script, 0)
 			if r.Class != tc.class || (tc.exit >= 0 && r.ExitCode != tc.exit) {
 				t.Fatalf("%+v log %q", r, r.Log)
 			}
-			if tc.class != hostrun.ClassSuccess && tc.class != hostrun.ClassResultMissing && len(r.Result) > 0 && name != "failure" {
+			if (tc.class == hostrun.ClassPrecheckFailed || tc.class == hostrun.ClassPostcheckFailed) && len(r.Result) == 0 {
+				t.Fatalf("check result dropped for %s", name)
+			}
+			if tc.class == hostrun.ClassScriptFailed && len(r.Result) > 0 && name != "failure" {
 				t.Fatalf("result kept for %s: %d bytes", name, len(r.Result))
 			}
 		})

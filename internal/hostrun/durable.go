@@ -40,6 +40,9 @@ type JobConfig struct {
 	// Systemd starts the job as a transient unit (systemd-run); otherwise
 	// it is started with setsid in the background (tests).
 	Systemd bool
+	// BootIDFile is read to tell whether a host rebooted; empty means
+	// /proc/sys/kernel/random/boot_id (tests point it elsewhere).
+	BootIDFile string
 }
 
 // DefaultJobConfig is the Debian adapter's setup (spec 07).
@@ -51,7 +54,48 @@ func (c JobConfig) valid() error {
 	if !safePathRe.MatchString(c.JobRoot) || !safePathRe.MatchString(c.RunRoot) || strings.Contains(c.JobRoot+c.RunRoot, "..") {
 		return errors.New("hostrun: job directories must be simple absolute paths")
 	}
+	if c.BootIDFile != "" && (!safePathRe.MatchString(c.BootIDFile) || strings.Contains(c.BootIDFile, "..")) {
+		return errors.New("hostrun: the boot ID file must be a simple absolute path")
+	}
 	return nil
+}
+
+var bootIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// ValidBootID reports whether s looks like a Linux boot ID.
+func ValidBootID(s string) bool { return bootIDRe.MatchString(s) }
+
+// BootID reads the host's current boot ID (a fixed read-only command).
+func BootID(ctx context.Context, client *ssh.Client, cfg JobConfig) (string, error) {
+	if err := cfg.valid(); err != nil {
+		return "", err
+	}
+	f := cfg.BootIDFile
+	if f == "" {
+		f = "/proc/sys/kernel/random/boot_id"
+	}
+	out, err := output(ctx, client, "exec head -c 64 "+f, 128)
+	if err != nil {
+		return "", err
+	}
+	id := strings.TrimSpace(string(out))
+	if !ValidBootID(id) {
+		return "", errors.New("hostrun: unreadable boot ID")
+	}
+	return id, nil
+}
+
+// AwaitReboot reads a result that asks the executor to wait for a reboot:
+// {"await_reboot":true,"boot_id":"<id before>"}.
+func AwaitReboot(result []byte) (string, bool) {
+	var doc struct {
+		Await  bool   `json:"await_reboot"`
+		BootID string `json:"boot_id"`
+	}
+	if json.Unmarshal(result, &doc) != nil || !doc.Await || !ValidBootID(doc.BootID) {
+		return "", false
+	}
+	return doc.BootID, true
 }
 
 // MaxDurableTimeout bounds a durable job.
@@ -301,19 +345,29 @@ func Remove(ctx context.Context, client *ssh.Client, cfg JobConfig, executionID 
 	return err
 }
 
-// classify sets Class and Detail from the exit code and the result.
+// classify sets Class and Detail from the exit code and the result. A
+// result that is not one bounded UTF-8 JSON document is dropped.
 func classify(r *Result, resultTooLarge bool) {
+	empty := len(bytes.TrimSpace(r.Result)) == 0
+	validResult := !resultTooLarge && !empty && utf8.Valid(r.Result) && oneJSONDocument(r.Result)
+	if !validResult {
+		r.Result = nil
+	}
 	switch {
 	case r.ExitCode == 129 || r.ExitCode == 143 || r.ExitCode == 137:
 		r.Class, r.Detail = ClassScriptInterrupted, fmt.Sprintf("interrupted (exit %d)", r.ExitCode)
+	case r.ExitCode == ExitPrecheckFailed:
+		r.Class, r.Detail = ClassPrecheckFailed, "the action's precheck failed"
+	case r.ExitCode == ExitPostcheckFailed:
+		r.Class, r.Detail = ClassPostcheckFailed, "the action's postcheck failed"
 	case r.ExitCode != 0:
 		r.Class, r.Detail = ClassScriptFailed, fmt.Sprintf("exit status %d", r.ExitCode)
 	case resultTooLarge:
-		r.Class, r.Detail, r.Result = ClassScriptFailed, "the result exceeds 1 MiB", nil
-	case len(bytes.TrimSpace(r.Result)) == 0:
+		r.Class, r.Detail = ClassScriptFailed, "the result exceeds 1 MiB"
+	case empty:
 		r.Class, r.Detail = ClassResultMissing, "the script printed no result"
-	case !utf8.Valid(r.Result) || !oneJSONDocument(r.Result):
-		r.Class, r.Detail, r.Result = ClassScriptFailed, "stdout is not exactly one JSON document", nil
+	case !validResult:
+		r.Class, r.Detail = ClassScriptFailed, "stdout is not exactly one JSON document"
 	default:
 		r.Class = ClassSuccess
 	}

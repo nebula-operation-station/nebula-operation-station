@@ -156,3 +156,52 @@ func (db *DB) ReleaseRun(executionID, hostID string) error {
 	}
 	return nil
 }
+
+// RunReboot is a durable run waiting for its host to come back from a
+// reboot.
+type RunReboot struct {
+	ExecutionID  string
+	HostID       string
+	OldBootID    string
+	Deadline     time.Time
+	ExitCode     int
+	Result       []byte
+	Log          []byte
+	LogTruncated bool
+}
+
+// AddRunReboot records that a run waits for a reboot.
+func (db *DB) AddRunReboot(r RunReboot) error {
+	_, err := db.sql.Exec(`INSERT INTO run_reboots (execution_id, host_id, old_boot_id, deadline, exit_code, result, log, log_truncated)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`, r.ExecutionID, r.HostID, r.OldBootID, r.Deadline.Unix(), r.ExitCode,
+		r.Result, r.Log, boolInt(r.LogTruncated))
+	if err != nil {
+		return fmt.Errorf("executordb: add run reboot: %w", err)
+	}
+	return nil
+}
+
+// GetRunReboot returns the reboot wait of a run, if any.
+func (db *DB) GetRunReboot(executionID, hostID string) (RunReboot, bool, error) {
+	r := RunReboot{ExecutionID: executionID, HostID: hostID}
+	var deadline int64
+	var trunc int
+	err := db.sql.QueryRow(`SELECT old_boot_id, deadline, exit_code, result, log, log_truncated FROM run_reboots WHERE execution_id = ? AND host_id = ?`,
+		executionID, hostID).Scan(&r.OldBootID, &deadline, &r.ExitCode, &r.Result, &r.Log, &trunc)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RunReboot{}, false, nil
+	}
+	if err != nil {
+		return RunReboot{}, false, fmt.Errorf("executordb: get run reboot: %w", err)
+	}
+	r.Deadline, r.LogTruncated = time.Unix(deadline, 0), trunc == 1
+	return r, true, nil
+}
+
+// DeleteRunReboot removes the reboot wait of a run.
+func (db *DB) DeleteRunReboot(executionID, hostID string) error {
+	if _, err := db.sql.Exec(`DELETE FROM run_reboots WHERE execution_id = ? AND host_id = ?`, executionID, hostID); err != nil {
+		return fmt.Errorf("executordb: delete run reboot: %w", err)
+	}
+	return nil
+}

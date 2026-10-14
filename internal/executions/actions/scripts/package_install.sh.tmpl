@@ -1,0 +1,80 @@
+#!/bin/sh
+# package.@MODE@ 1.0.0 (Nebula built-in, os-debian, durable job, runs as root).
+# Prechecks (exit 10 = precheck_failed), apt with the spec 11 options,
+# postchecks (exit 11 = postcheck_failed). Host text in the result is
+# base64-wrapped; the server parses it as untrusted text.
+set -u
+# No pathname expansion: package names come from host output.
+set -f
+export LC_ALL=C DEBIAN_FRONTEND=noninteractive
+b64() { base64 -w0 2>/dev/null || base64 | tr -d '\n'; }
+pre() { printf '{"format":"apt-install-v1","phase":"precheck","reason":"%s"}\n' "$1"; exit 10; }
+[ "$(id -u)" -eq 0 ] || pre "not running as root"
+command -v apt-get >/dev/null 2>&1 || pre "no apt-get: not a Debian or Ubuntu host"
+for d in / /var; do
+  avail=$(df -Pk "$d" 2>/dev/null | awk 'NR==2 {print $4}')
+  case "$avail" in ''|*[!0-9]*) avail=0 ;; esac
+  [ "$avail" -ge 512000 ] || pre "less than 500 MB free on $d"
+done
+# The durable job runs in its job directory below /var/lib/nebula.
+t=./.write-test.$$
+( : > "$t" ) 2>/dev/null && rm -f "$t" || pre "the filesystem of /var/lib/nebula is not writable"
+[ -z "$(dpkg --audit 2>/dev/null)" ] || pre "dpkg --audit reports unfinished or broken packages"
+units() { systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | sort; }
+# Fingerprint of the installed packages, to tell "apt never got the lock"
+# from "apt changed packages and then failed".
+pkgstate() { dpkg-query -W -f='${Package} ${Version} ${db:Status-Abbrev}\n' 2>/dev/null | cksum; }
+before=$(units)
+proxmox=false
+[ -d /etc/pve ] && proxmox=true
+mode=@MODE@
+err=$(mktemp) || pre "mktemp failed"
+state0=$(pkgstate)
+trap 'rm -f "$err"' EXIT
+opts="-q -y -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confold"
+case "$mode" in
+  install_security)
+    pkgs=$(apt-get -s -o Debug::NoLocking=1 upgrade 2>/dev/null | awk '/^Inst / && ($0 ~ /-security/ || $0 ~ /Debian-Security/) {print $2}' | sort -u)
+    # The names come from the host's own apt output: only Debian package
+    # names (optionally :arch) may reach the root apt-get, never an option.
+    for p in $pkgs; do
+      case "$p" in [a-z0-9]*) ;; *) pre "the apt simulation listed an invalid package name" ;; esac
+      case "$p" in *[!a-z0-9+.:-]*) pre "the apt simulation listed an invalid package name" ;; esac
+    done
+    # shellcheck disable=SC2086
+    set -- $pkgs
+    if [ $# -gt 0 ]; then
+      apt-get $opts install --only-upgrade "$@" 2>"$err" >&2
+      rc=$?
+    else
+      rc=0
+    fi
+    ;;
+  install_all)
+    sub=upgrade
+    [ "$proxmox" = true ] && sub=full-upgrade
+    pkgs=$(apt-get -s -o Debug::NoLocking=1 "$sub" 2>/dev/null | awk '/^Inst / {print $2}' | sort -u)
+    # shellcheck disable=SC2086
+    apt-get $opts "$sub" 2>"$err" >&2
+    rc=$?
+    ;;
+esac
+cat "$err" >&2
+# A held lock is a precheck failure only if no package changed; the text
+# comes from the host, so it never hides an install that happened.
+if [ "$rc" -ne 0 ] && grep -q "Could not get lock" "$err" && [ "$(pkgstate)" = "$state0" ]; then
+  pre "the package lock was held for more than 10 minutes (unattended-upgrades?)"
+fi
+audit_clean=true
+[ -z "$(dpkg --audit 2>/dev/null)" ] || audit_clean=false
+reboot=false
+[ -e /var/run/reboot-required ] && reboot=true
+after=$(units)
+new=$(printf '%s\n' "$after" | while IFS= read -r u; do [ -n "$u" ] && ! printf '%s\n' "$before" | grep -qxF "$u" && printf '%s\n' "$u"; done)
+docker=""
+command -v docker >/dev/null 2>&1 && docker=$(docker ps --format '{{.Names}} {{.Status}}' 2>/dev/null | head -n 500 | b64)
+printf '{"format":"apt-install-v1","phase":"done","mode":"%s","apt_exit":%d,"packages":"%s","dpkg_audit_clean":%s,"reboot_required":%s,"new_failed_units":"%s","docker":"%s","proxmox":%s}\n' \
+  "$mode" "$rc" "$(printf '%s' "$pkgs" | b64)" "$audit_clean" "$reboot" "$(printf '%s' "$new" | b64)" "$docker" "$proxmox"
+[ "$rc" -eq 0 ] || exit "$rc"
+[ "$audit_clean" = true ] || exit 11
+exit 0

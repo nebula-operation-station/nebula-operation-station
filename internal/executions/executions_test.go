@@ -19,8 +19,10 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 )
@@ -37,6 +39,7 @@ type fakeExec struct {
 	durable   []*pb.StartDurableRequest
 	polls     int
 	released  bool
+	result    []byte
 }
 
 func (f *fakeExec) ListHostKeys(context.Context, *pb.ListHostKeysRequest, ...grpc.CallOption) (*pb.ListHostKeysResponse, error) {
@@ -69,7 +72,11 @@ func (f *fakeExec) RunAttached(_ context.Context, in *pb.RunAttachedRequest, _ .
 	if f.attachErr != nil {
 		return nil, f.attachErr
 	}
-	return &pb.RunAttachedResponse{Class: "success", ExitCode: 0, Result: []byte(`{"ok":true}`), Log: []byte("log")}, nil
+	res := []byte(`{"ok":true}`)
+	if f.result != nil {
+		res = f.result
+	}
+	return &pb.RunAttachedResponse{Class: "success", ExitCode: 0, Result: res, Log: []byte("log")}, nil
 }
 
 func (f *fakeExec) StartDurable(_ context.Context, in *pb.StartDurableRequest, _ ...grpc.CallOption) (*pb.StartDurableResponse, error) {
@@ -135,14 +142,14 @@ func setup(t *testing.T, f *fakeExec) (*Service, *sql.DB) {
 func TestCreateRefusesUnusableHosts(t *testing.T) {
 	s, _ := setup(t, &fakeExec{})
 	ctx := context.Background()
-	if _, err := s.Create(ctx, "axel", "nope", []string{"web"}); !errors.Is(err, ErrUnknownAction) {
+	if _, err := s.Create(ctx, "axel", "nope", []string{"web"}, nil); !errors.Is(err, ErrUnknownAction) {
 		t.Fatal(err)
 	}
-	if _, err := s.Create(ctx, "axel", "core.facts", nil); !errors.Is(err, ErrNoHosts) {
+	if _, err := s.Create(ctx, "axel", "core.facts", nil, nil); !errors.Is(err, ErrNoHosts) {
 		t.Fatal(err)
 	}
 	for host, want := range map[string]string{"ghost": "not in the inventory", "new": "not enrolled", "bad": "blocked"} {
-		_, err := s.Create(ctx, "axel", "core.facts", []string{host})
+		_, err := s.Create(ctx, "axel", "core.facts", []string{host}, nil)
 		var he *HostError
 		if !errors.As(err, &he) || !strings.Contains(he.Reason, want) {
 			t.Errorf("%s: %v", host, err)
@@ -154,7 +161,7 @@ func TestCreateProposesAndApprovalRuns(t *testing.T) {
 	f := &fakeExec{}
 	s, _ := setup(t, f)
 	ctx := context.Background()
-	c, err := s.Create(ctx, "axel", "core.facts", []string{"web", "web"})
+	c, err := s.Create(ctx, "axel", "core.facts", []string{"web", "web"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +218,7 @@ func waitState(t *testing.T, s *Service, id, want string) {
 func TestAutoApprovedRunsAndRefusalsAreRecorded(t *testing.T) {
 	f := &fakeExec{approved: true, risk: pb.RiskClass_RISK_CLASS_LOW, attachErr: status.Error(codes.PermissionDenied, "host_already_run")}
 	s, _ := setup(t, f)
-	c, err := s.Create(context.Background(), "axel", "core.facts", []string{"web"})
+	c, err := s.Create(context.Background(), "axel", "core.facts", []string{"web"}, nil)
 	if err != nil || c.State != "approved" {
 		t.Fatalf("%+v %v", c, err)
 	}
@@ -229,7 +236,7 @@ func TestDurableRunsArePolledAndReleased(t *testing.T) {
 		Durable: true, Timeout: time.Minute, Script: []byte("true\n")})
 	f := &fakeExec{approved: true}
 	s, _ := setup(t, f)
-	c, err := s.Create(context.Background(), "axel", "test.durable", []string{"web"})
+	c, err := s.Create(context.Background(), "axel", "test.durable", []string{"web"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +260,7 @@ func TestDurableRunsArePolledAndReleased(t *testing.T) {
 func TestResumeMarksInterruptedAttachedRunsUnknown(t *testing.T) {
 	f := &fakeExec{}
 	s, db := setup(t, f)
-	c, err := s.Create(context.Background(), "axel", "core.facts", []string{"web"})
+	c, err := s.Create(context.Background(), "axel", "core.facts", []string{"web"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,5 +297,147 @@ func TestDecodeFacts(t *testing.T) {
 	}
 	if DecodeFacts([]byte("not json")) != nil {
 		t.Error("garbage decoded")
+	}
+}
+
+func TestSuccessfulUpdateListsAreKept(t *testing.T) {
+	f := &fakeExec{approved: true}
+	s, _ := setup(t, f)
+	sim := base64.StdEncoding.EncodeToString([]byte("Inst openssl [1] (2 Debian-Security:12/stable-security [amd64])\nInst vim [1] (2 Debian:12/stable [amd64])\n"))
+	f.result = []byte(`{"format":"apt-simulate-v1","mode":"upgrade","simulate":"` + sim + `","reboot_required":false,"reboot_pkgs":"","lists_mtime":1791960000,"proxmox":false}`)
+	c, err := s.Create(context.Background(), "axel", "package.list_updates", []string{"web"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, s, c.ID, "finished")
+	all, err := s.AllUpdates(context.Background())
+	if err != nil || all["web"].Total != 2 || all["web"].Security != 1 {
+		t.Fatalf("%+v %v", all, err)
+	}
+	u, err := s.Updates(context.Background(), "web")
+	if err != nil || len(u.Packages) != 2 || u.Packages[0].Name != "openssl" {
+		t.Fatalf("%+v %v", u, err)
+	}
+	if _, err := s.Updates(context.Background(), "new"); !errors.Is(err, ErrNoUpdates) {
+		t.Fatal(err)
+	}
+}
+
+func TestEvaluateOpsState(t *testing.T) {
+	at := time.Unix(1791960000, 0)
+	for name, tc := range map[string]struct {
+		run  lastRun
+		upd  *HostUpdates
+		want string
+	}{
+		"never":       {want: StateUnknown},
+		"reachable":   {run: lastRun{action: "core.facts", class: "success", at: at, ok: true}, want: StateReady},
+		"unreachable": {run: lastRun{action: "core.facts", class: "network_unreachable", at: at, ok: true}, want: StateUnreachable},
+		"not back":    {run: lastRun{action: "system.reboot", class: "host_not_returned", at: at, ok: true}, want: StateUnreachable},
+		"failed":      {run: lastRun{action: "package.install_all", class: "postcheck_failed", at: at, ok: true}, want: StateWarning},
+		"security":    {upd: &HostUpdates{Total: 3, Security: 1, ObservedAt: at}, want: StateWarning},
+		"reboot":      {upd: &HostUpdates{RebootRequired: true, ObservedAt: at}, want: StateWarning},
+		"clean":       {run: lastRun{action: "package.list_updates", class: "success", at: at, ok: true}, upd: &HostUpdates{Total: 2, ObservedAt: at}, want: StateReady},
+	} {
+		if got := evaluate(tc.run, tc.upd); got.State != tc.want {
+			t.Errorf("%s: %+v", name, got)
+		}
+	}
+}
+
+type sentEvents struct{ events []notify.Event }
+
+func (s *sentEvents) Name() string { return "test" }
+func (s *sentEvents) Send(_ context.Context, e notify.Event) error {
+	s.events = append(s.events, e)
+	return nil
+}
+
+func TestOpsStateTransitionsNotifyOnce(t *testing.T) {
+	f := &fakeExec{approved: true}
+	s, _ := setup(t, f)
+	sent := &sentEvents{}
+	s.SetNotifier(notify.NewWithSenders(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, sent))
+	run := func() {
+		c, err := s.Create(context.Background(), "axel", "core.facts", []string{"web"}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		waitState(t, s, c.ID, "finished")
+	}
+	run() // first state: READY, no transition to notify
+	f.mu.Lock()
+	f.attachErr = status.Error(codes.Unavailable, "x")
+	f.mu.Unlock()
+	run() // not_executed -> UNKNOWN
+	run() // same state again: no repeat
+	f.mu.Lock()
+	f.attachErr = nil
+	f.mu.Unlock()
+	run() // recovered
+	states, err := s.AllOpsStates(context.Background())
+	if err != nil || states["web"].State != StateReady {
+		t.Fatalf("%v %v", states, err)
+	}
+	if len(sent.events) != 2 || sent.events[0].State != StateUnknown || !strings.Contains(sent.events[1].Reason, "recovered") {
+		t.Fatalf("%+v", sent.events)
+	}
+}
+
+func TestParamsAreValidatedAndCarried(t *testing.T) {
+	f := &fakeExec{approved: true}
+	s, _ := setup(t, f)
+	ctx := context.Background()
+	var pe *ParamError
+	if _, err := s.Create(ctx, "axel", "service.restart", []string{"web"}, map[string]string{"unit": "-evil"}); !errors.As(err, &pe) {
+		t.Fatalf("bad unit: %v", err)
+	}
+	if _, err := s.Create(ctx, "axel", "core.facts", []string{"web"}, map[string]string{"x": "y"}); !errors.As(err, &pe) {
+		t.Fatalf("params for a parameterless action: %v", err)
+	}
+	c, err := s.Create(ctx, "axel", "service.restart", []string{"web"}, map[string]string{"unit": "nginx.service"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, s, c.ID, "finished")
+	ph, _ := canonical.HashParameters([]byte(`{"unit":"nginx.service"}`))
+	if f.proposed.GetRequest().GetParametersHash() != ph || string(f.proposed.GetParametersJson()) != `{"unit":"nginx.service"}` ||
+		string(f.attached[0].GetRun().GetParametersJson()) != `{"unit":"nginx.service"}` {
+		t.Fatalf("params not carried: %v %v", f.proposed, f.attached[0])
+	}
+}
+
+type lockedSender struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (l *lockedSender) Name() string { return "locked" }
+func (l *lockedSender) Send(context.Context, notify.Event) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.n++
+	return nil
+}
+
+// Runs finishing at once on one host must not both report the same
+// transition (Hermes review).
+func TestConcurrentRunsNotifyATransitionOnce(t *testing.T) {
+	s, _ := setup(t, &fakeExec{approved: true})
+	sent := &lockedSender{}
+	s.SetNotifier(notify.NewWithSenders(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, sent))
+	ctx := context.Background()
+	s.refreshOpsState(ctx, "web", lastRun{action: "core.facts", class: "success", at: s.now(), ok: true})
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.refreshOpsState(ctx, "web", lastRun{action: "core.facts", class: "not_executed", at: s.now(), ok: true})
+		}()
+	}
+	wg.Wait()
+	if sent.n != 1 {
+		t.Fatalf("%d notifications for one transition", sent.n)
 	}
 }

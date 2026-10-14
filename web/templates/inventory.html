@@ -3,6 +3,7 @@
 {{if .InventoryEditable}}
 <section class="panel" aria-label="Add host">
   <h2>Add host</h2>
+  <p class="hint">Many hosts at once: <a href="/inventory/import">Import CSV</a></p>
   <form id="host-form" class="form">
     <label>ID
       <input name="id" id="host-id" required pattern="[a-z0-9][a-z0-9._-]{0,62}" autocomplete="off">
@@ -51,7 +52,9 @@
         <th>Environment</th>
         <th>Criticality</th>
         <th>Endpoints</th>
+        <th>State</th>
         <th>SSH key</th>
+        <th>Updates</th>
         {{if .InventoryEditable}}<th>Actions</th>{{end}}
       </tr>
     </thead>
@@ -64,7 +67,9 @@
         <td>{{.Environment}}</td>
         <td>{{.Criticality}}</td>
         <td>{{range $i, $e := .Endpoints}}{{if $i}}, {{end}}{{$e}}{{end}}</td>
+        <td><span class="ops ops--{{.OpsState}}">{{.OpsState}}</span> <span class="hint">{{.OpsReason}}</span></td>
         <td>{{.KeyStatus}}</td>
+        <td>{{if .UpdatesAlert}}<span class="status--error">{{.Updates}}</span>{{else}}{{.Updates}}{{end}}</td>
         {{if $.InventoryEditable}}
         <td class="inventory__actions">
           <button type="button" class="button inventory__edit">Edit</button>

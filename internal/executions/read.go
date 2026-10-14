@@ -31,6 +31,8 @@ type Execution struct {
 	CreatedAt      time.Time
 	FinishedAt     time.Time
 	Hosts          []Host
+	// Params is the JSON object of the parameters.
+	Params string
 }
 
 // Host is one host of an execution. Result and Log are untrusted host
@@ -65,9 +67,9 @@ func (s *Service) Get(ctx context.Context, id string) (Execution, error) {
 	var timeout, created, expiry int64
 	var finished sql.NullInt64
 	err := s.db.QueryRowContext(ctx, `SELECT id, digest, action_id, module_version, artifact_sha256, risk, requirement, state, detail,
-			durable, timeout_s, options, approval_expiry, created_by, created_at, finished_at FROM executions WHERE id = ?`, id).
+			durable, timeout_s, options, approval_expiry, created_by, created_at, finished_at, params FROM executions WHERE id = ?`, id).
 		Scan(&e.ID, &e.Digest, &e.ActionID, &e.ModuleVersion, &e.ArtifactSHA256, &e.Risk, &e.Requirement, &e.State, &e.Detail,
-			&durable, &timeout, &e.Options, &expiry, &e.CreatedBy, &created, &finished)
+			&durable, &timeout, &e.Options, &expiry, &e.CreatedBy, &created, &finished, &e.Params)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Execution{}, ErrNotFound
 	}

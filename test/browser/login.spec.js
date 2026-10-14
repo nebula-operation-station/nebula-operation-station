@@ -85,6 +85,35 @@ function check(cond, what) {
   check(finished && /success/.test(main) && /Kernel/.test(main) && /Linux/.test(main), 'approved operation ran on the host and shows its facts');
   await page.goto(base + '/operations');
   check(/core\.facts/.test(await page.textContent('main')), 'the operation is listed');
+
+  // Check updates on the same host (a real apt simulation on the test machine).
+  await page.goto(base + '/operations/new');
+  await page.check('input[name="action"][value="package.list_updates"]');
+  await page.check('input[name="host"][value="e2e-host"]');
+  await Promise.all([page.waitForURL(/\/operations\/[0-9a-f-]{36}$/, { timeout: 15000 }), page.click('#operation-create')]);
+  await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('#operation-approve')]);
+  finished = false;
+  for (let i = 0; i < 60 && !finished; i++) {
+    finished = /State: finished/.test(await page.textContent('main'));
+    if (!finished) { await new Promise((r) => setTimeout(r, 500)); await page.reload(); }
+  }
+  check(finished && /\d+ updates, \d+ security/.test(await page.textContent('main')), 'update check ran and shows the update list');
+  await page.goto(base + '/inventory');
+  check(/checked \d{4}-\d{2}-\d{2}/.test(await page.textContent('tr[data-id="e2e-host"]')), 'the inventory shows the update status');
+  check(/(READY|WARNING)/.test(await page.textContent('tr[data-id="e2e-host"]')), 'the inventory shows the Ops State');
+  // Service actions take a unit name; the server refuses anything but a plain unit name.
+  await page.goto(base + '/operations/new');
+  check(await page.locator('label.param[data-action="service.restart"]').isHidden(), 'parameter fields stay hidden until their action is chosen');
+  await page.check('input[name="action"][value="service.restart"]');
+  await page.check('input[name="host"][value="e2e-host"]');
+  check(await page.locator('label.param[data-action="service.restart"]').isVisible(), 'choosing a service action shows its unit field');
+  await page.fill('label.param[data-action="service.restart"] input', '-x');
+  await page.click('#operation-create');
+  await page.waitForFunction(() => /unit/.test(document.getElementById('message').textContent), null, { timeout: 15000 });
+  check(/\/operations\/new$/.test(page.url()), 'an invalid unit name is refused before anything is proposed');
+  await page.fill('label.param[data-action="service.restart"] input', 'cron.service');
+  await Promise.all([page.waitForURL(/\/operations\/[0-9a-f-]{36}$/, { timeout: 15000 }), page.click('#operation-create')]);
+  check(/service\.restart .*with \{"unit":"cron\.service"\}/.test(await page.textContent('main')), 'the planned service operation shows its parameters');
   await page.goto(base + '/dashboard');
   await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('#executor-lock')]);
   check(/Privileged session: none/.test(await page.textContent('main')), 'lock ends the privileged session');
@@ -114,6 +143,24 @@ function check(cond, what) {
   await row().locator('.inventory__delete-confirm').fill('web-01');
   await Promise.all([page.waitForNavigation({ timeout: 15000 }), row().locator('.inventory__delete').click()]);
   check(await row().count() === 0, 'host deleted after typing its ID');
+
+  // CSV import: map columns, preview, import the importable rows.
+  await page.goto(base + '/inventory/import');
+  await page.setInputFiles('#csv-file', { name: 'hosts.csv', mimeType: 'text/csv',
+    buffer: Buffer.from('server_name,ip,vpn_ip,env\ncsv-01,10.0.0.1,10.8.0.1,PROD\ncsv-02,10.0.0.2,,DEV\ncsv-bad,not an ip,,DEV\n') });
+  await page.waitForSelector('#mapping-panel:not([hidden])', { timeout: 15000 });
+  await page.selectOption('select[data-field="id"]', 'server_name');
+  await page.selectOption('select[data-field="endpoint1"]', 'ip');
+  await page.selectOption('select[data-field="endpoint2"]', 'vpn_ip');
+  await page.selectOption('select[data-field="environment"]', 'env');
+  await page.click('#import-preview');
+  await page.waitForSelector('#preview-panel:not([hidden])', { timeout: 15000 });
+  check(await page.isDisabled('.import-row[value="3"]') && await page.isChecked('.import-row[value="1"]'), 'CSV preview marks the bad row as not importable');
+  await page.click('#import-commit');
+  await page.waitForSelector('#result-panel:not([hidden])', { timeout: 15000 });
+  check((await page.textContent('#results')).split('created').length === 3, 'two rows imported');
+  await page.goto(base + '/inventory');
+  check(await page.locator('tr[data-id="csv-01"]').count() === 1 && await page.locator('tr[data-id="csv-02"]').count() === 1, 'imported hosts are in the inventory');
   await page.goto(base + '/dashboard');
 
   const cookies = await ctx.cookies();

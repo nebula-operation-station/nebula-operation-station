@@ -4,6 +4,7 @@ package ui_test
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -31,7 +32,7 @@ type fakeOps struct {
 	exec       executions.Execution
 }
 
-func (f *fakeOps) Create(_ context.Context, user, action string, hosts []string) (executions.Created, error) {
+func (f *fakeOps) Create(_ context.Context, user, action string, hosts []string, _ map[string]string) (executions.Created, error) {
 	if f.createErr != nil {
 		return executions.Created{}, f.createErr
 	}
@@ -49,6 +50,14 @@ func (f *fakeOps) Get(_ context.Context, id string) (executions.Execution, error
 		return executions.Execution{}, executions.ErrNotFound
 	}
 	return f.exec, nil
+}
+
+func (f *fakeOps) AllUpdates(context.Context) (map[string]executions.HostUpdates, error) {
+	return map[string]executions.HostUpdates{"web": {HostID: "web", Total: 3, Security: 1, RebootRequired: true, ObservedAt: time.Unix(1791960000, 0)}}, nil
+}
+
+func (f *fakeOps) AllOpsStates(context.Context) (map[string]executions.OpsState, error) {
+	return map[string]executions.OpsState{"web": {State: "WARNING", Reason: "1 security updates", ObservedAt: time.Unix(1791960000, 0)}}, nil
 }
 
 func (f *fakeOps) List(context.Context, int) ([]executions.Summary, error) {
@@ -168,6 +177,8 @@ func TestOperationErrorsAreSafeForTheBrowser(t *testing.T) {
 			code: http.StatusInternalServerError, want: "operations unavailable", notWant: "server.db"},
 		"bad key": {approve: status.Error(codes.PermissionDenied, "assertion_invalid: signature does not verify"), path: "/operations/approve",
 			code: http.StatusForbidden, want: "security key not accepted", notWant: "signature"},
+		"bad parameter": {create: &executions.ParamError{Reason: "unit: not a valid value"}, path: "/operations/create",
+			code: http.StatusBadRequest, want: "unit: not a valid value"},
 		"not pending": {approve: executions.ErrNotPending, path: "/operations/approve", code: http.StatusConflict, want: "not waiting"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -182,5 +193,68 @@ func TestOperationErrorsAreSafeForTheBrowser(t *testing.T) {
 				t.Fatalf("%d %s", code, resp)
 			}
 		})
+	}
+}
+
+func TestUpdatesAreShownAsText(t *testing.T) {
+	sim := base64.StdEncoding.EncodeToString([]byte("Inst open<b>ssl [1] (2 Debian-Security:12/stable-security [amd64])\nInst openssl [3.0.1] (3.0.2 Debian-Security:12/stable-security [amd64])\n"))
+	f := &fakeOps{exec: executions.Execution{ID: opID, ActionID: "package.list_updates", State: "finished", CreatedAt: time.Unix(1791960000, 0),
+		Hosts: []executions.Host{{HostID: "web", State: "finished", Class: "success",
+			Result: []byte(`{"format":"apt-simulate-v1","mode":"upgrade","simulate":"` + sim + `","reboot_required":true,"reboot_pkgs":"","lists_mtime":0,"proxmox":false}`)}}}}
+	h := opsHandler(t, f, nil)
+	page := getBody(t, h, "/operations/"+opID)
+	if !strings.Contains(page, "1 updates, 1 security") || !strings.Contains(page, "<td>openssl</td><td>3.0.1</td><td>3.0.2</td>") || strings.Contains(page, "open<b>") {
+		t.Fatalf("page: %s", page)
+	}
+	o := ui.Options{PublicOrigin: "https://nebula.example.org", Operations: f,
+		Hosts: func(context.Context) ([]inventory.Host, error) { return []inventory.Host{{ID: "web"}}, nil }}
+	inv := getBody(t, newTestHandler(t, o).Handler(), "/inventory")
+	if !strings.Contains(inv, "1 security / 3 total, reboot required, checked 2026-10-14") || !strings.Contains(inv, ">WARNING</span>") ||
+		!strings.Contains(inv, "· 1 security updates") {
+		t.Fatalf("inventory: %s", inv)
+	}
+}
+
+func TestInstallResultsAreShown(t *testing.T) {
+	enc := base64.StdEncoding.EncodeToString
+	res := `{"format":"apt-install-v1","phase":"done","mode":"install_security","apt_exit":0,"packages":"` + enc([]byte("openssl\n")) +
+		`","dpkg_audit_clean":true,"reboot_required":true,"new_failed_units":"` + enc([]byte("nginx<b>.service\n")) + `","docker":""}`
+	pre := `{"format":"apt-install-v1","phase":"precheck","reason":"less than 500 MB free on /var"}`
+	f := &fakeOps{exec: executions.Execution{ID: opID, ActionID: "package.install_security", State: "finished", CreatedAt: time.Unix(1791960000, 0),
+		Hosts: []executions.Host{
+			{HostID: "a", State: "finished", Class: "success", Result: []byte(res)},
+			{HostID: "b", State: "finished", Class: "precheck_failed", Result: []byte(pre)},
+		}}}
+	page := getBody(t, opsHandler(t, f, nil), "/operations/"+opID)
+	for _, want := range []string{"1 packages", "reboot required", "WARNING: units failed since the update: nginx&lt;b&gt;.service",
+		"Precheck failed: less than 500 MB free on /var. Nothing was installed."} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page misses %q", want)
+		}
+	}
+}
+
+func TestServiceResultsAreShown(t *testing.T) {
+	enc := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	list := `{"format":"systemd-units-v1","units":"` + enc("nginx.service loaded failed failed Web <b>server</b>\n") + `"}`
+	f := &fakeOps{exec: executions.Execution{ID: opID, ActionID: "service.list", State: "finished", CreatedAt: time.Unix(1791960000, 0),
+		Hosts: []executions.Host{{HostID: "a", State: "finished", Class: "success", Result: []byte(list)}}}}
+	page := getBody(t, opsHandler(t, f, nil), "/operations/"+opID)
+	for _, want := range []string{"<td>nginx.service</td>", `<span class="status--error">failed</span>`, "Web &lt;b&gt;server&lt;/b&gt;"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("list page misses %q", want)
+		}
+	}
+	st := `{"format":"systemd-status-v1","phase":"done","verb":"restart","exit":0,"show":"` + enc("ActiveState=active\n") +
+		`","journal":"` + enc("started <script>\n") + `"}`
+	f.exec = executions.Execution{ID: opID, ActionID: "service.restart", State: "finished", CreatedAt: time.Unix(1791960000, 0),
+		Params: `{"unit":"nginx.service"}`,
+		Hosts:  []executions.Host{{HostID: "a", State: "finished", Class: "success", Result: []byte(st)}}}
+	page = getBody(t, opsHandler(t, f, nil), "/operations/"+opID)
+	for _, want := range []string{"systemctl restart: exit status 0", "<th>ActiveState</th><td>active</td>", "started &lt;script&gt;",
+		"nginx.service"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("status page misses %q", want)
+		}
 	}
 }

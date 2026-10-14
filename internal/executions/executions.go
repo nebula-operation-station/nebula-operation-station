@@ -30,6 +30,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
@@ -83,8 +84,10 @@ var stagePlanHash = func() string {
 	return s
 }()
 
-// emptyParams are the parameters of the built-in actions.
-var emptyParams = []byte(`{}`)
+// ParamError is an invalid action parameter (it describes the input).
+type ParamError struct{ Reason string }
+
+func (e *ParamError) Error() string { return e.Reason }
 
 // Service is safe for concurrent use.
 type Service struct {
@@ -93,6 +96,11 @@ type Service struct {
 	hosts Hosts
 	log   *slog.Logger
 	now   func() time.Time
+
+	notifier *notify.Notifier
+	// opsMu serializes Ops State evaluations, so two runs finishing at
+	// once on one host cannot both see the old state and notify twice.
+	opsMu sync.Mutex
 
 	mu      sync.Mutex
 	running map[string]bool // executions with a dispatcher in this process
@@ -138,10 +146,20 @@ type target struct {
 }
 
 // Create plans an execution of a built-in action on hosts and proposes it.
-func (s *Service) Create(ctx context.Context, user, actionID string, hostIDs []string) (Created, error) {
+func (s *Service) Create(ctx context.Context, user, actionID string, hostIDs []string, params map[string]string) (Created, error) {
 	a, ok := actions.Lookup(actionID)
 	if !ok {
 		return Created{}, ErrUnknownAction
+	}
+	if params == nil {
+		params = map[string]string{}
+	}
+	if err := a.ValidParams(params); err != nil {
+		return Created{}, &ParamError{Reason: err.Error()}
+	}
+	paramsJSON, err := json.Marshal(params)
+	if err != nil {
+		return Created{}, err
 	}
 	if len(hostIDs) == 0 {
 		return Created{}, ErrNoHosts
@@ -199,7 +217,7 @@ func (s *Service) Create(ctx context.Context, user, actionID string, hostIDs []s
 	if err != nil {
 		return Created{}, err
 	}
-	ph, err := canonical.HashParameters(emptyParams)
+	ph, err := canonical.HashParameters(paramsJSON)
 	if err != nil {
 		return Created{}, err
 	}
@@ -214,7 +232,7 @@ func (s *Service) Create(ctx context.Context, user, actionID string, hostIDs []s
 	for _, t := range targets {
 		req.ResolvedTargets = append(req.ResolvedTargets, &pb.Target{HostId: t.host, HostKeyFingerprint: t.fp})
 	}
-	p, err := s.exec.ProposeExecution(cctx, &pb.ProposeExecutionRequest{Request: req, ParametersJson: emptyParams, RaiseToMinimum: true})
+	p, err := s.exec.ProposeExecution(cctx, &pb.ProposeExecutionRequest{Request: req, ParametersJson: paramsJSON, RaiseToMinimum: true})
 	if err != nil {
 		return Created{}, err
 	}
@@ -229,9 +247,9 @@ func (s *Service) Create(ctx context.Context, user, actionID string, hostIDs []s
 	}
 	defer tx.Rollback() //nolint:errcheck
 	if _, err := tx.ExecContext(ctx, `INSERT INTO executions (id, digest, action_id, module_version, artifact_sha256, risk, requirement, state,
-			durable, timeout_s, options, approval_expiry, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			durable, timeout_s, options, approval_expiry, created_by, created_at, params) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, p.GetExecutionDigest(), a.ID, a.Version, a.SHA256(), c.Risk, c.Requirement, state, boolInt(a.Durable),
-		int64(a.Timeout/time.Second), p.GetRequestOptionsJson(), p.GetChallengeExpiryUnix(), user, s.now().Unix()); err != nil {
+		int64(a.Timeout/time.Second), p.GetRequestOptionsJson(), p.GetChallengeExpiryUnix(), user, s.now().Unix(), string(paramsJSON)); err != nil {
 		return Created{}, fmt.Errorf("store execution: %w", err)
 	}
 	for _, t := range targets {
@@ -375,7 +393,7 @@ func (s *Service) fail(id, detail string) {
 
 func (s *Service) runHost(ctx context.Context, e Execution, a actions.Action, h Host) {
 	run := &pb.AuthorizeRunRequest{ExecutionDigest: e.Digest, HostId: h.HostID, HostKeyFingerprint: h.Fingerprint,
-		ActionId: a.ID, ModuleVersion: a.Version, Artifact: a.Script, ParametersJson: emptyParams, CredentialRef: h.CredentialRef}
+		ActionId: a.ID, ModuleVersion: a.Version, Artifact: a.Script, ParametersJson: []byte(e.Params), CredentialRef: h.CredentialRef}
 	if h.State == "waiting" {
 		if _, err := s.db.ExecContext(ctx, `UPDATE execution_hosts SET state = 'running', started_at = ? WHERE execution_id = ? AND host_id = ?`,
 			s.now().Unix(), e.ID, h.HostID); err != nil {
@@ -386,21 +404,21 @@ func (s *Service) runHost(ctx context.Context, e Execution, a actions.Action, h 
 			r, err := s.exec.RunAttached(cctx, &pb.RunAttachedRequest{Run: run, Endpoints: h.Endpoints, TimeoutSeconds: uint32(a.Timeout / time.Second)})
 			cancel()
 			if err != nil {
-				s.finishHost(e.ID, h.HostID, "not_executed", refusal(err), -1, nil, nil, false)
+				s.finishHost(e.ID, a.ID, h.HostID, "not_executed", refusal(err), -1, nil, nil, false)
 				return
 			}
-			s.finishHost(e.ID, h.HostID, r.GetClass(), r.GetDetail(), int(r.GetExitCode()), r.GetResult(), r.GetLog(), r.GetLogTruncated())
+			s.finishHost(e.ID, a.ID, h.HostID, r.GetClass(), r.GetDetail(), int(r.GetExitCode()), r.GetResult(), r.GetLog(), r.GetLogTruncated())
 			return
 		}
 		cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		r, err := s.exec.StartDurable(cctx, &pb.StartDurableRequest{Run: run, Endpoints: h.Endpoints, TimeoutSeconds: uint32(a.Timeout / time.Second)})
 		cancel()
 		if err != nil {
-			s.finishHost(e.ID, h.HostID, "not_executed", refusal(err), -1, nil, nil, false)
+			s.finishHost(e.ID, a.ID, h.HostID, "not_executed", refusal(err), -1, nil, nil, false)
 			return
 		}
 		if st := r.GetRun(); st.GetState() == "finished" {
-			s.finishHost(e.ID, h.HostID, st.GetClass(), st.GetDetail(), int(st.GetExitCode()), st.GetResult(), st.GetLog(), st.GetLogTruncated())
+			s.finishHost(e.ID, a.ID, h.HostID, st.GetClass(), st.GetDetail(), int(st.GetExitCode()), st.GetResult(), st.GetLog(), st.GetLogTruncated())
 			return
 		}
 	}
@@ -415,7 +433,7 @@ func (s *Service) runHost(ctx context.Context, e Execution, a actions.Action, h 
 		cancel()
 		if err == nil && r.GetRun().GetState() == "finished" {
 			st := r.GetRun()
-			s.finishHost(e.ID, h.HostID, st.GetClass(), st.GetDetail(), int(st.GetExitCode()), st.GetResult(), st.GetLog(), st.GetLogTruncated())
+			s.finishHost(e.ID, a.ID, h.HostID, st.GetClass(), st.GetDetail(), int(st.GetExitCode()), st.GetResult(), st.GetLog(), st.GetLogTruncated())
 			cctx, cancel := context.WithTimeout(ctx, callTimeout)
 			if _, err := s.exec.GetRun(cctx, &pb.GetRunRequest{ExecutionId: e.ID, HostId: h.HostID, Release: true}); err != nil {
 				s.log.Warn("release run", "execution", e.ID, "host", h.HostID, "error", err.Error())
@@ -424,7 +442,7 @@ func (s *Service) runHost(ctx context.Context, e Execution, a actions.Action, h 
 			return
 		}
 		if status.Code(err) == codes.NotFound {
-			s.finishHost(e.ID, h.HostID, "unknown", "the executor has no record of this run", -1, nil, nil, false)
+			s.finishHost(e.ID, a.ID, h.HostID, "unknown", "the executor has no record of this run", -1, nil, nil, false)
 			return
 		}
 		select {
@@ -450,7 +468,7 @@ func refusal(err error) string {
 	return "refused by the executor: " + msg
 }
 
-func (s *Service) finishHost(id, host, class, detail string, exit int, result, log []byte, truncated bool) {
+func (s *Service) finishHost(id, actionID, host, class, detail string, exit int, result, log []byte, truncated bool) {
 	if len(detail) > 1000 {
 		detail = detail[:1000]
 	}
@@ -461,6 +479,8 @@ func (s *Service) finishHost(id, host, class, detail string, exit int, result, l
 		return
 	}
 	s.log.Info("audit", "kind", "execution_host_finished", "execution", id, "host", host, "class", class, "exit", exit)
+	s.observe(id, actionID, host, class, result)
+	s.refreshOpsState(s.ctx, host, lastRun{action: actionID, class: class, at: s.now(), ok: true})
 }
 
 func boolInt(b bool) int {

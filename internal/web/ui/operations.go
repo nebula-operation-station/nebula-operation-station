@@ -18,15 +18,37 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/osdebian"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
 )
 
 // Operations plans and follows executions (executions.Service).
 type Operations interface {
-	Create(ctx context.Context, user, actionID string, hosts []string) (executions.Created, error)
+	Create(ctx context.Context, user, actionID string, hosts []string, params map[string]string) (executions.Created, error)
 	Approve(ctx context.Context, user, id string, assertion []byte, typedTargets uint32) error
 	Get(ctx context.Context, id string) (executions.Execution, error)
 	List(ctx context.Context, limit int) ([]executions.Summary, error)
+	AllUpdates(ctx context.Context) (map[string]executions.HostUpdates, error)
+	AllOpsStates(ctx context.Context) (map[string]executions.OpsState, error)
+}
+
+// updatesSummary is the inventory text of an update list and whether it
+// needs attention (security updates or a reboot).
+func updatesSummary(u executions.HostUpdates) (string, bool) {
+	var parts []string
+	if u.Total == 0 {
+		parts = append(parts, "up to date")
+	} else {
+		parts = append(parts, strconv.Itoa(u.Security)+" security / "+strconv.Itoa(u.Total)+" total")
+		if u.Kernel > 0 {
+			parts = append(parts, "kernel")
+		}
+	}
+	if u.RebootRequired {
+		parts = append(parts, "reboot required")
+	}
+	parts = append(parts, "checked "+u.ObservedAt.UTC().Format("2006-01-02 15:04 MST"))
+	return strings.Join(parts, ", "), u.Security > 0 || u.RebootRequired
 }
 
 const (
@@ -53,6 +75,11 @@ type opsRow struct {
 type actionView struct {
 	ID, Title, Description, Risk string
 	ReadOnly                     bool
+	Params                       []paramView
+}
+
+type paramView struct {
+	Name, Label, Pattern string
 }
 
 type opsHostOption struct {
@@ -61,7 +88,7 @@ type opsHostOption struct {
 }
 
 type execView struct {
-	ID, Action, Version, Risk, Requirement, State, Detail, Digest, CreatedBy, Created string
+	ID, Action, Version, Risk, Requirement, State, Detail, Digest, CreatedBy, Created, Params string
 	// Options is the WebAuthn request options JSON while approval is
 	// pending (rendered into a data attribute, escaped by html/template).
 	Options                        string
@@ -72,9 +99,16 @@ type execView struct {
 type execHostView struct {
 	ID, State, Class, Detail, Exit string
 	Facts                          []executions.Fact
-	Result, Log                    string
-	ResultCut, LogCut, LogTrunc    bool
-	OK                             bool
+	// Updates is the parsed package.list_updates result.
+	Updates *updatesView
+	// Install is the parsed package.install_* result.
+	Install *osdebian.Install
+	// Units and Service are the parsed service.* results.
+	Units                       []osdebian.Unit
+	Service                     *osdebian.ServiceStatus
+	Result, Log                 string
+	ResultCut, LogCut, LogTrunc bool
+	OK                          bool
 }
 
 func (h *Handler) operationsEnabled(w http.ResponseWriter, r *http.Request) bool {
@@ -116,8 +150,12 @@ func (h *Handler) handleOperationNew(w http.ResponseWriter, r *http.Request) {
 	data := pageData{Title: "New operation", Active: "operations", Content: "operation_new", Scripts: []string{"webauthn.js", "operations.js"}}
 	ops := &operationsData{}
 	for _, a := range actions.Builtin {
-		ops.Actions = append(ops.Actions, actionView{ID: a.ID, Title: a.Title, Description: a.Description,
-			Risk: strings.TrimPrefix(a.Risk.String(), "RISK_CLASS_"), ReadOnly: a.ReadOnly})
+		v := actionView{ID: a.ID, Title: a.Title, Description: a.Description,
+			Risk: strings.TrimPrefix(a.Risk.String(), "RISK_CLASS_"), ReadOnly: a.ReadOnly}
+		for _, p := range a.Params {
+			v.Params = append(v.Params, paramView{Name: p.Name, Label: p.Label, Pattern: strings.TrimSuffix(strings.TrimPrefix(p.Pattern.String(), "^"), "$")})
+		}
+		ops.Actions = append(ops.Actions, v)
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), inventoryCallTimeout)
 	defer cancel()
@@ -191,6 +229,9 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 		Detail: e.Detail, Digest: e.Digest, CreatedBy: e.CreatedBy, Created: e.CreatedAt.UTC().Format("2006-01-02 15:04:05 MST"),
 		Pending: e.State == "pending", Live: e.State == "approved" || e.State == "running",
 		NeedsTypedCount: e.Requirement == "assertion_verified_typed_count"}
+	if e.Params != "" && e.Params != "{}" {
+		v.Params = e.Params
+	}
 	if v.Pending && len(e.Options) > 0 && json.Valid(e.Options) {
 		v.Options = string(e.Options)
 	}
@@ -201,6 +242,24 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 		}
 		if e.ActionID == "core.facts" && x.Class == "success" {
 			hv.Facts = executions.DecodeFacts(x.Result)
+		}
+		if strings.HasPrefix(e.ActionID, "package.install_") && len(x.Result) > 0 {
+			if in, err := osdebian.ParseInstall(x.Result); err == nil {
+				hv.Install = &in
+			}
+		}
+		if e.ActionID == "service.list" && x.Class == "success" {
+			hv.Units, _ = osdebian.ParseUnits(x.Result)
+		}
+		if strings.HasPrefix(e.ActionID, "service.") && e.ActionID != "service.list" && len(x.Result) > 0 {
+			if st, err := osdebian.ParseServiceStatus(x.Result); err == nil {
+				hv.Service = &st
+			}
+		}
+		if e.ActionID == "package.list_updates" && x.Class == "success" {
+			if u, err := osdebian.ParseUpdates(x.Result); err == nil {
+				hv.Updates = viewUpdates(u)
+			}
 		}
 		res := x.Result
 		var pretty bytes.Buffer
@@ -262,20 +321,22 @@ func (h *Handler) handleOperationCreate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var in struct {
-		Action string   `json:"action"`
-		Hosts  []string `json:"hosts"`
+		Action string            `json:"action"`
+		Hosts  []string          `json:"hosts"`
+		Params map[string]string `json:"params"`
 	}
 	if !readOpsJSON(w, r, &in) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
 	defer cancel()
-	c, err := h.operations.Create(ctx, webUser(r), in.Action, in.Hosts)
+	c, err := h.operations.Create(ctx, webUser(r), in.Action, in.Hosts, in.Params)
 	var he *executions.HostError
+	var pe *executions.ParamError
 	switch {
 	case err == nil:
 		writeJSON(w, http.StatusOK, map[string]any{"id": c.ID, "state": c.State, "risk": c.Risk})
-	case errors.Is(err, executions.ErrUnknownAction), errors.Is(err, executions.ErrNoHosts), errors.Is(err, executions.ErrTooManyHosts), errors.As(err, &he):
+	case errors.Is(err, executions.ErrUnknownAction), errors.Is(err, executions.ErrNoHosts), errors.Is(err, executions.ErrTooManyHosts), errors.As(err, &he), errors.As(err, &pe):
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 	default:
 		if st, ok := status.FromError(err); ok && st.Code() != codes.Unknown {
@@ -320,4 +381,49 @@ func (h *Handler) handleOperationApprove(w http.ResponseWriter, r *http.Request)
 			writeJSONError(w, http.StatusBadGateway, "executor unavailable")
 		}
 	}
+}
+
+// maxShownPackages bounds the update table on the page.
+const maxShownPackages = 500
+
+type updatesView struct {
+	Total, Security, Kernel int
+	Reboot                  bool
+	RebootPackages          string
+	ListsUpdated            string
+	Packages                []osdebian.Package
+	More                    int
+}
+
+func viewUpdates(u osdebian.Updates) *updatesView {
+	v := &updatesView{Total: len(u.Packages), Security: u.Security, Kernel: u.Kernel, Reboot: u.RebootRequired,
+		RebootPackages: strings.Join(u.RebootPackages, ", ")}
+	if !u.ListsUpdated.IsZero() {
+		v.ListsUpdated = u.ListsUpdated.UTC().Format("2006-01-02 15:04 MST")
+	}
+	v.Packages = u.Packages
+	if len(v.Packages) > maxShownPackages {
+		v.More = len(v.Packages) - maxShownPackages
+		v.Packages = v.Packages[:maxShownPackages]
+	}
+	return v
+}
+
+// opsStateView is the inventory text of a host's Ops State. A blocked pin
+// is UNREACHABLE whatever the last run said.
+func opsStateView(o executions.OpsState, keyStatus string) (string, string) {
+	if strings.HasPrefix(keyStatus, "BLOCKED") {
+		return executions.StateUnreachable, "host key mismatch: blocked until re-pinned"
+	}
+	if keyStatus == "not enrolled" {
+		return executions.StateUnknown, "not enrolled"
+	}
+	if o.State == "" {
+		return executions.StateUnknown, "not checked yet"
+	}
+	reason := o.Reason
+	if !o.ObservedAt.IsZero() {
+		reason = o.ObservedAt.UTC().Format("2006-01-02 15:04 MST") + " · " + reason
+	}
+	return o.State, reason
 }

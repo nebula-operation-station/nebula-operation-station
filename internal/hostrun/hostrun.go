@@ -30,7 +30,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -55,6 +54,14 @@ const (
 	ClassExecutionTimeout  = "execution_timeout"
 	ClassResultMissing     = "result_missing"
 	ClassPrecheckFailed    = "precheck_failed"
+	ClassPostcheckFailed   = "postcheck_failed"
+)
+
+// Exit statuses an action uses to report its own checks (adapter
+// convention; the result document says why).
+const (
+	ExitPrecheckFailed  = 10
+	ExitPostcheckFailed = 11
 )
 
 // Result of an attached run. Result and Log are untrusted host output.
@@ -229,24 +236,7 @@ func run(ctx context.Context, s Session, cmd string, timeout time.Duration, out,
 		res.Class, res.Detail = ClassPrecheckFailed, "the host could not prepare the run (needs /bin/sh, mktemp, base64 and a writable temp directory)"
 		return res
 	}
-	if res.ExitCode == 129 || res.ExitCode == 143 {
-		res.Class, res.Detail = ClassScriptInterrupted, fmt.Sprintf("interrupted (exit %d)", res.ExitCode)
-		return res
-	}
-	if res.ExitCode != 0 {
-		res.Class, res.Detail = ClassScriptFailed, fmt.Sprintf("exit status %d", res.ExitCode)
-		return res
-	}
-	switch {
-	case resultTooLarge:
-		res.Class, res.Detail, res.Result = ClassScriptFailed, "the result exceeds 1 MiB", nil
-	case len(bytes.TrimSpace(res.Result)) == 0:
-		res.Class, res.Detail = ClassResultMissing, "the script printed no result"
-	case !utf8.Valid(res.Result) || !oneJSONDocument(res.Result):
-		res.Class, res.Detail, res.Result = ClassScriptFailed, "stdout is not exactly one JSON document", nil
-	default:
-		res.Class = ClassSuccess
-	}
+	classify(&res, resultTooLarge)
 	return res
 }
 

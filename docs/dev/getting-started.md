@@ -119,6 +119,31 @@ nebula vault init    # optional: secret vault for API tokens (same passphrase re
 `nebula-server` has no systemd unit yet; run it directly for
 development (`bin/nebula-server`) if you need it.
 
+## Operations and patching
+
+With a pinned host (`nebula host enroll-script`, then `nebula host pin`)
+and an unlocked executor, the web UI's **Operations** page runs the
+built-in actions on enrolled hosts: collect facts, check updates, refresh
+package lists, install security updates, install all updates, reboot.
+Open a privileged session on the dashboard first; approve each operation
+with your security key.
+
+The executor decides the risk. A script it does not trust counts as at
+least HIGH, so every operation needs a fresh user-verified approval. To
+trust the built-in scripts at their declared level, read and trust them on
+the executor host:
+
+```
+nebula-server -export-actions /tmp/nebula-actions   # prints the trust commands
+less /tmp/nebula-actions/*.sh
+nebula artifact trust --action package.list_updates --version 1.0.0 --risk LOW /tmp/nebula-actions/package_list_updates-1.0.0.sh
+```
+
+Installing updates and rebooting run as durable jobs on the host (they
+need the `nebula` user's NOPASSWD sudo and systemd); the executor collects
+the result even across its own restarts. Nothing is installed or rebooted
+unless you start and approve it.
+
 ## Notifications (optional)
 
 Add a `notifications` block to `/etc/nebula/server.json` (any subset):
@@ -144,6 +169,6 @@ permits, executor-side WebAuthn verification, and the CLI unlock flow.
 See `docs/implementation/m0.md` for the full status, known gaps and
 decisions.
 
-Not yet available: most host management beyond enrollment and pinning
-(Milestone 3+), packaging (Milestone 10), and the discovery service.
+Not yet available: runbooks and modules, the stage engine (canary,
+waves), Docker and IPAM (Milestones 6+), packaging (Milestone 10), and the discovery service.
 Do not use this in production.

@@ -9,6 +9,13 @@
 
   const form = document.getElementById('operation-form');
   if (form) {
+    // Show the parameter fields of the chosen action only.
+    const showParams = () => {
+      const chosen = form.querySelector('input[name="action"]:checked');
+      for (const l of form.querySelectorAll('.param')) l.hidden = !chosen || l.dataset.action !== chosen.value;
+    };
+    for (const r of form.querySelectorAll('input[name="action"]')) r.addEventListener('change', showParams);
+    showParams();
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const action = form.querySelector('input[name="action"]:checked');
@@ -21,10 +28,16 @@
         w.show('Choose at least one host.', true);
         return;
       }
+      const params = {};
+      for (const l of form.querySelectorAll('.param')) {
+        if (l.dataset.action !== action.value) continue;
+        const input = l.querySelector('input');
+        params[input.dataset.param] = input.value.trim();
+      }
       const button = document.getElementById('operation-create');
       button.disabled = true;
       try {
-        const r = await w.post('/operations/create', { action: action.value, hosts });
+        const r = await w.post('/operations/create', { action: action.value, hosts, params });
         window.location.assign('/operations/' + encodeURIComponent(r.id));
       } catch (err) {
         w.show(err.message || 'Could not plan the operation.', true);

@@ -31,6 +31,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
@@ -164,9 +165,10 @@ var pageFiles = map[string]string{
 	"login":     "login.html",
 	"setup":     "setup.html",
 
-	"operations":    "operations.html",
-	"operation_new": "operation_new.html",
-	"operation":     "operation.html",
+	"operations":       "operations.html",
+	"inventory_import": "inventory_import.html",
+	"operation_new":    "operation_new.html",
+	"operation":        "operation.html",
 }
 
 // Handler returns the UI's http.Handler without the security middleware
@@ -181,6 +183,10 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("/inventory/hosts", h.handleHostCreate)
 	mux.HandleFunc("/inventory/hosts/update", h.handleHostUpdate)
 	mux.HandleFunc("/inventory/hosts/delete", h.handleHostDelete)
+	// CSV import (spec 12): page, preview, import of the selected rows.
+	mux.HandleFunc("GET /inventory/import", h.handleImportPage)
+	mux.HandleFunc("POST /inventory/import/preview", h.handleImportPreview)
+	mux.HandleFunc("POST /inventory/import/commit", h.handleImportCommit)
 	// Operations (M4): pages and the JSON endpoints their script calls.
 	mux.HandleFunc("GET /operations", h.handleOperations)
 	mux.HandleFunc("GET /operations/new", h.handleOperationNew)
@@ -295,6 +301,14 @@ type hostView struct {
 	// <fingerprint>", "BLOCKED (host key mismatch)", "not enrolled" or
 	// "executor unavailable".
 	KeyStatus string
+	// OpsState is READY, WARNING, UNREACHABLE or UNKNOWN (spec 12) and
+	// OpsReason its "time · reason" text.
+	OpsState  string
+	OpsReason string
+	// Updates summarizes the latest update check, "" if none.
+	Updates string
+	// UpdatesAlert marks pending security updates or a required reboot.
+	UpdatesAlert bool
 }
 
 func (h *Handler) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -390,11 +404,25 @@ func (h *Handler) handleInventory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	keys, keysUnavailable := h.hostKeyStatuses(ctx)
+	var updates map[string]executions.HostUpdates
+	var states map[string]executions.OpsState
+	if h.operations != nil {
+		if updates, err = h.operations.AllUpdates(ctx); err != nil {
+			h.log.Error("list host updates", "error", err)
+		}
+		if states, err = h.operations.AllOpsStates(ctx); err != nil {
+			h.log.Error("list ops states", "error", err)
+		}
+	}
 	for _, host := range hosts {
 		v := viewHost(host, keys)
 		if keysUnavailable {
 			v.KeyStatus = "executor unavailable"
 		}
+		if u, ok := updates[host.ID]; ok {
+			v.Updates, v.UpdatesAlert = updatesSummary(u)
+		}
+		v.OpsState, v.OpsReason = opsStateView(states[host.ID], v.KeyStatus)
 		data.Inventory = append(data.Inventory, v)
 	}
 	h.render(w, data)
