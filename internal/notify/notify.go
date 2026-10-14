@@ -37,6 +37,12 @@ const (
 	KindHostKeyMismatch = "host_key_mismatch"
 	KindTest            = "test"
 	KindOpsState        = "ops_state"
+	// KindExecution is an execution that finished with WARNING (some
+	// hosts failed) or FAILED (all hosts failed, or it could not run).
+	KindExecution = "execution"
+	// KindExecutorLocked is the executor found locked after a restart (or
+	// when the server starts): runs wait until `nebula unlock`.
+	KindExecutorLocked = "executor_locked"
 )
 
 // Event is one notification.
@@ -91,6 +97,10 @@ func (e Event) Title() string {
 		return "Nebula: test notification"
 	case KindOpsState:
 		return "Nebula: " + e.Host + " is " + e.State
+	case KindExecution:
+		return "Nebula: operation finished with " + e.State
+	case KindExecutorLocked:
+		return "Nebula: executor is locked"
 	}
 	return "Nebula: " + e.Kind + " " + e.Host
 }

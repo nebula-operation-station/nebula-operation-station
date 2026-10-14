@@ -380,15 +380,70 @@ func (s *Service) dispatch(id string) {
 	if ctx.Err() != nil {
 		return
 	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE executions SET state = 'finished', finished_at = ? WHERE id = ?
-		AND NOT EXISTS (SELECT 1 FROM execution_hosts WHERE execution_id = ? AND state != 'finished')`, s.now().Unix(), id, id); err != nil {
+	res, err := s.db.ExecContext(ctx, `UPDATE executions SET state = 'finished', finished_at = ? WHERE id = ? AND state != 'finished'
+		AND NOT EXISTS (SELECT 1 FROM execution_hosts WHERE execution_id = ? AND state != 'finished')`, s.now().Unix(), id, id)
+	if err != nil {
 		s.log.Error("execution finish", "execution", id, "error", err.Error())
+		return
 	}
 	s.log.Info("audit", "kind", "execution_finished", "execution", id)
+	if n, _ := res.RowsAffected(); n == 1 {
+		s.notifyFinished(ctx, id)
+	}
 }
 
 func (s *Service) fail(id, detail string) {
-	_, _ = s.db.ExecContext(s.ctx, `UPDATE executions SET state = 'failed', detail = ?, finished_at = ? WHERE id = ?`, detail, s.now().Unix(), id)
+	res, err := s.db.ExecContext(s.ctx, `UPDATE executions SET state = 'failed', detail = ?, finished_at = ? WHERE id = ? AND state != 'failed'`,
+		detail, s.now().Unix(), id)
+	if err != nil {
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 1 && s.notifier != nil {
+		action := ""
+		_ = s.db.QueryRowContext(s.ctx, `SELECT action_id FROM executions WHERE id = ?`, id).Scan(&action)
+		s.notifier.Notify(s.ctx, notify.Event{Kind: notify.KindExecution, State: "FAILED", ExecutionID: id,
+			Reason: action + ": " + detail, Time: s.now()})
+	}
+}
+
+// maxNotifiedHosts bounds the host list in an execution notification.
+const maxNotifiedHosts = 5
+
+// notifyFinished sends one notification for an execution that finished
+// with failed hosts (spec 13): FAILED if no host succeeded, WARNING if
+// some did. Successful executions are not notified. The message carries
+// hosts and result classes only, never host output.
+func (s *Service) notifyFinished(ctx context.Context, id string) {
+	if s.notifier == nil {
+		return
+	}
+	e, err := s.Get(ctx, id)
+	if err != nil {
+		return
+	}
+	var failed []string
+	for _, h := range e.Hosts {
+		if h.Class != "success" {
+			failed = append(failed, h.HostID+" ("+h.Class+")")
+		}
+	}
+	if len(failed) == 0 {
+		return
+	}
+	state := "WARNING"
+	if len(failed) == len(e.Hosts) {
+		state = "FAILED"
+	}
+	list := failed
+	if len(list) > maxNotifiedHosts {
+		list = append(list[:maxNotifiedHosts:maxNotifiedHosts], fmt.Sprintf("and %d more", len(failed)-maxNotifiedHosts))
+	}
+	host := ""
+	if len(e.Hosts) == 1 {
+		host = e.Hosts[0].HostID
+	}
+	s.notifier.Notify(ctx, notify.Event{Kind: notify.KindExecution, Host: host, State: state, ExecutionID: id, Time: s.now(),
+		Reason: fmt.Sprintf("%s: %d of %d hosts failed: %s", e.ActionID, len(failed), len(e.Hosts), strings.Join(list, ", "))})
 }
 
 func (s *Service) runHost(ctx context.Context, e Execution, a actions.Action, h Host) {

@@ -40,6 +40,7 @@ type fakeExec struct {
 	polls     int
 	released  bool
 	result    []byte
+	failHost  string
 }
 
 func (f *fakeExec) ListHostKeys(context.Context, *pb.ListHostKeysRequest, ...grpc.CallOption) (*pb.ListHostKeysResponse, error) {
@@ -75,6 +76,9 @@ func (f *fakeExec) RunAttached(_ context.Context, in *pb.RunAttachedRequest, _ .
 	res := []byte(`{"ok":true}`)
 	if f.result != nil {
 		res = f.result
+	}
+	if in.GetRun().GetHostId() == f.failHost {
+		return &pb.RunAttachedResponse{Class: "script_failed", ExitCode: 3, Result: res, Log: []byte("secret log line")}, nil
 	}
 	return &pb.RunAttachedResponse{Class: "success", ExitCode: 0, Result: res, Log: []byte("log")}, nil
 }
@@ -125,6 +129,7 @@ func setup(t *testing.T, f *fakeExec) (*Service, *sql.DB) {
 		"web": {ID: "web", Endpoints: []inventory.Endpoint{{Address: "10.0.0.5", Port: 22}, {Address: "fd00::5", Port: 2222}}},
 		"new": {ID: "new", Endpoints: []inventory.Endpoint{{Address: "10.0.0.6"}}},
 		"bad": {ID: "bad", Endpoints: []inventory.Endpoint{{Address: "10.0.0.7", Port: 22}}},
+		"db":  {ID: "db", Endpoints: []inventory.Endpoint{{Address: "10.0.0.8", Port: 22}}},
 	}
 	f.pins = []*pb.HostKeyPin{
 		{HostId: "web", Fingerprint: "SHA256:web", CredentialRef: "nebula-default"},
@@ -345,12 +350,40 @@ func TestEvaluateOpsState(t *testing.T) {
 	}
 }
 
-type sentEvents struct{ events []notify.Event }
+type sentEvents struct {
+	mu     sync.Mutex
+	events []notify.Event
+}
 
 func (s *sentEvents) Name() string { return "test" }
 func (s *sentEvents) Send(_ context.Context, e notify.Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.events = append(s.events, e)
 	return nil
+}
+
+// of returns the events of one kind sent so far.
+func (s *sentEvents) of(kind string) []notify.Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []notify.Event
+	for _, e := range s.events {
+		if e.Kind == kind {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// await waits until n events of kind were sent.
+func (s *sentEvents) await(t *testing.T, kind string, n int) []notify.Event {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for len(s.of(kind)) < n && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	return s.of(kind)
 }
 
 func TestOpsStateTransitionsNotifyOnce(t *testing.T) {
@@ -379,8 +412,9 @@ func TestOpsStateTransitionsNotifyOnce(t *testing.T) {
 	if err != nil || states["web"].State != StateReady {
 		t.Fatalf("%v %v", states, err)
 	}
-	if len(sent.events) != 2 || sent.events[0].State != StateUnknown || !strings.Contains(sent.events[1].Reason, "recovered") {
-		t.Fatalf("%+v", sent.events)
+	ops := sent.of(notify.KindOpsState)
+	if len(ops) != 2 || ops[0].State != StateUnknown || !strings.Contains(ops[1].Reason, "recovered") {
+		t.Fatalf("%+v", ops)
 	}
 }
 
@@ -404,6 +438,51 @@ func TestParamsAreValidatedAndCarried(t *testing.T) {
 	if f.proposed.GetRequest().GetParametersHash() != ph || string(f.proposed.GetParametersJson()) != `{"unit":"nginx.service"}` ||
 		string(f.attached[0].GetRun().GetParametersJson()) != `{"unit":"nginx.service"}` {
 		t.Fatalf("params not carried: %v %v", f.proposed, f.attached[0])
+	}
+}
+
+func TestFailedExecutionsNotifyOnce(t *testing.T) {
+	f := &fakeExec{approved: true}
+	s, _ := setup(t, f)
+	f.pins = append(f.pins, &pb.HostKeyPin{HostId: "db", Fingerprint: "SHA256:db", CredentialRef: "nebula-default"})
+	sent := &sentEvents{}
+	s.SetNotifier(notify.NewWithSenders(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, sent))
+	run := func(hosts ...string) string {
+		c, err := s.Create(context.Background(), "axel", "core.facts", hosts, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		waitState(t, s, c.ID, "finished")
+		return c.ID
+	}
+	run("web", "db") // all succeeded: nothing to tell
+	f.mu.Lock()
+	f.failHost = "db"
+	f.mu.Unlock()
+	partial := run("web", "db")
+	got := sent.await(t, notify.KindExecution, 1)
+	if len(got) != 1 || got[0].State != "WARNING" || got[0].ExecutionID != partial || got[0].Host != "" ||
+		got[0].Reason != "core.facts: 1 of 2 hosts failed: db (script_failed)" {
+		t.Fatalf("%+v", got)
+	}
+	f.mu.Lock()
+	f.attachErr = status.Error(codes.Unavailable, "x")
+	f.mu.Unlock()
+	all := run("web")
+	got = sent.await(t, notify.KindExecution, 2)
+	if len(got) != 2 || got[1].State != "FAILED" || got[1].Host != "web" || got[1].ExecutionID != all {
+		t.Fatalf("%+v", got)
+	}
+	for _, e := range got {
+		if strings.Contains(e.Reason, "log") {
+			t.Fatalf("host output in a notification: %+v", e)
+		}
+	}
+	// Finishing again (a resume) does not repeat the notification.
+	s.dispatch(all)
+	time.Sleep(50 * time.Millisecond)
+	if n := len(sent.of(notify.KindExecution)); n != 2 {
+		t.Fatalf("repeated: %d", n)
 	}
 }
 
