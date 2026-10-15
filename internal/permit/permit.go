@@ -265,6 +265,8 @@ type Options struct {
 	Store Store
 	// RiskPolicy is the executor's minimum risk. Required.
 	RiskPolicy RiskPolicy
+	// Schedules persists schedule grants; nil disables them.
+	Schedules ScheduleStore
 }
 
 // Authority owns all permits and the privileged session. It is safe for
@@ -277,6 +279,10 @@ type Authority struct {
 	audit    func(Event)
 	store    Store
 	risk     RiskPolicy
+	// schedules persists approved schedule grants (nil: disabled); grants
+	// holds the proposed ones until approval.
+	schedules ScheduleStore
+	grants    map[string]*pendingGrant
 
 	mu          sync.Mutex
 	permits     map[canonical.Digest]*Permit
@@ -319,6 +325,8 @@ func New(o Options) (*Authority, error) {
 		risk:       o.RiskPolicy,
 		permits:    map[canonical.Digest]*Permit{},
 		executions: map[string]canonical.Digest{},
+		schedules:  o.Schedules,
+		grants:     map[string]*pendingGrant{},
 	}, nil
 }
 
@@ -785,6 +793,9 @@ func (a *Authority) Lock(who string) {
 	a.sessChal, a.sessChalExp = nil, time.Time{}
 	n := len(a.permits)
 	a.permits = map[canonical.Digest]*Permit{}
+	// Pending schedule grants go too; approved ones stay (they need an
+	// unlocked keyring to run anyway, and are revoked one by one).
+	a.grants = map[string]*pendingGrant{}
 	// Execution IDs stay reserved so a revoked request cannot be re-bound to
 	// different content under the same ID.
 	a.emit(Event{Kind: "locked", Detail: fmt.Sprintf("by %s, %d permits revoked", who, n)})

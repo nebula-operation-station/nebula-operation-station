@@ -379,8 +379,12 @@ func toStatus(err error) error {
 	code := permit.CodeOf(err)
 	var c codes.Code
 	switch code {
-	case permit.CodeInvalidRequest, permit.CodeStagePlan, permit.CodeGateInvalid:
+	case permit.CodeInvalidRequest, permit.CodeStagePlan, permit.CodeGateInvalid, permit.CodeGrantInvalid:
 		c = codes.InvalidArgument
+	case permit.CodeScheduleUnavailable:
+		c = codes.Unimplemented
+	case permit.CodeTooSoon:
+		c = codes.ResourceExhausted
 	case permit.CodeNotFound:
 		c = codes.NotFound
 	case permit.CodeExecutionIDReused:
@@ -395,7 +399,8 @@ func toStatus(err error) error {
 	case permit.CodeAssertionRejected, permit.CodeTypedCountMismatch, permit.CodeRiskAboveApproval,
 		permit.CodeTargetNotPermitted, permit.CodeHostAlreadyRun, permit.CodeArtifactMismatch,
 		permit.CodeParametersMismatch, permit.CodeActionMismatch, permit.CodeCredentialMismatch,
-		permit.CodeStageNotOpen, permit.CodeRolloutStopped, permit.CodeRolloutAborted:
+		permit.CodeStageNotOpen, permit.CodeRolloutStopped, permit.CodeRolloutAborted,
+		permit.CodeGrantInactive, permit.CodeGrantNotCovered:
 		c = codes.PermissionDenied
 	default:
 		c = codes.Internal

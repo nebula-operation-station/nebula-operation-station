@@ -198,7 +198,7 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	auth, err := permit.New(permit.Options{Mode: o.mode, Verifier: verifier, Store: db, RiskPolicy: risk, Audit: executor.AuditLogger(log)})
+	auth, err := permit.New(permit.Options{Mode: o.mode, Verifier: verifier, Store: db, RiskPolicy: risk, Schedules: db, Audit: executor.AuditLogger(log)})
 	if err != nil {
 		t.Fatal(err)
 	}
