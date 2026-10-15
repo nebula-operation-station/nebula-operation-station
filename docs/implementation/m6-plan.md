@@ -1,8 +1,8 @@
-# Milestone 6 plan: stage engine (draft for discussion)
+# Milestone 6 plan: stage engine
 
-Status: **draft, not approved.** Nothing here is implemented. It turns
-spec 07 (stage engine) and spec 16 (Milestone 6) into a concrete plan and
-lists the decisions that need the maintainer before work starts.
+Status: **approved 2026-10-15** (decisions below). It turns spec 07 (stage
+engine) and spec 16 (Milestone 6) into a concrete plan; implementation
+follows the order at the end.
 
 ## What the spec asks for
 
@@ -104,26 +104,27 @@ A stage plan is part of what is approved, so it is hashed into
 - Retry/Skip/Abort audited; Skip needs the gate approval level.
 - Permit expiry: planned duration + margin, never above 24 h.
 
-## Decisions needed from the maintainer
+## Decisions (taken by the maintainer, 2026-10-15)
 
-1. **#23 first?** Retry of an unreachable host inside a stage relies on the
-   "unused for this host" rule proposed in #23. Without it, Retry means a
-   new approval.
-2. **Automatic continue for HIGH/CRITICAL rollouts:** spec 07 requires a
-   fresh assertion for HIGH gates. Should `continue: "auto"` be refused for
-   HIGH/CRITICAL plans (proposal: yes, auto only for LOW/MEDIUM)?
-3. **Who evaluates thresholds:** proposed is the executor, from its own run
-   records (server cannot fake success to open the next stage). This adds
-   state to the executor (`executor.db` migration for stage progress).
-4. **Skip approval level:** proposed is the same as a gate.
-5. **Scheduled read-only checks** (spec 01: the scheduler may run update
-   checks, facts): independent of stages, but also open. Spec 05 requires an
-   active privileged session for LOW. Options: (a) a standing, executor-held
-   "read-only schedule" grant created with a security key for a fixed set
-   of trusted read-only actions and hosts, with an expiry (e.g. 30 days),
-   revocable, audited; (b) no scheduling until the user opens a session;
-   (c) scheduling only on the executor host via `nebula` (cron). Proposal:
-   (a), limited to artifacts trusted as LOW and marked read-only.
+1. **#23 first: yes.** Retry classes are merged before the stage engine; a
+   host the run never reached stays unused in the permit, so Retry of an
+   unreachable host inside a stage needs no new approval.
+2. **Automatic continue only for LOW/MEDIUM.** A plan whose risk is HIGH or
+   CRITICAL cannot use `continue: "auto"`; every gate needs a fresh
+   assertion (spec 07).
+3. **The executor evaluates thresholds** from its own run records; the
+   server cannot report success to open the next stage. Stage progress is
+   executor state (`executor.db` migration).
+4. **Skip needs the same approval as a gate.**
+5. **Scheduled read-only checks: option (a).** A standing, executor-held
+   read-only schedule grant, created with a security key, for a fixed set of
+   actions and hosts, with an expiry (default 30 days), revocable and
+   audited; limited to actions that are LOW for the executor (trusted
+   artifacts) and marked read-only.
+
+Also decided for Milestone 8 (Docker): container start/stop/restart and the
+Compose update are MEDIUM, like service control; the registry digest check
+("update available") runs on the managed host as a LOW read-only action.
 
 ## Rough order of work
 
