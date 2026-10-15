@@ -5784,10 +5784,14 @@ type RunAttachedResponse struct {
 	// unless class is success or the script failed after printing it).
 	Result []byte `protobuf:"bytes,4,opt,name=result,proto3" json:"result,omitempty"`
 	// Untrusted host output: stderr, at most 10 MiB plus a marker.
-	Log           []byte `protobuf:"bytes,5,opt,name=log,proto3" json:"log,omitempty"`
-	LogTruncated  bool   `protobuf:"varint,6,opt,name=log_truncated,json=logTruncated,proto3" json:"log_truncated,omitempty"`
-	Endpoint      string `protobuf:"bytes,7,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
-	DurationMs    int64  `protobuf:"varint,8,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"`
+	Log          []byte `protobuf:"bytes,5,opt,name=log,proto3" json:"log,omitempty"`
+	LogTruncated bool   `protobuf:"varint,6,opt,name=log_truncated,json=logTruncated,proto3" json:"log_truncated,omitempty"`
+	Endpoint     string `protobuf:"bytes,7,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
+	DurationMs   int64  `protobuf:"varint,8,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"`
+	// The run never reached the host (network_unreachable: no endpoint got
+	// as far as the host key), so the permit's host is unused again and the
+	// same run may be retried before the permit expires.
+	Retryable     bool `protobuf:"varint,9,opt,name=retryable,proto3" json:"retryable,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5876,6 +5880,13 @@ func (x *RunAttachedResponse) GetDurationMs() int64 {
 		return x.DurationMs
 	}
 	return 0
+}
+
+func (x *RunAttachedResponse) GetRetryable() bool {
+	if x != nil {
+		return x.Retryable
+	}
+	return false
 }
 
 type StartDurableRequest struct {
@@ -6589,7 +6600,7 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x12RunAttachedRequest\x129\n" +
 	"\x03run\x18\x01 \x01(\v2'.nebula.executor.v1.AuthorizeRunRequestR\x03run\x12\x1c\n" +
 	"\tendpoints\x18\x02 \x03(\tR\tendpoints\x12'\n" +
-	"\x0ftimeout_seconds\x18\x03 \x01(\rR\x0etimeoutSeconds\"\xec\x01\n" +
+	"\x0ftimeout_seconds\x18\x03 \x01(\rR\x0etimeoutSeconds\"\x8a\x02\n" +
 	"\x13RunAttachedResponse\x12\x14\n" +
 	"\x05class\x18\x01 \x01(\tR\x05class\x12\x16\n" +
 	"\x06detail\x18\x02 \x01(\tR\x06detail\x12\x1b\n" +
@@ -6599,7 +6610,8 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\rlog_truncated\x18\x06 \x01(\bR\flogTruncated\x12\x1a\n" +
 	"\bendpoint\x18\a \x01(\tR\bendpoint\x12\x1f\n" +
 	"\vduration_ms\x18\b \x01(\x03R\n" +
-	"durationMs\"\x97\x01\n" +
+	"durationMs\x12\x1c\n" +
+	"\tretryable\x18\t \x01(\bR\tretryable\"\x97\x01\n" +
 	"\x13StartDurableRequest\x129\n" +
 	"\x03run\x18\x01 \x01(\v2'.nebula.executor.v1.AuthorizeRunRequestR\x03run\x12\x1c\n" +
 	"\tendpoints\x18\x02 \x03(\tR\tendpoints\x12'\n" +

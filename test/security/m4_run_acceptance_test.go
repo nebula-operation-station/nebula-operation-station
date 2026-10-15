@@ -164,20 +164,52 @@ func TestM4_RunAttachedNeedsThePinnedCredential(t *testing.T) {
 	}
 }
 
-// A failure after authorization is a result class, and the permit's host
-// is used up: an unreachable host is not retried with the same permit.
-func TestM4_RunAttachedConnectionFailureUsesTheHost(t *testing.T) {
+// A failure after authorization is a result class. A run that never
+// reached the host (every endpoint failed before the host key, so no
+// credential was offered and nothing ran) leaves the permit's host unused,
+// and the run may be retried (spec 07); a run that reached the host uses
+// it up, whatever its result.
+func TestM4_UnreachableRunCanBeRetriedOnlyUntilItReachesTheHost(t *testing.T) {
 	h := newHarness(t, harnessOptions{})
 	h.unlock()
 	host := h.pinnedRunHost("runhost")
 	d := h.approvedRun(host)
 	down := host
 	down.endpoint = closedPort(t)
-	r, err := h.client.RunAttached(h.ctx(), runReq(d, down, runScript, credRef))
-	if err != nil || r.GetClass() != "network_unreachable" {
-		t.Fatalf("unreachable: %v %v", r, err)
+	for i := 0; i < 2; i++ {
+		r, err := h.client.RunAttached(h.ctx(), runReq(d, down, runScript, credRef))
+		if err != nil || r.GetClass() != "network_unreachable" || !r.GetRetryable() {
+			t.Fatalf("unreachable %d: %v %v", i, r, err)
+		}
 	}
+	h.requireAudit("released", "runhost")
+	r, err := h.client.RunAttached(h.ctx(), runReq(d, host, runScript, credRef))
+	if err != nil || r.GetClass() != "success" || r.GetRetryable() {
+		t.Fatalf("retry: %v %v", r, err)
+	}
+	// Once the host was reached the permit's host is used: no further run,
+	// not even one that would fail to connect.
 	_, err = h.client.RunAttached(h.ctx(), runReq(d, host, runScript, credRef))
+	wantCode(t, err, codes.PermissionDenied, "")
+	_, err = h.client.RunAttached(h.ctx(), runReq(d, down, runScript, credRef))
+	wantCode(t, err, codes.PermissionDenied, "")
+	if n := len(host.srv.Commands()); n != 1 {
+		t.Fatalf("%d commands on the host", n)
+	}
+}
+
+// A run whose script fails reached the host: it is not retryable.
+func TestM4_FailedScriptUsesTheHost(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	h.unlock()
+	host := h.pinnedRunHost("runhost")
+	failing := []byte("exit 3\n")
+	d := h.approvedScript(host, failing)
+	r, err := h.client.RunAttached(h.ctx(), runReq(d, host, failing, credRef))
+	if err != nil || r.GetClass() != "script_failed" || r.GetRetryable() {
+		t.Fatalf("%v %v", r, err)
+	}
+	_, err = h.client.RunAttached(h.ctx(), runReq(d, host, failing, credRef))
 	wantCode(t, err, codes.PermissionDenied, "")
 }
 

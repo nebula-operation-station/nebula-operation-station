@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
 // fakeHost is a PATH with stand-ins for the commands the install script
@@ -208,6 +210,19 @@ func TestServiceControlScript(t *testing.T) {
 	for _, p := range []string{`{"unit":"-x"}`, `{"unit":"a;b"}`, `{"unit":"x","y":"z"}`, `{"unit":"$(id)"}`} {
 		if code, doc := run(p); code != 10 || doc["phase"] != "precheck" {
 			t.Errorf("%s: %d %v", p, code, doc)
+		}
+	}
+}
+
+func TestEveryActionHasARetryClass(t *testing.T) {
+	for _, a := range Builtin {
+		switch {
+		case a.Retry != RetrySafe && a.Retry != RetryReconcileFirst && a.Retry != RetryNever:
+			t.Errorf("%s: retry class %q", a.ID, a.Retry)
+		case a.Durable && a.Retry != RetryReconcileFirst:
+			t.Errorf("%s: a durable job is reconciled, never retried blindly", a.ID)
+		case a.Retry == RetrySafe && a.Risk != pb.RiskClass_RISK_CLASS_LOW:
+			t.Errorf("%s: only LOW actions are safe to retry", a.ID)
 		}
 	}
 }

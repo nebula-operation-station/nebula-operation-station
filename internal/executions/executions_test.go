@@ -41,6 +41,8 @@ type fakeExec struct {
 	released  bool
 	result    []byte
 	failHost  string
+	// unreachable answers that many runs with a retryable network_unreachable.
+	unreachable int
 }
 
 func (f *fakeExec) ListHostKeys(context.Context, *pb.ListHostKeysRequest, ...grpc.CallOption) (*pb.ListHostKeysResponse, error) {
@@ -72,6 +74,10 @@ func (f *fakeExec) RunAttached(_ context.Context, in *pb.RunAttachedRequest, _ .
 	f.attached = append(f.attached, in)
 	if f.attachErr != nil {
 		return nil, f.attachErr
+	}
+	if f.unreachable > 0 {
+		f.unreachable--
+		return &pb.RunAttachedResponse{Class: "network_unreachable", Detail: "all endpoints failed", ExitCode: -1, Retryable: true}, nil
 	}
 	res := []byte(`{"ok":true}`)
 	if f.result != nil {
@@ -483,6 +489,50 @@ func TestFailedExecutionsNotifyOnce(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if n := len(sent.of(notify.KindExecution)); n != 2 {
 		t.Fatalf("repeated: %d", n)
+	}
+}
+
+func TestSafeActionsRetryARunThatNeverReachedTheHost(t *testing.T) {
+	old := retryDelays
+	retryDelays = []time.Duration{10 * time.Millisecond, 10 * time.Millisecond}
+	t.Cleanup(func() { retryDelays = old })
+	f := &fakeExec{approved: true, unreachable: 2}
+	s, _ := setup(t, f)
+	ctx := context.Background()
+	attempts := func() int {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return len(f.attached)
+	}
+	// Safe: two unreachable runs, then the third reaches the host.
+	c, err := s.Create(ctx, "axel", "core.facts", []string{"web"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, s, c.ID, "finished")
+	e, _ := s.Get(ctx, c.ID)
+	if e.Hosts[0].Class != "success" || attempts() != 3 {
+		t.Fatalf("%+v after %d attempts", e.Hosts[0], attempts())
+	}
+	// Safe, but still unreachable after the last retry: reported as such.
+	f.mu.Lock()
+	f.unreachable, f.attached = 5, nil
+	f.mu.Unlock()
+	c, _ = s.Create(ctx, "axel", "core.facts", []string{"web"}, nil)
+	waitState(t, s, c.ID, "finished")
+	e, _ = s.Get(ctx, c.ID)
+	if e.Hosts[0].Class != "network_unreachable" || attempts() != 3 {
+		t.Fatalf("%+v after %d attempts", e.Hosts[0], attempts())
+	}
+	// Not safe (a restart): never retried automatically.
+	f.mu.Lock()
+	f.unreachable, f.attached = 1, nil
+	f.mu.Unlock()
+	c, _ = s.Create(ctx, "axel", "service.restart", []string{"web"}, map[string]string{"unit": "nginx.service"})
+	waitState(t, s, c.ID, "finished")
+	e, _ = s.Get(ctx, c.ID)
+	if e.Hosts[0].Class != "network_unreachable" || attempts() != 1 {
+		t.Fatalf("%+v after %d attempts", e.Hosts[0], attempts())
 	}
 }
 

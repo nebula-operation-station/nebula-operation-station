@@ -197,8 +197,12 @@ Without this, every operation needs a user-verified approval.
 
 Results stay on the operation page; host output is shown as text only.
 The executor never runs anything twice: if Nebula restarts during a job,
-it collects the result afterwards. A host that could not be reached uses
-up the approval for that host: plan the operation again.
+it collects the result afterwards. If no endpoint of a host answered
+(`network_unreachable`: nothing was sent, nothing ran), read-only actions
+are retried automatically after 20 seconds and after 1 minute with the
+same approval; other actions report the host as unreachable, and you plan
+the operation again. A host that was reached uses up the approval for that
+host, whatever the result.
 
 **Services:** List services, Service status (unit plus last journal lines)
 and Restart/Start/Stop/Reload take a unit name such as `nginx.service`.

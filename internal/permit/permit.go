@@ -640,6 +640,27 @@ func (a *Authority) AuthorizeGrant(d canonical.Digest, run Run) (Grant, error) {
 	return Grant{ExecutionID: p.Request.ExecutionID, Parameters: slices.Clone(p.Parameters)}, nil
 }
 
+// ReleaseHost makes a host of an approved permit usable again after a run
+// that provably never reached it: the executor calls it only when every
+// endpoint failed before the host key was received, so no credential was
+// offered and nothing ran (spec 07: the permit stays unused for this host;
+// the stage engine's Retry of an unreachable host relies on it). It
+// reports whether the host was released.
+func (a *Authority) ReleaseHost(d canonical.Digest, hostID string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	p, ok := a.permits[d]
+	if !ok || p.State != StateApproved || !a.now().Before(time.Unix(p.Request.ExpiryUnix, 0)) {
+		return false
+	}
+	if _, used := p.used[hostID]; !used {
+		return false
+	}
+	delete(p.used, hostID)
+	a.emit(Event{Kind: "released", Digest: d.String(), Host: hostID, Detail: "host unreachable; nothing ran"})
+	return true
+}
+
 // BeginSession returns a fresh challenge for opening the privileged session.
 // A new call replaces any earlier unused challenge.
 func (a *Authority) BeginSession() ([]byte, time.Time, error) {
