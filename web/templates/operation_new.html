@@ -28,6 +28,27 @@
       <p>No hosts in the inventory.</p>
       {{end}}
     </fieldset>
+    <fieldset>
+      <legend>Rollout</legend>
+      <label class="choice"><input type="radio" name="preset" value="single" checked> <strong>All at once</strong>
+        <span class="hint">Every host runs once the operation is approved.</span></label>
+      <label class="choice"><input type="radio" name="preset" value="canary"> <strong>Canary first</strong>
+        <span class="hint">The first hosts run alone; the rest only after they succeeded.</span></label>
+      <label class="choice"><input type="radio" name="preset" value="waves"> <strong>In waves</strong>
+        <span class="hint">Groups of hosts, one after the other.</span></label>
+      <label class="choice"><input type="radio" name="preset" value="environments"> <strong>DEV → QA → PROD</strong>
+        <span class="hint">By the hosts' inventory environment.</span></label>
+      <label class="stage-option" data-for="canary waves">Canary hosts / wave size
+        <input type="number" id="plan-size" min="1" value="1" inputmode="numeric"></label>
+      <label class="stage-option" data-for="canary waves environments">Failed (and unreachable) hosts allowed per stage
+        <input type="number" id="plan-max-failed" min="0" value="0" inputmode="numeric">
+        <span class="hint">A canary stage allows none. A stage with more failed hosts stops the rollout.</span></label>
+      <label class="stage-option" data-for="canary waves environments">After a stage passed
+        <select id="plan-continue">
+          <option value="manual" selected>wait for me (gate)</option>
+          <option value="auto">continue automatically (LOW and MEDIUM only)</option>
+        </select></label>
+    </fieldset>
     <p class="hint">The executor decides the risk: a script it does not trust counts as at least HIGH, and a host's criticality
        can raise it further. You approve with your security key on the next page.</p>
     <div class="actions">

@@ -70,6 +70,14 @@ body {
   cursor: pointer;
 }
 
+.button--small {
+  padding: 0.2rem 0.6rem;
+}
+
+.button--danger {
+  color: #8a1f1f;
+}
+
 .form {
   display: flex;
   flex-direction: column;

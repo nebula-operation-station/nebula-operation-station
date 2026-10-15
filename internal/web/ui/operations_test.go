@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -29,16 +30,49 @@ type fakeOps struct {
 	createErr  error
 	approveErr error
 	created    []string
+	plan       executions.Plan
 	approved   string
 	exec       executions.Execution
+	rollout    *pb.Rollout
+	gateRes    executions.GateResult
+	gateErr    error
+	gates      []string
 }
 
-func (f *fakeOps) Create(_ context.Context, user, action string, hosts []string, _ map[string]string) (executions.Created, error) {
+func (f *fakeOps) CreateStaged(_ context.Context, user, action string, hosts []string, _ map[string]string, plan executions.Plan) (executions.Created, error) {
 	if f.createErr != nil {
 		return executions.Created{}, f.createErr
 	}
+	f.plan = plan
 	f.created = append([]string{user, action}, hosts...)
 	return executions.Created{ID: opID, State: "pending", Risk: "HIGH"}, nil
+}
+
+func (f *fakeOps) Rollout(context.Context, string) (*pb.Rollout, error) {
+	if f.rollout == nil {
+		return nil, status.Error(codes.Unavailable, "down")
+	}
+	return f.rollout, nil
+}
+
+func (f *fakeOps) BeginGate(_ context.Context, _, id string, g executions.Gate) (executions.GateResult, error) {
+	f.gates = append(f.gates, fmt.Sprintf("begin %s %s %d %s", id, g.Kind, g.Stage, g.Host))
+	return f.gateRes, f.gateErr
+}
+
+func (f *fakeOps) CommitGate(_ context.Context, _, id string, g executions.Gate, assertion []byte) error {
+	f.gates = append(f.gates, fmt.Sprintf("commit %s %s %d %s %s", id, g.Kind, g.Stage, g.Host, assertion))
+	return f.gateErr
+}
+
+func (f *fakeOps) Abort(_ context.Context, _, id string) error {
+	f.gates = append(f.gates, "abort "+id)
+	return f.gateErr
+}
+
+func (f *fakeOps) RetryHost(_ context.Context, _, id, host string) error {
+	f.gates = append(f.gates, "retry "+id+" "+host)
+	return f.gateErr
 }
 
 func (f *fakeOps) Approve(_ context.Context, _ string, id string, assertion []byte, _ uint32) error {
@@ -318,5 +352,118 @@ func TestDockerInspectIsShown(t *testing.T) {
 	}
 	if strings.Contains(page, "hunter2") {
 		t.Fatal("secret on the page")
+	}
+}
+
+func stagedExecution() executions.Execution {
+	return executions.Execution{ID: opID, ActionID: "core.facts", State: "running", CreatedAt: time.Unix(1791960000, 0), Digest: strings.Repeat("d", 64),
+		StagePlan: `{"plan":"stages-v1","stages":[{"name":"canary","hosts":["web"],"max_failed":0,"max_unreachable":0,"continue":"manual","timeout_s":600},` +
+			`{"name":"rest","hosts":["db","app"],"max_failed":1,"max_unreachable":1,"continue":"manual","timeout_s":600}]}`,
+		Waiting: "stage 1 (canary) passed; waiting for you to continue to stage 2",
+		Hosts: []executions.Host{
+			{HostID: "web", State: "finished", Class: "success", Stage: 1},
+			{HostID: "db", State: "waiting", Stage: 2},
+			{HostID: "app", State: "waiting", Stage: 2},
+		}}
+}
+
+func TestStagedOperationShowsStagesAndGate(t *testing.T) {
+	f := &fakeOps{exec: stagedExecution(), rollout: &pb.Rollout{OpenStage: 1,
+		GateRequirement: pb.ApprovalRequirement_APPROVAL_REQUIREMENT_ASSERTION_VERIFIED,
+		Stages:          []*pb.StageStatus{{Open: true, Passed: true, Outcomes: []*pb.HostOutcome{{HostId: "web", Outcome: "succeeded"}}}, {}}}}
+	page := getBody(t, opsHandler(t, f, nil), "/operations/"+opID)
+	for _, want := range []string{"<td>1. canary</td>", "<td>db, app</td>", "<td>1 / 1</td>", "waiting for you to continue to stage 2",
+		`data-kind="open" data-stage="2"`, "Continue to stage 2 with security key", `id="rollout-abort"`, "<td>passed</td>", "<td>closed</td>"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page misses %q", want)
+		}
+	}
+	// Stage-2 hosts are not open yet: no skip.
+	if strings.Contains(page, `data-kind="skip"`) {
+		t.Error("skip offered for a closed stage")
+	}
+
+	// Hardened mode: the CLI command instead of a button; an unreachable
+	// host of the open stage can be retried or skipped.
+	f.rollout = &pb.Rollout{OpenStage: 2, GateRequirement: pb.ApprovalRequirement_APPROVAL_REQUIREMENT_CLI_ONLY,
+		Stages: []*pb.StageStatus{{Open: true, Passed: true}, {Open: true, Outcomes: []*pb.HostOutcome{{HostId: "db", Outcome: "unreachable"}}}}}
+	f.exec.Hosts[1] = executions.Host{HostID: "db", State: "finished", Class: "network_unreachable", Stage: 2}
+	page = getBody(t, opsHandler(t, f, nil), "/operations/"+opID)
+	for _, want := range []string{`class="button button--small retry-button" data-host="db"`, `data-kind="skip" data-host="db"`, `data-kind="skip" data-host="app"`} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page misses %q", want)
+		}
+	}
+	if strings.Contains(page, `data-kind="open"`) {
+		t.Error("gate offered although the open stage has not passed")
+	}
+
+	// The executor's view is unavailable: stages from the plan, no buttons.
+	f.rollout = nil
+	page = getBody(t, opsHandler(t, f, nil), "/operations/"+opID)
+	if !strings.Contains(page, "<td>2. rest</td>") || strings.Contains(page, "gate-button") || strings.Contains(page, "rollout-abort") {
+		t.Error("buttons without the executor's view")
+	}
+}
+
+func TestGateEndpoints(t *testing.T) {
+	f := &fakeOps{exec: stagedExecution(), gateRes: executions.GateResult{Done: true}}
+	h := opsHandler(t, f, nil)
+	if code, body := postJSON(t, h, "/operations/gate", `{"id":"`+opID+`","kind":"open","stage":2}`); code != http.StatusOK || !strings.Contains(body, `"done":true`) {
+		t.Fatalf("%d %s", code, body)
+	}
+	f.gateRes = executions.GateResult{Options: []byte(`{"publicKey":{"challenge":"x"}}`)}
+	if code, body := postJSON(t, h, "/operations/gate", `{"id":"`+opID+`","kind":"open","stage":2}`); code != http.StatusOK || !strings.Contains(body, `"options":{"publicKey"`) {
+		t.Fatalf("%d %s", code, body)
+	}
+	f.gateRes = executions.GateResult{CLI: true}
+	if code, body := postJSON(t, h, "/operations/gate", `{"id":"`+opID+`","kind":"skip","host":"db"}`); code != http.StatusConflict || !strings.Contains(body, "nebula approve --skip db") {
+		t.Fatalf("%d %s", code, body)
+	}
+	if code, _ := postJSON(t, h, "/operations/gate/commit", `{"id":"`+opID+`","kind":"open","stage":2,"assertion":{"id":"cred"}}`); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	if code, _ := postJSON(t, h, "/operations/abort", `{"id":"`+opID+`"}`); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	if code, _ := postJSON(t, h, "/operations/retry", `{"id":"`+opID+`","host":"db"}`); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	want := []string{"begin " + opID + " open 2 ", "begin " + opID + " open 2 ", "begin " + opID + " skip 0 db",
+		"commit " + opID + ` open 2  {"id":"cred"}`, "abort " + opID, "retry " + opID + " db"}
+	if strings.Join(f.gates, "|") != strings.Join(want, "|") {
+		t.Fatalf("%q", f.gates)
+	}
+	for err, code := range map[error]int{
+		executions.ErrNotFound:                                   http.StatusNotFound,
+		executions.ErrNotRunning:                                 http.StatusConflict,
+		executions.ErrNoRetry:                                    http.StatusConflict,
+		&executions.PlanError{Reason: "x"}:                       http.StatusBadRequest,
+		status.Error(codes.PermissionDenied, "assertion"):        http.StatusConflict,
+		status.Error(codes.Unavailable, "dial /run/x.sock"):      http.StatusBadGateway,
+		status.Error(codes.FailedPrecondition, "stage_not_done"): http.StatusConflict,
+	} {
+		f.gateErr = err
+		for _, path := range []string{"/operations/gate", "/operations/gate/commit", "/operations/abort", "/operations/retry"} {
+			if c, body := postJSON(t, h, path, `{"id":"`+opID+`"}`); c != code || strings.Contains(body, "/run/") {
+				t.Errorf("%v %s: %d %s", err, path, c, body)
+			}
+		}
+	}
+	if code, _ := postJSON(t, h, "/operations/gate", `{"id":"`+opID+`","extra":1}`); code != http.StatusBadRequest {
+		t.Fatal(code)
+	}
+}
+
+func TestCreatePassesThePlan(t *testing.T) {
+	f := &fakeOps{}
+	h := opsHandler(t, f, nil)
+	code, _ := postJSON(t, h, "/operations/create", `{"action":"core.facts","hosts":["web","db"],"plan":{"preset":"canary","size":1,"continue":"manual","max_failed":1}}`)
+	if code != http.StatusOK || f.plan != (executions.Plan{Preset: "canary", Size: 1, Continue: "manual", MaxFailed: 1}) {
+		t.Fatalf("%d %+v", code, f.plan)
+	}
+	f.createErr = &executions.PlanError{Reason: "the canary must be 1 to 1 hosts"}
+	if code, body := postJSON(t, h, "/operations/create", `{"action":"core.facts","hosts":["web"],"plan":{"preset":"canary"}}`); code != http.StatusBadRequest || !strings.Contains(body, "canary") {
+		t.Fatalf("%d %s", code, body)
 	}
 }

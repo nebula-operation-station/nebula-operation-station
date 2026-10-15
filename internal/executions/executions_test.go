@@ -570,3 +570,20 @@ func TestConcurrentRunsNotifyATransitionOnce(t *testing.T) {
 		t.Fatalf("%d notifications for one transition", sent.n)
 	}
 }
+
+// Single-stage executions never ask about rollouts.
+func (f *fakeExec) BeginGate(context.Context, *pb.BeginGateRequest, ...grpc.CallOption) (*pb.BeginGateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "no stages")
+}
+
+func (f *fakeExec) CommitGate(context.Context, *pb.CommitGateRequest, ...grpc.CallOption) (*pb.CommitGateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "no stages")
+}
+
+func (f *fakeExec) AbortRollout(context.Context, *pb.AbortRolloutRequest, ...grpc.CallOption) (*pb.AbortRolloutResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "no stages")
+}
+
+func (f *fakeExec) GetRollout(context.Context, *pb.GetRolloutRequest, ...grpc.CallOption) (*pb.GetRolloutResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "no stages")
+}

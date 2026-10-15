@@ -16,6 +16,15 @@
     };
     for (const r of form.querySelectorAll('input[name="action"]')) r.addEventListener('change', showParams);
     showParams();
+    // Show the options of the chosen rollout preset only.
+    const showPlan = () => {
+      const preset = form.querySelector('input[name="preset"]:checked');
+      for (const l of form.querySelectorAll('.stage-option')) {
+        l.hidden = !preset || !l.dataset.for.split(' ').includes(preset.value);
+      }
+    };
+    for (const r of form.querySelectorAll('input[name="preset"]')) r.addEventListener('change', showPlan);
+    showPlan();
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const action = form.querySelector('input[name="action"]:checked');
@@ -37,7 +46,17 @@
       const button = document.getElementById('operation-create');
       button.disabled = true;
       try {
-        const r = await w.post('/operations/create', { action: action.value, hosts, params });
+        const body = { action: action.value, hosts, params };
+        const preset = form.querySelector('input[name="preset"]:checked');
+        if (preset && preset.value !== 'single') {
+          body.plan = {
+            preset: preset.value,
+            size: parseInt(document.getElementById('plan-size').value, 10) || 0,
+            max_failed: parseInt(document.getElementById('plan-max-failed').value, 10) || 0,
+            continue: document.getElementById('plan-continue').value,
+          };
+        }
+        const r = await w.post('/operations/create', body);
         window.location.assign('/operations/' + encodeURIComponent(r.id));
       } catch (err) {
         w.show(err.message || 'Could not plan the operation.', true);
@@ -69,6 +88,66 @@
         w.show(err.name === 'NotAllowedError' ? 'Cancelled or timed out.' : (err.message || 'Could not approve.'), true);
       } finally {
         approve.disabled = false;
+      }
+    });
+  }
+
+  // Gates of a staged operation: continue to the next stage or skip a
+  // host. The executor says what is needed: nothing beyond the session
+  // (done at once), or the security key over its gate challenge.
+  for (const b of document.querySelectorAll('.gate-button')) {
+    b.addEventListener('click', async () => {
+      const gate = {
+        id: op.dataset.id,
+        kind: b.dataset.kind,
+        stage: parseInt(b.dataset.stage || '0', 10),
+        host: b.dataset.host || '',
+      };
+      b.disabled = true;
+      try {
+        const r = await w.post('/operations/gate', gate);
+        if (!r.done) {
+          w.show('Touch your security key…', false);
+          const cred = await navigator.credentials.get(w.requestOptions(r.options));
+          await w.post('/operations/gate/commit', Object.assign({ assertion: w.assertionJSON(cred) }, gate));
+        }
+        window.location.reload();
+      } catch (err) {
+        w.show(err.name === 'NotAllowedError' ? 'Cancelled or timed out.' : (err.message || 'Could not continue.'), true);
+        b.disabled = false;
+      }
+    });
+  }
+
+  for (const b of document.querySelectorAll('.retry-button')) {
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      try {
+        await w.post('/operations/retry', { id: op.dataset.id, host: b.dataset.host });
+        window.location.reload();
+      } catch (err) {
+        w.show(err.message || 'Could not retry.', true);
+        b.disabled = false;
+      }
+    });
+  }
+
+  // Abort asks once more on the button itself (no browser dialogs).
+  const abort = document.getElementById('rollout-abort');
+  if (abort) {
+    abort.addEventListener('click', async () => {
+      if (!abort.dataset.armed) {
+        abort.dataset.armed = '1';
+        abort.textContent = 'Really abort? No further host will run.';
+        return;
+      }
+      abort.disabled = true;
+      try {
+        await w.post('/operations/abort', { id: op.dataset.id });
+        window.location.reload();
+      } catch (err) {
+        w.show(err.message || 'Could not abort.', true);
+        abort.disabled = false;
       }
     });
   }

@@ -126,6 +126,22 @@ func (d direct) GetRun(ctx context.Context, in *pb.GetRunRequest, _ ...grpc.Call
 	return d.s.GetRun(ctx, in)
 }
 
+func (d direct) BeginGate(ctx context.Context, in *pb.BeginGateRequest, _ ...grpc.CallOption) (*pb.BeginGateResponse, error) {
+	return d.s.BeginGate(ctx, in)
+}
+
+func (d direct) CommitGate(ctx context.Context, in *pb.CommitGateRequest, _ ...grpc.CallOption) (*pb.CommitGateResponse, error) {
+	return d.s.CommitGate(ctx, in)
+}
+
+func (d direct) AbortRollout(ctx context.Context, in *pb.AbortRolloutRequest, _ ...grpc.CallOption) (*pb.AbortRolloutResponse, error) {
+	return d.s.AbortRollout(ctx, in)
+}
+
+func (d direct) GetRollout(ctx context.Context, in *pb.GetRolloutRequest, _ ...grpc.CallOption) (*pb.GetRolloutResponse, error) {
+	return d.s.GetRollout(ctx, in)
+}
+
 func must(err error) {
 	if err != nil {
 		panic(err)
@@ -209,6 +225,21 @@ func main() {
 	must(err)
 	_, err = inv.Create(context.Background(), inventory.Host{ID: "e2e-new", DisplayName: "E2E new host", Environment: inventory.EnvDev,
 		Criticality: inventory.CriticalityLow, Endpoints: []inventory.Endpoint{{Address: freshAddr, Port: freshPortNum}}}, inventory.CreateOptions{})
+	must(err)
+	// A second enrolled host for the staged rollout (canary first).
+	two, _, err := hostruntest.Serve(sshPub)
+	must(err)
+	tp, err := svc.ProbeHostKey(context.Background(), &pb.ProbeHostKeyRequest{Endpoint: two.Addr})
+	must(err)
+	_, err = svc.PinHostKey(context.Background(), &pb.PinHostKeyRequest{HostId: "e2e-two", AuthorizedKey: tp.GetAuthorizedKey(),
+		ExpectedFingerprint: tp.GetFingerprint(), SshUser: "nebula", CredentialRef: "nebula-default", Source: pb.HostKeySource_HOST_KEY_SOURCE_PROBE})
+	must(err)
+	twoAddr, twoPort, err := net.SplitHostPort(two.Addr)
+	must(err)
+	twoPortNum, err := strconv.Atoi(twoPort)
+	must(err)
+	_, err = inv.Create(context.Background(), inventory.Host{ID: "e2e-two", DisplayName: "E2E second host", Environment: inventory.EnvDev,
+		Criticality: inventory.CriticalityLow, Endpoints: []inventory.Endpoint{{Address: twoAddr, Port: twoPortNum}}}, inventory.CreateOptions{})
 	must(err)
 	ops := executions.New(context.Background(), direct{svc}, sdb, inv, log)
 	hostKeys := func(ctx context.Context) ([]*pb.HostKeyPin, error) {

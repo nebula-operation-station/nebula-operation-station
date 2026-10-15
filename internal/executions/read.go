@@ -33,6 +33,10 @@ type Execution struct {
 	Hosts          []Host
 	// Params is the JSON object of the parameters.
 	Params string
+	// StagePlan is the stage plan document ("" for one stage).
+	StagePlan string
+	// Waiting says what a staged rollout waits for.
+	Waiting string
 }
 
 // Host is one host of an execution. Result and Log are untrusted host
@@ -51,6 +55,8 @@ type Host struct {
 	LogTruncated  bool
 	StartedAt     time.Time
 	FinishedAt    time.Time
+	// Stage is the host's stage (1-based).
+	Stage int
 }
 
 func unix(n sql.NullInt64) time.Time {
@@ -67,9 +73,9 @@ func (s *Service) Get(ctx context.Context, id string) (Execution, error) {
 	var timeout, created, expiry int64
 	var finished sql.NullInt64
 	err := s.db.QueryRowContext(ctx, `SELECT id, digest, action_id, module_version, artifact_sha256, risk, requirement, state, detail,
-			durable, timeout_s, options, approval_expiry, created_by, created_at, finished_at, params FROM executions WHERE id = ?`, id).
+			durable, timeout_s, options, approval_expiry, created_by, created_at, finished_at, params, stage_plan, waiting FROM executions WHERE id = ?`, id).
 		Scan(&e.ID, &e.Digest, &e.ActionID, &e.ModuleVersion, &e.ArtifactSHA256, &e.Risk, &e.Requirement, &e.State, &e.Detail,
-			&durable, &timeout, &e.Options, &expiry, &e.CreatedBy, &created, &finished, &e.Params)
+			&durable, &timeout, &e.Options, &expiry, &e.CreatedBy, &created, &finished, &e.Params, &e.StagePlan, &e.Waiting)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Execution{}, ErrNotFound
 	}
@@ -81,7 +87,7 @@ func (s *Service) Get(ctx context.Context, id string) (Execution, error) {
 		e.ApprovalExpiry = time.Unix(expiry, 0)
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT host_id, fingerprint, credential_ref, endpoints, state, class, detail, exit_code, result, log,
-			log_truncated, started_at, finished_at FROM execution_hosts WHERE execution_id = ? ORDER BY host_id`, id)
+			log_truncated, started_at, finished_at, stage FROM execution_hosts WHERE execution_id = ? ORDER BY stage, host_id`, id)
 	if err != nil {
 		return Execution{}, fmt.Errorf("get execution hosts: %w", err)
 	}
@@ -92,7 +98,7 @@ func (s *Service) Get(ctx context.Context, id string) (Execution, error) {
 		var trunc int
 		var started, fin sql.NullInt64
 		if err := rows.Scan(&h.HostID, &h.Fingerprint, &h.CredentialRef, &eps, &h.State, &h.Class, &h.Detail, &h.ExitCode, &h.Result, &h.Log,
-			&trunc, &started, &fin); err != nil {
+			&trunc, &started, &fin, &h.Stage); err != nil {
 			return Execution{}, err
 		}
 		if err := json.Unmarshal([]byte(eps), &h.Endpoints); err != nil {
