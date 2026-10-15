@@ -5,6 +5,7 @@ package dockerhost
 import (
 	"encoding/base64"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -192,5 +193,50 @@ func TestParseImageUpdates(t *testing.T) {
 	u, _ = ParseImageUpdates([]byte(`{"format":"docker-updates-v1","phase":"precheck","reason":"curl is not installed"}`))
 	if u.Reason != "curl is not installed" {
 		t.Fatalf("%+v", u)
+	}
+}
+
+func TestParseRealComposeUpdate(t *testing.T) {
+	b, err := os.ReadFile("testdata/docker29-compose.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := ParseComposeUpdate(b)
+	if err != nil || c.Project != "site" || len(c.Before) != 3 || len(c.After) != 3 || c.Verdict != "WARNING" ||
+		len(c.Findings) != 1 || !strings.Contains(c.Findings[0], "site-web-1 (unhealthy)") {
+		t.Fatalf("%+v %v", c, err)
+	}
+}
+
+func TestComposePostflightVerdicts(t *testing.T) {
+	list := func(lines ...string) string { return enc(strings.Join(lines, "\n")) }
+	res := func(pull, up int, before, after string) []byte {
+		return []byte(`{"format":"compose-update-v1","phase":"done","project":"p","pull_exit":` + strconv.Itoa(pull) + `,"up_exit":` +
+			strconv.Itoa(up) + `,"before":"` + before + `","after":"` + after + `"}`)
+	}
+	web := "web\tp-web-1\trunning\tUp 1 hour (healthy)\t0.0.0.0:80->80/tcp\tnginx:1"
+	webNew := "web\tp-web-1\trunning\tUp 5 seconds (healthy)\t0.0.0.0:80->80/tcp\tnginx:2"
+	db := "db\tp-db-1\trunning\tUp 1 hour\t\tpostgres:16"
+	cases := []struct {
+		name, verdict, finding string
+		raw                    []byte
+	}{
+		{"clean", "OK", "", res(0, 0, list(web, db), list(webNew, db))},
+		{"pull failed", "FAILED", "pull exited with 1", res(1, -1, list(web, db), list(web, db))},
+		{"up failed", "FAILED", "up -d exited with 2", res(0, 2, list(web, db), list(webNew, db))},
+		{"fewer running", "FAILED", "2 containers ran before, 1 after", res(0, 0, list(web, db), list(webNew, "db\tp-db-1\texited\tExited (1)\t\tpostgres:16"))},
+		{"healthy became unhealthy", "FAILED", "was healthy before", res(0, 0, list(web, db), list("web\tp-web-1\trunning\tUp 5 seconds (unhealthy)\t0.0.0.0:80->80/tcp\tnginx:2", db))},
+		{"port gone", "WARNING", "published ports", res(0, 0, list(web, db), list("web\tp-web-1\trunning\tUp 5 seconds (healthy)\t\tnginx:2", db))},
+		{"count changed", "WARNING", "2 containers before, 3 after", res(0, 0, list(web, db), list(webNew, db, "cache\tp-cache-1\trunning\tUp 2 seconds\t\tredis:7"))},
+	}
+	for _, tc := range cases {
+		c, err := ParseComposeUpdate(tc.raw)
+		if err != nil || c.Verdict != tc.verdict || (tc.finding != "" && !strings.Contains(strings.Join(c.Findings, "|"), tc.finding)) {
+			t.Errorf("%s: %+v %v", tc.name, c, err)
+		}
+	}
+	c, _ := ParseComposeUpdate([]byte(`{"format":"compose-update-v1","phase":"precheck","reason":"no containers of this Compose project"}`))
+	if c.Verdict != "FAILED" || c.Reason == "" {
+		t.Fatalf("%+v", c)
 	}
 }

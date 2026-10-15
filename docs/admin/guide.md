@@ -8,9 +8,10 @@ What 0.1 covers: inventory (manual, CSV import), SSH enrollment with host
 key pinning, update checks, installing security or all updates (durable
 jobs with pre- and postchecks), reboots that wait for the host, service
 status and restart, Ops State per host, notifications (webhook, ntfy,
-Telegram), listing Docker containers, rollouts in stages (canary, waves,
-DEV → QA → PROD). Not in 0.1: runbooks and modules, Docker actions beyond listing,
-IPAM, scheduled checks, packages (APT/containers).
+Telegram), Docker (list, logs, details, start/stop/restart, image update
+check, Compose update), rollouts in stages (canary, waves, DEV → QA →
+PROD). Not in 0.1: runbooks and modules, IPAM, scheduled checks, packages
+(APT/containers).
 
 ## 1. Before you start
 
@@ -239,7 +240,14 @@ the host, for the current digest of every running container's image tag
 (a manifest HEAD request: anonymous, nothing is pulled, Docker Hub pull
 limits are not used) and lists the images with an update available; it
 needs curl and HTTPS from the host to the registries. Private registries
-that need credentials show as "unknown".
+that need credentials show as "unknown". Update Compose project (MEDIUM, a durable job) takes the
+project name, finds its working directory and files from the container
+labels, runs `docker compose pull` and then `docker compose up -d`, and
+compares the containers before and after: fewer running containers, a
+failed command or a container that was healthy and is not anymore is
+FAILED; a container that is not healthy, changed published ports or a
+different number of containers is a WARNING. Run Check image updates
+first to see what will change.
 
 ## 8. Notifications
 

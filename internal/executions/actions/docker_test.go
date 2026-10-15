@@ -255,3 +255,93 @@ esac`)
 		}
 	}
 }
+
+// docker.compose_update finds the project by its labels, passes every
+// config file as its own -f argument, pulls, and runs up -d only after a
+// successful pull.
+func TestDockerComposeUpdateScript(t *testing.T) {
+	a, ok := Lookup("docker.compose_update")
+	if !ok || !a.Durable || a.Retry != RetryReconcileFirst || a.ValidParams(map[string]string{"project": "site"}) != nil ||
+		a.ValidParams(map[string]string{"project": "-p"}) == nil || a.ValidParams(map[string]string{"project": "Site"}) == nil {
+		t.Fatalf("%+v", a)
+	}
+	run := func(t *testing.T, f *fakeHost, params string) (int, map[string]any) {
+		t.Helper()
+		p := filepath.Join(f.dir, "params")
+		if err := os.WriteFile(p, []byte(params), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("/bin/sh", "-c", string(a.Script))
+		cmd.Env = []string{"PATH=" + f.bin + ":/usr/bin:/bin", "NEBULA_PARAMS=" + p}
+		out, err := cmd.Output()
+		code := 0
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			code = ee.ExitCode()
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(out, &doc); err != nil {
+			t.Fatalf("result %q: %v", out, err)
+		}
+		return code, doc
+	}
+	setup := func(t *testing.T, pullExit string) *fakeHost {
+		f := newFakeHost(t, "1")
+		dir := filepath.Join(f.dir, "site dir")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range []string{"compose.yaml", "override,x.yaml"} {
+			if err := os.WriteFile(filepath.Join(dir, n), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		f.write(t, "docker", `echo "$@" >> "`+f.calls+`"
+case "$1 $2" in
+  "compose version") echo v2 ;;
+  "compose -p") case "$*" in *" pull") exit `+pullExit+` ;; esac; exit 0 ;;
+  "ps -a")
+    case "$*" in *" -q "*) echo c1 ;; *) printf 'web\tsite-web-1\trunning\tUp 1 hour (healthy)\t\tnginx:1\n' ;; esac ;;
+  "inspect --type")
+    case "$*" in *working_dir*) echo "`+dir+`" ;; *config_files*) echo "`+dir+`/compose.yaml,`+dir+`/override.yaml" ;; esac ;;
+esac`)
+		return f
+	}
+	f := setup(t, "0")
+	// override.yaml is missing: precheck.
+	code, doc := run(t, f, `{"project":"site"}`)
+	if code != 10 || !strings.Contains(doc["reason"].(string), "config file") {
+		t.Fatalf("%d %v", code, doc)
+	}
+	if err := os.WriteFile(filepath.Join(f.dir, "site dir", "override.yaml"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, doc = run(t, f, `{"project":"site"}`)
+	if code != 0 || doc["pull_exit"] != float64(0) || doc["up_exit"] != float64(0) || !strings.Contains(b64(t, doc, "after"), "site-web-1") {
+		t.Fatalf("%d %v", code, doc)
+	}
+	calls := f.readCalls(t)
+	dir := filepath.Join(f.dir, "site dir")
+	for _, want := range []string{
+		"compose -p site --project-directory " + dir + " -f " + dir + "/compose.yaml -f " + dir + "/override.yaml pull",
+		"compose -p site --project-directory " + dir + " -f " + dir + "/compose.yaml -f " + dir + "/override.yaml up -d",
+	} {
+		if !strings.Contains(calls, want) {
+			t.Errorf("missing %q in %q", want, calls)
+		}
+	}
+	// A failed pull restarts nothing.
+	f = setup(t, "1")
+	if err := os.WriteFile(filepath.Join(f.dir, "site dir", "override.yaml"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, doc = run(t, f, `{"project":"site"}`)
+	if code == 0 || doc["pull_exit"] != float64(1) || doc["up_exit"] != float64(-1) || strings.Contains(f.readCalls(t), "up -d") {
+		t.Fatalf("%d %v", code, doc)
+	}
+	for _, bad := range []string{`{"project":"-p"}`, `{"project":"a b"}`, `{"project":"site","x":1}`} {
+		if code, doc := run(t, f, bad); code != 10 || !strings.Contains(doc["reason"].(string), "parameter") {
+			t.Errorf("%s: %d %v", bad, code, doc)
+		}
+	}
+}
