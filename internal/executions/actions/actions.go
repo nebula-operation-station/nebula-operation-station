@@ -123,6 +123,13 @@ var dockerLogs []byte
 //go:embed scripts/docker_inspect.sh
 var dockerInspect []byte
 
+//go:embed scripts/docker_control.sh.tmpl
+var dockerControlTemplate string
+
+func dockerScript(verb string) []byte {
+	return []byte(strings.ReplaceAll(dockerControlTemplate, "@VERB@", verb))
+}
+
 //go:embed scripts/service_control.sh.tmpl
 var serviceControlTemplate string
 
@@ -210,6 +217,18 @@ var Builtin = []Action{
 		ID: "docker.inspect", Version: "1.0.0", Title: "Container details",
 		Description: "Image and digest, state, restart policy, health, mounts, published ports and networks of one container. Environment, command line and labels are not read. Read-only.",
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: time.Minute, ReadOnly: true, Script: dockerInspect, Params: containerParam, Retry: RetrySafe,
+	},
+	{
+		ID: "docker.start", Version: "1.0.0", Title: "Start container", Description: "docker start of one container (docker group or sudo); nothing is recreated or pulled.",
+		Risk: pb.RiskClass_RISK_CLASS_MEDIUM, Timeout: 3 * time.Minute, Script: dockerScript("start"), Params: containerParam, Retry: RetryNever,
+	},
+	{
+		ID: "docker.stop", Version: "1.0.0", Title: "Stop container", Description: "docker stop of one container (docker group or sudo).",
+		Risk: pb.RiskClass_RISK_CLASS_MEDIUM, Timeout: 3 * time.Minute, Script: dockerScript("stop"), Params: containerParam, Retry: RetryNever,
+	},
+	{
+		ID: "docker.restart", Version: "1.0.0", Title: "Restart container", Description: "docker restart of one container (docker group or sudo); nothing is recreated or pulled.",
+		Risk: pb.RiskClass_RISK_CLASS_MEDIUM, Timeout: 3 * time.Minute, Script: dockerScript("restart"), Params: containerParam, Retry: RetryNever,
 	},
 }
 

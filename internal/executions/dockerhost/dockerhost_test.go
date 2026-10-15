@@ -144,3 +144,27 @@ func TestParseLogsIsDefensive(t *testing.T) {
 		}
 	}
 }
+
+func TestParseRealControl(t *testing.T) {
+	b, err := os.ReadFile("testdata/docker29-start.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := ParseControl(b)
+	if err != nil || c.Verb != "start" || c.Container != "plain" || c.Exit != 0 || c.Before != "exited" || c.After != "running" ||
+		len(c.Output) != 1 || c.Output[0] != "plain" {
+		t.Fatalf("%+v %v", c, err)
+	}
+	c, err = ParseControl([]byte(`{"format":"docker-control-v1","phase":"done","verb":"rm","container":"-x","exit":999,"before":"` + enc("zombie") +
+		`","after":"%%","output":"` + enc("a\x1b[2Jb\n") + `"}`))
+	if err != nil || c.Verb != "" || c.Container != "" || c.Exit != 0 || c.Before != "" || c.After != "" || c.Output[0] != "a\uFFFD[2Jb" {
+		t.Fatalf("%+v %v", c, err)
+	}
+	if _, err := ParseControl([]byte(`{"format":"docker-logs-v1","phase":"done"}`)); err == nil {
+		t.Fatal("other format accepted")
+	}
+	c, _ = ParseControl([]byte(`{"format":"docker-control-v1","phase":"precheck","reason":"no such container"}`))
+	if c.Reason != "no such container" {
+		t.Fatalf("%+v", c)
+	}
+}

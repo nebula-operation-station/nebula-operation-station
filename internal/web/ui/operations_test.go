@@ -467,3 +467,16 @@ func TestCreatePassesThePlan(t *testing.T) {
 		t.Fatalf("%d %s", code, body)
 	}
 }
+
+func TestDockerControlIsShown(t *testing.T) {
+	b, err := os.ReadFile("../../executions/dockerhost/testdata/docker29-start.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeOps{exec: executions.Execution{ID: opID, ActionID: "docker.start", State: "finished", CreatedAt: time.Unix(1791960000, 0),
+		Params: `{"container":"plain"}`, Hosts: []executions.Host{{HostID: "a", State: "finished", Class: "success", Result: b}}}}
+	page := getBody(t, opsHandler(t, f, nil), "/operations/"+opID)
+	if !strings.Contains(page, "docker start plain: exit status 0;") || !strings.Contains(page, "state exited → running") {
+		t.Fatal(page)
+	}
+}

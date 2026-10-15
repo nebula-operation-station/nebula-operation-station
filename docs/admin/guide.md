@@ -231,7 +231,10 @@ repository digest, state, health, restart policy, mounts, published ports
 and networks (never its environment, command line or labels, which often
 hold secrets). All three read through the `docker` group if the
 SSH user is in it, otherwise through `sudo -n`; both are root on the host.
-Nothing is started, stopped or updated.
+These three only read. Start, Stop and Restart container (MEDIUM) run
+`docker start|stop|restart` of one container and show its state before
+and after; nothing is recreated, pulled or updated, and they are never
+retried automatically.
 
 ## 8. Notifications
 

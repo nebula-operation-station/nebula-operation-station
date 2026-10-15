@@ -122,7 +122,9 @@ type execHostView struct {
 	// DockerLogs is the parsed docker.logs result.
 	DockerLogs *dockerhost.Logs
 	// DockerInspect is the parsed docker.inspect result.
-	DockerInspect               *dockerhost.Inspect
+	DockerInspect *dockerhost.Inspect
+	// DockerControl is the parsed docker.start/stop/restart result.
+	DockerControl               *dockerhost.Control
 	Result, Log                 string
 	ResultCut, LogCut, LogTrunc bool
 	OK                          bool
@@ -287,6 +289,12 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 		if e.ActionID == "docker.logs" && len(x.Result) > 0 {
 			if l, err := dockerhost.ParseLogs(x.Result); err == nil {
 				hv.DockerLogs = &l
+			}
+		}
+		switch e.ActionID {
+		case "docker.start", "docker.stop", "docker.restart":
+			if c, err := dockerhost.ParseControl(x.Result); err == nil && len(x.Result) > 0 {
+				hv.DockerControl = &c
 			}
 		}
 		if e.ActionID == "docker.inspect" && len(x.Result) > 0 {
