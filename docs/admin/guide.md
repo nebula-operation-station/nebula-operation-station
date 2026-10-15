@@ -234,7 +234,12 @@ SSH user is in it, otherwise through `sudo -n`; both are root on the host.
 These three only read. Start, Stop and Restart container (MEDIUM) run
 `docker start|stop|restart` of one container and show its state before
 and after; nothing is recreated, pulled or updated, and they are never
-retried automatically.
+retried automatically. Check image updates (LOW) asks each registry, from
+the host, for the current digest of every running container's image tag
+(a manifest HEAD request: anonymous, nothing is pulled, Docker Hub pull
+limits are not used) and lists the images with an update available; it
+needs curl and HTTPS from the host to the registries. Private registries
+that need credentials show as "unknown".
 
 ## 8. Notifications
 

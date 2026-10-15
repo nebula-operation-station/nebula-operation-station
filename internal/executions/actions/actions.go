@@ -123,6 +123,9 @@ var dockerLogs []byte
 //go:embed scripts/docker_inspect.sh
 var dockerInspect []byte
 
+//go:embed scripts/docker_check_updates.sh
+var dockerCheckUpdates []byte
+
 //go:embed scripts/docker_control.sh.tmpl
 var dockerControlTemplate string
 
@@ -217,6 +220,11 @@ var Builtin = []Action{
 		ID: "docker.inspect", Version: "1.0.0", Title: "Container details",
 		Description: "Image and digest, state, restart policy, health, mounts, published ports and networks of one container. Environment, command line and labels are not read. Read-only.",
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: time.Minute, ReadOnly: true, Script: dockerInspect, Params: containerParam, Retry: RetrySafe,
+	},
+	{
+		ID: "docker.check_updates", Version: "1.0.0", Title: "Check image updates",
+		Description: "For the image of every running container, compares the local digest with the registry's current one for its tag (manifest HEAD request, anonymous, pulls nothing). Needs curl and HTTPS to the registries on the host. Read-only.",
+		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 5 * time.Minute, ReadOnly: true, Script: dockerCheckUpdates, Retry: RetrySafe,
 	},
 	{
 		ID: "docker.start", Version: "1.0.0", Title: "Start container", Description: "docker start of one container (docker group or sudo); nothing is recreated or pulled.",
