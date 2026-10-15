@@ -16,6 +16,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun/hostruntest"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/stageplan"
 )
 
 var (
@@ -64,7 +65,7 @@ func (h *harness) approvedScript(host runHost, script []byte, credRefs ...string
 		ParametersHash:  ph,
 		CredentialRefs:  credRefs,
 		RiskClass:       pb.RiskClass_RISK_CLASS_HIGH,
-		StagePlanHash:   strings.Repeat("c", 64),
+		StagePlanHash:   stageplan.SingleStageHash,
 		ExpiryUnix:      time.Now().Add(time.Hour).Unix(),
 		ResolvedTargets: []*pb.Target{{HostId: host.id, HostKeyFingerprint: host.fp}},
 	}
@@ -233,7 +234,7 @@ func TestM4_ProposeCanRaiseToTheMinimum(t *testing.T) {
 		return &pb.ExecutionRequest{
 			ExecutionId: fmt.Sprintf("00000000-0000-4000-8000-%012d", execCounter.Add(1)), ActionId: "test.run", ModuleVersion: "1.0.0",
 			ArtifactSha256: hexSum(runScript), ParametersHash: ph, CredentialRefs: []string{credRef}, RiskClass: pb.RiskClass_RISK_CLASS_LOW,
-			StagePlanHash: strings.Repeat("c", 64), ExpiryUnix: time.Now().Add(time.Hour).Unix(),
+			StagePlanHash: stageplan.SingleStageHash, ExpiryUnix: time.Now().Add(time.Hour).Unix(),
 			ResolvedTargets: []*pb.Target{{HostId: host.id, HostKeyFingerprint: host.fp}},
 		}
 	}

@@ -26,6 +26,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/stageplan"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vault"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnreg"
 )
@@ -165,11 +166,21 @@ func (s *Service) ProposeExecution(_ context.Context, req *pb.ProposeExecutionRe
 	if strings.HasPrefix(r.ActionID, reservedActionPrefix) {
 		return nil, status.Errorf(codes.InvalidArgument, "action_id %q is reserved for the executor", r.ActionID)
 	}
-	propose := s.auth.Propose
-	if req.GetRaiseToMinimum() {
-		propose = s.auth.ProposeAtLeastMinimum
+	var res permit.ProposeResult
+	if len(req.GetStagePlanJson()) > 0 {
+		res, err = s.auth.ProposeStaged(r, req.GetParametersJson(), req.GetStagePlanJson(), req.GetRaiseToMinimum())
+	} else {
+		// Without a plan the request is one stage of all targets, and its
+		// stage_plan_hash must say so.
+		if r.StagePlanHash != stageplan.SingleStageHash {
+			return nil, status.Error(codes.InvalidArgument, "stage_plan_invalid: a request without stage_plan_json must carry the single-stage plan hash")
+		}
+		propose := s.auth.Propose
+		if req.GetRaiseToMinimum() {
+			propose = s.auth.ProposeAtLeastMinimum
+		}
+		res, err = propose(r, req.GetParametersJson())
 	}
-	res, err := propose(r, req.GetParametersJson())
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -338,6 +349,7 @@ func (s *Service) ListPending(_ context.Context, _ *pb.ListPendingRequest) (*pb.
 			ApprovalRequirement: requirementToProto(p.Requirement),
 			ApprovalExpiryUnix:  p.ApprovalExpiry.Unix(),
 			CanonicalParameters: p.Parameters,
+			StagePlan:           planToProto(p.Plan),
 		})
 	}
 	return out, nil
@@ -367,7 +379,7 @@ func toStatus(err error) error {
 	code := permit.CodeOf(err)
 	var c codes.Code
 	switch code {
-	case permit.CodeInvalidRequest:
+	case permit.CodeInvalidRequest, permit.CodeStagePlan, permit.CodeGateInvalid:
 		c = codes.InvalidArgument
 	case permit.CodeNotFound:
 		c = codes.NotFound
@@ -377,11 +389,13 @@ func toStatus(err error) error {
 		c = codes.ResourceExhausted
 	case permit.CodeStorage:
 		c = codes.Unavailable
-	case permit.CodeWrongState, permit.CodeSessionRequired, permit.CodeCLIRequired, permit.CodeNoChallenge, permit.CodeExpired:
+	case permit.CodeWrongState, permit.CodeSessionRequired, permit.CodeCLIRequired, permit.CodeNoChallenge, permit.CodeExpired,
+		permit.CodeStageNotDone:
 		c = codes.FailedPrecondition
 	case permit.CodeAssertionRejected, permit.CodeTypedCountMismatch, permit.CodeRiskAboveApproval,
 		permit.CodeTargetNotPermitted, permit.CodeHostAlreadyRun, permit.CodeArtifactMismatch,
-		permit.CodeParametersMismatch, permit.CodeActionMismatch, permit.CodeCredentialMismatch:
+		permit.CodeParametersMismatch, permit.CodeActionMismatch, permit.CodeCredentialMismatch,
+		permit.CodeStageNotOpen, permit.CodeRolloutStopped, permit.CodeRolloutAborted:
 		c = codes.PermissionDenied
 	default:
 		c = codes.Internal

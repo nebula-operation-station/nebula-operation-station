@@ -40,6 +40,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/stageplan"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vault"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnreg"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
@@ -324,7 +325,7 @@ func (h *harness) request(risk pb.RiskClass) *pb.ExecutionRequest {
 		ParametersHash: ph,
 		CredentialRefs: []string{credRef},
 		RiskClass:      risk,
-		StagePlanHash:  strings.Repeat("c", 64),
+		StagePlanHash:  stageplan.SingleStageHash,
 		ExpiryUnix:     time.Now().Add(time.Hour).Unix(),
 		ResolvedTargets: []*pb.Target{
 			{HostId: "dockerflux", HostKeyFingerprint: fpA},

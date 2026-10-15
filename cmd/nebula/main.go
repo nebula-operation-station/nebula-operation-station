@@ -45,6 +45,8 @@ commands:
   lock                wipe keys, end the privileged session, revoke all permits
   pending             list permits waiting for approval
   approve <digest>    approve a pending permit (hardened path); a unique prefix is enough
+  approve --stage N DIGEST | approve --skip HOST DIGEST
+                      open the next stage of a rollout, or skip a host (hardened path)
   artifact trust --action ID --version X.Y.Z --risk LEVEL [--label TEXT] FILE
                       trust a script for one action; LEVEL becomes its minimum risk
   artifact untrust --action ID --version X.Y.Z SHA256
@@ -137,6 +139,9 @@ func run(cmd string, args []string) error {
 	case "pending":
 		return pending(ctx, c)
 	case "approve":
+		if len(args) > 1 && strings.HasPrefix(args[0], "--") {
+			return gateCmd(ctx, c, args, os.Stdin, os.Stdout)
+		}
 		if len(args) != 1 {
 			return errors.New("usage: nebula approve <digest-prefix>")
 		}
@@ -231,6 +236,14 @@ func approve(ctx context.Context, c pb.ExecutorServiceClient, prefix string) err
 	fmt.Printf("  parameters     sha256:%s\n", r.GetParametersHash())
 	fmt.Printf("                 %s\n", displaySafe(match.GetCanonicalParameters(), canonical.MaxParametersSize))
 	fmt.Printf("  stage plan     sha256:%s\n", r.GetStagePlanHash())
+	for i, st := range match.GetStagePlan() {
+		fmt.Printf("    stage %d %-20s %d hosts, max failed %d, max unreachable %d, continue %s\n", i+1,
+			displaySafe([]byte(st.GetName()), 40), len(st.GetHostIds()), st.GetMaxFailed(), st.GetMaxUnreachable(),
+			displaySafe([]byte(st.GetContinueMode()), 10))
+		for _, h := range st.GetHostIds() {
+			fmt.Printf("      %s\n", displaySafe([]byte(h), 64))
+		}
+	}
 	fmt.Printf("  credentials    %s\n", strings.Join(r.GetCredentialRefs(), ", "))
 	fmt.Printf("  permit expiry  %s\n", time.Unix(r.GetExpiryUnix(), 0).Format(time.RFC3339))
 	fmt.Printf("  targets (%d):\n", len(r.GetResolvedTargets()))

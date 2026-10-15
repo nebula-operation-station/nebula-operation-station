@@ -126,6 +126,12 @@ Also decided for Milestone 8 (Docker): container start/stop/restart and the
 Compose update are MEDIUM, like service control; the registry digest check
 ("update available") runs on the managed host as a LOW read-only action.
 
+## Status
+
+- Step 1 (executor) is decision 59 in `m0.md`. Stage state is kept with the
+  permit in memory, like the permit itself, so no `executor.db` migration
+  was needed: an executor restart ends the rollout as it ends every permit.
+
 ## Rough order of work
 
 1. Executor: plan validation, stage tracking in permits, `OpenStage` with

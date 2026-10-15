@@ -109,6 +109,7 @@ func (s *Service) RunAttached(ctx context.Context, req *pb.RunAttachedRequest) (
 		}
 		resp.DurationMs = time.Since(start).Milliseconds()
 		s.auditRun(d, r.GetHostId(), resp)
+		s.auth.RecordOutcome(grant.ExecutionID, r.GetHostId(), permit.OutcomeOfClass(resp.Class))
 		return resp, nil
 	}
 	defer c.Close()
@@ -122,6 +123,7 @@ func (s *Service) RunAttached(ctx context.Context, req *pb.RunAttachedRequest) (
 	}
 	resp.DurationMs = time.Since(start).Milliseconds()
 	s.auditRun(d, r.GetHostId(), resp)
+	s.auth.RecordOutcome(grant.ExecutionID, r.GetHostId(), permit.OutcomeOfClass(resp.Class))
 	return resp, nil
 }
 

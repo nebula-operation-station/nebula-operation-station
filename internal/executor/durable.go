@@ -12,6 +12,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
@@ -129,6 +130,8 @@ func (s *Service) finishRun(r executordb.Run) {
 	}
 	s.log.Info("audit", "kind", "run_finished", "execution", r.ExecutionID, "host", r.HostID, "class", r.Class, "exit", r.ExitCode,
 		"result_bytes", len(r.Result), "log_bytes", len(r.Log), "log_truncated", r.LogTruncated)
+	// The stage engine decides on the executor's own record of the run.
+	s.auth.RecordOutcome(r.ExecutionID, r.HostID, permit.OutcomeOfClass(r.Class))
 }
 
 // Reconcile runs reconciliation passes until ctx ends (spec 07). A pass

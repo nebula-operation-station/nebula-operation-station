@@ -60,5 +60,10 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_SetSecret_FullMethodName:                 {admin},
 		pb.ExecutorService_ListSecrets_FullMethodName:               {admin},
 		pb.ExecutorService_DeleteSecret_FullMethodName:              {admin},
+		pb.ExecutorService_BeginGate_FullMethodName:                 {server},
+		pb.ExecutorService_CommitGate_FullMethodName:                {server},
+		pb.ExecutorService_AbortRollout_FullMethodName:              {server},
+		pb.ExecutorService_GetRollout_FullMethodName:                {server, admin},
+		pb.ExecutorService_ApproveGateCLI_FullMethodName:            {admin},
 	}
 }

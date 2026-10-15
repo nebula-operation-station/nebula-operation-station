@@ -67,6 +67,11 @@ const (
 	ExecutorService_SetSecret_FullMethodName                 = "/nebula.executor.v1.ExecutorService/SetSecret"
 	ExecutorService_ListSecrets_FullMethodName               = "/nebula.executor.v1.ExecutorService/ListSecrets"
 	ExecutorService_DeleteSecret_FullMethodName              = "/nebula.executor.v1.ExecutorService/DeleteSecret"
+	ExecutorService_BeginGate_FullMethodName                 = "/nebula.executor.v1.ExecutorService/BeginGate"
+	ExecutorService_CommitGate_FullMethodName                = "/nebula.executor.v1.ExecutorService/CommitGate"
+	ExecutorService_AbortRollout_FullMethodName              = "/nebula.executor.v1.ExecutorService/AbortRollout"
+	ExecutorService_GetRollout_FullMethodName                = "/nebula.executor.v1.ExecutorService/GetRollout"
+	ExecutorService_ApproveGateCLI_FullMethodName            = "/nebula.executor.v1.ExecutorService/ApproveGateCLI"
 )
 
 // ExecutorServiceClient is the client API for ExecutorService service.
@@ -233,6 +238,28 @@ type ExecutorServiceClient interface {
 	ListSecrets(ctx context.Context, in *ListSecretsRequest, opts ...grpc.CallOption) (*ListSecretsResponse, error)
 	// Role: admin. Deletes a secret (vault unlocked).
 	DeleteSecret(ctx context.Context, in *DeleteSecretRequest, opts ...grpc.CallOption) (*DeleteSecretResponse, error)
+	// Stage engine (spec 07, Milestone 6). A permit proposed with a stage
+	// plan runs stage by stage: the executor refuses a host whose stage is
+	// not open, stops the rollout when a stage has more failed hosts than
+	// its plan allows, and opens a later stage only through a gate (or by
+	// itself, for a LOW or MEDIUM plan that says auto). The outcomes it
+	// decides on are its own run records.
+	//
+	// Role: server. Checks a gate (open the next stage, skip a host) and
+	// returns what it needs: nothing beyond the privileged session for LOW
+	// and MEDIUM, a fresh user-verified assertion over a challenge bound to
+	// digest and gate for HIGH and CRITICAL, the CLI in hardened mode.
+	BeginGate(ctx context.Context, in *BeginGateRequest, opts ...grpc.CallOption) (*BeginGateResponse, error)
+	// Role: server. Applies a gate with the privileged session and, for HIGH
+	// and CRITICAL, the assertion over BeginGate's challenge (single use).
+	CommitGate(ctx context.Context, in *CommitGateRequest, opts ...grpc.CallOption) (*CommitGateResponse, error)
+	// Role: server. Stops a rollout: no further host is authorized. Needs no
+	// approval, since it only takes permission away.
+	AbortRollout(ctx context.Context, in *AbortRolloutRequest, opts ...grpc.CallOption) (*AbortRolloutResponse, error)
+	// Role: server, admin. The executor's view of a rollout.
+	GetRollout(ctx context.Context, in *GetRolloutRequest, opts ...grpc.CallOption) (*GetRolloutResponse, error)
+	// Role: admin. Hardened gate path (`nebula approve --stage`, `--skip`).
+	ApproveGateCLI(ctx context.Context, in *ApproveGateCLIRequest, opts ...grpc.CallOption) (*ApproveGateCLIResponse, error)
 }
 
 type executorServiceClient struct {
@@ -703,6 +730,56 @@ func (c *executorServiceClient) DeleteSecret(ctx context.Context, in *DeleteSecr
 	return out, nil
 }
 
+func (c *executorServiceClient) BeginGate(ctx context.Context, in *BeginGateRequest, opts ...grpc.CallOption) (*BeginGateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BeginGateResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_BeginGate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) CommitGate(ctx context.Context, in *CommitGateRequest, opts ...grpc.CallOption) (*CommitGateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitGateResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_CommitGate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) AbortRollout(ctx context.Context, in *AbortRolloutRequest, opts ...grpc.CallOption) (*AbortRolloutResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AbortRolloutResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_AbortRollout_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) GetRollout(ctx context.Context, in *GetRolloutRequest, opts ...grpc.CallOption) (*GetRolloutResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetRolloutResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_GetRollout_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ApproveGateCLI(ctx context.Context, in *ApproveGateCLIRequest, opts ...grpc.CallOption) (*ApproveGateCLIResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ApproveGateCLIResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ApproveGateCLI_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExecutorServiceServer is the server API for ExecutorService service.
 // All implementations must embed UnimplementedExecutorServiceServer
 // for forward compatibility.
@@ -867,6 +944,28 @@ type ExecutorServiceServer interface {
 	ListSecrets(context.Context, *ListSecretsRequest) (*ListSecretsResponse, error)
 	// Role: admin. Deletes a secret (vault unlocked).
 	DeleteSecret(context.Context, *DeleteSecretRequest) (*DeleteSecretResponse, error)
+	// Stage engine (spec 07, Milestone 6). A permit proposed with a stage
+	// plan runs stage by stage: the executor refuses a host whose stage is
+	// not open, stops the rollout when a stage has more failed hosts than
+	// its plan allows, and opens a later stage only through a gate (or by
+	// itself, for a LOW or MEDIUM plan that says auto). The outcomes it
+	// decides on are its own run records.
+	//
+	// Role: server. Checks a gate (open the next stage, skip a host) and
+	// returns what it needs: nothing beyond the privileged session for LOW
+	// and MEDIUM, a fresh user-verified assertion over a challenge bound to
+	// digest and gate for HIGH and CRITICAL, the CLI in hardened mode.
+	BeginGate(context.Context, *BeginGateRequest) (*BeginGateResponse, error)
+	// Role: server. Applies a gate with the privileged session and, for HIGH
+	// and CRITICAL, the assertion over BeginGate's challenge (single use).
+	CommitGate(context.Context, *CommitGateRequest) (*CommitGateResponse, error)
+	// Role: server. Stops a rollout: no further host is authorized. Needs no
+	// approval, since it only takes permission away.
+	AbortRollout(context.Context, *AbortRolloutRequest) (*AbortRolloutResponse, error)
+	// Role: server, admin. The executor's view of a rollout.
+	GetRollout(context.Context, *GetRolloutRequest) (*GetRolloutResponse, error)
+	// Role: admin. Hardened gate path (`nebula approve --stage`, `--skip`).
+	ApproveGateCLI(context.Context, *ApproveGateCLIRequest) (*ApproveGateCLIResponse, error)
 	mustEmbedUnimplementedExecutorServiceServer()
 }
 
@@ -1014,6 +1113,21 @@ func (UnimplementedExecutorServiceServer) ListSecrets(context.Context, *ListSecr
 }
 func (UnimplementedExecutorServiceServer) DeleteSecret(context.Context, *DeleteSecretRequest) (*DeleteSecretResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteSecret not implemented")
+}
+func (UnimplementedExecutorServiceServer) BeginGate(context.Context, *BeginGateRequest) (*BeginGateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BeginGate not implemented")
+}
+func (UnimplementedExecutorServiceServer) CommitGate(context.Context, *CommitGateRequest) (*CommitGateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CommitGate not implemented")
+}
+func (UnimplementedExecutorServiceServer) AbortRollout(context.Context, *AbortRolloutRequest) (*AbortRolloutResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AbortRollout not implemented")
+}
+func (UnimplementedExecutorServiceServer) GetRollout(context.Context, *GetRolloutRequest) (*GetRolloutResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetRollout not implemented")
+}
+func (UnimplementedExecutorServiceServer) ApproveGateCLI(context.Context, *ApproveGateCLIRequest) (*ApproveGateCLIResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ApproveGateCLI not implemented")
 }
 func (UnimplementedExecutorServiceServer) mustEmbedUnimplementedExecutorServiceServer() {}
 func (UnimplementedExecutorServiceServer) testEmbeddedByValue()                         {}
@@ -1864,6 +1978,96 @@ func _ExecutorService_DeleteSecret_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_BeginGate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BeginGateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).BeginGate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_BeginGate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).BeginGate(ctx, req.(*BeginGateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_CommitGate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommitGateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).CommitGate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_CommitGate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).CommitGate(ctx, req.(*CommitGateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_AbortRollout_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AbortRolloutRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).AbortRollout(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_AbortRollout_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).AbortRollout(ctx, req.(*AbortRolloutRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_GetRollout_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRolloutRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).GetRollout(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_GetRollout_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).GetRollout(ctx, req.(*GetRolloutRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ApproveGateCLI_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ApproveGateCLIRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ApproveGateCLI(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ApproveGateCLI_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ApproveGateCLI(ctx, req.(*ApproveGateCLIRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ExecutorService_ServiceDesc is the grpc.ServiceDesc for ExecutorService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2054,6 +2258,26 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteSecret",
 			Handler:    _ExecutorService_DeleteSecret_Handler,
+		},
+		{
+			MethodName: "BeginGate",
+			Handler:    _ExecutorService_BeginGate_Handler,
+		},
+		{
+			MethodName: "CommitGate",
+			Handler:    _ExecutorService_CommitGate_Handler,
+		},
+		{
+			MethodName: "AbortRollout",
+			Handler:    _ExecutorService_AbortRollout_Handler,
+		},
+		{
+			MethodName: "GetRollout",
+			Handler:    _ExecutorService_GetRollout_Handler,
+		},
+		{
+			MethodName: "ApproveGateCLI",
+			Handler:    _ExecutorService_ApproveGateCLI_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
