@@ -30,6 +30,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
@@ -142,6 +143,22 @@ func (d direct) GetRollout(ctx context.Context, in *pb.GetRolloutRequest, _ ...g
 	return d.s.GetRollout(ctx, in)
 }
 
+func (d direct) ProposeScheduleGrant(ctx context.Context, in *pb.ProposeScheduleGrantRequest, _ ...grpc.CallOption) (*pb.ProposeScheduleGrantResponse, error) {
+	return d.s.ProposeScheduleGrant(ctx, in)
+}
+
+func (d direct) CommitScheduleGrant(ctx context.Context, in *pb.CommitScheduleGrantRequest, _ ...grpc.CallOption) (*pb.CommitScheduleGrantResponse, error) {
+	return d.s.CommitScheduleGrant(ctx, in)
+}
+
+func (d direct) RevokeScheduleGrant(ctx context.Context, in *pb.RevokeScheduleGrantRequest, _ ...grpc.CallOption) (*pb.RevokeScheduleGrantResponse, error) {
+	return d.s.RevokeScheduleGrant(ctx, in)
+}
+
+func (d direct) RunScheduled(ctx context.Context, in *pb.RunScheduledRequest, _ ...grpc.CallOption) (*pb.RunScheduledResponse, error) {
+	return d.s.RunScheduled(ctx, in)
+}
+
 func must(err error) {
 	if err != nil {
 		panic(err)
@@ -189,6 +206,18 @@ func main() {
 	must(err)
 	_, err = svc.PinHostKey(context.Background(), &pb.PinHostKeyRequest{HostId: "e2e-host", AuthorizedKey: probe.GetAuthorizedKey(),
 		ExpectedFingerprint: probe.GetFingerprint(), SshUser: "nebula", CredentialRef: "nebula-default", Source: pb.HostKeySource_HOST_KEY_SOURCE_PROBE})
+	must(err)
+	// service.list is trusted as LOW (read-only) and e2e-host is recorded
+	// LOW, so it can be scheduled (schedule grants).
+	sl, ok := actions.Lookup("service.list")
+	if !ok {
+		panic("service.list")
+	}
+	_, err = svc.TrustArtifact(context.Background(), &pb.TrustArtifactRequest{ActionId: sl.ID, ModuleVersion: sl.Version,
+		RiskClass: pb.RiskClass_RISK_CLASS_LOW, Artifact: sl.Script, Label: "browser test", ExpectedSha256: sl.SHA256()})
+	must(err)
+	_, err = svc.SetHostCriticality(context.Background(), &pb.SetHostCriticalityRequest{HostId: "e2e-host",
+		HostKeyFingerprint: probe.GetFingerprint(), Criticality: pb.RiskClass_RISK_CLASS_LOW})
 	must(err)
 	// A host whose key changed: pinned on one server, then reached at
 	// another one, which blocks it (re-pin from the dashboard).
@@ -246,7 +275,7 @@ func main() {
 		r, err := svc.ListHostKeys(ctx, &pb.ListHostKeysRequest{})
 		return r.GetHosts(), err
 	}
-	u, err := ui.New(ui.Options{PublicOrigin: origin, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Repin: direct{svc}, Enroll: direct{svc}, Log: log})
+	u, err := ui.New(ui.Options{PublicOrigin: origin, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Schedules: ops, Repin: direct{svc}, Enroll: direct{svc}, Log: log})
 	must(err)
 	mux := http.NewServeMux()
 	// Test hook: issue a one-time code like `nebula webauthn code`.

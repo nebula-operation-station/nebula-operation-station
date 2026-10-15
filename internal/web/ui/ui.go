@@ -100,6 +100,8 @@ type Options struct {
 	// Operations plans and follows executions. Nil leaves the
 	// operations page empty.
 	Operations Operations
+	// Schedules manages scheduled read-only checks. Nil hides them.
+	Schedules Schedules
 	// Repin re-pins hosts blocked by a host key mismatch. Nil leaves only
 	// the CLI instructions on the dashboard.
 	Repin Repinner
@@ -124,6 +126,7 @@ type Handler struct {
 	hostKeys   func(ctx context.Context) ([]*pb.HostKeyPin, error)
 	inventory  InventoryStore
 	operations Operations
+	schedules  Schedules
 	log        *slog.Logger
 	repin      Repinner
 	enroll     Enroller
@@ -160,6 +163,7 @@ func New(o Options) (*Handler, error) {
 		hostKeys:     o.HostKeys,
 		inventory:    o.Inventory,
 		operations:   o.Operations,
+		schedules:    o.Schedules,
 		repin:        o.Repin,
 		enroll:       o.Enroll,
 		log:          log,
@@ -180,6 +184,7 @@ var pageFiles = map[string]string{
 	"inventory_enroll": "inventory_enroll.html",
 	"operation_new":    "operation_new.html",
 	"operation":        "operation.html",
+	"schedules":        "schedules.html",
 }
 
 // Handler returns the UI's http.Handler without the security middleware
@@ -208,6 +213,11 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("POST /operations/gate/commit", h.handleOperationGateCommit)
 	mux.HandleFunc("POST /operations/abort", h.handleOperationAbort)
 	mux.HandleFunc("POST /operations/retry", h.handleOperationRetry)
+	// Scheduled read-only checks (schedule grants).
+	mux.HandleFunc("GET /schedules", h.handleSchedules)
+	mux.HandleFunc("POST /schedules/create", h.handleScheduleCreate)
+	mux.HandleFunc("POST /schedules/approve", h.handleScheduleApprove)
+	mux.HandleFunc("POST /schedules/revoke", h.handleScheduleRevoke)
 	mux.HandleFunc("POST /hostkeys/repin/propose", h.handleRepinPropose)
 	mux.HandleFunc("POST /hostkeys/repin/commit", h.handleRepinCommit)
 	mux.HandleFunc("GET /inventory/enroll", h.handleEnrollPage)
@@ -273,6 +283,8 @@ type pageData struct {
 	Enroll []enrollRow
 	// EnrollEnabled links the enrollment page from the inventory.
 	EnrollEnabled bool
+	// Schedules is the data of the scheduled-checks page.
+	Schedules *schedulesData
 	// Ops is the data of the operations pages.
 	Ops *operationsData
 	// InventoryEditable is true when Options.Inventory is set; the

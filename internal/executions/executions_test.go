@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -43,6 +44,10 @@ type fakeExec struct {
 	failHost  string
 	// unreachable answers that many runs with a retryable network_unreachable.
 	unreachable int
+	grantDoc    []byte
+	revoked     string
+	scheduled   []*pb.RunScheduledRequest
+	tooSoon     bool
 }
 
 func (f *fakeExec) ListHostKeys(context.Context, *pb.ListHostKeysRequest, ...grpc.CallOption) (*pb.ListHostKeysResponse, error) {
@@ -586,4 +591,42 @@ func (f *fakeExec) AbortRollout(context.Context, *pb.AbortRolloutRequest, ...grp
 
 func (f *fakeExec) GetRollout(context.Context, *pb.GetRolloutRequest, ...grpc.CallOption) (*pb.GetRolloutResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "no stages")
+}
+
+// Schedule grants: the fake records what it was asked.
+func (f *fakeExec) ProposeScheduleGrant(_ context.Context, in *pb.ProposeScheduleGrantRequest, _ ...grpc.CallOption) (*pb.ProposeScheduleGrantResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.grantDoc = in.GetGrantJson()
+	return &pb.ProposeScheduleGrantResponse{GrantDigest: strings.Repeat("e", 64), ApprovalRequirement: pb.ApprovalRequirement_APPROVAL_REQUIREMENT_ASSERTION_VERIFIED,
+		Challenge: []byte("c"), RequestOptionsJson: []byte(`{"publicKey":{"challenge":"grant"}}`)}, nil
+}
+
+func (f *fakeExec) CommitScheduleGrant(_ context.Context, in *pb.CommitScheduleGrantRequest, _ ...grpc.CallOption) (*pb.CommitScheduleGrantResponse, error) {
+	if string(in.GetAssertionJson()) != "good" {
+		return nil, status.Error(codes.PermissionDenied, "assertion_rejected")
+	}
+	return &pb.CommitScheduleGrantResponse{}, nil
+}
+
+func (f *fakeExec) RevokeScheduleGrant(_ context.Context, in *pb.RevokeScheduleGrantRequest, _ ...grpc.CallOption) (*pb.RevokeScheduleGrantResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.revoked = in.GetGrantId()
+	return &pb.RevokeScheduleGrantResponse{}, nil
+}
+
+func (f *fakeExec) RunScheduled(_ context.Context, in *pb.RunScheduledRequest, _ ...grpc.CallOption) (*pb.RunScheduledResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.scheduled = append(f.scheduled, in)
+	if f.tooSoon {
+		return nil, status.Error(codes.ResourceExhausted, "schedule_interval_not_elapsed")
+	}
+	res := f.result
+	if res == nil {
+		res = []byte(`{"ok":true}`)
+	}
+	return &pb.RunScheduledResponse{ExecutionId: fmt.Sprintf("00000000-0000-4000-8000-%012d", len(f.scheduled)),
+		Result: &pb.RunAttachedResponse{Class: "success", Result: res}}, nil
 }
