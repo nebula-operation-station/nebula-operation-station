@@ -168,12 +168,17 @@ func (s *stages) passed(i int) (bool, string) {
 func (a *Authority) evaluateLocked(p *Permit) {
 	s := p.stages
 	for !s.aborted && s.stopped == "" {
-		plan := s.plan[s.open]
-		if st := s.stats(s.open); st.failed > plan.MaxFailed {
-			s.stopped = fmt.Sprintf("stage %s: %d hosts failed, at most %d allowed", plan.Name, st.failed, plan.MaxFailed)
-			a.emit(Event{Kind: "stage_failed", Digest: p.Digest.String(), Detail: s.stopped})
-			return
+		// Every open stage counts, not only the newest: a host of an
+		// earlier stage that was retried after the stage passed can still
+		// fail it (Hermes review of #34).
+		for i := 0; i <= s.open; i++ {
+			if st := s.stats(i); st.failed > s.plan[i].MaxFailed {
+				s.stopped = fmt.Sprintf("stage %s: %d hosts failed, at most %d allowed", s.plan[i].Name, st.failed, s.plan[i].MaxFailed)
+				a.emit(Event{Kind: "stage_failed", Digest: p.Digest.String(), Detail: s.stopped})
+				return
+			}
 		}
+		plan := s.plan[s.open]
 		ok, _ := s.passed(s.open)
 		if !ok || s.open+1 >= len(s.plan) {
 			return
@@ -228,6 +233,35 @@ func (a *Authority) RecordOutcome(executionID, host string, o Outcome) {
 	s.outcome[host] = o
 	a.emit(Event{Kind: "outcome", Digest: d.String(), Host: host, Detail: string(o)})
 	a.evaluateLocked(p)
+}
+
+// ReleaseUnreachable is ReleaseHost and RecordOutcome(unreachable) in one
+// critical section, so no other run of the host can be authorized between
+// the release and the outcome (Hermes review of #34). It reports whether
+// the host was released; if not, the outcome is recorded anyway.
+func (a *Authority) ReleaseUnreachable(d canonical.Digest, hostID string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	p, ok := a.permits[d]
+	if !ok || p.stages == nil {
+		return false
+	}
+	released := false
+	if _, used := p.used[hostID]; used && p.State == StateApproved && a.now().Before(time.Unix(p.Request.ExpiryUnix, 0)) &&
+		p.stages.outcome[hostID] != OutcomeSkipped {
+		delete(p.used, hostID)
+		released = true
+		a.emit(Event{Kind: "released", Digest: d.String(), Host: hostID, Detail: "host unreachable; nothing ran"})
+	}
+	s := p.stages
+	if _, in := s.stageOf[hostID]; in {
+		if cur := s.outcome[hostID]; cur == OutcomeNone || cur == OutcomeUnreachable {
+			s.outcome[hostID] = OutcomeUnreachable
+			a.emit(Event{Kind: "outcome", Digest: d.String(), Host: hostID, Detail: string(OutcomeUnreachable)})
+			a.evaluateLocked(p)
+		}
+	}
+	return released
 }
 
 // GateChallenge is what a gate needs.

@@ -104,12 +104,15 @@ func (s *Service) RunAttached(ctx context.Context, req *pb.RunAttachedRequest) (
 		// Unreachable means no endpoint got as far as the host key: no
 		// credential was offered and nothing ran, so the host stays
 		// unused in the permit and the run may be retried.
-		if resp.Class == classNetworkUnreachable && s.auth.ReleaseHost(d, r.GetHostId()) {
-			resp.Retryable = true
+		// Release and outcome in one step, so that no second run of the
+		// host is authorized in between.
+		if resp.Class == classNetworkUnreachable {
+			resp.Retryable = s.auth.ReleaseUnreachable(d, r.GetHostId())
+		} else {
+			s.auth.RecordOutcome(grant.ExecutionID, r.GetHostId(), permit.OutcomeOfClass(resp.Class))
 		}
 		resp.DurationMs = time.Since(start).Milliseconds()
 		s.auditRun(d, r.GetHostId(), resp)
-		s.auth.RecordOutcome(grant.ExecutionID, r.GetHostId(), permit.OutcomeOfClass(resp.Class))
 		return resp, nil
 	}
 	defer c.Close()

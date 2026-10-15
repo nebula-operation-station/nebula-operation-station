@@ -325,3 +325,44 @@ func (e *env) hasEvent(kind, host string) bool {
 	}
 	return false
 }
+
+// A host of a passed stage that is retried and fails afterwards still
+// stops the rollout (Hermes review of #34, finding 1).
+func TestRetriedHostOfAPassedStageStillStopsTheRollout(t *testing.T) {
+	e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
+	e.openSession()
+	p := e.staged(canonical.RiskMedium, stg("canary", 0, 1, stageplan.ContinueAuto, "dockerflux"), stg("rest", 2, 2, stageplan.ContinueManual, "strompi", "web"))
+	if err := e.authorize(p, "dockerflux"); err != nil {
+		t.Fatal(err)
+	}
+	if !e.auth.ReleaseUnreachable(p.Digest, "dockerflux") {
+		t.Fatal("not released")
+	}
+	// Stage 1 passed with one unreachable host; stage 2 opened by itself.
+	if err := e.authorize(p, "strompi"); err != nil {
+		t.Fatal(err)
+	}
+	e.run(p, "dockerflux", OutcomeFailed)
+	wantCode(t, e.authorize(p, "web"), CodeRolloutStopped)
+}
+
+// Release and outcome happen together: once released, the host is
+// unreachable in the rollout at the same moment (finding 2).
+func TestReleaseUnreachableRecordsTheOutcome(t *testing.T) {
+	e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
+	e.openSession()
+	p := e.staged(canonical.RiskMedium, stg("one", 0, 0, stageplan.ContinueManual, "dockerflux", "strompi"), stg("two", 0, 0, stageplan.ContinueManual, "web"))
+	if err := e.authorize(p, "dockerflux"); err != nil {
+		t.Fatal(err)
+	}
+	if !e.auth.ReleaseUnreachable(p.Digest, "dockerflux") {
+		t.Fatal("not released")
+	}
+	r, _ := e.auth.Rollout(p.Digest)
+	if r.Stages[0].Outcomes["dockerflux"] != OutcomeUnreachable {
+		t.Fatalf("%+v", r.Stages[0].Outcomes)
+	}
+	if e.auth.ReleaseUnreachable(p.Digest, "dockerflux") {
+		t.Fatal("released twice")
+	}
+}
