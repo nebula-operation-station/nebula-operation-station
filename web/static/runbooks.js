@@ -71,6 +71,7 @@
   $('runbook-durable').checked = !!draft.durable;
   $('runbook-timeout').value = draft.timeout_s || 300;
   $('runbook-body').value = draft.body || '';
+  $('runbook-secrets').value = (draft.secrets || []).join(', ');
   for (const p of draft.params || []) {
     addRow(p);
   }
@@ -97,6 +98,7 @@
       durable: $('runbook-durable').checked,
       timeout_s: parseInt($('runbook-timeout').value, 10) || 0,
       params,
+      secrets: $('runbook-secrets').value.split(',').map((c) => c.trim()).filter((c) => c !== ''),
       body: $('runbook-body').value,
     };
     const button = $('runbook-save');

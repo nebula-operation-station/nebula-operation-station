@@ -23,6 +23,15 @@
     <tbody>{{range .Params}}<tr><td>{{.Name}}</td><td>{{.Label}}</td><td>{{.Type}}</td><td>{{.Choices}}</td><td><code>${{.Env}}</code></td></tr>{{end}}</tbody>
   </table>
   {{end}}
+  {{if .Secrets}}
+  <h2>Secret slots</h2>
+  <p class="hint">Planning names a vault secret for each slot. The executor reads it and sends it to the host only; the host keeps it
+    in a private file on a tmpfs while the script runs. A runbook with secrets is at least MEDIUM.</p>
+  <table class="inventory">
+    <thead><tr><th>Slot</th><th>In the script (path of the file)</th></tr></thead>
+    <tbody>{{range .Secrets}}<tr><td>{{.Name}}</td><td><code>${{.Env}}</code></td></tr>{{end}}</tbody>
+  </table>
+  {{end}}
   <h2>Script</h2>
   <pre class="output">{{.Body}}</pre>
   <h2>Versions</h2>

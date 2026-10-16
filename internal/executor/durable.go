@@ -39,6 +39,10 @@ func (s *Service) StartDurable(ctx context.Context, req *pb.StartDurableRequest)
 	if err != nil {
 		return nil, err
 	}
+	secrets, err := s.runSecrets(r.GetParametersJson())
+	if err != nil {
+		return nil, err
+	}
 	grant, err := s.auth.AuthorizeGrant(d, authorizeRequest(r))
 	if err != nil {
 		return nil, toStatus(err)
@@ -62,7 +66,7 @@ func (s *Service) StartDurable(ctx context.Context, req *pb.StartDurableRequest)
 		return s.runResponse(grant.ExecutionID, r.GetHostId(), false)
 	}
 	defer c.Close()
-	outcome, detail, err := hostrun.Dispatch(ctx, c.Client, s.jobs, grant.ExecutionID, grant.Parameters, r.GetArtifact(), timeout)
+	outcome, detail, err := hostrun.Dispatch(ctx, c.Client, s.jobs, grant.ExecutionID, grant.Parameters, r.GetArtifact(), timeout, secrets...)
 	switch {
 	case err != nil:
 		// The connection broke during dispatch: the reconciler finds out

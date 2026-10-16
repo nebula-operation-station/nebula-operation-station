@@ -70,6 +70,12 @@ func TestValidate(t *testing.T) {
 		},
 		"balanced breakout": func(d *Draft) { d.Body = "}\nexit 0\nf() {\n" },
 		"syntax error":      func(d *Draft) { d.Body = "if true; then\n" },
+		"nebula param":      func(d *Draft) { d.Params[0].Name = "nebula_secrets" },
+		"slot upper":        func(d *Draft) { d.Secrets = []string{"Token"} },
+		"slot dup":          func(d *Draft) { d.Secrets = []string{"token", "token"} },
+		"slot is param":     func(d *Draft) { d.Secrets = []string{"unit"} },
+		"slot nebula":       func(d *Draft) { d.Secrets = []string{"nebula_x"} },
+		"many slots":        func(d *Draft) { d.Secrets = []string{"a", "b", "c", "d", "e", "f", "g", "h", "i"} },
 	} {
 		d := draft()
 		d.Params = append([]Param(nil), d.Params...)
@@ -249,5 +255,40 @@ func TestArtifactWithCommentOnlyScript(t *testing.T) {
 	v := Version{Draft: Draft{Slug: "x", Body: "# nothing yet"}, Version: 2}
 	if out, err := exec.Command(sh, "-n", "-c", string(Artifact(v))).CombinedOutput(); err != nil {
 		t.Fatalf("%v %s", err, out)
+	}
+}
+
+// Secret slots: the prelude needs each file and gives the script its path.
+func TestArtifactSecretSlots(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	v := Version{Draft: Draft{Slug: "s", Secrets: []string{"token"}, Body: `echo "path=$NEBULA_SECRET_TOKEN"; cat "$NEBULA_SECRET_TOKEN"`}, Version: 1}
+	if a := v.Action(); len(a.Secrets) != 1 || a.Secrets[0] != "token" {
+		t.Fatal(a.Secrets)
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "a.sh")
+	pf := filepath.Join(dir, "p.json")
+	sd := filepath.Join(dir, "secrets")
+	_ = os.WriteFile(script, Artifact(v), 0o600)
+	_ = os.WriteFile(pf, []byte(`{"nebula_secrets":{"token":"app.token"}}`), 0o600)
+	_ = os.Mkdir(sd, 0o700)
+	run := func() (string, string, error) {
+		cmd := exec.Command(sh, script)
+		cmd.Env = []string{"NEBULA_PARAMS=" + pf, "NEBULA_SECRETS_DIR=" + sd, "PATH=" + os.Getenv("PATH")}
+		var out, errb strings.Builder
+		cmd.Stdout, cmd.Stderr = &out, &errb
+		err := cmd.Run()
+		return out.String(), errb.String(), err
+	}
+	if out, _, err := run(); err == nil || !strings.Contains(out, "secret token is not available") {
+		t.Fatalf("ran without the secret: %q %v", out, err)
+	}
+	_ = os.WriteFile(filepath.Join(sd, "token"), []byte("v4lue"), 0o600)
+	out, log, err := run()
+	if err != nil || !strings.Contains(log, "path="+sd+"/token") || !strings.Contains(log, "v4lue") || !strings.Contains(out, `"exit":0`) {
+		t.Fatalf("%q %q %v", out, log, err)
 	}
 }

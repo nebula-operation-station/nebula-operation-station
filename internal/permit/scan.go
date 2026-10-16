@@ -67,11 +67,15 @@ func (a *Authority) observe(sum [32]byte, artifact []byte) {
 }
 
 // floor is the executor's minimum risk for r on targets: the risk policy's
-// floor, raised by the scanner's result for r's artifact when it is known.
-func (a *Authority) floor(r canonical.Request, targets []canonical.Target) (canonical.Risk, string, error) {
+// floor, raised by the scanner's result for r's artifact when it is known
+// and by the use of vault secrets in params (nil: not known here).
+func (a *Authority) floor(r canonical.Request, targets []canonical.Target, params []byte) (canonical.Risk, string, error) {
 	f, why, err := a.risk.MinimumRisk(r, targets)
 	if err != nil {
 		return f, why, err
+	}
+	if sf, ok := secretFloor(params); ok && sf.Rank() > f.Rank() {
+		f, why = sf, "the run uses vault secrets"
 	}
 	a.scanMu.Lock()
 	s, ok := a.scans[r.ArtifactSHA256]
