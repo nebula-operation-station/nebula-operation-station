@@ -12,6 +12,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/schedgrant"
 )
 
 // Schedule grants (docs/implementation/schedule-grants.md). The rules are
@@ -28,19 +29,24 @@ func grantToProto(g permit.StoredGrant) *pb.ScheduleGrant {
 
 // ProposeScheduleGrant checks a grant document (server role).
 func (s *Service) ProposeScheduleGrant(_ context.Context, req *pb.ProposeScheduleGrantRequest) (*pb.ProposeScheduleGrantResponse, error) {
+	// Every target must be pinned with exactly the granted key, checked
+	// before the authority records the proposal, so a refused one never
+	// takes a pending slot. A document that does not parse is refused by
+	// the authority below with its reason.
+	if doc, _, _, err := schedgrant.Parse(req.GetGrantJson(), time.Now()); err == nil {
+		for _, t := range doc.Targets {
+			hk, ok, err := s.db.HostKey(t.HostID)
+			if err != nil {
+				return nil, s.adminStoreError("schedule grant", err)
+			}
+			if !ok || hk.Fingerprint != t.HostKeyFingerprint || hk.Blocked != nil {
+				return nil, status.Errorf(codes.InvalidArgument, "schedule_grant_invalid: host %s is not pinned with that key (or is blocked)", t.HostID)
+			}
+		}
+	}
 	pg, err := s.auth.ProposeScheduleGrant(req.GetGrantJson())
 	if err != nil {
 		return nil, toStatus(err)
-	}
-	// Every target must be pinned with exactly the granted key.
-	for _, t := range pg.Doc.Targets {
-		hk, ok, err := s.db.HostKey(t.HostID)
-		if err != nil {
-			return nil, s.adminStoreError("schedule grant", err)
-		}
-		if !ok || hk.Fingerprint != t.HostKeyFingerprint || hk.Blocked != nil {
-			return nil, status.Errorf(codes.InvalidArgument, "schedule_grant_invalid: host %s is not pinned with that key (or is blocked)", t.HostID)
-		}
 	}
 	out := &pb.ProposeScheduleGrantResponse{GrantDigest: pg.Digest, CanonicalGrant: pg.Canonical,
 		ApprovalRequirement: requirementToProto(pg.Requirement)}

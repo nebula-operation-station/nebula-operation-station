@@ -58,6 +58,7 @@ func TestParseRefusesGrantsOutsideTheLimits(t *testing.T) {
 		"no targets":     func(d *Doc) { d.Targets = nil },
 		"interval short": func(d *Doc) { d.MinIntervalS = 60 },
 		"interval long":  func(d *Doc) { d.MinIntervalS = 8 * 24 * 3600 },
+		"interval wraps": func(d *Doc) { d.MinIntervalS = -9223372036854774908 }, // times 1s wraps to 15 min; also beyond the I-JSON number range
 		"expiry soon":    func(d *Doc) { d.ExpiryUnix = now.Add(time.Minute).Unix() },
 		"expiry far":     func(d *Doc) { d.ExpiryUnix = now.Add(91 * 24 * time.Hour).Unix() },
 		"bad action":     func(d *Doc) { d.Actions[0].ActionID = "-x" },

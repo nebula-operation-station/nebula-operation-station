@@ -89,7 +89,7 @@ func Parse(raw []byte, now time.Time) (Doc, []byte, string, error) {
 		return Doc{}, nil, "", invalid("a grant has 1 to %d actions", MaxActions)
 	case len(d.Targets) == 0 || len(d.Targets) > MaxTargets:
 		return Doc{}, nil, "", invalid("a grant has 1 to %d targets", MaxTargets)
-	case time.Duration(d.MinIntervalS)*time.Second < MinInterval || time.Duration(d.MinIntervalS)*time.Second > MaxInterval:
+	case d.MinIntervalS < int64(MinInterval/time.Second) || d.MinIntervalS > int64(MaxInterval/time.Second): // no overflowing multiply
 		return Doc{}, nil, "", invalid("min_interval_s must be %d to %d", int64(MinInterval/time.Second), int64(MaxInterval/time.Second))
 	}
 	exp := time.Unix(d.ExpiryUnix, 0)
