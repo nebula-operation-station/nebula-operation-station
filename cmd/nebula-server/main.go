@@ -28,6 +28,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/runbooks"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/version"
@@ -202,6 +203,9 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	// Operations (M4): planned here, decided and run by the executor.
 	ops := executions.New(connCtx, exec, db, store, log)
 	ops.SetNotifier(notifier)
+	// Runbooks (M7-2) are planned like built-in actions.
+	rb := runbooks.New(db)
+	ops.SetRunbooks(rb)
 	if err := ops.Resume(connCtx); err != nil {
 		log.Error("resume executions", "error", err)
 	}
@@ -217,6 +221,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		Inventory:    store,
 		Operations:   ops,
 		Schedules:    ops,
+		Runbooks:     rb,
 		Repin:        exec,
 		Enroll:       exec,
 		Log:          log,

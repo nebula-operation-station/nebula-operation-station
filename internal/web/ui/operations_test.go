@@ -38,6 +38,21 @@ type fakeOps struct {
 	gateRes    executions.GateResult
 	gateErr    error
 	gates      []string
+	extra      []actions.Action // runbook actions after the built-ins
+}
+
+func (f *fakeOps) Catalog(context.Context) ([]actions.Action, error) {
+	return append(append([]actions.Action(nil), actions.Builtin...), f.extra...), nil
+}
+
+func (f *fakeOps) Action(ctx context.Context, id, version string) (actions.Action, bool, error) {
+	all, _ := f.Catalog(ctx)
+	for _, a := range all {
+		if a.ID == id && (version == "" || a.Version == version) {
+			return a, true, nil
+		}
+	}
+	return actions.Action{}, false, nil
 }
 
 func (f *fakeOps) CreateStaged(_ context.Context, user, action string, hosts []string, _ map[string]string, plan executions.Plan) (executions.Created, error) {

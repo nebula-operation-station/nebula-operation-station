@@ -143,6 +143,31 @@ function check(cond, what) {
   await page.goto(base + '/inventory');
   check(/checked \d{4}-\d{2}-\d{2}/.test(await page.textContent('tr[data-id="e2e-host"]')), 'the inventory shows the update status');
   check(/(READY|WARNING)/.test(await page.textContent('tr[data-id="e2e-host"]')), 'the inventory shows the Ops State');
+  // Runbooks: write one, save it as version 1, plan it with a parameter;
+  // the executor does not know the script, so it needs the key (HIGH).
+  await page.goto(base + '/runbooks/new');
+  await page.fill('#runbook-slug', 'hello');
+  await page.fill('#runbook-title', 'Say hello');
+  await page.selectOption('#runbook-risk', 'LOW');
+  await page.click('#runbook-param-add');
+  await page.fill('.param-row .param-name', 'who');
+  await page.fill('.param-row .param-label', 'Who');
+  await page.fill('#runbook-body', 'echo "hello $NEBULA_P_WHO from runbook"\n');
+  await Promise.all([page.waitForURL(/\/runbooks\/hello$/, { timeout: 15000 }), page.click('#runbook-save')]);
+  check(/Runbook hello, version 1/.test(await page.textContent('main')), 'a saved runbook shows its first version');
+  await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('a[href="/operations/new?action=runbook.hello"]')]);
+  check(await page.isChecked('input[name="action"][value="runbook.hello"]'), 'planning from the runbook preselects it');
+  await page.check('input[name="host"][value="e2e-host"]');
+  await page.fill('label.param[data-action="runbook.hello"] input', 'nebula');
+  await Promise.all([page.waitForURL(/\/operations\/[0-9a-f-]{36}$/, { timeout: 15000 }), page.click('#operation-create')]);
+  check(/Risk \(decided by the executor\): HIGH/.test(await page.textContent('main')), 'an untrusted runbook script is HIGH');
+  await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('#operation-approve')]);
+  finished = false;
+  for (let i = 0; i < 60 && !finished; i++) {
+    finished = /State: finished/.test(await page.textContent('main'));
+    if (!finished) { await new Promise((r) => setTimeout(r, 500)); await page.reload(); }
+  }
+  check(finished && /hello nebula from runbook/.test(await page.textContent('main')), 'the runbook ran with its parameter');
   // Service actions take a unit name; the server refuses anything but a plain unit name.
   await page.goto(base + '/operations/new');
   check(await page.locator('label.param[data-action="service.restart"]').isHidden(), 'parameter fields stay hidden until their action is chosen');

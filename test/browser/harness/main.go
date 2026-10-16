@@ -40,6 +40,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/runbooks"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/totp"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
@@ -275,11 +276,13 @@ func main() {
 		Criticality: inventory.CriticalityLow, Endpoints: []inventory.Endpoint{{Address: twoAddr, Port: twoPortNum}}}, inventory.CreateOptions{})
 	must(err)
 	ops := executions.New(context.Background(), direct{svc}, sdb, inv, log)
+	rb := runbooks.New(sdb)
+	ops.SetRunbooks(rb)
 	hostKeys := func(ctx context.Context) ([]*pb.HostKeyPin, error) {
 		r, err := svc.ListHostKeys(ctx, &pb.ListHostKeysRequest{})
 		return r.GetHosts(), err
 	}
-	u, err := ui.New(ui.Options{PublicOrigin: origin, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Schedules: ops, Repin: direct{svc}, Enroll: direct{svc}, Log: log})
+	u, err := ui.New(ui.Options{PublicOrigin: origin, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Schedules: ops, Runbooks: rb, Repin: direct{svc}, Enroll: direct{svc}, Log: log})
 	must(err)
 	mux := http.NewServeMux()
 	// Test hook: issue a one-time code like `nebula webauthn code`.

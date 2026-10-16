@@ -1,0 +1,35 @@
+{{define "content"}}
+{{with .Runbooks.Edit}}
+<h1>{{if .Existing}}Edit runbook{{else}}New runbook{{end}}</h1>
+<section class="panel" aria-label="Runbook editor">
+  <form id="runbook-form" class="form" data-draft="{{.Draft}}" data-existing="{{if .Existing}}1{{end}}" novalidate>
+    <label>Name (lowercase letters, digits, _; it becomes the action runbook.&lt;name&gt;)
+      <input type="text" id="runbook-slug" maxlength="40" autocomplete="off" pattern="[a-z0-9][a-z0-9_]{0,39}"></label>
+    <label>Title <input type="text" id="runbook-title" maxlength="100" autocomplete="off"></label>
+    <label>Description <textarea id="runbook-description" rows="3" maxlength="2000"></textarea></label>
+    <label>Declared risk
+      <select id="runbook-risk">
+        <option>LOW</option><option>MEDIUM</option><option>HIGH</option><option>CRITICAL</option>
+      </select></label>
+    <label class="choice"><input type="checkbox" id="runbook-durable"> Durable job (runs as root under systemd on the host, survives
+      a lost connection; otherwise the script runs attached as the SSH user and calls <code>sudo -n</code> itself)</label>
+    <label>Timeout (seconds; attached at most 600, durable at most 21600)
+      <input type="number" id="runbook-timeout" min="10" max="21600" inputmode="numeric"></label>
+    <fieldset>
+      <legend>Parameters</legend>
+      <p class="hint">Types: name (letters, digits, <code>_.@:-</code>, not starting with <code>-</code>), int, path (absolute),
+        choice (fixed words). The script reads them as <code>$NEBULA_P_&lt;NAME&gt;</code>; the host checks each value again before
+        the script starts.</p>
+      <div id="runbook-params"></div>
+      <button type="button" id="runbook-param-add" class="button button--small">Add parameter</button>
+    </fieldset>
+    <label>Script (POSIX sh; its output goes to the operation log)
+      <textarea id="runbook-body" rows="18" spellcheck="false"></textarea></label>
+    <div class="actions">
+      <button type="submit" id="runbook-save" class="button">Save as new version</button>
+    </div>
+  </form>
+</section>
+{{end}}
+<p id="message" class="message" role="status" aria-live="polite"></p>
+{{end}}
