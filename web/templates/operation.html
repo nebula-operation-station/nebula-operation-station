@@ -4,6 +4,8 @@
 <section class="panel" aria-label="Operation" id="operation" data-id="{{.ID}}" data-state="{{.State}}"{{if .Live}} data-live="1"{{end}}>
   <p class="status">Action: {{.Action}} {{.Version}}{{if .Params}} with <code>{{.Params}}</code>{{end}}</p>
   <p class="status">Risk (decided by the executor): {{.Risk}}</p>
+  {{if .Scanner}}<p class="status">Safety scanner (advisory; it can only raise the risk):
+    {{range $i, $f := .Scanner}}{{if $i}}; {{end}}{{$f.Category}} at line {{$f.Line}} (<code>{{$f.Excerpt}}</code>){{end}}</p>{{end}}
   <p class="status">State: <strong>{{.State}}</strong>{{if .Detail}} — {{.Detail}}{{end}}</p>
   <p class="status">Created by {{.CreatedBy}} at {{.Created}}</p>
   <p class="hint">Permit digest: <code>{{.Digest}}</code></p>

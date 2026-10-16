@@ -374,6 +374,12 @@ message ProposeExecutionRequest {
   // stage of all targets, and then stage_plan_hash must be the hash of
   // {"plan":"single-stage-v1"}.
   bytes stage_plan_json = 4;
+  // The artifact bytes (optional; they must hash to
+  // request.artifact_sha256). The executor scans them with the Safety
+  // Scanner, whose findings can raise its minimum risk (spec 10). Without
+  // them the scan happens only at run time, where a raised floor refuses
+  // the run (risk_above_approval).
+  bytes artifact = 5;
 }
 
 message ProposeExecutionResponse {

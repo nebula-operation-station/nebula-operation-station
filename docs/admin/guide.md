@@ -180,6 +180,14 @@ less /tmp/nebula-actions/*.sh
 
 Without this, every operation needs a user-verified approval.
 
+The executor also runs the **Safety Scanner** over every script, trusted
+or not: downloading and executing, `eval` or encoded payloads, destructive
+disk commands and bootloader changes make a script at least HIGH; users
+and groups, firewall and network changes, package removal, reboots and
+Docker removals at least MEDIUM. The scanner only ever raises the risk, and
+a clean scan proves nothing. The planning and operation pages show its
+findings.
+
 ## 7. Patch
 
 1. Dashboard: **Open privileged session** (security key). LOW actions such

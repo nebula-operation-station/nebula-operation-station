@@ -726,6 +726,12 @@ type ProposeExecutionRequest struct {
 	// stage of all targets, and then stage_plan_hash must be the hash of
 	// {"plan":"single-stage-v1"}.
 	StagePlanJson []byte `protobuf:"bytes,4,opt,name=stage_plan_json,json=stagePlanJson,proto3" json:"stage_plan_json,omitempty"`
+	// The artifact bytes (optional; they must hash to
+	// request.artifact_sha256). The executor scans them with the Safety
+	// Scanner, whose findings can raise its minimum risk (spec 10). Without
+	// them the scan happens only at run time, where a raised floor refuses
+	// the run (risk_above_approval).
+	Artifact      []byte `protobuf:"bytes,5,opt,name=artifact,proto3" json:"artifact,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -784,6 +790,13 @@ func (x *ProposeExecutionRequest) GetRaiseToMinimum() bool {
 func (x *ProposeExecutionRequest) GetStagePlanJson() []byte {
 	if x != nil {
 		return x.StagePlanJson
+	}
+	return nil
+}
+
+func (x *ProposeExecutionRequest) GetArtifact() []byte {
+	if x != nil {
+		return x.Artifact
 	}
 	return nil
 }
@@ -8022,12 +8035,13 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x16loaded_credential_refs\x18\a \x03(\tR\x14loadedCredentialRefs\x12)\n" +
 	"\x10recovery_pending\x18\b \x01(\bR\x0frecoveryPending\x12?\n" +
 	"\vvault_state\x18\t \x01(\x0e2\x1e.nebula.executor.v1.VaultStateR\n" +
-	"vaultState\"\xd4\x01\n" +
+	"vaultState\"\xf0\x01\n" +
 	"\x17ProposeExecutionRequest\x12>\n" +
 	"\arequest\x18\x01 \x01(\v2$.nebula.executor.v1.ExecutionRequestR\arequest\x12'\n" +
 	"\x0fparameters_json\x18\x02 \x01(\fR\x0eparametersJson\x12(\n" +
 	"\x10raise_to_minimum\x18\x03 \x01(\bR\x0eraiseToMinimum\x12&\n" +
-	"\x0fstage_plan_json\x18\x04 \x01(\fR\rstagePlanJson\"\xc7\x03\n" +
+	"\x0fstage_plan_json\x18\x04 \x01(\fR\rstagePlanJson\x12\x1a\n" +
+	"\bartifact\x18\x05 \x01(\fR\bartifact\"\xc7\x03\n" +
 	"\x18ProposeExecutionResponse\x12)\n" +
 	"\x10execution_digest\x18\x01 \x01(\tR\x0fexecutionDigest\x12+\n" +
 	"\x11canonical_request\x18\x02 \x01(\fR\x10canonicalRequest\x12Z\n" +

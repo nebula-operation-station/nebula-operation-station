@@ -7,7 +7,7 @@
       {{range $i, $a := .Ops.Actions}}
       <label class="choice">
         <input type="radio" name="action" value="{{$a.ID}}"{{if eq $i 0}} checked{{end}}>
-        <strong>{{$a.Title}}</strong> ({{$a.ID}}, declared {{$a.Risk}}{{if $a.ReadOnly}}, read-only{{end}})
+        <strong>{{$a.Title}}</strong> ({{$a.ID}}, declared {{$a.Risk}}{{if $a.ReadOnly}}, read-only{{end}}{{if $a.Scanner}}, safety scanner: {{range $j, $c := $a.Scanner}}{{if $j}}, {{end}}{{$c}}{{end}}{{end}})
         <span class="hint">{{$a.Description}}</span>
       </label>
       {{range $a.Params}}

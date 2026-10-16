@@ -290,6 +290,9 @@ type Authority struct {
 	sessionTill time.Time
 	sessChal    []byte
 	sessChalExp time.Time
+
+	scanMu sync.Mutex // guards scans; never held while taking mu
+	scans  map[string]scanResult
 }
 
 // New returns an Authority. A verifier and a store are required. A new
@@ -327,6 +330,7 @@ func New(o Options) (*Authority, error) {
 		executions: map[string]canonical.Digest{},
 		schedules:  o.Schedules,
 		grants:     map[string]*pendingGrant{},
+		scans:      map[string]scanResult{},
 	}, nil
 }
 
@@ -379,7 +383,7 @@ func (a *Authority) propose(r canonical.Request, parametersJSON, planJSON []byte
 		return ProposeResult{}, fail(CodeInvalidRequest, "%v", err)
 	}
 	if raise {
-		floor, _, err := a.risk.MinimumRisk(norm, norm.ResolvedTargets)
+		floor, _, err := a.floor(norm, norm.ResolvedTargets)
 		if err != nil {
 			return ProposeResult{}, a.storageFailure(digest.String(), err)
 		}
@@ -421,7 +425,7 @@ func (a *Authority) propose(r canonical.Request, parametersJSON, planJSON []byte
 
 	// The server's risk_class may raise the approval strength, never lower
 	// it below what the executor derives itself.
-	floor, why, err := a.risk.MinimumRisk(norm, norm.ResolvedTargets)
+	floor, why, err := a.floor(norm, norm.ResolvedTargets)
 	if err != nil {
 		return ProposeResult{}, a.storageFailure(digest.String(), err)
 	}
@@ -649,6 +653,7 @@ func (a *Authority) AuthorizeGrant(d canonical.Digest, run Run) (Grant, error) {
 		return Grant{}, fail(CodeArtifactMismatch, "artifact size %d outside 1..%d", len(run.Artifact), MaxArtifactSize)
 	}
 	artSum := sha256.Sum256(run.Artifact)
+	a.observe(artSum, run.Artifact)
 	paramHash, perr := canonical.HashParameters(run.ParametersJSON)
 
 	a.mu.Lock()
@@ -697,7 +702,7 @@ func (a *Authority) AuthorizeGrant(d canonical.Digest, run Run) (Grant, error) {
 	}
 	// Risk authorization per host run (spec 07): trust withdrawn or a host
 	// made more critical after approval stops the run.
-	floor, why, err := a.risk.MinimumRisk(p.Request, p.Request.ResolvedTargets[idx:idx+1])
+	floor, why, err := a.floor(p.Request, p.Request.ResolvedTargets[idx:idx+1])
 	if err != nil || floor.Rank() == 0 {
 		detail := fmt.Sprintf("risk policy: %v (floor %q)", err, floor)
 		a.emit(Event{Kind: "denied", Digest: d.String(), Host: run.HostID, Code: CodeStorage, Detail: detail})
