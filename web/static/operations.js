@@ -38,15 +38,21 @@
         return;
       }
       const params = {};
+      const secrets = {};
       for (const l of form.querySelectorAll('.param')) {
         if (l.dataset.action !== action.value) continue;
         const input = l.querySelector('input');
-        params[input.dataset.param] = input.value.trim();
+        if (input.dataset.secret) {
+          secrets[input.dataset.secret] = input.value.trim();
+        } else {
+          params[input.dataset.param] = input.value.trim();
+        }
       }
       const button = document.getElementById('operation-create');
       button.disabled = true;
       try {
         const body = { action: action.value, hosts, params };
+        if (Object.keys(secrets).length > 0) body.secrets = secrets;
         const preset = form.querySelector('input[name="preset"]:checked');
         if (preset && preset.value !== 'single') {
           body.plan = {

@@ -123,3 +123,21 @@ func TestRunbookSaveRefusesBadInput(t *testing.T) {
 		t.Fatal(code)
 	}
 }
+
+// M7-3: secret slots are shown on the runbook and asked for when planning.
+func TestRunbookSecretSlotsAreShown(t *testing.T) {
+	h, rb, f := runbookHandler(t)
+	body := strings.Replace(hostileRunbook, `"params":[`, `"secrets":["influx_token"],"params":[`, 1)
+	if code, msg := postJSON(t, h, "/runbooks/save", body); code != http.StatusOK {
+		t.Fatalf("%d %s", code, msg)
+	}
+	if page := getBody(t, h, "/runbooks/web_restart"); !strings.Contains(page, "$NEBULA_SECRET_INFLUX_TOKEN") || !strings.Contains(page, "at least MEDIUM") {
+		t.Fatal(page)
+	}
+	v, _ := rb.Get(context.Background(), "web_restart", 0)
+	f.extra = append(f.extra, v.Action())
+	plan := getBody(t, opsHandler(t, f, nil), "/operations/new?action=runbook.web_restart")
+	if !strings.Contains(plan, `data-secret="influx_token"`) || !strings.Contains(plan, "Vault secret for slot influx_token") {
+		t.Fatal("planner does not ask for the secret")
+	}
+}

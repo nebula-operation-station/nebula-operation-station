@@ -23,6 +23,9 @@
       <div id="runbook-params"></div>
       <button type="button" id="runbook-param-add" class="button button--small">Add parameter</button>
     </fieldset>
+    <label>Secret slots (comma-separated names; when planning you name a vault secret for each, and the script reads its value from
+      the file <code>$NEBULA_SECRET_&lt;SLOT&gt;</code>)
+      <input type="text" id="runbook-secrets" autocomplete="off" placeholder="influx_token"></label>
     <label>Script (POSIX sh; its output goes to the operation log)
       <textarea id="runbook-body" rows="18" spellcheck="false"></textarea></label>
     <div class="actions">
