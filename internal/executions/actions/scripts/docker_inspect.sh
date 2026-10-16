@@ -6,7 +6,7 @@
 set -u
 b64() { base64 -w0 2>/dev/null || base64 | tr -d '\n'; }
 pre() { printf '{"format":"docker-inspect-v1","phase":"precheck","reason":"%s"}\n' "$1"; exit 10; }
-c=$(sed -n 's/^{"container":"\([A-Za-z0-9][A-Za-z0-9_.-]*\)"}$/\1/p' "$NEBULA_PARAMS")
+c=$(sed -n 's/^{"container":"\([A-Za-z0-9][A-Za-z0-9_.-]\{0,127\}\)"}$/\1/p' "$NEBULA_PARAMS")
 [ -n "$c" ] || pre "the container parameter is missing or invalid"
 command -v docker >/dev/null 2>&1 || pre "Docker is not installed"
 # Same access as docker.list: the docker group, else sudo -n (spec 08).

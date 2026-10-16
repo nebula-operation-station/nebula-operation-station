@@ -4,6 +4,7 @@ package actions
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -206,5 +207,51 @@ esac`)
 	code, doc = run(`{"container":"gone"}`)
 	if code != 10 || doc["reason"] != "no such container" {
 		t.Fatalf("%d %v", code, doc)
+	}
+}
+
+// docker.start/stop/restart are MEDIUM, never retried, and run exactly
+// `docker <verb> -- <container>` after the same parameter check.
+func TestDockerControlScripts(t *testing.T) {
+	for _, verb := range []string{"start", "stop", "restart"} {
+		a, ok := Lookup("docker." + verb)
+		if !ok || a.ReadOnly || a.Retry != RetryNever || a.Risk.String() != "RISK_CLASS_MEDIUM" || strings.Contains(string(a.Script), "@VERB@") {
+			t.Fatalf("docker.%s %+v", verb, a)
+		}
+		f := newFakeHost(t, "1")
+		f.write(t, "id", `echo 1000`)
+		f.write(t, "sudo", `[ "$1" = "-n" ] || exit 1; shift; echo "sudo $*" >> "`+f.calls+`"; SUDO=1 exec "$@"`)
+		f.write(t, "docker", `[ -z "${SUDO:-}" ] && exit 1
+echo "$@" >> "`+f.calls+`"
+case "$1" in
+  version) echo 27 ;;
+  inspect) for x in "$@"; do last=$x; done; [ "$last" = web ] || exit 1; echo running ;;
+  `+verb+`) echo web; exit 3 ;;
+esac`)
+		p := filepath.Join(f.dir, "params")
+		if err := os.WriteFile(p, []byte(`{"container":"web"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("/bin/sh", "-c", string(a.Script))
+		cmd.Env = []string{"PATH=" + f.bin + ":/usr/bin:/bin", "NEBULA_PARAMS=" + p}
+		out, err := cmd.Output()
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) || ee.ExitCode() != 3 {
+			t.Fatalf("%s: %v", verb, err)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(out, &doc); err != nil || doc["verb"] != verb || doc["exit"] != float64(3) || b64(t, doc, "after") != "running" {
+			t.Fatalf("%s: %s %v", verb, out, err)
+		}
+		if !strings.Contains(f.readCalls(t), "sudo docker "+verb+" -- web") {
+			t.Fatalf("%s: calls %q", verb, f.readCalls(t))
+		}
+		if err := os.WriteFile(p, []byte(`{"container":"-f"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out, _ = exec.Command("/bin/sh", "-c", "NEBULA_PARAMS="+p+" PATH="+f.bin+":/usr/bin:/bin /bin/sh -c \"$0\"", string(a.Script)).Output()
+		if !strings.Contains(string(out), "invalid") || strings.Contains(f.readCalls(t), verb+" -- -f") {
+			t.Fatalf("%s: %s", verb, out)
+		}
 	}
 }
