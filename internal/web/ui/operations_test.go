@@ -480,3 +480,15 @@ func TestDockerControlIsShown(t *testing.T) {
 		t.Fatal(page)
 	}
 }
+
+func TestDockerUpdatesAreShown(t *testing.T) {
+	enc := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	b := "sha256:" + strings.Repeat("b", 64)
+	res := `{"format":"docker-updates-v1","phase":"done","images":1,"lines":"` + enc("nginx:1.27\tupdate\t"+b+"\tlocal none\n"+"bad<b>:1\tcurrent\t"+b+"\t\n") + `"}`
+	f := &fakeOps{exec: executions.Execution{ID: opID, ActionID: "docker.check_updates", State: "finished", CreatedAt: time.Unix(1791960000, 0),
+		Hosts: []executions.Host{{HostID: "a", State: "finished", Class: "success", Result: []byte(res)}}}}
+	page := getBody(t, opsHandler(t, f, nil), "/operations/"+opID)
+	if !strings.Contains(page, "1 images checked") || !strings.Contains(page, "1 with an update available") || !strings.Contains(page, "<td>nginx:1.27</td>") || strings.Contains(page, "bad<b>") {
+		t.Fatal(page)
+	}
+}

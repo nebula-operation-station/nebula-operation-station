@@ -168,3 +168,29 @@ func TestParseRealControl(t *testing.T) {
 		t.Fatalf("%+v", c)
 	}
 }
+
+func TestParseImageUpdates(t *testing.T) {
+	a, b := "sha256:"+strings.Repeat("a", 64), "sha256:"+strings.Repeat("b", 64)
+	lines := "reg.example:5000/app:1\tcurrent\t" + a + "\t\n" +
+		"nginx:1.27\tupdate\t" + b + "\tlocal " + a + "\n" +
+		"private/x:1\tunknown\t\tauthentication required\n" +
+		"busybox@" + a + "\tpinned\t\tthe image is pinned by digest\n" +
+		"evil\u202e:1\tcurrent\t" + a + "\t\n" + // bidi in the name: dropped
+		"x:1\tupdate\tnot-a-digest\t\n" + // no valid digest: unknown
+		"y:1\tmaybe\t\t\n" // unknown status: dropped
+	u, err := ParseImageUpdates([]byte(`{"format":"docker-updates-v1","phase":"done","images":7,"lines":"` + enc(lines) + `"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(u.Images) != 5 || u.Updates != 1 || u.Images[1].Status != "update" || u.Images[1].Remote != b ||
+		u.Images[2].Note != "authentication required" || u.Images[4].Status != "unknown" || u.Images[4].Remote != "" {
+		t.Fatalf("%+v", u)
+	}
+	if _, err := ParseImageUpdates([]byte(`{"format":"docker-ps-v1","phase":"done"}`)); err == nil {
+		t.Fatal("other format accepted")
+	}
+	u, _ = ParseImageUpdates([]byte(`{"format":"docker-updates-v1","phase":"precheck","reason":"curl is not installed"}`))
+	if u.Reason != "curl is not installed" {
+		t.Fatalf("%+v", u)
+	}
+}

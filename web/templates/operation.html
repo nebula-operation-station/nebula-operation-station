@@ -87,7 +87,7 @@
   </table>
 </section>
 {{range .Hosts}}
-{{if or .Facts .Updates .Install .Units .Service .Docker .DockerLogs .DockerInspect .DockerControl .Result .Log}}
+{{if or .Facts .Updates .Install .Units .Service .Docker .DockerLogs .DockerInspect .DockerControl .DockerUpdates .Result .Log}}
 <section class="panel" aria-label="Output of {{.ID}}">
   <h2>{{.ID}}</h2>
   {{if .Facts}}
@@ -122,6 +122,18 @@
   <p class="status">Container {{.Container}}{{if .State}}: {{if eq .State "running"}}running{{else}}<span class="status--error">{{.State}}</span>{{end}}{{end}}; {{len .Lines}} log lines</p>
   {{if .Lines}}<pre class="output">{{range .Lines}}{{.}}
 {{end}}</pre>{{end}}
+  {{end}}
+  {{end}}
+  {{with .DockerUpdates}}
+  {{if eq .Phase "precheck"}}<p class="status status--error">Precheck failed: {{.Reason}}</p>
+  {{else}}
+  <p class="status">{{len .Images}} images checked{{if .Updates}}, <span class="status--error">{{.Updates}} with an update available</span>{{else}}, no update available{{end}}</p>
+  {{if .Images}}
+  <table class="inventory">
+    <thead><tr><th>Image</th><th>Status</th><th>Registry digest</th><th>Note</th></tr></thead>
+    <tbody>{{range .Images}}<tr><td>{{.Image}}</td><td>{{if eq .Status "update"}}<span class="status--error">update available</span>{{else}}{{.Status}}{{end}}</td><td><span class="hint">{{.Remote}}</span></td><td>{{.Note}}</td></tr>{{end}}</tbody>
+  </table>
+  {{end}}
   {{end}}
   {{end}}
   {{with .DockerControl}}
