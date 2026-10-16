@@ -366,3 +366,28 @@ func TestReleaseUnreachableRecordsTheOutcome(t *testing.T) {
 		t.Fatal("released twice")
 	}
 }
+
+// Review m62b L1: the AuthorizeRun RPC reserves a host and nothing records
+// its outcome, so for a staged permit it would hold the stage open with a
+// host that no Skip can clear. Staged permits refuse it; the host stays
+// runnable and skippable.
+func TestAuthorizeRPCRefusesStagedPermits(t *testing.T) {
+	e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
+	e.openSession()
+	p := e.staged(canonical.RiskLow, stg("one", 0, 1, stageplan.ContinueManual, "dockerflux", "strompi"), stg("two", 0, 0, stageplan.ContinueManual, "web"))
+	wantCode(t, e.auth.Authorize(p.Digest, goodRun("dockerflux", fpA)), CodeStagePlan)
+	if err := e.auth.CommitGate(p.Digest, Gate{Kind: GateSkipHost, Host: "dockerflux"}, nil); err != nil {
+		t.Fatalf("skip after a refused AuthorizeRun: %v", err)
+	}
+	e.run(p, "strompi", OutcomeSucceeded)
+	if _, err := e.auth.BeginGate(p.Digest, Gate{Kind: GateOpenStage, Stage: 2}); err != nil {
+		t.Fatalf("stage one should have passed: %v", err)
+	}
+
+	// A permit without stages keeps the M0 behaviour: authorize and reserve.
+	q := e.propose(e.request(canonical.RiskLow))
+	if err := e.auth.Authorize(q.Digest, goodRun("dockerflux", fpA)); err != nil {
+		t.Fatal(err)
+	}
+	wantCode(t, e.auth.Authorize(q.Digest, goodRun("dockerflux", fpA)), CodeHostAlreadyRun)
+}

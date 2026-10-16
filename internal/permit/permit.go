@@ -197,6 +197,8 @@ type Permit struct {
 	failed int
 	used   map[string]struct{}
 	stages *stages
+	// staged: the request carried a stage plan document.
+	staged bool
 }
 
 // TargetCount is the number of hosts the permit covers.
@@ -472,6 +474,7 @@ func (a *Authority) propose(r canonical.Request, parametersJSON, planJSON []byte
 		Plan:        plan,
 		used:        map[string]struct{}{},
 		stages:      newStages(plan),
+		staged:      planJSON != nil,
 	}
 	if req == RequireNone {
 		p.State = StateApproved
@@ -611,8 +614,21 @@ type Grant struct {
 	Parameters  []byte
 }
 
-// Authorize is AuthorizeGrant without the grant.
+// Authorize is AuthorizeGrant without the grant: it reserves the host like
+// a run does (spec 07, one use per host). It serves the AuthorizeRun RPC,
+// which only checks and reserves; nothing records an outcome for a host
+// reserved this way, so it refuses permits proposed with a stage plan: such
+// a host would hold its stage open for good, and a Skip gate refuses a used
+// host without an outcome (decision 59). Staged permits run only through
+// the executor's own run path.
 func (a *Authority) Authorize(d canonical.Digest, run Run) error {
+	a.mu.Lock()
+	p, ok := a.permits[d]
+	staged := ok && p.staged
+	a.mu.Unlock()
+	if staged {
+		return a.deny(d, run.HostID, CodeStagePlan, "a staged permit runs only through the executor's run path")
+	}
 	_, err := a.AuthorizeGrant(d, run)
 	return err
 }

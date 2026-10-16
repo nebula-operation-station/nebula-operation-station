@@ -32,9 +32,11 @@ service ExecutorService {
   rpc BeginPrivilegedSession(BeginPrivilegedSessionRequest) returns (BeginPrivilegedSessionResponse);
   rpc CompletePrivilegedSession(CompletePrivilegedSessionRequest) returns (CompletePrivilegedSessionResponse);
 
-  // Role: server. Asks whether one host run is covered by an issued permit.
-  // The executor hashes the artifact and parameters itself. In Milestone 0
-  // this only authorizes; SSH execution arrives in Milestone 4.
+  // Role: server. Asks whether one host run is covered by an issued permit
+  // and, if so, reserves the host (one use per host). The executor hashes
+  // the artifact and parameters itself. Refused (stage_plan_invalid) for a
+  // permit proposed with a stage plan: nothing would record the host's
+  // outcome, so its stage could never pass or be skipped.
   rpc AuthorizeRun(AuthorizeRunRequest) returns (AuthorizeRunResponse);
 
   // Role: server. Authorizes one host run exactly like AuthorizeRun and

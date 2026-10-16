@@ -100,9 +100,11 @@ type ExecutorServiceClient interface {
 	// requires a user-verified assertion.
 	BeginPrivilegedSession(ctx context.Context, in *BeginPrivilegedSessionRequest, opts ...grpc.CallOption) (*BeginPrivilegedSessionResponse, error)
 	CompletePrivilegedSession(ctx context.Context, in *CompletePrivilegedSessionRequest, opts ...grpc.CallOption) (*CompletePrivilegedSessionResponse, error)
-	// Role: server. Asks whether one host run is covered by an issued permit.
-	// The executor hashes the artifact and parameters itself. In Milestone 0
-	// this only authorizes; SSH execution arrives in Milestone 4.
+	// Role: server. Asks whether one host run is covered by an issued permit
+	// and, if so, reserves the host (one use per host). The executor hashes
+	// the artifact and parameters itself. Refused (stage_plan_invalid) for a
+	// permit proposed with a stage plan: nothing would record the host's
+	// outcome, so its stage could never pass or be skipped.
 	AuthorizeRun(ctx context.Context, in *AuthorizeRunRequest, opts ...grpc.CallOption) (*AuthorizeRunResponse, error)
 	// Role: server. Authorizes one host run exactly like AuthorizeRun and
 	// runs it attached on the pinned host (spec 07, Milestone 4): the
@@ -806,9 +808,11 @@ type ExecutorServiceServer interface {
 	// requires a user-verified assertion.
 	BeginPrivilegedSession(context.Context, *BeginPrivilegedSessionRequest) (*BeginPrivilegedSessionResponse, error)
 	CompletePrivilegedSession(context.Context, *CompletePrivilegedSessionRequest) (*CompletePrivilegedSessionResponse, error)
-	// Role: server. Asks whether one host run is covered by an issued permit.
-	// The executor hashes the artifact and parameters itself. In Milestone 0
-	// this only authorizes; SSH execution arrives in Milestone 4.
+	// Role: server. Asks whether one host run is covered by an issued permit
+	// and, if so, reserves the host (one use per host). The executor hashes
+	// the artifact and parameters itself. Refused (stage_plan_invalid) for a
+	// permit proposed with a stage plan: nothing would record the host's
+	// outcome, so its stage could never pass or be skipped.
 	AuthorizeRun(context.Context, *AuthorizeRunRequest) (*AuthorizeRunResponse, error)
 	// Role: server. Authorizes one host run exactly like AuthorizeRun and
 	// runs it attached on the pinned host (spec 07, Milestone 4): the
