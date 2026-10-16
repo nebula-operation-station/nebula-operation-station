@@ -32,6 +32,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/stageplan"
 )
 
 // Executor is the part of the executor client the service uses (server
@@ -43,6 +44,10 @@ type Executor interface {
 	RunAttached(ctx context.Context, in *pb.RunAttachedRequest, opts ...grpc.CallOption) (*pb.RunAttachedResponse, error)
 	StartDurable(ctx context.Context, in *pb.StartDurableRequest, opts ...grpc.CallOption) (*pb.StartDurableResponse, error)
 	GetRun(ctx context.Context, in *pb.GetRunRequest, opts ...grpc.CallOption) (*pb.GetRunResponse, error)
+	BeginGate(ctx context.Context, in *pb.BeginGateRequest, opts ...grpc.CallOption) (*pb.BeginGateResponse, error)
+	CommitGate(ctx context.Context, in *pb.CommitGateRequest, opts ...grpc.CallOption) (*pb.CommitGateResponse, error)
+	AbortRollout(ctx context.Context, in *pb.AbortRolloutRequest, opts ...grpc.CallOption) (*pb.AbortRolloutResponse, error)
+	GetRollout(ctx context.Context, in *pb.GetRolloutRequest, opts ...grpc.CallOption) (*pb.GetRolloutResponse, error)
 }
 
 // Hosts gives the inventory hosts (inventory.Store).
@@ -71,22 +76,21 @@ func (e *HostError) Error() string { return "host " + e.Host + ": " + e.Reason }
 const (
 	MaxHosts       = 100
 	permitLifetime = time.Hour
-	pollInterval   = 5 * time.Second
 	callTimeout    = 30 * time.Second
 	// parallelHosts bounds concurrent host runs of one execution.
 	parallelHosts = 4
 )
 
+// pollInterval is how often the server asks the executor about a durable
+// run or a waiting rollout; tests shorten it.
+var pollInterval = 5 * time.Second
+
 // retryDelays are the waits before retrying a safe action whose run never
 // reached the host (spec 07 retry class safe); tests shorten them.
 var retryDelays = []time.Duration{20 * time.Second, time.Minute}
 
-// stagePlanHash identifies the only plan there is so far: one stage, all
-// hosts (the stage engine is Milestone 6).
-var stagePlanHash = func() string {
-	s, _ := canonical.HashParameters([]byte(`{"plan":"single-stage-v1"}`))
-	return s
-}()
+// stagePlanHash is the plan hash of a single-stage execution.
+var stagePlanHash = stageplan.SingleStageHash
 
 // ParamError is an invalid action parameter (it describes the input).
 type ParamError struct{ Reason string }
@@ -108,13 +112,14 @@ type Service struct {
 
 	mu      sync.Mutex
 	running map[string]bool // executions with a dispatcher in this process
+	again   map[string]bool // started again while their dispatcher ran
 	wg      sync.WaitGroup
 	ctx     context.Context
 }
 
 // New returns a service. ctx bounds the background dispatchers.
 func New(ctx context.Context, exec Executor, db *sql.DB, hosts Hosts, log *slog.Logger) *Service {
-	return &Service{exec: exec, db: db, hosts: hosts, log: log, now: time.Now, running: map[string]bool{}, ctx: ctx}
+	return &Service{exec: exec, db: db, hosts: hosts, log: log, now: time.Now, running: map[string]bool{}, again: map[string]bool{}, ctx: ctx}
 }
 
 // Wait blocks until the background dispatchers have stopped (tests).
@@ -149,8 +154,15 @@ type target struct {
 	endpoints []string
 }
 
-// Create plans an execution of a built-in action on hosts and proposes it.
+// Create plans a single-stage execution of a built-in action on hosts and
+// proposes it.
 func (s *Service) Create(ctx context.Context, user, actionID string, hostIDs []string, params map[string]string) (Created, error) {
+	return s.CreateStaged(ctx, user, actionID, hostIDs, params, Plan{})
+}
+
+// CreateStaged plans an execution with the stages of plan and proposes it;
+// the executor hashes the plan into the approval and enforces it.
+func (s *Service) CreateStaged(ctx context.Context, user, actionID string, hostIDs []string, params map[string]string, plan Plan) (Created, error) {
 	a, ok := actions.Lookup(actionID)
 	if !ok {
 		return Created{}, ErrUnknownAction
@@ -184,6 +196,7 @@ func (s *Service) Create(ctx context.Context, user, actionID string, hostIDs []s
 	seen := map[string]bool{}
 	var targets []target
 	creds := map[string]bool{}
+	envOf := map[string]inventory.Environment{}
 	for _, id := range hostIDs {
 		if seen[id] {
 			continue
@@ -206,6 +219,7 @@ func (s *Service) Create(ctx context.Context, user, actionID string, hostIDs []s
 		if len(h.Endpoints) == 0 {
 			return Created{}, &HostError{Host: id, Reason: "has no endpoints"}
 		}
+		envOf[id] = h.Environment
 		t := target{host: id, fp: p.GetFingerprint(), cred: p.GetCredentialRef()}
 		for _, e := range h.Endpoints {
 			port := e.Port
@@ -229,6 +243,26 @@ func (s *Service) Create(ctx context.Context, user, actionID string, hostIDs []s
 		ExecutionId: id, ActionId: a.ID, ModuleVersion: a.Version, ArtifactSha256: a.SHA256(), ParametersHash: ph,
 		RiskClass: a.Risk, StagePlanHash: stagePlanHash, ExpiryUnix: s.now().Add(permitLifetime).Unix(),
 	}
+	var planDoc []byte
+	stageOf := map[string]int{}
+	if plan.Staged() {
+		stages, err := buildStages(plan, a, targets, envOf)
+		if err != nil {
+			return Created{}, err
+		}
+		if planDoc, err = stageplan.Encode(stages); err != nil {
+			return Created{}, err
+		}
+		if req.StagePlanHash, err = canonical.HashParameters(planDoc); err != nil {
+			return Created{}, err
+		}
+		req.ExpiryUnix = planExpiry(s.now(), stages).Unix()
+		for i, st := range stages {
+			for _, h := range st.Hosts {
+				stageOf[h] = i + 1
+			}
+		}
+	}
 	for c := range creds {
 		req.CredentialRefs = append(req.CredentialRefs, c)
 	}
@@ -236,7 +270,8 @@ func (s *Service) Create(ctx context.Context, user, actionID string, hostIDs []s
 	for _, t := range targets {
 		req.ResolvedTargets = append(req.ResolvedTargets, &pb.Target{HostId: t.host, HostKeyFingerprint: t.fp})
 	}
-	p, err := s.exec.ProposeExecution(cctx, &pb.ProposeExecutionRequest{Request: req, ParametersJson: paramsJSON, RaiseToMinimum: true})
+	p, err := s.exec.ProposeExecution(cctx, &pb.ProposeExecutionRequest{Request: req, ParametersJson: paramsJSON, RaiseToMinimum: true,
+		StagePlanJson: planDoc})
 	if err != nil {
 		return Created{}, err
 	}
@@ -251,15 +286,16 @@ func (s *Service) Create(ctx context.Context, user, actionID string, hostIDs []s
 	}
 	defer tx.Rollback() //nolint:errcheck
 	if _, err := tx.ExecContext(ctx, `INSERT INTO executions (id, digest, action_id, module_version, artifact_sha256, risk, requirement, state,
-			durable, timeout_s, options, approval_expiry, created_by, created_at, params) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			durable, timeout_s, options, approval_expiry, created_by, created_at, params, stage_plan) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, p.GetExecutionDigest(), a.ID, a.Version, a.SHA256(), c.Risk, c.Requirement, state, boolInt(a.Durable),
-		int64(a.Timeout/time.Second), p.GetRequestOptionsJson(), p.GetChallengeExpiryUnix(), user, s.now().Unix(), string(paramsJSON)); err != nil {
+		int64(a.Timeout/time.Second), p.GetRequestOptionsJson(), p.GetChallengeExpiryUnix(), user, s.now().Unix(), string(paramsJSON), string(planDoc)); err != nil {
 		return Created{}, fmt.Errorf("store execution: %w", err)
 	}
 	for _, t := range targets {
 		eps, _ := json.Marshal(t.endpoints)
-		if _, err := tx.ExecContext(ctx, `INSERT INTO execution_hosts (execution_id, host_id, fingerprint, credential_ref, endpoints, state)
-			VALUES (?, ?, ?, ?, ?, 'waiting')`, id, t.host, t.fp, t.cred, string(eps)); err != nil {
+		stage := max(stageOf[t.host], 1)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO execution_hosts (execution_id, host_id, fingerprint, credential_ref, endpoints, state, stage)
+			VALUES (?, ?, ?, ?, ?, 'waiting', ?)`, id, t.host, t.fp, t.cred, string(eps), stage); err != nil {
 			return Created{}, fmt.Errorf("store execution host: %w", err)
 		}
 	}
@@ -330,9 +366,14 @@ func (s *Service) Resume(ctx context.Context) error {
 	return rows.Err()
 }
 
+// start dispatches an execution unless this process already does. A start
+// while the dispatcher runs (a retried host) is remembered: the dispatcher
+// may already have decided to return on what it read before, so it runs
+// once more and picks the host up.
 func (s *Service) start(id string) {
 	s.mu.Lock()
 	if s.running[id] {
+		s.again[id] = true
 		s.mu.Unlock()
 		return
 	}
@@ -341,12 +382,19 @@ func (s *Service) start(id string) {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		defer func() {
+		for {
+			s.dispatch(id)
 			s.mu.Lock()
-			delete(s.running, id)
+			again := s.again[id] && s.ctx.Err() == nil
+			delete(s.again, id)
+			if !again {
+				delete(s.running, id)
+			}
 			s.mu.Unlock()
-		}()
-		s.dispatch(id)
+			if !again {
+				return
+			}
+		}
 	}()
 }
 
@@ -366,6 +414,11 @@ func (s *Service) dispatch(id string) {
 		s.log.Error("execution dispatch", "execution", id, "error", err.Error())
 		return
 	}
+	if e.StagePlan != "" {
+		s.dispatchStaged(ctx, id, a)
+		s.finishExecution(ctx, id)
+		return
+	}
 	sem := make(chan struct{}, parallelHosts)
 	var wg sync.WaitGroup
 	for _, h := range e.Hosts {
@@ -381,6 +434,12 @@ func (s *Service) dispatch(id string) {
 		}(h)
 	}
 	wg.Wait()
+	s.finishExecution(ctx, id)
+}
+
+// finishExecution marks an execution finished once every host is, and
+// notifies its outcome once.
+func (s *Service) finishExecution(ctx context.Context, id string) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -427,7 +486,7 @@ func (s *Service) notifyFinished(ctx context.Context, id string) {
 	}
 	var failed []string
 	for _, h := range e.Hosts {
-		if h.Class != "success" {
+		if h.Class != "success" && h.Class != classSkipped {
 			failed = append(failed, h.HostID+" ("+h.Class+")")
 		}
 	}
@@ -531,6 +590,9 @@ func (s *Service) finishHost(id, actionID, host, class, detail string, exit int,
 		return
 	}
 	s.log.Info("audit", "kind", "execution_host_finished", "execution", id, "host", host, "class", class, "exit", exit)
+	if class == classSkipped || class == classNotRun {
+		return // nothing ran on the host: its state did not change
+	}
 	s.observe(id, actionID, host, class, result)
 	s.refreshOpsState(s.ctx, host, lastRun{action: actionID, class: class, at: s.now(), ok: true})
 }

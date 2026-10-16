@@ -131,6 +131,8 @@ Compose update are MEDIUM, like service control; the registry digest check
 - Step 1 (executor) is decision 59 in `m0.md`. Stage state is kept with the
   permit in memory, like the permit itself, so no `executor.db` migration
   was needed: an executor restart ends the rollout as it ends every permit.
+- Step 2 (server, UI, notifications, browser test with canary and gate) is
+  decision 60.
 
 ## Rough order of work
 

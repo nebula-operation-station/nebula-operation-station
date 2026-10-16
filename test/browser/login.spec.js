@@ -86,6 +86,34 @@ function check(cond, what) {
   await page.goto(base + '/operations');
   check(/core\.facts/.test(await page.textContent('main')), 'the operation is listed');
 
+  // Staged operation: the canary first; the second host only after the
+  // gate, which a HIGH rollout opens with the security key.
+  await page.goto(base + '/operations/new');
+  check(await page.locator('#plan-size').isHidden(), 'rollout options stay hidden for "all at once"');
+  await page.check('input[name="host"][value="e2e-host"]');
+  await page.check('input[name="host"][value="e2e-two"]');
+  await page.check('input[name="preset"][value="canary"]');
+  check(await page.locator('#plan-size').isVisible(), 'choosing a canary rollout shows its options');
+  await Promise.all([page.waitForURL(/\/operations\/[0-9a-f-]{36}$/, { timeout: 15000 }), page.click('#operation-create')]);
+  let staged = await page.textContent('main');
+  check(/1\. canary/.test(staged) && /2\. rest/.test(staged) && /e2e-two/.test(staged), 'the planned rollout shows its stages before approval');
+  await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('#operation-approve')]);
+  let gate = false;
+  for (let i = 0; i < 40 && !gate; i++) {
+    gate = (await page.locator('.gate-button[data-kind="open"]').count()) > 0;
+    if (!gate) { await new Promise((r) => setTimeout(r, 500)); await page.reload(); }
+  }
+  staged = await page.textContent('main');
+  check(gate && /continue to stage 2/.test(staged) && /Continue to stage 2 with security key/.test(staged),
+    'the canary ran and the rollout waits at the gate');
+  await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('.gate-button[data-kind="open"]')]);
+  finished = false;
+  for (let i = 0; i < 40 && !finished; i++) {
+    finished = /State: finished/.test(await page.textContent('main'));
+    if (!finished) { await new Promise((r) => setTimeout(r, 500)); await page.reload(); }
+  }
+  check(finished && (await page.locator('td:text-is("success")').count()) === 2, 'stage 2 ran after the gate was opened with the key');
+
   // Check updates on the same host (a real apt simulation on the test machine).
   await page.goto(base + '/operations/new');
   await page.check('input[name="action"][value="package.list_updates"]');

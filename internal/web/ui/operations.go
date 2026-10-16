@@ -20,17 +20,23 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/dockerhost"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/osdebian"
+	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
 )
 
 // Operations plans and follows executions (executions.Service).
 type Operations interface {
-	Create(ctx context.Context, user, actionID string, hosts []string, params map[string]string) (executions.Created, error)
+	CreateStaged(ctx context.Context, user, actionID string, hosts []string, params map[string]string, plan executions.Plan) (executions.Created, error)
 	Approve(ctx context.Context, user, id string, assertion []byte, typedTargets uint32) error
 	Get(ctx context.Context, id string) (executions.Execution, error)
 	List(ctx context.Context, limit int) ([]executions.Summary, error)
 	AllUpdates(ctx context.Context) (map[string]executions.HostUpdates, error)
 	AllOpsStates(ctx context.Context) (map[string]executions.OpsState, error)
+	Rollout(ctx context.Context, id string) (*pb.Rollout, error)
+	BeginGate(ctx context.Context, user, id string, g executions.Gate) (executions.GateResult, error)
+	CommitGate(ctx context.Context, user, id string, g executions.Gate, assertion []byte) error
+	Abort(ctx context.Context, user, id string) error
+	RetryHost(ctx context.Context, user, id, host string) error
 }
 
 // updatesSummary is the inventory text of an update list and whether it
@@ -95,10 +101,14 @@ type execView struct {
 	Options                        string
 	Pending, Live, NeedsTypedCount bool
 	Hosts                          []execHostView
+	// Rollout is the stage view of a staged operation.
+	Rollout *rolloutView
 }
 
 type execHostView struct {
 	ID, State, Class, Detail, Exit string
+	Stage                          int
+	CanSkip, CanRetry              bool
 	Facts                          []executions.Fact
 	// Updates is the parsed package.list_updates result.
 	Updates *updatesView
@@ -249,7 +259,7 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 		v.Options = string(e.Options)
 	}
 	for _, x := range e.Hosts {
-		hv := execHostView{ID: x.HostID, State: x.State, Class: x.Class, Detail: x.Detail, OK: x.Class == "success", LogTrunc: x.LogTruncated}
+		hv := execHostView{ID: x.HostID, State: x.State, Class: x.Class, Detail: x.Detail, OK: x.Class == "success", LogTrunc: x.LogTruncated, Stage: x.Stage}
 		if x.State == "finished" && x.ExitCode >= 0 {
 			hv.Exit = strconv.Itoa(x.ExitCode)
 		}
@@ -298,6 +308,7 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 		hv.Log, hv.LogCut = cut(x.Log, displayLimit)
 		v.Hosts = append(v.Hosts, hv)
 	}
+	h.rolloutFor(ctx, e, v)
 	data := pageData{Title: "Operation " + e.ID[:8], Active: "operations", Content: "operation",
 		Scripts: []string{"webauthn.js", "operations.js"}, Ops: &operationsData{Exec: v}}
 	h.render(w, data)
@@ -352,19 +363,30 @@ func (h *Handler) handleOperationCreate(w http.ResponseWriter, r *http.Request) 
 		Action string            `json:"action"`
 		Hosts  []string          `json:"hosts"`
 		Params map[string]string `json:"params"`
+		Plan   *struct {
+			Preset    string `json:"preset"`
+			Size      int    `json:"size"`
+			Continue  string `json:"continue"`
+			MaxFailed int    `json:"max_failed"`
+		} `json:"plan"`
 	}
 	if !readOpsJSON(w, r, &in) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
 	defer cancel()
-	c, err := h.operations.Create(ctx, webUser(r), in.Action, in.Hosts, in.Params)
+	var plan executions.Plan
+	if in.Plan != nil {
+		plan = executions.Plan{Preset: in.Plan.Preset, Size: in.Plan.Size, Continue: in.Plan.Continue, MaxFailed: in.Plan.MaxFailed}
+	}
+	c, err := h.operations.CreateStaged(ctx, webUser(r), in.Action, in.Hosts, in.Params, plan)
 	var he *executions.HostError
 	var pe *executions.ParamError
+	var ple *executions.PlanError
 	switch {
 	case err == nil:
 		writeJSON(w, http.StatusOK, map[string]any{"id": c.ID, "state": c.State, "risk": c.Risk})
-	case errors.Is(err, executions.ErrUnknownAction), errors.Is(err, executions.ErrNoHosts), errors.Is(err, executions.ErrTooManyHosts), errors.As(err, &he), errors.As(err, &pe):
+	case errors.Is(err, executions.ErrUnknownAction), errors.Is(err, executions.ErrNoHosts), errors.Is(err, executions.ErrTooManyHosts), errors.As(err, &he), errors.As(err, &pe), errors.As(err, &ple):
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 	default:
 		if st, ok := status.FromError(err); ok && st.Code() != codes.Unknown {

@@ -26,20 +26,61 @@
   {{end}}
   <p id="message" class="message" role="status" aria-live="polite"></p>
 </section>
+{{with .Rollout}}
+<section class="panel" aria-label="Stages" id="rollout">
+  <h2>Stages</h2>
+  {{if .Aborted}}<p class="status status--error">The rollout was aborted: no further host runs.</p>{{end}}
+  {{if .Stopped}}<p class="status status--error">The rollout stopped: {{.Stopped}}</p>{{end}}
+  {{if .Waiting}}<p class="status"><strong>{{.Waiting}}</strong></p>{{end}}
+  <table class="inventory">
+    <thead><tr><th>Stage</th><th>Hosts</th><th>Allowed failed / unreachable</th><th>Then</th><th>State</th></tr></thead>
+    <tbody>
+      {{range .Stages}}
+      <tr>
+        <td>{{.Num}}. {{.Name}}</td>
+        <td>{{range $i, $h := .Hosts}}{{if $i}}, {{end}}{{$h}}{{end}}</td>
+        <td>{{.MaxFailed}} / {{.MaxUnreachable}}</td>
+        <td>{{if eq .Continue "auto"}}continue automatically{{else}}wait for you{{end}}</td>
+        <td>{{if .Passed}}passed{{else if .Open}}open{{else}}closed{{end}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{if .GateNext}}
+  {{if .GateCLI}}
+  <p class="status">Continue on the executor host: <code>nebula approve --stage {{.GateNext}} {{$.Ops.Exec.Digest}}</code></p>
+  {{else}}
+  <div class="actions">
+    <button type="button" class="button gate-button" data-kind="open" data-stage="{{.GateNext}}">Continue to stage {{.GateNext}}{{if .GateKey}} with security key{{end}}</button>
+  </div>
+  {{end}}
+  {{end}}
+  {{if .CanAbort}}
+  <div class="actions">
+    <button type="button" class="button button--danger" id="rollout-abort">Abort rollout</button>
+  </div>
+  {{end}}
+</section>
+{{end}}
 <section class="panel" aria-label="Hosts">
   <h2>Hosts</h2>
   <table class="inventory">
     <thead>
-      <tr><th>Host</th><th>State</th><th>Outcome</th><th>Exit</th><th>Detail</th></tr>
+      <tr>{{if .Rollout}}<th>Stage</th>{{end}}<th>Host</th><th>State</th><th>Outcome</th><th>Exit</th><th>Detail</th>{{if .Rollout}}<th></th>{{end}}</tr>
     </thead>
     <tbody>
       {{range .Hosts}}
       <tr>
+        {{if $.Ops.Exec.Rollout}}<td>{{.Stage}}</td>{{end}}
         <td>{{.ID}}</td>
         <td>{{.State}}</td>
         <td>{{if .OK}}{{.Class}}{{else}}<span class="status--error">{{.Class}}</span>{{end}}</td>
         <td>{{.Exit}}</td>
         <td>{{.Detail}}</td>
+        {{if $.Ops.Exec.Rollout}}<td>
+          {{if .CanRetry}}<button type="button" class="button button--small retry-button" data-host="{{.ID}}">Retry</button>{{end}}
+          {{if .CanSkip}}<button type="button" class="button button--small gate-button" data-kind="skip" data-host="{{.ID}}">Skip</button>{{end}}
+        </td>{{end}}
       </tr>
       {{end}}
     </tbody>

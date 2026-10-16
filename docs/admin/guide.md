@@ -8,8 +8,8 @@ What 0.1 covers: inventory (manual, CSV import), SSH enrollment with host
 key pinning, update checks, installing security or all updates (durable
 jobs with pre- and postchecks), reboots that wait for the host, service
 status and restart, Ops State per host, notifications (webhook, ntfy,
-Telegram), listing Docker containers. Not in 0.1: stages and canaries,
-runbooks and modules, Docker actions beyond listing,
+Telegram), listing Docker containers, rollouts in stages (canary, waves,
+DEV → QA → PROD). Not in 0.1: runbooks and modules, Docker actions beyond listing,
 IPAM, scheduled checks, packages (APT/containers).
 
 ## 1. Before you start
@@ -203,6 +203,22 @@ are retried automatically after 20 seconds and after 1 minute with the
 same approval; other actions report the host as unreachable, and you plan
 the operation again. A host that was reached uses up the approval for that
 host, whatever the result.
+
+**Rollouts in stages.** Under *Rollout* on the planning page you choose
+how the hosts run: all at once (the default), *canary first* (the first N
+hosts alone, the rest only after them), *in waves* of N hosts, or *DEV → QA
+→ PROD* by the inventory environment. Each stage allows a number of failed
+and of unreachable hosts (a canary allows none); a stage with more failed
+hosts stops the rollout for good, and the hosts after it do not run. After
+a stage passed, the rollout waits for you ("Continue to stage N") or, for a
+LOW or MEDIUM operation, continues by itself if you chose so. The stages
+are part of what you approve: the executor enforces them, not the web
+server. Opening a stage of a HIGH or CRITICAL operation needs your security
+key again (in hardened mode `nebula approve --stage N <digest>` on the
+executor host). A host that could not be reached can be retried or skipped
+(skipping needs the same approval as opening a stage); *Abort rollout*
+stops every host that has not run. A restart of the executor ends the
+rollout like any approval.
 
 **Services:** List services, Service status (unit plus last journal lines)
 and Restart/Start/Stop/Reload take a unit name such as `nginx.service`.

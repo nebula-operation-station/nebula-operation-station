@@ -201,3 +201,31 @@ func (l *lazyExecutor) GetRun(ctx context.Context, in *pb.GetRunRequest, opts ..
 	}
 	return nil, errNotConnected
 }
+
+func (l *lazyExecutor) BeginGate(ctx context.Context, in *pb.BeginGateRequest, opts ...grpc.CallOption) (*pb.BeginGateResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.BeginGate(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) CommitGate(ctx context.Context, in *pb.CommitGateRequest, opts ...grpc.CallOption) (*pb.CommitGateResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.CommitGate(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) AbortRollout(ctx context.Context, in *pb.AbortRolloutRequest, opts ...grpc.CallOption) (*pb.AbortRolloutResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.AbortRollout(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) GetRollout(ctx context.Context, in *pb.GetRolloutRequest, opts ...grpc.CallOption) (*pb.GetRolloutResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.GetRollout(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
