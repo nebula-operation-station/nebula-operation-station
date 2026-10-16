@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +39,10 @@ type Operations interface {
 	CommitGate(ctx context.Context, user, id string, g executions.Gate, assertion []byte) error
 	Abort(ctx context.Context, user, id string) error
 	RetryHost(ctx context.Context, user, id, host string) error
+	// Catalog lists the plannable actions (built-ins, then runbooks).
+	Catalog(ctx context.Context) ([]actions.Action, error)
+	// Action finds an action at a version ("" for the current one).
+	Action(ctx context.Context, id, version string) (actions.Action, bool, error)
 }
 
 // updatesSummary is the inventory text of an update list and whether it
@@ -82,7 +87,7 @@ type opsRow struct {
 
 type actionView struct {
 	ID, Title, Description, Risk string
-	ReadOnly                     bool
+	ReadOnly, Selected           bool
 	Params                       []paramView
 	// Scanner lists the Safety Scanner's categories for the script.
 	Scanner []string
@@ -184,8 +189,18 @@ func (h *Handler) handleOperationNew(w http.ResponseWriter, r *http.Request) {
 	}
 	data := pageData{Title: "New operation", Active: "operations", Content: "operation_new", Scripts: []string{"webauthn.js", "operations.js"}}
 	ops := &operationsData{}
-	for _, a := range actions.Builtin {
-		v := actionView{ID: a.ID, Title: a.Title, Description: a.Description,
+	cctx, ccancel := context.WithTimeout(r.Context(), operationsCallTimeout)
+	catalog, err := h.operations.Catalog(cctx)
+	ccancel()
+	if err != nil {
+		h.log.Error("action catalog", "error", err)
+	}
+	want := r.URL.Query().Get("action")
+	if !slices.ContainsFunc(catalog, func(a actions.Action) bool { return a.ID == want }) && len(catalog) > 0 {
+		want = catalog[0].ID
+	}
+	for _, a := range catalog {
+		v := actionView{ID: a.ID, Title: a.Title, Description: a.Description, Selected: a.ID == want,
 			Risk: strings.TrimPrefix(a.Risk.String(), "RISK_CLASS_"), ReadOnly: a.ReadOnly}
 		f, _ := scanner.Scan(a.Script)
 		v.Scanner = scanner.Categories(f)
@@ -269,7 +284,7 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 	if e.Params != "" && e.Params != "{}" {
 		v.Params = e.Params
 	}
-	if a, ok := actions.Lookup(e.ActionID); ok && a.Version == e.ModuleVersion && a.SHA256() == e.ArtifactSHA256 {
+	if a, ok, err := h.operations.Action(ctx, e.ActionID, e.ModuleVersion); err == nil && ok && a.SHA256() == e.ArtifactSHA256 {
 		v.Scanner, _ = scanner.Scan(a.Script)
 	}
 	if v.Pending && len(e.Options) > 0 && json.Valid(e.Options) {
