@@ -492,3 +492,19 @@ func TestDockerUpdatesAreShown(t *testing.T) {
 		t.Fatal(page)
 	}
 }
+
+func TestComposeUpdateIsShown(t *testing.T) {
+	b, err := os.ReadFile("../../executions/dockerhost/testdata/docker29-compose.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeOps{exec: executions.Execution{ID: opID, ActionID: "docker.compose_update", State: "finished", CreatedAt: time.Unix(1791960000, 0),
+		Params: `{"project":"site"}`, Hosts: []executions.Host{{HostID: "a", State: "finished", Class: "success", Result: b}}}}
+	page := getBody(t, opsHandler(t, f, nil), "/operations/"+opID)
+	for _, want := range []string{"Compose project site:", "<strong>WARNING</strong>", "not healthy after the update: site-web-1 (unhealthy)",
+		"<td>after</td><td>web</td><td>site-web-1</td>", "127.0.0.1:18080-&gt;80/tcp"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page misses %q", want)
+		}
+	}
+}

@@ -73,6 +73,11 @@ var containerRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 
 var containerParam = []Param{{Name: "container", Label: "Container (name or ID)", Pattern: containerRe}}
 
+// projectRe is a Compose project name (docker compose's own rule).
+var projectRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,99}$`)
+
+var projectParam = []Param{{Name: "project", Label: "Compose project", Pattern: projectRe}}
+
 // ValidParams checks params against the action's parameters.
 func (a Action) ValidParams(params map[string]string) error {
 	if len(params) != len(a.Params) {
@@ -122,6 +127,9 @@ var dockerLogs []byte
 
 //go:embed scripts/docker_inspect.sh
 var dockerInspect []byte
+
+//go:embed scripts/docker_compose_update.sh
+var dockerComposeUpdate []byte
 
 //go:embed scripts/docker_check_updates.sh
 var dockerCheckUpdates []byte
@@ -225,6 +233,11 @@ var Builtin = []Action{
 		ID: "docker.check_updates", Version: "1.0.0", Title: "Check image updates",
 		Description: "For the image of every running container, compares the local digest with the registry's current one for its tag (manifest HEAD request, anonymous, pulls nothing). Needs curl and HTTPS to the registries on the host. Read-only.",
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 5 * time.Minute, ReadOnly: true, Script: dockerCheckUpdates, Retry: RetrySafe,
+	},
+	{
+		ID: "docker.compose_update", Version: "1.0.0", Title: "Update Compose project",
+		Description: "Manual update of one Compose project, as a durable job: docker compose pull, then up -d, with the containers listed before and after (postflight: running containers, health, published ports, count). Nothing else is changed.",
+		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Durable: true, Timeout: 30 * time.Minute, Script: dockerComposeUpdate, Params: projectParam, Retry: RetryReconcileFirst,
 	},
 	{
 		ID: "docker.start", Version: "1.0.0", Title: "Start container", Description: "docker start of one container (docker group or sudo); nothing is recreated or pulled.",

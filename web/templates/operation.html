@@ -87,7 +87,7 @@
   </table>
 </section>
 {{range .Hosts}}
-{{if or .Facts .Updates .Install .Units .Service .Docker .DockerLogs .DockerInspect .DockerControl .DockerUpdates .Result .Log}}
+{{if or .Facts .Updates .Install .Units .Service .Docker .DockerLogs .DockerInspect .DockerControl .DockerUpdates .Compose .Result .Log}}
 <section class="panel" aria-label="Output of {{.ID}}">
   <h2>{{.ID}}</h2>
   {{if .Facts}}
@@ -122,6 +122,21 @@
   <p class="status">Container {{.Container}}{{if .State}}: {{if eq .State "running"}}running{{else}}<span class="status--error">{{.State}}</span>{{end}}{{end}}; {{len .Lines}} log lines</p>
   {{if .Lines}}<pre class="output">{{range .Lines}}{{.}}
 {{end}}</pre>{{end}}
+  {{end}}
+  {{end}}
+  {{with .Compose}}
+  {{if eq .Phase "precheck"}}<p class="status status--error">Precheck failed: {{.Reason}}. Nothing was changed.</p>
+  {{else}}
+  <p class="status">Compose project {{.Project}}: {{if eq .Verdict "OK"}}<strong>OK</strong>{{else}}<span class="status--error"><strong>{{.Verdict}}</strong></span>{{end}}
+    (pull exit {{.PullExit}}, up exit {{.UpExit}})</p>
+  {{if .Findings}}<ul>{{range .Findings}}<li>{{.}}</li>{{end}}</ul>{{end}}
+  <table class="inventory">
+    <thead><tr><th></th><th>Service</th><th>Container</th><th>State</th><th>Status</th><th>Ports</th><th>Image</th></tr></thead>
+    <tbody>
+      {{range .Before}}<tr><td>before</td><td>{{.Service}}</td><td>{{.Name}}</td><td>{{.State}}</td><td>{{.Status}}</td><td>{{.Ports}}</td><td>{{.Image}}</td></tr>{{end}}
+      {{range .After}}<tr><td>after</td><td>{{.Service}}</td><td>{{.Name}}</td><td>{{.State}}</td><td>{{.Status}}</td><td>{{.Ports}}</td><td>{{.Image}}</td></tr>{{end}}
+    </tbody>
+  </table>
   {{end}}
   {{end}}
   {{with .DockerUpdates}}

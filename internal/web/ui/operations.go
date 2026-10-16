@@ -123,6 +123,8 @@ type execHostView struct {
 	DockerLogs *dockerhost.Logs
 	// DockerInspect is the parsed docker.inspect result.
 	DockerInspect *dockerhost.Inspect
+	// Compose is the parsed docker.compose_update result.
+	Compose *dockerhost.ComposeUpdate
 	// DockerUpdates is the parsed docker.check_updates result.
 	DockerUpdates *dockerhost.ImageUpdates
 	// DockerControl is the parsed docker.start/stop/restart result.
@@ -294,6 +296,10 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		switch e.ActionID {
+		case "docker.compose_update":
+			if c, err := dockerhost.ParseComposeUpdate(x.Result); err == nil && len(x.Result) > 0 {
+				hv.Compose = &c
+			}
 		case "docker.check_updates":
 			if u, err := dockerhost.ParseImageUpdates(x.Result); err == nil && len(x.Result) > 0 {
 				hv.DockerUpdates = &u
