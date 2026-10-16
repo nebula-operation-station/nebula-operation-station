@@ -32,9 +32,11 @@ service ExecutorService {
   rpc BeginPrivilegedSession(BeginPrivilegedSessionRequest) returns (BeginPrivilegedSessionResponse);
   rpc CompletePrivilegedSession(CompletePrivilegedSessionRequest) returns (CompletePrivilegedSessionResponse);
 
-  // Role: server. Asks whether one host run is covered by an issued permit.
-  // The executor hashes the artifact and parameters itself. In Milestone 0
-  // this only authorizes; SSH execution arrives in Milestone 4.
+  // Role: server. Asks whether one host run is covered by an issued permit
+  // and, if so, reserves the host (one use per host). The executor hashes
+  // the artifact and parameters itself. Refused (stage_plan_invalid) for a
+  // permit proposed with a stage plan: nothing would record the host's
+  // outcome, so its stage could never pass or be skipped.
   rpc AuthorizeRun(AuthorizeRunRequest) returns (AuthorizeRunResponse);
 
   // Role: server. Authorizes one host run exactly like AuthorizeRun and
@@ -234,6 +236,33 @@ service ExecutorService {
   rpc ListSecrets(ListSecretsRequest) returns (ListSecretsResponse);
   // Role: admin. Deletes a secret (vault unlocked).
   rpc DeleteSecret(DeleteSecretRequest) returns (DeleteSecretResponse);
+
+  // Stage engine (spec 07, Milestone 6). A permit proposed with a stage
+  // plan runs stage by stage: the executor refuses a host whose stage is
+  // not open, stops the rollout when a stage has more failed hosts than
+  // its plan allows, and opens a later stage only through a gate (or by
+  // itself, for a LOW or MEDIUM plan that says auto). The outcomes it
+  // decides on are its own run records.
+  //
+  // Role: server. Checks a gate (open the next stage, skip a host) and
+  // returns what it needs: nothing beyond the privileged session for LOW
+  // and MEDIUM, a fresh user-verified assertion over a challenge bound to
+  // digest and gate for HIGH and CRITICAL, the CLI in hardened mode.
+  rpc BeginGate(BeginGateRequest) returns (BeginGateResponse);
+
+  // Role: server. Applies a gate with the privileged session and, for HIGH
+  // and CRITICAL, the assertion over BeginGate's challenge (single use).
+  rpc CommitGate(CommitGateRequest) returns (CommitGateResponse);
+
+  // Role: server. Stops a rollout: no further host is authorized. Needs no
+  // approval, since it only takes permission away.
+  rpc AbortRollout(AbortRolloutRequest) returns (AbortRolloutResponse);
+
+  // Role: server, admin. The executor's view of a rollout.
+  rpc GetRollout(GetRolloutRequest) returns (GetRolloutResponse);
+
+  // Role: admin. Hardened gate path (`nebula approve --stage`, `--skip`).
+  rpc ApproveGateCLI(ApproveGateCLIRequest) returns (ApproveGateCLIResponse);
 }
 
 enum RiskClass {
@@ -310,6 +339,11 @@ message ProposeExecutionRequest {
   // Raise risk_class to the executor's minimum instead of rejecting a
   // lower one. The response reports the class that was registered.
   bool raise_to_minimum = 3;
+  // The stage plan document (stages-v1, see internal/stageplan); it must
+  // hash (RFC 8785, SHA-256) to request.stage_plan_hash. Empty means one
+  // stage of all targets, and then stage_plan_hash must be the hash of
+  // {"plan":"single-stage-v1"}.
+  bytes stage_plan_json = 4;
 }
 
 message ProposeExecutionResponse {
@@ -425,6 +459,108 @@ message PendingPermit {
   int64 approval_expiry_unix = 4;
   // Canonical (RFC 8785) parameters as held by the executor.
   bytes canonical_parameters = 5;
+  // The stage plan as held by the executor.
+  repeated PlanStage stage_plan = 6;
+}
+
+// One stage of an approved plan.
+message PlanStage {
+  string name = 1;
+  repeated string host_ids = 2;
+  uint32 max_failed = 3;
+  uint32 max_unreachable = 4;
+  // "manual" or "auto": how the next stage opens once this one passed.
+  string continue_mode = 5;
+  uint32 timeout_seconds = 6;
+}
+
+enum GateKind {
+  GATE_KIND_UNSPECIFIED = 0;
+  // Open the next stage (stage is its 1-based number).
+  GATE_KIND_OPEN_STAGE = 1;
+  // Skip a host of an open stage that has not run (or was unreachable).
+  GATE_KIND_SKIP_HOST = 2;
+}
+
+message Gate {
+  GateKind kind = 1;
+  uint32 stage = 2;
+  string host_id = 3;
+}
+
+message HostOutcome {
+  string host_id = 1;
+  // succeeded, failed, unreachable or skipped.
+  string outcome = 2;
+}
+
+message StageStatus {
+  PlanStage stage = 1;
+  bool open = 2;
+  // Complete and within its thresholds.
+  bool passed = 3;
+  repeated HostOutcome outcomes = 4;
+}
+
+message Rollout {
+  repeated StageStatus stages = 1;
+  // 1-based number of the highest open stage.
+  uint32 open_stage = 2;
+  // Why the rollout stopped (a stage had more failures than allowed).
+  string stopped = 3;
+  bool aborted = 4;
+  // What the next gate needs.
+  ApprovalRequirement gate_requirement = 5;
+}
+
+message BeginGateRequest {
+  string execution_digest = 1;
+  Gate gate = 2;
+}
+
+message BeginGateResponse {
+  ApprovalRequirement approval_requirement = 1;
+  // Empty when the privileged session suffices.
+  bytes challenge = 2;
+  int64 challenge_expiry_unix = 3;
+  // CredentialRequestOptions JSON over the challenge; empty without one.
+  bytes request_options_json = 4;
+}
+
+message CommitGateRequest {
+  string execution_digest = 1;
+  Gate gate = 2;
+  // PublicKeyCredential JSON; required for HIGH and CRITICAL.
+  bytes assertion_json = 3;
+}
+
+message CommitGateResponse {
+  Rollout rollout = 1;
+}
+
+message AbortRolloutRequest {
+  string execution_digest = 1;
+}
+
+message AbortRolloutResponse {
+  Rollout rollout = 1;
+}
+
+message GetRolloutRequest {
+  string execution_digest = 1;
+}
+
+message GetRolloutResponse {
+  Rollout rollout = 1;
+}
+
+message ApproveGateCLIRequest {
+  string execution_digest = 1;
+  Gate gate = 2;
+}
+
+message ApproveGateCLIResponse {
+  Rollout rollout = 1;
 }
 
 message ListPendingResponse {

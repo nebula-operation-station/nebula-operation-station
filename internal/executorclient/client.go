@@ -500,6 +500,46 @@ func (c *Client) GetRun(ctx context.Context, in *pb.GetRunRequest, opts ...grpc.
 	return resp, mapError(err)
 }
 
+// BeginGate: Checks a gate and returns what it needs (server role).
+func (c *Client) BeginGate(ctx context.Context, in *pb.BeginGateRequest, opts ...grpc.CallOption) (*pb.BeginGateResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.BeginGate(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// CommitGate: Applies a gate (server role).
+func (c *Client) CommitGate(ctx context.Context, in *pb.CommitGateRequest, opts ...grpc.CallOption) (*pb.CommitGateResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.CommitGate(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// AbortRollout: Stops a rollout (server role).
+func (c *Client) AbortRollout(ctx context.Context, in *pb.AbortRolloutRequest, opts ...grpc.CallOption) (*pb.AbortRolloutResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.AbortRollout(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// GetRollout: The executor's view of a rollout (server and admin roles).
+func (c *Client) GetRollout(ctx context.Context, in *pb.GetRolloutRequest, opts ...grpc.CallOption) (*pb.GetRolloutResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.GetRollout(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// ApproveGateCLI: Hardened gate path (admin role).
+func (c *Client) ApproveGateCLI(ctx context.Context, in *pb.ApproveGateCLIRequest, opts ...grpc.CallOption) (*pb.ApproveGateCLIResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ApproveGateCLI(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
 // Compile-time check: the client must implement the generated interface so
 // that a generated-code change breaks the build here.
 var _ pb.ExecutorServiceClient = (*Client)(nil)

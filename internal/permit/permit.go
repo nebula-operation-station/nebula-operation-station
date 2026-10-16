@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/stageplan"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
 )
 
@@ -189,9 +190,15 @@ type Permit struct {
 	ApprovalExpiry time.Time
 	ApprovedAt     time.Time
 	ApprovedBy     string
+	// Plan is the approved stage plan (one stage of all targets for a
+	// request without stages).
+	Plan []stageplan.Stage
 
 	failed int
 	used   map[string]struct{}
+	stages *stages
+	// staged: the request carried a stage plan document.
+	staged bool
 }
 
 // TargetCount is the number of hosts the permit covers.
@@ -202,7 +209,12 @@ func (p *Permit) clone() Permit {
 	c.Canonical = slices.Clone(p.Canonical)
 	c.Parameters = slices.Clone(p.Parameters)
 	c.Challenge = slices.Clone(p.Challenge)
+	c.Plan = slices.Clone(p.Plan)
+	for i := range c.Plan {
+		c.Plan[i].Hosts = slices.Clone(c.Plan[i].Hosts)
+	}
 	c.used = nil
+	c.stages = nil
 	return c
 }
 
@@ -327,17 +339,28 @@ type ProposeResult struct {
 // or revoked by Lock), proposing it again is rejected and the caller must
 // create a new execution.
 func (a *Authority) Propose(r canonical.Request, parametersJSON []byte) (ProposeResult, error) {
-	return a.propose(r, parametersJSON, false)
+	return a.propose(r, parametersJSON, nil, false)
+}
+
+// ProposeStaged is Propose for a request with a stage plan (spec 07). The
+// plan document must hash to the request's stage_plan_hash, cover every
+// target exactly once and, for a HIGH or CRITICAL request, continue
+// manually past every stage. raise is ProposeAtLeastMinimum's behaviour.
+func (a *Authority) ProposeStaged(r canonical.Request, parametersJSON, planJSON []byte, raise bool) (ProposeResult, error) {
+	if len(planJSON) == 0 {
+		return ProposeResult{}, fail(CodeStagePlan, "the stage plan document is required")
+	}
+	return a.propose(r, parametersJSON, planJSON, raise)
 }
 
 // ProposeAtLeastMinimum is Propose, but a risk_class below the executor's
 // minimum is raised to that minimum instead of being rejected. Raising
 // only makes the approval stricter; the permit records the raised class.
 func (a *Authority) ProposeAtLeastMinimum(r canonical.Request, parametersJSON []byte) (ProposeResult, error) {
-	return a.propose(r, parametersJSON, true)
+	return a.propose(r, parametersJSON, nil, true)
 }
 
-func (a *Authority) propose(r canonical.Request, parametersJSON []byte, raise bool) (ProposeResult, error) {
+func (a *Authority) propose(r canonical.Request, parametersJSON, planJSON []byte, raise bool) (ProposeResult, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := a.now()
@@ -403,6 +426,30 @@ func (a *Authority) propose(r canonical.Request, parametersJSON []byte, raise bo
 		return ProposeResult{}, fail(CodeInvalidRequest, "risk_class %s is below the executor's minimum %s", norm.RiskClass, floor)
 	}
 
+	plan := singleStagePlan(norm.ResolvedTargets)
+	if planJSON != nil {
+		hosts := make([]string, len(norm.ResolvedTargets))
+		for i, t := range norm.ResolvedTargets {
+			hosts[i] = t.HostID
+		}
+		sp, err := stageplan.Parse(planJSON, hosts)
+		if err != nil {
+			a.emit(Event{Kind: "rejected", Digest: digest.String(), Code: CodeStagePlan, Detail: err.Error()})
+			return ProposeResult{}, fail(CodeStagePlan, "%v", err)
+		}
+		if sp.Hash != norm.StagePlanHash {
+			a.emit(Event{Kind: "rejected", Digest: digest.String(), Code: CodeStagePlan, Detail: "plan does not hash to stage_plan_hash"})
+			return ProposeResult{}, fail(CodeStagePlan, "the stage plan does not hash to stage_plan_hash")
+		}
+		// Decision 2 of the M6 plan: HIGH and CRITICAL rollouts never
+		// continue on their own; every gate needs a fresh assertion.
+		if sp.AutoContinue() && norm.RiskClass.Rank() >= canonical.RiskHigh.Rank() {
+			a.emit(Event{Kind: "rejected", Digest: digest.String(), Code: CodeStagePlan, Detail: "automatic continue on a " + string(norm.RiskClass) + " rollout"})
+			return ProposeResult{}, fail(CodeStagePlan, "a %s rollout must continue manually past every stage", norm.RiskClass)
+		}
+		plan = sp.Stages
+	}
+
 	req := RequirementFor(norm.RiskClass, a.mode)
 	if req == RequireNone && !a.sessionActiveLocked(now) {
 		a.emit(Event{Kind: "rejected", Digest: digest.String(), Code: CodeSessionRequired})
@@ -424,7 +471,10 @@ func (a *Authority) propose(r canonical.Request, parametersJSON []byte, raise bo
 		Canonical:   canon,
 		Parameters:  params,
 		Requirement: req,
+		Plan:        plan,
 		used:        map[string]struct{}{},
+		stages:      newStages(plan),
+		staged:      planJSON != nil,
 	}
 	if req == RequireNone {
 		p.State = StateApproved
@@ -564,8 +614,21 @@ type Grant struct {
 	Parameters  []byte
 }
 
-// Authorize is AuthorizeGrant without the grant.
+// Authorize is AuthorizeGrant without the grant: it reserves the host like
+// a run does (spec 07, one use per host). It serves the AuthorizeRun RPC,
+// which only checks and reserves; nothing records an outcome for a host
+// reserved this way, so it refuses permits proposed with a stage plan: such
+// a host would hold its stage open for good, and a Skip gate refuses a used
+// host without an outcome (decision 59). Staged permits run only through
+// the executor's own run path.
 func (a *Authority) Authorize(d canonical.Digest, run Run) error {
+	a.mu.Lock()
+	p, ok := a.permits[d]
+	staged := ok && p.staged
+	a.mu.Unlock()
+	if staged {
+		return a.deny(d, run.HostID, CodeStagePlan, "a staged permit runs only through the executor's run path")
+	}
 	_, err := a.AuthorizeGrant(d, run)
 	return err
 }
@@ -605,6 +668,9 @@ func (a *Authority) AuthorizeGrant(d canonical.Digest, run Run) (Grant, error) {
 	}
 	if _, done := p.used[run.HostID]; done {
 		return Grant{}, a.deny(d, run.HostID, CodeHostAlreadyRun, "")
+	}
+	if err := a.checkStageLocked(p, d, run.HostID); err != nil {
+		return Grant{}, err
 	}
 	if run.ActionID != p.Request.ActionID || run.ModuleVersion != p.Request.ModuleVersion {
 		return Grant{}, a.deny(d, run.HostID, CodeActionMismatch, "")
@@ -653,7 +719,7 @@ func (a *Authority) ReleaseHost(d canonical.Digest, hostID string) bool {
 	if !ok || p.State != StateApproved || !a.now().Before(time.Unix(p.Request.ExpiryUnix, 0)) {
 		return false
 	}
-	if _, used := p.used[hostID]; !used {
+	if _, used := p.used[hostID]; !used || p.stages.outcome[hostID] == OutcomeSkipped {
 		return false
 	}
 	delete(p.used, hostID)
