@@ -166,6 +166,16 @@ func (s *Service) ProposeExecution(_ context.Context, req *pb.ProposeExecutionRe
 	if strings.HasPrefix(r.ActionID, reservedActionPrefix) {
 		return nil, status.Errorf(codes.InvalidArgument, "action_id %q is reserved for the executor", r.ActionID)
 	}
+	// The Safety Scanner sees the bytes before the risk is decided.
+	if art := req.GetArtifact(); len(art) > 0 {
+		sum, err := s.auth.ObserveArtifact(art)
+		if err != nil {
+			return nil, toStatus(err)
+		}
+		if sum != r.ArtifactSHA256 {
+			return nil, status.Error(codes.InvalidArgument, "artifact_mismatch: the artifact does not hash to artifact_sha256")
+		}
+	}
 	var res permit.ProposeResult
 	if len(req.GetStagePlanJson()) > 0 {
 		res, err = s.auth.ProposeStaged(r, req.GetParametersJson(), req.GetStagePlanJson(), req.GetRaiseToMinimum())

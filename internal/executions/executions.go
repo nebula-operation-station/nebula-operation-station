@@ -276,7 +276,7 @@ func (s *Service) CreateStaged(ctx context.Context, user, actionID string, hostI
 		req.ResolvedTargets = append(req.ResolvedTargets, &pb.Target{HostId: t.host, HostKeyFingerprint: t.fp})
 	}
 	p, err := s.exec.ProposeExecution(cctx, &pb.ProposeExecutionRequest{Request: req, ParametersJson: paramsJSON, RaiseToMinimum: true,
-		StagePlanJson: planDoc})
+		StagePlanJson: planDoc, Artifact: a.Script})
 	if err != nil {
 		return Created{}, err
 	}
