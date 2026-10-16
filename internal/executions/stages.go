@@ -228,11 +228,13 @@ func (s *Service) dispatchStaged(ctx context.Context, id string, a actions.Actio
 			switch {
 			case h.State == "waiting":
 				s.finishHost(e.ID, a.ID, h.HostID, classSkipped, "skipped at a gate", -1, nil, nil, false)
-			case h.State == "finished" && h.Class == "network_unreachable":
-				// Unreachable, then skipped: nothing ran, and it no longer
-				// counts as a failure of the rollout.
-				if _, err := s.db.ExecContext(ctx, `UPDATE execution_hosts SET class = ?, detail = 'unreachable; skipped at a gate'
-					WHERE execution_id = ? AND host_id = ? AND state = 'finished' AND class = 'network_unreachable'`, classSkipped, e.ID, h.HostID); err != nil {
+			case h.State == "finished" && (h.Class == "network_unreachable" || h.Class == "not_executed"):
+				// Unreachable (or a retry refused because the skip came
+				// first), then skipped: the executor's skipped outcome means
+				// no run completed on the host, and it no longer counts as a
+				// failure of the rollout.
+				if _, err := s.db.ExecContext(ctx, `UPDATE execution_hosts SET class = ?, detail = 'skipped at a gate'
+					WHERE execution_id = ? AND host_id = ? AND state = 'finished' AND class IN ('network_unreachable', 'not_executed')`, classSkipped, e.ID, h.HostID); err != nil {
 					s.log.Error("execution host skip", "execution", e.ID, "host", h.HostID, "error", err.Error())
 				}
 			}

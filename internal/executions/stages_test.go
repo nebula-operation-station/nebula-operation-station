@@ -32,6 +32,7 @@ type stagedExec struct {
 	aborted bool
 	gateReq pb.ApprovalRequirement
 	commits []*pb.CommitGateRequest
+	onRun   func(host string) // called before a run, without the lock
 }
 
 func (f *stagedExec) ProposeExecution(ctx context.Context, in *pb.ProposeExecutionRequest, o ...grpc.CallOption) (*pb.ProposeExecutionResponse, error) {
@@ -62,8 +63,14 @@ func (f *stagedExec) stageOf(host string) int {
 
 func (f *stagedExec) RunAttached(ctx context.Context, in *pb.RunAttachedRequest, o ...grpc.CallOption) (*pb.RunAttachedResponse, error) {
 	host := in.GetRun().GetHostId()
+	if f.onRun != nil {
+		f.onRun(host)
+	}
 	f.mu.Lock()
 	switch {
+	case f.outcome[host] == "skipped":
+		f.mu.Unlock()
+		return nil, status.Error(codes.PermissionDenied, "host_already_run: host was skipped")
 	case f.aborted:
 		f.mu.Unlock()
 		return nil, status.Error(codes.PermissionDenied, "rollout_aborted")
@@ -400,5 +407,40 @@ func TestUnreachableHostInTheLastStageWaits(t *testing.T) {
 	}
 	if err := s.RetryHost(ctx, "axel", c.ID, "db"); err == nil {
 		t.Fatal("retry of a finished execution")
+	}
+}
+
+// Review f63 F1: a retry that loses the race to a skip is refused by the
+// executor; the host still ends as skipped, not as a failure.
+func TestRetryThatLosesToASkipEndsSkipped(t *testing.T) {
+	f := &stagedExec{}
+	s := stagedSetup(t, f)
+	ctx := context.Background()
+	c, err := s.CreateStaged(ctx, "axel", "core.facts", []string{"web", "db"}, nil, Plan{Preset: PresetWaves, Size: 1, Continue: stageplan.ContinueManual})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the gate", func() bool { e, _ := s.Get(ctx, c.ID); return strings.Contains(e.Waiting, "continue to stage 2") })
+	f.mu.Lock()
+	f.unreachable = 1 + len(retryDelays)
+	f.mu.Unlock()
+	if _, err := s.BeginGate(ctx, "axel", c.ID, Gate{Kind: "open", Stage: 2}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the wait for stage 2", func() bool { e, _ := s.Get(ctx, c.ID); return strings.Contains(e.Waiting, "has not passed") })
+	// The skip lands while the retried run is on its way to the executor.
+	f.onRun = func(host string) {
+		if host == "db" {
+			f.mu.Lock()
+			f.outcome["db"] = "skipped"
+			f.mu.Unlock()
+		}
+	}
+	if err := s.RetryHost(ctx, "axel", c.ID, "db"); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, s, c.ID, "finished")
+	if h := hostsOf(t, s, c.ID); h["db"].Class != "skipped" {
+		t.Fatalf("%+v", h["db"])
 	}
 }
