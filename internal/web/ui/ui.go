@@ -102,6 +102,8 @@ type Options struct {
 	Operations Operations
 	// Schedules manages scheduled read-only checks. Nil hides them.
 	Schedules Schedules
+	// Runbooks stores runbooks. Nil leaves the runbooks page empty.
+	Runbooks Runbooks
 	// Repin re-pins hosts blocked by a host key mismatch. Nil leaves only
 	// the CLI instructions on the dashboard.
 	Repin Repinner
@@ -127,6 +129,7 @@ type Handler struct {
 	inventory  InventoryStore
 	operations Operations
 	schedules  Schedules
+	runbooks   Runbooks
 	log        *slog.Logger
 	repin      Repinner
 	enroll     Enroller
@@ -164,6 +167,7 @@ func New(o Options) (*Handler, error) {
 		inventory:    o.Inventory,
 		operations:   o.Operations,
 		schedules:    o.Schedules,
+		runbooks:     o.Runbooks,
 		repin:        o.Repin,
 		enroll:       o.Enroll,
 		log:          log,
@@ -185,6 +189,9 @@ var pageFiles = map[string]string{
 	"operation_new":    "operation_new.html",
 	"operation":        "operation.html",
 	"schedules":        "schedules.html",
+	"runbooks":         "runbooks.html",
+	"runbook":          "runbook.html",
+	"runbook_edit":     "runbook_edit.html",
 }
 
 // Handler returns the UI's http.Handler without the security middleware
@@ -218,6 +225,12 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("POST /schedules/create", h.handleScheduleCreate)
 	mux.HandleFunc("POST /schedules/approve", h.handleScheduleApprove)
 	mux.HandleFunc("POST /schedules/revoke", h.handleScheduleRevoke)
+	// Runbooks (M7-2).
+	mux.HandleFunc("GET /runbooks", h.handleRunbooks)
+	mux.HandleFunc("GET /runbooks/new", h.handleRunbookEdit)
+	mux.HandleFunc("GET /runbooks/{slug}", h.handleRunbook)
+	mux.HandleFunc("GET /runbooks/{slug}/{version}/artifact", h.handleRunbookArtifact)
+	mux.HandleFunc("POST /runbooks/save", h.handleRunbookSave)
 	mux.HandleFunc("POST /hostkeys/repin/propose", h.handleRepinPropose)
 	mux.HandleFunc("POST /hostkeys/repin/commit", h.handleRepinCommit)
 	mux.HandleFunc("GET /inventory/enroll", h.handleEnrollPage)
@@ -247,7 +260,6 @@ var emptyPages = []struct {
 	title string
 }{
 	{"/network", "Network"},
-	{"/runbooks", "Runbooks / Modules"},
 	{"/history", "History"},
 	{"/settings", "Settings"},
 }
@@ -285,6 +297,8 @@ type pageData struct {
 	EnrollEnabled bool
 	// Schedules is the data of the scheduled-checks page.
 	Schedules *schedulesData
+	// Runbooks is the data of the runbook pages.
+	Runbooks *runbooksData
 	// Ops is the data of the operations pages.
 	Ops *operationsData
 	// InventoryEditable is true when Options.Inventory is set; the

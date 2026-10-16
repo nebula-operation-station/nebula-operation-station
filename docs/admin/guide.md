@@ -10,8 +10,8 @@ jobs with pre- and postchecks), reboots that wait for the host, service
 status and restart, Ops State per host, notifications (webhook, ntfy,
 Telegram), Docker (list, logs, details, start/stop/restart, image update
 check, Compose update), rollouts in stages (canary, waves, DEV → QA →
-PROD), scheduled read-only checks. Not in 0.1: runbooks and modules, IPAM,
-packages (APT/containers).
+PROD), scheduled read-only checks, runbooks (your own scripts). Not in 0.1:
+modules, IPAM, packages (APT/containers).
 
 ## 1. Before you start
 
@@ -270,6 +270,24 @@ again on every run; *Revoke* (or `nebula schedule revoke <id>`) stops a
 schedule at once. Results appear as operations created by "schedule" and
 update the inventory like any run. A schedule survives restarts of the
 executor, but nothing runs while it is locked.
+
+**Runbooks.** *Runbooks → New runbook* holds your own scripts (POSIX
+`sh`). A runbook has a name (its action becomes `runbook.<name>`), a
+declared risk, a timeout, attached or durable, and typed parameters:
+`name` (letters, digits and `_.@:-`, not starting with `-`), `int`,
+`path` (absolute) or `choice` (fixed words). The script reads them as
+`$NEBULA_P_<NAME>`; before it starts, the host checks every value again
+with the same pattern. Its output goes to the operation log. An attached
+runbook runs as the SSH user and calls `sudo -n` where it needs root; a
+durable one runs as root under systemd. Saving creates a new version;
+versions never change, and an operation always runs the version it was
+planned with. The executor does not know your script, so a runbook is
+HIGH (security key each time) until you trust that exact version on the
+executor host with the command shown on its page (download the script,
+read it, then `nebula artifact trust …`); the Safety Scanner can raise it
+further. Scripts with control characters or invisible formatting
+characters (such as bidi overrides) are refused, so what you review is
+what runs.
 
 ## 8. Notifications
 

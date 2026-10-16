@@ -1,0 +1,31 @@
+{{define "content"}}
+<h1>Runbooks</h1>
+<section class="panel" aria-label="Runbooks">
+  <p class="hint">A runbook is your own script, run on hosts as an operation like the built-in actions. Every save is a new,
+     unchangeable version; an operation always runs the exact version it was planned with. The executor treats a runbook script it
+     does not know as at least HIGH (your security key every time) until you trust that version on the executor host, and its
+     Safety Scanner can raise the risk further.</p>
+  <div class="actions"><a class="button" href="/runbooks/new">New runbook</a></div>
+  {{with .Runbooks}}
+  {{if .Rows}}
+  <table class="inventory">
+    <thead><tr><th>Runbook</th><th>Title</th><th>Version</th><th>Declared risk</th><th>Safety scanner</th><th>Saved</th></tr></thead>
+    <tbody>
+      {{range .Rows}}
+      <tr>
+        <td><a href="/runbooks/{{.Slug}}">{{.Slug}}</a></td>
+        <td>{{.Title}}</td>
+        <td>{{.Version}}</td>
+        <td>{{.Risk}}</td>
+        <td>{{if .Scanner}}{{.Scanner}}{{else}}no findings{{end}}</td>
+        <td>{{.Created}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p>No runbooks yet.</p>
+  {{end}}
+  {{end}}
+</section>
+{{end}}

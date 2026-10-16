@@ -111,6 +111,7 @@ type Service struct {
 	now   func() time.Time
 
 	notifier *notify.Notifier
+	runbooks Runbooks
 	// opsMu serializes Ops State evaluations, so two runs finishing at
 	// once on one host cannot both see the old state and notify twice.
 	opsMu sync.Mutex
@@ -159,8 +160,8 @@ type target struct {
 	endpoints []string
 }
 
-// Create plans a single-stage execution of a built-in action on hosts and
-// proposes it.
+// Create plans a single-stage execution of an action (built-in or
+// runbook) on hosts and proposes it.
 func (s *Service) Create(ctx context.Context, user, actionID string, hostIDs []string, params map[string]string) (Created, error) {
 	return s.CreateStaged(ctx, user, actionID, hostIDs, params, Plan{})
 }
@@ -168,7 +169,10 @@ func (s *Service) Create(ctx context.Context, user, actionID string, hostIDs []s
 // CreateStaged plans an execution with the stages of plan and proposes it;
 // the executor hashes the plan into the approval and enforces it.
 func (s *Service) CreateStaged(ctx context.Context, user, actionID string, hostIDs []string, params map[string]string, plan Plan) (Created, error) {
-	a, ok := actions.Lookup(actionID)
+	a, ok, err := s.Action(ctx, actionID, "")
+	if err != nil {
+		return Created{}, err
+	}
 	if !ok {
 		return Created{}, ErrUnknownAction
 	}
@@ -410,7 +414,12 @@ func (s *Service) dispatch(id string) {
 		s.log.Error("execution dispatch", "execution", id, "error", err.Error())
 		return
 	}
-	a, ok := actions.Lookup(e.ActionID)
+	a, ok, err := s.Action(ctx, e.ActionID, e.ModuleVersion)
+	if err != nil {
+		// The store may come back (Resume retries on the next start).
+		s.log.Error("execution dispatch", "execution", id, "error", err.Error())
+		return
+	}
 	if !ok || a.Version != e.ModuleVersion || a.SHA256() != e.ArtifactSHA256 {
 		s.fail(id, "the action changed since the proposal; create a new execution")
 		return
