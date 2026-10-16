@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -475,7 +476,12 @@ func TestCreatePassesThePlan(t *testing.T) {
 	f := &fakeOps{}
 	h := opsHandler(t, f, nil)
 	code, _ := postJSON(t, h, "/operations/create", `{"action":"core.facts","hosts":["web","db"],"plan":{"preset":"canary","size":1,"continue":"manual","max_failed":1}}`)
-	if code != http.StatusOK || f.plan != (executions.Plan{Preset: "canary", Size: 1, Continue: "manual", MaxFailed: 1}) {
+	if code != http.StatusOK || !reflect.DeepEqual(f.plan, executions.Plan{Preset: "canary", Size: 1, Continue: "manual", MaxFailed: 1}) {
+		t.Fatalf("%d %+v", code, f.plan)
+	}
+	// Secret slots travel with the plan.
+	code, _ = postJSON(t, h, "/operations/create", `{"action":"core.facts","hosts":["web"],"params":{},"secrets":{"token":"app.token"}}`)
+	if code != http.StatusOK || f.plan.Secrets["token"] != "app.token" || f.plan.Staged() {
 		t.Fatalf("%d %+v", code, f.plan)
 	}
 	f.createErr = &executions.PlanError{Reason: "the canary must be 1 to 1 hosts"}

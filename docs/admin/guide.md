@@ -289,6 +289,18 @@ further. Scripts with control characters or invisible formatting
 characters (such as bidi overrides) are refused, so what you review is
 what runs.
 
+**Secrets in runbooks.** Store a secret in the executor's vault
+(`nebula secret set <id>` on the executor host), declare a secret slot in
+the runbook (for example `influx_token`) and name the vault secret when
+you plan the operation. The executor reads the value and sends it to the
+host only: an attached run keeps it in a private file under the SSH
+user's runtime directory (`$XDG_RUNTIME_DIR`, a tmpfs; without one, make
+the runbook durable), a durable job under `/run/nebula/<execution>/`, and
+both remove it when the script ends. The script reads the value from the
+file `$NEBULA_SECRET_<SLOT>`. A run with secrets is at least MEDIUM, cannot
+be scheduled, and known secret values are removed from its log and
+result (a safeguard, not the protection).
+
 ## 8. Notifications
 
 Add a `notifications` block to `/etc/nebula/server.json`, keep the file

@@ -35,6 +35,7 @@ const ActionPrefix = "runbook."
 const (
 	MaxBody        = 256 << 10
 	MaxParams      = 10
+	MaxSecrets     = 8
 	MaxChoices     = 20
 	MaxTitle       = 100
 	MaxDescription = 2000
@@ -90,7 +91,10 @@ type Draft struct {
 	Durable     bool    `json:"durable"`
 	TimeoutS    int     `json:"timeout_s"`
 	Params      []Param `json:"params"`
-	Body        string  `json:"body"`
+	// Secrets are secret slot names; the script reads each value from the
+	// file $NEBULA_SECRET_<SLOT>.
+	Secrets []string `json:"secrets"`
+	Body    string   `json:"body"`
 }
 
 // Version is one stored, immutable version.
@@ -168,12 +172,21 @@ func Validate(d Draft) error {
 		return invalid("the timeout must be %d to %d seconds", int(MinTimeout/time.Second), int(maxT/time.Second))
 	}
 	seen := map[string]bool{}
+	if len(d.Secrets) > MaxSecrets {
+		return invalid("at most %d secret slots", MaxSecrets)
+	}
+	for _, slot := range d.Secrets {
+		if !paramNameRe.MatchString(slot) || strings.HasPrefix(slot, "nebula") || seen[slot] {
+			return invalid("secret slots are distinct names of 1 to 32 lowercase letters, digits or _, starting with a letter (not nebula…)")
+		}
+		seen[slot] = true
+	}
 	for _, p := range d.Params {
 		switch {
-		case !paramNameRe.MatchString(p.Name):
-			return invalid("parameter names are 1 to 32 lowercase letters, digits or _, starting with a letter")
+		case !paramNameRe.MatchString(p.Name) || strings.HasPrefix(p.Name, "nebula"):
+			return invalid("parameter names are 1 to 32 lowercase letters, digits or _, starting with a letter (not nebula…)")
 		case seen[p.Name]:
-			return invalid("parameter %s appears twice", p.Name)
+			return invalid("parameter %s appears twice or is also a secret slot", p.Name)
 		case p.Label == "" || len(p.Label) > MaxLabel || !clean(p.Label, false):
 			return invalid("parameter %s needs a label of 1 to %d characters of plain text", p.Name, MaxLabel)
 		}
@@ -206,7 +219,7 @@ func (v Version) Action() actions.Action {
 	a := actions.Action{
 		ID: v.ActionID(), Version: v.ModuleVersion(), Title: v.Title, Description: v.Description,
 		Risk: riskProto(v.Risk), Durable: v.Durable, Timeout: time.Duration(v.TimeoutS) * time.Second,
-		Script: v.Artifact, Retry: actions.RetryNever,
+		Script: v.Artifact, Retry: actions.RetryNever, Secrets: append([]string(nil), v.Secrets...),
 	}
 	if v.Durable {
 		a.Retry = actions.RetryReconcileFirst
@@ -249,6 +262,9 @@ func (s *Store) Save(ctx context.Context, user string, d Draft) (Version, error)
 	if d.Params == nil {
 		d.Params = []Param{}
 	}
+	if d.Secrets == nil {
+		d.Secrets = []string{}
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Version{}, err
@@ -271,25 +287,32 @@ func (s *Store) Save(ctx context.Context, user string, d Draft) (Version, error)
 	if err != nil {
 		return Version{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO runbook_versions (slug, version, title, description, risk, durable, timeout_s, params, body,
-		artifact, artifact_sha256, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		d.Slug, v.Version, d.Title, d.Description, d.Risk, d.Durable, d.TimeoutS, string(params), []byte(d.Body),
+	secrets, err := json.Marshal(d.Secrets)
+	if err != nil {
+		return Version{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO runbook_versions (slug, version, title, description, risk, durable, timeout_s, params, secrets,
+		body, artifact, artifact_sha256, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		d.Slug, v.Version, d.Title, d.Description, d.Risk, d.Durable, d.TimeoutS, string(params), string(secrets), []byte(d.Body),
 		v.Artifact, v.ArtifactSHA256, user, now.Unix()); err != nil {
 		return Version{}, err
 	}
 	return v, tx.Commit()
 }
 
-const versionCols = `slug, version, title, description, risk, durable, timeout_s, params, body, artifact, artifact_sha256, created_by, created_at`
+const versionCols = `slug, version, title, description, risk, durable, timeout_s, params, secrets, body, artifact, artifact_sha256, created_by, created_at`
 
 func scanVersion(row interface{ Scan(...any) error }) (Version, error) {
 	var v Version
-	var params string
+	var params, secrets string
 	var body []byte
 	var created int64
-	if err := row.Scan(&v.Slug, &v.Version, &v.Title, &v.Description, &v.Risk, &v.Durable, &v.TimeoutS, &params, &body,
+	if err := row.Scan(&v.Slug, &v.Version, &v.Title, &v.Description, &v.Risk, &v.Durable, &v.TimeoutS, &params, &secrets, &body,
 		&v.Artifact, &v.ArtifactSHA256, &v.CreatedBy, &created); err != nil {
 		return Version{}, err
+	}
+	if err := json.Unmarshal([]byte(secrets), &v.Secrets); err != nil {
+		return Version{}, fmt.Errorf("runbooks: stored secret slots: %w", err)
 	}
 	v.Body = string(body)
 	v.CreatedAt = time.Unix(created, 0)

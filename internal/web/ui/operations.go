@@ -91,6 +91,8 @@ type actionView struct {
 	Params                       []paramView
 	// Scanner lists the Safety Scanner's categories for the script.
 	Scanner []string
+	// Secrets are the action's secret slots.
+	Secrets []string
 }
 
 type paramView struct {
@@ -204,6 +206,7 @@ func (h *Handler) handleOperationNew(w http.ResponseWriter, r *http.Request) {
 			Risk: strings.TrimPrefix(a.Risk.String(), "RISK_CLASS_"), ReadOnly: a.ReadOnly}
 		f, _ := scanner.Scan(a.Script)
 		v.Scanner = scanner.Categories(f)
+		v.Secrets = a.Secrets
 		for _, p := range a.Params {
 			v.Params = append(v.Params, paramView{Name: p.Name, Label: p.Label, Pattern: strings.TrimSuffix(strings.TrimPrefix(p.Pattern.String(), "^"), "$")})
 		}
@@ -406,10 +409,11 @@ func (h *Handler) handleOperationCreate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var in struct {
-		Action string            `json:"action"`
-		Hosts  []string          `json:"hosts"`
-		Params map[string]string `json:"params"`
-		Plan   *struct {
+		Action  string            `json:"action"`
+		Hosts   []string          `json:"hosts"`
+		Params  map[string]string `json:"params"`
+		Secrets map[string]string `json:"secrets"`
+		Plan    *struct {
 			Preset    string `json:"preset"`
 			Size      int    `json:"size"`
 			Continue  string `json:"continue"`
@@ -425,6 +429,7 @@ func (h *Handler) handleOperationCreate(w http.ResponseWriter, r *http.Request) 
 	if in.Plan != nil {
 		plan = executions.Plan{Preset: in.Plan.Preset, Size: in.Plan.Size, Continue: in.Plan.Continue, MaxFailed: in.Plan.MaxFailed}
 	}
+	plan.Secrets = in.Secrets
 	c, err := h.operations.CreateStaged(ctx, webUser(r), in.Action, in.Hosts, in.Params, plan)
 	var he *executions.HostError
 	var pe *executions.ParamError

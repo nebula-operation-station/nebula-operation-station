@@ -45,6 +45,7 @@ type runbookDetail struct {
 	Slug, Title, Description, Risk, Kind, ActionID, ModuleVersion, SHA256, Body, TrustCommand string
 	Version                                                                                   int
 	Params                                                                                    []runbookParamView
+	Secrets                                                                                   []runbookParamView
 	Scanner                                                                                   []scanner.Finding
 	Versions                                                                                  []runbookVersionRow
 }
@@ -119,6 +120,9 @@ func (h *Handler) handleRunbook(w http.ResponseWriter, r *http.Request) {
 		d.Params = append(d.Params, runbookParamView{Name: p.Name, Label: p.Label, Type: p.Type, Choices: strings.Join(p.Choices, ", "),
 			Env: "NEBULA_P_" + strings.ToUpper(p.Name)})
 	}
+	for _, slot := range v.Secrets {
+		d.Secrets = append(d.Secrets, runbookParamView{Name: slot, Env: "NEBULA_SECRET_" + strings.ToUpper(slot)})
+	}
 	d.Scanner, _ = scanner.Scan(v.Artifact)
 	d.TrustCommand = "nebula artifact trust --action " + a.ID + " --version " + a.Version + " --risk " + v.Risk +
 		" " + v.Slug + "-" + strconv.Itoa(v.Version) + ".sh"
@@ -166,7 +170,7 @@ func (h *Handler) handleRunbookEdit(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	d := runbooks.Draft{Risk: "HIGH", TimeoutS: 300, Params: []runbooks.Param{}}
+	d := runbooks.Draft{Risk: "HIGH", TimeoutS: 300, Params: []runbooks.Param{}, Secrets: []string{}}
 	edit := &runbookEdit{}
 	if slug := r.URL.Query().Get("from"); slug != "" {
 		ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)

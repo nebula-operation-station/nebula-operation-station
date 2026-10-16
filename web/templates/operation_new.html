@@ -15,6 +15,11 @@
         <input type="text" data-param="{{.Name}}" pattern="{{.Pattern}}" autocomplete="off">
       </label>
       {{end}}
+      {{range $a.Secrets}}
+      <label class="param" data-action="{{$a.ID}}" hidden>Vault secret for slot {{.}} (its ID on the executor, e.g. <code>app.token</code>)
+        <input type="text" data-secret="{{.}}" autocomplete="off">
+      </label>
+      {{end}}
       {{end}}
     </fieldset>
     <fieldset>

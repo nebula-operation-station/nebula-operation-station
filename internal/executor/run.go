@@ -90,6 +90,10 @@ func (s *Service) RunAttached(ctx context.Context, req *pb.RunAttachedRequest) (
 	if err != nil {
 		return nil, err
 	}
+	secrets, err := s.runSecrets(r.GetParametersJson())
+	if err != nil {
+		return nil, err
+	}
 
 	grant, err := s.auth.AuthorizeGrant(d, authorizeRequest(r))
 	if err != nil {
@@ -117,7 +121,8 @@ func (s *Service) RunAttached(ctx context.Context, req *pb.RunAttachedRequest) (
 	}
 	defer c.Close()
 	resp.Endpoint = c.Endpoint.String()
-	res, err := hostrun.Attached(ctx, c.Client, grant.ExecutionID, grant.Parameters, r.GetArtifact(), timeout)
+	res, err := hostrun.Attached(ctx, c.Client, grant.ExecutionID, grant.Parameters, r.GetArtifact(), timeout, secrets...)
+	redact(&res, secrets)
 	if err != nil {
 		resp.Class, resp.Detail = classUnknown, err.Error()
 	} else {
