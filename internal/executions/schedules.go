@@ -11,6 +11,7 @@ import (
 	"net"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -211,13 +212,56 @@ func (s *Service) ApproveSchedule(ctx context.Context, user, id string, assertio
 	cctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 	if _, err := s.exec.CommitScheduleGrant(cctx, &pb.CommitScheduleGrantRequest{GrantDigest: x.Digest, AssertionJson: assertion}); err != nil {
+		// The executor may have approved it already while the server did
+		// not record that (it stopped, or its update failed): the pending
+		// proposal is gone, the grant is live. Record what the executor
+		// holds instead of offering a button that can no longer work.
+		if status.Code(err) != codes.NotFound || !s.grantLive(ctx, x) {
+			return err
+		}
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE schedules SET state = 'active', options = NULL, approved_at = ? WHERE id = ? AND state = 'pending'`,
+		s.now().Unix(), id)
+	if err != nil {
 		return err
 	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE schedules SET state = 'active', options = NULL, approved_at = ? WHERE id = ? AND state = 'pending'`,
-		s.now().Unix(), id); err != nil {
-		return err
+	if n, _ := res.RowsAffected(); n != 1 {
+		// Revoked while the approval was in flight: withdraw the grant
+		// just approved, so the executor holds nothing the page does not
+		// show.
+		s.revokeGrant(ctx, id)
+		return ErrScheduleState
 	}
 	s.log.Info("audit", "kind", "schedule_approved", "schedule", id, "user", user)
+	return nil
+}
+
+// grantLive reports whether the executor holds the schedule's grant,
+// approved, unrevoked and unexpired.
+func (s *Service) grantLive(ctx context.Context, x Schedule) bool {
+	cctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	r, err := s.exec.ListScheduleGrants(cctx, &pb.ListScheduleGrantsRequest{})
+	if err != nil {
+		return false
+	}
+	for _, g := range r.GetGrants() {
+		if g.GetGrantId() == x.ID && g.GetGrantDigest() == x.Digest && g.GetRevokedUnix() == 0 && s.now().Before(time.Unix(g.GetExpiryUnix(), 0)) {
+			return true
+		}
+	}
+	return false
+}
+
+// revokeGrant revokes a schedule's grant on the executor; an unknown grant
+// is fine.
+func (s *Service) revokeGrant(ctx context.Context, id string) error {
+	cctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	if _, err := s.exec.RevokeScheduleGrant(cctx, &pb.RevokeScheduleGrantRequest{GrantId: id}); err != nil && status.Code(err) != codes.NotFound {
+		s.log.Warn("schedule revoke", "schedule", id, "error", refusal(err))
+		return err
+	}
 	return nil
 }
 
@@ -230,14 +274,12 @@ func (s *Service) RevokeSchedule(ctx context.Context, user, id string) error {
 	if x.State == "revoked" {
 		return ErrScheduleState
 	}
-	if x.State == "active" {
-		cctx, cancel := context.WithTimeout(ctx, callTimeout)
-		defer cancel()
-		if _, err := s.exec.RevokeScheduleGrant(cctx, &pb.RevokeScheduleGrantRequest{GrantId: id}); err != nil && status.Code(err) != codes.NotFound {
-			return err
-		}
+	// A pending schedule is revoked on the executor too: its grant may be
+	// live already when the server missed the approval (review m66).
+	if err := s.revokeGrant(ctx, id); err != nil {
+		return err
 	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE schedules SET state = 'revoked', options = NULL WHERE id = ?`, id); err != nil {
+	if _, err := s.db.ExecContext(ctx, `UPDATE schedules SET state = 'revoked', options = NULL WHERE id = ? AND state != 'revoked'`, id); err != nil {
 		return err
 	}
 	s.log.Info("audit", "kind", "schedule_revoked", "schedule", id, "user", user)
@@ -337,11 +379,35 @@ func (s *Service) runScheduled(ctx context.Context, x Schedule, a actions.Action
 	case codes.OK:
 	case codes.ResourceExhausted:
 		return // the executor's interval has not passed; try next tick
+	case codes.NotFound, codes.PermissionDenied:
+		// The executor no longer holds the grant, or holds it revoked (the
+		// server missed a revoke): the schedule is over, not retried every
+		// tick (review m66 finding 2). Other refusals (a host not covered,
+		// trust withdrawn) stay per run.
+		if status.Code(err) == codes.NotFound || strings.HasPrefix(status.Convert(err).Message(), "schedule_grant_inactive") {
+			s.endSchedule(ctx, x, refusal(err))
+			return
+		}
+		s.log.Warn("scheduled run refused", "schedule", x.ID, "action", a.ID, "host", host, "error", refusal(err))
+		return
 	default:
 		s.log.Warn("scheduled run refused", "schedule", x.ID, "action", a.ID, "host", host, "error", refusal(err))
 		return
 	}
 	s.storeScheduled(ctx, x, a, pin, r.GetExecutionId(), r.GetResult())
+}
+
+// endSchedule marks an active schedule revoked once the executor no longer
+// honours its grant.
+func (s *Service) endSchedule(ctx context.Context, x Schedule, why string) {
+	res, err := s.db.ExecContext(ctx, `UPDATE schedules SET state = 'revoked', options = NULL WHERE id = ? AND state = 'active'`, x.ID)
+	if err != nil {
+		s.log.Error("schedule end", "schedule", x.ID, "error", err.Error())
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 1 {
+		s.log.Info("audit", "kind", "schedule_revoked", "schedule", x.ID, "user", "executor", "reason", why)
+	}
 }
 
 // storeScheduled records a scheduled run as a finished execution of one

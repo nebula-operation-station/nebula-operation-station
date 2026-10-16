@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -48,6 +49,9 @@ type fakeExec struct {
 	revoked     string
 	scheduled   []*pb.RunScheduledRequest
 	tooSoon     bool
+	grants      []*pb.ScheduleGrant // approved grants
+	commitErr   error               // answers CommitScheduleGrant after approving
+	runErr      error               // answers RunScheduled
 }
 
 func (f *fakeExec) ListHostKeys(context.Context, *pb.ListHostKeysRequest, ...grpc.CallOption) (*pb.ListHostKeysResponse, error) {
@@ -606,13 +610,31 @@ func (f *fakeExec) CommitScheduleGrant(_ context.Context, in *pb.CommitScheduleG
 	if string(in.GetAssertionJson()) != "good" {
 		return nil, status.Error(codes.PermissionDenied, "assertion_rejected")
 	}
-	return &pb.CommitScheduleGrantResponse{}, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var d struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(f.grantDoc, &d)
+	f.grants = append(f.grants, &pb.ScheduleGrant{GrantId: d.ID, GrantDigest: in.GetGrantDigest(), ExpiryUnix: time.Now().Add(24 * time.Hour).Unix()})
+	return &pb.CommitScheduleGrantResponse{}, f.commitErr
+}
+
+func (f *fakeExec) ListScheduleGrants(context.Context, *pb.ListScheduleGrantsRequest, ...grpc.CallOption) (*pb.ListScheduleGrantsResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return &pb.ListScheduleGrantsResponse{Grants: f.grants}, nil
 }
 
 func (f *fakeExec) RevokeScheduleGrant(_ context.Context, in *pb.RevokeScheduleGrantRequest, _ ...grpc.CallOption) (*pb.RevokeScheduleGrantResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.revoked = in.GetGrantId()
+	for _, g := range f.grants {
+		if g.GetGrantId() == in.GetGrantId() {
+			g.RevokedUnix = time.Now().Unix()
+		}
+	}
 	return &pb.RevokeScheduleGrantResponse{}, nil
 }
 
@@ -620,6 +642,9 @@ func (f *fakeExec) RunScheduled(_ context.Context, in *pb.RunScheduledRequest, _
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.scheduled = append(f.scheduled, in)
+	if f.runErr != nil {
+		return nil, f.runErr
+	}
 	if f.tooSoon {
 		return nil, status.Error(codes.ResourceExhausted, "schedule_interval_not_elapsed")
 	}

@@ -159,6 +159,10 @@ func (d direct) RunScheduled(ctx context.Context, in *pb.RunScheduledRequest, _ 
 	return d.s.RunScheduled(ctx, in)
 }
 
+func (d direct) ListScheduleGrants(ctx context.Context, in *pb.ListScheduleGrantsRequest, _ ...grpc.CallOption) (*pb.ListScheduleGrantsResponse, error) {
+	return d.s.ListScheduleGrants(ctx, in)
+}
+
 func must(err error) {
 	if err != nil {
 		panic(err)

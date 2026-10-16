@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/schedgrant"
@@ -133,5 +136,62 @@ func TestDueSchedulesRunOncePerInterval(t *testing.T) {
 	}
 	if err := s.RevokeSchedule(ctx, "axel", c.ID); !errors.Is(err, ErrScheduleState) {
 		t.Fatal(err)
+	}
+}
+
+// Review m66: the server's schedule state follows the executor's grant
+// when one of the two steps did not land.
+func TestScheduleStateFollowsTheExecutor(t *testing.T) {
+	f := &fakeExec{}
+	s, _ := setup(t, f)
+	ctx := context.Background()
+	state := func(id string) string {
+		t.Helper()
+		x, err := s.GetSchedule(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return x.State
+	}
+
+	// The executor approved, the server did not record it: the next
+	// approval finds the live grant and records it.
+	c, err := s.CreateSchedule(ctx, "axel", []string{"core.facts"}, []string{"web"}, time.Hour, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.commitErr = status.Error(codes.Unavailable, "connection lost")
+	if err := s.ApproveSchedule(ctx, "axel", c.ID, []byte("good")); err == nil || state(c.ID) != "pending" {
+		t.Fatal("approval recorded without the executor's answer")
+	}
+	f.commitErr = status.Error(codes.NotFound, "not_found: no pending schedule grant")
+	if err := s.ApproveSchedule(ctx, "axel", c.ID, []byte("good")); err != nil || state(c.ID) != "active" {
+		t.Fatalf("%v %s", err, state(c.ID))
+	}
+	f.commitErr = nil
+
+	// A pending schedule whose grant is live is revoked on the executor too.
+	c2, err := s.CreateSchedule(ctx, "axel", []string{"core.facts"}, []string{"web"}, time.Hour, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.commitErr = status.Error(codes.Unavailable, "connection lost")
+	_ = s.ApproveSchedule(ctx, "axel", c2.ID, []byte("good"))
+	f.commitErr = nil
+	if err := s.RevokeSchedule(ctx, "axel", c2.ID); err != nil || f.revoked != c2.ID || state(c2.ID) != "revoked" {
+		t.Fatalf("%v %s %s", err, f.revoked, state(c2.ID))
+	}
+
+	// The executor refuses a revoked grant: the schedule ends instead of
+	// asking again every tick.
+	f.runErr = status.Error(codes.PermissionDenied, "schedule_grant_inactive: the grant was revoked or has expired")
+	s.RunDueSchedules(ctx)
+	if state(c.ID) != "revoked" {
+		t.Fatal(state(c.ID))
+	}
+	n := len(f.scheduled)
+	s.RunDueSchedules(ctx)
+	if len(f.scheduled) != n {
+		t.Fatal("an ended schedule ran again")
 	}
 }

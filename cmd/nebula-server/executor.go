@@ -257,3 +257,10 @@ func (l *lazyExecutor) RunScheduled(ctx context.Context, in *pb.RunScheduledRequ
 	}
 	return nil, errNotConnected
 }
+
+func (l *lazyExecutor) ListScheduleGrants(ctx context.Context, in *pb.ListScheduleGrantsRequest, opts ...grpc.CallOption) (*pb.ListScheduleGrantsResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ListScheduleGrants(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
