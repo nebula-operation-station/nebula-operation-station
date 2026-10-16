@@ -7160,6 +7160,835 @@ func (x *RunStatus) GetReleased() bool {
 	return false
 }
 
+type ProposeScheduleGrantRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The grant document (read-schedule-v1).
+	GrantJson     []byte `protobuf:"bytes,1,opt,name=grant_json,json=grantJson,proto3" json:"grant_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProposeScheduleGrantRequest) Reset() {
+	*x = ProposeScheduleGrantRequest{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[119]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProposeScheduleGrantRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProposeScheduleGrantRequest) ProtoMessage() {}
+
+func (x *ProposeScheduleGrantRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[119]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProposeScheduleGrantRequest.ProtoReflect.Descriptor instead.
+func (*ProposeScheduleGrantRequest) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{119}
+}
+
+func (x *ProposeScheduleGrantRequest) GetGrantJson() []byte {
+	if x != nil {
+		return x.GrantJson
+	}
+	return nil
+}
+
+type ProposeScheduleGrantResponse struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	GrantDigest         string                 `protobuf:"bytes,1,opt,name=grant_digest,json=grantDigest,proto3" json:"grant_digest,omitempty"`
+	CanonicalGrant      []byte                 `protobuf:"bytes,2,opt,name=canonical_grant,json=canonicalGrant,proto3" json:"canonical_grant,omitempty"`
+	ApprovalRequirement ApprovalRequirement    `protobuf:"varint,3,opt,name=approval_requirement,json=approvalRequirement,proto3,enum=nebula.executor.v1.ApprovalRequirement" json:"approval_requirement,omitempty"`
+	Challenge           []byte                 `protobuf:"bytes,4,opt,name=challenge,proto3" json:"challenge,omitempty"`
+	ChallengeExpiryUnix int64                  `protobuf:"varint,5,opt,name=challenge_expiry_unix,json=challengeExpiryUnix,proto3" json:"challenge_expiry_unix,omitempty"`
+	RequestOptionsJson  []byte                 `protobuf:"bytes,6,opt,name=request_options_json,json=requestOptionsJson,proto3" json:"request_options_json,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
+func (x *ProposeScheduleGrantResponse) Reset() {
+	*x = ProposeScheduleGrantResponse{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[120]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProposeScheduleGrantResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProposeScheduleGrantResponse) ProtoMessage() {}
+
+func (x *ProposeScheduleGrantResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[120]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProposeScheduleGrantResponse.ProtoReflect.Descriptor instead.
+func (*ProposeScheduleGrantResponse) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{120}
+}
+
+func (x *ProposeScheduleGrantResponse) GetGrantDigest() string {
+	if x != nil {
+		return x.GrantDigest
+	}
+	return ""
+}
+
+func (x *ProposeScheduleGrantResponse) GetCanonicalGrant() []byte {
+	if x != nil {
+		return x.CanonicalGrant
+	}
+	return nil
+}
+
+func (x *ProposeScheduleGrantResponse) GetApprovalRequirement() ApprovalRequirement {
+	if x != nil {
+		return x.ApprovalRequirement
+	}
+	return ApprovalRequirement_APPROVAL_REQUIREMENT_UNSPECIFIED
+}
+
+func (x *ProposeScheduleGrantResponse) GetChallenge() []byte {
+	if x != nil {
+		return x.Challenge
+	}
+	return nil
+}
+
+func (x *ProposeScheduleGrantResponse) GetChallengeExpiryUnix() int64 {
+	if x != nil {
+		return x.ChallengeExpiryUnix
+	}
+	return 0
+}
+
+func (x *ProposeScheduleGrantResponse) GetRequestOptionsJson() []byte {
+	if x != nil {
+		return x.RequestOptionsJson
+	}
+	return nil
+}
+
+type CommitScheduleGrantRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	GrantDigest   string                 `protobuf:"bytes,1,opt,name=grant_digest,json=grantDigest,proto3" json:"grant_digest,omitempty"`
+	AssertionJson []byte                 `protobuf:"bytes,2,opt,name=assertion_json,json=assertionJson,proto3" json:"assertion_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CommitScheduleGrantRequest) Reset() {
+	*x = CommitScheduleGrantRequest{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[121]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CommitScheduleGrantRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CommitScheduleGrantRequest) ProtoMessage() {}
+
+func (x *CommitScheduleGrantRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[121]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CommitScheduleGrantRequest.ProtoReflect.Descriptor instead.
+func (*CommitScheduleGrantRequest) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{121}
+}
+
+func (x *CommitScheduleGrantRequest) GetGrantDigest() string {
+	if x != nil {
+		return x.GrantDigest
+	}
+	return ""
+}
+
+func (x *CommitScheduleGrantRequest) GetAssertionJson() []byte {
+	if x != nil {
+		return x.AssertionJson
+	}
+	return nil
+}
+
+type ScheduleGrant struct {
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	GrantId     string                 `protobuf:"bytes,1,opt,name=grant_id,json=grantId,proto3" json:"grant_id,omitempty"`
+	GrantDigest string                 `protobuf:"bytes,2,opt,name=grant_digest,json=grantDigest,proto3" json:"grant_digest,omitempty"`
+	// The canonical grant document as approved.
+	CanonicalGrant []byte `protobuf:"bytes,3,opt,name=canonical_grant,json=canonicalGrant,proto3" json:"canonical_grant,omitempty"`
+	ApprovedBy     string `protobuf:"bytes,4,opt,name=approved_by,json=approvedBy,proto3" json:"approved_by,omitempty"`
+	CreatedUnix    int64  `protobuf:"varint,5,opt,name=created_unix,json=createdUnix,proto3" json:"created_unix,omitempty"`
+	ExpiryUnix     int64  `protobuf:"varint,6,opt,name=expiry_unix,json=expiryUnix,proto3" json:"expiry_unix,omitempty"`
+	// 0 while active.
+	RevokedUnix   int64 `protobuf:"varint,7,opt,name=revoked_unix,json=revokedUnix,proto3" json:"revoked_unix,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ScheduleGrant) Reset() {
+	*x = ScheduleGrant{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[122]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ScheduleGrant) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ScheduleGrant) ProtoMessage() {}
+
+func (x *ScheduleGrant) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[122]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ScheduleGrant.ProtoReflect.Descriptor instead.
+func (*ScheduleGrant) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{122}
+}
+
+func (x *ScheduleGrant) GetGrantId() string {
+	if x != nil {
+		return x.GrantId
+	}
+	return ""
+}
+
+func (x *ScheduleGrant) GetGrantDigest() string {
+	if x != nil {
+		return x.GrantDigest
+	}
+	return ""
+}
+
+func (x *ScheduleGrant) GetCanonicalGrant() []byte {
+	if x != nil {
+		return x.CanonicalGrant
+	}
+	return nil
+}
+
+func (x *ScheduleGrant) GetApprovedBy() string {
+	if x != nil {
+		return x.ApprovedBy
+	}
+	return ""
+}
+
+func (x *ScheduleGrant) GetCreatedUnix() int64 {
+	if x != nil {
+		return x.CreatedUnix
+	}
+	return 0
+}
+
+func (x *ScheduleGrant) GetExpiryUnix() int64 {
+	if x != nil {
+		return x.ExpiryUnix
+	}
+	return 0
+}
+
+func (x *ScheduleGrant) GetRevokedUnix() int64 {
+	if x != nil {
+		return x.RevokedUnix
+	}
+	return 0
+}
+
+type CommitScheduleGrantResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Grant         *ScheduleGrant         `protobuf:"bytes,1,opt,name=grant,proto3" json:"grant,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CommitScheduleGrantResponse) Reset() {
+	*x = CommitScheduleGrantResponse{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[123]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CommitScheduleGrantResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CommitScheduleGrantResponse) ProtoMessage() {}
+
+func (x *CommitScheduleGrantResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[123]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CommitScheduleGrantResponse.ProtoReflect.Descriptor instead.
+func (*CommitScheduleGrantResponse) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{123}
+}
+
+func (x *CommitScheduleGrantResponse) GetGrant() *ScheduleGrant {
+	if x != nil {
+		return x.Grant
+	}
+	return nil
+}
+
+type ListPendingScheduleGrantsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListPendingScheduleGrantsRequest) Reset() {
+	*x = ListPendingScheduleGrantsRequest{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[124]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListPendingScheduleGrantsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListPendingScheduleGrantsRequest) ProtoMessage() {}
+
+func (x *ListPendingScheduleGrantsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[124]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListPendingScheduleGrantsRequest.ProtoReflect.Descriptor instead.
+func (*ListPendingScheduleGrantsRequest) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{124}
+}
+
+type PendingScheduleGrant struct {
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	GrantDigest        string                 `protobuf:"bytes,1,opt,name=grant_digest,json=grantDigest,proto3" json:"grant_digest,omitempty"`
+	CanonicalGrant     []byte                 `protobuf:"bytes,2,opt,name=canonical_grant,json=canonicalGrant,proto3" json:"canonical_grant,omitempty"`
+	ApprovalExpiryUnix int64                  `protobuf:"varint,3,opt,name=approval_expiry_unix,json=approvalExpiryUnix,proto3" json:"approval_expiry_unix,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *PendingScheduleGrant) Reset() {
+	*x = PendingScheduleGrant{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[125]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PendingScheduleGrant) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PendingScheduleGrant) ProtoMessage() {}
+
+func (x *PendingScheduleGrant) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[125]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PendingScheduleGrant.ProtoReflect.Descriptor instead.
+func (*PendingScheduleGrant) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{125}
+}
+
+func (x *PendingScheduleGrant) GetGrantDigest() string {
+	if x != nil {
+		return x.GrantDigest
+	}
+	return ""
+}
+
+func (x *PendingScheduleGrant) GetCanonicalGrant() []byte {
+	if x != nil {
+		return x.CanonicalGrant
+	}
+	return nil
+}
+
+func (x *PendingScheduleGrant) GetApprovalExpiryUnix() int64 {
+	if x != nil {
+		return x.ApprovalExpiryUnix
+	}
+	return 0
+}
+
+type ListPendingScheduleGrantsResponse struct {
+	state         protoimpl.MessageState  `protogen:"open.v1"`
+	Grants        []*PendingScheduleGrant `protobuf:"bytes,1,rep,name=grants,proto3" json:"grants,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListPendingScheduleGrantsResponse) Reset() {
+	*x = ListPendingScheduleGrantsResponse{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[126]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListPendingScheduleGrantsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListPendingScheduleGrantsResponse) ProtoMessage() {}
+
+func (x *ListPendingScheduleGrantsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[126]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListPendingScheduleGrantsResponse.ProtoReflect.Descriptor instead.
+func (*ListPendingScheduleGrantsResponse) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{126}
+}
+
+func (x *ListPendingScheduleGrantsResponse) GetGrants() []*PendingScheduleGrant {
+	if x != nil {
+		return x.Grants
+	}
+	return nil
+}
+
+type ApproveScheduleGrantCLIRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	GrantDigest   string                 `protobuf:"bytes,1,opt,name=grant_digest,json=grantDigest,proto3" json:"grant_digest,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ApproveScheduleGrantCLIRequest) Reset() {
+	*x = ApproveScheduleGrantCLIRequest{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[127]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ApproveScheduleGrantCLIRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ApproveScheduleGrantCLIRequest) ProtoMessage() {}
+
+func (x *ApproveScheduleGrantCLIRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[127]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ApproveScheduleGrantCLIRequest.ProtoReflect.Descriptor instead.
+func (*ApproveScheduleGrantCLIRequest) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{127}
+}
+
+func (x *ApproveScheduleGrantCLIRequest) GetGrantDigest() string {
+	if x != nil {
+		return x.GrantDigest
+	}
+	return ""
+}
+
+type ApproveScheduleGrantCLIResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Grant         *ScheduleGrant         `protobuf:"bytes,1,opt,name=grant,proto3" json:"grant,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ApproveScheduleGrantCLIResponse) Reset() {
+	*x = ApproveScheduleGrantCLIResponse{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[128]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ApproveScheduleGrantCLIResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ApproveScheduleGrantCLIResponse) ProtoMessage() {}
+
+func (x *ApproveScheduleGrantCLIResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[128]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ApproveScheduleGrantCLIResponse.ProtoReflect.Descriptor instead.
+func (*ApproveScheduleGrantCLIResponse) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{128}
+}
+
+func (x *ApproveScheduleGrantCLIResponse) GetGrant() *ScheduleGrant {
+	if x != nil {
+		return x.Grant
+	}
+	return nil
+}
+
+type ListScheduleGrantsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListScheduleGrantsRequest) Reset() {
+	*x = ListScheduleGrantsRequest{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[129]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListScheduleGrantsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListScheduleGrantsRequest) ProtoMessage() {}
+
+func (x *ListScheduleGrantsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[129]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListScheduleGrantsRequest.ProtoReflect.Descriptor instead.
+func (*ListScheduleGrantsRequest) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{129}
+}
+
+type ListScheduleGrantsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Grants        []*ScheduleGrant       `protobuf:"bytes,1,rep,name=grants,proto3" json:"grants,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListScheduleGrantsResponse) Reset() {
+	*x = ListScheduleGrantsResponse{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[130]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListScheduleGrantsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListScheduleGrantsResponse) ProtoMessage() {}
+
+func (x *ListScheduleGrantsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[130]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListScheduleGrantsResponse.ProtoReflect.Descriptor instead.
+func (*ListScheduleGrantsResponse) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{130}
+}
+
+func (x *ListScheduleGrantsResponse) GetGrants() []*ScheduleGrant {
+	if x != nil {
+		return x.Grants
+	}
+	return nil
+}
+
+type RevokeScheduleGrantRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	GrantId       string                 `protobuf:"bytes,1,opt,name=grant_id,json=grantId,proto3" json:"grant_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RevokeScheduleGrantRequest) Reset() {
+	*x = RevokeScheduleGrantRequest{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[131]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokeScheduleGrantRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokeScheduleGrantRequest) ProtoMessage() {}
+
+func (x *RevokeScheduleGrantRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[131]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokeScheduleGrantRequest.ProtoReflect.Descriptor instead.
+func (*RevokeScheduleGrantRequest) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{131}
+}
+
+func (x *RevokeScheduleGrantRequest) GetGrantId() string {
+	if x != nil {
+		return x.GrantId
+	}
+	return ""
+}
+
+type RevokeScheduleGrantResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RevokeScheduleGrantResponse) Reset() {
+	*x = RevokeScheduleGrantResponse{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[132]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokeScheduleGrantResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokeScheduleGrantResponse) ProtoMessage() {}
+
+func (x *RevokeScheduleGrantResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[132]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokeScheduleGrantResponse.ProtoReflect.Descriptor instead.
+func (*RevokeScheduleGrantResponse) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{132}
+}
+
+type RunScheduledRequest struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	GrantId string                 `protobuf:"bytes,1,opt,name=grant_id,json=grantId,proto3" json:"grant_id,omitempty"`
+	// The run; execution_digest stays empty, the executor names the run.
+	Run            *AuthorizeRunRequest `protobuf:"bytes,2,opt,name=run,proto3" json:"run,omitempty"`
+	Endpoints      []string             `protobuf:"bytes,3,rep,name=endpoints,proto3" json:"endpoints,omitempty"`
+	TimeoutSeconds uint32               `protobuf:"varint,4,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *RunScheduledRequest) Reset() {
+	*x = RunScheduledRequest{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[133]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunScheduledRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunScheduledRequest) ProtoMessage() {}
+
+func (x *RunScheduledRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[133]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunScheduledRequest.ProtoReflect.Descriptor instead.
+func (*RunScheduledRequest) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{133}
+}
+
+func (x *RunScheduledRequest) GetGrantId() string {
+	if x != nil {
+		return x.GrantId
+	}
+	return ""
+}
+
+func (x *RunScheduledRequest) GetRun() *AuthorizeRunRequest {
+	if x != nil {
+		return x.Run
+	}
+	return nil
+}
+
+func (x *RunScheduledRequest) GetEndpoints() []string {
+	if x != nil {
+		return x.Endpoints
+	}
+	return nil
+}
+
+func (x *RunScheduledRequest) GetTimeoutSeconds() uint32 {
+	if x != nil {
+		return x.TimeoutSeconds
+	}
+	return 0
+}
+
+type RunScheduledResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The execution ID the executor gave the run.
+	ExecutionId   string               `protobuf:"bytes,1,opt,name=execution_id,json=executionId,proto3" json:"execution_id,omitempty"`
+	Result        *RunAttachedResponse `protobuf:"bytes,2,opt,name=result,proto3" json:"result,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunScheduledResponse) Reset() {
+	*x = RunScheduledResponse{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[134]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunScheduledResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunScheduledResponse) ProtoMessage() {}
+
+func (x *RunScheduledResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[134]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunScheduledResponse.ProtoReflect.Descriptor instead.
+func (*RunScheduledResponse) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{134}
+}
+
+func (x *RunScheduledResponse) GetExecutionId() string {
+	if x != nil {
+		return x.ExecutionId
+	}
+	return ""
+}
+
+func (x *RunScheduledResponse) GetResult() *RunAttachedResponse {
+	if x != nil {
+		return x.Result
+	}
+	return nil
+}
+
 var File_nebula_executor_v1_executor_proto protoreflect.FileDescriptor
 
 const file_nebula_executor_v1_executor_proto_rawDesc = "" +
@@ -7613,7 +8442,57 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	" \x01(\tR\bendpoint\x12,\n" +
 	"\x12dispatched_at_unix\x18\v \x01(\x03R\x10dispatchedAtUnix\x12(\n" +
 	"\x10finished_at_unix\x18\f \x01(\x03R\x0efinishedAtUnix\x12\x1a\n" +
-	"\breleased\x18\r \x01(\bR\breleased*\x80\x01\n" +
+	"\breleased\x18\r \x01(\bR\breleased\"<\n" +
+	"\x1bProposeScheduleGrantRequest\x12\x1d\n" +
+	"\n" +
+	"grant_json\x18\x01 \x01(\fR\tgrantJson\"\xca\x02\n" +
+	"\x1cProposeScheduleGrantResponse\x12!\n" +
+	"\fgrant_digest\x18\x01 \x01(\tR\vgrantDigest\x12'\n" +
+	"\x0fcanonical_grant\x18\x02 \x01(\fR\x0ecanonicalGrant\x12Z\n" +
+	"\x14approval_requirement\x18\x03 \x01(\x0e2'.nebula.executor.v1.ApprovalRequirementR\x13approvalRequirement\x12\x1c\n" +
+	"\tchallenge\x18\x04 \x01(\fR\tchallenge\x122\n" +
+	"\x15challenge_expiry_unix\x18\x05 \x01(\x03R\x13challengeExpiryUnix\x120\n" +
+	"\x14request_options_json\x18\x06 \x01(\fR\x12requestOptionsJson\"f\n" +
+	"\x1aCommitScheduleGrantRequest\x12!\n" +
+	"\fgrant_digest\x18\x01 \x01(\tR\vgrantDigest\x12%\n" +
+	"\x0eassertion_json\x18\x02 \x01(\fR\rassertionJson\"\xfe\x01\n" +
+	"\rScheduleGrant\x12\x19\n" +
+	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12!\n" +
+	"\fgrant_digest\x18\x02 \x01(\tR\vgrantDigest\x12'\n" +
+	"\x0fcanonical_grant\x18\x03 \x01(\fR\x0ecanonicalGrant\x12\x1f\n" +
+	"\vapproved_by\x18\x04 \x01(\tR\n" +
+	"approvedBy\x12!\n" +
+	"\fcreated_unix\x18\x05 \x01(\x03R\vcreatedUnix\x12\x1f\n" +
+	"\vexpiry_unix\x18\x06 \x01(\x03R\n" +
+	"expiryUnix\x12!\n" +
+	"\frevoked_unix\x18\a \x01(\x03R\vrevokedUnix\"V\n" +
+	"\x1bCommitScheduleGrantResponse\x127\n" +
+	"\x05grant\x18\x01 \x01(\v2!.nebula.executor.v1.ScheduleGrantR\x05grant\"\"\n" +
+	" ListPendingScheduleGrantsRequest\"\x94\x01\n" +
+	"\x14PendingScheduleGrant\x12!\n" +
+	"\fgrant_digest\x18\x01 \x01(\tR\vgrantDigest\x12'\n" +
+	"\x0fcanonical_grant\x18\x02 \x01(\fR\x0ecanonicalGrant\x120\n" +
+	"\x14approval_expiry_unix\x18\x03 \x01(\x03R\x12approvalExpiryUnix\"e\n" +
+	"!ListPendingScheduleGrantsResponse\x12@\n" +
+	"\x06grants\x18\x01 \x03(\v2(.nebula.executor.v1.PendingScheduleGrantR\x06grants\"C\n" +
+	"\x1eApproveScheduleGrantCLIRequest\x12!\n" +
+	"\fgrant_digest\x18\x01 \x01(\tR\vgrantDigest\"Z\n" +
+	"\x1fApproveScheduleGrantCLIResponse\x127\n" +
+	"\x05grant\x18\x01 \x01(\v2!.nebula.executor.v1.ScheduleGrantR\x05grant\"\x1b\n" +
+	"\x19ListScheduleGrantsRequest\"W\n" +
+	"\x1aListScheduleGrantsResponse\x129\n" +
+	"\x06grants\x18\x01 \x03(\v2!.nebula.executor.v1.ScheduleGrantR\x06grants\"7\n" +
+	"\x1aRevokeScheduleGrantRequest\x12\x19\n" +
+	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"\x1d\n" +
+	"\x1bRevokeScheduleGrantResponse\"\xb2\x01\n" +
+	"\x13RunScheduledRequest\x12\x19\n" +
+	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x129\n" +
+	"\x03run\x18\x02 \x01(\v2'.nebula.executor.v1.AuthorizeRunRequestR\x03run\x12\x1c\n" +
+	"\tendpoints\x18\x03 \x03(\tR\tendpoints\x12'\n" +
+	"\x0ftimeout_seconds\x18\x04 \x01(\rR\x0etimeoutSeconds\"z\n" +
+	"\x14RunScheduledResponse\x12!\n" +
+	"\fexecution_id\x18\x01 \x01(\tR\vexecutionId\x12?\n" +
+	"\x06result\x18\x02 \x01(\v2'.nebula.executor.v1.RunAttachedResponseR\x06result*\x80\x01\n" +
 	"\tRiskClass\x12\x1a\n" +
 	"\x16RISK_CLASS_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eRISK_CLASS_LOW\x10\x01\x12\x15\n" +
@@ -7648,7 +8527,7 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\rHostKeySource\x12\x1f\n" +
 	"\x1bHOST_KEY_SOURCE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15HOST_KEY_SOURCE_PROBE\x10\x01\x12\x1f\n" +
-	"\x1bHOST_KEY_SOURCE_KNOWN_HOSTS\x10\x022\xa2)\n" +
+	"\x1bHOST_KEY_SOURCE_KNOWN_HOSTS\x10\x022\xf5/\n" +
 	"\x0fExecutorService\x12X\n" +
 	"\tGetStatus\x12$.nebula.executor.v1.GetStatusRequest\x1a%.nebula.executor.v1.GetStatusResponse\x12m\n" +
 	"\x10ProposeExecution\x12+.nebula.executor.v1.ProposeExecutionRequest\x1a,.nebula.executor.v1.ProposeExecutionResponse\x12j\n" +
@@ -7706,7 +8585,14 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\fAbortRollout\x12'.nebula.executor.v1.AbortRolloutRequest\x1a(.nebula.executor.v1.AbortRolloutResponse\x12[\n" +
 	"\n" +
 	"GetRollout\x12%.nebula.executor.v1.GetRolloutRequest\x1a&.nebula.executor.v1.GetRolloutResponse\x12g\n" +
-	"\x0eApproveGateCLI\x12).nebula.executor.v1.ApproveGateCLIRequest\x1a*.nebula.executor.v1.ApproveGateCLIResponseBaZ_github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1;executorv1b\x06proto3"
+	"\x0eApproveGateCLI\x12).nebula.executor.v1.ApproveGateCLIRequest\x1a*.nebula.executor.v1.ApproveGateCLIResponse\x12y\n" +
+	"\x14ProposeScheduleGrant\x12/.nebula.executor.v1.ProposeScheduleGrantRequest\x1a0.nebula.executor.v1.ProposeScheduleGrantResponse\x12v\n" +
+	"\x13CommitScheduleGrant\x12..nebula.executor.v1.CommitScheduleGrantRequest\x1a/.nebula.executor.v1.CommitScheduleGrantResponse\x12\x88\x01\n" +
+	"\x19ListPendingScheduleGrants\x124.nebula.executor.v1.ListPendingScheduleGrantsRequest\x1a5.nebula.executor.v1.ListPendingScheduleGrantsResponse\x12\x82\x01\n" +
+	"\x17ApproveScheduleGrantCLI\x122.nebula.executor.v1.ApproveScheduleGrantCLIRequest\x1a3.nebula.executor.v1.ApproveScheduleGrantCLIResponse\x12s\n" +
+	"\x12ListScheduleGrants\x12-.nebula.executor.v1.ListScheduleGrantsRequest\x1a..nebula.executor.v1.ListScheduleGrantsResponse\x12v\n" +
+	"\x13RevokeScheduleGrant\x12..nebula.executor.v1.RevokeScheduleGrantRequest\x1a/.nebula.executor.v1.RevokeScheduleGrantResponse\x12a\n" +
+	"\fRunScheduled\x12'.nebula.executor.v1.RunScheduledRequest\x1a(.nebula.executor.v1.RunScheduledResponseBaZ_github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1;executorv1b\x06proto3"
 
 var (
 	file_nebula_executor_v1_executor_proto_rawDescOnce sync.Once
@@ -7721,7 +8607,7 @@ func file_nebula_executor_v1_executor_proto_rawDescGZIP() []byte {
 }
 
 var file_nebula_executor_v1_executor_proto_enumTypes = make([]protoimpl.EnumInfo, 7)
-var file_nebula_executor_v1_executor_proto_msgTypes = make([]protoimpl.MessageInfo, 119)
+var file_nebula_executor_v1_executor_proto_msgTypes = make([]protoimpl.MessageInfo, 135)
 var file_nebula_executor_v1_executor_proto_goTypes = []any{
 	(RiskClass)(0),                            // 0: nebula.executor.v1.RiskClass
 	(ApprovalRequirement)(0),                  // 1: nebula.executor.v1.ApprovalRequirement
@@ -7849,6 +8735,22 @@ var file_nebula_executor_v1_executor_proto_goTypes = []any{
 	(*GetRunResponse)(nil),                    // 123: nebula.executor.v1.GetRunResponse
 	(*GetRunRequest)(nil),                     // 124: nebula.executor.v1.GetRunRequest
 	(*RunStatus)(nil),                         // 125: nebula.executor.v1.RunStatus
+	(*ProposeScheduleGrantRequest)(nil),       // 126: nebula.executor.v1.ProposeScheduleGrantRequest
+	(*ProposeScheduleGrantResponse)(nil),      // 127: nebula.executor.v1.ProposeScheduleGrantResponse
+	(*CommitScheduleGrantRequest)(nil),        // 128: nebula.executor.v1.CommitScheduleGrantRequest
+	(*ScheduleGrant)(nil),                     // 129: nebula.executor.v1.ScheduleGrant
+	(*CommitScheduleGrantResponse)(nil),       // 130: nebula.executor.v1.CommitScheduleGrantResponse
+	(*ListPendingScheduleGrantsRequest)(nil),  // 131: nebula.executor.v1.ListPendingScheduleGrantsRequest
+	(*PendingScheduleGrant)(nil),              // 132: nebula.executor.v1.PendingScheduleGrant
+	(*ListPendingScheduleGrantsResponse)(nil), // 133: nebula.executor.v1.ListPendingScheduleGrantsResponse
+	(*ApproveScheduleGrantCLIRequest)(nil),    // 134: nebula.executor.v1.ApproveScheduleGrantCLIRequest
+	(*ApproveScheduleGrantCLIResponse)(nil),   // 135: nebula.executor.v1.ApproveScheduleGrantCLIResponse
+	(*ListScheduleGrantsRequest)(nil),         // 136: nebula.executor.v1.ListScheduleGrantsRequest
+	(*ListScheduleGrantsResponse)(nil),        // 137: nebula.executor.v1.ListScheduleGrantsResponse
+	(*RevokeScheduleGrantRequest)(nil),        // 138: nebula.executor.v1.RevokeScheduleGrantRequest
+	(*RevokeScheduleGrantResponse)(nil),       // 139: nebula.executor.v1.RevokeScheduleGrantResponse
+	(*RunScheduledRequest)(nil),               // 140: nebula.executor.v1.RunScheduledRequest
+	(*RunScheduledResponse)(nil),              // 141: nebula.executor.v1.RunScheduledResponse
 }
 var file_nebula_executor_v1_executor_proto_depIdxs = []int32{
 	0,   // 0: nebula.executor.v1.ExecutionRequest.risk_class:type_name -> nebula.executor.v1.RiskClass
@@ -7905,113 +8807,134 @@ var file_nebula_executor_v1_executor_proto_depIdxs = []int32{
 	19,  // 51: nebula.executor.v1.StartDurableRequest.run:type_name -> nebula.executor.v1.AuthorizeRunRequest
 	125, // 52: nebula.executor.v1.StartDurableResponse.run:type_name -> nebula.executor.v1.RunStatus
 	125, // 53: nebula.executor.v1.GetRunResponse.run:type_name -> nebula.executor.v1.RunStatus
-	9,   // 54: nebula.executor.v1.ExecutorService.GetStatus:input_type -> nebula.executor.v1.GetStatusRequest
-	11,  // 55: nebula.executor.v1.ExecutorService.ProposeExecution:input_type -> nebula.executor.v1.ProposeExecutionRequest
-	13,  // 56: nebula.executor.v1.ExecutorService.SubmitAssertion:input_type -> nebula.executor.v1.SubmitAssertionRequest
-	15,  // 57: nebula.executor.v1.ExecutorService.BeginPrivilegedSession:input_type -> nebula.executor.v1.BeginPrivilegedSessionRequest
-	17,  // 58: nebula.executor.v1.ExecutorService.CompletePrivilegedSession:input_type -> nebula.executor.v1.CompletePrivilegedSessionRequest
-	19,  // 59: nebula.executor.v1.ExecutorService.AuthorizeRun:input_type -> nebula.executor.v1.AuthorizeRunRequest
-	119, // 60: nebula.executor.v1.ExecutorService.RunAttached:input_type -> nebula.executor.v1.RunAttachedRequest
-	121, // 61: nebula.executor.v1.ExecutorService.StartDurable:input_type -> nebula.executor.v1.StartDurableRequest
-	124, // 62: nebula.executor.v1.ExecutorService.GetRun:input_type -> nebula.executor.v1.GetRunRequest
-	21,  // 63: nebula.executor.v1.ExecutorService.Unlock:input_type -> nebula.executor.v1.UnlockRequest
-	23,  // 64: nebula.executor.v1.ExecutorService.Lock:input_type -> nebula.executor.v1.LockRequest
-	25,  // 65: nebula.executor.v1.ExecutorService.ListPending:input_type -> nebula.executor.v1.ListPendingRequest
-	43,  // 66: nebula.executor.v1.ExecutorService.ApproveCLI:input_type -> nebula.executor.v1.ApproveCLIRequest
-	45,  // 67: nebula.executor.v1.ExecutorService.TrustArtifact:input_type -> nebula.executor.v1.TrustArtifactRequest
-	47,  // 68: nebula.executor.v1.ExecutorService.UntrustArtifact:input_type -> nebula.executor.v1.UntrustArtifactRequest
-	49,  // 69: nebula.executor.v1.ExecutorService.ListTrustedArtifacts:input_type -> nebula.executor.v1.ListTrustedArtifactsRequest
-	52,  // 70: nebula.executor.v1.ExecutorService.SetHostCriticality:input_type -> nebula.executor.v1.SetHostCriticalityRequest
-	54,  // 71: nebula.executor.v1.ExecutorService.ListHostCriticality:input_type -> nebula.executor.v1.ListHostCriticalityRequest
-	57,  // 72: nebula.executor.v1.ExecutorService.CreateRegistrationCode:input_type -> nebula.executor.v1.CreateRegistrationCodeRequest
-	59,  // 73: nebula.executor.v1.ExecutorService.BeginRegistration:input_type -> nebula.executor.v1.BeginRegistrationRequest
-	61,  // 74: nebula.executor.v1.ExecutorService.FinishRegistration:input_type -> nebula.executor.v1.FinishRegistrationRequest
-	63,  // 75: nebula.executor.v1.ExecutorService.ListWebAuthnCredentials:input_type -> nebula.executor.v1.ListWebAuthnCredentialsRequest
-	66,  // 76: nebula.executor.v1.ExecutorService.RemoveWebAuthnCredential:input_type -> nebula.executor.v1.RemoveWebAuthnCredentialRequest
-	90,  // 77: nebula.executor.v1.ExecutorService.BeginLogin:input_type -> nebula.executor.v1.BeginLoginRequest
-	92,  // 78: nebula.executor.v1.ExecutorService.FinishLogin:input_type -> nebula.executor.v1.FinishLoginRequest
-	94,  // 79: nebula.executor.v1.ExecutorService.CheckCredential:input_type -> nebula.executor.v1.CheckCredentialRequest
-	96,  // 80: nebula.executor.v1.ExecutorService.BeginTOTPSetup:input_type -> nebula.executor.v1.BeginTOTPSetupRequest
-	98,  // 81: nebula.executor.v1.ExecutorService.ConfirmTOTPSetup:input_type -> nebula.executor.v1.ConfirmTOTPSetupRequest
-	100, // 82: nebula.executor.v1.ExecutorService.RemoveTOTP:input_type -> nebula.executor.v1.RemoveTOTPRequest
-	102, // 83: nebula.executor.v1.ExecutorService.GetTOTPStatus:input_type -> nebula.executor.v1.GetTOTPStatusRequest
-	104, // 84: nebula.executor.v1.ExecutorService.RecoveryLogin:input_type -> nebula.executor.v1.RecoveryLoginRequest
-	106, // 85: nebula.executor.v1.ExecutorService.FinishRecovery:input_type -> nebula.executor.v1.FinishRecoveryRequest
-	68,  // 86: nebula.executor.v1.ExecutorService.ProbeHostKey:input_type -> nebula.executor.v1.ProbeHostKeyRequest
-	70,  // 87: nebula.executor.v1.ExecutorService.PinHostKey:input_type -> nebula.executor.v1.PinHostKeyRequest
-	73,  // 88: nebula.executor.v1.ExecutorService.UnpinHostKey:input_type -> nebula.executor.v1.UnpinHostKeyRequest
-	75,  // 89: nebula.executor.v1.ExecutorService.ListHostKeys:input_type -> nebula.executor.v1.ListHostKeysRequest
-	77,  // 90: nebula.executor.v1.ExecutorService.ProposeRepin:input_type -> nebula.executor.v1.ProposeRepinRequest
-	79,  // 91: nebula.executor.v1.ExecutorService.CommitRepin:input_type -> nebula.executor.v1.CommitRepinRequest
-	82,  // 92: nebula.executor.v1.ExecutorService.ProposeEnroll:input_type -> nebula.executor.v1.ProposeEnrollRequest
-	84,  // 93: nebula.executor.v1.ExecutorService.CommitEnroll:input_type -> nebula.executor.v1.CommitEnrollRequest
-	108, // 94: nebula.executor.v1.ExecutorService.GetSSHPublicKey:input_type -> nebula.executor.v1.GetSSHPublicKeyRequest
-	87,  // 95: nebula.executor.v1.ExecutorService.TestConnection:input_type -> nebula.executor.v1.TestConnectionRequest
-	110, // 96: nebula.executor.v1.ExecutorService.InitVault:input_type -> nebula.executor.v1.InitVaultRequest
-	112, // 97: nebula.executor.v1.ExecutorService.SetSecret:input_type -> nebula.executor.v1.SetSecretRequest
-	114, // 98: nebula.executor.v1.ExecutorService.ListSecrets:input_type -> nebula.executor.v1.ListSecretsRequest
-	117, // 99: nebula.executor.v1.ExecutorService.DeleteSecret:input_type -> nebula.executor.v1.DeleteSecretRequest
-	32,  // 100: nebula.executor.v1.ExecutorService.BeginGate:input_type -> nebula.executor.v1.BeginGateRequest
-	34,  // 101: nebula.executor.v1.ExecutorService.CommitGate:input_type -> nebula.executor.v1.CommitGateRequest
-	36,  // 102: nebula.executor.v1.ExecutorService.AbortRollout:input_type -> nebula.executor.v1.AbortRolloutRequest
-	38,  // 103: nebula.executor.v1.ExecutorService.GetRollout:input_type -> nebula.executor.v1.GetRolloutRequest
-	40,  // 104: nebula.executor.v1.ExecutorService.ApproveGateCLI:input_type -> nebula.executor.v1.ApproveGateCLIRequest
-	10,  // 105: nebula.executor.v1.ExecutorService.GetStatus:output_type -> nebula.executor.v1.GetStatusResponse
-	12,  // 106: nebula.executor.v1.ExecutorService.ProposeExecution:output_type -> nebula.executor.v1.ProposeExecutionResponse
-	14,  // 107: nebula.executor.v1.ExecutorService.SubmitAssertion:output_type -> nebula.executor.v1.SubmitAssertionResponse
-	16,  // 108: nebula.executor.v1.ExecutorService.BeginPrivilegedSession:output_type -> nebula.executor.v1.BeginPrivilegedSessionResponse
-	18,  // 109: nebula.executor.v1.ExecutorService.CompletePrivilegedSession:output_type -> nebula.executor.v1.CompletePrivilegedSessionResponse
-	20,  // 110: nebula.executor.v1.ExecutorService.AuthorizeRun:output_type -> nebula.executor.v1.AuthorizeRunResponse
-	120, // 111: nebula.executor.v1.ExecutorService.RunAttached:output_type -> nebula.executor.v1.RunAttachedResponse
-	122, // 112: nebula.executor.v1.ExecutorService.StartDurable:output_type -> nebula.executor.v1.StartDurableResponse
-	123, // 113: nebula.executor.v1.ExecutorService.GetRun:output_type -> nebula.executor.v1.GetRunResponse
-	22,  // 114: nebula.executor.v1.ExecutorService.Unlock:output_type -> nebula.executor.v1.UnlockResponse
-	24,  // 115: nebula.executor.v1.ExecutorService.Lock:output_type -> nebula.executor.v1.LockResponse
-	42,  // 116: nebula.executor.v1.ExecutorService.ListPending:output_type -> nebula.executor.v1.ListPendingResponse
-	44,  // 117: nebula.executor.v1.ExecutorService.ApproveCLI:output_type -> nebula.executor.v1.ApproveCLIResponse
-	46,  // 118: nebula.executor.v1.ExecutorService.TrustArtifact:output_type -> nebula.executor.v1.TrustArtifactResponse
-	48,  // 119: nebula.executor.v1.ExecutorService.UntrustArtifact:output_type -> nebula.executor.v1.UntrustArtifactResponse
-	51,  // 120: nebula.executor.v1.ExecutorService.ListTrustedArtifacts:output_type -> nebula.executor.v1.ListTrustedArtifactsResponse
-	53,  // 121: nebula.executor.v1.ExecutorService.SetHostCriticality:output_type -> nebula.executor.v1.SetHostCriticalityResponse
-	56,  // 122: nebula.executor.v1.ExecutorService.ListHostCriticality:output_type -> nebula.executor.v1.ListHostCriticalityResponse
-	58,  // 123: nebula.executor.v1.ExecutorService.CreateRegistrationCode:output_type -> nebula.executor.v1.CreateRegistrationCodeResponse
-	60,  // 124: nebula.executor.v1.ExecutorService.BeginRegistration:output_type -> nebula.executor.v1.BeginRegistrationResponse
-	62,  // 125: nebula.executor.v1.ExecutorService.FinishRegistration:output_type -> nebula.executor.v1.FinishRegistrationResponse
-	65,  // 126: nebula.executor.v1.ExecutorService.ListWebAuthnCredentials:output_type -> nebula.executor.v1.ListWebAuthnCredentialsResponse
-	67,  // 127: nebula.executor.v1.ExecutorService.RemoveWebAuthnCredential:output_type -> nebula.executor.v1.RemoveWebAuthnCredentialResponse
-	91,  // 128: nebula.executor.v1.ExecutorService.BeginLogin:output_type -> nebula.executor.v1.BeginLoginResponse
-	93,  // 129: nebula.executor.v1.ExecutorService.FinishLogin:output_type -> nebula.executor.v1.FinishLoginResponse
-	95,  // 130: nebula.executor.v1.ExecutorService.CheckCredential:output_type -> nebula.executor.v1.CheckCredentialResponse
-	97,  // 131: nebula.executor.v1.ExecutorService.BeginTOTPSetup:output_type -> nebula.executor.v1.BeginTOTPSetupResponse
-	99,  // 132: nebula.executor.v1.ExecutorService.ConfirmTOTPSetup:output_type -> nebula.executor.v1.ConfirmTOTPSetupResponse
-	101, // 133: nebula.executor.v1.ExecutorService.RemoveTOTP:output_type -> nebula.executor.v1.RemoveTOTPResponse
-	103, // 134: nebula.executor.v1.ExecutorService.GetTOTPStatus:output_type -> nebula.executor.v1.GetTOTPStatusResponse
-	105, // 135: nebula.executor.v1.ExecutorService.RecoveryLogin:output_type -> nebula.executor.v1.RecoveryLoginResponse
-	107, // 136: nebula.executor.v1.ExecutorService.FinishRecovery:output_type -> nebula.executor.v1.FinishRecoveryResponse
-	69,  // 137: nebula.executor.v1.ExecutorService.ProbeHostKey:output_type -> nebula.executor.v1.ProbeHostKeyResponse
-	72,  // 138: nebula.executor.v1.ExecutorService.PinHostKey:output_type -> nebula.executor.v1.PinHostKeyResponse
-	74,  // 139: nebula.executor.v1.ExecutorService.UnpinHostKey:output_type -> nebula.executor.v1.UnpinHostKeyResponse
-	76,  // 140: nebula.executor.v1.ExecutorService.ListHostKeys:output_type -> nebula.executor.v1.ListHostKeysResponse
-	78,  // 141: nebula.executor.v1.ExecutorService.ProposeRepin:output_type -> nebula.executor.v1.ProposeRepinResponse
-	80,  // 142: nebula.executor.v1.ExecutorService.CommitRepin:output_type -> nebula.executor.v1.CommitRepinResponse
-	83,  // 143: nebula.executor.v1.ExecutorService.ProposeEnroll:output_type -> nebula.executor.v1.ProposeEnrollResponse
-	86,  // 144: nebula.executor.v1.ExecutorService.CommitEnroll:output_type -> nebula.executor.v1.CommitEnrollResponse
-	109, // 145: nebula.executor.v1.ExecutorService.GetSSHPublicKey:output_type -> nebula.executor.v1.GetSSHPublicKeyResponse
-	89,  // 146: nebula.executor.v1.ExecutorService.TestConnection:output_type -> nebula.executor.v1.TestConnectionResponse
-	111, // 147: nebula.executor.v1.ExecutorService.InitVault:output_type -> nebula.executor.v1.InitVaultResponse
-	113, // 148: nebula.executor.v1.ExecutorService.SetSecret:output_type -> nebula.executor.v1.SetSecretResponse
-	116, // 149: nebula.executor.v1.ExecutorService.ListSecrets:output_type -> nebula.executor.v1.ListSecretsResponse
-	118, // 150: nebula.executor.v1.ExecutorService.DeleteSecret:output_type -> nebula.executor.v1.DeleteSecretResponse
-	33,  // 151: nebula.executor.v1.ExecutorService.BeginGate:output_type -> nebula.executor.v1.BeginGateResponse
-	35,  // 152: nebula.executor.v1.ExecutorService.CommitGate:output_type -> nebula.executor.v1.CommitGateResponse
-	37,  // 153: nebula.executor.v1.ExecutorService.AbortRollout:output_type -> nebula.executor.v1.AbortRolloutResponse
-	39,  // 154: nebula.executor.v1.ExecutorService.GetRollout:output_type -> nebula.executor.v1.GetRolloutResponse
-	41,  // 155: nebula.executor.v1.ExecutorService.ApproveGateCLI:output_type -> nebula.executor.v1.ApproveGateCLIResponse
-	105, // [105:156] is the sub-list for method output_type
-	54,  // [54:105] is the sub-list for method input_type
-	54,  // [54:54] is the sub-list for extension type_name
-	54,  // [54:54] is the sub-list for extension extendee
-	0,   // [0:54] is the sub-list for field type_name
+	1,   // 54: nebula.executor.v1.ProposeScheduleGrantResponse.approval_requirement:type_name -> nebula.executor.v1.ApprovalRequirement
+	129, // 55: nebula.executor.v1.CommitScheduleGrantResponse.grant:type_name -> nebula.executor.v1.ScheduleGrant
+	132, // 56: nebula.executor.v1.ListPendingScheduleGrantsResponse.grants:type_name -> nebula.executor.v1.PendingScheduleGrant
+	129, // 57: nebula.executor.v1.ApproveScheduleGrantCLIResponse.grant:type_name -> nebula.executor.v1.ScheduleGrant
+	129, // 58: nebula.executor.v1.ListScheduleGrantsResponse.grants:type_name -> nebula.executor.v1.ScheduleGrant
+	19,  // 59: nebula.executor.v1.RunScheduledRequest.run:type_name -> nebula.executor.v1.AuthorizeRunRequest
+	120, // 60: nebula.executor.v1.RunScheduledResponse.result:type_name -> nebula.executor.v1.RunAttachedResponse
+	9,   // 61: nebula.executor.v1.ExecutorService.GetStatus:input_type -> nebula.executor.v1.GetStatusRequest
+	11,  // 62: nebula.executor.v1.ExecutorService.ProposeExecution:input_type -> nebula.executor.v1.ProposeExecutionRequest
+	13,  // 63: nebula.executor.v1.ExecutorService.SubmitAssertion:input_type -> nebula.executor.v1.SubmitAssertionRequest
+	15,  // 64: nebula.executor.v1.ExecutorService.BeginPrivilegedSession:input_type -> nebula.executor.v1.BeginPrivilegedSessionRequest
+	17,  // 65: nebula.executor.v1.ExecutorService.CompletePrivilegedSession:input_type -> nebula.executor.v1.CompletePrivilegedSessionRequest
+	19,  // 66: nebula.executor.v1.ExecutorService.AuthorizeRun:input_type -> nebula.executor.v1.AuthorizeRunRequest
+	119, // 67: nebula.executor.v1.ExecutorService.RunAttached:input_type -> nebula.executor.v1.RunAttachedRequest
+	121, // 68: nebula.executor.v1.ExecutorService.StartDurable:input_type -> nebula.executor.v1.StartDurableRequest
+	124, // 69: nebula.executor.v1.ExecutorService.GetRun:input_type -> nebula.executor.v1.GetRunRequest
+	21,  // 70: nebula.executor.v1.ExecutorService.Unlock:input_type -> nebula.executor.v1.UnlockRequest
+	23,  // 71: nebula.executor.v1.ExecutorService.Lock:input_type -> nebula.executor.v1.LockRequest
+	25,  // 72: nebula.executor.v1.ExecutorService.ListPending:input_type -> nebula.executor.v1.ListPendingRequest
+	43,  // 73: nebula.executor.v1.ExecutorService.ApproveCLI:input_type -> nebula.executor.v1.ApproveCLIRequest
+	45,  // 74: nebula.executor.v1.ExecutorService.TrustArtifact:input_type -> nebula.executor.v1.TrustArtifactRequest
+	47,  // 75: nebula.executor.v1.ExecutorService.UntrustArtifact:input_type -> nebula.executor.v1.UntrustArtifactRequest
+	49,  // 76: nebula.executor.v1.ExecutorService.ListTrustedArtifacts:input_type -> nebula.executor.v1.ListTrustedArtifactsRequest
+	52,  // 77: nebula.executor.v1.ExecutorService.SetHostCriticality:input_type -> nebula.executor.v1.SetHostCriticalityRequest
+	54,  // 78: nebula.executor.v1.ExecutorService.ListHostCriticality:input_type -> nebula.executor.v1.ListHostCriticalityRequest
+	57,  // 79: nebula.executor.v1.ExecutorService.CreateRegistrationCode:input_type -> nebula.executor.v1.CreateRegistrationCodeRequest
+	59,  // 80: nebula.executor.v1.ExecutorService.BeginRegistration:input_type -> nebula.executor.v1.BeginRegistrationRequest
+	61,  // 81: nebula.executor.v1.ExecutorService.FinishRegistration:input_type -> nebula.executor.v1.FinishRegistrationRequest
+	63,  // 82: nebula.executor.v1.ExecutorService.ListWebAuthnCredentials:input_type -> nebula.executor.v1.ListWebAuthnCredentialsRequest
+	66,  // 83: nebula.executor.v1.ExecutorService.RemoveWebAuthnCredential:input_type -> nebula.executor.v1.RemoveWebAuthnCredentialRequest
+	90,  // 84: nebula.executor.v1.ExecutorService.BeginLogin:input_type -> nebula.executor.v1.BeginLoginRequest
+	92,  // 85: nebula.executor.v1.ExecutorService.FinishLogin:input_type -> nebula.executor.v1.FinishLoginRequest
+	94,  // 86: nebula.executor.v1.ExecutorService.CheckCredential:input_type -> nebula.executor.v1.CheckCredentialRequest
+	96,  // 87: nebula.executor.v1.ExecutorService.BeginTOTPSetup:input_type -> nebula.executor.v1.BeginTOTPSetupRequest
+	98,  // 88: nebula.executor.v1.ExecutorService.ConfirmTOTPSetup:input_type -> nebula.executor.v1.ConfirmTOTPSetupRequest
+	100, // 89: nebula.executor.v1.ExecutorService.RemoveTOTP:input_type -> nebula.executor.v1.RemoveTOTPRequest
+	102, // 90: nebula.executor.v1.ExecutorService.GetTOTPStatus:input_type -> nebula.executor.v1.GetTOTPStatusRequest
+	104, // 91: nebula.executor.v1.ExecutorService.RecoveryLogin:input_type -> nebula.executor.v1.RecoveryLoginRequest
+	106, // 92: nebula.executor.v1.ExecutorService.FinishRecovery:input_type -> nebula.executor.v1.FinishRecoveryRequest
+	68,  // 93: nebula.executor.v1.ExecutorService.ProbeHostKey:input_type -> nebula.executor.v1.ProbeHostKeyRequest
+	70,  // 94: nebula.executor.v1.ExecutorService.PinHostKey:input_type -> nebula.executor.v1.PinHostKeyRequest
+	73,  // 95: nebula.executor.v1.ExecutorService.UnpinHostKey:input_type -> nebula.executor.v1.UnpinHostKeyRequest
+	75,  // 96: nebula.executor.v1.ExecutorService.ListHostKeys:input_type -> nebula.executor.v1.ListHostKeysRequest
+	77,  // 97: nebula.executor.v1.ExecutorService.ProposeRepin:input_type -> nebula.executor.v1.ProposeRepinRequest
+	79,  // 98: nebula.executor.v1.ExecutorService.CommitRepin:input_type -> nebula.executor.v1.CommitRepinRequest
+	82,  // 99: nebula.executor.v1.ExecutorService.ProposeEnroll:input_type -> nebula.executor.v1.ProposeEnrollRequest
+	84,  // 100: nebula.executor.v1.ExecutorService.CommitEnroll:input_type -> nebula.executor.v1.CommitEnrollRequest
+	108, // 101: nebula.executor.v1.ExecutorService.GetSSHPublicKey:input_type -> nebula.executor.v1.GetSSHPublicKeyRequest
+	87,  // 102: nebula.executor.v1.ExecutorService.TestConnection:input_type -> nebula.executor.v1.TestConnectionRequest
+	110, // 103: nebula.executor.v1.ExecutorService.InitVault:input_type -> nebula.executor.v1.InitVaultRequest
+	112, // 104: nebula.executor.v1.ExecutorService.SetSecret:input_type -> nebula.executor.v1.SetSecretRequest
+	114, // 105: nebula.executor.v1.ExecutorService.ListSecrets:input_type -> nebula.executor.v1.ListSecretsRequest
+	117, // 106: nebula.executor.v1.ExecutorService.DeleteSecret:input_type -> nebula.executor.v1.DeleteSecretRequest
+	32,  // 107: nebula.executor.v1.ExecutorService.BeginGate:input_type -> nebula.executor.v1.BeginGateRequest
+	34,  // 108: nebula.executor.v1.ExecutorService.CommitGate:input_type -> nebula.executor.v1.CommitGateRequest
+	36,  // 109: nebula.executor.v1.ExecutorService.AbortRollout:input_type -> nebula.executor.v1.AbortRolloutRequest
+	38,  // 110: nebula.executor.v1.ExecutorService.GetRollout:input_type -> nebula.executor.v1.GetRolloutRequest
+	40,  // 111: nebula.executor.v1.ExecutorService.ApproveGateCLI:input_type -> nebula.executor.v1.ApproveGateCLIRequest
+	126, // 112: nebula.executor.v1.ExecutorService.ProposeScheduleGrant:input_type -> nebula.executor.v1.ProposeScheduleGrantRequest
+	128, // 113: nebula.executor.v1.ExecutorService.CommitScheduleGrant:input_type -> nebula.executor.v1.CommitScheduleGrantRequest
+	131, // 114: nebula.executor.v1.ExecutorService.ListPendingScheduleGrants:input_type -> nebula.executor.v1.ListPendingScheduleGrantsRequest
+	134, // 115: nebula.executor.v1.ExecutorService.ApproveScheduleGrantCLI:input_type -> nebula.executor.v1.ApproveScheduleGrantCLIRequest
+	136, // 116: nebula.executor.v1.ExecutorService.ListScheduleGrants:input_type -> nebula.executor.v1.ListScheduleGrantsRequest
+	138, // 117: nebula.executor.v1.ExecutorService.RevokeScheduleGrant:input_type -> nebula.executor.v1.RevokeScheduleGrantRequest
+	140, // 118: nebula.executor.v1.ExecutorService.RunScheduled:input_type -> nebula.executor.v1.RunScheduledRequest
+	10,  // 119: nebula.executor.v1.ExecutorService.GetStatus:output_type -> nebula.executor.v1.GetStatusResponse
+	12,  // 120: nebula.executor.v1.ExecutorService.ProposeExecution:output_type -> nebula.executor.v1.ProposeExecutionResponse
+	14,  // 121: nebula.executor.v1.ExecutorService.SubmitAssertion:output_type -> nebula.executor.v1.SubmitAssertionResponse
+	16,  // 122: nebula.executor.v1.ExecutorService.BeginPrivilegedSession:output_type -> nebula.executor.v1.BeginPrivilegedSessionResponse
+	18,  // 123: nebula.executor.v1.ExecutorService.CompletePrivilegedSession:output_type -> nebula.executor.v1.CompletePrivilegedSessionResponse
+	20,  // 124: nebula.executor.v1.ExecutorService.AuthorizeRun:output_type -> nebula.executor.v1.AuthorizeRunResponse
+	120, // 125: nebula.executor.v1.ExecutorService.RunAttached:output_type -> nebula.executor.v1.RunAttachedResponse
+	122, // 126: nebula.executor.v1.ExecutorService.StartDurable:output_type -> nebula.executor.v1.StartDurableResponse
+	123, // 127: nebula.executor.v1.ExecutorService.GetRun:output_type -> nebula.executor.v1.GetRunResponse
+	22,  // 128: nebula.executor.v1.ExecutorService.Unlock:output_type -> nebula.executor.v1.UnlockResponse
+	24,  // 129: nebula.executor.v1.ExecutorService.Lock:output_type -> nebula.executor.v1.LockResponse
+	42,  // 130: nebula.executor.v1.ExecutorService.ListPending:output_type -> nebula.executor.v1.ListPendingResponse
+	44,  // 131: nebula.executor.v1.ExecutorService.ApproveCLI:output_type -> nebula.executor.v1.ApproveCLIResponse
+	46,  // 132: nebula.executor.v1.ExecutorService.TrustArtifact:output_type -> nebula.executor.v1.TrustArtifactResponse
+	48,  // 133: nebula.executor.v1.ExecutorService.UntrustArtifact:output_type -> nebula.executor.v1.UntrustArtifactResponse
+	51,  // 134: nebula.executor.v1.ExecutorService.ListTrustedArtifacts:output_type -> nebula.executor.v1.ListTrustedArtifactsResponse
+	53,  // 135: nebula.executor.v1.ExecutorService.SetHostCriticality:output_type -> nebula.executor.v1.SetHostCriticalityResponse
+	56,  // 136: nebula.executor.v1.ExecutorService.ListHostCriticality:output_type -> nebula.executor.v1.ListHostCriticalityResponse
+	58,  // 137: nebula.executor.v1.ExecutorService.CreateRegistrationCode:output_type -> nebula.executor.v1.CreateRegistrationCodeResponse
+	60,  // 138: nebula.executor.v1.ExecutorService.BeginRegistration:output_type -> nebula.executor.v1.BeginRegistrationResponse
+	62,  // 139: nebula.executor.v1.ExecutorService.FinishRegistration:output_type -> nebula.executor.v1.FinishRegistrationResponse
+	65,  // 140: nebula.executor.v1.ExecutorService.ListWebAuthnCredentials:output_type -> nebula.executor.v1.ListWebAuthnCredentialsResponse
+	67,  // 141: nebula.executor.v1.ExecutorService.RemoveWebAuthnCredential:output_type -> nebula.executor.v1.RemoveWebAuthnCredentialResponse
+	91,  // 142: nebula.executor.v1.ExecutorService.BeginLogin:output_type -> nebula.executor.v1.BeginLoginResponse
+	93,  // 143: nebula.executor.v1.ExecutorService.FinishLogin:output_type -> nebula.executor.v1.FinishLoginResponse
+	95,  // 144: nebula.executor.v1.ExecutorService.CheckCredential:output_type -> nebula.executor.v1.CheckCredentialResponse
+	97,  // 145: nebula.executor.v1.ExecutorService.BeginTOTPSetup:output_type -> nebula.executor.v1.BeginTOTPSetupResponse
+	99,  // 146: nebula.executor.v1.ExecutorService.ConfirmTOTPSetup:output_type -> nebula.executor.v1.ConfirmTOTPSetupResponse
+	101, // 147: nebula.executor.v1.ExecutorService.RemoveTOTP:output_type -> nebula.executor.v1.RemoveTOTPResponse
+	103, // 148: nebula.executor.v1.ExecutorService.GetTOTPStatus:output_type -> nebula.executor.v1.GetTOTPStatusResponse
+	105, // 149: nebula.executor.v1.ExecutorService.RecoveryLogin:output_type -> nebula.executor.v1.RecoveryLoginResponse
+	107, // 150: nebula.executor.v1.ExecutorService.FinishRecovery:output_type -> nebula.executor.v1.FinishRecoveryResponse
+	69,  // 151: nebula.executor.v1.ExecutorService.ProbeHostKey:output_type -> nebula.executor.v1.ProbeHostKeyResponse
+	72,  // 152: nebula.executor.v1.ExecutorService.PinHostKey:output_type -> nebula.executor.v1.PinHostKeyResponse
+	74,  // 153: nebula.executor.v1.ExecutorService.UnpinHostKey:output_type -> nebula.executor.v1.UnpinHostKeyResponse
+	76,  // 154: nebula.executor.v1.ExecutorService.ListHostKeys:output_type -> nebula.executor.v1.ListHostKeysResponse
+	78,  // 155: nebula.executor.v1.ExecutorService.ProposeRepin:output_type -> nebula.executor.v1.ProposeRepinResponse
+	80,  // 156: nebula.executor.v1.ExecutorService.CommitRepin:output_type -> nebula.executor.v1.CommitRepinResponse
+	83,  // 157: nebula.executor.v1.ExecutorService.ProposeEnroll:output_type -> nebula.executor.v1.ProposeEnrollResponse
+	86,  // 158: nebula.executor.v1.ExecutorService.CommitEnroll:output_type -> nebula.executor.v1.CommitEnrollResponse
+	109, // 159: nebula.executor.v1.ExecutorService.GetSSHPublicKey:output_type -> nebula.executor.v1.GetSSHPublicKeyResponse
+	89,  // 160: nebula.executor.v1.ExecutorService.TestConnection:output_type -> nebula.executor.v1.TestConnectionResponse
+	111, // 161: nebula.executor.v1.ExecutorService.InitVault:output_type -> nebula.executor.v1.InitVaultResponse
+	113, // 162: nebula.executor.v1.ExecutorService.SetSecret:output_type -> nebula.executor.v1.SetSecretResponse
+	116, // 163: nebula.executor.v1.ExecutorService.ListSecrets:output_type -> nebula.executor.v1.ListSecretsResponse
+	118, // 164: nebula.executor.v1.ExecutorService.DeleteSecret:output_type -> nebula.executor.v1.DeleteSecretResponse
+	33,  // 165: nebula.executor.v1.ExecutorService.BeginGate:output_type -> nebula.executor.v1.BeginGateResponse
+	35,  // 166: nebula.executor.v1.ExecutorService.CommitGate:output_type -> nebula.executor.v1.CommitGateResponse
+	37,  // 167: nebula.executor.v1.ExecutorService.AbortRollout:output_type -> nebula.executor.v1.AbortRolloutResponse
+	39,  // 168: nebula.executor.v1.ExecutorService.GetRollout:output_type -> nebula.executor.v1.GetRolloutResponse
+	41,  // 169: nebula.executor.v1.ExecutorService.ApproveGateCLI:output_type -> nebula.executor.v1.ApproveGateCLIResponse
+	127, // 170: nebula.executor.v1.ExecutorService.ProposeScheduleGrant:output_type -> nebula.executor.v1.ProposeScheduleGrantResponse
+	130, // 171: nebula.executor.v1.ExecutorService.CommitScheduleGrant:output_type -> nebula.executor.v1.CommitScheduleGrantResponse
+	133, // 172: nebula.executor.v1.ExecutorService.ListPendingScheduleGrants:output_type -> nebula.executor.v1.ListPendingScheduleGrantsResponse
+	135, // 173: nebula.executor.v1.ExecutorService.ApproveScheduleGrantCLI:output_type -> nebula.executor.v1.ApproveScheduleGrantCLIResponse
+	137, // 174: nebula.executor.v1.ExecutorService.ListScheduleGrants:output_type -> nebula.executor.v1.ListScheduleGrantsResponse
+	139, // 175: nebula.executor.v1.ExecutorService.RevokeScheduleGrant:output_type -> nebula.executor.v1.RevokeScheduleGrantResponse
+	141, // 176: nebula.executor.v1.ExecutorService.RunScheduled:output_type -> nebula.executor.v1.RunScheduledResponse
+	119, // [119:177] is the sub-list for method output_type
+	61,  // [61:119] is the sub-list for method input_type
+	61,  // [61:61] is the sub-list for extension type_name
+	61,  // [61:61] is the sub-list for extension extendee
+	0,   // [0:61] is the sub-list for field type_name
 }
 
 func init() { file_nebula_executor_v1_executor_proto_init() }
@@ -8025,7 +8948,7 @@ func file_nebula_executor_v1_executor_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_nebula_executor_v1_executor_proto_rawDesc), len(file_nebula_executor_v1_executor_proto_rawDesc)),
 			NumEnums:      7,
-			NumMessages:   119,
+			NumMessages:   135,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -72,6 +72,13 @@ const (
 	ExecutorService_AbortRollout_FullMethodName              = "/nebula.executor.v1.ExecutorService/AbortRollout"
 	ExecutorService_GetRollout_FullMethodName                = "/nebula.executor.v1.ExecutorService/GetRollout"
 	ExecutorService_ApproveGateCLI_FullMethodName            = "/nebula.executor.v1.ExecutorService/ApproveGateCLI"
+	ExecutorService_ProposeScheduleGrant_FullMethodName      = "/nebula.executor.v1.ExecutorService/ProposeScheduleGrant"
+	ExecutorService_CommitScheduleGrant_FullMethodName       = "/nebula.executor.v1.ExecutorService/CommitScheduleGrant"
+	ExecutorService_ListPendingScheduleGrants_FullMethodName = "/nebula.executor.v1.ExecutorService/ListPendingScheduleGrants"
+	ExecutorService_ApproveScheduleGrantCLI_FullMethodName   = "/nebula.executor.v1.ExecutorService/ApproveScheduleGrantCLI"
+	ExecutorService_ListScheduleGrants_FullMethodName        = "/nebula.executor.v1.ExecutorService/ListScheduleGrants"
+	ExecutorService_RevokeScheduleGrant_FullMethodName       = "/nebula.executor.v1.ExecutorService/RevokeScheduleGrant"
+	ExecutorService_RunScheduled_FullMethodName              = "/nebula.executor.v1.ExecutorService/RunScheduled"
 )
 
 // ExecutorServiceClient is the client API for ExecutorService service.
@@ -262,6 +269,29 @@ type ExecutorServiceClient interface {
 	GetRollout(ctx context.Context, in *GetRolloutRequest, opts ...grpc.CallOption) (*GetRolloutResponse, error)
 	// Role: admin. Hardened gate path (`nebula approve --stage`, `--skip`).
 	ApproveGateCLI(ctx context.Context, in *ApproveGateCLIRequest, opts ...grpc.CallOption) (*ApproveGateCLIResponse, error)
+	// Schedule grants (docs/implementation/schedule-grants.md): standing
+	// permission, approved with the security key, to run fixed actions that
+	// the executor rates LOW on fixed hosts at most once per interval, until
+	// the grant expires or is revoked.
+	//
+	// Role: server. Checks a grant document (privileged session required)
+	// and returns the challenge to approve it.
+	ProposeScheduleGrant(ctx context.Context, in *ProposeScheduleGrantRequest, opts ...grpc.CallOption) (*ProposeScheduleGrantResponse, error)
+	// Role: server. Approves a proposed grant with a user-verified assertion.
+	CommitScheduleGrant(ctx context.Context, in *CommitScheduleGrantRequest, opts ...grpc.CallOption) (*CommitScheduleGrantResponse, error)
+	// Role: admin. Lists proposed grants (`nebula schedule pending`).
+	ListPendingScheduleGrants(ctx context.Context, in *ListPendingScheduleGrantsRequest, opts ...grpc.CallOption) (*ListPendingScheduleGrantsResponse, error)
+	// Role: admin. Hardened approval path (`nebula schedule approve`).
+	ApproveScheduleGrantCLI(ctx context.Context, in *ApproveScheduleGrantCLIRequest, opts ...grpc.CallOption) (*ApproveScheduleGrantCLIResponse, error)
+	// Role: server, admin.
+	ListScheduleGrants(ctx context.Context, in *ListScheduleGrantsRequest, opts ...grpc.CallOption) (*ListScheduleGrantsResponse, error)
+	// Role: server, admin. Needs no approval.
+	RevokeScheduleGrant(ctx context.Context, in *RevokeScheduleGrantRequest, opts ...grpc.CallOption) (*RevokeScheduleGrantResponse, error)
+	// Role: server. Runs one host run under a grant, attached, like
+	// RunAttached: the grant must cover action, artifact, parameters and the
+	// pinned host, the action must still be LOW there, and the interval must
+	// have passed.
+	RunScheduled(ctx context.Context, in *RunScheduledRequest, opts ...grpc.CallOption) (*RunScheduledResponse, error)
 }
 
 type executorServiceClient struct {
@@ -782,6 +812,76 @@ func (c *executorServiceClient) ApproveGateCLI(ctx context.Context, in *ApproveG
 	return out, nil
 }
 
+func (c *executorServiceClient) ProposeScheduleGrant(ctx context.Context, in *ProposeScheduleGrantRequest, opts ...grpc.CallOption) (*ProposeScheduleGrantResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProposeScheduleGrantResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ProposeScheduleGrant_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) CommitScheduleGrant(ctx context.Context, in *CommitScheduleGrantRequest, opts ...grpc.CallOption) (*CommitScheduleGrantResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitScheduleGrantResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_CommitScheduleGrant_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ListPendingScheduleGrants(ctx context.Context, in *ListPendingScheduleGrantsRequest, opts ...grpc.CallOption) (*ListPendingScheduleGrantsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListPendingScheduleGrantsResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ListPendingScheduleGrants_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ApproveScheduleGrantCLI(ctx context.Context, in *ApproveScheduleGrantCLIRequest, opts ...grpc.CallOption) (*ApproveScheduleGrantCLIResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ApproveScheduleGrantCLIResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ApproveScheduleGrantCLI_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ListScheduleGrants(ctx context.Context, in *ListScheduleGrantsRequest, opts ...grpc.CallOption) (*ListScheduleGrantsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListScheduleGrantsResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ListScheduleGrants_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) RevokeScheduleGrant(ctx context.Context, in *RevokeScheduleGrantRequest, opts ...grpc.CallOption) (*RevokeScheduleGrantResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RevokeScheduleGrantResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_RevokeScheduleGrant_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) RunScheduled(ctx context.Context, in *RunScheduledRequest, opts ...grpc.CallOption) (*RunScheduledResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RunScheduledResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_RunScheduled_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExecutorServiceServer is the server API for ExecutorService service.
 // All implementations must embed UnimplementedExecutorServiceServer
 // for forward compatibility.
@@ -970,6 +1070,29 @@ type ExecutorServiceServer interface {
 	GetRollout(context.Context, *GetRolloutRequest) (*GetRolloutResponse, error)
 	// Role: admin. Hardened gate path (`nebula approve --stage`, `--skip`).
 	ApproveGateCLI(context.Context, *ApproveGateCLIRequest) (*ApproveGateCLIResponse, error)
+	// Schedule grants (docs/implementation/schedule-grants.md): standing
+	// permission, approved with the security key, to run fixed actions that
+	// the executor rates LOW on fixed hosts at most once per interval, until
+	// the grant expires or is revoked.
+	//
+	// Role: server. Checks a grant document (privileged session required)
+	// and returns the challenge to approve it.
+	ProposeScheduleGrant(context.Context, *ProposeScheduleGrantRequest) (*ProposeScheduleGrantResponse, error)
+	// Role: server. Approves a proposed grant with a user-verified assertion.
+	CommitScheduleGrant(context.Context, *CommitScheduleGrantRequest) (*CommitScheduleGrantResponse, error)
+	// Role: admin. Lists proposed grants (`nebula schedule pending`).
+	ListPendingScheduleGrants(context.Context, *ListPendingScheduleGrantsRequest) (*ListPendingScheduleGrantsResponse, error)
+	// Role: admin. Hardened approval path (`nebula schedule approve`).
+	ApproveScheduleGrantCLI(context.Context, *ApproveScheduleGrantCLIRequest) (*ApproveScheduleGrantCLIResponse, error)
+	// Role: server, admin.
+	ListScheduleGrants(context.Context, *ListScheduleGrantsRequest) (*ListScheduleGrantsResponse, error)
+	// Role: server, admin. Needs no approval.
+	RevokeScheduleGrant(context.Context, *RevokeScheduleGrantRequest) (*RevokeScheduleGrantResponse, error)
+	// Role: server. Runs one host run under a grant, attached, like
+	// RunAttached: the grant must cover action, artifact, parameters and the
+	// pinned host, the action must still be LOW there, and the interval must
+	// have passed.
+	RunScheduled(context.Context, *RunScheduledRequest) (*RunScheduledResponse, error)
 	mustEmbedUnimplementedExecutorServiceServer()
 }
 
@@ -1132,6 +1255,27 @@ func (UnimplementedExecutorServiceServer) GetRollout(context.Context, *GetRollou
 }
 func (UnimplementedExecutorServiceServer) ApproveGateCLI(context.Context, *ApproveGateCLIRequest) (*ApproveGateCLIResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ApproveGateCLI not implemented")
+}
+func (UnimplementedExecutorServiceServer) ProposeScheduleGrant(context.Context, *ProposeScheduleGrantRequest) (*ProposeScheduleGrantResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ProposeScheduleGrant not implemented")
+}
+func (UnimplementedExecutorServiceServer) CommitScheduleGrant(context.Context, *CommitScheduleGrantRequest) (*CommitScheduleGrantResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CommitScheduleGrant not implemented")
+}
+func (UnimplementedExecutorServiceServer) ListPendingScheduleGrants(context.Context, *ListPendingScheduleGrantsRequest) (*ListPendingScheduleGrantsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListPendingScheduleGrants not implemented")
+}
+func (UnimplementedExecutorServiceServer) ApproveScheduleGrantCLI(context.Context, *ApproveScheduleGrantCLIRequest) (*ApproveScheduleGrantCLIResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ApproveScheduleGrantCLI not implemented")
+}
+func (UnimplementedExecutorServiceServer) ListScheduleGrants(context.Context, *ListScheduleGrantsRequest) (*ListScheduleGrantsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListScheduleGrants not implemented")
+}
+func (UnimplementedExecutorServiceServer) RevokeScheduleGrant(context.Context, *RevokeScheduleGrantRequest) (*RevokeScheduleGrantResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RevokeScheduleGrant not implemented")
+}
+func (UnimplementedExecutorServiceServer) RunScheduled(context.Context, *RunScheduledRequest) (*RunScheduledResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RunScheduled not implemented")
 }
 func (UnimplementedExecutorServiceServer) mustEmbedUnimplementedExecutorServiceServer() {}
 func (UnimplementedExecutorServiceServer) testEmbeddedByValue()                         {}
@@ -2072,6 +2216,132 @@ func _ExecutorService_ApproveGateCLI_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_ProposeScheduleGrant_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProposeScheduleGrantRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ProposeScheduleGrant(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ProposeScheduleGrant_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ProposeScheduleGrant(ctx, req.(*ProposeScheduleGrantRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_CommitScheduleGrant_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommitScheduleGrantRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).CommitScheduleGrant(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_CommitScheduleGrant_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).CommitScheduleGrant(ctx, req.(*CommitScheduleGrantRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ListPendingScheduleGrants_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListPendingScheduleGrantsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ListPendingScheduleGrants(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ListPendingScheduleGrants_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ListPendingScheduleGrants(ctx, req.(*ListPendingScheduleGrantsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ApproveScheduleGrantCLI_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ApproveScheduleGrantCLIRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ApproveScheduleGrantCLI(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ApproveScheduleGrantCLI_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ApproveScheduleGrantCLI(ctx, req.(*ApproveScheduleGrantCLIRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ListScheduleGrants_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListScheduleGrantsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ListScheduleGrants(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ListScheduleGrants_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ListScheduleGrants(ctx, req.(*ListScheduleGrantsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_RevokeScheduleGrant_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RevokeScheduleGrantRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).RevokeScheduleGrant(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_RevokeScheduleGrant_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).RevokeScheduleGrant(ctx, req.(*RevokeScheduleGrantRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_RunScheduled_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RunScheduledRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).RunScheduled(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_RunScheduled_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).RunScheduled(ctx, req.(*RunScheduledRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ExecutorService_ServiceDesc is the grpc.ServiceDesc for ExecutorService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2282,6 +2552,34 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ApproveGateCLI",
 			Handler:    _ExecutorService_ApproveGateCLI_Handler,
+		},
+		{
+			MethodName: "ProposeScheduleGrant",
+			Handler:    _ExecutorService_ProposeScheduleGrant_Handler,
+		},
+		{
+			MethodName: "CommitScheduleGrant",
+			Handler:    _ExecutorService_CommitScheduleGrant_Handler,
+		},
+		{
+			MethodName: "ListPendingScheduleGrants",
+			Handler:    _ExecutorService_ListPendingScheduleGrants_Handler,
+		},
+		{
+			MethodName: "ApproveScheduleGrantCLI",
+			Handler:    _ExecutorService_ApproveScheduleGrantCLI_Handler,
+		},
+		{
+			MethodName: "ListScheduleGrants",
+			Handler:    _ExecutorService_ListScheduleGrants_Handler,
+		},
+		{
+			MethodName: "RevokeScheduleGrant",
+			Handler:    _ExecutorService_RevokeScheduleGrant_Handler,
+		},
+		{
+			MethodName: "RunScheduled",
+			Handler:    _ExecutorService_RunScheduled_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

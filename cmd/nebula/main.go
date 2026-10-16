@@ -47,6 +47,8 @@ commands:
   approve <digest>    approve a pending permit (hardened path); a unique prefix is enough
   approve --stage N DIGEST | approve --skip HOST DIGEST
                       open the next stage of a rollout, or skip a host (hardened path)
+  schedule pending | approve <digest> | list | revoke <grant-id>
+                      schedule grants: standing permission for LOW read-only checks
   artifact trust --action ID --version X.Y.Z --risk LEVEL [--label TEXT] FILE
                       trust a script for one action; LEVEL becomes its minimum risk
   artifact untrust --action ID --version X.Y.Z SHA256
@@ -146,6 +148,8 @@ func run(cmd string, args []string) error {
 			return errors.New("usage: nebula approve <digest-prefix>")
 		}
 		return approve(ctx, c, args[0])
+	case "schedule":
+		return scheduleCmd(ctx, c, args, os.Stdin, os.Stdout)
 	case "artifact":
 		return artifactCmd(ctx, c, args)
 	case "host":

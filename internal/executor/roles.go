@@ -65,5 +65,12 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_AbortRollout_FullMethodName:              {server},
 		pb.ExecutorService_GetRollout_FullMethodName:                {server, admin},
 		pb.ExecutorService_ApproveGateCLI_FullMethodName:            {admin},
+		pb.ExecutorService_ProposeScheduleGrant_FullMethodName:      {server},
+		pb.ExecutorService_CommitScheduleGrant_FullMethodName:       {server},
+		pb.ExecutorService_ListPendingScheduleGrants_FullMethodName: {admin},
+		pb.ExecutorService_ApproveScheduleGrantCLI_FullMethodName:   {admin},
+		pb.ExecutorService_ListScheduleGrants_FullMethodName:        {server, admin},
+		pb.ExecutorService_RevokeScheduleGrant_FullMethodName:       {server, admin},
+		pb.ExecutorService_RunScheduled_FullMethodName:              {server},
 	}
 }

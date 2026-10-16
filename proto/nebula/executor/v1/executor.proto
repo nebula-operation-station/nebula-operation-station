@@ -263,6 +263,36 @@ service ExecutorService {
 
   // Role: admin. Hardened gate path (`nebula approve --stage`, `--skip`).
   rpc ApproveGateCLI(ApproveGateCLIRequest) returns (ApproveGateCLIResponse);
+
+  // Schedule grants (docs/implementation/schedule-grants.md): standing
+  // permission, approved with the security key, to run fixed actions that
+  // the executor rates LOW on fixed hosts at most once per interval, until
+  // the grant expires or is revoked.
+  //
+  // Role: server. Checks a grant document (privileged session required)
+  // and returns the challenge to approve it.
+  rpc ProposeScheduleGrant(ProposeScheduleGrantRequest) returns (ProposeScheduleGrantResponse);
+
+  // Role: server. Approves a proposed grant with a user-verified assertion.
+  rpc CommitScheduleGrant(CommitScheduleGrantRequest) returns (CommitScheduleGrantResponse);
+
+  // Role: admin. Lists proposed grants (`nebula schedule pending`).
+  rpc ListPendingScheduleGrants(ListPendingScheduleGrantsRequest) returns (ListPendingScheduleGrantsResponse);
+
+  // Role: admin. Hardened approval path (`nebula schedule approve`).
+  rpc ApproveScheduleGrantCLI(ApproveScheduleGrantCLIRequest) returns (ApproveScheduleGrantCLIResponse);
+
+  // Role: server, admin.
+  rpc ListScheduleGrants(ListScheduleGrantsRequest) returns (ListScheduleGrantsResponse);
+
+  // Role: server, admin. Needs no approval.
+  rpc RevokeScheduleGrant(RevokeScheduleGrantRequest) returns (RevokeScheduleGrantResponse);
+
+  // Role: server. Runs one host run under a grant, attached, like
+  // RunAttached: the grant must cover action, artifact, parameters and the
+  // pinned host, the action must still be LOW there, and the interval must
+  // have passed.
+  rpc RunScheduled(RunScheduledRequest) returns (RunScheduledResponse);
 }
 
 enum RiskClass {
@@ -1084,4 +1114,85 @@ message RunStatus {
   int64 dispatched_at_unix = 11;
   int64 finished_at_unix = 12;
   bool released = 13;
+}
+
+message ProposeScheduleGrantRequest {
+  // The grant document (read-schedule-v1).
+  bytes grant_json = 1;
+}
+
+message ProposeScheduleGrantResponse {
+  string grant_digest = 1;
+  bytes canonical_grant = 2;
+  ApprovalRequirement approval_requirement = 3;
+  bytes challenge = 4;
+  int64 challenge_expiry_unix = 5;
+  bytes request_options_json = 6;
+}
+
+message CommitScheduleGrantRequest {
+  string grant_digest = 1;
+  bytes assertion_json = 2;
+}
+
+message ScheduleGrant {
+  string grant_id = 1;
+  string grant_digest = 2;
+  // The canonical grant document as approved.
+  bytes canonical_grant = 3;
+  string approved_by = 4;
+  int64 created_unix = 5;
+  int64 expiry_unix = 6;
+  // 0 while active.
+  int64 revoked_unix = 7;
+}
+
+message CommitScheduleGrantResponse {
+  ScheduleGrant grant = 1;
+}
+
+message ListPendingScheduleGrantsRequest {}
+
+message PendingScheduleGrant {
+  string grant_digest = 1;
+  bytes canonical_grant = 2;
+  int64 approval_expiry_unix = 3;
+}
+
+message ListPendingScheduleGrantsResponse {
+  repeated PendingScheduleGrant grants = 1;
+}
+
+message ApproveScheduleGrantCLIRequest {
+  string grant_digest = 1;
+}
+
+message ApproveScheduleGrantCLIResponse {
+  ScheduleGrant grant = 1;
+}
+
+message ListScheduleGrantsRequest {}
+
+message ListScheduleGrantsResponse {
+  repeated ScheduleGrant grants = 1;
+}
+
+message RevokeScheduleGrantRequest {
+  string grant_id = 1;
+}
+
+message RevokeScheduleGrantResponse {}
+
+message RunScheduledRequest {
+  string grant_id = 1;
+  // The run; execution_digest stays empty, the executor names the run.
+  AuthorizeRunRequest run = 2;
+  repeated string endpoints = 3;
+  uint32 timeout_seconds = 4;
+}
+
+message RunScheduledResponse {
+  // The execution ID the executor gave the run.
+  string execution_id = 1;
+  RunAttachedResponse result = 2;
 }

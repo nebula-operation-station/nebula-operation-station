@@ -540,6 +540,67 @@ func (c *Client) ApproveGateCLI(ctx context.Context, in *pb.ApproveGateCLIReques
 	return resp, mapError(err)
 }
 
+// ProposeScheduleGrant: Checks a schedule grant document (server role).
+func (c *Client) ProposeScheduleGrant(ctx context.Context, in *pb.ProposeScheduleGrantRequest, opts ...grpc.CallOption) (*pb.ProposeScheduleGrantResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ProposeScheduleGrant(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// CommitScheduleGrant: Approves a schedule grant (server role).
+func (c *Client) CommitScheduleGrant(ctx context.Context, in *pb.CommitScheduleGrantRequest, opts ...grpc.CallOption) (*pb.CommitScheduleGrantResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.CommitScheduleGrant(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// ListPendingScheduleGrants: Proposed schedule grants (admin role).
+func (c *Client) ListPendingScheduleGrants(ctx context.Context, in *pb.ListPendingScheduleGrantsRequest, opts ...grpc.CallOption) (*pb.ListPendingScheduleGrantsResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ListPendingScheduleGrants(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// ApproveScheduleGrantCLI: Hardened grant approval (admin role).
+func (c *Client) ApproveScheduleGrantCLI(ctx context.Context, in *pb.ApproveScheduleGrantCLIRequest, opts ...grpc.CallOption) (*pb.ApproveScheduleGrantCLIResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ApproveScheduleGrantCLI(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// ListScheduleGrants: Stored schedule grants (server and admin roles).
+func (c *Client) ListScheduleGrants(ctx context.Context, in *pb.ListScheduleGrantsRequest, opts ...grpc.CallOption) (*pb.ListScheduleGrantsResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ListScheduleGrants(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// RevokeScheduleGrant: Revokes a schedule grant (server and admin roles).
+func (c *Client) RevokeScheduleGrant(ctx context.Context, in *pb.RevokeScheduleGrantRequest, opts ...grpc.CallOption) (*pb.RevokeScheduleGrantResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.RevokeScheduleGrant(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// RunScheduled: Runs one host run under a schedule grant (server role).
+// It runs on the host, so it gets the run timeout like RunAttached.
+func (c *Client) RunScheduled(ctx context.Context, in *pb.RunScheduledRequest, opts ...grpc.CallOption) (*pb.RunScheduledResponse, error) {
+	t := time.Duration(in.GetTimeoutSeconds()) * time.Second
+	if t <= 0 || t > 10*time.Minute {
+		t = 10 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout+t)
+	defer cancel()
+	resp, err := c.rpc.RunScheduled(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
 // Compile-time check: the client must implement the generated interface so
 // that a generated-code change breaks the build here.
 var _ pb.ExecutorServiceClient = (*Client)(nil)

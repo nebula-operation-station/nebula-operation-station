@@ -162,7 +162,7 @@ func main() {
 	must(err)
 	rp, err := riskpolicy.New(db)
 	must(err)
-	a, err := permit.New(permit.Options{Verifier: v, Store: db, RiskPolicy: rp})
+	a, err := permit.New(permit.Options{Verifier: v, Store: db, RiskPolicy: rp, Schedules: db})
 	must(err)
 	reg, err := webauthnreg.New(webauthnreg.Config{RPID: "localhost", Origins: []string{origin}, Audit: executor.RegistrationAuditLogger(log)}, v, db)
 	must(err)

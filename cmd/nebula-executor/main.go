@@ -141,6 +141,7 @@ func run() error {
 		Verifier:      verifier,
 		Store:         db,
 		RiskPolicy:    risk,
+		Schedules:     db,
 		SessionLength: time.Duration(*sessionMin) * time.Minute,
 		Audit:         executor.AuditLogger(log),
 	})
