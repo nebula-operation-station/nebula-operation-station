@@ -48,6 +48,11 @@ type Executor interface {
 	CommitGate(ctx context.Context, in *pb.CommitGateRequest, opts ...grpc.CallOption) (*pb.CommitGateResponse, error)
 	AbortRollout(ctx context.Context, in *pb.AbortRolloutRequest, opts ...grpc.CallOption) (*pb.AbortRolloutResponse, error)
 	GetRollout(ctx context.Context, in *pb.GetRolloutRequest, opts ...grpc.CallOption) (*pb.GetRolloutResponse, error)
+	ProposeScheduleGrant(ctx context.Context, in *pb.ProposeScheduleGrantRequest, opts ...grpc.CallOption) (*pb.ProposeScheduleGrantResponse, error)
+	CommitScheduleGrant(ctx context.Context, in *pb.CommitScheduleGrantRequest, opts ...grpc.CallOption) (*pb.CommitScheduleGrantResponse, error)
+	RevokeScheduleGrant(ctx context.Context, in *pb.RevokeScheduleGrantRequest, opts ...grpc.CallOption) (*pb.RevokeScheduleGrantResponse, error)
+	RunScheduled(ctx context.Context, in *pb.RunScheduledRequest, opts ...grpc.CallOption) (*pb.RunScheduledResponse, error)
+	ListScheduleGrants(ctx context.Context, in *pb.ListScheduleGrantsRequest, opts ...grpc.CallOption) (*pb.ListScheduleGrantsResponse, error)
 }
 
 // Hosts gives the inventory hosts (inventory.Store).

@@ -53,3 +53,8 @@ What a compromised server can do with a grant: run the approved LOW,
 read-only actions on the approved hosts, at most once per interval. It
 cannot add actions, hosts, parameters or frequency, and cannot extend the
 expiry.
+
+## Server
+
+The server's scheduler and the `/schedules` page are decision 62 in
+`m0.md`.

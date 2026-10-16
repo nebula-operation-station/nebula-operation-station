@@ -114,6 +114,20 @@ function check(cond, what) {
   }
   check(finished && (await page.locator('td:text-is("success")').count()) === 2, 'stage 2 ran after the gate was opened with the key');
 
+  // Scheduled checks: only actions the executor rates LOW can be
+  // scheduled; a schedule is approved once with the security key.
+  await page.goto(base + '/schedules');
+  await page.check('input[name="action"][value="core.facts"]');
+  await page.check('input[name="host"][value="e2e-host"]');
+  await page.click('#schedule-create');
+  await page.waitForFunction(() => /refused|LOW/.test(document.getElementById('message').textContent), null, { timeout: 15000 });
+  check(/not LOW/.test(await page.textContent('#message')), 'an action the executor does not trust as LOW cannot be scheduled');
+  await page.uncheck('input[name="action"][value="core.facts"]');
+  await page.check('input[name="action"][value="service.list"]');
+  await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('#schedule-create')]);
+  const schedRow = await page.textContent('section[aria-label="Scheduled checks"] tbody');
+  check(/service\.list/.test(schedRow) && /active/.test(schedRow) && /e2e-host/.test(schedRow), 'a schedule of a trusted LOW action is approved with the key');
+
   // Check updates on the same host (a real apt simulation on the test machine).
   await page.goto(base + '/operations/new');
   await page.check('input[name="action"][value="package.list_updates"]');

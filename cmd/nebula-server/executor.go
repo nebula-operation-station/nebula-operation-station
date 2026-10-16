@@ -229,3 +229,38 @@ func (l *lazyExecutor) GetRollout(ctx context.Context, in *pb.GetRolloutRequest,
 	}
 	return nil, errNotConnected
 }
+
+func (l *lazyExecutor) ProposeScheduleGrant(ctx context.Context, in *pb.ProposeScheduleGrantRequest, opts ...grpc.CallOption) (*pb.ProposeScheduleGrantResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ProposeScheduleGrant(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) CommitScheduleGrant(ctx context.Context, in *pb.CommitScheduleGrantRequest, opts ...grpc.CallOption) (*pb.CommitScheduleGrantResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.CommitScheduleGrant(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) RevokeScheduleGrant(ctx context.Context, in *pb.RevokeScheduleGrantRequest, opts ...grpc.CallOption) (*pb.RevokeScheduleGrantResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.RevokeScheduleGrant(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) RunScheduled(ctx context.Context, in *pb.RunScheduledRequest, opts ...grpc.CallOption) (*pb.RunScheduledResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.RunScheduled(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) ListScheduleGrants(ctx context.Context, in *pb.ListScheduleGrantsRequest, opts ...grpc.CallOption) (*pb.ListScheduleGrantsResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ListScheduleGrants(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}

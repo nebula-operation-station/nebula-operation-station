@@ -10,8 +10,8 @@ jobs with pre- and postchecks), reboots that wait for the host, service
 status and restart, Ops State per host, notifications (webhook, ntfy,
 Telegram), Docker (list, logs, details, start/stop/restart, image update
 check, Compose update), rollouts in stages (canary, waves, DEV → QA →
-PROD). Not in 0.1: runbooks and modules, IPAM, scheduled checks, packages
-(APT/containers).
+PROD), scheduled read-only checks. Not in 0.1: runbooks and modules, IPAM,
+packages (APT/containers).
 
 ## 1. Before you start
 
@@ -248,6 +248,20 @@ failed command or a container that was healthy and is not anymore is
 FAILED; a container that is not healthy, changed published ports or a
 different number of containers is a WARNING. Run Check image updates
 first to see what will change.
+
+**Scheduled checks.** *Operations → Scheduled checks* lets Nebula run
+read-only checks on its own, for example a daily update check on all
+hosts. You choose actions, hosts, an interval (hour, 6 hours, day, week)
+and a duration (at most 90 days), and approve the schedule once with your
+security key (hardened mode: `nebula schedule approve <digest>` on the
+executor host). The executor accepts only actions it rates LOW on every
+chosen host: the built-in script trusted as LOW (section 6) and the host
+recorded with a criticality (`nebula host pin --criticality`). It runs
+each action on each host at most once per interval and checks the trust
+again on every run; *Revoke* (or `nebula schedule revoke <id>`) stops a
+schedule at once. Results appear as operations created by "schedule" and
+update the inventory like any run. A schedule survives restarts of the
+executor, but nothing runs while it is locked.
 
 ## 8. Notifications
 

@@ -205,6 +205,8 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	if err := ops.Resume(connCtx); err != nil {
 		log.Error("resume executions", "error", err)
 	}
+	// Scheduled read-only checks run under executor-held schedule grants.
+	go ops.RunSchedules(connCtx)
 
 	h, err := ui.New(ui.Options{
 		PublicOrigin: cfg.PublicOrigin,
@@ -214,6 +216,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		HostKeys:     hostKeys,
 		Inventory:    store,
 		Operations:   ops,
+		Schedules:    ops,
 		Repin:        exec,
 		Enroll:       exec,
 		Log:          log,

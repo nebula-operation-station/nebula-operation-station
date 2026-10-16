@@ -1,0 +1,70 @@
+{{define "content"}}
+<h1>Scheduled checks</h1>
+<section class="panel" aria-label="Scheduled checks">
+  <p class="hint">A schedule lets Nebula run read-only checks on its own, for example a daily update check. You approve it once with
+     your security key. The executor accepts only actions it rates LOW: the built-in script must be trusted as LOW on the executor host
+     (<code>nebula-server -export-actions</code> and <code>nebula artifact trust</code>, see the guide) and the host recorded with a
+     criticality. It runs each action on each host at most once per interval, until the schedule expires or you revoke it.</p>
+  {{with .Schedules}}
+  {{if .Rows}}
+  <table class="inventory">
+    <thead><tr><th>Schedule</th><th>Actions</th><th>Hosts</th><th>Every</th><th>Until</th><th>State</th><th>By</th><th></th></tr></thead>
+    <tbody>
+      {{range .Rows}}
+      <tr>
+        <td>{{.Short}}</td>
+        <td>{{.Actions}}</td>
+        <td>{{.Hosts}}</td>
+        <td>{{.Interval}}</td>
+        <td>{{.Expires}}</td>
+        <td>{{.State}}</td>
+        <td>{{.CreatedBy}}</td>
+        <td>
+          {{if and .Pending .Options}}<button type="button" class="button button--small schedule-approve" data-id="{{.ID}}" data-options="{{.Options}}">Approve with security key</button>{{end}}
+          {{if or .Pending .Active}}<button type="button" class="button button--small button--danger schedule-revoke" data-id="{{.ID}}">Revoke</button>{{end}}
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p>No schedules yet.</p>
+  {{end}}
+  {{end}}
+</section>
+{{with .Schedules}}
+<section class="panel" aria-label="New schedule">
+  <h2>New schedule</h2>
+  <form id="schedule-form" class="form" novalidate>
+    <fieldset>
+      <legend>Actions (read-only, without parameters)</legend>
+      {{range .Actions}}
+      <label class="choice"><input type="checkbox" name="action" value="{{.ID}}"> <strong>{{.Title}}</strong> ({{.ID}})
+        <span class="hint">{{.Description}}</span></label>
+      {{end}}
+    </fieldset>
+    <fieldset>
+      <legend>Hosts</legend>
+      {{range .Hosts}}
+      <label class="choice"><input type="checkbox" name="host" value="{{.ID}}"> {{.Name}} <span class="hint">({{.ID}})</span></label>
+      {{else}}
+      <p>No enrolled hosts.</p>
+      {{end}}
+    </fieldset>
+    <label>Every
+      <select id="schedule-interval">
+        <option value="60">hour</option>
+        <option value="360">6 hours</option>
+        <option value="1440" selected>day</option>
+        <option value="10080">week</option>
+      </select></label>
+    <label>For (days, at most 90)
+      <input type="number" id="schedule-days" min="1" max="90" value="30" inputmode="numeric"></label>
+    <div class="actions">
+      <button type="submit" id="schedule-create" class="button">Propose schedule</button>
+    </div>
+  </form>
+</section>
+{{end}}
+<p id="message" class="message" role="status" aria-live="polite"></p>
+{{end}}
