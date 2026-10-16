@@ -96,7 +96,7 @@ func (h *Handler) rolloutFor(ctx context.Context, e executions.Execution, v *exe
 		hv := &v.Hosts[i]
 		o := outcome[hv.ID]
 		inOpen := hv.Stage <= rv.OpenStage
-		hv.CanSkip = rv.CanAbort && inOpen && (o == "" && hv.State == "waiting" || o == "unreachable")
+		hv.CanSkip = rv.CanAbort && inOpen && ((o == "" && hv.State == "waiting") || o == "unreachable")
 		hv.CanRetry = rv.CanAbort && inOpen && !e.Durable && o == "unreachable" && hv.Class == "network_unreachable"
 	}
 }

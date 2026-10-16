@@ -112,13 +112,14 @@ type Service struct {
 
 	mu      sync.Mutex
 	running map[string]bool // executions with a dispatcher in this process
+	again   map[string]bool // started again while their dispatcher ran
 	wg      sync.WaitGroup
 	ctx     context.Context
 }
 
 // New returns a service. ctx bounds the background dispatchers.
 func New(ctx context.Context, exec Executor, db *sql.DB, hosts Hosts, log *slog.Logger) *Service {
-	return &Service{exec: exec, db: db, hosts: hosts, log: log, now: time.Now, running: map[string]bool{}, ctx: ctx}
+	return &Service{exec: exec, db: db, hosts: hosts, log: log, now: time.Now, running: map[string]bool{}, again: map[string]bool{}, ctx: ctx}
 }
 
 // Wait blocks until the background dispatchers have stopped (tests).
@@ -365,9 +366,14 @@ func (s *Service) Resume(ctx context.Context) error {
 	return rows.Err()
 }
 
+// start dispatches an execution unless this process already does. A start
+// while the dispatcher runs (a retried host) is remembered: the dispatcher
+// may already have decided to return on what it read before, so it runs
+// once more and picks the host up.
 func (s *Service) start(id string) {
 	s.mu.Lock()
 	if s.running[id] {
+		s.again[id] = true
 		s.mu.Unlock()
 		return
 	}
@@ -376,12 +382,19 @@ func (s *Service) start(id string) {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		defer func() {
+		for {
+			s.dispatch(id)
 			s.mu.Lock()
-			delete(s.running, id)
+			again := s.again[id] && s.ctx.Err() == nil
+			delete(s.again, id)
+			if !again {
+				delete(s.running, id)
+			}
 			s.mu.Unlock()
-		}()
-		s.dispatch(id)
+			if !again {
+				return
+			}
+		}
 	}()
 }
 

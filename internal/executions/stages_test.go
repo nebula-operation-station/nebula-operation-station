@@ -344,3 +344,61 @@ func TestBuildStagesRefusesUnusablePlans(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Review m63 finding 1: an unreachable host in the last stage leaves every
+// host with an outcome but the stage not passed. The execution keeps
+// running and waits for a retry or a skip instead of finishing.
+func TestUnreachableHostInTheLastStageWaits(t *testing.T) {
+	f := &stagedExec{}
+	s := stagedSetup(t, f)
+	ctx := context.Background()
+	c, err := s.CreateStaged(ctx, "axel", "core.facts", []string{"web", "db"}, nil, Plan{Preset: PresetWaves, Size: 1, Continue: stageplan.ContinueManual})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the gate", func() bool { e, _ := s.Get(ctx, c.ID); return strings.Contains(e.Waiting, "continue to stage 2") })
+	unreachable := func(n int) {
+		f.mu.Lock()
+		f.unreachable = n
+		f.mu.Unlock()
+	}
+	unreachable(1 + len(retryDelays)) // db stays unreachable through the safe retries
+	if _, err := s.BeginGate(ctx, "axel", c.ID, Gate{Kind: "open", Stage: 2}); err != nil {
+		t.Fatal(err)
+	}
+	notPassed := func() bool {
+		e, _ := s.Get(ctx, c.ID)
+		return strings.Contains(e.Waiting, "stage 2 (wave-2) has not passed")
+	}
+	waitFor(t, "the wait for stage 2", notPassed)
+	if e, _ := s.Get(ctx, c.ID); e.State != "running" || hostsOf(t, s, c.ID)["db"].Class != "network_unreachable" {
+		t.Fatalf("%+v", e)
+	}
+
+	// A retry that is unreachable again: still waiting.
+	unreachable(1 + len(retryDelays))
+	if err := s.RetryHost(ctx, "axel", c.ID, "db"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the retry", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.unreachable == 0
+	})
+	waitFor(t, "the wait after the retry", func() bool { return hostsOf(t, s, c.ID)["db"].State == "finished" && notPassed() })
+	if e, _ := s.Get(ctx, c.ID); e.State != "running" {
+		t.Fatalf("%+v", e)
+	}
+
+	// Skipped: it no longer counts as a failure, and the execution ends.
+	if _, err := s.BeginGate(ctx, "axel", c.ID, Gate{Kind: "skip", Host: "db"}); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, s, c.ID, "finished")
+	if h := hostsOf(t, s, c.ID); h["db"].Class != "skipped" || h["web"].Class != "success" {
+		t.Fatalf("%+v", h)
+	}
+	if err := s.RetryHost(ctx, "axel", c.ID, "db"); err == nil {
+		t.Fatal("retry of a finished execution")
+	}
+}

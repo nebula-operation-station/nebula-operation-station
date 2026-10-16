@@ -222,8 +222,19 @@ func (s *Service) dispatchStaged(ctx context.Context, id string, a actions.Actio
 			}
 		}
 		for _, h := range e.Hosts {
-			if h.State == "waiting" && outcome[h.HostID] == "skipped" {
+			if outcome[h.HostID] != "skipped" {
+				continue
+			}
+			switch {
+			case h.State == "waiting":
 				s.finishHost(e.ID, a.ID, h.HostID, classSkipped, "skipped at a gate", -1, nil, nil, false)
+			case h.State == "finished" && h.Class == "network_unreachable":
+				// Unreachable, then skipped: nothing ran, and it no longer
+				// counts as a failure of the rollout.
+				if _, err := s.db.ExecContext(ctx, `UPDATE execution_hosts SET class = ?, detail = 'unreachable; skipped at a gate'
+					WHERE execution_id = ? AND host_id = ? AND state = 'finished' AND class = 'network_unreachable'`, classSkipped, e.ID, h.HostID); err != nil {
+					s.log.Error("execution host skip", "execution", e.ID, "host", h.HostID, "error", err.Error())
+				}
 			}
 		}
 		if ro.GetAborted() || ro.GetStopped() != "" {
@@ -246,6 +257,18 @@ func (s *Service) dispatchStaged(ctx context.Context, id string, a actions.Actio
 			}
 		}
 		if !pending {
+			// Every host has an outcome, but the open stage may still not
+			// have passed (an unreachable host over the threshold): the
+			// rollout waits for a retry, a skip or an abort, or until its
+			// permit ends (review m63 finding 1).
+			if open := int(ro.GetOpenStage()); open >= 1 && open <= len(ro.GetStages()) && !ro.GetStages()[open-1].GetPassed() {
+				s.setWaiting(ctx, e, waitNote(ro))
+				if !sleepCtx(ctx, pollInterval) {
+					return
+				}
+				continue
+			}
+			s.setWaiting(ctx, e, "")
 			return
 		}
 		if len(runnable) > 0 {
@@ -427,8 +450,12 @@ func (s *Service) RetryHost(ctx context.Context, user, id, host string) error {
 	if e.Durable {
 		return ErrNoRetry
 	}
+	// One statement against finishExecution's: either the retry lands while
+	// the execution still runs, or the execution finished first and the
+	// retry is refused.
 	res, err := s.db.ExecContext(ctx, `UPDATE execution_hosts SET state = 'waiting', class = '', detail = 'retry', finished_at = NULL
-		WHERE execution_id = ? AND host_id = ? AND state = 'finished' AND class = 'network_unreachable'`, id, host)
+		WHERE execution_id = ? AND host_id = ? AND state = 'finished' AND class = 'network_unreachable'
+		AND EXISTS (SELECT 1 FROM executions WHERE id = ? AND state = 'running')`, id, host, id)
 	if err != nil {
 		return err
 	}
