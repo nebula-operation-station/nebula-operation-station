@@ -21,6 +21,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/dockerhost"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/osdebian"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/scanner"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
 )
 
@@ -83,6 +84,8 @@ type actionView struct {
 	ID, Title, Description, Risk string
 	ReadOnly                     bool
 	Params                       []paramView
+	// Scanner lists the Safety Scanner's categories for the script.
+	Scanner []string
 }
 
 type paramView struct {
@@ -100,7 +103,10 @@ type execView struct {
 	// pending (rendered into a data attribute, escaped by html/template).
 	Options                        string
 	Pending, Live, NeedsTypedCount bool
-	Hosts                          []execHostView
+	// Scanner holds the Safety Scanner's findings for the action's script
+	// (advisory; the executor applies the same list to the risk).
+	Scanner []scanner.Finding
+	Hosts   []execHostView
 	// Rollout is the stage view of a staged operation.
 	Rollout *rolloutView
 }
@@ -181,6 +187,8 @@ func (h *Handler) handleOperationNew(w http.ResponseWriter, r *http.Request) {
 	for _, a := range actions.Builtin {
 		v := actionView{ID: a.ID, Title: a.Title, Description: a.Description,
 			Risk: strings.TrimPrefix(a.Risk.String(), "RISK_CLASS_"), ReadOnly: a.ReadOnly}
+		f, _ := scanner.Scan(a.Script)
+		v.Scanner = scanner.Categories(f)
 		for _, p := range a.Params {
 			v.Params = append(v.Params, paramView{Name: p.Name, Label: p.Label, Pattern: strings.TrimSuffix(strings.TrimPrefix(p.Pattern.String(), "^"), "$")})
 		}
@@ -260,6 +268,9 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 		NeedsTypedCount: e.Requirement == "assertion_verified_typed_count"}
 	if e.Params != "" && e.Params != "{}" {
 		v.Params = e.Params
+	}
+	if a, ok := actions.Lookup(e.ActionID); ok && a.Version == e.ModuleVersion && a.SHA256() == e.ArtifactSHA256 {
+		v.Scanner, _ = scanner.Scan(a.Script)
 	}
 	if v.Pending && len(e.Options) > 0 && json.Valid(e.Options) {
 		v.Options = string(e.Options)

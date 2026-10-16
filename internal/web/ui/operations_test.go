@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
@@ -506,5 +507,25 @@ func TestComposeUpdateIsShown(t *testing.T) {
 		if !strings.Contains(page, want) {
 			t.Errorf("page misses %q", want)
 		}
+	}
+}
+
+// Milestone 7: the Safety Scanner's findings are shown before approval.
+func TestScannerFindingsAreShown(t *testing.T) {
+	a, _ := actions.Lookup("system.reboot")
+	f := &fakeOps{exec: executions.Execution{ID: opID, ActionID: a.ID, ModuleVersion: a.Version, ArtifactSHA256: a.SHA256(), State: "pending",
+		CreatedAt: time.Unix(1791960000, 0)}}
+	h := opsHandler(t, f, nil)
+	page := getBody(t, h, "/operations/"+opID)
+	if !strings.Contains(page, "Safety scanner (advisory; it can only raise the risk)") || !strings.Contains(page, "reboot_or_power at line") {
+		t.Fatal(page)
+	}
+	// Another version's bytes: nothing to show.
+	f.exec.ArtifactSHA256 = strings.Repeat("0", 64)
+	if page := getBody(t, h, "/operations/"+opID); strings.Contains(page, "Safety scanner") {
+		t.Fatal("findings for bytes that are not the action's")
+	}
+	if form := getBody(t, h, "/operations/new"); !strings.Contains(form, "safety scanner: reboot_or_power") {
+		t.Fatal("planner does not show the findings")
 	}
 }

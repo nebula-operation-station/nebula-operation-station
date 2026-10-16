@@ -11,7 +11,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/scanner"
 )
 
 // fakeHost is a PATH with stand-ins for the commands the install script
@@ -247,5 +249,22 @@ exit 0`)
 				t.Fatalf("%d %v\n%s", code, doc, calls)
 			}
 		})
+	}
+}
+
+// Milestone 7: the Safety Scanner's view of the built-ins is pinned, and
+// it never raises a built-in above its declared risk (read-only actions
+// stay LOW, so they can still be scheduled).
+func TestBuiltinsUnderTheScanner(t *testing.T) {
+	want := map[string]string{"system.reboot": "reboot_or_power"}
+	for _, a := range Builtin {
+		f, floor := scanner.Scan(a.Script)
+		if got := strings.Join(scanner.Categories(f), ","); got != want[a.ID] {
+			t.Errorf("%s: findings %q, want %q", a.ID, got, want[a.ID])
+		}
+		declared := canonical.Risk(strings.TrimPrefix(a.Risk.String(), "RISK_CLASS_"))
+		if floor.Rank() > declared.Rank() {
+			t.Errorf("%s: scanner %s above declared %s", a.ID, floor, declared)
+		}
 	}
 }

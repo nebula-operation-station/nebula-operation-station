@@ -28,8 +28,10 @@
 //     read-only by declaration: they stay LOW on recorded LOW to HIGH hosts
 //     and need MEDIUM (a WebAuthn tap) on CRITICAL or unrecorded hosts.
 //
-// The floor is the maximum of both. The Safety Scanner and signed manifests
-// (Milestone 7) will add further sources; they can only raise the floor.
+// The floor is the maximum of both. The permit authority raises it further
+// with the Safety Scanner's result for the artifact bytes (internal/scanner,
+// internal/permit/scan.go); signed manifests (Milestone 7) will add another
+// source. Every further source can only raise the floor.
 package riskpolicy
 
 import (
