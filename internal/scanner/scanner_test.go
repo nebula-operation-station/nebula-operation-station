@@ -5,6 +5,7 @@ package scanner
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 )
@@ -75,6 +76,9 @@ func TestClean(t *testing.T) {
 		"cat /etc/os-release",
 		"curl -fsI https://registry-1.docker.io/v2/",
 		"base64 -w0 < f",
+		"curl -fsSL https://x/v.json -o /tmp/v.json && jq . /tmp/v.json",
+		"systemctl status ssh",
+		"dnf install -y nginx",
 	} {
 		if f, floor := Scan([]byte(script)); len(f) != 0 || floor != "" {
 			t.Errorf("%q: %+v", script, f)
@@ -109,4 +113,21 @@ func FuzzScan(f *testing.F) {
 			t.Fatal("bad result")
 		}
 	})
+}
+
+// Review m71 F1: the cost is bounded; what is not read counts as HIGH.
+func TestLargeScriptsAreBounded(t *testing.T) {
+	big := []byte(strings.Repeat("rm -rf / && true\n", 600000)) // ~10 MiB
+	start := time.Now()
+	f, floor := Scan(big)
+	if floor != canonical.RiskHigh || f[0].Category != TooLarge {
+		t.Fatal(floor, f[0])
+	}
+	many := []byte(strings.Repeat("a\n", MaxLines+5))
+	if f, floor := Scan(many); floor != canonical.RiskHigh || len(f) != 1 || f[0].Category != TooLarge {
+		t.Fatal(floor, f)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("scans took %s", d)
+	}
 }

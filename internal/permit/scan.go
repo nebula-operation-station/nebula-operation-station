@@ -22,6 +22,8 @@ import (
 // maxScans bounds the scan cache (artifact SHA-256 -> result).
 const maxScans = 1024
 
+var scanSlots = make(chan struct{}, 2)
+
 type scanResult struct {
 	risk       canonical.Risk
 	categories []string
@@ -48,7 +50,11 @@ func (a *Authority) observe(sum [32]byte, artifact []byte) {
 	if ok {
 		return
 	}
+	// At most two scans run at once, so concurrent requests cannot take
+	// all of the executor's CPU (review m71 F1).
+	scanSlots <- struct{}{}
 	findings, risk := scanner.Scan(artifact)
+	<-scanSlots
 	r := scanResult{risk: risk, categories: scanner.Categories(findings)}
 	a.scanMu.Lock()
 	defer a.scanMu.Unlock()

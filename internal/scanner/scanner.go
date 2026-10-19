@@ -32,13 +32,22 @@ const (
 	PackageRemoval  = "package_removal"
 	RebootPower     = "reboot_or_power"
 	DockerRemoval   = "docker_removal"
+	// TooLarge: the script is larger than the scanner reads; what it did
+	// not read could hold anything.
+	TooLarge = "too_large_to_scan"
 )
 
 // Limits: a longer line is scanned only in its first MaxLine bytes, and at
 // most MaxFindings findings are reported (the floor is computed from all).
+// The scanner reads at most MaxScan bytes and MaxLines logical lines (as
+// large as a runbook or module script may be), so the cost of one scan is
+// bounded whatever the server sends (review m71 F1); a longer script gets
+// the HIGH finding too_large_to_scan.
 const (
 	MaxLine     = 4096
 	MaxFindings = 50
+	MaxScan     = 256 << 10
+	MaxLines    = 5000
 	maxExcerpt  = 120
 )
 
@@ -76,6 +85,7 @@ var rules = []rule{
 	{DownloadExecute, canonical.RiskHigh, regexp.MustCompile(`\b(?:curl|wget|fetch)\b[^|;&]*\|\s*(?:sudo\s+(?:-\S+\s+)*)?(?:python3?|perl|ruby|php|node)\b`)},
 	{DownloadExecute, canonical.RiskHigh, regexp.MustCompile(`\b(?:ba|da|z|k)?sh\s+(?:-\S+\s+)*<\(\s*(?:curl|wget)\b`)},
 	{DownloadExecute, canonical.RiskHigh, regexp.MustCompile(`\b(?:ba|da|z|k)?sh\s+-c\s+["']?\$\(\s*(?:curl|wget)\b`)},
+	{DownloadExecute, canonical.RiskHigh, regexp.MustCompile(`\b(?:curl|wget|fetch)\b[^;&|]*\s(?:-o|-O|--output|--output-document)(?:\s+|=)?\S+[^;&|]*(?:&&|;|\|\|)\s*` + shell)},
 	{EvalEncoded, canonical.RiskHigh, regexp.MustCompile(cmd + `eval` + end)},
 	{EvalEncoded, canonical.RiskHigh, regexp.MustCompile(`\bbase64\s+(?:-\S+\s+)*(?:-d|-D|--decode)\b[^;&]*\|\s*` + shell)},
 	{EvalEncoded, canonical.RiskHigh, regexp.MustCompile(`\b(?:xxd\s+(?:-\S+\s+)*-r|openssl\s+(?:enc|base64)\b[^|;&]*\s-d)\b[^;&]*\|\s*` + shell)},
@@ -90,8 +100,10 @@ var rules = []rule{
 	{NetworkFirewall, canonical.RiskMedium, regexp.MustCompile(cmd + `(?:iptables|ip6tables|iptables-restore|ip6tables-restore|nft|ufw|firewall-cmd)` + end)},
 	{NetworkFirewall, canonical.RiskMedium, regexp.MustCompile(`\bip\s+(?:-\S+\s+)*(?:route|link|addr(?:ess)?|rule|neigh)\s+(?:add|del|delete|change|replace|set|flush)\b`)},
 	{NetworkFirewall, canonical.RiskMedium, regexp.MustCompile(`\bnetplan\s+apply\b|/etc/network/interfaces\b|/etc/netplan/|\bsystemctl\s+(?:-\S+\s+)*(?:restart|stop)\s+(?:networking|systemd-networkd|NetworkManager)\b`)},
+	{NetworkFirewall, canonical.RiskMedium, regexp.MustCompile(`\bsystemctl\s+(?:-\S+\s+)*(?:stop|disable|mask|kill)\s+(?:--now\s+)?(?:ssh|sshd)(?:\.service|\.socket)?` + end + `|\bifdown\b|\bifconfig\s+\S+\s+down\b|\bnmcli\s+(?:\S+\s+)*(?:down|delete)\b`)},
 	{PackageRemoval, canonical.RiskMedium, regexp.MustCompile(`\b(?:apt-get|apt|aptitude)\s+(?:\S+\s+)*?(?:remove|purge|autoremove)\b|--auto-?remove\b`)},
 	{PackageRemoval, canonical.RiskMedium, regexp.MustCompile(`\bdpkg\s+(?:\S+\s+)*?(?:-r|-P|--remove|--purge)` + end)},
+	{PackageRemoval, canonical.RiskMedium, regexp.MustCompile(`\b(?:dnf|yum|zypper|microdnf)\s+(?:\S+\s+)*?(?:remove|erase|autoremove)\b|\brpm\s+(?:\S+\s+)*?(?:-e|--erase)` + end + `|\bpacman\s+(?:\S+\s+)*?-R\w*` + end + `|\bapk\s+del\b`)},
 	{RebootPower, canonical.RiskMedium, regexp.MustCompile(cmd + `(?:reboot|shutdown|poweroff|halt|kexec)` + end)},
 	{RebootPower, canonical.RiskMedium, regexp.MustCompile(`\bsystemctl\s+(?:-\S+\s+)*(?:reboot|poweroff|halt|kexec|soft-reboot)\b|/proc/sysrq-trigger`)},
 	{DockerRemoval, canonical.RiskMedium, regexp.MustCompile(`\bdocker(?:-compose)?\b[^;&|]*\s(?:rm|rmi|prune|down)` + end)},
@@ -102,7 +114,20 @@ var rules = []rule{
 func Scan(script []byte) ([]Finding, canonical.Risk) {
 	var out []Finding
 	var floor canonical.Risk
-	for _, line := range logicalLines(script) {
+	if len(script) > MaxScan {
+		script = script[:MaxScan]
+		floor = canonical.RiskHigh
+		out = append(out, Finding{Category: TooLarge, Risk: canonical.RiskHigh, Line: 1, Excerpt: "more than 256 KiB"})
+	}
+	lines := logicalLines(script)
+	if len(lines) > MaxLines {
+		lines = lines[:MaxLines]
+		if floor == "" {
+			floor = canonical.RiskHigh
+			out = append(out, Finding{Category: TooLarge, Risk: canonical.RiskHigh, Line: MaxLines + 1, Excerpt: "more than 5000 lines"})
+		}
+	}
+	for _, line := range lines {
 		text := line.text
 		if len(text) > MaxLine {
 			text = text[:MaxLine]
