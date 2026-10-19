@@ -62,6 +62,13 @@ fuzz:
 	$(GO) test -run='^$$' -fuzz=FuzzVerifyNeverPanics -fuzztime=20s ./internal/webauthnverify/
 	$(GO) test -run='^$$' -fuzz=FuzzScan -fuzztime=20s ./internal/scanner/
 	$(GO) test -run='^$$' -fuzz=FuzzParse -fuzztime=20s ./internal/sshsig/
+	$(GO) test -run='^$$' -fuzz='^FuzzParseNmapXML$$' -fuzztime=20s ./internal/discoveryjob/
+	$(GO) test -run='^$$' -fuzz='^FuzzJobArgs$$' -fuzztime=20s ./internal/discoveryjob/
+	$(GO) test -run='^$$' -fuzz='^FuzzParse$$' -fuzztime=20s ./internal/modulelock/
+	$(GO) test -run='^$$' -fuzz='^FuzzParsers$$' -fuzztime=20s ./internal/executions/dockerhost/
+	$(GO) test -run='^$$' -fuzz='^FuzzParsers$$' -fuzztime=20s ./internal/executions/osdebian/
+	$(GO) test -run='^$$' -fuzz='^FuzzOneJSONDocument$$' -fuzztime=20s ./internal/hostrun/
+	$(GO) test -run='^$$' -fuzz='^FuzzRead$$' -fuzztime=20s ./internal/backup/
 
 check: lint generate-check test vuln
 

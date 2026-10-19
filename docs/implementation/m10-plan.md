@@ -1,6 +1,6 @@
 # Milestone 10 plan: hardening (Release 0.9 beta)
 
-Status: **in progress 2026-10-19**: M10-1 and M10-2 implemented (decisions 73 and 74 in m0.md); work continues with the defaults below.
+Status: **in progress 2026-10-19**: M10-1 to M10-3 implemented (decisions 73 to 75 in m0.md); work continues with the defaults below.
 It turns spec 15 (backup, restore, upgrades) and spec 16 (Milestone 10,
 Release 0.9 beta) into a concrete plan.
 
