@@ -302,6 +302,17 @@ file `$NEBULA_SECRET_<SLOT>`. A run with secrets is at least MEDIUM, cannot
 be scheduled, and known secret values are removed from its log and
 result (a safeguard, not the protection).
 
+**Module signers.** Modules signed by someone you trust run at their
+declared risk. Get the author's public key (`ssh-ed25519 …`) and its
+fingerprint on two different channels, then on the executor host:
+`nebula signer add --name "Who" key.pub` and type the fingerprint to
+confirm (CRITICAL: every module this key signs is trusted). `nebula signer
+list` shows them; `nebula signer remove SHA256:…` withdraws a key and the
+trust of every module it signed. If a new version of a module is signed by
+another key, Nebula refuses it until you have checked why and run
+`nebula module confirm-signer MODULE SHA256:…`. Unsigned modules always
+need your security key (at least HIGH).
+
 ## 8. Notifications
 
 Add a `notifications` block to `/etc/nebula/server.json`, keep the file

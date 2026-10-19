@@ -274,6 +274,20 @@ service ExecutorService {
   // action and version, and at which risk.
   rpc GetArtifactTrust(GetArtifactTrustRequest) returns (GetArtifactTrustResponse);
 
+  // Signed modules (M7-5). Role: server. The executor verifies the lock's
+  // SSH signature (namespace nebula-module) by a trusted signer, checks
+  // each script against the lock, builds each action's artifact itself and
+  // trusts it at the action's risk. Refused when the module was signed by
+  // another signer before (signer_changed) or the version's lock changed.
+  rpc RegisterModule(RegisterModuleRequest) returns (RegisterModuleResponse);
+  // Role: admin (`nebula signer …`). Adding a signer is CRITICAL: the CLI
+  // asks for the fingerprint to be typed.
+  rpc AddSigner(AddSignerRequest) returns (AddSignerResponse);
+  rpc RemoveSigner(RemoveSignerRequest) returns (RemoveSignerResponse);
+  rpc ConfirmModuleSigner(ConfirmModuleSignerRequest) returns (ConfirmModuleSignerResponse);
+  // Role: server, admin.
+  rpc ListSigners(ListSignersRequest) returns (ListSignersResponse);
+
   // Schedule grants (docs/implementation/schedule-grants.md): standing
   // permission, approved with the security key, to run fixed actions that
   // the executor rates LOW on fixed hosts at most once per interval, until
@@ -1248,4 +1262,66 @@ message GetArtifactTrustRequest {
 message GetArtifactTrustResponse {
   bool trusted = 1;
   RiskClass risk_class = 2;
+}
+
+message RegisterModuleRequest {
+  bytes lock_json = 1;
+  bytes signature = 2;
+  // Script files by the paths the lock names.
+  map<string, bytes> scripts = 3;
+}
+
+message ModuleAction {
+  string action_id = 1;
+  string module_version = 2;
+  string artifact_sha256 = 3;
+  RiskClass risk_class = 4;
+}
+
+message RegisterModuleResponse {
+  string name = 1;
+  string version = 2;
+  string lock_sha256 = 3;
+  string signer_fingerprint = 4;
+  string signer_name = 5;
+  repeated ModuleAction actions = 6;
+}
+
+message AddSignerRequest {
+  // One authorized_keys line (ssh-ed25519 only).
+  string public_key = 1;
+  string name = 2;
+}
+
+message AddSignerResponse {
+  string fingerprint = 1;
+}
+
+message RemoveSignerRequest {
+  string fingerprint = 1;
+}
+
+message RemoveSignerResponse {
+  bool removed = 1;
+  int64 trust_entries_removed = 2;
+}
+
+message ConfirmModuleSignerRequest {
+  string module = 1;
+  string fingerprint = 2;
+}
+
+message ConfirmModuleSignerResponse {}
+
+message ListSignersRequest {}
+
+message Signer {
+  string fingerprint = 1;
+  string name = 2;
+  int64 added_unix = 3;
+  string added_by = 4;
+}
+
+message ListSignersResponse {
+  repeated Signer signers = 1;
 }

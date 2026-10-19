@@ -61,6 +61,7 @@ fuzz:
 	$(GO) test -run='^$$' -fuzz=FuzzHashParameters -fuzztime=20s ./internal/canonical/
 	$(GO) test -run='^$$' -fuzz=FuzzVerifyNeverPanics -fuzztime=20s ./internal/webauthnverify/
 	$(GO) test -run='^$$' -fuzz=FuzzScan -fuzztime=20s ./internal/scanner/
+	$(GO) test -run='^$$' -fuzz=FuzzParse -fuzztime=20s ./internal/sshsig/
 
 check: lint generate-check test vuln
 

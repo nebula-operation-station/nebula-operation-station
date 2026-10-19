@@ -625,6 +625,46 @@ func (c *Client) GetArtifactTrust(ctx context.Context, in *pb.GetArtifactTrustRe
 	return resp, mapError(err)
 }
 
+// RegisterModule: Verifies and registers a signed module (server role).
+func (c *Client) RegisterModule(ctx context.Context, in *pb.RegisterModuleRequest, opts ...grpc.CallOption) (*pb.RegisterModuleResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.RegisterModule(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// AddSigner: Trusts a module signer (admin role).
+func (c *Client) AddSigner(ctx context.Context, in *pb.AddSignerRequest, opts ...grpc.CallOption) (*pb.AddSignerResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.AddSigner(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// RemoveSigner: Removes a module signer (admin role).
+func (c *Client) RemoveSigner(ctx context.Context, in *pb.RemoveSignerRequest, opts ...grpc.CallOption) (*pb.RemoveSignerResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.RemoveSigner(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// ConfirmModuleSigner: Accepts a module's new signer (admin role).
+func (c *Client) ConfirmModuleSigner(ctx context.Context, in *pb.ConfirmModuleSignerRequest, opts ...grpc.CallOption) (*pb.ConfirmModuleSignerResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ConfirmModuleSigner(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// ListSigners: Lists module signers (server and admin roles).
+func (c *Client) ListSigners(ctx context.Context, in *pb.ListSignersRequest, opts ...grpc.CallOption) (*pb.ListSignersResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ListSigners(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
 // Compile-time check: the client must implement the generated interface so
 // that a generated-code change breaks the build here.
 var _ pb.ExecutorServiceClient = (*Client)(nil)
