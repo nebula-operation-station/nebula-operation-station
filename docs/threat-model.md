@@ -51,5 +51,6 @@ Nebula Operation Station holds the keys that give root on a whole homelab. This 
 - **Memory remanence.** Go cannot reliably wipe memory; unlocked keys live in the executor's heap. Core dumps are disabled and the process is non-dumpable; use encrypted or no swap.
 - **An admin trusting the wrong script, level or signer.** Trust and signers say who vouches for the bytes, not what they do. The Safety Scanner is advisory; it can raise the risk of a script it recognises, but a script it does not recognise can still be harmful.
 - **The server's own audit lines.** They are not signed (a compromised server could write any); the optional hash chain shows accidental or offline edits only.
+- **Which networks get scanned, against a compromised server.** The rule that only known networks are scanned is the server's check; `nebula-discovery` enforces only the fixed arguments and the size limits, so a compromised server can have any network scanned (at most a /16 per target).
 - **The networks Nebula scans.** A scan is visible to the scanned hosts and their IDS; discovery results can be spoofed by anything on the network, which is why they are only ever proposals.
 - **Whoever holds a backup identity.** The age identity decrypts every backup made to it: the inventory, the audit data and the still passphrase-encrypted keys. Keep it off the Nebula machine.
