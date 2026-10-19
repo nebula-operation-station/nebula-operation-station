@@ -3,6 +3,7 @@
 {{with .Network}}
 <section class="panel" aria-label="Networks">
   <h2>Networks</h2>
+  {{if .DiscoveryEnabled}}<p><a href="/network/discovery">Discovery (scan networks with Nmap)</a></p>{{end}}
   <p class="hint">IPAM-light: networks, pools, reservations and exclusions. Nebula never manages DHCP or DNS; the status of an
     address is computed from what claims it (assets, managed hosts, reservations, discovery).</p>
   {{if .Networks}}

@@ -80,6 +80,8 @@ type networkData struct {
 	Kinds    []ipam.Kind
 	Network  *networkDetail
 	Asset    *assetDetail
+	// DiscoveryEnabled links the discovery page.
+	DiscoveryEnabled bool
 	// NetDraft and AssetDraft are JSON for the edit forms ("" for new).
 	NetDraft, AssetDraft string
 }
@@ -91,7 +93,7 @@ func (h *Handler) handleNetworkPage(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
 	defer cancel()
-	data := &networkData{Kinds: ipam.Kinds}
+	data := &networkData{Kinds: ipam.Kinds, DiscoveryEnabled: h.discovery != nil}
 	nets, err := h.network.Networks(ctx)
 	if err != nil {
 		h.log.Error("list networks", "error", err)

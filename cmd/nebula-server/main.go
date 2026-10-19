@@ -23,6 +23,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/discovery"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/discoveryjob"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executorclient"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
@@ -217,6 +219,13 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	// Scheduled read-only checks run under executor-held schedule grants.
 	go ops.RunSchedules(connCtx)
 
+	// Network assets, IPAM and discovery (M9). nebula-discovery runs the
+	// scans; the server only queues jobs and reads results.
+	hostAddrs := ipam.FromInventory(store.List)
+	ipamStore := ipam.New(db, hostAddrs)
+	disc := discovery.New(db, discoveryjob.Spool{Dir: cfg.DiscoveryDir}, ipamStore, hostAddrs, log)
+	go disc.Run(connCtx)
+
 	h, err := ui.New(ui.Options{
 		PublicOrigin: cfg.PublicOrigin,
 		Status:       exec,
@@ -230,7 +239,8 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		Trust:        exec,
 		Modules:      mods,
 		LastResult:   ops.LastResult,
-		Network:      ipam.New(db, ipam.FromInventory(store.List)),
+		Network:      ipamStore,
+		Discovery:    disc,
 		Repin:        exec,
 		Enroll:       exec,
 		Log:          log,

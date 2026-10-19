@@ -277,6 +277,25 @@ function check(cond, what) {
     'add to managed hosts prefills the inventory form');
   await Promise.all([page.waitForURL(/\/network\/a\/nas$/, { timeout: 15000 }), page.click('#host-submit')]);
   check(await page.locator('a[href="/hosts/nas"]').count() === 1, 'the asset is linked to the new managed host');
+  // Discovery (M9-2): queue a host discovery, let the test hook answer it
+  // like nebula-discovery, review the staging and import.
+  await page.goto(base + '/network/discovery');
+  await page.fill('#scan-targets', '10.99.0.0/24');
+  await page.click('#scan-form button[type="submit"]');
+  await page.waitForFunction(() => /not inside a known network/.test(document.getElementById('message').textContent), null, { timeout: 15000 });
+  check(true, 'a scan outside the known networks is refused');
+  await page.fill('#scan-targets', '192.168.10.0/24');
+  await Promise.all([page.waitForURL(/\/network\/discovery\/[0-9a-f-]{36}$/, { timeout: 15000 }), page.click('#scan-form button[type="submit"]')]);
+  check(/Waiting for nebula-discovery/.test(await page.textContent('main')), 'the queued scan waits for nebula-discovery');
+  check(await (await page.request.get(base + '/__discovery/answer')).text() === '1', 'the queued job reached the spool');
+  await page.reload();
+  check(/POSSIBLE MATCH/.test(await page.textContent('#staging')) && /NEW/.test(await page.textContent('#staging')) &&
+    await page.locator('#staging b').count() === 0, 'the staging classifies the hosts and shows network text as text');
+  await page.click('#import-all');
+  await page.waitForFunction(() => /imported as/.test(document.getElementById('staging').textContent), null, { timeout: 15000 });
+  check(await page.locator('#staging a[href="/network/a/printer"]').count() === 1, 'a new host is imported as an asset');
+  await page.goto(base + '/network/a/nas');
+  check(/aa:bb:cc:dd:ee:21/.test(await page.textContent('main')), 'the import adds the MAC the asset lacked');
 
   // CSV import: map columns, preview, import the importable rows.
   await page.goto(base + '/inventory/import');

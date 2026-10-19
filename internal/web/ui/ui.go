@@ -114,6 +114,9 @@ type Options struct {
 	// Network keeps networks and assets (M9-1). Nil leaves the network
 	// page empty.
 	Network NetworkStore
+	// Discovery queues scans and imports their results (M9-2). Nil hides
+	// discovery.
+	Discovery DiscoveryStore
 	// Repin re-pins hosts blocked by a host key mismatch. Nil leaves only
 	// the CLI instructions on the dashboard.
 	Repin Repinner
@@ -144,6 +147,7 @@ type Handler struct {
 	modules    Modules
 	lastResult LastResultFunc
 	network    NetworkStore
+	discovery  DiscoveryStore
 	log        *slog.Logger
 	repin      Repinner
 	enroll     Enroller
@@ -186,6 +190,7 @@ func New(o Options) (*Handler, error) {
 		modules:      o.Modules,
 		lastResult:   o.LastResult,
 		network:      o.Network,
+		discovery:    o.Discovery,
 		repin:        o.Repin,
 		enroll:       o.Enroll,
 		log:          log,
@@ -216,6 +221,8 @@ var pageFiles = map[string]string{
 	"network":          "network.html",
 	"network_detail":   "network_detail.html",
 	"asset":            "asset.html",
+	"discovery":        "discovery.html",
+	"discovery_job":    "discovery_job.html",
 }
 
 // pagePartials are extra template files a page uses.
@@ -280,6 +287,13 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("POST /network/a/save", h.handleAssetSave)
 	mux.HandleFunc("POST /network/a/delete", h.handleAssetDelete)
 	mux.HandleFunc("POST /network/a/link", h.handleAssetLink)
+	// Discovery (M9-2).
+	mux.HandleFunc("GET /network/discovery", h.handleDiscoveryPage)
+	mux.HandleFunc("GET /network/discovery/{id}", h.handleDiscoveryJob)
+	mux.HandleFunc("POST /network/discovery/submit", h.handleDiscoverySubmit)
+	mux.HandleFunc("POST /network/discovery/cancel", h.handleDiscoveryCancel)
+	mux.HandleFunc("POST /network/discovery/import", h.handleDiscoveryImport)
+	mux.HandleFunc("POST /network/discovery/schedule/delete", h.handleDiscoveryScheduleDelete)
 	mux.HandleFunc("POST /hostkeys/repin/propose", h.handleRepinPropose)
 	mux.HandleFunc("POST /hostkeys/repin/commit", h.handleRepinCommit)
 	mux.HandleFunc("GET /inventory/enroll", h.handleEnrollPage)
@@ -351,6 +365,8 @@ type pageData struct {
 	Modules *modulesData
 	// Network is the data of the network pages.
 	Network *networkData
+	// Discovery is the data of the discovery pages.
+	Discovery *discoveryData
 	// InventoryPrefill is the JSON that prefills the add-host form from
 	// an asset ("add to managed hosts").
 	InventoryPrefill string

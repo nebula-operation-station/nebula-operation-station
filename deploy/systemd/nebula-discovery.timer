@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Fallback for nebula-discovery.path: picks up a job that arrived while a
+# scan was finishing. It only runs scans that are already queued; it never
+# starts a scan on its own (there is no default schedule).
+[Unit]
+Description=Nebula Operation Station discovery: run queued scans (fallback)
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=10min
+Unit=nebula-discovery.service
+
+[Install]
+WantedBy=timers.target

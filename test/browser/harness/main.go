@@ -29,6 +29,8 @@ import (
 	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/discovery"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/discoveryjob"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
@@ -302,7 +304,14 @@ func main() {
 		r, err := svc.ListHostKeys(ctx, &pb.ListHostKeysRequest{})
 		return r.GetHosts(), err
 	}
-	u, err := ui.New(ui.Options{PublicOrigin: origin, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Schedules: ops, Runbooks: rb, Trust: direct{svc}, Modules: mods, LastResult: ops.LastResult, Network: ipam.New(sdb, ipam.FromInventory(inv.List)), Repin: direct{svc}, Enroll: direct{svc}, Log: log})
+	// Discovery with a spool; the test hook below answers queued jobs the
+	// way nebula-discovery would, with fixed hosts.
+	spool := discoveryjob.Spool{Dir: filepath.Join(dir, "discovery")}
+	must(os.MkdirAll(spool.JobsDir(), 0o750))
+	must(os.MkdirAll(spool.ResultsDir(), 0o750))
+	ipamStore := ipam.New(sdb, ipam.FromInventory(inv.List))
+	disc := discovery.New(sdb, spool, ipamStore, ipam.FromInventory(inv.List), log)
+	u, err := ui.New(ui.Options{PublicOrigin: origin, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Schedules: ops, Runbooks: rb, Trust: direct{svc}, Modules: mods, LastResult: ops.LastResult, Network: ipamStore, Discovery: disc, Repin: direct{svc}, Enroll: direct{svc}, Log: log})
 	must(err)
 	mux := http.NewServeMux()
 	// Test hook: issue a one-time code like `nebula webauthn code`.
@@ -324,6 +333,17 @@ func main() {
 	})
 	mux.HandleFunc("/__totp/next", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, totp.Code(totpSecret, time.Now().Add(totp.Step)))
+	})
+	mux.HandleFunc("/__discovery/answer", func(w http.ResponseWriter, r *http.Request) {
+		jobs, _, err := spool.PendingJobs()
+		must(err)
+		for _, j := range jobs {
+			must(spool.WriteResult(discoveryjob.Result{Format: discoveryjob.ResultFormat, Job: j.ID, StartedAt: time.Now().Unix(), FinishedAt: time.Now().Unix(), OK: true,
+				Hosts: []discoveryjob.Host{{Address: "192.168.10.21", MAC: "aa:bb:cc:dd:ee:21"},
+					{Address: "192.168.10.60", Hostname: "printer.lan", Vendor: "<b>ACME</b>", Ports: []discoveryjob.Port{{Port: 631, Protocol: "tcp", State: "open", Service: "ipp"}}}}}))
+		}
+		must(disc.Poll(r.Context()))
+		fmt.Fprint(w, len(jobs))
 	})
 	mux.Handle("/", middleware.Handler(middleware.Options{PublicOrigin: origin}, ah.Wrap(u.Handler())))
 	must(http.ListenAndServe("127.0.0.1:"+port, mux))

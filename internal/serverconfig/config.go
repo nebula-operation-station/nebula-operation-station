@@ -63,6 +63,9 @@ func (t Token) LogValue() slog.Value {
 	return slog.StringValue(redacted)
 }
 
+// DefaultDiscoveryDir is the default discovery spool.
+const DefaultDiscoveryDir = "/var/lib/nebula/discovery"
+
 // DefaultListen is the default listen address.
 const DefaultListen = "127.0.0.1:8080"
 
@@ -82,6 +85,10 @@ type Config struct {
 	ExecutorSocket string `json:"executor_socket"`
 	// ExecutorUser is the OS user the executor runs as.
 	ExecutorUser string `json:"executor_user"`
+	// DiscoveryDir is the discovery spool (jobs/ and results/) shared
+	// with nebula-discovery. Default "/var/lib/nebula/discovery"; without
+	// it discovery shows as not installed.
+	DiscoveryDir string `json:"discovery_dir"`
 	// Notifications configures the providers (spec 13). Their tokens are
 	// low-privilege and live here, not in the executor vault; a config
 	// with any of them must not be readable by others.
@@ -142,6 +149,9 @@ func (c *Config) applyDefaults() {
 	if c.Listen == "" {
 		c.Listen = DefaultListen
 	}
+	if c.DiscoveryDir == "" {
+		c.DiscoveryDir = DefaultDiscoveryDir
+	}
 }
 
 // Validate checks the configuration and returns a single error listing
@@ -180,6 +190,9 @@ func (c Config) Validate() error {
 	}
 	if c.ExecutorUser == "" {
 		problems = append(problems, "executor_user: required")
+	}
+	if c.DiscoveryDir != "" && !filepath.IsAbs(c.DiscoveryDir) {
+		problems = append(problems, fmt.Sprintf("discovery_dir: %q must be an absolute path", c.DiscoveryDir))
 	}
 
 	problems = append(problems, c.Notifications.problems()...)
