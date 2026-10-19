@@ -32,6 +32,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/events"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
@@ -171,7 +172,13 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 	}
 
 	h.logs = &syncBuffer{}
-	log := slog.New(slog.NewJSONHandler(h.logs, nil))
+	// Audit lines also go to the signed event chain, as in the executor.
+	eventKey, _, err := events.LoadOrCreateKey(o.dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain := events.NewChain(db, eventKey)
+	log := slog.New(events.NewHandler(slog.NewJSONHandler(h.logs, nil), chain))
 	// The harness identity is registered as if through H03 (unless a test
 	// starts without credentials); credentials are then loaded from
 	// executor.db exactly as the executor does.
@@ -210,6 +217,7 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 	}
 	h.verifier = verifier
 	svc := executor.NewService(auth, keyring.New(keysDir), db, reg, log)
+	svc.SetEventKey(chain.PublicKey())
 	svc.SetVaultParams(vault.Params{Time: 1, MemoryKiB: 64, Threads: 1})
 	// Durable jobs on the test hosts (local processes) go below the data
 	// directory, without sudo and systemd.

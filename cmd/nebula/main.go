@@ -59,6 +59,8 @@ commands:
                       accept a new signer for a module after reviewing it
   module pack [--archive OUT.tar.gz] DIR
                       write DIR/module.lock.json from module.yaml (to sign), or the archive to import
+  events [--after N] [--limit N] [--json] | key | verify
+                      the executor's signed event chain (verified here with the event key)
   host enroll-script --from ADDR[,ADDR] [--user nebula] [--key REF] [--no-sudo]
                       print a script to run on a new host: user, restricted key, sudo
   host probe ENDPOINT...
@@ -166,6 +168,8 @@ func run(cmd string, args []string) error {
 		return signerCmd(ctx, c, args, os.Stdin, os.Stdout)
 	case "module":
 		return moduleCmd(ctx, c, args, os.Stdin, os.Stdout)
+	case "events":
+		return eventsCmd(ctx, c, args, os.Stdout)
 	case "host":
 		return hostCmd(ctx, c, args)
 	case "webauthn":

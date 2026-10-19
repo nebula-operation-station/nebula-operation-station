@@ -665,6 +665,14 @@ func (c *Client) ListSigners(ctx context.Context, in *pb.ListSignersRequest, opt
 	return resp, mapError(err)
 }
 
+// ListEvents reads the executor's signed event chain (M10-1).
+func (c *Client) ListEvents(ctx context.Context, in *pb.ListEventsRequest, opts ...grpc.CallOption) (*pb.ListEventsResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ListEvents(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
 // Compile-time check: the client must implement the generated interface so
 // that a generated-code change breaks the build here.
 var _ pb.ExecutorServiceClient = (*Client)(nil)

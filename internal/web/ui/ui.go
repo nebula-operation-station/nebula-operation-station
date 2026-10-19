@@ -117,6 +117,10 @@ type Options struct {
 	// Discovery queues scans and imports their results (M9-2). Nil hides
 	// discovery.
 	Discovery DiscoveryStore
+	// Events reads the executor's signed event chain and Audit the
+	// server's audit lines, for the History page (M10-1).
+	Events EventSource
+	Audit  AuditStore
 	// Repin re-pins hosts blocked by a host key mismatch. Nil leaves only
 	// the CLI instructions on the dashboard.
 	Repin Repinner
@@ -148,6 +152,8 @@ type Handler struct {
 	lastResult LastResultFunc
 	network    NetworkStore
 	discovery  DiscoveryStore
+	events     EventSource
+	auditLog   AuditStore
 	log        *slog.Logger
 	repin      Repinner
 	enroll     Enroller
@@ -191,6 +197,8 @@ func New(o Options) (*Handler, error) {
 		lastResult:   o.LastResult,
 		network:      o.Network,
 		discovery:    o.Discovery,
+		events:       o.Events,
+		auditLog:     o.Audit,
 		repin:        o.Repin,
 		enroll:       o.Enroll,
 		log:          log,
@@ -222,6 +230,7 @@ var pageFiles = map[string]string{
 	"network_detail":   "network_detail.html",
 	"asset":            "asset.html",
 	"search":           "search.html",
+	"history":          "history.html",
 	"discovery":        "discovery.html",
 	"discovery_job":    "discovery_job.html",
 }
@@ -280,6 +289,7 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("GET /hosts/{id}", h.handleHost)
 	// Global search (M9-3): read-only, quick actions are links.
 	mux.HandleFunc("GET /search", h.handleSearch)
+	mux.HandleFunc("GET /history", h.handleHistory)
 	// Network: assets and IPAM-light (M9-1).
 	mux.HandleFunc("GET /network", h.handleNetworkPage)
 	mux.HandleFunc("GET /network/n/{id}", h.handleNetworkDetail)
@@ -325,7 +335,6 @@ var emptyPages = []struct {
 	path  string
 	title string
 }{
-	{"/history", "History"},
 	{"/settings", "Settings"},
 }
 
@@ -372,6 +381,8 @@ type pageData struct {
 	Discovery *discoveryData
 	// Search is the data of the search page.
 	Search *searchData
+	// History is the data of the history page.
+	History *historyData
 	// InventoryPrefill is the JSON that prefills the add-host form from
 	// an asset ("add to managed hosts").
 	InventoryPrefill string

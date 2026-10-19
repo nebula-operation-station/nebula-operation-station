@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/auditlog"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/discovery"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/discoveryjob"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
@@ -144,6 +145,9 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		return fmt.Errorf("open server database: %w", err)
 	}
 	defer db.Close()
+	// Audit lines are also kept in server.db for the History page (M10-1).
+	audit := auditlog.New(db, cfg.AuditHashChain)
+	log = slog.New(auditlog.NewHandler(log.Handler(), audit))
 
 	// An unreachable executor is not fatal: the server connects in the
 	// background (and pages show "Executor unavailable" until then). A
@@ -241,6 +245,8 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		LastResult:   ops.LastResult,
 		Network:      ipamStore,
 		Discovery:    disc,
+		Events:       exec,
+		Audit:        audit,
 		Repin:        exec,
 		Enroll:       exec,
 		Log:          log,

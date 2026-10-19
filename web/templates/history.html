@@ -1,0 +1,47 @@
+{{define "content"}}
+<h1>History</h1>
+{{with .History}}
+<form action="/history" method="get" class="form" role="search">
+  <label>Only events of kind (for example <code>unlocked</code>, <code>run_finished</code>, <code>host_created</code>)
+    <input type="text" name="kind" value="{{.Kind}}" maxlength="64" pattern="[a-z0-9_]{1,64}" autocomplete="off"></label>
+  <div class="actions"><button type="submit" class="button">Filter</button>{{if .Kind}} <a href="/history">all</a>{{end}}</div>
+</form>
+<section class="panel" aria-label="Executor events">
+  <h2>Executor events</h2>
+  <p class="hint">Signed by the executor and chained: a changed, reordered or missing event fails the check. Compare the key with the
+    output of <code>nebula events key</code> on the Nebula machine; <code>nebula events verify</code> checks the whole chain there.</p>
+  {{if .EventsUnavailable}}
+  <p class="status status--error">Executor unavailable</p>
+  {{else if .Fingerprint}}
+  <p>Event key <code>{{.Fingerprint}}</code> · {{.EventsHead}} events ·
+    {{if .EventsVerified}}the newest page verified{{else}}<span class="status--error">verification failed: {{.EventsError}}</span>{{end}}</p>
+  {{if .Events}}
+  <table class="inventory">
+    <thead><tr><th>#</th><th>Time (UTC)</th><th>Event</th><th>Details</th></tr></thead>
+    <tbody>
+      {{range .Events}}<tr><td>{{.Seq}}</td><td>{{.Time}}</td><td>{{.Kind}}</td><td>{{.Text}}</td></tr>{{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p>No events{{if .Kind}} of this kind among the newest ones{{end}}.</p>
+  {{end}}
+  {{end}}
+</section>
+<section class="panel" aria-label="Server audit">
+  <h2>Server audit</h2>
+  <p class="hint">What was done in the web UI. These lines are not signed{{if .Chain}}; {{.Chain}}{{end}}.</p>
+  {{if .AuditUnavailable}}<p class="status status--error">Audit log unavailable</p>{{end}}
+  {{if .Audit}}
+  <table class="inventory">
+    <thead><tr><th>#</th><th>Time</th><th>Event</th><th>User</th><th>Details</th></tr></thead>
+    <tbody>
+      {{range .Audit}}<tr><td>{{.Seq}}</td><td>{{.Time}}</td><td>{{.Kind}}</td><td>{{.User}}</td><td>{{.Text}}</td></tr>{{end}}
+    </tbody>
+  </table>
+  {{if .Older}}<p><a href="/history?before={{.Older}}{{if .Kind}}&amp;kind={{.Kind}}{{end}}">Older</a></p>{{end}}
+  {{else}}
+  <p>No audit lines{{if .Kind}} of this kind{{end}}.</p>
+  {{end}}
+</section>
+{{end}}
+{{end}}

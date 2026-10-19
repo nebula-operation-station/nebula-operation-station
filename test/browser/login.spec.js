@@ -304,6 +304,12 @@ function check(cond, what) {
   await page.goto(base + '/search?q=e2e-host');
   await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('main a[href="/operations/new?host=e2e-host"]')]);
   check(await page.isChecked('input[name="host"][value="e2e-host"]'), 'the quick action opens the planner with the host selected');
+  // History (M10-1): signed executor events and the server audit.
+  await page.goto(base + '/history');
+  check(/the newest page verified/.test(await page.textContent('main')) && /unlocked/.test(await page.textContent('section[aria-label="Executor events"]')),
+    'history shows the verified executor events');
+  check(/asset_saved/.test(await page.textContent('section[aria-label="Server audit"]')) && /hash chain intact/.test(await page.textContent('main')),
+    'history shows the server audit with its hash chain');
 
   // CSV import: map columns, preview, import the importable rows.
   await page.goto(base + '/inventory/import');
