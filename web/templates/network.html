@@ -1,0 +1,45 @@
+{{define "content"}}
+<h1>Network</h1>
+{{with .Network}}
+<section class="panel" aria-label="Networks">
+  <h2>Networks</h2>
+  <p class="hint">IPAM-light: networks, pools, reservations and exclusions. Nebula never manages DHCP or DNS; the status of an
+    address is computed from what claims it (assets, managed hosts, reservations, discovery).</p>
+  {{if .Networks}}
+  <table class="inventory">
+    <thead><tr><th>Network</th><th>Name</th><th>Prefix</th><th>VLAN</th><th>Gateway</th><th>Addresses</th></tr></thead>
+    <tbody>
+      {{range .Networks}}
+      <tr><td><a href="/network/n/{{.ID}}">{{.ID}}</a></td><td>{{.Name}}</td><td>{{.Prefix}}</td>
+        <td>{{if .VLAN}}{{.VLAN}}{{end}}</td><td>{{.Gateway}}</td><td>{{.Counts}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p>No networks yet.</p>
+  {{end}}
+  <h3>Add network</h3>
+  {{template "network_form" .}}
+</section>
+<section class="panel" aria-label="Assets">
+  <h2>Assets</h2>
+  <p class="hint">Devices in your networks, managed or not. "Add to managed hosts" on an asset starts the normal SSH enrollment.</p>
+  {{if .Assets}}
+  <table class="inventory">
+    <thead><tr><th>Asset</th><th>Name</th><th>Kind</th><th>Addresses</th><th>MAC</th><th>Managed host</th></tr></thead>
+    <tbody>
+      {{range .Assets}}
+      <tr><td><a href="/network/a/{{.ID}}">{{.ID}}</a></td><td>{{.Name}}</td><td>{{.Kind}}</td><td>{{.Addresses}}</td><td>{{.MAC}}</td>
+        <td>{{if .HostID}}<a href="/hosts/{{.HostID}}">{{.HostID}}</a>{{end}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p>No assets yet.</p>
+  {{end}}
+  <h3>Add asset</h3>
+  {{template "asset_form" .}}
+</section>
+{{end}}
+<p id="message" class="message" role="status" aria-live="polite"></p>
+{{end}}

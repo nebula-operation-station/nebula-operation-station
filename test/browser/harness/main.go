@@ -36,6 +36,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun/hostruntest"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/ipam"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/modules"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
@@ -301,7 +302,7 @@ func main() {
 		r, err := svc.ListHostKeys(ctx, &pb.ListHostKeysRequest{})
 		return r.GetHosts(), err
 	}
-	u, err := ui.New(ui.Options{PublicOrigin: origin, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Schedules: ops, Runbooks: rb, Trust: direct{svc}, Modules: mods, LastResult: ops.LastResult, Repin: direct{svc}, Enroll: direct{svc}, Log: log})
+	u, err := ui.New(ui.Options{PublicOrigin: origin, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Schedules: ops, Runbooks: rb, Trust: direct{svc}, Modules: mods, LastResult: ops.LastResult, Network: ipam.New(sdb, ipam.FromInventory(inv.List)), Repin: direct{svc}, Enroll: direct{svc}, Log: log})
 	must(err)
 	mux := http.NewServeMux()
 	// Test hook: issue a one-time code like `nebula webauthn code`.

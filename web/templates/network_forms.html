@@ -1,0 +1,26 @@
+{{define "network_form"}}
+<form id="network-form" class="form" data-draft="{{.NetDraft}}" novalidate>
+  <label>ID (lowercase letters, digits, . _ -) <input type="text" id="net-id" maxlength="63" autocomplete="off"></label>
+  <label>Name <input type="text" id="net-name" maxlength="128" autocomplete="off"></label>
+  <label>Prefix <input type="text" id="net-prefix" placeholder="192.168.10.0/24" autocomplete="off"></label>
+  <label>VLAN (0 for none) <input type="number" id="net-vlan" min="0" max="4094" value="0" inputmode="numeric"></label>
+  <label>Gateway <input type="text" id="net-gateway" placeholder="192.168.10.1" autocomplete="off"></label>
+  <label>Pools (one per line: name first-last)
+    <textarea id="net-pools" rows="3" placeholder="servers 192.168.10.10-192.168.10.49"></textarea></label>
+  <label>Notes <textarea id="net-notes" rows="2" maxlength="2000"></textarea></label>
+  <div class="actions"><button type="submit" class="button">Save network</button></div>
+</form>
+{{end}}
+
+{{define "asset_form"}}
+<form id="asset-form" class="form" data-draft="{{.AssetDraft}}" novalidate>
+  <label>ID (lowercase letters, digits, . _ -) <input type="text" id="asset-id" maxlength="63" autocomplete="off"></label>
+  <label>Name <input type="text" id="asset-name" maxlength="128" autocomplete="off"></label>
+  <label>Kind <select id="asset-kind">{{range .Kinds}}<option>{{.}}</option>{{end}}</select></label>
+  <label>Hostname <input type="text" id="asset-hostname" maxlength="253" autocomplete="off"></label>
+  <label>MAC address <input type="text" id="asset-mac" placeholder="aa:bb:cc:dd:ee:ff" autocomplete="off"></label>
+  <label>Addresses (one per line) <textarea id="asset-addresses" rows="2"></textarea></label>
+  <label>Notes <textarea id="asset-notes" rows="2" maxlength="2000"></textarea></label>
+  <div class="actions"><button type="submit" class="button">Save asset</button></div>
+</form>
+{{end}}

@@ -169,3 +169,26 @@ body {
 .ops--UNKNOWN {
   color: #5f6470;
 }
+
+/* Network address grid (M9-1): one cell per address, colored by status. */
+.ipgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(2.6rem, 1fr));
+  gap: 2px;
+  margin: 0.5rem 0;
+}
+
+.ipgrid__cell {
+  padding: 0.15rem 0;
+  text-align: center;
+  font-size: 0.8rem;
+  border-radius: 3px;
+  background: #e8f5e9;
+}
+
+.ip--RESERVED { background: #fff3cd; }
+.ip--ASSIGNED { background: #cfe0ff; }
+.ip--DISCOVERED { background: #e0d7f5; }
+.ip--CONFLICT { background: #f8c9c9; font-weight: 700; }
+.ip--EXCLUDED { background: #dddddd; color: #555555; }
+.ip--UNKNOWN { background: #f0f0f0; }

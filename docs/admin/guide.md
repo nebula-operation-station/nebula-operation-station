@@ -327,6 +327,21 @@ inventory) with values from its actions' latest results; scripts write
 their result as one JSON object to the file `$NEBULA_RESULT` (runbooks
 can too).
 
+**Network.** Under *Network* you keep your networks (prefix, VLAN,
+gateway, pools such as `servers 192.168.10.10-192.168.10.49`) and the
+devices in them (*assets*: NAS, printer, switch, …, managed or not).
+Nebula computes each address's status from what claims it: an asset or a
+managed host's IP endpoint (ASSIGNED), your reservation (RESERVED), your
+exclusion and the network and broadcast address (EXCLUDED), a discovery
+sighting nobody claims (DISCOVERED), or two claimants or a different MAC
+(CONFLICT). Networks up to /22 show every address as a grid; larger ones
+and IPv6 list only the addresses something claims. The network page
+suggests free addresses (of the whole network or one pool) that discovery
+has not seen in 30 days: a suggestion, not a guarantee, because a device
+may be switched off. Nebula never manages DHCP or DNS. **Add to managed
+hosts** on an asset opens the inventory form with its values and links
+the new host to the asset; enroll it as in section 5.
+
 ## 8. Notifications
 
 Add a `notifications` block to `/etc/nebula/server.json`, keep the file
