@@ -605,13 +605,21 @@ func (c *claims) view(n Network, ad netip.Addr, now time.Time) AddressView {
 		v.Seen = &sn
 	}
 	owners := c.owners(v.Assets, v.Hosts)
+	netOrBroadcast := ad.Is4() && n.Prefix.Bits() <= 30 && (ad == n.Prefix.Addr() || ad == lastAddr(n.Prefix))
+	excluded := v.Entry != nil && v.Entry.Kind == EntryExcluded
 	switch {
-	case v.Entry != nil && v.Entry.Kind == EntryExcluded:
-		v.Status, v.Why = Excluded, "excluded: "+v.Entry.Note
-	case ad.Is4() && n.Prefix.Bits() <= 30 && (ad == n.Prefix.Addr() || ad == lastAddr(n.Prefix)):
-		v.Status, v.Why = Excluded, "network or broadcast address"
+	// A claim on an address nobody may use, or several claims, is always
+	// shown as a conflict (review m91 F1).
 	case owners > 1:
 		v.Status, v.Why = Conflict, "claimed by several assets or hosts"
+	case owners > 0 && netOrBroadcast:
+		v.Status, v.Why = Conflict, "claimed, but it is the network or broadcast address"
+	case owners > 0 && excluded:
+		v.Status, v.Why = Conflict, "claimed, but excluded: "+v.Entry.Note
+	case excluded:
+		v.Status, v.Why = Excluded, "excluded: "+v.Entry.Note
+	case netOrBroadcast:
+		v.Status, v.Why = Excluded, "network or broadcast address"
 	case v.Seen != nil && v.Seen.MAC != "" && len(v.Assets) == 1 && c.macs[ad][0] != "" && c.macs[ad][0] != v.Seen.MAC:
 		v.Status, v.Why = Conflict, "discovery saw MAC "+v.Seen.MAC+", the asset has "+c.macs[ad][0]
 	case v.Entry != nil && v.Entry.Kind == EntryReserved && v.Seen != nil && owners == 0 && now.Sub(v.Seen.At) < SuggestStale:
@@ -676,6 +684,20 @@ func size(p netip.Prefix) int {
 	return 1 << host
 }
 
+// StatusMany returns Status for several networks, reading the claims once
+// (the network list shows a summary of each).
+func (s *Store) StatusMany(ctx context.Context, nets []Network) (map[string][]AddressView, map[string]bool, error) {
+	c, err := s.claims(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	views, listed := map[string][]AddressView{}, map[string]bool{}
+	for _, n := range nets {
+		views[n.ID], listed[n.ID] = s.statusWith(c, n)
+	}
+	return views, listed, nil
+}
+
 // Status returns the addresses of a network with their status: every
 // address for a network of at most MaxListed addresses, otherwise only
 // the addresses something claims (listed is then false).
@@ -688,13 +710,18 @@ func (s *Store) Status(ctx context.Context, networkID string) ([]AddressView, bo
 	if err != nil {
 		return nil, false, err
 	}
+	out, listed := s.statusWith(c, n)
+	return out, listed, nil
+}
+
+func (s *Store) statusWith(c *claims, n Network) ([]AddressView, bool) {
 	now := s.now()
 	var out []AddressView
 	if size(n.Prefix) <= MaxListed {
 		for ad, i := n.Prefix.Addr(), 0; i < size(n.Prefix) && n.Prefix.Contains(ad); ad, i = ad.Next(), i+1 {
 			out = append(out, c.view(n, ad, now))
 		}
-		return out, true, nil
+		return out, true
 	}
 	known := map[netip.Addr]bool{}
 	for _, m := range []map[netip.Addr][]string{c.assets, c.hosts} {
@@ -717,7 +744,7 @@ func (s *Store) Status(ctx context.Context, networkID string) ([]AddressView, bo
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Address.Less(out[j].Address) })
-	return out, false, nil
+	return out, false
 }
 
 // Suggest returns up to count FREE addresses of a network (or of one of

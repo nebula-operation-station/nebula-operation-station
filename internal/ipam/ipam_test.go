@@ -63,6 +63,8 @@ func TestStatusRules(t *testing.T) {
 		{ID: "cam2", Name: "Cam 2", Kind: KindIoT, Addresses: []netip.Addr{addr("192.168.10.31")}},
 		{ID: "nas", Name: "NAS", Kind: KindNAS, HostID: "nas1", Addresses: []netip.Addr{addr("192.168.10.21")}},
 		{ID: "other", Name: "Other", Kind: KindUnknown, Addresses: []netip.Addr{addr("192.168.10.20")}},
+		{ID: "bcast", Name: "Bcast", Kind: KindUnknown, Addresses: []netip.Addr{addr("192.168.10.255")}},
+		{ID: "excl", Name: "Excl", Kind: KindUnknown, Addresses: []netip.Addr{addr("192.168.10.42")}},
 	} {
 		if err := s.SaveAsset(ctx, a); err != nil {
 			t.Fatal(err)
@@ -72,6 +74,9 @@ func TestStatusRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := s.SetEntry(ctx, "admin", addr("192.168.10.41"), EntryExcluded, "broken port"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetEntry(ctx, "admin", addr("192.168.10.42"), EntryExcluded, "spare"); err != nil {
 		t.Fatal(err)
 	}
 	now := s.now().Unix()
@@ -89,7 +94,8 @@ func TestStatusRules(t *testing.T) {
 	}
 	want := map[string]Status{
 		"192.168.10.0":   Excluded,   // network address
-		"192.168.10.255": Excluded,   // broadcast
+		"192.168.10.255": Conflict,   // broadcast, but an asset claims it
+		"192.168.10.42":  Conflict,   // excluded, but an asset claims it
 		"192.168.10.1":   Assigned,   // gateway
 		"192.168.10.2":   Free,       //
 		"192.168.10.20":  Conflict,   // host web1 and asset "other"

@@ -26,6 +26,7 @@ type NetworkStore interface {
 	SaveNetwork(ctx context.Context, n ipam.Network) error
 	DeleteNetwork(ctx context.Context, id string) error
 	Status(ctx context.Context, networkID string) ([]ipam.AddressView, bool, error)
+	StatusMany(ctx context.Context, nets []ipam.Network) (map[string][]ipam.AddressView, map[string]bool, error)
 	Suggest(ctx context.Context, networkID, pool string, count int) ([]netip.Addr, error)
 	SetEntry(ctx context.Context, user string, ad netip.Addr, kind, note string) error
 	ClearEntry(ctx context.Context, ad netip.Addr) error
@@ -97,10 +98,14 @@ func (h *Handler) handleNetworkPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "network data unavailable", http.StatusInternalServerError)
 		return
 	}
+	views, listed, err := h.network.StatusMany(ctx, nets)
+	if err != nil {
+		h.log.Error("network status", "error", err)
+	}
 	for _, n := range nets {
 		row := networkRow{ID: n.ID, Name: n.Name, Prefix: n.Prefix.String(), VLAN: n.VLAN, Gateway: addrText(n.Gateway)}
-		if views, listed, err := h.network.Status(ctx, n.ID); err == nil {
-			row.Counts = statusCounts(views, listed)
+		if views != nil {
+			row.Counts = statusCounts(views[n.ID], listed[n.ID])
 		}
 		data.Networks = append(data.Networks, row)
 	}
