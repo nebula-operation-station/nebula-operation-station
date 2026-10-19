@@ -285,3 +285,10 @@ func (l *lazyExecutor) GetArtifactTrust(ctx context.Context, in *pb.GetArtifactT
 	}
 	return nil, errNotConnected
 }
+
+func (l *lazyExecutor) RegisterModule(ctx context.Context, in *pb.RegisterModuleRequest, opts ...grpc.CallOption) (*pb.RegisterModuleResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.RegisterModule(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}

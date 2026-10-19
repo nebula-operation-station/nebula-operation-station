@@ -107,6 +107,9 @@ func signerAdd(ctx context.Context, c pb.ExecutorServiceClient, args []string, s
 }
 
 func moduleCmd(ctx context.Context, c pb.ExecutorServiceClient, args []string, stdin io.Reader, w io.Writer) error {
+	if len(args) > 0 && args[0] == "pack" {
+		return modulePack(args[1:], w)
+	}
 	if len(args) != 3 || args[0] != "confirm-signer" {
 		return errors.New("usage: nebula module confirm-signer MODULE SHA256:FINGERPRINT")
 	}

@@ -26,6 +26,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executorclient"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/modules"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/runbooks"
@@ -206,6 +207,9 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	// Runbooks (M7-2) are planned like built-in actions.
 	rb := runbooks.New(db)
 	ops.SetRunbooks(rb)
+	// Modules (M7-5): the executor verifies their signatures.
+	mods := modules.New(db, exec)
+	ops.SetModules(mods)
 	if err := ops.Resume(connCtx); err != nil {
 		log.Error("resume executions", "error", err)
 	}
@@ -223,6 +227,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		Schedules:    ops,
 		Runbooks:     rb,
 		Trust:        exec,
+		Modules:      mods,
 		Repin:        exec,
 		Enroll:       exec,
 		Log:          log,

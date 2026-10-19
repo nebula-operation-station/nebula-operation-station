@@ -107,6 +107,8 @@ type Options struct {
 	// Trust asks the executor about artifact trust (runbook pages). Nil
 	// shows "unknown" and no trust button.
 	Trust ArtifactTrust
+	// Modules imports and lists modules. Nil hides the modules pages.
+	Modules Modules
 	// Repin re-pins hosts blocked by a host key mismatch. Nil leaves only
 	// the CLI instructions on the dashboard.
 	Repin Repinner
@@ -134,6 +136,7 @@ type Handler struct {
 	schedules  Schedules
 	runbooks   Runbooks
 	trust      ArtifactTrust
+	modules    Modules
 	log        *slog.Logger
 	repin      Repinner
 	enroll     Enroller
@@ -173,6 +176,7 @@ func New(o Options) (*Handler, error) {
 		schedules:    o.Schedules,
 		runbooks:     o.Runbooks,
 		trust:        o.Trust,
+		modules:      o.Modules,
 		repin:        o.Repin,
 		enroll:       o.Enroll,
 		log:          log,
@@ -197,6 +201,8 @@ var pageFiles = map[string]string{
 	"runbooks":         "runbooks.html",
 	"runbook":          "runbook.html",
 	"runbook_edit":     "runbook_edit.html",
+	"modules":          "modules.html",
+	"module":           "module.html",
 }
 
 // Handler returns the UI's http.Handler without the security middleware
@@ -238,6 +244,11 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("POST /runbooks/save", h.handleRunbookSave)
 	mux.HandleFunc("POST /runbooks/trust/begin", h.handleRunbookTrustBegin)
 	mux.HandleFunc("POST /runbooks/trust/commit", h.handleRunbookTrustCommit)
+	// Modules (M7-5).
+	mux.HandleFunc("GET /modules", h.handleModules)
+	mux.HandleFunc("GET /modules/{name}", h.handleModule)
+	mux.HandleFunc("POST /modules/import", h.handleModuleImport)
+	mux.HandleFunc("POST /modules/verify", h.handleModuleVerify)
 	mux.HandleFunc("POST /hostkeys/repin/propose", h.handleRepinPropose)
 	mux.HandleFunc("POST /hostkeys/repin/commit", h.handleRepinCommit)
 	mux.HandleFunc("GET /inventory/enroll", h.handleEnrollPage)
@@ -306,6 +317,8 @@ type pageData struct {
 	Schedules *schedulesData
 	// Runbooks is the data of the runbook pages.
 	Runbooks *runbooksData
+	// Modules is the data of the module pages.
+	Modules *modulesData
 	// Ops is the data of the operations pages.
 	Ops *operationsData
 	// InventoryEditable is true when Options.Inventory is set; the

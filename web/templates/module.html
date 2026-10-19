@@ -1,0 +1,28 @@
+{{define "content"}}
+{{with .Modules.Detail}}
+<h1>Module {{.Name}} {{.Version}}</h1>
+<section class="panel" aria-label="Module">
+  <p class="status">{{.Title}}</p>
+  {{if .Description}}<p class="hint">{{.Description}}</p>{{end}}
+  <p class="status">{{if .Verified}}Verified: signed by {{.Signer}}; the executor trusts its actions at their declared risk.{{else}}<span class="status--error">Unverified</span>: {{.Detail}}{{end}}</p>
+  <p class="status">Lock SHA-256: <code>{{.LockSHA256}}</code>; imported {{.Imported}}</p>
+  <div class="actions"><button type="button" id="module-verify" class="button" data-name="{{.Name}}" data-version="{{.Version}}">Verify again</button></div>
+  {{range .Actions}}
+  <h2>{{.Title}} <code>{{.ID}}</code></h2>
+  {{if .Description}}<p class="hint">{{.Description}}</p>{{end}}
+  <p class="status">Declared {{.Risk}}; {{.Kind}}{{if .Declares}}; declares {{.Declares}}{{end}}{{if .Secrets}}; secret slots {{.Secrets}}{{end}}</p>
+  {{if .Scanner}}<p class="status">Safety scanner (advisory; it can only raise the risk):
+    {{range $i, $f := .Scanner}}{{if $i}}; {{end}}{{$f.Category}} at line {{$f.Line}} (<code>{{$f.Excerpt}}</code>){{end}}</p>{{end}}
+  {{if .Params}}<p class="status">Parameters: {{range $i, $p := .Params}}{{if $i}}, {{end}}{{$p.Name}} ({{$p.Type}}{{if $p.Choices}}: {{$p.Choices}}{{end}}){{end}}</p>{{end}}
+  <div class="actions"><a class="button" href="/operations/new?action={{.ID}}">Plan operation</a></div>
+  <details><summary>Script {{.Script}}</summary><pre class="output">{{.Body}}</pre></details>
+  {{end}}
+  <h2>Versions</h2>
+  <table class="inventory">
+    <thead><tr><th>Version</th><th>State</th><th>Imported</th></tr></thead>
+    <tbody>{{range .Versions}}<tr><td><a href="/modules/{{.Name}}?version={{.Version}}">{{.Version}}</a></td><td>{{.State}}</td><td>{{.Imported}}</td></tr>{{end}}</tbody>
+  </table>
+</section>
+{{end}}
+<p id="message" class="message" role="status" aria-live="polite"></p>
+{{end}}

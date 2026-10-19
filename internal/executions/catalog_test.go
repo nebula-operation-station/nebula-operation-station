@@ -3,12 +3,17 @@
 package executions
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/modules"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/runbooks"
 )
@@ -101,5 +106,53 @@ func TestRunbookSecretsAreInTheParameters(t *testing.T) {
 	// Built-ins have no slots and take no mapping.
 	if _, err := s.CreateStaged(ctx, "axel", "core.facts", []string{"web"}, nil, Plan{Secrets: map[string]string{"token": "x"}}); !errors.As(err, &pe) {
 		t.Fatal(err)
+	}
+}
+
+// M7-5: module actions are planned like built-ins, at their version.
+func TestModuleActionsArePlannable(t *testing.T) {
+	f := &fakeExec{}
+	s, db := setup(t, f)
+	ms := modules.New(db, nil)
+	s.SetModules(ms)
+	ctx := context.Background()
+	read := func(n string) []byte {
+		b, err := os.ReadFile("../../test/security/testdata/module/" + n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(zw)
+	for name, b := range map[string][]byte{"module.lock.json": read("lock-1.0.0.json"), "actions/hello.sh": read("hello.sh"), "actions/restart.sh": read("restart.sh")} {
+		_ = tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(b)), Typeflag: tar.TypeReg})
+		_, _ = tw.Write(b)
+	}
+	_ = tw.Close()
+	_ = zw.Close()
+	if _, err := ms.Import(ctx, "axel", buf.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	all, _ := s.Catalog(ctx)
+	found := false
+	for _, a := range all {
+		found = found || (a.ID == "demo.hello" && a.Version == "1.0.0")
+	}
+	if !found {
+		t.Fatal("module action not in the catalog")
+	}
+	if _, err := s.Create(ctx, "axel", "demo.hello", []string{"web"}, map[string]string{"who": "you"}); err != nil {
+		t.Fatal(err)
+	}
+	if r := f.proposed.GetRequest(); r.GetActionId() != "demo.hello" || r.GetModuleVersion() != "1.0.0" {
+		t.Fatal(r)
+	}
+	if _, ok, _ := s.Action(ctx, "demo.hello", "9.9.9"); ok {
+		t.Fatal("unknown version found")
+	}
+	if _, ok, _ := s.Action(ctx, "docker.nope", ""); ok {
+		t.Fatal("unknown built-in family action found")
 	}
 }

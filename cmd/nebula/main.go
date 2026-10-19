@@ -57,6 +57,8 @@ commands:
                       module signers (ssh-ed25519); adding one is CRITICAL (type the fingerprint)
   module confirm-signer MODULE SHA256:FINGERPRINT
                       accept a new signer for a module after reviewing it
+  module pack [--archive OUT.tar.gz] DIR
+                      write DIR/module.lock.json from module.yaml (to sign), or the archive to import
   host enroll-script --from ADDR[,ADDR] [--user nebula] [--key REF] [--no-sudo]
                       print a script to run on a new host: user, restricted key, sudo
   host probe ENDPOINT...
@@ -107,6 +109,10 @@ func run(cmd string, args []string) error {
 	if cmd == "version" {
 		fmt.Println(version.String())
 		return nil
+	}
+	// Packing a module is the author's step; it needs no executor.
+	if cmd == "module" && len(args) > 0 && args[0] == "pack" {
+		return modulePack(args[1:], os.Stdout)
 	}
 	sock := envOr("NEBULA_EXECUTOR_SOCKET", "/run/nebula/executor.sock")
 	execUser := envOr("NEBULA_EXECUTOR_USER", "nebula-executor")
