@@ -20,6 +20,8 @@
   <div class="actions">
     <button type="button" id="runbook-trust" class="button" data-slug="{{.Slug}}" data-version="{{.Version}}">Trust this version as {{.Risk}} (security key)</button>
   </div>
+  <p class="hint">The executor stores the trust with the label <code>runbook {{.Slug}} version {{.Version}}</code>; your key covers
+    hash, action, version, risk and this label.</p>
   {{end}}
   <p class="hint">Trusting lets the executor rate exactly these bytes at their declared risk instead of HIGH (the Safety Scanner can
     still raise it). Read the script below first. In hardened mode, or on the executor host, run instead

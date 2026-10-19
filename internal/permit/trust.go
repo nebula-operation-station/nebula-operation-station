@@ -44,8 +44,10 @@ func trustChallenge(t PendingTrust) ([]byte, error) {
 		return nil, fmt.Errorf("permit: nonce: %w", err)
 	}
 	h := sha256.New()
-	h.Write([]byte("nebula-artifact-trust-v1\x00"))
-	for _, s := range []string{t.SHA256, t.ActionID, t.ModuleVersion, string(t.Risk)} {
+	// The label is bound too: it is stored with the trust and shown by
+	// `nebula artifact list`, so the key press must cover it.
+	h.Write([]byte("nebula-artifact-trust-v2\x00"))
+	for _, s := range []string{t.SHA256, t.ActionID, t.ModuleVersion, string(t.Risk), t.Label} {
 		h.Write([]byte(s))
 		h.Write([]byte{0})
 	}
