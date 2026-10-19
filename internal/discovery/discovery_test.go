@@ -92,6 +92,16 @@ func TestSubmitChecksTargets(t *testing.T) {
 	if err := f.s.Cancel(ctx, j.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatal(err)
 	}
+	// At most MaxQueued scans wait.
+	for i := 0; i < MaxQueued; i++ {
+		if _, err := f.s.Submit(ctx, "admin", Request{Mode: discoveryjob.ModePing, Targets: []string{"192.168.10.1"}}); err != nil {
+			t.Fatal(i, err)
+		}
+	}
+	var ve *ValidationError
+	if _, err := f.s.Submit(ctx, "admin", Request{Mode: discoveryjob.ModePing, Targets: []string{"192.168.10.1"}}); !errors.As(err, &ve) {
+		t.Fatal("queue not bounded", err)
+	}
 	// Without the spool, discovery is not installed.
 	_ = os.RemoveAll(f.pool.JobsDir())
 	if _, err := f.s.Submit(ctx, "admin", Request{Mode: discoveryjob.ModePing, Targets: []string{"192.168.10.0/24"}}); !errors.Is(err, ErrUnavailable) {

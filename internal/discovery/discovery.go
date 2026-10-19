@@ -49,6 +49,7 @@ const (
 // Limits and timing.
 const (
 	MinInterval   = time.Hour
+	MaxQueued     = 8             // queued scans at a time (review m92 F3)
 	resultTimeout = 3 * time.Hour // no result after this: failed
 	keepJobs      = 90 * 24 * time.Hour
 	tick          = 30 * time.Second
@@ -206,6 +207,13 @@ func (s *Store) submit(ctx context.Context, user string, req Request, scheduleID
 	j, err := s.job(ctx, req)
 	if err != nil {
 		return JobRow{}, err
+	}
+	var queued int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM discovery_jobs WHERE state = ?`, StateQueued).Scan(&queued); err != nil {
+		return JobRow{}, err
+	}
+	if queued >= MaxQueued {
+		return JobRow{}, invalid("%d scans are waiting already; let them finish or cancel some", queued)
 	}
 	spec, err := json.Marshal(j)
 	if err != nil {
@@ -487,6 +495,10 @@ func (m *matcher) classify(r *Row) {
 				}
 			}
 			r.Class, r.Reason = ClassExisting, "same MAC as asset "+a.ID
+			if len(atAddr) == 0 {
+				// Say it: the import gives the asset a new address (review m92 F2).
+				r.Reason += "; importing adds this address to it"
+			}
 			r.Importable = len(atAddr) == 0 || r.Hostname != "" && a.Hostname == ""
 			return
 		}
