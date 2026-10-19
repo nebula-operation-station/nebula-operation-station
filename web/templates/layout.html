@@ -17,6 +17,9 @@
     <a class="nav__item{{if eq .Active "runbooks"}} nav__item--active{{end}}" href="/runbooks">Runbooks / Modules</a>
     <a class="nav__item{{if eq .Active "history"}} nav__item--active{{end}}" href="/history">History</a>
     <a class="nav__item{{if eq .Active "settings"}} nav__item--active{{end}}" href="/settings">Settings</a>
+    <form class="nav__search" action="/search" method="get" role="search">
+      <input type="search" name="q" maxlength="100" placeholder="Search hosts, IPs, assets …" aria-label="Search"{{with .Search}} value="{{.Query}}"{{end}}>
+    </form>
     <button type="button" class="nav__logout" id="logout">Log out</button>
   </nav>
   {{end}}

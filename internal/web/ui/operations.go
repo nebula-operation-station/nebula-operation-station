@@ -102,6 +102,8 @@ type paramView struct {
 type opsHostOption struct {
 	ID, Name, Status string
 	Usable           bool
+	// Checked preselects the host (a quick action from search: ?host=ID).
+	Checked bool
 }
 
 type execView struct {
@@ -243,7 +245,8 @@ func (h *Handler) handleOperationNew(w http.ResponseWriter, r *http.Request) {
 			if name == "" {
 				name = x.ID
 			}
-			ops.Hosts = append(ops.Hosts, opsHostOption{ID: x.ID, Name: name, Status: st, Usable: usable[x.ID]})
+			ops.Hosts = append(ops.Hosts, opsHostOption{ID: x.ID, Name: name, Status: st, Usable: usable[x.ID],
+				Checked: usable[x.ID] && slices.Contains(r.URL.Query()["host"], x.ID)})
 		}
 	}
 	data.Ops = ops

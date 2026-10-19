@@ -221,6 +221,7 @@ var pageFiles = map[string]string{
 	"network":          "network.html",
 	"network_detail":   "network_detail.html",
 	"asset":            "asset.html",
+	"search":           "search.html",
 	"discovery":        "discovery.html",
 	"discovery_job":    "discovery_job.html",
 }
@@ -277,6 +278,8 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("POST /modules/import", h.handleModuleImport)
 	mux.HandleFunc("POST /modules/verify", h.handleModuleVerify)
 	mux.HandleFunc("GET /hosts/{id}", h.handleHost)
+	// Global search (M9-3): read-only, quick actions are links.
+	mux.HandleFunc("GET /search", h.handleSearch)
 	// Network: assets and IPAM-light (M9-1).
 	mux.HandleFunc("GET /network", h.handleNetworkPage)
 	mux.HandleFunc("GET /network/n/{id}", h.handleNetworkDetail)
@@ -367,6 +370,8 @@ type pageData struct {
 	Network *networkData
 	// Discovery is the data of the discovery pages.
 	Discovery *discoveryData
+	// Search is the data of the search page.
+	Search *searchData
 	// InventoryPrefill is the JSON that prefills the add-host form from
 	// an asset ("add to managed hosts").
 	InventoryPrefill string
