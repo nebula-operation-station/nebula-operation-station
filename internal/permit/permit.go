@@ -283,6 +283,8 @@ type Authority struct {
 	// holds the proposed ones until approval.
 	schedules ScheduleStore
 	grants    map[string]*pendingGrant
+	// trusts holds browser trust requests until their assertion (M7-4).
+	trusts map[string]*PendingTrust
 
 	mu          sync.Mutex
 	permits     map[canonical.Digest]*Permit
@@ -331,6 +333,7 @@ func New(o Options) (*Authority, error) {
 		schedules:  o.Schedules,
 		grants:     map[string]*pendingGrant{},
 		scans:      map[string]scanResult{},
+		trusts:     map[string]*PendingTrust{},
 	}, nil
 }
 
@@ -804,6 +807,7 @@ func (a *Authority) Lock(who string) {
 	// Pending schedule grants go too; approved ones stay (they need an
 	// unlocked keyring to run anyway, and are revoked one by one).
 	a.grants = map[string]*pendingGrant{}
+	a.trusts = map[string]*PendingTrust{}
 	// Execution IDs stay reserved so a revoked request cannot be re-bound to
 	// different content under the same ID.
 	a.emit(Event{Kind: "locked", Detail: fmt.Sprintf("by %s, %d permits revoked", who, n)})

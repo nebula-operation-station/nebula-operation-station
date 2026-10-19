@@ -601,6 +601,30 @@ func (c *Client) RunScheduled(ctx context.Context, in *pb.RunScheduledRequest, o
 	return resp, mapError(err)
 }
 
+// BeginTrustArtifact: Starts trusting an artifact from the browser (server role).
+func (c *Client) BeginTrustArtifact(ctx context.Context, in *pb.BeginTrustArtifactRequest, opts ...grpc.CallOption) (*pb.BeginTrustArtifactResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.BeginTrustArtifact(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// CommitTrustArtifact: Trusts the artifact with the security key's assertion (server role).
+func (c *Client) CommitTrustArtifact(ctx context.Context, in *pb.CommitTrustArtifactRequest, opts ...grpc.CallOption) (*pb.CommitTrustArtifactResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.CommitTrustArtifact(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// GetArtifactTrust: Whether the executor trusts an artifact (server and admin roles).
+func (c *Client) GetArtifactTrust(ctx context.Context, in *pb.GetArtifactTrustRequest, opts ...grpc.CallOption) (*pb.GetArtifactTrustResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.GetArtifactTrust(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
 // Compile-time check: the client must implement the generated interface so
 // that a generated-code change breaks the build here.
 var _ pb.ExecutorServiceClient = (*Client)(nil)

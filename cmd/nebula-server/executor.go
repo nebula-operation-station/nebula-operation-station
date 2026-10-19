@@ -264,3 +264,24 @@ func (l *lazyExecutor) ListScheduleGrants(ctx context.Context, in *pb.ListSchedu
 	}
 	return nil, errNotConnected
 }
+
+func (l *lazyExecutor) BeginTrustArtifact(ctx context.Context, in *pb.BeginTrustArtifactRequest, opts ...grpc.CallOption) (*pb.BeginTrustArtifactResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.BeginTrustArtifact(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) CommitTrustArtifact(ctx context.Context, in *pb.CommitTrustArtifactRequest, opts ...grpc.CallOption) (*pb.CommitTrustArtifactResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.CommitTrustArtifact(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) GetArtifactTrust(ctx context.Context, in *pb.GetArtifactTrustRequest, opts ...grpc.CallOption) (*pb.GetArtifactTrustResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.GetArtifactTrust(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}

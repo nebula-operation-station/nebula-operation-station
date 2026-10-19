@@ -222,6 +222,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		Operations:   ops,
 		Schedules:    ops,
 		Runbooks:     rb,
+		Trust:        exec,
 		Repin:        exec,
 		Enroll:       exec,
 		Log:          log,

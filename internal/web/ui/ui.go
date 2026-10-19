@@ -104,6 +104,9 @@ type Options struct {
 	Schedules Schedules
 	// Runbooks stores runbooks. Nil leaves the runbooks page empty.
 	Runbooks Runbooks
+	// Trust asks the executor about artifact trust (runbook pages). Nil
+	// shows "unknown" and no trust button.
+	Trust ArtifactTrust
 	// Repin re-pins hosts blocked by a host key mismatch. Nil leaves only
 	// the CLI instructions on the dashboard.
 	Repin Repinner
@@ -130,6 +133,7 @@ type Handler struct {
 	operations Operations
 	schedules  Schedules
 	runbooks   Runbooks
+	trust      ArtifactTrust
 	log        *slog.Logger
 	repin      Repinner
 	enroll     Enroller
@@ -168,6 +172,7 @@ func New(o Options) (*Handler, error) {
 		operations:   o.Operations,
 		schedules:    o.Schedules,
 		runbooks:     o.Runbooks,
+		trust:        o.Trust,
 		repin:        o.Repin,
 		enroll:       o.Enroll,
 		log:          log,
@@ -231,6 +236,8 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("GET /runbooks/{slug}", h.handleRunbook)
 	mux.HandleFunc("GET /runbooks/{slug}/{version}/artifact", h.handleRunbookArtifact)
 	mux.HandleFunc("POST /runbooks/save", h.handleRunbookSave)
+	mux.HandleFunc("POST /runbooks/trust/begin", h.handleRunbookTrustBegin)
+	mux.HandleFunc("POST /runbooks/trust/commit", h.handleRunbookTrustCommit)
 	mux.HandleFunc("POST /hostkeys/repin/propose", h.handleRepinPropose)
 	mux.HandleFunc("POST /hostkeys/repin/commit", h.handleRepinCommit)
 	mux.HandleFunc("GET /inventory/enroll", h.handleEnrollPage)

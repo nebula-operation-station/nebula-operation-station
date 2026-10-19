@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -129,4 +130,53 @@ func (s *Service) adminStoreError(op string, err error) error {
 	}
 	s.log.Error("audit", "kind", "store_error", "op", op, "detail", err.Error())
 	return status.Error(codes.Unavailable, "storage_error: "+err.Error())
+}
+
+// BeginTrustArtifact starts trusting an artifact from the browser (M7-4).
+func (s *Service) BeginTrustArtifact(_ context.Context, req *pb.BeginTrustArtifactRequest) (*pb.BeginTrustArtifactResponse, error) {
+	risk, err := riskFromProto(req.GetRiskClass())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	// The label is checked now, so that a bad one fails before the key.
+	if err := executordb.CheckLabel(req.GetLabel()); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	t, err := s.auth.BeginTrust(req.GetArtifact(), req.GetActionId(), req.GetModuleVersion(), risk, req.GetLabel())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	opts, err := s.reg.RequestOptions(t.Challenge, time.Until(t.Expiry))
+	if err != nil {
+		return nil, status.Error(codes.Internal, "request options")
+	}
+	return &pb.BeginTrustArtifactResponse{TrustId: t.ID, ArtifactSha256: t.SHA256, Challenge: t.Challenge, RequestOptionsJson: opts,
+		ChallengeExpiryUnix: t.Expiry.Unix()}, nil
+}
+
+// CommitTrustArtifact trusts the artifact once the assertion verifies.
+func (s *Service) CommitTrustArtifact(_ context.Context, req *pb.CommitTrustArtifactRequest) (*pb.CommitTrustArtifactResponse, error) {
+	t, by, err := s.auth.CommitTrust(req.GetTrustId(), req.GetAssertionJson())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	a := executordb.TrustedArtifact{SHA256: t.SHA256, ActionID: t.ActionID, ModuleVersion: t.ModuleVersion, Risk: t.Risk, Label: t.Label, TrustedBy: by}
+	if err := s.db.TrustArtifact(a); err != nil {
+		return nil, s.adminStoreError("trust_artifact", err)
+	}
+	s.log.Info("audit", "kind", "artifact_trusted", "by", by, "artifact_sha256", a.SHA256, "action", a.ActionID,
+		"version", a.ModuleVersion, "risk", string(a.Risk), "label", a.Label)
+	return &pb.CommitTrustArtifactResponse{ArtifactSha256: t.SHA256}, nil
+}
+
+// GetArtifactTrust reports the executor's trust in an artifact.
+func (s *Service) GetArtifactTrust(_ context.Context, req *pb.GetArtifactTrustRequest) (*pb.GetArtifactTrustResponse, error) {
+	risk, ok, err := s.db.ArtifactRisk(req.GetArtifactSha256(), req.GetActionId(), req.GetModuleVersion())
+	if err != nil {
+		return nil, s.adminStoreError("artifact_trust", err)
+	}
+	if !ok {
+		return &pb.GetArtifactTrustResponse{}, nil
+	}
+	return &pb.GetArtifactTrustResponse{Trusted: true, RiskClass: riskToProto(risk)}, nil
 }

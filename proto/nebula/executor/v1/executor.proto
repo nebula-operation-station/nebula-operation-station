@@ -264,6 +264,16 @@ service ExecutorService {
   // Role: admin. Hardened gate path (`nebula approve --stage`, `--skip`).
   rpc ApproveGateCLI(ApproveGateCLIRequest) returns (ApproveGateCLIResponse);
 
+  // Trust an artifact from the browser (M7-4). Role: server. The executor
+  // hashes the bytes and binds a fresh user-verified assertion to (hash,
+  // action, version, risk); needs the privileged session; hardened mode
+  // refuses (cli_required) and keeps `nebula artifact trust`.
+  rpc BeginTrustArtifact(BeginTrustArtifactRequest) returns (BeginTrustArtifactResponse);
+  rpc CommitTrustArtifact(CommitTrustArtifactRequest) returns (CommitTrustArtifactResponse);
+  // Role: server, admin. Whether the executor trusts these bytes as this
+  // action and version, and at which risk.
+  rpc GetArtifactTrust(GetArtifactTrustRequest) returns (GetArtifactTrustResponse);
+
   // Schedule grants (docs/implementation/schedule-grants.md): standing
   // permission, approved with the security key, to run fixed actions that
   // the executor rates LOW on fixed hosts at most once per interval, until
@@ -1201,4 +1211,41 @@ message RunScheduledResponse {
   // The execution ID the executor gave the run.
   string execution_id = 1;
   RunAttachedResponse result = 2;
+}
+
+message BeginTrustArtifactRequest {
+  bytes artifact = 1;
+  string action_id = 2;
+  string module_version = 3;
+  RiskClass risk_class = 4;
+  // Shown in `nebula artifact list`; plain text, at most 200 characters.
+  string label = 5;
+}
+
+message BeginTrustArtifactResponse {
+  string trust_id = 1;
+  string artifact_sha256 = 2;
+  bytes challenge = 3;
+  bytes request_options_json = 4;
+  int64 challenge_expiry_unix = 5;
+}
+
+message CommitTrustArtifactRequest {
+  string trust_id = 1;
+  bytes assertion_json = 2;
+}
+
+message CommitTrustArtifactResponse {
+  string artifact_sha256 = 1;
+}
+
+message GetArtifactTrustRequest {
+  string artifact_sha256 = 1;
+  string action_id = 2;
+  string module_version = 3;
+}
+
+message GetArtifactTrustResponse {
+  bool trusted = 1;
+  RiskClass risk_class = 2;
 }

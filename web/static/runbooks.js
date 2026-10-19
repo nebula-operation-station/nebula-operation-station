@@ -6,6 +6,25 @@
 
 (() => {
   const w = nebulaWebAuthn;
+
+  // Trust a version on the executor with the security key (M7-4).
+  const trust = document.getElementById('runbook-trust');
+  if (trust) {
+    trust.addEventListener('click', async () => {
+      trust.disabled = true;
+      try {
+        const b = await w.post('/runbooks/trust/begin', { slug: trust.dataset.slug, version: parseInt(trust.dataset.version, 10) });
+        w.show('Touch your security key…', false);
+        const cred = await navigator.credentials.get(w.requestOptions(b.options));
+        await w.post('/runbooks/trust/commit', { trust_id: b.trust_id, assertion: w.assertionJSON(cred) });
+        window.location.reload();
+      } catch (err) {
+        w.show(err.name === 'NotAllowedError' ? 'Cancelled or timed out.' : (err.message || 'Could not trust this version.'), true);
+        trust.disabled = false;
+      }
+    });
+  }
+
   const form = document.getElementById('runbook-form');
   if (!form) {
     return;
