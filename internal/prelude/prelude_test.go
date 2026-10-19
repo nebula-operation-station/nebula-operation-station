@@ -52,3 +52,26 @@ func TestResultFile(t *testing.T) {
 		}
 	}
 }
+
+// The natural `echo '{…}' > "$NEBULA_RESULT"` gives a one-line document,
+// and the result file goes into the run directory when there is one.
+func TestResultFileNewlineAndRunDir(t *testing.T) {
+	out, err := runArtifact(t, `echo '{"v":1}' > "$NEBULA_RESULT"`)
+	if err != nil || strings.Count(out, "\n") != 1 || !strings.HasSuffix(out, `"result":{"v":1}}`+"\n") {
+		t.Fatalf("%q %v", out, err)
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	dir, run := t.TempDir(), t.TempDir()
+	script, pf := filepath.Join(dir, "a.sh"), filepath.Join(dir, "p.json")
+	_ = os.WriteFile(script, Build("test", nil, nil, `case $NEBULA_RESULT in "$NEBULA_RUN_DIR"/*) echo '{"in":true}' > "$NEBULA_RESULT";; esac`), 0o600)
+	_ = os.WriteFile(pf, []byte(`{}`), 0o600)
+	cmd := exec.Command(sh, script)
+	cmd.Env = []string{"NEBULA_PARAMS=" + pf, "PATH=" + os.Getenv("PATH"), "NEBULA_RUN_DIR=" + run}
+	b, err := cmd.Output()
+	if err != nil || !strings.Contains(string(b), `"result":{"in":true}`) {
+		t.Fatalf("%q %v", b, err)
+	}
+}

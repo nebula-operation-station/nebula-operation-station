@@ -146,12 +146,16 @@ func Check(params []Param, secrets []string) (string, bool) {
 // NEBULA_SECRET_<SLOT>; the value itself never appears in the environment.
 //
 // The script runs in a subshell with stdin from /dev/null and its stdout
-// sent to the log (stderr): the result document (stdout) is always the
-// prelude's own one line, {"format":"runbook-v1","phase":"done","exit":N},
-// and the run's exit status is the script's. A script that has a result
-// writes one JSON object (at most 64 KiB) to the file $NEBULA_RESULT; the
-// prelude embeds it as "result" (anything that is not one JSON object
-// makes the run's result invalid, which the executor reports).
+// sent to the log (stderr): the result document (stdout) is the prelude's
+// own, {"format":"runbook-v1","phase":"done","exit":N}, and the run's exit
+// status is the script's. A script that has a result writes one JSON
+// object (at most 64 KiB) to the file $NEBULA_RESULT; the prelude embeds it
+// as "result" (trailing newlines dropped; it may span lines). Anything that
+// is not one JSON object, or a document naming a top-level member twice,
+// makes the run's result invalid, which the executor reports. The result
+// file lives in the bootstrap's private run directory when there is one
+// ($NEBULA_RUN_DIR), so it goes with that directory even if the prelude's
+// shell is killed.
 func Build(title string, params []Param, secrets []string, body string) []byte {
 	var b strings.Builder
 	b.WriteString("#!/bin/sh\n")
@@ -173,7 +177,7 @@ nebula_get() { sed -n 's/.*"'"$1"'":"\([^"\\]*\)".*/\1/p' "$NEBULA_PARAMS" | hea
 		b.WriteString("NEBULA_SECRET_" + up + "=$NEBULA_SECRETS_DIR/" + slot + "; export NEBULA_SECRET_" + up + "\n")
 	}
 	b.WriteString(`unset v
-NEBULA_RESULT=$(mktemp "${TMPDIR:-/tmp}/nebula-result.XXXXXXXXXX") || nebula_fail "cannot create the result file"
+NEBULA_RESULT=$(mktemp "${NEBULA_RUN_DIR:-${TMPDIR:-/tmp}}/nebula-result.XXXXXXXXXX") || nebula_fail "cannot create the result file"
 export NEBULA_RESULT
 trap 'rm -f "$NEBULA_RESULT"' EXIT
 set +u
@@ -189,9 +193,7 @@ set +u
 ( nebula_main ) </dev/null 1>&2
 rc=$?
 if [ -s "$NEBULA_RESULT" ] && [ "$(wc -c < "$NEBULA_RESULT")" -le 65536 ] && [ "$(head -c 1 "$NEBULA_RESULT")" = "{" ]; then
-  printf '{"format":"runbook-v1","phase":"done","exit":%d,"result":' "$rc"
-  cat "$NEBULA_RESULT"
-  printf '}\n'
+  printf '{"format":"runbook-v1","phase":"done","exit":%d,"result":%s}\n' "$rc" "$(cat "$NEBULA_RESULT")"
 else
   printf '{"format":"runbook-v1","phase":"done","exit":%d}\n' "$rc"
 fi

@@ -102,7 +102,7 @@ IFS= read -r p || { echo "nebula-bootstrap: no parameters" >&2; exit 121; }
 printf '%%s' "$p" | base64 -d > "$d/params.json" || { echo "nebula-bootstrap: base64 failed" >&2; exit 122; }
 %[2]scat > "$d/action.sh" || { echo "nebula-bootstrap: cannot write the script" >&2; exit 123; }
 cd "$d" || { echo "nebula-bootstrap: cd failed" >&2; exit 124; }
-NEBULA_EXECUTION_ID=%[1]s NEBULA_PARAMS="$d/params.json" NEBULA_SECRETS_DIR="$s" /bin/sh "$d/action.sh" </dev/null
+NEBULA_EXECUTION_ID=%[1]s NEBULA_PARAMS="$d/params.json" NEBULA_SECRETS_DIR="$s" NEBULA_RUN_DIR="$d" /bin/sh "$d/action.sh" </dev/null
 `
 
 // attachedSecrets puts the secrets of an attached run into a new private
@@ -296,6 +296,37 @@ func oneJSONDocument(b []byte) bool {
 	if err := dec.Decode(&v); err != nil {
 		return false
 	}
-	_, err := dec.Token()
-	return err == io.EOF
+	if _, err := dec.Token(); err != io.EOF {
+		return false
+	}
+	return !duplicateTopLevel(v)
+}
+
+// duplicateTopLevel reports whether an object document names a top-level
+// member twice. Decoders resolve duplicates differently (Go takes the
+// last), so a script could otherwise shadow members the prelude wrote,
+// such as "exit" or "format".
+func duplicateTopLevel(doc []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(doc))
+	t, err := dec.Token()
+	if err != nil || t != json.Delim('{') {
+		return false
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		k, err := dec.Token()
+		if err != nil {
+			return true
+		}
+		key, _ := k.(string)
+		if seen[key] {
+			return true
+		}
+		seen[key] = true
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return true
+		}
+	}
+	return false
 }

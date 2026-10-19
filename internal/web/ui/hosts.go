@@ -65,10 +65,14 @@ func (h *Handler) handleHost(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					h.log.Error("last result", "error", err)
 				}
+				var obj map[string]any
+				if ok {
+					obj = resultObject(res) // parsed once per card
+				}
 				for _, f := range c.Fields {
 					val := "—"
-					if ok {
-						val = fieldValue(res, f.Path)
+					if obj != nil {
+						val = fieldValue(obj, f.Path)
 					}
 					cv.Fields = append(cv.Fields, moduleFieldView{Label: f.Label, Value: val})
 				}
@@ -83,16 +87,22 @@ func (h *Handler) handleHost(w http.ResponseWriter, r *http.Request) {
 	h.render(w, data)
 }
 
-// fieldValue reads path from the "result" object of a runbook-v1 result
-// document and returns it as one line of plain text.
-func fieldValue(result []byte, path string) string {
+// resultObject returns the "result" object of a runbook-v1 result
+// document, or nil.
+func resultObject(result []byte) map[string]any {
 	var doc struct {
 		Result map[string]any `json:"result"`
 	}
-	if json.Unmarshal(result, &doc) != nil || doc.Result == nil {
-		return "—"
+	if json.Unmarshal(result, &doc) != nil {
+		return nil
 	}
-	var cur any = doc.Result
+	return doc.Result
+}
+
+// fieldValue reads path from a result object and returns it as one line
+// of plain text.
+func fieldValue(obj map[string]any, path string) string {
+	var cur any = obj
 	for _, seg := range strings.Split(path, ".") {
 		m, ok := cur.(map[string]any)
 		if !ok {
