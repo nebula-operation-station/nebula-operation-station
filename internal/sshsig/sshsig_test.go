@@ -5,6 +5,8 @@ package sshsig
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha512"
+	"encoding/base64"
 	"errors"
 	"os"
 	"strings"
@@ -77,4 +79,42 @@ func FuzzParse(f *testing.F) {
 	f.Fuzz(func(t *testing.T, b []byte) {
 		_, _, _ = Parse(b)
 	})
+}
+
+// sign builds an SSHSIG signature with the given reserved field.
+func sign(t *testing.T, signer ssh.Signer, ns, reserved string, msg []byte) []byte {
+	t.Helper()
+	h := sha512.Sum512(msg)
+	var m [6]byte
+	copy(m[:], magic)
+	signed := ssh.Marshal(struct {
+		Magic     [6]byte
+		Namespace string
+		Reserved  string
+		HashAlg   string
+		Hash      []byte
+	}{m, ns, reserved, "sha512", h[:]})
+	sig, err := signer.Sign(rand.Reader, signed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := ssh.Marshal(blob{Magic: m, Version: 1, PublicKey: signer.PublicKey().Marshal(), Namespace: ns, Reserved: reserved, HashAlg: "sha512",
+		Signature: ssh.Marshal(sig)})
+	return []byte(begin + "\n" + base64.StdEncoding.EncodeToString(raw) + "\n" + end + "\n")
+}
+
+// PROTOCOL.sshsig: the reserved field must be empty, even when signed.
+func TestReservedMustBeEmpty(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := []byte(`{"x":1}`)
+	if err := Verify(signer.PublicKey(), "nebula-module", msg, sign(t, signer, "nebula-module", "", msg)); err != nil {
+		t.Fatal(err)
+	}
+	if err := Verify(signer.PublicKey(), "nebula-module", msg, sign(t, signer, "nebula-module", "attacker-chosen", msg)); err == nil {
+		t.Fatal("non-empty reserved field accepted")
+	}
 }

@@ -136,11 +136,15 @@ func (s *Service) ConfirmModuleSigner(ctx context.Context, req *pb.ConfirmModule
 		return nil, status.Error(codes.FailedPrecondition, "the signer is not trusted; add it first")
 	}
 	who := callerName(ctx)
-	if err := s.db.ConfirmModuleSigner(req.GetModule(), req.GetFingerprint(), who); err != nil {
+	prev, err := s.db.ConfirmModuleSigner(req.GetModule(), req.GetFingerprint(), who, req.GetExpectedPrevious())
+	if errors.Is(err, executordb.ErrPreviousSigner) {
+		return nil, status.Errorf(codes.FailedPrecondition, "the module's signer is %q, not the one you reviewed; list it again", prev)
+	}
+	if err != nil {
 		return nil, s.adminStoreError("confirm_module_signer", err)
 	}
-	s.log.Info("audit", "kind", "module_signer_confirmed", "by", who, "module", req.GetModule(), "signer", req.GetFingerprint())
-	return &pb.ConfirmModuleSignerResponse{}, nil
+	s.log.Info("audit", "kind", "module_signer_confirmed", "by", who, "module", req.GetModule(), "signer", req.GetFingerprint(), "previous", prev)
+	return &pb.ConfirmModuleSignerResponse{Previous: prev}, nil
 }
 
 // ListSigners lists the trusted signers.
@@ -152,6 +156,13 @@ func (s *Service) ListSigners(context.Context, *pb.ListSignersRequest) (*pb.List
 	out := &pb.ListSignersResponse{}
 	for _, x := range list {
 		out.Signers = append(out.Signers, &pb.Signer{Fingerprint: x.Fingerprint, Name: x.Name, AddedUnix: x.AddedAt.Unix(), AddedBy: x.AddedBy})
+	}
+	mods, err := s.db.ModuleSigners()
+	if err != nil {
+		return nil, s.adminStoreError("list_signers", err)
+	}
+	for _, m := range mods {
+		out.Modules = append(out.Modules, &pb.ModuleSigner{Module: m.Name, Fingerprint: m.Fingerprint, ConfirmedBy: m.ConfirmedBy, UpdatedUnix: m.UpdatedAt.Unix()})
 	}
 	return out, nil
 }

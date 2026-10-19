@@ -73,9 +73,12 @@ func signerAdd(ctx context.Context, c pb.ExecutorServiceClient, args []string, s
 	if err != nil {
 		return err
 	}
-	key, comment, _, _, err := ssh.ParseAuthorizedKey(b)
+	key, comment, _, rest, err := ssh.ParseAuthorizedKey(b)
 	if err != nil {
 		return fmt.Errorf("not an SSH public key: %w", err)
+	}
+	if len(strings.TrimSpace(string(rest))) > 0 {
+		return errors.New("the file holds more than one key; add each key from its own file")
 	}
 	if key.Type() != ssh.KeyAlgoED25519 {
 		return errors.New("only ssh-ed25519 signing keys are accepted")
@@ -103,13 +106,49 @@ func signerAdd(ctx context.Context, c pb.ExecutorServiceClient, args []string, s
 	return nil
 }
 
-func moduleCmd(ctx context.Context, c pb.ExecutorServiceClient, args []string, w io.Writer) error {
+func moduleCmd(ctx context.Context, c pb.ExecutorServiceClient, args []string, stdin io.Reader, w io.Writer) error {
 	if len(args) != 3 || args[0] != "confirm-signer" {
 		return errors.New("usage: nebula module confirm-signer MODULE SHA256:FINGERPRINT")
 	}
-	if _, err := c.ConfirmModuleSigner(ctx, &pb.ConfirmModuleSignerRequest{Module: args[1], Fingerprint: args[2]}); err != nil {
+	module, fp := args[1], args[2]
+	list, err := c.ListSigners(ctx, &pb.ListSignersRequest{})
+	if err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "module %s: future versions must be signed by %s\n", args[1], args[2])
+	signers := map[string]string{}
+	for _, s := range list.GetSigners() {
+		signers[s.GetFingerprint()] = s.GetName()
+	}
+	name, ok := signers[fp]
+	if !ok {
+		return fmt.Errorf("%s is not a trusted signer (nebula signer list); add it first", displaySafe([]byte(fp), 60))
+	}
+	prev := ""
+	for _, m := range list.GetModules() {
+		if m.GetModule() == module {
+			prev = m.GetFingerprint()
+		}
+	}
+	if prev == fp {
+		return fmt.Errorf("module %s is already bound to %s", displaySafe([]byte(module), 40), fp)
+	}
+	fmt.Fprintln(w, "Change the signer of a module? Every future version must then be signed by the new key.")
+	fmt.Fprintf(w, "  module       %s\n", displaySafe([]byte(module), 40))
+	if prev == "" {
+		fmt.Fprintln(w, "  current      none")
+	} else {
+		fmt.Fprintf(w, "  current      %s  %s\n", prev, displaySafe([]byte(signers[prev]), 100))
+	}
+	fmt.Fprintf(w, "  new          %s  %s\n", fp, displaySafe([]byte(name), 100))
+	fmt.Fprintln(w, "Check with the module's author why the key changed before you continue.")
+	fmt.Fprint(w, "Type the new fingerprint in full to confirm: ")
+	line, _ := bufio.NewReader(stdin).ReadString('\n')
+	if strings.TrimSpace(line) != fp {
+		return errors.New("fingerprint not confirmed; nothing changed")
+	}
+	if _, err := c.ConfirmModuleSigner(ctx, &pb.ConfirmModuleSignerRequest{Module: module, Fingerprint: fp, ExpectedPrevious: prev}); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "module %s: future versions must be signed by %s\n", displaySafe([]byte(module), 40), fp)
 	return nil
 }

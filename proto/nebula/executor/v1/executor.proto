@@ -1309,9 +1309,15 @@ message RemoveSignerResponse {
 message ConfirmModuleSignerRequest {
   string module = 1;
   string fingerprint = 2;
+  // The module's signer the admin saw ("" for none); refused when the
+  // executor's record differs (failed_precondition).
+  string expected_previous = 3;
 }
 
-message ConfirmModuleSignerResponse {}
+message ConfirmModuleSignerResponse {
+  // The signer before the change ("" for none), also in the audit line.
+  string previous = 1;
+}
 
 message ListSignersRequest {}
 
@@ -1322,6 +1328,15 @@ message Signer {
   string added_by = 4;
 }
 
+message ModuleSigner {
+  string module = 1;
+  string fingerprint = 2;
+  string confirmed_by = 3;
+  int64 updated_unix = 4;
+}
+
 message ListSignersResponse {
   repeated Signer signers = 1;
+  // The signer each module is bound to.
+  repeated ModuleSigner modules = 2;
 }

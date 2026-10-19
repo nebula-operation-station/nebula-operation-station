@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/prelude"
 )
 
@@ -30,7 +31,30 @@ func raw(t *testing.T, l Lock) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return b
+	c, _, err := canonical.CanonicalParameters(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// Only the canonical bytes are a lock: the signed bytes and the recorded
+// hash must be the same thing.
+func TestParseRefusesNonCanonicalBytes(t *testing.T) {
+	plain, err := json.Marshal(valid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Parse(plain); !errors.Is(err, ErrInvalid) {
+		t.Fatal("reordered members accepted")
+	}
+	c := raw(t, valid())
+	if _, _, err := Parse(append(append([]byte{}, c...), '\n')); !errors.Is(err, ErrInvalid) {
+		t.Fatal("trailing newline accepted")
+	}
+	if _, h, err := Parse(c); err != nil || h != sum(c) {
+		t.Fatal("the hash is not the hash of the signed bytes", err)
+	}
 }
 
 func TestParse(t *testing.T) {

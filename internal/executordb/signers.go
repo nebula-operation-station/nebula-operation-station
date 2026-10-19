@@ -30,6 +30,8 @@ type ModuleVersion struct {
 var (
 	ErrSignerChanged  = errors.New("executordb: the module was signed by another signer before; an admin must confirm the new signer")
 	ErrVersionChanged = errors.New("executordb: this module version was registered with another lock")
+	// ErrPreviousSigner: the module's signer is not the one the admin saw.
+	ErrPreviousSigner = errors.New("executordb: the module's signer is not the one you confirmed against")
 )
 
 var (
@@ -121,19 +123,63 @@ func (db *DB) RemoveSigner(fingerprint string) (bool, int64, error) {
 
 // ConfirmModuleSigner makes fingerprint the signer of module name (an
 // admin's manual review of a signer change, or a first assignment).
-func (db *DB) ConfirmModuleSigner(name, fingerprint, by string) error {
-	if !moduleNameRe.MatchString(name) || !fpRe.MatchString(fingerprint) {
-		return fmt.Errorf("executordb: %w: module name or fingerprint", ErrInvalid)
+// The previous signer must be expectedPrevious ("" for none), so the admin
+// confirms the change they reviewed; it returns the previous signer.
+func (db *DB) ConfirmModuleSigner(name, fingerprint, by, expectedPrevious string) (string, error) {
+	if !moduleNameRe.MatchString(name) || !fpRe.MatchString(fingerprint) || expectedPrevious != "" && !fpRe.MatchString(expectedPrevious) {
+		return "", fmt.Errorf("executordb: %w: module name or fingerprint", ErrInvalid)
 	}
 	if err := checkText("actor", by, maxActorLen, false); err != nil {
-		return err
+		return "", err
 	}
-	if _, err := db.sql.Exec(`INSERT INTO module_signers (name, fingerprint, confirmed_by, updated_at) VALUES (?, ?, ?, ?)
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return "", fmt.Errorf("executordb: confirm module signer: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var prev string
+	err = tx.QueryRow(`SELECT fingerprint FROM module_signers WHERE name = ?`, name).Scan(&prev)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("executordb: confirm module signer: %w", err)
+	}
+	if prev != expectedPrevious {
+		return prev, ErrPreviousSigner
+	}
+	if _, err := tx.Exec(`INSERT INTO module_signers (name, fingerprint, confirmed_by, updated_at) VALUES (?, ?, ?, ?)
 		ON CONFLICT (name) DO UPDATE SET fingerprint = excluded.fingerprint, confirmed_by = excluded.confirmed_by, updated_at = excluded.updated_at`,
 		name, fingerprint, by, db.now().Unix()); err != nil {
-		return fmt.Errorf("executordb: confirm module signer: %w", err)
+		return "", fmt.Errorf("executordb: confirm module signer: %w", err)
 	}
-	return nil
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("executordb: confirm module signer: %w", err)
+	}
+	return prev, nil
+}
+
+// ModuleSigner is the signer a module is bound to.
+type ModuleSigner struct {
+	Name, Fingerprint, ConfirmedBy string
+	UpdatedAt                      time.Time
+}
+
+// ModuleSigners lists the module bindings by module name.
+func (db *DB) ModuleSigners() ([]ModuleSigner, error) {
+	rows, err := db.sql.Query(`SELECT name, fingerprint, confirmed_by, updated_at FROM module_signers ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("executordb: list module signers: %w", err)
+	}
+	defer rows.Close()
+	var out []ModuleSigner
+	for rows.Next() {
+		var m ModuleSigner
+		var at int64
+		if err := rows.Scan(&m.Name, &m.Fingerprint, &m.ConfirmedBy, &at); err != nil {
+			return nil, fmt.Errorf("executordb: list module signers: %w", err)
+		}
+		m.UpdatedAt = time.Unix(at, 0)
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }
 
 // RegisterModule records a verified module version and trusts its

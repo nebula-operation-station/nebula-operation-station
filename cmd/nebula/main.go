@@ -159,7 +159,7 @@ func run(cmd string, args []string) error {
 	case "signer":
 		return signerCmd(ctx, c, args, os.Stdin, os.Stdout)
 	case "module":
-		return moduleCmd(ctx, c, args, os.Stdout)
+		return moduleCmd(ctx, c, args, os.Stdin, os.Stdout)
 	case "host":
 		return hostCmd(ctx, c, args)
 	case "webauthn":

@@ -4,6 +4,7 @@ package security
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -106,8 +107,18 @@ func TestM7_SignedModules(t *testing.T) {
 			fpB = s.GetFingerprint()
 		}
 	}
-	if _, err := h.client.ConfirmModuleSigner(h.ctx(), &pb.ConfirmModuleSignerRequest{Module: "demo", Fingerprint: fpB}); err != nil {
-		t.Fatal(err)
+	// The admin confirms against the signer they reviewed.
+	_, err = h.client.ConfirmModuleSigner(h.ctx(), &pb.ConfirmModuleSignerRequest{Module: "demo", Fingerprint: fpB, ExpectedPrevious: fpB})
+	wantCode(t, err, codes.FailedPrecondition, "not the one you reviewed")
+	conf, err := h.client.ConfirmModuleSigner(h.ctx(), &pb.ConfirmModuleSignerRequest{Module: "demo", Fingerprint: fpB, ExpectedPrevious: r.GetSignerFingerprint()})
+	if err != nil || conf.GetPrevious() != r.GetSignerFingerprint() {
+		t.Fatal(conf, err)
+	}
+	if !strings.Contains(h.logs.String(), `"previous":"`+r.GetSignerFingerprint()+`"`) {
+		t.Fatal("the previous signer is not in the audit line")
+	}
+	if l, _ := h.client.ListSigners(h.ctx(), &pb.ListSignersRequest{}); len(l.GetModules()) != 1 || l.GetModules()[0].GetFingerprint() != fpB {
+		t.Fatal("module binding not listed")
 	}
 	if _, err := h.client.RegisterModule(h.ctx(), h.registerReq("1.1.0", "b")); err != nil {
 		t.Fatal(err)

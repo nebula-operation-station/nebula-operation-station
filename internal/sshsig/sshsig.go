@@ -93,6 +93,10 @@ func Verify(key ssh.PublicKey, namespace string, message, armored []byte) error 
 	if b.Namespace != namespace || namespace == "" {
 		return ErrNamespace
 	}
+	// PROTOCOL.sshsig: "Reserved for future use. Must be zero length."
+	if b.Reserved != "" {
+		return fmt.Errorf("sshsig: the reserved field must be empty")
+	}
 	var h []byte
 	switch b.HashAlg {
 	case "sha256":

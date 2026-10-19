@@ -310,7 +310,8 @@ confirm (CRITICAL: every module this key signs is trusted). `nebula signer
 list` shows them; `nebula signer remove SHA256:…` withdraws a key and the
 trust of every module it signed. If a new version of a module is signed by
 another key, Nebula refuses it until you have checked why and run
-`nebula module confirm-signer MODULE SHA256:…`. Unsigned modules always
+`nebula module confirm-signer MODULE SHA256:…` (it shows the current and the new
+signer and asks you to type the new fingerprint). Unsigned modules always
 need your security key (at least HIGH).
 
 ## 8. Notifications

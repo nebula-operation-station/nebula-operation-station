@@ -93,9 +93,15 @@ func invalid(format string, a ...any) error {
 // Parse reads a lock and returns it with the SHA-256 of its canonical
 // form. The bytes must be exactly the form they decode to.
 func Parse(raw []byte) (Lock, string, error) {
-	_, hash, err := canonical.CanonicalParameters(raw)
+	canon, hash, err := canonical.CanonicalParameters(raw)
 	if err != nil {
 		return Lock{}, "", invalid("%v", err)
+	}
+	// The signed bytes are the lock: only its canonical encoding (RFC 8785,
+	// as `nebula module pack` writes it) is accepted, so the recorded hash
+	// is the hash of exactly the bytes that were signed.
+	if !bytes.Equal(raw, canon) {
+		return Lock{}, "", invalid("the lock is not in its canonical form; write it with nebula module pack")
 	}
 	var l Lock
 	dec := json.NewDecoder(bytes.NewReader(raw))
