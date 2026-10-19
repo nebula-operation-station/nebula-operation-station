@@ -187,6 +187,8 @@ func TestImportRefusesBadArchives(t *testing.T) {
 		"missing":      tgz(t, entry{"module.lock.json", lock, 0}, entry{"actions/hello.sh", fx(t, "hello.sh"), 0}),
 		"other script": tgz(t, entry{"module.lock.json", lock, 0}, entry{"actions/hello.sh", []byte("rm -rf /\n"), 0}, entry{"actions/restart.sh", fx(t, "restart.sh"), 0}),
 		"huge":         tgz(t, entry{"big", bytes.Repeat([]byte("a"), 300<<10), 0}),
+		"extra file": tgz(t, entry{"module.lock.json", lock, 0}, entry{"actions/hello.sh", fx(t, "hello.sh"), 0}, entry{"actions/restart.sh", fx(t, "restart.sh"), 0},
+			entry{"notes.txt", []byte("x"), 0}),
 	} {
 		var ie *ImportError
 		if _, err := s.Import(ctx, "axel", arch); !errors.As(err, &ie) {

@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -66,12 +67,9 @@ const maxYAML = 256 << 10
 // packLock reads DIR/module.yaml and the scripts and returns the lock's
 // canonical bytes.
 func packLock(dir string) ([]byte, error) {
-	b, err := os.ReadFile(filepath.Join(dir, "module.yaml"))
+	b, err := readModuleFile(dir, "module.yaml", maxYAML)
 	if err != nil {
 		return nil, err
-	}
-	if len(b) > maxYAML {
-		return nil, errors.New("module.yaml is larger than 256 KiB")
 	}
 	var m yamlModule
 	dec := yaml.NewDecoder(bytes.NewReader(b))
@@ -126,16 +124,53 @@ func nonNil(s []string) []string {
 	return s
 }
 
-func readScript(dir, rel string) ([]byte, error) {
+// readModuleFile reads DIR/rel, at most limit bytes, refusing anything
+// that is not a regular file inside DIR: no symlink (also not in a parent
+// directory) may lead the author to pack and sign a file from elsewhere.
+func readModuleFile(dir, rel string, limit int64) ([]byte, error) {
 	if rel == "" || filepath.IsAbs(rel) || strings.Contains(rel, "..") {
-		return nil, fmt.Errorf("script %q must be a relative path inside the module", rel)
+		return nil, fmt.Errorf("%q must be a relative path inside the module", rel)
 	}
-	f, err := os.Open(filepath.Join(dir, filepath.FromSlash(rel)))
+	root, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return nil, err
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	p := filepath.Join(root, filepath.FromSlash(rel))
+	real, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return nil, err
+	}
+	if real != p {
+		return nil, fmt.Errorf("%s is or passes through a symbolic link; module files must be regular files inside the module", rel)
+	}
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	return io.ReadAll(io.LimitReader(f, modulelock.MaxScript+1))
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", rel)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > limit {
+		return nil, fmt.Errorf("%s is larger than %d KiB", rel, limit>>10)
+	}
+	return b, nil
+}
+
+func readScript(dir, rel string) ([]byte, error) {
+	return readModuleFile(dir, rel, modulelock.MaxScript)
 }
 
 func modulePack(args []string, w io.Writer) error {
@@ -160,7 +195,7 @@ func modulePack(args []string, w io.Writer) error {
 			p, modulelock.Namespace, p, dir)
 		return nil
 	}
-	lock, err := os.ReadFile(filepath.Join(dir, "module.lock.json"))
+	lock, err := readModuleFile(dir, "module.lock.json", maxYAML)
 	if err != nil {
 		return err
 	}
@@ -173,7 +208,7 @@ func modulePack(args []string, w io.Writer) error {
 		return errors.New("module.lock.json is out of date: run nebula module pack DIR and sign again")
 	}
 	files := map[string][]byte{"module.lock.json": lock}
-	if sig, err := os.ReadFile(filepath.Join(dir, "module.lock.json.sig")); err == nil {
+	if sig, err := readModuleFile(dir, "module.lock.json.sig", 8<<10); err == nil {
 		files["module.lock.json.sig"] = sig
 	} else {
 		fmt.Fprintln(w, "note: no module.lock.json.sig; the module will be unverified (its actions run at least HIGH)")

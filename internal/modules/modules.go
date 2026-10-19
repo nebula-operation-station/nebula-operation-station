@@ -173,6 +173,17 @@ func (s *Store) Import(ctx context.Context, user string, archive []byte) (Versio
 	}
 	v := Version{Lock: lock, LockJSON: lockJSON, LockSHA256: lockSum, Signature: files[SignatureFile], Scripts: map[string][]byte{},
 		ImportedBy: user, ImportedAt: s.now()}
+	// The archive holds the lock, its signature, the lock's scripts and
+	// optionally the author's module.yaml (not stored), nothing else.
+	wanted := map[string]bool{LockFile: true, SignatureFile: true, "module.yaml": true}
+	for _, name := range lock.Names() {
+		wanted[lock.Actions[name].Script] = true
+	}
+	for f := range files {
+		if !wanted[f] {
+			return Version{}, refuse("the archive holds %q, which the lock does not name", f)
+		}
+	}
 	for _, name := range lock.Names() {
 		p := lock.Actions[name].Script
 		b, ok := files[p]

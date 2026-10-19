@@ -72,3 +72,39 @@ func TestModulePack(t *testing.T) {
 		t.Fatal("unknown key accepted")
 	}
 }
+
+// Packing follows no symbolic link and truncates nothing: a link could
+// make the author sign and ship a file from outside the module.
+func TestModulePackRefusesLinksAndLargeScripts(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "id_ed25519")
+	_ = os.WriteFile(outside, []byte("PRIVATE KEY"), 0o600)
+	for name, setup := range map[string]func(dir string){
+		"script link": func(dir string) {
+			_ = os.MkdirAll(filepath.Join(dir, "actions"), 0o755)
+			_ = os.Symlink(outside, filepath.Join(dir, "actions", "restart.sh"))
+		},
+		"directory link": func(dir string) {
+			other := t.TempDir()
+			_ = os.WriteFile(filepath.Join(other, "restart.sh"), []byte("echo hi\n"), 0o644)
+			_ = os.Symlink(other, filepath.Join(dir, "actions"))
+		},
+		"large": func(dir string) {
+			_ = os.MkdirAll(filepath.Join(dir, "actions"), 0o755)
+			_ = os.WriteFile(filepath.Join(dir, "actions", "restart.sh"), []byte(strings.Repeat("# x\n", 70000)), 0o644)
+		},
+	} {
+		dir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(dir, "module.yaml"), []byte(moduleYAML), 0o644)
+		setup(dir)
+		var out strings.Builder
+		if err := modulePack([]string{dir}, &out); err == nil {
+			t.Errorf("%s: packed", name)
+		}
+	}
+	dir := t.TempDir()
+	_ = os.Symlink(outside, filepath.Join(dir, "module.yaml"))
+	var out strings.Builder
+	if err := modulePack([]string{dir}, &out); err == nil {
+		t.Error("linked module.yaml read")
+	}
+}

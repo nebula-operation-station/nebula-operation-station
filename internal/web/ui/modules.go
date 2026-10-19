@@ -179,5 +179,7 @@ func (h *Handler) handleModuleVerify(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "modules unavailable")
 		return
 	}
+	h.log.Info("audit", "kind", "module_verified", "module", v.Lock.Name, "version", v.Lock.Version, "state", v.State, "signer", v.Signer,
+		"user", webUser(r))
 	writeJSON(w, http.StatusOK, map[string]any{"state": v.State})
 }
