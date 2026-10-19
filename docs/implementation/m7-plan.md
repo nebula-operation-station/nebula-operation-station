@@ -1,8 +1,9 @@
 # Milestone 7 plan: runbooks and modules
 
-Status: **proposed 2026-10-16**; work starts with the defaults below (Axel:
-"mach weiter"). Each decision can still be changed before the part it
-affects is merged. It turns spec 10 (modules, runbooks, trust) and spec 16
+Status: **implemented 2026-10-19** with the defaults below (PRs #41–#47,
+decisions 63–69 in m0.md). Each decision can still be changed. Deviation:
+module state is the module's own action results per host (decision 69),
+not a separate key/value store. It turns spec 10 (modules, runbooks, trust) and spec 16
 (Milestone 7, Release 0.3) into a concrete plan.
 
 ## What the spec asks for

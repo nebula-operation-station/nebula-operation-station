@@ -148,7 +148,10 @@ func Check(params []Param, secrets []string) (string, bool) {
 // The script runs in a subshell with stdin from /dev/null and its stdout
 // sent to the log (stderr): the result document (stdout) is always the
 // prelude's own one line, {"format":"runbook-v1","phase":"done","exit":N},
-// and the run's exit status is the script's.
+// and the run's exit status is the script's. A script that has a result
+// writes one JSON object (at most 64 KiB) to the file $NEBULA_RESULT; the
+// prelude embeds it as "result" (anything that is not one JSON object
+// makes the run's result invalid, which the executor reports).
 func Build(title string, params []Param, secrets []string, body string) []byte {
 	var b strings.Builder
 	b.WriteString("#!/bin/sh\n")
@@ -169,7 +172,12 @@ nebula_get() { sed -n 's/.*"'"$1"'":"\([^"\\]*\)".*/\1/p' "$NEBULA_PARAMS" | hea
 		b.WriteString("[ -n \"${NEBULA_SECRETS_DIR:-}\" ] && [ -f \"$NEBULA_SECRETS_DIR/" + slot + "\" ] || nebula_fail \"secret " + slot + " is not available\"\n")
 		b.WriteString("NEBULA_SECRET_" + up + "=$NEBULA_SECRETS_DIR/" + slot + "; export NEBULA_SECRET_" + up + "\n")
 	}
-	b.WriteString("unset v\nset +u\n")
+	b.WriteString(`unset v
+NEBULA_RESULT=$(mktemp "${TMPDIR:-/tmp}/nebula-result.XXXXXXXXXX") || nebula_fail "cannot create the result file"
+export NEBULA_RESULT
+trap 'rm -f "$NEBULA_RESULT"' EXIT
+set +u
+`)
 	b.WriteString("nebula_main() {\n:\n")
 	b.WriteString("# ---- runbook script ----\n")
 	b.WriteString(body)
@@ -180,7 +188,13 @@ nebula_get() { sed -n 's/.*"'"$1"'":"\([^"\\]*\)".*/\1/p' "$NEBULA_PARAMS" | hea
 	b.WriteString(`}
 ( nebula_main ) </dev/null 1>&2
 rc=$?
-printf '{"format":"runbook-v1","phase":"done","exit":%d}\n' "$rc"
+if [ -s "$NEBULA_RESULT" ] && [ "$(wc -c < "$NEBULA_RESULT")" -le 65536 ] && [ "$(head -c 1 "$NEBULA_RESULT")" = "{" ]; then
+  printf '{"format":"runbook-v1","phase":"done","exit":%d,"result":' "$rc"
+  cat "$NEBULA_RESULT"
+  printf '}\n'
+else
+  printf '{"format":"runbook-v1","phase":"done","exit":%d}\n' "$rc"
+fi
 exit "$rc"
 `)
 	return []byte(b.String())

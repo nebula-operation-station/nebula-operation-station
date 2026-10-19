@@ -109,6 +109,8 @@ type Options struct {
 	Trust ArtifactTrust
 	// Modules imports and lists modules. Nil hides the modules pages.
 	Modules Modules
+	// LastResult feeds the module cards on host pages. Nil shows none.
+	LastResult LastResultFunc
 	// Repin re-pins hosts blocked by a host key mismatch. Nil leaves only
 	// the CLI instructions on the dashboard.
 	Repin Repinner
@@ -137,6 +139,7 @@ type Handler struct {
 	runbooks   Runbooks
 	trust      ArtifactTrust
 	modules    Modules
+	lastResult LastResultFunc
 	log        *slog.Logger
 	repin      Repinner
 	enroll     Enroller
@@ -177,6 +180,7 @@ func New(o Options) (*Handler, error) {
 		runbooks:     o.Runbooks,
 		trust:        o.Trust,
 		modules:      o.Modules,
+		lastResult:   o.LastResult,
 		repin:        o.Repin,
 		enroll:       o.Enroll,
 		log:          log,
@@ -203,6 +207,7 @@ var pageFiles = map[string]string{
 	"runbook_edit":     "runbook_edit.html",
 	"modules":          "modules.html",
 	"module":           "module.html",
+	"host":             "host.html",
 }
 
 // Handler returns the UI's http.Handler without the security middleware
@@ -249,6 +254,7 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("GET /modules/{name}", h.handleModule)
 	mux.HandleFunc("POST /modules/import", h.handleModuleImport)
 	mux.HandleFunc("POST /modules/verify", h.handleModuleVerify)
+	mux.HandleFunc("GET /hosts/{id}", h.handleHost)
 	mux.HandleFunc("POST /hostkeys/repin/propose", h.handleRepinPropose)
 	mux.HandleFunc("POST /hostkeys/repin/commit", h.handleRepinCommit)
 	mux.HandleFunc("GET /inventory/enroll", h.handleEnrollPage)
@@ -319,6 +325,8 @@ type pageData struct {
 	Runbooks *runbooksData
 	// Modules is the data of the module pages.
 	Modules *modulesData
+	// Host is the data of a host's page.
+	Host *hostPageData
 	// Ops is the data of the operations pages.
 	Ops *operationsData
 	// InventoryEditable is true when Options.Inventory is set; the

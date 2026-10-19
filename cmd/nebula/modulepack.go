@@ -60,6 +60,21 @@ type yamlModule struct {
 	Title       string                `yaml:"title"`
 	Description string                `yaml:"description"`
 	Actions     map[string]yamlAction `yaml:"actions"`
+	UI          *yamlUI               `yaml:"ui"`
+}
+
+type yamlUI struct {
+	HostTab *struct {
+		Title string `yaml:"title"`
+		Cards []struct {
+			Title  string `yaml:"title"`
+			Action string `yaml:"action"`
+			Fields []struct {
+				Label string `yaml:"label"`
+				Path  string `yaml:"path"`
+			} `yaml:"fields"`
+		} `yaml:"cards"`
+	} `yaml:"host_tab"`
 }
 
 const maxYAML = 256 << 10
@@ -102,6 +117,17 @@ func packLock(dir string) ([]byte, error) {
 			la.Params = append(la.Params, prelude.Param{Name: n, Label: p.Label, Type: p.Type, Choices: p.Choices})
 		}
 		l.Actions[name] = la
+	}
+	if m.UI != nil && m.UI.HostTab != nil {
+		t := &modulelock.HostTab{Title: m.UI.HostTab.Title, Cards: []modulelock.Card{}}
+		for _, c := range m.UI.HostTab.Cards {
+			card := modulelock.Card{Title: c.Title, Action: c.Action, Fields: []modulelock.Field{}}
+			for _, f := range c.Fields {
+				card.Fields = append(card.Fields, modulelock.Field{Label: f.Label, Path: f.Path})
+			}
+			t.Cards = append(t.Cards, card)
+		}
+		l.UI = &modulelock.UI{HostTab: t}
 	}
 	raw, err := json.Marshal(l)
 	if err != nil {
