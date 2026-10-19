@@ -52,9 +52,11 @@ func (a *Authority) observe(sum [32]byte, artifact []byte) {
 	}
 	// At most two scans run at once, so concurrent requests cannot take
 	// all of the executor's CPU (review m71 F1).
-	scanSlots <- struct{}{}
-	findings, risk := scanner.Scan(artifact)
-	<-scanSlots
+	findings, risk := func() ([]scanner.Finding, canonical.Risk) {
+		scanSlots <- struct{}{}
+		defer func() { <-scanSlots }()
+		return scanner.Scan(artifact)
+	}()
 	r := scanResult{risk: risk, categories: scanner.Categories(findings)}
 	a.scanMu.Lock()
 	defer a.scanMu.Unlock()

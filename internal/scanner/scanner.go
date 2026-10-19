@@ -127,10 +127,16 @@ func Scan(script []byte) ([]Finding, canonical.Risk) {
 			out = append(out, Finding{Category: TooLarge, Risk: canonical.RiskHigh, Line: MaxLines + 1, Excerpt: "more than 5000 lines"})
 		}
 	}
+	longLine := false
 	for _, line := range lines {
 		text := line.text
 		if len(text) > MaxLine {
+			// What is not read counts HIGH, as for the whole script.
 			text = text[:MaxLine]
+			if !longLine {
+				longLine, floor = true, canonical.RiskHigh
+				out = append(out, Finding{Category: TooLarge, Risk: canonical.RiskHigh, Line: line.no, Excerpt: "a line longer than 4096 bytes"})
+			}
 		}
 		if t := strings.TrimLeft(text, " \t"); t == "" || t[0] == '#' {
 			continue
