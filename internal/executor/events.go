@@ -51,7 +51,15 @@ func (s *Service) ListEvents(_ context.Context, req *pb.ListEventsRequest) (*pb.
 		s.log.Error("list events", "error", err)
 		return nil, status.Error(codes.Internal, "events unavailable")
 	}
+	keys, err := s.db.EventKeys()
+	if err != nil {
+		s.log.Error("list events", "error", err)
+		return nil, status.Error(codes.Internal, "events unavailable")
+	}
 	resp := &pb.ListEventsResponse{PublicKey: append([]byte(nil), s.eventKey...), HeadSeq: head}
+	for _, k := range keys {
+		resp.Keys = append(resp.Keys, &pb.EventKey{FirstSeq: k.FirstSeq, PublicKey: k.PublicKey})
+	}
 	for _, r := range recs {
 		resp.Events = append(resp.Events, &pb.Event{Seq: r.Seq, Body: r.Body, PrevHash: r.PrevHash, Hash: r.Hash, Signature: r.Sig})
 	}

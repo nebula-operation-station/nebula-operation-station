@@ -59,6 +59,10 @@ commands:
                       accept a new signer for a module after reviewing it
   module pack [--archive OUT.tar.gz] DIR
                       write DIR/module.lock.json from module.yaml (to sign), or the archive to import
+  backup [--out FILE] [--full] [--no-encrypt] [--pre-upgrade]
+                      run with sudo: an age-encrypted backup of server and executor data (never a secret in plaintext)
+  restore [--identity FILE] ARCHIVE
+                      run with sudo: CRITICAL; restore a backup (the current data is kept aside)
   events [--after N] [--limit N] [--json] | key | verify
                       the executor's signed event chain (verified here with the event key)
   host enroll-script --from ADDR[,ADDR] [--user nebula] [--key REF] [--no-sudo]
@@ -116,21 +120,16 @@ func run(cmd string, args []string) error {
 	if cmd == "module" && len(args) > 0 && args[0] == "pack" {
 		return modulePack(args[1:], os.Stdout)
 	}
-	sock := envOr("NEBULA_EXECUTOR_SOCKET", "/run/nebula/executor.sock")
-	execUser := envOr("NEBULA_EXECUTOR_USER", "nebula-executor")
-	wantUID, err := peercred.LookupUID(execUser)
-	if err != nil {
-		return fmt.Errorf("executor user %q: %w", execUser, err)
+	// Backup and restore run as root (sudo): they read or write the server's
+	// data themselves; backup talks to the executor as the admin who ran
+	// sudo.
+	switch cmd {
+	case "backup":
+		return backupCmd(args, os.Stdin, os.Stdout)
+	case "restore":
+		return restoreCmd(args, os.Stdin, os.Stdout)
 	}
-	// Verify who serves the socket before sending anything, the unlock
-	// passphrase in particular.
-	conn, err := grpc.NewClient("passthrough:///executor",
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-			return peercred.DialVerified(ctx, sock, wantUID)
-		}),
-		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(64<<20)),
-	)
+	conn, err := dialExecutor()
 	if err != nil {
 		return err
 	}
@@ -185,6 +184,24 @@ func run(cmd string, args []string) error {
 		os.Exit(64)
 		return nil
 	}
+}
+
+// dialExecutor connects to the executor socket. Who serves the socket is
+// verified before anything is sent, the unlock passphrase in particular.
+func dialExecutor() (*grpc.ClientConn, error) {
+	sock := envOr("NEBULA_EXECUTOR_SOCKET", "/run/nebula/executor.sock")
+	execUser := envOr("NEBULA_EXECUTOR_USER", "nebula-executor")
+	wantUID, err := peercred.LookupUID(execUser)
+	if err != nil {
+		return nil, fmt.Errorf("executor user %q: %w", execUser, err)
+	}
+	return grpc.NewClient("passthrough:///executor",
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return peercred.DialVerified(ctx, sock, wantUID)
+		}),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(64<<20)),
+	)
 }
 
 func status(ctx context.Context, c pb.ExecutorServiceClient) error {

@@ -88,6 +88,7 @@ const (
 	ExecutorService_RevokeScheduleGrant_FullMethodName       = "/nebula.executor.v1.ExecutorService/RevokeScheduleGrant"
 	ExecutorService_RunScheduled_FullMethodName              = "/nebula.executor.v1.ExecutorService/RunScheduled"
 	ExecutorService_ListEvents_FullMethodName                = "/nebula.executor.v1.ExecutorService/ListEvents"
+	ExecutorService_BackupExecutor_FullMethodName            = "/nebula.executor.v1.ExecutorService/BackupExecutor"
 )
 
 // ExecutorServiceClient is the client API for ExecutorService service.
@@ -326,6 +327,9 @@ type ExecutorServiceClient interface {
 	// Signed events (M10-1). Role: server, admin. Read-only: the chain of
 	// the executor's audit events with the key to verify it.
 	ListEvents(ctx context.Context, in *ListEventsRequest, opts ...grpc.CallOption) (*ListEventsResponse, error)
+	// Backup (M10-2). Role: admin. The executor's part of `nebula backup`:
+	// a checked snapshot of executor.db and the encrypted SSH key files.
+	BackupExecutor(ctx context.Context, in *BackupExecutorRequest, opts ...grpc.CallOption) (*BackupExecutorResponse, error)
 }
 
 type executorServiceClient struct {
@@ -1006,6 +1010,16 @@ func (c *executorServiceClient) ListEvents(ctx context.Context, in *ListEventsRe
 	return out, nil
 }
 
+func (c *executorServiceClient) BackupExecutor(ctx context.Context, in *BackupExecutorRequest, opts ...grpc.CallOption) (*BackupExecutorResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BackupExecutorResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_BackupExecutor_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExecutorServiceServer is the server API for ExecutorService service.
 // All implementations must embed UnimplementedExecutorServiceServer
 // for forward compatibility.
@@ -1242,6 +1256,9 @@ type ExecutorServiceServer interface {
 	// Signed events (M10-1). Role: server, admin. Read-only: the chain of
 	// the executor's audit events with the key to verify it.
 	ListEvents(context.Context, *ListEventsRequest) (*ListEventsResponse, error)
+	// Backup (M10-2). Role: admin. The executor's part of `nebula backup`:
+	// a checked snapshot of executor.db and the encrypted SSH key files.
+	BackupExecutor(context.Context, *BackupExecutorRequest) (*BackupExecutorResponse, error)
 	mustEmbedUnimplementedExecutorServiceServer()
 }
 
@@ -1452,6 +1469,9 @@ func (UnimplementedExecutorServiceServer) RunScheduled(context.Context, *RunSche
 }
 func (UnimplementedExecutorServiceServer) ListEvents(context.Context, *ListEventsRequest) (*ListEventsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListEvents not implemented")
+}
+func (UnimplementedExecutorServiceServer) BackupExecutor(context.Context, *BackupExecutorRequest) (*BackupExecutorResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BackupExecutor not implemented")
 }
 func (UnimplementedExecutorServiceServer) mustEmbedUnimplementedExecutorServiceServer() {}
 func (UnimplementedExecutorServiceServer) testEmbeddedByValue()                         {}
@@ -2680,6 +2700,24 @@ func _ExecutorService_ListEvents_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_BackupExecutor_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BackupExecutorRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).BackupExecutor(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_BackupExecutor_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).BackupExecutor(ctx, req.(*BackupExecutorRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ExecutorService_ServiceDesc is the grpc.ServiceDesc for ExecutorService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2954,6 +2992,10 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListEvents",
 			Handler:    _ExecutorService_ListEvents_Handler,
+		},
+		{
+			MethodName: "BackupExecutor",
+			Handler:    _ExecutorService_BackupExecutor_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

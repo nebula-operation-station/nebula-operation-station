@@ -110,8 +110,16 @@ func run() error {
 	}
 	chain := events.NewChain(db, eventKey)
 	log = slog.New(events.NewHandler(log.Handler(), chain))
-	if created {
-		log.Info("audit", "kind", "event_key_created", "fingerprint", events.Fingerprint(chain.PublicKey()))
+	added, previous, err := db.RegisterEventKey(chain.PublicKey())
+	if err != nil {
+		return err
+	}
+	if created || added {
+		attrs := []any{"kind", "event_key_created", "fingerprint", events.Fingerprint(chain.PublicKey())}
+		if previous != nil {
+			attrs = append(attrs, "previous", events.Fingerprint(previous))
+		}
+		log.Info("audit", attrs...)
 	}
 
 	keysDir := filepath.Join(*dataDir, "keys")
@@ -169,6 +177,7 @@ func run() error {
 	keys := keyring.New(keysDir)
 	svc := executor.NewService(auth, keys, db, reg, log)
 	svc.SetEventKey(chain.PublicKey())
+	svc.SetBackupDirs(*dataDir, keysDir)
 
 	lis, err := peercred.Listen(peercred.ListenOptions{Path: *socketPath, Mode: 0o660, Group: *socketGroup})
 	if err != nil {

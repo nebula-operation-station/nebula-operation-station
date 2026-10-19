@@ -673,6 +673,15 @@ func (c *Client) ListEvents(ctx context.Context, in *pb.ListEventsRequest, opts 
 	return resp, mapError(err)
 }
 
+// BackupExecutor is admin-only on the executor; the server's calls are
+// refused there.
+func (c *Client) BackupExecutor(ctx context.Context, in *pb.BackupExecutorRequest, opts ...grpc.CallOption) (*pb.BackupExecutorResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.BackupExecutor(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
 // Compile-time check: the client must implement the generated interface so
 // that a generated-code change breaks the build here.
 var _ pb.ExecutorServiceClient = (*Client)(nil)

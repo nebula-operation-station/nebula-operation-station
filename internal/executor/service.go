@@ -71,6 +71,8 @@ type Service struct {
 	dispatching map[string]bool
 	// eventKey verifies the signed event chain (M10-1).
 	eventKey ed25519.PublicKey
+	// dataDir and keysDir are read by BackupExecutor (M10-2).
+	dataDir, keysDir string
 	// Now is the clock for request expiries the executor sets itself
 	// (re-pin, enrollment); nil means time.Now. Tests set it.
 	Now func() time.Time

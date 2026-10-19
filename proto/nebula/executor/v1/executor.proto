@@ -321,6 +321,10 @@ service ExecutorService {
   // Signed events (M10-1). Role: server, admin. Read-only: the chain of
   // the executor's audit events with the key to verify it.
   rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
+
+  // Backup (M10-2). Role: admin. The executor's part of `nebula backup`:
+  // a checked snapshot of executor.db and the encrypted SSH key files.
+  rpc BackupExecutor(BackupExecutorRequest) returns (BackupExecutorResponse);
 }
 
 enum RiskClass {
@@ -1371,4 +1375,30 @@ message ListEventsResponse {
   // The event key (Ed25519, 32 bytes) and the newest sequence number.
   bytes public_key = 2;
   int64 head_seq = 3;
+  // Every key that signed the chain, from its first event on (a restore
+  // onto a new machine starts a new key).
+  repeated EventKey keys = 4;
+}
+
+message EventKey {
+  int64 first_seq = 1;
+  bytes public_key = 2;
+}
+
+message BackupExecutorRequest {}
+
+// One file of the executor's part of a backup: "executor.db" (a checked
+// snapshot) and "keys/<ref>.key" / "keys/<ref>.pub" (the SSH keys, still
+// encrypted with the passphrase). Never the event key or anything
+// decrypted.
+message BackupFile {
+  string name = 1;
+  uint32 mode = 2;
+  bytes data = 3;
+}
+
+message BackupExecutorResponse {
+  repeated BackupFile files = 1;
+  int32 schema_version = 2;
+  string version = 3;
 }
