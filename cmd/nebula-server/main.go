@@ -228,6 +228,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		Runbooks:     rb,
 		Trust:        exec,
 		Modules:      mods,
+		LastResult:   ops.LastResult,
 		Repin:        exec,
 		Enroll:       exec,
 		Log:          log,

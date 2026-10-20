@@ -73,6 +73,34 @@ type Action struct {
 	Declares    []string        `json:"declares"`
 }
 
+// Field is one value of a card: a label and a path into the result of
+// the card's action (dot-separated member names).
+type Field struct {
+	Label string `json:"label"`
+	Path  string `json:"path"`
+}
+
+// Card shows fields of the latest successful result of one of the
+// module's actions on a host.
+type Card struct {
+	Title  string  `json:"title"`
+	Action string  `json:"action"`
+	Fields []Field `json:"fields"`
+}
+
+// HostTab is the module's tab on a host's page.
+type HostTab struct {
+	Title string `json:"title"`
+	Cards []Card `json:"cards"`
+}
+
+// UI is the module's declarative UI (spec 10): metadata only. The core
+// renders it as text with its own templates; no module HTML, links or
+// JavaScript exist, and privileged dialogs never use module labels.
+type UI struct {
+	HostTab *HostTab `json:"host_tab,omitempty"`
+}
+
 // Lock is a module's lock document.
 type Lock struct {
 	Format      string            `json:"format"`
@@ -81,6 +109,46 @@ type Lock struct {
 	Title       string            `json:"title"`
 	Description string            `json:"description"`
 	Actions     map[string]Action `json:"actions"`
+	UI          *UI               `json:"ui,omitempty"`
+}
+
+// UI limits.
+const (
+	maxUIText = 60
+	maxCards  = 10
+	maxFields = 20
+)
+
+var pathRe = regexp.MustCompile(`^[a-z0-9_]{1,40}(\.[a-z0-9_]{1,40}){0,4}$`)
+
+func (l Lock) checkUI() error {
+	if l.UI == nil || l.UI.HostTab == nil {
+		return nil
+	}
+	t := l.UI.HostTab
+	if t.Title == "" || len(t.Title) > maxUIText || !prelude.Clean(t.Title, false) {
+		return invalid("ui: the host tab needs a title of 1 to %d characters of plain text", maxUIText)
+	}
+	if len(t.Cards) == 0 || len(t.Cards) > maxCards {
+		return invalid("ui: the host tab has 1 to %d cards", maxCards)
+	}
+	for _, c := range t.Cards {
+		if c.Title == "" || len(c.Title) > maxUIText || !prelude.Clean(c.Title, false) {
+			return invalid("ui: card titles are 1 to %d characters of plain text", maxUIText)
+		}
+		if _, ok := l.Actions[c.Action]; !ok {
+			return invalid("ui: card %q names action %q, which the module does not have", c.Title, c.Action)
+		}
+		if len(c.Fields) == 0 || len(c.Fields) > maxFields {
+			return invalid("ui: a card has 1 to %d fields", maxFields)
+		}
+		for _, f := range c.Fields {
+			if f.Label == "" || len(f.Label) > maxUIText || !prelude.Clean(f.Label, false) || !pathRe.MatchString(f.Path) {
+				return invalid("ui: fields need a plain label of 1 to %d characters and a path of member names (a.b.c)", maxUIText)
+			}
+		}
+	}
+	return nil
 }
 
 // ErrInvalid is a lock that is not valid.
@@ -136,6 +204,9 @@ func (l Lock) check() error {
 		return invalid("the description must be at most %d characters of plain text", MaxDescription)
 	case len(l.Actions) == 0 || len(l.Actions) > MaxActions:
 		return invalid("a module has 1 to %d actions", MaxActions)
+	}
+	if err := l.checkUI(); err != nil {
+		return err
 	}
 	for name, a := range l.Actions {
 		if err := a.check(name); err != nil {

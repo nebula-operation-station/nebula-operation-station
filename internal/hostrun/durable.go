@@ -113,7 +113,7 @@ const exitJobExists = 125
 const wrapper = `j=$1; r=$2; cd "$j" || exit 1
 b=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
 printf '{"state":"running","pid":%d,"boot":"%s","started":%s}\n' "$$" "$b" "$(date +%s)" > state.json.tmp && mv state.json.tmp state.json
-NEBULA_EXECUTION_ID=$3 NEBULA_PARAMS="$r/params.json" NEBULA_SECRETS_DIR="$r/secrets" /bin/sh "$j/action.sh" </dev/null >"$j/result.json.tmp" 2>"$j/execution.log"
+NEBULA_EXECUTION_ID=$3 NEBULA_PARAMS="$r/params.json" NEBULA_SECRETS_DIR="$r/secrets" NEBULA_RUN_DIR="$r" /bin/sh "$j/action.sh" </dev/null >"$j/result.json.tmp" 2>"$j/execution.log"
 rc=$?
 rm -rf "$r"
 sync "$j/result.json.tmp" "$j/execution.log" 2>/dev/null

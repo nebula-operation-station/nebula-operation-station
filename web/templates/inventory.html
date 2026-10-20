@@ -62,7 +62,7 @@
       {{range .Inventory}}
       <tr data-id="{{.ID}}" data-display-name="{{.DisplayName}}" data-environment="{{.Environment}}"
           data-criticality="{{.Criticality}}" data-endpoints="{{.EndpointsJSON}}" data-tags="{{.TagsJSON}}">
-        <td>{{.ID}}</td>
+        <td><a href="/hosts/{{.ID}}">{{.ID}}</a></td>
         <td>{{.DisplayName}}</td>
         <td>{{.Environment}}</td>
         <td>{{.Criticality}}</td>

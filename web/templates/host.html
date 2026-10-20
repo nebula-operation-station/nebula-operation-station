@@ -1,0 +1,20 @@
+{{define "content"}}
+{{with .Host}}
+<h1>Host {{.ID}}</h1>
+<section class="panel" aria-label="Host">
+  <div class="actions"><a class="button" href="/inventory">Inventory</a> <a class="button" href="/operations/new">New operation</a></div>
+  {{range .Tabs}}
+  <h2>{{.Title}} <span class="hint">(module {{.Module}} {{.Version}}, {{.State}})</span></h2>
+  {{range .Cards}}
+  <div class="panel">
+    <p class="status"><strong>{{.Title}}</strong> <span class="hint">{{.ActionID}}, {{.When}}</span></p>
+    <table class="inventory"><tbody>{{range .Fields}}<tr><th>{{.Label}}</th><td>{{.Value}}</td></tr>{{end}}</tbody></table>
+    <div class="actions"><a class="button button--small" href="/operations/new?action={{.ActionID}}">Run {{.ActionID}}</a></div>
+  </div>
+  {{end}}
+  {{else}}
+  <p>No module shows anything for this host.</p>
+  {{end}}
+</section>
+{{end}}
+{{end}}

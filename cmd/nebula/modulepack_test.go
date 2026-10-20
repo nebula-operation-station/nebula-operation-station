@@ -29,6 +29,15 @@ actions:
       mode: {type: choice, label: Mode, choices: [soft, hard]}
     secrets: [influx_token]
     declares: [requires_root]
+ui:
+  host_tab:
+    title: Telegraf
+    cards:
+      - title: Status
+        action: restart
+        fields:
+          - {label: Version, path: version}
+          - {label: Active, path: service.active}
 `
 
 func TestModulePack(t *testing.T) {
@@ -43,6 +52,9 @@ func TestModulePack(t *testing.T) {
 	lock, _ := os.ReadFile(filepath.Join(dir, "module.lock.json"))
 	l, _, err := modulelock.Parse(lock)
 	a := l.Actions["restart"]
+	if l.UI == nil || l.UI.HostTab == nil || l.UI.HostTab.Cards[0].Fields[1].Path != "service.active" {
+		t.Fatalf("ui: %+v", l.UI)
+	}
 	if err != nil || a.Risk != "MEDIUM" || a.TimeoutS != 60 || len(a.Params) != 2 || a.Params[0].Name != "mode" || a.Secrets[0] != "influx_token" {
 		t.Fatalf("%+v %v", l, err)
 	}

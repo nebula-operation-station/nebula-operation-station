@@ -322,6 +322,10 @@ parameters, secret slots, declarations) and the scripts, runs
 builds the archive with `nebula module pack --archive OUT.tar.gz DIR`.
 Import it under *Runbooks → Modules*. The page shows whether the executor
 verified it and every script it runs; plan its actions like any other.
+A module may also show a tab on each host's page (click the host in the
+inventory) with values from its actions' latest results; scripts write
+their result as one JSON object to the file `$NEBULA_RESULT` (runbooks
+can too).
 
 ## 8. Notifications
 

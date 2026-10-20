@@ -665,3 +665,21 @@ func riskName(r pb.RiskClass) string {
 func requirementName(r pb.ApprovalRequirement) string {
 	return strings.ToLower(strings.TrimPrefix(r.String(), "APPROVAL_REQUIREMENT_"))
 }
+
+// LastResult returns the result of the latest successful run of action
+// actionID (any version) on host, for module cards (M7-6). The result is
+// untrusted host output, bounded like every result.
+func (s *Service) LastResult(ctx context.Context, actionID, host string) ([]byte, time.Time, bool, error) {
+	var res []byte
+	var at sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT h.result, h.finished_at FROM execution_hosts h JOIN executions e ON e.id = h.execution_id
+		WHERE e.action_id = ? AND h.host_id = ? AND h.state = 'finished' AND h.class = 'success'
+		ORDER BY h.finished_at DESC LIMIT 1`, actionID, host).Scan(&res, &at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, time.Time{}, false, nil
+	}
+	if err != nil {
+		return nil, time.Time{}, false, err
+	}
+	return res, time.Unix(at.Int64, 0), true, nil
+}
