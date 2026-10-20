@@ -131,6 +131,12 @@ func open(dataDir string, now func() time.Time) (_ *DB, err error) {
 	if err := fsguard.EnsurePrivateFile(path); err != nil {
 		return nil, fmt.Errorf("executordb: %w", err)
 	}
+	// The marker is written as soon as the database file exists, before
+	// anything is written to it: a crash before the first migration commits
+	// still leaves it, so a later deletion is refused (review m106, 1).
+	if err := fsguard.EnsurePrivateFile(marker); err != nil {
+		return nil, fmt.Errorf("executordb: %w", err)
+	}
 
 	// _pragma values run in alphabetical order (after busy_timeout); the
 	// _journal_mode and _synchronous keys run after all of them. So the
@@ -172,10 +178,6 @@ func open(dataDir string, now func() time.Time) (_ *DB, err error) {
 		sdb.Close()
 		return nil, err
 	}
-	if err := fsguard.EnsurePrivateFile(marker); err != nil {
-		sdb.Close()
-		return nil, fmt.Errorf("executordb: %w", err)
-	}
 	return &DB{sql: sdb, dirLock: dirLock, created: created, now: now}, nil
 }
 
@@ -195,10 +197,10 @@ func lockDir(dir string) (*os.File, error) {
 	return f, nil
 }
 
-// Created reports whether Open created executor.db. On a data directory
-// that already holds credentials this means the stored counters and spent
-// execution IDs were lost (deleted file, restore without the database), and
-// the executor logs a warning.
+// Created reports whether Open created executor.db. A missing database
+// is refused while the marker exists, so on a data directory that already
+// holds credentials this means the admin removed the marker on purpose to
+// start empty; the executor logs a warning.
 func (db *DB) Created() bool { return db.created }
 
 // Close closes the database and then releases the directory lock. It is
