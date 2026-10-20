@@ -16,6 +16,7 @@
 #   sudo rm -rf /var/lib/nebula /etc/nebula
 #   sudo userdel nebula-server
 #   sudo userdel nebula-executor
+#   sudo userdel nebula-discovery
 #   sudo groupdel nebula-rpc
 
 set -euo pipefail
@@ -33,7 +34,7 @@ bin_dir=/usr/bin
 # --- Stop and remove the units ----------------------------------------------
 shopt -s nullglob
 removed_units=0
-for unit in "${script_dir}"/systemd/*.service; do
+for unit in "${script_dir}"/systemd/*.path "${script_dir}"/systemd/*.timer "${script_dir}"/systemd/*.service; do
   name=$(basename -- "${unit}")
   if [[ -e "${systemd_dir}/${name}" ]]; then
     systemctl stop "${name}" 2>/dev/null || true
@@ -56,20 +57,28 @@ fi
 if [[ -d "${drop_in_dir}" && -z "$(ls -A -- "${drop_in_dir}")" ]]; then
   rmdir -- "${drop_in_dir}"
 fi
+server_drop_in_dir="${systemd_dir}/nebula-server.service.d"
+if [[ -f "${server_drop_in_dir}/20-discovery.conf" ]]; then
+  rm -f -- "${server_drop_in_dir}/20-discovery.conf"
+  drop_in_removed=1
+fi
+if [[ -d "${server_drop_in_dir}" && -z "$(ls -A -- "${server_drop_in_dir}")" ]]; then
+  rmdir -- "${server_drop_in_dir}"
+fi
 
 if [[ ${removed_units} -eq 1 || ${drop_in_removed} -eq 1 ]]; then
   systemctl daemon-reload
 fi
 
 # --- Remove the binaries ------------------------------------------------------
-for bin in nebula nebula-server nebula-executor; do
+for bin in nebula nebula-server nebula-executor nebula-discovery; do
   if [[ -e "${bin_dir}/${bin}" ]]; then
     rm -f -- "${bin_dir}/${bin}"
   fi
 done
 
 echo "Nebula Operation Station binaries and units removed."
-echo "The users (nebula-server, nebula-executor), the group (nebula-rpc),"
+echo "The users (nebula-server, nebula-executor, nebula-discovery), the group (nebula-rpc),"
 echo "the data directories under /var/lib/nebula and the server"
 echo "configuration under /etc/nebula were left in place."
 echo "See the header of this script for manual cleanup."

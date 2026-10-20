@@ -35,10 +35,12 @@ From the extracted release tarball:
 sudo ./deploy/install.sh --admin-users alice --rp-id nebula.lab.example.org
 ```
 
-This creates the system users `nebula-executor` and `nebula-server`, the
-group `nebula-rpc` (your admin users join it; log out and in again), the
-data directories under `/var/lib/nebula`, both systemd units and
-`/etc/nebula/server.json`. It is idempotent: run it again with a newer
+This creates the system users `nebula-executor`, `nebula-server` and
+`nebula-discovery`, the group `nebula-rpc` (your admin users join it; log
+out and in again), the data directories under `/var/lib/nebula`, the
+systemd units and `/etc/nebula/server.json`. For network discovery also
+install Nmap (`sudo apt install nmap`); without it scans fail with a clear
+message and everything else works. It is idempotent: run it again with a newer
 tarball to upgrade; it never overwrites your edited unit files or
 `server.json`.
 
@@ -341,6 +343,23 @@ has not seen in 30 days: a suggestion, not a guarantee, because a device
 may be switched off. Nebula never manages DHCP or DNS. **Add to managed
 hosts** on an asset opens the inventory form with its values and links
 the new host to the asset; enroll it as in section 5.
+
+**Discovery.** *Network → Discovery* scans known networks with Nmap:
+host discovery, selected ports, service discovery (top 100 ports with
+versions), all TCP ports, or a custom scan from a fixed set of options
+(no free-form Nmap arguments). Targets must lie inside a network you
+added, at most a /16 each. Queue a scan now, once at a time, or every N
+hours (at least one); there is no default schedule. The scan runs in the
+separate `nebula-discovery` service (raw sockets only, no credentials, no
+database), started when a job is queued. Its results land in staging:
+each host is NEW, EXISTING (same MAC as an asset), POSSIBLE MATCH (same
+address, but no MAC to compare, as across VPNs and routed networks) or
+CONFLICT (the MAC or address belongs to another asset). Select the hosts
+and import them: a new host becomes an asset (kind unknown; set its kind
+afterwards), an existing one gets the address, MAC or hostname it lacks.
+Conflicts are never imported. Every host seen also feeds the address
+status (DISCOVERED, or CONFLICT for a different MAC). Names and banners
+come from the network and may lie.
 
 ## 8. Notifications
 

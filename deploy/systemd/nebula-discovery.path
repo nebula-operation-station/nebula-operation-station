@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Starts nebula-discovery.service when the server queues a scan.
+[Unit]
+Description=Nebula Operation Station discovery: watch for queued scans
+
+[Path]
+PathChanged=/var/lib/nebula/discovery/jobs
+Unit=nebula-discovery.service
+
+[Install]
+WantedBy=multi-user.target

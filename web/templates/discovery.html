@@ -1,0 +1,85 @@
+{{define "content"}}
+<h1>Discovery</h1>
+{{with .Discovery}}
+<section class="panel" aria-label="New scan">
+  <p class="hint">Nmap runs in <code>nebula-discovery</code>, a separate service with raw-socket rights only; it has no credentials
+    and no database. Results land in staging: nothing reaches your assets until you import it. Only addresses inside a
+    <a href="/network">known network</a> can be scanned (at most a /16).</p>
+  {{if not .Available}}
+  <p class="status status--error">nebula-discovery is not installed on this machine (its spool directory is missing). Install
+    Nebula with <code>deploy/install.sh</code> and the <code>nmap</code> package to scan.</p>
+  {{end}}
+  {{if .Networks}}
+  <form id="scan-form" class="form" novalidate>
+    <fieldset>
+      <legend>Scan</legend>
+      {{range .Modes}}<label class="choice"><input type="radio" name="mode" value="{{.}}"{{if eq . "ping"}} checked{{end}}>
+        {{if eq . "ping"}}Host discovery (which addresses answer){{else if eq . "ports"}}Selected ports{{else if eq . "services"}}Service discovery (top 100 ports, versions){{else if eq . "full_tcp"}}All TCP ports (slow){{else}}Custom{{end}}</label>{{end}}
+    </fieldset>
+    <label>Targets (one per line: an address or a prefix inside a known network)
+      <textarea id="scan-targets" rows="3" placeholder="{{(index .Networks 0).Prefix}}"></textarea></label>
+    <p class="hint">Known networks: {{range $i, $n := .Networks}}{{if $i}}, {{end}}<code>{{$n.Prefix}}</code> ({{$n.Name}}){{end}}</p>
+    <label class="mode-ports">Ports (for selected ports: <code>22,80,443,8000-8100</code>)
+      <input type="text" id="scan-ports" autocomplete="off"></label>
+    <fieldset class="mode-custom">
+      <legend>Custom options</legend>
+      <label class="choice"><input type="checkbox" id="c-version"> Service versions</label>
+      <label class="choice"><input type="checkbox" id="c-os"> Operating system</label>
+      <label class="choice"><input type="checkbox" id="c-udp"> Also UDP (needs ports or top ports)</label>
+      <label class="choice"><input type="checkbox" id="c-noping"> Treat every address as up (no host discovery)</label>
+      <label class="choice"><input type="checkbox" id="c-open"> Report open ports only</label>
+      <label>Ports <input type="text" id="c-ports" autocomplete="off"></label>
+      <label>Or the most common N ports (1–1000) <input type="number" id="c-top" min="1" max="1000" inputmode="numeric"></label>
+      <label>Speed <select id="c-timing"><option value="0">normal</option><option value="2">polite (T2)</option><option value="4">aggressive (T4)</option></select></label>
+    </fieldset>
+    <fieldset>
+      <legend>When</legend>
+      <label class="choice"><input type="radio" name="when" value="now" checked> Now</label>
+      <label class="choice"><input type="radio" name="when" value="once"> Once at a time</label>
+      <label class="choice"><input type="radio" name="when" value="interval"> Repeatedly</label>
+      <label class="when-sched">Name <input type="text" id="sched-name" maxlength="64" autocomplete="off"></label>
+      <label class="when-sched">First run (empty: now) <input type="datetime-local" id="sched-at"></label>
+      <label class="when-interval">Every … hours (at least 1) <input type="number" id="sched-hours" min="1" value="24" inputmode="numeric"></label>
+    </fieldset>
+    <div class="actions"><button type="submit" class="button">Queue scan</button></div>
+  </form>
+  {{else}}
+  <p>Add a <a href="/network">network</a> first: discovery only scans known networks.</p>
+  {{end}}
+</section>
+<section class="panel" aria-label="Scans">
+  <h2>Scans</h2>
+  {{if .Jobs}}
+  <table class="inventory">
+    <thead><tr><th>Queued</th><th>Targets</th><th>Scan</th><th>State</th><th>Hosts</th><th>By</th></tr></thead>
+    <tbody>
+      {{range .Jobs}}
+      <tr><td><a href="/network/discovery/{{.ID}}">{{.Created}}</a></td><td>{{.Targets}}</td><td>{{.Description}}</td>
+        <td>{{.State}}{{if .Error}}: {{.Error}}{{end}}</td><td>{{if .Done}}{{.Hosts}}{{end}}</td><td>{{.CreatedBy}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p>No scans yet.</p>
+  {{end}}
+</section>
+<section class="panel" aria-label="Schedules">
+  <h2>Schedules</h2>
+  <p class="hint">There is no default schedule: scans run only when you queue or schedule them.</p>
+  {{if .Schedules}}
+  <table class="inventory">
+    <thead><tr><th>Name</th><th>Targets</th><th>Scan</th><th>When</th><th>Next run</th><th></th></tr></thead>
+    <tbody>
+      {{range .Schedules}}
+      <tr><td>{{.Name}}</td><td>{{.Targets}}</td><td>{{.Description}}</td><td>{{.When}}</td><td>{{.Next}}</td>
+        <td><button type="button" class="button button--small sched-delete" data-id="{{.ID}}">Delete</button></td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p>No schedules.</p>
+  {{end}}
+</section>
+{{end}}
+<p id="message" class="message" role="status" aria-live="polite"></p>
+{{end}}

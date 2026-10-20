@@ -192,3 +192,9 @@ body {
 .ip--CONFLICT { background: #f8c9c9; font-weight: 700; }
 .ip--EXCLUDED { background: #dddddd; color: #555555; }
 .ip--UNKNOWN { background: #f0f0f0; }
+
+/* Discovery classes (M9-2). */
+.class--NEW { background: #e8f5e9; }
+.class--EXISTING { background: #cfe0ff; }
+.class--POSSIBLE_MATCH { background: #fff3cd; }
+.class--CONFLICT { background: #f8c9c9; font-weight: 700; }

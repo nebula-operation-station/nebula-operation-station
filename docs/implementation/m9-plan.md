@@ -1,6 +1,6 @@
 # Milestone 9 plan: network inventory, IPAM, discovery
 
-Status: **in progress 2026-10-19**: M9-1 implemented (decision 70 in m0.md); work continues with the defaults below.
+Status: **in progress 2026-10-19**: M9-1 and M9-2 implemented (decisions 70 and 71 in m0.md); work continues with the defaults below.
 It turns spec 12 (inventory, IPAM, discovery) and spec 16 (Milestone 9,
 Release 0.5) into a concrete plan.
 

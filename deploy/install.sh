@@ -135,7 +135,7 @@ for user in "${raw_users[@]}"; do
     exit 1
   fi
   case "$user" in
-    root|nebula-server|nebula-executor)
+    root|nebula-server|nebula-executor|nebula-discovery)
       echo "install.sh: $user cannot be an admin user; use a personal account" >&2
       exit 1
       ;;
@@ -168,7 +168,7 @@ drop_in_dir="${systemd_dir}/nebula-executor.service.d"
 drop_in="${drop_in_dir}/10-local.conf"
 
 # --- Check the tarball layout ---------------------------------------------
-for bin in nebula nebula-server nebula-executor; do
+for bin in nebula nebula-server nebula-executor nebula-discovery; do
   if [[ ! -f "${tarball_root}/${bin}" ]]; then
     echo "install.sh: ${tarball_root}/${bin} not found" >&2
     echo "install.sh: run this script from the extracted release tarball" >&2
@@ -192,6 +192,10 @@ if ! getent passwd nebula-executor >/dev/null; then
   useradd --system --home-dir "${var_lib}/executor" \
     --shell /usr/sbin/nologin nebula-executor
 fi
+if ! getent passwd nebula-discovery >/dev/null; then
+  useradd --system --home-dir "${var_lib}/discovery" \
+    --shell /usr/sbin/nologin nebula-discovery
+fi
 
 # Admin users need the nebula-rpc group for the CLI socket; usermod -aG
 # is a no-op when the membership already exists.
@@ -206,10 +210,15 @@ done
 install -d -m 0755 -o root -g root "${var_lib}"
 install -d -m 0750 -o nebula-server -g nebula-server "${var_lib}/server"
 install -d -m 0700 -o nebula-executor -g nebula-executor "${var_lib}/executor"
+# Discovery spool (spec 12): the server writes jobs/ and only reads
+# results/; nebula-discovery reads jobs/ and writes results/.
+install -d -m 0755 -o root -g root "${var_lib}/discovery"
+install -d -m 0750 -o nebula-server -g nebula-discovery "${var_lib}/discovery/jobs"
+install -d -m 0750 -o nebula-discovery -g nebula-server "${var_lib}/discovery/results"
 
 # --- Binaries (replaced on every run; detect real changes) ------------------
 bin_changed=0
-for bin in nebula nebula-server nebula-executor; do
+for bin in nebula nebula-server nebula-executor nebula-discovery; do
   old_sum=""
   if [[ -f "${bin_dir}/${bin}" ]]; then
     old_sum=$(sha256sum "${bin_dir}/${bin}" | cut -d' ' -f1)
@@ -224,7 +233,7 @@ done
 # --- Units (installed only if absent: never clobber admin edits) -----------
 shopt -s nullglob
 installed_units=()
-for unit in "${script_dir}"/systemd/*.service; do
+for unit in "${script_dir}"/systemd/*.service "${script_dir}"/systemd/*.path "${script_dir}"/systemd/*.timer; do
   name=$(basename -- "${unit}")
   if [[ -e "${systemd_dir}/${name}" ]]; then
     echo "install.sh: ${systemd_dir}/${name} already exists; leaving it untouched"
@@ -263,6 +272,26 @@ fi
 install -m 0644 -o root -g root "${tmp_drop_in}" "${drop_in}"
 rm -f "${tmp_drop_in}"
 
+# --- Server drop-in (rewritten on every run) -----------------------------
+# The server unit uses ProtectSystem=strict; it may write the discovery
+# job spool and nothing else outside its state directory.
+server_drop_in_dir="${systemd_dir}/nebula-server.service.d"
+server_drop_in="${server_drop_in_dir}/20-discovery.conf"
+server_drop_in_changed=1
+install -d -m 0755 -o root -g root "${server_drop_in_dir}"
+tmp_server_drop_in=$(mktemp)
+cat > "${tmp_server_drop_in}" <<EOF
+# Written by deploy/install.sh on every run; do not edit by hand.
+# nebula-server queues discovery scans here (spec 12).
+[Service]
+ReadWritePaths=${var_lib}/discovery/jobs
+EOF
+if [[ -f "${server_drop_in}" ]] && cmp -s "${tmp_server_drop_in}" "${server_drop_in}"; then
+  server_drop_in_changed=0
+fi
+install -m 0644 -o root -g root "${tmp_server_drop_in}" "${server_drop_in}"
+rm -f "${tmp_server_drop_in}"
+
 # --- Server config (created only if absent: never clobber admin edits) -----
 # /etc/nebula/server.json is the nebula-server configuration. It contains
 # no secrets. Re-runs never overwrite it: edit it by hand and restart
@@ -278,7 +307,8 @@ else
   "public_origin": "https://${rp_id}",
   "data_dir": "/var/lib/nebula/server",
   "executor_socket": "/run/nebula/executor.sock",
-  "executor_user": "nebula-executor"
+  "executor_user": "nebula-executor",
+  "discovery_dir": "/var/lib/nebula/discovery"
 }
 EOF
   install -m 0640 -o root -g nebula-server "${tmp_server_json}" /etc/nebula/server.json
@@ -289,10 +319,17 @@ fi
 systemctl daemon-reload
 
 for name in "${installed_units[@]}"; do
-  if [[ "${name}" != "nebula-executor.service" ]]; then
+  # The executor starts below; nebula-discovery.service is started by its
+  # path unit and timer and has no [Install] section.
+  if [[ "${name}" != "nebula-executor.service" && "${name}" != "nebula-discovery.service" ]]; then
     systemctl enable --now "${name}"
   fi
 done
+
+if systemctl is-active --quiet nebula-server.service && [[ ${bin_changed} -eq 1 || ${server_drop_in_changed} -eq 1 ]]; then
+  systemctl restart nebula-server.service
+  echo "install.sh: restarted nebula-server (binaries or drop-in changed)"
+fi
 
 if systemctl is-active --quiet nebula-executor.service; then
   if [[ ${bin_changed} -eq 1 || ${drop_in_changed} -eq 1 ]]; then

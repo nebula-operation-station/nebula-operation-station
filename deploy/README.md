@@ -42,3 +42,7 @@ systemctl enable --now nebula-executor nebula-server
 nebula unlock
 nebula webauthn code        # first security key: enter the code at https://<rp-id>/setup
 ```
+
+## nebula-discovery
+
+Network discovery (spec 12) runs in `deploy/systemd/nebula-discovery.service`, a oneshot unit as the `nebula-discovery` user with `AmbientCapabilities=CAP_NET_RAW` and nothing else (no credentials, no database, no listener). `nebula-discovery.path` starts it when the server writes a job into `/var/lib/nebula/discovery/jobs`; `nebula-discovery.timer` re-runs it every 10 minutes as a fallback (it only answers queued jobs and never scans on its own). It writes results to `/var/lib/nebula/discovery/results`. `install.sh` creates both directories (`jobs/` owned by `nebula-server`, group `nebula-discovery`; `results/` the reverse, both 0750) and a drop-in `nebula-server.service.d/20-discovery.conf` with `ReadWritePaths=` for `jobs/`. Nmap itself is optional: `sudo apt install nmap`.

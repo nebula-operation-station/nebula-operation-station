@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Reference unit for nebula-discovery (spec 12): runs the Nmap scans the
+# server queued in /var/lib/nebula/discovery/jobs and writes the results
+# to /var/lib/nebula/discovery/results, then exits. Started by
+# nebula-discovery.path when a job arrives (and by nebula-discovery.timer
+# as a fallback; the timer only runs queued jobs, it never scans on its
+# own). Raw-socket rights only: no credentials, no database, no listener.
+[Unit]
+Description=Nebula Operation Station discovery (queued Nmap scans)
+Documentation=https://github.com/nebula-operation-station/nebula-operation-station/tree/main/docs
+
+[Service]
+Type=oneshot
+User=nebula-discovery
+Group=nebula-discovery
+ExecStart=/usr/bin/nebula-discovery -spool /var/lib/nebula/discovery -nmap /usr/bin/nmap
+# One hour per scan; several queued scans run one after the other.
+TimeoutStartSec=6h
+UMask=0027
+
+# Nmap needs raw sockets (SYN scans, ARP host discovery) and nothing else.
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+
+# Hardening
+LimitCORE=0
+ProtectSystem=strict
+ReadWritePaths=/var/lib/nebula/discovery/results
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+# AF_PACKET for ARP and raw frames, AF_NETLINK for routes and interfaces,
+# AF_UNIX for name resolution.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_PACKET AF_NETLINK AF_UNIX
