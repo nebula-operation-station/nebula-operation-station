@@ -63,6 +63,13 @@ func TestValidate(t *testing.T) {
 		"choice quote":    func(d *Draft) { d.Params[3].Choices = []string{"a'"} },
 		"choice dup":      func(d *Draft) { d.Params[3].Choices = []string{"a", "a"} },
 		"choices on name": func(d *Draft) { d.Params[0].Choices = []string{"a"} },
+		// An unpaired "}" would close the prelude's function early and let
+		// the rest write the result document (review m72, finding 1).
+		"brace breakout": func(d *Draft) {
+			d.Body = "}\necho '{\"format\":\"runbook-v1\",\"phase\":\"done\",\"exit\":0}'\nexit 0\n"
+		},
+		"balanced breakout": func(d *Draft) { d.Body = "}\nexit 0\nf() {\n" },
+		"syntax error":      func(d *Draft) { d.Body = "if true; then\n" },
 	} {
 		d := draft()
 		d.Params = append([]Param(nil), d.Params...)

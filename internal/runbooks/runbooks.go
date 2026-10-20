@@ -52,6 +52,10 @@ const (
 
 // ere is each type's pattern, written so that Go's regexp and POSIX ERE
 // (grep -E, used by the prelude on the host) read it the same way.
+//
+// A path may contain ".." segments: it is an absolute path handed to the
+// author's own script, which can name any path anyway, so the pattern only
+// keeps quotes, spaces and shell metacharacters out (review m72, note 2).
 var ere = map[string]string{
 	TypeName: `[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}`,
 	TypeInt:  `[0-9]{1,9}`,
@@ -159,6 +163,16 @@ func Validate(d Draft) error {
 		// No control or invisible format characters (bidi overrides,
 		// zero-width): what a reviewer reads must be what runs.
 		return invalid("the script must be UTF-8 text with Unix line ends and without control or invisible formatting characters")
+	}
+	// The script runs inside a shell function of the generated artifact. A
+	// body that is not valid shell on its own (an unpaired "}" for example)
+	// could close that function early and run its rest at the top level,
+	// where stdout is the result document. Refuse it at save time.
+	if err := ShellCheck([]byte(d.Body)); err != nil {
+		return invalid("the script is not valid shell syntax (sh -n): %v", err)
+	}
+	if err := ShellCheck(Artifact(Version{Draft: d, Version: 1})); err != nil {
+		return invalid("the script does not fit into the runbook prelude (sh -n): %v", err)
 	}
 	maxT := hostrun.MaxTimeout
 	if d.Durable {
