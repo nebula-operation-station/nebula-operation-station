@@ -23,6 +23,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/events"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/fsguard"
@@ -101,6 +102,17 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Signed events (M10-1): every audit line is also appended to the
+	// event chain in executor.db, signed with the event key.
+	eventKey, created, err := events.LoadOrCreateKey(*dataDir)
+	if err != nil {
+		return err
+	}
+	chain := events.NewChain(db, eventKey)
+	log = slog.New(events.NewHandler(log.Handler(), chain))
+	if created {
+		log.Info("audit", "kind", "event_key_created", "fingerprint", events.Fingerprint(chain.PublicKey()))
+	}
 
 	keysDir := filepath.Join(*dataDir, "keys")
 	if err := fsguard.EnsurePrivateDir(keysDir); err != nil {
@@ -156,6 +168,7 @@ func run() error {
 	}
 	keys := keyring.New(keysDir)
 	svc := executor.NewService(auth, keys, db, reg, log)
+	svc.SetEventKey(chain.PublicKey())
 
 	lis, err := peercred.Listen(peercred.ListenOptions{Path: *socketPath, Mode: 0o660, Group: *socketGroup})
 	if err != nil {

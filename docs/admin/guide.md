@@ -435,6 +435,17 @@ with `nebula_api_auth: "Bearer nos_..."` in `secrets.yaml`. Ops State is
 notifications. The update counts are as fresh as the last **Check
 updates** run (`checked_at`).
 
+**History and events.** Every security-relevant step of the executor
+(unlock, logins, approvals, runs, trust, signers, host keys, vault) is
+recorded as an event, signed with the executor's event key and chained to
+the one before, so a changed, reordered or missing event shows. Note the
+key's fingerprint after installing (`nebula events key`) and compare it
+with the one on the *History* page now and then. `nebula events verify`
+checks the whole chain on the Nebula machine; `nebula events list --json`
+writes the events with hashes and signatures for an offsite copy. The
+*History* page also lists what was done in the web UI (the server's audit
+lines); set `"audit_hash_chain": true` in `server.json` to chain those too.
+
 ## 10. Day-to-day
 
 | Situation | What to do |

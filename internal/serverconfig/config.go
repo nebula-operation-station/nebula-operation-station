@@ -89,6 +89,10 @@ type Config struct {
 	// with nebula-discovery. Default "/var/lib/nebula/discovery"; without
 	// it discovery shows as not installed.
 	DiscoveryDir string `json:"discovery_dir"`
+	// AuditHashChain links each stored server audit line to the one
+	// before by hash (M10-1); off by default. The executor's own events are
+	// always signed and chained.
+	AuditHashChain bool `json:"audit_hash_chain"`
 	// Notifications configures the providers (spec 13). Their tokens are
 	// low-privilege and live here, not in the executor vault; a config
 	// with any of them must not be readable by others.

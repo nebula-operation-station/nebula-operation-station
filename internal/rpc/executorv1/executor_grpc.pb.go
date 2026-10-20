@@ -87,6 +87,7 @@ const (
 	ExecutorService_ListScheduleGrants_FullMethodName        = "/nebula.executor.v1.ExecutorService/ListScheduleGrants"
 	ExecutorService_RevokeScheduleGrant_FullMethodName       = "/nebula.executor.v1.ExecutorService/RevokeScheduleGrant"
 	ExecutorService_RunScheduled_FullMethodName              = "/nebula.executor.v1.ExecutorService/RunScheduled"
+	ExecutorService_ListEvents_FullMethodName                = "/nebula.executor.v1.ExecutorService/ListEvents"
 )
 
 // ExecutorServiceClient is the client API for ExecutorService service.
@@ -322,6 +323,9 @@ type ExecutorServiceClient interface {
 	// pinned host, the action must still be LOW there, and the interval must
 	// have passed.
 	RunScheduled(ctx context.Context, in *RunScheduledRequest, opts ...grpc.CallOption) (*RunScheduledResponse, error)
+	// Signed events (M10-1). Role: server, admin. Read-only: the chain of
+	// the executor's audit events with the key to verify it.
+	ListEvents(ctx context.Context, in *ListEventsRequest, opts ...grpc.CallOption) (*ListEventsResponse, error)
 }
 
 type executorServiceClient struct {
@@ -992,6 +996,16 @@ func (c *executorServiceClient) RunScheduled(ctx context.Context, in *RunSchedul
 	return out, nil
 }
 
+func (c *executorServiceClient) ListEvents(ctx context.Context, in *ListEventsRequest, opts ...grpc.CallOption) (*ListEventsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListEventsResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ListEvents_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExecutorServiceServer is the server API for ExecutorService service.
 // All implementations must embed UnimplementedExecutorServiceServer
 // for forward compatibility.
@@ -1225,6 +1239,9 @@ type ExecutorServiceServer interface {
 	// pinned host, the action must still be LOW there, and the interval must
 	// have passed.
 	RunScheduled(context.Context, *RunScheduledRequest) (*RunScheduledResponse, error)
+	// Signed events (M10-1). Role: server, admin. Read-only: the chain of
+	// the executor's audit events with the key to verify it.
+	ListEvents(context.Context, *ListEventsRequest) (*ListEventsResponse, error)
 	mustEmbedUnimplementedExecutorServiceServer()
 }
 
@@ -1432,6 +1449,9 @@ func (UnimplementedExecutorServiceServer) RevokeScheduleGrant(context.Context, *
 }
 func (UnimplementedExecutorServiceServer) RunScheduled(context.Context, *RunScheduledRequest) (*RunScheduledResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RunScheduled not implemented")
+}
+func (UnimplementedExecutorServiceServer) ListEvents(context.Context, *ListEventsRequest) (*ListEventsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListEvents not implemented")
 }
 func (UnimplementedExecutorServiceServer) mustEmbedUnimplementedExecutorServiceServer() {}
 func (UnimplementedExecutorServiceServer) testEmbeddedByValue()                         {}
@@ -2642,6 +2662,24 @@ func _ExecutorService_RunScheduled_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_ListEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListEventsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ListEvents(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ListEvents_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ListEvents(ctx, req.(*ListEventsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ExecutorService_ServiceDesc is the grpc.ServiceDesc for ExecutorService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2912,6 +2950,10 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RunScheduled",
 			Handler:    _ExecutorService_RunScheduled_Handler,
+		},
+		{
+			MethodName: "ListEvents",
+			Handler:    _ExecutorService_ListEvents_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

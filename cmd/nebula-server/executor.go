@@ -292,3 +292,10 @@ func (l *lazyExecutor) RegisterModule(ctx context.Context, in *pb.RegisterModule
 	}
 	return nil, errNotConnected
 }
+
+func (l *lazyExecutor) ListEvents(ctx context.Context, in *pb.ListEventsRequest, opts ...grpc.CallOption) (*pb.ListEventsResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ListEvents(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}

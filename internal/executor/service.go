@@ -7,6 +7,7 @@ package executor
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"log/slog"
 	"strconv"
@@ -68,6 +69,8 @@ type Service struct {
 	// reconciliation leaves them alone (after a restart the set is empty).
 	dispatchMu  sync.Mutex
 	dispatching map[string]bool
+	// eventKey verifies the signed event chain (M10-1).
+	eventKey ed25519.PublicKey
 	// Now is the clock for request expiries the executor sets itself
 	// (re-pin, enrollment); nil means time.Now. Tests set it.
 	Now func() time.Time

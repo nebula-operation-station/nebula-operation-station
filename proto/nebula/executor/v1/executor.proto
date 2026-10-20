@@ -317,6 +317,10 @@ service ExecutorService {
   // pinned host, the action must still be LOW there, and the interval must
   // have passed.
   rpc RunScheduled(RunScheduledRequest) returns (RunScheduledResponse);
+
+  // Signed events (M10-1). Role: server, admin. Read-only: the chain of
+  // the executor's audit events with the key to verify it.
+  rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
 }
 
 enum RiskClass {
@@ -1339,4 +1343,32 @@ message ListSignersResponse {
   repeated Signer signers = 1;
   // The signer each module is bound to.
   repeated ModuleSigner modules = 2;
+}
+
+message ListEventsRequest {
+  // Events with a sequence number above this one, oldest first.
+  int64 after_seq = 1;
+  // At most this many (1 to 1000; 0 means 100).
+  int32 limit = 2;
+  // When set, return the newest `limit` events instead (after_seq is
+  // ignored).
+  bool newest = 3;
+}
+
+// One signed event (M10-1): body is the canonical JSON (RFC 8785) of
+// {seq, time, kind, attrs}; hash = SHA-256(prev_hash || body); signature is
+// Ed25519 over hash with the executor's event key.
+message Event {
+  int64 seq = 1;
+  bytes body = 2;
+  bytes prev_hash = 3;
+  bytes hash = 4;
+  bytes signature = 5;
+}
+
+message ListEventsResponse {
+  repeated Event events = 1;
+  // The event key (Ed25519, 32 bytes) and the newest sequence number.
+  bytes public_key = 2;
+  int64 head_seq = 3;
 }

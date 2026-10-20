@@ -29,8 +29,10 @@ import (
 	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/auditlog"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/discovery"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/discoveryjob"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/events"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
@@ -96,6 +98,9 @@ func (d direct) Lock(ctx context.Context, in *pb.LockRequest, _ ...grpc.CallOpti
 	return d.s.Lock(ctx, in)
 }
 
+func (d direct) ListEvents(ctx context.Context, in *pb.ListEventsRequest, _ ...grpc.CallOption) (*pb.ListEventsResponse, error) {
+	return d.s.ListEvents(ctx, in)
+}
 func (d direct) GetStatus(ctx context.Context, in *pb.GetStatusRequest, _ ...grpc.CallOption) (*pb.GetStatusResponse, error) {
 	return d.s.GetStatus(ctx, in)
 }
@@ -193,11 +198,16 @@ func must(err error) {
 func main() {
 	port, dir := os.Args[1], os.Args[2]
 	origin := "http://localhost:" + port
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	base := slog.NewTextHandler(os.Stderr, nil)
 	exDir := filepath.Join(dir, "ex")
 	must(os.MkdirAll(exDir, 0o700))
 	db, err := executordb.Open(exDir)
 	must(err)
+	// The executor's audit lines go to its signed event chain (M10-1).
+	eventKey, _, err := events.LoadOrCreateKey(exDir)
+	must(err)
+	chain := events.NewChain(db, eventKey)
+	log := slog.New(events.NewHandler(base, chain))
 	creds, err := executor.LoadCredentials(db, exDir, log)
 	must(err)
 	v, err := webauthnverify.New(webauthnverify.Config{RPID: "localhost", Origins: []string{origin}, Counters: db}, creds)
@@ -211,6 +221,7 @@ func main() {
 	kd := filepath.Join(dir, "keys")
 	must(os.MkdirAll(kd, 0o700))
 	svc := executor.NewService(a, keyring.New(kd), db, reg, log)
+	svc.SetEventKey(chain.PublicKey())
 	svc.SetJobConfig(hostrun.JobConfig{JobRoot: filepath.Join(dir, "remote", "jobs"), RunRoot: filepath.Join(dir, "remote", "run")})
 
 	// An enrolled test host: an in-process SSH server that runs commands
@@ -311,7 +322,8 @@ func main() {
 	must(os.MkdirAll(spool.ResultsDir(), 0o750))
 	ipamStore := ipam.New(sdb, ipam.FromInventory(inv.List))
 	disc := discovery.New(sdb, spool, ipamStore, ipam.FromInventory(inv.List), log)
-	u, err := ui.New(ui.Options{PublicOrigin: origin, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Schedules: ops, Runbooks: rb, Trust: direct{svc}, Modules: mods, LastResult: ops.LastResult, Network: ipamStore, Discovery: disc, Repin: direct{svc}, Enroll: direct{svc}, Log: log})
+	audit := auditlog.New(sdb, true)
+	u, err := ui.New(ui.Options{PublicOrigin: origin, Events: direct{svc}, Audit: audit, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Schedules: ops, Runbooks: rb, Trust: direct{svc}, Modules: mods, LastResult: ops.LastResult, Network: ipamStore, Discovery: disc, Repin: direct{svc}, Enroll: direct{svc}, Log: slog.New(auditlog.NewHandler(base, audit))})
 	must(err)
 	mux := http.NewServeMux()
 	// Test hook: issue a one-time code like `nebula webauthn code`.
