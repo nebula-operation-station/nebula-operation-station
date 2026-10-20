@@ -42,13 +42,15 @@ die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() { sed -n '3,27p' "$0" | sed 's/^# \{0,1\}//'; }
 
+need() { [[ $# -ge 2 && -n "$2" ]] || die "$1 requires a value"; }
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --rp-id) rp_id=${2:-}; shift 2 ;;
+    --rp-id) need "$@"; rp_id=$2; shift 2 ;;
     --rp-id=*) rp_id=${1#*=}; shift ;;
-    --admin-users) admin_users=${2:-}; shift 2 ;;
+    --admin-users) need "$@"; admin_users=$2; shift 2 ;;
     --admin-users=*) admin_users=${1#*=}; shift ;;
-    --backup-recipient) backup_recipient=${2:-}; shift 2 ;;
+    --backup-recipient) need "$@"; backup_recipient=$2; shift 2 ;;
     --backup-recipient=*) backup_recipient=${1#*=}; shift ;;
     --no-caddy) with_caddy=0; shift ;;
     --no-unlock) with_unlock=0; shift ;;
@@ -90,6 +92,12 @@ case "${ID:-}" in
 esac
 
 as_admin() { sudo -u "$first_admin" -H -- "$@"; }
+
+# Changing the RP ID later would leave server.json and the Caddyfile with
+# the old one (and every security key registered for it): refuse.
+if [[ -f /etc/nebula/server.json ]] && ! grep -qF "\"https://$rp_id\"" /etc/nebula/server.json; then
+  die "/etc/nebula/server.json has another public_origin than https://$rp_id; use the RP ID of the first run (changing it means registering every security key again: see the handbook)"
+fi
 
 # --- 1. Sizing check (warnings only) ----------------------------------------
 say "Checking this machine"
@@ -143,8 +151,10 @@ for rel in json.load(sys.stdin):
                 print(f["filename"], f["sha256"]); sys.exit(0)
 sys.exit(1)' "$GO_SERIES" "$goarch") || die "could not find a Go ${GO_SERIES} release on go.dev"
   read -r go_file go_sum <<<"$dl"
+  [[ "$go_file" =~ ^go[0-9][0-9.]*\.linux-(amd64|arm64)\.tar\.gz$ ]] || die "unexpected Go file name from go.dev: $go_file"
+  [[ "$go_sum" =~ ^[0-9a-f]{64}$ ]] || die "unexpected Go checksum from go.dev"
   work=$(mktemp -d /var/tmp/nebula-go.XXXXXX)
-  curl -fsSL -o "$work/$go_file" "https://go.dev/dl/$go_file"
+  curl -fsSL --max-time 1800 -o "$work/$go_file" "https://go.dev/dl/$go_file"
   echo "$go_sum  $work/$go_file" | sha256sum -c --quiet || die "Go download checksum mismatch"
   rm -rf /usr/local/go
   tar -C /usr/local -xzf "$work/$go_file"
@@ -171,11 +181,15 @@ say "Installing Nebula (deploy/install.sh)"
 say "Backup recipient"
 if [[ -s /etc/nebula/backup-recipients ]]; then
   echo "  /etc/nebula/backup-recipients exists; keeping it"
+  if [[ -n "$backup_recipient" ]] && ! grep -qxF "$backup_recipient" /etc/nebula/backup-recipients; then
+    warn "--backup-recipient is not in /etc/nebula/backup-recipients; add it there yourself (one recipient per line) if you want it"
+  fi
 else
   if [[ -z "$backup_recipient" ]]; then
     keyfile="$admin_home/nebula-backup.key"
     if [[ ! -e "$keyfile" ]]; then
-      as_admin sh -c "umask 077 && age-keygen -o '$keyfile'" 2>/dev/null
+      # shellcheck disable=SC2016 # $1 expands in the inner shell
+      as_admin sh -c 'umask 077 && age-keygen -o "$1"' _ "$keyfile"
       created_backup_key=1
     fi
     backup_recipient=$(as_admin age-keygen -y "$keyfile")
@@ -189,8 +203,8 @@ fi
 say "SSH key for managed hosts"
 keydir=/var/lib/nebula/executor/keys
 install -d -m 0700 -o nebula-executor -g nebula-executor "$keydir"
-if compgen -G "$keydir/*.key" >/dev/null; then
-  echo "  a key exists in $keydir; keeping it"
+if [[ -e "$keydir/nebula-default.key" ]]; then
+  echo "  $keydir/nebula-default.key exists; keeping it"
 else
   echo "  Choose a long passphrase and store it in your password manager."
   echo "  You type it again after every restart (nebula unlock)."
@@ -203,6 +217,15 @@ if [[ $with_caddy -eq 1 ]]; then
   caddyfile=/etc/caddy/Caddyfile
   marker="# nebula-operation-station (deploy/quickstart)"
   if ! grep -qF "$marker" "$caddyfile" 2>/dev/null; then
+    # Only the package's demo site may be replaced; a Caddyfile with your
+    # own sites stays: add the Nebula site to it yourself, or --no-caddy.
+    if [[ -s "$caddyfile" ]] && ! grep -q '/usr/share/caddy' "$caddyfile"; then
+      die "$caddyfile has sites of its own; add this site to it and run again with --no-caddy:
+  $rp_id {
+      tls internal
+      reverse_proxy 127.0.0.1:8080
+  }"
+    fi
     [[ -f "$caddyfile" ]] && cp -p "$caddyfile" "$caddyfile.before-nebula"
     # The Debian package ships a demo site on :80; Nebula's site replaces it.
     cat > "$caddyfile" <<EOF
@@ -231,9 +254,10 @@ if [[ $with_unlock -eq 1 ]]; then
   as_admin /usr/bin/nebula unlock
   as_admin /usr/bin/nebula status || true
   say "Enrollment script for managed hosts"
-  from=$(hostname -I | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | paste -sd, -)
+  from=$(hostname -I | tr ' ' '\n' | { grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || true; } | paste -sd, -)
   if [[ -n "$from" ]]; then
-    as_admin sh -c "/usr/bin/nebula host enroll-script --from '$from' > '$admin_home/enroll.sh'"
+    # shellcheck disable=SC2016 # $1, $2 expand in the inner shell
+    as_admin sh -c '/usr/bin/nebula host enroll-script --from "$1" > "$2"' _ "$from" "$admin_home/enroll.sh"
     echo "  written to $admin_home/enroll.sh (for connections from $from)"
   fi
   say "One-time code for your first security key"
