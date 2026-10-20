@@ -1,0 +1,13 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# prerm: stop and disable the units on removal (not on upgrade). The data
+# in /var/lib/nebula, /etc/nebula and the system users stay.
+set -e
+case "$1" in
+  remove)
+    if [ -d /run/systemd/system ]; then
+      systemctl disable --now nebula-discovery.path nebula-discovery.timer nebula-server.service nebula-executor.service 2>/dev/null || true
+    fi
+    ;;
+esac
+exit 0

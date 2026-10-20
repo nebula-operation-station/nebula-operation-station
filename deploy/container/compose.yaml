@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Nebula Operation Station in containers (decision 5 of the M10 plan):
+# three containers from one image, the same split as the systemd units.
+#
+#   NEBULA_RP_ID=nebula.example.org docker compose up -d
+#   docker compose exec -u nebula-admin executor nebula unlock
+#
+# Edit server.json (public_origin = https://$NEBULA_RP_ID) first, and put a
+# TLS reverse proxy in front of 127.0.0.1:8080.
+name: nebula
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs: ["/tmp"]
+  restart: unless-stopped
+
+services:
+  executor:
+    <<: *hardening
+    image: ${NEBULA_IMAGE:-ghcr.io/nebula-operation-station/nebula:latest}
+    user: "10001:10001"
+    group_add: ["10010"]
+    # The executor reaches managed hosts over SSH (outbound only; it never
+    # listens), so it uses the host network.
+    network_mode: host
+    command:
+      - nebula-executor
+      - -data-dir=/var/lib/nebula/executor
+      - -socket=/run/nebula/executor.sock
+      - -socket-group=nebula-rpc
+      - -server-user=nebula-server
+      - -admin-users=nebula-admin
+      - -rp-id=${NEBULA_RP_ID:?set NEBULA_RP_ID}
+      - -origin=https://${NEBULA_RP_ID}
+    volumes:
+      - executor-data:/var/lib/nebula/executor
+      - rpc:/run/nebula
+
+  server:
+    <<: *hardening
+    image: ${NEBULA_IMAGE:-ghcr.io/nebula-operation-station/nebula:latest}
+    user: "10002:10002"
+    group_add: ["10010"]
+    depends_on: [executor]
+    command: [nebula-server, -config, /etc/nebula/server.json]
+    ports: ["127.0.0.1:8080:8080"]
+    volumes:
+      - server-data:/var/lib/nebula/server
+      - rpc:/run/nebula
+      - discovery-jobs:/var/lib/nebula/discovery/jobs
+      - discovery-results:/var/lib/nebula/discovery/results:ro
+      - ./server.json:/etc/nebula/server.json:ro
+
+  discovery:
+    <<: *hardening
+    image: ${NEBULA_IMAGE:-ghcr.io/nebula-operation-station/nebula:latest}
+    user: "10003:10003"
+    # Raw sockets for Nmap, and the host network to see the LAN. NET_RAW
+    # here is what makes nmap's file capability work under
+    # no-new-privileges: without it discovery cannot scan.
+    cap_add: [NET_RAW]
+    network_mode: host
+    command: [nebula-discovery, -spool=/var/lib/nebula/discovery, -watch=10s]
+    volumes:
+      - discovery-jobs:/var/lib/nebula/discovery/jobs:ro
+      - discovery-results:/var/lib/nebula/discovery/results
+
+volumes:
+  executor-data:
+  server-data:
+  rpc:
+  discovery-jobs:
+  discovery-results:

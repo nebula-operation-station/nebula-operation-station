@@ -110,3 +110,31 @@ func TestRealNmap(t *testing.T) {
 		t.Fatalf("%+v", res)
 	}
 }
+
+// In a container, discovery keeps running and answers jobs as they come.
+func TestWatchAnswersLaterJobs(t *testing.T) {
+	r := newRunner(t, fakeNmap(t, `echo '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'`+"\n"))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.watch(ctx, 20*time.Millisecond); close(done) }()
+	time.Sleep(50 * time.Millisecond)
+	j := discoveryjob.Job{Format: discoveryjob.JobFormat, ID: id1, Mode: discoveryjob.ModePing, Targets: []string{"10.0.0.1"}, CreatedAt: 1}
+	if err := r.spool.WriteJob(j); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if res, err := r.spool.ReadResult(id1); err == nil {
+			if !res.OK {
+				t.Fatalf("%+v", res)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no result")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+}

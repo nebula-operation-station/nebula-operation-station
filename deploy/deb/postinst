@@ -1,0 +1,35 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# postinst of the nebula-operation-station package. A first install only
+# tells the admin how to configure it. An upgrade never restarts the
+# services: the new binaries migrate the databases when they start, and
+# the backup before that needs the admin's own sudo, which dpkg does not
+# have (review m105). The services keep running the old version until the
+# admin has made a backup and restarts them.
+case "$1" in
+  configure)
+    if [ -z "$2" ]; then
+      cat <<EOF
+Nebula Operation Station is installed but not configured; its services do
+not start until it is. Configure it with:
+
+  sudo /usr/share/nebula/deploy/install.sh --from-package --admin-users USER --rp-id HOST
+
+(see /usr/share/doc/nebula-operation-station/guide.md). For network discovery also: sudo apt install nmap
+EOF
+      exit 0
+    fi
+    [ -d /run/systemd/system ] || exit 0
+    systemctl daemon-reload || true
+    if ! systemctl is-active --quiet nebula-executor.service; then
+      exit 0
+    fi
+    cat <<EOF
+nebula: the new version is installed; the services keep running the old one.
+nebula: back up, then restart (the new version migrates the databases):
+nebula:   sudo nebula backup && sudo systemctl restart nebula-executor nebula-server
+nebula: then run nebula unlock.
+EOF
+    ;;
+esac
+exit 0

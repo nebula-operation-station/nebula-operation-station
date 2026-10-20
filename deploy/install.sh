@@ -48,6 +48,8 @@ Usage: install.sh --admin-users USER[,USER...] --rp-id HOST
   --rp-id        WebAuthn RP ID: the fixed hostname Nebula is served
                  under (lowercase hostname)
 
+  --from-package  the .deb installed binaries and units; only configure
+
 Both options are required. They are written into the systemd drop-in
 /etc/systemd/system/nebula-executor.service.d/10-local.conf, which
 overrides the executor's ExecStart (origin = https://<rp-id>).
@@ -56,6 +58,10 @@ EOF
 
 admin_users=""
 rp_id=""
+# --from-package: the .deb installed the binaries (/usr/bin) and the units
+# (/lib/systemd/system); configure only users, directories, drop-ins and
+# server.json, then enable and start.
+from_package=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -83,6 +89,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --rp-id=*)
       rp_id="${1#*=}"
+      shift
+      ;;
+    --from-package)
+      from_package=1
       shift
       ;;
     -h|--help)
@@ -168,13 +178,24 @@ drop_in_dir="${systemd_dir}/nebula-executor.service.d"
 drop_in="${drop_in_dir}/10-local.conf"
 
 # --- Check the tarball layout ---------------------------------------------
-for bin in nebula nebula-server nebula-executor nebula-discovery; do
-  if [[ ! -f "${tarball_root}/${bin}" ]]; then
-    echo "install.sh: ${tarball_root}/${bin} not found" >&2
-    echo "install.sh: run this script from the extracted release tarball" >&2
-    exit 1
-  fi
-done
+unit_dir="${systemd_dir}"
+if [[ ${from_package} -eq 1 ]]; then
+  unit_dir=/lib/systemd/system
+  for bin in nebula nebula-server nebula-executor nebula-discovery; do
+    if [[ ! -x "${bin_dir}/${bin}" ]]; then
+      echo "install.sh: ${bin_dir}/${bin} not found; is the package installed?" >&2
+      exit 1
+    fi
+  done
+else
+  for bin in nebula nebula-server nebula-executor nebula-discovery; do
+    if [[ ! -f "${tarball_root}/${bin}" ]]; then
+      echo "install.sh: ${tarball_root}/${bin} not found" >&2
+      echo "install.sh: run this script from the extracted release tarball" >&2
+      exit 1
+    fi
+  done
+fi
 if [[ ! -d "${script_dir}/systemd" ]]; then
   echo "install.sh: ${script_dir}/systemd not found; is this a release tarball?" >&2
   exit 1
@@ -213,17 +234,26 @@ install -d -m 0700 -o nebula-executor -g nebula-executor "${var_lib}/executor"
 # Discovery spool (spec 12): the server writes jobs/ and only reads
 # results/; nebula-discovery reads jobs/ and writes results/.
 install -d -m 0755 -o root -g root "${var_lib}/discovery"
-install -d -m 0750 -o nebula-server -g nebula-discovery "${var_lib}/discovery/jobs"
-install -d -m 0750 -o nebula-discovery -g nebula-server "${var_lib}/discovery/results"
+# setgid: a file written by one side gets the directory's group, the
+# reader's, so the other side can read it (review m105).
+install -d -m 2750 -o nebula-server -g nebula-discovery "${var_lib}/discovery/jobs"
+install -d -m 2750 -o nebula-discovery -g nebula-server "${var_lib}/discovery/results"
 
 # --- Pre-upgrade backup (spec 15) --------------------------------------------
 # Before an existing install is replaced, the new CLI makes a backup (as
-# the admin who ran sudo, to ~/nebula-backups). It skips itself without
-# backup recipients, without sudo from an admin, or with an executor older
-# than backups; any other failure stops the upgrade (set
-# NEBULA_SKIP_BACKUP=1 to go on without one).
-if [[ -x "${bin_dir}/nebula-executor" && "${NEBULA_SKIP_BACKUP:-0}" != "1" ]]; then
-  if ! "${tarball_root}/nebula" backup --pre-upgrade; then
+# the admin who ran sudo, to ~/nebula-backups). Without a backup the
+# upgrade stops: when it cannot make one (exit 3: no backup recipients, no
+# sudo from an admin, an executor older than backups) or when it fails.
+# Set NEBULA_SKIP_BACKUP=1 to upgrade without one. Package upgrades never
+# restart the services (deploy/deb/postinst).
+if [[ ${from_package} -eq 0 && -x "${bin_dir}/nebula-executor" && "${NEBULA_SKIP_BACKUP:-0}" != "1" ]]; then
+  rc=0
+  "${tarball_root}/nebula" backup --pre-upgrade || rc=$?
+  if [[ ${rc} -eq 3 ]]; then
+    echo "install.sh: no pre-upgrade backup was made (see above); nothing was changed." >&2
+    echo "install.sh: fix that, or run again with NEBULA_SKIP_BACKUP=1 to upgrade without a backup" >&2
+    exit 1
+  elif [[ ${rc} -ne 0 ]]; then
     echo "install.sh: the pre-upgrade backup failed; fix it or run again with NEBULA_SKIP_BACKUP=1" >&2
     exit 1
   fi
@@ -231,7 +261,7 @@ fi
 
 # --- Binaries (replaced on every run; detect real changes) ------------------
 bin_changed=0
-for bin in nebula nebula-server nebula-executor nebula-discovery; do
+[[ ${from_package} -eq 1 ]] || for bin in nebula nebula-server nebula-executor nebula-discovery; do
   old_sum=""
   if [[ -f "${bin_dir}/${bin}" ]]; then
     old_sum=$(sha256sum "${bin_dir}/${bin}" | cut -d' ' -f1)
@@ -246,7 +276,15 @@ done
 # --- Units (installed only if absent: never clobber admin edits) -----------
 shopt -s nullglob
 installed_units=()
-for unit in "${script_dir}"/systemd/*.service "${script_dir}"/systemd/*.path "${script_dir}"/systemd/*.timer; do
+if [[ ${from_package} -eq 1 ]]; then
+  # The package ships the units; enable the ones not enabled yet.
+  for name in nebula-server.service nebula-discovery.path nebula-discovery.timer nebula-executor.service; do
+    if ! systemctl is-enabled --quiet "${name}" 2>/dev/null; then
+      installed_units+=("${name}")
+    fi
+  done
+fi
+[[ ${from_package} -eq 1 ]] || for unit in "${script_dir}"/systemd/*.service "${script_dir}"/systemd/*.path "${script_dir}"/systemd/*.timer; do
   name=$(basename -- "${unit}")
   if [[ -e "${systemd_dir}/${name}" ]]; then
     echo "install.sh: ${systemd_dir}/${name} already exists; leaving it untouched"
@@ -352,7 +390,7 @@ if systemctl is-active --quiet nebula-executor.service; then
   fi
 elif printf '%s\n' "${installed_units[@]}" | grep -qx 'nebula-executor.service'; then
   systemctl enable --now nebula-executor.service
-elif [[ -e "${systemd_dir}/nebula-executor.service" ]]; then
+elif [[ -e "${unit_dir}/nebula-executor.service" ]]; then
   # The unit exists from an earlier install but is not active (for
   # example it failed to start before this run): enable it and start it
   # now that the drop-in is in place.

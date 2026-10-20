@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
 	"syscall"
 	"time"
@@ -47,12 +48,40 @@ func main() {
 	spool := flag.String("spool", defaultSpool, "discovery spool directory (jobs/ and results/)")
 	nmap := flag.String("nmap", defaultNmap, "path of the nmap binary")
 	timeout := flag.Duration("timeout", defaultTimeout, "time limit per scan")
+	watch := flag.Duration("watch", 0, "keep running and look for queued jobs at this interval (containers; systemd starts it per job instead)")
 	flag.Parse()
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	r := &runner{spool: discoveryjob.Spool{Dir: *spool}, nmap: *nmap, timeout: *timeout, now: time.Now, log: log}
-	if err := r.runAll(context.Background()); err != nil {
-		log.Error("discovery", "error", err)
-		os.Exit(1)
+	if *watch <= 0 {
+		if err := r.runAll(context.Background()); err != nil {
+			log.Error("discovery", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *watch < time.Second {
+		log.Error("discovery", "error", "-watch must be at least 1s")
+		os.Exit(2)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	r.watch(ctx, *watch)
+}
+
+// watch answers queued jobs until ctx ends; an error is logged and the
+// next round tries again.
+func (r *runner) watch(ctx context.Context, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		if err := r.runAll(ctx); err != nil {
+			r.log.Error("discovery", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
 	}
 }
 
@@ -142,8 +171,10 @@ func (r *runner) run(ctx context.Context, j discoveryjob.Job) discoveryjob.Resul
 	_, _ = io.Copy(io.Discard, out) // let nmap finish writing
 	werr := cmd.Wait()
 	switch {
-	case ctx.Err() != nil:
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		return fail(fmt.Sprintf("the scan took longer than %s and was stopped", r.timeout))
+	case ctx.Err() != nil:
+		return fail("the scan was stopped because nebula-discovery is shutting down")
 	case werr != nil:
 		msg := strings.TrimSpace(stderr.buf.String())
 		if msg == "" {

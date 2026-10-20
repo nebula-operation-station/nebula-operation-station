@@ -1,4 +1,9 @@
 /bin/
+# build output at the root (never committed)
+/nebula
+/nebula-server
+/nebula-executor
+/nebula-discovery
 /dist/
 *.test
 *.out

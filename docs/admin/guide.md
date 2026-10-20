@@ -64,6 +64,18 @@ nebula vault init    # optional; the same passphrase is recommended
 nothing runs until an admin runs `nebula unlock` on the machine. If
 notifications are set up, you get a message that the executor is locked.
 
+**From the package** (once the APT repository is set up, see
+`deploy/apt/README.md`): `sudo apt install nebula-operation-station`, then
+`sudo /usr/share/nebula/deploy/install.sh --from-package --admin-users alice --rp-id nebula.lab.example.org`.
+Upgrades with `apt upgrade` make a backup first and restart the services.
+
+**In containers:** `deploy/container/compose.yaml` runs the executor,
+the server and discovery as three containers from one image. Set
+`public_origin` in `deploy/container/server.json`, then
+`NEBULA_RP_ID=nebula.lab.example.org docker compose up -d` and
+`docker compose exec -u nebula-admin executor nebula unlock`. Back up the
+volumes with the stack stopped; `nebula backup` is for host installs.
+
 ## 3. Reverse proxy
 
 `nebula-server` listens on `127.0.0.1:8080`. Put a TLS proxy in front
@@ -456,7 +468,7 @@ lines); set `"audit_hash_chain": true` in `server.json` to chain those too.
 | A security key is lost | `nebula webauthn list`, `nebula webauthn remove ID` (locks the executor) |
 | Operation shows `precheck_failed` | Read the reason on the operation page; nothing was installed |
 | Host `UNREACHABLE` | Check the endpoints; `nebula host test HOST ENDPOINT` |
-| Upgrade Nebula | Run `install.sh` from the new tarball, then `nebula unlock`; re-trust the actions if their version changed |
+| Upgrade Nebula | Run `install.sh` from the new tarball (it backs up first and stops if it cannot; `NEBULA_SKIP_BACKUP=1` upgrades without a backup), then `nebula unlock`. With the package: `apt upgrade` does not restart anything; run `sudo nebula backup && sudo systemctl restart nebula-executor nebula-server`, then `nebula unlock`. Re-trust the actions if their version changed |
 
 **Backups.** Once, on a machine you keep safe (not the Nebula machine):
 `age-keygen -o nebula-backup.key`, and put the printed public key

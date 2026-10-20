@@ -81,6 +81,61 @@ archives:
       - src: deploy/**
         dst: deploy/
 
+# The .deb (decision 4 of the M10 plan): binaries, units and deploy/ for
+# `install.sh --from-package`; the APT repository is built and signed
+# offline from these packages (deploy/apt/).
+nfpms:
+  - id: nebula
+    package_name: nebula-operation-station
+    ids: [nebula, nebula-server, nebula-executor, nebula-discovery]
+    file_name_template: "nebula-operation-station_{{ .Version }}_{{ .Arch }}"
+    vendor: Nebula Operation Station
+    homepage: https://github.com/nebula-operation-station/nebula-operation-station
+    maintainer: Nebula Operation Station maintainers <maintainers@nebula-operation-station.invalid>
+    description: Self-hosted operations control plane for Linux homelabs.
+    license: AGPL-3.0-or-later
+    section: admin
+    formats: [deb]
+    bindir: /usr/bin
+    recommends: [nmap]
+    contents:
+      - src: deploy/systemd/nebula-executor.service
+        dst: /lib/systemd/system/nebula-executor.service
+      - src: deploy/systemd/nebula-server.service
+        dst: /lib/systemd/system/nebula-server.service
+      - src: deploy/systemd/nebula-discovery.service
+        dst: /lib/systemd/system/nebula-discovery.service
+      - src: deploy/systemd/nebula-discovery.path
+        dst: /lib/systemd/system/nebula-discovery.path
+      - src: deploy/systemd/nebula-discovery.timer
+        dst: /lib/systemd/system/nebula-discovery.timer
+      - src: deploy/install.sh
+        dst: /usr/share/nebula/deploy/install.sh
+        file_info: {mode: 0755}
+      - src: deploy/uninstall.sh
+        dst: /usr/share/nebula/deploy/uninstall.sh
+        file_info: {mode: 0755}
+      - src: deploy/systemd/*
+        dst: /usr/share/nebula/deploy/systemd/
+      - src: docs/admin/guide.md
+        dst: /usr/share/doc/nebula-operation-station/guide.md
+    scripts:
+      postinstall: deploy/deb/postinst
+      preremove: deploy/deb/prerm
+
+# The container image (decision 5 of the M10 plan): the four binaries on
+# debian:12-slim; deploy/container/compose.yaml runs it. Pushing happens
+# offline with the release, like publishing.
+dockers:
+  - id: nebula
+    ids: [nebula, nebula-server, nebula-executor, nebula-discovery]
+    goos: linux
+    goarch: amd64
+    dockerfile: deploy/container/Dockerfile
+    image_templates:
+      - "ghcr.io/nebula-operation-station/nebula:{{ .Version }}"
+    skip_push: true
+
 checksum:
   name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
 
