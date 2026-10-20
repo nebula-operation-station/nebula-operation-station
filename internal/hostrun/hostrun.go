@@ -43,6 +43,10 @@ const (
 	DefaultTimeout = time.Minute
 )
 
+// killGrace is how long a timed-out attached run has between SIGTERM and
+// SIGKILL (a variable for tests).
+var killGrace = 5 * time.Second
+
 // TruncationMarker ends a log that hit MaxLog.
 const TruncationMarker = "\n[nebula: log truncated at 10 MiB]\n"
 
@@ -228,8 +232,16 @@ func run(ctx context.Context, s Session, cmd string, timeout time.Duration, out,
 	if timedOut {
 		// Best effort: OpenSSH may ignore the signal; closing the channel
 		// ends our side. The remote process can outlive this (stated in
-		// docs); long work belongs in a durable job.
-		_ = s.Signal(ssh.SIGKILL)
+		// docs); long work belongs in a durable job. TERM first: the
+		// bootstrap's trap turns it into an exit that removes the private
+		// runtime directory with the run's secrets; KILL only if it is
+		// still there after a grace period.
+		_ = s.Signal(ssh.SIGTERM)
+		select {
+		case <-done:
+		case <-time.After(killGrace):
+			_ = s.Signal(ssh.SIGKILL)
+		}
 		_ = s.Close()
 		select {
 		case <-done:

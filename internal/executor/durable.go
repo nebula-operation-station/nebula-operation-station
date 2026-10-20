@@ -43,6 +43,7 @@ func (s *Service) StartDurable(ctx context.Context, req *pb.StartDurableRequest)
 	if err != nil {
 		return nil, err
 	}
+	refs, _ := permit.SecretRefs(r.GetParametersJson()) // checked by runSecrets
 	grant, err := s.auth.AuthorizeGrant(d, authorizeRequest(r))
 	if err != nil {
 		return nil, toStatus(err)
@@ -50,7 +51,7 @@ func (s *Service) StartDurable(ctx context.Context, req *pb.StartDurableRequest)
 	// Recorded before anything goes to the host: a crash from here on is
 	// reconciled, never dispatched again.
 	if err := s.db.CreateRun(executordb.Run{ExecutionID: grant.ExecutionID, HostID: r.GetHostId(), Digest: d.String(),
-		Endpoints: req.GetEndpoints(), Fingerprint: r.GetHostKeyFingerprint(), Timeout: timeout}); err != nil {
+		Endpoints: req.GetEndpoints(), Fingerprint: r.GetHostKeyFingerprint(), Timeout: timeout, SecretRefs: refs}); err != nil {
 		s.log.Error("audit", "kind", "store_error", "op", "create_run", "digest", d.String(), "host", r.GetHostId(), "detail", err.Error())
 		return nil, status.Error(codes.Unavailable, "storage_error: the run was authorized but could not be recorded; it was not started")
 	}
@@ -247,6 +248,18 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 			fin.Class, fin.Detail = classUnknown, "the job directory is gone; the outcome cannot be known (not re-run)"
 		}
 		s.finishRun(fin)
+		// The run directory (with any secrets) may outlive the job
+		// directory; remove both.
+		_ = hostrun.Remove(ctx, c.Client, s.jobs, run.ExecutionID)
+	case "incomplete":
+		// The dispatch was cut off before the job was stored. Give a
+		// dispatch in progress its time, then end the run and remove
+		// what the cut-off dispatch left behind.
+		if now.Sub(since) > stuckDispatched {
+			fin.Class, fin.Detail = classNotExecuted, "the dispatch was cut off before the job was stored"
+			s.finishRun(fin)
+			_ = hostrun.Remove(ctx, c.Client, s.jobs, run.ExecutionID)
+		}
 	case "dispatched":
 		if now.Sub(since) > stuckDispatched {
 			fin.Class, fin.Detail = classNotExecuted, "the job was stored but never started"
@@ -265,10 +278,20 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 			fin.Class, fin.Detail = hostrun.ClassExecutionTimeout, "the job did not finish within its timeout"
 		}
 		s.finishRun(fin)
+		// A killed job never ran its own cleanup: remove the job and run
+		// directories (and any secrets) now.
+		if err := hostrun.Remove(ctx, c.Client, s.jobs, run.ExecutionID); err != nil {
+			s.log.Warn("audit", "kind", "job_cleanup_failed", "execution", run.ExecutionID, "host", run.HostID, "detail", err.Error())
+		}
 	case "finished":
 		res, err := hostrun.Collect(ctx, c.Client, s.jobs, run.ExecutionID, st.ExitCode)
 		if err != nil {
 			s.log.Warn("audit", "kind", "reconcile_collect_failed", "execution", run.ExecutionID, "host", run.HostID, "detail", err.Error())
+			return
+		}
+		// Secret values never leave the executor in a result or log.
+		if err := s.redactDurable(run, &res); err != nil {
+			s.log.Warn("audit", "kind", "reconcile_waits_for_vault", "execution", run.ExecutionID, "host", run.HostID)
 			return
 		}
 		fin.Class, fin.Detail, fin.ExitCode = res.Class, res.Detail, res.ExitCode

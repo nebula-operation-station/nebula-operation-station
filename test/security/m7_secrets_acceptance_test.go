@@ -88,6 +88,32 @@ func TestM7_SecretsReachOnlyTheHost(t *testing.T) {
 		t.Fatalf("secrets left on the host: %v", entries)
 	}
 
+	// A durable run gets the same redaction when the executor collects its
+	// result and log (review m73, finding 1), and leaves nothing behind.
+	p3, err := h.proposeSecretRun(host, params, riskHigh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.client.SubmitAssertion(h.ctx(), &pb.SubmitAssertionRequest{ExecutionDigest: p3.GetExecutionDigest(), AssertionJson: h.sign(p3.GetChallenge())}); err != nil {
+		t.Fatal(err)
+	}
+	dr := durableReq(p3.GetExecutionDigest(), host, secretScript)
+	dr.Run.ParametersJson = params
+	ds, err := h.client.StartDurable(h.ctx(), dr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := h.reconcileUntil(ds.GetRun().GetExecutionId(), host.id)
+	if st.GetClass() != "success" || string(st.GetResult()) != fmt.Sprintf(`{"len":%d}`, len(appToken)) {
+		t.Fatalf("durable: %+v", st)
+	}
+	if strings.Contains(string(st.GetLog()), appToken) || !strings.Contains(string(st.GetLog()), "[secret token redacted]") {
+		t.Fatalf("durable log %q", st.GetLog())
+	}
+	if strings.Contains(h.logs.String(), appToken) {
+		t.Fatal("the executor logged the secret (durable)")
+	}
+
 	// A secret the vault does not hold refuses the run before the host is
 	// used.
 	missing := []byte(`{"nebula_secrets":{"token":"no.such"}}`)

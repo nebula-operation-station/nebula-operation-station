@@ -43,10 +43,13 @@ type JobConfig struct {
 	// BootIDFile is read to tell whether a host rebooted; empty means
 	// /proc/sys/kernel/random/boot_id (tests point it elsewhere).
 	BootIDFile string
+	// RequireTmpfs refuses to write secrets unless the run root is a
+	// tmpfs (or ramfs), so a secret never lands on persistent disk.
+	RequireTmpfs bool
 }
 
 // DefaultJobConfig is the Debian adapter's setup (spec 07).
-var DefaultJobConfig = JobConfig{Sudo: true, JobRoot: "/var/lib/nebula/jobs", RunRoot: "/run/nebula", Systemd: true}
+var DefaultJobConfig = JobConfig{Sudo: true, JobRoot: "/var/lib/nebula/jobs", RunRoot: "/run/nebula", Systemd: true, RequireTmpfs: true}
 
 var safePathRe = regexp.MustCompile(`^/[A-Za-z0-9._/-]{1,200}$`)
 
@@ -146,21 +149,31 @@ func (c JobConfig) dispatchCommand(executionID string, timeout time.Duration, wi
 	}
 	j, r := c.JobRoot+"/"+executionID, c.RunRoot+"/"+executionID
 	// Secrets go to "$r/secrets" on the run root (tmpfs, removed with "$r"
-	// when the script ends); a failure while reading them removes the job.
-	secretsBlock := ""
+	// when the script ends). From the first secret byte until the job is
+	// handed to its launcher, the dispatch shell owns the cleanup: any
+	// failure, and a hang-up or kill signal (a dropped connection), removes
+	// the job, so no secret is left behind without a job to remove it.
+	secretsBlock, handedOver := "", ""
 	if withSecrets {
+		tmpfs := ""
+		if c.RequireTmpfs {
+			tmpfs = `case $(stat -f -c %T "$r" 2>/dev/null) in tmpfs|ramfs) ;; *) echo "nebula-bootstrap: the run root is not a tmpfs" >&2; exit 120;; esac
+`
+		}
 		secretsBlock = `trap 'rm -rf "$j" "$r"' EXIT
-mkdir -m 0700 "$r/secrets" || exit 120
+trap 'exit 129' HUP INT TERM
+` + tmpfs + `mkdir -m 0700 "$r/secrets" || exit 120
 s="$r/secrets"
-` + readSecrets + `trap - EXIT
+` + readSecrets
+		handedOver = `trap - EXIT HUP INT TERM
 `
 	}
-	launch := "setsid /bin/sh -c " + shellQuote(wrapper) + " nebula-job \"$j\" \"$r\" " + executionID + " </dev/null >/dev/null 2>&1 &"
+	launch := "setsid /bin/sh -c " + shellQuote(wrapper) + " nebula-job \"$j\" \"$r\" " + executionID + " </dev/null >/dev/null 2>&1 &\n" + handedOver
 	if c.Systemd {
 		launch = "systemd-run --quiet --collect --unit=nebula-job-" + executionID +
 			" --property=RuntimeMaxSec=" + strconv.Itoa(int(timeout/time.Second)) +
 			" /bin/sh -c " + shellQuote(wrapper) + " nebula-job \"$j\" \"$r\" " + executionID +
-			" || { echo 'nebula-bootstrap: systemd-run failed' >&2; rm -rf \"$j\" \"$r\"; exit 120; }"
+			" || { echo 'nebula-bootstrap: systemd-run failed' >&2; rm -rf \"$j\" \"$r\"; exit 120; }\n" + handedOver
 	}
 	body := `umask 077
 j=` + j + `; r=` + r + `
@@ -171,12 +184,12 @@ IFS= read -r p || { echo "nebula-bootstrap: no parameters" >&2; rm -rf "$j" "$r"
 printf '%s' "$p" | base64 -d > "$r/params.json" || { echo "nebula-bootstrap: base64 failed" >&2; rm -rf "$j" "$r"; exit 122; }
 ` + secretsBlock + `cat > "$j/action.sh" || { echo "nebula-bootstrap: cannot write the script" >&2; rm -rf "$j" "$r"; exit 123; }
 printf '{"state":"dispatched"}\n' > "$j/state.json"
-` + launch + `
-`
+` + launch
 	return c.program(body), nil
 }
 
-// CheckCommand prints the job's state.json, or "missing".
+// CheckCommand prints the job's state.json, "missing", or "incomplete"
+// for a job directory without state.json (a dispatch that was cut off).
 func (c JobConfig) CheckCommand(executionID string) (string, error) {
 	if !uuidRe.MatchString(executionID) {
 		return "", errors.New("hostrun: execution ID is not a lowercase UUID")
@@ -187,6 +200,7 @@ func (c JobConfig) CheckCommand(executionID string) (string, error) {
 	j := c.JobRoot + "/" + executionID
 	body := `j=` + j + `
 [ -d "$j" ] || { echo missing; exit 0; }
+[ -e "$j/state.json" ] || { echo incomplete; exit 0; }
 s=$(head -c 4096 "$j/state.json" 2>/dev/null)
 case "$s" in *'"state":"running"'*)
   pid=$(printf '%s' "$s" | sed -n 's/.*"pid":\([0-9]*\).*/\1/p')
@@ -281,7 +295,9 @@ func Dispatch(ctx context.Context, client *ssh.Client, cfg JobConfig, executionI
 
 // JobState of a durable job on the host.
 type JobState struct {
-	// Phase: missing, dispatched, running, finished, dead.
+	// Phase: missing, incomplete, dispatched, running, finished, dead.
+	// incomplete is a job directory without state.json: the dispatch was
+	// cut off before the job was stored.
 	Phase    string
 	ExitCode int
 }
@@ -305,6 +321,9 @@ func Check(ctx context.Context, client *ssh.Client, cfg JobConfig, executionID s
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 	if len(lines) == 0 || lines[0] == "missing" {
 		return JobState{Phase: "missing"}, nil
+	}
+	if lines[0] == "incomplete" {
+		return JobState{Phase: "incomplete"}, nil
 	}
 	var st stateDoc
 	if err := json.Unmarshal([]byte(lines[0]), &st); err != nil {
