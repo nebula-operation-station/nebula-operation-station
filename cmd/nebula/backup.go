@@ -414,13 +414,19 @@ func restoreWith(args []string, stdin io.Reader, w io.Writer, sys backup.System,
 	// A backup of another machine (a new machine, or the wrong file) takes
 	// over that machine's inventory, event chain and keys: say so and ask
 	// for its name (review m102, F2).
-	if here, _ := hostname(); m.Host != here {
+	// A backup that names no machine is treated as foreign as well
+	// (review fx2, note 4): then the word to type is "unknown".
+	if here, _ := hostname(); m.Host != here || m.Host == "" {
+		want, made := m.Host, displaySafe([]byte(m.Host), 64)
+		if want == "" {
+			want, made = "unknown", "an unknown machine (the backup names none)"
+		}
 		fmt.Fprintf(w, "This backup was made on %s, not on this machine (%s). Restoring it here makes this machine take over\n",
-			displaySafe([]byte(m.Host), 64), displaySafe([]byte(here), 64))
+			made, displaySafe([]byte(here), 64))
 		fmt.Fprintln(w, "its inventory, history, event chain and SSH keys.")
-		fmt.Fprint(w, "Type the backup's host name to continue: ")
+		fmt.Fprintf(w, "Type %q to continue: ", want)
 		line, _ := in.ReadString('\n')
-		if strings.TrimSpace(line) != m.Host || m.Host == "" {
+		if strings.TrimSpace(line) != want {
 			return errors.New("not confirmed; nothing changed")
 		}
 	}
