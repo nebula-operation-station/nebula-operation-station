@@ -19,6 +19,18 @@
   const submit = document.getElementById('host-submit');
   const cancel = document.getElementById('host-cancel');
   let editing = null; // host ID being edited, or null for "add host"
+  // "Add to managed hosts" from a network asset: prefill, and link the
+  // asset to the host once it exists.
+  let prefillAsset = null;
+  if (form.dataset.prefill) {
+    try {
+      const p = JSON.parse(form.dataset.prefill);
+      prefillAsset = p.asset;
+      idInput.value = p.id || '';
+      nameInput.value = p.display_name || '';
+      endpointsInput.value = (p.endpoints || []).join('\n');
+    } catch (_) { /* no prefill */ }
+  }
 
   function readForm() {
     const endpoints = endpointsInput.value
@@ -64,6 +76,11 @@
     submit.disabled = true;
     try {
       await w.post(editing === null ? '/inventory/hosts' : '/inventory/hosts/update', body);
+      if (editing === null && prefillAsset) {
+        await w.post('/network/a/link', { asset: prefillAsset, host: body.id });
+        window.location.assign('/network/a/' + encodeURIComponent(prefillAsset));
+        return;
+      }
       window.location.reload();
     } catch (err) {
       w.show(err.message || 'The change failed.', true);

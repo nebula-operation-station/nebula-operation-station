@@ -250,6 +250,34 @@ function check(cond, what) {
   await Promise.all([page.waitForNavigation({ timeout: 15000 }), row().locator('.inventory__delete').click()]);
   check(await row().count() === 0, 'host deleted after typing its ID');
 
+  // Network (M9-1): a network with its address grid, a reservation, an
+  // asset that becomes a managed host.
+  await page.goto(base + '/network');
+  await page.fill('#net-id', 'lan');
+  await page.fill('#net-name', 'LAN');
+  await page.fill('#net-prefix', '192.168.10.0/24');
+  await page.fill('#net-gateway', '192.168.10.1');
+  await page.fill('#net-pools', 'servers 192.168.10.10-192.168.10.19');
+  await Promise.all([page.waitForURL(/\/network\/n\/lan$/, { timeout: 15000 }), page.click('#network-form button[type="submit"]')]);
+  check(await page.locator('.ipgrid__cell').count() === 256 && await page.locator('.ipgrid__cell.ip--ASSIGNED').count() === 1,
+    'a /24 shows every address, the gateway as assigned');
+  await page.fill('#entry-address', '192.168.10.40');
+  await page.fill('#entry-note', 'new switch');
+  await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('#entry-form button[type="submit"]')]);
+  check(await page.getAttribute('.ipgrid__cell.ip--RESERVED', 'title') === '192.168.10.40 RESERVED: new switch', 'an address is reserved with a note');
+  check(/192\.168\.10\.2\b/.test(await page.textContent('section[aria-label="Network"]')), 'a free address is suggested');
+  await page.goto(base + '/network');
+  await page.fill('#asset-id', 'nas');
+  await page.fill('#asset-name', 'NAS');
+  await page.selectOption('#asset-kind', 'nas');
+  await page.fill('#asset-addresses', '192.168.10.21');
+  await Promise.all([page.waitForURL(/\/network\/a\/nas$/, { timeout: 15000 }), page.click('#asset-form button[type="submit"]')]);
+  await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('a[href="/inventory?asset=nas"]')]);
+  check(await page.inputValue('#host-id') === 'nas' && await page.inputValue('#host-endpoints') === '192.168.10.21',
+    'add to managed hosts prefills the inventory form');
+  await Promise.all([page.waitForURL(/\/network\/a\/nas$/, { timeout: 15000 }), page.click('#host-submit')]);
+  check(await page.locator('a[href="/hosts/nas"]').count() === 1, 'the asset is linked to the new managed host');
+
   // CSV import: map columns, preview, import the importable rows.
   await page.goto(base + '/inventory/import');
   await page.setInputFiles('#csv-file', { name: 'hosts.csv', mimeType: 'text/csv',

@@ -1,0 +1,27 @@
+{{define "content"}}
+{{with .Network}}{{with .Asset}}
+<h1>Asset {{.Name}}</h1>
+<section class="panel" aria-label="Asset">
+  <p>{{.Kind}}{{if .Hostname}} · {{.Hostname}}{{end}}{{if .MAC}} · MAC {{.MAC}}{{end}} · <a href="/network">all assets</a></p>
+  <p>Addresses: {{if .Addresses}}{{.Addresses}}{{else}}none{{end}}</p>
+  {{if .Notes}}<p class="output">{{.Notes}}</p>{{end}}
+  {{if .HostID}}
+  <p>Managed host: <a href="/hosts/{{.HostID}}">{{.HostID}}</a></p>
+  {{else if .CanEnroll}}
+  <p><a class="button" href="/inventory?asset={{.ID}}">Add to managed hosts</a></p>
+  <p class="hint">Opens the inventory form with this asset's values; enroll the new host afterwards (read and pin its SSH key).</p>
+  {{end}}
+</section>
+{{end}}
+<section class="panel" aria-label="Edit asset">
+  <h2>Edit</h2>
+  {{template "asset_form" .}}
+  <h3>Delete</h3>
+  <div class="actions">
+    <input type="text" id="asset-delete-confirm" placeholder="{{.Asset.ID}}" aria-label="Type the asset ID to confirm">
+    <button type="button" id="asset-delete" class="button button--danger" data-id="{{.Asset.ID}}">Delete asset</button>
+  </div>
+</section>
+{{end}}
+<p id="message" class="message" role="status" aria-live="polite"></p>
+{{end}}

@@ -111,6 +111,9 @@ type Options struct {
 	Modules Modules
 	// LastResult feeds the module cards on host pages. Nil shows none.
 	LastResult LastResultFunc
+	// Network keeps networks and assets (M9-1). Nil leaves the network
+	// page empty.
+	Network NetworkStore
 	// Repin re-pins hosts blocked by a host key mismatch. Nil leaves only
 	// the CLI instructions on the dashboard.
 	Repin Repinner
@@ -140,6 +143,7 @@ type Handler struct {
 	trust      ArtifactTrust
 	modules    Modules
 	lastResult LastResultFunc
+	network    NetworkStore
 	log        *slog.Logger
 	repin      Repinner
 	enroll     Enroller
@@ -152,7 +156,7 @@ func New(o Options) (*Handler, error) {
 	}
 	pages := make(map[string]*template.Template, len(pageFiles))
 	for name, file := range pageFiles {
-		set, err := template.New("").ParseFS(templates.FS, "layout.html", file)
+		set, err := template.New("").ParseFS(templates.FS, append([]string{"layout.html", file}, pagePartials[name]...)...)
 		if err != nil {
 			return nil, fmt.Errorf("ui: parse template %s: %w", name, err)
 		}
@@ -181,6 +185,7 @@ func New(o Options) (*Handler, error) {
 		trust:        o.Trust,
 		modules:      o.Modules,
 		lastResult:   o.LastResult,
+		network:      o.Network,
 		repin:        o.Repin,
 		enroll:       o.Enroll,
 		log:          log,
@@ -208,6 +213,16 @@ var pageFiles = map[string]string{
 	"modules":          "modules.html",
 	"module":           "module.html",
 	"host":             "host.html",
+	"network":          "network.html",
+	"network_detail":   "network_detail.html",
+	"asset":            "asset.html",
+}
+
+// pagePartials are extra template files a page uses.
+var pagePartials = map[string][]string{
+	"network":        {"network_forms.html"},
+	"network_detail": {"network_forms.html"},
+	"asset":          {"network_forms.html"},
 }
 
 // Handler returns the UI's http.Handler without the security middleware
@@ -255,6 +270,16 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("POST /modules/import", h.handleModuleImport)
 	mux.HandleFunc("POST /modules/verify", h.handleModuleVerify)
 	mux.HandleFunc("GET /hosts/{id}", h.handleHost)
+	// Network: assets and IPAM-light (M9-1).
+	mux.HandleFunc("GET /network", h.handleNetworkPage)
+	mux.HandleFunc("GET /network/n/{id}", h.handleNetworkDetail)
+	mux.HandleFunc("GET /network/a/{id}", h.handleAssetDetail)
+	mux.HandleFunc("POST /network/save", h.handleNetworkSave)
+	mux.HandleFunc("POST /network/delete", h.handleNetworkDelete)
+	mux.HandleFunc("POST /network/entry", h.handleIPEntry)
+	mux.HandleFunc("POST /network/a/save", h.handleAssetSave)
+	mux.HandleFunc("POST /network/a/delete", h.handleAssetDelete)
+	mux.HandleFunc("POST /network/a/link", h.handleAssetLink)
 	mux.HandleFunc("POST /hostkeys/repin/propose", h.handleRepinPropose)
 	mux.HandleFunc("POST /hostkeys/repin/commit", h.handleRepinCommit)
 	mux.HandleFunc("GET /inventory/enroll", h.handleEnrollPage)
@@ -283,7 +308,6 @@ var emptyPages = []struct {
 	path  string
 	title string
 }{
-	{"/network", "Network"},
 	{"/history", "History"},
 	{"/settings", "Settings"},
 }
@@ -325,6 +349,11 @@ type pageData struct {
 	Runbooks *runbooksData
 	// Modules is the data of the module pages.
 	Modules *modulesData
+	// Network is the data of the network pages.
+	Network *networkData
+	// InventoryPrefill is the JSON that prefills the add-host form from
+	// an asset ("add to managed hosts").
+	InventoryPrefill string
 	// Host is the data of a host's page.
 	Host *hostPageData
 	// Ops is the data of the operations pages.
@@ -471,6 +500,11 @@ func (h *Handler) handleInventory(w http.ResponseWriter, r *http.Request) {
 		data.InventoryEditable = true
 		data.EnrollEnabled = h.enroll != nil && h.hosts != nil
 		data.Scripts = []string{"webauthn.js", "inventory.js"}
+		if id := r.URL.Query().Get("asset"); id != "" {
+			ctx, cancel := context.WithTimeout(r.Context(), inventoryCallTimeout)
+			data.InventoryPrefill = h.assetPrefill(ctx, id)
+			cancel()
+		}
 	}
 	if h.hosts == nil {
 		h.render(w, data)

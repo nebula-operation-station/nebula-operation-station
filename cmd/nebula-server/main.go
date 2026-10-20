@@ -26,6 +26,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executorclient"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/ipam"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/modules"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
@@ -229,6 +230,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		Trust:        exec,
 		Modules:      mods,
 		LastResult:   ops.LastResult,
+		Network:      ipam.New(db, ipam.FromInventory(store.List)),
 		Repin:        exec,
 		Enroll:       exec,
 		Log:          log,
