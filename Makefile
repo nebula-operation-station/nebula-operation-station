@@ -69,6 +69,8 @@ fuzz:
 	$(GO) test -run='^$$' -fuzz='^FuzzParsers$$' -fuzztime=20s ./internal/executions/osdebian/
 	$(GO) test -run='^$$' -fuzz='^FuzzOneJSONDocument$$' -fuzztime=20s ./internal/hostrun/
 	$(GO) test -run='^$$' -fuzz='^FuzzRead$$' -fuzztime=20s ./internal/backup/
+	$(GO) test -run='^$$' -fuzz='^FuzzUnpack$$' -fuzztime=20s ./internal/modules/
+	$(GO) test -run='^$$' -fuzz='^FuzzParse$$' -fuzztime=20s ./internal/inventory/csvimport/
 
 check: lint generate-check test vuln
 

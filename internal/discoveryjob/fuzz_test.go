@@ -4,6 +4,7 @@ package discoveryjob
 
 import (
 	"net/netip"
+	"regexp"
 	"strings"
 	"testing"
 	"unicode"
@@ -31,7 +32,10 @@ func FuzzParseNmapXML(f *testing.F) {
 				t.Fatal("too many ports")
 			}
 			for _, p := range h.Ports {
-				checkText(t, p.Service+p.Product+p.Version)
+				// The bound is per field (Text truncates each), not their sum.
+				for _, txt := range []string{p.Service, p.Product, p.Version} {
+					checkText(t, txt)
+				}
 			}
 		}
 	})
@@ -67,14 +71,52 @@ func FuzzJobArgs(f *testing.F) {
 		if err != nil {
 			return
 		}
-		last := args[len(args)-1]
-		if strings.HasPrefix(last, "-") || strings.ContainsAny(last, " \t\n") {
-			t.Fatalf("target %q", last)
-		}
-		for _, a := range args {
-			if strings.Contains(a, "script") || strings.HasPrefix(a, "-i") || strings.HasPrefix(a, "-o") && a != "-oX" {
-				t.Fatalf("argument %q", a)
-			}
-		}
+		checkArgs(t, j, args)
 	})
 }
+
+// checkArgs requires every option to come from the fixed set of spec 09:
+// a pattern test would let a new option such as -sC or -A through.
+func checkArgs(t *testing.T, j Job, args []string) {
+	t.Helper()
+	targets, err := Targets(j.Targets)
+	if err != nil || len(args) < len(targets) {
+		t.Fatalf("targets %v: %v", args, err)
+	}
+	opts, tgts := args[:len(args)-len(targets)], args[len(args)-len(targets):]
+	for i, a := range tgts {
+		want := targets[i].String()
+		if targets[i].IsSingleIP() {
+			want = targets[i].Addr().String()
+		}
+		if a != want || strings.HasPrefix(a, "-") {
+			t.Fatalf("target %q, want %q", a, want)
+		}
+	}
+	fixed := []string{"--privileged", "-oX", "-", "--no-stylesheet", "--max-retries", nmapMaxRetries, "--host-timeout", nmapHostTimeout}
+	if len(opts) < len(fixed)+1 || strings.Join(opts[:len(fixed)], " ") != strings.Join(fixed, " ") {
+		t.Fatalf("fixed options %q", opts)
+	}
+	rest := opts[len(fixed):]
+	if last := rest[len(rest)-1]; last != "-T2" && last != "-T3" && last != "-T4" {
+		t.Fatalf("timing %q", last)
+	}
+	rest = rest[:len(rest)-1]
+	flags := map[string]bool{"-6": true, "-sn": true, "-sS": true, "-sU": true, "-sV": true, "-O": true, "-Pn": true, "--open": true, "-p-": true}
+	for i := 0; i < len(rest); i++ {
+		switch a := rest[i]; {
+		case flags[a]:
+		case a == "-p" && i+1 < len(rest) && argPortsRe.MatchString(rest[i+1]):
+			i++
+		case a == "--top-ports" && i+1 < len(rest) && argDigitsRe.MatchString(rest[i+1]):
+			i++
+		default:
+			t.Fatalf("option %q not in the fixed set (%q)", a, args)
+		}
+	}
+}
+
+var (
+	argPortsRe  = regexp.MustCompile(`^(T:)?[0-9][0-9,-]*(,U:[0-9][0-9,-]*)?$`)
+	argDigitsRe = regexp.MustCompile(`^[0-9]{1,5}$`)
+)

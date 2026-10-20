@@ -51,4 +51,17 @@ func TestSecurityIndexNamesExistingTests(t *testing.T) {
 			t.Errorf("the index names %s, which does not exist", m[1])
 		}
 	}
+	// A wildcard row (`TestH03_*`) must still match at least one test
+	// (review m103, finding 6).
+	for _, m := range regexp.MustCompile("`((?:Test|Fuzz)[A-Za-z0-9_]+)\\*`").FindAllStringSubmatch(string(doc), -1) {
+		n := 0
+		for name := range defined {
+			if strings.HasPrefix(name, m[1]) {
+				n++
+			}
+		}
+		if n == 0 {
+			t.Errorf("the index names %s*, which matches no test", m[1])
+		}
+	}
 }
