@@ -1,0 +1,35 @@
+{{define "content"}}
+{{with .Runbooks.Detail}}
+<h1>Runbook {{.Slug}}, version {{.Version}}</h1>
+<section class="panel" aria-label="Runbook">
+  <p class="status">{{.Title}}</p>
+  {{if .Description}}<p class="hint">{{.Description}}</p>{{end}}
+  <p class="status">Action {{.ActionID}} {{.ModuleVersion}}; {{.Kind}}; declared {{.Risk}}</p>
+  <p class="status">Artifact SHA-256: <code>{{.SHA256}}</code></p>
+  {{if .Scanner}}<p class="status">Safety scanner (advisory; it can only raise the risk):
+    {{range $i, $f := .Scanner}}{{if $i}}; {{end}}{{$f.Category}} at line {{$f.Line}} (<code>{{$f.Excerpt}}</code>){{end}}</p>
+  {{else}}<p class="status">Safety scanner: no findings (a clean scan proves nothing).</p>{{end}}
+  <div class="actions">
+    <a class="button" href="/operations/new?action={{.ActionID}}">Plan operation</a>
+    <a class="button" href="/runbooks/new?from={{.Slug}}">Edit (saves a new version)</a>
+    <a class="button" href="/runbooks/{{.Slug}}/{{.Version}}/artifact">Download script</a>
+  </div>
+  <p class="hint">To let the executor rate this version at its declared risk instead of HIGH, review the downloaded script and run on
+    the executor host: <code>{{.TrustCommand}}</code></p>
+  {{if .Params}}
+  <h2>Parameters</h2>
+  <table class="inventory">
+    <thead><tr><th>Name</th><th>Label</th><th>Type</th><th>Choices</th><th>In the script</th></tr></thead>
+    <tbody>{{range .Params}}<tr><td>{{.Name}}</td><td>{{.Label}}</td><td>{{.Type}}</td><td>{{.Choices}}</td><td><code>${{.Env}}</code></td></tr>{{end}}</tbody>
+  </table>
+  {{end}}
+  <h2>Script</h2>
+  <pre class="output">{{.Body}}</pre>
+  <h2>Versions</h2>
+  <table class="inventory">
+    <thead><tr><th>Version</th><th>Artifact</th><th>Saved by</th><th>Saved</th></tr></thead>
+    <tbody>{{range .Versions}}<tr><td><a href="/runbooks/{{$.Runbooks.Detail.Slug}}?version={{.Version}}">{{.Version}}</a></td><td><code>{{.Short}}</code></td><td>{{.CreatedBy}}</td><td>{{.Created}}</td></tr>{{end}}</tbody>
+  </table>
+</section>
+{{end}}
+{{end}}

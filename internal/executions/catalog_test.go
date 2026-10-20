@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package executions
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/runbooks"
+)
+
+// Runbooks are planned like built-ins, and an execution runs exactly the
+// version it was planned with, even after a newer one is saved.
+func TestRunbookExecutionRunsItsVersion(t *testing.T) {
+	f := &fakeExec{}
+	s, db := setup(t, f)
+	rb := runbooks.New(db)
+	s.SetRunbooks(rb)
+	ctx := context.Background()
+	d := runbooks.Draft{Slug: "hello", Title: "Hello", Risk: "MEDIUM", TimeoutS: 60,
+		Params: []runbooks.Param{{Name: "who", Label: "Who", Type: runbooks.TypeName}}, Body: "echo hello $NEBULA_P_WHO\n"}
+	v1, err := rb.Save(ctx, "axel", d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all, err := s.Catalog(ctx)
+	if err != nil || all[len(all)-1].ID != "runbook.hello" || all[len(all)-1].Version != "1.0.0" {
+		t.Fatalf("%v %v", err, all[len(all)-1])
+	}
+	var pe *ParamError
+	if _, err := s.Create(ctx, "axel", "runbook.hello", []string{"web"}, map[string]string{"who": "-rf"}); !errors.As(err, &pe) {
+		t.Fatal(err)
+	}
+	c, err := s.Create(ctx, "axel", "runbook.hello", []string{"web"}, map[string]string{"who": "world"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := f.proposed.GetRequest()
+	if r.GetActionId() != "runbook.hello" || r.GetModuleVersion() != "1.0.0" || r.GetArtifactSha256() != v1.ArtifactSHA256 ||
+		string(f.proposed.GetArtifact()) != string(v1.Artifact) {
+		t.Fatalf("%v", r)
+	}
+	d.Body = "echo version two\n"
+	if _, err := rb.Save(ctx, "axel", d); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Approve(ctx, "axel", c.ID, []byte("good"), 0); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, s, c.ID, "finished")
+	if run := f.attached[0].GetRun(); string(run.GetArtifact()) != string(v1.Artifact) || !strings.Contains(string(run.GetArtifact()), "echo hello") {
+		t.Fatal("ran another version")
+	}
+	if a, ok, err := s.Action(ctx, "runbook.hello", ""); err != nil || !ok || a.Version != "2.0.0" {
+		t.Fatalf("%v %v %v", a.Version, ok, err)
+	}
+	if _, ok, _ := s.Action(ctx, "runbook.hello", "3.0.0"); ok {
+		t.Fatal("a version that does not exist")
+	}
+	if _, err := s.Create(ctx, "axel", "runbook.nope", []string{"web"}, nil); !errors.Is(err, ErrUnknownAction) {
+		t.Fatal(err)
+	}
+	// Without a runbook store, runbooks are unknown.
+	s.SetRunbooks(nil)
+	if _, ok, _ := s.Action(ctx, "runbook.hello", ""); ok {
+		t.Fatal("runbook without a store")
+	}
+}
