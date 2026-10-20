@@ -198,3 +198,9 @@ body {
 .class--EXISTING { background: #cfe0ff; }
 .class--POSSIBLE_MATCH { background: #fff3cd; }
 .class--CONFLICT { background: #f8c9c9; font-weight: 700; }
+
+/* Global search in the navigation (M9-3). */
+.nav__search input {
+  padding: 0.2rem 0.4rem;
+  min-width: 14rem;
+}

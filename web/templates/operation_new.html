@@ -26,7 +26,7 @@
       <legend>Hosts</legend>
       {{range .Ops.Hosts}}
       <label class="choice">
-        <input type="checkbox" name="host" value="{{.ID}}"{{if not .Usable}} disabled{{end}}>
+        <input type="checkbox" name="host" value="{{.ID}}"{{if not .Usable}} disabled{{end}}{{if .Checked}} checked{{end}}>
         {{.Name}} <span class="hint">({{.ID}}, {{.Status}})</span>
       </label>
       {{else}}

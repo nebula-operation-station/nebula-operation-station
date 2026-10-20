@@ -361,6 +361,14 @@ Conflicts are never imported. Every host seen also feeds the address
 status (DISCOVERED, or CONFLICT for a different MAC). Names and banners
 come from the network and may lie.
 
+**Search.** The search box in the navigation finds hosts (ID, name,
+endpoint, tag `key=value`, group), assets (name, hostname, MAC,
+address), networks (name, prefix, `vlan 10`), an address with its status,
+executions (ID prefix, at least 4 characters, or action), runbooks and
+modules. Quick actions (*Plan an operation* for a host, *Plan* for a
+runbook, *Add to managed hosts* for an asset) only open the page that
+does the work; nothing runs without the usual review and approval.
+
 ## 8. Notifications
 
 Add a `notifications` block to `/etc/nebula/server.json`, keep the file

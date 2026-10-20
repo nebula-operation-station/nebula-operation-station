@@ -1,0 +1,32 @@
+{{define "content"}}
+<h1>Search</h1>
+{{with .Search}}
+<section class="panel" aria-label="Search">
+  <form action="/search" method="get" role="search" class="form">
+    <label>Hostname, IP address, subnet, asset, execution ID, module or runbook
+      <input type="search" name="q" maxlength="100" value="{{.Query}}" autocomplete="off"></label>
+    <div class="actions"><button type="submit" class="button">Search</button></div>
+  </form>
+  {{if .TooLong}}<p class="status--error">The search text is too long.</p>{{end}}
+</section>
+{{if .Query}}{{if not .TooLong}}
+<section class="panel" aria-label="Results">
+  {{if .Results}}
+  <table class="inventory">
+    <thead><tr><th>Kind</th><th>Match</th><th>Details</th><th>Actions</th></tr></thead>
+    <tbody>
+      {{range .Results}}
+      <tr><td>{{.Kind}}</td><td><a href="{{.URL}}">{{.Title}}</a></td><td>{{.Detail}}</td>
+        <td>{{range $i, $a := .Actions}}{{if $i}} · {{end}}<a href="{{$a.URL}}">{{$a.Label}}</a>{{end}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{if .Truncated}}<p class="hint">Only the first 20 matches are shown for: {{range $i, $k := .Truncated}}{{if $i}}, {{end}}{{$k}}{{end}}. Search more precisely.</p>{{end}}
+  <p class="hint">Quick actions only open pages: an operation is still planned, reviewed and approved as usual.</p>
+  {{else}}
+  <p>Nothing found for “{{.Query}}”.</p>
+  {{end}}
+</section>
+{{end}}{{end}}
+{{end}}
+{{end}}

@@ -296,6 +296,14 @@ function check(cond, what) {
   check(await page.locator('#staging a[href="/network/a/printer"]').count() === 1, 'a new host is imported as an asset');
   await page.goto(base + '/network/a/nas');
   check(/aa:bb:cc:dd:ee:21/.test(await page.textContent('main')), 'the import adds the MAC the asset lacked');
+  // Global search (M9-3) from the navigation.
+  await page.fill('.nav__search input[name="q"]', '192.168.10.21');
+  await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.press('.nav__search input[name="q"]', 'Enter')]);
+  check(await page.locator('main a[href="/network/a/nas"]').count() === 1 && /Address/.test(await page.textContent('main')) &&
+    await page.locator('main a[href="/hosts/nas"]').count() >= 1, 'search by IP finds the asset, the managed host and the address');
+  await page.goto(base + '/search?q=e2e-host');
+  await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('main a[href="/operations/new?host=e2e-host"]')]);
+  check(await page.isChecked('input[name="host"][value="e2e-host"]'), 'the quick action opens the planner with the host selected');
 
   // CSV import: map columns, preview, import the importable rows.
   await page.goto(base + '/inventory/import');
