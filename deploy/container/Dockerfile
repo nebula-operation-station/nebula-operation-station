@@ -30,8 +30,8 @@ RUN groupadd --system --gid 10010 nebula-rpc \
  && install -d -m 0700 -o nebula-executor -g nebula-executor /var/lib/nebula/executor /var/lib/nebula/executor/keys \
  && install -d -m 0750 -o nebula-server -g nebula-server /var/lib/nebula/server \
  && install -d -m 0755 /var/lib/nebula/discovery \
- && install -d -m 0750 -o nebula-server -g nebula-discovery /var/lib/nebula/discovery/jobs \
- && install -d -m 0750 -o nebula-discovery -g nebula-server /var/lib/nebula/discovery/results \
+ && install -d -m 2750 -o nebula-server -g nebula-discovery /var/lib/nebula/discovery/jobs \
+ && install -d -m 2750 -o nebula-discovery -g nebula-server /var/lib/nebula/discovery/results \
  && install -d -m 0750 -o nebula-executor -g nebula-rpc /run/nebula
 
 COPY nebula nebula-server nebula-executor nebula-discovery /usr/bin/

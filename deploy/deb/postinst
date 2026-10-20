@@ -1,15 +1,17 @@
 #!/bin/sh
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # postinst of the nebula-operation-station package. A first install only
-# tells the admin how to configure it; an upgrade makes the pre-upgrade
-# backup with the new CLI and then restarts the services (the new
-# binaries migrate the databases when they start).
-set -e
+# tells the admin how to configure it. An upgrade never restarts the
+# services: the new binaries migrate the databases when they start, and
+# the backup before that needs the admin's own sudo, which dpkg does not
+# have (review m105). The services keep running the old version until the
+# admin has made a backup and restarts them.
 case "$1" in
   configure)
     if [ -z "$2" ]; then
       cat <<EOF
-Nebula Operation Station is installed but not configured. Configure it with:
+Nebula Operation Station is installed but not configured; its services do
+not start until it is. Configure it with:
 
   sudo /usr/share/nebula/deploy/install.sh --from-package --admin-users USER --rp-id HOST
 
@@ -18,17 +20,16 @@ EOF
       exit 0
     fi
     [ -d /run/systemd/system ] || exit 0
-    systemctl daemon-reload
+    systemctl daemon-reload || true
     if ! systemctl is-active --quiet nebula-executor.service; then
       exit 0
     fi
-    if /usr/bin/nebula backup --pre-upgrade; then
-      systemctl try-restart nebula-executor.service nebula-server.service
-      echo "nebula: restarted the services; run nebula unlock"
-    else
-      echo "nebula: the pre-upgrade backup failed; the services keep running the old version until you restart them" >&2
-      echo "nebula: make a backup (sudo nebula backup), then: sudo systemctl restart nebula-executor nebula-server" >&2
-    fi
+    cat <<EOF
+nebula: the new version is installed; the services keep running the old one.
+nebula: back up, then restart (the new version migrates the databases):
+nebula:   sudo nebula backup && sudo systemctl restart nebula-executor nebula-server
+nebula: then run nebula unlock.
+EOF
     ;;
 esac
 exit 0

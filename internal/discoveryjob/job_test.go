@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -194,5 +195,37 @@ func TestSpool(t *testing.T) {
 	s.PruneResults(time.Hour, time.Now().Add(2*time.Hour))
 	if _, err := os.Stat(filepath.Join(s.ResultsDir(), testID+".json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("old result kept")
+	}
+}
+
+// The spool directories are setgid (install.sh, the container image): a
+// file one side writes gets the directory's group, the reader's, so the
+// other side can read it (review m105). Needs root to set a foreign group.
+func TestSpoolFilesTakeTheDirectoryGroup(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	const readerGID = 54321
+	s := Spool{Dir: t.TempDir()}
+	for _, d := range []string{s.JobsDir(), s.ResultsDir()} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chown(d, 0, readerGID); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(d, 0o750|os.ModeSetgid); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.WriteJob(job(ModePing, "10.0.0.0/24")); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(filepath.Join(s.JobsDir(), testID+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gid := fi.Sys().(*syscall.Stat_t).Gid; gid != readerGID || fi.Mode().Perm()&0o040 == 0 {
+		t.Fatalf("job file group %d, mode %v: the reader cannot read it", gid, fi.Mode())
 	}
 }

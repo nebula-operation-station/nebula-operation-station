@@ -20,6 +20,29 @@ Nebula Operation Station holds the keys that give root on a whole homelab. This 
 | `nebula` CLI | an admin user (backup and restore: root via sudo) | Unlock, hardened approval, trust, signers, backup and restore. |
 | Managed hosts, scanned networks, module authors | — | Nothing: everything they produce is untrusted input. |
 
+### The container deployment
+
+`deploy/container/compose.yaml` runs the same three services as three
+containers from one image. The boundaries above hold with these
+differences:
+
+| Container | Runs as | Differences from a host install |
+| --- | --- | --- |
+| `executor` | UID 10001 | Host network namespace (`network_mode: host`); still no TCP listener, only the Unix socket on a shared volume. Its data volume is mounted by no other container. |
+| `server` | UID 10002 | Listens on `0.0.0.0:8080` inside its own network namespace; only the compose port mapping (`127.0.0.1:8080`) keeps it off the network. Changing that mapping publishes the UI. |
+| `discovery` | UID 10003 | Host network namespace and `NET_RAW` (the only capability left); mounts only the two spool volumes. |
+| admin CLI | `nebula-admin`, UID 10100, in the executor container | A container-local admin identity, distinct from the host's admin users; whoever can `docker compose exec` into the executor container can act as it. |
+
+- **The image is a new trust.** Whoever builds or can replace
+  `ghcr.io/nebula-operation-station/nebula` (or the image named by
+  `NEBULA_IMAGE`) controls all three services. Pull it by digest and
+  check the digest against the release before you run it; build it
+  yourself from a tagged release if you cannot.
+- **Docker is root.** Anyone in the `docker` group, or with access to the
+  Docker socket, can read the executor's volume, start a shell as any
+  container user and take the keys: treat Docker access like root on the
+  Nebula machine (see "Not protected").
+
 ## Protected
 
 | Threat | Defence | Where |
@@ -36,7 +59,7 @@ Nebula Operation Station holds the keys that give root on a whole homelab. This 
 | Secrets leaking on the way to a host | Vault secrets travel only on the SSH channel into a private tmpfs file removed after the run; never in jobs, results, logs or events; known values are also redacted from output | `internal/executor/secrets.go`, `internal/hostrun` |
 | A module or update from an untrusted author | SSH signatures (namespace `nebula-module`) checked by the executor over the exact canonical lock; adding a signer is CRITICAL with a typed fingerprint; a module whose signer changes is refused until an admin confirms the change against the signer shown | `internal/sshsig`, `internal/modulelock`, `internal/executor/modules.go` |
 | A module UI injecting script | Declarative UI only: text bound to result fields, rendered by core templates; no module HTML, URLs or JavaScript | `internal/modulelock`, `internal/web/ui/hosts.go` |
-| A compromised server misusing discovery | Jobs are validated again by `nebula-discovery`: fixed Nmap arguments per mode, never free-form options; targets are addresses or prefixes of at most a /16; each side writes only its own spool directory; results are cleaned on both sides | `internal/discoveryjob`, `cmd/nebula-discovery`, `deploy/` |
+| A compromised server misusing discovery | Jobs are validated again by `nebula-discovery`: fixed Nmap arguments per mode, never free-form options; targets are addresses or prefixes of at most a /16 (IPv4) or /112 (IPv6); each side writes only its own spool directory; results are cleaned on both sides | `internal/discoveryjob`, `cmd/nebula-discovery`, `deploy/` |
 | Hostile scan results | Addresses parsed, MACs normalized, hostnames kept only when valid, other text cleaned and cut; nothing reaches the assets without an import, and a conflict is never imported | `internal/discoveryjob`, `internal/discovery` |
 | Forged, changed or hidden history | Every executor audit line is a signed, hash-chained event in append-only storage; `nebula events verify` checks the whole chain on the Nebula machine, the History page the newest part | `internal/events`, `internal/executordb` |
 | A backup leaking secrets, or a tampered restore | Backups hold no passphrase, no decrypted key, no plaintext secret and no event key, and are age-encrypted by default; restore is CRITICAL, checks the manifest, every checksum and the schema versions before anything changes, and keeps the old data | `internal/backup`, `cmd/nebula/backup.go`, `internal/executor/backup.go` |
@@ -51,6 +74,6 @@ Nebula Operation Station holds the keys that give root on a whole homelab. This 
 - **Memory remanence.** Go cannot reliably wipe memory; unlocked keys live in the executor's heap. Core dumps are disabled and the process is non-dumpable; use encrypted or no swap.
 - **An admin trusting the wrong script, level or signer.** Trust and signers say who vouches for the bytes, not what they do. The Safety Scanner is advisory; it can raise the risk of a script it recognises, but a script it does not recognise can still be harmful.
 - **The server's own audit lines.** They are not signed (a compromised server could write any); the optional hash chain shows accidental or offline edits only.
-- **Which networks get scanned, against a compromised server.** The rule that only known networks are scanned is the server's check; `nebula-discovery` enforces only the fixed arguments and the size limits, so a compromised server can have any network scanned (at most a /16 per target).
+- **Which networks get scanned, against a compromised server.** The rule that only known networks are scanned is the server's check; `nebula-discovery` enforces only the fixed arguments and the size limits, so a compromised server can have any network scanned (at most a /16 or an IPv6 /112 per target).
 - **The networks Nebula scans.** A scan is visible to the scanned hosts and their IDS; discovery results can be spoofed by anything on the network, which is why they are only ever proposals.
 - **Whoever holds a backup identity.** The age identity decrypts every backup made to it: the inventory, the audit data and the still passphrase-encrypted keys. Keep it off the Nebula machine.

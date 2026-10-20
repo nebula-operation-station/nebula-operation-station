@@ -89,6 +89,23 @@ func dropTo(u *user.User) error {
 	return nil
 }
 
+// ExitSkipped is the exit status of `nebula backup --pre-upgrade` when it
+// made no backup. It is not 0: an upgrade must never take a skipped backup
+// for a made one (review m105, the HIGH finding).
+const ExitSkipped = 3
+
+// exitError carries a specific exit status to main.
+type exitError struct {
+	code int
+	msg  string
+}
+
+func (e *exitError) Error() string { return e.msg }
+
+func skipped(reason string) error {
+	return &exitError{code: ExitSkipped, msg: "backup: no backup was made: " + reason}
+}
+
 // hostname is os.Hostname (a variable for tests).
 var hostname = os.Hostname
 
@@ -154,7 +171,7 @@ func backupCmd(args []string, stdin io.Reader, w io.Writer) error {
 	out := fs.String("out", "", "archive to write (default ~/nebula-backups/nebula-backup-<time>.tar.gz.age)")
 	full := fs.Bool("full", false, "full backup (execution logs and artifacts live in server.db, so every backup has them)")
 	noEncrypt := fs.Bool("no-encrypt", false, "write the archive unencrypted (asks to type \"unencrypted\")")
-	preUpgrade := fs.Bool("pre-upgrade", false, "the backup before an upgrade: no questions; skipped without recipients")
+	preUpgrade := fs.Bool("pre-upgrade", false, "the backup before an upgrade: no questions; exits 3 when it makes none")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -164,8 +181,7 @@ func backupCmd(args []string, stdin io.Reader, w io.Writer) error {
 	admin, err := adminFromSudo()
 	if err != nil {
 		if *preUpgrade {
-			fmt.Fprintln(w, "nebula backup: skipped (needs sudo from an admin user):", err)
-			return nil
+			return skipped("needs sudo from an admin user: " + err.Error())
 		}
 		return err
 	}
@@ -179,8 +195,7 @@ func backupCmd(args []string, stdin io.Reader, w io.Writer) error {
 			msg := fmt.Sprintf("no backup recipients in /%s: create a key with `age-keygen -o nebula-backup.key` on a machine you keep safe, "+
 				"and put its public key (age1…) into that file", recipientsFile)
 			if *preUpgrade {
-				fmt.Fprintln(w, "nebula backup: skipped:", msg)
-				return nil
+				return skipped(msg)
 			}
 			return errors.New(msg)
 		}
@@ -217,8 +232,7 @@ func backupCmd(args []string, stdin io.Reader, w io.Writer) error {
 	resp, err := pb.NewExecutorServiceClient(conn).BackupExecutor(ctx, &pb.BackupExecutorRequest{})
 	if err != nil {
 		if *preUpgrade && grpcstatus.Code(err) == codes.Unimplemented {
-			fmt.Fprintln(w, "nebula backup: skipped (the running executor is older than backups)")
-			return nil
+			return skipped("the running executor is older than backups")
 		}
 		return fmt.Errorf("the executor's part: %w", err)
 	}

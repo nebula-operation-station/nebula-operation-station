@@ -234,17 +234,26 @@ install -d -m 0700 -o nebula-executor -g nebula-executor "${var_lib}/executor"
 # Discovery spool (spec 12): the server writes jobs/ and only reads
 # results/; nebula-discovery reads jobs/ and writes results/.
 install -d -m 0755 -o root -g root "${var_lib}/discovery"
-install -d -m 0750 -o nebula-server -g nebula-discovery "${var_lib}/discovery/jobs"
-install -d -m 0750 -o nebula-discovery -g nebula-server "${var_lib}/discovery/results"
+# setgid: a file written by one side gets the directory's group, the
+# reader's, so the other side can read it (review m105).
+install -d -m 2750 -o nebula-server -g nebula-discovery "${var_lib}/discovery/jobs"
+install -d -m 2750 -o nebula-discovery -g nebula-server "${var_lib}/discovery/results"
 
 # --- Pre-upgrade backup (spec 15) --------------------------------------------
 # Before an existing install is replaced, the new CLI makes a backup (as
-# the admin who ran sudo, to ~/nebula-backups). It skips itself without
-# backup recipients, without sudo from an admin, or with an executor older
-# than backups; any other failure stops the upgrade (set
-# NEBULA_SKIP_BACKUP=1 to go on without one).
+# the admin who ran sudo, to ~/nebula-backups). Without a backup the
+# upgrade stops: when it cannot make one (exit 3: no backup recipients, no
+# sudo from an admin, an executor older than backups) or when it fails.
+# Set NEBULA_SKIP_BACKUP=1 to upgrade without one. Package upgrades never
+# restart the services (deploy/deb/postinst).
 if [[ ${from_package} -eq 0 && -x "${bin_dir}/nebula-executor" && "${NEBULA_SKIP_BACKUP:-0}" != "1" ]]; then
-  if ! "${tarball_root}/nebula" backup --pre-upgrade; then
+  rc=0
+  "${tarball_root}/nebula" backup --pre-upgrade || rc=$?
+  if [[ ${rc} -eq 3 ]]; then
+    echo "install.sh: no pre-upgrade backup was made (see above); nothing was changed." >&2
+    echo "install.sh: fix that, or run again with NEBULA_SKIP_BACKUP=1 to upgrade without a backup" >&2
+    exit 1
+  elif [[ ${rc} -ne 0 ]]; then
     echo "install.sh: the pre-upgrade backup failed; fix it or run again with NEBULA_SKIP_BACKUP=1" >&2
     exit 1
   fi

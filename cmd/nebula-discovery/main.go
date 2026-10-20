@@ -171,8 +171,10 @@ func (r *runner) run(ctx context.Context, j discoveryjob.Job) discoveryjob.Resul
 	_, _ = io.Copy(io.Discard, out) // let nmap finish writing
 	werr := cmd.Wait()
 	switch {
-	case ctx.Err() != nil:
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		return fail(fmt.Sprintf("the scan took longer than %s and was stopped", r.timeout))
+	case ctx.Err() != nil:
+		return fail("the scan was stopped because nebula-discovery is shutting down")
 	case werr != nil:
 		msg := strings.TrimSpace(stderr.buf.String())
 		if msg == "" {

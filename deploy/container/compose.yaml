@@ -57,7 +57,9 @@ services:
     <<: *hardening
     image: ${NEBULA_IMAGE:-ghcr.io/nebula-operation-station/nebula:latest}
     user: "10003:10003"
-    # Raw sockets for Nmap, and the host network to see the LAN.
+    # Raw sockets for Nmap, and the host network to see the LAN. NET_RAW
+    # here is what makes nmap's file capability work under
+    # no-new-privileges: without it discovery cannot scan.
     cap_add: [NET_RAW]
     network_mode: host
     command: [nebula-discovery, -spool=/var/lib/nebula/discovery, -watch=10s]

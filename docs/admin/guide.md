@@ -468,7 +468,7 @@ lines); set `"audit_hash_chain": true` in `server.json` to chain those too.
 | A security key is lost | `nebula webauthn list`, `nebula webauthn remove ID` (locks the executor) |
 | Operation shows `precheck_failed` | Read the reason on the operation page; nothing was installed |
 | Host `UNREACHABLE` | Check the endpoints; `nebula host test HOST ENDPOINT` |
-| Upgrade Nebula | Run `install.sh` from the new tarball, then `nebula unlock`; re-trust the actions if their version changed |
+| Upgrade Nebula | Run `install.sh` from the new tarball (it backs up first and stops if it cannot; `NEBULA_SKIP_BACKUP=1` upgrades without a backup), then `nebula unlock`. With the package: `apt upgrade` does not restart anything; run `sudo nebula backup && sudo systemctl restart nebula-executor nebula-server`, then `nebula unlock`. Re-trust the actions if their version changed |
 
 **Backups.** Once, on a machine you keep safe (not the Nebula machine):
 `age-keygen -o nebula-backup.key`, and put the printed public key
