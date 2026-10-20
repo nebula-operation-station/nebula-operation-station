@@ -1,0 +1,33 @@
+{{define "content"}}
+<h1>Modules</h1>
+<section class="panel" aria-label="Modules">
+  <p class="hint">A module bundles actions written by someone else. Import the archive made by <code>nebula module pack</code>. The
+     executor checks the author's SSH signature itself: a module signed by a signer you trusted on the executor host
+     (<code>nebula signer add</code>) is <strong>verified</strong> and its actions run at their declared risk; any other module is
+     <strong>unverified</strong> and its actions need your security key every time (at least HIGH). Modules never run code on the
+     Nebula machine. <a href="/runbooks">Runbooks</a> are your own scripts.</p>
+  {{with .Modules}}
+  {{if .Rows}}
+  <table class="inventory">
+    <thead><tr><th>Module</th><th>Version</th><th>Title</th><th>Actions</th><th>State</th><th>Imported</th></tr></thead>
+    <tbody>
+      {{range .Rows}}
+      <tr>
+        <td><a href="/modules/{{.Name}}">{{.Name}}</a></td><td>{{.Version}}</td><td>{{.Title}}</td><td>{{.Actions}}</td>
+        <td>{{if .Verified}}verified, {{.Signer}}{{else}}<span class="status--error">unverified</span>: {{.Detail}}{{end}}</td>
+        <td>{{.Imported}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p>No modules yet.</p>
+  {{end}}
+  {{end}}
+  <form id="module-import" class="form" novalidate>
+    <label>Module archive (.tar.gz, at most 1 MiB) <input type="file" id="module-file" accept=".tar.gz,.tgz,application/gzip"></label>
+    <div class="actions"><button type="submit" id="module-import-button" class="button">Import</button></div>
+  </form>
+</section>
+<p id="message" class="message" role="status" aria-live="polite"></p>
+{{end}}

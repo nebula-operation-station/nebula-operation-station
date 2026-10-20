@@ -37,6 +37,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun/hostruntest"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/modules"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
@@ -176,6 +177,10 @@ func (d direct) GetArtifactTrust(ctx context.Context, in *pb.GetArtifactTrustReq
 	return d.s.GetArtifactTrust(ctx, in)
 }
 
+func (d direct) RegisterModule(ctx context.Context, in *pb.RegisterModuleRequest, _ ...grpc.CallOption) (*pb.RegisterModuleResponse, error) {
+	return d.s.RegisterModule(ctx, in)
+}
+
 func must(err error) {
 	if err != nil {
 		panic(err)
@@ -290,11 +295,13 @@ func main() {
 	ops := executions.New(context.Background(), direct{svc}, sdb, inv, log)
 	rb := runbooks.New(sdb)
 	ops.SetRunbooks(rb)
+	mods := modules.New(sdb, direct{svc})
+	ops.SetModules(mods)
 	hostKeys := func(ctx context.Context) ([]*pb.HostKeyPin, error) {
 		r, err := svc.ListHostKeys(ctx, &pb.ListHostKeysRequest{})
 		return r.GetHosts(), err
 	}
-	u, err := ui.New(ui.Options{PublicOrigin: origin, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Schedules: ops, Runbooks: rb, Trust: direct{svc}, Repin: direct{svc}, Enroll: direct{svc}, Log: log})
+	u, err := ui.New(ui.Options{PublicOrigin: origin, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Schedules: ops, Runbooks: rb, Trust: direct{svc}, Modules: mods, Repin: direct{svc}, Enroll: direct{svc}, Log: log})
 	must(err)
 	mux := http.NewServeMux()
 	// Test hook: issue a one-time code like `nebula webauthn code`.

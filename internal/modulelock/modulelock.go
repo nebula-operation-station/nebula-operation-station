@@ -55,7 +55,7 @@ var declarations = map[string]bool{"requires_root": true, "writes_config": true,
 var (
 	nameRe   = regexp.MustCompile(`^[a-z][a-z0-9_]{1,30}$`)
 	actionRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,40}$`)
-	scriptRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}(/[a-z0-9][a-z0-9_.-]{0,63}){0,3}$`)
+	scriptRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,63}(/[a-z0-9][a-z0-9_.-]{0,63}){0,3}$`)
 	hex64    = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 

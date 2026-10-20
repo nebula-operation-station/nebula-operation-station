@@ -112,6 +112,7 @@ type Service struct {
 
 	notifier *notify.Notifier
 	runbooks Runbooks
+	modules  Modules
 	// opsMu serializes Ops State evaluations, so two runs finishing at
 	// once on one host cannot both see the old state and notify twice.
 	opsMu sync.Mutex

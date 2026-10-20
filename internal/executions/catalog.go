@@ -5,8 +5,10 @@ package executions
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/modules"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/runbooks"
 )
 
@@ -15,6 +17,16 @@ type Runbooks interface {
 	Get(ctx context.Context, slug string, version int) (runbooks.Version, error)
 	Latest(ctx context.Context) ([]runbooks.Version, error)
 }
+
+// Modules supplies imported module versions (internal/modules.Store).
+type Modules interface {
+	Get(ctx context.Context, name, version string) (modules.Version, error)
+	Latest(ctx context.Context) ([]modules.Version, error)
+}
+
+// SetModules makes module actions plannable. Call it before the service
+// starts dispatching.
+func (s *Service) SetModules(m Modules) { s.modules = m }
 
 // SetRunbooks makes runbooks plannable next to the built-in actions. Call
 // it before the service starts dispatching.
@@ -37,26 +49,49 @@ func (s *Service) Action(ctx context.Context, id, version string) (actions.Actio
 		}
 		return v.Action(), true, nil
 	}
-	a, ok := actions.Lookup(id)
-	if !ok || (version != "" && a.Version != version) {
+	if a, ok := actions.Lookup(id); ok {
+		if version != "" && a.Version != version {
+			return actions.Action{}, false, nil
+		}
+		return a, true, nil
+	}
+	name, _, found := strings.Cut(id, ".")
+	if !found || s.modules == nil {
 		return actions.Action{}, false, nil
 	}
-	return a, true, nil
+	v, err := s.modules.Get(ctx, name, version)
+	if errors.Is(err, modules.ErrNotFound) {
+		return actions.Action{}, false, nil
+	}
+	if err != nil {
+		return actions.Action{}, false, err
+	}
+	a, ok := v.Action(id)
+	return a, ok, nil
 }
 
 // Catalog lists the plannable actions: the built-ins, then the latest
-// version of every runbook.
+// version of every runbook and of every module.
 func (s *Service) Catalog(ctx context.Context) ([]actions.Action, error) {
 	out := append([]actions.Action(nil), actions.Builtin...)
-	if s.runbooks == nil {
+	if s.runbooks != nil {
+		rb, err := s.runbooks.Latest(ctx)
+		if err != nil {
+			return out, err
+		}
+		for _, v := range rb {
+			out = append(out, v.Action())
+		}
+	}
+	if s.modules == nil {
 		return out, nil
 	}
-	rb, err := s.runbooks.Latest(ctx)
+	mods, err := s.modules.Latest(ctx)
 	if err != nil {
 		return out, err
 	}
-	for _, v := range rb {
-		out = append(out, v.Action())
+	for _, v := range mods {
+		out = append(out, v.Actions()...)
 	}
 	return out, nil
 }

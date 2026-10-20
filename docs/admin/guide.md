@@ -314,6 +314,15 @@ another key, Nebula refuses it until you have checked why and run
 signer and asks you to type the new fingerprint). Unsigned modules always
 need your security key (at least HIGH).
 
+**Modules.** A module bundles actions others wrote. Its author keeps a
+`module.yaml` (name, version, title, actions with script, risk, timeout,
+parameters, secret slots, declarations) and the scripts, runs
+`nebula module pack DIR`, signs the printed lock with
+`ssh-keygen -Y sign -f KEY -n nebula-module DIR/module.lock.json` and
+builds the archive with `nebula module pack --archive OUT.tar.gz DIR`.
+Import it under *Runbooks → Modules*. The page shows whether the executor
+verified it and every script it runs; plan its actions like any other.
+
 ## 8. Notifications
 
 Add a `notifications` block to `/etc/nebula/server.json`, keep the file
