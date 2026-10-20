@@ -239,10 +239,8 @@ func TestAttrKeysStayDistinct(t *testing.T) {
 // place (review fx2, note 3).
 func TestAttrKeySuffixCollision(t *testing.T) {
 	long := strings.Repeat("k", MaxKind)
-	taken := map[string]string{}
 	first := attrKey(long+"a", map[string]string{clip(long+"a", MaxKind): "x"})
-	taken[clip(long+"a", MaxKind)] = "1"
-	taken[first] = "2"
+	taken := map[string]string{clip(long+"a", MaxKind): "1", first: "2"}
 	if got := attrKey(long+"a", taken); got == first || len(got) > MaxKind {
 		t.Fatalf("%q reused or too long", got)
 	}

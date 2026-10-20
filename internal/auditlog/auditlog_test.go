@@ -80,3 +80,17 @@ func TestAuditLog(t *testing.T) {
 		t.Fatal(out.String())
 	}
 }
+
+// The server audit log's copy of attrKey keeps crafted keys distinct like
+// the events copy (review fx3, note 2).
+func TestAttrKeySuffixCollision(t *testing.T) {
+	long := strings.Repeat("k", MaxKind)
+	first := attrKey(long+"a", map[string]string{clip(long+"a", MaxKind): "x"})
+	taken := map[string]string{clip(long+"a", MaxKind): "1", first: "2"}
+	if got := attrKey(long+"a", taken); got == first || len(got) > MaxKind {
+		t.Fatalf("%q reused or too long", got)
+	}
+	if got := attrKey("_truncated", map[string]string{}); got == "_truncated" {
+		t.Fatal("the reserved key was handed out")
+	}
+}
