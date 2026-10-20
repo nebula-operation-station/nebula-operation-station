@@ -51,6 +51,21 @@ func TestAuditLog(t *testing.T) {
 	if _, err := db.Exec(`UPDATE audit_log SET body = '{}' WHERE seq = 3`); err == nil {
 		t.Fatal("audit line updated")
 	}
+	if _, err := db.Exec(`DELETE FROM audit_log WHERE seq = 1`); err == nil {
+		t.Fatal("audit line deleted")
+	}
+	// Deleting the first chained lines offline (trigger dropped) breaks
+	// the chain too: the new first line does not start from zeros.
+	if _, err := db.Exec(`DROP TRIGGER audit_log_no_delete`); err != nil {
+		t.Fatal(err)
+	}
+	first, _, _ := chained.VerifyHead(ctx)
+	if _, err := db.Exec(`DELETE FROM audit_log WHERE seq = (SELECT min(seq) FROM audit_log WHERE hash IS NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if n, _, err := chained.VerifyHead(ctx); !errors.Is(err, ErrChainBroken) {
+		t.Fatal("prefix deletion not detected", first, n, err)
+	}
 	// An offline edit (trigger dropped) breaks the chain.
 	if _, err := db.Exec(`DROP TRIGGER audit_log_no_update`); err != nil {
 		t.Fatal(err)

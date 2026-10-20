@@ -61,7 +61,7 @@ func TestHistoryPage(t *testing.T) {
 
 	h := newTestHandler(t, ui.Options{PublicOrigin: "https://nebula.example.org", Events: ev, Audit: audit}).Handler()
 	page := getBody(t, h, "/history")
-	for _, want := range []string{events.Fingerprint(ch.PublicKey()), "the newest page verified", "unlocked", "host_created", "hash chain intact (1 chained lines)"} {
+	for _, want := range []string{events.Fingerprint(ch.PublicKey()), "the newest page verified", "unlocked", "host_created", "hash chain intact (1 chained lines, head "} {
 		if !strings.Contains(page, want) {
 			t.Errorf("missing %q in %s", want, page[strings.Index(page, "Server audit"):])
 		}

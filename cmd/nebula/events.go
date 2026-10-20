@@ -125,10 +125,21 @@ func eventsList(ctx context.Context, c pb.ExecutorServiceClient, args []string, 
 	if err := events.Verify(pub, recs, nil); err != nil {
 		return err
 	}
+	var bad error
 	for _, rec := range recs {
 		if *asJSON {
-			line, _ := json.Marshal(map[string]any{"seq": rec.Seq, "body": json.RawMessage(rec.Body), "prev_hash": hex.EncodeToString(rec.PrevHash),
+			line, err := json.Marshal(map[string]any{"seq": rec.Seq, "body": json.RawMessage(rec.Body), "prev_hash": hex.EncodeToString(rec.PrevHash),
 				"hash": hex.EncodeToString(rec.Hash), "signature": base64.StdEncoding.EncodeToString(rec.Sig)})
+			if err != nil {
+				// Never a silent null in the offsite copy (review m101,
+				// F4): keep the raw body and say what is wrong.
+				line, _ = json.Marshal(map[string]any{"seq": rec.Seq, "body_base64": base64.StdEncoding.EncodeToString(rec.Body),
+					"prev_hash": hex.EncodeToString(rec.PrevHash), "hash": hex.EncodeToString(rec.Hash),
+					"signature": base64.StdEncoding.EncodeToString(rec.Sig), "error": "the body is not valid JSON"})
+				if bad == nil {
+					bad = fmt.Errorf("event %d: the body is not valid JSON", rec.Seq)
+				}
+			}
 			fmt.Fprintln(w, string(line))
 			continue
 		}
@@ -153,5 +164,5 @@ func eventsList(ctx context.Context, c pb.ExecutorServiceClient, args []string, 
 	if !*asJSON {
 		fmt.Fprintf(w, "(%d of %d events; signatures verified with %s)\n", len(recs), r.GetHeadSeq(), events.Fingerprint(pub))
 	}
-	return nil
+	return bad
 }

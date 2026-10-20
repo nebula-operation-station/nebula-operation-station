@@ -16,6 +16,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -99,6 +100,18 @@ func clip(s string, n int) string {
 	return s[:n]
 }
 
+// attrKey is the stored key for k: clipped to MaxKind, and made unique when
+// two keys clip to the same prefix or a key is the reserved "_truncated"
+// (review m101, F2), so that two different lines never store the same body.
+func attrKey(k string, taken map[string]string) string {
+	c := clip(k, MaxKind)
+	if _, dup := taken[c]; !dup && c != "_truncated" {
+		return c
+	}
+	sum := sha256.Sum256([]byte(k))
+	return clip(k, MaxKind-9) + "#" + hex.EncodeToString(sum[:4])
+}
+
 // Append adds one event and returns its record.
 func (c *Chain) Append(kind string, attrs map[string]string) (Record, error) {
 	if kind == "" {
@@ -115,7 +128,7 @@ func (c *Chain) Append(kind string, attrs map[string]string) (Record, error) {
 			b.Attrs["_truncated"] = "true"
 			break
 		}
-		b.Attrs[clip(k, MaxKind)] = clip(attrs[k], MaxAttrValue)
+		b.Attrs[attrKey(k, b.Attrs)] = clip(attrs[k], MaxAttrValue)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -308,6 +321,11 @@ func flatten(prefix string, a slog.Attr, out map[string]string) {
 	}
 }
 
+// Handle implements slog.Handler. Appending is synchronous: an audit line
+// is in the chain before the call that logged it returns. A slow or locked
+// executor.db cannot block it for long: the database is opened in
+// exclusive locking mode (no other process holds a lock on it) and with a
+// busy timeout that bounds every wait (review m101, F3).
 // Handle implements slog.Handler.
 func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	if r.Message == "audit" && h.chain != nil {

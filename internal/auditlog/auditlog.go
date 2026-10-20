@@ -13,6 +13,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,6 +66,18 @@ func clip(s string, n int) string {
 	return s[:n]
 }
 
+// attrKey is the stored key for k: clipped to MaxKind, and made unique when
+// two keys clip to the same prefix or a key is the reserved "_truncated"
+// (review m101, F2), so that two different lines never store the same body.
+func attrKey(k string, taken map[string]string) string {
+	c := clip(k, MaxKind)
+	if _, dup := taken[c]; !dup && c != "_truncated" {
+		return c
+	}
+	sum := sha256.Sum256([]byte(k))
+	return clip(k, MaxKind-9) + "#" + hex.EncodeToString(sum[:4])
+}
+
 // Append stores one line.
 func (s *Store) Append(ctx context.Context, kind string, attrs map[string]string) error {
 	if kind == "" {
@@ -82,7 +95,7 @@ func (s *Store) Append(ctx context.Context, kind string, attrs map[string]string
 			clean["_truncated"] = "true"
 			break
 		}
-		clean[clip(k, MaxKind)] = clip(attrs[k], MaxAttrValue)
+		clean[attrKey(k, clean)] = clip(attrs[k], MaxAttrValue)
 	}
 	user := clip(clean["user"], 64)
 	body, err := json.Marshal(clean) // map keys are sorted: deterministic
@@ -148,9 +161,17 @@ var ErrChainBroken = errors.New("auditlog: the hash chain is broken")
 // Verify checks every chained line against the one before it and returns
 // how many chained lines it checked.
 func (s *Store) Verify(ctx context.Context) (int, error) {
+	n, _, err := s.VerifyHead(ctx)
+	return n, err
+}
+
+// VerifyHead is Verify that also returns the hash of the newest chained
+// line, for the operator to note down elsewhere: a chain rewritten from
+// the start is only detectable against an earlier head.
+func (s *Store) VerifyHead(ctx context.Context) (int, []byte, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT seq, at, kind, user_name, body, prev_hash, hash FROM audit_log WHERE hash IS NOT NULL ORDER BY seq`)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	defer rows.Close()
 	n := 0
@@ -160,16 +181,22 @@ func (s *Store) Verify(ctx context.Context) (int, error) {
 		var kind, user, body string
 		var prev, hash []byte
 		if err := rows.Scan(&seq, &at, &kind, &user, &body, &prev, &hash); err != nil {
-			return n, err
+			return n, nil, err
 		}
 		h := sha256.Sum256(append(append([]byte{}, prev...), lineBytes(at, kind, user, []byte(body))...))
-		if !bytes.Equal(h[:], hash) || last != nil && !bytes.Equal(prev, last) {
-			return n, fmt.Errorf("%w at line %d", ErrChainBroken, seq)
+		// The first chained line starts from zeros: a chain whose first
+		// lines were deleted does not (review m101, F1).
+		want := last
+		if want == nil {
+			want = make([]byte, sha256.Size)
+		}
+		if !bytes.Equal(h[:], hash) || !bytes.Equal(prev, want) {
+			return n, nil, fmt.Errorf("%w at line %d", ErrChainBroken, seq)
 		}
 		last = hash
 		n++
 	}
-	return n, rows.Err()
+	return n, last, rows.Err()
 }
 
 // Handler passes records to next and stores the "audit" ones.

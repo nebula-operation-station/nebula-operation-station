@@ -5,6 +5,7 @@ package ui
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"regexp"
@@ -30,7 +31,7 @@ type EventSource interface {
 // AuditStore lists the server's audit lines (internal/auditlog.Store).
 type AuditStore interface {
 	List(ctx context.Context, before int64, limit int, kind string) ([]auditlog.Entry, error)
-	Verify(ctx context.Context) (int, error)
+	VerifyHead(ctx context.Context) (int, []byte, error)
 }
 
 const historyPage = 100
@@ -135,10 +136,12 @@ func (h *Handler) handleHistory(w http.ResponseWriter, r *http.Request) {
 			d.Older = list[len(list)-1].Seq
 		}
 		if chained {
-			if n, err := h.auditLog.Verify(ctx); err != nil {
+			if n, head, err := h.auditLog.VerifyHead(ctx); err != nil {
 				d.Chain = "hash chain broken: " + err.Error()
 			} else {
-				d.Chain = "hash chain intact (" + strconv.Itoa(n) + " chained lines)"
+				// The head hash lets an operator notice a chain rewritten
+				// from the start: note it down elsewhere and compare.
+				d.Chain = "hash chain intact (" + strconv.Itoa(n) + " chained lines, head " + hex.EncodeToString(head) + ")"
 			}
 		}
 	}

@@ -209,3 +209,28 @@ func TestConcurrentAppends(t *testing.T) {
 	}
 	_ = context.Background()
 }
+
+// Two keys that clip to the same prefix, and a key named "_truncated",
+// keep their own values (review m101, F2).
+func TestAttrKeysStayDistinct(t *testing.T) {
+	c := NewChain(&memStore{}, ed25519.NewKeyFromSeed(make([]byte, 32)))
+	long := strings.Repeat("k", MaxKind)
+	r, err := c.Append("x", map[string]string{long + "a": "1", long + "b": "2", "_truncated": "user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b Body
+	if err := json.Unmarshal(r.Body, &b); err != nil {
+		t.Fatal(err)
+	}
+	vals := map[string]bool{}
+	for k, v := range b.Attrs {
+		if len(k) > MaxKind {
+			t.Errorf("key %q too long", k)
+		}
+		vals[v] = true
+	}
+	if len(b.Attrs) != 3 || !vals["1"] || !vals["2"] || !vals["user"] {
+		t.Fatalf("%v", b.Attrs)
+	}
+}
