@@ -24,7 +24,7 @@ import (
 
 const fixtures = "../../test/security/testdata/module/"
 
-func fx(t *testing.T, n string) []byte {
+func fx(t testing.TB, n string) []byte {
 	t.Helper()
 	b, err := os.ReadFile(fixtures + n)
 	if err != nil {
@@ -39,7 +39,7 @@ type entry struct {
 	typ  byte
 }
 
-func tgz(t *testing.T, es ...entry) []byte {
+func tgz(t testing.TB, es ...entry) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
@@ -59,7 +59,7 @@ func tgz(t *testing.T, es ...entry) []byte {
 	return buf.Bytes()
 }
 
-func demo(t *testing.T, version string, sig bool) []byte {
+func demo(t testing.TB, version string, sig bool) []byte {
 	es := []entry{{"module.lock.json", fx(t, "lock-"+version+".json"), 0}, {"./actions/hello.sh", fx(t, "hello.sh"), 0},
 		{"actions/restart.sh", fx(t, "restart.sh"), 0}, {"module.yaml", []byte("ignored"), 0}}
 	if sig {

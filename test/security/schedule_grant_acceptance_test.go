@@ -111,7 +111,12 @@ func TestScheduleGrantRefusesWhatIsNotLowOrNotPinned(t *testing.T) {
 	wantCode(t, err, codes.InvalidArgument, "not LOW")
 	low := h.lowRunHost("low")
 	moved := low
-	moved.fp = "SHA256:" + "Z" + low.fp[8:]
+	// Another fingerprint: change its first character (to one it is not).
+	c := "Z"
+	if low.fp[7] == 'Z' {
+		c = "Y"
+	}
+	moved.fp = "SHA256:" + c + low.fp[8:]
 	_, err = h.client.ProposeScheduleGrant(h.ctx(), &pb.ProposeScheduleGrantRequest{GrantJson: h.grantFor(moved, runScript)})
 	wantCode(t, err, codes.InvalidArgument, "")
 	// A grant's challenge cannot be used without the privileged session.
