@@ -1,9 +1,10 @@
 # Deployment
 
-Operators: use `deploy/install.sh` from a release tarball and follow the
-[operator guide](../docs/admin/guide.md). The manual steps below are for
-developers trying a build from source on a test machine. Packaging (APT,
-containers) comes in Milestone 10.
+Operators: install from a release tarball (`deploy/install.sh`), the
+Debian package (`deploy/apt/`) or the containers (`deploy/container/`)
+and follow the [installation and operations handbook](../docs/admin/guide.md).
+The manual steps below are for developers trying a build from source on a
+test machine.
 
 ```
 sudo groupadd --system nebula-rpc
