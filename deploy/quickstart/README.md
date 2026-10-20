@@ -81,7 +81,8 @@ is harmless.
 `NEBULA-IP` is an address or a range (at most /8, or /16 for IPv6); several
 separated by commas. It installs OpenSSH, sudo and curl, lets the Nebula
 machine past fail2ban (if it runs; a `jail.d/nebula.local` you edited
-yourself stays as it is), runs the enrollment script and prints the host's SSH key
+yourself stays as it is), runs the enrollment script (which also lets the
+`nebula` user past `AllowUsers`/`AllowGroups` in sshd, if those are used) and prints the host's SSH key
 fingerprints. Then in the web UI: **Inventory** → add the host →
 **Enroll hosts** → **Read host keys**, compare the fingerprints, pin.
 

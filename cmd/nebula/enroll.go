@@ -123,6 +123,50 @@ visudo -cf /etc/sudoers.d/nebula.tmp
 mv /etc/sudoers.d/nebula.tmp /etc/sudoers.d/nebula
 `)
 	}
+	var pats []string
+	for _, a := range o.from {
+		pats = append(pats, o.user+"@"+a)
+	}
+	fmt.Fprintf(&b, `
+# sshd: AllowUsers/AllowGroups (for example from a hardening baseline) would
+# refuse the user. Add it in a drop-in for exactly the directives that are
+# already in use; sshd merges the lists, so the existing entries stay valid.
+sshd_bin=$(command -v sshd || echo /usr/sbin/sshd)
+dropin=/etc/ssh/sshd_config.d/10-nebula.conf
+if [ -x "$sshd_bin" ]; then
+  if [ -f "$dropin" ]; then mv "$dropin" "$dropin.old"; fi
+  if conf=$("$sshd_bin" -T 2>/dev/null); then
+    want=''
+    if printf '%%s\n' "$conf" | grep -q '^allowusers '; then
+      want='AllowUsers %s'
+    fi
+    if printf '%%s\n' "$conf" | grep -q '^allowgroups '; then
+      want="$want
+AllowGroups $(id -gn "$user")"
+    fi
+    if printf '%%s\n' "$conf" | grep -Eq "^deny(users|groups) .*\b$user\b"; then
+      echo "warning: DenyUsers/DenyGroups in the sshd configuration names $user; Nebula cannot log in until you change that" >&2
+    fi
+    if [ -n "$want" ]; then
+      install -d -m 0755 /etc/ssh/sshd_config.d
+      printf '# Written by the Nebula enrollment script. sshd merges this with the\n# AllowUsers/AllowGroups lines elsewhere. On its own it would let only\n# Nebula log in: delete it if you remove those lines.\n%%s\n' "$want" > "$dropin"
+      chmod 0644 "$dropin"
+      if "$sshd_bin" -t && "$sshd_bin" -T 2>/dev/null | grep -Eq "^allow(users|groups) .*$user"; then
+        rm -f "$dropin.old"
+        systemctl try-reload-or-restart ssh 2>/dev/null || systemctl try-reload-or-restart sshd 2>/dev/null || true
+        echo "sshd: $dropin lets $user log in (AllowUsers/AllowGroups are in use)"
+      else
+        rm -f "$dropin"
+        echo "warning: sshd does not read $dropin (no Include of sshd_config.d?); add this to your AllowUsers/AllowGroups yourself:" >&2
+        printf '%%s\n' "$want" >&2
+      fi
+    else
+      rm -f "$dropin.old"
+    fi
+  fi
+  if [ -f "$dropin.old" ]; then mv "$dropin.old" "$dropin"; fi
+fi
+`, strings.Join(pats, " "))
 	b.WriteString(`
 # Fallback cleanup of job directories older than 14 days (spec 07).
 printf 'd /var/lib/nebula/jobs 0700 root root 14d\n' > /etc/tmpfiles.d/nebula.conf
@@ -132,7 +176,7 @@ echo "Done. Host key fingerprints of this host, to compare in 'nebula host pin':
 for f in /etc/ssh/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ecdsa_key.pub /etc/ssh/ssh_host_rsa_key.pub; do
   [ -r "$f" ] && ssh-keygen -lf "$f"
 done
-echo "Add Nebula's addresses to fail2ban ignoreip (as IPs) if fail2ban runs here."
+echo "If fail2ban runs here, add Nebula's addresses to its ignoreip (prepare-target.sh does that)."
 `)
 	return b.String()
 }

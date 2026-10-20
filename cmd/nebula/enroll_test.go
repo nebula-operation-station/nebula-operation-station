@@ -53,6 +53,10 @@ func TestEnrollScript(t *testing.T) {
 		"/etc/tmpfiles.d/nebula.conf",
 		"ssh-keygen -lf",
 		ssh.FingerprintSHA256(k),
+		// sshd drop-in for AllowUsers/AllowGroups, one pattern per address.
+		"want='AllowUsers nebula@192.168.0.10 nebula@10.8.0.0/24'",
+		`AllowGroups $(id -gn "$user")`,
+		"/etc/ssh/sshd_config.d/10-nebula.conf",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("script missing %q", want)
