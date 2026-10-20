@@ -49,7 +49,9 @@ var ShellCheck = func(script []byte) error {
 // match ends the run as precheck_failed before the author's script starts.
 // Values match their type's narrow character set, so they contain no quote
 // or backslash and the extraction cannot be confused by JSON escapes. Each
-// value is exported as NEBULA_P_<NAME>.
+// value is exported as NEBULA_P_<NAME>. For each secret slot the prelude
+// checks that the host bootstrap stored its file and exports its path as
+// NEBULA_SECRET_<SLOT>; the value itself never appears in the environment.
 //
 // The script runs in a subshell with stdin from /dev/null and its stdout
 // sent to the log (stderr): the result document (stdout) is always the
@@ -69,6 +71,11 @@ nebula_get() { sed -n 's/.*"'"$1"'":"\([^"\\]*\)".*/\1/p' "$NEBULA_PARAMS" | hea
 		b.WriteString("v=$(nebula_get " + p.Name + ")\n")
 		b.WriteString("printf '%s\\n' \"$v\" | LC_ALL=C grep -Eqx '" + p.pattern() + "' || nebula_fail \"parameter " + p.Name + " is not valid\"\n")
 		b.WriteString("NEBULA_P_" + up + "=$v; export NEBULA_P_" + up + "\n")
+	}
+	for _, slot := range v.Secrets {
+		up := strings.ToUpper(slot)
+		b.WriteString("[ -n \"${NEBULA_SECRETS_DIR:-}\" ] && [ -f \"$NEBULA_SECRETS_DIR/" + slot + "\" ] || nebula_fail \"secret " + slot + " is not available\"\n")
+		b.WriteString("NEBULA_SECRET_" + up + "=$NEBULA_SECRETS_DIR/" + slot + "; export NEBULA_SECRET_" + up + "\n")
 	}
 	b.WriteString("unset v\nset +u\n")
 	b.WriteString("nebula_main() {\n:\n")

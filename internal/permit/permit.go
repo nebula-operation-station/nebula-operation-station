@@ -383,7 +383,7 @@ func (a *Authority) propose(r canonical.Request, parametersJSON, planJSON []byte
 		return ProposeResult{}, fail(CodeInvalidRequest, "%v", err)
 	}
 	if raise {
-		floor, _, err := a.floor(norm, norm.ResolvedTargets)
+		floor, _, err := a.floor(norm, norm.ResolvedTargets, parametersJSON)
 		if err != nil {
 			return ProposeResult{}, a.storageFailure(digest.String(), err)
 		}
@@ -400,6 +400,9 @@ func (a *Authority) propose(r canonical.Request, parametersJSON, planJSON []byte
 	}
 	if paramsHash != norm.ParametersHash {
 		return ProposeResult{}, fail(CodeInvalidRequest, "parameters do not hash to parameters_hash")
+	}
+	if _, err := SecretRefs(params); err != nil {
+		return ProposeResult{}, fail(CodeInvalidRequest, "parameters: %v", err)
 	}
 
 	prev, bound := a.executions[norm.ExecutionID]
@@ -425,7 +428,7 @@ func (a *Authority) propose(r canonical.Request, parametersJSON, planJSON []byte
 
 	// The server's risk_class may raise the approval strength, never lower
 	// it below what the executor derives itself.
-	floor, why, err := a.floor(norm, norm.ResolvedTargets)
+	floor, why, err := a.floor(norm, norm.ResolvedTargets, params)
 	if err != nil {
 		return ProposeResult{}, a.storageFailure(digest.String(), err)
 	}
@@ -702,7 +705,7 @@ func (a *Authority) AuthorizeGrant(d canonical.Digest, run Run) (Grant, error) {
 	}
 	// Risk authorization per host run (spec 07): trust withdrawn or a host
 	// made more critical after approval stops the run.
-	floor, why, err := a.floor(p.Request, p.Request.ResolvedTargets[idx:idx+1])
+	floor, why, err := a.floor(p.Request, p.Request.ResolvedTargets[idx:idx+1], p.Parameters)
 	if err != nil || floor.Rank() == 0 {
 		detail := fmt.Sprintf("risk policy: %v (floor %q)", err, floor)
 		a.emit(Event{Kind: "denied", Digest: d.String(), Host: run.HostID, Code: CodeStorage, Detail: detail})

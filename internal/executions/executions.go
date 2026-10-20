@@ -182,7 +182,10 @@ func (s *Service) CreateStaged(ctx context.Context, user, actionID string, hostI
 	if err := a.ValidParams(params); err != nil {
 		return Created{}, &ParamError{Reason: err.Error()}
 	}
-	paramsJSON, err := json.Marshal(params)
+	if err := a.ValidSecrets(plan.Secrets); err != nil {
+		return Created{}, &ParamError{Reason: err.Error()}
+	}
+	paramsJSON, err := a.ParametersJSON(params, plan.Secrets)
 	if err != nil {
 		return Created{}, err
 	}

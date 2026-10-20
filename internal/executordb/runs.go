@@ -40,6 +40,9 @@ type Run struct {
 	DispatchedAt time.Time // zero until dispatched
 	FinishedAt   time.Time // zero until finished
 	Released     bool
+	// SecretRefs maps each secret slot of the run to its vault secret ID
+	// (never a value); empty for runs without secrets.
+	SecretRefs map[string]string
 }
 
 // CreateRun records an authorized durable run in state dispatching.
@@ -48,9 +51,17 @@ func (db *DB) CreateRun(r Run) error {
 	if err != nil {
 		return err
 	}
-	_, err = db.sql.Exec(`INSERT INTO runs (execution_id, host_id, digest, state, endpoints, fingerprint, timeout_s, created_at)
-		VALUES (?, ?, ?, 'dispatching', ?, ?, ?, ?)`, r.ExecutionID, r.HostID, r.Digest, string(eps), r.Fingerprint,
-		int64(r.Timeout/time.Second), db.now().Unix())
+	refs := ""
+	if len(r.SecretRefs) > 0 {
+		b, err := json.Marshal(r.SecretRefs)
+		if err != nil {
+			return err
+		}
+		refs = string(b)
+	}
+	_, err = db.sql.Exec(`INSERT INTO runs (execution_id, host_id, digest, state, endpoints, fingerprint, timeout_s, created_at, secret_refs)
+		VALUES (?, ?, ?, 'dispatching', ?, ?, ?, ?, ?)`, r.ExecutionID, r.HostID, r.Digest, string(eps), r.Fingerprint,
+		int64(r.Timeout/time.Second), db.now().Unix(), refs)
 	if err != nil {
 		return fmt.Errorf("executordb: create run: %w", err)
 	}
@@ -91,7 +102,7 @@ func boolInt(b bool) int {
 }
 
 const runColumns = `execution_id, host_id, digest, state, class, detail, exit_code, endpoints, fingerprint, timeout_s, endpoint,
-	result, log, log_truncated, created_at, dispatched_at, finished_at, released_at`
+	result, log, log_truncated, created_at, dispatched_at, finished_at, released_at, secret_refs`
 
 func scanRun(sc interface{ Scan(...any) error }) (Run, error) {
 	var r Run
@@ -99,9 +110,15 @@ func scanRun(sc interface{ Scan(...any) error }) (Run, error) {
 	var timeout, created int64
 	var dispatched, finished, released sql.NullInt64
 	var trunc int
+	var refs string
 	if err := sc.Scan(&r.ExecutionID, &r.HostID, &r.Digest, &r.State, &r.Class, &r.Detail, &r.ExitCode, &eps, &r.Fingerprint, &timeout,
-		&r.Endpoint, &r.Result, &r.Log, &trunc, &created, &dispatched, &finished, &released); err != nil {
+		&r.Endpoint, &r.Result, &r.Log, &trunc, &created, &dispatched, &finished, &released, &refs); err != nil {
 		return Run{}, err
+	}
+	if refs != "" {
+		if err := json.Unmarshal([]byte(refs), &r.SecretRefs); err != nil {
+			return Run{}, fmt.Errorf("executordb: run secret refs: %w", err)
+		}
 	}
 	if err := json.Unmarshal([]byte(eps), &r.Endpoints); err != nil {
 		return Run{}, fmt.Errorf("executordb: run endpoints: %w", err)

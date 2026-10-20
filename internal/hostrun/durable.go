@@ -43,10 +43,13 @@ type JobConfig struct {
 	// BootIDFile is read to tell whether a host rebooted; empty means
 	// /proc/sys/kernel/random/boot_id (tests point it elsewhere).
 	BootIDFile string
+	// RequireTmpfs refuses to write secrets unless the run root is a
+	// tmpfs (or ramfs), so a secret never lands on persistent disk.
+	RequireTmpfs bool
 }
 
 // DefaultJobConfig is the Debian adapter's setup (spec 07).
-var DefaultJobConfig = JobConfig{Sudo: true, JobRoot: "/var/lib/nebula/jobs", RunRoot: "/run/nebula", Systemd: true}
+var DefaultJobConfig = JobConfig{Sudo: true, JobRoot: "/var/lib/nebula/jobs", RunRoot: "/run/nebula", Systemd: true, RequireTmpfs: true}
 
 var safePathRe = regexp.MustCompile(`^/[A-Za-z0-9._/-]{1,200}$`)
 
@@ -110,7 +113,7 @@ const exitJobExists = 125
 const wrapper = `j=$1; r=$2; cd "$j" || exit 1
 b=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
 printf '{"state":"running","pid":%d,"boot":"%s","started":%s}\n' "$$" "$b" "$(date +%s)" > state.json.tmp && mv state.json.tmp state.json
-NEBULA_EXECUTION_ID=$3 NEBULA_PARAMS="$r/params.json" /bin/sh "$j/action.sh" </dev/null >"$j/result.json.tmp" 2>"$j/execution.log"
+NEBULA_EXECUTION_ID=$3 NEBULA_PARAMS="$r/params.json" NEBULA_SECRETS_DIR="$r/secrets" /bin/sh "$j/action.sh" </dev/null >"$j/result.json.tmp" 2>"$j/execution.log"
 rc=$?
 rm -rf "$r"
 sync "$j/result.json.tmp" "$j/execution.log" 2>/dev/null
@@ -131,6 +134,10 @@ func (c JobConfig) program(body string) string {
 // DispatchCommand returns the remote command that stores and starts the
 // job. timeout bounds the job when systemd runs it.
 func (c JobConfig) DispatchCommand(executionID string, timeout time.Duration) (string, error) {
+	return c.dispatchCommand(executionID, timeout, false)
+}
+
+func (c JobConfig) dispatchCommand(executionID string, timeout time.Duration, withSecrets bool) (string, error) {
 	if !uuidRe.MatchString(executionID) {
 		return "", errors.New("hostrun: execution ID is not a lowercase UUID")
 	}
@@ -141,12 +148,32 @@ func (c JobConfig) DispatchCommand(executionID string, timeout time.Duration) (s
 		return "", fmt.Errorf("hostrun: durable timeout must be 1s..%s", MaxDurableTimeout)
 	}
 	j, r := c.JobRoot+"/"+executionID, c.RunRoot+"/"+executionID
-	launch := "setsid /bin/sh -c " + shellQuote(wrapper) + " nebula-job \"$j\" \"$r\" " + executionID + " </dev/null >/dev/null 2>&1 &"
+	// Secrets go to "$r/secrets" on the run root (tmpfs, removed with "$r"
+	// when the script ends). From the first secret byte until the job is
+	// handed to its launcher, the dispatch shell owns the cleanup: any
+	// failure, and a hang-up or kill signal (a dropped connection), removes
+	// the job, so no secret is left behind without a job to remove it.
+	secretsBlock, handedOver := "", ""
+	if withSecrets {
+		tmpfs := ""
+		if c.RequireTmpfs {
+			tmpfs = `case $(stat -f -c %T "$r" 2>/dev/null) in tmpfs|ramfs) ;; *) echo "nebula-bootstrap: the run root is not a tmpfs" >&2; exit 120;; esac
+`
+		}
+		secretsBlock = `trap 'rm -rf "$j" "$r"' EXIT
+trap 'exit 129' HUP INT TERM
+` + tmpfs + `mkdir -m 0700 "$r/secrets" || exit 120
+s="$r/secrets"
+` + readSecrets
+		handedOver = `trap - EXIT HUP INT TERM
+`
+	}
+	launch := "setsid /bin/sh -c " + shellQuote(wrapper) + " nebula-job \"$j\" \"$r\" " + executionID + " </dev/null >/dev/null 2>&1 &\n" + handedOver
 	if c.Systemd {
 		launch = "systemd-run --quiet --collect --unit=nebula-job-" + executionID +
 			" --property=RuntimeMaxSec=" + strconv.Itoa(int(timeout/time.Second)) +
 			" /bin/sh -c " + shellQuote(wrapper) + " nebula-job \"$j\" \"$r\" " + executionID +
-			" || { echo 'nebula-bootstrap: systemd-run failed' >&2; rm -rf \"$j\" \"$r\"; exit 120; }"
+			" || { echo 'nebula-bootstrap: systemd-run failed' >&2; rm -rf \"$j\" \"$r\"; exit 120; }\n" + handedOver
 	}
 	body := `umask 077
 j=` + j + `; r=` + r + `
@@ -155,14 +182,14 @@ mkdir -m 0700 "$j" || { echo "nebula-bootstrap: job exists" >&2; exit 125; }
 mkdir -m 0700 "$r" || { echo "nebula-bootstrap: cannot create the run directory" >&2; rm -rf "$j"; exit 120; }
 IFS= read -r p || { echo "nebula-bootstrap: no parameters" >&2; rm -rf "$j" "$r"; exit 121; }
 printf '%s' "$p" | base64 -d > "$r/params.json" || { echo "nebula-bootstrap: base64 failed" >&2; rm -rf "$j" "$r"; exit 122; }
-cat > "$j/action.sh" || { echo "nebula-bootstrap: cannot write the script" >&2; rm -rf "$j" "$r"; exit 123; }
+` + secretsBlock + `cat > "$j/action.sh" || { echo "nebula-bootstrap: cannot write the script" >&2; rm -rf "$j" "$r"; exit 123; }
 printf '{"state":"dispatched"}\n' > "$j/state.json"
-` + launch + `
-`
+` + launch
 	return c.program(body), nil
 }
 
-// CheckCommand prints the job's state.json, or "missing".
+// CheckCommand prints the job's state.json, "missing", or "incomplete"
+// for a job directory without state.json (a dispatch that was cut off).
 func (c JobConfig) CheckCommand(executionID string) (string, error) {
 	if !uuidRe.MatchString(executionID) {
 		return "", errors.New("hostrun: execution ID is not a lowercase UUID")
@@ -173,6 +200,7 @@ func (c JobConfig) CheckCommand(executionID string) (string, error) {
 	j := c.JobRoot + "/" + executionID
 	body := `j=` + j + `
 [ -d "$j" ] || { echo missing; exit 0; }
+[ -e "$j/state.json" ] || { echo incomplete; exit 0; }
 s=$(head -c 4096 "$j/state.json" 2>/dev/null)
 case "$s" in *'"state":"running"'*)
   pid=$(printf '%s' "$s" | sed -n 's/.*"pid":\([0-9]*\).*/\1/p')
@@ -215,8 +243,11 @@ const (
 )
 
 // Dispatch stores the job on the host and starts it.
-func Dispatch(ctx context.Context, client *ssh.Client, cfg JobConfig, executionID string, params, script []byte, timeout time.Duration) (DispatchOutcome, string, error) {
-	cmd, err := cfg.DispatchCommand(executionID, timeout)
+func Dispatch(ctx context.Context, client *ssh.Client, cfg JobConfig, executionID string, params, script []byte, timeout time.Duration, secrets ...Secret) (DispatchOutcome, string, error) {
+	if err := validSecrets(secrets); err != nil {
+		return NotStarted, "", err
+	}
+	cmd, err := cfg.dispatchCommand(executionID, timeout, len(secrets) > 0)
 	if err != nil {
 		return NotStarted, "", err
 	}
@@ -227,7 +258,7 @@ func Dispatch(ctx context.Context, client *ssh.Client, cfg JobConfig, executionI
 	defer s.Close()
 	var stderr cappedBuffer
 	stderr.limit = 4096
-	s.Stdin = io.MultiReader(strings.NewReader(base64.StdEncoding.EncodeToString(params)+"\n"), bytes.NewReader(script))
+	s.Stdin = io.MultiReader(strings.NewReader(base64.StdEncoding.EncodeToString(params)+"\n"+secretLines(secrets)), bytes.NewReader(script))
 	s.Stderr = &stderr
 	done := make(chan error, 1)
 	go func() { done <- s.Run(cmd) }()
@@ -264,7 +295,9 @@ func Dispatch(ctx context.Context, client *ssh.Client, cfg JobConfig, executionI
 
 // JobState of a durable job on the host.
 type JobState struct {
-	// Phase: missing, dispatched, running, finished, dead.
+	// Phase: missing, incomplete, dispatched, running, finished, dead.
+	// incomplete is a job directory without state.json: the dispatch was
+	// cut off before the job was stored.
 	Phase    string
 	ExitCode int
 }
@@ -288,6 +321,9 @@ func Check(ctx context.Context, client *ssh.Client, cfg JobConfig, executionID s
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 	if len(lines) == 0 || lines[0] == "missing" {
 		return JobState{Phase: "missing"}, nil
+	}
+	if lines[0] == "incomplete" {
+		return JobState{Phase: "incomplete"}, nil
 	}
 	var st stateDoc
 	if err := json.Unmarshal([]byte(lines[0]), &st); err != nil {

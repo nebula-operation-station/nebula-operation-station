@@ -52,6 +52,9 @@ type Plan struct {
 	// MaxFailed is the number of failed (and of unreachable) hosts each
 	// stage tolerates; the canary stage tolerates none.
 	MaxFailed int
+	// Secrets maps each secret slot of the action to a vault secret ID
+	// (M7-3); it becomes part of the approved parameters.
+	Secrets map[string]string
 }
 
 // Staged reports whether the plan has stages.

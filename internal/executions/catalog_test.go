@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/runbooks"
 )
 
@@ -66,5 +68,38 @@ func TestRunbookExecutionRunsItsVersion(t *testing.T) {
 	s.SetRunbooks(nil)
 	if _, ok, _ := s.Action(ctx, "runbook.hello", ""); ok {
 		t.Fatal("runbook without a store")
+	}
+}
+
+// M7-3: a runbook's secret slots are mapped to vault secret IDs in the
+// approved parameters; the executor resolves them.
+func TestRunbookSecretsAreInTheParameters(t *testing.T) {
+	f := &fakeExec{}
+	s, db := setup(t, f)
+	rb := runbooks.New(db)
+	s.SetRunbooks(rb)
+	ctx := context.Background()
+	if _, err := rb.Save(ctx, "axel", runbooks.Draft{Slug: "push", Title: "Push", Risk: "MEDIUM", TimeoutS: 60, Secrets: []string{"token"},
+		Body: "cat \"$NEBULA_SECRET_TOKEN\" >/dev/null\n"}); err != nil {
+		t.Fatal(err)
+	}
+	var pe *ParamError
+	for _, bad := range []map[string]string{nil, {"other": "app.token"}, {"token": "../x"}, {"token": "a", "x": "b"}} {
+		if _, err := s.CreateStaged(ctx, "axel", "runbook.push", []string{"web"}, nil, Plan{Secrets: bad}); !errors.As(err, &pe) {
+			t.Errorf("%v: %v", bad, err)
+		}
+	}
+	if _, err := s.CreateStaged(ctx, "axel", "runbook.push", []string{"web"}, nil, Plan{Secrets: map[string]string{"token": "app.token"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(f.proposed.GetParametersJson()); got != `{"nebula_secrets":{"token":"app.token"}}` {
+		t.Fatal(got)
+	}
+	if actions.SecretsKey != permit.SecretsKey {
+		t.Fatal("server and executor disagree on the secrets member")
+	}
+	// Built-ins have no slots and take no mapping.
+	if _, err := s.CreateStaged(ctx, "axel", "core.facts", []string{"web"}, nil, Plan{Secrets: map[string]string{"token": "x"}}); !errors.As(err, &pe) {
+		t.Fatal(err)
 	}
 }

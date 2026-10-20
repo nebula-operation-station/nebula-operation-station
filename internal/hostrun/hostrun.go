@@ -43,6 +43,10 @@ const (
 	DefaultTimeout = time.Minute
 )
 
+// killGrace is how long a timed-out attached run has between SIGTERM and
+// SIGKILL (a variable for tests).
+var killGrace = 5 * time.Second
+
 // TruncationMarker ends a log that hit MaxLog.
 const TruncationMarker = "\n[nebula: log truncated at 10 MiB]\n"
 
@@ -86,25 +90,60 @@ const (
 	bootstrapTag     = "nebula-bootstrap: "
 )
 
-// bootstrap is the fixed remote program. %s is the execution ID.
+// bootstrap is the fixed remote program. %[1]s is the execution ID, %[2]s
+// the secrets block (empty without secrets).
 const bootstrap = `umask 077
+s=
 d=$(mktemp -d "${TMPDIR:-/tmp}/nebula.XXXXXXXXXX") || { echo "nebula-bootstrap: mktemp failed" >&2; exit 120; }
-trap 'rm -rf "$d"' EXIT
+trap 'rm -rf "$d" ${s:+"$s"}' EXIT
 trap 'exit 129' HUP
 trap 'exit 143' TERM
 IFS= read -r p || { echo "nebula-bootstrap: no parameters" >&2; exit 121; }
 printf '%%s' "$p" | base64 -d > "$d/params.json" || { echo "nebula-bootstrap: base64 failed" >&2; exit 122; }
-cat > "$d/action.sh" || { echo "nebula-bootstrap: cannot write the script" >&2; exit 123; }
+%[2]scat > "$d/action.sh" || { echo "nebula-bootstrap: cannot write the script" >&2; exit 123; }
 cd "$d" || { echo "nebula-bootstrap: cd failed" >&2; exit 124; }
-NEBULA_EXECUTION_ID=%s NEBULA_PARAMS="$d/params.json" /bin/sh "$d/action.sh" </dev/null
+NEBULA_EXECUTION_ID=%[1]s NEBULA_PARAMS="$d/params.json" NEBULA_SECRETS_DIR="$s" /bin/sh "$d/action.sh" </dev/null
+`
+
+// attachedSecrets puts the secrets of an attached run into a new private
+// directory on the SSH user's runtime directory ($XDG_RUNTIME_DIR, a
+// tmpfs under /run/user that systemd-logind removes when the user's last
+// session ends), never on disk (spec 06). Without such a directory the run
+// does not start.
+const attachedSecrets = `t=${XDG_RUNTIME_DIR:-}
+case $t in /*) ;; *) echo "nebula-bootstrap: the SSH user has no runtime directory (XDG_RUNTIME_DIR) for secrets; run this action as a durable job" >&2; exit 120;; esac
+case $(stat -f -c %T "$t" 2>/dev/null) in tmpfs|ramfs) ;; *) echo "nebula-bootstrap: the runtime directory is not a tmpfs" >&2; exit 120;; esac
+s=$(mktemp -d "$t/nebula-secrets.XXXXXXXXXX") || { echo "nebula-bootstrap: mktemp failed" >&2; exit 120; }
+` + readSecrets
+
+// readSecrets reads "N" and then N lines "slot base64" from stdin into
+// "$s/<slot>". It is fixed text; slots are checked again here.
+const readSecrets = `IFS= read -r n || { echo "nebula-bootstrap: no secrets" >&2; exit 121; }
+case $n in [1-8]) ;; *) echo "nebula-bootstrap: bad secret count" >&2; exit 121;; esac
+i=0
+while [ "$i" -lt "$n" ]; do
+  IFS=' ' read -r k v || { echo "nebula-bootstrap: secret missing" >&2; exit 121; }
+  case $k in [a-z]*) ;; *) echo "nebula-bootstrap: bad secret slot" >&2; exit 121;; esac
+  case $k in *[!a-z0-9_]*) echo "nebula-bootstrap: bad secret slot" >&2; exit 121;; esac
+  printf '%s' "$v" | base64 -d > "$s/$k" || { echo "nebula-bootstrap: base64 failed" >&2; exit 122; }
+  i=$((i + 1))
+done
 `
 
 // Command returns the remote command line for executionID.
 func Command(executionID string) (string, error) {
+	return command(executionID, false)
+}
+
+func command(executionID string, withSecrets bool) (string, error) {
 	if !uuidRe.MatchString(executionID) {
 		return "", errors.New("hostrun: execution ID is not a lowercase UUID")
 	}
-	script := fmt.Sprintf(bootstrap, executionID)
+	block := ""
+	if withSecrets {
+		block = attachedSecrets
+	}
+	script := fmt.Sprintf(bootstrap, executionID, block)
 	return "exec /bin/sh -c " + shellQuote(script), nil
 }
 
@@ -150,8 +189,11 @@ type Session interface {
 // Attached runs script with params as an attached run. timeout is bounded
 // by MaxTimeout; zero means DefaultTimeout. Errors are returned only when
 // nothing was started; everything after that is a Result class.
-func Attached(ctx context.Context, client *ssh.Client, executionID string, params, script []byte, timeout time.Duration) (Result, error) {
-	cmd, err := Command(executionID)
+func Attached(ctx context.Context, client *ssh.Client, executionID string, params, script []byte, timeout time.Duration, secrets ...Secret) (Result, error) {
+	if err := validSecrets(secrets); err != nil {
+		return Result{}, err
+	}
+	cmd, err := command(executionID, len(secrets) > 0)
 	if err != nil {
 		return Result{}, err
 	}
@@ -161,7 +203,7 @@ func Attached(ctx context.Context, client *ssh.Client, executionID string, param
 	}
 	var out, log cappedBuffer
 	out.limit, log.limit = MaxResult, MaxLog
-	s.Stdin = io.MultiReader(strings.NewReader(base64.StdEncoding.EncodeToString(params)+"\n"), bytes.NewReader(script))
+	s.Stdin = io.MultiReader(strings.NewReader(base64.StdEncoding.EncodeToString(params)+"\n"+secretLines(secrets)), bytes.NewReader(script))
 	s.Stdout, s.Stderr = &out, &log
 	return run(ctx, s, cmd, timeout, &out, &log), nil
 }
@@ -190,8 +232,16 @@ func run(ctx context.Context, s Session, cmd string, timeout time.Duration, out,
 	if timedOut {
 		// Best effort: OpenSSH may ignore the signal; closing the channel
 		// ends our side. The remote process can outlive this (stated in
-		// docs); long work belongs in a durable job.
-		_ = s.Signal(ssh.SIGKILL)
+		// docs); long work belongs in a durable job. TERM first: the
+		// bootstrap's trap turns it into an exit that removes the private
+		// runtime directory with the run's secrets; KILL only if it is
+		// still there after a grace period.
+		_ = s.Signal(ssh.SIGTERM)
+		select {
+		case <-done:
+		case <-time.After(killGrace):
+			_ = s.Signal(ssh.SIGKILL)
+		}
 		_ = s.Close()
 		select {
 		case <-done:

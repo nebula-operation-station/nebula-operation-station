@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -35,6 +36,47 @@ type Action struct {
 	Params []Param
 	// Retry is the spec 07 retry class.
 	Retry RetryClass
+	// Secrets are the action's secret slots (runbooks, M7-3): planning
+	// maps each to a vault secret ID, which the executor resolves.
+	Secrets []string
+}
+
+// SecretsKey is the parameters member that maps secret slots to vault
+// secret IDs (the executor's permit.SecretsKey).
+const SecretsKey = "nebula_secrets"
+
+// vaultIDRe is a vault secret ID (internal/vault).
+var vaultIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+
+// ValidSecrets checks a slot -> vault secret ID mapping against the
+// action's slots: exactly every slot, each with a valid ID.
+func (a Action) ValidSecrets(m map[string]string) error {
+	if len(m) != len(a.Secrets) {
+		return fmt.Errorf("%s needs a vault secret for each of its %d secret slots", a.ID, len(a.Secrets))
+	}
+	for _, slot := range a.Secrets {
+		id, ok := m[slot]
+		if !ok {
+			return fmt.Errorf("secret slot %s needs a vault secret", slot)
+		}
+		if !vaultIDRe.MatchString(id) {
+			return fmt.Errorf("secret slot %s: the vault secret ID is not valid", slot)
+		}
+	}
+	return nil
+}
+
+// ParametersJSON is the parameters document of a run: the parameters and,
+// for an action with secret slots, the slot mapping under SecretsKey.
+func (a Action) ParametersJSON(params, secrets map[string]string) ([]byte, error) {
+	if len(a.Secrets) == 0 {
+		return json.Marshal(params)
+	}
+	doc := map[string]any{SecretsKey: secrets}
+	for k, v := range params {
+		doc[k] = v
+	}
+	return json.Marshal(doc)
 }
 
 // RetryClass says what may happen after a host run that did not finish
