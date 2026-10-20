@@ -40,6 +40,9 @@ type searchData struct {
 	TooLong   bool
 }
 
+// maxAddressStatus bounds the address status lookups of one search.
+const maxAddressStatus = 4
+
 func esc(s string) string { return url.PathEscape(s) }
 
 // matcher is a case-insensitive substring test.
@@ -111,7 +114,7 @@ func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			for k, v := range x.Tags {
-				if m.any(k+"="+v) {
+				if m.any(k + "=" + v) {
 					hit = true
 				}
 			}
@@ -162,6 +165,7 @@ func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			h.log.Error("search networks", "error", err)
 		}
+		statusCalls := 0
 		for _, n := range nets {
 			hit := m.any(n.ID, n.Name, n.Prefix.String(), n.Notes) || isAddr && n.Prefix.Contains(addr) || isPrefix && n.Prefix.Overlaps(prefix)
 			if n.VLAN != 0 && (q == strconv.Itoa(n.VLAN) || strings.EqualFold(q, "vlan "+strconv.Itoa(n.VLAN)) || strings.EqualFold(q, "vlan"+strconv.Itoa(n.VLAN))) {
@@ -176,7 +180,11 @@ func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 			}
 			c.add(searchResult{Kind: "Network", Title: n.Name + " (" + n.ID + ")", Detail: detail, URL: "/network/n/" + esc(n.ID)})
 			// The address itself, with its status in this network.
-			if isAddr && n.Prefix.Contains(addr) {
+			// Status reloads every claim, so a search shows the address
+			// status for at most maxAddressStatus containing networks
+			// (review m93, finding 1); the network rows link to the rest.
+			if isAddr && n.Prefix.Contains(addr) && statusCalls < maxAddressStatus {
+				statusCalls++
 				if views, _, err := h.network.Status(ctx, n.ID); err == nil {
 					st, why := "UNKNOWN", ""
 					for _, v := range views {
@@ -193,10 +201,10 @@ func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if h.operations != nil {
+	if h.operations != nil && len(q) >= 4 {
 		if list, err := h.operations.List(ctx, 500); err != nil {
 			h.log.Error("search executions", "error", err)
-		} else if len(q) >= 4 {
+		} else {
 			lq := strings.ToLower(q)
 			for _, e := range list {
 				if strings.HasPrefix(e.ID, lq) || m.any(e.ActionID) && len(q) >= 3 {
