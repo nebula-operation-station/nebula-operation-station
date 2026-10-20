@@ -30,4 +30,4 @@ sudo apt update && sudo apt install nebula-operation-station
 sudo /usr/share/nebula/deploy/install.sh --from-package --admin-users alice --rp-id nebula.lab.example.org
 ```
 
-An upgrade (`apt upgrade`) makes the pre-upgrade backup with the new CLI and restarts the services; run `nebula unlock` afterwards.
+An upgrade (`apt upgrade`) installs the new version but never restarts the services, because the pre-upgrade backup needs the admin's own `sudo`: run `sudo nebula backup && sudo systemctl restart nebula-executor nebula-server`, then `nebula unlock` (handbook, section 13).

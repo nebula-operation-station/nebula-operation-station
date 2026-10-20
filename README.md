@@ -2,7 +2,7 @@
 
 A self-hosted operations control plane for Linux homelabs (about 5 to 100 hosts): inventory, SSH-based patching and service operations, staged rollouts and an audit trail, with credentials held by a separate executor that verifies every privileged action on its own.
 
-> **Status: alpha, working towards Release 0.1** (safe patching of Debian/Ubuntu hosts). Enrollment, update checks, installing updates, reboots and service operations work end to end in the test suite; the first runs on real hosts are still pending. Try it in a lab, not in production. Operators start with the [operator guide](docs/admin/guide.md); the state of every milestone is in [`docs/implementation/m0.md`](docs/implementation/m0.md).
+> **Status: alpha, working towards Release 0.9.** The code for 0.9 is complete and passes the test suite (patching, services, Docker, rollouts, runbooks, signed modules, IPAM, discovery, signed events, backup and restore, Debian packages and containers); the lab run on real hosts is still pending. Try it in a lab, not in production. Operators start with the [installation and operations handbook](docs/admin/guide.md); the state of every milestone is in [`docs/implementation/m0.md`](docs/implementation/m0.md).
 
 ## Design in one paragraph
 

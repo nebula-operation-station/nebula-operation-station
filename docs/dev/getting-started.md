@@ -171,8 +171,6 @@ permits, executor-side WebAuthn verification, and the CLI unlock flow.
 See `docs/implementation/m0.md` for the full status, known gaps and
 decisions.
 
-Milestones 1 to 5 (Release 0.1, Debian/Ubuntu patching) are implemented
-up to the first runs on real hosts; operators follow
-[`docs/admin/guide.md`](../admin/guide.md). Not yet available: runbooks and
-modules, the stage engine (canary, waves), Docker and IPAM (Milestones 6+),
-packaging (Milestone 10), and the discovery service.
+Milestones 1 to 10 (up to Release 0.9) are implemented up to the lab run
+on real hosts; operators follow the installation and operations handbook,
+[`docs/admin/guide.md`](../admin/guide.md).
