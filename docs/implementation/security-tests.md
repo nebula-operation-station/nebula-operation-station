@@ -50,6 +50,11 @@ the OpenSSH test VMs; **fuzz** in `make fuzz` (the seed corpora also run in
 | Key spraying across endpoints, fail2ban lockout | `TestH05_AuthFailureTriesNoOtherEndpoint` |
 | Secrets reaching anything but the host | `TestM7_SecretsReachOnlyTheHost`, `TestM2_NoRPCReturnsSecretValues` |
 | Forged or rewritten history | `TestExecutorEventsAreSignedAndChained`, `TestEventsAreAppendOnly`, `TestAuditLog` |
+| A module or update from an untrusted author | `TestM7_SignedModules`, `TestConfirmSignerNeedsTheTypedFingerprint`, `TestReservedMustBeEmpty`, `TestParseRefusesNonCanonicalBytes` |
+| A module UI injecting script | `TestModuleUICannotInjectScript` |
+| A compromised server misusing discovery | `TestValidateRefuses`, `FuzzJobArgs`, `TestSpool`, `TestRunWritesResults`, `TestSubmitChecksTargets` |
+| Hostile scan results | `FuzzParseNmapXML`, `TestParseNmapXML`, `TestPollClassifyImport`, `TestDiscoveryFlow` |
+| A backup leaking secrets, or a tampered restore | `TestBackupExecutorPart`, `TestRoundTrip`, `TestReadRefusesTampering`, `TestRestore` |
 
 ## Fuzz targets
 
