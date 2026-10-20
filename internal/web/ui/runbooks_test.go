@@ -4,12 +4,19 @@ package ui_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/runbooks"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
@@ -139,5 +146,79 @@ func TestRunbookSecretSlotsAreShown(t *testing.T) {
 	plan := getBody(t, opsHandler(t, f, nil), "/operations/new?action=runbook.web_restart")
 	if !strings.Contains(plan, `data-secret="influx_token"`) || !strings.Contains(plan, "Vault secret for slot influx_token") {
 		t.Fatal("planner does not ask for the secret")
+	}
+}
+
+type fakeTrust struct {
+	trusted bool
+	sum     string // what Begin reports as hashed
+	begun   *pb.BeginTrustArtifactRequest
+	commits int
+}
+
+func (f *fakeTrust) BeginTrustArtifact(_ context.Context, in *pb.BeginTrustArtifactRequest, _ ...grpc.CallOption) (*pb.BeginTrustArtifactResponse, error) {
+	f.begun = in
+	sum := f.sum
+	if sum == "" {
+		h := sha256.Sum256(in.GetArtifact())
+		sum = hex.EncodeToString(h[:])
+	}
+	return &pb.BeginTrustArtifactResponse{TrustId: "t1", ArtifactSha256: sum, RequestOptionsJson: []byte(`{"publicKey":{"challenge":"trust"}}`)}, nil
+}
+
+func (f *fakeTrust) CommitTrustArtifact(_ context.Context, in *pb.CommitTrustArtifactRequest, _ ...grpc.CallOption) (*pb.CommitTrustArtifactResponse, error) {
+	if string(in.GetAssertionJson()) != `"good"` {
+		return nil, status.Error(codes.PermissionDenied, "assertion_rejected")
+	}
+	f.commits++
+	f.trusted = true
+	return &pb.CommitTrustArtifactResponse{}, nil
+}
+
+func (f *fakeTrust) GetArtifactTrust(context.Context, *pb.GetArtifactTrustRequest, ...grpc.CallOption) (*pb.GetArtifactTrustResponse, error) {
+	return &pb.GetArtifactTrustResponse{Trusted: f.trusted, RiskClass: pb.RiskClass_RISK_CLASS_MEDIUM}, nil
+}
+
+// M7-4: a runbook version can be trusted on the executor with the key.
+func TestRunbookTrust(t *testing.T) {
+	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	rb := runbooks.New(db)
+	ft := &fakeTrust{}
+	h := newTestHandler(t, ui.Options{PublicOrigin: "https://nebula.example.org", Runbooks: rb, Trust: ft}).Handler()
+	if code, _ := postJSON(t, h, "/runbooks/save", hostileRunbook); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	page := getBody(t, h, "/runbooks/web_restart")
+	if !strings.Contains(page, "not trusted: the executor treats this version as at least HIGH") || !strings.Contains(page, `id="runbook-trust"`) {
+		t.Fatal(page)
+	}
+	code, body := postJSON(t, h, "/runbooks/trust/begin", `{"slug":"web_restart","version":1}`)
+	v, _ := rb.Get(context.Background(), "web_restart", 1)
+	if code != http.StatusOK || !strings.Contains(body, `"trust_id":"t1"`) || string(ft.begun.GetArtifact()) != string(v.Artifact) ||
+		ft.begun.GetActionId() != "runbook.web_restart" || ft.begun.GetModuleVersion() != "1.0.0" || ft.begun.GetRiskClass() != pb.RiskClass_RISK_CLASS_MEDIUM {
+		t.Fatalf("%d %s %v", code, body, ft.begun)
+	}
+	if code, _ := postJSON(t, h, "/runbooks/trust/commit", `{"trust_id":"t1","assertion":"bad"}`); code == http.StatusOK {
+		t.Fatal("bad assertion accepted")
+	}
+	if code, _ := postJSON(t, h, "/runbooks/trust/commit", `{"trust_id":"t1","assertion":"good"}`); code != http.StatusOK || ft.commits != 1 {
+		t.Fatal(code)
+	}
+	if page := getBody(t, h, "/runbooks/web_restart"); !strings.Contains(page, "Executor: trusted as MEDIUM") || strings.Contains(page, `id="runbook-trust"`) {
+		t.Fatal(page)
+	}
+	// The executor hashing other bytes than the version's is an error.
+	ft.sum = strings.Repeat("0", 64)
+	if code, _ := postJSON(t, h, "/runbooks/trust/begin", `{"slug":"web_restart","version":1}`); code != http.StatusBadGateway {
+		t.Fatal(code)
+	}
+	for _, b := range []string{`{"slug":"web_restart","version":0}`, `{"slug":"nope","version":1}`} {
+		if code, _ := postJSON(t, h, "/runbooks/trust/begin", b); code != http.StatusNotFound {
+			t.Errorf("%s: %d", b, code)
+		}
 	}
 }

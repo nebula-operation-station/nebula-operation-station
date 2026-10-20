@@ -72,6 +72,9 @@ const (
 	ExecutorService_AbortRollout_FullMethodName              = "/nebula.executor.v1.ExecutorService/AbortRollout"
 	ExecutorService_GetRollout_FullMethodName                = "/nebula.executor.v1.ExecutorService/GetRollout"
 	ExecutorService_ApproveGateCLI_FullMethodName            = "/nebula.executor.v1.ExecutorService/ApproveGateCLI"
+	ExecutorService_BeginTrustArtifact_FullMethodName        = "/nebula.executor.v1.ExecutorService/BeginTrustArtifact"
+	ExecutorService_CommitTrustArtifact_FullMethodName       = "/nebula.executor.v1.ExecutorService/CommitTrustArtifact"
+	ExecutorService_GetArtifactTrust_FullMethodName          = "/nebula.executor.v1.ExecutorService/GetArtifactTrust"
 	ExecutorService_ProposeScheduleGrant_FullMethodName      = "/nebula.executor.v1.ExecutorService/ProposeScheduleGrant"
 	ExecutorService_CommitScheduleGrant_FullMethodName       = "/nebula.executor.v1.ExecutorService/CommitScheduleGrant"
 	ExecutorService_ListPendingScheduleGrants_FullMethodName = "/nebula.executor.v1.ExecutorService/ListPendingScheduleGrants"
@@ -269,6 +272,15 @@ type ExecutorServiceClient interface {
 	GetRollout(ctx context.Context, in *GetRolloutRequest, opts ...grpc.CallOption) (*GetRolloutResponse, error)
 	// Role: admin. Hardened gate path (`nebula approve --stage`, `--skip`).
 	ApproveGateCLI(ctx context.Context, in *ApproveGateCLIRequest, opts ...grpc.CallOption) (*ApproveGateCLIResponse, error)
+	// Trust an artifact from the browser (M7-4). Role: server. The executor
+	// hashes the bytes and binds a fresh user-verified assertion to (hash,
+	// action, version, risk); needs the privileged session; hardened mode
+	// refuses (cli_required) and keeps `nebula artifact trust`.
+	BeginTrustArtifact(ctx context.Context, in *BeginTrustArtifactRequest, opts ...grpc.CallOption) (*BeginTrustArtifactResponse, error)
+	CommitTrustArtifact(ctx context.Context, in *CommitTrustArtifactRequest, opts ...grpc.CallOption) (*CommitTrustArtifactResponse, error)
+	// Role: server, admin. Whether the executor trusts these bytes as this
+	// action and version, and at which risk.
+	GetArtifactTrust(ctx context.Context, in *GetArtifactTrustRequest, opts ...grpc.CallOption) (*GetArtifactTrustResponse, error)
 	// Schedule grants (docs/implementation/schedule-grants.md): standing
 	// permission, approved with the security key, to run fixed actions that
 	// the executor rates LOW on fixed hosts at most once per interval, until
@@ -812,6 +824,36 @@ func (c *executorServiceClient) ApproveGateCLI(ctx context.Context, in *ApproveG
 	return out, nil
 }
 
+func (c *executorServiceClient) BeginTrustArtifact(ctx context.Context, in *BeginTrustArtifactRequest, opts ...grpc.CallOption) (*BeginTrustArtifactResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BeginTrustArtifactResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_BeginTrustArtifact_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) CommitTrustArtifact(ctx context.Context, in *CommitTrustArtifactRequest, opts ...grpc.CallOption) (*CommitTrustArtifactResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitTrustArtifactResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_CommitTrustArtifact_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) GetArtifactTrust(ctx context.Context, in *GetArtifactTrustRequest, opts ...grpc.CallOption) (*GetArtifactTrustResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetArtifactTrustResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_GetArtifactTrust_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *executorServiceClient) ProposeScheduleGrant(ctx context.Context, in *ProposeScheduleGrantRequest, opts ...grpc.CallOption) (*ProposeScheduleGrantResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ProposeScheduleGrantResponse)
@@ -1070,6 +1112,15 @@ type ExecutorServiceServer interface {
 	GetRollout(context.Context, *GetRolloutRequest) (*GetRolloutResponse, error)
 	// Role: admin. Hardened gate path (`nebula approve --stage`, `--skip`).
 	ApproveGateCLI(context.Context, *ApproveGateCLIRequest) (*ApproveGateCLIResponse, error)
+	// Trust an artifact from the browser (M7-4). Role: server. The executor
+	// hashes the bytes and binds a fresh user-verified assertion to (hash,
+	// action, version, risk); needs the privileged session; hardened mode
+	// refuses (cli_required) and keeps `nebula artifact trust`.
+	BeginTrustArtifact(context.Context, *BeginTrustArtifactRequest) (*BeginTrustArtifactResponse, error)
+	CommitTrustArtifact(context.Context, *CommitTrustArtifactRequest) (*CommitTrustArtifactResponse, error)
+	// Role: server, admin. Whether the executor trusts these bytes as this
+	// action and version, and at which risk.
+	GetArtifactTrust(context.Context, *GetArtifactTrustRequest) (*GetArtifactTrustResponse, error)
 	// Schedule grants (docs/implementation/schedule-grants.md): standing
 	// permission, approved with the security key, to run fixed actions that
 	// the executor rates LOW on fixed hosts at most once per interval, until
@@ -1255,6 +1306,15 @@ func (UnimplementedExecutorServiceServer) GetRollout(context.Context, *GetRollou
 }
 func (UnimplementedExecutorServiceServer) ApproveGateCLI(context.Context, *ApproveGateCLIRequest) (*ApproveGateCLIResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ApproveGateCLI not implemented")
+}
+func (UnimplementedExecutorServiceServer) BeginTrustArtifact(context.Context, *BeginTrustArtifactRequest) (*BeginTrustArtifactResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BeginTrustArtifact not implemented")
+}
+func (UnimplementedExecutorServiceServer) CommitTrustArtifact(context.Context, *CommitTrustArtifactRequest) (*CommitTrustArtifactResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CommitTrustArtifact not implemented")
+}
+func (UnimplementedExecutorServiceServer) GetArtifactTrust(context.Context, *GetArtifactTrustRequest) (*GetArtifactTrustResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetArtifactTrust not implemented")
 }
 func (UnimplementedExecutorServiceServer) ProposeScheduleGrant(context.Context, *ProposeScheduleGrantRequest) (*ProposeScheduleGrantResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ProposeScheduleGrant not implemented")
@@ -2216,6 +2276,60 @@ func _ExecutorService_ApproveGateCLI_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_BeginTrustArtifact_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BeginTrustArtifactRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).BeginTrustArtifact(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_BeginTrustArtifact_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).BeginTrustArtifact(ctx, req.(*BeginTrustArtifactRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_CommitTrustArtifact_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommitTrustArtifactRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).CommitTrustArtifact(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_CommitTrustArtifact_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).CommitTrustArtifact(ctx, req.(*CommitTrustArtifactRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_GetArtifactTrust_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetArtifactTrustRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).GetArtifactTrust(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_GetArtifactTrust_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).GetArtifactTrust(ctx, req.(*GetArtifactTrustRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ExecutorService_ProposeScheduleGrant_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ProposeScheduleGrantRequest)
 	if err := dec(in); err != nil {
@@ -2552,6 +2666,18 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ApproveGateCLI",
 			Handler:    _ExecutorService_ApproveGateCLI_Handler,
+		},
+		{
+			MethodName: "BeginTrustArtifact",
+			Handler:    _ExecutorService_BeginTrustArtifact_Handler,
+		},
+		{
+			MethodName: "CommitTrustArtifact",
+			Handler:    _ExecutorService_CommitTrustArtifact_Handler,
+		},
+		{
+			MethodName: "GetArtifactTrust",
+			Handler:    _ExecutorService_GetArtifactTrust_Handler,
 		},
 		{
 			MethodName: "ProposeScheduleGrant",

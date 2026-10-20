@@ -284,8 +284,9 @@ versions never change, and an operation always runs the version it was
 planned with. The executor does not know your script, so a runbook is
 HIGH (security key each time) until you trust that exact version on the
 executor host with the command shown on its page (download the script,
-read it, then `nebula artifact trust …`); the Safety Scanner can raise it
-further. Scripts with control characters or invisible formatting
+read it, then `nebula artifact trust …`), or with *Trust this version*
+on the runbook page and your security key (standard mode only); the
+Safety Scanner can raise it further. Scripts with control characters or invisible formatting
 characters (such as bidi overrides) are refused, so what you review is
 what runs.
 

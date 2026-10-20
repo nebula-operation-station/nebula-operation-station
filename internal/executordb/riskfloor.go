@@ -307,6 +307,9 @@ func riskFromDB(rank int64) (canonical.Risk, error) {
 
 // checkText rejects text that could rewrite a terminal (control and bidi
 // characters, invalid UTF-8) or exceeds max bytes.
+// CheckLabel checks a trust label as TrustArtifact does.
+func CheckLabel(label string) error { return checkText("label", label, maxLabelLen, true) }
+
 func checkText(field, s string, max int, allowEmpty bool) error {
 	if s == "" && !allowEmpty {
 		return fmt.Errorf("executordb: %w: %s is required", ErrInvalid, field)

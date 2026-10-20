@@ -11,6 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/grpc"
+
+	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/runbooks"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/scanner"
 )
@@ -18,6 +21,14 @@ import (
 // Runbooks (spec 10, M7-2): local single-action modules. Saving creates a
 // new immutable version; running one is an ordinary operation, and the
 // executor rates its script itself (untrusted: at least HIGH).
+
+// ArtifactTrust asks the executor about trust in an artifact and trusts
+// one with the security key (M7-4). The executor hashes the bytes itself.
+type ArtifactTrust interface {
+	BeginTrustArtifact(ctx context.Context, in *pb.BeginTrustArtifactRequest, opts ...grpc.CallOption) (*pb.BeginTrustArtifactResponse, error)
+	CommitTrustArtifact(ctx context.Context, in *pb.CommitTrustArtifactRequest, opts ...grpc.CallOption) (*pb.CommitTrustArtifactResponse, error)
+	GetArtifactTrust(ctx context.Context, in *pb.GetArtifactTrustRequest, opts ...grpc.CallOption) (*pb.GetArtifactTrustResponse, error)
+}
 
 // Runbooks stores runbooks (internal/runbooks.Store).
 type Runbooks interface {
@@ -42,6 +53,10 @@ type runbookVersionRow struct {
 }
 
 type runbookDetail struct {
+	// Trust is the executor's view: "trusted as LOW", "not trusted …" or
+	// "unknown"; CanTrust offers the security-key button.
+	Trust                                                                                     string
+	CanTrust, Trusted                                                                         bool
 	Slug, Title, Description, Risk, Kind, ActionID, ModuleVersion, SHA256, Body, TrustCommand string
 	Version                                                                                   int
 	Params                                                                                    []runbookParamView
@@ -126,13 +141,26 @@ func (h *Handler) handleRunbook(w http.ResponseWriter, r *http.Request) {
 	d.Scanner, _ = scanner.Scan(v.Artifact)
 	d.TrustCommand = "nebula artifact trust --action " + a.ID + " --version " + a.Version + " --risk " + v.Risk +
 		" " + v.Slug + "-" + strconv.Itoa(v.Version) + ".sh"
+	d.Trust = "unknown (executor unavailable)"
+	if h.trust != nil {
+		g, err := h.trust.GetArtifactTrust(ctx, &pb.GetArtifactTrustRequest{ArtifactSha256: v.ArtifactSHA256, ActionId: a.ID, ModuleVersion: a.Version})
+		switch {
+		case err != nil:
+			h.log.Error("artifact trust", "error", err)
+		case g.GetTrusted():
+			d.Trust, d.Trusted = "trusted as "+strings.TrimPrefix(g.GetRiskClass().String(), "RISK_CLASS_"), true
+		default:
+			d.Trust, d.CanTrust = "not trusted: the executor treats this version as at least HIGH", true
+		}
+	}
 	if all, err := h.runbooks.Versions(ctx, slug); err == nil {
 		for _, x := range all {
 			d.Versions = append(d.Versions, runbookVersionRow{Version: x.Version, Short: x.ArtifactSHA256[:16], CreatedBy: x.CreatedBy,
 				Created: x.CreatedAt.UTC().Format("2006-01-02 15:04 MST")})
 		}
 	}
-	h.render(w, pageData{Title: "Runbook " + v.Slug, Active: "runbooks", Content: "runbook", Runbooks: &runbooksData{Detail: d}})
+	h.render(w, pageData{Title: "Runbook " + v.Slug, Active: "runbooks", Content: "runbook", Scripts: []string{"webauthn.js", "runbooks.js"},
+		Runbooks: &runbooksData{Detail: d}})
 }
 
 // handleRunbookArtifact serves the exact bytes that run, for review and for
@@ -242,4 +270,73 @@ func (h *Handler) handleRunbookSave(w http.ResponseWriter, r *http.Request) {
 	}
 	h.log.Info("audit", "kind", "runbook_saved", "runbook", v.Slug, "version", v.Version, "artifact_sha256", v.ArtifactSHA256, "user", webUser(r))
 	writeJSON(w, http.StatusOK, map[string]any{"slug": v.Slug, "version": v.Version})
+}
+
+// handleRunbookTrustBegin asks the executor for a challenge to trust a
+// runbook version at its declared risk.
+func (h *Handler) handleRunbookTrustBegin(w http.ResponseWriter, r *http.Request) {
+	if h.runbooks == nil || h.trust == nil {
+		http.NotFound(w, r)
+		return
+	}
+	var in struct {
+		Slug    string `json:"slug"`
+		Version int    `json:"version"`
+	}
+	if !readOpsJSON(w, r, &in) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
+	defer cancel()
+	if in.Version < 1 {
+		writeJSONError(w, http.StatusNotFound, "runbook not found")
+		return
+	}
+	v, err := h.runbooks.Get(ctx, in.Slug, in.Version)
+	if errors.Is(err, runbooks.ErrNotFound) {
+		writeJSONError(w, http.StatusNotFound, "runbook not found")
+		return
+	}
+	if err != nil {
+		h.log.Error("get runbook", "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "runbooks unavailable")
+		return
+	}
+	a := v.Action()
+	b, err := h.trust.BeginTrustArtifact(ctx, &pb.BeginTrustArtifactRequest{Artifact: v.Artifact, ActionId: a.ID, ModuleVersion: a.Version,
+		RiskClass: a.Risk, Label: "runbook " + v.Slug + " version " + strconv.Itoa(v.Version)})
+	if err != nil {
+		h.executorRefusal(w, "begin artifact trust", err)
+		return
+	}
+	if b.GetArtifactSha256() != v.ArtifactSHA256 || !json.Valid(b.GetRequestOptionsJson()) {
+		h.log.Error("begin artifact trust", "error", "the executor hashed other bytes")
+		writeJSONError(w, http.StatusBadGateway, "executor unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"trust_id": b.GetTrustId(), "options": json.RawMessage(b.GetRequestOptionsJson())})
+}
+
+// handleRunbookTrustCommit relays the assertion.
+func (h *Handler) handleRunbookTrustCommit(w http.ResponseWriter, r *http.Request) {
+	if h.trust == nil {
+		http.NotFound(w, r)
+		return
+	}
+	var in struct {
+		TrustID   string          `json:"trust_id"`
+		Assertion json.RawMessage `json:"assertion"`
+	}
+	if !readOpsJSON(w, r, &in) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
+	defer cancel()
+	c, err := h.trust.CommitTrustArtifact(ctx, &pb.CommitTrustArtifactRequest{TrustId: in.TrustID, AssertionJson: in.Assertion})
+	if err != nil {
+		h.executorRefusal(w, "commit artifact trust", err)
+		return
+	}
+	h.log.Info("audit", "kind", "artifact_trusted", "artifact_sha256", c.GetArtifactSha256(), "user", webUser(r))
+	writeJSON(w, http.StatusOK, map[string]bool{"done": true})
 }

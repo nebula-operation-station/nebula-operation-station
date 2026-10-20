@@ -164,6 +164,18 @@ func (d direct) ListScheduleGrants(ctx context.Context, in *pb.ListScheduleGrant
 	return d.s.ListScheduleGrants(ctx, in)
 }
 
+func (d direct) BeginTrustArtifact(ctx context.Context, in *pb.BeginTrustArtifactRequest, _ ...grpc.CallOption) (*pb.BeginTrustArtifactResponse, error) {
+	return d.s.BeginTrustArtifact(ctx, in)
+}
+
+func (d direct) CommitTrustArtifact(ctx context.Context, in *pb.CommitTrustArtifactRequest, _ ...grpc.CallOption) (*pb.CommitTrustArtifactResponse, error) {
+	return d.s.CommitTrustArtifact(ctx, in)
+}
+
+func (d direct) GetArtifactTrust(ctx context.Context, in *pb.GetArtifactTrustRequest, _ ...grpc.CallOption) (*pb.GetArtifactTrustResponse, error) {
+	return d.s.GetArtifactTrust(ctx, in)
+}
+
 func must(err error) {
 	if err != nil {
 		panic(err)
@@ -282,7 +294,7 @@ func main() {
 		r, err := svc.ListHostKeys(ctx, &pb.ListHostKeysRequest{})
 		return r.GetHosts(), err
 	}
-	u, err := ui.New(ui.Options{PublicOrigin: origin, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Schedules: ops, Runbooks: rb, Repin: direct{svc}, Enroll: direct{svc}, Log: log})
+	u, err := ui.New(ui.Options{PublicOrigin: origin, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Schedules: ops, Runbooks: rb, Trust: direct{svc}, Repin: direct{svc}, Enroll: direct{svc}, Log: log})
 	must(err)
 	mux := http.NewServeMux()
 	// Test hook: issue a one-time code like `nebula webauthn code`.

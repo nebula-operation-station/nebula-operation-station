@@ -14,8 +14,19 @@
     <a class="button" href="/runbooks/new?from={{.Slug}}">Edit (saves a new version)</a>
     <a class="button" href="/runbooks/{{.Slug}}/{{.Version}}/artifact">Download script</a>
   </div>
-  <p class="hint">To let the executor rate this version at its declared risk instead of HIGH, review the downloaded script and run on
-    the executor host: <code>{{.TrustCommand}}</code></p>
+  <p class="status">Executor: {{.Trust}}</p>
+  {{if not .Trusted}}
+  {{if .CanTrust}}
+  <div class="actions">
+    <button type="button" id="runbook-trust" class="button" data-slug="{{.Slug}}" data-version="{{.Version}}">Trust this version as {{.Risk}} (security key)</button>
+  </div>
+  <p class="hint">The executor stores the trust with the label <code>runbook {{.Slug}} version {{.Version}}</code>; your key covers
+    hash, action, version, risk and this label.</p>
+  {{end}}
+  <p class="hint">Trusting lets the executor rate exactly these bytes at their declared risk instead of HIGH (the Safety Scanner can
+    still raise it). Read the script below first. In hardened mode, or on the executor host, run instead
+    <code>{{.TrustCommand}}</code> on the downloaded script.</p>
+  {{end}}
   {{if .Params}}
   <h2>Parameters</h2>
   <table class="inventory">
@@ -41,4 +52,5 @@
   </table>
 </section>
 {{end}}
+<p id="message" class="message" role="status" aria-live="polite"></p>
 {{end}}

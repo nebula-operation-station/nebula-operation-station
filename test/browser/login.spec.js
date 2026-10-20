@@ -168,6 +168,16 @@ function check(cond, what) {
     if (!finished) { await new Promise((r) => setTimeout(r, 500)); await page.reload(); }
   }
   check(finished && /hello nebula from runbook/.test(await page.textContent('main')), 'the runbook ran with its parameter');
+  // Trust that version on the executor with the key: it then runs LOW.
+  await page.goto(base + '/runbooks/hello');
+  check(/not trusted/.test(await page.textContent('main')), 'the runbook version is not trusted yet');
+  await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('#runbook-trust')]);
+  check(/Executor: trusted as LOW/.test(await page.textContent('main')), 'the runbook version is trusted with the security key');
+  await page.goto(base + '/operations/new?action=runbook.hello');
+  await page.check('input[name="host"][value="e2e-host"]');
+  await page.fill('label.param[data-action="runbook.hello"] input', 'again');
+  await Promise.all([page.waitForURL(/\/operations\/[0-9a-f-]{36}$/, { timeout: 15000 }), page.click('#operation-create')]);
+  check(/Risk \(decided by the executor\): LOW/.test(await page.textContent('main')), 'a trusted runbook runs at its declared risk');
   // Service actions take a unit name; the server refuses anything but a plain unit name.
   await page.goto(base + '/operations/new');
   check(await page.locator('label.param[data-action="service.restart"]').isHidden(), 'parameter fields stay hidden until their action is chosen');
