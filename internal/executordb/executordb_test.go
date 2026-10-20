@@ -429,3 +429,33 @@ func TestDirectoryLockHeldUntilClose(t *testing.T) {
 	}
 	f.Close()
 }
+
+// Once a database existed, a missing one is refused instead of being
+// recreated empty (counters and spent IDs would restart); removing the
+// marker starts empty on purpose.
+func TestMissingDatabaseIsRefusedAfterInstall(t *testing.T) {
+	dir := privateDir(t)
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if _, err := os.Stat(filepath.Join(dir, MarkerName)); err != nil {
+		t.Fatal("no marker", err)
+	}
+	for _, f := range []string{FileName, FileName + "-wal"} {
+		_ = os.Remove(filepath.Join(dir, f))
+	}
+	if _, err := Open(dir); !errors.Is(err, ErrMissingDatabase) {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, FileName)); !os.IsNotExist(err) {
+		t.Fatal("an empty database was created anyway")
+	}
+	_ = os.Remove(filepath.Join(dir, MarkerName))
+	db, err = Open(dir)
+	if err != nil || !db.Created() {
+		t.Fatal(err)
+	}
+	db.Close()
+}

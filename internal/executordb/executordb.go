@@ -40,6 +40,14 @@ import (
 // FileName is the database file inside the executor data directory.
 const FileName = "executor.db"
 
+// MarkerName is written next to the database once it exists; with the
+// marker present, a missing database is refused.
+const MarkerName = "executor.db.installed"
+
+// ErrMissingDatabase: the database is gone although the marker says one
+// existed.
+var ErrMissingDatabase = errors.New("executordb: the database is missing")
+
 // RetainSpentExecutions is how long an execution ID stays spent after its
 // request expired. An expired request can never be authorized again
 // (permit.Authorize checks the expiry), so pruning afterwards only frees
@@ -112,7 +120,21 @@ func open(dataDir string, now func() time.Time) (_ *DB, err error) {
 
 	_, statErr := os.Lstat(path)
 	created := os.IsNotExist(statErr)
+	// Once a database existed here, a missing one is an accident or an
+	// attack (counters and spent execution IDs would restart): refuse,
+	// unless the admin removes the marker on purpose.
+	marker := filepath.Join(dataDir, MarkerName)
+	if _, err := os.Lstat(marker); created && err == nil {
+		return nil, fmt.Errorf("executordb: %s is missing but %s says one existed: restore it (sudo nebula restore) or, to start empty on purpose, remove %s: %w",
+			path, MarkerName, marker, ErrMissingDatabase)
+	}
 	if err := fsguard.EnsurePrivateFile(path); err != nil {
+		return nil, fmt.Errorf("executordb: %w", err)
+	}
+	// The marker is written as soon as the database file exists, before
+	// anything is written to it: a crash before the first migration commits
+	// still leaves it, so a later deletion is refused (review m106, 1).
+	if err := fsguard.EnsurePrivateFile(marker); err != nil {
 		return nil, fmt.Errorf("executordb: %w", err)
 	}
 
@@ -175,10 +197,10 @@ func lockDir(dir string) (*os.File, error) {
 	return f, nil
 }
 
-// Created reports whether Open created executor.db. On a data directory
-// that already holds credentials this means the stored counters and spent
-// execution IDs were lost (deleted file, restore without the database), and
-// the executor logs a warning.
+// Created reports whether Open created executor.db. A missing database
+// is refused while the marker exists, so on a data directory that already
+// holds credentials this means the admin removed the marker on purpose to
+// start empty; the executor logs a warning.
 func (db *DB) Created() bool { return db.created }
 
 // Close closes the database and then releases the directory lock. It is
