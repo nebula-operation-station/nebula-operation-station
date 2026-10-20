@@ -20,11 +20,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/prelude"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
@@ -34,57 +33,30 @@ const ActionPrefix = "runbook."
 // Limits.
 const (
 	MaxBody        = 256 << 10
-	MaxParams      = 10
-	MaxSecrets     = 8
-	MaxChoices     = 20
+	MaxParams      = prelude.MaxParams
+	MaxSecrets     = prelude.MaxSecrets
+	MaxChoices     = prelude.MaxChoices
 	MaxTitle       = 100
 	MaxDescription = 2000
-	MaxLabel       = 100
+	MaxLabel       = prelude.MaxLabel
 	MinTimeout     = 10 * time.Second
 )
 
-// Parameter types (decision 2 of the M7 plan): no free-form strings.
+// Parameter types (internal/prelude).
 const (
-	TypeName   = "name"
-	TypeInt    = "int"
-	TypePath   = "path"
-	TypeChoice = "choice"
+	TypeName   = prelude.TypeName
+	TypeInt    = prelude.TypeInt
+	TypePath   = prelude.TypePath
+	TypeChoice = prelude.TypeChoice
 )
 
-// ere is each type's pattern, written so that Go's regexp and POSIX ERE
-// (grep -E, used by the prelude on the host) read it the same way.
-//
-// A path may contain ".." segments: it is an absolute path handed to the
-// author's own script, which can name any path anyway, so the pattern only
-// keeps quotes, spaces and shell metacharacters out (review m72, note 2).
-var ere = map[string]string{
-	TypeName: `[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}`,
-	TypeInt:  `[0-9]{1,9}`,
-	TypePath: `/[A-Za-z0-9._/-]{0,200}`,
-}
-
 var (
-	slugRe      = regexp.MustCompile(`^[a-z0-9][a-z0-9_]{0,39}$`)
-	paramNameRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
-	choiceRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
-	userRe      = regexp.MustCompile(`^[\x21-\x7e]{1,64}$`)
+	slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_]{0,39}$`)
+	userRe = regexp.MustCompile(`^[\x21-\x7e]{1,64}$`)
 )
 
 // Param is one typed parameter.
-type Param struct {
-	Name    string   `json:"name"`
-	Label   string   `json:"label"`
-	Type    string   `json:"type"`
-	Choices []string `json:"choices,omitempty"`
-}
-
-// pattern is the parameter's ERE without anchors.
-func (p Param) pattern() string {
-	if p.Type == TypeChoice {
-		return "(" + strings.Join(p.Choices, "|") + ")"
-	}
-	return ere[p.Type]
-}
+type Param = prelude.Param
 
 // Draft is what an author saves.
 type Draft struct {
@@ -129,24 +101,7 @@ func (e *InvalidError) Error() string { return "runbook not valid: " + e.Reason 
 
 func invalid(format string, a ...any) error { return &InvalidError{Reason: fmt.Sprintf(format, a...)} }
 
-// clean reports whether s is printable text without control, format
-// (bidi) or line/paragraph separator characters; newline and tab are
-// allowed only where multiline is true.
-func clean(s string, multiline bool) bool {
-	if !utf8.ValidString(s) {
-		return false
-	}
-	for _, r := range s {
-		switch {
-		case multiline && (r == '\n' || r == '\t'):
-		case r == '\r':
-			return false
-		case unicode.IsControl(r), unicode.Is(unicode.Cf, r), r == ' ', r == ' ', r == utf8.RuneError:
-			return false
-		}
-	}
-	return true
-}
+func clean(s string, multiline bool) bool { return prelude.Clean(s, multiline) }
 
 // Validate checks a draft.
 func Validate(d Draft) error {
@@ -159,8 +114,6 @@ func Validate(d Draft) error {
 		return invalid("the description must be at most %d characters of plain text", MaxDescription)
 	case d.Risk != "LOW" && d.Risk != "MEDIUM" && d.Risk != "HIGH" && d.Risk != "CRITICAL":
 		return invalid("the risk must be LOW, MEDIUM, HIGH or CRITICAL")
-	case len(d.Params) > MaxParams:
-		return invalid("at most %d parameters", MaxParams)
 	case d.Body == "" || len(d.Body) > MaxBody:
 		return invalid("the script must be 1 byte to %d KiB", MaxBody>>10)
 	case !clean(d.Body, true):
@@ -185,45 +138,8 @@ func Validate(d Draft) error {
 	if t := time.Duration(d.TimeoutS) * time.Second; d.TimeoutS < int(MinTimeout/time.Second) || t > maxT {
 		return invalid("the timeout must be %d to %d seconds", int(MinTimeout/time.Second), int(maxT/time.Second))
 	}
-	seen := map[string]bool{}
-	if len(d.Secrets) > MaxSecrets {
-		return invalid("at most %d secret slots", MaxSecrets)
-	}
-	for _, slot := range d.Secrets {
-		if !paramNameRe.MatchString(slot) || strings.HasPrefix(slot, "nebula") || seen[slot] {
-			return invalid("secret slots are distinct names of 1 to 32 lowercase letters, digits or _, starting with a letter (not nebula…)")
-		}
-		seen[slot] = true
-	}
-	for _, p := range d.Params {
-		switch {
-		case !paramNameRe.MatchString(p.Name) || strings.HasPrefix(p.Name, "nebula"):
-			return invalid("parameter names are 1 to 32 lowercase letters, digits or _, starting with a letter (not nebula…)")
-		case seen[p.Name]:
-			return invalid("parameter %s appears twice or is also a secret slot", p.Name)
-		case p.Label == "" || len(p.Label) > MaxLabel || !clean(p.Label, false):
-			return invalid("parameter %s needs a label of 1 to %d characters of plain text", p.Name, MaxLabel)
-		}
-		seen[p.Name] = true
-		switch p.Type {
-		case TypeName, TypeInt, TypePath:
-			if len(p.Choices) > 0 {
-				return invalid("parameter %s: only a choice has choices", p.Name)
-			}
-		case TypeChoice:
-			if len(p.Choices) == 0 || len(p.Choices) > MaxChoices {
-				return invalid("parameter %s: a choice has 1 to %d values", p.Name, MaxChoices)
-			}
-			vals := map[string]bool{}
-			for _, c := range p.Choices {
-				if !choiceRe.MatchString(c) || vals[c] {
-					return invalid("parameter %s: choices are distinct lowercase words (letters, digits, _ and -)", p.Name)
-				}
-				vals[c] = true
-			}
-		default:
-			return invalid("parameter %s: the type must be name, int, path or choice", p.Name)
-		}
+	if reason, ok := prelude.Check(d.Params, d.Secrets); !ok {
+		return invalid("%s", reason)
 	}
 	return nil
 }
@@ -239,7 +155,7 @@ func (v Version) Action() actions.Action {
 		a.Retry = actions.RetryReconcileFirst
 	}
 	for _, p := range v.Params {
-		a.Params = append(a.Params, actions.Param{Name: p.Name, Label: p.Label, Pattern: regexp.MustCompile("^" + p.pattern() + "$")})
+		a.Params = append(a.Params, actions.Param{Name: p.Name, Label: p.Label, Pattern: regexp.MustCompile("^" + p.Pattern() + "$")})
 	}
 	return a
 }

@@ -53,6 +53,10 @@ commands:
                       trust a script for one action; LEVEL becomes its minimum risk
   artifact untrust --action ID --version X.Y.Z SHA256
   artifact list       list trusted artifacts (anything else needs at least HIGH)
+  signer add --name NAME FILE | list | remove SHA256:FINGERPRINT
+                      module signers (ssh-ed25519); adding one is CRITICAL (type the fingerprint)
+  module confirm-signer MODULE SHA256:FINGERPRINT
+                      accept a new signer for a module after reviewing it
   host enroll-script --from ADDR[,ADDR] [--user nebula] [--key REF] [--no-sudo]
                       print a script to run on a new host: user, restricted key, sudo
   host probe ENDPOINT...
@@ -152,6 +156,10 @@ func run(cmd string, args []string) error {
 		return scheduleCmd(ctx, c, args, os.Stdin, os.Stdout)
 	case "artifact":
 		return artifactCmd(ctx, c, args)
+	case "signer":
+		return signerCmd(ctx, c, args, os.Stdin, os.Stdout)
+	case "module":
+		return moduleCmd(ctx, c, args, os.Stdin, os.Stdout)
 	case "host":
 		return hostCmd(ctx, c, args)
 	case "webauthn":

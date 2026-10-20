@@ -75,6 +75,11 @@ const (
 	ExecutorService_BeginTrustArtifact_FullMethodName        = "/nebula.executor.v1.ExecutorService/BeginTrustArtifact"
 	ExecutorService_CommitTrustArtifact_FullMethodName       = "/nebula.executor.v1.ExecutorService/CommitTrustArtifact"
 	ExecutorService_GetArtifactTrust_FullMethodName          = "/nebula.executor.v1.ExecutorService/GetArtifactTrust"
+	ExecutorService_RegisterModule_FullMethodName            = "/nebula.executor.v1.ExecutorService/RegisterModule"
+	ExecutorService_AddSigner_FullMethodName                 = "/nebula.executor.v1.ExecutorService/AddSigner"
+	ExecutorService_RemoveSigner_FullMethodName              = "/nebula.executor.v1.ExecutorService/RemoveSigner"
+	ExecutorService_ConfirmModuleSigner_FullMethodName       = "/nebula.executor.v1.ExecutorService/ConfirmModuleSigner"
+	ExecutorService_ListSigners_FullMethodName               = "/nebula.executor.v1.ExecutorService/ListSigners"
 	ExecutorService_ProposeScheduleGrant_FullMethodName      = "/nebula.executor.v1.ExecutorService/ProposeScheduleGrant"
 	ExecutorService_CommitScheduleGrant_FullMethodName       = "/nebula.executor.v1.ExecutorService/CommitScheduleGrant"
 	ExecutorService_ListPendingScheduleGrants_FullMethodName = "/nebula.executor.v1.ExecutorService/ListPendingScheduleGrants"
@@ -281,6 +286,19 @@ type ExecutorServiceClient interface {
 	// Role: server, admin. Whether the executor trusts these bytes as this
 	// action and version, and at which risk.
 	GetArtifactTrust(ctx context.Context, in *GetArtifactTrustRequest, opts ...grpc.CallOption) (*GetArtifactTrustResponse, error)
+	// Signed modules (M7-5). Role: server. The executor verifies the lock's
+	// SSH signature (namespace nebula-module) by a trusted signer, checks
+	// each script against the lock, builds each action's artifact itself and
+	// trusts it at the action's risk. Refused when the module was signed by
+	// another signer before (signer_changed) or the version's lock changed.
+	RegisterModule(ctx context.Context, in *RegisterModuleRequest, opts ...grpc.CallOption) (*RegisterModuleResponse, error)
+	// Role: admin (`nebula signer …`). Adding a signer is CRITICAL: the CLI
+	// asks for the fingerprint to be typed.
+	AddSigner(ctx context.Context, in *AddSignerRequest, opts ...grpc.CallOption) (*AddSignerResponse, error)
+	RemoveSigner(ctx context.Context, in *RemoveSignerRequest, opts ...grpc.CallOption) (*RemoveSignerResponse, error)
+	ConfirmModuleSigner(ctx context.Context, in *ConfirmModuleSignerRequest, opts ...grpc.CallOption) (*ConfirmModuleSignerResponse, error)
+	// Role: server, admin.
+	ListSigners(ctx context.Context, in *ListSignersRequest, opts ...grpc.CallOption) (*ListSignersResponse, error)
 	// Schedule grants (docs/implementation/schedule-grants.md): standing
 	// permission, approved with the security key, to run fixed actions that
 	// the executor rates LOW on fixed hosts at most once per interval, until
@@ -854,6 +872,56 @@ func (c *executorServiceClient) GetArtifactTrust(ctx context.Context, in *GetArt
 	return out, nil
 }
 
+func (c *executorServiceClient) RegisterModule(ctx context.Context, in *RegisterModuleRequest, opts ...grpc.CallOption) (*RegisterModuleResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RegisterModuleResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_RegisterModule_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) AddSigner(ctx context.Context, in *AddSignerRequest, opts ...grpc.CallOption) (*AddSignerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AddSignerResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_AddSigner_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) RemoveSigner(ctx context.Context, in *RemoveSignerRequest, opts ...grpc.CallOption) (*RemoveSignerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RemoveSignerResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_RemoveSigner_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ConfirmModuleSigner(ctx context.Context, in *ConfirmModuleSignerRequest, opts ...grpc.CallOption) (*ConfirmModuleSignerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConfirmModuleSignerResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ConfirmModuleSigner_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ListSigners(ctx context.Context, in *ListSignersRequest, opts ...grpc.CallOption) (*ListSignersResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListSignersResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ListSigners_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *executorServiceClient) ProposeScheduleGrant(ctx context.Context, in *ProposeScheduleGrantRequest, opts ...grpc.CallOption) (*ProposeScheduleGrantResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ProposeScheduleGrantResponse)
@@ -1121,6 +1189,19 @@ type ExecutorServiceServer interface {
 	// Role: server, admin. Whether the executor trusts these bytes as this
 	// action and version, and at which risk.
 	GetArtifactTrust(context.Context, *GetArtifactTrustRequest) (*GetArtifactTrustResponse, error)
+	// Signed modules (M7-5). Role: server. The executor verifies the lock's
+	// SSH signature (namespace nebula-module) by a trusted signer, checks
+	// each script against the lock, builds each action's artifact itself and
+	// trusts it at the action's risk. Refused when the module was signed by
+	// another signer before (signer_changed) or the version's lock changed.
+	RegisterModule(context.Context, *RegisterModuleRequest) (*RegisterModuleResponse, error)
+	// Role: admin (`nebula signer …`). Adding a signer is CRITICAL: the CLI
+	// asks for the fingerprint to be typed.
+	AddSigner(context.Context, *AddSignerRequest) (*AddSignerResponse, error)
+	RemoveSigner(context.Context, *RemoveSignerRequest) (*RemoveSignerResponse, error)
+	ConfirmModuleSigner(context.Context, *ConfirmModuleSignerRequest) (*ConfirmModuleSignerResponse, error)
+	// Role: server, admin.
+	ListSigners(context.Context, *ListSignersRequest) (*ListSignersResponse, error)
 	// Schedule grants (docs/implementation/schedule-grants.md): standing
 	// permission, approved with the security key, to run fixed actions that
 	// the executor rates LOW on fixed hosts at most once per interval, until
@@ -1315,6 +1396,21 @@ func (UnimplementedExecutorServiceServer) CommitTrustArtifact(context.Context, *
 }
 func (UnimplementedExecutorServiceServer) GetArtifactTrust(context.Context, *GetArtifactTrustRequest) (*GetArtifactTrustResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetArtifactTrust not implemented")
+}
+func (UnimplementedExecutorServiceServer) RegisterModule(context.Context, *RegisterModuleRequest) (*RegisterModuleResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RegisterModule not implemented")
+}
+func (UnimplementedExecutorServiceServer) AddSigner(context.Context, *AddSignerRequest) (*AddSignerResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AddSigner not implemented")
+}
+func (UnimplementedExecutorServiceServer) RemoveSigner(context.Context, *RemoveSignerRequest) (*RemoveSignerResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RemoveSigner not implemented")
+}
+func (UnimplementedExecutorServiceServer) ConfirmModuleSigner(context.Context, *ConfirmModuleSignerRequest) (*ConfirmModuleSignerResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ConfirmModuleSigner not implemented")
+}
+func (UnimplementedExecutorServiceServer) ListSigners(context.Context, *ListSignersRequest) (*ListSignersResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListSigners not implemented")
 }
 func (UnimplementedExecutorServiceServer) ProposeScheduleGrant(context.Context, *ProposeScheduleGrantRequest) (*ProposeScheduleGrantResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ProposeScheduleGrant not implemented")
@@ -2330,6 +2426,96 @@ func _ExecutorService_GetArtifactTrust_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_RegisterModule_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RegisterModuleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).RegisterModule(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_RegisterModule_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).RegisterModule(ctx, req.(*RegisterModuleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_AddSigner_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddSignerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).AddSigner(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_AddSigner_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).AddSigner(ctx, req.(*AddSignerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_RemoveSigner_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveSignerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).RemoveSigner(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_RemoveSigner_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).RemoveSigner(ctx, req.(*RemoveSignerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ConfirmModuleSigner_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConfirmModuleSignerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ConfirmModuleSigner(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ConfirmModuleSigner_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ConfirmModuleSigner(ctx, req.(*ConfirmModuleSignerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ListSigners_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSignersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ListSigners(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ListSigners_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ListSigners(ctx, req.(*ListSignersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ExecutorService_ProposeScheduleGrant_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ProposeScheduleGrantRequest)
 	if err := dec(in); err != nil {
@@ -2678,6 +2864,26 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetArtifactTrust",
 			Handler:    _ExecutorService_GetArtifactTrust_Handler,
+		},
+		{
+			MethodName: "RegisterModule",
+			Handler:    _ExecutorService_RegisterModule_Handler,
+		},
+		{
+			MethodName: "AddSigner",
+			Handler:    _ExecutorService_AddSigner_Handler,
+		},
+		{
+			MethodName: "RemoveSigner",
+			Handler:    _ExecutorService_RemoveSigner_Handler,
+		},
+		{
+			MethodName: "ConfirmModuleSigner",
+			Handler:    _ExecutorService_ConfirmModuleSigner_Handler,
+		},
+		{
+			MethodName: "ListSigners",
+			Handler:    _ExecutorService_ListSigners_Handler,
 		},
 		{
 			MethodName: "ProposeScheduleGrant",
