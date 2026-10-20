@@ -116,8 +116,15 @@ func Restore(m Manifest, files []File, l Layout, sys System, latest map[string]i
 		_ = sys.Start(StartUnits...)
 	}
 	for _, d := range []string{l.ServerDir(), l.ExecutorDir()} {
-		if _, err := os.Lstat(d); errors.Is(err, os.ErrNotExist) {
+		fi, err := os.Lstat(d)
+		if errors.Is(err, os.ErrNotExist) {
 			continue
+		}
+		// Renaming a symbolic link would leave its target in place while
+		// the report says the data was moved aside (review m102, F7).
+		if err == nil && !fi.IsDir() {
+			undo()
+			return rep, fmt.Errorf("backup: %s is not a directory (a symbolic link?); refusing to restore over it", d)
 		}
 		aside := d + ".pre-restore-" + ts
 		if err := os.Rename(d, aside); err != nil {

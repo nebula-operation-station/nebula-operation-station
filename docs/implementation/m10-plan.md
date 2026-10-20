@@ -50,8 +50,8 @@ Release 0.9 beta) into a concrete plan.
 - **Decision 3 (default):** the executor makes its part of the backup
   itself (`BackupExecutor`, admin role only): `VACUUM INTO` a private
   temporary file (the executor holds an exclusive lock on its database),
-  `PRAGMA integrity_check`, plus the encrypted SSH key files and the
-  event key; it streams them to the CLI. The server part is read by the
+  `PRAGMA integrity_check`, plus the encrypted SSH key files (never the
+  event key, decision 74); it streams them to the CLI. The server part is read by the
   CLI run with `sudo` (online backup API of `server.db`, config files).
   Nothing decrypted: the vault and keys stay encrypted with the
   passphrase.

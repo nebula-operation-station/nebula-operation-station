@@ -473,6 +473,11 @@ upgrade. To restore (on the same or a new machine, after `install.sh`):
 then `nebula unlock`. Your previous data is kept next to it
 (`*.pre-restore-<time>`), and the backup's `server.json` lands in
 `/etc/nebula/from-backup-<time>/` for you to compare; it is not applied.
+Restoring a backup made on another machine asks you to type that
+machine's name as well. An archive written with `--no-encrypt` has no
+integrity protection (its checksums live inside it): store and move it
+only together with a checksum you keep elsewhere, or use the encrypted
+default.
 
 ## Limits you should know
 

@@ -4,7 +4,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -90,6 +89,27 @@ func dropTo(u *user.User) error {
 	return nil
 }
 
+// hostname is os.Hostname (a variable for tests).
+var hostname = os.Hostname
+
+// readRegular reads a small configuration file only if it is a regular
+// file, not a symbolic link or anything else (review m102, F6).
+func readRegular(p string) ([]byte, error) {
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() || fi.Size() > 1<<20 {
+		return nil, fmt.Errorf("%s is not a regular file of at most 1 MiB", p)
+	}
+	return io.ReadAll(io.LimitReader(f, 1<<20))
+}
+
 // readServerPart reads the server's database (a checked snapshot) and the
 // configuration, as root.
 func readServerPart(tmp string) ([]backup.File, int, error) {
@@ -98,13 +118,19 @@ func readServerPart(tmp string) ([]backup.File, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
+	// Bounded before it is read into memory (review m102, F1).
+	if fi, err := os.Stat(snap); err != nil {
+		return nil, 0, err
+	} else if fi.Size() > backup.MaxFileSize {
+		return nil, 0, fmt.Errorf("server.db is %d MiB, more than a backup holds (%d MiB)", fi.Size()>>20, backup.MaxFileSize>>20)
+	}
 	b, err := os.ReadFile(snap)
 	if err != nil {
 		return nil, 0, err
 	}
 	files := []backup.File{{Path: backup.ServerDB, Mode: 0o600, Data: b}}
 	for name, p := range map[string]string{"server.json": "etc/nebula/server.json", "backup-recipients": recipientsFile} {
-		if b, err := os.ReadFile(rootPath(p)); err == nil {
+		if b, err := readRegular(rootPath(p)); err == nil {
 			files = append(files, backup.File{Path: "server/config/" + name, Mode: 0o640, Data: b})
 		}
 	}
@@ -145,7 +171,7 @@ func backupCmd(args []string, stdin io.Reader, w io.Writer) error {
 	}
 	var recipients []age.Recipient
 	if !*noEncrypt {
-		b, err := os.ReadFile(rootPath(recipientsFile))
+		b, err := readRegular(rootPath(recipientsFile))
 		if err == nil {
 			recipients, err = backup.ParseRecipients(b)
 		}
@@ -253,16 +279,29 @@ func writeArchiveFile(path string, m backup.Manifest, files []backup.File, recip
 		return "", 0, err
 	}
 	written := hex.EncodeToString(h.Sum(nil))
-	b, err := os.ReadFile(tmp)
+	// Read back streaming, never the whole archive in memory (review
+	// m102, F1).
+	rf, err := os.Open(tmp)
 	if err != nil {
 		return "", 0, err
 	}
-	again := sha256.Sum256(b)
-	if hex.EncodeToString(again[:]) != written {
+	again := sha256.New()
+	size, err := io.Copy(again, rf)
+	rf.Close()
+	if err != nil {
+		return "", 0, err
+	}
+	if hex.EncodeToString(again.Sum(nil)) != written {
 		return "", 0, errors.New("the archive on disk differs from what was written")
 	}
 	if len(recipients) == 0 {
-		if _, _, err := backup.Read(bytes.NewReader(b), nil); err != nil {
+		rf, err := os.Open(tmp)
+		if err != nil {
+			return "", 0, err
+		}
+		_, _, err = backup.Read(rf, nil)
+		rf.Close()
+		if err != nil {
 			return "", 0, fmt.Errorf("the written archive does not read back: %w", err)
 		}
 	}
@@ -272,7 +311,7 @@ func writeArchiveFile(path string, m backup.Manifest, files []backup.File, recip
 	if err := os.Rename(tmp, path); err != nil {
 		return "", 0, err
 	}
-	return written, int64(len(b)), nil
+	return written, size, nil
 }
 
 // systemctl is the System of a real machine.
@@ -353,9 +392,23 @@ func restoreWith(args []string, stdin io.Reader, w io.Writer, sys backup.System,
 	fmt.Fprintln(w, "The services stop; the current data moves aside (kept as *.pre-restore-<time>); the backup's data takes its")
 	fmt.Fprintln(w, "place; the configuration from the backup is written next to yours for review, not applied.")
 	fmt.Fprint(w, "Type \"restore\" to continue: ")
-	line, _ := bufio.NewReader(stdin).ReadString('\n')
+	in := bufio.NewReader(stdin)
+	line, _ := in.ReadString('\n')
 	if strings.TrimSpace(line) != "restore" {
 		return errors.New("not confirmed; nothing changed")
+	}
+	// A backup of another machine (a new machine, or the wrong file) takes
+	// over that machine's inventory, event chain and keys: say so and ask
+	// for its name (review m102, F2).
+	if here, _ := hostname(); m.Host != here {
+		fmt.Fprintf(w, "This backup was made on %s, not on this machine (%s). Restoring it here makes this machine take over\n",
+			displaySafe([]byte(m.Host), 64), displaySafe([]byte(here), 64))
+		fmt.Fprintln(w, "its inventory, history, event chain and SSH keys.")
+		fmt.Fprint(w, "Type the backup's host name to continue: ")
+		line, _ := in.ReadString('\n')
+		if strings.TrimSpace(line) != m.Host || m.Host == "" {
+			return errors.New("not confirmed; nothing changed")
+		}
 	}
 	rep, err := backup.Restore(m, files, backup.Layout{Root: nebulaRoot}, sys, latest, now)
 	if err != nil {

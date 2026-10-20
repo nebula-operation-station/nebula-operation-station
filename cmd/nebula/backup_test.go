@@ -81,8 +81,15 @@ func TestBackupAndRestoreFiles(t *testing.T) {
 	if err := restoreWith([]string{archive}, strings.NewReader("restore\n"), &out, sys, time.Now()); err == nil {
 		t.Fatal("encrypted archive read without identity")
 	}
+	// A backup of another machine needs its host name typed too.
+	realHostname := hostname
+	t.Cleanup(func() { hostname = realHostname })
+	hostname = func() (string, error) { return "other", nil }
+	if err := restoreWith([]string{"--identity", idFile, archive}, strings.NewReader("restore\nother\n"), &out, sys, time.Now()); err == nil || len(sys.calls) != 0 {
+		t.Fatal("restored another machine's backup without its name")
+	}
 	out.Reset()
-	if err := restoreWith([]string{"--identity", idFile, archive}, strings.NewReader("restore\n"), &out, sys, time.Now()); err != nil {
+	if err := restoreWith([]string{"--identity", idFile, archive}, strings.NewReader("restore\nh\n"), &out, sys, time.Now()); err != nil {
 		t.Fatal(err, out.String())
 	}
 	if !strings.Contains(out.String(), "nebula unlock") || !strings.Contains(out.String(), "kept the previous data") || len(sys.calls) != 2 {
