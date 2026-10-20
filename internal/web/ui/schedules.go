@@ -26,8 +26,9 @@ type Schedules interface {
 }
 
 type scheduleRow struct {
-	ID, Short, State, Actions, Hosts, Interval, Expires, CreatedBy, Options string
-	Pending, Active                                                         bool
+	ID, Short, State, Actions, Hosts, Interval, CreatedBy, Options string
+	Expires                                                        time.Time
+	Pending, Active                                                bool
 }
 
 type schedulesData struct {
@@ -63,7 +64,7 @@ func (h *Handler) handleSchedules(w http.ResponseWriter, r *http.Request) {
 			state = "expired"
 		}
 		row := scheduleRow{ID: x.ID, Short: x.ID[:8], State: state, Actions: strings.Join(x.Actions, ", "), Hosts: strings.Join(x.Hosts, ", "),
-			Interval: x.Interval.String(), Expires: x.ExpiresAt.UTC().Format("2006-01-02 15:04 MST"), CreatedBy: x.CreatedBy,
+			Interval: x.Interval.String(), Expires: x.ExpiresAt.UTC(), CreatedBy: x.CreatedBy,
 			Pending: state == "pending", Active: state == "active"}
 		if row.Pending && len(x.Options) > 0 && json.Valid(x.Options) {
 			row.Options = string(x.Options)
@@ -95,7 +96,7 @@ func (h *Handler) handleSchedules(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	data.Schedules = sd
-	h.render(w, data)
+	h.render(w, r, data)
 }
 
 func (h *Handler) scheduleError(w http.ResponseWriter, op string, err error) {

@@ -33,9 +33,10 @@ type DiscoveryStore interface {
 }
 
 type discoveryJobView struct {
-	ID, Created, Finished, Targets, Description, State, Error, CreatedBy string
-	Hosts                                                                int
-	Queued, Done                                                         bool
+	ID, Targets, Description, State, Error, CreatedBy string
+	Created, Finished                                 time.Time
+	Hosts                                             int
+	Queued, Done                                      bool
 }
 
 type discoveryRowView struct {
@@ -44,8 +45,9 @@ type discoveryRowView struct {
 }
 
 type discoveryScheduleView struct {
-	ID, Name, Description, Targets, When, Next, CreatedBy string
-	Enabled                                               bool
+	ID, Name, Description, Targets, When, CreatedBy string
+	Next                                            time.Time
+	Enabled                                         bool
 }
 
 type discoveryData struct {
@@ -62,10 +64,10 @@ type discoveryData struct {
 const timeFormat = "2006-01-02 15:04 MST"
 
 func viewJob(j discovery.JobRow) discoveryJobView {
-	v := discoveryJobView{ID: j.ID, Created: j.CreatedAt.UTC().Format(timeFormat), Targets: j.Targets, Description: j.Description, State: j.State,
+	v := discoveryJobView{ID: j.ID, Created: j.CreatedAt.UTC(), Targets: j.Targets, Description: j.Description, State: j.State,
 		Error: j.Error, CreatedBy: j.CreatedBy, Hosts: j.Hosts, Queued: j.State == discovery.StateQueued, Done: j.State == discovery.StateDone}
 	if !j.FinishedAt.IsZero() {
-		v.Finished = j.FinishedAt.UTC().Format(timeFormat)
+		v.Finished = j.FinishedAt.UTC()
 	}
 	if j.ScheduleID != "" {
 		v.CreatedBy += " (schedule)"
@@ -75,7 +77,7 @@ func viewJob(j discovery.JobRow) discoveryJobView {
 
 func (h *Handler) handleDiscoveryPage(w http.ResponseWriter, r *http.Request) {
 	if h.discovery == nil || h.network == nil {
-		h.render(w, pageData{Title: "Discovery", Active: "network", Content: "empty"})
+		h.render(w, r, pageData{Title: "Discovery", Active: "network", Content: "empty"})
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
@@ -107,18 +109,18 @@ func (h *Handler) handleDiscoveryPage(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, sc := range scheds {
 		v := discoveryScheduleView{ID: sc.ID, Name: sc.Name, Description: sc.Description, Targets: sc.Targets, CreatedBy: sc.CreatedBy, Enabled: sc.Enabled,
-			Next: sc.NextAt.UTC().Format(timeFormat)}
+			Next: sc.NextAt.UTC()}
 		switch {
 		case sc.Interval == 0 && sc.Enabled:
 			v.When = "once"
 		case sc.Interval == 0:
-			v.When, v.Next = "once (done)", ""
+			v.When, v.Next = "once (done)", time.Time{}
 		default:
 			v.When = "every " + strconv.Itoa(int(sc.Interval/time.Hour)) + " h"
 		}
 		d.Schedules = append(d.Schedules, v)
 	}
-	h.render(w, pageData{Title: "Discovery", Active: "network", Content: "discovery", Scripts: []string{"webauthn.js", "discovery.js"}, Discovery: d})
+	h.render(w, r, pageData{Title: "Discovery", Active: "network", Content: "discovery", Scripts: []string{"webauthn.js", "discovery.js"}, Discovery: d})
 }
 
 func (h *Handler) handleDiscoveryJob(w http.ResponseWriter, r *http.Request) {
@@ -168,7 +170,7 @@ func (h *Handler) handleDiscoveryJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	d.Counts = strings.Join(parts, ", ")
-	h.render(w, pageData{Title: "Discovery scan", Active: "network", Content: "discovery_job", Scripts: []string{"webauthn.js", "discovery.js"}, Discovery: d})
+	h.render(w, r, pageData{Title: "Discovery scan", Active: "network", Content: "discovery_job", Scripts: []string{"webauthn.js", "discovery.js"}, Discovery: d})
 }
 
 // answerDiscoveryError maps a store error.

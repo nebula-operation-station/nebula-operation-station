@@ -146,6 +146,9 @@ func TestOperationsPages(t *testing.T) {
 	if !strings.Contains(list, `href="/operations/`+opID+`"`) || !strings.Contains(list, "core.facts") {
 		t.Fatalf("list: %s", list)
 	}
+	if !strings.Contains(list, `<time datetime="`) {
+		t.Errorf("list should render timestamps as <time> elements: %s", list)
+	}
 	form := getBody(t, h, "/operations/new")
 	if !strings.Contains(form, `value="core.facts"`) || !strings.Contains(form, "&lt;b&gt;Web&lt;/b&gt;") ||
 		!strings.Contains(form, `name="host" value="new" disabled`) || !strings.Contains(form, "operations.js") {

@@ -2,8 +2,8 @@
 {{with .Discovery}}{{with .Job}}
 <h1>Discovery scan</h1>
 <section class="panel" aria-label="Scan">
-  <p>{{.Description}} of {{.Targets}} · queued {{.Created}} by {{.CreatedBy}} · <a href="/network/discovery">all scans</a></p>
-  <p>State: {{.State}}{{if .Finished}} ({{.Finished}}){{end}}{{if .Error}}: <span class="status--error">{{.Error}}</span>{{end}}</p>
+  <p>{{.Description}} of {{.Targets}} · queued {{timeTag .Created}} by {{.CreatedBy}} · <a href="/network/discovery">all scans</a></p>
+  <p>State: {{.State}}{{if not .Finished.IsZero}} ({{timeTag .Finished}}){{end}}{{if .Error}}: <span class="status--error">{{.Error}}</span>{{end}}</p>
   {{if .Queued}}
   <p class="hint">Waiting for nebula-discovery; reload this page to see the result.</p>
   <div class="actions"><button type="button" id="scan-cancel" class="button" data-id="{{.ID}}">Cancel</button></div>
@@ -17,6 +17,7 @@
     network segment; without one a match is only possible. Importing creates an asset (kind unknown) for a new host, or adds the
     address, MAC or hostname an existing asset lacks. Conflicts are never imported: fix the asset first.</p>
   {{if .Rows}}
+  <div class="table-wrap">
   <table class="inventory" id="staging" data-id="{{.Job.ID}}">
     <thead><tr><th></th><th>Address</th><th>Class</th><th>Why</th><th>MAC</th><th>Hostname</th><th>Open ports</th><th>OS</th></tr></thead>
     <tbody>
@@ -31,6 +32,7 @@
       {{end}}
     </tbody>
   </table>
+  </div>
   <div class="actions">
     <button type="button" id="import-selected" class="button">Import selected</button>
     <button type="button" id="import-all" class="button">Import all importable</button>

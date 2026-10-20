@@ -8,7 +8,7 @@
   {{range .Cards}}
   <div class="panel">
     <p class="status"><strong>{{.Title}}</strong> <span class="hint">{{.ActionID}}, {{.When}}</span></p>
-    <table class="inventory"><tbody>{{range .Fields}}<tr><th>{{.Label}}</th><td>{{.Value}}</td></tr>{{end}}</tbody></table>
+    <div class="table-wrap"><table class="inventory"><tbody>{{range .Fields}}<tr><th>{{.Label}}</th><td>{{.Value}}</td></tr>{{end}}</tbody></table></div>
     <div class="actions"><a class="button button--small" href="/operations/new?action={{.ActionID}}">Run {{.ActionID}}</a></div>
   </div>
   {{end}}

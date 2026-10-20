@@ -6,12 +6,14 @@
   {{if .Notes}}<p class="output">{{.Notes}}</p>{{end}}
   {{if .Pools}}
   <h2>Pools</h2>
+  <div class="table-wrap">
   <table class="inventory">
     <thead><tr><th>Pool</th><th>First</th><th>Last</th><th></th></tr></thead>
     <tbody>
       {{range .Pools}}<tr><td>{{.Name}}</td><td>{{.First}}</td><td>{{.Last}}</td><td><a href="?pool={{.Name}}">suggest from this pool</a></td></tr>{{end}}
     </tbody>
   </table>
+  </div>
   {{end}}
   <h2>Free address suggestion</h2>
   <p class="hint">A suggestion, never a certainty: these addresses are free in Nebula's records and discovery has not seen them in
@@ -29,12 +31,14 @@
     UNKNOWN).</p>
   {{end}}
   {{if .Claimed}}
+  <div class="table-wrap">
   <table class="inventory">
     <thead><tr><th>Address</th><th>Status</th><th>Why</th><th>Claimed by</th></tr></thead>
     <tbody>
       {{range .Claimed}}<tr><td>{{.Address}}</td><td class="ip--{{.Status}}">{{.Status}}</td><td>{{.Why}}</td><td>{{.Claims}}</td></tr>{{end}}
     </tbody>
   </table>
+  </div>
   {{end}}
   <h3>Reserve, exclude or clear an address</h3>
   <form id="entry-form" class="form" novalidate>

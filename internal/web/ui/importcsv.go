@@ -59,7 +59,7 @@ func (h *Handler) handleImportPage(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	h.render(w, pageData{Title: "Import hosts from CSV", Active: "inventory", Content: "inventory_import",
+	h.render(w, r, pageData{Title: "Import hosts from CSV", Active: "inventory", Content: "inventory_import",
 		Scripts: []string{"webauthn.js", "inventory-import.js"}})
 }
 

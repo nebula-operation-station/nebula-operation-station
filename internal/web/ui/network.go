@@ -88,7 +88,7 @@ type networkData struct {
 
 func (h *Handler) handleNetworkPage(w http.ResponseWriter, r *http.Request) {
 	if h.network == nil {
-		h.render(w, pageData{Title: "Network", Active: "network", Content: "empty"})
+		h.render(w, r, pageData{Title: "Network", Active: "network", Content: "empty"})
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
@@ -120,7 +120,7 @@ func (h *Handler) handleNetworkPage(w http.ResponseWriter, r *http.Request) {
 	for _, a := range assets {
 		data.Assets = append(data.Assets, viewAsset(a))
 	}
-	h.render(w, pageData{Title: "Network", Active: "network", Content: "network", Scripts: []string{"webauthn.js", "network.js"}, Network: data})
+	h.render(w, r, pageData{Title: "Network", Active: "network", Content: "network", Scripts: []string{"webauthn.js", "network.js"}, Network: data})
 }
 
 func (h *Handler) handleNetworkDetail(w http.ResponseWriter, r *http.Request) {
@@ -165,7 +165,7 @@ func (h *Handler) handleNetworkDetail(w http.ResponseWriter, r *http.Request) {
 			d.Suggest = append(d.Suggest, a.String())
 		}
 	}
-	h.render(w, pageData{Title: "Network " + n.Name, Active: "network", Content: "network_detail", Scripts: []string{"webauthn.js", "network.js"},
+	h.render(w, r, pageData{Title: "Network " + n.Name, Active: "network", Content: "network_detail", Scripts: []string{"webauthn.js", "network.js"},
 		Network: &networkData{Network: d, NetDraft: networkDraft(n)}})
 }
 
@@ -187,7 +187,7 @@ func (h *Handler) handleAssetDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d := &assetDetail{assetRow: viewAsset(a), Notes: a.Notes, CanEnroll: h.inventory != nil && a.HostID == ""}
-	h.render(w, pageData{Title: "Asset " + a.Name, Active: "network", Content: "asset", Scripts: []string{"webauthn.js", "network.js"},
+	h.render(w, r, pageData{Title: "Asset " + a.Name, Active: "network", Content: "asset", Scripts: []string{"webauthn.js", "network.js"},
 		Network: &networkData{Asset: d, Kinds: ipam.Kinds, AssetDraft: assetDraft(a)}})
 }
 

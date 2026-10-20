@@ -77,12 +77,12 @@ func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 	d := &searchData{Query: q}
 	data := pageData{Title: "Search", Content: "search", Search: d}
 	if q == "" {
-		h.render(w, data)
+		h.render(w, r, data)
 		return
 	}
 	if len(q) > maxQuery || !utf8.ValidString(q) {
 		d.TooLong = true
-		h.render(w, data)
+		h.render(w, r, data)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), searchTimeout)
@@ -240,5 +240,5 @@ func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	h.render(w, data)
+	h.render(w, r, data)
 }

@@ -50,15 +50,17 @@
 <section class="panel" aria-label="Scans">
   <h2>Scans</h2>
   {{if .Jobs}}
+  <div class="table-wrap">
   <table class="inventory">
     <thead><tr><th>Queued</th><th>Targets</th><th>Scan</th><th>State</th><th>Hosts</th><th>By</th></tr></thead>
     <tbody>
       {{range .Jobs}}
-      <tr><td><a href="/network/discovery/{{.ID}}">{{.Created}}</a></td><td>{{.Targets}}</td><td>{{.Description}}</td>
+      <tr><td><a href="/network/discovery/{{.ID}}">{{timeTag .Created}}</a></td><td>{{.Targets}}</td><td>{{.Description}}</td>
         <td>{{.State}}{{if .Error}}: {{.Error}}{{end}}</td><td>{{if .Done}}{{.Hosts}}{{end}}</td><td>{{.CreatedBy}}</td></tr>
       {{end}}
     </tbody>
   </table>
+  </div>
   {{else}}
   <p>No scans yet.</p>
   {{end}}
@@ -67,15 +69,17 @@
   <h2>Schedules</h2>
   <p class="hint">There is no default schedule: scans run only when you queue or schedule them.</p>
   {{if .Schedules}}
+  <div class="table-wrap">
   <table class="inventory">
     <thead><tr><th>Name</th><th>Targets</th><th>Scan</th><th>When</th><th>Next run</th><th></th></tr></thead>
     <tbody>
       {{range .Schedules}}
-      <tr><td>{{.Name}}</td><td>{{.Targets}}</td><td>{{.Description}}</td><td>{{.When}}</td><td>{{.Next}}</td>
+      <tr><td>{{.Name}}</td><td>{{.Targets}}</td><td>{{.Description}}</td><td>{{.When}}</td><td>{{timeTag .Next}}</td>
         <td><button type="button" class="button button--small sched-delete" data-id="{{.ID}}">Delete</button></td></tr>
       {{end}}
     </tbody>
   </table>
+  </div>
   {{else}}
   <p>No schedules.</p>
   {{end}}

@@ -39,8 +39,9 @@ type Runbooks interface {
 }
 
 type runbookRow struct {
-	Slug, Title, Risk, Scanner, Created string
-	Version                             int
+	Slug, Title, Risk, Scanner string
+	Created                    time.Time
+	Version                    int
 }
 
 type runbookParamView struct {
@@ -48,8 +49,9 @@ type runbookParamView struct {
 }
 
 type runbookVersionRow struct {
-	Version                   int
-	Short, CreatedBy, Created string
+	Version          int
+	Short, CreatedBy string
+	Created          time.Time
 }
 
 type runbookDetail struct {
@@ -80,7 +82,7 @@ type runbooksData struct {
 
 func (h *Handler) handleRunbooks(w http.ResponseWriter, r *http.Request) {
 	if h.runbooks == nil {
-		h.render(w, pageData{Title: "Runbooks / Modules", Active: "runbooks", Content: "empty"})
+		h.render(w, r, pageData{Title: "Runbooks / Modules", Active: "runbooks", Content: "empty"})
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
@@ -93,9 +95,9 @@ func (h *Handler) handleRunbooks(w http.ResponseWriter, r *http.Request) {
 	for _, v := range list {
 		f, _ := scanner.Scan(v.Artifact)
 		data.Runbooks.Rows = append(data.Runbooks.Rows, runbookRow{Slug: v.Slug, Title: v.Title, Risk: v.Risk, Version: v.Version,
-			Scanner: strings.Join(scanner.Categories(f), ", "), Created: v.CreatedAt.UTC().Format("2006-01-02 15:04 MST")})
+			Scanner: strings.Join(scanner.Categories(f), ", "), Created: v.CreatedAt.UTC()})
 	}
-	h.render(w, data)
+	h.render(w, r, data)
 }
 
 func (h *Handler) handleRunbook(w http.ResponseWriter, r *http.Request) {
@@ -156,10 +158,10 @@ func (h *Handler) handleRunbook(w http.ResponseWriter, r *http.Request) {
 	if all, err := h.runbooks.Versions(ctx, slug); err == nil {
 		for _, x := range all {
 			d.Versions = append(d.Versions, runbookVersionRow{Version: x.Version, Short: x.ArtifactSHA256[:16], CreatedBy: x.CreatedBy,
-				Created: x.CreatedAt.UTC().Format("2006-01-02 15:04 MST")})
+				Created: x.CreatedAt.UTC()})
 		}
 	}
-	h.render(w, pageData{Title: "Runbook " + v.Slug, Active: "runbooks", Content: "runbook", Scripts: []string{"webauthn.js", "runbooks.js"},
+	h.render(w, r, pageData{Title: "Runbook " + v.Slug, Active: "runbooks", Content: "runbook", Scripts: []string{"webauthn.js", "runbooks.js"},
 		Runbooks: &runbooksData{Detail: d}})
 }
 
@@ -225,7 +227,7 @@ func (h *Handler) handleRunbookEdit(w http.ResponseWriter, r *http.Request) {
 	if edit.Existing {
 		title = "Edit runbook " + d.Slug
 	}
-	h.render(w, pageData{Title: title, Active: "runbooks", Content: "runbook_edit", Scripts: []string{"webauthn.js", "runbooks.js"},
+	h.render(w, r, pageData{Title: title, Active: "runbooks", Content: "runbook_edit", Scripts: []string{"webauthn.js", "runbooks.js"},
 		Runbooks: &runbooksData{Edit: edit}})
 }
 

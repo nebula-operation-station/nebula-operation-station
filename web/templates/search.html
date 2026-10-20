@@ -12,6 +12,7 @@
 {{if .Query}}{{if not .TooLong}}
 <section class="panel" aria-label="Results">
   {{if .Results}}
+  <div class="table-wrap">
   <table class="inventory">
     <thead><tr><th>Kind</th><th>Match</th><th>Details</th><th>Actions</th></tr></thead>
     <tbody>
@@ -21,6 +22,7 @@
       {{end}}
     </tbody>
   </table>
+  </div>
   {{if .Truncated}}<p class="hint">Only the first 20 matches are shown for: {{range $i, $k := .Truncated}}{{if $i}}, {{end}}{{$k}}{{end}}. Search more precisely.</p>{{end}}
   <p class="hint">Quick actions only open pages: an operation is still planned, reviewed and approved as usual.</p>
   {{else}}

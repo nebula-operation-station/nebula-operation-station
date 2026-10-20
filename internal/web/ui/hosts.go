@@ -84,7 +84,7 @@ func (h *Handler) handleHost(w http.ResponseWriter, r *http.Request) {
 			data.Host.Tabs = append(data.Host.Tabs, tab)
 		}
 	}
-	h.render(w, data)
+	h.render(w, r, data)
 }
 
 // resultObject returns the "result" object of a runbook-v1 result
