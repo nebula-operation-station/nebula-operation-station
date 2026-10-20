@@ -98,7 +98,7 @@ func scheduleChallengeFor(digest string, expiry time.Time) ([]byte, error) {
 func (a *Authority) lowEverywhere(act schedgrant.Action, targets []canonical.Target) error {
 	r := canonical.Request{ActionID: act.ActionID, ModuleVersion: act.ModuleVersion, ArtifactSHA256: act.ArtifactSHA256}
 	for _, t := range targets {
-		floor, why, err := a.risk.MinimumRisk(r, []canonical.Target{t})
+		floor, why, err := a.floor(r, []canonical.Target{t})
 		if err != nil || floor.Rank() == 0 {
 			return a.storageFailure("", fmt.Errorf("risk policy: %v (floor %q)", err, floor))
 		}
@@ -270,6 +270,7 @@ func (a *Authority) AuthorizeScheduled(grantID, executionID string, run Run) (Gr
 		return Grant{}, fail(CodeArtifactMismatch, "artifact size %d outside 1..%d", len(run.Artifact), MaxArtifactSize)
 	}
 	artSum := sha256.Sum256(run.Artifact)
+	a.observe(artSum, run.Artifact)
 	params, paramHash, perr := canonical.CanonicalParameters(run.ParametersJSON)
 	now := a.now()
 	deny := func(code Code, detail string) error {
