@@ -121,6 +121,12 @@ Nebula needs no inbound port other than the one of your reverse proxy.
 
 ## 3. Installation
 
+**For a lab, the shortest path** is
+[`deploy/quickstart/`](../../deploy/quickstart/README.md): one script on the
+Nebula machine (packages, Go, build, `install.sh`, backup key, SSH key,
+Caddy with an internal CA, unlock, first code) and one on each managed
+host. The rest of this section describes the steps it automates.
+
 There are three ways to install. All three create the same separation of
 users and data.
 
