@@ -379,8 +379,10 @@ start.
 
 A file with notification secrets must not be readable or writable by
 others; the server refuses to start otherwise (the installer's 0640 is
-fine). Each key can also be given as a flag of the same name, which
-overrides the file, for example
+fine). The keys `listen`, `allow_remote_listen`, `public_origin`,
+`data_dir`, `executor_socket` and `executor_user` can also be given as
+flags of the same name, which override the file (the other keys have no
+flag), for example
 `nebula-server -config /etc/nebula/server.json -listen 127.0.0.1:8081`.
 Other `nebula-server` flags: `-version`, `-notify-test`,
 `-export-actions DIR` and `-api-token NAME:SCOPE[,SCOPE]` (sections 8.1
@@ -1045,7 +1047,7 @@ built-in actions again if their versions changed (section 8.1).
 | `secret_unavailable: no vault secret …` | `nebula secret list`; set the secret or choose another one. |
 | A schedule is refused | Only actions the executor rates LOW on every host: trust the built-in as LOW and record the host's criticality (section 9.4). |
 | Discovery shows as not installed | `discovery_dir` missing or wrong, or the spool directories are absent; run `install.sh` again. |
-| Discovery scans fail with `nmap` not found | `sudo apt install nmap`. |
+| Discovery scans fail: `nmap is not installed (install the nmap package on the Nebula machine)` | `sudo apt install nmap`. |
 | Scan results never arrive | The spool directories must be mode 2750 (`jobs/` `nebula-server:nebula-discovery`, `results/` the reverse); `install.sh` sets that. Check `systemctl status nebula-discovery.path`. |
 | `install.sh`: no pre-upgrade backup was made | Add a recipient to `/etc/nebula/backup-recipients` and run it through `sudo` from an admin account, or use `NEBULA_SKIP_BACKUP=1` knowingly. |
 | `nebula backup`: `run this with sudo` | Run `sudo nebula backup` from your admin login (not from a root shell). |
@@ -1121,7 +1123,7 @@ Run as an admin user on the Nebula machine (`nebula` without a command prints th
 | `artifact trust --action ID --version X.Y.Z --risk LEVEL [--label TEXT] FILE`, `artifact untrust …`, `artifact list` | Trusted scripts |
 | `signer add --name NAME FILE \| list \| remove SHA256:…`, `module confirm-signer MODULE SHA256:…` | Module signers |
 | `module pack [--archive OUT.tar.gz] DIR` | Build a module (author side; no executor needed) |
-| `backup [--out FILE] [--no-encrypt]`, `restore [--identity FILE] ARCHIVE` | With `sudo`; section 12 |
+| `backup [--out FILE] [--full] [--no-encrypt] [--pre-upgrade]`, `restore [--identity FILE] ARCHIVE` | With `sudo`; section 12 (`--full` only labels the archive, every backup is full; `--pre-upgrade` asks nothing and exits 3 when it makes no backup) |
 | `events [--after N] [--limit N] [--json] \| key \| verify` | Signed event chain |
 | `host enroll-script \| probe \| pin \| unpin \| keys \| test \| criticality \| clear \| list` | Enrollment, pins, criticality |
 | `webauthn code \| list \| remove ID` | Security keys |
