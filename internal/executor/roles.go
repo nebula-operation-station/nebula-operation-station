@@ -81,5 +81,6 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_RevokeScheduleGrant_FullMethodName:       {server, admin},
 		pb.ExecutorService_RunScheduled_FullMethodName:              {server},
 		pb.ExecutorService_ListEvents_FullMethodName:                {server, admin},
+		pb.ExecutorService_BackupExecutor_FullMethodName:            {admin},
 	}
 }

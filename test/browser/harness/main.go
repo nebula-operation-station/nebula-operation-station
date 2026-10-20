@@ -98,6 +98,9 @@ func (d direct) Lock(ctx context.Context, in *pb.LockRequest, _ ...grpc.CallOpti
 	return d.s.Lock(ctx, in)
 }
 
+func (d direct) BackupExecutor(ctx context.Context, in *pb.BackupExecutorRequest, _ ...grpc.CallOption) (*pb.BackupExecutorResponse, error) {
+	return d.s.BackupExecutor(ctx, in)
+}
 func (d direct) ListEvents(ctx context.Context, in *pb.ListEventsRequest, _ ...grpc.CallOption) (*pb.ListEventsResponse, error) {
 	return d.s.ListEvents(ctx, in)
 }
@@ -222,6 +225,9 @@ func main() {
 	must(os.MkdirAll(kd, 0o700))
 	svc := executor.NewService(a, keyring.New(kd), db, reg, log)
 	svc.SetEventKey(chain.PublicKey())
+	_, _, err = db.RegisterEventKey(chain.PublicKey())
+	must(err)
+	svc.SetBackupDirs(exDir, kd)
 	svc.SetJobConfig(hostrun.JobConfig{JobRoot: filepath.Join(dir, "remote", "jobs"), RunRoot: filepath.Join(dir, "remote", "run")})
 
 	// An enrolled test host: an in-process SSH server that runs commands

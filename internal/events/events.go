@@ -171,15 +171,56 @@ var (
 	ErrBrokenChain  = errors.New("events: the chain is broken (an event is missing, reordered or changed)")
 )
 
-// Verify checks consecutive records: each hash, each signature, each link
-// to the record before, and that the body carries the record's sequence
-// number. prev is the hash before the first record (nil: check the first
-// record's own link only, or zeros when it is event 1).
+// Key is an event key and the first event it signed. A chain changes its
+// key only when the executor starts without its key file (a restore onto
+// a new machine); every event is signed by the key whose range holds it.
+type Key struct {
+	FirstSeq  int64
+	PublicKey []byte
+}
+
+// keyFor returns the key of the range that holds seq (keys sorted by
+// FirstSeq), or nil.
+func keyFor(keys []Key, seq int64) ed25519.PublicKey {
+	var k ed25519.PublicKey
+	for _, x := range keys {
+		if x.FirstSeq <= seq {
+			k = x.PublicKey
+		}
+	}
+	return k
+}
+
+// KeysOr returns keys, or current as the only key from event 1 when keys
+// is empty (an executor from before the key history).
+func KeysOr(keys []Key, current ed25519.PublicKey) []Key {
+	if len(keys) == 0 {
+		return []Key{{FirstSeq: 1, PublicKey: current}}
+	}
+	return keys
+}
+
+// Verify checks records signed by the single key pub (see VerifyKeys).
 func Verify(pub ed25519.PublicKey, records []Record, prev []byte) error {
+	return VerifyKeys([]Key{{FirstSeq: 1, PublicKey: pub}}, records, prev)
+}
+
+// VerifyKeys checks consecutive records: each hash, each signature (by the
+// key whose range holds the record), each link to the record before, and
+// that the body carries the record's sequence number. prev is the hash
+// before the first record (nil: check the first record's own link only, or
+// zeros when it is event 1). keys must be sorted by FirstSeq.
+func VerifyKeys(keys []Key, records []Record, prev []byte) error {
+	for i := 1; i < len(keys); i++ {
+		if keys[i].FirstSeq <= keys[i-1].FirstSeq {
+			return errors.New("events: key ranges are not in order")
+		}
+	}
 	for i, r := range records {
 		if !bytes.Equal(hashOf(r.PrevHash, r.Body), r.Hash) {
 			return fmt.Errorf("%w (event %d)", ErrBadHash, r.Seq)
 		}
+		pub := keyFor(keys, r.Seq)
 		if len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, r.Hash, r.Sig) {
 			return fmt.Errorf("%w (event %d)", ErrBadSignature, r.Seq)
 		}

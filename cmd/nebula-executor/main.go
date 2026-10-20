@@ -109,9 +109,19 @@ func run() error {
 		return err
 	}
 	chain := events.NewChain(db, eventKey)
+	// The key is registered before the handler goes live, so no event is
+	// ever signed by a key the chain does not know yet (review m102, F4).
+	added, previous, err := db.RegisterEventKey(chain.PublicKey())
+	if err != nil {
+		return err
+	}
 	log = slog.New(events.NewHandler(log.Handler(), chain))
-	if created {
-		log.Info("audit", "kind", "event_key_created", "fingerprint", events.Fingerprint(chain.PublicKey()))
+	if created || added {
+		attrs := []any{"kind", "event_key_created", "fingerprint", events.Fingerprint(chain.PublicKey())}
+		if previous != nil {
+			attrs = append(attrs, "previous", events.Fingerprint(previous))
+		}
+		log.Info("audit", attrs...)
 	}
 
 	keysDir := filepath.Join(*dataDir, "keys")
@@ -169,6 +179,7 @@ func run() error {
 	keys := keyring.New(keysDir)
 	svc := executor.NewService(auth, keys, db, reg, log)
 	svc.SetEventKey(chain.PublicKey())
+	svc.SetBackupDirs(*dataDir, keysDir)
 
 	lis, err := peercred.Listen(peercred.ListenOptions{Path: *socketPath, Mode: 0o660, Group: *socketGroup})
 	if err != nil {

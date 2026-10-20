@@ -458,12 +458,26 @@ lines); set `"audit_hash_chain": true` in `server.json` to chain those too.
 | Host `UNREACHABLE` | Check the endpoints; `nebula host test HOST ENDPOINT` |
 | Upgrade Nebula | Run `install.sh` from the new tarball, then `nebula unlock`; re-trust the actions if their version changed |
 
-**Backups.** `/var/lib/nebula/executor` holds the encrypted SSH keys,
-pins, credentials and the vault; `/var/lib/nebula/server` the inventory
-and history. The executor keeps an exclusive lock on its database: back it
-up with the executor stopped (`systemctl stop nebula-executor`), and keep
-the key passphrase in your password manager. Restore before Release 0.9
-is manual.
+**Backups.** Once, on a machine you keep safe (not the Nebula machine):
+`age-keygen -o nebula-backup.key`, and put the printed public key
+(`age1…`) into `/etc/nebula/backup-recipients` on the Nebula machine.
+Then `sudo nebula backup` writes an encrypted archive to
+`~/nebula-backups/` while everything keeps running: the inventory,
+history and configuration, the executor's database and the SSH key files
+(still protected by their passphrase). The passphrase, decrypted keys and
+secrets are never in a backup, so keep the passphrase in your password
+manager. Copy the archives off the machine, for example with
+`restic backup ~/nebula-backups`. `install.sh` makes one before every
+upgrade. To restore (on the same or a new machine, after `install.sh`):
+`sudo nebula restore --identity nebula-backup.key FILE`, type `restore`,
+then `nebula unlock`. Your previous data is kept next to it
+(`*.pre-restore-<time>`), and the backup's `server.json` lands in
+`/etc/nebula/from-backup-<time>/` for you to compare; it is not applied.
+Restoring a backup made on another machine asks you to type that
+machine's name as well. An archive written with `--no-encrypt` has no
+integrity protection (its checksums live inside it): store and move it
+only together with a checksum you keep elsewhere, or use the encrypted
+default.
 
 ## Limits you should know
 

@@ -249,3 +249,12 @@ func parseMigrationName(name string) (migration, bool) {
 	}
 	return migration{version: v, name: name}, true
 }
+
+// LatestVersion is the newest schema version this binary knows.
+func LatestVersion() (int, error) {
+	m, err := loadMigrations()
+	if err != nil || len(m) == 0 {
+		return 0, err
+	}
+	return m[len(m)-1].version, nil
+}

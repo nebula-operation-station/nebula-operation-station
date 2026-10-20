@@ -49,12 +49,15 @@ type historyData struct {
 	EventsError       string
 	Fingerprint       string
 	EventsHead        int64
-	Events            []historyRow
-	Audit             []historyRow
-	AuditUnavailable  bool
-	Chain             string
-	Kind              string
-	Older             int64
+	// KeyChanges counts how often the event key changed (restores onto a
+	// new machine).
+	KeyChanges       int
+	Events           []historyRow
+	Audit            []historyRow
+	AuditUnavailable bool
+	Chain            string
+	Kind             string
+	Older            int64
 }
 
 func attrsText(m map[string]string, skip ...string) string {
@@ -103,7 +106,14 @@ func (h *Handler) handleHistory(w http.ResponseWriter, r *http.Request) {
 			for _, e := range resp.GetEvents() {
 				recs = append(recs, events.Record{Seq: e.GetSeq(), Body: e.GetBody(), PrevHash: e.GetPrevHash(), Hash: e.GetHash(), Sig: e.GetSignature()})
 			}
-			if err := events.Verify(pub, recs, nil); err != nil {
+			var keys []events.Key
+			for _, k := range resp.GetKeys() {
+				keys = append(keys, events.Key{FirstSeq: k.GetFirstSeq(), PublicKey: k.GetPublicKey()})
+			}
+			if len(keys) > 1 {
+				d.KeyChanges = len(keys) - 1
+			}
+			if err := events.VerifyKeys(events.KeysOr(keys, pub), recs, nil); err != nil {
 				d.EventsError = err.Error()
 			} else {
 				d.EventsVerified = true

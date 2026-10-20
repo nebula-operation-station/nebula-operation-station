@@ -40,6 +40,11 @@ func eventsCmd(ctx context.Context, c pb.ExecutorServiceClient, args []string, w
 		fmt.Fprintf(w, "event key   %s\n", events.Fingerprint(pub))
 		fmt.Fprintf(w, "public key  %s\n", base64.StdEncoding.EncodeToString(pub))
 		fmt.Fprintf(w, "events      %d\n", r.GetHeadSeq())
+		if ks := chainKeys(r); len(ks) > 1 {
+			for _, k := range ks {
+				fmt.Fprintf(w, "signed from event %d by %s\n", k.FirstSeq, events.Fingerprint(k.PublicKey))
+			}
+		}
 		return nil
 	case "verify":
 		return eventsVerify(ctx, c, w)
@@ -48,6 +53,15 @@ func eventsCmd(ctx context.Context, c pb.ExecutorServiceClient, args []string, w
 	default:
 		return fmt.Errorf("unknown events command %q (list, key, verify)", sub)
 	}
+}
+
+// chainKeys returns the keys of a response.
+func chainKeys(r *pb.ListEventsResponse) []events.Key {
+	var ks []events.Key
+	for _, k := range r.GetKeys() {
+		ks = append(ks, events.Key{FirstSeq: k.GetFirstSeq(), PublicKey: k.GetPublicKey()})
+	}
+	return events.KeysOr(ks, ed25519.PublicKey(r.GetPublicKey()))
 }
 
 func toRecords(es []*pb.Event) []events.Record {
@@ -63,13 +77,14 @@ func eventsVerify(ctx context.Context, c pb.ExecutorServiceClient, w io.Writer) 
 	var after int64
 	var prev []byte
 	var pub ed25519.PublicKey
+	var keys []events.Key
 	for {
 		r, err := c.ListEvents(ctx, &pb.ListEventsRequest{AfterSeq: after, Limit: eventsPage})
 		if err != nil {
 			return err
 		}
 		if pub == nil {
-			pub = ed25519.PublicKey(r.GetPublicKey())
+			pub, keys = ed25519.PublicKey(r.GetPublicKey()), chainKeys(r)
 		} else if !pub.Equal(ed25519.PublicKey(r.GetPublicKey())) {
 			return errors.New("the event key changed while reading")
 		}
@@ -80,7 +95,7 @@ func eventsVerify(ctx context.Context, c pb.ExecutorServiceClient, w io.Writer) 
 		if after == 0 && recs[0].Seq != 1 {
 			return fmt.Errorf("the chain does not start at event 1 (first is %d)", recs[0].Seq)
 		}
-		if err := events.Verify(pub, recs, prev); err != nil {
+		if err := events.VerifyKeys(keys, recs, prev); err != nil {
 			return err
 		}
 		if recs[0].Seq != after+1 {
@@ -92,6 +107,11 @@ func eventsVerify(ctx context.Context, c pb.ExecutorServiceClient, w io.Writer) 
 		}
 	}
 	fmt.Fprintf(w, "event key   %s\n", events.Fingerprint(pub))
+	if len(keys) > 1 {
+		for _, k := range keys {
+			fmt.Fprintf(w, "signed from event %d by %s\n", k.FirstSeq, events.Fingerprint(k.PublicKey))
+		}
+	}
 	fmt.Fprintf(w, "verified    %d events, signatures and chain intact\n", after)
 	if prev != nil {
 		fmt.Fprintf(w, "head        %s\n", hex.EncodeToString(prev))
@@ -122,7 +142,7 @@ func eventsList(ctx context.Context, c pb.ExecutorServiceClient, args []string, 
 	}
 	pub := ed25519.PublicKey(r.GetPublicKey())
 	recs := toRecords(r.GetEvents())
-	if err := events.Verify(pub, recs, nil); err != nil {
+	if err := events.VerifyKeys(chainKeys(r), recs, nil); err != nil {
 		return err
 	}
 	var bad error

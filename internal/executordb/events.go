@@ -72,3 +72,62 @@ func (db *DB) EventAt(seq int64) (events.Record, error) {
 	}
 	return r, nil
 }
+
+// EventKeys returns the keys that signed the chain, by first sequence
+// number.
+func (db *DB) EventKeys() ([]events.Key, error) {
+	rows, err := db.sql.Query(`SELECT first_seq, public_key FROM event_keys ORDER BY first_seq`)
+	if err != nil {
+		return nil, fmt.Errorf("executordb: list event keys: %w", err)
+	}
+	defer rows.Close()
+	var out []events.Key
+	for rows.Next() {
+		var k events.Key
+		if err := rows.Scan(&k.FirstSeq, &k.PublicKey); err != nil {
+			return nil, fmt.Errorf("executordb: list event keys: %w", err)
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// RegisterEventKey records pub as the key from the next event on, unless
+// it is recorded already. It returns whether it was added and the key it
+// replaces (nil for the first key). The first key of a chain that already
+// has events (an install from before the key history) starts at event 1.
+func (db *DB) RegisterEventKey(pub []byte) (bool, []byte, error) {
+	if len(pub) != 32 {
+		return false, nil, fmt.Errorf("executordb: %w: event key", ErrInvalid)
+	}
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return false, nil, fmt.Errorf("executordb: register event key: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var n int
+	if err := tx.QueryRow(`SELECT count(*) FROM event_keys WHERE public_key = ?`, pub).Scan(&n); err != nil {
+		return false, nil, fmt.Errorf("executordb: register event key: %w", err)
+	}
+	if n > 0 {
+		return false, nil, nil
+	}
+	var prev []byte
+	err = tx.QueryRow(`SELECT public_key FROM event_keys ORDER BY first_seq DESC LIMIT 1`).Scan(&prev)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, nil, fmt.Errorf("executordb: register event key: %w", err)
+	}
+	first := int64(1)
+	if prev != nil {
+		if err := tx.QueryRow(`SELECT coalesce(max(seq), 0) + 1 FROM events`).Scan(&first); err != nil {
+			return false, nil, fmt.Errorf("executordb: register event key: %w", err)
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO event_keys (first_seq, public_key, added_at) VALUES (?, ?, ?)`, first, pub, db.now().Unix()); err != nil {
+		return false, nil, fmt.Errorf("executordb: register event key: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, nil, fmt.Errorf("executordb: register event key: %w", err)
+	}
+	return true, prev, nil
+}

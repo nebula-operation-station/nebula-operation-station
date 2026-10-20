@@ -14,7 +14,7 @@
   <p class="status status--error">Executor unavailable</p>
   {{else if .Fingerprint}}
   <p>Event key <code>{{.Fingerprint}}</code> · {{.EventsHead}} events ·
-    {{if .EventsVerified}}the newest page verified{{else}}<span class="status--error">verification failed: {{.EventsError}}</span>{{end}}</p>
+    {{if .KeyChanges}}the key changed {{.KeyChanges}} time(s) (a restore onto a new machine; <code>nebula events key</code> lists them) · {{end}}{{if .EventsVerified}}the newest page verified{{else}}<span class="status--error">verification failed: {{.EventsError}}</span>{{end}}</p>
   {{if .Events}}
   <table class="inventory">
     <thead><tr><th>#</th><th>Time (UTC)</th><th>Event</th><th>Details</th></tr></thead>

@@ -218,6 +218,10 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 	h.verifier = verifier
 	svc := executor.NewService(auth, keyring.New(keysDir), db, reg, log)
 	svc.SetEventKey(chain.PublicKey())
+	if _, _, err := db.RegisterEventKey(chain.PublicKey()); err != nil {
+		t.Fatal(err)
+	}
+	svc.SetBackupDirs(o.dataDir, keysDir)
 	svc.SetVaultParams(vault.Params{Time: 1, MemoryKiB: 64, Threads: 1})
 	// Durable jobs on the test hosts (local processes) go below the data
 	// directory, without sudo and systemd.

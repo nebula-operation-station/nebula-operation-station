@@ -216,6 +216,19 @@ install -d -m 0755 -o root -g root "${var_lib}/discovery"
 install -d -m 0750 -o nebula-server -g nebula-discovery "${var_lib}/discovery/jobs"
 install -d -m 0750 -o nebula-discovery -g nebula-server "${var_lib}/discovery/results"
 
+# --- Pre-upgrade backup (spec 15) --------------------------------------------
+# Before an existing install is replaced, the new CLI makes a backup (as
+# the admin who ran sudo, to ~/nebula-backups). It skips itself without
+# backup recipients, without sudo from an admin, or with an executor older
+# than backups; any other failure stops the upgrade (set
+# NEBULA_SKIP_BACKUP=1 to go on without one).
+if [[ -x "${bin_dir}/nebula-executor" && "${NEBULA_SKIP_BACKUP:-0}" != "1" ]]; then
+  if ! "${tarball_root}/nebula" backup --pre-upgrade; then
+    echo "install.sh: the pre-upgrade backup failed; fix it or run again with NEBULA_SKIP_BACKUP=1" >&2
+    exit 1
+  fi
+fi
+
 # --- Binaries (replaced on every run; detect real changes) ------------------
 bin_changed=0
 for bin in nebula nebula-server nebula-executor nebula-discovery; do
