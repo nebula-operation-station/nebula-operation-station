@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -108,8 +109,20 @@ func attrKey(k string, taken map[string]string) string {
 	if _, dup := taken[c]; !dup && c != "_truncated" {
 		return c
 	}
-	sum := sha256.Sum256([]byte(k))
-	return clip(k, MaxKind-9) + "#" + hex.EncodeToString(sum[:4])
+	// A crafted key can equal another key's suffixed form: try further
+	// suffixes until one is free (review fx2, note 3). The first suffix is
+	// the hash of the key alone, so existing bodies keep their keys.
+	for i := 0; ; i++ {
+		in := k
+		if i > 0 {
+			in = k + "#" + strconv.Itoa(i)
+		}
+		sum := sha256.Sum256([]byte(in))
+		cand := clip(k, MaxKind-9) + "#" + hex.EncodeToString(sum[:4])
+		if _, dup := taken[cand]; !dup {
+			return cand
+		}
+	}
 }
 
 // Append adds one event and returns its record.
@@ -367,7 +380,6 @@ func flatten(prefix string, a slog.Attr, out map[string]string) {
 // executor.db cannot block it for long: the database is opened in
 // exclusive locking mode (no other process holds a lock on it) and with a
 // busy timeout that bounds every wait (review m101, F3).
-// Handle implements slog.Handler.
 func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	if r.Message == "audit" && h.chain != nil {
 		attrs := map[string]string{"level": r.Level.String()}

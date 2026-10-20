@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -74,8 +75,20 @@ func attrKey(k string, taken map[string]string) string {
 	if _, dup := taken[c]; !dup && c != "_truncated" {
 		return c
 	}
-	sum := sha256.Sum256([]byte(k))
-	return clip(k, MaxKind-9) + "#" + hex.EncodeToString(sum[:4])
+	// A crafted key can equal another key's suffixed form: try further
+	// suffixes until one is free (review fx2, note 3). The first suffix is
+	// the hash of the key alone, so existing bodies keep their keys.
+	for i := 0; ; i++ {
+		in := k
+		if i > 0 {
+			in = k + "#" + strconv.Itoa(i)
+		}
+		sum := sha256.Sum256([]byte(in))
+		cand := clip(k, MaxKind-9) + "#" + hex.EncodeToString(sum[:4])
+		if _, dup := taken[cand]; !dup {
+			return cand
+		}
+	}
 }
 
 // Append stores one line.

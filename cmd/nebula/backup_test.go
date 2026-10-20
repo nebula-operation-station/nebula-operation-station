@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,6 +94,29 @@ func TestBackupAndRestoreFiles(t *testing.T) {
 		t.Fatal(err, out.String())
 	}
 	if !strings.Contains(out.String(), "nebula unlock") || !strings.Contains(out.String(), "kept the previous data") || len(sys.calls) != 2 {
+		t.Fatal(out.String(), sys.calls)
+	}
+
+	// A backup that names no host is foreign too, even when this machine's
+	// name is unknown as well: only the word "unknown" confirms it (review
+	// fx3, note 1).
+	m.Host = ""
+	unnamed := filepath.Join(t.TempDir(), "u.tar.gz.age")
+	if _, _, err := writeArchiveFile(unnamed, m, files, []age.Recipient{id.Recipient()}); err != nil {
+		t.Fatal(err)
+	}
+	hostname = func() (string, error) { return "", errors.New("no hostname") }
+	for _, second := range []string{"", "h", "restore"} {
+		if err := restoreWith([]string{"--identity", idFile, unnamed}, strings.NewReader("restore\n"+second+"\n"), &out, sys, time.Now()); err == nil || len(sys.calls) != 2 {
+			t.Fatalf("an unnamed backup was restored with %q", second)
+		}
+	}
+	out.Reset()
+	// A later restore, so its data moves aside under its own name.
+	if err := restoreWith([]string{"--identity", idFile, unnamed}, strings.NewReader("restore\nunknown\n"), &out, sys, time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err, out.String())
+	}
+	if !strings.Contains(out.String(), "an unknown machine") || len(sys.calls) != 4 {
 		t.Fatal(out.String(), sys.calls)
 	}
 }

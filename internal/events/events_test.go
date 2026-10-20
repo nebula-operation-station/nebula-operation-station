@@ -234,3 +234,14 @@ func TestAttrKeysStayDistinct(t *testing.T) {
 		t.Fatalf("%v", b.Attrs)
 	}
 }
+
+// A key crafted to equal another key's suffixed form does not take its
+// place (review fx2, note 3).
+func TestAttrKeySuffixCollision(t *testing.T) {
+	long := strings.Repeat("k", MaxKind)
+	first := attrKey(long+"a", map[string]string{clip(long+"a", MaxKind): "x"})
+	taken := map[string]string{clip(long+"a", MaxKind): "1", first: "2"}
+	if got := attrKey(long+"a", taken); got == first || len(got) > MaxKind {
+		t.Fatalf("%q reused or too long", got)
+	}
+}
