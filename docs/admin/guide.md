@@ -576,7 +576,9 @@ destructive disk commands and bootloader changes make a script at least
 HIGH; users and groups, firewall and network changes, package removal,
 reboots and Docker removals at least MEDIUM; a line it cannot read counts
 HIGH. The scanner only ever raises the risk, and a clean scan proves
-nothing. The planning and operation pages show its findings.
+nothing. The planning and operation pages show its findings; `nebula
+approve` shows them and the script's first 40 lines (at most 4 KiB)
+before you confirm.
 
 ### 8.2 Module signers
 
@@ -906,8 +908,9 @@ place.
 - **Hardened mode** (`-hardened`, section 6.2): HIGH and CRITICAL
   operations, opening their stages and approving schedules need the CLI
   on the machine (`nebula pending`, `nebula approve`), which shows what
-  the executor will really run. Use it when the web server could be
-  exposed to more than you.
+  the executor will really run: the Safety Scanner's findings and the
+  script's first 40 lines (at most 4 KiB), not just its hash. Use it when
+  the web server could be exposed to more than you.
 - **Lock** when you leave (`nebula lock` or the dashboard). An unlocked
   executor holds keys and secrets in memory.
 - **Who is admin** is decided by the executor's `-admin-users`, not by

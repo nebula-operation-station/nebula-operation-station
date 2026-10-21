@@ -3,6 +3,9 @@
 package permit
 
 import (
+	"bytes"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/descope/virtualwebauthn"
@@ -61,5 +64,53 @@ func TestScannerRefusesARunApprovedBelowItsFloor(t *testing.T) {
 	}
 	if _, err := e.auth.ObserveArtifact(nil); err == nil {
 		t.Fatal("empty artifact observed")
+	}
+}
+
+// artifactPreview is display data for the approval screen: the first 40
+// lines, at most 4 KiB, at a line boundary.
+func TestArtifactPreviewLimits(t *testing.T) {
+	// 50 short lines: the first 40 are kept, at a line boundary.
+	var sb strings.Builder
+	for i := 0; i < 50; i++ {
+		fmt.Fprintf(&sb, "line %02d\n", i)
+	}
+	got := artifactPreview([]byte(sb.String()))
+	if n := strings.Count(string(got), "\n"); n != 40 {
+		t.Fatalf("kept %d lines, want 40", n)
+	}
+	if !strings.HasPrefix(string(got), "line 00\n") || !strings.HasSuffix(string(got), "line 39\n") {
+		t.Fatalf("wrong window:\n%s", got)
+	}
+
+	// Under 40 lines and under 4 KiB: unchanged.
+	small := []byte("a\nb\nc\n")
+	if got := artifactPreview(small); string(got) != "a\nb\nc\n" {
+		t.Fatalf("%q", got)
+	}
+
+	// A single line over 4 KiB: capped at 4 KiB.
+	one := bytes.Repeat([]byte("y"), 5000)
+	if got := artifactPreview(one); len(got) != previewMaxBytes {
+		t.Fatalf("single line %d bytes, want %d", len(got), previewMaxBytes)
+	}
+
+	// Under 40 lines but over 4 KiB: hard-capped at 4 KiB.
+	var big strings.Builder
+	for i := 0; i < 10; i++ {
+		big.WriteString(strings.Repeat("x", 500))
+		big.WriteByte('\n')
+	}
+	got = artifactPreview([]byte(big.String()))
+	if len(got) != previewMaxBytes {
+		t.Fatalf("preview %d bytes, want %d", len(got), previewMaxBytes)
+	}
+
+	// Empty and nil.
+	if got := artifactPreview(nil); len(got) != 0 {
+		t.Fatalf("%q", got)
+	}
+	if got := artifactPreview([]byte{}); len(got) != 0 {
+		t.Fatalf("%q", got)
 	}
 }

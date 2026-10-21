@@ -6,6 +6,10 @@
   <p class="status">Risk (decided by the executor): {{.Risk}}</p>
   {{if .Scanner}}<p class="status">Safety scanner (advisory; it can only raise the risk):
     {{range $i, $f := .Scanner}}{{if $i}}; {{end}}{{$f.Category}} at line {{$f.Line}} (<code>{{$f.Excerpt}}</code>){{end}}</p>{{end}}
+  {{if .ScriptPreview}}<details class="script-preview">
+    <summary>Script (first 40 lines)</summary>
+    <pre class="script-preview__code">{{.ScriptPreview}}</pre>
+  </details>{{end}}
   <p class="status">State: <strong>{{.State}}</strong>{{if .Detail}} — {{.Detail}}{{end}}</p>
   <p class="status">Created by {{.CreatedBy}} at {{timeTag .Created}}</p>
   <p class="hint">Permit digest: <code>{{.Digest}}</code></p>

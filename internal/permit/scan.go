@@ -3,6 +3,7 @@
 package permit
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
@@ -22,11 +23,22 @@ import (
 // maxScans bounds the scan cache (artifact SHA-256 -> result).
 const maxScans = 1024
 
+// Preview limits for the artifact shown to the approver: the first
+// previewMaxLines lines, at most previewMaxBytes bytes.
+const (
+	previewMaxLines = 40
+	previewMaxBytes = 4 << 10
+)
+
 var scanSlots = make(chan struct{}, 2)
 
 type scanResult struct {
 	risk       canonical.Risk
 	categories []string
+	// findings is what the approver sees (at most scanner.MaxFindings);
+	// preview is the artifact's first lines for the approval screen.
+	findings []scanner.Finding
+	preview  []byte
 }
 
 // ObserveArtifact scans artifact bytes and remembers the result under
@@ -57,13 +69,45 @@ func (a *Authority) observe(sum [32]byte, artifact []byte) {
 		defer func() { <-scanSlots }()
 		return scanner.Scan(artifact)
 	}()
-	r := scanResult{risk: risk, categories: scanner.Categories(findings)}
+	r := scanResult{risk: risk, categories: scanner.Categories(findings), findings: findings, preview: artifactPreview(artifact)}
 	a.scanMu.Lock()
 	defer a.scanMu.Unlock()
 	if len(a.scans) >= maxScans {
 		clear(a.scans)
 	}
 	a.scans[key] = r
+}
+
+// artifactPreview returns the first previewMaxLines lines of b, at most
+// previewMaxBytes bytes, for the approval screen.
+func artifactPreview(b []byte) []byte {
+	if len(b) > previewMaxBytes {
+		b = b[:previewMaxBytes]
+	}
+	off := 0
+	for i := 0; i < previewMaxLines; i++ {
+		j := bytes.IndexByte(b[off:], '\n')
+		if j < 0 {
+			// Fewer than previewMaxLines lines: keep the rest.
+			return b
+		}
+		off += j + 1 // keep the newline
+	}
+	return b[:off]
+}
+
+// ScanInfo returns the Safety Scanner findings and the display preview the
+// executor computed for an artifact it has seen (its SHA-256 in hex). ok is
+// false when the executor has not scanned these bytes, so a caller must not
+// present "no findings" in that case.
+func (a *Authority) ScanInfo(sha256hex string) (findings []scanner.Finding, preview []byte, ok bool) {
+	a.scanMu.Lock()
+	defer a.scanMu.Unlock()
+	s, ok := a.scans[sha256hex]
+	if !ok {
+		return nil, nil, false
+	}
+	return s.findings, s.preview, true
 }
 
 // floor is the executor's minimum risk for r on targets: the risk policy's

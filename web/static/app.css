@@ -1188,4 +1188,27 @@ details[open] summary { color: var(--text); margin-bottom: var(--space-2); }
   align-items: center;
   gap: var(--space-1);
   margin: 0.2rem 0;
+/* --- Operation: collapsed script preview (details/summary, no JS). --- */
+.script-preview {
+  margin: 0 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.script-preview summary {
+  cursor: pointer;
+  padding: var(--space-1) var(--space-2);
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  user-select: none;
+}
+.script-preview__code {
+  margin: 0;
+  padding: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  line-height: 1.4;
+  white-space: pre;
+  overflow-x: auto;
+  border-top: 1px solid var(--border);
 }
