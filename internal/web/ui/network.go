@@ -93,6 +93,27 @@ func (h *Handler) handleNetworkPage(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
 	defer cancel()
+	mode, setCookie := h.networkModeFromRequest(r)
+	if setCookie {
+		http.SetCookie(w, h.networkModeCookie(mode, r))
+	}
+	if mode == networkModeExpert {
+		h.renderNetworkExpert(w, r, ctx, mode)
+		return
+	}
+	quick, err := h.buildNetworkQuick(ctx, mode)
+	if err != nil {
+		h.log.Error("list networks", "error", err)
+		http.Error(w, "network data unavailable", http.StatusInternalServerError)
+		return
+	}
+	h.render(w, r, pageData{Title: "Network", Active: "network", Content: "network_quick",
+		Scripts: []string{"webauthn.js", "network.js"}, Quick: quick, NetworkMode: mode})
+}
+
+// renderNetworkExpert renders the full IPAM view (the "Expert" mode): networks,
+// pools, reservations, exclusions, assets and discovery schedules.
+func (h *Handler) renderNetworkExpert(w http.ResponseWriter, r *http.Request, ctx context.Context, mode string) {
 	data := &networkData{Kinds: ipam.Kinds, DiscoveryEnabled: h.discovery != nil}
 	nets, err := h.network.Networks(ctx)
 	if err != nil {
@@ -120,7 +141,8 @@ func (h *Handler) handleNetworkPage(w http.ResponseWriter, r *http.Request) {
 	for _, a := range assets {
 		data.Assets = append(data.Assets, viewAsset(a))
 	}
-	h.render(w, r, pageData{Title: "Network", Active: "network", Content: "network", Scripts: []string{"webauthn.js", "network.js"}, Network: data})
+	h.render(w, r, pageData{Title: "Network", Active: "network", Content: "network",
+		Scripts: []string{"webauthn.js", "network.js"}, Network: data, NetworkMode: mode})
 }
 
 func (h *Handler) handleNetworkDetail(w http.ResponseWriter, r *http.Request) {

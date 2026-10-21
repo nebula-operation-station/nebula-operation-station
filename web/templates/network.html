@@ -1,5 +1,9 @@
 {{define "content"}}
 <h1>Network</h1>
+<nav class="seg" aria-label="Network view">
+  <a class="seg-item{{if eq .NetworkMode "quick"}} seg-item--active{{end}}" href="/network?mode=quick">Quick</a>
+  <a class="seg-item{{if eq .NetworkMode "expert"}} seg-item--active{{end}}" href="/network?mode=expert">Expert</a>
+</nav>
 {{with .Network}}
 <section class="panel" aria-label="Networks">
   <h2>Networks</h2>
@@ -21,8 +25,10 @@
   {{else}}
   <p>No networks yet.</p>
   {{end}}
-  <h3>Add network</h3>
-  {{template "network_form" .}}
+  <details>
+    <summary>Add network</summary>
+    {{template "network_form" .}}
+  </details>
 </section>
 <section class="panel" aria-label="Assets">
   <h2>Assets</h2>
@@ -42,8 +48,10 @@
   {{else}}
   <p>No assets yet.</p>
   {{end}}
-  <h3>Add asset</h3>
-  {{template "asset_form" .}}
+  <details>
+    <summary>Add asset</summary>
+    {{template "asset_form" .}}
+  </details>
 </section>
 {{end}}
 <p id="message" class="message" role="status" aria-live="polite"></p>

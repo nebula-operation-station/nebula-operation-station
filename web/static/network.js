@@ -120,4 +120,57 @@
       }
     });
   }
+
+  // Quick view: "Scan" creates the network if it is missing, queues a scan for
+  // SSH through the discovery path, then opens the discovery job page.
+  const scan = $('scan-form');
+  if (scan) {
+    scan.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const cidr = $('scan-cidr').value.trim();
+      if (!cidr) {
+        w.show('Enter a network such as 192.168.10.0/24.', true);
+        return;
+      }
+      const btn = $('scan-btn');
+      btn.disabled = true;
+      try {
+        const r = await w.post('/network/scan', { cidr });
+        if (r.job) {
+          window.location.assign('/network/discovery/' + encodeURIComponent(r.job));
+        } else {
+          w.show('Network created; the scan could not be queued.');
+          window.location.reload();
+        }
+      } catch (err) {
+        w.show(err.message || 'The scan failed.', true);
+        btn.disabled = false;
+      }
+    });
+  }
+
+  // Quick view: "Save as device" turns a discovery sighting into an asset.
+  for (const b of document.querySelectorAll('.save-device')) {
+    b.addEventListener('click', async () => {
+      const address = b.dataset.address;
+      let id = 'dev-' + address.replace(/[^a-z0-9._-]/g, '-').toLowerCase();
+      if (id.length > 63) id = id.slice(0, 63);
+      b.disabled = true;
+      try {
+        await w.post('/network/a/save', {
+          id,
+          name: b.dataset.name || address,
+          kind: 'unknown',
+          hostname: b.dataset.hostname || '',
+          mac: b.dataset.mac || '',
+          notes: 'Saved from a discovery scan.',
+          addresses: [address],
+        });
+        window.location.reload();
+      } catch (err) {
+        w.show(err.message || 'Could not save the device.', true);
+        b.disabled = false;
+      }
+    });
+  }
 })();
