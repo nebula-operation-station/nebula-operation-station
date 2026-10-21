@@ -473,6 +473,24 @@ and a cleanup rule `/etc/tmpfiles.d/nebula.conf` for job directories
 older than 14 days. `--no-sudo` leaves out sudo: then only read-only
 actions work. `--key REF` uses another credential than `nebula-default`.
 
+If sshd limits logins with `AllowUsers` or `AllowGroups` (hardening
+baselines often do), the script adds the user in
+`/etc/ssh/sshd_config.d/10-nebula.conf`: `AllowUsers nebula@<each --from
+address>` and/or `AllowGroups nebula`, only for the directives already in
+use. sshd merges these lists with the existing ones, so everyone allowed
+before stays allowed. `AllowGroups` names the user's own group, which the
+script creates (also where `USERGROUPS_ENAB=no`); if that group has other
+members it adds nothing and tells you. The script checks the result with
+`sshd -t` and reloads sshd (it applies to new connections); if sshd does
+not read `sshd_config.d` (no `Include`), it prints the line to add
+yourself. Restrictions inside a `Match` block (for example `Match Address`)
+are only reported: the script checks the configuration sshd applies to
+connections from each `--from` address and tells you what to add there.
+Delete the drop-in if you later remove `AllowUsers`/`AllowGroups`
+elsewhere: on its own it would let only Nebula in. A `DenyUsers`/
+`DenyGroups` entry that names the user, and an sshd configuration that
+`sshd -T` cannot read, are reported as well.
+
 **Read the script**, copy it to the host and run it there as root.
 
 ### 7.2 Pinning host keys
