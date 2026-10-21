@@ -11,8 +11,11 @@ the [handbook](../../docs/admin/guide.md); this is the short path.
 | Each managed host | Debian 12, Ubuntu 22.04/24.04 or Proxmox VE | 1 CPU, 1–2 GB RAM, 16 GB disk |
 
 Plus a normal login (your admin account, not root) with `sudo` on the
-Nebula machine, a hostname for the web UI (for example
-`nebula.lab.example.org`) and a FIDO2 security key, better two.
+Nebula machine, the full host name (FQDN) you will open the web UI under
+(for example `nebula.lab.example.org`, not just the machine's short name)
+and a FIDO2 security key, better two. That name is the `--rp-id`: the
+security keys are bound to it and work only at exactly
+`https://<that name>/`.
 
 ## 1. The Nebula machine
 
@@ -63,7 +66,8 @@ At the end it prints what is left, in this order:
 Options: `--admin-users a,b` (default: you), `--backup-recipient age1…`
 (use a key you already have; only on the first run), `--no-caddy` (your
 own reverse proxy), `--no-unlock`. Keep the same `--rp-id` on every run:
-the script refuses another one, because the security keys are bound to it.
+the script refuses another one (it compares with `server.json` and with
+the executor), because the security keys are bound to it.
 
 ## 2. Each managed host
 
@@ -91,6 +95,6 @@ fingerprints. Then in the web UI: **Inventory** → add the host →
 | When | What |
 | --- | --- |
 | After every reboot of the Nebula machine | `nebula unlock` |
-| Upgrade | `git pull`, then `sudo ./deploy/quickstart/setup-nebula.sh --rp-id …` again (it backs up first) |
+| Upgrade | `git checkout main && git pull`, then `sudo ./deploy/quickstart/setup-nebula.sh --rp-id …` again (it backs up first) |
 | Backup | `sudo nebula backup`, copy `~/nebula-backups/` off the machine |
 | Anything else | [handbook](../../docs/admin/guide.md) |
