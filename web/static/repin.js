@@ -12,28 +12,38 @@
   let current = null;
   const set = (id, text) => { document.getElementById(id).textContent = text; };
 
+  const start = async (host) => {
+    try {
+      const r = await w.post('/hostkeys/repin/propose', { host });
+      current = r;
+      set('repin-host', r.host);
+      set('repin-pinned', r.pinned);
+      set('repin-presented', r.presented);
+      set('repin-endpoint', r.endpoint);
+      set('repin-since', r.since);
+      set('repin-risk', r.risk);
+      document.getElementById('repin-confirm').checked = false;
+      document.getElementById('repin-typed-label').hidden = r.requirement !== 'typed_count';
+      document.getElementById('repin-cli').hidden = r.requirement !== 'cli';
+      set('repin-cli-cmd', 'nebula approve ' + r.digest.slice(0, 12));
+      set('repin-approve', r.requirement === 'cli' ? 'Re-pin' : 'Re-pin with security key');
+      panel.hidden = false;
+      w.show('Compare the new fingerprint on the host console before you continue.', false);
+    } catch (err) {
+      w.show(err.message || 'Could not propose the re-pin.', true);
+    }
+  };
+
   for (const b of document.querySelectorAll('.repin-start')) {
-    b.addEventListener('click', async () => {
-      try {
-        const r = await w.post('/hostkeys/repin/propose', { host: b.dataset.host });
-        current = r;
-        set('repin-host', r.host);
-        set('repin-pinned', r.pinned);
-        set('repin-presented', r.presented);
-        set('repin-endpoint', r.endpoint);
-        set('repin-since', r.since);
-        set('repin-risk', r.risk);
-        document.getElementById('repin-confirm').checked = false;
-        document.getElementById('repin-typed-label').hidden = r.requirement !== 'typed_count';
-        document.getElementById('repin-cli').hidden = r.requirement !== 'cli';
-        set('repin-cli-cmd', 'nebula approve ' + r.digest.slice(0, 12));
-        set('repin-approve', r.requirement === 'cli' ? 'Re-pin' : 'Re-pin with security key');
-        panel.hidden = false;
-        w.show('Compare the new fingerprint on the host console before you continue.', false);
-      } catch (err) {
-        w.show(err.message || 'Could not propose the re-pin.', true);
-      }
-    });
+    b.addEventListener('click', () => start(b.dataset.host));
+  }
+
+  // ?repin=HOST (the host page's re-pin link) opens the proposal for that
+  // host. The user still compares the fingerprint and approves.
+  const want = new URLSearchParams(location.search).get('repin');
+  if (want) {
+    const b = document.querySelector('.repin-start[data-host="' + CSS.escape(want) + '"]');
+    if (b) start(want);
   }
 
   document.getElementById('repin-cancel').addEventListener('click', () => {

@@ -32,14 +32,16 @@ type fakeOps struct {
 	createErr  error
 	approveErr error
 	created    []string
-	plan       executions.Plan
-	approved   string
-	exec       executions.Execution
-	rollout    *pb.Rollout
-	gateRes    executions.GateResult
-	gateErr    error
-	gates      []string
-	extra      []actions.Action // runbook actions after the built-ins
+	// createdCalls records every CreateStaged call as [user, action, hosts...].
+	createdCalls [][]string
+	plan         executions.Plan
+	approved     string
+	exec         executions.Execution
+	rollout      *pb.Rollout
+	gateRes      executions.GateResult
+	gateErr      error
+	gates        []string
+	extra        []actions.Action // runbook actions after the built-ins
 }
 
 func (f *fakeOps) Catalog(context.Context) ([]actions.Action, error) {
@@ -62,6 +64,7 @@ func (f *fakeOps) CreateStaged(_ context.Context, user, action string, hosts []s
 	}
 	f.plan = plan
 	f.created = append([]string{user, action}, hosts...)
+	f.createdCalls = append(f.createdCalls, f.created)
 	return executions.Created{ID: opID, State: "pending", Risk: "HIGH"}, nil
 }
 
@@ -114,6 +117,18 @@ func (f *fakeOps) AllOpsStates(context.Context) (map[string]executions.OpsState,
 
 func (f *fakeOps) List(context.Context, int) ([]executions.Summary, error) {
 	return []executions.Summary{{ID: opID, ActionID: "core.facts", Risk: "HIGH", State: "finished", CreatedBy: "axel", CreatedAt: time.Unix(1791960000, 0), Hosts: 1}}, nil
+}
+
+func (f *fakeOps) LastResults(context.Context, string) (map[string]executions.LastResultRow, error) {
+	return map[string]executions.LastResultRow{}, nil
+}
+
+func (f *fakeOps) LastSeenAll(context.Context) (map[string]time.Time, error) {
+	return map[string]time.Time{}, nil
+}
+
+func (f *fakeOps) ListHost(context.Context, string, int) ([]executions.Summary, error) {
+	return nil, nil
 }
 
 func opsHandler(t *testing.T, ops ui.Operations, log *strings.Builder) http.Handler {
@@ -264,9 +279,16 @@ func TestUpdatesAreShownAsText(t *testing.T) {
 	o := ui.Options{PublicOrigin: "https://nebula.example.org", Operations: f,
 		Hosts: func(context.Context) ([]inventory.Host, error) { return []inventory.Host{{ID: "web"}}, nil }}
 	inv := getBody(t, newTestHandler(t, o).Handler(), "/inventory")
-	if !strings.Contains(inv, "1 security / 3 total, reboot required, checked 2026-10-14") || !strings.Contains(inv, ">WARNING</span>") ||
-		!strings.Contains(inv, "· 1 security updates") {
-		t.Fatalf("inventory: %s", inv)
+	for _, want := range []string{
+		`<span class="badge badge--critical">1 security</span>`,
+		`<span class="badge badge--warning">3 total</span>`,
+		`<span class="badge badge--warning">reboot</span>`,
+		`<span class="badge badge--warning">Warning</span>`,
+		"1 security updates",
+	} {
+		if !strings.Contains(inv, want) {
+			t.Errorf("inventory misses %q", want)
+		}
 	}
 }
 

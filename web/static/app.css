@@ -183,12 +183,11 @@ code {
   min-width: 0;
 }
 
-/* --- Sidebar navigation. --- */
+/* --- Sidebar navigation. ---
+ * The sidebar stretches to the full height of the content row (the grid
+ * default), so its background fills the page even when the content is taller
+ * than the viewport. The nav itself stays at the top. */
 .sidebar {
-  position: sticky;
-  top: 0;
-  align-self: start;
-  height: 100vh;
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
@@ -548,7 +547,7 @@ legend {
 
 .inventory th,
 .inventory td {
-  padding: 0.5rem 0.6rem;
+  padding: 0.45rem 0.5rem;
   border-bottom: 1px solid var(--border);
   text-align: left;
   vertical-align: top;
@@ -746,4 +745,178 @@ time { white-space: nowrap; }
 
   .main { padding: var(--space-2); }
   .form-grid { grid-template-columns: 1fr; }
+}
+
+/* --- Inventory toolbar: filter field + chips. --- */
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+.filter {
+  flex: 1 1 14rem;
+  max-width: 24rem;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.7rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-decoration: none;
+  background: var(--surface);
+}
+.chip:hover { color: var(--text); border-color: var(--brand); text-decoration: none; }
+.chip--active {
+  color: var(--brand);
+  border-color: var(--brand);
+  background: var(--brand-bg, var(--surface-2));
+}
+.chip--env { font-family: var(--font-mono); font-size: 0.72rem; }
+
+/* --- "More" menu (details/summary, no JS). --- */
+.menu { position: relative; display: inline-block; }
+.menu summary { list-style: none; cursor: pointer; user-select: none; }
+.menu summary::-webkit-details-marker { display: none; }
+.menu[open] summary { border-radius: var(--radius-sm) var(--radius-sm) 0 0; }
+.menu a {
+  display: block;
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 10;
+  min-width: 11rem;
+  padding: 0.5rem 0.8rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  text-decoration: none;
+  font-size: 0.9rem;
+  box-shadow: var(--shadow-lg);
+}
+.menu a + a { border-top: 0; }
+.menu a:first-of-type { border-radius: 0 0 var(--radius-sm) var(--radius-sm); }
+.menu a:hover { background: var(--surface-2); text-decoration: none; }
+
+/* --- Inventory rows. --- */
+.inventory tbody tr[data-id] { cursor: pointer; }
+.inventory tbody tr[data-id]:hover { background: var(--surface-2); }
+.host-cell { min-width: 9.5rem; }
+.host-link { display: flex; flex-direction: column; gap: 0.1rem; color: var(--text); text-decoration: none; }
+.host-link:hover .host-name { color: var(--brand); text-decoration: underline; }
+.host-name { font-weight: 700; }
+.host-id { color: var(--text-muted); font-size: 0.75rem; }
+.host-os { max-width: 11rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.host-status { max-width: 13rem; white-space: normal; }
+.host-status .badge { margin-right: 0.35rem; }
+.host-status .hint { display: inline; }
+.host-updates { white-space: nowrap; }
+.key-pinned {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--ok);
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+.key-icon { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 2; }
+.enroll-link { font-weight: 600; }
+
+/* --- Host page header. --- */
+.host-header {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) 2fr;
+  gap: var(--space-2);
+}
+.host-header__badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+.host-header__table th { width: 8rem; }
+.badge--env {
+  color: var(--pending);
+  background: var(--pending-bg);
+  border-color: var(--pending-border);
+  font-family: var(--font-mono);
+}
+.badge--crit { color: var(--text-muted); background: var(--surface-2); border-color: var(--border-strong); }
+.repin-link { font-weight: 600; margin-left: 0.5rem; }
+
+/* --- Summary tiles (host overview). --- */
+.summary-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+.summary-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  text-decoration: none;
+  color: var(--text);
+}
+.summary-tile:hover { border-color: var(--brand); text-decoration: none; background: var(--surface); }
+.summary-tile__num { font-size: 1.5rem; font-weight: 700; }
+.summary-tile__label { color: var(--text-muted); font-size: 0.8rem; }
+
+/* --- Container action links. --- */
+.container-actions { white-space: nowrap; }
+.container-actions a { margin-right: 0.6rem; font-size: 0.85rem; }
+
+/* --- Inline forms (refresh buttons in tab toolbars). --- */
+.inline-form { display: inline; }
+
+/* --- Dashboard tiles. --- */
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+  gap: var(--space-2);
+}
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  text-decoration: none;
+  color: var(--text);
+}
+.tile:hover { border-color: var(--brand); text-decoration: none; background: var(--surface); }
+.tile__num { font-size: 1.6rem; font-weight: 700; }
+.tile__label { color: var(--text-muted); font-size: 0.8rem; }
+.tile--ok .tile__num { color: var(--ok); }
+.tile--warning .tile__num { color: var(--warn); }
+.tile--critical .tile__num { color: var(--crit); }
+.tile--unknown .tile__num { color: var(--unknown); }
+.tile--accent .tile__num { color: var(--pending); }
+
+/* --- Inventory + host page: narrow screens. --- */
+@media (max-width: 899px) {
+  .host-header { grid-template-columns: 1fr; }
+  .filter { max-width: none; }
 }

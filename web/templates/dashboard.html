@@ -73,4 +73,17 @@
   <p>No managed hosts yet.</p>
   {{end}}
 </section>
+{{if .DashboardTiles}}
+<section class="panel" aria-label="Host overview">
+  <h2>Host overview</h2>
+  <div class="tiles">
+    {{range .DashboardTiles}}
+    <a class="tile {{.Class}}" href="{{.Href}}">
+      <span class="tile__num">{{.Num}}</span>
+      <span class="tile__label">{{.Label}}</span>
+    </a>
+    {{end}}
+  </div>
+</section>
+{{end}}
 {{end}}

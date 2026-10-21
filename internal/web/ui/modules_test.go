@@ -144,9 +144,9 @@ func TestModuleUICannotInjectScript(t *testing.T) {
 		return result, time.Unix(1792000000, 0), true, nil
 	}
 	h := newTestHandler(t, ui.Options{PublicOrigin: "https://nebula.example.org", Modules: ms, LastResult: last}).Handler()
-	page := getBody(t, h, "/hosts/web")
+	page := getBody(t, h, "/hosts/web?tab=modules")
 	for _, want := range []string{"&lt;script&gt;alert(1)&lt;/script&gt;", "javascript:alert(2)", "&lt;img src=x onerror=alert(3)&gt;",
-		"&lt;script&gt;alert(4)&lt;/script&gt;\ufffd[2J\ufffdevil", `{&#34;deep&#34;:true}`, "<td>—</td>", `href="/operations/new?action=evil.status"`} {
+		"&lt;script&gt;alert(4)&lt;/script&gt;\ufffd[2J\ufffdevil", `{&#34;deep&#34;:true}`, "<td>—</td>", `href="/operations/new?action=evil.status&amp;host=web"`} {
 		if !strings.Contains(page, want) {
 			t.Errorf("page misses %q", want)
 		}
@@ -156,7 +156,7 @@ func TestModuleUICannotInjectScript(t *testing.T) {
 			t.Errorf("page contains %q", bad)
 		}
 	}
-	if page := getBody(t, h, "/hosts/other"); !strings.Contains(page, "never run on this host") {
+	if page := getBody(t, h, "/hosts/other?tab=modules"); !strings.Contains(page, "never run on this host") {
 		t.Fatal(page)
 	}
 	rec := httptest.NewRecorder()
