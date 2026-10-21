@@ -40,7 +40,12 @@ func TestNetworkPagesAndStatus(t *testing.T) {
 	inv := newFakeInventory()
 	inv.hosts["web1"] = inventory.Host{ID: "web1", Endpoints: []inventory.Endpoint{{Address: "192.168.10.20", Port: 22}}}
 	h := networkHandler(t, inv)
-	if page := getBody(t, h, "/network"); !strings.Contains(page, "No networks yet.") || !strings.Contains(page, "No assets yet.") {
+	// The default view is Quick: empty scan/devices/networks states.
+	if page := getBody(t, h, "/network"); !strings.Contains(page, "No networks yet.") || !strings.Contains(page, "No devices yet.") {
+		t.Fatal(page)
+	}
+	// Expert mode keeps the full IPAM tables.
+	if page := getBody(t, h, "/network?mode=expert"); !strings.Contains(page, "No networks yet.") || !strings.Contains(page, "No assets yet.") {
 		t.Fatal(page)
 	}
 	for _, c := range []struct {
@@ -151,7 +156,7 @@ func TestNetworkWithoutStore(t *testing.T) {
 	if page := getBody(t, h, "/network"); !strings.Contains(page, "Network") {
 		t.Fatal(page)
 	}
-	for _, p := range []string{"/network/save", "/network/a/save", "/network/entry", "/network/a/link"} {
+	for _, p := range []string{"/network/save", "/network/a/save", "/network/entry", "/network/a/link", "/network/scan"} {
 		if code, _ := postJSON(t, h, p, `{}`); code != http.StatusNotFound {
 			t.Errorf("%s: %d", p, code)
 		}

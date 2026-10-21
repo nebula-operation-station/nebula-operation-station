@@ -14,6 +14,10 @@ Taken from the test harness's preview mode with demo data (`go run ./test/browse
 | **Host: pending updates** | **Host: containers** |
 | ![Host page, updates tab](docs/screenshots/host-updates-light.png) | ![Host page, containers tab](docs/screenshots/host-containers-light.png) |
 
+Network, quick mode (scan, devices, usage):
+
+![Network page in quick mode](docs/screenshots/network-quick-light.png)
+
 On a phone: [inventory](docs/screenshots/inventory-phone-light.png). Light, dark or system theme under Settings → Appearance.
 
 ## Design in one paragraph

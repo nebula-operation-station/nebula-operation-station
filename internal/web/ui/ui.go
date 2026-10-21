@@ -22,6 +22,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"google.golang.org/grpc"
@@ -119,6 +120,9 @@ type Options struct {
 	// Enroll pins new hosts in bulk from the inventory. It needs
 	// Inventory; nil leaves enrollment to the CLI.
 	Enroll Enroller
+	// ServerIP returns the server's own first private IPv4, for the
+	// quick-scan prefill. Nil uses the machine's interfaces.
+	ServerIP func() netip.Addr
 	// Log receives executor status errors (the page itself only shows
 	// "Executor unavailable"). Nil means slog.Default().
 	Log *slog.Logger
@@ -149,6 +153,7 @@ type Handler struct {
 	log        *slog.Logger
 	repin      Repinner
 	enroll     Enroller
+	serverIP   func() netip.Addr
 }
 
 // New parses the embedded templates and builds a Handler.
@@ -172,6 +177,10 @@ func New(o Options) (*Handler, error) {
 	if log == nil {
 		log = slog.Default()
 	}
+	serverIP := o.ServerIP
+	if serverIP == nil {
+		serverIP = serverPrivateIPv4
+	}
 	return &Handler{
 		publicOrigin: o.PublicOrigin,
 		pages:        pages,
@@ -193,6 +202,7 @@ func New(o Options) (*Handler, error) {
 		auditLog:     o.Audit,
 		repin:        o.Repin,
 		enroll:       o.Enroll,
+		serverIP:     serverIP,
 		log:          log,
 	}, nil
 }
@@ -220,6 +230,7 @@ var pageFiles = map[string]string{
 	"module":           "module.html",
 	"host":             "host.html",
 	"network":          "network.html",
+	"network_quick":    "network_quick.html",
 	"network_detail":   "network_detail.html",
 	"asset":            "asset.html",
 	"search":           "search.html",
@@ -297,6 +308,7 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("GET /network/n/{id}", h.handleNetworkDetail)
 	mux.HandleFunc("GET /network/a/{id}", h.handleAssetDetail)
 	mux.HandleFunc("POST /network/save", h.handleNetworkSave)
+	mux.HandleFunc("POST /network/scan", h.handleNetworkScan)
 	mux.HandleFunc("POST /network/delete", h.handleNetworkDelete)
 	mux.HandleFunc("POST /network/entry", h.handleIPEntry)
 	mux.HandleFunc("POST /network/a/save", h.handleAssetSave)
@@ -399,6 +411,11 @@ type pageData struct {
 	Modules *modulesData
 	// Network is the data of the network pages.
 	Network *networkData
+	// Quick is the data of the quick network view.
+	Quick *networkQuickData
+	// NetworkMode is the active network view ("quick" or "expert"), for the
+	// segmented switch.
+	NetworkMode string
 	// Discovery is the data of the discovery pages.
 	Discovery *discoveryData
 	// Search is the data of the search page.

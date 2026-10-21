@@ -1,0 +1,75 @@
+{{define "content"}}
+<h1>Network</h1>
+<nav class="seg" aria-label="Network view">
+  <a class="seg-item{{if eq .NetworkMode "quick"}} seg-item--active{{end}}" href="/network?mode=quick">Quick</a>
+  <a class="seg-item{{if eq .NetworkMode "expert"}} seg-item--active{{end}}" href="/network?mode=expert">Expert</a>
+</nav>
+{{with .Quick}}
+<div class="quick">
+  <section class="panel quick__scan" aria-label="Scan a network">
+    <h2>Scan a network</h2>
+    {{if .ScanEnabled}}
+    <form id="scan-form" novalidate>
+      <label class="scan-cidr">Network
+        <input type="text" id="scan-cidr" value="{{.ScanCIDR}}" placeholder="192.168.10.0/24" autocomplete="off" spellcheck="false">
+      </label>
+      <button type="submit" class="button" id="scan-btn">Scan</button>
+    </form>
+    <p class="hint">Creates the network if it does not exist, then queues a scan for SSH. At most a /16 for IPv4.</p>
+    {{else}}
+    <p class="status status--warning">{{.ScanNote}} <a href="https://github.com/nebula-operation-station/nebula-operation-station/blob/main/docs/admin/guide.md#98-discovery">How to enable discovery</a>.</p>
+    {{end}}
+  </section>
+  <section class="panel quick__networks" aria-label="Networks">
+    <h2>Networks</h2>
+    {{if .Networks}}
+    <ul class="netlist">
+      {{range .Networks}}
+      <li class="netlist__item">
+        <div class="netlist__head">
+          <a class="netlist__name" href="/network/n/{{.ID}}">{{.Name}}</a>
+          <span class="netlist__prefix mono">{{.Prefix}}</span>
+        </div>
+        <div class="netlist__foot">
+          <span class="netlist__counts">{{.Counts}}</span>
+          {{if .BarClass}}<div class="usage" role="img" aria-label="{{.Counts}}"><div class="usage__fill {{.BarClass}}"></div></div>{{end}}
+        </div>
+      </li>
+      {{end}}
+    </ul>
+    {{else}}
+    <p>No networks yet. Scan one above.</p>
+    {{end}}
+  </section>
+  <section class="panel quick__devices" aria-label="Devices">
+    <h2>Devices</h2>
+    <p class="hint">Your saved devices and the latest scan results. "Save as device" keeps a sighting; "Add as managed host" starts SSH enrollment.</p>
+    {{if .Devices}}
+    <div class="table-wrap">
+    <table class="inventory">
+      <thead><tr><th>Address</th><th>Name</th><th>MAC</th><th>SSH</th><th>Status</th><th></th></tr></thead>
+      <tbody>
+        {{range .Devices}}
+        <tr>
+          <td class="mono">{{.Address}}</td>
+          <td>{{.Name}}</td>
+          <td class="mono">{{.MAC}}{{if .Vendor}} <span class="hint">{{.Vendor}}</span>{{end}}</td>
+          <td>{{if .SSH}}{{if eq .SSH "yes"}}<span class="badge badge--ok">open</span>{{else}}<span class="badge badge--grey">closed</span>{{end}}{{else}}—{{end}}</td>
+          <td>{{if .Managed}}<span class="badge badge--ok">managed</span> <a href="/hosts/{{.Managed}}">{{.Managed}}</a>{{end}}</td>
+          <td class="row-actions">
+            {{if .CanSave}}<button type="button" class="button button--small button--secondary save-device" data-address="{{.Address}}" data-name="{{.Name}}" data-hostname="{{.Hostname}}" data-mac="{{.MAC}}">Save as device</button>{{end}}
+            {{if .CanEnroll}}<a class="button button--small button--secondary" href="/inventory?asset={{.AssetID}}">Add as managed host</a>{{end}}
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    </div>
+    {{else}}
+    <p>No devices yet. Scan a network above to find some.</p>
+    {{end}}
+  </section>
+</div>
+{{end}}
+<p id="message" class="message" role="status" aria-live="polite"></p>
+{{end}}
