@@ -102,8 +102,16 @@ set -eu
 user='%s'
 key_line='%s %s'
 
+# A dedicated group named like the user, also where USERGROUPS_ENAB=no or the
+# user existed before: the file ownership below and AllowGroups rely on it.
+if ! getent group "$user" >/dev/null 2>&1; then
+  groupadd --system "$user"
+fi
 if ! id "$user" >/dev/null 2>&1; then
-  useradd --system --create-home --shell /bin/sh "$user"
+  useradd --system --create-home --shell /bin/sh -g "$user" "$user"
+fi
+if ! id -nG "$user" | tr ' ' '\n' | grep -qx "$user"; then
+  usermod -a -G "$user" "$user"
 fi
 home=$(getent passwd "$user" | cut -d: -f6)
 install -d -m 0700 -o "$user" -g "$user" "$home/.ssh"
@@ -123,17 +131,22 @@ visudo -cf /etc/sudoers.d/nebula.tmp
 mv /etc/sudoers.d/nebula.tmp /etc/sudoers.d/nebula
 `)
 	}
-	var pats []string
+	var pats, probe []string
 	for _, a := range o.from {
 		pats = append(pats, o.user+"@"+a)
+		// sshd -T -C needs an address: the base address of a range.
+		probe = append(probe, strings.SplitN(a, "/", 2)[0])
 	}
 	fmt.Fprintf(&b, `
 # sshd: AllowUsers/AllowGroups (for example from a hardening baseline) would
 # refuse the user. Add it in a drop-in for exactly the directives that are
 # already in use; sshd merges the lists, so the existing entries stay valid.
+# AllowGroups names the user's own group only: nobody else gets in.
 sshd_bin=$(command -v sshd || echo /usr/sbin/sshd)
 dropin=/etc/ssh/sshd_config.d/10-nebula.conf
+probe='%s'
 if [ -x "$sshd_bin" ]; then
+  rm -f "$dropin.old"
   if [ -f "$dropin" ]; then mv "$dropin" "$dropin.old"; fi
   if conf=$("$sshd_bin" -T 2>/dev/null); then
     want=''
@@ -141,8 +154,13 @@ if [ -x "$sshd_bin" ]; then
       want='AllowUsers %s'
     fi
     if printf '%%s\n' "$conf" | grep -q '^allowgroups '; then
-      want="$want
-AllowGroups $(id -gn "$user")"
+      others=$(getent group "$user" | cut -d: -f4 | tr ',' '\n' | grep -vx "$user" || true)
+      if [ -n "$others" ]; then
+        echo "warning: group $user has other members ($others); not adding AllowGroups $user. Add $user to your AllowUsers/AllowGroups yourself." >&2
+      else
+        want="${want:+$want
+}AllowGroups $user"
+      fi
     fi
     if printf '%%s\n' "$conf" | grep -Eq "^deny(users|groups) .*\b$user\b"; then
       echo "warning: DenyUsers/DenyGroups in the sshd configuration names $user; Nebula cannot log in until you change that" >&2
@@ -151,10 +169,10 @@ AllowGroups $(id -gn "$user")"
       install -d -m 0755 /etc/ssh/sshd_config.d
       printf '# Written by the Nebula enrollment script. sshd merges this with the\n# AllowUsers/AllowGroups lines elsewhere. On its own it would let only\n# Nebula log in: delete it if you remove those lines.\n%%s\n' "$want" > "$dropin"
       chmod 0644 "$dropin"
-      if "$sshd_bin" -t && "$sshd_bin" -T 2>/dev/null | grep -Eq "^allow(users|groups) .*$user"; then
+      if "$sshd_bin" -t && "$sshd_bin" -T 2>/dev/null | grep -Eq "^allowusers $user@|^allowgroups $user\$"; then
         rm -f "$dropin.old"
         systemctl try-reload-or-restart ssh 2>/dev/null || systemctl try-reload-or-restart sshd 2>/dev/null || true
-        echo "sshd: $dropin lets $user log in (AllowUsers/AllowGroups are in use)"
+        echo "sshd: $dropin lets $user log in (AllowUsers/AllowGroups are in use; applies to new connections)"
       else
         rm -f "$dropin"
         echo "warning: sshd does not read $dropin (no Include of sshd_config.d?); add this to your AllowUsers/AllowGroups yourself:" >&2
@@ -163,10 +181,23 @@ AllowGroups $(id -gn "$user")"
     else
       rm -f "$dropin.old"
     fi
+    # Match blocks (for example Match Address) are not in the plain sshd -T
+    # output: check the configuration sshd applies to Nebula's connections.
+    for a in $probe; do
+      mconf=$("$sshd_bin" -T -C "user=$user,host=$a,addr=$a" 2>/dev/null) || continue
+      if printf '%%s\n' "$mconf" | grep -q '^allowusers ' && ! printf '%%s\n' "$mconf" | grep -Eq "^allowusers $user(@|\$)"; then
+        echo "warning: for connections from $a an AllowUsers (in a Match block?) does not name $user; add $user@$a there" >&2
+      fi
+      if printf '%%s\n' "$mconf" | grep -q '^allowgroups ' && ! printf '%%s\n' "$mconf" | grep -qx "allowgroups $user"; then
+        echo "warning: for connections from $a an AllowGroups (in a Match block?) does not name $user; add $user there" >&2
+      fi
+    done
+  else
+    echo "warning: $sshd_bin -T failed, so AllowUsers/AllowGroups were not checked; fix the sshd configuration (sshd -t) and run this script again" >&2
   fi
   if [ -f "$dropin.old" ]; then mv "$dropin.old" "$dropin"; fi
 fi
-`, strings.Join(pats, " "))
+`, strings.Join(probe, " "), strings.Join(pats, " "))
 	b.WriteString(`
 # Fallback cleanup of job directories older than 14 days (spec 07).
 printf 'd /var/lib/nebula/jobs 0700 root root 14d\n' > /etc/tmpfiles.d/nebula.conf
@@ -176,7 +207,7 @@ echo "Done. Host key fingerprints of this host, to compare in 'nebula host pin':
 for f in /etc/ssh/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ecdsa_key.pub /etc/ssh/ssh_host_rsa_key.pub; do
   [ -r "$f" ] && ssh-keygen -lf "$f"
 done
-echo "If fail2ban runs here, add Nebula's addresses to its ignoreip (prepare-target.sh does that)."
+echo "If fail2ban runs here, add Nebula's addresses to its ignoreip."
 `)
 	return b.String()
 }
