@@ -141,8 +141,8 @@ function check(cond, what) {
   }
   check(finished && /\d+ updates, \d+ security/.test(await page.textContent('main')), 'update check ran and shows the update list');
   await page.goto(base + '/inventory');
-  check(/checked \d{4}-\d{2}-\d{2}/.test(await page.textContent('tr[data-id="e2e-host"]')), 'the inventory shows the update status');
-  check(/(READY|WARNING)/.test(await page.textContent('tr[data-id="e2e-host"]')), 'the inventory shows the Ops State');
+  check(/checked \S/.test(await page.textContent('tr[data-id="e2e-host"]')) && await page.locator('tr[data-id="e2e-host"] .host-updates time[datetime]').count() === 1, 'the inventory shows the update status');
+  check(/(ready|warning|ok)/i.test(await page.textContent('tr[data-id="e2e-host"]')), 'the inventory shows the Ops State');
   // Runbooks: write one, save it as version 1, plan it with a parameter;
   // the executor does not know the script, so it needs the key (HIGH).
   await page.goto(base + '/runbooks/new');
@@ -224,30 +224,40 @@ function check(cond, what) {
   await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('#executor-lock')]);
   check(/Privileged session: none/.test(await page.textContent('main')), 'lock ends the privileged session');
 
-  // Inventory: add, edit, reject a duplicate, delete (JSON POSTs with a real Origin).
+  // Inventory: add (dialog, JSON POST), edit and delete (host page settings
+  // tab, form POSTs), reject a duplicate ID. All with a real Origin.
   await page.goto(base + '/inventory');
+  await page.click('a.add-host');
+  await page.waitForSelector('#add-host-dialog[open]');
   await page.fill('#host-id', 'web-01');
   await page.fill('#host-display-name', 'Web 1');
   await page.selectOption('#host-environment', 'PROD');
   await page.fill('#host-endpoints', '192.168.0.10\n[fd00::10]:2222');
   await page.fill('#host-tags', 'role=web');
-  await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('#host-submit')]);
+  await Promise.all([page.waitForURL(/\/hosts\/web-01/, { timeout: 15000 }), page.click('#host-submit')]);
+  check(/Next: read and pin the host key/.test(await page.textContent('main')) && /\[fd00::10\]:2222/.test(await page.textContent('main')),
+    'host added from the inventory dialog; its page points to enrollment');
   const row = () => page.locator('tr[data-id="web-01"]');
-  check(/Web 1/.test(await row().textContent()) && /\[fd00::10\]:2222/.test(await row().textContent()), 'host added from the inventory page');
-  await row().locator('.inventory__edit').click();
-  check(await page.inputValue('#host-tags') === 'role=web' && await page.$eval('#host-id', (e) => e.readOnly), 'edit fills the form and locks the ID');
-  await page.fill('#host-display-name', 'Web one');
-  await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('#host-submit')]);
+  await page.goto(base + '/hosts/web-01?tab=settings');
+  check(await page.inputValue('textarea[name="tags"]') === 'role=web' && await page.$eval('form[action$="/settings"] input[name="id"]', (e) => e.readOnly),
+    'the settings tab shows the host and locks the ID');
+  await page.fill('input[name="display_name"]', 'Web one');
+  await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('form[action$="/settings"] button[type="submit"]')]);
+  await page.goto(base + '/inventory');
   check(/Web one/.test(await row().textContent()), 'host edited');
+  await page.click('a.add-host');
+  await page.waitForSelector('#add-host-dialog[open]');
   await page.fill('#host-id', 'web-01');
   await page.fill('#host-endpoints', '192.168.0.11');
   await page.click('#host-submit');
   await page.waitForFunction(() => /already exists/.test(document.getElementById('message').textContent), null, { timeout: 15000 });
   check(true, 'a duplicate host ID is refused');
-  await row().locator('.inventory__delete').click();
-  await page.waitForFunction(() => /Type the host ID/.test(document.getElementById('message').textContent));
-  await row().locator('.inventory__delete-confirm').fill('web-01');
-  await Promise.all([page.waitForNavigation({ timeout: 15000 }), row().locator('.inventory__delete').click()]);
+  await page.goto(base + '/hosts/web-01?tab=settings');
+  const del = page.locator('form[action$="/delete"] button[type="submit"]');
+  check(await del.isDisabled(), 'delete stays disabled until the ID is typed');
+  await page.fill('input[name="confirm_id"]', 'web-01');
+  await Promise.all([page.waitForNavigation({ timeout: 15000 }), del.click()]);
+  await page.goto(base + '/inventory');
   check(await row().count() === 0, 'host deleted after typing its ID');
 
   // Network (M9-1): a network with its address grid, a reservation, an

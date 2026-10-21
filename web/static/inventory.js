@@ -68,6 +68,8 @@
     });
   }
   cancel.addEventListener('click', () => dialog.close());
+  // Coming from "Add to managed hosts": show the prefilled dialog right away.
+  if (prefillAsset && !dialog.open) open();
   dialog.addEventListener('cancel', () => w.show('', false));
 
   function readForm() {

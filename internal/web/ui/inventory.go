@@ -60,6 +60,8 @@ type hostView struct {
 	UpdatesSecurity int
 	UpdatesTotal    int
 	Reboot          bool
+	// UpdatesChecked is when the latest update check ran (zero: never).
+	UpdatesChecked time.Time
 	// Containers are the counts of the latest docker.list.
 	ContainersRunning int
 	ContainersTotal   int
@@ -244,6 +246,7 @@ func viewHost(host inventory.Host, pins map[string]*pb.HostKeyPin, pinsUnavailab
 	v.StateLabel, v.StateClass, v.StateFilter = stateBadge(st, v.KeyStatus)
 	if u, ok := b.updates[host.ID]; ok {
 		v.UpdatesSecurity, v.UpdatesTotal, v.Reboot = u.Security, u.Total, u.RebootRequired
+		v.UpdatesChecked = u.ObservedAt
 	}
 	if row, ok := b.docker[host.ID]; ok {
 		if l, err := dockerhost.ParseList(row.Result); err == nil {
@@ -494,7 +497,7 @@ var tagFingerprintRe = regexp.MustCompile(`(?i)^(sha256|md5):[0-9a-f]{2}(:[0-9a-
 
 // errTagsFormat is the tag validation error: the value looks like a
 // pasted host key or is not key=value labels.
-var errTagsFormat = errors.New("Tags are key=value labels; host keys are read and pinned under Enroll hosts")
+var errTagsFormat = errors.New("tags are key=value labels; host keys are read and pinned under Enroll hosts")
 
 // validateTagText checks a block of tag lines (one key=value per line).
 func validateTagText(text string) error {

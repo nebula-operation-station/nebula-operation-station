@@ -33,6 +33,8 @@ type Operations interface {
 	Get(ctx context.Context, id string) (executions.Execution, error)
 	List(ctx context.Context, limit int) ([]executions.Summary, error)
 	AllUpdates(ctx context.Context) (map[string]executions.HostUpdates, error)
+	// Updates is one host's latest update list with its packages.
+	Updates(ctx context.Context, host string) (executions.HostUpdates, error)
 	AllOpsStates(ctx context.Context) (map[string]executions.OpsState, error)
 	// LastResults is the latest successful result per host for one
 	// action (one query, not one per host).
@@ -51,25 +53,6 @@ type Operations interface {
 	Catalog(ctx context.Context) ([]actions.Action, error)
 	// Action finds an action at a version ("" for the current one).
 	Action(ctx context.Context, id, version string) (actions.Action, bool, error)
-}
-
-// updatesSummary is the inventory text of an update list and whether it
-// needs attention (security updates or a reboot).
-func updatesSummary(u executions.HostUpdates) (string, bool) {
-	var parts []string
-	if u.Total == 0 {
-		parts = append(parts, "up to date")
-	} else {
-		parts = append(parts, strconv.Itoa(u.Security)+" security / "+strconv.Itoa(u.Total)+" total")
-		if u.Kernel > 0 {
-			parts = append(parts, "kernel")
-		}
-	}
-	if u.RebootRequired {
-		parts = append(parts, "reboot required")
-	}
-	parts = append(parts, "checked "+u.ObservedAt.UTC().Format("2006-01-02 15:04 MST"))
-	return strings.Join(parts, ", "), u.Security > 0 || u.RebootRequired
 }
 
 const (

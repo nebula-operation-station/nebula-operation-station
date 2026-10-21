@@ -5,6 +5,7 @@ package ui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"sort"
@@ -173,7 +174,7 @@ func (h *Handler) handleHost(w http.ResponseWriter, r *http.Request) {
 	}
 	data := pageData{Title: "Host " + id, Active: "inventory", Content: "host",
 		Host:    &hostPageData{ID: id, Tab: tab, Tabs: hostTabs},
-		Scripts: []string{"webauthn.js", "host.js"}}
+		Scripts: []string{"webauthn.js", "host.js", "formpost.js"}}
 	data.Host.Warn = r.URL.Query().Get("warn")
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
 	defer cancel()
@@ -238,6 +239,13 @@ func (h *Handler) fillHost(ctx context.Context, host *inventory.Host, hp *hostPa
 	}
 	// Updates: the parsed package.list_updates, security first.
 	if u, ok := b.updates[id]; ok {
+		// The inventory batch has only the counts; the package list is
+		// read for this one host.
+		if full, err := h.operations.Updates(ctx, id); err == nil {
+			u = full
+		} else if !errors.Is(err, executions.ErrNoUpdates) {
+			h.log.Error("host updates", "host", id, "error", err)
+		}
 		for _, p := range u.Packages {
 			hp.Packages = append(hp.Packages, packageRow{Name: p.Name, From: p.From, To: p.To, Arch: p.Arch,
 				Security: p.Security, Kernel: p.Kernel})

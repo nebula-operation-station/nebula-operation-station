@@ -23,7 +23,8 @@
       if (isNaN(t.getTime())) continue;
       el.textContent = t.toLocaleString();
       var diff = t.getTime() - now;
-      el.title = diff >= 0 ? 'in ' + relative(diff) : relative(diff) + ' ago';
+      var rel = relative(diff);
+      el.title = rel === 'just now' ? rel : diff >= 0 ? 'in ' + rel : rel + ' ago';
     }
   }
 

@@ -58,7 +58,7 @@
   <div class="toolbar">
     <h2>Overview</h2>
     <div class="actions">
-      <form method="post" action="/hosts/{{.ID}}/refresh" class="inline-form">
+      <form method="post" action="/hosts/{{.ID}}/refresh" class="inline-form" data-fetch>
         <input type="hidden" name="tab" value="overview">
         <button type="submit" class="button button--small">Refresh all</button>
       </form>
@@ -99,7 +99,7 @@
   <div class="toolbar">
     <h2>Updates</h2>
     <div class="actions">
-      <form method="post" action="/hosts/{{.ID}}/refresh" class="inline-form">
+      <form method="post" action="/hosts/{{.ID}}/refresh" class="inline-form" data-fetch>
         <input type="hidden" name="tab" value="updates">
         <button type="submit" class="button button--small">Refresh</button>
       </form>
@@ -141,7 +141,7 @@
   <div class="toolbar">
     <h2>Containers</h2>
     <div class="actions">
-      <form method="post" action="/hosts/{{.ID}}/refresh" class="inline-form">
+      <form method="post" action="/hosts/{{.ID}}/refresh" class="inline-form" data-fetch>
         <input type="hidden" name="tab" value="containers">
         <button type="submit" class="button button--small">Refresh</button>
       </form>
@@ -182,7 +182,7 @@
   <div class="toolbar">
     <h2>Services</h2>
     <div class="actions">
-      <form method="post" action="/hosts/{{.ID}}/refresh" class="inline-form">
+      <form method="post" action="/hosts/{{.ID}}/refresh" class="inline-form" data-fetch>
         <input type="hidden" name="tab" value="services">
         <button type="submit" class="button button--small">Refresh</button>
       </form>
@@ -264,7 +264,7 @@
 <section class="panel" aria-label="Settings">
   <h2>Settings</h2>
   {{with .Settings}}
-  <form class="form form-grid" method="post" action="/hosts/{{$hid}}/settings">
+  <form class="form form-grid" method="post" action="/hosts/{{$hid}}/settings" data-fetch>
     <label>ID
       <input name="id" value="{{$hid}}" readonly>
     </label>
@@ -295,7 +295,7 @@
   </form>
   <h3>Delete host</h3>
   <p class="hint">Deleting removes the host from the inventory. Its executions and results stay in the history.</p>
-  <form class="form form-grid" method="post" action="/hosts/{{$hid}}/delete">
+  <form class="form form-grid" method="post" action="/hosts/{{$hid}}/delete" data-fetch>
     <label class="field--full">Type the host ID to delete
       <input type="text" name="confirm_id" autocomplete="off" required>
     </label>

@@ -111,6 +111,14 @@ func (f *fakeOps) AllUpdates(context.Context) (map[string]executions.HostUpdates
 	return map[string]executions.HostUpdates{"web": {HostID: "web", Total: 3, Security: 1, RebootRequired: true, ObservedAt: time.Unix(1791960000, 0)}}, nil
 }
 
+func (f *fakeOps) Updates(_ context.Context, host string) (executions.HostUpdates, error) {
+	u, ok := map[string]executions.HostUpdates{"web": {HostID: "web", Total: 3, Security: 1, RebootRequired: true, ObservedAt: time.Unix(1791960000, 0)}}[host]
+	if !ok {
+		return executions.HostUpdates{}, executions.ErrNoUpdates
+	}
+	return u, nil
+}
+
 func (f *fakeOps) AllOpsStates(context.Context) (map[string]executions.OpsState, error) {
 	return map[string]executions.OpsState{"web": {State: "WARNING", Reason: "1 security updates", ObservedAt: time.Unix(1791960000, 0)}}, nil
 }

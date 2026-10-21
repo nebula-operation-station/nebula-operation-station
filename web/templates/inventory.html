@@ -69,14 +69,16 @@
           {{if .UpdatesSecurity}}<span class="badge badge--critical">{{.UpdatesSecurity}} security</span>{{end}}
           {{if .UpdatesTotal}}<span class="badge badge--warning">{{.UpdatesTotal}} total</span>{{end}}
           {{if .Reboot}}<span class="badge badge--warning">reboot</span>{{end}}
-          {{if and (not .UpdatesTotal) (not .Reboot)}}—{{end}}
+          {{if .UpdatesChecked.IsZero}}<span class="hint">not checked</span>{{else}}
+          {{if and (not .UpdatesTotal) (not .Reboot)}}<span class="badge badge--ok">up to date</span>{{end}}
+          <span class="hint">checked {{timeTag .UpdatesChecked}}</span>{{end}}
         </td>
         <td>{{if .ContainersKnown}}{{.ContainersRunning}}/{{.ContainersTotal}}{{else}}—{{end}}</td>
         <td>
           {{if eq .KeyStatus "pinned"}}
           <span class="key-pinned" title="{{.KeyType}} {{.KeyFingerprint}}">
             <svg class="key-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M8 12 l3 3 l5 -6"></path></svg>
-            pinned <span class="mono">{{.KeyShort}}</span>
+            pinned
           </span>
           {{else if eq .KeyStatus "blocked"}}
           <span class="badge badge--critical">blocked</span>
