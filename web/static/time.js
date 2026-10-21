@@ -22,6 +22,7 @@
       var t = new Date(el.getAttribute('datetime'));
       if (isNaN(t.getTime())) continue;
       el.textContent = t.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' });
+      if (el.classList.contains('stale')) continue; // keep the server-set title "stale"
       var diff = t.getTime() - now;
       var rel = relative(diff);
       el.title = rel === 'just now' ? rel : diff >= 0 ? 'in ' + rel : rel + ' ago';

@@ -19,7 +19,7 @@
         <dt>Hosts</dt>
         <dd>
           <details class="schedule-hosts">
-            <summary>{{.HostCount}}</summary>
+            <summary>{{if eq .HostCount 1}}1 host{{else}}{{.HostCount}} hosts{{end}}</summary>
             <ul>
               {{range .HostList}}
               <li class="mono">{{.}}</li>

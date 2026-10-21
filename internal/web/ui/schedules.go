@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -59,6 +60,30 @@ type schedulesData struct {
 	// defaults are a day for 30 days.
 	IntervalOptions []scheduleIntervalOption
 	Interval, Days  string
+}
+
+// formatScheduleInterval renders an interval for the cards: "15 min",
+// "6 h", "1 day", "3 days".
+func formatScheduleInterval(d time.Duration) string {
+	if d%(24*time.Hour) == 0 {
+		n := int(d / (24 * time.Hour))
+		if n == 1 {
+			return "1 day"
+		}
+		return fmt.Sprintf("%d days", n)
+	}
+	if d%time.Hour == 0 {
+		n := int(d / time.Hour)
+		if n == 1 {
+			return "1 h"
+		}
+		return fmt.Sprintf("%d h", n)
+	}
+	n := int(d / time.Minute)
+	if n == 1 {
+		return "1 min"
+	}
+	return fmt.Sprintf("%d min", n)
 }
 
 // schedulePrefill reads the preselection from the query parameters
@@ -125,7 +150,7 @@ func (h *Handler) handleSchedules(w http.ResponseWriter, r *http.Request) {
 		}
 		row := scheduleRow{ID: x.ID, Short: x.ID[:8], State: state, Actions: strings.Join(x.Actions, ", "),
 			HostCount: len(x.Hosts), HostList: x.Hosts,
-			Interval: x.Interval.String(), Expires: x.ExpiresAt.UTC(), CreatedBy: x.CreatedBy,
+			Interval: formatScheduleInterval(x.Interval), Expires: x.ExpiresAt.UTC(), CreatedBy: x.CreatedBy,
 			Pending: state == "pending", Active: state == "active"}
 		switch state {
 		case "pending":

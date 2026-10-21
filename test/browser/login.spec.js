@@ -125,8 +125,8 @@ function check(cond, what) {
   await page.uncheck('input[name="action"][value="core.facts"]');
   await page.check('input[name="action"][value="service.list"]');
   await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('#schedule-create')]);
-  const schedRow = await page.textContent('section[aria-label="Scheduled checks"] tbody');
-  check(/service\.list/.test(schedRow) && /active/.test(schedRow) && /e2e-host/.test(schedRow), 'a schedule of a trusted LOW action is approved with the key');
+  const schedCard = await page.textContent('section[aria-label="Scheduled checks"] .schedule-card');
+  check(/service\.list/.test(schedCard) && /active/.test(schedCard) && /e2e-host/.test(schedCard), 'a schedule of a trusted LOW action is approved with the key');
 
   // Check updates on the same host (a real apt simulation on the test machine).
   await page.goto(base + '/operations/new');
@@ -161,6 +161,17 @@ function check(cond, what) {
   await Promise.all([page.waitForURL(/\/operations$/, { timeout: 15000 }), page.click('#bulk-refresh')]);
   check((((await page.content()).match(/core\.facts/g)) || []).length > opsBefore && /service\.list/.test(await page.textContent('main')),
     'refresh of the selection creates the read operations');
+  // The bulk bar can open the schedules page with the four reads and the
+  // selection preselected; the More menu offers to keep all hosts fresh.
+  await page.goto(base + '/inventory');
+  check(await page.locator('a[href*="/schedules?all=1"]').count() === 1, 'the inventory offers to keep all hosts fresh');
+  await page.check('tr[data-id="e2e-host"] input.host-select');
+  await Promise.all([page.waitForURL(/\/schedules\?/, { timeout: 15000 }), page.click('#bulk-schedule')]);
+  check(await page.isChecked('input[name="host"][value="e2e-host"]') &&
+    (await page.locator('input[name="action"]:checked').count()) === 4 &&
+    (await page.inputValue('#schedule-interval')) === '360' &&
+    (await page.inputValue('#schedule-days')) === '30',
+    'the bulk bar opens the schedules page with the four reads, the host and the 6 h preset preselected');
   // Runbooks: write one, save it as version 1, plan it with a parameter;
   // the executor does not know the script, so it needs the key (HIGH).
   await page.goto(base + '/runbooks/new');

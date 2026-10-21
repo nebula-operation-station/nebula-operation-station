@@ -861,9 +861,9 @@ time { white-space: nowrap; }
 .host-link:hover .host-name { color: var(--brand); text-decoration: underline; }
 .host-name { font-weight: 700; }
 .host-id { color: var(--text-muted); font-size: 0.75rem; }
-.host-os { max-width: 11rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.host-os { max-width: 7rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .host-status,
-.host-updates { min-width: 11rem; max-width: 16rem; white-space: normal; }
+.host-updates { min-width: 9rem; max-width: 11rem; white-space: normal; }
 .host-status .hint,
 .host-updates .hint {
   display: block;

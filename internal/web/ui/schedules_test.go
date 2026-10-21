@@ -68,7 +68,7 @@ func TestSchedulesPage(t *testing.T) {
 			ExpiresAt: time.Now().Add(-time.Hour), CreatedBy: "axel"},
 	}}
 	page := getBody(t, schedHandler(t, f), "/schedules")
-	for _, want := range []string{`<h3 class="mono">11111111</h3>`, "package.list_updates", "24h0m0s", "schedule-approve",
+	for _, want := range []string{`<h3 class="mono">11111111</h3>`, "package.list_updates", "1 day", "1 h", "schedule-approve",
 		`>expired</span>`, `value="core.facts"`, `value="package.list_updates"`, `&lt;b&gt;Web&lt;/b&gt;`} {
 		if !strings.Contains(page, want) {
 			t.Errorf("page misses %q", want)
