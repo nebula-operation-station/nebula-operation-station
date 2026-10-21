@@ -7,6 +7,13 @@
  * custom properties so components stay consistent across pages and themes.
  */
 
+/* The hidden attribute always wins over component display rules (for
+   example .form label { display: flex }), so script-toggled parts stay
+   hidden. */
+[hidden] {
+  display: none !important;
+}
+
 :root {
   /* type */
   --font: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -513,6 +520,38 @@ legend {
   color: var(--text);
 }
 .choice input { accent-color: var(--brand); }
+
+/* Radio and checkbox rows inside forms: the control on the left, the text
+   next to it, a hint on its own line below the title. (.form label would
+   otherwise stack them as a column.) */
+.form .choice {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 0.5rem;
+  row-gap: 0.1rem;
+  font-size: var(--fs-base);
+  font-weight: 400;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.form .choice .hint {
+  flex-basis: 100%;
+  padding-left: 1.6rem;
+}
+.form input[type="radio"],
+.form input[type="checkbox"] {
+  width: auto;
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+  flex: 0 0 auto;
+  accent-color: var(--brand);
+}
+/* Forms built from fieldsets of choices need more width than a field list. */
+.form:has(> fieldset) { max-width: 52rem; }
+.form fieldset { min-width: 0; }
 
 .message { min-height: 1.5em; margin: 0; }
 .message--error { color: var(--crit); }
