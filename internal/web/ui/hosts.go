@@ -208,7 +208,7 @@ func (h *Handler) fillHost(ctx context.Context, host *inventory.Host, hp *hostPa
 	id := host.ID
 	pins, pinsUnavailable := h.hostKeyPins(ctx)
 	b := h.batchData(ctx)
-	v := viewHost(*host, pins, pinsUnavailable, b)
+	v := viewHost(*host, pins, pinsUnavailable, b, time.Now())
 	hp.Found = true
 	hp.DisplayName = v.DisplayName
 	hp.Environment = v.Environment

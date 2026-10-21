@@ -7,27 +7,40 @@
      criticality. It runs each action on each host at most once per interval, until the schedule expires or you revoke it.</p>
   {{with .Schedules}}
   {{if .Rows}}
-  <div class="table-wrap">
-  <table class="inventory">
-    <thead><tr><th>Schedule</th><th>Actions</th><th>Hosts</th><th>Every</th><th>Until</th><th>State</th><th>By</th><th></th></tr></thead>
-    <tbody>
-      {{range .Rows}}
-      <tr>
-        <td>{{.Short}}</td>
-        <td>{{.Actions}}</td>
-        <td>{{.Hosts}}</td>
-        <td>{{.Interval}}</td>
-        <td>{{timeTag .Expires}}</td>
-        <td>{{.State}}</td>
-        <td>{{.CreatedBy}}</td>
-        <td>
-          {{if and .Pending .Options}}<button type="button" class="button button--small schedule-approve" data-id="{{.ID}}" data-options="{{.Options}}">Approve with security key</button>{{end}}
-          {{if or .Pending .Active}}<button type="button" class="button button--small button--danger schedule-revoke" data-id="{{.ID}}">Revoke</button>{{end}}
-        </td>
-      </tr>
+  <div class="schedule-cards">
+    {{range .Rows}}
+    <article class="schedule-card{{if .Pending}} schedule-card--pending{{end}}">
+      <header class="schedule-card__head">
+        <h3 class="mono">{{.Short}}</h3>
+        <span class="badge {{.StateClass}}">{{.State}}</span>
+      </header>
+      <dl class="schedule-meta">
+        <dt>Actions</dt><dd class="mono">{{.Actions}}</dd>
+        <dt>Hosts</dt>
+        <dd>
+          <details class="schedule-hosts">
+            <summary>{{.HostCount}}</summary>
+            <ul>
+              {{range .HostList}}
+              <li class="mono">{{.}}</li>
+              {{end}}
+            </ul>
+          </details>
+        </dd>
+        <dt>Every</dt><dd>{{.Interval}}</dd>
+        <dt>Until</dt><dd>{{timeTag .Expires}}</dd>
+        {{if .LastRunSet}}<dt>Last run</dt><dd>{{timeTag .LastRun}}</dd>{{end}}
+        {{if .NextDueSet}}<dt>Next due</dt><dd>{{timeTag .NextDue}}</dd>{{end}}
+      </dl>
+      <p class="hint">by {{.CreatedBy}}</p>
+      {{if or .Pending .Active}}
+      <div class="actions">
+        {{if and .Pending .Options}}<button type="button" class="button button--small schedule-approve" data-id="{{.ID}}" data-options="{{.Options}}">Approve with security key</button>{{end}}
+        <button type="button" class="button button--small button--danger schedule-revoke" data-id="{{.ID}}">Revoke</button>
+      </div>
       {{end}}
-    </tbody>
-  </table>
+    </article>
+    {{end}}
   </div>
   {{else}}
   <p>No schedules yet.</p>
@@ -35,33 +48,33 @@
   {{end}}
 </section>
 {{with .Schedules}}
+{{$sd := .}}
 <section class="panel" aria-label="New schedule">
   <h2>New schedule</h2>
   <form id="schedule-form" class="form" novalidate>
     <fieldset>
       <legend>Actions (read-only, without parameters)</legend>
       {{range .Actions}}
-      <label class="choice"><input type="checkbox" name="action" value="{{.ID}}"> <strong>{{.Title}}</strong> ({{.ID}})
+      <label class="choice"><input type="checkbox" name="action" value="{{.ID}}"{{if .Selected}} checked{{end}}> <strong>{{.Title}}</strong> ({{.ID}})
         <span class="hint">{{.Description}}</span></label>
       {{end}}
     </fieldset>
     <fieldset>
       <legend>Hosts</legend>
       {{range .Hosts}}
-      <label class="choice"><input type="checkbox" name="host" value="{{.ID}}"> {{.Name}} <span class="hint">({{.ID}})</span></label>
+      <label class="choice"><input type="checkbox" name="host" value="{{.ID}}"{{if .Checked}} checked{{end}}> {{.Name}} <span class="hint">({{.ID}})</span></label>
       {{else}}
       <p>No enrolled hosts.</p>
       {{end}}
     </fieldset>
     <label>Every
       <select id="schedule-interval">
-        <option value="60">hour</option>
-        <option value="360">6 hours</option>
-        <option value="1440" selected>day</option>
-        <option value="10080">week</option>
+        {{range .IntervalOptions}}
+        <option value="{{.Value}}"{{if eq $sd.Interval .Value}} selected{{end}}>{{.Label}}</option>
+        {{end}}
       </select></label>
     <label>For (days, at most 90)
-      <input type="number" id="schedule-days" min="1" max="90" value="30" inputmode="numeric"></label>
+      <input type="number" id="schedule-days" min="1" max="90" value="{{$sd.Days}}" inputmode="numeric"></label>
     <div class="actions">
       <button type="submit" id="schedule-create" class="button">Propose schedule</button>
     </div>

@@ -74,9 +74,16 @@ type hostView struct {
 	// LastSeen is the newest finished execution on the host.
 	LastSeen    time.Time
 	LastSeenSet bool
+	// Stale is true for an enrolled host whose newest read is older than
+	// staleThreshold (or that was never read).
+	Stale bool
 	// Search is the lowercased text the client-side filter matches.
 	Search string
 }
+
+// staleThreshold is how long an enrolled host may go without a read
+// before the inventory marks it stale.
+const staleThreshold = 24 * time.Hour
 
 // batchData holds the per-host reads the inventory pages need, fetched
 // with a constant number of queries (one per action, not one per host).
@@ -196,7 +203,7 @@ func stateBadge(state, keyStatus string) (label, class, filter string) {
 // viewHost formats one inventory host for the table. The facts, update
 // lists and container lists are untrusted host output: they are parsed
 // by the bounded parsers and rendered as text only.
-func viewHost(host inventory.Host, pins map[string]*pb.HostKeyPin, pinsUnavailable bool, b batchData) hostView {
+func viewHost(host inventory.Host, pins map[string]*pb.HostKeyPin, pinsUnavailable bool, b batchData, now time.Time) hostView {
 	v := hostView{
 		ID:          host.ID,
 		DisplayName: host.DisplayName,
@@ -276,6 +283,12 @@ func viewHost(host inventory.Host, pins map[string]*pb.HostKeyPin, pinsUnavailab
 	if at, ok := b.lastSeen[host.ID]; ok {
 		v.LastSeen, v.LastSeenSet = at, true
 	}
+	// Stale: enrolled (pinned) hosts only, and only when the reads could
+	// be listed at all — with the executor unavailable, "never read" is
+	// not a statement about the host.
+	if v.KeyStatus == "pinned" && b.lastSeen != nil && (!v.LastSeenSet || now.Sub(v.LastSeen) > staleThreshold) {
+		v.Stale = true
+	}
 	var sb strings.Builder
 	sb.WriteString(strings.ToLower(host.ID))
 	sb.WriteByte(' ')
@@ -292,12 +305,15 @@ func viewHost(host inventory.Host, pins map[string]*pb.HostKeyPin, pinsUnavailab
 
 // inventoryRowMatches reports whether a row passes the server-side
 // filters (?state=, ?env=, ?updates=1, ?reboot=1, ?containers=1,
-// ?services=1). Empty filters select everything.
-func inventoryRowMatches(v hostView, state, env string, updates, reboot, containers, services bool) bool {
+// ?services=1, ?stale=1). Empty filters select everything.
+func inventoryRowMatches(v hostView, state, env string, updates, reboot, containers, services, stale bool) bool {
 	if state != "" && v.StateFilter != state {
 		return false
 	}
 	if env != "" && v.Environment != env {
+		return false
+	}
+	if stale && !v.Stale {
 		return false
 	}
 	if updates && v.UpdatesTotal == 0 {
@@ -372,23 +388,25 @@ func (h *Handler) renderInventory(w http.ResponseWriter, r *http.Request, dialog
 	}
 	pins, pinsUnavailable := h.hostKeyPins(ctx)
 	b := h.batchData(ctx)
+	now := time.Now()
 	q := r.URL.Query()
 	stateF, envF := q.Get("state"), q.Get("env")
 	updatesF, rebootF := q.Get("updates") == "1", q.Get("reboot") == "1"
 	containersF, servicesF := q.Get("containers") == "1", q.Get("services") == "1"
-	filtered := stateF != "" || envF != "" || updatesF || rebootF || containersF || servicesF
+	staleF := q.Get("stale") == "1"
+	filtered := stateF != "" || envF != "" || updatesF || rebootF || containersF || servicesF || staleF
 	envs := map[string]bool{}
 	for _, host := range hosts {
 		envs[string(host.Environment)] = true
 	}
 	for _, host := range hosts {
-		v := viewHost(host, pins, pinsUnavailable, b)
-		if filtered && !inventoryRowMatches(v, stateF, envF, updatesF, rebootF, containersF, servicesF) {
+		v := viewHost(host, pins, pinsUnavailable, b, now)
+		if filtered && !inventoryRowMatches(v, stateF, envF, updatesF, rebootF, containersF, servicesF, staleF) {
 			continue
 		}
 		data.Inventory = append(data.Inventory, v)
 	}
-	data.InventoryState, data.InventoryEnv = stateF, envF
+	data.InventoryState, data.InventoryEnv, data.InventoryStale = stateF, envF, staleF
 	for e := range envs {
 		data.InventoryEnvs = append(data.InventoryEnvs, e)
 	}
@@ -877,9 +895,9 @@ func (h *Handler) dashboardTiles(ctx context.Context) []dashboardTile {
 		{Label: "Unknown", Class: "tile--unknown", Href: "/inventory?state=unknown"},
 		{Label: "Not enrolled", Class: "tile--unknown", Href: "/inventory?state=not_enrolled"},
 	}
-	var updates, reboot, containers, services int
+	var updates, reboot, containers, services, stale int
 	for _, host := range hosts {
-		v := viewHost(host, pins, pinsUnavailable, b)
+		v := viewHost(host, pins, pinsUnavailable, b, time.Now())
 		switch v.StateFilter {
 		case "ok":
 			tiles[0].Num++
@@ -904,12 +922,16 @@ func (h *Handler) dashboardTiles(ctx context.Context) []dashboardTile {
 		if v.FailedServices > 0 {
 			services++
 		}
+		if v.Stale {
+			stale++
+		}
 	}
 	tiles = append(tiles,
 		dashboardTile{Num: updates, Label: "Hosts with updates", Class: "tile--accent", Href: "/inventory?updates=1"},
 		dashboardTile{Num: reboot, Label: "Reboot required", Class: "tile--accent", Href: "/inventory?reboot=1"},
 		dashboardTile{Num: containers, Label: "Containers with updates", Class: "tile--accent", Href: "/inventory?containers=1"},
 		dashboardTile{Num: services, Label: "Failed services", Class: "tile--accent", Href: "/inventory?services=1"},
+		dashboardTile{Num: stale, Label: "Stale hosts (no read in 24 h)", Class: "tile--warning", Href: "/inventory?stale=1"},
 	)
 	return tiles
 }

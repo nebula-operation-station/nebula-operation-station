@@ -8,6 +8,7 @@
       <summary class="button button--secondary">More</summary>
       <a href="/inventory/import">Import CSV</a>
       {{if .EnrollEnabled}}<a href="/inventory/enroll">Enroll hosts</a>{{end}}
+      <a href="/schedules?all=1&amp;action=core.facts&amp;action=package.list_updates&amp;action=docker.list&amp;action=service.list&amp;interval=360&amp;days=30">Keep all hosts fresh…</a>
     </details>
     {{end}}
   </div>
@@ -16,20 +17,24 @@
 <div class="filters">
   <input type="search" id="inventory-filter" class="filter" placeholder="Filter by ID, name, endpoint or OS" aria-label="Filter hosts" autocomplete="off">
   <div class="chips" role="group" aria-label="Filter by state">
-    <a class="chip{{if eq .InventoryState ""}} chip--active{{end}}" href="/inventory{{if .InventoryEnv}}?env={{.InventoryEnv}}{{end}}">All</a>
-    <a class="chip{{if eq .InventoryState "ok"}} chip--active{{end}}" href="/inventory?state=ok{{if .InventoryEnv}}&amp;env={{.InventoryEnv}}{{end}}">OK</a>
-    <a class="chip{{if eq .InventoryState "warning"}} chip--active{{end}}" href="/inventory?state=warning{{if .InventoryEnv}}&amp;env={{.InventoryEnv}}{{end}}">Warning</a>
-    <a class="chip{{if eq .InventoryState "critical"}} chip--active{{end}}" href="/inventory?state=critical{{if .InventoryEnv}}&amp;env={{.InventoryEnv}}{{end}}">Critical</a>
-    <a class="chip{{if eq .InventoryState "unknown"}} chip--active{{end}}" href="/inventory?state=unknown{{if .InventoryEnv}}&amp;env={{.InventoryEnv}}{{end}}">Unknown</a>
-    <a class="chip{{if eq .InventoryState "not_enrolled"}} chip--active{{end}}" href="/inventory?state=not_enrolled{{if .InventoryEnv}}&amp;env={{.InventoryEnv}}{{end}}">Not enrolled</a>
+    <a class="chip{{if eq .InventoryState ""}} chip--active{{end}}" href="/inventory{{if .InventoryEnv}}?env={{.InventoryEnv}}{{if .InventoryStale}}&amp;stale=1{{end}}{{else if .InventoryStale}}?stale=1{{end}}">All</a>
+    <a class="chip{{if eq .InventoryState "ok"}} chip--active{{end}}" href="/inventory?state=ok{{if .InventoryEnv}}&amp;env={{.InventoryEnv}}{{end}}{{if .InventoryStale}}&amp;stale=1{{end}}">OK</a>
+    <a class="chip{{if eq .InventoryState "warning"}} chip--active{{end}}" href="/inventory?state=warning{{if .InventoryEnv}}&amp;env={{.InventoryEnv}}{{end}}{{if .InventoryStale}}&amp;stale=1{{end}}">Warning</a>
+    <a class="chip{{if eq .InventoryState "critical"}} chip--active{{end}}" href="/inventory?state=critical{{if .InventoryEnv}}&amp;env={{.InventoryEnv}}{{end}}{{if .InventoryStale}}&amp;stale=1{{end}}">Critical</a>
+    <a class="chip{{if eq .InventoryState "unknown"}} chip--active{{end}}" href="/inventory?state=unknown{{if .InventoryEnv}}&amp;env={{.InventoryEnv}}{{end}}{{if .InventoryStale}}&amp;stale=1{{end}}">Unknown</a>
+    <a class="chip{{if eq .InventoryState "not_enrolled"}} chip--active{{end}}" href="/inventory?state=not_enrolled{{if .InventoryEnv}}&amp;env={{.InventoryEnv}}{{end}}{{if .InventoryStale}}&amp;stale=1{{end}}">Not enrolled</a>
   </div>
   {{if .InventoryEnvs}}
   <div class="chips" role="group" aria-label="Filter by environment">
     {{range .InventoryEnvs}}
-    <a class="chip chip--env{{if eq $.InventoryEnv .}} chip--active{{end}}" href="/inventory?env={{.}}{{if $.InventoryState}}&amp;state={{$.InventoryState}}{{end}}">{{.}}</a>
+    <a class="chip chip--env{{if eq $.InventoryEnv .}} chip--active{{end}}" href="/inventory?env={{.}}{{if $.InventoryState}}&amp;state={{$.InventoryState}}{{end}}{{if $.InventoryStale}}&amp;stale=1{{end}}">{{.}}</a>
     {{end}}
   </div>
   {{end}}
+  <div class="chips" role="group" aria-label="Filter by freshness">
+    <a class="chip{{if not .InventoryStale}} chip--active{{end}}" href="/inventory{{if .InventoryState}}?state={{.InventoryState}}{{if .InventoryEnv}}&amp;env={{.InventoryEnv}}{{end}}{{else if .InventoryEnv}}?env={{.InventoryEnv}}{{end}}">Fresh</a>
+    <a class="chip{{if .InventoryStale}} chip--active{{end}}" href="/inventory?stale=1{{if .InventoryEnv}}&amp;env={{.InventoryEnv}}{{end}}{{if .InventoryState}}&amp;state={{.InventoryState}}{{end}}">Stale (no read in 24 h)</a>
+  </div>
 </div>
 {{end}}
 {{if .InventoryUnavailable}}
@@ -41,6 +46,7 @@
 <div class="bulkbar" id="bulkbar" hidden>
   <strong id="bulk-count">0 selected</strong>
   <button type="button" id="bulk-refresh" class="button">Refresh updates, containers, services</button>
+  <button type="button" id="bulk-schedule" class="button button--secondary">Schedule refresh…</button>
   <button type="button" id="bulk-reboot" class="button button--danger">Reboot…</button>
   <span class="hint">Refreshes run without a key tap while a privileged session is open (Dashboard). Reboot opens the operation form: choose the rollout, then approve.</span>
   <p id="bulk-message" class="message" role="status" aria-live="polite"></p>
@@ -101,7 +107,7 @@
           <span class="hint">not enrolled</span>
           {{end}}
         </td>
-        <td>{{if .LastSeenSet}}<time datetime="{{.LastSeen.Format "2006-01-02T15:04:05Z07:00"}}">{{.LastSeen.Format "2 Jan 2006 15:04 UTC"}}</time>{{else}}—{{end}}</td>
+        <td>{{if .LastSeenSet}}<time datetime="{{.LastSeen.Format "2006-01-02T15:04:05Z07:00"}}"{{if .Stale}} class="stale" title="stale"{{end}}>{{.LastSeen.Format "2 Jan 2006 15:04 UTC"}}</time>{{else}}<span{{if .Stale}} class="stale" title="stale"{{end}}>—</span>{{end}}</td>
       </tr>
       {{end}}
     </tbody>

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,15 +27,74 @@ type Schedules interface {
 }
 
 type scheduleRow struct {
-	ID, Short, State, Actions, Hosts, Interval, CreatedBy, Options string
-	Expires                                                        time.Time
-	Pending, Active                                                bool
+	ID, Short, State, StateClass, Actions, Interval, CreatedBy, Options string
+	HostCount                                                           int
+	HostList                                                            []string
+	Expires                                                             time.Time
+	LastRun, NextDue                                                    time.Time
+	LastRunSet, NextDueSet                                              bool
+	Pending, Active                                                     bool
 }
+
+// scheduleIntervalOption is one interval the form offers.
+type scheduleIntervalOption struct{ Value, Label string }
+
+// scheduleIntervals are the intervals the form offers (minutes, as the
+// create endpoint takes interval_minutes). The default is a day; the
+// inventory's "Schedule refresh…" presets 6 hours.
+var scheduleIntervals = []scheduleIntervalOption{
+	{Value: "60", Label: "hour"},
+	{Value: "360", Label: "6 hours"},
+	{Value: "1440", Label: "day"},
+	{Value: "10080", Label: "week"},
+}
+
+const defaultScheduleInterval = "1440"
 
 type schedulesData struct {
 	Rows    []scheduleRow
 	Actions []actionView
 	Hosts   []opsHostOption
+	// Interval and Days preselect the form (query parameters); the
+	// defaults are a day for 30 days.
+	IntervalOptions []scheduleIntervalOption
+	Interval, Days  string
+}
+
+// schedulePrefill reads the preselection from the query parameters
+// (?action=, ?host=, ?all=1, ?interval=, ?days=, as /operations/new?host=
+// does). Only values the form can hold are kept: actions the executor may
+// schedule, hosts the form offers, one of the offered intervals, and a
+// whole number of days 1 to 90. Everything else is ignored.
+func schedulePrefill(r *http.Request, schedulable map[string]bool, offeredHosts map[string]bool) (actions, hosts map[string]bool, allHosts bool, interval, days string) {
+	interval, days = defaultScheduleInterval, "30"
+	actions, hosts = map[string]bool{}, map[string]bool{}
+	q := r.URL.Query()
+	for _, a := range q["action"] {
+		if schedulable[a] {
+			actions[a] = true
+		}
+	}
+	for _, id := range q["host"] {
+		if offeredHosts[id] {
+			hosts[id] = true
+		}
+	}
+	allHosts = q.Get("all") == "1"
+	if v := q.Get("interval"); v != "" {
+		for _, o := range scheduleIntervals {
+			if o.Value == v {
+				interval = v
+				break
+			}
+		}
+	}
+	if v := q.Get("days"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= executions.MaxScheduleDays {
+			days = strconv.Itoa(n)
+		}
+	}
+	return
 }
 
 func (h *Handler) schedulesEnabled(w http.ResponseWriter, r *http.Request) bool {
@@ -52,7 +112,7 @@ func (h *Handler) handleSchedules(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
 	defer cancel()
 	data := pageData{Title: "Scheduled checks", Active: "operations", Content: "schedules", Scripts: []string{"webauthn.js", "schedules.js"}}
-	sd := &schedulesData{}
+	sd := &schedulesData{IntervalOptions: scheduleIntervals, Interval: defaultScheduleInterval, Days: "30"}
 	list, err := h.schedules.Schedules(ctx)
 	if err != nil {
 		h.log.Error("list schedules", "error", err)
@@ -63,17 +123,35 @@ func (h *Handler) handleSchedules(w http.ResponseWriter, r *http.Request) {
 		if state == "active" && !now.Before(x.ExpiresAt) {
 			state = "expired"
 		}
-		row := scheduleRow{ID: x.ID, Short: x.ID[:8], State: state, Actions: strings.Join(x.Actions, ", "), Hosts: strings.Join(x.Hosts, ", "),
+		row := scheduleRow{ID: x.ID, Short: x.ID[:8], State: state, Actions: strings.Join(x.Actions, ", "),
+			HostCount: len(x.Hosts), HostList: x.Hosts,
 			Interval: x.Interval.String(), Expires: x.ExpiresAt.UTC(), CreatedBy: x.CreatedBy,
 			Pending: state == "pending", Active: state == "active"}
+		switch state {
+		case "pending":
+			row.StateClass = "badge--pending"
+		case "active":
+			row.StateClass = "badge--ok"
+		default:
+			row.StateClass = "badge--unknown"
+		}
+		if !x.LastRun.IsZero() {
+			row.LastRun, row.LastRunSet = x.LastRun.UTC(), true
+		}
+		if state == "active" && row.LastRunSet {
+			row.NextDue, row.NextDueSet = x.LastRun.Add(x.Interval).UTC(), true
+		}
 		if row.Pending && len(x.Options) > 0 && json.Valid(x.Options) {
 			row.Options = string(x.Options)
 		}
 		sd.Rows = append(sd.Rows, row)
 	}
+	schedulable := map[string]bool{}
 	for _, a := range executions.SortedActions() {
+		schedulable[a.ID] = true
 		sd.Actions = append(sd.Actions, actionView{ID: a.ID, Title: a.Title, Description: a.Description, ReadOnly: true})
 	}
+	offered := map[string]bool{}
 	if h.hosts != nil && h.hostKeys != nil {
 		hosts, err := h.hosts(ctx)
 		if err != nil {
@@ -92,8 +170,20 @@ func (h *Handler) handleSchedules(w http.ResponseWriter, r *http.Request) {
 					name = x.ID
 				}
 				sd.Hosts = append(sd.Hosts, opsHostOption{ID: x.ID, Name: name, Usable: true})
+				offered[x.ID] = true
 			}
 		}
+	}
+	// Prefill from the query parameters (the inventory's "Schedule
+	// refresh…" and "Keep all hosts fresh…"). It only checks boxes:
+	// nothing is created without the normal approval flow.
+	preActions, preHosts, preAll, interval, days := schedulePrefill(r, schedulable, offered)
+	sd.Interval, sd.Days = interval, days
+	for i := range sd.Actions {
+		sd.Actions[i].Selected = preActions[sd.Actions[i].ID]
+	}
+	for i := range sd.Hosts {
+		sd.Hosts[i].Checked = preHosts[sd.Hosts[i].ID] || preAll
 	}
 	data.Schedules = sd
 	h.render(w, r, data)
