@@ -5,7 +5,29 @@
     <a class="button" href="/operations/new">New operation</a>
     <a class="button" href="/schedules">Scheduled checks</a>
   </div>
-  {{if .Ops.List}}
+  {{if .Ops.Pending}}
+  <section class="panel panel--alert" aria-label="Waiting for your approval">
+    <h2>Waiting for your approval</h2>
+    <ul class="approval-list">
+      {{range .Ops.Pending}}
+      <li><a href="/operations/{{.ID}}">{{.Short}}</a>
+        {{if .Title}}<strong>{{.Title}}</strong>{{else}}<code class="mono">{{.Action}}</code>{{end}}
+        — {{.Hosts}} host{{if ne .Hosts 1}}s{{end}}, by {{.CreatedBy}}, {{timeTag .Created}}</li>
+      {{end}}
+    </ul>
+  </section>
+  {{end}}
+  <div class="filters">
+    <input type="search" id="operations-filter" class="filter" placeholder="Filter by action or host" aria-label="Filter operations" autocomplete="off">
+    <div class="chips" role="group" aria-label="Filter by state">
+      <a class="chip{{if eq .Ops.StateFilter ""}} chip--active{{end}}" href="/operations">All</a>
+      <a class="chip{{if eq .Ops.StateFilter "pending"}} chip--active{{end}}" href="/operations?state=pending">Waiting for approval</a>
+      <a class="chip{{if eq .Ops.StateFilter "running"}} chip--active{{end}}" href="/operations?state=running">Running</a>
+      <a class="chip{{if eq .Ops.StateFilter "finished"}} chip--active{{end}}" href="/operations?state=finished">Finished</a>
+      <a class="chip{{if eq .Ops.StateFilter "failed"}} chip--active{{end}}" href="/operations?state=failed">Failed</a>
+    </div>
+  </div>
+  {{if .Ops.Items}}
   <div class="table-wrap">
   <table class="inventory">
     <thead>
@@ -18,20 +40,39 @@
         <th>Not successful</th>
         <th>By</th>
         <th>Created</th>
+        <th>Finished</th>
       </tr>
     </thead>
     <tbody>
-      {{range .Ops.List}}
-      <tr>
-        <td><a href="/operations/{{.ID}}">{{.Short}}</a></td>
-        <td>{{.Action}}</td>
-        <td>{{.Risk}}</td>
-        <td>{{.State}}</td>
-        <td>{{.Hosts}}</td>
-        <td>{{.Failed}}</td>
-        <td>{{.CreatedBy}}</td>
-        <td>{{timeTag .Created}}</td>
+      {{range .Ops.Items}}
+      {{if .Group}}
+      <tr class="op-group-row" data-search="{{.Group.Search}}">
+        <td colspan="9">
+          <details class="op-group">
+            <summary><strong>{{.Group.Label}}</strong> — {{.Group.Hosts}} host{{if ne .Group.Hosts 1}}s{{end}}, by {{.Group.CreatedBy}}, {{timeTag .Group.Created}}</summary>
+            <ul class="op-group__list">
+              {{range .Group.Rows}}
+              <li><a href="/operations/{{.ID}}">{{.Short}}</a>
+                {{if .Title}}<strong>{{.Title}}</strong>{{else}}<code class="mono">{{.Action}}</code>{{end}}
+                <span class="badge {{.StateClass}}">{{.State}}</span></li>
+              {{end}}
+            </ul>
+          </details>
+        </td>
       </tr>
+      {{else}}
+      <tr data-search="{{.Row.Search}}">
+        <td><a href="/operations/{{.Row.ID}}">{{.Row.Short}}</a></td>
+        <td>{{if .Row.Title}}<strong>{{.Row.Title}}</strong> <span class="hint mono">{{.Row.Action}}</span>{{else}}<code class="mono">{{.Row.Action}}</code>{{end}}</td>
+        <td>{{.Row.Risk}}</td>
+        <td><span class="badge {{.Row.StateClass}}">{{.Row.State}}</span></td>
+        <td>{{.Row.HostNames}}</td>
+        <td>{{.Row.Failed}}</td>
+        <td>{{.Row.CreatedBy}}</td>
+        <td>{{timeTag .Row.Created}}</td>
+        <td>{{if .Row.FinishedSet}}{{timeTag .Row.Finished}}{{else}}—{{end}}</td>
+      </tr>
+      {{end}}
       {{end}}
     </tbody>
   </table>

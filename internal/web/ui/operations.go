@@ -41,6 +41,8 @@ type Operations interface {
 	LastResults(ctx context.Context, actionID string) (map[string]executions.LastResultRow, error)
 	// LastSeenAll is the newest finished execution per host.
 	LastSeenAll(ctx context.Context) (map[string]time.Time, error)
+	// ListHosts is the host IDs of the given executions (one query).
+	ListHosts(ctx context.Context, ids []string) (map[string][]string, error)
 	// ListHost is the newest executions that targeted a host (the host
 	// page's operations tab).
 	ListHost(ctx context.Context, host string, limit int) ([]executions.Summary, error)
@@ -65,16 +67,47 @@ const (
 
 // operationsData is the page data of the operations pages.
 type operationsData struct {
-	List    []opsRow
-	Actions []actionView
-	Hosts   []opsHostOption
-	Exec    *execView
+	// Items is the list: single operations and groups, newest first.
+	Items []opsItem
+	// Pending are the operations waiting for approval (the section at
+	// the top of the page).
+	Pending []opsRow
+	// StateFilter is the active ?state= chip.
+	StateFilter string
+	Actions     []actionView
+	Hosts       []opsHostOption
+	Exec        *execView
 }
 
 type opsRow struct {
-	ID, Short, Action, Risk, State, CreatedBy string
-	Created                                   time.Time
-	Hosts, Failed                             int
+	ID, Short, Action, Title, Risk, State, StateClass, CreatedBy string
+	Created, Finished                                            time.Time
+	FinishedSet                                                  bool
+	Hosts, Failed                                                int
+	// HostNames is the compact host display (first 3 names + "+N").
+	HostNames string
+	// Search is the lowercased text the client-side filter matches
+	// (ID, action, host names).
+	Search string
+	// hostKey is the sorted host set (grouping key, not rendered).
+	hostKey string
+}
+
+// opsItem is one row of the operations list: a single operation or a
+// group of operations created together (the inventory bulk refresh).
+type opsItem struct {
+	Row   *opsRow
+	Group *opsGroup
+}
+
+// opsGroup is a batch of operations collapsed into one expandable row.
+type opsGroup struct {
+	Label     string
+	Hosts     int
+	CreatedBy string
+	Created   time.Time
+	Search    string
+	Rows      []opsRow
 }
 
 type actionView struct {
@@ -161,7 +194,7 @@ func (h *Handler) operationsEnabled(w http.ResponseWriter, r *http.Request) bool
 }
 
 func (h *Handler) handleOperations(w http.ResponseWriter, r *http.Request) {
-	data := pageData{Title: "Operations", Active: "operations", Content: "operations"}
+	data := pageData{Title: "Operations", Active: "operations", Content: "operations", Scripts: []string{"operations.js"}}
 	if h.operations == nil {
 		data.Content = "empty"
 		h.render(w, r, data)
@@ -175,13 +208,132 @@ func (h *Handler) handleOperations(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "operations unavailable", http.StatusInternalServerError)
 		return
 	}
-	ops := &operationsData{}
-	for _, e := range list {
-		ops.List = append(ops.List, opsRow{ID: e.ID, Short: e.ID[:8], Action: e.ActionID, Risk: e.Risk, State: e.State,
-			CreatedBy: e.CreatedBy, Created: e.CreatedAt.UTC(), Hosts: e.Hosts, Failed: e.Failed})
+	ids := make([]string, len(list))
+	for i, e := range list {
+		ids[i] = e.ID
 	}
-	data.Ops = ops
+	hostIDs, err := h.operations.ListHosts(ctx, ids)
+	if err != nil {
+		h.log.Error("list execution hosts", "error", err)
+		hostIDs = map[string][]string{}
+	}
+	catalog, err := h.operations.Catalog(ctx)
+	if err != nil {
+		h.log.Error("action catalog", "error", err)
+	}
+	readOnly := map[string]bool{}
+	actionTitle := map[string]string{}
+	for _, a := range catalog {
+		readOnly[a.ID] = a.ReadOnly
+		actionTitle[a.ID] = a.Title
+	}
+	names := map[string]string{}
+	if h.hosts != nil {
+		if hosts, err := h.hosts(ctx); err == nil {
+			for _, x := range hosts {
+				name := x.DisplayName
+				if name == "" {
+					name = x.ID
+				}
+				names[x.ID] = name
+			}
+		}
+	}
+	stateF := r.URL.Query().Get("state")
+	switch stateF {
+	case "", "pending", "running", "finished", "failed":
+	default:
+		stateF = "" // invalid values are ignored
+	}
+	var rows, pending []opsRow
+	for _, e := range list {
+		row := opsRow{ID: e.ID, Short: e.ID[:8], Action: e.ActionID, Title: actionTitle[e.ActionID],
+			Risk: e.Risk, State: e.State, StateClass: opsStateClass(e.State), CreatedBy: e.CreatedBy,
+			Created: e.CreatedAt.UTC(), Finished: e.FinishedAt.UTC(), FinishedSet: !e.FinishedAt.IsZero(),
+			Hosts: e.Hosts, Failed: e.Failed, hostKey: strings.Join(hostIDs[e.ID], "\n")}
+		var parts []string
+		for _, id := range hostIDs[e.ID] {
+			n := names[id]
+			if n == "" {
+				n = id
+			}
+			parts = append(parts, n)
+		}
+		row.HostNames = compactHosts(parts)
+		row.Search = strings.ToLower(e.ID + " " + e.ActionID + " " + strings.Join(parts, " "))
+		if e.State == "pending" {
+			pending = append(pending, row)
+		}
+		if stateF != "" && e.State != stateF {
+			continue
+		}
+		rows = append(rows, row)
+	}
+	data.Ops = &operationsData{Items: groupOpsRows(rows, readOnly, stateF == ""), Pending: pending, StateFilter: stateF}
 	h.render(w, r, data)
+}
+
+// opsStateClass is the badge class of an execution state.
+func opsStateClass(state string) string {
+	switch state {
+	case "pending":
+		return "badge--pending"
+	case "approved", "running":
+		return "badge--warning"
+	case "finished":
+		return "badge--ok"
+	case "failed":
+		return "badge--critical"
+	default:
+		return "badge--unknown"
+	}
+}
+
+// compactHosts renders at most three names plus "+N" for the rest.
+func compactHosts(names []string) string {
+	if len(names) <= 3 {
+		return strings.Join(names, ", ")
+	}
+	return strings.Join(names[:3], ", ") + " +" + strconv.Itoa(len(names)-3)
+}
+
+// groupOpsRows collapses consecutive operations created in the same
+// second by the same user for the same host set into one expandable row
+// — that is what the inventory bulk refresh creates. Only read-only
+// operations are grouped, and only without an active state filter.
+func groupOpsRows(rows []opsRow, readOnly map[string]bool, group bool) []opsItem {
+	items := make([]opsItem, 0, len(rows))
+	for i := 0; i < len(rows); {
+		j := i + 1
+		for group && j < len(rows) && sameBatch(&rows[i], &rows[j], readOnly) {
+			j++
+		}
+		if j-i >= 2 {
+			first := rows[i]
+			search := make([]string, 0, j-i)
+			for _, x := range rows[i:j] {
+				search = append(search, x.Search)
+			}
+			items = append(items, opsItem{Group: &opsGroup{
+				Label: "Refresh (" + strconv.Itoa(j-i) + " reads)", Hosts: first.Hosts, CreatedBy: first.CreatedBy,
+				Created: first.Created, Search: strings.Join(search, " "), Rows: rows[i:j],
+			}})
+		} else {
+			items = append(items, opsItem{Row: &rows[i]})
+		}
+		i = j
+	}
+	return items
+}
+
+// sameBatch reports whether b belongs to the batch started by a: both
+// read-only, same creation second, same user, same host set.
+func sameBatch(a, b *opsRow, readOnly map[string]bool) bool {
+	if !readOnly[a.Action] || !readOnly[b.Action] {
+		return false
+	}
+	return a.CreatedBy == b.CreatedBy && a.hostKey == b.hostKey &&
+		a.Created.Truncate(time.Second) == b.Created.Truncate(time.Second)
 }
 
 func (h *Handler) handleOperationNew(w http.ResponseWriter, r *http.Request) {

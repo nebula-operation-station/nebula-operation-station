@@ -42,6 +42,11 @@ type fakeOps struct {
 	gateErr      error
 	gates        []string
 	extra        []actions.Action // runbook actions after the built-ins
+	// list and listHosts override List/ListHosts for the list-page tests;
+	// lastSeen overrides LastSeenAll (nil: no reads known).
+	list      []executions.Summary
+	listHosts map[string][]string
+	lastSeen  map[string]time.Time
 }
 
 func (f *fakeOps) Catalog(context.Context) ([]actions.Action, error) {
@@ -124,6 +129,9 @@ func (f *fakeOps) AllOpsStates(context.Context) (map[string]executions.OpsState,
 }
 
 func (f *fakeOps) List(context.Context, int) ([]executions.Summary, error) {
+	if f.list != nil {
+		return f.list, nil
+	}
 	return []executions.Summary{{ID: opID, ActionID: "core.facts", Risk: "HIGH", State: "finished", CreatedBy: "axel", CreatedAt: time.Unix(1791960000, 0), Hosts: 1}}, nil
 }
 
@@ -132,11 +140,15 @@ func (f *fakeOps) LastResults(context.Context, string) (map[string]executions.La
 }
 
 func (f *fakeOps) LastSeenAll(context.Context) (map[string]time.Time, error) {
-	return map[string]time.Time{}, nil
+	return f.lastSeen, nil
 }
 
 func (f *fakeOps) ListHost(context.Context, string, int) ([]executions.Summary, error) {
 	return nil, nil
+}
+
+func (f *fakeOps) ListHosts(context.Context, []string) (map[string][]string, error) {
+	return f.listHosts, nil
 }
 
 func opsHandler(t *testing.T, ops ui.Operations, log *strings.Builder) http.Handler {
@@ -581,5 +593,81 @@ func TestScannerFindingsAreShown(t *testing.T) {
 	}
 	if form := getBody(t, h, "/operations/new"); !strings.Contains(form, "safety scanner: reboot_or_power") {
 		t.Fatal("planner does not show the findings")
+	}
+}
+
+// The operations list: state chips, the approval section, the batch
+// grouping of a bulk refresh, and untrusted host names as text.
+func TestOperationsListFiltersAndGrouping(t *testing.T) {
+	t0 := time.Unix(1791960000, 0)
+	f := &fakeOps{listHosts: map[string][]string{}}
+	n := 0
+	add := func(tag, action, state, user string, at time.Time, hosts []string) string {
+		n++
+		id := fmt.Sprintf("%s%07d-0000-4000-8000-000000000001", tag, n)
+		f.list = append(f.list, executions.Summary{ID: id, ActionID: action, Risk: "LOW", State: state,
+			CreatedBy: user, CreatedAt: at, Hosts: len(hosts)})
+		f.listHosts[id] = hosts
+		return id
+	}
+	both := []string{"web", "new"}
+	var batch []string
+	for _, a := range []string{"core.facts", "package.list_updates", "docker.list", "service.list"} {
+		batch = append(batch, add("1", a, "finished", "axel", t0, both))
+	}
+	otherUser := add("2", "core.facts", "finished", "bruno", t0, both)
+	otherHosts := add("3", "core.facts", "finished", "axel", t0, both[:1])
+	notReadOnly := add("4", "package.install_all", "finished", "axel", t0, both)
+	pending := add("5", "system.reboot", "pending", "axel", t0, both)
+	h := opsHandler(t, f, nil)
+
+	body := getBody(t, h, "/operations")
+	// The four reads created in the same second by the same user for the
+	// same hosts are one expandable row.
+	if !strings.Contains(body, "Refresh (4 reads)") {
+		t.Fatalf("batch not grouped: %s", body)
+	}
+	for _, id := range batch {
+		if !strings.Contains(body, "/operations/"+id) {
+			t.Errorf("group misses %s", id)
+		}
+	}
+	// The near-misses stay their own rows.
+	for _, id := range []string{otherUser, otherHosts, notReadOnly} {
+		if !strings.Contains(body, "/operations/"+id) {
+			t.Errorf("row misses %s", id)
+		}
+	}
+	// The pending operation is in the approval section and in the table.
+	if !strings.Contains(body, "Waiting for your approval") || strings.Count(body, "/operations/"+pending) != 2 {
+		t.Errorf("pending op: %s", body)
+	}
+	// Host names are untrusted text.
+	if !strings.Contains(body, "&lt;b&gt;Web&lt;/b&gt;") || strings.Contains(body, "<b>Web</b>") {
+		t.Error("host name not rendered as text")
+	}
+	// The action title is shown next to the ID.
+	if !strings.Contains(body, "Collect facts") {
+		t.Error("action title missing")
+	}
+
+	// State filter: the pending op leaves the table (approval section
+	// keeps it) and grouping is off.
+	fin := getBody(t, h, "/operations?state=finished")
+	if strings.Count(fin, "/operations/"+pending) != 1 || strings.Contains(fin, "Refresh (4 reads)") {
+		t.Errorf("finished filter: %s", fin)
+	}
+	if strings.Count(fin, "/operations/"+batch[0]) != 1 {
+		t.Errorf("batch row should be a plain row with a state filter")
+	}
+	// The pending chip shows the pending op in the table.
+	pend := getBody(t, h, "/operations?state=pending")
+	if strings.Count(pend, "/operations/"+pending) != 2 || strings.Contains(pend, "/operations/"+batch[0]) {
+		t.Errorf("pending filter: %s", pend)
+	}
+	// Invalid state values are ignored.
+	all := getBody(t, h, "/operations?state=bogus")
+	if !strings.Contains(all, "Refresh (4 reads)") || !strings.Contains(all, "/operations/"+pending) {
+		t.Error("invalid state value must be ignored")
 	}
 }

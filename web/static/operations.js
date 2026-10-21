@@ -72,6 +72,18 @@
     });
   }
 
+  // List page: client-side text filter over action and host names (the
+  // row's search text is built server side and lowercased there).
+  const opsFilter = document.getElementById('operations-filter');
+  if (opsFilter) {
+    opsFilter.addEventListener('input', () => {
+      const q = opsFilter.value.trim().toLowerCase();
+      for (const row of document.querySelectorAll('tbody tr[data-search]')) {
+        row.hidden = q !== '' && !row.dataset.search.includes(q);
+      }
+    });
+  }
+
   const op = document.getElementById('operation');
   if (!op) return;
 

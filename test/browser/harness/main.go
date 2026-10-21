@@ -440,12 +440,18 @@ func serviceListResult(units ...string) []byte {
 // action's module version and artifact hash. finishedAt zero means the
 // execution has not finished.
 func seedExec(ctx context.Context, sdb *sql.DB, actionID, hostID string, result []byte, finishedAt time.Time, execState, hostState, class string) string {
+	return seedExecAt(ctx, sdb, actionID, hostID, result, finishedAt.Add(-2*time.Minute), finishedAt, execState, hostState, class)
+}
+
+// seedExecAt is seedExec with an explicit creation time (for executions
+// that have not finished yet, whose creation is not derived from the
+// finish time).
+func seedExecAt(ctx context.Context, sdb *sql.DB, actionID, hostID string, result []byte, created, finishedAt time.Time, execState, hostState, class string) string {
 	a, ok := actions.Lookup(actionID)
 	if !ok {
 		panic("no action " + actionID)
 	}
 	id := newID36()
-	created := finishedAt.Add(-2 * time.Minute)
 	var fin interface{}
 	if !finishedAt.IsZero() {
 		fin = finishedAt.Unix()
@@ -641,12 +647,51 @@ func seedPreview(ctx context.Context, svc *executor.Service, sdb *sql.DB, inv *i
 	seedOpsState(ctx, sdb, "ci", executions.StateUnreachable, "no answer on 192.168.10.42:22", ago(30*time.Minute))
 
 	// --- A few executions in other states (operations tab) -------------
-	seedExec(ctx, sdb, "package.install_security", "nas", nil, time.Time{}, "pending", "waiting", "")
+	seedExecAt(ctx, sdb, "package.install_security", "nas", nil, ago(5*time.Minute), time.Time{}, "pending", "waiting", "")
+	seedExecAt(ctx, sdb, "package.install_security", "web", nil, ago(2*time.Minute), time.Time{}, "running", "running", "")
 	seedExec(ctx, sdb, "system.reboot", "nas", nil, ago(2*time.Hour), "failed", "finished", "not_executed")
 	seedExec(ctx, sdb, "core.facts", "ci", nil, ago(30*time.Minute), "failed", "finished", "unreachable")
 
+	// --- Stale host ----------------------------------------------------
+	// backup was last read 48 h ago: the inventory marks it stale and the
+	// dashboard tile counts it.
+	pinHost(ctx, svc, inv, sshPub, "backup", "Backup server", inventory.EnvProd, inventory.CriticalityMedium)
+	seedExec(ctx, sdb, "core.facts", "backup", factsResult(deb12, "Linux backup 6.1.0-18-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.76-1 x86_64", "backup", "432000", false), ago(48*time.Hour), "finished", "finished", "success")
+
+	// --- Schedules -----------------------------------------------------
+	seedSchedules(ctx, sdb, now)
+
 	// --- Networks, assets, discovery -----------------------------------
 	seedNetworks(ctx, sdb, now)
+}
+
+// seedSchedules stores one active and one pending schedule, and one
+// finished run of the active one, so the schedules page shows both cards
+// with their last run.
+func seedSchedules(ctx context.Context, sdb *sql.DB, now time.Time) {
+	acts, _ := json.Marshal([]string{"core.facts", "package.list_updates", "docker.list", "service.list"})
+	hosts, _ := json.Marshal([]string{"web", "nas", "db"})
+	active := newID36()
+	_, err := sdb.ExecContext(ctx, `INSERT INTO schedules (id, digest, state, actions, hosts, interval_s, expires_at, options, created_by, created_at, approved_at)
+		VALUES (?, ?, 'active', ?, ?, 21600, ?, NULL, 'demo', ?, ?)`,
+		active, strings.Repeat("ab", 32), string(acts), string(hosts), now.Add(30*24*time.Hour).Unix(), now.Add(-7*24*time.Hour).Unix(), now.Add(-7*24*time.Hour).Unix())
+	must(err)
+	// One finished run of the active schedule, two hours ago.
+	a, _ := actions.Lookup("core.facts")
+	runID := newID36()
+	_, err = sdb.ExecContext(ctx, `INSERT INTO executions (id, digest, action_id, module_version, artifact_sha256, risk, requirement, state,
+		durable, timeout_s, created_by, created_at, finished_at, params, schedule_id)
+		VALUES (?, '', ?, ?, ?, 'LOW', 'schedule grant', 'finished', 0, ?, 'schedule', ?, ?, '{}', ?)`,
+		runID, a.ID, a.Version, a.SHA256(), int64(a.Timeout/time.Second), now.Add(-2*time.Hour).Unix(), now.Add(-2*time.Hour).Unix(), active)
+	must(err)
+	// Pending: two reads on ci, daily, proposed an hour ago.
+	pacts, _ := json.Marshal([]string{"core.facts", "package.list_updates"})
+	phosts, _ := json.Marshal([]string{"ci"})
+	opts := `{"challenge":"ZGVtby1jaGFsbGVuZ2U","rpId":"demo","timeout":60000,"userVerification":"required"}`
+	_, err = sdb.ExecContext(ctx, `INSERT INTO schedules (id, digest, state, actions, hosts, interval_s, expires_at, options, created_by, created_at)
+		VALUES (?, ?, 'pending', ?, ?, 86400, ?, ?, 'demo', ?)`,
+		newID36(), strings.Repeat("cd", 32), string(pacts), string(phosts), now.Add(30*24*time.Hour).Unix(), opts, now.Add(-time.Hour).Unix())
+	must(err)
 }
 
 // digest returns a fixed 64-hex sha256 digest for a docker image.

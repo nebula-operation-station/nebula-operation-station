@@ -88,6 +88,20 @@
       }
       e.target.disabled = false;
     });
+    // "Schedule refresh…" opens the schedules page with the four read
+    // actions and the selected hosts preselected (6 h / 30 days).
+    // Prefill only checks boxes; the schedule is created through the
+    // normal approval flow on that page.
+    document.getElementById('bulk-schedule').addEventListener('click', () => {
+      const hosts = selected();
+      if (hosts.length === 0) return;
+      const q = new URLSearchParams();
+      for (const a of ['core.facts', 'package.list_updates', 'docker.list', 'service.list']) q.append('action', a);
+      for (const h of hosts) q.append('host', h);
+      q.set('interval', '360');
+      q.set('days', '30');
+      window.location.assign('/schedules?' + q.toString());
+    });
     document.getElementById('bulk-reboot').addEventListener('click', () => {
       const hosts = selected();
       if (hosts.length === 0) return;

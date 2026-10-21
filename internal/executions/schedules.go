@@ -49,6 +49,9 @@ type Schedule struct {
 	Options           []byte
 	CreatedBy         string
 	CreatedAt         time.Time
+	// LastRun is the newest scheduled run of this schedule, zero if it has
+	// not run yet (Schedules fills it with one extra query).
+	LastRun time.Time
 }
 
 // Errors of schedules.
@@ -182,7 +185,8 @@ func (s *Service) GetSchedule(ctx context.Context, id string) (Schedule, error) 
 	return x, err
 }
 
-// Schedules returns all schedules, newest first.
+// Schedules returns all schedules, newest first, with the newest run of
+// each (LastRun, one extra query).
 func (s *Service) Schedules(ctx context.Context) ([]Schedule, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+scheduleColumns+` FROM schedules ORDER BY created_at DESC, id`)
 	if err != nil {
@@ -196,6 +200,37 @@ func (s *Service) Schedules(ctx context.Context) ([]Schedule, error) {
 			return nil, err
 		}
 		out = append(out, x)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	last, err := s.scheduleLastRuns(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if t, ok := last[out[i].ID]; ok {
+			out[i].LastRun = t
+		}
+	}
+	return out, nil
+}
+
+// scheduleLastRuns is the newest execution per schedule, in one query.
+func (s *Service) scheduleLastRuns(ctx context.Context) (map[string]time.Time, error) {
+	out := map[string]time.Time{}
+	rows, err := s.db.QueryContext(ctx, `SELECT schedule_id, max(created_at) FROM executions WHERE schedule_id != '' GROUP BY schedule_id`)
+	if err != nil {
+		return nil, fmt.Errorf("list schedule runs: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var at int64
+		if err := rows.Scan(&id, &at); err != nil {
+			return nil, err
+		}
+		out[id] = time.Unix(at, 0)
 	}
 	return out, rows.Err()
 }

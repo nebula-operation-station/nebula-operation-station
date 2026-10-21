@@ -392,6 +392,9 @@ type pageData struct {
 	InventoryState string
 	InventoryEnv   string
 	InventoryEnvs  []string
+	// InventoryStale is the active ?stale=1 filter (enrolled hosts
+	// without a read in 24 h).
+	InventoryStale bool
 	// Blocked lists hosts blocked after a host key mismatch.
 	Blocked []blockedView
 	// BlockedUnknown is true when the executor could not be asked.

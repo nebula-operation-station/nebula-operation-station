@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -143,6 +144,36 @@ func (s *Service) List(ctx context.Context, limit int) ([]Summary, error) {
 		}
 		x.CreatedAt, x.FinishedAt = time.Unix(created.Int64, 0), unix(finished)
 		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+// ListHosts returns the host IDs of the given executions in one query.
+// Unknown IDs simply have no entry.
+func (s *Service) ListHosts(ctx context.Context, ids []string) (map[string][]string, error) {
+	out := make(map[string][]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	if len(ids) > 500 {
+		return nil, errors.New("too many executions for ListHosts")
+	}
+	ph := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		ph[i], args[i] = "?", id
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT execution_id, host_id FROM execution_hosts WHERE execution_id IN (`+strings.Join(ph, ",")+`) ORDER BY execution_id, host_id`)
+	if err != nil {
+		return nil, fmt.Errorf("list execution hosts: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var exec, host string
+		if err := rows.Scan(&exec, &host); err != nil {
+			return nil, err
+		}
+		out[exec] = append(out[exec], host)
 	}
 	return out, rows.Err()
 }

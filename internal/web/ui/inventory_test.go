@@ -12,8 +12,10 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
+	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
 
@@ -474,5 +476,54 @@ func TestPagesOnlyReferenceEmbeddedScripts(t *testing.T) {
 				t.Errorf("%s: %s answers %d", page, m[1], rec.Code)
 			}
 		}
+	}
+}
+
+// A host whose newest read is older than 24 h is marked stale, and
+// ?stale=1 filters to those hosts server-side (invalid values ignored).
+func TestInventoryStaleFilter(t *testing.T) {
+	now := time.Now()
+	f := &fakeOps{lastSeen: map[string]time.Time{
+		"web-01": now.Add(-2 * time.Hour),  // fresh
+		"db-01":  now.Add(-48 * time.Hour), // stale
+	}}
+	h := newTestHandler(t, ui.Options{
+		PublicOrigin: "https://nebula.example.org",
+		Hosts:        func(context.Context) ([]inventory.Host, error) { return inventoryHosts(), nil },
+		HostKeys: func(context.Context) ([]*pb.HostKeyPin, error) {
+			return []*pb.HostKeyPin{
+				{HostId: "web-01", KeyType: "ssh-ed25519", Fingerprint: "SHA256:AAAA"},
+				{HostId: "db-01", KeyType: "ssh-ed25519", Fingerprint: "SHA256:BBBB"},
+			}, nil
+		},
+		Inventory:  newFakeInventory(),
+		Operations: f,
+	})
+	body := getBody(t, h.Handler(), "/inventory")
+	if n := strings.Count(body, `class="stale" title="stale"`); n != 1 {
+		t.Errorf("want exactly one stale mark, got %d", n)
+	}
+	// The mark sits on the db-01 row, not on web-01 or nas-01.
+	i := strings.Index(body, `data-id="db-01"`)
+	j := strings.Index(body, `data-id="nas-01"`)
+	if i < 0 || j < 0 || !strings.Contains(body[i:j], `class="stale"`) {
+		t.Error("stale mark not on the db-01 row")
+	}
+	// ?stale=1 shows only the stale enrolled host.
+	body = getBody(t, h.Handler(), "/inventory?stale=1")
+	if !strings.Contains(body, `data-id="db-01"`) || strings.Contains(body, `data-id="web-01"`) || strings.Contains(body, `data-id="nas-01"`) {
+		t.Errorf("stale filter: %s", body)
+	}
+	// An invalid value is ignored: all hosts again.
+	body = getBody(t, h.Handler(), "/inventory?stale=2")
+	for _, id := range []string{"web-01", "db-01", "nas-01"} {
+		if !strings.Contains(body, `data-id="`+id+`"`) {
+			t.Errorf("stale=2 must be ignored, misses %s", id)
+		}
+	}
+	// The dashboard tile counts the stale hosts and links to the filter.
+	dash := getBody(t, h.Handler(), "/dashboard")
+	if !strings.Contains(dash, "Stale hosts (no read in 24 h)") || !strings.Contains(dash, `href="/inventory?stale=1"`) {
+		t.Error("dashboard tile missing")
 	}
 }

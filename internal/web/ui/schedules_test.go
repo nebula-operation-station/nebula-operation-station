@@ -68,8 +68,8 @@ func TestSchedulesPage(t *testing.T) {
 			ExpiresAt: time.Now().Add(-time.Hour), CreatedBy: "axel"},
 	}}
 	page := getBody(t, schedHandler(t, f), "/schedules")
-	for _, want := range []string{"<td>11111111</td>", "package.list_updates", "24h0m0s", "schedule-approve", "<td>expired</td>",
-		`value="core.facts"`, `value="package.list_updates"`, "&lt;b&gt;Web&lt;/b&gt;"} {
+	for _, want := range []string{`<h3 class="mono">11111111</h3>`, "package.list_updates", "1 day", "1 h", "schedule-approve",
+		`>expired</span>`, `value="core.facts"`, `value="package.list_updates"`, `&lt;b&gt;Web&lt;/b&gt;`} {
 		if !strings.Contains(page, want) {
 			t.Errorf("page misses %q", want)
 		}
@@ -77,6 +77,40 @@ func TestSchedulesPage(t *testing.T) {
 	for _, not := range []string{`value="service.status"`, `value="package.install_all"`, `value="new"`} {
 		if strings.Contains(page, not) {
 			t.Errorf("page offers %q", not)
+		}
+	}
+}
+
+// The prefill from the query parameters only checks boxes: unknown
+// actions and hosts are not offered at all, invalid interval and days
+// fall back to the defaults, and nothing is created.
+func TestSchedulePrefillOnlyChecksBoxes(t *testing.T) {
+	h := schedHandler(t, &fakeSchedules{})
+	body := getBody(t, h, "/schedules?action=core.facts&action=package.install_all&action=system.reboot&host=web&host=new&interval=360&days=45")
+	for _, want := range []string{
+		`value="core.facts" checked>`,
+		`value="web" checked>`,
+		`value="360" selected>`,
+		`value="45"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("prefill misses %q", want)
+		}
+	}
+	for _, not := range []string{
+		`value="package.install_all"`, // not schedulable
+		`value="system.reboot"`,       // not schedulable
+		`value="new"`,                 // host not enrolled
+	} {
+		if strings.Contains(body, not) {
+			t.Errorf("prefill offers %q", not)
+		}
+	}
+	// Invalid values are ignored; all=1 checks every offered host.
+	body = getBody(t, h, "/schedules?interval=999&days=999&all=1")
+	for _, want := range []string{`value="1440" selected>`, `value="30"`, `value="web" checked>`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("defaults miss %q", want)
 		}
 	}
 }
