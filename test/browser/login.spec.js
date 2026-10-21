@@ -157,10 +157,10 @@ function check(cond, what) {
     'reboot opens the operation form with the action and the host preselected');
   await page.goto(base + '/inventory');
   await page.check('tr[data-id="e2e-host"] input.host-select');
-  const opsBefore = await page.request.get(base + '/operations').then((r) => r.text()).then((t) => (t.match(/core\.facts/g) || []).length);
+  const groupsBefore = await page.request.get(base + '/operations').then((r) => r.text()).then((t) => (t.match(/op-group-row/g) || []).length);
   await Promise.all([page.waitForURL(/\/operations$/, { timeout: 15000 }), page.click('#bulk-refresh')]);
-  check((((await page.content()).match(/core\.facts/g)) || []).length > opsBefore && /service\.list/.test(await page.textContent('main')),
-    'refresh of the selection creates the read operations');
+  check((((await page.content()).match(/op-group-row/g)) || []).length > groupsBefore && /4 reads/.test(await page.textContent('main')),
+    'refresh of the selection creates the four reads, shown as one group');
   // The bulk bar can open the schedules page with the four reads and the
   // selection preselected; the More menu offers to keep all hosts fresh.
   await page.goto(base + '/inventory');
