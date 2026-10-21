@@ -148,6 +148,10 @@ function check(cond, what) {
   check(await page.locator('#bulkbar').isHidden(), 'no bulk bar without a selection');
   await page.check('tr[data-id="e2e-host"] input.host-select');
   check(/1 selected/.test(await page.textContent('#bulkbar')), 'selecting a host shows the bulk bar');
+  await page.fill('#inventory-filter', 'no-such-host');
+  check(await page.locator('#bulkbar').isHidden(), 'a host hidden by the filter is unselected');
+  await page.fill('#inventory-filter', '');
+  await page.check('tr[data-id="e2e-host"] input.host-select');
   await Promise.all([page.waitForURL(/\/operations\/new\?/, { timeout: 15000 }), page.click('#bulk-reboot')]);
   check(await page.isChecked('input[name="action"][value="system.reboot"]') && await page.isChecked('input[name="host"][value="e2e-host"]'),
     'reboot opens the operation form with the action and the host preselected');

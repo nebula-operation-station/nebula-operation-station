@@ -31,8 +31,8 @@ var bulkRefreshActions = []string{"core.facts", "package.list_updates", "docker.
 var errBulkSelection = errors.New("select between 1 and 200 hosts from the inventory")
 
 // bulkHosts reads and checks the selected host IDs: valid, unique, known
-// to the inventory.
-func (h *Handler) bulkHosts(ctx context.Context, r *http.Request) ([]string, error) {
+// to the inventory. It returns the hosts with their inventory records.
+func (h *Handler) bulkHosts(ctx context.Context, r *http.Request) ([]inventory.Host, error) {
 	if err := r.ParseForm(); err != nil {
 		return nil, errBulkSelection
 	}
@@ -40,21 +40,22 @@ func (h *Handler) bulkHosts(ctx context.Context, r *http.Request) ([]string, err
 	if len(ids) == 0 || len(ids) > maxBulkHosts {
 		return nil, errBulkSelection
 	}
-	var out []string
+	var out []inventory.Host
 	for _, id := range ids {
 		if !canonical.ValidHostID(id) {
 			return nil, errBulkSelection
 		}
-		if slices.Contains(out, id) {
+		if slices.ContainsFunc(out, func(x inventory.Host) bool { return x.ID == id }) {
 			continue
 		}
-		if _, err := h.inventory.Get(ctx, id); err != nil {
+		host, err := h.inventory.Get(ctx, id)
+		if err != nil {
 			if errors.Is(err, inventory.ErrHostNotFound) {
 				return nil, errors.New("host " + id + " is not in the inventory")
 			}
 			return nil, err
 		}
-		out = append(out, id)
+		out = append(out, host)
 	}
 	return out, nil
 }
@@ -68,7 +69,7 @@ func (h *Handler) handleInventoryRefresh(w http.ResponseWriter, r *http.Request)
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
 	defer cancel()
-	ids, err := h.bulkHosts(ctx, r)
+	hosts, err := h.bulkHosts(ctx, r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -78,28 +79,35 @@ func (h *Handler) handleInventoryRefresh(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "the executor is unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	var enrolled []string
-	for _, id := range ids {
-		if pins[id] != nil {
-			enrolled = append(enrolled, id)
+	// Only hosts an operation can run on, as CreateStaged checks them: a
+	// pinned key that is not blocked, and an endpoint. The others are
+	// skipped rather than failing the whole refresh.
+	var usable []string
+	for _, host := range hosts {
+		if p := pins[host.ID]; p != nil && !p.GetBlocked() && len(host.Endpoints) > 0 {
+			usable = append(usable, host.ID)
 		}
 	}
-	if len(enrolled) == 0 {
-		http.Error(w, "none of the selected hosts has a pinned key yet: enroll them first", http.StatusBadRequest)
+	if len(usable) == 0 {
+		http.Error(w, "none of the selected hosts can run an operation (no pinned key, key blocked, or no endpoint)", http.StatusBadRequest)
 		return
 	}
-	pending := 0
-	for _, a := range bulkRefreshActions {
-		c, err := h.operations.CreateStaged(ctx, webUser(r), a, enrolled, map[string]string{}, executions.Plan{})
-		if err != nil {
-			h.log.Error("inventory refresh", "action", a, "hosts", len(enrolled), "error", err)
-			http.Error(w, "the refresh could not be created: "+err.Error(), http.StatusBadGateway)
-			return
-		}
-		if c.State == "pending" {
-			pending++
+	pending, created := 0, 0
+	// The executor takes at most executions.MaxHosts hosts per operation.
+	for chunk := range slices.Chunk(usable, executions.MaxHosts) {
+		for _, a := range bulkRefreshActions {
+			c, err := h.operations.CreateStaged(ctx, webUser(r), a, chunk, map[string]string{}, executions.Plan{})
+			if err != nil {
+				h.log.Error("inventory refresh", "action", a, "hosts", len(chunk), "created", created, "error", err)
+				http.Error(w, "the refresh could not be created; see the server log", http.StatusBadGateway)
+				return
+			}
+			created++
+			if c.State == "pending" {
+				pending++
+			}
 		}
 	}
-	h.log.Info("audit", "kind", "inventory_refresh", "user", webUser(r), "hosts", len(enrolled), "skipped", len(ids)-len(enrolled), "pending", pending)
+	h.log.Info("audit", "kind", "inventory_refresh", "user", webUser(r), "hosts", len(usable), "skipped", len(hosts)-len(usable), "operations", created, "pending", pending)
 	http.Redirect(w, r, "/operations", http.StatusSeeOther)
 }

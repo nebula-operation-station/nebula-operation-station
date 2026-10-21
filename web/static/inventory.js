@@ -53,7 +53,16 @@
       }
       update();
     });
-    if (filter) filter.addEventListener('input', update);
+    // The selection is what is shown: rows the text filter hides are
+    // unselected, so a bulk action never reaches a host you cannot see.
+    if (filter) {
+      filter.addEventListener('input', () => {
+        for (const b of boxes()) {
+          if (b.closest('tr').hidden) b.checked = false;
+        }
+        update();
+      });
+    }
     document.getElementById('bulk-refresh').addEventListener('click', async (e) => {
       const hosts = selected();
       if (hosts.length === 0) return;
