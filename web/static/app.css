@@ -1106,3 +1106,34 @@ details summary {
 }
 details summary:hover { color: var(--text); }
 details[open] summary { color: var(--text); margin-bottom: var(--space-2); }
+
+/* --- Inventory selection and bulk actions. --- */
+.inventory th.select,
+.inventory td.select { width: 2rem; text-align: center; }
+.inventory td.select input,
+.inventory th.select input { width: 1rem; height: 1rem; accent-color: var(--brand); cursor: pointer; }
+.bulkbar {
+  position: fixed;
+  bottom: 1.25rem;
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: calc(100% - 2rem);
+  z-index: 20;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  margin-bottom: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  background: var(--surface);
+  border: 1px solid var(--brand);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.bulkbar .hint { flex-basis: 100%; max-width: 52rem; }
+.bulkbar .message:empty { display: none; }
+@media (min-width: 900px) {
+  /* Centre the bulk bar over the content, not over the sidebar. */
+  .bulkbar { left: calc(50% + var(--sidebar-w) / 2); max-width: calc(100% - var(--sidebar-w) - 2rem); }
+}

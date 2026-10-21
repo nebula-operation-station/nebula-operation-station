@@ -21,7 +21,7 @@
       var el = els[i];
       var t = new Date(el.getAttribute('datetime'));
       if (isNaN(t.getTime())) continue;
-      el.textContent = t.toLocaleString();
+      el.textContent = t.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' });
       var diff = t.getTime() - now;
       var rel = relative(diff);
       el.title = rel === 'just now' ? rel : diff >= 0 ? 'in ' + rel : rel + ' ago';
