@@ -14,7 +14,8 @@
 # the backup key and the SSH key for managed hosts, sets up Caddy with an
 # internal CA in front of the web UI, unlocks the executor and prints the
 # one-time code for the first security key. Every step is idempotent: run
-# it again after `git pull` to upgrade (install.sh backs up first).
+# it again after `git checkout main && git pull` to upgrade (install.sh
+# backs up first).
 #
 # Options:
 #   --rp-id HOST              hostname the web UI is served under (required)
@@ -93,10 +94,22 @@ esac
 
 as_admin() { sudo -u "$first_admin" -H -- "$@"; }
 
-# Changing the RP ID later would leave server.json and the Caddyfile with
-# the old one (and every security key registered for it): refuse.
+# Changing the RP ID later would leave server.json, the Caddyfile or the
+# executor with the old one (and every security key registered for it):
+# refuse. The executor's is the one in effect (last -rp-id of the unit).
 if [[ -f /etc/nebula/server.json ]] && ! grep -qF "\"https://$rp_id\"" /etc/nebula/server.json; then
   die "/etc/nebula/server.json has another public_origin than https://$rp_id; use the RP ID of the first run (changing it means registering every security key again: see the handbook)"
+fi
+# systemctl cat shows the unit and its drop-ins in the order systemd applies
+# them; without a unit file, left-over drop-ins still count. Comment lines
+# are skipped; any whitespace may separate the flag and its value.
+current_rp=$( { systemctl cat nebula-executor 2>/dev/null || cat /etc/systemd/system/nebula-executor.service.d/*.conf 2>/dev/null; } \
+  | grep -v '^[[:space:]]*#' | grep -oE -- '-rp-id[[:space:]]+[^[:space:]\\]+' | tail -n 1 | awk '{print $2}' || true)
+if [[ -n "$current_rp" && "$current_rp" != "nebula.example.org" && "$current_rp" != "$rp_id" ]]; then
+  die "the executor runs with RP ID $current_rp, not $rp_id; use --rp-id $current_rp (changing it means registering every security key again: see the handbook)"
+fi
+if [[ "$rp_id" != *.* ]]; then
+  warn "--rp-id $rp_id is a short host name: security keys then only work at exactly https://$rp_id/. A full name (for example ops.example.org) is the usual choice, and it cannot be changed later without registering the keys again."
 fi
 
 # --- 1. Sizing check (warnings only) ----------------------------------------
@@ -311,6 +324,6 @@ cat <<EOF
      then pin it in the web UI (Inventory -> Enroll hosts).
 
 After every reboot of this machine: nebula unlock
-Upgrade later: git pull, then run this script again.
+Upgrade later: git checkout main && git pull, then run this script again.
 Handbook: docs/admin/guide.md
 EOF
