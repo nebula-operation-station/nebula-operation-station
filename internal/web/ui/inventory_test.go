@@ -375,19 +375,28 @@ func TestInventoryPageWithStoreHasFormAndButtons(t *testing.T) {
 	for _, want := range []string{
 		"Add host",
 		`id="host-form"`,
-		`class="button inventory__edit"`,
-		`class="button inventory__delete"`,
-		`class="inventory__delete-confirm"`,
 		`src="/static/webauthn.js"`,
 		`src="/static/inventory.js"`,
-		// The row carries the data the edit form is prefilled from
-		// (html/template escapes the JSON quotes in the attribute).
+		// The row carries the data the client-side filter and the
+		// row click use.
 		`data-id="web-01"`,
-		`data-endpoints="[&#34;10.0.0.5:22&#34;,&#34;10.0.0.5:2222&#34;]"`,
-		`data-tags="{}"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("inventory page missing %q", want)
+		}
+	}
+	// Edit and delete moved to the host page (settings tab): the edit
+	// form posts to the host, the delete form needs the ID typed in.
+	settings := getBody(t, h.Handler(), "/hosts/web-01?tab=settings")
+	for _, want := range []string{
+		`action="/hosts/web-01/settings"`,
+		`name="display_name"`,
+		`action="/hosts/web-01/delete"`,
+		`name="confirm_id"`,
+		"Type the host ID to delete",
+	} {
+		if !strings.Contains(settings, want) {
+			t.Errorf("host settings tab missing %q", want)
 		}
 	}
 }

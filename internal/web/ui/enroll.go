@@ -36,6 +36,10 @@ const maxEnrollHosts = 50
 type enrollRow struct {
 	ID, Name  string
 	Endpoints []string
+	// Selected pre-checks the row (?host= from the inventory or a host
+	// page). It only selects; reading and approving still need the
+	// user's actions.
+	Selected bool
 }
 
 type enrollHost struct {
@@ -73,6 +77,10 @@ func (h *Handler) handleEnrollPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data := pageData{Title: "Enroll hosts", Active: "inventory", Content: "inventory_enroll", Scripts: []string{"webauthn.js", "inventory-enroll.js"}}
+	// ?host= preselects one row (the inventory "Enroll →" link and the
+	// host page's next-step banner). Selection only: reading and
+	// approving still need the user's actions.
+	preselect := r.URL.Query().Get("host")
 	ctx, cancel := context.WithTimeout(r.Context(), inventoryCallTimeout)
 	defer cancel()
 	hosts, err := h.hosts(ctx)
@@ -103,7 +111,10 @@ func (h *Handler) handleEnrollPage(w http.ResponseWriter, r *http.Request) {
 		if name == "" {
 			name = x.ID
 		}
-		data.Enroll = append(data.Enroll, enrollRow{ID: x.ID, Name: name, Endpoints: endpointStrings(x)})
+		data.Enroll = append(data.Enroll, enrollRow{ID: x.ID, Name: name, Endpoints: endpointStrings(x), Selected: x.ID == preselect})
+	}
+	if preselect != "" && !pinned[preselect] {
+		data.EnrollNote = "Enrolling " + preselect + ": check the row, read the key, compare the fingerprint on the host's console, then approve."
 	}
 	h.render(w, r, data)
 }

@@ -12,7 +12,7 @@
       </label>
       {{range $a.Params}}
       <label class="param" data-action="{{$a.ID}}" hidden>{{.Label}}
-        <input type="text" data-param="{{.Name}}" pattern="{{.Pattern}}" autocomplete="off">
+        <input type="text" data-param="{{.Name}}" value="{{.Value}}" pattern="{{.Pattern}}" autocomplete="off">
       </label>
       {{end}}
       {{range $a.Secrets}}
