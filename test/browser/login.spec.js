@@ -263,6 +263,9 @@ function check(cond, what) {
   // Network (M9-1): a network with its address grid, a reservation, an
   // asset that becomes a managed host.
   await page.goto(base + '/network');
+  check(/Scan a network/.test(await page.textContent('main')), 'the network page opens in quick mode');
+  await page.goto(base + '/network?mode=expert');
+  await page.click('summary:has-text("Add network")');
   await page.fill('#net-id', 'lan');
   await page.fill('#net-name', 'LAN');
   await page.fill('#net-prefix', '192.168.10.0/24');
@@ -277,6 +280,8 @@ function check(cond, what) {
   check(await page.getAttribute('.ipgrid__cell.ip--RESERVED', 'title') === '192.168.10.40 RESERVED: new switch', 'an address is reserved with a note');
   check(/192\.168\.10\.2\b/.test(await page.textContent('section[aria-label="Network"]')), 'a free address is suggested');
   await page.goto(base + '/network');
+  check(/seg-item--active[^>]*>Expert/.test(await page.innerHTML('main')), 'the expert mode is remembered');
+  await page.click('summary:has-text("Add asset")');
   await page.fill('#asset-id', 'nas');
   await page.fill('#asset-name', 'NAS');
   await page.selectOption('#asset-kind', 'nas');
