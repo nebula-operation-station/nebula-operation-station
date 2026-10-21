@@ -16,12 +16,14 @@
   <p>Event key <code>{{.Fingerprint}}</code> · {{.EventsHead}} events ·
     {{if .KeyChanges}}the key changed {{.KeyChanges}} time(s) (a restore onto a new machine; <code>nebula events key</code> lists them) · {{end}}{{if .EventsVerified}}the newest page verified{{else}}<span class="status--error">verification failed: {{.EventsError}}</span>{{end}}</p>
   {{if .Events}}
+  <div class="table-wrap">
   <table class="inventory">
     <thead><tr><th>#</th><th>Time (UTC)</th><th>Event</th><th>Details</th></tr></thead>
     <tbody>
       {{range .Events}}<tr><td>{{.Seq}}</td><td>{{.Time}}</td><td>{{.Kind}}</td><td>{{.Text}}</td></tr>{{end}}
     </tbody>
   </table>
+  </div>
   {{else}}
   <p>No events{{if .Kind}} of this kind among the newest ones{{end}}.</p>
   {{end}}
@@ -32,12 +34,14 @@
   <p class="hint">What was done in the web UI. These lines are not signed{{if .Chain}}; {{.Chain}}{{end}}.</p>
   {{if .AuditUnavailable}}<p class="status status--error">Audit log unavailable</p>{{end}}
   {{if .Audit}}
+  <div class="table-wrap">
   <table class="inventory">
     <thead><tr><th>#</th><th>Time</th><th>Event</th><th>User</th><th>Details</th></tr></thead>
     <tbody>
       {{range .Audit}}<tr><td>{{.Seq}}</td><td>{{.Time}}</td><td>{{.Kind}}</td><td>{{.User}}</td><td>{{.Text}}</td></tr>{{end}}
     </tbody>
   </table>
+  </div>
   {{if .Older}}<p><a href="/history?before={{.Older}}{{if .Kind}}&amp;kind={{.Kind}}{{end}}">Older</a></p>{{end}}
   {{else}}
   <p>No audit lines{{if .Kind}} of this kind{{end}}.</p>

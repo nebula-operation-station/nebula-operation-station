@@ -79,7 +79,7 @@ func (h *Handler) handleEnrollPage(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.log.Error("list hosts", "error", err)
 		data.InventoryUnavailable = true
-		h.render(w, data)
+		h.render(w, r, data)
 		return
 	}
 	pinned := map[string]bool{}
@@ -88,7 +88,7 @@ func (h *Handler) handleEnrollPage(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			h.log.Error("list host keys", "error", err)
 			data.InventoryUnavailable = true
-			h.render(w, data)
+			h.render(w, r, data)
 			return
 		}
 		for _, p := range pins {
@@ -105,7 +105,7 @@ func (h *Handler) handleEnrollPage(w http.ResponseWriter, r *http.Request) {
 		}
 		data.Enroll = append(data.Enroll, enrollRow{ID: x.ID, Name: name, Endpoints: endpointStrings(x)})
 	}
-	h.render(w, data)
+	h.render(w, r, data)
 }
 
 // checkEnrollHosts verifies that every host is in the inventory and the

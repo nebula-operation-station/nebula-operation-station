@@ -81,8 +81,9 @@ type operationsData struct {
 }
 
 type opsRow struct {
-	ID, Short, Action, Risk, State, CreatedBy, Created string
-	Hosts, Failed                                      int
+	ID, Short, Action, Risk, State, CreatedBy string
+	Created                                   time.Time
+	Hosts, Failed                             int
 }
 
 type actionView struct {
@@ -107,7 +108,8 @@ type opsHostOption struct {
 }
 
 type execView struct {
-	ID, Action, Version, Risk, Requirement, State, Detail, Digest, CreatedBy, Created, Params string
+	ID, Action, Version, Risk, Requirement, State, Detail, Digest, CreatedBy, Params string
+	Created                                                                          time.Time
 	// Options is the WebAuthn request options JSON while approval is
 	// pending (rendered into a data attribute, escaped by html/template).
 	Options                        string
@@ -167,7 +169,7 @@ func (h *Handler) handleOperations(w http.ResponseWriter, r *http.Request) {
 	data := pageData{Title: "Operations", Active: "operations", Content: "operations"}
 	if h.operations == nil {
 		data.Content = "empty"
-		h.render(w, data)
+		h.render(w, r, data)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
@@ -181,10 +183,10 @@ func (h *Handler) handleOperations(w http.ResponseWriter, r *http.Request) {
 	ops := &operationsData{}
 	for _, e := range list {
 		ops.List = append(ops.List, opsRow{ID: e.ID, Short: e.ID[:8], Action: e.ActionID, Risk: e.Risk, State: e.State,
-			CreatedBy: e.CreatedBy, Created: e.CreatedAt.UTC().Format("2006-01-02 15:04 MST"), Hosts: e.Hosts, Failed: e.Failed})
+			CreatedBy: e.CreatedBy, Created: e.CreatedAt.UTC(), Hosts: e.Hosts, Failed: e.Failed})
 	}
 	data.Ops = ops
-	h.render(w, data)
+	h.render(w, r, data)
 }
 
 func (h *Handler) handleOperationNew(w http.ResponseWriter, r *http.Request) {
@@ -250,7 +252,7 @@ func (h *Handler) handleOperationNew(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	data.Ops = ops
-	h.render(w, data)
+	h.render(w, r, data)
 }
 
 // cut returns at most limit bytes of b as valid UTF-8 text and whether it
@@ -284,7 +286,7 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v := &execView{ID: e.ID, Action: e.ActionID, Version: e.ModuleVersion, Risk: e.Risk, Requirement: e.Requirement, State: e.State,
-		Detail: e.Detail, Digest: e.Digest, CreatedBy: e.CreatedBy, Created: e.CreatedAt.UTC().Format("2006-01-02 15:04:05 MST"),
+		Detail: e.Detail, Digest: e.Digest, CreatedBy: e.CreatedBy, Created: e.CreatedAt.UTC(),
 		Pending: e.State == "pending", Live: e.State == "approved" || e.State == "running",
 		NeedsTypedCount: e.Requirement == "assertion_verified_typed_count"}
 	if e.Params != "" && e.Params != "{}" {
@@ -363,7 +365,7 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 	h.rolloutFor(ctx, e, v)
 	data := pageData{Title: "Operation " + e.ID[:8], Active: "operations", Content: "operation",
 		Scripts: []string{"webauthn.js", "operations.js"}, Ops: &operationsData{Exec: v}}
-	h.render(w, data)
+	h.render(w, r, data)
 }
 
 func webUser(r *http.Request) string {
@@ -494,7 +496,7 @@ type updatesView struct {
 	Total, Security, Kernel int
 	Reboot                  bool
 	RebootPackages          string
-	ListsUpdated            string
+	ListsUpdated            time.Time
 	Packages                []osdebian.Package
 	More                    int
 }
@@ -503,7 +505,7 @@ func viewUpdates(u osdebian.Updates) *updatesView {
 	v := &updatesView{Total: len(u.Packages), Security: u.Security, Kernel: u.Kernel, Reboot: u.RebootRequired,
 		RebootPackages: strings.Join(u.RebootPackages, ", ")}
 	if !u.ListsUpdated.IsZero() {
-		v.ListsUpdated = u.ListsUpdated.UTC().Format("2006-01-02 15:04 MST")
+		v.ListsUpdated = u.ListsUpdated.UTC()
 	}
 	v.Packages = u.Packages
 	if len(v.Packages) > maxShownPackages {

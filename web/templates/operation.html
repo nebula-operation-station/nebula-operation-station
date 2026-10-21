@@ -7,7 +7,7 @@
   {{if .Scanner}}<p class="status">Safety scanner (advisory; it can only raise the risk):
     {{range $i, $f := .Scanner}}{{if $i}}; {{end}}{{$f.Category}} at line {{$f.Line}} (<code>{{$f.Excerpt}}</code>){{end}}</p>{{end}}
   <p class="status">State: <strong>{{.State}}</strong>{{if .Detail}} — {{.Detail}}{{end}}</p>
-  <p class="status">Created by {{.CreatedBy}} at {{.Created}}</p>
+  <p class="status">Created by {{.CreatedBy}} at {{timeTag .Created}}</p>
   <p class="hint">Permit digest: <code>{{.Digest}}</code></p>
   {{if .Pending}}
   {{if .Options}}
@@ -34,6 +34,7 @@
   {{if .Aborted}}<p class="status status--error">The rollout was aborted: no further host runs.</p>{{end}}
   {{if .Stopped}}<p class="status status--error">The rollout stopped: {{.Stopped}}</p>{{end}}
   {{if .Waiting}}<p class="status"><strong>{{.Waiting}}</strong></p>{{end}}
+  <div class="table-wrap">
   <table class="inventory">
     <thead><tr><th>Stage</th><th>Hosts</th><th>Allowed failed / unreachable</th><th>Then</th><th>State</th></tr></thead>
     <tbody>
@@ -48,6 +49,7 @@
       {{end}}
     </tbody>
   </table>
+  </div>
   {{if .GateNext}}
   {{if .GateCLI}}
   <p class="status">Continue on the executor host: <code>nebula approve --stage {{.GateNext}} {{$.Ops.Exec.Digest}}</code></p>
@@ -66,6 +68,7 @@
 {{end}}
 <section class="panel" aria-label="Hosts">
   <h2>Hosts</h2>
+  <div class="table-wrap">
   <table class="inventory">
     <thead>
       <tr>{{if .Rollout}}<th>Stage</th>{{end}}<th>Host</th><th>State</th><th>Outcome</th><th>Exit</th><th>Detail</th>{{if .Rollout}}<th></th>{{end}}</tr>
@@ -87,23 +90,28 @@
       {{end}}
     </tbody>
   </table>
+  </div>
 </section>
 {{range .Hosts}}
 {{if or .Facts .Updates .Install .Units .Service .Docker .DockerLogs .DockerInspect .DockerControl .DockerUpdates .Compose .Result .Log}}
 <section class="panel" aria-label="Output of {{.ID}}">
   <h2>{{.ID}}</h2>
   {{if .Facts}}
+  <div class="table-wrap">
   <table class="inventory">
     <tbody>
       {{range .Facts}}<tr><th>{{.Name}}</th><td>{{.Value}}</td></tr>{{end}}
     </tbody>
   </table>
+  </div>
   {{end}}
   {{if .Units}}
+  <div class="table-wrap">
   <table class="inventory">
     <thead><tr><th>Unit</th><th>Load</th><th>Active</th><th>Sub</th><th>Description</th></tr></thead>
     <tbody>{{range .Units}}<tr><td>{{.Name}}</td><td>{{.Load}}</td><td>{{if eq .Active "failed"}}<span class="status--error">failed</span>{{else}}{{.Active}}{{end}}</td><td>{{.Sub}}</td><td>{{.Description}}</td></tr>{{end}}</tbody>
   </table>
+  </div>
   {{end}}
   {{with .Docker}}
   {{if eq .Phase "precheck"}}<p class="status status--error">Precheck failed: {{.Reason}}</p>
@@ -111,10 +119,12 @@
   {{else}}
   <p class="status">Docker {{.Version}}: {{.Summary.Total}} containers, {{.Summary.Running}} running, {{.Summary.Stopped}} stopped{{if .Summary.Unhealthy}}, <span class="status--error">{{.Summary.Unhealthy}} unhealthy</span>{{end}}{{if .Summary.Projects}}; Compose projects: {{range $i, $p := .Summary.Projects}}{{if $i}}, {{end}}{{$p}}{{end}}{{end}}</p>
   {{if .Containers}}
+  <div class="table-wrap">
   <table class="inventory">
     <thead><tr><th>Container</th><th>Compose</th><th>Image</th><th>State</th><th>Health</th><th>Status</th><th>Ports</th></tr></thead>
     <tbody>{{range .Containers}}<tr><td title="{{.ID}}">{{.Name}}</td><td>{{if .Project}}<span title="{{.Dir}}">{{.Project}}{{if .Service}} / {{.Service}}{{end}}</span>{{end}}</td><td>{{.Image}}</td><td>{{if .Running}}{{.State}}{{else if or (eq .State "dead") (eq .State "restarting")}}<span class="status--error">{{.State}}</span>{{else}}{{.State}}{{end}}</td><td>{{if eq .Health "unhealthy"}}<span class="status--error">unhealthy</span>{{else}}{{.Health}}{{end}}</td><td>{{.Status}}</td><td>{{.Ports}}</td></tr>{{end}}</tbody>
   </table>
+  </div>
   {{end}}
   {{end}}
   {{end}}
@@ -132,6 +142,7 @@
   <p class="status">Compose project {{.Project}}: {{if eq .Verdict "OK"}}<strong>OK</strong>{{else}}<span class="status--error"><strong>{{.Verdict}}</strong></span>{{end}}
     (pull exit {{.PullExit}}, up exit {{.UpExit}})</p>
   {{if .Findings}}<ul>{{range .Findings}}<li>{{.}}</li>{{end}}</ul>{{end}}
+  <div class="table-wrap">
   <table class="inventory">
     <thead><tr><th></th><th>Service</th><th>Container</th><th>State</th><th>Status</th><th>Ports</th><th>Image</th></tr></thead>
     <tbody>
@@ -139,6 +150,7 @@
       {{range .After}}<tr><td>after</td><td>{{.Service}}</td><td>{{.Name}}</td><td>{{.State}}</td><td>{{.Status}}</td><td>{{.Ports}}</td><td>{{.Image}}</td></tr>{{end}}
     </tbody>
   </table>
+  </div>
   {{end}}
   {{end}}
   {{with .DockerUpdates}}
@@ -146,10 +158,12 @@
   {{else}}
   <p class="status">{{len .Images}} images checked{{if .Updates}}, <span class="status--error">{{.Updates}} with an update available</span>{{else}}, no update available{{end}}</p>
   {{if .Images}}
+  <div class="table-wrap">
   <table class="inventory">
     <thead><tr><th>Image</th><th>Status</th><th>Registry digest</th><th>Note</th></tr></thead>
     <tbody>{{range .Images}}<tr><td>{{.Image}}</td><td>{{if eq .Status "update"}}<span class="status--error">update available</span>{{else}}{{.Status}}{{end}}</td><td><span class="hint">{{.Remote}}</span></td><td>{{.Note}}</td></tr>{{end}}</tbody>
   </table>
+  </div>
   {{end}}
   {{end}}
   {{end}}
@@ -165,6 +179,7 @@
   {{with .DockerInspect}}
   {{if eq .Phase "precheck"}}<p class="status status--error">Precheck failed: {{.Reason}}</p>
   {{else}}
+  <div class="table-wrap">
   <table class="inventory">
     <tbody>
       <tr><th>Container</th><td>{{.Name}} <span class="hint">{{.ID}}</span></td></tr>
@@ -176,24 +191,29 @@
       {{if .Networks}}<tr><th>Networks</th><td>{{range $i, $n := .Networks}}{{if $i}}, {{end}}{{$n.Name}}{{if $n.IP}} ({{$n.IP}}){{end}}{{end}}</td></tr>{{end}}
     </tbody>
   </table>
+  </div>
   {{if .Ports}}
+  <div class="table-wrap">
   <table class="inventory">
     <thead><tr><th>Container port</th><th>Published on</th></tr></thead>
     <tbody>{{range .Ports}}<tr><td>{{.Container}}</td><td>{{if .Host}}{{.Host}}{{else}}<span class="hint">not published</span>{{end}}</td></tr>{{end}}</tbody>
   </table>
+  </div>
   {{end}}
   {{if .Mounts}}
+  <div class="table-wrap">
   <table class="inventory">
     <thead><tr><th>Mount</th><th>Type</th><th>Source</th><th>Access</th></tr></thead>
     <tbody>{{range .Mounts}}<tr><td>{{.Destination}}</td><td>{{.Type}}{{if .Name}} {{.Name}}{{end}}</td><td>{{.Source}}</td><td>{{if .ReadOnly}}read-only{{else}}read-write{{end}}</td></tr>{{end}}</tbody>
   </table>
+  </div>
   {{end}}
   {{end}}
   {{end}}
   {{with .Service}}
   {{if eq .Phase "precheck"}}<p class="status status--error">Precheck failed: {{.Reason}}</p>{{end}}
   {{if .Verb}}<p class="status">systemctl {{.Verb}}: exit status {{.Exit}}</p>{{end}}
-  {{if .Props}}<table class="inventory"><tbody>{{range .Props}}<tr><th>{{.Name}}</th><td>{{.Value}}</td></tr>{{end}}</tbody></table>{{end}}
+  {{if .Props}}<div class="table-wrap"><table class="inventory"><tbody>{{range .Props}}<tr><th>{{.Name}}</th><td>{{.Value}}</td></tr>{{end}}</tbody></table></div>{{end}}
   {{if .Journal}}<pre class="output">{{range .Journal}}{{.}}
 {{end}}</pre>{{end}}
   {{end}}
@@ -207,14 +227,16 @@
   {{end}}
   {{end}}
   {{with .Updates}}
-  <p class="status">{{.Total}} updates, {{.Security}} security, {{.Kernel}} kernel{{if .Reboot}}, <span class="status--error">reboot required</span>{{if .RebootPackages}} ({{.RebootPackages}}){{end}}{{end}}{{if .ListsUpdated}}. Package lists from {{.ListsUpdated}}.{{end}}</p>
+  <p class="status">{{.Total}} updates, {{.Security}} security, {{.Kernel}} kernel{{if .Reboot}}, <span class="status--error">reboot required</span>{{if .RebootPackages}} ({{.RebootPackages}}){{end}}{{end}}{{if not .ListsUpdated.IsZero}}. Package lists from {{timeTag .ListsUpdated}}.{{end}}</p>
   {{if .Packages}}
+  <div class="table-wrap">
   <table class="inventory">
     <thead><tr><th>Package</th><th>Installed</th><th>New</th><th>From</th><th></th></tr></thead>
     <tbody>
       {{range .Packages}}<tr><td>{{.Name}}</td><td>{{.From}}</td><td>{{.To}}</td><td>{{range $i, $a := .Archives}}{{if $i}}, {{end}}{{$a}}{{end}}</td><td>{{if .Security}}<span class="status--error">security</span>{{end}}{{if .Kernel}} kernel{{end}}</td></tr>{{end}}
     </tbody>
   </table>
+  </div>
   {{if .More}}<p class="hint">{{.More}} more not shown.</p>{{end}}
   {{end}}
   {{end}}

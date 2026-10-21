@@ -72,7 +72,7 @@ func (h *Handler) handleModules(w http.ResponseWriter, r *http.Request) {
 	for _, v := range list {
 		data.Modules.Rows = append(data.Modules.Rows, rowOf(v))
 	}
-	h.render(w, data)
+	h.render(w, r, data)
 }
 
 func (h *Handler) handleModule(w http.ResponseWriter, r *http.Request) {
@@ -113,7 +113,7 @@ func (h *Handler) handleModule(w http.ResponseWriter, r *http.Request) {
 			d.Versions = append(d.Versions, rowOf(x))
 		}
 	}
-	h.render(w, pageData{Title: "Module " + v.Lock.Name, Active: "runbooks", Content: "module", Scripts: []string{"webauthn.js", "modules.js"},
+	h.render(w, r, pageData{Title: "Module " + v.Lock.Name, Active: "runbooks", Content: "module", Scripts: []string{"webauthn.js", "modules.js"},
 		Modules: &modulesData{Detail: d}})
 }
 

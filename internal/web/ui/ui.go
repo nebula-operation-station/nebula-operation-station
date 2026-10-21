@@ -166,7 +166,7 @@ func New(o Options) (*Handler, error) {
 	}
 	pages := make(map[string]*template.Template, len(pageFiles))
 	for name, file := range pageFiles {
-		set, err := template.New("").ParseFS(templates.FS, append([]string{"layout.html", file}, pagePartials[name]...)...)
+		set, err := template.New("").Funcs(template.FuncMap{"timeTag": timeTag}).ParseFS(templates.FS, append([]string{"layout.html", file}, pagePartials[name]...)...)
 		if err != nil {
 			return nil, fmt.Errorf("ui: parse template %s: %w", name, err)
 		}
@@ -213,6 +213,7 @@ var pageFiles = map[string]string{
 	"inventory": "inventory.html",
 	"login":     "login.html",
 	"setup":     "setup.html",
+	"settings":  "settings.html",
 
 	"operations":       "operations.html",
 	"inventory_import": "inventory_import.html",
@@ -290,6 +291,8 @@ func (h *Handler) Handler() http.Handler {
 	// Global search (M9-3): read-only, quick actions are links.
 	mux.HandleFunc("GET /search", h.handleSearch)
 	mux.HandleFunc("GET /history", h.handleHistory)
+	mux.HandleFunc("GET /settings", h.handleSettingsPage)
+	mux.HandleFunc("POST /settings/appearance", h.handleSettingsAppearance)
 	// Network: assets and IPAM-light (M9-1).
 	mux.HandleFunc("GET /network", h.handleNetworkPage)
 	mux.HandleFunc("GET /network/n/{id}", h.handleNetworkDetail)
@@ -330,13 +333,13 @@ func (h *Handler) Server() (*http.Server, error) {
 	return middleware.NewServer(middleware.Options{PublicOrigin: h.publicOrigin}, h.Handler())
 }
 
-// emptyPages are the shell pages that have no content yet.
+// emptyPages are the shell pages that have no content yet. /settings is a
+// real page now (see settings.go); the list is empty until the next shell
+// page needs a placeholder.
 var emptyPages = []struct {
 	path  string
 	title string
-}{
-	{"/settings", "Settings"},
-}
+}{}
 
 // pageData is the data passed to the layout template.
 type pageData struct {
@@ -344,6 +347,10 @@ type pageData struct {
 	Title string
 	// Active marks the current navigation item.
 	Active string
+	// Theme is "system" (default), "light" or "dark"; it is set on the
+	// <html> data-theme attribute. render fills it from the nebula_theme
+	// cookie when a handler leaves it empty.
+	Theme string
 	// Content is the content template name to render inside the layout.
 	Content string
 	// Bare pages (login, setup) are shown without the navigation.
@@ -383,6 +390,8 @@ type pageData struct {
 	Search *searchData
 	// History is the data of the history page.
 	History *historyData
+	// Settings is the data of the settings page.
+	Settings *settingsData
 	// InventoryPrefill is the JSON that prefills the add-host form from
 	// an asset ("add to managed hosts").
 	InventoryPrefill string
@@ -487,7 +496,7 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		data.Hosts = h.hostNames(r.Context())
 	}
 	data.Blocked, data.BlockedUnknown = h.blockedHosts(r.Context())
-	h.render(w, data)
+	h.render(w, r, data)
 }
 
 // blockedHosts lists hosts blocked after a host key mismatch, so the
@@ -539,7 +548,7 @@ func (h *Handler) handleInventory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if h.hosts == nil {
-		h.render(w, data)
+		h.render(w, r, data)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), inventoryCallTimeout)
@@ -551,7 +560,7 @@ func (h *Handler) handleInventory(w http.ResponseWriter, r *http.Request) {
 		// log only.
 		h.log.Error("list inventory hosts", "error", err)
 		data.InventoryUnavailable = true
-		h.render(w, data)
+		h.render(w, r, data)
 		return
 	}
 	keys, keysUnavailable := h.hostKeyStatuses(ctx)
@@ -576,7 +585,7 @@ func (h *Handler) handleInventory(w http.ResponseWriter, r *http.Request) {
 		v.OpsState, v.OpsReason = opsStateView(states[host.ID], v.KeyStatus)
 		data.Inventory = append(data.Inventory, v)
 	}
-	h.render(w, data)
+	h.render(w, r, data)
 }
 
 // hostKeyStatuses maps a host ID to its SSH key status text. The second
@@ -861,7 +870,7 @@ func (h *Handler) handleBare(title, content, script string) http.HandlerFunc {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		h.render(w, pageData{Title: title, Content: content, Bare: true, Scripts: []string{"webauthn.js", script}})
+		h.render(w, r, pageData{Title: title, Content: content, Bare: true, Scripts: []string{"webauthn.js", script}})
 	}
 }
 
@@ -877,7 +886,7 @@ func (h *Handler) handleEmpty(path string) http.HandlerFunc {
 				title = p.title
 			}
 		}
-		h.render(w, pageData{Title: title, Active: path[1:], Content: "empty"})
+		h.render(w, r, pageData{Title: title, Active: path[1:], Content: "empty"})
 	}
 }
 
@@ -904,7 +913,10 @@ func viewStatus(st *pb.GetStatusResponse) *statusView {
 	return &statusView{LockText: lock, Session: session, Recovery: st.GetRecoveryPending(), Vault: vault}
 }
 
-func (h *Handler) render(w http.ResponseWriter, data pageData) {
+func (h *Handler) render(w http.ResponseWriter, r *http.Request, data pageData) {
+	if data.Theme == "" {
+		data.Theme = themeFromRequest(r)
+	}
 	set, ok := h.pages[data.Content]
 	if !ok {
 		http.Error(w, "internal error: unknown page", http.StatusInternalServerError)

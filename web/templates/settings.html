@@ -1,0 +1,36 @@
+{{define "content"}}
+<div class="toolbar">
+  <h1>Settings</h1>
+</div>
+
+<section class="panel">
+  <h2>Appearance</h2>
+  <p class="hint">Choose how the interface is coloured. “System” follows your operating system’s light or dark setting.</p>
+  <form id="appearance-form" class="form" novalidate>
+    <fieldset>
+      <legend>Theme</legend>
+      <label class="choice"><input type="radio" name="theme" value="system"{{if eq .Settings.Theme "system"}} checked{{end}}> System</label>
+      <label class="choice"><input type="radio" name="theme" value="light"{{if eq .Settings.Theme "light"}} checked{{end}}> Light</label>
+      <label class="choice"><input type="radio" name="theme" value="dark"{{if eq .Settings.Theme "dark"}} checked{{end}}> Dark</label>
+    </fieldset>
+    <p id="message" class="message" role="status"></p>
+    <div class="actions">
+      <button type="submit" id="appearance-submit" class="button">Save theme</button>
+    </div>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>Inventory tools</h2>
+  <div class="actions actions--stack">
+    <a class="button button--secondary" href="/inventory/import">Import hosts from CSV</a>
+    <a class="button button--secondary" href="/inventory/enroll">Enroll hosts</a>
+    <a class="button button--secondary" href="/schedules">Scheduled checks</a>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>About</h2>
+  <p class="hint">Nebula Operation Station <span class="mono">{{.Settings.Version}}</span></p>
+</section>
+{{end}}

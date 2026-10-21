@@ -81,7 +81,7 @@ func attrsText(m map[string]string, skip ...string) string {
 
 func (h *Handler) handleHistory(w http.ResponseWriter, r *http.Request) {
 	if h.events == nil && h.auditLog == nil {
-		h.render(w, pageData{Title: "History", Active: "history", Content: "empty"})
+		h.render(w, r, pageData{Title: "History", Active: "history", Content: "empty"})
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
@@ -155,5 +155,5 @@ func (h *Handler) handleHistory(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	h.render(w, pageData{Title: "History", Active: "history", Content: "history", History: d})
+	h.render(w, r, pageData{Title: "History", Active: "history", Content: "history", History: d})
 }

@@ -16,6 +16,7 @@
   {{if .RepinEnabled}}
   <div id="repin-panel" class="panel" hidden>
     <h3>Re-pin <span id="repin-host"></span></h3>
+    <div class="table-wrap">
     <table class="inventory"><tbody>
       <tr><th>Pinned key</th><td id="repin-pinned"></td></tr>
       <tr><th>New key (presented)</th><td><strong id="repin-presented"></strong></td></tr>
@@ -23,6 +24,7 @@
       <tr><th>Blocked since</th><td id="repin-since"></td></tr>
       <tr><th>Risk</th><td id="repin-risk"></td></tr>
     </tbody></table>
+    </div>
     <p class="status status--error">Only continue if the new fingerprint matches what the host shows on its own console. An attacker
        between Nebula and the host can cause exactly this block.</p>
     <label class="choice"><input type="checkbox" id="repin-confirm"> I compared the new fingerprint on the host's console</label>

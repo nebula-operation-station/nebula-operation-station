@@ -7,6 +7,7 @@
   <p class="hint">IPAM-light: networks, pools, reservations and exclusions. Nebula never manages DHCP or DNS; the status of an
     address is computed from what claims it (assets, managed hosts, reservations, discovery).</p>
   {{if .Networks}}
+  <div class="table-wrap">
   <table class="inventory">
     <thead><tr><th>Network</th><th>Name</th><th>Prefix</th><th>VLAN</th><th>Gateway</th><th>Addresses</th></tr></thead>
     <tbody>
@@ -16,6 +17,7 @@
       {{end}}
     </tbody>
   </table>
+  </div>
   {{else}}
   <p>No networks yet.</p>
   {{end}}
@@ -26,6 +28,7 @@
   <h2>Assets</h2>
   <p class="hint">Devices in your networks, managed or not. "Add to managed hosts" on an asset starts the normal SSH enrollment.</p>
   {{if .Assets}}
+  <div class="table-wrap">
   <table class="inventory">
     <thead><tr><th>Asset</th><th>Name</th><th>Kind</th><th>Addresses</th><th>MAC</th><th>Managed host</th></tr></thead>
     <tbody>
@@ -35,6 +38,7 @@
       {{end}}
     </tbody>
   </table>
+  </div>
   {{else}}
   <p>No assets yet.</p>
   {{end}}

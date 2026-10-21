@@ -7,6 +7,7 @@
      criticality. It runs each action on each host at most once per interval, until the schedule expires or you revoke it.</p>
   {{with .Schedules}}
   {{if .Rows}}
+  <div class="table-wrap">
   <table class="inventory">
     <thead><tr><th>Schedule</th><th>Actions</th><th>Hosts</th><th>Every</th><th>Until</th><th>State</th><th>By</th><th></th></tr></thead>
     <tbody>
@@ -16,7 +17,7 @@
         <td>{{.Actions}}</td>
         <td>{{.Hosts}}</td>
         <td>{{.Interval}}</td>
-        <td>{{.Expires}}</td>
+        <td>{{timeTag .Expires}}</td>
         <td>{{.State}}</td>
         <td>{{.CreatedBy}}</td>
         <td>
@@ -27,6 +28,7 @@
       {{end}}
     </tbody>
   </table>
+  </div>
   {{else}}
   <p>No schedules yet.</p>
   {{end}}
