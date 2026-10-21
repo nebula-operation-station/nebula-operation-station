@@ -33,7 +33,17 @@ type Operations interface {
 	Get(ctx context.Context, id string) (executions.Execution, error)
 	List(ctx context.Context, limit int) ([]executions.Summary, error)
 	AllUpdates(ctx context.Context) (map[string]executions.HostUpdates, error)
+	// Updates is one host's latest update list with its packages.
+	Updates(ctx context.Context, host string) (executions.HostUpdates, error)
 	AllOpsStates(ctx context.Context) (map[string]executions.OpsState, error)
+	// LastResults is the latest successful result per host for one
+	// action (one query, not one per host).
+	LastResults(ctx context.Context, actionID string) (map[string]executions.LastResultRow, error)
+	// LastSeenAll is the newest finished execution per host.
+	LastSeenAll(ctx context.Context) (map[string]time.Time, error)
+	// ListHost is the newest executions that targeted a host (the host
+	// page's operations tab).
+	ListHost(ctx context.Context, host string, limit int) ([]executions.Summary, error)
 	Rollout(ctx context.Context, id string) (*pb.Rollout, error)
 	BeginGate(ctx context.Context, user, id string, g executions.Gate) (executions.GateResult, error)
 	CommitGate(ctx context.Context, user, id string, g executions.Gate, assertion []byte) error
@@ -43,25 +53,6 @@ type Operations interface {
 	Catalog(ctx context.Context) ([]actions.Action, error)
 	// Action finds an action at a version ("" for the current one).
 	Action(ctx context.Context, id, version string) (actions.Action, bool, error)
-}
-
-// updatesSummary is the inventory text of an update list and whether it
-// needs attention (security updates or a reboot).
-func updatesSummary(u executions.HostUpdates) (string, bool) {
-	var parts []string
-	if u.Total == 0 {
-		parts = append(parts, "up to date")
-	} else {
-		parts = append(parts, strconv.Itoa(u.Security)+" security / "+strconv.Itoa(u.Total)+" total")
-		if u.Kernel > 0 {
-			parts = append(parts, "kernel")
-		}
-	}
-	if u.RebootRequired {
-		parts = append(parts, "reboot required")
-	}
-	parts = append(parts, "checked "+u.ObservedAt.UTC().Format("2006-01-02 15:04 MST"))
-	return strings.Join(parts, ", "), u.Security > 0 || u.RebootRequired
 }
 
 const (
@@ -98,6 +89,10 @@ type actionView struct {
 
 type paramView struct {
 	Name, Label, Pattern string
+	// Value prefills the input (?param=name=value; the value comes from
+	// the user's own URL and is validated by the action's pattern and
+	// by the executor).
+	Value string
 }
 
 type opsHostOption struct {
@@ -205,6 +200,14 @@ func (h *Handler) handleOperationNew(w http.ResponseWriter, r *http.Request) {
 	if !slices.ContainsFunc(catalog, func(a actions.Action) bool { return a.ID == want }) && len(catalog) > 0 {
 		want = catalog[0].ID
 	}
+	// Param prefill: ?param=name=value, repeatable (a container action
+	// link from the host page).
+	paramValues := map[string]string{}
+	for _, p := range r.URL.Query()["param"] {
+		if name, value, ok := strings.Cut(p, "="); ok {
+			paramValues[name] = value
+		}
+	}
 	for _, a := range catalog {
 		v := actionView{ID: a.ID, Title: a.Title, Description: a.Description, Selected: a.ID == want,
 			Risk: strings.TrimPrefix(a.Risk.String(), "RISK_CLASS_"), ReadOnly: a.ReadOnly}
@@ -212,7 +215,8 @@ func (h *Handler) handleOperationNew(w http.ResponseWriter, r *http.Request) {
 		v.Scanner = scanner.Categories(f)
 		v.Secrets = a.Secrets
 		for _, p := range a.Params {
-			v.Params = append(v.Params, paramView{Name: p.Name, Label: p.Label, Pattern: strings.TrimSuffix(strings.TrimPrefix(p.Pattern.String(), "^"), "$")})
+			v.Params = append(v.Params, paramView{Name: p.Name, Label: p.Label, Value: paramValues[p.Name],
+				Pattern: strings.TrimSuffix(strings.TrimPrefix(p.Pattern.String(), "^"), "$")})
 		}
 		ops.Actions = append(ops.Actions, v)
 	}

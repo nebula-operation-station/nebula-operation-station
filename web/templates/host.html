@@ -1,20 +1,313 @@
 {{define "content"}}
 {{with .Host}}
-<h1>Host {{.ID}}</h1>
-<section class="panel" aria-label="Host">
-  <div class="actions"><a class="button" href="/inventory">Inventory</a> <a class="button" href="/operations/new">New operation</a></div>
+{{$hid := .ID}}
+{{$tab := .Tab}}
+{{$settings := .Settings}}
+<div class="toolbar">
+  <h1>{{if .DisplayName}}{{.DisplayName}}{{else}}{{.ID}}{{end}}</h1>
+  <div class="actions">
+    <a class="button button--secondary" href="/inventory">Inventory</a>
+  </div>
+</div>
+{{if .Warn}}<p class="status status--warning">{{.Warn}}</p>{{end}}
+{{if not .Found}}<p class="status status--warning">This host is not in the inventory; only stored data and module views are shown.</p>{{end}}
+<section class="panel" aria-label="Host header">
+  <div class="host-header">
+    <div class="host-header__badges">
+      <span class="badge badge--env">{{.Environment}}</span>
+      <span class="badge badge--crit">{{.Criticality}}</span>
+      <span class="badge {{.StateClass}}">{{.StateLabel}}</span>
+      {{if .StateReason}}<span class="hint">{{.StateReason}}</span>{{end}}
+    </div>
+    <div class="table-wrap">
+    <table class="inventory host-header__table">
+      <tbody>
+        <tr><th>ID</th><td class="mono">{{.ID}}</td></tr>
+        <tr><th>Endpoints</th><td>{{range $i, $e := .Endpoints}}{{if $i}}, {{end}}<span class="mono">{{$e}}</span>{{end}}{{if not .Endpoints}}—{{end}}</td></tr>
+        <tr><th>Key</th><td>
+          {{if eq .KeyStatus "pinned"}}
+          <span title="{{.KeyFingerprint}}">pinned <span class="mono">{{.KeyShort}}</span></span>
+          {{else if eq .KeyStatus "blocked"}}
+          <span class="badge badge--critical">blocked (host key mismatch)</span>
+          {{if .RepinHref}}<a class="repin-link" href="{{.RepinHref}}">Re-pin →</a>{{end}}
+          {{else if eq .KeyStatus "unavailable"}}
+          <span class="hint">unknown (executor unavailable)</span>
+          {{else}}
+          <span class="hint">not enrolled</span>
+          {{end}}
+        </td></tr>
+        <tr><th>Last seen</th><td>{{if .LastSeenSet}}as of {{timeTag .LastSeen}}{{else}}—{{end}}</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+</section>
+{{if eq .KeyStatus "not enrolled"}}
+<section class="panel panel--alert" aria-label="Next step">
+  <p><strong>Next: read and pin the host key.</strong> Until the key is pinned, no operation can run on this host.</p>
+  <div class="actions"><a class="button" href="/inventory/enroll?host={{.ID}}">Enroll this host</a></div>
+</section>
+{{end}}
+<nav class="tabs" aria-label="Host tabs">
   {{range .Tabs}}
-  <h2>{{.Title}} <span class="hint">(module {{.Module}} {{.Version}}, {{.State}})</span></h2>
+  <a class="tab{{if eq $tab .ID}} tab--active{{end}}" href="/hosts/{{$hid}}?tab={{.ID}}">{{.Title}}</a>
+  {{end}}
+</nav>
+{{if eq .Tab "overview"}}
+<section class="panel" aria-label="Overview">
+  <div class="toolbar">
+    <h2>Overview</h2>
+    <div class="actions">
+      <form method="post" action="/hosts/{{.ID}}/refresh" class="inline-form" data-fetch>
+        <input type="hidden" name="tab" value="overview">
+        <button type="submit" class="button button--small">Refresh all</button>
+      </form>
+    </div>
+  </div>
+  {{if .Facts}}
+  <p class="hint">as of {{timeTag .AsOf}}</p>
+  <div class="table-wrap">
+  <table class="inventory">
+    <tbody>
+      {{range .Facts}}
+      <tr><th>{{.Label}}</th><td>{{.Value}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p class="empty">Not read yet.</p>
+  {{end}}
+  <div class="summary-tiles">
+    <a class="summary-tile" href="/hosts/{{.ID}}?tab=updates">
+      <span class="summary-tile__num">{{.UpdatesTotal}}</span>
+      <span class="summary-tile__label">updates{{if .UpdatesSecurity}} ({{.UpdatesSecurity}} security){{end}}</span>
+    </a>
+    <a class="summary-tile" href="/hosts/{{.ID}}?tab=containers">
+      <span class="summary-tile__num">{{if .ContainersKnown}}{{.ContainersRunning}}/{{.ContainersTotal}}{{else}}—{{end}}</span>
+      <span class="summary-tile__label">containers running</span>
+    </a>
+    <a class="summary-tile" href="/hosts/{{.ID}}?tab=services">
+      <span class="summary-tile__num">{{.FailedServices}}</span>
+      <span class="summary-tile__label">failed services</span>
+    </a>
+  </div>
+</section>
+{{end}}
+{{if eq .Tab "updates"}}
+<section class="panel" aria-label="Updates">
+  <div class="toolbar">
+    <h2>Updates</h2>
+    <div class="actions">
+      <form method="post" action="/hosts/{{.ID}}/refresh" class="inline-form" data-fetch>
+        <input type="hidden" name="tab" value="updates">
+        <button type="submit" class="button button--small">Refresh</button>
+      </form>
+      <a class="button button--small" href="/operations/new?action=package.install_security&amp;host={{.ID}}">Install security updates</a>
+      <a class="button button--small" href="/operations/new?action=package.install_all&amp;host={{.ID}}">Install all updates</a>
+    </div>
+  </div>
+  {{if .Packages}}
+  {{if .Reboot}}
+  <p class="status status--warning">A reboot is required after installing the updates.</p>
+  {{end}}
+  <p class="hint">as of {{timeTag .UpdatesAsOf}}</p>
+  <div class="table-wrap">
+  <table class="inventory">
+    <thead><tr><th>Package</th><th>Version</th><th>Arch</th><th></th></tr></thead>
+    <tbody>
+      {{range .Packages}}
+      <tr>
+        <td>{{.Name}}</td>
+        <td class="mono">{{.From}} → {{.To}}</td>
+        <td>{{.Arch}}</td>
+        <td>
+          {{if .Security}}<span class="badge badge--critical">security</span>{{end}}
+          {{if .Kernel}}<span class="badge badge--warning">kernel</span>{{end}}
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p class="empty">No updates recorded. {{if .Reboot}}A reboot is still required.{{end}}</p>
+  {{if .Reboot}}<p class="status status--warning">A reboot is required.</p>{{end}}
+  {{end}}
+</section>
+{{end}}
+{{if eq .Tab "containers"}}
+<section class="panel" aria-label="Containers">
+  <div class="toolbar">
+    <h2>Containers</h2>
+    <div class="actions">
+      <form method="post" action="/hosts/{{.ID}}/refresh" class="inline-form" data-fetch>
+        <input type="hidden" name="tab" value="containers">
+        <button type="submit" class="button button--small">Refresh</button>
+      </form>
+    </div>
+  </div>
+  {{if .Containers}}
+  <p class="hint">as of {{timeTag .ContainersAsOf}}</p>
+  <div class="table-wrap">
+  <table class="inventory">
+    <thead><tr><th>Name</th><th>Image</th><th>State</th><th>Status</th><th>Ports</th><th>Project</th><th>Actions</th></tr></thead>
+    <tbody>
+      {{range .Containers}}
+      <tr>
+        <td class="mono">{{.Name}}</td>
+        <td class="mono">{{.Image}}</td>
+        <td><span class="badge {{.StateClass}}">{{.State}}</span>{{if .Update}}<span class="badge badge--warning">update</span>{{end}}</td>
+        <td>{{.Status}}</td>
+        <td class="mono">{{.Ports}}</td>
+        <td class="mono">{{.Project}}</td>
+        <td class="container-actions">
+          <a href="/operations/new?action=docker.logs&amp;host={{$hid}}&amp;param=container={{.Name}}">logs</a>
+          <a href="/operations/new?action=docker.inspect&amp;host={{$hid}}&amp;param=container={{.Name}}">inspect</a>
+          <a href="/operations/new?action=docker.restart&amp;host={{$hid}}&amp;param=container={{.Name}}">restart</a>
+          {{if .Project}}<a href="/operations/new?action=docker.compose_update&amp;host={{$hid}}&amp;param=project={{.Project}}">update project</a>{{end}}
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p class="empty">Not read yet.</p>
+  {{end}}
+</section>
+{{end}}
+{{if eq .Tab "services"}}
+<section class="panel" aria-label="Services">
+  <div class="toolbar">
+    <h2>Services</h2>
+    <div class="actions">
+      <form method="post" action="/hosts/{{.ID}}/refresh" class="inline-form" data-fetch>
+        <input type="hidden" name="tab" value="services">
+        <button type="submit" class="button button--small">Refresh</button>
+      </form>
+    </div>
+  </div>
+  {{if .Units}}
+  <p class="hint">as of {{timeTag .ServicesAsOf}}</p>
+  <div class="table-wrap">
+  <table class="inventory">
+    <thead><tr><th>Unit</th><th>State</th><th>Sub</th><th>Description</th></tr></thead>
+    <tbody>
+      {{range .Units}}
+      <tr>
+        <td class="mono">{{.Name}}</td>
+        <td><span class="badge{{if .Failed}} badge--critical{{else}} badge--ok{{end}}">{{.Active}}</span></td>
+        <td>{{.Sub}}</td>
+        <td>{{.Description}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p class="empty">Not read yet.</p>
+  {{end}}
+</section>
+{{end}}
+{{if eq .Tab "operations"}}
+<section class="panel" aria-label="Operations">
+  <div class="toolbar">
+    <h2>Operations</h2>
+    <div class="actions">
+      <a class="button button--small" href="/operations/new?host={{.ID}}">New operation</a>
+    </div>
+  </div>
+  {{if .Ops}}
+  <p class="hint">The last {{len .Ops}} executions that targeted this host.</p>
+  <div class="table-wrap">
+  <table class="inventory">
+    <thead><tr><th>Operation</th><th>Action</th><th>State</th><th>Created</th><th>Finished</th></tr></thead>
+    <tbody>
+      {{range .Ops}}
+      <tr>
+        <td><a class="mono" href="/operations/{{.ID}}">{{.ID}}</a></td>
+        <td class="mono">{{.Action}}</td>
+        <td><span class="badge {{.StateClass}}">{{.State}}</span></td>
+        <td>{{timeTag .Created}}</td>
+        <td>{{if .FinishedSet}}{{timeTag .Finished}}{{else}}—{{end}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p class="empty">No executions for this host yet.</p>
+  {{end}}
+</section>
+{{end}}
+{{if eq .Tab "modules"}}
+<section class="panel" aria-label="Modules">
+  <h2>Modules</h2>
+  {{if .ModuleTabs}}
+  {{range .ModuleTabs}}
+  <h3>{{.Title}} <span class="hint">(module {{.Module}} {{.Version}}, {{.State}})</span></h3>
   {{range .Cards}}
   <div class="panel">
     <p class="status"><strong>{{.Title}}</strong> <span class="hint">{{.ActionID}}, {{.When}}</span></p>
     <div class="table-wrap"><table class="inventory"><tbody>{{range .Fields}}<tr><th>{{.Label}}</th><td>{{.Value}}</td></tr>{{end}}</tbody></table></div>
-    <div class="actions"><a class="button button--small" href="/operations/new?action={{.ActionID}}">Run {{.ActionID}}</a></div>
+    <div class="actions"><a class="button button--small" href="/operations/new?action={{.ActionID}}&amp;host={{$hid}}">Run {{.ActionID}}</a></div>
   </div>
+  {{end}}
   {{end}}
   {{else}}
   <p>No module shows anything for this host.</p>
   {{end}}
 </section>
+{{end}}
+{{if eq .Tab "settings"}}
+<section class="panel" aria-label="Settings">
+  <h2>Settings</h2>
+  {{with .Settings}}
+  <form class="form form-grid" method="post" action="/hosts/{{$hid}}/settings" data-fetch>
+    <label>ID
+      <input name="id" value="{{$hid}}" readonly>
+    </label>
+    <label>Display name
+      <input name="display_name" value="{{.DisplayName}}" maxlength="128" autocomplete="off">
+    </label>
+    <label>Environment
+      <select name="environment">
+        {{range .Environments}}<option value="{{.}}"{{if eq $settings.Environment .}} selected{{end}}>{{.}}</option>
+        {{end}}
+      </select>
+    </label>
+    <label>Criticality
+      <select name="criticality">
+        {{range .Criticalities}}<option value="{{.}}"{{if eq $settings.Criticality .}} selected{{end}}>{{.}}</option>
+        {{end}}
+      </select>
+    </label>
+    <label class="field--full">Endpoints (one per line: host, host:port or [v6]:port)
+      <textarea name="endpoints" rows="3">{{.EndpointsText}}</textarea>
+    </label>
+    <label class="field--full">Tags (one key=value per line)
+      <textarea name="tags" rows="3">{{.TagsText}}</textarea>
+    </label>
+    <div class="actions">
+      <button type="submit" class="button">Save changes</button>
+    </div>
+  </form>
+  <h3>Delete host</h3>
+  <p class="hint">Deleting removes the host from the inventory. Its executions and results stay in the history.</p>
+  <form class="form form-grid" method="post" action="/hosts/{{$hid}}/delete" data-fetch>
+    <label class="field--full">Type the host ID to delete
+      <input type="text" name="confirm_id" autocomplete="off" required>
+    </label>
+    <input type="hidden" name="id" value="{{$hid}}">
+    <div class="actions">
+      <button type="submit" class="button button--danger">Delete host</button>
+    </div>
+  </form>
+  {{else}}
+  <p class="status status--error">Inventory is not configured; the host cannot be edited.</p>
+  {{end}}
+</section>
+{{end}}
 {{end}}
 {{end}}

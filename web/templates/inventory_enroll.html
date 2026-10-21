@@ -6,6 +6,7 @@
      (<code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code>) and approve the table with your security key. Hosts pinned here have no
      criticality record and count as HIGH until you set one with <code>nebula host criticality</code>.</p>
   <p id="message" class="message" role="status" aria-live="polite"></p>
+  {{if .EnrollNote}}<p class="status status--pending">{{.EnrollNote}}</p>{{end}}
 </section>
 {{if .InventoryUnavailable}}
 <p class="status status--error">Inventory or executor unavailable</p>
@@ -18,7 +19,7 @@
     <tbody>
       {{range .Enroll}}
       <tr class="enroll-row" data-host="{{.ID}}">
-        <td><input type="checkbox" class="enroll-pick" aria-label="Enroll {{.ID}}"></td>
+        <td><input type="checkbox" class="enroll-pick" aria-label="Enroll {{.ID}}"{{if .Selected}} checked{{end}}></td>
         <td>{{.Name}}</td>
         <td><select class="enroll-endpoint">{{range .Endpoints}}<option>{{.}}</option>{{end}}</select></td>
         <td><input type="text" class="enroll-user" value="nebula" size="10" autocomplete="off"></td>

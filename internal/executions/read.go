@@ -118,15 +118,17 @@ type Summary struct {
 	State     string
 	CreatedBy string
 	CreatedAt time.Time
-	Hosts     int
-	Failed    int
+	// FinishedAt is zero while the execution has not finished.
+	FinishedAt time.Time
+	Hosts      int
+	Failed     int
 }
 
 // List returns the latest executions, newest first.
 func (s *Service) List(ctx context.Context, limit int) ([]Summary, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT e.id, e.action_id, e.risk, e.state, e.created_by, e.created_at,
-			(SELECT count(*) FROM execution_hosts h WHERE h.execution_id = e.id),
-			(SELECT count(*) FROM execution_hosts h WHERE h.execution_id = e.id AND h.state = 'finished' AND h.class != 'success')
+	rows, err := s.db.QueryContext(ctx, `SELECT e.id, e.action_id, e.risk, e.state, e.created_by, e.created_at, e.finished_at,
+		(SELECT count(*) FROM execution_hosts h WHERE h.execution_id = e.id),
+		(SELECT count(*) FROM execution_hosts h WHERE h.execution_id = e.id AND h.state = 'finished' AND h.class != 'success')
 		FROM executions e ORDER BY e.created_at DESC, e.id LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list executions: %w", err)
@@ -135,11 +137,11 @@ func (s *Service) List(ctx context.Context, limit int) ([]Summary, error) {
 	var out []Summary
 	for rows.Next() {
 		var x Summary
-		var created int64
-		if err := rows.Scan(&x.ID, &x.ActionID, &x.Risk, &x.State, &x.CreatedBy, &created, &x.Hosts, &x.Failed); err != nil {
+		var created, finished sql.NullInt64
+		if err := rows.Scan(&x.ID, &x.ActionID, &x.Risk, &x.State, &x.CreatedBy, &created, &finished, &x.Hosts, &x.Failed); err != nil {
 			return nil, err
 		}
-		x.CreatedAt = time.Unix(created, 0)
+		x.CreatedAt, x.FinishedAt = time.Unix(created.Int64, 0), unix(finished)
 		out = append(out, x)
 	}
 	return out, rows.Err()

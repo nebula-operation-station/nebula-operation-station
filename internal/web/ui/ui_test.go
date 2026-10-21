@@ -387,21 +387,33 @@ func TestInventoryShowsHostsWithKeyStatus(t *testing.T) {
 	})
 	body := getBody(t, h.Handler(), "/inventory")
 	for _, want := range []string{
-		// Pinned host: all columns, endpoints in stored order.
-		"web-01", "Web server 1", "PROD", "HIGH",
-		"10.0.0.5:22, 10.0.0.5:2222",
-		"pinned ssh-ed25519 SHA256:AAAA",
+		// Pinned host: name, ID, full fingerprint in the title.
+		"web-01", "Web server 1",
+		`title="ssh-ed25519 SHA256:AAAA"`,
+		"pinned",
 		// Blocked host.
-		"db-01", "Database 1", "CRITICAL",
-		"10.0.0.6:22",
-		"BLOCKED (host key mismatch)",
+		"db-01", "Database 1", "blocked",
 		// Not-enrolled host.
-		"nas-01", "NAS", "DEV", "LOW",
-		"10.0.0.7:22, [fd00::7]:2222", // IPv6 bracketed, so the port is unambiguous
-		"not enrolled",
+		"nas-01", "NAS", "not enrolled",
+		// Rows are clickable to the host page.
+		`href="/hosts/web-01"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("inventory missing %q", want)
+		}
+	}
+	// Endpoints and environment moved to the host page, in stored order
+	// (IPv6 bracketed, so the port is unambiguous).
+	host := getBody(t, h.Handler(), "/hosts/web-01")
+	for _, want := range []string{"10.0.0.5:22", "10.0.0.5:2222", "PROD", "HIGH"} {
+		if !strings.Contains(host, want) {
+			t.Errorf("host page missing %q", want)
+		}
+	}
+	host = getBody(t, h.Handler(), "/hosts/nas-01")
+	for _, want := range []string{"10.0.0.7:22", "[fd00::7]:2222"} {
+		if !strings.Contains(host, want) {
+			t.Errorf("host page missing %q", want)
 		}
 	}
 }
@@ -420,7 +432,7 @@ func TestInventoryEmptyShowsHint(t *testing.T) {
 				Hosts:        tc.hosts,
 			})
 			body := getBody(t, h.Handler(), "/inventory")
-			if !strings.Contains(body, "No managed hosts yet. CSV import and enrollment follow.") {
+			if !strings.Contains(body, "No managed hosts yet.") {
 				t.Errorf("inventory missing empty hint")
 			}
 		})
@@ -543,5 +555,58 @@ func TestDashboardShowsBlockedHostsAndVault(t *testing.T) {
 	body = getBody(t, h.Handler(), "/dashboard")
 	if !strings.Contains(body, "Host key status unavailable") || strings.Contains(body, "executor.sock") || !strings.Contains(logged.String(), "executor.sock") {
 		t.Errorf("executor error: page %q log %q", body, logged.String())
+	}
+}
+
+// TestHostRefreshCreatesTheTabActions: the host page's refresh button
+// creates the tab's read-only actions through the normal create path and
+// redirects to the first pending operation.
+func TestHostRefreshCreatesTheTabActions(t *testing.T) {
+	f := &fakeOps{}
+	o := ui.Options{
+		PublicOrigin: "https://nebula.example.org",
+		Operations:   f,
+		Inventory:    newFakeInventory(),
+		Hosts: func(context.Context) ([]inventory.Host, error) {
+			return []inventory.Host{{ID: "web"}}, nil
+		},
+	}
+	h := newTestHandler(t, o).Handler()
+	postForm := func(tab string) (int, string) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/hosts/web/refresh", strings.NewReader("tab="+tab))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		h.ServeHTTP(rec, req)
+		return rec.Code, rec.Header().Get("Location")
+	}
+
+	code, loc := postForm("overview")
+	if code != http.StatusSeeOther || loc != "/operations/"+opID {
+		t.Fatalf("overview: %d %s", code, loc)
+	}
+	want := []string{"core.facts", "package.list_updates", "docker.list", "service.list"}
+	if len(f.createdCalls) != len(want) {
+		t.Fatalf("overview calls: %v", f.createdCalls)
+	}
+	for i, a := range want {
+		call := f.createdCalls[i]
+		if call[1] != a || len(call) != 3 || call[2] != "web" {
+			t.Fatalf("overview call %d: %v", i, call)
+		}
+	}
+
+	f.createdCalls = nil
+	code, loc = postForm("containers")
+	if code != http.StatusSeeOther || loc != "/operations/"+opID {
+		t.Fatalf("containers: %d %s", code, loc)
+	}
+	if len(f.createdCalls) != 2 || f.createdCalls[0][1] != "docker.list" || f.createdCalls[1][1] != "docker.check_updates" {
+		t.Fatalf("containers calls: %v", f.createdCalls)
+	}
+
+	// A tab without a refresh action is rejected and creates nothing.
+	f.createdCalls = nil
+	if code, _ := postForm("settings"); code != http.StatusBadRequest || len(f.createdCalls) != 0 {
+		t.Fatalf("settings: %d %v", code, f.createdCalls)
 	}
 }

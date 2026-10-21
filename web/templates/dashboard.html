@@ -40,6 +40,32 @@
 {{else if .BlockedUnknown}}
 <p class="status status--error">Host key status unavailable</p>
 {{end}}
+{{if .DashboardTiles}}
+<section class="panel" aria-label="Host overview">
+  <h2>Host overview</h2>
+  <div class="tiles">
+    {{range .DashboardTiles}}
+    <a class="tile {{.Class}}" href="{{.Href}}">
+      <span class="tile__num">{{.Num}}</span>
+      <span class="tile__label">{{.Label}}</span>
+    </a>
+    {{end}}
+  </div>
+</section>
+{{else}}
+<section class="panel" aria-label="Managed hosts">
+  <h2>Managed hosts</h2>
+  {{if .Hosts}}
+  <ul class="hosts">
+    {{range .Hosts}}
+    <li>{{.}}</li>
+    {{end}}
+  </ul>
+  {{else}}
+  <p>No managed hosts yet.</p>
+  {{end}}
+</section>
+{{end}}
 <section class="panel" aria-label="Executor status">
   <h2>Executor</h2>
   {{if .Status}}
@@ -60,17 +86,5 @@
   <p id="message" class="message" role="status" aria-live="polite"></p>
   <p class="hint">A privileged session needs your security key with user verification. Lock ends it,
      revokes every permit and wipes the SSH keys until <code>nebula unlock</code>.</p>
-</section>
-<section class="panel" aria-label="Managed hosts">
-  <h2>Managed hosts</h2>
-  {{if .Hosts}}
-  <ul class="hosts">
-    {{range .Hosts}}
-    <li>{{.}}</li>
-    {{end}}
-  </ul>
-  {{else}}
-  <p>No managed hosts yet.</p>
-  {{end}}
 </section>
 {{end}}

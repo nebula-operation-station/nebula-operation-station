@@ -16,26 +16,18 @@ package ui
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
-	"io"
 	"io/fs"
 	"log/slog"
-	"net"
 	"net/http"
-	"strconv"
-	"strings"
 	"time"
 
 	"google.golang.org/grpc"
 
-	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/middleware"
 	"github.com/nebula-operation-station/nebula-operation-station/web/static"
 	"github.com/nebula-operation-station/nebula-operation-station/web/templates"
@@ -250,6 +242,7 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("/", h.handleRoot)
 	mux.HandleFunc("/dashboard", h.handleDashboard)
 	mux.HandleFunc("/inventory", h.handleInventory)
+	mux.HandleFunc("/inventory/new", h.handleInventoryNew)
 	// Host changes are JSON POSTs only (decision 36: never plain form
 	// posts). Without Options.Inventory they answer 404.
 	mux.HandleFunc("/inventory/hosts", h.handleHostCreate)
@@ -288,6 +281,12 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("POST /modules/import", h.handleModuleImport)
 	mux.HandleFunc("POST /modules/verify", h.handleModuleVerify)
 	mux.HandleFunc("GET /hosts/{id}", h.handleHost)
+	// The host settings form (edit and delete) posts as a plain form
+	// (no JavaScript) or as JSON from the dialog; both go through the
+	// Origin-checked POST routes.
+	mux.HandleFunc("POST /hosts/{id}/refresh", h.handleHostRefresh)
+	mux.HandleFunc("POST /hosts/{id}/settings", h.handleHostFormUpdate)
+	mux.HandleFunc("POST /hosts/{id}/delete", h.handleHostFormDelete)
 	// Global search (M9-3): read-only, quick actions are links.
 	mux.HandleFunc("GET /search", h.handleSearch)
 	mux.HandleFunc("GET /history", h.handleHistory)
@@ -366,6 +365,20 @@ type pageData struct {
 	InventoryUnavailable bool
 	// Inventory is the table of managed hosts, in ID order.
 	Inventory []hostView
+	// InventoryDialogOpen shows the add-host dialog with the open
+	// attribute (the no-JavaScript form at /inventory/new, or a form
+	// error).
+	InventoryDialogOpen bool
+	// InventoryError is a form error shown inside the add dialog.
+	InventoryError string
+	// InventoryConfirmDuplicate adds the hidden confirmation field to
+	// the add form (after a duplicate-endpoint warning).
+	InventoryConfirmDuplicate bool
+	// InventoryState, InventoryEnv and InventoryEnvs are the active
+	// server-side filters and the known environments.
+	InventoryState string
+	InventoryEnv   string
+	InventoryEnvs  []string
 	// Blocked lists hosts blocked after a host key mismatch.
 	Blocked []blockedView
 	// BlockedUnknown is true when the executor could not be asked.
@@ -374,6 +387,8 @@ type pageData struct {
 	RepinEnabled bool
 	// Enroll lists inventory hosts without a pinned key.
 	Enroll []enrollRow
+	// EnrollNote explains a preselected enrollment (?host=).
+	EnrollNote string
 	// EnrollEnabled links the enrollment page from the inventory.
 	EnrollEnabled bool
 	// Schedules is the data of the scheduled-checks page.
@@ -403,6 +418,9 @@ type pageData struct {
 	// page then shows the add-host form and the per-row edit and
 	// delete controls.
 	InventoryEditable bool
+	// DashboardTiles are the host-state tiles on the dashboard, each
+	// linking to the filtered inventory.
+	DashboardTiles []dashboardTile
 }
 
 // statusView is the dashboard's executor status, pre-formatted for
@@ -425,40 +443,6 @@ type blockedView struct {
 	Endpoint    string
 	Fingerprint string
 	Since       string
-}
-
-// hostView is one row of the inventory table, pre-formatted for
-// display. Every field is untrusted host data, rendered as text only.
-type hostView struct {
-	// ID is the host ID.
-	ID string
-	// DisplayName is the host's display name.
-	DisplayName string
-	// Environment is DEV, QA or PROD.
-	Environment string
-	// Criticality is LOW, MEDIUM, HIGH or CRITICAL.
-	Criticality string
-	// Endpoints are "address:port" strings in stored order.
-	Endpoints []string
-	// EndpointsJSON is the JSON array of the endpoint strings, used to
-	// prefill the edit form (host:port and [v6]:port are exactly what
-	// the form and sshtransport.ParseEndpoint accept).
-	EndpointsJSON string
-	// TagsJSON is the JSON object of the host tags, used to prefill
-	// the edit form.
-	TagsJSON string
-	// KeyStatus is the host's SSH key status: "pinned <key type>
-	// <fingerprint>", "BLOCKED (host key mismatch)", "not enrolled" or
-	// "executor unavailable".
-	KeyStatus string
-	// OpsState is READY, WARNING, UNREACHABLE or UNKNOWN (spec 12) and
-	// OpsReason its "time · reason" text.
-	OpsState  string
-	OpsReason string
-	// Updates summarizes the latest update check, "" if none.
-	Updates string
-	// UpdatesAlert marks pending security updates or a required reboot.
-	UpdatesAlert bool
 }
 
 func (h *Handler) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -496,6 +480,9 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		data.Hosts = h.hostNames(r.Context())
 	}
 	data.Blocked, data.BlockedUnknown = h.blockedHosts(r.Context())
+	if h.hosts != nil && h.inventory != nil {
+		data.DashboardTiles = h.dashboardTiles(r.Context())
+	}
 	h.render(w, r, data)
 }
 
@@ -529,339 +516,6 @@ func (h *Handler) blockedHosts(ctx context.Context) ([]blockedView, bool) {
 		out = append(out, blockedView{HostID: p.GetHostId(), Endpoint: p.GetBlockedEndpoint(), Fingerprint: fp, Since: since})
 	}
 	return out, false
-}
-
-func (h *Handler) handleInventory(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	data := pageData{Title: "Inventory", Active: "inventory", Content: "inventory"}
-	if h.inventory != nil {
-		data.InventoryEditable = true
-		data.EnrollEnabled = h.enroll != nil && h.hosts != nil
-		data.Scripts = []string{"webauthn.js", "inventory.js"}
-		if id := r.URL.Query().Get("asset"); id != "" {
-			ctx, cancel := context.WithTimeout(r.Context(), inventoryCallTimeout)
-			data.InventoryPrefill = h.assetPrefill(ctx, id)
-			cancel()
-		}
-	}
-	if h.hosts == nil {
-		h.render(w, r, data)
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), inventoryCallTimeout)
-	defer cancel()
-	hosts, err := h.hosts(ctx)
-	if err != nil {
-		// The page shows a fixed "Inventory unavailable" message; the
-		// error detail (which can contain internal state) goes to the
-		// log only.
-		h.log.Error("list inventory hosts", "error", err)
-		data.InventoryUnavailable = true
-		h.render(w, r, data)
-		return
-	}
-	keys, keysUnavailable := h.hostKeyStatuses(ctx)
-	var updates map[string]executions.HostUpdates
-	var states map[string]executions.OpsState
-	if h.operations != nil {
-		if updates, err = h.operations.AllUpdates(ctx); err != nil {
-			h.log.Error("list host updates", "error", err)
-		}
-		if states, err = h.operations.AllOpsStates(ctx); err != nil {
-			h.log.Error("list ops states", "error", err)
-		}
-	}
-	for _, host := range hosts {
-		v := viewHost(host, keys)
-		if keysUnavailable {
-			v.KeyStatus = "executor unavailable"
-		}
-		if u, ok := updates[host.ID]; ok {
-			v.Updates, v.UpdatesAlert = updatesSummary(u)
-		}
-		v.OpsState, v.OpsReason = opsStateView(states[host.ID], v.KeyStatus)
-		data.Inventory = append(data.Inventory, v)
-	}
-	h.render(w, r, data)
-}
-
-// hostKeyStatuses maps a host ID to its SSH key status text. The second
-// return value is true when the executor's pins could not be read (the
-// column then shows "executor unavailable").
-func (h *Handler) hostKeyStatuses(ctx context.Context) (map[string]string, bool) {
-	if h.hostKeys == nil {
-		return nil, true
-	}
-	pins, err := h.hostKeys(ctx)
-	if err != nil {
-		// The column shows a fixed "executor unavailable" message; the
-		// error detail goes to the log only.
-		h.log.Error("list host key pins", "error", err)
-		return nil, true
-	}
-	// The executor pins one key per host; if a host ever has several
-	// pins, the blocked one wins, since it is the state that refuses
-	// connections.
-	byHost := make(map[string]*pb.HostKeyPin, len(pins))
-	for _, pin := range pins {
-		if pin == nil {
-			continue
-		}
-		id := pin.GetHostId()
-		if cur, ok := byHost[id]; !ok || (pin.GetBlocked() && !cur.GetBlocked()) {
-			byHost[id] = pin
-		}
-	}
-	statuses := make(map[string]string, len(byHost))
-	for id, pin := range byHost {
-		if pin.GetBlocked() {
-			statuses[id] = "BLOCKED (host key mismatch)"
-			continue
-		}
-		statuses[id] = "pinned " + pin.GetKeyType() + " " + pin.GetFingerprint()
-	}
-	return statuses, false
-}
-
-// viewHost formats one inventory host for the table.
-func viewHost(host inventory.Host, keys map[string]string) hostView {
-	endpoints := make([]string, len(host.Endpoints))
-	for i, e := range host.Endpoints {
-		port := e.Port
-		if port == 0 {
-			port = defaultSSHPort
-		}
-		// JoinHostPort brackets IPv6 addresses ("[fd00::1]:22").
-		endpoints[i] = net.JoinHostPort(e.Address, strconv.Itoa(port))
-	}
-	endpointsJSON, _ := json.Marshal(endpoints)
-	tags := host.Tags
-	if tags == nil {
-		tags = map[string]string{}
-	}
-	tagsJSON, _ := json.Marshal(tags)
-	keyStatus := "not enrolled"
-	if s, ok := keys[host.ID]; ok {
-		keyStatus = s
-	}
-	return hostView{
-		ID:            host.ID,
-		DisplayName:   host.DisplayName,
-		Environment:   string(host.Environment),
-		Criticality:   string(host.Criticality),
-		Endpoints:     endpoints,
-		EndpointsJSON: string(endpointsJSON),
-		TagsJSON:      string(tagsJSON),
-		KeyStatus:     keyStatus,
-	}
-}
-
-// maxHostBodyBytes limits the JSON body of the host change endpoints.
-const maxHostBodyBytes = 64 << 10
-
-// hostRequest is the JSON body of the create and update endpoints.
-// Endpoints are strings parsed by sshtransport.ParseEndpoint ("host",
-// "host:port" or "[v6]:port").
-type hostRequest struct {
-	ID          string            `json:"id"`
-	DisplayName string            `json:"display_name"`
-	Environment string            `json:"environment"`
-	Criticality string            `json:"criticality"`
-	Endpoints   []string          `json:"endpoints"`
-	Tags        map[string]string `json:"tags"`
-}
-
-// toHost converts the request into an inventory host, parsing every
-// endpoint. The returned error describes the input only.
-func (in hostRequest) toHost() (inventory.Host, error) {
-	h := inventory.Host{
-		ID:          in.ID,
-		DisplayName: in.DisplayName,
-		Environment: inventory.Environment(in.Environment),
-		Criticality: inventory.Criticality(in.Criticality),
-		Tags:        in.Tags,
-	}
-	for _, s := range in.Endpoints {
-		e, err := sshtransport.ParseEndpoint(s)
-		if err != nil {
-			return inventory.Host{}, err
-		}
-		port := int(e.Port)
-		if port == 0 {
-			port = 22 // the inventory default; the store stores it explicitly
-		}
-		h.Endpoints = append(h.Endpoints, inventory.Endpoint{Address: e.Host, Port: port})
-	}
-	return h, nil
-}
-
-// decodeHostRequest reads and validates the JSON body of a create or
-// update request. It returns the parsed host, or an error describing
-// the input (bad JSON, unknown fields, oversized body, bad endpoint).
-func decodeHostRequest(w http.ResponseWriter, r *http.Request) (inventory.Host, error) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxHostBodyBytes)
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		return inventory.Host{}, fmt.Errorf("read request body: %w", err)
-	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
-	var in hostRequest
-	if err := dec.Decode(&in); err != nil {
-		return inventory.Host{}, fmt.Errorf("request body is not valid JSON: %v", err)
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return inventory.Host{}, errors.New("request body contains data after the JSON object")
-	}
-	return in.toHost()
-}
-
-// answerStoreError maps an inventory store error to a response:
-// validation problems (which describe the input) are 400 with the
-// problem text, unknown hosts are 404, and everything else is 500 with
-// a fixed message — the detail goes to the log only.
-func (h *Handler) answerStoreError(w http.ResponseWriter, action, id string, err error) {
-	var verr *inventory.ValidationError
-	switch {
-	case errors.As(err, &verr):
-		writeJSONError(w, http.StatusBadRequest, verr.Error())
-	case errors.Is(err, inventory.ErrHostNotFound):
-		writeJSONError(w, http.StatusNotFound, "host not found")
-	case errors.Is(err, inventory.ErrHostExists):
-		writeJSONError(w, http.StatusConflict, "a host with this ID already exists")
-	default:
-		h.log.Error(action, "host", id, "error", err)
-		writeJSONError(w, http.StatusInternalServerError, "inventory unavailable")
-	}
-}
-
-// audit logs one line per inventory change: the kind, the host ID and
-// the web user.
-func (h *Handler) audit(r *http.Request, kind, hostID string) {
-	user := "unknown"
-	if s, ok := auth.SessionFrom(r.Context()); ok {
-		user = s.UserName
-	}
-	h.log.Info("audit", "kind", kind, "host", hostID, "user", user)
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func writeJSONError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
-}
-
-// answerDecodeError turns a decodeHostRequest error into a response:
-// an oversized body is 413, anything else (bad JSON, unknown fields,
-// bad endpoint) is 400 with the input-describing text.
-func answerDecodeError(w http.ResponseWriter, err error) {
-	var mbe *http.MaxBytesError
-	if errors.As(err, &mbe) {
-		writeJSONError(w, http.StatusRequestEntityTooLarge, "request body too large")
-		return
-	}
-	writeJSONError(w, http.StatusBadRequest, err.Error())
-}
-
-// hostChangeAllowed answers the request itself unless it is a JSON POST
-// to a configured inventory. Requiring application/json is defence in
-// depth next to the Origin check: no plain HTML form can send it.
-func (h *Handler) hostChangeAllowed(w http.ResponseWriter, r *http.Request) bool {
-	if h.inventory == nil {
-		http.NotFound(w, r)
-		return false
-	}
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return false
-	}
-	if ct, _, _ := strings.Cut(r.Header.Get("Content-Type"), ";"); !strings.EqualFold(strings.TrimSpace(ct), "application/json") {
-		writeJSONError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
-		return false
-	}
-	return true
-}
-
-func (h *Handler) handleHostCreate(w http.ResponseWriter, r *http.Request) {
-	if !h.hostChangeAllowed(w, r) {
-		return
-	}
-	host, err := decodeHostRequest(w, r)
-	if err != nil {
-		answerDecodeError(w, err)
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), inventoryCallTimeout)
-	defer cancel()
-	if _, err := h.inventory.Create(ctx, host, inventory.CreateOptions{}); err != nil {
-		h.answerStoreError(w, "create host", host.ID, err)
-		return
-	}
-	h.audit(r, "host_created", host.ID)
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-}
-
-func (h *Handler) handleHostUpdate(w http.ResponseWriter, r *http.Request) {
-	if !h.hostChangeAllowed(w, r) {
-		return
-	}
-	host, err := decodeHostRequest(w, r)
-	if err != nil {
-		answerDecodeError(w, err)
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), inventoryCallTimeout)
-	defer cancel()
-	if _, err := h.inventory.Update(ctx, host); err != nil {
-		h.answerStoreError(w, "update host", host.ID, err)
-		return
-	}
-	h.audit(r, "host_updated", host.ID)
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-}
-
-// deleteRequest is the JSON body of the delete endpoint.
-type deleteRequest struct {
-	ID string `json:"id"`
-}
-
-func (h *Handler) handleHostDelete(w http.ResponseWriter, r *http.Request) {
-	if !h.hostChangeAllowed(w, r) {
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxHostBodyBytes)
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		answerDecodeError(w, err)
-		return
-	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
-	var in deleteRequest
-	if err := dec.Decode(&in); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "request body is not valid JSON: "+err.Error())
-		return
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		writeJSONError(w, http.StatusBadRequest, "request body contains data after the JSON object")
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), inventoryCallTimeout)
-	defer cancel()
-	if err := h.inventory.Delete(ctx, in.ID); err != nil {
-		h.answerStoreError(w, "delete host", in.ID, err)
-		return
-	}
-	h.audit(r, "host_deleted", in.ID)
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (h *Handler) handleBare(title, content, script string) http.HandlerFunc {

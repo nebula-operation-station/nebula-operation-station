@@ -15,7 +15,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"database/sql"
 	"encoding/base32"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"log/slog"
@@ -24,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -35,6 +40,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/events"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/osdebian"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
@@ -199,7 +205,19 @@ func must(err error) {
 }
 
 func main() {
-	port, dir := os.Args[1], os.Args[2]
+	args := os.Args[1:]
+	// -preview serves the UI without the WebAuthn session check and seeds
+	// demo data, for a human to look at the pages (make test-browser uses
+	// the harness without the flag and must keep its login flow).
+	preview := false
+	if len(args) > 0 && args[0] == "-preview" {
+		preview = true
+		args = args[1:]
+	}
+	if len(args) < 2 {
+		panic("usage: harness [-preview] PORT DIR")
+	}
+	port, dir := args[0], args[1]
 	origin := "http://localhost:" + port
 	base := slog.NewTextHandler(os.Stderr, nil)
 	exDir := filepath.Join(dir, "ex")
@@ -331,6 +349,9 @@ func main() {
 	audit := auditlog.New(sdb, true)
 	u, err := ui.New(ui.Options{PublicOrigin: origin, Events: direct{svc}, Audit: audit, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Schedules: ops, Runbooks: rb, Trust: direct{svc}, Modules: mods, LastResult: ops.LastResult, Network: ipamStore, Discovery: disc, Repin: direct{svc}, Enroll: direct{svc}, Log: slog.New(auditlog.NewHandler(base, audit))})
 	must(err)
+	if preview {
+		seedPreview(context.Background(), svc, sdb, inv, sshPub)
+	}
 	mux := http.NewServeMux()
 	// Test hook: issue a one-time code like `nebula webauthn code`.
 	mux.HandleFunc("/__code", func(w http.ResponseWriter, r *http.Request) {
@@ -363,6 +384,314 @@ func main() {
 		must(disc.Poll(r.Context()))
 		fmt.Fprint(w, len(jobs))
 	})
-	mux.Handle("/", middleware.Handler(middleware.Options{PublicOrigin: origin}, ah.Wrap(u.Handler())))
+	mount := u.Handler()
+	if !preview {
+		mount = ah.Wrap(mount)
+	}
+	mux.Handle("/", middleware.Handler(middleware.Options{PublicOrigin: origin}, mount))
 	must(http.ListenAndServe("127.0.0.1:"+port, mux))
+}
+
+// ---------------------------------------------------------------------------
+// Preview mode (-preview): seed a small lab so a human can look at the pages.
+// It is test-only: it never runs in a release and only in this binary.
+
+// newID36 returns a random 36-character identifier (UUID-shaped), the length
+// the executions and discovery_jobs tables require.
+func newID36() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err)
+	}
+	h := hex.EncodeToString(b[:])
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
+func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+
+func jsonDoc(v any) []byte {
+	js, err := json.Marshal(v)
+	must(err)
+	return js
+}
+
+// factsResult builds a core.facts result (values base64, spec 09).
+func factsResult(osRelease, uname, hostname, uptime string, proxmox bool) []byte {
+	return jsonDoc(map[string]any{"os_release": b64(osRelease), "uname": b64(uname),
+		"hostname": b64(hostname), "uptime": b64(uptime), "proxmox": proxmox})
+}
+
+func dockerListResult(version string, containers ...string) []byte {
+	return jsonDoc(map[string]any{"format": "docker-ps-v1", "phase": "done", "present": true,
+		"version": b64(version), "containers": b64(strings.Join(containers, "\n"))})
+}
+
+func dockerUpdatesResult(lines ...string) []byte {
+	return jsonDoc(map[string]any{"format": "docker-updates-v1", "phase": "done",
+		"lines": b64(strings.Join(lines, "\n"))})
+}
+
+func serviceListResult(units ...string) []byte {
+	return jsonDoc(map[string]any{"format": "systemd-units-v1",
+		"units": b64(strings.Join(units, "\n"))})
+}
+
+// seedExec inserts one execution (and its per-host row) with the real
+// action's module version and artifact hash. finishedAt zero means the
+// execution has not finished.
+func seedExec(ctx context.Context, sdb *sql.DB, actionID, hostID string, result []byte, finishedAt time.Time, execState, hostState, class string) string {
+	a, ok := actions.Lookup(actionID)
+	if !ok {
+		panic("no action " + actionID)
+	}
+	id := newID36()
+	created := finishedAt.Add(-2 * time.Minute)
+	var fin interface{}
+	if !finishedAt.IsZero() {
+		fin = finishedAt.Unix()
+	}
+	_, err := sdb.ExecContext(ctx, `INSERT INTO executions (id, action_id, module_version, artifact_sha256, risk, state, durable, timeout_s, created_by, created_at, finished_at, params)
+		VALUES (?, ?, ?, ?, 'LOW', ?, 0, 300, 'demo', ?, ?, '{}')`,
+		id, a.ID, a.Version, a.SHA256(), execState, created.Unix(), fin)
+	must(err)
+	var res interface{}
+	if result != nil {
+		res = result
+	}
+	_, err = sdb.ExecContext(ctx, `INSERT INTO execution_hosts (execution_id, host_id, fingerprint, credential_ref, endpoints, state, class, exit_code, result, started_at, finished_at)
+		VALUES (?, ?, 'SHA256:demo', 'nebula-default', '127.0.0.1:22', ?, ?, 0, ?, ?, ?)`,
+		id, hostID, hostState, class, res, created.Unix(), fin)
+	must(err)
+	return id
+}
+
+// seedUpdates stores a parsed package.list_updates for host.
+func seedUpdates(ctx context.Context, sdb *sql.DB, hostID, execID string, pkgs []osdebian.Package, total, security, kernel int, reboot bool, observedAt time.Time) {
+	js, err := json.Marshal(pkgs)
+	must(err)
+	var rebootI int
+	if reboot {
+		rebootI = 1
+	}
+	_, err = sdb.ExecContext(ctx, `INSERT INTO host_updates (host_id, observed_at, execution_id, total, security, kernel, reboot_required, lists_updated, packages)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(host_id) DO UPDATE SET
+		observed_at=excluded.observed_at, execution_id=excluded.execution_id, total=excluded.total, security=excluded.security,
+		kernel=excluded.kernel, reboot_required=excluded.reboot_required, lists_updated=excluded.lists_updated, packages=excluded.packages`,
+		hostID, observedAt.Unix(), execID, total, security, kernel, rebootI, observedAt.Add(-time.Hour).Unix(), string(js))
+	must(err)
+}
+
+// seedOpsState stores the last Ops State of host.
+func seedOpsState(ctx context.Context, sdb *sql.DB, hostID, state, reason string, observedAt time.Time) {
+	_, err := sdb.ExecContext(ctx, `INSERT INTO host_ops_state (host_id, state, reason, source, observed_at, changed_at)
+		VALUES (?, ?, ?, 'demo', ?, ?) ON CONFLICT(host_id) DO UPDATE SET
+		state=excluded.state, reason=excluded.reason, observed_at=excluded.observed_at, changed_at=excluded.changed_at`,
+		hostID, state, reason, observedAt.Unix(), observedAt.Unix())
+	must(err)
+}
+
+// pinHost starts an in-process SSH server, pins its key for id and creates
+// the inventory host. It returns the endpoint.
+func pinHost(ctx context.Context, svc *executor.Service, inv *inventory.Store, sshPub ssh.PublicKey, id, display string, env inventory.Environment, crit inventory.Criticality) inventory.Endpoint {
+	h, _, err := hostruntest.Serve(sshPub)
+	must(err)
+	probe, err := svc.ProbeHostKey(ctx, &pb.ProbeHostKeyRequest{Endpoint: h.Addr})
+	must(err)
+	_, err = svc.PinHostKey(ctx, &pb.PinHostKeyRequest{HostId: id, AuthorizedKey: probe.GetAuthorizedKey(),
+		ExpectedFingerprint: probe.GetFingerprint(), SshUser: "nebula", CredentialRef: "nebula-default", Source: pb.HostKeySource_HOST_KEY_SOURCE_PROBE})
+	must(err)
+	return createInventoryHost(ctx, inv, id, display, env, crit, h.Addr)
+}
+
+// pinBlockedHost pins the key on one server, then reaches the host at a
+// different server: the key changed, so the pin blocks.
+func pinBlockedHost(ctx context.Context, svc *executor.Service, inv *inventory.Store, sshPub ssh.PublicKey, id, display string, env inventory.Environment, crit inventory.Criticality) inventory.Endpoint {
+	old, _, err := hostruntest.Serve(sshPub)
+	must(err)
+	probe, err := svc.ProbeHostKey(ctx, &pb.ProbeHostKeyRequest{Endpoint: old.Addr})
+	must(err)
+	_, err = svc.PinHostKey(ctx, &pb.PinHostKeyRequest{HostId: id, AuthorizedKey: probe.GetAuthorizedKey(),
+		ExpectedFingerprint: probe.GetFingerprint(), SshUser: "nebula", CredentialRef: "nebula-default", Source: pb.HostKeySource_HOST_KEY_SOURCE_PROBE})
+	must(err)
+	cur, _, err := hostruntest.Serve(sshPub)
+	must(err)
+	_, err = svc.TestConnection(ctx, &pb.TestConnectionRequest{HostId: id, Endpoints: []string{cur.Addr}})
+	must(err)
+	return createInventoryHost(ctx, inv, id, display, env, crit, cur.Addr)
+}
+
+// unenrolledHost creates an inventory host without a pinned key.
+func unenrolledHost(ctx context.Context, inv *inventory.Store, sshPub ssh.PublicKey, id, display string, env inventory.Environment, crit inventory.Criticality) inventory.Endpoint {
+	h, _, err := hostruntest.Serve(sshPub)
+	must(err)
+	return createInventoryHost(ctx, inv, id, display, env, crit, h.Addr)
+}
+
+func createInventoryHost(ctx context.Context, inv *inventory.Store, id, display string, env inventory.Environment, crit inventory.Criticality, addr string) inventory.Endpoint {
+	a, portStr, err := net.SplitHostPort(addr)
+	must(err)
+	port, err := strconv.Atoi(portStr)
+	must(err)
+	ep := inventory.Endpoint{Address: a, Port: port}
+	_, err = inv.Create(ctx, inventory.Host{ID: id, DisplayName: display, Environment: env, Criticality: crit, Endpoints: []inventory.Endpoint{ep}}, inventory.CreateOptions{})
+	must(err)
+	return ep
+}
+
+// seedPreview seeds the demo lab: eight hosts in different states, their
+// stored read-only results, update lists, ops states, two networks with
+// assets and a finished discovery job.
+func seedPreview(ctx context.Context, svc *executor.Service, sdb *sql.DB, inv *inventory.Store, sshPub ssh.PublicKey) {
+	now := time.Now()
+	ago := func(d time.Duration) time.Time { return now.Add(-d) }
+
+	// --- Hosts ---------------------------------------------------------
+	pinHost(ctx, svc, inv, sshPub, "web", "Web server", inventory.EnvProd, inventory.CriticalityMedium)
+	pinHost(ctx, svc, inv, sshPub, "nas", "Storage", inventory.EnvProd, inventory.CriticalityHigh)
+	pinHost(ctx, svc, inv, sshPub, "pve", "Proxmox", inventory.EnvProd, inventory.CriticalityHigh)
+	pinHost(ctx, svc, inv, sshPub, "db", "Database", inventory.EnvProd, inventory.CriticalityCritical)
+	pinHost(ctx, svc, inv, sshPub, "cache", "Cache", inventory.EnvDev, inventory.CriticalityLow)
+	pinHost(ctx, svc, inv, sshPub, "ci", "CI runner", inventory.EnvDev, inventory.CriticalityLow)
+	unenrolledHost(ctx, inv, sshPub, "printer", "Printer", inventory.EnvDev, inventory.CriticalityLow)
+	pinBlockedHost(ctx, svc, inv, sshPub, "old", "Old server", inventory.EnvDev, inventory.CriticalityLow)
+
+	// --- Facts ---------------------------------------------------------
+	deb12 := "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\nID=debian\nVERSION_ID=\"12\""
+	ubu24 := "PRETTY_NAME=\"Ubuntu 24.04.2 LTS\"\nID=ubuntu\nVERSION_ID=\"24.04\""
+	pveOS := "PRETTY_NAME=\"Proxmox Virtual Environment 8.1\"\nID=debian\nVERSION_ID=\"12\""
+	seedExec(ctx, sdb, "core.facts", "web", factsResult(deb12, "Linux web 6.1.0-18-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.76-1 x86_64", "web", "1234567", false), ago(6*time.Minute), "finished", "finished", "success")
+	seedExec(ctx, sdb, "core.facts", "nas", factsResult(ubu24, "Linux nas 6.8.0-40-generic #40-Ubuntu SMP PREEMPT_DYNAMIC x86_64", "nas", "864000", false), ago(9*time.Minute), "finished", "finished", "success")
+	seedExec(ctx, sdb, "core.facts", "pve", factsResult(pveOS, "Linux pve 6.8.12-8-pve #1 SMP PVE 6.8.12-8 (2024-05-01) x86_64", "pve", "5184000", true), ago(12*time.Minute), "finished", "finished", "success")
+	seedExec(ctx, sdb, "core.facts", "db", factsResult(ubu24, "Linux db 6.8.0-40-generic #40-Ubuntu SMP PREEMPT_DYNAMIC x86_64", "db", "864000", false), ago(15*time.Minute), "finished", "finished", "success")
+	seedExec(ctx, sdb, "core.facts", "cache", factsResult(deb12, "Linux cache 6.1.0-18-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.76-1 x86_64", "cache", "259200", false), ago(20*time.Minute), "finished", "finished", "success")
+	seedExec(ctx, sdb, "core.facts", "ci", factsResult(deb12, "Linux ci 6.1.0-18-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.76-1 x86_64", "ci", "43200", false), ago(30*time.Minute), "finished", "finished", "success")
+
+	// --- Updates -------------------------------------------------------
+	nasPkgs := []osdebian.Package{
+		{Name: "openssl", From: "3.0.13-0ubuntu3", To: "3.0.13-0ubuntu3.4", Archives: []string{"ubuntu-security"}, Arch: "amd64", Security: true},
+		{Name: "linux-image-generic", From: "6.8.0-40.40", To: "6.8.0-45.45", Archives: []string{"ubuntu-security", "ubuntu-updates"}, Arch: "amd64", Security: true, Kernel: true},
+		{Name: "libc6", From: "2.39-0ubuntu8", To: "2.39-0ubuntu8.5", Archives: []string{"ubuntu-security"}, Arch: "amd64", Security: true},
+	}
+	nasExec := seedExec(ctx, sdb, "package.list_updates", "nas", nil, ago(9*time.Minute), "finished", "finished", "success")
+	seedUpdates(ctx, sdb, "nas", nasExec, nasPkgs, 3, 3, 1, true, ago(9*time.Minute))
+	dbPkgs := []osdebian.Package{
+		{Name: "postgresql-16", From: "16.2-1", To: "16.3-1", Archives: []string{"ubuntu-updates"}, Arch: "amd64"},
+	}
+	dbExec := seedExec(ctx, sdb, "package.list_updates", "db", nil, ago(15*time.Minute), "finished", "finished", "success")
+	seedUpdates(ctx, sdb, "db", dbExec, dbPkgs, 1, 0, 0, false, ago(15*time.Minute))
+	seedExec(ctx, sdb, "package.list_updates", "web", nil, ago(6*time.Minute), "finished", "finished", "success")
+	seedExec(ctx, sdb, "package.list_updates", "pve", nil, ago(12*time.Minute), "finished", "finished", "success")
+	seedExec(ctx, sdb, "package.list_updates", "cache", nil, ago(20*time.Minute), "finished", "finished", "success")
+
+	// --- Containers ----------------------------------------------------
+	// pve: five containers, one exited, one with an image update.
+	seedExec(ctx, sdb, "docker.list", "pve", dockerListResult("26.1.4",
+		"a1b2c3d4e5f6\tpve-backup\tproxmox/proxmox-backup-server:3.0\trunning\tUp 2 months (healthy)\t0.0.0.0:1020->1020/tcp\t\t\t",
+		"b2c3d4e5f6a1\tpve-nginx\tnginx:1.25\trunning\tUp 5 days\t0.0.0.0:80->80/tcp\t\t\t",
+		"c3d4e5f6a1b2\tpve-redis\tredis:7\trunning\tUp 5 days (healthy)\t\t\t\t",
+		"d4e5f6a1b2c3\tpve-grafana\tgrafana/grafana:10.4\trunning\tUp 3 days\t0.0.0.0:3000->3000/tcp\t\t\t",
+		"e5f6a1b2c3d4\tpve-migration\tmigration:2024.05\texited\tExited (0) 2 hours ago\t\t\t\t"), ago(12*time.Minute), "finished", "finished", "success")
+	seedExec(ctx, sdb, "docker.check_updates", "pve", dockerUpdatesResult(
+		"proxmox/proxmox-backup-server:3.0\tcurrent\t"+digest("pve-backup")+"\tlatest",
+		"nginx:1.25\tcurrent\t"+digest("nginx")+"\tlatest",
+		"redis:7\tcurrent\t"+digest("redis")+"\tlatest",
+		"grafana/grafana:10.4\tupdate\t"+digest("grafana")+"\tnew version available"), ago(12*time.Minute), "finished", "finished", "success")
+	// db: four containers; one image has an update, one name is a script
+	// tag (the bounded parser drops it) and one image carries a script tag
+	// (rendered as text only).
+	seedExec(ctx, sdb, "docker.list", "db", dockerListResult("26.1.4",
+		"f6a1b2c3d4e5\tdb-postgres\tpostgres:16\trunning\tUp 10 days (healthy)\t127.0.0.1:5432->5432/tcp\t\t\t",
+		"a7b8c9d0e1f2\tdb-admin\tpgadmin/pgadmin4:8\trunning\tUp 10 days\t0.0.0.0:5050->80/tcp\t\t\t",
+		"b8c9d0e1f2a3\tdb-backup\tdb-backup:1.2\texited\tExited (1) 3 days ago\t\t\t\t",
+		"c9d0e1f2a3b4\txss-test\tevil <script>alert(1)</script>\trunning\tUp 1 hour\t\t\t\t",
+		"d0e1f2a3b4c5\t<script>alert(1)</script>\tevil:1\trunning\tUp 1 hour\t\t\t\t"), ago(15*time.Minute), "finished", "finished", "success")
+	seedExec(ctx, sdb, "docker.check_updates", "db", dockerUpdatesResult(
+		"postgres:16\tcurrent\t"+digest("postgres")+"\tlatest",
+		"pgadmin/pgadmin4:8\tupdate\t"+digest("pgadmin")+"\tnew version available",
+		"db-backup:1.2\tcurrent\t"+digest("db-backup")+"\tlatest"), ago(15*time.Minute), "finished", "finished", "success")
+
+	// --- Services ------------------------------------------------------
+	seedExec(ctx, sdb, "service.list", "web", serviceListResult(
+		"nginx.service\tloaded\tactive\trunning\tA high performance web server",
+		"ssh.service\tloaded\tactive\trunning\tOpenBSD Secure Shell server",
+		"cron.service\tloaded\tactive\trunning\tPackage-based dependency management"), ago(6*time.Minute), "finished", "finished", "success")
+	seedExec(ctx, sdb, "service.list", "nas", serviceListResult(
+		"nfs-kernel-server.service\tloaded\tactive\trunning\tNFS kernel daemon",
+		"smartd.service\tloaded\tactive\trunning\tDisk Smart Monitoring",
+		"ssh.service\tloaded\tactive\trunning\tOpenBSD Secure Shell server"), ago(9*time.Minute), "finished", "finished", "success")
+	seedExec(ctx, sdb, "service.list", "pve", serviceListResult(
+		"pveproxy.service\tloaded\tactive\trunning\tProxmox Virtual Environment web interface",
+		"pve-firewall.service\tloaded\tactive\trunning\tProxmox Virtual Environment firewall",
+		"ssh.service\tloaded\tactive\trunning\tOpenBSD Secure Shell server"), ago(12*time.Minute), "finished", "finished", "success")
+	seedExec(ctx, sdb, "service.list", "db", serviceListResult(
+		"postgresql@16-main.service\tloaded\tactive\trunning\tPostgreSQL 16 database cluster",
+		"ssh.service\tloaded\tactive\trunning\tOpenBSD Secure Shell server"), ago(15*time.Minute), "finished", "finished", "success")
+	// cache: one failed unit, so the failed-services tile and filter work.
+	seedExec(ctx, sdb, "service.list", "cache", serviceListResult(
+		"redis-server.service\tloaded\tactive\trunning\tAdvanced key-value store",
+		"cups.service\tloaded\tfailed\tfailed\tCUPS printing service",
+		"ssh.service\tloaded\tactive\trunning\tOpenBSD Secure Shell server"), ago(20*time.Minute), "finished", "finished", "success")
+
+	// --- Ops states ----------------------------------------------------
+	seedOpsState(ctx, sdb, "web", executions.StateReady, "no pending work", ago(6*time.Minute))
+	seedOpsState(ctx, sdb, "nas", executions.StateWarning, "3 security updates, reboot required", ago(9*time.Minute))
+	seedOpsState(ctx, sdb, "pve", executions.StateReady, "no pending work", ago(12*time.Minute))
+	seedOpsState(ctx, sdb, "db", executions.StateReady, "1 update pending", ago(15*time.Minute))
+	seedOpsState(ctx, sdb, "cache", executions.StateWarning, "1 failed service", ago(20*time.Minute))
+	seedOpsState(ctx, sdb, "ci", executions.StateUnreachable, "no answer on 192.168.10.42:22", ago(30*time.Minute))
+
+	// --- A few executions in other states (operations tab) -------------
+	seedExec(ctx, sdb, "package.install_security", "nas", nil, time.Time{}, "pending", "waiting", "")
+	seedExec(ctx, sdb, "system.reboot", "nas", nil, ago(2*time.Hour), "failed", "finished", "not_executed")
+	seedExec(ctx, sdb, "core.facts", "ci", nil, ago(30*time.Minute), "failed", "finished", "unreachable")
+
+	// --- Networks, assets, discovery -----------------------------------
+	seedNetworks(ctx, sdb, now)
+}
+
+// digest returns a fixed 64-hex sha256 digest for a docker image.
+func digest(image string) string {
+	return "sha256:" + sha256hex(image)
+}
+
+// sha256hex returns a deterministic 64-hex string derived from image (a
+// stand-in for a real digest; the parser only checks the shape).
+func sha256hex(image string) string {
+	const hexd = "0123456789abcdef"
+	var out [64]byte
+	seed := uint32(0x811c9dc5)
+	for i := 0; i < 64; i++ {
+		seed ^= uint32(image[i%len(image)])
+		seed *= 0x01000193
+		out[i] = hexd[seed&0x0f]
+	}
+	return string(out[:])
+}
+
+// seedNetworks stores two networks, their assets and a finished discovery
+// job with staged hosts.
+func seedNetworks(ctx context.Context, sdb *sql.DB, now time.Time) {
+	_, err := sdb.ExecContext(ctx, `INSERT OR IGNORE INTO networks (id, name, prefix, vlan, gateway, notes) VALUES
+		('lan', 'Home LAN', '192.168.10.0/24', 1, '192.168.10.1', 'Main switch'),
+		('lab', 'Lab', '192.168.60.0/24', 60, '192.168.60.1', 'Isolated lab VLAN')`)
+	must(err)
+	_, err = sdb.ExecContext(ctx, `INSERT OR IGNORE INTO assets (id, name, kind, hostname, mac, notes, host_id, updated_at) VALUES
+		('fw', 'Firewall', 'firewall', 'fw.lan', 'aa:bb:cc:dd:ee:01', 'OPNsense', '', ?),
+		('sw', 'Switch', 'switch', 'sw.lan', 'aa:bb:cc:dd:ee:02', 'UniFi', '', ?),
+		('prn', 'Printer', 'printer', 'printer.lan', 'aa:bb:cc:dd:ee:21', 'CUPS ipp', '', ?)`,
+		now.Unix(), now.Unix(), now.Unix())
+	must(err)
+	_, err = sdb.ExecContext(ctx, `INSERT OR IGNORE INTO asset_addresses (asset_id, address) VALUES
+		('fw', '192.168.10.1'), ('sw', '192.168.10.2'), ('prn', '192.168.10.21')`)
+	must(err)
+	jid := newID36()
+	_, err = sdb.ExecContext(ctx, `INSERT INTO discovery_jobs (id, spec, description, targets, created_by, created_at, state, finished_at, hosts)
+		VALUES (?, '{"networks":["192.168.10.0/24"]}', 'Weekly scan', '192.168.10.0/24', 'demo', ?, 'done', ?, 3)`,
+		jid, now.Add(-time.Hour).Unix(), now.Add(-59*time.Minute).Unix())
+	must(err)
+	_, err = sdb.ExecContext(ctx, `INSERT OR IGNORE INTO discovery_staging (job_id, address, mac, vendor, hostname, os, ports) VALUES
+		(?, '192.168.10.21', 'aa:bb:cc:dd:ee:21', 'HP', 'printer.lan', 'Linux', '[{"port":631,"protocol":"tcp","state":"open","service":"ipp"}]'),
+		(?, '192.168.10.50', 'aa:bb:cc:dd:ee:50', 'Synology', 'nas.lan', 'DiskStation', '[]'),
+		(?, '192.168.10.99', 'aa:bb:cc:dd:ee:99', '', '', '', '[]')`, jid, jid, jid)
+	must(err)
 }

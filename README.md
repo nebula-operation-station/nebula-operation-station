@@ -4,6 +4,18 @@ A self-hosted operations control plane for Linux homelabs (about 5 to 100 hosts)
 
 > **Status: alpha, working towards Release 0.9.** The code for 0.9 is complete and passes the test suite (patching, services, Docker, rollouts, runbooks, signed modules, IPAM, discovery, signed events, backup and restore, Debian packages and containers); the lab run on real hosts is still pending. Try it in a lab, not in production. Operators start with the [installation and operations handbook](docs/admin/guide.md); the state of every milestone is in [`docs/implementation/m0.md`](docs/implementation/m0.md).
 
+## Screenshots
+
+Taken from the test harness's preview mode with demo data (`go run ./test/browser/harness -preview PORT /absolute/empty/dir`, then open `http://localhost:PORT`).
+
+| Dashboard | Inventory (dark theme) |
+| --- | --- |
+| ![Dashboard with host overview tiles](docs/screenshots/dashboard-light.png) | ![Inventory with status, updates, containers and key per host](docs/screenshots/inventory-dark.png) |
+| **Host: pending updates** | **Host: containers** |
+| ![Host page, updates tab](docs/screenshots/host-updates-light.png) | ![Host page, containers tab](docs/screenshots/host-containers-light.png) |
+
+On a phone: [inventory](docs/screenshots/inventory-phone-light.png). Light, dark or system theme under Settings → Appearance.
+
 ## Design in one paragraph
 
 `nebula-server` serves the web UI and plans work but holds no keys and cannot execute anything. `nebula-executor` holds the SSH keys in memory, listens only on a Unix socket, identifies callers by their kernel-reported UID, and authorizes each run against a permit bound to the exact artifact, targets, parameters and credentials that a human approved with WebAuthn or the `nebula` CLI. Managed hosts need no agent. Details: [`docs/spec/00-index.md`](docs/spec/00-index.md).

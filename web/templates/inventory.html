@@ -1,93 +1,154 @@
 {{define "content"}}
-<h1>Inventory</h1>
+<div class="toolbar">
+  <h1>Inventory</h1>
+  <div class="actions">
+    {{if .InventoryEditable}}
+    <a class="button add-host" href="/inventory/new">Add host</a>
+    <details class="menu">
+      <summary class="button button--secondary">More</summary>
+      <a href="/inventory/import">Import CSV</a>
+      {{if .EnrollEnabled}}<a href="/inventory/enroll">Enroll hosts</a>{{end}}
+    </details>
+    {{end}}
+  </div>
+</div>
 {{if .InventoryEditable}}
-<section class="panel" aria-label="Add host">
-  <h2>Add host</h2>
-  <p class="hint">Many hosts at once: <a href="/inventory/import">Import CSV</a>{{if .EnrollEnabled}} · <a href="/inventory/enroll">Enroll hosts (read and pin host keys)</a>{{end}}</p>
-  {{if .InventoryPrefill}}<p class="hint">Adding the network asset as a managed host: check the values, then add it. The asset is
-    linked to the new host.</p>{{end}}
-  <form id="host-form" class="form"{{if .InventoryPrefill}} data-prefill="{{.InventoryPrefill}}"{{end}}>
-    <label>ID
-      <input name="id" id="host-id" required pattern="[a-z0-9][a-z0-9._-]{0,62}" autocomplete="off">
-    </label>
-    <label>Display name
-      <input name="display_name" id="host-display-name" maxlength="128" autocomplete="off">
-    </label>
-    <label>Environment
-      <select name="environment" id="host-environment">
-        <option value="DEV">DEV</option>
-        <option value="QA">QA</option>
-        <option value="PROD">PROD</option>
-      </select>
-    </label>
-    <label>Criticality
-      <select name="criticality" id="host-criticality">
-        <option value="LOW">LOW</option>
-        <option value="MEDIUM">MEDIUM</option>
-        <option value="HIGH">HIGH</option>
-        <option value="CRITICAL">CRITICAL</option>
-      </select>
-    </label>
-    <label>Endpoints (one per line: host, host:port or [v6]:port)
-      <textarea name="endpoints" id="host-endpoints" rows="3"></textarea>
-    </label>
-    <label>Tags (one key=value per line)
-      <textarea name="tags" id="host-tags" rows="3"></textarea>
-    </label>
-    <div class="actions">
-      <button type="submit" id="host-submit" class="button">Add host</button>
-      <button type="button" id="host-cancel" class="button" hidden>Cancel</button>
-    </div>
-    <p id="message" class="message" role="status" aria-live="polite"></p>
-  </form>
-</section>
+<div class="filters">
+  <input type="search" id="inventory-filter" class="filter" placeholder="Filter by ID, name, endpoint or OS" aria-label="Filter hosts" autocomplete="off">
+  <div class="chips" role="group" aria-label="Filter by state">
+    <a class="chip{{if eq .InventoryState ""}} chip--active{{end}}" href="/inventory{{if .InventoryEnv}}?env={{.InventoryEnv}}{{end}}">All</a>
+    <a class="chip{{if eq .InventoryState "ok"}} chip--active{{end}}" href="/inventory?state=ok{{if .InventoryEnv}}&amp;env={{.InventoryEnv}}{{end}}">OK</a>
+    <a class="chip{{if eq .InventoryState "warning"}} chip--active{{end}}" href="/inventory?state=warning{{if .InventoryEnv}}&amp;env={{.InventoryEnv}}{{end}}">Warning</a>
+    <a class="chip{{if eq .InventoryState "critical"}} chip--active{{end}}" href="/inventory?state=critical{{if .InventoryEnv}}&amp;env={{.InventoryEnv}}{{end}}">Critical</a>
+    <a class="chip{{if eq .InventoryState "unknown"}} chip--active{{end}}" href="/inventory?state=unknown{{if .InventoryEnv}}&amp;env={{.InventoryEnv}}{{end}}">Unknown</a>
+    <a class="chip{{if eq .InventoryState "not_enrolled"}} chip--active{{end}}" href="/inventory?state=not_enrolled{{if .InventoryEnv}}&amp;env={{.InventoryEnv}}{{end}}">Not enrolled</a>
+  </div>
+  {{if .InventoryEnvs}}
+  <div class="chips" role="group" aria-label="Filter by environment">
+    {{range .InventoryEnvs}}
+    <a class="chip chip--env{{if eq $.InventoryEnv .}} chip--active{{end}}" href="/inventory?env={{.}}{{if $.InventoryState}}&amp;state={{$.InventoryState}}{{end}}">{{.}}</a>
+    {{end}}
+  </div>
+  {{end}}
+</div>
 {{end}}
+{{if .InventoryUnavailable}}
 <section class="panel" aria-label="Managed hosts">
-  {{if .InventoryUnavailable}}
   <p class="status status--error">Inventory unavailable</p>
-  {{else if .Inventory}}
+</section>
+{{else if .Inventory}}
+<section class="panel" aria-label="Managed hosts">
   <div class="table-wrap">
   <table class="inventory">
     <thead>
       <tr>
-        <th>ID</th>
-        <th>Display name</th>
-        <th>Environment</th>
-        <th>Criticality</th>
-        <th>Endpoints</th>
-        <th>State</th>
-        <th>SSH key</th>
+        <th>Host</th>
+        <th>OS</th>
+        <th>Status</th>
         <th>Updates</th>
-        {{if .InventoryEditable}}<th>Actions</th>{{end}}
+        <th>Containers</th>
+        <th>Key</th>
+        <th>Last seen</th>
       </tr>
     </thead>
     <tbody>
       {{range .Inventory}}
-      <tr data-id="{{.ID}}" data-display-name="{{.DisplayName}}" data-environment="{{.Environment}}"
-          data-criticality="{{.Criticality}}" data-endpoints="{{.EndpointsJSON}}" data-tags="{{.TagsJSON}}">
-        <td><a href="/hosts/{{.ID}}">{{.ID}}</a></td>
-        <td>{{.DisplayName}}</td>
-        <td>{{.Environment}}</td>
-        <td>{{.Criticality}}</td>
-        <td>{{range $i, $e := .Endpoints}}{{if $i}}, {{end}}{{$e}}{{end}}</td>
-        <td><span class="ops ops--{{.OpsState}}">{{.OpsState}}</span> <span class="hint">{{.OpsReason}}</span></td>
-        <td>{{.KeyStatus}}</td>
-        <td>{{if .UpdatesAlert}}<span class="status--error">{{.Updates}}</span>{{else}}{{.Updates}}{{end}}</td>
-        {{if $.InventoryEditable}}
-        <td class="inventory__actions">
-          <button type="button" class="button inventory__edit">Edit</button>
-          <input type="text" class="inventory__delete-confirm" placeholder="{{.ID}}"
-                 aria-label="Type {{.ID}} to confirm deletion" autocomplete="off">
-          <button type="button" class="button inventory__delete">Delete</button>
+      <tr data-id="{{.ID}}" data-search="{{.Search}}" data-state="{{.StateFilter}}" data-environment="{{.Environment}}">
+        <td class="host-cell">
+          <a class="host-link" href="/hosts/{{.ID}}">
+            <span class="host-name">{{if .DisplayName}}{{.DisplayName}}{{else}}{{.ID}}{{end}}</span>
+            <span class="host-id mono">{{.ID}}</span>
+          </a>
         </td>
-        {{end}}
+        <td class="host-os">{{if .OS}}{{.OS}}{{else}}—{{end}}</td>
+        <td class="host-status">
+          <span class="badge {{.StateClass}}">{{.StateLabel}}</span>
+          {{if .StateReason}}<span class="hint">{{.StateReason}}</span>{{end}}
+        </td>
+        <td class="host-updates">
+          {{if .UpdatesSecurity}}<span class="badge badge--critical">{{.UpdatesSecurity}} security</span>{{end}}
+          {{if .UpdatesTotal}}<span class="badge badge--warning">{{.UpdatesTotal}} total</span>{{end}}
+          {{if .Reboot}}<span class="badge badge--warning">reboot</span>{{end}}
+          {{if .UpdatesChecked.IsZero}}<span class="hint">not checked</span>{{else}}
+          {{if and (not .UpdatesTotal) (not .Reboot)}}<span class="badge badge--ok">up to date</span>{{end}}
+          <span class="hint">checked {{timeTag .UpdatesChecked}}</span>{{end}}
+        </td>
+        <td>{{if .ContainersKnown}}{{.ContainersRunning}}/{{.ContainersTotal}}{{else}}—{{end}}</td>
+        <td>
+          {{if eq .KeyStatus "pinned"}}
+          <span class="key-pinned" title="{{.KeyType}} {{.KeyFingerprint}}">
+            <svg class="key-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M8 12 l3 3 l5 -6"></path></svg>
+            pinned
+          </span>
+          {{else if eq .KeyStatus "blocked"}}
+          <span class="badge badge--critical">blocked</span>
+          {{else if eq .KeyStatus "unavailable"}}
+          <span class="hint">unknown (executor unavailable)</span>
+          {{else if $.EnrollEnabled}}
+          <a class="enroll-link" href="/inventory/enroll?host={{.ID}}">Enroll →</a>
+          {{else}}
+          <span class="hint">not enrolled</span>
+          {{end}}
+        </td>
+        <td>{{if .LastSeenSet}}<time datetime="{{.LastSeen.Format "2006-01-02T15:04:05Z07:00"}}">{{.LastSeen.Format "2 Jan 2006 15:04 UTC"}}</time>{{else}}—{{end}}</td>
       </tr>
       {{end}}
     </tbody>
   </table>
   </div>
-  {{else}}
-  <p>No managed hosts yet. CSV import and enrollment follow.</p>
+</section>
+{{else}}
+<section class="panel empty" aria-label="Managed hosts">
+  <p>No managed hosts yet.</p>
+  {{if .InventoryEditable}}
+  <p><a class="button add-host" href="/inventory/new">Add your first host</a></p>
+  <p class="hint">Or import a list: <a href="/inventory/import">Import CSV</a>. The quick start in <code>docs/admin/guide.md</code> walks through
+     adding a host and pinning its SSH key.</p>
   {{end}}
 </section>
+{{end}}
+{{if .InventoryEditable}}
+<dialog id="add-host-dialog" aria-label="Add host"{{if .InventoryDialogOpen}} open{{end}}>
+  <section class="panel" aria-label="Add host form">
+    <h2>Add host</h2>
+    {{if .InventoryError}}<p class="status status--error">{{.InventoryError}}</p>{{end}}
+    <form id="host-form" class="form form-grid" action="/inventory" method="post"{{if .InventoryPrefill}} data-prefill="{{.InventoryPrefill}}"{{end}}>
+      <label>ID
+        <input name="id" id="host-id" required pattern="[a-z0-9][a-z0-9._-]{0,62}" autocomplete="off">
+      </label>
+      <label>Display name
+        <input name="display_name" id="host-display-name" maxlength="128" autocomplete="off">
+      </label>
+      <label>Environment
+        <select name="environment" id="host-environment">
+          <option value="DEV">DEV</option>
+          <option value="QA">QA</option>
+          <option value="PROD">PROD</option>
+        </select>
+      </label>
+      <label>Criticality
+        <select name="criticality" id="host-criticality">
+          <option value="LOW">LOW</option>
+          <option value="MEDIUM" selected>MEDIUM</option>
+          <option value="HIGH">HIGH</option>
+          <option value="CRITICAL">CRITICAL</option>
+        </select>
+      </label>
+      <label class="field--full">Endpoints (one per line: host, host:port or [v6]:port)
+        <textarea name="endpoints" id="host-endpoints" rows="3"></textarea>
+      </label>
+      <label class="field--full">Tags (one key=value per line)
+        <textarea name="tags" id="host-tags" rows="2"></textarea>
+      </label>
+      {{if .InventoryConfirmDuplicate}}<input type="hidden" name="confirm_duplicate" value="1">{{end}}
+      <div class="actions">
+        <button type="submit" id="host-submit" class="button">Add host</button>
+        <button type="button" id="host-cancel" class="button button--secondary">Cancel</button>
+      </div>
+      <p id="message" class="message" role="status" aria-live="polite"></p>
+    </form>
+    <p class="hint">After adding, read and pin the host key under <a href="/inventory/enroll">Enroll hosts</a>.</p>
+  </section>
+</dialog>
+{{end}}
 {{end}}

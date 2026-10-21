@@ -1,14 +1,38 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Inventory page: create, edit and delete hosts through the JSON
-// endpoints. Every request goes through nebulaWebAuthn.post (fetch with
-// a real Origin, decision 36); server text is shown with textContent
-// only, never innerHTML.
+// Inventory page: client-side text filter, row navigation to the host
+// page, and the add-host dialog. The dialog posts JSON to
+// /inventory/hosts (fetch with a real Origin, decision 36); without
+// JavaScript the same form posts as a plain form to /inventory. Server
+// text is shown with textContent only, never innerHTML.
 'use strict';
 
 (() => {
   const w = nebulaWebAuthn;
+
+  // Client-side text filter: the row's search text (id, name, endpoint,
+  // OS) is built server side and lowercased there.
+  const filter = document.getElementById('inventory-filter');
+  if (filter) {
+    filter.addEventListener('input', () => {
+      const q = filter.value.trim().toLowerCase();
+      for (const row of document.querySelectorAll('tbody tr[data-search]')) {
+        row.hidden = q !== '' && !row.dataset.search.includes(q);
+      }
+    });
+  }
+
+  // A row click goes to the host page; the links inside the row keep
+  // their own behaviour.
+  for (const row of document.querySelectorAll('tbody tr[data-id]')) {
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('a, button, input, select, textarea')) return;
+      window.location.assign('/hosts/' + encodeURIComponent(row.dataset.id));
+    });
+  }
+
+  const dialog = document.getElementById('add-host-dialog');
   const form = document.getElementById('host-form');
-  if (!form) return; // read-only page: no inventory store configured
+  if (!dialog || !form) return; // read-only page: no inventory store configured
 
   const idInput = document.getElementById('host-id');
   const nameInput = document.getElementById('host-display-name');
@@ -18,9 +42,9 @@
   const tagsInput = document.getElementById('host-tags');
   const submit = document.getElementById('host-submit');
   const cancel = document.getElementById('host-cancel');
-  let editing = null; // host ID being edited, or null for "add host"
-  // "Add to managed hosts" from a network asset: prefill, and link the
-  // asset to the host once it exists.
+
+  // "Add to managed hosts" from a network asset: prefill the dialog, and
+  // link the asset to the host once it exists.
   let prefillAsset = null;
   if (form.dataset.prefill) {
     try {
@@ -31,6 +55,22 @@
       endpointsInput.value = (p.endpoints || []).join('\n');
     } catch (_) { /* no prefill */ }
   }
+
+  const open = () => {
+    w.show('', false);
+    dialog.showModal();
+    idInput.focus();
+  };
+  for (const b of document.querySelectorAll('.add-host')) {
+    b.addEventListener('click', (e) => {
+      e.preventDefault();
+      open();
+    });
+  }
+  cancel.addEventListener('click', () => dialog.close());
+  // Coming from "Add to managed hosts": show the prefilled dialog right away.
+  if (prefillAsset && !dialog.open) open();
+  dialog.addEventListener('cancel', () => w.show('', false));
 
   function readForm() {
     const endpoints = endpointsInput.value
@@ -55,15 +95,6 @@
     };
   }
 
-  function resetForm() {
-    editing = null;
-    form.reset();
-    idInput.readOnly = false;
-    submit.textContent = 'Add host';
-    cancel.hidden = true;
-    w.show('', false);
-  }
-
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     let body;
@@ -75,60 +106,28 @@
     }
     submit.disabled = true;
     try {
-      await w.post(editing === null ? '/inventory/hosts' : '/inventory/hosts/update', body);
-      if (editing === null && prefillAsset) {
+      try {
+        await w.post('/inventory/hosts', body);
+      } catch (err) {
+        if (err.data && err.data.duplicate_endpoint) {
+          // Warn, do not block: ask for the "Add anyway" confirmation
+          // and retry with the confirmation set.
+          if (!confirm(err.message + '\n\nAdd anyway?')) return;
+          await w.post('/inventory/hosts', Object.assign({}, body, { confirm_duplicate: true }));
+        } else {
+          throw err;
+        }
+      }
+      if (prefillAsset) {
         await w.post('/network/a/link', { asset: prefillAsset, host: body.id });
         window.location.assign('/network/a/' + encodeURIComponent(prefillAsset));
         return;
       }
-      window.location.reload();
+      window.location.assign('/hosts/' + encodeURIComponent(body.id));
     } catch (err) {
       w.show(err.message || 'The change failed.', true);
     } finally {
       submit.disabled = false;
     }
   });
-
-  cancel.addEventListener('click', resetForm);
-
-  for (const btn of document.querySelectorAll('.inventory__edit')) {
-    btn.addEventListener('click', () => {
-      const row = btn.closest('tr');
-      editing = row.dataset.id;
-      idInput.value = row.dataset.id;
-      idInput.readOnly = true;
-      nameInput.value = row.dataset.displayName;
-      envSelect.value = row.dataset.environment;
-      critSelect.value = row.dataset.criticality;
-      endpointsInput.value = JSON.parse(row.dataset.endpoints).join('\n');
-      tagsInput.value = Object.entries(JSON.parse(row.dataset.tags))
-        .map(([k, v]) => k + '=' + v)
-        .join('\n');
-      submit.textContent = 'Save changes';
-      cancel.hidden = false;
-      w.show('', false);
-      form.scrollIntoView();
-    });
-  }
-
-  for (const btn of document.querySelectorAll('.inventory__delete')) {
-    btn.addEventListener('click', async () => {
-      const row = btn.closest('tr');
-      const id = row.dataset.id;
-      const typed = row.querySelector('.inventory__delete-confirm').value.trim();
-      if (typed !== id) {
-        w.show('Type the host ID (' + id + ') to confirm the deletion.', true);
-        return;
-      }
-      btn.disabled = true;
-      try {
-        await w.post('/inventory/hosts/delete', { id });
-        window.location.reload();
-      } catch (err) {
-        w.show(err.message || 'Could not delete the host.', true);
-      } finally {
-        btn.disabled = false;
-      }
-    });
-  }
 })();
