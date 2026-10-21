@@ -25,9 +25,68 @@
   // their own behaviour.
   for (const row of document.querySelectorAll('tbody tr[data-id]')) {
     row.addEventListener('click', (e) => {
-      if (e.target.closest('a, button, input, select, textarea')) return;
+      if (e.target.closest('a, button, input, select, textarea, td.select')) return;
       window.location.assign('/hosts/' + encodeURIComponent(row.dataset.id));
     });
+  }
+
+  // Selection and bulk actions: refresh the reads behind the columns for
+  // the selected hosts, or open the reboot form with them preselected.
+  const bulkbar = document.getElementById('bulkbar');
+  if (bulkbar) {
+    const boxes = () => Array.from(document.querySelectorAll('input.host-select'));
+    const selected = () => boxes().filter((b) => b.checked).map((b) => b.value);
+    const all = document.getElementById('select-all');
+    const count = document.getElementById('bulk-count');
+    const msg = document.getElementById('bulk-message');
+    const update = () => {
+      const n = selected().length;
+      bulkbar.hidden = n === 0;
+      count.textContent = n + ' selected';
+      const shown = boxes().filter((b) => !b.closest('tr').hidden);
+      all.checked = shown.length > 0 && shown.every((b) => b.checked);
+    };
+    for (const b of boxes()) b.addEventListener('change', update);
+    all.addEventListener('change', () => {
+      for (const b of boxes()) {
+        if (!b.closest('tr').hidden) b.checked = all.checked; // only what the filter shows
+      }
+      update();
+    });
+    if (filter) filter.addEventListener('input', update);
+    document.getElementById('bulk-refresh').addEventListener('click', async (e) => {
+      const hosts = selected();
+      if (hosts.length === 0) return;
+      e.target.disabled = true;
+      msg.textContent = '';
+      try {
+        const body = new URLSearchParams();
+        for (const h of hosts) body.append('host', h);
+        const res = await fetch('/inventory/refresh', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body,
+        });
+        if (res.ok) {
+          window.location.assign(res.url);
+          return;
+        }
+        msg.textContent = (await res.text()).trim() || ('Request failed (' + res.status + ')'); // text only
+        msg.classList.add('message--error');
+      } catch (err) {
+        msg.textContent = String(err);
+      }
+      e.target.disabled = false;
+    });
+    document.getElementById('bulk-reboot').addEventListener('click', () => {
+      const hosts = selected();
+      if (hosts.length === 0) return;
+      const q = new URLSearchParams({ action: 'system.reboot' });
+      for (const h of hosts) q.append('host', h);
+      window.location.assign('/operations/new?' + q.toString());
+    });
+    update();
   }
 
   const dialog = document.getElementById('add-host-dialog');

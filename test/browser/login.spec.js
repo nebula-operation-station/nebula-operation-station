@@ -143,6 +143,20 @@ function check(cond, what) {
   await page.goto(base + '/inventory');
   check(/checked \S/.test(await page.textContent('tr[data-id="e2e-host"]')) && await page.locator('tr[data-id="e2e-host"] .host-updates time[datetime]').count() === 1, 'the inventory shows the update status');
   check(/(ready|warning|ok)/i.test(await page.textContent('tr[data-id="e2e-host"]')), 'the inventory shows the Ops State');
+  // Selection: the bulk bar appears; reboot opens the operation form with
+  // the hosts preselected; refresh creates the read operations.
+  check(await page.locator('#bulkbar').isHidden(), 'no bulk bar without a selection');
+  await page.check('tr[data-id="e2e-host"] input.host-select');
+  check(/1 selected/.test(await page.textContent('#bulkbar')), 'selecting a host shows the bulk bar');
+  await Promise.all([page.waitForURL(/\/operations\/new\?/, { timeout: 15000 }), page.click('#bulk-reboot')]);
+  check(await page.isChecked('input[name="action"][value="system.reboot"]') && await page.isChecked('input[name="host"][value="e2e-host"]'),
+    'reboot opens the operation form with the action and the host preselected');
+  await page.goto(base + '/inventory');
+  await page.check('tr[data-id="e2e-host"] input.host-select');
+  const opsBefore = await page.request.get(base + '/operations').then((r) => r.text()).then((t) => (t.match(/core\.facts/g) || []).length);
+  await Promise.all([page.waitForURL(/\/operations$/, { timeout: 15000 }), page.click('#bulk-refresh')]);
+  check((((await page.content()).match(/core\.facts/g)) || []).length > opsBefore && /service\.list/.test(await page.textContent('main')),
+    'refresh of the selection creates the read operations');
   // Runbooks: write one, save it as version 1, plan it with a parameter;
   // the executor does not know the script, so it needs the key (HIGH).
   await page.goto(base + '/runbooks/new');

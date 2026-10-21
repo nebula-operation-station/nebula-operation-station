@@ -296,6 +296,7 @@ func (h *Handler) Handler() http.Handler {
 	// (no JavaScript) or as JSON from the dialog; both go through the
 	// Origin-checked POST routes.
 	mux.HandleFunc("POST /hosts/{id}/refresh", h.handleHostRefresh)
+	mux.HandleFunc("POST /inventory/refresh", h.handleInventoryRefresh)
 	mux.HandleFunc("POST /hosts/{id}/settings", h.handleHostFormUpdate)
 	mux.HandleFunc("POST /hosts/{id}/delete", h.handleHostFormDelete)
 	// Global search (M9-3): read-only, quick actions are links.

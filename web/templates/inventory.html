@@ -37,11 +37,21 @@
   <p class="status status--error">Inventory unavailable</p>
 </section>
 {{else if .Inventory}}
+{{if .InventoryEditable}}
+<div class="bulkbar" id="bulkbar" hidden>
+  <strong id="bulk-count">0 selected</strong>
+  <button type="button" id="bulk-refresh" class="button">Refresh updates, containers, services</button>
+  <button type="button" id="bulk-reboot" class="button button--danger">Reboot…</button>
+  <span class="hint">Refreshes run without a key tap while a privileged session is open (Dashboard). Reboot opens the operation form: choose the rollout, then approve.</span>
+  <p id="bulk-message" class="message" role="status" aria-live="polite"></p>
+</div>
+{{end}}
 <section class="panel" aria-label="Managed hosts">
   <div class="table-wrap">
   <table class="inventory">
     <thead>
       <tr>
+        {{if $.InventoryEditable}}<th class="select"><input type="checkbox" id="select-all" aria-label="Select all shown hosts"></th>{{end}}
         <th>Host</th>
         <th>OS</th>
         <th>Status</th>
@@ -54,6 +64,7 @@
     <tbody>
       {{range .Inventory}}
       <tr data-id="{{.ID}}" data-search="{{.Search}}" data-state="{{.StateFilter}}" data-environment="{{.Environment}}">
+        {{if $.InventoryEditable}}<td class="select"><input type="checkbox" class="host-select" value="{{.ID}}" aria-label="Select {{.ID}}"></td>{{end}}
         <td class="host-cell">
           <a class="host-link" href="/hosts/{{.ID}}">
             <span class="host-name">{{if .DisplayName}}{{.DisplayName}}{{else}}{{.ID}}{{end}}</span>
