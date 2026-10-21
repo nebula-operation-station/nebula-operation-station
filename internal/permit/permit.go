@@ -541,6 +541,26 @@ func challengeFor(d canonical.Digest, expiry time.Time) ([]byte, error) {
 	return h.Sum(nil), nil
 }
 
+// floorRiseLocked rejects the approval when the executor's minimum risk
+// rose above the permit's risk class since the proposal (trust withdrawn,
+// a host made more critical, or the scanner). Called with a.mu held; like
+// AuthorizeGrant it reads the risk source and the scan cache. The reason
+// (which may name hosts) goes to the audit log, not the reply.
+func (a *Authority) floorRiseLocked(p *Permit) error {
+	floor, why, err := a.floor(p.Request, p.Request.ResolvedTargets, p.Parameters)
+	if err != nil || floor.Rank() == 0 {
+		a.emit(Event{Kind: "rejected", Digest: p.Digest.String(), Code: CodeStorage,
+			Detail: fmt.Sprintf("risk policy: %v (floor %q)", err, floor)})
+		return fail(CodeStorage, "executor state store unavailable")
+	}
+	if p.Request.RiskClass.Rank() < floor.Rank() {
+		a.emit(Event{Kind: "rejected", Digest: p.Digest.String(), Code: CodeRiskAboveApproval,
+			Detail: fmt.Sprintf("approved as %s, executor minimum is now %s (%s)", p.Request.RiskClass, floor, why)})
+		return fail(CodeRiskAboveApproval, "approved as %s, executor minimum is now %s", p.Request.RiskClass, floor)
+	}
+	return nil
+}
+
 // SubmitAssertion approves a pending permit with a WebAuthn assertion that
 // the browser produced over the permit's challenge.
 func (a *Authority) SubmitAssertion(d canonical.Digest, assertionJSON []byte, typedCount int) (Permit, error) {
@@ -564,6 +584,9 @@ func (a *Authority) SubmitAssertion(d canonical.Digest, assertionJSON []byte, ty
 	}
 	if p.Requirement == RequireAssertionVerifiedTypedCount && typedCount != p.TargetCount() {
 		return Permit{}, a.countFailure(p, CodeTypedCountMismatch, "typed %d, permit covers %d targets", typedCount, p.TargetCount())
+	}
+	if err := a.floorRiseLocked(p); err != nil {
+		return Permit{}, err
 	}
 
 	uv := p.Requirement >= RequireAssertionVerified
@@ -601,6 +624,9 @@ func (a *Authority) ApproveCLI(d canonical.Digest, typedCount int, who string) (
 	}
 	if p.Request.RiskClass == canonical.RiskCritical && typedCount != p.TargetCount() {
 		return Permit{}, a.countFailure(p, CodeTypedCountMismatch, "typed %d, permit covers %d targets", typedCount, p.TargetCount())
+	}
+	if err := a.floorRiseLocked(p); err != nil {
+		return Permit{}, err
 	}
 	p.State = StateApproved
 	p.Challenge = nil
