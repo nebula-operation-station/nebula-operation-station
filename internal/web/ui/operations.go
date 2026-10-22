@@ -145,7 +145,10 @@ type execView struct {
 	// Scanner holds the Safety Scanner's findings for the action's script
 	// (advisory; the executor applies the same list to the risk).
 	Scanner []scanner.Finding
-	Hosts   []execHostView
+	// ScriptPreview is the first lines of the action's script (at most 40
+	// lines / 4 KiB), shown collapsed next to the scanner findings.
+	ScriptPreview string
+	Hosts         []execHostView
 	// Rollout is the stage view of a staged operation.
 	Rollout *rolloutView
 }
@@ -425,6 +428,26 @@ func cut(b []byte, limit int) (string, bool) {
 	return strings.ToValidUTF8(string(b), "�"), true
 }
 
+// scriptPreview returns the first 40 lines of b, at most 4 KiB, as valid
+// UTF-8 text, for the operation page's collapsed script preview.
+func scriptPreview(b []byte) string {
+	const maxLines = 40
+	const maxBytes = 4 << 10
+	if len(b) > maxBytes {
+		b = b[:maxBytes]
+	}
+	off := 0
+	for i := 0; i < maxLines; i++ {
+		j := bytes.IndexByte(b[off:], '\n')
+		if j < 0 {
+			// Fewer than maxLines lines: keep the rest.
+			return strings.ToValidUTF8(string(b), "�")
+		}
+		off += j + 1 // keep the newline
+	}
+	return strings.ToValidUTF8(string(b[:off]), "�")
+}
+
 func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 	if !h.operationsEnabled(w, r) {
 		return
@@ -450,6 +473,7 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 	}
 	if a, ok, err := h.operations.Action(ctx, e.ActionID, e.ModuleVersion); err == nil && ok && a.SHA256() == e.ArtifactSHA256 {
 		v.Scanner, _ = scanner.Scan(a.Script)
+		v.ScriptPreview = scriptPreview(a.Script)
 	}
 	if v.Pending && len(e.Options) > 0 && json.Valid(e.Options) {
 		v.Options = string(e.Options)

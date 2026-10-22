@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -162,7 +163,7 @@ func run(cmd string, args []string) error {
 		if len(args) != 1 {
 			return errors.New("usage: nebula approve <digest-prefix>")
 		}
-		return approve(ctx, c, args[0])
+		return approve(ctx, c, args[0], os.Stdin, os.Stdout)
 	case "schedule":
 		return scheduleCmd(ctx, c, args, os.Stdin, os.Stdout)
 	case "artifact":
@@ -248,7 +249,7 @@ func pending(ctx context.Context, c pb.ExecutorServiceClient) error {
 	return nil
 }
 
-func approve(ctx context.Context, c pb.ExecutorServiceClient, prefix string) error {
+func approve(ctx context.Context, c pb.ExecutorServiceClient, prefix string, in io.Reader, out io.Writer) error {
 	if len(prefix) < 8 {
 		return errors.New("give at least 8 characters of the digest")
 	}
@@ -271,41 +272,43 @@ func approve(ctx context.Context, c pb.ExecutorServiceClient, prefix string) err
 
 	// Everything shown here comes from the executor, not from the web UI.
 	r := match.GetRequest()
-	fmt.Println("Approve this execution? (as seen by the executor)")
-	fmt.Printf("  digest         %s\n", match.GetExecutionDigest())
-	fmt.Printf("  risk           %s\n", shortRisk(r.GetRiskClass()))
-	fmt.Printf("  action         %s @ %s\n", r.GetActionId(), r.GetModuleVersion())
-	fmt.Printf("  artifact       sha256:%s\n", r.GetArtifactSha256())
-	fmt.Printf("  parameters     sha256:%s\n", r.GetParametersHash())
-	fmt.Printf("                 %s\n", displaySafe(match.GetCanonicalParameters(), canonical.MaxParametersSize))
-	fmt.Printf("  stage plan     sha256:%s\n", r.GetStagePlanHash())
+	fmt.Fprintln(out, "Approve this execution? (as seen by the executor)")
+	fmt.Fprintf(out, "  digest         %s\n", match.GetExecutionDigest())
+	fmt.Fprintf(out, "  risk           %s\n", shortRisk(r.GetRiskClass()))
+	fmt.Fprintf(out, "  action         %s @ %s\n", r.GetActionId(), r.GetModuleVersion())
+	fmt.Fprintf(out, "  artifact       sha256:%s\n", r.GetArtifactSha256())
+	printSafetyScanner(out, match)
+	printScriptPreview(out, match)
+	fmt.Fprintf(out, "  parameters     sha256:%s\n", r.GetParametersHash())
+	fmt.Fprintf(out, "                 %s\n", displaySafe(match.GetCanonicalParameters(), canonical.MaxParametersSize))
+	fmt.Fprintf(out, "  stage plan     sha256:%s\n", r.GetStagePlanHash())
 	for i, st := range match.GetStagePlan() {
-		fmt.Printf("    stage %d %-20s %d hosts, max failed %d, max unreachable %d, continue %s\n", i+1,
+		fmt.Fprintf(out, "    stage %d %-20s %d hosts, max failed %d, max unreachable %d, continue %s\n", i+1,
 			displaySafe([]byte(st.GetName()), 40), len(st.GetHostIds()), st.GetMaxFailed(), st.GetMaxUnreachable(),
 			displaySafe([]byte(st.GetContinueMode()), 10))
 		for _, h := range st.GetHostIds() {
-			fmt.Printf("      %s\n", displaySafe([]byte(h), 64))
+			fmt.Fprintf(out, "      %s\n", displaySafe([]byte(h), 64))
 		}
 	}
-	fmt.Printf("  credentials    %s\n", strings.Join(r.GetCredentialRefs(), ", "))
-	fmt.Printf("  permit expiry  %s\n", time.Unix(r.GetExpiryUnix(), 0).Format(time.RFC3339))
-	fmt.Printf("  targets (%d):\n", len(r.GetResolvedTargets()))
+	fmt.Fprintf(out, "  credentials    %s\n", strings.Join(r.GetCredentialRefs(), ", "))
+	fmt.Fprintf(out, "  permit expiry  %s\n", time.Unix(r.GetExpiryUnix(), 0).Format(time.RFC3339))
+	fmt.Fprintf(out, "  targets (%d):\n", len(r.GetResolvedTargets()))
 	for _, t := range r.GetResolvedTargets() {
-		fmt.Printf("    %-32s %s\n", t.GetHostId(), t.GetHostKeyFingerprint())
+		fmt.Fprintf(out, "    %-32s %s\n", t.GetHostId(), t.GetHostKeyFingerprint())
 	}
 
-	in := bufio.NewReader(os.Stdin)
+	br := bufio.NewReader(in)
 	typed := 0
 	if r.GetRiskClass() == pb.RiskClass_RISK_CLASS_CRITICAL {
-		fmt.Print("CRITICAL: type the number of targets to approve: ")
-		line, _ := in.ReadString('\n')
+		fmt.Fprint(out, "CRITICAL: type the number of targets to approve: ")
+		line, _ := br.ReadString('\n')
 		typed, err = strconv.Atoi(strings.TrimSpace(line))
 		if err != nil {
 			return errors.New("not a number; nothing approved")
 		}
 	} else {
-		fmt.Print("Type 'yes' to approve: ")
-		line, _ := in.ReadString('\n')
+		fmt.Fprint(out, "Type 'yes' to approve: ")
+		line, _ := br.ReadString('\n')
 		if strings.TrimSpace(line) != "yes" {
 			return errors.New("not approved")
 		}
@@ -313,8 +316,47 @@ func approve(ctx context.Context, c pb.ExecutorServiceClient, prefix string) err
 	if _, err := c.ApproveCLI(ctx, &pb.ApproveCLIRequest{ExecutionDigest: match.GetExecutionDigest(), TypedTargetCount: uint32(typed)}); err != nil {
 		return err
 	}
-	fmt.Println("approved")
+	fmt.Fprintln(out, "approved")
 	return nil
+}
+
+// printSafetyScanner shows the executor's Safety Scanner verdict for the
+// permit's artifact: each finding (category, line, excerpt) or "no
+// findings". All of it is host data, so it goes through displaySafe. When
+// the executor has not scanned these bytes (no artifact preview), it says
+// so instead of claiming "no findings".
+func printSafetyScanner(out io.Writer, p *pb.PendingPermit) {
+	if len(p.GetArtifactPreview()) == 0 {
+		fmt.Fprintln(out, "  safety scanner not scanned by the executor (artifact bytes not part of the proposal)")
+		return
+	}
+	f := p.GetScannerFindings()
+	if len(f) == 0 {
+		fmt.Fprintln(out, "  safety scanner no findings")
+		return
+	}
+	fmt.Fprintln(out, "  safety scanner")
+	for _, x := range f {
+		fmt.Fprintf(out, "    %s at line %d: %s\n",
+			displaySafe([]byte(x.GetCategory()), 64), x.GetLine(),
+			displaySafe([]byte(x.GetExcerpt()), 160))
+	}
+}
+
+// printScriptPreview shows the first lines of the artifact the executor
+// holds (at most 40 lines / 4 KiB, cut by the executor), as text.
+func printScriptPreview(out io.Writer, p *pb.PendingPermit) {
+	preview := p.GetArtifactPreview()
+	if len(preview) == 0 {
+		return
+	}
+	fmt.Fprintln(out, "  script (first 40 lines)")
+	for _, line := range strings.Split(string(preview), "\n") {
+		if line == "" {
+			continue
+		}
+		fmt.Fprintf(out, "    %s\n", displaySafe([]byte(line), 4096))
+	}
 }
 
 func envOr(key, def string) string {

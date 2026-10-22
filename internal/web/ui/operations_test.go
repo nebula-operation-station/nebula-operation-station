@@ -671,3 +671,22 @@ func TestOperationsListFiltersAndGrouping(t *testing.T) {
 		t.Error("invalid state value must be ignored")
 	}
 }
+
+func TestScriptPreviewIsShown(t *testing.T) {
+	a, _ := actions.Lookup("system.reboot")
+	f := &fakeOps{exec: executions.Execution{ID: opID, ActionID: a.ID, ModuleVersion: a.Version, ArtifactSHA256: a.SHA256(), State: "pending",
+		CreatedAt: time.Unix(1791960000, 0)}}
+	h := opsHandler(t, f, nil)
+	page := getBody(t, h, "/operations/"+opID)
+	// The first lines of the script, in a collapsed <details>, as text.
+	for _, want := range []string{`<details class="script-preview">`, "Script (first 40 lines)", "#!/bin/sh", "system.reboot 1.0.0"} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("page misses %q:\n%s", want, page)
+		}
+	}
+	// Another version's bytes: no preview.
+	f.exec.ArtifactSHA256 = strings.Repeat("0", 64)
+	if page := getBody(t, h, "/operations/"+opID); strings.Contains(page, "script-preview") {
+		t.Fatal("preview for bytes that are not the action's")
+	}
+}

@@ -529,6 +529,21 @@ message PendingPermit {
   bytes canonical_parameters = 5;
   // The stage plan as held by the executor.
   repeated PlanStage stage_plan = 6;
+  // Safety Scanner findings for the artifact, as computed by the executor
+  // (display data only; empty when the executor has not scanned these
+  // bytes, which then also means artifact_preview is empty).
+  repeated ScannerFinding scanner_findings = 7;
+  // First 40 lines of the artifact (at most 4 KiB), for display only.
+  bytes artifact_preview = 8;
+}
+
+// One Safety Scanner finding, as shown to the approver.
+message ScannerFinding {
+  string category = 1;
+  // 1-based line number.
+  int32 line = 2;
+  // Matched text, ASCII-quoted and shortened by the scanner.
+  string excerpt = 3;
 }
 
 // One stage of an approved plan.

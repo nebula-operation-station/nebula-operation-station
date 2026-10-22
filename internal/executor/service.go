@@ -358,14 +358,28 @@ func (s *Service) Lock(ctx context.Context, _ *pb.LockRequest) (*pb.LockResponse
 func (s *Service) ListPending(_ context.Context, _ *pb.ListPendingRequest) (*pb.ListPendingResponse, error) {
 	out := &pb.ListPendingResponse{}
 	for _, p := range s.auth.Pending() {
-		out.Permits = append(out.Permits, &pb.PendingPermit{
+		pp := &pb.PendingPermit{
 			ExecutionDigest:     p.Digest.String(),
 			Request:             toProto(p.Request),
 			ApprovalRequirement: requirementToProto(p.Requirement),
 			ApprovalExpiryUnix:  p.ApprovalExpiry.Unix(),
 			CanonicalParameters: p.Parameters,
 			StagePlan:           planToProto(p.Plan),
-		})
+		}
+		// Display data for the approval screen: the Safety Scanner's
+		// verdict and the artifact's first lines, as the executor holds
+		// them. They change nothing the permit authorizes.
+		if findings, preview, ok := s.auth.ScanInfo(p.Request.ArtifactSHA256); ok {
+			for _, f := range findings {
+				pp.ScannerFindings = append(pp.ScannerFindings, &pb.ScannerFinding{
+					Category: f.Category,
+					Line:     int32(f.Line),
+					Excerpt:  f.Excerpt,
+				})
+			}
+			pp.ArtifactPreview = preview
+		}
+		out.Permits = append(out.Permits, pp)
 	}
 	return out, nil
 }

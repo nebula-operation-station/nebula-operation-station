@@ -227,3 +227,67 @@ func TestFloorReasonStaysInTheAuditLog(t *testing.T) {
 		t.Fatalf("reason in %d audit events, want 2", found)
 	}
 }
+
+// When the executor's floor rises after the proposal (a host becomes more
+// critical, trust is withdrawn, or the scanner), both approval paths reject
+// with a message naming the new floor instead of approving and failing at
+// run time.
+func TestApprovalRejectedWhenTheFloorRose(t *testing.T) {
+	e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
+	e.openSession()
+
+	// ApproveCLI path: a MEDIUM permit (pending), then the floor rises to HIGH.
+	p := e.propose(e.request(canonical.RiskMedium))
+	if p.State != StatePending {
+		t.Fatal(p.State)
+	}
+	e.risk.set(canonical.RiskHigh)
+	_, err := e.auth.ApproveCLI(p.Digest, 0, "admin")
+	wantCode(t, err, CodeRiskAboveApproval)
+	if !strings.Contains(err.Error(), "executor minimum is now HIGH") {
+		t.Fatalf("error does not name the new floor: %v", err)
+	}
+	// Still pending: not approved, not discarded, not counted as a failure.
+	if pend, appr := e.auth.Counts(); pend != 1 || appr != 0 {
+		t.Fatalf("permit after floor rise: %d pending, %d approved", pend, appr)
+	}
+	// A matching floor approves.
+	e.risk.set(canonical.RiskMedium)
+	if _, err := e.auth.ApproveCLI(p.Digest, 0, "admin"); err != nil {
+		t.Fatalf("approval at the floor: %v", err)
+	}
+
+	// SubmitAssertion path: a MEDIUM permit, then the floor rises to HIGH.
+	e2 := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
+	e2.openSession()
+	q := e2.propose(e2.request(canonical.RiskMedium))
+	e2.risk.set(canonical.RiskHigh)
+	_, err = e2.auth.SubmitAssertion(q.Digest, e2.sign(q.Challenge), 0)
+	wantCode(t, err, CodeRiskAboveApproval)
+	if !strings.Contains(err.Error(), "executor minimum is now HIGH") {
+		t.Fatalf("assertion error does not name the new floor: %v", err)
+	}
+}
+
+func TestApprovalFailsClosedWhenTheFloorIsUnknown(t *testing.T) {
+	for name, broken := range map[string]func(*fakePolicy){
+		"policy error":  func(f *fakePolicy) { f.setErr(errors.New("disk gone")) },
+		"unknown class": func(f *fakePolicy) { f.mu.Lock(); f.bogus = true; f.mu.Unlock() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
+			e.openSession()
+			p := e.propose(e.request(canonical.RiskMedium))
+			q := e.propose(e.request(canonical.RiskMedium))
+			broken(e.risk)
+			_, err := e.auth.ApproveCLI(p.Digest, 0, "admin")
+			wantCode(t, err, CodeStorage)
+			_, err = e.auth.SubmitAssertion(q.Digest, e.sign(q.Challenge), 0)
+			wantCode(t, err, CodeStorage)
+			// Neither is approved; both stay pending for a later attempt.
+			if pend, appr := e.auth.Counts(); pend != 2 || appr != 0 {
+				t.Fatalf("after an unknown floor: %d pending, %d approved", pend, appr)
+			}
+		})
+	}
+}
