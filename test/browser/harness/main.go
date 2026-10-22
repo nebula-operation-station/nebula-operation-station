@@ -350,7 +350,7 @@ func main() {
 	u, err := ui.New(ui.Options{PublicOrigin: origin, Events: direct{svc}, Audit: audit, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Pins: inv, Schedules: ops, Runbooks: rb, Trust: direct{svc}, Modules: mods, LastResult: ops.LastResult, Network: ipamStore, Discovery: disc, Repin: direct{svc}, Enroll: direct{svc}, Log: slog.New(auditlog.NewHandler(base, audit))})
 	must(err)
 	if preview {
-		seedPreview(context.Background(), svc, sdb, inv, sshPub)
+		seedPreview(context.Background(), svc, sdb, inv, rb, sshPub)
 	}
 	mux := http.NewServeMux()
 	// Test hook: issue a one-time code like `nebula webauthn code`.
@@ -547,7 +547,7 @@ func createInventoryHost(ctx context.Context, inv *inventory.Store, id, display 
 // seedPreview seeds the demo lab: eight hosts in different states, their
 // stored read-only results, update lists, ops states, two networks with
 // assets and a finished discovery job.
-func seedPreview(ctx context.Context, svc *executor.Service, sdb *sql.DB, inv *inventory.Store, sshPub ssh.PublicKey) {
+func seedPreview(ctx context.Context, svc *executor.Service, sdb *sql.DB, inv *inventory.Store, rb *runbooks.Store, sshPub ssh.PublicKey) {
 	now := time.Now()
 	ago := func(d time.Duration) time.Time { return now.Add(-d) }
 
@@ -564,6 +564,15 @@ func seedPreview(ctx context.Context, svc *executor.Service, sdb *sql.DB, inv *i
 	// --- Pinned actions (quick-action bar on the host page) -----------
 	must(inv.SetPinnedActions(ctx, "web", []string{"core.facts", "service.list", "service.status"}, "demo"))
 	must(inv.SetPinnedActions(ctx, "nas", []string{"package.install_security", "system.reboot"}, "demo"))
+
+	// --- A runbook (so the pin-to-hosts box is visible) ---------------
+	_, err := rb.Save(ctx, "demo", runbooks.Draft{
+		Slug: "backup_check", Title: "Backup check",
+		Description: "Read-only check that the nightly backup ran and the latest archive is present.",
+		Risk:        "LOW", TimeoutS: 300,
+		Body: "ls -1 /var/backups | tail -n 5",
+	})
+	must(err)
 
 	// --- Facts ---------------------------------------------------------
 	deb12 := "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\nID=debian\nVERSION_ID=\"12\""
