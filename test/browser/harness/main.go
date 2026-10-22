@@ -561,6 +561,10 @@ func seedPreview(ctx context.Context, svc *executor.Service, sdb *sql.DB, inv *i
 	unenrolledHost(ctx, inv, sshPub, "printer", "Printer", inventory.EnvDev, inventory.CriticalityLow)
 	pinBlockedHost(ctx, svc, inv, sshPub, "old", "Old server", inventory.EnvDev, inventory.CriticalityLow)
 
+	// --- Pinned actions (quick-action bar on the host page) -----------
+	must(inv.SetPinnedActions(ctx, "web", []string{"core.facts", "service.list", "service.status"}, "demo"))
+	must(inv.SetPinnedActions(ctx, "nas", []string{"package.install_security", "system.reboot"}, "demo"))
+
 	// --- Facts ---------------------------------------------------------
 	deb12 := "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\nID=debian\nVERSION_ID=\"12\""
 	ubu24 := "PRETTY_NAME=\"Ubuntu 24.04.2 LTS\"\nID=ubuntu\nVERSION_ID=\"24.04\""
