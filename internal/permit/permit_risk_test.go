@@ -268,3 +268,26 @@ func TestApprovalRejectedWhenTheFloorRose(t *testing.T) {
 		t.Fatalf("assertion error does not name the new floor: %v", err)
 	}
 }
+
+func TestApprovalFailsClosedWhenTheFloorIsUnknown(t *testing.T) {
+	for name, broken := range map[string]func(*fakePolicy){
+		"policy error":  func(f *fakePolicy) { f.setErr(errors.New("disk gone")) },
+		"unknown class": func(f *fakePolicy) { f.mu.Lock(); f.bogus = true; f.mu.Unlock() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
+			e.openSession()
+			p := e.propose(e.request(canonical.RiskMedium))
+			q := e.propose(e.request(canonical.RiskMedium))
+			broken(e.risk)
+			_, err := e.auth.ApproveCLI(p.Digest, 0, "admin")
+			wantCode(t, err, CodeStorage)
+			_, err = e.auth.SubmitAssertion(q.Digest, e.sign(q.Challenge), 0)
+			wantCode(t, err, CodeStorage)
+			// Neither is approved; both stay pending for a later attempt.
+			if pend, appr := e.auth.Counts(); pend != 2 || appr != 0 {
+				t.Fatalf("after an unknown floor: %d pending, %d approved", pend, appr)
+			}
+		})
+	}
+}

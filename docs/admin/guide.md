@@ -578,7 +578,10 @@ reboots and Docker removals at least MEDIUM; a line it cannot read counts
 HIGH. The scanner only ever raises the risk, and a clean scan proves
 nothing. The planning and operation pages show its findings; `nebula
 approve` shows them and the script's first 40 lines (at most 4 KiB)
-before you confirm.
+before you confirm. The web pages scan the script the server holds; `nebula
+approve` shows the executor's own scan of the bytes it will authorize and
+says "not scanned by the executor" when the proposal carried no script
+bytes (the executor still scans them before the run).
 
 ### 8.2 Module signers
 
