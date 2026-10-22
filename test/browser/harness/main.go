@@ -347,7 +347,7 @@ func main() {
 	ipamStore := ipam.New(sdb, ipam.FromInventory(inv.List))
 	disc := discovery.New(sdb, spool, ipamStore, ipam.FromInventory(inv.List), log)
 	audit := auditlog.New(sdb, true)
-	u, err := ui.New(ui.Options{PublicOrigin: origin, Events: direct{svc}, Audit: audit, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Schedules: ops, Runbooks: rb, Trust: direct{svc}, Modules: mods, LastResult: ops.LastResult, Network: ipamStore, Discovery: disc, Repin: direct{svc}, Enroll: direct{svc}, Log: slog.New(auditlog.NewHandler(base, audit))})
+	u, err := ui.New(ui.Options{PublicOrigin: origin, Events: direct{svc}, Audit: audit, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Pins: inv, Schedules: ops, Runbooks: rb, Trust: direct{svc}, Modules: mods, LastResult: ops.LastResult, Network: ipamStore, Discovery: disc, Repin: direct{svc}, Enroll: direct{svc}, Log: slog.New(auditlog.NewHandler(base, audit))})
 	must(err)
 	if preview {
 		seedPreview(context.Background(), svc, sdb, inv, sshPub)

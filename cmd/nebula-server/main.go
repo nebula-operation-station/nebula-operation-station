@@ -238,6 +238,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		HostKeys:     hostKeys,
 		Inventory:    store,
 		Operations:   ops,
+		Pins:         store,
 		Schedules:    ops,
 		Runbooks:     rb,
 		Trust:        exec,

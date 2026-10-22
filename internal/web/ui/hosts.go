@@ -153,6 +153,10 @@ type hostPageData struct {
 	// Settings.
 	Settings *hostSettingsView
 	Warn     string
+
+	// Quick actions (job ui5).
+	QuickActions []quickActionView
+	PinSettings  *pinSettingsView
 }
 
 // hostTabLimit bounds the operations tab.
@@ -174,7 +178,7 @@ func (h *Handler) handleHost(w http.ResponseWriter, r *http.Request) {
 	}
 	data := pageData{Title: "Host " + id, Active: "inventory", Content: "host",
 		Host:    &hostPageData{ID: id, Tab: tab, Tabs: hostTabs},
-		Scripts: []string{"webauthn.js", "host.js", "formpost.js"}}
+		Scripts: []string{"webauthn.js", "runop.js", "host.js", "formpost.js"}}
 	data.Host.Warn = r.URL.Query().Get("warn")
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
 	defer cancel()
@@ -198,6 +202,8 @@ func (h *Handler) handleHost(w http.ResponseWriter, r *http.Request) {
 	if h.modules != nil && h.lastResult != nil {
 		hp.ModuleTabs = h.moduleTabs(ctx, id)
 	}
+	h.hostQuickActions(ctx, id, hp)
+	h.hostPinSettings(ctx, id, hp)
 	h.render(w, r, data)
 }
 

@@ -48,7 +48,13 @@
   <button type="button" id="bulk-refresh" class="button">Refresh updates, containers, services</button>
   <button type="button" id="bulk-schedule" class="button button--secondary">Schedule refresh…</button>
   <button type="button" id="bulk-reboot" class="button button--danger">Reboot…</button>
-  <span class="hint">Refreshes run without a key tap while a privileged session is open (Dashboard). Reboot opens the operation form: choose the rollout, then approve.</span>
+  <span class="hint">Refresh runs without a key tap while a privileged session is open (Dashboard); otherwise it opens the session with one tap. Reboot asks for the key.</span>
+  <div class="bulkbar__confirm" id="bulk-reboot-confirm" hidden>
+    <span>Reboot <span class="bulk-reboot-confirm__count">0</span> host(s) now?</span>
+    <button type="button" id="bulk-reboot-go" class="button button--danger">Reboot now</button>
+    <button type="button" id="bulk-reboot-cancel" class="button button--secondary">Cancel</button>
+    <a href="/operations/new">Plan a staged reboot…</a>
+  </div>
   <p id="bulk-message" class="message" role="status" aria-live="polite"></p>
 </div>
 {{end}}

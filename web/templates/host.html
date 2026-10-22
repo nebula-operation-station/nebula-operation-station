@@ -48,6 +48,28 @@
   <div class="actions"><a class="button" href="/inventory/enroll?host={{.ID}}">Enroll this host</a></div>
 </section>
 {{end}}
+{{if .QuickActions}}
+<section class="panel quickactions" aria-label="Quick actions" id="quick-actions" data-host="{{$hid}}">
+  <h2>Quick actions</h2>
+  <div class="quickactions__buttons">
+    {{range .QuickActions}}
+    {{if .Params}}
+    <a class="button button--secondary" href="/operations/new?host={{$hid}}&amp;action={{.ActionID}}">{{.Title}}</a>
+    {{else}}
+    <button type="button" class="button quickaction" data-action="{{.ActionID}}">{{.Title}}</button>
+    {{end}}
+    {{end}}
+  </div>
+  <div class="bulkbar__confirm" id="quick-reboot-confirm" hidden>
+    <span>Reboot this host now?</span>
+    <button type="button" id="quick-reboot-go" class="button button--danger">Reboot now</button>
+    <button type="button" id="quick-reboot-cancel" class="button button--secondary">Cancel</button>
+    <a href="/operations/new?action=system.reboot&amp;host={{$hid}}">Plan a staged reboot…</a>
+  </div>
+  <p id="quick-message" class="message" role="status" aria-live="polite"></p>
+  <div id="quick-status"></div>
+</section>
+{{end}}
 <nav class="tabs" aria-label="Host tabs">
   {{range .Tabs}}
   <a class="tab{{if eq $tab .ID}} tab--active{{end}}" href="/hosts/{{$hid}}?tab={{.ID}}">{{.Title}}</a>
@@ -306,6 +328,24 @@
   </form>
   {{else}}
   <p class="status status--error">Inventory is not configured; the host cannot be edited.</p>
+  {{end}}
+  {{with .PinSettings}}
+  <h3>Quick actions</h3>
+  <p class="hint">Pinned catalog actions appear on the quick-action bar of this host. Actions with parameters open the operation form prefilled for the host. Pinning changes no risk and no approval.</p>
+  <form id="pins-form" data-host="{{$hid}}">
+    <div class="pins-list">
+      {{range .Actions}}
+      <label class="choice">
+        <input type="checkbox" name="pin" value="{{.ID}}"{{if .Pinned}} checked{{end}}>
+        <span>{{.Title}}{{if .HasParams}} <span class="hint">(opens the form)</span>{{end}}</span>
+      </label>
+      {{end}}
+    </div>
+    <div class="actions">
+      <button type="submit" id="pins-submit" class="button">Save pins</button>
+    </div>
+  </form>
+  <p id="pins-message" class="message" role="status" aria-live="polite"></p>
   {{end}}
 </section>
 {{end}}
