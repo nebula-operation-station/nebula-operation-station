@@ -143,8 +143,9 @@ function check(cond, what) {
   await page.goto(base + '/inventory');
   check(/checked \S/.test(await page.textContent('tr[data-id="e2e-host"]')) && await page.locator('tr[data-id="e2e-host"] .host-updates time[datetime]').count() === 1, 'the inventory shows the update status');
   check(/(ready|warning|ok)/i.test(await page.textContent('tr[data-id="e2e-host"]')), 'the inventory shows the Ops State');
-  // Selection: the bulk bar appears; reboot opens the operation form with
-  // the hosts preselected; refresh creates the read operations.
+  // Selection: the bulk bar appears; reboot confirms inline in the bar
+  // (no navigation, no browser dialog) and asks for the key; refresh
+  // runs the four reads in place and reloads the table when they are done.
   check(await page.locator('#bulkbar').isHidden(), 'no bulk bar without a selection');
   await page.check('tr[data-id="e2e-host"] input.host-select');
   check(/1 selected/.test(await page.textContent('#bulkbar')), 'selecting a host shows the bulk bar');
@@ -152,15 +153,75 @@ function check(cond, what) {
   check(await page.locator('#bulkbar').isHidden(), 'a host hidden by the filter is unselected');
   await page.fill('#inventory-filter', '');
   await page.check('tr[data-id="e2e-host"] input.host-select');
-  await Promise.all([page.waitForURL(/\/operations\/new\?/, { timeout: 15000 }), page.click('#bulk-reboot')]);
-  check(await page.isChecked('input[name="action"][value="system.reboot"]') && await page.isChecked('input[name="host"][value="e2e-host"]'),
-    'reboot opens the operation form with the action and the host preselected');
+  // Reboot confirms inline in the bulk bar and stays on the inventory;
+  // the key tap is answered by the virtual authenticator. The test host
+  // is not root, so the reboot precheck fails and nothing reboots.
+  await page.click('#bulk-reboot');
+  check(!await page.locator('#bulk-reboot-confirm').isHidden() && /Reboot 1 host/.test(await page.textContent('#bulk-reboot-confirm')),
+    'reboot asks for an inline confirmation in the bulk bar');
+  check(page.url() === base + '/inventory', 'the inline confirm does not navigate away');
+  await page.click('#bulk-reboot-cancel');
+  check(await page.locator('#bulk-reboot-confirm').isHidden(), 'cancelling hides the inline confirm');
+  check((await page.getAttribute('#bulk-reboot-plan', 'href')).includes('action=system.reboot&host=e2e-host'),
+    'the staged-reboot link opens the form with the selected hosts');
+  await page.click('#bulk-update');
+  check(!await page.locator('#bulk-update-confirm').isHidden() && /Install on 1 host/.test(await page.textContent('#bulk-update-confirm')),
+    'install updates asks for an inline confirmation');
+  check((await page.getAttribute('#bulk-update-plan', 'href')).includes('action=package.install_security&host=e2e-host'), 'the plan link carries security updates and the selection');
+  await page.check('input[name="bulk-update-kind"][value="package.install_all"]');
+  check((await page.getAttribute('#bulk-update-plan', 'href')).includes('action=package.install_all&host=e2e-host'), 'choosing all updates changes the plan link');
+  await Promise.all([page.waitForURL(/\/operations\/new\?/, { timeout: 15000 }), page.click('#bulk-update-plan')]);
+  check(await page.isChecked('input[name="action"][value="package.install_all"]') && await page.isChecked('input[name="host"][value="e2e-host"]'),
+    'the operation form opens with the action and the selected host checked');
   await page.goto(base + '/inventory');
   await page.check('tr[data-id="e2e-host"] input.host-select');
-  const groupsBefore = await page.request.get(base + '/operations').then((r) => r.text()).then((t) => (t.match(/op-group-row/g) || []).length);
-  await Promise.all([page.waitForURL(/\/operations$/, { timeout: 15000 }), page.click('#bulk-refresh')]);
-  check((((await page.content()).match(/op-group-row/g)) || []).length > groupsBefore && /4 reads/.test(await page.textContent('main')),
-    'refresh of the selection creates the four reads, shown as one group');
+  await page.click('#bulk-reboot');
+  await page.click('#bulk-reboot-go');
+  // Approved in place with the key: the status line follows the
+  // operation (the durable reboot job on the test host does not finish
+  // within the test, so only approval and status are checked).
+  await page.waitForFunction(() => /: (approved|running|finished|failed)/.test(document.getElementById('bulkbar').textContent), null, { timeout: 60000 });
+  check(true, 'the reboot was approved in place and its status follows in the bulk bar');
+  // One-click refresh: the privileged session is open (from the
+  // dashboard); the reads the executor does not trust as LOW are
+  // approved in place one after the other (the virtual authenticator
+  // answers the taps), and the table reloads when all are done.
+  await page.goto(base + '/inventory');
+  await page.check('tr[data-id="e2e-host"] input.host-select');
+  const reloaded = page.waitForEvent('load', { timeout: 180000 });
+  await page.click('#bulk-refresh');
+  await page.waitForSelector('#bulkbar .runop-links a', { timeout: 180000 });
+  await reloaded;
+  check(/checked \S/.test(await page.textContent('tr[data-id="e2e-host"]')) && /(ready|warning|ok)/i.test(await page.textContent('tr[data-id="e2e-host"]')),
+    'one-click refresh ran the reads and reloaded the table');
+  // Host page: the quick-action bar has the built-ins plus the actions
+  // pinned to the host; a pinned read runs in place and the page
+  // reloads when it is done. A pinned action with parameters opens the
+  // operation form prefilled for the host instead of running directly.
+  // Pin three actions on the settings tab (a read, another read, one
+  // with parameters), then use them from the quick-action bar.
+  await page.goto(base + '/hosts/e2e-host?tab=settings');
+  await page.waitForSelector('#pins-form');
+  for (const a of ['core.facts', 'service.list', 'service.status']) await page.check(`#pins-form input[name="pin"][value="${a}"]`);
+  await page.click('#pins-submit');
+  await page.waitForFunction(() => /Pins saved/.test(document.getElementById('pins-message').textContent), null, { timeout: 15000 });
+  await page.goto(base + '/hosts/e2e-host?tab=settings');
+  check(await page.isChecked('#pins-form input[name="pin"][value="core.facts"]') &&
+    await page.isChecked('#pins-form input[name="pin"][value="service.list"]') &&
+    await page.isChecked('#pins-form input[name="pin"][value="service.status"]'),
+    'pins are saved and shown checked on the settings tab');
+  await page.goto(base + '/hosts/e2e-host');
+  await page.waitForSelector('#quick-actions');
+  const qa = await page.textContent('#quick-actions');
+  check(/Refresh/.test(qa) && /Install security updates/.test(qa) && /Reboot/.test(qa), 'the quick-action bar has the built-ins');
+  check(/Collect facts/.test(qa) && /List services/.test(qa) && /Service status/.test(qa), 'the pinned actions are on the quick-action bar');
+  check((await page.getAttribute('#quick-actions a[href*="action=service.status"]', 'href') || '').includes('host=e2e-host'),
+    'a pinned action with parameters opens the operation form prefilled for the host');
+  const qaReloaded = page.waitForEvent('load', { timeout: 180000 });
+  await page.click('#quick-actions button[data-action="core.facts"]');
+  await page.waitForSelector('#quick-status .runop-links a', { timeout: 180000 });
+  await qaReloaded;
+  check(new URL(page.url()).pathname === '/hosts/e2e-host', 'the pinned read ran in place and the host page reloaded');
   // The bulk bar can open the schedules page with the four reads and the
   // selection preselected; the More menu offers to keep all hosts fresh.
   await page.goto(base + '/inventory');

@@ -4,6 +4,7 @@ package ui_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,14 @@ import (
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
+
+// refreshResponse is the JSON of POST /inventory/refresh (job ui5): the
+// created operations with their state and approval data, plus the number
+// of skipped hosts.
+type refreshResponse struct {
+	Operations []map[string]any `json:"operations"`
+	Skipped    int              `json:"skipped"`
+}
 
 func TestInventoryRefreshCreatesOneOperationPerReadForPinnedHosts(t *testing.T) {
 	f := &fakeOps{}
@@ -41,8 +50,15 @@ func TestInventoryRefreshCreatesOneOperationPerReadForPinnedHosts(t *testing.T) 
 	}
 
 	rec := post("host=web&host=db&host=new&host=moved&host=noaddr&host=web")
-	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/operations" {
-		t.Fatalf("refresh: %d %s %s", rec.Code, rec.Header().Get("Location"), rec.Body)
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("refresh: %d %s %s", rec.Code, rec.Header().Get("Content-Type"), rec.Body)
+	}
+	var resp refreshResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("refresh body: %v: %s", err, rec.Body)
+	}
+	if len(resp.Operations) != 4 || resp.Skipped != 3 {
+		t.Fatalf("refresh: %d operations, %d skipped", len(resp.Operations), resp.Skipped)
 	}
 	want := []string{"core.facts", "package.list_updates", "docker.list", "service.list"}
 	if len(f.createdCalls) != len(want) {
@@ -54,6 +70,12 @@ func TestInventoryRefreshCreatesOneOperationPerReadForPinnedHosts(t *testing.T) 
 		// endpoint; the duplicate web counts once).
 		if c := f.createdCalls[i]; c[1] != a || strings.Join(c[2:], ",") != "web,db" {
 			t.Fatalf("call %d: %v", i, c)
+		}
+		// The created operations carry the state and the approval data
+		// the in-place UI needs, and nothing beyond it.
+		op := resp.Operations[i]
+		if op["id"] != opID || op["state"] != "pending" || op["risk"] != "HIGH" {
+			t.Fatalf("operation %d: %v", i, op)
 		}
 	}
 
@@ -89,7 +111,7 @@ func TestInventoryRefreshCreatesOneOperationPerReadForPinnedHosts(t *testing.T) 
 	req := httptest.NewRequest(http.MethodPost, "/inventory/refresh", strings.NewReader(strings.Join(body, "&")))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	big.ServeHTTP(rec, req)
-	if rec.Code != http.StatusSeeOther || len(f.createdCalls) != 8 {
+	if rec.Code != http.StatusOK || len(f.createdCalls) != 8 {
 		t.Fatalf("150 hosts: %d, %d operations", rec.Code, len(f.createdCalls))
 	}
 	if n0, n4 := len(f.createdCalls[0])-2, len(f.createdCalls[4])-2; n0 != 100 || n4 != 50 {
@@ -100,7 +122,7 @@ func TestInventoryRefreshCreatesOneOperationPerReadForPinnedHosts(t *testing.T) 
 	// GET is not a refresh.
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/inventory/refresh", nil))
-	if rec.Code == http.StatusSeeOther || len(f.createdCalls) != 0 {
+	if rec.Code == http.StatusOK || len(f.createdCalls) != 0 {
 		t.Fatalf("GET: %d", rec.Code)
 	}
 }

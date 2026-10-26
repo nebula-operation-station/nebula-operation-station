@@ -93,6 +93,9 @@ type Options struct {
 	// Operations plans and follows executions. Nil leaves the
 	// operations page empty.
 	Operations Operations
+	// Pins stores the per-host pinned quick actions (job ui5). Nil
+	// leaves pin management off: no pin endpoints and no pin UI.
+	Pins PinStore
 	// Schedules manages scheduled read-only checks. Nil hides them.
 	Schedules Schedules
 	// Runbooks stores runbooks. Nil leaves the runbooks page empty.
@@ -141,6 +144,7 @@ type Handler struct {
 	hostKeys   func(ctx context.Context) ([]*pb.HostKeyPin, error)
 	inventory  InventoryStore
 	operations Operations
+	pins       PinStore
 	schedules  Schedules
 	runbooks   Runbooks
 	trust      ArtifactTrust
@@ -191,6 +195,7 @@ func New(o Options) (*Handler, error) {
 		hostKeys:     o.HostKeys,
 		inventory:    o.Inventory,
 		operations:   o.Operations,
+		pins:         o.Pins,
 		schedules:    o.Schedules,
 		runbooks:     o.Runbooks,
 		trust:        o.Trust,
@@ -269,6 +274,8 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("GET /operations/{id}", h.handleOperation)
 	mux.HandleFunc("POST /operations/create", h.handleOperationCreate)
 	mux.HandleFunc("POST /operations/approve", h.handleOperationApprove)
+	// The status poll is GET only (the handler answers 405 otherwise).
+	mux.HandleFunc("/operations/{id}/status", h.handleOperationStatus)
 	mux.HandleFunc("POST /operations/gate", h.handleOperationGate)
 	mux.HandleFunc("POST /operations/gate/commit", h.handleOperationGateCommit)
 	mux.HandleFunc("POST /operations/abort", h.handleOperationAbort)
@@ -297,6 +304,10 @@ func (h *Handler) Handler() http.Handler {
 	// Origin-checked POST routes.
 	mux.HandleFunc("POST /hosts/{id}/refresh", h.handleHostRefresh)
 	mux.HandleFunc("POST /inventory/refresh", h.handleInventoryRefresh)
+	// Pin management: the handlers answer 405 for the wrong method.
+	mux.HandleFunc("/hosts/{id}/pins", h.handleHostPins)
+	mux.HandleFunc("/actions/pin", h.handleActionPin)
+	mux.HandleFunc("/privileged/session", h.handlePrivilegedSession)
 	mux.HandleFunc("POST /hosts/{id}/settings", h.handleHostFormUpdate)
 	mux.HandleFunc("POST /hosts/{id}/delete", h.handleHostFormDelete)
 	// Global search (M9-3): read-only, quick actions are links.

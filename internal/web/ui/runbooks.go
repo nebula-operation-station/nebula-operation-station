@@ -65,6 +65,9 @@ type runbookDetail struct {
 	Secrets                                                                                   []runbookParamView
 	Scanner                                                                                   []scanner.Finding
 	Versions                                                                                  []runbookVersionRow
+	// PinToHosts is the "Pin to hosts…" chooser (job ui5); nil while
+	// pins are not wired.
+	PinToHosts *pinToHostsView
 }
 
 type runbookEdit struct {
@@ -161,7 +164,8 @@ func (h *Handler) handleRunbook(w http.ResponseWriter, r *http.Request) {
 				Created: x.CreatedAt.UTC()})
 		}
 	}
-	h.render(w, r, pageData{Title: "Runbook " + v.Slug, Active: "runbooks", Content: "runbook", Scripts: []string{"webauthn.js", "runbooks.js"},
+	d.PinToHosts = h.pinToHosts(ctx)
+	h.render(w, r, pageData{Title: "Runbook " + v.Slug, Active: "runbooks", Content: "runbook", Scripts: []string{"webauthn.js", "runbooks.js", "pinhosts.js"},
 		Runbooks: &runbooksData{Detail: d}})
 }
 

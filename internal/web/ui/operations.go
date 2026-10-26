@@ -621,7 +621,14 @@ func (h *Handler) handleOperationCreate(w http.ResponseWriter, r *http.Request) 
 	var ple *executions.PlanError
 	switch {
 	case err == nil:
-		writeJSON(w, http.StatusOK, map[string]any{"id": c.ID, "state": c.State, "risk": c.Risk})
+		out := map[string]any{"id": c.ID, "state": c.State, "risk": c.Risk, "requirement": c.Requirement}
+		// Options are the WebAuthn request options JSON the browser
+		// approves with; the in-place run UI (runop.js) needs them in
+		// the response instead of a detour through the operation page.
+		if len(c.Options) > 0 {
+			out["options"] = json.RawMessage(c.Options)
+		}
+		writeJSON(w, http.StatusOK, out)
 	case errors.Is(err, executions.ErrUnknownAction), errors.Is(err, executions.ErrNoHosts), errors.Is(err, executions.ErrTooManyHosts), errors.As(err, &he), errors.As(err, &pe), errors.As(err, &ple):
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 	default:

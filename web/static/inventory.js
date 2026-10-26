@@ -63,12 +63,19 @@
         update();
       });
     }
+    // One-click refresh: make sure the privileged session is open (one
+    // key tap while it is not), create the reads for the selection,
+    // approve what waits for a tap in place, one after the other, and
+    // follow the rest by status; the page reloads when all are done.
     document.getElementById('bulk-refresh').addEventListener('click', async (e) => {
       const hosts = selected();
       if (hosts.length === 0) return;
       e.target.disabled = true;
       msg.textContent = '';
+      msg.classList.remove('message--error');
       try {
+        await nebulaRunOp.ensureSession(msg);
+        msg.textContent = 'Refreshing ' + hosts.length + ' hosts…';
         const body = new URLSearchParams();
         for (const h of hosts) body.append('host', h);
         const res = await fetch('/inventory/refresh', {
@@ -77,16 +84,25 @@
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body,
         });
-        if (res.ok) {
-          window.location.assign(res.url);
-          return;
+        const text = await res.text(); // text only; server text is never HTML
+        let data = null;
+        try { data = JSON.parse(text); } catch (_) { /* not JSON */ }
+        if (!res.ok || !data) {
+          throw new Error((data && data.error) || text.trim() || ('Request failed (' + res.status + ')'));
         }
-        msg.textContent = (await res.text()).trim() || ('Request failed (' + res.status + ')'); // text only
-        msg.classList.add('message--error');
+        if (data.operations.length === 0) {
+          throw new Error('No operation could be created for the selected hosts.');
+        }
+        for (const op of data.operations) {
+          if (op.state !== 'pending' || !op.options) continue;
+          await nebulaRunOp.approveInPlace(op, hosts, msg, bulkbar);
+        }
+        nebulaRunOp.followStatus(bulkbar, data.operations.map((o) => o.id), { reloadWhenDone: true });
       } catch (err) {
-        msg.textContent = String(err);
+        msg.textContent = err.name === 'NotAllowedError' ? 'Cancelled or timed out.' : (err.message || 'Could not refresh.');
+        msg.classList.add('message--error');
+        e.target.disabled = false;
       }
-      e.target.disabled = false;
     });
     // "Schedule refresh…" opens the schedules page with the four read
     // actions and the selected hosts preselected (6 h / 30 days).
@@ -102,12 +118,83 @@
       q.set('days', '30');
       window.location.assign('/schedules?' + q.toString());
     });
+    // "Reboot…" confirms inline in the bulk bar (no browser dialog),
+    // then creates one system.reboot operation for the whole selection
+    // and approves it in place with the key; the status follows in the
+    // bar. The link keeps the operation form for canary and waves.
+    // The "plan in the form" links carry the action and the selection, so
+    // the operation form opens with the same hosts checked.
+    const planHref = (action, hosts) => {
+      const q = new URLSearchParams({ action });
+      for (const h of hosts) q.append('host', h);
+      return '/operations/new?' + q.toString();
+    };
+    const rebootConfirm = document.getElementById('bulk-reboot-confirm');
+    const rebootGo = document.getElementById('bulk-reboot-go');
+    const rebootCancel = document.getElementById('bulk-reboot-cancel');
     document.getElementById('bulk-reboot').addEventListener('click', () => {
       const hosts = selected();
       if (hosts.length === 0) return;
-      const q = new URLSearchParams({ action: 'system.reboot' });
-      for (const h of hosts) q.append('host', h);
-      window.location.assign('/operations/new?' + q.toString());
+      updateConfirm.hidden = true;
+      rebootConfirm.hidden = false;
+      rebootConfirm.querySelector('.bulk-reboot-confirm__count').textContent = String(hosts.length);
+      document.getElementById('bulk-reboot-plan').href = planHref('system.reboot', hosts);
+      rebootGo.disabled = false;
+    });
+
+    // "Install updates…": security or all updates for the selection,
+    // confirmed inline and approved in place with the key, like reboot.
+    const updateConfirm = document.getElementById('bulk-update-confirm');
+    const updateGo = document.getElementById('bulk-update-go');
+    const updateKind = () => updateConfirm.querySelector('input[name="bulk-update-kind"]:checked').value;
+    const updatePlan = () => { document.getElementById('bulk-update-plan').href = planHref(updateKind(), selected()); };
+    for (const r of updateConfirm.querySelectorAll('input[name="bulk-update-kind"]')) r.addEventListener('change', updatePlan);
+    document.getElementById('bulk-update').addEventListener('click', () => {
+      const hosts = selected();
+      if (hosts.length === 0) return;
+      rebootConfirm.hidden = true;
+      updateConfirm.hidden = false;
+      updateConfirm.querySelector('.bulk-update-confirm__count').textContent = String(hosts.length);
+      updatePlan();
+      updateGo.disabled = false;
+    });
+    document.getElementById('bulk-update-cancel').addEventListener('click', () => {
+      updateConfirm.hidden = true;
+    });
+    updateGo.addEventListener('click', async () => {
+      const hosts = selected();
+      if (hosts.length === 0) return;
+      updateGo.disabled = true;
+      msg.textContent = '';
+      msg.classList.remove('message--error');
+      try {
+        await nebulaRunOp.ensureSession(msg);
+        const id = await nebulaRunOp.runOperation({ action: updateKind(), hosts }, msg, updateConfirm.parentElement);
+        nebulaRunOp.followStatus(updateConfirm.parentElement, [id], { reloadWhenDone: true });
+      } catch (err) {
+        msg.textContent = err.name === 'NotAllowedError' ? 'Cancelled or timed out.' : (err.message || 'Could not install the updates.');
+        msg.classList.add('message--error');
+        updateGo.disabled = false;
+      }
+    });
+    rebootCancel.addEventListener('click', () => {
+      rebootConfirm.hidden = true;
+    });
+    rebootGo.addEventListener('click', async () => {
+      const hosts = selected();
+      if (hosts.length === 0) return;
+      rebootGo.disabled = true;
+      msg.textContent = '';
+      msg.classList.remove('message--error');
+      try {
+        await nebulaRunOp.ensureSession(msg);
+        const id = await nebulaRunOp.runOperation({ action: 'system.reboot', hosts }, msg, rebootConfirm.parentElement);
+        nebulaRunOp.followStatus(rebootConfirm.parentElement, [id]);
+      } catch (err) {
+        msg.textContent = err.name === 'NotAllowedError' ? 'Cancelled or timed out.' : (err.message || 'Could not reboot.');
+        msg.classList.add('message--error');
+        rebootGo.disabled = false;
+      }
     });
     update();
   }

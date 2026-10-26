@@ -44,6 +44,9 @@ type moduleDetail struct {
 	LockSHA256  string
 	Actions     []moduleActionView
 	Versions    []moduleRow
+	// PinToHosts is the "Pin to hosts…" chooser (job ui5); nil while
+	// pins are not wired.
+	PinToHosts *pinToHostsView
 }
 
 type modulesData struct {
@@ -113,7 +116,8 @@ func (h *Handler) handleModule(w http.ResponseWriter, r *http.Request) {
 			d.Versions = append(d.Versions, rowOf(x))
 		}
 	}
-	h.render(w, r, pageData{Title: "Module " + v.Lock.Name, Active: "runbooks", Content: "module", Scripts: []string{"webauthn.js", "modules.js"},
+	d.PinToHosts = h.pinToHosts(ctx)
+	h.render(w, r, pageData{Title: "Module " + v.Lock.Name, Active: "runbooks", Content: "module", Scripts: []string{"webauthn.js", "modules.js", "pinhosts.js"},
 		Modules: &modulesData{Detail: d}})
 }
 

@@ -14,6 +14,24 @@
     <a class="button" href="/runbooks/new?from={{.Slug}}">Edit (saves a new version)</a>
     <a class="button" href="/runbooks/{{.Slug}}/{{.Version}}/artifact">Download script</a>
   </div>
+  {{with .PinToHosts}}
+  <h2>Pin to hosts…</h2>
+  <p class="hint">Pinned actions appear on the quick-action bar of the host. Pinning changes no risk and no approval.</p>
+  <form class="pin-to-hosts" data-action="{{$.Runbooks.Detail.ActionID}}">
+    <div class="pins-list">
+      {{range .Hosts}}
+      <label class="choice">
+        <input type="checkbox" name="pin-host" value="{{.ID}}">
+        <span>{{.DisplayName}}</span>
+      </label>
+      {{end}}
+    </div>
+    <div class="actions">
+      <button type="submit" class="button">Pin to the chosen hosts</button>
+    </div>
+  </form>
+  <p class="pin-to-hosts-message message" role="status" aria-live="polite"></p>
+  {{end}}
   <p class="status">Executor: {{.Trust}}</p>
   {{if not .Trusted}}
   {{if .CanTrust}}

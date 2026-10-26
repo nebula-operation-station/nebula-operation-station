@@ -360,7 +360,7 @@ func (h *Handler) renderInventory(w http.ResponseWriter, r *http.Request, dialog
 	if h.inventory != nil {
 		data.InventoryEditable = true
 		data.EnrollEnabled = h.enroll != nil && h.hosts != nil
-		data.Scripts = []string{"webauthn.js", "inventory.js"}
+		data.Scripts = []string{"webauthn.js", "runop.js", "inventory.js"}
 		if id := r.URL.Query().Get("asset"); id != "" {
 			ctx, cancel := context.WithTimeout(r.Context(), inventoryCallTimeout)
 			data.InventoryPrefill = h.assetPrefill(ctx, id)
