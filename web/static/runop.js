@@ -161,7 +161,7 @@ const nebulaRunOp = (() => {
       }
     };
     render();
-    let timer = setInterval(tick, 2000);
+    let timer = null;
     const tick = async () => {
       let allDone = true;
       for (const id of ids) {
@@ -188,6 +188,7 @@ const nebulaRunOp = (() => {
         }
       }
     };
+    timer = setInterval(tick, 2000);
     tick();
   }
 

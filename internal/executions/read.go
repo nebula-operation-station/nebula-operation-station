@@ -163,7 +163,7 @@ func (s *Service) ListHosts(ctx context.Context, ids []string) (map[string][]str
 	for i, id := range ids {
 		ph[i], args[i] = "?", id
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT execution_id, host_id FROM execution_hosts WHERE execution_id IN (`+strings.Join(ph, ",")+`) ORDER BY execution_id, host_id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT execution_id, host_id FROM execution_hosts WHERE execution_id IN (`+strings.Join(ph, ",")+`) ORDER BY execution_id, host_id`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list execution hosts: %w", err)
 	}

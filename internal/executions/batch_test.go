@@ -129,3 +129,25 @@ func TestListFinishedAt(t *testing.T) {
 		t.Errorf("list: %+v", list)
 	}
 }
+
+func TestListHostsMapsExecutionsToTheirHosts(t *testing.T) {
+	s, db := setup(t, &fakeExec{})
+	ctx := context.Background()
+	a, b := strings.Repeat("1", 36), strings.Repeat("2", 36)
+	seedExecution(t, db, a, "core.facts", "web", "success", nil, 100, 100)
+	seedExecution(t, db, b, "core.facts", "db", "success", nil, 100, 100)
+	if _, err := db.Exec(`INSERT INTO execution_hosts (execution_id, host_id, fingerprint, credential_ref, endpoints, state, class, started_at, finished_at)
+		VALUES (?, 'nas', 'SHA256:x', 'nebula-default', '[]', 'finished', 'success', 100, 100)`, a); err != nil {
+		t.Fatal(err)
+	}
+	m, err := s.ListHosts(ctx, []string{a, b, "unknown"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(m[a], ",") != "nas,web" || strings.Join(m[b], ",") != "db" || len(m) != 2 {
+		t.Fatalf("ListHosts: %v", m)
+	}
+	if _, err := s.ListHosts(ctx, make([]string, 501)); err == nil {
+		t.Fatal("more than 500 IDs must be refused")
+	}
+}

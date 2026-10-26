@@ -32,7 +32,7 @@
   </div>
   {{end}}
   <div class="chips" role="group" aria-label="Filter by freshness">
-    <a class="chip{{if not .InventoryStale}} chip--active{{end}}" href="/inventory{{if .InventoryState}}?state={{.InventoryState}}{{if .InventoryEnv}}&amp;env={{.InventoryEnv}}{{end}}{{else if .InventoryEnv}}?env={{.InventoryEnv}}{{end}}">Fresh</a>
+    <a class="chip{{if not .InventoryStale}} chip--active{{end}}" href="/inventory{{if .InventoryState}}?state={{.InventoryState}}{{if .InventoryEnv}}&amp;env={{.InventoryEnv}}{{end}}{{else if .InventoryEnv}}?env={{.InventoryEnv}}{{end}}">Any age</a>
     <a class="chip{{if .InventoryStale}} chip--active{{end}}" href="/inventory?stale=1{{if .InventoryEnv}}&amp;env={{.InventoryEnv}}{{end}}{{if .InventoryState}}&amp;state={{.InventoryState}}{{end}}">Stale (no read in 24 h)</a>
   </div>
 </div>
