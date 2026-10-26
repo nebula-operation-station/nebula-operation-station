@@ -162,6 +162,19 @@ function check(cond, what) {
   check(page.url() === base + '/inventory', 'the inline confirm does not navigate away');
   await page.click('#bulk-reboot-cancel');
   check(await page.locator('#bulk-reboot-confirm').isHidden(), 'cancelling hides the inline confirm');
+  check((await page.getAttribute('#bulk-reboot-plan', 'href')).includes('action=system.reboot&host=e2e-host'),
+    'the staged-reboot link opens the form with the selected hosts');
+  await page.click('#bulk-update');
+  check(!await page.locator('#bulk-update-confirm').isHidden() && /Install on 1 host/.test(await page.textContent('#bulk-update-confirm')),
+    'install updates asks for an inline confirmation');
+  check((await page.getAttribute('#bulk-update-plan', 'href')).includes('action=package.install_security&host=e2e-host'), 'the plan link carries security updates and the selection');
+  await page.check('input[name="bulk-update-kind"][value="package.install_all"]');
+  check((await page.getAttribute('#bulk-update-plan', 'href')).includes('action=package.install_all&host=e2e-host'), 'choosing all updates changes the plan link');
+  await Promise.all([page.waitForURL(/\/operations\/new\?/, { timeout: 15000 }), page.click('#bulk-update-plan')]);
+  check(await page.isChecked('input[name="action"][value="package.install_all"]') && await page.isChecked('input[name="host"][value="e2e-host"]'),
+    'the operation form opens with the action and the selected host checked');
+  await page.goto(base + '/inventory');
+  await page.check('tr[data-id="e2e-host"] input.host-select');
   await page.click('#bulk-reboot');
   await page.click('#bulk-reboot-go');
   // Approved in place with the key: the status line follows the

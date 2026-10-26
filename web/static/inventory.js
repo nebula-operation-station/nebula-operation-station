@@ -122,15 +122,60 @@
     // then creates one system.reboot operation for the whole selection
     // and approves it in place with the key; the status follows in the
     // bar. The link keeps the operation form for canary and waves.
+    // The "plan in the form" links carry the action and the selection, so
+    // the operation form opens with the same hosts checked.
+    const planHref = (action, hosts) => {
+      const q = new URLSearchParams({ action });
+      for (const h of hosts) q.append('host', h);
+      return '/operations/new?' + q.toString();
+    };
     const rebootConfirm = document.getElementById('bulk-reboot-confirm');
     const rebootGo = document.getElementById('bulk-reboot-go');
     const rebootCancel = document.getElementById('bulk-reboot-cancel');
     document.getElementById('bulk-reboot').addEventListener('click', () => {
       const hosts = selected();
       if (hosts.length === 0) return;
+      updateConfirm.hidden = true;
       rebootConfirm.hidden = false;
       rebootConfirm.querySelector('.bulk-reboot-confirm__count').textContent = String(hosts.length);
+      document.getElementById('bulk-reboot-plan').href = planHref('system.reboot', hosts);
       rebootGo.disabled = false;
+    });
+
+    // "Install updates…": security or all updates for the selection,
+    // confirmed inline and approved in place with the key, like reboot.
+    const updateConfirm = document.getElementById('bulk-update-confirm');
+    const updateGo = document.getElementById('bulk-update-go');
+    const updateKind = () => updateConfirm.querySelector('input[name="bulk-update-kind"]:checked').value;
+    const updatePlan = () => { document.getElementById('bulk-update-plan').href = planHref(updateKind(), selected()); };
+    for (const r of updateConfirm.querySelectorAll('input[name="bulk-update-kind"]')) r.addEventListener('change', updatePlan);
+    document.getElementById('bulk-update').addEventListener('click', () => {
+      const hosts = selected();
+      if (hosts.length === 0) return;
+      rebootConfirm.hidden = true;
+      updateConfirm.hidden = false;
+      updateConfirm.querySelector('.bulk-update-confirm__count').textContent = String(hosts.length);
+      updatePlan();
+      updateGo.disabled = false;
+    });
+    document.getElementById('bulk-update-cancel').addEventListener('click', () => {
+      updateConfirm.hidden = true;
+    });
+    updateGo.addEventListener('click', async () => {
+      const hosts = selected();
+      if (hosts.length === 0) return;
+      updateGo.disabled = true;
+      msg.textContent = '';
+      msg.classList.remove('message--error');
+      try {
+        await nebulaRunOp.ensureSession(msg);
+        const id = await nebulaRunOp.runOperation({ action: updateKind(), hosts }, msg, updateConfirm.parentElement);
+        nebulaRunOp.followStatus(updateConfirm.parentElement, [id], { reloadWhenDone: true });
+      } catch (err) {
+        msg.textContent = err.name === 'NotAllowedError' ? 'Cancelled or timed out.' : (err.message || 'Could not install the updates.');
+        msg.classList.add('message--error');
+        updateGo.disabled = false;
+      }
     });
     rebootCancel.addEventListener('click', () => {
       rebootConfirm.hidden = true;
