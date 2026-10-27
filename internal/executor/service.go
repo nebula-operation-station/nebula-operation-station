@@ -76,6 +76,14 @@ type Service struct {
 	// Now is the clock for request expiries the executor sets itself
 	// (re-pin, enrollment); nil means time.Now. Tests set it.
 	Now func() time.Time
+	// reconcileInterval is the interval passed to Reconcile; ReconcileOnce
+	// uses it to compute the backoff between failed attempts (issue #70).
+	reconcileInterval time.Duration
+	// reconcileBackoff holds per-run failure state between reconcile
+	// attempts (issue #70). It is lost on restart, which is fine: every
+	// open run gets one try at startup.
+	reconcileBackoffMu sync.Mutex
+	reconcileBackoff   map[string]*reconcileBackoffState
 }
 
 func (s *Service) clock() time.Time {

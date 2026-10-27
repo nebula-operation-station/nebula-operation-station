@@ -3,7 +3,6 @@
 package executor
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -101,9 +100,13 @@ func startTestSSH(t *testing.T, user ssh.PublicKey, mode int32) *testSSH {
 	return s
 }
 
-func (s *testSSH) setMode(m int32)      { s.mode.Store(m) }
-func (s *testSSH) connections() int64   { return s.conns.Load() }
-func (s *testSSH) commands() []string   { s.mu.Lock(); defer s.mu.Unlock(); return append([]string(nil), s.cmds...) }
+func (s *testSSH) setMode(m int32)    { s.mode.Store(m) }
+func (s *testSSH) connections() int64 { return s.conns.Load() }
+func (s *testSSH) commands() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.cmds...)
+}
 func (s *testSSH) recordCommand(c string) { s.mu.Lock(); s.cmds = append(s.cmds, c); s.mu.Unlock() }
 
 func (s *testSSH) serve(c net.Conn, cfg *ssh.ServerConfig) {
@@ -292,6 +295,9 @@ const testPassphrase = "reconcile-test-passphrase-0123456789"
 func newReconcileEnv(t *testing.T) *reconcileEnv {
 	t.Helper()
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	db, err := executordb.Open(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -324,8 +330,8 @@ func newReconcileEnv(t *testing.T) *reconcileEnv {
 
 	clk := &fakeClock{t: time.Now()}
 	verifier, err := webauthnverify.New(webauthnverify.Config{
-		RPID:    "reconcile.test",
-		Origins: []string{"https://reconcile.test"},
+		RPID:     "reconcile.test",
+		Origins:  []string{"https://reconcile.test"},
 		Counters: db,
 	}, nil)
 	if err != nil {
@@ -386,10 +392,7 @@ func newReconcileEnv(t *testing.T) *reconcileEnv {
 // pin stores the host key for e.host and remembers the fingerprint.
 func (e *reconcileEnv) pin(hostKey ssh.Signer) {
 	e.t.Helper()
-	pk, err := ssh.NewPublicKey(hostKey.PublicKey())
-	if err != nil {
-		e.t.Fatal(err)
-	}
+	pk := hostKey.PublicKey()
 	pin, err := e.db.PinHostKey(executordb.HostKey{
 		HostID:        e.host,
 		PublicKey:     pk.Marshal(),
@@ -480,9 +483,7 @@ func (e *reconcileEnv) backoffEntries() int {
 }
 
 func (e *reconcileEnv) reconcile(ctx context.Context) {
-	if err := e.svc.ReconcileOnce(ctx); err != nil {
-		e.t.Fatalf("ReconcileOnce: %v", err)
-	}
+	e.svc.ReconcileOnce(ctx)
 }
 
 // TestReconcileClosesRunAfterDeadlineWhenSessionsFail: the host authenticates
@@ -504,10 +505,10 @@ func TestReconcileClosesRunAfterDeadlineWhenSessionsFail(t *testing.T) {
 	if len(recs) != 1 {
 		t.Fatalf("reconcile_check_failed records = %d, want 1", len(recs))
 	}
-	if recs[0].attrs["attempt"] != 1 {
+	if recs[0].attrs["attempt"] != int64(1) {
 		t.Errorf("attempt = %v, want 1", recs[0].attrs["attempt"])
 	}
-	if recs[0].attrs["next_try_in"] != 75 {
+	if recs[0].attrs["next_try_in"] != int64(75) {
 		t.Errorf("next_try_in = %v, want 75", recs[0].attrs["next_try_in"])
 	}
 
@@ -580,70 +581,52 @@ func TestReconcileBacksOffBetweenFailures(t *testing.T) {
 	id := e.createRun(srv.addr, 10*time.Minute)
 	ctx := context.Background()
 
-	// attempt 1 at t0
-	e.reconcile(ctx)
-	if got := srv.connections(); got != 1 {
-		t.Fatalf("connections after attempt 1 = %d, want 1", got)
+	// Clock advances and whether a connection is expected at each step.
+	// Attempts land at t0, +75s, +225s, +525s, +1125s, +2325s, +4125s:
+	// the delay doubles (75, 150, 300, 600, 1200) and is capped at
+	// 1800 s from the sixth attempt (75*2^5 = 2400 s would exceed it).
+	steps := []struct {
+		wait    time.Duration
+		attempt bool
+	}{
+		{0, true},
+		{10 * time.Second, false},
+		{64 * time.Second, false}, // t0+74s: still inside the first backoff
+		{time.Second, true},       // t0+75s: attempt 2
+		{149 * time.Second, false},
+		{time.Second, true}, // t0+225s: attempt 3
+		{299 * time.Second, false},
+		{time.Second, true}, // t0+525s: attempt 4
+		{599 * time.Second, false},
+		{time.Second, true}, // t0+1125s: attempt 5
+		{1199 * time.Second, false},
+		{time.Second, true}, // t0+2325s: attempt 6
+		{1799 * time.Second, false},
+		{time.Second, true}, // t0+4125s: attempt 7 (capped delay)
 	}
-	// inside the first backoff: no connection
-	e.clock.Add(10 * time.Second)
-	e.reconcile(ctx)
-	// just before the boundary: still no connection
-	e.clock.Add(64 * time.Second)
-	e.reconcile(ctx)
-	if got := srv.connections(); got != 1 {
-		t.Fatalf("connections at t0+74s = %d, want 1 (backoff must skip)", got)
-	}
-	// at the boundary: attempt 2
-	e.clock.Add(time.Second)
-	e.reconcile(ctx)
-	if got := srv.connections(); got != 2 {
-		t.Fatalf("connections at t0+75s = %d, want 2", got)
-	}
-	// delay doubled to 150 s: attempt 3 at t0+225 s
-	e.clock.Add(149 * time.Second)
-	e.reconcile(ctx)
-	if got := srv.connections(); got != 2 {
-		t.Fatalf("connections at t0+224s = %d, want 2", got)
-	}
-	e.clock.Add(time.Second)
-	e.reconcile(ctx)
-	if got := srv.connections(); got != 3 {
-		t.Fatalf("connections at t0+225s = %d, want 3", got)
-	}
-	// delays 300 s, 600 s, 1200 s, 2400 s: attempts 4..7
-	for _, d := range []time.Duration{300 * time.Second, 600 * time.Second, 1200 * time.Second, 2400 * time.Second} {
-		e.clock.Add(d - time.Second)
+	want := int64(0)
+	for i, st := range steps {
+		e.clock.Add(st.wait)
 		e.reconcile(ctx)
-		e.clock.Add(time.Second)
-		e.reconcile(ctx)
+		if st.attempt {
+			want++
+		}
+		if got := srv.connections(); got != want {
+			t.Fatalf("step %d: connections = %d, want %d", i, got, want)
+		}
 	}
-	want := int64(7)
-	if got := srv.connections(); got != want {
-		t.Fatalf("connections = %d, want %d", got, want)
-	}
-	// from here the delay is capped at 30 min: attempt 8 at +1800 s
-	e.clock.Add(1799 * time.Second)
-	e.reconcile(ctx)
-	if got := srv.connections(); got != want {
-		t.Fatalf("connections before cap boundary = %d, want %d", got, want)
-	}
-	e.clock.Add(time.Second)
-	e.reconcile(ctx)
-	if got := srv.connections(); got != want+1 {
-		t.Fatalf("connections at cap boundary = %d, want %d", got, want+1)
-	}
-	// the capped delay is reported as 1800 s
 	recs := e.logs.find("reconcile_check_failed", id)
-	if len(recs) != 8 {
-		t.Fatalf("reconcile_check_failed records = %d, want 8", len(recs))
+	if len(recs) != 7 {
+		t.Fatalf("reconcile_check_failed records = %d, want 7", len(recs))
 	}
-	last := recs[len(recs)-1]
-	if last.attrs["attempt"] != 8 {
-		t.Errorf("last attempt = %v, want 8", last.attrs["attempt"])
-	}
-	if last.attrs["next_try_in"] != 1800 {
-		t.Errorf("last next_try_in = %v, want 1800 (capped)", last.attrs["next_try_in"])
+	wantDelays := []int64{75, 150, 300, 600, 1200, 1800, 1800}
+	for i, r := range recs {
+		if r.attrs["attempt"] != int64(i+1) {
+			t.Errorf("record %d: attempt = %v, want %d", i, r.attrs["attempt"], i+1)
+		}
+		if r.attrs["next_try_in"] != wantDelays[i] {
+			t.Errorf("record %d: next_try_in = %v, want %d", i, r.attrs["next_try_in"], wantDelays[i])
+		}
 	}
 }
 

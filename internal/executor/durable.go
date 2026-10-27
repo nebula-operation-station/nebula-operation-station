@@ -142,6 +142,7 @@ func (s *Service) finishRun(r executordb.Run) {
 // Reconcile runs reconciliation passes until ctx ends (spec 07). A pass
 // needs the unlocked keyring; while locked, open runs wait.
 func (s *Service) Reconcile(ctx context.Context, interval time.Duration) {
+	s.setReconcileInterval(interval)
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -152,6 +153,14 @@ func (s *Service) Reconcile(ctx context.Context, interval time.Duration) {
 		case <-t.C:
 		}
 	}
+}
+
+// setReconcileInterval stores the reconcile interval so ReconcileOnce can
+// compute the backoff between failed attempts (issue #70).
+func (s *Service) setReconcileInterval(d time.Duration) {
+	s.reconcileBackoffMu.Lock()
+	s.reconcileInterval = d
+	s.reconcileBackoffMu.Unlock()
 }
 
 // ReconcileOnce checks every open run once.
@@ -197,6 +206,8 @@ func (s *Service) isDispatching(key string) bool {
 }
 
 func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
+	now := s.clock()
+	key := run.ExecutionID + "/" + run.HostID
 	eps, err := parseEndpoints(run.Endpoints)
 	if err != nil {
 		s.finishRun(executordb.Run{ExecutionID: run.ExecutionID, HostID: run.HostID, Class: classUnknown, Detail: "stored endpoints unusable", ExitCode: -1})
@@ -207,15 +218,30 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 		s.log.Error("audit", "kind", "store_error", "op", "get_run_reboot", "detail", err.Error())
 		return
 	}
+	// A run waiting for a reboot is governed by its reboot deadline, not
+	// by the reconcile deadline or the backoff below (issue #70).
+	if !waiting && !s.reconcileDue(key, now) {
+		return
+	}
 	c, err := s.Connect(ctx, run.HostID, run.Fingerprint, eps)
 	if err != nil {
-		_, detail := connectClass(err)
-		if waiting && time.Now().After(reboot.Deadline) {
-			s.finishReboot(run, reboot, classHostNotReturned, "the host did not come back from the reboot in time: "+detail, "")
+		cls, detail := connectClass(err)
+		if waiting {
+			if now.After(reboot.Deadline) {
+				s.finishReboot(run, reboot, classHostNotReturned, "the host did not come back from the reboot in time: "+detail, "")
+				return
+			}
+			// Retried on the next pass; a blocked host waits for a re-pin.
+			s.log.Warn("audit", "kind", "reconcile_unreachable", "execution", run.ExecutionID, "host", run.HostID, "detail", detail)
 			return
 		}
-		// Retried on the next pass; a blocked host waits for a re-pin.
-		s.log.Warn("audit", "kind", "reconcile_unreachable", "execution", run.ExecutionID, "host", run.HostID, "detail", detail)
+		attempt, nextIn := s.noteReconcileFailure(key, now)
+		if now.After(reconcileDeadline(run)) {
+			s.closeUncheckable(run, key, cls+": "+detail)
+			return
+		}
+		s.log.Warn("audit", "kind", "reconcile_unreachable", "execution", run.ExecutionID, "host", run.HostID, "detail", detail,
+			"attempt", attempt, "next_try_in", int(nextIn.Round(time.Second).Seconds()))
 		return
 	}
 	defer c.Close()
@@ -224,17 +250,24 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 		switch {
 		case err == nil && id != reboot.OldBootID:
 			s.finishReboot(run, reboot, hostrun.ClassSuccess, "rebooted and back", c.Endpoint.String())
-		case time.Now().After(reboot.Deadline):
+		case now.After(reboot.Deadline):
 			s.finishReboot(run, reboot, classHostNotReturned, "the host did not reboot in time", c.Endpoint.String())
 		}
 		return
 	}
 	st, err := hostrun.Check(ctx, c.Client, s.jobs, run.ExecutionID)
 	if err != nil {
-		s.log.Warn("audit", "kind", "reconcile_check_failed", "execution", run.ExecutionID, "host", run.HostID, "detail", err.Error())
+		attempt, nextIn := s.noteReconcileFailure(key, now)
+		if now.After(reconcileDeadline(run)) {
+			s.closeUncheckable(run, key, "check failed: "+err.Error())
+			return
+		}
+		s.log.Warn("audit", "kind", "reconcile_check_failed", "execution", run.ExecutionID, "host", run.HostID, "detail", err.Error(),
+			"attempt", attempt, "next_try_in", int(nextIn.Round(time.Second).Seconds()))
 		return
 	}
-	now := time.Now()
+	// The host is checkable again: the failure streak ends.
+	s.clearReconcileBackoff(key)
 	since := run.DispatchedAt
 	if since.IsZero() {
 		since = run.CreatedAt
@@ -327,4 +360,117 @@ func (s *Service) finishReboot(run executordb.Run, r executordb.RunReboot, class
 	if err := s.db.DeleteRunReboot(run.ExecutionID, run.HostID); err != nil {
 		s.log.Error("audit", "kind", "store_error", "op", "delete_run_reboot", "detail", err.Error())
 	}
+}
+
+// Reconcile deadline and backoff (issue #70).
+const (
+	// reconcileGrace is added to a run's timeout before the reconciler
+	// gives up on a host it cannot check: the job may have run, and the
+	// run is closed as unknown — never re-run (spec 07).
+	reconcileGrace = 24 * time.Hour
+	// maxReconcileBackoff caps the delay between failed reconcile
+	// attempts of one run.
+	maxReconcileBackoff = 30 * time.Minute
+	// maxReconcileReason bounds a failure reason embedded in a stored
+	// detail or audit record; the reason is untrusted host output.
+	maxReconcileReason = 200
+)
+
+// reconcileBackoffState is the per-run failure state between reconcile
+// attempts (issue #70).
+type reconcileBackoffState struct {
+	attempts int
+	lastTry  time.Time
+}
+
+// reconcileDeadline is when a run that is not waiting for a reboot stops
+// being checkable: dispatch time plus the action's timeout plus
+// reconcileGrace (issue #70).
+func reconcileDeadline(run executordb.Run) time.Time {
+	since := run.DispatchedAt
+	if since.IsZero() {
+		since = run.CreatedAt
+	}
+	return since.Add(run.Timeout + reconcileGrace)
+}
+
+// reconcileBackoffDelay is how long to wait after attempts consecutive
+// failed reconcile attempts: interval * 2^(attempts-1), capped at
+// maxReconcileBackoff. A zero interval means no backoff (ReconcileOnce
+// called directly without Reconcile).
+func reconcileBackoffDelay(interval time.Duration, attempts int) time.Duration {
+	if interval <= 0 || attempts <= 0 {
+		return 0
+	}
+	d := interval
+	for i := 1; i < attempts; i++ {
+		d *= 2
+		if d > maxReconcileBackoff {
+			return maxReconcileBackoff
+		}
+	}
+	if d > maxReconcileBackoff {
+		return maxReconcileBackoff
+	}
+	return d
+}
+
+// reconcileDue reports whether a run with failed attempts may be tried
+// again at now (issue #70). A run without recorded failures is always due.
+func (s *Service) reconcileDue(key string, now time.Time) bool {
+	s.reconcileBackoffMu.Lock()
+	defer s.reconcileBackoffMu.Unlock()
+	st, ok := s.reconcileBackoff[key]
+	if !ok {
+		return true
+	}
+	return !now.Before(st.lastTry.Add(reconcileBackoffDelay(s.reconcileInterval, st.attempts)))
+}
+
+// noteReconcileFailure records one failed reconcile attempt and returns
+// the attempt count and the delay until the next try (issue #70).
+func (s *Service) noteReconcileFailure(key string, now time.Time) (int, time.Duration) {
+	s.reconcileBackoffMu.Lock()
+	defer s.reconcileBackoffMu.Unlock()
+	if s.reconcileBackoff == nil {
+		s.reconcileBackoff = map[string]*reconcileBackoffState{}
+	}
+	st, ok := s.reconcileBackoff[key]
+	if !ok {
+		st = &reconcileBackoffState{}
+		s.reconcileBackoff[key] = st
+	}
+	st.attempts++
+	st.lastTry = now
+	return st.attempts, reconcileBackoffDelay(s.reconcileInterval, st.attempts)
+}
+
+// clearReconcileBackoff drops the failure state of a run that was checked
+// successfully or finished (issue #70).
+func (s *Service) clearReconcileBackoff(key string) {
+	s.reconcileBackoffMu.Lock()
+	defer s.reconcileBackoffMu.Unlock()
+	delete(s.reconcileBackoff, key)
+}
+
+// closeUncheckable ends a run whose host could not be checked before the
+// reconcile deadline (issue #70). The job may have run: reconcile-first
+// runs are never re-run (spec 07). The remote job directory is not removed
+// — there is no connection; the host's tmpfiles rule is the fallback
+// (spec 07).
+func (s *Service) closeUncheckable(run executordb.Run, key, reason string) {
+	s.clearReconcileBackoff(key)
+	detail := "the host could not be checked before the reconcile deadline (" + boundReason(reason) + "); the job may have run and is not re-run"
+	s.log.Warn("audit", "kind", "reconcile_deadline_passed", "execution", run.ExecutionID, "host", run.HostID, "detail", detail)
+	s.finishRun(executordb.Run{ExecutionID: run.ExecutionID, HostID: run.HostID, Class: classUnknown, Detail: detail, ExitCode: -1})
+}
+
+// boundReason limits a failure reason embedded in a stored detail
+// (issue #70) to maxReconcileReason runes.
+func boundReason(s string) string {
+	r := []rune(s)
+	if len(r) <= maxReconcileReason {
+		return s
+	}
+	return string(r[:maxReconcileReason]) + "…"
 }
