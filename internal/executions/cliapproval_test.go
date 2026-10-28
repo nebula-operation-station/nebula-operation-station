@@ -291,8 +291,9 @@ func TestCheckCLIApprovalSingle(t *testing.T) {
 		t.Fatal(err)
 	}
 	state, err := s.CheckCLIApproval(ctx, c.ID)
-	// The dispatcher may already have moved it to running.
-	if err != nil || (state != "approved" && state != "running") {
+	// The dispatcher may already have moved it on: the fake executor
+	// answers at once, so on a fast machine the run can even be finished.
+	if err != nil || (state != "approved" && state != "running" && state != "finished") {
 		t.Fatalf("state=%s err=%v", state, err)
 	}
 	waitState(t, s, c.ID, "finished")
