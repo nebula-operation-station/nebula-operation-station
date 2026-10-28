@@ -1157,6 +1157,41 @@ details[open] summary { color: var(--text); margin-bottom: var(--space-2); }
      confirm carry the meaning, the hint would only add height. */
   .bulkbar .hint { display: none; }
 }
+/* Desktop and tablet: the body's items flow as direct children of the
+   bar, so the layout is unchanged and the toggle is not needed. */
+.bulkbar__body { display: contents; }
+@media (min-width: 601px) {
+  .bulkbar-toggle { display: none; }
+}
+/* Phones: the bar becomes a compact bottom sheet. Collapsed it shows the
+   count, the "More actions" toggle and the primary action (refresh) in two
+   rows; expanded it adds the remaining actions and the inline confirms.
+   The toggle is a real button, so it is keyboard and screen-reader friendly. */
+@media (max-width: 600px) {
+  .bulkbar {
+    left: 0;
+    right: 0;
+    bottom: 0;
+    transform: none;
+    width: auto;
+    max-width: none;
+    margin-bottom: 0;
+    border-radius: var(--radius) var(--radius) 0 0;
+    border-left: 0;
+    border-right: 0;
+    border-bottom: 0;
+    padding-bottom: calc(var(--space-2) + env(safe-area-inset-bottom, 0px));
+  }
+  .bulkbar-toggle { margin-left: auto; }
+  .bulkbar__body {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+    flex-basis: 100%;
+  }
+  .bulkbar:not(.bulkbar--expanded) .bulkbar__body { display: none; }
+}
 
 /* --- Inventory freshness: hosts without a read in 24 h. --- */
 .stale { color: var(--warn); font-weight: 600; }
