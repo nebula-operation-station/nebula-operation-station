@@ -5,6 +5,7 @@ package executor
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -235,8 +236,8 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 			s.log.Warn("audit", "kind", "reconcile_unreachable", "execution", run.ExecutionID, "host", run.HostID, "detail", detail)
 			return
 		}
-		attempt, nextIn := s.noteReconcileFailure(key, now)
-		if now.After(reconcileDeadline(run)) {
+		attempt, nextIn, firstFail := s.noteReconcileFailure(key, now)
+		if now.After(reconcileDeadline(run, firstFail)) {
 			s.closeUncheckable(run, key, cls+": "+detail)
 			return
 		}
@@ -257,8 +258,8 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 	}
 	st, err := hostrun.Check(ctx, c.Client, s.jobs, run.ExecutionID)
 	if err != nil {
-		attempt, nextIn := s.noteReconcileFailure(key, now)
-		if now.After(reconcileDeadline(run)) {
+		attempt, nextIn, firstFail := s.noteReconcileFailure(key, now)
+		if now.After(reconcileDeadline(run, firstFail)) {
 			s.closeUncheckable(run, key, "check failed: "+err.Error())
 			return
 		}
@@ -379,17 +380,24 @@ const (
 // reconcileBackoffState is the per-run failure state between reconcile
 // attempts (issue #70).
 type reconcileBackoffState struct {
-	attempts int
-	lastTry  time.Time
+	attempts  int
+	firstFail time.Time
+	lastTry   time.Time
 }
 
 // reconcileDeadline is when a run that is not waiting for a reboot stops
 // being checkable: dispatch time plus the action's timeout plus
-// reconcileGrace (issue #70).
-func reconcileDeadline(run executordb.Run) time.Time {
+// reconcileGrace (issue #70). A stored run always has a creation time; if
+// both timestamps are missing (a damaged row), the first failed attempt
+// seen by this process is the start, so the run still gets a full grace
+// period instead of being closed at once (review rv70).
+func reconcileDeadline(run executordb.Run, firstFail time.Time) time.Time {
 	since := run.DispatchedAt
 	if since.IsZero() {
 		since = run.CreatedAt
+	}
+	if since.IsZero() {
+		since = firstFail
 	}
 	return since.Add(run.Timeout + reconcileGrace)
 }
@@ -428,8 +436,9 @@ func (s *Service) reconcileDue(key string, now time.Time) bool {
 }
 
 // noteReconcileFailure records one failed reconcile attempt and returns
-// the attempt count and the delay until the next try (issue #70).
-func (s *Service) noteReconcileFailure(key string, now time.Time) (int, time.Duration) {
+// the attempt count, the delay until the next try and the time of the
+// first failure in this streak (issue #70).
+func (s *Service) noteReconcileFailure(key string, now time.Time) (int, time.Duration, time.Time) {
 	s.reconcileBackoffMu.Lock()
 	defer s.reconcileBackoffMu.Unlock()
 	if s.reconcileBackoff == nil {
@@ -437,12 +446,12 @@ func (s *Service) noteReconcileFailure(key string, now time.Time) (int, time.Dur
 	}
 	st, ok := s.reconcileBackoff[key]
 	if !ok {
-		st = &reconcileBackoffState{}
+		st = &reconcileBackoffState{firstFail: now}
 		s.reconcileBackoff[key] = st
 	}
 	st.attempts++
 	st.lastTry = now
-	return st.attempts, reconcileBackoffDelay(s.reconcileInterval, st.attempts)
+	return st.attempts, reconcileBackoffDelay(s.reconcileInterval, st.attempts), st.firstFail
 }
 
 // clearReconcileBackoff drops the failure state of a run that was checked
@@ -465,9 +474,17 @@ func (s *Service) closeUncheckable(run executordb.Run, key, reason string) {
 	s.finishRun(executordb.Run{ExecutionID: run.ExecutionID, HostID: run.HostID, Class: classUnknown, Detail: detail, ExitCode: -1})
 }
 
-// boundReason limits a failure reason embedded in a stored detail
-// (issue #70) to maxReconcileReason runes.
+// boundReason makes a failure reason safe to embed in a stored detail and
+// an audit record (issue #70): control characters become spaces (the
+// reason may contain host output; review rv70) and the result is limited
+// to maxReconcileReason runes.
 func boundReason(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) {
+			return ' '
+		}
+		return r
+	}, s)
 	r := []rune(s)
 	if len(r) <= maxReconcileReason {
 		return s

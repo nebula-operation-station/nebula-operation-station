@@ -730,3 +730,41 @@ func TestReconcileSuccessClearsBackoff(t *testing.T) {
 		t.Fatalf("backoff entries after success = %d, want 0", got)
 	}
 }
+
+// Review rv70: a damaged row without timestamps is not closed at once; its
+// deadline starts at the first failed attempt.
+func TestReconcileDeadlineWithoutTimestampsStartsAtFirstFailure(t *testing.T) {
+	first := time.Date(2026, 10, 28, 1, 0, 0, 0, time.UTC)
+	run := executordb.Run{Timeout: 10 * time.Minute}
+	got := reconcileDeadline(run, first)
+	want := first.Add(10*time.Minute + reconcileGrace)
+	if !got.Equal(want) {
+		t.Fatalf("deadline = %v, want %v", got, want)
+	}
+	created := first.Add(-time.Hour)
+	run.CreatedAt = created
+	if got := reconcileDeadline(run, first); !got.Equal(created.Add(10*time.Minute + reconcileGrace)) {
+		t.Fatalf("deadline with CreatedAt = %v, want it based on CreatedAt", got)
+	}
+}
+
+// Review rv70: boundReason strips control characters on its own.
+func TestBoundReasonStripsControlCharacters(t *testing.T) {
+	cases := map[string]string{
+		"line1\nline2":       "line1 line2",
+		"tab\there\r":        "tab here ",
+		"esc\x1b[31mred":     "esc [31mred",
+		"del\x7fc1\u0085end": "del c1 end",
+		"plain reason":       "plain reason",
+	}
+	for in, want := range cases {
+		if got := boundReason(in); got != want {
+			t.Errorf("boundReason(%q) = %q, want %q", in, got, want)
+		}
+	}
+	long := strings.Repeat("x\n", maxReconcileReason)
+	got := boundReason(long)
+	if strings.ContainsAny(got, "\n") || len([]rune(got)) != maxReconcileReason+1 {
+		t.Fatalf("long reason not bounded and cleaned: %d runes", len([]rune(got)))
+	}
+}
