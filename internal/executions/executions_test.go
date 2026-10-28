@@ -53,6 +53,8 @@ type fakeExec struct {
 	grants      []*pb.ScheduleGrant // approved grants
 	commitErr   error               // answers CommitScheduleGrant after approving
 	runErr      error               // answers RunScheduled
+	// onSubmit runs inside SubmitAssertion before it answers approved.
+	onSubmit func()
 }
 
 func (f *fakeExec) ListHostKeys(context.Context, *pb.ListHostKeysRequest, ...grpc.CallOption) (*pb.ListHostKeysResponse, error) {
@@ -74,6 +76,9 @@ func (f *fakeExec) SubmitAssertion(_ context.Context, in *pb.SubmitAssertionRequ
 	f.submitted = in
 	if string(in.GetAssertionJson()) != "good" {
 		return nil, status.Error(codes.PermissionDenied, "assertion_invalid")
+	}
+	if f.onSubmit != nil {
+		f.onSubmit()
 	}
 	return &pb.SubmitAssertionResponse{State: pb.PermitState_PERMIT_STATE_APPROVED}, nil
 }
@@ -697,13 +702,13 @@ func TestExpirePendingExpiresOnlyOverduePending(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	set(pendingOverdue, "pending", now.Unix()-100)
+	set(pendingOverdue, "pending", now.Unix()-int64(expireGrace/time.Second)-100)
 	set(pendingFresh, "pending", now.Unix()+100)
-	set(approved, "approved", now.Unix()-100)
-	set(running, "running", now.Unix()-100)
-	set(finished, "finished", now.Unix()-100)
-	set(failed, "failed", now.Unix()-100)
-	set(staged.ID, "running", now.Unix()-100)
+	set(approved, "approved", now.Unix()-int64(expireGrace/time.Second)-100)
+	set(running, "running", now.Unix()-int64(expireGrace/time.Second)-100)
+	set(finished, "finished", now.Unix()-int64(expireGrace/time.Second)-100)
+	set(failed, "failed", now.Unix()-int64(expireGrace/time.Second)-100)
+	set(staged.ID, "running", now.Unix()-int64(expireGrace/time.Second)-100)
 
 	n, err := s.ExpirePending(ctx, now)
 	if err != nil {
@@ -758,7 +763,7 @@ func TestExpirePendingIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE executions SET approval_expiry = ? WHERE id = ?`, now.Unix()-100, c.ID); err != nil {
+	if _, err := db.Exec(`UPDATE executions SET approval_expiry = ? WHERE id = ?`, now.Unix()-int64(expireGrace/time.Second)-100, c.ID); err != nil {
 		t.Fatal(err)
 	}
 	if n, _ := s.ExpirePending(ctx, now); n != 1 {
@@ -790,7 +795,7 @@ func TestExpirePendingSendsNoNotification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE executions SET approval_expiry = ? WHERE id = ?`, now.Unix()-100, c.ID); err != nil {
+	if _, err := db.Exec(`UPDATE executions SET approval_expiry = ? WHERE id = ?`, now.Unix()-int64(expireGrace/time.Second)-100, c.ID); err != nil {
 		t.Fatal(err)
 	}
 	if n, err := s.ExpirePending(ctx, now); err != nil || n != 1 {
@@ -816,7 +821,7 @@ func TestApprovingAnExpiredExecutionIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE executions SET approval_expiry = ? WHERE id = ?`, now.Unix()-100, c.ID); err != nil {
+	if _, err := db.Exec(`UPDATE executions SET approval_expiry = ? WHERE id = ?`, now.Unix()-int64(expireGrace/time.Second)-100, c.ID); err != nil {
 		t.Fatal(err)
 	}
 	if n, err := s.ExpirePending(ctx, now); err != nil || n != 1 {
@@ -870,5 +875,60 @@ func TestExpirePendingLogsAnAuditRecord(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "operations_expired") || !strings.Contains(buf.String(), "count=1") {
 		t.Fatalf("audit record missing: %s", buf.String())
+	}
+}
+
+// A pending execution is kept for expireGrace after its window ended, so a
+// browser approval the executor granted just before is recorded first.
+func TestExpirePendingKeepsPendingWithinGrace(t *testing.T) {
+	f := &fakeExec{}
+	s, db := setup(t, f)
+	ctx := context.Background()
+	now := time.Unix(1791960000, 0)
+	c, err := s.Create(ctx, "axel", "core.facts", []string{"web"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE executions SET approval_expiry = ? WHERE id = ?`, now.Unix()-30, c.ID); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.ExpirePending(ctx, now); err != nil || n != 0 {
+		t.Fatalf("within grace: n=%d err=%v, want 0", n, err)
+	}
+	if n, err := s.ExpirePending(ctx, now.Add(expireGrace)); err != nil || n != 1 {
+		t.Fatalf("after grace: n=%d err=%v, want 1", n, err)
+	}
+}
+
+// If the execution stops being pending while the executor approves (the
+// sweep expired it), Approve records nothing and dispatches nothing.
+func TestApproveDoesNotStartWhenExecutionStoppedBeingPending(t *testing.T) {
+	f := &fakeExec{}
+	s, db := setup(t, f)
+	ctx := context.Background()
+	c, err := s.Create(ctx, "axel", "core.facts", []string{"web"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.onSubmit = func() {
+		if _, err := db.Exec(`UPDATE executions SET state = 'expired' WHERE id = ?`, c.ID); err != nil {
+			t.Error(err)
+		}
+	}
+	if err := s.Approve(ctx, "axel", c.ID, []byte("good"), 0); !errors.Is(err, ErrNotPending) {
+		t.Fatalf("approve: %v, want ErrNotPending", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	e, err := s.Get(ctx, c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.State != "expired" {
+		t.Fatalf("state %s, want expired", e.State)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.attached) != 0 || len(f.durable) != 0 {
+		t.Fatalf("dispatched %d attached, %d durable runs", len(f.attached), len(f.durable))
 	}
 }
