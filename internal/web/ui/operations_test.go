@@ -46,6 +46,7 @@ type fakeOps struct {
 	// lastSeen overrides LastSeenAll (nil: no reads known).
 	list      []executions.Summary
 	listHosts map[string][]string
+	listHost  []executions.Summary // the host page's operations tab
 	lastSeen  map[string]time.Time
 }
 
@@ -144,7 +145,7 @@ func (f *fakeOps) LastSeenAll(context.Context) (map[string]time.Time, error) {
 }
 
 func (f *fakeOps) ListHost(context.Context, string, int) ([]executions.Summary, error) {
-	return nil, nil
+	return f.listHost, nil
 }
 
 func (f *fakeOps) ListHosts(context.Context, []string) (map[string][]string, error) {
@@ -688,5 +689,64 @@ func TestScriptPreviewIsShown(t *testing.T) {
 	f.exec.ArtifactSHA256 = strings.Repeat("0", 64)
 	if page := getBody(t, h, "/operations/"+opID); strings.Contains(page, "script-preview") {
 		t.Fatal("preview for bytes that are not the action's")
+	}
+}
+
+// TestOperationsListShowsExpired covers the expired badge and the state
+// filter of the operations list (issue #71): an expired operation is muted
+// and untrusted action names render as text.
+func TestOperationsListShowsExpired(t *testing.T) {
+	finishedID := "9b9c2f7e-4a51-4c8e-9a51-6f0d3c2b1a01"
+	f := &fakeOps{listHosts: map[string][]string{opID: {"web"}, finishedID: {"web"}}}
+	f.list = []executions.Summary{
+		{ID: opID, ActionID: `<script>alert(1)</script>`, Risk: "HIGH", State: "expired",
+			CreatedBy: "axel", CreatedAt: time.Unix(1791960000, 0), Hosts: 1},
+		{ID: finishedID, ActionID: "core.facts", Risk: "LOW", State: "finished",
+			CreatedBy: "axel", CreatedAt: time.Unix(1791960001, 0), Hosts: 1},
+	}
+	h := opsHandler(t, f, nil)
+
+	body := getBody(t, h, "/operations")
+	if !strings.Contains(body, `badge badge--expired">expired`) {
+		t.Errorf("expired badge missing: %s", body)
+	}
+	if !strings.Contains(body, "&lt;script&gt;alert(1)&lt;/script&gt;") || strings.Contains(body, "<script>alert(1)</script>") {
+		t.Error("untrusted action id not rendered as text")
+	}
+	if !strings.Contains(body, `href="/operations?state=expired"`) {
+		t.Error("expired filter chip missing")
+	}
+
+	expired := getBody(t, h, "/operations?state=expired")
+	if !strings.Contains(expired, "/operations/"+opID) || strings.Contains(expired, "/operations/"+finishedID) {
+		t.Errorf("expired filter: %s", expired)
+	}
+}
+
+// TestOperationPageShowsExpiredWithPlanAgain covers the operation page of
+// an expired execution (issue #71): it says the approval window ended and
+// nothing was run, offers "Plan again" prefilled with the same action,
+// hosts and parameters, and no approval controls.
+func TestOperationPageShowsExpiredWithPlanAgain(t *testing.T) {
+	f := &fakeOps{exec: executions.Execution{ID: opID, ActionID: "service.restart", ModuleVersion: "1.0.0", Risk: "HIGH",
+		State: "expired", Detail: "approval window ended; nothing was run", Digest: strings.Repeat("d", 64),
+		CreatedBy: "axel", CreatedAt: time.Unix(1791960000, 0), FinishedAt: time.Unix(1791963600, 0),
+		Params: `{"name":"<b>x</b>"}`,
+		Hosts: []executions.Host{{HostID: "web", State: "finished", Class: "not_executed",
+			Detail: "approval window ended; nothing was run"}}}}
+	h := opsHandler(t, f, nil)
+
+	body := getBody(t, h, "/operations/"+opID)
+	for _, want := range []string{
+		"The approval window ended before anyone approved: nothing was run.",
+		`href="/operations/new?action=service.restart&amp;host=web&amp;param=name%3D%3Cb%3Ex%3C%2Fb%3E"`,
+		"Plan again",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expired page misses %q", want)
+		}
+	}
+	if strings.Contains(body, "Approve with security key") {
+		t.Error("expired page must not offer approval")
 	}
 }

@@ -82,6 +82,10 @@ const (
 	MaxHosts       = 100
 	permitLifetime = time.Hour
 	callTimeout    = 30 * time.Second
+	// expireGrace is how long after its approval window a pending execution
+	// is kept before ExpirePending marks it expired; longer than any
+	// in-flight Approve (callTimeout) so the two never race (issue #71).
+	expireGrace = 2 * time.Minute
 	// parallelHosts bounds concurrent host runs of one execution.
 	parallelHosts = 4
 )
@@ -342,12 +346,74 @@ func (s *Service) Approve(ctx context.Context, user, id string, assertion []byte
 	if r.GetState() != pb.PermitState_PERMIT_STATE_APPROVED {
 		return status.Error(codes.FailedPrecondition, "not approved yet")
 	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE executions SET state = 'approved', options = NULL WHERE id = ? AND state = 'pending'`, id); err != nil {
+	res, err := s.db.ExecContext(ctx, `UPDATE executions SET state = 'approved', options = NULL WHERE id = ? AND state = 'pending'`, id)
+	if err != nil {
 		return err
+	}
+	// Start only an execution this call moved to approved: if it stopped
+	// being pending meanwhile (expired by the sweep, or approved by another
+	// request), nothing is dispatched; an unused permit expires on the
+	// executor (issue #71).
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n != 1 {
+		s.log.Warn("audit", "kind", "execution_approval_not_recorded", "execution", id, "user", user)
+		return ErrNotPending
 	}
 	s.log.Info("audit", "kind", "execution_approved_in_browser", "execution", id, "user", user)
 	s.start(id)
 	return nil
+}
+
+// ExpirePending marks every pending execution whose approval window has ended
+// as expired (spec 07). The executor drops the permit when the window closes
+// but the server only learns it here: the execution stays 'pending' (with a
+// long-past approval_expiry) and its host rows stay 'waiting'. In one
+// transaction each such execution becomes 'expired' with a finished_at, and
+// its host rows in state 'waiting' become 'finished' with class
+// 'not_executed'. Only 'pending' executions are touched — approved, running,
+// staged-waiting, finished and failed executions never change. It returns the
+// number of executions expired. An expiry is not a failure, so no
+// notification is sent; one audit record of kind operations_expired is logged
+// when at least one execution expired.
+//
+// An execution expires only expireGrace after its window ended: the executor
+// refuses approvals after the window, and a browser approval it granted just
+// before has been recorded by then, so the sweep never races Approve.
+func (s *Service) ExpirePending(ctx context.Context, now time.Time) (int, error) {
+	const detail = "approval window ended; nothing was run"
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	res, err := tx.ExecContext(ctx, `UPDATE executions SET state = 'expired', detail = ?, finished_at = ?
+		WHERE state = 'pending' AND approval_expiry > 0 AND approval_expiry < ?`, detail, now.Unix(), now.Add(-expireGrace).Unix())
+	if err != nil {
+		return 0, fmt.Errorf("expire executions: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("expire executions: %w", err)
+	}
+	if n > 0 {
+		// Only the executions expired in this call: a successful call always
+		// finishes the waiting hosts of what it expires, so no other 'expired'
+		// row has finished_at == now.
+		if _, err := tx.ExecContext(ctx, `UPDATE execution_hosts SET state = 'finished', class = 'not_executed',
+			detail = ?, finished_at = ? WHERE state = 'waiting'
+			AND execution_id IN (SELECT id FROM executions WHERE state = 'expired' AND finished_at = ?)`,
+			detail, now.Unix(), now.Unix()); err != nil {
+			return 0, fmt.Errorf("expire execution hosts: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	if n > 0 {
+		s.log.Info("audit", "kind", "operations_expired", "count", n)
+	}
+	return int(n), nil
 }
 
 // Resume restarts the dispatchers of executions that were approved or
