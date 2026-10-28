@@ -491,39 +491,80 @@ func (s *Service) CheckCLIApproval(ctx context.Context, id string) (string, erro
 // refuses approvals after the window, and a browser approval it granted just
 // before has been recorded by then, so the sweep never races Approve.
 //
-// Before expiring, the sweep records CLI approvals (CheckCLIApprovals): an
-// execution whose permit the executor still reports approved is approved and
-// dispatched, not expired. If the executor is unreachable the sweep aborts
-// with the error instead of expiring what it could not verify — nothing can
-// run while the executor is down, and an approved permit may still be live
-// (issue #78).
+// Before expiring, the sweep asks the executor for the permit state of each
+// overdue execution (issue #78): one whose permit the executor reports
+// approved (approved on the executor host) is recorded approved and
+// dispatched, not expired. An execution whose check fails (executor
+// unreachable, or the executor refuses the digest) is not expired in this
+// sweep, because an approved permit may still be live; the other overdue
+// executions are expired and the first check error is returned. Executions
+// without a digest cannot have been approved on the CLI and are expired
+// without a check.
 func (s *Service) ExpirePending(ctx context.Context, now time.Time) (int, error) {
-	if _, err := s.CheckCLIApprovals(ctx, now); err != nil {
-		return 0, fmt.Errorf("check CLI approvals: %w", err)
-	}
 	const detail = "approval window ended; nothing was run"
+	rows, err := s.db.QueryContext(ctx, `SELECT id, digest FROM executions
+		WHERE state = 'pending' AND approval_expiry > 0 AND approval_expiry < ?`, now.Add(-expireGrace).Unix())
+	if err != nil {
+		return 0, fmt.Errorf("list overdue executions: %w", err)
+	}
+	type overdue struct{ id, digest string }
+	var list []overdue
+	for rows.Next() {
+		var o overdue
+		if err := rows.Scan(&o.id, &o.digest); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		list = append(list, o)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	var expire []string
+	var checkErr error
+	for _, o := range list {
+		if o.digest != "" {
+			approved, err := s.checkCLIApproval(ctx, o.id, o.digest)
+			if err != nil {
+				if checkErr == nil {
+					checkErr = fmt.Errorf("check CLI approvals: %w", err)
+				}
+				continue // not verified: stays pending for the next sweep
+			}
+			if approved {
+				continue
+			}
+		}
+		expire = append(expire, o.id)
+	}
+	if len(expire) == 0 {
+		return 0, checkErr
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback() //nolint:errcheck
-	res, err := tx.ExecContext(ctx, `UPDATE executions SET state = 'expired', detail = ?, finished_at = ?
-		WHERE state = 'pending' AND approval_expiry > 0 AND approval_expiry < ?`, detail, now.Unix(), now.Add(-expireGrace).Unix())
-	if err != nil {
-		return 0, fmt.Errorf("expire executions: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("expire executions: %w", err)
-	}
-	if n > 0 {
-		// Only the executions expired in this call: a successful call always
-		// finishes the waiting hosts of what it expires, so no other 'expired'
-		// row has finished_at == now.
+	var n int64
+	for _, id := range expire {
+		// Guarded like Approve: an execution that stopped being pending
+		// since the list (approved meanwhile) is left alone.
+		res, err := tx.ExecContext(ctx, `UPDATE executions SET state = 'expired', detail = ?, finished_at = ?
+			WHERE id = ? AND state = 'pending'`, detail, now.Unix(), id)
+		if err != nil {
+			return 0, fmt.Errorf("expire executions: %w", err)
+		}
+		m, err := res.RowsAffected()
+		if err != nil {
+			return 0, fmt.Errorf("expire executions: %w", err)
+		}
+		if m != 1 {
+			continue
+		}
+		n++
 		if _, err := tx.ExecContext(ctx, `UPDATE execution_hosts SET state = 'finished', class = 'not_executed',
-			detail = ?, finished_at = ? WHERE state = 'waiting'
-			AND execution_id IN (SELECT id FROM executions WHERE state = 'expired' AND finished_at = ?)`,
-			detail, now.Unix(), now.Unix()); err != nil {
+			detail = ?, finished_at = ? WHERE execution_id = ? AND state = 'waiting'`, detail, now.Unix(), id); err != nil {
 			return 0, fmt.Errorf("expire execution hosts: %w", err)
 		}
 	}
@@ -533,7 +574,7 @@ func (s *Service) ExpirePending(ctx context.Context, now time.Time) (int, error)
 	if n > 0 {
 		s.log.Info("audit", "kind", "operations_expired", "count", n)
 	}
-	return int(n), nil
+	return int(n), checkErr
 }
 
 // Resume restarts the dispatchers of executions that were approved or

@@ -350,3 +350,41 @@ func TestCheckCLIApprovalsSkipsExecutionsWithoutADigest(t *testing.T) {
 		t.Fatalf("state %s, want pending", e.State)
 	}
 }
+
+// TestExpirePendingSkipsOnlyTheExecutionWhoseCheckFailed checks that one
+// execution the executor refuses to check (here: an invalid digest) stays
+// pending and is reported, while the other overdue execution still expires,
+// so a single bad row cannot stop the sweep for good.
+func TestExpirePendingSkipsOnlyTheExecutionWhoseCheckFailed(t *testing.T) {
+	bad := strings.Repeat("b", 64)
+	f := &fakeExec{permitState: pb.PermitState_PERMIT_STATE_PENDING,
+		permitStateErrFor: map[string]error{bad: status.Error(codes.InvalidArgument, "bad digest")}}
+	s, db := setup(t, f)
+	ctx := context.Background()
+	now := time.Unix(1791960000, 0)
+	overdue := now.Unix() - int64(expireGrace/time.Second) - 100
+	a, err := s.Create(ctx, "axel", "core.facts", []string{"web"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := s.Create(ctx, "axel", "core.facts", []string{"web"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE executions SET approval_expiry = ?`, overdue); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE executions SET digest = ? WHERE id = ?`, bad, b.ID); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.ExpirePending(ctx, now)
+	if n != 1 || status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("n=%d err=%v, want 1 and InvalidArgument", n, err)
+	}
+	if e, _ := s.Get(ctx, a.ID); e.State != "expired" {
+		t.Fatalf("checked execution: state %s, want expired", e.State)
+	}
+	if e, _ := s.Get(ctx, b.ID); e.State != "pending" {
+		t.Fatalf("unchecked execution: state %s, want pending", e.State)
+	}
+}
