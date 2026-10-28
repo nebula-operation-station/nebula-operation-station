@@ -120,14 +120,14 @@ func TestM2Recovery_RolesAndSessionCheck(t *testing.T) {
 			return err
 		},
 		"RemoveTOTP": func() error { _, err := server.client.RemoveTOTP(server.ctx(), &pb.RemoveTOTPRequest{}); return err },
-		"GetTOTPStatus": func() error {
-			_, err := server.client.GetTOTPStatus(server.ctx(), &pb.GetTOTPStatusRequest{})
-			return err
-		},
 	} {
 		if err := call(); err == nil {
 			t.Errorf("server role may call %s", name)
 		}
+	}
+	// Reading the status is allowed for the server role (issue #72).
+	if _, err := server.client.GetTOTPStatus(server.ctx(), &pb.GetTOTPStatusRequest{}); err != nil {
+		t.Fatalf("server role may not read the TOTP status: %v", err)
 	}
 	admin := newHarness(t, harnessOptions{uidRoles: map[uint32][]peercred.Role{uid: {peercred.RoleAdmin}}})
 	_, err := admin.client.RecoveryLogin(admin.ctx(), &pb.RecoveryLoginRequest{Code: "123456"})
