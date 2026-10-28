@@ -30,6 +30,14 @@
   <p class="status status--error">This operation needs approval on the executor host: run <code>nebula pending</code> and <code>nebula approve</code> there.</p>
   {{end}}
   {{end}}
+  {{if .Expired}}
+  <div class="approval">
+    <p class="status status--error">The approval window ended before anyone approved: nothing was run.</p>
+    <div class="actions">
+      <a class="button" href="{{.PlanAgain}}">Plan again</a>
+    </div>
+  </div>
+  {{end}}
   <p id="message" class="message" role="status" aria-live="polite"></p>
 </section>
 {{with .Rollout}}

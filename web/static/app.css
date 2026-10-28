@@ -638,6 +638,8 @@ legend {
 .badge--critical, .badge--error, .badge--red { color: var(--crit); background: var(--crit-bg); border-color: var(--crit-border); }
 .badge--unknown, .badge--grey { color: var(--unknown); background: var(--unknown-bg); border-color: var(--unknown-border); }
 .badge--pending, .badge--blue { color: var(--pending); background: var(--pending-bg); border-color: var(--pending-border); }
+/* Muted: an expired operation is done waiting (issue #71), not in progress. */
+.badge--expired { color: var(--unknown); background: var(--unknown-bg); border-color: var(--unknown-border); }
 
 /* --- Host readiness (operations / inventory). --- */
 .ops { font-weight: 700; }

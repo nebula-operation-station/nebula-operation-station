@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
@@ -422,6 +423,29 @@ func TestHostPageQuickActions(t *testing.T) {
 	}
 	if strings.Contains(body2, "pins-form") {
 		t.Errorf("pin settings rendered without the pin store")
+	}
+}
+
+// TestHostPageDoesNotShowExpiredAsInProgress covers issue #71: an expired
+// operation on the host page is muted, not the blue in-progress badge, so
+// the host does not look busy forever.
+func TestHostPageDoesNotShowExpiredAsInProgress(t *testing.T) {
+	f := &fakeOps{listHost: []executions.Summary{{ID: opID, ActionID: "core.facts", Risk: "HIGH", State: "expired",
+		CreatedBy: "axel", CreatedAt: time.Unix(1791960000, 0), FinishedAt: time.Unix(1791963600, 0), Hosts: 1}}}
+	h := newTestHandler(t, ui.Options{
+		PublicOrigin: "https://nebula.example.org",
+		Operations:   f,
+		Hosts: func(context.Context) ([]inventory.Host, error) {
+			return []inventory.Host{{ID: "web-01"}}, nil
+		},
+	}).Handler()
+
+	body := getBody(t, h, "/hosts/web-01?tab=operations")
+	if !strings.Contains(body, `badge badge--expired">expired`) {
+		t.Fatalf("expired badge missing: %s", body)
+	}
+	if strings.Contains(body, "badge--pending") {
+		t.Error("expired operation shown as in progress")
 	}
 }
 
