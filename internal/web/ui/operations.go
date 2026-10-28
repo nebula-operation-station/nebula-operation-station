@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -142,6 +143,11 @@ type execView struct {
 	// pending (rendered into a data attribute, escaped by html/template).
 	Options                        string
 	Pending, Live, NeedsTypedCount bool
+	// Expired is true when the approval window ended before anyone
+	// approved (issue #71): nothing was run. PlanAgain opens the
+	// operation form prefilled with the same action, hosts and parameters.
+	Expired   bool
+	PlanAgain string
 	// Scanner holds the Safety Scanner's findings for the action's script
 	// (advisory; the executor applies the same list to the risk).
 	Scanner []scanner.Finding
@@ -244,7 +250,7 @@ func (h *Handler) handleOperations(w http.ResponseWriter, r *http.Request) {
 	}
 	stateF := r.URL.Query().Get("state")
 	switch stateF {
-	case "", "pending", "running", "finished", "failed":
+	case "", "pending", "running", "finished", "failed", "expired":
 	default:
 		stateF = "" // invalid values are ignored
 	}
@@ -287,6 +293,8 @@ func opsStateClass(state string) string {
 		return "badge--ok"
 	case "failed":
 		return "badge--critical"
+	case "expired":
+		return "badge--expired"
 	default:
 		return "badge--unknown"
 	}
@@ -468,6 +476,10 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 		Detail: e.Detail, Digest: e.Digest, CreatedBy: e.CreatedBy, Created: e.CreatedAt.UTC(),
 		Pending: e.State == "pending", Live: e.State == "approved" || e.State == "running",
 		NeedsTypedCount: e.Requirement == "assertion_verified_typed_count"}
+	if e.State == "expired" {
+		v.Expired = true
+		v.PlanAgain = planAgainURL(e)
+	}
 	if e.Params != "" && e.Params != "{}" {
 		v.Params = e.Params
 	}
@@ -546,6 +558,27 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 	data := pageData{Title: "Operation " + e.ID[:8], Active: "operations", Content: "operation",
 		Scripts: []string{"webauthn.js", "operations.js"}, Ops: &operationsData{Exec: v}}
 	h.render(w, r, data)
+}
+
+// planAgainURL is the operation form prefilled with the execution's action,
+// hosts and parameters (issue #71), reusing the same prefill a container
+// action link from the host page uses: ?action=, ?host= (repeatable) and
+// ?param=name=value (repeatable).
+func planAgainURL(e executions.Execution) string {
+	q := url.Values{}
+	q.Set("action", e.ActionID)
+	for _, x := range e.Hosts {
+		q.Add("host", x.HostID)
+	}
+	if e.Params != "" && e.Params != "{}" {
+		var pm map[string]string
+		if json.Unmarshal([]byte(e.Params), &pm) == nil {
+			for k, val := range pm {
+				q.Add("param", k+"="+val)
+			}
+		}
+	}
+	return "/operations/new?" + q.Encode()
 }
 
 func webUser(r *http.Request) string {

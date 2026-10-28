@@ -25,6 +25,7 @@
       <a class="chip{{if eq .Ops.StateFilter "running"}} chip--active{{end}}" href="/operations?state=running">Running</a>
       <a class="chip{{if eq .Ops.StateFilter "finished"}} chip--active{{end}}" href="/operations?state=finished">Finished</a>
       <a class="chip{{if eq .Ops.StateFilter "failed"}} chip--active{{end}}" href="/operations?state=failed">Failed</a>
+      <a class="chip{{if eq .Ops.StateFilter "expired"}} chip--active{{end}}" href="/operations?state=expired">Expired</a>
     </div>
   </div>
   {{if .Ops.Items}}

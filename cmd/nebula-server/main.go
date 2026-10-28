@@ -57,6 +57,10 @@ const pruneInterval = time.Hour
 // blocked hosts to notify.
 const hostKeyPollInterval = 30 * time.Second
 
+// expireInterval is how often pending operations whose approval window has
+// ended are marked expired.
+const expireInterval = time.Minute
+
 func pruneSessions(ctx context.Context, s *auth.Store, log *slog.Logger) {
 	t := time.NewTicker(pruneInterval)
 	defer t.Stop()
@@ -222,6 +226,27 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 	// Scheduled read-only checks run under executor-held schedule grants.
 	go ops.RunSchedules(connCtx)
+
+	// Expire pending operations whose approval window ended (issue #71): the
+	// executor drops the permit when the window closes but the server only
+	// learns it here. Run once at startup, then once a minute.
+	if _, err := ops.ExpirePending(connCtx, time.Now()); err != nil {
+		log.Error("expire pending operations", "error", err)
+	}
+	go func() {
+		t := time.NewTicker(expireInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-connCtx.Done():
+				return
+			case <-t.C:
+			}
+			if _, err := ops.ExpirePending(connCtx, time.Now()); err != nil {
+				log.Error("expire pending operations", "error", err)
+			}
+		}
+	}()
 
 	// Network assets, IPAM and discovery (M9). nebula-discovery runs the
 	// scans; the server only queues jobs and reads results.

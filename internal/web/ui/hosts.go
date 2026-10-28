@@ -435,6 +435,10 @@ func execStateClass(state string) string {
 		return "badge--critical"
 	case "pending", "approved", "running":
 		return "badge--pending"
+	case "expired":
+		// Muted, not in progress (issue #71): an expired operation is
+		// done waiting and must not make the host look busy.
+		return "badge--expired"
 	default:
 		return "badge--unknown"
 	}
