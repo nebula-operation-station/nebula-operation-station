@@ -110,6 +110,28 @@
     });
   }
 
+  // "Check approval": the operation is approved on the executor host
+  // (hardened path); ask the server to ask the executor, and reload when
+  // the state changed (approved and dispatched).
+  const check = document.getElementById('operation-check');
+  if (check) {
+    check.addEventListener('click', async () => {
+      check.disabled = true;
+      try {
+        const r = await w.post('/operations/' + encodeURIComponent(op.dataset.id) + '/check', {});
+        if (r.state !== 'pending') {
+          window.location.reload();
+          return;
+        }
+        w.show('Still pending on the executor host.', false);
+      } catch (err) {
+        w.show(err.message || 'Could not check the approval.', true);
+      } finally {
+        check.disabled = false;
+      }
+    });
+  }
+
   // Gates of a staged operation: continue to the next stage or skip a
   // host. The executor says what is needed: nothing beyond the session
   // (done at once), or the security key over its gate challenge.
