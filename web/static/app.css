@@ -832,7 +832,17 @@ time { white-space: nowrap; }
 .chip--env { font-family: var(--font-mono); font-size: 0.72rem; }
 
 /* --- "More" menu (details/summary, no JS). --- */
-.menu { position: relative; display: inline-block; }
+/* The summary already carries a .button border, so the generic details
+   decoration (border, padding, background) must not apply here — it would
+   draw a second frame around the button. */
+.menu {
+  position: relative;
+  display: inline-block;
+  margin-top: 0;
+  border: 0;
+  padding: 0;
+  background: none;
+}
 .menu summary { list-style: none; cursor: pointer; user-select: none; }
 .menu summary::-webkit-details-marker { display: none; }
 .menu[open] summary { border-radius: var(--radius-sm) var(--radius-sm) 0 0; }
@@ -852,6 +862,9 @@ time { white-space: nowrap; }
   box-shadow: var(--shadow-lg);
 }
 .menu a + a { border-top: 0; }
+/* Open: the summary's bottom border is the panel's top edge, so the first
+   link must not add a second line. */
+.menu[open] a:first-of-type { border-top: 0; }
 .menu a:first-of-type { border-radius: 0 0 var(--radius-sm) var(--radius-sm); }
 .menu a:hover { background: var(--surface-2); text-decoration: none; }
 
