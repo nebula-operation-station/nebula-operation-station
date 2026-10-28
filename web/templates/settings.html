@@ -21,6 +21,66 @@
 </section>
 
 <section class="panel">
+  <h2>Sign-in and security keys</h2>
+  <p class="hint">A hardware security key (YubiKey) and a passkey (Touch ID, Windows Hello) both work; two keys are recommended so you can still sign in when one is lost.</p>
+  {{if .Settings.KeysError}}
+  <p class="message message--error">{{.Settings.KeysError}}</p>
+  {{else if .Settings.Keys}}
+  <div class="table-wrap">
+    <table class="inventory" id="key-table">
+      <thead>
+        <tr>
+          <th>Label</th>
+          <th>Authenticator</th>
+          <th>Registered</th>
+          <th>Credential</th>
+          <th>Remove (CLI)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Settings.Keys}}
+        <tr>
+          <td>{{.Label}}{{if .Current}} <span class="hint">(this session)</span>{{end}}</td>
+          <td class="mono">{{if .AAGUID}}{{.AAGUID}}{{else}}—{{end}}</td>
+          <td>{{.Registered}}</td>
+          <td class="mono">{{.ShortID}}</td>
+          <td><input type="text" readonly class="mono" value="{{.RemoveCmd}}" aria-label="Remove command for this key"></td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <p class="hint">No security keys are registered yet. Add one below.</p>
+  {{end}}
+  <h3>Add a security key</h3>
+  <form id="key-form" class="form" novalidate>
+    <label for="key-label">Label for the new key</label>
+    <input id="key-label" name="label" maxlength="200" autocomplete="off" spellcheck="false" placeholder="YubiKey 5C NFC, MacBook Touch ID">
+    <p id="key-code-cmd" class="hint mono" role="status">On the Nebula machine: nebula webauthn code</p>
+    <label for="key-code">One-time code</label>
+    <input id="key-code" name="code" maxlength="40" autocomplete="one-time-code" spellcheck="false">
+    <p id="key-message" class="message" role="status" aria-live="polite"></p>
+    <div class="actions">
+      <button type="submit" id="key-submit" class="button">Add key</button>
+    </div>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>Recovery</h2>
+  {{if .Settings.TOTPError}}
+  <p class="message message--error">{{.Settings.TOTPError}}</p>
+  {{else if .Settings.TOTP}}
+  <p>{{if .Settings.TOTP.Configured}}{{if .Settings.TOTP.Activated}}TOTP recovery is enabled.{{else}}TOTP is set up but not activated: confirm a code on the executor host.{{end}}{{else}}TOTP recovery is not set up.{{end}}</p>
+  {{if .Settings.TOTP.RecoveryPending}}
+  <p class="message message--error">A recovery login is pending: register a new security key before privileged work is possible again.</p>
+  {{end}}
+  <p class="hint">TOTP setup and removal stay on the executor host: <code class="mono">nebula totp setup</code>, <code class="mono">nebula totp status</code>, <code class="mono">nebula totp remove</code>.</p>
+  {{end}}
+</section>
+
+<section class="panel">
   <h2>Inventory tools</h2>
   <div class="actions actions--stack">
     <a class="button button--secondary" href="/inventory/import">Import hosts from CSV</a>

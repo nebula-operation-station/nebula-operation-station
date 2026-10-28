@@ -146,6 +146,20 @@ func (l *lazyExecutor) ListHostKeys(ctx context.Context, in *pb.ListHostKeysRequ
 	return nil, errNotConnected
 }
 
+func (l *lazyExecutor) ListWebAuthnCredentials(ctx context.Context, in *pb.ListWebAuthnCredentialsRequest, opts ...grpc.CallOption) (*pb.ListWebAuthnCredentialsResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ListWebAuthnCredentials(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) GetTOTPStatus(ctx context.Context, in *pb.GetTOTPStatusRequest, opts ...grpc.CallOption) (*pb.GetTOTPStatusResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.GetTOTPStatus(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
 func (l *lazyExecutor) Lock(ctx context.Context, in *pb.LockRequest, opts ...grpc.CallOption) (*pb.LockResponse, error) {
 	if c := l.c.Load(); c != nil {
 		return c.Lock(ctx, in, opts...)

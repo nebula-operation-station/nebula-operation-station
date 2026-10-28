@@ -83,5 +83,26 @@ const nebulaWebAuthn = (() => {
     m.classList.toggle('message--error', !!isError);
   }
 
-  return { requestOptions, creationOptions, assertionJSON, attestationJSON, post, show };
+  // register runs the full registration flow against the existing /setup
+  // endpoints: the one-time code, the new key, and — when keys are
+  // registered already — a confirming key. statusEl receives the current
+  // step; the promise resolves with the /setup/finish answer.
+  async function register(code, statusEl) {
+    const status = (text) => {
+      statusEl.textContent = text; // never innerHTML
+      statusEl.classList.remove('message--error');
+    };
+    const begin = await post('/setup/begin', { code });
+    status('Touch the new security key…');
+    const created = await navigator.credentials.create(creationOptions(begin.creation_options));
+    const body = { registration_id: begin.registration_id, attestation: attestationJSON(created) };
+    if (begin.authorization_options) {
+      status('Now confirm with a security key that is already registered…');
+      const confirm = await navigator.credentials.get(requestOptions(begin.authorization_options));
+      body.assertion = assertionJSON(confirm);
+    }
+    return post('/setup/finish', body);
+  }
+
+  return { requestOptions, creationOptions, assertionJSON, attestationJSON, post, show, register };
 })();

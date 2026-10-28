@@ -38,33 +38,82 @@ function check(cond, what) {
   await page.waitForFunction(() => /already|failed|not accepted/i.test(document.getElementById('message').textContent));
   check(/already registered/i.test(await page.textContent('#message')), 'the same key cannot be registered twice');
 
-  // Second key: unplug the first, create with the second, then plug the first back for the confirmation.
-  const { credentials } = await cdp.send('WebAuthn.getCredentials', { authenticatorId: first });
-  await cdp.send('WebAuthn.removeVirtualAuthenticator', { authenticatorId: first });
-  const { authenticatorId: second } = await cdp.send('WebAuthn.addVirtualAuthenticator', { options: opts });
-  let swapped = false;
-  await page.exposeBinding('__swapKeys', async () => {
-    await cdp.send('WebAuthn.removeVirtualAuthenticator', { authenticatorId: second });
-    const { authenticatorId: back } = await cdp.send('WebAuthn.addVirtualAuthenticator', { options: opts });
-    for (const c of credentials) await cdp.send('WebAuthn.addCredential', { authenticatorId: back, credential: c });
-    swapped = true;
-  });
-  await page.addInitScript(() => {
-    const orig = navigator.credentials.create.bind(navigator.credentials);
-    navigator.credentials.create = async (o) => { const c = await orig(o); await window.__swapKeys(); return c; };
-  });
-  const code2 = await (await page.request.get(base + '/__code')).text();
-  await page.goto(base + '/setup');
-  await page.fill('#code', code2);
-  await page.click('#setup button');
-  await page.waitForFunction(() => /registered\. You can|failed|not accepted|expired|Cancelled/i.test(document.getElementById('message').textContent), null, { timeout: 30000 });
-  check(swapped && /registered\. You can/i.test(await page.textContent('#message')), 'second key registered, confirmed by the first');
-
-  // Login with the first key, then logout from the dashboard.
+  // Login with the first key; the second one goes in from Settings.
   await page.goto(base + '/login');
   await page.click('#login');
   await page.waitForURL('**/dashboard', { timeout: 15000 });
   check(true, 'login with the first key opens the dashboard');
+
+  // Settings: the key table lists the registered key, marks the key of
+  // the current session, and shows the CLI remove command with the full
+  // credential ID.
+  await page.goto(base + '/settings');
+  const keyTable = page.locator('#key-table');
+  check((await keyTable.locator('tbody tr').count()) === 1, 'settings lists the registered key');
+  check(/this session/.test(await keyTable.textContent()), 'the key of the current session is marked');
+  const { credentials } = await cdp.send('WebAuthn.getCredentials', { authenticatorId: first });
+  const cmd = await keyTable.locator('tbody input').first().inputValue();
+  // The executor stores and returns the credential ID as base64url (raw),
+  // which is what `nebula webauthn remove` takes; CDP reports it as padded
+  // base64, so re-encode the raw bytes.
+  check(cmd === 'nebula webauthn remove ' + Buffer.from(credentials[0].credentialId, 'base64').toString('base64url'), 'the remove command shows the full credential ID');
+  check(/not set up/.test(await page.locator('section:has(h2:text-is("Recovery"))').textContent()), 'the recovery section shows the TOTP status');
+
+  // Add the second key through the panel: unplug the first, create with
+  // the second, plug the first back in for confirmation.
+  await cdp.send('WebAuthn.removeVirtualAuthenticator', { authenticatorId: first });
+  const { authenticatorId: second } = await cdp.send('WebAuthn.addVirtualAuthenticator', { options: opts });
+  // __swapKeys unplugs the authenticator holding the new key and plugs in
+  // one with the carried credentials of the first key (for the
+  // confirmation assertion); `current` is the authenticator plugged in.
+  let swaps = 0;
+  let newKey = second;
+  let carry = credentials;
+  let current = second;
+  await page.exposeBinding('__swapKeys', async () => {
+    await cdp.send('WebAuthn.removeVirtualAuthenticator', { authenticatorId: newKey });
+    const { authenticatorId: back } = await cdp.send('WebAuthn.addVirtualAuthenticator', { options: opts });
+    for (const c of carry) await cdp.send('WebAuthn.addCredential', { authenticatorId: back, credential: c });
+    current = back;
+    swaps++;
+  });
+  // Wrap create() in the CURRENT document (the panel runs create/get here and
+  // only reloads after success, so an init script would be too late): after
+  // the new key creates, swap it out and plug the first key back in for the
+  // confirmation assertion.
+  await page.evaluate(() => {
+    const orig = navigator.credentials.create.bind(navigator.credentials);
+    navigator.credentials.create = async (o) => { const c = await orig(o); await window.__swapKeys(); return c; };
+  });
+  const code2 = await (await page.request.get(base + '/__code')).text();
+  await page.fill('#key-label', 'Second key');
+  await page.fill('#key-code', code2);
+  const panelReloaded = page.waitForEvent('load', { timeout: 30000 });
+  await page.click('#key-submit');
+  await panelReloaded;
+  check(swaps === 1, 'the panel asked for the new key and confirmation with the first');
+  check((await keyTable.locator('tbody tr').count()) === 2, 'two keys are listed after the panel registration');
+
+  // /setup still adds a further key while keys exist: one-time code, the
+  // new key, then confirmation with a registered key (review rv72). The
+  // first key's credentials are carried with their current sign counter.
+  ({ credentials: carry } = await cdp.send('WebAuthn.getCredentials', { authenticatorId: current }));
+  await cdp.send('WebAuthn.removeVirtualAuthenticator', { authenticatorId: current });
+  ({ authenticatorId: newKey } = await cdp.send('WebAuthn.addVirtualAuthenticator', { options: opts }));
+  await page.goto(base + '/setup');
+  await page.evaluate(() => {
+    const orig = navigator.credentials.create.bind(navigator.credentials);
+    navigator.credentials.create = async (o) => { const c = await orig(o); await window.__swapKeys(); return c; };
+  });
+  const code3 = await (await page.request.get(base + '/__code')).text();
+  await page.fill('#code', code3);
+  await page.click('#setup button');
+  await page.waitForFunction(() => /registered\. You can|failed|not accepted|expired|Cancelled/i.test(document.getElementById('message').textContent), null, { timeout: 30000 });
+  check(swaps === 2 && /registered\. You can/i.test(await page.textContent('#message')), 'a third key registered through /setup, confirmed by the first');
+  await page.goto(base + '/settings');
+  check((await keyTable.locator('tbody tr').count()) === 3, 'three keys are listed after the /setup registration');
+  // Back to the dashboard for the privileged session and operations.
+  await page.goto(base + '/dashboard');
   // Privileged session from the dashboard, then lock.
   check(/Privileged session: none/.test(await page.textContent('main')), 'no privileged session after login');
   await Promise.all([page.waitForNavigation({ timeout: 15000 }), page.click('#session-open')]);

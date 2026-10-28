@@ -344,16 +344,25 @@ section 6.1 and restrict port 8080 to the proxy with a firewall.
    (single use, valid for 15 minutes).
 2. Open `https://<rp-id>/setup`, enter the code and register your first
    security key.
-3. Log in at `https://<rp-id>/login`. Register the backup key the same
-   way; every further key must also be confirmed with an already
-   registered one.
-4. Recommended: `nebula totp setup` on the machine. TOTP lets you log in
+3. Log in at `https://<rp-id>/login`.
+4. Add a second key in *Settings* → *Sign-in and security keys*:
+   *Add a security key* takes a fresh one-time code (run
+   `nebula webauthn code` on the Nebula machine) and a label, then asks
+   for the new key and confirmation with an already registered one. A
+   hardware key (YubiKey) and a passkey (Touch ID, Windows Hello) both
+   work; two keys are recommended.
+5. Recommended: `nebula totp setup` on the machine. TOTP lets you log in
    when every key is lost; Nebula then forces a new key registration,
    which you confirm on the machine with `nebula totp finish-recovery`.
 
 `nebula webauthn list` shows the registered keys (with the key that
-confirmed each one); `nebula webauthn remove ID` removes one and locks the
-executor.
+confirmed each one). Removing a key is CLI-only:
+`nebula webauthn remove ID` removes one and locks the executor; the
+Settings page shows the exact command for every key.
+
+**Recovery.** TOTP setup and removal are CLI-only: `nebula totp setup`,
+`nebula totp status`, `nebula totp remove`. The *Recovery* section in
+Settings shows the current status and the commands.
 
 **Privileged session.** On the dashboard, *Open privileged session*
 (security key with user verification) lets LOW actions run for the

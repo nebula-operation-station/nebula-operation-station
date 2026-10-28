@@ -202,6 +202,18 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		}
 		return resp.GetHosts(), nil
 	}
+	// securityKeys and totpStatus back the settings page ("Sign-in and
+	// security keys" and "Recovery"); both are read-only RPCs.
+	securityKeys := func(ctx context.Context) ([]*pb.WebAuthnCredential, error) {
+		resp, err := exec.ListWebAuthnCredentials(ctx, &pb.ListWebAuthnCredentialsRequest{})
+		if err != nil {
+			return nil, err
+		}
+		return resp.GetCredentials(), nil
+	}
+	totpStatus := func(ctx context.Context) (*pb.GetTOTPStatusResponse, error) {
+		return exec.GetTOTPStatus(ctx, &pb.GetTOTPStatusRequest{})
+	}
 
 	// Host key mismatches notify (spec 13: always sent, cannot be muted).
 	watcher := &notify.HostKeyWatcher{Notifier: notifier, List: hostKeys, DB: db, Interval: hostKeyPollInterval, Log: log}
@@ -301,6 +313,8 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		Audit:        audit,
 		Repin:        exec,
 		Enroll:       exec,
+		SecurityKeys: securityKeys,
+		TOTPStatus:   totpStatus,
 		Log:          log,
 	})
 	if err != nil {
