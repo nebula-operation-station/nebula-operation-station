@@ -143,8 +143,10 @@ func TestH03_OnlyTheAdminCreatesCodes(t *testing.T) {
 	h := newHarness(t, harnessOptions{noCredential: true, uidRoles: map[uint32][]peercred.Role{uint32(os.Getuid()): {peercred.RoleServer}}})
 	_, err := h.client.CreateRegistrationCode(h.ctx(), &pb.CreateRegistrationCodeRequest{})
 	wantCode(t, err, codes.PermissionDenied, "")
-	_, err = h.client.ListWebAuthnCredentials(h.ctx(), &pb.ListWebAuthnCredentialsRequest{})
-	wantCode(t, err, codes.PermissionDenied, "")
+	// Listing is read-only and allowed for the server role (issue #72).
+	if _, err = h.client.ListWebAuthnCredentials(h.ctx(), &pb.ListWebAuthnCredentialsRequest{}); err != nil {
+		t.Fatalf("server role may not list credentials: %v", err)
+	}
 	_, err = h.client.RemoveWebAuthnCredential(h.ctx(), &pb.RemoveWebAuthnCredentialRequest{CredentialId: "AA"})
 	wantCode(t, err, codes.PermissionDenied, "")
 

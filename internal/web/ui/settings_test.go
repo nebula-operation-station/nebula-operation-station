@@ -3,12 +3,15 @@
 package ui_test
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
 
@@ -119,6 +122,128 @@ func TestSettingsPageShowsAboutAndTools(t *testing.T) {
 	for _, want := range []string{"Appearance", "Inventory tools", "About", "/inventory/import", "/inventory/enroll", "/schedules"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("settings page missing %q", want)
+		}
+	}
+}
+
+// TestSettingsPageListsSecurityKeys checks the "Sign-in and security keys"
+// section lists every registered key (label, short AAGUID hex, the exact
+// remove command with the full credential ID) and the recovery section shows
+// the TOTP status and the CLI commands.
+func TestSettingsPageListsSecurityKeys(t *testing.T) {
+	creds := []*pb.WebAuthnCredential{
+		{CredentialId: "abc123", Label: "YubiKey 5C NFC", Aaguid: "051d0464864e8f06b775a07a915b3b2c", CreatedAtUnix: 1750000000},
+		{CredentialId: "def456", Label: "MacBook Touch ID", CreatedAtUnix: 1750100000},
+	}
+	h := newTestHandler(t, ui.Options{
+		PublicOrigin: "https://nebula.example.org",
+		SecurityKeys: func(ctx context.Context) ([]*pb.WebAuthnCredential, error) { return creds, nil },
+		TOTPStatus: func(ctx context.Context) (*pb.GetTOTPStatusResponse, error) {
+			return &pb.GetTOTPStatusResponse{Configured: true, Activated: true}, nil
+		},
+	})
+	body := getBody(t, h.Handler(), "/settings")
+	for _, want := range []string{
+		"Sign-in and security keys",
+		"YubiKey 5C NFC",
+		"MacBook Touch ID",
+		"051d0464",
+		"nebula webauthn remove abc123",
+		"nebula webauthn remove def456",
+		"Add a security key",
+		"nebula webauthn code",
+		"Recovery",
+		"TOTP recovery is enabled",
+		"nebula totp setup",
+		"nebula totp status",
+		"nebula totp remove",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("settings page misses %q", want)
+		}
+	}
+}
+
+// TestSettingsPageRendersHostileKeyLabelAsText checks a label containing HTML
+// and control characters is rendered as text, never as markup.
+func TestSettingsPageRendersHostileKeyLabelAsText(t *testing.T) {
+	label := "<img src=x onerror=alert(1)>\a<script>alert(2)</script>"
+	h := newTestHandler(t, ui.Options{
+		PublicOrigin: "https://nebula.example.org",
+		SecurityKeys: func(ctx context.Context) ([]*pb.WebAuthnCredential, error) {
+			return []*pb.WebAuthnCredential{{CredentialId: "abc123", Label: label}}, nil
+		},
+	})
+	body := getBody(t, h.Handler(), "/settings")
+	if strings.Contains(body, "<img src=x") || strings.Contains(body, "<script>") {
+		t.Error("label rendered as HTML")
+	}
+	if !strings.Contains(body, "&lt;img src=x") {
+		t.Error("label not escaped as text")
+	}
+}
+
+// TestSettingsPageShowsErrorLineWhenExecutorUnreachable checks that an
+// executor failure renders the section with a plain error line: status 200,
+// no internal details.
+func TestSettingsPageShowsErrorLineWhenExecutorUnreachable(t *testing.T) {
+	h := newTestHandler(t, ui.Options{
+		PublicOrigin: "https://nebula.example.org",
+		SecurityKeys: func(ctx context.Context) ([]*pb.WebAuthnCredential, error) {
+			return nil, errors.New("dial tcp 10.0.0.5:9443: connection refused")
+		},
+		TOTPStatus: func(ctx context.Context) (*pb.GetTOTPStatusResponse, error) {
+			return nil, errors.New("dial tcp 10.0.0.5:9443: connection refused")
+		},
+	})
+	body := getBody(t, h.Handler(), "/settings")
+	for _, want := range []string{"Security keys could not be loaded", "Recovery status could not be loaded"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("settings page misses %q", want)
+		}
+	}
+	if strings.Contains(body, "10.0.0.5") || strings.Contains(body, "connection refused") {
+		t.Error("internal error detail leaked into the page")
+	}
+}
+
+// TestSettingsPageShowsTOTPStatus checks the recovery section reflects the
+// executor's TOTP status.
+func TestSettingsPageShowsTOTPStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		st   *pb.GetTOTPStatusResponse
+		want string
+	}{
+		{name: "enabled", st: &pb.GetTOTPStatusResponse{Configured: true, Activated: true}, want: "TOTP recovery is enabled"},
+		{name: "not activated", st: &pb.GetTOTPStatusResponse{Configured: true}, want: "TOTP is set up but not activated"},
+		{name: "not set up", st: &pb.GetTOTPStatusResponse{}, want: "TOTP recovery is not set up"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHandler(t, ui.Options{
+				PublicOrigin: "https://nebula.example.org",
+				TOTPStatus: func(ctx context.Context) (*pb.GetTOTPStatusResponse, error) {
+					return tc.st, nil
+				},
+			})
+			body := getBody(t, h.Handler(), "/settings")
+			if !strings.Contains(body, tc.want) {
+				t.Errorf("recovery section misses %q", tc.want)
+			}
+		})
+	}
+}
+
+// TestSettingsPageAddKeyPanelReusesSetupEndpoints checks the "Add a security
+// key" panel is present with a code input and that the page loads the shared
+// WebAuthn script; the panel posts to the existing /setup endpoints, whose
+// CSRF/Origin rules are covered by the auth package tests.
+func TestSettingsPageAddKeyPanelReusesSetupEndpoints(t *testing.T) {
+	h := newTestHandler(t, ui.Options{PublicOrigin: "https://nebula.example.org"})
+	body := getBody(t, h.Handler(), "/settings")
+	for _, want := range []string{`id="key-form"`, `id="key-code"`, `id="key-label"`, "/static/webauthn.js", "/static/settings.js"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("settings page misses %q", want)
 		}
 	}
 }

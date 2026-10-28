@@ -31,6 +31,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/descope/virtualwebauthn"
 	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc"
 
@@ -339,6 +340,13 @@ func main() {
 		r, err := svc.ListHostKeys(ctx, &pb.ListHostKeysRequest{})
 		return r.GetHosts(), err
 	}
+	securityKeys := func(ctx context.Context) ([]*pb.WebAuthnCredential, error) {
+		r, err := svc.ListWebAuthnCredentials(ctx, &pb.ListWebAuthnCredentialsRequest{})
+		return r.GetCredentials(), err
+	}
+	totpStatus := func(ctx context.Context) (*pb.GetTOTPStatusResponse, error) {
+		return svc.GetTOTPStatus(ctx, &pb.GetTOTPStatusRequest{})
+	}
 	// Discovery with a spool; the test hook below answers queued jobs the
 	// way nebula-discovery would, with fixed hosts.
 	spool := discoveryjob.Spool{Dir: filepath.Join(dir, "discovery")}
@@ -347,10 +355,10 @@ func main() {
 	ipamStore := ipam.New(sdb, ipam.FromInventory(inv.List))
 	disc := discovery.New(sdb, spool, ipamStore, ipam.FromInventory(inv.List), log)
 	audit := auditlog.New(sdb, true)
-	u, err := ui.New(ui.Options{PublicOrigin: origin, Events: direct{svc}, Audit: audit, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Pins: inv, Schedules: ops, Runbooks: rb, Trust: direct{svc}, Modules: mods, LastResult: ops.LastResult, Network: ipamStore, Discovery: disc, Repin: direct{svc}, Enroll: direct{svc}, Log: slog.New(auditlog.NewHandler(base, audit))})
+	u, err := ui.New(ui.Options{PublicOrigin: origin, Events: direct{svc}, Audit: audit, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Pins: inv, Schedules: ops, Runbooks: rb, Trust: direct{svc}, Modules: mods, LastResult: ops.LastResult, Network: ipamStore, Discovery: disc, Repin: direct{svc}, Enroll: direct{svc}, SecurityKeys: securityKeys, TOTPStatus: totpStatus, Log: slog.New(auditlog.NewHandler(base, audit))})
 	must(err)
 	if preview {
-		seedPreview(context.Background(), svc, sdb, inv, rb, sshPub)
+		seedPreview(context.Background(), svc, sdb, inv, rb, sshPub, origin)
 	}
 	mux := http.NewServeMux()
 	// Test hook: issue a one-time code like `nebula webauthn code`.
@@ -544,12 +552,70 @@ func createInventoryHost(ctx context.Context, inv *inventory.Store, id, display 
 	return ep
 }
 
+// seedPreviewKeys registers two security keys (a hardware key and a
+// passkey) through the real registration RPCs with virtual
+// authenticators, and enables TOTP recovery. The second key is confirmed
+// with the first, exactly like the browser flow, so the Settings page
+// shows a populated key table and the recovery status.
+func seedPreviewKeys(ctx context.Context, svc *executor.Service, origin string) {
+	rp := virtualwebauthn.RelyingParty{Name: "Nebula", ID: "localhost", Origin: origin}
+	type demoKey struct {
+		label  string
+		aaguid string
+	}
+	keys := []demoKey{
+		{"YubiKey 5C NFC", "4c6f7562694b65790000000000000001"},
+		{"MacBook Touch ID", "00112233445566778899aabbccddeeff"},
+	}
+	var confirm virtualwebauthn.Authenticator
+	var confirmCred virtualwebauthn.Credential
+	for i, k := range keys {
+		ca, err := svc.CreateRegistrationCode(ctx, &pb.CreateRegistrationCodeRequest{UserName: "demo", Label: k.label})
+		must(err)
+		b, err := svc.BeginRegistration(ctx, &pb.BeginRegistrationRequest{Code: ca.GetCode()})
+		must(err)
+		opts, err := virtualwebauthn.ParseAttestationOptions(string(b.GetCreationOptionsJson()))
+		must(err)
+		a := virtualwebauthn.NewAuthenticatorWithOptions(virtualwebauthn.AuthenticatorOptions{})
+		if js, err := hex.DecodeString(k.aaguid); err == nil && len(js) == len(a.Aaguid) {
+			copy(a.Aaguid[:], js)
+		}
+		c := virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2)
+		a.AddCredential(c)
+		req := &pb.FinishRegistrationRequest{RegistrationId: b.GetRegistrationId(),
+			AttestationJson: []byte(virtualwebauthn.CreateAttestationResponse(rp, a, c, *opts))}
+		if b.GetAuthorizationOptionsJson() != nil {
+			// Keys already exist: the new one must be confirmed by an
+			// existing key (decisions 27, 37).
+			ao, err := virtualwebauthn.ParseAssertionOptions(string(b.GetAuthorizationOptionsJson()))
+			must(err)
+			req.AssertionJson = []byte(virtualwebauthn.CreateAssertionResponse(rp, confirm, confirmCred, *ao))
+		}
+		_, err = svc.FinishRegistration(ctx, req)
+		must(err)
+		if i == 0 {
+			confirm, confirmCred = a, c
+		}
+	}
+	// TOTP recovery, like `nebula totp setup` on the executor host.
+	b, err := svc.BeginTOTPSetup(ctx, &pb.BeginTOTPSetupRequest{})
+	must(err)
+	secret, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(b.GetSecretBase32())
+	must(err)
+	_, err = svc.ConfirmTOTPSetup(ctx, &pb.ConfirmTOTPSetupRequest{Code: totp.Code(secret, time.Now())})
+	must(err)
+}
+
 // seedPreview seeds the demo lab: eight hosts in different states, their
 // stored read-only results, update lists, ops states, two networks with
-// assets and a finished discovery job.
-func seedPreview(ctx context.Context, svc *executor.Service, sdb *sql.DB, inv *inventory.Store, rb *runbooks.Store, sshPub ssh.PublicKey) {
+// assets and a finished discovery job. It also registers two security keys
+// and enables TOTP recovery so the Settings page shows real content.
+func seedPreview(ctx context.Context, svc *executor.Service, sdb *sql.DB, inv *inventory.Store, rb *runbooks.Store, sshPub ssh.PublicKey, origin string) {
 	now := time.Now()
 	ago := func(d time.Duration) time.Time { return now.Add(-d) }
+
+	// --- Sign-in and security keys (Settings page) ---------------------
+	seedPreviewKeys(ctx, svc, origin)
 
 	// --- Hosts ---------------------------------------------------------
 	pinHost(ctx, svc, inv, sshPub, "web", "Web server", inventory.EnvProd, inventory.CriticalityMedium)

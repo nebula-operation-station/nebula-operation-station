@@ -126,6 +126,15 @@ type Options struct {
 	// ServerIP returns the server's own first private IPv4, for the
 	// quick-scan prefill. Nil uses the machine's interfaces.
 	ServerIP func() netip.Addr
+	// SecurityKeys returns the WebAuthn credentials registered with the
+	// executor, for the settings page ("Sign-in and security keys"). Nil
+	// hides the key table; an error makes the section show a plain error
+	// line (the detail goes to the log only).
+	SecurityKeys func(ctx context.Context) ([]*pb.WebAuthnCredential, error)
+	// TOTPStatus returns the executor's TOTP status, for the settings
+	// page ("Recovery"). Nil hides the status; an error makes the section
+	// show a plain error line (the detail goes to the log only).
+	TOTPStatus func(ctx context.Context) (*pb.GetTOTPStatusResponse, error)
 	// Log receives executor status errors (the page itself only shows
 	// "Executor unavailable"). Nil means slog.Default().
 	Log *slog.Logger
@@ -136,28 +145,30 @@ type Handler struct {
 	publicOrigin string
 	// pages maps a content name to the parsed template set (layout +
 	// that page), so every page can define its own "content" block.
-	pages      map[string]*template.Template
-	staticFS   fs.FS
-	status     StatusProvider
-	hostNames  func(ctx context.Context) []string
-	hosts      func(ctx context.Context) ([]inventory.Host, error)
-	hostKeys   func(ctx context.Context) ([]*pb.HostKeyPin, error)
-	inventory  InventoryStore
-	operations Operations
-	pins       PinStore
-	schedules  Schedules
-	runbooks   Runbooks
-	trust      ArtifactTrust
-	modules    Modules
-	lastResult LastResultFunc
-	network    NetworkStore
-	discovery  DiscoveryStore
-	events     EventSource
-	auditLog   AuditStore
-	log        *slog.Logger
-	repin      Repinner
-	enroll     Enroller
-	serverIP   func() netip.Addr
+	pages        map[string]*template.Template
+	staticFS     fs.FS
+	status       StatusProvider
+	hostNames    func(ctx context.Context) []string
+	hosts        func(ctx context.Context) ([]inventory.Host, error)
+	hostKeys     func(ctx context.Context) ([]*pb.HostKeyPin, error)
+	inventory    InventoryStore
+	operations   Operations
+	pins         PinStore
+	schedules    Schedules
+	runbooks     Runbooks
+	trust        ArtifactTrust
+	modules      Modules
+	lastResult   LastResultFunc
+	network      NetworkStore
+	discovery    DiscoveryStore
+	events       EventSource
+	auditLog     AuditStore
+	log          *slog.Logger
+	repin        Repinner
+	enroll       Enroller
+	serverIP     func() netip.Addr
+	securityKeys func(ctx context.Context) ([]*pb.WebAuthnCredential, error)
+	totpStatus   func(ctx context.Context) (*pb.GetTOTPStatusResponse, error)
 }
 
 // New parses the embedded templates and builds a Handler.
@@ -208,6 +219,8 @@ func New(o Options) (*Handler, error) {
 		repin:        o.Repin,
 		enroll:       o.Enroll,
 		serverIP:     serverIP,
+		securityKeys: o.SecurityKeys,
+		totpStatus:   o.TOTPStatus,
 		log:          log,
 	}, nil
 }
