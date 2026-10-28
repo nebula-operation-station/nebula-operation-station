@@ -543,20 +543,38 @@ func challengeFor(d canonical.Digest, expiry time.Time) ([]byte, error) {
 
 // floorRiseLocked rejects the approval when the executor's minimum risk
 // rose above the permit's risk class since the proposal (trust withdrawn,
-// a host made more critical, or the scanner). Called with a.mu held; like
-// AuthorizeGrant it reads the risk source and the scan cache. The reason
-// (which may name hosts) goes to the audit log, not the reply.
+// a host made more critical, or the scanner). Called with a.mu held.
+//
+// The per-target risk reads (trust, host criticality) are store queries, so
+// they must not run while a.mu is held: the request, its targets and the
+// parameters are copied under the lock, the lock is dropped for the reads,
+// then re-acquired and the permit re-validated — it may have been approved,
+// expired or discarded while the store was read. If anything changed or a
+// read fails, the approval is rejected, exactly as when the check ran under
+// the lock. The reason (which may name hosts) goes to the audit log, not
+// the reply.
 func (a *Authority) floorRiseLocked(p *Permit) error {
-	floor, why, err := a.floor(p.Request, p.Request.ResolvedTargets, p.Parameters)
-	if err != nil || floor.Rank() == 0 {
-		a.emit(Event{Kind: "rejected", Digest: p.Digest.String(), Code: CodeStorage,
-			Detail: fmt.Sprintf("risk policy: %v (floor %q)", err, floor)})
+	d := p.Digest
+	req := p.Request
+	params := p.Parameters
+	a.mu.Unlock()
+	floor, why, ferr := a.floor(req, req.ResolvedTargets, params)
+	// Re-acquire before deciding. a.floor returns errors and never panics,
+	// so the lock is always re-held before the caller's deferred Unlock.
+	a.mu.Lock()
+	// Re-validate: the permit may have changed while the store was read.
+	if _, err := a.pendingLocked(d, a.now()); err != nil {
+		return err
+	}
+	if ferr != nil || floor.Rank() == 0 {
+		a.emit(Event{Kind: "rejected", Digest: d.String(), Code: CodeStorage,
+			Detail: fmt.Sprintf("risk policy: %v (floor %q)", ferr, floor)})
 		return fail(CodeStorage, "executor state store unavailable")
 	}
-	if p.Request.RiskClass.Rank() < floor.Rank() {
-		a.emit(Event{Kind: "rejected", Digest: p.Digest.String(), Code: CodeRiskAboveApproval,
-			Detail: fmt.Sprintf("approved as %s, executor minimum is now %s (%s)", p.Request.RiskClass, floor, why)})
-		return fail(CodeRiskAboveApproval, "approved as %s, executor minimum is now %s", p.Request.RiskClass, floor)
+	if req.RiskClass.Rank() < floor.Rank() {
+		a.emit(Event{Kind: "rejected", Digest: d.String(), Code: CodeRiskAboveApproval,
+			Detail: fmt.Sprintf("approved as %s, executor minimum is now %s (%s)", req.RiskClass, floor, why)})
+		return fail(CodeRiskAboveApproval, "approved as %s, executor minimum is now %s", req.RiskClass, floor)
 	}
 	return nil
 }
