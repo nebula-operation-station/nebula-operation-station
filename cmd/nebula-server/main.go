@@ -61,6 +61,13 @@ const hostKeyPollInterval = 30 * time.Second
 // ended are marked expired.
 const expireInterval = time.Minute
 
+// cliApproveInterval is how often the server asks the executor for the
+// permit state of pending operations: an approval made on the executor host
+// (nebula approve, hardened path) is recorded and dispatched only when the
+// server asks (issue #78). The check does not contact the executor while no
+// operation is pending.
+const cliApproveInterval = 10 * time.Second
+
 func pruneSessions(ctx context.Context, s *auth.Store, log *slog.Logger) {
 	t := time.NewTicker(pruneInterval)
 	defer t.Stop()
@@ -256,6 +263,25 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 			}
 			if _, err := ops.ExpirePending(connCtx, time.Now()); err != nil {
 				log.Error("expire pending operations", "error", err)
+			}
+		}
+	}()
+
+	// Record approvals made on the executor host (issue #78): the check
+	// contacts the executor only while at least one operation is pending.
+	go func() {
+		t := time.NewTicker(cliApproveInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-connCtx.Done():
+				return
+			case <-t.C:
+			}
+			if n, err := ops.CheckCLIApprovals(connCtx, time.Now()); err != nil {
+				log.Error("check CLI approvals", "error", err)
+			} else if n > 0 {
+				log.Info("recorded CLI approvals", "count", n)
 			}
 		}
 	}()

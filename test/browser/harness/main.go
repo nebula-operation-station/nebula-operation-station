@@ -135,6 +135,10 @@ func (d direct) SubmitAssertion(ctx context.Context, in *pb.SubmitAssertionReque
 	return d.s.SubmitAssertion(ctx, in)
 }
 
+func (d direct) GetPermitState(ctx context.Context, in *pb.GetPermitStateRequest, _ ...grpc.CallOption) (*pb.GetPermitStateResponse, error) {
+	return d.s.GetPermitState(ctx, in)
+}
+
 func (d direct) RunAttached(ctx context.Context, in *pb.RunAttachedRequest, _ ...grpc.CallOption) (*pb.RunAttachedResponse, error) {
 	return d.s.RunAttached(ctx, in)
 }

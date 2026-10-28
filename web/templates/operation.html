@@ -28,6 +28,9 @@
   </div>
   {{else}}
   <p class="status status--error">This operation needs approval on the executor host: run <code>nebula pending</code> and <code>nebula approve</code> there.</p>
+  <div class="actions">
+    <button type="button" id="operation-check" class="button">Check approval</button>
+  </div>
   {{end}}
   {{end}}
   {{if .Expired}}

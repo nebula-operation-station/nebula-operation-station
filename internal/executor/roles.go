@@ -27,6 +27,7 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_Lock_FullMethodName:                      {server, admin},
 		pb.ExecutorService_ListPending_FullMethodName:               {admin},
 		pb.ExecutorService_ApproveCLI_FullMethodName:                {admin},
+		pb.ExecutorService_GetPermitState_FullMethodName:            {server, admin},
 		pb.ExecutorService_TrustArtifact_FullMethodName:             {admin},
 		pb.ExecutorService_UntrustArtifact_FullMethodName:           {admin},
 		pb.ExecutorService_ListTrustedArtifacts_FullMethodName:      {admin},
