@@ -3,6 +3,7 @@
 package executions
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/base64"
@@ -654,4 +655,220 @@ func (f *fakeExec) RunScheduled(_ context.Context, in *pb.RunScheduledRequest, _
 	}
 	return &pb.RunScheduledResponse{ExecutionId: fmt.Sprintf("00000000-0000-4000-8000-%012d", len(f.scheduled)),
 		Result: &pb.RunAttachedResponse{Class: "success", Result: res}}, nil
+}
+
+// TestExpirePendingExpiresOnlyOverduePending checks the core behaviour: only a
+// pending execution whose approval window has ended becomes expired (its
+// waiting host rows become finished/not_executed); approved, running,
+// staged-waiting, finished, failed and not-yet-overdue pending executions are
+// left untouched.
+func TestExpirePendingExpiresOnlyOverduePending(t *testing.T) {
+	f := &fakeExec{}
+	s, db := setup(t, f)
+	f.pins = []*pb.HostKeyPin{
+		{HostId: "web", Fingerprint: "SHA256:web", CredentialRef: "nebula-default"},
+		{HostId: "db", Fingerprint: "SHA256:db", CredentialRef: "nebula-default"},
+	}
+	ctx := context.Background()
+	now := time.Unix(1791960000, 0)
+	mk := func(host string) string {
+		t.Helper()
+		c, err := s.Create(ctx, "axel", "core.facts", []string{host}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c.ID
+	}
+	set := func(id, state string, expiry int64) {
+		t.Helper()
+		if _, err := db.Exec(`UPDATE executions SET state = ?, approval_expiry = ? WHERE id = ?`, state, expiry, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pendingOverdue := mk("web")
+	pendingFresh := mk("db")
+	approved := mk("web")
+	running := mk("db")
+	finished := mk("web")
+	failed := mk("db")
+	// A staged execution that is running and waiting at a gate.
+	staged, err := s.CreateStaged(ctx, "axel", "core.facts", []string{"web", "db"}, nil,
+		Plan{Preset: PresetCanary, Size: 1, Continue: "auto", MaxFailed: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	set(pendingOverdue, "pending", now.Unix()-100)
+	set(pendingFresh, "pending", now.Unix()+100)
+	set(approved, "approved", now.Unix()-100)
+	set(running, "running", now.Unix()-100)
+	set(finished, "finished", now.Unix()-100)
+	set(failed, "failed", now.Unix()-100)
+	set(staged.ID, "running", now.Unix()-100)
+
+	n, err := s.ExpirePending(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("expired %d, want 1", n)
+	}
+	const wantDetail = "approval window ended; nothing was run"
+	e, err := s.Get(ctx, pendingOverdue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.State != "expired" || e.Detail != wantDetail || !e.FinishedAt.Equal(now) {
+		t.Fatalf("expired execution %+v", e)
+	}
+	if e.Hosts[0].State != "finished" || e.Hosts[0].Class != "not_executed" || e.Hosts[0].Detail != wantDetail {
+		t.Fatalf("expired host %+v", e.Hosts[0])
+	}
+	// The not-yet-overdue pending execution is untouched.
+	e, _ = s.Get(ctx, pendingFresh)
+	if e.State != "pending" || e.Hosts[0].State != "waiting" {
+		t.Fatalf("fresh pending %+v", e)
+	}
+	// The other states are untouched.
+	for id, want := range map[string]string{approved: "approved", running: "running", finished: "finished", failed: "failed", staged.ID: "running"} {
+		e, _ := s.Get(ctx, id)
+		if e.State != want {
+			t.Fatalf("%s: state %s, want %s", id, e.State, want)
+		}
+	}
+	// The staged execution still waits with both hosts waiting.
+	e, _ = s.Get(ctx, staged.ID)
+	waiting := 0
+	for _, h := range e.Hosts {
+		if h.State == "waiting" {
+			waiting++
+		}
+	}
+	if waiting != 2 {
+		t.Fatalf("staged waiting hosts %d, want 2", waiting)
+	}
+}
+
+// TestExpirePendingIsIdempotent checks that a second sweep finds nothing to do.
+func TestExpirePendingIsIdempotent(t *testing.T) {
+	f := &fakeExec{}
+	s, db := setup(t, f)
+	ctx := context.Background()
+	now := time.Unix(1791960000, 0)
+	c, err := s.Create(ctx, "axel", "core.facts", []string{"web"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE executions SET approval_expiry = ? WHERE id = ?`, now.Unix()-100, c.ID); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := s.ExpirePending(ctx, now); n != 1 {
+		t.Fatalf("first sweep expired %d, want 1", n)
+	}
+	if n, _ := s.ExpirePending(ctx, now); n != 0 {
+		t.Fatalf("second sweep expired %d, want 0", n)
+	}
+	e, _ := s.Get(ctx, c.ID)
+	if e.State != "expired" || e.Hosts[0].State != "finished" || e.Hosts[0].Class != "not_executed" {
+		t.Fatalf("after second sweep %+v", e)
+	}
+}
+
+// TestExpirePendingSendsNoNotification checks that expiring is silent: it is
+// not a failure and must not notify anyone.
+func TestExpirePendingSendsNoNotification(t *testing.T) {
+	f := &fakeExec{}
+	s, db := setup(t, f)
+	sent := &sentEvents{}
+	s.SetNotifier(notify.NewWithSenders(
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		[]time.Duration{24 * time.Hour},
+		sent,
+	))
+	ctx := context.Background()
+	now := time.Unix(1791960000, 0)
+	c, err := s.Create(ctx, "axel", "core.facts", []string{"web"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE executions SET approval_expiry = ? WHERE id = ?`, now.Unix()-100, c.ID); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.ExpirePending(ctx, now); err != nil || n != 1 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	sent.mu.Lock()
+	defer sent.mu.Unlock()
+	if len(sent.events) != 0 {
+		t.Fatalf("sent %d events, want none: %+v", len(sent.events), sent.events)
+	}
+}
+
+// TestApprovingAnExpiredExecutionIsRefused checks that the server refuses to
+// submit an assertion for an expired execution (it is not pending) and never
+// asks the executor to.
+func TestApprovingAnExpiredExecutionIsRefused(t *testing.T) {
+	f := &fakeExec{}
+	s, db := setup(t, f)
+	ctx := context.Background()
+	now := time.Unix(1791960000, 0)
+	c, err := s.Create(ctx, "axel", "core.facts", []string{"web"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE executions SET approval_expiry = ? WHERE id = ?`, now.Unix()-100, c.ID); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.ExpirePending(ctx, now); err != nil || n != 1 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	err = s.Approve(ctx, "axel", c.ID, []byte("good"), 0)
+	if !errors.Is(err, ErrNotPending) {
+		t.Fatalf("approve expired: %v, want ErrNotPending", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.submitted != nil {
+		t.Fatalf("executor was asked to submit for an expired execution")
+	}
+}
+
+// TestExpirePendingLogsAnAuditRecord checks that one audit record of kind
+// operations_expired with the count is logged when something expired and none
+// when nothing did.
+func TestExpirePendingLogsAnAuditRecord(t *testing.T) {
+	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	f := &fakeExec{pins: []*pb.HostKeyPin{{HostId: "web", Fingerprint: "SHA256:web", CredentialRef: "nebula-default"}}}
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := New(ctx, f, db, fakeHosts{"web": {ID: "web", Endpoints: []inventory.Endpoint{{Address: "10.0.0.5", Port: 22}}}}, log)
+	t.Cleanup(func() { cancel(); s.Wait() })
+	c, err := s.Create(ctx, "axel", "core.facts", []string{"web"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE executions SET approval_expiry = 1 WHERE id = ?`, c.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Not overdue yet: no record.
+	if n, err := s.ExpirePending(ctx, time.Unix(1, 0)); err != nil || n != 0 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	if strings.Contains(buf.String(), "operations_expired") {
+		t.Fatalf("audit record logged with nothing expired: %s", buf.String())
+	}
+	// Now overdue: one record with the count.
+	buf.Reset()
+	if n, err := s.ExpirePending(ctx, time.Unix(1000, 0)); err != nil || n != 1 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	if !strings.Contains(buf.String(), "operations_expired") || !strings.Contains(buf.String(), "count=1") {
+		t.Fatalf("audit record missing: %s", buf.String())
+	}
 }

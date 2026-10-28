@@ -350,6 +350,53 @@ func (s *Service) Approve(ctx context.Context, user, id string, assertion []byte
 	return nil
 }
 
+// ExpirePending marks every pending execution whose approval window has ended
+// as expired (spec 07). The executor drops the permit when the window closes
+// but the server only learns it here: the execution stays 'pending' (with a
+// long-past approval_expiry) and its host rows stay 'waiting'. In one
+// transaction each such execution becomes 'expired' with a finished_at, and
+// its host rows in state 'waiting' become 'finished' with class
+// 'not_executed'. Only 'pending' executions are touched — approved, running,
+// staged-waiting, finished and failed executions never change. It returns the
+// number of executions expired. An expiry is not a failure, so no
+// notification is sent; one audit record of kind operations_expired is logged
+// when at least one execution expired.
+func (s *Service) ExpirePending(ctx context.Context, now time.Time) (int, error) {
+	const detail = "approval window ended; nothing was run"
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	res, err := tx.ExecContext(ctx, `UPDATE executions SET state = 'expired', detail = ?, finished_at = ?
+		WHERE state = 'pending' AND approval_expiry > 0 AND approval_expiry < ?`, detail, now.Unix(), now.Unix())
+	if err != nil {
+		return 0, fmt.Errorf("expire executions: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("expire executions: %w", err)
+	}
+	if n > 0 {
+		// Only the executions expired in this call: a successful call always
+		// finishes the waiting hosts of what it expires, so no other 'expired'
+		// row has finished_at == now.
+		if _, err := tx.ExecContext(ctx, `UPDATE execution_hosts SET state = 'finished', class = 'not_executed',
+			detail = ?, finished_at = ? WHERE state = 'waiting'
+			AND execution_id IN (SELECT id FROM executions WHERE state = 'expired' AND finished_at = ?)`,
+			detail, now.Unix(), now.Unix()); err != nil {
+			return 0, fmt.Errorf("expire execution hosts: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	if n > 0 {
+		s.log.Info("audit", "kind", "operations_expired", "count", n)
+	}
+	return int(n), nil
+}
+
 // Resume restarts the dispatchers of executions that were approved or
 // running when the server stopped. Attached runs that were in flight have
 // an unknown outcome on the server side; the executor never re-runs them.
