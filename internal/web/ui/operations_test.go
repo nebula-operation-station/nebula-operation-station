@@ -41,7 +41,10 @@ type fakeOps struct {
 	gateRes      executions.GateResult
 	gateErr      error
 	gates        []string
-	extra        []actions.Action // runbook actions after the built-ins
+	// checkState/checkErr drive CheckCLIApproval (the check endpoint).
+	checkState string
+	checkErr   error
+	extra      []actions.Action // runbook actions after the built-ins
 	// list and listHosts override List/ListHosts for the list-page tests;
 	// lastSeen overrides LastSeenAll (nil: no reads known).
 	list      []executions.Summary
@@ -104,6 +107,19 @@ func (f *fakeOps) RetryHost(_ context.Context, _, id, host string) error {
 func (f *fakeOps) Approve(_ context.Context, _ string, id string, assertion []byte, _ uint32) error {
 	f.approved = id + ":" + string(assertion)
 	return f.approveErr
+}
+
+func (f *fakeOps) CheckCLIApproval(_ context.Context, id string) (string, error) {
+	if f.checkErr != nil {
+		return "", f.checkErr
+	}
+	if id != opID {
+		return "", executions.ErrNotFound
+	}
+	if f.checkState == "" {
+		return "pending", nil
+	}
+	return f.checkState, nil
 }
 
 func (f *fakeOps) Get(_ context.Context, id string) (executions.Execution, error) {
@@ -248,6 +264,37 @@ func TestOperationCreateAndApprove(t *testing.T) {
 	code, body = postJSON(t, h, "/operations/approve", `{"id":"`+opID+`","assertion":{"id":"cred"}}`)
 	if code != http.StatusOK || f.approved != opID+`:{"id":"cred"}` {
 		t.Fatalf("approve: %d %s %s", code, body, f.approved)
+	}
+}
+
+func TestOperationCheckEndpoint(t *testing.T) {
+	f := &fakeOps{}
+	h := opsHandler(t, f, nil)
+	// The route is POST only; a GET matches no route (404), like the
+	// other POST endpoints.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/operations/"+opID+"/check", nil))
+	if rec.Code == http.StatusOK {
+		t.Fatalf("GET on check: %d", rec.Code)
+	}
+	// JSON shape: the execution's state after the check.
+	code, body := postJSON(t, h, "/operations/"+opID+"/check", `{}`)
+	if code != http.StatusOK || !strings.Contains(body, `{"state":"pending"}`) {
+		t.Fatalf("check: %d %s", code, body)
+	}
+	// The recorded state is returned as is.
+	f.checkState = "approved"
+	if code, body := postJSON(t, h, "/operations/"+opID+"/check", `{}`); code != http.StatusOK || !strings.Contains(body, `"state":"approved"`) {
+		t.Fatalf("approved: %d %s", code, body)
+	}
+	// Unknown id: 404.
+	if code, _ := postJSON(t, h, "/operations/nope/check", `{}`); code != http.StatusNotFound {
+		t.Fatalf("unknown id: %d", code)
+	}
+	// Executor error: 502, no details in the body.
+	f.checkErr = errors.New("boom")
+	if code, body := postJSON(t, h, "/operations/"+opID+"/check", `{}`); code != http.StatusBadGateway || strings.Contains(body, "boom") {
+		t.Fatalf("executor error: %d %s", code, body)
 	}
 }
 

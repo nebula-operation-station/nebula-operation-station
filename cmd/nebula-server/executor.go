@@ -195,6 +195,13 @@ func (l *lazyExecutor) SubmitAssertion(ctx context.Context, in *pb.SubmitAsserti
 	return nil, errNotConnected
 }
 
+func (l *lazyExecutor) GetPermitState(ctx context.Context, in *pb.GetPermitStateRequest, opts ...grpc.CallOption) (*pb.GetPermitStateResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.GetPermitState(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
 func (l *lazyExecutor) RunAttached(ctx context.Context, in *pb.RunAttachedRequest, opts ...grpc.CallOption) (*pb.RunAttachedResponse, error) {
 	if c := l.c.Load(); c != nil {
 		return c.RunAttached(ctx, in, opts...)

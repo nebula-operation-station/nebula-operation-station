@@ -52,6 +52,10 @@ type Operations interface {
 	CommitGate(ctx context.Context, user, id string, g executions.Gate, assertion []byte) error
 	Abort(ctx context.Context, user, id string) error
 	RetryHost(ctx context.Context, user, id, host string) error
+	// CheckCLIApproval asks the executor for the permit state of one
+	// execution (the "Check approval" button) and returns its state after
+	// the check.
+	CheckCLIApproval(ctx context.Context, id string) (string, error)
 	// Catalog lists the plannable actions (built-ins, then runbooks).
 	Catalog(ctx context.Context) ([]actions.Action, error)
 	// Action finds an action at a version ("" for the current one).
@@ -713,6 +717,28 @@ func (h *Handler) handleOperationApprove(w http.ResponseWriter, r *http.Request)
 			h.log.Error("approve execution", "error", err)
 			writeJSONError(w, http.StatusBadGateway, "executor unavailable")
 		}
+	}
+}
+
+// handleOperationCheck is the "Check approval" button of the operation page
+// for operations that are approved on the executor host (hardened path): it
+// asks the executor for the permit state of that one execution, records it
+// when approved, and returns the new state.
+func (h *Handler) handleOperationCheck(w http.ResponseWriter, r *http.Request) {
+	if !h.operationsEnabled(w, r) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
+	defer cancel()
+	state, err := h.operations.CheckCLIApproval(ctx, r.PathValue("id"))
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, map[string]string{"state": state})
+	case errors.Is(err, executions.ErrNotFound):
+		writeJSONError(w, http.StatusNotFound, "operation not found")
+	default:
+		h.log.Error("check CLI approval", "error", err)
+		writeJSONError(w, http.StatusBadGateway, "executor unavailable")
 	}
 }
 

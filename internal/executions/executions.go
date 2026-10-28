@@ -53,6 +53,7 @@ type Executor interface {
 	RevokeScheduleGrant(ctx context.Context, in *pb.RevokeScheduleGrantRequest, opts ...grpc.CallOption) (*pb.RevokeScheduleGrantResponse, error)
 	RunScheduled(ctx context.Context, in *pb.RunScheduledRequest, opts ...grpc.CallOption) (*pb.RunScheduledResponse, error)
 	ListScheduleGrants(ctx context.Context, in *pb.ListScheduleGrantsRequest, opts ...grpc.CallOption) (*pb.ListScheduleGrantsResponse, error)
+	GetPermitState(ctx context.Context, in *pb.GetPermitStateRequest, opts ...grpc.CallOption) (*pb.GetPermitStateResponse, error)
 }
 
 // Hosts gives the inventory hosts (inventory.Store).
@@ -365,6 +366,115 @@ func (s *Service) Approve(ctx context.Context, user, id string, assertion []byte
 	return nil
 }
 
+// checkCLIApproval asks the executor for the permit state of one execution
+// and, when the executor reports it approved (approved on the executor host
+// with `nebula approve`, the hardened path), records it approved with the
+// same guarded update as Approve and starts it. It reports whether it
+// recorded the approval. An execution the executor does not report approved
+// is left alone; an executor error is returned and the execution stays
+// pending for the next check.
+func (s *Service) checkCLIApproval(ctx context.Context, id, digest string) (bool, error) {
+	cctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	r, err := s.exec.GetPermitState(cctx, &pb.GetPermitStateRequest{ExecutionDigest: digest})
+	if err != nil {
+		return false, err
+	}
+	if r.GetState() != pb.PermitState_PERMIT_STATE_APPROVED {
+		return false, nil
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE executions SET state = 'approved', options = NULL WHERE id = ? AND state = 'pending'`, id)
+	if err != nil {
+		return false, err
+	}
+	// Start only an execution this call moved to approved: if it stopped
+	// being pending meanwhile (expired by the sweep, or approved by the
+	// browser path or a concurrent check), nothing is dispatched.
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if n != 1 {
+		s.log.Warn("audit", "kind", "execution_approval_not_recorded", "execution", id)
+		return false, nil
+	}
+	s.log.Info("audit", "kind", "execution_approved_on_cli", "execution", id)
+	s.start(id)
+	return true, nil
+}
+
+// CheckCLIApprovals asks the executor for the permit state of every pending
+// execution and records the ones it reports approved (issue #78): an
+// operation approved on the executor host with `nebula approve` (hardened
+// path) is seen by the server only this way. Each such execution is moved to
+// 'approved' with the same guarded update as Approve and started only by the
+// call that moved it, so an approval is dispatched exactly once.
+//
+// Every pending execution is checked, not only the ones whose approval
+// window is still open: an approved permit stays executable on the executor
+// until the request expires, so an approval made just after the window
+// closed must still be caught before the sweep expires the execution. It
+// does not contact the executor when no execution is pending. An executor
+// error leaves the executions pending and is returned. It returns the number
+// of executions recorded approved.
+func (s *Service) CheckCLIApprovals(ctx context.Context, now time.Time) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, digest FROM executions WHERE state = 'pending'`)
+	if err != nil {
+		return 0, fmt.Errorf("list pending executions: %w", err)
+	}
+	type pending struct{ id, digest string }
+	var list []pending
+	for rows.Next() {
+		var p pending
+		if err := rows.Scan(&p.id, &p.digest); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		list = append(list, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	n := 0
+	var firstErr error
+	for _, p := range list {
+		if p.digest == "" {
+			continue // corrupted row: there is no digest to ask the executor
+		}
+		ok, err := s.checkCLIApproval(ctx, p.id, p.digest)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+		if ok {
+			n++
+		}
+	}
+	return n, firstErr
+}
+
+// CheckCLIApproval is the on-demand version of CheckCLIApprovals for the
+// operation page's "Check approval" button: it asks the executor for the
+// permit state of one execution and records it when the executor reports it
+// approved. It returns the execution's state after the check.
+func (s *Service) CheckCLIApproval(ctx context.Context, id string) (string, error) {
+	e, err := s.Get(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	if e.State != "pending" {
+		return e.State, nil
+	}
+	if _, err := s.checkCLIApproval(ctx, id, e.Digest); err != nil {
+		return "", err
+	}
+	e, err = s.Get(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	return e.State, nil
+}
+
 // ExpirePending marks every pending execution whose approval window has ended
 // as expired (spec 07). The executor drops the permit when the window closes
 // but the server only learns it here: the execution stays 'pending' (with a
@@ -380,30 +490,81 @@ func (s *Service) Approve(ctx context.Context, user, id string, assertion []byte
 // An execution expires only expireGrace after its window ended: the executor
 // refuses approvals after the window, and a browser approval it granted just
 // before has been recorded by then, so the sweep never races Approve.
+//
+// Before expiring, the sweep asks the executor for the permit state of each
+// overdue execution (issue #78): one whose permit the executor reports
+// approved (approved on the executor host) is recorded approved and
+// dispatched, not expired. An execution whose check fails (executor
+// unreachable, or the executor refuses the digest) is not expired in this
+// sweep, because an approved permit may still be live; the other overdue
+// executions are expired and the first check error is returned. Executions
+// without a digest cannot have been approved on the CLI and are expired
+// without a check.
 func (s *Service) ExpirePending(ctx context.Context, now time.Time) (int, error) {
 	const detail = "approval window ended; nothing was run"
+	rows, err := s.db.QueryContext(ctx, `SELECT id, digest FROM executions
+		WHERE state = 'pending' AND approval_expiry > 0 AND approval_expiry < ?`, now.Add(-expireGrace).Unix())
+	if err != nil {
+		return 0, fmt.Errorf("list overdue executions: %w", err)
+	}
+	type overdue struct{ id, digest string }
+	var list []overdue
+	for rows.Next() {
+		var o overdue
+		if err := rows.Scan(&o.id, &o.digest); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		list = append(list, o)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	var expire []string
+	var checkErr error
+	for _, o := range list {
+		if o.digest != "" {
+			approved, err := s.checkCLIApproval(ctx, o.id, o.digest)
+			if err != nil {
+				if checkErr == nil {
+					checkErr = fmt.Errorf("check CLI approvals: %w", err)
+				}
+				continue // not verified: stays pending for the next sweep
+			}
+			if approved {
+				continue
+			}
+		}
+		expire = append(expire, o.id)
+	}
+	if len(expire) == 0 {
+		return 0, checkErr
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback() //nolint:errcheck
-	res, err := tx.ExecContext(ctx, `UPDATE executions SET state = 'expired', detail = ?, finished_at = ?
-		WHERE state = 'pending' AND approval_expiry > 0 AND approval_expiry < ?`, detail, now.Unix(), now.Add(-expireGrace).Unix())
-	if err != nil {
-		return 0, fmt.Errorf("expire executions: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("expire executions: %w", err)
-	}
-	if n > 0 {
-		// Only the executions expired in this call: a successful call always
-		// finishes the waiting hosts of what it expires, so no other 'expired'
-		// row has finished_at == now.
+	var n int64
+	for _, id := range expire {
+		// Guarded like Approve: an execution that stopped being pending
+		// since the list (approved meanwhile) is left alone.
+		res, err := tx.ExecContext(ctx, `UPDATE executions SET state = 'expired', detail = ?, finished_at = ?
+			WHERE id = ? AND state = 'pending'`, detail, now.Unix(), id)
+		if err != nil {
+			return 0, fmt.Errorf("expire executions: %w", err)
+		}
+		m, err := res.RowsAffected()
+		if err != nil {
+			return 0, fmt.Errorf("expire executions: %w", err)
+		}
+		if m != 1 {
+			continue
+		}
+		n++
 		if _, err := tx.ExecContext(ctx, `UPDATE execution_hosts SET state = 'finished', class = 'not_executed',
-			detail = ?, finished_at = ? WHERE state = 'waiting'
-			AND execution_id IN (SELECT id FROM executions WHERE state = 'expired' AND finished_at = ?)`,
-			detail, now.Unix(), now.Unix()); err != nil {
+			detail = ?, finished_at = ? WHERE execution_id = ? AND state = 'waiting'`, detail, now.Unix(), id); err != nil {
 			return 0, fmt.Errorf("expire execution hosts: %w", err)
 		}
 	}
@@ -413,7 +574,7 @@ func (s *Service) ExpirePending(ctx context.Context, now time.Time) (int, error)
 	if n > 0 {
 		s.log.Info("audit", "kind", "operations_expired", "count", n)
 	}
-	return int(n), nil
+	return int(n), checkErr
 }
 
 // Resume restarts the dispatchers of executions that were approved or

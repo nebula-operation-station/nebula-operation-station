@@ -404,6 +404,24 @@ func (s *Service) ApproveCLI(ctx context.Context, req *pb.ApproveCLIRequest) (*p
 	return &pb.ApproveCLIResponse{State: stateToProto(p.State)}, nil
 }
 
+// GetPermitState reports the state of the live permit for the execution
+// digest. It is read-only: it changes nothing and returns only the state,
+// never the permit's options, parameters or request. When there is no live
+// permit (never proposed, expired, consumed, revoked by Lock) it answers
+// UNSPECIFIED, not an error: the absence of a permit is a valid answer to a
+// read, and the caller treats it like "not approved yet".
+func (s *Service) GetPermitState(_ context.Context, req *pb.GetPermitStateRequest) (*pb.GetPermitStateResponse, error) {
+	d, err := canonical.ParseDigest(req.GetExecutionDigest())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	st, ok := s.auth.PermitState(d)
+	if !ok {
+		return &pb.GetPermitStateResponse{State: pb.PermitState_PERMIT_STATE_UNSPECIFIED}, nil
+	}
+	return &pb.GetPermitStateResponse{State: stateToProto(st)}, nil
+}
+
 func callerName(ctx context.Context) string {
 	c, ok := peercred.CallerFrom(ctx)
 	if !ok {

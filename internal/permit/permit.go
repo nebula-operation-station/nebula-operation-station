@@ -904,6 +904,23 @@ func (a *Authority) Counts() (pending, approved int) {
 	return pending, approved
 }
 
+// PermitState reports the state of the live permit for the digest without
+// changing it: StatePending or StateApproved, or ok=false when there is no
+// live permit (never proposed, approval window closed, request expired,
+// consumed past expiry, or revoked by Lock). It reveals nothing about the
+// permit's contents. Expired permits are collected first, exactly like
+// Pending and Counts, so the answer matches what the executor would act on.
+func (a *Authority) PermitState(d canonical.Digest) (State, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.gcLocked(a.now())
+	p, ok := a.permits[d]
+	if !ok {
+		return 0, false
+	}
+	return p.State, true
+}
+
 func (a *Authority) pendingLocked(d canonical.Digest, now time.Time) (*Permit, error) {
 	p, ok := a.permits[d]
 	if !ok {

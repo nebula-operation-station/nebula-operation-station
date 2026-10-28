@@ -287,6 +287,7 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("GET /operations/{id}", h.handleOperation)
 	mux.HandleFunc("POST /operations/create", h.handleOperationCreate)
 	mux.HandleFunc("POST /operations/approve", h.handleOperationApprove)
+	mux.HandleFunc("POST /operations/{id}/check", h.handleOperationCheck)
 	// The status poll is GET only (the handler answers 405 otherwise).
 	mux.HandleFunc("/operations/{id}/status", h.handleOperationStatus)
 	mux.HandleFunc("POST /operations/gate", h.handleOperationGate)

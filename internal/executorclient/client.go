@@ -201,6 +201,15 @@ func (c *Client) ApproveCLI(ctx context.Context, in *pb.ApproveCLIRequest, opts 
 	return resp, mapError(err)
 }
 
+// GetPermitState returns the state of the live permit for the execution
+// digest (read-only; UNSPECIFIED when there is no live permit).
+func (c *Client) GetPermitState(ctx context.Context, in *pb.GetPermitStateRequest, opts ...grpc.CallOption) (*pb.GetPermitStateResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.GetPermitState(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
 // The risk-data methods below are admin-only on the executor (H01); the
 // server's UID is denied. They exist so that Client implements the full
 // generated interface.
