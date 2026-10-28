@@ -55,6 +55,13 @@ type fakeExec struct {
 	runErr      error               // answers RunScheduled
 	// onSubmit runs inside SubmitAssertion before it answers approved.
 	onSubmit func()
+	// permitState is answered by GetPermitState (the CLI-approval check);
+	// zero is UNSPECIFIED, like a digest with no live permit.
+	permitState pb.PermitState
+	// permitStateErr is answered by GetPermitState instead of a state.
+	permitStateErr error
+	// permitStateCalls counts GetPermitState calls (no RPC without pending).
+	permitStateCalls int
 }
 
 func (f *fakeExec) ListHostKeys(context.Context, *pb.ListHostKeysRequest, ...grpc.CallOption) (*pb.ListHostKeysResponse, error) {
@@ -127,6 +134,16 @@ func (f *fakeExec) GetRun(_ context.Context, in *pb.GetRunRequest, _ ...grpc.Cal
 		return &pb.GetRunResponse{Run: &pb.RunStatus{State: "finished", Class: "success"}}, nil
 	}
 	return &pb.GetRunResponse{Run: &pb.RunStatus{State: "finished", Class: "success", Result: []byte(`{"kept":true}`)}}, nil
+}
+
+func (f *fakeExec) GetPermitState(_ context.Context, _ *pb.GetPermitStateRequest, _ ...grpc.CallOption) (*pb.GetPermitStateResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.permitStateCalls++
+	if f.permitStateErr != nil {
+		return nil, f.permitStateErr
+	}
+	return &pb.GetPermitStateResponse{State: f.permitState}, nil
 }
 
 type fakeHosts map[string]inventory.Host
