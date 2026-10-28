@@ -405,3 +405,21 @@ func TestApproveConcurrentWithFloorChange(t *testing.T) {
 		t.Fatalf("after no approvals: %d pending, %d approved", pend, appr)
 	}
 }
+
+// A lock while the floor read runs (the global lock is released for it)
+// revokes the permit; the approval re-validates after re-acquiring the lock
+// and must fail instead of approving a permit that no longer exists.
+func TestFloorReadRevalidatesAfterLock(t *testing.T) {
+	e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
+	e.openSession()
+	p := e.propose(e.request(canonical.RiskMedium))
+	assertion := e.sign(p.Challenge)
+	e.risk.setDuring(func() { e.auth.Lock("test") })
+	_, err := e.auth.SubmitAssertion(p.Digest, assertion, 0)
+	if err == nil {
+		t.Fatal("approval succeeded for a permit revoked during the floor read")
+	}
+	if pend, appr := e.auth.Counts(); pend != 0 || appr != 0 {
+		t.Fatalf("after a lock during the floor read: %d pending, %d approved", pend, appr)
+	}
+}

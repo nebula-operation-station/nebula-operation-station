@@ -557,14 +557,31 @@ func (a *Authority) floorRiseLocked(p *Permit) error {
 	d := p.Digest
 	req := p.Request
 	params := p.Parameters
-	a.mu.Unlock()
-	floor, why, ferr := a.floor(req, req.ResolvedTargets, params)
-	// Re-acquire before deciding. a.floor returns errors and never panics,
-	// so the lock is always re-held before the caller's deferred Unlock.
-	a.mu.Lock()
-	// Re-validate: the permit may have changed while the store was read.
-	if _, err := a.pendingLocked(d, a.now()); err != nil {
+	var (
+		floor canonical.Risk
+		why   string
+		ferr  error
+	)
+	func() {
+		// Re-acquire even if the read panics, so the caller's deferred
+		// Unlock never unlocks an unlocked mutex.
+		a.mu.Unlock()
+		defer a.mu.Lock()
+		floor, why, ferr = a.floor(req, req.ResolvedTargets, params)
+	}()
+	// Re-validate: the permit may have changed while the store was read. It
+	// must still be pending and the very same permit the caller holds; a
+	// permit discarded and proposed again under the same digest is another
+	// object, and approving the caller's stale copy would report an approval
+	// that never reaches the live permit.
+	q, err := a.pendingLocked(d, a.now())
+	if err != nil {
 		return err
+	}
+	if q != p {
+		a.emit(Event{Kind: "rejected", Digest: d.String(), Code: CodeWrongState,
+			Detail: "permit replaced during the risk check"})
+		return fail(CodeWrongState, "permit changed during approval, try again")
 	}
 	if ferr != nil || floor.Rank() == 0 {
 		a.emit(Event{Kind: "rejected", Digest: d.String(), Code: CodeStorage,
