@@ -2760,6 +2760,94 @@ func (x *ApproveCLIResponse) GetState() PermitState {
 	return PermitState_PERMIT_STATE_UNSPECIFIED
 }
 
+type GetPermitStateRequest struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	ExecutionDigest string                 `protobuf:"bytes,1,opt,name=execution_digest,json=executionDigest,proto3" json:"execution_digest,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *GetPermitStateRequest) Reset() {
+	*x = GetPermitStateRequest{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[39]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetPermitStateRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetPermitStateRequest) ProtoMessage() {}
+
+func (x *GetPermitStateRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[39]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetPermitStateRequest.ProtoReflect.Descriptor instead.
+func (*GetPermitStateRequest) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{39}
+}
+
+func (x *GetPermitStateRequest) GetExecutionDigest() string {
+	if x != nil {
+		return x.ExecutionDigest
+	}
+	return ""
+}
+
+type GetPermitStateResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	State         PermitState            `protobuf:"varint,1,opt,name=state,proto3,enum=nebula.executor.v1.PermitState" json:"state,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetPermitStateResponse) Reset() {
+	*x = GetPermitStateResponse{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[40]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetPermitStateResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetPermitStateResponse) ProtoMessage() {}
+
+func (x *GetPermitStateResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[40]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetPermitStateResponse.ProtoReflect.Descriptor instead.
+func (*GetPermitStateResponse) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{40}
+}
+
+func (x *GetPermitStateResponse) GetState() PermitState {
+	if x != nil {
+		return x.State
+	}
+	return PermitState_PERMIT_STATE_UNSPECIFIED
+}
+
 type TrustArtifactRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ActionId      string                 `protobuf:"bytes,1,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"`
@@ -2779,7 +2867,7 @@ type TrustArtifactRequest struct {
 
 func (x *TrustArtifactRequest) Reset() {
 	*x = TrustArtifactRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[39]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2791,7 +2879,7 @@ func (x *TrustArtifactRequest) String() string {
 func (*TrustArtifactRequest) ProtoMessage() {}
 
 func (x *TrustArtifactRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[39]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2804,7 +2892,7 @@ func (x *TrustArtifactRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TrustArtifactRequest.ProtoReflect.Descriptor instead.
 func (*TrustArtifactRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{39}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *TrustArtifactRequest) GetActionId() string {
@@ -2859,7 +2947,7 @@ type TrustArtifactResponse struct {
 
 func (x *TrustArtifactResponse) Reset() {
 	*x = TrustArtifactResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[40]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2871,7 +2959,7 @@ func (x *TrustArtifactResponse) String() string {
 func (*TrustArtifactResponse) ProtoMessage() {}
 
 func (x *TrustArtifactResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[40]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2884,7 +2972,7 @@ func (x *TrustArtifactResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TrustArtifactResponse.ProtoReflect.Descriptor instead.
 func (*TrustArtifactResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{40}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *TrustArtifactResponse) GetArtifactSha256() string {
@@ -2905,7 +2993,7 @@ type UntrustArtifactRequest struct {
 
 func (x *UntrustArtifactRequest) Reset() {
 	*x = UntrustArtifactRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[41]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2917,7 +3005,7 @@ func (x *UntrustArtifactRequest) String() string {
 func (*UntrustArtifactRequest) ProtoMessage() {}
 
 func (x *UntrustArtifactRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[41]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2930,7 +3018,7 @@ func (x *UntrustArtifactRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UntrustArtifactRequest.ProtoReflect.Descriptor instead.
 func (*UntrustArtifactRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{41}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *UntrustArtifactRequest) GetArtifactSha256() string {
@@ -2963,7 +3051,7 @@ type UntrustArtifactResponse struct {
 
 func (x *UntrustArtifactResponse) Reset() {
 	*x = UntrustArtifactResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[42]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2975,7 +3063,7 @@ func (x *UntrustArtifactResponse) String() string {
 func (*UntrustArtifactResponse) ProtoMessage() {}
 
 func (x *UntrustArtifactResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[42]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2988,7 +3076,7 @@ func (x *UntrustArtifactResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UntrustArtifactResponse.ProtoReflect.Descriptor instead.
 func (*UntrustArtifactResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{42}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *UntrustArtifactResponse) GetRemoved() bool {
@@ -3006,7 +3094,7 @@ type ListTrustedArtifactsRequest struct {
 
 func (x *ListTrustedArtifactsRequest) Reset() {
 	*x = ListTrustedArtifactsRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[43]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3018,7 +3106,7 @@ func (x *ListTrustedArtifactsRequest) String() string {
 func (*ListTrustedArtifactsRequest) ProtoMessage() {}
 
 func (x *ListTrustedArtifactsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[43]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3031,7 +3119,7 @@ func (x *ListTrustedArtifactsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTrustedArtifactsRequest.ProtoReflect.Descriptor instead.
 func (*ListTrustedArtifactsRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{43}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{45}
 }
 
 type TrustedArtifact struct {
@@ -3049,7 +3137,7 @@ type TrustedArtifact struct {
 
 func (x *TrustedArtifact) Reset() {
 	*x = TrustedArtifact{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[44]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3061,7 +3149,7 @@ func (x *TrustedArtifact) String() string {
 func (*TrustedArtifact) ProtoMessage() {}
 
 func (x *TrustedArtifact) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[44]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3074,7 +3162,7 @@ func (x *TrustedArtifact) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TrustedArtifact.ProtoReflect.Descriptor instead.
 func (*TrustedArtifact) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{44}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *TrustedArtifact) GetArtifactSha256() string {
@@ -3135,7 +3223,7 @@ type ListTrustedArtifactsResponse struct {
 
 func (x *ListTrustedArtifactsResponse) Reset() {
 	*x = ListTrustedArtifactsResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[45]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3147,7 +3235,7 @@ func (x *ListTrustedArtifactsResponse) String() string {
 func (*ListTrustedArtifactsResponse) ProtoMessage() {}
 
 func (x *ListTrustedArtifactsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[45]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3160,7 +3248,7 @@ func (x *ListTrustedArtifactsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTrustedArtifactsResponse.ProtoReflect.Descriptor instead.
 func (*ListTrustedArtifactsResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{45}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *ListTrustedArtifactsResponse) GetArtifacts() []*TrustedArtifact {
@@ -3186,7 +3274,7 @@ type SetHostCriticalityRequest struct {
 
 func (x *SetHostCriticalityRequest) Reset() {
 	*x = SetHostCriticalityRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[46]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3198,7 +3286,7 @@ func (x *SetHostCriticalityRequest) String() string {
 func (*SetHostCriticalityRequest) ProtoMessage() {}
 
 func (x *SetHostCriticalityRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[46]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3211,7 +3299,7 @@ func (x *SetHostCriticalityRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetHostCriticalityRequest.ProtoReflect.Descriptor instead.
 func (*SetHostCriticalityRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{46}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *SetHostCriticalityRequest) GetHostId() string {
@@ -3255,7 +3343,7 @@ type SetHostCriticalityResponse struct {
 
 func (x *SetHostCriticalityResponse) Reset() {
 	*x = SetHostCriticalityResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[47]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3267,7 +3355,7 @@ func (x *SetHostCriticalityResponse) String() string {
 func (*SetHostCriticalityResponse) ProtoMessage() {}
 
 func (x *SetHostCriticalityResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[47]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3280,7 +3368,7 @@ func (x *SetHostCriticalityResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetHostCriticalityResponse.ProtoReflect.Descriptor instead.
 func (*SetHostCriticalityResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{47}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *SetHostCriticalityResponse) GetChanged() bool {
@@ -3305,7 +3393,7 @@ type ListHostCriticalityRequest struct {
 
 func (x *ListHostCriticalityRequest) Reset() {
 	*x = ListHostCriticalityRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[48]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3317,7 +3405,7 @@ func (x *ListHostCriticalityRequest) String() string {
 func (*ListHostCriticalityRequest) ProtoMessage() {}
 
 func (x *ListHostCriticalityRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[48]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3330,7 +3418,7 @@ func (x *ListHostCriticalityRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListHostCriticalityRequest.ProtoReflect.Descriptor instead.
 func (*ListHostCriticalityRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{48}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{50}
 }
 
 type HostCriticality struct {
@@ -3346,7 +3434,7 @@ type HostCriticality struct {
 
 func (x *HostCriticality) Reset() {
 	*x = HostCriticality{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[49]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3358,7 +3446,7 @@ func (x *HostCriticality) String() string {
 func (*HostCriticality) ProtoMessage() {}
 
 func (x *HostCriticality) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[49]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3371,7 +3459,7 @@ func (x *HostCriticality) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HostCriticality.ProtoReflect.Descriptor instead.
 func (*HostCriticality) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{49}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *HostCriticality) GetHostId() string {
@@ -3418,7 +3506,7 @@ type ListHostCriticalityResponse struct {
 
 func (x *ListHostCriticalityResponse) Reset() {
 	*x = ListHostCriticalityResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[50]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3430,7 +3518,7 @@ func (x *ListHostCriticalityResponse) String() string {
 func (*ListHostCriticalityResponse) ProtoMessage() {}
 
 func (x *ListHostCriticalityResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[50]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3443,7 +3531,7 @@ func (x *ListHostCriticalityResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListHostCriticalityResponse.ProtoReflect.Descriptor instead.
 func (*ListHostCriticalityResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{50}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *ListHostCriticalityResponse) GetHosts() []*HostCriticality {
@@ -3465,7 +3553,7 @@ type CreateRegistrationCodeRequest struct {
 
 func (x *CreateRegistrationCodeRequest) Reset() {
 	*x = CreateRegistrationCodeRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[51]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3477,7 +3565,7 @@ func (x *CreateRegistrationCodeRequest) String() string {
 func (*CreateRegistrationCodeRequest) ProtoMessage() {}
 
 func (x *CreateRegistrationCodeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[51]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3490,7 +3578,7 @@ func (x *CreateRegistrationCodeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateRegistrationCodeRequest.ProtoReflect.Descriptor instead.
 func (*CreateRegistrationCodeRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{51}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *CreateRegistrationCodeRequest) GetUserName() string {
@@ -3518,7 +3606,7 @@ type CreateRegistrationCodeResponse struct {
 
 func (x *CreateRegistrationCodeResponse) Reset() {
 	*x = CreateRegistrationCodeResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[52]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3530,7 +3618,7 @@ func (x *CreateRegistrationCodeResponse) String() string {
 func (*CreateRegistrationCodeResponse) ProtoMessage() {}
 
 func (x *CreateRegistrationCodeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[52]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3543,7 +3631,7 @@ func (x *CreateRegistrationCodeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateRegistrationCodeResponse.ProtoReflect.Descriptor instead.
 func (*CreateRegistrationCodeResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{52}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *CreateRegistrationCodeResponse) GetCode() string {
@@ -3570,7 +3658,7 @@ type BeginRegistrationRequest struct {
 
 func (x *BeginRegistrationRequest) Reset() {
 	*x = BeginRegistrationRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[53]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3582,7 +3670,7 @@ func (x *BeginRegistrationRequest) String() string {
 func (*BeginRegistrationRequest) ProtoMessage() {}
 
 func (x *BeginRegistrationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[53]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3595,7 +3683,7 @@ func (x *BeginRegistrationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BeginRegistrationRequest.ProtoReflect.Descriptor instead.
 func (*BeginRegistrationRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{53}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *BeginRegistrationRequest) GetCode() string {
@@ -3622,7 +3710,7 @@ type BeginRegistrationResponse struct {
 
 func (x *BeginRegistrationResponse) Reset() {
 	*x = BeginRegistrationResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[54]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3634,7 +3722,7 @@ func (x *BeginRegistrationResponse) String() string {
 func (*BeginRegistrationResponse) ProtoMessage() {}
 
 func (x *BeginRegistrationResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[54]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3647,7 +3735,7 @@ func (x *BeginRegistrationResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BeginRegistrationResponse.ProtoReflect.Descriptor instead.
 func (*BeginRegistrationResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{54}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *BeginRegistrationResponse) GetRegistrationId() string {
@@ -3692,7 +3780,7 @@ type FinishRegistrationRequest struct {
 
 func (x *FinishRegistrationRequest) Reset() {
 	*x = FinishRegistrationRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[55]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3704,7 +3792,7 @@ func (x *FinishRegistrationRequest) String() string {
 func (*FinishRegistrationRequest) ProtoMessage() {}
 
 func (x *FinishRegistrationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[55]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3717,7 +3805,7 @@ func (x *FinishRegistrationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FinishRegistrationRequest.ProtoReflect.Descriptor instead.
 func (*FinishRegistrationRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{55}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *FinishRegistrationRequest) GetRegistrationId() string {
@@ -3756,7 +3844,7 @@ type FinishRegistrationResponse struct {
 
 func (x *FinishRegistrationResponse) Reset() {
 	*x = FinishRegistrationResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[56]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3768,7 +3856,7 @@ func (x *FinishRegistrationResponse) String() string {
 func (*FinishRegistrationResponse) ProtoMessage() {}
 
 func (x *FinishRegistrationResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[56]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3781,7 +3869,7 @@ func (x *FinishRegistrationResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FinishRegistrationResponse.ProtoReflect.Descriptor instead.
 func (*FinishRegistrationResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{56}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *FinishRegistrationResponse) GetCredentialId() string {
@@ -3813,7 +3901,7 @@ type ListWebAuthnCredentialsRequest struct {
 
 func (x *ListWebAuthnCredentialsRequest) Reset() {
 	*x = ListWebAuthnCredentialsRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[57]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3825,7 +3913,7 @@ func (x *ListWebAuthnCredentialsRequest) String() string {
 func (*ListWebAuthnCredentialsRequest) ProtoMessage() {}
 
 func (x *ListWebAuthnCredentialsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[57]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3838,7 +3926,7 @@ func (x *ListWebAuthnCredentialsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListWebAuthnCredentialsRequest.ProtoReflect.Descriptor instead.
 func (*ListWebAuthnCredentialsRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{57}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{59}
 }
 
 type WebAuthnCredential struct {
@@ -3860,7 +3948,7 @@ type WebAuthnCredential struct {
 
 func (x *WebAuthnCredential) Reset() {
 	*x = WebAuthnCredential{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[58]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3872,7 +3960,7 @@ func (x *WebAuthnCredential) String() string {
 func (*WebAuthnCredential) ProtoMessage() {}
 
 func (x *WebAuthnCredential) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[58]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3885,7 +3973,7 @@ func (x *WebAuthnCredential) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WebAuthnCredential.ProtoReflect.Descriptor instead.
 func (*WebAuthnCredential) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{58}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *WebAuthnCredential) GetCredentialId() string {
@@ -3946,7 +4034,7 @@ type ListWebAuthnCredentialsResponse struct {
 
 func (x *ListWebAuthnCredentialsResponse) Reset() {
 	*x = ListWebAuthnCredentialsResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[59]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3958,7 +4046,7 @@ func (x *ListWebAuthnCredentialsResponse) String() string {
 func (*ListWebAuthnCredentialsResponse) ProtoMessage() {}
 
 func (x *ListWebAuthnCredentialsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[59]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3971,7 +4059,7 @@ func (x *ListWebAuthnCredentialsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListWebAuthnCredentialsResponse.ProtoReflect.Descriptor instead.
 func (*ListWebAuthnCredentialsResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{59}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *ListWebAuthnCredentialsResponse) GetCredentials() []*WebAuthnCredential {
@@ -3991,7 +4079,7 @@ type RemoveWebAuthnCredentialRequest struct {
 
 func (x *RemoveWebAuthnCredentialRequest) Reset() {
 	*x = RemoveWebAuthnCredentialRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[60]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4003,7 +4091,7 @@ func (x *RemoveWebAuthnCredentialRequest) String() string {
 func (*RemoveWebAuthnCredentialRequest) ProtoMessage() {}
 
 func (x *RemoveWebAuthnCredentialRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[60]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4016,7 +4104,7 @@ func (x *RemoveWebAuthnCredentialRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveWebAuthnCredentialRequest.ProtoReflect.Descriptor instead.
 func (*RemoveWebAuthnCredentialRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{60}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *RemoveWebAuthnCredentialRequest) GetCredentialId() string {
@@ -4035,7 +4123,7 @@ type RemoveWebAuthnCredentialResponse struct {
 
 func (x *RemoveWebAuthnCredentialResponse) Reset() {
 	*x = RemoveWebAuthnCredentialResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[61]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4047,7 +4135,7 @@ func (x *RemoveWebAuthnCredentialResponse) String() string {
 func (*RemoveWebAuthnCredentialResponse) ProtoMessage() {}
 
 func (x *RemoveWebAuthnCredentialResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[61]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4060,7 +4148,7 @@ func (x *RemoveWebAuthnCredentialResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveWebAuthnCredentialResponse.ProtoReflect.Descriptor instead.
 func (*RemoveWebAuthnCredentialResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{61}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *RemoveWebAuthnCredentialResponse) GetRemoved() bool {
@@ -4080,7 +4168,7 @@ type ProbeHostKeyRequest struct {
 
 func (x *ProbeHostKeyRequest) Reset() {
 	*x = ProbeHostKeyRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[62]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4092,7 +4180,7 @@ func (x *ProbeHostKeyRequest) String() string {
 func (*ProbeHostKeyRequest) ProtoMessage() {}
 
 func (x *ProbeHostKeyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[62]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4105,7 +4193,7 @@ func (x *ProbeHostKeyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProbeHostKeyRequest.ProtoReflect.Descriptor instead.
 func (*ProbeHostKeyRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{62}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{64}
 }
 
 func (x *ProbeHostKeyRequest) GetEndpoint() string {
@@ -4128,7 +4216,7 @@ type ProbeHostKeyResponse struct {
 
 func (x *ProbeHostKeyResponse) Reset() {
 	*x = ProbeHostKeyResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[63]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4140,7 +4228,7 @@ func (x *ProbeHostKeyResponse) String() string {
 func (*ProbeHostKeyResponse) ProtoMessage() {}
 
 func (x *ProbeHostKeyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[63]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4153,7 +4241,7 @@ func (x *ProbeHostKeyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProbeHostKeyResponse.ProtoReflect.Descriptor instead.
 func (*ProbeHostKeyResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{63}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{65}
 }
 
 func (x *ProbeHostKeyResponse) GetEndpoint() string {
@@ -4201,7 +4289,7 @@ type PinHostKeyRequest struct {
 
 func (x *PinHostKeyRequest) Reset() {
 	*x = PinHostKeyRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[64]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4213,7 +4301,7 @@ func (x *PinHostKeyRequest) String() string {
 func (*PinHostKeyRequest) ProtoMessage() {}
 
 func (x *PinHostKeyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[64]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4226,7 +4314,7 @@ func (x *PinHostKeyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PinHostKeyRequest.ProtoReflect.Descriptor instead.
 func (*PinHostKeyRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{64}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{66}
 }
 
 func (x *PinHostKeyRequest) GetHostId() string {
@@ -4294,7 +4382,7 @@ type HostKeyPin struct {
 
 func (x *HostKeyPin) Reset() {
 	*x = HostKeyPin{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[65]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4306,7 +4394,7 @@ func (x *HostKeyPin) String() string {
 func (*HostKeyPin) ProtoMessage() {}
 
 func (x *HostKeyPin) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[65]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4319,7 +4407,7 @@ func (x *HostKeyPin) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HostKeyPin.ProtoReflect.Descriptor instead.
 func (*HostKeyPin) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{65}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{67}
 }
 
 func (x *HostKeyPin) GetHostId() string {
@@ -4415,7 +4503,7 @@ type PinHostKeyResponse struct {
 
 func (x *PinHostKeyResponse) Reset() {
 	*x = PinHostKeyResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[66]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[68]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4427,7 +4515,7 @@ func (x *PinHostKeyResponse) String() string {
 func (*PinHostKeyResponse) ProtoMessage() {}
 
 func (x *PinHostKeyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[66]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[68]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4440,7 +4528,7 @@ func (x *PinHostKeyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PinHostKeyResponse.ProtoReflect.Descriptor instead.
 func (*PinHostKeyResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{66}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{68}
 }
 
 func (x *PinHostKeyResponse) GetPin() *HostKeyPin {
@@ -4461,7 +4549,7 @@ type UnpinHostKeyRequest struct {
 
 func (x *UnpinHostKeyRequest) Reset() {
 	*x = UnpinHostKeyRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[67]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[69]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4473,7 +4561,7 @@ func (x *UnpinHostKeyRequest) String() string {
 func (*UnpinHostKeyRequest) ProtoMessage() {}
 
 func (x *UnpinHostKeyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[67]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[69]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4486,7 +4574,7 @@ func (x *UnpinHostKeyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnpinHostKeyRequest.ProtoReflect.Descriptor instead.
 func (*UnpinHostKeyRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{67}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{69}
 }
 
 func (x *UnpinHostKeyRequest) GetHostId() string {
@@ -4512,7 +4600,7 @@ type UnpinHostKeyResponse struct {
 
 func (x *UnpinHostKeyResponse) Reset() {
 	*x = UnpinHostKeyResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[68]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[70]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4524,7 +4612,7 @@ func (x *UnpinHostKeyResponse) String() string {
 func (*UnpinHostKeyResponse) ProtoMessage() {}
 
 func (x *UnpinHostKeyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[68]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[70]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4537,7 +4625,7 @@ func (x *UnpinHostKeyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnpinHostKeyResponse.ProtoReflect.Descriptor instead.
 func (*UnpinHostKeyResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{68}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{70}
 }
 
 func (x *UnpinHostKeyResponse) GetRemoved() bool {
@@ -4555,7 +4643,7 @@ type ListHostKeysRequest struct {
 
 func (x *ListHostKeysRequest) Reset() {
 	*x = ListHostKeysRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[69]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[71]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4567,7 +4655,7 @@ func (x *ListHostKeysRequest) String() string {
 func (*ListHostKeysRequest) ProtoMessage() {}
 
 func (x *ListHostKeysRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[69]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[71]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4580,7 +4668,7 @@ func (x *ListHostKeysRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListHostKeysRequest.ProtoReflect.Descriptor instead.
 func (*ListHostKeysRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{69}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{71}
 }
 
 type ListHostKeysResponse struct {
@@ -4592,7 +4680,7 @@ type ListHostKeysResponse struct {
 
 func (x *ListHostKeysResponse) Reset() {
 	*x = ListHostKeysResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[70]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[72]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4604,7 +4692,7 @@ func (x *ListHostKeysResponse) String() string {
 func (*ListHostKeysResponse) ProtoMessage() {}
 
 func (x *ListHostKeysResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[70]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[72]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4617,7 +4705,7 @@ func (x *ListHostKeysResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListHostKeysResponse.ProtoReflect.Descriptor instead.
 func (*ListHostKeysResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{70}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{72}
 }
 
 func (x *ListHostKeysResponse) GetHosts() []*HostKeyPin {
@@ -4636,7 +4724,7 @@ type ProposeRepinRequest struct {
 
 func (x *ProposeRepinRequest) Reset() {
 	*x = ProposeRepinRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[71]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[73]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4648,7 +4736,7 @@ func (x *ProposeRepinRequest) String() string {
 func (*ProposeRepinRequest) ProtoMessage() {}
 
 func (x *ProposeRepinRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[71]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[73]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4661,7 +4749,7 @@ func (x *ProposeRepinRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProposeRepinRequest.ProtoReflect.Descriptor instead.
 func (*ProposeRepinRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{71}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{73}
 }
 
 func (x *ProposeRepinRequest) GetHostId() string {
@@ -4683,7 +4771,7 @@ type ProposeRepinResponse struct {
 
 func (x *ProposeRepinResponse) Reset() {
 	*x = ProposeRepinResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[72]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[74]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4695,7 +4783,7 @@ func (x *ProposeRepinResponse) String() string {
 func (*ProposeRepinResponse) ProtoMessage() {}
 
 func (x *ProposeRepinResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[72]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[74]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4708,7 +4796,7 @@ func (x *ProposeRepinResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProposeRepinResponse.ProtoReflect.Descriptor instead.
 func (*ProposeRepinResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{72}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{74}
 }
 
 func (x *ProposeRepinResponse) GetPermit() *ProposeExecutionResponse {
@@ -4735,7 +4823,7 @@ type CommitRepinRequest struct {
 
 func (x *CommitRepinRequest) Reset() {
 	*x = CommitRepinRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[73]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[75]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4747,7 +4835,7 @@ func (x *CommitRepinRequest) String() string {
 func (*CommitRepinRequest) ProtoMessage() {}
 
 func (x *CommitRepinRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[73]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[75]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4760,7 +4848,7 @@ func (x *CommitRepinRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitRepinRequest.ProtoReflect.Descriptor instead.
 func (*CommitRepinRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{73}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{75}
 }
 
 func (x *CommitRepinRequest) GetExecutionDigest() string {
@@ -4786,7 +4874,7 @@ type CommitRepinResponse struct {
 
 func (x *CommitRepinResponse) Reset() {
 	*x = CommitRepinResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[74]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[76]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4798,7 +4886,7 @@ func (x *CommitRepinResponse) String() string {
 func (*CommitRepinResponse) ProtoMessage() {}
 
 func (x *CommitRepinResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[74]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[76]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4811,7 +4899,7 @@ func (x *CommitRepinResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitRepinResponse.ProtoReflect.Descriptor instead.
 func (*CommitRepinResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{74}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{76}
 }
 
 func (x *CommitRepinResponse) GetPin() *HostKeyPin {
@@ -4841,7 +4929,7 @@ type EnrollHost struct {
 
 func (x *EnrollHost) Reset() {
 	*x = EnrollHost{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[75]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[77]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4853,7 +4941,7 @@ func (x *EnrollHost) String() string {
 func (*EnrollHost) ProtoMessage() {}
 
 func (x *EnrollHost) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[75]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[77]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4866,7 +4954,7 @@ func (x *EnrollHost) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnrollHost.ProtoReflect.Descriptor instead.
 func (*EnrollHost) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{75}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{77}
 }
 
 func (x *EnrollHost) GetHostId() string {
@@ -4928,7 +5016,7 @@ type ProposeEnrollRequest struct {
 
 func (x *ProposeEnrollRequest) Reset() {
 	*x = ProposeEnrollRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[76]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[78]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4940,7 +5028,7 @@ func (x *ProposeEnrollRequest) String() string {
 func (*ProposeEnrollRequest) ProtoMessage() {}
 
 func (x *ProposeEnrollRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[76]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[78]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4953,7 +5041,7 @@ func (x *ProposeEnrollRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProposeEnrollRequest.ProtoReflect.Descriptor instead.
 func (*ProposeEnrollRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{76}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{78}
 }
 
 func (x *ProposeEnrollRequest) GetHosts() []*EnrollHost {
@@ -4975,7 +5063,7 @@ type ProposeEnrollResponse struct {
 
 func (x *ProposeEnrollResponse) Reset() {
 	*x = ProposeEnrollResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[77]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[79]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4987,7 +5075,7 @@ func (x *ProposeEnrollResponse) String() string {
 func (*ProposeEnrollResponse) ProtoMessage() {}
 
 func (x *ProposeEnrollResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[77]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[79]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5000,7 +5088,7 @@ func (x *ProposeEnrollResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProposeEnrollResponse.ProtoReflect.Descriptor instead.
 func (*ProposeEnrollResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{77}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{79}
 }
 
 func (x *ProposeEnrollResponse) GetPermit() *ProposeExecutionResponse {
@@ -5028,7 +5116,7 @@ type CommitEnrollRequest struct {
 
 func (x *CommitEnrollRequest) Reset() {
 	*x = CommitEnrollRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[78]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[80]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5040,7 +5128,7 @@ func (x *CommitEnrollRequest) String() string {
 func (*CommitEnrollRequest) ProtoMessage() {}
 
 func (x *CommitEnrollRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[78]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[80]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5053,7 +5141,7 @@ func (x *CommitEnrollRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitEnrollRequest.ProtoReflect.Descriptor instead.
 func (*CommitEnrollRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{78}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{80}
 }
 
 func (x *CommitEnrollRequest) GetExecutionDigest() string {
@@ -5085,7 +5173,7 @@ type EnrollResult struct {
 
 func (x *EnrollResult) Reset() {
 	*x = EnrollResult{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[79]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[81]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5097,7 +5185,7 @@ func (x *EnrollResult) String() string {
 func (*EnrollResult) ProtoMessage() {}
 
 func (x *EnrollResult) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[79]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[81]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5110,7 +5198,7 @@ func (x *EnrollResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnrollResult.ProtoReflect.Descriptor instead.
 func (*EnrollResult) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{79}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{81}
 }
 
 func (x *EnrollResult) GetHostId() string {
@@ -5164,7 +5252,7 @@ type CommitEnrollResponse struct {
 
 func (x *CommitEnrollResponse) Reset() {
 	*x = CommitEnrollResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[80]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[82]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5176,7 +5264,7 @@ func (x *CommitEnrollResponse) String() string {
 func (*CommitEnrollResponse) ProtoMessage() {}
 
 func (x *CommitEnrollResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[80]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[82]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5189,7 +5277,7 @@ func (x *CommitEnrollResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitEnrollResponse.ProtoReflect.Descriptor instead.
 func (*CommitEnrollResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{80}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{82}
 }
 
 func (x *CommitEnrollResponse) GetResults() []*EnrollResult {
@@ -5210,7 +5298,7 @@ type TestConnectionRequest struct {
 
 func (x *TestConnectionRequest) Reset() {
 	*x = TestConnectionRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[81]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[83]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5222,7 +5310,7 @@ func (x *TestConnectionRequest) String() string {
 func (*TestConnectionRequest) ProtoMessage() {}
 
 func (x *TestConnectionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[81]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[83]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5235,7 +5323,7 @@ func (x *TestConnectionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TestConnectionRequest.ProtoReflect.Descriptor instead.
 func (*TestConnectionRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{81}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{83}
 }
 
 func (x *TestConnectionRequest) GetHostId() string {
@@ -5264,7 +5352,7 @@ type ConnectionAttempt struct {
 
 func (x *ConnectionAttempt) Reset() {
 	*x = ConnectionAttempt{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[82]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[84]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5276,7 +5364,7 @@ func (x *ConnectionAttempt) String() string {
 func (*ConnectionAttempt) ProtoMessage() {}
 
 func (x *ConnectionAttempt) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[82]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[84]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5289,7 +5377,7 @@ func (x *ConnectionAttempt) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConnectionAttempt.ProtoReflect.Descriptor instead.
 func (*ConnectionAttempt) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{82}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{84}
 }
 
 func (x *ConnectionAttempt) GetEndpoint() string {
@@ -5328,7 +5416,7 @@ type TestConnectionResponse struct {
 
 func (x *TestConnectionResponse) Reset() {
 	*x = TestConnectionResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[83]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[85]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5340,7 +5428,7 @@ func (x *TestConnectionResponse) String() string {
 func (*TestConnectionResponse) ProtoMessage() {}
 
 func (x *TestConnectionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[83]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[85]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5353,7 +5441,7 @@ func (x *TestConnectionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TestConnectionResponse.ProtoReflect.Descriptor instead.
 func (*TestConnectionResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{83}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{85}
 }
 
 func (x *TestConnectionResponse) GetOk() bool {
@@ -5399,7 +5487,7 @@ type BeginLoginRequest struct {
 
 func (x *BeginLoginRequest) Reset() {
 	*x = BeginLoginRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[84]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[86]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5411,7 +5499,7 @@ func (x *BeginLoginRequest) String() string {
 func (*BeginLoginRequest) ProtoMessage() {}
 
 func (x *BeginLoginRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[84]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[86]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5424,7 +5512,7 @@ func (x *BeginLoginRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BeginLoginRequest.ProtoReflect.Descriptor instead.
 func (*BeginLoginRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{84}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{86}
 }
 
 type BeginLoginResponse struct {
@@ -5439,7 +5527,7 @@ type BeginLoginResponse struct {
 
 func (x *BeginLoginResponse) Reset() {
 	*x = BeginLoginResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[85]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[87]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5451,7 +5539,7 @@ func (x *BeginLoginResponse) String() string {
 func (*BeginLoginResponse) ProtoMessage() {}
 
 func (x *BeginLoginResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[85]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[87]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5464,7 +5552,7 @@ func (x *BeginLoginResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BeginLoginResponse.ProtoReflect.Descriptor instead.
 func (*BeginLoginResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{85}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{87}
 }
 
 func (x *BeginLoginResponse) GetLoginId() string {
@@ -5498,7 +5586,7 @@ type FinishLoginRequest struct {
 
 func (x *FinishLoginRequest) Reset() {
 	*x = FinishLoginRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[86]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[88]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5510,7 +5598,7 @@ func (x *FinishLoginRequest) String() string {
 func (*FinishLoginRequest) ProtoMessage() {}
 
 func (x *FinishLoginRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[86]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[88]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5523,7 +5611,7 @@ func (x *FinishLoginRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FinishLoginRequest.ProtoReflect.Descriptor instead.
 func (*FinishLoginRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{86}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{88}
 }
 
 func (x *FinishLoginRequest) GetLoginId() string {
@@ -5552,7 +5640,7 @@ type FinishLoginResponse struct {
 
 func (x *FinishLoginResponse) Reset() {
 	*x = FinishLoginResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[87]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[89]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5564,7 +5652,7 @@ func (x *FinishLoginResponse) String() string {
 func (*FinishLoginResponse) ProtoMessage() {}
 
 func (x *FinishLoginResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[87]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[89]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5577,7 +5665,7 @@ func (x *FinishLoginResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FinishLoginResponse.ProtoReflect.Descriptor instead.
 func (*FinishLoginResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{87}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{89}
 }
 
 func (x *FinishLoginResponse) GetCredentialId() string {
@@ -5611,7 +5699,7 @@ type CheckCredentialRequest struct {
 
 func (x *CheckCredentialRequest) Reset() {
 	*x = CheckCredentialRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[88]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[90]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5623,7 +5711,7 @@ func (x *CheckCredentialRequest) String() string {
 func (*CheckCredentialRequest) ProtoMessage() {}
 
 func (x *CheckCredentialRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[88]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[90]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5636,7 +5724,7 @@ func (x *CheckCredentialRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckCredentialRequest.ProtoReflect.Descriptor instead.
 func (*CheckCredentialRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{88}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{90}
 }
 
 func (x *CheckCredentialRequest) GetCredentialId() string {
@@ -5655,7 +5743,7 @@ type CheckCredentialResponse struct {
 
 func (x *CheckCredentialResponse) Reset() {
 	*x = CheckCredentialResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[89]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[91]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5667,7 +5755,7 @@ func (x *CheckCredentialResponse) String() string {
 func (*CheckCredentialResponse) ProtoMessage() {}
 
 func (x *CheckCredentialResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[89]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[91]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5680,7 +5768,7 @@ func (x *CheckCredentialResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckCredentialResponse.ProtoReflect.Descriptor instead.
 func (*CheckCredentialResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{89}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{91}
 }
 
 func (x *CheckCredentialResponse) GetRegistered() bool {
@@ -5700,7 +5788,7 @@ type BeginTOTPSetupRequest struct {
 
 func (x *BeginTOTPSetupRequest) Reset() {
 	*x = BeginTOTPSetupRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[90]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[92]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5712,7 +5800,7 @@ func (x *BeginTOTPSetupRequest) String() string {
 func (*BeginTOTPSetupRequest) ProtoMessage() {}
 
 func (x *BeginTOTPSetupRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[90]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[92]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5725,7 +5813,7 @@ func (x *BeginTOTPSetupRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BeginTOTPSetupRequest.ProtoReflect.Descriptor instead.
 func (*BeginTOTPSetupRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{90}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{92}
 }
 
 func (x *BeginTOTPSetupRequest) GetAccount() string {
@@ -5747,7 +5835,7 @@ type BeginTOTPSetupResponse struct {
 
 func (x *BeginTOTPSetupResponse) Reset() {
 	*x = BeginTOTPSetupResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[91]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[93]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5759,7 +5847,7 @@ func (x *BeginTOTPSetupResponse) String() string {
 func (*BeginTOTPSetupResponse) ProtoMessage() {}
 
 func (x *BeginTOTPSetupResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[91]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[93]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5772,7 +5860,7 @@ func (x *BeginTOTPSetupResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BeginTOTPSetupResponse.ProtoReflect.Descriptor instead.
 func (*BeginTOTPSetupResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{91}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{93}
 }
 
 func (x *BeginTOTPSetupResponse) GetSecretBase32() string {
@@ -5798,7 +5886,7 @@ type ConfirmTOTPSetupRequest struct {
 
 func (x *ConfirmTOTPSetupRequest) Reset() {
 	*x = ConfirmTOTPSetupRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[92]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[94]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5810,7 +5898,7 @@ func (x *ConfirmTOTPSetupRequest) String() string {
 func (*ConfirmTOTPSetupRequest) ProtoMessage() {}
 
 func (x *ConfirmTOTPSetupRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[92]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[94]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5823,7 +5911,7 @@ func (x *ConfirmTOTPSetupRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfirmTOTPSetupRequest.ProtoReflect.Descriptor instead.
 func (*ConfirmTOTPSetupRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{92}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{94}
 }
 
 func (x *ConfirmTOTPSetupRequest) GetCode() string {
@@ -5841,7 +5929,7 @@ type ConfirmTOTPSetupResponse struct {
 
 func (x *ConfirmTOTPSetupResponse) Reset() {
 	*x = ConfirmTOTPSetupResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[93]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[95]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5853,7 +5941,7 @@ func (x *ConfirmTOTPSetupResponse) String() string {
 func (*ConfirmTOTPSetupResponse) ProtoMessage() {}
 
 func (x *ConfirmTOTPSetupResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[93]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[95]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5866,7 +5954,7 @@ func (x *ConfirmTOTPSetupResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfirmTOTPSetupResponse.ProtoReflect.Descriptor instead.
 func (*ConfirmTOTPSetupResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{93}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{95}
 }
 
 type RemoveTOTPRequest struct {
@@ -5877,7 +5965,7 @@ type RemoveTOTPRequest struct {
 
 func (x *RemoveTOTPRequest) Reset() {
 	*x = RemoveTOTPRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[94]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[96]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5889,7 +5977,7 @@ func (x *RemoveTOTPRequest) String() string {
 func (*RemoveTOTPRequest) ProtoMessage() {}
 
 func (x *RemoveTOTPRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[94]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[96]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5902,7 +5990,7 @@ func (x *RemoveTOTPRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveTOTPRequest.ProtoReflect.Descriptor instead.
 func (*RemoveTOTPRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{94}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{96}
 }
 
 type RemoveTOTPResponse struct {
@@ -5914,7 +6002,7 @@ type RemoveTOTPResponse struct {
 
 func (x *RemoveTOTPResponse) Reset() {
 	*x = RemoveTOTPResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[95]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[97]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5926,7 +6014,7 @@ func (x *RemoveTOTPResponse) String() string {
 func (*RemoveTOTPResponse) ProtoMessage() {}
 
 func (x *RemoveTOTPResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[95]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[97]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5939,7 +6027,7 @@ func (x *RemoveTOTPResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveTOTPResponse.ProtoReflect.Descriptor instead.
 func (*RemoveTOTPResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{95}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{97}
 }
 
 func (x *RemoveTOTPResponse) GetRemoved() bool {
@@ -5957,7 +6045,7 @@ type GetTOTPStatusRequest struct {
 
 func (x *GetTOTPStatusRequest) Reset() {
 	*x = GetTOTPStatusRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[96]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[98]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5969,7 +6057,7 @@ func (x *GetTOTPStatusRequest) String() string {
 func (*GetTOTPStatusRequest) ProtoMessage() {}
 
 func (x *GetTOTPStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[96]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[98]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5982,7 +6070,7 @@ func (x *GetTOTPStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetTOTPStatusRequest.ProtoReflect.Descriptor instead.
 func (*GetTOTPStatusRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{96}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{98}
 }
 
 type GetTOTPStatusResponse struct {
@@ -5997,7 +6085,7 @@ type GetTOTPStatusResponse struct {
 
 func (x *GetTOTPStatusResponse) Reset() {
 	*x = GetTOTPStatusResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[97]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[99]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6009,7 +6097,7 @@ func (x *GetTOTPStatusResponse) String() string {
 func (*GetTOTPStatusResponse) ProtoMessage() {}
 
 func (x *GetTOTPStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[97]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[99]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6022,7 +6110,7 @@ func (x *GetTOTPStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetTOTPStatusResponse.ProtoReflect.Descriptor instead.
 func (*GetTOTPStatusResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{97}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{99}
 }
 
 func (x *GetTOTPStatusResponse) GetConfigured() bool {
@@ -6062,7 +6150,7 @@ type RecoveryLoginRequest struct {
 
 func (x *RecoveryLoginRequest) Reset() {
 	*x = RecoveryLoginRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[98]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[100]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6074,7 +6162,7 @@ func (x *RecoveryLoginRequest) String() string {
 func (*RecoveryLoginRequest) ProtoMessage() {}
 
 func (x *RecoveryLoginRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[98]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[100]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6087,7 +6175,7 @@ func (x *RecoveryLoginRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecoveryLoginRequest.ProtoReflect.Descriptor instead.
 func (*RecoveryLoginRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{98}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{100}
 }
 
 func (x *RecoveryLoginRequest) GetCode() string {
@@ -6105,7 +6193,7 @@ type RecoveryLoginResponse struct {
 
 func (x *RecoveryLoginResponse) Reset() {
 	*x = RecoveryLoginResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[99]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[101]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6117,7 +6205,7 @@ func (x *RecoveryLoginResponse) String() string {
 func (*RecoveryLoginResponse) ProtoMessage() {}
 
 func (x *RecoveryLoginResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[99]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[101]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6130,7 +6218,7 @@ func (x *RecoveryLoginResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecoveryLoginResponse.ProtoReflect.Descriptor instead.
 func (*RecoveryLoginResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{99}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{101}
 }
 
 type FinishRecoveryRequest struct {
@@ -6143,7 +6231,7 @@ type FinishRecoveryRequest struct {
 
 func (x *FinishRecoveryRequest) Reset() {
 	*x = FinishRecoveryRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[100]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[102]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6155,7 +6243,7 @@ func (x *FinishRecoveryRequest) String() string {
 func (*FinishRecoveryRequest) ProtoMessage() {}
 
 func (x *FinishRecoveryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[100]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[102]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6168,7 +6256,7 @@ func (x *FinishRecoveryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FinishRecoveryRequest.ProtoReflect.Descriptor instead.
 func (*FinishRecoveryRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{100}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{102}
 }
 
 func (x *FinishRecoveryRequest) GetCredentialId() string {
@@ -6186,7 +6274,7 @@ type FinishRecoveryResponse struct {
 
 func (x *FinishRecoveryResponse) Reset() {
 	*x = FinishRecoveryResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[101]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[103]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6198,7 +6286,7 @@ func (x *FinishRecoveryResponse) String() string {
 func (*FinishRecoveryResponse) ProtoMessage() {}
 
 func (x *FinishRecoveryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[101]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[103]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6211,7 +6299,7 @@ func (x *FinishRecoveryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FinishRecoveryResponse.ProtoReflect.Descriptor instead.
 func (*FinishRecoveryResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{101}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{103}
 }
 
 type GetSSHPublicKeyRequest struct {
@@ -6223,7 +6311,7 @@ type GetSSHPublicKeyRequest struct {
 
 func (x *GetSSHPublicKeyRequest) Reset() {
 	*x = GetSSHPublicKeyRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[102]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[104]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6235,7 +6323,7 @@ func (x *GetSSHPublicKeyRequest) String() string {
 func (*GetSSHPublicKeyRequest) ProtoMessage() {}
 
 func (x *GetSSHPublicKeyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[102]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[104]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6248,7 +6336,7 @@ func (x *GetSSHPublicKeyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSSHPublicKeyRequest.ProtoReflect.Descriptor instead.
 func (*GetSSHPublicKeyRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{102}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{104}
 }
 
 func (x *GetSSHPublicKeyRequest) GetCredentialRef() string {
@@ -6269,7 +6357,7 @@ type GetSSHPublicKeyResponse struct {
 
 func (x *GetSSHPublicKeyResponse) Reset() {
 	*x = GetSSHPublicKeyResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[103]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[105]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6281,7 +6369,7 @@ func (x *GetSSHPublicKeyResponse) String() string {
 func (*GetSSHPublicKeyResponse) ProtoMessage() {}
 
 func (x *GetSSHPublicKeyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[103]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[105]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6294,7 +6382,7 @@ func (x *GetSSHPublicKeyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSSHPublicKeyResponse.ProtoReflect.Descriptor instead.
 func (*GetSSHPublicKeyResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{103}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{105}
 }
 
 func (x *GetSSHPublicKeyResponse) GetAuthorizedKey() string {
@@ -6320,7 +6408,7 @@ type InitVaultRequest struct {
 
 func (x *InitVaultRequest) Reset() {
 	*x = InitVaultRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[104]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[106]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6332,7 +6420,7 @@ func (x *InitVaultRequest) String() string {
 func (*InitVaultRequest) ProtoMessage() {}
 
 func (x *InitVaultRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[104]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[106]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6345,7 +6433,7 @@ func (x *InitVaultRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InitVaultRequest.ProtoReflect.Descriptor instead.
 func (*InitVaultRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{104}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{106}
 }
 
 func (x *InitVaultRequest) GetPassphrase() []byte {
@@ -6363,7 +6451,7 @@ type InitVaultResponse struct {
 
 func (x *InitVaultResponse) Reset() {
 	*x = InitVaultResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[105]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[107]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6375,7 +6463,7 @@ func (x *InitVaultResponse) String() string {
 func (*InitVaultResponse) ProtoMessage() {}
 
 func (x *InitVaultResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[105]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[107]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6388,7 +6476,7 @@ func (x *InitVaultResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InitVaultResponse.ProtoReflect.Descriptor instead.
 func (*InitVaultResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{105}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{107}
 }
 
 type SetSecretRequest struct {
@@ -6401,7 +6489,7 @@ type SetSecretRequest struct {
 
 func (x *SetSecretRequest) Reset() {
 	*x = SetSecretRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[106]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[108]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6413,7 +6501,7 @@ func (x *SetSecretRequest) String() string {
 func (*SetSecretRequest) ProtoMessage() {}
 
 func (x *SetSecretRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[106]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[108]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6426,7 +6514,7 @@ func (x *SetSecretRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetSecretRequest.ProtoReflect.Descriptor instead.
 func (*SetSecretRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{106}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{108}
 }
 
 func (x *SetSecretRequest) GetId() string {
@@ -6452,7 +6540,7 @@ type SetSecretResponse struct {
 
 func (x *SetSecretResponse) Reset() {
 	*x = SetSecretResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[107]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[109]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6464,7 +6552,7 @@ func (x *SetSecretResponse) String() string {
 func (*SetSecretResponse) ProtoMessage() {}
 
 func (x *SetSecretResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[107]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[109]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6477,7 +6565,7 @@ func (x *SetSecretResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetSecretResponse.ProtoReflect.Descriptor instead.
 func (*SetSecretResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{107}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{109}
 }
 
 func (x *SetSecretResponse) GetVersion() int64 {
@@ -6495,7 +6583,7 @@ type ListSecretsRequest struct {
 
 func (x *ListSecretsRequest) Reset() {
 	*x = ListSecretsRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[108]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[110]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6507,7 +6595,7 @@ func (x *ListSecretsRequest) String() string {
 func (*ListSecretsRequest) ProtoMessage() {}
 
 func (x *ListSecretsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[108]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[110]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6520,7 +6608,7 @@ func (x *ListSecretsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSecretsRequest.ProtoReflect.Descriptor instead.
 func (*ListSecretsRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{108}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{110}
 }
 
 type SecretInfo struct {
@@ -6535,7 +6623,7 @@ type SecretInfo struct {
 
 func (x *SecretInfo) Reset() {
 	*x = SecretInfo{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[109]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[111]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6547,7 +6635,7 @@ func (x *SecretInfo) String() string {
 func (*SecretInfo) ProtoMessage() {}
 
 func (x *SecretInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[109]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[111]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6560,7 +6648,7 @@ func (x *SecretInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SecretInfo.ProtoReflect.Descriptor instead.
 func (*SecretInfo) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{109}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{111}
 }
 
 func (x *SecretInfo) GetId() string {
@@ -6601,7 +6689,7 @@ type ListSecretsResponse struct {
 
 func (x *ListSecretsResponse) Reset() {
 	*x = ListSecretsResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[110]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[112]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6613,7 +6701,7 @@ func (x *ListSecretsResponse) String() string {
 func (*ListSecretsResponse) ProtoMessage() {}
 
 func (x *ListSecretsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[110]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[112]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6626,7 +6714,7 @@ func (x *ListSecretsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSecretsResponse.ProtoReflect.Descriptor instead.
 func (*ListSecretsResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{110}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{112}
 }
 
 func (x *ListSecretsResponse) GetSecrets() []*SecretInfo {
@@ -6652,7 +6740,7 @@ type DeleteSecretRequest struct {
 
 func (x *DeleteSecretRequest) Reset() {
 	*x = DeleteSecretRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[111]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[113]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6664,7 +6752,7 @@ func (x *DeleteSecretRequest) String() string {
 func (*DeleteSecretRequest) ProtoMessage() {}
 
 func (x *DeleteSecretRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[111]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[113]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6677,7 +6765,7 @@ func (x *DeleteSecretRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteSecretRequest.ProtoReflect.Descriptor instead.
 func (*DeleteSecretRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{111}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{113}
 }
 
 func (x *DeleteSecretRequest) GetId() string {
@@ -6695,7 +6783,7 @@ type DeleteSecretResponse struct {
 
 func (x *DeleteSecretResponse) Reset() {
 	*x = DeleteSecretResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[112]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[114]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6707,7 +6795,7 @@ func (x *DeleteSecretResponse) String() string {
 func (*DeleteSecretResponse) ProtoMessage() {}
 
 func (x *DeleteSecretResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[112]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[114]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6720,7 +6808,7 @@ func (x *DeleteSecretResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteSecretResponse.ProtoReflect.Descriptor instead.
 func (*DeleteSecretResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{112}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{114}
 }
 
 type RunAttachedRequest struct {
@@ -6737,7 +6825,7 @@ type RunAttachedRequest struct {
 
 func (x *RunAttachedRequest) Reset() {
 	*x = RunAttachedRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[113]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[115]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6749,7 +6837,7 @@ func (x *RunAttachedRequest) String() string {
 func (*RunAttachedRequest) ProtoMessage() {}
 
 func (x *RunAttachedRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[113]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[115]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6762,7 +6850,7 @@ func (x *RunAttachedRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunAttachedRequest.ProtoReflect.Descriptor instead.
 func (*RunAttachedRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{113}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{115}
 }
 
 func (x *RunAttachedRequest) GetRun() *AuthorizeRunRequest {
@@ -6812,7 +6900,7 @@ type RunAttachedResponse struct {
 
 func (x *RunAttachedResponse) Reset() {
 	*x = RunAttachedResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[114]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[116]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6824,7 +6912,7 @@ func (x *RunAttachedResponse) String() string {
 func (*RunAttachedResponse) ProtoMessage() {}
 
 func (x *RunAttachedResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[114]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[116]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6837,7 +6925,7 @@ func (x *RunAttachedResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunAttachedResponse.ProtoReflect.Descriptor instead.
 func (*RunAttachedResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{114}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{116}
 }
 
 func (x *RunAttachedResponse) GetClass() string {
@@ -6915,7 +7003,7 @@ type StartDurableRequest struct {
 
 func (x *StartDurableRequest) Reset() {
 	*x = StartDurableRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[115]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[117]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6927,7 +7015,7 @@ func (x *StartDurableRequest) String() string {
 func (*StartDurableRequest) ProtoMessage() {}
 
 func (x *StartDurableRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[115]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[117]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6940,7 +7028,7 @@ func (x *StartDurableRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartDurableRequest.ProtoReflect.Descriptor instead.
 func (*StartDurableRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{115}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{117}
 }
 
 func (x *StartDurableRequest) GetRun() *AuthorizeRunRequest {
@@ -6973,7 +7061,7 @@ type StartDurableResponse struct {
 
 func (x *StartDurableResponse) Reset() {
 	*x = StartDurableResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[116]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[118]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6985,7 +7073,7 @@ func (x *StartDurableResponse) String() string {
 func (*StartDurableResponse) ProtoMessage() {}
 
 func (x *StartDurableResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[116]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[118]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6998,7 +7086,7 @@ func (x *StartDurableResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartDurableResponse.ProtoReflect.Descriptor instead.
 func (*StartDurableResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{116}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{118}
 }
 
 func (x *StartDurableResponse) GetRun() *RunStatus {
@@ -7017,7 +7105,7 @@ type GetRunResponse struct {
 
 func (x *GetRunResponse) Reset() {
 	*x = GetRunResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[117]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[119]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7029,7 +7117,7 @@ func (x *GetRunResponse) String() string {
 func (*GetRunResponse) ProtoMessage() {}
 
 func (x *GetRunResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[117]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[119]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7042,7 +7130,7 @@ func (x *GetRunResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRunResponse.ProtoReflect.Descriptor instead.
 func (*GetRunResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{117}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{119}
 }
 
 func (x *GetRunResponse) GetRun() *RunStatus {
@@ -7063,7 +7151,7 @@ type GetRunRequest struct {
 
 func (x *GetRunRequest) Reset() {
 	*x = GetRunRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[118]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[120]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7075,7 +7163,7 @@ func (x *GetRunRequest) String() string {
 func (*GetRunRequest) ProtoMessage() {}
 
 func (x *GetRunRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[118]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[120]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7088,7 +7176,7 @@ func (x *GetRunRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRunRequest.ProtoReflect.Descriptor instead.
 func (*GetRunRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{118}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{120}
 }
 
 func (x *GetRunRequest) GetExecutionId() string {
@@ -7137,7 +7225,7 @@ type RunStatus struct {
 
 func (x *RunStatus) Reset() {
 	*x = RunStatus{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[119]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[121]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7149,7 +7237,7 @@ func (x *RunStatus) String() string {
 func (*RunStatus) ProtoMessage() {}
 
 func (x *RunStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[119]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[121]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7162,7 +7250,7 @@ func (x *RunStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunStatus.ProtoReflect.Descriptor instead.
 func (*RunStatus) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{119}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{121}
 }
 
 func (x *RunStatus) GetExecutionId() string {
@@ -7266,7 +7354,7 @@ type ProposeScheduleGrantRequest struct {
 
 func (x *ProposeScheduleGrantRequest) Reset() {
 	*x = ProposeScheduleGrantRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[120]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[122]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7278,7 +7366,7 @@ func (x *ProposeScheduleGrantRequest) String() string {
 func (*ProposeScheduleGrantRequest) ProtoMessage() {}
 
 func (x *ProposeScheduleGrantRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[120]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[122]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7291,7 +7379,7 @@ func (x *ProposeScheduleGrantRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProposeScheduleGrantRequest.ProtoReflect.Descriptor instead.
 func (*ProposeScheduleGrantRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{120}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{122}
 }
 
 func (x *ProposeScheduleGrantRequest) GetGrantJson() []byte {
@@ -7315,7 +7403,7 @@ type ProposeScheduleGrantResponse struct {
 
 func (x *ProposeScheduleGrantResponse) Reset() {
 	*x = ProposeScheduleGrantResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[121]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[123]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7327,7 +7415,7 @@ func (x *ProposeScheduleGrantResponse) String() string {
 func (*ProposeScheduleGrantResponse) ProtoMessage() {}
 
 func (x *ProposeScheduleGrantResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[121]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[123]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7340,7 +7428,7 @@ func (x *ProposeScheduleGrantResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProposeScheduleGrantResponse.ProtoReflect.Descriptor instead.
 func (*ProposeScheduleGrantResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{121}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{123}
 }
 
 func (x *ProposeScheduleGrantResponse) GetGrantDigest() string {
@@ -7395,7 +7483,7 @@ type CommitScheduleGrantRequest struct {
 
 func (x *CommitScheduleGrantRequest) Reset() {
 	*x = CommitScheduleGrantRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[122]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[124]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7407,7 +7495,7 @@ func (x *CommitScheduleGrantRequest) String() string {
 func (*CommitScheduleGrantRequest) ProtoMessage() {}
 
 func (x *CommitScheduleGrantRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[122]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[124]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7420,7 +7508,7 @@ func (x *CommitScheduleGrantRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitScheduleGrantRequest.ProtoReflect.Descriptor instead.
 func (*CommitScheduleGrantRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{122}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{124}
 }
 
 func (x *CommitScheduleGrantRequest) GetGrantDigest() string {
@@ -7454,7 +7542,7 @@ type ScheduleGrant struct {
 
 func (x *ScheduleGrant) Reset() {
 	*x = ScheduleGrant{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[123]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[125]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7466,7 +7554,7 @@ func (x *ScheduleGrant) String() string {
 func (*ScheduleGrant) ProtoMessage() {}
 
 func (x *ScheduleGrant) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[123]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[125]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7479,7 +7567,7 @@ func (x *ScheduleGrant) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScheduleGrant.ProtoReflect.Descriptor instead.
 func (*ScheduleGrant) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{123}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{125}
 }
 
 func (x *ScheduleGrant) GetGrantId() string {
@@ -7540,7 +7628,7 @@ type CommitScheduleGrantResponse struct {
 
 func (x *CommitScheduleGrantResponse) Reset() {
 	*x = CommitScheduleGrantResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[124]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[126]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7552,7 +7640,7 @@ func (x *CommitScheduleGrantResponse) String() string {
 func (*CommitScheduleGrantResponse) ProtoMessage() {}
 
 func (x *CommitScheduleGrantResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[124]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[126]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7565,7 +7653,7 @@ func (x *CommitScheduleGrantResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitScheduleGrantResponse.ProtoReflect.Descriptor instead.
 func (*CommitScheduleGrantResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{124}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{126}
 }
 
 func (x *CommitScheduleGrantResponse) GetGrant() *ScheduleGrant {
@@ -7583,7 +7671,7 @@ type ListPendingScheduleGrantsRequest struct {
 
 func (x *ListPendingScheduleGrantsRequest) Reset() {
 	*x = ListPendingScheduleGrantsRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[125]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[127]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7595,7 +7683,7 @@ func (x *ListPendingScheduleGrantsRequest) String() string {
 func (*ListPendingScheduleGrantsRequest) ProtoMessage() {}
 
 func (x *ListPendingScheduleGrantsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[125]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[127]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7608,7 +7696,7 @@ func (x *ListPendingScheduleGrantsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListPendingScheduleGrantsRequest.ProtoReflect.Descriptor instead.
 func (*ListPendingScheduleGrantsRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{125}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{127}
 }
 
 type PendingScheduleGrant struct {
@@ -7622,7 +7710,7 @@ type PendingScheduleGrant struct {
 
 func (x *PendingScheduleGrant) Reset() {
 	*x = PendingScheduleGrant{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[126]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[128]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7634,7 +7722,7 @@ func (x *PendingScheduleGrant) String() string {
 func (*PendingScheduleGrant) ProtoMessage() {}
 
 func (x *PendingScheduleGrant) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[126]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[128]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7647,7 +7735,7 @@ func (x *PendingScheduleGrant) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PendingScheduleGrant.ProtoReflect.Descriptor instead.
 func (*PendingScheduleGrant) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{126}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{128}
 }
 
 func (x *PendingScheduleGrant) GetGrantDigest() string {
@@ -7680,7 +7768,7 @@ type ListPendingScheduleGrantsResponse struct {
 
 func (x *ListPendingScheduleGrantsResponse) Reset() {
 	*x = ListPendingScheduleGrantsResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[127]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[129]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7692,7 +7780,7 @@ func (x *ListPendingScheduleGrantsResponse) String() string {
 func (*ListPendingScheduleGrantsResponse) ProtoMessage() {}
 
 func (x *ListPendingScheduleGrantsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[127]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[129]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7705,7 +7793,7 @@ func (x *ListPendingScheduleGrantsResponse) ProtoReflect() protoreflect.Message 
 
 // Deprecated: Use ListPendingScheduleGrantsResponse.ProtoReflect.Descriptor instead.
 func (*ListPendingScheduleGrantsResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{127}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{129}
 }
 
 func (x *ListPendingScheduleGrantsResponse) GetGrants() []*PendingScheduleGrant {
@@ -7724,7 +7812,7 @@ type ApproveScheduleGrantCLIRequest struct {
 
 func (x *ApproveScheduleGrantCLIRequest) Reset() {
 	*x = ApproveScheduleGrantCLIRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[128]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[130]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7736,7 +7824,7 @@ func (x *ApproveScheduleGrantCLIRequest) String() string {
 func (*ApproveScheduleGrantCLIRequest) ProtoMessage() {}
 
 func (x *ApproveScheduleGrantCLIRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[128]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[130]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7749,7 +7837,7 @@ func (x *ApproveScheduleGrantCLIRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApproveScheduleGrantCLIRequest.ProtoReflect.Descriptor instead.
 func (*ApproveScheduleGrantCLIRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{128}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{130}
 }
 
 func (x *ApproveScheduleGrantCLIRequest) GetGrantDigest() string {
@@ -7768,7 +7856,7 @@ type ApproveScheduleGrantCLIResponse struct {
 
 func (x *ApproveScheduleGrantCLIResponse) Reset() {
 	*x = ApproveScheduleGrantCLIResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[129]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[131]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7780,7 +7868,7 @@ func (x *ApproveScheduleGrantCLIResponse) String() string {
 func (*ApproveScheduleGrantCLIResponse) ProtoMessage() {}
 
 func (x *ApproveScheduleGrantCLIResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[129]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[131]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7793,7 +7881,7 @@ func (x *ApproveScheduleGrantCLIResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApproveScheduleGrantCLIResponse.ProtoReflect.Descriptor instead.
 func (*ApproveScheduleGrantCLIResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{129}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{131}
 }
 
 func (x *ApproveScheduleGrantCLIResponse) GetGrant() *ScheduleGrant {
@@ -7811,7 +7899,7 @@ type ListScheduleGrantsRequest struct {
 
 func (x *ListScheduleGrantsRequest) Reset() {
 	*x = ListScheduleGrantsRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[130]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[132]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7823,7 +7911,7 @@ func (x *ListScheduleGrantsRequest) String() string {
 func (*ListScheduleGrantsRequest) ProtoMessage() {}
 
 func (x *ListScheduleGrantsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[130]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[132]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7836,7 +7924,7 @@ func (x *ListScheduleGrantsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListScheduleGrantsRequest.ProtoReflect.Descriptor instead.
 func (*ListScheduleGrantsRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{130}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{132}
 }
 
 type ListScheduleGrantsResponse struct {
@@ -7848,7 +7936,7 @@ type ListScheduleGrantsResponse struct {
 
 func (x *ListScheduleGrantsResponse) Reset() {
 	*x = ListScheduleGrantsResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[131]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[133]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7860,7 +7948,7 @@ func (x *ListScheduleGrantsResponse) String() string {
 func (*ListScheduleGrantsResponse) ProtoMessage() {}
 
 func (x *ListScheduleGrantsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[131]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[133]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7873,7 +7961,7 @@ func (x *ListScheduleGrantsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListScheduleGrantsResponse.ProtoReflect.Descriptor instead.
 func (*ListScheduleGrantsResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{131}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{133}
 }
 
 func (x *ListScheduleGrantsResponse) GetGrants() []*ScheduleGrant {
@@ -7892,7 +7980,7 @@ type RevokeScheduleGrantRequest struct {
 
 func (x *RevokeScheduleGrantRequest) Reset() {
 	*x = RevokeScheduleGrantRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[132]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[134]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7904,7 +7992,7 @@ func (x *RevokeScheduleGrantRequest) String() string {
 func (*RevokeScheduleGrantRequest) ProtoMessage() {}
 
 func (x *RevokeScheduleGrantRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[132]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[134]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7917,7 +8005,7 @@ func (x *RevokeScheduleGrantRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RevokeScheduleGrantRequest.ProtoReflect.Descriptor instead.
 func (*RevokeScheduleGrantRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{132}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{134}
 }
 
 func (x *RevokeScheduleGrantRequest) GetGrantId() string {
@@ -7935,7 +8023,7 @@ type RevokeScheduleGrantResponse struct {
 
 func (x *RevokeScheduleGrantResponse) Reset() {
 	*x = RevokeScheduleGrantResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[133]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[135]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7947,7 +8035,7 @@ func (x *RevokeScheduleGrantResponse) String() string {
 func (*RevokeScheduleGrantResponse) ProtoMessage() {}
 
 func (x *RevokeScheduleGrantResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[133]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[135]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7960,7 +8048,7 @@ func (x *RevokeScheduleGrantResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RevokeScheduleGrantResponse.ProtoReflect.Descriptor instead.
 func (*RevokeScheduleGrantResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{133}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{135}
 }
 
 type RunScheduledRequest struct {
@@ -7976,7 +8064,7 @@ type RunScheduledRequest struct {
 
 func (x *RunScheduledRequest) Reset() {
 	*x = RunScheduledRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[134]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[136]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7988,7 +8076,7 @@ func (x *RunScheduledRequest) String() string {
 func (*RunScheduledRequest) ProtoMessage() {}
 
 func (x *RunScheduledRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[134]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[136]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8001,7 +8089,7 @@ func (x *RunScheduledRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunScheduledRequest.ProtoReflect.Descriptor instead.
 func (*RunScheduledRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{134}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{136}
 }
 
 func (x *RunScheduledRequest) GetGrantId() string {
@@ -8043,7 +8131,7 @@ type RunScheduledResponse struct {
 
 func (x *RunScheduledResponse) Reset() {
 	*x = RunScheduledResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[135]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[137]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8055,7 +8143,7 @@ func (x *RunScheduledResponse) String() string {
 func (*RunScheduledResponse) ProtoMessage() {}
 
 func (x *RunScheduledResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[135]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[137]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8068,7 +8156,7 @@ func (x *RunScheduledResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunScheduledResponse.ProtoReflect.Descriptor instead.
 func (*RunScheduledResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{135}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{137}
 }
 
 func (x *RunScheduledResponse) GetExecutionId() string {
@@ -8099,7 +8187,7 @@ type BeginTrustArtifactRequest struct {
 
 func (x *BeginTrustArtifactRequest) Reset() {
 	*x = BeginTrustArtifactRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[136]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[138]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8111,7 +8199,7 @@ func (x *BeginTrustArtifactRequest) String() string {
 func (*BeginTrustArtifactRequest) ProtoMessage() {}
 
 func (x *BeginTrustArtifactRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[136]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[138]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8124,7 +8212,7 @@ func (x *BeginTrustArtifactRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BeginTrustArtifactRequest.ProtoReflect.Descriptor instead.
 func (*BeginTrustArtifactRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{136}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{138}
 }
 
 func (x *BeginTrustArtifactRequest) GetArtifact() []byte {
@@ -8175,7 +8263,7 @@ type BeginTrustArtifactResponse struct {
 
 func (x *BeginTrustArtifactResponse) Reset() {
 	*x = BeginTrustArtifactResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[137]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[139]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8187,7 +8275,7 @@ func (x *BeginTrustArtifactResponse) String() string {
 func (*BeginTrustArtifactResponse) ProtoMessage() {}
 
 func (x *BeginTrustArtifactResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[137]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[139]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8200,7 +8288,7 @@ func (x *BeginTrustArtifactResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BeginTrustArtifactResponse.ProtoReflect.Descriptor instead.
 func (*BeginTrustArtifactResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{137}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{139}
 }
 
 func (x *BeginTrustArtifactResponse) GetTrustId() string {
@@ -8248,7 +8336,7 @@ type CommitTrustArtifactRequest struct {
 
 func (x *CommitTrustArtifactRequest) Reset() {
 	*x = CommitTrustArtifactRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[138]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[140]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8260,7 +8348,7 @@ func (x *CommitTrustArtifactRequest) String() string {
 func (*CommitTrustArtifactRequest) ProtoMessage() {}
 
 func (x *CommitTrustArtifactRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[138]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[140]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8273,7 +8361,7 @@ func (x *CommitTrustArtifactRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitTrustArtifactRequest.ProtoReflect.Descriptor instead.
 func (*CommitTrustArtifactRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{138}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{140}
 }
 
 func (x *CommitTrustArtifactRequest) GetTrustId() string {
@@ -8299,7 +8387,7 @@ type CommitTrustArtifactResponse struct {
 
 func (x *CommitTrustArtifactResponse) Reset() {
 	*x = CommitTrustArtifactResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[139]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[141]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8311,7 +8399,7 @@ func (x *CommitTrustArtifactResponse) String() string {
 func (*CommitTrustArtifactResponse) ProtoMessage() {}
 
 func (x *CommitTrustArtifactResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[139]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[141]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8324,7 +8412,7 @@ func (x *CommitTrustArtifactResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitTrustArtifactResponse.ProtoReflect.Descriptor instead.
 func (*CommitTrustArtifactResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{139}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{141}
 }
 
 func (x *CommitTrustArtifactResponse) GetArtifactSha256() string {
@@ -8345,7 +8433,7 @@ type GetArtifactTrustRequest struct {
 
 func (x *GetArtifactTrustRequest) Reset() {
 	*x = GetArtifactTrustRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[140]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[142]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8357,7 +8445,7 @@ func (x *GetArtifactTrustRequest) String() string {
 func (*GetArtifactTrustRequest) ProtoMessage() {}
 
 func (x *GetArtifactTrustRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[140]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[142]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8370,7 +8458,7 @@ func (x *GetArtifactTrustRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetArtifactTrustRequest.ProtoReflect.Descriptor instead.
 func (*GetArtifactTrustRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{140}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{142}
 }
 
 func (x *GetArtifactTrustRequest) GetArtifactSha256() string {
@@ -8404,7 +8492,7 @@ type GetArtifactTrustResponse struct {
 
 func (x *GetArtifactTrustResponse) Reset() {
 	*x = GetArtifactTrustResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[141]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[143]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8416,7 +8504,7 @@ func (x *GetArtifactTrustResponse) String() string {
 func (*GetArtifactTrustResponse) ProtoMessage() {}
 
 func (x *GetArtifactTrustResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[141]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[143]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8429,7 +8517,7 @@ func (x *GetArtifactTrustResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetArtifactTrustResponse.ProtoReflect.Descriptor instead.
 func (*GetArtifactTrustResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{141}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{143}
 }
 
 func (x *GetArtifactTrustResponse) GetTrusted() bool {
@@ -8458,7 +8546,7 @@ type RegisterModuleRequest struct {
 
 func (x *RegisterModuleRequest) Reset() {
 	*x = RegisterModuleRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[142]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[144]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8470,7 +8558,7 @@ func (x *RegisterModuleRequest) String() string {
 func (*RegisterModuleRequest) ProtoMessage() {}
 
 func (x *RegisterModuleRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[142]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[144]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8483,7 +8571,7 @@ func (x *RegisterModuleRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterModuleRequest.ProtoReflect.Descriptor instead.
 func (*RegisterModuleRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{142}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{144}
 }
 
 func (x *RegisterModuleRequest) GetLockJson() []byte {
@@ -8519,7 +8607,7 @@ type ModuleAction struct {
 
 func (x *ModuleAction) Reset() {
 	*x = ModuleAction{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[143]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[145]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8531,7 +8619,7 @@ func (x *ModuleAction) String() string {
 func (*ModuleAction) ProtoMessage() {}
 
 func (x *ModuleAction) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[143]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[145]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8544,7 +8632,7 @@ func (x *ModuleAction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ModuleAction.ProtoReflect.Descriptor instead.
 func (*ModuleAction) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{143}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{145}
 }
 
 func (x *ModuleAction) GetActionId() string {
@@ -8589,7 +8677,7 @@ type RegisterModuleResponse struct {
 
 func (x *RegisterModuleResponse) Reset() {
 	*x = RegisterModuleResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[144]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[146]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8601,7 +8689,7 @@ func (x *RegisterModuleResponse) String() string {
 func (*RegisterModuleResponse) ProtoMessage() {}
 
 func (x *RegisterModuleResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[144]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[146]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8614,7 +8702,7 @@ func (x *RegisterModuleResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterModuleResponse.ProtoReflect.Descriptor instead.
 func (*RegisterModuleResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{144}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{146}
 }
 
 func (x *RegisterModuleResponse) GetName() string {
@@ -8670,7 +8758,7 @@ type AddSignerRequest struct {
 
 func (x *AddSignerRequest) Reset() {
 	*x = AddSignerRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[145]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[147]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8682,7 +8770,7 @@ func (x *AddSignerRequest) String() string {
 func (*AddSignerRequest) ProtoMessage() {}
 
 func (x *AddSignerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[145]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[147]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8695,7 +8783,7 @@ func (x *AddSignerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AddSignerRequest.ProtoReflect.Descriptor instead.
 func (*AddSignerRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{145}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{147}
 }
 
 func (x *AddSignerRequest) GetPublicKey() string {
@@ -8721,7 +8809,7 @@ type AddSignerResponse struct {
 
 func (x *AddSignerResponse) Reset() {
 	*x = AddSignerResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[146]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[148]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8733,7 +8821,7 @@ func (x *AddSignerResponse) String() string {
 func (*AddSignerResponse) ProtoMessage() {}
 
 func (x *AddSignerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[146]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[148]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8746,7 +8834,7 @@ func (x *AddSignerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AddSignerResponse.ProtoReflect.Descriptor instead.
 func (*AddSignerResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{146}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{148}
 }
 
 func (x *AddSignerResponse) GetFingerprint() string {
@@ -8765,7 +8853,7 @@ type RemoveSignerRequest struct {
 
 func (x *RemoveSignerRequest) Reset() {
 	*x = RemoveSignerRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[147]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[149]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8777,7 +8865,7 @@ func (x *RemoveSignerRequest) String() string {
 func (*RemoveSignerRequest) ProtoMessage() {}
 
 func (x *RemoveSignerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[147]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[149]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8790,7 +8878,7 @@ func (x *RemoveSignerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveSignerRequest.ProtoReflect.Descriptor instead.
 func (*RemoveSignerRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{147}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{149}
 }
 
 func (x *RemoveSignerRequest) GetFingerprint() string {
@@ -8810,7 +8898,7 @@ type RemoveSignerResponse struct {
 
 func (x *RemoveSignerResponse) Reset() {
 	*x = RemoveSignerResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[148]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[150]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8822,7 +8910,7 @@ func (x *RemoveSignerResponse) String() string {
 func (*RemoveSignerResponse) ProtoMessage() {}
 
 func (x *RemoveSignerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[148]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[150]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8835,7 +8923,7 @@ func (x *RemoveSignerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveSignerResponse.ProtoReflect.Descriptor instead.
 func (*RemoveSignerResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{148}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{150}
 }
 
 func (x *RemoveSignerResponse) GetRemoved() bool {
@@ -8865,7 +8953,7 @@ type ConfirmModuleSignerRequest struct {
 
 func (x *ConfirmModuleSignerRequest) Reset() {
 	*x = ConfirmModuleSignerRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[149]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[151]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8877,7 +8965,7 @@ func (x *ConfirmModuleSignerRequest) String() string {
 func (*ConfirmModuleSignerRequest) ProtoMessage() {}
 
 func (x *ConfirmModuleSignerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[149]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[151]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8890,7 +8978,7 @@ func (x *ConfirmModuleSignerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfirmModuleSignerRequest.ProtoReflect.Descriptor instead.
 func (*ConfirmModuleSignerRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{149}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{151}
 }
 
 func (x *ConfirmModuleSignerRequest) GetModule() string {
@@ -8924,7 +9012,7 @@ type ConfirmModuleSignerResponse struct {
 
 func (x *ConfirmModuleSignerResponse) Reset() {
 	*x = ConfirmModuleSignerResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[150]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[152]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8936,7 +9024,7 @@ func (x *ConfirmModuleSignerResponse) String() string {
 func (*ConfirmModuleSignerResponse) ProtoMessage() {}
 
 func (x *ConfirmModuleSignerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[150]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[152]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8949,7 +9037,7 @@ func (x *ConfirmModuleSignerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfirmModuleSignerResponse.ProtoReflect.Descriptor instead.
 func (*ConfirmModuleSignerResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{150}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{152}
 }
 
 func (x *ConfirmModuleSignerResponse) GetPrevious() string {
@@ -8967,7 +9055,7 @@ type ListSignersRequest struct {
 
 func (x *ListSignersRequest) Reset() {
 	*x = ListSignersRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[151]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[153]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8979,7 +9067,7 @@ func (x *ListSignersRequest) String() string {
 func (*ListSignersRequest) ProtoMessage() {}
 
 func (x *ListSignersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[151]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[153]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8992,7 +9080,7 @@ func (x *ListSignersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSignersRequest.ProtoReflect.Descriptor instead.
 func (*ListSignersRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{151}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{153}
 }
 
 type Signer struct {
@@ -9007,7 +9095,7 @@ type Signer struct {
 
 func (x *Signer) Reset() {
 	*x = Signer{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[152]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[154]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9019,7 +9107,7 @@ func (x *Signer) String() string {
 func (*Signer) ProtoMessage() {}
 
 func (x *Signer) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[152]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[154]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9032,7 +9120,7 @@ func (x *Signer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Signer.ProtoReflect.Descriptor instead.
 func (*Signer) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{152}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{154}
 }
 
 func (x *Signer) GetFingerprint() string {
@@ -9075,7 +9163,7 @@ type ModuleSigner struct {
 
 func (x *ModuleSigner) Reset() {
 	*x = ModuleSigner{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[153]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[155]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9087,7 +9175,7 @@ func (x *ModuleSigner) String() string {
 func (*ModuleSigner) ProtoMessage() {}
 
 func (x *ModuleSigner) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[153]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[155]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9100,7 +9188,7 @@ func (x *ModuleSigner) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ModuleSigner.ProtoReflect.Descriptor instead.
 func (*ModuleSigner) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{153}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{155}
 }
 
 func (x *ModuleSigner) GetModule() string {
@@ -9142,7 +9230,7 @@ type ListSignersResponse struct {
 
 func (x *ListSignersResponse) Reset() {
 	*x = ListSignersResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[154]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[156]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9154,7 +9242,7 @@ func (x *ListSignersResponse) String() string {
 func (*ListSignersResponse) ProtoMessage() {}
 
 func (x *ListSignersResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[154]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[156]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9167,7 +9255,7 @@ func (x *ListSignersResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSignersResponse.ProtoReflect.Descriptor instead.
 func (*ListSignersResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{154}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{156}
 }
 
 func (x *ListSignersResponse) GetSigners() []*Signer {
@@ -9199,7 +9287,7 @@ type ListEventsRequest struct {
 
 func (x *ListEventsRequest) Reset() {
 	*x = ListEventsRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[155]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[157]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9211,7 +9299,7 @@ func (x *ListEventsRequest) String() string {
 func (*ListEventsRequest) ProtoMessage() {}
 
 func (x *ListEventsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[155]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[157]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9224,7 +9312,7 @@ func (x *ListEventsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListEventsRequest.ProtoReflect.Descriptor instead.
 func (*ListEventsRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{155}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{157}
 }
 
 func (x *ListEventsRequest) GetAfterSeq() int64 {
@@ -9264,7 +9352,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[156]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[158]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9276,7 +9364,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[156]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[158]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9289,7 +9377,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{156}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{158}
 }
 
 func (x *Event) GetSeq() int64 {
@@ -9342,7 +9430,7 @@ type ListEventsResponse struct {
 
 func (x *ListEventsResponse) Reset() {
 	*x = ListEventsResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[157]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[159]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9354,7 +9442,7 @@ func (x *ListEventsResponse) String() string {
 func (*ListEventsResponse) ProtoMessage() {}
 
 func (x *ListEventsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[157]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[159]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9367,7 +9455,7 @@ func (x *ListEventsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListEventsResponse.ProtoReflect.Descriptor instead.
 func (*ListEventsResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{157}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{159}
 }
 
 func (x *ListEventsResponse) GetEvents() []*Event {
@@ -9408,7 +9496,7 @@ type EventKey struct {
 
 func (x *EventKey) Reset() {
 	*x = EventKey{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[158]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[160]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9420,7 +9508,7 @@ func (x *EventKey) String() string {
 func (*EventKey) ProtoMessage() {}
 
 func (x *EventKey) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[158]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[160]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9433,7 +9521,7 @@ func (x *EventKey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EventKey.ProtoReflect.Descriptor instead.
 func (*EventKey) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{158}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{160}
 }
 
 func (x *EventKey) GetFirstSeq() int64 {
@@ -9458,7 +9546,7 @@ type BackupExecutorRequest struct {
 
 func (x *BackupExecutorRequest) Reset() {
 	*x = BackupExecutorRequest{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[159]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[161]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9470,7 +9558,7 @@ func (x *BackupExecutorRequest) String() string {
 func (*BackupExecutorRequest) ProtoMessage() {}
 
 func (x *BackupExecutorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[159]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[161]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9483,7 +9571,7 @@ func (x *BackupExecutorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BackupExecutorRequest.ProtoReflect.Descriptor instead.
 func (*BackupExecutorRequest) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{159}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{161}
 }
 
 // One file of the executor's part of a backup: "executor.db" (a checked
@@ -9501,7 +9589,7 @@ type BackupFile struct {
 
 func (x *BackupFile) Reset() {
 	*x = BackupFile{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[160]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[162]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9513,7 +9601,7 @@ func (x *BackupFile) String() string {
 func (*BackupFile) ProtoMessage() {}
 
 func (x *BackupFile) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[160]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[162]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9526,7 +9614,7 @@ func (x *BackupFile) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BackupFile.ProtoReflect.Descriptor instead.
 func (*BackupFile) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{160}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{162}
 }
 
 func (x *BackupFile) GetName() string {
@@ -9561,7 +9649,7 @@ type BackupExecutorResponse struct {
 
 func (x *BackupExecutorResponse) Reset() {
 	*x = BackupExecutorResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[161]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[163]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9573,7 +9661,7 @@ func (x *BackupExecutorResponse) String() string {
 func (*BackupExecutorResponse) ProtoMessage() {}
 
 func (x *BackupExecutorResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[161]
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[163]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9586,7 +9674,7 @@ func (x *BackupExecutorResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BackupExecutorResponse.ProtoReflect.Descriptor instead.
 func (*BackupExecutorResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{161}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{163}
 }
 
 func (x *BackupExecutorResponse) GetFiles() []*BackupFile {
@@ -9780,6 +9868,10 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x10execution_digest\x18\x01 \x01(\tR\x0fexecutionDigest\x12,\n" +
 	"\x12typed_target_count\x18\x02 \x01(\rR\x10typedTargetCount\"K\n" +
 	"\x12ApproveCLIResponse\x125\n" +
+	"\x05state\x18\x01 \x01(\x0e2\x1f.nebula.executor.v1.PermitStateR\x05state\"B\n" +
+	"\x15GetPermitStateRequest\x12)\n" +
+	"\x10execution_digest\x18\x01 \x01(\tR\x0fexecutionDigest\"O\n" +
+	"\x16GetPermitStateResponse\x125\n" +
 	"\x05state\x18\x01 \x01(\x0e2\x1f.nebula.executor.v1.PermitStateR\x05state\"\xf3\x01\n" +
 	"\x14TrustArtifactRequest\x12\x1b\n" +
 	"\taction_id\x18\x01 \x01(\tR\bactionId\x12%\n" +
@@ -10265,7 +10357,7 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\rHostKeySource\x12\x1f\n" +
 	"\x1bHOST_KEY_SOURCE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15HOST_KEY_SOURCE_PROBE\x10\x01\x12\x1f\n" +
-	"\x1bHOST_KEY_SOURCE_KNOWN_HOSTS\x10\x022\x958\n" +
+	"\x1bHOST_KEY_SOURCE_KNOWN_HOSTS\x10\x022\xfe8\n" +
 	"\x0fExecutorService\x12X\n" +
 	"\tGetStatus\x12$.nebula.executor.v1.GetStatusRequest\x1a%.nebula.executor.v1.GetStatusResponse\x12m\n" +
 	"\x10ProposeExecution\x12+.nebula.executor.v1.ProposeExecutionRequest\x1a,.nebula.executor.v1.ProposeExecutionResponse\x12j\n" +
@@ -10280,7 +10372,8 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x04Lock\x12\x1f.nebula.executor.v1.LockRequest\x1a .nebula.executor.v1.LockResponse\x12^\n" +
 	"\vListPending\x12&.nebula.executor.v1.ListPendingRequest\x1a'.nebula.executor.v1.ListPendingResponse\x12[\n" +
 	"\n" +
-	"ApproveCLI\x12%.nebula.executor.v1.ApproveCLIRequest\x1a&.nebula.executor.v1.ApproveCLIResponse\x12d\n" +
+	"ApproveCLI\x12%.nebula.executor.v1.ApproveCLIRequest\x1a&.nebula.executor.v1.ApproveCLIResponse\x12g\n" +
+	"\x0eGetPermitState\x12).nebula.executor.v1.GetPermitStateRequest\x1a*.nebula.executor.v1.GetPermitStateResponse\x12d\n" +
 	"\rTrustArtifact\x12(.nebula.executor.v1.TrustArtifactRequest\x1a).nebula.executor.v1.TrustArtifactResponse\x12j\n" +
 	"\x0fUntrustArtifact\x12*.nebula.executor.v1.UntrustArtifactRequest\x1a+.nebula.executor.v1.UntrustArtifactResponse\x12y\n" +
 	"\x14ListTrustedArtifacts\x12/.nebula.executor.v1.ListTrustedArtifactsRequest\x1a0.nebula.executor.v1.ListTrustedArtifactsResponse\x12s\n" +
@@ -10356,7 +10449,7 @@ func file_nebula_executor_v1_executor_proto_rawDescGZIP() []byte {
 }
 
 var file_nebula_executor_v1_executor_proto_enumTypes = make([]protoimpl.EnumInfo, 7)
-var file_nebula_executor_v1_executor_proto_msgTypes = make([]protoimpl.MessageInfo, 163)
+var file_nebula_executor_v1_executor_proto_msgTypes = make([]protoimpl.MessageInfo, 165)
 var file_nebula_executor_v1_executor_proto_goTypes = []any{
 	(RiskClass)(0),                            // 0: nebula.executor.v1.RiskClass
 	(ApprovalRequirement)(0),                  // 1: nebula.executor.v1.ApprovalRequirement
@@ -10404,130 +10497,132 @@ var file_nebula_executor_v1_executor_proto_goTypes = []any{
 	(*ListPendingResponse)(nil),               // 43: nebula.executor.v1.ListPendingResponse
 	(*ApproveCLIRequest)(nil),                 // 44: nebula.executor.v1.ApproveCLIRequest
 	(*ApproveCLIResponse)(nil),                // 45: nebula.executor.v1.ApproveCLIResponse
-	(*TrustArtifactRequest)(nil),              // 46: nebula.executor.v1.TrustArtifactRequest
-	(*TrustArtifactResponse)(nil),             // 47: nebula.executor.v1.TrustArtifactResponse
-	(*UntrustArtifactRequest)(nil),            // 48: nebula.executor.v1.UntrustArtifactRequest
-	(*UntrustArtifactResponse)(nil),           // 49: nebula.executor.v1.UntrustArtifactResponse
-	(*ListTrustedArtifactsRequest)(nil),       // 50: nebula.executor.v1.ListTrustedArtifactsRequest
-	(*TrustedArtifact)(nil),                   // 51: nebula.executor.v1.TrustedArtifact
-	(*ListTrustedArtifactsResponse)(nil),      // 52: nebula.executor.v1.ListTrustedArtifactsResponse
-	(*SetHostCriticalityRequest)(nil),         // 53: nebula.executor.v1.SetHostCriticalityRequest
-	(*SetHostCriticalityResponse)(nil),        // 54: nebula.executor.v1.SetHostCriticalityResponse
-	(*ListHostCriticalityRequest)(nil),        // 55: nebula.executor.v1.ListHostCriticalityRequest
-	(*HostCriticality)(nil),                   // 56: nebula.executor.v1.HostCriticality
-	(*ListHostCriticalityResponse)(nil),       // 57: nebula.executor.v1.ListHostCriticalityResponse
-	(*CreateRegistrationCodeRequest)(nil),     // 58: nebula.executor.v1.CreateRegistrationCodeRequest
-	(*CreateRegistrationCodeResponse)(nil),    // 59: nebula.executor.v1.CreateRegistrationCodeResponse
-	(*BeginRegistrationRequest)(nil),          // 60: nebula.executor.v1.BeginRegistrationRequest
-	(*BeginRegistrationResponse)(nil),         // 61: nebula.executor.v1.BeginRegistrationResponse
-	(*FinishRegistrationRequest)(nil),         // 62: nebula.executor.v1.FinishRegistrationRequest
-	(*FinishRegistrationResponse)(nil),        // 63: nebula.executor.v1.FinishRegistrationResponse
-	(*ListWebAuthnCredentialsRequest)(nil),    // 64: nebula.executor.v1.ListWebAuthnCredentialsRequest
-	(*WebAuthnCredential)(nil),                // 65: nebula.executor.v1.WebAuthnCredential
-	(*ListWebAuthnCredentialsResponse)(nil),   // 66: nebula.executor.v1.ListWebAuthnCredentialsResponse
-	(*RemoveWebAuthnCredentialRequest)(nil),   // 67: nebula.executor.v1.RemoveWebAuthnCredentialRequest
-	(*RemoveWebAuthnCredentialResponse)(nil),  // 68: nebula.executor.v1.RemoveWebAuthnCredentialResponse
-	(*ProbeHostKeyRequest)(nil),               // 69: nebula.executor.v1.ProbeHostKeyRequest
-	(*ProbeHostKeyResponse)(nil),              // 70: nebula.executor.v1.ProbeHostKeyResponse
-	(*PinHostKeyRequest)(nil),                 // 71: nebula.executor.v1.PinHostKeyRequest
-	(*HostKeyPin)(nil),                        // 72: nebula.executor.v1.HostKeyPin
-	(*PinHostKeyResponse)(nil),                // 73: nebula.executor.v1.PinHostKeyResponse
-	(*UnpinHostKeyRequest)(nil),               // 74: nebula.executor.v1.UnpinHostKeyRequest
-	(*UnpinHostKeyResponse)(nil),              // 75: nebula.executor.v1.UnpinHostKeyResponse
-	(*ListHostKeysRequest)(nil),               // 76: nebula.executor.v1.ListHostKeysRequest
-	(*ListHostKeysResponse)(nil),              // 77: nebula.executor.v1.ListHostKeysResponse
-	(*ProposeRepinRequest)(nil),               // 78: nebula.executor.v1.ProposeRepinRequest
-	(*ProposeRepinResponse)(nil),              // 79: nebula.executor.v1.ProposeRepinResponse
-	(*CommitRepinRequest)(nil),                // 80: nebula.executor.v1.CommitRepinRequest
-	(*CommitRepinResponse)(nil),               // 81: nebula.executor.v1.CommitRepinResponse
-	(*EnrollHost)(nil),                        // 82: nebula.executor.v1.EnrollHost
-	(*ProposeEnrollRequest)(nil),              // 83: nebula.executor.v1.ProposeEnrollRequest
-	(*ProposeEnrollResponse)(nil),             // 84: nebula.executor.v1.ProposeEnrollResponse
-	(*CommitEnrollRequest)(nil),               // 85: nebula.executor.v1.CommitEnrollRequest
-	(*EnrollResult)(nil),                      // 86: nebula.executor.v1.EnrollResult
-	(*CommitEnrollResponse)(nil),              // 87: nebula.executor.v1.CommitEnrollResponse
-	(*TestConnectionRequest)(nil),             // 88: nebula.executor.v1.TestConnectionRequest
-	(*ConnectionAttempt)(nil),                 // 89: nebula.executor.v1.ConnectionAttempt
-	(*TestConnectionResponse)(nil),            // 90: nebula.executor.v1.TestConnectionResponse
-	(*BeginLoginRequest)(nil),                 // 91: nebula.executor.v1.BeginLoginRequest
-	(*BeginLoginResponse)(nil),                // 92: nebula.executor.v1.BeginLoginResponse
-	(*FinishLoginRequest)(nil),                // 93: nebula.executor.v1.FinishLoginRequest
-	(*FinishLoginResponse)(nil),               // 94: nebula.executor.v1.FinishLoginResponse
-	(*CheckCredentialRequest)(nil),            // 95: nebula.executor.v1.CheckCredentialRequest
-	(*CheckCredentialResponse)(nil),           // 96: nebula.executor.v1.CheckCredentialResponse
-	(*BeginTOTPSetupRequest)(nil),             // 97: nebula.executor.v1.BeginTOTPSetupRequest
-	(*BeginTOTPSetupResponse)(nil),            // 98: nebula.executor.v1.BeginTOTPSetupResponse
-	(*ConfirmTOTPSetupRequest)(nil),           // 99: nebula.executor.v1.ConfirmTOTPSetupRequest
-	(*ConfirmTOTPSetupResponse)(nil),          // 100: nebula.executor.v1.ConfirmTOTPSetupResponse
-	(*RemoveTOTPRequest)(nil),                 // 101: nebula.executor.v1.RemoveTOTPRequest
-	(*RemoveTOTPResponse)(nil),                // 102: nebula.executor.v1.RemoveTOTPResponse
-	(*GetTOTPStatusRequest)(nil),              // 103: nebula.executor.v1.GetTOTPStatusRequest
-	(*GetTOTPStatusResponse)(nil),             // 104: nebula.executor.v1.GetTOTPStatusResponse
-	(*RecoveryLoginRequest)(nil),              // 105: nebula.executor.v1.RecoveryLoginRequest
-	(*RecoveryLoginResponse)(nil),             // 106: nebula.executor.v1.RecoveryLoginResponse
-	(*FinishRecoveryRequest)(nil),             // 107: nebula.executor.v1.FinishRecoveryRequest
-	(*FinishRecoveryResponse)(nil),            // 108: nebula.executor.v1.FinishRecoveryResponse
-	(*GetSSHPublicKeyRequest)(nil),            // 109: nebula.executor.v1.GetSSHPublicKeyRequest
-	(*GetSSHPublicKeyResponse)(nil),           // 110: nebula.executor.v1.GetSSHPublicKeyResponse
-	(*InitVaultRequest)(nil),                  // 111: nebula.executor.v1.InitVaultRequest
-	(*InitVaultResponse)(nil),                 // 112: nebula.executor.v1.InitVaultResponse
-	(*SetSecretRequest)(nil),                  // 113: nebula.executor.v1.SetSecretRequest
-	(*SetSecretResponse)(nil),                 // 114: nebula.executor.v1.SetSecretResponse
-	(*ListSecretsRequest)(nil),                // 115: nebula.executor.v1.ListSecretsRequest
-	(*SecretInfo)(nil),                        // 116: nebula.executor.v1.SecretInfo
-	(*ListSecretsResponse)(nil),               // 117: nebula.executor.v1.ListSecretsResponse
-	(*DeleteSecretRequest)(nil),               // 118: nebula.executor.v1.DeleteSecretRequest
-	(*DeleteSecretResponse)(nil),              // 119: nebula.executor.v1.DeleteSecretResponse
-	(*RunAttachedRequest)(nil),                // 120: nebula.executor.v1.RunAttachedRequest
-	(*RunAttachedResponse)(nil),               // 121: nebula.executor.v1.RunAttachedResponse
-	(*StartDurableRequest)(nil),               // 122: nebula.executor.v1.StartDurableRequest
-	(*StartDurableResponse)(nil),              // 123: nebula.executor.v1.StartDurableResponse
-	(*GetRunResponse)(nil),                    // 124: nebula.executor.v1.GetRunResponse
-	(*GetRunRequest)(nil),                     // 125: nebula.executor.v1.GetRunRequest
-	(*RunStatus)(nil),                         // 126: nebula.executor.v1.RunStatus
-	(*ProposeScheduleGrantRequest)(nil),       // 127: nebula.executor.v1.ProposeScheduleGrantRequest
-	(*ProposeScheduleGrantResponse)(nil),      // 128: nebula.executor.v1.ProposeScheduleGrantResponse
-	(*CommitScheduleGrantRequest)(nil),        // 129: nebula.executor.v1.CommitScheduleGrantRequest
-	(*ScheduleGrant)(nil),                     // 130: nebula.executor.v1.ScheduleGrant
-	(*CommitScheduleGrantResponse)(nil),       // 131: nebula.executor.v1.CommitScheduleGrantResponse
-	(*ListPendingScheduleGrantsRequest)(nil),  // 132: nebula.executor.v1.ListPendingScheduleGrantsRequest
-	(*PendingScheduleGrant)(nil),              // 133: nebula.executor.v1.PendingScheduleGrant
-	(*ListPendingScheduleGrantsResponse)(nil), // 134: nebula.executor.v1.ListPendingScheduleGrantsResponse
-	(*ApproveScheduleGrantCLIRequest)(nil),    // 135: nebula.executor.v1.ApproveScheduleGrantCLIRequest
-	(*ApproveScheduleGrantCLIResponse)(nil),   // 136: nebula.executor.v1.ApproveScheduleGrantCLIResponse
-	(*ListScheduleGrantsRequest)(nil),         // 137: nebula.executor.v1.ListScheduleGrantsRequest
-	(*ListScheduleGrantsResponse)(nil),        // 138: nebula.executor.v1.ListScheduleGrantsResponse
-	(*RevokeScheduleGrantRequest)(nil),        // 139: nebula.executor.v1.RevokeScheduleGrantRequest
-	(*RevokeScheduleGrantResponse)(nil),       // 140: nebula.executor.v1.RevokeScheduleGrantResponse
-	(*RunScheduledRequest)(nil),               // 141: nebula.executor.v1.RunScheduledRequest
-	(*RunScheduledResponse)(nil),              // 142: nebula.executor.v1.RunScheduledResponse
-	(*BeginTrustArtifactRequest)(nil),         // 143: nebula.executor.v1.BeginTrustArtifactRequest
-	(*BeginTrustArtifactResponse)(nil),        // 144: nebula.executor.v1.BeginTrustArtifactResponse
-	(*CommitTrustArtifactRequest)(nil),        // 145: nebula.executor.v1.CommitTrustArtifactRequest
-	(*CommitTrustArtifactResponse)(nil),       // 146: nebula.executor.v1.CommitTrustArtifactResponse
-	(*GetArtifactTrustRequest)(nil),           // 147: nebula.executor.v1.GetArtifactTrustRequest
-	(*GetArtifactTrustResponse)(nil),          // 148: nebula.executor.v1.GetArtifactTrustResponse
-	(*RegisterModuleRequest)(nil),             // 149: nebula.executor.v1.RegisterModuleRequest
-	(*ModuleAction)(nil),                      // 150: nebula.executor.v1.ModuleAction
-	(*RegisterModuleResponse)(nil),            // 151: nebula.executor.v1.RegisterModuleResponse
-	(*AddSignerRequest)(nil),                  // 152: nebula.executor.v1.AddSignerRequest
-	(*AddSignerResponse)(nil),                 // 153: nebula.executor.v1.AddSignerResponse
-	(*RemoveSignerRequest)(nil),               // 154: nebula.executor.v1.RemoveSignerRequest
-	(*RemoveSignerResponse)(nil),              // 155: nebula.executor.v1.RemoveSignerResponse
-	(*ConfirmModuleSignerRequest)(nil),        // 156: nebula.executor.v1.ConfirmModuleSignerRequest
-	(*ConfirmModuleSignerResponse)(nil),       // 157: nebula.executor.v1.ConfirmModuleSignerResponse
-	(*ListSignersRequest)(nil),                // 158: nebula.executor.v1.ListSignersRequest
-	(*Signer)(nil),                            // 159: nebula.executor.v1.Signer
-	(*ModuleSigner)(nil),                      // 160: nebula.executor.v1.ModuleSigner
-	(*ListSignersResponse)(nil),               // 161: nebula.executor.v1.ListSignersResponse
-	(*ListEventsRequest)(nil),                 // 162: nebula.executor.v1.ListEventsRequest
-	(*Event)(nil),                             // 163: nebula.executor.v1.Event
-	(*ListEventsResponse)(nil),                // 164: nebula.executor.v1.ListEventsResponse
-	(*EventKey)(nil),                          // 165: nebula.executor.v1.EventKey
-	(*BackupExecutorRequest)(nil),             // 166: nebula.executor.v1.BackupExecutorRequest
-	(*BackupFile)(nil),                        // 167: nebula.executor.v1.BackupFile
-	(*BackupExecutorResponse)(nil),            // 168: nebula.executor.v1.BackupExecutorResponse
-	nil,                                       // 169: nebula.executor.v1.RegisterModuleRequest.ScriptsEntry
+	(*GetPermitStateRequest)(nil),             // 46: nebula.executor.v1.GetPermitStateRequest
+	(*GetPermitStateResponse)(nil),            // 47: nebula.executor.v1.GetPermitStateResponse
+	(*TrustArtifactRequest)(nil),              // 48: nebula.executor.v1.TrustArtifactRequest
+	(*TrustArtifactResponse)(nil),             // 49: nebula.executor.v1.TrustArtifactResponse
+	(*UntrustArtifactRequest)(nil),            // 50: nebula.executor.v1.UntrustArtifactRequest
+	(*UntrustArtifactResponse)(nil),           // 51: nebula.executor.v1.UntrustArtifactResponse
+	(*ListTrustedArtifactsRequest)(nil),       // 52: nebula.executor.v1.ListTrustedArtifactsRequest
+	(*TrustedArtifact)(nil),                   // 53: nebula.executor.v1.TrustedArtifact
+	(*ListTrustedArtifactsResponse)(nil),      // 54: nebula.executor.v1.ListTrustedArtifactsResponse
+	(*SetHostCriticalityRequest)(nil),         // 55: nebula.executor.v1.SetHostCriticalityRequest
+	(*SetHostCriticalityResponse)(nil),        // 56: nebula.executor.v1.SetHostCriticalityResponse
+	(*ListHostCriticalityRequest)(nil),        // 57: nebula.executor.v1.ListHostCriticalityRequest
+	(*HostCriticality)(nil),                   // 58: nebula.executor.v1.HostCriticality
+	(*ListHostCriticalityResponse)(nil),       // 59: nebula.executor.v1.ListHostCriticalityResponse
+	(*CreateRegistrationCodeRequest)(nil),     // 60: nebula.executor.v1.CreateRegistrationCodeRequest
+	(*CreateRegistrationCodeResponse)(nil),    // 61: nebula.executor.v1.CreateRegistrationCodeResponse
+	(*BeginRegistrationRequest)(nil),          // 62: nebula.executor.v1.BeginRegistrationRequest
+	(*BeginRegistrationResponse)(nil),         // 63: nebula.executor.v1.BeginRegistrationResponse
+	(*FinishRegistrationRequest)(nil),         // 64: nebula.executor.v1.FinishRegistrationRequest
+	(*FinishRegistrationResponse)(nil),        // 65: nebula.executor.v1.FinishRegistrationResponse
+	(*ListWebAuthnCredentialsRequest)(nil),    // 66: nebula.executor.v1.ListWebAuthnCredentialsRequest
+	(*WebAuthnCredential)(nil),                // 67: nebula.executor.v1.WebAuthnCredential
+	(*ListWebAuthnCredentialsResponse)(nil),   // 68: nebula.executor.v1.ListWebAuthnCredentialsResponse
+	(*RemoveWebAuthnCredentialRequest)(nil),   // 69: nebula.executor.v1.RemoveWebAuthnCredentialRequest
+	(*RemoveWebAuthnCredentialResponse)(nil),  // 70: nebula.executor.v1.RemoveWebAuthnCredentialResponse
+	(*ProbeHostKeyRequest)(nil),               // 71: nebula.executor.v1.ProbeHostKeyRequest
+	(*ProbeHostKeyResponse)(nil),              // 72: nebula.executor.v1.ProbeHostKeyResponse
+	(*PinHostKeyRequest)(nil),                 // 73: nebula.executor.v1.PinHostKeyRequest
+	(*HostKeyPin)(nil),                        // 74: nebula.executor.v1.HostKeyPin
+	(*PinHostKeyResponse)(nil),                // 75: nebula.executor.v1.PinHostKeyResponse
+	(*UnpinHostKeyRequest)(nil),               // 76: nebula.executor.v1.UnpinHostKeyRequest
+	(*UnpinHostKeyResponse)(nil),              // 77: nebula.executor.v1.UnpinHostKeyResponse
+	(*ListHostKeysRequest)(nil),               // 78: nebula.executor.v1.ListHostKeysRequest
+	(*ListHostKeysResponse)(nil),              // 79: nebula.executor.v1.ListHostKeysResponse
+	(*ProposeRepinRequest)(nil),               // 80: nebula.executor.v1.ProposeRepinRequest
+	(*ProposeRepinResponse)(nil),              // 81: nebula.executor.v1.ProposeRepinResponse
+	(*CommitRepinRequest)(nil),                // 82: nebula.executor.v1.CommitRepinRequest
+	(*CommitRepinResponse)(nil),               // 83: nebula.executor.v1.CommitRepinResponse
+	(*EnrollHost)(nil),                        // 84: nebula.executor.v1.EnrollHost
+	(*ProposeEnrollRequest)(nil),              // 85: nebula.executor.v1.ProposeEnrollRequest
+	(*ProposeEnrollResponse)(nil),             // 86: nebula.executor.v1.ProposeEnrollResponse
+	(*CommitEnrollRequest)(nil),               // 87: nebula.executor.v1.CommitEnrollRequest
+	(*EnrollResult)(nil),                      // 88: nebula.executor.v1.EnrollResult
+	(*CommitEnrollResponse)(nil),              // 89: nebula.executor.v1.CommitEnrollResponse
+	(*TestConnectionRequest)(nil),             // 90: nebula.executor.v1.TestConnectionRequest
+	(*ConnectionAttempt)(nil),                 // 91: nebula.executor.v1.ConnectionAttempt
+	(*TestConnectionResponse)(nil),            // 92: nebula.executor.v1.TestConnectionResponse
+	(*BeginLoginRequest)(nil),                 // 93: nebula.executor.v1.BeginLoginRequest
+	(*BeginLoginResponse)(nil),                // 94: nebula.executor.v1.BeginLoginResponse
+	(*FinishLoginRequest)(nil),                // 95: nebula.executor.v1.FinishLoginRequest
+	(*FinishLoginResponse)(nil),               // 96: nebula.executor.v1.FinishLoginResponse
+	(*CheckCredentialRequest)(nil),            // 97: nebula.executor.v1.CheckCredentialRequest
+	(*CheckCredentialResponse)(nil),           // 98: nebula.executor.v1.CheckCredentialResponse
+	(*BeginTOTPSetupRequest)(nil),             // 99: nebula.executor.v1.BeginTOTPSetupRequest
+	(*BeginTOTPSetupResponse)(nil),            // 100: nebula.executor.v1.BeginTOTPSetupResponse
+	(*ConfirmTOTPSetupRequest)(nil),           // 101: nebula.executor.v1.ConfirmTOTPSetupRequest
+	(*ConfirmTOTPSetupResponse)(nil),          // 102: nebula.executor.v1.ConfirmTOTPSetupResponse
+	(*RemoveTOTPRequest)(nil),                 // 103: nebula.executor.v1.RemoveTOTPRequest
+	(*RemoveTOTPResponse)(nil),                // 104: nebula.executor.v1.RemoveTOTPResponse
+	(*GetTOTPStatusRequest)(nil),              // 105: nebula.executor.v1.GetTOTPStatusRequest
+	(*GetTOTPStatusResponse)(nil),             // 106: nebula.executor.v1.GetTOTPStatusResponse
+	(*RecoveryLoginRequest)(nil),              // 107: nebula.executor.v1.RecoveryLoginRequest
+	(*RecoveryLoginResponse)(nil),             // 108: nebula.executor.v1.RecoveryLoginResponse
+	(*FinishRecoveryRequest)(nil),             // 109: nebula.executor.v1.FinishRecoveryRequest
+	(*FinishRecoveryResponse)(nil),            // 110: nebula.executor.v1.FinishRecoveryResponse
+	(*GetSSHPublicKeyRequest)(nil),            // 111: nebula.executor.v1.GetSSHPublicKeyRequest
+	(*GetSSHPublicKeyResponse)(nil),           // 112: nebula.executor.v1.GetSSHPublicKeyResponse
+	(*InitVaultRequest)(nil),                  // 113: nebula.executor.v1.InitVaultRequest
+	(*InitVaultResponse)(nil),                 // 114: nebula.executor.v1.InitVaultResponse
+	(*SetSecretRequest)(nil),                  // 115: nebula.executor.v1.SetSecretRequest
+	(*SetSecretResponse)(nil),                 // 116: nebula.executor.v1.SetSecretResponse
+	(*ListSecretsRequest)(nil),                // 117: nebula.executor.v1.ListSecretsRequest
+	(*SecretInfo)(nil),                        // 118: nebula.executor.v1.SecretInfo
+	(*ListSecretsResponse)(nil),               // 119: nebula.executor.v1.ListSecretsResponse
+	(*DeleteSecretRequest)(nil),               // 120: nebula.executor.v1.DeleteSecretRequest
+	(*DeleteSecretResponse)(nil),              // 121: nebula.executor.v1.DeleteSecretResponse
+	(*RunAttachedRequest)(nil),                // 122: nebula.executor.v1.RunAttachedRequest
+	(*RunAttachedResponse)(nil),               // 123: nebula.executor.v1.RunAttachedResponse
+	(*StartDurableRequest)(nil),               // 124: nebula.executor.v1.StartDurableRequest
+	(*StartDurableResponse)(nil),              // 125: nebula.executor.v1.StartDurableResponse
+	(*GetRunResponse)(nil),                    // 126: nebula.executor.v1.GetRunResponse
+	(*GetRunRequest)(nil),                     // 127: nebula.executor.v1.GetRunRequest
+	(*RunStatus)(nil),                         // 128: nebula.executor.v1.RunStatus
+	(*ProposeScheduleGrantRequest)(nil),       // 129: nebula.executor.v1.ProposeScheduleGrantRequest
+	(*ProposeScheduleGrantResponse)(nil),      // 130: nebula.executor.v1.ProposeScheduleGrantResponse
+	(*CommitScheduleGrantRequest)(nil),        // 131: nebula.executor.v1.CommitScheduleGrantRequest
+	(*ScheduleGrant)(nil),                     // 132: nebula.executor.v1.ScheduleGrant
+	(*CommitScheduleGrantResponse)(nil),       // 133: nebula.executor.v1.CommitScheduleGrantResponse
+	(*ListPendingScheduleGrantsRequest)(nil),  // 134: nebula.executor.v1.ListPendingScheduleGrantsRequest
+	(*PendingScheduleGrant)(nil),              // 135: nebula.executor.v1.PendingScheduleGrant
+	(*ListPendingScheduleGrantsResponse)(nil), // 136: nebula.executor.v1.ListPendingScheduleGrantsResponse
+	(*ApproveScheduleGrantCLIRequest)(nil),    // 137: nebula.executor.v1.ApproveScheduleGrantCLIRequest
+	(*ApproveScheduleGrantCLIResponse)(nil),   // 138: nebula.executor.v1.ApproveScheduleGrantCLIResponse
+	(*ListScheduleGrantsRequest)(nil),         // 139: nebula.executor.v1.ListScheduleGrantsRequest
+	(*ListScheduleGrantsResponse)(nil),        // 140: nebula.executor.v1.ListScheduleGrantsResponse
+	(*RevokeScheduleGrantRequest)(nil),        // 141: nebula.executor.v1.RevokeScheduleGrantRequest
+	(*RevokeScheduleGrantResponse)(nil),       // 142: nebula.executor.v1.RevokeScheduleGrantResponse
+	(*RunScheduledRequest)(nil),               // 143: nebula.executor.v1.RunScheduledRequest
+	(*RunScheduledResponse)(nil),              // 144: nebula.executor.v1.RunScheduledResponse
+	(*BeginTrustArtifactRequest)(nil),         // 145: nebula.executor.v1.BeginTrustArtifactRequest
+	(*BeginTrustArtifactResponse)(nil),        // 146: nebula.executor.v1.BeginTrustArtifactResponse
+	(*CommitTrustArtifactRequest)(nil),        // 147: nebula.executor.v1.CommitTrustArtifactRequest
+	(*CommitTrustArtifactResponse)(nil),       // 148: nebula.executor.v1.CommitTrustArtifactResponse
+	(*GetArtifactTrustRequest)(nil),           // 149: nebula.executor.v1.GetArtifactTrustRequest
+	(*GetArtifactTrustResponse)(nil),          // 150: nebula.executor.v1.GetArtifactTrustResponse
+	(*RegisterModuleRequest)(nil),             // 151: nebula.executor.v1.RegisterModuleRequest
+	(*ModuleAction)(nil),                      // 152: nebula.executor.v1.ModuleAction
+	(*RegisterModuleResponse)(nil),            // 153: nebula.executor.v1.RegisterModuleResponse
+	(*AddSignerRequest)(nil),                  // 154: nebula.executor.v1.AddSignerRequest
+	(*AddSignerResponse)(nil),                 // 155: nebula.executor.v1.AddSignerResponse
+	(*RemoveSignerRequest)(nil),               // 156: nebula.executor.v1.RemoveSignerRequest
+	(*RemoveSignerResponse)(nil),              // 157: nebula.executor.v1.RemoveSignerResponse
+	(*ConfirmModuleSignerRequest)(nil),        // 158: nebula.executor.v1.ConfirmModuleSignerRequest
+	(*ConfirmModuleSignerResponse)(nil),       // 159: nebula.executor.v1.ConfirmModuleSignerResponse
+	(*ListSignersRequest)(nil),                // 160: nebula.executor.v1.ListSignersRequest
+	(*Signer)(nil),                            // 161: nebula.executor.v1.Signer
+	(*ModuleSigner)(nil),                      // 162: nebula.executor.v1.ModuleSigner
+	(*ListSignersResponse)(nil),               // 163: nebula.executor.v1.ListSignersResponse
+	(*ListEventsRequest)(nil),                 // 164: nebula.executor.v1.ListEventsRequest
+	(*Event)(nil),                             // 165: nebula.executor.v1.Event
+	(*ListEventsResponse)(nil),                // 166: nebula.executor.v1.ListEventsResponse
+	(*EventKey)(nil),                          // 167: nebula.executor.v1.EventKey
+	(*BackupExecutorRequest)(nil),             // 168: nebula.executor.v1.BackupExecutorRequest
+	(*BackupFile)(nil),                        // 169: nebula.executor.v1.BackupFile
+	(*BackupExecutorResponse)(nil),            // 170: nebula.executor.v1.BackupExecutorResponse
+	nil,                                       // 171: nebula.executor.v1.RegisterModuleRequest.ScriptsEntry
 }
 var file_nebula_executor_v1_executor_proto_depIdxs = []int32{
 	0,   // 0: nebula.executor.v1.ExecutionRequest.risk_class:type_name -> nebula.executor.v1.RiskClass
@@ -10559,190 +10654,193 @@ var file_nebula_executor_v1_executor_proto_depIdxs = []int32{
 	32,  // 26: nebula.executor.v1.ApproveGateCLIResponse.rollout:type_name -> nebula.executor.v1.Rollout
 	26,  // 27: nebula.executor.v1.ListPendingResponse.permits:type_name -> nebula.executor.v1.PendingPermit
 	2,   // 28: nebula.executor.v1.ApproveCLIResponse.state:type_name -> nebula.executor.v1.PermitState
-	0,   // 29: nebula.executor.v1.TrustArtifactRequest.risk_class:type_name -> nebula.executor.v1.RiskClass
-	0,   // 30: nebula.executor.v1.TrustedArtifact.risk_class:type_name -> nebula.executor.v1.RiskClass
-	51,  // 31: nebula.executor.v1.ListTrustedArtifactsResponse.artifacts:type_name -> nebula.executor.v1.TrustedArtifact
-	0,   // 32: nebula.executor.v1.SetHostCriticalityRequest.criticality:type_name -> nebula.executor.v1.RiskClass
-	0,   // 33: nebula.executor.v1.HostCriticality.criticality:type_name -> nebula.executor.v1.RiskClass
-	56,  // 34: nebula.executor.v1.ListHostCriticalityResponse.hosts:type_name -> nebula.executor.v1.HostCriticality
-	65,  // 35: nebula.executor.v1.ListWebAuthnCredentialsResponse.credentials:type_name -> nebula.executor.v1.WebAuthnCredential
-	6,   // 36: nebula.executor.v1.PinHostKeyRequest.source:type_name -> nebula.executor.v1.HostKeySource
-	6,   // 37: nebula.executor.v1.HostKeyPin.source:type_name -> nebula.executor.v1.HostKeySource
-	72,  // 38: nebula.executor.v1.PinHostKeyResponse.pin:type_name -> nebula.executor.v1.HostKeyPin
-	72,  // 39: nebula.executor.v1.ListHostKeysResponse.hosts:type_name -> nebula.executor.v1.HostKeyPin
-	12,  // 40: nebula.executor.v1.ProposeRepinResponse.permit:type_name -> nebula.executor.v1.ProposeExecutionResponse
-	72,  // 41: nebula.executor.v1.ProposeRepinResponse.pin:type_name -> nebula.executor.v1.HostKeyPin
-	72,  // 42: nebula.executor.v1.CommitRepinResponse.pin:type_name -> nebula.executor.v1.HostKeyPin
-	82,  // 43: nebula.executor.v1.ProposeEnrollRequest.hosts:type_name -> nebula.executor.v1.EnrollHost
-	12,  // 44: nebula.executor.v1.ProposeEnrollResponse.permit:type_name -> nebula.executor.v1.ProposeExecutionResponse
-	82,  // 45: nebula.executor.v1.ProposeEnrollResponse.hosts:type_name -> nebula.executor.v1.EnrollHost
-	82,  // 46: nebula.executor.v1.CommitEnrollRequest.hosts:type_name -> nebula.executor.v1.EnrollHost
-	86,  // 47: nebula.executor.v1.CommitEnrollResponse.results:type_name -> nebula.executor.v1.EnrollResult
-	89,  // 48: nebula.executor.v1.TestConnectionResponse.attempts:type_name -> nebula.executor.v1.ConnectionAttempt
-	116, // 49: nebula.executor.v1.ListSecretsResponse.secrets:type_name -> nebula.executor.v1.SecretInfo
-	4,   // 50: nebula.executor.v1.ListSecretsResponse.vault_state:type_name -> nebula.executor.v1.VaultState
-	19,  // 51: nebula.executor.v1.RunAttachedRequest.run:type_name -> nebula.executor.v1.AuthorizeRunRequest
-	19,  // 52: nebula.executor.v1.StartDurableRequest.run:type_name -> nebula.executor.v1.AuthorizeRunRequest
-	126, // 53: nebula.executor.v1.StartDurableResponse.run:type_name -> nebula.executor.v1.RunStatus
-	126, // 54: nebula.executor.v1.GetRunResponse.run:type_name -> nebula.executor.v1.RunStatus
-	1,   // 55: nebula.executor.v1.ProposeScheduleGrantResponse.approval_requirement:type_name -> nebula.executor.v1.ApprovalRequirement
-	130, // 56: nebula.executor.v1.CommitScheduleGrantResponse.grant:type_name -> nebula.executor.v1.ScheduleGrant
-	133, // 57: nebula.executor.v1.ListPendingScheduleGrantsResponse.grants:type_name -> nebula.executor.v1.PendingScheduleGrant
-	130, // 58: nebula.executor.v1.ApproveScheduleGrantCLIResponse.grant:type_name -> nebula.executor.v1.ScheduleGrant
-	130, // 59: nebula.executor.v1.ListScheduleGrantsResponse.grants:type_name -> nebula.executor.v1.ScheduleGrant
-	19,  // 60: nebula.executor.v1.RunScheduledRequest.run:type_name -> nebula.executor.v1.AuthorizeRunRequest
-	121, // 61: nebula.executor.v1.RunScheduledResponse.result:type_name -> nebula.executor.v1.RunAttachedResponse
-	0,   // 62: nebula.executor.v1.BeginTrustArtifactRequest.risk_class:type_name -> nebula.executor.v1.RiskClass
-	0,   // 63: nebula.executor.v1.GetArtifactTrustResponse.risk_class:type_name -> nebula.executor.v1.RiskClass
-	169, // 64: nebula.executor.v1.RegisterModuleRequest.scripts:type_name -> nebula.executor.v1.RegisterModuleRequest.ScriptsEntry
-	0,   // 65: nebula.executor.v1.ModuleAction.risk_class:type_name -> nebula.executor.v1.RiskClass
-	150, // 66: nebula.executor.v1.RegisterModuleResponse.actions:type_name -> nebula.executor.v1.ModuleAction
-	159, // 67: nebula.executor.v1.ListSignersResponse.signers:type_name -> nebula.executor.v1.Signer
-	160, // 68: nebula.executor.v1.ListSignersResponse.modules:type_name -> nebula.executor.v1.ModuleSigner
-	163, // 69: nebula.executor.v1.ListEventsResponse.events:type_name -> nebula.executor.v1.Event
-	165, // 70: nebula.executor.v1.ListEventsResponse.keys:type_name -> nebula.executor.v1.EventKey
-	167, // 71: nebula.executor.v1.BackupExecutorResponse.files:type_name -> nebula.executor.v1.BackupFile
-	9,   // 72: nebula.executor.v1.ExecutorService.GetStatus:input_type -> nebula.executor.v1.GetStatusRequest
-	11,  // 73: nebula.executor.v1.ExecutorService.ProposeExecution:input_type -> nebula.executor.v1.ProposeExecutionRequest
-	13,  // 74: nebula.executor.v1.ExecutorService.SubmitAssertion:input_type -> nebula.executor.v1.SubmitAssertionRequest
-	15,  // 75: nebula.executor.v1.ExecutorService.BeginPrivilegedSession:input_type -> nebula.executor.v1.BeginPrivilegedSessionRequest
-	17,  // 76: nebula.executor.v1.ExecutorService.CompletePrivilegedSession:input_type -> nebula.executor.v1.CompletePrivilegedSessionRequest
-	19,  // 77: nebula.executor.v1.ExecutorService.AuthorizeRun:input_type -> nebula.executor.v1.AuthorizeRunRequest
-	120, // 78: nebula.executor.v1.ExecutorService.RunAttached:input_type -> nebula.executor.v1.RunAttachedRequest
-	122, // 79: nebula.executor.v1.ExecutorService.StartDurable:input_type -> nebula.executor.v1.StartDurableRequest
-	125, // 80: nebula.executor.v1.ExecutorService.GetRun:input_type -> nebula.executor.v1.GetRunRequest
-	21,  // 81: nebula.executor.v1.ExecutorService.Unlock:input_type -> nebula.executor.v1.UnlockRequest
-	23,  // 82: nebula.executor.v1.ExecutorService.Lock:input_type -> nebula.executor.v1.LockRequest
-	25,  // 83: nebula.executor.v1.ExecutorService.ListPending:input_type -> nebula.executor.v1.ListPendingRequest
-	44,  // 84: nebula.executor.v1.ExecutorService.ApproveCLI:input_type -> nebula.executor.v1.ApproveCLIRequest
-	46,  // 85: nebula.executor.v1.ExecutorService.TrustArtifact:input_type -> nebula.executor.v1.TrustArtifactRequest
-	48,  // 86: nebula.executor.v1.ExecutorService.UntrustArtifact:input_type -> nebula.executor.v1.UntrustArtifactRequest
-	50,  // 87: nebula.executor.v1.ExecutorService.ListTrustedArtifacts:input_type -> nebula.executor.v1.ListTrustedArtifactsRequest
-	53,  // 88: nebula.executor.v1.ExecutorService.SetHostCriticality:input_type -> nebula.executor.v1.SetHostCriticalityRequest
-	55,  // 89: nebula.executor.v1.ExecutorService.ListHostCriticality:input_type -> nebula.executor.v1.ListHostCriticalityRequest
-	58,  // 90: nebula.executor.v1.ExecutorService.CreateRegistrationCode:input_type -> nebula.executor.v1.CreateRegistrationCodeRequest
-	60,  // 91: nebula.executor.v1.ExecutorService.BeginRegistration:input_type -> nebula.executor.v1.BeginRegistrationRequest
-	62,  // 92: nebula.executor.v1.ExecutorService.FinishRegistration:input_type -> nebula.executor.v1.FinishRegistrationRequest
-	64,  // 93: nebula.executor.v1.ExecutorService.ListWebAuthnCredentials:input_type -> nebula.executor.v1.ListWebAuthnCredentialsRequest
-	67,  // 94: nebula.executor.v1.ExecutorService.RemoveWebAuthnCredential:input_type -> nebula.executor.v1.RemoveWebAuthnCredentialRequest
-	91,  // 95: nebula.executor.v1.ExecutorService.BeginLogin:input_type -> nebula.executor.v1.BeginLoginRequest
-	93,  // 96: nebula.executor.v1.ExecutorService.FinishLogin:input_type -> nebula.executor.v1.FinishLoginRequest
-	95,  // 97: nebula.executor.v1.ExecutorService.CheckCredential:input_type -> nebula.executor.v1.CheckCredentialRequest
-	97,  // 98: nebula.executor.v1.ExecutorService.BeginTOTPSetup:input_type -> nebula.executor.v1.BeginTOTPSetupRequest
-	99,  // 99: nebula.executor.v1.ExecutorService.ConfirmTOTPSetup:input_type -> nebula.executor.v1.ConfirmTOTPSetupRequest
-	101, // 100: nebula.executor.v1.ExecutorService.RemoveTOTP:input_type -> nebula.executor.v1.RemoveTOTPRequest
-	103, // 101: nebula.executor.v1.ExecutorService.GetTOTPStatus:input_type -> nebula.executor.v1.GetTOTPStatusRequest
-	105, // 102: nebula.executor.v1.ExecutorService.RecoveryLogin:input_type -> nebula.executor.v1.RecoveryLoginRequest
-	107, // 103: nebula.executor.v1.ExecutorService.FinishRecovery:input_type -> nebula.executor.v1.FinishRecoveryRequest
-	69,  // 104: nebula.executor.v1.ExecutorService.ProbeHostKey:input_type -> nebula.executor.v1.ProbeHostKeyRequest
-	71,  // 105: nebula.executor.v1.ExecutorService.PinHostKey:input_type -> nebula.executor.v1.PinHostKeyRequest
-	74,  // 106: nebula.executor.v1.ExecutorService.UnpinHostKey:input_type -> nebula.executor.v1.UnpinHostKeyRequest
-	76,  // 107: nebula.executor.v1.ExecutorService.ListHostKeys:input_type -> nebula.executor.v1.ListHostKeysRequest
-	78,  // 108: nebula.executor.v1.ExecutorService.ProposeRepin:input_type -> nebula.executor.v1.ProposeRepinRequest
-	80,  // 109: nebula.executor.v1.ExecutorService.CommitRepin:input_type -> nebula.executor.v1.CommitRepinRequest
-	83,  // 110: nebula.executor.v1.ExecutorService.ProposeEnroll:input_type -> nebula.executor.v1.ProposeEnrollRequest
-	85,  // 111: nebula.executor.v1.ExecutorService.CommitEnroll:input_type -> nebula.executor.v1.CommitEnrollRequest
-	109, // 112: nebula.executor.v1.ExecutorService.GetSSHPublicKey:input_type -> nebula.executor.v1.GetSSHPublicKeyRequest
-	88,  // 113: nebula.executor.v1.ExecutorService.TestConnection:input_type -> nebula.executor.v1.TestConnectionRequest
-	111, // 114: nebula.executor.v1.ExecutorService.InitVault:input_type -> nebula.executor.v1.InitVaultRequest
-	113, // 115: nebula.executor.v1.ExecutorService.SetSecret:input_type -> nebula.executor.v1.SetSecretRequest
-	115, // 116: nebula.executor.v1.ExecutorService.ListSecrets:input_type -> nebula.executor.v1.ListSecretsRequest
-	118, // 117: nebula.executor.v1.ExecutorService.DeleteSecret:input_type -> nebula.executor.v1.DeleteSecretRequest
-	33,  // 118: nebula.executor.v1.ExecutorService.BeginGate:input_type -> nebula.executor.v1.BeginGateRequest
-	35,  // 119: nebula.executor.v1.ExecutorService.CommitGate:input_type -> nebula.executor.v1.CommitGateRequest
-	37,  // 120: nebula.executor.v1.ExecutorService.AbortRollout:input_type -> nebula.executor.v1.AbortRolloutRequest
-	39,  // 121: nebula.executor.v1.ExecutorService.GetRollout:input_type -> nebula.executor.v1.GetRolloutRequest
-	41,  // 122: nebula.executor.v1.ExecutorService.ApproveGateCLI:input_type -> nebula.executor.v1.ApproveGateCLIRequest
-	143, // 123: nebula.executor.v1.ExecutorService.BeginTrustArtifact:input_type -> nebula.executor.v1.BeginTrustArtifactRequest
-	145, // 124: nebula.executor.v1.ExecutorService.CommitTrustArtifact:input_type -> nebula.executor.v1.CommitTrustArtifactRequest
-	147, // 125: nebula.executor.v1.ExecutorService.GetArtifactTrust:input_type -> nebula.executor.v1.GetArtifactTrustRequest
-	149, // 126: nebula.executor.v1.ExecutorService.RegisterModule:input_type -> nebula.executor.v1.RegisterModuleRequest
-	152, // 127: nebula.executor.v1.ExecutorService.AddSigner:input_type -> nebula.executor.v1.AddSignerRequest
-	154, // 128: nebula.executor.v1.ExecutorService.RemoveSigner:input_type -> nebula.executor.v1.RemoveSignerRequest
-	156, // 129: nebula.executor.v1.ExecutorService.ConfirmModuleSigner:input_type -> nebula.executor.v1.ConfirmModuleSignerRequest
-	158, // 130: nebula.executor.v1.ExecutorService.ListSigners:input_type -> nebula.executor.v1.ListSignersRequest
-	127, // 131: nebula.executor.v1.ExecutorService.ProposeScheduleGrant:input_type -> nebula.executor.v1.ProposeScheduleGrantRequest
-	129, // 132: nebula.executor.v1.ExecutorService.CommitScheduleGrant:input_type -> nebula.executor.v1.CommitScheduleGrantRequest
-	132, // 133: nebula.executor.v1.ExecutorService.ListPendingScheduleGrants:input_type -> nebula.executor.v1.ListPendingScheduleGrantsRequest
-	135, // 134: nebula.executor.v1.ExecutorService.ApproveScheduleGrantCLI:input_type -> nebula.executor.v1.ApproveScheduleGrantCLIRequest
-	137, // 135: nebula.executor.v1.ExecutorService.ListScheduleGrants:input_type -> nebula.executor.v1.ListScheduleGrantsRequest
-	139, // 136: nebula.executor.v1.ExecutorService.RevokeScheduleGrant:input_type -> nebula.executor.v1.RevokeScheduleGrantRequest
-	141, // 137: nebula.executor.v1.ExecutorService.RunScheduled:input_type -> nebula.executor.v1.RunScheduledRequest
-	162, // 138: nebula.executor.v1.ExecutorService.ListEvents:input_type -> nebula.executor.v1.ListEventsRequest
-	166, // 139: nebula.executor.v1.ExecutorService.BackupExecutor:input_type -> nebula.executor.v1.BackupExecutorRequest
-	10,  // 140: nebula.executor.v1.ExecutorService.GetStatus:output_type -> nebula.executor.v1.GetStatusResponse
-	12,  // 141: nebula.executor.v1.ExecutorService.ProposeExecution:output_type -> nebula.executor.v1.ProposeExecutionResponse
-	14,  // 142: nebula.executor.v1.ExecutorService.SubmitAssertion:output_type -> nebula.executor.v1.SubmitAssertionResponse
-	16,  // 143: nebula.executor.v1.ExecutorService.BeginPrivilegedSession:output_type -> nebula.executor.v1.BeginPrivilegedSessionResponse
-	18,  // 144: nebula.executor.v1.ExecutorService.CompletePrivilegedSession:output_type -> nebula.executor.v1.CompletePrivilegedSessionResponse
-	20,  // 145: nebula.executor.v1.ExecutorService.AuthorizeRun:output_type -> nebula.executor.v1.AuthorizeRunResponse
-	121, // 146: nebula.executor.v1.ExecutorService.RunAttached:output_type -> nebula.executor.v1.RunAttachedResponse
-	123, // 147: nebula.executor.v1.ExecutorService.StartDurable:output_type -> nebula.executor.v1.StartDurableResponse
-	124, // 148: nebula.executor.v1.ExecutorService.GetRun:output_type -> nebula.executor.v1.GetRunResponse
-	22,  // 149: nebula.executor.v1.ExecutorService.Unlock:output_type -> nebula.executor.v1.UnlockResponse
-	24,  // 150: nebula.executor.v1.ExecutorService.Lock:output_type -> nebula.executor.v1.LockResponse
-	43,  // 151: nebula.executor.v1.ExecutorService.ListPending:output_type -> nebula.executor.v1.ListPendingResponse
-	45,  // 152: nebula.executor.v1.ExecutorService.ApproveCLI:output_type -> nebula.executor.v1.ApproveCLIResponse
-	47,  // 153: nebula.executor.v1.ExecutorService.TrustArtifact:output_type -> nebula.executor.v1.TrustArtifactResponse
-	49,  // 154: nebula.executor.v1.ExecutorService.UntrustArtifact:output_type -> nebula.executor.v1.UntrustArtifactResponse
-	52,  // 155: nebula.executor.v1.ExecutorService.ListTrustedArtifacts:output_type -> nebula.executor.v1.ListTrustedArtifactsResponse
-	54,  // 156: nebula.executor.v1.ExecutorService.SetHostCriticality:output_type -> nebula.executor.v1.SetHostCriticalityResponse
-	57,  // 157: nebula.executor.v1.ExecutorService.ListHostCriticality:output_type -> nebula.executor.v1.ListHostCriticalityResponse
-	59,  // 158: nebula.executor.v1.ExecutorService.CreateRegistrationCode:output_type -> nebula.executor.v1.CreateRegistrationCodeResponse
-	61,  // 159: nebula.executor.v1.ExecutorService.BeginRegistration:output_type -> nebula.executor.v1.BeginRegistrationResponse
-	63,  // 160: nebula.executor.v1.ExecutorService.FinishRegistration:output_type -> nebula.executor.v1.FinishRegistrationResponse
-	66,  // 161: nebula.executor.v1.ExecutorService.ListWebAuthnCredentials:output_type -> nebula.executor.v1.ListWebAuthnCredentialsResponse
-	68,  // 162: nebula.executor.v1.ExecutorService.RemoveWebAuthnCredential:output_type -> nebula.executor.v1.RemoveWebAuthnCredentialResponse
-	92,  // 163: nebula.executor.v1.ExecutorService.BeginLogin:output_type -> nebula.executor.v1.BeginLoginResponse
-	94,  // 164: nebula.executor.v1.ExecutorService.FinishLogin:output_type -> nebula.executor.v1.FinishLoginResponse
-	96,  // 165: nebula.executor.v1.ExecutorService.CheckCredential:output_type -> nebula.executor.v1.CheckCredentialResponse
-	98,  // 166: nebula.executor.v1.ExecutorService.BeginTOTPSetup:output_type -> nebula.executor.v1.BeginTOTPSetupResponse
-	100, // 167: nebula.executor.v1.ExecutorService.ConfirmTOTPSetup:output_type -> nebula.executor.v1.ConfirmTOTPSetupResponse
-	102, // 168: nebula.executor.v1.ExecutorService.RemoveTOTP:output_type -> nebula.executor.v1.RemoveTOTPResponse
-	104, // 169: nebula.executor.v1.ExecutorService.GetTOTPStatus:output_type -> nebula.executor.v1.GetTOTPStatusResponse
-	106, // 170: nebula.executor.v1.ExecutorService.RecoveryLogin:output_type -> nebula.executor.v1.RecoveryLoginResponse
-	108, // 171: nebula.executor.v1.ExecutorService.FinishRecovery:output_type -> nebula.executor.v1.FinishRecoveryResponse
-	70,  // 172: nebula.executor.v1.ExecutorService.ProbeHostKey:output_type -> nebula.executor.v1.ProbeHostKeyResponse
-	73,  // 173: nebula.executor.v1.ExecutorService.PinHostKey:output_type -> nebula.executor.v1.PinHostKeyResponse
-	75,  // 174: nebula.executor.v1.ExecutorService.UnpinHostKey:output_type -> nebula.executor.v1.UnpinHostKeyResponse
-	77,  // 175: nebula.executor.v1.ExecutorService.ListHostKeys:output_type -> nebula.executor.v1.ListHostKeysResponse
-	79,  // 176: nebula.executor.v1.ExecutorService.ProposeRepin:output_type -> nebula.executor.v1.ProposeRepinResponse
-	81,  // 177: nebula.executor.v1.ExecutorService.CommitRepin:output_type -> nebula.executor.v1.CommitRepinResponse
-	84,  // 178: nebula.executor.v1.ExecutorService.ProposeEnroll:output_type -> nebula.executor.v1.ProposeEnrollResponse
-	87,  // 179: nebula.executor.v1.ExecutorService.CommitEnroll:output_type -> nebula.executor.v1.CommitEnrollResponse
-	110, // 180: nebula.executor.v1.ExecutorService.GetSSHPublicKey:output_type -> nebula.executor.v1.GetSSHPublicKeyResponse
-	90,  // 181: nebula.executor.v1.ExecutorService.TestConnection:output_type -> nebula.executor.v1.TestConnectionResponse
-	112, // 182: nebula.executor.v1.ExecutorService.InitVault:output_type -> nebula.executor.v1.InitVaultResponse
-	114, // 183: nebula.executor.v1.ExecutorService.SetSecret:output_type -> nebula.executor.v1.SetSecretResponse
-	117, // 184: nebula.executor.v1.ExecutorService.ListSecrets:output_type -> nebula.executor.v1.ListSecretsResponse
-	119, // 185: nebula.executor.v1.ExecutorService.DeleteSecret:output_type -> nebula.executor.v1.DeleteSecretResponse
-	34,  // 186: nebula.executor.v1.ExecutorService.BeginGate:output_type -> nebula.executor.v1.BeginGateResponse
-	36,  // 187: nebula.executor.v1.ExecutorService.CommitGate:output_type -> nebula.executor.v1.CommitGateResponse
-	38,  // 188: nebula.executor.v1.ExecutorService.AbortRollout:output_type -> nebula.executor.v1.AbortRolloutResponse
-	40,  // 189: nebula.executor.v1.ExecutorService.GetRollout:output_type -> nebula.executor.v1.GetRolloutResponse
-	42,  // 190: nebula.executor.v1.ExecutorService.ApproveGateCLI:output_type -> nebula.executor.v1.ApproveGateCLIResponse
-	144, // 191: nebula.executor.v1.ExecutorService.BeginTrustArtifact:output_type -> nebula.executor.v1.BeginTrustArtifactResponse
-	146, // 192: nebula.executor.v1.ExecutorService.CommitTrustArtifact:output_type -> nebula.executor.v1.CommitTrustArtifactResponse
-	148, // 193: nebula.executor.v1.ExecutorService.GetArtifactTrust:output_type -> nebula.executor.v1.GetArtifactTrustResponse
-	151, // 194: nebula.executor.v1.ExecutorService.RegisterModule:output_type -> nebula.executor.v1.RegisterModuleResponse
-	153, // 195: nebula.executor.v1.ExecutorService.AddSigner:output_type -> nebula.executor.v1.AddSignerResponse
-	155, // 196: nebula.executor.v1.ExecutorService.RemoveSigner:output_type -> nebula.executor.v1.RemoveSignerResponse
-	157, // 197: nebula.executor.v1.ExecutorService.ConfirmModuleSigner:output_type -> nebula.executor.v1.ConfirmModuleSignerResponse
-	161, // 198: nebula.executor.v1.ExecutorService.ListSigners:output_type -> nebula.executor.v1.ListSignersResponse
-	128, // 199: nebula.executor.v1.ExecutorService.ProposeScheduleGrant:output_type -> nebula.executor.v1.ProposeScheduleGrantResponse
-	131, // 200: nebula.executor.v1.ExecutorService.CommitScheduleGrant:output_type -> nebula.executor.v1.CommitScheduleGrantResponse
-	134, // 201: nebula.executor.v1.ExecutorService.ListPendingScheduleGrants:output_type -> nebula.executor.v1.ListPendingScheduleGrantsResponse
-	136, // 202: nebula.executor.v1.ExecutorService.ApproveScheduleGrantCLI:output_type -> nebula.executor.v1.ApproveScheduleGrantCLIResponse
-	138, // 203: nebula.executor.v1.ExecutorService.ListScheduleGrants:output_type -> nebula.executor.v1.ListScheduleGrantsResponse
-	140, // 204: nebula.executor.v1.ExecutorService.RevokeScheduleGrant:output_type -> nebula.executor.v1.RevokeScheduleGrantResponse
-	142, // 205: nebula.executor.v1.ExecutorService.RunScheduled:output_type -> nebula.executor.v1.RunScheduledResponse
-	164, // 206: nebula.executor.v1.ExecutorService.ListEvents:output_type -> nebula.executor.v1.ListEventsResponse
-	168, // 207: nebula.executor.v1.ExecutorService.BackupExecutor:output_type -> nebula.executor.v1.BackupExecutorResponse
-	140, // [140:208] is the sub-list for method output_type
-	72,  // [72:140] is the sub-list for method input_type
-	72,  // [72:72] is the sub-list for extension type_name
-	72,  // [72:72] is the sub-list for extension extendee
-	0,   // [0:72] is the sub-list for field type_name
+	2,   // 29: nebula.executor.v1.GetPermitStateResponse.state:type_name -> nebula.executor.v1.PermitState
+	0,   // 30: nebula.executor.v1.TrustArtifactRequest.risk_class:type_name -> nebula.executor.v1.RiskClass
+	0,   // 31: nebula.executor.v1.TrustedArtifact.risk_class:type_name -> nebula.executor.v1.RiskClass
+	53,  // 32: nebula.executor.v1.ListTrustedArtifactsResponse.artifacts:type_name -> nebula.executor.v1.TrustedArtifact
+	0,   // 33: nebula.executor.v1.SetHostCriticalityRequest.criticality:type_name -> nebula.executor.v1.RiskClass
+	0,   // 34: nebula.executor.v1.HostCriticality.criticality:type_name -> nebula.executor.v1.RiskClass
+	58,  // 35: nebula.executor.v1.ListHostCriticalityResponse.hosts:type_name -> nebula.executor.v1.HostCriticality
+	67,  // 36: nebula.executor.v1.ListWebAuthnCredentialsResponse.credentials:type_name -> nebula.executor.v1.WebAuthnCredential
+	6,   // 37: nebula.executor.v1.PinHostKeyRequest.source:type_name -> nebula.executor.v1.HostKeySource
+	6,   // 38: nebula.executor.v1.HostKeyPin.source:type_name -> nebula.executor.v1.HostKeySource
+	74,  // 39: nebula.executor.v1.PinHostKeyResponse.pin:type_name -> nebula.executor.v1.HostKeyPin
+	74,  // 40: nebula.executor.v1.ListHostKeysResponse.hosts:type_name -> nebula.executor.v1.HostKeyPin
+	12,  // 41: nebula.executor.v1.ProposeRepinResponse.permit:type_name -> nebula.executor.v1.ProposeExecutionResponse
+	74,  // 42: nebula.executor.v1.ProposeRepinResponse.pin:type_name -> nebula.executor.v1.HostKeyPin
+	74,  // 43: nebula.executor.v1.CommitRepinResponse.pin:type_name -> nebula.executor.v1.HostKeyPin
+	84,  // 44: nebula.executor.v1.ProposeEnrollRequest.hosts:type_name -> nebula.executor.v1.EnrollHost
+	12,  // 45: nebula.executor.v1.ProposeEnrollResponse.permit:type_name -> nebula.executor.v1.ProposeExecutionResponse
+	84,  // 46: nebula.executor.v1.ProposeEnrollResponse.hosts:type_name -> nebula.executor.v1.EnrollHost
+	84,  // 47: nebula.executor.v1.CommitEnrollRequest.hosts:type_name -> nebula.executor.v1.EnrollHost
+	88,  // 48: nebula.executor.v1.CommitEnrollResponse.results:type_name -> nebula.executor.v1.EnrollResult
+	91,  // 49: nebula.executor.v1.TestConnectionResponse.attempts:type_name -> nebula.executor.v1.ConnectionAttempt
+	118, // 50: nebula.executor.v1.ListSecretsResponse.secrets:type_name -> nebula.executor.v1.SecretInfo
+	4,   // 51: nebula.executor.v1.ListSecretsResponse.vault_state:type_name -> nebula.executor.v1.VaultState
+	19,  // 52: nebula.executor.v1.RunAttachedRequest.run:type_name -> nebula.executor.v1.AuthorizeRunRequest
+	19,  // 53: nebula.executor.v1.StartDurableRequest.run:type_name -> nebula.executor.v1.AuthorizeRunRequest
+	128, // 54: nebula.executor.v1.StartDurableResponse.run:type_name -> nebula.executor.v1.RunStatus
+	128, // 55: nebula.executor.v1.GetRunResponse.run:type_name -> nebula.executor.v1.RunStatus
+	1,   // 56: nebula.executor.v1.ProposeScheduleGrantResponse.approval_requirement:type_name -> nebula.executor.v1.ApprovalRequirement
+	132, // 57: nebula.executor.v1.CommitScheduleGrantResponse.grant:type_name -> nebula.executor.v1.ScheduleGrant
+	135, // 58: nebula.executor.v1.ListPendingScheduleGrantsResponse.grants:type_name -> nebula.executor.v1.PendingScheduleGrant
+	132, // 59: nebula.executor.v1.ApproveScheduleGrantCLIResponse.grant:type_name -> nebula.executor.v1.ScheduleGrant
+	132, // 60: nebula.executor.v1.ListScheduleGrantsResponse.grants:type_name -> nebula.executor.v1.ScheduleGrant
+	19,  // 61: nebula.executor.v1.RunScheduledRequest.run:type_name -> nebula.executor.v1.AuthorizeRunRequest
+	123, // 62: nebula.executor.v1.RunScheduledResponse.result:type_name -> nebula.executor.v1.RunAttachedResponse
+	0,   // 63: nebula.executor.v1.BeginTrustArtifactRequest.risk_class:type_name -> nebula.executor.v1.RiskClass
+	0,   // 64: nebula.executor.v1.GetArtifactTrustResponse.risk_class:type_name -> nebula.executor.v1.RiskClass
+	171, // 65: nebula.executor.v1.RegisterModuleRequest.scripts:type_name -> nebula.executor.v1.RegisterModuleRequest.ScriptsEntry
+	0,   // 66: nebula.executor.v1.ModuleAction.risk_class:type_name -> nebula.executor.v1.RiskClass
+	152, // 67: nebula.executor.v1.RegisterModuleResponse.actions:type_name -> nebula.executor.v1.ModuleAction
+	161, // 68: nebula.executor.v1.ListSignersResponse.signers:type_name -> nebula.executor.v1.Signer
+	162, // 69: nebula.executor.v1.ListSignersResponse.modules:type_name -> nebula.executor.v1.ModuleSigner
+	165, // 70: nebula.executor.v1.ListEventsResponse.events:type_name -> nebula.executor.v1.Event
+	167, // 71: nebula.executor.v1.ListEventsResponse.keys:type_name -> nebula.executor.v1.EventKey
+	169, // 72: nebula.executor.v1.BackupExecutorResponse.files:type_name -> nebula.executor.v1.BackupFile
+	9,   // 73: nebula.executor.v1.ExecutorService.GetStatus:input_type -> nebula.executor.v1.GetStatusRequest
+	11,  // 74: nebula.executor.v1.ExecutorService.ProposeExecution:input_type -> nebula.executor.v1.ProposeExecutionRequest
+	13,  // 75: nebula.executor.v1.ExecutorService.SubmitAssertion:input_type -> nebula.executor.v1.SubmitAssertionRequest
+	15,  // 76: nebula.executor.v1.ExecutorService.BeginPrivilegedSession:input_type -> nebula.executor.v1.BeginPrivilegedSessionRequest
+	17,  // 77: nebula.executor.v1.ExecutorService.CompletePrivilegedSession:input_type -> nebula.executor.v1.CompletePrivilegedSessionRequest
+	19,  // 78: nebula.executor.v1.ExecutorService.AuthorizeRun:input_type -> nebula.executor.v1.AuthorizeRunRequest
+	122, // 79: nebula.executor.v1.ExecutorService.RunAttached:input_type -> nebula.executor.v1.RunAttachedRequest
+	124, // 80: nebula.executor.v1.ExecutorService.StartDurable:input_type -> nebula.executor.v1.StartDurableRequest
+	127, // 81: nebula.executor.v1.ExecutorService.GetRun:input_type -> nebula.executor.v1.GetRunRequest
+	21,  // 82: nebula.executor.v1.ExecutorService.Unlock:input_type -> nebula.executor.v1.UnlockRequest
+	23,  // 83: nebula.executor.v1.ExecutorService.Lock:input_type -> nebula.executor.v1.LockRequest
+	25,  // 84: nebula.executor.v1.ExecutorService.ListPending:input_type -> nebula.executor.v1.ListPendingRequest
+	44,  // 85: nebula.executor.v1.ExecutorService.ApproveCLI:input_type -> nebula.executor.v1.ApproveCLIRequest
+	46,  // 86: nebula.executor.v1.ExecutorService.GetPermitState:input_type -> nebula.executor.v1.GetPermitStateRequest
+	48,  // 87: nebula.executor.v1.ExecutorService.TrustArtifact:input_type -> nebula.executor.v1.TrustArtifactRequest
+	50,  // 88: nebula.executor.v1.ExecutorService.UntrustArtifact:input_type -> nebula.executor.v1.UntrustArtifactRequest
+	52,  // 89: nebula.executor.v1.ExecutorService.ListTrustedArtifacts:input_type -> nebula.executor.v1.ListTrustedArtifactsRequest
+	55,  // 90: nebula.executor.v1.ExecutorService.SetHostCriticality:input_type -> nebula.executor.v1.SetHostCriticalityRequest
+	57,  // 91: nebula.executor.v1.ExecutorService.ListHostCriticality:input_type -> nebula.executor.v1.ListHostCriticalityRequest
+	60,  // 92: nebula.executor.v1.ExecutorService.CreateRegistrationCode:input_type -> nebula.executor.v1.CreateRegistrationCodeRequest
+	62,  // 93: nebula.executor.v1.ExecutorService.BeginRegistration:input_type -> nebula.executor.v1.BeginRegistrationRequest
+	64,  // 94: nebula.executor.v1.ExecutorService.FinishRegistration:input_type -> nebula.executor.v1.FinishRegistrationRequest
+	66,  // 95: nebula.executor.v1.ExecutorService.ListWebAuthnCredentials:input_type -> nebula.executor.v1.ListWebAuthnCredentialsRequest
+	69,  // 96: nebula.executor.v1.ExecutorService.RemoveWebAuthnCredential:input_type -> nebula.executor.v1.RemoveWebAuthnCredentialRequest
+	93,  // 97: nebula.executor.v1.ExecutorService.BeginLogin:input_type -> nebula.executor.v1.BeginLoginRequest
+	95,  // 98: nebula.executor.v1.ExecutorService.FinishLogin:input_type -> nebula.executor.v1.FinishLoginRequest
+	97,  // 99: nebula.executor.v1.ExecutorService.CheckCredential:input_type -> nebula.executor.v1.CheckCredentialRequest
+	99,  // 100: nebula.executor.v1.ExecutorService.BeginTOTPSetup:input_type -> nebula.executor.v1.BeginTOTPSetupRequest
+	101, // 101: nebula.executor.v1.ExecutorService.ConfirmTOTPSetup:input_type -> nebula.executor.v1.ConfirmTOTPSetupRequest
+	103, // 102: nebula.executor.v1.ExecutorService.RemoveTOTP:input_type -> nebula.executor.v1.RemoveTOTPRequest
+	105, // 103: nebula.executor.v1.ExecutorService.GetTOTPStatus:input_type -> nebula.executor.v1.GetTOTPStatusRequest
+	107, // 104: nebula.executor.v1.ExecutorService.RecoveryLogin:input_type -> nebula.executor.v1.RecoveryLoginRequest
+	109, // 105: nebula.executor.v1.ExecutorService.FinishRecovery:input_type -> nebula.executor.v1.FinishRecoveryRequest
+	71,  // 106: nebula.executor.v1.ExecutorService.ProbeHostKey:input_type -> nebula.executor.v1.ProbeHostKeyRequest
+	73,  // 107: nebula.executor.v1.ExecutorService.PinHostKey:input_type -> nebula.executor.v1.PinHostKeyRequest
+	76,  // 108: nebula.executor.v1.ExecutorService.UnpinHostKey:input_type -> nebula.executor.v1.UnpinHostKeyRequest
+	78,  // 109: nebula.executor.v1.ExecutorService.ListHostKeys:input_type -> nebula.executor.v1.ListHostKeysRequest
+	80,  // 110: nebula.executor.v1.ExecutorService.ProposeRepin:input_type -> nebula.executor.v1.ProposeRepinRequest
+	82,  // 111: nebula.executor.v1.ExecutorService.CommitRepin:input_type -> nebula.executor.v1.CommitRepinRequest
+	85,  // 112: nebula.executor.v1.ExecutorService.ProposeEnroll:input_type -> nebula.executor.v1.ProposeEnrollRequest
+	87,  // 113: nebula.executor.v1.ExecutorService.CommitEnroll:input_type -> nebula.executor.v1.CommitEnrollRequest
+	111, // 114: nebula.executor.v1.ExecutorService.GetSSHPublicKey:input_type -> nebula.executor.v1.GetSSHPublicKeyRequest
+	90,  // 115: nebula.executor.v1.ExecutorService.TestConnection:input_type -> nebula.executor.v1.TestConnectionRequest
+	113, // 116: nebula.executor.v1.ExecutorService.InitVault:input_type -> nebula.executor.v1.InitVaultRequest
+	115, // 117: nebula.executor.v1.ExecutorService.SetSecret:input_type -> nebula.executor.v1.SetSecretRequest
+	117, // 118: nebula.executor.v1.ExecutorService.ListSecrets:input_type -> nebula.executor.v1.ListSecretsRequest
+	120, // 119: nebula.executor.v1.ExecutorService.DeleteSecret:input_type -> nebula.executor.v1.DeleteSecretRequest
+	33,  // 120: nebula.executor.v1.ExecutorService.BeginGate:input_type -> nebula.executor.v1.BeginGateRequest
+	35,  // 121: nebula.executor.v1.ExecutorService.CommitGate:input_type -> nebula.executor.v1.CommitGateRequest
+	37,  // 122: nebula.executor.v1.ExecutorService.AbortRollout:input_type -> nebula.executor.v1.AbortRolloutRequest
+	39,  // 123: nebula.executor.v1.ExecutorService.GetRollout:input_type -> nebula.executor.v1.GetRolloutRequest
+	41,  // 124: nebula.executor.v1.ExecutorService.ApproveGateCLI:input_type -> nebula.executor.v1.ApproveGateCLIRequest
+	145, // 125: nebula.executor.v1.ExecutorService.BeginTrustArtifact:input_type -> nebula.executor.v1.BeginTrustArtifactRequest
+	147, // 126: nebula.executor.v1.ExecutorService.CommitTrustArtifact:input_type -> nebula.executor.v1.CommitTrustArtifactRequest
+	149, // 127: nebula.executor.v1.ExecutorService.GetArtifactTrust:input_type -> nebula.executor.v1.GetArtifactTrustRequest
+	151, // 128: nebula.executor.v1.ExecutorService.RegisterModule:input_type -> nebula.executor.v1.RegisterModuleRequest
+	154, // 129: nebula.executor.v1.ExecutorService.AddSigner:input_type -> nebula.executor.v1.AddSignerRequest
+	156, // 130: nebula.executor.v1.ExecutorService.RemoveSigner:input_type -> nebula.executor.v1.RemoveSignerRequest
+	158, // 131: nebula.executor.v1.ExecutorService.ConfirmModuleSigner:input_type -> nebula.executor.v1.ConfirmModuleSignerRequest
+	160, // 132: nebula.executor.v1.ExecutorService.ListSigners:input_type -> nebula.executor.v1.ListSignersRequest
+	129, // 133: nebula.executor.v1.ExecutorService.ProposeScheduleGrant:input_type -> nebula.executor.v1.ProposeScheduleGrantRequest
+	131, // 134: nebula.executor.v1.ExecutorService.CommitScheduleGrant:input_type -> nebula.executor.v1.CommitScheduleGrantRequest
+	134, // 135: nebula.executor.v1.ExecutorService.ListPendingScheduleGrants:input_type -> nebula.executor.v1.ListPendingScheduleGrantsRequest
+	137, // 136: nebula.executor.v1.ExecutorService.ApproveScheduleGrantCLI:input_type -> nebula.executor.v1.ApproveScheduleGrantCLIRequest
+	139, // 137: nebula.executor.v1.ExecutorService.ListScheduleGrants:input_type -> nebula.executor.v1.ListScheduleGrantsRequest
+	141, // 138: nebula.executor.v1.ExecutorService.RevokeScheduleGrant:input_type -> nebula.executor.v1.RevokeScheduleGrantRequest
+	143, // 139: nebula.executor.v1.ExecutorService.RunScheduled:input_type -> nebula.executor.v1.RunScheduledRequest
+	164, // 140: nebula.executor.v1.ExecutorService.ListEvents:input_type -> nebula.executor.v1.ListEventsRequest
+	168, // 141: nebula.executor.v1.ExecutorService.BackupExecutor:input_type -> nebula.executor.v1.BackupExecutorRequest
+	10,  // 142: nebula.executor.v1.ExecutorService.GetStatus:output_type -> nebula.executor.v1.GetStatusResponse
+	12,  // 143: nebula.executor.v1.ExecutorService.ProposeExecution:output_type -> nebula.executor.v1.ProposeExecutionResponse
+	14,  // 144: nebula.executor.v1.ExecutorService.SubmitAssertion:output_type -> nebula.executor.v1.SubmitAssertionResponse
+	16,  // 145: nebula.executor.v1.ExecutorService.BeginPrivilegedSession:output_type -> nebula.executor.v1.BeginPrivilegedSessionResponse
+	18,  // 146: nebula.executor.v1.ExecutorService.CompletePrivilegedSession:output_type -> nebula.executor.v1.CompletePrivilegedSessionResponse
+	20,  // 147: nebula.executor.v1.ExecutorService.AuthorizeRun:output_type -> nebula.executor.v1.AuthorizeRunResponse
+	123, // 148: nebula.executor.v1.ExecutorService.RunAttached:output_type -> nebula.executor.v1.RunAttachedResponse
+	125, // 149: nebula.executor.v1.ExecutorService.StartDurable:output_type -> nebula.executor.v1.StartDurableResponse
+	126, // 150: nebula.executor.v1.ExecutorService.GetRun:output_type -> nebula.executor.v1.GetRunResponse
+	22,  // 151: nebula.executor.v1.ExecutorService.Unlock:output_type -> nebula.executor.v1.UnlockResponse
+	24,  // 152: nebula.executor.v1.ExecutorService.Lock:output_type -> nebula.executor.v1.LockResponse
+	43,  // 153: nebula.executor.v1.ExecutorService.ListPending:output_type -> nebula.executor.v1.ListPendingResponse
+	45,  // 154: nebula.executor.v1.ExecutorService.ApproveCLI:output_type -> nebula.executor.v1.ApproveCLIResponse
+	47,  // 155: nebula.executor.v1.ExecutorService.GetPermitState:output_type -> nebula.executor.v1.GetPermitStateResponse
+	49,  // 156: nebula.executor.v1.ExecutorService.TrustArtifact:output_type -> nebula.executor.v1.TrustArtifactResponse
+	51,  // 157: nebula.executor.v1.ExecutorService.UntrustArtifact:output_type -> nebula.executor.v1.UntrustArtifactResponse
+	54,  // 158: nebula.executor.v1.ExecutorService.ListTrustedArtifacts:output_type -> nebula.executor.v1.ListTrustedArtifactsResponse
+	56,  // 159: nebula.executor.v1.ExecutorService.SetHostCriticality:output_type -> nebula.executor.v1.SetHostCriticalityResponse
+	59,  // 160: nebula.executor.v1.ExecutorService.ListHostCriticality:output_type -> nebula.executor.v1.ListHostCriticalityResponse
+	61,  // 161: nebula.executor.v1.ExecutorService.CreateRegistrationCode:output_type -> nebula.executor.v1.CreateRegistrationCodeResponse
+	63,  // 162: nebula.executor.v1.ExecutorService.BeginRegistration:output_type -> nebula.executor.v1.BeginRegistrationResponse
+	65,  // 163: nebula.executor.v1.ExecutorService.FinishRegistration:output_type -> nebula.executor.v1.FinishRegistrationResponse
+	68,  // 164: nebula.executor.v1.ExecutorService.ListWebAuthnCredentials:output_type -> nebula.executor.v1.ListWebAuthnCredentialsResponse
+	70,  // 165: nebula.executor.v1.ExecutorService.RemoveWebAuthnCredential:output_type -> nebula.executor.v1.RemoveWebAuthnCredentialResponse
+	94,  // 166: nebula.executor.v1.ExecutorService.BeginLogin:output_type -> nebula.executor.v1.BeginLoginResponse
+	96,  // 167: nebula.executor.v1.ExecutorService.FinishLogin:output_type -> nebula.executor.v1.FinishLoginResponse
+	98,  // 168: nebula.executor.v1.ExecutorService.CheckCredential:output_type -> nebula.executor.v1.CheckCredentialResponse
+	100, // 169: nebula.executor.v1.ExecutorService.BeginTOTPSetup:output_type -> nebula.executor.v1.BeginTOTPSetupResponse
+	102, // 170: nebula.executor.v1.ExecutorService.ConfirmTOTPSetup:output_type -> nebula.executor.v1.ConfirmTOTPSetupResponse
+	104, // 171: nebula.executor.v1.ExecutorService.RemoveTOTP:output_type -> nebula.executor.v1.RemoveTOTPResponse
+	106, // 172: nebula.executor.v1.ExecutorService.GetTOTPStatus:output_type -> nebula.executor.v1.GetTOTPStatusResponse
+	108, // 173: nebula.executor.v1.ExecutorService.RecoveryLogin:output_type -> nebula.executor.v1.RecoveryLoginResponse
+	110, // 174: nebula.executor.v1.ExecutorService.FinishRecovery:output_type -> nebula.executor.v1.FinishRecoveryResponse
+	72,  // 175: nebula.executor.v1.ExecutorService.ProbeHostKey:output_type -> nebula.executor.v1.ProbeHostKeyResponse
+	75,  // 176: nebula.executor.v1.ExecutorService.PinHostKey:output_type -> nebula.executor.v1.PinHostKeyResponse
+	77,  // 177: nebula.executor.v1.ExecutorService.UnpinHostKey:output_type -> nebula.executor.v1.UnpinHostKeyResponse
+	79,  // 178: nebula.executor.v1.ExecutorService.ListHostKeys:output_type -> nebula.executor.v1.ListHostKeysResponse
+	81,  // 179: nebula.executor.v1.ExecutorService.ProposeRepin:output_type -> nebula.executor.v1.ProposeRepinResponse
+	83,  // 180: nebula.executor.v1.ExecutorService.CommitRepin:output_type -> nebula.executor.v1.CommitRepinResponse
+	86,  // 181: nebula.executor.v1.ExecutorService.ProposeEnroll:output_type -> nebula.executor.v1.ProposeEnrollResponse
+	89,  // 182: nebula.executor.v1.ExecutorService.CommitEnroll:output_type -> nebula.executor.v1.CommitEnrollResponse
+	112, // 183: nebula.executor.v1.ExecutorService.GetSSHPublicKey:output_type -> nebula.executor.v1.GetSSHPublicKeyResponse
+	92,  // 184: nebula.executor.v1.ExecutorService.TestConnection:output_type -> nebula.executor.v1.TestConnectionResponse
+	114, // 185: nebula.executor.v1.ExecutorService.InitVault:output_type -> nebula.executor.v1.InitVaultResponse
+	116, // 186: nebula.executor.v1.ExecutorService.SetSecret:output_type -> nebula.executor.v1.SetSecretResponse
+	119, // 187: nebula.executor.v1.ExecutorService.ListSecrets:output_type -> nebula.executor.v1.ListSecretsResponse
+	121, // 188: nebula.executor.v1.ExecutorService.DeleteSecret:output_type -> nebula.executor.v1.DeleteSecretResponse
+	34,  // 189: nebula.executor.v1.ExecutorService.BeginGate:output_type -> nebula.executor.v1.BeginGateResponse
+	36,  // 190: nebula.executor.v1.ExecutorService.CommitGate:output_type -> nebula.executor.v1.CommitGateResponse
+	38,  // 191: nebula.executor.v1.ExecutorService.AbortRollout:output_type -> nebula.executor.v1.AbortRolloutResponse
+	40,  // 192: nebula.executor.v1.ExecutorService.GetRollout:output_type -> nebula.executor.v1.GetRolloutResponse
+	42,  // 193: nebula.executor.v1.ExecutorService.ApproveGateCLI:output_type -> nebula.executor.v1.ApproveGateCLIResponse
+	146, // 194: nebula.executor.v1.ExecutorService.BeginTrustArtifact:output_type -> nebula.executor.v1.BeginTrustArtifactResponse
+	148, // 195: nebula.executor.v1.ExecutorService.CommitTrustArtifact:output_type -> nebula.executor.v1.CommitTrustArtifactResponse
+	150, // 196: nebula.executor.v1.ExecutorService.GetArtifactTrust:output_type -> nebula.executor.v1.GetArtifactTrustResponse
+	153, // 197: nebula.executor.v1.ExecutorService.RegisterModule:output_type -> nebula.executor.v1.RegisterModuleResponse
+	155, // 198: nebula.executor.v1.ExecutorService.AddSigner:output_type -> nebula.executor.v1.AddSignerResponse
+	157, // 199: nebula.executor.v1.ExecutorService.RemoveSigner:output_type -> nebula.executor.v1.RemoveSignerResponse
+	159, // 200: nebula.executor.v1.ExecutorService.ConfirmModuleSigner:output_type -> nebula.executor.v1.ConfirmModuleSignerResponse
+	163, // 201: nebula.executor.v1.ExecutorService.ListSigners:output_type -> nebula.executor.v1.ListSignersResponse
+	130, // 202: nebula.executor.v1.ExecutorService.ProposeScheduleGrant:output_type -> nebula.executor.v1.ProposeScheduleGrantResponse
+	133, // 203: nebula.executor.v1.ExecutorService.CommitScheduleGrant:output_type -> nebula.executor.v1.CommitScheduleGrantResponse
+	136, // 204: nebula.executor.v1.ExecutorService.ListPendingScheduleGrants:output_type -> nebula.executor.v1.ListPendingScheduleGrantsResponse
+	138, // 205: nebula.executor.v1.ExecutorService.ApproveScheduleGrantCLI:output_type -> nebula.executor.v1.ApproveScheduleGrantCLIResponse
+	140, // 206: nebula.executor.v1.ExecutorService.ListScheduleGrants:output_type -> nebula.executor.v1.ListScheduleGrantsResponse
+	142, // 207: nebula.executor.v1.ExecutorService.RevokeScheduleGrant:output_type -> nebula.executor.v1.RevokeScheduleGrantResponse
+	144, // 208: nebula.executor.v1.ExecutorService.RunScheduled:output_type -> nebula.executor.v1.RunScheduledResponse
+	166, // 209: nebula.executor.v1.ExecutorService.ListEvents:output_type -> nebula.executor.v1.ListEventsResponse
+	170, // 210: nebula.executor.v1.ExecutorService.BackupExecutor:output_type -> nebula.executor.v1.BackupExecutorResponse
+	142, // [142:211] is the sub-list for method output_type
+	73,  // [73:142] is the sub-list for method input_type
+	73,  // [73:73] is the sub-list for extension type_name
+	73,  // [73:73] is the sub-list for extension extendee
+	0,   // [0:73] is the sub-list for field type_name
 }
 
 func init() { file_nebula_executor_v1_executor_proto_init() }
@@ -10756,7 +10854,7 @@ func file_nebula_executor_v1_executor_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_nebula_executor_v1_executor_proto_rawDesc), len(file_nebula_executor_v1_executor_proto_rawDesc)),
 			NumEnums:      7,
-			NumMessages:   163,
+			NumMessages:   165,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

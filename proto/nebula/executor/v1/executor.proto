@@ -75,6 +75,13 @@ service ExecutorService {
   // Role: admin. Hardened approval path.
   rpc ApproveCLI(ApproveCLIRequest) returns (ApproveCLIResponse);
 
+  // Role: server, admin. Read-only: the state of the live permit for the
+  // given execution digest, so the server can see an approval made on the
+  // executor host (spec 05, hardened path). Returns UNSPECIFIED when there
+  // is no live permit (never proposed, expired, consumed, revoked by Lock).
+  // Reveals nothing about the permit's contents and changes nothing.
+  rpc GetPermitState(GetPermitStateRequest) returns (GetPermitStateResponse);
+
   // Executor-held risk data (H01). ProposeExecution rejects a risk_class
   // below the minimum the executor derives from it: the declared risk of a
   // trusted (artifact, action, version), HIGH for anything untrusted, and
@@ -657,6 +664,14 @@ message ApproveCLIRequest {
 }
 
 message ApproveCLIResponse {
+  PermitState state = 1;
+}
+
+message GetPermitStateRequest {
+  string execution_digest = 1;
+}
+
+message GetPermitStateResponse {
   PermitState state = 1;
 }
 

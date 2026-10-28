@@ -53,6 +53,7 @@ type Executor interface {
 	RevokeScheduleGrant(ctx context.Context, in *pb.RevokeScheduleGrantRequest, opts ...grpc.CallOption) (*pb.RevokeScheduleGrantResponse, error)
 	RunScheduled(ctx context.Context, in *pb.RunScheduledRequest, opts ...grpc.CallOption) (*pb.RunScheduledResponse, error)
 	ListScheduleGrants(ctx context.Context, in *pb.ListScheduleGrantsRequest, opts ...grpc.CallOption) (*pb.ListScheduleGrantsResponse, error)
+	GetPermitState(ctx context.Context, in *pb.GetPermitStateRequest, opts ...grpc.CallOption) (*pb.GetPermitStateResponse, error)
 }
 
 // Hosts gives the inventory hosts (inventory.Store).

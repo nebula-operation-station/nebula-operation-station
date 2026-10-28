@@ -34,6 +34,7 @@ const (
 	ExecutorService_Lock_FullMethodName                      = "/nebula.executor.v1.ExecutorService/Lock"
 	ExecutorService_ListPending_FullMethodName               = "/nebula.executor.v1.ExecutorService/ListPending"
 	ExecutorService_ApproveCLI_FullMethodName                = "/nebula.executor.v1.ExecutorService/ApproveCLI"
+	ExecutorService_GetPermitState_FullMethodName            = "/nebula.executor.v1.ExecutorService/GetPermitState"
 	ExecutorService_TrustArtifact_FullMethodName             = "/nebula.executor.v1.ExecutorService/TrustArtifact"
 	ExecutorService_UntrustArtifact_FullMethodName           = "/nebula.executor.v1.ExecutorService/UntrustArtifact"
 	ExecutorService_ListTrustedArtifacts_FullMethodName      = "/nebula.executor.v1.ExecutorService/ListTrustedArtifacts"
@@ -152,6 +153,12 @@ type ExecutorServiceClient interface {
 	ListPending(ctx context.Context, in *ListPendingRequest, opts ...grpc.CallOption) (*ListPendingResponse, error)
 	// Role: admin. Hardened approval path.
 	ApproveCLI(ctx context.Context, in *ApproveCLIRequest, opts ...grpc.CallOption) (*ApproveCLIResponse, error)
+	// Role: server, admin. Read-only: the state of the live permit for the
+	// given execution digest, so the server can see an approval made on the
+	// executor host (spec 05, hardened path). Returns UNSPECIFIED when there
+	// is no live permit (never proposed, expired, consumed, revoked by Lock).
+	// Reveals nothing about the permit's contents and changes nothing.
+	GetPermitState(ctx context.Context, in *GetPermitStateRequest, opts ...grpc.CallOption) (*GetPermitStateResponse, error)
 	// Role: admin. Trusts an artifact for one action and version at a
 	// declared risk. The executor hashes the bytes itself. Replaces an
 	// earlier entry for the same artifact, action and version.
@@ -464,6 +471,16 @@ func (c *executorServiceClient) ApproveCLI(ctx context.Context, in *ApproveCLIRe
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ApproveCLIResponse)
 	err := c.cc.Invoke(ctx, ExecutorService_ApproveCLI_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) GetPermitState(ctx context.Context, in *GetPermitStateRequest, opts ...grpc.CallOption) (*GetPermitStateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetPermitStateResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_GetPermitState_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1081,6 +1098,12 @@ type ExecutorServiceServer interface {
 	ListPending(context.Context, *ListPendingRequest) (*ListPendingResponse, error)
 	// Role: admin. Hardened approval path.
 	ApproveCLI(context.Context, *ApproveCLIRequest) (*ApproveCLIResponse, error)
+	// Role: server, admin. Read-only: the state of the live permit for the
+	// given execution digest, so the server can see an approval made on the
+	// executor host (spec 05, hardened path). Returns UNSPECIFIED when there
+	// is no live permit (never proposed, expired, consumed, revoked by Lock).
+	// Reveals nothing about the permit's contents and changes nothing.
+	GetPermitState(context.Context, *GetPermitStateRequest) (*GetPermitStateResponse, error)
 	// Role: admin. Trusts an artifact for one action and version at a
 	// declared risk. The executor hashes the bytes itself. Replaces an
 	// earlier entry for the same artifact, action and version.
@@ -1307,6 +1330,9 @@ func (UnimplementedExecutorServiceServer) ListPending(context.Context, *ListPend
 }
 func (UnimplementedExecutorServiceServer) ApproveCLI(context.Context, *ApproveCLIRequest) (*ApproveCLIResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ApproveCLI not implemented")
+}
+func (UnimplementedExecutorServiceServer) GetPermitState(context.Context, *GetPermitStateRequest) (*GetPermitStateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetPermitState not implemented")
 }
 func (UnimplementedExecutorServiceServer) TrustArtifact(context.Context, *TrustArtifactRequest) (*TrustArtifactResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method TrustArtifact not implemented")
@@ -1724,6 +1750,24 @@ func _ExecutorService_ApproveCLI_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ExecutorServiceServer).ApproveCLI(ctx, req.(*ApproveCLIRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_GetPermitState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetPermitStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).GetPermitState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_GetPermitState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).GetPermitState(ctx, req.(*GetPermitStateRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -2776,6 +2820,10 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ApproveCLI",
 			Handler:    _ExecutorService_ApproveCLI_Handler,
+		},
+		{
+			MethodName: "GetPermitState",
+			Handler:    _ExecutorService_GetPermitState_Handler,
 		},
 		{
 			MethodName: "TrustArtifact",
