@@ -10,16 +10,7 @@
     submit.disabled = true;
     try {
       const code = document.getElementById('code').value.trim();
-      const begin = await w.post('/setup/begin', { code });
-      w.show('Touch the new security key…', false);
-      const created = await navigator.credentials.create(w.creationOptions(begin.creation_options));
-      const body = { registration_id: begin.registration_id, attestation: w.attestationJSON(created) };
-      if (begin.authorization_options) {
-        w.show('Now confirm with a security key that is already registered…', false);
-        const confirm = await navigator.credentials.get(w.requestOptions(begin.authorization_options));
-        body.assertion = w.assertionJSON(confirm);
-      }
-      const done = await w.post('/setup/finish', body);
+      const done = await w.register(code, document.getElementById('message'));
       if (done.recovery_confirmation_required) {
         w.show('Security key registered. To end the recovery, confirm it on the executor host: nebula totp finish-recovery', false);
       } else {
