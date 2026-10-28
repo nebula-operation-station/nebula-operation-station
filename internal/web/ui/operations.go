@@ -483,6 +483,13 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 	if e.Params != "" && e.Params != "{}" {
 		v.Params = e.Params
 	}
+	// The safety scan is computed here from the module script. Every
+	// execution this server creates sends the artifact bytes to the
+	// executor (executions.CreateStaged and schedules pass
+	// Artifact: a.Script), so the executor always has a scan entry for a
+	// web-visible execution and this matches what `nebula approve` shows.
+	// The CLI's "not scanned by the executor" state only applies to
+	// proposals made without artifact bytes, which the web never creates.
 	if a, ok, err := h.operations.Action(ctx, e.ActionID, e.ModuleVersion); err == nil && ok && a.SHA256() == e.ArtifactSHA256 {
 		v.Scanner, _ = scanner.Scan(a.Script)
 		v.ScriptPreview = scriptPreview(a.Script)
