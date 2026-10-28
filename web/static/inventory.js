@@ -39,13 +39,28 @@
     const all = document.getElementById('select-all');
     const count = document.getElementById('bulk-count');
     const msg = document.getElementById('bulk-message');
+    const toggle = document.getElementById('bulkbar-toggle');
+    // A fresh selection starts collapsed on phones, so the sheet does not
+    // cover the table; the count and refresh stay reachable.
+    const setCollapsed = () => {
+      bulkbar.classList.remove('bulkbar--expanded');
+      if (toggle) toggle.setAttribute('aria-expanded', 'false');
+    };
     const update = () => {
       const n = selected().length;
+      const wasHidden = bulkbar.hidden;
       bulkbar.hidden = n === 0;
       count.textContent = n + ' selected';
+      if (n > 0 && wasHidden) setCollapsed();
       const shown = boxes().filter((b) => !b.closest('tr').hidden);
       all.checked = shown.length > 0 && shown.every((b) => b.checked);
     };
+    if (toggle) {
+      toggle.addEventListener('click', () => {
+        const expanded = bulkbar.classList.toggle('bulkbar--expanded');
+        toggle.setAttribute('aria-expanded', String(expanded));
+      });
+    }
     for (const b of boxes()) b.addEventListener('change', update);
     all.addEventListener('change', () => {
       for (const b of boxes()) {

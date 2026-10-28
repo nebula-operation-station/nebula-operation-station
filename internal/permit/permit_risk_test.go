@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/descope/virtualwebauthn"
 
@@ -24,6 +25,10 @@ type fakePolicy struct {
 	err   error
 	bogus bool       // return an unknown risk class
 	calls [][]string // hostIDs of every call
+	// during, if set, is invoked (with mu released) at the start of each
+	// MinimumRisk call, so a test can observe the read in flight and change
+	// the floor while it runs; the read then sees the new value.
+	during func()
 }
 
 func newFakePolicy() *fakePolicy {
@@ -31,6 +36,12 @@ func newFakePolicy() *fakePolicy {
 }
 
 func (f *fakePolicy) MinimumRisk(_ canonical.Request, targets []canonical.Target) (canonical.Risk, string, error) {
+	f.mu.Lock()
+	during := f.during
+	f.mu.Unlock()
+	if during != nil {
+		during() // mu released: a test may change the floor while the read runs
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var hostIDs []string
@@ -54,6 +65,7 @@ func (f *fakePolicy) MinimumRisk(_ canonical.Request, targets []canonical.Target
 }
 
 func (f *fakePolicy) set(base canonical.Risk) { f.mu.Lock(); f.base = base; f.mu.Unlock() }
+func (f *fakePolicy) setDuring(fn func())     { f.mu.Lock(); f.during = fn; f.mu.Unlock() }
 func (f *fakePolicy) setHost(h string, c canonical.Risk) {
 	f.mu.Lock()
 	f.hosts[h] = c
@@ -289,5 +301,125 @@ func TestApprovalFailsClosedWhenTheFloorIsUnknown(t *testing.T) {
 				t.Fatalf("after an unknown floor: %d pending, %d approved", pend, appr)
 			}
 		})
+	}
+}
+
+// The per-target risk read must not hold the global authority lock: while
+// the read is in flight, other operations (session, propose, approve) must
+// still run, and a floor change made during the read is reflected in the
+// decision (fail closed, as if the check had run under the lock).
+func TestFloorRiseReleasesTheGlobalLock(t *testing.T) {
+	e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
+	e.openSession()
+	p := e.propose(e.request(canonical.RiskMedium))
+	assertion := e.sign(p.Challenge)
+
+	inside := make(chan struct{})
+	release := make(chan struct{})
+	e.risk.setDuring(func() {
+		close(inside)
+		<-release
+	})
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.auth.SubmitAssertion(p.Digest, assertion, 0)
+		done <- err
+	}()
+	<-inside // the floor read is in flight
+	// The global lock must be free while the read runs: this must not block.
+	sessOK := make(chan bool, 1)
+	go func() {
+		ok, _ := e.auth.Session()
+		sessOK <- ok
+	}()
+	select {
+	case ok := <-sessOK:
+		if !ok {
+			t.Fatal("session lost while the floor read was in flight")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Session() blocked while the floor read was in flight: a.mu was not released")
+	}
+	// Raise the floor while the read is in flight; the decision must see it.
+	e.risk.set(canonical.RiskHigh)
+	close(release)
+	wantCode(t, <-done, CodeRiskAboveApproval)
+	// Rejected, not approved: still pending for a later attempt.
+	if pend, appr := e.auth.Counts(); pend != 1 || appr != 0 {
+		t.Fatalf("after a mid-read floor rise: %d pending, %d approved", pend, appr)
+	}
+}
+
+// Approvals race a floor change: under -race the decision must stay correct —
+// no data race, at most one approval succeeds, and the permit ends in one
+// consistent state matching the outcome.
+func TestApproveConcurrentWithFloorChange(t *testing.T) {
+	e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
+	e.openSession()
+	p := e.propose(e.request(canonical.RiskMedium))
+	assertion := e.sign(p.Challenge)
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				e.risk.set(canonical.RiskHigh) // above MEDIUM: would reject
+				e.risk.set(canonical.RiskLow)  // at/below MEDIUM: would approve
+			}
+		}
+	}()
+
+	const approvers = 16
+	var wg sync.WaitGroup
+	errs := make([]error, approvers)
+	for i := 0; i < approvers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = e.auth.SubmitAssertion(p.Digest, assertion, 0)
+		}(i)
+	}
+	wg.Wait()
+
+	approved := 0
+	for _, err := range errs {
+		if err == nil {
+			approved++
+		}
+	}
+	if approved > 1 {
+		t.Fatalf("%d approvals succeeded, want at most 1", approved)
+	}
+	pend, appr := e.auth.Counts()
+	if approved == 1 {
+		if appr != 1 || pend != 0 {
+			t.Fatalf("after one approval: %d pending, %d approved", pend, appr)
+		}
+	} else if pend != 1 || appr != 0 {
+		// No approval succeeded: a floor rise or a consumed challenge
+		// rejects; it does not discard the permit.
+		t.Fatalf("after no approvals: %d pending, %d approved", pend, appr)
+	}
+}
+
+// A lock while the floor read runs (the global lock is released for it)
+// revokes the permit; the approval re-validates after re-acquiring the lock
+// and must fail instead of approving a permit that no longer exists.
+func TestFloorReadRevalidatesAfterLock(t *testing.T) {
+	e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
+	e.openSession()
+	p := e.propose(e.request(canonical.RiskMedium))
+	assertion := e.sign(p.Challenge)
+	e.risk.setDuring(func() { e.auth.Lock("test") })
+	_, err := e.auth.SubmitAssertion(p.Digest, assertion, 0)
+	if err == nil {
+		t.Fatal("approval succeeded for a permit revoked during the floor read")
+	}
+	if pend, appr := e.auth.Counts(); pend != 0 || appr != 0 {
+		t.Fatalf("after a lock during the floor read: %d pending, %d approved", pend, appr)
 	}
 }

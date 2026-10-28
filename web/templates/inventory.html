@@ -45,24 +45,27 @@
 {{if .InventoryEditable}}
 <div class="bulkbar" id="bulkbar" hidden>
   <strong id="bulk-count">0 selected</strong>
+  <button type="button" id="bulkbar-toggle" class="button button--secondary bulkbar-toggle" aria-expanded="false" aria-controls="bulkbar-body">More actions</button>
   <button type="button" id="bulk-refresh" class="button">Refresh updates, containers, services</button>
-  <button type="button" id="bulk-schedule" class="button button--secondary">Schedule refresh…</button>
-  <button type="button" id="bulk-update" class="button button--secondary">Install updates…</button>
-  <button type="button" id="bulk-reboot" class="button button--danger">Reboot…</button>
-  <span class="hint">Refresh runs without a key tap while a privileged session is open (Dashboard); otherwise it opens the session with one tap. Installing updates and rebooting ask for the key.</span>
-  <div class="bulkbar__confirm" id="bulk-update-confirm" hidden>
-    <span>Install on <span class="bulk-update-confirm__count">0</span> host(s):</span>
-    <label class="choice"><input type="radio" name="bulk-update-kind" value="package.install_security" checked> security updates</label>
-    <label class="choice"><input type="radio" name="bulk-update-kind" value="package.install_all"> all updates</label>
-    <button type="button" id="bulk-update-go" class="button">Install now</button>
-    <button type="button" id="bulk-update-cancel" class="button button--secondary">Cancel</button>
-    <a id="bulk-update-plan" href="/operations/new">Plan in the form (canary, waves)…</a>
-  </div>
-  <div class="bulkbar__confirm" id="bulk-reboot-confirm" hidden>
-    <span>Reboot <span class="bulk-reboot-confirm__count">0</span> host(s) now?</span>
-    <button type="button" id="bulk-reboot-go" class="button button--danger">Reboot now</button>
-    <button type="button" id="bulk-reboot-cancel" class="button button--secondary">Cancel</button>
-    <a id="bulk-reboot-plan" href="/operations/new">Plan a staged reboot…</a>
+  <div class="bulkbar__body" id="bulkbar-body">
+    <button type="button" id="bulk-schedule" class="button button--secondary">Schedule refresh…</button>
+    <button type="button" id="bulk-update" class="button button--secondary">Install updates…</button>
+    <button type="button" id="bulk-reboot" class="button button--danger">Reboot…</button>
+    <span class="hint">Refresh runs without a key tap while a privileged session is open (Dashboard); otherwise it opens the session with one tap. Installing updates and rebooting ask for the key.</span>
+    <div class="bulkbar__confirm" id="bulk-update-confirm" hidden>
+      <span>Install on <span class="bulk-update-confirm__count">0</span> host(s):</span>
+      <label class="choice"><input type="radio" name="bulk-update-kind" value="package.install_security" checked> security updates</label>
+      <label class="choice"><input type="radio" name="bulk-update-kind" value="package.install_all"> all updates</label>
+      <button type="button" id="bulk-update-go" class="button">Install now</button>
+      <button type="button" id="bulk-update-cancel" class="button button--secondary">Cancel</button>
+      <a id="bulk-update-plan" href="/operations/new">Plan in the form (canary, waves)…</a>
+    </div>
+    <div class="bulkbar__confirm" id="bulk-reboot-confirm" hidden>
+      <span>Reboot <span class="bulk-reboot-confirm__count">0</span> host(s) now?</span>
+      <button type="button" id="bulk-reboot-go" class="button button--danger">Reboot now</button>
+      <button type="button" id="bulk-reboot-cancel" class="button button--secondary">Cancel</button>
+      <a id="bulk-reboot-plan" href="/operations/new">Plan a staged reboot…</a>
+    </div>
   </div>
   <p id="bulk-message" class="message" role="status" aria-live="polite"></p>
 </div>
