@@ -26,4 +26,18 @@
       toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
     });
   }
+
+  // On narrow screens the full placeholder is clipped inside the search
+  // field, so swap in a shorter one; the long text stays on wide screens.
+  const search = document.querySelector('.topbar__search input');
+  if (search) {
+    const long = search.getAttribute('placeholder') || '';
+    const short = 'Search hosts, IPs …';
+    const narrow = window.matchMedia('(max-width: 600px)');
+    const apply = () => {
+      search.placeholder = narrow.matches ? short : long;
+    };
+    apply();
+    narrow.addEventListener('change', apply);
+  }
 })();
