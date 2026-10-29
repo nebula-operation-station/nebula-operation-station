@@ -47,7 +47,7 @@ CREATE TABLE pve_staging (
     hostname        TEXT NOT NULL DEFAULT '',
     macs_json       TEXT NOT NULL DEFAULT '[]',
     ips_json        TEXT NOT NULL DEFAULT '[]',
-    state           TEXT NOT NULL CHECK (state IN ('NEW', 'EXISTING', 'POSSIBLE', 'CONFLICT')),
+    state           TEXT NOT NULL CHECK (state IN ('NEW', 'EXISTING', 'POSSIBLE MATCH', 'CONFLICT')),
     candidates_json TEXT NOT NULL DEFAULT '[]',
     created_at      TEXT NOT NULL,
     imported_at     TEXT NOT NULL DEFAULT '',
@@ -58,19 +58,21 @@ CREATE TABLE pve_staging (
 CREATE INDEX idx_pve_staging_remote ON pve_staging (remote_id);
 
 CREATE TABLE pve_drift_hints (
-    id            INTEGER PRIMARY KEY,
-    remote_id     TEXT NOT NULL,
-    vmid          INTEGER NOT NULL,
-    generation    INTEGER NOT NULL,
-    host_id       TEXT NOT NULL,
-    field         TEXT NOT NULL CHECK (field IN ('ip', 'ram', 'node', 'state')),
-    pve_value     TEXT NOT NULL,
-    host_value    TEXT NOT NULL,
-    observed_at   TEXT NOT NULL,
-    state         TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'accepted', 'ignored')),
-    decided_by    TEXT NOT NULL DEFAULT '',
-    decided_at    TEXT NOT NULL DEFAULT '',
-    UNIQUE (remote_id, vmid, generation, host_id, field, pve_value, host_value)
+    id              INTEGER PRIMARY KEY,
+    remote_id       TEXT NOT NULL,
+    vmid            INTEGER NOT NULL,
+    generation      INTEGER NOT NULL,
+    host_id         TEXT NOT NULL,
+    field           TEXT NOT NULL CHECK (field IN ('ip', 'ram', 'node', 'state')),
+    inventory_value TEXT NOT NULL,
+    pve_value       TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    resolved_at     TEXT NOT NULL DEFAULT '',
+    resolution      TEXT NOT NULL DEFAULT '' CHECK (resolution IN ('', 'accepted', 'ignored')),
+    resolved_by     TEXT NOT NULL DEFAULT '',
+    -- One hint per (host, field): re-detection reopens the row, so the
+    -- list stays bounded and the open set is unique.
+    UNIQUE (host_id, field)
 );
 CREATE INDEX idx_pve_drift_hints_remote ON pve_drift_hints (remote_id);
 CREATE INDEX idx_pve_drift_hints_host ON pve_drift_hints (host_id);
