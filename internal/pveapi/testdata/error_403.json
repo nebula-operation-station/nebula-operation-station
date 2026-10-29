@@ -1,0 +1,14 @@
+{
+  "data": {
+    "error": true,
+    "message": "Permission denied: no permission in path '/nodes/n1/storage'",
+    "status": 403
+  },
+  "errors": {
+    "/nodes/n1/storage": {
+      "message": "Permission denied",
+      "status": 403
+    }
+  },
+  "status": "error"
+}
