@@ -302,6 +302,10 @@ code {
   align-items: center;
   gap: 0.4rem;
   flex: 1;
+  /* Allow shrinking below the input's intrinsic width: on phones the
+     menu button and logout button share the row, and the field must
+     give them their space instead of pushing the row wider. */
+  min-width: 0;
   max-width: 34rem;
   padding: 0.35rem 0.6rem;
   background: var(--surface-2);
