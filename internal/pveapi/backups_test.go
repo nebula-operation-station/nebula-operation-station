@@ -207,14 +207,14 @@ func TestGetJSONRequiresTokenBeforeRequest(t *testing.T) {
 }
 
 func TestGetJSONSendsTokenHeader(t *testing.T) {
-	var got atomic.String
+	var got atomic.Value
 	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got.Store(r.Header.Get("Authorization"))
 		http.NotFound(w, r)
 	}))
 	_ = c.getJSON(context.Background(), "/cluster/backup", nil, &struct{}{})
 	if got.Load() != testToken {
-		t.Errorf("Authorization = %q, want %q", got.Load(), testToken)
+		t.Errorf("Authorization = %v, want %q", got.Load(), testToken)
 	}
 }
 
