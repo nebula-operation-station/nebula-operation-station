@@ -304,3 +304,87 @@ func TestValidateVMID(t *testing.T) {
 		t.Errorf("validateVMID(100): %v", err)
 	}
 }
+
+func TestGuestListCanonicalResources(t *testing.T) {
+	for _, version := range []string{"pve8", "pve9"} {
+		t.Run(version, func(t *testing.T) {
+			c := clientFor(t, fixtureServer(t, map[string]string{
+				"/nodes/pve1/qemu": version + "/qemu_pve1.json",
+				"/nodes/pve1/lxc":  "pve8/lxc_pve1.json",
+			}))
+			q, err := c.ListQemu(context.Background(), "pve1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(q) != 2 || q[0].MaxCPU != 4 || q[0].MaxMemory != 8<<30 || q[1].MaxCPU != 8 || q[1].MaxMemory != 16<<30 {
+				t.Errorf("qemu resources = %+v", q)
+			}
+			l, err := c.ListLxc(context.Background(), "pve1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(l) != 1 || l[0].MaxCPU != 2 || l[0].MaxMemory != 4<<30 {
+				t.Errorf("lxc resources = %+v", l)
+			}
+		})
+	}
+	for _, resource := range []string{`"cpus":-1`, `"maxmem":-1`} {
+		if _, err := parseGuestList([]byte(`[{"vmid":100,`+resource+`}]`), "pve1", KindQemu); err == nil {
+			t.Errorf("negative resource accepted: %s", resource)
+		}
+	}
+}
+
+func TestListsRejectNullAndAcceptEmptyArrays(t *testing.T) {
+	for _, payload := range []string{`null`, ` null `, `[]`} {
+		t.Run(payload, func(t *testing.T) {
+			c := newTestClient(t, serveData(t, payload), nil)
+			nodes, nerr := c.ListNodes(context.Background())
+			qemu, qerr := c.ListQemu(context.Background(), "pve1")
+			lxc, lerr := c.ListLxc(context.Background(), "pve1")
+			for i, err := range []error{nerr, qerr, lerr} {
+				if (err != nil) != (payload != "[]") {
+					t.Errorf("list %d: err=%v for payload %s", i, err, payload)
+				}
+			}
+			if payload == "[]" && (len(nodes) != 0 || len(qemu) != 0 || len(lxc) != 0) {
+				t.Error("empty array returned nonempty list")
+			}
+		})
+	}
+}
+
+func TestEnumerateClusterNullListsNeverProduceCompleteInventory(t *testing.T) {
+	for _, endpoint := range []string{"/nodes", "/nodes/pve1/qemu", "/nodes/pve1/lxc", "none"} {
+		t.Run(endpoint, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				p := strings.TrimPrefix(r.URL.Path, apiRoot)
+				switch {
+				case p == endpoint:
+					fmt.Fprint(w, `{"data":null}`)
+				case p == "/nodes":
+					fmt.Fprint(w, `{"data":[{"node":"pve1","status":"online"}]}`)
+				default:
+					fmt.Fprint(w, `{"data":[]}`)
+				}
+			}), nil)
+			inv, err := c.EnumerateCluster(context.Background())
+			if endpoint == "/nodes" {
+				if err == nil {
+					t.Fatal("null nodes produced an inventory")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if endpoint == "none" {
+				if inv.Partial || len(inv.Guests) != 0 || len(inv.NodeErrors) != 0 {
+					t.Errorf("explicit empty lists should be complete: %+v", inv)
+				}
+			} else if !inv.Partial || inv.NodeErrors["pve1"] == "" {
+				t.Errorf("null guest list should be partial: %+v", inv)
+			}
+		})
+	}
+}

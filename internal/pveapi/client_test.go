@@ -212,3 +212,19 @@ func TestSanitizeText(t *testing.T) {
 		}
 	}
 }
+
+func TestStatusErrorPVEMessageIsSanitizedAndBounded(t *testing.T) {
+	for _, body := range []string{
+		`{"data":null,"errors":null,"message":"failure\u0000` + strings.Repeat("x", 2000) + `"}`,
+		`{"message":"failure\u0000` + strings.Repeat("x", 2000) + `","errors":{"field":"validation detail"}}`,
+	} {
+		err := apiStatusError("/nodes", http.StatusInternalServerError, []byte(body))
+		var se *StatusError
+		if !errors.As(err, &se) {
+			t.Fatal("expected StatusError")
+		}
+		if !strings.HasPrefix(se.Message, "failure") || len(se.Message) > MaxErrorMessageBytes || strings.ContainsRune(se.Message, 0) {
+			t.Errorf("invalid sanitized message: %q", se.Message)
+		}
+	}
+}

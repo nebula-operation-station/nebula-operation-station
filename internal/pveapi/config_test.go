@@ -280,3 +280,94 @@ func TestParseSizeBytes(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigArgumentsNeverSurviveSerialization(t *testing.T) {
+	marker := strings.Repeat("fixture-only", 3)
+	for _, kind := range []GuestKind{KindQemu, KindLxc} {
+		for _, args := range []string{
+			"-object secret,id=sec0,data=" + marker,
+			"-object secret,id=sec0,format=base64,data=" + marker,
+			"-iscsi user=fixture,password=" + marker,
+		} {
+			body, err := json.Marshal(map[string]string{"args": args, "machine": "q35"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := parseGuestConfig(body, "pve1", 100, kind)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := cfg.Extras["args"]; ok {
+				t.Error("raw args retained in Extras")
+			}
+			encoded, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(encoded), marker) {
+				t.Error("serialized config contains inline credential")
+			}
+			if cfg.Extras["machine"] != "q35" {
+				t.Error("unrelated config field was dropped")
+			}
+		}
+	}
+}
+
+func TestConfigUnsuffixedMemoryUsesMiB(t *testing.T) {
+	for _, body := range []string{
+		`{"cores":"3","sockets":"2","memory":"4096","balloon":"1024","swap":"512"}`,
+		`{"cores":3,"sockets":2,"memory":4096,"balloon":1024,"swap":512}`,
+	} {
+		cfg, err := parseGuestConfig(json.RawMessage(body), "pve1", 100, KindQemu)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.CPUs != 6 || cfg.Memory != 4<<30 || cfg.Balloon != 1<<30 || cfg.Swap != 512<<20 {
+			t.Errorf("resources = %d/%d/%d/%d", cfg.CPUs, cfg.Memory, cfg.Balloon, cfg.Swap)
+		}
+	}
+	cfg, err := parseGuestConfig(json.RawMessage(`{"cpus":3,"balloon":0,"swap":0}`), "pve1", 200, KindLxc)
+	if err != nil || cfg.CPUs != 3 || cfg.Balloon != 0 || cfg.Swap != 0 {
+		t.Fatalf("numeric cpus and zero resources: cfg=%+v, err=%v", cfg, err)
+	}
+}
+
+func TestConfigRejectsInvalidNumericResources(t *testing.T) {
+	for _, key := range []string{"cores", "cpus", "sockets", "memory", "balloon", "swap"} {
+		for _, value := range []string{"-1", "1.5", "9223372036854775808", "true", "null", "{}", "[]"} {
+			t.Run(key+"/"+value, func(t *testing.T) {
+				body := json.RawMessage(fmt.Sprintf(`{%q:%s}`, key, value))
+				if _, err := parseGuestConfig(body, "pve1", 100, KindQemu); err == nil {
+					t.Fatal("invalid numeric resource accepted")
+				}
+			})
+		}
+	}
+	for _, key := range []string{"memory", "balloon", "swap"} {
+		body := json.RawMessage(fmt.Sprintf(`{%q:8796093022208}`, key))
+		if _, err := parseGuestConfig(body, "pve1", 100, KindQemu); err == nil {
+			t.Errorf("%s: MiB conversion overflow accepted", key)
+		}
+	}
+}
+
+func TestNICCanonicalModelsAndTag(t *testing.T) {
+	for _, model := range []string{"virtio", "e1000", "e1000-82540em", "e1000-82544gc", "e1000-82545em", "e1000e", "i82551", "i82557b", "i82559er", "ne2k_isa", "ne2k_pci", "pcnet", "rtl8139", "vmxnet3", "hwaddr", "macaddr"} {
+		t.Run(model, func(t *testing.T) {
+			nic, err := parseNIC("net0", model+"=AA:BB:CC:DD:EE:01,bridge=vmbr0,tag=42")
+			if err != nil || nic.MAC != "aa:bb:cc:dd:ee:01" || nic.VLAN != 42 || nic.Bridge != "vmbr0" {
+				t.Fatalf("nic = %+v, err = %v", nic, err)
+			}
+		})
+	}
+	for _, tag := range []string{"-1", "4095", "bad"} {
+		if _, err := parseNIC("net0", "virtio=AA:BB:CC:DD:EE:01,tag="+tag); err == nil {
+			t.Errorf("tag %q accepted", tag)
+		}
+	}
+	nic, err := parseNIC("net0", "virtio=invalid,bridge=vmbr0")
+	if err != nil || nic.MAC != "" {
+		t.Fatalf("invalid MAC retained: nic=%+v, err=%v", nic, err)
+	}
+}

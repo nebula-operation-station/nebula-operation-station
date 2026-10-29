@@ -128,7 +128,7 @@ func TestAgentMalformed(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api2/json/nodes/pve1/qemu/100/agent/network-get-interfaces",
 		func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte(`{"data":[{"name":"eth0","ip-address":[{"ip-address":"not-an-ip","prefix":24}]}]}`))
+			w.Write([]byte(`{"data":{"result":[{"name":"eth0","ip-addresses":[{"ip-address":"not-an-ip","prefix":24}]}]}}`))
 		})
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
@@ -146,13 +146,13 @@ func TestAgentInterfaceLimit(t *testing.T) {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		fmt.Fprintf(&b, `{"name":"if%d","ip-address":[]}`, i)
+		fmt.Fprintf(&b, `{"name":"if%d","ip-addresses":[]}`, i)
 	}
 	b.WriteByte(']')
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api2/json/nodes/pve1/qemu/100/agent/network-get-interfaces",
 		func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(w, `{"data":%s}`, b.String())
+			fmt.Fprintf(w, `{"data":{"result":%s}}`, b.String())
 		})
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
@@ -171,5 +171,146 @@ func TestAgentRejectsBadArgs(t *testing.T) {
 	}
 	if _, err := c.AgentFSInfo(context.Background(), "pve1", -5); err == nil {
 		t.Error("AgentFSInfo: expected error for bad vmid")
+	}
+}
+
+func TestAgentPVE9ResultWrappers(t *testing.T) {
+	ts := fixtureServer(t, map[string]string{
+		"/nodes/pve1/qemu/100/agent/network-get-interfaces": "pve9/agent_net_100.json",
+		"/nodes/pve1/qemu/100/agent/get-osinfo":             "pve9/agent_osinfo_100.json",
+		"/nodes/pve1/qemu/100/agent/get-fsinfo":             "pve9/agent_fsinfo_100.json",
+	})
+	c := clientFor(t, ts)
+	net, err := c.AgentNetworkInterfaces(context.Background(), "pve1", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !net.Available || len(net.Interfaces) != 1 {
+		t.Fatalf("network = %+v", net)
+	}
+	iface := net.Interfaces[0]
+	if iface.Name != "Ethernet" || iface.MAC != "aa:bb:cc:dd:ee:09" || len(iface.IPs) != 1 ||
+		iface.IPs[0].IP != "192.0.2.9" || iface.IPs[0].Prefix != 24 {
+		t.Errorf("interface = %+v", iface)
+	}
+	os, err := c.AgentOSInfo(context.Background(), "pve1", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.Available || os.Name != "Microsoft Windows" || os.Version != "10.0" {
+		t.Errorf("os = %+v", os)
+	}
+	fs, err := c.AgentFSInfo(context.Background(), "pve1", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fs.Available || len(fs.Filesystems) != 1 {
+		t.Fatalf("filesystems = %+v", fs)
+	}
+	if fs.Filesystems[0].Mountpoint != `C:\` || fs.Filesystems[0].Type != "NTFS" ||
+		fs.Filesystems[0].Size != 64<<30 || fs.Filesystems[0].Used != 16<<30 {
+		t.Errorf("filesystem = %+v", fs.Filesystems[0])
+	}
+}
+
+func TestAgentRejectsMalformedResultWrappers(t *testing.T) {
+	for _, payload := range []string{`null`, `{}`, `[]`, `{"result":null}`, `{"result":"bad"}`} {
+		t.Run(payload, func(t *testing.T) {
+			c := newTestClient(t, serveData(t, payload), nil)
+			if _, err := c.AgentNetworkInterfaces(context.Background(), "pve1", 100); !errors.Is(err, ErrAgentMalformed) {
+				t.Errorf("network: err = %v, want ErrAgentMalformed", err)
+			}
+			if _, err := c.AgentOSInfo(context.Background(), "pve1", 100); !errors.Is(err, ErrAgentMalformed) {
+				t.Errorf("osinfo: err = %v, want ErrAgentMalformed", err)
+			}
+			if _, err := c.AgentFSInfo(context.Background(), "pve1", 100); !errors.Is(err, ErrAgentMalformed) {
+				t.Errorf("fsinfo: err = %v, want ErrAgentMalformed", err)
+			}
+		})
+	}
+}
+
+func TestAgentActualFieldsStillEnforceLimits(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		result  string
+	}{
+		{"network-get-interfaces", `[{"name":"eth0","hardware-address":"AA:BB:CC:DD:EE:01","ip-addresses":[{"ip-address":"invalid","prefix":24}]}]`},
+		{"network-get-interfaces", `[{"name":"eth0","ip-addresses":[{"ip-address":"192.0.2.1","prefix":129}]}]`},
+		{"get-fsinfo", `[{"name":"sda1","total-bytes":-1}]`},
+		{"get-fsinfo", `[{"name":"sda1","used-bytes":-1}]`},
+		{"get-fsinfo", `[{"name":"sda1","total-bytes":9223372036854775808}]`},
+	} {
+		c := newTestClient(t, serveData(t, `{"result":`+tc.result+`}`), nil)
+		var err error
+		if tc.command == "get-fsinfo" {
+			_, err = c.AgentFSInfo(context.Background(), "pve1", 100)
+		} else {
+			_, err = c.AgentNetworkInterfaces(context.Background(), "pve1", 100)
+		}
+		if !errors.Is(err, ErrAgentMalformed) {
+			t.Errorf("%s: err = %v, want ErrAgentMalformed", tc.command, err)
+		}
+	}
+}
+
+func TestAgentPVEErrorMessages(t *testing.T) {
+	for _, tc := range []struct {
+		message     string
+		status      int
+		unavailable bool
+	}{
+		{"QEMU guest agent is not running", http.StatusInternalServerError, true},
+		{"QEMU guest agent is not enabled", http.StatusInternalServerError, true},
+		{"No QEMU guest agent configured", http.StatusInternalServerError, true},
+		{"VM 100 is not running", http.StatusInternalServerError, true},
+		{"node is down", http.StatusInternalServerError, true},
+		{"internal storage error", http.StatusInternalServerError, false},
+		{"QEMU guest agent command failed: permission denied", http.StatusInternalServerError, false},
+		{"guest agent command not supported", http.StatusInternalServerError, false},
+		{"permission check failed (VM.GuestAgent.Audit)", http.StatusForbidden, false},
+	} {
+		t.Run(tc.message, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				fmt.Fprintf(w, `{"data":null,"message":%q,"errors":null}`, tc.message)
+			}), nil)
+			checks := []func() (bool, string, error){
+				func() (bool, string, error) {
+					r, err := c.AgentNetworkInterfaces(context.Background(), "pve1", 100)
+					if err != nil {
+						return false, "", err
+					}
+					return r.Available, r.Reason, nil
+				},
+				func() (bool, string, error) {
+					r, err := c.AgentOSInfo(context.Background(), "pve1", 100)
+					if err != nil {
+						return false, "", err
+					}
+					return r.Available, r.Reason, nil
+				},
+				func() (bool, string, error) {
+					r, err := c.AgentFSInfo(context.Background(), "pve1", 100)
+					if err != nil {
+						return false, "", err
+					}
+					return r.Available, r.Reason, nil
+				},
+			}
+			for i, check := range checks {
+				available, reason, err := check()
+				if tc.unavailable {
+					if err != nil || available || reason != tc.message {
+						t.Errorf("method %d: available=%v reason=%q err=%v", i, available, reason, err)
+					}
+				} else {
+					var se *StatusError
+					if !errors.As(err, &se) || se.Code != tc.status || se.Message != tc.message {
+						t.Errorf("method %d: err=%v, want original StatusError", i, err)
+					}
+				}
+			}
+		})
 	}
 }

@@ -3,6 +3,7 @@
 package pveapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -140,7 +141,20 @@ func (c *Client) agentGet(ctx context.Context, node string, vmid int, cmd string
 	if err := validateVMID(vmid); err != nil {
 		return nil, err
 	}
-	return c.do(ctx, fmt.Sprintf("/nodes/%s/qemu/%d/agent/%s", node, vmid, cmd))
+	data, err := c.do(ctx, fmt.Sprintf("/nodes/%s/qemu/%d/agent/%s", node, vmid, cmd))
+	if err != nil {
+		return nil, err
+	}
+	var env struct {
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrAgentMalformed, err)
+	}
+	if len(env.Result) == 0 || bytes.Equal(bytes.TrimSpace(env.Result), []byte("null")) {
+		return nil, fmt.Errorf("%w: missing result", ErrAgentMalformed)
+	}
+	return env.Result, nil
 }
 
 // agentUnavailable reports whether err means the guest agent is not
@@ -155,7 +169,7 @@ func agentUnavailable(err error) (string, bool) {
 	}
 	if se.Code >= 500 {
 		msg := strings.ToLower(se.Message)
-		for _, hint := range []string{"agent", "not running", "node is down"} {
+		for _, hint := range []string{"no qemu guest agent configured", "agent is not enabled", "not running", "node is down"} {
 			if strings.Contains(msg, hint) {
 				return se.Message, true
 			}
@@ -168,12 +182,12 @@ func agentUnavailable(err error) (string, bool) {
 func parseAgentInterfaces(data json.RawMessage) ([]AgentInterface, error) {
 	var raw []struct {
 		Name      string `json:"name"`
-		MAC       string `json:"mac-address"`
+		MAC       string `json:"hardware-address"`
 		MTU       *int   `json:"mtu"`
 		IPAddress []struct {
 			IP     string `json:"ip-address"`
 			Prefix *int   `json:"prefix"`
-		} `json:"ip-address"`
+		} `json:"ip-addresses"`
 		Flags []string `json:"flags"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -245,8 +259,8 @@ func parseAgentFSInfo(data json.RawMessage) ([]AgentFilesystem, error) {
 		Name       string `json:"name"`
 		Mountpoint string `json:"mountpoint"`
 		Type       string `json:"type"`
-		Size       *int64 `json:"size"`
-		Used       *int64 `json:"used"`
+		Size       *int64 `json:"total-bytes"`
+		Used       *int64 `json:"used-bytes"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrAgentMalformed, err)

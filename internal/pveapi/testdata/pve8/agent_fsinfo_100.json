@@ -1,17 +1,17 @@
-[
+{"result": [
   {
     "name": "/dev/sda1",
     "mountpoint": "/",
     "type": "ext4",
-    "size": 34359738368,
-    "used": 8589934592,
+    "total-bytes": 34359738368,
+    "used-bytes": 8589934592,
     "uuid": "abcd-1234"
   },
   {
     "name": "/dev/sdb1",
     "mountpoint": "/data",
     "type": "xfs",
-    "size": 1099511627776,
-    "used": 549755813888
+    "total-bytes": 1099511627776,
+    "used-bytes": 549755813888
   }
-]
+]}

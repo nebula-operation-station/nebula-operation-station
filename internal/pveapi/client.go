@@ -189,16 +189,19 @@ func (c *Client) do(ctx context.Context, path string) (json.RawMessage, error) {
 }
 
 // apiStatusError builds a StatusError from a non-2xx PVE response body.
-// PVE answers with either {"error": "..."} or
-// {"errors": {"<endpoint>": "..."}}.
+// PVE supplies "message" and optional field-specific "errors"; older
+// envelopes with "error" are also accepted.
 func apiStatusError(path string, code int, body []byte) error {
 	var env struct {
-		Error  string            `json:"error"`
-		Errors map[string]string `json:"errors"`
+		Message string            `json:"message"`
+		Error   string            `json:"error"`
+		Errors  map[string]string `json:"errors"`
 	}
 	msg := ""
 	if err := json.Unmarshal(body, &env); err == nil {
-		if env.Error != "" {
+		if env.Message != "" {
+			msg = env.Message
+		} else if env.Error != "" {
 			msg = env.Error
 		} else {
 			for _, v := range env.Errors {

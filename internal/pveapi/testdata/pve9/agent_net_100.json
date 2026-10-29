@@ -1,0 +1,8 @@
+{"result":[
+  {
+    "name":"Ethernet",
+    "hardware-address":"AA:BB:CC:DD:EE:09",
+    "ip-addresses":[{"ip-address":"192.0.2.9","ip-address-type":"ipv4","prefix":24}],
+    "statistics":{"rx-bytes":1024,"tx-bytes":512}
+  }
+]}

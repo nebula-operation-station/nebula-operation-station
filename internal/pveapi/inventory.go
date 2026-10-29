@@ -105,6 +105,9 @@ func (c *Client) ListNodes(ctx context.Context) ([]Node, error) {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("pveapi: decode /nodes: %w", err)
 	}
+	if raw == nil {
+		return nil, fmt.Errorf("pveapi: decode /nodes: null list")
+	}
 	if len(raw) > MaxObjectsPerPage {
 		return nil, fmt.Errorf("pveapi: /nodes has %d objects, limit %d", len(raw), MaxObjectsPerPage)
 	}
@@ -154,14 +157,17 @@ func parseGuestList(data json.RawMessage, node string, kind GuestKind) ([]Guest,
 		VMID      int64  `json:"vmid"`
 		Name      string `json:"name"`
 		Status    string `json:"status"`
-		MaxCPU    int    `json:"maxcpu"`
-		MaxMemory int64  `json:"maxmemory"`
+		MaxCPU    int    `json:"cpus"`
+		MaxMemory int64  `json:"maxmem"`
 		Uptime    int64  `json:"uptime"`
 		Ctime     *int64 `json:"ctime"`
 		UUID      string `json:"uuid"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("pveapi: decode guest list: %w", err)
+	}
+	if raw == nil {
+		return nil, fmt.Errorf("pveapi: decode guest list: null list")
 	}
 	if len(raw) > MaxObjectsPerPage {
 		return nil, fmt.Errorf("pveapi: guest list has %d objects, limit %d", len(raw), MaxObjectsPerPage)

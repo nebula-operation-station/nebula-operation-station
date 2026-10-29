@@ -3,6 +3,7 @@
 package pveapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,10 +19,11 @@ import (
 // never be kept (ADR 0006: Cloud-Init passwords, storage credentials).
 var secretKeyPattern = regexp.MustCompile(`(?i)(password|secret|token)`)
 
-// configDropKeys are non-secret keys that ADR 0006 discards before
-// spooling: snippet references (snippet files may hold secrets) and
-// free-form descriptions.
+// configDropKeys are fields discarded before spooling: raw arguments
+// may contain inline credentials, snippet files may hold secrets, and
+// free-form descriptions are excluded by policy.
 var configDropKeys = map[string]bool{
+	"args":        true,
 	"snippets":    true,
 	"description": true,
 }
@@ -149,13 +151,15 @@ func (c *Client) GetLxcConfig(ctx context.Context, node string, vmid int) (*Gues
 	return cfg, nil
 }
 
-// parseGuestConfig decodes a PVE guest config map (flat key -> value
-// strings) into a GuestConfig, dropping secrets. Keys are processed in
-// sorted order so the result is deterministic. PVE 8 and PVE 9 configs use
-// the same flat shape; unknown keys land in Extras.
+// parseGuestConfig decodes a flat PVE guest config map of strings and
+// schema-defined numbers into a GuestConfig, dropping secrets. Keys are
+// processed in sorted order so the result is deterministic. PVE 8 and
+// PVE 9 configs use the same flat shape; unknown keys land in Extras.
 func parseGuestConfig(data json.RawMessage, node string, vmid int, kind GuestKind) (*GuestConfig, error) {
 	var raw map[string]any
-	if err := json.Unmarshal(data, &raw); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	if err := dec.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("decode guest config: %w", err)
 	}
 	keys := make([]string, 0, len(raw))
@@ -175,9 +179,18 @@ func parseGuestConfig(data json.RawMessage, node string, vmid int, kind GuestKin
 	for _, key := range keys {
 		val, ok := raw[key].(string)
 		if !ok {
-			// Non-string values are not part of the PVE config schema;
-			// drop unknown fields.
-			continue
+			switch key {
+			case "cores", "cpus", "sockets", "memory", "balloon", "swap", "onboot", "ctime":
+				n, ok := raw[key].(json.Number)
+				if !ok {
+					return nil, fmt.Errorf("bad %s: expected string or number", key)
+				}
+				// Preserve the number exactly; the field parsers enforce
+				// integer syntax, bounds and conversion overflow checks.
+				val = n.String()
+			default:
+				continue
+			}
 		}
 		switch {
 		case key == "sshkeys" || key == "sshkey":
@@ -208,19 +221,19 @@ func parseGuestConfig(data json.RawMessage, node string, vmid int, kind GuestKin
 			}
 			sockets = n
 		case key == "memory":
-			n, err := parseSizeBytes(val, 1024)
+			n, err := parseSizeBytes(val, 1<<20)
 			if err != nil {
 				return nil, fmt.Errorf("bad memory %q", val)
 			}
 			cfg.Memory = n
 		case key == "balloon":
-			n, err := parseSizeBytes(val, 1024)
+			n, err := parseSizeBytes(val, 1<<20)
 			if err != nil {
 				return nil, fmt.Errorf("bad balloon %q", val)
 			}
 			cfg.Balloon = n
 		case key == "swap":
-			n, err := parseSizeBytes(val, 1024)
+			n, err := parseSizeBytes(val, 1<<20)
 			if err != nil {
 				return nil, fmt.Errorf("bad swap %q", val)
 			}
@@ -326,7 +339,7 @@ func parseBoundedInt(s string, lo, hi int) (int, error) {
 }
 
 // parseSizeBytes parses PVE size values: a plain number (multiplied by
-// plainUnit, e.g. 1024 for KiB-based memory) or a number with a binary
+// plainUnit, e.g. 1<<20 for MiB-based memory) or a number with a binary
 // K/M/G/T suffix (which already encodes the unit).
 func parseSizeBytes(s string, plainUnit int64) (int64, error) {
 	if s == "" {
@@ -469,20 +482,22 @@ func parseMount(device, val string) (Mount, error) {
 	return m, nil
 }
 
-// parseNIC decodes a netN value. QEMU uses macaddr=, LXC uses hwaddr=.
+// parseNIC decodes a netN value. QEMU uses model=MAC or macaddr=MAC;
+// LXC uses hwaddr=MAC. Both use tag= for the VLAN ID.
 func parseNIC(device, val string) (NIC, error) {
 	nic := NIC{Device: device}
 	for _, kv := range parseKVList(val) {
 		switch kv[0] {
 		case "bridge":
 			nic.Bridge = sanitizeText(kv[1], 64)
-		case "vlan":
+		case "tag", "vlan":
 			n, err := parseBoundedInt(kv[1], 0, 4094)
 			if err != nil {
 				return nic, fmt.Errorf("bad vlan for %s: %w", device, err)
 			}
 			nic.VLAN = n
-		case "macaddr", "hwaddr":
+		case "macaddr", "hwaddr", "virtio", "e1000", "e1000-82540em", "e1000-82544gc", "e1000-82545em",
+			"e1000e", "i82551", "i82557b", "i82559er", "ne2k_isa", "ne2k_pci", "pcnet", "rtl8139", "vmxnet3":
 			if macPattern.MatchString(kv[1]) {
 				nic.MAC = strings.ToLower(kv[1])
 			}
