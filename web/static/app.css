@@ -1366,7 +1366,7 @@ details[open] summary { color: var(--text); margin-bottom: var(--space-2); }
 }
 .chart__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
 .chart__box--container {
-  display: flex; align-items: center; gap: 0.5rem;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 0.25rem;
   width: 180px; min-height: 70px;
   padding: 0.5rem 0.625rem;
   background: var(--surface);
@@ -1376,9 +1376,10 @@ details[open] summary { color: var(--text); margin-bottom: var(--space-2); }
   overflow: hidden;
 }
 .chart__box--container::before { content: ""; position: absolute; left: -1.25rem; top: 50%; width: 1.25rem; border-top: 2px solid var(--border); }
-.chart__cname { font-weight: 600; color: var(--text); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 8rem; }
+.chart__cname { font-weight: 600; color: var(--text); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .chart__cname:hover { color: var(--brand); }
-.chart__cimg { font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chart__cimg { font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.chart__cstate { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-top: auto; }
 .chart__project { border: 1px dashed var(--border-strong); border-radius: var(--radius-sm); padding: 0.5rem; }
 .chart__project__label { display: block; font-size: 0.75rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.375rem; }
 .chart__none, .chart__empty { font-size: var(--fs-sm); color: var(--text-faint); margin: 0; }

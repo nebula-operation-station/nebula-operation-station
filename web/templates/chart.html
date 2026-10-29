@@ -49,8 +49,10 @@
             <li class="chart__box chart__box--container">
               <a class="chart__cname" href="/hosts/{{$h.ID}}">{{.Name}}</a>
               <span class="chart__cimg">{{.Image}}</span>
-              <span class="badge {{.StateClass}}">{{.State}}</span>
-              {{if .Health}}<span class="badge badge--critical">{{.Health}}</span>{{end}}
+              <span class="chart__cstate">
+                <span class="badge {{.StateClass}}">{{.State}}</span>
+                {{if .Health}}<span class="badge badge--critical">{{.Health}}</span>{{end}}
+              </span>
             </li>
             {{end}}
           </ul>
