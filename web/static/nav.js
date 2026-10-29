@@ -63,6 +63,7 @@
     const openDrawer = () => {
       app.classList.add('app--drawer-open');
       menu.setAttribute('aria-expanded', 'true');
+      menu.setAttribute('aria-label', 'Close navigation');
       if (close) {
         close.focus();
       }
@@ -70,6 +71,7 @@
     const closeDrawer = () => {
       app.classList.remove('app--drawer-open');
       menu.setAttribute('aria-expanded', 'false');
+      menu.setAttribute('aria-label', 'Open navigation');
       menu.focus();
     };
     menu.addEventListener('click', () => {
