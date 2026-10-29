@@ -1389,13 +1389,13 @@ details[open] summary { color: var(--text); margin-bottom: var(--space-2); }
 /* Inventory org chart (ADR 0006, P1-18): hosts left-to-right,         */
 /* container columns beside each host. No JavaScript.                  */
 
-.chart { padding: var(--space-2); overflow-x: auto; }
+.chart { padding: var(--space-2); }
 .chart__hosts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
 .chart__node { border: 2px solid var(--border-strong); border-radius: var(--radius); background: var(--surface); }
 .chart__node--critical { border-color: var(--crit); }
 .chart__node--warning { border-color: var(--warn); }
 .chart__node--neutral { border-color: var(--border-strong); }
-.chart__details { display: flex; align-items: stretch; gap: var(--space-2); padding: var(--space-2); }
+.chart__details { display: flex; align-items: flex-start; gap: var(--space-2); padding: var(--space-2); }
 .chart__details > summary { list-style: none; }
 .chart__details > summary::-webkit-details-marker { display: none; }
 .chart__box--host {
@@ -1426,12 +1426,22 @@ details[open] summary { color: var(--text); margin-bottom: var(--space-2); }
 .chart__bar__track { height: 6px; background: var(--surface-3); border-radius: 3px; overflow: hidden; }
 .chart__bar__fill { display: block; height: 100%; width: 0; background: var(--brand); }
 .chart__bar__val { font-variant-numeric: tabular-nums; }
+/* The container column: it grows with its content, the page scrolls.
+   Its left border is the org-chart spine. */
 .chart__children {
   flex: 1 1 auto; min-width: 0;
+  position: relative;
   display: flex; flex-direction: column; gap: var(--space-2);
-  max-height: 420px; overflow-y: auto;
   padding-left: var(--space-2);
   border-left: 2px solid var(--border);
+}
+/* Connector from the host box to the spine, at the host title row. */
+.chart__children::before {
+  content: ""; position: absolute;
+  left: calc(-1 * var(--space-2) - 2px);
+  top: 1.2rem;
+  width: calc(var(--space-2) + 2px);
+  border-top: 2px solid var(--border);
 }
 .chart__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
 .chart__box--container {
@@ -1444,21 +1454,38 @@ details[open] summary { color: var(--text); margin-bottom: var(--space-2); }
   position: relative;
   overflow: hidden;
 }
-.chart__box--container::before { content: ""; position: absolute; left: -1.25rem; top: 50%; width: 1.25rem; border-top: 2px solid var(--border); }
+/* Branch from the spine to a standalone container box. */
+.chart__box--container::before {
+  content: ""; position: absolute;
+  left: calc(-1 * var(--space-2) - 2px);
+  top: 50%;
+  width: calc(var(--space-2) + 2px);
+  border-top: 2px solid var(--border);
+}
 .chart__cname { font-weight: 600; color: var(--text); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .chart__cname:hover { color: var(--brand); }
 .chart__cimg { font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .chart__cstate { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-top: auto; }
-.chart__project { border: 1px dashed var(--border-strong); border-radius: var(--radius-sm); padding: 0.5rem; }
+.chart__project { position: relative; border: 1px dashed var(--border-strong); border-radius: var(--radius-sm); padding: 0.5rem; }
+/* Branch from the spine to a Compose group frame, at its label row. */
+.chart__project::before {
+  content: ""; position: absolute;
+  left: calc(-1 * var(--space-2) - 2px);
+  top: 0.95rem;
+  width: calc(var(--space-2) + 2px);
+  border-top: 2px solid var(--border);
+}
+/* Boxes inside a group frame have no branch of their own. */
+.chart__project .chart__box--container::before { display: none; }
 .chart__project__label { display: block; font-size: 0.75rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.375rem; }
 .chart__none, .chart__empty { font-size: var(--fs-sm); color: var(--text-faint); margin: 0; }
 
 /* Narrow screens: fall back to an indented list (CSS only). */
 @media (max-width: 600px) {
-  .chart { overflow-x: visible; }
   .chart__details { flex-direction: column; }
   .chart__box--host { flex-basis: auto; width: 100%; min-height: 0; }
-  .chart__children { border-left: none; padding-left: var(--space-2); max-height: none; overflow: visible; }
+  .chart__children { border-left: none; padding-left: var(--space-2); }
+  .chart__children::before, .chart__project::before { display: none; }
   .chart__box--container { width: 100%; min-height: 0; }
   .chart__box--container::before { display: none; }
   .chart__cname { max-width: none; }
