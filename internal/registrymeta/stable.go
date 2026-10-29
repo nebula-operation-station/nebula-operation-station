@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // DefaultPolicyVersion is the selection-policy version recorded in a Result
@@ -66,7 +67,7 @@ type parsedTag struct {
 	minor   int
 	patch   int
 	variant string // kindVersion: suffix (e.g. alpine); kindDate: "date"
-	isPre   bool   // kindVersion: variant is a pre-release identifier
+	isPre   bool   // kindVersion: tag contains a pre-release identifier
 	dateKey int64  // kindDate: YYYYMMDDHHMMSS, for ordering
 }
 
@@ -144,6 +145,7 @@ type Result struct {
 var (
 	versionRe     = regexp.MustCompile(`^([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?(?:-(.*))?$`)
 	dateDashRe    = regexp.MustCompile(`^([0-9]{4})-([0-9]{2})-([0-9]{2})([T ].*)?$`)
+	dateTimeRe    = regexp.MustCompile(`^[T ][0-9]{2}:[0-9]{2}:[0-9]{2}Z?$`)
 	dateCompactRe = regexp.MustCompile(`^([0-9]{4})([0-9]{2})([0-9]{2})$`)
 	hexRe         = regexp.MustCompile(`^[0-9a-fA-F]+$`)
 	preReleaseRe  = regexp.MustCompile(`^(rc|beta|alpha|dev|pre|preview|canary|snapshot|snap|milestone|nightly|edge|unstable|testing|experimental)[0-9.+-]*$`)
@@ -309,9 +311,6 @@ func matchAny(tag string, re []*regexp.Regexp) bool {
 func familyOf(cur parsedTag, policy Policy) (string, bool) {
 	switch cur.kind {
 	case kindVersion:
-		if cur.isPre {
-			return "", true // a pre-release current compares plain stable tags
-		}
 		return cur.variant, true
 	case kindDate:
 		if policy.AllowDates {
@@ -468,6 +467,11 @@ func parseTag(tag string) parsedTag {
 		p.dateKey = key
 		return p
 	}
+	// Malformed dates must not fall through to numeric version parsing.
+	if dateDashRe.MatchString(t) || dateCompactRe.MatchString(t) {
+		return p
+	}
+
 	s := t
 	if s[0] == 'v' || s[0] == 'V' {
 		s = s[1:]
@@ -488,20 +492,41 @@ func parseTag(tag string) parsedTag {
 		p.kind = kindOther
 		return p
 	}
+	components := []*int{&p.major, &p.minor, &p.patch}
+	for i, component := range components {
+		if m[i+1] == "" {
+			continue
+		}
+		n, err := strconv.Atoi(m[i+1])
+		if err != nil {
+			return p
+		}
+		*component = n
+	}
 	p.kind = kindVersion
-	p.major, _ = strconv.Atoi(m[1])
 	norm := m[1]
 	if m[2] != "" {
-		p.minor, _ = strconv.Atoi(m[2])
 		norm += "." + m[2]
 	}
 	if m[3] != "" {
-		p.patch, _ = strconv.Atoi(m[3])
 		norm += "." + m[3]
 	}
 	p.variant = m[4]
 	p.norm = norm
 	p.isPre = isPreRelease(p.variant)
+	if p.isPre {
+		p.variant = ""
+	} else {
+		// Use the longest recognized prerelease prefix so rc-1-alpine
+		// retains alpine, and compound variants such as alpine-slim survive.
+		for i := len(p.variant) - 1; i > 0; i-- {
+			if p.variant[i] == '-' && isPreRelease(p.variant[:i]) {
+				p.isPre = true
+				p.variant = p.variant[i+1:]
+				break
+			}
+		}
+	}
 	return p
 }
 
@@ -539,8 +564,8 @@ func isPreRelease(variant string) bool {
 }
 
 // parseDate recognises YYYY-MM-DD (optionally with a time part) and YYYYMMDD
-// tags and returns a comparable key. It reports false for anything that is
-// not a plausible calendar date.
+// tags and returns a comparable key. A time part must be HH:MM:SS with a
+// leading T or space and optional trailing Z. Invalid dates/times are rejected.
 func parseDate(t string) (int64, bool) {
 	var y, mo, d, rest string
 	if m := dateDashRe.FindStringSubmatch(t); m != nil {
@@ -558,15 +583,15 @@ func parseDate(t string) (int64, bool) {
 	}
 	key := int64(yy)*1000000 + int64(mm)*10000 + int64(dd)
 	hh, mi, ss := 0, 0, 0
-	if r := strings.TrimPrefix(strings.TrimPrefix(rest, "T"), " "); r != "" {
-		parts := strings.SplitN(r, ":", 3)
-		hh, _ = strconv.Atoi(parts[0])
-		if len(parts) > 1 {
-			mi, _ = strconv.Atoi(parts[1])
+	if rest != "" {
+		if !dateTimeRe.MatchString(rest) {
+			return 0, false
 		}
-		if len(parts) > 2 {
-			ss, _ = strconv.Atoi(strings.TrimSuffix(parts[2], "Z"))
+		clock, err := time.Parse("15:04:05", strings.TrimSuffix(rest[1:], "Z"))
+		if err != nil {
+			return 0, false
 		}
+		hh, mi, ss = clock.Clock()
 	}
 	key = key*100 + int64(hh)
 	key = key*100 + int64(mi)
@@ -575,5 +600,9 @@ func parseDate(t string) (int64, bool) {
 }
 
 func validDate(y, m, d int) bool {
-	return y >= 1900 && y <= 2999 && m >= 1 && m <= 12 && d >= 1 && d <= 31
+	if y < 1900 || y > 2999 || m < 1 || m > 12 || d < 1 || d > 31 {
+		return false
+	}
+	date := time.Date(y, time.Month(m), d, 0, 0, 0, 0, time.UTC)
+	return date.Month() == time.Month(m) && date.Day() == d
 }

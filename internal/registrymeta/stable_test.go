@@ -384,3 +384,72 @@ func TestLatestStableDoesNotMutateInput(t *testing.T) {
 		}
 	}
 }
+
+func TestLatestStableRejectsOverflow(t *testing.T) {
+	oversized := strings.Repeat("9", 30)
+	for _, tag := range []string{oversized + ".0.0", "1." + oversized + ".0", "1.2." + oversized} {
+		t.Run(tag, func(t *testing.T) {
+			got, err := LatestStable("1.2.3", []string{tag, "1.2.3"}, Policy{})
+			if err != nil || got.Status != StatusUpToDate || got.Latest != "1.2.3" {
+				t.Fatalf("LatestStable = %+v, %v; want up-to-date 1.2.3", got, err)
+			}
+			got, err = LatestStable(tag, []string{"1.2.3"}, Policy{})
+			if err != nil || got.Status != StatusUnknown || got.Latest != "1.2.3" {
+				t.Fatalf("overflow current = %+v, %v; want unknown with advisory 1.2.3", got, err)
+			}
+		})
+	}
+}
+
+func TestLatestStablePrereleaseRetainsVariant(t *testing.T) {
+	for _, suffix := range []string{"rc1-alpine", "beta.2-alpine3.19", "rc-1-alpine-slim"} {
+		variant := suffix[strings.Index(suffix, "alpine"):]
+		t.Run(suffix, func(t *testing.T) {
+			for _, tc := range []struct {
+				tags   []string
+				status Status
+				latest string
+			}{
+				{[]string{"2.0.0", "1.3.0-" + variant, "1.4.0-rc2-" + variant}, StatusNewer, "1.3.0-" + variant},
+				{[]string{"2.0.0", "1.3.0"}, StatusUnknown, ""},
+			} {
+				got, err := LatestStable("1.3.0-"+suffix, tc.tags, Policy{})
+				if err != nil || got.Status != tc.status || got.Latest != tc.latest {
+					t.Fatalf("LatestStable = %+v, %v; want %v %q", got, err, tc.status, tc.latest)
+				}
+			}
+		})
+	}
+}
+
+func TestLatestStableValidatesDateAndTime(t *testing.T) {
+	for _, tag := range []string{
+		"2024-02-31", "2023-02-29", "1900-02-29", "2024-04-31", "20240231",
+		"2024-03-01T24:00:00", "2024-03-01T12:60:00", "2024-03-01T12:00:60",
+		"2024-03-01T", "2024-03-01T12", "2024-03-01T1:02:03", "2024-03-01T12:00",
+		"2024-03-01Txx:00:00", "2024-03-01T12:00:00junk", "2024-03-01T12:00:00.5Z",
+		"2024-03-01T999999999999999999999999:00:00",
+	} {
+		t.Run(tag, func(t *testing.T) {
+			if got := parseTag(tag); got.kind != kindOther {
+				t.Fatalf("parseTag(%q).kind = %v; want kindOther", tag, got.kind)
+			}
+			got, err := LatestStable("2024-02-28", []string{"2024-02-29", tag}, Policy{AllowDates: true})
+			if err != nil || got.Status != StatusNewer || got.Latest != "2024-02-29" {
+				t.Fatalf("LatestStable = %+v, %v; want newer 2024-02-29", got, err)
+			}
+			got, err = LatestStable(tag, []string{"2024-02-29"}, Policy{AllowDates: true})
+			if err != nil || got.Status != StatusUnknown || got.Latest != "" {
+				t.Fatalf("invalid current = %+v, %v; want unknown without a selection", got, err)
+			}
+		})
+	}
+	for _, tag := range []string{"20240229", "2000-02-29", "2024-02-29T23:59:59Z", "2024-02-29 23:59:59", "2024-02-29T00:00:00"} {
+		t.Run(tag, func(t *testing.T) {
+			got, err := LatestStable("1999-01-01", []string{tag}, Policy{AllowDates: true})
+			if err != nil || got.Status != StatusNewer || got.Latest != tag {
+				t.Fatalf("LatestStable = %+v, %v; want newer %q", got, err, tag)
+			}
+		})
+	}
+}
