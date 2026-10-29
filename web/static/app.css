@@ -35,6 +35,7 @@
 
   /* layout */
   --sidebar-w: 15rem;
+  --sidebar-w-collapsed: 4.5rem;
   --topbar-h: 3.5rem;
   --content-max: 90rem;
 
@@ -261,6 +262,27 @@ code {
   stroke-linejoin: round;
 }
 
+/* --- Collapsed sidebar (icons only, desktop). ---
+ * The state is rendered by the server (app--nav-collapsed from the
+ * nebula_nav cookie); labels are hidden and the title attributes,
+ * rendered only in the collapsed state, carry the tooltips. Scoped to
+ * ≥ 601px: on phones the drawer always shows the labels. */
+@media (min-width: 601px) {
+  .app--nav-collapsed { grid-template-columns: var(--sidebar-w-collapsed) 1fr; }
+  .app--nav-collapsed .sidebar__text,
+  .app--nav-collapsed .sidebar__nav span { display: none; }
+  .app--nav-collapsed .sidebar__head {
+    flex-direction: column;
+  }
+  .app--nav-collapsed .sidebar__brand,
+  .app--nav-collapsed .sidebar__item {
+    justify-content: center;
+    gap: 0;
+    padding-left: 0.4rem;
+    padding-right: 0.4rem;
+  }
+}
+
 /* --- Top bar: search + logout. --- */
 .topbar {
   display: flex;
@@ -328,6 +350,9 @@ code {
   color: var(--text);
   cursor: pointer;
 }
+/* The collapse toggle in the sidebar head is the desktop control;
+   .topbar__menu is hidden by default, so show it explicitly. */
+.sidebar__collapse { display: inline-flex; }
 .topbar__menu svg {
   width: 1.25rem;
   height: 1.25rem;
@@ -757,10 +782,12 @@ dialog .panel { border: 0; box-shadow: none; margin: 0; }
 /* --- Timestamps: <time> shows UTC text; time.js rewrites it locally. --- */
 time { white-space: nowrap; }
 
-/* --- Responsive: sidebar becomes a top bar under 900px. --- */
-@media (max-width: 899px) {
+/* --- Responsive: phones (≤ 600px) get an off-canvas drawer. --- */
+@media (max-width: 600px) {
   .app { grid-template-columns: 1fr; }
 
+  /* Without JS the sidebar stays a top bar, so the navigation remains
+     reachable; with JS (html.js) it becomes an off-canvas drawer. */
   .sidebar {
     position: static;
     height: auto;
@@ -772,7 +799,6 @@ time { white-space: nowrap; }
     border-bottom: 1px solid var(--border);
     padding-bottom: 0.5rem;
   }
-  .topbar__menu { display: inline-flex; }
   .sidebar__nav {
     flex-direction: row;
     flex-wrap: wrap;
@@ -780,12 +806,48 @@ time { white-space: nowrap; }
     padding-top: 0.5rem;
   }
   .sidebar__item { padding: 0.4rem 0.6rem; }
+  .sidebar__collapse { display: none; }
 
-  /* Collapsed (menu toggled): hide the nav, keep it reachable without JS. */
-  .app--nav-collapsed .sidebar__nav { display: none; }
+  /* With JS: the sidebar becomes an off-canvas drawer. */
+  html.js .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 30;
+    width: min(85vw, 18rem);
+    overflow-y: auto;
+    border-right: 1px solid var(--border);
+    border-bottom: 0;
+    transform: translateX(-105%);
+    transition: transform 0.18s ease;
+  }
+  html.js .sidebar__head {
+    border-bottom: 0;
+    padding-bottom: 0;
+  }
+  html.js .sidebar__nav {
+    flex-direction: column;
+    flex-wrap: nowrap;
+    gap: 0.15rem;
+    padding-top: 0;
+  }
+  html.js .sidebar__item { padding: 0.5rem 0.65rem; }
+  html.js .topbar__menu--mobile { display: inline-flex; }
+  html.js .sidebar__close { display: inline-flex; }
+  html.js .app--drawer-open .sidebar {
+    transform: translateX(0);
+    box-shadow: var(--shadow-lg);
+  }
+  html.js .app--drawer-open .sidebar__backdrop { display: block; }
 
   .main { padding: var(--space-2); }
   .form-grid { grid-template-columns: 1fr; }
+}
+.sidebar__backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 25;
+  background: rgba(16, 24, 40, 0.45);
 }
 
 /* --- Inventory toolbar: filter field + chips. --- */
@@ -1151,6 +1213,7 @@ details[open] summary { color: var(--text); margin-bottom: var(--space-2); }
 @media (min-width: 900px) {
   /* Centre the bulk bar over the content, not over the sidebar. */
   .bulkbar { left: calc(50% + var(--sidebar-w) / 2); max-width: calc(100% - var(--sidebar-w) - 2rem); }
+  .app--nav-collapsed .bulkbar { left: calc(50% + var(--sidebar-w-collapsed) / 2); max-width: calc(100% - var(--sidebar-w-collapsed) - 2rem); }
 }
 @media (max-width: 899px) {
   /* On small screens the bar is compact: the buttons and the inline
