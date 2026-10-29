@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -192,6 +193,199 @@ func TestRedirectRefused(t *testing.T) {
 	}
 	if resp != nil {
 		resp.Body.Close()
+	}
+}
+
+func TestRedirectRefusedByBothConstructors(t *testing.T) {
+	for _, constructor := range []string{"NewClient", "NewRoundTripper"} {
+		for _, status := range []int{300, 301, 302, 303, 304, 305, 307, 308} {
+			t.Run(fmt.Sprintf("%s/%d", constructor, status), func(t *testing.T) {
+				ca := newTestCA(t, "pve-root-ca")
+				var hits atomic.Int32
+				srv := newTLSServer(t, ca.serverCert(t, leafSpec{ips: []net.IP{loopback}}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if hits.Add(1) > 1 {
+						w.WriteHeader(http.StatusOK)
+						return
+					}
+					w.Header().Set("Location", "/elsewhere")
+					w.WriteHeader(status)
+				}))
+				var fallbackHits atomic.Int32
+				fallback := newTLSServer(t, ca.serverCert(t, leafSpec{ips: []net.IP{loopback}}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					fallbackHits.Add(1)
+				}))
+				opts := Options{Trust: Trust{CA: ca.cert}, Endpoints: []*url.URL{mustParseURL(t, srv.URL), mustParseURL(t, fallback.URL)}}
+				req, err := http.NewRequest(http.MethodGet, srv.URL+"/x", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var resp *http.Response
+				if constructor == "NewClient" {
+					client := newTestClient(t, opts)
+					t.Cleanup(client.CloseIdleConnections)
+					resp, err = client.Do(req)
+				} else {
+					var rt http.RoundTripper
+					rt, err = NewRoundTripper(opts)
+					if err != nil {
+						t.Fatal(err)
+					}
+					resp, err = rt.RoundTrip(req)
+				}
+				if resp != nil {
+					resp.Body.Close()
+				}
+				if !errors.Is(err, ErrRedirect) {
+					t.Fatalf("redirect: err = %v, want ErrRedirect", err)
+				}
+				if hits.Load() != 1 || fallbackHits.Load() != 0 {
+					t.Fatalf("redirect followed or failed over: hits = %d, fallback hits = %d", hits.Load(), fallbackHits.Load())
+				}
+			})
+		}
+	}
+}
+
+func TestMalformedCertificateChainStopsFailover(t *testing.T) {
+	for _, version := range []uint16{tls.VersionTLS12, tls.VersionTLS13} {
+		for _, malformed := range []string{"leaf", "intermediate"} {
+			for _, pin := range []string{"CA", "leaf"} {
+				t.Run(fmt.Sprintf("TLS%x/%s/%s", version, malformed, pin), func(t *testing.T) {
+					ca := newTestCA(t, "pve-root-ca")
+					cert := ca.serverCert(t, leafSpec{ips: []net.IP{loopback}})
+					cert.Leaf = parseCert(t, cert.Certificate[0])
+					goodCert := cert
+					cert.Certificate = append([][]byte(nil), cert.Certificate...)
+					trust := Trust{CA: ca.cert}
+					if pin == "leaf" {
+						trust = Trust{LeafFingerprint: Fingerprint(cert.Leaf)}
+					}
+					if malformed == "leaf" {
+						cert.Certificate[0] = []byte{0x30, 0x00}
+					} else {
+						cert.Certificate = append(cert.Certificate, []byte{0x30, 0x00})
+					}
+					var badHits, goodHits atomic.Int32
+					bad := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						badHits.Add(1)
+					}))
+					bad.TLS = &tls.Config{
+						Certificates: []tls.Certificate{goodCert}, MinVersion: version, MaxVersion: version,
+						// httptest parses its initial leaf; serve the malformed
+						// chain only during the actual client handshake.
+						GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+							return &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: version, MaxVersion: version}, nil
+						},
+					}
+					bad.StartTLS()
+					t.Cleanup(bad.Close)
+					good := newTLSServer(t, goodCert, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						goodHits.Add(1)
+					}))
+					client := newTestClient(t, Options{Trust: trust, Endpoints: []*url.URL{mustParseURL(t, bad.URL), mustParseURL(t, good.URL)}})
+					resp, err := client.Get(bad.URL + "/x")
+					if resp != nil {
+						resp.Body.Close()
+					}
+					if !errors.Is(err, ErrTrustMismatch) {
+						t.Fatalf("malformed chain: err = %v, want ErrTrustMismatch", err)
+					}
+					if badHits.Load() != 0 || goodHits.Load() != 0 {
+						t.Fatalf("request sent after malformed chain: bad hits = %d, good hits = %d", badHits.Load(), goodHits.Load())
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestFlushedHeadersAllowDelayedResponseBody(t *testing.T) {
+	ca := newTestCA(t, "pve-root-ca")
+	release := make(chan struct{})
+	srv := newTLSServer(t, ca.serverCert(t, leafSpec{ips: []net.IP{loopback}}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-release
+		fmt.Fprint(w, "delayed content")
+	}))
+	// Release the handler even if obtaining the response fails.
+	t.Cleanup(func() { close(release) })
+	client := newTestClient(t, Options{Trust: Trust{CA: ca.cert}, Endpoints: []*url.URL{mustParseURL(t, srv.URL)}})
+	resp, err := client.Get(srv.URL + "/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	// The body is sent only after RoundTrip has returned the headers.
+	release <- struct{}{}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read delayed body: %v", err)
+	}
+	if string(body) != "delayed content" {
+		t.Fatalf("body = %q, want delayed content", body)
+	}
+}
+
+func TestStalledTLSHandshakeClosesConnectionAfterRequestTimeout(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan net.Conn, 1)
+	closed := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			closed <- err
+			return
+		}
+		defer conn.Close()
+		accepted <- conn
+		_, err = io.Copy(io.Discard, conn)
+		closed <- err
+	}()
+	ca := newTestCA(t, "pve-root-ca")
+	endpoint := "https://" + listener.Addr().String()
+	client := newTestClient(t, Options{
+		Trust: Trust{CA: ca.cert}, Endpoints: []*url.URL{mustParseURL(t, endpoint)}, Timeout: 200 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/x", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestDone := make(chan error, 1)
+	go func() {
+		resp, err := client.Do(req)
+		if resp != nil {
+			resp.Body.Close()
+		}
+		requestDone <- err
+	}()
+	select {
+	case conn := <-accepted:
+		defer conn.Close()
+	case <-time.After(2 * time.Second):
+		t.Fatal("client did not connect")
+	}
+	select {
+	case err := <-requestDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("request: err = %v, want DeadlineExceeded", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("request did not time out")
+	}
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("peer read: %v, want EOF", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("TLS connection remained open after request timeout")
 	}
 }
 

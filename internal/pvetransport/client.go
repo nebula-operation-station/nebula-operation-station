@@ -33,6 +33,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -82,7 +83,7 @@ type Options struct {
 	Auth func(ctx context.Context) (string, error)
 
 	// Timeout bounds one endpoint attempt: dial, handshake and the
-	// request up to the response headers. Default 30s.
+	// request through response body consumption. Default 30s.
 	Timeout time.Duration
 
 	// DialTimeout bounds the TCP dial of one attempt. Default 10s.
@@ -206,6 +207,11 @@ func newEndpointConn(u *url.URL, opts Options) *endpointConn {
 			IdleConnTimeout:     30 * time.Second,
 			DialContext:         dialer.DialContext,
 			DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				// Transport detaches dial cancellation from the request.
+				// Bound the custom handshake independently so a stalled
+				// peer cannot retain its socket after the attempt times out.
+				ctx, cancel := context.WithTimeout(ctx, opts.Timeout)
+				defer cancel()
 				return dialAndVerify(ctx, dialer, u.Host, opts.Trust.TLSConfig(host, opts.Now))
 			},
 		},
@@ -225,6 +231,11 @@ func dialAndVerify(ctx context.Context, dialer *net.Dialer, addr string, tlsConf
 	tlsConn := tls.Client(raw, tlsConfig)
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		raw.Close()
+		// crypto/tls parses the chain before VerifyPeerCertificate and
+		// exposes parsing failures as plain errors, without a typed cause.
+		if strings.HasPrefix(err.Error(), "tls: failed to parse certificate from server: ") {
+			return nil, fmt.Errorf("%w: %v", ErrTrustMismatch, err)
+		}
 		if errors.Is(err, ErrTrustMismatch) {
 			return nil, err // trust failure: terminal
 		}
@@ -272,6 +283,10 @@ func (rt *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	for _, ec := range attempts {
 		resp, err := rt.attempt(req, ec)
 		if err == nil {
+			if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+				resp.Body.Close()
+				return nil, ErrRedirect
+			}
 			resp.Body = newLimitedBody(resp.Body, rt.opts.MaxResponseBytes, ErrResponseTooLarge)
 			return resp, nil
 		}
@@ -299,7 +314,12 @@ func (rt *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 // transmitted to an endpoint that failed pin verification.
 func (rt *roundTripper) attempt(req *http.Request, ec *endpointConn) (*http.Response, error) {
 	ctx, cancel := context.WithTimeout(req.Context(), rt.opts.Timeout)
-	defer cancel()
+	bodyReturned := false
+	defer func() {
+		if !bodyReturned {
+			cancel()
+		}
+	}()
 
 	attemptReq := req.Clone(ctx)
 	target := &url.URL{
@@ -335,7 +355,33 @@ func (rt *roundTripper) attempt(req *http.Request, ec *endpointConn) (*http.Resp
 		}
 	}
 
-	return ec.transport.RoundTrip(attemptReq)
+	resp, err := ec.transport.RoundTrip(attemptReq)
+	if err != nil {
+		return nil, err
+	}
+	resp.Body = &cancelBody{ReadCloser: resp.Body, cancel: cancel}
+	bodyReturned = true
+	return resp, nil
+}
+
+// cancelBody releases the attempt context when the response is consumed
+// or closed, keeping it alive while the caller reads a streamed body.
+type cancelBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil {
+		b.cancel()
+	}
+	return n, err
+}
+
+func (b *cancelBody) Close() error {
+	defer b.cancel()
+	return b.ReadCloser.Close()
 }
 
 // requestBody returns a fresh, size-limited copy of the request body.
