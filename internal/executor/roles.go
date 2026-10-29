@@ -3,6 +3,7 @@
 package executor
 
 import (
+	"context"
 	"regexp"
 	"strings"
 
@@ -162,4 +163,22 @@ func ValidateReadPVERequest(req *pb.ReadPVERequest) error {
 		return status.Error(codes.InvalidArgument, "read pve: unknown method")
 	}
 	return nil
+}
+
+// ListPVERemotes (ADR 0006, P1-05) is the PVE read surface for the
+// pve-collector role. It returns Unimplemented until the pveapi wiring
+// lands (P1-07); the request carries no fields, so there is nothing to
+// validate.
+func (s *Service) ListPVERemotes(_ context.Context, _ *pb.ListPVERemotesRequest) (*pb.ListPVERemotesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "list pve remotes: not wired yet (P1-07)")
+}
+
+// ReadPVE (ADR 0006, P1-05) validates the request with the final rules
+// (ValidateReadPVERequest) and returns Unimplemented until the pveapi
+// wiring lands (P1-07).
+func (s *Service) ReadPVE(_ context.Context, in *pb.ReadPVERequest) (*pb.ReadPVEResponse, error) {
+	if err := ValidateReadPVERequest(in); err != nil {
+		return nil, err
+	}
+	return nil, status.Errorf(codes.Unimplemented, "read pve: not wired yet (P1-07)")
 }
