@@ -28,8 +28,9 @@ const (
 	// MaxNesting bounds JSON nesting depth.
 	MaxNesting = 32
 	// MaxObjectsPerDocument bounds the total number of JSON objects in one
-	// decoded document.
-	MaxObjectsPerDocument = 10000
+	// decoded document; the 1 MiB document limit already caps the realistic
+	// count far below this.
+	MaxObjectsPerDocument = 100000
 )
 
 // Identity and record limits.
@@ -80,12 +81,12 @@ const (
 	MaxGuestGeneration = uint64(1) << 48
 )
 
-// PVE VMID range: 100 to 4,999,999,999.
+// PVE VMID range: 100 to 9,999,999,999 (exceeds uint32).
 const (
 	// MinVMID is the lowest valid PVE VMID.
 	MinVMID = 100
 	// MaxVMID is the highest valid PVE VMID.
-	MaxVMID = 4999999999
+	MaxVMID = 9999999999
 )
 
 // 802.1Q VLAN range; 0 means untagged.
