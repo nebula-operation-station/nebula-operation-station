@@ -1,0 +1,93 @@
+{
+  "data": [
+    {
+      "content": "images,iso,vztmpl,backup",
+      "inuse": 1,
+      "shared": 0,
+      "type": "dir",
+      "active": 1,
+      "storage": "local",
+      "used": 1073741824,
+      "total": 2147483648
+    },
+    {
+      "content": "images",
+      "shared": 0,
+      "type": "dir",
+      "active": 1,
+      "storage": "local-qcow",
+      "used": 1000000000,
+      "total": 4294967296
+    },
+    {
+      "content": "images",
+      "shared": 0,
+      "type": "lvm",
+      "active": 1,
+      "storage": "local-lvm",
+      "used": 5368709120,
+      "total": 10737418240
+    },
+    {
+      "content": "images",
+      "shared": 0,
+      "type": "lvm",
+      "active": 1,
+      "storage": "Datastore_4TB_NVME",
+      "used": 100,
+      "total": 4000000000000
+    },
+    {
+      "content": "images",
+      "shared": 0,
+      "type": "zfspool",
+      "active": 1,
+      "storage": "tank-vms",
+      "used": 200,
+      "total": 8000000000000
+    },
+    {
+      "content": "images",
+      "shared": 0,
+      "type": "rbd",
+      "active": 1,
+      "storage": "rbdstore",
+      "used": 300,
+      "total": 5000000000000
+    },
+    {
+      "content": "images,backup",
+      "shared": 1,
+      "type": "cephfs",
+      "active": 1,
+      "storage": "cephfs1",
+      "used": 400,
+      "total": 3000000000000
+    },
+    {
+      "content": "images",
+      "shared": 0,
+      "type": "lvmthin",
+      "active": 1,
+      "storage": "thin1",
+      "used": 500,
+      "total": 2000000000000
+    },
+    {
+      "content": "backup",
+      "shared": 1,
+      "type": "pbs",
+      "active": 1,
+      "storage": "pbs1"
+    },
+    {
+      "content": "images",
+      "shared": 0,
+      "type": "nfs",
+      "active": 0,
+      "storage": "nfs-old",
+      "used": 600,
+      "total": 1000000000000
+    }
+  ]
+}

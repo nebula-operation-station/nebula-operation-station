@@ -1,0 +1,28 @@
+{
+  "data": [
+    {
+      "description": "first snapshot",
+      "disk": 1073741824,
+      "memory": 1048576,
+      "name": "snap1",
+      "parent": "",
+      "snaptime": 1793260800,
+      "vmstate": 1
+    },
+    {
+      "description": "second, with a longer description text to measure",
+      "disk": 2147483648,
+      "memory": 2097152,
+      "name": "snap2",
+      "parent": "snap1",
+      "snaptime": 1793266200,
+      "vmstate": 0
+    },
+    {
+      "name": "current",
+      "parent": "snap2",
+      "description": "You are here!",
+      "running": 1
+    }
+  ]
+}
