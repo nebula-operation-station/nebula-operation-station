@@ -596,6 +596,32 @@ func (db *DB) RemoveRemote(remoteID, by string) (PveRemote, error) {
 // references of an active remote (rotation, spec 06). Secret values are
 // never accepted here; they live in the vault.
 func (db *DB) SetRemoteCredentials(remoteID string, creds PveRemoteCredentials, by string) (PveRemote, error) {
+	return db.setRemoteCredentials(remoteID, creds, by, nil, nil)
+}
+
+// RotateRemoteSecret commits an encrypted vault secret and its registry
+// version together. Stale remote trust or credentials reject the whole write.
+func (db *DB) RotateRemoteSecret(expected PveRemote, purpose string, secret VaultSecret, by string) (PveRemote, error) {
+	creds := expected.Credentials
+	var ref string
+	var version int64
+	switch purpose {
+	case "read":
+		ref, version = creds.ReadRef, creds.ReadVersion
+		creds.ReadRef, creds.ReadVersion = secret.ID, secret.Version
+	case "action":
+		ref, version = creds.ActionRef, creds.ActionVersion
+		creds.ActionRef, creds.ActionVersion = secret.ID, secret.Version
+	default:
+		return PveRemote{}, ErrInvalid
+	}
+	if (ref != "" && ref != secret.ID) || secret.Version != version+1 || len(secret.WrappedDEK) == 0 || len(secret.Sealed) == 0 {
+		return PveRemote{}, ErrSecretVersion
+	}
+	return db.setRemoteCredentials(expected.RemoteID, creds, by, &expected, &secret)
+}
+
+func (db *DB) setRemoteCredentials(remoteID string, creds PveRemoteCredentials, by string, expected *PveRemote, secret *VaultSecret) (PveRemote, error) {
 	if err := validatePveCredentials("read", creds.ReadRef, creds.ReadVersion); err != nil {
 		return PveRemote{}, err
 	}
@@ -620,7 +646,15 @@ func (db *DB) SetRemoteCredentials(remoteID string, creds PveRemoteCredentials, 
 	if rm.State != StateActive {
 		return PveRemote{}, fmt.Errorf("%w: %s is %s", ErrRemoteState, remoteID, rm.State)
 	}
+	if expected != nil && (rm.TrustPin != expected.TrustPin || rm.TrustGeneration != expected.TrustGeneration || rm.Credentials != expected.Credentials) {
+		return PveRemote{}, ErrSecretVersion
+	}
 	now := db.now().Truncate(time.Second)
+	if secret != nil {
+		if err := putSecret(tx, *secret, now); err != nil {
+			return PveRemote{}, err
+		}
+	}
 	if _, err := tx.Exec(`UPDATE pve_remotes SET read_credential_ref = ?, read_credential_version = ?,
 		action_credential_ref = ?, action_credential_version = ?, updated_at = ?, updated_by = ? WHERE remote_id = ?`,
 		creds.ReadRef, creds.ReadVersion, creds.ActionRef, creds.ActionVersion, now.Unix(), by, remoteID); err != nil {

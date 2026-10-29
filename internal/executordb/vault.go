@@ -78,17 +78,25 @@ func (db *DB) GetVault() (VaultMeta, error) {
 // (1 for a new secret); otherwise ErrSecretVersion, so two concurrent
 // writers cannot both win.
 func (db *DB) PutSecret(s VaultSecret) error {
+	return putSecret(db.sql, s, db.now())
+}
+
+type secretWriter interface {
+	Exec(string, ...any) (sql.Result, error)
+}
+
+func putSecret(q secretWriter, s VaultSecret, now time.Time) error {
 	if err := checkText("updated_by", s.UpdatedBy, maxActorLen, false); err != nil {
 		return err
 	}
 	var res sql.Result
 	var err error
 	if s.Version == 1 {
-		res, err = db.sql.Exec(`INSERT INTO vault_secrets (id, version, wrapped_dek, sealed, updated_at, updated_by)
-			VALUES (?, 1, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`, s.ID, s.WrappedDEK, s.Sealed, db.now().Unix(), s.UpdatedBy)
+		res, err = q.Exec(`INSERT INTO vault_secrets (id, version, wrapped_dek, sealed, updated_at, updated_by)
+			VALUES (?, 1, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`, s.ID, s.WrappedDEK, s.Sealed, now.Unix(), s.UpdatedBy)
 	} else {
-		res, err = db.sql.Exec(`UPDATE vault_secrets SET version = ?, wrapped_dek = ?, sealed = ?, updated_at = ?, updated_by = ?
-			WHERE id = ? AND version = ?`, s.Version, s.WrappedDEK, s.Sealed, db.now().Unix(), s.UpdatedBy, s.ID, s.Version-1)
+		res, err = q.Exec(`UPDATE vault_secrets SET version = ?, wrapped_dek = ?, sealed = ?, updated_at = ?, updated_by = ?
+			WHERE id = ? AND version = ?`, s.Version, s.WrappedDEK, s.Sealed, now.Unix(), s.UpdatedBy, s.ID, s.Version-1)
 	}
 	if err != nil {
 		return fmt.Errorf("executordb: put secret: %w", err)

@@ -76,6 +76,8 @@ type Service struct {
 	// Now is the clock for request expiries the executor sets itself
 	// (re-pin, enrollment); nil means time.Now. Tests set it.
 	Now func() time.Time
+	// pveMu serializes local PVE credential and trust administration.
+	pveMu sync.Mutex
 	// reconcileInterval is the interval passed to Reconcile; ReconcileOnce
 	// uses it to compute the backoff between failed attempts (issue #70).
 	reconcileInterval time.Duration
