@@ -1,0 +1,9 @@
+{
+  "content": ["images"],
+  "id": "local-lvm",
+  "inuse": 1,
+  "shared": 0,
+  "space": {"used": 5368709120, "total": 10737418240},
+  "type": "lvm",
+  "active": 1
+}
