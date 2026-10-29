@@ -320,3 +320,52 @@ func (l *lazyExecutor) ListEvents(ctx context.Context, in *pb.ListEventsRequest,
 	}
 	return nil, errNotConnected
 }
+
+func (l *lazyExecutor) ProbePVERemote(ctx context.Context, in *pb.ProbePVERemoteRequest, opts ...grpc.CallOption) (*pb.ProbePVERemoteResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ProbePVERemote(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) AddPVERemote(ctx context.Context, in *pb.AddPVERemoteRequest, opts ...grpc.CallOption) (*pb.AddPVERemoteResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.AddPVERemote(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) RotatePVEToken(ctx context.Context, in *pb.RotatePVETokenRequest, opts ...grpc.CallOption) (*pb.RotatePVETokenResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.RotatePVEToken(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) RemovePVERemote(ctx context.Context, in *pb.RemovePVERemoteRequest, opts ...grpc.CallOption) (*pb.RemovePVERemoteResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.RemovePVERemote(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) ListPVEAdminRemotes(ctx context.Context, in *pb.ListPVEAdminRemotesRequest, opts ...grpc.CallOption) (*pb.ListPVEAdminRemotesResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ListPVEAdminRemotes(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) ProposePVERepin(ctx context.Context, in *pb.ProposePVERepinRequest, opts ...grpc.CallOption) (*pb.ProposePVERepinResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ProposePVERepin(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) CommitPVERepin(ctx context.Context, in *pb.CommitPVERepinRequest, opts ...grpc.CallOption) (*pb.CommitPVERepinResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.CommitPVERepin(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}

@@ -251,6 +251,62 @@ func (c *Client) ReadPVE(ctx context.Context, in *pb.ReadPVERequest, opts ...grp
 	return resp, mapError(err)
 }
 
+// ProbePVERemote probes PVE endpoints without credentials (admin role).
+func (c *Client) ProbePVERemote(ctx context.Context, in *pb.ProbePVERemoteRequest, opts ...grpc.CallOption) (*pb.ProbePVERemoteResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ProbePVERemote(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// AddPVERemote registers a PVE remote (admin role).
+func (c *Client) AddPVERemote(ctx context.Context, in *pb.AddPVERemoteRequest, opts ...grpc.CallOption) (*pb.AddPVERemoteResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.AddPVERemote(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// RotatePVEToken replaces a PVE remote token (admin role).
+func (c *Client) RotatePVEToken(ctx context.Context, in *pb.RotatePVETokenRequest, opts ...grpc.CallOption) (*pb.RotatePVETokenResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.RotatePVEToken(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// RemovePVERemote removes a PVE remote (admin role).
+func (c *Client) RemovePVERemote(ctx context.Context, in *pb.RemovePVERemoteRequest, opts ...grpc.CallOption) (*pb.RemovePVERemoteResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.RemovePVERemote(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// ListPVEAdminRemotes lists PVE remote administration metadata (admin role).
+func (c *Client) ListPVEAdminRemotes(ctx context.Context, in *pb.ListPVEAdminRemotesRequest, opts ...grpc.CallOption) (*pb.ListPVEAdminRemotesResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ListPVEAdminRemotes(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// ProposePVERepin proposes a PVE remote trust change (admin role).
+func (c *Client) ProposePVERepin(ctx context.Context, in *pb.ProposePVERepinRequest, opts ...grpc.CallOption) (*pb.ProposePVERepinResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ProposePVERepin(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// CommitPVERepin commits an approved PVE remote trust change (admin role).
+func (c *Client) CommitPVERepin(ctx context.Context, in *pb.CommitPVERepinRequest, opts ...grpc.CallOption) (*pb.CommitPVERepinResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.CommitPVERepin(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
 // The risk-data methods below are admin-only on the executor (H01); the
 // server's UID is denied. They exist so that Client implements the full
 // generated interface.
