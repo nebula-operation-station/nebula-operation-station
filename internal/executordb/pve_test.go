@@ -6,7 +6,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -52,6 +55,97 @@ func addPveRemote(t *testing.T, db *DB, r pvecontract.Remote) PveRemote {
 		t.Fatalf("add %s: %v", r.RemoteID, err)
 	}
 	return rm
+}
+
+func assertPveRemotePersisted(t *testing.T, db *DB, rm PveRemote) {
+	t.Helper()
+	got, ok, err := db.GetRemote(rm.RemoteID)
+	if err != nil || !ok {
+		t.Fatalf("get returned remote: ok=%v err=%v", ok, err)
+	}
+	// Compare timestamps by instant, independent of their location representation.
+	canonicalTimes := func(r PveRemote) PveRemote {
+		r.CreatedAt = r.CreatedAt.UTC()
+		r.UpdatedAt = r.UpdatedAt.UTC()
+		if r.BlockedAt != nil {
+			at := r.BlockedAt.UTC()
+			r.BlockedAt = &at
+		}
+		if r.RemovedAt != nil {
+			at := r.RemovedAt.UTC()
+			r.RemovedAt = &at
+		}
+		return r
+	}
+	if !reflect.DeepEqual(canonicalTimes(rm), canonicalTimes(got)) {
+		t.Fatalf("returned record differs from storage:\nreturned: %+v\nstored: %+v", rm, got)
+	}
+}
+
+// Each writer transaction advances the generation and endpoint ports together.
+// Readers must never combine values from different writer transactions.
+func TestPveRemoteReadsKeepGenerationAndEndpointsTogether(t *testing.T) {
+	for _, method := range []string{"GetRemote", "ListRemotes", "RemoteByTrustPin"} {
+		t.Run(method, func(t *testing.T) {
+			db := pveDB(t)
+			pin := pinOf("ca-a")
+			addPveRemote(t, db, pveClusterRemote("pve-a", pin))
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			wg.Go(func() {
+				<-start
+				for i := 0; i < 200; i++ {
+					tx, err := db.sql.Begin()
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					_, err = tx.Exec(`UPDATE pve_remotes SET trust_generation = trust_generation + 1;
+						UPDATE pve_remote_endpoints SET port = port + 1`)
+					if err != nil {
+						_ = tx.Rollback()
+						t.Error(err)
+						return
+					}
+					if err := tx.Commit(); err != nil {
+						t.Error(err)
+						return
+					}
+				}
+			})
+			defer wg.Wait()
+			close(start)
+			for i := 0; i < 200; i++ {
+				var rm PveRemote
+				var err error
+				var ok bool
+				switch method {
+				case "GetRemote":
+					rm, ok, err = db.GetRemote("pve-a")
+				case "RemoteByTrustPin":
+					rm, ok, err = db.RemoteByTrustPin(pin)
+				case "ListRemotes":
+					var all []PveRemote
+					all, err = db.ListRemotes()
+					ok = len(all) == 1
+					if ok {
+						rm = all[0]
+					}
+				}
+				if err != nil || !ok {
+					t.Fatalf("read: ok=%v err=%v", ok, err)
+				}
+				if len(rm.Endpoints) != 2 {
+					t.Fatalf("incomplete endpoints: %v", rm.Endpoints)
+				}
+				for _, ep := range rm.Endpoints {
+					if uint64(ep.Port) != 8005+rm.TrustGeneration {
+						t.Fatalf("mixed snapshots: generation=%d endpoint=%+v", rm.TrustGeneration, ep)
+					}
+				}
+			}
+		})
+	}
 }
 
 func TestPveRemoteCreateListGet(t *testing.T) {
@@ -105,11 +199,15 @@ func TestPveRemoteCreateListGet(t *testing.T) {
 
 func TestPveRemoteCreateRejectsInvalid(t *testing.T) {
 	db := pveDB(t)
-	base := pveClusterRemote("pve-main", pinOf("ca-main"))
 	creds := PveRemoteCredentials{ReadRef: "pve-main-read", ReadVersion: 1}
 	many := make([]pvecontract.Endpoint, pvecontract.MaxEndpointsPerRemote+1)
 	for i := range many {
-		many[i] = pvecontract.Endpoint{Host: "n1.example.lan", Port: 8006}
+		many[i] = pvecontract.Endpoint{Host: fmt.Sprintf("n%d.example.lan", i+1), Port: 8006}
+	}
+	validCount := pveClusterRemote("pve-main", pinOf("ca-main"))
+	validCount.Endpoints = many[:pvecontract.MaxEndpointsPerRemote]
+	if _, err := pvecontract.ValidateRemote(validCount); err != nil {
+		t.Fatalf("endpoint-count fixture is otherwise invalid: %v", err)
 	}
 	longName := strings.Repeat("n", pvecontract.MaxLabelBytes+1)
 	longRef := strings.Repeat("r", 65)
@@ -147,10 +245,13 @@ func TestPveRemoteCreateRejectsInvalid(t *testing.T) {
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
-			r, c, by := base, creds, "admin"
+			r, c, by := pveClusterRemote("pve-main", pinOf("ca-main")), creds, "admin"
+			if _, err := pvecontract.ValidateRemote(r); err != nil {
+				t.Fatalf("invalid starting input: %v", err)
+			}
 			mutate(&r, &c, &by)
-			if _, err := db.AddRemote(r, c, by); err == nil {
-				t.Fatal("accepted")
+			if _, err := db.AddRemote(r, c, by); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("want ErrInvalid, got %v", err)
 			}
 			all, err := db.ListRemotes()
 			if err != nil {
@@ -203,6 +304,7 @@ func TestPveRemoteBlockUnblock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertPveRemotePersisted(t, db, rm)
 	if rm.State != StateBlocked || !rm.BlockedAt.Equal(pveT0) || rm.BlockedBy != "admin" || rm.BlockedReason == "" {
 		t.Fatalf("blocked record: %+v", rm)
 	}
@@ -223,6 +325,7 @@ func TestPveRemoteBlockUnblock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertPveRemotePersisted(t, db, rm)
 	if rm.State != StateActive || rm.BlockedAt != nil || rm.BlockedReason != "" {
 		t.Fatalf("unblocked record: %+v", rm)
 	}
@@ -255,6 +358,7 @@ func TestPveRemoteRemoveTombstoneAndReadd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertPveRemotePersisted(t, db, rm)
 	if rm.State != StateRemoved || !rm.RemovedAt.Equal(pveT0) {
 		t.Fatalf("removed record: %+v", rm)
 	}
@@ -299,6 +403,7 @@ func TestPveRemoteRemoveTombstoneAndReadd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-add: %v", err)
 	}
+	assertPveRemotePersisted(t, db, rm)
 	if rm.State != StateActive || rm.TrustGeneration != 2 || rm.RemovedAt != nil {
 		t.Fatalf("re-added record: %+v", rm)
 	}
@@ -331,6 +436,7 @@ func TestPveRemoteRepin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertPveRemotePersisted(t, db, rm)
 	if rm.TrustPin != p2 || rm.TrustGeneration != 2 || rm.State != StateActive {
 		t.Fatalf("re-pinned record: %+v", rm)
 	}
@@ -373,6 +479,7 @@ func TestPveRemoteRepin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertPveRemotePersisted(t, db, rm)
 	if rm.State != StateActive || rm.TrustGeneration != 3 || rm.BlockedAt != nil {
 		t.Fatalf("re-pin of blocked remote: %+v", rm)
 	}
@@ -397,6 +504,7 @@ func TestPveRemoteEndpointChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertPveRemotePersisted(t, db, rm)
 	if len(rm.Endpoints) != 2 || rm.Endpoints[0].Host != "pve3.example.lan" || rm.Endpoints[1].Port != 8443 {
 		t.Fatalf("endpoints: %v", rm.Endpoints)
 	}
@@ -442,6 +550,7 @@ func TestPveRemoteCredentialsRotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertPveRemotePersisted(t, db, rm)
 	if rm.Credentials.ReadVersion != 2 || rm.Credentials.ActionRef != "pve-a-action" || rm.Credentials.ActionVersion != 1 {
 		t.Fatalf("credentials: %+v", rm.Credentials)
 	}
@@ -464,6 +573,99 @@ func TestPveRemoteCredentialsRotation(t *testing.T) {
 	}
 	if _, err := db.SetRemoteCredentials("pve-a", PveRemoteCredentials{ReadRef: "pve-a-read", ReadVersion: 3}, "admin"); !errors.Is(err, ErrRemoteState) {
 		t.Fatalf("blocked remote: %v", err)
+	}
+}
+
+func TestPveRemotePartialWritesRollBack(t *testing.T) {
+	operations := []string{"add", "re-add", "endpoints", "block", "unblock", "repin", "remove", "credentials"}
+	for _, failure := range []string{"endpoint", "audit"} {
+		for _, operation := range operations {
+			if failure == "endpoint" && operation != "add" && operation != "re-add" && operation != "endpoints" {
+				continue
+			}
+			t.Run(failure+"/"+operation, func(t *testing.T) {
+				db := pveDB(t)
+				pin := pinOf("ca-a")
+				addPveRemote(t, db, pveClusterRemote("pve-a", pin))
+				if operation == "re-add" {
+					if _, err := db.RemoveRemote("pve-a", "admin"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if operation == "unblock" {
+					if _, err := db.BlockRemote("pve-a", "mismatch", "admin"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				type snapshot struct {
+					remotes       []PveRemote
+					changes       []PveRemoteChange
+					endpointCount int
+				}
+				read := func() snapshot {
+					t.Helper()
+					var s snapshot
+					var err error
+					s.remotes, err = db.ListRemotes()
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, id := range []string{"pve-a", "pve-b"} {
+						changes, err := db.RemoteChanges(id)
+						if err != nil {
+							t.Fatal(err)
+						}
+						s.changes = append(s.changes, changes...)
+					}
+					if err := db.sql.QueryRow(`SELECT COUNT(*) FROM pve_remote_endpoints`).Scan(&s.endpointCount); err != nil {
+						t.Fatal(err)
+					}
+					return s
+				}
+				before := read()
+				trigger := `CREATE TEMP TRIGGER fail_pve_write AFTER INSERT ON pve_remote_changes
+					BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END`
+				if failure == "endpoint" {
+					// Deletion and the first endpoint insert succeed before the second fails.
+					trigger = `CREATE TEMP TRIGGER fail_pve_write BEFORE INSERT ON pve_remote_endpoints
+						WHEN NEW.seq = 2 BEGIN SELECT RAISE(ABORT, 'injected endpoint failure'); END`
+				}
+				if _, err := db.sql.Exec(trigger); err != nil {
+					t.Fatal(err)
+				}
+				db.now = func() time.Time { return pveT0.Add(time.Hour) }
+				eps := []pvecontract.Endpoint{{Host: "new1.example.lan", Port: 8443}, {Host: "new2.example.lan", Port: 8443}}
+				var err error
+				switch operation {
+				case "add", "re-add":
+					id, newPin := "pve-a", pin
+					if operation == "add" {
+						id, newPin = "pve-b", pinOf("ca-b")
+					}
+					r := pveClusterRemote(id, newPin)
+					r.Endpoints = eps
+					_, err = db.AddRemote(r, PveRemoteCredentials{}, "other-admin")
+				case "endpoints":
+					_, err = db.SetEndpoints("pve-a", eps, "other-admin")
+				case "block":
+					_, err = db.BlockRemote("pve-a", "mismatch", "other-admin")
+				case "unblock":
+					_, err = db.UnblockRemote("pve-a", "other-admin")
+				case "repin":
+					_, err = db.RepinRemote("pve-a", pin, pinOf("ca-new"), "other-admin")
+				case "remove":
+					_, err = db.RemoveRemote("pve-a", "other-admin")
+				case "credentials":
+					_, err = db.SetRemoteCredentials("pve-a", PveRemoteCredentials{ReadRef: "rotated-read", ReadVersion: 2}, "other-admin")
+				}
+				if err == nil || !strings.Contains(err.Error(), "injected "+failure+" failure") {
+					t.Fatalf("want injected %s failure, got %v", failure, err)
+				}
+				if after := read(); !reflect.DeepEqual(before, after) {
+					t.Fatalf("partial mutation survived rollback:\nbefore: %+v\nafter: %+v", before, after)
+				}
+			})
+		}
 	}
 }
 

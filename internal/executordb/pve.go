@@ -254,15 +254,23 @@ func (db *DB) AddRemote(r pvecontract.Remote, creds PveRemoteCredentials, by str
 // GetRemote returns the registry record of a remote in any state,
 // including tombstones.
 func (db *DB) GetRemote(remoteID string) (PveRemote, bool, error) {
-	rm, err := scanPveRemote(db.sql.QueryRow(`SELECT `+pveRemoteColumns+` FROM pve_remotes WHERE remote_id = ?`, remoteID))
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return PveRemote{}, false, fmt.Errorf("executordb: get pve remote: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	rm, err := scanPveRemote(tx.QueryRow(`SELECT `+pveRemoteColumns+` FROM pve_remotes WHERE remote_id = ?`, remoteID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return PveRemote{}, false, nil
 	}
 	if err != nil {
 		return PveRemote{}, false, fmt.Errorf("executordb: get pve remote: %w", err)
 	}
-	if err := db.loadPveEndpoints(&rm); err != nil {
+	if err := db.loadPveEndpoints(tx, &rm); err != nil {
 		return PveRemote{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return PveRemote{}, false, fmt.Errorf("executordb: get pve remote: %w", err)
 	}
 	return rm, true, nil
 }
@@ -270,7 +278,12 @@ func (db *DB) GetRemote(remoteID string) (PveRemote, bool, error) {
 // ListRemotes returns every registry record, including tombstones,
 // ordered by remote_id.
 func (db *DB) ListRemotes() ([]PveRemote, error) {
-	rows, err := db.sql.Query(`SELECT ` + pveRemoteColumns + ` FROM pve_remotes ORDER BY remote_id`)
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("executordb: list pve remotes: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	rows, err := tx.Query(`SELECT ` + pveRemoteColumns + ` FROM pve_remotes ORDER BY remote_id`)
 	if err != nil {
 		return nil, fmt.Errorf("executordb: list pve remotes: %w", err)
 	}
@@ -293,9 +306,12 @@ func (db *DB) ListRemotes() ([]PveRemote, error) {
 	// Endpoints are loaded only after the list rows are closed: the
 	// database runs on a single connection.
 	for i := range out {
-		if err := db.loadPveEndpoints(&out[i]); err != nil {
+		if err := db.loadPveEndpoints(tx, &out[i]); err != nil {
 			return nil, err
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("executordb: list pve remotes: %w", err)
 	}
 	return out, nil
 }
@@ -306,15 +322,23 @@ func (db *DB) RemoteByTrustPin(pin string) (PveRemote, bool, error) {
 	if !pvecontract.ValidTrustPin(pin) {
 		return PveRemote{}, false, nil
 	}
-	rm, err := scanPveRemote(db.sql.QueryRow(`SELECT `+pveRemoteColumns+` FROM pve_remotes WHERE trust_pin = ?`, pin))
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return PveRemote{}, false, fmt.Errorf("executordb: pve remote by pin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	rm, err := scanPveRemote(tx.QueryRow(`SELECT `+pveRemoteColumns+` FROM pve_remotes WHERE trust_pin = ?`, pin))
 	if errors.Is(err, sql.ErrNoRows) {
 		return PveRemote{}, false, nil
 	}
 	if err != nil {
 		return PveRemote{}, false, fmt.Errorf("executordb: pve remote by pin: %w", err)
 	}
-	if err := db.loadPveEndpoints(&rm); err != nil {
+	if err := db.loadPveEndpoints(tx, &rm); err != nil {
 		return PveRemote{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return PveRemote{}, false, fmt.Errorf("executordb: pve remote by pin: %w", err)
 	}
 	return rm, true, nil
 }
@@ -352,6 +376,9 @@ func (db *DB) BlockRemote(remoteID, reason, by string) (PveRemote, error) {
 	if err != nil {
 		return PveRemote{}, fmt.Errorf("executordb: block pve remote: %w", err)
 	}
+	if err := db.loadPveEndpoints(tx, &rm); err != nil {
+		return PveRemote{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return PveRemote{}, fmt.Errorf("executordb: block pve remote: %w", err)
 	}
@@ -385,6 +412,9 @@ func (db *DB) UnblockRemote(remoteID, by string) (PveRemote, error) {
 	rm, err := scanPveRemote(tx.QueryRow(`SELECT `+pveRemoteColumns+` FROM pve_remotes WHERE remote_id = ?`, remoteID))
 	if err != nil {
 		return PveRemote{}, fmt.Errorf("executordb: unblock pve remote: %w", err)
+	}
+	if err := db.loadPveEndpoints(tx, &rm); err != nil {
+		return PveRemote{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return PveRemote{}, fmt.Errorf("executordb: unblock pve remote: %w", err)
@@ -450,6 +480,9 @@ func (db *DB) RepinRemote(remoteID, oldPin, newPin, by string) (PveRemote, error
 	}
 	if err := db.logPveChange(tx, remoteID, ChangeTrustRepin,
 		fmt.Sprintf("from=%s to=%s gen=%d", oldPin, newPin, newGen), by, now); err != nil {
+		return PveRemote{}, err
+	}
+	if err := db.loadPveEndpoints(tx, &rm); err != nil {
 		return PveRemote{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -546,6 +579,9 @@ func (db *DB) RemoveRemote(remoteID, by string) (PveRemote, error) {
 	if err := db.logPveChange(tx, remoteID, ChangeRemoved, "", by, now); err != nil {
 		return PveRemote{}, err
 	}
+	if err := db.loadPveEndpoints(tx, &rm); err != nil {
+		return PveRemote{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return PveRemote{}, fmt.Errorf("executordb: remove pve remote: %w", err)
 	}
@@ -592,6 +628,9 @@ func (db *DB) SetRemoteCredentials(remoteID string, creds PveRemoteCredentials, 
 	}
 	if err := db.logPveChange(tx, remoteID, ChangeCredentials,
 		fmt.Sprintf("read=%s@%d action=%s@%d", creds.ReadRef, creds.ReadVersion, creds.ActionRef, creds.ActionVersion), by, now); err != nil {
+		return PveRemote{}, err
+	}
+	if err := db.loadPveEndpoints(tx, &rm); err != nil {
 		return PveRemote{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -666,8 +705,8 @@ func scanPveRemote(r rowScanner) (PveRemote, error) {
 	return rm, nil
 }
 
-func (db *DB) loadPveEndpoints(rm *PveRemote) error {
-	rows, err := db.sql.Query(`SELECT host, port FROM pve_remote_endpoints WHERE remote_id = ? ORDER BY seq`, rm.RemoteID)
+func (db *DB) loadPveEndpoints(tx *sql.Tx, rm *PveRemote) error {
+	rows, err := tx.Query(`SELECT host, port FROM pve_remote_endpoints WHERE remote_id = ? ORDER BY seq`, rm.RemoteID)
 	if err != nil {
 		return fmt.Errorf("executordb: pve remote endpoints: %w", err)
 	}
