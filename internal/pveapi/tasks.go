@@ -17,24 +17,21 @@ const (
 	maxUPIDTypeLen = 64
 	// maxUPIDUserLen bounds a task user name.
 	maxUPIDUserLen = 256
-	// maxUPIDStatusLen bounds a task status name.
-	maxUPIDStatusLen = 64
+	// taskPageSize bounds each task metadata request.
+	taskPageSize = 100
+	// maxTaskScan bounds total task objects scanned, even if none match Since.
+	maxTaskScan = 1000
 )
 
 var (
 	// nodeNameRe validates a PVE node name.
 	nodeNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
-	// upidRe parses a PVE UPID:
-	//
-	//	UPID:<node>:<pid>:<pveuuid>:<start>:<type>:<vmid>:<user>[:<status>]
-	//
-	// The trailing status field is present in PVE 9 tasklists and absent in
-	// older PVE 8 lists; both shapes are accepted.
+	// UPID numeric fields are hexadecimal; pstart can grow to nine digits.
+	// The target may be empty or nonnumeric and the final colon is required.
 	upidRe = regexp.MustCompile(fmt.Sprintf(
-		`^UPID:([^:]{1,64}):(\d{1,10}):(\d{1,10}):(\d{1,10}):`+
-			`([^:]{1,%d}):(\d{1,10}):`+
-			`([^:]{1,%d})(?::([^:]{0,%d}))?$`,
-		maxUPIDTypeLen, maxUPIDUserLen, maxUPIDStatusLen))
+		`^UPID:([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?):([0-9A-Fa-f]{8}):([0-9A-Fa-f]{8,9}):([0-9A-Fa-f]{8}):`+
+			`([^:\s/]{1,%d}):([^:\s/]*):([^:\s/]{1,%d}):$`,
+		maxUPIDTypeLen, maxUPIDUserLen))
 )
 
 // TaskFilter selects and bounds the task summaries returned by NodeTasks.
@@ -55,11 +52,11 @@ type TaskList struct {
 	Reason string
 	// Tasks are the matching task summaries, newest first.
 	Tasks []TaskSummary
-	// Truncated reports that more tasks matched the filter than Limit.
+	// Truncated reports more matching tasks than Limit or an incomplete scan.
 	Truncated bool
 }
 
-// TaskSummary is one parsed UPID from /nodes/{node}/tasklist. It is task
+// TaskSummary is one task object from /nodes/{node}/tasks. It is task
 // metadata only (actor, type, time, target, status); the client never
 // fetches task logs, task status detail or command output.
 type TaskSummary struct {
@@ -69,22 +66,28 @@ type TaskSummary struct {
 	Node string
 	// Type is the task type, e.g. "qmstart", "vzdump", "update".
 	Type string
-	// ID is the target id (vmid) as digits; "0" for cluster-wide tasks.
+	// ID is the target identifier; empty for tasks without a target.
 	ID string
 	// User is the actor, e.g. "root@pam".
 	User string
 	// Start is when the task started.
 	Start time.Time
-	// End is when the task ended; zero means unknown. The tasklist does
-	// not carry end times and the client does not fetch per-task status.
+	// End is when the task ended from metadata; zero means unknown.
 	End time.Time
-	// Status is the UPID status field ("started"/"stopped"); empty when
-	// the UPID carries no status (older PVE 8 lists).
+	// Status is the metadata status or exit result (e.g. "RUNNING", "OK",
+	// or an error message); empty means unknown.
 	Status string
 }
 
-// NodeTasks reads GET /nodes/{node}/tasklist and returns bounded task
-// summaries. It parses UPIDs only; it never calls the per-task status or
+type taskData struct {
+	UPID    string `json:"upid"`
+	EndTime *int64 `json:"endtime"`
+	Status  string `json:"status"`
+	User    string `json:"user"`
+}
+
+// NodeTasks reads GET /nodes/{node}/tasks using bounded start/limit pages.
+// It returns task metadata only; it never calls the per-task status or
 // log endpoints under /nodes/{node}/tasks/{upid}, and it has no mutation
 // endpoints.
 func (c *Client) NodeTasks(ctx context.Context, node string, f TaskFilter) (TaskList, error) {
@@ -99,65 +102,87 @@ func (c *Client) NodeTasks(ctx context.Context, node string, f TaskFilter) (Task
 		return TaskList{}, fmt.Errorf("pveapi: task limit %d exceeds %d", limit, MaxTaskLimit)
 	}
 
-	body, reason, err := c.do(ctx, "/nodes/"+url.PathEscape(node)+"/tasklist")
-	if err != nil {
-		return TaskList{}, err
-	}
-	if body == nil {
-		if reason == reasonNotFound {
-			reason = "unknown node: no task list"
-		}
-		return TaskList{Available: false, Reason: reason}, nil
-	}
-
-	ups, err := decodeData[[]string](body)
-	if err != nil {
-		return TaskList{}, err
-	}
-	if len(*ups) > maxTaskObjects {
-		return TaskList{}, fmt.Errorf("%w: tasklist exceeds %d objects", ErrMalformed, maxTaskObjects)
-	}
-
 	out := TaskList{Available: true}
-	for _, raw := range *ups {
-		task, err := parseUPID(raw)
+	for start := 0; start < maxTaskScan; start += taskPageSize {
+		query := url.Values{"start": {strconv.Itoa(start)}, "limit": {strconv.Itoa(taskPageSize)}}
+		if !f.Since.IsZero() {
+			query.Set("since", strconv.FormatInt(f.Since.Unix(), 10))
+		}
+		body, reason, err := c.do(ctx, "/nodes/"+url.PathEscape(node)+"/tasks?"+query.Encode())
 		if err != nil {
 			return TaskList{}, err
 		}
-		if !f.Since.IsZero() && task.Start.Before(f.Since) {
-			continue
+		if body == nil {
+			if reason == reasonNotFound {
+				reason = "unknown node: no task list"
+			}
+			return TaskList{Reason: reason}, nil
 		}
-		if len(out.Tasks) < limit {
+		page, err := decodeData[[]taskData](body)
+		if err != nil {
+			return TaskList{}, err
+		}
+		if len(*page) > taskPageSize {
+			return TaskList{}, fmt.Errorf("%w: task page exceeds requested limit", ErrMalformed)
+		}
+		for _, entry := range *page {
+			task, err := parseUPID(entry.UPID)
+			if err != nil {
+				return TaskList{}, err
+			}
+			if task.Node != node {
+				return TaskList{}, fmt.Errorf("%w: task node mismatch", ErrMalformed)
+			}
+			if task.Status, err = checkText("status", entry.Status); err != nil {
+				return TaskList{}, err
+			}
+			// PVE may render token actors as the owning user in task metadata.
+			if entry.User != "" {
+				if task.User, err = checkText("user", entry.User); err != nil {
+					return TaskList{}, err
+				}
+			}
+			if entry.EndTime != nil {
+				if *entry.EndTime < task.Start.Unix() || *entry.EndTime > maxStartUnix {
+					return TaskList{}, fmt.Errorf("%w: task end time out of range", ErrMalformed)
+				}
+				task.End = time.Unix(*entry.EndTime, 0).UTC()
+			}
+			if !f.Since.IsZero() && task.Start.Before(f.Since) {
+				continue
+			}
+			if len(out.Tasks) == limit {
+				out.Truncated = true
+				return out, nil
+			}
 			out.Tasks = append(out.Tasks, task)
-		} else {
-			out.Truncated = true
+		}
+		if len(*page) < taskPageSize {
+			return out, nil
 		}
 	}
+	out.Truncated = true
 	return out, nil
 }
 
 // parseUPID parses one PVE UPID string into a TaskSummary.
 func parseUPID(raw string) (TaskSummary, error) {
-	if len(raw) > maxTextLen {
-		return TaskSummary{}, fmt.Errorf("%w: upid too long", ErrMalformed)
+	if _, err := checkText("upid", raw); err != nil {
+		return TaskSummary{}, err
 	}
 	m := upidRe.FindStringSubmatch(raw)
 	if m == nil {
 		return TaskSummary{}, fmt.Errorf("%w: invalid upid", ErrMalformed)
 	}
-	start, err := strconv.ParseInt(m[4], 10, 64)
+	start, err := strconv.ParseInt(m[4], 16, 64)
 	if err != nil || start <= 0 || start > maxStartUnix {
 		return TaskSummary{}, fmt.Errorf("%w: invalid upid start time", ErrMalformed)
 	}
-	id, err := strconv.ParseInt(m[6], 10, 64)
-	if err != nil || id > maxVMID {
-		return TaskSummary{}, fmt.Errorf("%w: invalid upid vmid", ErrMalformed)
-	}
-	status := m[8]
-	// The status field is a fixed PVE vocabulary; anything else means the
-	// string is not a tasklist UPID (e.g. a user field containing ':').
-	if status != "" && status != "started" && status != "stopped" && status != "aborted" {
-		return TaskSummary{}, fmt.Errorf("%w: invalid upid status", ErrMalformed)
+	// Decode both process fields using their actual hexadecimal representation.
+	for _, field := range []string{m[2], m[3]} {
+		if _, err := strconv.ParseUint(field, 16, 64); err != nil {
+			return TaskSummary{}, fmt.Errorf("%w: invalid upid process field", ErrMalformed)
+		}
 	}
 	return TaskSummary{
 		UPID:  raw,
@@ -166,7 +191,5 @@ func parseUPID(raw string) (TaskSummary, error) {
 		ID:    m[6],
 		User:  m[7],
 		Start: time.Unix(start, 0).UTC(),
-		// The tasklist does not carry end times; End stays zero (unknown).
-		Status: status, // empty when the UPID has no status field
 	}, nil
 }

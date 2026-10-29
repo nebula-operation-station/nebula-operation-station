@@ -1,51 +1,18 @@
-{"data": [
-  {
-    "id": 100,
-    "type": "vm",
-    "managed": 1,
-    "state": "started",
-    "state-reason": "started",
-    "state-reason-detail": "",
-    "start-attempts": 0,
-    "start-failures": 0,
-    "last-state-change": 1761580000,
-    "last-state-change-by": "root@pam",
-    "last-state-change-node": "pve1",
-    "node": "pve1",
-    "digest": "a1b2c3",
-    "placement": {
-      "digest": "a1b2c3",
-      "node": "pve1",
-      "options": {"digest": "a1b2c3", "node": "pve1", "options": null}
+{
+  "data": [
+    {
+      "sid": "vm:100",
+      "type": "vm",
+      "state": "started",
+      "max_restart": 1,
+      "max_relocate": 1
     },
-    "options": {
+    {
+      "sid": "ct:200",
+      "type": "ct",
       "state": "started",
-      "autostart": 1,
-      "inertia": 100,
-      "max-relocate": 1,
-      "max-start": 1,
-      "digest": "a1b2c3"
+      "max_restart": 1,
+      "max_relocate": 1
     }
-  },
-  {
-    "id": 200,
-    "type": "ct",
-    "managed": 1,
-    "state": "relocating",
-    "state-reason": "relocate to pve1",
-    "state-reason-detail": "migration in progress",
-    "start-attempts": 1,
-    "start-failures": 0,
-    "last-state-change": 1761571000,
-    "last-state-change-by": "root@pam",
-    "last-state-change-node": "pve2",
-    "node": "pve2",
-    "options": {
-      "state": "started",
-      "autostart": 1,
-      "inertia": 100,
-      "max-relocate": 1,
-      "max-start": 1
-    }
-  }
-]}
+  ]
+}

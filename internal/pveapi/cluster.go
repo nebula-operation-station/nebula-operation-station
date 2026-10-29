@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -40,9 +41,6 @@ const (
 	DefaultMaxBody = 1 << 20
 	// MaxTaskLimit is the maximum number of task summaries one call returns.
 	MaxTaskLimit = 500
-	// maxTaskObjects bounds UPIDs in one tasklist response (1,000 objects
-	// per page).
-	maxTaskObjects = 1000
 	// maxHAObjects bounds HA objects in one response (1,000 objects per
 	// page).
 	maxHAObjects = 1000
@@ -50,8 +48,6 @@ const (
 	maxClusterNodes = 1000
 	// maxVMID bounds a plausible PVE VMID.
 	maxVMID = 999999999
-	// maxAttempts bounds a plausible HA start attempt/failure counter.
-	maxAttempts = 1000000
 	// maxTextLen is the maximum length of one text field (4 KiB).
 	maxTextLen = 4096
 	// maxStartUnix bounds a plausible UPID start time (year 2100).
@@ -113,7 +109,11 @@ func (c *Client) do(ctx context.Context, path string) ([]byte, string, error) {
 	}
 	req.Header.Set("Authorization", token)
 
-	resp, err := c.HTTP.Do(req)
+	// Copy the injected client so its redirect policy is neither trusted nor
+	// mutated. Credentials must never be sent to a redirected destination.
+	httpClient := *c.HTTP
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return nil, "request timed out", nil
@@ -147,6 +147,10 @@ func (c *Client) do(ctx context.Context, path string) ([]byte, string, error) {
 // decodeData decodes the PVE JSON envelope {"data": ...} and returns the
 // data value. A null or missing data is malformed.
 func decodeData[T any](body []byte) (*T, error) {
+	// encoding/json replaces invalid UTF-8, so validate the original bytes.
+	if !utf8.Valid(body) {
+		return nil, fmt.Errorf("%w: response is not valid utf-8", ErrMalformed)
+	}
 	var env struct {
 		Data *T `json:"data"`
 	}
@@ -170,21 +174,10 @@ func checkText(field, v string) (string, error) {
 	return v, nil
 }
 
-// nonNeg validates an optional non-negative counter.
-func nonNeg(field string, v *int) (int, error) {
-	if v == nil {
-		return 0, nil
-	}
-	if *v < 0 || *v > maxAttempts {
-		return 0, fmt.Errorf("%w: %s out of range", ErrMalformed, field)
-	}
-	return *v, nil
-}
-
 // ClusterStatus is a bounded summary of GET /cluster/status (ADR 0006:
 // membership, votes/quorum). A standalone PVE host has no cluster entry:
-// the endpoint is absent and the result is Available=false, never an empty
-// cluster with zero nodes.
+// only node entries are returned and the result is Available=false, never
+// an empty cluster with zero nodes.
 type ClusterStatus struct {
 	// Available reports whether the remote has a configured cluster.
 	Available bool
@@ -200,11 +193,13 @@ type ClusterStatus struct {
 	NodesTotal int
 }
 
-type clusterStatusData struct {
-	Cluster     string `json:"cluster"`
-	NodesOnline *int   `json:"nodes_online"`
-	NodesTotal  *int   `json:"nodes_total"`
-	Quorum      *int   `json:"quorum"`
+type clusterStatusEntry struct {
+	Type    string `json:"type"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Nodes   *int   `json:"nodes"`
+	Quorate *int   `json:"quorate"`
+	Online  *int   `json:"online"`
 }
 
 // ClusterStatus reads GET /cluster/status.
@@ -217,44 +212,57 @@ func (c *Client) ClusterStatus(ctx context.Context) (ClusterStatus, error) {
 		if reason == reasonNotFound {
 			reason = "standalone host: no cluster configured"
 		}
-		return ClusterStatus{Available: false, Reason: reason}, nil
+		return ClusterStatus{Reason: reason}, nil
 	}
-	d, err := decodeData[clusterStatusData](body)
+	entries, err := decodeData[[]clusterStatusEntry](body)
 	if err != nil {
 		return ClusterStatus{}, err
 	}
-	name, err := checkText("cluster", d.Cluster)
-	if err != nil {
-		return ClusterStatus{}, err
+	if len(*entries) > maxClusterNodes+1 {
+		return ClusterStatus{}, fmt.Errorf("%w: too many cluster entries", ErrMalformed)
 	}
-	out := ClusterStatus{Available: true, Name: name}
-	if d.NodesOnline != nil {
-		if *d.NodesOnline < 0 || *d.NodesOnline > maxClusterNodes {
-			return ClusterStatus{}, fmt.Errorf("%w: nodes_online out of range", ErrMalformed)
+	out := ClusterStatus{}
+	for _, e := range *entries {
+		if _, err := checkText("id", e.ID); err != nil {
+			return ClusterStatus{}, err
 		}
-		out.NodesOnline = *d.NodesOnline
-	}
-	if d.NodesTotal != nil {
-		if *d.NodesTotal < 0 || *d.NodesTotal > maxClusterNodes {
-			return ClusterStatus{}, fmt.Errorf("%w: nodes_total out of range", ErrMalformed)
+		name, err := checkText("name", e.Name)
+		if err != nil {
+			return ClusterStatus{}, err
 		}
-		out.NodesTotal = *d.NodesTotal
-	}
-	if d.Quorum != nil {
-		switch *d.Quorum {
-		case 0:
-		case 1:
-			out.Quorum = true
+		switch e.Type {
+		case "cluster":
+			if out.Available || e.Nodes == nil || *e.Nodes < 0 || *e.Nodes > maxClusterNodes {
+				return ClusterStatus{}, fmt.Errorf("%w: invalid cluster node count or duplicate cluster", ErrMalformed)
+			}
+			if e.Quorate == nil || (*e.Quorate != 0 && *e.Quorate != 1) {
+				return ClusterStatus{}, fmt.Errorf("%w: quorate out of range", ErrMalformed)
+			}
+			out.Available = true
+			out.Name = name
+			out.NodesTotal = *e.Nodes
+			out.Quorum = *e.Quorate == 1
+		case "node":
+			if e.Online == nil || (*e.Online != 0 && *e.Online != 1) {
+				return ClusterStatus{}, fmt.Errorf("%w: online out of range", ErrMalformed)
+			}
+			out.NodesOnline += *e.Online
 		default:
-			return ClusterStatus{}, fmt.Errorf("%w: quorum out of range", ErrMalformed)
+			return ClusterStatus{}, fmt.Errorf("%w: unknown cluster entry type", ErrMalformed)
 		}
+	}
+	if !out.Available {
+		return ClusterStatus{Reason: "standalone host: no cluster configured"}, nil
+	}
+	if out.NodesOnline > out.NodesTotal {
+		return ClusterStatus{}, fmt.Errorf("%w: online nodes exceed total", ErrMalformed)
 	}
 	return out, nil
 }
 
 // HAStatus is a bounded summary of the HA manager state: the desired states
 // from GET /cluster/ha/resources joined with the observed states from
-// GET /cluster/ha/status/current, one entry per VMID (ADR 0006: HA resource
+// GET /cluster/ha/status/current, one entry per SID (ADR 0006: HA resource
 // desired/observed states). A remote without HA has no HA endpoints: the
 // result is Available=false, never an empty resource list.
 type HAStatus struct {
@@ -274,7 +282,7 @@ type HAResource struct {
 	Type string
 	// Managed reports whether the resource is HA-managed.
 	Managed bool
-	// DesiredState is the configured HA state (resource option "state").
+	// DesiredState is the configured top-level HA resource state.
 	DesiredState string
 	// State is the observed HA state, e.g. "started".
 	State string
@@ -296,35 +304,21 @@ type HAResource struct {
 }
 
 type haResourceData struct {
-	ID                  *int   `json:"id"`
-	Type                string `json:"type"`
-	Managed             *int   `json:"managed"`
-	Node                string `json:"node"`
-	StartAttempts       *int   `json:"start-attempts"`
-	StartFailures       *int   `json:"start-failures"`
-	LastStateChange     *int64 `json:"last-state-change"`
-	LastStateChangeBy   string `json:"last-state-change-by"`
-	LastStateChangeNode string `json:"last-state-change-node"`
-	Options             *struct {
-		State string `json:"state"`
-	} `json:"options"`
+	SID   string `json:"sid"`
+	Type  string `json:"type"`
+	State string `json:"state"`
 }
 
 type haStatusEntry struct {
-	ID                  *int   `json:"id"`
-	State               string `json:"state"`
-	StateReason         string `json:"state-reason"`
-	StateReasonDetail   string `json:"state-reason-detail"`
-	Node                string `json:"node"`
-	StartAttempts       *int   `json:"start-attempts"`
-	StartFailures       *int   `json:"start-failures"`
-	LastStateChange     *int64 `json:"last-state-change"`
-	LastStateChangeBy   string `json:"last-state-change-by"`
-	LastStateChangeNode string `json:"last-state-change-node"`
+	ID    string `json:"id"`
+	Type  string `json:"type"`
+	SID   string `json:"sid"`
+	State string `json:"state"`
+	Node  string `json:"node"`
 }
 
 // HAStatus reads GET /cluster/ha/resources and GET /cluster/ha/status/current
-// and joins them per VMID.
+// and joins service entries by SID.
 func (c *Client) HAStatus(ctx context.Context) (HAStatus, error) {
 	resBody, resReason, err := c.do(ctx, "/cluster/ha/resources")
 	if err != nil {
@@ -360,13 +354,26 @@ func (c *Client) HAStatus(ctx context.Context) (HAStatus, error) {
 		return HAStatus{}, fmt.Errorf("%w: ha status exceeds %d objects", ErrMalformed, maxHAObjects)
 	}
 
-	observed := make(map[int]haStatusEntry, len(*entries))
+	observed := make(map[string]haStatusEntry, len(*entries))
 	for _, e := range *entries {
-		id, err := haID("status", e.ID)
-		if err != nil {
+		for field, value := range map[string]string{"id": e.ID, "type": e.Type, "sid": e.SID, "state": e.State, "node": e.Node} {
+			if _, err := checkText(field, value); err != nil {
+				return HAStatus{}, err
+			}
+		}
+		if e.Type != "service" {
+			continue
+		}
+		if _, _, err := haSID(e.SID); err != nil {
 			return HAStatus{}, err
 		}
-		observed[id] = e
+		if e.ID != "service:"+e.SID {
+			return HAStatus{}, fmt.Errorf("%w: inconsistent ha service id", ErrMalformed)
+		}
+		if _, exists := observed[e.SID]; exists {
+			return HAStatus{}, fmt.Errorf("%w: duplicate ha service", ErrMalformed)
+		}
+		observed[e.SID] = e
 	}
 
 	out := HAStatus{Available: true}
@@ -380,99 +387,43 @@ func (c *Client) HAStatus(ctx context.Context) (HAStatus, error) {
 	return out, nil
 }
 
-func haID(kind string, id *int) (int, error) {
-	if id == nil || *id <= 0 || *id > maxVMID {
-		return 0, fmt.Errorf("%w: %s vmid out of range", ErrMalformed, kind)
+// haSID validates the service type and VMID without conflating VM and CT IDs.
+func haSID(sid string) (string, int, error) {
+	if _, err := checkText("sid", sid); err != nil {
+		return "", 0, err
 	}
-	return *id, nil
+	typ, id, ok := strings.Cut(sid, ":")
+	if !ok || (typ != "vm" && typ != "ct") || len(id) == 0 {
+		return "", 0, fmt.Errorf("%w: invalid ha sid", ErrMalformed)
+	}
+	for _, c := range id {
+		if c < '0' || c > '9' {
+			return "", 0, fmt.Errorf("%w: invalid ha vmid", ErrMalformed)
+		}
+	}
+	vmID, err := strconv.Atoi(id)
+	if err != nil || vmID <= 0 || vmID > maxVMID {
+		return "", 0, fmt.Errorf("%w: ha vmid out of range", ErrMalformed)
+	}
+	return typ, vmID, nil
 }
 
-func haResource(r haResourceData, observed map[int]haStatusEntry) (HAResource, error) {
-	vmID, err := haID("resource", r.ID)
+func haResource(r haResourceData, observed map[string]haStatusEntry) (HAResource, error) {
+	typ, vmID, err := haSID(r.SID)
 	if err != nil {
 		return HAResource{}, err
 	}
-	typ, err := checkText("type", r.Type)
+	if r.Type != typ {
+		return HAResource{}, fmt.Errorf("%w: inconsistent ha resource type", ErrMalformed)
+	}
+	state, err := checkText("state", r.State)
 	if err != nil {
 		return HAResource{}, err
 	}
-	if typ != "vm" && typ != "ct" {
-		return HAResource{}, fmt.Errorf("%w: unknown ha resource type", ErrMalformed)
-	}
-	out := HAResource{VMID: vmID, Type: typ}
-	if r.Managed != nil {
-		switch *r.Managed {
-		case 0:
-		case 1:
-			out.Managed = true
-		default:
-			return HAResource{}, fmt.Errorf("%w: managed out of range", ErrMalformed)
-		}
-	}
-	if r.Options != nil {
-		if out.DesiredState, err = checkText("options.state", r.Options.State); err != nil {
-			return HAResource{}, err
-		}
-	}
-	if out.Node, err = checkText("node", r.Node); err != nil {
-		return HAResource{}, err
-	}
-	if out.StartAttempts, err = nonNeg("start-attempts", r.StartAttempts); err != nil {
-		return HAResource{}, err
-	}
-	if out.StartFailures, err = nonNeg("start-failures", r.StartFailures); err != nil {
-		return HAResource{}, err
-	}
-	if r.LastStateChange != nil {
-		out.LastStateChange = time.Unix(*r.LastStateChange, 0).UTC()
-	}
-	if out.LastStateChangeBy, err = checkText("last-state-change-by", r.LastStateChangeBy); err != nil {
-		return HAResource{}, err
-	}
-	if out.LastStateChangeNode, err = checkText("last-state-change-node", r.LastStateChangeNode); err != nil {
-		return HAResource{}, err
-	}
-
-	// The observed state from /cluster/ha/status/current wins over the
-	// resource copy when both are present.
-	if e, ok := observed[vmID]; ok {
-		if out.State, err = checkText("state", e.State); err != nil {
-			return HAResource{}, err
-		}
-		if out.StateReason, err = checkText("state-reason", e.StateReason); err != nil {
-			return HAResource{}, err
-		}
-		if out.StateReasonDetail, err = checkText("state-reason-detail", e.StateReasonDetail); err != nil {
-			return HAResource{}, err
-		}
-		if e.Node != "" {
-			if out.Node, err = checkText("node", e.Node); err != nil {
-				return HAResource{}, err
-			}
-		}
-		if e.StartAttempts != nil {
-			if out.StartAttempts, err = nonNeg("start-attempts", e.StartAttempts); err != nil {
-				return HAResource{}, err
-			}
-		}
-		if e.StartFailures != nil {
-			if out.StartFailures, err = nonNeg("start-failures", e.StartFailures); err != nil {
-				return HAResource{}, err
-			}
-		}
-		if e.LastStateChange != nil {
-			out.LastStateChange = time.Unix(*e.LastStateChange, 0).UTC()
-		}
-		if e.LastStateChangeBy != "" {
-			if out.LastStateChangeBy, err = checkText("last-state-change-by", e.LastStateChangeBy); err != nil {
-				return HAResource{}, err
-			}
-		}
-		if e.LastStateChangeNode != "" {
-			if out.LastStateChangeNode, err = checkText("last-state-change-node", e.LastStateChangeNode); err != nil {
-				return HAResource{}, err
-			}
-		}
+	out := HAResource{VMID: vmID, Type: typ, Managed: true, DesiredState: state}
+	if e, ok := observed[r.SID]; ok {
+		out.State = e.State
+		out.Node = e.Node
 	}
 	return out, nil
 }

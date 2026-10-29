@@ -1,24 +1,45 @@
-{"data": [
-  {
-    "id": 100,
-    "state": "started",
-    "state-reason": "started",
-    "state-reason-detail": "",
-    "start-attempts": 0,
-    "start-failures": 0,
-    "last-state-change": 1761580000,
-    "last-state-change-by": "root@pam",
-    "last-state-change-node": "pve1"
-  },
-  {
-    "id": 200,
-    "state": "relocating",
-    "state-reason": "relocate to pve1",
-    "state-reason-detail": "migration in progress",
-    "start-attempts": 1,
-    "start-failures": 0,
-    "last-state-change": 1761571000,
-    "last-state-change-by": "root@pam",
-    "last-state-change-node": "pve2"
-  }
-]}
+{
+  "data": [
+    {
+      "id": "quorum",
+      "type": "quorum",
+      "node": "pve1",
+      "status": "OK",
+      "quorate": 1
+    },
+    {
+      "id": "master",
+      "type": "master",
+      "node": "pve1",
+      "status": "pve1 (active)",
+      "timestamp": 1761580000
+    },
+    {
+      "id": "lrm:pve1",
+      "type": "lrm",
+      "node": "pve1",
+      "status": "pve1 (active)",
+      "timestamp": 1761580000
+    },
+    {
+      "id": "service:ct:200",
+      "type": "service",
+      "sid": "ct:200",
+      "node": "pve2",
+      "state": "migrate",
+      "crm_state": "migrate",
+      "status": "ct:200 (pve2, migrate)",
+      "request_state": "started"
+    },
+    {
+      "id": "service:vm:100",
+      "type": "service",
+      "sid": "vm:100",
+      "node": "pve1",
+      "state": "started",
+      "crm_state": "started",
+      "status": "vm:100 (pve1, started)",
+      "request_state": "started"
+    }
+  ]
+}

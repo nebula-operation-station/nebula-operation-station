@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -136,10 +137,10 @@ func TestClusterStatusPVE9(t *testing.T) {
 }
 
 func TestClusterStatusStandalone(t *testing.T) {
-	// A standalone host has no cluster entry: the endpoint is absent.
+	// A standalone host returns only the local node, with no cluster entry.
 	// That is "unavailable", never an empty cluster with zero nodes.
 	f := newFakePVE(t, map[string]fakeRoute{
-		"/api2/json/cluster/status": {status: http.StatusNotFound},
+		"/api2/json/cluster/status": {body: fixture(t, "cluster_status_standalone.json")},
 	})
 	c := newTestClient(t, f)
 
@@ -169,7 +170,7 @@ func TestClusterStatusMalformed(t *testing.T) {
 	// quorum out of range; the body carries a marker that must not leak
 	// into the error.
 	f := newFakePVE(t, map[string]fakeRoute{
-		"/api2/json/cluster/status": {body: `{"data":{"cluster":"marker-xyz","quorum":7}}`},
+		"/api2/json/cluster/status": {body: `{"data":[{"type":"cluster","id":"cluster","name":"marker-xyz","nodes":1,"quorate":7}]}`},
 	})
 	c := newTestClient(t, f)
 
@@ -207,7 +208,7 @@ func TestClusterStatusNullData(t *testing.T) {
 }
 
 func TestClusterStatusOversize(t *testing.T) {
-	body := `{"data":{"cluster":"` + strings.Repeat("x", 300) + `","quorum":1}}`
+	body := `{"data":[{"type":"cluster","id":"cluster","name":"` + strings.Repeat("x", 300) + `","nodes":1,"quorate":1}]}`
 	f := newFakePVE(t, map[string]fakeRoute{
 		"/api2/json/cluster/status": {body: body},
 	})
@@ -222,7 +223,7 @@ func TestClusterStatusOversize(t *testing.T) {
 
 func TestClusterStatusNodesOutOfRange(t *testing.T) {
 	f := newFakePVE(t, map[string]fakeRoute{
-		"/api2/json/cluster/status": {body: `{"data":{"cluster":"c","nodes_online":-1}}`},
+		"/api2/json/cluster/status": {body: `{"data":[{"type":"cluster","id":"cluster","name":"c","nodes":-1,"quorate":1}]}`},
 	})
 	c := newTestClient(t, f)
 
@@ -284,12 +285,11 @@ func TestHAStatusPVE8(t *testing.T) {
 	if vm.DesiredState != "started" || vm.State != "started" {
 		t.Errorf("vm 100 desired/observed = %q/%q, want started/started", vm.DesiredState, vm.State)
 	}
-	if vm.Node != "pve1" || vm.LastStateChangeBy != "root@pam" {
-		t.Errorf("vm 100 node/by = %q/%q, want pve1/root@pam", vm.Node, vm.LastStateChangeBy)
+	if vm.Node != "pve1" {
+		t.Errorf("vm 100 node = %q, want pve1", vm.Node)
 	}
-	want := time.Unix(1761580000, 0).UTC()
-	if !vm.LastStateChange.Equal(want) {
-		t.Errorf("vm 100 LastStateChange = %v, want %v", vm.LastStateChange, want)
+	if !vm.LastStateChange.IsZero() || vm.LastStateChangeBy != "" || vm.StartAttempts != 0 {
+		t.Errorf("HA status must leave unavailable metadata unknown: %+v", vm)
 	}
 	ct := got.Resources[1]
 	if ct.VMID != 200 || ct.Type != "ct" {
@@ -301,8 +301,8 @@ func TestHAStatusPVE8(t *testing.T) {
 }
 
 func TestHAStatusPVE9(t *testing.T) {
-	// PVE 9 shape: digest/placement/state-reason-detail fields; unknown
-	// fields are dropped, observed state wins over the resource copy.
+	// Mixed manager and service entries are joined with configuration
+	// independently of status order and desired state.
 	f := newFakePVE(t, map[string]fakeRoute{
 		"/api2/json/cluster/ha/resources":      {body: fixture(t, "ha_resources_pve9.json")},
 		"/api2/json/cluster/ha/status/current": {body: fixture(t, "ha_status_pve9.json")},
@@ -320,17 +320,14 @@ func TestHAStatusPVE9(t *testing.T) {
 		t.Fatalf("len(Resources) = %d, want 2", len(got.Resources))
 	}
 	ct := got.Resources[1]
-	if ct.State != "relocating" || ct.StateReason != "relocate to pve1" {
-		t.Errorf("vm 200 state/reason = %q/%q, want relocating/relocate to pve1", ct.State, ct.StateReason)
+	if ct.State != "migrate" || ct.Node != "pve2" {
+		t.Errorf("ct 200 = %+v, want observed migrate on pve2", ct)
 	}
-	if ct.StateReasonDetail != "migration in progress" {
-		t.Errorf("vm 200 StateReasonDetail = %q", ct.StateReasonDetail)
+	if ct.DesiredState != "started" || !ct.Managed {
+		t.Errorf("ct 200 = %+v, want desired started and managed", ct)
 	}
-	if ct.DesiredState != "started" {
-		t.Errorf("vm 200 DesiredState = %q, want started", ct.DesiredState)
-	}
-	if ct.StartAttempts != 1 {
-		t.Errorf("vm 200 StartAttempts = %d, want 1", ct.StartAttempts)
+	if ct.StateReason != "" || ct.StateReasonDetail != "" || ct.StartAttempts != 0 {
+		t.Errorf("HA status must leave unavailable metadata unknown: %+v", ct)
 	}
 }
 
@@ -379,9 +376,10 @@ func TestHAStatusMalformed(t *testing.T) {
 		name string
 		res  string
 	}{
-		{"vmid out of range", `{"data":[{"id":-5,"type":"vm"}]}`},
-		{"unknown type", `{"data":[{"id":100,"type":"lxc"}]}`},
-		{"managed out of range", `{"data":[{"id":100,"type":"vm","managed":2}]}`},
+		{"negative vmid", `{"data":[{"sid":"vm:-5","type":"vm"}]}`},
+		{"vmid out of range", `{"data":[{"sid":"vm:9999999999","type":"vm"}]}`},
+		{"unknown type", `{"data":[{"sid":"lxc:100","type":"lxc"}]}`},
+		{"inconsistent type", `{"data":[{"sid":"vm:100","type":"ct"}]}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -398,7 +396,7 @@ func TestHAStatusMalformed(t *testing.T) {
 }
 
 func TestHAStatusOversize(t *testing.T) {
-	body := `{"data":[{"id":100,"type":"vm","node":"` + strings.Repeat("x", 300) + `"}]}`
+	body := `{"data":[{"sid":"vm:100","type":"vm","state":"` + strings.Repeat("x", 300) + `"}]}`
 	f := newFakePVE(t, map[string]fakeRoute{
 		"/api2/json/cluster/ha/resources":      {body: body},
 		"/api2/json/cluster/ha/status/current": {body: `{"data":[]}`},
@@ -408,5 +406,114 @@ func TestHAStatusOversize(t *testing.T) {
 
 	if _, err := c.HAStatus(context.Background()); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("err = %v, want ErrMalformed", err)
+	}
+}
+
+func TestRedirectDestinationsReceiveNoRequest(t *testing.T) {
+	for _, code := range []int{301, 302, 303, 307, 308} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			var hits atomic.Int32
+			destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
+				_, _ = w.Write([]byte(`{"data":[]}`))
+			}))
+			defer destination.Close()
+			source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, destination.URL, code)
+			}))
+			defer source.Close()
+			hc := source.Client() // Ordinary injected client follows redirects by default.
+			c := &Client{HTTP: hc, BaseURL: source.URL, Token: func(context.Context) (string, error) { return "test-token", nil }}
+			got, err := c.ClusterStatus(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantUnavailable(t, got.Available, got.Reason, "redirect")
+			if hits.Load() != 0 {
+				t.Fatalf("redirected destination received %d requests", hits.Load())
+			}
+			if hc.CheckRedirect != nil {
+				t.Fatal("injected client was mutated")
+			}
+		})
+	}
+}
+
+func TestResponsesRejectInvalidUTF8BeforeDecoding(t *testing.T) {
+	for _, endpoint := range []string{"cluster", "resources", "status", "tasks"} {
+		t.Run(endpoint, func(t *testing.T) {
+			routes := map[string]fakeRoute{
+				"/api2/json/cluster/status":            {body: fixture(t, "cluster_status_pve8.json")},
+				"/api2/json/cluster/ha/resources":      {body: fixture(t, "ha_resources_pve8.json")},
+				"/api2/json/cluster/ha/status/current": {body: fixture(t, "ha_status_pve8.json")},
+				tasksPath:                              {body: fixture(t, "tasklist_pve8.json")},
+			}
+			path := map[string]string{"cluster": "/api2/json/cluster/status", "resources": "/api2/json/cluster/ha/resources", "status": "/api2/json/cluster/ha/status/current", "tasks": tasksPath}[endpoint]
+			// Even ignored fields must not allow malformed response bytes.
+			routes[path] = fakeRoute{body: strings.Replace(routes[path].body, "{", "{\"ignored\":\"\xff\",", 1)}
+			f := newFakePVE(t, routes)
+			c := newTestClient(t, f)
+			var err error
+			switch endpoint {
+			case "cluster":
+				_, err = c.ClusterStatus(context.Background())
+			case "resources", "status":
+				_, err = c.HAStatus(context.Background())
+			case "tasks":
+				_, err = c.NodeTasks(context.Background(), "pve1", TaskFilter{})
+			}
+			if !errors.Is(err, ErrMalformed) {
+				t.Fatalf("err = %v, want ErrMalformed", err)
+			}
+		})
+	}
+}
+
+func TestHAStatusJoinsBySID(t *testing.T) {
+	f := newFakePVE(t, map[string]fakeRoute{
+		"/api2/json/cluster/ha/resources":      {body: `{"data":[{"sid":"vm:100","type":"vm","state":"started"},{"sid":"ct:100","type":"ct","state":"stopped"},{"sid":"vm:200","type":"vm","state":"disabled"}]}`},
+		"/api2/json/cluster/ha/status/current": {body: `{"data":[{"id":"quorum","type":"quorum","status":"OK"},{"id":"service:ct:100","type":"service","sid":"ct:100","state":"stopped","node":"pve2"},{"id":"service:vm:100","type":"service","sid":"vm:100","state":"started","node":"pve1"}]}`},
+	})
+	got, err := newTestClient(t, f).HAStatus(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Resources) != 3 {
+		t.Fatalf("resources = %+v, want three configured resources", got.Resources)
+	}
+	if got.Resources[0].Node != "pve1" || got.Resources[1].Node != "pve2" || got.Resources[2].State != "" || got.Resources[2].DesiredState != "disabled" {
+		t.Fatalf("incorrect SID join: %+v", got.Resources)
+	}
+}
+
+func TestClusterStatusRejectsMalformedEntries(t *testing.T) {
+	for _, body := range []string{
+		`{"data":[{"type":"cluster","name":"c","nodes":1001,"quorate":1}]}`,
+		`{"data":[{"type":"cluster","name":"c","nodes":1,"quorate":1},{"type":"cluster","name":"c","nodes":1,"quorate":1}]}`,
+		`{"data":[{"type":"node","name":"pve1","online":2}]}`,
+		`{"data":[{"type":"cluster","name":"c","nodes":0,"quorate":1},{"type":"node","name":"pve1","online":1}]}`,
+		`{"data":[{"type":"unknown"}]}`,
+	} {
+		f := newFakePVE(t, map[string]fakeRoute{"/api2/json/cluster/status": {body: body}})
+		if _, err := newTestClient(t, f).ClusterStatus(context.Background()); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("err = %v, want ErrMalformed", err)
+		}
+	}
+}
+
+func TestHAStatusRejectsMalformedServices(t *testing.T) {
+	for _, status := range []string{
+		`{"data":[{"type":"service","id":"service:vm:100","sid":"vm:-5"}]}`,
+		`{"data":[{"type":"service","id":"service:vm:200","sid":"vm:100"}]}`,
+		`{"data":[{"type":"service","id":"service:vm:100","sid":"vm:100"},{"type":"service","id":"service:vm:100","sid":"vm:100"}]}`,
+		`{"data":[{"type":"service","id":"service:vm:100","sid":"vm:100","node":"` + strings.Repeat("x", maxTextLen+1) + `"}]}`,
+	} {
+		f := newFakePVE(t, map[string]fakeRoute{
+			"/api2/json/cluster/ha/resources":      {body: fixture(t, "ha_resources_pve8.json")},
+			"/api2/json/cluster/ha/status/current": {body: status},
+		})
+		if _, err := newTestClient(t, f).HAStatus(context.Background()); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("err = %v, want ErrMalformed", err)
+		}
 	}
 }
