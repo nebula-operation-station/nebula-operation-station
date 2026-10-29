@@ -91,14 +91,14 @@ func pveAskLine(stdin io.Reader, prompt, what string) (string, error) {
 
 func pveCmd(args []string, stdin io.Reader, ask prompter, w io.Writer) error {
 	if len(args) < 1 || args[0] != "remote" {
-		return errors.New(pveUsage)
+		return errors.New(strings.TrimSpace(pveUsage))
 	}
 	return pveRemoteCmd(args[1:], bufio.NewReaderSize(stdin, maxPveConfirmationBytes+2), ask, w)
 }
 
 func pveRemoteCmd(args []string, stdin io.Reader, ask prompter, w io.Writer) error {
 	if len(args) == 0 {
-		return errors.New(pveUsage)
+		return errors.New(strings.TrimSpace(pveUsage))
 	}
 	switch args[0] {
 	case "add":
@@ -112,7 +112,7 @@ func pveRemoteCmd(args []string, stdin io.Reader, ask prompter, w io.Writer) err
 	case "list":
 		return pveRemoteList(args[1:], w)
 	}
-	return errors.New(pveUsage)
+	return errors.New(strings.TrimSpace(pveUsage))
 }
 
 // pveSplitID splits the first bare argument (the remote id) from the
@@ -143,7 +143,7 @@ func pveRemoteAdd(args []string, stdin io.Reader, ask prompter, w io.Writer) err
 		return err
 	}
 	if id == "" || fs.NArg() != 0 || len(endpoints) == 0 {
-		return errors.New(pveUsage)
+		return errors.New(strings.TrimSpace(pveUsage))
 	}
 	k := *kind
 	var kindVal pvecontract.Kind
@@ -231,7 +231,7 @@ func pveRemoteRotateToken(args []string, stdin io.Reader, ask prompter, w io.Wri
 		return err
 	}
 	if id == "" || fs.NArg() != 0 || (*purpose != executor.PvePurposeRead && *purpose != executor.PvePurposeAction) {
-		return errors.New(pveUsage)
+		return errors.New(strings.TrimSpace(pveUsage))
 	}
 	conn, err := dialExecutor()
 	if err != nil {
@@ -269,7 +269,7 @@ func pveRemoteRemove(args []string, stdin io.Reader, ask prompter, w io.Writer) 
 		return err
 	}
 	if id == "" || fs.NArg() != 0 {
-		return errors.New(pveUsage)
+		return errors.New(strings.TrimSpace(pveUsage))
 	}
 	conn, err := dialExecutor()
 	if err != nil {
@@ -303,7 +303,7 @@ func pveRemoteRepin(args []string, stdin io.Reader, ask prompter, w io.Writer) e
 		return err
 	}
 	if id == "" || fs.NArg() != 0 {
-		return errors.New(pveUsage)
+		return errors.New(strings.TrimSpace(pveUsage))
 	}
 	conn, err := dialExecutor()
 	if err != nil {
@@ -371,7 +371,7 @@ func pveRemoteList(args []string, w io.Writer) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return errors.New(pveUsage)
+		return errors.New(strings.TrimSpace(pveUsage))
 	}
 	conn, err := dialExecutor()
 	if err != nil {
