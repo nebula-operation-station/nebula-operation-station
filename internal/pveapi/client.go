@@ -240,16 +240,3 @@ func sanitizeText(s string, max int) string {
 	}
 	return s
 }
-
-// sanitizeStrings sanitizes each element of a bounded string list; at most
-// n elements are kept, each at most max bytes.
-func sanitizeStrings(in []string, n, max int) []string {
-	if len(in) > n {
-		in = in[:n]
-	}
-	out := make([]string, len(in))
-	for i, s := range in {
-		out[i] = sanitizeText(s, max)
-	}
-	return out
-}
