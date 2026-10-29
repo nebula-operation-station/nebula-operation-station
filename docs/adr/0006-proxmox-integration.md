@@ -1,6 +1,6 @@
 # ADR 0006: Proxmox VE remotes, inventory and executor-owned actions
 
-Status: proposed, 2026-10-29
+Status: accepted by the maintainer, 2026-10-29
 
 ## Context
 
