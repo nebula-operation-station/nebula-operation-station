@@ -91,8 +91,8 @@ func TestGetJSONDecodesDataEnvelope(t *testing.T) {
 	if err := c.getJSON(context.Background(), "/cluster/backup", nil, &out); err != nil {
 		t.Fatalf("getJSON: %v", err)
 	}
-	if len(out) != 2 {
-		t.Fatalf("entries = %d, want 2", len(out))
+	if len(out) != 3 {
+		t.Fatalf("entries = %d, want 3", len(out))
 	}
 }
 
@@ -296,7 +296,7 @@ func TestReadBackupsPBSVerifiedStates(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("catalog entries = %d, want 3", len(got))
 	}
-	// 0/1 integers and JSON booleans must both decode.
+	// Real PBS verification states must decode.
 	if got[0].Verified != TriYes || got[1].Verified != TriNo || got[2].Verified != TriYes {
 		t.Errorf("verified = %v %v %v, want yes no yes", got[0].Verified, got[1].Verified, got[2].Verified)
 	}
@@ -476,7 +476,7 @@ func TestReadBackupsAnyDeniedSourceMakesCatalogUnavailable(t *testing.T) {
 
 func TestReadBackupsNotesContentNeverStored(t *testing.T) {
 	const secretNotes = "NEVER-STORED-NOTES-XYZ"
-	body := `{"data":[{"volid":"local:backup/vm-100-disk-0.vzdump","type":"backup","vmid":100,"ctime":1761621600,"size":10,"notes":"` + secretNotes + `"}]}`
+	body := `{"data":[{"volid":"local:backup/vm-100-disk-0.vzdump","content":"backup","vmid":100,"ctime":1761621600,"size":10,"notes":"` + secretNotes + `"}]}`
 	c, _ := newTestClient(t, jsonServer(t, map[string][]byte{
 		"/api2/json/nodes/pve1/storage/local/content": []byte(body),
 		"/api2/json/cluster/backup":                   loadFixture(t, "jobs-empty.json"),
@@ -501,16 +501,17 @@ func TestReadBackupsNotesContentNeverStored(t *testing.T) {
 }
 
 func TestReadBackupsRejectsMalformedEntries(t *testing.T) {
-	valid := `{"volid":"local:backup/vm-100-disk-0.vzdump","type":"backup","vmid":100,"ctime":1761621600,"size":10}`
+	valid := `{"volid":"local:backup/vm-100-disk-0.vzdump","content":"backup","vmid":100,"ctime":1761621600,"size":10}`
 	cases := map[string]string{
-		"missing vmid":     `{"volid":"local:backup/vm-100-disk-0.vzdump","type":"backup","ctime":1761621600,"size":10}`,
-		"zero ctime":       `{"volid":"local:backup/vm-100-disk-0.vzdump","type":"backup","vmid":100,"ctime":0,"size":10}`,
-		"ctime too large":  `{"volid":"local:backup/vm-100-disk-0.vzdump","type":"backup","vmid":100,"ctime":4294967296,"size":10}`,
-		"negative size":    `{"volid":"local:backup/vm-100-disk-0.vzdump","type":"backup","vmid":100,"ctime":1761621600,"size":-1}`,
-		"wrong content":    `{"volid":"local:backup/vm-100-disk-0.img","type":"disk","vmid":100,"ctime":1761621600,"size":10}`,
-		"volid with space": `{"volid":"local:backup/vm 100.vzdump","type":"backup","vmid":100,"ctime":1761621600,"size":10}`,
-		"oversized volid":  fmt.Sprintf(`{"volid":"%s","type":"backup","vmid":100,"ctime":1761621600,"size":10}`, strings.Repeat("a", maxVolidBytes+1)),
-		"oversized notes":  fmt.Sprintf(`%s,"notes":"%s"}`, valid[:len(valid)-1], strings.Repeat("n", maxNotesBytes+1)),
+		"invented type only": `{"volid":"local:backup/vm-100-disk-0.vzdump","type":"backup","vmid":100,"ctime":1761621600,"size":10}`,
+		"missing vmid":       `{"volid":"local:backup/vm-100-disk-0.vzdump","content":"backup","ctime":1761621600,"size":10}`,
+		"zero ctime":         `{"volid":"local:backup/vm-100-disk-0.vzdump","content":"backup","vmid":100,"ctime":0,"size":10}`,
+		"ctime too large":    `{"volid":"local:backup/vm-100-disk-0.vzdump","content":"backup","vmid":100,"ctime":4294967296,"size":10}`,
+		"negative size":      `{"volid":"local:backup/vm-100-disk-0.vzdump","content":"backup","vmid":100,"ctime":1761621600,"size":-1}`,
+		"wrong content":      `{"volid":"local:backup/vm-100-disk-0.img","content":"disk","vmid":100,"ctime":1761621600,"size":10}`,
+		"volid with space":   `{"volid":"local:backup/vm 100.vzdump","content":"backup","vmid":100,"ctime":1761621600,"size":10}`,
+		"oversized volid":    fmt.Sprintf(`{"volid":"%s","content":"backup","vmid":100,"ctime":1761621600,"size":10}`, strings.Repeat("a", maxVolidBytes+1)),
+		"oversized notes":    fmt.Sprintf(`%s,"notes":"%s"}`, valid[:len(valid)-1], strings.Repeat("n", maxNotesBytes+1)),
 	}
 	for name, entry := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -540,7 +541,7 @@ func TestReadBackupsRejectsTooManyEntries(t *testing.T) {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		fmt.Fprintf(&b, `{"volid":"local:backup/vm-100-disk-%d.vzdump","type":"backup","vmid":100,"ctime":1761621600,"size":10}`, i)
+		fmt.Fprintf(&b, `{"volid":"local:backup/vm-100-disk-%d.vzdump","content":"backup","vmid":100,"ctime":1761621600,"size":10}`, i)
 	}
 	b.WriteString(`]}`)
 	c, _ := newTestClient(t, jsonServer(t, map[string][]byte{
@@ -574,8 +575,8 @@ func TestReadBackupsJobsParsed(t *testing.T) {
 		t.Fatalf("jobs = %+v, want available", obs.Jobs)
 	}
 	jobs := obs.Jobs.Value
-	if len(jobs) != 2 {
-		t.Fatalf("jobs = %d, want 2", len(jobs))
+	if len(jobs) != 3 {
+		t.Fatalf("jobs = %d, want 3", len(jobs))
 	}
 	j0 := jobs[0]
 	if j0.Schedule != "daily" || j0.Time != "02:00" || j0.Mode != "snapshot" || j0.Storage != "pbs1" {
@@ -588,11 +589,14 @@ func TestReadBackupsJobsParsed(t *testing.T) {
 		t.Errorf("job[0].notes length = %d, want %d", j0.NotesLength, len("nightly PBS backup"))
 	}
 	j1 := jobs[1]
-	if j1.Schedule != "weekly" || j1.Day != "sunday" || j1.Pool != "webservers" {
-		t.Errorf("job[1] = %+v, want weekly sunday pool webservers", j1)
+	if j1.Schedule != "weekly" || j1.Day != "sunday" {
+		t.Errorf("job[1] = %+v, want weekly sunday", j1)
 	}
-	if len(j1.Volumes) != 1 || j1.Volumes[0] != "local:backup/vm-200-disk-0.vzdump" {
-		t.Errorf("job[1].volumes = %v", j1.Volumes)
+	if jobs[2].Pool != "webservers" {
+		t.Errorf("job[2] = %+v, want pool webservers", jobs[2])
+	}
+	if len(j1.VMIDs) != 1 || j1.VMIDs[0] != 200 {
+		t.Errorf("job[1].vmids = %v", j1.VMIDs)
 	}
 }
 
@@ -653,14 +657,14 @@ func TestJobCoversVMID(t *testing.T) {
 		vmid uint64
 		want bool
 	}{
-		{BackupJob{All: true}, 999, true},
-		{BackupJob{Pool: "webservers"}, 100, true},
-		{BackupJob{Pool: "webservers"}, 300, false},
-		{BackupJob{Pool: "unknown-pool"}, 100, false},
-		{BackupJob{Volumes: []string{"local:backup/vm-200-disk-0.vzdump"}}, 200, true},
-		{BackupJob{Volumes: []string{"local:backup/vm-200-disk-0.vzdump"}}, 201, false},
-		{BackupJob{Pool: "webservers", Volumes: []string{"local:backup/vm-300-disk-0.vzdump"}}, 300, true},
-		{BackupJob{Storage: "local"}, 100, false},
+		{BackupJob{Enabled: true, All: true}, 999, true},
+		{BackupJob{Enabled: true, Pool: "webservers"}, 100, true},
+		{BackupJob{Enabled: true, Pool: "webservers"}, 300, false},
+		{BackupJob{Enabled: true, Pool: "unknown-pool"}, 100, false},
+		{BackupJob{Enabled: true, VMIDs: []uint64{200}}, 200, true},
+		{BackupJob{Enabled: true, VMIDs: []uint64{200}}, 201, false},
+		{BackupJob{Enabled: true, Pool: "webservers", VMIDs: []uint64{300}}, 300, false},
+		{BackupJob{Enabled: true, Storage: "local"}, 100, false},
 	}
 	for _, tc := range cases {
 		if got := tc.job.CoversVMID(tc.vmid, pools); got != tc.want {
@@ -716,13 +720,13 @@ func TestReadBackupsCorrelatesPerVMID(t *testing.T) {
 		t.Fatalf("guest 200 tasks = %+v, want 1 failed", g200.Tasks.Value)
 	}
 
-	// The all=1 job covers every known guest; the pool job covers 300 and
-	// (via volumes) 200.
+	// The all=1 job covers every known guest; explicit selection covers
+	// 200 and the pool job covers 300.
 	if len(g100.Jobs.Value) != 1 {
 		t.Errorf("guest 100 jobs = %+v, want 1 (all=1)", g100.Jobs.Value)
 	}
 	if len(g200.Jobs.Value) != 2 {
-		t.Errorf("guest 200 jobs = %+v, want 2 (all=1 + volumes)", g200.Jobs.Value)
+		t.Errorf("guest 200 jobs = %+v, want 2 (all=1 + vmid)", g200.Jobs.Value)
 	}
 	if len(g300.Jobs.Value) != 2 {
 		t.Errorf("guest 300 jobs = %+v, want 2 (all=1 + pool)", g300.Jobs.Value)
@@ -812,6 +816,9 @@ func TestReadBackupsRejectsInvalidOptions(t *testing.T) {
 			Scope: ReadScope{FullContent: true},
 			Pools: map[string]map[uint64]bool{"Bad Pool": {1: true}},
 		}},
+		{"invalid guest node", BackupsOptions{GuestNodes: map[uint64]string{100: "bad node"}}},
+		{"zero guest node vmid", BackupsOptions{GuestNodes: map[uint64]string{0: "pve1"}}},
+		{"guest node vmid out of range", BackupsOptions{GuestNodes: map[uint64]string{maxVMID: "pve1"}}},
 		{"oversized exit status", BackupsOptions{
 			Scope: ReadScope{FullContent: true},
 			Tasks: []TaskSummary{{Node: "pve1", Type: "backup", Target: "qemu/1", VMID: 1, StartedUnix: 1, FinishedUnix: 2, ExitStatus: strings.Repeat("e", maxExitStatusBytes+1)}},

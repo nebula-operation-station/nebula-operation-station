@@ -2,7 +2,7 @@
   "data": [
     {
       "volid": "pbs1:backup/vm-100-20251029-060000",
-      "type": "backup",
+      "content": "backup",
       "vmid": 100,
       "ctime": 1761621600,
       "size": 1073741824,

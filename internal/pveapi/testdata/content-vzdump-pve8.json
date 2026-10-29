@@ -2,7 +2,7 @@
   "data": [
     {
       "volid": "local:backup/vm-100-disk-0.vzdump",
-      "type": "backup",
+      "content": "backup",
       "vmid": 100,
       "ctime": 1761621600,
       "size": 1073741824,
@@ -14,7 +14,7 @@
     },
     {
       "volid": "local:backup/vm-200-disk-0.vzdump",
-      "type": "backup",
+      "content": "backup",
       "vmid": 200,
       "ctime": 1761535200,
       "size": 536870912,

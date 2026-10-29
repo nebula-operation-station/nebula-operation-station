@@ -37,6 +37,13 @@ const (
 	// maxListings is the maximum number of entries accepted from one
 	// listing endpoint (storage content, cluster backup jobs).
 	maxListings = 10000
+	// maxJSONDepth bounds containers in the strict JSON walk, including
+	// unknown fields, before recursive descent.
+	maxJSONDepth = 32
+	// Correlation limits bound scanning and the aggregate per-guest output.
+	maxCorrelationWork        = 1000000
+	maxCorrelatedRecords      = 50000
+	maxCorrelationOutputBytes = 16 << 20
 	// maxVolidBytes bounds a PVE volume ID (storage:backup/name).
 	maxVolidBytes = 256
 	// maxNotesBytes bounds a notes field; only its length is kept.
@@ -50,8 +57,10 @@ const (
 	maxTargetBytes = 128
 	// maxExitStatusBytes bounds a task ExitStatus string.
 	maxExitStatusBytes = 64
-	// maxVolumesPerJob bounds the volumes selection of one backup job.
-	maxVolumesPerJob = 1024
+	// maxVMIDsPerJob bounds each guest selection/exclusion list.
+	maxVMIDsPerJob = 1024
+	// maxVMIDListBytes bounds list text before splitting it into IDs.
+	maxVMIDListBytes = maxVMIDsPerJob * 12
 	// maxPathBytes bounds an API path built from validated names.
 	maxPathBytes = 256
 
@@ -178,8 +187,8 @@ type CatalogEntry struct {
 	CTimeUnix   int64
 	SizeBytes   int64
 	NotesLength int
-	// Verified is SourcePBS only when the field is present in the
-	// response (PBS 1.1+); TriUnknown otherwise.
+	// Verified is derived from PBS verification.state when present;
+	// TriUnknown otherwise.
 	Verified TriState
 }
 
@@ -192,28 +201,45 @@ type BackupJob struct {
 	Storage  string
 	All      bool
 	Pool     string
-	Volumes  []string
+	// VMIDs is the explicit guest selection from the PVE vmid list.
+	VMIDs []uint64
+	// Exclude removes guests from an All selection.
+	Exclude []uint64
+	// Node restricts coverage to guests currently on this node.
+	Node string
+	// Enabled reports whether the job runs; PVE defaults it to true.
+	Enabled bool
 	// NotesLength is the length of the job notes; the notes content is
 	// never kept.
 	NotesLength int
 }
 
 // CoversVMID reports whether the job selection covers the guest vmid.
-// all=true covers every guest; pool and volumes selections are a union.
-// Pools not present in pools are treated as unknown and cover nothing.
+// Disabled jobs and node-restricted jobs (which require node information)
+// cover nothing. Pools not present in pools are treated as unknown.
 func (j BackupJob) CoversVMID(vmid uint64, pools map[string]map[uint64]bool) bool {
-	if j.All {
-		return true
+	return j.coversGuest(vmid, "", pools)
+}
+
+func (j BackupJob) coversGuest(vmid uint64, node string, pools map[string]map[uint64]bool) bool {
+	if !j.Enabled || (j.Node != "" && j.Node != node) {
+		return false
 	}
 	if j.Pool != "" {
-		if members, ok := pools[j.Pool]; ok && members[vmid] {
+		return pools[j.Pool][vmid]
+	}
+	for _, id := range j.VMIDs {
+		if id == vmid {
 			return true
 		}
 	}
-	for _, v := range j.Volumes {
-		if vmidFromVolid(v) == vmid {
-			return true
+	if j.All {
+		for _, id := range j.Exclude {
+			if id == vmid {
+				return false
+			}
 		}
+		return true
 	}
 	return false
 }
@@ -229,7 +255,9 @@ type TaskSummary struct {
 	VMID         uint64
 	StartedUnix  int64
 	FinishedUnix int64
-	ExitStatus   string
+	// ExitStatus is the terminal task result; empty means no terminal
+	// result was observed. A result also requires valid start/end times.
+	ExitStatus string
 }
 
 // BackupSource is one node/storage pair that can hold backup volumes.
@@ -263,6 +291,10 @@ type BackupsOptions struct {
 	// Pools maps pool name to member vmids for job selection coverage.
 	// Pools not present are treated as unknown.
 	Pools map[string]map[uint64]bool
+	// GuestNodes maps guest IDs to their current inventory node. A
+	// node-restricted job never covers guests with unknown placement.
+	// Storage locations and historical tasks do not establish placement.
+	GuestNodes map[uint64]string
 }
 
 // BackupsObservation is the correlated, nonsecret backup evidence for one
@@ -373,7 +405,10 @@ func (c *Client) ReadBackups(ctx context.Context, opts BackupsOptions) (BackupsO
 		return BackupsObservation{}, err
 	}
 
-	obs.Guests = correlate(obs.Catalog, obs.Jobs, opts.Tasks, opts.Pools)
+	obs.Guests, err = correlate(obs.Catalog, obs.Jobs, opts.Tasks, opts.Pools, opts.GuestNodes)
+	if err != nil {
+		return BackupsObservation{}, err
+	}
 	return obs, nil
 }
 
@@ -500,7 +535,7 @@ func (c *Client) getJSON(ctx context.Context, path string, query url.Values, out
 // object keys at any depth.
 func strictJSON(raw []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
-	if err := strictWalk(dec); err != nil {
+	if err := strictWalk(dec, 0); err != nil {
 		return err
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
@@ -509,13 +544,16 @@ func strictJSON(raw []byte) error {
 	return nil
 }
 
-func strictWalk(dec *json.Decoder) error {
+func strictWalk(dec *json.Decoder, depth int) error {
 	tok, err := dec.Token()
 	if err != nil {
 		return err
 	}
 	switch v := tok.(type) {
 	case json.Delim:
+		if depth >= maxJSONDepth {
+			return errors.New("pveapi: JSON depth limit exceeded")
+		}
 		switch v {
 		case '{':
 			seen := make(map[string]struct{})
@@ -532,7 +570,7 @@ func strictWalk(dec *json.Decoder) error {
 					return fmt.Errorf("pveapi: duplicate key %q", key[:min(len(key), 32)])
 				}
 				seen[key] = struct{}{}
-				if err := strictWalk(dec); err != nil {
+				if err := strictWalk(dec, depth+1); err != nil {
 					return err
 				}
 			}
@@ -541,7 +579,7 @@ func strictWalk(dec *json.Decoder) error {
 			}
 		case '[':
 			for dec.More() {
-				if err := strictWalk(dec); err != nil {
+				if err := strictWalk(dec, depth+1); err != nil {
 					return err
 				}
 			}
@@ -558,18 +596,18 @@ func strictWalk(dec *json.Decoder) error {
 // rawContentEntry is one entry of a storage content listing (PVE 8 and 9
 // shapes). Unknown fields are ignored for forward compatibility.
 type rawContentEntry struct {
-	Volid    string    `json:"volid"`
-	Type     string    `json:"type"`
-	VMID     uint64    `json:"vmid"`
-	CTime    int64     `json:"ctime"`
-	Size     int64     `json:"size"`
-	Notes    string    `json:"notes"`
-	Verified *flexBool `json:"verified"`
+	Volid        string          `json:"volid"`
+	Content      string          `json:"content"`
+	VMID         uint64          `json:"vmid"`
+	CTime        int64           `json:"ctime"`
+	Size         int64           `json:"size"`
+	Notes        string          `json:"notes"`
+	Verification json.RawMessage `json:"verification"`
 }
 
 // toCatalogEntry validates the entry and reduces it to nonsecret metadata.
 func (e rawContentEntry) toCatalogEntry(source string) (CatalogEntry, error) {
-	if e.Type != "backup" {
+	if e.Content != "backup" {
 		return CatalogEntry{}, errors.New("content entry: unexpected content type")
 	}
 	if !validVolid(e.Volid) {
@@ -588,11 +626,13 @@ func (e rawContentEntry) toCatalogEntry(source string) (CatalogEntry, error) {
 		return CatalogEntry{}, errors.New("content entry: invalid notes")
 	}
 	verified := TriUnknown
-	if source == SourcePBS && e.Verified != nil {
-		if bool(*e.Verified) {
-			verified = TriYes
-		} else {
-			verified = TriNo
+	if len(e.Verification) != 0 {
+		v, err := parseVerification(e.Verification)
+		if err != nil {
+			return CatalogEntry{}, err
+		}
+		if source == SourcePBS {
+			verified = v
 		}
 	}
 	return CatalogEntry{
@@ -606,23 +646,46 @@ func (e rawContentEntry) toCatalogEntry(source string) (CatalogEntry, error) {
 	}, nil
 }
 
+func parseVerification(raw json.RawMessage) (TriState, error) {
+	var v struct {
+		State string          `json:"state"`
+		UPID  json.RawMessage `json:"upid"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil || (v.State != "ok" && v.State != "failed") {
+		return "", errors.New("content entry: invalid verification")
+	}
+	if len(v.UPID) != 0 {
+		var upid string
+		if err := json.Unmarshal(v.UPID, &upid); err != nil || upid == "" || !validPrintable(upid, maxVolidBytes) {
+			return "", errors.New("content entry: invalid verification")
+		}
+	}
+	if v.State == "ok" {
+		return TriYes, nil
+	}
+	return TriNo, nil
+}
+
 // rawJob is one /cluster/backup job definition (PVE 8 and 9 shapes).
 // Unknown fields are ignored for forward compatibility.
 type rawJob struct {
-	Schedule string    `json:"schedule"`
-	Day      string    `json:"day"`
-	Time     string    `json:"time"`
-	Mode     string    `json:"mode"`
-	Storage  string    `json:"storage"`
-	All      *flexBool `json:"all"`
-	Pool     string    `json:"pool"`
-	Volumes  []string  `json:"volumes"`
-	Notes    string    `json:"notes"`
+	Schedule string          `json:"schedule"`
+	Day      string          `json:"day"`
+	Time     string          `json:"time"`
+	Mode     string          `json:"mode"`
+	Storage  string          `json:"storage"`
+	All      flexBool        `json:"all"`
+	Pool     string          `json:"pool"`
+	VMID     string          `json:"vmid"`
+	Exclude  string          `json:"exclude"`
+	Node     string          `json:"node"`
+	Enabled  json.RawMessage `json:"enabled"`
+	Notes    string          `json:"notes"`
 }
 
 // toJob validates the job definition and reduces it to nonsecret fields.
 func (r rawJob) toJob() (BackupJob, error) {
-	if !validPrintable(r.Schedule, maxFieldBytes) {
+	if !validText(r.Schedule, maxFieldBytes) {
 		return BackupJob{}, errors.New("backup job: invalid schedule")
 	}
 	if !validPrintable(r.Day, maxFieldBytes) {
@@ -640,15 +703,25 @@ func (r rawJob) toJob() (BackupJob, error) {
 	if r.Pool != "" && !validSlug(r.Pool) {
 		return BackupJob{}, errors.New("backup job: invalid pool")
 	}
-	if len(r.Volumes) > maxVolumesPerJob {
-		return BackupJob{}, errors.New("backup job: too many volumes")
+	vmids, err := parseVMIDList(r.VMID)
+	if err != nil {
+		return BackupJob{}, errors.New("backup job: invalid vmid selection")
 	}
-	volumes := make([]string, 0, len(r.Volumes))
-	for _, v := range r.Volumes {
-		if !validVolid(v) {
-			return BackupJob{}, errors.New("backup job: invalid volume")
+	exclude, err := parseVMIDList(r.Exclude)
+	if err != nil {
+		return BackupJob{}, errors.New("backup job: invalid exclusions")
+	}
+	if len(vmids) != 0 && (bool(r.All) || r.Pool != "" || len(exclude) != 0) {
+		return BackupJob{}, errors.New("backup job: conflicting guest selections")
+	}
+	if r.Node != "" && !validSlug(r.Node) {
+		return BackupJob{}, errors.New("backup job: invalid node")
+	}
+	enabled := flexBool(true)
+	if len(r.Enabled) != 0 {
+		if err := json.Unmarshal(r.Enabled, &enabled); err != nil {
+			return BackupJob{}, err
 		}
-		volumes = append(volumes, v)
 	}
 	if !utf8.ValidString(r.Notes) || len(r.Notes) > maxNotesBytes {
 		return BackupJob{}, errors.New("backup job: invalid notes")
@@ -659,9 +732,12 @@ func (r rawJob) toJob() (BackupJob, error) {
 		Time:        r.Time,
 		Mode:        r.Mode,
 		Storage:     r.Storage,
-		All:         r.All != nil && bool(*r.All),
+		All:         bool(r.All) || (len(exclude) != 0 && r.Pool == ""),
 		Pool:        r.Pool,
-		Volumes:     volumes,
+		VMIDs:       vmids,
+		Exclude:     exclude,
+		Node:        r.Node,
+		Enabled:     bool(enabled),
 		NotesLength: len(r.Notes),
 	}, nil
 }
@@ -679,9 +755,33 @@ func (b *flexBool) UnmarshalJSON(raw []byte) error {
 	case "false", "0":
 		*b = false
 	default:
-		return fmt.Errorf("pveapi: expected boolean or 0/1, got %s", raw)
+		return errors.New("pveapi: expected boolean or 0/1")
 	}
 	return nil
+}
+
+var vmidListPattern = regexp.MustCompile(`^[0-9]+(?:[ \t]*[,;][ \t]*[0-9]+|[ \t]+[0-9]+)*$`)
+
+func parseVMIDList(raw string) ([]uint64, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	if len(raw) > maxVMIDListBytes || !vmidListPattern.MatchString(raw) {
+		return nil, errors.New("invalid guest list")
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ';' || r == ' ' || r == '\t' })
+	if len(parts) > maxVMIDsPerJob {
+		return nil, errors.New("too many guest IDs")
+	}
+	ids := make([]uint64, 0, len(parts))
+	for _, part := range parts {
+		id, err := strconv.ParseUint(part, 10, 64)
+		if err != nil || id == 0 || id >= maxVMID {
+			return nil, errors.New("invalid guest ID")
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
 
 // validateOptions checks every caller-supplied value before any I/O and
@@ -742,43 +842,148 @@ func validateOptions(opts BackupsOptions) ([]BackupSource, error) {
 			}
 		}
 	}
+	for vmid, node := range opts.GuestNodes {
+		if vmid == 0 || vmid >= maxVMID || !validSlug(node) {
+			return nil, errors.New("pveapi: invalid guest node mapping")
+		}
+	}
 	return sources, nil
 }
 
-// correlate builds the per-guest evidence from the three datasets.
-func correlate(catalog Dataset[[]CatalogEntry], jobs Dataset[[]BackupJob], tasks []TaskSummary, pools map[string]map[uint64]bool) []GuestBackups {
+// correlationBudget bounds aggregate scanning, records and encoded output.
+// Remaining counters avoid overflow when checking hostile aggregate sizes.
+type correlationBudget struct {
+	work, records, bytes int
+}
+
+func (b *correlationBudget) useWork(n int) error {
+	if n > b.work {
+		return errors.New("pveapi: correlation work limit exceeded")
+	}
+	b.work -= n
+	return nil
+}
+
+func (b *correlationBudget) reserveRecord(size int) error {
+	if b.records == 0 {
+		return errors.New("pveapi: correlation record limit exceeded")
+	}
+	if size > b.bytes {
+		return errors.New("pveapi: correlation output limit exceeded")
+	}
+	b.records--
+	b.bytes -= size
+	return nil
+}
+
+func (b *correlationBudget) evidence(e BackupEvidence) error {
+	raw, err := json.Marshal(e)
+	if err != nil {
+		return fmt.Errorf("pveapi: size correlation evidence: %w", err)
+	}
+	return b.reserveRecord(len(raw) + 1) // include the array separator
+}
+
+// correlate builds the per-guest evidence from the three datasets. Every
+// enumeration and coverage scan consumes work, and every record is reserved
+// before appending it. Limit failures discard the entire observation.
+func correlate(catalog Dataset[[]CatalogEntry], jobs Dataset[[]BackupJob], tasks []TaskSummary, pools map[string]map[uint64]bool, guestNodes map[uint64]string) ([]GuestBackups, error) {
+	budget := correlationBudget{work: maxCorrelationWork, records: maxCorrelatedRecords, bytes: maxCorrelationOutputBytes}
 	vmids := make(map[uint64]struct{})
+	addVMID := func(id uint64) error {
+		if _, ok := vmids[id]; ok {
+			return nil
+		}
+		// This bounds the guest object and dataset wrappers, including
+		// unavailable reasons, independently of the nested records.
+		const guestOverheadBytes = 1024
+		if err := budget.reserveRecord(guestOverheadBytes); err != nil {
+			return err
+		}
+		vmids[id] = struct{}{}
+		return nil
+	}
+	if err := budget.useWork(len(guestNodes)); err != nil {
+		return nil, err
+	}
+	for id := range guestNodes {
+		if err := addVMID(id); err != nil {
+			return nil, err
+		}
+	}
 	catalogByVMID := make(map[uint64][]BackupEvidence)
 	if catalog.IsAvailable() {
+		if err := budget.useWork(len(catalog.Value)); err != nil {
+			return nil, err
+		}
 		for _, e := range catalog.Value {
-			vmids[e.VMID] = struct{}{}
-			catalogByVMID[e.VMID] = append(catalogByVMID[e.VMID], catalogEvidence(e))
+			if err := addVMID(e.VMID); err != nil {
+				return nil, err
+			}
+			ev := catalogEvidence(e)
+			if err := budget.evidence(ev); err != nil {
+				return nil, err
+			}
+			catalogByVMID[e.VMID] = append(catalogByVMID[e.VMID], ev)
 		}
 	}
 	var tasksByVMID map[uint64][]BackupEvidence
 	if tasks != nil {
+		if err := budget.useWork(len(tasks)); err != nil {
+			return nil, err
+		}
 		tasksByVMID = make(map[uint64][]BackupEvidence)
 		for _, t := range tasks {
-			if t.Type != "backup" || t.VMID == 0 {
+			if (t.Type != "backup" && t.Type != "vzdump") || t.VMID == 0 {
 				continue
 			}
-			vmids[t.VMID] = struct{}{}
-			tasksByVMID[t.VMID] = append(tasksByVMID[t.VMID], taskEvidence(t))
+			if err := addVMID(t.VMID); err != nil {
+				return nil, err
+			}
+			ev, complete := taskEvidence(t)
+			if !complete {
+				continue
+			}
+			if err := budget.evidence(ev); err != nil {
+				return nil, err
+			}
+			tasksByVMID[t.VMID] = append(tasksByVMID[t.VMID], ev)
 		}
 	}
+	var jobBytes []int
 	if jobs.IsAvailable() {
-		for _, j := range jobs.Value {
-			if j.All {
-				continue // covers every known guest; no vmids to enumerate
+		if err := budget.useWork(len(jobs.Value)); err != nil {
+			return nil, err
+		}
+		jobBytes = make([]int, len(jobs.Value))
+		for i, j := range jobs.Value {
+			if err := budget.useWork(len(j.VMIDs) + len(j.Exclude)); err != nil {
+				return nil, err
+			}
+			encoded, err := json.Marshal(j)
+			if err != nil {
+				return nil, fmt.Errorf("pveapi: size correlation job: %w", err)
+			}
+			jobBytes[i] = len(encoded) + 1
+			if !j.Enabled {
+				continue
 			}
 			if j.Pool != "" {
-				for vmid := range pools[j.Pool] {
-					vmids[vmid] = struct{}{}
+				if err := budget.useWork(len(pools[j.Pool])); err != nil {
+					return nil, err
 				}
-			}
-			for _, v := range j.Volumes {
-				if id := vmidFromVolid(v); id != 0 {
-					vmids[id] = struct{}{}
+				for vmid, member := range pools[j.Pool] {
+					if member {
+						if err := addVMID(vmid); err != nil {
+							return nil, err
+						}
+					}
+				}
+			} else if !j.All {
+				for _, id := range j.VMIDs {
+					if err := addVMID(id); err != nil {
+						return nil, err
+					}
 				}
 			}
 		}
@@ -813,8 +1018,14 @@ func correlate(catalog Dataset[[]CatalogEntry], jobs Dataset[[]BackupJob], tasks
 		}
 		if jobs.IsAvailable() {
 			var cov []BackupJob
-			for _, j := range jobs.Value {
-				if j.CoversVMID(id, pools) {
+			for i, j := range jobs.Value {
+				if err := budget.useWork(1 + len(j.VMIDs) + len(j.Exclude)); err != nil {
+					return nil, err
+				}
+				if j.coversGuest(id, guestNodes[id], pools) {
+					if err := budget.reserveRecord(jobBytes[i]); err != nil {
+						return nil, err
+					}
 					cov = append(cov, j)
 				}
 			}
@@ -827,7 +1038,7 @@ func correlate(catalog Dataset[[]CatalogEntry], jobs Dataset[[]BackupJob], tasks
 		}
 		guests = append(guests, g)
 	}
-	return guests
+	return guests, nil
 }
 
 // catalogEvidence converts a catalog entry into guest backup evidence.
@@ -848,7 +1059,11 @@ func catalogEvidence(e CatalogEntry) BackupEvidence {
 
 // taskEvidence converts a task summary into guest backup evidence. PVE
 // backup tasks are vzdump runs regardless of destination storage.
-func taskEvidence(t TaskSummary) BackupEvidence {
+func taskEvidence(t TaskSummary) (BackupEvidence, bool) {
+	if t.ExitStatus == "" || t.StartedUnix <= 0 || t.FinishedUnix <= 0 ||
+		t.FinishedUnix < t.StartedUnix || t.FinishedUnix > maxCTimeUnix {
+		return BackupEvidence{}, false
+	}
 	status := StatusFailed
 	if t.ExitStatus == TaskExitOK {
 		status = StatusSuccess
@@ -861,24 +1076,7 @@ func taskEvidence(t TaskSummary) BackupEvidence {
 		StartedUnix:  t.StartedUnix,
 		FinishedUnix: t.FinishedUnix,
 		Verified:     TriUnknown,
-	}
-}
-
-// vmidInVolid extracts the guest ID from a backup volume ID such as
-// local:backup/vm-100-disk-0.vzdump or pbs1:backup/vm-100-20261029-060000.
-var vmidInVolid = regexp.MustCompile(`vm-([0-9]{1,9})`)
-
-// vmidFromVolid returns the guest ID encoded in a volume ID, or 0 if none.
-func vmidFromVolid(volid string) uint64 {
-	m := vmidInVolid.FindStringSubmatch(volid)
-	if m == nil {
-		return 0
-	}
-	n, err := strconv.ParseUint(m[1], 10, 64)
-	if err != nil {
-		return 0
-	}
-	return n
+	}, true
 }
 
 // validSlug reports whether s is a PVE node/storage/pool name: 1..64 bytes

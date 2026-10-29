@@ -15,11 +15,14 @@
       "time": "03:30",
       "mode": "snapshot",
       "storage": "local",
-      "pool": "webservers",
-      "volumes": [
-        "local:backup/vm-200-disk-0.vzdump"
-      ],
+      "vmid": "200",
       "bwlimit": 0
+    },
+    {
+      "schedule": "mon..fri 03:30",
+      "storage": "local",
+      "pool": "webservers",
+      "enabled": 1
     }
   ]
 }
