@@ -335,6 +335,8 @@ code {
 
 .topbar__logout {
   margin-left: auto;
+  flex: none;
+  white-space: nowrap;
 }
 
 /* Mobile menu button: hidden on wide screens, shown on narrow. */
