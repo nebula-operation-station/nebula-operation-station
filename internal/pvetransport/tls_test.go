@@ -54,21 +54,15 @@ type leafSpec struct {
 	notAfter  time.Time
 }
 
-// leaf creates a server leaf certificate signed by the CA and returns its
-// DER encoding.
-func (ca *testCA) leaf(t *testing.T, spec leafSpec) []byte {
-	t.Helper()
-	pub, _, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
+// leafTemplate builds the x509 template for a server leaf certificate.
+func leafTemplate(spec leafSpec) *x509.Certificate {
 	if spec.notBefore.IsZero() {
 		spec.notBefore = time.Now().Add(-time.Hour)
 	}
 	if spec.notAfter.IsZero() {
 		spec.notAfter = time.Now().Add(time.Hour)
 	}
-	tmpl := &x509.Certificate{
+	return &x509.Certificate{
 		SerialNumber: big.NewInt(time.Now().UnixNano()),
 		Subject:      pkix.Name{CommonName: "leaf"},
 		NotBefore:    spec.notBefore,
@@ -78,7 +72,17 @@ func (ca *testCA) leaf(t *testing.T, spec leafSpec) []byte {
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, pub, ca.key)
+}
+
+// leaf creates a server leaf certificate signed by the CA and returns its
+// DER encoding.
+func (ca *testCA) leaf(t *testing.T, spec leafSpec) []byte {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.CreateCertificate(rand.Reader, leafTemplate(spec), ca.cert, pub, ca.key)
 	if err != nil {
 		t.Fatal(err)
 	}
