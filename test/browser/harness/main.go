@@ -676,8 +676,8 @@ func seedPreview(ctx context.Context, svc *executor.Service, sdb *sql.DB, inv *i
 	// pve: five containers, one exited, one with an image update.
 	seedExec(ctx, sdb, "docker.list", "pve", dockerListResult("26.1.4",
 		"a1b2c3d4e5f6\tpve-backup\tproxmox/proxmox-backup-server:3.0\trunning\tUp 2 months (healthy)\t0.0.0.0:1020->1020/tcp\t\t\t",
-		"b2c3d4e5f6a1\tpve-nginx\tnginx:1.25\trunning\tUp 5 days\t0.0.0.0:80->80/tcp\t\t\t",
-		"c3d4e5f6a1b2\tpve-redis\tredis:7\trunning\tUp 5 days (healthy)\t\t\t\t",
+		"b2c3d4e5f6a1	pve-nginx	nginx:1.25	running	Up 5 days	0.0.0.0:80->80/tcp	pve-stack	nginx	/opt/stack",
+		"c3d4e5f6a1b2	pve-redis	redis:7	running	Up 5 days (healthy)		pve-stack	redis	/opt/stack",
 		"d4e5f6a1b2c3\tpve-grafana\tgrafana/grafana:10.4\trunning\tUp 3 days\t0.0.0.0:3000->3000/tcp\t\t\t",
 		"e5f6a1b2c3d4\tpve-migration\tmigration:2024.05\texited\tExited (0) 2 hours ago\t\t\t\t"), ago(12*time.Minute), "finished", "finished", "success")
 	seedExec(ctx, sdb, "docker.check_updates", "pve", dockerUpdatesResult(
