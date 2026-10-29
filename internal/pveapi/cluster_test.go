@@ -262,8 +262,8 @@ func TestTokenSupplierError(t *testing.T) {
 
 func TestHAStatusPVE8(t *testing.T) {
 	f := newFakePVE(t, map[string]fakeRoute{
-		"/api2/json/cluster/ha/resources":       {body: fixture(t, "ha_resources_pve8.json")},
-		"/api2/json/cluster/ha/status/current":  {body: fixture(t, "ha_status_pve8.json")},
+		"/api2/json/cluster/ha/resources":      {body: fixture(t, "ha_resources_pve8.json")},
+		"/api2/json/cluster/ha/status/current": {body: fixture(t, "ha_status_pve8.json")},
 	})
 	c := newTestClient(t, f)
 
