@@ -1,0 +1,25 @@
+{
+  "data": [
+    {
+      "schedule": "daily",
+      "time": "02:00",
+      "mode": "snapshot",
+      "storage": "pbs1",
+      "all": 1,
+      "notes": "nightly PBS backup",
+      "retention-keep": 7
+    },
+    {
+      "schedule": "weekly",
+      "day": "sunday",
+      "time": "03:30",
+      "mode": "snapshot",
+      "storage": "local",
+      "pool": "webservers",
+      "volumes": [
+        "local:backup/vm-200-disk-0.vzdump"
+      ],
+      "bwlimit": 0
+    }
+  ]
+}

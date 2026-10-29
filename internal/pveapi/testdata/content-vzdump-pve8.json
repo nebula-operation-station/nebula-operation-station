@@ -1,0 +1,27 @@
+{
+  "data": [
+    {
+      "volid": "local:backup/vm-100-disk-0.vzdump",
+      "type": "backup",
+      "vmid": 100,
+      "ctime": 1761621600,
+      "size": 1073741824,
+      "notes": "nightly vzdump",
+      "filename": "vm-100-disk-0.vzdump",
+      "server": "pve1",
+      "storage": "local",
+      "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "volid": "local:backup/vm-200-disk-0.vzdump",
+      "type": "backup",
+      "vmid": 200,
+      "ctime": 1761535200,
+      "size": 536870912,
+      "filename": "vm-200-disk-0.vzdump",
+      "server": "pve1",
+      "storage": "local",
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ]
+}
