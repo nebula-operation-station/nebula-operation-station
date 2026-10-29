@@ -1,0 +1,5 @@
+[
+  {"node": "pve1", "status": "online", "type": "pve"},
+  {"node": "pve2", "status": "online", "type": "pve"},
+  {"node": "pve3", "status": "offline", "type": "pve"}
+]

@@ -6,35 +6,22 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 )
 
-// TriState is a three-valued yes/no/unknown flag for capability hints.
-//
-// TODO(p102): replace with pvecontract.TriState once
-// agent/p102-pve-contracts lands on main.
-type TriState int
+// TriState is the shared yes/no/unknown capability hint.
+type TriState = pvecontract.TriState
 
 // TriState values.
 const (
 	// TriUnknown means the capability could not be determined.
-	TriUnknown TriState = iota
+	TriUnknown = pvecontract.Unknown
 	// TriNo means the capability is known to be absent.
-	TriNo
+	TriNo = pvecontract.No
 	// TriYes means the capability is present.
-	TriYes
+	TriYes = pvecontract.Yes
 )
-
-// String renders the tri-state for display and logs.
-func (t TriState) String() string {
-	switch t {
-	case TriNo:
-		return "no"
-	case TriYes:
-		return "yes"
-	default:
-		return "unknown"
-	}
-}
 
 // Storage is one PVE storage with derived snapshot capability.
 type Storage struct {

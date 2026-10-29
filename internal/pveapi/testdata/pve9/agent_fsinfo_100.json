@@ -1,0 +1,10 @@
+{"result":[
+  {
+    "name":"System",
+    "mountpoint":"C:\\",
+    "type":"NTFS",
+    "total-bytes":68719476736,
+    "used-bytes":17179869184,
+    "disk":[]
+  }
+]}

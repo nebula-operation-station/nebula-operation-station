@@ -1,0 +1,5 @@
+[
+  {"node": "pve1", "status": "online", "type": "pve", "ip_address": "192.168.0.10"},
+  {"node": "pve2", "status": "online", "type": "pve", "ip_address": "192.168.0.11"},
+  {"node": "pve3", "status": "offline", "type": "pve", "ip_address": "192.168.0.12"}
+]
