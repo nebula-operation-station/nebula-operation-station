@@ -1,10 +1,10 @@
 {
   "data": [
-    { "time": 1761600000, "cpu": 0.15, "mem": 0.2452, "diskread": 1048576, "diskwrite": 2097152, "netin": 5242880, "netout": 2621440, "loadavg": 0.42, "swap": 0.0 },
-    { "time": 1761600060, "cpu": 0.18, "mem": 0.2501, "diskread": 0, "diskwrite": 1048576, "netin": 6291456, "netout": 3145728, "loadavg": 0.44, "swap": 0.0 },
-    { "time": 1761600120, "cpu": 0.2, "diskread": 524288, "diskwrite": 1572864, "netin": 4194304, "loadavg": 0.5, "swap": 0.0 },
-    { "time": 1761600180, "cpu": 0.17, "mem": 0.248, "diskread": 2097152, "diskwrite": 0, "netin": 7340032, "netout": 3670016, "loadavg": 0.47, "swap": 0.0 },
-    { "time": 1761600240, "cpu": 0.16, "mem": 0.2512, "diskread": 1048576, "diskwrite": 1048576, "netin": 5767168, "netout": 2883584, "loadavg": 0.45, "swap": 0.0 }
+    { "time": 1761600000, "cpu": 0.15, "memused": 16180019132, "memtotal": 65987027456, "diskread": 1048576, "diskwrite": 2097152, "netin": 5242880, "netout": 2621440, "loadavg": 0.42, "swap": 0.0 },
+    { "time": 1761600060, "cpu": 0.18, "memused": 16503355566, "memtotal": 65987027456, "diskread": 0, "diskwrite": 1048576, "netin": 6291456, "netout": 3145728, "loadavg": 0.44, "swap": 0.0 },
+    { "time": 1761600120, "cpu": 0.2, "memtotal": 65987027456, "diskread": 524288, "diskwrite": 1572864, "netin": 4194304, "loadavg": 0.5, "swap": 0.0 },
+    { "time": 1761600180, "cpu": 0.17, "memused": 16364782809, "memtotal": 65987027456, "diskread": 2097152, "diskwrite": 0, "netin": 7340032, "netout": 3670016, "loadavg": 0.47, "swap": 0.0 },
+    { "time": 1761600240, "cpu": 0.16, "memused": 16575941296, "diskread": 1048576, "diskwrite": 1048576, "netin": 5767168, "netout": 2883584, "loadavg": 0.45, "swap": 0.0 }
   ],
   "errors": null,
   "status": "OK",

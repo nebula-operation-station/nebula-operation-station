@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"path"
@@ -109,7 +110,8 @@ func WithPerCallTimeout(d time.Duration) Option {
 // NewMetricsClient builds a MetricsClient. base is the PVE API root,
 // for example "https://pve.example.lan:8006/api2/json". It must be an
 // absolute http(s) URL without user info: credentials never follow API
-// URLs (ADR 0006). hc must not be nil.
+// URLs (ADR 0006). hc must not be nil. The client is cloned and
+// redirects are disabled so authentication stays at the configured endpoint.
 func NewMetricsClient(base string, hc *http.Client, auth AuthHeaderSupplier, opts ...Option) (*MetricsClient, error) {
 	if hc == nil {
 		return nil, fmt.Errorf("%w: nil http client", ErrBadParam)
@@ -119,7 +121,7 @@ func NewMetricsClient(base string, hc *http.Client, auth AuthHeaderSupplier, opt
 	}
 	u, err := url.Parse(base)
 	if err != nil {
-		return nil, fmt.Errorf("%w: base URL: %v", ErrBadParam, err)
+		return nil, fmt.Errorf("%w: malformed base URL", ErrBadParam)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return nil, fmt.Errorf("%w: base URL scheme %q", ErrBadParam, u.Scheme)
@@ -130,9 +132,13 @@ func NewMetricsClient(base string, hc *http.Client, auth AuthHeaderSupplier, opt
 	if u.User != nil {
 		return nil, fmt.Errorf("%w: base URL must not carry user info", ErrBadParam)
 	}
+	httpClient := *hc
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	c := &MetricsClient{
 		base:    strings.TrimRight(base, "/"),
-		http:    hc,
+		http:    &httpClient,
 		auth:    auth,
 		maxBody: defaultMaxBody,
 		timeout: defaultTimeout,
@@ -175,7 +181,7 @@ func (c *MetricsClient) doGet(ctx context.Context, endpointPath string, query ur
 
 	u, err := url.Parse(c.base)
 	if err != nil { // unreachable: base validated in the constructor
-		return nil, fmt.Errorf("%w: base URL: %v", ErrBadParam, err)
+		return nil, fmt.Errorf("%w: malformed base URL", ErrBadParam)
 	}
 	u.Path = path.Join(u.Path, endpointPath)
 	if len(query) > 0 {
@@ -294,19 +300,21 @@ type NodeMetrics struct {
 }
 
 // GuestMetrics is the normalized current status of a QEMU or LXC guest.
-// Missing fields stay nil, as in NodeMetrics.
+// Missing fields stay nil. Memory and allocation are bytes; the I/O
+// fields are cumulative byte counters since guest process start, not rates.
+// Rates in bytes per second are available through GuestRRDData.
 type GuestMetrics struct {
-	Node      string
-	Kind      GuestKind
-	VMID      int
-	Status    string // raw PVE status, for example "running" or "stopped"
-	CPU       *float64
-	MemUsed   *int64
-	MemTotal  *int64
-	DiskRead  *int64
-	DiskWrite *int64
-	NetIn     *int64
-	NetOut    *int64
+	Node           string
+	Kind           GuestKind
+	VMID           int
+	Status         string // raw PVE status, for example "running" or "stopped"
+	CPU            *float64
+	MemUsed        *int64
+	MemTotal       *int64
+	DiskReadBytes  *int64
+	DiskWriteBytes *int64
+	NetInBytes     *int64
+	NetOutBytes    *int64
 	// DiskAllocated is the guest's configured PVE disk size in bytes
 	// (PVE "maxdisk"). It is an ALLOCATION, not filesystem usage: it
 	// must never be rendered as a DISK usage percentage or bar.
@@ -323,7 +331,7 @@ func checkCPU(endpointPath string, field string, v *float64) error {
 	if v == nil {
 		return nil
 	}
-	if *v < 0 || *v > 1 {
+	if math.IsNaN(*v) || math.IsInf(*v, 0) || *v < 0 || *v > 1 {
 		return fmt.Errorf("%w: %s: %s=%g outside [0,1]", ErrInvalidRange, endpointPath, field, *v)
 	}
 	return nil
@@ -336,6 +344,20 @@ func checkBytes(endpointPath string, field string, v *int64) error {
 	}
 	if *v < 0 {
 		return fmt.Errorf("%w: %s: %s=%d negative", ErrInvalidRange, endpointPath, field, *v)
+	}
+	return nil
+}
+
+// maxRRDBytes is the exclusive upper bound for byte averages. It keeps
+// values within the domain of the int64 byte counts used by status reads.
+const maxRRDBytes = 0x1p63
+
+func checkRRDBytes(endpointPath string, field string, v *float64) error {
+	if v == nil {
+		return nil
+	}
+	if math.IsNaN(*v) || math.IsInf(*v, 0) || *v < 0 || *v >= maxRRDBytes {
+		return fmt.Errorf("%w: %s: %s outside byte range", ErrInvalidRange, endpointPath, field)
 	}
 	return nil
 }
@@ -461,15 +483,15 @@ func (c *MetricsClient) GuestStatus(ctx context.Context, node string, kind Guest
 	}
 	m := GuestMetrics{
 		Node: node, Kind: kind, VMID: vmid,
-		Status:        status,
-		CPU:           raw.CPU,
-		MemUsed:       raw.Mem,
-		MemTotal:      raw.MaxMem,
-		DiskRead:      raw.DiskRead,
-		DiskWrite:     raw.DiskWrite,
-		NetIn:         raw.NetIn,
-		NetOut:        raw.NetOut,
-		DiskAllocated: raw.MaxDisk,
+		Status:         status,
+		CPU:            raw.CPU,
+		MemUsed:        raw.Mem,
+		MemTotal:       raw.MaxMem,
+		DiskReadBytes:  raw.DiskRead,
+		DiskWriteBytes: raw.DiskWrite,
+		NetInBytes:     raw.NetIn,
+		NetOutBytes:    raw.NetOut,
+		DiskAllocated:  raw.MaxDisk,
 	}
 	return m, nil
 }
@@ -477,16 +499,16 @@ func (c *MetricsClient) GuestStatus(ctx context.Context, node string, kind Guest
 // --- RRD endpoints ---
 
 // nodeRRDPointRaw is one point of GET /nodes/{node}/rrddata.
-// PVE node RRD "mem" is a FRACTION of total memory (0..1), unlike guest
-// RRD where "mem" is bytes.
+// PVE node RRD "memused" and "memtotal" are byte averages.
 type nodeRRDPointRaw struct {
 	Time      *int64   `json:"time"`
 	CPU       *float64 `json:"cpu"`
-	Mem       *float64 `json:"mem"`
-	DiskRead  *int64   `json:"diskread"`
-	DiskWrite *int64   `json:"diskwrite"`
-	NetIn     *int64   `json:"netin"`
-	NetOut    *int64   `json:"netout"`
+	MemUsed   *float64 `json:"memused"`
+	MemTotal  *float64 `json:"memtotal"`
+	DiskRead  *float64 `json:"diskread"`
+	DiskWrite *float64 `json:"diskwrite"`
+	NetIn     *float64 `json:"netin"`
+	NetOut    *float64 `json:"netout"`
 }
 
 // guestRRDPointRaw is one point of
@@ -495,27 +517,27 @@ type nodeRRDPointRaw struct {
 type guestRRDPointRaw struct {
 	Time      *int64   `json:"time"`
 	CPU       *float64 `json:"cpu"`
-	Mem       *int64   `json:"mem"`
-	MaxMem    *int64   `json:"maxmem"`
-	DiskRead  *int64   `json:"diskread"`
-	DiskWrite *int64   `json:"diskwrite"`
-	NetIn     *int64   `json:"netin"`
-	NetOut    *int64   `json:"netout"`
+	Mem       *float64 `json:"mem"`
+	MaxMem    *float64 `json:"maxmem"`
+	DiskRead  *float64 `json:"diskread"`
+	DiskWrite *float64 `json:"diskwrite"`
+	NetIn     *float64 `json:"netin"`
+	NetOut    *float64 `json:"netout"`
 }
 
 // RRDPoint is one normalized PVE RRD sample from the AVERAGE sets.
 // Missing fields stay nil; a missing point is never filled with zero.
 // CPU is a fraction in [0,1]; memory is in bytes; disk and net rates
-// are in bytes per second.
+// are in bytes per second. Fractional averages are preserved.
 type RRDPoint struct {
 	Time      time.Time // unix seconds of the sample
 	CPU       *float64
-	MemUsed   *int64
-	MemTotal  *int64
-	DiskRead  *int64
-	DiskWrite *int64
-	NetIn     *int64
-	NetOut    *int64
+	MemUsed   *float64
+	MemTotal  *float64
+	DiskRead  *float64
+	DiskWrite *float64
+	NetIn     *float64
+	NetOut    *float64
 }
 
 func (p nodeRRDPointRaw) validate(endpointPath string, i int) error {
@@ -525,16 +547,15 @@ func (p nodeRRDPointRaw) validate(endpointPath string, i int) error {
 	if err := checkCPU(endpointPath, fmt.Sprintf("point[%d].cpu", i), p.CPU); err != nil {
 		return err
 	}
-	if p.Mem != nil && (*p.Mem < 0 || *p.Mem > 1) {
-		return fmt.Errorf("%w: %s: point[%d].mem=%g outside [0,1]", ErrInvalidRange, endpointPath, i, *p.Mem)
-	}
-	for field, v := range map[string]*int64{
+	for field, v := range map[string]*float64{
+		"memused":   p.MemUsed,
+		"memtotal":  p.MemTotal,
 		"diskread":  p.DiskRead,
 		"diskwrite": p.DiskWrite,
 		"netin":     p.NetIn,
 		"netout":    p.NetOut,
 	} {
-		if err := checkBytes(endpointPath, fmt.Sprintf("point[%d].%s", i, field), v); err != nil {
+		if err := checkRRDBytes(endpointPath, fmt.Sprintf("point[%d].%s", i, field), v); err != nil {
 			return err
 		}
 	}
@@ -548,7 +569,7 @@ func (p guestRRDPointRaw) validate(endpointPath string, i int) error {
 	if err := checkCPU(endpointPath, fmt.Sprintf("point[%d].cpu", i), p.CPU); err != nil {
 		return err
 	}
-	for field, v := range map[string]*int64{
+	for field, v := range map[string]*float64{
 		"mem":       p.Mem,
 		"maxmem":    p.MaxMem,
 		"diskread":  p.DiskRead,
@@ -556,7 +577,7 @@ func (p guestRRDPointRaw) validate(endpointPath string, i int) error {
 		"netin":     p.NetIn,
 		"netout":    p.NetOut,
 	} {
-		if err := checkBytes(endpointPath, fmt.Sprintf("point[%d].%s", i, field), v); err != nil {
+		if err := checkRRDBytes(endpointPath, fmt.Sprintf("point[%d].%s", i, field), v); err != nil {
 			return err
 		}
 	}
@@ -564,10 +585,10 @@ func (p guestRRDPointRaw) validate(endpointPath string, i int) error {
 }
 
 // NodeRRDData reads and normalizes GET /nodes/{node}/rrddata for the
-// given timeframe (hour or day, AVERAGE sets). memTotalBytes is the
-// node's total memory in bytes (from NodeStatus); it converts PVE's
-// fractional node RRD "mem" values into used bytes. If it is not
-// positive, MemUsed stays nil rather than being guessed.
+// given timeframe (hour or day, AVERAGE sets). Memory bytes come from
+// each sample's memused and memtotal fields. memTotalBytes is retained
+// for call compatibility and must be non-negative; it does not fill or
+// override missing RRD values.
 //
 // A successful response with no points returns an empty slice, not an
 // error (empty is distinct from unavailable).
@@ -598,6 +619,8 @@ func (c *MetricsClient) NodeRRDData(ctx context.Context, node string, tf Timefra
 		}
 		p := RRDPoint{
 			CPU:       r.CPU,
+			MemUsed:   r.MemUsed,
+			MemTotal:  r.MemTotal,
 			DiskRead:  r.DiskRead,
 			DiskWrite: r.DiskWrite,
 			NetIn:     r.NetIn,
@@ -605,14 +628,6 @@ func (c *MetricsClient) NodeRRDData(ctx context.Context, node string, tf Timefra
 		}
 		if r.Time != nil {
 			p.Time = time.Unix(*r.Time, 0).UTC()
-		}
-		if r.Mem != nil && memTotalBytes > 0 {
-			used := int64(*r.Mem * float64(memTotalBytes))
-			p.MemUsed = &used
-		}
-		if memTotalBytes > 0 {
-			total := memTotalBytes
-			p.MemTotal = &total
 		}
 		points = append(points, p)
 	}
