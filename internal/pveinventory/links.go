@@ -433,7 +433,7 @@ func (s *Store) SuggestHosts(ctx context.Context, remoteID string, vmid, generat
 		return nil, fmt.Errorf("pveinventory: list ipam assets: %w", err)
 	}
 	hostsByAssetMAC := map[string][]string{} // normalized mac -> host ids
-	hostsByAssetIP := map[string][]string{} // lowercased ip -> host ids
+	hostsByAssetIP := map[string][]string{}  // lowercased ip -> host ids
 	for _, a := range assets {
 		if a.HostID == "" {
 			continue
