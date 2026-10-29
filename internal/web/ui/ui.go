@@ -331,6 +331,7 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("GET /history", h.handleHistory)
 	mux.HandleFunc("GET /settings", h.handleSettingsPage)
 	mux.HandleFunc("POST /settings/appearance", h.handleSettingsAppearance)
+	mux.HandleFunc("POST /ui/nav", h.handleNav)
 	// Network: assets and IPAM-light (M9-1).
 	mux.HandleFunc("GET /network", h.handleNetworkPage)
 	mux.HandleFunc("GET /network/n/{id}", h.handleNetworkDetail)
@@ -390,6 +391,10 @@ type pageData struct {
 	// <html> data-theme attribute. render fills it from the nebula_theme
 	// cookie when a handler leaves it empty.
 	Theme string
+	// NavCollapsed is true when the nebula_nav cookie says the sidebar is
+	// collapsed (icons only); the layout renders the collapsed state so
+	// the first paint is correct (no client-side flicker).
+	NavCollapsed bool
 	// Content is the content template name to render inside the layout.
 	Content string
 	// Bare pages (login, setup) are shown without the navigation.
@@ -621,6 +626,7 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, data pageData) 
 	if data.Theme == "" {
 		data.Theme = themeFromRequest(r)
 	}
+	data.NavCollapsed = navStateFromRequest(r) == navCollapsed
 	set, ok := h.pages[data.Content]
 	if !ok {
 		http.Error(w, "internal error: unknown page", http.StatusInternalServerError)

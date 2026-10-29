@@ -8,56 +8,65 @@
 </head>
 <body>
   {{if not .Bare}}
-  <div class="app">
-    <aside class="sidebar">
+  <div class="app{{if .NavCollapsed}} app--nav-collapsed{{end}}">
+    <aside class="sidebar" id="sidebar">
       <div class="sidebar__head">
-        <a class="sidebar__brand" href="/dashboard">
-          <svg class="sidebar__icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><circle cx="12" cy="12" r="3"></circle></svg>
-          <span>Nebula</span>
+        <a class="sidebar__brand" href="/dashboard"{{if .NavCollapsed}} title="Nebula"{{end}}>
+          <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-orbit"></use></svg>
+          <span class="sidebar__text">Nebula</span>
         </a>
-        <button type="button" class="topbar__menu" id="nav-toggle" aria-label="Toggle navigation" aria-expanded="true" aria-controls="sidebar-nav">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"></line><line x1="4" y1="12" x2="20" y2="12"></line><line x1="4" y1="17" x2="20" y2="17"></line></svg>
+        <button type="button" class="topbar__menu sidebar__collapse" id="nav-collapse"
+          aria-label="{{if .NavCollapsed}}Expand navigation{{else}}Collapse navigation{{end}}"
+          aria-expanded="{{if .NavCollapsed}}false{{else}}true{{end}}" aria-controls="sidebar-nav">
+          <svg aria-hidden="true"><use href="/static/icons.svg#i-panel-left-{{if .NavCollapsed}}open{{else}}close{{end}}"></use></svg>
+        </button>
+        <button type="button" class="topbar__menu sidebar__close" id="nav-close" aria-label="Close navigation">
+          <svg aria-hidden="true"><use href="/static/icons.svg#i-x"></use></svg>
         </button>
       </div>
       <nav class="sidebar__nav" id="sidebar-nav" aria-label="Main navigation">
-        <a class="sidebar__item{{if eq .Active "dashboard"}} sidebar__item--active{{end}}" href="/dashboard">
-          <svg class="sidebar__icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect></svg>
+        <a class="sidebar__item{{if eq .Active "dashboard"}} sidebar__item--active{{end}}" href="/dashboard"{{if .NavCollapsed}} title="Dashboard"{{end}}{{if eq .Active "dashboard"}} aria-current="page"{{end}}>
+          <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-layout-dashboard"></use></svg>
           <span>Dashboard</span>
         </a>
-        <a class="sidebar__item{{if eq .Active "inventory"}} sidebar__item--active{{end}}" href="/inventory">
-          <svg class="sidebar__icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="7"></rect><rect x="3" y="13" width="18" height="7"></rect><line x1="7" y1="7.5" x2="7" y2="7.5"></line><line x1="7" y1="16.5" x2="7" y2="16.5"></line></svg>
+        <a class="sidebar__item{{if eq .Active "inventory"}} sidebar__item--active{{end}}" href="/inventory"{{if .NavCollapsed}} title="Inventory"{{end}}{{if eq .Active "inventory"}} aria-current="page"{{end}}>
+          <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-server"></use></svg>
           <span>Inventory</span>
         </a>
-        <a class="sidebar__item{{if eq .Active "chart"}} sidebar__item--active{{end}}" href="/inventory/chart">
-          <svg class="sidebar__icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="8" height="6"></rect><rect x="14" y="3" width="7" height="5"></rect><rect x="14" y="10" width="7" height="5"></rect><rect x="14" y="17" width="7" height="5"></rect><line x1="11" y1="8" x2="14" y2="5.5"></line><line x1="11" y1="8" x2="14" y2="12.5"></line><line x1="11" y1="8" x2="14" y2="19.5"></line></svg>
+        <a class="sidebar__item{{if eq .Active "chart"}} sidebar__item--active{{end}}" href="/inventory/chart"{{if .NavCollapsed}} title="Inventory chart"{{end}}{{if eq .Active "chart"}} aria-current="page"{{end}}>
+          <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-network"></use></svg>
           <span>Inventory chart</span>
         </a>
-        <a class="sidebar__item{{if eq .Active "network"}} sidebar__item--active{{end}}" href="/network">
-          <svg class="sidebar__icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><line x1="3" y1="12" x2="21" y2="12"></line><path d="M12 3 a14 14 0 0 1 0 18 a14 14 0 0 1 0 -18"></path></svg>
+        <a class="sidebar__item{{if eq .Active "network"}} sidebar__item--active{{end}}" href="/network"{{if .NavCollapsed}} title="Network"{{end}}{{if eq .Active "network"}} aria-current="page"{{end}}>
+          <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-globe"></use></svg>
           <span>Network</span>
         </a>
-        <a class="sidebar__item{{if eq .Active "operations"}} sidebar__item--active{{end}}" href="/operations">
-          <svg class="sidebar__icon" viewBox="0 0 24 24" aria-hidden="true"><polygon points="7 5 19 12 7 19"></polygon></svg>
+        <a class="sidebar__item{{if eq .Active "operations"}} sidebar__item--active{{end}}" href="/operations"{{if .NavCollapsed}} title="Operations"{{end}}{{if eq .Active "operations"}} aria-current="page"{{end}}>
+          <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-play"></use></svg>
           <span>Operations</span>
         </a>
-        <a class="sidebar__item{{if eq .Active "runbooks"}} sidebar__item--active{{end}}" href="/runbooks">
-          <svg class="sidebar__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4 h11 a2 2 0 0 1 2 2 v14 H7 a2 2 0 0 1 -2 -2 z"></path><line x1="9" y1="9" x2="15" y2="9"></line><line x1="9" y1="13" x2="15" y2="13"></line></svg>
+        <a class="sidebar__item{{if eq .Active "runbooks"}} sidebar__item--active{{end}}" href="/runbooks"{{if .NavCollapsed}} title="Runbooks / Modules"{{end}}{{if eq .Active "runbooks"}} aria-current="page"{{end}}>
+          <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-book-open"></use></svg>
           <span>Runbooks / Modules</span>
         </a>
-        <a class="sidebar__item{{if eq .Active "history"}} sidebar__item--active{{end}}" href="/history">
-          <svg class="sidebar__icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><polyline points="12 7 12 12 15.5 14"></polyline></svg>
+        <a class="sidebar__item{{if eq .Active "history"}} sidebar__item--active{{end}}" href="/history"{{if .NavCollapsed}} title="History"{{end}}{{if eq .Active "history"}} aria-current="page"{{end}}>
+          <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-history"></use></svg>
           <span>History</span>
         </a>
-        <a class="sidebar__item{{if eq .Active "settings"}} sidebar__item--active{{end}}" href="/settings">
-          <svg class="sidebar__icon" viewBox="0 0 24 24" aria-hidden="true"><line x1="4" y1="8" x2="20" y2="8"></line><line x1="4" y1="16" x2="20" y2="16"></line><circle cx="9" cy="8" r="2.2"></circle><circle cx="15" cy="16" r="2.2"></circle></svg>
+        <a class="sidebar__item{{if eq .Active "settings"}} sidebar__item--active{{end}}" href="/settings"{{if .NavCollapsed}} title="Settings"{{end}}{{if eq .Active "settings"}} aria-current="page"{{end}}>
+          <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-settings"></use></svg>
           <span>Settings</span>
         </a>
       </nav>
     </aside>
     <div class="app__body">
       <header class="topbar">
+        <button type="button" class="topbar__menu topbar__menu--mobile" id="nav-menu"
+          aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">
+          <svg aria-hidden="true"><use href="/static/icons.svg#i-menu"></use></svg>
+        </button>
         <form class="topbar__search nav__search" action="/search" method="get" role="search">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="16" y1="16" x2="21" y2="21"></line></svg>
+          <svg aria-hidden="true"><use href="/static/icons.svg#i-search"></use></svg>
           <input type="search" name="q" maxlength="100" placeholder="Search hosts, IPs, assets …" aria-label="Search"{{with .Search}} value="{{.Query}}"{{end}}>
         </form>
         <button type="button" class="topbar__logout button button--secondary button--small" id="logout">Log out</button>
@@ -66,6 +75,7 @@
         {{template "content" .}}
       </main>
     </div>
+    <div class="sidebar__backdrop" id="nav-backdrop" aria-hidden="true"></div>
   </div>
   {{else}}
   <main class="main main--bare">
