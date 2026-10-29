@@ -332,6 +332,22 @@ service ExecutorService {
   // Backup (M10-2). Role: admin. The executor's part of `nebula backup`:
   // a checked snapshot of executor.db and the encrypted SSH key files.
   rpc BackupExecutor(BackupExecutorRequest) returns (BackupExecutorResponse);
+
+  // PVE provider reads (ADR 0006, P1-05). Role: server, admin,
+  // pve-collector. Metadata only: which remotes exist, their kind, ordered
+  // endpoints, trust generation and state. The trust pin is a SHA-256
+  // fingerprint — a trust identifier, not a secret. No credentials, no
+  // trust material, no raw API output.
+  rpc ListPVERemotes(ListPVERemotesRequest) returns (ListPVERemotesResponse);
+
+  // PVE provider reads (ADR 0006, P1-05). Role: admin, pve-collector. One
+  // typed read against one remote. The server never calls this: it writes
+  // poll requests to the spool and the pve-collector schedules the reads.
+  // There is no generic HTTP proxy and no method reveals secrets. The
+  // executor validates remote_id, method and parameter shape and returns
+  // InvalidArgument for malformed requests; until the pveapi wiring lands
+  // (P1-07) it answers Unimplemented for valid requests.
+  rpc ReadPVE(ReadPVERequest) returns (ReadPVEResponse);
 }
 
 enum RiskClass {
@@ -1431,4 +1447,325 @@ message BackupExecutorResponse {
   repeated BackupFile files = 1;
   int32 schema_version = 2;
   string version = 3;
+}
+
+// PVE provider read RPCs (ADR 0006). The executor alone talks to PVE;
+// these messages are the typed read surface the pve-collector schedules.
+// Responses carry sanitized, pvecontract-shaped observation data: no
+// credentials, no raw API output, no task logs.
+
+// PVERemoteKind is the kind of a PVE remote.
+enum PVERemoteKind {
+  PVE_REMOTE_KIND_UNSPECIFIED = 0;
+  PVE_REMOTE_KIND_CLUSTER = 1;
+  PVE_REMOTE_KIND_STANDALONE = 2;
+}
+
+// PVERemoteState is the connection state of a remote.
+enum PVERemoteState {
+  PVE_REMOTE_STATE_UNSPECIFIED = 0;
+  PVE_REMOTE_STATE_ACTIVE = 1;
+  // BLOCKED: a changed pin, invalid chain or SAN mismatch blocks the whole
+  // remote persistently until an admin re-pins it.
+  PVE_REMOTE_STATE_BLOCKED = 2;
+}
+
+// PVEEndpoint is one ordered node API endpoint of a remote.
+message PVEEndpoint {
+  string host = 1;
+  uint32 port = 2;
+}
+
+// PVERemoteInfo is the nonsecret metadata of one PVE remote.
+message PVERemoteInfo {
+  string remote_id = 1;
+  string name = 2;
+  PVERemoteKind kind = 3;
+  repeated PVEEndpoint endpoints = 4;
+  // The SHA-256 fingerprint of the pinned CA (cluster) or leaf (standalone)
+  // certificate. A trust identifier, not a secret.
+  string trust_pin = 5;
+  uint64 trust_generation = 6;
+  PVERemoteState state = 7;
+}
+
+message ListPVERemotesRequest {}
+
+message ListPVERemotesResponse {
+  repeated PVERemoteInfo remotes = 1;
+}
+
+// PVEReadMethod is the typed enumeration method of one PVE remote. The set
+// is final (ADR 0006, P1-05): no free-form URL, no generic proxy.
+enum PVEReadMethod {
+  PVE_READ_METHOD_UNSPECIFIED = 0;
+  PVE_READ_METHOD_NODES = 1;
+  PVE_READ_METHOD_GUESTS = 2;
+  PVE_READ_METHOD_GUEST_CONFIG = 3;
+  PVE_READ_METHOD_GUEST_AGENT = 4;
+  PVE_READ_METHOD_STORAGE = 5;
+  PVE_READ_METHOD_SNAPSHOTS = 6;
+  PVE_READ_METHOD_CLUSTER = 7;
+  PVE_READ_METHOD_TASKS = 8;
+  PVE_READ_METHOD_BACKUPS = 9;
+  PVE_READ_METHOD_METRICS = 10;
+}
+
+// PVEDatasetState mirrors pvecontract.Availability: AVAILABLE with an empty
+// value means "nothing found"; UNAVAILABLE with a reason means "could not
+// be read".
+enum PVEDatasetState {
+  PVE_DATASET_STATE_UNSPECIFIED = 0;
+  PVE_DATASET_STATE_AVAILABLE = 1;
+  PVE_DATASET_STATE_UNAVAILABLE = 2;
+}
+
+// PVEReadNodeParams scopes NODES to one node (empty: all nodes).
+message PVEReadNodeParams {
+  string node = 1;
+}
+
+// PVEReadGuestParams scopes a guest method to one guest.
+message PVEReadGuestParams {
+  uint64 vmid = 1;
+}
+
+// ReadPVERequest is one typed read. Exactly the parameter shape the method
+// accepts may be set (see executor.ValidateReadPVERequest).
+message ReadPVERequest {
+  string remote_id = 1;
+  PVEReadMethod method = 2;
+  oneof params {
+    PVEReadNodeParams node = 3;
+    PVEReadGuestParams guest = 4;
+  }
+}
+
+// ReadPVEResponse is one pvecontract-shaped observation page for one
+// remote. Exactly one payload is set, matching the requested method.
+message ReadPVEResponse {
+  string remote_id = 1;
+  int64 observed_at_unix = 2;
+  uint64 collection_generation = 3;
+  oneof payload {
+    PVENodes nodes = 4;
+    PVEGuests guests = 5;
+    PVEGuestConfig guest_config = 6;
+    PVEGuestAgent guest_agent = 7;
+    PVEStorages storages = 8;
+    PVESnapshots snapshots = 9;
+    PVECluster cluster = 10;
+    PVETasks tasks = 11;
+    PVEBackups backups = 12;
+    PVEMetrics metrics = 13;
+  }
+}
+
+// PVENodes is the 60-second node inventory.
+message PVENodes {
+  PVEDatasetState state = 1;
+  string reason = 2;
+  repeated PVENode nodes = 3;
+}
+
+message PVENode {
+  string node = 1;
+  string status = 2;
+  uint64 uptime_seconds = 3;
+  uint32 cpu_count = 4;
+  uint64 ram_total_bytes = 5;
+  uint64 ram_used_bytes = 6;
+  // The 15-minute node details read.
+  PVENodeDetails details = 7;
+}
+
+message PVENodeDetails {
+  PVEDatasetState state = 1;
+  string reason = 2;
+  string pve_version = 3;
+  string kernel_version = 4;
+}
+
+// PVEGuests is the 60-second guest inventory.
+message PVEGuests {
+  PVEDatasetState state = 1;
+  string reason = 2;
+  repeated PVEGuest guests = 3;
+}
+
+message PVEGuest {
+  uint64 vmid = 1;
+  string kind = 2;
+  string node = 3;
+  string name = 4;
+  string status = 5;
+  uint64 generation = 6;
+  string uuid = 7;
+}
+
+// PVEGuestConfig is the 5-minute guest configuration read for one guest.
+message PVEGuestConfig {
+  PVEDatasetState state = 1;
+  string reason = 2;
+  uint64 vmid = 3;
+  uint32 cpu_count = 4;
+  uint64 ram_bytes = 5;
+  repeated PVEDisk disks = 6;
+  repeated string boot_order = 7;
+  repeated PVEHostPCI hostpci = 8;
+  PVECloudInitIP cloud_init_ip = 9;
+  repeated string tags = 10;
+  string pool = 11;
+  PVEGuestCapabilities capabilities = 12;
+}
+
+message PVEDisk {
+  string storage = 1;
+  string volume = 2;
+  string format = 3;
+  uint64 size_bytes = 4;
+}
+
+message PVEHostPCI {
+  string id = 1;
+  string device = 2;
+  string target = 3;
+}
+
+message PVECloudInitIP {
+  string ip = 1;
+  string gateway = 2;
+  repeated string nameservers = 3;
+}
+
+// PVEGuestCapabilities mirrors pvecontract.GuestCapabilities (tri-state
+// strings: "yes", "no", "unknown").
+message PVEGuestCapabilities {
+  string snapshots = 1;
+  string live_migration = 2;
+  string ram_snapshots = 3;
+}
+
+// PVEGuestAgent is the QEMU guest agent summary for one guest.
+message PVEGuestAgent {
+  PVEDatasetState state = 1;
+  string reason = 2;
+  uint64 vmid = 3;
+  string hostname = 4;
+  string os = 5;
+  repeated PVEFilesystem filesystems = 6;
+}
+
+message PVEFilesystem {
+  string mount_point = 1;
+  string fstype = 2;
+  uint64 size_bytes = 3;
+  uint64 used_bytes = 4;
+}
+
+// PVEStorages is the 5-minute storage read.
+message PVEStorages {
+  PVEDatasetState state = 1;
+  string reason = 2;
+  repeated PVEStorage storages = 3;
+}
+
+message PVEStorage {
+  string name = 1;
+  string type = 2;
+  string format = 3;
+  repeated string content = 4;
+  bool active = 5;
+  uint64 size_bytes = 6;
+  uint64 free_bytes = 7;
+}
+
+// PVESnapshots is the 5-minute snapshot read for one guest.
+message PVESnapshots {
+  PVEDatasetState state = 1;
+  string reason = 2;
+  uint64 vmid = 3;
+  repeated PVESnapshot snapshots = 4;
+}
+
+message PVESnapshot {
+  string name = 1;
+  int64 time_unix = 2;
+  string parent = 3;
+  bool has_ram = 4;
+}
+
+// PVECluster is the 60-second cluster and HA read.
+message PVECluster {
+  PVEDatasetState state = 1;
+  string reason = 2;
+  repeated PVEClusterNode nodes = 3;
+  string quorum = 4;
+  repeated PVEHAResource ha_resources = 5;
+}
+
+message PVEClusterNode {
+  string node = 1;
+  string status = 2;
+  bool vote = 3;
+  bool maintenance = 4;
+}
+
+message PVEHAResource {
+  string id = 1;
+  string kind = 2;
+  uint64 vmid = 3;
+  string desired = 4;
+  string observed = 5;
+  string node = 6;
+}
+
+// PVETasks is the bounded task metadata read. Never raw task logs.
+message PVETasks {
+  PVEDatasetState state = 1;
+  string reason = 2;
+  repeated PVETask tasks = 3;
+}
+
+message PVETask {
+  string node = 1;
+  string actor = 2;
+  string type = 3;
+  string target = 4;
+  int64 started_unix = 5;
+  string exit_status = 6;
+}
+
+// PVEBackups is the 5-minute nonsecret backup evidence read for one guest.
+message PVEBackups {
+  PVEDatasetState state = 1;
+  string reason = 2;
+  uint64 vmid = 3;
+  repeated PVEBackupEvidence backups = 4;
+}
+
+message PVEBackupEvidence {
+  string source = 1;
+  string kind = 2;
+  string status = 3;
+  string name = 4;
+  int64 started_unix = 5;
+  int64 finished_unix = 6;
+  string verified = 7;
+}
+
+// PVEMetrics is one bounded metrics read (guest; vmid 0 in the request
+// means node scope). Metric names and units are fixed by the executor;
+// values are normalized (ADR 0006, P1-21).
+message PVEMetrics {
+  PVEDatasetState state = 1;
+  string reason = 2;
+  uint64 vmid = 3;
+  repeated PVEMetric metrics = 4;
+}
+
+message PVEMetric {
+  string name = 1;
+  string unit = 2;
+  double value = 3;
 }

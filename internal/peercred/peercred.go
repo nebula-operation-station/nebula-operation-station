@@ -36,6 +36,11 @@ type Role string
 const (
 	RoleServer Role = "server"
 	RoleAdmin  Role = "admin"
+	// RolePVECollector is the UID of the pve-collector process (ADR 0006,
+	// P1-05). It may call ONLY ListPVERemotes and ReadPVE: the typed PVE
+	// read surface. It never runs execution, never manages keys or remotes,
+	// and never sees credentials — the executor alone talks to PVE.
+	RolePVECollector Role = "pve-collector"
 )
 
 // AuthInfo carries the peer's credentials as reported by the kernel at

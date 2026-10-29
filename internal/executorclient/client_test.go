@@ -29,6 +29,8 @@ import (
 	"github.com/descope/virtualwebauthn"
 	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
@@ -302,6 +304,85 @@ func TestNewDialsVerifiedSocket(t *testing.T) {
 	}
 	if st.GetUnlocked() {
 		t.Fatal("executor should start locked")
+	}
+}
+
+func TestNewPVECollectorWithCollectorOnlyUID(t *testing.T) {
+	h := newHarness(t, harnessOptions{
+		uidRoles: map[uint32][]peercred.Role{uint32(os.Getuid()): {peercred.RolePVECollector}},
+	})
+	o := Options{SocketPath: h.socket, ExecutorUser: currentUser(t)}
+	if c, err := New(h.ctx(), o); !errors.Is(err, ErrPermissionDenied) {
+		if c != nil {
+			c.Close()
+		}
+		t.Fatalf("ordinary client with collector-only UID: want ErrPermissionDenied, got %v", err)
+	}
+	c, err := NewPVECollector(h.ctx(), o)
+	if err != nil {
+		t.Fatalf("new collector client: %v", err)
+	}
+	t.Cleanup(func() { c.Close() })
+	if _, err := c.ListPVERemotes(h.ctx(), &pb.ListPVERemotesRequest{}); status.Code(err) != codes.Unimplemented {
+		t.Fatalf("collector ListPVERemotes: want Unimplemented, got %v", err)
+	}
+	if _, err := c.ReadPVE(h.ctx(), &pb.ReadPVERequest{RemoteId: "pve-1", Method: pb.PVEReadMethod_PVE_READ_METHOD_NODES}); status.Code(err) != codes.Unimplemented {
+		t.Fatalf("collector ReadPVE: want Unimplemented, got %v", err)
+	}
+	if _, err := c.GetStatus(h.ctx(), &pb.GetStatusRequest{}); !errors.Is(err, ErrPermissionDenied) {
+		t.Fatalf("collector GetStatus: want ErrPermissionDenied, got %v", err)
+	}
+}
+
+func TestNewPVECollectorRefusesForeignSocket(t *testing.T) {
+	h := newHarness(t, harnessOptions{
+		uidRoles: map[uint32][]peercred.Role{uint32(os.Getuid()): {peercred.RolePVECollector}},
+	})
+	c, err := NewPVECollector(h.ctx(), Options{SocketPath: h.socket, ExecutorUser: otherUser(t)})
+	if c != nil {
+		c.Close()
+		t.Fatal("collector client accepted a socket served by the wrong user")
+	}
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("want ErrUnavailable, got %v", err)
+	}
+}
+
+type collectorProbeService struct {
+	pb.UnimplementedExecutorServiceServer
+	probeError error
+}
+
+func (s *collectorProbeService) ListPVERemotes(context.Context, *pb.ListPVERemotesRequest) (*pb.ListPVERemotesResponse, error) {
+	if s.probeError != nil {
+		return nil, s.probeError
+	}
+	return &pb.ListPVERemotesResponse{}, nil
+}
+
+func TestNewPVECollectorProbe(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		probeError error
+		wantError  error
+	}{
+		{name: "success"},
+		{name: "permission denied", probeError: status.Error(codes.PermissionDenied, "denied"), wantError: ErrPermissionDenied},
+		{name: "unavailable", probeError: status.Error(codes.Unavailable, "unavailable"), wantError: ErrUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			socket := startFake(t, &collectorProbeService{probeError: tc.probeError})
+			c, err := NewPVECollector(testCtx(t), Options{SocketPath: socket, ExecutorUser: currentUser(t)})
+			if c != nil {
+				defer c.Close()
+			}
+			if !errors.Is(err, tc.wantError) {
+				t.Fatalf("want %v, got %v", tc.wantError, err)
+			}
+			if tc.wantError != nil && c != nil {
+				t.Fatal("failed probe returned a client")
+			}
+		})
 	}
 }
 

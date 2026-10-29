@@ -90,6 +90,8 @@ const (
 	ExecutorService_RunScheduled_FullMethodName              = "/nebula.executor.v1.ExecutorService/RunScheduled"
 	ExecutorService_ListEvents_FullMethodName                = "/nebula.executor.v1.ExecutorService/ListEvents"
 	ExecutorService_BackupExecutor_FullMethodName            = "/nebula.executor.v1.ExecutorService/BackupExecutor"
+	ExecutorService_ListPVERemotes_FullMethodName            = "/nebula.executor.v1.ExecutorService/ListPVERemotes"
+	ExecutorService_ReadPVE_FullMethodName                   = "/nebula.executor.v1.ExecutorService/ReadPVE"
 )
 
 // ExecutorServiceClient is the client API for ExecutorService service.
@@ -337,6 +339,20 @@ type ExecutorServiceClient interface {
 	// Backup (M10-2). Role: admin. The executor's part of `nebula backup`:
 	// a checked snapshot of executor.db and the encrypted SSH key files.
 	BackupExecutor(ctx context.Context, in *BackupExecutorRequest, opts ...grpc.CallOption) (*BackupExecutorResponse, error)
+	// PVE provider reads (ADR 0006, P1-05). Role: server, admin,
+	// pve-collector. Metadata only: which remotes exist, their kind, ordered
+	// endpoints, trust generation and state. The trust pin is a SHA-256
+	// fingerprint — a trust identifier, not a secret. No credentials, no
+	// trust material, no raw API output.
+	ListPVERemotes(ctx context.Context, in *ListPVERemotesRequest, opts ...grpc.CallOption) (*ListPVERemotesResponse, error)
+	// PVE provider reads (ADR 0006, P1-05). Role: admin, pve-collector. One
+	// typed read against one remote. The server never calls this: it writes
+	// poll requests to the spool and the pve-collector schedules the reads.
+	// There is no generic HTTP proxy and no method reveals secrets. The
+	// executor validates remote_id, method and parameter shape and returns
+	// InvalidArgument for malformed requests; until the pveapi wiring lands
+	// (P1-07) it answers Unimplemented for valid requests.
+	ReadPVE(ctx context.Context, in *ReadPVERequest, opts ...grpc.CallOption) (*ReadPVEResponse, error)
 }
 
 type executorServiceClient struct {
@@ -1037,6 +1053,26 @@ func (c *executorServiceClient) BackupExecutor(ctx context.Context, in *BackupEx
 	return out, nil
 }
 
+func (c *executorServiceClient) ListPVERemotes(ctx context.Context, in *ListPVERemotesRequest, opts ...grpc.CallOption) (*ListPVERemotesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListPVERemotesResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ListPVERemotes_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ReadPVE(ctx context.Context, in *ReadPVERequest, opts ...grpc.CallOption) (*ReadPVEResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadPVEResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ReadPVE_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExecutorServiceServer is the server API for ExecutorService service.
 // All implementations must embed UnimplementedExecutorServiceServer
 // for forward compatibility.
@@ -1282,6 +1318,20 @@ type ExecutorServiceServer interface {
 	// Backup (M10-2). Role: admin. The executor's part of `nebula backup`:
 	// a checked snapshot of executor.db and the encrypted SSH key files.
 	BackupExecutor(context.Context, *BackupExecutorRequest) (*BackupExecutorResponse, error)
+	// PVE provider reads (ADR 0006, P1-05). Role: server, admin,
+	// pve-collector. Metadata only: which remotes exist, their kind, ordered
+	// endpoints, trust generation and state. The trust pin is a SHA-256
+	// fingerprint — a trust identifier, not a secret. No credentials, no
+	// trust material, no raw API output.
+	ListPVERemotes(context.Context, *ListPVERemotesRequest) (*ListPVERemotesResponse, error)
+	// PVE provider reads (ADR 0006, P1-05). Role: admin, pve-collector. One
+	// typed read against one remote. The server never calls this: it writes
+	// poll requests to the spool and the pve-collector schedules the reads.
+	// There is no generic HTTP proxy and no method reveals secrets. The
+	// executor validates remote_id, method and parameter shape and returns
+	// InvalidArgument for malformed requests; until the pveapi wiring lands
+	// (P1-07) it answers Unimplemented for valid requests.
+	ReadPVE(context.Context, *ReadPVERequest) (*ReadPVEResponse, error)
 	mustEmbedUnimplementedExecutorServiceServer()
 }
 
@@ -1498,6 +1548,12 @@ func (UnimplementedExecutorServiceServer) ListEvents(context.Context, *ListEvent
 }
 func (UnimplementedExecutorServiceServer) BackupExecutor(context.Context, *BackupExecutorRequest) (*BackupExecutorResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method BackupExecutor not implemented")
+}
+func (UnimplementedExecutorServiceServer) ListPVERemotes(context.Context, *ListPVERemotesRequest) (*ListPVERemotesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListPVERemotes not implemented")
+}
+func (UnimplementedExecutorServiceServer) ReadPVE(context.Context, *ReadPVERequest) (*ReadPVEResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReadPVE not implemented")
 }
 func (UnimplementedExecutorServiceServer) mustEmbedUnimplementedExecutorServiceServer() {}
 func (UnimplementedExecutorServiceServer) testEmbeddedByValue()                         {}
@@ -2762,6 +2818,42 @@ func _ExecutorService_BackupExecutor_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_ListPVERemotes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListPVERemotesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ListPVERemotes(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ListPVERemotes_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ListPVERemotes(ctx, req.(*ListPVERemotesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ReadPVE_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadPVERequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ReadPVE(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ReadPVE_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ReadPVE(ctx, req.(*ReadPVERequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ExecutorService_ServiceDesc is the grpc.ServiceDesc for ExecutorService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -3044,6 +3136,14 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "BackupExecutor",
 			Handler:    _ExecutorService_BackupExecutor_Handler,
+		},
+		{
+			MethodName: "ListPVERemotes",
+			Handler:    _ExecutorService_ListPVERemotes_Handler,
+		},
+		{
+			MethodName: "ReadPVE",
+			Handler:    _ExecutorService_ReadPVE_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
