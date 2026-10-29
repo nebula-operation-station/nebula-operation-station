@@ -60,6 +60,14 @@ type TaskList struct {
 // metadata only (actor, type, time, target, status); the client never
 // fetches task logs, task status detail or command output.
 type TaskSummary struct {
+	Actor        string
+	Target       string
+	VMID         uint64
+	StartedUnix  int64
+	FinishedUnix int64
+	// ExitStatus is the terminal task result; empty means no terminal
+	// result was observed. A result also requires valid start/end times.
+	ExitStatus string
 	// UPID is the validated raw UPID string.
 	UPID string
 	// Node is the node the task ran on.

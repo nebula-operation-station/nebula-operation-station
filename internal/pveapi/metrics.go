@@ -28,10 +28,6 @@ import (
 	"time"
 )
 
-// TODO(pvecontract): replace the local normalized types with
-// internal/pvecontract once P1-02 (contracts, branch
-// agent/p102-pve-contracts) lands on main; keep the normalization rules.
-
 // Sentinel errors. Callers branch on these with errors.Is.
 var (
 	// ErrBadParam marks a rejected request parameter (node name, vmid,
@@ -48,8 +44,8 @@ var (
 
 // The two guest types with status/RRD endpoints.
 const (
-	KindQEMU GuestKind = "qemu"
-	KindLXC  GuestKind = "lxc"
+	KindQEMU = KindQemu
+	KindLXC  = KindLxc
 )
 
 // Timeframe selects the resolution of an RRD read. PVE serves the

@@ -11,11 +11,6 @@
 // distinct from "empty" (a valid response with no entries). The client
 // never logs request headers or response bodies, and error messages never
 // contain response content.
-//
-// TODO(pvecontract): ticket P1-02 (internal/pvecontract) is not on main
-// yet. The result and limit types in this package are minimal local
-// definitions; once pvecontract lands, move the shared contract types there
-// and keep only the HTTP client in this package.
 package pveapi
 
 import (
@@ -64,7 +59,7 @@ var (
 	ErrMalformed = errors.New("pveapi: malformed response")
 )
 
-// do performs one GET against base+path. It returns the raw body, or a
+// clusterGet performs one GET against base+path. It returns the raw body, or a
 // non-empty reason when the dataset is unavailable (transport failure,
 // timeout, 404, non-2xx). It never includes headers or bodies in the
 // reason or in a returned error.

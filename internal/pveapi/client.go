@@ -10,12 +10,8 @@
 // responsibility: the client takes a ready *http.Client and a base URL.
 // It never logs request headers or response bodies.
 //
-// The response types (Node, Guest, GuestConfig, agent results) are
-// defined locally in this package.
-//
-// TODO(pvecontract): internal/pvecontract does not exist yet; when it is
-// introduced, move the shared PVE wire types there and switch this
-// package to use them.
+// Reader-specific response types are defined locally; shared capability
+// and backup observation types use internal/pvecontract.
 package pveapi
 
 import (
@@ -80,6 +76,11 @@ type TokenSupplier func(ctx context.Context) (string, error)
 // Client is a read-only Proxmox VE API client. It is safe for concurrent
 // use.
 type Client struct {
+	// TokenHeader supplies backup request credentials for callers without a context-aware supplier.
+	TokenHeader func() string
+	// MaxResponseBytes bounds backup responses; zero uses the backup default.
+	MaxResponseBytes int64
+
 	// HTTP is the transport. Required.
 	HTTP *http.Client
 	// BaseURL is the PVE API root, e.g.
@@ -256,19 +257,6 @@ func sanitizeText(s string, max int) string {
 		s = s[:cut] + ellipsis
 	}
 	return s
-}
-
-// sanitizeStrings sanitizes each element of a bounded string list; at most
-// n elements are kept, each at most max bytes.
-func sanitizeStrings(in []string, n, max int) []string {
-	if len(in) > n {
-		in = in[:n]
-	}
-	out := make([]string, len(in))
-	for i, s := range in {
-		out[i] = sanitizeText(s, max)
-	}
-	return out
 }
 
 // Identity and record limits.
