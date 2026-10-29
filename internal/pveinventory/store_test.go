@@ -296,11 +296,23 @@ func TestDatasetFailureIsAtomicAndIsolated(t *testing.T) {
 		t.Fatalf("expected 1 tombstoned guest, got %d", n)
 	}
 
-	// 3) A collector resends the same generation 1 (stale counter). The
-	// insert hits the primary key of the tombstone row, so the whole
-	// guests dataset must roll back. The node dataset (ingested earlier in
-	// the same call) must still commit.
-	obs3 := newObsA().nodes(mkNode("p2")).guests(mkGuest(100, 1, "vm1-again")).build()
+	// Mutate one guest and its dataset status successfully before a later
+	// guest fails. Both mutations must roll back, while nodes still commit.
+	before, err := s.GetDatasetStatus(ctx, "remote-a", DatasetGuests)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER mutate_guest_status AFTER INSERT ON pve_guests
+		WHEN NEW.vmid = 200 BEGIN
+		UPDATE pve_dataset_status SET reason = 'must roll back' WHERE dataset = 'guests';
+		END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER fail_second_guest BEFORE INSERT ON pve_guests
+		WHEN NEW.vmid = 300 BEGIN SELECT RAISE(ABORT, 'forced guest failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	obs3 := newObsA().nodes(mkNode("p2")).guests(mkGuest(200, 1, "first-write"), mkGuest(300, 1, "failure")).build()
 	rep, err := s.IngestObservation(ctx, obs3)
 	if err == nil {
 		t.Fatalf("expected an error for the failed guests dataset")
@@ -319,6 +331,10 @@ func TestDatasetFailureIsAtomicAndIsolated(t *testing.T) {
 	}
 	if n := countRows(t, db, "pve_nodes"); n != 2 {
 		t.Fatalf("expected 2 node rows (p1, p2), got %d", n)
+	}
+	after, err := s.GetDatasetStatus(ctx, "remote-a", DatasetGuests)
+	if err != nil || after != before {
+		t.Fatalf("guest status must roll back: before=%+v after=%+v err=%v", before, after, err)
 	}
 	// Guest details must not be written for a rolled-back guests dataset.
 	if n := countRows(t, db, "pve_guest_configs"); n != 0 {
