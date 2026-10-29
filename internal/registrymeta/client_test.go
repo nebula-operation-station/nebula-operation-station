@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -831,6 +832,42 @@ func TestRateLimitExponentialBackoff(t *testing.T) {
 	}
 	if pause2 != 2*MinRateLimitPause {
 		t.Fatalf("second pause = %s, want %s", pause2, 2*MinRateLimitPause)
+	}
+}
+
+func TestRateLimitRemainingHeader(t *testing.T) {
+	rec := &recorder{}
+	fc := newFakeClock()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.enter(r.Method, r.URL.Path)
+		defer rec.leave()
+		if strings.HasSuffix(r.URL.Path, "/tags/list") {
+			w.Header().Set("Docker-RateLimit-Remaining", "0")
+			w.Header().Set("Docker-RateLimit-Reset", strconv.FormatInt(fc.Now().Add(20*time.Minute).Unix(), 10))
+			_ = json.NewEncoder(w).Encode(map[string]any{"tags": []string{"1.0.0"}})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv, fc)
+	ctx := context.Background()
+
+	if _, err := c.ListTags(ctx, Ref{Registry: srv.URL, Repository: "repo-a"}); err != nil {
+		t.Fatalf("ListTags repo-a: %v", err)
+	}
+	c.mu.Lock()
+	pause := c.regs[srv.URL].pauseUntil.Sub(fc.Now())
+	c.mu.Unlock()
+	if pause != 20*time.Minute {
+		t.Fatalf("pause = %s, want 20m from the reset header", pause)
+	}
+	_, err := c.ListTags(ctx, Ref{Registry: srv.URL, Repository: "repo-b"})
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("want ErrRateLimited while the budget is exhausted, got %v", err)
+	}
+	if got := rec.count("GET /v2/repo-b/tags/list"); got != 0 {
+		t.Fatalf("the exhausted budget must not hit the network, got %d requests", got)
 	}
 }
 

@@ -420,7 +420,39 @@ func (c *Client) noteRateLimit(reg string, retryAfter time.Duration) {
 		pause = retryAfter
 	}
 	pause += c.jitter()
-	st.pauseUntil = c.now().Add(pause)
+	until := c.now().Add(pause)
+	if st.pauseUntil.After(until) {
+		until = st.pauseUntil
+	}
+	st.pauseUntil = until
+	c.mu.Unlock()
+}
+
+// noteBudget honors Docker Hub rate-limit budget headers (Docker-RateLimit-
+// Remaining / Docker-RateLimit-Reset) when supplied (ADR 0006: "honor
+// remaining/reset and Retry-After when supplied").
+func (c *Client) noteBudget(reg string, h http.Header) {
+	remaining := h.Get("Docker-RateLimit-Remaining")
+	if remaining == "" {
+		return
+	}
+	n, err := strconv.Atoi(remaining)
+	if err != nil || n > 0 {
+		return
+	}
+	sec, err := strconv.ParseInt(h.Get("Docker-RateLimit-Reset"), 10, 64)
+	if err != nil {
+		return
+	}
+	until := time.Unix(sec, 0)
+	if d := until.Sub(c.now()); d <= 0 {
+		return
+	}
+	c.mu.Lock()
+	st := c.regLocked(reg)
+	if until.After(st.pauseUntil) {
+		st.pauseUntil = until
+	}
 	c.mu.Unlock()
 }
 
@@ -550,6 +582,7 @@ func (c *Client) doWithToken(ctx context.Context, ref Ref, repo, method, u strin
 		if err != nil {
 			return nil, fmt.Errorf("registrymeta: %s %s: %w", method, u, err)
 		}
+		c.noteBudget(ref.Registry, resp.Header)
 		if resp.StatusCode == http.StatusTooManyRequests {
 			c.noteRateLimit(ref.Registry, c.retryAfter(resp.Header.Get("Retry-After")))
 			resp.Body.Close()
