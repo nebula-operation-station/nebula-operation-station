@@ -14,6 +14,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
+	"github.com/nebula-operation-station/nebula-operation-station/web/static"
 )
 
 // chartOps overrides the batch reads fakeOps hardcodes, so the chart
@@ -23,6 +24,7 @@ type chartOps struct {
 	states  map[string]executions.OpsState
 	updates map[string]executions.HostUpdates
 	docker  map[string]executions.LastResultRow
+	facts   map[string]executions.LastResultRow
 }
 
 func (c *chartOps) AllOpsStates(context.Context) (map[string]executions.OpsState, error) {
@@ -34,10 +36,25 @@ func (c *chartOps) AllUpdates(context.Context) (map[string]executions.HostUpdate
 }
 
 func (c *chartOps) LastResults(_ context.Context, actionID string) (map[string]executions.LastResultRow, error) {
-	if actionID == "docker.list" {
+	switch actionID {
+	case "docker.list":
 		return c.docker, nil
+	case "core.facts":
+		return c.facts, nil
 	}
 	return map[string]executions.LastResultRow{}, nil
+}
+
+// factsDoc builds a core.facts result from an os-release body.
+func factsDoc(t *testing.T, osRelease string) []byte {
+	t.Helper()
+	doc, err := json.Marshal(map[string]any{
+		"os_release": base64.StdEncoding.EncodeToString([]byte(osRelease)),
+	})
+	if err != nil {
+		t.Fatalf("marshal facts: %v", err)
+	}
+	return doc
 }
 
 // dockerListDoc builds a docker.list result (format docker-ps-v1) from
@@ -88,6 +105,14 @@ func chartHandler(t *testing.T) *ui.Handler {
 				"a3a3a3a3a3a3	loose	busybox:1	exited	Exited (0)				",
 				"a4a4a4a4a4a4	inject	<img src=x onerror=alert(1)>	running	Up 1 hour				"),
 				FinishedAt: observed},
+			"clean": {Result: dockerListDoc(t,
+				"b1b1b1b1b1b1	healthy-one	nginx:1.25	running	Up 5 days (healthy)				",
+				"b2b2b2b2b2b2	starting-one	redis:7	running	Up 5 minutes (health: starting)				",
+				"b3b3b3b3b3b3	unhealthy-one	nginx:1.25	running	Up 5 days (unhealthy)				"),
+				FinishedAt: observed},
+		},
+		facts: map[string]executions.LastResultRow{
+			"clean": {Result: factsDoc(t, `PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"`), FinishedAt: observed},
 		},
 	}
 	var log strings.Builder
@@ -161,6 +186,67 @@ func TestChartExpandedOnlyForProblemHosts(t *testing.T) {
 	opens := strings.Count(body, `<details class="chart__details" open`)
 	if opens != 2 {
 		t.Errorf("open details count = %d, want 2 (nas, ci)", opens)
+	}
+}
+
+// TestChartBadgeClasses checks the badge colour classes of every state
+// badge the chart renders: docker state (running green, exited red) and
+// docker health (healthy green, starting yellow, unhealthy red).
+func TestChartBadgeClasses(t *testing.T) {
+	body := getBody(t, chartHandler(t).Handler(), "/inventory/chart")
+	for _, want := range []string{
+		`<span class="badge badge--ok">running</span>`,
+		`<span class="badge badge--critical">exited</span>`,
+		`<span class="badge badge--ok">healthy</span>`,
+		`<span class="badge badge--warning">starting</span>`,
+		`<span class="badge badge--critical">unhealthy</span>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("chart body missing %q", want)
+		}
+	}
+	if strings.Contains(body, `badge--critical">healthy`) {
+		t.Error("healthy badge styled critical")
+	}
+	if strings.Contains(body, `badge--critical">starting`) {
+		t.Error("starting badge styled critical")
+	}
+}
+
+// TestChartTruncationTooltips checks that the values that can be cut by
+// the ellipsis (image names, the OS line, container names) carry the full
+// value in a title attribute.
+func TestChartTruncationTooltips(t *testing.T) {
+	body := getBody(t, chartHandler(t).Handler(), "/inventory/chart")
+	for _, want := range []string{
+		`title="nginx:1.25"`,
+		`title="web-nginx"`,
+		`title="OK · Debian GNU/Linux 12 (bookworm)"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("chart body missing tooltip %q", want)
+		}
+	}
+}
+
+// TestChartCSSHasNoInnerScroll checks that no chart rule creates a scroll
+// area of its own: the columns grow with their content and the page
+// scrolls.
+func TestChartCSSHasNoInnerScroll(t *testing.T) {
+	b, err := static.FS.ReadFile("app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v", err)
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		sel := strings.TrimSpace(line)
+		if !strings.HasPrefix(sel, ".chart") {
+			continue
+		}
+		for _, bad := range []string{"overflow: auto", "overflow-x: auto", "overflow-y: auto", "overflow: scroll"} {
+			if strings.Contains(sel, bad) {
+				t.Errorf("chart CSS keeps an inner scroll area: %s", sel)
+			}
+		}
 	}
 }
 

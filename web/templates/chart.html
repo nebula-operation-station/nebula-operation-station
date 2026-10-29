@@ -22,9 +22,9 @@
         <summary class="chart__box chart__box--host">
           <span class="chart__title">
             <span class="chart__dot {{.StateClass}}" aria-hidden="true"></span>
-            <a class="chart__name" href="/hosts/{{.ID}}">{{if .DisplayName}}{{.DisplayName}}{{else}}{{.ID}}{{end}}</a>
+            <a class="chart__name" href="/hosts/{{.ID}}" title="{{if .DisplayName}}{{.DisplayName}}{{else}}{{.ID}}{{end}}">{{if .DisplayName}}{{.DisplayName}}{{else}}{{.ID}}{{end}}</a>
           </span>
-          <span class="chart__sub">{{.StateLabel}}{{if .OS}} · {{.OS}}{{end}}</span>
+          <span class="chart__sub" title="{{.StateLabel}}{{if .OS}} · {{.OS}}{{end}}">{{.StateLabel}}{{if .OS}} · {{.OS}}{{end}}</span>
           <span class="chart__patch">
             <span class="badge {{.PatchClass}}">{{.PatchText}}</span>
             <span class="chart__count">{{.ContainerCount}} containers</span>
@@ -47,11 +47,11 @@
           <ul class="chart__list">
             {{range .Containers}}
             <li class="chart__box chart__box--container">
-              <a class="chart__cname" href="/hosts/{{$h.ID}}">{{.Name}}</a>
-              <span class="chart__cimg">{{.Image}}</span>
+              <a class="chart__cname" href="/hosts/{{$h.ID}}" title="{{.Name}}">{{.Name}}</a>
+              <span class="chart__cimg" title="{{.Image}}">{{.Image}}</span>
               <span class="chart__cstate">
                 <span class="badge {{.StateClass}}">{{.State}}</span>
-                {{if .Health}}<span class="badge badge--critical">{{.Health}}</span>{{end}}
+                {{if .Health}}<span class="badge {{.HealthClass}}">{{.Health}}</span>{{end}}
               </span>
             </li>
             {{end}}

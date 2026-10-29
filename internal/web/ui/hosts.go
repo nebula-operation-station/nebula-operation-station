@@ -426,6 +426,21 @@ func containerStateClass(state string) string {
 	}
 }
 
+// containerHealthClass is the badge class of a docker health state:
+// healthy green, unhealthy red, starting yellow.
+func containerHealthClass(health string) string {
+	switch health {
+	case "healthy":
+		return "badge--ok"
+	case "unhealthy":
+		return "badge--critical"
+	case "starting":
+		return "badge--warning"
+	default:
+		return "badge--unknown"
+	}
+}
+
 // execStateClass is the badge class of an execution state.
 func execStateClass(state string) string {
 	switch state {

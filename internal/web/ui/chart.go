@@ -23,8 +23,11 @@ type chartContainer struct {
 	State string
 	// StateClass is the badge CSS class for the state.
 	StateClass string
-	// Health is "unhealthy" when the health check fails, else "".
+	// Health is the docker health state (healthy, unhealthy, starting),
+	// "" when the container has no health check.
 	Health string
+	// HealthClass is the badge CSS class for the health state.
+	HealthClass string
 	// Project is the Compose project name, "" for standalone.
 	Project string
 }
@@ -115,7 +118,8 @@ func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins m
 				var standalone []chartContainer
 				for _, c := range list.Containers {
 					cv := chartContainer{Name: c.Name, Image: c.Image, State: c.State,
-						StateClass: containerStateClass(c.State), Health: c.Health, Project: c.Project}
+						StateClass: containerStateClass(c.State), Health: c.Health,
+						HealthClass: containerHealthClass(c.Health), Project: c.Project}
 					if c.Project == "" {
 						standalone = append(standalone, cv)
 						continue
