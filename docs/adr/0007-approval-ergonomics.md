@@ -1,6 +1,6 @@
 # ADR 0007: Bounded read leases and batch approval
 
-Status: proposed, 2026-10-29
+Status: accepted by the maintainer, 2026-10-29
 
 ## Context
 
