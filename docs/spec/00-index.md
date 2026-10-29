@@ -1,15 +1,19 @@
 # Specification index
 
-Nebula Operation Station, Technical Specification v2.2 (decision-frozen, Oct 9, 2026), split into one file per section so that agents and reviewers can load only what a task needs.
+<a id="v23-00-01"></a>
+<!-- Spec v2.3 (ADR 0006, ADR 0007): v23-00-01 -->
+Nebula Operation Station, Technical Specification v2.3 (ADR 0006, ADR 0007, Oct 29, 2026), retaining the v2.2 decision-frozen baseline and split into one file per section so that agents and reviewers can load only what a task needs. The paragraph-level revision record and unresolved questions are in [17-frozen-decisions.md](17-frozen-decisions.md).
 
 Changing anything here is an architecture revision, not an implementation detail. See `17-frozen-decisions.md` and `../adr/`.
 
+<a id="v23-00-02"></a>
+<!-- Spec v2.3 (ADR 0006, ADR 0007): v23-00-02 -->
 | File | Section |
 | --- | --- |
 | [01-product.md](01-product.md) | Product definition, principles and non-goals |
 | [02-architecture.md](02-architecture.md) | Architecture and trust boundary |
 | [03-processes-and-data.md](03-processes-and-data.md) | Processes, data stores and what each may access |
-| [04-revision-history.md](04-revision-history.md) | Changes from v2.1 |
+| [04-revision-history.md](04-revision-history.md) | Changes from v2.1 and the v2.3 architecture revision |
 | [05-authentication.md](05-authentication.md) | Authentication, sessions and approval |
 | [06-credentials.md](06-credentials.md) | Credentials: executor-owned agent and secret vault |
 | [07-execution-model.md](07-execution-model.md) | Execution model: permits, stages, durable jobs, reconciliation |
