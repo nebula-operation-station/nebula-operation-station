@@ -82,6 +82,19 @@ func TestPVECollectorUnknownUIDDenied(t *testing.T) {
 	h.requireHandshakeRejection(uint32(os.Getuid()))
 }
 
+func TestPVECollectorNodesRejectsGuestParameter(t *testing.T) {
+	h := newHarness(t, harnessOptions{
+		uidRoles: map[uint32][]peercred.Role{uint32(os.Getuid()): {peercred.RolePVECollector}},
+	})
+	for _, vmid := range []uint64{0, 100} {
+		req := validReadPVE()
+		req.Params = &pb.ReadPVERequest_Guest{Guest: &pb.PVEReadGuestParams{Vmid: vmid}}
+		if _, err := h.client.ReadPVE(h.ctx(), req); status.Code(err) != codes.InvalidArgument {
+			t.Errorf("NODES with guest vmid %d: want InvalidArgument, got %v", vmid, err)
+		}
+	}
+}
+
 // TestPVEReadServerAndAdminAccess pins the other two rows of the PVE read
 // role table (ADR 0006, P1-05): the server role may call ListPVERemotes
 // but not ReadPVE; the admin role may call both; malformed ReadPVE

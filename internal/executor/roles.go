@@ -141,6 +141,9 @@ func ValidateReadPVERequest(req *pb.ReadPVERequest) error {
 	}
 	switch req.Method {
 	case pb.PVEReadMethod_PVE_READ_METHOD_NODES:
+		if _, ok := req.Params.(*pb.ReadPVERequest_Guest); ok {
+			return status.Error(codes.InvalidArgument, "read pve: nodes method does not take a guest parameter")
+		}
 		if p := req.GetNode(); p != nil && !validPVENodeName(p.Node) {
 			return status.Error(codes.InvalidArgument, "read pve: malformed node name")
 		}

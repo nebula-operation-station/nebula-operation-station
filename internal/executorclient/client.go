@@ -18,7 +18,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
@@ -62,6 +64,17 @@ type Client struct {
 // New creates a Client and verifies the connection: the socket must exist,
 // be served by the configured executor user, and answer GetStatus.
 func New(ctx context.Context, o Options) (*Client, error) {
+	return newClient(ctx, o, false)
+}
+
+// NewPVECollector creates a Client for a collector-only UID. It verifies the
+// executor's peer UID and probes ListPVERemotes instead of GetStatus. An
+// Unimplemented response is accepted while the PVE handlers await wiring.
+func NewPVECollector(ctx context.Context, o Options) (*Client, error) {
+	return newClient(ctx, o, true)
+}
+
+func newClient(ctx context.Context, o Options, collector bool) (*Client, error) {
 	if o.SocketPath == "" {
 		return nil, errors.New("executorclient: SocketPath is required")
 	}
@@ -103,7 +116,15 @@ func New(ctx context.Context, o Options) (*Client, error) {
 		defaultTimeout:   o.DefaultTimeout,
 		authorizeTimeout: o.AuthorizeRunTimeout,
 	}
-	if _, err := c.GetStatus(ctx, &pb.GetStatusRequest{}); err != nil {
+	if collector {
+		_, err = c.ListPVERemotes(ctx, &pb.ListPVERemotesRequest{})
+		if status.Code(err) == codes.Unimplemented {
+			err = nil
+		}
+	} else {
+		_, err = c.GetStatus(ctx, &pb.GetStatusRequest{})
+	}
+	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("executorclient: verify executor at %s: %w", o.SocketPath, err)
 	}
