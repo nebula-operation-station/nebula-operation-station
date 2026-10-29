@@ -1,0 +1,28 @@
+{
+  "data": [
+    {
+      "schedule": "daily",
+      "time": "02:00",
+      "mode": "snapshot",
+      "storage": "pbs1",
+      "all": 1,
+      "notes": "nightly PBS backup",
+      "retention-keep": 7
+    },
+    {
+      "schedule": "weekly",
+      "day": "sunday",
+      "time": "03:30",
+      "mode": "snapshot",
+      "storage": "local",
+      "vmid": "200",
+      "bwlimit": 0
+    },
+    {
+      "schedule": "mon..fri 03:30",
+      "storage": "local",
+      "pool": "webservers",
+      "enabled": 1
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "data": {
+    "cpu": 0.1,
+    "hostname": "pve1",
+    "netin": 1048576,
+    "status": "online"
+  },
+  "errors": null,
+  "status": "OK",
+  "time": 1761600000
+}
