@@ -80,6 +80,20 @@ type TokenSupplier func(ctx context.Context) (string, error)
 // Client is a read-only Proxmox VE API client. It is safe for concurrent
 // use.
 type Client struct {
+	// HTTP is the transport. Required.
+	HTTP *http.Client
+	// BaseURL is the PVE API root, e.g.
+	// "https://pve.example:8006/api2/json". Required.
+	BaseURL string
+	// Token supplies the value of the Authorization header for each call
+	// (e.g. "PVEAPIToken=user!realm!token"). Required. Its error value must
+	// not contain the token.
+	Token func(ctx context.Context) (string, error)
+	// Timeout bounds each API call. Zero means DefaultTimeout.
+	Timeout time.Duration
+	// MaxBody caps the decoded response size in bytes. Zero means
+	// DefaultMaxBody.
+	MaxBody int64
 	base    string
 	http    *http.Client
 	token   TokenSupplier

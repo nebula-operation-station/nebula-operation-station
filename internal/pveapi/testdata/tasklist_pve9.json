@@ -1,0 +1,51 @@
+{
+  "data": [
+    {
+      "upid": "UPID:pve1:00001234:1ABCDEF01:68FF93E0:qmstart:100:root@pam:",
+      "node": "pve1",
+      "pid": 4660,
+      "pstart": 7177367297,
+      "starttime": 1761580000,
+      "type": "qmstart",
+      "id": "100",
+      "user": "root@pam",
+      "status": "RUNNING"
+    },
+    {
+      "upid": "UPID:pve1:00001233:1ABCDEF01:68FF8FF8:vzdump:200:admin@pve:",
+      "node": "pve1",
+      "pid": 4659,
+      "pstart": 7177367297,
+      "starttime": 1761579000,
+      "type": "vzdump",
+      "id": "200",
+      "user": "admin@pve",
+      "status": "OK",
+      "endtime": 1761579030
+    },
+    {
+      "upid": "UPID:pve1:00001232:1ABCDEF01:68FF8C10:qmstop:100:root@pam:",
+      "node": "pve1",
+      "pid": 4658,
+      "pstart": 7177367297,
+      "starttime": 1761578000,
+      "type": "qmstop",
+      "id": "100",
+      "user": "root@pam",
+      "status": "WARNINGS: 1",
+      "endtime": 1761578030
+    },
+    {
+      "upid": "UPID:pve1:00001231:1ABCDEF01:68FF8828:aptupdate::root@pam:",
+      "node": "pve1",
+      "pid": 4657,
+      "pstart": 7177367297,
+      "starttime": 1761577000,
+      "type": "aptupdate",
+      "id": "",
+      "user": "root@pam",
+      "status": "job failed",
+      "endtime": 1761577030
+    }
+  ]
+}

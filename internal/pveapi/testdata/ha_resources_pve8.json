@@ -1,0 +1,18 @@
+{
+  "data": [
+    {
+      "sid": "vm:100",
+      "type": "vm",
+      "state": "started",
+      "max_restart": 1,
+      "max_relocate": 1
+    },
+    {
+      "sid": "ct:200",
+      "type": "ct",
+      "state": "stopped",
+      "max_restart": 1,
+      "max_relocate": 1
+    }
+  ]
+}

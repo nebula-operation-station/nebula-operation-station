@@ -1,0 +1,42 @@
+{
+  "data": [
+    {
+      "type": "cluster",
+      "id": "cluster",
+      "name": "pve-cluster",
+      "nodes": 3,
+      "version": 4,
+      "quorate": 0
+    },
+    {
+      "type": "node",
+      "id": "node/pve1",
+      "name": "pve1",
+      "nodeid": 1,
+      "local": 1,
+      "online": 1,
+      "ip": "192.0.2.1",
+      "level": ""
+    },
+    {
+      "type": "node",
+      "id": "node/pve2",
+      "name": "pve2",
+      "nodeid": 2,
+      "local": 0,
+      "online": 1,
+      "ip": "192.0.2.2",
+      "level": ""
+    },
+    {
+      "type": "node",
+      "id": "node/pve3",
+      "name": "pve3",
+      "nodeid": 3,
+      "local": 0,
+      "online": 1,
+      "ip": "192.0.2.3",
+      "level": ""
+    }
+  ]
+}
