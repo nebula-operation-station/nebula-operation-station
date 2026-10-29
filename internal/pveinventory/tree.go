@@ -704,7 +704,7 @@ func containerState(c Container) (BoxState, string) {
 	case "paused", "restarting", "removing":
 		st, reason = StateWarning, c.State
 	default:
-		st, reason = StateUnknown, "state " + c.State
+		st, reason = StateUnknown, "state "+c.State
 	}
 	if c.Health == "unhealthy" {
 		st, reason = maxState(st, reason, StateCritical, "unhealthy")
