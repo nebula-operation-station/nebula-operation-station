@@ -1,0 +1,16 @@
+[
+  {
+    "vmid": 210,
+    "name": "dns1",
+    "status": "stopped",
+    "maxcpu": 1,
+    "maxmemory": 1073741824,
+    "mem": 0,
+    "cputime": 0,
+    "disk": 0,
+    "net": 0,
+    "cpu": 0,
+    "uptime": 0,
+    "smp": 1
+  }
+]

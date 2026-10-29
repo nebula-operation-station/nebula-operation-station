@@ -1,0 +1,18 @@
+[
+  {
+    "vmid": 200,
+    "name": "cache1",
+    "status": "running",
+    "maxcpu": 2,
+    "maxmemory": 4294967296,
+    "mem": 1073741824,
+    "cputime": 60000,
+    "disk": 5368709120,
+    "net": 10485760,
+    "cpu": 0.05,
+    "uptime": 7200,
+    "pid": 512,
+    "smp": 2,
+    "swap": 0
+  }
+]
