@@ -172,13 +172,15 @@ func TestBuildTreeBareMetalRootsWithContainersAndServices(t *testing.T) {
 	if root.Counts[KindCompose] != 1 || root.Counts[KindContainer] != 1 || root.Counts[KindService] != 2 {
 		t.Fatalf("wrong counts: %+v", root.Counts)
 	}
-	// Exited container is off; the host aggregate stays ok.
+	// Exited container is off; the host aggregate is off (grey), since
+	// off ranks above ok in the worst-state order (ADR: red > yellow >
+	// grey for off/expected off > green).
 	db := findBox(t, root.Children, "container/h1/ccc")
 	if db.State != StateOff {
 		t.Fatalf("exited container state = %s, want off", db.State)
 	}
-	if root.Worst != StateOK {
-		t.Fatalf("host worst = %s, want ok", root.Worst)
+	if root.Worst != StateOff {
+		t.Fatalf("host worst = %s, want off (off child)", root.Worst)
 	}
 	cron := findBox(t, root.Children, "service/h1/cron.service")
 	if cron.State != StateOff || cron.Unit != "cron.service" {
