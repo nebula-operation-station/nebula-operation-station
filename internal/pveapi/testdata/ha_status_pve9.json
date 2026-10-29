@@ -1,0 +1,24 @@
+{"data": [
+  {
+    "id": 100,
+    "state": "started",
+    "state-reason": "started",
+    "state-reason-detail": "",
+    "start-attempts": 0,
+    "start-failures": 0,
+    "last-state-change": 1761580000,
+    "last-state-change-by": "root@pam",
+    "last-state-change-node": "pve1"
+  },
+  {
+    "id": 200,
+    "state": "relocating",
+    "state-reason": "relocate to pve1",
+    "state-reason-detail": "migration in progress",
+    "start-attempts": 1,
+    "start-failures": 0,
+    "last-state-change": 1761571000,
+    "last-state-change-by": "root@pam",
+    "last-state-change-node": "pve2"
+  }
+]}

@@ -1,0 +1,24 @@
+{"data": [
+  {
+    "id": 100,
+    "state": "started",
+    "state-reason": "started",
+    "state-reason-detail": "",
+    "start-attempts": 0,
+    "start-failures": 0,
+    "last-state-change": 1761580000,
+    "last-state-change-by": "root@pam",
+    "last-state-change-node": "pve1"
+  },
+  {
+    "id": 200,
+    "state": "stopped",
+    "state-reason": "stopped by admin@pve",
+    "state-reason-detail": "",
+    "start-attempts": 0,
+    "start-failures": 0,
+    "last-state-change": 1761570000,
+    "last-state-change-by": "admin@pve",
+    "last-state-change-node": "pve2"
+  }
+]}
