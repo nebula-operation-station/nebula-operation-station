@@ -210,6 +210,26 @@ func (c *Client) GetPermitState(ctx context.Context, in *pb.GetPermitStateReques
 	return resp, mapError(err)
 }
 
+// ListPVERemotes lists the registered PVE remotes with their nonsecret
+// metadata (ADR 0006). Role: server, admin, pve-collector.
+func (c *Client) ListPVERemotes(ctx context.Context, in *pb.ListPVERemotesRequest, opts ...grpc.CallOption) (*pb.ListPVERemotesResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ListPVERemotes(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// ReadPVE performs one typed PVE read against one remote and returns a
+// pvecontract-shaped observation page (ADR 0006). Role: admin,
+// pve-collector. The server never calls this: the server writes poll
+// requests to the spool and the pve-collector schedules the reads.
+func (c *Client) ReadPVE(ctx context.Context, in *pb.ReadPVERequest, opts ...grpc.CallOption) (*pb.ReadPVEResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ReadPVE(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
 // The risk-data methods below are admin-only on the executor (H01); the
 // server's UID is denied. They exist so that Client implements the full
 // generated interface.
