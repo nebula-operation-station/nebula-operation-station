@@ -4,6 +4,7 @@ package pveapi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -37,12 +38,12 @@ type SnapshotList struct {
 // /nodes/{node}/{qemu|lxc}/{vmid}/snapshot. Unknown fields are dropped on
 // decode.
 type snapshotWire struct {
-	Name         string `json:"name"`
-	Parent       string `json:"parent"`
-	SnapTime     string `json:"snaptime"`
-	SnapTimeUnix *int64 `json:"snaptime_unix"`
-	VMState      *int   `json:"vmstate"`
-	Description  string `json:"description"`
+	Name         string          `json:"name"`
+	Parent       string          `json:"parent"`
+	SnapTime     json.RawMessage `json:"snaptime"`
+	SnapTimeUnix *int64          `json:"snaptime_unix"`
+	VMState      *int            `json:"vmstate"`
+	Description  string          `json:"description"`
 }
 
 // ListSnapshots reads /nodes/{node}/{guestKind}/{vmid}/snapshot for a
@@ -60,17 +61,16 @@ func (c *Client) ListSnapshots(ctx context.Context, node, guestKind string, vmid
 		return SnapshotList{}, err
 	}
 	path := fmt.Sprintf("/nodes/%s/%s/%d/snapshot", node, guestKind, vmid)
-	var wire []snapshotWire
+	wire := recordPage[snapshotWire]{
+		limit:   MaxSnapshotsPerGuest,
+		include: func(w snapshotWire) bool { return w.Name != "current" },
+	}
 	if err := c.get(ctx, path, &wire); err != nil {
 		return SnapshotList{}, err
 	}
-	snapshots := make([]Snapshot, 0, len(wire))
-	complete := len(wire) <= MaxSnapshotsPerGuest
-	seen := make(map[string]bool, len(wire))
-	for _, w := range wire {
-		if len(snapshots) >= MaxSnapshotsPerGuest {
-			break
-		}
+	snapshots := make([]Snapshot, 0, len(wire.records))
+	seen := make(map[string]bool, len(wire.records))
+	for _, w := range wire.records {
 		s, err := snapshotFromWire(w)
 		if err != nil {
 			return SnapshotList{}, schemaErr(path)
@@ -81,7 +81,7 @@ func (c *Client) ListSnapshots(ctx context.Context, node, guestKind string, vmid
 		seen[s.Name] = true
 		snapshots = append(snapshots, s)
 	}
-	return SnapshotList{Snapshots: snapshots, Complete: complete}, nil
+	return SnapshotList{Snapshots: snapshots, Complete: wire.complete}, nil
 }
 
 // snapshotFromWire validates one wire record.
@@ -100,12 +100,24 @@ func snapshotFromWire(w snapshotWire) (Snapshot, error) {
 			return Snapshot{}, fmt.Errorf("snapshot %s: snaptime out of range", w.Name)
 		}
 		snapTime = *w.SnapTimeUnix
-	} else if w.SnapTime != "" {
-		t, err := time.Parse(time.RFC3339, w.SnapTime)
-		if err != nil {
-			return Snapshot{}, fmt.Errorf("snapshot %s: bad snaptime %q", w.Name, w.SnapTime)
+	} else if len(w.SnapTime) > 0 && string(w.SnapTime) != "null" {
+		if w.SnapTime[0] == '"' {
+			// Retain compatibility with older RFC3339 observations.
+			var text string
+			if err := json.Unmarshal(w.SnapTime, &text); err != nil {
+				return Snapshot{}, fmt.Errorf("snapshot %s: bad snaptime", w.Name)
+			}
+			t, err := time.Parse(time.RFC3339, text)
+			if err != nil {
+				return Snapshot{}, fmt.Errorf("snapshot %s: bad snaptime", w.Name)
+			}
+			snapTime = t.Unix()
+		} else if err := json.Unmarshal(w.SnapTime, &snapTime); err != nil {
+			return Snapshot{}, fmt.Errorf("snapshot %s: bad snaptime", w.Name)
 		}
-		snapTime = t.Unix()
+		if snapTime < 0 || snapTime > MaxSnapTimeUnix {
+			return Snapshot{}, fmt.Errorf("snapshot %s: snaptime out of range", w.Name)
+		}
 	} else {
 		return Snapshot{}, fmt.Errorf("snapshot %s: missing snaptime", w.Name)
 	}

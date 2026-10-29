@@ -1,10 +1,17 @@
-[
-  {
-    "description": "",
-    "name": "before-update",
-    "parent": "",
-    "snaptime": "2026-10-29T10:00:00Z",
-    "snaptime_unix": 1793268000,
-    "vmstate": 0
-  }
-]
+{
+  "data": [
+    {
+      "description": "",
+      "name": "before-update",
+      "parent": "",
+      "snaptime": 1793268000,
+      "vmstate": 0
+    },
+    {
+      "name": "current",
+      "parent": "before-update",
+      "description": "You are here!",
+      "running": 1
+    }
+  ]
+}

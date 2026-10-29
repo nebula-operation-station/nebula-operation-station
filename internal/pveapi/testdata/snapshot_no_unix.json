@@ -1,9 +1,11 @@
-[
-  {
-    "description": "x",
-    "name": "snap1",
-    "parent": "",
-    "snaptime": "2026-10-29T08:00:00Z",
-    "vmstate": 1
-  }
-]
+{
+  "data": [
+    {
+      "description": "x",
+      "name": "snap1",
+      "parent": "",
+      "snaptime": "2026-10-29T08:00:00Z",
+      "vmstate": 1
+    }
+  ]
+}

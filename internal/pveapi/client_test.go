@@ -4,12 +4,14 @@ package pveapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -56,7 +58,7 @@ func TestGetSendsTokenHeader(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `[]`)
+		fmt.Fprint(w, `{"data":[]}`)
 	}))
 	defer ts.Close()
 	c := testClient(t, ts)
@@ -74,7 +76,7 @@ func TestGetSendsTokenHeader(t *testing.T) {
 
 func TestGetDropsUnknownFields(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"id":"local","type":"dir","some_future_field":{"nested":true},"another":"x"}`)
+		fmt.Fprint(w, `{"data":{"id":"local","type":"dir","some_future_field":{"nested":true},"another":"x"},"total":1}`)
 	}))
 	defer ts.Close()
 	c := testClient(t, ts)
@@ -162,7 +164,7 @@ func TestGetUnavailableTransport(t *testing.T) {
 func TestGetUnavailableTimeout(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(500 * time.Millisecond)
-		fmt.Fprint(w, `[]`)
+		fmt.Fprint(w, `{"data":[]}`)
 	}))
 	defer ts.Close()
 	c := testClient(t, ts)
@@ -181,7 +183,7 @@ func TestGetUnavailableTimeout(t *testing.T) {
 func TestGetUnavailableCallerContextCancel(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(300 * time.Millisecond)
-		fmt.Fprint(w, `[]`)
+		fmt.Fprint(w, `{"data":[]}`)
 	}))
 	defer ts.Close()
 	c := testClient(t, ts)
@@ -253,7 +255,7 @@ func TestGetUnavailableInvalidJSON(t *testing.T) {
 
 func TestGetUnavailableNoToken(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `[]`)
+		fmt.Fprint(w, `{"data":[]}`)
 	}))
 	defer ts.Close()
 	c, err := NewClient(&http.Client{}, ts.URL, func(ctx context.Context) (string, error) {
@@ -283,5 +285,89 @@ func TestUnavailableErrorIsAndAs(t *testing.T) {
 	}
 	if !strings.Contains(ue.Error(), "/nodes/n1/storage") {
 		t.Fatalf("error text missing endpoint: %v", ue)
+	}
+}
+
+func TestGetRejectsRedirectsWithoutRequestingTarget(t *testing.T) {
+	for _, status := range []int{301, 302, 303, 307, 308} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			var requests atomic.Int32
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				fmt.Fprint(w, `{"data":[]}`)
+			}))
+			defer target.Close()
+			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, target.URL, status)
+			}))
+			defer source.Close()
+			var callbacks atomic.Int32
+			injected := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+				callbacks.Add(1)
+				return nil
+			}}
+			c, err := NewClient(injected, source.URL, func(context.Context) (string, error) { return "tok", nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out []string
+			err = c.get(context.Background(), "/nodes/n1/storage", &out)
+			var ue *UnavailableError
+			if !errors.As(err, &ue) || ue.Reason != ReasonHTTPError || ue.Status != status {
+				t.Fatalf("get = %v, want rejected redirect %d", err, status)
+			}
+			if requests.Load() != 0 || callbacks.Load() != 0 {
+				t.Fatalf("target requests = %d, injected callbacks = %d", requests.Load(), callbacks.Load())
+			}
+			// NewClient must leave the caller's redirect policy intact.
+			if err := injected.CheckRedirect(nil, nil); err != nil || callbacks.Load() != 1 {
+				t.Fatal("injected client redirect policy changed")
+			}
+		})
+	}
+}
+
+func TestGetRejectsInvalidDataEnvelope(t *testing.T) {
+	for _, body := range []string{`[]`, `null`, `{}`, `{"data":null}`, `{"data":"wrong"}`, `{"data":{}}`, `{"data":[]} {}`} {
+		t.Run(body, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprint(w, body)
+			}))
+			defer ts.Close()
+			var out []string
+			err := testClient(t, ts).get(context.Background(), "/nodes/n1/storage", &out)
+			if !errors.Is(err, ErrUnavailable) {
+				t.Fatalf("get = %v, want ErrUnavailable", err)
+			}
+		})
+	}
+}
+
+func TestRecordPageBoundsDecodingAndRetention(t *testing.T) {
+	for _, limit := range []int{MaxStoragesPerRemote, MaxSnapshotsPerGuest} {
+		for _, count := range []int{MaxObjectsPerPage, MaxObjectsPerPage + 1, 10000} {
+			t.Run(fmt.Sprintf("limit=%d/count=%d", limit, count), func(t *testing.T) {
+				decoded := 0
+				page := recordPage[struct{}]{limit: limit, include: func(struct{}) bool {
+					decoded++
+					return true
+				}}
+				body := []byte(`[` + strings.Repeat(`{},`, count-1) + `{}]`)
+				err := json.Unmarshal(body, &page)
+				if count > MaxObjectsPerPage {
+					if !errors.Is(err, errRecordSchema) {
+						t.Fatalf("decode = %v, want page rejection", err)
+					}
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				if decoded != MaxObjectsPerPage {
+					t.Fatalf("decoded %d records, want %d", decoded, MaxObjectsPerPage)
+				}
+				if len(page.records) != limit || cap(page.records) > limit || page.complete {
+					t.Fatalf("retained count/cap/complete = %d/%d/%t", len(page.records), cap(page.records), page.complete)
+				}
+			})
+		}
 	}
 }

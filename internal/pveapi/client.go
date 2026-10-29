@@ -12,6 +12,7 @@
 package pveapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -153,7 +154,13 @@ func NewClient(httpClient *http.Client, baseURL string, token TokenSupplier) (*C
 		return nil, fmt.Errorf("pveapi: base url %q must be an absolute http(s) URL", baseURL)
 	}
 	timeout := DefaultRequestTimeout
-	return &Client{http: httpClient, baseURL: strings.TrimRight(u.String(), "/"), token: token, RequestTimeout: timeout}, nil
+	// Keep the caller's transport and timeouts, but never forward credentials
+	// to a redirect destination, including another port on the same host.
+	client := *httpClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &Client{http: &client, baseURL: strings.TrimRight(u.String(), "/"), token: token, RequestTimeout: timeout}, nil
 }
 
 // get performs a GET request against the remote and decodes the JSON body
@@ -215,10 +222,67 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 	}
 	// Unknown fields are dropped deliberately (ADR 0006); PVE 8 and 9
 	// responses differ in extra fields, so decoding is not strict here.
-	if err := json.Unmarshal(body, out); err != nil {
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return &UnavailableError{Endpoint: path, Reason: ReasonInvalidJSON}
+	}
+	if len(envelope.Data) == 0 || bytes.Equal(envelope.Data, []byte("null")) {
+		return schemaErr(path)
+	}
+	if err := json.Unmarshal(envelope.Data, out); err != nil {
+		if errors.Is(err, errRecordSchema) {
+			return schemaErr(path)
+		}
 		return &UnavailableError{Endpoint: path, Reason: ReasonInvalidJSON}
 	}
 	return nil
+}
+
+var errRecordSchema = errors.New("pveapi: invalid record page")
+
+// recordPage decodes at most MaxObjectsPerPage records, one at a time,
+// retaining only the caller's record limit. Excluded pseudo-records still
+// count toward the page limit, but not the result limit or completeness.
+type recordPage[T any] struct {
+	records  []T
+	limit    int
+	include  func(T) bool
+	complete bool
+}
+
+// UnmarshalJSON implements bounded record-array decoding.
+func (p *recordPage[T]) UnmarshalJSON(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	token, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if token != json.Delim('[') {
+		return errRecordSchema
+	}
+	p.records = make([]T, 0, min(p.limit, MaxObjectsPerPage))
+	p.complete = true
+	for count := 0; dec.More(); count++ {
+		if count >= MaxObjectsPerPage {
+			return errRecordSchema
+		}
+		var record T
+		if err := dec.Decode(&record); err != nil {
+			return err
+		}
+		if p.include != nil && !p.include(record) {
+			continue
+		}
+		if len(p.records) < p.limit {
+			p.records = append(p.records, record)
+		} else {
+			p.complete = false
+		}
+	}
+	_, err = dec.Token()
+	return err
 }
 
 // schemaErr wraps a validation failure as a fixed-reason unavailability.

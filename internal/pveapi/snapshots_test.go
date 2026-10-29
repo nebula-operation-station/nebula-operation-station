@@ -121,7 +121,7 @@ func TestListSnapshotsTooManyMarksIncomplete(t *testing.T) {
 			"vmstate":       0,
 		}
 	}
-	body, _ := json.Marshal(entries)
+	body, _ := json.Marshal(map[string]any{"data": entries})
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write(body)
 	}))
@@ -141,7 +141,7 @@ func TestListSnapshotsTooManyMarksIncomplete(t *testing.T) {
 
 func TestListSnapshotsSchemaRejectsBadName(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `[{"name":"bad name!","snaptime":"2026-10-29T08:00:00Z","snaptime_unix":1793260800,"vmstate":0}]`)
+		fmt.Fprint(w, `{"data":[{"name":"bad name!","snaptime":"2026-10-29T08:00:00Z","snaptime_unix":1793260800,"vmstate":0}]}`)
 	}))
 	defer ts.Close()
 	c := testClient(t, ts)
@@ -157,9 +157,9 @@ func TestListSnapshotsSchemaRejectsBadName(t *testing.T) {
 
 func TestListSnapshotsSchemaRejectsDuplicateNames(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `[`+
+		fmt.Fprint(w, `{"data":[`+
 			`{"name":"dup","snaptime":"2026-10-29T08:00:00Z","snaptime_unix":1,"vmstate":0},`+
-			`{"name":"dup","parent":"dup","snaptime":"2026-10-29T09:00:00Z","snaptime_unix":2,"vmstate":0}]`)
+			`{"name":"dup","parent":"dup","snaptime":"2026-10-29T09:00:00Z","snaptime_unix":2,"vmstate":0}]}`)
 	}))
 	defer ts.Close()
 	c := testClient(t, ts)
@@ -175,7 +175,7 @@ func TestListSnapshotsSchemaRejectsDuplicateNames(t *testing.T) {
 
 func TestListSnapshotsSchemaRejectsBadVMState(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `[{"name":"s1","snaptime":"2026-10-29T08:00:00Z","snaptime_unix":1,"vmstate":7}]`)
+		fmt.Fprint(w, `{"data":[{"name":"s1","snaptime":"2026-10-29T08:00:00Z","snaptime_unix":1,"vmstate":7}]}`)
 	}))
 	defer ts.Close()
 	c := testClient(t, ts)
@@ -192,7 +192,7 @@ func TestListSnapshotsSchemaRejectsBadVMState(t *testing.T) {
 func TestListSnapshotsSchemaRejectsBadSnapTime(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// snaptime present but unparseable; snaptime_unix absent.
-		fmt.Fprint(w, `[{"name":"s1","snaptime":"not-a-time","vmstate":0}]`)
+		fmt.Fprint(w, `{"data":[{"name":"s1","snaptime":"not-a-time","vmstate":0}]}`)
 	}))
 	defer ts.Close()
 	c := testClient(t, ts)
@@ -236,5 +236,52 @@ func TestListSnapshotsRejectsBadArguments(t *testing.T) {
 	}
 	if _, err := c.ListSnapshots(context.Background(), "BAD NODE", "qemu", 101); err == nil {
 		t.Fatal("ListSnapshots(bad node): expected error")
+	}
+}
+
+func TestListSnapshotsExcludesCurrentWithoutTimestamp(t *testing.T) {
+	for _, kind := range []string{"qemu", "lxc"} {
+		for _, count := range []int{0, 1, MaxSnapshotsPerGuest} {
+			t.Run(fmt.Sprintf("%s/%d", kind, count), func(t *testing.T) {
+				entries := []map[string]any{{"name": "current", "description": "You are here!", "running": 1}}
+				for i := range count {
+					entries = append(entries, map[string]any{"name": fmt.Sprintf("s%d", i), "snaptime": 1793260800})
+				}
+				body, err := json.Marshal(map[string]any{"data": entries})
+				if err != nil {
+					t.Fatal(err)
+				}
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(body) }))
+				defer ts.Close()
+				list, err := testClient(t, ts).ListSnapshots(context.Background(), "n1", kind, 101)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !list.Complete || len(list.Snapshots) != count {
+					t.Fatalf("count/complete = %d/%t, want %d/true", len(list.Snapshots), list.Complete, count)
+				}
+				for _, s := range list.Snapshots {
+					if s.Name == "current" || s.SnapTimeUnix != 1793260800 {
+						t.Fatalf("snapshot = %+v", s)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestListSnapshotsRejectsInvalidUnixTimestamp(t *testing.T) {
+	for _, value := range []string{`-1`, `100000000001`, `1.5`, `null`, `true`, `{}`} {
+		t.Run(value, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, `{"data":[{"name":"snap1","snaptime":%s}]}`, value)
+			}))
+			defer ts.Close()
+			_, err := testClient(t, ts).ListSnapshots(context.Background(), "n1", "qemu", 101)
+			var ue *UnavailableError
+			if !errors.As(err, &ue) || ue.Reason != ReasonSchema {
+				t.Fatalf("timestamp %s = %v, want schema rejection", value, err)
+			}
+		})
 	}
 }

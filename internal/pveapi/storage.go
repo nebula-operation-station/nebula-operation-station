@@ -5,6 +5,7 @@ package pveapi
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // TriState is a three-valued yes/no/unknown flag for capability hints.
@@ -71,20 +72,14 @@ type StorageList struct {
 // storageWire is the PVE 8/9 response shape of /nodes/{node}/storage.
 // Unknown fields are dropped on decode.
 type storageWire struct {
-	ID      string            `json:"id"`
-	Type    string            `json:"type"`
-	Format  string            `json:"format"`
-	Content []string          `json:"content"`
-	Active  *int              `json:"active"`
-	Shared  *int              `json:"shared"`
-	Space   *storageSpaceWire `json:"space"`
-}
-
-// storageSpaceWire is the space sub-object; absent for types without
-// capacity reporting.
-type storageSpaceWire struct {
-	Used  *uint64 `json:"used"`
-	Total *uint64 `json:"total"`
+	ID      string  `json:"storage"`
+	Type    string  `json:"type"`
+	Format  string  `json:"format"`
+	Content string  `json:"content"`
+	Active  *int    `json:"active"`
+	Shared  *int    `json:"shared"`
+	Used    *uint64 `json:"used"`
+	Total   *uint64 `json:"total"`
 }
 
 // ListStorages reads /nodes/{node}/storage and returns the node's storage
@@ -96,26 +91,22 @@ func (c *Client) ListStorages(ctx context.Context, node string) (StorageList, er
 		return StorageList{}, err
 	}
 	path := "/nodes/" + node + "/storage"
-	var wire []storageWire
+	wire := recordPage[storageWire]{limit: MaxStoragesPerRemote}
 	if err := c.get(ctx, path, &wire); err != nil {
 		return StorageList{}, err
 	}
-	storages := make([]Storage, 0, len(wire))
-	complete := len(wire) <= MaxStoragesPerRemote
-	for _, w := range wire {
-		if len(storages) >= MaxStoragesPerRemote {
-			break
-		}
+	storages := make([]Storage, 0, len(wire.records))
+	for _, w := range wire.records {
 		st, err := storageFromWire(w)
 		if err != nil {
 			return StorageList{}, schemaErr(path)
 		}
 		storages = append(storages, st)
 	}
-	return StorageList{Storages: storages, Complete: complete}, nil
+	return StorageList{Storages: storages, Complete: wire.complete}, nil
 }
 
-// GetStorage reads /nodes/{node}/storage/{id} for one storage.
+// GetStorage reads /nodes/{node}/storage/{id}/status for one storage.
 func (c *Client) GetStorage(ctx context.Context, node, storageID string) (Storage, error) {
 	if err := validNodeName(node); err != nil {
 		return Storage{}, err
@@ -123,11 +114,16 @@ func (c *Client) GetStorage(ctx context.Context, node, storageID string) (Storag
 	if err := validStorageID(storageID); err != nil {
 		return Storage{}, err
 	}
-	path := "/nodes/" + node + "/storage/" + storageID
+	path := "/nodes/" + node + "/storage/" + storageID + "/status"
 	var w storageWire
 	if err := c.get(ctx, path, &w); err != nil {
 		return Storage{}, err
 	}
+	// The status response need not repeat the storage ID from the path.
+	if w.ID != "" && w.ID != storageID {
+		return Storage{}, schemaErr(path)
+	}
+	w.ID = storageID
 	st, err := storageFromWire(w)
 	if err != nil {
 		return Storage{}, schemaErr(path)
@@ -153,11 +149,17 @@ func storageFromWire(w storageWire) (Storage, error) {
 	if len(w.Format) > MaxStorageFormatBytes {
 		return Storage{}, fmt.Errorf("storage %s: format too long", w.ID)
 	}
-	if len(w.Content) > MaxContentTypes {
+	if len(w.Content) > MaxTextFieldBytes {
+		return Storage{}, fmt.Errorf("storage %s: content too long", w.ID)
+	}
+	if w.Content != "" && strings.Count(w.Content, ",") >= MaxContentTypes {
 		return Storage{}, fmt.Errorf("storage %s: too many content types", w.ID)
 	}
-	content := make([]string, 0, len(w.Content))
-	for _, ct := range w.Content {
+	content := []string{}
+	if w.Content != "" {
+		content = strings.Split(w.Content, ",")
+	}
+	for _, ct := range content {
 		if ct == "" || len(ct) > MaxRefBytes {
 			return Storage{}, fmt.Errorf("storage %s: invalid content type", w.ID)
 		}
@@ -167,7 +169,6 @@ func storageFromWire(w storageWire) (Storage, error) {
 				return Storage{}, fmt.Errorf("storage %s: invalid content type %q", w.ID, ct)
 			}
 		}
-		content = append(content, ct)
 	}
 	if w.Active == nil || (*w.Active != 0 && *w.Active != 1) {
 		return Storage{}, fmt.Errorf("storage %s: invalid active flag", w.ID)
@@ -184,12 +185,12 @@ func storageFromWire(w storageWire) (Storage, error) {
 		Shared:    *w.Shared == 1,
 		Snapshots: SnapshotCapability(w.Type, w.Format),
 	}
-	if w.Space != nil {
-		if w.Space.Used == nil || w.Space.Total == nil {
-			return Storage{}, fmt.Errorf("storage %s: incomplete space object", w.ID)
+	if w.Used != nil || w.Total != nil {
+		if w.Used == nil || w.Total == nil {
+			return Storage{}, fmt.Errorf("storage %s: incomplete capacity", w.ID)
 		}
-		st.TotalBytes = *w.Space.Total
-		st.UsedBytes = *w.Space.Used
+		st.TotalBytes = *w.Total
+		st.UsedBytes = *w.Used
 		st.CapacityKnown = true
 	}
 	return st, nil
@@ -200,20 +201,24 @@ func storageFromWire(w storageWire) (Storage, error) {
 // hints, never guarantees).
 //
 //   - zfspool, lvmthin, rbd: yes
-//   - lvm (thick), cephfs: no
-//   - dir: yes only for qcow2 volumes, no for raw (the default)
+//   - cephfs: no
+//   - dir: yes for qcow2 volumes, no for raw, unknown otherwise
+//   - lvm: unknown without PVE version and volume-chain configuration
 //   - anything else: unknown
 func SnapshotCapability(storageType, volumeFormat string) TriState {
 	switch storageType {
 	case "zfspool", "lvmthin", "rbd":
 		return TriYes
-	case "lvm", "cephfs":
+	case "cephfs":
 		return TriNo
 	case "dir":
 		if volumeFormat == "qcow2" {
 			return TriYes
 		}
-		return TriNo
+		if volumeFormat == "raw" {
+			return TriNo
+		}
+		return TriUnknown
 	default:
 		return TriUnknown
 	}

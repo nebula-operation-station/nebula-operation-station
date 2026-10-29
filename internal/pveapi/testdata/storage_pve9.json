@@ -1,31 +1,34 @@
-[
-  {
-    "content": ["images", "iso"],
-    "digest": "0123456789abcdef",
-    "format": "raw",
-    "id": "local",
-    "inuse": 1,
-    "mount": "/var/lib/vz",
-    "nodes": null,
-    "pool": null,
-    "server": null,
-    "shared": 0,
-    "space": {"used": 1, "total": 2},
-    "type": "dir",
-    "active": 1
-  },
-  {
-    "content": ["images"],
-    "digest": "fedcba9876543210",
-    "id": "mystery",
-    "inuse": 0,
-    "mount": null,
-    "nodes": null,
-    "pool": null,
-    "server": "gluster.example",
-    "shared": 1,
-    "space": {"used": 3, "total": 4},
-    "type": "glue",
-    "active": 1
-  }
-]
+{
+  "data": [
+    {
+      "content": "images,iso",
+      "digest": "0123456789abcdef",
+      "inuse": 1,
+      "mount": "/var/lib/vz",
+      "nodes": null,
+      "pool": null,
+      "server": null,
+      "shared": 0,
+      "type": "dir",
+      "active": 1,
+      "storage": "local",
+      "used": 1,
+      "total": 2
+    },
+    {
+      "content": "images",
+      "digest": "fedcba9876543210",
+      "inuse": 0,
+      "mount": null,
+      "nodes": null,
+      "pool": null,
+      "server": "gluster.example",
+      "shared": 1,
+      "type": "glue",
+      "active": 1,
+      "storage": "mystery",
+      "used": 3,
+      "total": 4
+    }
+  ]
+}
