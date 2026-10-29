@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -14,22 +15,34 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvetransport"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
+	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vault"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnreg"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
 )
 
-const pveTestToken = "pveadmin!custody!S3cr3t-Token-Value"
+const pveTestToken = "pveadmin@pve!custody=S3cr3t-Token-Value"
 
 const pveTestPassphrase = "test-vault-passphrase-0123456789-abcdef"
 
@@ -61,12 +74,25 @@ func pveSelfSignedCert(t *testing.T) tls.Certificate {
 func pvePinningServer(t *testing.T, cert tls.Certificate) (string, string) {
 	t.Helper()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") == "PVEAPIToken="+pveTestToken {
-			io.WriteString(w, `{"version":"test"}`)
+	mux.HandleFunc("/api2/json/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "PVEAPIToken="+pveTestToken {
+			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		w.WriteHeader(http.StatusUnauthorized)
+		switch r.URL.Path {
+		case "/api2/json/version":
+			io.WriteString(w, `{"data":{"version":"8.2"}}`)
+		case "/api2/json/access/users":
+			if r.URL.Query().Get("full") != "1" {
+				w.WriteHeader(400)
+				return
+			}
+			io.WriteString(w, `{"data":[{"userid":"pveadmin@pve","tokens":[{"tokenid":"custody","privsep":1,"expire":2000000000}]}]}`)
+		case "/api2/json/access/permissions":
+			io.WriteString(w, `{"data":{"/":{"Sys.Audit":1},"/vms":{"VM.Audit":1},"/storage":{"Datastore.Audit":1},"/pool":{"Pool.Audit":1}}}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
 	})
 	srv := httptest.NewUnstartedServer(mux)
 	srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
@@ -90,42 +116,86 @@ func mustParseCert(t *testing.T, der []byte) *x509.Certificate {
 	return c
 }
 
-// pveTestDataDir creates a temporary executor data directory with an
-// initialized vault and points NEBULA_EXECUTOR_DATA_DIR at it. The DB
-// is closed before returning: the executor database allows a single
-// holder, and the CLI opens it itself.
+// The CLI tests retain a live executor and its exclusive database lock.
+var pveTestExecutors sync.Map
+
 func pveTestDataDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatalf("chmod: %v", err)
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
 	}
-	t.Setenv("NEBULA_EXECUTOR_DATA_DIR", dir)
 	db, err := executordb.Open(dir)
 	if err != nil {
-		t.Fatalf("open db: %v", err)
+		t.Fatal(err)
 	}
-	v := vault.New(db)
-	if err := v.Init([]byte(pveTestPassphrase), vault.DefaultParams, "test"); err != nil {
-		_ = db.Close()
-		t.Fatalf("init vault: %v", err)
+	t.Cleanup(func() { _ = db.Close(); pveTestExecutors.Delete(dir) })
+	pveTestExecutors.Store(dir, db)
+	keysDir := filepath.Join(dir, "keys")
+	if err := os.Mkdir(keysDir, 0700); err != nil {
+		t.Fatal(err)
 	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close db: %v", err)
+	verifier, err := webauthnverify.New(webauthnverify.Config{RPID: "pve.test", Origins: []string{"https://pve.test"}, Counters: db}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	risk, err := riskpolicy.New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := permit.New(permit.Options{Verifier: verifier, Store: db, RiskPolicy: risk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := webauthnreg.New(webauthnreg.Config{RPID: "pve.test", Origins: []string{"https://pve.test"}}, verifier, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := executor.NewService(auth, keyring.New(keysDir), db, reg, log)
+	svc.SetVaultParams(vault.MinParams)
+	policy := peercred.NewPolicy(map[uint32][]peercred.Role{uint32(os.Getuid()): {peercred.RoleAdmin}}, executor.MethodRoles())
+	server := executor.NewGRPCServer(svc, policy, log)
+	socketDir := t.TempDir()
+	socket := filepath.Join(socketDir, "executor.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { server.Stop(); _ = listener.Close() })
+	u, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NEBULA_EXECUTOR_USER", u.Username)
+	t.Setenv("NEBULA_EXECUTOR_SOCKET", socket)
+	// A nonexistent client-side data directory demonstrates RPC custody.
+	t.Setenv("NEBULA_EXECUTOR_DATA_DIR", filepath.Join(dir, "not-client-accessible"))
+	conn, err := dialExecutor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	c := pb.NewExecutorServiceClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := c.InitVault(ctx, &pb.InitVaultRequest{Passphrase: []byte(pveTestPassphrase)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Unlock(ctx, &pb.UnlockRequest{Passphrase: []byte(pveTestPassphrase), Scope: pb.UnlockScope_UNLOCK_SCOPE_VAULT}); err != nil {
+		t.Fatal(err)
 	}
 	return dir
 }
 
-// pveTestDB opens the test data directory for assertions (after the
-// CLI has finished and closed its handle).
 func pveTestDB(t *testing.T, dir string) *executordb.DB {
 	t.Helper()
-	db, err := executordb.Open(dir)
-	if err != nil {
-		t.Fatalf("open db: %v", err)
+	db, ok := pveTestExecutors.Load(dir)
+	if !ok {
+		t.Fatal("test executor unavailable")
 	}
-	t.Cleanup(func() { _ = db.Close() })
-	return db
+	return db.(*executordb.DB)
 }
 
 // pveTestAsk answers the CLI prompts: the vault passphrase and the
@@ -266,18 +336,51 @@ func TestPveRemoteRemoveRequiresYes(t *testing.T) {
 	}
 }
 
-// pvePeekRemote opens the data directory, reads one remote, and closes
-// the handle again (the executor DB allows a single holder).
+// pvePeekRemote reads from the executor's live database for assertions.
 func pvePeekRemote(t *testing.T, dir string) (executordb.PveRemote, bool) {
 	t.Helper()
-	db, err := executordb.Open(dir)
+	rm, ok, err := pveTestDB(t, dir).GetRemote("testlab")
 	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	defer db.Close()
-	rm, ok, err := db.GetRemote("testlab")
-	if err != nil {
-		t.Fatalf("get remote: %v", err)
+		t.Fatal(err)
 	}
 	return rm, ok
+}
+
+func TestPveRepinReadsPipedConfirmations(t *testing.T) {
+	dir := pveTestDataDir(t)
+	endpoint, newPin := pvePinningServer(t, pveSelfSignedCert(t))
+	oldCert := pveSelfSignedCert(t)
+	oldFP := pvetransport.Fingerprint(mustParseCert(t, oldCert.Certificate[0]))
+	oldPin := hex.EncodeToString(oldFP[:])
+	ep, err := parsePveEndpoint(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seed the old identity while the endpoint now presents the replacement.
+	db := pveTestDB(t, dir)
+	remote, err := pvecontract.ValidateRemote(pvecontract.Remote{RemoteID: "testlab", Kind: pvecontract.KindStandalone, Endpoints: []pvecontract.Endpoint{ep}, TrustPin: oldPin, TrustGeneration: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AddRemote(remote, executordb.PveRemoteCredentials{ReadRef: executor.PveVaultID("testlab", executor.PvePurposeRead), ReadVersion: 1}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	// Both fingerprints and approval arrive in one write to the pipe.
+	err = pveCmd([]string{"remote", "repin", "testlab"}, strings.NewReader(oldPin+"\n"+newPin+"\nyes\n"), pveTestAsk(t), &out)
+	if err != nil {
+		t.Fatalf("piped re-pin: %v", err)
+	}
+	rm, ok := pvePeekRemote(t, dir)
+	if !ok || rm.TrustPin != newPin || rm.TrustGeneration != 2 {
+		t.Fatalf("re-pin did not commit: %+v", rm)
+	}
+}
+
+func TestPveConfirmationInputIsBounded(t *testing.T) {
+	for _, input := range []string{strings.Repeat("x", maxPveConfirmationBytes+2) + "\n", strings.Repeat("x", maxPveConfirmationBytes+2)} {
+		if _, err := pveAskLine(strings.NewReader(input), "", "fingerprint"); err == nil {
+			t.Fatal("oversized confirmation accepted")
+		}
+	}
 }

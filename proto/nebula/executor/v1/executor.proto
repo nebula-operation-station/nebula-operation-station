@@ -333,6 +333,16 @@ service ExecutorService {
   // a checked snapshot of executor.db and the encrypted SSH key files.
   rpc BackupExecutor(BackupExecutorRequest) returns (BackupExecutorResponse);
 
+  // Local PVE credential administration. Role: admin for every method.
+  rpc ProbePVERemote(ProbePVERemoteRequest) returns (ProbePVERemoteResponse);
+  rpc AddPVERemote(AddPVERemoteRequest) returns (AddPVERemoteResponse);
+  rpc RotatePVEToken(RotatePVETokenRequest) returns (RotatePVETokenResponse);
+  rpc RemovePVERemote(RemovePVERemoteRequest) returns (RemovePVERemoteResponse);
+  rpc ListPVEAdminRemotes(ListPVEAdminRemotesRequest) returns (ListPVEAdminRemotesResponse);
+  // Proposes a HIGH permit bound to current trust, endpoints and credentials.
+  rpc ProposePVERepin(ProposePVERepinRequest) returns (ProposePVERepinResponse);
+  rpc CommitPVERepin(CommitPVERepinRequest) returns (CommitPVERepinResponse);
+
   // PVE provider reads (ADR 0006, P1-05). Role: server, admin,
   // pve-collector. Metadata only: which remotes exist, their kind, ordered
   // endpoints, trust generation and state. The trust pin is a SHA-256
@@ -1768,4 +1778,97 @@ message PVEMetric {
   string name = 1;
   string unit = 2;
   double value = 3;
+}
+
+// ProbePVERemoteRequest names approved endpoints for credential-free probing.
+message ProbePVERemoteRequest {
+  string kind = 1;
+  repeated PVEEndpoint endpoints = 2;
+}
+
+message PVEProbeEndpoint {
+  string host = 1;
+  uint32 port = 2;
+  string leaf_fingerprint = 3;
+  string ca_fingerprint = 4;
+}
+
+message ProbePVERemoteResponse {
+  repeated PVEProbeEndpoint endpoints = 1;
+  string trust_pin = 2;
+}
+
+// PVEAdminRemote is metadata only; token values never leave the executor.
+message PVEAdminRemote {
+  string remote_id = 1;
+  string name = 2;
+  string kind = 3;
+  repeated PVEEndpoint endpoints = 4;
+  string trust_pin = 5;
+  uint64 trust_generation = 6;
+  string state = 7;
+  string read_ref = 8;
+  int64 read_version = 9;
+  string action_ref = 10;
+  int64 action_version = 11;
+  int64 updated_at_unix = 12;
+}
+
+message AddPVERemoteRequest {
+  string remote_id = 1;
+  string name = 2;
+  string kind = 3;
+  repeated PVEEndpoint endpoints = 4;
+  string confirmed_pin = 5;
+  bytes read_token = 6;
+  bytes action_token = 7;
+}
+
+message RotatePVETokenRequest {
+  string remote_id = 1;
+  string purpose = 2;
+  bytes token = 3;
+}
+
+message RemovePVERemoteRequest {
+  string remote_id = 1;
+}
+
+message ListPVEAdminRemotesRequest {}
+
+message ListPVEAdminRemotesResponse {
+  repeated PVEAdminRemote remotes = 1;
+}
+
+message ProposePVERepinRequest {
+  string remote_id = 1;
+  string old_pin = 2;
+  string confirmed_new_pin = 3;
+}
+
+message CommitPVERepinRequest {
+  string remote_id = 1;
+  string old_pin = 2;
+  string confirmed_new_pin = 3;
+  string execution_digest = 4;
+}
+
+message AddPVERemoteResponse {
+  PVEAdminRemote remote = 1;
+}
+
+message RotatePVETokenResponse {
+  PVEAdminRemote remote = 1;
+}
+
+message RemovePVERemoteResponse {
+  PVEAdminRemote remote = 1;
+}
+
+message CommitPVERepinResponse {
+  PVEAdminRemote remote = 1;
+}
+
+message ProposePVERepinResponse {
+  ProposeExecutionResponse permit = 1;
 }

@@ -315,6 +315,17 @@ func (v *Vault) unlocked(f func(master []byte) error) error {
 
 // Put stores value under id as a new version and returns that version.
 func (v *Vault) Put(id string, value []byte, by string) (int64, error) {
+	return v.PutWithCommit(id, value, by, v.store.PutSecret)
+}
+
+// PutWithCommit encrypts a new version while unlocked and delegates its
+// persistence to commit. The callback must atomically store the encrypted
+// secret with any dependent metadata, or leave both unchanged on error.
+// The vault remains unlocked for the callback's duration.
+func (v *Vault) PutWithCommit(id string, value []byte, by string, commit func(executordb.VaultSecret) error) (int64, error) {
+	if commit == nil {
+		return 0, errors.New("vault: commit is required")
+	}
 	if !idRe.MatchString(id) {
 		return 0, ErrInvalidID
 	}
@@ -342,7 +353,7 @@ func (v *Vault) Put(id string, value []byte, by string) (int64, error) {
 		if err != nil {
 			return err
 		}
-		err = v.store.PutSecret(executordb.VaultSecret{ID: id, Version: version, WrappedDEK: wrapped, Sealed: sealed, UpdatedBy: by})
+		err = commit(executordb.VaultSecret{ID: id, Version: version, WrappedDEK: wrapped, Sealed: sealed, UpdatedBy: by})
 		if errors.Is(err, executordb.ErrSecretVersion) {
 			return ErrConcurrentChange
 		}

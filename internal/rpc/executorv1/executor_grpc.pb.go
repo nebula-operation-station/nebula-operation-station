@@ -90,6 +90,13 @@ const (
 	ExecutorService_RunScheduled_FullMethodName              = "/nebula.executor.v1.ExecutorService/RunScheduled"
 	ExecutorService_ListEvents_FullMethodName                = "/nebula.executor.v1.ExecutorService/ListEvents"
 	ExecutorService_BackupExecutor_FullMethodName            = "/nebula.executor.v1.ExecutorService/BackupExecutor"
+	ExecutorService_ProbePVERemote_FullMethodName            = "/nebula.executor.v1.ExecutorService/ProbePVERemote"
+	ExecutorService_AddPVERemote_FullMethodName              = "/nebula.executor.v1.ExecutorService/AddPVERemote"
+	ExecutorService_RotatePVEToken_FullMethodName            = "/nebula.executor.v1.ExecutorService/RotatePVEToken"
+	ExecutorService_RemovePVERemote_FullMethodName           = "/nebula.executor.v1.ExecutorService/RemovePVERemote"
+	ExecutorService_ListPVEAdminRemotes_FullMethodName       = "/nebula.executor.v1.ExecutorService/ListPVEAdminRemotes"
+	ExecutorService_ProposePVERepin_FullMethodName           = "/nebula.executor.v1.ExecutorService/ProposePVERepin"
+	ExecutorService_CommitPVERepin_FullMethodName            = "/nebula.executor.v1.ExecutorService/CommitPVERepin"
 	ExecutorService_ListPVERemotes_FullMethodName            = "/nebula.executor.v1.ExecutorService/ListPVERemotes"
 	ExecutorService_ReadPVE_FullMethodName                   = "/nebula.executor.v1.ExecutorService/ReadPVE"
 )
@@ -339,6 +346,15 @@ type ExecutorServiceClient interface {
 	// Backup (M10-2). Role: admin. The executor's part of `nebula backup`:
 	// a checked snapshot of executor.db and the encrypted SSH key files.
 	BackupExecutor(ctx context.Context, in *BackupExecutorRequest, opts ...grpc.CallOption) (*BackupExecutorResponse, error)
+	// Local PVE credential administration. Role: admin for every method.
+	ProbePVERemote(ctx context.Context, in *ProbePVERemoteRequest, opts ...grpc.CallOption) (*ProbePVERemoteResponse, error)
+	AddPVERemote(ctx context.Context, in *AddPVERemoteRequest, opts ...grpc.CallOption) (*AddPVERemoteResponse, error)
+	RotatePVEToken(ctx context.Context, in *RotatePVETokenRequest, opts ...grpc.CallOption) (*RotatePVETokenResponse, error)
+	RemovePVERemote(ctx context.Context, in *RemovePVERemoteRequest, opts ...grpc.CallOption) (*RemovePVERemoteResponse, error)
+	ListPVEAdminRemotes(ctx context.Context, in *ListPVEAdminRemotesRequest, opts ...grpc.CallOption) (*ListPVEAdminRemotesResponse, error)
+	// Proposes a HIGH permit bound to current trust, endpoints and credentials.
+	ProposePVERepin(ctx context.Context, in *ProposePVERepinRequest, opts ...grpc.CallOption) (*ProposePVERepinResponse, error)
+	CommitPVERepin(ctx context.Context, in *CommitPVERepinRequest, opts ...grpc.CallOption) (*CommitPVERepinResponse, error)
 	// PVE provider reads (ADR 0006, P1-05). Role: server, admin,
 	// pve-collector. Metadata only: which remotes exist, their kind, ordered
 	// endpoints, trust generation and state. The trust pin is a SHA-256
@@ -1053,6 +1069,76 @@ func (c *executorServiceClient) BackupExecutor(ctx context.Context, in *BackupEx
 	return out, nil
 }
 
+func (c *executorServiceClient) ProbePVERemote(ctx context.Context, in *ProbePVERemoteRequest, opts ...grpc.CallOption) (*ProbePVERemoteResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProbePVERemoteResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ProbePVERemote_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) AddPVERemote(ctx context.Context, in *AddPVERemoteRequest, opts ...grpc.CallOption) (*AddPVERemoteResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AddPVERemoteResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_AddPVERemote_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) RotatePVEToken(ctx context.Context, in *RotatePVETokenRequest, opts ...grpc.CallOption) (*RotatePVETokenResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RotatePVETokenResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_RotatePVEToken_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) RemovePVERemote(ctx context.Context, in *RemovePVERemoteRequest, opts ...grpc.CallOption) (*RemovePVERemoteResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RemovePVERemoteResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_RemovePVERemote_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ListPVEAdminRemotes(ctx context.Context, in *ListPVEAdminRemotesRequest, opts ...grpc.CallOption) (*ListPVEAdminRemotesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListPVEAdminRemotesResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ListPVEAdminRemotes_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ProposePVERepin(ctx context.Context, in *ProposePVERepinRequest, opts ...grpc.CallOption) (*ProposePVERepinResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProposePVERepinResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ProposePVERepin_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) CommitPVERepin(ctx context.Context, in *CommitPVERepinRequest, opts ...grpc.CallOption) (*CommitPVERepinResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitPVERepinResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_CommitPVERepin_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *executorServiceClient) ListPVERemotes(ctx context.Context, in *ListPVERemotesRequest, opts ...grpc.CallOption) (*ListPVERemotesResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListPVERemotesResponse)
@@ -1318,6 +1404,15 @@ type ExecutorServiceServer interface {
 	// Backup (M10-2). Role: admin. The executor's part of `nebula backup`:
 	// a checked snapshot of executor.db and the encrypted SSH key files.
 	BackupExecutor(context.Context, *BackupExecutorRequest) (*BackupExecutorResponse, error)
+	// Local PVE credential administration. Role: admin for every method.
+	ProbePVERemote(context.Context, *ProbePVERemoteRequest) (*ProbePVERemoteResponse, error)
+	AddPVERemote(context.Context, *AddPVERemoteRequest) (*AddPVERemoteResponse, error)
+	RotatePVEToken(context.Context, *RotatePVETokenRequest) (*RotatePVETokenResponse, error)
+	RemovePVERemote(context.Context, *RemovePVERemoteRequest) (*RemovePVERemoteResponse, error)
+	ListPVEAdminRemotes(context.Context, *ListPVEAdminRemotesRequest) (*ListPVEAdminRemotesResponse, error)
+	// Proposes a HIGH permit bound to current trust, endpoints and credentials.
+	ProposePVERepin(context.Context, *ProposePVERepinRequest) (*ProposePVERepinResponse, error)
+	CommitPVERepin(context.Context, *CommitPVERepinRequest) (*CommitPVERepinResponse, error)
 	// PVE provider reads (ADR 0006, P1-05). Role: server, admin,
 	// pve-collector. Metadata only: which remotes exist, their kind, ordered
 	// endpoints, trust generation and state. The trust pin is a SHA-256
@@ -1548,6 +1643,27 @@ func (UnimplementedExecutorServiceServer) ListEvents(context.Context, *ListEvent
 }
 func (UnimplementedExecutorServiceServer) BackupExecutor(context.Context, *BackupExecutorRequest) (*BackupExecutorResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method BackupExecutor not implemented")
+}
+func (UnimplementedExecutorServiceServer) ProbePVERemote(context.Context, *ProbePVERemoteRequest) (*ProbePVERemoteResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ProbePVERemote not implemented")
+}
+func (UnimplementedExecutorServiceServer) AddPVERemote(context.Context, *AddPVERemoteRequest) (*AddPVERemoteResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AddPVERemote not implemented")
+}
+func (UnimplementedExecutorServiceServer) RotatePVEToken(context.Context, *RotatePVETokenRequest) (*RotatePVETokenResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RotatePVEToken not implemented")
+}
+func (UnimplementedExecutorServiceServer) RemovePVERemote(context.Context, *RemovePVERemoteRequest) (*RemovePVERemoteResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RemovePVERemote not implemented")
+}
+func (UnimplementedExecutorServiceServer) ListPVEAdminRemotes(context.Context, *ListPVEAdminRemotesRequest) (*ListPVEAdminRemotesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListPVEAdminRemotes not implemented")
+}
+func (UnimplementedExecutorServiceServer) ProposePVERepin(context.Context, *ProposePVERepinRequest) (*ProposePVERepinResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ProposePVERepin not implemented")
+}
+func (UnimplementedExecutorServiceServer) CommitPVERepin(context.Context, *CommitPVERepinRequest) (*CommitPVERepinResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CommitPVERepin not implemented")
 }
 func (UnimplementedExecutorServiceServer) ListPVERemotes(context.Context, *ListPVERemotesRequest) (*ListPVERemotesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListPVERemotes not implemented")
@@ -2818,6 +2934,132 @@ func _ExecutorService_BackupExecutor_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_ProbePVERemote_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProbePVERemoteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ProbePVERemote(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ProbePVERemote_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ProbePVERemote(ctx, req.(*ProbePVERemoteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_AddPVERemote_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddPVERemoteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).AddPVERemote(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_AddPVERemote_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).AddPVERemote(ctx, req.(*AddPVERemoteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_RotatePVEToken_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RotatePVETokenRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).RotatePVEToken(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_RotatePVEToken_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).RotatePVEToken(ctx, req.(*RotatePVETokenRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_RemovePVERemote_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemovePVERemoteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).RemovePVERemote(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_RemovePVERemote_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).RemovePVERemote(ctx, req.(*RemovePVERemoteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ListPVEAdminRemotes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListPVEAdminRemotesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ListPVEAdminRemotes(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ListPVEAdminRemotes_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ListPVEAdminRemotes(ctx, req.(*ListPVEAdminRemotesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ProposePVERepin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProposePVERepinRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ProposePVERepin(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ProposePVERepin_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ProposePVERepin(ctx, req.(*ProposePVERepinRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_CommitPVERepin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommitPVERepinRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).CommitPVERepin(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_CommitPVERepin_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).CommitPVERepin(ctx, req.(*CommitPVERepinRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ExecutorService_ListPVERemotes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListPVERemotesRequest)
 	if err := dec(in); err != nil {
@@ -3136,6 +3378,34 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "BackupExecutor",
 			Handler:    _ExecutorService_BackupExecutor_Handler,
+		},
+		{
+			MethodName: "ProbePVERemote",
+			Handler:    _ExecutorService_ProbePVERemote_Handler,
+		},
+		{
+			MethodName: "AddPVERemote",
+			Handler:    _ExecutorService_AddPVERemote_Handler,
+		},
+		{
+			MethodName: "RotatePVEToken",
+			Handler:    _ExecutorService_RotatePVEToken_Handler,
+		},
+		{
+			MethodName: "RemovePVERemote",
+			Handler:    _ExecutorService_RemovePVERemote_Handler,
+		},
+		{
+			MethodName: "ListPVEAdminRemotes",
+			Handler:    _ExecutorService_ListPVEAdminRemotes_Handler,
+		},
+		{
+			MethodName: "ProposePVERepin",
+			Handler:    _ExecutorService_ProposePVERepin_Handler,
+		},
+		{
+			MethodName: "CommitPVERepin",
+			Handler:    _ExecutorService_CommitPVERepin_Handler,
 		},
 		{
 			MethodName: "ListPVERemotes",

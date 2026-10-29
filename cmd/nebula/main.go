@@ -144,8 +144,7 @@ func run(cmd string, args []string) error {
 	case "restore":
 		return restoreCmd(args, os.Stdin, os.Stdout)
 	case "pve":
-		// PVE credential custody runs locally on the executor host
-		// (admin-only); it needs no executor connection.
+		// PVE administration authenticates the local admin through peer credentials.
 		return pveCmd(args, os.Stdin, ttyPrompter, os.Stdout)
 	}
 	conn, err := dialExecutor()

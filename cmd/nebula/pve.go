@@ -2,13 +2,8 @@
 
 // PVE remote credential custody (ADR 0006, P1-06).
 //
-// These commands run locally against the executor's data directory and
-// need its vault unlocked (the passphrase is asked without echo). They
-// must be run as the executor user or root, like `nebula backup`.
-//
-// TODO(p105): once the P1-05 proto is on main, these commands go
-// through the executor's admin-only RPCs (peercred-authenticated)
-// instead of opening the executor data directly.
+// Commands use the peer-credential-authenticated executor socket. The
+// executor owns the database, vault, network probes and token validation.
 package main
 
 import (
@@ -18,19 +13,18 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
-	"os/user"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/vault"
+	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
+
+const maxPveConfirmationBytes = 64
 
 const pveUsage = `usage: nebula pve remote add <id> --kind cluster|standalone --endpoint host:port [--endpoint host:port ...] [--name NAME] [--action-token]
        nebula pve remote rotate-token <id> --purpose read|action
@@ -38,8 +32,8 @@ const pveUsage = `usage: nebula pve remote add <id> --kind cluster|standalone --
        nebula pve remote repin <id>
        nebula pve remote list
 
-Runs locally on the executor host (as the executor user or root) against
-NEBULA_EXECUTOR_DATA_DIR (default /var/lib/nebula/executor). Tokens are
+Runs as a configured local admin through NEBULA_EXECUTOR_SOCKET.
+Unlock the executor vault with nebula unlock first. Tokens are
 asked without echo; the trust fingerprint must be typed back after
 out-of-band comparison. List is metadata only.`
 
@@ -73,69 +67,24 @@ func splitHostPort(s string) (string, string, error) {
 	return s[:i], s[i+1:], nil
 }
 
-// pveLocalDB opens the executor database from the data directory.
-func pveLocalDB() (*executordb.DB, error) {
-	dir := envOr("NEBULA_EXECUTOR_DATA_DIR", "/var/lib/nebula/executor")
-	db, err := executordb.Open(dir)
-	if err != nil {
-		return nil, fmt.Errorf("executor data %s: %w", dir, err)
-	}
-	return db, nil
-}
-
-// pveLocalAdmin opens the executor database and, when the vault is
-// locked, unlocks it with the passphrase asked without echo. The caller
-// closes the returned DB.
-func pveLocalAdmin(ask prompter) (*executor.PveAdmin, *executordb.DB, error) {
-	db, err := pveLocalDB()
-	if err != nil {
-		return nil, nil, err
-	}
-	v := vault.New(db)
-	st, err := v.State()
-	if err != nil {
-		_ = db.Close()
-		return nil, nil, err
-	}
-	if st == vault.StateNotInitialized {
-		_ = db.Close()
-		return nil, nil, errors.New("the executor vault is not initialized (nebula vault init)")
-	}
-	if st == vault.StateLocked {
-		pass, err := ask("Executor vault passphrase: ")
-		if err != nil {
-			_ = db.Close()
-			return nil, nil, err
-		}
-		defer clear(pass)
-		if err := v.Unlock(pass); err != nil {
-			_ = db.Close()
-			return nil, nil, err
-		}
-	}
-	return &executor.PveAdmin{
-		DB:    db,
-		Vault: v,
-		Now:   time.Now,
-		Log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}, db, nil
-}
-
-// pveBy is the local admin identity for the change trail.
-func pveBy() string {
-	if u, err := user.Current(); err == nil && u.Username != "" {
-		return u.Username
-	}
-	return "local-admin"
-}
-
 // pveAskLine reads one confirmation line (not a secret: fingerprints
 // were shown on screen) and returns it trimmed.
 func pveAskLine(stdin io.Reader, prompt, what string) (string, error) {
 	fmt.Fprint(os.Stderr, prompt)
-	line, err := bufio.NewReader(stdin).ReadString('\n')
-	if err != nil && line == "" {
+	br, ok := stdin.(*bufio.Reader)
+	if !ok {
+		br = bufio.NewReaderSize(stdin, maxPveConfirmationBytes+2)
+	}
+	raw, err := br.ReadSlice('\n')
+	if len(raw) > maxPveConfirmationBytes+1 || (err != nil && !errors.Is(err, io.EOF)) {
+		return "", fmt.Errorf("reading %s: confirmation exceeds limit or cannot be read", what)
+	}
+	if err != nil && len(raw) == 0 {
 		return "", fmt.Errorf("reading %s: %w", what, err)
+	}
+	line := strings.TrimSuffix(string(raw), "\n")
+	if len(line) > maxPveConfirmationBytes {
+		return "", fmt.Errorf("reading %s: confirmation exceeds limit", what)
 	}
 	return strings.TrimSpace(line), nil
 }
@@ -144,7 +93,7 @@ func pveCmd(args []string, stdin io.Reader, ask prompter, w io.Writer) error {
 	if len(args) < 1 || args[0] != "remote" {
 		return errors.New(pveUsage)
 	}
-	return pveRemoteCmd(args[1:], stdin, ask, w)
+	return pveRemoteCmd(args[1:], bufio.NewReaderSize(stdin, maxPveConfirmationBytes+2), ask, w)
 }
 
 func pveRemoteCmd(args []string, stdin io.Reader, ask prompter, w io.Writer) error {
@@ -215,30 +164,28 @@ func pveRemoteAdd(args []string, stdin io.Reader, ask prompter, w io.Writer) err
 		eps = append(eps, ep)
 	}
 
-	admin, db, err := pveLocalAdmin(ask)
+	conn, err := dialExecutor()
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer conn.Close()
+	c := pb.NewExecutorServiceClient(conn)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	// 1. Probe without credentials and show the presented chain.
-	res, err := executor.DefaultPveProbe(ctx, eps)
+	res, err := c.ProbePVERemote(ctx, &pb.ProbePVERemoteRequest{Kind: string(kindVal), Endpoints: pveProtoEndpoints(eps)})
 	if err != nil {
 		return err
 	}
 	fmt.Fprintln(w, "presented trust identities (compare out of band):")
 	for _, ep := range res.Endpoints {
 		fmt.Fprintf(w, "  %s:%d  leaf %s\n", ep.Host, ep.Port, ep.LeafFingerprint)
-		if ep.CAFingerprint != "" {
-			fmt.Fprintf(w, "  %s:%d  ca   %s\n", ep.Host, ep.Port, ep.CAFingerprint)
+		if ep.CaFingerprint != "" {
+			fmt.Fprintf(w, "  %s:%d  ca   %s\n", ep.Host, ep.Port, ep.CaFingerprint)
 		}
 	}
-	pin, _, err := res.TrustIdentity(kindVal)
-	if err != nil {
-		return err
-	}
+	pin := res.GetTrustPin()
 	// 2. Typed confirmation of the trust-identity fingerprint.
 	confirmed, err := pveAskLine(stdin, "Type the trust fingerprint to confirm: ", "fingerprint")
 	if err != nil {
@@ -248,35 +195,30 @@ func pveRemoteAdd(args []string, stdin io.Reader, ask prompter, w io.Writer) err
 		return errors.New("confirmation does not match the presented trust identity; nothing stored")
 	}
 	// 3. The tokens, asked without echo, never from argv or env.
-	readToken, err := ask("PVE API token for read (user!tokenID!value, not echoed): ")
+	readToken, err := ask("PVE API token for read (USER@REALM!TOKENID=VALUE, not echoed): ")
 	if err != nil {
 		return err
 	}
 	defer clear(readToken)
 	var actionToken []byte
 	if *withAction {
-		actionToken, err = ask("PVE API token for action (user!tokenID!value, not echoed): ")
+		actionToken, err = ask("PVE API token for action (USER@REALM!TOKENID=VALUE, not echoed): ")
 		if err != nil {
 			return err
 		}
 		defer clear(actionToken)
 	}
 	// 4. Validate against the pinned endpoint, store envelope-encrypted.
-	rm, err := admin.AddRemote(ctx, executor.PveAddRemote{
-		RemoteID:     id,
-		Name:         *name,
-		Kind:         kindVal,
-		Endpoints:    eps,
-		ConfirmedPin: confirmed,
-		ReadToken:    readToken,
-		ActionToken:  actionToken,
-		By:           pveBy(),
+	response, err := c.AddPVERemote(ctx, &pb.AddPVERemoteRequest{
+		RemoteId: id, Name: *name, Kind: string(kindVal), Endpoints: pveProtoEndpoints(eps),
+		ConfirmedPin: confirmed, ReadToken: readToken, ActionToken: actionToken,
 	})
 	if err != nil {
 		return err
 	}
+	rm := response.GetRemote()
 	fmt.Fprintf(w, "remote %s added: %s, pin generation %d, read credential %s@%d\n",
-		rm.RemoteID, rm.State, rm.TrustGeneration, rm.Credentials.ReadRef, rm.Credentials.ReadVersion)
+		rm.RemoteId, rm.State, rm.TrustGeneration, rm.ReadRef, rm.ReadVersion)
 	return nil
 }
 
@@ -291,31 +233,31 @@ func pveRemoteRotateToken(args []string, stdin io.Reader, ask prompter, w io.Wri
 	if id == "" || fs.NArg() != 0 || (*purpose != executor.PvePurposeRead && *purpose != executor.PvePurposeAction) {
 		return errors.New(pveUsage)
 	}
-	admin, db, err := pveLocalAdmin(ask)
+	conn, err := dialExecutor()
 	if err != nil {
 		return err
 	}
-	defer db.Close()
-	token, err := ask("New PVE API token (user!tokenID!value, not echoed): ")
+	defer conn.Close()
+	c := pb.NewExecutorServiceClient(conn)
+	token, err := ask("New PVE API token (USER@REALM!TOKENID=VALUE, not echoed): ")
 	if err != nil {
 		return err
 	}
 	defer clear(token)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	rm, err := admin.RotateToken(ctx, executor.PveRotateToken{
-		RemoteID: id, Purpose: *purpose, Token: token, By: pveBy(),
-	})
+	response, err := c.RotatePVEToken(ctx, &pb.RotatePVETokenRequest{RemoteId: id, Purpose: *purpose, Token: token})
 	if err != nil {
 		return err
 	}
-	creds := rm.Credentials
+	rm := response.GetRemote()
+	creds := rm
 	ref, ver := creds.ReadRef, creds.ReadVersion
 	if *purpose == executor.PvePurposeAction {
 		ref, ver = creds.ActionRef, creds.ActionVersion
 	}
 	fmt.Fprintf(w, "remote %s: %s credential rotated to %s@%d (the old version was kept until the new one was validated)\n",
-		rm.RemoteID, *purpose, ref, ver)
+		rm.RemoteId, *purpose, ref, ver)
 	return nil
 }
 
@@ -329,11 +271,12 @@ func pveRemoteRemove(args []string, stdin io.Reader, ask prompter, w io.Writer) 
 	if id == "" || fs.NArg() != 0 {
 		return errors.New(pveUsage)
 	}
-	admin, db, err := pveLocalAdmin(ask)
+	conn, err := dialExecutor()
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer conn.Close()
+	c := pb.NewExecutorServiceClient(conn)
 	line, err := pveAskLine(stdin, fmt.Sprintf("Type 'yes' to remove remote %s (disable, revoke grants, delete vault secrets, tombstone): ", id), "confirmation")
 	if err != nil {
 		return err
@@ -343,11 +286,12 @@ func pveRemoteRemove(args []string, stdin io.Reader, ask prompter, w io.Writer) 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	rm, err := admin.RemoveRemote(ctx, executor.PveRemove{RemoteID: id, By: pveBy()})
+	response, err := c.RemovePVERemote(ctx, &pb.RemovePVERemoteRequest{RemoteId: id})
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "remote %s removed: %s\n", rm.RemoteID, rm.State)
+	rm := response.GetRemote()
+	fmt.Fprintf(w, "remote %s removed: %s\n", rm.RemoteId, rm.State)
 	return nil
 }
 
@@ -361,34 +305,40 @@ func pveRemoteRepin(args []string, stdin io.Reader, ask prompter, w io.Writer) e
 	if id == "" || fs.NArg() != 0 {
 		return errors.New(pveUsage)
 	}
-	admin, db, err := pveLocalAdmin(ask)
+	conn, err := dialExecutor()
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer conn.Close()
+	c := pb.NewExecutorServiceClient(conn)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	stored, ok, err := db.GetRemote(id)
+	metadata, err := c.ListPVEAdminRemotes(ctx, &pb.ListPVEAdminRemotesRequest{})
 	if err != nil {
 		return err
 	}
-	if !ok || stored.State == executordb.StateRemoved {
+	var stored *pb.PVEAdminRemote
+	for _, remote := range metadata.GetRemotes() {
+		if remote.RemoteId == id {
+			stored = remote
+			break
+		}
+	}
+	if stored == nil || stored.State == "removed" {
 		return fmt.Errorf("remote %s not found", id)
 	}
-	res, err := executor.DefaultPveProbe(ctx, stored.Endpoints)
+	res, err := c.ProbePVERemote(ctx, &pb.ProbePVERemoteRequest{Kind: stored.Kind, Endpoints: stored.Endpoints})
 	if err != nil {
 		return err
 	}
 	fmt.Fprintln(w, "presented trust identities (compare out of band):")
 	for _, ep := range res.Endpoints {
 		fmt.Fprintf(w, "  %s:%d  leaf %s\n", ep.Host, ep.Port, ep.LeafFingerprint)
-		if ep.CAFingerprint != "" {
-			fmt.Fprintf(w, "  %s:%d  ca   %s\n", ep.Host, ep.Port, ep.CAFingerprint)
+		if ep.CaFingerprint != "" {
+			fmt.Fprintf(w, "  %s:%d  ca   %s\n", ep.Host, ep.Port, ep.CaFingerprint)
 		}
 	}
-	if _, _, err := res.TrustIdentity(stored.Kind); err != nil {
-		return err
-	}
+
 	oldPin, err := pveAskLine(stdin, "Type the current pin from the registry: ", "current pin")
 	if err != nil {
 		return err
@@ -397,13 +347,20 @@ func pveRemoteRepin(args []string, stdin io.Reader, ask prompter, w io.Writer) e
 	if err != nil {
 		return err
 	}
-	rm, err := admin.Repin(ctx, executor.PveRepin{
-		RemoteID: id, OldPin: oldPin, ConfirmedNewPin: newConfirmed, By: pveBy(),
-	})
+	proposed, err := c.ProposePVERepin(ctx, &pb.ProposePVERepinRequest{RemoteId: id, OldPin: oldPin, ConfirmedNewPin: newConfirmed})
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "remote %s re-pinned to generation %d (new pin %s…)\n", rm.RemoteID, rm.TrustGeneration, prefix64(rm.TrustPin))
+	proposal := proposed.GetPermit()
+	if err := approve(ctx, c, proposal.GetExecutionDigest(), stdin, w); err != nil {
+		return err
+	}
+	response, err := c.CommitPVERepin(ctx, &pb.CommitPVERepinRequest{RemoteId: id, OldPin: oldPin, ConfirmedNewPin: newConfirmed, ExecutionDigest: proposal.GetExecutionDigest()})
+	if err != nil {
+		return err
+	}
+	rm := response.GetRemote()
+	fmt.Fprintf(w, "remote %s re-pinned to generation %d (new pin %s…)\n", rm.RemoteId, rm.TrustGeneration, prefix64(rm.TrustPin))
 	return nil
 }
 
@@ -416,15 +373,16 @@ func pveRemoteList(args []string, w io.Writer) error {
 	if fs.NArg() != 0 {
 		return errors.New(pveUsage)
 	}
-	db, err := pveLocalDB()
+	conn, err := dialExecutor()
 	if err != nil {
 		return err
 	}
-	defer db.Close()
-	admin := &executor.PveAdmin{DB: db}
+	defer conn.Close()
+	c := pb.NewExecutorServiceClient(conn)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	remotes, err := admin.ListRemotes(ctx)
+	metadata, err := c.ListPVEAdminRemotes(ctx, &pb.ListPVEAdminRemotesRequest{})
+	remotes := metadata.GetRemotes()
 	if err != nil {
 		return err
 	}
@@ -439,10 +397,10 @@ func pveRemoteList(args []string, w io.Writer) error {
 		for _, ep := range r.Endpoints {
 			eps = append(eps, fmt.Sprintf("%s:%d", ep.Host, ep.Port))
 		}
-		cred := fmt.Sprintf("%s@%d", r.Credentials.ReadRef, r.Credentials.ReadVersion)
+		cred := fmt.Sprintf("%s@%d", r.ReadRef, r.ReadVersion)
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s (gen %d)\t%s\t%s\t%s\n",
-			r.RemoteID, r.Kind, r.State, prefix64(r.TrustPin), r.TrustGeneration,
-			strings.Join(eps, " "), cred, r.UpdatedAt.Format(time.RFC3339))
+			r.RemoteId, r.Kind, r.State, prefix64(r.TrustPin), r.TrustGeneration,
+			strings.Join(eps, " "), cred, time.Unix(r.UpdatedAtUnix, 0).Format(time.RFC3339))
 	}
 	return tw.Flush()
 }
@@ -453,4 +411,12 @@ func prefix64(s string) string {
 		return s[:16] + "…"
 	}
 	return s
+}
+
+func pveProtoEndpoints(eps []pvecontract.Endpoint) []*pb.PVEEndpoint {
+	out := make([]*pb.PVEEndpoint, 0, len(eps))
+	for _, ep := range eps {
+		out = append(out, &pb.PVEEndpoint{Host: ep.Host, Port: uint32(ep.Port)})
+	}
+	return out
 }

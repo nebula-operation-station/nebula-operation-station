@@ -31,6 +31,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -38,10 +39,13 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvetransport"
@@ -60,13 +64,17 @@ var (
 	ErrPveTokenInvalid = errors.New("executor: pve token rejected by the pinned endpoint")
 	// ErrPveTokenFormat is returned for malformed token strings. The
 	// token value is not part of the error.
-	ErrPveTokenFormat = errors.New("executor: malformed pve api token (want user!tokenID!value)")
+	ErrPveTokenFormat = errors.New("executor: malformed pve api token (want USER@REALM!TOKENID=VALUE)")
 	// ErrPveTokenRejected is returned for tokens whose profile is refused
 	// by policy (password realm, built-in admin users). The token value is
 	// not part of the error.
 	ErrPveTokenRejected = errors.New("executor: pve token profile is not accepted")
 	// ErrPvePurpose is returned for a purpose other than read|action.
 	ErrPvePurpose = errors.New("executor: pve purpose must be read or action")
+	// ErrPveApprovalRequired means re-pinning has no bound HIGH approval.
+	ErrPveApprovalRequired = errors.New("executor: pve re-pin requires a bound HIGH approval")
+	// ErrPveResponse is a sanitized failure of an authenticated request.
+	ErrPveResponse = errors.New("executor: pve authenticated request failed")
 )
 
 // Credential purposes of a PVE remote.
@@ -77,8 +85,16 @@ const (
 	PvePurposeAction = "action"
 )
 
-// maxPveTokenLen bounds a PVE API token string (user!tokenID!value).
+// maxPveTokenLen bounds a PVE API token string (USER@REALM!TOKENID=VALUE).
 const maxPveTokenLen = 256
+
+const maxPveProfileBytes = canonical.MaxParametersSize
+
+const maxPveACLPathBytes = 256
+
+var pveTokenPattern = regexp.MustCompile(`^([A-Za-z0-9_.-]+@[A-Za-z][A-Za-z0-9_.-]*)!([A-Za-z][A-Za-z0-9_.-]*)=([A-Za-z0-9._~-]+)$`)
+
+var pveACLPathPattern = regexp.MustCompile(`^/(?:[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)?$`)
 
 // probeTimeout bounds the credential-free TLS probe of one endpoint.
 const probeTimeout = 10 * time.Second
@@ -222,11 +238,20 @@ func fetchPresentedChain(ctx context.Context, host string, port uint16) ([]*x509
 type PveTokenValidateFunc func(ctx context.Context, endpoints []pvecontract.Endpoint, trust pvetransport.Trust, token []byte) error
 
 // DefaultPveTokenValidate is the PveTokenValidateFunc used when
-// PveAdmin.ValidateToken is nil: it performs an authenticated
-// GET /version against the pinned endpoint with the PVE API token and
-// accepts 2xx. 401/403 maps to ErrPveTokenInvalid. The token value never
-// appears in the returned error.
+// PveAdmin.ValidateToken is nil for a read token. It verifies the version,
+// token metadata and complete effective permission tree through pinned TLS.
+// Unverifiable, expired, non-separated or excessive profiles are refused.
 func DefaultPveTokenValidate(ctx context.Context, endpoints []pvecontract.Endpoint, trust pvetransport.Trust, token []byte) error {
+	return defaultPveTokenValidate(ctx, endpoints, trust, token, PvePurposeRead, time.Now, token)
+}
+
+func defaultPveTokenValidate(ctx context.Context, endpoints []pvecontract.Endpoint, trust pvetransport.Trust, token []byte, purpose string, now func() time.Time, metadataToken []byte) error {
+	if err := validatePveTokenFormat(token); err != nil {
+		return err
+	}
+	if purpose != PvePurposeRead && purpose != PvePurposeAction {
+		return ErrPvePurpose
+	}
 	urls := make([]*url.URL, 0, len(endpoints))
 	for _, ep := range endpoints {
 		u, err := pvetransport.ParseEndpoint("https://" + net.JoinHostPort(ep.Host, strconv.Itoa(int(ep.Port))))
@@ -236,28 +261,169 @@ func DefaultPveTokenValidate(ctx context.Context, endpoints []pvecontract.Endpoi
 		urls = append(urls, u)
 	}
 	client, err := pvetransport.NewClient(pvetransport.Options{
-		Trust:     trust,
-		Endpoints: urls,
-		Auth:      func(context.Context) (string, error) { return "PVEAPIToken=" + string(token), nil },
+		Trust:            trust,
+		Endpoints:        urls,
+		Auth:             func(context.Context) (string, error) { return "PVEAPIToken=" + string(token), nil },
+		MaxResponseBytes: maxPveProfileBytes,
+		Now:              now,
 	})
 	if err != nil {
 		return fmt.Errorf("executor: pve token validate: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://pve.invalid/version", nil)
+	var version struct {
+		Version string `json:"version"`
+	}
+	if err := pveProfileGET(ctx, client, "/api2/json/version", &version); err != nil {
+		return err
+	}
+	if version.Version == "" {
+		return ErrPveTokenRejected
+	}
+	var permissions map[string]map[string]int
+	if err := pveProfileGET(ctx, client, "/api2/json/access/permissions", &permissions); err != nil {
+		return err
+	}
+	if err := validatePvePermissions(permissions, purpose); err != nil {
+		return err
+	}
+	if err := validatePveTokenFormat(metadataToken); err != nil {
+		return ErrPveTokenRejected
+	}
+	// The token-info endpoint's self rule does not apply to API token IDs.
+	// NOSRead's Sys.Audit on / permits the full user/token metadata listing.
+	metadataClient, err := pvetransport.NewClient(pvetransport.Options{Trust: trust, Endpoints: urls, Auth: func(context.Context) (string, error) { return "PVEAPIToken=" + string(metadataToken), nil }, MaxResponseBytes: maxPveProfileBytes, Now: now})
 	if err != nil {
-		return fmt.Errorf("executor: pve token validate: %w", err)
+		return ErrPveResponse
+	}
+	var users []pveProfileUser
+	if err := pveProfileGET(ctx, metadataClient, "/api2/json/access/users?full=1", &users); err != nil {
+		return err
+	}
+	return validatePveTokenMetadata(users, token, now())
+}
+
+type pveProfileUser struct {
+	UserID string `json:"userid"`
+	Enable *int   `json:"enable"`
+	Expire *int64 `json:"expire"`
+	Tokens []struct {
+		TokenID string `json:"tokenid"`
+		Privsep *int   `json:"privsep"`
+		Expire  *int64 `json:"expire"`
+	} `json:"tokens"`
+}
+
+func validatePveTokenMetadata(users []pveProfileUser, token []byte, now time.Time) error {
+	parts := pveTokenPattern.FindSubmatch(token)
+	foundUser, foundToken := false, false
+	for _, user := range users {
+		if user.UserID != string(parts[1]) {
+			continue
+		}
+		if foundUser || (user.Enable != nil && *user.Enable != 1) || (user.Expire != nil && *user.Expire != 0 && *user.Expire <= now.Unix()) {
+			return ErrPveTokenRejected
+		}
+		foundUser = true
+		for _, meta := range user.Tokens {
+			if meta.TokenID != string(parts[2]) {
+				continue
+			}
+			if foundToken || meta.Privsep == nil || *meta.Privsep != 1 {
+				return ErrPveTokenRejected
+			}
+			expiry := meta.Expire
+			if expiry == nil {
+				expiry = user.Expire
+			}
+			if expiry == nil || *expiry <= now.Unix() {
+				return ErrPveTokenRejected
+			}
+			foundToken = true
+		}
+	}
+	if !foundUser || !foundToken {
+		return ErrPveTokenRejected
+	}
+	return nil
+}
+
+// Never wrap errors from HTTP parsing or body decoding: a peer may reflect
+// the Authorization header into a status line, header, chunk or JSON value.
+func pveProfileGET(ctx context.Context, client *http.Client, path string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://pve.invalid"+path, nil)
+	if err != nil {
+		return ErrPveResponse
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("executor: pve token validate: %w", err)
+		if errors.Is(err, pvetransport.ErrTrustMismatch) {
+			return pvetransport.ErrTrustMismatch
+		}
+		return ErrPveResponse
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-	switch {
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return ErrPveTokenInvalid
-	case resp.StatusCode < 200 || resp.StatusCode > 299:
-		return fmt.Errorf("executor: pve token validate: the pinned endpoint answered %d", resp.StatusCode)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return ErrPveResponse
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxPveProfileBytes+1))
+	if err != nil || len(raw) > maxPveProfileBytes || !utf8.Valid(raw) {
+		return ErrPveResponse
+	}
+	if _, err := canonical.HashParameters(raw); err != nil {
+		return ErrPveTokenRejected
+	}
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if json.Unmarshal(raw, &envelope) != nil || len(envelope.Data) == 0 || bytes.Equal(envelope.Data, []byte("null")) || json.Unmarshal(envelope.Data, out) != nil {
+		return ErrPveTokenRejected
+	}
+	return nil
+}
+
+func validatePvePermissions(perms map[string]map[string]int, purpose string) error {
+	read := map[string]string{"Sys.Audit": "/", "VM.Audit": "/vms", "Datastore.Audit": "/storage", "Pool.Audit": "/pool"}
+	if len(perms) == 0 {
+		return ErrPveTokenRejected
+	}
+	action := false
+	for path, rights := range perms {
+		if len(path) > maxPveACLPathBytes || !pveACLPathPattern.MatchString(path) || strings.Contains(path, "/../") || strings.HasSuffix(path, "/..") || strings.Contains(path, "/./") || strings.HasSuffix(path, "/.") {
+			return ErrPveTokenRejected
+		}
+		if len(rights) == 0 {
+			continue
+		}
+		for privilege, propagate := range rights {
+			if propagate != 0 && propagate != 1 {
+				return ErrPveTokenRejected
+			}
+			if purpose == PvePurposeRead {
+				base, ok := read[privilege]
+				if !ok || !(path == base || (base == "/" && strings.HasPrefix(path, "/")) || strings.HasPrefix(path, base+"/")) {
+					return ErrPveTokenRejected
+				}
+			} else {
+				vmid := strings.TrimPrefix(path, "/vms/")
+				id, err := strconv.ParseUint(vmid, 10, 32)
+				if privilege != "VM.PowerMgmt" || !strings.HasPrefix(path, "/vms/") || err != nil || id == 0 || strconv.FormatUint(id, 10) != vmid {
+					return ErrPveTokenRejected
+				}
+				action = true
+			}
+		}
+	}
+	if purpose == PvePurposeRead {
+		for privilege, path := range read {
+			if perms[path][privilege] != 1 {
+				return ErrPveTokenRejected
+			}
+		}
+	} else if !action {
+		return ErrPveTokenRejected
 	}
 	return nil
 }
@@ -269,18 +435,15 @@ func validatePveTokenFormat(token []byte) error {
 	if len(token) == 0 || len(token) > maxPveTokenLen {
 		return ErrPveTokenFormat
 	}
-	if strings.ContainsAny(string(token), " \t\r\n") {
+	parts := pveTokenPattern.FindSubmatch(token)
+	if parts == nil {
 		return ErrPveTokenFormat
 	}
-	parts := strings.Split(string(token), "!")
-	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
-		return ErrPveTokenFormat
-	}
-	user := parts[0]
+	user := string(parts[1])
 	switch {
 	case strings.HasSuffix(user, "@pam"):
 		return fmt.Errorf("%w: password-realm user is refused", ErrPveTokenRejected)
-	case user == "Administrator" || user == "PVEVMAdmin":
+	case strings.HasPrefix(user, "Administrator@") || strings.HasPrefix(user, "PVEVMAdmin@"):
 		return fmt.Errorf("%w: built-in admin user is refused", ErrPveTokenRejected)
 	}
 	return nil
@@ -300,6 +463,9 @@ type PveAdmin struct {
 	// ValidateToken validates a token against the pinned endpoint.
 	// Default: DefaultPveTokenValidate.
 	ValidateToken PveTokenValidateFunc
+	// AuthorizeRepin consumes an approval bound to the current remote,
+	// old/new fingerprints, endpoints and generations. Nil refuses re-pin.
+	AuthorizeRepin func(context.Context, executordb.PveRemote, PveRepin) error
 	// RevokeGrants revokes the read grants and permits that depend on the
 	// remote's credentials or trust.
 	// TODO(p107): provider read grants do not exist yet; the default is a
@@ -320,6 +486,13 @@ func (a *PveAdmin) checkDeps() error {
 	if a.Vault == nil {
 		return errors.New("executor: pve admin: Vault is required")
 	}
+	st, err := a.Vault.State()
+	if err != nil {
+		return fmt.Errorf("executor: pve vault state: %w", err)
+	}
+	if st != vault.StateUnlocked {
+		return vault.ErrLocked
+	}
 	return nil
 }
 
@@ -338,11 +511,20 @@ func (a *PveAdmin) probeFn() PveProbeFunc {
 	return a.Probe
 }
 
-func (a *PveAdmin) validateTokenFn() PveTokenValidateFunc {
-	if a.ValidateToken == nil {
-		return DefaultPveTokenValidate
+func (a *PveAdmin) validateTokenFn(purpose string, metadataToken []byte) PveTokenValidateFunc {
+	return func(ctx context.Context, eps []pvecontract.Endpoint, trust pvetransport.Trust, token []byte) error {
+		if err := a.checkDeps(); err != nil {
+			return err
+		}
+		if a.ValidateToken != nil {
+			return a.ValidateToken(ctx, eps, trust, token)
+		}
+		now := a.Now
+		if now == nil {
+			now = time.Now
+		}
+		return defaultPveTokenValidate(ctx, eps, trust, token, purpose, now, metadataToken)
 	}
-	return a.ValidateToken
 }
 
 func (a *PveAdmin) revoke(remoteID, reason string) error {
@@ -434,6 +616,9 @@ func (a *PveAdmin) AddRemote(ctx context.Context, in PveAddRemote) (executordb.P
 			return executordb.PveRemote{}, err
 		}
 	}
+	if len(in.ActionToken) > 0 && bytes.Equal(pveTokenPattern.FindSubmatch(in.ReadToken)[1], pveTokenPattern.FindSubmatch(in.ActionToken)[1]) {
+		return executordb.PveRemote{}, ErrPveTokenRejected
+	}
 	res, err := a.probeFn()(ctx, remote.Endpoints)
 	if err != nil {
 		return executordb.PveRemote{}, err
@@ -445,7 +630,7 @@ func (a *PveAdmin) AddRemote(ctx context.Context, in PveAddRemote) (executordb.P
 	if pin != remote.TrustPin {
 		return executordb.PveRemote{}, fmt.Errorf("%w: presented %s, confirmed %s", ErrPvePinMismatch, pin, remote.TrustPin)
 	}
-	if err := a.validateTokenFn()(ctx, remote.Endpoints, trust, in.ReadToken); err != nil {
+	if err := a.validateTokenFn(PvePurposeRead, in.ReadToken)(ctx, remote.Endpoints, trust, in.ReadToken); err != nil {
 		return executordb.PveRemote{}, err
 	}
 	readID := PveVaultID(remote.RemoteID, PvePurposeRead)
@@ -459,7 +644,7 @@ func (a *PveAdmin) AddRemote(ctx context.Context, in PveAddRemote) (executordb.P
 			a.compensateVault(readID, readVersion)
 			return executordb.PveRemote{}, err
 		}
-		if err := a.validateTokenFn()(ctx, remote.Endpoints, trust, in.ActionToken); err != nil {
+		if err := a.validateTokenFn(PvePurposeAction, in.ReadToken)(ctx, remote.Endpoints, trust, in.ActionToken); err != nil {
 			a.compensateVault(readID, readVersion)
 			return executordb.PveRemote{}, err
 		}
@@ -525,42 +710,71 @@ func (a *PveAdmin) RotateToken(ctx context.Context, in PveRotateToken) (executor
 	if rm.State != executordb.StateActive {
 		return executordb.PveRemote{}, fmt.Errorf("executor: pve rotate token: %w: %s is %s", executordb.ErrRemoteState, in.RemoteID, rm.State)
 	}
+	metadataToken := in.Token
+	otherRef := rm.Credentials.ActionRef
+	if in.Purpose == PvePurposeAction {
+		otherRef = rm.Credentials.ReadRef
+	}
+	if otherRef != "" {
+		other, err := a.Vault.Open(otherRef)
+		if err != nil {
+			return executordb.PveRemote{}, err
+		}
+		defer clear(other)
+		if validatePveTokenFormat(other) != nil || bytes.Equal(pveTokenPattern.FindSubmatch(in.Token)[1], pveTokenPattern.FindSubmatch(other)[1]) {
+			return executordb.PveRemote{}, ErrPveTokenRejected
+		}
+		if in.Purpose == PvePurposeAction {
+			metadataToken = other
+		}
+	}
 	res, err := a.probeFn()(ctx, rm.Endpoints)
 	if err != nil {
+		if errors.Is(err, pvetransport.ErrTrustMismatch) {
+			return executordb.PveRemote{}, a.blockTrustFailure(rm.RemoteID, in.By, err)
+		}
 		return executordb.PveRemote{}, err
 	}
 	pin, trust, err := res.TrustIdentity(rm.Kind)
 	if err != nil {
-		return executordb.PveRemote{}, err
+		return executordb.PveRemote{}, a.blockTrustFailure(rm.RemoteID, in.By, ErrPvePinMismatch)
 	}
 	if pin != rm.TrustPin {
-		return executordb.PveRemote{}, fmt.Errorf("%w: presented %s, pinned %s", ErrPvePinMismatch, pin, rm.TrustPin)
+		return executordb.PveRemote{}, a.blockTrustFailure(rm.RemoteID, in.By, ErrPvePinMismatch)
 	}
-	if err := a.validateTokenFn()(ctx, rm.Endpoints, trust, in.Token); err != nil {
+	if err := a.validateTokenFn(in.Purpose, metadataToken)(ctx, rm.Endpoints, trust, in.Token); err != nil {
+		if errors.Is(err, pvetransport.ErrTrustMismatch) {
+			return executordb.PveRemote{}, a.blockTrustFailure(rm.RemoteID, in.By, pvetransport.ErrTrustMismatch)
+		}
 		return executordb.PveRemote{}, err
 	}
 	id := PveVaultID(in.RemoteID, in.Purpose)
-	version, err := a.Vault.Put(id, in.Token, in.By)
+	var rotated executordb.PveRemote
+	version, err := a.Vault.PutWithCommit(id, in.Token, in.By, func(secret executordb.VaultSecret) error {
+		var err error
+		rotated, err = a.DB.RotateRemoteSecret(rm, in.Purpose, secret, in.By)
+		return err
+	})
 	if err != nil {
 		return executordb.PveRemote{}, fmt.Errorf("executor: pve rotate token: store token: %w", err)
 	}
-	creds := rm.Credentials
-	switch in.Purpose {
-	case PvePurposeRead:
-		creds.ReadRef, creds.ReadVersion = id, version
-	case PvePurposeAction:
-		creds.ActionRef, creds.ActionVersion = id, version
-	}
-	rm, err = a.DB.SetRemoteCredentials(in.RemoteID, creds, in.By)
-	if err != nil {
-		a.compensateVault(id, version)
-		return executordb.PveRemote{}, fmt.Errorf("executor: pve rotate token: %w", err)
-	}
+	rm = rotated
 	if err := a.revoke(in.RemoteID, "pve credential rotation: "+in.Purpose+" token version "+strconv.FormatInt(version, 10)); err != nil {
 		return executordb.PveRemote{}, fmt.Errorf("executor: pve rotate token: revoke grants: %w", err)
 	}
 	a.log().Info("pve token rotated", "remote", in.RemoteID, "purpose", in.Purpose, "ref", id, "version", version)
 	return rm, nil
+}
+
+func (a *PveAdmin) blockTrustFailure(remoteID, by string, cause error) error {
+	if _, err := a.DB.BlockRemote(remoteID, "pve trust verification failed", by); err != nil {
+		return fmt.Errorf("executor: persist pve trust block: %w", errors.Join(cause, err))
+	}
+	if err := a.revoke(remoteID, "pve trust verification failed"); err != nil {
+		return fmt.Errorf("executor: revoke blocked pve authority: %w", errors.Join(cause, err))
+	}
+	a.log().Warn("pve remote blocked", "remote", remoteID, "reason", "trust verification failed")
+	return cause
 }
 
 // PveRemove carries one `pve remote remove` request.
@@ -633,6 +847,8 @@ type PveRepin struct {
 	ConfirmedNewPin string
 	// By is the authenticated admin identity.
 	By string
+	// ApprovalDigest identifies the approved, single-use HIGH permit.
+	ApprovalDigest string
 }
 
 // Repin re-pins a remote to the trust identity its endpoints present
@@ -666,6 +882,15 @@ func (a *PveAdmin) Repin(ctx context.Context, in PveRepin) (executordb.PveRemote
 	}
 	if pin != in.ConfirmedNewPin {
 		return executordb.PveRemote{}, fmt.Errorf("%w: presented %s, confirmed %s", ErrPvePinMismatch, pin, in.ConfirmedNewPin)
+	}
+	if a.AuthorizeRepin == nil {
+		return executordb.PveRemote{}, ErrPveApprovalRequired
+	}
+	if err := a.AuthorizeRepin(ctx, rm, in); err != nil {
+		return executordb.PveRemote{}, err
+	}
+	if err := a.checkDeps(); err != nil {
+		return executordb.PveRemote{}, err
 	}
 	rm, err = a.DB.RepinRemote(in.RemoteID, in.OldPin, pin, in.By)
 	if err != nil {

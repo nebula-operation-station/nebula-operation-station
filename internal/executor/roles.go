@@ -97,6 +97,14 @@ func MethodRoles() map[string][]peercred.Role {
 		// ReadPVE: it writes poll requests to the spool and the pve-collector
 		// schedules the reads. Remote management (add/rotate/remove/repin) is
 		// not part of this surface.
+		pb.ExecutorService_ProbePVERemote_FullMethodName:      {admin},
+		pb.ExecutorService_AddPVERemote_FullMethodName:        {admin},
+		pb.ExecutorService_RotatePVEToken_FullMethodName:      {admin},
+		pb.ExecutorService_RemovePVERemote_FullMethodName:     {admin},
+		pb.ExecutorService_ListPVEAdminRemotes_FullMethodName: {admin},
+		pb.ExecutorService_ProposePVERepin_FullMethodName:     {admin},
+		pb.ExecutorService_CommitPVERepin_FullMethodName:      {admin},
+
 		pb.ExecutorService_ListPVERemotes_FullMethodName: {server, admin, peercred.RolePVECollector},
 		pb.ExecutorService_ReadPVE_FullMethodName:        {peercred.RolePVECollector, admin},
 	}
