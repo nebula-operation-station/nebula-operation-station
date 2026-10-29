@@ -54,6 +54,9 @@ var ErrDriftHintNotFound = errors.New("pveinventory: drift hint not found")
 // resolved.
 var ErrDriftResolved = errors.New("pveinventory: drift hint already resolved")
 
+// ErrDriftStale is returned when newer observations superseded the hint.
+var ErrDriftStale = errors.New("pveinventory: drift hint superseded")
+
 // DriftHint is a read-only record of a difference between the linked
 // managed host and the PVE guest observation. It is never applied
 // automatically: a human accepts (updates display fields only) or
@@ -84,6 +87,8 @@ type DriftHint struct {
 	Resolution string
 	// ResolvedBy is the user who resolved the hint.
 	ResolvedBy string
+	// SupersededAt is when newer observations invalidated this confirmation.
+	SupersededAt time.Time
 }
 
 // SweepDrift computes drift hints for all actively linked guests of one
@@ -139,63 +144,95 @@ func (s *Store) computeDrift(ctx context.Context, l Link, g Guest, h inventory.H
 	for _, e := range h.Endpoints {
 		endpointIPs[strings.ToLower(e.Address)] = true
 	}
-	var out []DriftHint
-
-	// IP: a guest IP that is not an endpoint address of the host.
-	if missing := missingGuestIPs(guestIPs, endpointIPs); len(missing) > 0 {
-		out = append(out, s.recordDrift(ctx, l, h.ID, DriftFieldIP,
-			strings.Join(endpointAddresses(h), ", "), strings.Join(missing, ", ")))
+	var pending []DriftHint
+	add := func(field, invValue, pveValue string) {
+		pending = append(pending, DriftHint{Field: field, InventoryValue: invValue, PVEValue: pveValue})
 	}
 
-	// RAM / node / state: compared against the host's display tags; no
-	// hint when the tag is not recorded yet.
-	cfg, err := s.GetGuestConfig(ctx, l.RemoteID, l.VMID, l.Generation)
-	if err != nil {
+	if missing := missingGuestIPs(guestIPs, endpointIPs); len(missing) > 0 {
+		add(DriftFieldIP, strings.Join(endpointAddresses(h), ", "), strings.Join(missing, ", "))
+	}
+
+	// Dataset status is authoritative: an unavailable poll may retain an
+	// older config row. Neither missing nor unavailable RAM blocks other fields.
+	status, err := s.GetGuestDatasetStatus(ctx, l.RemoteID, l.VMID, l.Generation, DatasetConfig)
+	if err != nil && !errors.Is(err, ErrDatasetNotFound) {
 		return nil, err
 	}
-	if v, ok := h.Tags[TagPVERAM]; ok && cfg.RAMBytes > 0 && v != formatRAM(cfg.RAMBytes) {
-		out = append(out, s.recordDrift(ctx, l, h.ID, DriftFieldRAM, v, formatRAM(cfg.RAMBytes)))
+	if err == nil && status.State == StateAvailable {
+		cfg, err := s.GetGuestConfig(ctx, l.RemoteID, l.VMID, l.Generation)
+		if err != nil && !errors.Is(err, ErrGuestNotFound) {
+			return nil, err
+		}
+		if v, ok := h.Tags[TagPVERAM]; err == nil && ok && cfg.State == StateAvailable && cfg.RAMBytes > 0 && v != formatRAM(cfg.RAMBytes) {
+			add(DriftFieldRAM, v, formatRAM(cfg.RAMBytes))
+		}
 	}
 	if v, ok := h.Tags[TagPVENode]; ok && v != g.Node {
-		out = append(out, s.recordDrift(ctx, l, h.ID, DriftFieldNode, v, g.Node))
+		add(DriftFieldNode, v, g.Node)
 	}
 	if v, ok := h.Tags[TagPVEState]; ok && v != g.Status {
-		out = append(out, s.recordDrift(ctx, l, h.ID, DriftFieldState, v, g.Status))
+		add(DriftFieldState, v, g.Status)
+	}
+	var out []DriftHint
+	args := []any{s.formatTime(s.now()), h.ID}
+	query := `UPDATE pve_drift_hints SET superseded_at = ?
+		WHERE host_id = ? AND resolved_at = '' AND superseded_at = ''`
+	for _, p := range pending {
+		hint, err := s.recordDrift(ctx, l, h.ID, p.Field, p.InventoryValue, p.PVEValue)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, hint)
+		query += ` AND id != ?`
+		args = append(args, hint.ID)
+	}
+	// A difference that disappeared also invalidates its old confirmation.
+	if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+		return nil, fmt.Errorf("pveinventory: supersede obsolete drift hints: %w", err)
 	}
 	return out, nil
 }
 
-// recordDrift upserts one hint per (host, field) and returns the stored
-// hint. Re-detection reopens a previously resolved hint.
-func (s *Store) recordDrift(ctx context.Context, l Link, hostID, field, invValue, pveValue string) DriftHint {
+// recordDrift retains immutable values and decisions. Only unchanged
+// observations reuse a confirmation ID; new values supersede the open version.
+func (s *Store) recordDrift(ctx context.Context, l Link, hostID, field, invValue, pveValue string) (DriftHint, error) {
 	now := s.formatTime(s.now())
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO pve_drift_hints (remote_id, vmid, generation, host_id, field,
-		                              inventory_value, pve_value, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT (host_id, field) DO UPDATE SET
-			remote_id = excluded.remote_id,
-			vmid = excluded.vmid,
-			generation = excluded.generation,
-			inventory_value = excluded.inventory_value,
-			pve_value = excluded.pve_value,
-			resolved_at = '',
-			resolution = '',
-			resolved_by = ''`,
-		l.RemoteID, l.VMID, l.Generation, hostID, field, invValue, pveValue, now)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return DriftHint{}
+		return DriftHint{}, fmt.Errorf("pveinventory: begin drift hint: %w", err)
 	}
-	row := s.db.QueryRowContext(ctx, `
-		SELECT id, remote_id, vmid, generation, host_id, field,
-		       inventory_value, pve_value, created_at, resolved_at, resolution, resolved_by
-		FROM pve_drift_hints
-		WHERE host_id = ? AND field = ?`, hostID, field)
-	h, err := scanDriftRow(row)
+	defer tx.Rollback()
+	h, err := scanDriftRow(tx.QueryRowContext(ctx, `SELECT `+driftColumns+`
+		FROM pve_drift_hints WHERE host_id = ? AND field = ? ORDER BY id DESC LIMIT 1`, hostID, field))
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return DriftHint{}, fmt.Errorf("pveinventory: read previous drift hint: %w", err)
+	}
+	if err == nil && h.ResolvedAt.IsZero() && h.SupersededAt.IsZero() && h.RemoteID == l.RemoteID && h.VMID == l.VMID && h.Generation == l.Generation && h.InventoryValue == invValue && h.PVEValue == pveValue {
+		return h, nil
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE pve_drift_hints SET superseded_at = ?
+		WHERE host_id = ? AND field = ? AND resolved_at = '' AND superseded_at = ''`, now, hostID, field); err != nil {
+		return DriftHint{}, fmt.Errorf("pveinventory: supersede drift hint: %w", err)
+	}
+	res, err := tx.ExecContext(ctx, `INSERT INTO pve_drift_hints
+		(remote_id, vmid, generation, host_id, field, inventory_value, pve_value, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, l.RemoteID, l.VMID, l.Generation, hostID, field, invValue, pveValue, now)
 	if err != nil {
-		return DriftHint{}
+		return DriftHint{}, fmt.Errorf("pveinventory: insert drift hint: %w", err)
 	}
-	return h
+	id, err := res.LastInsertId()
+	if err != nil {
+		return DriftHint{}, fmt.Errorf("pveinventory: drift hint id: %w", err)
+	}
+	h, err = s.getDriftHintRow(ctx, tx, id)
+	if err != nil {
+		return DriftHint{}, fmt.Errorf("pveinventory: read stored drift hint: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return DriftHint{}, fmt.Errorf("pveinventory: commit drift hint: %w", err)
+	}
+	return h, nil
 }
 
 // ResolveDriftHint explicitly resolves one open drift hint. Accept
@@ -209,39 +246,52 @@ func (s *Store) ResolveDriftHint(ctx context.Context, id int64, resolution, acto
 	if resolution != DriftAccepted && resolution != DriftIgnored {
 		return DriftHint{}, fmt.Errorf("pveinventory: drift resolution must be %q or %q", DriftAccepted, DriftIgnored)
 	}
-	h, err := s.getDriftHint(ctx, id)
+	now := s.formatTime(s.now())
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return DriftHint{}, fmt.Errorf("pveinventory: begin resolve drift hint: %w", err)
+	}
+	defer tx.Rollback()
+	h, err := s.getDriftHintRow(ctx, tx, id)
 	if err != nil {
 		return DriftHint{}, err
 	}
 	if !h.ResolvedAt.IsZero() {
 		return DriftHint{}, fmt.Errorf("%w: %d", ErrDriftResolved, id)
 	}
+	if !h.SupersededAt.IsZero() {
+		return DriftHint{}, fmt.Errorf("%w: %d", ErrDriftStale, id)
+	}
 	if resolution == DriftAccepted {
-		host, err := s.hostStore().Get(ctx, h.HostID)
-		if err != nil {
-			return DriftHint{}, fmt.Errorf("pveinventory: get host %s for drift accept: %w", h.HostID, err)
-		}
 		tag, ok := driftTagForField(h.Field)
 		if !ok {
 			return DriftHint{}, fmt.Errorf("pveinventory: no display tag for drift field %q", h.Field)
 		}
-		if host.Tags == nil {
-			host.Tags = map[string]string{}
+		// Write only the display tag. No host snapshot is rewritten, so
+		// concurrent endpoint, credential and criticality edits survive.
+		res, err := tx.ExecContext(ctx, `INSERT INTO host_tag_kv (host_id, tag_key, tag_value)
+			SELECT id, ?, ? FROM hosts WHERE name = ?
+			ON CONFLICT (host_id, tag_key) DO UPDATE SET tag_value = excluded.tag_value`, tag, h.PVEValue, h.HostID)
+		if err != nil {
+			return DriftHint{}, fmt.Errorf("pveinventory: update host %s display tag: %w", h.HostID, err)
 		}
-		host.Tags[tag] = h.PVEValue
-		if _, err := s.hostStore().Update(ctx, host); err != nil {
-			return DriftHint{}, fmt.Errorf("pveinventory: update host %s tags: %w", h.HostID, err)
+		if n, err := res.RowsAffected(); err != nil {
+			return DriftHint{}, fmt.Errorf("pveinventory: display tag affected rows: %w", err)
+		} else if n != 1 {
+			return DriftHint{}, fmt.Errorf("pveinventory: accept drift for host %s: %w", h.HostID, inventory.ErrHostNotFound)
 		}
 	}
-	now := s.formatTime(s.now())
-	res, err := s.db.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE pve_drift_hints SET resolved_at = ?, resolution = ?, resolved_by = ?
-		WHERE id = ? AND resolved_at = ''`, now, resolution, actor, id)
+		WHERE id = ? AND resolved_at = '' AND superseded_at = ''`, now, resolution, actor, id)
 	if err != nil {
 		return DriftHint{}, fmt.Errorf("pveinventory: resolve drift hint %d: %w", id, err)
 	}
 	if n, _ := res.RowsAffected(); n != 1 {
 		return DriftHint{}, fmt.Errorf("%w: %d", ErrDriftResolved, id)
+	}
+	if err := tx.Commit(); err != nil {
+		return DriftHint{}, fmt.Errorf("pveinventory: commit drift resolution: %w", err)
 	}
 	h.ResolvedAt, _ = time.Parse(time.RFC3339, now)
 	h.Resolution = resolution
@@ -257,11 +307,10 @@ func (s *Store) ListDriftHints(ctx context.Context, remoteID string, limit int) 
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, remote_id, vmid, generation, host_id, field,
-		       inventory_value, pve_value, created_at, resolved_at, resolution, resolved_by
+		SELECT `+driftColumns+`
 		FROM pve_drift_hints
 		WHERE remote_id = ?
-		ORDER BY (resolved_at = ''), id
+		ORDER BY (resolved_at = '' AND superseded_at = '') DESC, id
 		LIMIT ?`, remoteID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("pveinventory: list drift hints %s: %w", remoteID, err)
@@ -280,9 +329,15 @@ func (s *Store) ListDriftHints(ctx context.Context, remoteID string, limit int) 
 
 // getDriftHint loads one drift hint by id.
 func (s *Store) getDriftHint(ctx context.Context, id int64) (DriftHint, error) {
-	row := s.db.QueryRowContext(ctx, `
-		SELECT id, remote_id, vmid, generation, host_id, field,
-		       inventory_value, pve_value, created_at, resolved_at, resolution, resolved_by
+	return s.getDriftHintRow(ctx, s.db, id)
+}
+
+const driftColumns = `id, remote_id, vmid, generation, host_id, field,
+	inventory_value, pve_value, created_at, resolved_at, resolution, resolved_by, superseded_at`
+
+func (s *Store) getDriftHintRow(ctx context.Context, db rowQuerier, id int64) (DriftHint, error) {
+	row := db.QueryRowContext(ctx, `
+		SELECT `+driftColumns+`
 		FROM pve_drift_hints WHERE id = ?`, id)
 	h, err := scanDriftRow(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -346,12 +401,13 @@ func formatRAM(b uint64) string {
 // scanDriftRow scans one pve_drift_hints row.
 func scanDriftRow(row linkScanner) (DriftHint, error) {
 	var h DriftHint
-	var createdAt, resolvedAt string
+	var createdAt, resolvedAt, supersededAt string
 	err := row.Scan(&h.ID, &h.RemoteID, &h.VMID, &h.Generation, &h.HostID, &h.Field,
-		&h.InventoryValue, &h.PVEValue, &createdAt, &resolvedAt, &h.Resolution, &h.ResolvedBy)
+		&h.InventoryValue, &h.PVEValue, &createdAt, &resolvedAt, &h.Resolution, &h.ResolvedBy, &supersededAt)
 	if err != nil {
 		return DriftHint{}, err
 	}
+	h.SupersededAt, _ = time.Parse(time.RFC3339, supersededAt)
 	h.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 	if resolvedAt != "" {
 		h.ResolvedAt, _ = time.Parse(time.RFC3339, resolvedAt)

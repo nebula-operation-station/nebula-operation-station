@@ -142,45 +142,67 @@ func (s *Store) CreateLink(ctx context.Context, remoteID string, vmid, generatio
 	if err := validActor(actor); err != nil {
 		return Link{}, err
 	}
-	if _, err := s.getIncarnation(ctx, remoteID, vmid, generation); err != nil {
-		return Link{}, err
-	}
-	if _, err := s.hostStore().Get(ctx, hostID); err != nil {
-		if errors.Is(err, inventory.ErrHostNotFound) {
-			return Link{}, fmt.Errorf("%w: %s", ErrManagedHostNotFound, hostID)
-		}
-		return Link{}, fmt.Errorf("pveinventory: get managed host %s: %w", hostID, err)
-	}
-
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Link{}, fmt.Errorf("pveinventory: begin create link: %w", err)
 	}
 	defer tx.Rollback()
 
-	if l, err := scanLinkRow(tx.QueryRowContext(ctx, linkByIncarnationSQL, remoteID, vmid, generation)); err == nil {
-		return Link{}, fmt.Errorf("%w: %s/%d/%d -> %s", ErrLinkExists, remoteID, vmid, generation, l.HostID)
-	} else if !errors.Is(err, ErrLinkNotFound) {
-		return Link{}, err
-	}
-	if l, err := scanLinkRow(tx.QueryRowContext(ctx, linkByHostSQL, hostID)); err == nil {
-		return Link{}, fmt.Errorf("%w: %s -> %s/%d/%d", ErrHostAlreadyLinked, hostID, l.RemoteID, l.VMID, l.Generation)
-	} else if !errors.Is(err, ErrLinkNotFound) {
-		return Link{}, err
-	}
-
 	now := s.formatTime(s.now())
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO pve_host_links (remote_id, vmid, generation, host_id, created_by, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		remoteID, vmid, generation, hostID, actor, now); err != nil {
-		return Link{}, fmt.Errorf("pveinventory: create link %s/%d/%d -> %s: %w", remoteID, vmid, generation, hostID, err)
+	if err := s.createLinkTx(ctx, tx, remoteID, vmid, generation, hostID, actor, now); err != nil {
+		return Link{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return Link{}, fmt.Errorf("pveinventory: commit create link: %w", err)
 	}
 	createdAt, _ := time.Parse(time.RFC3339, now)
 	return Link{RemoteID: remoteID, VMID: vmid, Generation: generation, HostID: hostID, CreatedBy: actor, CreatedAt: createdAt}, nil
+}
+
+// createLinkTx validates the active incarnation and link invariants in
+// the same transaction as the caller's writes.
+func (s *Store) createLinkTx(ctx context.Context, tx *sql.Tx, remoteID string, vmid, generation uint64, hostID, actor, now string) error {
+	if err := validateLinkIncarnation(ctx, tx, remoteID, vmid, generation); err != nil {
+		return err
+	}
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM hosts WHERE name = ?`, hostID).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: %s", ErrManagedHostNotFound, hostID)
+		}
+		return fmt.Errorf("pveinventory: validate managed host %s: %w", hostID, err)
+	}
+	if l, err := scanLinkRow(tx.QueryRowContext(ctx, linkByIncarnationSQL, remoteID, vmid, generation)); err == nil {
+		return fmt.Errorf("%w: %s/%d/%d -> %s", ErrLinkExists, remoteID, vmid, generation, l.HostID)
+	} else if !errors.Is(err, ErrLinkNotFound) {
+		return err
+	}
+	if l, err := scanLinkRow(tx.QueryRowContext(ctx, linkByHostSQL, hostID)); err == nil {
+		return fmt.Errorf("%w: %s -> %s/%d/%d", ErrHostAlreadyLinked, hostID, l.RemoteID, l.VMID, l.Generation)
+	} else if !errors.Is(err, ErrLinkNotFound) {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO pve_host_links (remote_id, vmid, generation, host_id, created_by, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		remoteID, vmid, generation, hostID, actor, now); err != nil {
+		return fmt.Errorf("pveinventory: create link %s/%d/%d -> %s: %w", remoteID, vmid, generation, hostID, err)
+	}
+	return nil
+}
+
+// validateLinkIncarnation rejects stale staging rows before creating a host.
+func validateLinkIncarnation(ctx context.Context, tx *sql.Tx, remoteID string, vmid, generation uint64) error {
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM pve_guests
+		WHERE remote_id = ? AND vmid = ? AND generation = ? AND tombstoned = 0`, remoteID, vmid, generation).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: %s/%d/%d", ErrGuestNotFound, remoteID, vmid, generation)
+		}
+		return fmt.Errorf("pveinventory: validate link incarnation: %w", err)
+	}
+	return nil
 }
 
 // GetLink returns the active link for the guest incarnation.

@@ -18,9 +18,9 @@ import (
 const (
 	// StagingNew: no managed host matches the guest.
 	StagingNew = "NEW"
-	// StagingExisting: exactly one managed host matches the guest.
+	// StagingExisting: a MAC matches exactly one managed host.
 	StagingExisting = "EXISTING"
-	// StagingPossible: several managed hosts match, no hard conflict.
+	// StagingPossible: IP-only or multiple matches, with no hard conflict.
 	StagingPossible = "POSSIBLE MATCH"
 	// StagingConflict: a hard conflict (one MAC on two guests, one IP on
 	// two hosts). Conflicts are flagged, never resolved silently.
@@ -82,27 +82,60 @@ type StagingEntry struct {
 // EXISTING, POSSIBLE MATCH or CONFLICT from its candidate matches.
 // Linked guests are managed via their link and stay out of staging.
 func (s *Store) SweepStaging(ctx context.Context, remoteID string) ([]StagingEntry, error) {
-	guests, err := s.ListGuests(ctx, remoteID, GuestFilter{}, 0)
-	if err != nil {
-		return nil, err
-	}
 	var out []StagingEntry
-	for _, g := range guests {
-		if _, err := s.GetLink(ctx, remoteID, g.VMID, g.Generation); err == nil {
-			continue // actively linked: managed
-		} else if !errors.Is(err, ErrLinkNotFound) {
-			return nil, err
-		}
-		entry, err := s.computeStaging(ctx, remoteID, g)
+	var afterVMID, afterGeneration uint64
+	for {
+		guests, err := s.stagingGuestBatch(ctx, remoteID, afterVMID, afterGeneration)
 		if err != nil {
 			return nil, err
 		}
-		if err := s.upsertStaging(ctx, entry); err != nil {
-			return nil, err
+		if len(guests) == 0 {
+			break
 		}
-		out = append(out, entry)
+		for _, g := range guests {
+			if _, err := s.GetLink(ctx, remoteID, g.VMID, g.Generation); err == nil {
+				continue // actively linked: managed
+			} else if !errors.Is(err, ErrLinkNotFound) {
+				return nil, err
+			}
+			entry, err := s.computeStaging(ctx, remoteID, g)
+			if err != nil {
+				return nil, err
+			}
+			if err := s.upsertStaging(ctx, entry); err != nil {
+				return nil, err
+			}
+			out = append(out, entry)
+		}
+		last := guests[len(guests)-1]
+		afterVMID, afterGeneration = last.VMID, last.Generation
 	}
 	return out, nil
+}
+
+// stagingGuestBatch uses a stable cursor and closes the bounded read before
+// the sweep writes staging rows.
+func (s *Store) stagingGuestBatch(ctx context.Context, remoteID string, afterVMID, afterGeneration uint64) ([]Guest, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT remote_id, vmid, generation, kind, node, name, status, uuid,
+		       observed_at, source, state, reason, collection_generation,
+		       tombstoned, tombstoned_at
+		FROM pve_guests WHERE remote_id = ? AND tombstoned = 0
+		  AND (vmid, generation) > (?, ?)
+		ORDER BY vmid, generation LIMIT ?`, remoteID, afterVMID, afterGeneration, MaxGuestsQuery)
+	if err != nil {
+		return nil, fmt.Errorf("pveinventory: staging guest batch: %w", err)
+	}
+	defer rows.Close()
+	var out []Guest
+	for rows.Next() {
+		g, err := scanGuestRow(rows, s, "staging guest batch")
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
 }
 
 // computeStaging classifies one unlinked guest.
@@ -145,17 +178,28 @@ func (s *Store) computeStaging(ctx context.Context, remoteID string, g Guest) (S
 	sort.Strings(entry.IPs)
 
 	hostSet := map[string]bool{}
+	// A cloned MAC is a guest conflict even when no IPAM asset or host
+	// candidate exists. Host match conflicts are handled below.
 	conflict := false
+	for mac := range seenMAC {
+		others, err := s.guestsWithMAC(ctx, remoteID, mac, g.VMID)
+		if err != nil {
+			return StagingEntry{}, err
+		}
+		conflict = conflict || len(others) > 0
+	}
+	strongMatch := false
 	for _, c := range candidates {
 		hostSet[c.HostID] = true
+		strongMatch = strongMatch || c.Match == MatchMAC
 		conflict = conflict || c.Conflict
 	}
 	switch {
 	case conflict:
 		entry.Status = StagingConflict
-	case len(hostSet) == 1:
+	case len(hostSet) == 1 && strongMatch:
 		entry.Status = StagingExisting
-	case len(hostSet) > 1:
+	case len(hostSet) > 0:
 		entry.Status = StagingPossible
 	default:
 		entry.Status = StagingNew
@@ -239,7 +283,12 @@ func (s *Store) ImportStaged(ctx context.Context, remoteID string, vmid, generat
 	if err := validActor(actor); err != nil {
 		return "", err
 	}
-	entry, err := s.getStaging(ctx, remoteID, vmid, generation)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("pveinventory: begin staged import: %w", err)
+	}
+	defer tx.Rollback()
+	entry, err := s.getStagingRow(ctx, tx, remoteID, vmid, generation)
 	if err != nil {
 		return "", err
 	}
@@ -249,22 +298,20 @@ func (s *Store) ImportStaged(ctx context.Context, remoteID string, vmid, generat
 	if entry.Status == StagingConflict {
 		return "", fmt.Errorf("%w: %s/%d/%d", ErrStagingConflict, remoteID, vmid, generation)
 	}
+	if err := validateLinkIncarnation(ctx, tx, remoteID, vmid, generation); err != nil {
+		return "", err
+	}
 	if hostID == "" {
-		hostID, err = s.createHostFromGuest(ctx, entry)
+		hostID, err = s.createHostFromGuest(ctx, tx, entry)
 		if err != nil {
 			return "", err
 		}
-	} else if _, err := s.hostStore().Get(ctx, hostID); err != nil {
-		if errors.Is(err, inventory.ErrHostNotFound) {
-			return "", fmt.Errorf("%w: %s", ErrManagedHostNotFound, hostID)
-		}
-		return "", fmt.Errorf("pveinventory: get managed host %s: %w", hostID, err)
-	}
-	if _, err := s.CreateLink(ctx, remoteID, vmid, generation, hostID, actor); err != nil {
-		return "", err
 	}
 	now := s.formatTime(s.now())
-	res, err := s.db.ExecContext(ctx, `
+	if err := s.createLinkTx(ctx, tx, remoteID, vmid, generation, hostID, actor, now); err != nil {
+		return "", err
+	}
+	res, err := tx.ExecContext(ctx, `
 		UPDATE pve_staging SET imported_at = ?, imported_by = ?, imported_asset = ?
 		WHERE remote_id = ? AND vmid = ? AND generation = ? AND imported_at = ''`,
 		now, actor, hostID, remoteID, vmid, generation)
@@ -274,12 +321,23 @@ func (s *Store) ImportStaged(ctx context.Context, remoteID string, vmid, generat
 	if n, _ := res.RowsAffected(); n != 1 {
 		return "", fmt.Errorf("%w: %s/%d/%d", ErrStagingImported, remoteID, vmid, generation)
 	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("pveinventory: commit staged import: %w", err)
+	}
 	return hostID, nil
 }
 
 // getStaging loads one stored staging row.
 func (s *Store) getStaging(ctx context.Context, remoteID string, vmid, generation uint64) (StagingEntry, error) {
-	row := s.db.QueryRowContext(ctx, `
+	return s.getStagingRow(ctx, s.db, remoteID, vmid, generation)
+}
+
+type rowQuerier interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func (s *Store) getStagingRow(ctx context.Context, db rowQuerier, remoteID string, vmid, generation uint64) (StagingEntry, error) {
+	row := db.QueryRowContext(ctx, `
 		SELECT remote_id, vmid, generation, kind, name, node, status,
 		       macs_json, ips_json, state, candidates_json, created_at,
 		       imported_at, imported_by, imported_asset
@@ -296,14 +354,15 @@ func (s *Store) getStaging(ctx context.Context, remoteID string, vmid, generatio
 // createHostFromGuest creates a new managed host from the staged guest
 // data: a deterministic id derived from the guest name, the guest name
 // as display name, and the guest IPs as endpoints.
-func (s *Store) createHostFromGuest(ctx context.Context, e StagingEntry) (string, error) {
+func (s *Store) createHostFromGuest(ctx context.Context, tx *sql.Tx, e StagingEntry) (string, error) {
 	base := slugifyHostID(e.Name)
 	if base == "" {
 		base = fmt.Sprintf("vm%d", e.VMID)
 	}
 	id := base
 	for i := 2; ; i++ {
-		if _, err := s.hostStore().Get(ctx, id); errors.Is(err, inventory.ErrHostNotFound) {
+		var exists int
+		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM hosts WHERE name = ?`, id).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
 			break
 		} else if err != nil {
 			return "", fmt.Errorf("pveinventory: check host id %s: %w", id, err)
@@ -318,7 +377,7 @@ func (s *Store) createHostFromGuest(ctx context.Context, e StagingEntry) (string
 	}
 	eps := make([]inventory.Endpoint, 0, len(e.IPs))
 	for _, ip := range e.IPs {
-		eps = append(eps, inventory.Endpoint{Address: ip})
+		eps = append(eps, inventory.Endpoint{Address: ip, Port: 22})
 	}
 	host := inventory.Host{
 		ID:          id,
@@ -327,8 +386,25 @@ func (s *Store) createHostFromGuest(ctx context.Context, e StagingEntry) (string
 		Criticality: "LOW",
 		Endpoints:   eps,
 	}
-	if _, err := s.hostStore().Create(ctx, host, inventory.CreateOptions{}); err != nil {
-		return "", fmt.Errorf("pveinventory: create host from staged guest %s/%d/%d: %w", e.RemoteID, e.VMID, e.Generation, err)
+	if err := inventory.Validate(host); err != nil {
+		return "", err
+	}
+	now := s.formatTime(s.now())
+	res, err := tx.ExecContext(ctx, `INSERT INTO hosts
+		(name, display_name, environment, criticality, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)`, host.ID, host.DisplayName, host.Environment, host.Criticality, now, now)
+	if err != nil {
+		return "", fmt.Errorf("pveinventory: create staged host %s: %w", id, err)
+	}
+	hid, err := res.LastInsertId()
+	if err != nil {
+		return "", fmt.Errorf("pveinventory: staged host id: %w", err)
+	}
+	for i, ep := range host.Endpoints {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO host_endpoints
+			(host_id, address, port, priority, created_at) VALUES (?, ?, ?, ?, ?)`, hid, ep.Address, ep.Port, i, now); err != nil {
+			return "", fmt.Errorf("pveinventory: staged host endpoint: %w", err)
+		}
 	}
 	return id, nil
 }
