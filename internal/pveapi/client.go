@@ -9,6 +9,13 @@
 // endpoints. TLS trust and certificate pinning are the caller's
 // responsibility: the client takes a ready *http.Client and a base URL.
 // It never logs request headers or response bodies.
+//
+// The response types (Node, Guest, GuestConfig, agent results) are
+// defined locally in this package.
+//
+// TODO(pvecontract): internal/pvecontract does not exist yet; when it is
+// introduced, move the shared PVE wire types there and switch this
+// package to use them.
 package pveapi
 
 import (

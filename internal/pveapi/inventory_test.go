@@ -177,11 +177,11 @@ func TestGuestListTooManyObjects(t *testing.T) {
 
 func TestEnumerateClusterPartial(t *testing.T) {
 	fixtures := map[string]string{
-		"/nodes":            "pve8/nodes.json",
-		"/nodes/pve1/qemu":  "pve8/qemu_pve1.json",
-		"/nodes/pve1/lxc":   "pve8/lxc_pve1.json",
-		"/nodes/pve2/qemu":  "pve8/qemu_pve2.json",
-		"/nodes/pve2/lxc":   "pve8/lxc_pve2.json",
+		"/nodes":           "pve8/nodes.json",
+		"/nodes/pve1/qemu": "pve8/qemu_pve1.json",
+		"/nodes/pve1/lxc":  "pve8/lxc_pve1.json",
+		"/nodes/pve2/qemu": "pve8/qemu_pve2.json",
+		"/nodes/pve2/lxc":  "pve8/lxc_pve2.json",
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api2/json/", func(w http.ResponseWriter, r *http.Request) {
@@ -232,7 +232,7 @@ func TestEnumerateClusterPartial(t *testing.T) {
 
 func TestEnumerateClusterStandalone(t *testing.T) {
 	ts := fixtureServer(t, map[string]string{
-		"/nodes":          "standalone/nodes.json",
+		"/nodes":           "standalone/nodes.json",
 		"/nodes/pve0/qemu": "standalone/qemu_pve0.json",
 		"/nodes/pve0/lxc":  "standalone/lxc_pve0.json",
 	})
@@ -274,10 +274,10 @@ func TestIncarnationMatches(t *testing.T) {
 	t1 := time.Unix(1750000000, 0)
 	t2 := time.Unix(1750003600, 0)
 	cases := []struct {
-		name    string
-		a, b    Incarnation
-		same    bool
-		known   bool
+		name  string
+		a, b  Incarnation
+		same  bool
+		known bool
 	}{
 		{"same uuid", Incarnation{UUID: "u1"}, Incarnation{UUID: "u1"}, true, true},
 		{"different uuid", Incarnation{UUID: "u1"}, Incarnation{UUID: "u2"}, false, true},
