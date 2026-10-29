@@ -1,0 +1,10 @@
+{
+  "data": {
+    "cpu": 1.5,
+    "memory": { "used": 16106127360, "total": 65987027456 },
+    "status": "online"
+  },
+  "errors": null,
+  "status": "OK",
+  "time": 1761600000
+}

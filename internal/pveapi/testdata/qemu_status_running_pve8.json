@@ -1,0 +1,21 @@
+{
+  "data": {
+    "cpu": 0.3125,
+    "cpulimit": 4,
+    "cpuunits": 0.3125,
+    "diskread": 262144,
+    "diskwrite": 1048576,
+    "diskwriteext": 0,
+    "maxdisk": 107374182400,
+    "maxmem": 8589934592,
+    "mem": 4294967296,
+    "netin": 2097152,
+    "netout": 1048576,
+    "netinext": 0,
+    "netoutext": 0,
+    "status": "running"
+  },
+  "errors": null,
+  "status": "OK",
+  "time": 1761600000
+}

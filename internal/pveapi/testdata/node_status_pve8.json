@@ -1,0 +1,25 @@
+{
+  "data": {
+    "cpu": 0.1875,
+    "cpuunits": 0.1875,
+    "disk": { "used": 2199023255552, "total": 10995116277760, "log": 0 },
+    "diskread": 1258291,
+    "diskwrite": 3145728,
+    "guests": 7,
+    "hostname": "pve1",
+    "kmsg": { "critical": 0, "debug": 0, "error": 0, "info": 0, "warn": 0 },
+    "loadavg": [0.42, 0.38, 0.31],
+    "memory": { "used": 16106127360, "total": 65987027456 },
+    "netin": 10485760,
+    "netout": 5242880,
+    "pveversion": "8.2.4",
+    "spy": 0,
+    "status": "online",
+    "swap": { "used": 0, "total": 4294967296 },
+    "temperature": { "fan1": 0, "temp1": 45 },
+    "uptime": 1234567
+  },
+  "errors": null,
+  "status": "OK",
+  "time": 1761600000
+}

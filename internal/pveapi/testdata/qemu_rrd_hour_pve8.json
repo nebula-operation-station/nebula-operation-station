@@ -1,0 +1,10 @@
+{
+  "data": [
+    { "time": 1761600000, "cpu": 0.25, "mem": 4026531840, "diskread": 131072, "diskwrite": 524288, "netin": 1048576, "netout": 524288, "cpulimit": 4, "maxmem": 8589934592 },
+    { "time": 1761600060, "cpu": 0.3, "mem": 4194304000, "diskread": 0, "diskwrite": 262144, "netin": 2097152, "netout": 1048576, "cpulimit": 4, "maxmem": 8589934592 },
+    { "time": 1761600120, "cpu": 0.28, "diskread": 65536, "diskwrite": 131072, "netin": 1572864, "netout": 786432, "cpulimit": 4, "maxmem": 8589934592 }
+  ],
+  "errors": null,
+  "status": "OK",
+  "time": 1761600300
+}
