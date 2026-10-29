@@ -188,6 +188,107 @@ func TestBuildTreeBareMetalRootsWithContainersAndServices(t *testing.T) {
 	}
 }
 
+func TestBuildTreeHealthyComposeAggregation(t *testing.T) {
+	in := treeInput()
+	h := hostIn("h1")
+	h.Containers = []Container{
+		{ID: "c1", State: "running", Health: "healthy", Project: "stack"},
+		{ID: "c2", State: "running", Health: "healthy", Project: "stack"},
+	}
+	in.Hosts = []HostInput{h}
+
+	tree, err := BuildTree(in)
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+	compose := findBox(t, tree.Roots[0].Children, "compose/h1/stack")
+	if compose.State != StateOK || compose.Worst != StateOK {
+		t.Fatalf("healthy compose state = %q/%q, want ok/ok", compose.State, compose.Worst)
+	}
+	if compose.Counts[KindContainer] != 2 || tree.Roots[0].Worst != StateOK {
+		t.Fatalf("healthy compose counts = %v, host worst = %s", compose.Counts, tree.Roots[0].Worst)
+	}
+}
+
+func TestBuildTreeHostStalenessPropagatesToObservations(t *testing.T) {
+	for _, linked := range []bool{false, true} {
+		for _, stale := range []bool{false, true} {
+			t.Run(fmt.Sprintf("linked=%v/stale=%v", linked, stale), func(t *testing.T) {
+				in := treeInput()
+				h := hostIn("h1")
+				h.Stale = stale
+				h.Containers = []Container{
+					{ID: "running", State: "running", Health: "healthy"},
+					{ID: "exited", State: "exited"},
+					{ID: "compose-running", State: "running", Health: "healthy", Project: "stack"},
+					{ID: "compose-exited", State: "exited", Project: "stack"},
+					{ID: "unhealthy", State: "running", Health: "unhealthy"},
+					{ID: "paused", State: "paused"},
+				}
+				h.Services = []Service{
+					{Name: "active.service", Active: "active"},
+					{Name: "inactive.service", Active: "inactive"},
+					{Name: "failed.service", Active: "failed"},
+				}
+				in.Hosts = []HostInput{h}
+				if linked {
+					in.Remotes = []RemoteInput{{
+						RemoteID: "remote-a",
+						Nodes:    []NodeInput{nodeIn("p1")},
+						Guests:   []GuestInput{guestIn(100, "p1", "vm-100")},
+					}}
+					in.Links = []HostLink{{RemoteID: "remote-a", VMID: 100, Generation: 1, HostID: "h1"}}
+				}
+				tree, err := BuildTree(in)
+				if err != nil {
+					t.Fatalf("BuildTree: %v", err)
+				}
+				parent := tree.Roots[0]
+				if linked {
+					parent = findBox(t, parent.Children, "guest/remote-a/100/1")
+				}
+				wantParent := StateOK
+				if stale {
+					wantParent = StateUnknown
+				}
+				if parent.Stale != stale || parent.State != wantParent {
+					t.Errorf("parent stale=%v state=%s, want %v/%s", parent.Stale, parent.State, stale, wantParent)
+				}
+				compose := findBox(t, parent.Children, "compose/h1/stack")
+				for _, tc := range []struct {
+					id    string
+					state BoxState
+				}{
+					{"container/h1/running", StateOK},
+					{"container/h1/exited", StateOff},
+					{"container/h1/compose-running", StateOK},
+					{"container/h1/compose-exited", StateOff},
+					{"container/h1/unhealthy", StateCritical},
+					{"container/h1/paused", StateWarning},
+					{"service/h1/active.service", StateOK},
+					{"service/h1/inactive.service", StateOff},
+					{"service/h1/failed.service", StateCritical},
+				} {
+					b := findBox(t, append(parent.Children, compose.Children...), tc.id)
+					want := tc.state
+					if stale && StateRank(want) < StateRank(StateUnknown) {
+						want = StateUnknown
+					}
+					if b.Stale != stale || b.State != want || b.Worst != want {
+						t.Errorf("%s stale=%v state=%s/%s, want %v/%s/%s", tc.id, b.Stale, b.State, b.Worst, stale, want, want)
+					}
+					if stale && want == StateUnknown && b.StateReason != "stale" {
+						t.Errorf("%s reason=%q, want stale", tc.id, b.StateReason)
+					}
+				}
+				if stale && (!compose.Stale || compose.State != StateUnknown || compose.Worst != StateUnknown || compose.StateReason != "stale") {
+					t.Errorf("stale compose: %+v", compose)
+				}
+			})
+		}
+	}
+}
+
 func TestBuildTreeWorstStateAggregation(t *testing.T) {
 	in := treeInput()
 	h := hostIn("h1")

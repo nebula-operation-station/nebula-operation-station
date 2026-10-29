@@ -525,6 +525,7 @@ func buildGuestBox(remoteID string, g GuestInput, now time.Time, staleAfter time
 	}
 	h := hosts[hostID]
 	b.HostID = hostID
+	b.Stale = b.Stale || h.Stale
 	hs, hr := hostState(h)
 	b.State, b.StateReason = maxState(b.State, b.StateReason, hs, hr)
 	b.Children = hostChildren(h)
@@ -556,8 +557,12 @@ func hostChildren(h HostInput) []Box {
 			ID:    "container/" + h.ID + "/" + c.ID,
 			Name:  c.Name,
 			Image: c.Image,
+			Stale: h.Stale,
 		}
 		cb.State, cb.StateReason = containerState(c)
+		if h.Stale {
+			cb.State, cb.StateReason = maxState(cb.State, cb.StateReason, StateUnknown, "stale")
+		}
 		if c.Project == "" {
 			out = append(out, cb)
 			continue
@@ -565,9 +570,14 @@ func hostChildren(h HostInput) []Box {
 		idx, ok := groups[c.Project]
 		if !ok {
 			gb := Box{
-				Kind: KindCompose,
-				ID:   "compose/" + h.ID + "/" + c.Project,
-				Name: c.Project,
+				Kind:  KindCompose,
+				ID:    "compose/" + h.ID + "/" + c.Project,
+				Name:  c.Project,
+				State: StateOK,
+				Stale: h.Stale,
+			}
+			if h.Stale {
+				gb.State, gb.StateReason = StateUnknown, "stale"
 			}
 			groups[c.Project] = len(out)
 			out = append(out, gb)
@@ -577,12 +587,16 @@ func hostChildren(h HostInput) []Box {
 	}
 	for _, sv := range h.Services {
 		sb := Box{
-			Kind: KindService,
-			ID:   "service/" + h.ID + "/" + sv.Name,
-			Name: sv.Name,
-			Unit: sv.Name,
+			Kind:  KindService,
+			ID:    "service/" + h.ID + "/" + sv.Name,
+			Name:  sv.Name,
+			Unit:  sv.Name,
+			Stale: h.Stale,
 		}
 		sb.State, sb.StateReason = serviceState(sv)
+		if h.Stale {
+			sb.State, sb.StateReason = maxState(sb.State, sb.StateReason, StateUnknown, "stale")
+		}
 		out = append(out, sb)
 	}
 	return out
