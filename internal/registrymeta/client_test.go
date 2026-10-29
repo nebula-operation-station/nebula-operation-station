@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -230,9 +229,9 @@ func TestListTagsPagination(t *testing.T) {
 		switch r.URL.Query().Get("n") {
 		case "":
 			w.Header().Set("Link", `</v2/repo/tags/list?n=2>; rel="next"`)
-			_ = json.NewEncoder(w).Encode(map[string]any{"tags": []string{"a", "b"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": "repo", "tags": []string{"a", "b"}})
 		case "2":
-			_ = json.NewEncoder(w).Encode(map[string]any{"tags": []string{"c"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": "repo", "tags": []string{"c"}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -268,7 +267,7 @@ func TestListTagsPaginationBudget(t *testing.T) {
 			next = fmt.Sprintf("%d", len(n)+1)
 		}
 		w.Header().Set("Link", fmt.Sprintf(`</v2/repo/tags/list?n=%s>; rel="next"`, next))
-		_ = json.NewEncoder(w).Encode(map[string]any{"tags": []string{"x"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": "repo", "tags": []string{"x"}})
 	}))
 	defer srv.Close()
 	fc := newFakeClock()
@@ -374,7 +373,7 @@ func TestOriginNotAllowed(t *testing.T) {
 
 func TestSSRFPrivateAddress(t *testing.T) {
 	rec := &recorder{}
-	srv := httptest.NewServer(tagsHandler(rec, "1.0.0"))
+	srv := httptest.NewTLSServer(tagsHandler(rec, "1.0.0"))
 	defer srv.Close()
 	fc := newFakeClock()
 	c, err := NewClient(Options{
@@ -479,7 +478,7 @@ func TestLinkForeignOrigin(t *testing.T) {
 		rec.enter(r.Method, r.URL.Path)
 		defer rec.leave()
 		w.Header().Set("Link", `<http://evil.example.com/v2/repo/tags/list>; rel="next"`)
-		_ = json.NewEncoder(w).Encode(map[string]any{"tags": []string{"a"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": "repo", "tags": []string{"a"}})
 	}))
 	defer srv.Close()
 	fc := newFakeClock()
@@ -497,7 +496,7 @@ func TestLinkWrongPath(t *testing.T) {
 		rec.enter(r.Method, r.URL.Path)
 		defer rec.leave()
 		w.Header().Set("Link", `</v2/repo/blobs/sha256:abc>; rel="next"`)
-		_ = json.NewEncoder(w).Encode(map[string]any{"tags": []string{"a"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": "repo", "tags": []string{"a"}})
 	}))
 	defer srv.Close()
 	fc := newFakeClock()
@@ -604,7 +603,7 @@ func TestNoLayerPulls(t *testing.T) {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"tags": []string{"1.0"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": "repo", "tags": []string{"1.0"}})
 		case r.URL.Path == "/v2/repo/manifests/1.0" && r.Method == http.MethodHead:
 			w.Header().Set("Docker-Content-Digest", digest)
 		default:
@@ -669,7 +668,7 @@ func TestFailureCached(t *testing.T) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"tags": []string{"1.0.0"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": "repo", "tags": []string{"1.0.0"}})
 	}))
 	defer srv.Close()
 	fc := newFakeClock()
@@ -709,7 +708,7 @@ func TestCoalescing(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"tags": []string{"1.0.0"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": "repo", "tags": []string{"1.0.0"}})
 	}))
 	defer srv.Close()
 	fc := newFakeClock()
@@ -746,7 +745,7 @@ func TestRateLimit429(t *testing.T) {
 			w.WriteHeader(http.StatusTooManyRequests)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"tags": []string{"1.0.0"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": "repo", "tags": []string{"1.0.0"}})
 	}))
 	defer srv.Close()
 	fc := newFakeClock()
@@ -842,9 +841,9 @@ func TestRateLimitRemainingHeader(t *testing.T) {
 		rec.enter(r.Method, r.URL.Path)
 		defer rec.leave()
 		if strings.HasSuffix(r.URL.Path, "/tags/list") {
-			w.Header().Set("Docker-RateLimit-Remaining", "0")
-			w.Header().Set("Docker-RateLimit-Reset", strconv.FormatInt(fc.Now().Add(20*time.Minute).Unix(), 10))
-			_ = json.NewEncoder(w).Encode(map[string]any{"tags": []string{"1.0.0"}})
+			w.Header().Set("ratelimit-limit", "100;w=21600")
+			w.Header().Set("ratelimit-remaining", "0;w=21600")
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v2/"), "/tags/list"), "tags": []string{"1.0.0"}})
 			return
 		}
 		http.NotFound(w, r)
@@ -859,8 +858,8 @@ func TestRateLimitRemainingHeader(t *testing.T) {
 	c.mu.Lock()
 	pause := c.regs[srv.URL].pauseUntil.Sub(fc.Now())
 	c.mu.Unlock()
-	if pause != 20*time.Minute {
-		t.Fatalf("pause = %s, want 20m from the reset header", pause)
+	if pause != 6*time.Hour {
+		t.Fatalf("pause = %s, want 6h from the window parameter", pause)
 	}
 	_, err := c.ListTags(ctx, Ref{Registry: srv.URL, Repository: "repo-b"})
 	if !errors.Is(err, ErrRateLimited) {
@@ -878,7 +877,7 @@ func TestRequestInterval(t *testing.T) {
 		defer rec.leave()
 		switch r.URL.Path {
 		case "/v2/repo-a/tags/list", "/v2/repo-b/tags/list":
-			_ = json.NewEncoder(w).Encode(map[string]any{"tags": []string{"1.0.0"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v2/"), "/tags/list"), "tags": []string{"1.0.0"}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -907,7 +906,7 @@ func TestConcurrencyCap(t *testing.T) {
 		defer rec.leave()
 		time.Sleep(1500 * time.Millisecond) // real time: requests overlap
 		if strings.HasSuffix(r.URL.Path, "/tags/list") {
-			_ = json.NewEncoder(w).Encode(map[string]any{"tags": []string{"1.0.0"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v2/"), "/tags/list"), "tags": []string{"1.0.0"}})
 			return
 		}
 		http.NotFound(w, r)
@@ -939,7 +938,7 @@ func TestDefaultNamespace(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"tags": []string{"1.0.0"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": "library/nginx", "tags": []string{"1.0.0"}})
 	}))
 	defer srv.Close()
 	fc := newFakeClock()
@@ -982,7 +981,7 @@ func TestTokenServiceParam(t *testing.T) {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"tags": []string{"1.0.0"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": "repo", "tags": []string{"1.0.0"}})
 		default:
 			http.NotFound(w, r)
 		}

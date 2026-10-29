@@ -169,8 +169,8 @@ type Options struct {
 	// Default: uniform in [0, 1 min).
 	Jitter func() time.Duration
 	// AllowLoopback permits dials to loopback, private and link-local
-	// addresses. Test-only escape hatch for httptest servers; production
-	// must leave it false.
+	// addresses and HTTP origins. Test-only escape hatch for httptest
+	// servers; production must leave it false.
 	AllowLoopback bool
 	// Cache, when non-nil, stores results and failures. Default: a new
 	// Cache.
@@ -205,11 +205,14 @@ func NewClient(o Options) (*Client, error) {
 	by := make(map[string]Origin, len(o.Origins))
 	authOK := make(map[string]bool, len(o.Origins))
 	for _, og := range o.Origins {
-		if _, err := parseOrigin(og.Registry); err != nil {
-			return nil, err
-		}
-		if _, err := parseOrigin(og.Auth); err != nil {
-			return nil, err
+		for _, origin := range []string{og.Registry, og.Auth} {
+			u, err := parseOrigin(origin)
+			if err != nil {
+				return nil, err
+			}
+			if u.Scheme != "https" && !o.AllowLoopback {
+				return nil, fmt.Errorf("%w: HTTPS is required", ErrOriginNotAllowed)
+			}
 		}
 		if og.AuthPath == "" {
 			og.AuthPath = "/token"
@@ -256,14 +259,14 @@ func NewClient(o Options) (*Client, error) {
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return c.checkRedirect(req, via)
 		},
-		Transport: &http.Transport{
+		Transport: &budgetTransport{client: c, base: &http.Transport{
 			Proxy:               nil, // no proxies (ADR 0006)
 			DialContext:         c.dialContext,
 			ForceAttemptHTTP2:   false,
 			MaxIdleConnsPerHost: MaxConcurrentPerRegistry,
 			IdleConnTimeout:     30 * time.Second,
 			TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
-		},
+		}},
 	}
 	return c, nil
 }
@@ -277,19 +280,36 @@ func parseOrigin(s string) (*url.URL, error) {
 	return u, nil
 }
 
-// checkRedirect allows redirects only to allowlisted registry or auth
-// origins, at most MaxRedirects times (ADR 0006: "no redirects/proxies";
-// challenges and links cannot select arbitrary origins).
+// checkRedirect confines redirects to the original metadata resource and
+// method on an approved origin, or to a configured token endpoint.
 func (c *Client) checkRedirect(req *http.Request, via []*http.Request) error {
-	if len(via) >= MaxRedirects {
+	if len(via) == 0 || len(via) >= MaxRedirects {
 		return fmt.Errorf("%w: more than %d redirects", ErrRedirectNotAllowed, MaxRedirects)
 	}
+	first := via[0]
 	o := originOf(req.URL)
-	if _, ok := c.byOrigin[o]; ok {
-		return nil
+	if req.Method != first.Method || req.URL.User != nil || req.URL.Fragment != "" {
+		return fmt.Errorf("%w: invalid metadata resource", ErrRedirectNotAllowed)
 	}
-	if c.authOK[o] {
-		return nil
+	if _, ok := c.byOrigin[originOf(first.URL)]; ok {
+		if _, ok := c.byOrigin[o]; ok && req.URL.Path == first.URL.Path && req.URL.EscapedPath() == first.URL.EscapedPath() {
+			if (first.Method == http.MethodGet && strings.HasSuffix(first.URL.Path, "/tags/list")) ||
+				(first.Method == http.MethodHead && strings.Contains(first.URL.Path, "/manifests/")) {
+				return nil
+			}
+		}
+	}
+	if first.Method == http.MethodGet && c.authOK[o] {
+		for _, source := range c.byOrigin {
+			if originOf(first.URL) != source.Auth || first.URL.EscapedPath() != source.AuthPath {
+				continue
+			}
+			for _, target := range c.byOrigin {
+				if o == target.Auth && req.URL.EscapedPath() == target.AuthPath {
+					return nil
+				}
+			}
+		}
 	}
 	return fmt.Errorf("%w: %s", ErrRedirectNotAllowed, o)
 }
@@ -428,26 +448,31 @@ func (c *Client) noteRateLimit(reg string, retryAfter time.Duration) {
 	c.mu.Unlock()
 }
 
-// noteBudget honors Docker Hub rate-limit budget headers (Docker-RateLimit-
-// Remaining / Docker-RateLimit-Reset) when supplied (ADR 0006: "honor
-// remaining/reset and Retry-After when supplied").
+// noteBudget honors Docker Hub's RateLimit-Remaining: N;w=seconds format.
+// With no exact reset time, an exhausted budget waits a full advertised window.
 func (c *Client) noteBudget(reg string, h http.Header) {
-	remaining := h.Get("Docker-RateLimit-Remaining")
-	if remaining == "" {
+	parts := strings.Split(h.Get("RateLimit-Remaining"), ";")
+	n, err := strconv.ParseUint(strings.TrimSpace(parts[0]), 10, 64)
+	if err != nil || n != 0 {
 		return
 	}
-	n, err := strconv.Atoi(remaining)
-	if err != nil || n > 0 {
+	var window time.Duration
+	const maxWindowSeconds = uint64((1<<63 - 1) / time.Second)
+	for _, p := range parts[1:] {
+		key, value, ok := strings.Cut(strings.TrimSpace(p), "=")
+		if !ok || strings.TrimSpace(key) != "w" {
+			continue
+		}
+		sec, err := strconv.ParseUint(strings.TrimSpace(value), 10, 64)
+		if err != nil || sec == 0 || sec > maxWindowSeconds || window != 0 {
+			return
+		}
+		window = time.Duration(sec) * time.Second
+	}
+	if window == 0 {
 		return
 	}
-	sec, err := strconv.ParseInt(h.Get("Docker-RateLimit-Reset"), 10, 64)
-	if err != nil {
-		return
-	}
-	until := time.Unix(sec, 0)
-	if d := until.Sub(c.now()); d <= 0 {
-		return
-	}
+	until := c.now().Add(window)
 	c.mu.Lock()
 	st := c.regLocked(reg)
 	if until.After(st.pauseUntil) {
@@ -505,6 +530,48 @@ func readBounded(r io.Reader) ([]byte, error) {
 	return b, nil
 }
 
+// budgetTransport applies budgets to every HTTP exchange, including redirects
+// and authentication requests, using the destination origin.
+type budgetTransport struct {
+	client *Client
+	base   http.RoundTripper
+}
+
+// RoundTrip reserves a request slot until the response body is closed.
+func (t *budgetTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	c := t.client
+	reg := originOf(req.URL)
+	if err := c.acquire(req.Context(), reg); err != nil {
+		return nil, err
+	}
+	resp, err := t.base.RoundTrip(req)
+	if err != nil {
+		c.release(reg)
+		return nil, err
+	}
+	resp.Body = &budgetBody{ReadCloser: resp.Body, release: func() { c.release(reg) }}
+	c.noteBudget(reg, resp.Header)
+	if resp.StatusCode == http.StatusTooManyRequests {
+		c.noteRateLimit(reg, c.retryAfter(resp.Header.Get("Retry-After")))
+	} else if resp.StatusCode < 300 {
+		c.noteSuccess(reg)
+	}
+	return resp, nil
+}
+
+type budgetBody struct {
+	io.ReadCloser
+	once    sync.Once
+	release func()
+}
+
+// Close closes the body and releases its request slot exactly once.
+func (b *budgetBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(b.release)
+	return err
+}
+
 // do issues one HTTP request with an optional bearer token.
 func (c *Client) do(ctx context.Context, method, u, token string, hdrs map[string]string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, u, nil)
@@ -531,18 +598,13 @@ func (c *Client) fetchToken(ctx context.Context, ref Ref, repo string) (string, 
 		q.Set("service", og.Service)
 	}
 	tu := og.Auth + og.AuthPath + "?" + q.Encode()
-	if err := c.acquire(ctx, ref.Registry); err != nil {
-		return "", err
-	}
-	defer c.release(ref.Registry)
 	resp, err := c.do(ctx, http.MethodGet, tu, "", nil)
 	if err != nil {
 		return "", fmt.Errorf("registrymeta: token for %s: %w", repo, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusTooManyRequests {
-		c.noteRateLimit(ref.Registry, c.retryAfter(resp.Header.Get("Retry-After")))
-		return "", fmt.Errorf("%w: %s", ErrRateLimited, ref.Registry)
+		return "", fmt.Errorf("%w: %s", ErrRateLimited, originOf(resp.Request.URL))
 	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("registrymeta: token endpoint for %s: unexpected status %d", repo, resp.StatusCode)
@@ -574,19 +636,13 @@ func (c *Client) fetchToken(ctx context.Context, ref Ref, repo string) (string, 
 func (c *Client) doWithToken(ctx context.Context, ref Ref, repo, method, u string, hdrs map[string]string) (*http.Response, error) {
 	token := ""
 	for attempt := 0; attempt < 2; attempt++ {
-		if err := c.acquire(ctx, ref.Registry); err != nil {
-			return nil, err
-		}
 		resp, err := c.do(ctx, method, u, token, hdrs)
-		c.release(ref.Registry)
 		if err != nil {
 			return nil, fmt.Errorf("registrymeta: %s %s: %w", method, u, err)
 		}
-		c.noteBudget(ref.Registry, resp.Header)
 		if resp.StatusCode == http.StatusTooManyRequests {
-			c.noteRateLimit(ref.Registry, c.retryAfter(resp.Header.Get("Retry-After")))
 			resp.Body.Close()
-			return nil, fmt.Errorf("%w: %s", ErrRateLimited, ref.Registry)
+			return nil, fmt.Errorf("%w: %s", ErrRateLimited, originOf(resp.Request.URL))
 		}
 		if resp.StatusCode == http.StatusUnauthorized && token == "" {
 			resp.Body.Close()
@@ -596,9 +652,6 @@ func (c *Client) doWithToken(ctx context.Context, ref Ref, repo, method, u strin
 			}
 			token = t
 			continue
-		}
-		if resp.StatusCode < 300 {
-			c.noteSuccess(ref.Registry)
 		}
 		return resp, nil
 	}
@@ -644,8 +697,12 @@ func (c *Client) ListTags(ctx context.Context, ref Ref) (TagsResult, error) {
 	}
 	cl, shared := c.begin(key)
 	if shared {
-		<-cl.done
-		return c.cachedTags(key)
+		select {
+		case <-ctx.Done():
+			return TagsResult{}, ctx.Err()
+		case <-cl.done:
+			return c.cachedTags(key)
+		}
 	}
 	res, err := c.fetchTags(ctx, ref, repo)
 	if err != nil {
@@ -703,8 +760,12 @@ func (c *Client) TagDigest(ctx context.Context, ref Ref) (DigestResult, error) {
 	}
 	cl, shared := c.begin(key)
 	if shared {
-		<-cl.done
-		return c.cachedDigest(key)
+		select {
+		case <-ctx.Done():
+			return DigestResult{}, ctx.Err()
+		case <-cl.done:
+			return c.cachedDigest(key)
+		}
 	}
 	res, err := c.fetchDigest(ctx, ref, repo)
 	if err != nil {
@@ -757,6 +818,15 @@ func (c *Client) checkRef(ref Ref) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("%w: %s", ErrOriginNotAllowed, ref.Registry)
 	}
+	if ref.Tag != "" && (len(ref.Tag) > MaxTagLen || !tagRe.MatchString(ref.Tag)) {
+		return "", fmt.Errorf("%w: invalid tag", ErrBadRef)
+	}
+	if ref.Digest != "" && (len(ref.Digest) > MaxImageLen || !digestRe.MatchString(ref.Digest)) {
+		return "", fmt.Errorf("%w: invalid digest", ErrBadRef)
+	}
+	if ref.Tag != "" && ref.Digest != "" {
+		return "", fmt.Errorf("%w: tag and digest are mutually exclusive", ErrBadRef)
+	}
 	repo := ref.Repository
 	if og.DefaultNamespace != "" && !strings.Contains(repo, "/") {
 		repo = og.DefaultNamespace + "/" + repo
@@ -796,12 +866,17 @@ func (c *Client) fetchTags(ctx context.Context, ref Ref, repo string) (TagsResul
 			return TagsResult{}, fmt.Errorf("registrymeta: tag list for %s: unexpected status %d", repo, resp.StatusCode)
 		}
 		var pageData struct {
-			Tags []string `json:"tags"`
+			Name string          `json:"name"`
+			Tags json.RawMessage `json:"tags"`
 		}
-		if err := json.Unmarshal(body, &pageData); err != nil {
+		if err := json.Unmarshal(body, &pageData); err != nil || pageData.Name != repo || len(pageData.Tags) == 0 {
 			return TagsResult{}, fmt.Errorf("registrymeta: tag list for %s: %w", repo, ErrBadResponse)
 		}
-		for _, t := range pageData.Tags {
+		var pageTags []string
+		if err := json.Unmarshal(pageData.Tags, &pageTags); err != nil {
+			return TagsResult{}, fmt.Errorf("registrymeta: tag list for %s: %w", repo, ErrBadResponse)
+		}
+		for _, t := range pageTags {
 			if len(t) == 0 || len(t) > MaxTagLen || strings.ContainsAny(t, "/\\@") {
 				return TagsResult{}, fmt.Errorf("registrymeta: tag list for %s: %w", repo, ErrBadResponse)
 			}
