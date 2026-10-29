@@ -9,18 +9,22 @@ package permit
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"time"
 
 	"github.com/gowebpki/jcs"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/schedgrant"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
 )
 
 // ReadGrantFormat is the "grant" member of the read-grant document.
@@ -327,4 +331,312 @@ func readGrantWalkValue(dec *json.Decoder, depth int, first any) error {
 	default:
 		return nil
 	}
+}
+
+// Read-grant failure codes.
+const (
+	CodeLeaseUnavailable Code = "read_grants_unavailable"
+	CodeLeaseInvalid     Code = "read_grant_invalid"
+	CodeLeaseInactive    Code = "read_grant_inactive"
+	CodeLeaseNotCovered  Code = "read_grant_does_not_cover"
+	CodeLeaseBudget      Code = "read_grant_budget_exhausted"
+)
+
+// StoredReadGrant is an approved read grant.
+type StoredReadGrant struct {
+	ID         string
+	Digest     string
+	Doc        []byte // canonical document
+	ApprovedBy string
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	RevokedAt  time.Time // zero while active
+}
+
+// ReadGrantStore persists approved read grants and the run budget each
+// target has spent in its rolling hour (internal/executordb implements it).
+type ReadGrantStore interface {
+	SaveReadGrant(g StoredReadGrant) error
+	ReadGrant(id string) (StoredReadGrant, bool, error)
+	ReadGrants() ([]StoredReadGrant, error)
+	// RevokeReadGrant marks a grant revoked; false if it is unknown or was
+	// revoked before.
+	RevokeReadGrant(id string, at time.Time) (bool, error)
+	// ReserveReadRun atomically reserves one run of grantID (actionID on
+	// hostID) at now. It succeeds only while (a) the target's reservations
+	// in the last hour are below the per-target ceiling budget, and (b) the
+	// last reservation of actionID on hostID is at least minInterval ago
+	// (the 15-minute per-action floor). Both counters are shared across
+	// grants, so overlapping grants cannot multiply the per-target ceiling,
+	// and they are durable across restart. minInterval is the grant's own
+	// approved minimum interval (at least 15 minutes).
+	ReserveReadRun(grantID, actionID, hostID string, now time.Time, budget int, minInterval time.Duration) (bool, error)
+}
+
+type pendingReadGrant struct {
+	doc       ReadGrantDoc
+	canon     []byte
+	digest    string
+	challenge []byte
+	expiry    time.Time
+}
+
+// PendingReadGrant describes a proposed read grant.
+type PendingReadGrant struct {
+	Digest      string
+	Canonical   []byte
+	Requirement Requirement
+	Challenge   []byte
+	Expiry      time.Time
+	Doc         ReadGrantDoc
+}
+
+// readGrantChallengeFor builds the read-grant approval challenge: a domain
+// separator of its own, the grant digest, a fresh nonce and the challenge
+// expiry.
+func readGrantChallengeFor(digest string, expiry time.Time) ([]byte, error) {
+	var nonce [32]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return nil, fmt.Errorf("permit: nonce: %w", err)
+	}
+	h := sha256.New()
+	h.Write([]byte("nebula-read-grant-v1\x00"))
+	h.Write([]byte(digest))
+	h.Write(nonce[:])
+	var exp [8]byte
+	binary.BigEndian.PutUint64(exp[:], uint64(expiry.Unix()))
+	h.Write(exp[:])
+	return h.Sum(nil), nil
+}
+
+// ProposeReadGrant checks a read-grant document and holds it for approval.
+// Unlike schedule grants it needs no privileged session (ADR 0007): the
+// user-verified assertion over the grant digest is the approval.
+func (a *Authority) ProposeReadGrant(raw []byte) (PendingReadGrant, error) {
+	if a.leases == nil {
+		return PendingReadGrant{}, fail(CodeLeaseUnavailable, "")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := a.now()
+	a.gcReadGrantsLocked(now)
+	doc, canon, digest, err := ParseReadGrant(raw, now)
+	if err != nil {
+		return PendingReadGrant{}, fail(CodeLeaseInvalid, "%v", err)
+	}
+	for _, act := range doc.Actions {
+		if err := a.lowEverywhere(act.ActionID, act.ModuleVersion, act.ArtifactSHA256, doc.Targets); err != nil {
+			return PendingReadGrant{}, err
+		}
+	}
+	if _, ok, err := a.leases.ReadGrant(doc.ID); err != nil {
+		return PendingReadGrant{}, a.storageFailure(digest, err)
+	} else if ok {
+		return PendingReadGrant{}, fail(CodeLeaseInvalid, "grant %s exists", doc.ID)
+	}
+	if len(a.readGrants) >= MaxPendingGrants {
+		return PendingReadGrant{}, fail(CodeLimit, "too many pending read grants")
+	}
+	req := RequireAssertionVerified
+	if a.mode == ModeHardened {
+		req = RequireCLI
+	}
+	pg := &pendingReadGrant{doc: doc, canon: canon, digest: digest, expiry: now.Add(ApprovalWindow)}
+	if req != RequireCLI {
+		if pg.challenge, err = readGrantChallengeFor(digest, pg.expiry); err != nil {
+			return PendingReadGrant{}, err
+		}
+	}
+	a.readGrants[digest] = pg
+	a.emit(Event{Kind: "read_grant_proposed", Digest: digest, Detail: fmt.Sprintf("%s: %d actions, %d hosts, %d runs/hour/host, until %s",
+		doc.ID, len(doc.Actions), len(doc.Targets), doc.RunBudget, time.Unix(doc.ExpiryUnix, 0).UTC().Format(time.RFC3339))})
+	return PendingReadGrant{Digest: digest, Canonical: slices.Clone(canon), Requirement: req, Challenge: slices.Clone(pg.challenge),
+		Expiry: pg.expiry, Doc: doc}, nil
+}
+
+// PendingReadGrants returns the read grants waiting for approval.
+func (a *Authority) PendingReadGrants() []PendingReadGrant {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.gcReadGrantsLocked(a.now())
+	var out []PendingReadGrant
+	for _, g := range a.readGrants {
+		out = append(out, PendingReadGrant{Digest: g.digest, Canonical: slices.Clone(g.canon), Expiry: g.expiry, Doc: g.doc})
+	}
+	slices.SortFunc(out, func(x, y PendingReadGrant) int { return x.Expiry.Compare(y.Expiry) })
+	return out
+}
+
+// CommitReadGrant approves a pending read grant with a user-verified
+// assertion over its challenge. No privileged session is needed (ADR 0007);
+// the assertion is the approval. The challenge is consumed whether or not
+// the assertion verifies.
+func (a *Authority) CommitReadGrant(digest string, assertionJSON []byte) (StoredReadGrant, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := a.now()
+	a.gcReadGrantsLocked(now)
+	pg, ok := a.readGrants[digest]
+	if !ok {
+		return StoredReadGrant{}, fail(CodeNotFound, "no pending read grant with this digest")
+	}
+	if a.mode == ModeHardened {
+		return StoredReadGrant{}, fail(CodeCLIRequired, "hardened mode: use nebula read-grant approve")
+	}
+	delete(a.readGrants, digest)
+	credID, err := a.verifier.Verify(assertionJSON, pg.challenge, webauthnverify.Requirement{UserVerification: true})
+	if errors.Is(err, webauthnverify.ErrCounterStore) {
+		return StoredReadGrant{}, a.storageFailure(digest, err)
+	}
+	if err != nil {
+		a.emit(Event{Kind: "rejected", Digest: digest, Code: CodeAssertionRejected, Detail: "read grant: " + err.Error()})
+		return StoredReadGrant{}, fail(CodeAssertionRejected, "%v", err)
+	}
+	return a.storeReadGrantLocked(pg, now, "webauthn:"+hex.EncodeToString(credID))
+}
+
+// ApproveReadGrantCLI approves a pending read grant from the CLI; the
+// caller has established that the peer is an admin on the executor host.
+func (a *Authority) ApproveReadGrantCLI(digest, who string) (StoredReadGrant, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := a.now()
+	a.gcReadGrantsLocked(now)
+	pg, ok := a.readGrants[digest]
+	if !ok {
+		return StoredReadGrant{}, fail(CodeNotFound, "no pending read grant with this digest")
+	}
+	delete(a.readGrants, digest)
+	return a.storeReadGrantLocked(pg, now, "cli:"+who)
+}
+
+func (a *Authority) storeReadGrantLocked(pg *pendingReadGrant, now time.Time, by string) (StoredReadGrant, error) {
+	// Trust may have been withdrawn while the grant waited.
+	for _, act := range pg.doc.Actions {
+		if err := a.lowEverywhere(act.ActionID, act.ModuleVersion, act.ArtifactSHA256, pg.doc.Targets); err != nil {
+			return StoredReadGrant{}, err
+		}
+	}
+	g := StoredReadGrant{ID: pg.doc.ID, Digest: pg.digest, Doc: pg.canon, ApprovedBy: by, CreatedAt: now, ExpiresAt: time.Unix(pg.doc.ExpiryUnix, 0)}
+	if err := a.leases.SaveReadGrant(g); err != nil {
+		return StoredReadGrant{}, a.storageFailure(pg.digest, err)
+	}
+	a.emit(Event{Kind: "read_grant_approved", Digest: pg.digest, Detail: g.ID + " by " + by})
+	return g, nil
+}
+
+// RevokeReadGrant revokes a read grant. It needs no approval.
+func (a *Authority) RevokeReadGrant(id, who string) error {
+	if a.leases == nil {
+		return fail(CodeLeaseUnavailable, "")
+	}
+	ok, err := a.leases.RevokeReadGrant(id, a.now())
+	if err != nil {
+		return a.storageFailure("", err)
+	}
+	if !ok {
+		return fail(CodeNotFound, "no active read grant %s", id)
+	}
+	a.emit(Event{Kind: "read_grant_revoked", Detail: id + " by " + who})
+	return nil
+}
+
+// ReadGrants returns the stored read grants.
+func (a *Authority) ReadGrants() ([]StoredReadGrant, error) {
+	if a.leases == nil {
+		return nil, fail(CodeLeaseUnavailable, "")
+	}
+	gs, err := a.leases.ReadGrants()
+	if err != nil {
+		return nil, a.storageFailure("", err)
+	}
+	return gs, nil
+}
+
+// gcReadGrantsLocked drops pending read grants whose approval window closed.
+func (a *Authority) gcReadGrantsLocked(now time.Time) {
+	for d, g := range a.readGrants {
+		if !now.Before(g.expiry) {
+			delete(a.readGrants, d)
+		}
+	}
+}
+
+// AuthorizeReadRun checks one read run against a read grant and reserves
+// one unit of the target's rolling-hour budget. The trigger selects which
+// runs the grant covers: its trigger must cover the run's. The grant's ID
+// names a fresh execution for the run. The reservation is made durably
+// before dispatch; a storage failure denies.
+func (a *Authority) AuthorizeReadRun(grantID, executionID, trigger string, run Run) (Grant, error) {
+	if a.leases == nil {
+		return Grant{}, fail(CodeLeaseUnavailable, "")
+	}
+	switch trigger {
+	case TriggerScheduled, TriggerOnDemand:
+	default:
+		return Grant{}, fail(CodeLeaseInvalid, "trigger must be %q or %q", TriggerScheduled, TriggerOnDemand)
+	}
+	if len(run.Artifact) == 0 || len(run.Artifact) > MaxArtifactSize {
+		return Grant{}, fail(CodeArtifactMismatch, "artifact size %d outside 1..%d", len(run.Artifact), MaxArtifactSize)
+	}
+	artSum := sha256.Sum256(run.Artifact)
+	a.observe(artSum, run.Artifact)
+	params, paramHash, perr := canonical.CanonicalParameters(run.ParametersJSON)
+	if _, uses := secretFloor(params); perr == nil && uses {
+		// Read runs are LOW; a run with secrets never is.
+		return Grant{}, fail(CodeLeaseNotCovered, "read runs cannot use vault secrets")
+	}
+	now := a.now()
+	deny := func(code Code, detail string) error {
+		a.emit(Event{Kind: "denied", Digest: "readgrant:" + grantID, Host: run.HostID, Code: code, Detail: detail})
+		return &Error{Code: code, Detail: detail}
+	}
+	g, ok, err := a.leases.ReadGrant(grantID)
+	if err != nil {
+		return Grant{}, a.storageFailure("readgrant:"+grantID, err)
+	}
+	if !ok {
+		return Grant{}, deny(CodeNotFound, "no read grant "+grantID)
+	}
+	if !g.RevokedAt.IsZero() || !now.Before(g.ExpiresAt) {
+		return Grant{}, deny(CodeLeaseInactive, "the read grant was revoked or has expired")
+	}
+	// The stored bytes are the approved canonical document; parse them
+	// again rather than trusting anything else.
+	doc, _, digest, err := ParseReadGrant(g.Doc, g.CreatedAt)
+	if err != nil || digest != g.Digest {
+		return Grant{}, a.storageFailure("readgrant:"+grantID, fmt.Errorf("stored read grant does not verify: %v", err))
+	}
+	switch doc.Trigger {
+	case TriggerBoth:
+	case trigger:
+	default:
+		return Grant{}, deny(CodeLeaseNotCovered, "the read grant does not cover "+trigger+" runs")
+	}
+	act, ok := doc.Action(run.ActionID, run.ModuleVersion)
+	if !ok {
+		return Grant{}, deny(CodeLeaseNotCovered, "action "+run.ActionID+"@"+run.ModuleVersion+" is not in the read grant")
+	}
+	t, ok := doc.Target(run.HostID)
+	if !ok || t.HostKeyFingerprint != run.HostKeyFingerprint {
+		return Grant{}, deny(CodeLeaseNotCovered, "host or host key is not in the read grant")
+	}
+	if hex.EncodeToString(artSum[:]) != act.ArtifactSHA256 {
+		return Grant{}, deny(CodeArtifactMismatch, "artifact bytes do not hash to the granted value")
+	}
+	if perr != nil || paramHash != act.ParametersHash {
+		return Grant{}, deny(CodeParametersMismatch, "parameters do not hash to the granted value")
+	}
+	if err := a.lowEverywhere(act.ActionID, act.ModuleVersion, act.ArtifactSHA256, []canonical.Target{t}); err != nil {
+		return Grant{}, err
+	}
+	reserved, err := a.leases.ReserveReadRun(grantID, run.ActionID, run.HostID, now, int(doc.RunBudget), time.Duration(doc.MinIntervalS)*time.Second)
+	if err != nil {
+		return Grant{}, a.storageFailure("readgrant:"+grantID, err)
+	}
+	if !reserved {
+		return Grant{}, deny(CodeLeaseBudget, fmt.Sprintf("per-target run budget of %d per hour is exhausted", doc.RunBudget))
+	}
+	a.emit(Event{Kind: "authorized", Digest: "readgrant:" + grantID, Host: run.HostID, Detail: run.ActionID + " as " + executionID})
+	return Grant{ExecutionID: executionID, Parameters: params}, nil
 }

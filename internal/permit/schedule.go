@@ -94,18 +94,19 @@ func scheduleChallengeFor(digest string, expiry time.Time) ([]byte, error) {
 	return h.Sum(nil), nil
 }
 
-// lowEverywhere checks that the executor rates action LOW on every target.
-func (a *Authority) lowEverywhere(act schedgrant.Action, targets []canonical.Target) error {
-	r := canonical.Request{ActionID: act.ActionID, ModuleVersion: act.ModuleVersion, ArtifactSHA256: act.ArtifactSHA256}
+// lowEverywhere checks that the executor rates an action LOW on every
+// target. Shared by schedule grants and read grants.
+func (a *Authority) lowEverywhere(actionID, version, artifactSHA256 string, targets []canonical.Target) error {
+	r := canonical.Request{ActionID: actionID, ModuleVersion: version, ArtifactSHA256: artifactSHA256}
 	for _, t := range targets {
 		floor, why, err := a.floor(r, []canonical.Target{t}, nil)
 		if err != nil || floor.Rank() == 0 {
 			return a.storageFailure("", fmt.Errorf("risk policy: %v (floor %q)", err, floor))
 		}
 		if floor != canonical.RiskLow {
-			a.emit(Event{Kind: "rejected", Host: t.HostID, Code: CodeGrantInvalid, Detail: act.ActionID + ": " + string(floor) + " (" + why + ")"})
-			return fail(CodeGrantInvalid, "%s@%s is %s on %s, not LOW: only actions the executor trusts as LOW (read-only) can be scheduled",
-				act.ActionID, act.ModuleVersion, floor, t.HostID)
+			a.emit(Event{Kind: "rejected", Host: t.HostID, Code: CodeGrantInvalid, Detail: actionID + ": " + string(floor) + " (" + why + ")"})
+			return fail(CodeGrantInvalid, "%s@%s is %s on %s, not LOW: only actions the executor trusts as LOW (read-only) can be granted",
+				actionID, version, floor, t.HostID)
 		}
 	}
 	return nil
@@ -129,7 +130,7 @@ func (a *Authority) ProposeScheduleGrant(raw []byte) (PendingGrant, error) {
 		return PendingGrant{}, fail(CodeGrantInvalid, "%v", err)
 	}
 	for _, act := range doc.Actions {
-		if err := a.lowEverywhere(act, doc.Targets); err != nil {
+		if err := a.lowEverywhere(act.ActionID, act.ModuleVersion, act.ArtifactSHA256, doc.Targets); err != nil {
 			return PendingGrant{}, err
 		}
 	}
@@ -219,7 +220,7 @@ func (a *Authority) ApproveScheduleGrantCLI(digest, who string) (StoredGrant, er
 func (a *Authority) storeGrantLocked(pg *pendingGrant, now time.Time, by string) (StoredGrant, error) {
 	// Trust may have been withdrawn while the grant waited.
 	for _, act := range pg.doc.Actions {
-		if err := a.lowEverywhere(act, pg.doc.Targets); err != nil {
+		if err := a.lowEverywhere(act.ActionID, act.ModuleVersion, act.ArtifactSHA256, pg.doc.Targets); err != nil {
 			return StoredGrant{}, err
 		}
 	}
@@ -311,7 +312,7 @@ func (a *Authority) AuthorizeScheduled(grantID, executionID string, run Run) (Gr
 	if perr != nil || paramHash != act.ParametersHash {
 		return Grant{}, deny(CodeParametersMismatch, "parameters do not hash to the granted value")
 	}
-	if err := a.lowEverywhere(act, []canonical.Target{t}); err != nil {
+	if err := a.lowEverywhere(act.ActionID, act.ModuleVersion, act.ArtifactSHA256, []canonical.Target{t}); err != nil {
 		return Grant{}, err
 	}
 	claimed, err := a.schedules.ClaimScheduleRun(grantID, run.ActionID, run.HostID, now, time.Duration(doc.MinIntervalS)*time.Second)
