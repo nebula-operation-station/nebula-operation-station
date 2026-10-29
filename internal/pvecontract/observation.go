@@ -175,7 +175,11 @@ func (d *Dataset[T]) UnmarshalJSON(raw []byte) error {
 		}
 	}
 	var value T
-	if rawValue, ok := keys["value"]; ok {
+	rawValue, hasValue := keys["value"]
+	if state == Available && (!hasValue || bytes.Equal(bytes.TrimSpace(rawValue), []byte("null"))) {
+		return fmt.Errorf("dataset: available dataset requires a non-null value")
+	}
+	if hasValue {
 		dec := json.NewDecoder(bytes.NewReader(rawValue))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&value); err != nil {

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"regexp"
 	"slices"
@@ -206,7 +207,7 @@ func walkDocument(raw []byte) error {
 	if err := walkValue(dec, 0, &objects, &seenStack); err != nil {
 		return err
 	}
-	if _, err := dec.Token(); err == nil {
+	if _, err := dec.Token(); err != io.EOF {
 		return errors.New("trailing data after JSON document")
 	}
 	return nil
