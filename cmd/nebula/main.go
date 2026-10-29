@@ -12,6 +12,7 @@
 //	nebula host probe|pin|unpin|keys|test|criticality|clear|list
 //	nebula webauthn code|list|remove
 //	nebula totp setup|status|remove
+//	nebula pve remote add|rotate-token|remove|repin|list
 package main
 
 import (
@@ -95,6 +96,15 @@ commands:
   secret set ID       store a secret (value from the terminal or stdin; never an argument)
   secret list         list secret IDs and versions (never values)
   secret rm ID        delete a secret
+  pve remote add <id> --kind cluster|standalone --endpoint host:port [...]
+                      register a PVE remote: probe, confirm the fingerprint, store the token
+  pve remote rotate-token <id> --purpose read|action
+                      validate the new token first; the old one stays until it is validated
+  pve remote remove <id>
+                      disable, revoke dependent grants, delete the vault secrets, tombstone
+  pve remote repin <id>
+                      re-pin the trust identity after a certificate change
+  pve remote list     metadata only (never secrets)
   version             print version
 
 environment:
@@ -133,6 +143,10 @@ func run(cmd string, args []string) error {
 		return backupCmd(args, os.Stdin, os.Stdout)
 	case "restore":
 		return restoreCmd(args, os.Stdin, os.Stdout)
+	case "pve":
+		// PVE credential custody runs locally on the executor host
+		// (admin-only); it needs no executor connection.
+		return pveCmd(args, os.Stdin, ttyPrompter, os.Stdout)
 	}
 	conn, err := dialExecutor()
 	if err != nil {
