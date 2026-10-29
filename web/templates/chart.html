@@ -1,0 +1,68 @@
+{{define "content"}}
+<div class="toolbar">
+  <h1>Inventory chart</h1>
+  <div class="actions">
+    <a class="button button--secondary" href="/inventory">Back to list</a>
+  </div>
+</div>
+{{if .Chart.Unavailable}}
+<section class="panel" aria-label="Inventory chart">
+  <p class="status status--error">Inventory unavailable</p>
+</section>
+{{else if not .Chart.Hosts}}
+<section class="panel" aria-label="Inventory chart">
+  <p class="chart__empty">No managed hosts yet.</p>
+</section>
+{{else}}
+<section class="panel chart" aria-label="Inventory org chart">
+  <ul class="chart__hosts">
+    {{range .Chart.Hosts}}{{$h := .}}
+    <li class="chart__node {{.WorstClass}}">
+      <details class="chart__details"{{if .Expanded}} open{{end}}>
+        <summary class="chart__box chart__box--host">
+          <span class="chart__title">
+            <span class="chart__dot {{.StateClass}}" aria-hidden="true"></span>
+            <a class="chart__name" href="/hosts/{{.ID}}">{{if .DisplayName}}{{.DisplayName}}{{else}}{{.ID}}{{end}}</a>
+          </span>
+          <span class="chart__sub">{{.StateLabel}}{{if .OS}} · {{.OS}}{{end}}</span>
+          <span class="chart__patch">
+            <span class="badge {{.PatchClass}}">{{.PatchText}}</span>
+            <span class="chart__count">{{.ContainerCount}} containers</span>
+          </span>
+          <span class="chart__bars" role="img" aria-label="CPU, RAM and disk usage not collected yet">
+            <span class="chart__bar"><span class="chart__bar__name">CPU</span><span class="chart__bar__track"><span class="chart__bar__fill"></span></span><span class="chart__bar__val">–</span></span>
+            <span class="chart__bar"><span class="chart__bar__name">RAM</span><span class="chart__bar__track"><span class="chart__bar__fill"></span></span><span class="chart__bar__val">–</span></span>
+            <span class="chart__bar"><span class="chart__bar__name">DISK</span><span class="chart__bar__track"><span class="chart__bar__fill"></span></span><span class="chart__bar__val">–</span></span>
+          </span>
+        </summary>
+        <div class="chart__children">
+          {{if not .ContainerCount}}
+          <p class="chart__none">No stored container list.</p>
+          {{end}}
+          {{range .Groups}}
+          {{if .Name}}
+          <div class="chart__project">
+            <span class="chart__project__label">{{.Name}}</span>
+          {{end}}
+          <ul class="chart__list">
+            {{range .Containers}}
+            <li class="chart__box chart__box--container">
+              <a class="chart__cname" href="/hosts/{{$h.ID}}">{{.Name}}</a>
+              <span class="chart__cimg">{{.Image}}</span>
+              <span class="badge {{.StateClass}}">{{.State}}</span>
+              {{if .Health}}<span class="badge badge--critical">{{.Health}}</span>{{end}}
+            </li>
+            {{end}}
+          </ul>
+          {{if .Name}}
+          </div>
+          {{end}}
+          {{end}}
+        </div>
+      </details>
+    </li>
+    {{end}}
+  </ul>
+</section>
+{{end}}
+{{end}}
