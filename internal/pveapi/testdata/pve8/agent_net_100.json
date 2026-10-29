@@ -1,0 +1,21 @@
+[
+  {
+    "name": "eth0",
+    "mac-address": "AA:BB:CC:DD:EE:01",
+    "mtu": 1500,
+    "ip-address": [
+      {"ip-address": "192.168.1.10", "prefix": 24, "type": "ipv4"},
+      {"ip-address": "fe80::aabb:ccdd:ee01", "prefix": 64, "type": "ipv6"}
+    ],
+    "flags": ["up", "broadcast", "multicast"]
+  },
+  {
+    "name": "eth1",
+    "mac-address": "AA:BB:CC:DD:EE:02",
+    "mtu": 1450,
+    "ip-address": [
+      {"ip-address": "10.20.0.5", "prefix": 16, "type": "ipv4"}
+    ],
+    "flags": ["up"]
+  }
+]
