@@ -1,0 +1,21 @@
+{"result": [
+  {
+    "name": "eth0",
+    "hardware-address": "AA:BB:CC:DD:EE:01",
+    "mtu": 1500,
+    "ip-addresses": [
+      {"ip-address": "192.168.1.10", "prefix": 24, "ip-address-type": "ipv4"},
+      {"ip-address": "fe80::aabb:ccdd:ee01", "prefix": 64, "ip-address-type": "ipv6"}
+    ],
+    "flags": ["up", "broadcast", "multicast"]
+  },
+  {
+    "name": "eth1",
+    "hardware-address": "AA:BB:CC:DD:EE:02",
+    "mtu": 1450,
+    "ip-addresses": [
+      {"ip-address": "10.20.0.5", "prefix": 16, "ip-address-type": "ipv4"}
+    ],
+    "flags": ["up"]
+  }
+]}

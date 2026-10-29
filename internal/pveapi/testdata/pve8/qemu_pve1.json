@@ -1,0 +1,31 @@
+[
+  {
+    "vmid": 100,
+    "name": "web1",
+    "status": "running",
+    "cpus": 4,
+    "maxmem": 8589934592,
+    "mem": 4294967296,
+    "cputime": 123456,
+    "disk": 10737418240,
+    "net": 104857600,
+    "cpu": 0.12,
+    "uptime": 3600,
+    "pid": 4321,
+    "smp": 4
+  },
+  {
+    "vmid": 101,
+    "name": "db1",
+    "status": "stopped",
+    "cpus": 8,
+    "maxmem": 17179869184,
+    "mem": 0,
+    "cputime": 0,
+    "disk": 0,
+    "net": 0,
+    "cpu": 0,
+    "uptime": 0,
+    "smp": 8
+  }
+]

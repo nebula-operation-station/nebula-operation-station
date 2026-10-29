@@ -1,0 +1,17 @@
+[
+  {
+    "vmid": 110,
+    "name": "mail1",
+    "status": "paused",
+    "cpus": 2,
+    "maxmem": 4294967296,
+    "mem": 2147483648,
+    "cputime": 300,
+    "disk": 1073741824,
+    "net": 0,
+    "cpu": 0,
+    "uptime": 60,
+    "pid": 777,
+    "smp": 2
+  }
+]
