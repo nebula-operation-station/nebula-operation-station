@@ -1,0 +1,9 @@
+{
+  "data": [
+    { "time": 1761600000, "cpu": 0.15, "memused": 16180019132, "memtotal": 65987027456, "diskread": 1048576, "diskwrite": 2097152, "netin": 5242880, "netout": 2621440, "loadavg": 0.42, "swap": 0.0 },
+    { "time": 1761600060, "cpu": 2.0, "memused": 16503355566, "memtotal": 65987027456, "diskread": 0, "diskwrite": 1048576, "netin": 6291456, "netout": 3145728, "loadavg": 0.44, "swap": 0.0 }
+  ],
+  "errors": null,
+  "status": "OK",
+  "time": 1761600300
+}

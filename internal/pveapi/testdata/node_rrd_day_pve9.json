@@ -1,0 +1,11 @@
+{
+  "data": [
+    { "time": 1761582000, "cpu": 0.21, "memused": 17156627138, "memtotal": 65987027456, "diskread": 3145728, "diskwrite": 4194304, "netin": 8388608, "netout": 4194304, "loadavg": 0.61, "swap": 0.0 },
+    { "time": 1761582300, "cpu": 0.19, "memused": 16978462164, "memtotal": 65987027456, "diskread": 1048576, "diskwrite": 2097152, "netin": 7340032, "netout": 3670016, "loadavg": 0.55, "swap": 0.0 },
+    { "time": 1761582600, "cpu": 0.23, "memused": 17229212868, "memtotal": 65987027456, "diskread": 4194304, "diskwrite": 0, "netin": 9437184, "netout": 4718592, "loadavg": 0.66, "swap": 0.0, "temp1": 47 },
+    { "time": 1761582900, "cpu": 0.2, "memused": 17084041408, "memtotal": 65987027456, "diskread": 2097152, "diskwrite": 3145728, "netin": 8912896, "netout": 4456448, "loadavg": 0.6, "swap": 0.0 }
+  ],
+  "errors": null,
+  "status": "OK",
+  "time": 1761583200
+}

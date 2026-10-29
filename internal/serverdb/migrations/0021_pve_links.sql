@@ -1,4 +1,4 @@
--- 0020_pve_links.sql
+-- 0021_pve_links.sql
 -- PVE guest <-> managed host linking, staging and drift hints (ADR 0006,
 -- ticket P1-12).
 --

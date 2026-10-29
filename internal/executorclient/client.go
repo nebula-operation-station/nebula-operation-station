@@ -18,7 +18,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
@@ -62,6 +64,17 @@ type Client struct {
 // New creates a Client and verifies the connection: the socket must exist,
 // be served by the configured executor user, and answer GetStatus.
 func New(ctx context.Context, o Options) (*Client, error) {
+	return newClient(ctx, o, false)
+}
+
+// NewPVECollector creates a Client for a collector-only UID. It verifies the
+// executor's peer UID and probes ListPVERemotes instead of GetStatus. An
+// Unimplemented response is accepted while the PVE handlers await wiring.
+func NewPVECollector(ctx context.Context, o Options) (*Client, error) {
+	return newClient(ctx, o, true)
+}
+
+func newClient(ctx context.Context, o Options, collector bool) (*Client, error) {
 	if o.SocketPath == "" {
 		return nil, errors.New("executorclient: SocketPath is required")
 	}
@@ -103,7 +116,15 @@ func New(ctx context.Context, o Options) (*Client, error) {
 		defaultTimeout:   o.DefaultTimeout,
 		authorizeTimeout: o.AuthorizeRunTimeout,
 	}
-	if _, err := c.GetStatus(ctx, &pb.GetStatusRequest{}); err != nil {
+	if collector {
+		_, err = c.ListPVERemotes(ctx, &pb.ListPVERemotesRequest{})
+		if status.Code(err) == codes.Unimplemented {
+			err = nil
+		}
+	} else {
+		_, err = c.GetStatus(ctx, &pb.GetStatusRequest{})
+	}
+	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("executorclient: verify executor at %s: %w", o.SocketPath, err)
 	}
@@ -207,6 +228,82 @@ func (c *Client) GetPermitState(ctx context.Context, in *pb.GetPermitStateReques
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.GetPermitState(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// ListPVERemotes lists the registered PVE remotes with their nonsecret
+// metadata (ADR 0006). Role: server, admin, pve-collector.
+func (c *Client) ListPVERemotes(ctx context.Context, in *pb.ListPVERemotesRequest, opts ...grpc.CallOption) (*pb.ListPVERemotesResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ListPVERemotes(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// ReadPVE performs one typed PVE read against one remote and returns a
+// pvecontract-shaped observation page (ADR 0006). Role: admin,
+// pve-collector. The server never calls this: the server writes poll
+// requests to the spool and the pve-collector schedules the reads.
+func (c *Client) ReadPVE(ctx context.Context, in *pb.ReadPVERequest, opts ...grpc.CallOption) (*pb.ReadPVEResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ReadPVE(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// ProbePVERemote probes PVE endpoints without credentials (admin role).
+func (c *Client) ProbePVERemote(ctx context.Context, in *pb.ProbePVERemoteRequest, opts ...grpc.CallOption) (*pb.ProbePVERemoteResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ProbePVERemote(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// AddPVERemote registers a PVE remote (admin role).
+func (c *Client) AddPVERemote(ctx context.Context, in *pb.AddPVERemoteRequest, opts ...grpc.CallOption) (*pb.AddPVERemoteResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.AddPVERemote(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// RotatePVEToken replaces a PVE remote token (admin role).
+func (c *Client) RotatePVEToken(ctx context.Context, in *pb.RotatePVETokenRequest, opts ...grpc.CallOption) (*pb.RotatePVETokenResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.RotatePVEToken(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// RemovePVERemote removes a PVE remote (admin role).
+func (c *Client) RemovePVERemote(ctx context.Context, in *pb.RemovePVERemoteRequest, opts ...grpc.CallOption) (*pb.RemovePVERemoteResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.RemovePVERemote(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// ListPVEAdminRemotes lists PVE remote administration metadata (admin role).
+func (c *Client) ListPVEAdminRemotes(ctx context.Context, in *pb.ListPVEAdminRemotesRequest, opts ...grpc.CallOption) (*pb.ListPVEAdminRemotesResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ListPVEAdminRemotes(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// ProposePVERepin proposes a PVE remote trust change (admin role).
+func (c *Client) ProposePVERepin(ctx context.Context, in *pb.ProposePVERepinRequest, opts ...grpc.CallOption) (*pb.ProposePVERepinResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ProposePVERepin(ctx, in, opts...)
+	return resp, mapError(err)
+}
+
+// CommitPVERepin commits an approved PVE remote trust change (admin role).
+func (c *Client) CommitPVERepin(ctx context.Context, in *pb.CommitPVERepinRequest, opts ...grpc.CallOption) (*pb.CommitPVERepinResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.CommitPVERepin(ctx, in, opts...)
 	return resp, mapError(err)
 }
 

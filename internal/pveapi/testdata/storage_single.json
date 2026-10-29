@@ -1,0 +1,11 @@
+{
+  "data": {
+    "content": "images",
+    "inuse": 1,
+    "shared": 0,
+    "type": "lvm",
+    "active": 1,
+    "used": 5368709120,
+    "total": 10737418240
+  }
+}

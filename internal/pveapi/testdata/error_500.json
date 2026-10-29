@@ -1,0 +1,8 @@
+{
+  "data": {
+    "error": true,
+    "message": "internal error: secret-token-leak-abc123",
+    "status": 500
+  },
+  "status": "error"
+}

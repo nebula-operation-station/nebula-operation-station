@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 )
@@ -105,6 +106,30 @@ func (s *Store) withTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	return nil
 }
 
+// withObservationTx rejects obsolete collections inside the same transaction
+// as the writes, including when another ingest has advanced the remote.
+func (s *Store) withObservationTx(ctx context.Context, obs pvecontract.Observation, fn func(*sql.Tx) error) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		var generation uint64
+		var observed string
+		err := tx.QueryRowContext(ctx, `SELECT last_collection_generation, last_observed_at
+			FROM pve_remotes WHERE remote_id = ?`, obs.RemoteID).Scan(&generation, &observed)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("pveinventory: check collection freshness: %w", err)
+		}
+		if err == nil {
+			at, err := time.Parse(time.RFC3339, observed)
+			if err != nil {
+				return fmt.Errorf("pveinventory: parse collection timestamp: %w", err)
+			}
+			if obs.CollectionGeneration < generation || (obs.CollectionGeneration == generation && obs.ObservedAt.Before(at)) {
+				return ErrStaleObservation
+			}
+		}
+		return fn(tx)
+	})
+}
+
 // setDatasetStatus records the current state of one top-level dataset.
 func (s *Store) setDatasetStatus(ctx context.Context, tx *sql.Tx, remoteID, dataset string, state DatasetState, obs pvecontract.Observation, reason string) error {
 	if _, err := tx.ExecContext(ctx, `
@@ -155,10 +180,13 @@ func (s *Store) IngestObservation(ctx context.Context, obs pvecontract.Observati
 	rep := IngestReport{RemoteID: v.RemoteID, Errors: map[string]error{}}
 
 	// Remote bookkeeping (presentation copy; identity is executor-owned).
-	if err := s.withTx(ctx, func(tx *sql.Tx) error {
+	if err := s.withObservationTx(ctx, v, func(tx *sql.Tx) error {
 		return s.touchRemote(ctx, tx, v.RemoteID, v.ObservedAt, v.Source, v.CollectionGeneration)
 	}); err != nil {
 		rep.Errors["remote"] = err
+		if errors.Is(err, ErrStaleObservation) {
+			return rep, err
+		}
 	}
 
 	if n, err := s.ingestNodes(ctx, v); err != nil {
@@ -223,7 +251,7 @@ func (s *Store) IngestObservation(ctx context.Context, obs pvecontract.Observati
 func (s *Store) ingestNodes(ctx context.Context, obs pvecontract.Observation) (int, error) {
 	state, reason := storedState(obs.Nodes.State, obs.Nodes.Reason, obs.Complete, obs.Reason, true)
 	var n int
-	err := s.withTx(ctx, func(tx *sql.Tx) error {
+	err := s.withObservationTx(ctx, obs, func(tx *sql.Tx) error {
 		if obs.Nodes.State == pvecontract.Available {
 			for _, nd := range obs.Nodes.Value {
 				detailsAvail := 0
@@ -233,12 +261,17 @@ func (s *Store) ingestNodes(ctx context.Context, obs pvecontract.Observation) (i
 					pveVer = nd.Details.Value.PVEVersion
 					kernelVer = nd.Details.Value.KernelVersion
 				}
+				detailsObserved := ""
+				if detailsAvail == 1 {
+					detailsObserved = s.formatTime(obs.ObservedAt)
+				}
 				if _, err := tx.ExecContext(ctx, `
 					INSERT INTO pve_nodes (remote_id, node, status, uptime_seconds, cpu_count,
 					                      ram_total_bytes, ram_used_bytes, pve_version, kernel_version,
 					                      details_available, observed_at, source, state, reason,
-					                      collection_generation)
-					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+					                      collection_generation, details_observed_at, details_checked_at,
+					                      details_source, details_reason)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 					ON CONFLICT (remote_id, node) DO UPDATE SET
 						status                = excluded.status,
 						uptime_seconds        = excluded.uptime_seconds,
@@ -247,6 +280,10 @@ func (s *Store) ingestNodes(ctx context.Context, obs pvecontract.Observation) (i
 						ram_used_bytes        = excluded.ram_used_bytes,
 						pve_version           = CASE WHEN excluded.details_available = 1 THEN excluded.pve_version ELSE pve_nodes.pve_version END,
 						kernel_version        = CASE WHEN excluded.details_available = 1 THEN excluded.kernel_version ELSE pve_nodes.kernel_version END,
+						details_observed_at   = CASE WHEN excluded.details_available = 1 THEN excluded.details_observed_at ELSE pve_nodes.details_observed_at END,
+						details_checked_at    = excluded.details_checked_at,
+						details_source        = excluded.details_source,
+						details_reason        = excluded.details_reason,
 						details_available     = excluded.details_available,
 						observed_at           = excluded.observed_at,
 						source                = excluded.source,
@@ -256,7 +293,7 @@ func (s *Store) ingestNodes(ctx context.Context, obs pvecontract.Observation) (i
 					obs.RemoteID, nd.Node, string(nd.Status), nd.UptimeSeconds, nd.CPUCount,
 					nd.RAMTotalBytes, nd.RAMUsedBytes, pveVer, kernelVer, detailsAvail,
 					s.formatTime(obs.ObservedAt), obs.Source, string(state), reason,
-					obs.CollectionGeneration); err != nil {
+					obs.CollectionGeneration, detailsObserved, s.formatTime(obs.ObservedAt), obs.Source, nd.Details.Reason); err != nil {
 					return fmt.Errorf("pveinventory: ingest node %s: %w", nd.Node, err)
 				}
 				n++
@@ -279,14 +316,19 @@ type guestsIngest struct {
 func (s *Store) ingestGuests(ctx context.Context, obs pvecontract.Observation) (guestsIngest, error) {
 	var rep guestsIngest
 	state, reason := storedState(obs.Guests.State, obs.Guests.Reason, obs.Complete, obs.Reason, true)
-	err := s.withTx(ctx, func(tx *sql.Tx) error {
+	err := s.withObservationTx(ctx, obs, func(tx *sql.Tx) error {
 		if obs.Guests.State != pvecontract.Available {
 			return s.setDatasetStatus(ctx, tx, obs.RemoteID, DatasetGuests, state, obs, reason)
 		}
 		now := s.formatTime(s.now())
-		seen := make(map[uint64]struct{}, len(obs.Guests.Value))
+		if err := s.prepareGuestCollection(ctx, tx, obs); err != nil {
+			return err
+		}
 		for _, g := range obs.Guests.Value {
-			seen[g.VMID] = struct{}{}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO pve_guest_collection_seen (remote_id, vmid)
+				VALUES (?, ?) ON CONFLICT DO NOTHING`, obs.RemoteID, g.VMID); err != nil {
+				return fmt.Errorf("pveinventory: record collection guest: %w", err)
+			}
 			var activeGen uint64
 			var hasActive bool
 			row := tx.QueryRowContext(ctx, `
@@ -300,6 +342,14 @@ func (s *Store) ingestGuests(ctx context.Context, obs pvecontract.Observation) (
 			}
 			switch {
 			case !hasActive:
+				var highWater uint64
+				if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(generation), 0)
+					FROM pve_guest_generations WHERE remote_id = ? AND vmid = ?`, obs.RemoteID, g.VMID).Scan(&highWater); err != nil {
+					return fmt.Errorf("pveinventory: read guest generation: %w", err)
+				}
+				if g.Generation <= highWater {
+					continue
+				}
 				if err := s.insertGuest(ctx, tx, obs, g, state, reason); err != nil {
 					return err
 				}
@@ -325,25 +375,68 @@ func (s *Store) ingestGuests(ctx context.Context, obs pvecontract.Observation) (
 				// newer incarnation and do not clobber it.
 			}
 		}
-		// Only a complete enumeration may tombstone unseen guests.
+		var seenCount int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pve_guest_collection_seen WHERE remote_id = ?`, obs.RemoteID).Scan(&seenCount); err != nil {
+			return fmt.Errorf("pveinventory: count collection guests: %w", err)
+		}
+		if seenCount > pvecontract.MaxGuestsPerRemote {
+			return fmt.Errorf("pveinventory: collection exceeds guest limit %d", pvecontract.MaxGuestsPerRemote)
+		}
+		// Only the final page reconciles the whole collection, in bounded batches.
 		if obs.Complete {
-			active, err := s.activeGuests(ctx, tx, obs.RemoteID)
-			if err != nil {
-				return err
-			}
-			for _, inc := range active {
-				if _, ok := seen[inc.vmid]; ok {
-					continue
-				}
-				if err := s.tombstoneGuest(ctx, tx, obs.RemoteID, inc.vmid, inc.gen, now); err != nil {
+			for {
+				active, err := s.unseenGuests(ctx, tx, obs.RemoteID)
+				if err != nil {
 					return err
 				}
-				rep.Tombstoned++
+				if len(active) == 0 {
+					break
+				}
+				for _, inc := range active {
+					if err := s.tombstoneGuest(ctx, tx, obs.RemoteID, inc.vmid, inc.gen, now); err != nil {
+						return err
+					}
+					rep.Tombstoned++
+				}
 			}
+		}
+		var activeCount int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pve_guests WHERE remote_id = ? AND tombstoned = 0`, obs.RemoteID).Scan(&activeCount); err != nil {
+			return fmt.Errorf("pveinventory: count active guests: %w", err)
+		}
+		if activeCount > pvecontract.MaxGuestsPerRemote {
+			return fmt.Errorf("pveinventory: remote exceeds guest limit %d", pvecontract.MaxGuestsPerRemote)
 		}
 		return s.setDatasetStatus(ctx, tx, obs.RemoteID, DatasetGuests, state, obs, reason)
 	})
 	return rep, err
+}
+
+// prepareGuestCollection starts a collection or resumes its persisted membership.
+// A paged collection keeps its membership until the collection generation
+// advances. A standalone complete observation reconciles its own enumeration.
+func (s *Store) prepareGuestCollection(ctx context.Context, tx *sql.Tx, obs pvecontract.Observation) error {
+	var generation uint64
+	var paged bool
+	err := tx.QueryRowContext(ctx, `SELECT collection_generation, paged
+		FROM pve_guest_collections WHERE remote_id = ?`, obs.RemoteID).Scan(&generation, &paged)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("pveinventory: read collection: %w", err)
+	}
+	if errors.Is(err, sql.ErrNoRows) || generation != obs.CollectionGeneration || !paged {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM pve_guest_collection_seen WHERE remote_id = ?`, obs.RemoteID); err != nil {
+			return fmt.Errorf("pveinventory: reset collection: %w", err)
+		}
+		paged = false
+	}
+	paged = paged || !obs.Complete
+	if _, err := tx.ExecContext(ctx, `INSERT INTO pve_guest_collections
+		(remote_id, collection_generation, paged) VALUES (?, ?, ?)
+		ON CONFLICT (remote_id) DO UPDATE SET collection_generation = excluded.collection_generation,
+		paged = excluded.paged`, obs.RemoteID, obs.CollectionGeneration, paged); err != nil {
+		return fmt.Errorf("pveinventory: record collection: %w", err)
+	}
+	return nil
 }
 
 // activeIncarnation is a (vmid, generation) pair of an active guest.
@@ -352,11 +445,17 @@ type activeIncarnation struct {
 	gen  uint64
 }
 
-// activeGuests lists the active incarnations of one remote.
-func (s *Store) activeGuests(ctx context.Context, tx *sql.Tx, remoteID string) ([]activeIncarnation, error) {
+// reconcileBatchSize bounds memory used while reconciling a collection.
+const reconcileBatchSize = 256
+
+// unseenGuests lists one bounded batch of active incarnations absent from the collection.
+func (s *Store) unseenGuests(ctx context.Context, tx *sql.Tx, remoteID string) ([]activeIncarnation, error) {
 	rows, err := tx.QueryContext(ctx, `
-		SELECT vmid, generation FROM pve_guests
-		WHERE remote_id = ? AND tombstoned = 0`, remoteID)
+		SELECT vmid, generation FROM pve_guests AS g
+		WHERE remote_id = ? AND tombstoned = 0 AND NOT EXISTS (
+			SELECT 1 FROM pve_guest_collection_seen AS seen
+			WHERE seen.remote_id = g.remote_id AND seen.vmid = g.vmid)
+		ORDER BY vmid, generation LIMIT ?`, remoteID, reconcileBatchSize)
 	if err != nil {
 		return nil, fmt.Errorf("pveinventory: list active guests %s: %w", remoteID, err)
 	}
@@ -383,6 +482,11 @@ func (s *Store) insertGuest(ctx context.Context, tx *sql.Tx, obs pvecontract.Obs
 		g.UUID, s.formatTime(obs.ObservedAt), obs.Source, string(state), reason,
 		obs.CollectionGeneration); err != nil {
 		return fmt.Errorf("pveinventory: insert guest %s/%d: %w", obs.RemoteID, g.VMID, err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO pve_guest_generations (remote_id, vmid, generation)
+		VALUES (?, ?, ?) ON CONFLICT (remote_id, vmid) DO UPDATE SET
+		generation = MAX(pve_guest_generations.generation, excluded.generation)`, obs.RemoteID, g.VMID, g.Generation); err != nil {
+		return fmt.Errorf("pveinventory: retain guest generation: %w", err)
 	}
 	return nil
 }
@@ -440,8 +544,16 @@ func (s *Store) ingestGuestDetails(ctx context.Context, obs pvecontract.Observat
 	if obs.Guests.State != pvecontract.Available {
 		return rep, nil
 	}
-	err := s.withTx(ctx, func(tx *sql.Tx) error {
+	err := s.withObservationTx(ctx, obs, func(tx *sql.Tx) error {
 		for _, g := range obs.Guests.Value {
+			var active bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pve_guests
+				WHERE remote_id = ? AND vmid = ? AND generation = ? AND tombstoned = 0)`, obs.RemoteID, g.VMID, g.Generation).Scan(&active); err != nil {
+				return fmt.Errorf("pveinventory: check guest detail incarnation: %w", err)
+			}
+			if !active {
+				continue
+			}
 			if err := s.ingestGuestConfig(ctx, tx, obs, g, &rep); err != nil {
 				return err
 			}
@@ -587,7 +699,7 @@ func (s *Store) ingestGuestSnapshots(ctx context.Context, tx *sql.Tx, obs pvecon
 }
 
 // ingestGuestBackups inserts one guest's backup evidence records and records
-// its status. Evidence is accumulated (insert-or-ignore), never deleted.
+// its status. Evidence is accumulated and updated, never deleted.
 func (s *Store) ingestGuestBackups(ctx context.Context, tx *sql.Tx, obs pvecontract.Observation, g pvecontract.GuestObservation, rep *guestDetailsIngest) error {
 	state, reason := storedState(g.Backups.State, g.Backups.Reason, obs.Complete, obs.Reason, false)
 	if g.Backups.State == pvecontract.Available {
@@ -597,7 +709,12 @@ func (s *Store) ingestGuestBackups(ctx context.Context, tx *sql.Tx, obs pvecontr
 				                                     name, status, started_unix, finished_unix,
 				                                     verified, observed_at, collection_generation)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-				ON CONFLICT (remote_id, vmid, generation, source, kind, name, started_unix) DO NOTHING`,
+				ON CONFLICT (remote_id, vmid, generation, source, kind, name, started_unix) DO UPDATE SET
+					status = excluded.status,
+					finished_unix = excluded.finished_unix,
+					verified = excluded.verified,
+					observed_at = excluded.observed_at,
+					collection_generation = excluded.collection_generation`,
 				obs.RemoteID, g.VMID, g.Generation, b.Source, b.Kind, b.Name, b.Status,
 				b.StartedUnix, b.FinishedUnix, string(b.Verified), s.formatTime(obs.ObservedAt),
 				obs.CollectionGeneration); err != nil {
@@ -613,7 +730,7 @@ func (s *Store) ingestGuestBackups(ctx context.Context, tx *sql.Tx, obs pvecontr
 func (s *Store) ingestStorages(ctx context.Context, obs pvecontract.Observation) (int, error) {
 	state, reason := storedState(obs.Storages.State, obs.Storages.Reason, obs.Complete, obs.Reason, true)
 	var n int
-	err := s.withTx(ctx, func(tx *sql.Tx) error {
+	err := s.withObservationTx(ctx, obs, func(tx *sql.Tx) error {
 		if obs.Storages.State == pvecontract.Available {
 			for _, st := range obs.Storages.Value {
 				contentJSON, err := json.Marshal(st.Content)
@@ -655,7 +772,7 @@ func (s *Store) ingestStorages(ctx context.Context, obs pvecontract.Observation)
 func (s *Store) ingestCluster(ctx context.Context, obs pvecontract.Observation) (bool, error) {
 	state, reason := storedState(obs.Cluster.State, obs.Cluster.Reason, obs.Complete, obs.Reason, false)
 	var done bool
-	err := s.withTx(ctx, func(tx *sql.Tx) error {
+	err := s.withObservationTx(ctx, obs, func(tx *sql.Tx) error {
 		if obs.Cluster.State == pvecontract.Available {
 			nodesJSON, err := json.Marshal(obs.Cluster.Value.Nodes)
 			if err != nil {
@@ -692,19 +809,23 @@ func (s *Store) ingestCluster(ctx context.Context, obs pvecontract.Observation) 
 }
 
 // ingestTasks inserts the task metadata and records its status. Task rows
-// are historical: they are accumulated (insert-or-ignore), never deleted
+// are historical: they are accumulated and updated, never deleted
 // except by explicit retention.
 func (s *Store) ingestTasks(ctx context.Context, obs pvecontract.Observation) (int, error) {
 	state, reason := storedState(obs.Tasks.State, obs.Tasks.Reason, obs.Complete, obs.Reason, true)
 	var n int
-	err := s.withTx(ctx, func(tx *sql.Tx) error {
+	err := s.withObservationTx(ctx, obs, func(tx *sql.Tx) error {
 		if obs.Tasks.State == pvecontract.Available {
 			for _, t := range obs.Tasks.Value {
 				if _, err := tx.ExecContext(ctx, `
 					INSERT INTO pve_tasks (remote_id, node, actor, type, target, started_unix,
 					                      exit_status, observed_at, source, collection_generation)
 					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-					ON CONFLICT (remote_id, node, started_unix, actor, type, target) DO NOTHING`,
+					ON CONFLICT (remote_id, node, started_unix, actor, type, target) DO UPDATE SET
+						exit_status = excluded.exit_status,
+						observed_at = excluded.observed_at,
+						source = excluded.source,
+						collection_generation = excluded.collection_generation`,
 					obs.RemoteID, t.Node, t.Actor, t.Type, t.Target, t.StartedUnix,
 					t.ExitStatus, s.formatTime(obs.ObservedAt), obs.Source,
 					obs.CollectionGeneration); err != nil {

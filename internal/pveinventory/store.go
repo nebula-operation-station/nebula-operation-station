@@ -100,6 +100,8 @@ const (
 
 // Sentinel errors callers branch on.
 var (
+	// ErrStaleObservation is returned when a collection predates the stored observation.
+	ErrStaleObservation = errors.New("pveinventory: stale observation")
 	// ErrRemoteNotFound is returned for an unknown remote_id.
 	ErrRemoteNotFound = errors.New("pveinventory: remote not found")
 	// ErrNodeNotFound is returned for an unknown (remote_id, node).
@@ -154,15 +156,23 @@ type Remote struct {
 
 // Node is one stored PVE node.
 type Node struct {
-	RemoteID             string
-	Node                 string
-	Status               string
-	UptimeSeconds        uint64
-	CPUCount             uint32
-	RAMTotalBytes        uint64
-	RAMUsedBytes         uint64
-	PVEVersion           string
-	KernelVersion        string
+	RemoteID      string
+	Node          string
+	Status        string
+	UptimeSeconds uint64
+	CPUCount      uint32
+	RAMTotalBytes uint64
+	RAMUsedBytes  uint64
+	PVEVersion    string
+	KernelVersion string
+	// DetailsObservedAt timestamps the retained version values, even when unavailable.
+	DetailsObservedAt time.Time
+	// DetailsCheckedAt timestamps the most recent detail availability observation.
+	DetailsCheckedAt time.Time
+	// DetailsSource identifies the collector of the most recent detail check.
+	DetailsSource string
+	// DetailsReason explains why the most recent detail check was unavailable.
+	DetailsReason        string
 	DetailsAvailable     bool
 	ObservedAt           time.Time
 	Source               string
@@ -457,7 +467,7 @@ func (s *Store) touchRemote(ctx context.Context, tx *sql.Tx, remoteID string, ob
 			last_observed_at             = excluded.last_observed_at,
 			last_source                  = excluded.last_source,
 			last_collection_generation   = MAX(pve_remotes.last_collection_generation, excluded.last_collection_generation)`,
-		remoteID, s.formatTime(observedAt), s.formatTime(observedAt), source, gen); err != nil {
+		remoteID, observedAt.UTC().Format(time.RFC3339Nano), observedAt.UTC().Format(time.RFC3339Nano), source, gen); err != nil {
 		return fmt.Errorf("pveinventory: touch remote %s: %w", remoteID, err)
 	}
 	return nil
@@ -471,20 +481,22 @@ func (s *Store) GetNode(ctx context.Context, remoteID, node string) (Node, error
 		SELECT remote_id, node, status, uptime_seconds, cpu_count,
 		       ram_total_bytes, ram_used_bytes, pve_version, kernel_version,
 		       details_available, observed_at, source, state, reason,
-		       collection_generation
+		       collection_generation, details_observed_at, details_checked_at, details_source, details_reason
 		FROM pve_nodes WHERE remote_id = ? AND node = ?`, remoteID, node)
 	var n Node
 	var details int
-	var observed, state string
+	var observed, state, detailsObserved, detailsChecked string
 	if err := row.Scan(&n.RemoteID, &n.Node, &n.Status, &n.UptimeSeconds,
 		&n.CPUCount, &n.RAMTotalBytes, &n.RAMUsedBytes, &n.PVEVersion,
 		&n.KernelVersion, &details, &observed, &n.Source, &state, &n.Reason,
-		&n.CollectionGeneration); err != nil {
+		&n.CollectionGeneration, &detailsObserved, &detailsChecked, &n.DetailsSource, &n.DetailsReason); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Node{}, fmt.Errorf("pveinventory: get node %s/%s: %w", remoteID, node, ErrNodeNotFound)
 		}
 		return Node{}, fmt.Errorf("pveinventory: get node %s/%s: %w", remoteID, node, err)
 	}
+	n.DetailsObservedAt, _ = time.Parse(time.RFC3339, detailsObserved)
+	n.DetailsCheckedAt, _ = time.Parse(time.RFC3339, detailsChecked)
 	n.DetailsAvailable = details != 0
 	n.State = DatasetState(state)
 	n.ObservedAt, _ = time.Parse(time.RFC3339, observed)
@@ -503,7 +515,7 @@ func (s *Store) ListNodes(ctx context.Context, remoteID string, limit int) ([]No
 		SELECT remote_id, node, status, uptime_seconds, cpu_count,
 		       ram_total_bytes, ram_used_bytes, pve_version, kernel_version,
 		       details_available, observed_at, source, state, reason,
-		       collection_generation
+		       collection_generation, details_observed_at, details_checked_at, details_source, details_reason
 		FROM pve_nodes WHERE remote_id = ? ORDER BY node LIMIT ?`, remoteID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("pveinventory: list nodes %s: %w", remoteID, err)
@@ -513,13 +525,15 @@ func (s *Store) ListNodes(ctx context.Context, remoteID string, limit int) ([]No
 	for rows.Next() {
 		var n Node
 		var details int
-		var observed, state string
+		var observed, state, detailsObserved, detailsChecked string
 		if err := rows.Scan(&n.RemoteID, &n.Node, &n.Status, &n.UptimeSeconds,
 			&n.CPUCount, &n.RAMTotalBytes, &n.RAMUsedBytes, &n.PVEVersion,
 			&n.KernelVersion, &details, &observed, &n.Source, &state, &n.Reason,
-			&n.CollectionGeneration); err != nil {
+			&n.CollectionGeneration, &detailsObserved, &detailsChecked, &n.DetailsSource, &n.DetailsReason); err != nil {
 			return nil, fmt.Errorf("pveinventory: list nodes %s: %w", remoteID, err)
 		}
+		n.DetailsObservedAt, _ = time.Parse(time.RFC3339, detailsObserved)
+		n.DetailsCheckedAt, _ = time.Parse(time.RFC3339, detailsChecked)
 		n.DetailsAvailable = details != 0
 		n.State = DatasetState(state)
 		n.ObservedAt, _ = time.Parse(time.RFC3339, observed)
@@ -744,21 +758,37 @@ func (s *Store) ListSnapshots(ctx context.Context, remoteID string, vmid, genera
 
 // --- Backups ---
 
-// ListBackups returns up to limit backup evidence records of one
-// incarnation, ordered by source, kind, name. A non-positive limit uses
-// MaxBackupsQuery.
+// ListBackups returns up to limit backup records, newest start first.
+// A non-positive limit uses MaxBackupsQuery.
 func (s *Store) ListBackups(ctx context.Context, remoteID string, vmid, generation uint64, limit int) ([]BackupObservation, error) {
+	return s.ListBackupsPage(ctx, remoteID, vmid, generation, limit, nil)
+}
+
+// ListBackupsPage returns a bounded page ordered by start time and evidence
+// identity descending. Pass the previous page's last record as before, or nil
+// for the newest page. A non-positive limit uses MaxBackupsQuery.
+func (s *Store) ListBackupsPage(ctx context.Context, remoteID string, vmid, generation uint64, limit int, before *BackupObservation) ([]BackupObservation, error) {
 	limit, err := checkLimit(limit, MaxBackupsQuery)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	query := `
 		SELECT remote_id, vmid, generation, source, kind, name, status,
 		       started_unix, finished_unix, verified, observed_at,
 		       collection_generation
 		FROM pve_backup_observations
-		WHERE remote_id = ? AND vmid = ? AND generation = ?
-		ORDER BY source, kind, name, started_unix LIMIT ?`, remoteID, vmid, generation, limit)
+		WHERE remote_id = ? AND vmid = ? AND generation = ?`
+	args := []any{remoteID, vmid, generation}
+	if before != nil {
+		if before.RemoteID != remoteID || before.VMID != vmid || before.Generation != generation {
+			return nil, errors.New("pveinventory: backup cursor belongs to another incarnation")
+		}
+		query += ` AND (started_unix, source, kind, name) < (?, ?, ?, ?)`
+		args = append(args, before.StartedUnix, before.Source, before.Kind, before.Name)
+	}
+	query += ` ORDER BY started_unix DESC, source DESC, kind DESC, name DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("pveinventory: list backups %s/%d/%d: %w", remoteID, vmid, generation, err)
 	}
