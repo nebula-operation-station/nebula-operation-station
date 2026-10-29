@@ -1,0 +1,18 @@
+{
+  "name": "cache1",
+  "ostype": "linux",
+  "hostname": "cache1.lab.example",
+  "cores": "2",
+  "memory": "2048M",
+  "swap": "512M",
+  "rootfs": "local-lvm:vm-200-disk-0,size=8G",
+  "mp0": "local:200,mp=/var/cache",
+  "net0": "name=eth0,type=veth,bridge=vmbr0,hwaddr=AA:BB:CC:DD:EE:20,vlan=3",
+  "features": "nesting=1,keys=0",
+  "nameserver": "192.168.1.1",
+  "searchdomain": "lab.example",
+  "onboot": "1",
+  "ctime": "1750003600",
+  "sshkeys": "AAAAB3NzaC1yc2EAAAADAQABAAABAQ0fakecontainerkey",
+  "description": "cache container"
+}
