@@ -314,11 +314,19 @@ type PveAdmin struct {
 
 // checkDeps verifies the required dependencies.
 func (a *PveAdmin) checkDeps() error {
-	if a.DB == nil {
-		return errors.New("executor: pve admin: DB is required")
+	if err := a.checkDB(); err != nil {
+		return err
 	}
 	if a.Vault == nil {
 		return errors.New("executor: pve admin: Vault is required")
+	}
+	return nil
+}
+
+// checkDB verifies the dependencies of the metadata-only operations.
+func (a *PveAdmin) checkDB() error {
+	if a.DB == nil {
+		return errors.New("executor: pve admin: DB is required")
 	}
 	return nil
 }
@@ -673,9 +681,8 @@ func (a *PveAdmin) Repin(ctx context.Context, in PveRepin) (executordb.PveRemote
 // ListRemotes returns the registry metadata of every remote. Secrets
 // never leave the vault: the result carries opaque refs only.
 func (a *PveAdmin) ListRemotes(ctx context.Context) ([]executordb.PveRemote, error) {
-	if err := a.checkDeps(); err != nil {
+	if err := a.checkDB(); err != nil {
 		return nil, err
 	}
 	return a.DB.ListRemotes()
 }
-
