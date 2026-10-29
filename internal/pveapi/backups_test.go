@@ -283,7 +283,7 @@ func TestReadBackupsVZDumpCatalog(t *testing.T) {
 func TestReadBackupsPBSVerifiedStates(t *testing.T) {
 	c, _ := newTestClient(t, jsonServer(t, map[string][]byte{
 		"/api2/json/nodes/pve1/storage/pbs1/content": loadFixture(t, "content-pbs-pve9.json"),
-		"/api2/json/cluster/backup":                   loadFixture(t, "jobs-empty.json"),
+		"/api2/json/cluster/backup":                  loadFixture(t, "jobs-empty.json"),
 	}))
 	obs, err := c.ReadBackups(context.Background(), BackupsOptions{
 		Sources: []BackupSource{{Node: "pve1", Storage: "pbs1", Type: "pbs"}},
@@ -323,7 +323,7 @@ func TestReadBackupsPBSVerifiedStates(t *testing.T) {
 func TestReadBackupsPBSWithoutVerifiedField(t *testing.T) {
 	c, _ := newTestClient(t, jsonServer(t, map[string][]byte{
 		"/api2/json/nodes/pve1/storage/pbs1/content": loadFixture(t, "content-pbs-pve8.json"),
-		"/api2/json/cluster/backup":                   loadFixture(t, "jobs-empty.json"),
+		"/api2/json/cluster/backup":                  loadFixture(t, "jobs-empty.json"),
 	}))
 	obs, err := c.ReadBackups(context.Background(), BackupsOptions{
 		Sources: []BackupSource{{Node: "pve1", Storage: "pbs1", Type: "pbs"}},
@@ -809,8 +809,8 @@ func TestReadBackupsRejectsInvalidOptions(t *testing.T) {
 			Tasks: []TaskSummary{{Node: "pve1", Type: "backup", Target: "qemu/1", VMID: 1, StartedUnix: 10, FinishedUnix: 5, ExitStatus: TaskExitOK}},
 		}},
 		{"bad pool key", BackupsOptions{
-			Scope:   ReadScope{FullContent: true},
-			Pools:   map[string]map[uint64]bool{"Bad Pool": {1: true}},
+			Scope: ReadScope{FullContent: true},
+			Pools: map[string]map[uint64]bool{"Bad Pool": {1: true}},
 		}},
 		{"oversized exit status", BackupsOptions{
 			Scope: ReadScope{FullContent: true},
