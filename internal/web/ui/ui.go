@@ -231,6 +231,7 @@ var pageFiles = map[string]string{
 	"dashboard": "dashboard.html",
 	"empty":     "empty.html",
 	"inventory": "inventory.html",
+	"chart":     "chart.html",
 	"login":     "login.html",
 	"setup":     "setup.html",
 	"settings":  "settings.html",
@@ -271,6 +272,7 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("/", h.handleRoot)
 	mux.HandleFunc("/dashboard", h.handleDashboard)
 	mux.HandleFunc("/inventory", h.handleInventory)
+	mux.HandleFunc("GET /inventory/chart", h.handleInventoryChart)
 	mux.HandleFunc("/inventory/new", h.handleInventoryNew)
 	// Host changes are JSON POSTs only (decision 36: never plain form
 	// posts). Without Options.Inventory they answer 404.
@@ -408,6 +410,8 @@ type pageData struct {
 	InventoryUnavailable bool
 	// Inventory is the table of managed hosts, in ID order.
 	Inventory []hostView
+	// Chart is the data of the inventory org chart page.
+	Chart *chartData
 	// InventoryDialogOpen shows the add-host dialog with the open
 	// attribute (the no-JavaScript form at /inventory/new, or a form
 	// error).
