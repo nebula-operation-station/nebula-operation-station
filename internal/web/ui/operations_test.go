@@ -452,7 +452,7 @@ func TestDockerInspectIsShown(t *testing.T) {
 		Hosts: []executions.Host{{HostID: "a", State: "finished", Class: "success", Result: b},
 			{HostID: "b", State: "finished", Class: "precheck_failed", Result: []byte(`{"format":"docker-inspect-v1","phase":"precheck","reason":"no such container"}`)}}}}
 	page := getBody(t, opsHandler(t, f, nil), "/operations/"+opID)
-	for _, want := range []string{"<td>full <span class=\"hint\">b46feb47000b</span></td>", "nos-test/sleeper@sha256:1c39e3d3",
+	for _, want := range []string{"<td>full <span class=\"hint\">b46feb47000b</span></td>", "nos-test/sleeper@sha256:7f2a9c4e",
 		`<span class="status--error">unhealthy</span>`, "unless-stopped; 0 restarts", "bridge (172.17.0.2)",
 		"<td>90/tcp</td><td>127.0.0.1:9090</td>", "<td>/data</td><td>bind</td><td>/tmp</td><td>read-only</td>",
 		"<td>volume nosvol</td>", "Precheck failed: no such container"} {
