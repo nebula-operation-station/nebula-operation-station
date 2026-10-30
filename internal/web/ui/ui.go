@@ -135,6 +135,13 @@ type Options struct {
 	// page ("Recovery"). Nil hides the status; an error makes the section
 	// show a plain error line (the detail goes to the log only).
 	TOTPStatus func(ctx context.Context) (*pb.GetTOTPStatusResponse, error)
+	// PVE provides the stored PVE inventory for the read-only PVE pages
+	// (ADR 0006, P1-13). Nil hides the pages and the navigation item.
+	PVE PVEStore
+	// PVERemotes returns the registry metadata (approved endpoints,
+	// trust pin, state) of the PVE remotes, for the deep links. Nil or
+	// an error renders the pages without deep links.
+	PVERemotes PVERemoteMetaFunc
 	// Log receives executor status errors (the page itself only shows
 	// "Executor unavailable"). Nil means slog.Default().
 	Log *slog.Logger
@@ -169,6 +176,8 @@ type Handler struct {
 	serverIP     func() netip.Addr
 	securityKeys func(ctx context.Context) ([]*pb.WebAuthnCredential, error)
 	totpStatus   func(ctx context.Context) (*pb.GetTOTPStatusResponse, error)
+	pve          PVEStore
+	pveRemotes   PVERemoteMetaFunc
 }
 
 // New parses the embedded templates and builds a Handler.
@@ -221,6 +230,8 @@ func New(o Options) (*Handler, error) {
 		serverIP:     serverIP,
 		securityKeys: o.SecurityKeys,
 		totpStatus:   o.TOTPStatus,
+		pve:          o.PVE,
+		pveRemotes:   o.PVERemotes,
 		log:          log,
 	}, nil
 }
@@ -256,6 +267,8 @@ var pageFiles = map[string]string{
 	"history":          "history.html",
 	"discovery":        "discovery.html",
 	"discovery_job":    "discovery_job.html",
+	"pve":              "pve.html",
+	"pve_detail":       "pve_detail.html",
 }
 
 // pagePartials are extra template files a page uses.
@@ -350,6 +363,9 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("POST /network/discovery/cancel", h.handleDiscoveryCancel)
 	mux.HandleFunc("POST /network/discovery/import", h.handleDiscoveryImport)
 	mux.HandleFunc("POST /network/discovery/schedule/delete", h.handleDiscoveryScheduleDelete)
+	// PVE remotes (ADR 0006, P1-13): read-only, stored inventory only.
+	mux.HandleFunc("GET /pve", h.handlePVEList)
+	mux.HandleFunc("GET /pve/{id}", h.handlePVEDetail)
 	mux.HandleFunc("POST /hostkeys/repin/propose", h.handleRepinPropose)
 	mux.HandleFunc("POST /hostkeys/repin/commit", h.handleRepinCommit)
 	mux.HandleFunc("GET /inventory/enroll", h.handleEnrollPage)
@@ -469,6 +485,12 @@ type pageData struct {
 	Host *hostPageData
 	// Ops is the data of the operations pages.
 	Ops *operationsData
+	// PVEList is the data of the PVE remote list page.
+	PVEList *pveListData
+	// PVEDetail is the data of a PVE remote's detail page.
+	PVEDetail *pveDetailData
+	// PVENav shows the PVE navigation item (Options.PVE is set).
+	PVENav bool
 	// InventoryEditable is true when Options.Inventory is set; the
 	// page then shows the add-host form and the per-row edit and
 	// delete controls.
@@ -627,6 +649,7 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, data pageData) 
 		data.Theme = themeFromRequest(r)
 	}
 	data.NavCollapsed = navStateFromRequest(r) == navCollapsed
+	data.PVENav = h.pve != nil
 	set, ok := h.pages[data.Content]
 	if !ok {
 		http.Error(w, "internal error: unknown page", http.StatusInternalServerError)

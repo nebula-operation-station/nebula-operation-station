@@ -32,6 +32,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/ipam"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/modules"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/runbooks"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
@@ -82,6 +83,18 @@ func pruneSessions(ctx context.Context, s *auth.Store, log *slog.Logger) {
 				log.Info("pruned expired sessions", "count", n)
 			}
 		}
+	}
+}
+
+// pveRemoteStateText renders the executor's PVE remote state for the UI.
+func pveRemoteStateText(s pb.PVERemoteState) string {
+	switch s {
+	case pb.PVERemoteState_PVE_REMOTE_STATE_ACTIVE:
+		return "active"
+	case pb.PVERemoteState_PVE_REMOTE_STATE_BLOCKED:
+		return "blocked"
+	default:
+		return "—"
 	}
 }
 
@@ -179,6 +192,40 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 
 	store := inventory.New(db)
+
+	// PVE remotes (ADR 0006, P1-13): the pages read only the inventory
+	// stored on the server; the registry metadata (approved endpoints,
+	// trust pin, state) comes from the executor's ListPVERemotes RPC.
+	pveStore := pveinventory.New(db)
+	pveRemotes := func(ctx context.Context) ([]ui.PVERemoteMeta, error) {
+		resp, err := exec.ListPVERemotes(ctx, &pb.ListPVERemotesRequest{})
+		if err != nil {
+			return nil, err
+		}
+		infos := resp.GetRemotes()
+		metas := make([]ui.PVERemoteMeta, 0, len(infos))
+		for _, info := range infos {
+			meta := ui.PVERemoteMeta{
+				RemoteID:        info.GetRemoteId(),
+				Name:            info.GetName(),
+				TrustPin:        info.GetTrustPin(),
+				TrustGeneration: info.GetTrustGeneration(),
+				State:           pveRemoteStateText(info.GetState()),
+			}
+			switch info.GetKind() {
+			case pb.PVERemoteKind_PVE_REMOTE_KIND_CLUSTER:
+				meta.Kind = "cluster"
+			case pb.PVERemoteKind_PVE_REMOTE_KIND_STANDALONE:
+				meta.Kind = "standalone"
+			}
+			for _, ep := range info.GetEndpoints() {
+				meta.Endpoints = append(meta.Endpoints, ui.PVEEndpoint{Host: ep.GetHost(), Port: int(ep.GetPort())})
+			}
+			metas = append(metas, meta)
+		}
+		return metas, nil
+	}
+
 	hostNames := func(ctx context.Context) []string {
 		hosts, err := store.List(ctx)
 		if err != nil {
@@ -309,6 +356,8 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		LastResult:   ops.LastResult,
 		Network:      ipamStore,
 		Discovery:    disc,
+		PVE:          pveStore,
+		PVERemotes:   pveRemotes,
 		Events:       exec,
 		Audit:        audit,
 		Repin:        exec,

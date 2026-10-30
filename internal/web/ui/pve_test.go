@@ -25,11 +25,11 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
+	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/middleware"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
-	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
 const pveOrigin = "https://nebula.example.org"
@@ -154,23 +154,23 @@ func TestPVEListPageShowsStoredRemotes(t *testing.T) {
 		{
 			RemoteID: "remote-fresh", Name: "Lab cluster", Kind: string(pvecontract.KindCluster),
 			Endpoints: []ui.PVEEndpoint{{Host: "pve1.lab", Port: 8006}},
-			TrustPin: pvePin(0), TrustGeneration: 1, State: "active",
+			TrustPin:  pvePin(0), TrustGeneration: 1, State: "active",
 		},
 		{
 			RemoteID: "remote-stale", Name: "Standalone one", Kind: string(pvecontract.KindStandalone),
 			Endpoints: []ui.PVEEndpoint{{Host: "192.168.0.10", Port: 8006}},
-			TrustPin: pvePin(1), TrustGeneration: 2, State: "active",
+			TrustPin:  pvePin(1), TrustGeneration: 2, State: "active",
 		},
 	})
 	seedRemote(t, e.store, pvecontract.Remote{
 		RemoteID: "remote-fresh", Name: "Lab cluster", Kind: pvecontract.KindCluster,
 		Endpoints: []pvecontract.Endpoint{{Host: "pve1.lab", Port: 8006}},
-		TrustPin: pvePin(0), TrustGeneration: 1,
+		TrustPin:  pvePin(0), TrustGeneration: 1,
 	})
 	seedRemote(t, e.store, pvecontract.Remote{
 		RemoteID: "remote-stale", Name: "Standalone one", Kind: pvecontract.KindStandalone,
 		Endpoints: []pvecontract.Endpoint{{Host: "192.168.0.10", Port: 8006}},
-		TrustPin: pvePin(1), TrustGeneration: 2,
+		TrustPin:  pvePin(1), TrustGeneration: 2,
 	})
 	fresh := newPVEObs("remote-fresh", now.Add(-time.Minute))
 	fresh.Nodes = pvecontract.AvailableDataset([]pvecontract.NodeObservation{pveNodeObs("pve1.lab", pvecontract.NodeOnline)})
@@ -209,13 +209,13 @@ func TestPVEListPageHostileNamesAreText(t *testing.T) {
 		{
 			RemoteID: "remote-a", Name: hostileName, Kind: string(pvecontract.KindStandalone),
 			Endpoints: []ui.PVEEndpoint{{Host: "pve-a", Port: 8006}},
-			TrustPin: pvePin(0), TrustGeneration: 1, State: "active",
+			TrustPin:  pvePin(0), TrustGeneration: 1, State: "active",
 		},
 	})
 	seedRemote(t, e.store, pvecontract.Remote{
 		RemoteID: "remote-a", Name: hostileName, Kind: pvecontract.KindStandalone,
 		Endpoints: []pvecontract.Endpoint{{Host: "pve-a", Port: 8006}},
-		TrustPin: pvePin(0), TrustGeneration: 1,
+		TrustPin:  pvePin(0), TrustGeneration: 1,
 	})
 	obs := newPVEObs("remote-a", now)
 	obs.Nodes = pvecontract.AvailableDataset([]pvecontract.NodeObservation{pveNodeObs("pve-a", pvecontract.NodeOnline)})
@@ -259,16 +259,16 @@ func TestPVEListPageUnapprovedOriginGetsNoLink(t *testing.T) {
 			TrustPin: pvePin(0), TrustGeneration: 1, State: "active"},
 		{RemoteID: "remote-b", Name: "Bad host", Kind: string(pvecontract.KindStandalone),
 			Endpoints: []ui.PVEEndpoint{{Host: "bad host", Port: 8006}},
-			TrustPin: pvePin(1), TrustGeneration: 1, State: "active"},
+			TrustPin:  pvePin(1), TrustGeneration: 1, State: "active"},
 		{RemoteID: "remote-c", Name: "Bad port", Kind: string(pvecontract.KindStandalone),
 			Endpoints: []ui.PVEEndpoint{{Host: "pve-c", Port: 0}},
-			TrustPin: pvePin(2), TrustGeneration: 1, State: "active"},
+			TrustPin:  pvePin(2), TrustGeneration: 1, State: "active"},
 	})
 	for _, id := range []string{"remote-a", "remote-b", "remote-c", "remote-d"} {
 		seedRemote(t, e.store, pvecontract.Remote{
 			RemoteID: id, Name: id, Kind: pvecontract.KindStandalone,
 			Endpoints: []pvecontract.Endpoint{{Host: "pve-x", Port: 8006}},
-			TrustPin: pvePin(3), TrustGeneration: 1,
+			TrustPin:  pvePin(3), TrustGeneration: 1,
 		})
 		obs := newPVEObs(id, now)
 		obs.Nodes = pvecontract.AvailableDataset([]pvecontract.NodeObservation{pveNodeObs("pve-x", pvecontract.NodeOnline)})
@@ -295,13 +295,13 @@ func TestPVEDetailPageShowsNodesAndGuests(t *testing.T) {
 		{
 			RemoteID: "remote-a", Name: "Lab cluster", Kind: string(pvecontract.KindCluster),
 			Endpoints: []ui.PVEEndpoint{{Host: "pve1.lab", Port: 8006}, {Host: "pve2.lab", Port: 8006}},
-			TrustPin: pvePin(0), TrustGeneration: 1, State: "active",
+			TrustPin:  pvePin(0), TrustGeneration: 1, State: "active",
 		},
 	})
 	seedRemote(t, e.store, pvecontract.Remote{
 		RemoteID: "remote-a", Name: "Lab cluster", Kind: pvecontract.KindCluster,
 		Endpoints: []pvecontract.Endpoint{{Host: "pve1.lab", Port: 8006}, {Host: "pve2.lab", Port: 8006}},
-		TrustPin: pvePin(0), TrustGeneration: 1,
+		TrustPin:  pvePin(0), TrustGeneration: 1,
 	})
 	obs := newPVEObs("remote-a", now)
 	// pve3.lab has no approved endpoint: it must not get a link.
@@ -342,16 +342,17 @@ func TestPVEDetailPageShowsNodesAndGuests(t *testing.T) {
 func TestPVEDetailPageStaleAndUnknownLabels(t *testing.T) {
 	now := time.Now()
 	e := newPVEEnv(t, nil)
-	for id := range map[string]time.Time{
+	obsAt := map[string]time.Time{
 		"remote-fresh": now.Add(-time.Minute),
 		"remote-stale": now.Add(-time.Hour),
-	} {
+	}
+	for id, at := range obsAt {
 		seedRemote(t, e.store, pvecontract.Remote{
 			RemoteID: id, Name: id, Kind: pvecontract.KindStandalone,
 			Endpoints: []pvecontract.Endpoint{{Host: "pve-x", Port: 8006}},
-			TrustPin: pvePin(0), TrustGeneration: 1,
+			TrustPin:  pvePin(0), TrustGeneration: 1,
 		})
-		obs := newPVEObs(id, now.Add(-time.Minute))
+		obs := newPVEObs(id, at)
 		obs.Nodes = pvecontract.AvailableDataset([]pvecontract.NodeObservation{pveNodeObs("pve-x", pvecontract.NodeOnline)})
 		seedObs(t, e.store, obs)
 	}
@@ -359,9 +360,8 @@ func TestPVEDetailPageStaleAndUnknownLabels(t *testing.T) {
 	seedRemote(t, e.store, pvecontract.Remote{
 		RemoteID: "remote-never", Name: "remote-never", Kind: pvecontract.KindStandalone,
 		Endpoints: []pvecontract.Endpoint{{Host: "pve-x", Port: 8006}},
-		TrustPin: pvePin(0), TrustGeneration: 1,
+		TrustPin:  pvePin(0), TrustGeneration: 1,
 	})
-	_ = now
 
 	code, body := e.get("/pve")
 	if code != http.StatusOK {
@@ -418,13 +418,13 @@ func TestPVEPagesHaveNoInlineScriptOrStyle(t *testing.T) {
 		{
 			RemoteID: "remote-a", Name: "Lab cluster", Kind: string(pvecontract.KindCluster),
 			Endpoints: []ui.PVEEndpoint{{Host: "pve1.lab", Port: 8006}},
-			TrustPin: pvePin(0), TrustGeneration: 1, State: "active",
+			TrustPin:  pvePin(0), TrustGeneration: 1, State: "active",
 		},
 	})
 	seedRemote(t, e.store, pvecontract.Remote{
 		RemoteID: "remote-a", Name: "Lab cluster", Kind: pvecontract.KindCluster,
 		Endpoints: []pvecontract.Endpoint{{Host: "pve1.lab", Port: 8006}},
-		TrustPin: pvePin(0), TrustGeneration: 1,
+		TrustPin:  pvePin(0), TrustGeneration: 1,
 	})
 	obs := newPVEObs("remote-a", now)
 	obs.Nodes = pvecontract.AvailableDataset([]pvecontract.NodeObservation{pveNodeObs("pve1.lab", pvecontract.NodeOnline)})
@@ -460,7 +460,7 @@ func TestPVEListPageMetaErrorStillRendersWithoutLinks(t *testing.T) {
 	seedRemote(t, e.store, pvecontract.Remote{
 		RemoteID: "remote-a", Name: "Lab cluster", Kind: pvecontract.KindCluster,
 		Endpoints: []pvecontract.Endpoint{{Host: "pve1.lab", Port: 8006}},
-		TrustPin: pvePin(0), TrustGeneration: 1,
+		TrustPin:  pvePin(0), TrustGeneration: 1,
 	})
 	obs := newPVEObs("remote-a", now)
 	obs.Nodes = pvecontract.AvailableDataset([]pvecontract.NodeObservation{pveNodeObs("pve1.lab", pvecontract.NodeOnline)})
@@ -534,7 +534,12 @@ func TestPVEPageRedirectsWhenLoggedOut(t *testing.T) {
 	srv := httptest.NewServer(middleware.Handler(middleware.Options{PublicOrigin: pveOrigin}, a.Wrap(u.Handler())))
 	defer srv.Close()
 
-	res, err := http.Get(srv.URL + "/pve")
+	// The default client would follow the 303 to /login (200); inspect
+	// the redirect itself.
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	res, err := client.Get(srv.URL + "/pve")
 	if err != nil {
 		t.Fatalf("GET /pve: %v", err)
 	}

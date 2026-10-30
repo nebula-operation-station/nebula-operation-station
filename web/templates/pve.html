@@ -1,0 +1,30 @@
+{{define "content"}}
+<section class="panel" aria-label="PVE remotes">
+  <h2>PVE remotes</h2>
+  {{if .PVEList.Unavailable}}
+  <p class="status status--error">Stored inventory unavailable</p>
+  {{else if not .PVEList.Rows}}
+  <p class="status">No PVE remotes observed yet.</p>
+  {{else}}
+  <table class="inventory">
+    <thead>
+      <tr><th>Remote</th><th>Kind</th><th>Nodes</th><th>Trust pin</th><th>State</th><th>Last observed</th><th>Source</th><th>PVE UI</th></tr>
+    </thead>
+    <tbody>
+      {{range .PVEList.Rows}}
+      <tr>
+        <td><a href="{{.DetailURL}}">{{.Name}}</a></td>
+        <td>{{.Kind}}</td>
+        <td>{{.Nodes}}</td>
+        <td class="mono">{{.PinText}}</td>
+        <td>{{.StateText}}{{if .Label}} <span class="badge badge--warning">{{.Label}}</span>{{end}}</td>
+        <td>{{timeTag .LastObservedAt}}{{if .Age}} ({{.Age}}){{end}}</td>
+        <td>{{.Source}}</td>
+        <td>{{if .Link}}<a href="{{.Link}}" target="_blank" rel="noopener noreferrer">Open</a>{{end}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{end}}
+</section>
+{{end}}

@@ -356,6 +356,13 @@ func (l *lazyExecutor) ListPVEAdminRemotes(ctx context.Context, in *pb.ListPVEAd
 	return nil, errNotConnected
 }
 
+func (l *lazyExecutor) ListPVERemotes(ctx context.Context, in *pb.ListPVERemotesRequest, opts ...grpc.CallOption) (*pb.ListPVERemotesResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ListPVERemotes(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
 func (l *lazyExecutor) ProposePVERepin(ctx context.Context, in *pb.ProposePVERepinRequest, opts ...grpc.CallOption) (*pb.ProposePVERepinResponse, error) {
 	if c := l.c.Load(); c != nil {
 		return c.ProposePVERepin(ctx, in, opts...)
