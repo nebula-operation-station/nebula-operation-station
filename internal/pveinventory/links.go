@@ -13,10 +13,19 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/servicecheck"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/ipam"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 )
+
+// boolInt renders a boolean as a 0/1 integer for SQLite.
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
 
 // Sentinel errors callers branch on.
 var (
@@ -386,6 +395,13 @@ func (s *Store) SweepVMIDReuse(ctx context.Context, remoteID string) ([]ReuseNot
 				it.vmid, remoteID, it.hostID, it.generation, it.newGeneration),
 		})
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE pve_service_placements
+ SET removed_at = ?, removed_by = 'system', remove_reason = 'guest incarnation no longer active'
+ WHERE kind = 'guest' AND remote_id = ? AND removed_at = '' AND NOT EXISTS (
+ SELECT 1 FROM pve_guests g WHERE g.remote_id = pve_service_placements.remote_id
+ AND g.vmid = pve_service_placements.vmid AND g.generation = pve_service_placements.generation AND g.tombstoned = 0)`, now, remoteID); err != nil {
+		return nil, fmt.Errorf("pveinventory: expire guest service placements: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("pveinventory: commit vmid reuse sweep: %w", err)
 	}
@@ -688,4 +704,388 @@ func scanLinkRow(row linkScanner) (Link, error) {
 		l.UnlinkedAt, _ = time.Parse(time.RFC3339, unlinkedAt)
 	}
 	return l, nil
+}
+
+// Service placement (ADR 0006, ticket P1-27): an explicit, reviewed
+// association of a service with the place where it runs. A service has at
+// most one active placement. A placement is only ever created by an
+// explicit call with an actor — no code path infers placements from
+// observed state (names, processes, Compose labels). A service without a
+// placement, or without a configured check, stays unknown.
+
+// Service placement kinds (ServicePlacement.Kind).
+const (
+	// PlacementHost: the service runs on the managed host itself.
+	PlacementHost = "host"
+	// PlacementGuest: the service runs inside a PVE guest incarnation.
+	PlacementGuest = "guest"
+	// PlacementContainer: the service runs in a Docker container on a
+	// managed host; the container identity is (host_id, full container ID).
+	PlacementContainer = "container"
+)
+
+// Limits for service placements.
+const (
+	// MaxServiceNameLen is the maximum length of a service name.
+	MaxServiceNameLen = 128
+	// MaxPlacementSourceLen is the maximum length of a placement source.
+	MaxPlacementSourceLen = 64
+	// MaxContainerIDLen is the length of a full Docker container ID.
+	MaxContainerIDLen = 64
+	// MaxPlacementQuery is the cap for ListServicePlacements results.
+	MaxPlacementQuery = 1000
+)
+
+var (
+	serviceNameRe     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	containerIDRe     = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	placementSourceRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+)
+
+// ErrServicePlaced reports that the service already has an active
+// placement.
+var ErrServicePlaced = errors.New("service already has an active placement")
+
+// ErrPlacementNotFound reports that the service has no active placement.
+var ErrPlacementNotFound = errors.New("no active service placement")
+
+// ServicePlacement is an explicit association of a service with the place
+// where it runs, plus its optional health-check configuration.
+type ServicePlacement struct {
+	// ServiceName is the service name (for example a Compose service
+	// name).
+	ServiceName string
+	// Kind is PlacementHost, PlacementGuest or PlacementContainer.
+	Kind string
+	// HostID is the managed host (host and container kinds).
+	HostID string
+	// RemoteID is the PVE remote (guest kind only).
+	RemoteID string
+	// VMID is the guest VMID (guest kind only).
+	VMID uint64
+	// Generation is the guest incarnation generation (guest kind only).
+	Generation uint64
+	// ContainerID is the full Docker container ID (container kind only).
+	ContainerID string
+	// CheckProtocol is the health-check protocol (http, https or tcp),
+	// empty when no check is configured.
+	CheckProtocol string
+	// CheckDestination is the approved destination of the check.
+	CheckDestination string
+	// CheckPort is the port of the check.
+	CheckPort int
+	// CheckInternal is true when the check destination is an approved
+	// reserved address (including resolved DNS answers).
+	CheckInternal bool
+	// Source is how the association was established (for example
+	// "manual" or "reviewed-compose").
+	Source string
+	// RecordedBy is the actor that recorded the placement.
+	RecordedBy string
+	// RecordedAt is when the placement was recorded.
+	RecordedAt time.Time
+	// RemovedAt is the tombstone time (zero while active).
+	RemovedAt time.Time
+	// RemovedBy is the actor that removed the placement.
+	RemovedBy string
+	// RemoveReason is why the placement was removed.
+	RemoveReason string
+}
+
+// CheckConfigured reports whether an HTTP/TCP health check is configured
+// for this placement. Without one, the service health stays unknown.
+func (p ServicePlacement) CheckConfigured() bool {
+	return p.CheckProtocol != "" && p.CheckDestination != "" && p.CheckPort != 0
+}
+
+const placementColumns = `service_name, kind, host_id, remote_id, vmid, generation, container_id,
+	check_protocol, check_destination, check_port, check_internal,
+	source, recorded_by, recorded_at, removed_at, removed_by, remove_reason`
+
+func scanPlacementRow(row linkScanner) (ServicePlacement, error) {
+	var p ServicePlacement
+	var recordedAt, removedAt string
+	err := row.Scan(
+		&p.ServiceName, &p.Kind, &p.HostID, &p.RemoteID, &p.VMID, &p.Generation, &p.ContainerID,
+		&p.CheckProtocol, &p.CheckDestination, &p.CheckPort, &p.CheckInternal,
+		&p.Source, &p.RecordedBy, &recordedAt, &removedAt, &p.RemovedBy, &p.RemoveReason,
+	)
+	if err != nil {
+		return ServicePlacement{}, err
+	}
+	p.RecordedAt, err = time.Parse(time.RFC3339Nano, recordedAt)
+	if err != nil {
+		return ServicePlacement{}, fmt.Errorf("pveinventory: parse placement recorded_at: %w", err)
+	}
+	if removedAt != "" {
+		t, err := time.Parse(time.RFC3339Nano, removedAt)
+		if err != nil {
+			return ServicePlacement{}, fmt.Errorf("pveinventory: parse placement removed_at %q: %w", removedAt, err)
+		}
+		p.RemovedAt = t
+	}
+	return p, nil
+}
+
+// validateServicePlacement checks the placement fields that do not need
+// the database.
+func validateServicePlacement(p ServicePlacement) error {
+	if !serviceNameRe.MatchString(p.ServiceName) {
+		return fmt.Errorf("pveinventory: set service placement: invalid service name")
+	}
+	if !placementSourceRe.MatchString(p.Source) {
+		return fmt.Errorf("pveinventory: set service placement: invalid source")
+	}
+	switch p.Kind {
+	case PlacementHost:
+		if p.HostID == "" {
+			return fmt.Errorf("pveinventory: set service placement: host placement requires host_id")
+		}
+		if p.RemoteID != "" || p.VMID != 0 || p.Generation != 0 || p.ContainerID != "" {
+			return fmt.Errorf("pveinventory: set service placement: host placement carries guest or container fields")
+		}
+	case PlacementGuest:
+		if p.RemoteID == "" || p.VMID == 0 || p.Generation == 0 {
+			return fmt.Errorf("pveinventory: set service placement: guest placement requires remote_id, vmid and generation")
+		}
+		if p.HostID != "" || p.ContainerID != "" {
+			return fmt.Errorf("pveinventory: set service placement: guest placement carries host or container fields")
+		}
+	case PlacementContainer:
+		if p.HostID == "" {
+			return fmt.Errorf("pveinventory: set service placement: container placement requires host_id")
+		}
+		if !containerIDRe.MatchString(p.ContainerID) {
+			return fmt.Errorf("pveinventory: set service placement: container placement requires the full container ID")
+		}
+		if p.RemoteID != "" || p.VMID != 0 || p.Generation != 0 {
+			return fmt.Errorf("pveinventory: set service placement: container placement carries guest fields")
+		}
+	default:
+		return fmt.Errorf("pveinventory: set service placement: unknown kind")
+	}
+	// The check configuration is all-or-nothing; a partially
+	// configured check is rejected, and a complete one is validated by
+	// the servicecheck contract (approved destination and port).
+	configured := p.CheckConfigured()
+	partial := (p.CheckProtocol != "" || p.CheckDestination != "" || p.CheckPort != 0 || p.CheckInternal) && !configured
+	if partial {
+		return fmt.Errorf("pveinventory: set service placement: check configuration must be complete or absent")
+	}
+	if configured {
+		if err := servicecheck.ValidateCheck(servicecheck.Check{
+			Protocol:         p.CheckProtocol,
+			Destination:      p.CheckDestination,
+			Port:             p.CheckPort,
+			InternalApproved: p.CheckInternal,
+		}); err != nil {
+			return fmt.Errorf("pveinventory: set service placement: %w", err)
+		}
+	}
+	return nil
+}
+
+// SetServicePlacement records an explicit service placement. It is the
+// only way a placement is created; nothing infers placements from
+// observed state. It fails with ErrServicePlaced when the service
+// already has an active placement.
+func (s *Store) SetServicePlacement(ctx context.Context, p ServicePlacement, actor string) (ServicePlacement, error) {
+	if err := validActor(actor); err != nil {
+		return ServicePlacement{}, err
+	}
+	if err := validateServicePlacement(p); err != nil {
+		return ServicePlacement{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ServicePlacement{}, fmt.Errorf("pveinventory: set service placement: %w", err)
+	}
+	defer tx.Rollback()
+
+	switch p.Kind {
+	case PlacementHost, PlacementContainer:
+		if err := requireManagedHost(ctx, tx, p.HostID); err != nil {
+			return ServicePlacement{}, err
+		}
+	case PlacementGuest:
+		if err := validateLinkIncarnation(ctx, tx, p.RemoteID, p.VMID, p.Generation); err != nil {
+			return ServicePlacement{}, err
+		}
+	}
+
+	var exists int
+	err = tx.QueryRowContext(ctx,
+		`SELECT count(*) FROM pve_service_placements WHERE service_name = ? AND removed_at = ''`,
+		p.ServiceName).Scan(&exists)
+	if err != nil {
+		return ServicePlacement{}, fmt.Errorf("pveinventory: set service placement %q: %w", p.ServiceName, err)
+	}
+	if exists > 0 {
+		return ServicePlacement{}, fmt.Errorf("pveinventory: set service placement %q: %w", p.ServiceName, ErrServicePlaced)
+	}
+
+	p.RecordedBy = actor
+	p.RecordedAt = s.now().UTC().Truncate(time.Second)
+	p.RemovedAt = time.Time{}
+	p.RemovedBy = ""
+	p.RemoveReason = ""
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO pve_service_placements (`+placementColumns+`)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '')`,
+		p.ServiceName, p.Kind, p.HostID, p.RemoteID, p.VMID, p.Generation, p.ContainerID,
+		p.CheckProtocol, p.CheckDestination, p.CheckPort, boolInt(p.CheckInternal),
+		p.Source, p.RecordedBy, s.formatTime(p.RecordedAt))
+	if err != nil {
+		return ServicePlacement{}, fmt.Errorf("pveinventory: set service placement %q: %w", p.ServiceName, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return ServicePlacement{}, fmt.Errorf("pveinventory: set service placement %q: %w", p.ServiceName, err)
+	}
+	return p, nil
+}
+
+// requireManagedHost fails with ErrManagedHostNotFound when the managed
+// host does not exist.
+func requireManagedHost(ctx context.Context, tx *sql.Tx, hostID string) error {
+	var exists int
+	err := tx.QueryRowContext(ctx, `SELECT count(*) FROM hosts WHERE name = ?`, hostID).Scan(&exists)
+	if err != nil {
+		return fmt.Errorf("pveinventory: set service placement: %w", err)
+	}
+	if exists == 0 {
+		return fmt.Errorf("pveinventory: set service placement: %w", ErrManagedHostNotFound)
+	}
+	return nil
+}
+
+// GetServicePlacement returns the active placement of a service. It
+// fails with ErrPlacementNotFound when the service has no active
+// placement, or when a guest placement points at a tombstoned
+// incarnation or a removed remote (the placement no longer applies).
+func (s *Store) GetServicePlacement(ctx context.Context, serviceName string) (ServicePlacement, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+placementColumns+` FROM pve_service_placements WHERE service_name = ? AND `+activePlacementSQL, serviceName)
+	p, err := scanPlacementRow(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ServicePlacement{}, fmt.Errorf("pveinventory: get service placement: %w", ErrPlacementNotFound)
+	}
+	if err != nil {
+		return ServicePlacement{}, fmt.Errorf("pveinventory: get service placement: %w", err)
+	}
+	return p, nil
+}
+
+// Placements cannot transfer across guest or container incarnations. Stale
+// references remain in history but never appear as currently placed services.
+const activePlacementSQL = `removed_at = '' AND (
+ (kind IN ('host', 'container') AND EXISTS (SELECT 1 FROM hosts h WHERE h.name = pve_service_placements.host_id)) OR
+ (kind = 'guest' AND EXISTS (SELECT 1 FROM pve_guests g JOIN pve_remotes r ON r.remote_id = g.remote_id
+ WHERE g.remote_id = pve_service_placements.remote_id AND g.vmid = pve_service_placements.vmid
+ AND g.generation = pve_service_placements.generation AND g.tombstoned = 0)))`
+
+// ListServicePlacements returns the active placements, ordered by
+// service name, capped at limit (or MaxPlacementQuery when limit <= 0).
+func (s *Store) ListServicePlacements(ctx context.Context, limit int) ([]ServicePlacement, error) {
+	limit, err := checkLimit(limit, MaxPlacementQuery)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT `+placementColumns+` FROM pve_service_placements WHERE `+activePlacementSQL+` ORDER BY service_name LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("pveinventory: list service placements: %w", err)
+	}
+	defer rows.Close()
+	var out []ServicePlacement
+	for rows.Next() {
+		p, err := scanPlacementRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("pveinventory: list service placements: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("pveinventory: list service placements: %w", err)
+	}
+	return out, nil
+}
+
+// RemoveServicePlacement tombstones the active placement of a service.
+// It fails with ErrPlacementNotFound when the service has no active
+// placement.
+func (s *Store) RemoveServicePlacement(ctx context.Context, serviceName, actor, reason string) (ServicePlacement, error) {
+	if err := validActor(actor); err != nil {
+		return ServicePlacement{}, err
+	}
+	if reason == "" || len(reason) > MaxUnlinkReasonLen || !utf8.ValidString(reason) {
+		return ServicePlacement{}, fmt.Errorf("pveinventory: remove service placement %q: reason required", serviceName)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ServicePlacement{}, fmt.Errorf("pveinventory: remove service placement %q: %w", serviceName, err)
+	}
+	defer tx.Rollback()
+
+	var id int64
+	err = tx.QueryRowContext(ctx,
+		`SELECT id FROM pve_service_placements WHERE service_name = ? AND removed_at = ''`,
+		serviceName).Scan(&id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ServicePlacement{}, fmt.Errorf("pveinventory: remove service placement %q: %w", serviceName, ErrPlacementNotFound)
+		}
+		return ServicePlacement{}, fmt.Errorf("pveinventory: remove service placement %q: %w", serviceName, err)
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE pve_service_placements SET removed_at = ?, removed_by = ?, remove_reason = ? WHERE id = ?`,
+		s.formatTime(s.now()), actor, reason, id)
+	if err != nil {
+		return ServicePlacement{}, fmt.Errorf("pveinventory: remove service placement %q: %w", serviceName, err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ServicePlacement{}, fmt.Errorf("pveinventory: remove service placement %q: %w", serviceName, ErrPlacementNotFound)
+	}
+	p, err := scanPlacementRow(tx.QueryRowContext(ctx, `SELECT `+placementColumns+` FROM pve_service_placements WHERE id = ?`, id))
+	if err != nil {
+		return ServicePlacement{}, fmt.Errorf("pveinventory: read removed placement: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return ServicePlacement{}, fmt.Errorf("pveinventory: remove service placement: %w", err)
+	}
+	return p, nil
+}
+
+// ServiceHealth keeps process/container runtime state separate from endpoint health.
+type ServiceHealth struct {
+	// Runtime is the independently observed process or container state.
+	Runtime BoxState
+	// Endpoint is unknown until a matching configured check has a valid result.
+	Endpoint BoxState
+	// Latency is the bounded probe duration; zero when no result applies.
+	Latency time.Duration
+	// HTTPStatus is the HTTP response code, or zero for TCP or unavailable results.
+	HTTPStatus int
+}
+
+// Health returns unknown endpoint health until a check configured for this exact
+// destination, port, protocol and approval has produced a valid result. Runtime
+// state never supplies or overrides an endpoint result.
+func (p ServicePlacement) Health(runtime BoxState, checked servicecheck.Check, result *servicecheck.Result) ServiceHealth {
+	h := ServiceHealth{Runtime: runtime, Endpoint: StateUnknown}
+	configured := servicecheck.Check{Protocol: p.CheckProtocol, Destination: p.CheckDestination, Port: p.CheckPort, InternalApproved: p.CheckInternal}
+	if !p.RemovedAt.IsZero() || !p.CheckConfigured() || configured != checked || result == nil || servicecheck.ValidateCheck(configured) != nil || servicecheck.ValidateResult(*result) != nil {
+		return h
+	}
+	if (configured.Protocol == "tcp") != (result.HTTPStatus == 0) && result.Status == servicecheck.StatusOK {
+		return h
+	}
+	if configured.Protocol == "tcp" && result.HTTPStatus != 0 {
+		return h
+	}
+	h.Latency, h.HTTPStatus = result.Latency, result.HTTPStatus
+	switch result.Status {
+	case servicecheck.StatusOK:
+		h.Endpoint = StateOK
+	case servicecheck.StatusRedirect, servicecheck.StatusHTTPError, servicecheck.StatusRefused, servicecheck.StatusUnresolved, servicecheck.StatusTimeout, servicecheck.StatusTLS:
+		h.Endpoint = StateCritical
+	}
+	return h
 }
