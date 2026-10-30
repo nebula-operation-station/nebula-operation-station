@@ -399,6 +399,8 @@ func TestDriftVersionMigrationPreservesExistingDecisions(t *testing.T) {
    (42, 'remote-a', 100, 1, 'web1', 'state', 'stopped', 'running', '2026-10-29T12:00:00Z', '', '', '');
   DROP INDEX idx_pve_backup_task_freshness;
   DROP INDEX idx_pve_backup_catalog_freshness;
+  DROP TABLE pve_metric_buckets;
+  DROP TABLE pve_metric_current;
   DELETE FROM schema_migrations WHERE version >= 22;`); err != nil {
 		t.Fatal(err)
 	}

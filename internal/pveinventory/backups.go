@@ -418,7 +418,7 @@ func (s *Store) backupDatasetStatus(ctx context.Context, remoteID string, vmid, 
 	return DatasetState(state), reason, obs, collectionGeneration, nil
 }
 
-// These range reads match migration 0023's expression indexes. Status and
+// These range reads match migration 0024's expression indexes. Status and
 // verification buckets are independent so no other channel, failed run or
 // unverified volume can crowd out a success or a verified volume. Both range
 // selection and ordering use the effective timestamp, including unfinished tasks.
