@@ -25,6 +25,9 @@ import (
 const (
 	// maxRawSize bounds the decoded size of a single response value.
 	maxRawSize = 1 << 20
+	// Document limits cover base64 fields plus bounded JSON metadata.
+	maxMetricsJSONSize     = 4*((maxRawSize+2)/3*4) + (maxReasonLen+2)/3*4 + 1024
+	maxFilesystemsJSONSize = (maxRawSize+2)/3*4 + (maxReasonLen+2)/3*4 + 1024
 	// maxMounts bounds the number of real mounts in a filesystem.list result.
 	maxMounts = 256
 	// maxMountLen bounds a mount point in bytes.
@@ -123,9 +126,9 @@ type Filesystems struct {
 	Phase string
 	// Reason is a printable precheck reason; empty on done.
 	Reason string
-	// Available reports whether the host produced a mount listing at all.
-	// It is distinct from an empty Mounts slice, which means the host has
-	// no real (non-virtual) mounts.
+	// Available reports whether the host produced a complete, valid listing.
+	// A valid listing containing only virtual filesystems is available with
+	// no Mounts. An incomplete listing retains its valid mounts.
 	Available bool
 	// Mounts holds the real filesystems, in the order the host reported them.
 	Mounts []Mount
@@ -158,6 +161,9 @@ func (f Filesystems) Fullest() (Mount, bool) {
 
 // ParseMetrics parses a host.metrics result document.
 func ParseMetrics(result []byte) (Metrics, error) {
+	if len(result) > maxMetricsJSONSize {
+		return Metrics{}, fmt.Errorf("host metrics document exceeds %d bytes", maxMetricsJSONSize)
+	}
 	var doc struct {
 		Format string `json:"format"`
 		Phase  string `json:"phase"`
@@ -207,6 +213,9 @@ func ParseMetrics(result []byte) (Metrics, error) {
 
 // ParseFilesystems parses a filesystem.list result document.
 func ParseFilesystems(result []byte) (Filesystems, error) {
+	if len(result) > maxFilesystemsJSONSize {
+		return Filesystems{}, fmt.Errorf("filesystem list document exceeds %d bytes", maxFilesystemsJSONSize)
+	}
 	var doc struct {
 		Format string `json:"format"`
 		Phase  string `json:"phase"`
@@ -232,15 +241,19 @@ func ParseFilesystems(result []byte) (Filesystems, error) {
 	if err != nil {
 		return Filesystems{}, err
 	}
-	// Available is true once the host produced any mount line, which is
-	// distinct from a list that is empty after dropping virtual filesystems.
+	// Valid exclusions count as a listing; malformed rows make it incomplete.
+	complete := true
 	for _, line := range strings.Split(mounts, "\n") {
 		if line == "" {
 			continue
 		}
 		fs.Available = true
-		m, ok := parseMountLine(line)
-		if !ok {
+		m, err := parseMountLine(line)
+		if err != nil {
+			complete = false
+			continue
+		}
+		if m.FSType == "" {
 			continue
 		}
 		if len(fs.Mounts) >= maxMounts {
@@ -248,6 +261,7 @@ func ParseFilesystems(result []byte) (Filesystems, error) {
 		}
 		fs.Mounts = append(fs.Mounts, m)
 	}
+	fs.Available = fs.Available && complete
 	return fs, nil
 }
 
@@ -332,31 +346,34 @@ func parseDisk(s string) DiskStat {
 	}
 }
 
-// parseMountLine parses one "fstype\tmount\tsize\tused" line. It returns
-// ok=false for malformed lines and for virtual kernel filesystems, which are
-// excluded by the explicit pseudoFilesystems list.
-func parseMountLine(line string) (Mount, bool) {
+// parseMountLine parses one "fstype\tmount\tsize\tused" line. A valid
+// virtual filesystem returns an empty Mount without an error; malformed rows
+// return an error so callers can distinguish exclusions from incomplete data.
+func parseMountLine(line string) (Mount, error) {
 	f := strings.Split(line, "\t")
 	if len(f) != 4 {
-		return Mount{}, false
+		return Mount{}, errors.New("filesystem row has invalid field count")
 	}
 	fstype, mount, sizeStr, usedStr := f[0], f[1], f[2], f[3]
 	if !printable(fstype, maxFSTypeLen) || !printable(mount, maxMountLen) {
-		return Mount{}, false
-	}
-	if pseudoFilesystems[fstype] {
-		return Mount{}, false
+		return Mount{}, errors.New("filesystem row has invalid type or mount")
 	}
 	size, err1 := strconv.ParseUint(sizeStr, 10, 64)
 	used, err2 := strconv.ParseUint(usedStr, 10, 64)
-	if err1 != nil || err2 != nil || size == 0 || size > maxBytes || used > size {
-		return Mount{}, false
+	if err1 != nil || err2 != nil || size > maxBytes || used > size {
+		return Mount{}, errors.New("filesystem row has invalid byte counts")
+	}
+	if pseudoFilesystems[fstype] {
+		return Mount{}, nil
+	}
+	if size == 0 {
+		return Mount{}, errors.New("filesystem row has zero size")
 	}
 	pct := 100 * float64(used) / float64(size)
 	if pct > 100 {
 		pct = 100
 	}
-	return Mount{FSType: fstype, Mount: mount, SizeBytes: size, UsedBytes: used, Percent: pct}, true
+	return Mount{FSType: fstype, Mount: mount, SizeBytes: size, UsedBytes: used, Percent: pct}, nil
 }
 
 // decodeText base64-decodes a field and validates it is UTF-8 text within
@@ -365,6 +382,9 @@ func parseMountLine(line string) (Mount, bool) {
 func decodeText(field string, limit int) (string, error) {
 	if field == "" {
 		return "", nil
+	}
+	if len(field) > base64.StdEncoding.EncodedLen(limit) {
+		return "", fmt.Errorf("host metric encoded value exceeds %d bytes", base64.StdEncoding.EncodedLen(limit))
 	}
 	raw, err := base64.StdEncoding.DecodeString(field)
 	if err != nil {

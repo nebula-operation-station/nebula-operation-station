@@ -207,6 +207,15 @@ func TestParseMetricsMalformed(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseMetrics: %v", err)
 			}
+			want := Metrics{Phase: "done"}
+			if tc.name == "cpu not a number" {
+				want.Load = LoadStat{Available: true}
+				want.Mem = MemStat{Available: true, UsedBytes: 1, TotalBytes: 2}
+				want.Disk = DiskStat{Available: true, Mount: "/", UsedBytes: 1, TotalBytes: 2, Percent: 50}
+			}
+			if m != want {
+				t.Errorf("metrics = %+v, want %+v", m, want)
+			}
 		})
 	}
 }
@@ -241,7 +250,7 @@ func TestParseFilesystemsUnavailableVsEmpty(t *testing.T) {
 	}
 
 	// Only virtual filesystems: available, but the real list is empty.
-	fs, err = ParseFilesystems(fsDoc("proc\t/proc\t0\t0\ntmpfs\t/run\t1000\t10\tsysfs\t/sys\t0\t0"))
+	fs, err = ParseFilesystems(fsDoc("proc\t/proc\t0\t0\ntmpfs\t/run\t1000\t10\nsysfs\t/sys\t0\t0"))
 	if err != nil {
 		t.Fatalf("ParseFilesystems: %v", err)
 	}
@@ -286,7 +295,7 @@ func TestParseFilesystemsMalformed(t *testing.T) {
 		{"wrong format", []byte(`{"format":"fs-list-v2","phase":"done"}`), true},
 		{"unknown phase", []byte(`{"format":"fs-list-v1","phase":"weird"}`), true},
 		{"bad base64", []byte(`{"format":"fs-list-v1","phase":"done","mounts":"!!!"}`), true},
-		// Malformed lines are dropped, not errors.
+		// Malformed lines are dropped and make the listing unavailable.
 		{"short line", fsDoc("ext4\t/\t1000"), false},
 		{"long line", fsDoc("ext4\t/\t1000\t10\textra"), false},
 		{"size zero", fsDoc("ext4\t/\t0\t10"), false},
@@ -304,6 +313,9 @@ func TestParseFilesystemsMalformed(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("ParseFilesystems: %v", err)
+			}
+			if fs.Available || len(fs.Mounts) != 0 {
+				t.Errorf("malformed listing = %+v, want unavailable and no mounts", fs)
 			}
 		})
 	}
@@ -338,5 +350,91 @@ func TestMemPercent(t *testing.T) {
 func TestFullestEmpty(t *testing.T) {
 	if _, ok := (Filesystems{}).Fullest(); ok {
 		t.Error("Fullest on empty = ok, want false")
+	}
+}
+
+func TestParsersBoundDocumentsBeforeUnmarshal(t *testing.T) {
+	// Invalid JSON makes the size error prove rejection precedes unmarshalling.
+	doc := []byte(strings.Repeat("!", 8<<20))
+	if _, err := ParseMetrics(doc); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("oversize metrics: %v, want size rejection", err)
+	}
+	if _, err := ParseFilesystems(doc); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("oversize filesystems: %v, want size rejection", err)
+	}
+}
+
+func TestDecodeTextBoundsEncodedInputBeforeDecoding(t *testing.T) {
+	for _, limit := range []int{maxReasonLen, maxRawSize} {
+		// Invalid base64 distinguishes the size guard from the decoder error.
+		field := strings.Repeat("!", base64.StdEncoding.EncodedLen(limit)+1)
+		if _, err := decodeText(field, limit); err == nil || !strings.Contains(err.Error(), "exceeds") {
+			t.Errorf("limit %d: %v, want size rejection", limit, err)
+		}
+		text := strings.Repeat("x", limit)
+		if got, err := decodeText(b64(text), limit); err != nil || got != text {
+			t.Errorf("limit %d: boundary value rejected: %v", limit, err)
+		}
+		// The encoded length alone cannot catch padding at the decoded boundary.
+		if _, err := decodeText(b64(text+"x"), limit); err == nil {
+			t.Errorf("limit %d: oversized decoded value accepted", limit)
+		}
+	}
+}
+
+func TestParseMetricsMalformedPreservesValidReadings(t *testing.T) {
+	valid := []string{"25", "1 2 3", "1 2", "/\t1\t2"}
+	want := Metrics{Phase: "done", CPU: CPUStat{Available: true, Percent: 25},
+		Load: LoadStat{Available: true, Min1: 1, Min5: 2, Min15: 3},
+		Mem:  MemStat{Available: true, UsedBytes: 1, TotalBytes: 2},
+		Disk: DiskStat{Available: true, Mount: "/", UsedBytes: 1, TotalBytes: 2, Percent: 50}}
+	for i, values := range [][]string{
+		{"abc", "NaN", "Inf", "-1", "101"},
+		{"0 0", "NaN 0 0", "0 -1 0", "0 0 1048577"},
+		{"0 0", "3 2", "-1 2", "1 4611686018427387905"},
+		{"/\t1", "/\t3\t2", "/\t-1\t2", "/\t1\t4611686018427387905"},
+	} {
+		for _, value := range values {
+			fields := append([]string(nil), valid...)
+			fields[i] = value
+			m, err := ParseMetrics(metricsDoc(fields[0], fields[1], fields[2], fields[3]))
+			if err != nil {
+				t.Fatalf("field %d value %q: %v", i, value, err)
+			}
+			expected := want
+			switch i {
+			case 0:
+				expected.CPU = CPUStat{}
+			case 1:
+				expected.Load = LoadStat{}
+			case 2:
+				expected.Mem = MemStat{}
+			case 3:
+				expected.Disk = DiskStat{}
+			}
+			if m != expected {
+				t.Errorf("field %d value %q: got %+v, want %+v", i, value, m, expected)
+			}
+		}
+	}
+}
+
+func TestParseFilesystemsMalformedRowsPreserveValidMounts(t *testing.T) {
+	for _, row := range []string{
+		"ext4\t/bad\t1000", "ext4\t/bad\t0\t0", "ext4\t/bad\t1000\t2000",
+		"ext4\t/bad\tbig\t10", "ext4\t/bad\t1000\t-1", "tmpfs\t/run\tbad\t0",
+		"tmpfs\t/run\t1000\t10\textra",
+	} {
+		fs, err := ParseFilesystems(fsDoc("ext4\t/good\t1000\t10\n" + row + "\nxfs\t/also-good\t2000\t0"))
+		if err != nil {
+			t.Fatalf("row %q: %v", row, err)
+		}
+		if fs.Available || len(fs.Mounts) != 2 {
+			t.Fatalf("row %q: %+v, want incomplete listing with two valid mounts", row, fs)
+		}
+		if fs.Mounts[0] != (Mount{FSType: "ext4", Mount: "/good", SizeBytes: 1000, UsedBytes: 10, Percent: 1}) ||
+			fs.Mounts[1] != (Mount{FSType: "xfs", Mount: "/also-good", SizeBytes: 2000}) {
+			t.Errorf("row %q: valid mounts changed: %+v", row, fs.Mounts)
+		}
 	}
 }
