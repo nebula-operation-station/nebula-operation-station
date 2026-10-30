@@ -26,12 +26,14 @@ const (
 // Container is one line of `docker ps -a`.
 type Container struct {
 	ID      string // first 12 hex digits
+	FullID  string // full 64 hex digits
 	Name    string
 	Image   string
 	State   string // created, running, paused, restarting, removing, exited, dead
 	Status  string // docker's text, e.g. "Up 3 hours (healthy)"
 	Health  string // healthy, unhealthy, starting or ""
 	Ports   string
+	Created string // creation time, RFC 3339 UTC, "" if not parseable
 	Project string // Compose project, "" for a standalone container
 	Service string // Compose service
 	Dir     string // Compose working directory
@@ -81,6 +83,7 @@ func (l List) Summary() Summary {
 
 var (
 	idRe      = regexp.MustCompile(`^[0-9a-f]{12,64}$`)
+	fullIDRe  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	nameRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.,/-]{0,254}$`)
 	projectRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,99}$`)
 	states    = map[string]bool{"created": true, "running": true, "paused": true, "restarting": true, "removing": true, "exited": true, "dead": true}
@@ -170,15 +173,21 @@ func ParseList(result []byte) (List, error) {
 		if len(l.Containers) >= maxContainers {
 			break
 		}
-		f := strings.Split(line, "\t")
-		if len(f) != 9 || !idRe.MatchString(f[0]) || !nameRe.MatchString(f[1]) || !states[f[3]] {
+		f := strings.Split(line, "	")
+		if (len(f) != 9 && len(f) != 10) || !idRe.MatchString(f[0]) || !nameRe.MatchString(f[1]) || !states[f[3]] {
 			continue
 		}
 		c := Container{ID: f[0][:12], Name: f[1], State: f[3]}
+		if fullIDRe.MatchString(f[0]) {
+			c.FullID = f[0]
+		}
 		if !printable(f[2], 300) || !printable(f[4], 200) || !printable(f[5], 1000) {
 			continue
 		}
 		c.Image, c.Status, c.Ports, c.Health = f[2], f[4], f[5], health(f[4])
+		if len(f) == 10 {
+			c.Created = createdFromList(f[9])
+		}
 		if projectRe.MatchString(f[6]) {
 			c.Project = f[6]
 			if printable(f[7], 100) {

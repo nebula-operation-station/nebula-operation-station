@@ -3,13 +3,16 @@
 package actions
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"text/template"
 )
 
 // The docker.list script asks the daemon once for the version and once for
@@ -20,7 +23,7 @@ func TestDockerListScript(t *testing.T) {
 	if !ok || !a.ReadOnly || len(a.Params) != 0 {
 		t.Fatalf("docker.list %+v", a)
 	}
-	line := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\tweb\tnginx:1.27\trunning\tUp 2 hours (healthy)\t0.0.0.0:80->80/tcp\tsite\tweb\t/srv/site"
+	line := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\tweb\tnginx:1.27\trunning\tUp 2 hours (healthy)\t0.0.0.0:80->80/tcp\tsite\tweb\t/srv/site\t2026-01-02 03:04:05 +0000 UTC"
 	docker := func(f *fakeHost, group bool) {
 		f.write(t, "docker", `echo "$@" >> "`+f.calls+`"
 [ -e "`+f.dir+`/no-daemon" ] && exit 1
@@ -45,7 +48,7 @@ case "$1" in version) echo "27.3.1" ;; ps) printf '%s\n' "`+line+`" ;; esac`)
 			t.Fatalf("%d %v", code, doc)
 		}
 		calls := f.readCalls(t)
-		if strings.Contains(calls, "sudo") || !strings.Contains(calls, "ps -a --no-trunc --format") {
+		if strings.Contains(calls, "sudo") || !strings.Contains(calls, "ps -a --no-trunc --format") || !strings.Contains(calls, "{{.CreatedAt}}") {
 			t.Fatalf("calls %q", calls)
 		}
 	})
@@ -177,7 +180,7 @@ case "$1 $2" in
   "version "*) echo 27 ;;
   "inspect --type") for x in "$@"; do last=$x; done; [ "$last" = web ] || exit 1
      case "$*" in *'{{.Image}}'*) echo sha256:abc ;; *'{{.Id}}'*) echo abc ;; *) echo '{"id":"abc"}' ;; esac ;;
-  "image inspect") echo '["repo@sha256:abc"]' ;;
+  "image inspect") echo '{"id":"sha256:abc","created":"2026-01-01T00:00:00Z","os":"linux","architecture":"amd64","variant":"","repo_digests":["repo@sha256:abc"]}' ;;
 esac`)
 	p := filepath.Join(f.dir, "params")
 	run := func(params string) (int, map[string]any) {
@@ -198,11 +201,72 @@ esac`)
 		return code, doc
 	}
 	code, doc := run(`{"container":"web"}`)
-	if code != 0 || doc["container"] != "web" || b64(t, doc, "inspect") != `{"id":"abc"}` || b64(t, doc, "digests") != "[\"repo@sha256:abc\"]\n" {
+	wantImage := `{"id":"sha256:abc","created":"2026-01-01T00:00:00Z","os":"linux","architecture":"amd64","variant":"","repo_digests":["repo@sha256:abc"]}` + "\n"
+	if code != 0 || doc["container"] != "web" || b64(t, doc, "inspect") != `{"id":"abc"}` || b64(t, doc, "image") != wantImage {
 		t.Fatalf("%d %v", code, doc)
 	}
-	if calls := f.readCalls(t); !strings.Contains(calls, "image inspect --format {{json .RepoDigests}} -- sha256:abc") {
+	if calls := f.readCalls(t); !strings.Contains(calls, "image inspect --format") || !strings.Contains(calls, "{{json .RepoDigests}}") || !strings.Contains(calls, "-- sha256:abc") {
 		t.Fatalf("calls %q", calls)
+	}
+	// Execute the actual requested templates: canned Docker output alone
+	// cannot detect a field that the script forgot to request.
+	for _, tc := range []struct {
+		name, prefix, suffix, input, want string
+	}{
+		{
+			"container creation", "inspect --type container --format {\"", " -- web",
+			`{"Id":"abc","Name":"/web","Created":"2026-01-02T03:04:05Z","Config":{"Image":"repo:tag"},"Image":"sha256:abc","State":{"Status":"running"},"RestartCount":0,"HostConfig":{"RestartPolicy":{"Name":"no"}},"Mounts":[],"NetworkSettings":{"Ports":{},"Networks":{}}}`,
+			`{"id":"abc","name":"/web","created":"2026-01-02T03:04:05Z","image":"repo:tag","image_id":"sha256:abc","state":{"Status":"running"},"restarts":0,"restart_policy":"no","mounts":[],"ports":{},"networks":{}}`,
+		},
+		{
+			"image descriptor", "image inspect --format {\"", " -- sha256:abc",
+			`{"Id":"sha256:abc","Created":"2026-01-01T00:00:00Z","Os":"linux","Architecture":"amd64","Variant":"","RepoDigests":["repo@sha256:abc"],"Descriptor":{"digest":"sha256:def","mediaType":"application/vnd.oci.image.index.v1+json","annotations":{"unrequested":"omitted"}}}`,
+			`{"id":"sha256:abc","created":"2026-01-01T00:00:00Z","os":"linux","architecture":"amd64","variant":"","repo_digests":["repo@sha256:abc"],"descriptor":{"digest":"sha256:def","mediaType":"application/vnd.oci.image.index.v1+json"}}`,
+		},
+		{
+			"legacy image without descriptor", "image inspect --format {\"", " -- sha256:abc",
+			`{"Id":"sha256:abc","Created":"2026-01-01T00:00:00Z","Os":"linux","Architecture":"amd64","Variant":"","RepoDigests":[]}`,
+			`{"id":"sha256:abc","created":"2026-01-01T00:00:00Z","os":"linux","architecture":"amd64","variant":"","repo_digests":[],"descriptor":null}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var format string
+			for line := range strings.SplitSeq(f.readCalls(t), "\n") {
+				if strings.HasPrefix(line, tc.prefix) && strings.HasSuffix(line, tc.suffix) {
+					format = strings.TrimSuffix(strings.TrimPrefix(line, strings.TrimSuffix(tc.prefix, "{\"")), tc.suffix)
+					break
+				}
+			}
+			if format == "" {
+				t.Fatal("inspect template was not requested")
+			}
+			tmpl, err := template.New("inspect").Option("missingkey=error").Funcs(template.FuncMap{
+				"json": func(v any) (string, error) {
+					b, err := json.Marshal(v)
+					return string(b), err
+				},
+			}).Parse(format)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var input, want, got map[string]any
+			if err := json.Unmarshal([]byte(tc.input), &input); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(tc.want), &want); err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			if err := tmpl.Execute(&out, input); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("requested fields = %s, want %s", out.String(), tc.want)
+			}
+		})
 	}
 	code, doc = run(`{"container":"gone"}`)
 	if code != 10 || doc["reason"] != "no such container" {
