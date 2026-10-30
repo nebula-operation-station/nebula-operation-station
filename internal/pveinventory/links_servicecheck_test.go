@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/servicecheck"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 )
 
 func TestServicePlacementExplicitLifecycle(t *testing.T) {
@@ -149,6 +150,73 @@ func TestGuestPlacementNeverFollowsVMIDReuse(t *testing.T) {
 	p.Generation = 2
 	if _, err := s.SetServicePlacement(ctx, p, "alice"); err != nil {
 		t.Fatalf("review new incarnation: %v", err)
+	}
+}
+
+func TestServicePlacementNeverFollowsHostReenrollment(t *testing.T) {
+	for _, kind := range []string{PlacementHost, PlacementContainer} {
+		t.Run(kind, func(t *testing.T) {
+			s, db, _ := newTestStore(t)
+			ctx := context.Background()
+			mustCreateHost(t, db, mkManagedHost("web1", "127.0.0.1"))
+			mustCreateHost(t, db, mkManagedHost("web2", "127.0.0.2"))
+			p := ServicePlacement{
+				ServiceName: "api", Kind: kind, HostID: "web1", Source: "manual",
+				CheckProtocol: "http", CheckDestination: "127.0.0.1", CheckPort: 8080, CheckInternal: true,
+			}
+			if kind == PlacementContainer {
+				p.ContainerID = strings.Repeat("a", 64)
+			}
+			original, err := s.SetServicePlacement(ctx, p, "alice")
+			if err != nil {
+				t.Fatal(err)
+			}
+			other := p
+			other.ServiceName, other.HostID = "other", "web2"
+			unaffected, err := s.SetServicePlacement(ctx, other, "alice")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := inventory.New(db).Delete(ctx, "web1"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.GetServicePlacement(ctx, "api"); !errors.Is(err, ErrPlacementNotFound) {
+				t.Fatalf("placement after deletion: %v", err)
+			}
+			mustCreateHost(t, db, mkManagedHost("web1", "127.0.0.3"))
+			if _, err := s.GetServicePlacement(ctx, "api"); !errors.Is(err, ErrPlacementNotFound) {
+				t.Fatalf("placement resurrected after re-enrollment: %v", err)
+			}
+			if all, err := s.ListServicePlacements(ctx, 0); err != nil || len(all) != 1 || all[0] != unaffected {
+				t.Fatalf("active placements after re-enrollment: %+v %v", all, err)
+			}
+			history, err := scanPlacementRow(db.QueryRowContext(ctx,
+				`SELECT `+placementColumns+` FROM pve_service_placements WHERE service_name = ?`, "api"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if history.RemovedAt.IsZero() || history.RemovedBy == "" || history.RemoveReason == "" {
+				t.Fatalf("missing deletion tombstone: %+v", history)
+			}
+			preserved := history
+			preserved.RemovedAt, preserved.RemovedBy, preserved.RemoveReason = time.Time{}, "", ""
+			if preserved != original {
+				t.Fatalf("placement history changed: %+v; want %+v", preserved, original)
+			}
+			p.CheckProtocol, p.CheckDestination, p.CheckPort, p.CheckInternal = "", "", 0, false
+			fresh, err := s.SetServicePlacement(ctx, p, "bob")
+			if err != nil {
+				t.Fatalf("fresh placement after re-enrollment: %v", err)
+			}
+			got, err := s.GetServicePlacement(ctx, "api")
+			if err != nil || got != fresh || got.CheckConfigured() || got.CheckInternal {
+				t.Fatalf("fresh placement inherited approval: %+v %v", got, err)
+			}
+			var n int
+			if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pve_service_placements WHERE service_name = ?`, "api").Scan(&n); err != nil || n != 2 {
+				t.Fatalf("placement history count: %d %v", n, err)
+			}
+		})
 	}
 }
 

@@ -76,3 +76,66 @@ func TestServicePlacementSchemaEnforcesOneActivePlacementAndCheckShape(t *testin
 		})
 	}
 }
+
+func TestHostDeletionTombstonesPlacementsAfterSchemaUpgrade(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "upgrade.db")
+	db := rawOpen(t, path)
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var previous []migration
+	for _, m := range migrations {
+		if m.version <= 25 {
+			previous = append(previous, m)
+		}
+	}
+	if err := migrateWith(db, previous, time.Now); err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []string{
+		`INSERT INTO hosts(name,created_at,updated_at) VALUES ('web1','2026-10-30T00:00:00Z','2026-10-30T00:00:00Z')`,
+		`INSERT INTO pve_service_placements(service_name,kind,host_id,source,recorded_by,recorded_at)
+		 VALUES ('api','host','web1','manual','alice','2026-10-30T00:00:00Z')`,
+	} {
+		if _, err := db.Exec(query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// The tombstone and host deletion must share a transaction.
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM hosts WHERE name='web1'`); err != nil {
+		t.Fatal(err)
+	}
+	var removedAt string
+	if err := tx.QueryRow(`SELECT removed_at FROM pve_service_placements WHERE service_name='api'`).Scan(&removedAt); err != nil || removedAt == "" {
+		t.Fatalf("placement not tombstoned during deletion: %q %v", removedAt, err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT removed_at FROM pve_service_placements WHERE service_name='api'`).Scan(&removedAt); err != nil || removedAt != "" {
+		t.Fatalf("rollback failed to restore placement: %q %v", removedAt, err)
+	}
+	if _, err := db.Exec(`DELETE FROM hosts WHERE name='web1'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT removed_at FROM pve_service_placements WHERE service_name='api'`).Scan(&removedAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, removedAt); err != nil {
+		t.Fatalf("invalid tombstone time %q: %v", removedAt, err)
+	}
+}
