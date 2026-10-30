@@ -4,6 +4,7 @@ package backupstatus
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -259,18 +260,18 @@ func TestClassify(t *testing.T) {
 	}{
 		{"absent", Report{Phase: "done"}, ClassUnknown},
 		{"precheck", Report{Phase: "precheck", Present: true}, ClassUnknown},
-		{"truncated", Report{Phase: "done", Present: true, Truncated: true, Jobs: []Job{{Name: "j", State: "Success", StartedAt: fresh, EndedAt: &fresh, UTC: true}}}, ClassUnknown},
+		{"truncated", Report{Phase: "done", Present: true, Truncated: true, Jobs: []Job{{Name: "j", State: "Success", StartedAt: fresh, EndedAt: &fresh, UTC: true, EndUTC: true}}}, ClassUnknown},
 		{"no jobs", Report{Phase: "done", Present: true}, ClassUnknown},
-		{"fresh success", Report{Phase: "done", Present: true, Jobs: []Job{{Name: "j", State: "Success", StartedAt: fresh, EndedAt: &fresh, UTC: true}}}, ClassOK},
-		{"stale success", Report{Phase: "done", Present: true, Jobs: []Job{{Name: "j", State: "Success", StartedAt: stale, EndedAt: &stale, UTC: true}}}, ClassWarning},
-		{"future end", Report{Phase: "done", Present: true, Jobs: []Job{{Name: "j", State: "Success", StartedAt: fresh, EndedAt: &future, UTC: true}}}, ClassWarning},
-		{"failed", Report{Phase: "done", Present: true, Jobs: []Job{{Name: "j", State: "Failed", StartedAt: fresh, EndedAt: &fresh, UTC: true}}}, ClassWarning},
+		{"fresh success", Report{Phase: "done", Present: true, Jobs: []Job{{Name: "j", State: "Success", StartedAt: fresh, EndedAt: &fresh, UTC: true, EndUTC: true}}}, ClassOK},
+		{"stale success", Report{Phase: "done", Present: true, Jobs: []Job{{Name: "j", State: "Success", StartedAt: stale, EndedAt: &stale, UTC: true, EndUTC: true}}}, ClassWarning},
+		{"future end", Report{Phase: "done", Present: true, Jobs: []Job{{Name: "j", State: "Success", StartedAt: fresh, EndedAt: &future, UTC: true, EndUTC: true}}}, ClassWarning},
+		{"failed", Report{Phase: "done", Present: true, Jobs: []Job{{Name: "j", State: "Failed", StartedAt: fresh, EndedAt: &fresh, UTC: true, EndUTC: true}}}, ClassWarning},
 		{"running", Report{Phase: "done", Present: true, Jobs: []Job{{Name: "j", State: "Running", StartedAt: fresh}}}, ClassWarning},
 		{
 			"one of two stale",
 			Report{Phase: "done", Present: true, Jobs: []Job{
-				{Name: "ok", State: "Success", StartedAt: fresh, EndedAt: &fresh, UTC: true},
-				{Name: "stale", State: "Success", StartedAt: stale, EndedAt: &stale, UTC: true},
+				{Name: "ok", State: "Success", StartedAt: fresh, EndedAt: &fresh, UTC: true, EndUTC: true},
+				{Name: "stale", State: "Success", StartedAt: stale, EndedAt: &stale, UTC: true, EndUTC: true},
 			}},
 			ClassWarning,
 		},
@@ -285,7 +286,7 @@ func TestClassify(t *testing.T) {
 func TestClassifyRespectsMaxAge(t *testing.T) {
 	now := time.Date(2025, 9, 15, 12, 0, 0, 0, time.UTC)
 	end := time.Date(2025, 9, 15, 11, 0, 0, 0, time.UTC)
-	rep := Report{Phase: "done", Present: true, Jobs: []Job{{Name: "j", State: "Success", StartedAt: end, EndedAt: &end, UTC: true}}}
+	rep := Report{Phase: "done", Present: true, Jobs: []Job{{Name: "j", State: "Success", StartedAt: end, EndedAt: &end, UTC: true, EndUTC: true}}}
 	if got := rep.Classify(now, time.Hour); got != ClassOK {
 		t.Errorf("1h maxAge: %q, want ok", got)
 	}
@@ -313,4 +314,140 @@ func parseFromDoc(t *testing.T, doc string) Report {
 		t.Fatal(err)
 	}
 	return rep
+}
+
+func sessionDocument(number int, name string) string {
+	id := fmt.Sprintf("{00000000-0000-0000-0000-%012x}", number)
+	return fmt.Sprintf("[%d] %s\nID: %s\nJob name: %s\nState: Success\nStart time: 2025-09-15 00:30:02 UTC\nEnd time: 2025-09-15 00:33:52 UTC\n", number, id, id, name)
+}
+
+func TestInvalidSessionsForceUnknownWithValidSuccess(t *testing.T) {
+	valid := sessionDocument(1, "valid job")
+	for _, tc := range []struct {
+		name string
+		old  string
+		new  string
+	}{
+		{"identity mismatch", "ID: {00000000-0000-0000-0000-000000000002}", "ID: {00000000-0000-0000-0000-000000000003}"},
+		{"invalid state", "State: Success", "State: Unexpected"},
+		{"missing start", "Start time: 2025-09-15 00:30:02 UTC\n", ""},
+		{"invalid calendar", "2025-09-15 00:30:02", "2025-02-30 00:30:02"},
+		{"duplicate state", "State: Success", "State: Success\nState: Failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rep := parseFromDoc(t, valid+strings.Replace(sessionDocument(2, "invalid job"), tc.old, tc.new, 1))
+			if len(rep.Jobs) != 1 || rep.Jobs[0].Name != "valid job" {
+				t.Fatalf("jobs = %+v, want only valid job", rep.Jobs)
+			}
+			assertIncompleteUnknown(t, rep)
+		})
+	}
+}
+
+func TestSessionTimezoneCertaintyAndOrdering(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		start    string
+		end      string
+		startUTC bool
+		endUTC   bool
+		invalid  bool
+		want     Classification
+	}{
+		{"explicit UTC", "2025-09-15 00:30:02 UTC", "2025-09-15 00:33:52 UTC", true, true, false, ClassOK},
+		{"explicit GMT and Z", "2025-09-15 00:30:02 GMT", "2025-09-15 00:33:52 Z", true, true, false, ClassOK},
+		{"unknown start timezone", "2025-09-15 00:30:02", "2025-09-15 00:33:52 UTC", false, true, false, ClassUnknown},
+		{"unknown end timezone", "2025-09-15 00:30:02 UTC", "2025-09-15 00:33:52", true, false, false, ClassUnknown},
+		{"unknown both timezones", "2025-09-15 00:30:02", "2025-09-15 00:33:52", false, false, false, ClassUnknown},
+		{"end before start", "2025-09-15 00:34:00 UTC", "2025-09-15 00:33:52 UTC", true, true, true, ClassUnknown},
+		{"equal timestamps", "2025-09-15 00:33:52 UTC", "2025-09-15 00:33:52 UTC", true, true, false, ClassOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := strings.Replace(sessionDocument(1, "job"), "2025-09-15 00:30:02 UTC", tc.start, 1)
+			doc = strings.Replace(doc, "2025-09-15 00:33:52 UTC", tc.end, 1)
+			rep := parseFromDoc(t, doc)
+			if tc.invalid {
+				if len(rep.Jobs) != 0 {
+					t.Fatalf("impossible session retained: %+v", rep.Jobs)
+				}
+				assertIncompleteUnknown(t, rep)
+			} else if len(rep.Jobs) != 1 || rep.Jobs[0].UTC != tc.startUTC || rep.Jobs[0].EndUTC != tc.endUTC {
+				t.Fatalf("timezone markers not preserved: %+v", rep.Jobs)
+			}
+			if got := rep.Classify(time.Date(2025, 9, 15, 12, 0, 0, 0, time.UTC), 24*time.Hour); got != tc.want {
+				t.Fatalf("Classify = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSessionCountLimit(t *testing.T) {
+	for _, count := range []int{maxSessions - 1, maxSessions, maxSessions + 1} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			var doc strings.Builder
+			for i := 1; i <= count; i++ {
+				// One job keeps the session limit independent of the job limit.
+				doc.WriteString(sessionDocument(i, "job"))
+			}
+			rep := parseFromDoc(t, doc.String())
+			if count > maxSessions {
+				assertIncompleteUnknown(t, rep)
+				return
+			}
+			if rep.Truncated || len(rep.Jobs) != 1 || rep.Jobs[0].Sessions != count {
+				t.Fatalf("report = %+v", rep)
+			}
+			if got := rep.Classify(time.Date(2025, 9, 15, 12, 0, 0, 0, time.UTC), 24*time.Hour); got != ClassOK {
+				t.Fatalf("Classify = %q, want ok", got)
+			}
+		})
+	}
+}
+
+func TestSessionBlockLineLimit(t *testing.T) {
+	for _, lines := range []int{maxBlockLines - 1, maxBlockLines, maxBlockLines + 1} {
+		t.Run(fmt.Sprint(lines), func(t *testing.T) {
+			doc := sessionDocument(1, "job") + strings.Repeat("Ignored: value\n", min(lines, maxBlockLines)-5)
+			if lines > maxBlockLines {
+				// The contradictory field sits just beyond the line limit.
+				doc += "State: Failed\n"
+			}
+			rep := parseFromDoc(t, doc)
+			if lines > maxBlockLines {
+				assertIncompleteUnknown(t, rep)
+				return
+			}
+			if rep.Truncated || len(rep.Jobs) != 1 {
+				t.Fatalf("report = %+v", rep)
+			}
+			if got := rep.Classify(time.Date(2025, 9, 15, 12, 0, 0, 0, time.UTC), 24*time.Hour); got != ClassOK {
+				t.Fatalf("Classify = %q, want ok", got)
+			}
+		})
+	}
+}
+
+func TestMalformedUTF8JobNamesAreRejected(t *testing.T) {
+	for _, name := range []string{"bad\xffname", "bad\xc0\xafname", "bad\xe2\x82", "bad\xed\xa0\x80name"} {
+		t.Run(fmt.Sprintf("%x", name), func(t *testing.T) {
+			rep := parseFromDoc(t, sessionDocument(1, "valid job")+sessionDocument(2, name))
+			if len(rep.Jobs) != 1 || rep.Jobs[0].Name != "valid job" {
+				t.Fatalf("malformed name retained: %+v", rep.Jobs)
+			}
+			assertIncompleteUnknown(t, rep)
+		})
+	}
+	if rep := parseFromDoc(t, sessionDocument(1, "valid \ufffd name")); len(rep.Jobs) != 1 || rep.Truncated {
+		t.Fatalf("valid replacement rune rejected: %+v", rep)
+	}
+}
+
+func assertIncompleteUnknown(t *testing.T, rep Report) {
+	t.Helper()
+	if !rep.Truncated {
+		t.Error("incomplete evidence was not marked")
+	}
+	if got := rep.Classify(time.Date(2025, 9, 15, 12, 0, 0, 0, time.UTC), 24*time.Hour); got != ClassUnknown {
+		t.Errorf("Classify = %q, want unknown", got)
+	}
 }

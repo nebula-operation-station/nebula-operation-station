@@ -61,7 +61,8 @@ type Job struct {
 	State     string     // allowlisted state of the latest session
 	StartedAt time.Time  // start time; UTC location, wall clock as reported
 	EndedAt   *time.Time // nil while the session is still running
-	UTC       bool       // the source explicitly said UTC (not a guess)
+	UTC       bool       // start time explicitly said UTC (not a guess)
+	EndUTC    bool       // end time explicitly said UTC (not a guess)
 	Sessions  int        // sessions observed for this job
 }
 
@@ -93,6 +94,11 @@ const (
 func (r Report) Classify(now time.Time, maxAge time.Duration) Classification {
 	if r.Phase == "precheck" || !r.Present || r.Truncated || len(r.Jobs) == 0 {
 		return ClassUnknown
+	}
+	for _, j := range r.Jobs {
+		if j.State == "Success" && (!j.UTC || !j.EndUTC || (j.EndedAt != nil && j.EndedAt.Before(j.StartedAt))) {
+			return ClassUnknown
+		}
 	}
 	for _, j := range r.Jobs {
 		if j.State != "Success" || j.EndedAt == nil || now.Before(*j.EndedAt) || now.Sub(*j.EndedAt) > maxAge {
@@ -142,7 +148,9 @@ func Parse(result []byte) (Report, error) {
 	if !ok {
 		return Report{}, ErrFormat
 	}
-	rep.Jobs = parseSessions(text)
+	var incomplete bool
+	rep.Jobs, incomplete = parseSessions(text)
+	rep.Truncated = rep.Truncated || incomplete
 	return rep, nil
 }
 
@@ -153,56 +161,65 @@ type session struct {
 	start    time.Time
 	startUTC bool
 	end      time.Time
+	endUTC   bool
 	ended    bool
 }
 
 // parseSessions reads the session document: one "[N] {id}" block per
 // session, each block the key/value lines of
 // `veeamconfig session info --id {id}`. A block that violates the
-// strict schema is dropped; per job the session with the latest start
-// time wins. A broken header sequence makes the whole document
-// hostile: no evidence is taken from it.
-func parseSessions(text string) []Job {
+// strict schema is dropped and marks the evidence incomplete. Per job,
+// the session with the latest start time wins. A broken header sequence
+// makes the whole document hostile: no evidence is taken from it.
+func parseSessions(text string) ([]Job, bool) {
 	var (
-		jobs  = map[string]*Job{}
-		order []string
-		seq   int
-		curID string
-		cur   []string
+		jobs       = map[string]*Job{}
+		order      []string
+		seq        int
+		curID      string
+		cur        []string
+		overflow   bool
+		incomplete bool
 	)
 	flush := func() {
 		if curID != "" {
-			if s, ok := parseSessionBlock(curID, cur); ok {
+			if s, ok := parseSessionBlock(curID, cur); ok && !overflow {
 				addSession(jobs, &order, s)
+			} else {
+				incomplete = true
 			}
 		}
-		curID, cur = "", nil
+		curID, cur, overflow = "", nil, false
 	}
-	for _, line := range strings.Split(text, "\n") {
+	for _, line := range strings.Split(strings.TrimSuffix(text, "\n"), "\n") {
 		line = strings.TrimRight(line, "\r")
 		if m := blockHeaderRe.FindStringSubmatch(line); m != nil {
 			flush()
 			seq++
 			n, _ := strconv.Atoi(m[1])
-			if n != seq {
-				return nil // corrupted or hostile document
+			if n != seq || seq > maxSessions {
+				return nil, true // corrupted or hostile document
 			}
 			curID = "{" + m[2] + "}"
 			continue
 		}
-		if curID != "" && len(cur) < maxBlockLines {
-			cur = append(cur, line)
+		if curID != "" {
+			if len(cur) < maxBlockLines {
+				cur = append(cur, line)
+			} else {
+				overflow = true
+			}
 		}
 	}
 	flush()
 	if len(jobs) > maxJobs {
-		return nil
+		return nil, true
 	}
 	out := make([]Job, 0, len(order))
 	for _, name := range order {
 		out = append(out, *jobs[name])
 	}
-	return out
+	return out, incomplete
 }
 
 // parseSessionBlock reads one session block against the strict schema.
@@ -260,16 +277,16 @@ func parseSessionBlock(headerID string, lines []string) (session, bool) {
 			if s.ended {
 				return session{}, false
 			}
-			tt, _, ok := parseTime(value)
+			tt, u, ok := parseTime(value)
 			if !ok {
 				return session{}, false
 			}
-			s.end, s.ended = tt, true
+			s.end, s.endUTC, s.ended = tt, u, true
 		default:
 			// Unknown key: dropped.
 		}
 	}
-	if !haveID || !haveName || !haveState || !haveStart {
+	if !haveID || !haveName || !haveState || !haveStart || (s.ended && s.end.Before(s.start)) {
 		return session{}, false
 	}
 	return s, true
@@ -291,6 +308,7 @@ func addSession(jobs map[string]*Job, order *[]string, s session) {
 	j.State = s.state
 	j.StartedAt = s.start
 	j.UTC = s.startUTC
+	j.EndUTC = s.endUTC
 	if s.ended {
 		e := s.end
 		j.EndedAt = &e
@@ -338,11 +356,11 @@ func decode(in string) (string, bool) {
 
 // printable reports whether s is printable text within maxLen.
 func printable(s string, maxLen int) bool {
-	if len(s) > maxLen {
+	if len(s) > maxLen || !utf8.ValidString(s) {
 		return false
 	}
 	for _, r := range s {
-		if r < 0x20 || r == 0x7f || !utf8.ValidRune(r) {
+		if r < 0x20 || r == 0x7f {
 			return false
 		}
 	}

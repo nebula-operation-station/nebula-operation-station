@@ -141,3 +141,29 @@ esac`)
 		}
 	})
 }
+
+func TestBackupStatusEmitsOnlyApprovedMetadata(t *testing.T) {
+	a, ok := Lookup("backup.status")
+	if !ok {
+		t.Fatal("backup.status missing")
+	}
+	f := newFakeHost(t, "1")
+	f.write(t, "veeamconfig", `case "$1 $2" in
+"session list")
+	printf '%s\n' '`+backupList+`' ;;
+"session info")
+	printf '%s\n' 'ID: {11111111-2222-3333-4444-555555555555}' 'Job name: system backup' 'State: Success' 'Start time: 2025-09-15 00:30:02 UTC' 'End time: 2025-09-15 00:33:52 UTC' 'Job ID: unapproved-job-id' 'Log path: unapproved-path' 'Diagnostic output' ' State: unapproved-indented-field'
+	printf '%s\n' 'stderr diagnostic' 'Job name: stderr-metadata' >&2 ;;
+esac`)
+	code, doc := f.run(t, a.Script)
+	if code != 0 || doc["phase"] != "done" || doc["present"] != true {
+		t.Fatalf("%d %v", code, doc)
+	}
+	want := "[1] {11111111-2222-3333-4444-555555555555}\n" +
+		"ID: {11111111-2222-3333-4444-555555555555}\n" +
+		"Job name: system backup\nState: Success\n" +
+		"Start time: 2025-09-15 00:30:02 UTC\nEnd time: 2025-09-15 00:33:52 UTC\n\n"
+	if got := b64(t, doc, "sessions"); got != want {
+		t.Fatalf("sessions = %q, want only approved stdout metadata %q", got, want)
+	}
+}

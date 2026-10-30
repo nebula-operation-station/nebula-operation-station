@@ -21,12 +21,21 @@ max_sessions=32
 max_session_bytes=8192
 max_total_bytes=524288
 guid_re='\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}'
-# query runs one fixed command with a bounded capture and a 3-digit
-# exit-status trailer. It prints the decoded text and the status as the
+# query takes a diagnostic-capture flag and runs one fixed command
+# with a bounded capture and a 3-digit exit-status trailer. It prints the decoded text and the status as the
 # last line (??? when the capture exceeded the byte limit); the caller
 # splits them off again.
 query() {
-	cap=$({ "$@" 2>&1; printf '\n%03d' "$?"; } | head -c "$((max_output_bytes + 5))" | b64)
+	capture_diagnostics=$1
+	shift
+	cap=$({
+		if [ "$capture_diagnostics" = 1 ]; then
+			"$@" 2>&1
+		else
+			"$@" 2>/dev/null
+		fi
+		printf '\n%03d' "$?"
+	} | head -c "$((max_output_bytes + 5))" | b64)
 	captured_bytes=$((${#cap} / 4 * 3))
 	case "$cap" in
 	*==) captured_bytes=$((captured_bytes - 2)) ;;
@@ -44,7 +53,7 @@ query() {
 	printf '%s\n%s' "$cap" "$status"
 }
 # 1) the session list: the session identities, nothing else is used.
-res=$(query veeamconfig session list)
+res=$(query 1 veeamconfig session list)
 status=${res##*'
 '}
 list_out=${res%????}
@@ -75,7 +84,7 @@ total=0
 count=0
 for id in $ids; do
 	count=$((count + 1))
-	res=$(query veeamconfig session info --id "$id")
+	res=$(query 0 veeamconfig session info --id "$id")
 	status=${res##*'
 '}
 	info=${res%????}
@@ -88,6 +97,9 @@ for id in $ids; do
 		truncated=1
 		continue
 	fi
+	# Only approved metadata from stdout enters the result. Diagnostics
+	# and other fields are discarded before constructing session blocks.
+	info=$(printf '%s\n' "$info" | LC_ALL=C grep -aE '^(ID|Job name|State|Start time|End time):')
 	block="[${count}] ${id}
 ${info}
 "
