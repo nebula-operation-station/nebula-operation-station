@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -22,11 +23,13 @@ var ErrPCIFormat = errors.New("gpuhost: not a pci.inventory result")
 var ErrGPUFormat = errors.New("gpuhost: not a gpu.status result")
 
 const (
-	maxRawSize   = 1 << 20 // 1 MiB decoded
-	maxDevices   = 512     // PCI devices per host
-	maxGPUs      = 64      // GPUs per host
-	maxNameLen   = 100     // a device or GPU name
-	maxReasonLen = 300     // a precheck reason
+	maxDocumentSize = 2 << 20                  // 2 MiB JSON, checked before unmarshalling
+	maxEncodedSize  = (maxRawSize + 2) / 3 * 4 // base64, checked before decoding
+	maxRawSize      = 1 << 20                  // 1 MiB decoded
+	maxDevices      = 512                      // PCI devices per host
+	maxGPUs         = 64                       // GPUs per host
+	maxNameLen      = 100                      // a device or GPU name
+	maxReasonLen    = 300                      // a precheck reason
 
 	maxIndex     = 255     // nvidia-smi GPU index
 	maxUtil      = 100     // percent
@@ -119,6 +122,9 @@ func printable(s string, limit int) bool {
 }
 
 func decode(s string) (string, bool) {
+	if len(s) > maxEncodedSize {
+		return "", false
+	}
 	b, err := base64.StdEncoding.DecodeString(s)
 	if err != nil || len(b) > maxRawSize || !utf8.Valid(b) {
 		return "", false
@@ -158,7 +164,7 @@ func floatMetric(s string, hi float64) (v float64, avail, valid bool) {
 		return 0, false, true
 	}
 	f, err := strconv.ParseFloat(s, 64)
-	if err != nil || f < 0 || f > hi {
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < 0 || f > hi {
 		return 0, false, false
 	}
 	return f, true, true
@@ -167,6 +173,9 @@ func floatMetric(s string, hi float64) (v float64, avail, valid bool) {
 // ParsePCIInventory reads a pci.inventory result. Lines that are not an
 // NVIDIA display or 3D controller are left out.
 func ParsePCIInventory(result []byte) (PCIInventory, error) {
+	if len(result) > maxDocumentSize {
+		return PCIInventory{}, ErrPCIFormat
+	}
 	var doc struct {
 		Format  string `json:"format"`
 		Phase   string `json:"phase"`
@@ -174,7 +183,7 @@ func ParsePCIInventory(result []byte) (PCIInventory, error) {
 		Present bool   `json:"present"`
 		Devices string `json:"devices"`
 	}
-	if json.Unmarshal(result, &doc) != nil || doc.Format != "pci-inventory-v1" || (doc.Phase != "done" && doc.Phase != "precheck") {
+	if json.Unmarshal(result, &doc) != nil || doc.Format != "pci-inventory-v1" || len(doc.Devices) > maxEncodedSize || (doc.Phase != "done" && doc.Phase != "precheck") {
 		return PCIInventory{}, ErrPCIFormat
 	}
 	inv := PCIInventory{Phase: doc.Phase, Present: doc.Present}
@@ -260,6 +269,9 @@ func parseGPULine(f []string) (GPU, bool) {
 // ParseGPUStatus reads a gpu.status result. Lines that do not fit the
 // fixed 9-field schema are left out.
 func ParseGPUStatus(result []byte) (GPUStatus, error) {
+	if len(result) > maxDocumentSize {
+		return GPUStatus{}, ErrGPUFormat
+	}
 	var doc struct {
 		Format  string `json:"format"`
 		Phase   string `json:"phase"`
@@ -267,7 +279,7 @@ func ParseGPUStatus(result []byte) (GPUStatus, error) {
 		Present bool   `json:"present"`
 		GPUs    string `json:"gpus"`
 	}
-	if json.Unmarshal(result, &doc) != nil || doc.Format != "gpu-status-v1" || (doc.Phase != "done" && doc.Phase != "precheck") {
+	if json.Unmarshal(result, &doc) != nil || doc.Format != "gpu-status-v1" || len(doc.GPUs) > maxEncodedSize || (doc.Phase != "done" && doc.Phase != "precheck") {
 		return GPUStatus{}, ErrGPUFormat
 	}
 	st := GPUStatus{Phase: doc.Phase, Present: doc.Present}

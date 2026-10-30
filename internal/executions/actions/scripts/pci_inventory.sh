@@ -9,13 +9,35 @@ if ! command -v lspci >/dev/null 2>&1; then
 	printf '{"format":"pci-inventory-v1","phase":"done","present":false}\n'
 	exit 0
 fi
-out=$(lspci -mm -nn -D 2>/dev/null) || pre "lspci failed"
-# lspci -mm quotes every field; unquote to slot, class, vendor, device.
+# Bound the stream before shell capture, with one overflow byte and a
+# four-byte exit-status trailer. Base64 preserves NULs and trailing newlines
+# until after the byte count is checked.
+max_output_bytes=1048576
+out=$({ lspci -mm -nn -D 2>/dev/null; printf '\n%03d' "$?"; } | head -c "$((max_output_bytes + 5))" | b64)
+captured_bytes=$((${#out} / 4 * 3))
+case "$out" in
+*==) captured_bytes=$((captured_bytes - 2)) ;;
+*=) captured_bytes=$((captured_bytes - 1)) ;;
+esac
+[ "$captured_bytes" -le "$((max_output_bytes + 4))" ] || pre "command output exceeds byte limit"
+# The sentinel preserves newlines while decoding the bounded capture.
+out=$(printf '%s' "$out" | base64 -d; printf '.')
+out=${out%.}
+status=${out##*'
+'}
+out=${out%????}
+[ "$status" = 000 ] || pre "lspci failed"
+# lspci -mm -nn -D has an unquoted slot followed by quoted fields.
+# Normalize numeric class suffixes to the parser's class names.
 # Only NVIDIA display and 3D controllers pass; the parser re-checks the
 # schema of every line.
 out=$(printf '%s\n' "$out" | awk '
-  $4 ~ /^(3D controller|VGA compatible controller)$/ && ($6 ~ /^NVIDIA/ || $6 ~ /\[10de\]/) {
-    print $2 "\t" $4 "\t" $6 "\t" $8
+  $2 ~ /^(3D controller \[0302\]|VGA compatible controller \[0300\])$/ && ($4 ~ /^NVIDIA/ || $4 ~ /\[10de\]/) {
+    slot = $1
+    sub(/[[:space:]]+$/, "", slot)
+    class = $2
+    sub(/ \[[0-9a-f]+\]$/, "", class)
+    print slot "\t" class "\t" $4 "\t" $6
   }' FS='"' | head -n 512)
 out=$(printf '%s\n' "$out" | b64)
 printf '{"format":"pci-inventory-v1","phase":"done","present":true,"devices":"%s"}\n' "$out"

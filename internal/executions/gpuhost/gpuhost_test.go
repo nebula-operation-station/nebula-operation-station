@@ -4,6 +4,7 @@ package gpuhost
 
 import (
 	"encoding/base64"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -238,5 +239,60 @@ func TestParsePCIInventoryOtherResults(t *testing.T) {
 		if _, err := ParsePCIInventory([]byte(bad)); err == nil {
 			t.Errorf("%s accepted", bad)
 		}
+	}
+}
+
+func TestParsersRejectOversizedDocumentsAndPayloads(t *testing.T) {
+	const rawLimit = 1 << 20
+	const documentLimit = 2 << 20
+	for _, tc := range []struct {
+		name, format, field string
+		parse               func([]byte) error
+		want                error
+	}{
+		{"PCI", "pci-inventory-v1", "devices", func(b []byte) error { _, err := ParsePCIInventory(b); return err }, ErrPCIFormat},
+		{"GPU", "gpu-status-v1", "gpus", func(b []byte) error { _, err := ParseGPUStatus(b); return err }, ErrGPUFormat},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prefix := `{"format":"` + tc.format + `","phase":"done","present":true,"` + tc.field + `":"`
+			small := prefix + `"}`
+			for name, doc := range map[string]string{
+				"document":        small + strings.Repeat(" ", documentLimit+1-len(small)),
+				"encoded payload": prefix + enc(strings.Repeat("x", rawLimit)) + `\n` + `"}`,
+				"decoded payload": prefix + enc(strings.Repeat("x", rawLimit+1)) + `"}`,
+			} {
+				t.Run(name, func(t *testing.T) {
+					if err := tc.parse([]byte(doc)); !errors.Is(err, tc.want) {
+						t.Fatalf("got %v, want %v", err, tc.want)
+					}
+				})
+			}
+			// Newlines are ignored by base64 decoding, so an encoded limit is
+			// necessary even when the decoded payload is within its limit.
+			for _, phase := range []string{"done", "precheck"} {
+				doc := `{"format":"` + tc.format + `","phase":"` + phase + `","present":false,"` + tc.field + `":"` + enc(strings.Repeat("x", rawLimit)) + `\n` + `"}`
+				if err := tc.parse([]byte(doc)); !errors.Is(err, tc.want) {
+					t.Errorf("%s oversized payload: %v", phase, err)
+				}
+			}
+			if err := tc.parse([]byte(prefix + enc(strings.Repeat("x", rawLimit)) + `"}`)); err != nil {
+				t.Fatalf("payload at limit rejected: %v", err)
+			}
+			if err := tc.parse([]byte(small + strings.Repeat(" ", documentLimit-len(small)))); err != nil {
+				t.Fatalf("document at limit rejected: %v", err)
+			}
+		})
+	}
+}
+
+func TestParseGPURejectsNonfinitePower(t *testing.T) {
+	for _, power := range []string{"NaN", "nan", "+Inf", "-Inf", "Infinity"} {
+		t.Run(power, func(t *testing.T) {
+			line := "0, GPU-673e42ea-5685-7487-4d7e-045c914a4d51, 00000000:65:00.0, NVIDIA RTX A6000, 12, 34567, 49140, 45, " + power
+			st, err := ParseGPUStatus(gpuDoc(line))
+			if err != nil || len(st.GPUs) != 0 {
+				t.Fatalf("nonfinite power accepted: %+v %v", st, err)
+			}
+		})
 	}
 }
