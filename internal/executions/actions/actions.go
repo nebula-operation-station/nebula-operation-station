@@ -146,6 +146,12 @@ func (a Action) SHA256() string {
 //go:embed scripts/core_facts.sh
 var coreFacts []byte
 
+//go:embed scripts/host_metrics.sh
+var hostMetrics []byte
+
+//go:embed scripts/fs_list.sh
+var fsList []byte
+
 //go:embed scripts/package_list_updates.sh
 var packageListUpdates []byte
 
@@ -210,6 +216,16 @@ var Builtin = []Action{
 		ID: "core.facts", Version: "1.0.0", Title: "Collect facts",
 		Description: "Reads /etc/os-release, kernel, hostname, uptime and whether the host is a Proxmox VE node. Read-only.",
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 30 * time.Second, ReadOnly: true, Script: coreFacts, Retry: RetrySafe,
+	},
+	{
+		ID: "host.metrics", Version: "1.0.0", Title: "Host metrics",
+		Description: "CPU usage over a short sample, load averages, RAM used/total and the fullest real filesystem. Read-only.",
+		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 30 * time.Second, ReadOnly: true, Script: hostMetrics, Retry: RetrySafe,
+	},
+	{
+		ID: "filesystem.list", Version: "1.0.0", Title: "List filesystems",
+		Description: "All real mounts with filesystem type, size and used bytes; virtual filesystems (proc, sysfs, tmpfs, ...) are excluded by an explicit list. Read-only.",
+		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 30 * time.Second, ReadOnly: true, Script: fsList, Retry: RetrySafe,
 	},
 	{
 		ID: "package.list_updates", Version: "1.0.0", Title: "Check updates",
