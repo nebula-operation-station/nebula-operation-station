@@ -69,6 +69,9 @@ type Service struct {
 	// reconciliation leaves them alone (after a restart the set is empty).
 	dispatchMu  sync.Mutex
 	dispatching map[string]bool
+	// readSlots bounds reads across callers and grants, including SSH setup.
+	readSlotsOnce sync.Once
+	readSlots     chan struct{}
 	// eventKey verifies the signed event chain (M10-1).
 	eventKey ed25519.PublicKey
 	// dataDir and keysDir are read by BackupExecutor (M10-2).

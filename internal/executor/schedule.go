@@ -135,6 +135,11 @@ func (s *Service) RunRead(ctx context.Context, trigger string, req *pb.RunSchedu
 	if timeout > hostrun.MaxTimeout {
 		return nil, status.Errorf(codes.InvalidArgument, "timeout above %s", hostrun.MaxTimeout)
 	}
+	release, err := s.admitRead()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	// prepareRun wants a digest; a scheduled run is named by the grant.
 	probe := &pb.AuthorizeRunRequest{ExecutionDigest: zeroDigest, HostId: r.GetHostId(), CredentialRef: r.GetCredentialRef()}
 	_, eps, err := s.prepareRun(probe, req.GetEndpoints())
@@ -224,6 +229,20 @@ func (s *Service) RunRead(ctx context.Context, trigger string, req *pb.RunSchedu
 	resp.DurationMs = time.Since(start).Milliseconds()
 	s.auditScheduled(label, id, r.GetHostId(), resp)
 	return &pb.RunScheduledResponse{ExecutionId: id, Result: resp}, nil
+}
+
+// maxConcurrentReads is an executor-wide ceiling, never multiplied by grants
+// or callers. Excess requests are denied before reserving or opening SSH.
+const maxConcurrentReads = 4
+
+func (s *Service) admitRead() (func(), error) {
+	s.readSlotsOnce.Do(func() { s.readSlots = make(chan struct{}, maxConcurrentReads) })
+	select {
+	case s.readSlots <- struct{}{}:
+		return func() { <-s.readSlots }, nil
+	default:
+		return nil, status.Error(codes.ResourceExhausted, "read concurrency limit reached")
+	}
 }
 
 func closeReadConnectionOnCancel(ctx context.Context, c io.Closer) func() {

@@ -57,9 +57,9 @@ const (
 	DefaultRunBudget = 24
 	// MaxRunBudget bounds the per-target rolling-hour run budget.
 	MaxRunBudget = 240
-	// GlobalRunBudget is the executor-wide per-target rolling-hour ceiling
-	// shared by every read grant and legacy schedule grant. Overlapping
-	// grants cannot multiply it.
+	// GlobalRunBudget is the ordinary/legacy per-target rolling-hour ceiling.
+	// All profiles share spent counters; only separately approved telemetry
+	// grants can use the higher schedgrant.MaxTelemetryRunBudget ceiling.
 	GlobalRunBudget = MaxRunBudget
 	// RollingHour is the budget window.
 	RollingHour = time.Hour
@@ -75,8 +75,9 @@ var readCredentialRefRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 
 var readGrantIssuerRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
-// ReadOnlyAllowlist is the approved read-only action contract (ADR 0007):
-// the only actions a read grant may cover. Effective LOW alone is not
+// ReadOnlyAllowlist is the original ordinary read-only contract (ADR 0007).
+// InReadOnlyAllowlist also includes the reviewed SSH telemetry actions.
+// Effective LOW alone is not
 // sufficient; e.g. package.refresh, docker.logs and secret-bearing actions
 // are excluded even when the executor rates them LOW.
 var ReadOnlyAllowlist = []string{
@@ -92,6 +93,9 @@ var ReadOnlyAllowlist = []string{
 // InReadOnlyAllowlist reports whether actionID is part of the approved
 // read-only action contract.
 func InReadOnlyAllowlist(actionID string) bool {
+	if schedgrant.IsTelemetryAction(actionID) {
+		return true
+	}
 	for _, id := range ReadOnlyAllowlist {
 		if id == actionID {
 			return true
@@ -127,7 +131,7 @@ type ReadGrantDoc struct {
 	Targets      []canonical.Target `json:"targets"`
 	MinIntervalS int64              `json:"min_interval_s"`
 	RunBudget    int64              `json:"run_budget"`
-	// RateProfile selects the approved ordinary-read rate policy in v2.
+	// RateProfile selects the approved ordinary or telemetry rate policy in v2.
 	RateProfile string `json:"rate_profile,omitempty"`
 	// Credentials binds every frozen target to its exact SSH credential.
 	Credentials []ReadGrantCredential `json:"credentials,omitempty"`
@@ -227,11 +231,15 @@ func parseReadGrant(raw []byte, now time.Time, stored bool) (ReadGrantDoc, []byt
 	if len(d.Targets) == 0 || len(d.Targets) > MaxReadGrantTargets {
 		return fail("a grant has 1 to %d targets", MaxReadGrantTargets)
 	}
+	minInterval, maxBudget := schedgrant.MinInterval, MaxRunBudget
+	if d.Grant == ReadGrantFormat && d.RateProfile == schedgrant.TelemetryReadProfile {
+		minInterval, maxBudget = schedgrant.TelemetryLiveInterval, schedgrant.MaxTelemetryRunBudget
+	}
 	switch {
-	case d.MinIntervalS < int64(schedgrant.MinInterval/time.Second) || d.MinIntervalS > int64(schedgrant.MaxInterval/time.Second): // no overflowing multiply
-		return fail("min_interval_s must be %d to %d", int64(schedgrant.MinInterval/time.Second), int64(schedgrant.MaxInterval/time.Second))
-	case d.RunBudget < 1 || d.RunBudget > MaxRunBudget:
-		return fail("run_budget must be 1 to %d", MaxRunBudget)
+	case d.MinIntervalS < int64(minInterval/time.Second) || d.MinIntervalS > int64(schedgrant.MaxInterval/time.Second): // no overflowing multiply
+		return fail("min_interval_s must be %d to %d", int64(minInterval/time.Second), int64(schedgrant.MaxInterval/time.Second))
+	case d.RunBudget < 1 || d.RunBudget > int64(maxBudget):
+		return fail("run_budget must be 1 to %d", maxBudget)
 	}
 	seen := map[string]bool{}
 	for _, a := range d.Actions {
@@ -242,6 +250,8 @@ func parseReadGrant(raw []byte, now time.Time, stored bool) (ReadGrantDoc, []byt
 			return fail("action %s: hashes must be 64 lowercase hex characters", a.ActionID)
 		case !InReadOnlyAllowlist(a.ActionID):
 			return fail("action %s is not in the approved read-only contract", a.ActionID)
+		case d.RateProfile == schedgrant.TelemetryReadProfile && !schedgrant.IsTelemetryAction(a.ActionID):
+			return fail("action %s is not in the approved telemetry contract", a.ActionID)
 		case seen["a:"+a.ActionID+"@"+a.ModuleVersion]:
 			return fail("action %s@%s listed twice", a.ActionID, a.ModuleVersion)
 		}
@@ -257,8 +267,8 @@ func parseReadGrant(raw []byte, now time.Time, stored bool) (ReadGrantDoc, []byt
 		seen["t:"+t.HostID] = true
 	}
 	if d.Grant == ReadGrantFormat {
-		if d.RateProfile != schedgrant.OrdinaryReadProfile {
-			return fail("rate_profile must be ordinary")
+		if d.RateProfile != schedgrant.OrdinaryReadProfile && d.RateProfile != schedgrant.TelemetryReadProfile {
+			return fail("rate_profile must be ordinary or telemetry")
 		}
 		if len(d.Credentials) != len(d.Targets) {
 			return fail("each frozen target needs one credential binding")
@@ -660,7 +670,11 @@ func (a *Authority) AuthorizeReadRun(grantID, executionID, trigger string, run R
 	if err != nil {
 		return Grant{}, err
 	}
-	reserved, err := a.leases.ReserveReadRun(grantID, run.ActionID, run.HostID, a.now(), int(doc.RunBudget), time.Duration(doc.MinIntervalS)*time.Second)
+	interval := time.Duration(doc.MinIntervalS) * time.Second
+	if doc.RateProfile == schedgrant.TelemetryReadProfile && trigger == TriggerScheduled {
+		interval = max(interval, schedgrant.TelemetryHistoryInterval)
+	}
+	reserved, err := a.leases.ReserveReadRun(grantID, run.ActionID, run.HostID, a.now(), int(doc.RunBudget), interval)
 	if errors.Is(err, ErrReadGrantInactive) {
 		return Grant{}, fail(CodeLeaseInactive, "the read grant was revoked or has expired")
 	}
