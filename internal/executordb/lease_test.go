@@ -3,12 +3,182 @@
 package executordb
 
 import (
+	"database/sql"
+	"errors"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 )
+
+func TestReserveReadRunRejectsInactiveGrant(t *testing.T) {
+	for _, state := range []string{"revoked", "expired", "unknown", "expired after rollback"} {
+		t.Run(state, func(t *testing.T) {
+			db := openT(t, privateDir(t))
+			g := readGrantDoc(t)
+			if state != "unknown" {
+				if err := db.SaveReadGrant(g); err != nil {
+					t.Fatal(err)
+				}
+			}
+			at := t0
+			switch state {
+			case "revoked":
+				if ok, err := db.RevokeReadGrant(g.ID, at); err != nil || !ok {
+					t.Fatalf("revoke: %v, %v", ok, err)
+				}
+			case "expired":
+				at = g.ExpiresAt
+			case "expired after rollback":
+				if _, err := db.sql.Exec(`UPDATE read_clock SET high_water = ?`, g.ExpiresAt.Unix()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if ok, err := db.ReserveReadRun(g.ID, "core.facts", "web", at, 1, 15*time.Minute); ok || !errors.Is(err, permit.ErrReadGrantInactive) {
+				t.Fatalf("inactive grant reserved: %v, %v", ok, err)
+			}
+			var spent int
+			if err := db.sql.QueryRow(`SELECT COUNT(*) FROM read_run_log`).Scan(&spent); err != nil || spent != 0 {
+				t.Fatalf("inactive claim spent budget: %d, %v", spent, err)
+			}
+		})
+	}
+}
+
+func TestLegacyScheduleMigrationPreservesApprovalAndClaims(t *testing.T) {
+	dir := privateDir(t)
+	ms := mustMigrations(t)
+	shared := -1
+	for i, m := range ms {
+		if m.name == "0016_shared_read_grants.sql" {
+			shared = i
+		}
+	}
+	if shared < 1 {
+		t.Fatal("shared grant migration missing")
+	}
+	if err := seedPrePveDatabase(t, dir, ms[:shared]); err != nil {
+		t.Fatal(err)
+	}
+	old, err := sql.Open("sqlite", filepath.Join(dir, FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer old.Close()
+	const legacyID = "00000000-0000-4000-8000-000000000002"
+	expires := t0.Add(90 * 24 * time.Hour)
+	for _, row := range []struct {
+		id, digest string
+		revoked    any
+	}{
+		{legacyID, strings.Repeat("b", 64), nil},
+		{"00000000-0000-4000-8000-000000000003", strings.Repeat("c", 64), t0.Unix()},
+	} {
+		if _, err := old.Exec(`INSERT INTO schedule_grants (id, digest, doc, approved_by, created_at, expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			row.id, row.digest, []byte(`{"grant":"read-schedule-v1"}`), "webauthn:legacy", t0.Unix(), expires.Unix(), row.revoked); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := old.Exec(`INSERT INTO schedule_runs (grant_id, action_id, host_id, last_run) VALUES (?, 'core.facts', 'web', ?)`, legacyID, t0.Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db := openT(t, dir)
+	all, err := db.ReadGrants()
+	if err != nil || len(all) != 2 {
+		t.Fatalf("migrated approvals: %+v, %v", all, err)
+	}
+	g, ok, err := db.ScheduleGrant(legacyID)
+	if err != nil || !ok || g.Digest != strings.Repeat("b", 64) || string(g.Doc) != `{"grant":"read-schedule-v1"}` || g.ApprovedBy != "webauthn:legacy" || !g.ExpiresAt.Equal(expires) {
+		t.Fatalf("migration changed approval: %+v, %v, %v", g, ok, err)
+	}
+	revoked, ok, err := db.ReadGrant("00000000-0000-4000-8000-000000000003")
+	if err != nil || !ok || !revoked.RevokedAt.Equal(t0) {
+		t.Fatalf("migration lost revocation: %+v, %v", revoked, err)
+	}
+	if db.reserveT(t, legacyID, "docker.list", "web", t0, 1, 15*time.Minute) {
+		t.Fatal("migration lost spent budget")
+	}
+	if db.reserveT(t, legacyID, "core.facts", "web", t0.Add(14*time.Minute), 2, 15*time.Minute) {
+		t.Fatal("migration lost action floor")
+	}
+	if !db.reserveT(t, legacyID, "core.facts", "web", t0.Add(15*time.Minute), 2, 15*time.Minute) {
+		t.Fatal("migrated action floor never clears")
+	}
+	var obsolete int
+	if err := db.sql.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name IN ('schedule_grants', 'schedule_runs')`).Scan(&obsolete); err != nil || obsolete != 0 {
+		t.Fatalf("migration duplicated authority: %d old tables, %v", obsolete, err)
+	}
+}
+
+func TestLegacyScheduleSharesReadGrantAccounting(t *testing.T) {
+	for _, first := range []string{"read", "schedule"} {
+		t.Run(first, func(t *testing.T) {
+			db := openT(t, privateDir(t))
+			g := readGrantDoc(t)
+			if err := db.SaveReadGrant(g); err != nil {
+				t.Fatal(err)
+			}
+			s := permit.StoredGrant{ID: "00000000-0000-4000-8000-000000000002", Digest: strings.Repeat("b", 64), Doc: []byte(`{}`),
+				ApprovedBy: g.ApprovedBy, CreatedAt: t0, ExpiresAt: t0.Add(90 * 24 * time.Hour)}
+			if err := db.SaveScheduleGrant(s); err != nil {
+				t.Fatal(err)
+			}
+			all, err := db.ReadGrants()
+			if err != nil || len(all) != 2 {
+				t.Fatalf("shared registry: %+v, %v", all, err)
+			}
+			claim := func(kind, action string) bool {
+				t.Helper()
+				var ok bool
+				var err error
+				if kind == "read" {
+					ok, err = db.ReserveReadRun(g.ID, action, "web", t0, permit.GlobalRunBudget, 15*time.Minute)
+				} else {
+					ok, err = db.ClaimScheduleRun(s.ID, action, "web", t0, 15*time.Minute)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				return ok
+			}
+			other := "schedule"
+			if first == "schedule" {
+				other = "read"
+			}
+			if !claim(first, "core.facts") {
+				t.Fatal("first claim denied")
+			}
+			if claim(other, "core.facts") {
+				t.Fatal("legacy schedule bypassed shared action floor")
+			}
+			for i := 1; i < permit.GlobalRunBudget; i++ {
+				if !claim(first, fmt.Sprintf("action.%d", i)) {
+					t.Fatalf("claim %d denied", i)
+				}
+			}
+			if claim(other, "service.list") {
+				t.Fatal("legacy schedule bypassed shared target ceiling")
+			}
+			stored, ok, err := db.ReadGrant(s.ID)
+			if err != nil || !ok || !stored.ExpiresAt.Equal(s.ExpiresAt) || string(stored.Doc) != string(s.Doc) {
+				t.Fatalf("legacy approval changed: %+v, %v, %v", stored, ok, err)
+			}
+			if ok, err := db.RevokeReadGrant(s.ID, t0); err != nil || !ok {
+				t.Fatalf("shared revoke: %v, %v", ok, err)
+			}
+			legacy, ok, err := db.ScheduleGrant(s.ID)
+			if err != nil || !ok || legacy.RevokedAt.IsZero() {
+				t.Fatalf("legacy revoke diverged: %+v, %v", legacy, err)
+			}
+		})
+	}
+}
 
 var readGrantID = "00000000-0000-4000-8000-000000000001"
 

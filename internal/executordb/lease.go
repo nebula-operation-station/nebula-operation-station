@@ -30,8 +30,12 @@ func scanReadGrant(row interface{ Scan(...any) error }) (permit.StoredReadGrant,
 
 // SaveReadGrant stores an approved read grant.
 func (db *DB) SaveReadGrant(g permit.StoredReadGrant) error {
-	_, err := db.sql.Exec(`INSERT INTO read_grants (id, digest, doc, approved_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		g.ID, g.Digest, g.Doc, g.ApprovedBy, g.CreatedAt.Unix(), g.ExpiresAt.Unix())
+	return db.saveReadGrant(g, false)
+}
+
+func (db *DB) saveReadGrant(g permit.StoredReadGrant, legacy bool) error {
+	_, err := db.sql.Exec(`INSERT INTO read_grants (id, digest, doc, approved_by, created_at, expires_at, legacy_schedule) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		g.ID, g.Digest, g.Doc, g.ApprovedBy, g.CreatedAt.Unix(), g.ExpiresAt.Unix(), legacy)
 	if err != nil {
 		return fmt.Errorf("executordb: save read grant: %w", err)
 	}
@@ -88,6 +92,8 @@ func (db *DB) RevokeReadGrant(id string, at time.Time) (bool, error) {
 // per-target ceiling, and they are durable across restart. The window is
 // anchored to the latest time the store has seen (the high-water clock),
 // so a wall-clock rollback never moves it backward or refills a budget.
+// Grant activity is rechecked in that same transaction, serialized with
+// revocation; a missing, revoked or expired grant returns ErrReadGrantInactive.
 func (db *DB) ReserveReadRun(grantID, actionID, hostID string, now time.Time, budget int, minInterval time.Duration) (bool, error) {
 	if budget < 1 {
 		return false, fmt.Errorf("executordb: reserve read run: budget %d below 1", budget)
@@ -104,6 +110,13 @@ func (db *DB) ReserveReadRun(grantID, actionID, hostID string, now time.Time, bu
 	var effective int64
 	if err := tx.QueryRow(`SELECT high_water FROM read_clock WHERE id = 1`).Scan(&effective); err != nil {
 		return false, fmt.Errorf("executordb: reserve read run: %w", err)
+	}
+	var active bool
+	if err := tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM read_grants WHERE id = ? AND revoked_at IS NULL AND expires_at > ?)`, grantID, effective).Scan(&active); err != nil {
+		return false, fmt.Errorf("executordb: reserve read run: %w", err)
+	}
+	if !active {
+		return false, permit.ErrReadGrantInactive
 	}
 	cutoff := effective - int64(permit.RollingHour/time.Second)
 	// Rows at or before the cutoff can never count again; drop them so the

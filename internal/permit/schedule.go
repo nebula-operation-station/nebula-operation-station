@@ -25,19 +25,12 @@ import (
 // (ScheduleStore) and survive a restart; pending ones do not.
 
 // StoredGrant is an approved schedule grant.
-type StoredGrant struct {
-	ID         string
-	Digest     string
-	Doc        []byte // canonical document
-	ApprovedBy string
-	CreatedAt  time.Time
-	ExpiresAt  time.Time
-	RevokedAt  time.Time // zero while active
-}
+type StoredGrant = StoredReadGrant
 
 // ScheduleStore persists approved grants and the last run of each action
 // on each host (internal/executordb implements it).
 type ScheduleStore interface {
+	ReadGrantStore
 	SaveScheduleGrant(g StoredGrant) error
 	ScheduleGrant(id string) (StoredGrant, bool, error)
 	ScheduleGrants() ([]StoredGrant, error)
@@ -267,63 +260,27 @@ func (a *Authority) AuthorizeScheduled(grantID, executionID string, run Run) (Gr
 	if a.schedules == nil {
 		return Grant{}, fail(CodeScheduleUnavailable, "")
 	}
-	if len(run.Artifact) == 0 || len(run.Artifact) > MaxArtifactSize {
-		return Grant{}, fail(CodeArtifactMismatch, "artifact size %d outside 1..%d", len(run.Artifact), MaxArtifactSize)
+	grant, err := a.AuthorizeReadRun(grantID, executionID, TriggerScheduled, run)
+	// Preserve the compatibility API's failure codes while using one grant
+	// registry, scope check and durable reservation path.
+	var denied *Error
+	if errors.As(err, &denied) {
+		code := denied.Code
+		switch code {
+		case CodeLeaseUnavailable:
+			code = CodeScheduleUnavailable
+		case CodeLeaseInactive:
+			code = CodeGrantInactive
+		case CodeLeaseNotCovered:
+			code = CodeGrantNotCovered
+		case CodeLeaseBudget:
+			code = CodeTooSoon
+		}
+		if code != denied.Code {
+			return Grant{}, fail(code, "schedule interval or budget: %s", denied.Detail)
+		}
 	}
-	artSum := sha256.Sum256(run.Artifact)
-	a.observe(artSum, run.Artifact)
-	params, paramHash, perr := canonical.CanonicalParameters(run.ParametersJSON)
-	if _, uses := secretFloor(params); perr == nil && uses {
-		// Scheduled runs are LOW; a run with secrets never is.
-		return Grant{}, fail(CodeGrantNotCovered, "scheduled runs cannot use vault secrets")
-	}
-	now := a.now()
-	deny := func(code Code, detail string) error {
-		a.emit(Event{Kind: "denied", Digest: "grant:" + grantID, Host: run.HostID, Code: code, Detail: detail})
-		return &Error{Code: code, Detail: detail}
-	}
-	g, ok, err := a.schedules.ScheduleGrant(grantID)
-	if err != nil {
-		return Grant{}, a.storageFailure("grant:"+grantID, err)
-	}
-	if !ok {
-		return Grant{}, deny(CodeNotFound, "no schedule grant "+grantID)
-	}
-	if !g.RevokedAt.IsZero() || !now.Before(g.ExpiresAt) {
-		return Grant{}, deny(CodeGrantInactive, "the grant was revoked or has expired")
-	}
-	// The stored bytes are the approved canonical document; parse them
-	// again rather than trusting anything else.
-	doc, _, digest, err := schedgrant.Parse(g.Doc, g.CreatedAt)
-	if err != nil || digest != g.Digest {
-		return Grant{}, a.storageFailure("grant:"+grantID, fmt.Errorf("stored grant does not verify: %v", err))
-	}
-	act, ok := doc.Action(run.ActionID, run.ModuleVersion)
-	if !ok {
-		return Grant{}, deny(CodeGrantNotCovered, "action "+run.ActionID+"@"+run.ModuleVersion+" is not in the grant")
-	}
-	t, ok := doc.Target(run.HostID)
-	if !ok || t.HostKeyFingerprint != run.HostKeyFingerprint {
-		return Grant{}, deny(CodeGrantNotCovered, "host or host key is not in the grant")
-	}
-	if hex.EncodeToString(artSum[:]) != act.ArtifactSHA256 {
-		return Grant{}, deny(CodeArtifactMismatch, "artifact bytes do not hash to the granted value")
-	}
-	if perr != nil || paramHash != act.ParametersHash {
-		return Grant{}, deny(CodeParametersMismatch, "parameters do not hash to the granted value")
-	}
-	if err := a.lowEverywhere(act.ActionID, act.ModuleVersion, act.ArtifactSHA256, []canonical.Target{t}); err != nil {
-		return Grant{}, err
-	}
-	claimed, err := a.schedules.ClaimScheduleRun(grantID, run.ActionID, run.HostID, now, time.Duration(doc.MinIntervalS)*time.Second)
-	if err != nil {
-		return Grant{}, a.storageFailure("grant:"+grantID, err)
-	}
-	if !claimed {
-		return Grant{}, deny(CodeTooSoon, fmt.Sprintf("at most one run every %ds", doc.MinIntervalS))
-	}
-	a.emit(Event{Kind: "authorized", Digest: "grant:" + grantID, Host: run.HostID, Detail: run.ActionID + " as " + executionID})
-	return Grant{ExecutionID: executionID, Parameters: params}, nil
+	return grant, err
 }
 
 // gcGrantsLocked drops pending grants whose approval window closed.

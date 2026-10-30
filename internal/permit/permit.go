@@ -267,7 +267,8 @@ type Options struct {
 	RiskPolicy RiskPolicy
 	// Schedules persists schedule grants; nil disables them.
 	Schedules ScheduleStore
-	// Leases persists read grants; nil disables them.
+	// Leases persists read grants; nil uses Schedules when configured,
+	// otherwise disables them.
 	Leases ReadGrantStore
 }
 
@@ -316,6 +317,9 @@ func New(o Options) (*Authority, error) {
 	}
 	if o.RiskPolicy == nil {
 		return nil, errors.New("permit: a risk policy is required")
+	}
+	if o.Leases == nil && o.Schedules != nil {
+		o.Leases = o.Schedules
 	}
 	if o.Now == nil {
 		o.Now = time.Now

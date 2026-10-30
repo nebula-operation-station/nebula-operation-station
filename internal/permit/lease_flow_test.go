@@ -94,6 +94,10 @@ func (m *memLeases) ReserveReadRun(grantID, actionID, hostID string, now time.Ti
 		effective = m.highWater
 	}
 	m.highWater = effective
+	g, ok := m.grants[grantID]
+	if !ok || !g.RevokedAt.IsZero() || !effective.Before(g.ExpiresAt) {
+		return false, ErrReadGrantInactive
+	}
 	cutoff := effective.Add(-RollingHour)
 	var kept []time.Time
 	for _, ts := range m.hostRes[hostID] {
@@ -522,6 +526,29 @@ func TestReadGrantReserveStorageError(t *testing.T) {
 	le.failReserve = true
 	_, err := e.auth.AuthorizeReadRun(g.ID, "e", TriggerOnDemand, readRun("dockerflux", fpA))
 	wantCode(t, err, CodeStorage)
+}
+
+type readGrantRiskHook struct {
+	RiskPolicy
+	before func()
+}
+
+func (p readGrantRiskHook) MinimumRisk(r canonical.Request, targets []canonical.Target) (canonical.Risk, string, error) {
+	p.before()
+	return p.RiskPolicy.MinimumRisk(r, targets)
+}
+
+func TestReadGrantExpiresBetweenLookupAndReservation(t *testing.T) {
+	e, store := newLeaseEnv(t, ModeStandard)
+	g := approveReadGrant(t, e, readGrantRaw(t, readGrantDocAt(t, e.clk.Now(), DefaultReadGrantLifetime)))
+	// This check occurs after the active-grant lookup and immediately before
+	// reservation. Advance to the exact expiry without sleeping or racing time.
+	e.auth.risk = readGrantRiskHook{RiskPolicy: e.risk, before: func() { e.clk.Add(DefaultReadGrantLifetime) }}
+	_, err := e.auth.AuthorizeReadRun(g.ID, "expired-before-claim", TriggerOnDemand, readRun("dockerflux", fpA))
+	wantCode(t, err, CodeLeaseInactive)
+	if len(store.hostRes["dockerflux"]) != 0 {
+		t.Fatal("expired authorization spent budget")
+	}
 }
 
 // Lock pauses grants: pending read grants are dropped, but stored grants and

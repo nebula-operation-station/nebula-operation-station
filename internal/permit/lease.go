@@ -342,6 +342,10 @@ const (
 	CodeLeaseBudget      Code = "read_grant_budget_exhausted"
 )
 
+// ErrReadGrantInactive means a grant was absent, revoked or expired when the
+// store attempted to reserve a run, atomically with the budget accounting.
+var ErrReadGrantInactive = errors.New("permit: read grant is inactive")
+
 // StoredReadGrant is an approved read grant.
 type StoredReadGrant struct {
 	ID         string
@@ -363,7 +367,9 @@ type ReadGrantStore interface {
 	// revoked before.
 	RevokeReadGrant(id string, at time.Time) (bool, error)
 	// ReserveReadRun atomically reserves one run of grantID (actionID on
-	// hostID) at now. It succeeds only while (a) the target's reservations
+	// hostID) at now. It returns ErrReadGrantInactive unless the grant exists,
+	// is unrevoked and has not expired at the high-water time, checked in the
+	// reservation transaction. It succeeds only while (a) the target's reservations
 	// in the last hour are below the per-target ceiling budget, and (b) the
 	// last reservation of actionID on hostID is at least minInterval ago
 	// (the 15-minute per-action floor). Both counters are shared across
@@ -603,7 +609,7 @@ func (a *Authority) AuthorizeReadRun(grantID, executionID, trigger string, run R
 	}
 	// The stored bytes are the approved canonical document; parse them
 	// again rather than trusting anything else.
-	doc, _, digest, err := ParseReadGrant(g.Doc, g.CreatedAt)
+	doc, digest, err := readGrantScope(g)
 	if err != nil || digest != g.Digest {
 		return Grant{}, a.storageFailure("readgrant:"+grantID, fmt.Errorf("stored read grant does not verify: %v", err))
 	}
@@ -630,7 +636,10 @@ func (a *Authority) AuthorizeReadRun(grantID, executionID, trigger string, run R
 	if err := a.lowEverywhere(act.ActionID, act.ModuleVersion, act.ArtifactSHA256, []canonical.Target{t}); err != nil {
 		return Grant{}, err
 	}
-	reserved, err := a.leases.ReserveReadRun(grantID, run.ActionID, run.HostID, now, int(doc.RunBudget), time.Duration(doc.MinIntervalS)*time.Second)
+	reserved, err := a.leases.ReserveReadRun(grantID, run.ActionID, run.HostID, a.now(), int(doc.RunBudget), time.Duration(doc.MinIntervalS)*time.Second)
+	if errors.Is(err, ErrReadGrantInactive) {
+		return Grant{}, deny(CodeLeaseInactive, "the read grant was revoked or has expired")
+	}
 	if err != nil {
 		return Grant{}, a.storageFailure("readgrant:"+grantID, err)
 	}
@@ -639,4 +648,31 @@ func (a *Authority) AuthorizeReadRun(grantID, executionID, trigger string, run R
 	}
 	a.emit(Event{Kind: "authorized", Digest: "readgrant:" + grantID, Host: run.HostID, Detail: run.ActionID + " as " + executionID})
 	return Grant{ExecutionID: executionID, Parameters: params}, nil
+}
+
+// readGrantScope verifies the original signed document before adapting legacy
+// schedule scope for the common authorization path. The adaptation is never
+// persisted or treated as a new approval, and never grants on-demand access.
+func readGrantScope(g StoredReadGrant) (ReadGrantDoc, string, error) {
+	var header struct {
+		Grant string `json:"grant"`
+	}
+	if err := json.Unmarshal(g.Doc, &header); err != nil {
+		return ReadGrantDoc{}, "", err
+	}
+	if header.Grant != schedgrant.Format {
+		doc, _, digest, err := ParseReadGrant(g.Doc, g.CreatedAt)
+		return doc, digest, err
+	}
+	legacy, _, digest, err := schedgrant.Parse(g.Doc, g.CreatedAt)
+	if err != nil {
+		return ReadGrantDoc{}, "", err
+	}
+	doc := ReadGrantDoc{ID: legacy.ID, Trigger: TriggerScheduled, ExpiryUnix: legacy.ExpiryUnix,
+		Targets: legacy.Targets, MinIntervalS: legacy.MinIntervalS, RunBudget: GlobalRunBudget}
+	for _, action := range legacy.Actions {
+		doc.Actions = append(doc.Actions, ReadGrantAction{ActionID: action.ActionID, ModuleVersion: action.ModuleVersion,
+			ArtifactSHA256: action.ArtifactSHA256, ParametersHash: action.ParametersHash})
+	}
+	return doc, digest, nil
 }

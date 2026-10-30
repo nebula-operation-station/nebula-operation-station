@@ -13,8 +13,9 @@ import (
 func TestScheduleGrantsAndClaims(t *testing.T) {
 	db := openT(t, privateDir(t))
 	now := time.Unix(1792000000, 0)
+	// Keep the grant active through both sides of the interval boundary.
 	g := permit.StoredGrant{ID: "00000000-0000-4000-8000-000000000001", Digest: strings.Repeat("a", 64), Doc: []byte(`{}`),
-		ApprovedBy: "webauthn:x", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+		ApprovedBy: "webauthn:x", CreatedAt: now, ExpiresAt: now.Add(2 * time.Hour)}
 	if err := db.SaveScheduleGrant(g); err != nil {
 		t.Fatal(err)
 	}

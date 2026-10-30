@@ -31,15 +31,19 @@ const (
 // newLeaseAuthority builds a permit authority over the harness's real store,
 // WebAuthn verifier and risk data, with the durable read-grant store wired in
 // exactly as the production executor will (part B).
-func newLeaseAuthority(t *testing.T, h *harness) *permit.Authority {
+func newLeaseAuthority(t *testing.T, h *harness, stores ...permit.ReadGrantStore) *permit.Authority {
 	t.Helper()
 	risk, err := riskpolicy.New(h.db)
 	if err != nil {
 		t.Fatal(err)
 	}
+	var store permit.ReadGrantStore = h.db
+	if len(stores) > 0 {
+		store = stores[0]
+	}
 	auth, err := permit.New(permit.Options{
 		Mode: permit.ModeStandard, Verifier: h.verifier, Store: h.db,
-		RiskPolicy: risk, Schedules: h.db, Leases: h.db,
+		RiskPolicy: risk, Schedules: h.db, Leases: store,
 	})
 	if err != nil {
 		t.Fatal(err)
