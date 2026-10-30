@@ -1,0 +1,13 @@
+{
+  "format": "image-vulns-v1",
+  "phase": "done",
+  "present": true,
+  "status": "ok",
+  "trivy": "MC41Mi4w",
+  "dbver": "Mg==",
+  "dbage": 1,
+  "image": "nginx@sha256:a3f9c1d2e4b5a6978867564534231201fedcba98765432100123456789abcdef",
+  "platform": "bGludXgvYW1kNjQ=",
+  "cached": false,
+  "summary": "eyJzZXZlcml0eSI6eyJDUklUSUNBTCI6MiwiSElHSCI6MSwiTUVESVVNIjoxLCJMT1ciOjEsIlVOS05PV04iOjB9LCJ0b3RhbCI6NSwidGFyZ2V0cyI6MiwidG9wIjpbeyJpZCI6IkNWRS0yMDIzLTQ1MjkwIiwic2V2ZXJpdHkiOiJDUklUSUNBTCIsImZpeGVkIjoidjAuMjMuMCJ9LHsiaWQiOiJDVkUtMjAyNC0yODA4NSIsInNldmVyaXR5IjoiQ1JJVElDQUwiLCJmaXhlZCI6IjMuMS40LTN+ZGViMTJ1NSJ9LHsiaWQiOiJDVkUtMjAyMy0zODQwOCIsInNldmVyaXR5IjoiSElHSCIsImZpeGVkIjoiMi45LjE0K2Rmc2ctMS4zfmRlYjEydTUifSx7ImlkIjoiQ1ZFLTIwMjMtNTI0MjUiLCJzZXZlcml0eSI6Ik1FRElVTSIsImZpeGVkIjoiMi4xMi42LTArZGViMTJ1NCJ9LHsiaWQiOiJDVkUtMjAyMi0zNzQzNCIsInNldmVyaXR5IjoiTE9XIiwiZml4ZWQiOiIifV19"
+}
