@@ -16,25 +16,30 @@ import (
 // Inspect is a parsed docker.inspect result. Every field comes from the
 // host; fields that do not fit are left empty.
 type Inspect struct {
-	Phase         string // done or precheck
-	Reason        string
-	Container     string
-	ID            string // first 12 hex digits
-	Name          string
-	Image         string
-	ImageID       string
-	Digests       []string
-	Status        string
-	ExitCode      int
-	Started       string // RFC 3339 in UTC, "" if never
-	Finished      string
-	Restarts      int
-	RestartPolicy string
-	Health        string
-	FailingStreak int
-	Mounts        []Mount
-	Ports         []PortMap
-	Networks      []Network
+	Phase            string // done or precheck
+	Reason           string
+	Container        string
+	ID               string // first 12 hex digits
+	FullID           string // full 64 hex digits
+	Name             string
+	Image            string
+	ImageID          string // image configuration ID (sha256:...), the platform digest
+	Created          string // container creation time, RFC 3339 UTC, "" if not parseable
+	ImageCreated     string // image creation time, RFC 3339 UTC, "" if not parseable
+	Platform         string // image platform "os/arch" or "os/arch/variant"
+	Digests          []string
+	ImageDigestIndex string // first registry manifest/index digest, "" if none
+	Status           string
+	ExitCode         int
+	Started          string // RFC 3339 in UTC, "" if never
+	Finished         string
+	Restarts         int
+	RestartPolicy    string
+	Health           string
+	FailingStreak    int
+	Mounts           []Mount
+	Ports            []PortMap
+	Networks         []Network
 }
 
 // Mount is one mount of a container.
@@ -57,6 +62,7 @@ const (
 	maxPorts    = 200
 	maxNetworks = 50
 	maxDigests  = 20
+	maxImage    = 64 << 10 // one image's metadata, after base64 decode
 )
 
 var (
@@ -89,6 +95,35 @@ func when(s string) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
+// createdFromList parses a `docker ps` {{.CreatedAt}} value (docker renders
+// it in Go's default time layout) or RFC 3339, and returns RFC 3339 in UTC.
+func createdFromList(s string) string {
+	s = text(s, 64)
+	if s == "" {
+		return ""
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339,
+		"2006-01-02 15:04:05.999999999 -0700 MST", "2006-01-02 15:04:05 -0700 MST"} {
+		if t, err := time.Parse(layout, s); err == nil && t.Year() >= 2000 {
+			return t.UTC().Format(time.RFC3339)
+		}
+	}
+	return ""
+}
+
+// platformFrom builds "os/arch" or "os/arch/variant" from image fields.
+func platformFrom(os, arch, variant string) string {
+	os, arch, variant = text(os, 32), text(arch, 32), text(variant, 32)
+	if os == "" && arch == "" {
+		return ""
+	}
+	p := os + "/" + arch
+	if variant != "" {
+		p += "/" + variant
+	}
+	return p
+}
+
 // ParseInspect reads a docker.inspect result.
 func ParseInspect(result []byte) (Inspect, error) {
 	var doc struct {
@@ -97,6 +132,7 @@ func ParseInspect(result []byte) (Inspect, error) {
 		Reason    string `json:"reason"`
 		Container string `json:"container"`
 		Inspect   string `json:"inspect"`
+		Image     string `json:"image"`
 		Digests   string `json:"digests"`
 	}
 	if json.Unmarshal(result, &doc) != nil || doc.Format != "docker-inspect-v1" || (doc.Phase != "done" && doc.Phase != "precheck") {
@@ -119,6 +155,7 @@ func ParseInspect(result []byte) (Inspect, error) {
 		Name    string `json:"name"`
 		Image   string `json:"image"`
 		ImageID string `json:"image_id"`
+		Created string `json:"created"`
 		State   struct {
 			Status     string `json:"Status"`
 			ExitCode   int    `json:"ExitCode"`
@@ -149,7 +186,9 @@ func ParseInspect(result []byte) (Inspect, error) {
 	}
 	if idRe.MatchString(c.ID) {
 		in.ID = c.ID[:12]
+		in.FullID = c.ID
 	}
+	in.Created = when(c.Created)
 	if n := strings.TrimPrefix(c.Name, "/"); nameRe.MatchString(n) {
 		in.Name = n
 	}
@@ -226,7 +265,30 @@ func ParseInspect(result []byte) (Inspect, error) {
 		in.Networks = append(in.Networks, Network{Name: name, IP: ip})
 	}
 	sort.Slice(in.Networks, func(i, j int) bool { return in.Networks[i].Name < in.Networks[j].Name })
-	if b, err := base64.StdEncoding.DecodeString(doc.Digests); err == nil && len(b) <= maxRawSize {
+	if doc.Image != "" {
+		if b, err := base64.StdEncoding.DecodeString(doc.Image); err == nil && len(b) <= maxImage {
+			var im struct {
+				ID           string   `json:"id"`
+				Created      string   `json:"created"`
+				OS           string   `json:"os"`
+				Architecture string   `json:"architecture"`
+				Variant      string   `json:"variant"`
+				RepoDigests  []string `json:"repo_digests"`
+			}
+			if json.Unmarshal(b, &im) == nil {
+				if imageIDRe.MatchString(im.ID) {
+					in.ImageID = im.ID
+				}
+				in.ImageCreated = when(im.Created)
+				in.Platform = platformFrom(im.OS, im.Architecture, im.Variant)
+				for _, x := range im.RepoDigests {
+					if len(in.Digests) < maxDigests && digestRe.MatchString(x) {
+						in.Digests = append(in.Digests, x)
+					}
+				}
+			}
+		}
+	} else if b, err := base64.StdEncoding.DecodeString(doc.Digests); err == nil && len(b) <= maxRawSize {
 		var ds []string
 		if json.Unmarshal(b, &ds) == nil {
 			for _, x := range ds {
@@ -235,6 +297,9 @@ func ParseInspect(result []byte) (Inspect, error) {
 				}
 			}
 		}
+	}
+	if len(in.Digests) > 0 {
+		in.ImageDigestIndex = in.Digests[0]
 	}
 	return in, nil
 }

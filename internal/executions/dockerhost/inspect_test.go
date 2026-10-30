@@ -26,8 +26,11 @@ func TestParseRealInspect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if in.Container != "full" || in.Name != "full" || in.ID != "b46feb47000b" || in.Image != "nos-test/sleeper:2" ||
+	if in.Container != "full" || in.Name != "full" || in.ID != "b46feb47000b" ||
+		in.FullID != "b46feb47000b8c2913bfcb3beab51cebd2a6729630f1f1b857a31f6fdae3e347" || in.Image != "nos-test/sleeper:2" ||
 		!strings.HasPrefix(in.ImageID, "sha256:1c39e3d3") || len(in.Digests) != 1 ||
+		in.ImageDigestIndex != "nos-test/sleeper@sha256:1c39e3d32b94219809c559e37d826b4c30e564d9ec5aae33314a930c1d98c615" ||
+		in.Created != "2026-10-14T19:06:42Z" || in.ImageCreated != "2026-09-01T12:00:00Z" || in.Platform != "linux/amd64" ||
 		in.Status != "running" || in.Started == "" || in.Finished != "" || in.RestartPolicy != "unless-stopped" ||
 		in.Health != "unhealthy" || in.FailingStreak < 1 {
 		t.Fatalf("%+v", in)
@@ -52,6 +55,11 @@ func TestParseRealInspect(t *testing.T) {
 	in, err = ParseInspect(b)
 	if err != nil || in.Status != "created" || in.Health != "" || in.Started != "" || in.RestartPolicy != "no" || len(in.Mounts) != 0 {
 		t.Fatalf("%+v %v", in, err)
+	}
+	if in.Created != "2026-10-14T19:06:40Z" || in.ImageCreated != "2026-08-15T08:30:00Z" || in.Platform != "linux/amd64" ||
+		in.FullID != "a58f9bc117914e03de9c322d90d61bedffc5f34cfd32af76a063544df3e2ce0f" ||
+		in.ImageDigestIndex != "nos-test/sleeper@sha256:b95befdf2d99fd398f1c0bd80195f99cad52632b5de8f77a60c56bb539918195" {
+		t.Fatalf("%+v", in)
 	}
 }
 
@@ -101,5 +109,53 @@ func TestParseInspectIsDefensive(t *testing.T) {
 	in, err = ParseInspect([]byte(`{"format":"docker-inspect-v1","phase":"precheck","reason":"no such container"}`))
 	if err != nil || in.Reason != "no such container" {
 		t.Fatalf("%+v %v", in, err)
+	}
+}
+
+func TestParseInspectImageDefensive(t *testing.T) {
+	inner := `{"id":"` + strings.Repeat("a", 64) + `","name":"/ok","image":"img","image_id":"sha256:` +
+		strings.Repeat("c", 64) + `","created":"2026-01-02T03:04:05Z","state":{"Status":"running","StartedAt":"2026-01-01T00:00:00Z"}}`
+	enc := base64.StdEncoding.EncodeToString
+
+	// Valid image metadata: platform, image creation time and index digest.
+	goodImage := `{"id":"sha256:` + strings.Repeat("c", 64) + `","created":"2026-01-01T00:00:00Z",` +
+		`"os":"linux","architecture":"arm64","variant":"v8","repo_digests":["repo@sha256:` + strings.Repeat("d", 64) + `"]}`
+	in, err := ParseInspect([]byte(`{"format":"docker-inspect-v1","phase":"done","container":"c1","inspect":"` +
+		enc([]byte(inner)) + `","image":"` + enc([]byte(goodImage)) + `"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in.Platform != "linux/arm64/v8" || in.ImageCreated != "2026-01-01T00:00:00Z" ||
+		in.Created != "2026-01-02T03:04:05Z" || len(in.Digests) != 1 ||
+		in.ImageDigestIndex != "repo@sha256:"+strings.Repeat("d", 64) {
+		t.Fatalf("%+v", in)
+	}
+
+	// A malformed image field is ignored; the container still parses.
+	in, err = ParseInspect([]byte(`{"format":"docker-inspect-v1","phase":"done","container":"c1","inspect":"` +
+		enc([]byte(inner)) + `","image":"` + enc([]byte("not json")) + `"}`))
+	if err != nil || in.Platform != "" || in.ImageCreated != "" || len(in.Digests) != 0 || in.ImageDigestIndex != "" {
+		t.Fatalf("%+v %v", in, err)
+	}
+
+	// An oversize image field is rejected.
+	in, err = ParseInspect([]byte(`{"format":"docker-inspect-v1","phase":"done","container":"c1","inspect":"` +
+		enc([]byte(inner)) + `","image":"` + enc([]byte(strings.Repeat("x", maxImage+1))) + `"}`))
+	if err != nil || in.Platform != "" || len(in.Digests) != 0 {
+		t.Fatalf("%+v %v", in, err)
+	}
+
+	// Extra fields in the image object (e.g. environment) are never copied out.
+	leaky := `{"id":"sha256:` + strings.Repeat("c", 64) + `","os":"linux","architecture":"amd64",` +
+		`"repo_digests":["repo@sha256:` + strings.Repeat("d", 64) + `"],"env":["TOKEN=hunter2"]}`
+	in, err = ParseInspect([]byte(`{"format":"docker-inspect-v1","phase":"done","container":"c1","inspect":"` +
+		enc([]byte(inner)) + `","image":"` + enc([]byte(leaky)) + `"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{in.Platform, in.ImageCreated, in.ImageDigestIndex, in.ImageID, in.Created} {
+		if strings.Contains(s, "hunter2") {
+			t.Fatalf("secret leaked: %q", s)
+		}
 	}
 }

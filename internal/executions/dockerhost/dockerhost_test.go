@@ -36,9 +36,15 @@ func TestParseRealOutput(t *testing.T) {
 		t.Fatalf("order %+v", l.Containers)
 	}
 	web := l.Containers[3]
-	if web.ID != "c1bfa1cc4a9a" || web.Project != "site" || web.Service != "web" || web.Dir != "/srv/site" ||
+	if web.ID != "c1bfa1cc4a9a" || web.FullID != "c1bfa1cc4a9a2109aa190e758a09c75ffa9cc9caf9fb653a143fb27e9e299cf2" ||
+		web.Created != "2026-10-14T19:06:42Z" || web.Project != "site" || web.Service != "web" || web.Dir != "/srv/site" ||
 		web.Health != "unhealthy" || web.Ports != "127.0.0.1:8080->80/tcp" || !web.Running() {
 		t.Fatalf("web %+v", web)
+	}
+	// Standalone containers carry their creation time too.
+	done := l.Containers[0]
+	if done.FullID != "9b7bac13719447598ade00c6979da1a0a0b97b1b999b2ecf75e5f4877663c566" || done.Created != "2026-10-14T19:06:38Z" {
+		t.Fatalf("done %+v", done)
 	}
 	s := l.Summary()
 	if s.Total != 4 || s.Running != 2 || s.Stopped != 2 || s.Unhealthy != 1 || len(s.Projects) != 1 || s.Projects[0] != "site" {
@@ -238,5 +244,48 @@ func TestComposePostflightVerdicts(t *testing.T) {
 	c, _ := ParseComposeUpdate([]byte(`{"format":"compose-update-v1","phase":"precheck","reason":"no containers of this Compose project"}`))
 	if c.Verdict != "FAILED" || c.Reason == "" {
 		t.Fatalf("%+v", c)
+	}
+}
+
+func TestCreatedFromList(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"2026-10-14 19:06:42 +0000 UTC", "2026-10-14T19:06:42Z"},
+		{"2026-10-14 19:06:42.314239641 +0000 UTC", "2026-10-14T19:06:42Z"},
+		{"2026-10-14T19:06:42.314239641Z", "2026-10-14T19:06:42Z"},
+		{"2026-10-14 19:06:42 +0200 CEST", "2026-10-14T17:06:42Z"},
+		{"", ""},
+		{"not a time", ""},
+		{"0001-01-01 00:00:00 +0000 UTC", ""},
+	}
+	for _, c := range cases {
+		if got := createdFromList(c.in); got != c.want {
+			t.Errorf("createdFromList(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestParseListCreatedMalformed(t *testing.T) {
+	// A 10-field row with an unparseable creation time is still parsed, with
+	// Created left empty.
+	row := strings.Repeat("a", 64) + "	ok	img	running	Up 1h				not a time"
+	res := `{"format":"docker-ps-v1","phase":"done","present":true,"version":"29.0.0","containers":"` +
+		base64.StdEncoding.EncodeToString([]byte(row+"\n")) + `"}`
+	l, err := ParseList([]byte(res))
+	if err != nil || len(l.Containers) != 1 {
+		t.Fatalf("%+v %v", l, err)
+	}
+	if l.Containers[0].Created != "" || l.Containers[0].FullID != strings.Repeat("a", 64) {
+		t.Fatalf("created %+v", l.Containers[0])
+	}
+	// A short row is still malformed and dropped.
+	row2 := strings.Repeat("b", 64) + "	ok2	img2	running	Up 1h"
+	res2 := `{"format":"docker-ps-v1","phase":"done","present":true,"version":"29.0.0","containers":"` +
+		base64.StdEncoding.EncodeToString([]byte(row2+"\n")) + `"}`
+	l, err = ParseList([]byte(res2))
+	if err != nil || len(l.Containers) != 0 {
+		t.Fatalf("%+v %v", l, err)
 	}
 }
