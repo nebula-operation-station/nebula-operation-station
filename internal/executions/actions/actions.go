@@ -120,6 +120,12 @@ var projectRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,99}$`)
 
 var projectParam = []Param{{Name: "project", Label: "Compose project", Pattern: projectRe}}
 
+// imageRe is a digest-pinned image reference (repo@sha256:…): the scan
+// target is immutable, and no tag lookup or pull is possible.
+var imageRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._/:-]{0,254}@sha256:[0-9a-f]{64}$`)
+
+var imageParam = []Param{{Name: "image", Label: "Image (repo@sha256:digest)", Pattern: imageRe}}
+
 // ValidParams checks params against the action's parameters.
 func (a Action) ValidParams(params map[string]string) error {
 	if len(params) != len(a.Params) {
@@ -184,6 +190,9 @@ var dockerComposeUpdate []byte
 
 //go:embed scripts/docker_check_updates.sh
 var dockerCheckUpdates []byte
+
+//go:embed scripts/image_vulns.sh
+var imageVulns []byte
 
 //go:embed scripts/docker_control.sh.tmpl
 var dockerControlTemplate string
@@ -305,6 +314,11 @@ var Builtin = []Action{
 		ID: "docker.check_updates", Version: "1.0.0", Title: "Check image updates",
 		Description: "For the image of every running container, compares the local digest with the registry's current one for its tag (manifest HEAD request, anonymous, pulls nothing). Needs curl and HTTPS to the registries on the host. Read-only.",
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 5 * time.Minute, ReadOnly: true, Script: dockerCheckUpdates, Retry: RetrySafe,
+	},
+	{
+		ID: "image.vulnerabilities", Version: "1.0.0", Title: "Image CVE observations",
+		Description: "Optional CVE observation of one local image by digest via the host's own Trivy (offline scan; no install, pull or database refresh). Unique CVE counts by severity, top CVEs with fixed versions, scan and database age, coverage. Absent, stale, busy or failed scans stay unknown, never zero. Read-only.",
+		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 10 * time.Minute, ReadOnly: true, Script: imageVulns, Params: imageParam, Retry: RetrySafe,
 	},
 	{
 		ID: "docker.compose_update", Version: "1.0.0", Title: "Update Compose project",
