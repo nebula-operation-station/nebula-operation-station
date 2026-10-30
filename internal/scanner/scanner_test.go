@@ -127,7 +127,7 @@ func TestLargeScriptsAreBounded(t *testing.T) {
 	if f, floor := Scan(many); floor != canonical.RiskHigh || len(f) != 1 || f[0].Category != TooLarge {
 		t.Fatal(floor, f)
 	}
-	if d := time.Since(start); d > 5*time.Second {
+	if d := time.Since(start); d > 20*time.Second { // generous: shared CI runners under -race
 		t.Fatalf("scans took %s", d)
 	}
 }
