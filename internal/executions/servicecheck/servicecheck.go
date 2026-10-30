@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/netip"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -97,7 +98,9 @@ func ValidateCheck(c Check) error {
 		}
 		return nil
 	}
-	if !hostnameRe.MatchString(d) {
+	// Hostnames are case-insensitive; the destination is embedded in a
+	// URL, so it must stay a bare name.
+	if !hostnameRe.MatchString(strings.ToLower(d)) {
 		return fmt.Errorf("destination must be a hostname or IP literal")
 	}
 	return nil
