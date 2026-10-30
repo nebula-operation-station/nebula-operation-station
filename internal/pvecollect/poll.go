@@ -8,15 +8,21 @@ package pvecollect
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 )
+
+// maxReadWorkers bounds workers and buffered responses even with a large config.
+const maxReadWorkers = 16
 
 // Reader is the executor read surface the collector uses. The generated
 // executorclient.Client satisfies it; tests substitute a fake. The collector
@@ -69,6 +75,9 @@ func (c Config) withDefaults() Config {
 	if c.MaxConcurrentReads <= 0 {
 		c.MaxConcurrentReads = 2
 	}
+	if c.MaxConcurrentReads > maxReadWorkers {
+		c.MaxConcurrentReads = maxReadWorkers
+	}
 	if c.ReadTimeout <= 0 {
 		c.ReadTimeout = 30 * time.Second
 	}
@@ -101,7 +110,6 @@ type Collector struct {
 	cfg    Config
 
 	mu       sync.Mutex
-	gen      map[string]uint64
 	failures map[string]int
 	nextPoll map[string]time.Time
 }
@@ -118,7 +126,6 @@ func New(reader Reader, spool *Spool, cfg Config) (*Collector, error) {
 		reader:   reader,
 		spool:    spool,
 		cfg:      cfg.withDefaults(),
-		gen:      map[string]uint64{},
 		failures: map[string]int{},
 		nextPoll: map[string]time.Time{},
 	}, nil
@@ -206,13 +213,16 @@ func (c *Collector) pollRemote(ctx context.Context, remoteID string, now time.Ti
 	if err != nil {
 		return err
 	}
-	c.mu.Lock()
-	c.gen[remoteID]++
-	gen := c.gen[remoteID]
-	c.mu.Unlock()
+	gen, err := c.spool.allocateGeneration(ctx, remoteID)
+	if err != nil {
+		return fmt.Errorf("pvecollect: allocate generation: %w", err)
+	}
 	obs.CollectionGeneration = gen
 	if _, err := c.spool.WriteFile(ctx, *obs); err != nil {
 		return fmt.Errorf("pvecollect: spool %s: %w", remoteID, err)
+	}
+	if !obs.Complete {
+		return errors.New("pvecollect: incomplete collection")
 	}
 	return nil
 }
@@ -233,7 +243,11 @@ func (c *Collector) recordFailure(remoteID string, now time.Time) {
 	c.failures[remoteID]++
 	delay := c.cfg.InitialBackoff
 	for i := 1; i < c.failures[remoteID] && delay < c.cfg.MaxBackoff; i++ {
-		delay *= 2
+		if delay > c.cfg.MaxBackoff/2 {
+			delay = c.cfg.MaxBackoff
+		} else {
+			delay *= 2
+		}
 	}
 	if delay > c.cfg.MaxBackoff {
 		delay = c.cfg.MaxBackoff
@@ -273,14 +287,36 @@ func (c *Collector) readRemote(ctx context.Context, remoteID string, now time.Ti
 		{method: pb.PVEReadMethod_PVE_READ_METHOD_CLUSTER},
 		{method: pb.PVEReadMethod_PVE_READ_METHOD_TASKS},
 	}
-	res1 := c.runReads(ctx, remoteID, phase1)
-
+	var retainedBytes int
+	checkBudget := func(res readResult) error {
+		retainedBytes += proto.Size(res.resp)
+		if retainedBytes > maxSpoolFileBytes {
+			return ErrOversize
+		}
+		return nil
+	}
 	var vmids []uint64
-	for _, res := range res1 {
+	err := c.runReads(ctx, remoteID, phase1, func(res readResult) error {
+		if err := checkBudget(res); err != nil {
+			return err
+		}
 		switch res.req.method {
 		case pb.PVEReadMethod_PVE_READ_METHOD_NODES:
 			obs.Nodes = convertNodes(res)
 		case pb.PVEReadMethod_PVE_READ_METHOD_GUESTS:
+			guests := res.resp.GetGuests()
+			if guests != nil {
+				if len(guests.Guests) > pvecontract.MaxObjectsPerPage || len(guests.Guests) > pvecontract.MaxGuestsPerRemote {
+					return errors.New("pvecollect: guest list exceeds limit")
+				}
+				seen := make(map[uint64]bool, len(guests.Guests))
+				for _, guest := range guests.Guests {
+					if guest == nil || guest.Vmid < pvecontract.MinVMID || guest.Vmid > pvecontract.MaxVMID || seen[guest.Vmid] {
+						return errors.New("pvecollect: invalid guest identity")
+					}
+					seen[guest.Vmid] = true
+				}
+			}
 			obs.Guests = convertGuests(res)
 			for _, g := range obs.Guests.Value {
 				vmids = append(vmids, g.VMID)
@@ -295,6 +331,19 @@ func (c *Collector) readRemote(ctx context.Context, remoteID string, now time.Ti
 		if res.err != nil || datasetUnavailable(res) {
 			obs.Complete = false
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Validate the complete phase-1 schema before any guest detail work.
+	// Generation 1 is a validation placeholder; allocation happens at publish.
+	obs.CollectionGeneration = 1
+	if !obs.Complete {
+		obs.Reason = "one or more datasets were not read"
+	}
+	if _, err := pvecontract.ValidateObservation(*obs); err != nil {
+		return nil, errors.New("pvecollect: invalid collection input")
 	}
 
 	// Phase 2: per-guest detail reads, only when the guest list is usable.
@@ -308,12 +357,18 @@ func (c *Collector) readRemote(ctx context.Context, remoteID string, now time.Ti
 				readReq{method: pb.PVEReadMethod_PVE_READ_METHOD_BACKUPS, vmid: vmid},
 			)
 		}
-		res2 := c.runReads(ctx, remoteID, phase2)
-		for _, res := range res2 {
+		err := c.runReads(ctx, remoteID, phase2, func(res readResult) error {
+			if err := checkBudget(res); err != nil {
+				return err
+			}
 			c.applyGuestDetail(obs, res)
 			if res.err != nil || datasetUnavailable(res) {
 				obs.Complete = false
 			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -323,32 +378,65 @@ func (c *Collector) readRemote(ctx context.Context, remoteID string, now time.Ti
 	return obs, nil
 }
 
-// runReads executes reqs with bounded concurrency and returns results in the
-// same order as reqs.
-func (c *Collector) runReads(ctx context.Context, remoteID string, reqs []readReq) []readResult {
-	results := make([]readResult, len(reqs))
+// runReads streams results through a fixed worker pool. Each worker holds at
+// most one response; the result buffer holds at most one response per worker.
+// Consumption errors and cancellation stop scheduling remaining work.
+func (c *Collector) runReads(ctx context.Context, remoteID string, reqs []readReq, consume func(readResult) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(reqs) == 0 {
-		return results
+		return nil
 	}
-	sem := make(chan struct{}, c.cfg.MaxConcurrentReads)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	workers := min(c.cfg.MaxConcurrentReads, len(reqs))
+	results := make(chan readResult, workers)
+	var next atomic.Int64
 	var wg sync.WaitGroup
-	for i, r := range reqs {
+	for range workers {
 		wg.Add(1)
-		go func(i int, r readReq) {
+		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			out := readResult{req: r}
-			rctx, cancel := context.WithTimeout(ctx, c.cfg.ReadTimeout)
-			defer cancel()
-			resp, err := c.reader.ReadPVE(rctx, buildReadReq(remoteID, r))
-			out.resp = resp
-			out.err = err
-			results[i] = out
-		}(i, r)
+			for {
+				if ctx.Err() != nil {
+					return
+				}
+				i := int(next.Add(1) - 1)
+				if i >= len(reqs) {
+					return
+				}
+				r := reqs[i]
+				rctx, cancelRead := context.WithTimeout(ctx, c.cfg.ReadTimeout)
+				resp, err := c.reader.ReadPVE(rctx, buildReadReq(remoteID, r))
+				cancelRead()
+				if resp != nil && proto.Size(resp) > maxSpoolFileBytes {
+					resp, err = nil, ErrOversize
+				}
+				select {
+				case results <- readResult{req: r, resp: resp, err: err}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
 	}
-	wg.Wait()
-	return results
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(results); close(done) }()
+	defer func() { cancel(); <-done }()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case res, ok := <-results:
+			if !ok {
+				return ctx.Err()
+			}
+			if err := consume(res); err != nil {
+				return err
+			}
+		}
+	}
 }
 
 // buildReadReq assembles a ReadPVE request for one readReq, honouring the

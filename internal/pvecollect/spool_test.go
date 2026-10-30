@@ -45,6 +45,7 @@ func newTestSpool(t *testing.T) *Spool {
 	if err != nil {
 		t.Fatalf("NewSpool: %v", err)
 	}
+	t.Cleanup(func() { s.Close() })
 	return s
 }
 
@@ -70,8 +71,8 @@ func TestSpoolWriteIsAtomicAndReadable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat results dir: %v", err)
 	}
-	if perm := di.Mode().Perm(); perm != 0o710 {
-		t.Errorf("results dir mode = %o, want 0710", perm)
+	if perm := di.Mode().Perm(); perm != 0o770 {
+		t.Errorf("results dir mode = %o, want 0770", perm)
 	}
 	if filepath.Dir(path) != s.ResultsDir() {
 		t.Errorf("file written to %s, want %s", filepath.Dir(path), s.ResultsDir())

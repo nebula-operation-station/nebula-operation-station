@@ -122,7 +122,7 @@ func (im *Importer) Run(ctx context.Context, interval time.Duration) error {
 	defer t.Stop()
 	for {
 		if rep, err := im.ImportOnce(ctx); err != nil {
-			im.log.Warn("pvecollect: import pass failed", "error", err)
+			im.log.Warn("pvecollect: import pass failed", "reason", "spool_unavailable")
 		} else if rep.Files > 0 {
 			im.log.Info("pvecollect: import pass",
 				"files", rep.Files, "imported", rep.Imported,
@@ -139,8 +139,7 @@ func (im *Importer) Run(ctx context.Context, interval time.Duration) error {
 
 // importFile processes one spool file and always removes it afterwards.
 // The returned message is short and safe to log: it comes from the spool's
-// own validation errors or the store's ingest summary, never from raw file
-// content.
+// fixed rejection codes, never decoder or validation text.
 func (im *Importer) importFile(ctx context.Context, name string) (fileOutcome, string) {
 	// ReadFile revalidates everything the collector checked on write:
 	// name shape, regular file, size limit, strict decode, and that the
@@ -148,13 +147,13 @@ func (im *Importer) importFile(ctx context.Context, name string) (fileOutcome, s
 	obs, err := im.spool.ReadFile(ctx, name)
 	if err != nil {
 		im.drop(ctx, name, err)
-		return fileRejected, err.Error()
+		return fileRejected, "invalid_observation"
 	}
 	// Fast in-memory replay guard; the store's transactional freshness
 	// check is the durable one.
 	if err := im.spool.CheckReplay(obs); err != nil {
 		im.drop(ctx, name, err)
-		return fileReplayed, err.Error()
+		return fileReplayed, "replayed_observation"
 	}
 	irep, err := im.store.IngestObservation(ctx, obs)
 	switch {
@@ -163,18 +162,18 @@ func (im *Importer) importFile(ctx context.Context, name string) (fileOutcome, s
 		return fileImported, ""
 	case errors.Is(err, pveinventory.ErrStaleObservation):
 		im.drop(ctx, name, err)
-		return fileReplayed, err.Error()
+		return fileReplayed, "replayed_observation"
 	case len(irep.Errors) > 0:
 		// Per-dataset failures: the applied datasets are committed, the
 		// failed ones are recorded in the report. The file is dropped
 		// because the collection watermark has advanced and a retry
 		// would be rejected as stale.
 		im.drop(ctx, name, err)
-		return filePartial, err.Error()
+		return filePartial, "partial_observation"
 	default:
 		// Whole-observation validation failed; nothing was applied.
 		im.drop(ctx, name, err)
-		return fileRejected, err.Error()
+		return fileRejected, "invalid_observation"
 	}
 }
 
@@ -183,10 +182,25 @@ func (im *Importer) importFile(ctx context.Context, name string) (fileOutcome, s
 // is idempotent and stale files are rejected.
 func (im *Importer) drop(ctx context.Context, name string, why error) {
 	if err := im.spool.Remove(ctx, name); err != nil {
-		im.log.Warn("pvecollect: remove spool file", "file", name, "error", err)
+		im.log.Warn("pvecollect: remove spool file", "file", name, "reason", "remove_failed")
 		return
 	}
 	if why != nil {
-		im.log.Info("pvecollect: dropped spool file", "file", name, "reason", why)
+		im.log.Info("pvecollect: dropped spool file", "file", name, "reason", rejectionCode(why))
+	}
+}
+
+// rejectionCode deliberately discards error text from all untrusted decoders
+// and validators. Only this fixed vocabulary may reach rejection logs.
+func rejectionCode(err error) string {
+	switch {
+	case errors.Is(err, ErrOversize):
+		return "oversize_observation"
+	case errors.Is(err, ErrSymlink):
+		return "symlink_refused"
+	case errors.Is(err, ErrReplayed), errors.Is(err, pveinventory.ErrStaleObservation):
+		return "replayed_observation"
+	default:
+		return "invalid_observation"
 	}
 }

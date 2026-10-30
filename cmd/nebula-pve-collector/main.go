@@ -64,6 +64,8 @@ func run(socket, executorUser, spoolDir string, interval time.Duration, once boo
 		return err
 	}
 
+	defer spool.Close()
+
 	c, err := pvecollect.New(client, spool, pvecollect.Config{Interval: interval})
 	if err != nil {
 		return err

@@ -23,6 +23,7 @@ func newTestImporter(t *testing.T) (*Importer, *Spool, *pveinventory.Store) {
 	if err != nil {
 		t.Fatalf("NewSpool: %v", err)
 	}
+	t.Cleanup(func() { spool.Close() })
 	db, err := serverdb.Open(filepath.Join(t.TempDir(), "inv.db"))
 	if err != nil {
 		t.Fatalf("serverdb.Open: %v", err)

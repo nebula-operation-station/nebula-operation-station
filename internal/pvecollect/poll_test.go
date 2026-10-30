@@ -127,6 +127,7 @@ func newTestCollector(t *testing.T, fr Reader) (*Collector, *Spool, *time.Time) 
 	if err != nil {
 		t.Fatalf("NewSpool: %v", err)
 	}
+	t.Cleanup(func() { spool.Close() })
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 	nowPtr := &now
 	c, err := New(fr, spool, Config{
@@ -246,8 +247,8 @@ func TestPollOnceBacksOffOnFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PollOnce: %v", err)
 	}
-	if rep.Polled != 1 {
-		t.Fatalf("pass after backoff = %+v, want 1 polled", rep)
+	if rep.Failed != 1 || rep.Polled != 0 {
+		t.Fatalf("pass after backoff = %+v, want 1 failed", rep)
 	}
 }
 
