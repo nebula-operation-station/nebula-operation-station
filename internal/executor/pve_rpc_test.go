@@ -10,7 +10,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
+	"strings"
+
 	"testing"
 	"time"
 
@@ -18,8 +21,10 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
@@ -150,5 +155,69 @@ func TestPveRepinRequiresExactSingleUseHighApproval(t *testing.T) {
 	}
 	if _, err := svc.CommitPVERepin(ctx, request); err == nil {
 		t.Fatal("approval replay accepted")
+	}
+}
+
+func TestListPVERemotesServerRPCReadsRegistryMetadata(t *testing.T) {
+	e := newReconcileEnv(t)
+	for _, tc := range []struct {
+		id   string
+		kind pvecontract.Kind
+		pin  string
+	}{{"cluster", pvecontract.KindCluster, "a"}, {"standalone", pvecontract.KindStandalone, "b"}} {
+		_, err := e.svc.db.AddRemote(pvecontract.Remote{RemoteID: tc.id, Name: tc.id, Kind: tc.kind, Endpoints: []pvecontract.Endpoint{{Host: "pve.lab", Port: 8006}}, TrustPin: strings.Repeat(tc.pin, 64), TrustGeneration: 1}, executordb.PveRemoteCredentials{}, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.svc.db.BlockRemote("standalone", "pin mismatch", "test"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := e.svc.db.ListRemotes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(t.TempDir(), "pve.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := NewGRPCServer(e.svc, peercred.NewPolicy(map[uint32][]peercred.Role{uint32(os.Getuid()): {peercred.RoleServer}}, MethodRoles()), e.svc.log)
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { srv.Stop(); _ = ln.Close() })
+	conn, err := grpc.NewClient("passthrough:///executor", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+		return peercred.DialVerified(ctx, sock, uint32(os.Getuid()))
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := pb.NewExecutorServiceClient(conn).ListPVERemotes(ctx, &pb.ListPVERemotesRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &pb.ListPVERemotesResponse{Remotes: []*pb.PVERemoteInfo{
+		{RemoteId: "cluster", Name: "cluster", Kind: pb.PVERemoteKind_PVE_REMOTE_KIND_CLUSTER, Endpoints: []*pb.PVEEndpoint{{Host: "pve.lab", Port: 8006}}, TrustPin: strings.Repeat("a", 64), TrustGeneration: 1, State: pb.PVERemoteState_PVE_REMOTE_STATE_ACTIVE},
+		{RemoteId: "standalone", Name: "standalone", Kind: pb.PVERemoteKind_PVE_REMOTE_KIND_STANDALONE, Endpoints: []*pb.PVEEndpoint{{Host: "pve.lab", Port: 8006}}, TrustPin: strings.Repeat("b", 64), TrustGeneration: 1, State: pb.PVERemoteState_PVE_REMOTE_STATE_BLOCKED},
+	}}
+	if !proto.Equal(got, want) {
+		t.Fatalf("metadata mismatch: got %v want %v", got, want)
+	}
+	after, err := e.svc.db.ListRemotes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("metadata read changed registry")
+	}
+}
+
+func TestListPVERemotesRegistryErrorIsSanitized(t *testing.T) {
+	svc := &Service{}
+	got, err := svc.ListPVERemotes(context.Background(), &pb.ListPVERemotesRequest{})
+	if got != nil || status.Code(err) != codes.Internal || status.Convert(err).Message() != "pve operation failed" {
+		t.Fatalf("registry error: response=%v error=%v", got, err)
 	}
 }

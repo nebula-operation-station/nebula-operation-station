@@ -176,12 +176,36 @@ func ValidateReadPVERequest(req *pb.ReadPVERequest) error {
 	return nil
 }
 
-// ListPVERemotes (ADR 0006, P1-05) is the PVE read surface for the
-// pve-collector role. It returns Unimplemented until the pveapi wiring
-// lands (P1-07); the request carries no fields, so there is nothing to
-// validate.
-func (s *Service) ListPVERemotes(_ context.Context, _ *pb.ListPVERemotesRequest) (*pb.ListPVERemotesResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "list pve remotes: not wired yet (P1-07)")
+// ListPVERemotes returns public registry metadata for server and collector
+// reads. Credential references and values are excluded from this surface.
+func (s *Service) ListPVERemotes(ctx context.Context, _ *pb.ListPVERemotesRequest) (*pb.ListPVERemotesResponse, error) {
+	s.pveMu.Lock()
+	defer s.pveMu.Unlock()
+	rows, err := s.pveAdmin().ListRemotes(ctx)
+	if err != nil {
+		return nil, pveRPCError(err)
+	}
+	out := &pb.ListPVERemotesResponse{}
+	for _, r := range rows {
+		info := &pb.PVERemoteInfo{RemoteId: r.RemoteID, Name: r.Name, TrustPin: r.TrustPin, TrustGeneration: r.TrustGeneration}
+		switch r.Kind {
+		case pvecontract.KindCluster:
+			info.Kind = pb.PVERemoteKind_PVE_REMOTE_KIND_CLUSTER
+		case pvecontract.KindStandalone:
+			info.Kind = pb.PVERemoteKind_PVE_REMOTE_KIND_STANDALONE
+		}
+		switch r.State {
+		case "active":
+			info.State = pb.PVERemoteState_PVE_REMOTE_STATE_ACTIVE
+		case "blocked":
+			info.State = pb.PVERemoteState_PVE_REMOTE_STATE_BLOCKED
+		}
+		for _, ep := range r.Endpoints {
+			info.Endpoints = append(info.Endpoints, &pb.PVEEndpoint{Host: ep.Host, Port: uint32(ep.Port)})
+		}
+		out.Remotes = append(out.Remotes, info)
+	}
+	return out, nil
 }
 
 // ReadPVE (ADR 0006, P1-05) validates the request with the final rules

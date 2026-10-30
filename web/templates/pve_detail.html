@@ -1,0 +1,85 @@
+{{define "content"}}
+<section class="panel" aria-label="PVE remote">
+  <h2><a href="/pve">{{.PVEDetail.Name}}</a></h2>
+  <p>
+    <span class="badge badge--env">{{.PVEDetail.Kind}}</span>
+    <span class="badge">{{.PVEDetail.StateText}}</span>
+    {{if .PVEDetail.Label}}<span class="badge badge--warning">{{.PVEDetail.Label}}</span>{{end}}
+    {{if .PVEDetail.Link}}<a href="{{.PVEDetail.Link}}" target="_blank" rel="noopener noreferrer">Open PVE UI</a>{{end}}
+  </p>
+  <table class="inventory">
+    <tr><th>Trust pin</th><td class="mono">{{.PVEDetail.PinText}}</td></tr>
+    <tr><th>Last observed</th><td>{{timeTag .PVEDetail.LastObservedAt}}{{if .PVEDetail.Age}} ({{.PVEDetail.Age}}){{end}}</td></tr>
+    <tr><th>Source</th><td>{{.PVEDetail.Source}}</td></tr>
+  </table>
+
+  <h3>Nodes</h3>
+  {{if .PVEDetail.Nodes}}
+  <table class="inventory">
+    <thead>
+      <tr><th>Node</th><th>Status</th><th>PVE</th><th>Kernel</th><th>Last observed</th><th>PVE UI</th></tr>
+    </thead>
+    <tbody>
+      {{range .PVEDetail.Nodes}}
+      <tr>
+        <td>{{.Node}}</td>
+        <td>{{.Status}}{{if .Label}} <span class="badge badge--warning">{{.Label}}</span>{{end}}</td>
+        <td>{{if .PVEVersion}}{{.PVEVersion}}{{else}}—{{end}}{{if .DetailsLabel}} <span class="badge badge--warning">{{.DetailsLabel}}</span>{{end}} {{timeTag .DetailsObservedAt}}{{if .DetailsAge}} ({{.DetailsAge}}){{end}}</td>
+        <td>{{if .KernelVersion}}{{.KernelVersion}}{{else}}—{{end}}{{if .DetailsLabel}} <span class="badge badge--warning">{{.DetailsLabel}}</span>{{end}} {{timeTag .DetailsObservedAt}}{{if .DetailsAge}} ({{.DetailsAge}}){{end}}</td>
+        <td>{{timeTag .ObservedAt}}{{if .Age}} ({{.Age}}){{end}}</td>
+        <td>{{if .Link}}<a href="{{.Link}}" target="_blank" rel="noopener noreferrer">Open</a>{{end}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="status">No nodes stored.</p>
+  {{end}}
+
+  <h3>Guests</h3>
+  {{if .PVEDetail.Guests}}
+  <table class="inventory">
+    <thead>
+      <tr><th>VMID</th><th>Kind</th><th>Name</th><th>Node</th><th>Status</th><th>Last observed</th><th>PVE UI</th></tr>
+    </thead>
+    <tbody>
+      {{range .PVEDetail.Guests}}
+      <tr>
+        <td class="mono">{{.VMIDText}}</td>
+        <td>{{.Kind}}</td>
+        <td>{{.Name}}</td>
+        <td>{{.Node}}</td>
+        <td>{{.Status}}{{if .Label}} <span class="badge badge--warning">{{.Label}}</span>{{end}}</td>
+        <td>{{timeTag .ObservedAt}}{{if .Age}} ({{.Age}}){{end}}</td>
+        <td>{{if .Link}}<a href="{{.Link}}" target="_blank" rel="noopener noreferrer">Open</a>{{end}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="status">No guests stored.</p>
+  {{end}}
+
+  <h3>Datasets</h3>
+  {{if .PVEDetail.Datasets}}
+  <table class="inventory">
+    <thead>
+      <tr><th>Dataset</th><th>State</th><th>Last observed</th><th>Source</th><th>Reason</th></tr>
+    </thead>
+    <tbody>
+      {{range .PVEDetail.Datasets}}
+      <tr>
+        <td>{{.Dataset}}</td>
+        <td>{{.State}}</td>
+        <td>{{timeTag .ObservedAt}}{{if .Age}} ({{.Age}}){{end}}</td>
+        <td>{{.Source}}</td>
+        <td>{{.Reason}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="status">No dataset status stored.</p>
+  {{end}}
+</section>
+{{end}}

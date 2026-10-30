@@ -32,11 +32,10 @@ func TestPVECollectorBoundary(t *testing.T) {
 		uidRoles: map[uint32][]peercred.Role{uint32(os.Getuid()): {peercred.RolePVECollector}},
 	})
 
-	// The two PVE read methods are allowed. The executor answers
-	// Unimplemented until the pveapi wiring lands (P1-07); what matters
-	// here is that the role table does not reject the calls.
-	if _, err := h.client.ListPVERemotes(h.ctx(), &pb.ListPVERemotesRequest{}); status.Code(err) != codes.Unimplemented {
-		t.Fatalf("collector ListPVERemotes: want Unimplemented (allowed, not wired), got %v", err)
+	// Both read methods are allowed. Metadata reads return the empty
+	// registry; ReadPVE remains Unimplemented until its provider is wired.
+	if got, err := h.client.ListPVERemotes(h.ctx(), &pb.ListPVERemotesRequest{}); err != nil || got == nil || len(got.GetRemotes()) != 0 {
+		t.Fatalf("collector ListPVERemotes: want empty registry metadata, got %v, %v", got, err)
 	}
 	if _, err := h.client.ReadPVE(h.ctx(), validReadPVE()); status.Code(err) != codes.Unimplemented {
 		t.Fatalf("collector ReadPVE: want Unimplemented (allowed, not wired), got %v", err)
@@ -104,8 +103,8 @@ func TestPVEReadServerAndAdminAccess(t *testing.T) {
 	hs := newHarness(t, harnessOptions{
 		uidRoles: map[uint32][]peercred.Role{uint32(os.Getuid()): {peercred.RoleServer}},
 	})
-	if _, err := hs.client.ListPVERemotes(hs.ctx(), &pb.ListPVERemotesRequest{}); status.Code(err) != codes.Unimplemented {
-		t.Fatalf("server ListPVERemotes: want Unimplemented (allowed, not wired), got %v", err)
+	if got, err := hs.client.ListPVERemotes(hs.ctx(), &pb.ListPVERemotesRequest{}); err != nil || got == nil || len(got.GetRemotes()) != 0 {
+		t.Fatalf("server ListPVERemotes: want empty registry metadata, got %v, %v", got, err)
 	}
 	if _, err := hs.client.ReadPVE(hs.ctx(), validReadPVE()); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("server ReadPVE: want PermissionDenied, got %v", err)
@@ -115,8 +114,8 @@ func TestPVEReadServerAndAdminAccess(t *testing.T) {
 	ha := newHarness(t, harnessOptions{
 		uidRoles: map[uint32][]peercred.Role{uint32(os.Getuid()): {peercred.RoleAdmin}},
 	})
-	if _, err := ha.client.ListPVERemotes(ha.ctx(), &pb.ListPVERemotesRequest{}); status.Code(err) != codes.Unimplemented {
-		t.Fatalf("admin ListPVERemotes: want Unimplemented (allowed, not wired), got %v", err)
+	if got, err := ha.client.ListPVERemotes(ha.ctx(), &pb.ListPVERemotesRequest{}); err != nil || got == nil || len(got.GetRemotes()) != 0 {
+		t.Fatalf("admin ListPVERemotes: want empty registry metadata, got %v, %v", got, err)
 	}
 	if _, err := ha.client.ReadPVE(ha.ctx(), validReadPVE()); status.Code(err) != codes.Unimplemented {
 		t.Fatalf("admin ReadPVE: want Unimplemented (allowed, not wired), got %v", err)

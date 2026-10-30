@@ -37,6 +37,12 @@
           <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-network"></use></svg>
           <span>Inventory chart</span>
         </a>
+        {{if .PVENav}}
+        <a class="sidebar__item{{if eq .Active "pve"}} sidebar__item--active{{end}}" href="/pve"{{if .NavCollapsed}} title="PVE remotes"{{end}}{{if eq .Active "pve"}} aria-current="page"{{end}}>
+          <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-orbit"></use></svg>
+          <span>PVE remotes</span>
+        </a>
+        {{end}}
         <a class="sidebar__item{{if eq .Active "network"}} sidebar__item--active{{end}}" href="/network"{{if .NavCollapsed}} title="Network"{{end}}{{if eq .Active "network"}} aria-current="page"{{end}}>
           <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-globe"></use></svg>
           <span>Network</span>
