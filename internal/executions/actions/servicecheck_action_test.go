@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestServiceCheckParamsAreStrict checks the service.check parameter
@@ -67,7 +68,7 @@ func TestServiceCheckParamsAreStrict(t *testing.T) {
 }
 
 // runServiceCheck runs the embedded service.check script with the given
-// parameters document (real curl, loopback destinations only) and returns
+// parameters document (real sockets, loopback destinations only) and returns
 // the exit code and the result document.
 func runServiceCheck(t *testing.T, params string) (int, map[string]any) {
 	t.Helper()
@@ -231,5 +232,226 @@ func TestServiceCheckScriptRedirectNotFollowed(t *testing.T) {
 	}
 	if strings.Contains(fmt.Sprint(doc), "127.0.0.1:1") {
 		t.Error("the result must not contain the redirect target")
+	}
+}
+
+func TestServiceCheckRefusesAmbiguousAndResolvedInternalDestinations(t *testing.T) {
+	for _, d := range []string{"127.1", "2130706433", "0177.0.0.1", "0x7f000001", "localhost"} {
+		t.Run(d, func(t *testing.T) {
+			code, doc := runServiceCheck(t, fmt.Sprintf(`{"destination":%q,"port":"80","protocol":"http","internal":"no"}`, d))
+			if code != 10 || doc["phase"] != "precheck" {
+				t.Fatalf("SSRF accepted: %d %v", code, doc)
+			}
+		})
+	}
+}
+
+func TestServiceCheckTCPOnlyNeedsConnection(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		<-done
+	}()
+	start := time.Now()
+	code, doc := runServiceCheck(t, fmt.Sprintf(`{"destination":"127.0.0.1","port":"%d","protocol":"tcp","internal":"yes"}`, ln.Addr().(*net.TCPAddr).Port))
+	if code != 0 || doc["status"] != "ok" {
+		t.Fatalf("connected TCP: %d %v", code, doc)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("TCP probe waited for remote close")
+	}
+}
+
+func TestServiceCheckHTTPDoesNotReadBodyOrInheritCurlConfig(t *testing.T) {
+	methods := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods <- r.Method
+		w.Header().Set("Content-Length", "1000000000")
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, ".curlrc"), []byte("location\nurl = http://127.0.0.1:1/\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := Lookup("service.check")
+	p := filepath.Join(t.TempDir(), "params")
+	params := fmt.Sprintf(`{"destination":"127.0.0.1","port":"%d","protocol":"http","internal":"yes"}`, srv.Listener.Addr().(*net.TCPAddr).Port)
+	if err := os.WriteFile(p, []byte(params), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/sh", "-c", string(a.Script))
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + home, "CURL_HOME=" + home, "http_proxy=http://127.0.0.1:1", "ALL_PROXY=http://127.0.0.1:1", "NEBULA_PARAMS=" + p}
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("probe: %v %s", err, out)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc["status"] != "ok" || doc["http_status"] != 200.0 {
+		t.Fatalf("result: %s", out)
+	}
+	if method := <-methods; method != "HEAD" {
+		t.Fatalf("method: %s", method)
+	}
+}
+
+// runServiceCheckPython exercises the embedded probe with controlled resolver
+// answers. The harness replaces all sockets by default, so metadata/public DNS
+// cases cannot perform network I/O even if destination validation regresses.
+func runServiceCheckPython(t *testing.T, params, setup string) (int, map[string]any) {
+	t.Helper()
+	a, _ := Lookup("service.check")
+	parts := strings.SplitN(string(a.Script), "<<'PY_SERVICE_CHECK'\n", 2)
+	if len(parts) != 2 {
+		t.Fatal("missing embedded Python probe")
+	}
+	source := strings.SplitN(parts[1], "\nPY_SERVICE_CHECK", 2)[0]
+	source = strings.TrimSuffix(strings.TrimSpace(source), "sys.exit(main())")
+	path := filepath.Join(t.TempDir(), "params")
+	if err := os.WriteFile(path, []byte(params), 0600); err != nil {
+		t.Fatal(err)
+	}
+	harness := source + "\n" + `
+def forbidden_socket(*args, **kwargs):
+    raise AssertionError('unexpected socket')
+socket.socket = forbidden_socket
+` + setup + "\nsys.exit(main())\n"
+	cmd := exec.Command("python3", "-I", "-c", harness, path)
+	out, err := cmd.Output()
+	code := 0
+	if err != nil {
+		ee, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatal(err)
+		}
+		code = ee.ExitCode()
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("probe output: %q %v", out, err)
+	}
+	return code, doc
+}
+
+func TestServiceCheckDNSAnswersAreApprovedAndPinned(t *testing.T) {
+	for _, tc := range []struct {
+		name, setup, approved, want string
+		exit                        int
+	}{
+		{"metadata refused", `socket.getaddrinfo = lambda *args: [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('169.254.169.254', 80))]`, "no", "precheck", 10},
+		{"mixed public and metadata refused", `socket.getaddrinfo = lambda *args: [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('192.0.2.10', 80)), (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('169.254.169.254', 80))]`, "no", "precheck", 10},
+		{"IPv6 link local refused", `socket.getaddrinfo = lambda *args: [(socket.AF_INET6, socket.SOCK_STREAM, 6, '', ('fe80::1', 80, 0, 0))]`, "no", "precheck", 10},
+		{"mapped metadata refused", `socket.getaddrinfo = lambda *args: [(socket.AF_INET6, socket.SOCK_STREAM, 6, '', ('::ffff:169.254.169.254', 80, 0, 0))]`, "no", "precheck", 10},
+		{"wrong port refused", `socket.getaddrinfo = lambda *args: [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('192.0.2.10', 81))]`, "yes", "precheck", 10},
+		{"answer count bounded", `socket.getaddrinfo = lambda *args: [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('192.0.2.10', 80))] * 17`, "no", "precheck", 10},
+		{"resolver timeout", `socket.getaddrinfo = lambda *args: time.sleep(30)`, "yes", "timeout", 0},
+		{"explicit metadata approval and pinning", `
+resolutions = 0
+def resolve(*args):
+    global resolutions
+    resolutions += 1
+    if resolutions != 1:
+        raise AssertionError('DNS resolved again')
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('169.254.169.254', 80))]
+class PinnedSocket:
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
+    def settimeout(self, value): pass
+    def connect(self, address):
+        if address != ('169.254.169.254', 80) or resolutions != 1:
+            raise AssertionError('destination changed')
+socket.getaddrinfo = resolve
+socket.socket = lambda *args: PinnedSocket()
+`, "yes", "ok", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Now()
+			code, doc := runServiceCheckPython(t, fmt.Sprintf(`{"destination":"web1.example","port":"80","protocol":"tcp","internal":%q}`, tc.approved), tc.setup)
+			if code != tc.exit || (doc["phase"] != tc.want && doc["status"] != tc.want) {
+				t.Fatalf("result: %d %v", code, doc)
+			}
+			if time.Since(start) > 7*time.Second {
+				t.Fatal("probe exceeded total timeout")
+			}
+		})
+	}
+}
+
+func TestServiceCheckScriptRejectsNonCanonicalParams(t *testing.T) {
+	for _, params := range []string{
+		`{"destination":"127.0.0.1","destination":"web1","port":"80","protocol":"tcp","internal":"yes"}`,
+		`{"destination":"127.0.0.1","port":"80","protocol":"tcp","internal":"yes","extra":"x"}`,
+		`{"destination":"127.0.0.1","port":80,"protocol":"tcp","internal":"yes"}`,
+		`{"destination":"` + strings.Repeat("a", 1025) + `","port":"80","protocol":"tcp","internal":"yes"}`,
+	} {
+		code, doc := runServiceCheck(t, params)
+		if code != 10 || doc["phase"] != "precheck" {
+			t.Fatalf("accepted %d %v", code, doc)
+		}
+	}
+}
+
+func TestServiceCheckHTTPSVerifiesCertificate(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }))
+	defer srv.Close()
+	code, doc := runServiceCheck(t, fmt.Sprintf(`{"destination":"127.0.0.1","port":"%d","protocol":"https","internal":"yes"}`, srv.Listener.Addr().(*net.TCPAddr).Port))
+	if code != 0 || doc["status"] != "tls-error" {
+		t.Fatalf("untrusted certificate accepted: %d %v", code, doc)
+	}
+}
+
+func TestServiceCheckCatalogIsBoundedAndReadOnly(t *testing.T) {
+	a, ok := Lookup("service.check")
+	if !ok || !a.ReadOnly || a.Risk.String() != "RISK_CLASS_LOW" || a.Retry != RetrySafe || a.Timeout > 10*time.Second {
+		t.Fatal("service.check must be LOW, read-only, safely retryable and bounded by 10 seconds")
+	}
+	if err := a.ValidParams(map[string]string{"destination": "::1", "port": "80", "protocol": "http", "internal": "yes"}); err != nil {
+		t.Fatalf("approved IPv6: %v", err)
+	}
+}
+
+func TestServiceCheckStatusLineIsBounded(t *testing.T) {
+	for _, tc := range []struct{ name, line, want string }{
+		{"status only", `b'HTTP/1.1 200 OK\r\n'`, "ok"},
+		{"oversized status", `b'H' * 1025`, "error"},
+		{"malformed status", `b'HTTP/1.1 xyz Bad\r\n'`, "error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setup := `
+socket.getaddrinfo = lambda *args: [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('127.0.0.1', 80))]
+class StatusSocket:
+    def __init__(self): self.line = ` + tc.line + `
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
+    def settimeout(self, value): pass
+    def connect(self, address): pass
+    def sendall(self, request):
+        if request != b'HEAD / HTTP/1.1\r\nHost: web1:80\r\nConnection: close\r\n\r\n':
+            raise AssertionError('unapproved request')
+    def recv(self, size):
+        if size != 1 or not self.line:
+            raise AssertionError('read beyond status line')
+        char, self.line = self.line[:1], self.line[1:]
+        return char
+socket.socket = lambda *args: StatusSocket()
+`
+			code, doc := runServiceCheckPython(t, `{"destination":"web1","port":"80","protocol":"http","internal":"yes"}`, setup)
+			if code != 0 || doc["status"] != tc.want || len(doc) != 5 {
+				t.Fatalf("status document: %d %v", code, doc)
+			}
+		})
 	}
 }

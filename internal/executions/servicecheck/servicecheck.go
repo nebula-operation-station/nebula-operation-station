@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Format is the result document format this action emits.
@@ -28,8 +29,8 @@ const (
 	// MaxDestinationLen is the RFC 1123 maximum for a hostname.
 	MaxDestinationLen = 253
 	// MaxLatencyMS bounds the reported latency: the probe's fixed
-	// --max-time is 5 s, so anything larger is not a probe result.
-	MaxLatencyMS = 60000
+	// total timeout is 5 s, so anything larger is not a probe result.
+	MaxLatencyMS = 5000
 	// MaxDocSize bounds the result document (the probe emits a few dozen
 	// bytes; a larger one is not a probe result).
 	MaxDocSize = 1 << 10
@@ -62,21 +63,23 @@ type Result struct {
 type Check struct {
 	Protocol string // "http", "https" or "tcp"
 	// Destination is a hostname or an IP literal, nothing else.
-	Destination string
+	Destination      string
 	Port             int
 	InternalApproved bool
 }
+
+// numericHostRe rejects legacy inet_aton forms before a resolver can reinterpret them.
+var numericHostRe = regexp.MustCompile(`(?i)^(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+))*$`)
 
 // hostnameRe is a strict RFC 1123 hostname: labels of 1-63 characters of
 // [a-z0-9-], starting and ending with [a-z0-9], no trailing dot. It is
 // deliberately narrower than what a resolver would accept: the destination
 // is embedded in a URL, so it must stay a bare name.
-var hostnameRe = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$`)
+var hostnameRe = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$`)
 
 // ValidateCheck checks one probe destination. Hostnames are accepted as
-// written (the operator approves the name; DNS is resolved on the host at
-// probe time). IP literals are checked against the reserved ranges unless
-// explicitly approved.
+// written; the host probe also validates and pins every DNS answer before
+// connecting. IP literals are checked against reserved ranges unless approved.
 func ValidateCheck(c Check) error {
 	switch c.Protocol {
 	case "http", "https", "tcp":
@@ -87,7 +90,7 @@ func ValidateCheck(c Check) error {
 		return fmt.Errorf("port must be 1-65535")
 	}
 	d := c.Destination
-	if d == "" || len(d) > MaxDestinationLen {
+	if d == "" || len(d) > MaxDestinationLen || strings.Contains(d, "%") {
 		return fmt.Errorf("destination must be a hostname or IP literal of at most %d characters", MaxDestinationLen)
 	}
 	if addr, err := netip.ParseAddr(d); err == nil {
@@ -100,7 +103,7 @@ func ValidateCheck(c Check) error {
 	}
 	// Hostnames are case-insensitive; the destination is embedded in a
 	// URL, so it must stay a bare name.
-	if !hostnameRe.MatchString(strings.ToLower(d)) {
+	if !hostnameRe.MatchString(d) || numericHostRe.MatchString(d) {
 		return fmt.Errorf("destination must be a hostname or IP literal")
 	}
 	return nil
@@ -156,22 +159,47 @@ func ParseResult(b []byte) (Result, error) {
 	if len(b) == 0 || len(b) > MaxDocSize {
 		return Result{}, fmt.Errorf("result must be 1-%d bytes", MaxDocSize)
 	}
+	if !utf8.Valid(b) {
+		return Result{}, fmt.Errorf("result is not UTF-8")
+	}
 	dec := json.NewDecoder(bytes.NewReader(b))
-	var raw map[string]json.RawMessage
-	if err := dec.Decode(&raw); err != nil {
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('{') {
+		return Result{}, fmt.Errorf("result must be an object")
+	}
+	raw := make(map[string]json.RawMessage)
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return Result{}, fmt.Errorf("result is not a JSON document")
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return Result{}, fmt.Errorf("result has an invalid key")
+		}
+		if _, exists := raw[key]; exists {
+			return Result{}, fmt.Errorf("result has a duplicate field")
+		}
+		switch key {
+		case "format", "phase", "status", "latency_ms", "http_status":
+		default:
+			return Result{}, fmt.Errorf("result carries an unexpected field")
+		}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil || bytes.Equal(value, []byte("null")) {
+			return Result{}, fmt.Errorf("result field is invalid")
+		}
+		raw[key] = value
+	}
+	if _, err := dec.Token(); err != nil {
 		return Result{}, fmt.Errorf("result is not a JSON document")
 	}
 	var extra any
 	if err := dec.Decode(&extra); err != io.EOF {
 		return Result{}, fmt.Errorf("result must be exactly one JSON document")
 	}
-	// Any other key (a body, a URL, host text) is refused.
-	for k := range raw {
-		switch k {
-		case "format", "phase", "status", "latency_ms", "http_status":
-		default:
-			return Result{}, fmt.Errorf("result carries an unexpected field")
-		}
+	if len(raw) != 5 {
+		return Result{}, fmt.Errorf("result requires exactly five fields")
 	}
 	d := &doc{}
 	if err := json.Unmarshal(b, d); err != nil {
@@ -183,30 +211,40 @@ func ParseResult(b []byte) (Result, error) {
 	if d.LatencyMS < 0 || d.LatencyMS > MaxLatencyMS {
 		return Result{}, fmt.Errorf("latency is outside 0-%d ms", MaxLatencyMS)
 	}
-	if d.HTTPStatus < 0 || d.HTTPStatus > 599 {
-		return Result{}, fmt.Errorf("http status is outside 0-599")
+	r := Result{Status: Status(d.Status), Latency: time.Duration(d.LatencyMS) * time.Millisecond, HTTPStatus: d.HTTPStatus}
+	if err := ValidateResult(r); err != nil {
+		return Result{}, err
 	}
-	r := Result{Latency: time.Duration(d.LatencyMS) * time.Millisecond, HTTPStatus: d.HTTPStatus}
-	switch Status(d.Status) {
+	return r, nil
+}
+
+// ValidateResult rejects inconsistent statuses and values outside the probe bounds.
+func ValidateResult(r Result) error {
+	if r.Latency < 0 || r.Latency > MaxLatencyMS*time.Millisecond {
+		return fmt.Errorf("latency is outside probe bounds")
+	}
+	if r.HTTPStatus < 0 || r.HTTPStatus > 599 {
+		return fmt.Errorf("http status is outside 0-599")
+	}
+	switch r.Status {
 	case StatusOK:
-		if d.HTTPStatus != 0 && (d.HTTPStatus < 200 || d.HTTPStatus > 299) {
-			return Result{}, fmt.Errorf("status ok requires a 2xx or no status code")
+		if r.HTTPStatus != 0 && (r.HTTPStatus < 200 || r.HTTPStatus > 299) {
+			return fmt.Errorf("status ok requires a 2xx or no status code")
 		}
 	case StatusRedirect:
-		if d.HTTPStatus < 300 || d.HTTPStatus > 399 {
-			return Result{}, fmt.Errorf("status redirect requires a 3xx status code")
+		if r.HTTPStatus < 300 || r.HTTPStatus > 399 {
+			return fmt.Errorf("status redirect requires a 3xx status code")
 		}
 	case StatusHTTPError:
-		if d.HTTPStatus < 400 || d.HTTPStatus > 599 {
-			return Result{}, fmt.Errorf("status http-error requires a 4xx or 5xx status code")
+		if r.HTTPStatus < 400 || r.HTTPStatus > 599 {
+			return fmt.Errorf("status http-error requires a 4xx or 5xx status code")
 		}
 	case StatusRefused, StatusUnresolved, StatusTimeout, StatusTLS, StatusError:
-		if d.HTTPStatus != 0 {
-			return Result{}, fmt.Errorf("status %s must not carry a status code", d.Status)
+		if r.HTTPStatus != 0 {
+			return fmt.Errorf("failed probe must not carry a status code")
 		}
 	default:
-		return Result{}, fmt.Errorf("unknown status %q", d.Status)
+		return fmt.Errorf("unknown probe status")
 	}
-	r.Status = Status(d.Status)
-	return r, nil
+	return nil
 }

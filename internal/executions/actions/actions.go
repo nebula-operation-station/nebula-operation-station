@@ -119,7 +119,7 @@ var unitParam = []Param{{Name: "unit", Label: "Unit (e.g. nginx.service)", Patte
 // destination: a bare hostname or IP literal (the script and
 // servicecheck.ValidateCheck apply the stricter rules, including the
 // reserved-range approval).
-var serviceCheckDestinationRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$`)
+var serviceCheckDestinationRe = regexp.MustCompile(`^[A-Za-z0-9:][A-Za-z0-9.:-]{0,252}$`)
 
 var serviceCheckParams = []Param{
 	{Name: "destination", Label: "Approved destination (hostname or IP literal)", Pattern: serviceCheckDestinationRe},
@@ -208,7 +208,7 @@ var serviceList []byte
 //go:embed scripts/service_status.sh
 var serviceStatus []byte
 
-//go:embed scripts/service_check.sh
+//go:embed servicecheck/check.sh
 var serviceCheck []byte
 
 //go:embed scripts/docker_list.sh
@@ -311,9 +311,9 @@ var Builtin = []Action{
 	},
 	{
 		ID: "service.check", Version: "1.0.0", Title: "Service check",
-		Description: "One bounded HTTP(S) or TCP probe to an operator-approved destination and port: a fixed status and the latency only, no redirects, no response bodies. Reserved (internal) IP literals need the explicit internal=yes approval. Read-only.",
-		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: time.Minute, ReadOnly: true, Script: serviceCheck, Params: serviceCheckParams, Retry: RetrySafe,
-		Validate:    serviceCheckValidate,
+		Description: "One bounded HTTP(S) or TCP probe to an operator-approved destination and port: a fixed status and the latency only, no redirects, no response bodies. Reserved addresses, including DNS answers, need explicit internal=yes approval. Requires python3. Read-only.",
+		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 10 * time.Second, ReadOnly: true, Script: serviceCheck, Params: serviceCheckParams, Retry: RetrySafe,
+		Validate: serviceCheckValidate,
 	},
 	{
 		ID: "service.restart", Version: "1.0.0", Title: "Restart service", Description: "systemctl restart of one unit (sudo).",

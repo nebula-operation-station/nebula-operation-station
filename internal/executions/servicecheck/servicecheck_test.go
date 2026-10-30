@@ -14,47 +14,47 @@ func TestValidateCheck(t *testing.T) {
 		ok     bool
 		reason string
 	}{
-		"hostname http":       {check: Check{Protocol: "http", Destination: "web1", Port: 80}, ok: true},
-		"hostname https":      {check: Check{Protocol: "https", Destination: "web1.lab.example", Port: 443}, ok: true},
-		"public ip tcp":       {check: Check{Protocol: "tcp", Destination: "192.0.2.10", Port: 5432}, ok: true},
-		"public ip boundary":  {check: Check{Protocol: "tcp", Destination: "172.32.0.1", Port: 80}, ok: true},
-		"cgNat boundary":      {check: Check{Protocol: "tcp", Destination: "100.128.0.1", Port: 80}, ok: true},
-		"longest hostname":    {check: Check{Protocol: "tcp", Destination: strings.Repeat("a", 63) + "." + strings.Repeat("a", 63) + "." + strings.Repeat("a", 63) + "." + strings.Repeat("a", 61), Port: 80}, ok: true},
-		"longest label":       {check: Check{Protocol: "tcp", Destination: strings.Repeat("a", 63), Port: 80}, ok: true},
-		"port boundary high":  {check: Check{Protocol: "http", Destination: "web1", Port: 65535}, ok: true},
-		"private approved":    {check: Check{Protocol: "tcp", Destination: "192.168.1.10", Port: 9000, InternalApproved: true}, ok: true},
+		"hostname http":         {check: Check{Protocol: "http", Destination: "web1", Port: 80}, ok: true},
+		"hostname https":        {check: Check{Protocol: "https", Destination: "web1.lab.example", Port: 443}, ok: true},
+		"public ip tcp":         {check: Check{Protocol: "tcp", Destination: "192.0.2.10", Port: 5432}, ok: true},
+		"public ip boundary":    {check: Check{Protocol: "tcp", Destination: "172.32.0.1", Port: 80}, ok: true},
+		"cgNat boundary":        {check: Check{Protocol: "tcp", Destination: "100.128.0.1", Port: 80}, ok: true},
+		"longest hostname":      {check: Check{Protocol: "tcp", Destination: strings.Repeat("a", 63) + "." + strings.Repeat("a", 63) + "." + strings.Repeat("a", 63) + "." + strings.Repeat("a", 61), Port: 80}, ok: true},
+		"longest label":         {check: Check{Protocol: "tcp", Destination: strings.Repeat("a", 63), Port: 80}, ok: true},
+		"port boundary high":    {check: Check{Protocol: "http", Destination: "web1", Port: 65535}, ok: true},
+		"private approved":      {check: Check{Protocol: "tcp", Destination: "192.168.1.10", Port: 9000, InternalApproved: true}, ok: true},
 		"ipv6 literal approved": {check: Check{Protocol: "tcp", Destination: "2001:db8::10", Port: 8080, InternalApproved: true}, ok: true},
-		"loopback approved":   {check: Check{Protocol: "tcp", Destination: "127.0.0.1", Port: 22, InternalApproved: true}, ok: true},
-		"metadata approved":   {check: Check{Protocol: "http", Destination: "169.254.169.254", Port: 80, InternalApproved: true}, ok: true},
-		"private":             {check: Check{Protocol: "tcp", Destination: "192.168.1.10", Port: 9000}, ok: false, reason: "internal"},
-		"private 10":          {check: Check{Protocol: "tcp", Destination: "10.0.0.5", Port: 445}, ok: false, reason: "internal"},
-		"private 172.16":      {check: Check{Protocol: "tcp", Destination: "172.16.0.1", Port: 80}, ok: false, reason: "internal"},
-		"link-local metadata": {check: Check{Protocol: "http", Destination: "169.254.169.254", Port: 80}, ok: false, reason: "internal"},
-		"loopback":            {check: Check{Protocol: "tcp", Destination: "127.0.0.1", Port: 22}, ok: false, reason: "internal"},
-		"this network":        {check: Check{Protocol: "tcp", Destination: "0.0.0.0", Port: 80}, ok: false, reason: "internal"},
-		"cgNat":               {check: Check{Protocol: "tcp", Destination: "100.64.0.1", Port: 80}, ok: false, reason: "internal"},
-		"cgNat high":          {check: Check{Protocol: "tcp", Destination: "100.127.255.255", Port: 80}, ok: false, reason: "internal"},
-		"multicast":           {check: Check{Protocol: "tcp", Destination: "224.0.0.1", Port: 80}, ok: false, reason: "internal"},
-		"broadcast":           {check: Check{Protocol: "tcp", Destination: "255.255.255.255", Port: 80}, ok: false, reason: "internal"},
-		"ipv6 loopback":       {check: Check{Protocol: "tcp", Destination: "::1", Port: 80}, ok: false, reason: "internal"},
-		"ipv6 link-local":     {check: Check{Protocol: "tcp", Destination: "fe80::1", Port: 80}, ok: false, reason: "internal"},
-		"ipv6 unique local":   {check: Check{Protocol: "tcp", Destination: "fc00::1", Port: 80}, ok: false, reason: "internal"},
-		"ipv6 multicast":      {check: Check{Protocol: "tcp", Destination: "ff02::1", Port: 80}, ok: false, reason: "internal"},
-		"scheme":              {check: Check{Protocol: "tcp", Destination: "http://web1", Port: 80}, ok: false, reason: "destination"},
-		"embedded port":       {check: Check{Protocol: "tcp", Destination: "web1:80", Port: 80}, ok: false, reason: "destination"},
-		"path":                {check: Check{Protocol: "tcp", Destination: "web1.evil/x", Port: 80}, ok: false, reason: "destination"},
-		"userinfo":            {check: Check{Protocol: "tcp", Destination: "web1@evil", Port: 80}, ok: false, reason: "destination"},
-		"space":               {check: Check{Protocol: "tcp", Destination: " web1", Port: 80}, ok: false, reason: "destination"},
-		"leading hyphen":      {check: Check{Protocol: "tcp", Destination: "-web1", Port: 80}, ok: false, reason: "destination"},
-		"trailing dot":        {check: Check{Protocol: "tcp", Destination: "web1.", Port: 80}, ok: false, reason: "destination"},
-		"underscore":          {check: Check{Protocol: "tcp", Destination: "web_1", Port: 80}, ok: false, reason: "destination"},
-		"empty label":         {check: Check{Protocol: "tcp", Destination: "a..b", Port: 80}, ok: false, reason: "destination"},
-		"empty":               {check: Check{Protocol: "tcp", Destination: "", Port: 80}, ok: false, reason: "destination"},
-		"too long":            {check: Check{Protocol: "tcp", Destination: strings.Repeat("a", 254), Port: 80}, ok: false, reason: "destination"},
-		"long label":          {check: Check{Protocol: "tcp", Destination: strings.Repeat("a", 64), Port: 80}, ok: false, reason: "destination"},
-		"bad protocol":        {check: Check{Protocol: "udp", Destination: "web1", Port: 80}, ok: false, reason: "protocol"},
-		"port zero":           {check: Check{Protocol: "http", Destination: "web1", Port: 0}, ok: false, reason: "port"},
-		"port high":           {check: Check{Protocol: "http", Destination: "web1", Port: 65536}, ok: false, reason: "port"},
+		"loopback approved":     {check: Check{Protocol: "tcp", Destination: "127.0.0.1", Port: 22, InternalApproved: true}, ok: true},
+		"metadata approved":     {check: Check{Protocol: "http", Destination: "169.254.169.254", Port: 80, InternalApproved: true}, ok: true},
+		"private":               {check: Check{Protocol: "tcp", Destination: "192.168.1.10", Port: 9000}, ok: false, reason: "internal"},
+		"private 10":            {check: Check{Protocol: "tcp", Destination: "10.0.0.5", Port: 445}, ok: false, reason: "internal"},
+		"private 172.16":        {check: Check{Protocol: "tcp", Destination: "172.16.0.1", Port: 80}, ok: false, reason: "internal"},
+		"link-local metadata":   {check: Check{Protocol: "http", Destination: "169.254.169.254", Port: 80}, ok: false, reason: "internal"},
+		"loopback":              {check: Check{Protocol: "tcp", Destination: "127.0.0.1", Port: 22}, ok: false, reason: "internal"},
+		"this network":          {check: Check{Protocol: "tcp", Destination: "0.0.0.0", Port: 80}, ok: false, reason: "internal"},
+		"cgNat":                 {check: Check{Protocol: "tcp", Destination: "100.64.0.1", Port: 80}, ok: false, reason: "internal"},
+		"cgNat high":            {check: Check{Protocol: "tcp", Destination: "100.127.255.255", Port: 80}, ok: false, reason: "internal"},
+		"multicast":             {check: Check{Protocol: "tcp", Destination: "224.0.0.1", Port: 80}, ok: false, reason: "internal"},
+		"broadcast":             {check: Check{Protocol: "tcp", Destination: "255.255.255.255", Port: 80}, ok: false, reason: "internal"},
+		"ipv6 loopback":         {check: Check{Protocol: "tcp", Destination: "::1", Port: 80}, ok: false, reason: "internal"},
+		"ipv6 link-local":       {check: Check{Protocol: "tcp", Destination: "fe80::1", Port: 80}, ok: false, reason: "internal"},
+		"ipv6 unique local":     {check: Check{Protocol: "tcp", Destination: "fc00::1", Port: 80}, ok: false, reason: "internal"},
+		"ipv6 multicast":        {check: Check{Protocol: "tcp", Destination: "ff02::1", Port: 80}, ok: false, reason: "internal"},
+		"scheme":                {check: Check{Protocol: "tcp", Destination: "http://web1", Port: 80}, ok: false, reason: "destination"},
+		"embedded port":         {check: Check{Protocol: "tcp", Destination: "web1:80", Port: 80}, ok: false, reason: "destination"},
+		"path":                  {check: Check{Protocol: "tcp", Destination: "web1.evil/x", Port: 80}, ok: false, reason: "destination"},
+		"userinfo":              {check: Check{Protocol: "tcp", Destination: "web1@evil", Port: 80}, ok: false, reason: "destination"},
+		"space":                 {check: Check{Protocol: "tcp", Destination: " web1", Port: 80}, ok: false, reason: "destination"},
+		"leading hyphen":        {check: Check{Protocol: "tcp", Destination: "-web1", Port: 80}, ok: false, reason: "destination"},
+		"trailing dot":          {check: Check{Protocol: "tcp", Destination: "web1.", Port: 80}, ok: false, reason: "destination"},
+		"underscore":            {check: Check{Protocol: "tcp", Destination: "web_1", Port: 80}, ok: false, reason: "destination"},
+		"empty label":           {check: Check{Protocol: "tcp", Destination: "a..b", Port: 80}, ok: false, reason: "destination"},
+		"empty":                 {check: Check{Protocol: "tcp", Destination: "", Port: 80}, ok: false, reason: "destination"},
+		"too long":              {check: Check{Protocol: "tcp", Destination: strings.Repeat("a", 254), Port: 80}, ok: false, reason: "destination"},
+		"long label":            {check: Check{Protocol: "tcp", Destination: strings.Repeat("a", 64), Port: 80}, ok: false, reason: "destination"},
+		"bad protocol":          {check: Check{Protocol: "udp", Destination: "web1", Port: 80}, ok: false, reason: "protocol"},
+		"port zero":             {check: Check{Protocol: "http", Destination: "web1", Port: 0}, ok: false, reason: "port"},
+		"port high":             {check: Check{Protocol: "http", Destination: "web1", Port: 65536}, ok: false, reason: "port"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := ValidateCheck(tc.check)
@@ -176,5 +176,37 @@ func TestParseResult(t *testing.T) {
 				t.Fatalf("got %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestAmbiguousDestinationsAreRejected(t *testing.T) {
+	for _, d := range []string{"2130706433", "127.1", "0177.0.0.1", "0x7f000001", "0x7f.0.0.1", "127.000.000.001", "::ffff:127.0.0.1%eth0", "fe80::1%eth0"} {
+		for _, approved := range []bool{false, true} {
+			if err := ValidateCheck(Check{Protocol: "http", Destination: d, Port: 80, InternalApproved: approved}); err == nil {
+				t.Errorf("accepted ambiguous destination %q (approved=%v)", d, approved)
+			}
+		}
+	}
+}
+
+func TestResultRequiresExactFields(t *testing.T) {
+	for _, doc := range []string{
+		`{"format":"service-check-v1","phase":"done","status":"ok"}`,
+		`{"format":"service-check-v1","phase":"done","status":"ok","latency_ms":null,"http_status":0}`,
+		`{"format":"service-check-v1","phase":"done","status":"ok","latency_ms":0,"http_status":0,"status":"refused"}`,
+		`{"format":"service-check-v1","phase":"done","status":"timeout","latency_ms":5001,"http_status":0}`,
+		"{\"format\":\"service-check-v1\",\"phase\":\"done\",\"status\":\"ok\",\"latency_ms\":0,\"http_status\":0,\"\xff\":0}",
+	} {
+		if _, err := ParseResult([]byte(doc)); err == nil {
+			t.Errorf("accepted malformed result %q", doc)
+		}
+	}
+}
+
+func TestDestinationsAreASCII(t *testing.T) {
+	for _, d := range []string{"K.example", "İ.example", "ſ.example", "web\nexample"} {
+		if err := ValidateCheck(Check{Protocol: "http", Destination: d, Port: 80}); err == nil {
+			t.Errorf("accepted destination %q", d)
+		}
 	}
 }
