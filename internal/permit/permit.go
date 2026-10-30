@@ -267,6 +267,9 @@ type Options struct {
 	RiskPolicy RiskPolicy
 	// Schedules persists schedule grants; nil disables them.
 	Schedules ScheduleStore
+	// Leases persists read grants; nil uses Schedules when configured,
+	// otherwise disables them.
+	Leases ReadGrantStore
 }
 
 // Authority owns all permits and the privileged session. It is safe for
@@ -283,6 +286,10 @@ type Authority struct {
 	// holds the proposed ones until approval.
 	schedules ScheduleStore
 	grants    map[string]*pendingGrant
+	// leases persists approved read grants (nil: disabled); readGrants
+	// holds the proposed ones until approval.
+	leases     ReadGrantStore
+	readGrants map[string]*pendingReadGrant
 	// trusts holds browser trust requests until their assertion (M7-4).
 	trusts map[string]*PendingTrust
 
@@ -311,6 +318,9 @@ func New(o Options) (*Authority, error) {
 	if o.RiskPolicy == nil {
 		return nil, errors.New("permit: a risk policy is required")
 	}
+	if o.Leases == nil && o.Schedules != nil {
+		o.Leases = o.Schedules
+	}
 	if o.Now == nil {
 		o.Now = time.Now
 	}
@@ -332,6 +342,8 @@ func New(o Options) (*Authority, error) {
 		executions: map[string]canonical.Digest{},
 		schedules:  o.Schedules,
 		grants:     map[string]*pendingGrant{},
+		leases:     o.Leases,
+		readGrants: map[string]*pendingReadGrant{},
 		scans:      map[string]scanResult{},
 		trusts:     map[string]*PendingTrust{},
 	}, nil
@@ -868,6 +880,7 @@ func (a *Authority) Lock(who string) {
 	// Pending schedule grants go too; approved ones stay (they need an
 	// unlocked keyring to run anyway, and are revoked one by one).
 	a.grants = map[string]*pendingGrant{}
+	a.readGrants = map[string]*pendingReadGrant{}
 	a.trusts = map[string]*PendingTrust{}
 	// Execution IDs stay reserved so a revoked request cannot be re-bound to
 	// different content under the same ID.

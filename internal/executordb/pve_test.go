@@ -4,9 +4,12 @@ package executordb
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -709,33 +712,28 @@ func TestPveClosedDBFailsClosed(t *testing.T) {
 func TestPveMigrationUpOnExistingDatabase(t *testing.T) {
 	dir := privateDir(t)
 	ms := mustMigrations(t)
-	if len(ms) < 2 {
-		t.Fatal("no migrations shipped")
-	}
-	newest := ms[len(ms)-1].version
-
-	db := openT(t, dir)
-	// Simulate a database from a binary without the PVE registry: drop the
-	// PVE objects and unrecord the newest migration.
-	for _, stmt := range []string{
-		`DROP TABLE pve_remote_changes`,
-		`DROP TABLE pve_remote_endpoints`,
-		`DROP INDEX pve_remote_trust_pin_idx`,
-		`DROP TABLE pve_remotes`,
-	} {
-		if _, err := db.sql.Exec(stmt); err != nil {
-			t.Fatalf("simulate old database: %v", err)
+	pve := -1
+	for i, m := range ms {
+		if m.name == "0014_pve_remotes.sql" {
+			pve = i
 		}
 	}
-	if _, err := db.sql.Exec(`DELETE FROM schema_migrations WHERE version = ?`, newest); err != nil {
+	if pve < 1 {
+		t.Fatal("PVE migration not shipped")
+	}
+	pveVersion := ms[pve].version
+	// Simulate a database from a binary without the PVE registry: every
+	// migration before the PVE one applied and recorded, nothing from it
+	// onward. (The schema version is a single watermark, so the PVE
+	// migration can only be re-applied on a database that predates it.)
+	if err := seedPrePveDatabase(t, dir, ms[:pve]); err != nil {
 		t.Fatal(err)
 	}
-	db.Close()
 
 	// Reopening must apply the PVE migration on the existing schema.
 	db2 := openT(t, dir)
 	var n int
-	if err := db2.sql.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, newest).Scan(&n); err != nil {
+	if err := db2.sql.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, pveVersion).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
@@ -762,6 +760,46 @@ func TestPveMigrationUpOnExistingDatabase(t *testing.T) {
 	if _, err := db2.sql.Exec(`INSERT INTO pve_remote_changes (remote_id, change_type, detail, actor, at) VALUES ('migr', 'created', '', 'admin', 0)`); err != nil {
 		t.Fatalf("insert into pve_remote_changes: %v", err)
 	}
+}
+
+// seedPrePveDatabase builds executor.db in dir as a binary without the PVE
+// registry left it: the given migrations (everything before the PVE one)
+// applied and recorded, nothing after. The real Open then applies the PVE
+// migration (and any later one) on the existing schema.
+func seedPrePveDatabase(t *testing.T, dir string, ms []migration) error {
+	t.Helper()
+	path := filepath.Join(dir, FileName)
+	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(%d)&_pragma=foreign_keys(1)&_pragma=locking_mode(EXCLUSIVE)&_journal_mode=WAL&_synchronous=FULL",
+		path, busyTimeout.Milliseconds())
+	sdb, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return err
+	}
+	sdb.SetMaxOpenConns(1)
+	sdb.SetMaxIdleConns(1)
+	if _, err := sdb.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
+		sdb.Close()
+		return err
+	}
+	for _, m := range ms {
+		if err := apply(sdb, m, func() time.Time { return pveT0 }); err != nil {
+			sdb.Close()
+			return err
+		}
+	}
+	if err := sdb.Close(); err != nil {
+		return err
+	}
+	// SQLite creates the file with the default umask; the executor requires
+	// 0600. The WAL sidecars go away with the connection; remove any that
+	// remain so the real Open starts clean.
+	if err := os.Chmod(path, 0o600); err != nil {
+		return err
+	}
+	for _, p := range []string{path + "-wal", path + "-shm"} {
+		_ = os.Remove(p)
+	}
+	return nil
 }
 
 // TestPveMigrationUniquePinIndex checks the database-level guard against

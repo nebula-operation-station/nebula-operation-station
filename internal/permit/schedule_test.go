@@ -4,7 +4,6 @@ package permit
 
 import (
 	"encoding/json"
-	"sync"
 	"testing"
 	"time"
 
@@ -16,13 +15,11 @@ import (
 
 // memSchedules is an in-memory ScheduleStore.
 type memSchedules struct {
-	mu     sync.Mutex
-	grants map[string]StoredGrant
-	last   map[string]time.Time
+	*memLeases
 }
 
 func newMemSchedules() *memSchedules {
-	return &memSchedules{grants: map[string]StoredGrant{}, last: map[string]time.Time{}}
+	return &memSchedules{memLeases: newMemLeases()}
 }
 
 func (m *memSchedules) SaveScheduleGrant(g StoredGrant) error {
@@ -62,14 +59,7 @@ func (m *memSchedules) RevokeScheduleGrant(id string, at time.Time) (bool, error
 }
 
 func (m *memSchedules) ClaimScheduleRun(grantID, actionID, hostID string, now time.Time, minInterval time.Duration) (bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	k := grantID + "|" + actionID + "|" + hostID
-	if last, ok := m.last[k]; ok && now.Sub(last) < minInterval {
-		return false, nil
-	}
-	m.last[k] = now
-	return true, nil
+	return m.ReserveReadRun(grantID, actionID, hostID, now, GlobalRunBudget, minInterval)
 }
 
 func (e *env) withSchedules(t *testing.T, mode Mode) *memSchedules {
@@ -219,6 +209,47 @@ func TestScheduleGrantExpires(t *testing.T) {
 	e.approvedGrant()
 	e.clk.Add(30*24*time.Hour + time.Second)
 	_, err := e.auth.AuthorizeScheduled(grantID, "x", goodRun("dockerflux", fpA))
+	wantCode(t, err, CodeGrantInactive)
+}
+
+func TestLegacyScheduleUsesReadGrantAuthorityWithoutExtendingScope(t *testing.T) {
+	e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
+	e.withSchedules(t, ModeStandard)
+	e.openSession()
+	var doc schedgrant.Doc
+	if err := json.Unmarshal(e.grantDoc(grantID), &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc.ExpiryUnix = e.clk.Now().Add(90 * 24 * time.Hour).Unix()
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := e.auth.ProposeScheduleGrant(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := e.auth.CommitScheduleGrant(p.Digest, e.sign(p.Challenge))
+	if err != nil {
+		t.Fatal(err)
+	}
+	all, err := e.auth.ReadGrants()
+	if err != nil || len(all) != 1 || string(all[0].Doc) != string(g.Doc) || all[0].Digest != g.Digest || !all[0].ExpiresAt.Equal(g.ExpiresAt) {
+		t.Fatalf("legacy approval missing from shared registry: %+v, %v", all, err)
+	}
+	run := goodRun("dockerflux", fpA)
+	_, err = e.auth.AuthorizeReadRun(g.ID, "on-demand", TriggerOnDemand, run)
+	wantCode(t, err, CodeLeaseNotCovered)
+	e.clk.Add(89 * 24 * time.Hour)
+	if _, err := e.auth.AuthorizeReadRun(g.ID, "scheduled", TriggerScheduled, run); err != nil {
+		t.Fatalf("legacy expiry shortened: %v", err)
+	}
+	_, err = e.auth.AuthorizeScheduled(g.ID, "again", run)
+	wantCode(t, err, CodeTooSoon)
+	if err := e.auth.RevokeReadGrant(g.ID, "test"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = e.auth.AuthorizeScheduled(g.ID, "revoked", run)
 	wantCode(t, err, CodeGrantInactive)
 }
 
