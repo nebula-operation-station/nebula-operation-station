@@ -323,8 +323,8 @@ func TestNewPVECollectorWithCollectorOnlyUID(t *testing.T) {
 		t.Fatalf("new collector client: %v", err)
 	}
 	t.Cleanup(func() { c.Close() })
-	if _, err := c.ListPVERemotes(h.ctx(), &pb.ListPVERemotesRequest{}); status.Code(err) != codes.Unimplemented {
-		t.Fatalf("collector ListPVERemotes: want Unimplemented, got %v", err)
+	if got, err := c.ListPVERemotes(h.ctx(), &pb.ListPVERemotesRequest{}); err != nil || got == nil || len(got.GetRemotes()) != 0 {
+		t.Fatalf("collector ListPVERemotes: want empty registry metadata, got %v, %v", got, err)
 	}
 	if _, err := c.ReadPVE(h.ctx(), &pb.ReadPVERequest{RemoteId: "pve-1", Method: pb.PVEReadMethod_PVE_READ_METHOD_NODES}); status.Code(err) != codes.Unimplemented {
 		t.Fatalf("collector ReadPVE: want Unimplemented, got %v", err)

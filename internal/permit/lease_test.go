@@ -40,6 +40,11 @@ func readGrantDocAt(t *testing.T, now time.Time, lifetime time.Duration) ReadGra
 		},
 		MinIntervalS: 900,
 		RunBudget:    DefaultRunBudget,
+		RateProfile:  "ordinary",
+		Credentials: []ReadGrantCredential{
+			{HostID: "dockerflux", CredentialRef: "nebula-default", CredentialVersion: fpA},
+			{HostID: "strompi", CredentialRef: "nebula-default", CredentialVersion: fpA},
+		},
 	}
 }
 
@@ -159,8 +164,10 @@ func TestReadGrantDocBoundaries(t *testing.T) {
 			ArtifactSHA256: hexSum(artifact), ParametersHash: ph})
 	}
 	d.Targets = nil
+	d.Credentials = nil
 	for i := 0; i < 1000; i++ {
 		d.Targets = append(d.Targets, canonical.Target{HostID: "h" + itoa(i), HostKeyFingerprint: fpA})
+		d.Credentials = append(d.Credentials, ReadGrantCredential{HostID: "h" + itoa(i), CredentialRef: "nebula-default", CredentialVersion: fpA})
 	}
 	if _, _, _, err := ParseReadGrant(readGrantRaw(t, d), now); err != nil {
 		t.Fatalf("32 actions / 1000 targets: %v", err)
@@ -237,4 +244,59 @@ func itoa(i int) string {
 		i /= 10
 	}
 	return string(b[pos:])
+}
+
+func TestReadGrantRejectsUntrustedDocumentsWithoutEchoingValues(t *testing.T) {
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	valid := readGrantRaw(t, readGrantDocAt(t, now, DefaultReadGrantLifetime))
+	const marker = "untrusted-input-marker"
+	for name, raw := range map[string][]byte{
+		"oversize":         bytes.Repeat([]byte(" "), MaxReadGrantDocSize+1),
+		"invalid utf8":     bytes.Replace(valid, []byte(`"root"`), []byte{'"', 0xff, '"'}, 1),
+		"unknown member":   append([]byte(`{"`+marker+`":true,`), valid[1:]...),
+		"duplicate member": append([]byte(`{"`+marker+`":true,"`+marker+`":false,`), valid[1:]...),
+		"invalid target":   bytes.Replace(valid, []byte(`"dockerflux"`), []byte(`"`+marker+` "`), 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, _, err := ParseReadGrant(raw, now)
+			if err == nil {
+				t.Fatal("invalid document accepted")
+			}
+			if strings.Contains(err.Error(), marker) {
+				t.Fatalf("untrusted value in error: %v", err)
+			}
+		})
+	}
+}
+
+func TestReadGrantV2BindsOrdinaryProfileAndCredentialVersions(t *testing.T) {
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	for name, mutate := range map[string]func(*ReadGrantDoc){
+		"missing profile":        func(d *ReadGrantDoc) { d.RateProfile = "" },
+		"unapproved profile":     func(d *ReadGrantDoc) { d.RateProfile = "telemetry" },
+		"missing credentials":    func(d *ReadGrantDoc) { d.Credentials = nil },
+		"missing target binding": func(d *ReadGrantDoc) { d.Credentials = d.Credentials[:1] },
+		"duplicate binding":      func(d *ReadGrantDoc) { d.Credentials[1] = d.Credentials[0] },
+		"unfrozen target":        func(d *ReadGrantDoc) { d.Credentials[0].HostID = "unapproved" },
+		"malformed reference":    func(d *ReadGrantDoc) { d.Credentials[0].CredentialRef = "../key" },
+		"missing version":        func(d *ReadGrantDoc) { d.Credentials[0].CredentialVersion = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := readGrantDocAt(t, now, DefaultReadGrantLifetime)
+			mutate(&d)
+			if _, _, _, err := ParseReadGrant(readGrantRaw(t, d), now); err == nil {
+				t.Fatal("unbound v2 document accepted")
+			}
+		})
+	}
+	d := readGrantDocAt(t, now, DefaultReadGrantLifetime)
+	_, _, before, err := ParseReadGrant(readGrantRaw(t, d), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Credentials[0].CredentialVersion = fpB
+	_, _, after, err := ParseReadGrant(readGrantRaw(t, d), now)
+	if err != nil || before == after {
+		t.Fatalf("credential version not bound into digest: %v", err)
+	}
 }

@@ -376,3 +376,108 @@ func TestReserveReadRunStorageError(t *testing.T) {
 		t.Fatal("reservation on a closed store succeeded")
 	}
 }
+
+// Denied attempts still observe time. Losing that observation on rollback
+// could resurrect an expired grant or move subsequent claims into the past.
+func TestReadClockDenialsSurviveRollbackAndRestart(t *testing.T) {
+	for _, denial := range []string{"expiry", "budget", "interval"} {
+		t.Run(denial, func(t *testing.T) {
+			dir := privateDir(t)
+			db, err := open(dir, func() time.Time { return t0 })
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			g := readGrantDoc(t)
+			if denial == "expiry" {
+				g.ExpiresAt = t0.Add(time.Hour)
+			}
+			if err := db.SaveReadGrant(g); err != nil {
+				t.Fatal(err)
+			}
+			if !db.reserveT(t, g.ID, "core.facts", "web", t0, 1, 2*time.Hour) {
+				t.Fatal("initial claim denied")
+			}
+			observed := t0.Add(30 * time.Minute)
+			if denial != "budget" {
+				observed = t0.Add(90 * time.Minute)
+			}
+			ok, err := db.ReserveReadRun(g.ID, "core.facts", "web", observed, 1, 2*time.Hour)
+			if ok || (denial == "expiry" && !errors.Is(err, permit.ErrReadGrantInactive)) || (denial != "expiry" && err != nil) {
+				t.Fatalf("denial: %v, %v", ok, err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			db, err = open(dir, func() time.Time { return t0 })
+			if err != nil {
+				t.Fatal(err)
+			}
+			var high int64
+			if err := db.sql.QueryRow(`SELECT high_water FROM read_clock WHERE id = 1`).Scan(&high); err != nil {
+				t.Fatal(err)
+			}
+			if high != observed.Unix() {
+				t.Fatalf("denied observation lost: got %d, want %d", high, observed.Unix())
+			}
+			if denial == "expiry" {
+				if ok, err := db.ReserveReadRun(g.ID, "docker.list", "other", t0, 1, 15*time.Minute); ok || !errors.Is(err, permit.ErrReadGrantInactive) {
+					t.Fatalf("expired grant resurrected after rollback: %v, %v", ok, err)
+				}
+			}
+		})
+	}
+}
+
+func TestReadGrantRecoveryStateIsCheckedInsideStorageMutation(t *testing.T) {
+	db := openT(t, privateDir(t))
+	g := readGrantDoc(t)
+	if err := db.SaveReadGrant(g); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetRecoveryPending(); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := db.ReserveReadRun(g.ID, "core.facts", "web", t0, 1, 15*time.Minute); ok || !errors.Is(err, permit.ErrReadGrantInactive) {
+		t.Fatalf("recovery claim: %v, %v", ok, err)
+	}
+	g.ID, g.Digest = "00000000-0000-4000-8000-000000000002", strings.Repeat("b", 64)
+	if err := db.SaveReadGrant(g); err == nil {
+		t.Fatal("grant created during recovery")
+	}
+}
+
+func TestReadGrantConcurrentClaimsRespectSharedCeiling(t *testing.T) {
+	db := openT(t, privateDir(t))
+	for i := 1; i <= 2; i++ {
+		g := readGrantDoc(t)
+		g.ID, g.Digest = fmt.Sprintf("00000000-0000-4000-8000-%012d", i), strings.Repeat(fmt.Sprint(i), 64)
+		if err := db.SaveReadGrant(g); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const budget, contenders = 3, 24
+	start, result := make(chan struct{}), make(chan bool, contenders)
+	errs := make(chan error, contenders)
+	for i := 0; i < contenders; i++ {
+		go func() {
+			<-start
+			ok, err := db.ReserveReadRun(fmt.Sprintf("00000000-0000-4000-8000-%012d", i%2+1), fmt.Sprintf("action.%d", i), "web", t0, budget, 15*time.Minute)
+			result <- ok
+			errs <- err
+		}()
+	}
+	close(start)
+	accepted := 0
+	for i := 0; i < contenders; i++ {
+		if <-result {
+			accepted++
+		}
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if accepted != budget {
+		t.Fatalf("accepted %d claims, want %d", accepted, budget)
+	}
+}
