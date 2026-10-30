@@ -1131,3 +1131,221 @@ func TestChartDataExcludesTombstonedGuests(t *testing.T) {
 		}
 	}
 }
+
+// --- PVE storage boxes (owner request: datastores under each PVE host) ---
+
+func storageIn(node, id, typ string, used, total uint64) StorageInput {
+	return StorageInput{Node: node, ID: id, Type: typ, Active: true,
+		UsedBytes: used, TotalBytes: total, CapacityKnown: total > 0}
+}
+
+func TestBuildTreeStorageBoxesAfterGuests(t *testing.T) {
+	in := treeInput()
+	in.Remotes = []RemoteInput{{
+		RemoteID: "remote-a",
+		Nodes:    []NodeInput{nodeIn("p1")},
+		Guests:   []GuestInput{guestIn(100, "p1", "vm-100")},
+		Storages: []StorageInput{
+			storageIn("p1", "zfs-data", "zfspool", 70, 100),
+			storageIn("p1", "local", "dir", 10, 100),
+			storageIn("p1", "backup", "pbs", 0, 0),
+		},
+	}}
+	tree, err := BuildTree(in)
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+	root := tree.Roots[0]
+	// The guest box first, then the storage boxes sorted by id.
+	if len(root.Children) != 4 {
+		t.Fatalf("expected 4 children, got %d", len(root.Children))
+	}
+	if root.Children[0].Kind != KindGuest {
+		t.Fatalf("first child is %s, want guest", root.Children[0].Kind)
+	}
+	want := []string{"storage/remote-a/backup", "storage/remote-a/local", "storage/remote-a/zfs-data"}
+	for i, id := range want {
+		if root.Children[i+1].ID != id {
+			t.Fatalf("child %d = %s, want %s", i+1, root.Children[i+1].ID, id)
+		}
+	}
+	if root.Counts[KindStorage] != 3 {
+		t.Fatalf("storage count = %d, want 3", root.Counts[KindStorage])
+	}
+	zfs := findBox(t, root.Children, "storage/remote-a/zfs-data")
+	if zfs.Kind != KindStorage || zfs.Name != "zfs-data" || zfs.StorageType != "zfspool" {
+		t.Fatalf("wrong storage box: %+v", zfs)
+	}
+	if zfs.StorageUsedBytes != 70 || zfs.StorageTotalBytes != 100 || zfs.StorageFillPercent != 70 {
+		t.Fatalf("zfs fill: %d/%d pct=%d", zfs.StorageUsedBytes, zfs.StorageTotalBytes, zfs.StorageFillPercent)
+	}
+	if zfs.State != StateWarning {
+		t.Fatalf("70%% storage state = %s, want warning", zfs.State)
+	}
+	backup := findBox(t, root.Children, "storage/remote-a/backup")
+	if !backup.StorageBackup {
+		t.Fatal("pbs storage not marked as backup datastore")
+	}
+	if backup.State != StateUnknown {
+		t.Fatalf("pbs storage without capacity: state = %s, want unknown (never 0%%)", backup.State)
+	}
+	local := findBox(t, root.Children, "storage/remote-a/local")
+	if local.State != StateOK || local.StorageFillPercent != 10 {
+		t.Fatalf("local storage: state=%s pct=%d", local.State, local.StorageFillPercent)
+	}
+}
+
+func TestBuildTreeSharedStorageOncePerCluster(t *testing.T) {
+	in := treeInput()
+	shared := storageIn("p1", "nfs-shared", "nfs", 50, 100)
+	shared.Shared = true
+	in.Remotes = []RemoteInput{{
+		RemoteID: "remote-a",
+		Nodes:    []NodeInput{nodeIn("p1"), nodeIn("p2")},
+		Storages: []StorageInput{
+			shared,
+			storageIn("p2", "nfs-shared", "nfs", 50, 100),
+			storageIn("p2", "local2", "dir", 10, 100),
+		},
+	}}
+	tree, err := BuildTree(in)
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+	p1 := findBox(t, tree.Roots, "node/remote-a/p1")
+	p2 := findBox(t, tree.Roots, "node/remote-a/p2")
+	s1 := findBox(t, p1.Children, "storage/remote-a/nfs-shared")
+	if !s1.StorageShared {
+		t.Fatal("shared storage not marked shared")
+	}
+	for _, c := range p2.Children {
+		if c.ID == "storage/remote-a/nfs-shared" {
+			t.Fatal("shared storage double-counted on the second node")
+		}
+	}
+	if len(p2.Children) != 1 || p2.Children[0].ID != "storage/remote-a/local2" {
+		t.Fatalf("p2 children: %+v", p2.Children)
+	}
+
+	// A storage reported by more than one node is shared even without
+	// the flag.
+	in.Remotes[0].Storages[0].Shared = false
+	tree, err = BuildTree(in)
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+	p1 = findBox(t, tree.Roots, "node/remote-a/p1")
+	s1 = findBox(t, p1.Children, "storage/remote-a/nfs-shared")
+	if !s1.StorageShared {
+		t.Fatal("multi-node storage not derived as shared")
+	}
+}
+
+func TestBuildTreeStorageStates(t *testing.T) {
+	cases := []struct {
+		name   string
+		st     StorageInput
+		want   BoxState
+		reason string
+	}{
+		{"inactive", func() StorageInput { s := storageIn("p1", "s", "dir", 0, 100); s.Active = false; return s }(), StateUnknown, "inactive"},
+		{"no capacity", storageIn("p1", "s", "pbs", 0, 0), StateUnknown, "capacity unknown"},
+		{"zero total", storageIn("p1", "s", "dir", 5, 0), StateUnknown, "capacity unknown"},
+		{"stale", func() StorageInput { s := storageIn("p1", "s", "dir", 50, 100); s.Stale = true; return s }(), StateUnknown, "stale"},
+		{"ok 49", storageIn("p1", "s", "dir", 49, 100), StateOK, ""},
+		{"warn 70", storageIn("p1", "s", "dir", 70, 100), StateWarning, "70% full"},
+		{"warn 89", storageIn("p1", "s", "dir", 89, 100), StateWarning, "89% full"},
+		{"crit 90", storageIn("p1", "s", "dir", 90, 100), StateCritical, "90% full"},
+		{"crit 100", storageIn("p1", "s", "dir", 100, 100), StateCritical, "100% full"},
+		{"over 100 clamped", storageIn("p1", "s", "dir", 150, 100), StateCritical, "100% full"},
+	}
+	for _, tc := range cases {
+		in := treeInput()
+		in.Remotes = []RemoteInput{{RemoteID: "remote-a", Nodes: []NodeInput{nodeIn("p1")}, Storages: []StorageInput{tc.st}}}
+		tree, err := BuildTree(in)
+		if err != nil {
+			t.Fatalf("BuildTree %s: %v", tc.name, err)
+		}
+		b := findBox(t, tree.Roots[0].Children, "storage/remote-a/s")
+		if b.State != tc.want || b.StateReason != tc.reason {
+			t.Errorf("%s: state=%s reason=%q, want %s %q", tc.name, b.State, b.StateReason, tc.want, tc.reason)
+		}
+	}
+}
+
+func TestBuildTreeStorageThresholdFeedsNodeState(t *testing.T) {
+	in := treeInput()
+	in.Remotes = []RemoteInput{{
+		RemoteID: "remote-a",
+		Nodes:    []NodeInput{nodeIn("p1")},
+		Storages: []StorageInput{storageIn("p1", "full", "lvmthin", 95, 100)},
+	}}
+	tree, err := BuildTree(in)
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+	root := tree.Roots[0]
+	if root.State != StateCritical || root.Worst != StateCritical {
+		t.Fatalf("node state/worst = %s/%s, want critical/critical", root.State, root.Worst)
+	}
+}
+
+func TestBuildTreeStorageValidation(t *testing.T) {
+	dup := treeInput()
+	dup.Remotes = []RemoteInput{{RemoteID: "remote-a", Nodes: []NodeInput{nodeIn("p1")}, Storages: []StorageInput{
+		storageIn("p1", "local", "dir", 1, 10),
+		storageIn("p1", "local", "dir", 2, 20),
+	}}}
+	if _, err := BuildTree(dup); err == nil {
+		t.Error("duplicate (node, id) storage accepted")
+	}
+	noNode := treeInput()
+	noNode.Remotes = []RemoteInput{{RemoteID: "remote-a", Nodes: []NodeInput{nodeIn("p1")}, Storages: []StorageInput{
+		storageIn("", "local", "dir", 1, 10),
+	}}}
+	if _, err := BuildTree(noNode); err == nil {
+		t.Error("storage without node accepted")
+	}
+	noID := treeInput()
+	noID.Remotes = []RemoteInput{{RemoteID: "remote-a", Nodes: []NodeInput{nodeIn("p1")}, Storages: []StorageInput{
+		storageIn("p1", "", "dir", 1, 10),
+	}}}
+	if _, err := BuildTree(noID); err == nil {
+		t.Error("storage without id accepted")
+	}
+	over := treeInput()
+	sts := make([]StorageInput, 0, MaxTreeStoragesPerRemote+1)
+	for i := 0; i <= MaxTreeStoragesPerRemote; i++ {
+		sts = append(sts, storageIn("p1", fmt.Sprintf("s%02d", i), "dir", 1, 10))
+	}
+	over.Remotes = []RemoteInput{{RemoteID: "remote-a", Nodes: []NodeInput{nodeIn("p1")}, Storages: sts}}
+	if _, err := BuildTree(over); err == nil {
+		t.Error("storage count above the limit accepted")
+	}
+	at := treeInput()
+	at.Remotes = []RemoteInput{{RemoteID: "remote-a", Nodes: []NodeInput{nodeIn("p1")}, Storages: sts[:MaxTreeStoragesPerRemote]}}
+	if _, err := BuildTree(at); err != nil {
+		t.Errorf("storage count at the limit rejected: %v", err)
+	}
+}
+
+func TestBuildTreeImplicitNodeForOrphanStorage(t *testing.T) {
+	in := treeInput()
+	in.Remotes = []RemoteInput{{
+		RemoteID: "remote-a",
+		Storages: []StorageInput{storageIn("ghost", "local", "dir", 10, 100)},
+	}}
+	tree, err := BuildTree(in)
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+	if len(tree.Roots) != 1 || tree.Roots[0].Kind != KindPVENode || tree.Roots[0].Name != "ghost" {
+		t.Fatalf("expected implicit node root, got %+v", tree.Roots)
+	}
+	if tree.Roots[0].State != StateUnknown {
+		t.Fatalf("implicit node state = %s, want unknown", tree.Roots[0].State)
+	}
+	if len(tree.Roots[0].Children) != 1 || tree.Roots[0].Children[0].Kind != KindStorage {
+		t.Fatalf("implicit node children: %+v", tree.Roots[0].Children)
+	}
+}
