@@ -1479,13 +1479,98 @@ details[open] summary { color: var(--text); margin-bottom: var(--space-2); }
 .chart__project__label { display: block; font-size: 0.75rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.375rem; }
 .chart__none, .chart__empty { font-size: var(--fs-sm); color: var(--text-faint); margin: 0; }
 
+/* PVE node box: the node column of the org chart. */
+.chart__box--node {
+  display: flex; flex-direction: column; gap: 0.375rem;
+  flex: 0 0 220px; width: 220px; min-height: 70px;
+  padding: 0.625rem 0.75rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  overflow: hidden;
+}
+.chart__box--node:hover { border-color: var(--border-strong); }
+.chart__box--node:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+/* Guest box under a PVE node. */
+.chart__box--guest {
+  display: flex; align-items: center; gap: 0.5rem;
+  width: 180px;
+  padding: 0.375rem 0.625rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  position: relative;
+}
+/* Branch from the spine to a guest box. */
+.chart__box--guest::before {
+  content: ""; position: absolute;
+  left: calc(-1 * var(--space-2) - 2px);
+  top: 50%;
+  width: calc(var(--space-2) + 2px);
+  border-top: 2px solid var(--border);
+}
+.chart__gname { font-weight: 600; color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chart__vmid { font-size: 0.75rem; color: var(--text-faint); font-variant-numeric: tabular-nums; margin-left: auto; flex: none; }
+/* Storage (datastore) box under a PVE node: icon by type, id,
+   type label, fill level with bar. */
+.chart__box--storage {
+  display: flex; flex-direction: column; gap: 0.25rem;
+  width: 240px;
+  padding: 0.375rem 0.625rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  position: relative;
+}
+/* Branch from the spine to a storage box. */
+.chart__box--storage::before {
+  content: ""; position: absolute;
+  left: calc(-1 * var(--space-2) - 2px);
+  top: 50%;
+  width: calc(var(--space-2) + 2px);
+  border-top: 2px solid var(--border);
+}
+.chart__storage--warning { border-color: var(--warn); }
+.chart__storage--critical { border-color: var(--crit); }
+.chart__storage--unknown { border-color: var(--border-strong); }
+.chart__storage-head { display: flex; align-items: center; gap: 0.375rem; min-width: 0; }
+.chart__storage-icon { width: 14px; height: 14px; border-radius: 3px; background: var(--unknown); flex: none; }
+.chart__storage-icon--dir { background: var(--ok); }
+.chart__storage-icon--lvm { background: var(--brand); }
+.chart__storage-icon--lvmthin { background: var(--brand); }
+.chart__storage-icon--rbd { background: var(--brand); }
+.chart__storage-icon--iscsi { background: var(--brand); }
+.chart__storage-icon--zfspool { background: var(--warn); }
+.chart__storage-icon--vbds { background: var(--warn); }
+.chart__storage-icon--nfs { background: var(--pending); }
+.chart__storage-icon--cifs { background: var(--pending); }
+.chart__storage-icon--pbs { background: var(--crit); }
+.chart__storage-id { font-weight: 600; color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chart__storage-type { font-size: 0.75rem; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chart__storage-badge {
+  font-size: 0.6875rem; letter-spacing: 0.03em; text-transform: uppercase;
+  color: var(--text-muted); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 3px;
+  padding: 0 0.25rem; flex: none;
+}
+.chart__storage-fill { font-size: 0.75rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.chart__storage-fill--unknown { color: var(--text-faint); }
+.chart__storage-track { height: 6px; background: var(--surface-3); border-radius: 3px; overflow: hidden; }
+.chart__storage--ok .chart__storage-track .chart__bar__fill { background: var(--ok); }
+.chart__storage--warning .chart__storage-track .chart__bar__fill { background: var(--warn); }
+.chart__storage--critical .chart__storage-track .chart__bar__fill { background: var(--crit); }
+
 /* Narrow screens: fall back to an indented list (CSS only). */
 @media (max-width: 600px) {
   .chart__details { flex-direction: column; }
   .chart__box--host { flex-basis: auto; width: 100%; min-height: 0; }
+  .chart__box--node { flex-basis: auto; width: 100%; min-height: 0; }
   .chart__children { border-left: none; padding-left: var(--space-2); }
   .chart__children::before, .chart__project::before { display: none; }
   .chart__box--container { width: 100%; min-height: 0; }
   .chart__box--container::before { display: none; }
   .chart__cname { max-width: none; }
+  .chart__box--guest, .chart__box--storage { width: 100%; }
+  .chart__box--guest::before, .chart__box--storage::before { display: none; }
 }
