@@ -89,6 +89,13 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_ListScheduleGrants_FullMethodName:        {server, admin},
 		pb.ExecutorService_RevokeScheduleGrant_FullMethodName:       {server, admin},
 		pb.ExecutorService_RunScheduled_FullMethodName:              {server},
+		pb.ExecutorService_ProposeReadGrant_FullMethodName:          {server},
+		pb.ExecutorService_CommitReadGrant_FullMethodName:           {server},
+		pb.ExecutorService_ListPendingReadGrants_FullMethodName:     {admin},
+		pb.ExecutorService_ApproveReadGrantCLI_FullMethodName:       {admin},
+		pb.ExecutorService_ListReadGrants_FullMethodName:            {server, admin},
+		pb.ExecutorService_RevokeReadGrant_FullMethodName:           {server, admin},
+		pb.ExecutorService_RunReadGrant_FullMethodName:              {server},
 		pb.ExecutorService_ListEvents_FullMethodName:                {server, admin},
 		pb.ExecutorService_BackupExecutor_FullMethodName:            {admin},
 		// PVE provider reads (ADR 0006, P1-05). The entries are final:
