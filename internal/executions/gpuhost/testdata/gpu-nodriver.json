@@ -1,0 +1,1 @@
+{"format":"gpu-status-v1","phase":"precheck","reason":"NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver."}
