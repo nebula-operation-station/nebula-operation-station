@@ -20,7 +20,8 @@ ver=$($d version --format '{{.Server.Version}}' 2>/dev/null) ||
 t='{{"\t"}}'
 fmt="{{.ID}}$t{{.Names}}$t{{.Image}}$t{{.State}}$t{{.Status}}$t{{.Ports}}$t"
 fmt="$fmt{{.Label \"com.docker.compose.project\"}}$t{{.Label \"com.docker.compose.service\"}}$t"
-fmt="$fmt{{.Label \"com.docker.compose.project.working_dir\"}}"
+# Creation time is the 10th column; older parsers ignore it, this one keeps it.
+fmt="$fmt{{.Label \"com.docker.compose.project.working_dir\"}}$t{{.CreatedAt}}"
 ps=$($d ps -a --no-trunc --format "$fmt" 2>/dev/null) || pre "docker ps failed"
 ps=$(printf '%s\n' "$ps" | head -n 2000 | b64)
 ver=$(printf '%s' "$ver" | head -c 100 | b64)

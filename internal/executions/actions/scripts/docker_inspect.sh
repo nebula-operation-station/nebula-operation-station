@@ -24,6 +24,10 @@ f="$f"'"mounts":{{json .Mounts}},"ports":{{json .NetworkSettings.Ports}},"networ
 $d inspect --type container --format '{{.Id}}' -- "$c" >/dev/null 2>&1 || pre "no such container"
 info=$($d inspect --type container --format "$f" -- "$c" 2>/dev/null) || pre "docker inspect failed"
 img=$($d inspect --type container --format '{{.Image}}' -- "$c" 2>/dev/null)
-digests=$($d image inspect --format '{{json .RepoDigests}}' -- "$img" 2>/dev/null | head -c 65536 | b64)
+# Image metadata: the configuration (platform) digest in .Id, the registry
+# index digests in .RepoDigests, plus creation time and platform. Only these
+# fields are read; environment, command line and labels are never touched.
+imf='{"id":{{json .Id}},"created":{{json .Created}},"os":{{json .Os}},"architecture":{{json .Architecture}},"variant":{{json .Variant}},"repo_digests":{{json .RepoDigests}}}'
+image=$($d image inspect --format "$imf" -- "$img" 2>/dev/null | head -c 65536 | b64)
 info=$(printf '%s' "$info" | head -c 524288 | b64)
-printf '{"format":"docker-inspect-v1","phase":"done","container":"%s","inspect":"%s","digests":"%s"}\n' "$c" "$info" "$digests"
+printf '{"format":"docker-inspect-v1","phase":"done","container":"%s","inspect":"%s","image":"%s"}\n' "$c" "$info" "$image"

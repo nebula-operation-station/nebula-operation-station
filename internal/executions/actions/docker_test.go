@@ -20,7 +20,7 @@ func TestDockerListScript(t *testing.T) {
 	if !ok || !a.ReadOnly || len(a.Params) != 0 {
 		t.Fatalf("docker.list %+v", a)
 	}
-	line := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\tweb\tnginx:1.27\trunning\tUp 2 hours (healthy)\t0.0.0.0:80->80/tcp\tsite\tweb\t/srv/site"
+	line := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\tweb\tnginx:1.27\trunning\tUp 2 hours (healthy)\t0.0.0.0:80->80/tcp\tsite\tweb\t/srv/site\t2026-01-02 03:04:05 +0000 UTC"
 	docker := func(f *fakeHost, group bool) {
 		f.write(t, "docker", `echo "$@" >> "`+f.calls+`"
 [ -e "`+f.dir+`/no-daemon" ] && exit 1
@@ -45,7 +45,7 @@ case "$1" in version) echo "27.3.1" ;; ps) printf '%s\n' "`+line+`" ;; esac`)
 			t.Fatalf("%d %v", code, doc)
 		}
 		calls := f.readCalls(t)
-		if strings.Contains(calls, "sudo") || !strings.Contains(calls, "ps -a --no-trunc --format") {
+		if strings.Contains(calls, "sudo") || !strings.Contains(calls, "ps -a --no-trunc --format") || !strings.Contains(calls, "{{.CreatedAt}}") {
 			t.Fatalf("calls %q", calls)
 		}
 	})
@@ -177,7 +177,7 @@ case "$1 $2" in
   "version "*) echo 27 ;;
   "inspect --type") for x in "$@"; do last=$x; done; [ "$last" = web ] || exit 1
      case "$*" in *'{{.Image}}'*) echo sha256:abc ;; *'{{.Id}}'*) echo abc ;; *) echo '{"id":"abc"}' ;; esac ;;
-  "image inspect") echo '["repo@sha256:abc"]' ;;
+  "image inspect") echo '{"id":"sha256:abc","created":"2026-01-01T00:00:00Z","os":"linux","architecture":"amd64","variant":"","repo_digests":["repo@sha256:abc"]}' ;;
 esac`)
 	p := filepath.Join(f.dir, "params")
 	run := func(params string) (int, map[string]any) {
@@ -198,10 +198,11 @@ esac`)
 		return code, doc
 	}
 	code, doc := run(`{"container":"web"}`)
-	if code != 0 || doc["container"] != "web" || b64(t, doc, "inspect") != `{"id":"abc"}` || b64(t, doc, "digests") != "[\"repo@sha256:abc\"]\n" {
+	wantImage := `{"id":"sha256:abc","created":"2026-01-01T00:00:00Z","os":"linux","architecture":"amd64","variant":"","repo_digests":["repo@sha256:abc"]}` + "\n"
+	if code != 0 || doc["container"] != "web" || b64(t, doc, "inspect") != `{"id":"abc"}` || b64(t, doc, "image") != wantImage {
 		t.Fatalf("%d %v", code, doc)
 	}
-	if calls := f.readCalls(t); !strings.Contains(calls, "image inspect --format {{json .RepoDigests}} -- sha256:abc") {
+	if calls := f.readCalls(t); !strings.Contains(calls, "image inspect --format") || !strings.Contains(calls, "{{json .RepoDigests}}") || !strings.Contains(calls, "-- sha256:abc") {
 		t.Fatalf("calls %q", calls)
 	}
 	code, doc = run(`{"container":"gone"}`)
