@@ -162,7 +162,7 @@ the collector alone writes results. Neither accepts URLs or raw API paths.
 | Guest configuration | Every 5 min: CPU, RAM, disk/storage references, NIC MAC/bridge/VLAN, boot order, `hostpci` device/target mappings, nonsecret Cloud-Init IP configuration, tags and pool membership |
 | Guest interfaces | Every 60 s where supported: QEMU agent IP/MAC/hostname/OS/filesystem summary; LXC interfaces from its typed API, explicitly labelled by source |
 | Snapshots and storage | Every 5 min: snapshot names/time/parent/RAM flag; storage type, format, availability, capacity and supported features; never image or backup contents |
-| Backups | Every 5 min: available nonsecret `vzdump`/PBS metadata and recent task summaries, plus detectable Veeam evidence from enrolled hosts; freshness warnings are phase 1, with source/coverage/age and unknown states; distinguish task success from a currently present/restorable backup |
+| Backups | Every 5 min: available nonsecret `vzdump`/PBS metadata and recent task summaries; freshness warnings are phase 1, with source/coverage/age and unknown states; distinguish task success from a currently present/restorable backup |
 | Cluster and HA | Every 60 s: membership, votes/quorum, HA resource desired/observed states, maintenance; replication/Corosync-link summaries where readable |
 | Node details and foreign activity | Every 15 min: PVE/kernel versions and bounded task metadata (actor, type, time, target, exit status); no raw task logs or command output |
 
@@ -172,12 +172,11 @@ content is filtered using `VM.Backup` and `Datastore.AllocateSpace` checks
 borrow the action token or add write privileges for inventory. Show
 `unavailable: insufficient read privileges`; task history is merely evidence
 of a past run. PBS retention/verification requires a separately approved
-read-only source; Veeam detection uses allowlisted local product/job metadata, never guessed log
-paths or credentials. Neither gets a new credential integration implicitly.
+read-only source; it gets no new credential integration implicitly.
 Compare the last evidenced successful backup against an operator-selected
 maximum age (default 24 h), separately displaying catalog presence, verification
 and restore confidence. Stale, failed and overdue evidence warns in phase 1;
-undetected Veeam, denied catalogs and missing samples stay unknown/unavailable.
+denied catalogs and missing samples stay unknown/unavailable.
 Missing visibility must never become “no backups” or “backup safe”.
 
 Store normalized observations in the server's `nebula.db`: `pve_remotes`,
@@ -264,7 +263,6 @@ No InfluxDB endpoint or general monitoring dashboard is introduced.
 | New `pci.inventory`, `gpu.status` | LOW, read-only: NVIDIA PCI identity on the owning machine; fixed `nvidia-smi --query-gpu` fields for GPU UUID/PCI ID, util %, VRAM used/total, temperature and power; no arbitrary command/flags or device changes |
 | New `docker.stats` | LOW, read-only: one bounded non-streaming CPU/RAM snapshot keyed by full container ID; Compose grouping derives from validated list/inspect hints |
 | New `service.check` | LOW, read-only: bounded HTTP/TCP port, health and latency checks from the enrolled host; explicit approved destinations, no redirects, arbitrary URLs or response bodies; unknown if unconfigured |
-| New `backup.status` | LOW, read-only: bounded allowlisted local Veeam evidence when detectable; PVE/PBS evidence stays in typed provider readers |
 | New `image.vulnerabilities` (optional) | LOW, read-only: sanitized CVE counts/severity, image identity and scanner/database age from an operator-installed host-local scanner |
 
 LOW is the base class, not an exemption from executor-derived host/trust floors
@@ -557,8 +555,8 @@ Neither tokens nor interactive SSH get extended implicitly to provide it;
 shell remains outside the committed phases pending another architecture review.
 
 Phase 1 delivers read-only remotes, staging, the collapsible org chart,
-patch/image state, optional CVE badges, backup-freshness warnings (vzdump/PBS
-and Veeam where detectable), GPU/CPU/RAM/filesystem values with 24 h averages,
+patch/image state, optional CVE badges, backup-freshness warnings (vzdump/PBS),
+GPU/CPU/RAM/filesystem values with 24 h averages,
 service checks, drift hints and deep links.
 Phase 2 adds tree-triggered OS/container and Compose-stack update/rollback
 with approved exact service/replica sets, plus VM/LXC actions, starting
@@ -594,7 +592,7 @@ Before release, record exact supported PVE 8/9 package versions and verify:
 - Minimal per-method ACLs, filtered empty responses, legacy PVE 8 agent rights,
   LXC interfaces/snapshots, task retention, and HA delegation/reboot semantics.
 - Whether any safe read-only backup catalog route exists on deployed versions;
-  task history does not establish PBS/Veeam backup existence or restore safety.
+  task history does not establish PBS backup existence or restore safety.
 - Actual node SANs, custom/ACME certificates, CA retrieval and renewal behavior;
   same-CA endpoint membership checks and reliable VMID-reuse detection.
 - Storage/format snapshot capabilities (including PVE 9 LVM changes), passthrough
@@ -625,7 +623,7 @@ Before release, record exact supported PVE 8/9 package versions and verify:
 - Optional host-local Trivy profile/version, local-only scan enforcement,
   operator-managed database freshness, severity-to-border policy and scan budgets;
   how to present digest correlation, deduplication and incomplete coverage?
-- Which deployed PBS/Veeam metadata is safely readable without broader rights,
+- Which deployed PBS metadata is safely readable without broader rights,
   how to associate jobs with exact guest generations, and how to distinguish
   unknown catalog/verification coverage from an overdue successful-backup age?
 - Approved service HTTP/TCP targets, check timeouts/cadence and latency-warning
@@ -685,7 +683,7 @@ so the new surfaces each fit one agent job.
 | P1-25: metric retention/averages | New `internal/pveinventory/metrics.go`, server DB migration, tests | Injected time, 288 five-minute buckets/24 h per metric, server-side averages/coverage, missing samples not zero, pruning and incarnation reset; live values share buckets |
 | P1-26: telemetry collection scheduling | `internal/pvecollect/`, existing SSH observation scheduler, tests | Authorized 5-min history/10-s live leases only, exact target scopes, remote/host budgets, injected time, coalescing; lock/expiry stop reads |
 | P1-27: service placement and health | `internal/pveinventory/links.go`, `internal/executions/actions/`, new `internal/executions/servicecheck/`, tests | Explicit host/container service placement, LOW `service.check`, approved HTTP/TCP destination/port, bounded latency/timeouts, redirect/SSRF refusal, no bodies; runtime vs endpoint health and unconfigured unknown |
-| P1-28: Veeam read-only evidence | `internal/executions/actions/`, new `internal/executions/backupstatus/`, tests | LOW `backup.status`, allowlisted detectable local metadata, identity/source/time limits, no secrets/raw logs; absent/unsupported/denied coverage stays unknown |
+| P1-28: Dropped (owner decision 2026-10-30: no Veeam support; PBS evidence via P1-20/P1-29) | — | — |
 | P1-29: backup freshness model | New `internal/pveinventory/backups.go`, server DB migration, tests | Phase-1 warnings, operator age/default 24 h, failed/overdue/stale/expected-off, exact guest association; task/catalog/verification confidence kept separate, unknown never safe |
 | P1-30: optional image CVE observations | `internal/executions/actions/`, `internal/executions/dockerhost/`, tests | LOW `image.vulnerabilities`, optional host-local Trivy/local immutable image, no install/pull/DB refresh, bounded one-scan/host, digest/platform/DB cache ≤24 h; severity/count/age/coverage, missing/stale/failed never zero, no raw findings/secrets |
 | P1-31: stable-version selection | New `internal/registrymeta/stable.go`, tests | Numeric SemVer/variants/overrides, policy version, ambiguous ties/incomplete tags unknown, same-tag/platform vs stable-version distinction, no tag mutation |
