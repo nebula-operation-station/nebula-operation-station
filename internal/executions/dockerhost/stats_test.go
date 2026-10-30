@@ -71,7 +71,7 @@ func TestParseStatsRealOutput(t *testing.T) {
 		t.Fatalf("web mem limit %+v", web)
 	}
 	if mustFloat(t, "web mem %", web.MemPercent) != 6.25 {
-		t.Fatalf("web mem % %+v", web)
+		t.Fatalf("web mem%% %+v", web)
 	}
 	worker := s.Containers[0]
 	if mustFloat(t, "worker cpu", worker.CPUPercent) != 0.5 {
@@ -84,7 +84,7 @@ func TestParseStatsRealOutput(t *testing.T) {
 		t.Fatalf("worker mem limit %+v", worker)
 	}
 	if mustFloat(t, "worker mem %", worker.MemPercent) != 12.5 {
-		t.Fatalf("worker mem % %+v", worker)
+		t.Fatalf("worker mem%% %+v", worker)
 	}
 }
 
@@ -97,13 +97,13 @@ func TestParseStatsDropsWhatDoesNotFit(t *testing.T) {
 	lines := strings.Join([]string{
 		`{"id":"` + ok + `","name":"ok","cpu":"1.00%","mem":"1MB / 2GB","memp":"5.00%"}`,
 		`{"id":"` + strings.Repeat("ab", 6) + `","name":"short","cpu":"1%","mem":"1MB / 2GB","memp":"5%"}`, // 12-hex ID
-		`{"id":"XYZ","name":"badid","cpu":"1%","mem":"1MB / 2GB","memp":"5%"}`,                              // not an ID
-		`{"id":"` + badName + `","name":"-lead","cpu":"1%","mem":"1MB / 2GB","memp":"5%"}`,                  // bad name
-		`{"id":"` + badCPU + `","name":"noper","cpu":"high","mem":"1MB / 2GB","memp":"5%"}`,                 // bad CPU
-		`{"id":"` + overCPU + `","name":"over","cpu":"100001%","mem":"1MB / 2GB","memp":"5%"}`,              // CPU out of range
-		`{"id":"` + badMem + `","name":"badmem","cpu":"1%","mem":"lots / much","memp":"5%"}`,                // bad memory
-		`{"id":"` + badMemP + `","name":"badmemp","cpu":"1%","mem":"1MB / 2GB","memp":"n/a"}`,               // bad memory %
-		"garbage",                                                                                           // not JSON
+		`{"id":"XYZ","name":"badid","cpu":"1%","mem":"1MB / 2GB","memp":"5%"}`,                             // not an ID
+		`{"id":"` + badName + `","name":"-lead","cpu":"1%","mem":"1MB / 2GB","memp":"5%"}`,                 // bad name
+		`{"id":"` + badCPU + `","name":"noper","cpu":"high","mem":"1MB / 2GB","memp":"5%"}`,                // bad CPU
+		`{"id":"` + overCPU + `","name":"over","cpu":"100001%","mem":"1MB / 2GB","memp":"5%"}`,             // CPU out of range
+		`{"id":"` + badMem + `","name":"badmem","cpu":"1%","mem":"lots / much","memp":"5%"}`,               // bad memory
+		`{"id":"` + badMemP + `","name":"badmemp","cpu":"1%","mem":"1MB / 2GB","memp":"n/a"}`,              // bad memory %
+		"garbage", // not JSON
 	}, "\n")
 	s, err := ParseStats(statsResult("27.0", lines))
 	if err != nil {
@@ -129,7 +129,7 @@ func TestParseStatsDropsWhatDoesNotFit(t *testing.T) {
 		t.Fatalf("memory kept: %+v", c)
 	}
 	if c := statsByID(t, s, badMemP); c.MemPercent != nil {
-		t.Fatalf("memory % kept: %+v", c)
+		t.Fatalf("memory %% kept: %+v", c)
 	}
 }
 
@@ -198,8 +198,8 @@ func TestParseStatsFullIDReplacement(t *testing.T) {
 // converts it back to bytes (base 1024) and rejects what does not fit.
 func TestParseStatsHumanSizes(t *testing.T) {
 	for _, tc := range []struct {
-		in                          string
-		used, limit                 int64
+		in          string
+		used, limit int64
 	}{
 		{"5B / 10B", 5, 10},
 		{"524kB / 1MB", 524 << 10, 1 << 20},
@@ -234,7 +234,7 @@ func TestParseStatsPercentBounds(t *testing.T) {
 		{"0%", 100, true, 0},
 		{"100%", 100, true, 100},
 		{"12.34%", 100, true, 12.34},
-		{"101%", 100, false, 0}, // memory % cannot exceed 100
+		{"101%", 100, false, 0},        // memory % cannot exceed 100
 		{"200.00%", 100000, true, 200}, // CPU % may exceed 100 on multi-core
 		{"100001%", 100000, false, 0},  // CPU % sanity bound
 		{"high", 100, false, 0},
