@@ -1285,8 +1285,10 @@ func TestBuildTreeStorageThresholdFeedsNodeState(t *testing.T) {
 		t.Fatalf("BuildTree: %v", err)
 	}
 	root := tree.Roots[0]
-	if root.State != StateCritical || root.Worst != StateCritical {
-		t.Fatalf("node state/worst = %s/%s, want critical/critical", root.State, root.Worst)
+	// The node's own state stays ok; the storage feeds the worst
+	// state the chart renders on the node box.
+	if root.State != StateOK || root.Worst != StateCritical {
+		t.Fatalf("node state/worst = %s/%s, want ok/critical", root.State, root.Worst)
 	}
 }
 
