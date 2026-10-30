@@ -342,6 +342,11 @@ func (s *Service) Unlock(ctx context.Context, req *pb.UnlockRequest) (*pb.Unlock
 		}
 	}
 	resp.VaultState = s.vaultState()
+	if resp.KeysUnlocked {
+		if err := s.auth.ResumeReadDispatch(); err != nil {
+			return nil, toStatus(err)
+		}
+	}
 	if resp.KeysUnlocked || (tryVault && vaultErr == nil) {
 		return resp, nil
 	}

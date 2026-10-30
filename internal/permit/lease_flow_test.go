@@ -4,6 +4,7 @@ package permit
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -24,6 +25,7 @@ type memLeases struct {
 	hostRes     map[string][]time.Time // hostID -> reservation times
 	actionLast  map[string]time.Time   // actionID|hostID -> last reservation
 	highWater   time.Time
+	recovering  bool
 	failRead    bool
 	failReserve bool
 }
@@ -141,12 +143,15 @@ func newLeaseEnv(t *testing.T, mode Mode) (*env, *memLeases) {
 	e := newEnv(t, mode, virtualwebauthn.AuthenticatorOptions{})
 	le := newMemLeases()
 	e.auth.leases = le
+	if err := e.auth.ResumeReadDispatch(); err != nil {
+		t.Fatal(err)
+	}
 	return e, le
 }
 
 func readRun(host, fp string) Run {
 	return Run{HostID: host, HostKeyFingerprint: fp, ActionID: "core.facts",
-		ModuleVersion: "1.0.0", Artifact: artifact, ParametersJSON: params, CredentialRef: "nebula-default"}
+		ModuleVersion: "1.0.0", Artifact: artifact, ParametersJSON: params, CredentialRef: "nebula-default", CredentialVersion: fpA}
 }
 
 func readGrantDocWith(t *testing.T, id string, now time.Time, lifetime time.Duration, budget int64, actions []string) ReadGrantDoc {
@@ -581,5 +586,317 @@ func TestReadGrantLockAndRestart(t *testing.T) {
 		t.Fatal("spent budget survived the restart but allowed a further run")
 	} else {
 		wantCode(t, err, CodeLeaseBudget)
+	}
+}
+
+// Recovery state is durable authority state, independent of browser sessions.
+func (m *memLeases) RecoveryPending() (time.Time, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failRead {
+		return time.Time{}, false, errors.New("disk full")
+	}
+	return time.Time{}, m.recovering, nil
+}
+
+func TestReadGrantRecoveryRefusesEveryAuthorityEntryPoint(t *testing.T) {
+	for _, operation := range []string{"propose", "commit", "cli", "run"} {
+		for _, storageFailure := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/store-error=%v", operation, storageFailure), func(t *testing.T) {
+				e, store := newLeaseEnv(t, ModeStandard)
+				raw := readGrantRaw(t, readGrantDocAt(t, e.clk.Now(), DefaultReadGrantLifetime))
+				var p PendingReadGrant
+				var g StoredReadGrant
+				if operation == "run" {
+					g = approveReadGrant(t, e, raw)
+				} else if operation != "propose" {
+					var err error
+					p, err = e.auth.ProposeReadGrant(raw)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				store.recovering, store.failRead = true, storageFailure
+				var err error
+				switch operation {
+				case "propose":
+					_, err = e.auth.ProposeReadGrant(raw)
+				case "commit":
+					_, err = e.auth.CommitReadGrant(p.Digest, e.sign(p.Challenge))
+				case "cli":
+					_, err = e.auth.ApproveReadGrantCLI(p.Digest, "admin")
+				case "run":
+					_, err = e.auth.AuthorizeReadRun(g.ID, "read", TriggerOnDemand, readRun("dockerflux", fpA))
+				}
+				if err == nil {
+					t.Fatal("recovery allowed standing read authority")
+				}
+				if len(store.hostRes) != 0 {
+					t.Fatal("recovery consumed a budget claim")
+				}
+			})
+		}
+	}
+}
+
+func TestReadGrantPendingScopeCannotBeMutatedByCaller(t *testing.T) {
+	for _, listing := range []bool{false, true} {
+		t.Run(fmt.Sprint(listing), func(t *testing.T) {
+			e, _ := newLeaseEnv(t, ModeStandard)
+			p, err := e.auth.ProposeReadGrant(readGrantRaw(t, readGrantDocAt(t, e.clk.Now(), DefaultReadGrantLifetime)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			copy := p
+			if listing {
+				copy = e.auth.PendingReadGrants()[0]
+			}
+			copy.Doc.Actions[0].ArtifactSHA256 = strings.Repeat("0", 64)
+			copy.Doc.Targets[0].HostID = "replacement"
+			copy.Doc.Credentials[0].CredentialRef = "replacement"
+			pending := e.auth.PendingReadGrants()[0]
+			if pending.Doc.Actions[0].ArtifactSHA256 != hexSum(artifact) || pending.Doc.Targets[0].HostID != "dockerflux" || pending.Doc.Credentials[0].CredentialRef != "nebula-default" {
+				t.Fatal("caller mutated the executor's pending scope")
+			}
+			if _, err := e.auth.CommitReadGrant(p.Digest, e.sign(p.Challenge)); err != nil {
+				t.Fatalf("caller mutated approval scope: %v", err)
+			}
+		})
+	}
+}
+
+func TestReadGrantDispatchRechecksWithoutSpendingAgain(t *testing.T) {
+	for _, change := range []string{"none", "revoke", "lock", "expiry", "risk", "recovery", "store error"} {
+		t.Run(change, func(t *testing.T) {
+			e, store := newLeaseEnv(t, ModeStandard)
+			g := approveReadGrant(t, e, readGrantRaw(t, readGrantDocAt(t, e.clk.Now(), DefaultReadGrantLifetime)))
+			claim, err := e.auth.AuthorizeReadRun(g.ID, "dispatch", TriggerOnDemand, readRun("dockerflux", fpA))
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch change {
+			case "revoke":
+				if err := e.auth.RevokeReadGrant(g.ID, "admin"); err != nil {
+					t.Fatal(err)
+				}
+			case "lock":
+				e.auth.Lock("admin")
+			case "expiry":
+				e.clk.Add(DefaultReadGrantLifetime)
+			case "risk":
+				e.risk.setHost("dockerflux", canonical.RiskHigh)
+			case "recovery":
+				store.recovering = true
+			case "store error":
+				store.failRead = true
+			}
+			calls := 0
+			err = e.auth.DispatchReadRun(claim, func() error { calls++; return nil })
+			if change == "none" {
+				if err != nil || calls != 1 {
+					t.Fatalf("valid dispatch: %d, %v", calls, err)
+				}
+				if err := e.auth.DispatchReadRun(claim, func() error { calls++; return nil }); err == nil || calls != 1 {
+					t.Fatal("claim dispatched twice")
+				}
+			} else if err == nil || calls != 0 {
+				t.Fatalf("changed authority dispatched: %d, %v", calls, err)
+			}
+			if len(store.hostRes["dockerflux"]) != 1 {
+				t.Fatal("final check changed the spent budget")
+			}
+		})
+	}
+}
+
+func TestReadGrantDispatchSerializesRevocationAndLock(t *testing.T) {
+	for _, operation := range []string{"revoke", "lock"} {
+		t.Run(operation, func(t *testing.T) {
+			e, _ := newLeaseEnv(t, ModeStandard)
+			g := approveReadGrant(t, e, readGrantRaw(t, readGrantDocAt(t, e.clk.Now(), DefaultReadGrantLifetime)))
+			claim, err := e.auth.AuthorizeReadRun(g.ID, "dispatch", TriggerOnDemand, readRun("dockerflux", fpA))
+			if err != nil {
+				t.Fatal(err)
+			}
+			started, finish := make(chan struct{}), make(chan struct{})
+			release := sync.OnceFunc(func() { close(finish) })
+			defer release()
+			dispatched := make(chan error, 1)
+			go func() {
+				dispatched <- e.auth.DispatchReadRun(claim, func() error { close(started); <-finish; return nil })
+			}()
+			<-started
+			attempted, stopped := make(chan struct{}), make(chan error, 1)
+			go func() {
+				close(attempted)
+				if operation == "revoke" {
+					stopped <- e.auth.RevokeReadGrant(g.ID, "admin")
+				} else {
+					e.auth.Lock("admin")
+					stopped <- nil
+				}
+			}()
+			<-attempted
+			select {
+			case err := <-stopped:
+				t.Fatalf("lifecycle completed inside dispatch: %v", err)
+			case <-time.After(20 * time.Millisecond):
+			}
+			release()
+			if err := <-dispatched; err != nil {
+				t.Fatal(err)
+			}
+			if err := <-stopped; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestReadGrantExpiredObservationCannotBeUndoneByRollback(t *testing.T) {
+	e, _ := newLeaseEnv(t, ModeStandard)
+	g := approveReadGrant(t, e, readGrantRaw(t, readGrantDocAt(t, e.clk.Now(), ReadGrantMinLifetime)))
+	e.clk.Add(ReadGrantMinLifetime)
+	if _, err := e.auth.AuthorizeReadRun(g.ID, "expired", TriggerOnDemand, readRun("dockerflux", fpA)); err == nil {
+		t.Fatal("expired read authorized")
+	}
+	e.clk.Add(-ReadGrantMinLifetime)
+	if _, err := e.auth.AuthorizeReadRun(g.ID, "rollback", TriggerOnDemand, readRun("dockerflux", fpA)); err == nil {
+		t.Fatal("expired read resurrected on rollback")
+	}
+}
+
+func (m *memLeases) ReadGrantClock(now time.Time) (time.Time, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failRead {
+		return time.Time{}, errors.New("disk full")
+	}
+	if now.After(m.highWater) {
+		m.highWater = now
+	}
+	return m.highWater, nil
+}
+
+func TestReadGrantRejectsCredentialSubstitutionAndRotation(t *testing.T) {
+	for _, change := range []string{"reference", "version"} {
+		t.Run(change, func(t *testing.T) {
+			e, store := newLeaseEnv(t, ModeStandard)
+			g := approveReadGrant(t, e, readGrantRaw(t, readGrantDocAt(t, e.clk.Now(), DefaultReadGrantLifetime)))
+			run := readRun("dockerflux", fpA)
+			if change == "reference" {
+				run.CredentialRef = "replacement"
+			} else {
+				run.CredentialVersion = fpB
+			}
+			if _, err := e.auth.AuthorizeReadRun(g.ID, "substitute", TriggerOnDemand, run); err == nil {
+				t.Fatal("changed credential authorized")
+			}
+			if len(store.hostRes) != 0 {
+				t.Fatal("credential rejection consumed budget")
+			}
+		})
+	}
+}
+
+func TestReadGrantV1StoredScopeIsNotReinterpreted(t *testing.T) {
+	e, store := newLeaseEnv(t, ModeStandard)
+	d := readGrantDocAt(t, e.clk.Now(), DefaultReadGrantLifetime)
+	d.Grant, d.Trigger, d.RateProfile, d.Credentials = "read-grant-v1", TriggerScheduled, "", nil
+	raw := readGrantRaw(t, d)
+	if _, err := e.auth.ProposeReadGrant(raw); err == nil {
+		t.Fatal("new approval accepted previous format")
+	}
+	doc, canon, digest, err := parseReadGrant(raw, e.clk.Now(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := StoredReadGrant{ID: doc.ID, Doc: canon, Digest: digest, CreatedAt: e.clk.Now(), ExpiresAt: time.Unix(doc.ExpiryUnix, 0)}
+	if err := store.SaveReadGrant(g); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.auth.AuthorizeReadRun(g.ID, "on-demand", TriggerOnDemand, readRun("dockerflux", fpA)); err == nil {
+		t.Fatal("previous scheduled scope widened")
+	}
+	if _, err := e.auth.AuthorizeReadRun(g.ID, "scheduled", TriggerScheduled, readRun("dockerflux", fpA)); err != nil {
+		t.Fatalf("previous scope changed: %v", err)
+	}
+	got, _, _ := store.ReadGrant(g.ID)
+	if string(got.Doc) != string(canon) || got.Digest != digest || !got.ExpiresAt.Equal(g.ExpiresAt) {
+		t.Fatal("previous approval rewritten")
+	}
+}
+
+func TestReadGrantCannotBeApprovedAfterItsAbsoluteExpiry(t *testing.T) {
+	e, _ := newLeaseEnv(t, ModeStandard)
+	d := readGrantDocAt(t, e.clk.Now().Add(-ReadGrantMinLifetime+time.Minute), ReadGrantMinLifetime)
+	p, err := e.auth.ProposeReadGrant(readGrantRaw(t, d))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.clk.Add(time.Minute)
+	if _, err := e.auth.CommitReadGrant(p.Digest, e.sign(p.Challenge)); err == nil {
+		t.Fatal("expired grant approved inside challenge window")
+	}
+}
+
+func TestReadGrantDispatchRejectsUnusableClaims(t *testing.T) {
+	for _, change := range []string{"missing", "parameters", "execution id", "other authority", "nil callback", "guard predates lock"} {
+		t.Run(change, func(t *testing.T) {
+			e, _ := newLeaseEnv(t, ModeStandard)
+			g := approveReadGrant(t, e, readGrantRaw(t, readGrantDocAt(t, e.clk.Now(), DefaultReadGrantLifetime)))
+			guard := e.auth.ReadDispatchGuard()
+			if change == "guard predates lock" {
+				e.auth.Lock("admin")
+			}
+			claim, err := e.auth.AuthorizeReadRun(g.ID, "original", TriggerOnDemand, readRun("dockerflux", fpA))
+			if err != nil {
+				t.Fatal(err)
+			}
+			called := false
+			callback := func() error { called = true; return nil }
+			switch change {
+			case "missing":
+				claim = Grant{}
+			case "parameters":
+				claim.Parameters = []byte(`{}`)
+			case "execution id":
+				claim.ExecutionID = "replacement"
+			case "other authority":
+				other, _ := newLeaseEnv(t, ModeStandard)
+				guard = other.auth.ReadDispatchGuard()
+			case "nil callback":
+				callback = nil
+			}
+			if err := guard(claim, callback); err == nil || called {
+				t.Fatalf("unusable claim dispatched: %v", err)
+			}
+		})
+	}
+}
+
+func TestReadGrantLockPausesNewDispatchUntilExplicitResume(t *testing.T) {
+	e, _ := newLeaseEnv(t, ModeStandard)
+	g := approveReadGrant(t, e, readGrantRaw(t, readGrantDocWith(t, rgID, e.clk.Now(), DefaultReadGrantLifetime, 24, []string{"core.facts", "docker.list"})))
+	e.auth.Lock("credential removed")
+	claim, err := e.auth.AuthorizeReadRun(g.ID, "after-lock", TriggerOnDemand, readRun("dockerflux", fpA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	if err := e.auth.DispatchReadRun(claim, func() error { called = true; return nil }); err == nil || called {
+		t.Fatal("new read escaped a pause without local unlock")
+	}
+	if err := e.auth.ResumeReadDispatch(); err != nil {
+		t.Fatal(err)
+	}
+	run := readRun("dockerflux", fpA)
+	run.ActionID = "docker.list"
+	claim, err = e.auth.AuthorizeReadRun(g.ID, "after-unlock", TriggerOnDemand, run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.auth.DispatchReadRun(claim, func() error { called = true; return nil }); err != nil || !called {
+		t.Fatalf("explicit resume failed: %v", err)
 	}
 }

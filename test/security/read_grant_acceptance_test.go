@@ -77,6 +77,8 @@ func readFactGrantDoc(t *testing.T, id string, now time.Time, budget int64) []by
 		Targets:      []canonical.Target{{HostID: "dockerflux", HostKeyFingerprint: fpA}},
 		MinIntervalS: 900,
 		RunBudget:    budget,
+		RateProfile:  "ordinary",
+		Credentials:  []permit.ReadGrantCredential{{HostID: "dockerflux", CredentialRef: credRef, CredentialVersion: fpA}},
 	}
 	raw, err := json.Marshal(doc)
 	if err != nil {
@@ -89,7 +91,7 @@ func readFactRun(action string) permit.Run {
 	return permit.Run{
 		HostID: "dockerflux", HostKeyFingerprint: fpA,
 		ActionID: action, ModuleVersion: "1.0.0",
-		Artifact: readFactArtifact, ParametersJSON: readFactParams, CredentialRef: credRef,
+		Artifact: readFactArtifact, ParametersJSON: readFactParams, CredentialRef: credRef, CredentialVersion: fpA,
 	}
 }
 

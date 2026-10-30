@@ -6,6 +6,7 @@ import (
 	"context"
 	"time"
 
+	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -113,6 +114,14 @@ func (s *Service) RevokeScheduleGrant(ctx context.Context, req *pb.RevokeSchedul
 // need no grant come first; after AuthorizeScheduled the interval has
 // started whatever happens.
 func (s *Service) RunScheduled(ctx context.Context, req *pb.RunScheduledRequest) (*pb.RunScheduledResponse, error) {
+	return s.RunRead(ctx, permit.TriggerScheduled, req)
+}
+
+// RunRead dispatches an exact scheduled or on-demand read through the same
+// grant, budget and lifecycle checks. RPC adapters choose the trigger; this
+// entry point grants no authority beyond the approved document.
+func (s *Service) RunRead(ctx context.Context, trigger string, req *pb.RunScheduledRequest) (*pb.RunScheduledResponse, error) {
+	dispatch := s.auth.ReadDispatchGuard()
 	r := req.GetRun()
 	if r == nil {
 		return nil, status.Error(codes.InvalidArgument, "run is required")
@@ -130,11 +139,22 @@ func (s *Service) RunScheduled(ctx context.Context, req *pb.RunScheduledRequest)
 	if err != nil {
 		return nil, err
 	}
+	signer, err := s.keys.Signer(r.GetCredentialRef())
+	if err != nil {
+		return nil, status.Error(codes.FailedPrecondition, "credential unavailable for read")
+	}
+	run := authorizeRequest(r)
+	run.CredentialVersion = ssh.FingerprintSHA256(signer.PublicKey())
 	id, err := newExecutionID()
 	if err != nil {
 		return nil, status.Error(codes.Internal, "random")
 	}
-	grant, err := s.auth.AuthorizeScheduled(req.GetGrantId(), id, authorizeRequest(r))
+	var grant permit.Grant
+	if trigger == permit.TriggerScheduled {
+		grant, err = s.auth.AuthorizeScheduled(req.GetGrantId(), id, run)
+	} else {
+		grant, err = s.auth.AuthorizeReadRun(req.GetGrantId(), id, trigger, run)
+	}
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -150,12 +170,56 @@ func (s *Service) RunScheduled(ctx context.Context, req *pb.RunScheduledRequest)
 	}
 	defer c.Close()
 	resp.Endpoint = c.Endpoint.String()
-	res, err := hostrun.Attached(ctx, c.Client, grant.ExecutionID, grant.Parameters, r.GetArtifact(), timeout)
+	// Attached's own timer starts after NewSession. A hostile peer can
+	// otherwise stall channel creation forever while holding the lifecycle
+	// guard. Bound the entire dispatch and close the connection on expiry.
+	dispatchTimeout := timeout
+	if dispatchTimeout <= 0 {
+		dispatchTimeout = hostrun.DefaultTimeout
+	}
+	dispatchCtx, cancel := context.WithTimeout(ctx, dispatchTimeout)
+	defer cancel()
+	stopClose := context.AfterFunc(dispatchCtx, func() { _ = c.Close() })
+	defer stopClose()
+	// The handshake can block while a lease is revoked or the executor is
+	// locked. Recheck authority and local pin/credential state immediately
+	// before dispatch, serialized with lifecycle changes, without claiming
+	// another budget unit.
+	err = dispatch(grant, func() error {
+		if err := dispatchCtx.Err(); err != nil {
+			return status.Error(codes.Canceled, "read canceled before dispatch")
+		}
+		if _, _, err := s.prepareRun(probe, req.GetEndpoints()); err != nil {
+			return err
+		}
+		hk, ok, err := s.db.HostKey(r.GetHostId())
+		if err != nil {
+			return s.adminStoreError("read dispatch", err)
+		}
+		if !ok || hk.Fingerprint != r.GetHostKeyFingerprint() || hk.Blocked != nil {
+			return status.Error(codes.PermissionDenied, "read target pin changed before dispatch")
+		}
+		current, err := s.keys.Signer(r.GetCredentialRef())
+		if err != nil || ssh.FingerprintSHA256(current.PublicKey()) != run.CredentialVersion {
+			return status.Error(codes.PermissionDenied, "read credential version changed before dispatch")
+		}
+		res, err := hostrun.Attached(dispatchCtx, c.Client, grant.ExecutionID, grant.Parameters, r.GetArtifact(), timeout)
+		if err != nil {
+			resp.Class, resp.Detail = classUnknown, err.Error()
+		} else {
+			resp.Class, resp.Detail, resp.ExitCode = res.Class, res.Detail, int32(res.ExitCode)
+			resp.Result, resp.Log, resp.LogTruncated = res.Result, res.Log, res.LogTruncated
+		}
+		return nil
+	})
 	if err != nil {
-		resp.Class, resp.Detail = classUnknown, err.Error()
-	} else {
-		resp.Class, resp.Detail, resp.ExitCode = res.Class, res.Detail, int32(res.ExitCode)
-		resp.Result, resp.Log, resp.LogTruncated = res.Result, res.Log, res.LogTruncated
+		resp.Class, resp.Detail = "read_denied", "read authority changed before dispatch"
+		resp.DurationMs = time.Since(start).Milliseconds()
+		s.auditScheduled(label, id, r.GetHostId(), resp)
+		if permit.CodeOf(err) != "" {
+			return nil, toStatus(err)
+		}
+		return nil, err
 	}
 	resp.DurationMs = time.Since(start).Milliseconds()
 	s.auditScheduled(label, id, r.GetHostId(), resp)

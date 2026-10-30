@@ -290,6 +290,8 @@ type Authority struct {
 	// holds the proposed ones until approval.
 	leases     ReadGrantStore
 	readGrants map[string]*pendingReadGrant
+	readEpoch  uint64 // incremented on lock; queued reads retain their original epoch
+	readPaused bool   // only explicit local credential unlock resumes dispatch
 	// trusts holds browser trust requests until their assertion (M7-4).
 	trusts map[string]*PendingTrust
 
@@ -344,6 +346,7 @@ func New(o Options) (*Authority, error) {
 		grants:     map[string]*pendingGrant{},
 		leases:     o.Leases,
 		readGrants: map[string]*pendingReadGrant{},
+		readPaused: true,
 		scans:      map[string]scanResult{},
 		trusts:     map[string]*PendingTrust{},
 	}, nil
@@ -692,6 +695,8 @@ type Run struct {
 	Artifact           []byte
 	ParametersJSON     []byte
 	CredentialRef      string
+	// CredentialVersion is executor-derived for standing read grants.
+	CredentialVersion string
 }
 
 // MaxArtifactSize bounds the artifact bytes hashed per run.
@@ -703,6 +708,7 @@ const MaxArtifactSize = 8 << 20
 type Grant struct {
 	ExecutionID string
 	Parameters  []byte
+	read        *readClaim
 }
 
 // Authorize is AuthorizeGrant without the grant: it reserves the host like
@@ -873,6 +879,8 @@ func (a *Authority) Session() (bool, time.Time) {
 func (a *Authority) Lock(who string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.readEpoch++
+	a.readPaused = true
 	a.sessionTill = time.Time{}
 	a.sessChal, a.sessChalExp = nil, time.Time{}
 	n := len(a.permits)
