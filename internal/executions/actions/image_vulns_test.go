@@ -4,11 +4,14 @@ package actions
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -59,6 +62,10 @@ var trivyOut = `{
 // inside the host directory so the scan work and cache are inspectable.
 func (f *fakeHost) runVulns(t *testing.T, path, params string) (int, []byte, map[string]any) {
 	t.Helper()
+	// Model a private host home even when the test runner uses a group-writable umask.
+	if err := os.Chmod(f.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	p := filepath.Join(f.dir, "params.json")
 	if err := os.WriteFile(p, []byte(params), 0o600); err != nil {
 		t.Fatal(err)
@@ -71,7 +78,9 @@ func (f *fakeHost) runVulns(t *testing.T, path, params string) (int, []byte, map
 	if err := os.WriteFile(s, a.Script, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("/bin/sh", s)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/bin/sh", s)
 	cmd.Dir = f.dir
 	cmd.Env = []string{
 		"PATH=" + path,
@@ -128,7 +137,16 @@ func vulnsDB(t *testing.T, f *fakeHost) {
 	if err := os.MkdirAll(db, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(db, "vuln-list.json"), []byte("{}"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(db, "trivy.db"), []byte("operator-managed database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	vulnsDBUpdatedAt(t, f, time.Now())
+}
+
+func vulnsDBUpdatedAt(t *testing.T, f *fakeHost, updated time.Time) {
+	t.Helper()
+	metadata := fmt.Sprintf(`{"Version":2,"UpdatedAt":%q,"NextUpdate":%q,"DownloadedAt":%q}`, updated.UTC().Format(time.RFC3339Nano), updated.Add(6*time.Hour).UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano))
+	if err := os.WriteFile(filepath.Join(f.dir, "tcache", "db", "metadata.json"), []byte(metadata), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -184,7 +202,7 @@ func TestImageVulnsAction(t *testing.T) {
 		}
 	}
 	s := string(a.Script)
-	for _, want := range []string{"--offline-scan", "--skip-db-update", "--scanners vuln"} {
+	for _, want := range []string{"--offline-scan", "--skip-db-update", "--skip-java-db-update", "--image-src docker", "--scanners vuln"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("script lacks the local-only scan flag %s", want)
 		}
@@ -235,7 +253,7 @@ func TestImageVulnsScriptOK(t *testing.T) {
 		t.Fatalf("summary %+v", sum)
 	}
 	calls := f.readCalls(t)
-	if !strings.Contains(calls, "image --offline-scan --skip-db-update --scanners vuln --quiet --format json") ||
+	if !strings.Contains(calls, "image --offline-scan --skip-db-update --skip-java-db-update --image-src docker --scanners vuln --quiet --format json") ||
 		!strings.Contains(calls, "image inspect") {
 		t.Fatalf("calls %q", calls)
 	}
@@ -325,10 +343,8 @@ func TestImageVulnsScriptStale(t *testing.T) {
 		vulnsDocker(t, f, true)
 		vulnsTrivy(t, f, "trivy-out.json", "0")
 		vulnsDB(t, f)
-		old := time.Now().Add(-48 * time.Hour)
-		if err := os.Chtimes(filepath.Join(f.dir, "tcache", "db", "vuln-list.json"), old, old); err != nil {
-			t.Fatal(err)
-		}
+		old := time.Now().Add(-48 * time.Hour).Truncate(time.Second)
+		vulnsDBUpdatedAt(t, f, old)
 		code, _, doc := f.runVulns(t, f.bin+":/usr/bin:/bin", vulnsParams())
 		if code != 0 || doc["status"] != "stale" {
 			t.Fatalf("%d %v", code, doc)
@@ -349,18 +365,28 @@ func TestImageVulnsScriptBusy(t *testing.T) {
 	if err := os.MkdirAll(w, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := exec.LookPath("flock"); err != nil {
-		t.Skip("flock missing on this machine")
+	for _, name := range []string{"scan.json", "scan.err", "reduced"} {
+		if err := os.WriteFile(filepath.Join(w, name), []byte("active scan"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	lock := exec.Command("flock", filepath.Join(w, "scan.lock"), "-c", "sleep 3")
-	if err := lock.Start(); err != nil {
+	lock, err := os.OpenFile(filepath.Join(w, "scan.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
 		t.Fatal(err)
 	}
-	defer lock.Process.Kill()
-	time.Sleep(200 * time.Millisecond)
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
 	code, _, doc := f.runVulns(t, f.bin+":/usr/bin:/bin", vulnsParams())
 	if code != 0 || doc["status"] != "busy" {
 		t.Fatalf("%d %v", code, doc)
+	}
+	for _, name := range []string{"scan.json", "scan.err", "reduced"} {
+		b, err := os.ReadFile(filepath.Join(w, name))
+		if err != nil || string(b) != "active scan" {
+			t.Fatalf("busy run changed %s: %q, %v", name, b, err)
+		}
 	}
 }
 
@@ -423,7 +449,7 @@ func TestImageVulnsScriptPrecheck(t *testing.T) {
 }
 
 // TestImageVulnsScriptSudo: a non-root user without the docker group uses
-// sudo -n for docker, trivy and the database mtime.
+// sudo -n for docker, trivy and the database metadata.
 func TestImageVulnsScriptSudo(t *testing.T) {
 	f := newFakeHost(t, "1")
 	f.write(t, "id", `echo 1000`)
@@ -439,12 +465,14 @@ case "$1" in
   image) cat "`+f.dir+`/trivy-out.json"; exit 0 ;;
 esac`)
 	f.write(t, "sudo", `[ "$1" = "-n" ] || exit 1; shift
-if [ "$1" = "stat" ]; then echo "$(date +%s)"; exit 0; fi
+if [ "$1" = "test" ]; then exit 0; fi
+if [ "$1" = "cat" ]; then cat "`+f.dir+`/tcache/db/metadata.json"; exit; fi
 echo "sudo $*" >> "`+f.calls+`"
 SUDO=1 exec "$@"`)
 	if err := os.WriteFile(filepath.Join(f.dir, "trivy-out.json"), []byte(trivyOut), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	vulnsDB(t, f)
 	code, _, doc := f.runVulns(t, f.bin+":/usr/bin:/bin", vulnsParams())
 	if code != 0 || doc["status"] != "ok" {
 		t.Fatalf("%d %v", code, doc)
@@ -452,5 +480,229 @@ SUDO=1 exec "$@"`)
 	calls := f.readCalls(t)
 	if !strings.Contains(calls, "sudo docker image inspect") || !strings.Contains(calls, "sudo trivy image --offline-scan --skip-db-update") {
 		t.Fatalf("calls %q", calls)
+	}
+}
+
+func TestImageVulnsScriptJSONStructure(t *testing.T) {
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, []byte(trivyOut)); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, report, status string
+		total, targets       int
+	}{
+		{"minified", compact.String(), "ok", 2, 1},
+		{"reordered", `{"Results":[{"Vulnerabilities":[{"Severity":"HIGH","FixedVersion":"2.0","VulnerabilityID":"CVE-2024-1234"}],"Target":"a"},{"Target":"b","Vulnerabilities":null}],"SchemaVersion":2}`, "ok", 1, 2},
+		{"empty vulnerabilities", `{"SchemaVersion":2,"Results":[{"Target":"a","Vulnerabilities":[]}]}`, "ok", 0, 1},
+		{"malformed skeleton", "{\n\"SchemaVersion\":2,\n\"Results\": [\n\"Vulnerabilities\": []\n", "unsupported", 0, 0},
+		{"trailing garbage", compact.String() + "garbage", "unsupported", 0, 0},
+		{"multiple documents", compact.String() + compact.String(), "unsupported", 0, 0},
+		{"wrong results type", `{"SchemaVersion":2,"Results":{"Vulnerabilities":[]}}`, "unsupported", 0, 0},
+		{"wrong vulnerability type", `{"SchemaVersion":2,"Results":[{"Target":"a","Vulnerabilities":{}}]}`, "unsupported", 0, 0},
+		{"wrong severity type", `{"SchemaVersion":2,"Results":[{"Target":"a","Vulnerabilities":[{"VulnerabilityID":"CVE-1234","Severity":3}]}]}`, "unsupported", 0, 0},
+		{"missing vulnerability scan", `{"SchemaVersion":2,"Results":[{"Target":"a"}]}`, "unsupported", 0, 0},
+		{"unsupported schema", `{"SchemaVersion":99,"Results":[{"Target":"a","Vulnerabilities":[]}]}`, "unsupported", 0, 0},
+		{"invalid UTF-8", strings.Replace(compact.String(), "openssl", "\xff", 1), "unsupported", 0, 0},
+		{"duplicate key", `{"SchemaVersion":2,"Results":[],"Results":[{"Target":"a","Vulnerabilities":[]}]}`, "unsupported", 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeHost(t, "1")
+			vulnsDocker(t, f, true)
+			vulnsTrivy(t, f, "report", "0")
+			vulnsDB(t, f)
+			if err := os.WriteFile(filepath.Join(f.dir, "report"), []byte(tc.report), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			code, raw, doc := f.runVulns(t, f.bin+":/usr/bin:/bin", vulnsParams())
+			if code != 0 || doc["status"] != tc.status {
+				t.Fatalf("%d %v", code, doc)
+			}
+			v, err := dockerhost.ParseImageVulns(raw)
+			if err != nil || v.Total != tc.total || v.Targets != tc.targets {
+				t.Fatalf("parsed %+v, %v", v, err)
+			}
+			if tc.name == "reordered" && (v.Top[0].Severity != "HIGH" || v.Top[0].Fixed != "2.0") {
+				t.Fatalf("reordered fields lost: %+v", v.Top)
+			}
+			if tc.name == "minified" && (v.Severity["HIGH"] != 1 || v.Severity["CRITICAL"] != 1 ||
+				len(v.Top) != 2 || v.Top[1].Fixed != "1.1.2") {
+				t.Fatalf("minified fields lost: %+v", v)
+			}
+			if tc.status != "ok" && doc["summary"] != nil {
+				t.Fatal("invalid report carried findings")
+			}
+		})
+	}
+}
+
+func TestImageVulnsScriptRejectsUnsafeWorkPaths(t *testing.T) {
+	for _, kind := range []string{"parent symlink", "parent writable", "work symlink", "work writable", "work file", "lock symlink", "lock hardlink", "cache symlink", "planted scan files"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newFakeHost(t, "1")
+			vulnsDocker(t, f, true)
+			vulnsTrivy(t, f, "report", "0")
+			vulnsDB(t, f)
+			if err := os.WriteFile(filepath.Join(f.dir, "report"), []byte(trivyOut), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			parent := filepath.Join(f.dir, "tmp")
+			w := filepath.Join(parent, "nebula-image-vulns.0")
+			if err := os.MkdirAll(w, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			victim := filepath.Join(f.dir, "victim")
+			if err := os.WriteFile(victim, []byte("untouched"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			symlink := func(target, path string) {
+				t.Helper()
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			switch kind {
+			case "parent symlink":
+				if err := os.Rename(parent, parent+"-real"); err != nil {
+					t.Fatal(err)
+				}
+				symlink(parent+"-real", parent)
+			case "parent writable":
+				if err := os.Chmod(parent, 0o777); err != nil {
+					t.Fatal(err)
+				}
+			case "work symlink":
+				if err := os.Remove(w); err != nil {
+					t.Fatal(err)
+				}
+				symlink(f.dir, w)
+			case "work writable":
+				if err := os.Chmod(w, 0o777); err != nil {
+					t.Fatal(err)
+				}
+			case "work file":
+				if err := os.Remove(w); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(w, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "lock symlink":
+				symlink(victim, filepath.Join(w, "scan.lock"))
+			case "lock hardlink":
+				if err := os.Link(victim, filepath.Join(w, "scan.lock")); err != nil {
+					t.Fatal(err)
+				}
+			case "cache symlink":
+				symlink(victim, filepath.Join(w, "c-planted"))
+			case "planted scan files":
+				for _, name := range []string{"scan.json", "scan.err", "reduced"} {
+					symlink(victim, filepath.Join(w, name))
+				}
+			}
+			code, _, doc := f.runVulns(t, f.bin+":/usr/bin:/bin", vulnsParams())
+			if kind != "planted scan files" && (code != 10 || doc["phase"] != "precheck") {
+				t.Fatalf("unsafe path accepted: %d %v", code, doc)
+			}
+			if kind == "planted scan files" && (code != 0 || doc["status"] != "ok") {
+				t.Fatalf("unique scan files failed: %d %v", code, doc)
+			}
+			b, err := os.ReadFile(victim)
+			if err != nil || string(b) != "untouched" {
+				t.Fatalf("victim changed: %q, %v", b, err)
+			}
+		})
+	}
+}
+
+func TestImageVulnsScriptLimitsBothStreamsWithoutSpooling(t *testing.T) {
+	for _, stream := range []string{"stdout", "stderr"} {
+		t.Run(stream, func(t *testing.T) {
+			f := newFakeHost(t, "1")
+			vulnsDocker(t, f, true)
+			vulnsDB(t, f)
+			f.write(t, "trivy", `case "$1" in
+--version) echo 'Version: 0.52.0' ;;
+image) exec python3 - <<'PY'
+import os, pathlib, stat, sys
+if not all(stat.S_ISFIFO(os.fstat(fd).st_mode) for fd in (1, 2)):
+    pathlib.Path(os.environ['HOME'], 'spooled').touch()
+stream = sys.`+stream+`.buffer
+for _ in range(512):
+    stream.write(b'x' * 65536)
+    stream.flush()
+    for p in pathlib.Path(os.environ['TMPDIR']).rglob('*'):
+        if p.is_file() and p.stat().st_size > 65536:
+            pathlib.Path(os.environ['HOME'], 'spooled').touch()
+pathlib.Path(os.environ['HOME'], 'completed').touch()
+PY
+;; esac`)
+			code, _, doc := f.runVulns(t, f.bin+":/usr/bin:/bin", vulnsParams())
+			if code != 0 || doc["status"] != "truncated" || doc["summary"] != nil {
+				t.Fatalf("unbounded %s: %d %v", stream, code, doc)
+			}
+			for _, name := range []string{"spooled", "completed"} {
+				if _, err := os.Stat(filepath.Join(f.dir, name)); !os.IsNotExist(err) {
+					t.Fatalf("scanner %s: %v", name, err)
+				}
+			}
+		})
+	}
+}
+
+func TestImageVulnsScriptRequiresJSONReducer(t *testing.T) {
+	f := newFakeHost(t, "1")
+	vulnsDocker(t, f, true)
+	vulnsTrivy(t, f, "report", "0")
+	code, _, doc := f.runVulns(t, f.bin+":"+vulnsBin(t, f), vulnsParams())
+	if code != 10 || doc["phase"] != "precheck" || !strings.Contains(doc["reason"].(string), "Python 3") {
+		t.Fatalf("%d %v", code, doc)
+	}
+}
+
+func TestImageVulnsScriptDatabaseMetadataAndAgeBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name, metadata, status string
+		age                    int
+	}{
+		{"fresh", "", "ok", 0},
+		{"before boundary", "", "ok", 86399},
+		{"at boundary", "", "ok", 86400},
+		{"after boundary", "", "stale", 86401},
+		{"almost 25 hours", "", "stale", 89999},
+		{"bad metadata", `{"Version":2,"UpdatedAt":"yesterday"}`, "stale", 0},
+		{"malformed metadata", `{`, "stale", 0},
+		{"wrong schema", `{"Version":1,"UpdatedAt":"2026-01-01T00:00:00Z"}`, "stale", 0},
+		{"oversized metadata", strings.Repeat(" ", 16385), "stale", 0},
+		{"missing database", "", "stale", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeHost(t, "1")
+			vulnsDocker(t, f, true)
+			vulnsTrivy(t, f, "report", "0")
+			vulnsDB(t, f)
+			if err := os.WriteFile(filepath.Join(f.dir, "report"), []byte(trivyOut), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// Freeze the script's clock and keep file mtimes fresh: age must
+			// come from UpdatedAt, rather than the database file's mtime.
+			now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+			f.write(t, "date", fmt.Sprintf("echo %d", now.Unix()))
+			vulnsDBUpdatedAt(t, f, now.Add(-time.Duration(tc.age)*time.Second))
+			if tc.metadata != "" {
+				if err := os.WriteFile(filepath.Join(f.dir, "tcache", "db", "metadata.json"), []byte(tc.metadata), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.name == "missing database" {
+				if err := os.Remove(filepath.Join(f.dir, "tcache", "db", "trivy.db")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			code, _, doc := f.runVulns(t, f.bin+":/usr/bin:/bin", vulnsParams())
+			if code != 0 || doc["status"] != tc.status {
+				t.Fatalf("%d %v", code, doc)
+			}
+		})
 	}
 }
