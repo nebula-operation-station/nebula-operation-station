@@ -3,6 +3,7 @@
 package hostmetrics
 
 import (
+	"math"
 	"os"
 	"testing"
 )
@@ -45,7 +46,7 @@ func FuzzParseMetricsBounds(f *testing.F) {
 			t.Fatalf("reason is %d bytes, bound is %d", len(m.Reason), maxReasonLen)
 		}
 		if m.CPU.Available {
-			if m.CPU.Percent < 0 || m.CPU.Percent > 100 {
+			if fuzzFloatOutsideRange(m.CPU.Percent, 100) {
 				t.Fatalf("cpu percent %v outside [0, 100]", m.CPU.Percent)
 			}
 		} else if m.CPU.Percent != 0 {
@@ -53,7 +54,7 @@ func FuzzParseMetricsBounds(f *testing.F) {
 		}
 		if m.Load.Available {
 			for _, v := range []float64{m.Load.Min1, m.Load.Min5, m.Load.Min15} {
-				if v < 0 || v > maxLoad {
+				if fuzzFloatOutsideRange(v, maxLoad) {
 					t.Fatalf("load value %v outside [0, %d]", v, maxLoad)
 				}
 			}
@@ -74,7 +75,7 @@ func FuzzParseMetricsBounds(f *testing.F) {
 			if m.Disk.TotalBytes == 0 || m.Disk.TotalBytes > maxBytes || m.Disk.UsedBytes > m.Disk.TotalBytes {
 				t.Fatalf("disk used %d / total %d violates its bounds", m.Disk.UsedBytes, m.Disk.TotalBytes)
 			}
-			if m.Disk.Percent < 0 || m.Disk.Percent > 100 {
+			if fuzzFloatOutsideRange(m.Disk.Percent, 100) {
 				t.Fatalf("disk percent %v outside [0, 100]", m.Disk.Percent)
 			}
 		} else if m.Disk.Mount != "" || m.Disk.UsedBytes != 0 || m.Disk.TotalBytes != 0 || m.Disk.Percent != 0 {
@@ -118,9 +119,37 @@ func FuzzParseFilesystemsBounds(f *testing.F) {
 			if m.SizeBytes == 0 || m.SizeBytes > maxBytes || m.UsedBytes > m.SizeBytes {
 				t.Fatalf("mount used %d / size %d violates its bounds", m.UsedBytes, m.SizeBytes)
 			}
-			if m.Percent < 0 || m.Percent > 100 {
+			if fuzzFloatOutsideRange(m.Percent, 100) {
 				t.Fatalf("mount percent %v outside [0, 100]", m.Percent)
 			}
 		}
 	})
+}
+
+func fuzzFloatOutsideRange(v, max float64) bool {
+	return math.IsNaN(v) || v < 0 || v > max
+}
+
+func TestFuzzFloatRangeRejectsNonfinite(t *testing.T) {
+	for _, max := range []float64{100, maxLoad} {
+		for _, tc := range []struct {
+			name    string
+			value   float64
+			outside bool
+		}{
+			{"NaN", math.NaN(), true},
+			{"positive infinity", math.Inf(1), true},
+			{"negative infinity", math.Inf(-1), true},
+			{"negative", -1, true},
+			{"above maximum", max + 1, true},
+			{"zero", 0, false},
+			{"maximum", max, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				if got := fuzzFloatOutsideRange(tc.value, max); got != tc.outside {
+					t.Errorf("range [0, %v], value %v: outside = %v, want %v", max, tc.value, got, tc.outside)
+				}
+			})
+		}
+	}
 }

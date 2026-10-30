@@ -3,7 +3,9 @@
 package gpuhost
 
 import (
+	"math"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -104,8 +106,73 @@ func FuzzParseGPUStatus(f *testing.F) {
 			if g.TemperatureC != nil && (*g.TemperatureC < 0 || *g.TemperatureC > maxTempC) {
 				t.Fatalf("temperature %d outside [0, %d]", *g.TemperatureC, maxTempC)
 			}
-			if g.PowerW != nil && (*g.PowerW < 0 || *g.PowerW > maxPowerW) {
+			if g.PowerW != nil && fuzzFloatOutsideRange(*g.PowerW, maxPowerW) {
 				t.Fatalf("power %v W outside [0, %v]", *g.PowerW, maxPowerW)
+			}
+		}
+	})
+}
+
+func fuzzFloatOutsideRange(v, max float64) bool {
+	return math.IsNaN(v) || v < 0 || v > max
+}
+
+func TestFuzzFloatRangeRejectsNonfinite(t *testing.T) {
+	for _, max := range []float64{maxPowerW} {
+		for _, tc := range []struct {
+			name    string
+			value   float64
+			outside bool
+		}{
+			{"NaN", math.NaN(), true},
+			{"positive infinity", math.Inf(1), true},
+			{"negative infinity", math.Inf(-1), true},
+			{"negative", -1, true},
+			{"above maximum", max + 1, true},
+			{"zero", 0, false},
+			{"maximum", max, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				if got := fuzzFloatOutsideRange(tc.value, max); got != tc.outside {
+					t.Errorf("range [0, %v], value %v: outside = %v, want %v", max, tc.value, got, tc.outside)
+				}
+			})
+		}
+	}
+}
+
+// FuzzParseGPUStatusUnavailable builds valid payloads so unavailable metrics
+// cannot escape the oracle through malformed input or a dropped GPU row.
+func FuzzParseGPUStatusUnavailable(f *testing.F) {
+	const metricCount = 5
+	// Seed every availability combination, including real zeros and all [N/A].
+	for mask := uint8(0); mask < 1<<metricCount; mask++ {
+		f.Add(mask)
+	}
+	f.Fuzz(func(t *testing.T, mask uint8) {
+		fields := []string{
+			"0", "GPU-673e42ea-5685-7487-4d7e-045c914a4d51",
+			"00000000:65:00.0", "NVIDIA RTX A6000",
+			"0", "0", "0", "0", "0",
+		}
+		for i := 0; i < metricCount; i++ {
+			if mask&(1<<i) != 0 {
+				fields[4+i] = "[N/A]"
+			}
+		}
+		st, err := ParseGPUStatus(gpuDoc(strings.Join(fields, ", ")))
+		if err != nil || len(st.GPUs) != 1 {
+			t.Fatalf("valid GPU with availability mask %05b was rejected: %+v, %v", mask, st, err)
+		}
+		g := st.GPUs[0]
+		unavailable := []bool{
+			g.UtilPercent == nil, g.MemoryUsedMiB == nil,
+			g.MemoryTotalMiB == nil, g.TemperatureC == nil, g.PowerW == nil,
+		}
+		for i, got := range unavailable {
+			want := mask&(1<<i) != 0
+			if got != want {
+				t.Errorf("metric column %d (%q): nil = %v, want %v", 4+i, fields[4+i], got, want)
 			}
 		}
 	})

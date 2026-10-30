@@ -3,6 +3,7 @@
 package dockerhost
 
 import (
+	"math"
 	"os"
 	"testing"
 )
@@ -47,7 +48,7 @@ func FuzzParseStats(f *testing.F) {
 			if len(c.Name) > 255 {
 				t.Fatalf("container name exceeds 255 bytes: %d", len(c.Name))
 			}
-			if c.CPUPercent != nil && (*c.CPUPercent < 0 || *c.CPUPercent > maxCPUPercent) {
+			if c.CPUPercent != nil && fuzzFloatOutsideRange(*c.CPUPercent, maxCPUPercent) {
 				t.Fatalf("cpu percent %v outside [0, %d]", *c.CPUPercent, maxCPUPercent)
 			}
 			for _, m := range []*int64{c.MemUsedBytes, c.MemLimitBytes} {
@@ -55,7 +56,7 @@ func FuzzParseStats(f *testing.F) {
 					t.Fatalf("memory bytes %d outside [0, %d]", *m, maxMemBytes)
 				}
 			}
-			if c.MemPercent != nil && (*c.MemPercent < 0 || *c.MemPercent > maxMemPercent) {
+			if c.MemPercent != nil && fuzzFloatOutsideRange(*c.MemPercent, maxMemPercent) {
 				t.Fatalf("memory percent %v outside [0, %d]", *c.MemPercent, maxMemPercent)
 			}
 		}
@@ -116,4 +117,32 @@ func FuzzParseImageVulns(f *testing.F) {
 			}
 		}
 	})
+}
+
+func fuzzFloatOutsideRange(v, max float64) bool {
+	return math.IsNaN(v) || v < 0 || v > max
+}
+
+func TestFuzzFloatRangeRejectsNonfinite(t *testing.T) {
+	for _, max := range []float64{maxCPUPercent, maxMemPercent} {
+		for _, tc := range []struct {
+			name    string
+			value   float64
+			outside bool
+		}{
+			{"NaN", math.NaN(), true},
+			{"positive infinity", math.Inf(1), true},
+			{"negative infinity", math.Inf(-1), true},
+			{"negative", -1, true},
+			{"above maximum", max + 1, true},
+			{"zero", 0, false},
+			{"maximum", max, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				if got := fuzzFloatOutsideRange(tc.value, max); got != tc.outside {
+					t.Errorf("range [0, %v], value %v: outside = %v, want %v", max, tc.value, got, tc.outside)
+				}
+			})
+		}
+	}
 }
