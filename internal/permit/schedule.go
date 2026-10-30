@@ -227,6 +227,8 @@ func (a *Authority) storeGrantLocked(pg *pendingGrant, now time.Time, by string)
 
 // RevokeScheduleGrant revokes a grant. It needs no approval.
 func (a *Authority) RevokeScheduleGrant(id, who string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.schedules == nil {
 		return fail(CodeScheduleUnavailable, "")
 	}

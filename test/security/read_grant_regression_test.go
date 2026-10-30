@@ -3,15 +3,21 @@
 package security
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc/codes"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
@@ -121,6 +127,7 @@ func TestReadGrantUnspentGrantPausesAcrossLockAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	doc.Targets = []canonical.Target{{HostID: host.id, HostKeyFingerprint: host.fp}}
+	doc.Credentials = []permit.ReadGrantCredential{{HostID: host.id, CredentialRef: credRef, CredentialVersion: ssh.FingerprintSHA256(h.userKey)}}
 	for i := range doc.Actions {
 		doc.Actions[i].ArtifactSHA256 = hexSum(artifact)
 	}
@@ -190,5 +197,223 @@ func TestReadGrantUnspentGrantPausesAcrossLockAndRestart(t *testing.T) {
 	}
 	if len(host.srv.Commands()) != 1 {
 		t.Fatalf("queued work escaped or unlocked read did not dispatch: %d commands", len(host.srv.Commands()))
+	}
+}
+
+// claimedReadReservations queues work after its durable budget claim, before
+// the executor can connect or dispatch. Lifecycle calls must invalidate it.
+type claimedReadReservations struct {
+	permit.ReadGrantStore
+	reached, resume chan struct{}
+	once            sync.Once
+}
+
+func (s *claimedReadReservations) ReserveReadRun(id, action, host string, now time.Time, budget int, interval time.Duration) (bool, error) {
+	ok, err := s.ReadGrantStore.ReserveReadRun(id, action, host, now, budget, interval)
+	if ok && err == nil {
+		s.once.Do(func() { close(s.reached); <-s.resume })
+	}
+	return ok, err
+}
+
+func TestReadGrantFinalDispatchDeniesQueuedStateChanges(t *testing.T) {
+	for _, trigger := range []string{permit.TriggerScheduled, permit.TriggerOnDemand} {
+		for _, change := range []string{"none", "revoke", "lock-unlock", "recovery"} {
+			t.Run(trigger+"/"+change, func(t *testing.T) {
+				h := newHarness(t, harnessOptions{})
+				h.unlock()
+				host := h.pinnedRunHost("queued-read")
+				if _, err := h.client.SetHostCriticality(h.ctx(), &pb.SetHostCriticalityRequest{HostId: host.id, HostKeyFingerprint: host.fp, Criticality: pb.RiskClass_RISK_CLASS_LOW}); err != nil {
+					t.Fatal(err)
+				}
+				artifact := []byte("#!/bin/sh\nprintf '{}'\n")
+				for _, action := range readGrantActions {
+					if err := h.db.TrustArtifact(executordb.TrustedArtifact{SHA256: hexSum(artifact), ActionID: action, ModuleVersion: "1.0.0", Risk: canonical.RiskLow, TrustedBy: "acceptance"}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				store := &claimedReadReservations{ReadGrantStore: h.db, reached: make(chan struct{}), resume: make(chan struct{})}
+				release := sync.OnceFunc(func() { close(store.resume) })
+				defer release()
+				auth, svc := newReadGrantService(t, h, store)
+				if _, err := svc.Unlock(context.Background(), &pb.UnlockRequest{Passphrase: []byte(passphrase)}); err != nil {
+					t.Fatal(err)
+				}
+				var doc permit.ReadGrantDoc
+				if err := json.Unmarshal(readFactGrantDoc(t, readGrantID, time.Now(), 3), &doc); err != nil {
+					t.Fatal(err)
+				}
+				doc.Targets = []canonical.Target{{HostID: host.id, HostKeyFingerprint: host.fp}}
+				doc.Credentials = []permit.ReadGrantCredential{{HostID: host.id, CredentialRef: credRef, CredentialVersion: ssh.FingerprintSHA256(h.userKey)}}
+				for i := range doc.Actions {
+					doc.Actions[i].ArtifactSHA256 = hexSum(artifact)
+				}
+				raw, err := json.Marshal(doc)
+				if err != nil {
+					t.Fatal(err)
+				}
+				p, err := auth.ProposeReadGrant(raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				g, err := auth.CommitReadGrant(p.Digest, h.sign(p.Challenge))
+				if err != nil {
+					t.Fatal(err)
+				}
+				request := &pb.RunScheduledRequest{GrantId: g.ID, Endpoints: []string{host.endpoint}, Run: &pb.AuthorizeRunRequest{HostId: host.id, HostKeyFingerprint: host.fp, ActionId: "core.facts", ModuleVersion: "1.0.0", Artifact: artifact, ParametersJson: readFactParams, CredentialRef: credRef}}
+				result := make(chan error, 1)
+				go func() {
+					r, err := svc.RunRead(context.Background(), trigger, request)
+					if err == nil && r.GetResult().GetClass() != "success" {
+						err = fmt.Errorf("read outcome: %s", r.GetResult().GetClass())
+					}
+					result <- err
+				}()
+				select {
+				case <-store.reached:
+				case <-time.After(10 * time.Second):
+					t.Fatal("read did not reach claimed queue")
+				}
+				switch change {
+				case "revoke":
+					if err := auth.RevokeReadGrant(g.ID, "acceptance"); err != nil {
+						t.Fatal(err)
+					}
+				case "lock-unlock":
+					if _, err := svc.Lock(context.Background(), &pb.LockRequest{}); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := svc.Unlock(context.Background(), &pb.UnlockRequest{Passphrase: []byte(passphrase)}); err != nil {
+						t.Fatal(err)
+					}
+				case "recovery":
+					if err := h.db.SetRecoveryPending(); err != nil {
+						t.Fatal(err)
+					}
+				}
+				release()
+				select {
+				case err := <-result:
+					if change == "none" {
+						if err != nil || len(host.srv.Commands()) != 1 {
+							t.Fatalf("unchanged read: %v, %d commands", err, len(host.srv.Commands()))
+						}
+					} else if err == nil || len(host.srv.Commands()) != 0 {
+						t.Fatalf("queued read escaped %s: %v, %d commands", change, err, len(host.srv.Commands()))
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("queued read did not finish")
+				}
+			})
+		}
+	}
+}
+
+func TestReadGrantUnresponsiveSessionCannotHoldLockPastReadTimeout(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+	h.unlock()
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostKey, err := ssh.NewSignerFromKey(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, session := make(chan net.Conn, 1), make(chan struct{})
+	t.Cleanup(func() {
+		_ = listener.Close()
+		select {
+		case conn := <-accepted:
+			_ = conn.Close()
+		default:
+		}
+	})
+	go func() {
+		raw, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		accepted <- raw
+		defer raw.Close()
+		config := &ssh.ServerConfig{PublicKeyCallback: func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			if !bytes.Equal(key.Marshal(), h.userKey.Marshal()) {
+				return nil, fmt.Errorf("unexpected test client key")
+			}
+			return nil, nil
+		}}
+		config.AddHostKey(hostKey)
+		conn, channels, requests, err := ssh.NewServerConn(raw, config)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		go ssh.DiscardRequests(requests)
+		if channel, ok := <-channels; ok && channel.ChannelType() == "session" {
+			// Never accept/reject the channel. hostrun.Attached is blocked in
+			// NewSession, before its own command timeout starts.
+			close(session)
+			_ = conn.Wait()
+		}
+	}()
+	pin, err := h.db.PinHostKey(executordb.HostKey{HostID: "stall-read", PublicKey: hostKey.PublicKey().Marshal(), User: "root", CredentialRef: credRef, Source: executordb.SourceProbe, PinnedBy: "acceptance"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.client.SetHostCriticality(h.ctx(), &pb.SetHostCriticalityRequest{HostId: pin.HostID, HostKeyFingerprint: pin.Fingerprint, Criticality: pb.RiskClass_RISK_CLASS_LOW}); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range readGrantActions {
+		if err := h.db.TrustArtifact(executordb.TrustedArtifact{SHA256: hexSum(readFactArtifact), ActionID: action, ModuleVersion: "1.0.0", Risk: canonical.RiskLow, TrustedBy: "acceptance"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	auth, svc := newReadGrantService(t, h, h.db)
+	if _, err := svc.Unlock(context.Background(), &pb.UnlockRequest{Passphrase: []byte(passphrase)}); err != nil {
+		t.Fatal(err)
+	}
+	var doc permit.ReadGrantDoc
+	if err := json.Unmarshal(readFactGrantDoc(t, readGrantID, time.Now(), 3), &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc.Targets = []canonical.Target{{HostID: pin.HostID, HostKeyFingerprint: pin.Fingerprint}}
+	doc.Credentials = []permit.ReadGrantCredential{{HostID: pin.HostID, CredentialRef: credRef, CredentialVersion: ssh.FingerprintSHA256(h.userKey)}}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := auth.ProposeReadGrant(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := auth.CommitReadGrant(p.Digest, h.sign(p.Challenge))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		_, _ = svc.RunRead(context.Background(), permit.TriggerOnDemand, &pb.RunScheduledRequest{GrantId: g.ID, TimeoutSeconds: 1, Endpoints: []string{listener.Addr().String()}, Run: &pb.AuthorizeRunRequest{HostId: pin.HostID, HostKeyFingerprint: pin.Fingerprint, ActionId: "core.facts", ModuleVersion: "1.0.0", Artifact: readFactArtifact, ParametersJson: readFactParams, CredentialRef: credRef}})
+	}()
+	select {
+	case <-session:
+	case <-time.After(5 * time.Second):
+		t.Fatal("read did not request a session")
+	}
+	locked := make(chan struct{})
+	go func() { _, _ = svc.Lock(context.Background(), &pb.LockRequest{}); close(locked) }()
+	select {
+	case <-locked:
+	case <-time.After(3 * time.Second):
+		t.Fatal("unresponsive session held lock beyond read timeout")
+	}
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("timed out read did not finish")
 	}
 }

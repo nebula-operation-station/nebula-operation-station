@@ -34,12 +34,31 @@ func (db *DB) SaveReadGrant(g permit.StoredReadGrant) error {
 }
 
 func (db *DB) saveReadGrant(g permit.StoredReadGrant, legacy bool) error {
-	_, err := db.sql.Exec(`INSERT INTO read_grants (id, digest, doc, approved_by, created_at, expires_at, legacy_schedule) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+	res, err := db.sql.Exec(`INSERT INTO read_grants (id, digest, doc, approved_by, created_at, expires_at, legacy_schedule)
+		SELECT ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM recovery_state)`,
 		g.ID, g.Digest, g.Doc, g.ApprovedBy, g.CreatedAt.Unix(), g.ExpiresAt.Unix(), legacy)
 	if err != nil {
 		return fmt.Errorf("executordb: save read grant: %w", err)
 	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("executordb: save read grant: %w", err)
+	} else if n == 0 {
+		return permit.ErrReadGrantInactive
+	}
 	return nil
+}
+
+// ReadGrantClock durably observes now and returns the nondecreasing read
+// clock, including observations that are denied before a reservation.
+func (db *DB) ReadGrantClock(now time.Time) (time.Time, error) {
+	var effective int64
+	err := db.sql.QueryRow(`INSERT INTO read_clock (id, high_water) VALUES (1, ?)
+		ON CONFLICT(id) DO UPDATE SET high_water = MAX(read_clock.high_water, excluded.high_water)
+		RETURNING high_water`, now.Unix()).Scan(&effective)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("executordb: read grant clock: %w", err)
+	}
+	return time.Unix(effective, 0), nil
 }
 
 // ReadGrant returns one read grant.
@@ -111,12 +130,21 @@ func (db *DB) ReserveReadRun(grantID, actionID, hostID string, now time.Time, bu
 	if err := tx.QueryRow(`SELECT high_water FROM read_clock WHERE id = 1`).Scan(&effective); err != nil {
 		return false, fmt.Errorf("executordb: reserve read run: %w", err)
 	}
+	// Denials still observe time. Commit the high-water update so rollback
+	// or restart cannot resurrect expired authority or rewind the window.
+	deny := func(reason error) (bool, error) {
+		if err := tx.Commit(); err != nil {
+			return false, fmt.Errorf("executordb: reserve read run: %w", err)
+		}
+		return false, reason
+	}
 	var active bool
-	if err := tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM read_grants WHERE id = ? AND revoked_at IS NULL AND expires_at > ?)`, grantID, effective).Scan(&active); err != nil {
+	if err := tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM read_grants WHERE id = ? AND revoked_at IS NULL AND expires_at > ?)
+		AND NOT EXISTS (SELECT 1 FROM recovery_state)`, grantID, effective).Scan(&active); err != nil {
 		return false, fmt.Errorf("executordb: reserve read run: %w", err)
 	}
 	if !active {
-		return false, permit.ErrReadGrantInactive
+		return deny(permit.ErrReadGrantInactive)
 	}
 	cutoff := effective - int64(permit.RollingHour/time.Second)
 	// Rows at or before the cutoff can never count again; drop them so the
@@ -129,7 +157,7 @@ func (db *DB) ReserveReadRun(grantID, actionID, hostID string, now time.Time, bu
 		return false, fmt.Errorf("executordb: reserve read run: %w", err)
 	}
 	if spent >= budget {
-		return false, nil
+		return deny(nil)
 	}
 	var last int64
 	err = tx.QueryRow(`SELECT last_run FROM read_action_last WHERE action_id = ? AND host_id = ?`, actionID, hostID).Scan(&last)
@@ -140,7 +168,7 @@ func (db *DB) ReserveReadRun(grantID, actionID, hostID string, now time.Time, bu
 		return false, fmt.Errorf("executordb: reserve read run: %w", err)
 	}
 	if last > effective-int64(minInterval/time.Second) {
-		return false, nil
+		return deny(nil)
 	}
 	if _, err := tx.Exec(`INSERT INTO read_run_log (grant_id, host_id, at) VALUES (?, ?, ?)`, grantID, hostID, effective); err != nil {
 		return false, fmt.Errorf("executordb: reserve read run: %w", err)
