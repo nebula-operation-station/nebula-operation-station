@@ -62,7 +62,6 @@ ui:
 | `pci.inventory`, `gpu.status` | NVIDIA PCI identity; fixed `nvidia-smi --query-gpu` fields for UUID/PCI ID, utilization, VRAM used/total, temperature and power; no arbitrary flags/command or device changes |
 | `docker.stats` | One bounded non-streaming CPU/RAM snapshot keyed by full container ID; validated list/inspect hints for Compose grouping |
 | `service.check` | Bounded HTTP/TCP health/latency from an enrolled host, exact approved destination/port, no redirects, generic URLs or response bodies; unknown if unconfigured |
-| `backup.status` | Allowlisted detectable local Veeam product/job metadata; no guessed log paths or credentials; PVE/PBS evidence stays in typed provider readers |
 | `image.vulnerabilities` (optional) | Sanitized unique CVE counts/severity, immutable local image identity and scanner/database age from operator-installed host-local Trivy; no installation, image pull or database refresh |
 
 <a id="v23-10-04"></a>

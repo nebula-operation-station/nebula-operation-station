@@ -38,7 +38,7 @@ Nebula knows every network asset, manages a subset of them over SSH, and never w
 | Guest configuration | 5 min: CPU/RAM/disk-storage references, NIC MAC/bridge/VLAN, boot order, `hostpci` mappings, nonsecret Cloud-Init IP configuration, tags/pools |
 | Interfaces | 60 s where supported: informational QEMU agent IP/MAC/hostname/OS/filesystem summary or typed LXC interfaces, source-labelled; PVE 8 broader agent rights remain unavailable |
 | Snapshots and storage | 5 min: name/time/parent/RAM flag and storage type/format/availability/capacity/features, never image/backup contents |
-| Backup evidence | 5 min: available nonsecret vzdump/PBS/task metadata and detectable Veeam evidence from enrolled hosts, with source/coverage/age |
+| Backup evidence | 5 min: available nonsecret vzdump/PBS/task metadata, with source/coverage/age |
 | Cluster and HA | 60 s: membership/votes/quorum, desired/observed HA states, maintenance and readable replication/Corosync summaries |
 | Node details/foreign activity | 15 min: PVE/kernel versions and bounded actor/type/time/target/exit-status metadata, no raw task logs/commands |
 
@@ -48,7 +48,7 @@ Nebula knows every network asset, manages a subset of them over SSH, and never w
 
 <a id="v23-12-05"></a>
 <!-- Spec v2.3 (ADR 0006, ADR 0007): v23-12-05 -->
-**Backup confidence.** Read-only tokens may lack full backup catalogs due to write-privilege filtering; show unavailable: insufficient read privileges rather than borrow action tokens/widen ACLs. Task success is evidence of a past run, distinct from currently present/restorable backup, catalog availability and verification/restore confidence. Compare last evidenced success against operator-selected maximum age, default 24 h; stale/failed/overdue evidence warns in phase 1. Undetected Veeam, denied catalogs and missing samples remain unknown/unavailable, never no backups or backup safe. PBS retention/verification needs a separately approved read-only source; Veeam uses allowlisted local metadata, no implicit credential integration.
+**Backup confidence.** Read-only tokens may lack full backup catalogs due to write-privilege filtering; show unavailable: insufficient read privileges rather than borrow action tokens/widen ACLs. Task success is evidence of a past run, distinct from currently present/restorable backup, catalog availability and verification/restore confidence. Compare last evidenced success against operator-selected maximum age, default 24 h; stale/failed/overdue evidence warns in phase 1. Denied catalogs and missing samples remain unknown/unavailable, never no backups or backup safe. PBS retention/verification needs a separately approved read-only source; no implicit credential integration.
 
 <a id="v23-12-06"></a>
 <!-- Spec v2.3 (ADR 0006, ADR 0007): v23-12-06 -->

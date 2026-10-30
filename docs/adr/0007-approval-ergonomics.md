@@ -74,7 +74,7 @@ or unit; enumeration does not confer arbitrary follow-up command authority.
 `docker.logs` and secret-bearing actions are excluded. Effective LOW alone is
 insufficient: the executor also requires an approved read-only action contract.
 Later reviewed additions include ADR 0006 `host.metrics`, `filesystem.list`,
-`pci.inventory`, `gpu.status`, `docker.stats`, `service.check`, `backup.status`
+`pci.inventory`, `gpu.status`, `docker.stats`, `service.check`
 and optional `image.vulnerabilities`, each with its own cost/parameter limits.
 Service checks bind approved destinations; no generic URL, shell or API path.
 
