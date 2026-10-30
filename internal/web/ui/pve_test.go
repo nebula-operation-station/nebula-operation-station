@@ -44,7 +44,7 @@ type pveTestEnv struct {
 	metaErr error
 }
 
-func newPVEEnv(t *testing.T, metas []ui.PVERemoteMeta) *pveTestEnv {
+func newPVEEnv(t *testing.T, metas []ui.PVERemoteMeta, clocks ...func() time.Time) *pveTestEnv {
 	t.Helper()
 	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
 	if err != nil {
@@ -52,11 +52,16 @@ func newPVEEnv(t *testing.T, metas []ui.PVERemoteMeta) *pveTestEnv {
 	}
 	t.Cleanup(func() { db.Close() })
 	e := &pveTestEnv{t: t, store: pveinventory.New(db), metas: metas}
+	var now func() time.Time
+	if len(clocks) > 0 {
+		now = clocks[0]
+	}
 	u, err := ui.New(ui.Options{
 		PublicOrigin: pveOrigin,
 		Log:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 		PVE:          e.store,
 		PVERemotes:   e.remotes,
+		Now:          now,
 	})
 	if err != nil {
 		t.Fatalf("ui.New: %v", err)
@@ -325,8 +330,9 @@ func TestPVEDetailPageShowsNodesAndGuests(t *testing.T) {
 		">web-1<", ">c-1<", ">nolink<",
 		">101<", ">200<", ">300<",
 		"running", "stopped",
-		`href="https://pve1.lab:8006/nodes/pve1.lab/qemu/101"`,
-		`href="https://pve2.lab:8006/nodes/pve2.lab/lxc/200"`,
+		`href="https://pve1.lab:8006/#v1:0:=qemu%2F101:4:::::::"`,
+		`href="https://pve2.lab:8006/#v1:0:=lxc%2F200:4:::::::"`,
+		`href="https://pve1.lab:8006/#v1:0:=node%2Fpve1.lab:4:::::::"`,
 		// Dataset status table.
 		">nodes<", ">guests<",
 	} {
@@ -334,17 +340,17 @@ func TestPVEDetailPageShowsNodesAndGuests(t *testing.T) {
 			t.Errorf("detail page missing %q", want)
 		}
 	}
-	if strings.Contains(body, "/nodes/pve3.lab") || strings.Contains(body, "/qemu/300") {
+	if strings.Contains(body, "node%2Fpve3.lab") || strings.Contains(body, "qemu%2F300") {
 		t.Errorf("node without an approved endpoint got a deep link:\n%s", body)
 	}
 }
 
 func TestPVEDetailPageStaleAndUnknownLabels(t *testing.T) {
 	now := time.Now()
-	e := newPVEEnv(t, nil)
+	e := newPVEEnv(t, nil, func() time.Time { return now })
 	obsAt := map[string]time.Time{
 		"remote-fresh": now.Add(-time.Minute),
-		"remote-stale": now.Add(-time.Hour),
+		"remote-stale": now.Add(-4 * time.Minute),
 	}
 	for id, at := range obsAt {
 		seedRemote(t, e.store, pvecontract.Remote{
@@ -372,6 +378,10 @@ func TestPVEDetailPageStaleAndUnknownLabels(t *testing.T) {
 	}
 	if got := strings.Count(body, ">unknown<"); got != 1 {
 		t.Errorf("list page has %d unknown labels, want 1", got)
+	}
+	code, body = e.get("/pve/remote-stale")
+	if code != http.StatusOK || strings.Count(body, ">stale<") != 2 {
+		t.Errorf("four-minute-old remote and node must be stale: status=%d body=%s", code, body)
 	}
 }
 
@@ -564,4 +574,70 @@ func TestPVEPageRedirectsWhenLoggedOut(t *testing.T) {
 	if res2.StatusCode != http.StatusUnauthorized {
 		t.Errorf("POST /pve logged out = %d, want 401", res2.StatusCode)
 	}
+}
+
+func TestPVERetainedVersionsHaveIndependentFreshness(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name        string
+		age         time.Duration
+		unavailable bool
+		label       string
+	}{
+		{"available", 10 * time.Minute, false, ""},
+		{"stale", time.Hour, false, "stale"},
+		{"retained unavailable", time.Hour, true, "unavailable"},
+		{"never observed", 0, true, "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newPVEEnv(t, nil, func() time.Time { return now })
+			seedRemote(t, e.store, pvecontract.Remote{RemoteID: "remote-a", Name: "Lab", Kind: pvecontract.KindStandalone, Endpoints: []pvecontract.Endpoint{{Host: "pve.lab", Port: 8006}}, TrustPin: pvePin(0), TrustGeneration: 1})
+			n := pveNodeObs("pve.lab", pvecontract.NodeOnline)
+			if tc.age > 0 {
+				n.Details = pvecontract.AvailableDataset(pvecontract.NodeDetails{PVEVersion: "9.0.1", KernelVersion: "6.8.0"})
+				old := newPVEObs("remote-a", now.Add(-tc.age))
+				old.Nodes = pvecontract.AvailableDataset([]pvecontract.NodeObservation{n})
+				seedObs(t, e.store, old)
+			}
+			if tc.unavailable {
+				n.Details = pvecontract.UnavailableDataset[pvecontract.NodeDetails]("details denied")
+			}
+			fresh := newPVEObs("remote-a", now)
+			// A fresh inventory must not refresh retained detail values.
+			if tc.unavailable {
+				fresh.Nodes = pvecontract.AvailableDataset([]pvecontract.NodeObservation{n})
+				seedObs(t, e.store, fresh)
+			}
+			code, body := e.get("/pve/remote-a")
+			if code != 200 {
+				t.Fatalf("status %d", code)
+			}
+			for _, version := range []string{"9.0.1", "6.8.0"} {
+				if tc.age == 0 {
+					version = "—"
+				}
+				start := strings.Index(body, "<td>"+version)
+				if start < 0 {
+					t.Fatalf("missing version %q", version)
+				}
+				cell := body[start:]
+				cell = cell[:strings.Index(cell, "</td>")]
+				if tc.label == "" && strings.Contains(cell, "badge--warning") {
+					t.Errorf("available details falsely labelled: %s", cell)
+				}
+				if tc.label != "" && !strings.Contains(cell, ">"+tc.label+"<") {
+					t.Errorf("version cell lacks %s: %s", tc.label, cell)
+				}
+				if tc.age > 0 && !strings.Contains(cell, pveExpectedAge(tc.age)) {
+					t.Errorf("missing detail age: %s", cell)
+				}
+			}
+		})
+	}
+}
+func pveExpectedAge(age time.Duration) string {
+	if age >= time.Hour {
+		return "1h ago"
+	}
+	return "10m ago"
 }

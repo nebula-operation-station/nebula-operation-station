@@ -18,8 +18,11 @@ import (
 )
 
 // pveStaleThreshold marks a stored observation as stale after three missed
-// poll intervals (ADR 0006: 5-minute intervals, stale after three misses).
-const pveStaleThreshold = 15 * time.Minute
+// inventory poll intervals (ADR 0006: 60-second intervals).
+const pveStaleThreshold = 3 * time.Minute
+
+// Node version details are polled every 15 minutes, independently of inventory.
+const pveDetailsStaleThreshold = 45 * time.Minute
 
 // pveCallTimeout bounds the store reads made while rendering a PVE page.
 const pveCallTimeout = 5 * time.Second
@@ -122,6 +125,10 @@ type pveNodeRow struct {
 	PVEVersion string
 	// KernelVersion is the stored kernel version, if observed.
 	KernelVersion string
+	// Details fields describe the retained versions independently of inventory.
+	DetailsObservedAt time.Time
+	DetailsAge        string
+	DetailsLabel      string
 	// Label is the staleness/availability label.
 	Label string
 	// ObservedAt is the stored observation time.
@@ -239,22 +246,22 @@ func pveDeepLink(kind string, endpoints []PVEEndpoint, node string, extra ...str
 	if !ok || !pveEndpointValid(ep) {
 		return ""
 	}
-	parts := make([]string, 0, 1+len(extra))
+	resource := ""
 	if node != "" {
-		parts = append(parts, "nodes", url.PathEscape(node))
+		resource = "node/" + node
 	}
-	for _, e := range extra {
-		parts = append(parts, url.PathEscape(e))
+	if len(extra) == 2 {
+		resource = extra[0] + "/" + extra[1]
 	}
 	host := ep.Host
 	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
 		host = "[" + host + "]"
 	}
 	s := "https://" + host + ":" + strconv.Itoa(ep.Port)
-	if len(parts) == 0 {
+	if resource == "" {
 		return s + "/"
 	}
-	return s + "/" + strings.Join(parts, "/")
+	return s + "/#v1:0:=" + url.PathEscape(resource) + ":4:::::::"
 }
 
 // pveRemoteLabel is the staleness label of a stored remote: "unknown" when
@@ -341,7 +348,7 @@ func (h *Handler) handlePVEList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	metas := h.pveMeta(ctx)
-	now := time.Now()
+	now := h.pveNow()
 	rows := make([]pveRemoteRow, 0, len(remotes))
 	for _, rm := range remotes {
 		meta := metas[rm.RemoteID]
@@ -408,7 +415,7 @@ func (h *Handler) handlePVEDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	meta := h.pveMeta(ctx)[id]
-	now := time.Now()
+	now := h.pveNow()
 
 	// The registry name is approved metadata; the stored name is
 	// collector-provided and only a fallback.
@@ -439,14 +446,17 @@ func (h *Handler) handlePVEDetail(w http.ResponseWriter, r *http.Request) {
 	} else {
 		for _, n := range nodes {
 			d.Nodes = append(d.Nodes, pveNodeRow{
-				Node:          n.Node,
-				Status:        n.Status,
-				PVEVersion:    n.PVEVersion,
-				KernelVersion: n.KernelVersion,
-				Label:         pveRowLabel(n.ObservedAt, n.State, now),
-				ObservedAt:    n.ObservedAt,
-				Age:           pveAge(now, n.ObservedAt),
-				Link:          pveDeepLink(rm.Kind, meta.Endpoints, n.Node),
+				Node:              n.Node,
+				Status:            n.Status,
+				PVEVersion:        n.PVEVersion,
+				KernelVersion:     n.KernelVersion,
+				DetailsObservedAt: n.DetailsObservedAt,
+				DetailsAge:        pveAge(now, n.DetailsObservedAt),
+				DetailsLabel:      pveDetailsLabel(n, now),
+				Label:             pveRowLabel(n.ObservedAt, n.State, now),
+				ObservedAt:        n.ObservedAt,
+				Age:               pveAge(now, n.ObservedAt),
+				Link:              pveDeepLink(rm.Kind, meta.Endpoints, n.Node),
 			})
 		}
 	}
@@ -482,4 +492,24 @@ func (h *Handler) handlePVEDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	h.render(w, r, pageData{Title: "PVE remote " + rm.Name, Active: "pve", Content: "pve_detail", PVEDetail: d})
+}
+
+func (h *Handler) pveNow() time.Time {
+	if h.now != nil {
+		return h.now()
+	}
+	return time.Now()
+}
+
+func pveDetailsLabel(n pveinventory.Node, now time.Time) string {
+	if n.DetailsObservedAt.IsZero() {
+		return "unknown"
+	}
+	if !n.DetailsAvailable {
+		return "unavailable"
+	}
+	if now.Sub(n.DetailsObservedAt) > pveDetailsStaleThreshold {
+		return "stale"
+	}
+	return ""
 }

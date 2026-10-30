@@ -24,8 +24,8 @@
       <tr>
         <td>{{.Node}}</td>
         <td>{{.Status}}{{if .Label}} <span class="badge badge--warning">{{.Label}}</span>{{end}}</td>
-        <td>{{.PVEVersion}}</td>
-        <td>{{.KernelVersion}}</td>
+        <td>{{if .PVEVersion}}{{.PVEVersion}}{{else}}—{{end}}{{if .DetailsLabel}} <span class="badge badge--warning">{{.DetailsLabel}}</span>{{end}} {{timeTag .DetailsObservedAt}}{{if .DetailsAge}} ({{.DetailsAge}}){{end}}</td>
+        <td>{{if .KernelVersion}}{{.KernelVersion}}{{else}}—{{end}}{{if .DetailsLabel}} <span class="badge badge--warning">{{.DetailsLabel}}</span>{{end}} {{timeTag .DetailsObservedAt}}{{if .DetailsAge}} ({{.DetailsAge}}){{end}}</td>
         <td>{{timeTag .ObservedAt}}{{if .Age}} ({{.Age}}){{end}}</td>
         <td>{{if .Link}}<a href="{{.Link}}" target="_blank" rel="noopener noreferrer">Open</a>{{end}}</td>
       </tr>
