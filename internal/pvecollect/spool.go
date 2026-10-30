@@ -86,7 +86,7 @@ type watermark struct {
 // with mode 0710 (the server group lists and traverses it to read the 0640
 // files).
 func NewSpool(root string) (*Spool, error) {
-	if filepath.IsAbs(root) != true {
+	if !filepath.IsAbs(root) {
 		return nil, fmt.Errorf("pvecollect: spool root %q must be an absolute path", root)
 	}
 	if err := checkDirNoSymlink(root); err != nil {
