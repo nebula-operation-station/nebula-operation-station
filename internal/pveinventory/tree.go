@@ -932,11 +932,13 @@ type ChartQuery struct {
 	// RemoteID restricts the query to one remote; "" means all
 	// remotes.
 	RemoteID string
-	// MaxRemotes, MaxNodes and MaxGuests bound the queries. Non-positive
-	// values use the defaults; values above the defaults are an error.
-	MaxRemotes int
-	MaxNodes   int
-	MaxGuests  int
+	// MaxRemotes, MaxNodes, MaxGuests and MaxStorages bound the
+	// queries. Non-positive values use the defaults; values above the
+	// defaults are an error.
+	MaxRemotes  int
+	MaxNodes    int
+	MaxGuests   int
+	MaxStorages int
 }
 
 // ChartData is the stored PVE side of a TreeInput.
@@ -948,12 +950,16 @@ type ChartData struct {
 	// Guests maps remote_id to its active guest incarnations, ordered
 	// by vmid.
 	Guests map[string][]Guest
+	// Storages maps remote_id to its storages, ordered by storage
+	// name.
+	Storages map[string][]Storage
 }
 
 // ChartData returns the stored PVE observations needed to build the
 // org chart, using bounded queries. Remotes are read with
-// MaxRemotes, then nodes and guests per remote with MaxNodes and
-// MaxGuests. Only active guest incarnations are returned.
+// MaxRemotes, then nodes, guests and storages per remote with
+// MaxNodes, MaxGuests and MaxStorages. Only active guest
+// incarnations are returned.
 func (s *Store) ChartData(ctx context.Context, q ChartQuery) (ChartData, error) {
 	remotesLimit, err := checkLimit(q.MaxRemotes, MaxTreeRemotes)
 	if err != nil {
@@ -967,10 +973,15 @@ func (s *Store) ChartData(ctx context.Context, q ChartQuery) (ChartData, error) 
 	if err != nil {
 		return ChartData{}, err
 	}
+	storagesLimit, err := checkLimit(q.MaxStorages, MaxStoragesQuery)
+	if err != nil {
+		return ChartData{}, err
+	}
 
 	data := ChartData{
-		Nodes:  make(map[string][]Node),
-		Guests: make(map[string][]Guest),
+		Nodes:    make(map[string][]Node),
+		Guests:   make(map[string][]Guest),
+		Storages: make(map[string][]Storage),
 	}
 
 	query := `SELECT remote_id, name, kind, trust_generation,
@@ -1017,6 +1028,11 @@ func (s *Store) ChartData(ctx context.Context, q ChartQuery) (ChartData, error) 
 			return ChartData{}, err
 		}
 		data.Guests[r.RemoteID] = guests
+		storages, err := s.ListStorages(ctx, r.RemoteID, storagesLimit)
+		if err != nil {
+			return ChartData{}, err
+		}
+		data.Storages[r.RemoteID] = storages
 	}
 	return data, nil
 }

@@ -1021,12 +1021,18 @@ func seedChartStore(t *testing.T) *Store {
 	if _, err := s.IngestObservation(ctx, newObsA().
 		nodes(mkNode("p1"), mkNode("p2")).
 		guests(mkGuest(100, 1, "vm-100"), mkGuest(110, 1, "vm-110"), mkGuest(120, 1, "vm-120")).
+		storages(
+			mkStorage("local-lvm", "lvmthin", 100<<30, 10<<30),
+			mkStorage("shared-nfs", "nfs", 1<<40, 500<<30),
+			mkStorage("pbs-backup", "pbs", 0, 0),
+		).
 		build()); err != nil {
 		t.Fatalf("ingest A: %v", err)
 	}
 	if _, err := s.IngestObservation(ctx, newObsB().
 		nodes(mkNode("q1")).
 		guests(mkGuest(100, 1, "vm-b100")).
+		storages(mkStorage("local-dir", "dir", 10<<30, 9<<30)).
 		build()); err != nil {
 		t.Fatalf("ingest B: %v", err)
 	}
@@ -1100,10 +1106,58 @@ func TestChartDataBoundedQueries(t *testing.T) {
 		{MaxRemotes: MaxTreeRemotes + 1},
 		{MaxNodes: MaxTreeNodesPerRemote + 1},
 		{MaxGuests: MaxTreeGuestsPerRemote + 1},
+		{MaxStorages: MaxStoragesQuery + 1},
 	} {
 		if _, err := s.ChartData(ctx, q); err == nil {
 			t.Fatalf("expected error for limit %d above maximum", q.MaxRemotes)
 		}
+	}
+}
+
+func TestChartDataStorages(t *testing.T) {
+	s := seedChartStore(t)
+	ctx := context.Background()
+
+	data, err := s.ChartData(ctx, ChartQuery{})
+	if err != nil {
+		t.Fatalf("ChartData: %v", err)
+	}
+	// Storages are returned per remote, ordered by storage name.
+	gotA := data.Storages["remote-a"]
+	if len(gotA) != 3 {
+		t.Fatalf("remote-a storages: %d, want 3", len(gotA))
+	}
+	wantA := []struct {
+		name string
+		typ  string
+	}{
+		{"local-lvm", "lvmthin"},
+		{"pbs-backup", "pbs"},
+		{"shared-nfs", "nfs"},
+	}
+	for i, w := range wantA {
+		if gotA[i].Name != w.name || gotA[i].Type != w.typ {
+			t.Fatalf("remote-a storage %d = %s/%s, want %s/%s", i, gotA[i].Name, gotA[i].Type, w.name, w.typ)
+		}
+	}
+	// Size and free bytes are carried through.
+	if gotA[0].SizeBytes != 100<<30 || gotA[0].FreeBytes != 10<<30 {
+		t.Fatalf("local-lvm bytes: %d/%d", gotA[0].SizeBytes, gotA[0].FreeBytes)
+	}
+	if gotA[1].SizeBytes != 0 || gotA[1].FreeBytes != 0 {
+		t.Fatalf("pbs-backup bytes: %d/%d", gotA[1].SizeBytes, gotA[1].FreeBytes)
+	}
+	if gotB := data.Storages["remote-b"]; len(gotB) != 1 || gotB[0].Name != "local-dir" {
+		t.Fatalf("remote-b storages: %+v", gotB)
+	}
+
+	// Bounded storages: truncated in name order.
+	data, err = s.ChartData(ctx, ChartQuery{RemoteID: "remote-a", MaxStorages: 2})
+	if err != nil {
+		t.Fatalf("ChartData MaxStorages: %v", err)
+	}
+	if len(data.Storages["remote-a"]) != 2 || data.Storages["remote-a"][1].Name != "pbs-backup" {
+		t.Fatalf("bounded storages: %+v", data.Storages["remote-a"])
 	}
 }
 
