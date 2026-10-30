@@ -204,6 +204,9 @@ var pciInventory []byte
 //go:embed scripts/gpu_status.sh
 var gpuStatus []byte
 
+//go:embed scripts/backup_status.sh
+var backupStatus []byte
+
 // Builtin lists the built-in actions in display order.
 var Builtin = []Action{
 	{
@@ -308,6 +311,11 @@ var Builtin = []Action{
 		ID: "gpu.status", Version: "1.0.0", Title: "GPU status",
 		Description: "Per-GPU status from nvidia-smi (fixed query: index, UUID, PCI bus ID, name, utilization, memory, temperature, power). A missing driver is reported as such, never as an empty list. Read-only.",
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: time.Minute, ReadOnly: true, Script: gpuStatus, Retry: RetrySafe,
+	},
+	{
+		ID: "backup.status", Version: "1.0.0", Title: "Backup status",
+		Description: "Per-job Veeam Agent backup evidence from the allowlisted local CLI (session list and session info): job name, last session state, last start/end time. A host without the Veeam Agent, or a denied or unsupported query, is reported as such, never as a safe backup. Read-only.",
+		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 5 * time.Minute, ReadOnly: true, Script: backupStatus, Retry: RetrySafe,
 	},
 }
 
