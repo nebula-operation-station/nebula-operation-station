@@ -1161,6 +1161,173 @@ func TestChartDataStorages(t *testing.T) {
 	}
 }
 
+func TestChartDataTreeInputStorages(t *testing.T) {
+	s := seedChartStore(t)
+	data, err := s.ChartData(context.Background(), ChartQuery{})
+	if err != nil {
+		t.Fatalf("ChartData: %v", err)
+	}
+	in := data.TreeInput(treeNow, 0, nil, nil)
+
+	// remote-a: storages anchored to the first stored node, p1.
+	ra := in.Remotes[0]
+	if ra.RemoteID != "remote-a" {
+		t.Fatalf("remote order: %+v", ra)
+	}
+	if len(ra.Storages) != 3 {
+		t.Fatalf("remote-a storages: %d, want 3", len(ra.Storages))
+	}
+	for _, st := range ra.Storages {
+		if st.Node != "p1" {
+			t.Fatalf("storage %s anchored to %q, want p1", st.ID, st.Node)
+		}
+	}
+	byID := make(map[string]StorageInput, len(ra.Storages))
+	for _, st := range ra.Storages {
+		byID[st.ID] = st
+	}
+	lvm := byID["local-lvm"]
+	if lvm.Shared || !lvm.CapacityKnown || lvm.UsedBytes != 90<<30 || lvm.TotalBytes != 100<<30 {
+		t.Fatalf("local-lvm: %+v", lvm)
+	}
+	nfs := byID["shared-nfs"]
+	// Seeded with size 1 TiB and 500 GiB free, so used is 524 GiB.
+	if !nfs.Shared || !nfs.CapacityKnown || nfs.UsedBytes != 1<<40-500<<30 || nfs.TotalBytes != 1<<40 {
+		t.Fatalf("shared-nfs: %+v", nfs)
+	}
+	pbs := byID["pbs-backup"]
+	if !pbs.Shared || pbs.CapacityKnown || pbs.Stale {
+		t.Fatalf("pbs-backup: %+v", pbs)
+	}
+	// remote-b: anchored to its only node, not shared.
+	rb := in.Remotes[1]
+	if len(rb.Storages) != 1 || rb.Storages[0].Node != "q1" || rb.Storages[0].Shared {
+		t.Fatalf("remote-b storages: %+v", rb.Storages)
+	}
+
+	// BuildTree places the boxes under the anchor node; the pbs box
+	// is unknown (no capacity), never 0 percent.
+	tree, err := BuildTree(in)
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+	p1 := findBox(t, tree.Roots, "node/remote-a/p1")
+	if len(p1.Children) != 6 { // 3 guests + 3 storages
+		t.Fatalf("p1 children: %d, want 6", len(p1.Children))
+	}
+	stBox := findBox(t, p1.Children, "storage/remote-a/local-lvm")
+	if stBox.State != StateCritical || stBox.StorageFillPercent != 90 {
+		t.Fatalf("local-lvm box: state=%s fill=%d, want critical 90", stBox.State, stBox.StorageFillPercent)
+	}
+	pbsBox := findBox(t, p1.Children, "storage/remote-a/pbs-backup")
+	if pbsBox.State != StateUnknown || pbsBox.StorageFillPercent != 0 || !pbsBox.StorageBackup || !pbsBox.StorageShared {
+		t.Fatalf("pbs box: %+v", pbsBox)
+	}
+	// The shared nfs box is marked shared and appears once.
+	nfsBox := findBox(t, p1.Children, "storage/remote-a/shared-nfs")
+	if !nfsBox.StorageShared || nfsBox.State != StateOK {
+		t.Fatalf("nfs box: %+v", nfsBox)
+	}
+	if got := countBoxes(tree.Roots, "storage/remote-a/shared-nfs"); got != 1 {
+		t.Fatalf("shared nfs counted %d times, want 1", got)
+	}
+}
+
+func countBoxes(boxes []Box, id string) int {
+	n := 0
+	for _, b := range boxes {
+		if b.ID == id {
+			n++
+		}
+		n += countBoxes(b.Children, id)
+	}
+	return n
+}
+
+func TestChartDataTreeInputStorageEdgeCases(t *testing.T) {
+	// Inactive and stale storages are unknown, never 0 percent.
+	data := ChartData{
+		Remotes: []Remote{{RemoteID: "remote-a", Name: "A"}},
+		Nodes: map[string][]Node{
+			"remote-a": {{Node: "p1", Status: "online", State: StateAvailable, ObservedAt: freshAt()}},
+		},
+		Storages: map[string][]Storage{
+			"remote-a": {
+				{Name: "fresh", Type: "dir", Active: true, SizeBytes: 10 << 30, FreeBytes: 9 << 30, ObservedAt: freshAt(), State: StateAvailable},
+				{Name: "inactive", Type: "dir", Active: false, SizeBytes: 10 << 30, FreeBytes: 9 << 30, ObservedAt: freshAt(), State: StateAvailable},
+				{Name: "stale", Type: "dir", Active: true, SizeBytes: 10 << 30, FreeBytes: 9 << 30, ObservedAt: staleAt(), State: StateAvailable},
+			},
+		},
+	}
+	tree, err := BuildTree(data.TreeInput(treeNow, 0, nil, nil))
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+	p1 := findBox(t, tree.Roots, "node/remote-a/p1")
+	freshBox := findBox(t, p1.Children, "storage/remote-a/fresh")
+	if freshBox.State != StateOK || freshBox.StorageFillPercent != 10 {
+		t.Fatalf("fresh box: %+v", freshBox)
+	}
+	inactiveBox := findBox(t, p1.Children, "storage/remote-a/inactive")
+	if inactiveBox.State != StateUnknown || inactiveBox.StorageFillPercent != 0 {
+		t.Fatalf("inactive box: %+v", inactiveBox)
+	}
+	staleBox := findBox(t, p1.Children, "storage/remote-a/stale")
+	if !staleBox.Stale || staleBox.State != StateUnknown || staleBox.StorageFillPercent != 0 {
+		t.Fatalf("stale box: %+v", staleBox)
+	}
+}
+
+func TestChartDataTreeInputStorageAnchoring(t *testing.T) {
+	ctx := context.Background()
+
+	// No node observations: storages anchor to the first guest's node.
+	s, _, _ := newTestStore(t)
+	if err := s.UpsertRemote(ctx, remoteA()); err != nil {
+		t.Fatalf("UpsertRemote: %v", err)
+	}
+	if _, err := s.IngestObservation(ctx, newObsA().
+		guests(mkGuest(101, 1, "vm-101")).
+		storages(mkStorage("local", "dir", 10<<30, 5<<30)).
+		build()); err != nil {
+		t.Fatalf("ingest guest-only: %v", err)
+	}
+	data, err := s.ChartData(ctx, ChartQuery{})
+	if err != nil {
+		t.Fatalf("ChartData: %v", err)
+	}
+	in := data.TreeInput(treeNow, 0, nil, nil)
+	if len(in.Remotes[0].Storages) != 1 || in.Remotes[0].Storages[0].Node != "p1" {
+		t.Fatalf("guest-anchor: %+v", in.Remotes[0].Storages)
+	}
+
+	// No nodes and no guests: storages are dropped, remote kept.
+	s2, _, _ := newTestStore(t)
+	if err := s2.UpsertRemote(ctx, remoteB()); err != nil {
+		t.Fatalf("UpsertRemote B: %v", err)
+	}
+	if _, err := s2.IngestObservation(ctx, newObsB().
+		storages(mkStorage("orphan", "dir", 10<<30, 5<<30)).
+		build()); err != nil {
+		t.Fatalf("ingest orphan: %v", err)
+	}
+	data2, err := s2.ChartData(ctx, ChartQuery{})
+	if err != nil {
+		t.Fatalf("ChartData orphan: %v", err)
+	}
+	in2 := data2.TreeInput(treeNow, 0, nil, nil)
+	if len(in2.Remotes) != 1 || len(in2.Remotes[0].Storages) != 0 {
+		t.Fatalf("orphan: %+v", in2.Remotes)
+	}
+	tree2, err := BuildTree(in2)
+	if err != nil {
+		t.Fatalf("BuildTree orphan: %v", err)
+	}
+	if len(tree2.Roots) != 0 {
+		t.Fatalf("orphan tree roots: %+v", tree2.Roots)
+	}
+}
+
 func TestChartDataExcludesTombstonedGuests(t *testing.T) {
 	s := seedChartStore(t)
 	ctx := context.Background()
