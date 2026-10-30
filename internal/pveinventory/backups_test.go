@@ -12,6 +12,9 @@ package pveinventory
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,8 +55,7 @@ func taskEvidence(name, status string, started, finished int64) pvecontract.Back
 	}
 }
 
-// catalogEvidence builds a PBS catalog evidence row. The status "present" is
-// the pvecontract-valid value; the model must not depend on the exact string.
+// catalogEvidence builds an affirmative PBS catalog evidence row.
 func catalogEvidence(name string, ctime int64, verified pvecontract.TriState) pvecontract.BackupEvidence {
 	return pvecontract.BackupEvidence{
 		Source:       pvecontract.BackupPBS,
@@ -156,10 +158,11 @@ func TestEvaluateFreshness(t *testing.T) {
 			want: FreshnessStaleData,
 		},
 		{
-			name: "expected-off: stopped guest",
+			name: "expected-off: explicitly exempt stopped guest",
 			in: FreshnessInput{
 				RemoteID: "r", VMID: 1, Generation: 1,
 				Now: testBase, GuestStatus: string(pvecontract.GuestStopped),
+				ExpectedOff:  true,
 				DatasetState: StateAvailable, DatasetObservedAt: testBase,
 			},
 			want: FreshnessExpectedOff,
@@ -227,16 +230,14 @@ func TestEvaluateFreshness(t *testing.T) {
 			},
 		},
 		{
-			name: "model ignores catalog status string",
+			name: "model requires affirmative catalog status",
 			in: FreshnessInput{
 				RemoteID: "r", VMID: 1, Generation: 1,
 				Now: testBase, GuestStatus: string(pvecontract.GuestRunning),
 				DatasetState: StateAvailable, DatasetObservedAt: testBase,
-				// "catalog" is the pveapi-emitted status; the model must treat
-				// any catalog-kind entry as a present backup.
 				Evidence: []pvecontract.BackupEvidence{{
 					Source: pvecontract.BackupPBS, Kind: pvecontract.BackupKindCatalog,
-					Name: "vol1", Status: "catalog", FinishedUnix: nowUnix - 3600, Verified: pvecontract.Unknown,
+					Name: "vol1", Status: "present", FinishedUnix: nowUnix - 3600, Verified: pvecontract.Unknown,
 				}},
 			},
 			want: FreshnessOK,
@@ -272,6 +273,237 @@ func TestEvaluateFreshness(t *testing.T) {
 			}
 			if tc.check != nil {
 				tc.check(t, f)
+			}
+		})
+	}
+}
+
+func TestGuestBackupFreshnessUnknownCatalogIsNotPresent(t *testing.T) {
+	s, _, _ := newTestStore(t)
+	e := catalogEvidence("unknown-volume", nowUnix-60, pvecontract.Yes)
+	e.Status = "unknown"
+	ingestOK(t, s, newObsA().guests(guestWithBackups(100, 1, "vm", pvecontract.GuestRunning,
+		pvecontract.AvailableDataset([]pvecontract.BackupEvidence{e}))).build())
+	f, err := s.GuestBackupFreshness(context.Background(), "remote-a", 100, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.State != FreshnessUnknown || f.Catalog.Present || f.LastSuccessUnix != 0 || f.Verification.State != pvecontract.Unknown || f.Verification.Count != 0 {
+		t.Fatalf("unknown catalog became affirmative evidence: %+v", f)
+	}
+}
+
+func TestGuestBackupFreshnessCatalogDeletionBetweenPolls(t *testing.T) {
+	for _, sameTime := range []bool{false, true} {
+		t.Run(fmt.Sprintf("same-time=%t", sameTime), func(t *testing.T) {
+			s, _, now := newTestStore(t)
+			ctx := context.Background()
+			obs := newObsA().guests(guestWithBackups(100, 1, "vm", pvecontract.GuestRunning,
+				pvecontract.AvailableDataset([]pvecontract.BackupEvidence{catalogEvidence("deleted", nowUnix-60, pvecontract.Yes)}))).build()
+			ingestOK(t, s, obs)
+			before, err := s.GuestBackupFreshness(ctx, "remote-a", 100, 1, 0)
+			if err != nil || before.State != FreshnessOK || !before.Catalog.Present || before.Verification.State != pvecontract.Yes {
+				t.Fatalf("before deletion: %+v, %v", before, err)
+			}
+			obs.CollectionGeneration++
+			if !sameTime {
+				obs.ObservedAt = obs.ObservedAt.Add(5 * time.Minute)
+			}
+			*now = obs.ObservedAt
+			obs.Guests.Value[0].Backups.Value = nil
+			ingestOK(t, s, obs)
+			after, err := s.GuestBackupFreshness(ctx, "remote-a", 100, 1, 0)
+			if err != nil || after.State != FreshnessOverdue || after.Catalog.Present || after.Catalog.Count != 0 || after.LastSuccessUnix != 0 || after.Verification.State != pvecontract.Unknown || after.Verification.Count != 0 {
+				t.Fatalf("deleted catalog still current: %+v, %v", after, err)
+			}
+			retained, err := s.ListBackups(ctx, "remote-a", 100, 1, 0)
+			if err != nil || len(retained) != 1 || !retained[0].ObservedAt.Equal(testBase) {
+				t.Fatalf("historical evidence was not retained with its age: %+v, %v", retained, err)
+			}
+		})
+	}
+}
+
+func TestStoppedGuestRequiresExpectedOffPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		state    DatasetState
+		observed time.Time
+		evidence []pvecontract.BackupEvidence
+		want     FreshnessState
+	}{
+		{"unavailable", StateUnavailable, testBase, nil, FreshnessUnknown},
+		{"partial", StatePartial, testBase, nil, FreshnessUnknown},
+		{"stale", StateAvailable, testBase.Add(-time.Hour), nil, FreshnessStaleData},
+		{"failed", StateAvailable, testBase, []pvecontract.BackupEvidence{taskEvidence("failed", "failed", nowUnix-60, nowUnix-30)}, FreshnessFailed},
+		{"empty", StateAvailable, testBase, nil, FreshnessOverdue},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := FreshnessInput{Now: testBase, GuestStatus: string(pvecontract.GuestStopped),
+				DatasetState: tc.state, DatasetObservedAt: tc.observed, Evidence: tc.evidence}
+			f := EvaluateFreshness(in)
+			if f.State != tc.want {
+				t.Fatalf("stopped guest without policy: %+v, want %s", f, tc.want)
+			}
+			if tc.want != FreshnessOverdue {
+				in.ExpectedOff = true
+				if f := EvaluateFreshness(in); f.State != tc.want {
+					t.Fatalf("policy suppressed visibility or failure: %+v, want %s", f, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestEvaluateFreshnessClockToleranceBoundary(t *testing.T) {
+	for _, kind := range []string{pvecontract.BackupKindTask, pvecontract.BackupKindCatalog} {
+		for _, offset := range []time.Duration{0, BackupClockTolerance, BackupClockTolerance + time.Second} {
+			t.Run(fmt.Sprintf("%s/%s", kind, offset), func(t *testing.T) {
+				timestamp := testBase.Add(offset).Unix()
+				e := taskEvidence("clock", "success", nowUnix-60, timestamp)
+				if kind == pvecontract.BackupKindCatalog {
+					e = catalogEvidence("clock", timestamp, pvecontract.Yes)
+				}
+				in := FreshnessInput{Now: testBase, DatasetState: StateAvailable, DatasetObservedAt: testBase,
+					Evidence: []pvecontract.BackupEvidence{e}}
+				want := FreshnessOK
+				if offset > BackupClockTolerance {
+					want = FreshnessUnknown
+				}
+				if f := EvaluateFreshness(in); f.State != want {
+					t.Fatalf("clock tolerance: %+v, want %s", f, want)
+				}
+				// Exercise the indexed range boundary through the store too.
+				s, _, _ := newTestStore(t)
+				ingestOK(t, s, newObsA().guests(guestWithBackups(100, 1, "vm", pvecontract.GuestRunning,
+					pvecontract.AvailableDataset(in.Evidence))).build())
+				if f, err := s.GuestBackupFreshness(context.Background(), "remote-a", 100, 1, 0); err != nil || f.State != want {
+					t.Fatalf("stored clock tolerance: %+v, %v, want %s", f, err, want)
+				}
+			})
+		}
+	}
+}
+
+func TestEvaluateFreshnessRejectsFutureEvidence(t *testing.T) {
+	for _, timestamp := range []int64{nowUnix + 121, nowUnix + 10*365*24*60*60, math.MaxInt64} {
+		for _, kind := range []string{pvecontract.BackupKindTask, pvecontract.BackupKindCatalog} {
+			for _, startedOnly := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%d/started-only=%t", kind, timestamp, startedOnly), func(t *testing.T) {
+					e := taskEvidence("future", "success", 0, timestamp)
+					if kind == pvecontract.BackupKindCatalog {
+						e = catalogEvidence("future", timestamp, pvecontract.Yes)
+					}
+					if startedOnly {
+						e.StartedUnix, e.FinishedUnix = timestamp, 0
+					}
+					f := EvaluateFreshness(FreshnessInput{Now: testBase, DatasetState: StateAvailable,
+						DatasetObservedAt: testBase, Evidence: []pvecontract.BackupEvidence{e}})
+					if f.State != FreshnessUnknown || f.LastSuccessUnix != 0 || f.LastRunUnix != 0 || f.Task.LastSuccessUnix != 0 || f.Catalog.Present || f.Verification.State != pvecontract.Unknown {
+						t.Fatalf("future timestamp trusted: %+v", f)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestGuestBackupFreshnessChannelsSurviveCutoff(t *testing.T) {
+	for _, flood := range []string{"catalog", "task", "failure", "future"} {
+		t.Run(flood, func(t *testing.T) {
+			s, _, _ := newTestStore(t)
+			ctx := context.Background()
+			evidence := []pvecontract.BackupEvidence{
+				taskEvidence("success", "success", nowUnix-7200, nowUnix-7100),
+				taskEvidence("failure", "failed", nowUnix-7300, nowUnix-7200),
+				catalogEvidence("verified", nowUnix-8000, pvecontract.Yes),
+			}
+			for i := 0; i < 1025; i++ {
+				name := fmt.Sprintf("flood-%04d", i)
+				switch flood {
+				case "catalog":
+					evidence = append(evidence, catalogEvidence(name, nowUnix-3600+int64(i), pvecontract.No))
+				case "task":
+					evidence = append(evidence, taskEvidence(name, "running", nowUnix-3600+int64(i), 0))
+				case "failure":
+					evidence = append(evidence, taskEvidence(name, "failed", nowUnix-10000+int64(i), nowUnix-3500+int64(i)))
+				case "future":
+					evidence = append(evidence, taskEvidence(name, "success", nowUnix-60, nowUnix+3600+int64(i)))
+				}
+			}
+			for start := 0; start < len(evidence); start += pvecontract.MaxBackupsPerGuest {
+				end := min(start+pvecontract.MaxBackupsPerGuest, len(evidence))
+				ingestOK(t, s, newObsA().guests(guestWithBackups(100, 1, "vm", pvecontract.GuestRunning,
+					pvecontract.AvailableDataset(evidence[start:end]))).build())
+			}
+			f, err := s.GuestBackupFreshness(ctx, "remote-a", 100, 1, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := FreshnessOK
+			if flood == "failure" {
+				want = FreshnessFailed
+			}
+			if f.State != want || f.Task.LastSuccessUnix != nowUnix-7100 || !f.Catalog.Present || f.Verification.State != pvecontract.Yes {
+				t.Fatalf("confidence channel lost behind cutoff: %+v, want %s", f, want)
+			}
+			if flood != "failure" && flood != "task" && (f.Task.LastRunUnix != nowUnix-7100 || f.Task.LastRunStatus != "success") {
+				t.Fatalf("task summary lost: %+v", f.Task)
+			}
+			if flood == "task" && (f.Task.LastRunUnix != nowUnix-3600+1024 || f.Task.LastRunStatus != "running") {
+				t.Fatalf("unfinished tasks not ordered by effective time: %+v", f.Task)
+			}
+			switch flood {
+			case "catalog":
+				if f.Catalog.Count != MaxFreshnessEvidence+1 || f.Verification.Count != MaxFreshnessEvidence+1 {
+					t.Fatalf("catalog bucket read was not bounded: %+v", f)
+				}
+			case "task", "failure":
+				wantCount := MaxFreshnessEvidence + 1 // capped failures plus one success
+				if flood == "task" {
+					wantCount++ // capped running tasks plus one failure and one success
+				}
+				if f.Task.Count != wantCount {
+					t.Fatalf("task bucket read was not bounded: %+v", f.Task)
+				}
+			}
+		})
+	}
+}
+
+func TestFreshnessEvidenceUsesBoundedIndexedRanges(t *testing.T) {
+	s, db, _ := newTestStore(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name  string
+		query string
+		args  []any
+		index string
+	}{
+		{"tasks", backupTaskEvidenceQuery, []any{"remote-a", 100, 1, "success", 0, nowUnix, MaxFreshnessEvidence}, "idx_pve_backup_task_freshness"},
+		{"catalog", backupCatalogEvidenceQuery, []any{"remote-a", 100, 1, s.formatTime(testBase), 1, "present", "yes", 0, nowUnix, MaxFreshnessEvidence}, "idx_pve_backup_catalog_freshness"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, err := db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+tc.query, tc.args...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rows.Close()
+			var plan string
+			for rows.Next() {
+				var id, parent, unused int
+				var detail string
+				if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+					t.Fatal(err)
+				}
+				plan += detail + "\n"
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(plan, "SEARCH pve_backup_observations USING INDEX "+tc.index) ||
+				!strings.Contains(plan, "<expr>>? AND <expr><?") || strings.Contains(plan, "TEMP B-TREE") || strings.Contains(plan, "SCAN ") {
+				t.Fatalf("freshness query scans or sorts unbounded history:\n%s", plan)
 			}
 		})
 	}

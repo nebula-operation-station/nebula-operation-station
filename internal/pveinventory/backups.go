@@ -51,9 +51,14 @@ const (
 	// treated as stale data rather than as a basis for a freshness verdict.
 	DefaultBackupStaleAfter = backupStaleIntervals * backupCadence
 
-	// MaxFreshnessEvidence bounds how many evidence rows are loaded for a
-	// freshness verdict. Freshness only needs the newest rows (it is a
-	// max-over-time computation), so a bounded newest-first read is exact.
+	// BackupClockTolerance permits small differences between host clocks.
+	// Evidence further in the future cannot establish a successful backup.
+	BackupClockTolerance = 2 * time.Minute
+
+	// MaxFreshnessEvidence bounds each independently indexed evidence bucket
+	// (task status or catalog status/verification). Each bucket also reads at
+	// most one future row to preserve visibility of rejected timestamps.
+	// Maxima and verification states remain exact; counts describe sampled rows.
 	MaxFreshnessEvidence = 1024
 )
 
@@ -63,6 +68,7 @@ const (
 const (
 	backupStatusSuccess = "success"
 	backupStatusFailed  = "failed"
+	backupStatusPresent = "present"
 )
 
 // FreshnessState is the overall per-guest backup freshness verdict.
@@ -83,8 +89,8 @@ const (
 	// FreshnessStaleData: the backup evidence dataset itself is stale, so no
 	// trustworthy verdict can be made from it.
 	FreshnessStaleData FreshnessState = "stale-data"
-	// FreshnessExpectedOff: the guest is expected off (stopped); no backup is
-	// expected and no warning is raised.
+	// FreshnessExpectedOff: explicit policy expects the stopped guest off,
+	// and no backup is expected.
 	FreshnessExpectedOff FreshnessState = "expected-off"
 	// FreshnessUnknown: there is no usable backup visibility (denied catalog,
 	// filtered read, missing sample). Unknown is never safe.
@@ -181,13 +187,17 @@ type FreshnessInput struct {
 
 	// GuestStatus is the guest's stored state (pvecontract.GuestStatus).
 	GuestStatus string
+	// ExpectedOff is an explicit operator policy that exempts a stopped guest
+	// from backups. GuestStatus alone never establishes this expectation.
+	ExpectedOff bool
 	// DatasetState is the backup evidence dataset visibility.
 	DatasetState DatasetState
 	// DatasetReason is the dataset's stored reason.
 	DatasetReason string
 	// DatasetObservedAt is when the backup evidence was last collected.
 	DatasetObservedAt time.Time
-	// Evidence is the stored backup evidence for the incarnation.
+	// Evidence contains historical tasks and only the current poll's catalog
+	// entries. Retained catalog history must not imply current presence.
 	Evidence []pvecontract.BackupEvidence
 }
 
@@ -218,8 +228,16 @@ func EvaluateFreshness(in FreshnessInput) Freshness {
 	var catalog CatalogConfidence
 	verification := VerificationConfidence{State: pvecontract.Unknown}
 	var lastSuccess, lastRun, lastFailed int64
+	var uncertainEvidence bool
+	latestAllowed := in.Now.Add(BackupClockTolerance).Unix()
 
 	for _, e := range in.Evidence {
+		// Compare integer seconds before constructing a time.Time: hostile
+		// timestamps may be as large as MaxInt64.
+		if e.StartedUnix > latestAllowed || e.FinishedUnix > latestAllowed {
+			uncertainEvidence = true
+			continue
+		}
 		t := e.FinishedUnix
 		if t == 0 {
 			t = e.StartedUnix
@@ -240,6 +258,10 @@ func EvaluateFreshness(in FreshnessInput) Freshness {
 			}
 		case pvecontract.BackupKindCatalog:
 			catalog.Count++
+			if e.Status != backupStatusPresent {
+				uncertainEvidence = true
+				break
+			}
 			catalog.Present = true
 			if t > catalog.NewestUnix {
 				catalog.NewestUnix = t
@@ -257,7 +279,7 @@ func EvaluateFreshness(in FreshnessInput) Freshness {
 		// A successful backup is evidenced by a successful task or by a
 		// present catalog entry.
 		isSuccess := (e.Kind == pvecontract.BackupKindTask && e.Status == backupStatusSuccess) ||
-			e.Kind == pvecontract.BackupKindCatalog
+			(e.Kind == pvecontract.BackupKindCatalog && e.Status == backupStatusPresent)
 		if isSuccess && t > lastSuccess {
 			lastSuccess = t
 		}
@@ -272,14 +294,9 @@ func EvaluateFreshness(in FreshnessInput) Freshness {
 	f.LastSuccessUnix = lastSuccess
 	f.LastRunUnix = lastRun
 
-	// Verdict, by priority. Earlier states are more fundamental: a stopped
-	// guest needs no backup; stale data and missing visibility cannot ground
-	// any verdict; only then do we compare the last success against the age.
+	// Missing visibility, stale data and failed attempts remain visible even
+	// for a guest explicitly expected off.
 	switch {
-	case in.GuestStatus == string(pvecontract.GuestStopped):
-		f.State = FreshnessExpectedOff
-		f.Reason = "guest is expected off (stopped); no backup expected"
-
 	case in.DatasetState == StateUnavailable:
 		f.State = FreshnessUnknown
 		f.Reason = "backup evidence unavailable: " + in.DatasetReason
@@ -296,6 +313,14 @@ func EvaluateFreshness(in FreshnessInput) Freshness {
 	case lastFailed > lastSuccess && lastFailed > 0:
 		f.State = FreshnessFailed
 		f.Reason = "most recent backup attempt failed after the last evidenced success"
+
+	case lastSuccess == 0 && uncertainEvidence:
+		f.State = FreshnessUnknown
+		f.Reason = "backup evidence has unknown catalog presence or timestamps beyond the clock tolerance"
+
+	case in.ExpectedOff && in.GuestStatus == string(pvecontract.GuestStopped):
+		f.State = FreshnessExpectedOff
+		f.Reason = "guest is explicitly expected off; no backup expected"
 
 	case lastSuccess > 0 && in.Now.Sub(time.Unix(lastSuccess, 0)) <= maxAge:
 		f.State = FreshnessOK
@@ -322,11 +347,12 @@ func (s *Store) GuestBackupFreshness(ctx context.Context, remoteID string, vmid,
 	if err != nil {
 		return Freshness{}, err
 	}
-	dsState, dsReason, dsObserved, err := s.backupDatasetStatus(ctx, remoteID, vmid, generation)
+	dsState, dsReason, dsObserved, dsGeneration, err := s.backupDatasetStatus(ctx, remoteID, vmid, generation)
 	if err != nil {
 		return Freshness{}, err
 	}
-	evidence, err := s.loadBackupEvidence(ctx, remoteID, vmid, generation)
+	now := s.now()
+	evidence, err := s.loadBackupEvidence(ctx, remoteID, vmid, generation, dsObserved, dsGeneration, now)
 	if err != nil {
 		return Freshness{}, err
 	}
@@ -335,7 +361,7 @@ func (s *Store) GuestBackupFreshness(ctx context.Context, remoteID string, vmid,
 		RemoteID:          remoteID,
 		VMID:              vmid,
 		Generation:        generation,
-		Now:               s.now(),
+		Now:               now,
 		MaxAge:            maxAge,
 		GuestStatus:       status,
 		DatasetState:      dsState,
@@ -367,47 +393,91 @@ func (s *Store) guestStatusForGeneration(ctx context.Context, remoteID string, v
 	return status, nil
 }
 
-// backupDatasetStatus returns the stored state, reason and observed-at of the
-// per-guest backup evidence dataset. A missing row means no backup dataset was
-// ever recorded for the incarnation, which is reported as unavailable.
-func (s *Store) backupDatasetStatus(ctx context.Context, remoteID string, vmid, generation uint64) (DatasetState, string, time.Time, error) {
+// backupDatasetStatus returns the stored state, reason, observed-at and
+// collection generation of the per-guest backup dataset. A missing row means
+// none was ever recorded for the incarnation and is reported as unavailable.
+func (s *Store) backupDatasetStatus(ctx context.Context, remoteID string, vmid, generation uint64) (DatasetState, string, time.Time, uint64, error) {
 	var state string
 	var observed string
 	var reason string
+	var collectionGeneration uint64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT state, observed_at, reason FROM pve_guest_dataset_status
+		`SELECT state, observed_at, reason, collection_generation FROM pve_guest_dataset_status
 		 WHERE remote_id = ? AND vmid = ? AND generation = ? AND dataset = ?`,
-		remoteID, vmid, generation, DatasetBackups).Scan(&state, &observed, &reason)
+		remoteID, vmid, generation, DatasetBackups).Scan(&state, &observed, &reason, &collectionGeneration)
 	if errors.Is(err, sql.ErrNoRows) {
-		return StateUnavailable, "no backup dataset recorded", time.Time{}, nil
+		return StateUnavailable, "no backup dataset recorded", time.Time{}, 0, nil
 	}
 	if err != nil {
-		return "", "", time.Time{}, fmt.Errorf("pveinventory: read backup dataset status: %w", err)
+		return "", "", time.Time{}, 0, fmt.Errorf("pveinventory: read backup dataset status: %w", err)
 	}
 	obs, err := time.Parse(time.RFC3339Nano, observed)
 	if err != nil {
-		return "", "", time.Time{}, fmt.Errorf("pveinventory: parse backup dataset observed_at: %w", err)
+		return "", "", time.Time{}, 0, fmt.Errorf("pveinventory: parse backup dataset observed_at: %w", err)
 	}
-	return DatasetState(state), reason, obs, nil
+	return DatasetState(state), reason, obs, collectionGeneration, nil
 }
 
-// loadBackupEvidence returns the newest backup evidence rows for one exact
-// guest incarnation, bounded by MaxFreshnessEvidence. Newest-first ordering
-// keeps the max-over-time computations in EvaluateFreshness exact.
-func (s *Store) loadBackupEvidence(ctx context.Context, remoteID string, vmid, generation uint64) ([]pvecontract.BackupEvidence, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT source, kind, name, status, started_unix, finished_unix, verified
-		 FROM pve_backup_observations
-		 WHERE remote_id = ? AND vmid = ? AND generation = ?
-		 ORDER BY finished_unix DESC, started_unix DESC, source DESC, kind DESC, name DESC
-		 LIMIT ?`,
-		remoteID, vmid, generation, MaxFreshnessEvidence)
+// These range reads match migration 0023's expression indexes. Status and
+// verification buckets are independent so no other channel, failed run or
+// unverified volume can crowd out a success or a verified volume. Both range
+// selection and ordering use the effective timestamp, including unfinished tasks.
+const backupTaskEvidenceQuery = `SELECT source, kind, name, status, started_unix, finished_unix, verified
+	FROM pve_backup_observations
+	WHERE remote_id = ? AND vmid = ? AND generation = ? AND kind = 'task' AND status = ?
+	AND (CASE WHEN finished_unix = 0 THEN started_unix ELSE finished_unix END) BETWEEN ? AND ?
+	ORDER BY (CASE WHEN finished_unix = 0 THEN started_unix ELSE finished_unix END) DESC,
+	         source DESC, name DESC, started_unix DESC LIMIT ?`
+
+const backupCatalogEvidenceQuery = `SELECT source, kind, name, status, started_unix, finished_unix, verified
+	FROM pve_backup_observations
+	WHERE remote_id = ? AND vmid = ? AND generation = ? AND kind = 'catalog'
+	AND observed_at = ? AND collection_generation = ? AND status = ? AND verified = ?
+	AND (CASE WHEN finished_unix = 0 THEN started_unix ELSE finished_unix END) BETWEEN ? AND ?
+	ORDER BY (CASE WHEN finished_unix = 0 THEN started_unix ELSE finished_unix END) DESC,
+	         source DESC, name DESC, started_unix DESC LIMIT ?`
+
+// loadBackupEvidence reads bounded, indexed buckets for one exact incarnation.
+// Task history remains usable, while catalog presence and verification require
+// coverage from the current dataset poll (both its time and collection).
+func (s *Store) loadBackupEvidence(ctx context.Context, remoteID string, vmid, generation uint64, observed time.Time, collectionGeneration uint64, now time.Time) ([]pvecontract.BackupEvidence, error) {
+	latestAllowed := now.Add(BackupClockTolerance).Unix()
+	ranges := [][3]int64{
+		{0, latestAllowed, MaxFreshnessEvidence},
+		{latestAllowed + 1, 1<<63 - 1, 1},
+	}
+	var out []pvecontract.BackupEvidence
+	for _, r := range ranges {
+		for _, status := range []string{backupStatusSuccess, backupStatusFailed, "running", "unknown"} {
+			rows, err := s.readFreshnessEvidence(ctx, backupTaskEvidenceQuery,
+				remoteID, vmid, generation, status, r[0], r[1], r[2])
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, rows...)
+		}
+		for _, status := range []string{backupStatusPresent, "unknown"} {
+			for _, verified := range []pvecontract.TriState{pvecontract.Yes, pvecontract.No, pvecontract.Unknown} {
+				rows, err := s.readFreshnessEvidence(ctx, backupCatalogEvidenceQuery,
+					remoteID, vmid, generation, s.formatTime(observed), collectionGeneration, status, verified, r[0], r[1], r[2])
+				if err != nil {
+					return nil, err
+				}
+				out = append(out, rows...)
+			}
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) readFreshnessEvidence(ctx context.Context, query string, args ...any) ([]pvecontract.BackupEvidence, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("pveinventory: query backup evidence: %w", err)
 	}
 	defer rows.Close()
 
-	out := make([]pvecontract.BackupEvidence, 0, MaxFreshnessEvidence)
+	var out []pvecontract.BackupEvidence
 	for rows.Next() {
 		var e pvecontract.BackupEvidence
 		if err := rows.Scan(&e.Source, &e.Kind, &e.Name, &e.Status, &e.StartedUnix, &e.FinishedUnix, &e.Verified); err != nil {
