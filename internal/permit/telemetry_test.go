@@ -109,7 +109,14 @@ func TestTelemetryLiveAndHistoryFloorsShareBudget(t *testing.T) {
 }
 
 func TestTelemetryExactAuthorityAndLifecycle(t *testing.T) {
-	for _, scenario := range []string{"host", "key", "credential", "action", "version", "artifact", "parameters", "risk", "expiry", "revoke", "lock", "restart", "storage"} {
+	for scenario, expected := range map[string]Code{
+		"host": CodeLeaseNotCovered, "key": CodeLeaseNotCovered,
+		"credential": CodeCredentialMismatch, "action": CodeLeaseNotCovered,
+		"version": CodeLeaseNotCovered, "artifact": CodeArtifactMismatch,
+		"parameters": CodeParametersMismatch, "risk": CodeGrantInvalid,
+		"expiry": CodeLeaseInactive, "revoke": CodeLeaseInactive,
+		"lock": CodeLeaseBudget, "restart": CodeLeaseBudget, "storage": CodeStorage,
+	} {
 		t.Run(scenario, func(t *testing.T) {
 			e, store := newLeaseEnv(t, ModeStandard)
 			g := approveReadGrant(t, e, readGrantRaw(t, telemetryDoc(t, e.clk.Now())))
@@ -169,10 +176,11 @@ func TestTelemetryExactAuthorityAndLifecycle(t *testing.T) {
 					t.Fatal("stale claim accepted")
 				}
 			}
+			// A preceding claim must not mask a missing scope check with an
+			// interval denial. Each case must fail for its own authorization rule.
+			e.clk.Add(11 * time.Second)
 			_, err = e.auth.AuthorizeReadRun(g.ID, "denied", TriggerOnDemand, run)
-			if err == nil {
-				t.Fatal("changed scope/lifecycle accepted")
-			}
+			wantCode(t, err, expected)
 		})
 	}
 }

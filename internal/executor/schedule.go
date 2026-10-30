@@ -123,7 +123,6 @@ func (s *Service) RunScheduled(ctx context.Context, req *pb.RunScheduledRequest)
 // grant, budget and lifecycle checks. RPC adapters choose the trigger; this
 // entry point grants no authority beyond the approved document.
 func (s *Service) RunRead(ctx context.Context, trigger string, req *pb.RunScheduledRequest) (*pb.RunScheduledResponse, error) {
-	dispatch := s.auth.ReadDispatchGuard()
 	r := req.GetRun()
 	if r == nil {
 		return nil, status.Error(codes.InvalidArgument, "run is required")
@@ -140,6 +139,7 @@ func (s *Service) RunRead(ctx context.Context, trigger string, req *pb.RunSchedu
 		return nil, err
 	}
 	defer release()
+	dispatch := s.auth.ReadDispatchGuard()
 	// prepareRun wants a digest; a scheduled run is named by the grant.
 	probe := &pb.AuthorizeRunRequest{ExecutionDigest: zeroDigest, HostId: r.GetHostId(), CredentialRef: r.GetCredentialRef()}
 	_, eps, err := s.prepareRun(probe, req.GetEndpoints())
