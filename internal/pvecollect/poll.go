@@ -295,7 +295,7 @@ func (c *Collector) readRemote(ctx context.Context, remoteID string, now time.Ti
 		}
 		return nil
 	}
-	var vmids []uint64
+	var guestResult readResult
 	err := c.runReads(ctx, remoteID, phase1, func(res readResult) error {
 		if err := checkBudget(res); err != nil {
 			return err
@@ -304,23 +304,7 @@ func (c *Collector) readRemote(ctx context.Context, remoteID string, now time.Ti
 		case pb.PVEReadMethod_PVE_READ_METHOD_NODES:
 			obs.Nodes = convertNodes(res)
 		case pb.PVEReadMethod_PVE_READ_METHOD_GUESTS:
-			guests := res.resp.GetGuests()
-			if guests != nil {
-				if len(guests.Guests) > pvecontract.MaxObjectsPerPage || len(guests.Guests) > pvecontract.MaxGuestsPerRemote {
-					return errors.New("pvecollect: guest list exceeds limit")
-				}
-				seen := make(map[uint64]bool, len(guests.Guests))
-				for _, guest := range guests.Guests {
-					if guest == nil || guest.Vmid < pvecontract.MinVMID || guest.Vmid > pvecontract.MaxVMID || seen[guest.Vmid] {
-						return errors.New("pvecollect: invalid guest identity")
-					}
-					seen[guest.Vmid] = true
-				}
-			}
-			obs.Guests = convertGuests(res)
-			for _, g := range obs.Guests.Value {
-				vmids = append(vmids, g.VMID)
-			}
+			guestResult = res
 		case pb.PVEReadMethod_PVE_READ_METHOD_STORAGE:
 			obs.Storages = convertStorages(res)
 		case pb.PVEReadMethod_PVE_READ_METHOD_CLUSTER:
@@ -335,6 +319,26 @@ func (c *Collector) readRemote(ctx context.Context, remoteID string, now time.Ti
 	})
 	if err != nil {
 		return nil, err
+	}
+	// Finish node-scoped reads before rejecting the whole guest list.
+	// Validate every identity before conversion or detail scheduling.
+	var vmids []uint64
+	guests := guestResult.resp.GetGuests()
+	if guests != nil {
+		if len(guests.Guests) > pvecontract.MaxObjectsPerPage || len(guests.Guests) > pvecontract.MaxGuestsPerRemote {
+			return nil, errors.New("pvecollect: guest list exceeds limit")
+		}
+		seen := make(map[uint64]bool, len(guests.Guests))
+		for _, guest := range guests.Guests {
+			if guest == nil || guest.Vmid < pvecontract.MinVMID || guest.Vmid > pvecontract.MaxVMID || seen[guest.Vmid] {
+				return nil, errors.New("pvecollect: invalid guest identity")
+			}
+			seen[guest.Vmid] = true
+		}
+	}
+	obs.Guests = convertGuests(guestResult)
+	for _, g := range obs.Guests.Value {
+		vmids = append(vmids, g.VMID)
 	}
 	// Validate the complete phase-1 schema before any guest detail work.
 	// Generation 1 is a validation placeholder; allocation happens at publish.
