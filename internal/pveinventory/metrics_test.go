@@ -194,17 +194,18 @@ func Test288BucketsAndSlidingWindow(t *testing.T) {
 	ctx := context.Background()
 	base := *now
 
-	// Fill 288 buckets with values 1..288 (one per 5-min step).
+	// Fill 288 buckets with distinct values in (0,1] (one per 5-min step).
+	val := func(i int) float64 { return float64(i+1) / RetentionBuckets }
 	for i := 0; i < RetentionBuckets; i++ {
 		*now = base.Add(time.Duration(i) * BucketDuration)
-		if err := s.RecordSample(ctx, nodeTarget(), MetricCPU, float64(i+1), "c"); err != nil {
+		if err := s.RecordSample(ctx, nodeTarget(), MetricCPU, val(i), "c"); err != nil {
 			t.Fatalf("record %d: %v", i, err)
 		}
 	}
 
 	var fullSum float64
-	for i := 1; i <= RetentionBuckets; i++ {
-		fullSum += float64(i)
+	for i := 0; i < RetentionBuckets; i++ {
+		fullSum += val(i)
 	}
 	sum, err := s.GetMetricSummary(ctx, nodeTarget(), MetricCPU)
 	if err != nil {
@@ -223,17 +224,17 @@ func Test288BucketsAndSlidingWindow(t *testing.T) {
 		t.Errorf("average = %v, want %v", sum.Average, fullSum/RetentionBuckets)
 	}
 
-	// A 289th sample slides the window: the oldest bucket (value 1) drops
-	// out of the 24 h window.
+	// A 289th sample slides the window: the oldest bucket drops out of the
+	// 24 h window.
 	*now = base.Add(RetentionBuckets * BucketDuration)
-	if err := s.RecordSample(ctx, nodeTarget(), MetricCPU, 999, "c"); err != nil {
+	if err := s.RecordSample(ctx, nodeTarget(), MetricCPU, 1.0, "c"); err != nil {
 		t.Fatalf("record 289: %v", err)
 	}
 	var slideSum float64
-	for i := 2; i <= RetentionBuckets; i++ {
-		slideSum += float64(i)
+	for i := 1; i < RetentionBuckets; i++ {
+		slideSum += val(i)
 	}
-	slideSum += 999
+	slideSum += 1.0
 	sum, err = s.GetMetricSummary(ctx, nodeTarget(), MetricCPU)
 	if err != nil {
 		t.Fatalf("summary after slide: %v", err)
@@ -417,7 +418,7 @@ func TestGetMetricBucketsLimit(t *testing.T) {
 
 	for i := 0; i < 5; i++ {
 		*now = base.Add(time.Duration(i) * BucketDuration)
-		if err := s.RecordSample(ctx, nodeTarget(), MetricCPU, float64(i), "c"); err != nil {
+		if err := s.RecordSample(ctx, nodeTarget(), MetricCPU, float64(i)/5.0, "c"); err != nil {
 			t.Fatalf("record %d: %v", i, err)
 		}
 	}

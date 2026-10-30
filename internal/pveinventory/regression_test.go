@@ -397,7 +397,9 @@ func TestDriftVersionMigrationPreservesExistingDecisions(t *testing.T) {
   INSERT INTO pve_drift_hints VALUES
    (41, 'remote-a', 100, 1, 'web1', 'ram', '8 GiB', '4 GiB', '2026-10-29T12:00:00Z', '2026-10-29T12:00:00Z', 'ignored', 'alice'),
    (42, 'remote-a', 100, 1, 'web1', 'state', 'stopped', 'running', '2026-10-29T12:00:00Z', '', '', '');
-  DELETE FROM schema_migrations WHERE version = 22;`); err != nil {
+  DROP TABLE pve_metric_buckets;
+  DROP TABLE pve_metric_current;
+  DELETE FROM schema_migrations WHERE version >= 22;`); err != nil {
 		t.Fatal(err)
 	}
 	var path string
