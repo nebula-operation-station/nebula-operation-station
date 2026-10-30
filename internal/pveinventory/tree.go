@@ -1036,3 +1036,93 @@ func (s *Store) ChartData(ctx context.Context, q ChartQuery) (ChartData, error) 
 	}
 	return data, nil
 }
+
+// clusterStorageTypes lists the PVE storage types that are
+// cluster-wide (shared) rather than node-local.
+var clusterStorageTypes = map[string]bool{
+	"nfs":       true,
+	"cifs":      true,
+	"pbs":       true,
+	"rbd":       true,
+	"glusterfs": true,
+	"vbks":      true,
+	"iscsi":     true,
+	"iscsi-gw":  true,
+	"swift":     true,
+	"azure8":    true,
+	"azure":     true,
+	"sheepdog":  true,
+}
+
+// TreeInput converts the stored chart data into a TreeInput for
+// BuildTree, passing hosts and links through unchanged.
+//
+// Storage observations are stored per remote, not per node. Each
+// storage is attributed to the remote's first node in stored order,
+// falling back to the first guest's node. Storages of a cluster-wide
+// type are marked shared, so a shared storage appears once per
+// cluster under the first node and is never double-counted. Storages
+// of a remote without any node or guest are dropped, because they
+// would have no parent node box.
+func (d ChartData) TreeInput(now time.Time, staleAfter time.Duration, hosts []HostInput, links []HostLink) TreeInput {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if staleAfter <= 0 {
+		staleAfter = DefaultStaleAfter
+	}
+	in := TreeInput{Now: now, StaleAfter: staleAfter, Hosts: hosts, Links: links}
+	for _, r := range d.Remotes {
+		ri := RemoteInput{RemoteID: r.RemoteID, Name: r.Name}
+		nodes := d.Nodes[r.RemoteID]
+		for _, n := range nodes {
+			ri.Nodes = append(ri.Nodes, NodeInput{
+				Node: n.Node, Status: n.Status, State: n.State,
+				Reason: n.Reason, ObservedAt: n.ObservedAt,
+			})
+		}
+		guests := d.Guests[r.RemoteID]
+		for _, g := range guests {
+			ri.Guests = append(ri.Guests, GuestInput{
+				VMID: g.VMID, Generation: g.Generation, Kind: g.Kind,
+				Node: g.Node, Name: g.Name, Status: g.Status,
+				State: g.State, Reason: g.Reason, ObservedAt: g.ObservedAt,
+			})
+		}
+		anchor := ""
+		if len(nodes) > 0 {
+			anchor = nodes[0].Node
+		} else {
+			for _, g := range guests {
+				if g.Node != "" {
+					anchor = g.Node
+					break
+				}
+			}
+		}
+		if anchor == "" {
+			// No node box could host the storages; drop them.
+			in.Remotes = append(in.Remotes, ri)
+			continue
+		}
+		for _, st := range d.Storages[r.RemoteID] {
+			var used uint64
+			if st.SizeBytes > st.FreeBytes {
+				used = st.SizeBytes - st.FreeBytes
+			}
+			ri.Storages = append(ri.Storages, StorageInput{
+				Node:          anchor,
+				ID:            st.Name,
+				Type:          st.Type,
+				Active:        st.Active,
+				Shared:        clusterStorageTypes[st.Type],
+				UsedBytes:     used,
+				TotalBytes:    st.SizeBytes,
+				CapacityKnown: st.SizeBytes > 0,
+				Stale:         now.Sub(st.ObservedAt) > staleAfter,
+			})
+		}
+		in.Remotes = append(in.Remotes, ri)
+	}
+	return in
+}
