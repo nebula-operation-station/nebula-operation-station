@@ -1012,6 +1012,16 @@ func (s *Store) Prune(ctx context.Context) (PruneReport, error) {
 		}
 	}
 
+	// Retired guest metric series share the tombstone lifecycle. Keep node
+	// series and other incarnations/remotes intact.
+	for _, table := range []string{"pve_metric_buckets", "pve_metric_current"} {
+		if _, err := tx.ExecContext(ctx,
+			fmt.Sprintf(`DELETE FROM %s WHERE target_kind = ? AND (remote_id, vmid, generation) IN (%s)`, table, subq),
+			string(MetricTargetGuest), tombCutoff); err != nil {
+			return PruneReport{}, fmt.Errorf("pveinventory: prune %s: %w", table, err)
+		}
+	}
+
 	res, err := tx.ExecContext(ctx, `DELETE FROM pve_guests
 		WHERE tombstoned = 1 AND tombstoned_at != '' AND tombstoned_at < ?`, tombCutoff)
 	if err != nil {

@@ -27,6 +27,9 @@ import (
 	"fmt"
 	"math"
 	"time"
+	"unicode/utf8"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 )
 
 // BucketDuration is the width of one metric bucket (five minutes).
@@ -106,6 +109,8 @@ var (
 	// ErrInvalidMetricValue is returned for a value outside [0,1] or not
 	// finite.
 	ErrInvalidMetricValue = errors.New("pveinventory: invalid metric value")
+	// ErrInvalidMetricSource is returned for an oversized or non-UTF-8 source.
+	ErrInvalidMetricSource = errors.New("pveinventory: invalid metric source")
 )
 
 // keyFields returns the storage key columns for a target.
@@ -115,6 +120,12 @@ func (t MetricTarget) keyFields() (kind, node string, vmid, generation uint64) {
 
 // validateTarget rejects malformed metric targets.
 func validateTarget(t MetricTarget) error {
+	if len(t.RemoteID) > pvecontract.MaxRemoteIDBytes || !utf8.ValidString(t.RemoteID) {
+		return fmt.Errorf("%w: remote_id exceeds limit or is not UTF-8", ErrInvalidMetricTarget)
+	}
+	if len(t.Node) > pvecontract.MaxNodeNameBytes || !utf8.ValidString(t.Node) {
+		return fmt.Errorf("%w: node exceeds limit or is not UTF-8", ErrInvalidMetricTarget)
+	}
 	if t.RemoteID == "" {
 		return fmt.Errorf("%w: empty remote_id", ErrInvalidMetricTarget)
 	}
@@ -186,11 +197,15 @@ func (s *Store) RecordSample(ctx context.Context, t MetricTarget, m MetricName, 
 	if err := validateMetricValue(value); err != nil {
 		return err
 	}
+	if len(source) > pvecontract.MaxTextFieldBytes || !utf8.ValidString(source) {
+		return fmt.Errorf("%w: exceeds text limit or is not UTF-8", ErrInvalidMetricSource)
+	}
 	curStart, _ := s.windowStart()
 	kind, node, vmid, generation := t.keyFields()
 	bucketStartUnix := curStart.Unix()
 
-	if _, err := s.db.ExecContext(ctx, `
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
         INSERT INTO pve_metric_buckets
             (remote_id, target_kind, node, vmid, generation, metric, bucket_start_unix, sum, count)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
@@ -198,12 +213,12 @@ func (s *Store) RecordSample(ctx context.Context, t MetricTarget, m MetricName, 
         DO UPDATE SET
             sum   = pve_metric_buckets.sum + excluded.sum,
             count = pve_metric_buckets.count + 1`,
-		t.RemoteID, kind, node, vmid, generation, string(m), bucketStartUnix, value); err != nil {
-		return fmt.Errorf("pveinventory: record sample %s/%s: %w", t.RemoteID, m, err)
-	}
+			t.RemoteID, kind, node, vmid, generation, string(m), bucketStartUnix, value); err != nil {
+			return fmt.Errorf("pveinventory: record sample %s/%s: %w", t.RemoteID, m, err)
+		}
 
-	observedAt := s.formatTime(s.now())
-	if _, err := s.db.ExecContext(ctx, `
+		observedAt := s.formatTime(s.now())
+		if _, err := tx.ExecContext(ctx, `
         INSERT INTO pve_metric_current
             (remote_id, target_kind, node, vmid, generation, metric, value, observed_at, source)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -215,10 +230,11 @@ func (s *Store) RecordSample(ctx context.Context, t MetricTarget, m MetricName, 
                                THEN excluded.observed_at ELSE pve_metric_current.observed_at END,
             source      = CASE WHEN excluded.observed_at >= pve_metric_current.observed_at
                                THEN excluded.source ELSE pve_metric_current.source END`,
-		t.RemoteID, kind, node, vmid, generation, string(m), value, observedAt, source); err != nil {
-		return fmt.Errorf("pveinventory: record current %s/%s: %w", t.RemoteID, m, err)
-	}
-	return nil
+			t.RemoteID, kind, node, vmid, generation, string(m), value, observedAt, source); err != nil {
+			return fmt.Errorf("pveinventory: record current %s/%s: %w", t.RemoteID, m, err)
+		}
+		return nil
+	})
 }
 
 // GetMetricSummary returns the server-side 24 h aggregate for one
@@ -232,7 +248,7 @@ func (s *Store) GetMetricSummary(ctx context.Context, t MetricTarget, m MetricNa
 	if err := validateMetric(m); err != nil {
 		return MetricSummary{}, err
 	}
-	_, windowStart := s.windowStart()
+	curStart, windowStart := s.windowStart()
 	kind, node, vmid, generation := t.keyFields()
 	windowStartUnix := windowStart.Unix()
 
@@ -241,8 +257,8 @@ func (s *Store) GetMetricSummary(ctx context.Context, t MetricTarget, m MetricNa
         SELECT COALESCE(SUM(sum), 0), COALESCE(SUM(count), 0), COUNT(*)
         FROM pve_metric_buckets
         WHERE remote_id = ? AND target_kind = ? AND node = ? AND vmid = ?
-          AND generation = ? AND metric = ? AND bucket_start_unix >= ?`,
-		t.RemoteID, kind, node, vmid, generation, string(m), windowStartUnix)
+          AND generation = ? AND metric = ? AND bucket_start_unix >= ? AND bucket_start_unix <= ?`,
+		t.RemoteID, kind, node, vmid, generation, string(m), windowStartUnix, curStart.Unix())
 	var totalSum float64
 	var totalSamples int64
 	var bucketsValid int64
@@ -309,7 +325,7 @@ func (s *Store) GetMetricBuckets(ctx context.Context, t MetricTarget, m MetricNa
 	if err != nil {
 		return nil, err
 	}
-	_, windowStart := s.windowStart()
+	curStart, windowStart := s.windowStart()
 	kind, node, vmid, generation := t.keyFields()
 	windowStartUnix := windowStart.Unix()
 
@@ -318,8 +334,8 @@ func (s *Store) GetMetricBuckets(ctx context.Context, t MetricTarget, m MetricNa
         SELECT COUNT(*)
         FROM pve_metric_buckets
         WHERE remote_id = ? AND target_kind = ? AND node = ? AND vmid = ?
-          AND generation = ? AND metric = ? AND bucket_start_unix >= ?`,
-		t.RemoteID, kind, node, vmid, generation, string(m), windowStartUnix).Scan(&total); err != nil {
+          AND generation = ? AND metric = ? AND bucket_start_unix >= ? AND bucket_start_unix <= ?`,
+		t.RemoteID, kind, node, vmid, generation, string(m), windowStartUnix, curStart.Unix()).Scan(&total); err != nil {
 		return nil, fmt.Errorf("pveinventory: buckets count %s/%s: %w", t.RemoteID, m, err)
 	}
 	offset := 0
@@ -330,10 +346,10 @@ func (s *Store) GetMetricBuckets(ctx context.Context, t MetricTarget, m MetricNa
         SELECT bucket_start_unix, sum, count
         FROM pve_metric_buckets
         WHERE remote_id = ? AND target_kind = ? AND node = ? AND vmid = ?
-          AND generation = ? AND metric = ? AND bucket_start_unix >= ?
+          AND generation = ? AND metric = ? AND bucket_start_unix >= ? AND bucket_start_unix <= ?
         ORDER BY bucket_start_unix ASC
         LIMIT ? OFFSET ?`,
-		t.RemoteID, kind, node, vmid, generation, string(m), windowStartUnix, limit, offset)
+		t.RemoteID, kind, node, vmid, generation, string(m), windowStartUnix, curStart.Unix(), limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("pveinventory: buckets %s/%s: %w", t.RemoteID, m, err)
 	}
@@ -362,8 +378,8 @@ func (s *Store) GetMetricBuckets(ctx context.Context, t MetricTarget, m MetricNa
 }
 
 // PruneMetrics removes bucket rows older than the 24 h window and returns the
-// number of rows removed. It never touches the current-value rows (bounded,
-// one per series).
+// number of rows removed. It retains current-value rows; Prune removes
+// retired guest series when their incarnation tombstones expire.
 func (s *Store) PruneMetrics(ctx context.Context) (int64, error) {
 	_, windowStart := s.windowStart()
 	res, err := s.db.ExecContext(ctx, `

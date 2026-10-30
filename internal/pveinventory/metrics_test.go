@@ -21,8 +21,11 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 )
 
 // approxEqual reports whether a and b are equal within a small epsilon.
@@ -514,5 +517,298 @@ func TestSummaryValidation(t *testing.T) {
 	}
 	if _, err := s.GetMetricBuckets(ctx, MetricTarget{Kind: MetricTargetNode}, MetricCPU, 0); !errors.Is(err, ErrInvalidMetricTarget) {
 		t.Errorf("buckets target err = %v, want ErrInvalidMetricTarget", err)
+	}
+}
+
+func TestRecordSampleRollsBackOnCurrentWriteFailure(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		name := "new series"
+		if existing {
+			name = "existing series"
+		}
+		t.Run(name, func(t *testing.T) {
+			s, db, _ := newTestStore(t)
+			ctx := context.Background()
+			wantSamples := 0
+			if existing {
+				if err := s.RecordSample(ctx, nodeTarget(), MetricCPU, 0.25, "original"); err != nil {
+					t.Fatal(err)
+				}
+				wantSamples = 1
+			}
+			if _, err := db.ExecContext(ctx, `CREATE TRIGGER fail_metric_current
+				BEFORE INSERT ON pve_metric_current BEGIN
+				SELECT RAISE(FAIL, 'injected current write failure'); END`); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.RecordSample(ctx, nodeTarget(), MetricCPU, 0.75, "retry"); err == nil {
+				t.Fatal("current write failure must fail recording")
+			}
+			sum, err := s.GetMetricSummary(ctx, nodeTarget(), MetricCPU)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sum.Samples != wantSamples || (existing && (sum.Average != 0.25 || sum.Current != 0.25)) {
+				t.Errorf("failed write changed aggregates/current: %+v", sum)
+			}
+			if !existing && (countRows(t, db, "pve_metric_buckets") != 0 || countRows(t, db, "pve_metric_current") != 0) {
+				t.Error("failed write left metric rows")
+			}
+			if _, err := db.ExecContext(ctx, `DROP TRIGGER fail_metric_current`); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.RecordSample(ctx, nodeTarget(), MetricCPU, 0.75, "retry"); err != nil {
+				t.Fatal(err)
+			}
+			sum, err = s.GetMetricSummary(ctx, nodeTarget(), MetricCPU)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantAverage := 0.75
+			if existing {
+				wantAverage = 0.5
+			}
+			if sum.Samples != wantSamples+1 || sum.Average != wantAverage || sum.Current != 0.75 {
+				t.Fatalf("retry counted failed sample: %+v", sum)
+			}
+		})
+	}
+}
+
+func TestMetricQueriesExcludeFutureBucketsAfterClockRollback(t *testing.T) {
+	s, _, now := newTestStore(t)
+	ctx := context.Background()
+	base := now.Truncate(BucketDuration)
+	for i := 0; i <= RetentionBuckets; i++ {
+		*now = base.Add(time.Duration(i) * BucketDuration)
+		value := 0.25
+		if i == RetentionBuckets {
+			value = 1 // distinguish the future bucket from the retained history
+		}
+		if err := s.RecordSample(ctx, nodeTarget(), MetricCPU, value, "c"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		bucket int
+		want   int
+	}{
+		{"full window", RetentionBuckets - 1, RetentionBuckets},
+		{"partial window", 2, 3},
+		{"first bucket", 0, 1},
+		{"before history", -1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			*now = base.Add(time.Duration(tc.bucket)*BucketDuration + 30*time.Second)
+			sum, err := s.GetMetricSummary(ctx, nodeTarget(), MetricCPU)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sum.Valid != (tc.want > 0) || sum.Samples != tc.want || sum.BucketsValid != tc.want ||
+				!approxEqual(sum.Coverage, float64(tc.want)/RetentionBuckets) || sum.Coverage > 1 {
+				t.Errorf("summary includes future buckets: %+v", sum)
+			}
+			if tc.want > 0 && sum.Average != 0.25 {
+				t.Errorf("average = %v, want 0.25", sum.Average)
+			}
+			for _, limit := range []int{0, 1, 3} {
+				buckets, err := s.GetMetricBuckets(ctx, nodeTarget(), MetricCPU, limit)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := tc.want
+				if limit > 0 {
+					want = min(want, limit)
+				}
+				if len(buckets) != want {
+					t.Errorf("limit %d: got %d buckets, want %d", limit, len(buckets), want)
+					continue
+				}
+				for i, b := range buckets {
+					wantStart := base.Add(time.Duration(tc.bucket-want+1+i) * BucketDuration)
+					if !b.Start.Equal(wantStart) || b.Average != 0.25 || b.Count != 1 {
+						t.Errorf("limit %d bucket %d: %+v, want start %v / average 0.25 / count 1", limit, i, b, wantStart)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestMetricTextValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		field string
+		value string
+	}{
+		{"oversized remote", "remote", strings.Repeat("r", pvecontract.MaxRemoteIDBytes+1)},
+		{"invalid remote UTF-8", "remote", "r\xff"},
+		{"oversized node", "node", strings.Repeat("n", pvecontract.MaxNodeNameBytes+1)},
+		{"oversized multibyte node", "node", strings.Repeat("é", pvecontract.MaxNodeNameBytes/2+1)},
+		{"invalid node UTF-8", "node", "n\xff"},
+		{"oversized source", "source", strings.Repeat("s", pvecontract.MaxTextFieldBytes+1)},
+		{"oversized multibyte source", "source", strings.Repeat("é", pvecontract.MaxTextFieldBytes/2+1)},
+		{"invalid source UTF-8", "source", "s\xff"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, db, _ := newTestStore(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel() // validation must reject input before attempting SQL
+			target, source := nodeTarget(), "c"
+			switch tc.field {
+			case "remote":
+				target.RemoteID = tc.value
+			case "node":
+				target.Node = tc.value
+			case "source":
+				source = tc.value
+			}
+			wantErr := ErrInvalidMetricTarget
+			if tc.field == "source" {
+				wantErr = ErrInvalidMetricSource
+			}
+			if err := s.RecordSample(ctx, target, MetricCPU, 0.5, source); !errors.Is(err, wantErr) {
+				t.Errorf("RecordSample error = %v, want %v before SQL", err, wantErr)
+			}
+			if countRows(t, db, "pve_metric_buckets") != 0 || countRows(t, db, "pve_metric_current") != 0 {
+				t.Error("invalid text persisted metric rows")
+			}
+			if tc.field != "source" {
+				if _, err := s.GetMetricSummary(ctx, target, MetricCPU); !errors.Is(err, ErrInvalidMetricTarget) {
+					t.Errorf("summary target error = %v", err)
+				}
+				if _, err := s.GetMetricBuckets(ctx, target, MetricCPU, 0); !errors.Is(err, ErrInvalidMetricTarget) {
+					t.Errorf("bucket target error = %v", err)
+				}
+				if _, err := s.ListMetricSummaries(ctx, target); !errors.Is(err, ErrInvalidMetricTarget) {
+					t.Errorf("list target error = %v", err)
+				}
+			}
+		})
+	}
+	t.Run("byte limits accepted", func(t *testing.T) {
+		s, _, _ := newTestStore(t)
+		target := nodeTarget()
+		target.RemoteID = strings.Repeat("r", pvecontract.MaxRemoteIDBytes)
+		target.Node = strings.Repeat("é", pvecontract.MaxNodeNameBytes/2) + "n"
+		source := strings.Repeat("é", pvecontract.MaxTextFieldBytes/2)
+		if err := s.RecordSample(context.Background(), target, MetricCPU, 0.5, source); err != nil {
+			t.Fatalf("valid text at byte limits rejected: %v", err)
+		}
+	})
+}
+
+func TestPruneRemovesMetricsWithRetiredIncarnation(t *testing.T) {
+	s, db, now := newTestStore(t)
+	ctx := context.Background()
+	ingestOK(t, s, newObsA().guests(mkGuest(101, 1, "old"), mkGuest(202, 1, "other")).build())
+	ingestOK(t, s, newObsB().guests(mkGuest(101, 1, "other-remote")).build())
+	old := guestTarget(1)
+	other := old
+	other.VMID = 202
+	crossRemote := old
+	crossRemote.RemoteID = "remote-b"
+	targets := []MetricTarget{old, other, crossRemote, nodeTarget()}
+	record := func(target MetricTarget) {
+		t.Helper()
+		for _, m := range []MetricName{MetricCPU, MetricRAM, MetricDisk} {
+			if err := s.RecordSample(ctx, target, m, 0.5, "c"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, target := range targets {
+		record(target)
+	}
+	*now = now.Add(time.Hour)
+	obs := newObsA().guests(mkGuest(101, 2, "new"), mkGuest(202, 1, "other")).build()
+	obs.CollectionGeneration = 2
+	obs.ObservedAt = *now
+	ingestOK(t, s, obs)
+	targets = append(targets, guestTarget(2))
+	record(guestTarget(2))
+
+	// Old current values remain after bucket retention and until their tombstone expires.
+	*now = now.Add(25 * time.Hour)
+	if _, err := s.PruneMetrics(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if report, err := s.Prune(ctx); err != nil || report.TombstonesRemoved != 0 {
+		t.Fatalf("recent tombstone prune: %+v, %v", report, err)
+	}
+	if n := countRows(t, db, "pve_metric_current"); n != 3*len(targets) {
+		t.Fatalf("current rows before tombstone expiry = %d", n)
+	}
+
+	// Tombstone another guest recently; it must survive the older incarnation's purge.
+	*now = testBase.Add(TombstoneRetention + 2*time.Hour)
+	obs = newObsA().guests(mkGuest(101, 2, "new")).build()
+	obs.CollectionGeneration = 3
+	obs.ObservedAt = *now
+	ingestOK(t, s, obs)
+	for _, target := range targets {
+		record(target) // ensure both metric tables contain rows when the tombstone is purged
+	}
+	report, err := s.Prune(ctx)
+	if err != nil || report.TombstonesRemoved != 1 {
+		t.Fatalf("expired tombstone prune: %+v, %v", report, err)
+	}
+	for _, table := range []string{"pve_metric_buckets", "pve_metric_current"} {
+		if n := countRows(t, db, table); n != 3*(len(targets)-1) {
+			t.Errorf("%s rows after purge = %d, want %d", table, n, 3*(len(targets)-1))
+		}
+	}
+	for _, target := range targets {
+		sum, err := s.GetMetricSummary(ctx, target, MetricCPU)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if target == old {
+			if sum.Valid || !sum.CurrentAt.IsZero() {
+				t.Errorf("retired incarnation metrics survived: %+v", sum)
+			}
+		} else if !sum.Valid || sum.Current != 0.5 {
+			t.Errorf("unrelated series removed: %+v", sum)
+		}
+	}
+}
+
+func TestPruneRollsBackOnMetricDeleteFailure(t *testing.T) {
+	for _, table := range []string{"pve_metric_buckets", "pve_metric_current"} {
+		t.Run(table, func(t *testing.T) {
+			s, db, now := newTestStore(t)
+			ctx := context.Background()
+			ingestOK(t, s, newObsA().guests(mkGuest(101, 1, "old")).build())
+			if err := s.RecordSample(ctx, guestTarget(1), MetricCPU, 0.5, "c"); err != nil {
+				t.Fatal(err)
+			}
+			ingestOK(t, s, newObsA().guests().build())
+			*now = now.Add(TombstoneRetention + time.Hour)
+			if _, err := db.ExecContext(ctx, `CREATE TRIGGER fail_metric_delete
+				BEFORE DELETE ON `+table+` BEGIN
+				SELECT RAISE(FAIL, 'injected metric delete failure'); END`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Prune(ctx); err == nil {
+				t.Fatal("metric delete failure must fail pruning")
+			}
+			for _, retained := range []string{"pve_guests", "pve_guest_dataset_status", "pve_metric_buckets", "pve_metric_current"} {
+				if n := countRows(t, db, retained); n == 0 {
+					t.Errorf("failed prune removed %s rows", retained)
+				}
+			}
+			if _, err := db.ExecContext(ctx, `DROP TRIGGER fail_metric_delete`); err != nil {
+				t.Fatal(err)
+			}
+			if report, err := s.Prune(ctx); err != nil || report.TombstonesRemoved != 1 {
+				t.Fatalf("retry prune: %+v, %v", report, err)
+			}
+			for _, removed := range []string{"pve_guests", "pve_guest_dataset_status", "pve_metric_buckets", "pve_metric_current"} {
+				if n := countRows(t, db, removed); n != 0 {
+					t.Errorf("retry left %d %s rows", n, removed)
+				}
+			}
+		})
 	}
 }
