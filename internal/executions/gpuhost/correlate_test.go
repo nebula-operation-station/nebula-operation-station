@@ -29,15 +29,15 @@ func TestParseBusID(t *testing.T) {
 
 func TestParseHostPCITarget(t *testing.T) {
 	for s, want := range map[string]HostPCITarget{
-		"0000:65:00":               {Domain: "0000", Bus: "65", Device: "00", FnLo: -1, FnHi: -1},
-		"0000:65:00.0":             {Domain: "0000", Bus: "65", Device: "00", FnLo: 0, FnHi: 0},
-		"65:00":                    {Domain: "0000", Bus: "65", Device: "00", FnLo: -1, FnHi: -1},
-		"65:00.0":                  {Domain: "0000", Bus: "65", Device: "00", FnLo: 0, FnHi: 0},
-		"host0:0000:65:00":         {Domain: "0000", Bus: "65", Device: "00", FnLo: -1, FnHi: -1},
-		"host1:65:00":              {Domain: "0000", Bus: "65", Device: "00", FnLo: -1, FnHi: -1},
-		"pcieRoot1:0000:65:00":     {Domain: "0000", Bus: "65", Device: "00", FnLo: -1, FnHi: -1},
+		"0000:65:00":                {Domain: "0000", Bus: "65", Device: "00", FnLo: -1, FnHi: -1},
+		"0000:65:00.0":              {Domain: "0000", Bus: "65", Device: "00", FnLo: 0, FnHi: 0},
+		"65:00":                     {Domain: "0000", Bus: "65", Device: "00", FnLo: -1, FnHi: -1},
+		"65:00.0":                   {Domain: "0000", Bus: "65", Device: "00", FnLo: 0, FnHi: 0},
+		"host0:0000:65:00":          {Domain: "0000", Bus: "65", Device: "00", FnLo: -1, FnHi: -1},
+		"host1:65:00":               {Domain: "0000", Bus: "65", Device: "00", FnLo: -1, FnHi: -1},
+		"pcieRoot1:0000:65:00":      {Domain: "0000", Bus: "65", Device: "00", FnLo: -1, FnHi: -1},
 		"0000:65:00.0-0000:65:00.1": {Domain: "0000", Bus: "65", Device: "00", FnLo: 0, FnHi: 1},
-		"0000:65:00,subfunction=1": {Domain: "0000", Bus: "65", Device: "00", FnLo: -1, FnHi: -1},
+		"0000:65:00,subfunction=1":  {Domain: "0000", Bus: "65", Device: "00", FnLo: -1, FnHi: -1},
 	} {
 		got, err := ParseHostPCITarget(s)
 		if err != nil || got != want {

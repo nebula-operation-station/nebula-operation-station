@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc"
+	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
 // pci.inventory is a LOW read-only action without parameters and runs

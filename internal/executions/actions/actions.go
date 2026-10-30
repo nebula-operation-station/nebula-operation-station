@@ -198,6 +198,12 @@ func installScript(mode string) []byte {
 	return []byte(strings.ReplaceAll(packageInstallTemplate, "@MODE@", mode))
 }
 
+//go:embed scripts/pci_inventory.sh
+var pciInventory []byte
+
+//go:embed scripts/gpu_status.sh
+var gpuStatus []byte
+
 // Builtin lists the built-in actions in display order.
 var Builtin = []Action{
 	{
@@ -292,6 +298,16 @@ var Builtin = []Action{
 	{
 		ID: "docker.restart", Version: "1.0.0", Title: "Restart container", Description: "docker restart of one container (docker group or sudo); nothing is recreated or pulled.",
 		Risk: pb.RiskClass_RISK_CLASS_MEDIUM, Timeout: 3 * time.Minute, Script: dockerScript("restart"), Params: containerParam, Retry: RetryNever,
+	},
+	{
+		ID: "pci.inventory", Version: "1.0.0", Title: "List PCI GPUs",
+		Description: "The host's NVIDIA display and 3D controllers from lspci (lspci -mm -nn -D), with the PCI bus ID for hostpci passthrough mapping. A host without lspci reports that. Read-only.",
+		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 30 * time.Second, ReadOnly: true, Script: pciInventory, Retry: RetrySafe,
+	},
+	{
+		ID: "gpu.status", Version: "1.0.0", Title: "GPU status",
+		Description: "Per-GPU status from nvidia-smi (fixed query: index, UUID, PCI bus ID, name, utilization, memory, temperature, power). A missing driver is reported as such, never as an empty list. Read-only.",
+		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: time.Minute, ReadOnly: true, Script: gpuStatus, Retry: RetrySafe,
 	},
 }
 
