@@ -29,7 +29,7 @@ func TestParseRealInspect(t *testing.T) {
 	if in.Container != "full" || in.Name != "full" || in.ID != "b46feb47000b" ||
 		in.FullID != "b46feb47000b8c2913bfcb3beab51cebd2a6729630f1f1b857a31f6fdae3e347" || in.Image != "nos-test/sleeper:2" ||
 		!strings.HasPrefix(in.ImageID, "sha256:1c39e3d3") || len(in.Digests) != 1 ||
-		in.ImageDigestIndex != "nos-test/sleeper@sha256:1c39e3d32b94219809c559e37d826b4c30e564d9ec5aae33314a930c1d98c615" ||
+		in.ImageDigestIndex != "nos-test/sleeper@sha256:7f2a9c4e1d8b3f6a0c5e9d2b7a4f8c1e3d6b9a2f5c8e1d4b7a0f3c6e9d2b5a8f" ||
 		in.Created != "2026-10-14T19:06:42Z" || in.ImageCreated != "2026-09-01T12:00:00Z" || in.Platform != "linux/amd64" ||
 		in.Status != "running" || in.Started == "" || in.Finished != "" || in.RestartPolicy != "unless-stopped" ||
 		in.Health != "unhealthy" || in.FailingStreak < 1 {
@@ -58,7 +58,7 @@ func TestParseRealInspect(t *testing.T) {
 	}
 	if in.Created != "2026-10-14T19:06:40Z" || in.ImageCreated != "2026-08-15T08:30:00Z" || in.Platform != "linux/amd64" ||
 		in.FullID != "a58f9bc117914e03de9c322d90d61bedffc5f34cfd32af76a063544df3e2ce0f" ||
-		in.ImageDigestIndex != "nos-test/sleeper@sha256:b95befdf2d99fd398f1c0bd80195f99cad52632b5de8f77a60c56bb539918195" {
+		in.ImageDigestIndex != "nos-test/sleeper@sha256:3e8b1c5f9a2d4e7b0c3f6a9d2b5e8c1f4a7d0b3e6c9f2a5d8b1e4c7f0a3d6b9e" {
 		t.Fatalf("%+v", in)
 	}
 }
