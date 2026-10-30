@@ -34,8 +34,10 @@ const (
 	// observation files.
 	resultsDirName = "results"
 	// spoolDirMode is the permission of the spool root and results
-	// directory: only the owning user may read or write them.
-	spoolDirMode = 0o700
+	// directory: the owning user (the collector) reads and writes, the
+	// group (the server) may list and traverse so it can read the 0640
+	// files.
+	spoolDirMode = 0o710
 	// spoolFileMode is the permission of spool files: the owner reads and
 	// writes, the group (the server) reads.
 	spoolFileMode = 0o640
@@ -81,7 +83,8 @@ type watermark struct {
 
 // NewSpool creates or opens the spool rooted at root. The root must be an
 // absolute path and must not be a symlink; the results directory is created
-// with mode 0700.
+// with mode 0710 (the server group lists and traverses it to read the 0640
+// files).
 func NewSpool(root string) (*Spool, error) {
 	if filepath.IsAbs(root) != true {
 		return nil, fmt.Errorf("pvecollect: spool root %q must be an absolute path", root)
@@ -89,9 +92,26 @@ func NewSpool(root string) (*Spool, error) {
 	if err := checkDirNoSymlink(root); err != nil {
 		return nil, fmt.Errorf("pvecollect: spool root: %w", err)
 	}
+	rootExisted := true
+	if _, err := os.Lstat(root); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("pvecollect: spool root: %w", err)
+		}
+		rootExisted = false
+	}
 	results := filepath.Join(root, resultsDirName)
 	if err := os.MkdirAll(results, spoolDirMode); err != nil {
 		return nil, fmt.Errorf("pvecollect: create results dir: %w", err)
+	}
+	// MkdirAll applies the mode through the process umask; chmod makes the
+	// group access deterministic.
+	if !rootExisted {
+		if err := os.Chmod(root, spoolDirMode); err != nil {
+			return nil, fmt.Errorf("pvecollect: chmod spool root: %w", err)
+		}
+	}
+	if err := os.Chmod(results, spoolDirMode); err != nil {
+		return nil, fmt.Errorf("pvecollect: chmod results dir: %w", err)
 	}
 	if err := checkDirNoSymlink(results); err != nil {
 		return nil, fmt.Errorf("pvecollect: results dir: %w", err)

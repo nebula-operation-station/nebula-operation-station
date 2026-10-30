@@ -64,6 +64,15 @@ func TestSpoolWriteIsAtomicAndReadable(t *testing.T) {
 	if perm := fi.Mode().Perm(); perm != 0o640 {
 		t.Errorf("written file mode = %o, want 0640", perm)
 	}
+	// The results directory must let the server group list and traverse
+	// so it can read the 0640 files.
+	di, err := os.Stat(s.ResultsDir())
+	if err != nil {
+		t.Fatalf("stat results dir: %v", err)
+	}
+	if perm := di.Mode().Perm(); perm != 0o710 {
+		t.Errorf("results dir mode = %o, want 0710", perm)
+	}
 	if filepath.Dir(path) != s.ResultsDir() {
 		t.Errorf("file written to %s, want %s", filepath.Dir(path), s.ResultsDir())
 	}
