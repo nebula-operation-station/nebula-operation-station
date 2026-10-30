@@ -4,6 +4,8 @@ package executor
 
 import (
 	"context"
+	"io"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -168,7 +170,6 @@ func (s *Service) RunRead(ctx context.Context, trigger string, req *pb.RunSchedu
 		s.auditScheduled(label, id, r.GetHostId(), resp)
 		return &pb.RunScheduledResponse{ExecutionId: id, Result: resp}, nil
 	}
-	defer c.Close()
 	resp.Endpoint = c.Endpoint.String()
 	// Attached's own timer starts after NewSession. A hostile peer can
 	// otherwise stall channel creation forever while holding the lifecycle
@@ -179,8 +180,7 @@ func (s *Service) RunRead(ctx context.Context, trigger string, req *pb.RunSchedu
 	}
 	dispatchCtx, cancel := context.WithTimeout(ctx, dispatchTimeout)
 	defer cancel()
-	stopClose := context.AfterFunc(dispatchCtx, func() { _ = c.Close() })
-	defer stopClose()
+	defer closeReadConnectionOnCancel(dispatchCtx, c)()
 	// The handshake can block while a lease is revoked or the executor is
 	// locked. Recheck authority and local pin/credential state immediately
 	// before dispatch, serialized with lifecycle changes, without claiming
@@ -224,6 +224,18 @@ func (s *Service) RunRead(ctx context.Context, trigger string, req *pb.RunSchedu
 	resp.DurationMs = time.Since(start).Milliseconds()
 	s.auditScheduled(label, id, r.GetHostId(), resp)
 	return &pb.RunScheduledResponse{ExecutionId: id, Result: resp}, nil
+}
+
+func closeReadConnectionOnCancel(ctx context.Context, c io.Closer) func() {
+	// Stopping AfterFunc does not wait for an in-flight callback. Share
+	// the guard with cleanup because the transport's Close is not atomic.
+	var once sync.Once
+	closeConnection := func() { once.Do(func() { _ = c.Close() }) }
+	stopClose := context.AfterFunc(ctx, closeConnection)
+	return func() {
+		stopClose()
+		closeConnection()
+	}
 }
 
 // zeroDigest satisfies prepareRun's digest check for scheduled runs.
