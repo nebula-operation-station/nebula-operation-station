@@ -148,3 +148,78 @@ case "$1" in version) echo "27.3.1" ;; stats) printf '%s\n' '`+line+`' ;; esac`)
 		}
 	})
 }
+
+func TestDockerStatsScriptBoundsCollectionAndPreservesFailures(t *testing.T) {
+	const maxBytes = 1048576
+	mktemp, err := exec.LookPath("mktemp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, output, want string
+		failed             bool
+	}{
+		{"empty", "exit 0", "", false},
+		{"byte limit", `head -c 1048576 /dev/zero | tr '\000' x`, strings.Repeat("x", maxBytes), false},
+		{"oversized line", `head -c 2097152 /dev/zero | tr '\000' x`, strings.Repeat("x", maxBytes), false},
+		{"oversized binary", `head -c 2097152 /dev/zero`, strings.Repeat("\x00", maxBytes), false},
+		{"row limit", `i=0; while [ "$i" -lt 3000 ]; do printf 'row\n'; i=$((i + 1)); done`, strings.Repeat("row\n", 2000), false},
+		{"command failure", "exit 9", "", true},
+		{"failure after output", "printf 'partial\\n'; exit 9", "", true},
+		{"failure after byte limit", `head -c 2097152 /dev/zero | tr '\000' x; exit 9`, "", true},
+		{"failure after row limit", `i=0; while [ "$i" -lt 3000 ]; do printf 'row\n'; i=$((i + 1)); done; exit 9`, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := Lookup("docker.stats")
+			f := newFakeHost(t, "1")
+			f.write(t, "mktemp", `exec "`+mktemp+`" "`+f.dir+`/stats-status.XXXXXX"`)
+			f.write(t, "docker", "case \"$1\" in\nversion) echo 27 ;;\nstats)\n"+tc.output+"\n;;\nesac")
+			code, doc := f.run(t, a.Script)
+			if files, err := filepath.Glob(filepath.Join(f.dir, "stats-status.*")); err != nil || len(files) != 0 {
+				t.Fatalf("status files not cleaned up: %v, %v", files, err)
+			}
+			if tc.failed {
+				if code != 10 || doc["phase"] != "precheck" || doc["reason"] != "docker stats failed" || doc["stats"] != nil {
+					t.Fatalf("command failure lost: code=%d doc=%v", code, doc)
+				}
+				return
+			}
+			if code != 0 || doc["phase"] != "done" || doc["present"] != true {
+				t.Fatalf("code=%d phase=%v reason=%v", code, doc["phase"], doc["reason"])
+			}
+			if got := b64(t, doc, "stats"); got != tc.want {
+				t.Fatalf("stats differ: got %d bytes, want %d", len(got), len(tc.want))
+			}
+		})
+	}
+}
+
+func TestDockerStatsScriptBoundsMemoryDuringCollection(t *testing.T) {
+	a, _ := Lookup("docker.stats")
+	f := newFakeHost(t, "1")
+	f.write(t, "docker", `case "$1" in
+version) echo 27 ;;
+stats) head -c 67108864 /dev/zero | tr '\000' x ;;
+esac`)
+	// The producer emits twice the shell's address-space limit. Truncating
+	// only after command substitution would exhaust the collecting shell.
+	script := append([]byte("ulimit -v 32768 || exit 1\n"), a.Script...)
+	code, doc := f.run(t, script)
+	if code != 0 || doc["phase"] != "done" || doc["present"] != true {
+		t.Fatalf("code=%d phase=%v reason=%v", code, doc["phase"], doc["reason"])
+	}
+	if got := b64(t, doc, "stats"); got != strings.Repeat("x", 1048576) {
+		t.Fatalf("stats differ: got %d bytes, want 1048576", len(got))
+	}
+}
+
+func TestDockerStatsScriptRejectsStatusFileCreationFailure(t *testing.T) {
+	a, _ := Lookup("docker.stats")
+	f := newFakeHost(t, "1")
+	f.write(t, "docker", `case "$1" in version) echo 27 ;; stats) exit 0 ;; esac`)
+	f.write(t, "mktemp", "exit 1")
+	code, doc := f.run(t, a.Script)
+	if code != 10 || doc["phase"] != "precheck" || doc["reason"] != "cannot collect docker stats" || doc["stats"] != nil {
+		t.Fatalf("status file creation failure lost: code=%d doc=%v", code, doc)
+	}
+}

@@ -5,6 +5,7 @@ package dockerhost
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -111,7 +112,7 @@ func percent(s string, max float64) (float64, bool) {
 		return 0, false
 	}
 	v, err := strconv.ParseFloat(strings.TrimSuffix(s, "%"), 64)
-	if err != nil || v < 0 || v > max {
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > max {
 		return 0, false
 	}
 	return v, true

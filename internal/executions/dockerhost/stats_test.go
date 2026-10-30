@@ -3,6 +3,7 @@
 package dockerhost
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -245,6 +246,26 @@ func TestParseStatsPercentBounds(t *testing.T) {
 			got, ok := percent(tc.in, tc.max)
 			if ok != tc.ok || (ok && got != tc.v) {
 				t.Fatalf("percent(%q, %v) = %v, %v; want %v, %v", tc.in, tc.max, got, ok, tc.v, tc.ok)
+			}
+		})
+	}
+}
+
+func TestParseStatsNonFinitePercentagesRemainNil(t *testing.T) {
+	for _, value := range []string{"NaN%", "nan%", "+Inf%", "-Inf%", "Infinity%", "+Infinity%", "-Infinity%"} {
+		t.Run(value, func(t *testing.T) {
+			full := strings.Repeat("07", 32)
+			line := `{"id":"` + full + `","name":"web","cpu":"` + value + `","mem":"1MB / 2GB","memp":"` + value + `"}`
+			s, err := ParseStats(statsResult("27.0", line))
+			if err != nil || len(s.Containers) != 1 {
+				t.Fatalf("%+v %v", s, err)
+			}
+			c := s.Containers[0]
+			if c.CPUPercent != nil || c.MemPercent != nil {
+				t.Errorf("non-finite metrics kept: %+v", c)
+			}
+			if _, err := json.Marshal(s); err != nil {
+				t.Fatalf("stats cannot be serialized: %v", err)
 			}
 		})
 	}

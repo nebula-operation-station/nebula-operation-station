@@ -24,7 +24,14 @@ pre "the Docker daemon is not reachable, or the SSH user may not use it (docker 
 # even when it keeps its name). The template reads only the statistics
 # fields; never the environment, labels or command line.
 fmt='{"id":{{json .ID}},"name":{{json .Name}},"cpu":{{json .CPUPerc}},"mem":{{json .MemUsage}},"memp":{{json .MemPerc}}}'
-st=$($d stats --no-stream --no-trunc --format "$fmt" 2>/dev/null) || pre "docker stats failed"
-st=$(printf '%s\n' "$st" | head -n 2000 | b64)
+# Bound bytes before lines: a single line can itself be arbitrarily large.
+# Keep the command status outside the truncated stream and drain the rest,
+# so a real Docker failure is detected without truncation causing SIGPIPE.
+max_stats_bytes=1048576
+status_file=$(mktemp) || pre "cannot collect docker stats"
+trap 'rm -f -- "$status_file"' 0
+st=$({ $d stats --no-stream --no-trunc --format "$fmt" 2>/dev/null; printf '%s\n' "$?" > "$status_file"; } |
+	{ head -c "$max_stats_bytes" | head -n 2000 | b64; cat >/dev/null; })
+[ "$(cat "$status_file")" = 0 ] || pre "docker stats failed"
 ver=$(printf '%s' "$ver" | head -c 100 | b64)
 printf '{"format":"docker-stats-v1","phase":"done","present":true,"version":"%s","stats":"%s"}\n' "$ver" "$st"
