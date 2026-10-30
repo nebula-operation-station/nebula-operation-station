@@ -11,35 +11,37 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Inspect is a parsed docker.inspect result. Every field comes from the
 // host; fields that do not fit are left empty.
 type Inspect struct {
-	Phase            string // done or precheck
-	Reason           string
-	Container        string
-	ID               string // first 12 hex digits
-	FullID           string // full 64 hex digits
-	Name             string
-	Image            string
-	ImageID          string // image configuration ID (sha256:...), the platform digest
-	Created          string // container creation time, RFC 3339 UTC, "" if not parseable
-	ImageCreated     string // image creation time, RFC 3339 UTC, "" if not parseable
-	Platform         string // image platform "os/arch" or "os/arch/variant"
-	Digests          []string
-	ImageDigestIndex string // first registry manifest/index digest, "" if none
-	Status           string
-	ExitCode         int
-	Started          string // RFC 3339 in UTC, "" if never
-	Finished         string
-	Restarts         int
-	RestartPolicy    string
-	Health           string
-	FailingStreak    int
-	Mounts           []Mount
-	Ports            []PortMap
-	Networks         []Network
+	Phase               string // done or precheck
+	Reason              string
+	Container           string
+	ID                  string // first 12 hex digits
+	FullID              string // full 64 hex digits
+	Name                string
+	Image               string
+	ImageID             string   // image configuration digest (sha256:...)
+	Created             string   // container creation time, RFC 3339 UTC, "" if not parseable
+	ImageCreated        string   // image creation time, RFC 3339 UTC, "" if not parseable
+	Platform            string   // image platform "os/arch" or "os/arch/variant"
+	Digests             []string // repository digests, whose kinds are unknown
+	ImageDigestPlatform string   // platform-manifest digest, "" if kind is unknown
+	ImageDigestIndex    string   // index digest, "" if kind is unknown
+	Status              string
+	ExitCode            int
+	Started             string // RFC 3339 in UTC, "" if never
+	Finished            string
+	Restarts            int
+	RestartPolicy       string
+	Health              string
+	FailingStreak       int
+	Mounts              []Mount
+	Ports               []PortMap
+	Networks            []Network
 }
 
 // Mount is one mount of a container.
@@ -58,24 +60,26 @@ type Network struct{ Name, IP string }
 var ErrInspectFormat = errors.New("dockerhost: not a docker.inspect result")
 
 const (
-	maxMounts   = 100
-	maxPorts    = 200
-	maxNetworks = 50
-	maxDigests  = 20
-	maxImage    = 64 << 10 // one image's metadata, after base64 decode
+	maxMounts            = 100
+	maxPorts             = 200
+	maxNetworks          = 50
+	maxDigests           = 20
+	maxImage             = 64 << 10 // one image's metadata, after base64 decode
+	maxPlatformComponent = 32
 )
 
 var (
-	imageIDRe     = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	digestRe      = regexp.MustCompile(`^[a-z0-9][a-z0-9._/:-]{0,254}@sha256:[0-9a-f]{64}$`)
-	portRe        = regexp.MustCompile(`^[0-9]{1,5}/(tcp|udp|sctp)$`)
-	hostPortRe    = regexp.MustCompile(`^[0-9]{1,5}$`)
-	hostIPRe      = regexp.MustCompile(`^[0-9A-Fa-f.:]{0,45}$`)
-	ipRe          = regexp.MustCompile(`^[0-9A-Fa-f.:]{0,45}$`)
-	netNameRe     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
-	mountTypes    = map[string]bool{"bind": true, "volume": true, "tmpfs": true, "npipe": true, "cluster": true, "image": true}
-	restartPolicy = map[string]bool{"": true, "no": true, "always": true, "unless-stopped": true, "on-failure": true}
-	healthStates  = map[string]bool{"starting": true, "healthy": true, "unhealthy": true}
+	imageIDRe           = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	platformComponentRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*$`)
+	digestRe            = regexp.MustCompile(`^[a-z0-9][a-z0-9._/:-]{0,254}@sha256:[0-9a-f]{64}$`)
+	portRe              = regexp.MustCompile(`^[0-9]{1,5}/(tcp|udp|sctp)$`)
+	hostPortRe          = regexp.MustCompile(`^[0-9]{1,5}$`)
+	hostIPRe            = regexp.MustCompile(`^[0-9A-Fa-f.:]{0,45}$`)
+	ipRe                = regexp.MustCompile(`^[0-9A-Fa-f.:]{0,45}$`)
+	netNameRe           = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+	mountTypes          = map[string]bool{"bind": true, "volume": true, "tmpfs": true, "npipe": true, "cluster": true, "image": true}
+	restartPolicy       = map[string]bool{"": true, "no": true, "always": true, "unless-stopped": true, "on-failure": true}
+	healthStates        = map[string]bool{"starting": true, "healthy": true, "unhealthy": true}
 )
 
 func text(s string, limit int) string {
@@ -111,10 +115,13 @@ func createdFromList(s string) string {
 	return ""
 }
 
+func platformComponent(s string) bool {
+	return len(s) <= maxPlatformComponent && platformComponentRe.MatchString(s)
+}
+
 // platformFrom builds "os/arch" or "os/arch/variant" from image fields.
 func platformFrom(os, arch, variant string) string {
-	os, arch, variant = text(os, 32), text(arch, 32), text(variant, 32)
-	if os == "" && arch == "" {
+	if !platformComponent(os) || !platformComponent(arch) || (variant != "" && !platformComponent(variant)) {
 		return ""
 	}
 	p := os + "/" + arch
@@ -186,6 +193,8 @@ func ParseInspect(result []byte) (Inspect, error) {
 	}
 	if idRe.MatchString(c.ID) {
 		in.ID = c.ID[:12]
+	}
+	if fullIDRe.MatchString(c.ID) {
 		in.FullID = c.ID
 	}
 	in.Created = when(c.Created)
@@ -266,7 +275,7 @@ func ParseInspect(result []byte) (Inspect, error) {
 	}
 	sort.Slice(in.Networks, func(i, j int) bool { return in.Networks[i].Name < in.Networks[j].Name })
 	if doc.Image != "" {
-		if b, err := base64.StdEncoding.DecodeString(doc.Image); err == nil && len(b) <= maxImage {
+		if b, err := base64.StdEncoding.DecodeString(doc.Image); err == nil && len(b) <= maxImage && utf8.Valid(b) {
 			var im struct {
 				ID           string   `json:"id"`
 				Created      string   `json:"created"`
@@ -274,6 +283,10 @@ func ParseInspect(result []byte) (Inspect, error) {
 				Architecture string   `json:"architecture"`
 				Variant      string   `json:"variant"`
 				RepoDigests  []string `json:"repo_digests"`
+				Descriptor   *struct {
+					Digest    string `json:"digest"`
+					MediaType string `json:"mediaType"`
+				} `json:"descriptor"`
 			}
 			if json.Unmarshal(b, &im) == nil {
 				if imageIDRe.MatchString(im.ID) {
@@ -284,6 +297,14 @@ func ParseInspect(result []byte) (Inspect, error) {
 				for _, x := range im.RepoDigests {
 					if len(in.Digests) < maxDigests && digestRe.MatchString(x) {
 						in.Digests = append(in.Digests, x)
+					}
+				}
+				if d := im.Descriptor; d != nil && imageIDRe.MatchString(d.Digest) {
+					switch d.MediaType {
+					case "application/vnd.oci.image.manifest.v1+json", "application/vnd.docker.distribution.manifest.v2+json":
+						in.ImageDigestPlatform = d.Digest
+					case "application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json":
+						in.ImageDigestIndex = d.Digest
 					}
 				}
 			}
@@ -297,9 +318,6 @@ func ParseInspect(result []byte) (Inspect, error) {
 				}
 			}
 		}
-	}
-	if len(in.Digests) > 0 {
-		in.ImageDigestIndex = in.Digests[0]
 	}
 	return in, nil
 }

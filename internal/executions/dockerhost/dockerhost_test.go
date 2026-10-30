@@ -289,3 +289,47 @@ func TestParseListCreatedMalformed(t *testing.T) {
 		t.Fatalf("%+v %v", l, err)
 	}
 }
+
+func TestContainerFullIDRequires64HexDigits(t *testing.T) {
+	for _, tc := range []struct {
+		name, id string
+		accepted bool
+		full     bool
+	}{
+		{"short", strings.Repeat("a", 12), true, false},
+		{"partial", strings.Repeat("a", 13), true, false},
+		{"almost full", strings.Repeat("a", 63), true, false},
+		{"full", strings.Repeat("abcdef01", 8), true, true},
+		{"too short", strings.Repeat("a", 11), false, false},
+		{"too long", strings.Repeat("a", 65), false, false},
+		{"non hex", strings.Repeat("g", 64), false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var wantID, wantFull string
+			if tc.accepted {
+				wantID = tc.id[:12]
+			}
+			if tc.full {
+				wantFull = tc.id
+			}
+			l, err := ParseList(result("29", tc.id+"\tok\timg\trunning\tUp\t\t\t\t"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.accepted {
+				if len(l.Containers) != 1 || l.Containers[0].ID != wantID || l.Containers[0].FullID != wantFull {
+					t.Errorf("list identities: %+v", l.Containers)
+				}
+			} else if len(l.Containers) != 0 {
+				t.Errorf("invalid list identity accepted: %+v", l.Containers)
+			}
+			in, err := ParseInspect([]byte(`{"format":"docker-inspect-v1","phase":"done","inspect":"` + enc(`{"id":"`+tc.id+`"}`) + `"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if in.ID != wantID || in.FullID != wantFull {
+				t.Errorf("inspect identities: ID=%q FullID=%q, want %q %q", in.ID, in.FullID, wantID, wantFull)
+			}
+		})
+	}
+}

@@ -83,6 +83,7 @@ func (l List) Summary() Summary {
 
 var (
 	idRe      = regexp.MustCompile(`^[0-9a-f]{12,64}$`)
+	fullIDRe  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	nameRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.,/-]{0,254}$`)
 	projectRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,99}$`)
 	states    = map[string]bool{"created": true, "running": true, "paused": true, "restarting": true, "removing": true, "exited": true, "dead": true}
@@ -176,7 +177,10 @@ func ParseList(result []byte) (List, error) {
 		if (len(f) != 9 && len(f) != 10) || !idRe.MatchString(f[0]) || !nameRe.MatchString(f[1]) || !states[f[3]] {
 			continue
 		}
-		c := Container{ID: f[0][:12], FullID: f[0], Name: f[1], State: f[3]}
+		c := Container{ID: f[0][:12], Name: f[1], State: f[3]}
+		if fullIDRe.MatchString(f[0]) {
+			c.FullID = f[0]
+		}
 		if !printable(f[2], 300) || !printable(f[4], 200) || !printable(f[5], 1000) {
 			continue
 		}
