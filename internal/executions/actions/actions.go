@@ -170,6 +170,9 @@ var serviceStatus []byte
 //go:embed scripts/docker_list.sh
 var dockerList []byte
 
+//go:embed scripts/docker_stats.sh
+var dockerStats []byte
+
 //go:embed scripts/docker_logs.sh
 var dockerLogs []byte
 
@@ -282,6 +285,11 @@ var Builtin = []Action{
 		ID: "docker.list", Version: "1.0.0", Title: "List containers",
 		Description: "Lists all Docker containers with image, state, health, published ports and Compose project (docker group or sudo). A host without Docker reports that. Read-only.",
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: time.Minute, ReadOnly: true, Script: dockerList, Retry: RetrySafe,
+	},
+	{
+		ID: "docker.stats", Version: "1.0.0", Title: "Container runtime stats",
+		Description: "One bounded, non-streaming CPU and memory snapshot of the running containers, keyed by full container ID (docker group or sudo). Environment, labels and command line are not read. Read-only.",
+		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: time.Minute, ReadOnly: true, Script: dockerStats, Retry: RetrySafe,
 	},
 	{
 		ID: "docker.logs", Version: "1.0.0", Title: "Container logs",
