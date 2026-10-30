@@ -161,6 +161,12 @@ func (e *ValidationError) Error() string {
 // Normalize validates r against now and returns a copy with set-like lists
 // sorted. It never mutates r.
 func Normalize(r Request, now time.Time) (Request, error) {
+	return normalizeRequest(r, now, false)
+}
+
+// normalizeRequest permits an empty SSH target list only when the batch caller
+// separately validates an exact typed provider target.
+func normalizeRequest(r Request, now time.Time, providerTarget bool) (Request, error) {
 	var p []string
 	add := func(format string, args ...any) { p = append(p, fmt.Sprintf(format, args...)) }
 
@@ -214,7 +220,7 @@ func Normalize(r Request, now time.Time) (Request, error) {
 	}
 
 	switch {
-	case len(r.ResolvedTargets) == 0:
+	case len(r.ResolvedTargets) == 0 && !providerTarget:
 		add("at least one resolved target is required")
 	case len(r.ResolvedTargets) > MaxTargets:
 		add("too many targets (%d > %d)", len(r.ResolvedTargets), MaxTargets)
