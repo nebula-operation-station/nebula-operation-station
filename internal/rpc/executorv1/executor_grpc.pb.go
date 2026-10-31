@@ -26,6 +26,7 @@ const (
 	ExecutorService_SubmitAssertion_FullMethodName           = "/nebula.executor.v1.ExecutorService/SubmitAssertion"
 	ExecutorService_BeginPrivilegedSession_FullMethodName    = "/nebula.executor.v1.ExecutorService/BeginPrivilegedSession"
 	ExecutorService_CompletePrivilegedSession_FullMethodName = "/nebula.executor.v1.ExecutorService/CompletePrivilegedSession"
+	ExecutorService_GetSessionState_FullMethodName           = "/nebula.executor.v1.ExecutorService/GetSessionState"
 	ExecutorService_AuthorizeRun_FullMethodName              = "/nebula.executor.v1.ExecutorService/AuthorizeRun"
 	ExecutorService_RunAttached_FullMethodName               = "/nebula.executor.v1.ExecutorService/RunAttached"
 	ExecutorService_StartDurable_FullMethodName              = "/nebula.executor.v1.ExecutorService/StartDurable"
@@ -131,9 +132,16 @@ type ExecutorServiceClient interface {
 	// ProposeExecution. The executor verifies it on its own.
 	SubmitAssertion(ctx context.Context, in *SubmitAssertionRequest, opts ...grpc.CallOption) (*SubmitAssertionResponse, error)
 	// Role: server. Starts and completes the privileged web session, which
-	// requires a user-verified assertion.
+	// requires a user-verified assertion. The challenge is bound to the
+	// session-extension operation and the executor's configured duration;
+	// the same flow opens an expired session (spec 05, ADR 0007 E19d).
 	BeginPrivilegedSession(ctx context.Context, in *BeginPrivilegedSessionRequest, opts ...grpc.CallOption) (*BeginPrivilegedSessionResponse, error)
 	CompletePrivilegedSession(ctx context.Context, in *CompletePrivilegedSessionRequest, opts ...grpc.CallOption) (*CompletePrivilegedSessionResponse, error)
+	// Role: server, admin. Reports the executor's authoritative privileged
+	// session state: active, expiry, configured duration and remaining time
+	// (spec 05, ADR 0007 E19d). The server displays these values; it cannot
+	// choose or extend the duration.
+	GetSessionState(ctx context.Context, in *GetSessionStateRequest, opts ...grpc.CallOption) (*GetSessionStateResponse, error)
 	// Role: server. Asks whether one host run is covered by an issued permit
 	// and, if so, reserves the host (one use per host). The executor hashes
 	// the artifact and parameters itself. Refused (stage_plan_invalid) for a
@@ -450,6 +458,16 @@ func (c *executorServiceClient) CompletePrivilegedSession(ctx context.Context, i
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CompletePrivilegedSessionResponse)
 	err := c.cc.Invoke(ctx, ExecutorService_CompletePrivilegedSession_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) GetSessionState(ctx context.Context, in *GetSessionStateRequest, opts ...grpc.CallOption) (*GetSessionStateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetSessionStateResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_GetSessionState_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1279,9 +1297,16 @@ type ExecutorServiceServer interface {
 	// ProposeExecution. The executor verifies it on its own.
 	SubmitAssertion(context.Context, *SubmitAssertionRequest) (*SubmitAssertionResponse, error)
 	// Role: server. Starts and completes the privileged web session, which
-	// requires a user-verified assertion.
+	// requires a user-verified assertion. The challenge is bound to the
+	// session-extension operation and the executor's configured duration;
+	// the same flow opens an expired session (spec 05, ADR 0007 E19d).
 	BeginPrivilegedSession(context.Context, *BeginPrivilegedSessionRequest) (*BeginPrivilegedSessionResponse, error)
 	CompletePrivilegedSession(context.Context, *CompletePrivilegedSessionRequest) (*CompletePrivilegedSessionResponse, error)
+	// Role: server, admin. Reports the executor's authoritative privileged
+	// session state: active, expiry, configured duration and remaining time
+	// (spec 05, ADR 0007 E19d). The server displays these values; it cannot
+	// choose or extend the duration.
+	GetSessionState(context.Context, *GetSessionStateRequest) (*GetSessionStateResponse, error)
 	// Role: server. Asks whether one host run is covered by an issued permit
 	// and, if so, reserves the host (one use per host). The executor hashes
 	// the artifact and parameters itself. Refused (stage_plan_invalid) for a
@@ -1568,6 +1593,9 @@ func (UnimplementedExecutorServiceServer) BeginPrivilegedSession(context.Context
 }
 func (UnimplementedExecutorServiceServer) CompletePrivilegedSession(context.Context, *CompletePrivilegedSessionRequest) (*CompletePrivilegedSessionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CompletePrivilegedSession not implemented")
+}
+func (UnimplementedExecutorServiceServer) GetSessionState(context.Context, *GetSessionStateRequest) (*GetSessionStateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetSessionState not implemented")
 }
 func (UnimplementedExecutorServiceServer) AuthorizeRun(context.Context, *AuthorizeRunRequest) (*AuthorizeRunResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AuthorizeRun not implemented")
@@ -1916,6 +1944,24 @@ func _ExecutorService_CompletePrivilegedSession_Handler(srv interface{}, ctx con
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ExecutorServiceServer).CompletePrivilegedSession(ctx, req.(*CompletePrivilegedSessionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_GetSessionState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSessionStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).GetSessionState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_GetSessionState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).GetSessionState(ctx, req.(*GetSessionStateRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -3386,6 +3432,10 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CompletePrivilegedSession",
 			Handler:    _ExecutorService_CompletePrivilegedSession_Handler,
+		},
+		{
+			MethodName: "GetSessionState",
+			Handler:    _ExecutorService_GetSessionState_Handler,
 		},
 		{
 			MethodName: "AuthorizeRun",
