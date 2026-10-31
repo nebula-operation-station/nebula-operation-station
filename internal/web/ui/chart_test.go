@@ -357,9 +357,9 @@ func TestChartPVEStorageBoxes(t *testing.T) {
 		"local fill":             "50 % von 512 GiB",
 		"lvm fill":               "80 % von 480 GiB",
 		"backup fill":            "95 % von 500 GiB",
-		"local bar":              `style="width:50%"`,
-		"lvm bar":                `style="width:80%"`,
-		"backup bar":             `style="width:95%"`,
+		"local bar":              `<meter class="chart__storage-meter" min="0" max="100" low="70" high="90" optimum="0" value="50">50%</meter>`,
+		"lvm bar":                `<meter class="chart__storage-meter" min="0" max="100" low="70" high="90" optimum="0" value="80">80%</meter>`,
+		"backup bar":             `<meter class="chart__storage-meter" min="0" max="100" low="70" high="90" optimum="0" value="95">95%</meter>`,
 		"warning storage class":  "chart__storage--warning",
 		"critical storage class": "chart__storage--critical",
 		"node worst state":       "chart__node--critical",
@@ -407,6 +407,32 @@ func TestChartPVEStorageUnknown(t *testing.T) {
 	}
 	if strings.Contains(body, "width:0%") {
 		t.Error("unknown storage must not render a 0 % bar")
+	}
+}
+
+// TestChartPVEStorageBarsCSPCompatible guards finding 6: a strict CSP blocks
+// inline width styles, which left the storage fills at zero width. The fill
+// must be carried by a CSP-compatible construct (a native meter element), not
+// an inline style attribute.
+func TestChartPVEStorageBarsCSPCompatible(t *testing.T) {
+	tree := pveChartTree(t,
+		pveinventory.StorageInput{
+			Node: "pve1", ID: "local", Type: "dir", Active: true,
+			UsedBytes: 384 * gib, TotalBytes: 480 * gib, CapacityKnown: true,
+		},
+	)
+	body := getBody(t, pveChartHandler(t, tree).Handler(), "/inventory/chart")
+	// No inline width style anywhere in the storage markup: a strict CSP
+	// (style-src without 'unsafe-inline') drops it and the fill stays at 0.
+	if strings.Contains(body, `style="width:`) {
+		t.Error("storage fill uses an inline width style; strict CSP blocks it")
+	}
+	// The fill level is carried by the meter element's value attribute.
+	if !strings.Contains(body, `<meter class="chart__storage-meter"`) {
+		t.Error("storage fill must use a CSP-compatible meter element")
+	}
+	if !strings.Contains(body, `value="80">80%</meter>`) {
+		t.Error("meter must carry the used percentage in its value attribute")
 	}
 }
 

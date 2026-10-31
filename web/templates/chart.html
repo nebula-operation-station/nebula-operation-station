@@ -44,7 +44,7 @@
               </span>
               {{if .HasPercent}}
               <span class="chart__storage-fill">{{.UsedPercent}} % von {{.TotalText}}</span>
-              <span class="chart__bar__track chart__storage-track"><span class="chart__bar__fill" style="width:{{.UsedPercent}}%"></span></span>
+              <meter class="chart__storage-meter" min="0" max="100" low="70" high="90" optimum="0" value="{{.UsedPercent}}">{{.UsedPercent}}%</meter>
               {{else}}
               <span class="chart__storage-fill chart__storage-fill--unknown">unknown</span>
               {{end}}
