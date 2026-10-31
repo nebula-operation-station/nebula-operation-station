@@ -12,7 +12,7 @@ The pre-Milestone-1 architecture decisions are now closed. Changes to these deci
 - [x] **Default approval mode:** Standard; hardened CLI approval remains optional.
 - [x] **Vault unlock:** CLI is default/recommended; Web unlock is opt-in and labelled weaker.
 - [x] **Supported targets for 0.1:** Debian 12, Ubuntu 22.04 LTS, Ubuntu 24.04 LTS, Proxmox VE 8 and 9 as Debian-based hosts.
-- [x] **First-party signing key:** offline Ed25519 root key, never stored in CI, with signed rotation metadata and encrypted offline recovery backup.
+- [x] **First-party signing key:** offline YubiKey-held Ed25519 root, never stored in CI; only public keys ship, rotation is signed, and recovery uses a separately enrolled second YubiKey root and encrypted offline key handle backups. `root-1` is active; `root-2` is pending. See [release signing](10-modules.md#release-signing) (owner decision 2026-10-30 within ADR 0001).
 
 ### Implementation details that remain intentionally non-architectural
 
@@ -23,7 +23,7 @@ The following can be chosen during implementation without reopening the architec
 - protobuf package names and field numbering
 - concrete timeout and payload-limit defaults, provided they stay within the security model
 - exact release automation tooling around the offline signing step
-- exact hardware/media used to store the offline signing key and its recovery copy
+- offline storage arrangements for hardware roots and encrypted key handle backups, within the [owner-approved YubiKey signing contract](10-modules.md#release-signing)
 
 <a id="v23-17-01"></a>
 <!-- Spec v2.3 (ADR 0006, ADR 0007): v23-17-01 -->
@@ -58,7 +58,7 @@ The following can be chosen during implementation without reopening the architec
 
 <a id="v23-17-07"></a>
 <!-- Spec v2.3 (ADR 0006, ADR 0007): v23-17-07 -->
-**Q1 — Local role and trust lifecycle.** How is the collector UID mapping provisioned, independently expired and removed, and how are those changes audited? The role has no execution authority outside a standing grant. What exact bounded release-bundle/provenance packaging and previous-byte retention implement `trust-builtins`? The ADR sets no trust-record TTL; clarify any independent expiry without inventing one here.
+**Q1 — Local role and trust lifecycle.** How is the collector UID mapping provisioned, independently expired and removed, and how are those changes audited? The role has no execution authority outside a standing grant. The release-bundle/provenance packaging, size/count/field limits, signed root rotation and previous-byte retention part is resolved by the [owner-approved release-signing contract](10-modules.md#release-signing), 2026-10-30: two previous built-in versions plus every version superseded within 90 days, under a 2 GiB executor storage ceiling with fail-closed admission. The ADR sets no trust-record TTL; retention does not introduce one. Collector-role lifecycle remains open.
 
 <a id="v23-17-08"></a>
 <!-- Spec v2.3 (ADR 0006, ADR 0007): v23-17-08 -->
@@ -86,7 +86,7 @@ The following can be chosen during implementation without reopening the architec
 
 <a id="v23-17-14"></a>
 <!-- Spec v2.3 (ADR 0006, ADR 0007): v23-17-14 -->
-**Q8 — Evidence and metric semantics.** Define exact RRD/status units/normalization, filesystem exclusions, time-weighted bucket averages and minimum coverage for a full-day claim. Define NVIDIA PCI/UUID/passthrough/multi-function/multi-GPU/MIG correlation and unavailable fields. Which deployed PBS/Veeam metadata safely identifies exact guest generations, catalog presence and verification coverage? Which Trivy version/profile, local-only enforcement, runtime/output/scan cadence, database freshness, CVE deduplication/coverage and severity-to-border policy apply? Default successful-backup age is 24 h, not proof of restorability.
+**Q8 — Evidence and metric semantics.** Define exact RRD/status units/normalization, filesystem exclusions, time-weighted bucket averages and minimum coverage for a full-day claim. Define NVIDIA PCI/UUID/passthrough/multi-function/multi-GPU/MIG correlation and unavailable fields. Which deployed PBS metadata safely identifies exact guest generations, catalog presence and verification coverage? Which Trivy version/profile, local-only enforcement, runtime/output/scan cadence, database freshness, CVE deduplication/coverage and severity-to-border policy apply? Default successful-backup age is 24 h, not proof of restorability.
 
 <a id="v23-17-15"></a>
 <!-- Spec v2.3 (ADR 0006, ADR 0007): v23-17-15 -->

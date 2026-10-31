@@ -118,3 +118,37 @@ func TestReservedMustBeEmpty(t *testing.T) {
 		t.Fatal("non-empty reserved field accepted")
 	}
 }
+
+func TestReleaseSigningDocumentsOpenSSHUserPresenceLimitation(t *testing.T) {
+	data, err := os.ReadFile("../../docs/admin/release-signing.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, procedure, ok := strings.Cut(string(data), "## Sign offline and verify\n")
+	if !ok {
+		t.Fatal("missing offline verification procedure")
+	}
+	procedure, _, _ = strings.Cut(procedure, "\n## Enroll, rotate and recover")
+	procedure = strings.Join(strings.Fields(procedure), " ")
+	for _, required := range []string{
+		"`ssh-keygen -Y verify` does not enforce user presence",
+		"`flags=0`",
+		"allowed-signers file has no `no-touch-required` option",
+		"Before publication of any release or rotation",
+		"cryptographically authenticate the FIDO flags/counter",
+		"require `(flags & 0x01) != 0`",
+		"If that check is unavailable, do not publish",
+	} {
+		if !strings.Contains(procedure, required) {
+			t.Errorf("offline verification procedure must document %q", required)
+		}
+	}
+	for _, misleading := range []string{
+		"Use OpenSSH with security-key support and its default touch requirement",
+		"never use a `no-touch-required` allowed-signers option",
+	} {
+		if strings.Contains(procedure, misleading) {
+			t.Errorf("offline verification procedure retains misleading guidance %q", misleading)
+		}
+	}
+}
