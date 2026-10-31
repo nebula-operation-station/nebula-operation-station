@@ -27,6 +27,7 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_SubmitAssertion_FullMethodName:           {server},
 		pb.ExecutorService_BeginPrivilegedSession_FullMethodName:    {server},
 		pb.ExecutorService_CompletePrivilegedSession_FullMethodName: {server},
+		pb.ExecutorService_GetSessionState_FullMethodName:           {server, admin},
 		pb.ExecutorService_AuthorizeRun_FullMethodName:              {server},
 		pb.ExecutorService_RunAttached_FullMethodName:               {server},
 		pb.ExecutorService_StartDurable_FullMethodName:              {server},

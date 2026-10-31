@@ -22,6 +22,11 @@ const (
 	MaxSessionLength = 240 * time.Minute
 
 	sessionExtensionDomain = "nebula-session-extension-v1\x00"
+
+	// SessionExtensionOperation names the operation bound into the
+	// session-extension challenge. The same operation opens an expired
+	// session as well (spec 05).
+	SessionExtensionOperation = "session_extension"
 )
 
 func normalizeSessionLength(length time.Duration) (time.Duration, error) {
