@@ -561,22 +561,24 @@ func buildRemoteBranch(r RemoteInput, now time.Time, staleAfter time.Duration, h
 	}
 
 	// Storage boxes: one per (node, id), sorted by id, after the
-	// guests. A storage reported by several nodes appears once per
-	// cluster, under the first node (input order) that reports it,
-	// marked shared; it is never double-counted.
-	firstNodeFor := make(map[string]string, len(r.Storages))
-	nodeCount := make(map[string]int, len(r.Storages))
+	// guests. Only explicitly shared storages are deduplicated: a shared
+	// storage reported by several nodes appears once per cluster, under
+	// the first node (input order) that reports it. Node-local storages
+	// are kept per node, even when two nodes happen to use the same
+	// storage id, so an independent local store is never hidden.
+	firstSharedNode := make(map[string]string, len(r.Storages))
 	for _, s := range r.Storages {
-		if _, ok := firstNodeFor[s.ID]; !ok {
-			firstNodeFor[s.ID] = s.Node
+		if s.Shared {
+			if _, ok := firstSharedNode[s.ID]; !ok {
+				firstSharedNode[s.ID] = s.Node
+			}
 		}
-		nodeCount[s.ID]++
 	}
 	storagesByNode := make(map[string][]StorageInput)
 	storageNodeOrder := make([]string, 0, len(r.Storages))
 	for _, s := range r.Storages {
-		if firstNodeFor[s.ID] != s.Node {
-			continue // placed under the first node; not double-counted
+		if s.Shared && firstSharedNode[s.ID] != s.Node {
+			continue // shared storage placed under the first node; not double-counted
 		}
 		if _, ok := storagesByNode[s.Node]; !ok {
 			storageNodeOrder = append(storageNodeOrder, s.Node)
@@ -616,7 +618,7 @@ func buildRemoteBranch(r RemoteInput, now time.Time, staleAfter time.Duration, h
 		if sts := storagesByNode[name]; len(sts) > 0 {
 			sort.Slice(sts, func(i, j int) bool { return sts[i].ID < sts[j].ID })
 			for _, s := range sts {
-				b.Children = append(b.Children, buildStorageBox(r.RemoteID, s, nodeCount[s.ID] > 1))
+				b.Children = append(b.Children, buildStorageBox(r.RemoteID, s))
 			}
 		}
 		out = append(out, b)
@@ -624,10 +626,10 @@ func buildRemoteBranch(r RemoteInput, now time.Time, staleAfter time.Duration, h
 	return out, nil
 }
 
-// buildStorageBox builds one storage (datastore) box under a PVE
-// node. multiNode is true when the storage is reported by more than
-// one node, which makes it shared even without the shared flag.
-func buildStorageBox(remoteID string, s StorageInput, multiNode bool) Box {
+// buildStorageBox builds one storage (datastore) box under a PVE node.
+// The shared flag is taken from the input; it is never derived from how
+// many nodes report the storage.
+func buildStorageBox(remoteID string, s StorageInput) Box {
 	b := Box{
 		Kind:              KindStorage,
 		ID:                "storage/" + remoteID + "/" + s.ID,
@@ -635,7 +637,7 @@ func buildStorageBox(remoteID string, s StorageInput, multiNode bool) Box {
 		StorageType:       s.Type,
 		StorageUsedBytes:  s.UsedBytes,
 		StorageTotalBytes: s.TotalBytes,
-		StorageShared:     s.Shared || multiNode,
+		StorageShared:     s.Shared,
 		StorageBackup:     s.Type == "pbs",
 		Stale:             s.Stale,
 	}

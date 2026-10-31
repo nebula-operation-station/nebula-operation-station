@@ -1420,12 +1420,14 @@ func TestBuildTreeSharedStorageOncePerCluster(t *testing.T) {
 	in := treeInput()
 	shared := storageIn("p1", "nfs-shared", "nfs", 50, 100)
 	shared.Shared = true
+	shared2 := storageIn("p2", "nfs-shared", "nfs", 50, 100)
+	shared2.Shared = true
 	in.Remotes = []RemoteInput{{
 		RemoteID: "remote-a",
 		Nodes:    []NodeInput{nodeIn("p1"), nodeIn("p2")},
 		Storages: []StorageInput{
 			shared,
-			storageIn("p2", "nfs-shared", "nfs", 50, 100),
+			shared2,
 			storageIn("p2", "local2", "dir", 10, 100),
 		},
 	}}
@@ -1448,17 +1450,58 @@ func TestBuildTreeSharedStorageOncePerCluster(t *testing.T) {
 		t.Fatalf("p2 children: %+v", p2.Children)
 	}
 
-	// A storage reported by more than one node is shared even without
-	// the flag.
+	// A storage reported by more than one node but not explicitly shared
+	// is kept per node and never derived as shared.
 	in.Remotes[0].Storages[0].Shared = false
+	in.Remotes[0].Storages[1].Shared = false
 	tree, err = BuildTree(in)
 	if err != nil {
 		t.Fatalf("BuildTree: %v", err)
 	}
 	p1 = findBox(t, tree.Roots, "node/remote-a/p1")
+	p2 = findBox(t, tree.Roots, "node/remote-a/p2")
 	s1 = findBox(t, p1.Children, "storage/remote-a/nfs-shared")
-	if !s1.StorageShared {
-		t.Fatal("multi-node storage not derived as shared")
+	if s1.StorageShared {
+		t.Fatal("non-shared multi-node storage derived as shared")
+	}
+	s2 := findBox(t, p2.Children, "storage/remote-a/nfs-shared")
+	if s2.StorageShared {
+		t.Fatal("non-shared multi-node storage derived as shared on second node")
+	}
+	if len(p2.Children) != 2 {
+		t.Fatalf("p2 children: %+v", p2.Children)
+	}
+}
+
+func TestBuildTreeSameIDLocalStoresNotDeduped(t *testing.T) {
+	// Two independent node-local stores with the same id on different
+	// nodes must both render; dedup applies only to explicitly shared
+	// stores. The second node's critical store must not be hidden.
+	in := treeInput()
+	in.Remotes = []RemoteInput{{
+		RemoteID: "remote-a",
+		Nodes:    []NodeInput{nodeIn("p1"), nodeIn("p2")},
+		Storages: []StorageInput{
+			storageIn("p1", "local", "dir", 10, 100),
+			storageIn("p2", "local", "dir", 90, 100),
+		},
+	}}
+	tree, err := BuildTree(in)
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+	p1 := findBox(t, tree.Roots, "node/remote-a/p1")
+	p2 := findBox(t, tree.Roots, "node/remote-a/p2")
+	s1 := findBox(t, p1.Children, "storage/remote-a/local")
+	s2 := findBox(t, p2.Children, "storage/remote-a/local")
+	if s1.StorageShared {
+		t.Fatal("local store on p1 marked shared")
+	}
+	if s2.StorageShared {
+		t.Fatal("local store on p2 marked shared")
+	}
+	if s2.State != StateCritical {
+		t.Fatalf("p2 local store state = %s, want critical", s2.State)
 	}
 }
 
