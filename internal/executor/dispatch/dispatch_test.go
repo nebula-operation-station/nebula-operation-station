@@ -16,11 +16,11 @@ var ctx = context.Background()
 // fakeRecorder is a durable recorder test double: state survives being
 // handed to a fresh Dispatcher, simulating an executor restart.
 type fakeRecorder struct {
-	mu            sync.Mutex
-	intents       map[string]bool
-	outcomes      map[string]Outcome
-	failIntent    error
-	failOutcome   error
+	mu          sync.Mutex
+	intents     map[string]bool
+	outcomes    map[string]Outcome
+	failIntent  error
+	failOutcome error
 }
 
 func newFakeRecorder() *fakeRecorder {
