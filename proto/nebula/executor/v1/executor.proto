@@ -360,6 +360,28 @@ service ExecutorService {
   // checks. The trigger selects work inside the approved scope only.
   rpc RunReadGrant(RunReadGrantRequest) returns (RunReadGrantResponse);
 
+  // Batch read grants (ADR 0007, E19b). These methods use batch authority;
+  // a batch is a bounded, complete plan of several read members that share
+  // one approval. The server proposes and relays a user-verified assertion;
+  // only the executor-local admin reviews and approves.
+  // Role: server. Proposes the complete bounded plan; the authority alone
+  // chooses and binds the approval requirement.
+  rpc ProposeBatch(ProposeBatchRequest) returns (ProposeBatchResponse);
+
+  // Role: server. Relays a fresh user-verified assertion; the executor
+  // verifies the batch-bound challenge. This is never a server approval.
+  rpc CommitBatch(CommitBatchRequest) returns (CommitBatchResponse);
+
+  // Role: admin. Retrieves the complete frozen plan for local review.
+  rpc ReviewBatch(ReviewBatchRequest) returns (ReviewBatchResponse);
+
+  // Role: admin only. Approves the locally reviewed digest.
+  rpc ApproveBatchCLI(ApproveBatchCLIRequest) returns (ApproveBatchCLIResponse);
+
+  // Role: server, admin. Confirms the batch is approved and fresh, with the
+  // parent/member linkage. The server polls this before dispatch.
+  rpc GetBatchStatus(GetBatchStatusRequest) returns (GetBatchStatusResponse);
+
   // Signed events (M10-1). Role: server, admin. Read-only: the chain of
   // the executor's audit events with the key to verify it.
   rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
@@ -2023,4 +2045,135 @@ message RunReadGrantRequest {
 message RunReadGrantResponse {
   string execution_id = 1;
   RunAttachedResponse result = 2;
+}
+
+// Batch plan (ADR 0007, E19b). The complete bounded plan: the parent batch
+// and its members, with the stage/dependency graph that links them. This is
+// never a truncated approval scope; the full plan is always returned.
+message BatchPlan {
+  // Parent batch identity.
+  string batch_id = 1;
+  int64 expiry_unix = 2;
+  // Members in plan order; each is bound to the parent by its stage plan hash.
+  repeated BatchMember members = 3;
+  repeated BatchStage stages = 4;
+  repeated BatchDependency dependencies = 5;
+}
+
+message BatchMember {
+  string member_id = 1;
+  string action_id = 2;
+  string module_version = 3;
+  RiskClass risk = 4;
+  repeated string host_ids = 5;
+  // Must equal the parent stage plan hash (parent/member linkage).
+  string stage_plan_hash = 6;
+}
+
+message BatchStage {
+  string stage_id = 1;
+  // "manual" or "automatic".
+  string gate = 2;
+  repeated string member_ids = 3;
+  repeated string required_postchecks = 4;
+}
+
+message BatchDependency {
+  string member_id = 1;
+  repeated string depends_on = 2;
+}
+
+// Host-author text from a member scan; rendered as untrusted text only.
+message BatchFinding {
+  string category = 1;
+  RiskClass risk = 2;
+  int32 line = 3;
+  string excerpt = 4;
+}
+
+// Scanner findings for one member, in plan order.
+message BatchMemberFindings {
+  repeated BatchFinding findings = 1;
+}
+
+// One exact artifact and parameter document for a batch member.
+message BatchMemberInput {
+  string member_id = 1;
+  bytes artifact = 2;
+  bytes parameters_json = 3;
+}
+
+message ProposeBatchRequest {
+  // Strict canonical batch JSON, 1..2 MiB; bounded members and stages.
+  bytes batch_json = 1;
+  // One exact artifact and parameter document per member, in plan order.
+  repeated BatchMemberInput members = 2;
+}
+
+message ProposeBatchResponse {
+  string batch_digest = 1;
+  // Complete canonical plan; never a truncated approval scope.
+  bytes canonical_batch = 2;
+  BatchPlan plan = 3;
+  RiskClass risk = 4;
+  ApprovalRequirement approval_requirement = 5;
+  bytes challenge = 6;
+  int64 challenge_expiry_unix = 7;
+  bytes request_options_json = 8;
+  // State after propose: APPROVED for LOW, PENDING otherwise.
+  PermitState state = 9;
+}
+
+message CommitBatchRequest {
+  // Exactly 64 lowercase hexadecimal characters.
+  string batch_digest = 1;
+  // UTF-8 WebAuthn assertion JSON, 1..16 KiB. Verified by the executor.
+  bytes assertion_json = 2;
+}
+
+message CommitBatchResponse {
+  PermitState state = 1;
+}
+
+message ReviewBatchRequest {
+  string batch_digest = 1;
+}
+
+message ReviewBatchResponse {
+  string batch_digest = 1;
+  bytes canonical_batch = 2;
+  BatchPlan plan = 3;
+  RiskClass risk = 4;
+  PermitState state = 5;
+  string approved_by = 6;
+  int64 approval_expiry_unix = 7;
+  // Member parameters in plan order (opaque secret references only).
+  repeated bytes member_parameters = 8;
+  // Scanner findings in member order; host-author text.
+  repeated BatchMemberFindings member_findings = 9;
+}
+
+message ApproveBatchCLIRequest {
+  string batch_digest = 1;
+}
+
+message ApproveBatchCLIResponse {
+  PermitState state = 1;
+  string approved_by = 2;
+}
+
+message GetBatchStatusRequest {
+  string batch_digest = 1;
+}
+
+message GetBatchStatusResponse {
+  string batch_digest = 1;
+  PermitState state = 2;
+  RiskClass risk = 3;
+  // Parent/member linkage: the parent batch and its member IDs.
+  string batch_id = 4;
+  repeated string member_ids = 5;
+  string approved_by = 6;
+  int64 approval_expiry_unix = 7;
+  int64 expiry_unix = 8;
 }

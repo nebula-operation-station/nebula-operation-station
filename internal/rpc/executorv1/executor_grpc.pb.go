@@ -96,6 +96,11 @@ const (
 	ExecutorService_ListReadGrants_FullMethodName            = "/nebula.executor.v1.ExecutorService/ListReadGrants"
 	ExecutorService_RevokeReadGrant_FullMethodName           = "/nebula.executor.v1.ExecutorService/RevokeReadGrant"
 	ExecutorService_RunReadGrant_FullMethodName              = "/nebula.executor.v1.ExecutorService/RunReadGrant"
+	ExecutorService_ProposeBatch_FullMethodName              = "/nebula.executor.v1.ExecutorService/ProposeBatch"
+	ExecutorService_CommitBatch_FullMethodName               = "/nebula.executor.v1.ExecutorService/CommitBatch"
+	ExecutorService_ReviewBatch_FullMethodName               = "/nebula.executor.v1.ExecutorService/ReviewBatch"
+	ExecutorService_ApproveBatchCLI_FullMethodName           = "/nebula.executor.v1.ExecutorService/ApproveBatchCLI"
+	ExecutorService_GetBatchStatus_FullMethodName            = "/nebula.executor.v1.ExecutorService/GetBatchStatus"
 	ExecutorService_ListEvents_FullMethodName                = "/nebula.executor.v1.ExecutorService/ListEvents"
 	ExecutorService_BackupExecutor_FullMethodName            = "/nebula.executor.v1.ExecutorService/BackupExecutor"
 	ExecutorService_ProbePVERemote_FullMethodName            = "/nebula.executor.v1.ExecutorService/ProbePVERemote"
@@ -375,6 +380,23 @@ type ExecutorServiceClient interface {
 	// ID. Both triggers share authorization, budget, revocation and dispatch
 	// checks. The trigger selects work inside the approved scope only.
 	RunReadGrant(ctx context.Context, in *RunReadGrantRequest, opts ...grpc.CallOption) (*RunReadGrantResponse, error)
+	// Batch read grants (ADR 0007, E19b). These methods use batch authority;
+	// a batch is a bounded, complete plan of several read members that share
+	// one approval. The server proposes and relays a user-verified assertion;
+	// only the executor-local admin reviews and approves.
+	// Role: server. Proposes the complete bounded plan; the authority alone
+	// chooses and binds the approval requirement.
+	ProposeBatch(ctx context.Context, in *ProposeBatchRequest, opts ...grpc.CallOption) (*ProposeBatchResponse, error)
+	// Role: server. Relays a fresh user-verified assertion; the executor
+	// verifies the batch-bound challenge. This is never a server approval.
+	CommitBatch(ctx context.Context, in *CommitBatchRequest, opts ...grpc.CallOption) (*CommitBatchResponse, error)
+	// Role: admin. Retrieves the complete frozen plan for local review.
+	ReviewBatch(ctx context.Context, in *ReviewBatchRequest, opts ...grpc.CallOption) (*ReviewBatchResponse, error)
+	// Role: admin only. Approves the locally reviewed digest.
+	ApproveBatchCLI(ctx context.Context, in *ApproveBatchCLIRequest, opts ...grpc.CallOption) (*ApproveBatchCLIResponse, error)
+	// Role: server, admin. Confirms the batch is approved and fresh, with the
+	// parent/member linkage. The server polls this before dispatch.
+	GetBatchStatus(ctx context.Context, in *GetBatchStatusRequest, opts ...grpc.CallOption) (*GetBatchStatusResponse, error)
 	// Signed events (M10-1). Role: server, admin. Read-only: the chain of
 	// the executor's audit events with the key to verify it.
 	ListEvents(ctx context.Context, in *ListEventsRequest, opts ...grpc.CallOption) (*ListEventsResponse, error)
@@ -1164,6 +1186,56 @@ func (c *executorServiceClient) RunReadGrant(ctx context.Context, in *RunReadGra
 	return out, nil
 }
 
+func (c *executorServiceClient) ProposeBatch(ctx context.Context, in *ProposeBatchRequest, opts ...grpc.CallOption) (*ProposeBatchResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProposeBatchResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ProposeBatch_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) CommitBatch(ctx context.Context, in *CommitBatchRequest, opts ...grpc.CallOption) (*CommitBatchResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitBatchResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_CommitBatch_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ReviewBatch(ctx context.Context, in *ReviewBatchRequest, opts ...grpc.CallOption) (*ReviewBatchResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReviewBatchResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ReviewBatch_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ApproveBatchCLI(ctx context.Context, in *ApproveBatchCLIRequest, opts ...grpc.CallOption) (*ApproveBatchCLIResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ApproveBatchCLIResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ApproveBatchCLI_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) GetBatchStatus(ctx context.Context, in *GetBatchStatusRequest, opts ...grpc.CallOption) (*GetBatchStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetBatchStatusResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_GetBatchStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *executorServiceClient) ListEvents(ctx context.Context, in *ListEventsRequest, opts ...grpc.CallOption) (*ListEventsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListEventsResponse)
@@ -1540,6 +1612,23 @@ type ExecutorServiceServer interface {
 	// ID. Both triggers share authorization, budget, revocation and dispatch
 	// checks. The trigger selects work inside the approved scope only.
 	RunReadGrant(context.Context, *RunReadGrantRequest) (*RunReadGrantResponse, error)
+	// Batch read grants (ADR 0007, E19b). These methods use batch authority;
+	// a batch is a bounded, complete plan of several read members that share
+	// one approval. The server proposes and relays a user-verified assertion;
+	// only the executor-local admin reviews and approves.
+	// Role: server. Proposes the complete bounded plan; the authority alone
+	// chooses and binds the approval requirement.
+	ProposeBatch(context.Context, *ProposeBatchRequest) (*ProposeBatchResponse, error)
+	// Role: server. Relays a fresh user-verified assertion; the executor
+	// verifies the batch-bound challenge. This is never a server approval.
+	CommitBatch(context.Context, *CommitBatchRequest) (*CommitBatchResponse, error)
+	// Role: admin. Retrieves the complete frozen plan for local review.
+	ReviewBatch(context.Context, *ReviewBatchRequest) (*ReviewBatchResponse, error)
+	// Role: admin only. Approves the locally reviewed digest.
+	ApproveBatchCLI(context.Context, *ApproveBatchCLIRequest) (*ApproveBatchCLIResponse, error)
+	// Role: server, admin. Confirms the batch is approved and fresh, with the
+	// parent/member linkage. The server polls this before dispatch.
+	GetBatchStatus(context.Context, *GetBatchStatusRequest) (*GetBatchStatusResponse, error)
 	// Signed events (M10-1). Role: server, admin. Read-only: the chain of
 	// the executor's audit events with the key to verify it.
 	ListEvents(context.Context, *ListEventsRequest) (*ListEventsResponse, error)
@@ -1803,6 +1892,21 @@ func (UnimplementedExecutorServiceServer) RevokeReadGrant(context.Context, *Revo
 }
 func (UnimplementedExecutorServiceServer) RunReadGrant(context.Context, *RunReadGrantRequest) (*RunReadGrantResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RunReadGrant not implemented")
+}
+func (UnimplementedExecutorServiceServer) ProposeBatch(context.Context, *ProposeBatchRequest) (*ProposeBatchResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ProposeBatch not implemented")
+}
+func (UnimplementedExecutorServiceServer) CommitBatch(context.Context, *CommitBatchRequest) (*CommitBatchResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CommitBatch not implemented")
+}
+func (UnimplementedExecutorServiceServer) ReviewBatch(context.Context, *ReviewBatchRequest) (*ReviewBatchResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReviewBatch not implemented")
+}
+func (UnimplementedExecutorServiceServer) ApproveBatchCLI(context.Context, *ApproveBatchCLIRequest) (*ApproveBatchCLIResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ApproveBatchCLI not implemented")
+}
+func (UnimplementedExecutorServiceServer) GetBatchStatus(context.Context, *GetBatchStatusRequest) (*GetBatchStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetBatchStatus not implemented")
 }
 func (UnimplementedExecutorServiceServer) ListEvents(context.Context, *ListEventsRequest) (*ListEventsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListEvents not implemented")
@@ -3208,6 +3312,96 @@ func _ExecutorService_RunReadGrant_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_ProposeBatch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProposeBatchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ProposeBatch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ProposeBatch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ProposeBatch(ctx, req.(*ProposeBatchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_CommitBatch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommitBatchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).CommitBatch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_CommitBatch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).CommitBatch(ctx, req.(*CommitBatchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ReviewBatch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReviewBatchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ReviewBatch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ReviewBatch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ReviewBatch(ctx, req.(*ReviewBatchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ApproveBatchCLI_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ApproveBatchCLIRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ApproveBatchCLI(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ApproveBatchCLI_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ApproveBatchCLI(ctx, req.(*ApproveBatchCLIRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_GetBatchStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetBatchStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).GetBatchStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_GetBatchStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).GetBatchStatus(ctx, req.(*GetBatchStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ExecutorService_ListEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListEventsRequest)
 	if err := dec(in); err != nil {
@@ -3712,6 +3906,26 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RunReadGrant",
 			Handler:    _ExecutorService_RunReadGrant_Handler,
+		},
+		{
+			MethodName: "ProposeBatch",
+			Handler:    _ExecutorService_ProposeBatch_Handler,
+		},
+		{
+			MethodName: "CommitBatch",
+			Handler:    _ExecutorService_CommitBatch_Handler,
+		},
+		{
+			MethodName: "ReviewBatch",
+			Handler:    _ExecutorService_ReviewBatch_Handler,
+		},
+		{
+			MethodName: "ApproveBatchCLI",
+			Handler:    _ExecutorService_ApproveBatchCLI_Handler,
+		},
+		{
+			MethodName: "GetBatchStatus",
+			Handler:    _ExecutorService_GetBatchStatus_Handler,
 		},
 		{
 			MethodName: "ListEvents",
