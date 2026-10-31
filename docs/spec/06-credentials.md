@@ -4,6 +4,9 @@
 
 SSH private keys stay in standard OpenSSH format with a passphrase on disk and are decrypted into the executor's in-process keyring on unlock, the same model as ssh-agent with keychain. The vault holds only what is not an SSH key: API tokens, provider credentials, secret runbook parameters.
 
+<a id="release-root-custody"></a>
+**Release root custody.** The SSH credentials described here authenticate to managed hosts. Offline release-signing roots are separate YubiKey-held Ed25519 keys under [spec 10](10-modules.md#release-signing): their signing secrets never enter executor storage/keyrings, the vault, CI or hosts. Only public root keys ship with Nebula. Root recovery uses a separately enrolled second YubiKey and encrypted offline non-resident key handle backups; it is not part of `nebula unlock` or instance backup/restore.
+
 **SSH keys.**
 
 - Stored under `/var/lib/nebula/executor/keys/` as OpenSSH private keys (bcrypt-pbkdf, the standard format). Users can bring existing keys.
