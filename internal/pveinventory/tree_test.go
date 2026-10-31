@@ -1537,6 +1537,48 @@ func TestBuildTreeStorageStates(t *testing.T) {
 	}
 }
 
+func TestChartDataTreeInputStorageCapacityValidation(t *testing.T) {
+	// A malformed capacity pair (free > total) must not render as a
+	// healthy zero fill; it is capacity-unknown. The stored
+	// availability is preserved: unavailable is unknown, partial is a
+	// warning, available with a valid pair is healthy.
+	data := ChartData{
+		Remotes: []Remote{{RemoteID: "remote-a", Name: "A"}},
+		Nodes: map[string][]Node{
+			"remote-a": {{Node: "p1", Status: "online", State: StateAvailable, ObservedAt: freshAt()}},
+		},
+		Storages: map[string][]Storage{
+			"remote-a": {
+				{Name: "malformed", Type: "dir", Active: true, SizeBytes: 10 << 30, FreeBytes: 20 << 30, ObservedAt: freshAt(), State: StateAvailable},
+				{Name: "unavail", Type: "dir", Active: true, SizeBytes: 10 << 30, FreeBytes: 9 << 30, ObservedAt: freshAt(), State: StateUnavailable, Reason: "read failed"},
+				{Name: "partial", Type: "dir", Active: true, SizeBytes: 10 << 30, FreeBytes: 9 << 30, ObservedAt: freshAt(), State: StatePartial, Reason: "truncated"},
+				{Name: "valid", Type: "dir", Active: true, SizeBytes: 10 << 30, FreeBytes: 9 << 30, ObservedAt: freshAt(), State: StateAvailable},
+			},
+		},
+	}
+	tree, err := BuildTree(data.TreeInput(treeNow, 0, nil, nil))
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+	p1 := findBox(t, tree.Roots, "node/remote-a/p1")
+	m := findBox(t, p1.Children, "storage/remote-a/malformed")
+	if m.State != StateUnknown || m.StateReason != "capacity unknown" {
+		t.Fatalf("malformed box: %+v", m)
+	}
+	u := findBox(t, p1.Children, "storage/remote-a/unavail")
+	if u.State != StateUnknown || u.StateReason != "read failed" {
+		t.Fatalf("unavail box: %+v", u)
+	}
+	p := findBox(t, p1.Children, "storage/remote-a/partial")
+	if p.State != StateWarning || p.StateReason != "truncated" {
+		t.Fatalf("partial box: %+v", p)
+	}
+	v := findBox(t, p1.Children, "storage/remote-a/valid")
+	if v.State != StateOK {
+		t.Fatalf("valid box: %+v", v)
+	}
+}
+
 func TestBuildTreeStorageThresholdFeedsNodeState(t *testing.T) {
 	in := treeInput()
 	in.Remotes = []RemoteInput{{

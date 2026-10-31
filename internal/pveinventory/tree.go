@@ -230,6 +230,12 @@ type StorageInput struct {
 	// CapacityKnown is false when the observation carried no usable
 	// used/total pair.
 	CapacityKnown bool
+	// StoredState is the stored dataset availability state
+	// (available, unavailable, partial); empty means derive it from
+	// the observation fields.
+	StoredState DatasetState
+	// StoredReason is the stored dataset reason (untrusted text).
+	StoredReason string
 	// Stale is set by the caller when the observation is older than
 	// the stale threshold.
 	Stale bool
@@ -649,13 +655,21 @@ func buildStorageBox(remoteID string, s StorageInput) Box {
 }
 
 // storageState derives the state of a storage box. Inactive, stale
-// and capacity-unknown storages are unknown, never 0 percent.
+// and capacity-unknown storages are unknown, never 0 percent. The
+// stored availability is preserved: an unavailable observation is
+// never a healthy fill, and a partial one is a warning.
 func storageState(s StorageInput) (BoxState, string) {
 	if !s.Active {
 		return StateUnknown, "inactive"
 	}
 	if s.Stale {
 		return StateUnknown, "stale"
+	}
+	switch s.StoredState {
+	case StateUnavailable:
+		return StateUnknown, storedDatasetReason(s, "unavailable")
+	case StatePartial:
+		return StateWarning, storedDatasetReason(s, "partial")
 	}
 	if !s.CapacityKnown || s.TotalBytes == 0 {
 		return StateUnknown, "capacity unknown"
@@ -668,6 +682,16 @@ func storageState(s StorageInput) (BoxState, string) {
 		return StateWarning, fmt.Sprintf("%d%% full", pct)
 	}
 	return StateOK, ""
+}
+
+// storedDatasetReason returns the stored dataset reason for a
+// non-available state, falling back to a default when the stored
+// reason is empty.
+func storedDatasetReason(s StorageInput, fallback string) string {
+	if s.StoredReason != "" {
+		return s.StoredReason
+	}
+	return fallback
 }
 
 // storageFillPercent is the used percentage of a storage, clamped to
@@ -1108,8 +1132,13 @@ func (d ChartData) TreeInput(now time.Time, staleAfter time.Duration, hosts []Ho
 			continue
 		}
 		for _, st := range d.Storages[r.RemoteID] {
+			// A capacity pair is only usable when the total is
+			// positive and the free amount does not exceed it; a
+			// malformed pair (free > total) is capacity-unknown, not
+			// a healthy zero fill.
+			capacityKnown := st.SizeBytes > 0 && st.FreeBytes <= st.SizeBytes
 			var used uint64
-			if st.SizeBytes > st.FreeBytes {
+			if capacityKnown {
 				used = st.SizeBytes - st.FreeBytes
 			}
 			ri.Storages = append(ri.Storages, StorageInput{
@@ -1120,7 +1149,9 @@ func (d ChartData) TreeInput(now time.Time, staleAfter time.Duration, hosts []Ho
 				Shared:        clusterStorageTypes[st.Type],
 				UsedBytes:     used,
 				TotalBytes:    st.SizeBytes,
-				CapacityKnown: st.SizeBytes > 0,
+				CapacityKnown: capacityKnown,
+				StoredState:   st.State,
+				StoredReason:  st.Reason,
 				Stale:         now.Sub(st.ObservedAt) > staleAfter,
 			})
 		}
