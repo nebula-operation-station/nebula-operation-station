@@ -13,6 +13,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 	"github.com/nebula-operation-station/nebula-operation-station/web/static"
 )
@@ -273,5 +274,205 @@ func TestChartUnavailableInventory(t *testing.T) {
 	body := getBody(t, h.Handler(), "/inventory/chart")
 	if !strings.Contains(body, "Inventory unavailable") {
 		t.Error("unavailable message missing")
+	}
+}
+
+// gib is one GiB in bytes.
+const gib = 1024 * 1024 * 1024
+
+// pveChartTree builds an org-chart tree from one PVE remote with the
+// given storages, for the PVE chart render tests.
+func pveChartTree(t *testing.T, storages ...pveinventory.StorageInput) pveinventory.Tree {
+	t.Helper()
+	now := time.Unix(1791960000, 0)
+	tree, err := pveinventory.BuildTree(pveinventory.TreeInput{
+		Now: now,
+		Remotes: []pveinventory.RemoteInput{{
+			RemoteID: "pve-lab",
+			Name:     "PVE lab",
+			Nodes: []pveinventory.NodeInput{{
+				Node:       "pve1",
+				Status:     "online",
+				ObservedAt: now,
+			}},
+			Guests: []pveinventory.GuestInput{{
+				VMID:       100,
+				Generation: 1,
+				Kind:       "qemu",
+				Node:       "pve1",
+				Name:       "web-vm",
+				Status:     "running",
+				ObservedAt: now,
+			}},
+			Storages: storages,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+	return tree
+}
+
+// pveChartHandler builds a handler with the given PVE tree provider.
+func pveChartHandler(t *testing.T, tree pveinventory.Tree) *ui.Handler {
+	t.Helper()
+	var log strings.Builder
+	return newTestHandler(t, ui.Options{
+		Hosts:        func(context.Context) ([]inventory.Host, error) { return chartHosts(), nil },
+		PVEChart:     func(context.Context) (pveinventory.Tree, error) { return tree, nil },
+		Log:          slog.New(slog.NewTextHandler(&log, nil)),
+		PublicOrigin: "https://nebula.example",
+	})
+}
+
+func TestChartPVEStorageBoxes(t *testing.T) {
+	tree := pveChartTree(t,
+		pveinventory.StorageInput{
+			Node: "pve1", ID: "local", Type: "dir", Active: true,
+			UsedBytes: 256 * gib, TotalBytes: 512 * gib, CapacityKnown: true,
+		},
+		pveinventory.StorageInput{
+			Node: "pve1", ID: "local-lvm", Type: "lvmthin", Active: true, Shared: true,
+			UsedBytes: 384 * gib, TotalBytes: 480 * gib, CapacityKnown: true,
+		},
+		pveinventory.StorageInput{
+			Node: "pve1", ID: "backup", Type: "pbs", Active: true,
+			UsedBytes: 475 * gib, TotalBytes: 500 * gib, CapacityKnown: true,
+		},
+	)
+	body := getBody(t, pveChartHandler(t, tree).Handler(), "/inventory/chart")
+
+	for label, want := range map[string]string{
+		"PVE node box":           "chart__box--node",
+		"node name":              "pve1",
+		"guest box":              "chart__box--guest",
+		"guest name":             "web-vm",
+		"guest vmid":             "VM 100",
+		"storage box":            "chart__box--storage",
+		"dir icon":               "chart__storage-icon--dir",
+		"lvmthin icon":           "chart__storage-icon--lvmthin",
+		"pbs icon":               "chart__storage-icon--pbs",
+		"pbs label":              "backup datastore",
+		"shared mark":            "shared",
+		"local fill":             "50 % von 512 GiB",
+		"lvm fill":               "80 % von 480 GiB",
+		"backup fill":            "95 % von 500 GiB",
+		"local bar":              `<meter class="chart__storage-meter" min="0" max="100" low="70" high="90" optimum="0" value="50">50%</meter>`,
+		"lvm bar":                `<meter class="chart__storage-meter" min="0" max="100" low="70" high="90" optimum="0" value="80">80%</meter>`,
+		"backup bar":             `<meter class="chart__storage-meter" min="0" max="100" low="70" high="90" optimum="0" value="95">95%</meter>`,
+		"warning storage class":  "chart__storage--warning",
+		"critical storage class": "chart__storage--critical",
+		"node worst state":       "chart__node--critical",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("chart page missing %s (%q)", label, want)
+		}
+	}
+	// Storages render after the guest boxes.
+	if i, j := strings.Index(body, "chart__box--guest"), strings.Index(body, "chart__box--storage"); i < 0 || j < 0 || i > j {
+		t.Errorf("storage boxes must render after guest boxes (guest at %d, storage at %d)", i, j)
+	}
+}
+
+func TestChartPVEStorageEscaping(t *testing.T) {
+	evil := `"><script>alert(1)</script>`
+	tree := pveChartTree(t,
+		pveinventory.StorageInput{
+			Node: "pve1", ID: evil, Type: "dir", Active: true,
+			UsedBytes: gib, TotalBytes: 2 * gib, CapacityKnown: true,
+		},
+	)
+	body := getBody(t, pveChartHandler(t, tree).Handler(), "/inventory/chart")
+	if strings.Contains(body, "<script>alert(1)</script>") {
+		t.Error("raw script tag from storage id reached the page")
+	}
+	if !strings.Contains(body, "&lt;script&gt;alert(1)&lt;/script&gt;") {
+		t.Error("escaped storage id missing")
+	}
+}
+
+func TestChartPVEStorageUnknown(t *testing.T) {
+	tree := pveChartTree(t,
+		pveinventory.StorageInput{
+			Node: "pve1", ID: "off", Type: "nfs", Active: false,
+			UsedBytes: 0, TotalBytes: 0, CapacityKnown: false,
+		},
+	)
+	body := getBody(t, pveChartHandler(t, tree).Handler(), "/inventory/chart")
+	if !strings.Contains(body, "chart__storage-fill--unknown") {
+		t.Error("unknown fill marker missing")
+	}
+	if !strings.Contains(body, ">unknown<") {
+		t.Error("unknown text missing")
+	}
+	if strings.Contains(body, "width:0%") {
+		t.Error("unknown storage must not render a 0 % bar")
+	}
+}
+
+// TestChartPVEStorageBarsCSPCompatible guards finding 6: a strict CSP blocks
+// inline width styles, which left the storage fills at zero width. The fill
+// must be carried by a CSP-compatible construct (a native meter element), not
+// an inline style attribute.
+func TestChartPVEStorageBarsCSPCompatible(t *testing.T) {
+	tree := pveChartTree(t,
+		pveinventory.StorageInput{
+			Node: "pve1", ID: "local", Type: "dir", Active: true,
+			UsedBytes: 384 * gib, TotalBytes: 480 * gib, CapacityKnown: true,
+		},
+	)
+	body := getBody(t, pveChartHandler(t, tree).Handler(), "/inventory/chart")
+	// No inline width style anywhere in the storage markup: a strict CSP
+	// (style-src without 'unsafe-inline') drops it and the fill stays at 0.
+	if strings.Contains(body, `style="width:`) {
+		t.Error("storage fill uses an inline width style; strict CSP blocks it")
+	}
+	// The fill level is carried by the meter element's value attribute.
+	if !strings.Contains(body, `<meter class="chart__storage-meter"`) {
+		t.Error("storage fill must use a CSP-compatible meter element")
+	}
+	if !strings.Contains(body, `value="80">80%</meter>`) {
+		t.Error("meter must carry the used percentage in its value attribute")
+	}
+}
+
+func TestChartPVEUnavailable(t *testing.T) {
+	var log strings.Builder
+	h := newTestHandler(t, ui.Options{
+		Hosts:        func(context.Context) ([]inventory.Host, error) { return chartHosts(), nil },
+		PVEChart:     func(context.Context) (pveinventory.Tree, error) { return pveinventory.Tree{}, errors.New("pve down") },
+		Log:          slog.New(slog.NewTextHandler(&log, nil)),
+		PublicOrigin: "https://nebula.example",
+	})
+	body := getBody(t, h.Handler(), "/inventory/chart")
+	if !strings.Contains(body, "PVE unavailable") {
+		t.Error("PVE unavailable message missing")
+	}
+	if !strings.Contains(body, "chart__box--host") {
+		t.Error("managed hosts must still render when PVE is unavailable")
+	}
+}
+
+func TestChartPVENilProvider(t *testing.T) {
+	body := getBody(t, chartHandler(t).Handler(), "/inventory/chart")
+	if strings.Contains(body, "chart__box--node") {
+		t.Error("PVE node box without provider")
+	}
+	if strings.Contains(body, "PVE unavailable") {
+		t.Error("PVE unavailable message without provider")
+	}
+}
+
+func TestChartPVENodesBeforeHosts(t *testing.T) {
+	tree := pveChartTree(t,
+		pveinventory.StorageInput{
+			Node: "pve1", ID: "local", Type: "dir", Active: true,
+			UsedBytes: gib, TotalBytes: 4 * gib, CapacityKnown: true,
+		},
+	)
+	body := getBody(t, pveChartHandler(t, tree).Handler(), "/inventory/chart")
+	i, j := strings.Index(body, "chart__box--node"), strings.Index(body, "chart__box--host")
+	if i < 0 || j < 0 || i > j {
+		t.Errorf("PVE nodes must render before managed hosts (pve at %d, host at %d)", i, j)
 	}
 }

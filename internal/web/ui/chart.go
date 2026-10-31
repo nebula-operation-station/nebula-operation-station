@@ -3,12 +3,14 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/dockerhost"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
@@ -74,6 +76,182 @@ type chartData struct {
 	Unavailable bool
 	// Hosts are the host columns, in inventory order.
 	Hosts []chartHost
+	// PVENodes are the PVE node columns with their guest and storage
+	// (datastore) children, in tree order; empty when the PVE provider
+	// is nil.
+	PVENodes []pveNodeView
+	// PVEUnavailable is true when the PVE tree could not be read.
+	PVEUnavailable bool
+}
+
+// pveNodeView is one PVE node box in the org chart, with its guest and
+// storage (datastore) children.
+type pveNodeView struct {
+	// Name is the node name (untrusted text; rendered as text only).
+	Name string
+	// State is the node's own state; StateClass is its dot CSS class.
+	State      string
+	StateClass string
+	// StateReason explains the node state.
+	StateReason string
+	// WorstClass is the border colour class (chart__node--...).
+	WorstClass string
+	// Expanded opens the subtree by default (nodes with problems).
+	Expanded bool
+	// Stale marks a stale node observation.
+	Stale bool
+	// Guests are the guest boxes, in tree order.
+	Guests []pveGuestView
+	// Storages are the storage (datastore) boxes, sorted after the
+	// guests.
+	Storages []pveStorageView
+}
+
+// pveGuestView is one guest box under a PVE node.
+type pveGuestView struct {
+	// Name is the guest name (untrusted text; rendered as text only).
+	Name string
+	// VMID is the guest VMID.
+	VMID uint64
+	// State is the guest state; StateClass is its dot CSS class.
+	State      string
+	StateClass string
+	// StateReason explains the guest state.
+	StateReason string
+	// Stale marks a stale guest observation.
+	Stale bool
+}
+
+// pveStorageView is one storage (datastore) box under a PVE node.
+type pveStorageView struct {
+	// Name is the storage id (untrusted text; rendered as text only).
+	Name string
+	// TypeLabel is the type label: the storage type, or "backup
+	// datastore" for Proxmox Backup Server storages.
+	TypeLabel string
+	// IconClass is the CSS class of the type icon.
+	IconClass string
+	// Shared marks a cluster-shared datastore.
+	Shared bool
+	// HasPercent is false when the fill level is unknown; the box then
+	// shows "unknown", never 0 percent.
+	HasPercent bool
+	// UsedPercent is the used percentage, clamped to [0, 100].
+	UsedPercent int
+	// TotalText is the human-readable total capacity.
+	TotalText string
+	// State is the storage state (ok, warning, critical, unknown); it
+	// drives the box border and bar colour.
+	State string
+	// StateReason explains the storage state.
+	StateReason string
+	// Stale marks a stale storage observation.
+	Stale bool
+}
+
+// pveStateClass maps a PVE box state to its dot badge CSS class. "off"
+// has no badge of its own and uses the unknown (grey) one.
+func pveStateClass(state string) string {
+	if state == string(pveinventory.StateOff) {
+		return "badge--unknown"
+	}
+	return "badge--" + state
+}
+
+// storageTypeLabel is the type label of a storage box: the storage
+// type, or "backup datastore" for Proxmox Backup Server storages.
+func storageTypeLabel(backup bool, stype string) string {
+	if backup {
+		return "backup datastore"
+	}
+	return stype
+}
+
+// storageIconClass maps a storage type to the CSS class of its icon.
+// The type is untrusted text; only this fixed set of suffixes ever
+// reaches the class attribute, everything else uses the generic icon.
+func storageIconClass(stype string) string {
+	switch stype {
+	case "dir", "lvm", "lvmthin", "zfspool", "nfs", "cifs", "pbs", "rbd", "iscsi", "vbds":
+		return "chart__storage-icon--" + stype
+	default:
+		return "chart__storage-icon--other"
+	}
+}
+
+// humanBytes renders a byte count as a compact display value
+// ("512 GiB", "512 MiB", "123 B").
+func humanBytes(b uint64) string {
+	const gib = uint64(1024 * 1024 * 1024)
+	const mib = uint64(1024 * 1024)
+	switch {
+	case b >= gib && b%gib == 0:
+		return fmt.Sprintf("%d GiB", b/gib)
+	case b >= gib:
+		return fmt.Sprintf("%.1f GiB", float64(b)/float64(gib))
+	case b >= mib && b%mib == 0:
+		return fmt.Sprintf("%d MiB", b/mib)
+	case b >= mib:
+		return fmt.Sprintf("%.1f MiB", float64(b)/float64(mib))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
+}
+
+// pveTreeToView converts the PVE roots of the org-chart tree into
+// chart views. Non-PVE roots (managed hosts) are skipped: the chart
+// renders those from the inventory.
+func pveTreeToView(tree pveinventory.Tree) []pveNodeView {
+	out := make([]pveNodeView, 0, len(tree.Roots))
+	for _, r := range tree.Roots {
+		if r.Kind != pveinventory.KindPVENode {
+			continue
+		}
+		n := pveNodeView{
+			Name:        r.Name,
+			State:       string(r.State),
+			StateClass:  pveStateClass(string(r.State)),
+			StateReason: r.StateReason,
+			Stale:       r.Stale,
+		}
+		switch r.Worst {
+		case pveinventory.StateCritical:
+			n.WorstClass = "chart__node--critical"
+		case pveinventory.StateWarning:
+			n.WorstClass = "chart__node--warning"
+		default:
+			n.WorstClass = "chart__node--neutral"
+		}
+		n.Expanded = n.WorstClass != "chart__node--neutral"
+		for _, c := range r.Children {
+			switch c.Kind {
+			case pveinventory.KindGuest:
+				n.Guests = append(n.Guests, pveGuestView{
+					Name:        c.Name,
+					VMID:        c.VMID,
+					State:       string(c.State),
+					StateClass:  pveStateClass(string(c.State)),
+					StateReason: c.StateReason,
+					Stale:       c.Stale,
+				})
+			case pveinventory.KindStorage:
+				n.Storages = append(n.Storages, pveStorageView{
+					Name:        c.Name,
+					TypeLabel:   storageTypeLabel(c.StorageBackup, c.StorageType),
+					IconClass:   storageIconClass(c.StorageType),
+					Shared:      c.StorageShared,
+					HasPercent:  c.State != pveinventory.StateUnknown,
+					UsedPercent: c.StorageFillPercent,
+					TotalText:   humanBytes(c.StorageTotalBytes),
+					State:       string(c.State),
+					StateReason: c.StateReason,
+					Stale:       c.Stale,
+				})
+			}
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 // chartHosts builds the org chart columns from the batch reads.
@@ -164,5 +342,17 @@ func (h *Handler) handleInventoryChart(w http.ResponseWriter, r *http.Request) {
 	pins, pinsUnavailable := h.hostKeyPins(ctx)
 	b := h.batchData(ctx)
 	data.Chart = &chartData{Hosts: h.chartHosts(ctx, hosts, pins, pinsUnavailable, b)}
+	// PVE section: node boxes with guest and storage (datastore)
+	// children. A nil provider hides the section; an error shows
+	// "PVE unavailable" (the detail goes to the log only).
+	if h.pveChart != nil {
+		tree, err := h.pveChart(ctx)
+		if err != nil {
+			h.log.Error("org chart: PVE tree failed", "error", err)
+			data.Chart.PVEUnavailable = true
+		} else {
+			data.Chart.PVENodes = pveTreeToView(tree)
+		}
+	}
 	h.render(w, r, data)
 }

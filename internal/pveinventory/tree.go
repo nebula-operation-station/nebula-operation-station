@@ -29,6 +29,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"math/big"
 	"sort"
 	"time"
 
@@ -53,9 +55,25 @@ const (
 	MaxTreeServices = 1000
 	// MaxTreeLinks bounds reviewed host links in one tree.
 	MaxTreeLinks = 1000
+	// MaxTreeStoragesPerRemote bounds storage boxes per remote.
+	MaxTreeStoragesPerRemote = 256
 	// DefaultStaleAfter marks a PVE observation stale after three
 	// missed 60-second inventory intervals.
 	DefaultStaleAfter = 3 * time.Minute
+)
+
+// Storage fill thresholds for the org chart.
+const (
+	// StorageWarnPercent marks a storage warning at 70 percent full.
+	StorageWarnPercent = 70
+	// StorageCritPercent marks a storage critical at 90 percent full.
+	StorageCritPercent = 90
+	// StorageStaleAfter marks a storage observation stale after three
+	// missed five-minute storage refresh intervals. Storage is refreshed
+	// on a five-minute cadence (spec 12), so the default three-minute
+	// node window would expire a valid observation before its next
+	// refresh.
+	StorageStaleAfter = 15 * time.Minute
 )
 
 // BoxKind identifies one org-chart box.
@@ -69,6 +87,7 @@ const (
 	KindCompose   BoxKind = "compose"
 	KindContainer BoxKind = "container"
 	KindService   BoxKind = "service"
+	KindStorage   BoxKind = "storage"
 )
 
 // BoxState is the state of one box.
@@ -198,6 +217,38 @@ type GuestInput struct {
 	ObservedAt time.Time
 }
 
+// StorageInput is one PVE storage (datastore) observation on one
+// node.
+type StorageInput struct {
+	// Node is the node the storage is reported on.
+	Node string
+	// ID is the storage ID (untrusted text).
+	ID string
+	// Type is the storage type (dir, lvmthin, zfspool, nfs, cifs,
+	// pbs, ...).
+	Type string
+	// Active is the storage active flag.
+	Active bool
+	// Shared is the storage shared flag.
+	Shared bool
+	// UsedBytes is the used capacity in bytes.
+	UsedBytes uint64
+	// TotalBytes is the total capacity in bytes.
+	TotalBytes uint64
+	// CapacityKnown is false when the observation carried no usable
+	// used/total pair.
+	CapacityKnown bool
+	// StoredState is the stored dataset availability state
+	// (available, unavailable, partial); empty means derive it from
+	// the observation fields.
+	StoredState DatasetState
+	// StoredReason is the stored dataset reason (untrusted text).
+	StoredReason string
+	// Stale is set by the caller when the observation is older than
+	// the stale threshold.
+	Stale bool
+}
+
 // RemoteInput is one PVE remote with its node and guest observations.
 type RemoteInput struct {
 	// RemoteID is the remote identity.
@@ -208,6 +259,8 @@ type RemoteInput struct {
 	Nodes []NodeInput
 	// Guests are the active guest incarnations, in stored order.
 	Guests []GuestInput
+	// Storages are the storage observations, in stored order.
+	Storages []StorageInput
 }
 
 // HostLink is one reviewed (remote, vmid, generation) -> host link. It
@@ -261,6 +314,21 @@ type Box struct {
 	Image string
 	// Unit is the systemd unit name (service boxes).
 	Unit string
+	// StorageType is the storage type (storage boxes).
+	StorageType string
+	// StorageUsedBytes and StorageTotalBytes are the storage
+	// capacities in bytes (storage boxes).
+	StorageUsedBytes  uint64
+	StorageTotalBytes uint64
+	// StorageFillPercent is the used percentage, clamped to [0, 100]
+	// (storage boxes with known capacity).
+	StorageFillPercent int
+	// StorageShared marks a storage that is shared across the
+	// cluster (storage boxes).
+	StorageShared bool
+	// StorageBackup marks a Proxmox Backup Server datastore (storage
+	// boxes).
+	StorageBackup bool
 	// State is the box's own state; StateReason explains it.
 	State       BoxState
 	StateReason string
@@ -363,6 +431,9 @@ func BuildTree(in TreeInput) (Tree, error) {
 		if len(r.Guests) > MaxTreeGuestsPerRemote {
 			return Tree{}, fmt.Errorf("chart tree: remote %s has %d guests, limit %d", r.RemoteID, len(r.Guests), MaxTreeGuestsPerRemote)
 		}
+		if len(r.Storages) > MaxTreeStoragesPerRemote {
+			return Tree{}, fmt.Errorf("chart tree: remote %s has %d storages, limit %d", r.RemoteID, len(r.Storages), MaxTreeStoragesPerRemote)
+		}
 		seenNodes := make(map[string]bool, len(r.Nodes))
 		for _, n := range r.Nodes {
 			if n.Node == "" {
@@ -379,6 +450,20 @@ func BuildTree(in TreeInput) (Tree, error) {
 				return Tree{}, fmt.Errorf("chart tree: remote %s has duplicate guest vmid %d generation %d", r.RemoteID, g.VMID, g.Generation)
 			}
 			guests[k] = true
+		}
+		seenStorages := make(map[string]bool, len(r.Storages))
+		for _, s := range r.Storages {
+			if s.Node == "" {
+				return Tree{}, fmt.Errorf("chart tree: remote %s has a storage without node", r.RemoteID)
+			}
+			if s.ID == "" {
+				return Tree{}, fmt.Errorf("chart tree: remote %s has a storage without id", r.RemoteID)
+			}
+			k := s.Node + "\x00" + s.ID
+			if seenStorages[k] {
+				return Tree{}, fmt.Errorf("chart tree: remote %s has duplicate storage %q on node %q", r.RemoteID, s.ID, s.Node)
+			}
+			seenStorages[k] = true
 		}
 	}
 
@@ -488,6 +573,48 @@ func buildRemoteBranch(r RemoteInput, now time.Time, staleAfter time.Duration, h
 		}
 		order = append(order, name)
 	}
+
+	// Storage boxes: one per (node, id), sorted by id, after the
+	// guests. Only explicitly shared storages are deduplicated: a shared
+	// storage reported by several nodes appears once per cluster, under
+	// the first node (input order) that reports it. Node-local storages
+	// are kept per node, even when two nodes happen to use the same
+	// storage id, so an independent local store is never hidden.
+	firstSharedNode := make(map[string]string, len(r.Storages))
+	for _, s := range r.Storages {
+		if s.Shared {
+			if _, ok := firstSharedNode[s.ID]; !ok {
+				firstSharedNode[s.ID] = s.Node
+			}
+		}
+	}
+	storagesByNode := make(map[string][]StorageInput)
+	storageNodeOrder := make([]string, 0, len(r.Storages))
+	for _, s := range r.Storages {
+		if s.Shared && firstSharedNode[s.ID] != s.Node {
+			continue // shared storage placed under the first node; not double-counted
+		}
+		if _, ok := storagesByNode[s.Node]; !ok {
+			storageNodeOrder = append(storageNodeOrder, s.Node)
+		}
+		storagesByNode[s.Node] = append(storagesByNode[s.Node], s)
+	}
+	// Implicit node boxes for storages whose node was not observed.
+	for _, name := range storageNodeOrder {
+		if _, ok := nodes[name]; ok {
+			continue
+		}
+		nodes[name] = Box{
+			Kind:        KindPVENode,
+			ID:          "node/" + r.RemoteID + "/" + name,
+			Name:        name,
+			RemoteID:    r.RemoteID,
+			RemoteName:  r.Name,
+			State:       StateUnknown,
+			StateReason: "no node observation",
+		}
+		order = append(order, name)
+	}
 	if len(order) > MaxTreeNodesPerRemote {
 		// The input node limit bounds r.Nodes; implicit nodes for
 		// orphan guests can push the total over it. Fail closed.
@@ -502,9 +629,98 @@ func buildRemoteBranch(r RemoteInput, now time.Time, staleAfter time.Duration, h
 			hostID, linked := linkByGuest[k]
 			b.Children = append(b.Children, buildGuestBox(r.RemoteID, g, now, staleAfter, hosts, hostID, linked))
 		}
+		if sts := storagesByNode[name]; len(sts) > 0 {
+			sort.Slice(sts, func(i, j int) bool { return sts[i].ID < sts[j].ID })
+			for _, s := range sts {
+				b.Children = append(b.Children, buildStorageBox(r.RemoteID, s))
+			}
+		}
 		out = append(out, b)
 	}
 	return out, nil
+}
+
+// buildStorageBox builds one storage (datastore) box under a PVE node.
+// The shared flag is taken from the input; it is never derived from how
+// many nodes report the storage.
+func buildStorageBox(remoteID string, s StorageInput) Box {
+	b := Box{
+		Kind:              KindStorage,
+		ID:                "storage/" + remoteID + "/" + s.ID,
+		Name:              s.ID,
+		StorageType:       s.Type,
+		StorageUsedBytes:  s.UsedBytes,
+		StorageTotalBytes: s.TotalBytes,
+		StorageShared:     s.Shared,
+		StorageBackup:     s.Type == "pbs",
+		Stale:             s.Stale,
+	}
+	b.State, b.StateReason = storageState(s)
+	if b.State != StateUnknown {
+		b.StorageFillPercent = storageFillPercent(s)
+	}
+	return b
+}
+
+// storageState derives the state of a storage box. Inactive, stale
+// and capacity-unknown storages are unknown, never 0 percent. The
+// stored availability is preserved: an unavailable observation is
+// never a healthy fill, and a partial one is a warning.
+func storageState(s StorageInput) (BoxState, string) {
+	if !s.Active {
+		return StateUnknown, "inactive"
+	}
+	if s.Stale {
+		return StateUnknown, "stale"
+	}
+	switch s.StoredState {
+	case StateUnavailable:
+		return StateUnknown, storedDatasetReason(s, "unavailable")
+	case StatePartial:
+		return StateWarning, storedDatasetReason(s, "partial")
+	}
+	if !s.CapacityKnown || s.TotalBytes == 0 {
+		return StateUnknown, "capacity unknown"
+	}
+	pct := storageFillPercent(s)
+	if pct >= StorageCritPercent {
+		return StateCritical, fmt.Sprintf("%d%% full", pct)
+	}
+	if pct >= StorageWarnPercent {
+		return StateWarning, fmt.Sprintf("%d%% full", pct)
+	}
+	return StateOK, ""
+}
+
+// storedDatasetReason returns the stored dataset reason for a
+// non-available state, falling back to a default when the stored
+// reason is empty.
+func storedDatasetReason(s StorageInput, fallback string) string {
+	if s.StoredReason != "" {
+		return s.StoredReason
+	}
+	return fallback
+}
+
+// storageFillPercent is the used percentage of a storage, clamped to
+// [0, 100]. It is only called for storages with total > 0. The
+// multiplication is overflow-safe: a hostile used near 2^64 falls back
+// to arbitrary-precision arithmetic so the percentage cannot wrap to
+// zero and suppress the critical threshold.
+func storageFillPercent(s StorageInput) int {
+	if s.UsedBytes >= s.TotalBytes {
+		return 100
+	}
+	// used < total, so the percentage is in [0, 100). The fast path
+	// is safe when used*100 cannot overflow uint64; a hostile used
+	// above that bound falls back to big.Int.
+	if s.UsedBytes <= math.MaxUint64/100 {
+		return int(s.UsedBytes * 100 / s.TotalBytes)
+	}
+	num := new(big.Int).SetUint64(s.UsedBytes)
+	num.Mul(num, big.NewInt(100))
+	den := new(big.Int).SetUint64(s.TotalBytes)
+	return int(new(big.Int).Quo(num, den).Int64())
 }
 
 // buildGuestBox builds one guest box, attaching the linked host's SSH
@@ -760,11 +976,13 @@ type ChartQuery struct {
 	// RemoteID restricts the query to one remote; "" means all
 	// remotes.
 	RemoteID string
-	// MaxRemotes, MaxNodes and MaxGuests bound the queries. Non-positive
-	// values use the defaults; values above the defaults are an error.
-	MaxRemotes int
-	MaxNodes   int
-	MaxGuests  int
+	// MaxRemotes, MaxNodes, MaxGuests and MaxStorages bound the
+	// queries. Non-positive values use the defaults; values above the
+	// defaults are an error.
+	MaxRemotes  int
+	MaxNodes    int
+	MaxGuests   int
+	MaxStorages int
 }
 
 // ChartData is the stored PVE side of a TreeInput.
@@ -776,12 +994,16 @@ type ChartData struct {
 	// Guests maps remote_id to its active guest incarnations, ordered
 	// by vmid.
 	Guests map[string][]Guest
+	// Storages maps remote_id to its storages, ordered by storage
+	// name.
+	Storages map[string][]Storage
 }
 
 // ChartData returns the stored PVE observations needed to build the
 // org chart, using bounded queries. Remotes are read with
-// MaxRemotes, then nodes and guests per remote with MaxNodes and
-// MaxGuests. Only active guest incarnations are returned.
+// MaxRemotes, then nodes, guests and storages per remote with
+// MaxNodes, MaxGuests and MaxStorages. Only active guest
+// incarnations are returned.
 func (s *Store) ChartData(ctx context.Context, q ChartQuery) (ChartData, error) {
 	remotesLimit, err := checkLimit(q.MaxRemotes, MaxTreeRemotes)
 	if err != nil {
@@ -795,10 +1017,15 @@ func (s *Store) ChartData(ctx context.Context, q ChartQuery) (ChartData, error) 
 	if err != nil {
 		return ChartData{}, err
 	}
+	storagesLimit, err := checkLimit(q.MaxStorages, MaxStoragesQuery)
+	if err != nil {
+		return ChartData{}, err
+	}
 
 	data := ChartData{
-		Nodes:  make(map[string][]Node),
-		Guests: make(map[string][]Guest),
+		Nodes:    make(map[string][]Node),
+		Guests:   make(map[string][]Guest),
+		Storages: make(map[string][]Storage),
 	}
 
 	query := `SELECT remote_id, name, kind, trust_generation,
@@ -845,6 +1072,108 @@ func (s *Store) ChartData(ctx context.Context, q ChartQuery) (ChartData, error) 
 			return ChartData{}, err
 		}
 		data.Guests[r.RemoteID] = guests
+		storages, err := s.ListStorages(ctx, r.RemoteID, storagesLimit)
+		if err != nil {
+			return ChartData{}, err
+		}
+		data.Storages[r.RemoteID] = storages
 	}
 	return data, nil
+}
+
+// clusterStorageTypes lists the PVE storage types that are
+// cluster-wide (shared) rather than node-local.
+var clusterStorageTypes = map[string]bool{
+	"nfs":       true,
+	"cifs":      true,
+	"pbs":       true,
+	"rbd":       true,
+	"glusterfs": true,
+	"vbks":      true,
+	"iscsi":     true,
+	"iscsi-gw":  true,
+	"swift":     true,
+	"azure8":    true,
+	"azure":     true,
+	"sheepdog":  true,
+}
+
+// TreeInput converts the stored chart data into a TreeInput for
+// BuildTree, passing hosts and links through unchanged.
+//
+// Storage observations are stored per remote, not per node. Each
+// storage is attributed to the remote's first node in stored order,
+// falling back to the first guest's node. Storages of a cluster-wide
+// type are marked shared, so a shared storage appears once per
+// cluster under the first node and is never double-counted. Storages
+// of a remote without any node or guest are dropped, because they
+// would have no parent node box.
+func (d ChartData) TreeInput(now time.Time, staleAfter time.Duration, hosts []HostInput, links []HostLink) TreeInput {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if staleAfter <= 0 {
+		staleAfter = DefaultStaleAfter
+	}
+	in := TreeInput{Now: now, StaleAfter: staleAfter, Hosts: hosts, Links: links}
+	for _, r := range d.Remotes {
+		ri := RemoteInput{RemoteID: r.RemoteID, Name: r.Name}
+		nodes := d.Nodes[r.RemoteID]
+		for _, n := range nodes {
+			ri.Nodes = append(ri.Nodes, NodeInput{
+				Node: n.Node, Status: n.Status, State: n.State,
+				Reason: n.Reason, ObservedAt: n.ObservedAt,
+			})
+		}
+		guests := d.Guests[r.RemoteID]
+		for _, g := range guests {
+			ri.Guests = append(ri.Guests, GuestInput{
+				VMID: g.VMID, Generation: g.Generation, Kind: g.Kind,
+				Node: g.Node, Name: g.Name, Status: g.Status,
+				State: g.State, Reason: g.Reason, ObservedAt: g.ObservedAt,
+			})
+		}
+		anchor := ""
+		if len(nodes) > 0 {
+			anchor = nodes[0].Node
+		} else {
+			for _, g := range guests {
+				if g.Node != "" {
+					anchor = g.Node
+					break
+				}
+			}
+		}
+		if anchor == "" {
+			// No node box could host the storages; drop them.
+			in.Remotes = append(in.Remotes, ri)
+			continue
+		}
+		for _, st := range d.Storages[r.RemoteID] {
+			// A capacity pair is only usable when the total is
+			// positive and the free amount does not exceed it; a
+			// malformed pair (free > total) is capacity-unknown, not
+			// a healthy zero fill.
+			capacityKnown := st.SizeBytes > 0 && st.FreeBytes <= st.SizeBytes
+			var used uint64
+			if capacityKnown {
+				used = st.SizeBytes - st.FreeBytes
+			}
+			ri.Storages = append(ri.Storages, StorageInput{
+				Node:          anchor,
+				ID:            st.Name,
+				Type:          st.Type,
+				Active:        st.Active,
+				Shared:        clusterStorageTypes[st.Type],
+				UsedBytes:     used,
+				TotalBytes:    st.SizeBytes,
+				CapacityKnown: capacityKnown,
+				StoredState:   st.State,
+				StoredReason:  st.Reason,
+				Stale:         now.Sub(st.ObservedAt) > StorageStaleAfter,
+			})
+		}
+		in.Remotes = append(in.Remotes, ri)
+	}
+	return in
 }

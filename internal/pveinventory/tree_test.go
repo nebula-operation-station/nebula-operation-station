@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -1021,12 +1022,18 @@ func seedChartStore(t *testing.T) *Store {
 	if _, err := s.IngestObservation(ctx, newObsA().
 		nodes(mkNode("p1"), mkNode("p2")).
 		guests(mkGuest(100, 1, "vm-100"), mkGuest(110, 1, "vm-110"), mkGuest(120, 1, "vm-120")).
+		storages(
+			mkStorage("local-lvm", "lvmthin", 100<<30, 10<<30),
+			mkStorage("shared-nfs", "nfs", 1<<40, 500<<30),
+			mkStorage("pbs-backup", "pbs", 0, 0),
+		).
 		build()); err != nil {
 		t.Fatalf("ingest A: %v", err)
 	}
 	if _, err := s.IngestObservation(ctx, newObsB().
 		nodes(mkNode("q1")).
 		guests(mkGuest(100, 1, "vm-b100")).
+		storages(mkStorage("local-dir", "dir", 10<<30, 9<<30)).
 		build()); err != nil {
 		t.Fatalf("ingest B: %v", err)
 	}
@@ -1100,10 +1107,225 @@ func TestChartDataBoundedQueries(t *testing.T) {
 		{MaxRemotes: MaxTreeRemotes + 1},
 		{MaxNodes: MaxTreeNodesPerRemote + 1},
 		{MaxGuests: MaxTreeGuestsPerRemote + 1},
+		{MaxStorages: MaxStoragesQuery + 1},
 	} {
 		if _, err := s.ChartData(ctx, q); err == nil {
 			t.Fatalf("expected error for limit %d above maximum", q.MaxRemotes)
 		}
+	}
+}
+
+func TestChartDataStorages(t *testing.T) {
+	s := seedChartStore(t)
+	ctx := context.Background()
+
+	data, err := s.ChartData(ctx, ChartQuery{})
+	if err != nil {
+		t.Fatalf("ChartData: %v", err)
+	}
+	// Storages are returned per remote, ordered by storage name.
+	gotA := data.Storages["remote-a"]
+	if len(gotA) != 3 {
+		t.Fatalf("remote-a storages: %d, want 3", len(gotA))
+	}
+	wantA := []struct {
+		name string
+		typ  string
+	}{
+		{"local-lvm", "lvmthin"},
+		{"pbs-backup", "pbs"},
+		{"shared-nfs", "nfs"},
+	}
+	for i, w := range wantA {
+		if gotA[i].Name != w.name || gotA[i].Type != w.typ {
+			t.Fatalf("remote-a storage %d = %s/%s, want %s/%s", i, gotA[i].Name, gotA[i].Type, w.name, w.typ)
+		}
+	}
+	// Size and free bytes are carried through.
+	if gotA[0].SizeBytes != 100<<30 || gotA[0].FreeBytes != 10<<30 {
+		t.Fatalf("local-lvm bytes: %d/%d", gotA[0].SizeBytes, gotA[0].FreeBytes)
+	}
+	if gotA[1].SizeBytes != 0 || gotA[1].FreeBytes != 0 {
+		t.Fatalf("pbs-backup bytes: %d/%d", gotA[1].SizeBytes, gotA[1].FreeBytes)
+	}
+	if gotB := data.Storages["remote-b"]; len(gotB) != 1 || gotB[0].Name != "local-dir" {
+		t.Fatalf("remote-b storages: %+v", gotB)
+	}
+
+	// Bounded storages: truncated in name order.
+	data, err = s.ChartData(ctx, ChartQuery{RemoteID: "remote-a", MaxStorages: 2})
+	if err != nil {
+		t.Fatalf("ChartData MaxStorages: %v", err)
+	}
+	if len(data.Storages["remote-a"]) != 2 || data.Storages["remote-a"][1].Name != "pbs-backup" {
+		t.Fatalf("bounded storages: %+v", data.Storages["remote-a"])
+	}
+}
+
+func TestChartDataTreeInputStorages(t *testing.T) {
+	s := seedChartStore(t)
+	data, err := s.ChartData(context.Background(), ChartQuery{})
+	if err != nil {
+		t.Fatalf("ChartData: %v", err)
+	}
+	in := data.TreeInput(treeNow, 0, nil, nil)
+
+	// remote-a: storages anchored to the first stored node, p1.
+	ra := in.Remotes[0]
+	if ra.RemoteID != "remote-a" {
+		t.Fatalf("remote order: %+v", ra)
+	}
+	if len(ra.Storages) != 3 {
+		t.Fatalf("remote-a storages: %d, want 3", len(ra.Storages))
+	}
+	for _, st := range ra.Storages {
+		if st.Node != "p1" {
+			t.Fatalf("storage %s anchored to %q, want p1", st.ID, st.Node)
+		}
+	}
+	byID := make(map[string]StorageInput, len(ra.Storages))
+	for _, st := range ra.Storages {
+		byID[st.ID] = st
+	}
+	lvm := byID["local-lvm"]
+	if lvm.Shared || !lvm.CapacityKnown || lvm.UsedBytes != 90<<30 || lvm.TotalBytes != 100<<30 {
+		t.Fatalf("local-lvm: %+v", lvm)
+	}
+	nfs := byID["shared-nfs"]
+	// Seeded with size 1 TiB and 500 GiB free, so used is 524 GiB.
+	if !nfs.Shared || !nfs.CapacityKnown || nfs.UsedBytes != 1<<40-500<<30 || nfs.TotalBytes != 1<<40 {
+		t.Fatalf("shared-nfs: %+v", nfs)
+	}
+	pbs := byID["pbs-backup"]
+	if !pbs.Shared || pbs.CapacityKnown || pbs.Stale {
+		t.Fatalf("pbs-backup: %+v", pbs)
+	}
+	// remote-b: anchored to its only node, not shared.
+	rb := in.Remotes[1]
+	if len(rb.Storages) != 1 || rb.Storages[0].Node != "q1" || rb.Storages[0].Shared {
+		t.Fatalf("remote-b storages: %+v", rb.Storages)
+	}
+
+	// BuildTree places the boxes under the anchor node; the pbs box
+	// is unknown (no capacity), never 0 percent.
+	tree, err := BuildTree(in)
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+	p1 := findBox(t, tree.Roots, "node/remote-a/p1")
+	if len(p1.Children) != 6 { // 3 guests + 3 storages
+		t.Fatalf("p1 children: %d, want 6", len(p1.Children))
+	}
+	stBox := findBox(t, p1.Children, "storage/remote-a/local-lvm")
+	if stBox.State != StateCritical || stBox.StorageFillPercent != 90 {
+		t.Fatalf("local-lvm box: state=%s fill=%d, want critical 90", stBox.State, stBox.StorageFillPercent)
+	}
+	pbsBox := findBox(t, p1.Children, "storage/remote-a/pbs-backup")
+	if pbsBox.State != StateUnknown || pbsBox.StorageFillPercent != 0 || !pbsBox.StorageBackup || !pbsBox.StorageShared {
+		t.Fatalf("pbs box: %+v", pbsBox)
+	}
+	// The shared nfs box is marked shared and appears once.
+	nfsBox := findBox(t, p1.Children, "storage/remote-a/shared-nfs")
+	if !nfsBox.StorageShared || nfsBox.State != StateOK {
+		t.Fatalf("nfs box: %+v", nfsBox)
+	}
+	if got := countBoxes(tree.Roots, "storage/remote-a/shared-nfs"); got != 1 {
+		t.Fatalf("shared nfs counted %d times, want 1", got)
+	}
+}
+
+func countBoxes(boxes []Box, id string) int {
+	n := 0
+	for _, b := range boxes {
+		if b.ID == id {
+			n++
+		}
+		n += countBoxes(b.Children, id)
+	}
+	return n
+}
+
+func TestChartDataTreeInputStorageEdgeCases(t *testing.T) {
+	// Inactive and stale storages are unknown, never 0 percent.
+	data := ChartData{
+		Remotes: []Remote{{RemoteID: "remote-a", Name: "A"}},
+		Nodes: map[string][]Node{
+			"remote-a": {{Node: "p1", Status: "online", State: StateAvailable, ObservedAt: freshAt()}},
+		},
+		Storages: map[string][]Storage{
+			"remote-a": {
+				{Name: "fresh", Type: "dir", Active: true, SizeBytes: 10 << 30, FreeBytes: 9 << 30, ObservedAt: freshAt(), State: StateAvailable},
+				{Name: "inactive", Type: "dir", Active: false, SizeBytes: 10 << 30, FreeBytes: 9 << 30, ObservedAt: freshAt(), State: StateAvailable},
+				{Name: "stale", Type: "dir", Active: true, SizeBytes: 10 << 30, FreeBytes: 9 << 30, ObservedAt: treeNow.Add(-16 * time.Minute), State: StateAvailable},
+			},
+		},
+	}
+	tree, err := BuildTree(data.TreeInput(treeNow, 0, nil, nil))
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+	p1 := findBox(t, tree.Roots, "node/remote-a/p1")
+	freshBox := findBox(t, p1.Children, "storage/remote-a/fresh")
+	if freshBox.State != StateOK || freshBox.StorageFillPercent != 10 {
+		t.Fatalf("fresh box: %+v", freshBox)
+	}
+	inactiveBox := findBox(t, p1.Children, "storage/remote-a/inactive")
+	if inactiveBox.State != StateUnknown || inactiveBox.StorageFillPercent != 0 {
+		t.Fatalf("inactive box: %+v", inactiveBox)
+	}
+	staleBox := findBox(t, p1.Children, "storage/remote-a/stale")
+	if !staleBox.Stale || staleBox.State != StateUnknown || staleBox.StorageFillPercent != 0 {
+		t.Fatalf("stale box: %+v", staleBox)
+	}
+}
+
+func TestChartDataTreeInputStorageAnchoring(t *testing.T) {
+	ctx := context.Background()
+
+	// No node observations: storages anchor to the first guest's node.
+	s, _, _ := newTestStore(t)
+	if err := s.UpsertRemote(ctx, remoteA()); err != nil {
+		t.Fatalf("UpsertRemote: %v", err)
+	}
+	if _, err := s.IngestObservation(ctx, newObsA().
+		guests(mkGuest(101, 1, "vm-101")).
+		storages(mkStorage("local", "dir", 10<<30, 5<<30)).
+		build()); err != nil {
+		t.Fatalf("ingest guest-only: %v", err)
+	}
+	data, err := s.ChartData(ctx, ChartQuery{})
+	if err != nil {
+		t.Fatalf("ChartData: %v", err)
+	}
+	in := data.TreeInput(treeNow, 0, nil, nil)
+	if len(in.Remotes[0].Storages) != 1 || in.Remotes[0].Storages[0].Node != "p1" {
+		t.Fatalf("guest-anchor: %+v", in.Remotes[0].Storages)
+	}
+
+	// No nodes and no guests: storages are dropped, remote kept.
+	s2, _, _ := newTestStore(t)
+	if err := s2.UpsertRemote(ctx, remoteB()); err != nil {
+		t.Fatalf("UpsertRemote B: %v", err)
+	}
+	if _, err := s2.IngestObservation(ctx, newObsB().
+		storages(mkStorage("orphan", "dir", 10<<30, 5<<30)).
+		build()); err != nil {
+		t.Fatalf("ingest orphan: %v", err)
+	}
+	data2, err := s2.ChartData(ctx, ChartQuery{})
+	if err != nil {
+		t.Fatalf("ChartData orphan: %v", err)
+	}
+	in2 := data2.TreeInput(treeNow, 0, nil, nil)
+	if len(in2.Remotes) != 1 || len(in2.Remotes[0].Storages) != 0 {
+		t.Fatalf("orphan: %+v", in2.Remotes)
+	}
+	tree2, err := BuildTree(in2)
+	if err != nil {
+		t.Fatalf("BuildTree orphan: %v", err)
+	}
+	if len(tree2.Roots) != 0 {
+		t.Fatalf("orphan tree roots: %+v", tree2.Roots)
 	}
 }
 
@@ -1129,5 +1351,379 @@ func TestChartDataExcludesTombstonedGuests(t *testing.T) {
 		if g.VMID == 120 {
 			t.Fatal("tombstoned guest 120 must not appear")
 		}
+	}
+}
+
+// --- PVE storage boxes (owner request: datastores under each PVE host) ---
+
+func storageIn(node, id, typ string, used, total uint64) StorageInput {
+	return StorageInput{Node: node, ID: id, Type: typ, Active: true,
+		UsedBytes: used, TotalBytes: total, CapacityKnown: total > 0}
+}
+
+func TestBuildTreeStorageBoxesAfterGuests(t *testing.T) {
+	in := treeInput()
+	in.Remotes = []RemoteInput{{
+		RemoteID: "remote-a",
+		Nodes:    []NodeInput{nodeIn("p1")},
+		Guests:   []GuestInput{guestIn(100, "p1", "vm-100")},
+		Storages: []StorageInput{
+			storageIn("p1", "zfs-data", "zfspool", 70, 100),
+			storageIn("p1", "local", "dir", 10, 100),
+			storageIn("p1", "backup", "pbs", 0, 0),
+		},
+	}}
+	tree, err := BuildTree(in)
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+	root := tree.Roots[0]
+	// The guest box first, then the storage boxes sorted by id.
+	if len(root.Children) != 4 {
+		t.Fatalf("expected 4 children, got %d", len(root.Children))
+	}
+	if root.Children[0].Kind != KindGuest {
+		t.Fatalf("first child is %s, want guest", root.Children[0].Kind)
+	}
+	want := []string{"storage/remote-a/backup", "storage/remote-a/local", "storage/remote-a/zfs-data"}
+	for i, id := range want {
+		if root.Children[i+1].ID != id {
+			t.Fatalf("child %d = %s, want %s", i+1, root.Children[i+1].ID, id)
+		}
+	}
+	if root.Counts[KindStorage] != 3 {
+		t.Fatalf("storage count = %d, want 3", root.Counts[KindStorage])
+	}
+	zfs := findBox(t, root.Children, "storage/remote-a/zfs-data")
+	if zfs.Kind != KindStorage || zfs.Name != "zfs-data" || zfs.StorageType != "zfspool" {
+		t.Fatalf("wrong storage box: %+v", zfs)
+	}
+	if zfs.StorageUsedBytes != 70 || zfs.StorageTotalBytes != 100 || zfs.StorageFillPercent != 70 {
+		t.Fatalf("zfs fill: %d/%d pct=%d", zfs.StorageUsedBytes, zfs.StorageTotalBytes, zfs.StorageFillPercent)
+	}
+	if zfs.State != StateWarning {
+		t.Fatalf("70%% storage state = %s, want warning", zfs.State)
+	}
+	backup := findBox(t, root.Children, "storage/remote-a/backup")
+	if !backup.StorageBackup {
+		t.Fatal("pbs storage not marked as backup datastore")
+	}
+	if backup.State != StateUnknown {
+		t.Fatalf("pbs storage without capacity: state = %s, want unknown (never 0%%)", backup.State)
+	}
+	local := findBox(t, root.Children, "storage/remote-a/local")
+	if local.State != StateOK || local.StorageFillPercent != 10 {
+		t.Fatalf("local storage: state=%s pct=%d", local.State, local.StorageFillPercent)
+	}
+}
+
+func TestBuildTreeSharedStorageOncePerCluster(t *testing.T) {
+	in := treeInput()
+	shared := storageIn("p1", "nfs-shared", "nfs", 50, 100)
+	shared.Shared = true
+	shared2 := storageIn("p2", "nfs-shared", "nfs", 50, 100)
+	shared2.Shared = true
+	in.Remotes = []RemoteInput{{
+		RemoteID: "remote-a",
+		Nodes:    []NodeInput{nodeIn("p1"), nodeIn("p2")},
+		Storages: []StorageInput{
+			shared,
+			shared2,
+			storageIn("p2", "local2", "dir", 10, 100),
+		},
+	}}
+	tree, err := BuildTree(in)
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+	p1 := findBox(t, tree.Roots, "node/remote-a/p1")
+	p2 := findBox(t, tree.Roots, "node/remote-a/p2")
+	s1 := findBox(t, p1.Children, "storage/remote-a/nfs-shared")
+	if !s1.StorageShared {
+		t.Fatal("shared storage not marked shared")
+	}
+	for _, c := range p2.Children {
+		if c.ID == "storage/remote-a/nfs-shared" {
+			t.Fatal("shared storage double-counted on the second node")
+		}
+	}
+	if len(p2.Children) != 1 || p2.Children[0].ID != "storage/remote-a/local2" {
+		t.Fatalf("p2 children: %+v", p2.Children)
+	}
+
+	// A storage reported by more than one node but not explicitly shared
+	// is kept per node and never derived as shared.
+	in.Remotes[0].Storages[0].Shared = false
+	in.Remotes[0].Storages[1].Shared = false
+	tree, err = BuildTree(in)
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+	p1 = findBox(t, tree.Roots, "node/remote-a/p1")
+	p2 = findBox(t, tree.Roots, "node/remote-a/p2")
+	s1 = findBox(t, p1.Children, "storage/remote-a/nfs-shared")
+	if s1.StorageShared {
+		t.Fatal("non-shared multi-node storage derived as shared")
+	}
+	s2 := findBox(t, p2.Children, "storage/remote-a/nfs-shared")
+	if s2.StorageShared {
+		t.Fatal("non-shared multi-node storage derived as shared on second node")
+	}
+	if len(p2.Children) != 2 {
+		t.Fatalf("p2 children: %+v", p2.Children)
+	}
+}
+
+func TestBuildTreeSameIDLocalStoresNotDeduped(t *testing.T) {
+	// Two independent node-local stores with the same id on different
+	// nodes must both render; dedup applies only to explicitly shared
+	// stores. The second node's critical store must not be hidden.
+	in := treeInput()
+	in.Remotes = []RemoteInput{{
+		RemoteID: "remote-a",
+		Nodes:    []NodeInput{nodeIn("p1"), nodeIn("p2")},
+		Storages: []StorageInput{
+			storageIn("p1", "local", "dir", 10, 100),
+			storageIn("p2", "local", "dir", 90, 100),
+		},
+	}}
+	tree, err := BuildTree(in)
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+	p1 := findBox(t, tree.Roots, "node/remote-a/p1")
+	p2 := findBox(t, tree.Roots, "node/remote-a/p2")
+	s1 := findBox(t, p1.Children, "storage/remote-a/local")
+	s2 := findBox(t, p2.Children, "storage/remote-a/local")
+	if s1.StorageShared {
+		t.Fatal("local store on p1 marked shared")
+	}
+	if s2.StorageShared {
+		t.Fatal("local store on p2 marked shared")
+	}
+	if s2.State != StateCritical {
+		t.Fatalf("p2 local store state = %s, want critical", s2.State)
+	}
+}
+
+func TestBuildTreeStorageStates(t *testing.T) {
+	cases := []struct {
+		name   string
+		st     StorageInput
+		want   BoxState
+		reason string
+	}{
+		{"inactive", func() StorageInput { s := storageIn("p1", "s", "dir", 0, 100); s.Active = false; return s }(), StateUnknown, "inactive"},
+		{"no capacity", storageIn("p1", "s", "pbs", 0, 0), StateUnknown, "capacity unknown"},
+		{"zero total", storageIn("p1", "s", "dir", 5, 0), StateUnknown, "capacity unknown"},
+		{"stale", func() StorageInput { s := storageIn("p1", "s", "dir", 50, 100); s.Stale = true; return s }(), StateUnknown, "stale"},
+		{"ok 49", storageIn("p1", "s", "dir", 49, 100), StateOK, ""},
+		{"warn 70", storageIn("p1", "s", "dir", 70, 100), StateWarning, "70% full"},
+		{"warn 89", storageIn("p1", "s", "dir", 89, 100), StateWarning, "89% full"},
+		{"crit 90", storageIn("p1", "s", "dir", 90, 100), StateCritical, "90% full"},
+		{"crit 100", storageIn("p1", "s", "dir", 100, 100), StateCritical, "100% full"},
+		{"over 100 clamped", storageIn("p1", "s", "dir", 150, 100), StateCritical, "100% full"},
+	}
+	for _, tc := range cases {
+		in := treeInput()
+		in.Remotes = []RemoteInput{{RemoteID: "remote-a", Nodes: []NodeInput{nodeIn("p1")}, Storages: []StorageInput{tc.st}}}
+		tree, err := BuildTree(in)
+		if err != nil {
+			t.Fatalf("BuildTree %s: %v", tc.name, err)
+		}
+		b := findBox(t, tree.Roots[0].Children, "storage/remote-a/s")
+		if b.State != tc.want || b.StateReason != tc.reason {
+			t.Errorf("%s: state=%s reason=%q, want %s %q", tc.name, b.State, b.StateReason, tc.want, tc.reason)
+		}
+	}
+}
+
+func TestChartDataTreeInputStorageCapacityValidation(t *testing.T) {
+	// A malformed capacity pair (free > total) must not render as a
+	// healthy zero fill; it is capacity-unknown. The stored
+	// availability is preserved: unavailable is unknown, partial is a
+	// warning, available with a valid pair is healthy.
+	data := ChartData{
+		Remotes: []Remote{{RemoteID: "remote-a", Name: "A"}},
+		Nodes: map[string][]Node{
+			"remote-a": {{Node: "p1", Status: "online", State: StateAvailable, ObservedAt: freshAt()}},
+		},
+		Storages: map[string][]Storage{
+			"remote-a": {
+				{Name: "malformed", Type: "dir", Active: true, SizeBytes: 10 << 30, FreeBytes: 20 << 30, ObservedAt: freshAt(), State: StateAvailable},
+				{Name: "unavail", Type: "dir", Active: true, SizeBytes: 10 << 30, FreeBytes: 9 << 30, ObservedAt: freshAt(), State: StateUnavailable, Reason: "read failed"},
+				{Name: "partial", Type: "dir", Active: true, SizeBytes: 10 << 30, FreeBytes: 9 << 30, ObservedAt: freshAt(), State: StatePartial, Reason: "truncated"},
+				{Name: "valid", Type: "dir", Active: true, SizeBytes: 10 << 30, FreeBytes: 9 << 30, ObservedAt: freshAt(), State: StateAvailable},
+			},
+		},
+	}
+	tree, err := BuildTree(data.TreeInput(treeNow, 0, nil, nil))
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+	p1 := findBox(t, tree.Roots, "node/remote-a/p1")
+	m := findBox(t, p1.Children, "storage/remote-a/malformed")
+	if m.State != StateUnknown || m.StateReason != "capacity unknown" {
+		t.Fatalf("malformed box: %+v", m)
+	}
+	u := findBox(t, p1.Children, "storage/remote-a/unavail")
+	if u.State != StateUnknown || u.StateReason != "read failed" {
+		t.Fatalf("unavail box: %+v", u)
+	}
+	p := findBox(t, p1.Children, "storage/remote-a/partial")
+	if p.State != StateWarning || p.StateReason != "truncated" {
+		t.Fatalf("partial box: %+v", p)
+	}
+	v := findBox(t, p1.Children, "storage/remote-a/valid")
+	if v.State != StateOK {
+		t.Fatalf("valid box: %+v", v)
+	}
+}
+
+func TestStorageFillPercentOverflowSafe(t *testing.T) {
+	// Hostile used/total pairs where used*100 overflows uint64 must
+	// still yield the correct percentage, not wrap to zero and
+	// suppress the critical threshold.
+	cases := []struct {
+		name  string
+		used  uint64
+		total uint64
+		want  int
+	}{
+		{"fast path", 1, 2, 50},
+		{"fast path boundary", math.MaxUint64 / 100, 2 * math.MaxUint64 / 100, 50},
+		{"overflow half full", 50 << 55, 100 << 55, 50},
+		{"overflow three quarters", 75 << 55, 100 << 55, 75},
+		{"overflow near full", 99 << 55, 100 << 55, 99},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := storageFillPercent(StorageInput{UsedBytes: tc.used, TotalBytes: tc.total})
+			if got != tc.want {
+				t.Fatalf("storageFillPercent(used=%d, total=%d) = %d, want %d", tc.used, tc.total, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestChartDataTreeInputStorageStaleThreshold(t *testing.T) {
+	// Storage is refreshed on a five-minute cadence (spec 12), so a
+	// valid observation must not be expired by the three-minute node
+	// window. The storage threshold is cadence-appropriate: an
+	// observation within the cadence is fresh, one at the boundary is
+	// fresh (strict >), and one just past it is stale.
+	build := func(observedAt time.Time) Box {
+		data := ChartData{
+			Remotes: []Remote{{RemoteID: "remote-a", Name: "A"}},
+			Nodes: map[string][]Node{
+				"remote-a": {{Node: "p1", Status: "online", State: StateAvailable, ObservedAt: freshAt()}},
+			},
+			Storages: map[string][]Storage{
+				"remote-a": {{Name: "s", Type: "dir", Active: true, SizeBytes: 10 << 30, FreeBytes: 9 << 30, ObservedAt: observedAt, State: StateAvailable}},
+			},
+		}
+		tree, err := BuildTree(data.TreeInput(treeNow, 0, nil, nil))
+		if err != nil {
+			t.Fatalf("BuildTree: %v", err)
+		}
+		p1 := findBox(t, tree.Roots, "node/remote-a/p1")
+		return findBox(t, p1.Children, "storage/remote-a/s")
+	}
+	isStale := func(b Box) bool { return b.State == StateUnknown && b.StateReason == "stale" }
+	// Within the five-minute cadence: fresh (stale under the old
+	// three-minute node window).
+	if isStale(build(treeNow.Add(-4 * time.Minute))) {
+		t.Fatal("4-min-old storage marked stale")
+	}
+	// Ten minutes old (staleAt): still fresh for storage.
+	if isStale(build(staleAt())) {
+		t.Fatal("10-min-old storage marked stale")
+	}
+	// At the boundary: fresh (strict >).
+	if isStale(build(treeNow.Add(-StorageStaleAfter))) {
+		t.Fatal("boundary storage marked stale")
+	}
+	// Just past the boundary: stale.
+	if !isStale(build(treeNow.Add(-StorageStaleAfter - time.Second))) {
+		t.Fatal("past-boundary storage not stale")
+	}
+}
+
+func TestBuildTreeStorageThresholdFeedsNodeState(t *testing.T) {
+	in := treeInput()
+	in.Remotes = []RemoteInput{{
+		RemoteID: "remote-a",
+		Nodes:    []NodeInput{nodeIn("p1")},
+		Storages: []StorageInput{storageIn("p1", "full", "lvmthin", 95, 100)},
+	}}
+	tree, err := BuildTree(in)
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+	root := tree.Roots[0]
+	// The node's own state stays ok; the storage feeds the worst
+	// state the chart renders on the node box.
+	if root.State != StateOK || root.Worst != StateCritical {
+		t.Fatalf("node state/worst = %s/%s, want ok/critical", root.State, root.Worst)
+	}
+}
+
+func TestBuildTreeStorageValidation(t *testing.T) {
+	dup := treeInput()
+	dup.Remotes = []RemoteInput{{RemoteID: "remote-a", Nodes: []NodeInput{nodeIn("p1")}, Storages: []StorageInput{
+		storageIn("p1", "local", "dir", 1, 10),
+		storageIn("p1", "local", "dir", 2, 20),
+	}}}
+	if _, err := BuildTree(dup); err == nil {
+		t.Error("duplicate (node, id) storage accepted")
+	}
+	noNode := treeInput()
+	noNode.Remotes = []RemoteInput{{RemoteID: "remote-a", Nodes: []NodeInput{nodeIn("p1")}, Storages: []StorageInput{
+		storageIn("", "local", "dir", 1, 10),
+	}}}
+	if _, err := BuildTree(noNode); err == nil {
+		t.Error("storage without node accepted")
+	}
+	noID := treeInput()
+	noID.Remotes = []RemoteInput{{RemoteID: "remote-a", Nodes: []NodeInput{nodeIn("p1")}, Storages: []StorageInput{
+		storageIn("p1", "", "dir", 1, 10),
+	}}}
+	if _, err := BuildTree(noID); err == nil {
+		t.Error("storage without id accepted")
+	}
+	over := treeInput()
+	sts := make([]StorageInput, 0, MaxTreeStoragesPerRemote+1)
+	for i := 0; i <= MaxTreeStoragesPerRemote; i++ {
+		sts = append(sts, storageIn("p1", fmt.Sprintf("s%02d", i), "dir", 1, 10))
+	}
+	over.Remotes = []RemoteInput{{RemoteID: "remote-a", Nodes: []NodeInput{nodeIn("p1")}, Storages: sts}}
+	if _, err := BuildTree(over); err == nil {
+		t.Error("storage count above the limit accepted")
+	}
+	at := treeInput()
+	at.Remotes = []RemoteInput{{RemoteID: "remote-a", Nodes: []NodeInput{nodeIn("p1")}, Storages: sts[:MaxTreeStoragesPerRemote]}}
+	if _, err := BuildTree(at); err != nil {
+		t.Errorf("storage count at the limit rejected: %v", err)
+	}
+}
+
+func TestBuildTreeImplicitNodeForOrphanStorage(t *testing.T) {
+	in := treeInput()
+	in.Remotes = []RemoteInput{{
+		RemoteID: "remote-a",
+		Storages: []StorageInput{storageIn("ghost", "local", "dir", 10, 100)},
+	}}
+	tree, err := BuildTree(in)
+	if err != nil {
+		t.Fatalf("BuildTree: %v", err)
+	}
+	if len(tree.Roots) != 1 || tree.Roots[0].Kind != KindPVENode || tree.Roots[0].Name != "ghost" {
+		t.Fatalf("expected implicit node root, got %+v", tree.Roots)
+	}
+	if tree.Roots[0].State != StateUnknown {
+		t.Fatalf("implicit node state = %s, want unknown", tree.Roots[0].State)
+	}
+	if len(tree.Roots[0].Children) != 1 || tree.Roots[0].Children[0].Kind != KindStorage {
+		t.Fatalf("implicit node children: %+v", tree.Roots[0].Children)
 	}
 }

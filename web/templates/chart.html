@@ -9,13 +9,52 @@
 <section class="panel" aria-label="Inventory chart">
   <p class="status status--error">Inventory unavailable</p>
 </section>
-{{else if not .Chart.Hosts}}
-<section class="panel" aria-label="Inventory chart">
-  <p class="chart__empty">No managed hosts yet.</p>
-</section>
-{{else}}
+{{else if or .Chart.Hosts .Chart.PVENodes}}
 <section class="panel chart" aria-label="Inventory org chart">
+  {{if .Chart.PVEUnavailable}}
+  <p class="status status--error">PVE unavailable</p>
+  {{end}}
   <ul class="chart__hosts">
+    {{range .Chart.PVENodes}}
+    <li class="chart__node {{.WorstClass}}">
+      <details class="chart__details"{{if .Expanded}} open{{end}}>
+        <summary class="chart__box chart__box--node" title="{{.StateReason}}">
+          <span class="chart__title">
+            <span class="chart__dot {{.StateClass}}" aria-hidden="true"></span>
+            <span class="chart__name" title="{{.Name}}">{{.Name}}</span>
+          </span>
+          <span class="chart__sub">PVE node{{if .Stale}} · stale{{end}}</span>
+        </summary>
+        <div class="chart__children">
+          <ul class="chart__list">
+            {{range .Guests}}
+            <li class="chart__box chart__box--guest" title="{{.StateReason}}">
+              <span class="chart__dot {{.StateClass}}" aria-hidden="true"></span>
+              <span class="chart__gname" title="{{.Name}}">{{.Name}}</span>
+              <span class="chart__vmid">VM {{.VMID}}</span>
+            </li>
+            {{end}}
+            {{range .Storages}}
+            <li class="chart__box chart__box--storage chart__storage--{{.State}}" title="{{.StateReason}}">
+              <span class="chart__storage-head">
+                <span class="chart__storage-icon {{.IconClass}}" aria-hidden="true"></span>
+                <span class="chart__storage-id" title="{{.Name}}">{{.Name}}</span>
+                <span class="chart__storage-type">{{.TypeLabel}}</span>
+                {{if .Shared}}<span class="chart__storage-badge">shared</span>{{end}}
+              </span>
+              {{if .HasPercent}}
+              <span class="chart__storage-fill">{{.UsedPercent}} % von {{.TotalText}}</span>
+              <meter class="chart__storage-meter" min="0" max="100" low="70" high="90" optimum="0" value="{{.UsedPercent}}">{{.UsedPercent}}%</meter>
+              {{else}}
+              <span class="chart__storage-fill chart__storage-fill--unknown">unknown</span>
+              {{end}}
+            </li>
+            {{end}}
+          </ul>
+        </div>
+      </details>
+    </li>
+    {{end}}
     {{range .Chart.Hosts}}{{$h := .}}
     <li class="chart__node {{.WorstClass}}">
       <details class="chart__details"{{if .Expanded}} open{{end}}>
@@ -65,6 +104,10 @@
     </li>
     {{end}}
   </ul>
+</section>
+{{else}}
+<section class="panel" aria-label="Inventory chart">
+  <p class="chart__empty">No managed hosts yet.</p>
 </section>
 {{end}}
 {{end}}

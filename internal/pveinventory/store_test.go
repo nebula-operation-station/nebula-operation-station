@@ -84,6 +84,17 @@ func mkGuest(vmid uint64, gen uint64, name string) pvecontract.GuestObservation 
 	}
 }
 
+func mkStorage(name, typ string, sizeBytes, freeBytes uint64) pvecontract.StorageObservation {
+	return pvecontract.StorageObservation{
+		Name:      name,
+		Type:      typ,
+		Content:   []string{"images"},
+		Active:    true,
+		SizeBytes: sizeBytes,
+		FreeBytes: freeBytes,
+	}
+}
+
 func newObsA() *obsBuilder {
 	return &obsBuilder{obs: pvecontract.Observation{
 		RemoteID:             "remote-a",
