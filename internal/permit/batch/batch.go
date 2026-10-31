@@ -321,7 +321,7 @@ func (a *Authority) freshLocked(ctx context.Context, d canonical.Digest, e *entr
 			}
 		}
 	}()
-	live, err := a.getLocked(d, state)
+	live, err := a.getLocked(d, 0)
 	if err != nil {
 		return err
 	}
@@ -332,6 +332,10 @@ func (a *Authority) freshLocked(ctx context.Context, d canonical.Digest, e *entr
 		delete(a.entries, d)
 		a.emit("batch_invalidated", d, permit.CodeRiskAboveApproval, "")
 		return ErrInvalidated
+	}
+	// A concurrent approval must not hide an observed trust or risk change.
+	if state != 0 && live.approval.State != state {
+		return failure(permit.CodeWrongState, "batch approval is in the wrong state")
 	}
 	if checkErr != nil {
 		a.emit("batch_denied", d, permit.CodeStorage, "")

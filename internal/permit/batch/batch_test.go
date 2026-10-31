@@ -322,6 +322,60 @@ func TestTrustOrRiskChangeInvalidatesWholeBatch(t *testing.T) {
 		}
 	}
 }
+func TestConcurrentApprovalCannotPreserveBatchAfterObservedCriticalRisk(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode permit.Mode
+	}{
+		{"browser", permit.ModeStandard},
+		{"cli", permit.ModeHardened},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := setup(t, tc.mode)
+			p := propose(t, e, canonical.RiskHigh, canonical.RiskLow)
+			assertion := e.sign(p.Challenge)
+			approve := func() error {
+				if tc.mode == permit.ModeHardened {
+					_, err := e.a.ApproveCLI(ctx, p.Digest, 1000)
+					return err
+				}
+				_, err := e.a.SubmitAssertion(ctx, p.Digest, assertion)
+				return err
+			}
+			entered, release := make(chan struct{}), make(chan struct{})
+			unblock := sync.OnceFunc(func() { close(release) })
+			defer unblock()
+			var reads atomic.Int32
+			e.policy.hook = func() {
+				if reads.Add(1) == 1 {
+					close(entered)
+					<-release
+				}
+			}
+			original := Snapshot{Risk: canonical.RiskHigh, Trust: sha256.Sum256([]byte("member-0"))}
+			critical := original
+			critical.Risk = canonical.RiskCritical
+			e.policy.set("member-0", critical)
+			done := make(chan error, 1)
+			go func() { done <- approve() }()
+			// The first read captured CRITICAL before blocking. Restore risk so
+			// another request can approve while that observation is in flight.
+			<-entered
+			e.policy.set("member-0", original)
+			if err := approve(); err != nil {
+				t.Fatal(err)
+			}
+			unblock()
+			observedErr := <-done
+			_, err := e.a.Check(ctx, p.Digest)
+			wantCode(t, err, permit.CodeNotFound)
+			if !errors.Is(observedErr, ErrInvalidated) {
+				t.Fatalf("observed risk change: got %v, want %v", observedErr, ErrInvalidated)
+			}
+		})
+	}
+}
+
 func TestPolicyFailureDeniesWithoutLeakingDetails(t *testing.T) {
 	e := setup(t, permit.ModeStandard)
 	p := propose(t, e, canonical.RiskHigh)
