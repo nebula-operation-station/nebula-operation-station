@@ -88,6 +88,13 @@ const (
 	ExecutorService_ListScheduleGrants_FullMethodName        = "/nebula.executor.v1.ExecutorService/ListScheduleGrants"
 	ExecutorService_RevokeScheduleGrant_FullMethodName       = "/nebula.executor.v1.ExecutorService/RevokeScheduleGrant"
 	ExecutorService_RunScheduled_FullMethodName              = "/nebula.executor.v1.ExecutorService/RunScheduled"
+	ExecutorService_ProposeReadGrant_FullMethodName          = "/nebula.executor.v1.ExecutorService/ProposeReadGrant"
+	ExecutorService_CommitReadGrant_FullMethodName           = "/nebula.executor.v1.ExecutorService/CommitReadGrant"
+	ExecutorService_ListPendingReadGrants_FullMethodName     = "/nebula.executor.v1.ExecutorService/ListPendingReadGrants"
+	ExecutorService_ApproveReadGrantCLI_FullMethodName       = "/nebula.executor.v1.ExecutorService/ApproveReadGrantCLI"
+	ExecutorService_ListReadGrants_FullMethodName            = "/nebula.executor.v1.ExecutorService/ListReadGrants"
+	ExecutorService_RevokeReadGrant_FullMethodName           = "/nebula.executor.v1.ExecutorService/RevokeReadGrant"
+	ExecutorService_RunReadGrant_FullMethodName              = "/nebula.executor.v1.ExecutorService/RunReadGrant"
 	ExecutorService_ListEvents_FullMethodName                = "/nebula.executor.v1.ExecutorService/ListEvents"
 	ExecutorService_BackupExecutor_FullMethodName            = "/nebula.executor.v1.ExecutorService/BackupExecutor"
 	ExecutorService_ProbePVERemote_FullMethodName            = "/nebula.executor.v1.ExecutorService/ProbePVERemote"
@@ -340,6 +347,26 @@ type ExecutorServiceClient interface {
 	// pinned host, the action must still be LOW there, and the interval must
 	// have passed.
 	RunScheduled(ctx context.Context, in *RunScheduledRequest, opts ...grpc.CallOption) (*RunScheduledResponse, error)
+	// Read grants (ADR 0007). These methods use read-grant-v2 authority;
+	// legacy read-schedule-v1 signatures never authorize on-demand reads.
+	// Role: server. Proposes a bounded, frozen document without a session.
+	ProposeReadGrant(ctx context.Context, in *ProposeReadGrantRequest, opts ...grpc.CallOption) (*ProposeReadGrantResponse, error)
+	// Role: server. Relays a fresh user-verified assertion; the executor
+	// verifies the grant-bound challenge. This is never a server approval.
+	// Hardened mode rejects browser approval and requires the local CLI.
+	CommitReadGrant(ctx context.Context, in *CommitReadGrantRequest, opts ...grpc.CallOption) (*CommitReadGrantResponse, error)
+	// Role: admin. Retrieves the complete frozen scope for local review.
+	ListPendingReadGrants(ctx context.Context, in *ListPendingReadGrantsRequest, opts ...grpc.CallOption) (*ListPendingReadGrantsResponse, error)
+	// Role: admin only. Approves the locally reviewed digest.
+	ApproveReadGrantCLI(ctx context.Context, in *ApproveReadGrantCLIRequest, opts ...grpc.CallOption) (*ApproveReadGrantCLIResponse, error)
+	// Role: server, admin. Lists complete approved read grants.
+	ListReadGrants(ctx context.Context, in *ListReadGrantsRequest, opts ...grpc.CallOption) (*ListReadGrantsResponse, error)
+	// Role: server, admin. Reduces authority, without an assertion.
+	RevokeReadGrant(ctx context.Context, in *RevokeReadGrantRequest, opts ...grpc.CallOption) (*RevokeReadGrantResponse, error)
+	// Role: server. One exact read with a fresh executor-generated execution
+	// ID. Both triggers share authorization, budget, revocation and dispatch
+	// checks. The trigger selects work inside the approved scope only.
+	RunReadGrant(ctx context.Context, in *RunReadGrantRequest, opts ...grpc.CallOption) (*RunReadGrantResponse, error)
 	// Signed events (M10-1). Role: server, admin. Read-only: the chain of
 	// the executor's audit events with the key to verify it.
 	ListEvents(ctx context.Context, in *ListEventsRequest, opts ...grpc.CallOption) (*ListEventsResponse, error)
@@ -1049,6 +1076,76 @@ func (c *executorServiceClient) RunScheduled(ctx context.Context, in *RunSchedul
 	return out, nil
 }
 
+func (c *executorServiceClient) ProposeReadGrant(ctx context.Context, in *ProposeReadGrantRequest, opts ...grpc.CallOption) (*ProposeReadGrantResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProposeReadGrantResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ProposeReadGrant_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) CommitReadGrant(ctx context.Context, in *CommitReadGrantRequest, opts ...grpc.CallOption) (*CommitReadGrantResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitReadGrantResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_CommitReadGrant_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ListPendingReadGrants(ctx context.Context, in *ListPendingReadGrantsRequest, opts ...grpc.CallOption) (*ListPendingReadGrantsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListPendingReadGrantsResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ListPendingReadGrants_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ApproveReadGrantCLI(ctx context.Context, in *ApproveReadGrantCLIRequest, opts ...grpc.CallOption) (*ApproveReadGrantCLIResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ApproveReadGrantCLIResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ApproveReadGrantCLI_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ListReadGrants(ctx context.Context, in *ListReadGrantsRequest, opts ...grpc.CallOption) (*ListReadGrantsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListReadGrantsResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ListReadGrants_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) RevokeReadGrant(ctx context.Context, in *RevokeReadGrantRequest, opts ...grpc.CallOption) (*RevokeReadGrantResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RevokeReadGrantResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_RevokeReadGrant_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) RunReadGrant(ctx context.Context, in *RunReadGrantRequest, opts ...grpc.CallOption) (*RunReadGrantResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RunReadGrantResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_RunReadGrant_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *executorServiceClient) ListEvents(ctx context.Context, in *ListEventsRequest, opts ...grpc.CallOption) (*ListEventsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListEventsResponse)
@@ -1398,6 +1495,26 @@ type ExecutorServiceServer interface {
 	// pinned host, the action must still be LOW there, and the interval must
 	// have passed.
 	RunScheduled(context.Context, *RunScheduledRequest) (*RunScheduledResponse, error)
+	// Read grants (ADR 0007). These methods use read-grant-v2 authority;
+	// legacy read-schedule-v1 signatures never authorize on-demand reads.
+	// Role: server. Proposes a bounded, frozen document without a session.
+	ProposeReadGrant(context.Context, *ProposeReadGrantRequest) (*ProposeReadGrantResponse, error)
+	// Role: server. Relays a fresh user-verified assertion; the executor
+	// verifies the grant-bound challenge. This is never a server approval.
+	// Hardened mode rejects browser approval and requires the local CLI.
+	CommitReadGrant(context.Context, *CommitReadGrantRequest) (*CommitReadGrantResponse, error)
+	// Role: admin. Retrieves the complete frozen scope for local review.
+	ListPendingReadGrants(context.Context, *ListPendingReadGrantsRequest) (*ListPendingReadGrantsResponse, error)
+	// Role: admin only. Approves the locally reviewed digest.
+	ApproveReadGrantCLI(context.Context, *ApproveReadGrantCLIRequest) (*ApproveReadGrantCLIResponse, error)
+	// Role: server, admin. Lists complete approved read grants.
+	ListReadGrants(context.Context, *ListReadGrantsRequest) (*ListReadGrantsResponse, error)
+	// Role: server, admin. Reduces authority, without an assertion.
+	RevokeReadGrant(context.Context, *RevokeReadGrantRequest) (*RevokeReadGrantResponse, error)
+	// Role: server. One exact read with a fresh executor-generated execution
+	// ID. Both triggers share authorization, budget, revocation and dispatch
+	// checks. The trigger selects work inside the approved scope only.
+	RunReadGrant(context.Context, *RunReadGrantRequest) (*RunReadGrantResponse, error)
 	// Signed events (M10-1). Role: server, admin. Read-only: the chain of
 	// the executor's audit events with the key to verify it.
 	ListEvents(context.Context, *ListEventsRequest) (*ListEventsResponse, error)
@@ -1637,6 +1754,27 @@ func (UnimplementedExecutorServiceServer) RevokeScheduleGrant(context.Context, *
 }
 func (UnimplementedExecutorServiceServer) RunScheduled(context.Context, *RunScheduledRequest) (*RunScheduledResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RunScheduled not implemented")
+}
+func (UnimplementedExecutorServiceServer) ProposeReadGrant(context.Context, *ProposeReadGrantRequest) (*ProposeReadGrantResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ProposeReadGrant not implemented")
+}
+func (UnimplementedExecutorServiceServer) CommitReadGrant(context.Context, *CommitReadGrantRequest) (*CommitReadGrantResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CommitReadGrant not implemented")
+}
+func (UnimplementedExecutorServiceServer) ListPendingReadGrants(context.Context, *ListPendingReadGrantsRequest) (*ListPendingReadGrantsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListPendingReadGrants not implemented")
+}
+func (UnimplementedExecutorServiceServer) ApproveReadGrantCLI(context.Context, *ApproveReadGrantCLIRequest) (*ApproveReadGrantCLIResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ApproveReadGrantCLI not implemented")
+}
+func (UnimplementedExecutorServiceServer) ListReadGrants(context.Context, *ListReadGrantsRequest) (*ListReadGrantsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListReadGrants not implemented")
+}
+func (UnimplementedExecutorServiceServer) RevokeReadGrant(context.Context, *RevokeReadGrantRequest) (*RevokeReadGrantResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RevokeReadGrant not implemented")
+}
+func (UnimplementedExecutorServiceServer) RunReadGrant(context.Context, *RunReadGrantRequest) (*RunReadGrantResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RunReadGrant not implemented")
 }
 func (UnimplementedExecutorServiceServer) ListEvents(context.Context, *ListEventsRequest) (*ListEventsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListEvents not implemented")
@@ -2898,6 +3036,132 @@ func _ExecutorService_RunScheduled_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_ProposeReadGrant_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProposeReadGrantRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ProposeReadGrant(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ProposeReadGrant_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ProposeReadGrant(ctx, req.(*ProposeReadGrantRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_CommitReadGrant_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommitReadGrantRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).CommitReadGrant(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_CommitReadGrant_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).CommitReadGrant(ctx, req.(*CommitReadGrantRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ListPendingReadGrants_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListPendingReadGrantsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ListPendingReadGrants(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ListPendingReadGrants_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ListPendingReadGrants(ctx, req.(*ListPendingReadGrantsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ApproveReadGrantCLI_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ApproveReadGrantCLIRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ApproveReadGrantCLI(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ApproveReadGrantCLI_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ApproveReadGrantCLI(ctx, req.(*ApproveReadGrantCLIRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ListReadGrants_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListReadGrantsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ListReadGrants(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ListReadGrants_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ListReadGrants(ctx, req.(*ListReadGrantsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_RevokeReadGrant_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RevokeReadGrantRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).RevokeReadGrant(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_RevokeReadGrant_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).RevokeReadGrant(ctx, req.(*RevokeReadGrantRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_RunReadGrant_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RunReadGrantRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).RunReadGrant(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_RunReadGrant_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).RunReadGrant(ctx, req.(*RunReadGrantRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ExecutorService_ListEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListEventsRequest)
 	if err := dec(in); err != nil {
@@ -3370,6 +3634,34 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RunScheduled",
 			Handler:    _ExecutorService_RunScheduled_Handler,
+		},
+		{
+			MethodName: "ProposeReadGrant",
+			Handler:    _ExecutorService_ProposeReadGrant_Handler,
+		},
+		{
+			MethodName: "CommitReadGrant",
+			Handler:    _ExecutorService_CommitReadGrant_Handler,
+		},
+		{
+			MethodName: "ListPendingReadGrants",
+			Handler:    _ExecutorService_ListPendingReadGrants_Handler,
+		},
+		{
+			MethodName: "ApproveReadGrantCLI",
+			Handler:    _ExecutorService_ApproveReadGrantCLI_Handler,
+		},
+		{
+			MethodName: "ListReadGrants",
+			Handler:    _ExecutorService_ListReadGrants_Handler,
+		},
+		{
+			MethodName: "RevokeReadGrant",
+			Handler:    _ExecutorService_RevokeReadGrant_Handler,
+		},
+		{
+			MethodName: "RunReadGrant",
+			Handler:    _ExecutorService_RunReadGrant_Handler,
 		},
 		{
 			MethodName: "ListEvents",

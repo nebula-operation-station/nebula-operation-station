@@ -325,6 +325,33 @@ service ExecutorService {
   // have passed.
   rpc RunScheduled(RunScheduledRequest) returns (RunScheduledResponse);
 
+  // Read grants (ADR 0007). These methods use read-grant-v2 authority;
+  // legacy read-schedule-v1 signatures never authorize on-demand reads.
+  // Role: server. Proposes a bounded, frozen document without a session.
+  rpc ProposeReadGrant(ProposeReadGrantRequest) returns (ProposeReadGrantResponse);
+
+  // Role: server. Relays a fresh user-verified assertion; the executor
+  // verifies the grant-bound challenge. This is never a server approval.
+  // Hardened mode rejects browser approval and requires the local CLI.
+  rpc CommitReadGrant(CommitReadGrantRequest) returns (CommitReadGrantResponse);
+
+  // Role: admin. Retrieves the complete frozen scope for local review.
+  rpc ListPendingReadGrants(ListPendingReadGrantsRequest) returns (ListPendingReadGrantsResponse);
+
+  // Role: admin only. Approves the locally reviewed digest.
+  rpc ApproveReadGrantCLI(ApproveReadGrantCLIRequest) returns (ApproveReadGrantCLIResponse);
+
+  // Role: server, admin. Lists complete approved read grants.
+  rpc ListReadGrants(ListReadGrantsRequest) returns (ListReadGrantsResponse);
+
+  // Role: server, admin. Reduces authority, without an assertion.
+  rpc RevokeReadGrant(RevokeReadGrantRequest) returns (RevokeReadGrantResponse);
+
+  // Role: server. One exact read with a fresh executor-generated execution
+  // ID. Both triggers share authorization, budget, revocation and dispatch
+  // checks. The trigger selects work inside the approved scope only.
+  rpc RunReadGrant(RunReadGrantRequest) returns (RunReadGrantResponse);
+
   // Signed events (M10-1). Role: server, admin. Read-only: the chain of
   // the executor's audit events with the key to verify it.
   rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
@@ -1871,4 +1898,102 @@ message CommitPVERepinResponse {
 
 message ProposePVERepinResponse {
   ProposeExecutionResponse permit = 1;
+}
+
+// ReadGrantTrigger selects one approved trigger for one run. It grants no
+// additional authority. Unspecified and unknown values are rejected.
+enum ReadGrantTrigger {
+  READ_GRANT_TRIGGER_UNSPECIFIED = 0;
+  READ_GRANT_TRIGGER_SCHEDULED = 1;
+  READ_GRANT_TRIGGER_ON_DEMAND = 2;
+}
+
+message ProposeReadGrantRequest {
+  // Strict read-grant-v2 JSON, 1..256 KiB; at most 32 actions/1,000 hosts.
+  bytes grant_json = 1;
+}
+
+message ProposeReadGrantResponse {
+  string grant_digest = 1;
+  // Complete canonical document; never a truncated approval scope.
+  bytes canonical_grant = 2;
+  ApprovalRequirement approval_requirement = 3;
+  bytes challenge = 4;
+  int64 challenge_expiry_unix = 5;
+  bytes request_options_json = 6;
+}
+
+message CommitReadGrantRequest {
+  // Exactly 64 lowercase hexadecimal characters.
+  string grant_digest = 1;
+  // UTF-8 WebAuthn assertion JSON, 1..16 KiB. Verified by the executor.
+  bytes assertion_json = 2;
+}
+
+// ReadGrant is durable authority, distinct from a legacy ScheduleGrant.
+message ReadGrant {
+  string grant_id = 1;
+  string grant_digest = 2;
+  bytes canonical_grant = 3;
+  string approved_by = 4;
+  int64 created_unix = 5;
+  int64 expiry_unix = 6;
+  // Zero while active.
+  int64 revoked_unix = 7;
+}
+
+message CommitReadGrantResponse {
+  ReadGrant grant = 1;
+}
+
+message ListPendingReadGrantsRequest {}
+
+message PendingReadGrant {
+  string grant_digest = 1;
+  bytes canonical_grant = 2;
+  int64 approval_expiry_unix = 3;
+}
+
+// Lists fail with ResourceExhausted above the executor's response bound;
+// no approval document or list is silently truncated.
+message ListPendingReadGrantsResponse {
+  repeated PendingReadGrant grants = 1;
+}
+
+message ApproveReadGrantCLIRequest {
+  string grant_digest = 1;
+}
+
+message ApproveReadGrantCLIResponse {
+  ReadGrant grant = 1;
+}
+
+message ListReadGrantsRequest {}
+
+message ListReadGrantsResponse {
+  repeated ReadGrant grants = 1;
+}
+
+message RevokeReadGrantRequest {
+  // Lowercase UUID v4, exactly 36 bytes.
+  string grant_id = 1;
+}
+
+message RevokeReadGrantResponse {}
+
+message RunReadGrantRequest {
+  string grant_id = 1;
+  // execution_digest must be empty. Exact artifact/parameters/credential
+  // binding is rechecked against the approved grant on every run.
+  AuthorizeRunRequest run = 2;
+  // 1..8 endpoints, each at most 1,024 bytes.
+  repeated string endpoints = 3;
+  // Zero selects the executor default; maximum 600 seconds.
+  uint32 timeout_seconds = 4;
+  ReadGrantTrigger trigger = 5;
+}
+
+message RunReadGrantResponse {
+  string execution_id = 1;
+  RunAttachedResponse result = 2;
 }
