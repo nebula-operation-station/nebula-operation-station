@@ -1256,7 +1256,7 @@ func TestChartDataTreeInputStorageEdgeCases(t *testing.T) {
 			"remote-a": {
 				{Name: "fresh", Type: "dir", Active: true, SizeBytes: 10 << 30, FreeBytes: 9 << 30, ObservedAt: freshAt(), State: StateAvailable},
 				{Name: "inactive", Type: "dir", Active: false, SizeBytes: 10 << 30, FreeBytes: 9 << 30, ObservedAt: freshAt(), State: StateAvailable},
-				{Name: "stale", Type: "dir", Active: true, SizeBytes: 10 << 30, FreeBytes: 9 << 30, ObservedAt: staleAt(), State: StateAvailable},
+				{Name: "stale", Type: "dir", Active: true, SizeBytes: 10 << 30, FreeBytes: 9 << 30, ObservedAt: treeNow.Add(-16 * time.Minute), State: StateAvailable},
 			},
 		},
 	}
@@ -1603,6 +1603,49 @@ func TestStorageFillPercentOverflowSafe(t *testing.T) {
 				t.Fatalf("storageFillPercent(used=%d, total=%d) = %d, want %d", tc.used, tc.total, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestChartDataTreeInputStorageStaleThreshold(t *testing.T) {
+	// Storage is refreshed on a five-minute cadence (spec 12), so a
+	// valid observation must not be expired by the three-minute node
+	// window. The storage threshold is cadence-appropriate: an
+	// observation within the cadence is fresh, one at the boundary is
+	// fresh (strict >), and one just past it is stale.
+	build := func(observedAt time.Time) Box {
+		data := ChartData{
+			Remotes: []Remote{{RemoteID: "remote-a", Name: "A"}},
+			Nodes: map[string][]Node{
+				"remote-a": {{Node: "p1", Status: "online", State: StateAvailable, ObservedAt: freshAt()}},
+			},
+			Storages: map[string][]Storage{
+				"remote-a": {{Name: "s", Type: "dir", Active: true, SizeBytes: 10 << 30, FreeBytes: 9 << 30, ObservedAt: observedAt, State: StateAvailable}},
+			},
+		}
+		tree, err := BuildTree(data.TreeInput(treeNow, 0, nil, nil))
+		if err != nil {
+			t.Fatalf("BuildTree: %v", err)
+		}
+		p1 := findBox(t, tree.Roots, "node/remote-a/p1")
+		return findBox(t, p1.Children, "storage/remote-a/s")
+	}
+	isStale := func(b Box) bool { return b.State == StateUnknown && b.StateReason == "stale" }
+	// Within the five-minute cadence: fresh (stale under the old
+	// three-minute node window).
+	if isStale(build(treeNow.Add(-4 * time.Minute))) {
+		t.Fatal("4-min-old storage marked stale")
+	}
+	// Ten minutes old (staleAt): still fresh for storage.
+	if isStale(build(staleAt())) {
+		t.Fatal("10-min-old storage marked stale")
+	}
+	// At the boundary: fresh (strict >).
+	if isStale(build(treeNow.Add(-StorageStaleAfter))) {
+		t.Fatal("boundary storage marked stale")
+	}
+	// Just past the boundary: stale.
+	if !isStale(build(treeNow.Add(-StorageStaleAfter - time.Second))) {
+		t.Fatal("past-boundary storage not stale")
 	}
 }
 

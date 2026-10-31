@@ -68,6 +68,12 @@ const (
 	StorageWarnPercent = 70
 	// StorageCritPercent marks a storage critical at 90 percent full.
 	StorageCritPercent = 90
+	// StorageStaleAfter marks a storage observation stale after three
+	// missed five-minute storage refresh intervals. Storage is refreshed
+	// on a five-minute cadence (spec 12), so the default three-minute
+	// node window would expire a valid observation before its next
+	// refresh.
+	StorageStaleAfter = 15 * time.Minute
 )
 
 // BoxKind identifies one org-chart box.
@@ -1164,7 +1170,7 @@ func (d ChartData) TreeInput(now time.Time, staleAfter time.Duration, hosts []Ho
 				CapacityKnown: capacityKnown,
 				StoredState:   st.State,
 				StoredReason:  st.Reason,
-				Stale:         now.Sub(st.ObservedAt) > staleAfter,
+				Stale:         now.Sub(st.ObservedAt) > StorageStaleAfter,
 			})
 		}
 		in.Remotes = append(in.Remotes, ri)
