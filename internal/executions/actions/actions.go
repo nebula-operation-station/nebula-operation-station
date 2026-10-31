@@ -14,9 +14,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/servicecheck"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
@@ -39,6 +41,10 @@ type Action struct {
 	// Secrets are the action's secret slots (runbooks, M7-3): planning
 	// maps each to a vault secret ID, which the executor resolves.
 	Secrets []string
+	// Validate, when set, applies action-specific parameter rules beyond
+	// the per-parameter patterns (service.check's reserved-destination
+	// approval). It runs after the pattern checks.
+	Validate func(params map[string]string) error
 }
 
 // SecretsKey is the parameters member that maps secret slots to vault
@@ -109,6 +115,36 @@ var unitRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9@._:-]{0,199}$`)
 
 var unitParam = []Param{{Name: "unit", Label: "Unit (e.g. nginx.service)", Pattern: unitRe}}
 
+// serviceCheckDestinationRe is the parameter gate for a service.check
+// destination: a bare hostname or IP literal (the script and
+// servicecheck.ValidateCheck apply the stricter rules, including the
+// reserved-range approval).
+var serviceCheckDestinationRe = regexp.MustCompile(`^[A-Za-z0-9:][A-Za-z0-9.:-]{0,252}$`)
+
+var serviceCheckParams = []Param{
+	{Name: "destination", Label: "Approved destination (hostname or IP literal)", Pattern: serviceCheckDestinationRe},
+	{Name: "port", Label: "Port (1-65535)", Pattern: regexp.MustCompile(`^[0-9]{1,5}$`)},
+	{Name: "protocol", Label: "Protocol (http, https or tcp)", Pattern: regexp.MustCompile(`^(http|https|tcp)$`)},
+	{Name: "internal", Label: "Reserved destination approved (no or yes)", Pattern: regexp.MustCompile(`^(no|yes)$`)},
+}
+
+// serviceCheckValidate applies the service.check destination rules
+// (servicecheck.ValidateCheck): the destination is a hostname or IP
+// literal, and reserved (internal) IP literals need the explicit
+// internal=yes approval.
+func serviceCheckValidate(params map[string]string) error {
+	port, err := strconv.Atoi(params["port"])
+	if err != nil {
+		return fmt.Errorf("parameter port is not valid")
+	}
+	return servicecheck.ValidateCheck(servicecheck.Check{
+		Protocol:         params["protocol"],
+		Destination:      params["destination"],
+		Port:             port,
+		InternalApproved: params["internal"] == "yes",
+	})
+}
+
 // containerRe is a Docker container name or ID: no leading '-', no
 // spaces, quotes or slashes.
 var containerRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
@@ -138,6 +174,11 @@ func (a Action) ValidParams(params map[string]string) error {
 		}
 		if !p.Pattern.MatchString(v) {
 			return fmt.Errorf("parameter %s is not valid", p.Name)
+		}
+	}
+	if a.Validate != nil {
+		if err := a.Validate(params); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -172,6 +213,9 @@ var serviceList []byte
 
 //go:embed scripts/service_status.sh
 var serviceStatus []byte
+
+//go:embed servicecheck/check.sh
+var serviceCheck []byte
 
 //go:embed scripts/docker_list.sh
 var dockerList []byte
@@ -273,6 +317,12 @@ var Builtin = []Action{
 		ID: "service.status", Version: "1.0.0", Title: "Service status",
 		Description: "State of one unit and its last 50 journal lines (journal via sudo when needed). Read-only.",
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: time.Minute, ReadOnly: true, Script: serviceStatus, Params: unitParam, Retry: RetrySafe,
+	},
+	{
+		ID: "service.check", Version: "1.0.0", Title: "Service check",
+		Description: "One bounded HTTP(S) or TCP probe to an operator-approved destination and port: a fixed status and the latency only, no redirects, no response bodies. Reserved addresses, including DNS answers, need explicit internal=yes approval. Requires python3. Read-only.",
+		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 10 * time.Second, ReadOnly: true, Script: serviceCheck, Params: serviceCheckParams, Retry: RetrySafe,
+		Validate: serviceCheckValidate,
 	},
 	{
 		ID: "service.restart", Version: "1.0.0", Title: "Restart service", Description: "systemctl restart of one unit (sudo).",
