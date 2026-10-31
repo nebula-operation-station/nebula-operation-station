@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -1576,6 +1577,32 @@ func TestChartDataTreeInputStorageCapacityValidation(t *testing.T) {
 	v := findBox(t, p1.Children, "storage/remote-a/valid")
 	if v.State != StateOK {
 		t.Fatalf("valid box: %+v", v)
+	}
+}
+
+func TestStorageFillPercentOverflowSafe(t *testing.T) {
+	// Hostile used/total pairs where used*100 overflows uint64 must
+	// still yield the correct percentage, not wrap to zero and
+	// suppress the critical threshold.
+	cases := []struct {
+		name  string
+		used  uint64
+		total uint64
+		want  int
+	}{
+		{"fast path", 1, 2, 50},
+		{"fast path boundary", math.MaxUint64 / 100, 2 * math.MaxUint64 / 100, 50},
+		{"overflow half full", 50 << 55, 100 << 55, 50},
+		{"overflow three quarters", 75 << 55, 100 << 55, 75},
+		{"overflow near full", 99 << 55, 100 << 55, 99},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := storageFillPercent(StorageInput{UsedBytes: tc.used, TotalBytes: tc.total})
+			if got != tc.want {
+				t.Fatalf("storageFillPercent(used=%d, total=%d) = %d, want %d", tc.used, tc.total, got, tc.want)
+			}
+		})
 	}
 }
 

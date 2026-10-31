@@ -29,6 +29,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"math/big"
 	"sort"
 	"time"
 
@@ -695,14 +697,24 @@ func storedDatasetReason(s StorageInput, fallback string) string {
 }
 
 // storageFillPercent is the used percentage of a storage, clamped to
-// [0, 100]. It is only called for storages with total > 0.
+// [0, 100]. It is only called for storages with total > 0. The
+// multiplication is overflow-safe: a hostile used near 2^64 falls back
+// to arbitrary-precision arithmetic so the percentage cannot wrap to
+// zero and suppress the critical threshold.
 func storageFillPercent(s StorageInput) int {
 	if s.UsedBytes >= s.TotalBytes {
 		return 100
 	}
-	// used < total, so the multiplication overflows only above
-	// ~180 EB total, beyond any PVE storage.
-	return int(s.UsedBytes * 100 / s.TotalBytes)
+	// used < total, so the percentage is in [0, 100). The fast path
+	// is safe when used*100 cannot overflow uint64; a hostile used
+	// above that bound falls back to big.Int.
+	if s.UsedBytes <= math.MaxUint64/100 {
+		return int(s.UsedBytes * 100 / s.TotalBytes)
+	}
+	num := new(big.Int).SetUint64(s.UsedBytes)
+	num.Mul(num, big.NewInt(100))
+	den := new(big.Int).SetUint64(s.TotalBytes)
+	return int(new(big.Int).Quo(num, den).Int64())
 }
 
 // buildGuestBox builds one guest box, attaching the linked host's SSH
