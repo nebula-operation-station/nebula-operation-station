@@ -261,7 +261,13 @@ func (s *Service) BeginPrivilegedSession(_ context.Context, _ *pb.BeginPrivilege
 	if err != nil {
 		return nil, status.Error(codes.Internal, "cannot build request options")
 	}
-	return &pb.BeginPrivilegedSessionResponse{Challenge: ch, ChallengeExpiryUnix: exp.Unix(), RequestOptionsJson: opts}, nil
+	return &pb.BeginPrivilegedSessionResponse{
+		Challenge:           ch,
+		ChallengeExpiryUnix: exp.Unix(),
+		RequestOptionsJson:  opts,
+		Operation:           permit.SessionExtensionOperation,
+		DurationSeconds:     int64(s.auth.SessionLength() / time.Second),
+	}, nil
 }
 
 func (s *Service) CompletePrivilegedSession(_ context.Context, req *pb.CompletePrivilegedSessionRequest) (*pb.CompletePrivilegedSessionResponse, error) {

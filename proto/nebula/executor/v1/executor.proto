@@ -28,9 +28,17 @@ service ExecutorService {
   rpc SubmitAssertion(SubmitAssertionRequest) returns (SubmitAssertionResponse);
 
   // Role: server. Starts and completes the privileged web session, which
-  // requires a user-verified assertion.
+  // requires a user-verified assertion. The challenge is bound to the
+  // session-extension operation and the executor's configured duration;
+  // the same flow opens an expired session (spec 05, ADR 0007 E19d).
   rpc BeginPrivilegedSession(BeginPrivilegedSessionRequest) returns (BeginPrivilegedSessionResponse);
   rpc CompletePrivilegedSession(CompletePrivilegedSessionRequest) returns (CompletePrivilegedSessionResponse);
+
+  // Role: server, admin. Reports the executor's authoritative privileged
+  // session state: active, expiry, configured duration and remaining time
+  // (spec 05, ADR 0007 E19d). The server displays these values; it cannot
+  // choose or extend the duration.
+  rpc GetSessionState(GetSessionStateRequest) returns (GetSessionStateResponse);
 
   // Role: server. Asks whether one host run is covered by an issued permit
   // and, if so, reserves the host (one use per host). The executor hashes
@@ -517,6 +525,11 @@ message BeginPrivilegedSessionResponse {
   // CredentialRequestOptions JSON for navigator.credentials.get() over the
   // challenge (registered credentials, user verification required).
   bytes request_options_json = 4;
+  // Operation bound into the challenge: the session-extension operation,
+  // which also opens an expired session (spec 05).
+  string operation = 5;
+  // Executor-configured session duration bound into the challenge.
+  int64 duration_seconds = 6;
 }
 
 message CompletePrivilegedSessionRequest {
@@ -525,6 +538,20 @@ message CompletePrivilegedSessionRequest {
 
 message CompletePrivilegedSessionResponse {
   int64 session_expiry_unix = 1;
+}
+
+message GetSessionStateRequest {}
+
+message GetSessionStateResponse {
+  // True while the privileged session is active.
+  bool active = 1;
+  // Executor-reported session expiry; 0 while inactive.
+  int64 expiry_unix = 2;
+  // Executor-configured session duration. The extension challenge is bound
+  // to it; the server cannot choose or extend it.
+  int64 duration_seconds = 3;
+  // Executor-reported remaining time; 0 while inactive.
+  int64 remaining_seconds = 4;
 }
 
 message AuthorizeRunRequest {
