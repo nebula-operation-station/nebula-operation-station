@@ -348,6 +348,12 @@ type StorageObservation struct {
 	Active    bool     `json:"active"`
 	SizeBytes uint64   `json:"size_bytes"`
 	FreeBytes uint64   `json:"free_bytes"`
+	// Node is the node that reported this storage and its usage. Empty
+	// only in observations from sources that predate per-node storage.
+	Node string `json:"node,omitempty"`
+	// Shared is PVE's authoritative shared flag: the same storage is
+	// reported by every node that can use it and must be counted once.
+	Shared bool `json:"shared,omitempty"`
 }
 
 // ClusterObservation is the 60-second cluster and HA read.
@@ -501,12 +507,23 @@ func ValidateObservation(o Observation) (Observation, error) {
 
 	checkDataset("storages", o.Storages, add)
 	if o.Storages.State == Available {
-		if len(o.Storages.Value) > MaxStoragesPerRemote {
-			add("too many storages (%d > %d)", len(o.Storages.Value), MaxStoragesPerRemote)
+		if len(o.Storages.Value) > MaxStorageReportsPerRemote {
+			add("too many storage reports (%d > %d)", len(o.Storages.Value), MaxStorageReportsPerRemote)
 		}
 		seen := map[string]struct{}{}
+		// shared records each storage ID's shared flag: PVE derives it
+		// from storage.cfg, so every node must report the same value.
+		shared := map[string]bool{}
 		for i, s := range o.Storages.Value {
-			validateStorageObservation(fmt.Sprintf("storages[%d]", i), s, seen, add)
+			where := fmt.Sprintf("storages[%d]", i)
+			validateStorageObservation(where, s, seen, add)
+			if prev, ok := shared[s.Name]; ok && prev != s.Shared {
+				add("%s: storage %q has an inconsistent shared flag", where, s.Name)
+			}
+			shared[s.Name] = s.Shared
+		}
+		if len(shared) > MaxStoragesPerRemote {
+			add("too many storages (%d > %d)", len(shared), MaxStoragesPerRemote)
 		}
 	}
 
@@ -872,10 +889,14 @@ func validateStorageObservation(where string, s StorageObservation, seen map[str
 	if !slugRe.MatchString(s.Name) {
 		add("%s: name %q is malformed", where, s.Name)
 	}
-	if _, dup := seen[s.Name]; dup {
-		add("%s: name %q is duplicated", where, s.Name)
+	if s.Node != "" && !validNodeName(s.Node) {
+		add("%s: node %q is malformed", where, s.Node)
 	}
-	seen[s.Name] = struct{}{}
+	key := s.Node + "/" + s.Name
+	if _, dup := seen[key]; dup {
+		add("%s: storage %q on node %q is duplicated", where, s.Name, s.Node)
+	}
+	seen[key] = struct{}{}
 	if !slugRe.MatchString(s.Type) {
 		add("%s: type %q is malformed", where, s.Type)
 	}

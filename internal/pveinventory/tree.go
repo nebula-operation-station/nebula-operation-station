@@ -55,8 +55,9 @@ const (
 	MaxTreeServices = 1000
 	// MaxTreeLinks bounds reviewed host links in one tree.
 	MaxTreeLinks = 1000
-	// MaxTreeStoragesPerRemote bounds storage boxes per remote.
-	MaxTreeStoragesPerRemote = 256
+	// MaxTreeStoragesPerRemote bounds per-node storage reports per remote;
+	// shared storages collapse to one box.
+	MaxTreeStoragesPerRemote = pvecontract.MaxStorageReportsPerRemote
 	// DefaultStaleAfter marks a PVE observation stale after three
 	// missed 60-second inventory intervals.
 	DefaultStaleAfter = 3 * time.Minute
@@ -1081,33 +1082,17 @@ func (s *Store) ChartData(ctx context.Context, q ChartQuery) (ChartData, error) 
 	return data, nil
 }
 
-// clusterStorageTypes lists the PVE storage types that are
-// cluster-wide (shared) rather than node-local.
-var clusterStorageTypes = map[string]bool{
-	"nfs":       true,
-	"cifs":      true,
-	"pbs":       true,
-	"rbd":       true,
-	"glusterfs": true,
-	"vbks":      true,
-	"iscsi":     true,
-	"iscsi-gw":  true,
-	"swift":     true,
-	"azure8":    true,
-	"azure":     true,
-	"sheepdog":  true,
-}
-
 // TreeInput converts the stored chart data into a TreeInput for
 // BuildTree, passing hosts and links through unchanged.
 //
-// Storage observations are stored per remote, not per node. Each
-// storage is attributed to the remote's first node in stored order,
-// falling back to the first guest's node. Storages of a cluster-wide
-// type are marked shared, so a shared storage appears once per
-// cluster under the first node and is never double-counted. Storages
-// of a remote without any node or guest are dropped, because they
-// would have no parent node box.
+// Storage observations are stored per reporting node with PVE's
+// authoritative shared flag (vorher: attributed to the first node and
+// shared guessed from the storage type). BuildTree places a shared
+// storage once, under the first node that reports it. Reports without a
+// node (older sources) are placed under the remote's first node, falling
+// back to the first guest's node, for display only. Storages of a remote
+// without any node or guest are dropped, because they would have no
+// parent node box.
 func (d ChartData) TreeInput(now time.Time, staleAfter time.Duration, hosts []HostInput, links []HostLink) TreeInput {
 	if now.IsZero() {
 		now = time.Now()
@@ -1154,17 +1139,21 @@ func (d ChartData) TreeInput(now time.Time, staleAfter time.Duration, hosts []Ho
 			// positive and the free amount does not exceed it; a
 			// malformed pair (free > total) is capacity-unknown, not
 			// a healthy zero fill.
-			capacityKnown := st.SizeBytes > 0 && st.FreeBytes <= st.SizeBytes
+			capacityKnown := st.Active && st.SizeBytes > 0 && st.FreeBytes <= st.SizeBytes
 			var used uint64
 			if capacityKnown {
 				used = st.SizeBytes - st.FreeBytes
 			}
+			node := st.Node
+			if node == "" {
+				node = anchor
+			}
 			ri.Storages = append(ri.Storages, StorageInput{
-				Node:          anchor,
+				Node:          node,
 				ID:            st.Name,
 				Type:          st.Type,
 				Active:        st.Active,
-				Shared:        clusterStorageTypes[st.Type],
+				Shared:        st.Shared,
 				UsedBytes:     used,
 				TotalBytes:    st.SizeBytes,
 				CapacityKnown: capacityKnown,
@@ -1176,4 +1165,16 @@ func (d ChartData) TreeInput(now time.Time, staleAfter time.Duration, hosts []Ho
 		in.Remotes = append(in.Remotes, ri)
 	}
 	return in
+}
+
+// ChartTree builds the PVE side of the org chart from the stored
+// observations at now: node boxes with their guest and storage (datastore)
+// children. Managed SSH hosts are rendered by the chart page itself, so
+// none are passed here.
+func (s *Store) ChartTree(ctx context.Context, now time.Time) (Tree, error) {
+	data, err := s.ChartData(ctx, ChartQuery{})
+	if err != nil {
+		return Tree{}, err
+	}
+	return BuildTree(data.TreeInput(now, 0, nil, nil))
 }

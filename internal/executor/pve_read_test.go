@@ -526,3 +526,67 @@ func TestRemovePVERemoteRevokesProviderGrants(t *testing.T) {
 		t.Fatalf("grant not revoked on removal: %v %v", grants, err)
 	}
 }
+
+// TestReadPVEStorageReportsPerNodeWithSharedFlag checks that STORAGE returns
+// one entry per (node, storage) with the reporting node and PVE's shared
+// flag, keeps node-local usage per node, and reports an inactive storage
+// without capacity.
+func TestReadPVEStorageReportsPerNodeWithSharedFlag(t *testing.T) {
+	e := newPveReadEnv(t, pvecontract.KindCluster)
+	e.pve.set("/api2/json/nodes", `{"data":[{"node":"pve1","status":"online","type":"node"},{"node":"pve2","status":"online","type":"node"},{"node":"pve3","status":"offline","type":"node"}]}`)
+	e.pve.set("/api2/json/nodes/pve1/storage", `{"data":[`+
+		`{"storage":"nfs","type":"nfs","content":"images","active":1,"shared":1,"used":400,"total":1000},`+
+		`{"storage":"local","type":"dir","content":"iso","active":1,"shared":0,"used":10,"total":100}]}`)
+	e.pve.set("/api2/json/nodes/pve2/storage", `{"data":[`+
+		`{"storage":"nfs","type":"nfs","content":"images","active":1,"shared":1,"used":400,"total":1000},`+
+		`{"storage":"local","type":"dir","content":"iso","active":1,"shared":0,"used":90,"total":100},`+
+		`{"storage":"gone","type":"dir","content":"iso","active":0,"shared":0,"used":5,"total":50}]}`)
+	e.approve(e.grantDoc(pveReadGrantID, 240, allPveMethods()...))
+
+	got, err := e.read(pb.PVEReadMethod_PVE_READ_METHOD_STORAGE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := got.GetStorages()
+	if s.GetState() != pb.PVEDatasetState_PVE_DATASET_STATE_AVAILABLE || len(s.GetStorages()) != 5 {
+		t.Fatalf("storages = %v", s)
+	}
+	type key struct{ node, name string }
+	by := map[key]*pb.PVEStorage{}
+	for _, st := range s.GetStorages() {
+		by[key{st.GetNode(), st.GetName()}] = st
+	}
+	for _, n := range []string{"pve1", "pve2"} {
+		if st := by[key{n, "nfs"}]; st == nil || !st.GetShared() || st.GetSizeBytes() != 1000 || st.GetFreeBytes() != 600 {
+			t.Fatalf("%s nfs = %v", n, st)
+		}
+	}
+	if st := by[key{"pve1", "local"}]; st == nil || st.GetShared() || st.GetFreeBytes() != 90 {
+		t.Fatalf("pve1 local = %v", st)
+	}
+	if st := by[key{"pve2", "local"}]; st == nil || st.GetShared() || st.GetFreeBytes() != 10 {
+		t.Fatalf("pve2 local = %v", st)
+	}
+	if st := by[key{"pve2", "gone"}]; st == nil || st.GetActive() || st.GetSizeBytes() != 0 || st.GetFreeBytes() != 0 {
+		t.Fatalf("inactive storage carries capacity: %v", st)
+	}
+}
+
+// TestReadPVEStorageInconsistentSharedFlagUnavailable checks that a remote
+// reporting the same storage as shared on one node and local on another
+// yields an unavailable dataset instead of a guessed answer.
+func TestReadPVEStorageInconsistentSharedFlagUnavailable(t *testing.T) {
+	e := newPveReadEnv(t, pvecontract.KindCluster)
+	e.pve.set("/api2/json/nodes", `{"data":[{"node":"pve1","status":"online","type":"node"},{"node":"pve2","status":"online","type":"node"}]}`)
+	e.pve.set("/api2/json/nodes/pve1/storage", `{"data":[{"storage":"nfs","type":"nfs","content":"images","active":1,"shared":1,"used":1,"total":10}]}`)
+	e.pve.set("/api2/json/nodes/pve2/storage", `{"data":[{"storage":"nfs","type":"nfs","content":"images","active":1,"shared":0,"used":1,"total":10}]}`)
+	e.approve(e.grantDoc(pveReadGrantID, 240, allPveMethods()...))
+
+	got, err := e.read(pb.PVEReadMethod_PVE_READ_METHOD_STORAGE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := got.GetStorages().GetState(); st != pb.PVEDatasetState_PVE_DATASET_STATE_UNAVAILABLE {
+		t.Fatalf("state = %v, want unavailable", st)
+	}
+}
