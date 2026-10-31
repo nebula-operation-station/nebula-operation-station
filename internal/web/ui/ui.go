@@ -28,6 +28,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/middleware"
 	"github.com/nebula-operation-station/nebula-operation-station/web/static"
@@ -135,6 +136,11 @@ type Options struct {
 	// page ("Recovery"). Nil hides the status; an error makes the section
 	// show a plain error line (the detail goes to the log only).
 	TOTPStatus func(ctx context.Context) (*pb.GetTOTPStatusResponse, error)
+	// PVEChart returns the PVE side of the org chart for the inventory
+	// chart page: PVE node boxes with their guest and storage (datastore)
+	// children. Nil hides the PVE section. An error makes the PVE section
+	// show "PVE unavailable"; the detail goes to the log only.
+	PVEChart func(ctx context.Context) (pveinventory.Tree, error)
 	// PVE provides the stored PVE inventory for the read-only PVE pages
 	// (ADR 0006, P1-13). Nil hides the pages and the navigation item.
 	PVE PVEStore
@@ -178,6 +184,7 @@ type Handler struct {
 	serverIP     func() netip.Addr
 	securityKeys func(ctx context.Context) ([]*pb.WebAuthnCredential, error)
 	totpStatus   func(ctx context.Context) (*pb.GetTOTPStatusResponse, error)
+	pveChart     func(ctx context.Context) (pveinventory.Tree, error)
 	now          func() time.Time
 	pve          PVEStore
 	pveRemotes   PVERemoteMetaFunc
@@ -233,6 +240,7 @@ func New(o Options) (*Handler, error) {
 		serverIP:     serverIP,
 		securityKeys: o.SecurityKeys,
 		totpStatus:   o.TOTPStatus,
+		pveChart:     o.PVEChart,
 		pve:          o.PVE,
 		pveRemotes:   o.PVERemotes,
 		now:          o.Now,
