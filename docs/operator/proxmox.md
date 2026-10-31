@@ -35,7 +35,12 @@ schema-bounded, and secret-bearing fields (Cloud-Init passwords, SSH keys,
 snippets, descriptions, hook scripts, storage credentials) are discarded
 before anything is spooled.
 
-**Phase 1 (merged)** is read-only inventory. **Phase 2 (planned)** adds
+**Phase 1** is read-only inventory. Remote management (add, probe, rotate,
+re-pin, remove), the spool import and the web pages are merged. **Live
+collection is planned:** the executor's typed `ReadPVE` method still answers
+`Unimplemented` (provider read profile, ADR 0007 E08), so a running collector
+cannot fill the inventory yet and the PVE pages show no or stale data until
+that lands. **Phase 2 (planned)** adds
 typed VM/LXC actions (start, graceful shutdown, hard stop, snapshots,
 backups, configuration changes, intra-cluster migration, node reboot) with
 their own permits and risk classes. The action token can already be stored
@@ -63,21 +68,35 @@ else. Granting a broader built-in role (for example `PVEAuditor`, which
 includes additional audit privileges) fails validation. On the PVE side:
 
 ```sh
-# Role with exactly the four required audit privileges.
-pveum role add NOSRead --privs Sys.Audit VM.Audit Datastore.Audit Pool.Audit
+# One role per audit privilege, so that each privilege is granted only on
+# its own path. A single role with all four privileges granted on `/` would
+# propagate VM.Audit, Datastore.Audit and Pool.Audit to paths the executor
+# does not allow, and the token would be rejected.
+pveum role add NOSSysAudit       --privs "Sys.Audit"
+pveum role add NOSVMAudit        --privs "VM.Audit"
+pveum role add NOSDatastoreAudit --privs "Datastore.Audit"
+pveum role add NOSPoolAudit      --privs "Pool.Audit"
 
-# Non-interactive user with an expiry.
-pveum user add nos-read@pve --expire 365
+# Non-interactive user. --expire takes a Unix timestamp (0 = never), so
+# compute one in the future, for example one year from now:
+EXPIRE=$(date -d '+1 year' +%s)
+pveum user add nos-read@pve --expire "$EXPIRE"
 
-# Privilege-separated, expiring API token.
-pveum user token add nos-read@pve --privsep 1 --expires 31536000
+# Privilege-separated, expiring API token with the ID nosread1. Note the
+# token secret printed once by this command.
+pveum user token add nos-read@pve nosread1 --privsep 1 --expire "$EXPIRE"
 
-# Grant the ACLs to the user and to the token: effective rights are the
-# intersection, so both sides need the same entries.
-for path in / /vms /storage /pool; do
-  pveum acl modify "$path" -user nos-read@pve -roles NOSRead
-  pveum acl modify "$path" -user 'nos-read@pve!nosread1' -roles NOSRead
-done
+# Grant every ACL to the user and to the token: with privilege separation
+# the effective rights are the intersection, so both need the same entries.
+# Token ACLs use --tokens, user ACLs use --users.
+pveum acl modify /        --users nos-read@pve --roles NOSSysAudit
+pveum acl modify /vms     --users nos-read@pve --roles NOSVMAudit
+pveum acl modify /storage --users nos-read@pve --roles NOSDatastoreAudit
+pveum acl modify /pool    --users nos-read@pve --roles NOSPoolAudit
+pveum acl modify /        --tokens 'nos-read@pve!nosread1' --roles NOSSysAudit
+pveum acl modify /vms     --tokens 'nos-read@pve!nosread1' --roles NOSVMAudit
+pveum acl modify /storage --tokens 'nos-read@pve!nosread1' --roles NOSDatastoreAudit
+pveum acl modify /pool    --tokens 'nos-read@pve!nosread1' --roles NOSPoolAudit
 ```
 
 The four required entries are `Sys.Audit` on `/`, `VM.Audit` on `/vms`,
@@ -91,11 +110,12 @@ The action token must be a **different PVE user** from the read token and may
 carry only `VM.PowerMgmt` on explicitly enabled `/vms/<vmid>` paths:
 
 ```sh
-pveum role add NOSAction --privs VM.PowerMgmt
-pveum user add nos-action@pve --expire 365
-pveum user token add nos-action@pve --privsep 1 --expires 31536000
-pveum acl modify /vms/101 -user nos-action@pve -roles NOSAction
-pveum acl modify /vms/101 -user 'nos-action@pve!nosaction1' -roles NOSAction
+pveum role add NOSAction --privs "VM.PowerMgmt"
+EXPIRE=$(date -d '+1 year' +%s)
+pveum user add nos-action@pve --expire "$EXPIRE"
+pveum user token add nos-action@pve nosaction1 --privsep 1 --expire "$EXPIRE"
+pveum acl modify /vms/101 --users nos-action@pve --roles NOSAction
+pveum acl modify /vms/101 --tokens 'nos-action@pve!nosaction1' --roles NOSAction
 ```
 
 Add one `/vms/<vmid>` entry per guest you want to be able to operate later.
@@ -214,6 +234,10 @@ credential reference and version, updated time). It never prints secrets and
 works while the vault is locked.
 
 ## What the collector reads
+
+> **Planned:** the collector's reads are answered `Unimplemented` by the
+> executor until the provider read profile (ADR 0007 E08) is merged. The
+> schedule below is what the collector requests; no live data arrives yet.
 
 `nebula-pve-collector` polls every **active** remote once per interval.
 Blocked or removed remotes are skipped. One pass per remote issues two
