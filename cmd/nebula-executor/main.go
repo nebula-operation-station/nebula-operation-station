@@ -57,7 +57,7 @@ func run() error {
 		adminUsers  = flag.String("admin-users", "", "comma-separated OS users allowed to unlock and approve")
 		rpID        = flag.String("rp-id", "", "WebAuthn RP ID: the fixed hostname Nebula is served under")
 		hardened    = flag.Bool("hardened", false, "require `nebula approve` for HIGH and CRITICAL")
-		sessionMin  = flag.Int("session-minutes", 60, "privileged session length")
+		sessionMin  = flag.Int("session-minutes", int(permit.DefaultSessionLength/time.Minute), "privileged session length in minutes (15–240)")
 		showVersion = flag.Bool("version", false, "print version and exit")
 		origins     stringList
 	)
@@ -67,6 +67,11 @@ func run() error {
 	if *showVersion {
 		fmt.Println(version.String())
 		return nil
+	}
+
+	sessionLength, err := sessionLengthFromMinutes(*sessionMin)
+	if err != nil {
+		return err
 	}
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -164,7 +169,7 @@ func run() error {
 		Store:         db,
 		RiskPolicy:    risk,
 		Schedules:     db,
-		SessionLength: time.Duration(*sessionMin) * time.Minute,
+		SessionLength: sessionLength,
 		Audit:         executor.AuditLogger(log),
 	})
 	if err != nil {

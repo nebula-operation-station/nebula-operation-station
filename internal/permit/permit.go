@@ -326,9 +326,11 @@ func New(o Options) (*Authority, error) {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	if o.SessionLength <= 0 {
-		o.SessionLength = DefaultSessionLength
+	length, err := normalizeSessionLength(o.SessionLength)
+	if err != nil {
+		return nil, err
 	}
+	o.SessionLength = length
 	if o.Audit == nil {
 		o.Audit = func(Event) {}
 	}
@@ -825,46 +827,18 @@ func (a *Authority) ReleaseHost(d canonical.Digest, hostID string) bool {
 	return true
 }
 
-// BeginSession returns a fresh challenge for opening the privileged session.
-// A new call replaces any earlier unused challenge.
+// BeginSession returns a fresh challenge for opening or extending the privileged
+// session. It binds the operation and executor-configured duration, and replaces
+// any earlier unused challenge without changing the current session expiry.
 func (a *Authority) BeginSession() ([]byte, time.Time, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	c := make([]byte, 32)
-	if _, err := rand.Read(c); err != nil {
-		return nil, time.Time{}, err
-	}
-	a.sessChal = c
-	a.sessChalExp = a.now().Add(SessionChallengeTTL)
-	return slices.Clone(c), a.sessChalExp, nil
+	return a.beginSessionPolicy()
 }
 
-// CompleteSession opens the privileged session with a user-verified
-// assertion over the challenge from BeginSession. The challenge is consumed
-// whether or not verification succeeds.
+// CompleteSession opens or extends the privileged session with one fresh UV
+// assertion. Expiry is approval time plus the configured duration; extensions
+// never accumulate time. The challenge is consumed even on failure.
 func (a *Authority) CompleteSession(assertionJSON []byte) (time.Time, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	now := a.now()
-	ch, exp := a.sessChal, a.sessChalExp
-	a.sessChal, a.sessChalExp = nil, time.Time{}
-	if ch == nil {
-		return time.Time{}, fail(CodeNoChallenge, "call BeginPrivilegedSession first")
-	}
-	if !now.Before(exp) {
-		return time.Time{}, fail(CodeExpired, "session challenge expired")
-	}
-	credID, err := a.verifier.Verify(assertionJSON, ch, webauthnverify.Requirement{UserVerification: true})
-	if errors.Is(err, webauthnverify.ErrCounterStore) {
-		return time.Time{}, a.storageFailure("", err)
-	}
-	if err != nil {
-		a.emit(Event{Kind: "rejected", Code: CodeAssertionRejected, Detail: "privileged session: " + err.Error()})
-		return time.Time{}, fail(CodeAssertionRejected, "%v", err)
-	}
-	a.sessionTill = now.Add(a.sessLen)
-	a.emit(Event{Kind: "session_opened", Detail: "webauthn:" + hex.EncodeToString(credID)})
-	return a.sessionTill, nil
+	return a.completeSessionPolicy(assertionJSON)
 }
 
 // Session reports whether the privileged session is active and until when.
