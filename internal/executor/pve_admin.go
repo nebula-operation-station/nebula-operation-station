@@ -466,10 +466,9 @@ type PveAdmin struct {
 	// AuthorizeRepin consumes an approval bound to the current remote,
 	// old/new fingerprints, endpoints and generations. Nil refuses re-pin.
 	AuthorizeRepin func(context.Context, executordb.PveRemote, PveRepin) error
-	// RevokeGrants revokes the read grants and permits that depend on the
-	// remote's credentials or trust.
-	// TODO(p107): provider read grants do not exist yet; the default is a
-	// no-op placeholder.
+	// RevokeGrants revokes the provider read grants that depend on the
+	// remote's credentials or trust. Nil revokes nothing (tests); the
+	// executor service wires permit.Authority.RevokeProviderGrants.
 	RevokeGrants func(remoteID, reason string) error
 	// Now is the clock. Default: time.Now.
 	Now func() time.Time

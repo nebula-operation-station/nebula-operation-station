@@ -135,6 +135,9 @@ type ReadGrantDoc struct {
 	RateProfile string `json:"rate_profile,omitempty"`
 	// Credentials binds every frozen target to its exact SSH credential.
 	Credentials []ReadGrantCredential `json:"credentials,omitempty"`
+	// ProviderTargets binds the exact PVE remotes of a provider grant
+	// (rate_profile "provider", ADR 0007 E08). Empty for SSH profiles.
+	ProviderTargets []ProviderTarget `json:"provider_targets,omitempty"`
 }
 
 // Action returns the entry for actionID@version.
@@ -225,6 +228,15 @@ func parseReadGrant(raw []byte, now time.Time, stored bool) (ReadGrantDoc, []byt
 	default:
 		return fail("trigger must be %q, %q or %q", TriggerScheduled, TriggerOnDemand, TriggerBoth)
 	}
+	if d.Grant == ReadGrantFormat && d.RateProfile == ProviderReadProfile {
+		if err := validateProviderGrant(d); err != nil {
+			return fail("%v", err)
+		}
+		return d, canon, digest, nil
+	}
+	if len(d.ProviderTargets) != 0 {
+		return fail("only provider grants bind provider targets")
+	}
 	if len(d.Actions) == 0 || len(d.Actions) > MaxReadGrantActions {
 		return fail("a grant has 1 to %d actions", MaxReadGrantActions)
 	}
@@ -268,7 +280,7 @@ func parseReadGrant(raw []byte, now time.Time, stored bool) (ReadGrantDoc, []byt
 	}
 	if d.Grant == ReadGrantFormat {
 		if d.RateProfile != schedgrant.OrdinaryReadProfile && d.RateProfile != schedgrant.TelemetryReadProfile {
-			return fail("rate_profile must be ordinary or telemetry")
+			return fail("rate_profile must be ordinary, telemetry or provider")
 		}
 		if len(d.Credentials) != len(d.Targets) {
 			return fail("each frozen target needs one credential binding")
@@ -524,8 +536,8 @@ func (a *Authority) ProposeReadGrant(raw []byte) (PendingReadGrant, error) {
 		}
 	}
 	a.readGrants[digest] = pg
-	a.emit(Event{Kind: "read_grant_proposed", Digest: digest, Detail: fmt.Sprintf("%s: %d actions, %d hosts, %d runs/hour/host, until %s",
-		doc.ID, len(doc.Actions), len(doc.Targets), doc.RunBudget, time.Unix(doc.ExpiryUnix, 0).UTC().Format(time.RFC3339))})
+	a.emit(Event{Kind: "read_grant_proposed", Digest: digest, Detail: fmt.Sprintf("%s: %d actions, %d hosts, %d provider remotes, %d runs/hour/target, until %s",
+		doc.ID, len(doc.Actions), len(doc.Targets), len(doc.ProviderTargets), doc.RunBudget, time.Unix(doc.ExpiryUnix, 0).UTC().Format(time.RFC3339))})
 	return PendingReadGrant{Digest: digest, Canonical: slices.Clone(canon), Requirement: req, Challenge: slices.Clone(pg.challenge),
 		Expiry: pg.expiry, Doc: cloneReadGrantDoc(doc)}, nil
 }
@@ -534,6 +546,10 @@ func cloneReadGrantDoc(doc ReadGrantDoc) ReadGrantDoc {
 	doc.Actions = slices.Clone(doc.Actions)
 	doc.Targets = slices.Clone(doc.Targets)
 	doc.Credentials = slices.Clone(doc.Credentials)
+	doc.ProviderTargets = slices.Clone(doc.ProviderTargets)
+	for i := range doc.ProviderTargets {
+		doc.ProviderTargets[i].Methods = slices.Clone(doc.ProviderTargets[i].Methods)
+	}
 	return doc
 }
 

@@ -108,6 +108,18 @@ func TestClusterStatusPVE8(t *testing.T) {
 	if got.NodesOnline != 2 || got.NodesTotal != 3 {
 		t.Errorf("NodesOnline/NodesTotal = %d/%d, want 2/3", got.NodesOnline, got.NodesTotal)
 	}
+	online := 0
+	for _, m := range got.Members {
+		if m.Name == "" {
+			t.Errorf("member without name: %+v", m)
+		}
+		if m.Online {
+			online++
+		}
+	}
+	if len(got.Members) != 3 || online != 2 {
+		t.Errorf("Members = %+v, want 3 with 2 online", got.Members)
+	}
 }
 
 func TestClusterStatusPVE9(t *testing.T) {
