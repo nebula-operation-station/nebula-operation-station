@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"unicode/utf8"
 )
@@ -79,6 +80,34 @@ func newFuzzClient(t fuzzT, base string) *Client {
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
+	}
+	return c
+}
+
+// newSingleBodyFuzzServer starts a catch-all server whose handler returns one
+// shared atomic body for every request, plus a standard client. The caller
+// stores the hostile input into body before each reader call. This is the
+// common shape for readers whose endpoint returns a single JSON document.
+func newSingleBodyFuzzServer(f *testing.F) (*fuzzServer, *Client, *atomic.Value) {
+	body := &atomic.Value{}
+	body.Store([]byte(`{"data":[]}`))
+	fs := newFuzzServer(f, func(string) []byte {
+		b, _ := body.Load().([]byte)
+		return b
+	})
+	c := newFuzzClient(f, fs.url())
+	return fs, c, body
+}
+
+// newFuzzMetricsClient builds a MetricsClient against the fuzz server. The base
+// URL must end with /api2/json, so the caller passes fs.url()+"/api2/json".
+func newFuzzMetricsClient(t fuzzT, base string) *MetricsClient {
+	t.Helper()
+	c, err := NewMetricsClient(base, http.DefaultClient, func(context.Context) (string, string, error) {
+		return "Authorization", testToken, nil
+	})
+	if err != nil {
+		t.Fatalf("NewMetricsClient: %v", err)
 	}
 	return c
 }
