@@ -138,6 +138,8 @@ func (e *Error) Is(target error) bool {
 // codes.PermissionDenied: the run does not match the approved permit or the
 // permit does not cover it.
 var policyBlockedCodes = map[string]bool{
+	string(permit.CodeLeaseInactive):      true,
+	string(permit.CodeLeaseNotCovered):    true,
 	string(permit.CodeTargetNotPermitted): true,
 	string(permit.CodeHostAlreadyRun):     true,
 	string(permit.CodeArtifactMismatch):   true,
@@ -151,6 +153,11 @@ var policyBlockedCodes = map[string]bool{
 var knownCodes = func() map[string]bool {
 	m := make(map[string]bool, 32)
 	for _, c := range []string{
+		string(permit.CodeLeaseInvalid),
+		string(permit.CodeLeaseUnavailable),
+		string(permit.CodeLeaseInactive),
+		string(permit.CodeLeaseNotCovered),
+		string(permit.CodeLeaseBudget),
 		string(permit.CodeInvalidRequest),
 		string(permit.CodeExecutionIDReused),
 		string(permit.CodeSessionRequired),
