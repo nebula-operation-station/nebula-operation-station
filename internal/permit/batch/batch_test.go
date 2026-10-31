@@ -17,6 +17,7 @@ import (
 	"github.com/descope/virtualwebauthn"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/scanner"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
 )
 
@@ -41,11 +42,15 @@ type policy struct {
 	states map[string]Snapshot
 	err    error
 	hook   func()
+	n      int
 }
+
+func (p *policy) reads() int { p.mu.Lock(); defer p.mu.Unlock(); return p.n }
 
 func (p *policy) Evaluate(_ context.Context, m canonical.BatchMember) (Snapshot, error) {
 	p.mu.Lock()
 	s, err, hook := p.states[m.MemberID], p.err, p.hook
+	p.n++
 	p.mu.Unlock()
 	if hook != nil {
 		hook()
@@ -796,4 +801,99 @@ func TestPolicyFailureAtDispatchCheckDeniesAuthority(t *testing.T) {
 	e.policy.err = errors.New("unavailable")
 	_, err := e.a.Check(ctx, p.Digest)
 	wantCode(t, err, permit.CodeStorage)
+}
+
+// Review PR #128: retained plan bytes are bounded across all entries, and the
+// budget is returned when entries go away.
+func TestRetainedBytesBudgetBoundsMemoryAndIsReleased(t *testing.T) {
+	e := setup(t, permit.ModeStandard)
+	p := propose(t, e, canonical.RiskHigh)
+	e.a.mu.Lock()
+	got := e.a.retained
+	e.a.mu.Unlock()
+	if got <= 0 || got != retainedSize(p) {
+		t.Fatalf("retained = %d, want %d", got, retainedSize(p))
+	}
+	// Fill the budget: the next proposal is refused before any scan or policy read.
+	e.a.mu.Lock()
+	e.a.retained = MaxRetainedBytes
+	e.a.mu.Unlock()
+	var b canonical.Batch
+	raw, in := e.plan(t, canonical.RiskHigh)
+	if err := json.Unmarshal(raw, &b); err != nil {
+		t.Fatal(err)
+	}
+	b.BatchID = "00000000-0000-4000-8000-000000000003"
+	raw, _ = json.Marshal(b)
+	reads := e.policy.reads()
+	_, err := e.a.Propose(ctx, raw, in)
+	wantCode(t, err, permit.CodeLimit)
+	if e.policy.reads() != reads {
+		t.Fatal("over-budget proposal still read policy state")
+	}
+	// Budget just below the limit: storing the plan would exceed it.
+	e.a.mu.Lock()
+	e.a.retained = MaxRetainedBytes - 1
+	e.a.mu.Unlock()
+	_, err = e.a.Propose(ctx, raw, in)
+	wantCode(t, err, permit.CodeLimit)
+	// Lock releases everything.
+	e.a.Lock()
+	e.a.mu.Lock()
+	defer e.a.mu.Unlock()
+	if e.a.retained != 0 || len(e.a.entries) != 0 {
+		t.Fatalf("after Lock retained=%d entries=%d", e.a.retained, len(e.a.entries))
+	}
+}
+
+// Review PR #128: expiry returns the entry's bytes to the budget.
+func TestExpiredEntryReleasesRetainedBytes(t *testing.T) {
+	e := setup(t, permit.ModeStandard)
+	p := propose(t, e, canonical.RiskHigh)
+	e.unix.Add(4000)
+	_, err := e.a.Check(ctx, p.Digest)
+	wantCode(t, err, permit.CodeExpired)
+	e.a.mu.Lock()
+	defer e.a.mu.Unlock()
+	if e.a.retained != 0 {
+		t.Fatalf("retained = %d after expiry, want 0", e.a.retained)
+	}
+}
+
+// Review PR #128: duplicates are refused before scanning, and batch scans
+// share the executor-wide scan limit (a canceled wait does not scan).
+func TestDuplicateRefusedBeforeScanAndScanWaitHonoursContext(t *testing.T) {
+	e := setup(t, permit.ModeStandard)
+	raw, in := e.plan(t, canonical.RiskHigh)
+	if _, err := e.a.Propose(ctx, raw, in); err != nil {
+		t.Fatal(err)
+	}
+	reads := e.policy.reads()
+	_, err := e.a.Propose(ctx, raw, in)
+	wantCode(t, err, permit.CodeWrongState)
+	if e.policy.reads() != reads {
+		t.Fatal("duplicate proposal did per-member work before refusal")
+	}
+	// A scanner whose slot never frees: the proposal must give up with ctx.
+	e.options.Scan = func(c context.Context, _ []byte) ([]scanner.Finding, canonical.Risk, error) {
+		<-c.Done()
+		return nil, "", c.Err()
+	}
+	a, err := New(e.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.a = a
+	var b canonical.Batch
+	if err := json.Unmarshal(raw, &b); err != nil {
+		t.Fatal(err)
+	}
+	b.BatchID = "00000000-0000-4000-8000-000000000004"
+	raw, _ = json.Marshal(b)
+	c, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	_, err = e.a.Propose(c, raw, in)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("got %v, want deadline while all scan slots are busy", err)
+	}
 }

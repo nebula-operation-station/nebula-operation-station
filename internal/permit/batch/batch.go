@@ -28,6 +28,11 @@ import (
 
 const challengeDomain = "nebula:batch-approval:v1\x00"
 
+// MaxRetainedBytes bounds the parameter, canonical-plan and preview bytes all
+// pending and approved batch plans keep in executor memory together, so
+// unapproved proposals cannot exhaust it (review PR #128).
+const MaxRetainedBytes = 64 << 20
+
 var (
 	// ErrCritical rejects the entire proposal when any member is CRITICAL.
 	ErrCritical = errors.New("CRITICAL members cannot be approved in a batch")
@@ -81,6 +86,9 @@ type Options struct {
 	AdminUID uint32
 	Now      func() time.Time
 	Audit    func(permit.Event)
+	// Scan runs the Safety Scanner. Default permit.ScanBounded, which shares
+	// the executor-wide scan limit with ordinary proposals; tests may inject.
+	Scan func(context.Context, []byte) ([]scanner.Finding, canonical.Risk, error)
 }
 
 // Approval is a detached, complete review copy. Parameters and Findings use
@@ -105,6 +113,7 @@ type entry struct {
 	approval  Approval
 	snapshots []Snapshot
 	failed    int
+	size      int64
 }
 
 // Authority serializes batch approval transitions. Plans, challenges and
@@ -116,6 +125,8 @@ type Authority struct {
 	entries map[canonical.Digest]*entry
 	seen    map[string]struct{}
 	epoch   uint64
+	// retained is the sum of entry.size over entries (MaxRetainedBytes).
+	retained int64
 }
 
 // New creates an authority with no pending or approved plans.
@@ -131,6 +142,9 @@ func New(o Options) (*Authority, error) {
 	}
 	if o.Audit == nil {
 		o.Audit = func(permit.Event) {}
+	}
+	if o.Scan == nil {
+		o.Scan = permit.ScanBounded
 	}
 	return &Authority{options: o, entries: map[canonical.Digest]*entry{}, seen: map[string]struct{}{}}, nil
 }
@@ -151,6 +165,11 @@ func (a *Authority) Propose(ctx context.Context, raw []byte, inputs []MemberInpu
 	}
 	if len(inputs) != len(plan.Members) {
 		return Approval{}, failure(permit.CodeInvalidRequest, "every member needs its exact artifact and parameters")
+	}
+	// Refuse duplicates and over-capacity proposals before any scanning, so
+	// they cannot consume scan slots (review PR #128).
+	if err := a.admit(epoch, plan.BatchID); err != nil {
+		return Approval{}, err
 	}
 	p := Approval{Plan: plan, Parameters: make([][]byte, len(inputs)), Findings: make([][]scanner.Finding, len(inputs)), Risk: canonical.RiskLow, State: permit.StatePending}
 	snapshots := make([]Snapshot, len(inputs))
@@ -183,7 +202,10 @@ func (a *Authority) Propose(ctx context.Context, raw []byte, inputs []MemberInpu
 			return Approval{}, err
 		}
 		snapshots[i] = snapshot
-		findings, scanRisk := scanner.Scan(in.Artifact)
+		findings, scanRisk, err := a.options.Scan(ctx, in.Artifact)
+		if err != nil {
+			return Approval{}, fmt.Errorf("propose batch: %w", err)
+		}
 		risk := canonical.MaxRisk(m.Request.RiskClass, canonical.MaxRisk(snapshot.Risk, scanRisk))
 		if len(refs) > 0 {
 			risk = canonical.MaxRisk(risk, canonical.RiskMedium)
@@ -246,14 +268,61 @@ func (a *Authority) Propose(ctx context.Context, raw []byte, inputs []MemberInpu
 		p.ApprovedAt = a.options.Now()
 		p.ApprovedBy = "privileged-session"
 	}
-	e := &entry{approval: p, snapshots: snapshots}
+	size := retainedSize(p)
+	if a.retained+size > MaxRetainedBytes {
+		return Approval{}, failure(permit.CodeLimit, "batch approval memory budget reached")
+	}
+	e := &entry{approval: p, snapshots: snapshots, size: size}
 	a.entries[digest] = e
+	a.retained += size
 	a.seen[plan.BatchID] = struct{}{}
 	a.emit("batch_proposed", digest, "", "")
 	if p.State == permit.StateApproved {
 		a.emit("batch_approved", digest, "", p.ApprovedBy)
 	}
 	return cloneApproval(p), nil
+}
+
+// admit checks, before the expensive per-member work, that the batch ID is
+// fresh and that capacity remains. Propose repeats the check under the same
+// lock when it stores the plan.
+func (a *Authority) admit(epoch uint64, batchID string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if epoch != a.epoch {
+		return failure(permit.CodeWrongState, "executor locked during proposal")
+	}
+	a.gcLocked()
+	if _, ok := a.seen[batchID]; ok {
+		return failure(permit.CodeWrongState, "batch ID already proposed; use a fresh plan")
+	}
+	if len(a.entries) >= permit.MaxPending || len(a.seen) >= permit.MaxExecutionIDs || a.retained >= MaxRetainedBytes {
+		return failure(permit.CodeLimit, "batch approval capacity reached")
+	}
+	return nil
+}
+
+// removeLocked drops an entry and returns its bytes to the budget.
+func (a *Authority) removeLocked(d canonical.Digest) {
+	if e, ok := a.entries[d]; ok {
+		a.retained -= e.size
+		delete(a.entries, d)
+	}
+}
+
+// retainedSize is the memory an approval keeps: parameters, canonical plan
+// and finding texts.
+func retainedSize(p Approval) int64 {
+	n := int64(len(p.Canonical) + len(p.Challenge))
+	for _, b := range p.Parameters {
+		n += int64(len(b))
+	}
+	for _, fs := range p.Findings {
+		for _, f := range fs {
+			n += int64(len(f.Category) + len(f.Excerpt) + 64)
+		}
+	}
+	return n
 }
 
 func challengeFor(d canonical.Digest, nonce []byte, expiry time.Time) []byte {
@@ -288,7 +357,7 @@ func (a *Authority) getLocked(d canonical.Digest, state permit.State) (*entry, e
 	p := &e.approval
 	now := a.options.Now()
 	if !now.Before(time.Unix(p.Plan.ExpiryUnix, 0)) || (p.State == permit.StatePending && !now.Before(p.ApprovalExpiry)) {
-		delete(a.entries, d)
+		a.removeLocked(d)
 		a.emit("batch_expired", d, permit.CodeExpired, "")
 		return nil, failure(permit.CodeExpired, "batch approval expired")
 	}
@@ -329,7 +398,7 @@ func (a *Authority) freshLocked(ctx context.Context, d canonical.Digest, e *entr
 		return failure(permit.CodeWrongState, "batch changed during approval")
 	}
 	if changed {
-		delete(a.entries, d)
+		a.removeLocked(d)
 		a.emit("batch_invalidated", d, permit.CodeRiskAboveApproval, "")
 		return ErrInvalidated
 	}
@@ -374,7 +443,7 @@ func (a *Authority) SubmitAssertion(ctx context.Context, d canonical.Digest, ass
 	if err != nil {
 		e.failed++
 		if e.failed >= permit.MaxFailedAssertions {
-			delete(a.entries, d)
+			a.removeLocked(d)
 		}
 		a.emit("batch_rejected", d, permit.CodeAssertionRejected, "")
 		return Approval{}, failure(permit.CodeAssertionRejected, "batch assertion rejected")
@@ -459,6 +528,7 @@ func (a *Authority) Lock() {
 	defer a.mu.Unlock()
 	a.epoch++
 	clear(a.entries)
+	a.retained = 0
 	a.emit("batch_locked", canonical.Digest{}, "", "")
 }
 
@@ -467,7 +537,7 @@ func (a *Authority) gcLocked() {
 	for d, e := range a.entries {
 		p := e.approval
 		if !now.Before(time.Unix(p.Plan.ExpiryUnix, 0)) || (p.State == permit.StatePending && !now.Before(p.ApprovalExpiry)) {
-			delete(a.entries, d)
+			a.removeLocked(d)
 		}
 	}
 }

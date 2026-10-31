@@ -4,6 +4,7 @@ package permit
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
@@ -31,6 +32,28 @@ const (
 )
 
 var scanSlots = make(chan struct{}, 2)
+
+// scanLimited runs the Safety Scanner under the executor-wide scan limit.
+func scanLimited(artifact []byte) ([]scanner.Finding, canonical.Risk) {
+	scanSlots <- struct{}{}
+	defer func() { <-scanSlots }()
+	return scanner.Scan(artifact)
+}
+
+// ScanBounded runs the Safety Scanner under the same executor-wide limit of
+// two concurrent scans that ordinary permit proposals use, so other
+// authorities (batch approval) cannot bypass it. It gives up when ctx ends
+// while waiting for a slot.
+func ScanBounded(ctx context.Context, artifact []byte) ([]scanner.Finding, canonical.Risk, error) {
+	select {
+	case scanSlots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, "", ctx.Err()
+	}
+	defer func() { <-scanSlots }()
+	f, r := scanner.Scan(artifact)
+	return f, r, nil
+}
 
 type scanResult struct {
 	risk       canonical.Risk
@@ -64,11 +87,7 @@ func (a *Authority) observe(sum [32]byte, artifact []byte) {
 	}
 	// At most two scans run at once, so concurrent requests cannot take
 	// all of the executor's CPU (review m71 F1).
-	findings, risk := func() ([]scanner.Finding, canonical.Risk) {
-		scanSlots <- struct{}{}
-		defer func() { <-scanSlots }()
-		return scanner.Scan(artifact)
-	}()
+	findings, risk := scanLimited(artifact)
 	r := scanResult{risk: risk, categories: scanner.Categories(findings), findings: findings, preview: artifactPreview(artifact)}
 	a.scanMu.Lock()
 	defer a.scanMu.Unlock()
