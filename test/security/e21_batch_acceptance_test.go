@@ -369,7 +369,9 @@ func TestE21BatchSubstitutionAndReplayFail(t *testing.T) {
 // TestE21BatchLockRacesDoNotLetQueuedWorkEscape: a lock between the durable
 // dispatch intent and the transport call ends the claimed member as
 // not_executed, without reaching the target, and revokes every remaining
-// claim and approval. A trust change does the same for an unlocked batch.
+// claim and approval. For a trust change the property holds only when the
+// executor runs Check before the transport call: dispatch itself does not
+// re-evaluate trust or risk yet (see the KNOWN GAP note in the case).
 func TestE21BatchLockRacesDoNotLetQueuedWorkEscape(t *testing.T) {
 	for _, change := range []string{"lock", "untrust"} {
 		t.Run(change, func(t *testing.T) {
@@ -414,9 +416,18 @@ func TestE21BatchLockRacesDoNotLetQueuedWorkEscape(t *testing.T) {
 				if ok, err := h.db.UntrustArtifact(hexSum(e21UpgradeArtifact), e21UpgradeAction, "1.0.0"); err != nil || !ok {
 					t.Fatalf("untrust: %v %v", ok, err)
 				}
-				// The executor rechecks before any further authority use.
-				if _, err := b.a.Check(ctx, approved.Digest); err == nil {
-					t.Fatal("approval survived a trust withdrawal")
+				// KNOWN GAP (review of PR #150, M1): Dispatch only calls
+				// Permits.Member, which never re-evaluates trust or risk.
+				// Without this explicit Check the claimed member reaches
+				// the transport after the withdrawal, and a withdrawal
+				// between Check and the transport call still escapes.
+				// Closing it needs a revalidating permit lookup at the
+				// dispatch boundary in internal/permit/batch and
+				// internal/executor/dispatch (protected; separate ticket).
+				// This case only shows that an executor Check revokes the
+				// claimed member before the transport is reached.
+				if _, err := b.a.Check(ctx, approved.Digest); !errors.Is(err, batch.ErrInvalidated) {
+					t.Fatalf("check after trust withdrawal: %v, want ErrInvalidated", err)
 				}
 			}
 			close(rec.resume)
