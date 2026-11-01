@@ -811,7 +811,8 @@ func (s *TelemetryScheduler) perform(p planned) (recorded, discarded int, failed
 	r := s.running[p.id]
 	delete(s.running, p.id)
 	if r != nil {
-		r.cancel()
+		// The read context also bounds recording; release it at the end.
+		defer r.cancel()
 	}
 	k := p.read.Target.key()
 	st := s.targets[k]
@@ -853,7 +854,7 @@ func (s *TelemetryScheduler) perform(p planned) (recorded, discarded int, failed
 	// gate is held for reading: Lock and SetLeases wait until these
 	// samples are recorded and cannot interleave with them.
 	for _, smp := range valid {
-		if err := s.sink.RecordTelemetry(context.WithoutCancel(p.ctx), smp); err != nil {
+		if err := s.sink.RecordTelemetry(p.ctx, smp); err != nil {
 			discarded++
 			continue
 		}

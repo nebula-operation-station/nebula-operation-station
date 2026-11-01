@@ -227,6 +227,19 @@ func TestTelemetryLeasesDropStaleOrForeignGrants(t *testing.T) {
 	}
 }
 
+func TestTelemetryLeasesSkipDuplicateGrantIDs(t *testing.T) {
+	now := telT0
+	g := grantFixture(t, gid1, now, nil)
+	ls := TelemetryLeasesFromGrants([]*pb.ReadGrant{g, g}, TelemetryIdentities{Remotes: []*pb.PVERemoteInfo{activeRemoteInfo()}}, now)
+	if len(ls) != 1 {
+		t.Fatalf("leases = %d", len(ls))
+	}
+	s, _, _ := newTel(t, &telReader{})
+	if err := s.SetLeases(ls); err != nil {
+		t.Fatalf("derived leases rejected: %v", err)
+	}
+}
+
 func TestTelemetryLeasesRequireCurrentRemoteIdentity(t *testing.T) {
 	now := telT0
 	g := grantFixture(t, gid1, now, nil)

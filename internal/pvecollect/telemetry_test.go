@@ -695,6 +695,28 @@ func TestTelemetryDropsForeignAndInvalidSamples(t *testing.T) {
 	}
 }
 
+type ctxSink struct{ err error }
+
+func (c *ctxSink) RecordTelemetry(ctx context.Context, _ TelemetrySample) error {
+	c.err = ctx.Err()
+	return nil
+}
+
+func TestTelemetrySinkGetsLiveReadContext(t *testing.T) {
+	clk := &fakeClock{t: telT0}
+	sink := &ctxSink{err: errors.New("not called")}
+	s, err := NewTelemetryScheduler(&telReader{}, sink, TelemetryConfig{Now: clk.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetLeases([]TelemetryLease{lease("g1", true, false, telT0.Add(time.Hour), 10, provTarget("remote-a", 101, 1))}); err != nil {
+		t.Fatal(err)
+	}
+	if rep := s.RunOnce(context.Background()); rep.Recorded != 1 || sink.err != nil {
+		t.Fatalf("%+v sink ctx err = %v", rep, sink.err)
+	}
+}
+
 func TestTelemetrySetLeasesRejectsMalformed(t *testing.T) {
 	tg := provTarget("remote-a", 101, 1)
 	good := lease("g1", true, true, telT0.Add(time.Hour), 10, tg)

@@ -142,11 +142,12 @@ func TelemetryLeasesFromGrants(grants []*pb.ReadGrant, ids TelemetryIdentities, 
 	}
 	var out []TelemetryLease
 	total := 0
+	seenIDs := map[string]bool{}
 	for _, g := range grants {
 		if len(out) >= MaxTelemetryLeases {
 			break
 		}
-		if g == nil || g.GetRevokedUnix() != 0 || !now.Before(time.Unix(g.GetExpiryUnix(), 0)) {
+		if g == nil || g.GetRevokedUnix() != 0 || !now.Before(time.Unix(g.GetExpiryUnix(), 0)) || seenIDs[g.GetGrantId()] {
 			continue
 		}
 		doc, _, digest, err := permit.ParseReadGrant(g.GetCanonicalGrant(), now)
@@ -194,6 +195,7 @@ func TelemetryLeasesFromGrants(grants []*pb.ReadGrant, ids TelemetryIdentities, 
 			continue
 		}
 		total += len(l.Targets)
+		seenIDs[l.GrantID] = true
 		out = append(out, l)
 	}
 	return out
