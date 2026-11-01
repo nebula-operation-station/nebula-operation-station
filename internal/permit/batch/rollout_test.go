@@ -256,6 +256,69 @@ func TestProviderMemberOnBusyVMNotClaimable(t *testing.T) {
 	}
 }
 
+// Review PR #142: a node-level provider action (VMID 0, e.g. a node reboot)
+// and a guest action on the same node never run at once; guests on another
+// node are unaffected.
+func TestProviderNodeActionBlocksGuestsOnSameNode(t *testing.T) {
+	e := setup(t, permit.ModeStandard)
+	pin := canonical.Digest(sha256.Sum256([]byte("pin"))).String()
+	prov := func(node string, vmid uint32) *canonical.BatchProviderTarget {
+		kind := "qemu"
+		if vmid == 0 {
+			kind = "node"
+		}
+		return &canonical.BatchProviderTarget{
+			RemoteID: "remote-1", Kind: kind, Node: node, VMID: vmid,
+			Generation: 1, Pin: pin, TrustGeneration: 1,
+			APIEndpoints: []string{"https://pve-1.example.com"},
+		}
+	}
+	spec := planSpec{
+		batchID: "00000000-0000-4000-8000-000000000001",
+		stages:  []specStage{{id: "first", gate: canonical.BatchGateManual}},
+		members: []specMember{
+			{id: "member-0", risk: canonical.RiskLow, stage: 0, action: "package.upgrade", provider: prov("pve-1", 100)},
+			{id: "member-1", risk: canonical.RiskLow, stage: 0, action: "package.install", provider: prov("pve-1", 0)},
+			{id: "member-2", risk: canonical.RiskLow, stage: 0, action: "package.list", provider: prov("pve-2", 0)},
+		},
+	}
+	p := proposePlan(t, e, spec)
+	if _, err := e.a.ClaimMember(ctx, p.Digest, 0, p.Plan.Members[0]); err != nil {
+		t.Fatalf("guest claim: %v", err)
+	}
+	_, err := e.a.ClaimMember(ctx, p.Digest, 1, p.Plan.Members[1])
+	wantCode(t, err, CodeHostBusy)
+	if _, err := e.a.ClaimMember(ctx, p.Digest, 2, p.Plan.Members[2]); err != nil {
+		t.Fatalf("other node claim: %v", err)
+	}
+	e.a.RecordOutcome(p.Plan.Members[0].Request.ExecutionID, "member-0", permit.OutcomeSucceeded)
+	if _, err := e.a.ClaimMember(ctx, p.Digest, 1, p.Plan.Members[1]); err != nil {
+		t.Fatalf("node claim after guest done: %v", err)
+	}
+}
+
+func TestHostKeysConflict(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{"ssh:h1", "ssh:h1", true},
+		{"ssh:h1", "ssh:h2", false},
+		{"node:r:n1:100", "node:r:n1:100", true},
+		{"node:r:n1:100", "node:r:n1:101", false},
+		{"node:r:n1:0", "node:r:n1:101", true},
+		{"node:r:n1:101", "node:r:n1:0", true},
+		{"node:r:n1:0", "node:r:n2:0", false},
+		{"node:r1:n1:0", "node:r2:n1:5", false},
+		{"node:r:n1:x", "node:r:n1:0", false},
+		{"ssh:h1", "node:r:h1:0", false},
+	} {
+		if got := hostKeysConflict(tc.a, tc.b); got != tc.want {
+			t.Errorf("hostKeysConflict(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
 // A stage is not passed until its required postchecks are recorded, so the
 // next stage does not open and its member is not claimable.
 func TestStagePostcheckRequiredBeforeNextStage(t *testing.T) {

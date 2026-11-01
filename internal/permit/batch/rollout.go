@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
@@ -284,10 +285,48 @@ func (a *Authority) checkMemberGatesLocked(e *entry, m canonical.BatchMember) er
 		return a.deny(e.approval.Digest, m.MemberID, CodeDependencyNotMet, why)
 	}
 	hk := memberHostKey(m)
-	if busy, ok := r.hostBusy[hk]; ok {
-		return a.deny(e.approval.Digest, m.MemberID, CodeHostBusy, fmt.Sprintf("member %s is running on the same host", busy))
+	for busyKey, busy := range r.hostBusy {
+		if hostKeysConflict(hk, busyKey) {
+			return a.deny(e.approval.Digest, m.MemberID, CodeHostBusy, fmt.Sprintf("member %s is running on the same host", busy))
+		}
 	}
 	return nil
+}
+
+// hostKeysConflict reports whether two ordering keys name overlapping
+// physical resources. Equal keys always conflict. Provider keys on the same
+// remote and node also conflict when either acts on the node itself (VMID 0,
+// for example a node reboot) — a node action must not run while one of its
+// guests is being changed, and vice versa (review PR #142).
+func hostKeysConflict(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ra, na, va, oka := parseNodeKey(a)
+	rb, nb, vb, okb := parseNodeKey(b)
+	return oka && okb && ra == rb && na == nb && (va == 0 || vb == 0)
+}
+
+// parseNodeKey splits a provider ordering key "node:<remote>:<node>:<vmid>".
+func parseNodeKey(k string) (remote, node string, vmid uint64, ok bool) {
+	rest, found := strings.CutPrefix(k, "node:")
+	if !found {
+		return "", "", 0, false
+	}
+	i := strings.LastIndexByte(rest, ':')
+	if i < 0 {
+		return "", "", 0, false
+	}
+	v, err := strconv.ParseUint(rest[i+1:], 10, 32)
+	if err != nil {
+		return "", "", 0, false
+	}
+	head := rest[:i]
+	j := strings.IndexByte(head, ':')
+	if j < 0 {
+		return "", "", 0, false
+	}
+	return head[:j], head[j+1:], v, true
 }
 
 // deny records an audit event and returns the failure.
