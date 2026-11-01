@@ -50,14 +50,15 @@ type Service struct {
 	pb.UnimplementedExecutorServiceServer
 
 	auth *permit.Authority
-	// batchAuth is the batch read-grant authority (ADR 0007, E19b); nil
-	// until the executor wires it, in which case the batch RPCs are
-	// Unimplemented.
-	batchAuth *batch.Authority
 	keys *keyring.Keyring
 	db   *executordb.DB
 	reg  *webauthnreg.Registrar
 	log  *slog.Logger
+
+	// batchAuth is the batch approval authority (ADR 0007, E19b); nil until
+	// SetBatchAuthority wires it, in which case the batch RPCs are
+	// Unimplemented.
+	batchAuth *batch.Authority
 	// transport is the SSH client configuration (spec 08 defaults).
 	transport sshtransport.Config
 	// recovery limits wrong TOTP recovery codes.
