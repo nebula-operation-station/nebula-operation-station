@@ -6,6 +6,16 @@ fail() {
   exit 1
 }
 
+# nebula_check_repo_key FILE EXPECTED_FPR
+# Fails the run unless the GPG key in FILE has primary fingerprint
+# EXPECTED_FPR. The fingerprint is pinned from the vendor's documentation
+# (cited at the call site); a mismatch means the downloaded key is not the
+# vendor's, so we stop before installing anything.
+nebula_check_repo_key() {
+  fpr=$(gpg --show-keys --with-colons "$1" 2>/dev/null | awk -F: '$1=="fpr" {print $10; exit}')
+  [ "$fpr" = "$2" ] || fail "repository key fingerprint mismatch: got ${fpr:-<none>}, want $2"
+}
+
 json_escape() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\\"/g'
 }
@@ -30,7 +40,18 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq ca-certificates curl gnupg
 install -d -m 0755 /etc/apt/keyrings
-curl -fsSL https://pkgs.netbird.io/key.asc | gpg --dearmor > /etc/apt/keyrings/netbird.gpg
+[ -n "${NEBULA_RUN_DIR:-}" ] || fail "NEBULA_RUN_DIR is not set"
+key="$NEBULA_RUN_DIR/nebula-netbird-key"
+curl -fsSL "https://pkgs.netbird.io/debian/public.key" -o "$key"
+# Pin the full primary-key fingerprint of the NetBird apt signing key so a
+# substituted key is rejected before anything is installed. The key is the
+# "Wiretrustee <dev@wiretrustee.com>" key, published in the vendor's
+# public-keys repository (https://github.com/netbirdio/public-keys,
+# packages/deb.gpg) and served at https://pkgs.netbird.io/debian/public.key
+# (https://docs.netbird.io/get-started/install/linux).
+nebula_check_repo_key "$key" EFE37DF047DF7CCDF1FC54FA83F79AD029778355
+gpg --dearmor -o /etc/apt/keyrings/netbird.gpg "$key"
+rm -f "$key"
 chmod a+r /etc/apt/keyrings/netbird.gpg
 printf 'deb [arch=%s signed-by=/etc/apt/keyrings/netbird.gpg] https://pkgs.netbird.io/ stable main\n' "$(dpkg --print-architecture)" > /etc/apt/sources.list.d/netbird.list
 apt-get update -qq

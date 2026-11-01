@@ -6,6 +6,16 @@ fail() {
   exit 1
 }
 
+# nebula_check_repo_key FILE EXPECTED_FPR
+# Fails the run unless the GPG key in FILE has primary fingerprint
+# EXPECTED_FPR. The fingerprint is pinned from the vendor's documentation
+# (cited at the call site); a mismatch means the downloaded key is not the
+# vendor's, so we stop before installing anything.
+nebula_check_repo_key() {
+  fpr=$(gpg --show-keys --with-colons "$1" 2>/dev/null | awk -F: '$1=="fpr" {print $10; exit}')
+  [ "$fpr" = "$2" ] || fail "repository key fingerprint mismatch: got ${fpr:-<none>}, want $2"
+}
+
 json_escape() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\\"/g'
 }
@@ -34,7 +44,17 @@ export DEBIAN_FRONTEND=noninteractive
 codename=$VERSION_CODENAME
 apt-get update -qq
 apt-get install -y -qq ca-certificates curl gnupg
-curl -fsSL https://repos.influxdata.com/influxdata.key | gpg --dearmor > /usr/share/keyrings/influxdata-archive-keyring.gpg
+[ -n "${NEBULA_RUN_DIR:-}" ] || fail "NEBULA_RUN_DIR is not set"
+key="$NEBULA_RUN_DIR/nebula-influxdata-key"
+curl -fsSL "https://repos.influxdata.com/influxdata-archive.key" -o "$key"
+# Pin the full primary-key fingerprint of the InfluxData apt signing key so a
+# substituted key is rejected before anything is installed. The key is the
+# "InfluxData Package Signing Key", documented in InfluxData's install docs
+# (https://docs.influxdata.com/influxdb/v1/introduction/install/) and served
+# at https://repos.influxdata.com/influxdata-archive.key.
+nebula_check_repo_key "$key" 24C975CBA61A024EE1B631787C3D57159FC2F927
+gpg --dearmor -o /usr/share/keyrings/influxdata-archive-keyring.gpg "$key"
+rm -f "$key"
 printf 'deb [signed-by=/usr/share/keyrings/influxdata-archive-keyring.gpg] https://repos.influxdata.com/debian %s main\n' "$codename" > /etc/apt/sources.list.d/influxdata.list
 apt-get update -qq
 apt-get install -y -qq telegraf
