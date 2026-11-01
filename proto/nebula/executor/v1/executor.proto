@@ -2049,7 +2049,9 @@ message RunReadGrantResponse {
 
 // Batch plan (ADR 0007, E19b). The complete bounded plan: the parent batch
 // and its members, with the stage/dependency graph that links them. This is
-// never a truncated approval scope; the full plan is always returned.
+// never a truncated approval scope; the full plan is always returned. The
+// canonical_batch bytes sent next to it are authoritative; this is a typed
+// view of every member and of the complete stage/dependency graph.
 message BatchPlan {
   // Parent batch identity.
   string batch_id = 1;
@@ -2058,6 +2060,9 @@ message BatchPlan {
   repeated BatchMember members = 3;
   repeated BatchStage stages = 4;
   repeated BatchDependency dependencies = 5;
+  // Parent stage plan hash; every member's stage_plan_hash equals it.
+  string stage_plan_hash = 6;
+  string batch_version = 7;
 }
 
 message BatchMember {
@@ -2068,6 +2073,12 @@ message BatchMember {
   repeated string host_ids = 5;
   // Must equal the parent stage plan hash (parent/member linkage).
   string stage_plan_hash = 6;
+  // Executor-bound member execution ID; a member runs only under this ID
+  // and only as a child of the approved parent digest.
+  string execution_id = 7;
+  string artifact_sha256 = 8;
+  string parameters_hash = 9;
+  repeated string credential_refs = 10;
 }
 
 message BatchStage {
@@ -2076,6 +2087,9 @@ message BatchStage {
   string gate = 2;
   repeated string member_ids = 3;
   repeated string required_postchecks = 4;
+  // Absolute counts; zero stops on the first failed or unreachable member.
+  int32 failure_threshold = 5;
+  int32 unreachable_threshold = 6;
 }
 
 message BatchDependency {
@@ -2177,4 +2191,7 @@ message GetBatchStatusResponse {
   string approved_by = 6;
   int64 approval_expiry_unix = 7;
   int64 expiry_unix = 8;
+  // Parent stage plan hash, and each member's execution ID in member order.
+  string stage_plan_hash = 9;
+  repeated string member_execution_ids = 10;
 }

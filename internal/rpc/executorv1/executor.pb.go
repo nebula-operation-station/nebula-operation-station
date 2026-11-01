@@ -14404,16 +14404,21 @@ func (x *RunReadGrantResponse) GetResult() *RunAttachedResponse {
 
 // Batch plan (ADR 0007, E19b). The complete bounded plan: the parent batch
 // and its members, with the stage/dependency graph that links them. This is
-// never a truncated approval scope; the full plan is always returned.
+// never a truncated approval scope; the full plan is always returned. The
+// canonical_batch bytes sent next to it are authoritative; this is a typed
+// view of every member and of the complete stage/dependency graph.
 type BatchPlan struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Parent batch identity.
 	BatchId    string `protobuf:"bytes,1,opt,name=batch_id,json=batchId,proto3" json:"batch_id,omitempty"`
 	ExpiryUnix int64  `protobuf:"varint,2,opt,name=expiry_unix,json=expiryUnix,proto3" json:"expiry_unix,omitempty"`
 	// Members in plan order; each is bound to the parent by its stage plan hash.
-	Members       []*BatchMember     `protobuf:"bytes,3,rep,name=members,proto3" json:"members,omitempty"`
-	Stages        []*BatchStage      `protobuf:"bytes,4,rep,name=stages,proto3" json:"stages,omitempty"`
-	Dependencies  []*BatchDependency `protobuf:"bytes,5,rep,name=dependencies,proto3" json:"dependencies,omitempty"`
+	Members      []*BatchMember     `protobuf:"bytes,3,rep,name=members,proto3" json:"members,omitempty"`
+	Stages       []*BatchStage      `protobuf:"bytes,4,rep,name=stages,proto3" json:"stages,omitempty"`
+	Dependencies []*BatchDependency `protobuf:"bytes,5,rep,name=dependencies,proto3" json:"dependencies,omitempty"`
+	// Parent stage plan hash; every member's stage_plan_hash equals it.
+	StagePlanHash string `protobuf:"bytes,6,opt,name=stage_plan_hash,json=stagePlanHash,proto3" json:"stage_plan_hash,omitempty"`
+	BatchVersion  string `protobuf:"bytes,7,opt,name=batch_version,json=batchVersion,proto3" json:"batch_version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -14483,6 +14488,20 @@ func (x *BatchPlan) GetDependencies() []*BatchDependency {
 	return nil
 }
 
+func (x *BatchPlan) GetStagePlanHash() string {
+	if x != nil {
+		return x.StagePlanHash
+	}
+	return ""
+}
+
+func (x *BatchPlan) GetBatchVersion() string {
+	if x != nil {
+		return x.BatchVersion
+	}
+	return ""
+}
+
 type BatchMember struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	MemberId      string                 `protobuf:"bytes,1,opt,name=member_id,json=memberId,proto3" json:"member_id,omitempty"`
@@ -14492,8 +14511,14 @@ type BatchMember struct {
 	HostIds       []string               `protobuf:"bytes,5,rep,name=host_ids,json=hostIds,proto3" json:"host_ids,omitempty"`
 	// Must equal the parent stage plan hash (parent/member linkage).
 	StagePlanHash string `protobuf:"bytes,6,opt,name=stage_plan_hash,json=stagePlanHash,proto3" json:"stage_plan_hash,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Executor-bound member execution ID; a member runs only under this ID
+	// and only as a child of the approved parent digest.
+	ExecutionId    string   `protobuf:"bytes,7,opt,name=execution_id,json=executionId,proto3" json:"execution_id,omitempty"`
+	ArtifactSha256 string   `protobuf:"bytes,8,opt,name=artifact_sha256,json=artifactSha256,proto3" json:"artifact_sha256,omitempty"`
+	ParametersHash string   `protobuf:"bytes,9,opt,name=parameters_hash,json=parametersHash,proto3" json:"parameters_hash,omitempty"`
+	CredentialRefs []string `protobuf:"bytes,10,rep,name=credential_refs,json=credentialRefs,proto3" json:"credential_refs,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *BatchMember) Reset() {
@@ -14568,6 +14593,34 @@ func (x *BatchMember) GetStagePlanHash() string {
 	return ""
 }
 
+func (x *BatchMember) GetExecutionId() string {
+	if x != nil {
+		return x.ExecutionId
+	}
+	return ""
+}
+
+func (x *BatchMember) GetArtifactSha256() string {
+	if x != nil {
+		return x.ArtifactSha256
+	}
+	return ""
+}
+
+func (x *BatchMember) GetParametersHash() string {
+	if x != nil {
+		return x.ParametersHash
+	}
+	return ""
+}
+
+func (x *BatchMember) GetCredentialRefs() []string {
+	if x != nil {
+		return x.CredentialRefs
+	}
+	return nil
+}
+
 type BatchStage struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	StageId string                 `protobuf:"bytes,1,opt,name=stage_id,json=stageId,proto3" json:"stage_id,omitempty"`
@@ -14575,8 +14628,11 @@ type BatchStage struct {
 	Gate               string   `protobuf:"bytes,2,opt,name=gate,proto3" json:"gate,omitempty"`
 	MemberIds          []string `protobuf:"bytes,3,rep,name=member_ids,json=memberIds,proto3" json:"member_ids,omitempty"`
 	RequiredPostchecks []string `protobuf:"bytes,4,rep,name=required_postchecks,json=requiredPostchecks,proto3" json:"required_postchecks,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Absolute counts; zero stops on the first failed or unreachable member.
+	FailureThreshold     int32 `protobuf:"varint,5,opt,name=failure_threshold,json=failureThreshold,proto3" json:"failure_threshold,omitempty"`
+	UnreachableThreshold int32 `protobuf:"varint,6,opt,name=unreachable_threshold,json=unreachableThreshold,proto3" json:"unreachable_threshold,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *BatchStage) Reset() {
@@ -14635,6 +14691,20 @@ func (x *BatchStage) GetRequiredPostchecks() []string {
 		return x.RequiredPostchecks
 	}
 	return nil
+}
+
+func (x *BatchStage) GetFailureThreshold() int32 {
+	if x != nil {
+		return x.FailureThreshold
+	}
+	return 0
+}
+
+func (x *BatchStage) GetUnreachableThreshold() int32 {
+	if x != nil {
+		return x.UnreachableThreshold
+	}
+	return 0
 }
 
 type BatchDependency struct {
@@ -14866,7 +14936,8 @@ func (x *BatchMemberInput) GetParametersJson() []byte {
 
 type ProposeBatchRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Strict canonical batch JSON, 1..2 MiB; bounded members and stages.
+	// Strict canonical batch JSON, at most 2 MiB; at most 100 members and
+	// 20 stages. The complete plan is frozen and never truncated.
 	BatchJson []byte `protobuf:"bytes,1,opt,name=batch_json,json=batchJson,proto3" json:"batch_json,omitempty"`
 	// One exact artifact and parameter document per member, in plan order.
 	Members       []*BatchMemberInput `protobuf:"bytes,2,rep,name=members,proto3" json:"members,omitempty"`
@@ -15431,6 +15502,9 @@ type GetBatchStatusResponse struct {
 	ApprovedBy         string   `protobuf:"bytes,6,opt,name=approved_by,json=approvedBy,proto3" json:"approved_by,omitempty"`
 	ApprovalExpiryUnix int64    `protobuf:"varint,7,opt,name=approval_expiry_unix,json=approvalExpiryUnix,proto3" json:"approval_expiry_unix,omitempty"`
 	ExpiryUnix         int64    `protobuf:"varint,8,opt,name=expiry_unix,json=expiryUnix,proto3" json:"expiry_unix,omitempty"`
+	// Parent stage plan hash, and each member's execution ID in member order.
+	StagePlanHash      string   `protobuf:"bytes,9,opt,name=stage_plan_hash,json=stagePlanHash,proto3" json:"stage_plan_hash,omitempty"`
+	MemberExecutionIds []string `protobuf:"bytes,10,rep,name=member_execution_ids,json=memberExecutionIds,proto3" json:"member_execution_ids,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -15519,6 +15593,20 @@ func (x *GetBatchStatusResponse) GetExpiryUnix() int64 {
 		return x.ExpiryUnix
 	}
 	return 0
+}
+
+func (x *GetBatchStatusResponse) GetStagePlanHash() string {
+	if x != nil {
+		return x.StagePlanHash
+	}
+	return ""
+}
+
+func (x *GetBatchStatusResponse) GetMemberExecutionIds() []string {
+	if x != nil {
+		return x.MemberExecutionIds
+	}
+	return nil
 }
 
 var File_nebula_executor_v1_executor_proto protoreflect.FileDescriptor
@@ -16470,28 +16558,37 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\atrigger\x18\x05 \x01(\x0e2$.nebula.executor.v1.ReadGrantTriggerR\atrigger\"z\n" +
 	"\x14RunReadGrantResponse\x12!\n" +
 	"\fexecution_id\x18\x01 \x01(\tR\vexecutionId\x12?\n" +
-	"\x06result\x18\x02 \x01(\v2'.nebula.executor.v1.RunAttachedResponseR\x06result\"\x83\x02\n" +
+	"\x06result\x18\x02 \x01(\v2'.nebula.executor.v1.RunAttachedResponseR\x06result\"\xd0\x02\n" +
 	"\tBatchPlan\x12\x19\n" +
 	"\bbatch_id\x18\x01 \x01(\tR\abatchId\x12\x1f\n" +
 	"\vexpiry_unix\x18\x02 \x01(\x03R\n" +
 	"expiryUnix\x129\n" +
 	"\amembers\x18\x03 \x03(\v2\x1f.nebula.executor.v1.BatchMemberR\amembers\x126\n" +
 	"\x06stages\x18\x04 \x03(\v2\x1e.nebula.executor.v1.BatchStageR\x06stages\x12G\n" +
-	"\fdependencies\x18\x05 \x03(\v2#.nebula.executor.v1.BatchDependencyR\fdependencies\"\xe4\x01\n" +
+	"\fdependencies\x18\x05 \x03(\v2#.nebula.executor.v1.BatchDependencyR\fdependencies\x12&\n" +
+	"\x0fstage_plan_hash\x18\x06 \x01(\tR\rstagePlanHash\x12#\n" +
+	"\rbatch_version\x18\a \x01(\tR\fbatchVersion\"\x82\x03\n" +
 	"\vBatchMember\x12\x1b\n" +
 	"\tmember_id\x18\x01 \x01(\tR\bmemberId\x12\x1b\n" +
 	"\taction_id\x18\x02 \x01(\tR\bactionId\x12%\n" +
 	"\x0emodule_version\x18\x03 \x01(\tR\rmoduleVersion\x121\n" +
 	"\x04risk\x18\x04 \x01(\x0e2\x1d.nebula.executor.v1.RiskClassR\x04risk\x12\x19\n" +
 	"\bhost_ids\x18\x05 \x03(\tR\ahostIds\x12&\n" +
-	"\x0fstage_plan_hash\x18\x06 \x01(\tR\rstagePlanHash\"\x8b\x01\n" +
+	"\x0fstage_plan_hash\x18\x06 \x01(\tR\rstagePlanHash\x12!\n" +
+	"\fexecution_id\x18\a \x01(\tR\vexecutionId\x12'\n" +
+	"\x0fartifact_sha256\x18\b \x01(\tR\x0eartifactSha256\x12'\n" +
+	"\x0fparameters_hash\x18\t \x01(\tR\x0eparametersHash\x12'\n" +
+	"\x0fcredential_refs\x18\n" +
+	" \x03(\tR\x0ecredentialRefs\"\xed\x01\n" +
 	"\n" +
 	"BatchStage\x12\x19\n" +
 	"\bstage_id\x18\x01 \x01(\tR\astageId\x12\x12\n" +
 	"\x04gate\x18\x02 \x01(\tR\x04gate\x12\x1d\n" +
 	"\n" +
 	"member_ids\x18\x03 \x03(\tR\tmemberIds\x12/\n" +
-	"\x13required_postchecks\x18\x04 \x03(\tR\x12requiredPostchecks\"M\n" +
+	"\x13required_postchecks\x18\x04 \x03(\tR\x12requiredPostchecks\x12+\n" +
+	"\x11failure_threshold\x18\x05 \x01(\x05R\x10failureThreshold\x123\n" +
+	"\x15unreachable_threshold\x18\x06 \x01(\x05R\x14unreachableThreshold\"M\n" +
 	"\x0fBatchDependency\x12\x1b\n" +
 	"\tmember_id\x18\x01 \x01(\tR\bmemberId\x12\x1d\n" +
 	"\n" +
@@ -16546,7 +16643,7 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\vapproved_by\x18\x02 \x01(\tR\n" +
 	"approvedBy\":\n" +
 	"\x15GetBatchStatusRequest\x12!\n" +
-	"\fbatch_digest\x18\x01 \x01(\tR\vbatchDigest\"\xd3\x02\n" +
+	"\fbatch_digest\x18\x01 \x01(\tR\vbatchDigest\"\xad\x03\n" +
 	"\x16GetBatchStatusResponse\x12!\n" +
 	"\fbatch_digest\x18\x01 \x01(\tR\vbatchDigest\x125\n" +
 	"\x05state\x18\x02 \x01(\x0e2\x1f.nebula.executor.v1.PermitStateR\x05state\x121\n" +
@@ -16558,7 +16655,10 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"approvedBy\x120\n" +
 	"\x14approval_expiry_unix\x18\a \x01(\x03R\x12approvalExpiryUnix\x12\x1f\n" +
 	"\vexpiry_unix\x18\b \x01(\x03R\n" +
-	"expiryUnix*\x80\x01\n" +
+	"expiryUnix\x12&\n" +
+	"\x0fstage_plan_hash\x18\t \x01(\tR\rstagePlanHash\x120\n" +
+	"\x14member_execution_ids\x18\n" +
+	" \x03(\tR\x12memberExecutionIds*\x80\x01\n" +
 	"\tRiskClass\x12\x1a\n" +
 	"\x16RISK_CLASS_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eRISK_CLASS_LOW\x10\x01\x12\x15\n" +
