@@ -105,6 +105,10 @@ type Candidate struct {
 	Manifest Manifest
 	// Modules are the verified modules, in manifest order.
 	Modules []ModuleBundle
+	// ManifestBytes and Signature are the exact signed manifest and its
+	// detached signature, retained as provenance.
+	ManifestBytes []byte
+	Signature     []byte
 }
 
 // ReadBundleDir reads and verifies a local review directory holding
@@ -150,7 +154,7 @@ func ReadBundleDir(dir string, roots []Root) (Candidate, error) {
 	if err != nil {
 		return Candidate{}, err
 	}
-	return Candidate{Manifest: m, Modules: mods}, nil
+	return Candidate{Manifest: m, Modules: mods, ManifestBytes: man, Signature: sig}, nil
 }
 
 // readRegular reads a regular file of at most max bytes without
@@ -217,7 +221,7 @@ func VerifyBundle(m Manifest, b []byte) ([]ModuleBundle, error) {
 		if s := sha256.Sum256(e.data); hex.EncodeToString(s[:]) != md.SHA256 {
 			return bad("%s does not match the manifest's sha256", e.name)
 		}
-		files, err := readUstar(e.data, tarLimits{maxEntries: MaxModuleFiles, maxFile: MaxOtherFile, maxTotal: MaxInnerContent}, validInnerPath)
+		files, err := readModuleTar(e.data)
 		if err != nil {
 			return bad("%s: %v", e.name, err)
 		}
@@ -235,6 +239,32 @@ func VerifyBundle(m Manifest, b []byte) ([]ModuleBundle, error) {
 		out = append(out, mb)
 	}
 	return out, nil
+}
+
+func readModuleTar(b []byte) ([]tarEntry, error) {
+	return readUstar(b, tarLimits{maxEntries: MaxModuleFiles, maxFile: MaxOtherFile, maxTotal: MaxInnerContent}, validInnerPath)
+}
+
+// ParseModuleTar re-reads a module tar retained from an earlier verified
+// bundle, with the same checks as VerifyBundle: exact size and hash
+// against md, strict ustar, lock and scripts. The executor uses it to
+// diff against exact previous bytes; it never establishes provenance.
+func ParseModuleTar(md Module, b []byte) (ModuleBundle, error) {
+	if int64(len(b)) != md.Size || len(b) > MaxModuleTar {
+		return ModuleBundle{}, fmt.Errorf("%w: module %s %s has %d bytes, want %d", ErrBundle, md.Name, md.Version, len(b), md.Size)
+	}
+	if s := sha256.Sum256(b); hex.EncodeToString(s[:]) != md.SHA256 {
+		return ModuleBundle{}, fmt.Errorf("%w: module %s %s does not match its sha256", ErrBundle, md.Name, md.Version)
+	}
+	files, err := readModuleTar(b)
+	if err != nil {
+		return ModuleBundle{}, fmt.Errorf("%w: module %s %s: %v", ErrBundle, md.Name, md.Version, err)
+	}
+	mb, err := verifyModule(md, b, files)
+	if err != nil {
+		return ModuleBundle{}, fmt.Errorf("%w: module %s %s: %v", ErrBundle, md.Name, md.Version, err)
+	}
+	return mb, nil
 }
 
 func verifyModule(md Module, tar []byte, files []tarEntry) (ModuleBundle, error) {

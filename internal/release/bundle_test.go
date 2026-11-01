@@ -311,3 +311,21 @@ func TestReadBundleDir(t *testing.T) {
 		t.Fatalf("directory as signature: %v", err)
 	}
 }
+
+func TestParseModuleTar(t *testing.T) {
+	b := moduleTar(t, "docker", "1.2.0")
+	md := Module{Name: "docker", Version: "1.2.0", Size: int64(len(b)), SHA256: hexSum(b)}
+	if mb, err := ParseModuleTar(md, b); err != nil || mb.Lock.Name != "docker" || len(mb.Actions) != 1 {
+		t.Fatalf("ParseModuleTar: %v", err)
+	}
+	flipped := append([]byte{}, b...)
+	flipped[600] ^= 1
+	if _, err := ParseModuleTar(md, flipped); !errors.Is(err, ErrBundle) {
+		t.Fatalf("corrupt bytes: %v", err)
+	}
+	other := md
+	other.Version = "1.2.1"
+	if _, err := ParseModuleTar(other, b); !errors.Is(err, ErrBundle) {
+		t.Fatalf("lock/version mismatch: %v", err)
+	}
+}
