@@ -1,0 +1,64 @@
+name: docker
+version: 1.0.0
+title: Docker
+description: >
+  Installs and manages Docker Engine (docker-ce) from Docker's
+  distribution repository, pinned to a major or minor version, with
+  the buildx and compose plugins. Uninstall removes the engine and
+  its state. Targets Debian 12/13 and Ubuntu 22.04/24.04.
+actions:
+  install:
+    title: Install Docker
+    description: >
+      Adds Docker's apt repository and installs docker-ce pinned to
+      the requested version plus containerd.io, docker-buildx-plugin
+      and docker-compose-plugin; enables and starts the service.
+      No-op when already installed at the pinned version.
+    script: actions/install.sh
+    risk: medium
+    durable: true
+    timeout: 900s
+    params:
+      - {name: version, label: "Docker version, major or minor", type: name}
+    secrets: []
+    declares: [requires_root, writes_config, network_access]
+  verify:
+    title: Verify Docker
+    description: >
+      Read-only check that the engine is installed, the service is
+      active and the major version matches the request. Exits
+      non-zero when it does not.
+    script: actions/verify.sh
+    risk: low
+    durable: false
+    timeout: 120s
+    params:
+      - {name: version, label: "Docker version, major or minor", type: name}
+    secrets: []
+    declares: []
+  update:
+    title: Update Docker
+    description: >
+      Upgrades the Docker packages within the pinned version and
+      restarts the service. No-op when current.
+    script: actions/update.sh
+    risk: medium
+    durable: true
+    timeout: 900s
+    params:
+      - {name: version, label: "Docker version, major or minor", type: name}
+    secrets: []
+    declares: [requires_root, network_access]
+  uninstall:
+    title: Uninstall Docker
+    description: >
+      Stops the service, purges the Docker packages and removes
+      /etc/docker, /var/lib/docker and /var/lib/containerd. No-op
+      when not installed.
+    script: actions/uninstall.sh
+    risk: high
+    durable: true
+    timeout: 900s
+    params: []
+    secrets: []
+    declares: [requires_root]

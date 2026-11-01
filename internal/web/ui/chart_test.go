@@ -22,10 +22,12 @@ import (
 // tests can drive ops states, update counts and docker lists per host.
 type chartOps struct {
 	*fakeOps
-	states  map[string]executions.OpsState
-	updates map[string]executions.HostUpdates
-	docker  map[string]executions.LastResultRow
-	facts   map[string]executions.LastResultRow
+	states   map[string]executions.OpsState
+	updates  map[string]executions.HostUpdates
+	docker   map[string]executions.LastResultRow
+	facts    map[string]executions.LastResultRow
+	dockerUp map[string]executions.LastResultRow
+	registry map[string]executions.LastResultRow
 }
 
 func (c *chartOps) AllOpsStates(context.Context) (map[string]executions.OpsState, error) {
@@ -42,6 +44,10 @@ func (c *chartOps) LastResults(_ context.Context, actionID string) (map[string]e
 		return c.docker, nil
 	case "core.facts":
 		return c.facts, nil
+	case "docker.check_updates":
+		return c.dockerUp, nil
+	case "registry.tags":
+		return c.registry, nil
 	}
 	return map[string]executions.LastResultRow{}, nil
 }

@@ -1,0 +1,64 @@
+name: telegraf
+version: 1.0.0
+title: Telegraf
+description: >
+  Installs and manages the Telegraf agent from the InfluxData apt
+  repository, configured to ship metrics to an InfluxDB 2.x
+  instance. The API token is a vault secret written to a 0600 file
+  that the plugin reads via token_file; it never appears in the
+  configuration. Targets Debian 12/13 and Ubuntu 22.04/24.04.
+actions:
+  install:
+    title: Install Telegraf
+    description: >
+      Adds the InfluxData apt repository, installs telegraf, writes
+      the InfluxDB v2 output configuration and the 0600 token file,
+      then restarts the service. No-op when already in place.
+    script: actions/install.sh
+    risk: medium
+    durable: true
+    timeout: 900s
+    params:
+      - {name: influx_scheme, label: InfluxDB scheme, type: choice, choices: [http, https]}
+      - {name: influx_host, label: "InfluxDB host, host or host:port", type: name}
+      - {name: influx_org, label: InfluxDB organization, type: name}
+      - {name: influx_bucket, label: InfluxDB bucket, type: name}
+    secrets: [influx_token]
+    declares: [requires_root, writes_config, network_access]
+  verify:
+    title: Verify Telegraf
+    description: >
+      Read-only check that the service is active and the
+      configuration and token file are in place with the right
+      permissions. Exits non-zero when it is not.
+    script: actions/verify.sh
+    risk: low
+    durable: false
+    timeout: 120s
+    params: []
+    secrets: []
+    declares: []
+  update:
+    title: Update Telegraf
+    description: >
+      Upgrades telegraf and restarts the service. No-op when
+      current.
+    script: actions/update.sh
+    risk: medium
+    durable: true
+    timeout: 900s
+    params: []
+    secrets: []
+    declares: [requires_root, network_access]
+  uninstall:
+    title: Uninstall Telegraf
+    description: >
+      Removes the configuration and token file, purges telegraf and
+      removes the apt repository. No-op when not installed.
+    script: actions/uninstall.sh
+    risk: medium
+    durable: true
+    timeout: 600s
+    params: []
+    secrets: []
+    declares: [requires_root, network_access]

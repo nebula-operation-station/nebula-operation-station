@@ -312,9 +312,7 @@ func (c *Collector) readRemote(ctx context.Context, remoteID string, now time.Ti
 		case pb.PVEReadMethod_PVE_READ_METHOD_TASKS:
 			obs.Tasks = convertTasks(res)
 		}
-		// A truncated task window keeps its newest tasks but is not the
-		// complete history, so the observation is not complete either.
-		if res.err != nil || datasetUnavailable(res) || res.resp.GetTasks().GetTruncated() {
+		if res.err != nil || datasetUnavailable(res) {
 			obs.Complete = false
 		}
 		return nil
@@ -358,13 +356,13 @@ func (c *Collector) readRemote(ctx context.Context, remoteID string, now time.Ti
 		for i := range obs.Guests.Value {
 			g := &obs.Guests.Value[i]
 			phase2 = append(phase2, readReq{method: pb.PVEReadMethod_PVE_READ_METHOD_GUEST_CONFIG, vmid: g.VMID})
-			// The QEMU guest agent exists only in running QEMU guests; for
-			// the others the dataset is "not applicable", which does not
-			// make the observation incomplete and spends no read budget.
-			if agentApplicable(*g) {
-				phase2 = append(phase2, readReq{method: pb.PVEReadMethod_PVE_READ_METHOD_GUEST_AGENT, vmid: g.VMID})
+			// Only a QEMU guest that is not stopped or paused can answer. For the
+			// others the dataset is not applicable rather than missing, so
+			// it costs no request and does not mark the page incomplete.
+			if reason := agentNotApplicable(*g); reason != "" {
+				g.Agent = pvecontract.UnavailableDataset[pvecontract.GuestAgent](reason)
 			} else {
-				g.Agent = pvecontract.UnavailableDataset[pvecontract.GuestAgent](reasonAgentNotApplicable)
+				phase2 = append(phase2, readReq{method: pb.PVEReadMethod_PVE_READ_METHOD_GUEST_AGENT, vmid: g.VMID})
 			}
 			phase2 = append(phase2,
 				readReq{method: pb.PVEReadMethod_PVE_READ_METHOD_SNAPSHOTS, vmid: g.VMID},
@@ -392,13 +390,22 @@ func (c *Collector) readRemote(ctx context.Context, remoteID string, now time.Ti
 	return obs, nil
 }
 
-// reasonAgentNotApplicable is the fixed agent reason for guests that have
-// no QEMU guest agent to ask (containers, guests that are not running).
-const reasonAgentNotApplicable = "not applicable: the QEMU guest agent runs only in running QEMU guests"
+// Reasons for a guest agent dataset that does not apply to the guest.
+const (
+	reasonAgentContainer  = "not applicable: containers have no guest agent"
+	reasonAgentNotRunning = "not applicable: guest is not running"
+)
 
-// agentApplicable reports whether a GUEST_AGENT read can succeed for g.
-func agentApplicable(g pvecontract.GuestObservation) bool {
-	return g.Kind == pvecontract.GuestQEMU && g.Status == pvecontract.GuestRunning
+// agentNotApplicable returns why g cannot have a guest agent, or "".
+func agentNotApplicable(g pvecontract.GuestObservation) string {
+	switch {
+	case g.Kind != pvecontract.GuestQEMU:
+		return reasonAgentContainer
+	case g.Status == pvecontract.GuestStopped || g.Status == pvecontract.GuestPaused:
+		// An unknown status still gets a read: absence is not proven.
+		return reasonAgentNotRunning
+	}
+	return ""
 }
 
 // runReads streams results through a fixed worker pool. Each worker holds at
