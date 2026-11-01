@@ -1,0 +1,18 @@
+# Nebula Operation Station release root anchors (spec 10, Release signing).
+#
+# Compiled into every binary. A fresh installation validates the published
+# rotation chain starting from these bootstrap anchors; an installation with
+# durable root state continues its own chain and never resets it from here.
+#
+# One slot per line, comments and blank lines ignored:
+#
+#   <root-id> sk-ssh-ed25519@openssh.com <base64 key blob> [comment]
+#   <root-id> -
+#
+# The second form is an explicit empty placeholder: it never verifies
+# anything. Only public keys belong here; the signing secrets stay on
+# offline YubiKeys (docs/admin/release-signing.md).
+root-1 sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIH6DVvY6q6jDyLGQeYjKhNufFKi2jzFHzFO04+ng5mkoAAAABHNzaDo= nebula-release-root-1 (Axel, YubiKey 34718658)
+# Backup root-2 is pending (spec 10): it is enrolled through a rotation
+# signed by root-1, not by editing this file first.
+root-2 -

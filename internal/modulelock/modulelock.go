@@ -158,9 +158,21 @@ func invalid(format string, a ...any) error {
 	return fmt.Errorf("%w: %s", ErrInvalid, fmt.Sprintf(format, a...))
 }
 
-// Parse reads a lock and returns it with the SHA-256 of its canonical
-// form. The bytes must be exactly the form they decode to.
-func Parse(raw []byte) (Lock, string, error) {
+// Parse reads a third-party lock and returns it with the SHA-256 of its
+// canonical form. The bytes must be exactly the form they decode to.
+func Parse(raw []byte) (Lock, string, error) { return parse(raw, false) }
+
+// ParseFirstParty reads a lock from a verified release bundle (spec 10,
+// release-bundle profile). Only the module name grammar differs from
+// Parse: first-party family names, including the reserved built-in names
+// and os-debian, are allowed. Callers must have verified the bundle's
+// release provenance first; third-party locks always use Parse.
+func ParseFirstParty(raw []byte) (Lock, string, error) { return parse(raw, true) }
+
+// firstPartyNameRe is the release manifest's module-name grammar.
+var firstPartyNameRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
+
+func parse(raw []byte, firstParty bool) (Lock, string, error) {
 	canon, hash, err := canonical.CanonicalParameters(raw)
 	if err != nil {
 		return Lock{}, "", invalid("%v", err)
@@ -184,17 +196,19 @@ func Parse(raw []byte) (Lock, string, error) {
 	if _, h, err := canonical.CanonicalParameters(again); err != nil || h != hash {
 		return Lock{}, "", invalid("the lock is not in its exact form (every member, lowercase names, nothing else)")
 	}
-	if err := l.check(); err != nil {
+	if err := l.check(firstParty); err != nil {
 		return Lock{}, "", err
 	}
 	return l, hash, nil
 }
 
-func (l Lock) check() error {
+func (l Lock) check(firstParty bool) error {
 	switch {
 	case l.Format != Format:
 		return invalid("format must be %q", Format)
-	case !nameRe.MatchString(l.Name) || reserved[l.Name]:
+	case firstParty && !firstPartyNameRe.MatchString(l.Name):
+		return invalid("the first-party module name must match [a-z][a-z0-9_-]{0,63}")
+	case !firstParty && (!nameRe.MatchString(l.Name) || reserved[l.Name]):
 		return invalid("the module name must be 2 to 31 lowercase letters, digits or _, start with a letter, and not be reserved")
 	case !canonical.ValidModuleVersion(l.Version):
 		return invalid("the version must be X.Y.Z")
