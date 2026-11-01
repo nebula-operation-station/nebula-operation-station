@@ -45,6 +45,9 @@ type IngestReport struct {
 	GuestsStarted int
 	// StoragesUpserted is the number of storage rows upserted.
 	StoragesUpserted int
+	// StoragesDeleted is the number of storage rows dropped because a
+	// complete, available storage read no longer reports them.
+	StoragesDeleted int
 	// TasksInserted is the number of task rows inserted.
 	TasksInserted int
 	// ClusterUpserted reports whether the cluster status was written.
@@ -216,10 +219,11 @@ func (s *Store) IngestObservation(ctx context.Context, obs pvecontract.Observati
 			rep.BackupsStored = d.Backups
 		}
 	}
-	if n, err := s.ingestStorages(ctx, v); err != nil {
+	if n, deleted, err := s.ingestStorages(ctx, v); err != nil {
 		rep.Errors["storages"] = err
 	} else {
 		rep.StoragesUpserted = n
+		rep.StoragesDeleted = deleted
 	}
 	if done, err := s.ingestCluster(ctx, v); err != nil {
 		rep.Errors["cluster"] = err
@@ -727,9 +731,13 @@ func (s *Store) ingestGuestBackups(ctx context.Context, tx *sql.Tx, obs pvecontr
 }
 
 // ingestStorages upserts the storage dataset and records its status.
-func (s *Store) ingestStorages(ctx context.Context, obs pvecontract.Observation) (int, error) {
+// A complete, available storage read is authoritative: it deletes the
+// remote's storage rows the observation no longer reports, in the same
+// transaction. Partial, incomplete or unavailable observations never
+// delete.
+func (s *Store) ingestStorages(ctx context.Context, obs pvecontract.Observation) (int, int, error) {
 	state, reason := storedState(obs.Storages.State, obs.Storages.Reason, obs.Complete, obs.Reason, true)
-	var n int
+	var n, deleted int
 	err := s.withObservationTx(ctx, obs, func(tx *sql.Tx) error {
 		if obs.Storages.State == pvecontract.Available {
 			for _, st := range obs.Storages.Value {
@@ -763,10 +771,66 @@ func (s *Store) ingestStorages(ctx context.Context, obs pvecontract.Observation)
 				}
 				n++
 			}
+			// state is StateAvailable only when the dataset is available
+			// and the observation is complete; only then is the read
+			// authoritative enough to delete unseen rows.
+			if state == StateAvailable {
+				d, derr := s.deleteUnseenStorages(ctx, tx, obs)
+				if derr != nil {
+					return derr
+				}
+				deleted = d
+			}
 		}
 		return s.setDatasetStatus(ctx, tx, obs.RemoteID, DatasetStorages, state, obs, reason)
 	})
-	return n, err
+	return n, deleted, err
+}
+
+// storageRow identifies one stored storage report by its key columns.
+type storageRow struct {
+	node string
+	name string
+}
+
+// storageRowKey joins the key columns of a storage report.
+func storageRowKey(node, name string) string { return node + "\x00" + name }
+
+// deleteUnseenStorages deletes the remote's storage rows that the
+// observation no longer reports, keyed by (node, name). It runs inside
+// the observation transaction, so upserts and deletions commit
+// atomically.
+func (s *Store) deleteUnseenStorages(ctx context.Context, tx *sql.Tx, obs pvecontract.Observation) (int, error) {
+	reported := make(map[string]struct{}, len(obs.Storages.Value))
+	for _, st := range obs.Storages.Value {
+		reported[storageRowKey(st.Node, st.Name)] = struct{}{}
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT node, name FROM pve_storages WHERE remote_id = ?`, obs.RemoteID)
+	if err != nil {
+		return 0, fmt.Errorf("pveinventory: list storages %s: %w", obs.RemoteID, err)
+	}
+	defer rows.Close()
+	var stale []storageRow
+	for rows.Next() {
+		var r storageRow
+		if err := rows.Scan(&r.node, &r.name); err != nil {
+			return 0, fmt.Errorf("pveinventory: list storages %s: %w", obs.RemoteID, err)
+		}
+		if _, ok := reported[storageRowKey(r.node, r.name)]; !ok {
+			stale = append(stale, r)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("pveinventory: list storages %s: %w", obs.RemoteID, err)
+	}
+	for _, r := range stale {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM pve_storages WHERE remote_id = ? AND node = ? AND name = ?`,
+			obs.RemoteID, r.node, r.name); err != nil {
+			return 0, fmt.Errorf("pveinventory: delete storage %s/%s: %w", r.node, r.name, err)
+		}
+	}
+	return len(stale), nil
 }
 
 // ingestCluster upserts the cluster/HA summary and records its status.
