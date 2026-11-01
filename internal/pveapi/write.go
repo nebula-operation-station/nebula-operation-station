@@ -24,7 +24,8 @@ import (
 //
 // Writer exposes a closed allowlist of operations: full clone, an
 // allowlisted config set, disk resize, start, storage download-url with a
-// mandatory SHA-256 checksum, template conversion and task status. Every
+// mandatory SHA-256 checksum, creation of a guest from an imported image
+// (cloud-init drive, agent=1), template conversion and task status. Every
 // method takes typed, validated arguments; there is no URL, raw API path or
 // free-form parameter input. Every mutation returns the validated UPID of
 // the PVE task it started.
