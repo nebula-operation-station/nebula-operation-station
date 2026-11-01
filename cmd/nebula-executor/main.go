@@ -23,6 +23,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/events"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
@@ -30,6 +31,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit/batch"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/version"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnreg"
@@ -175,6 +177,20 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Batch read-grant authority (ADR 0007, E19b). Plans and approvals are
+	// in-memory only: a restart revokes every open batch.
+	batchAuth, err := batch.New(batch.Options{
+		Mode:     mode,
+		Verifier: verifier,
+		Policy:   batchRiskPolicy{risk: risk},
+		Session:  auth.Session,
+		AdminUID: adminUIDFromRoles(uidRoles),
+		Now:      time.Now,
+		Audit:    executor.AuditLogger(log),
+	})
+	if err != nil {
+		return err
+	}
 	reg, err := webauthnreg.New(webauthnreg.Config{
 		RPID: *rpID, Origins: origins, Audit: executor.RegistrationAuditLogger(log),
 	}, verifier, db)
@@ -185,6 +201,7 @@ func run() error {
 	svc := executor.NewService(auth, keys, db, reg, log)
 	svc.SetEventKey(chain.PublicKey())
 	svc.SetBackupDirs(*dataDir, keysDir)
+	svc.SetBatchAuthority(batchAuth)
 
 	lis, err := peercred.Listen(peercred.ListenOptions{Path: *socketPath, Mode: 0o660, Group: *socketGroup})
 	if err != nil {
@@ -201,6 +218,7 @@ func run() error {
 		<-ctx.Done()
 		keys.Lock()
 		auth.Lock("shutdown")
+		batchAuth.Lock()
 		srv.GracefulStop()
 	}()
 
@@ -247,6 +265,53 @@ func resolveRoles(serverUser, adminUsers string) (map[uint32][]peercred.Role, er
 		roles[uid] = []peercred.Role{peercred.RoleAdmin}
 	}
 	return roles, nil
+}
+
+// batchRiskPolicy adapts the executor risk policy to the batch authority's
+// per-member verdict: the member's floor is the risk policy's minimum, and the
+// trust anchor is the member's artifact SHA-256 (never empty, per the
+// authority's non-zero Trust contract).
+type batchRiskPolicy struct {
+	risk *riskpolicy.Policy
+}
+
+func (b batchRiskPolicy) Evaluate(_ context.Context, m canonical.BatchMember) (batch.Snapshot, error) {
+	risk, _, err := b.risk.MinimumRisk(m.Request, m.Request.ResolvedTargets)
+	if err != nil {
+		return batch.Snapshot{}, err
+	}
+	trust, err := canonical.ParseDigest(m.Request.ArtifactSHA256)
+	if err != nil {
+		return batch.Snapshot{}, err
+	}
+	return batch.Snapshot{Risk: risk, Trust: trust}, nil
+}
+
+// adminUIDFromRoles returns the smallest admin UID. The batch authority accepts
+// exactly one executor-local admin for CLI review and approval; with several
+// configured, the smallest UID is chosen deterministically.
+func adminUIDFromRoles(roles map[uint32][]peercred.Role) uint32 {
+	var adminUID uint32
+	set := false
+	for uid, rs := range roles {
+		if !hasRole(rs, peercred.RoleAdmin) {
+			continue
+		}
+		if !set || uid < adminUID {
+			adminUID = uid
+			set = true
+		}
+	}
+	return adminUID
+}
+
+func hasRole(roles []peercred.Role, want peercred.Role) bool {
+	for _, r := range roles {
+		if r == want {
+			return true
+		}
+	}
+	return false
 }
 
 func modeName(m permit.Mode) string {

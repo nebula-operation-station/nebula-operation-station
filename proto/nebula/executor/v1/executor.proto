@@ -2104,7 +2104,8 @@ message BatchMemberInput {
 }
 
 message ProposeBatchRequest {
-  // Strict canonical batch JSON, 1..2 MiB; bounded members and stages.
+  // Strict canonical batch JSON, at most 2 MiB; at most 100 members and
+  // 20 stages. The complete plan is frozen and never truncated.
   bytes batch_json = 1;
   // One exact artifact and parameter document per member, in plan order.
   repeated BatchMemberInput members = 2;
