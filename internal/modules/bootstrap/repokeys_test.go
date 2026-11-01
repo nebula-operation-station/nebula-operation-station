@@ -19,7 +19,7 @@ var repoKeyPins = map[string]struct {
 	fingerprint string
 	keyURL      string
 }{
-	"docker":   {fingerprint: "9DC858229FC7DD38854AE2D88D81803C0EBFCD88", keyURL: "https://download.docker.com/linux/"},
+	"docker":   {fingerprint: "9DC858229FC7DD38854AE2D88D81803C0EBFCD88", keyURL: "https://download.docker.com/linux/$distro/gpg"},
 	"netbird":  {fingerprint: "EFE37DF047DF7CCDF1FC54FA83F79AD029778355", keyURL: "https://pkgs.netbird.io/debian/public.key"},
 	"telegraf": {fingerprint: "24C975CBA61A024EE1B631787C3D57159FC2F927", keyURL: "https://repos.influxdata.com/influxdata-archive.key"},
 }
@@ -102,7 +102,12 @@ func runRepoKeyCheck(t *testing.T, m Module, keyFpr, pinned string) (int, string
 		// No readable key: gpg fails and prints nothing.
 		stubBody = "#!/bin/sh\nexit 1\n"
 	} else {
-		stubBody = "#!/bin/sh\nprintf 'pub:u:4096:1:0000000000000000:1700000000:::u:::c\\nfpr:::::::::" + keyFpr + ":\\n'\n"
+		// One pub/fpr record pair per comma-separated fingerprint.
+		var recs strings.Builder
+		for _, f := range strings.Split(keyFpr, ",") {
+			recs.WriteString("pub:u:4096:1:0000000000000000:1700000000:::u:::c\\nfpr:::::::::" + f + ":\\n")
+		}
+		stubBody = "#!/bin/sh\nprintf '" + recs.String() + "'\n"
 	}
 	if err := os.WriteFile(stub, []byte(stubBody), 0o755); err != nil {
 		t.Fatal(err)
@@ -151,6 +156,11 @@ func TestRepoKeyCheckRejectsWrongFingerprint(t *testing.T) {
 		}
 		if rc, out := runRepoKeyCheck(t, m, "", pin); rc == 0 {
 			t.Errorf("%s: a key with no readable fingerprint was accepted (rc 0, %q)", name, out)
+		}
+		// apt trusts every key in the signed-by file: a second key behind
+		// the genuine one must not pass.
+		if rc, out := runRepoKeyCheck(t, m, pin+","+wrong, pin); rc == 0 {
+			t.Errorf("%s: a key file with an extra key was accepted (rc 0, %q)", name, out)
 		}
 		if rc, out := runRepoKeyCheck(t, m, pin, pin); rc != 0 {
 			t.Errorf("%s: the vendor key was rejected (rc %d, %q)", name, rc, out)
