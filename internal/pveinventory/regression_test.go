@@ -403,6 +403,8 @@ func TestDriftVersionMigrationPreservesExistingDecisions(t *testing.T) {
   DROP TABLE pve_metric_current;
   DROP TRIGGER tombstone_service_placements_on_host_delete;
   DROP TABLE pve_service_placements;
+  DROP TABLE deploy_profile_versions;
+  DROP TABLE deploy_profiles;
   DELETE FROM schema_migrations WHERE version >= 22;`); err != nil {
 		t.Fatal(err)
 	}
