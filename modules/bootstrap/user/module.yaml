@@ -1,0 +1,72 @@
+name: user
+version: 1.0.0
+title: User account
+description: >
+  Creates and reconciles a local user account with a login shell, home
+  directory under /home, group memberships and the admin's SSH public
+  key (key-based access; the account is created without a password).
+  Targets Debian 12/13 and Ubuntu 22.04/24.04.
+actions:
+  install:
+    title: Install user account
+    description: >
+      Creates the account if it is missing and reconciles shell, home,
+      groups and the SSH public key if it exists. Groups must already
+      exist. The ssh_public_key secret slot holds an OpenSSH public key.
+    script: actions/install.sh
+    risk: medium
+    durable: true
+    timeout: 300s
+    params:
+      - {name: name, label: Login name, type: name}
+      - {name: shell, label: Login shell, type: choice, choices: [bash, sh, nologin]}
+      - {name: home, label: Home directory, type: path}
+      - {name: groups, label: "Groups, colon-separated", type: name}
+    secrets: [ssh_public_key]
+    declares: [requires_root, writes_config]
+  verify:
+    title: Verify user account
+    description: >
+      Read-only check that the account exists with the expected shell,
+      home and group memberships. Exits non-zero when it does not.
+    script: actions/verify.sh
+    risk: low
+    durable: false
+    timeout: 120s
+    params:
+      - {name: name, label: Login name, type: name}
+      - {name: shell, label: Login shell, type: choice, choices: [bash, sh, nologin]}
+      - {name: home, label: Home directory, type: path}
+      - {name: groups, label: "Groups, colon-separated", type: name}
+    secrets: []
+    declares: []
+  update:
+    title: Update user account
+    description: >
+      Reconciles shell, home, groups and the SSH public key to the
+      module's state. Same behavior as install; run it after changing
+      the profile's parameters.
+    script: actions/update.sh
+    risk: medium
+    durable: true
+    timeout: 300s
+    params:
+      - {name: name, label: Login name, type: name}
+      - {name: shell, label: Login shell, type: choice, choices: [bash, sh, nologin]}
+      - {name: home, label: Home directory, type: path}
+      - {name: groups, label: "Groups, colon-separated", type: name}
+    secrets: [ssh_public_key]
+    declares: [requires_root, writes_config]
+  uninstall:
+    title: Uninstall user account
+    description: >
+      Removes the account and its home directory. No-op when the
+      account does not exist.
+    script: actions/uninstall.sh
+    risk: high
+    durable: true
+    timeout: 300s
+    params:
+      - {name: name, label: Login name, type: name}
+    secrets: []
+    declares: [requires_root]

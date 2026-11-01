@@ -1,0 +1,71 @@
+name: ssh-hardening
+version: 1.0.0
+title: SSH hardening
+description: >
+  Manages a drop-in sshd configuration that pins the port, denies root
+  login, sets the authentication mode, limits attempts and restricts
+  access to the listed users and groups. The live configuration is
+  never touched while it does not pass sshd -t. Targets Debian 12/13
+  and Ubuntu 22.04/24.04.
+actions:
+  install:
+    title: Install SSH hardening
+    description: >
+      Writes the drop-in, validates the full configuration with
+      sshd -t before it goes live, then reloads ssh.
+    script: actions/install.sh
+    risk: medium
+    durable: true
+    timeout: 300s
+    params:
+      - {name: port, label: SSH port, type: int}
+      - {name: allow_users, label: "Allowed users, colon-separated", type: name}
+      - {name: allow_groups, label: "Allowed groups, colon-separated", type: name}
+      - {name: auth, label: Authentication, type: choice, choices: [publickey, password]}
+    secrets: []
+    declares: [requires_root, writes_config]
+  verify:
+    title: Verify SSH hardening
+    description: >
+      Read-only check that the drop-in matches the module's state,
+      sshd -t passes and the effective configuration (sshd -T) shows
+      the expected values. Exits non-zero when it does not.
+    script: actions/verify.sh
+    risk: medium
+    durable: false
+    timeout: 120s
+    params:
+      - {name: port, label: SSH port, type: int}
+      - {name: allow_users, label: "Allowed users, colon-separated", type: name}
+      - {name: allow_groups, label: "Allowed groups, colon-separated", type: name}
+      - {name: auth, label: Authentication, type: choice, choices: [publickey, password]}
+    secrets: []
+    declares: [requires_root]
+  update:
+    title: Update SSH hardening
+    description: >
+      Reconciles the drop-in to the module's state, validates with
+      sshd -t, then reloads ssh. Same behavior as install.
+    script: actions/update.sh
+    risk: medium
+    durable: true
+    timeout: 300s
+    params:
+      - {name: port, label: SSH port, type: int}
+      - {name: allow_users, label: "Allowed users, colon-separated", type: name}
+      - {name: allow_groups, label: "Allowed groups, colon-separated", type: name}
+      - {name: auth, label: Authentication, type: choice, choices: [publickey, password]}
+    secrets: []
+    declares: [requires_root, writes_config]
+  uninstall:
+    title: Uninstall SSH hardening
+    description: >
+      Removes the drop-in, validates with sshd -t, then reloads ssh.
+      No-op when the drop-in is absent.
+    script: actions/uninstall.sh
+    risk: medium
+    durable: true
+    timeout: 300s
+    params: []
+    secrets: []
+    declares: [requires_root, writes_config]

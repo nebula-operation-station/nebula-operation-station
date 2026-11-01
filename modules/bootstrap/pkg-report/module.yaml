@@ -1,0 +1,58 @@
+name: pkg-report
+version: 1.0.0
+title: Package report
+description: >
+  Installs a daily cron job that refreshes the apt lists and appends
+  the list of upgradable packages to /var/log/nebula/pkg-report.log,
+  so the operator sees what is waiting on each host. Targets Debian
+  12/13 and Ubuntu 22.04/24.04.
+actions:
+  install:
+    title: Install package report
+    description: >
+      Writes the report script and the cron entry. No-op when both
+      are already in place.
+    script: actions/install.sh
+    risk: medium
+    durable: true
+    timeout: 120s
+    params: []
+    secrets: []
+    declares: [requires_root, writes_config]
+  verify:
+    title: Verify package report
+    description: >
+      Read-only check that the report script is in place, passes
+      sh -n and the cron entry references it. Exits non-zero when it
+      does not.
+    script: actions/verify.sh
+    risk: low
+    durable: false
+    timeout: 120s
+    params: []
+    secrets: []
+    declares: []
+  update:
+    title: Update package report
+    description: >
+      Reconciles the report script and the cron entry to the
+      module's state. Same behavior as install.
+    script: actions/update.sh
+    risk: medium
+    durable: true
+    timeout: 120s
+    params: []
+    secrets: []
+    declares: [requires_root, writes_config]
+  uninstall:
+    title: Uninstall package report
+    description: >
+      Removes the cron entry and the report script. No-op when
+      absent.
+    script: actions/uninstall.sh
+    risk: medium
+    durable: true
+    timeout: 120s
+    params: []
+    secrets: []
+    declares: [requires_root]
