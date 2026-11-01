@@ -1023,9 +1023,9 @@ func seedChartStore(t *testing.T) *Store {
 		nodes(mkNode("p1"), mkNode("p2")).
 		guests(mkGuest(100, 1, "vm-100"), mkGuest(110, 1, "vm-110"), mkGuest(120, 1, "vm-120")).
 		storages(
-			mkStorage("local-lvm", "lvmthin", 100<<30, 10<<30),
-			mkStorage("shared-nfs", "nfs", 1<<40, 500<<30),
-			mkStorage("pbs-backup", "pbs", 0, 0),
+			onNode(mkStorage("local-lvm", "lvmthin", 100<<30, 10<<30), "p1", false),
+			onNode(mkStorage("shared-nfs", "nfs", 1<<40, 500<<30), "p1", true),
+			onNode(mkStorage("pbs-backup", "pbs", 0, 0), "p1", true),
 		).
 		build()); err != nil {
 		t.Fatalf("ingest A: %v", err)
@@ -1033,7 +1033,7 @@ func seedChartStore(t *testing.T) *Store {
 	if _, err := s.IngestObservation(ctx, newObsB().
 		nodes(mkNode("q1")).
 		guests(mkGuest(100, 1, "vm-b100")).
-		storages(mkStorage("local-dir", "dir", 10<<30, 9<<30)).
+		storages(onNode(mkStorage("local-dir", "dir", 10<<30, 9<<30), "q1", false)).
 		build()); err != nil {
 		t.Fatalf("ingest B: %v", err)
 	}
@@ -1170,7 +1170,8 @@ func TestChartDataTreeInputStorages(t *testing.T) {
 	}
 	in := data.TreeInput(treeNow, 0, nil, nil)
 
-	// remote-a: storages anchored to the first stored node, p1.
+	// remote-a: storages anchored to their reporting node, p1, with
+	// PVE's shared flag carried through (no type guessing).
 	ra := in.Remotes[0]
 	if ra.RemoteID != "remote-a" {
 		t.Fatalf("remote order: %+v", ra)
@@ -1725,5 +1726,103 @@ func TestBuildTreeImplicitNodeForOrphanStorage(t *testing.T) {
 	}
 	if len(tree.Roots[0].Children) != 1 || tree.Roots[0].Children[0].Kind != KindStorage {
 		t.Fatalf("implicit node children: %+v", tree.Roots[0].Children)
+	}
+}
+
+// TestChartTreeSharedStorageSeenByThreeNodesAppearsOnce ingests a
+// three-node cluster where every node reports the same shared NFS store
+// and its own node-local "local" store. The shared store must appear
+// once, the node-local stores once per node, and an inactive store as
+// unknown rather than as 0 percent.
+func TestChartTreeSharedStorageSeenByThreeNodesAppearsOnce(t *testing.T) {
+	s, _, _ := newTestStore(t)
+	ctx := context.Background()
+	if err := s.UpsertRemote(ctx, remoteA()); err != nil {
+		t.Fatalf("UpsertRemote: %v", err)
+	}
+	inactive := onNode(mkStorage("old-iscsi", "iscsi", 100<<30, 50<<30), "p3", false)
+	inactive.Active = false
+	if _, err := s.IngestObservation(ctx, newObsA().
+		nodes(mkNode("p1"), mkNode("p2"), mkNode("p3")).
+		storages(
+			onNode(mkStorage("shared-nfs", "nfs", 1<<40, 512<<30), "p1", true),
+			onNode(mkStorage("local", "dir", 100<<30, 90<<30), "p1", false),
+			onNode(mkStorage("shared-nfs", "nfs", 1<<40, 512<<30), "p2", true),
+			onNode(mkStorage("local", "dir", 200<<30, 20<<30), "p2", false),
+			onNode(mkStorage("shared-nfs", "nfs", 1<<40, 512<<30), "p3", true),
+			onNode(mkStorage("local", "dir", 50<<30, 25<<30), "p3", false),
+			inactive,
+		).
+		build()); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+
+	// The store keeps one row per (node, storage) with node and shared.
+	rows, err := s.ListStorages(ctx, "remote-a", 0)
+	if err != nil {
+		t.Fatalf("ListStorages: %v", err)
+	}
+	if len(rows) != 7 {
+		t.Fatalf("stored rows: %d, want 7", len(rows))
+	}
+	shared := 0
+	nodes := map[string]bool{}
+	for _, r := range rows {
+		if r.Name == "shared-nfs" {
+			if !r.Shared {
+				t.Fatalf("shared-nfs on %s stored unshared", r.Node)
+			}
+			shared++
+			nodes[r.Node] = true
+		} else if r.Shared {
+			t.Fatalf("%s on %s stored shared", r.Name, r.Node)
+		}
+	}
+	if shared != 3 || !nodes["p1"] || !nodes["p2"] || !nodes["p3"] {
+		t.Fatalf("shared-nfs rows: %d on %v", shared, nodes)
+	}
+
+	tree, err := s.ChartTree(ctx, testBase.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("ChartTree: %v", err)
+	}
+	if got := countBoxes(tree.Roots, "storage/remote-a/shared-nfs"); got != 1 {
+		t.Fatalf("shared-nfs boxes: %d, want 1", got)
+	}
+	if got := countBoxes(tree.Roots, "storage/remote-a/local"); got != 3 {
+		t.Fatalf("local boxes: %d, want 3 (one per node)", got)
+	}
+	p1 := findBox(t, tree.Roots, "node/remote-a/p1")
+	nfs := findBox(t, p1.Children, "storage/remote-a/shared-nfs")
+	if !nfs.StorageShared || nfs.StorageTotalBytes != 1<<40 || nfs.StorageFillPercent != 50 {
+		t.Fatalf("shared-nfs box: %+v", nfs)
+	}
+	p2 := findBox(t, tree.Roots, "node/remote-a/p2")
+	local2 := findBox(t, p2.Children, "storage/remote-a/local")
+	if local2.StorageTotalBytes != 200<<30 || local2.StorageFillPercent != 90 {
+		t.Fatalf("p2 local box carries the wrong node's usage: %+v", local2)
+	}
+	p3 := findBox(t, tree.Roots, "node/remote-a/p3")
+	old := findBox(t, p3.Children, "storage/remote-a/old-iscsi")
+	if old.State != StateUnknown || old.StorageFillPercent != 0 {
+		t.Fatalf("inactive storage: state=%s fill=%d, want unknown", old.State, old.StorageFillPercent)
+	}
+}
+
+// TestChartTreeInactiveStorageCapacityUnknown checks that an inactive
+// storage never feeds a capacity, even when PVE still reports bytes.
+func TestChartTreeInactiveStorageCapacityUnknown(t *testing.T) {
+	d := ChartData{
+		Remotes: []Remote{{RemoteID: "remote-a", Name: "Lab A"}},
+		Nodes:   map[string][]Node{"remote-a": {{RemoteID: "remote-a", Node: "p1"}}},
+		Storages: map[string][]Storage{"remote-a": {{
+			RemoteID: "remote-a", Node: "p1", Name: "gone", Type: "dir",
+			Active: false, SizeBytes: 100, FreeBytes: 10,
+		}}},
+	}
+	in := d.TreeInput(treeNow, 0, nil, nil)
+	st := in.Remotes[0].Storages[0]
+	if st.CapacityKnown || st.UsedBytes != 0 {
+		t.Fatalf("inactive storage input: %+v", st)
 	}
 }

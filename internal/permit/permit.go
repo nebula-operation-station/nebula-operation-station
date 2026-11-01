@@ -849,6 +849,15 @@ func (a *Authority) Session() (bool, time.Time) {
 	return a.sessionActiveLocked(now), a.sessionTill
 }
 
+// SessionLength reports the executor-configured privileged session duration.
+// Every session-extension challenge is bound to it; the server cannot change
+// it (spec 05).
+func (a *Authority) SessionLength() time.Duration {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.sessLen
+}
+
 // Lock ends the privileged session and revokes every permit.
 func (a *Authority) Lock(who string) {
 	a.mu.Lock()

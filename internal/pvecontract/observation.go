@@ -348,6 +348,12 @@ type StorageObservation struct {
 	Active    bool     `json:"active"`
 	SizeBytes uint64   `json:"size_bytes"`
 	FreeBytes uint64   `json:"free_bytes"`
+	// Node is the node that reported this storage and its usage. Empty
+	// only in observations from sources that predate per-node storage.
+	Node string `json:"node,omitempty"`
+	// Shared is PVE's authoritative shared flag: the same storage is
+	// reported by every node that can use it and must be counted once.
+	Shared bool `json:"shared,omitempty"`
 }
 
 // ClusterObservation is the 60-second cluster and HA read.
@@ -387,8 +393,12 @@ type TaskObservation struct {
 }
 
 var (
-	slugRe           = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
-	volumeRe         = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,254}(?::[a-z0-9][a-z0-9._-]{0,254})?$`)
+	slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	// volumeRe is a PVE volume ID: storage[:name], where the name may carry
+	// one directory component (dir storages: "100/vm-100-disk-0.qcow2",
+	// "iso/debian-12.iso") and keeps PVE's case. Components start with an
+	// alphanumeric, so "." and ".." components cannot occur.
+	volumeRe         = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,254}(?::[A-Za-z0-9][A-Za-z0-9._+-]{0,254}(?:/[A-Za-z0-9][A-Za-z0-9._+-]{0,254})?)?$`)
 	macRe            = regexp.MustCompile(`^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$`)
 	uuidRe           = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	versionRe        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`)
@@ -501,12 +511,23 @@ func ValidateObservation(o Observation) (Observation, error) {
 
 	checkDataset("storages", o.Storages, add)
 	if o.Storages.State == Available {
-		if len(o.Storages.Value) > MaxStoragesPerRemote {
-			add("too many storages (%d > %d)", len(o.Storages.Value), MaxStoragesPerRemote)
+		if len(o.Storages.Value) > MaxStorageReportsPerRemote {
+			add("too many storage reports (%d > %d)", len(o.Storages.Value), MaxStorageReportsPerRemote)
 		}
 		seen := map[string]struct{}{}
+		// shared records each storage ID's shared flag: PVE derives it
+		// from storage.cfg, so every node must report the same value.
+		shared := map[string]bool{}
 		for i, s := range o.Storages.Value {
-			validateStorageObservation(fmt.Sprintf("storages[%d]", i), s, seen, add)
+			where := fmt.Sprintf("storages[%d]", i)
+			validateStorageObservation(where, s, seen, add)
+			if prev, ok := shared[s.Name]; ok && prev != s.Shared {
+				add("%s: storage %q has an inconsistent shared flag", where, s.Name)
+			}
+			shared[s.Name] = s.Shared
+		}
+		if len(shared) > MaxStoragesPerRemote {
+			add("too many storages (%d > %d)", len(shared), MaxStoragesPerRemote)
 		}
 	}
 
@@ -663,7 +684,7 @@ func validateGuestConfig(where string, c GuestConfig, add func(format string, ar
 		if !slugRe.MatchString(d.Storage) {
 			add("%s: disks[%d]: storage %q is malformed", where, i, d.Storage)
 		}
-		if !volumeRe.MatchString(d.Volume) {
+		if len(d.Volume) > MaxVolumeBytes || !volumeRe.MatchString(d.Volume) {
 			add("%s: disks[%d]: volume %q is malformed", where, i, d.Volume)
 		}
 		if _, dup := seenVol[d.Volume]; dup {
@@ -872,10 +893,14 @@ func validateStorageObservation(where string, s StorageObservation, seen map[str
 	if !slugRe.MatchString(s.Name) {
 		add("%s: name %q is malformed", where, s.Name)
 	}
-	if _, dup := seen[s.Name]; dup {
-		add("%s: name %q is duplicated", where, s.Name)
+	if s.Node != "" && !validNodeName(s.Node) {
+		add("%s: node %q is malformed", where, s.Node)
 	}
-	seen[s.Name] = struct{}{}
+	key := s.Node + "/" + s.Name
+	if _, dup := seen[key]; dup {
+		add("%s: storage %q on node %q is duplicated", where, s.Name, s.Node)
+	}
+	seen[key] = struct{}{}
 	if !slugRe.MatchString(s.Type) {
 		add("%s: type %q is malformed", where, s.Type)
 	}

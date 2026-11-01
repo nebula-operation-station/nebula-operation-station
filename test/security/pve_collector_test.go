@@ -7,6 +7,7 @@ package security
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc"
@@ -33,12 +34,13 @@ func TestPVECollectorBoundary(t *testing.T) {
 	})
 
 	// Both read methods are allowed. Metadata reads return the empty
-	// registry; ReadPVE remains Unimplemented until its provider is wired.
+	// registry; ReadPVE reaches its handler, which refuses to read while
+	// the executor vault is locked (a role denial would be PermissionDenied).
 	if got, err := h.client.ListPVERemotes(h.ctx(), &pb.ListPVERemotesRequest{}); err != nil || got == nil || len(got.GetRemotes()) != 0 {
 		t.Fatalf("collector ListPVERemotes: want empty registry metadata, got %v, %v", got, err)
 	}
-	if _, err := h.client.ReadPVE(h.ctx(), validReadPVE()); status.Code(err) != codes.Unimplemented {
-		t.Fatalf("collector ReadPVE: want Unimplemented (allowed, not wired), got %v", err)
+	if _, err := h.client.ReadPVE(h.ctx(), validReadPVE()); status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "vault is locked") {
+		t.Fatalf("collector ReadPVE: want FailedPrecondition from the handler (allowed, vault locked), got %v", err)
 	}
 
 	// Loop over every method of the executor service: the collector is
@@ -117,8 +119,8 @@ func TestPVEReadServerAndAdminAccess(t *testing.T) {
 	if got, err := ha.client.ListPVERemotes(ha.ctx(), &pb.ListPVERemotesRequest{}); err != nil || got == nil || len(got.GetRemotes()) != 0 {
 		t.Fatalf("admin ListPVERemotes: want empty registry metadata, got %v, %v", got, err)
 	}
-	if _, err := ha.client.ReadPVE(ha.ctx(), validReadPVE()); status.Code(err) != codes.Unimplemented {
-		t.Fatalf("admin ReadPVE: want Unimplemented (allowed, not wired), got %v", err)
+	if _, err := ha.client.ReadPVE(ha.ctx(), validReadPVE()); status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "vault is locked") {
+		t.Fatalf("admin ReadPVE: want FailedPrecondition from the handler (allowed, vault locked), got %v", err)
 	}
 	if _, err := ha.client.ReadPVE(ha.ctx(), &pb.ReadPVERequest{RemoteId: "pve-1"}); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("admin ReadPVE without method: want InvalidArgument, got %v", err)

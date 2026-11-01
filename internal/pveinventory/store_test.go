@@ -95,6 +95,13 @@ func mkStorage(name, typ string, sizeBytes, freeBytes uint64) pvecontract.Storag
 	}
 }
 
+// onNode sets the reporting node and PVE's shared flag on a storage.
+func onNode(st pvecontract.StorageObservation, node string, shared bool) pvecontract.StorageObservation {
+	st.Node = node
+	st.Shared = shared
+	return st
+}
+
 func newObsA() *obsBuilder {
 	return &obsBuilder{obs: pvecontract.Observation{
 		RemoteID:             "remote-a",

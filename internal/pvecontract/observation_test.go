@@ -165,6 +165,15 @@ func TestDecodeObservation(t *testing.T) {
 			o.Cluster = UnavailableDataset[ClusterObservation]("standalone remote")
 			o.Tasks = UnavailableDataset[[]TaskObservation]("api timeout")
 		}, ""},
+		{"valid same storage on several nodes", func(o *Observation) {
+			mk := func(node, name string, shared bool) StorageObservation {
+				return StorageObservation{Name: name, Node: node, Type: "dir", Content: []string{"images"}, Active: true, Shared: shared}
+			}
+			o.Storages = AvailableDataset([]StorageObservation{
+				mk("pve1", "local", false), mk("pve2", "local", false),
+				mk("pve1", "nfs", true), mk("pve2", "nfs", true), mk("pve3", "nfs", true),
+			})
+		}, ""},
 		{"valid empty available lists", func(o *Observation) {
 			o.Nodes = AvailableDataset([]NodeObservation{})
 			o.Guests = AvailableDataset([]GuestObservation{})
@@ -192,6 +201,13 @@ func TestDecodeObservation(t *testing.T) {
 		{"guest uuid malformed", func(o *Observation) { o.Guests.Value[0].UUID = "not-a-uuid" }, "uuid"},
 		{"config cpu_count zero", func(o *Observation) { o.Guests.Value[0].Config.Value.CPUCount = 0 }, "cpu_count"},
 		{"disk volume malformed", func(o *Observation) { o.Guests.Value[0].Config.Value.Disks[0].Volume = "LOCAL-LVM:vm" }, "volume"},
+		{"disk volume parent component", func(o *Observation) { o.Guests.Value[0].Config.Value.Disks[0].Volume = "local:../etc/shadow" }, "volume"},
+		{"disk volume two components", func(o *Observation) { o.Guests.Value[0].Config.Value.Disks[0].Volume = "local:iso/a/b.iso" }, "volume"},
+		{"disk volume absolute", func(o *Observation) { o.Guests.Value[0].Config.Value.Disks[0].Volume = "local:/etc/shadow" }, "volume"},
+		{"disk volume dot component", func(o *Observation) { o.Guests.Value[0].Config.Value.Disks[0].Volume = "local:iso/.hidden" }, "volume"},
+		{"disk volume oversize", func(o *Observation) {
+			o.Guests.Value[0].Config.Value.Disks[0].Volume = "local:" + strings.Repeat("a", 200) + "/" + strings.Repeat("b", 60)
+		}, "volume"},
 		{"disk volume duplicated", func(o *Observation) {
 			o.Guests.Value[0].Config.Value.Disks = append(o.Guests.Value[0].Config.Value.Disks, o.Guests.Value[0].Config.Value.Disks[0])
 		}, "duplicated"},
@@ -296,6 +312,26 @@ func TestDecodeObservation(t *testing.T) {
 			}
 			o.Storages = AvailableDataset(ss)
 		}, "too many storages"},
+		{"too many storage reports", func(o *Observation) {
+			ss := make([]StorageObservation, MaxStorageReportsPerRemote+1)
+			for i := range ss {
+				ss[i] = StorageObservation{Name: fmt.Sprintf("st%02d", i%8), Node: fmt.Sprintf("n%04d", i/8), Type: "dir", Content: []string{"images"}, Active: true}
+			}
+			o.Storages = AvailableDataset(ss)
+		}, "too many storage reports"},
+		{"storage node malformed", func(o *Observation) {
+			o.Storages = AvailableDataset([]StorageObservation{{Name: "local", Node: "bad node\n", Type: "dir", Content: []string{"images"}, Active: true}})
+		}, "node"},
+		{"storage duplicated on one node", func(o *Observation) {
+			st := StorageObservation{Name: "local", Node: "pve1", Type: "dir", Content: []string{"images"}, Active: true}
+			o.Storages = AvailableDataset([]StorageObservation{st, st})
+		}, "duplicated"},
+		{"storage shared flag inconsistent", func(o *Observation) {
+			a := StorageObservation{Name: "nfs", Node: "pve1", Type: "nfs", Content: []string{"images"}, Active: true, Shared: true}
+			b := a
+			b.Node, b.Shared = "pve2", false
+			o.Storages = AvailableDataset([]StorageObservation{a, b})
+		}, "inconsistent shared flag"},
 		{"too many tasks", func(o *Observation) {
 			tks := make([]TaskObservation, MaxObjectsPerPage+1)
 			for i := range tks {
@@ -478,5 +514,15 @@ func TestValidationErrorIsErrInvalid(t *testing.T) {
 	}
 	if !errors.Is(err, ErrInvalid) {
 		t.Fatalf("errors.Is(err, ErrInvalid) = false for %v", err)
+	}
+}
+
+func TestValidateObservationAcceptsDirStorageVolumes(t *testing.T) {
+	for _, vol := range []string{"local:100/vm-100-disk-0.qcow2", "local:iso/Debian-12.4_amd64+netinst.iso", "local-lvm:vm-100-disk-0", "rbd"} {
+		o := baseObservation()
+		o.Guests.Value[0].Config.Value.Disks[0].Volume = vol
+		if _, err := ValidateObservation(o); err != nil {
+			t.Errorf("%s: %v", vol, err)
+		}
 	}
 }

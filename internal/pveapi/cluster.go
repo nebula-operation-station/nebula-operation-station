@@ -167,6 +167,16 @@ type ClusterStatus struct {
 	NodesOnline int
 	// NodesTotal is the total number of cluster nodes.
 	NodesTotal int
+	// Members lists the node entries in response order.
+	Members []ClusterMember
+}
+
+// ClusterMember is one node entry of GET /cluster/status.
+type ClusterMember struct {
+	// Name is the node name.
+	Name string
+	// Online reports whether corosync sees the node online.
+	Online bool
 }
 
 type clusterStatusEntry struct {
@@ -223,6 +233,7 @@ func (c *Client) ClusterStatus(ctx context.Context) (ClusterStatus, error) {
 				return ClusterStatus{}, fmt.Errorf("%w: online out of range", ErrMalformed)
 			}
 			out.NodesOnline += *e.Online
+			out.Members = append(out.Members, ClusterMember{Name: name, Online: *e.Online == 1})
 		default:
 			return ClusterStatus{}, fmt.Errorf("%w: unknown cluster entry type", ErrMalformed)
 		}

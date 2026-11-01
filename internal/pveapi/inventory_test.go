@@ -388,3 +388,33 @@ func TestEnumerateClusterNullListsNeverProduceCompleteInventory(t *testing.T) {
 		})
 	}
 }
+
+func TestListNodesCapacityAndBounds(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body string
+		want *Node
+	}{
+		"capacity": {`{"data":[{"node":"pve1","status":"online","type":"node","maxcpu":8,"maxmem":1000,"mem":400,"uptime":99}]}`,
+			&Node{Name: "pve1", Status: "online", Type: "node", MaxCPU: 8, MaxMemory: 1000, Memory: 400, UptimeSeconds: 99}},
+		"offline without capacity": {`{"data":[{"node":"pve2","status":"offline","type":"node"}]}`,
+			&Node{Name: "pve2", Status: "offline", Type: "node"}},
+		"negative cpus":   {`{"data":[{"node":"pve1","status":"online","maxcpu":-1}]}`, nil},
+		"too many cpus":   {`{"data":[{"node":"pve1","status":"online","maxcpu":5000}]}`, nil},
+		"negative memory": {`{"data":[{"node":"pve1","status":"online","mem":-5}]}`, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, tc.body) }))
+			t.Cleanup(ts.Close)
+			nodes, err := clientFor(t, ts).ListNodes(context.Background())
+			if tc.want == nil {
+				if err == nil {
+					t.Fatalf("hostile node accepted: %+v", nodes)
+				}
+				return
+			}
+			if err != nil || len(nodes) != 1 || nodes[0] != *tc.want {
+				t.Fatalf("nodes = %+v, %v; want %+v", nodes, err, *tc.want)
+			}
+		})
+	}
+}

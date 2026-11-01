@@ -299,3 +299,29 @@ func TestLockWinsOverAnUnlockInFlight(t *testing.T) {
 		t.Fatalf("a fresh unlock must work: %v", err)
 	}
 }
+
+// OpenVersion reports the version it decrypted, so a caller bound to an
+// exact credential version notices a rotation.
+func TestOpenVersionReportsDecryptedVersion(t *testing.T) {
+	db, _ := newDB(t)
+	v := newTestVault(db)
+	if err := v.Init([]byte(pass), testParams, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := v.OpenVersion("pve.read"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing secret: %v", err)
+	}
+	for want := int64(1); want <= 2; want++ {
+		if _, err := v.Put("pve.read", []byte("value-"+string(rune('0'+want))), "admin"); err != nil {
+			t.Fatal(err)
+		}
+		got, ver, err := v.OpenVersion("pve.read")
+		if err != nil || ver != want || string(got) != "value-"+string(rune('0'+want)) {
+			t.Fatalf("OpenVersion = %q, %d, %v; want version %d", got, ver, err, want)
+		}
+	}
+	v.Lock()
+	if _, ver, err := v.OpenVersion("pve.read"); err == nil || ver != 0 {
+		t.Fatalf("locked vault opened version %d: %v", ver, err)
+	}
+}

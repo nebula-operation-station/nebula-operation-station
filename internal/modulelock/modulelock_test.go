@@ -118,3 +118,34 @@ func TestParseRefuses(t *testing.T) {
 		t.Fatal("missing member accepted")
 	}
 }
+
+// The release-bundle profile admits first-party family names, including
+// reserved built-in names and os-debian; the third-party profile still
+// refuses them, and every other check applies to both.
+func TestParseFirstPartyProfile(t *testing.T) {
+	for _, name := range []string{"docker", "core", "os-debian", "package"} {
+		l := valid()
+		l.Name = name
+		if _, _, err := Parse(raw(t, l)); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("third-party Parse accepted %q", name)
+		}
+		got, _, err := ParseFirstParty(raw(t, l))
+		if err != nil || got.ActionID("restart") != name+".restart" {
+			t.Fatalf("ParseFirstParty(%q): %v", name, err)
+		}
+	}
+	for name, mut := range map[string]func(*Lock){
+		"uppercase":     func(l *Lock) { l.Name = "Docker" },
+		"leading digit": func(l *Lock) { l.Name = "1os" },
+		"too long":      func(l *Lock) { l.Name = "a" + strings.Repeat("b", 64) },
+		"dot":           func(l *Lock) { l.Name = "os.debian" },
+		"version":       func(l *Lock) { l.Name = "docker"; l.Version = "1.2" },
+		"risk":          func(l *Lock) { l.Name = "docker"; a := l.Actions["restart"]; a.Risk = "low"; l.Actions["restart"] = a },
+	} {
+		l := valid()
+		mut(&l)
+		if _, _, err := ParseFirstParty(raw(t, l)); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s: ParseFirstParty accepted it", name)
+		}
+	}
+}

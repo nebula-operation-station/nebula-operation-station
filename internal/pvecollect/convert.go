@@ -272,6 +272,8 @@ func convertStorages(res readResult) pvecontract.Dataset[[]pvecontract.StorageOb
 			Active:    s.Active,
 			SizeBytes: s.SizeBytes,
 			FreeBytes: s.FreeBytes,
+			Node:      s.Node,
+			Shared:    s.Shared,
 		})
 	}
 	return pvecontract.AvailableDataset(out)

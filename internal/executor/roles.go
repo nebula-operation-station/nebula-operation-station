@@ -27,6 +27,7 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_SubmitAssertion_FullMethodName:           {server},
 		pb.ExecutorService_BeginPrivilegedSession_FullMethodName:    {server},
 		pb.ExecutorService_CompletePrivilegedSession_FullMethodName: {server},
+		pb.ExecutorService_GetSessionState_FullMethodName:           {server, admin},
 		pb.ExecutorService_AuthorizeRun_FullMethodName:              {server},
 		pb.ExecutorService_RunAttached_FullMethodName:               {server},
 		pb.ExecutorService_StartDurable_FullMethodName:              {server},
@@ -136,9 +137,8 @@ func validPVENodeName(s string) bool {
 }
 
 // ValidateReadPVERequest validates a ReadPVE request (ADR 0006, P1-05) and
-// returns a codes.InvalidArgument status error for malformed requests. The
-// PVE read handlers must call it before anything else (the pveapi wiring
-// lands in P1-07); the rules are final:
+// returns a codes.InvalidArgument status error for malformed requests.
+// ReadPVE (pve_read.go) calls it before anything else; the rules are final:
 //
 //   - remote_id must be a well-formed slug (pvecontract.ValidRemoteID);
 //   - method must be one of the ten typed read methods;
@@ -213,14 +213,4 @@ func (s *Service) ListPVERemotes(ctx context.Context, _ *pb.ListPVERemotesReques
 		out.Remotes = append(out.Remotes, info)
 	}
 	return out, nil
-}
-
-// ReadPVE (ADR 0006, P1-05) validates the request with the final rules
-// (ValidateReadPVERequest) and returns Unimplemented until the pveapi
-// wiring lands (P1-07).
-func (s *Service) ReadPVE(_ context.Context, in *pb.ReadPVERequest) (*pb.ReadPVEResponse, error) {
-	if err := ValidateReadPVERequest(in); err != nil {
-		return nil, err
-	}
-	return nil, status.Errorf(codes.Unimplemented, "read pve: not wired yet (P1-07)")
 }
