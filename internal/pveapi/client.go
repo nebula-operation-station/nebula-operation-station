@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package pveapi is a typed, read-only client for the Proxmox VE API
+// Package pveapi is a typed client for the Proxmox VE API
 // (ADR 0006, phase 1 read path). It enumerates cluster nodes and QEMU/LXC
 // guests, reads guest configurations with secret fields removed, and
 // queries the QEMU guest agent (interfaces, OS info, filesystems).
 //
-// The client performs GET requests only and never issues mutation
-// endpoints. TLS trust and certificate pinning are the caller's
-// responsibility: the client takes a ready *http.Client and a base URL.
-// It never logs request headers or response bodies.
+// Client performs GET requests only and never issues mutation endpoints.
+// The only mutations live on the separate Writer type (ADR 0008 PV-02):
+// a closed allowlist of typed provisioning calls (full clone, allowlisted
+// config set, disk resize, start, checksummed download-url, template
+// conversion) plus task status. TLS trust and certificate pinning are the
+// caller's responsibility: both types take a ready *http.Client and a base
+// URL. Neither logs request headers or response bodies.
 //
 // Reader-specific response types are defined locally; shared capability
 // and backup observation types use internal/pvecontract.

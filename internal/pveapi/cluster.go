@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package pveapi is a typed, read-only client for the Proxmox VE API
+// Package pveapi is a typed client for the Proxmox VE API
 // (ADR 0006, ticket P1-19). It reads cluster status, HA state and bounded
-// per-node task metadata. It exposes no mutation endpoints and no executor
-// or server wiring.
+// per-node task metadata. The read clients expose no mutation endpoints;
+// mutations exist only on Writer (ADR 0008). There is no executor or server
+// wiring here.
 //
 // Every response is untrusted input: response size limits, UTF-8 checks and
 // explicit schemas apply, unknown fields are dropped, and "unavailable"

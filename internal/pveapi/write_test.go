@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -382,6 +383,26 @@ func TestWriteBadRequestKeepsOnlySentParamNames(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "bad value") || strings.Contains(err.Error(), "injected") {
 		t.Errorf("error carries response text: %v", err)
+	}
+}
+
+// TestWriterMethodSetIsAllowlist pins the Writer API to the ADR 0008
+// allowlist; a new write method must be added here deliberately.
+func TestWriterMethodSetIsAllowlist(t *testing.T) {
+	want := []string{"CloneVM", "ConvertToTemplate", "DownloadURL", "ResizeDisk", "SetConfig", "StartVM", "TaskStatus"}
+	typ := reflect.TypeFor[*Writer]()
+	var got []string
+	for i := range typ.NumMethod() {
+		got = append(got, typ.Method(i).Name)
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("Writer methods = %v, want %v", got, want)
+	}
+	// The read client has no write path.
+	for _, name := range want {
+		if _, ok := reflect.TypeFor[*Client]().MethodByName(name); ok {
+			t.Errorf("Client unexpectedly has %s", name)
+		}
 	}
 }
 
