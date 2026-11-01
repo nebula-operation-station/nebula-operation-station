@@ -29,7 +29,9 @@
   $('dp-image').value = draft.image || '';
   $('dp-storage').value = draft.storage_class || '';
   const size = draft.size || {};
-  $('dp-size-preset').value = size.preset || 'M';
+  // A draft without a preset but with values is a custom size; keep the
+  // custom fields visible instead of falling back to the default preset.
+  $('dp-size-preset').value = size.preset || ((size.vcpu || size.ram_gib || size.disk_gib) ? '' : 'M');
   $('dp-vcpu').value = size.vcpu || '';
   $('dp-ram').value = size.ram_gib || '';
   $('dp-disk').value = size.disk_gib || '';

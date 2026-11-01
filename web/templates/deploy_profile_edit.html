@@ -4,25 +4,25 @@
 <section class="panel" aria-label="Deploy profile editor">
   <form id="deploy-profile-form" class="form"
     data-draft="{{.Draft}}" data-modules="{{.Modules}}" data-presets="{{.Presets}}" novalidate>
-    <label>Slug (lowercase letters, digits, <code>-</code>; it never changes)
-      <input type="text" id="dp-slug" maxlength="40" autocomplete="off" pattern="[a-z0-9][a-z0-9-]{0,39}"></label>
+    <label>Slug (lowercase letters, digits, <code>_</code>; it never changes)
+      <input type="text" id="dp-slug" maxlength="40" autocomplete="off" pattern="[a-z0-9][a-z0-9_]{0,39}"></label>
     <label>Title <input type="text" id="dp-title" maxlength="100" autocomplete="off"></label>
     <label>Description <textarea id="dp-description" rows="3" maxlength="2000"></textarea></label>
     <label>Image reference <input type="text" id="dp-image" maxlength="64" autocomplete="off"></label>
     <label>Storage class <input type="text" id="dp-storage" maxlength="64" autocomplete="off" placeholder="local-lvm"></label>
     <fieldset>
       <legend>Size</legend>
-      <p class="hint">A preset (S/M/L/XL) or a custom size inside the bounds. Custom: 1–64 vCPU, 1–256 GiB RAM, 1–10240 GiB
-        disk, and the disk must fit the RAM (at most 16 GiB per GiB of RAM).</p>
+      <p class="hint">A preset (S/M/L/XL) or a custom size inside the bounds. Custom: 1–32 vCPU, 1–64 GiB RAM, 1–1024 GiB
+        disk.</p>
       <label>Preset
         <select id="dp-size-preset">
           <option value="S">S</option><option value="M" selected>M</option><option value="L">L</option><option value="XL">XL</option>
           <option value="">custom</option>
         </select></label>
       <div id="dp-size-custom" hidden>
-        <label>Custom vCPU <input type="number" id="dp-vcpu" min="1" max="64" inputmode="numeric"></label>
-        <label>Custom RAM (GiB) <input type="number" id="dp-ram" min="1" max="256" inputmode="numeric"></label>
-        <label>Custom disk (GiB) <input type="number" id="dp-disk" min="1" max="10240" inputmode="numeric"></label>
+        <label>Custom vCPU <input type="number" id="dp-vcpu" min="1" max="32" inputmode="numeric"></label>
+        <label>Custom RAM (GiB) <input type="number" id="dp-ram" min="1" max="64" inputmode="numeric"></label>
+        <label>Custom disk (GiB) <input type="number" id="dp-disk" min="1" max="1024" inputmode="numeric"></label>
       </div>
     </fieldset>
     <fieldset>

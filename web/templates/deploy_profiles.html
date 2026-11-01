@@ -5,8 +5,8 @@
      size), image, network and DNS, the bootstrap modules to run, the runbooks it references and the vault entries it needs
      (references only — no secret values ever). Every save is a new, unchangeable version; provisioning always uses the exact
      version it was planned with.</p>
-  <div class="actions"><a class="button" href="/deploy/new">New deploy profile</a></div>
   {{with .DeployProfiles}}
+  <div class="actions"><a class="button" href="/deploy/new">New deploy profile</a></div>
   {{if .Rows}}
   <div class="table-wrap">
   <table class="inventory">
