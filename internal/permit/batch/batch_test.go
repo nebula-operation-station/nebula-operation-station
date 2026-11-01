@@ -63,6 +63,7 @@ type environment struct {
 	a        *Authority
 	options  Options
 	policy   *policy
+	store    *fakeStore
 	active   atomic.Bool
 	unix     atomic.Int64
 	rp       virtualwebauthn.RelyingParty
@@ -89,6 +90,8 @@ func setup(t *testing.T, mode permit.Mode) *environment {
 		Now:     func() time.Time { return time.Unix(e.unix.Load(), 0) },
 		Session: func() (bool, time.Time) { return e.active.Load(), time.Unix(e.unix.Load(), 0).Add(time.Hour) },
 		Audit:   func(ev permit.Event) { e.events = append(e.events, ev) }}
+	e.store = newFakeStore()
+	e.options.Store = e.store
 	e.a, err = New(e.options)
 	if err != nil {
 		t.Fatal(err)

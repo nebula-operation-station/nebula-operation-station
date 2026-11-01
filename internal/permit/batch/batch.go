@@ -89,6 +89,9 @@ type Options struct {
 	// Scan runs the Safety Scanner. Default permit.ScanBounded, which shares
 	// the executor-wide scan limit with ordinary proposals; tests may inject.
 	Scan func(context.Context, []byte) ([]scanner.Finding, canonical.Risk, error)
+	// Store durably spends execution IDs (internal/executordb implements it).
+	// Without it, Propose and ClaimMember fail closed.
+	Store permit.Store
 }
 
 // Approval is a detached, complete review copy. Parameters and Findings use
@@ -123,6 +126,7 @@ type Authority struct {
 	mu      sync.Mutex
 	options Options
 	entries map[canonical.Digest]*entry
+	members map[string]*MemberPermit
 	seen    map[string]struct{}
 	epoch   uint64
 	// retained is the sum of entry.size over entries (MaxRetainedBytes).
@@ -146,7 +150,7 @@ func New(o Options) (*Authority, error) {
 	if o.Scan == nil {
 		o.Scan = permit.ScanBounded
 	}
-	return &Authority{options: o, entries: map[canonical.Digest]*entry{}, seen: map[string]struct{}{}}, nil
+	return &Authority{options: o, entries: map[canonical.Digest]*entry{}, members: map[string]*MemberPermit{}, seen: map[string]struct{}{}}, nil
 }
 
 func failure(code permit.Code, detail string) error { return &permit.Error{Code: code, Detail: detail} }
@@ -271,6 +275,13 @@ func (a *Authority) Propose(ctx context.Context, raw []byte, inputs []MemberInpu
 	size := retainedSize(p)
 	if a.retained+size > MaxRetainedBytes {
 		return Approval{}, failure(permit.CodeLimit, "batch approval memory budget reached")
+	}
+	// Spend every member execution ID durably as the last step before the
+	// approval exists (the spent-ID discipline of single requests): a
+	// rejected proposal spends nothing, while an unapproved, expired or
+	// abandoned one can never reissue its IDs.
+	if err := a.bindExecutionIDs(p.Plan, digest, time.Unix(p.Plan.ExpiryUnix, 0)); err != nil {
+		return Approval{}, err
 	}
 	e := &entry{approval: p, snapshots: snapshots, size: size}
 	a.entries[digest] = e
@@ -521,13 +532,16 @@ func (a *Authority) Check(ctx context.Context, d canonical.Digest) (Approval, er
 	return cloneApproval(e.approval), nil
 }
 
-// Lock revokes all pending and approved batches, including in-flight approvals.
-// The executor lifecycle adapter must call it whenever the executor locks.
+// Lock revokes all pending and approved batches, every claimed member
+// permit, including in-flight approvals. The executor lifecycle adapter must
+// call it whenever the executor locks. Durable execution ID bindings survive
+// the lock: a spent ID is never reissued.
 func (a *Authority) Lock() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.epoch++
 	clear(a.entries)
+	clear(a.members)
 	a.retained = 0
 	a.emit("batch_locked", canonical.Digest{}, "", "")
 }
@@ -538,6 +552,11 @@ func (a *Authority) gcLocked() {
 		p := e.approval
 		if !now.Before(time.Unix(p.Plan.ExpiryUnix, 0)) || (p.State == permit.StatePending && !now.Before(p.ApprovalExpiry)) {
 			a.removeLocked(d)
+		}
+	}
+	for key, mp := range a.members {
+		if _, ok := a.entries[mp.ParentDigest]; !ok {
+			delete(a.members, key)
 		}
 	}
 }
