@@ -356,7 +356,7 @@ func (c *Collector) readRemote(ctx context.Context, remoteID string, now time.Ti
 		for i := range obs.Guests.Value {
 			g := &obs.Guests.Value[i]
 			phase2 = append(phase2, readReq{method: pb.PVEReadMethod_PVE_READ_METHOD_GUEST_CONFIG, vmid: g.VMID})
-			// Only a running QEMU guest can have a guest agent. For the
+			// Only a QEMU guest that is not stopped or paused can answer. For the
 			// others the dataset is not applicable rather than missing, so
 			// it costs no request and does not mark the page incomplete.
 			if reason := agentNotApplicable(*g); reason != "" {
@@ -401,7 +401,8 @@ func agentNotApplicable(g pvecontract.GuestObservation) string {
 	switch {
 	case g.Kind != pvecontract.GuestQEMU:
 		return reasonAgentContainer
-	case g.Status != pvecontract.GuestRunning:
+	case g.Status == pvecontract.GuestStopped || g.Status == pvecontract.GuestPaused:
+		// An unknown status still gets a read: absence is not proven.
 		return reasonAgentNotRunning
 	}
 	return ""

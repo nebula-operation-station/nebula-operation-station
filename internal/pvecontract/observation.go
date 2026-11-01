@@ -403,8 +403,9 @@ var (
 	printableNoSpace = regexp.MustCompile(`^[\x21-\x7e]+$`)
 	// snapshotNameRe is a PVE snapshot name, which keeps its case.
 	snapshotNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
-	// poolIDRe is a PVE pool ID, which keeps its case.
-	poolIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	// poolIDRe is a PVE pool ID, which keeps its case; PVE 8.1+ nests
+	// pools up to three levels ("dev/team1/ci").
+	poolIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,63}){0,2}$`)
 	// windowsMountRe is a Windows drive root or path as the guest agent
 	// reports it ("C:\\", "D:\\data").
 	windowsMountRe = regexp.MustCompile(`^[A-Za-z]:\\`)

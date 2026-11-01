@@ -340,6 +340,7 @@ func TestPollOnceSkipsAgentReadsThatCannotApply(t *testing.T) {
 					{Vmid: 100, Kind: "qemu", Node: "p1", Status: "running", Generation: 1},
 					{Vmid: 101, Kind: "qemu", Node: "p1", Status: "stopped", Generation: 1},
 					{Vmid: 200, Kind: "lxc", Node: "p1", Status: "running", Generation: 1},
+					{Vmid: 102, Kind: "qemu", Node: "p1", Status: "unknown", Generation: 1},
 				},
 			}}}, nil
 		case pb.PVEReadMethod_PVE_READ_METHOD_GUEST_AGENT:
@@ -353,8 +354,8 @@ func TestPollOnceSkipsAgentReadsThatCannotApply(t *testing.T) {
 	if _, err := c.PollOnce(context.Background()); err != nil {
 		t.Fatalf("PollOnce: %v", err)
 	}
-	if len(agentReads) != 1 || agentReads[100] != 1 {
-		t.Fatalf("agent reads = %v, want only guest 100", agentReads)
+	if len(agentReads) != 2 || agentReads[100] != 1 || agentReads[102] != 1 {
+		t.Fatalf("agent reads = %v, want guests 100 and 102 (unknown status is not proof of absence)", agentReads)
 	}
 	names, err := spool.List(context.Background())
 	if err != nil || len(names) != 1 {
@@ -367,9 +368,9 @@ func TestPollOnceSkipsAgentReadsThatCannotApply(t *testing.T) {
 	if !obs.Complete {
 		t.Fatalf("observation incomplete: %q", obs.Reason)
 	}
-	want := map[uint64]string{100: "", 101: reasonAgentNotRunning, 200: reasonAgentContainer}
+	want := map[uint64]string{100: "", 101: reasonAgentNotRunning, 102: "", 200: reasonAgentContainer}
 	for _, g := range obs.Guests.Value {
-		if g.Agent.Reason != want[g.VMID] || g.Agent.IsAvailable() != (g.VMID == 100) {
+		if g.Agent.Reason != want[g.VMID] || g.Agent.IsAvailable() != (g.VMID == 100 || g.VMID == 102) {
 			t.Fatalf("guest %d agent = %+v", g.VMID, g.Agent)
 		}
 	}
