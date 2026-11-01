@@ -19,8 +19,6 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecollect"
 )
 
-const collectorUnit = "deploy/systemd/nebula-pve-collector.service"
-
 // readRepoFile reads a file from the repository root (two levels up from
 // test/security) and returns it as a string.
 func readRepoFile(t *testing.T, parts ...string) string {
@@ -30,6 +28,12 @@ func readRepoFile(t *testing.T, parts ...string) string {
 		t.Fatalf("read %s: %v", filepath.Join(parts...), err)
 	}
 	return string(b)
+}
+
+// readCollectorUnit reads the collector's systemd unit from the repository.
+func readCollectorUnit(t *testing.T) string {
+	t.Helper()
+	return readRepoFile(t, "deploy", "systemd", "nebula-pve-collector.service")
 }
 
 // unitDirective returns the value of the first occurrence of key in a
@@ -57,7 +61,7 @@ func unitDirective(unit, key string) string {
 // or discovery, and reaches the executor socket through the shared
 // nebula-rpc group.
 func TestPVECollectorUnitRunsAsDistinctUser(t *testing.T) {
-	unit := readRepoFile(t, "deploy", "systemd", "nebula-pve-collector.service")
+	unit := readCollectorUnit(t)
 	if got := unitDirective(unit, "User"); got != "nebula-pve-collector" {
 		t.Errorf("User = %q, want nebula-pve-collector (a distinct UID)", got)
 	}
@@ -72,7 +76,7 @@ func TestPVECollectorUnitRunsAsDistinctUser(t *testing.T) {
 // TestPVECollectorUnitNoNetwork: the collector has no network — only the
 // AF_UNIX family (for the executor socket) is allowed.
 func TestPVECollectorUnitNoNetwork(t *testing.T) {
-	unit := readRepoFile(t, "deploy", "systemd", "nebula-pve-collector.service")
+	unit := readCollectorUnit(t)
 	if got := unitDirective(unit, "RestrictAddressFamilies"); got != "AF_UNIX" {
 		t.Errorf("RestrictAddressFamilies = %q, want exactly AF_UNIX (no network)", got)
 	}
@@ -81,7 +85,7 @@ func TestPVECollectorUnitNoNetwork(t *testing.T) {
 // TestPVECollectorUnitNoCapabilities: the collector holds no capabilities
 // (ADR 0006: no capabilities).
 func TestPVECollectorUnitNoCapabilities(t *testing.T) {
-	unit := readRepoFile(t, "deploy", "systemd", "nebula-pve-collector.service")
+	unit := readCollectorUnit(t)
 	if got := unitDirective(unit, "CapabilityBoundingSet"); got != "" {
 		t.Errorf("CapabilityBoundingSet = %q, want empty (no capabilities)", got)
 	}
@@ -93,7 +97,7 @@ func TestPVECollectorUnitNoCapabilities(t *testing.T) {
 // TestPVECollectorUnitNoExecutorDB: the collector never mounts or reads the
 // executor's database; the spool is its only writable path.
 func TestPVECollectorUnitNoExecutorDB(t *testing.T) {
-	unit := readRepoFile(t, "deploy", "systemd", "nebula-pve-collector.service")
+	unit := readCollectorUnit(t)
 	if strings.Contains(unit, "/var/lib/nebula/executor") {
 		t.Error("unit references /var/lib/nebula/executor; the collector must not access the executor DB")
 	}
@@ -105,7 +109,7 @@ func TestPVECollectorUnitNoExecutorDB(t *testing.T) {
 // TestPVECollectorUnitLockedStartup: the collector starts locked (no new
 // privileges, read-only filesystem, no SUID/SGID, no W^X, seccomp).
 func TestPVECollectorUnitLockedStartup(t *testing.T) {
-	unit := readRepoFile(t, "deploy", "systemd", "nebula-pve-collector.service")
+	unit := readCollectorUnit(t)
 	for _, want := range []string{
 		"NoNewPrivileges=yes",
 		"ProtectSystem=strict",
@@ -134,7 +138,7 @@ func TestPVECollectorUnitLockedStartup(t *testing.T) {
 // TestPVECollectorUnitSpool: the unit points the collector at the spool and
 // the executor socket (matching docs/operator/proxmox.md).
 func TestPVECollectorUnitSpool(t *testing.T) {
-	unit := readRepoFile(t, "deploy", "systemd", "nebula-pve-collector.service")
+	unit := readCollectorUnit(t)
 	exec := unitDirective(unit, "ExecStart")
 	for _, want := range []string{
 		"-socket /run/nebula/executor.sock",
