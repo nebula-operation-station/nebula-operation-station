@@ -12,6 +12,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Dataset sources.
@@ -405,7 +407,22 @@ var (
 	pciDeviceRe      = regexp.MustCompile(`^PCI-[0-9a-f]{4}:[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]$`)
 	pciTargetRe      = regexp.MustCompile(`^(?:[0-9a-f]{4}:)?[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]$`)
 	printableNoSpace = regexp.MustCompile(`^[\x21-\x7e]+$`)
+	// pveNameRe is a case-preserving PVE identifier: snapshot names
+	// (pve-configid, e.g. "Pre-Upgrade") and pool IDs (pve-poolid).
+	pveNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
+	// windowsMountRe is a Windows guest drive root or path ("C:\", "D:\Data").
+	windowsMountRe = regexp.MustCompile(`^[A-Za-z]:\\`)
 )
+
+// validMountPoint reports whether m is a guest-agent mount point: an
+// absolute POSIX path or a Windows drive path, valid UTF-8 without control
+// characters, at most MaxLabelBytes.
+func validMountPoint(m string) bool {
+	if len(m) > MaxLabelBytes || !utf8.ValidString(m) || strings.ContainsFunc(m, unicode.IsControl) {
+		return false
+	}
+	return strings.HasPrefix(m, "/") || windowsMountRe.MatchString(m)
+}
 
 // ValidNodeName reports whether s is a valid PVE node name (DNS host name).
 func ValidNodeName(s string) bool { return validNodeName(s) }
@@ -736,7 +753,7 @@ func validateGuestConfig(where string, c GuestConfig, add func(format string, ar
 		}
 		seenTag[t] = struct{}{}
 	}
-	if c.Pool != "" && !slugRe.MatchString(c.Pool) {
+	if c.Pool != "" && !pveNameRe.MatchString(c.Pool) {
 		add("%s: pool %q is malformed", where, c.Pool)
 	}
 	validateCapabilities(where+".capabilities", c.Capabilities, add)
@@ -816,7 +833,7 @@ func validateGuestAgent(where string, a GuestAgent, add func(format string, args
 		add("%s: too many filesystems (%d > %d)", where, len(a.Filesystems), MaxFilesystemsPerGuest)
 	}
 	for i, fs := range a.Filesystems {
-		if !strings.HasPrefix(fs.MountPoint, "/") || len(fs.MountPoint) > MaxLabelBytes {
+		if !validMountPoint(fs.MountPoint) {
 			add("%s: filesystems[%d]: mount_point %q is malformed", where, i, fs.MountPoint)
 		}
 		if !slugRe.MatchString(fs.FSType) {
@@ -834,7 +851,7 @@ func validateSnapshots(where string, ss []Snapshot, add func(format string, args
 	}
 	names := map[string]struct{}{}
 	for i, s := range ss {
-		if !slugRe.MatchString(s.Name) {
+		if !pveNameRe.MatchString(s.Name) {
 			add("%s[%d]: name %q is malformed", where, i, s.Name)
 		}
 		names[s.Name] = struct{}{}

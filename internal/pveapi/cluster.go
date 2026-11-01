@@ -259,6 +259,82 @@ type HAStatus struct {
 	Reason string
 	// Resources is the HA state per VMID, in resource-list order.
 	Resources []HAResource
+	// Maintenance maps each node with an HA local resource manager entry
+	// to whether that LRM is in maintenance mode. A node without an entry
+	// is absent: its maintenance state is unknown, never "not in
+	// maintenance".
+	Maintenance map[string]bool
+}
+
+// NodeVotes is the corosync quorum vote count per configured cluster node
+// from GET /cluster/config/nodes (needs Sys.Audit on /). Only node names
+// and vote counts are kept; ring addresses and other corosync settings are
+// discarded.
+type NodeVotes struct {
+	// Available reports whether the node list could be read.
+	Available bool
+	// Reason explains an unavailable result.
+	Reason string
+	// Votes maps node name to its quorum_votes (corosync default 1).
+	Votes map[string]int
+}
+
+// maxQuorumVotes bounds one node's corosync quorum_votes.
+const maxQuorumVotes = 255
+
+type clusterConfigNode struct {
+	Node        string          `json:"node"`
+	QuorumVotes json.RawMessage `json:"quorum_votes"`
+}
+
+// ClusterNodeVotes reads GET /cluster/config/nodes.
+func (c *Client) ClusterNodeVotes(ctx context.Context) (NodeVotes, error) {
+	body, reason, err := c.clusterGet(ctx, "/cluster/config/nodes")
+	if err != nil {
+		return NodeVotes{}, err
+	}
+	if body == nil {
+		return NodeVotes{Reason: reason}, nil
+	}
+	entries, err := decodeData[[]clusterConfigNode](body)
+	if err != nil {
+		return NodeVotes{}, err
+	}
+	if len(*entries) > maxClusterNodes {
+		return NodeVotes{}, fmt.Errorf("%w: too many cluster config nodes", ErrMalformed)
+	}
+	out := NodeVotes{Available: true, Votes: make(map[string]int, len(*entries))}
+	for _, e := range *entries {
+		if !nodeNameRe.MatchString(e.Node) {
+			return NodeVotes{}, fmt.Errorf("%w: invalid cluster config node name", ErrMalformed)
+		}
+		if _, dup := out.Votes[e.Node]; dup {
+			return NodeVotes{}, fmt.Errorf("%w: duplicate cluster config node", ErrMalformed)
+		}
+		votes, err := quorumVotes(e.QuorumVotes)
+		if err != nil {
+			return NodeVotes{}, err
+		}
+		out.Votes[e.Node] = votes
+	}
+	return out, nil
+}
+
+// quorumVotes parses quorum_votes, which PVE renders as a JSON number or a
+// decimal string; absent means the corosync default of one vote.
+func quorumVotes(raw json.RawMessage) (int, error) {
+	s := strings.Trim(string(raw), `"`)
+	if len(raw) == 0 || string(raw) == "null" {
+		return 1, nil
+	}
+	if len(s) == 0 || len(s) > 3 || strings.Trim(s, "0123456789") != "" {
+		return 0, fmt.Errorf("%w: invalid quorum_votes", ErrMalformed)
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil || v > maxQuorumVotes {
+		return 0, fmt.Errorf("%w: quorum_votes out of range", ErrMalformed)
+	}
+	return v, nil
 }
 
 // HAResource is the HA state of one VMID.
@@ -297,11 +373,28 @@ type haResourceData struct {
 }
 
 type haStatusEntry struct {
-	ID    string `json:"id"`
-	Type  string `json:"type"`
-	SID   string `json:"sid"`
-	State string `json:"state"`
-	Node  string `json:"node"`
+	ID     string `json:"id"`
+	Type   string `json:"type"`
+	SID    string `json:"sid"`
+	State  string `json:"state"`
+	Node   string `json:"node"`
+	Status string `json:"status"`
+}
+
+// lrmMaintenanceMarker is how PVE's HA status renders a local resource
+// manager in maintenance mode ("<node> (maintenance mode, <time>)").
+const lrmMaintenanceMarker = "(maintenance mode,"
+
+// haLRM records one lrm entry of /cluster/ha/status/current into modes.
+func haLRM(e haStatusEntry, modes map[string]bool) error {
+	if !nodeNameRe.MatchString(e.Node) || e.ID != "lrm:"+e.Node {
+		return fmt.Errorf("%w: inconsistent ha lrm entry", ErrMalformed)
+	}
+	if _, dup := modes[e.Node]; dup {
+		return fmt.Errorf("%w: duplicate ha lrm entry", ErrMalformed)
+	}
+	modes[e.Node] = strings.Contains(e.Status, lrmMaintenanceMarker)
+	return nil
 }
 
 // HAStatus reads GET /cluster/ha/resources and GET /cluster/ha/status/current
@@ -342,11 +435,18 @@ func (c *Client) HAStatus(ctx context.Context) (HAStatus, error) {
 	}
 
 	observed := make(map[string]haStatusEntry, len(*entries))
+	maintenance := map[string]bool{}
 	for _, e := range *entries {
-		for field, value := range map[string]string{"id": e.ID, "type": e.Type, "sid": e.SID, "state": e.State, "node": e.Node} {
+		for field, value := range map[string]string{"id": e.ID, "type": e.Type, "sid": e.SID, "state": e.State, "node": e.Node, "status": e.Status} {
 			if _, err := checkText(field, value); err != nil {
 				return HAStatus{}, err
 			}
+		}
+		if e.Type == "lrm" {
+			if err := haLRM(e, maintenance); err != nil {
+				return HAStatus{}, err
+			}
+			continue
 		}
 		if e.Type != "service" {
 			continue
@@ -363,7 +463,7 @@ func (c *Client) HAStatus(ctx context.Context) (HAStatus, error) {
 		observed[e.SID] = e
 	}
 
-	out := HAStatus{Available: true}
+	out := HAStatus{Available: true, Maintenance: maintenance}
 	for _, r := range *resources {
 		res, err := haResource(r, observed)
 		if err != nil {

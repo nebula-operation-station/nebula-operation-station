@@ -42,6 +42,25 @@ type TaskFilter struct {
 	// Limit bounds the number of returned summaries. Zero means
 	// MaxTaskLimit. Values above MaxTaskLimit are rejected.
 	Limit int
+	// Type restricts the result to one task type (PVE "typefilter", for
+	// example "vzdump"). Empty means all types. The filter is sent to PVE
+	// and re-applied to every returned task, so a server ignoring it can
+	// never widen the result.
+	Type string
+	// VMID restricts the result to tasks whose target ID is exactly this
+	// guest (PVE "vmid"). Zero means all targets. Re-applied like Type.
+	VMID uint64
+}
+
+// taskTypeRe validates a TaskFilter.Type.
+var taskTypeRe = regexp.MustCompile(`^[a-z][a-z0-9]{0,31}$`)
+
+// matches re-applies the type and VMID filter to one parsed task.
+func (f TaskFilter) matches(t TaskSummary) bool {
+	if f.Type != "" && t.Type != f.Type {
+		return false
+	}
+	return f.VMID == 0 || t.ID == strconv.FormatUint(f.VMID, 10)
 }
 
 // TaskList is a bounded summary of one node's task list.
@@ -109,12 +128,24 @@ func (c *Client) NodeTasks(ctx context.Context, node string, f TaskFilter) (Task
 	if limit > MaxTaskLimit {
 		return TaskList{}, fmt.Errorf("pveapi: task limit %d exceeds %d", limit, MaxTaskLimit)
 	}
+	if f.Type != "" && !taskTypeRe.MatchString(f.Type) {
+		return TaskList{}, fmt.Errorf("pveapi: invalid task type filter")
+	}
+	if f.VMID > MaxVMID {
+		return TaskList{}, fmt.Errorf("pveapi: invalid task vmid filter")
+	}
 
 	out := TaskList{Available: true}
 	for start := 0; start < maxTaskScan; start += taskPageSize {
 		query := url.Values{"start": {strconv.Itoa(start)}, "limit": {strconv.Itoa(taskPageSize)}}
 		if !f.Since.IsZero() {
 			query.Set("since", strconv.FormatInt(f.Since.Unix(), 10))
+		}
+		if f.Type != "" {
+			query.Set("typefilter", f.Type)
+		}
+		if f.VMID != 0 {
+			query.Set("vmid", strconv.FormatUint(f.VMID, 10))
 		}
 		body, reason, err := c.clusterGet(ctx, "/nodes/"+url.PathEscape(node)+"/tasks?"+query.Encode())
 		if err != nil {
@@ -156,7 +187,7 @@ func (c *Client) NodeTasks(ctx context.Context, node string, f TaskFilter) (Task
 				}
 				task.End = time.Unix(*entry.EndTime, 0).UTC()
 			}
-			if !f.Since.IsZero() && task.Start.Before(f.Since) {
+			if (!f.Since.IsZero() && task.Start.Before(f.Since)) || !f.matches(task) {
 				continue
 			}
 			if len(out.Tasks) == limit {
