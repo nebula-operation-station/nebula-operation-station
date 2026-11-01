@@ -11671,7 +11671,9 @@ func (x *PVEFilesystem) GetUsedBytes() uint64 {
 	return 0
 }
 
-// PVEStorages is the 5-minute storage read.
+// PVEStorages is the 5-minute storage read: one entry per (node, storage)
+// as each online node reports it. A shared storage appears once per
+// reporting node with shared = true and is counted once downstream.
 type PVEStorages struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	State         PVEDatasetState        `protobuf:"varint,1,opt,name=state,proto3,enum=nebula.executor.v1.PVEDatasetState" json:"state,omitempty"`
@@ -11733,14 +11735,20 @@ func (x *PVEStorages) GetStorages() []*PVEStorage {
 }
 
 type PVEStorage struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Type          string                 `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
-	Format        string                 `protobuf:"bytes,3,opt,name=format,proto3" json:"format,omitempty"`
-	Content       []string               `protobuf:"bytes,4,rep,name=content,proto3" json:"content,omitempty"`
-	Active        bool                   `protobuf:"varint,5,opt,name=active,proto3" json:"active,omitempty"`
-	SizeBytes     uint64                 `protobuf:"varint,6,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
-	FreeBytes     uint64                 `protobuf:"varint,7,opt,name=free_bytes,json=freeBytes,proto3" json:"free_bytes,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Name    string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Type    string                 `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
+	Format  string                 `protobuf:"bytes,3,opt,name=format,proto3" json:"format,omitempty"`
+	Content []string               `protobuf:"bytes,4,rep,name=content,proto3" json:"content,omitempty"`
+	Active  bool                   `protobuf:"varint,5,opt,name=active,proto3" json:"active,omitempty"`
+	// 0 when the capacity is unknown (inactive storage or not reported);
+	// never a measured empty store.
+	SizeBytes uint64 `protobuf:"varint,6,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
+	FreeBytes uint64 `protobuf:"varint,7,opt,name=free_bytes,json=freeBytes,proto3" json:"free_bytes,omitempty"`
+	// Node that reported this storage and its usage.
+	Node string `protobuf:"bytes,8,opt,name=node,proto3" json:"node,omitempty"`
+	// PVE's authoritative shared flag.
+	Shared        bool `protobuf:"varint,9,opt,name=shared,proto3" json:"shared,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -11822,6 +11830,20 @@ func (x *PVEStorage) GetFreeBytes() uint64 {
 		return x.FreeBytes
 	}
 	return 0
+}
+
+func (x *PVEStorage) GetNode() string {
+	if x != nil {
+		return x.Node
+	}
+	return ""
+}
+
+func (x *PVEStorage) GetShared() bool {
+	if x != nil {
+		return x.Shared
+	}
+	return false
 }
 
 // PVESnapshots is the 5-minute snapshot read for one guest.
@@ -15161,7 +15183,7 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\vPVEStorages\x129\n" +
 	"\x05state\x18\x01 \x01(\x0e2#.nebula.executor.v1.PVEDatasetStateR\x05state\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\x12:\n" +
-	"\bstorages\x18\x03 \x03(\v2\x1e.nebula.executor.v1.PVEStorageR\bstorages\"\xbc\x01\n" +
+	"\bstorages\x18\x03 \x03(\v2\x1e.nebula.executor.v1.PVEStorageR\bstorages\"\xe8\x01\n" +
 	"\n" +
 	"PVEStorage\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
@@ -15172,7 +15194,9 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\n" +
 	"size_bytes\x18\x06 \x01(\x04R\tsizeBytes\x12\x1d\n" +
 	"\n" +
-	"free_bytes\x18\a \x01(\x04R\tfreeBytes\"\xb4\x01\n" +
+	"free_bytes\x18\a \x01(\x04R\tfreeBytes\x12\x12\n" +
+	"\x04node\x18\b \x01(\tR\x04node\x12\x16\n" +
+	"\x06shared\x18\t \x01(\bR\x06shared\"\xb4\x01\n" +
 	"\fPVESnapshots\x129\n" +
 	"\x05state\x18\x01 \x01(\x0e2#.nebula.executor.v1.PVEDatasetStateR\x05state\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\x12\x12\n" +

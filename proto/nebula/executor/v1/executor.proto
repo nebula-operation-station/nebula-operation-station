@@ -1731,7 +1731,9 @@ message PVEFilesystem {
   uint64 used_bytes = 4;
 }
 
-// PVEStorages is the 5-minute storage read.
+// PVEStorages is the 5-minute storage read: one entry per (node, storage)
+// as each online node reports it. A shared storage appears once per
+// reporting node with shared = true and is counted once downstream.
 message PVEStorages {
   PVEDatasetState state = 1;
   string reason = 2;
@@ -1744,8 +1746,14 @@ message PVEStorage {
   string format = 3;
   repeated string content = 4;
   bool active = 5;
+  // 0 when the capacity is unknown (inactive storage or not reported);
+  // never a measured empty store.
   uint64 size_bytes = 6;
   uint64 free_bytes = 7;
+  // Node that reported this storage and its usage.
+  string node = 8;
+  // PVE's authoritative shared flag.
+  bool shared = 9;
 }
 
 // PVESnapshots is the 5-minute snapshot read for one guest.

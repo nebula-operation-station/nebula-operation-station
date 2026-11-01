@@ -53,8 +53,12 @@ const (
 	MaxTagsPerGuest = 32
 	// MaxSnapshotsPerGuest bounds snapshots per guest.
 	MaxSnapshotsPerGuest = 256
-	// MaxStoragesPerRemote bounds storages per remote.
+	// MaxStoragesPerRemote bounds distinct storage IDs per remote (and per
+	// node report).
 	MaxStoragesPerRemote = 64
+	// MaxStorageReportsPerRemote bounds per-node storage reports in one
+	// observation: each node reports the storages it can use.
+	MaxStorageReportsPerRemote = 1024
 	// MaxDisksPerGuest bounds disk references per guest.
 	MaxDisksPerGuest = 32
 	// MaxPCIDevicesPerGuest bounds hostpci devices per guest.

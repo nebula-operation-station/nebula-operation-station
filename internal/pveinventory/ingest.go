@@ -738,15 +738,16 @@ func (s *Store) ingestStorages(ctx context.Context, obs pvecontract.Observation)
 					return fmt.Errorf("pveinventory: storage %s content: %w", st.Name, err)
 				}
 				if _, err := tx.ExecContext(ctx, `
-					INSERT INTO pve_storages (remote_id, name, type, format, content_json, active,
-					                         size_bytes, free_bytes, observed_at, source, state,
+					INSERT INTO pve_storages (remote_id, node, name, type, format, content_json, active,
+					                         shared, size_bytes, free_bytes, observed_at, source, state,
 					                         reason, collection_generation)
-					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-					ON CONFLICT (remote_id, name) DO UPDATE SET
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+					ON CONFLICT (remote_id, node, name) DO UPDATE SET
 						type                  = excluded.type,
 						format                = excluded.format,
 						content_json          = excluded.content_json,
 						active                = excluded.active,
+						shared                = excluded.shared,
 						size_bytes            = excluded.size_bytes,
 						free_bytes            = excluded.free_bytes,
 						observed_at           = excluded.observed_at,
@@ -754,8 +755,8 @@ func (s *Store) ingestStorages(ctx context.Context, obs pvecontract.Observation)
 						state                 = excluded.state,
 						reason                = excluded.reason,
 						collection_generation = MAX(pve_storages.collection_generation, excluded.collection_generation)`,
-					obs.RemoteID, st.Name, st.Type, st.Format, string(contentJSON),
-					boolToInt(st.Active), st.SizeBytes, st.FreeBytes,
+					obs.RemoteID, st.Node, st.Name, st.Type, st.Format, string(contentJSON),
+					boolToInt(st.Active), boolToInt(st.Shared), st.SizeBytes, st.FreeBytes,
 					s.formatTime(obs.ObservedAt), obs.Source, string(state), reason,
 					obs.CollectionGeneration); err != nil {
 					return fmt.Errorf("pveinventory: ingest storage %s: %w", st.Name, err)

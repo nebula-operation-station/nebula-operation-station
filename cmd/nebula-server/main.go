@@ -357,6 +357,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		Network:      ipamStore,
 		Discovery:    disc,
 		PVE:          pveStore,
+		PVEChart:     func(ctx context.Context) (pveinventory.Tree, error) { return pveStore.ChartTree(ctx, time.Now()) },
 		PVERemotes:   pveRemotes,
 		Events:       exec,
 		Audit:        audit,

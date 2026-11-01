@@ -445,11 +445,11 @@ func readPveStorages(ctx context.Context, remoteID, base string, hc *http.Client
 	if err != nil {
 		return &pb.PVEStorages{State: pveUnavailable, Reason: pveReasonRead}
 	}
-	// One entry per storage ID: a storage is reported by every node that
-	// can use it. Per-node usage and the shared flag are wired separately
-	// (storwire); until then the first readable report wins.
+	// One entry per (node, storage) as each online node reports it, with
+	// PVE's shared flag; downstream counts a shared storage once. An
+	// inactive storage, or one without a usable capacity pair, carries no
+	// capacity (unknown), never a measured zero.
 	obs := []pvecontract.StorageObservation{}
-	seen := map[string]bool{}
 	for _, n := range nodes {
 		if n.Status != "online" {
 			continue
@@ -459,12 +459,9 @@ func readPveStorages(ctx context.Context, remoteID, base string, hc *http.Client
 			return &pb.PVEStorages{State: pveUnavailable, Reason: pveReasonPartial}
 		}
 		for _, st := range list.Storages {
-			if seen[st.ID] {
-				continue
-			}
-			seen[st.ID] = true
-			so := pvecontract.StorageObservation{Name: st.ID, Type: st.Type, Format: st.Format, Active: st.Active, Content: []string{}}
-			if st.CapacityKnown && st.UsedBytes <= st.TotalBytes {
+			so := pvecontract.StorageObservation{Name: st.ID, Type: st.Type, Format: st.Format, Active: st.Active,
+				Content: []string{}, Node: n.Name, Shared: st.Shared}
+			if st.Active && st.CapacityKnown && st.UsedBytes <= st.TotalBytes {
 				so.SizeBytes, so.FreeBytes = st.TotalBytes, st.TotalBytes-st.UsedBytes
 			}
 			have := map[string]bool{}
@@ -483,7 +480,7 @@ func readPveStorages(ctx context.Context, remoteID, base string, hc *http.Client
 	out := &pb.PVEStorages{State: pveAvailable}
 	for _, so := range obs {
 		out.Storages = append(out.Storages, &pb.PVEStorage{Name: so.Name, Type: so.Type, Format: so.Format, Content: so.Content,
-			Active: so.Active, SizeBytes: so.SizeBytes, FreeBytes: so.FreeBytes})
+			Active: so.Active, SizeBytes: so.SizeBytes, FreeBytes: so.FreeBytes, Node: so.Node, Shared: so.Shared})
 	}
 	return out
 }
