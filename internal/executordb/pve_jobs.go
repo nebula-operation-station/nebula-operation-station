@@ -46,11 +46,19 @@ var (
 	// ErrPveJobOrder is returned when a step is recorded before the
 	// previous step has succeeded.
 	ErrPveJobOrder = errors.New("executordb: previous pve job step has not succeeded")
+	// ErrPveJobTask is returned when a UPID does not carry the task type
+	// and token user the step expects, so it is not the step's task.
+	ErrPveJobTask = errors.New("executordb: pve task does not belong to the job step")
+	// ErrPveUPIDRecorded is returned when a UPID is already stored for a
+	// step: one task never belongs to two steps.
+	ErrPveUPIDRecorded = errors.New("executordb: pve task id already recorded for a job step")
 
-	pveUPIDRe   = regexp.MustCompile(`^UPID:([A-Za-z0-9][A-Za-z0-9-]{0,62}):[0-9A-F]{8}:[0-9A-F]{8}:([0-9A-F]{8}):([a-z0-9]{1,32}):([A-Za-z0-9._-]{0,64}):[A-Za-z0-9_.@!-]{1,128}:$`)
-	pveHex64Re  = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	pveNodeRe   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,62}$`)
-	pveActionRe = regexp.MustCompile(`^pve\.[a-z0-9_.]{1,60}$`)
+	pveUPIDRe     = regexp.MustCompile(`^UPID:([A-Za-z0-9][A-Za-z0-9-]{0,62}):[0-9A-F]{8}:[0-9A-F]{8}:([0-9A-F]{8}):([a-z0-9]{1,32}):([A-Za-z0-9._-]{0,64}):([A-Za-z0-9_.@!-]{1,128}):$`)
+	pveHex64Re    = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	pveNodeRe     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,62}$`)
+	pveActionRe   = regexp.MustCompile(`^pve\.[a-z0-9_.]{1,60}$`)
+	pveTaskTypeRe = regexp.MustCompile(`^[a-z0-9]{1,32}$`)
+	pveTaskUserRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+![A-Za-z0-9_.-]+$`)
 )
 
 // PveUPID is the parsed form of a PVE task ID.
@@ -59,6 +67,9 @@ type PveUPID struct {
 	StartTime time.Time
 	Type      string
 	ID        string
+	// User is the user or API token (user@realm!token) that started the
+	// task.
+	User string
 }
 
 // ParsePveUPID validates upid, which comes from the PVE remote and is
@@ -75,7 +86,7 @@ func ParsePveUPID(upid string) (PveUPID, bool) {
 	if err != nil {
 		return PveUPID{}, false
 	}
-	return PveUPID{Node: m[1], StartTime: time.Unix(int64(start), 0), Type: m[3], ID: m[4]}, true
+	return PveUPID{Node: m[1], StartTime: time.Unix(int64(start), 0), Type: m[3], ID: m[4], User: m[5]}, true
 }
 
 // PveJob is one durable PVE mutation step.
@@ -91,14 +102,20 @@ type PveJob struct {
 	VMID            uint64
 	// RequestDigest is the hex SHA-256 of the exact request the step sends.
 	RequestDigest string
-	State         string
-	UPID          string
-	TaskNode      string
-	ExitStatus    string
-	CreatedAt     time.Time
-	DispatchedAt  time.Time // zero until the UPID is stored
-	UpdatedAt     time.Time
-	FinishedAt    time.Time // zero until terminal
+	// TaskType is the PVE task type (qmstart, qmclone, ...) the step's
+	// task must have.
+	TaskType string
+	// TaskUser is the action token ID (user@realm!token) the step's task
+	// must have been started by.
+	TaskUser     string
+	State        string
+	UPID         string
+	TaskNode     string
+	ExitStatus   string
+	CreatedAt    time.Time
+	DispatchedAt time.Time // zero until the UPID is stored
+	UpdatedAt    time.Time
+	FinishedAt   time.Time // zero until terminal
 }
 
 func validatePveJob(j PveJob) error {
@@ -115,6 +132,8 @@ func validatePveJob(j PveJob) error {
 		return fmt.Errorf("executordb: %w: pve job remote", ErrInvalid)
 	case !pveNodeRe.MatchString(j.Node) || j.VMID > 9999999999:
 		return fmt.Errorf("executordb: %w: pve job target", ErrInvalid)
+	case !pveTaskTypeRe.MatchString(j.TaskType) || len(j.TaskUser) > 128 || !pveTaskUserRe.MatchString(j.TaskUser):
+		return fmt.Errorf("executordb: %w: pve job task type or user", ErrInvalid)
 	}
 	switch j.Kind {
 	case "qemu", "lxc", "node":
@@ -154,9 +173,9 @@ func (db *DB) CreatePveJobIntent(j PveJob) error {
 		return ErrPveJobOrder
 	}
 	now := db.now().Unix()
-	if _, err := tx.Exec(`INSERT INTO pve_jobs (execution_id, step, digest, action, remote_id, trust_generation, kind, node, vmid, request_digest, state, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'dispatching', ?, ?)`,
-		j.ExecutionID, j.Step, j.Digest, j.Action, j.RemoteID, int64(j.TrustGeneration), j.Kind, j.Node, int64(j.VMID), j.RequestDigest, now, now); err != nil {
+	if _, err := tx.Exec(`INSERT INTO pve_jobs (execution_id, step, digest, action, remote_id, trust_generation, kind, node, vmid, request_digest, task_type, task_user, state, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'dispatching', ?, ?)`,
+		j.ExecutionID, j.Step, j.Digest, j.Action, j.RemoteID, int64(j.TrustGeneration), j.Kind, j.Node, int64(j.VMID), j.RequestDigest, j.TaskType, j.TaskUser, now, now); err != nil {
 		return fmt.Errorf("executordb: create pve job: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -167,21 +186,63 @@ func (db *DB) CreatePveJobIntent(j PveJob) error {
 
 // RecordPveJobUPID stores the UPID returned for a dispatched step (or
 // identified for it during reconciliation) and moves it to running. The
-// UPID is untrusted input: it must be well-formed and name taskNode. A
-// step's UPID is stored once and never replaced.
+// UPID is untrusted input: it must be well-formed, name taskNode and carry
+// the step's task type and token user (ErrPveJobTask otherwise). A step's
+// UPID is stored once and never replaced, and a UPID already stored for
+// any step is refused with ErrPveUPIDRecorded.
 func (db *DB) RecordPveJobUPID(executionID string, step int, upid, taskNode string) error {
 	u, ok := ParsePveUPID(upid)
 	if !ok || u.Node != taskNode {
 		return fmt.Errorf("executordb: %w: pve task id", ErrInvalid)
 	}
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("executordb: record pve upid: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }() // a no-op after Commit
+	var taskType, taskUser string
+	err = tx.QueryRow(`SELECT task_type, task_user FROM pve_jobs WHERE execution_id = ? AND step = ?`, executionID, step).Scan(&taskType, &taskUser)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrPveJobNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("executordb: record pve upid: %w", err)
+	}
+	if u.Type != taskType || u.User != taskUser {
+		return ErrPveJobTask
+	}
+	var used int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM pve_jobs WHERE upid = ?`, upid).Scan(&used); err != nil {
+		return fmt.Errorf("executordb: record pve upid: %w", err)
+	}
+	if used != 0 {
+		return ErrPveUPIDRecorded
+	}
 	now := db.now().Unix()
-	res, err := db.sql.Exec(`UPDATE pve_jobs SET state = 'running', upid = ?, task_node = ?, dispatched_at = ?, updated_at = ?
+	res, err := tx.Exec(`UPDATE pve_jobs SET state = 'running', upid = ?, task_node = ?, dispatched_at = ?, updated_at = ?
 		WHERE execution_id = ? AND step = ? AND state IN ('dispatching', 'reconciling') AND upid IS NULL`,
 		upid, taskNode, now, now, executionID, step)
 	if err != nil {
 		return fmt.Errorf("executordb: record pve upid: %w", err)
 	}
-	return db.pveJobChanged(res, executionID, step)
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("executordb: record pve upid: %w", err)
+	} else if n != 1 {
+		return ErrPveJobState
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("executordb: record pve upid: %w", err)
+	}
+	return nil
+}
+
+// PveUPIDRecorded reports whether upid is already stored for a job step.
+func (db *DB) PveUPIDRecorded(upid string) (bool, error) {
+	var n int
+	if err := db.sql.QueryRow(`SELECT COUNT(*) FROM pve_jobs WHERE upid = ?`, upid).Scan(&n); err != nil {
+		return false, fmt.Errorf("executordb: pve upid recorded: %w", err)
+	}
+	return n != 0, nil
 }
 
 // MarkPveJobReconciling records that the outcome of a step is uncertain
@@ -251,13 +312,13 @@ func (db *DB) pveJobChanged(res sql.Result, executionID string, step int) error 
 	return ErrPveJobState
 }
 
-const pveJobColumns = `execution_id, step, digest, action, remote_id, trust_generation, kind, node, vmid, request_digest, state,
+const pveJobColumns = `execution_id, step, digest, action, remote_id, trust_generation, kind, node, vmid, request_digest, task_type, task_user, state,
 	COALESCE(upid, ''), COALESCE(task_node, ''), exit_status, created_at, COALESCE(dispatched_at, 0), updated_at, COALESCE(finished_at, 0)`
 
 func scanPveJob(r rowScanner) (PveJob, error) {
 	var j PveJob
 	var gen, vmid, created, dispatched, updated, finished int64
-	if err := r.Scan(&j.ExecutionID, &j.Step, &j.Digest, &j.Action, &j.RemoteID, &gen, &j.Kind, &j.Node, &vmid, &j.RequestDigest, &j.State,
+	if err := r.Scan(&j.ExecutionID, &j.Step, &j.Digest, &j.Action, &j.RemoteID, &gen, &j.Kind, &j.Node, &vmid, &j.RequestDigest, &j.TaskType, &j.TaskUser, &j.State,
 		&j.UPID, &j.TaskNode, &j.ExitStatus, &created, &dispatched, &updated, &finished); err != nil {
 		return PveJob{}, err
 	}

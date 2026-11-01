@@ -14,7 +14,67 @@ func testPveJob(step int) PveJob {
 	return PveJob{
 		ExecutionID: "00000000-0000-4000-9000-000000000001", Step: step, Digest: strings.Repeat("a", 64),
 		Action: "pve.guest.start", RemoteID: "pve-lab", TrustGeneration: 3, Kind: "qemu", Node: "pve1", VMID: 101,
-		RequestDigest: strings.Repeat("b", 64),
+		RequestDigest: strings.Repeat("b", 64), TaskType: "qmstart", TaskUser: "nebula@pve!action",
+	}
+}
+
+func TestPveJobUPIDMustBeTheStepsTask(t *testing.T) {
+	cases := map[string]string{
+		"other task type": strings.Replace(testUPID, ":qmstart:", ":vzdump:", 1),
+		"other user":      strings.Replace(testUPID, "nebula@pve!action", "root@pam", 1),
+		"other token":     strings.Replace(testUPID, "nebula@pve!action", "nebula@pve!read", 1),
+	}
+	for name, upid := range cases {
+		t.Run(name, func(t *testing.T) {
+			db := openT(t, privateDir(t))
+			if err := db.CreatePveJobIntent(testPveJob(1)); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.RecordPveJobUPID(testPveJob(1).ExecutionID, 1, upid, "pve1"); !errors.Is(err, ErrPveJobTask) {
+				t.Fatalf("foreign task stored: %v", err)
+			}
+			if j, _, _ := db.PveJob(testPveJob(1).ExecutionID, 1); j.UPID != "" || j.State != PveJobDispatching {
+				t.Fatalf("job: %+v", j)
+			}
+		})
+	}
+}
+
+func TestPveJobUPIDBelongsToOneStep(t *testing.T) {
+	db := openT(t, privateDir(t))
+	id := testPveJob(1).ExecutionID
+	if err := db.CreatePveJobIntent(testPveJob(1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordPveJobUPID(id, 1, testUPID, "pve1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.FinishPveJob(id, 1, PveJobSucceeded, "OK"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreatePveJobIntent(testPveJob(2)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordPveJobUPID(id, 2, testUPID, "pve1"); !errors.Is(err, ErrPveUPIDRecorded) {
+		t.Fatalf("step 1's task stored for step 2: %v", err)
+	}
+	other := testPveJob(1)
+	other.ExecutionID = "00000000-0000-4000-9000-000000000002"
+	if err := db.CreatePveJobIntent(other); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordPveJobUPID(other.ExecutionID, 1, testUPID, "pve1"); !errors.Is(err, ErrPveUPIDRecorded) {
+		t.Fatalf("task stored for another job: %v", err)
+	}
+	if used, err := db.PveUPIDRecorded(testUPID); err != nil || !used {
+		t.Fatalf("recorded: %v %v", used, err)
+	}
+	if used, err := db.PveUPIDRecorded(strings.Replace(testUPID, "000A1B2C", "000A1B2D", 1)); err != nil || used {
+		t.Fatalf("unrecorded: %v %v", used, err)
+	}
+	// The unique index holds even without the check in RecordPveJobUPID.
+	if _, err := db.sql.Exec(`UPDATE pve_jobs SET upid = ?, task_node = 'pve1' WHERE execution_id = ? AND step = 1`, testUPID, other.ExecutionID); err == nil {
+		t.Fatal("unique index allowed a reused UPID")
 	}
 }
 
@@ -173,6 +233,10 @@ func TestPveJobRejectsMalformedIntent(t *testing.T) {
 		"kind":          func(j *PveJob) { j.Kind = "vm" },
 		"node":          func(j *PveJob) { j.Node = "a/b" },
 		"generation":    func(j *PveJob) { j.TrustGeneration = 0 },
+		"no task type":  func(j *PveJob) { j.TaskType = "" },
+		"task type":     func(j *PveJob) { j.TaskType = "qm:start" },
+		"no task user":  func(j *PveJob) { j.TaskUser = "" },
+		"task user":     func(j *PveJob) { j.TaskUser = "root@pam" },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

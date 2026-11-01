@@ -70,7 +70,18 @@ func (f *fakeMutClient) Dispatch(ctx context.Context, _ executordb.PveRemote, no
 	if on != nil {
 		return on(n, node)
 	}
-	return testUPIDAt(node, time.Now(), 101, n), nil
+	return testTaskUPID(node, time.Now(), mutTaskTypes[step.Method], "101", mutActionUser, n), nil
+}
+
+// mutTaskTypes is the fake client's method allowlist and task types.
+var mutTaskTypes = map[string]string{
+	"guest.start": "qmstart", "guest.resize": "qmresize", "guest.config": "qmconfig",
+	"guest.clone": "qmclone", "guest.delete": "qmdestroy", "node.update": "aptupdate",
+}
+
+func (f *fakeMutClient) TaskType(method string) (string, bool) {
+	tt, ok := mutTaskTypes[method]
+	return tt, ok
 }
 
 func (f *fakeMutClient) TaskStatus(ctx context.Context, _ executordb.PveRemote, _, upid string, tok pveapi.TokenSupplier) (PveTaskStatus, error) {
@@ -105,9 +116,20 @@ func (f *fakeMutClient) dispatchCount() int {
 	return len(f.dispatches)
 }
 
-// testUPIDAt is a well-formed UPID for vmid on node started at t.
+// mutActionUser is the token ID of mutActionToken, as PVE writes it into
+// the UPIDs of the tasks it starts.
+const mutActionUser = "nosact@pve!act"
+
+// testUPIDAt is a well-formed qmstart UPID of the action token for vmid on
+// node started at t.
 func testUPIDAt(node string, t time.Time, vmid uint64, seq int) string {
-	return fmt.Sprintf("UPID:%s:%08X:0000ABCD:%08X:qmstart:%d:nosact@pve!act:", node, 0x1000+seq, t.Unix(), vmid)
+	return testTaskUPID(node, t, "qmstart", fmt.Sprint(vmid), mutActionUser, seq)
+}
+
+// testTaskUPID is a well-formed UPID of a task of type typ on id, started
+// by user on node at t.
+func testTaskUPID(node string, t time.Time, typ, id, user string, seq int) string {
+	return fmt.Sprintf("UPID:%s:%08X:0000ABCD:%08X:%s:%s:%s:", node, 0x1000+seq, t.Unix(), typ, id, user)
 }
 
 type pveMutEnv struct {
@@ -247,7 +269,8 @@ func TestPveMutationReadOnlyRemoteIsRefused(t *testing.T) {
 
 func TestPveMutationStoresIntentAndUPIDAroundDispatch(t *testing.T) {
 	e := newPveMutEnv(t, true)
-	req := e.approve(mutRequest("guest.clone", "guest.config", "guest.start"))
+	methods := []string{"guest.clone", "guest.config", "guest.start"}
+	req := e.approve(mutRequest(methods...))
 	var seen []string
 	e.client.onDispatch = func(n int, node string) (string, error) {
 		steps, err := e.pe.db.PveJobSteps(e.execID(req))
@@ -264,7 +287,7 @@ func TestPveMutationStoresIntentAndUPIDAroundDispatch(t *testing.T) {
 				t.Errorf("step %d dispatched before step %d had its UPID and succeeded: %+v", n, prev.Step, prev)
 			}
 		}
-		upid := testUPIDAt(node, time.Now(), 101, n)
+		upid := testTaskUPID(node, time.Now(), mutTaskTypes[methods[n-1]], "101", mutActionUser, n)
 		seen = append(seen, upid)
 		return upid, nil
 	}
@@ -471,7 +494,7 @@ func TestPveMutationRestartBeforeUPIDNeverRedispatches(t *testing.T) {
 	// in dispatching without a UPID.
 	job := executordb.PveJob{ExecutionID: "00000000-0000-4000-a000-777777777777", Step: 1, Digest: strings.Repeat("a", 64),
 		Action: "pve.test.mutation", RemoteID: mutRemote, TrustGeneration: 1, Kind: "qemu", Node: "pve1", VMID: 101,
-		RequestDigest: strings.Repeat("b", 64)}
+		RequestDigest: strings.Repeat("b", 64), TaskType: "qmstart", TaskUser: mutActionUser}
 	if err := e.pe.db.CreatePveJobIntent(job); err != nil {
 		t.Fatal(err)
 	}
@@ -575,5 +598,218 @@ func TestPveMutationPlanComesFromApproval(t *testing.T) {
 	}
 	if e.client.dispatchCount() != 0 {
 		t.Fatal("dispatched")
+	}
+	// A method the client does not allow has no task type to identify.
+	r := mutRequest("guest.start", "guest.unknown")
+	if _, _, err := e.m.ProposalRequest(context.Background(), r, "00000000-0000-4000-a000-888888888889", canonical.RiskMedium, strings.Repeat("c", 64), time.Now().Add(time.Hour)); !errors.Is(err, ErrPveMutationPlan) {
+		t.Fatalf("unknown method: %v", err)
+	}
+}
+
+func nodeRequest(steps ...string) PveMutationRequest {
+	req := mutRequest(steps...)
+	var plan []PveMutationStep
+	for _, s := range steps {
+		plan = append(plan, PveMutationStep{Method: s, Args: json.RawMessage(`{}`)})
+	}
+	req.Parameters, _ = json.Marshal(map[string]any{"steps": plan})
+	req.Kind, req.VMID = permit.ProviderKindNode, 0
+	return req
+}
+
+func TestPveMutationLostResponseNeverAdoptsForeignTask(t *testing.T) {
+	cases := map[string]struct {
+		req    PveMutationRequest
+		lost   int // the step whose response is lost
+		recent func(at time.Time, earlier []string) []string
+	}{
+		"earlier step's task": {mutRequest("guest.start", "guest.resize", "guest.config"), 2,
+			func(_ time.Time, earlier []string) []string { return earlier }},
+		"earlier step's task of the same type": {mutRequest("guest.config", "guest.config", "guest.start"), 2,
+			func(_ time.Time, earlier []string) []string { return earlier }},
+		"foreign backup of the guest": {mutRequest("guest.start"), 1, func(at time.Time, _ []string) []string {
+			return []string{testTaskUPID("pve1", at, "vzdump", "101", "root@pam", 7)}
+		}},
+		"same task type by another user": {mutRequest("guest.start"), 1, func(at time.Time, _ []string) []string {
+			return []string{testTaskUPID("pve1", at, "qmstart", "101", "root@pam", 7)}
+		}},
+		"same task type by the read token": {mutRequest("guest.start"), 1, func(at time.Time, _ []string) []string {
+			return []string{testTaskUPID("pve1", at, "qmstart", "101", "nosread@pve!read", 7)}
+		}},
+		"node target with unrelated node tasks": {nodeRequest("node.update"), 1, func(at time.Time, _ []string) []string {
+			return []string{testTaskUPID("pve1", at, "aptupdate", "", "root@pam", 7), testTaskUPID("pve1", at, "vncproxy", "", mutActionUser, 8)}
+		}},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newPveMutEnv(t, true)
+			req := e.approve(c.req)
+			var earlier []string
+			e.client.onDispatch = func(n int, node string) (string, error) {
+				if n < c.lost {
+					steps, _ := parsePveSteps(c.req.Parameters)
+					upid := testTaskUPID(node, time.Now(), mutTaskTypes[steps[n-1].Method], "101", mutActionUser, n)
+					earlier = append(earlier, upid)
+					return upid, nil
+				}
+				e.client.mu.Lock()
+				e.client.recent = c.recent(time.Now(), earlier)
+				e.client.mu.Unlock()
+				return "", errors.New("connection reset")
+			}
+			res, err := e.m.Run(context.Background(), req)
+			if !errors.Is(err, ErrPveDispatchUncertain) {
+				t.Fatalf("run: %v", err)
+			}
+			if len(res.Steps) != c.lost || res.Steps[c.lost-1].State != executordb.PveJobUnknown || res.Steps[c.lost-1].UPID != "" {
+				t.Fatalf("steps: %+v", res.Steps)
+			}
+			if e.client.dispatchCount() != c.lost {
+				t.Fatalf("a later step was dispatched: %d", e.client.dispatchCount())
+			}
+		})
+	}
+}
+
+func TestPveMutationIdentifiesTaskBeyondManyCandidates(t *testing.T) {
+	e := newPveMutEnv(t, true)
+	req := e.approve(mutRequest("guest.start"))
+	var want string
+	e.client.onDispatch = func(int, string) (string, error) {
+		at := time.Now()
+		var recent []string
+		for i := range 300 {
+			recent = append(recent, testTaskUPID("pve1", at, "vzdump", fmt.Sprint(200+i), "root@pam", 100+i))
+		}
+		want = testUPIDAt("pve1", at, 101, 7)
+		e.client.mu.Lock()
+		e.client.recent = append(recent, want)
+		e.client.mu.Unlock()
+		return "", errors.New("connection reset")
+	}
+	res, err := e.m.Run(context.Background(), req)
+	if err != nil || len(res.Steps) != 1 || res.Steps[0].State != executordb.PveJobSucceeded || res.Steps[0].UPID != want {
+		t.Fatalf("run: %v %+v", err, res.Steps)
+	}
+}
+
+func TestPveMutationReconcileDuringDispatchLeavesStepAlone(t *testing.T) {
+	e := newPveMutEnv(t, true)
+	req := e.approve(mutRequest("guest.start", "guest.config"))
+	e.client.onDispatch = func(n int, node string) (string, error) {
+		// A concurrent reconciliation pass sees the step in dispatching
+		// without a UPID; it must not take it over.
+		if err := e.m.Reconcile(context.Background()); err != nil {
+			t.Errorf("reconcile: %v", err)
+		}
+		steps := []string{"guest.start", "guest.config"}
+		return testTaskUPID(node, time.Now(), mutTaskTypes[steps[n-1]], "101", mutActionUser, n), nil
+	}
+	res, err := e.m.Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(res.Steps) != 2 || res.Steps[0].State != executordb.PveJobSucceeded || res.Steps[1].State != executordb.PveJobSucceeded {
+		t.Fatalf("steps: %+v", res.Steps)
+	}
+	// Once Run returns, its open steps are Reconcile's again.
+	req = e.approve(mutRequest("guest.start"))
+	e.client.onDispatch = nil
+	e.client.status = func(string) (PveTaskStatus, error) { return PveTaskStatus{Running: true}, nil }
+	e.m.MaxWait = 10 * time.Millisecond
+	res, err = e.m.Run(context.Background(), req)
+	if !errors.Is(err, ErrPveStepRunning) {
+		t.Fatalf("run: %v", err)
+	}
+	e.client.status = nil
+	if err := e.m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if j, _, _ := e.pe.db.PveJob(res.ExecutionID, 1); j.State != executordb.PveJobSucceeded {
+		t.Fatalf("job after reconcile: %+v", j)
+	}
+}
+
+func TestPveMutationTaskRecordGoneIsUnknown(t *testing.T) {
+	gone := func(string) (PveTaskStatus, error) {
+		return PveTaskStatus{}, fmt.Errorf("404 no such task: %w", ErrPveTaskNotFound)
+	}
+	t.Run("during run", func(t *testing.T) {
+		e := newPveMutEnv(t, true)
+		req := e.approve(mutRequest("guest.start", "guest.config"))
+		e.client.status = gone
+		res, err := e.m.Run(context.Background(), req)
+		if !errors.Is(err, ErrPveDispatchUncertain) || len(res.Steps) != 1 || res.Steps[0].State != executordb.PveJobUnknown {
+			t.Fatalf("run: %v %+v", err, res.Steps)
+		}
+		if e.client.dispatchCount() != 1 {
+			t.Fatalf("dispatches: %d", e.client.dispatchCount())
+		}
+	})
+	t.Run("during reconcile", func(t *testing.T) {
+		e := newPveMutEnv(t, true)
+		req := e.approve(mutRequest("guest.start"))
+		e.client.status = func(string) (PveTaskStatus, error) { return PveTaskStatus{Running: true}, nil }
+		e.m.MaxWait = 10 * time.Millisecond
+		res, err := e.m.Run(context.Background(), req)
+		if !errors.Is(err, ErrPveStepRunning) {
+			t.Fatalf("run: %v", err)
+		}
+		e.restart()
+		e.client.status = gone
+		if err := e.m.Reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if j, _, _ := e.pe.db.PveJob(res.ExecutionID, 1); j.State != executordb.PveJobUnknown {
+			t.Fatalf("job: %+v", j)
+		}
+		if open, _ := e.pe.db.OpenPveJobs(); len(open) != 0 {
+			t.Fatalf("open: %+v", open)
+		}
+	})
+	t.Run("transient error keeps the step open", func(t *testing.T) {
+		e := newPveMutEnv(t, true)
+		req := e.approve(mutRequest("guest.start"))
+		e.client.status = func(string) (PveTaskStatus, error) { return PveTaskStatus{}, errors.New("unreachable") }
+		e.m.MaxWait = 10 * time.Millisecond
+		res, err := e.m.Run(context.Background(), req)
+		if !errors.Is(err, ErrPveStepRunning) {
+			t.Fatalf("run: %v", err)
+		}
+		e.restart()
+		if err := e.m.Reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if j, _, _ := e.pe.db.PveJob(res.ExecutionID, 1); j.State != executordb.PveJobRunning {
+			t.Fatalf("job: %+v", j)
+		}
+	})
+}
+
+func TestPveMutationWaitUsesInjectedClock(t *testing.T) {
+	e := newPveMutEnv(t, true)
+	req := e.approve(mutRequest("guest.start"))
+	var mu sync.Mutex
+	clock := time.Now()
+	// Every reading of the clock is an hour later, so the wait bound has
+	// passed after the first poll.
+	e.m.Now = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		clock = clock.Add(time.Hour)
+		return clock
+	}
+	e.m.MaxWait = 10 * time.Minute
+	e.client.status = func(string) (PveTaskStatus, error) { return PveTaskStatus{Running: true}, nil }
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := e.m.Run(ctx, req); !errors.Is(err, ErrPveStepRunning) {
+		t.Fatalf("run: %v", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("the wait ignored the injected clock and ran until the context ended")
+	}
+	if n := len(e.client.statusQueried); n != 1 {
+		t.Fatalf("polls: %d", n)
 	}
 }
