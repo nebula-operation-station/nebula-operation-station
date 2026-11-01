@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/schedgrant"
 )
 
 func TestReserveReadRunRejectsInactiveGrant(t *testing.T) {
@@ -479,5 +480,49 @@ func TestReadGrantConcurrentClaimsRespectSharedCeiling(t *testing.T) {
 	}
 	if accepted != budget {
 		t.Fatalf("accepted %d claims, want %d", accepted, budget)
+	}
+}
+
+// Interval rows older than the longest approvable interval are pruned, so
+// per-guest and per-target interval keys cannot grow without bound.
+func TestReserveReadRunPrunesStaleIntervalRows(t *testing.T) {
+	db := openT(t, privateDir(t))
+	if err := db.SaveReadGrant(readGrantDoc(t)); err != nil {
+		t.Fatal(err)
+	}
+	old := t0.Add(-schedgrant.MaxInterval).Unix()
+	for _, action := range []string{"pve.snapshots:100", "pve.snapshots:101"} {
+		if _, err := db.sql.Exec(`INSERT INTO read_action_last (action_id, host_id, last_run) VALUES (?, ?, ?)`, action, "pve:pve-1", old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recent := t0.Add(-time.Minute).Unix()
+	if _, err := db.sql.Exec(`INSERT INTO read_action_last (action_id, host_id, last_run) VALUES (?, ?, ?)`, "pve.snapshots:102", "pve:pve-1", recent); err != nil {
+		t.Fatal(err)
+	}
+	if !db.reserveT(t, readGrantID, "core.facts", "web", t0, 24, 15*time.Minute) {
+		t.Fatal("run denied")
+	}
+	var n int
+	if err := db.sql.QueryRow(`SELECT COUNT(*) FROM read_action_last`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("read_action_last has %d rows, want 2 (the recent one and the new run)", n)
+	}
+	// A recent row still enforces its interval.
+	if db.reserveT(t, readGrantID, "pve.snapshots:102", "pve:pve-1", t0, 24, 15*time.Minute) {
+		t.Fatal("recent interval row was pruned")
+	}
+}
+
+// An interval longer than the retention would outlive its own row.
+func TestReserveReadRunRejectsIntervalAboveRetention(t *testing.T) {
+	db := openT(t, privateDir(t))
+	if err := db.SaveReadGrant(readGrantDoc(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ReserveReadRun(readGrantID, "core.facts", "web", t0, 24, schedgrant.MaxInterval+time.Second); err == nil {
+		t.Fatal("interval above retention accepted")
 	}
 }

@@ -234,6 +234,12 @@ func parseReadGrant(raw []byte, now time.Time, stored bool) (ReadGrantDoc, []byt
 		}
 		return d, canon, digest, nil
 	}
+	if d.Grant == ReadGrantFormat && d.RateProfile == ProviderTelemetryProfile {
+		if err := validateProviderTelemetryGrant(d); err != nil {
+			return fail("%v", err)
+		}
+		return d, canon, digest, nil
+	}
 	if len(d.ProviderTargets) != 0 {
 		return fail("only provider grants bind provider targets")
 	}
@@ -280,7 +286,7 @@ func parseReadGrant(raw []byte, now time.Time, stored bool) (ReadGrantDoc, []byt
 	}
 	if d.Grant == ReadGrantFormat {
 		if d.RateProfile != schedgrant.OrdinaryReadProfile && d.RateProfile != schedgrant.TelemetryReadProfile {
-			return fail("rate_profile must be ordinary, telemetry or provider")
+			return fail("rate_profile must be ordinary, telemetry, provider or provider_telemetry")
 		}
 		if len(d.Credentials) != len(d.Targets) {
 			return fail("each frozen target needs one credential binding")
@@ -549,6 +555,7 @@ func cloneReadGrantDoc(doc ReadGrantDoc) ReadGrantDoc {
 	doc.ProviderTargets = slices.Clone(doc.ProviderTargets)
 	for i := range doc.ProviderTargets {
 		doc.ProviderTargets[i].Methods = slices.Clone(doc.ProviderTargets[i].Methods)
+		doc.ProviderTargets[i].MetricsTargets = slices.Clone(doc.ProviderTargets[i].MetricsTargets)
 	}
 	return doc
 }

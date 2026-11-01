@@ -68,6 +68,10 @@ type ProviderTarget struct {
 	TrustGeneration   uint64   `json:"trust_generation"`
 	CredentialVersion int64    `json:"credential_version"`
 	Methods           []string `json:"methods"`
+	// MetricsTargets binds the exact metrics targets of a provider
+	// telemetry grant (ProviderTelemetryProfile); other provider grants
+	// leave it empty.
+	MetricsTargets []ProviderMetricsTarget `json:"metrics_targets,omitempty"`
 }
 
 // ProviderTarget returns the frozen provider target for remoteID.
@@ -108,6 +112,8 @@ func validateProviderGrant(d ReadGrantDoc) error {
 			return fmt.Errorf("remote %s: credential_version out of range", t.RemoteID)
 		case len(t.Methods) == 0 || len(t.Methods) > len(providerMethods):
 			return fmt.Errorf("remote %s: 1 to %d methods", t.RemoteID, len(providerMethods))
+		case len(t.MetricsTargets) != 0:
+			return fmt.Errorf("remote %s: only provider telemetry grants bind metrics targets", t.RemoteID)
 		}
 		seen[t.RemoteID] = true
 		methods := map[string]bool{}
@@ -183,8 +189,12 @@ type ProviderClaim struct {
 	// GrantID names the grant whose budget paid for the read.
 	GrantID   string
 	authority *Authority
-	read      ProviderRead
-	epoch     uint64
+	// profile and covers are the rate profile and the exact-scope test of
+	// the reserved read; Check re-applies them to the paying grant.
+	profile  string
+	remoteID string
+	covers   func(ProviderTarget) bool
+	epoch    uint64
 }
 
 // AuthorizeProviderRead finds an active provider grant that covers r and
@@ -198,6 +208,39 @@ func (a *Authority) AuthorizeProviderRead(r ProviderRead) (ProviderClaim, error)
 	if !validProviderRead(r) {
 		return ProviderClaim{}, fail(CodeLeaseInvalid, "malformed provider read")
 	}
+	return a.authorizeProvider(providerAuth{
+		profile: ProviderReadProfile, remoteID: r.RemoteID, label: r.Method, actionKey: providerActionKey(r),
+		budgetKey: providerBudgetKey(r.RemoteID),
+		listed:    func(t ProviderTarget, _ ReadGrantDoc) bool { return slices.Contains(t.Methods, r.Method) },
+		covers:    func(t ProviderTarget) bool { return t.covers(r) },
+		interval: func(d ReadGrantDoc) time.Duration {
+			return time.Duration(d.MinIntervalS) * time.Second
+		},
+		notCovered: "no active provider grant covers this remote and method",
+	})
+}
+
+// providerAuth describes one provider reservation for authorizeProvider.
+type providerAuth struct {
+	profile  string
+	remoteID string
+	// label names the work in audit events (method or metrics target).
+	label     string
+	actionKey string
+	// budgetKey names the rolling-hour counter the read spends.
+	budgetKey string
+	// listed reports whether a grant's target names this work at all;
+	// covers additionally requires the exact frozen identity.
+	listed     func(ProviderTarget, ReadGrantDoc) bool
+	covers     func(ProviderTarget) bool
+	interval   func(ReadGrantDoc) time.Duration
+	notCovered string
+}
+
+// authorizeProvider finds the active grants of p.profile that cover the
+// work and durably reserves one request of the per-remote budget and the
+// per-work interval from the first one with room left.
+func (a *Authority) authorizeProvider(p providerAuth) (ProviderClaim, error) {
 	a.mu.Lock()
 	epoch, paused := a.readEpoch, a.readPaused
 	a.mu.Unlock()
@@ -209,11 +252,11 @@ func (a *Authority) AuthorizeProviderRead(r ProviderRead) (ProviderClaim, error)
 	}
 	now, err := a.leases.ReadGrantClock(a.now())
 	if err != nil {
-		return ProviderClaim{}, a.storageFailure("provider:"+r.RemoteID, err)
+		return ProviderClaim{}, a.storageFailure("provider:"+p.remoteID, err)
 	}
 	grants, err := a.leases.ReadGrants()
 	if err != nil {
-		return ProviderClaim{}, a.storageFailure("provider:"+r.RemoteID, err)
+		return ProviderClaim{}, a.storageFailure("provider:"+p.remoteID, err)
 	}
 	slices.SortFunc(grants, func(x, y StoredReadGrant) int {
 		switch {
@@ -225,7 +268,7 @@ func (a *Authority) AuthorizeProviderRead(r ProviderRead) (ProviderClaim, error)
 		return 0
 	})
 	deny := func(code Code, detail string) error {
-		a.emit(Event{Kind: "denied", Digest: "provider:" + r.RemoteID, Code: code, Detail: r.Method + ": " + detail})
+		a.emit(Event{Kind: "denied", Digest: "provider:" + p.remoteID, Code: code, Detail: p.label + ": " + detail})
 		return &Error{Code: code, Detail: detail}
 	}
 	type candidate struct {
@@ -242,14 +285,14 @@ func (a *Authority) AuthorizeProviderRead(r ProviderRead) (ProviderClaim, error)
 		if err != nil || digest != g.Digest || doc.ID != g.ID || doc.ExpiryUnix != g.ExpiresAt.Unix() {
 			return ProviderClaim{}, a.storageFailure("readgrant:"+g.ID, fmt.Errorf("stored read grant does not verify: %v", err))
 		}
-		if doc.RateProfile != ProviderReadProfile {
+		if doc.RateProfile != p.profile {
 			continue
 		}
-		t, ok := doc.ProviderTarget(r.RemoteID)
-		if !ok || !slices.Contains(t.Methods, r.Method) {
+		t, ok := doc.ProviderTarget(p.remoteID)
+		if !ok || !p.listed(t, doc) {
 			continue
 		}
-		if !t.covers(r) {
+		if !p.covers(t) {
 			stale = true
 			continue
 		}
@@ -259,12 +302,11 @@ func (a *Authority) AuthorizeProviderRead(r ProviderRead) (ProviderClaim, error)
 		if stale {
 			return ProviderClaim{}, deny(CodeLeaseNotCovered, "the remote's trust or credential changed; the provider grant needs replacement")
 		}
-		return ProviderClaim{}, deny(CodeLeaseNotCovered, "no active provider grant covers this remote and method")
+		return ProviderClaim{}, deny(CodeLeaseNotCovered, p.notCovered)
 	}
 	budgetDenied := false
 	for _, c := range candidates {
-		interval := time.Duration(c.doc.MinIntervalS) * time.Second
-		reserved, err := a.leases.ReserveReadRun(c.id, providerActionKey(r), providerBudgetKey(r.RemoteID), a.now(), int(c.doc.RunBudget), interval)
+		reserved, err := a.leases.ReserveReadRun(c.id, p.actionKey, p.budgetKey, a.now(), int(c.doc.RunBudget), p.interval(c.doc))
 		if errors.Is(err, ErrReadGrantInactive) {
 			continue
 		}
@@ -275,8 +317,8 @@ func (a *Authority) AuthorizeProviderRead(r ProviderRead) (ProviderClaim, error)
 			budgetDenied = true
 			continue
 		}
-		a.emit(Event{Kind: "authorized", Digest: "readgrant:" + c.id, Detail: fmt.Sprintf("provider %s %s budget_claimed", r.RemoteID, r.Method)})
-		return ProviderClaim{GrantID: c.id, authority: a, read: r, epoch: epoch}, nil
+		a.emit(Event{Kind: "authorized", Digest: "readgrant:" + c.id, Detail: fmt.Sprintf("provider %s %s budget_claimed", p.remoteID, p.label)})
+		return ProviderClaim{GrantID: c.id, authority: a, profile: p.profile, remoteID: p.remoteID, covers: p.covers, epoch: epoch}, nil
 	}
 	if budgetDenied {
 		return ProviderClaim{}, deny(CodeLeaseBudget, "provider interval or rolling-hour request budget exhausted")
@@ -291,7 +333,7 @@ func (a *Authority) AuthorizeProviderRead(r ProviderRead) (ProviderClaim, error)
 // returning the result; it is serialized with Lock and revocation.
 func (c ProviderClaim) Check() error {
 	a := c.authority
-	if a == nil {
+	if a == nil || c.covers == nil {
 		return fail(CodeLeaseInactive, "no reserved provider read")
 	}
 	a.mu.Lock()
@@ -317,8 +359,8 @@ func (c ProviderClaim) Check() error {
 	if err != nil || digest != g.Digest || doc.ID != g.ID {
 		return a.storageFailure("readgrant:"+c.GrantID, fmt.Errorf("stored read grant does not verify: %v", err))
 	}
-	t, ok := doc.ProviderTarget(c.read.RemoteID)
-	if doc.RateProfile != ProviderReadProfile || !ok || !t.covers(c.read) {
+	t, ok := doc.ProviderTarget(c.remoteID)
+	if doc.RateProfile != c.profile || !ok || !c.covers(t) {
 		return fail(CodeLeaseNotCovered, "the provider grant no longer covers this read")
 	}
 	return nil
@@ -343,7 +385,7 @@ func (a *Authority) RevokeProviderGrants(remoteID, who string) (int, error) {
 			continue
 		}
 		doc, _, err := readGrantScope(g)
-		if err != nil || doc.RateProfile != ProviderReadProfile {
+		if err != nil || (doc.RateProfile != ProviderReadProfile && doc.RateProfile != ProviderTelemetryProfile) {
 			continue
 		}
 		if _, ok := doc.ProviderTarget(remoteID); !ok {

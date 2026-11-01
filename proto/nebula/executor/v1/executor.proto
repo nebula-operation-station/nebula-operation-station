@@ -1598,6 +1598,20 @@ message PVEReadGuestParams {
   uint64 vmid = 1;
 }
 
+// PVEReadMetricsParams names one exact metrics target of METRICS (spec 17
+// "SSH/provider telemetry leases"): the node itself (kind "node", vmid 0,
+// generation 0) or one QEMU/LXC guest on that node with its local guest
+// generation. A provider telemetry grant must list exactly this target.
+// live selects the 10-second on-demand path (a visible chart or details
+// page); otherwise the read is a 5-minute scheduled history sample.
+message PVEReadMetricsParams {
+  string node = 1;
+  string kind = 2;
+  uint64 vmid = 3;
+  uint64 generation = 4;
+  bool live = 5;
+}
+
 // ReadPVERequest is one typed read. Exactly the parameter shape the method
 // accepts may be set (see executor.ValidateReadPVERequest).
 message ReadPVERequest {
@@ -1606,6 +1620,7 @@ message ReadPVERequest {
   oneof params {
     PVEReadNodeParams node = 3;
     PVEReadGuestParams guest = 4;
+    PVEReadMetricsParams metrics = 5;
   }
 }
 
@@ -1830,14 +1845,19 @@ message PVEBackupEvidence {
   string verified = 7;
 }
 
-// PVEMetrics is one bounded metrics read (guest; vmid 0 in the request
-// means node scope). Metric names and units are fixed by the executor;
-// values are normalized (ADR 0006, P1-21).
+// PVEMetrics is one bounded current-status metrics sample of the requested
+// target (vmid 0: the node). Metric names and units are fixed by the
+// executor; values are normalized (ADR 0006, P1-21). A metric PVE did not
+// report is absent, never zero. status is the raw-checked PVE status
+// mapped to a fixed set.
 message PVEMetrics {
   PVEDatasetState state = 1;
   string reason = 2;
   uint64 vmid = 3;
   repeated PVEMetric metrics = 4;
+  string node = 5;
+  string kind = 6;
+  string status = 7;
 }
 
 message PVEMetric {
