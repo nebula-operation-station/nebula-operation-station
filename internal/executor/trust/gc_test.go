@@ -65,3 +65,30 @@ func TestAdmitPinnedKeepsVersion(t *testing.T) {
 		t.Fatalf("with pin, docker@1.0.0 should be kept, got %v", res2.Collected)
 	}
 }
+
+// TestForwardClockJumpSkipsCollection: an implausible forward wall-clock
+// jump (uncertain clock) must not make bytes eligible for early deletion
+// (spec 10, "a detected backward/uncertain clock must not make bytes
+// eligible for early deletion").
+func TestForwardClockJumpSkipsCollection(t *testing.T) {
+	e := newEnv(t)
+	e.admit(e.candidate("1.0.0", docker("1.0.0", "echo 1"), coreMod("1.0.0")))
+	e.now = e.now.Add(24 * time.Hour)
+	e.admit(e.candidate("1.1.0", docker("1.1.0", "echo 1"), coreMod("1.0.0")))
+	e.now = e.now.Add(24 * time.Hour)
+	e.admit(e.candidate("1.2.0", docker("1.2.0", "echo 1"), coreMod("1.0.0")))
+	// Implausible forward jump: 800 days past the high-water (t0+2d).
+	e.now = e.now.Add(800 * 24 * time.Hour)
+	c := e.candidate("1.3.0", docker("1.3.0", "echo 1"), coreMod("1.0.0"))
+	r, err := e.s.Review(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.s.Admit(c, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Collected) != 0 {
+		t.Fatalf("uncertain clock: collection must be skipped, got %v", res.Collected)
+	}
+}

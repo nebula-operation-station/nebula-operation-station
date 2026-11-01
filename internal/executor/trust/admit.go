@@ -127,7 +127,7 @@ func (s *Store) admit(in release.Candidate, reviewed Review, pinned map[string]b
 	// predecessors never block an admission; protected history (two most
 	// recent predecessors, 90-day floors) is never counted as freed.
 	// Collected objects are deleted only after the index is committed.
-	if !s.clockBackward() {
+	if !s.clockBackward() && !s.clockForward() {
 		res.Collected = collect(&x, now, pinned)
 	}
 	// Reserve the worst case before changing anything.
