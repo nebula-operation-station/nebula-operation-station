@@ -393,8 +393,12 @@ type TaskObservation struct {
 }
 
 var (
-	slugRe           = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
-	volumeRe         = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,254}(?::[a-z0-9][a-z0-9._-]{0,254})?$`)
+	slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	// volumeRe is a PVE volume ID: storage[:name], where the name may carry
+	// one directory component (dir storages: "100/vm-100-disk-0.qcow2",
+	// "iso/debian-12.iso") and keeps PVE's case. Components start with an
+	// alphanumeric, so "." and ".." components cannot occur.
+	volumeRe         = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,254}(?::[A-Za-z0-9][A-Za-z0-9._+-]{0,254}(?:/[A-Za-z0-9][A-Za-z0-9._+-]{0,254})?)?$`)
 	macRe            = regexp.MustCompile(`^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$`)
 	uuidRe           = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	versionRe        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`)
@@ -680,7 +684,7 @@ func validateGuestConfig(where string, c GuestConfig, add func(format string, ar
 		if !slugRe.MatchString(d.Storage) {
 			add("%s: disks[%d]: storage %q is malformed", where, i, d.Storage)
 		}
-		if !volumeRe.MatchString(d.Volume) {
+		if len(d.Volume) > MaxVolumeBytes || !volumeRe.MatchString(d.Volume) {
 			add("%s: disks[%d]: volume %q is malformed", where, i, d.Volume)
 		}
 		if _, dup := seenVol[d.Volume]; dup {

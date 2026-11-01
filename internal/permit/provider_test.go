@@ -282,3 +282,54 @@ func TestProviderReadRecoveryAndStorageFailClosed(t *testing.T) {
 		t.Fatal("tampered grant authorized a read")
 	}
 }
+
+// Per-guest methods keep one interval per guest, so a collection cycle can
+// read every guest once, while all of them spend the one remote budget.
+func TestProviderGuestReadIntervalIsPerGuest(t *testing.T) {
+	e, _ := newLeaseEnv(t, ModeStandard)
+	doc := providerDocAt(e.clk.Now(), rgID, 4)
+	doc.ProviderTargets[0].Methods = []string{ProviderMethodSnapshots}
+	approveReadGrant(t, e, readGrantRaw(t, doc))
+	guest := func(vmid uint64) ProviderRead {
+		r := providerRead(ProviderMethodSnapshots)
+		r.VMID = vmid
+		return r
+	}
+	for _, vmid := range []uint64{100, 101} {
+		if _, err := e.auth.AuthorizeProviderRead(guest(vmid)); err != nil {
+			t.Fatalf("guest %d: %v", vmid, err)
+		}
+	}
+	// Budget is left (2 of 4), so this denial is the guest's own interval.
+	_, err := e.auth.AuthorizeProviderRead(guest(100))
+	wantCode(t, err, CodeLeaseBudget)
+	e.clk.Add(time.Minute)
+	if _, err := e.auth.AuthorizeProviderRead(guest(100)); err != nil {
+		t.Fatalf("guest 100 after its interval: %v", err)
+	}
+	if _, err := e.auth.AuthorizeProviderRead(guest(102)); err != nil {
+		t.Fatal(err)
+	}
+	// All guests spend the one remote budget of 4.
+	_, err = e.auth.AuthorizeProviderRead(guest(103))
+	wantCode(t, err, CodeLeaseBudget)
+}
+
+func TestProviderReadRejectsMisplacedVMID(t *testing.T) {
+	e, _ := newLeaseEnv(t, ModeStandard)
+	doc := providerDocAt(e.clk.Now(), rgID, 240)
+	doc.ProviderTargets[0].Methods = []string{ProviderMethodNodes, ProviderMethodGuestConfig}
+	approveReadGrant(t, e, readGrantRaw(t, doc))
+	for name, r := range map[string]ProviderRead{
+		"guest method without vmid": providerRead(ProviderMethodGuestConfig),
+		"remote method with vmid":   func() ProviderRead { r := providerRead(ProviderMethodNodes); r.VMID = 100; return r }(),
+		"vmid below range":          func() ProviderRead { r := providerRead(ProviderMethodGuestConfig); r.VMID = 99; return r }(),
+		"vmid above contract range": func() ProviderRead { r := providerRead(ProviderMethodGuestConfig); r.VMID = 1e10; return r }(),
+	} {
+		_, err := e.auth.AuthorizeProviderRead(r)
+		if err == nil {
+			t.Fatalf("%s: authorized", name)
+		}
+		wantCode(t, err, CodeLeaseInvalid)
+	}
+}
