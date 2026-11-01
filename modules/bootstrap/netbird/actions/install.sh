@@ -40,8 +40,11 @@ if netbird status 2>/dev/null | grep -q 'connected'; then
   joined=no
 else
   # The setup key is one-time and is read from the vault file at the
-  # last moment; it never appears in a log or result.
-  netbird up --key "$(head -n 1 "$NEBULA_SECRET_SETUP_KEY")" --server "$server" --hostname "$hostname"
+  # last moment; it never appears in a log or result. It is passed in the
+  # environment (NB_SETUP_KEY, readable only by root via /proc/<pid>/environ),
+  # never on the command line, where every local user could see it in ps.
+  NB_SETUP_KEY=$(head -n 1 "$NEBULA_SECRET_SETUP_KEY") \
+    netbird up --server "$server" --hostname "$hostname"
   joined=yes
 fi
 emit true action install joined "$joined"

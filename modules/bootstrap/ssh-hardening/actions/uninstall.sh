@@ -22,6 +22,7 @@ emit() {
   } > "$NEBULA_RESULT"
 }
 
+dropin=/etc/ssh/sshd_config.d/90-nebula-hardening.conf
 removed=no
 if [ -f "$dropin" ]; then
   rm -f "$dropin"
