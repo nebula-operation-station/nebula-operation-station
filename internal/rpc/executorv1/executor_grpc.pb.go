@@ -401,8 +401,12 @@ type ExecutorServiceClient interface {
 	// poll requests to the spool and the pve-collector schedules the reads.
 	// There is no generic HTTP proxy and no method reveals secrets. The
 	// executor validates remote_id, method and parameter shape and returns
-	// InvalidArgument for malformed requests; until the pveapi wiring lands
-	// (P1-07) it answers Unimplemented for valid requests.
+	// InvalidArgument for malformed requests. Each read needs an active
+	// provider read grant (read-grant-v2, rate_profile "provider", ADR 0007
+	// E08) naming the remote's current trust pin, trust generation and read
+	// credential version and the method; it spends that grant's per-method
+	// interval and per-remote request budget. NODES, GUESTS, STORAGE and
+	// CLUSTER are wired; the other methods answer Unimplemented.
 	ReadPVE(ctx context.Context, in *ReadPVERequest, opts ...grpc.CallOption) (*ReadPVEResponse, error)
 }
 
@@ -1566,8 +1570,12 @@ type ExecutorServiceServer interface {
 	// poll requests to the spool and the pve-collector schedules the reads.
 	// There is no generic HTTP proxy and no method reveals secrets. The
 	// executor validates remote_id, method and parameter shape and returns
-	// InvalidArgument for malformed requests; until the pveapi wiring lands
-	// (P1-07) it answers Unimplemented for valid requests.
+	// InvalidArgument for malformed requests. Each read needs an active
+	// provider read grant (read-grant-v2, rate_profile "provider", ADR 0007
+	// E08) naming the remote's current trust pin, trust generation and read
+	// credential version and the method; it spends that grant's per-method
+	// interval and per-remote request budget. NODES, GUESTS, STORAGE and
+	// CLUSTER are wired; the other methods answer Unimplemented.
 	ReadPVE(context.Context, *ReadPVERequest) (*ReadPVEResponse, error)
 	mustEmbedUnimplementedExecutorServiceServer()
 }

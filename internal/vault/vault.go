@@ -365,10 +365,18 @@ func (v *Vault) PutWithCommit(id string, value []byte, by string, commit func(ex
 // Open decrypts secret id. It is for the executor's own use; no RPC
 // returns its result.
 func (v *Vault) Open(id string) ([]byte, error) {
+	out, _, err := v.OpenVersion(id)
+	return out, err
+}
+
+// OpenVersion decrypts secret id and returns the version it decrypted, so
+// a caller bound to an exact credential version can compare atomically.
+func (v *Vault) OpenVersion(id string) ([]byte, int64, error) {
 	if !idRe.MatchString(id) {
-		return nil, ErrInvalidID
+		return nil, 0, ErrInvalidID
 	}
 	var out []byte
+	var version int64
 	err := v.unlocked(func(master []byte) error {
 		s, err := v.store.GetSecret(id)
 		if errors.Is(err, executordb.ErrNoSecret) {
@@ -386,9 +394,13 @@ func (v *Vault) Open(id string) ([]byte, error) {
 		if err != nil {
 			return ErrCorrupt
 		}
+		version = s.Version
 		return nil
 	})
-	return out, err
+	if err != nil {
+		return nil, 0, err
+	}
+	return out, version, nil
 }
 
 // List returns the stored secrets without values. It works while locked:

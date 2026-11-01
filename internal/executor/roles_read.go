@@ -16,6 +16,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
@@ -108,6 +109,16 @@ func (s *Service) ProposeReadGrant(_ context.Context, req *pb.ProposeReadGrantRe
 		}
 		if !ok || pin.Fingerprint != target.HostKeyFingerprint || pin.Blocked != nil {
 			return nil, status.Error(codes.InvalidArgument, "read grant: target is not pinned with the approved key or is blocked")
+		}
+	}
+	for _, target := range doc.ProviderTargets {
+		rm, ok, err := s.db.GetRemote(target.RemoteID)
+		if err != nil {
+			return nil, s.adminStoreError("read grant", err)
+		}
+		if !ok || rm.State != executordb.StateActive || rm.TrustPin != target.TrustPin || rm.TrustGeneration != target.TrustGeneration ||
+			rm.Credentials.ReadVersion != target.CredentialVersion {
+			return nil, status.Error(codes.InvalidArgument, "read grant: remote is not active with the approved trust and credential version")
 		}
 	}
 	pg, err := s.auth.ProposeReadGrant(req.GetGrantJson())

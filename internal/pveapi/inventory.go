@@ -37,11 +37,20 @@ func validateVMID(vmid int) error {
 	return nil
 }
 
+// maxNodeCPUs bounds the reported CPU count of one node.
+const maxNodeCPUs = 4096
+
 // Node is one cluster node as reported by /nodes.
 type Node struct {
 	Name   string
 	Status string // "online", "offline", "maintenance"
 	Type   string // "pve"
+	// MaxCPU, MaxMemory, Memory and UptimeSeconds are the node's reported
+	// capacity and usage; 0 means not reported (for example offline).
+	MaxCPU        int
+	MaxMemory     uint64
+	Memory        uint64
+	UptimeSeconds uint64
 }
 
 // Guest is one QEMU or LXC guest as reported by the node list endpoints.
@@ -98,9 +107,13 @@ func (c *Client) ListNodes(ctx context.Context) ([]Node, error) {
 		return nil, err
 	}
 	var raw []struct {
-		Node   string `json:"node"`
-		Status string `json:"status"`
-		Type   string `json:"type"`
+		Node   string  `json:"node"`
+		Status string  `json:"status"`
+		Type   string  `json:"type"`
+		MaxCPU *int    `json:"maxcpu"`
+		MaxMem *uint64 `json:"maxmem"`
+		Mem    *uint64 `json:"mem"`
+		Uptime *uint64 `json:"uptime"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("pveapi: decode /nodes: %w", err)
@@ -116,11 +129,27 @@ func (c *Client) ListNodes(ctx context.Context) ([]Node, error) {
 		if err := validateNodeName(n.Node); err != nil {
 			return nil, err
 		}
-		nodes = append(nodes, Node{
+		nd := Node{
 			Name:   n.Node,
 			Status: sanitizeText(n.Status, 64),
 			Type:   sanitizeText(n.Type, 32),
-		})
+		}
+		if n.MaxCPU != nil {
+			if *n.MaxCPU < 0 || *n.MaxCPU > maxNodeCPUs {
+				return nil, fmt.Errorf("pveapi: /nodes: maxcpu out of range")
+			}
+			nd.MaxCPU = *n.MaxCPU
+		}
+		if n.MaxMem != nil {
+			nd.MaxMemory = *n.MaxMem
+		}
+		if n.Mem != nil {
+			nd.Memory = *n.Mem
+		}
+		if n.Uptime != nil {
+			nd.UptimeSeconds = *n.Uptime
+		}
+		nodes = append(nodes, nd)
 	}
 	return nodes, nil
 }

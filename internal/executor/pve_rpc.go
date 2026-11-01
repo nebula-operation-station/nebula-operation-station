@@ -26,7 +26,11 @@ const pveRepinAction = "nebula.pve.repin"
 var pveRepinArtifact = []byte("nebula.pve.repin 1.0.0\nReplace the approved remote trust fingerprint and invalidate dependent authority.\n")
 
 func (s *Service) pveAdmin() *PveAdmin {
-	return &PveAdmin{DB: s.db, Vault: s.vault, Now: s.clock, Log: s.log, AuthorizeRepin: s.authorizePVERepin}
+	return &PveAdmin{DB: s.db, Vault: s.vault, Now: s.clock, Log: s.log, AuthorizeRepin: s.authorizePVERepin,
+		RevokeGrants: func(remoteID, reason string) error {
+			_, err := s.auth.RevokeProviderGrants(remoteID, reason)
+			return err
+		}}
 }
 
 func pveAdminProto(r executordb.PveRemote) *pb.PVEAdminRemote {
