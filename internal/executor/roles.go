@@ -96,17 +96,17 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_ApproveReadGrantCLI_FullMethodName:       {admin},
 		pb.ExecutorService_ListReadGrants_FullMethodName:            {server, admin},
 		pb.ExecutorService_RevokeReadGrant_FullMethodName:           {server, admin},
-		pb.ExecutorService_RunReadGrant_FullMethodName: {server},
+		pb.ExecutorService_RunReadGrant_FullMethodName:              {server},
 		// Batch read grants (ADR 0007, E19b). The server proposes and relays a
 		// user-verified assertion; only the admin reviews and approves. The
 		// server can never approve a batch.
-		pb.ExecutorService_ProposeBatch_FullMethodName:     {server},
-		pb.ExecutorService_CommitBatch_FullMethodName:      {server},
-		pb.ExecutorService_ReviewBatch_FullMethodName:      {admin},
-		pb.ExecutorService_ApproveBatchCLI_FullMethodName:  {admin},
-		pb.ExecutorService_GetBatchStatus_FullMethodName:   {server, admin},
-		pb.ExecutorService_ListEvents_FullMethodName:       {server, admin},
-		pb.ExecutorService_BackupExecutor_FullMethodName:            {admin},
+		pb.ExecutorService_ProposeBatch_FullMethodName:    {server},
+		pb.ExecutorService_CommitBatch_FullMethodName:     {server},
+		pb.ExecutorService_ReviewBatch_FullMethodName:     {admin},
+		pb.ExecutorService_ApproveBatchCLI_FullMethodName: {admin},
+		pb.ExecutorService_GetBatchStatus_FullMethodName:  {server, admin},
+		pb.ExecutorService_ListEvents_FullMethodName:      {server, admin},
+		pb.ExecutorService_BackupExecutor_FullMethodName:  {admin},
 		// PVE provider reads (ADR 0006, P1-05). The entries are final:
 		// pve-collector may call ONLY these two methods; server may list the
 		// remotes (metadata); admin may call both. The server never calls
