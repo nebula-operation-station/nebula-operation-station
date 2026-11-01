@@ -292,6 +292,9 @@ type Authority struct {
 	readGrants map[string]*pendingReadGrant
 	readEpoch  uint64 // incremented on lock; queued reads retain their original epoch
 	readPaused bool   // only explicit local credential unlock resumes dispatch
+	// lockEpoch is incremented on lock; a provider mutation claim made
+	// before a lock is void (MutationClaim.Check).
+	lockEpoch uint64
 	// trusts holds browser trust requests until their assertion (M7-4).
 	trusts map[string]*PendingTrust
 
@@ -863,6 +866,7 @@ func (a *Authority) Lock(who string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.readEpoch++
+	a.lockEpoch++
 	a.readPaused = true
 	a.sessionTill = time.Time{}
 	a.sessChal, a.sessChalExp = nil, time.Time{}
