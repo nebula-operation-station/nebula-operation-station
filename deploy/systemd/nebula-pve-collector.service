@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Reference unit for nebula-pve-collector (ADR 0006, P1-14). The collector
+# polls the executor over the shared Unix socket for PVE remote inventory
+# (ListPVERemotes) and read results (ReadPVE), and writes the observations
+# to the spool under /var/lib/nebula/pve, which the server imports.
+#
+# It runs as its own system user (nebula-pve-collector) with the
+# pve-collector peercred role, and is locked down harder than the executor
+# and server: no capabilities, and no network at all (AF_UNIX only, for the
+# executor socket). It never mounts or reads the executor's database — the
+# spool is its only writable path, and it only gets what the pve-collector
+# role allows.
+[Unit]
+Description=Nebula Operation Station Proxmox PVE collector
+Documentation=https://github.com/nebula-operation-station/nebula-operation-station/tree/main/docs
+After=nebula-executor.service
+Wants=nebula-executor.service
+
+[Service]
+Type=simple
+User=nebula-pve-collector
+Group=nebula-pve-collector
+# nebula-rpc: connect to /run/nebula/executor.sock (SO_PEERCRED, group rw).
+SupplementaryGroups=nebula-rpc
+ExecStart=/usr/bin/nebula-pve-collector \
+  -socket /run/nebula/executor.sock \
+  -executor-user nebula-executor \
+  -spool /var/lib/nebula/pve \
+  -interval 1m
+Restart=on-failure
+UMask=0077
+
+# Hardening
+LimitCORE=0
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Unix socket for the executor RPC only. No AF_INET/AF_INET6: the collector
+# has no network listener and no outbound network (ADR 0006).
+RestrictAddressFamilies=AF_UNIX
+# The spool is the only writable path; the executor socket is reached
+# read-only through the nebula-rpc group.
+ReadWritePaths=/var/lib/nebula/pve
+
+[Install]
+WantedBy=multi-user.target
