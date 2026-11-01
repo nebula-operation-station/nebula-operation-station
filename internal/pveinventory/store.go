@@ -84,8 +84,9 @@ const (
 	MaxGuestsQuery = 1000
 	// MaxNodesQuery bounds ListNodes.
 	MaxNodesQuery = 1000
-	// MaxStoragesQuery bounds ListStorages.
-	MaxStoragesQuery = 64
+	// MaxStoragesQuery bounds ListStorages (per-node reports; vorher 64
+	// distinct storages).
+	MaxStoragesQuery = pvecontract.MaxStorageReportsPerRemote
 	// MaxTasksQuery bounds ListTasks.
 	MaxTasksQuery = 1000
 	// MaxSnapshotsQuery bounds ListSnapshots.
@@ -274,14 +275,19 @@ type BackupObservation struct {
 	CollectionGeneration uint64
 }
 
-// Storage is one stored PVE storage.
+// Storage is one stored PVE storage as reported by one node.
 type Storage struct {
-	RemoteID             string
-	Name                 string
-	Type                 string
-	Format               string
-	Content              []string
-	Active               bool
+	RemoteID string
+	// Node is the node that reported the storage and its usage; empty
+	// for reports from sources without per-node storage.
+	Node    string
+	Name    string
+	Type    string
+	Format  string
+	Content []string
+	Active  bool
+	// Shared is PVE's authoritative shared flag (counted once per remote).
+	Shared               bool
 	SizeBytes            uint64
 	FreeBytes            uint64
 	ObservedAt           time.Time
@@ -810,7 +816,8 @@ func (s *Store) ListBackupsPage(ctx context.Context, remoteID string, vmid, gene
 
 // --- Storages ---
 
-// ListStorages returns up to limit storages of one remote, ordered by name.
+// ListStorages returns up to limit per-node storage reports of one remote,
+// ordered by name, then node.
 // A non-positive limit uses MaxStoragesQuery.
 func (s *Store) ListStorages(ctx context.Context, remoteID string, limit int) ([]Storage, error) {
 	limit, err := checkLimit(limit, MaxStoragesQuery)
@@ -818,10 +825,10 @@ func (s *Store) ListStorages(ctx context.Context, remoteID string, limit int) ([
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT remote_id, name, type, format, content_json, active, size_bytes,
-		       free_bytes, observed_at, source, state, reason,
+		SELECT remote_id, node, name, type, format, content_json, active, shared,
+		       size_bytes, free_bytes, observed_at, source, state, reason,
 		       collection_generation
-		FROM pve_storages WHERE remote_id = ? ORDER BY name LIMIT ?`, remoteID, limit)
+		FROM pve_storages WHERE remote_id = ? ORDER BY name, node LIMIT ?`, remoteID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("pveinventory: list storages %s: %w", remoteID, err)
 	}
@@ -830,10 +837,10 @@ func (s *Store) ListStorages(ctx context.Context, remoteID string, limit int) ([
 	for rows.Next() {
 		var st Storage
 		var content string
-		var active int
+		var active, shared int
 		var observed, state string
-		if err := rows.Scan(&st.RemoteID, &st.Name, &st.Type, &st.Format,
-			&content, &active, &st.SizeBytes, &st.FreeBytes, &observed,
+		if err := rows.Scan(&st.RemoteID, &st.Node, &st.Name, &st.Type, &st.Format,
+			&content, &active, &shared, &st.SizeBytes, &st.FreeBytes, &observed,
 			&st.Source, &state, &st.Reason, &st.CollectionGeneration); err != nil {
 			return nil, fmt.Errorf("pveinventory: list storages %s: %w", remoteID, err)
 		}
@@ -841,6 +848,7 @@ func (s *Store) ListStorages(ctx context.Context, remoteID string, limit int) ([
 			return nil, fmt.Errorf("pveinventory: list storages %s: content: %w", remoteID, err)
 		}
 		st.Active = active != 0
+		st.Shared = shared != 0
 		st.State = DatasetState(state)
 		st.ObservedAt, _ = time.Parse(time.RFC3339, observed)
 		out = append(out, st)

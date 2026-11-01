@@ -22,6 +22,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -326,8 +327,9 @@ func TestNewPVECollectorWithCollectorOnlyUID(t *testing.T) {
 	if got, err := c.ListPVERemotes(h.ctx(), &pb.ListPVERemotesRequest{}); err != nil || got == nil || len(got.GetRemotes()) != 0 {
 		t.Fatalf("collector ListPVERemotes: want empty registry metadata, got %v, %v", got, err)
 	}
-	if _, err := c.ReadPVE(h.ctx(), &pb.ReadPVERequest{RemoteId: "pve-1", Method: pb.PVEReadMethod_PVE_READ_METHOD_NODES}); status.Code(err) != codes.Unimplemented {
-		t.Fatalf("collector ReadPVE: want Unimplemented, got %v", err)
+	// Allowed: the handler answers (vault locked), not the role policy.
+	if _, err := c.ReadPVE(h.ctx(), &pb.ReadPVERequest{RemoteId: "pve-1", Method: pb.PVEReadMethod_PVE_READ_METHOD_NODES}); status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "vault is locked") {
+		t.Fatalf("collector ReadPVE: want FailedPrecondition from the handler, got %v", err)
 	}
 	if _, err := c.GetStatus(h.ctx(), &pb.GetStatusRequest{}); !errors.Is(err, ErrPermissionDenied) {
 		t.Fatalf("collector GetStatus: want ErrPermissionDenied, got %v", err)
