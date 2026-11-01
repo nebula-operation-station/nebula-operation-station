@@ -28,6 +28,9 @@ var pveRepinArtifact = []byte("nebula.pve.repin 1.0.0\nReplace the approved remo
 func (s *Service) pveAdmin() *PveAdmin {
 	return &PveAdmin{DB: s.db, Vault: s.vault, Now: s.clock, Log: s.log, AuthorizeRepin: s.authorizePVERepin,
 		RevokeGrants: func(remoteID, reason string) error {
+			// Trust, credential and state changes also void every mutation
+			// permit of the remote, including one whose job is in flight.
+			s.auth.RevokeProviderMutations(remoteID, reason)
 			_, err := s.auth.RevokeProviderGrants(remoteID, reason)
 			return err
 		}}

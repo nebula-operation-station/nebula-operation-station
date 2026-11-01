@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"time"
 	"unicode/utf8"
 )
@@ -46,23 +47,35 @@ var (
 	// previous step has succeeded.
 	ErrPveJobOrder = errors.New("executordb: previous pve job step has not succeeded")
 
-	pveUPIDRe   = regexp.MustCompile(`^UPID:([A-Za-z0-9][A-Za-z0-9-]{0,62}):[0-9A-F]{8}:[0-9A-F]{8}:[0-9A-F]{8}:[a-z0-9]{1,32}:[A-Za-z0-9._-]{0,64}:[A-Za-z0-9_.@!-]{1,128}:$`)
+	pveUPIDRe   = regexp.MustCompile(`^UPID:([A-Za-z0-9][A-Za-z0-9-]{0,62}):[0-9A-F]{8}:[0-9A-F]{8}:([0-9A-F]{8}):([a-z0-9]{1,32}):([A-Za-z0-9._-]{0,64}):[A-Za-z0-9_.@!-]{1,128}:$`)
 	pveHex64Re  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	pveNodeRe   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,62}$`)
 	pveActionRe = regexp.MustCompile(`^pve\.[a-z0-9_.]{1,60}$`)
 )
 
-// PveUPIDNode validates upid, which comes from the PVE remote and is
-// untrusted, and returns the node it names.
-func PveUPIDNode(upid string) (string, bool) {
+// PveUPID is the parsed form of a PVE task ID.
+type PveUPID struct {
+	Node      string
+	StartTime time.Time
+	Type      string
+	ID        string
+}
+
+// ParsePveUPID validates upid, which comes from the PVE remote and is
+// untrusted, and returns its members.
+func ParsePveUPID(upid string) (PveUPID, bool) {
 	if len(upid) > MaxPveUPIDBytes {
-		return "", false
+		return PveUPID{}, false
 	}
 	m := pveUPIDRe.FindStringSubmatch(upid)
 	if m == nil {
-		return "", false
+		return PveUPID{}, false
 	}
-	return m[1], true
+	start, err := strconv.ParseUint(m[2], 16, 32)
+	if err != nil {
+		return PveUPID{}, false
+	}
+	return PveUPID{Node: m[1], StartTime: time.Unix(int64(start), 0), Type: m[3], ID: m[4]}, true
 }
 
 // PveJob is one durable PVE mutation step.
@@ -162,8 +175,8 @@ func (db *DB) CreatePveJobIntent(j PveJob) error {
 // UPID is untrusted input: it must be well-formed and name taskNode. A
 // step's UPID is stored once and never replaced.
 func (db *DB) RecordPveJobUPID(executionID string, step int, upid, taskNode string) error {
-	node, ok := PveUPIDNode(upid)
-	if !ok || node != taskNode {
+	u, ok := ParsePveUPID(upid)
+	if !ok || u.Node != taskNode {
 		return fmt.Errorf("executordb: %w: pve task id", ErrInvalid)
 	}
 	now := db.now().Unix()
@@ -189,8 +202,10 @@ func (db *DB) MarkPveJobReconciling(executionID string, step int) error {
 	return db.pveJobChanged(res, executionID, step)
 }
 
-// FinishPveJob records a terminal state. succeeded and failed need a
-// stored UPID (an observed task); unknown does not. exitStatus is the
+// FinishPveJob records a terminal state. succeeded needs a stored UPID (an
+// observed task); failed without a UPID means the remote answered and
+// refused the request, and unknown that the task could not be identified.
+// exitStatus is the
 // task's exit status from the remote, which is untrusted: it is bounded
 // and replaced when it is not printable UTF-8.
 func (db *DB) FinishPveJob(executionID string, step int, state, exitStatus string) error {
@@ -203,7 +218,7 @@ func (db *DB) FinishPveJob(executionID string, step int, state, exitStatus strin
 	now := db.now().Unix()
 	q := `UPDATE pve_jobs SET state = ?, exit_status = ?, updated_at = ?, finished_at = ?
 		WHERE execution_id = ? AND step = ? AND state IN ('dispatching', 'running', 'reconciling')`
-	if state != PveJobUnknown {
+	if state == PveJobSucceeded {
 		q += ` AND upid IS NOT NULL`
 	}
 	res, err := db.sql.Exec(q, state, exitStatus, now, now, executionID, step)
