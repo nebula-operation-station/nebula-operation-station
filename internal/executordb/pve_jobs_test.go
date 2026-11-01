@@ -58,6 +58,10 @@ func TestPveJobUPIDBelongsToOneStep(t *testing.T) {
 	if err := db.RecordPveJobUPID(id, 2, testUPID, "pve1"); !errors.Is(err, ErrPveUPIDRecorded) {
 		t.Fatalf("step 1's task stored for step 2: %v", err)
 	}
+	// One open step per target: close step 2 before another job starts.
+	if err := db.FinishPveJob(id, 2, PveJobUnknown, ""); err != nil {
+		t.Fatal(err)
+	}
 	other := testPveJob(1)
 	other.ExecutionID = "00000000-0000-4000-9000-000000000002"
 	if err := db.CreatePveJobIntent(other); err != nil {
@@ -130,6 +134,37 @@ func TestPveJobStepsAreOrdered(t *testing.T) {
 	}
 }
 
+func TestPveJobOneOpenStepPerTarget(t *testing.T) {
+	db := openT(t, privateDir(t))
+	if err := db.CreatePveJobIntent(testPveJob(1)); err != nil {
+		t.Fatal(err)
+	}
+	second := testPveJob(1)
+	second.ExecutionID = "00000000-0000-4000-9000-000000000002"
+	if err := db.CreatePveJobIntent(second); !errors.Is(err, ErrPveTargetBusy) {
+		t.Fatalf("second job on an open target: %v", err)
+	}
+	// Other guests and node targets are independent.
+	otherGuest := second
+	otherGuest.ExecutionID, otherGuest.VMID = "00000000-0000-4000-9000-000000000003", 102
+	if err := db.CreatePveJobIntent(otherGuest); err != nil {
+		t.Fatalf("other guest: %v", err)
+	}
+	// The partial unique index holds even without the check.
+	if _, err := db.sql.Exec(`INSERT INTO pve_jobs (execution_id, step, digest, action, remote_id, trust_generation, kind, node, vmid, request_digest, task_type, task_user, state, created_at, updated_at)
+		VALUES ('x3', 1, ?, 'pve.guest.start', 'pve-lab', 3, 'qemu', 'pve1', 101, ?, 'qmstart', 'nebula@pve!action', 'reconciling', 1, 1)`,
+		strings.Repeat("a", 64), strings.Repeat("b", 64)); err == nil {
+		t.Fatal("index allowed a second open step on the target")
+	}
+	// Once the open step is terminal, the target is free again.
+	if err := db.FinishPveJob(testPveJob(1).ExecutionID, 1, PveJobUnknown, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreatePveJobIntent(second); err != nil {
+		t.Fatalf("after the first job ended: %v", err)
+	}
+}
+
 func TestPveJobUPIDStoredOnce(t *testing.T) {
 	db := openT(t, privateDir(t))
 	id := testPveJob(1).ExecutionID
@@ -148,6 +183,26 @@ func TestPveJobUPIDStoredOnce(t *testing.T) {
 	}
 	if err := db.RecordPveJobUPID(id, 9, testUPID, "pve1"); !errors.Is(err, ErrPveJobNotFound) {
 		t.Fatalf("unknown step: %v", err)
+	}
+}
+
+// TestPveJobAcceptsNineDigitPstart: pstart has nine hex digits on a node
+// with more than about 497 days of uptime (pveapi task fixtures).
+func TestPveJobAcceptsNineDigitPstart(t *testing.T) {
+	upid := "UPID:pve1:00001234:1ABCDEF01:68FF93E0:qmstart:101:nebula@pve!action:"
+	u, ok := ParsePveUPID(upid)
+	if !ok || u.Node != "pve1" || u.Type != "qmstart" || u.ID != "101" || u.StartTime.Unix() != 0x68FF93E0 {
+		t.Fatalf("parse: %+v %v", u, ok)
+	}
+	if _, ok := ParsePveUPID(strings.Replace(upid, "1ABCDEF01", "1ABCDEF012", 1)); ok {
+		t.Fatal("ten-digit pstart accepted")
+	}
+	db := openT(t, privateDir(t))
+	if err := db.CreatePveJobIntent(testPveJob(1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordPveJobUPID(testPveJob(1).ExecutionID, 1, upid, "pve1"); err != nil {
+		t.Fatalf("record: %v", err)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"regexp"
+	"slices"
 	"sync"
 	"time"
 
@@ -81,6 +82,11 @@ var (
 	// ErrPveJobStore is returned when the durable job record could not be
 	// written; nothing more is dispatched.
 	ErrPveJobStore = errors.New("executor: pve job record unavailable")
+	// ErrPveTargetBusy is returned when another mutation step on the same
+	// target is still open (running or reconciling); nothing is
+	// dispatched. Mutations of one target are serialized so a lost task is
+	// never attributed to another job.
+	ErrPveTargetBusy = errors.New("executor: another pve mutation of the target is still open")
 
 	// ErrPveRejected is the sentinel a PveMutationClient wraps when the
 	// remote answered and refused a mutation, so no task exists. Any other
@@ -258,7 +264,7 @@ func (m *PveMutations) activeRemote(remoteID string) (executordb.PveRemote, erro
 func sameRemote(rm executordb.PveRemote, t permit.ProviderMutationTarget) bool {
 	return rm.State == executordb.StateActive && rm.RemoteID == t.RemoteID && rm.TrustPin == t.TrustPin &&
 		rm.TrustGeneration == t.TrustGeneration && rm.Credentials.ActionRef == t.CredentialRef &&
-		rm.Credentials.ActionVersion == t.CredentialVersion
+		rm.Credentials.ActionVersion == t.CredentialVersion && slices.Equal(rm.Endpoints, t.APIEndpoints)
 }
 
 // token opens one credential of rm at its registered version and returns a
@@ -303,7 +309,8 @@ func (m *PveMutations) target(ctx context.Context, rm executordb.PveRemote, req 
 	t := permit.ProviderMutationTarget{
 		RemoteID: rm.RemoteID, TrustPin: rm.TrustPin, TrustGeneration: rm.TrustGeneration,
 		CredentialRef: rm.Credentials.ActionRef, CredentialVersion: rm.Credentials.ActionVersion,
-		Kind: req.Kind, Node: liveNode, VMID: req.VMID, ConfigDigest: digest,
+		APIEndpoints: slices.Clone(rm.Endpoints),
+		Kind:         req.Kind, Node: liveNode, VMID: req.VMID, ConfigDigest: digest,
 	}
 	if err := t.Validate(); err != nil {
 		return permit.ProviderMutationTarget{}, ErrPveTargetChanged
@@ -478,6 +485,10 @@ func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, 
 	}
 	// The intent is durable (synchronous=FULL) before anything is sent.
 	if err := m.DB.CreatePveJobIntent(job); err != nil {
+		if errors.Is(err, executordb.ErrPveTargetBusy) {
+			m.log().Warn("audit", "kind", "pve_mutation_target_busy", "remote", t.RemoteID, "node", t.Node, "vmid", t.VMID, "execution", claim.ExecutionID, "step", n)
+			return ErrPveTargetBusy
+		}
 		m.log().Error("pve job intent not recorded", "execution", claim.ExecutionID, "step", n)
 		return ErrPveJobStore
 	}
@@ -549,8 +560,9 @@ func taskMatches(u executordb.PveUPID, job executordb.PveJob) bool {
 
 // identify looks for the exact task of a step whose UPID is unknown. One
 // candidate (same node, guest, task type, action token and start window,
-// not already recorded for any step) is adopted; none or several mark the
-// step unknown. Nothing is ever dispatched. A read error leaves the step
+// not already recorded for any step) is adopted; several mark the step
+// unknown, and none marks it unknown only once the start window has
+// passed (until then it stays reconciling). Nothing is ever dispatched. A read error leaves the step
 // reconciling for the next pass.
 func (m *PveMutations) identify(ctx context.Context, rm executordb.PveRemote, job *executordb.PveJob, read pveapi.TokenSupplier) error {
 	since := job.CreatedAt.Add(-pveTaskMatchSkew)
@@ -577,6 +589,11 @@ func (m *PveMutations) identify(ctx context.Context, rm executordb.PveRemote, jo
 		if match = append(match, upid); len(match) > 1 {
 			break
 		}
+	}
+	if len(match) == 0 && m.now().Before(job.CreatedAt.Add(pveTaskMatchWindow+pveTaskMatchSkew)) {
+		// The task may still appear: identification is not complete while
+		// its start window is open, so the step stays reconciling.
+		return ErrPveDispatchUncertain
 	}
 	if len(match) != 1 {
 		if err := m.DB.FinishPveJob(job.ExecutionID, job.Step, executordb.PveJobUnknown, ""); err != nil {

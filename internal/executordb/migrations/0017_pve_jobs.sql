@@ -42,3 +42,10 @@ CREATE TABLE pve_jobs (
 CREATE UNIQUE INDEX pve_jobs_upid_uq ON pve_jobs (upid) WHERE upid IS NOT NULL;
 
 CREATE INDEX pve_jobs_open_idx ON pve_jobs (state) WHERE state IN ('dispatching', 'running', 'reconciling');
+
+-- At most one open step per provider target (remote, kind, node, vmid):
+-- concurrent mutations of the same guest could otherwise adopt each
+-- other's task when a response is lost. A node target (vmid 0) serializes
+-- the node-level mutations of that node.
+CREATE UNIQUE INDEX pve_jobs_open_target_uq ON pve_jobs (remote_id, kind, node, vmid)
+    WHERE state IN ('dispatching', 'running', 'reconciling');

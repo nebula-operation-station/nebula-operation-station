@@ -52,8 +52,15 @@ var (
 	// ErrPveUPIDRecorded is returned when a UPID is already stored for a
 	// step: one task never belongs to two steps.
 	ErrPveUPIDRecorded = errors.New("executordb: pve task id already recorded for a job step")
+	// ErrPveTargetBusy is returned when another step on the same target
+	// (remote, kind, node, vmid) is still open: mutations of one target are
+	// serialized so a lost task is never attributed to another job.
+	ErrPveTargetBusy = errors.New("executordb: another pve job step on the target is still open")
 
-	pveUPIDRe     = regexp.MustCompile(`^UPID:([A-Za-z0-9][A-Za-z0-9-]{0,62}):[0-9A-F]{8}:[0-9A-F]{8}:([0-9A-F]{8}):([a-z0-9]{1,32}):([A-Za-z0-9._-]{0,64}):([A-Za-z0-9_.@!-]{1,128}):$`)
+	// pveUPIDRe follows the pveapi UPID grammar for the numeric fields:
+	// pstart (clock ticks since boot) grows to nine hex digits once a
+	// node's uptime passes about 497 days at USER_HZ=100.
+	pveUPIDRe     = regexp.MustCompile(`^UPID:([A-Za-z0-9][A-Za-z0-9-]{0,62}):[0-9A-F]{8}:[0-9A-F]{8,9}:([0-9A-F]{8}):([a-z0-9]{1,32}):([A-Za-z0-9._-]{0,64}):([A-Za-z0-9_.@!-]{1,128}):$`)
 	pveHex64Re    = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	pveNodeRe     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,62}$`)
 	pveActionRe   = regexp.MustCompile(`^pve\.[a-z0-9_.]{1,60}$`)
@@ -147,7 +154,8 @@ func validatePveJob(j PveJob) error {
 // ErrPveJobExists if the step was recorded before (so a step can be
 // dispatched at most once, across restarts), and with ErrPveJobOrder unless
 // every earlier step of the job has succeeded. Earlier steps must also bind
-// the same permit digest and target.
+// the same permit digest and target. It fails with ErrPveTargetBusy while
+// any step on the same target is open.
 func (db *DB) CreatePveJobIntent(j PveJob) error {
 	if err := validatePveJob(j); err != nil {
 		return err
@@ -171,6 +179,14 @@ func (db *DB) CreatePveJobIntent(j PveJob) error {
 	}
 	if prior != j.Step-1 || done != prior {
 		return ErrPveJobOrder
+	}
+	var busy int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM pve_jobs WHERE remote_id = ? AND kind = ? AND node = ? AND vmid = ?
+		AND state IN ('dispatching', 'running', 'reconciling')`, j.RemoteID, j.Kind, j.Node, int64(j.VMID)).Scan(&busy); err != nil {
+		return fmt.Errorf("executordb: create pve job: %w", err)
+	}
+	if busy != 0 {
+		return ErrPveTargetBusy
 	}
 	now := db.now().Unix()
 	if _, err := tx.Exec(`INSERT INTO pve_jobs (execution_id, step, digest, action, remote_id, trust_generation, kind, node, vmid, request_digest, task_type, task_user, state, created_at, updated_at)

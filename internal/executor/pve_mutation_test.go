@@ -178,6 +178,13 @@ func (e *pveMutEnv) restart() {
 		MaxWait: 2 * time.Second, Log: slog.New(slog.NewTextHandler(e.logs, nil))}
 }
 
+// passMatchWindow moves the engine clock past the start window of every
+// step recorded so far, so an unidentified step can be declared unknown.
+func (e *pveMutEnv) passMatchWindow() {
+	later := time.Now().Add(pveTaskMatchWindow + pveTaskMatchSkew + time.Minute)
+	e.m.Now = func() time.Time { return later }
+}
+
 func mutRequest(steps ...string) PveMutationRequest {
 	var plan []PveMutationStep
 	for _, s := range steps {
@@ -329,6 +336,7 @@ func TestPveMutationRefusesChangedTarget(t *testing.T) {
 		"config changed":    func(e *pveMutEnv) { e.client.configDigest = strings.Repeat("00", 32) },
 		"action rotated":    func(e *pveMutEnv) { e.rotateAction() },
 		"remote blocked":    func(e *pveMutEnv) { _, _ = e.pe.db.BlockRemote(mutRemote, "test", "admin") },
+		"endpoints changed": func(e *pveMutEnv) { e.setEndpoints("pve1.example.test", "evil.example.test") },
 		"vault locked":      func(e *pveMutEnv) { e.pe.vault.Lock() },
 		"executor locked":   func(e *pveMutEnv) { e.auth.Lock("admin") },
 		"executor restarts": func(e *pveMutEnv) { e.restart() },
@@ -359,6 +367,14 @@ func (e *pveMutEnv) rotateAction() {
 	}
 }
 
+// setEndpoints replaces the registry endpoints of the test remote.
+func (e *pveMutEnv) setEndpoints(hosts ...string) {
+	e.t.Helper()
+	if _, err := e.pe.db.SetEndpoints(mutRemote, pveEndpoints(hosts...), "admin"); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
 func TestPveMutationPermitIsSingleUse(t *testing.T) {
 	e := newPveMutEnv(t, true)
 	req := e.approve(mutRequest("guest.start"))
@@ -374,22 +390,26 @@ func TestPveMutationPermitIsSingleUse(t *testing.T) {
 }
 
 func TestPveMutationLostResponseNeverRedispatches(t *testing.T) {
+	// wantState is the state after Run; finalState the state after a
+	// reconciliation once the task's start window has passed. A step
+	// without a candidate stays reconciling while the window is open.
 	cases := map[string]struct {
-		recent    func(time.Time) []string
-		want      error
-		wantState string
+		recent     func(time.Time) []string
+		want       error
+		wantState  string
+		finalState string
 	}{
-		"no task found": {func(time.Time) []string { return nil }, ErrPveDispatchUncertain, executordb.PveJobUnknown},
+		"no task found": {func(time.Time) []string { return nil }, ErrPveDispatchUncertain, executordb.PveJobReconciling, executordb.PveJobUnknown},
 		"two candidates": {func(at time.Time) []string {
 			return []string{testUPIDAt("pve1", at, 101, 7), testUPIDAt("pve1", at, 101, 8)}
-		}, ErrPveDispatchUncertain, executordb.PveJobUnknown},
-		"other guest only": {func(at time.Time) []string { return []string{testUPIDAt("pve1", at, 999, 7)} }, ErrPveDispatchUncertain, executordb.PveJobUnknown},
+		}, ErrPveDispatchUncertain, executordb.PveJobUnknown, executordb.PveJobUnknown},
+		"other guest only": {func(at time.Time) []string { return []string{testUPIDAt("pve1", at, 999, 7)} }, ErrPveDispatchUncertain, executordb.PveJobReconciling, executordb.PveJobUnknown},
 		"stale task only": {func(at time.Time) []string {
 			return []string{testUPIDAt("pve1", at.Add(-time.Hour), 101, 7)}
-		}, ErrPveDispatchUncertain, executordb.PveJobUnknown},
+		}, ErrPveDispatchUncertain, executordb.PveJobReconciling, executordb.PveJobUnknown},
 		"exact task identified": {func(at time.Time) []string {
 			return []string{testUPIDAt("pve1", at, 999, 6), testUPIDAt("pve1", at, 101, 7), "garbage"}
-		}, nil, executordb.PveJobSucceeded},
+		}, nil, executordb.PveJobSucceeded, executordb.PveJobSucceeded},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -411,10 +431,21 @@ func TestPveMutationLostResponseNeverRedispatches(t *testing.T) {
 				t.Fatalf("steps: %+v", res.Steps)
 			}
 			e.noSecrets(err, res.ExecutionID)
-			// Reconciliation and a restart change nothing and never dispatch.
+			// Reconciliation and a restart never dispatch; once the start
+			// window has passed, an unidentified step is unknown.
 			e.restart()
 			if err := e.m.Reconcile(context.Background()); err != nil {
 				t.Fatal(err)
+			}
+			if j, _, _ := e.pe.db.PveJob(res.ExecutionID, 1); j.State != c.wantState {
+				t.Fatalf("job within the window: %+v", j)
+			}
+			e.passMatchWindow()
+			if err := e.m.Reconcile(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if j, _, _ := e.pe.db.PveJob(res.ExecutionID, 1); j.State != c.finalState {
+				t.Fatalf("job after the window: %+v", j)
 			}
 			if _, err := e.m.Run(context.Background(), req); !errors.Is(err, ErrPveMutationDenied) {
 				t.Fatalf("run after restart: %v", err)
@@ -503,6 +534,14 @@ func TestPveMutationRestartBeforeUPIDNeverRedispatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	j, _, _ := e.pe.db.PveJob(job.ExecutionID, 1)
+	if j.State != executordb.PveJobReconciling || e.client.dispatchCount() != 0 {
+		t.Fatalf("job within the window %+v, dispatches %d", j, e.client.dispatchCount())
+	}
+	e.passMatchWindow()
+	if err := e.m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	j, _, _ = e.pe.db.PveJob(job.ExecutionID, 1)
 	if j.State != executordb.PveJobUnknown || e.client.dispatchCount() != 0 {
 		t.Fatalf("job %+v, dispatches %d", j, e.client.dispatchCount())
 	}
@@ -514,6 +553,9 @@ func TestPveMutationLockOrRevokeInFlightStopsNextStep(t *testing.T) {
 		"revoke remote":   func(e *pveMutEnv) { e.auth.RevokeProviderMutations(mutRemote, "admin") },
 		"remote blocked":  func(e *pveMutEnv) { _, _ = e.pe.db.BlockRemote(mutRemote, "trust failure", "executor") },
 		"action rotation": func(e *pveMutEnv) { e.rotateAction() },
+		"endpoints changed": func(e *pveMutEnv) {
+			e.setEndpoints("evil.example.test")
+		},
 	}
 	for name, revoke := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -575,8 +617,15 @@ func TestPveMutationMalformedUPIDIsReconciled(t *testing.T) {
 	req := e.approve(mutRequest("guest.start"))
 	e.client.onDispatch = func(int, string) (string, error) { return "UPID:pve2:../../etc:", nil }
 	res, err := e.m.Run(context.Background(), req)
-	if !errors.Is(err, ErrPveDispatchUncertain) || res.Steps[0].State != executordb.PveJobUnknown || res.Steps[0].UPID != "" {
+	if !errors.Is(err, ErrPveDispatchUncertain) || res.Steps[0].State != executordb.PveJobReconciling || res.Steps[0].UPID != "" {
 		t.Fatalf("run: %v %+v", err, res.Steps)
+	}
+	e.passMatchWindow()
+	if err := e.m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if j, _, _ := e.pe.db.PveJob(res.ExecutionID, 1); j.State != executordb.PveJobUnknown || j.UPID != "" || e.client.dispatchCount() != 1 {
+		t.Fatalf("job after the window: %+v", j)
 	}
 }
 
@@ -661,8 +710,17 @@ func TestPveMutationLostResponseNeverAdoptsForeignTask(t *testing.T) {
 			if !errors.Is(err, ErrPveDispatchUncertain) {
 				t.Fatalf("run: %v", err)
 			}
-			if len(res.Steps) != c.lost || res.Steps[c.lost-1].State != executordb.PveJobUnknown || res.Steps[c.lost-1].UPID != "" {
+			if len(res.Steps) != c.lost || res.Steps[c.lost-1].State != executordb.PveJobReconciling || res.Steps[c.lost-1].UPID != "" {
 				t.Fatalf("steps: %+v", res.Steps)
+			}
+			// No foreign task is adopted later either: once the window has
+			// passed the step is unknown.
+			e.passMatchWindow()
+			if err := e.m.Reconcile(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if j, _, _ := e.pe.db.PveJob(res.ExecutionID, c.lost); j.State != executordb.PveJobUnknown || j.UPID != "" {
+				t.Fatalf("job after the window: %+v", j)
 			}
 			if e.client.dispatchCount() != c.lost {
 				t.Fatalf("a later step was dispatched: %d", e.client.dispatchCount())
@@ -812,4 +870,113 @@ func TestPveMutationWaitUsesInjectedClock(t *testing.T) {
 	if n := len(e.client.statusQueried); n != 1 {
 		t.Fatalf("polls: %d", n)
 	}
+}
+
+// TestPveMutationLateTaskIsAdoptedWithinWindow: a lost response whose task
+// is not yet listed stays reconciling, and the task is adopted once it
+// appears inside the start window.
+func TestPveMutationLateTaskIsAdoptedWithinWindow(t *testing.T) {
+	e := newPveMutEnv(t, true)
+	req := e.approve(mutRequest("guest.start"))
+	e.client.onDispatch = func(int, string) (string, error) { return "", errors.New("client timeout") }
+	res, err := e.m.Run(context.Background(), req)
+	if !errors.Is(err, ErrPveDispatchUncertain) || len(res.Steps) != 1 || res.Steps[0].State != executordb.PveJobReconciling {
+		t.Fatalf("run: %v %+v", err, res.Steps)
+	}
+	late := testUPIDAt("pve1", time.Now().Add(time.Minute), 101, 9)
+	e.client.mu.Lock()
+	e.client.recent = []string{late}
+	e.client.mu.Unlock()
+	if err := e.m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	j, _, _ := e.pe.db.PveJob(res.ExecutionID, 1)
+	if j.State != executordb.PveJobSucceeded || j.UPID != late || e.client.dispatchCount() != 1 {
+		t.Fatalf("job: %+v, dispatches %d", j, e.client.dispatchCount())
+	}
+}
+
+// TestPveMutationSerializesPerTarget: while one mutation of a guest is
+// open, another approved mutation of the same guest is not dispatched, so
+// the first job's identification can never adopt the second job's task.
+func TestPveMutationSerializesPerTarget(t *testing.T) {
+	e := newPveMutEnv(t, true)
+	a := e.approve(mutRequest("guest.start"))
+	b := e.approve(mutRequest("guest.start"))
+	e.client.onDispatch = func(int, string) (string, error) { return "", errors.New("connection reset") }
+	resA, err := e.m.Run(context.Background(), a)
+	if !errors.Is(err, ErrPveDispatchUncertain) || resA.Steps[0].State != executordb.PveJobReconciling {
+		t.Fatalf("run a: %v %+v", err, resA.Steps)
+	}
+	e.client.onDispatch = nil
+	resB, err := e.m.Run(context.Background(), b)
+	if !errors.Is(err, ErrPveTargetBusy) || len(resB.Steps) != 0 {
+		t.Fatalf("run b: %v %+v", err, resB.Steps)
+	}
+	if e.client.dispatchCount() != 1 {
+		t.Fatalf("dispatches: %d", e.client.dispatchCount())
+	}
+	// A's step is still reconciling and has adopted nothing.
+	if j, _, _ := e.pe.db.PveJob(resA.ExecutionID, 1); j.State != executordb.PveJobReconciling || j.UPID != "" {
+		t.Fatalf("job a: %+v", j)
+	}
+	// Another guest on the same remote is independent.
+	other := mutRequest("guest.start")
+	other.VMID = 102
+	other = e.approve(other)
+	e.client.onDispatch = func(n int, node string) (string, error) {
+		return testTaskUPID(node, time.Now(), "qmstart", "102", mutActionUser, n), nil
+	}
+	if _, err := e.m.Run(context.Background(), other); err != nil {
+		t.Fatalf("other guest: %v", err)
+	}
+	// Once A is terminal, the guest takes new mutations again.
+	e.passMatchWindow()
+	if err := e.m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if j, _, _ := e.pe.db.PveJob(resA.ExecutionID, 1); j.State != executordb.PveJobUnknown {
+		t.Fatalf("job a after the window: %+v", j)
+	}
+	e.m.Now = nil
+	e.client.onDispatch = nil
+	c := e.approve(mutRequest("guest.start"))
+	if _, err := e.m.Run(context.Background(), c); err != nil {
+		t.Fatalf("after a ended: %v", err)
+	}
+}
+
+// TestPveMutationNineDigitPstartUPID: a node with more than about 497 days
+// of uptime writes nine-digit pstart values; such a UPID is recorded on
+// dispatch and identified after a lost response.
+func TestPveMutationNineDigitPstartUPID(t *testing.T) {
+	upidAt := func(at time.Time) string {
+		return fmt.Sprintf("UPID:pve1:00001234:1ABCDEF01:%08X:qmstart:101:%s:", at.Unix(), mutActionUser)
+	}
+	t.Run("dispatch", func(t *testing.T) {
+		e := newPveMutEnv(t, true)
+		req := e.approve(mutRequest("guest.start"))
+		var upid string
+		e.client.onDispatch = func(int, string) (string, error) { upid = upidAt(time.Now()); return upid, nil }
+		res, err := e.m.Run(context.Background(), req)
+		if err != nil || len(res.Steps) != 1 || res.Steps[0].State != executordb.PveJobSucceeded || res.Steps[0].UPID != upid {
+			t.Fatalf("run: %v %+v", err, res.Steps)
+		}
+	})
+	t.Run("identify", func(t *testing.T) {
+		e := newPveMutEnv(t, true)
+		req := e.approve(mutRequest("guest.start"))
+		var upid string
+		e.client.onDispatch = func(int, string) (string, error) {
+			upid = upidAt(time.Now())
+			e.client.mu.Lock()
+			e.client.recent = []string{upid}
+			e.client.mu.Unlock()
+			return "", errors.New("connection reset")
+		}
+		res, err := e.m.Run(context.Background(), req)
+		if err != nil || len(res.Steps) != 1 || res.Steps[0].State != executordb.PveJobSucceeded || res.Steps[0].UPID != upid {
+			t.Fatalf("run: %v %+v", err, res.Steps)
+		}
+	})
 }

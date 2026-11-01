@@ -5,6 +5,7 @@ package permit
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/descope/virtualwebauthn"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 )
 
 var mutationArtifact = []byte("pve.guest.start 1.0.0\nStart one exact guest.\n")
@@ -20,7 +22,8 @@ func mutationTarget() ProviderMutationTarget {
 	return ProviderMutationTarget{
 		RemoteID: "pve-lab", TrustPin: strings.Repeat("ab", 32), TrustGeneration: 3,
 		CredentialRef: "pve-0011223344556677-action", CredentialVersion: 2,
-		Kind: ProviderKindQemu, Node: "pve1", VMID: 101, ConfigDigest: strings.Repeat("cd", 32),
+		APIEndpoints: []pvecontract.Endpoint{{Host: "pve1.lab.test", Port: 8006}, {Host: "pve2.lab.test", Port: 8006}},
+		Kind:         ProviderKindQemu, Node: "pve1", VMID: 101, ConfigDigest: strings.Repeat("cd", 32),
 	}
 }
 
@@ -53,11 +56,20 @@ func (e *env) approvedMutation(t ProviderMutationTarget) canonical.Digest {
 
 func TestProviderMutationPermitBindsExactTarget(t *testing.T) {
 	cases := map[string]func(*ProviderMutationTarget){
-		"other remote":          func(x *ProviderMutationTarget) { x.RemoteID = "pve-other" },
-		"re-pinned trust":       func(x *ProviderMutationTarget) { x.TrustPin = strings.Repeat("ef", 32) },
-		"new trust generation":  func(x *ProviderMutationTarget) { x.TrustGeneration++ },
-		"rotated action token":  func(x *ProviderMutationTarget) { x.CredentialVersion++ },
-		"read token instead":    func(x *ProviderMutationTarget) { x.CredentialRef = "pve-0011223344556677-read" },
+		"other remote":         func(x *ProviderMutationTarget) { x.RemoteID = "pve-other" },
+		"re-pinned trust":      func(x *ProviderMutationTarget) { x.TrustPin = strings.Repeat("ef", 32) },
+		"new trust generation": func(x *ProviderMutationTarget) { x.TrustGeneration++ },
+		"rotated action token": func(x *ProviderMutationTarget) { x.CredentialVersion++ },
+		"read token instead":   func(x *ProviderMutationTarget) { x.CredentialRef = "pve-0011223344556677-read" },
+		"added api endpoint": func(x *ProviderMutationTarget) {
+			x.APIEndpoints = append(slices.Clone(x.APIEndpoints), pvecontract.Endpoint{Host: "evil.example", Port: 8006})
+		},
+		"replaced api endpoint": func(x *ProviderMutationTarget) {
+			x.APIEndpoints = []pvecontract.Endpoint{{Host: "evil.example", Port: 8006}, x.APIEndpoints[1]}
+		},
+		"reordered api endpoints": func(x *ProviderMutationTarget) {
+			x.APIEndpoints = []pvecontract.Endpoint{x.APIEndpoints[1], x.APIEndpoints[0]}
+		},
 		"guest moved to node":   func(x *ProviderMutationTarget) { x.Node = "pve2" },
 		"other vmid":            func(x *ProviderMutationTarget) { x.VMID = 102 },
 		"lxc with same vmid":    func(x *ProviderMutationTarget) { x.Kind = ProviderKindLXC },
@@ -121,7 +133,14 @@ func TestProviderMutationRejectsMalformedTarget(t *testing.T) {
 		"bad node":         func(m *ProviderMutation) { m.Target.Node = "../etc" },
 		"zero generation":  func(m *ProviderMutation) { m.Target.TrustGeneration = 0 },
 		"no credential":    func(m *ProviderMutation) { m.Target.CredentialRef = "" },
-		"array params":     func(m *ProviderMutation) { m.Parameters = json.RawMessage(`[1]`) },
+		"no api endpoints": func(m *ProviderMutation) { m.Target.APIEndpoints = nil },
+		"bad api endpoint": func(m *ProviderMutation) {
+			m.Target.APIEndpoints = []pvecontract.Endpoint{{Host: "../x", Port: 8006}}
+		},
+		"duplicate api endpoint": func(m *ProviderMutation) {
+			m.Target.APIEndpoints = []pvecontract.Endpoint{{Host: "a.test", Port: 8006}, {Host: "a.test", Port: 8006}}
+		},
+		"array params": func(m *ProviderMutation) { m.Parameters = json.RawMessage(`[1]`) },
 		"huge params": func(m *ProviderMutation) {
 			m.Parameters = json.RawMessage(`{"x":"` + strings.Repeat("a", maxProviderMutationParams) + `"}`)
 		},

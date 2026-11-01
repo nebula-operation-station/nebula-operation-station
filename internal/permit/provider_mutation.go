@@ -50,7 +50,8 @@ var (
 
 // ProviderMutationTarget is the exact target of one PVE mutation. Every
 // member is bound into the permit digest; any difference at dispatch time
-// (re-pin, new trust generation, rotated action token, guest moved to
+// (re-pin, new trust generation, rotated action token, changed API
+// endpoint set, guest moved to
 // another node, VMID reuse or a changed configuration) refuses the run and
 // needs a new proposal.
 type ProviderMutationTarget struct {
@@ -61,8 +62,12 @@ type ProviderMutationTarget struct {
 	// A mutation never uses the read token.
 	CredentialRef     string `json:"credential_ref"`
 	CredentialVersion int64  `json:"credential_version"`
-	Kind              string `json:"kind"`
-	Node              string `json:"node"`
+	// APIEndpoints is the remote's approved, ordered API endpoint set
+	// (ADR 0006: failover may change the entry node only within it). A
+	// changed set refuses the run.
+	APIEndpoints []pvecontract.Endpoint `json:"api_endpoints"`
+	Kind         string                 `json:"kind"`
+	Node         string                 `json:"node"`
 	// VMID is the guest; 0 for a node target.
 	VMID uint64 `json:"vmid"`
 	// ConfigDigest is the hex SHA-256 of the complete configuration the
@@ -81,6 +86,8 @@ func (t ProviderMutationTarget) Validate() error {
 		return fmt.Errorf("%w: action credential reference", ErrProviderMutationTarget)
 	case t.CredentialVersion < 1 || t.CredentialVersion > maxProviderCredentialVersion:
 		return fmt.Errorf("%w: action credential version out of range", ErrProviderMutationTarget)
+	case !validAPIEndpoints(t):
+		return fmt.Errorf("%w: api endpoint set", ErrProviderMutationTarget)
 	case !pvecontract.ValidNodeName(t.Node):
 		return fmt.Errorf("%w: node", ErrProviderMutationTarget)
 	case !hex64Re.MatchString(t.ConfigDigest):
@@ -101,6 +108,16 @@ func (t ProviderMutationTarget) Validate() error {
 	return nil
 }
 
+// validAPIEndpoints checks the endpoint set of t with the registry rules of
+// pvecontract (1..MaxEndpointsPerRemote valid, distinct host:port pairs).
+func validAPIEndpoints(t ProviderMutationTarget) bool {
+	_, err := pvecontract.ValidateRemote(pvecontract.Remote{
+		RemoteID: t.RemoteID, Kind: pvecontract.KindCluster, Endpoints: t.APIEndpoints,
+		TrustPin: t.TrustPin, TrustGeneration: t.TrustGeneration,
+	})
+	return err == nil
+}
+
 // diff names the first member in which t and u differ, or "" if they are
 // equal. Member names are not secret.
 func (t ProviderMutationTarget) diff(u ProviderMutationTarget) string {
@@ -111,6 +128,8 @@ func (t ProviderMutationTarget) diff(u ProviderMutationTarget) string {
 		return "trust pin or generation"
 	case t.CredentialRef != u.CredentialRef || t.CredentialVersion != u.CredentialVersion:
 		return "action credential version"
+	case !slices.Equal(t.APIEndpoints, u.APIEndpoints):
+		return "api endpoint set"
 	case t.Kind != u.Kind || t.Node != u.Node || t.VMID != u.VMID:
 		return "node or vmid"
 	case t.ConfigDigest != u.ConfigDigest:
