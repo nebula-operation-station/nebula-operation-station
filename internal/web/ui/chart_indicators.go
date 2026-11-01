@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 package ui
 
-import "time"
+import (
+	"time"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/hostmetrics"
+)
 
 // Indicator kinds (ADR 0006 P1-34).
 const (
@@ -123,4 +127,45 @@ func worstState(states ...IndicatorState) IndicatorState {
 		}
 	}
 	return worst
+}
+
+// hostIndicators builds the CPU, RAM and disk indicators for one host
+// from the parsed host.metrics and filesystem.list results (ADR 0006
+// P1-34). observedAt is when the readings were taken; values older than
+// staleAfter are stale, missing readings unknown — never zero. The disk
+// indicators are one per real filesystem (Label "Disk <mount>") plus the
+// fullest one as the summary (Label "Disk").
+func hostIndicators(m hostmetrics.Metrics, fs hostmetrics.Filesystems, observedAt, now time.Time, staleAfter time.Duration) []Indicator {
+	out := make([]Indicator, 0, 3+len(fs.Mounts))
+	var cpu *float64
+	if m.CPU.Available {
+		v := m.CPU.Percent
+		cpu = &v
+	}
+	var ram *float64
+	if m.Mem.Available && m.Mem.TotalBytes > 0 {
+		v := m.Mem.Percent()
+		ram = &v
+	}
+	out = append(out, newIndicator(IndicatorCPU, cpu, nil, observedAt, now, staleAfter))
+	out = append(out, newIndicator(IndicatorRAM, ram, nil, observedAt, now, staleAfter))
+	for _, mt := range fs.Mounts {
+		v := mt.Percent
+		ind := newIndicator(IndicatorDisk, &v, nil, observedAt, now, staleAfter)
+		ind.Label = "Disk " + mt.Mount
+		out = append(out, ind)
+	}
+	// Summary: the fullest filesystem. The host.metrics disk reading
+	// is the action's own fullest computation; the filesystem list
+	// covers hosts whose metrics disk reading is unavailable.
+	if m.Disk.Available {
+		v := m.Disk.Percent
+		out = append(out, newIndicator(IndicatorDisk, &v, nil, observedAt, now, staleAfter))
+	} else if best, ok := fs.Fullest(); ok {
+		v := best.Percent
+		out = append(out, newIndicator(IndicatorDisk, &v, nil, observedAt, now, staleAfter))
+	} else {
+		out = append(out, newIndicator(IndicatorDisk, nil, nil, observedAt, now, staleAfter))
+	}
+	return out
 }
