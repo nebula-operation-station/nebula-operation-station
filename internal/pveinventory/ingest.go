@@ -796,14 +796,37 @@ type storageRow struct {
 // storageRowKey joins the key columns of a storage report.
 func storageRowKey(node, name string) string { return node + "\x00" + name }
 
+// nodeRemoved reports whether the observation carries an available node
+// list that no longer contains node, i.e. the node left the cluster. An
+// offline node is still listed; without a node list nothing counts as
+// removed.
+func nodeRemoved(obs pvecontract.Observation, node string) bool {
+	if obs.Nodes.State != pvecontract.Available || !obs.Complete {
+		return false
+	}
+	for _, n := range obs.Nodes.Value {
+		if n.Node == node {
+			return false
+		}
+	}
+	return true
+}
+
 // deleteUnseenStorages deletes the remote's storage rows that the
-// observation no longer reports, keyed by (node, name). It runs inside
-// the observation transaction, so upserts and deletions commit
-// atomically.
+// observation no longer reports, keyed by (node, name). Only nodes that
+// reported storages are authoritative for their rows: the executor skips
+// offline nodes, so rows of a node that reported nothing (offline or
+// unreachable) are kept and age into stale instead of disappearing. Rows
+// of a node that a complete node list no longer contains (removed from
+// the cluster) are deleted. It
+// runs inside the observation transaction, so upserts and deletions
+// commit atomically.
 func (s *Store) deleteUnseenStorages(ctx context.Context, tx *sql.Tx, obs pvecontract.Observation) (int, error) {
 	reported := make(map[string]struct{}, len(obs.Storages.Value))
+	reportingNodes := map[string]struct{}{}
 	for _, st := range obs.Storages.Value {
 		reported[storageRowKey(st.Node, st.Name)] = struct{}{}
+		reportingNodes[st.Node] = struct{}{}
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT node, name FROM pve_storages WHERE remote_id = ?`, obs.RemoteID)
 	if err != nil {
@@ -815,6 +838,9 @@ func (s *Store) deleteUnseenStorages(ctx context.Context, tx *sql.Tx, obs pvecon
 		var r storageRow
 		if err := rows.Scan(&r.node, &r.name); err != nil {
 			return 0, fmt.Errorf("pveinventory: list storages %s: %w", obs.RemoteID, err)
+		}
+		if _, ok := reportingNodes[r.node]; !ok && !nodeRemoved(obs, r.node) {
+			continue // node did not report: keep its rows (offline, unreachable)
 		}
 		if _, ok := reported[storageRowKey(r.node, r.name)]; !ok {
 			stale = append(stale, r)

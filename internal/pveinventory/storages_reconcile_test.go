@@ -14,6 +14,8 @@ import (
 	"database/sql"
 	"testing"
 	"time"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 )
 
 // storageRowPairs lists the stored (node, name) pairs of one remote.
@@ -118,7 +120,7 @@ func TestIngestStoragesCompleteReadDropsRemovedStorage(t *testing.T) {
 	}
 }
 
-func TestIngestStoragesCompleteEmptyReadDropsAllRows(t *testing.T) {
+func TestIngestStoragesCompleteReadWithoutReportingNodesKeepsRows(t *testing.T) {
 	s, db, _ := newTestStore(t)
 	ctx := context.Background()
 	if err := s.UpsertRemote(ctx, remoteA()); err != nil {
@@ -126,8 +128,10 @@ func TestIngestStoragesCompleteEmptyReadDropsAllRows(t *testing.T) {
 	}
 	seedStorageCluster(t, s, ctx)
 
-	// A complete read that found no storages is a complete enumeration
-	// that found nothing: every row disappears.
+	// A complete read where no node reported storages (all nodes offline:
+	// the executor skips them) is not evidence that the storages are gone.
+	// Both nodes are still listed, so every row is kept and ages into
+	// stale instead of disappearing.
 	obs := newObsA().
 		nodes(mkNode("p1"), mkNode("p2")).
 		storages().
@@ -138,11 +142,11 @@ func TestIngestStoragesCompleteEmptyReadDropsAllRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ingest 2: %v", err)
 	}
-	if rep.StoragesUpserted != 0 || rep.StoragesDeleted != 4 {
+	if rep.StoragesUpserted != 0 || rep.StoragesDeleted != 0 {
 		t.Fatalf("report 2: %+v", rep)
 	}
-	if n := countRows(t, db, "pve_storages"); n != 0 {
-		t.Fatalf("expected 0 storage rows, got %d", n)
+	if n := countRows(t, db, "pve_storages"); n != 4 {
+		t.Fatalf("expected 4 storage rows kept, got %d", n)
 	}
 }
 
@@ -233,5 +237,38 @@ func TestIngestStoragesSharedStorageOnceInTree(t *testing.T) {
 	}
 	if n := countBoxesByID(tree.Roots, "storage/remote-a/local2"); n != 1 {
 		t.Fatalf("local2 storage boxes = %d, want 1", n)
+	}
+}
+
+// Review PR #140: a node that is offline (still listed, but skipped by the
+// executor) keeps its storage rows; only rows of reporting nodes and of
+// nodes removed from the cluster are reconciled.
+func TestIngestStoragesOfflineNodeKeepsRows(t *testing.T) {
+	s, db, _ := newTestStore(t)
+	ctx := context.Background()
+	if err := s.UpsertRemote(ctx, remoteA()); err != nil {
+		t.Fatalf("UpsertRemote: %v", err)
+	}
+	seedStorageCluster(t, s, ctx)
+	offline := mkNode("p2")
+	offline.Status = pvecontract.NodeOffline
+	obs := newObsA().
+		nodes(mkNode("p1"), offline).
+		storages(onNode(mkStorage("local", "dir", 1<<30, 512<<20), "p1", false)).
+		build()
+	obs.CollectionGeneration = 2
+	obs.ObservedAt = testBase.Add(time.Minute)
+	rep, err := s.IngestObservation(ctx, obs)
+	if err != nil {
+		t.Fatalf("ingest 2: %v", err)
+	}
+	// p1 no longer reports nfs-shared: that row goes. p2 is offline: its
+	// local2 and nfs-shared rows stay.
+	if rep.StoragesDeleted != 1 {
+		t.Fatalf("report 2: %+v", rep)
+	}
+	got := storageRowPairs(t, db, "remote-a")
+	if len(got) != 3 || !got["p1\x00local"] || !got["p2\x00local2"] || !got["p2\x00nfs-shared"] || got["p1\x00nfs-shared"] {
+		t.Fatalf("remaining rows: %v", got)
 	}
 }
