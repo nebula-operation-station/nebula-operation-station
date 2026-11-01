@@ -161,7 +161,10 @@ func TestValidateReadPVERequest(t *testing.T) {
 		{name: "storage ok", req: &pb.ReadPVERequest{RemoteId: "pve-1", Method: pb.PVEReadMethod_PVE_READ_METHOD_STORAGE}, wantErr: false},
 		{name: "cluster ok", req: &pb.ReadPVERequest{RemoteId: "pve-1", Method: pb.PVEReadMethod_PVE_READ_METHOD_CLUSTER}, wantErr: false},
 		{name: "tasks ok", req: &pb.ReadPVERequest{RemoteId: "pve-1", Method: pb.PVEReadMethod_PVE_READ_METHOD_TASKS}, wantErr: false},
-		{name: "metrics ok", req: &pb.ReadPVERequest{RemoteId: "pve-1", Method: pb.PVEReadMethod_PVE_READ_METHOD_METRICS}, wantErr: false},
+		// METRICS names one exact target (spec 17 telemetry lease); the
+		// earlier parameterless shape is rejected.
+		{name: "metrics ok", req: &pb.ReadPVERequest{RemoteId: "pve-1", Method: pb.PVEReadMethod_PVE_READ_METHOD_METRICS, Params: &pb.ReadPVERequest_Metrics{Metrics: &pb.PVEReadMetricsParams{Node: "node1", Kind: "node"}}}, wantErr: false},
+		{name: "metrics without target", req: &pb.ReadPVERequest{RemoteId: "pve-1", Method: pb.PVEReadMethod_PVE_READ_METHOD_METRICS}, wantErr: true},
 		{name: "metrics with guest param", req: &pb.ReadPVERequest{RemoteId: "pve-1", Method: pb.PVEReadMethod_PVE_READ_METHOD_METRICS, Params: &pb.ReadPVERequest_Guest{Guest: guest(100)}}, wantErr: true},
 		{name: "guest config ok", req: &pb.ReadPVERequest{RemoteId: "pve-1", Method: pb.PVEReadMethod_PVE_READ_METHOD_GUEST_CONFIG, Params: &pb.ReadPVERequest_Guest{Guest: guest(100)}}, wantErr: false},
 		{name: "guest config without guest", req: &pb.ReadPVERequest{RemoteId: "pve-1", Method: pb.PVEReadMethod_PVE_READ_METHOD_GUEST_CONFIG}, wantErr: true},

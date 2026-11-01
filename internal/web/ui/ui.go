@@ -101,6 +101,9 @@ type Options struct {
 	Schedules Schedules
 	// Runbooks stores runbooks. Nil leaves the runbooks page empty.
 	Runbooks Runbooks
+	// DeployProfiles stores deploy profiles (ADR 0008 section 1). Nil
+	// leaves the deploy page empty.
+	DeployProfiles DeployProfiles
 	// Trust asks the executor about artifact trust (runbook pages). Nil
 	// shows "unknown" and no trust button.
 	Trust ArtifactTrust
@@ -160,34 +163,35 @@ type Handler struct {
 	publicOrigin string
 	// pages maps a content name to the parsed template set (layout +
 	// that page), so every page can define its own "content" block.
-	pages        map[string]*template.Template
-	staticFS     fs.FS
-	status       StatusProvider
-	hostNames    func(ctx context.Context) []string
-	hosts        func(ctx context.Context) ([]inventory.Host, error)
-	hostKeys     func(ctx context.Context) ([]*pb.HostKeyPin, error)
-	inventory    InventoryStore
-	operations   Operations
-	pins         PinStore
-	schedules    Schedules
-	runbooks     Runbooks
-	trust        ArtifactTrust
-	modules      Modules
-	lastResult   LastResultFunc
-	network      NetworkStore
-	discovery    DiscoveryStore
-	events       EventSource
-	auditLog     AuditStore
-	log          *slog.Logger
-	repin        Repinner
-	enroll       Enroller
-	serverIP     func() netip.Addr
-	securityKeys func(ctx context.Context) ([]*pb.WebAuthnCredential, error)
-	totpStatus   func(ctx context.Context) (*pb.GetTOTPStatusResponse, error)
-	pveChart     func(ctx context.Context) (pveinventory.Tree, error)
-	now          func() time.Time
-	pve          PVEStore
-	pveRemotes   PVERemoteMetaFunc
+	pages          map[string]*template.Template
+	staticFS       fs.FS
+	status         StatusProvider
+	hostNames      func(ctx context.Context) []string
+	hosts          func(ctx context.Context) ([]inventory.Host, error)
+	hostKeys       func(ctx context.Context) ([]*pb.HostKeyPin, error)
+	inventory      InventoryStore
+	operations     Operations
+	pins           PinStore
+	schedules      Schedules
+	runbooks       Runbooks
+	deployProfiles DeployProfiles
+	trust          ArtifactTrust
+	modules        Modules
+	lastResult     LastResultFunc
+	network        NetworkStore
+	discovery      DiscoveryStore
+	events         EventSource
+	auditLog       AuditStore
+	log            *slog.Logger
+	repin          Repinner
+	enroll         Enroller
+	serverIP       func() netip.Addr
+	securityKeys   func(ctx context.Context) ([]*pb.WebAuthnCredential, error)
+	totpStatus     func(ctx context.Context) (*pb.GetTOTPStatusResponse, error)
+	pveChart       func(ctx context.Context) (pveinventory.Tree, error)
+	now            func() time.Time
+	pve            PVEStore
+	pveRemotes     PVERemoteMetaFunc
 }
 
 // New parses the embedded templates and builds a Handler.
@@ -216,35 +220,36 @@ func New(o Options) (*Handler, error) {
 		serverIP = serverPrivateIPv4
 	}
 	return &Handler{
-		publicOrigin: o.PublicOrigin,
-		pages:        pages,
-		staticFS:     staticFS,
-		status:       o.Status,
-		hostNames:    o.HostNames,
-		hosts:        o.Hosts,
-		hostKeys:     o.HostKeys,
-		inventory:    o.Inventory,
-		operations:   o.Operations,
-		pins:         o.Pins,
-		schedules:    o.Schedules,
-		runbooks:     o.Runbooks,
-		trust:        o.Trust,
-		modules:      o.Modules,
-		lastResult:   o.LastResult,
-		network:      o.Network,
-		discovery:    o.Discovery,
-		events:       o.Events,
-		auditLog:     o.Audit,
-		repin:        o.Repin,
-		enroll:       o.Enroll,
-		serverIP:     serverIP,
-		securityKeys: o.SecurityKeys,
-		totpStatus:   o.TOTPStatus,
-		pveChart:     o.PVEChart,
-		pve:          o.PVE,
-		pveRemotes:   o.PVERemotes,
-		now:          o.Now,
-		log:          log,
+		publicOrigin:   o.PublicOrigin,
+		pages:          pages,
+		staticFS:       staticFS,
+		status:         o.Status,
+		hostNames:      o.HostNames,
+		hosts:          o.Hosts,
+		hostKeys:       o.HostKeys,
+		inventory:      o.Inventory,
+		operations:     o.Operations,
+		pins:           o.Pins,
+		schedules:      o.Schedules,
+		runbooks:       o.Runbooks,
+		deployProfiles: o.DeployProfiles,
+		trust:          o.Trust,
+		modules:        o.Modules,
+		lastResult:     o.LastResult,
+		network:        o.Network,
+		discovery:      o.Discovery,
+		events:         o.Events,
+		auditLog:       o.Audit,
+		repin:          o.Repin,
+		enroll:         o.Enroll,
+		serverIP:       serverIP,
+		securityKeys:   o.SecurityKeys,
+		totpStatus:     o.TOTPStatus,
+		pveChart:       o.PVEChart,
+		pve:            o.PVE,
+		pveRemotes:     o.PVERemotes,
+		now:            o.Now,
+		log:            log,
 	}, nil
 }
 
@@ -259,28 +264,31 @@ var pageFiles = map[string]string{
 	"setup":     "setup.html",
 	"settings":  "settings.html",
 
-	"operations":       "operations.html",
-	"inventory_import": "inventory_import.html",
-	"inventory_enroll": "inventory_enroll.html",
-	"operation_new":    "operation_new.html",
-	"operation":        "operation.html",
-	"schedules":        "schedules.html",
-	"runbooks":         "runbooks.html",
-	"runbook":          "runbook.html",
-	"runbook_edit":     "runbook_edit.html",
-	"modules":          "modules.html",
-	"module":           "module.html",
-	"host":             "host.html",
-	"network":          "network.html",
-	"network_quick":    "network_quick.html",
-	"network_detail":   "network_detail.html",
-	"asset":            "asset.html",
-	"search":           "search.html",
-	"history":          "history.html",
-	"discovery":        "discovery.html",
-	"discovery_job":    "discovery_job.html",
-	"pve":              "pve.html",
-	"pve_detail":       "pve_detail.html",
+	"operations":          "operations.html",
+	"inventory_import":    "inventory_import.html",
+	"inventory_enroll":    "inventory_enroll.html",
+	"operation_new":       "operation_new.html",
+	"operation":           "operation.html",
+	"schedules":           "schedules.html",
+	"runbooks":            "runbooks.html",
+	"runbook":             "runbook.html",
+	"runbook_edit":        "runbook_edit.html",
+	"deploy_profiles":     "deploy_profiles.html",
+	"deploy_profile":      "deploy_profile.html",
+	"deploy_profile_edit": "deploy_profile_edit.html",
+	"modules":             "modules.html",
+	"module":              "module.html",
+	"host":                "host.html",
+	"network":             "network.html",
+	"network_quick":       "network_quick.html",
+	"network_detail":      "network_detail.html",
+	"asset":               "asset.html",
+	"search":              "search.html",
+	"history":             "history.html",
+	"discovery":           "discovery.html",
+	"discovery_job":       "discovery_job.html",
+	"pve":                 "pve.html",
+	"pve_detail":          "pve_detail.html",
 }
 
 // pagePartials are extra template files a page uses.
@@ -334,6 +342,12 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("POST /runbooks/save", h.handleRunbookSave)
 	mux.HandleFunc("POST /runbooks/trust/begin", h.handleRunbookTrustBegin)
 	mux.HandleFunc("POST /runbooks/trust/commit", h.handleRunbookTrustCommit)
+	// Deploy profiles (ADR 0008 section 1, PV-04).
+	mux.HandleFunc("GET /deploy", h.handleDeployProfiles)
+	mux.HandleFunc("GET /deploy/new", h.handleDeployProfileEdit)
+	mux.HandleFunc("GET /deploy/{slug}", h.handleDeployProfile)
+	mux.HandleFunc("GET /deploy/{slug}/edit", h.handleDeployProfileEdit)
+	mux.HandleFunc("POST /deploy/save", h.handleDeployProfileSave)
 	// Modules (M7-5).
 	mux.HandleFunc("GET /modules", h.handleModules)
 	mux.HandleFunc("GET /modules/{name}", h.handleModule)
@@ -473,6 +487,8 @@ type pageData struct {
 	Schedules *schedulesData
 	// Runbooks is the data of the runbook pages.
 	Runbooks *runbooksData
+	// DeployProfiles is the data of the deploy profile pages.
+	DeployProfiles *deployProfilesData
 	// Modules is the data of the module pages.
 	Modules *modulesData
 	// Network is the data of the network pages.

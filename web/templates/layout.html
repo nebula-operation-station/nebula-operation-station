@@ -42,6 +42,10 @@
           <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-orbit"></use></svg>
           <span>PVE remotes</span>
         </a>
+        <a class="sidebar__item{{if eq .Active "deploy"}} sidebar__item--active{{end}}" href="/deploy"{{if .NavCollapsed}} title="Deploy profiles"{{end}}{{if eq .Active "deploy"}} aria-current="page"{{end}}>
+          <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-rocket"></use></svg>
+          <span>Deploy profiles</span>
+        </a>
         {{end}}
         <a class="sidebar__item{{if eq .Active "network"}} sidebar__item--active{{end}}" href="/network"{{if .NavCollapsed}} title="Network"{{end}}{{if eq .Active "network"}} aria-current="page"{{end}}>
           <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-globe"></use></svg>

@@ -1,0 +1,62 @@
+name: firewall
+version: 1.0.0
+title: Firewall
+description: >
+  Manages the host firewall with ufw (default deny in, allow out,
+  allow the SSH port) and fail2ban with an sshd jail in aggressive
+  mode. Uninstall disables ufw and purges both. Targets Debian 12/13
+  and Ubuntu 22.04/24.04.
+actions:
+  install:
+    title: Install firewall
+    description: >
+      Installs ufw and fail2ban, sets the default policies, allows
+      the SSH port, enables ufw and activates the sshd jail. No-op
+      when already in place.
+    script: actions/install.sh
+    risk: medium
+    durable: true
+    timeout: 600s
+    params:
+      - {name: ssh_port, label: SSH port, type: int}
+    secrets: []
+    declares: [requires_root, writes_config, network_access]
+  verify:
+    title: Verify firewall
+    description: >
+      Read-only check that ufw is active with the SSH port allowed
+      and the fail2ban sshd jail is running. Exits non-zero when it
+      is not.
+    script: actions/verify.sh
+    risk: medium
+    durable: false
+    timeout: 120s
+    params:
+      - {name: ssh_port, label: SSH port, type: int}
+    secrets: []
+    declares: [requires_root]
+  update:
+    title: Update firewall
+    description: >
+      Upgrades ufw and fail2ban and re-asserts the module's rules.
+      No-op when current.
+    script: actions/update.sh
+    risk: medium
+    durable: true
+    timeout: 600s
+    params:
+      - {name: ssh_port, label: SSH port, type: int}
+    secrets: []
+    declares: [requires_root, writes_config, network_access]
+  uninstall:
+    title: Uninstall firewall
+    description: >
+      Disables ufw, removes the fail2ban jail drop-in and purges both
+      packages. No-op when not installed.
+    script: actions/uninstall.sh
+    risk: medium
+    durable: true
+    timeout: 600s
+    params: []
+    secrets: []
+    declares: [requires_root, writes_config]

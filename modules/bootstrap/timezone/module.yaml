@@ -1,0 +1,58 @@
+name: timezone
+version: 1.0.0
+title: Timezone
+description: >
+  Sets the system timezone (IANA zone, e.g. /Europe/Berlin) by
+  linking /etc/localtime and writing /etc/timezone. Uninstall resets
+  the system to UTC. Targets Debian 12/13 and Ubuntu 22.04/24.04.
+actions:
+  install:
+    title: Install timezone
+    description: >
+      Links /etc/localtime to the requested IANA zone and writes
+      /etc/timezone. No-op when already set.
+    script: actions/install.sh
+    risk: medium
+    durable: true
+    timeout: 120s
+    params:
+      - {name: zone, label: IANA zone with leading slash, type: path}
+    secrets: []
+    declares: [requires_root, writes_config]
+  verify:
+    title: Verify timezone
+    description: >
+      Read-only check that /etc/localtime and /etc/timezone point at
+      the requested zone. Exits non-zero when they do not.
+    script: actions/verify.sh
+    risk: low
+    durable: false
+    timeout: 120s
+    params:
+      - {name: zone, label: IANA zone with leading slash, type: path}
+    secrets: []
+    declares: []
+  update:
+    title: Update timezone
+    description: >
+      Reconciles /etc/localtime and /etc/timezone to the requested
+      zone. Same behavior as install.
+    script: actions/update.sh
+    risk: medium
+    durable: true
+    timeout: 120s
+    params:
+      - {name: zone, label: IANA zone with leading slash, type: path}
+    secrets: []
+    declares: [requires_root, writes_config]
+  uninstall:
+    title: Uninstall timezone
+    description: >
+      Resets the system timezone to UTC. No-op when already UTC.
+    script: actions/uninstall.sh
+    risk: medium
+    durable: true
+    timeout: 120s
+    params: []
+    secrets: []
+    declares: [requires_root, writes_config]

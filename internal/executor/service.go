@@ -83,6 +83,8 @@ type Service struct {
 	pveMu sync.Mutex
 	// pveRead holds per-remote provider read slots and verified CAs.
 	pveRead pveReadState
+	// pveMetrics caps live metrics targets and metrics requests per remote.
+	pveMetrics pveMetricsGate
 	// reconcileInterval is the interval passed to Reconcile; ReconcileOnce
 	// uses it to compute the backoff between failed attempts (issue #70).
 	reconcileInterval time.Duration

@@ -70,6 +70,13 @@ func (a *Authority) ClaimMember(ctx context.Context, parent canonical.Digest, in
 	if _, ok := a.members[key]; ok {
 		return MemberPermit{}, failure(permit.CodeWrongState, "member already claimed")
 	}
+	// E12: a member behind an unopened stage gate, with an unsatisfied
+	// dependency, or on a host where another member is running is not
+	// claimable. Dispatch takes only live claimed permits, so gating the claim
+	// gates dispatch.
+	if err := a.checkMemberGatesLocked(e, frozen); err != nil {
+		return MemberPermit{}, err
+	}
 	if a.options.Store == nil {
 		return MemberPermit{}, failure(permit.CodeStorage, "execution ID store unavailable")
 	}
@@ -88,6 +95,12 @@ func (a *Authority) ClaimMember(ctx context.Context, parent canonical.Digest, in
 		Expiry:       time.Unix(plan.ExpiryUnix, 0),
 	}
 	a.members[key] = mp
+	hk := memberHostKey(frozen)
+	if e.rollout != nil {
+		e.rollout.inFlight[frozen.MemberID] = true
+		e.rollout.hostBusy[hk] = frozen.MemberID
+	}
+	a.batchExecIndex[frozen.Request.ExecutionID] = batchExecRef{digest: parent, memberID: frozen.MemberID, hostKey: hk}
 	a.emit("member_claimed", parent, "", frozen.MemberID)
 	return mp.clone(), nil
 }

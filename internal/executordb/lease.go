@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/schedgrant"
 )
 
 // Read grants (ADR 0007 "One standing read-grant mechanism"); DB
@@ -101,6 +102,10 @@ func (db *DB) RevokeReadGrant(id string, at time.Time) (bool, error) {
 	return n == 1, err
 }
 
+// readActionLastRetention is how long an interval row is kept: the
+// longest interval any read grant may approve (schedgrant.MaxInterval).
+const readActionLastRetention = schedgrant.MaxInterval
+
 // ReserveReadRun atomically reserves one run of actionID on hostID under
 // grantID at now, in one transaction, so two concurrent reservations
 // cannot both succeed. It succeeds only while (a) the target's
@@ -116,6 +121,9 @@ func (db *DB) RevokeReadGrant(id string, at time.Time) (bool, error) {
 func (db *DB) ReserveReadRun(grantID, actionID, hostID string, now time.Time, budget int, minInterval time.Duration) (bool, error) {
 	if budget < 1 {
 		return false, fmt.Errorf("executordb: reserve read run: budget %d below 1", budget)
+	}
+	if minInterval > readActionLastRetention {
+		return false, fmt.Errorf("executordb: reserve read run: interval %s above %s", minInterval, readActionLastRetention)
 	}
 	tx, err := db.sql.Begin()
 	if err != nil {
@@ -158,6 +166,11 @@ func (db *DB) ReserveReadRun(grantID, actionID, hostID string, now time.Time, bu
 	}
 	if spent >= budget {
 		return deny(nil)
+	}
+	// Interval rows older than the longest approvable interval can never
+	// deny again; drop them so per-guest and per-target keys stay bounded.
+	if _, err := tx.Exec(`DELETE FROM read_action_last WHERE last_run <= ?`, effective-int64(readActionLastRetention/time.Second)); err != nil {
+		return false, fmt.Errorf("executordb: reserve read run: %w", err)
 	}
 	var last int64
 	err = tx.QueryRow(`SELECT last_run FROM read_action_last WHERE action_id = ? AND host_id = ?`, actionID, hostID).Scan(&last)

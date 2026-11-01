@@ -45,9 +45,8 @@ const (
 )
 
 // pveReadMethods maps the wired typed methods to their grant method names.
-// BACKUPS and METRICS stay Unimplemented: backup catalog completeness
-// depends on token privileges the registry does not record, and metrics
-// need their own telemetry target lease (spec 17).
+// METRICS is not listed: it runs under the separate provider telemetry
+// lease (authorizePveRead).
 var pveReadMethods = map[pb.PVEReadMethod]string{
 	pb.PVEReadMethod_PVE_READ_METHOD_NODES:        permit.ProviderMethodNodes,
 	pb.PVEReadMethod_PVE_READ_METHOD_GUESTS:       permit.ProviderMethodGuests,
@@ -57,6 +56,7 @@ var pveReadMethods = map[pb.PVEReadMethod]string{
 	pb.PVEReadMethod_PVE_READ_METHOD_SNAPSHOTS:    permit.ProviderMethodSnapshots,
 	pb.PVEReadMethod_PVE_READ_METHOD_CLUSTER:      permit.ProviderMethodCluster,
 	pb.PVEReadMethod_PVE_READ_METHOD_TASKS:        permit.ProviderMethodTasks,
+	pb.PVEReadMethod_PVE_READ_METHOD_BACKUPS:      permit.ProviderMethodBackups,
 }
 
 var (
@@ -157,6 +157,9 @@ func (s *Service) ReadPVE(ctx context.Context, in *pb.ReadPVERequest) (*pb.ReadP
 		return nil, err
 	}
 	method, ok := pveReadMethods[in.Method]
+	if in.Method == pb.PVEReadMethod_PVE_READ_METHOD_METRICS {
+		method, ok = permit.ProviderMethodMetrics, true
+	}
 	if !ok {
 		return nil, status.Error(codes.Unimplemented, "read pve: method is not wired yet")
 	}
@@ -184,12 +187,9 @@ func (s *Service) ReadPVE(ctx context.Context, in *pb.ReadPVERequest) (*pb.ReadP
 	}
 	defer release()
 
-	claim, err := s.auth.AuthorizeProviderRead(permit.ProviderRead{
-		RemoteID: rm.RemoteID, Method: method, VMID: in.GetGuest().GetVmid(), TrustPin: rm.TrustPin,
-		TrustGeneration: rm.TrustGeneration, CredentialVersion: rm.Credentials.ReadVersion,
-	})
+	claim, err := s.authorizePveRead(rm, method, in)
 	if err != nil {
-		return nil, readGrantStatus(err)
+		return nil, err
 	}
 	token, version, err := s.vault.OpenVersion(rm.Credentials.ReadRef)
 	if err != nil || version != rm.Credentials.ReadVersion {
@@ -231,6 +231,10 @@ func (s *Service) ReadPVE(ctx context.Context, in *pb.ReadPVERequest) (*pb.ReadP
 		out.Payload = &pb.ReadPVEResponse_Snapshots{Snapshots: readPveSnapshots(ctx, rm.RemoteID, base, hc, supplier, in.GetGuest().GetVmid(), s.clock())}
 	case pb.PVEReadMethod_PVE_READ_METHOD_TASKS:
 		out.Payload = &pb.ReadPVEResponse_Tasks{Tasks: readPveTasks(ctx, rm.RemoteID, base, hc, supplier, s.clock())}
+	case pb.PVEReadMethod_PVE_READ_METHOD_BACKUPS:
+		out.Payload = &pb.ReadPVEResponse_Backups{Backups: readPveBackups(ctx, rm.RemoteID, base, hc, supplier, in.GetGuest().GetVmid(), s.clock())}
+	case pb.PVEReadMethod_PVE_READ_METHOD_METRICS:
+		out.Payload = &pb.ReadPVEResponse_Metrics{Metrics: readPveMetrics(ctx, base, hc, supplier, pveMetricsTarget(in.GetMetrics()))}
 	}
 	if watch.failed.Load() {
 		return nil, s.blockPveRead(rm.RemoteID)
@@ -243,6 +247,40 @@ func (s *Service) ReadPVE(ctx context.Context, in *pb.ReadPVERequest) (*pb.ReadP
 	}
 	s.log.Info("audit", "kind", "pve_read", "remote", rm.RemoteID, "method", method, "grant", claim.GrantID)
 	return out, nil
+}
+
+// authorizePveRead reserves the grant budget of one read. Metrics reads use
+// the separate provider telemetry lease (spec 17 "SSH/provider telemetry
+// leases") for the exact target and first pass the per-remote gate (one
+// metrics request per second, at most four live targets renewed within 30
+// s, spec 12 "Visible-target requests"); a gate slot is released again
+// when no grant authorizes the read, so a request adds no authority.
+func (s *Service) authorizePveRead(rm executordb.PveRemote, method string, in *pb.ReadPVERequest) (permit.ProviderClaim, error) {
+	if in.Method != pb.PVEReadMethod_PVE_READ_METHOD_METRICS {
+		claim, err := s.auth.AuthorizeProviderRead(permit.ProviderRead{
+			RemoteID: rm.RemoteID, Method: method, VMID: in.GetGuest().GetVmid(), TrustPin: rm.TrustPin,
+			TrustGeneration: rm.TrustGeneration, CredentialVersion: rm.Credentials.ReadVersion,
+		})
+		if err != nil {
+			return permit.ProviderClaim{}, readGrantStatus(err)
+		}
+		return claim, nil
+	}
+	target := pveMetricsTarget(in.GetMetrics())
+	live := in.GetMetrics().GetLive()
+	undo, err := s.pveMetrics.admit(rm.RemoteID, pveMetricsGateKey(target), live, s.clock())
+	if err != nil {
+		return permit.ProviderClaim{}, err
+	}
+	claim, err := s.auth.AuthorizeProviderMetrics(permit.ProviderMetricsRead{
+		RemoteID: rm.RemoteID, TrustPin: rm.TrustPin, TrustGeneration: rm.TrustGeneration,
+		CredentialVersion: rm.Credentials.ReadVersion, Target: target, Live: live,
+	})
+	if err != nil {
+		undo()
+		return permit.ProviderClaim{}, readGrantStatus(err)
+	}
+	return claim, nil
 }
 
 // blockPveRead blocks a remote whose endpoints failed trust verification and
@@ -516,16 +554,37 @@ func readPveCluster(ctx context.Context, remoteID, base string, hc *http.Client,
 	if err != nil {
 		return &pb.PVECluster{State: pveUnavailable, Reason: pveReasonRead}
 	}
+	votes, err := c.ClusterNodeVotes(ctx)
+	if err != nil {
+		return &pb.PVECluster{State: pveUnavailable, Reason: pveReasonInvalid}
+	}
 	obs := pvecontract.ClusterObservation{Quorum: "not-quorate", Nodes: []pvecontract.ClusterNode{}, HAResources: []pvecontract.HAResource{}}
 	if cs.Quorum {
 		obs.Quorum = "quorate"
 	}
+	voteState := make([]pvecontract.TriState, 0, len(cs.Members))
+	maintState := make([]pvecontract.TriState, 0, len(cs.Members))
 	for _, m := range cs.Members {
 		st := pvecontract.NodeOffline
 		if m.Online {
 			st = pvecontract.NodeOnline
 		}
-		obs.Nodes = append(obs.Nodes, pvecontract.ClusterNode{Node: m.Name, Status: st})
+		vote, maint := pvecontract.Unknown, pvecontract.Unknown
+		if n, ok := votes.Votes[m.Name]; votes.Available && ok {
+			vote = pvecontract.No
+			if n > 0 {
+				vote = pvecontract.Yes
+			}
+		}
+		if mm, ok := ha.Maintenance[m.Name]; ha.Available && ok {
+			maint = pvecontract.No
+			if mm {
+				maint = pvecontract.Yes
+			}
+		}
+		voteState, maintState = append(voteState, vote), append(maintState, maint)
+		obs.Nodes = append(obs.Nodes, pvecontract.ClusterNode{Node: m.Name, Status: st,
+			Vote: vote == pvecontract.Yes, Maintenance: maint == pvecontract.Yes})
 	}
 	if ha.Available {
 		for _, r := range ha.Resources {
@@ -543,8 +602,9 @@ func readPveCluster(ctx context.Context, remoteID, base string, hc *http.Client,
 		return &pb.PVECluster{State: pveUnavailable, Reason: pveReasonInvalid}
 	}
 	out := &pb.PVECluster{State: pveAvailable, Quorum: obs.Quorum}
-	for _, n := range obs.Nodes {
-		out.Nodes = append(out.Nodes, &pb.PVEClusterNode{Node: n.Node, Status: string(n.Status)})
+	for i, n := range obs.Nodes {
+		out.Nodes = append(out.Nodes, &pb.PVEClusterNode{Node: n.Node, Status: string(n.Status), Vote: n.Vote, Maintenance: n.Maintenance,
+			VoteState: string(voteState[i]), MaintenanceState: string(maintState[i])})
 	}
 	for _, h := range obs.HAResources {
 		out.HaResources = append(out.HaResources, &pb.PVEHAResource{Id: h.ID, Kind: string(h.Kind), Vmid: h.VMID,

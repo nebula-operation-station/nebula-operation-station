@@ -464,6 +464,19 @@ func (s *Store) clock() time.Time {
 // mark; garbage collection is skipped then.
 func (s *Store) clockBackward() bool { return s.now().UTC().Before(s.idx.ClockHighWater) }
 
+// MaxClockJump is the largest forward wall-clock advance that garbage
+// collection trusts in one step; a larger jump is an uncertain clock and
+// collection is skipped (spec 10, "uncertain clock").
+const MaxClockJump = 730 * 24 * time.Hour
+
+// clockForward reports whether the wall clock jumped implausibly forward
+// past the high-water mark; garbage collection is skipped then (spec 10,
+// "a detected backward/uncertain clock must not make bytes eligible for
+// early deletion").
+func (s *Store) clockForward() bool {
+	return s.now().UTC().Sub(s.idx.ClockHighWater) > MaxClockJump
+}
+
 func maxTime(a, b time.Time) time.Time {
 	if a.After(b) {
 		return a

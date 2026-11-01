@@ -1,0 +1,61 @@
+name: packages
+version: 1.0.0
+title: Packages
+description: >
+  Installs, verifies, updates and removes a fixed set of Debian
+  packages from the distribution archives. The package list is a
+  parameter, not a free-form command. Targets Debian 12/13 and
+  Ubuntu 22.04/24.04.
+actions:
+  install:
+    title: Install packages
+    description: >
+      apt-get update, then installs the missing packages from the
+      list. No-op when all are installed.
+    script: actions/install.sh
+    risk: medium
+    durable: true
+    timeout: 900s
+    params:
+      - {name: packages, label: "Package list, colon-separated", type: name}
+    secrets: []
+    declares: [requires_root, network_access]
+  verify:
+    title: Verify packages
+    description: >
+      Read-only check that every package in the list is installed.
+      Exits non-zero when one is missing.
+    script: actions/verify.sh
+    risk: low
+    durable: false
+    timeout: 120s
+    params:
+      - {name: packages, label: "Package list, colon-separated", type: name}
+    secrets: []
+    declares: []
+  update:
+    title: Update packages
+    description: >
+      apt-get update, then upgrades only the packages in the list.
+      No-op when all are current.
+    script: actions/update.sh
+    risk: medium
+    durable: true
+    timeout: 900s
+    params:
+      - {name: packages, label: "Package list, colon-separated", type: name}
+    secrets: []
+    declares: [requires_root, network_access]
+  uninstall:
+    title: Uninstall packages
+    description: >
+      Purges the packages in the list and autoremoves what is left
+      unused. No-op when none are installed.
+    script: actions/uninstall.sh
+    risk: high
+    durable: true
+    timeout: 900s
+    params:
+      - {name: packages, label: "Package list, colon-separated", type: name}
+    secrets: []
+    declares: [requires_root, network_access]
