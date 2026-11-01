@@ -45,12 +45,18 @@ const (
 )
 
 // pveReadMethods maps the wired typed methods to their grant method names.
-// The remaining methods stay Unimplemented until their mapping lands.
+// BACKUPS and METRICS stay Unimplemented: backup catalog completeness
+// depends on token privileges the registry does not record, and metrics
+// need their own telemetry target lease (spec 17).
 var pveReadMethods = map[pb.PVEReadMethod]string{
-	pb.PVEReadMethod_PVE_READ_METHOD_NODES:   permit.ProviderMethodNodes,
-	pb.PVEReadMethod_PVE_READ_METHOD_GUESTS:  permit.ProviderMethodGuests,
-	pb.PVEReadMethod_PVE_READ_METHOD_STORAGE: permit.ProviderMethodStorage,
-	pb.PVEReadMethod_PVE_READ_METHOD_CLUSTER: permit.ProviderMethodCluster,
+	pb.PVEReadMethod_PVE_READ_METHOD_NODES:        permit.ProviderMethodNodes,
+	pb.PVEReadMethod_PVE_READ_METHOD_GUESTS:       permit.ProviderMethodGuests,
+	pb.PVEReadMethod_PVE_READ_METHOD_GUEST_CONFIG: permit.ProviderMethodGuestConfig,
+	pb.PVEReadMethod_PVE_READ_METHOD_GUEST_AGENT:  permit.ProviderMethodGuestAgent,
+	pb.PVEReadMethod_PVE_READ_METHOD_STORAGE:      permit.ProviderMethodStorage,
+	pb.PVEReadMethod_PVE_READ_METHOD_SNAPSHOTS:    permit.ProviderMethodSnapshots,
+	pb.PVEReadMethod_PVE_READ_METHOD_CLUSTER:      permit.ProviderMethodCluster,
+	pb.PVEReadMethod_PVE_READ_METHOD_TASKS:        permit.ProviderMethodTasks,
 }
 
 var (
@@ -179,7 +185,7 @@ func (s *Service) ReadPVE(ctx context.Context, in *pb.ReadPVERequest) (*pb.ReadP
 	defer release()
 
 	claim, err := s.auth.AuthorizeProviderRead(permit.ProviderRead{
-		RemoteID: rm.RemoteID, Method: method, TrustPin: rm.TrustPin,
+		RemoteID: rm.RemoteID, Method: method, VMID: in.GetGuest().GetVmid(), TrustPin: rm.TrustPin,
 		TrustGeneration: rm.TrustGeneration, CredentialVersion: rm.Credentials.ReadVersion,
 	})
 	if err != nil {
@@ -217,6 +223,14 @@ func (s *Service) ReadPVE(ctx context.Context, in *pb.ReadPVERequest) (*pb.ReadP
 		out.Payload = &pb.ReadPVEResponse_Storages{Storages: readPveStorages(ctx, rm.RemoteID, base, hc, supplier, s.clock())}
 	case pb.PVEReadMethod_PVE_READ_METHOD_CLUSTER:
 		out.Payload = &pb.ReadPVEResponse_Cluster{Cluster: readPveCluster(ctx, rm.RemoteID, base, hc, supplier, s.clock())}
+	case pb.PVEReadMethod_PVE_READ_METHOD_GUEST_CONFIG:
+		out.Payload = &pb.ReadPVEResponse_GuestConfig{GuestConfig: readPveGuestConfig(ctx, rm.RemoteID, base, hc, supplier, in.GetGuest().GetVmid(), s.clock())}
+	case pb.PVEReadMethod_PVE_READ_METHOD_GUEST_AGENT:
+		out.Payload = &pb.ReadPVEResponse_GuestAgent{GuestAgent: readPveGuestAgent(ctx, rm.RemoteID, base, hc, supplier, in.GetGuest().GetVmid(), s.clock())}
+	case pb.PVEReadMethod_PVE_READ_METHOD_SNAPSHOTS:
+		out.Payload = &pb.ReadPVEResponse_Snapshots{Snapshots: readPveSnapshots(ctx, rm.RemoteID, base, hc, supplier, in.GetGuest().GetVmid(), s.clock())}
+	case pb.PVEReadMethod_PVE_READ_METHOD_TASKS:
+		out.Payload = &pb.ReadPVEResponse_Tasks{Tasks: readPveTasks(ctx, rm.RemoteID, base, hc, supplier, s.clock())}
 	}
 	if watch.failed.Load() {
 		return nil, s.blockPveRead(rm.RemoteID)

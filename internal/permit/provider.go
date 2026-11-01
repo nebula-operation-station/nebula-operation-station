@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
@@ -125,8 +126,12 @@ func validateProviderGrant(d ReadGrantDoc) error {
 // its own registry; nothing in it comes from the caller except the remote
 // ID and method, which select work inside existing authority.
 type ProviderRead struct {
-	RemoteID          string
-	Method            string
+	RemoteID string
+	Method   string
+	// VMID is the guest of a per-guest method (guest_config, guest_agent,
+	// snapshots, backups) and 0 for remote-wide methods. It keys the
+	// method's interval per guest; the request budget stays per remote.
+	VMID              uint64
 	TrustPin          string
 	TrustGeneration   uint64
 	CredentialVersion int64
@@ -136,8 +141,32 @@ type ProviderRead struct {
 // prefix keeps it disjoint from SSH host IDs, which cannot contain ':'.
 func providerBudgetKey(remoteID string) string { return "pve:" + remoteID }
 
-// providerActionKey is the interval key of one method.
-func providerActionKey(method string) string { return "pve." + method }
+// providerGuestMethods are the methods that read one guest.
+var providerGuestMethods = []string{ProviderMethodGuestConfig, ProviderMethodGuestAgent, ProviderMethodSnapshots, ProviderMethodBackups}
+
+// maxProviderVMID is the largest guest ID a provider read may name.
+const maxProviderVMID = pvecontract.MaxVMID
+
+// validProviderRead reports whether r names a remote and method, with a
+// guest exactly for the per-guest methods.
+func validProviderRead(r ProviderRead) bool {
+	if !pvecontract.ValidRemoteID(r.RemoteID) || !ValidProviderMethod(r.Method) {
+		return false
+	}
+	if slices.Contains(providerGuestMethods, r.Method) {
+		return r.VMID >= pvecontract.MinVMID && r.VMID <= maxProviderVMID
+	}
+	return r.VMID == 0
+}
+
+// providerActionKey is the interval key of one read: the method, and for
+// per-guest methods the guest, so each guest keeps its own cadence.
+func providerActionKey(r ProviderRead) string {
+	if r.VMID != 0 {
+		return "pve." + r.Method + ":" + strconv.FormatUint(r.VMID, 10)
+	}
+	return "pve." + r.Method
+}
 
 // covers reports whether the provider target authorizes r: same remote,
 // method listed, and identical trust pin, generation and credential version.
@@ -166,7 +195,7 @@ func (a *Authority) AuthorizeProviderRead(r ProviderRead) (ProviderClaim, error)
 	if a.leases == nil {
 		return ProviderClaim{}, fail(CodeLeaseUnavailable, "")
 	}
-	if !pvecontract.ValidRemoteID(r.RemoteID) || !ValidProviderMethod(r.Method) {
+	if !validProviderRead(r) {
 		return ProviderClaim{}, fail(CodeLeaseInvalid, "malformed provider read")
 	}
 	a.mu.Lock()
@@ -235,7 +264,7 @@ func (a *Authority) AuthorizeProviderRead(r ProviderRead) (ProviderClaim, error)
 	budgetDenied := false
 	for _, c := range candidates {
 		interval := time.Duration(c.doc.MinIntervalS) * time.Second
-		reserved, err := a.leases.ReserveReadRun(c.id, providerActionKey(r.Method), providerBudgetKey(r.RemoteID), a.now(), int(c.doc.RunBudget), interval)
+		reserved, err := a.leases.ReserveReadRun(c.id, providerActionKey(r), providerBudgetKey(r.RemoteID), a.now(), int(c.doc.RunBudget), interval)
 		if errors.Is(err, ErrReadGrantInactive) {
 			continue
 		}
