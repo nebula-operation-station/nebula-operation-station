@@ -1,0 +1,66 @@
+{{define "content"}}
+{{with .DeployProfiles.Edit}}
+<h1>{{if .Existing}}Edit deploy profile{{else}}New deploy profile{{end}}</h1>
+<section class="panel" aria-label="Deploy profile editor">
+  <form id="deploy-profile-form" class="form"
+    data-draft="{{.Draft}}" data-modules="{{.Modules}}" data-presets="{{.Presets}}" novalidate>
+    <label>Slug (lowercase letters, digits, <code>-</code>; it never changes)
+      <input type="text" id="dp-slug" maxlength="40" autocomplete="off" pattern="[a-z0-9][a-z0-9-]{0,39}"></label>
+    <label>Title <input type="text" id="dp-title" maxlength="100" autocomplete="off"></label>
+    <label>Description <textarea id="dp-description" rows="3" maxlength="2000"></textarea></label>
+    <label>Image reference <input type="text" id="dp-image" maxlength="64" autocomplete="off"></label>
+    <label>Storage class <input type="text" id="dp-storage" maxlength="64" autocomplete="off" placeholder="local-lvm"></label>
+    <fieldset>
+      <legend>Size</legend>
+      <p class="hint">A preset (S/M/L/XL) or a custom size inside the bounds. Custom: 1–64 vCPU, 1–256 GiB RAM, 1–10240 GiB
+        disk, and the disk must fit the RAM (at most 16 GiB per GiB of RAM).</p>
+      <label>Preset
+        <select id="dp-size-preset">
+          <option value="S">S</option><option value="M" selected>M</option><option value="L">L</option><option value="XL">XL</option>
+          <option value="">custom</option>
+        </select></label>
+      <div id="dp-size-custom" hidden>
+        <label>Custom vCPU <input type="number" id="dp-vcpu" min="1" max="64" inputmode="numeric"></label>
+        <label>Custom RAM (GiB) <input type="number" id="dp-ram" min="1" max="256" inputmode="numeric"></label>
+        <label>Custom disk (GiB) <input type="number" id="dp-disk" min="1" max="10240" inputmode="numeric"></label>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>Network</legend>
+      <label>Bridge <input type="text" id="dp-bridge" maxlength="64" autocomplete="off" placeholder="vmbr0"></label>
+      <label>VLAN (0 = none) <input type="number" id="dp-vlan" min="0" max="4094" inputmode="numeric"></label>
+      <label class="choice"><input type="checkbox" id="dp-dhcp"> DHCP (otherwise the IP comes from the IPAM pool)</label>
+      <label>IPAM pool <input type="text" id="dp-ipam" maxlength="64" autocomplete="off"></label>
+    </fieldset>
+    <fieldset>
+      <legend>DNS</legend>
+      <label>Nameservers (comma-separated, at most 4) <input type="text" id="dp-nameservers" autocomplete="off" placeholder="1.1.1.1, 9.9.9.9"></label>
+      <label>Search domain <input type="text" id="dp-search" maxlength="253" autocomplete="off"></label>
+    </fieldset>
+    <fieldset>
+      <legend>Bootstrap modules</legend>
+      <p class="hint">Modules run in the order checked (at most 10). Each module can carry up to 8 parameters. A parameter is
+        never a secret: anything sensitive is referenced from the vault below.</p>
+      <div id="dp-bootstrap"></div>
+    </fieldset>
+    <fieldset>
+      <legend>Runbooks</legend>
+      <p class="hint">Runbooks this profile references (at most 10), by slug and version.</p>
+      <div id="dp-runbooks"></div>
+      <button type="button" id="dp-runbook-add" class="button button--small">Add runbook</button>
+    </fieldset>
+    <fieldset>
+      <legend>Vault references</legend>
+      <p class="hint">Slots the provisioning reads from the vault (at most 8). Only the reference goes into the profile —
+        never the value.</p>
+      <div id="dp-vault"></div>
+      <button type="button" id="dp-vault-add" class="button button--small">Add vault reference</button>
+    </fieldset>
+    <div class="actions">
+      <button type="submit" id="dp-save" class="button">Save as new version</button>
+    </div>
+  </form>
+</section>
+{{end}}
+<p id="message" class="message" role="status" aria-live="polite"></p>
+{{end}}

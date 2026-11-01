@@ -1,0 +1,33 @@
+{{define "content"}}
+<h1>Deploy Profiles</h1>
+<section class="panel" aria-label="Deploy profiles">
+  <p class="hint">A deploy profile is a secret-free preset for provisioning a guest: size (S/M/L/XL or a bounded custom
+     size), image, network and DNS, the bootstrap modules to run, the runbooks it references and the vault entries it needs
+     (references only — no secret values ever). Every save is a new, unchangeable version; provisioning always uses the exact
+     version it was planned with.</p>
+  <div class="actions"><a class="button" href="/deploy/new">New deploy profile</a></div>
+  {{with .DeployProfiles}}
+  {{if .Rows}}
+  <div class="table-wrap">
+  <table class="inventory">
+    <thead><tr><th>Profile</th><th>Title</th><th>Image</th><th>Size</th><th>Version</th><th>Saved</th></tr></thead>
+    <tbody>
+      {{range .Rows}}
+      <tr>
+        <td><a href="/deploy/{{.Slug}}">{{.Slug}}</a></td>
+        <td>{{.Title}}</td>
+        <td>{{.Image}}</td>
+        <td>{{.SizeLabel}}</td>
+        <td>{{.Version}}</td>
+        <td>{{timeTag .Created}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p>No deploy profiles yet.</p>
+  {{end}}
+  {{end}}
+</section>
+{{end}}

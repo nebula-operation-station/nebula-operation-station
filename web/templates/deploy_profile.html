@@ -1,0 +1,27 @@
+{{define "content"}}
+{{with .DeployProfiles.Detail}}
+<h1>Deploy profile {{.Slug}}, version {{.Version}}</h1>
+<section class="panel" aria-label="Deploy profile">
+  <p class="status">{{.Title}}</p>
+  {{if .Description}}<p class="hint">{{.Description}}</p>{{end}}
+  <p class="status">Image {{.Image}} on storage {{.StorageClass}}</p>
+  <p class="status">Size: {{.SizeLabel}}</p>
+  <p class="status">Network: bridge {{.Bridge}}{{if .IPAMPool}}, IPAM pool {{.IPAMPool}}{{end}}{{if .DHCP}}, {{.DHCP}}{{end}}</p>
+  {{if .DNS}}<p class="status">DNS: {{.DNS}}</p>{{end}}
+  {{if .Bootstrap}}<p class="status">Bootstrap modules: {{.Bootstrap}}</p>{{end}}
+  {{if .Runbooks}}<p class="status">Runbooks: {{.Runbooks}}</p>{{end}}
+  {{if .VaultRefs}}<p class="status">Vault references (values stay in the vault): {{.VaultRefs}}</p>{{end}}
+  <p class="status">Document SHA-256: <code>{{.DocSHA256}}</code></p>
+  <div class="actions">
+    <a class="button" href="/deploy/{{.Slug}}/edit">Edit (saves a new version)</a>
+  </div>
+  <h2>Versions</h2>
+  <div class="table-wrap">
+  <table class="inventory">
+    <thead><tr><th>Version</th><th>Document</th><th>Saved by</th><th>Saved</th></tr></thead>
+    <tbody>{{range .Versions}}<tr><td><a href="/deploy/{{$.DeployProfiles.Detail.Slug}}?version={{.Version}}">{{.Version}}</a></td><td><code>{{.DocSHA256}}</code></td><td>{{.CreatedBy}}</td><td>{{timeTag .Created}}</td></tr>{{end}}</tbody>
+  </table>
+  </div>
+</section>
+{{end}}
+{{end}}
