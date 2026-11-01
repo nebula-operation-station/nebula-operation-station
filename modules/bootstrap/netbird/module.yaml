@@ -1,0 +1,59 @@
+name: netbird
+version: 1.0.0
+title: NetBird
+description: >
+  Installs and manages the NetBird mesh agent from NetBird's apt
+  repository and joins the mesh with a one-time setup key. Secrets
+  come from the vault: the setup key is a secret slot, never a
+  profile value. Targets Debian 12/13 and Ubuntu 22.04/24.04.
+actions:
+  install:
+    title: Install NetBird
+    description: >
+      Adds NetBird's apt repository, installs the agent and joins the
+      mesh with the setup key from the vault. When the agent is
+      already connected, it only re-asserts up.
+    script: actions/install.sh
+    risk: medium
+    durable: true
+    timeout: 900s
+    params:
+      - {name: server, label: "NetBird server, host or host:port", type: name}
+      - {name: hostname, label: Mesh hostname, type: name}
+    secrets: [setup_key]
+    declares: [requires_root, writes_config, network_access]
+  verify:
+    title: Verify NetBird
+    description: >
+      Read-only check that the agent is installed and connected to
+      the mesh. Exits non-zero when it is not.
+    script: actions/verify.sh
+    risk: medium
+    durable: false
+    timeout: 120s
+    params: []
+    secrets: []
+    declares: [requires_root]
+  update:
+    title: Update NetBird
+    description: >
+      Upgrades the NetBird agent package. No-op when current.
+    script: actions/update.sh
+    risk: medium
+    durable: true
+    timeout: 900s
+    params: []
+    secrets: []
+    declares: [requires_root, network_access]
+  uninstall:
+    title: Uninstall NetBird
+    description: >
+      Disconnects the agent, purges the package and removes the apt
+      repository. No-op when not installed.
+    script: actions/uninstall.sh
+    risk: medium
+    durable: true
+    timeout: 600s
+    params: []
+    secrets: []
+    declares: [requires_root, network_access]

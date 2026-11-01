@@ -66,6 +66,10 @@
           <span class="chart__sub" title="{{.StateLabel}}{{if .OS}} · {{.OS}}{{end}}">{{.StateLabel}}{{if .OS}} · {{.OS}}{{end}}</span>
           <span class="chart__patch">
             <span class="badge {{.PatchClass}}">{{.PatchText}}</span>
+            {{if .Patch.Known}}
+            {{if .Patch.ListAge}}<span class="chart__listage" title="package list age">list {{.Patch.ListAge}}</span>
+            {{else}}<span class="chart__listage chart__listage--unknown" title="package list age unknown">list ?</span>{{end}}
+            {{else}}<span class="chart__listage chart__listage--unknown" title="patch state unknown (never checked)">list unknown</span>{{end}}
             <span class="chart__count">{{.ContainerCount}} containers</span>
           </span>
           <span class="chart__bars" role="img" aria-label="CPU, RAM and disk usage not collected yet">
@@ -75,6 +79,32 @@
           </span>
         </summary>
         <div class="chart__children">
+          <aside class="chart__dpanel" aria-label="Details">
+            <section class="chart__dpanel-sec">
+              <h4 class="chart__dpanel-h">Config</h4>
+              <dl class="chart__dpanel-kv">
+                {{range .Details.Config}}<dt>{{.K}}</dt><dd>{{.V}}</dd>{{end}}
+              </dl>
+              <a class="chart__dpanel-link" href="{{.Details.DetailURL}}">open host</a>
+            </section>
+            <section class="chart__dpanel-sec">
+              <h4 class="chart__dpanel-h">Updates</h4>
+              {{if .Patch.Known}}
+              <p class="chart__dpanel-src">source: {{.Patch.Source}} · list {{if .Patch.ListAge}}{{.Patch.ListAge}}{{else}}unknown{{end}} · checked {{if .Patch.ObservedAge}}{{.Patch.ObservedAge}}{{else}}unknown{{end}}</p>
+              <p class="chart__dpatch">{{.Patch.Total}} updates ({{.Patch.Security}} security, {{.Patch.Kernel}} kernel){{if .Patch.Reboot}} · reboot pending{{end}}</p>
+              {{else}}
+              <p class="chart__unknown">unknown — never checked</p>
+              {{end}}
+            </section>
+            <section class="chart__dpanel-sec">
+              <h4 class="chart__dpanel-h">Snapshots</h4>
+              <p class="chart__unknown">{{.Details.Snapshots}}</p>
+            </section>
+            <section class="chart__dpanel-sec">
+              <h4 class="chart__dpanel-h">Backups</h4>
+              <p class="chart__unknown">{{.Details.Backups}}</p>
+            </section>
+          </aside>
           {{if not .ContainerCount}}
           <p class="chart__none">No stored container list.</p>
           {{end}}
@@ -91,6 +121,12 @@
               <span class="chart__cstate">
                 <span class="badge {{.StateClass}}">{{.State}}</span>
                 {{if .Health}}<span class="badge {{.HealthClass}}">{{.Health}}</span>{{end}}
+              </span>
+              <span class="chart__cupdate">
+                <span class="badge {{.SameTagClass}}">{{.SameTagText}}</span>
+                <span class="badge {{.StableClass}}">{{.StableText}}</span>
+                {{if .Note}}<span class="chart__note" title="{{.Note}}">{{.Note}}</span>{{end}}
+                {{if .ReleaseNotes}}<span class="chart__note chart__note--release" title="{{.ReleaseNotes}}">{{.ReleaseNotes}}</span>{{end}}
               </span>
             </li>
             {{end}}
