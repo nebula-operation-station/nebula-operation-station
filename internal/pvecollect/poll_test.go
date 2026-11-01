@@ -324,3 +324,53 @@ func (listErrReader) ListPVERemotes(_ context.Context, _ *pb.ListPVERemotesReque
 func (listErrReader) ReadPVE(_ context.Context, _ *pb.ReadPVERequest, _ ...grpc.CallOption) (*pb.ReadPVEResponse, error) {
 	return nil, errors.New("not called")
 }
+
+// Containers and stopped VMs cannot have a guest agent: the collector does
+// not ask for one, labels the dataset not applicable, and the page stays
+// complete.
+func TestPollOnceSkipsAgentReadsThatCannotApply(t *testing.T) {
+	var mu sync.Mutex
+	agentReads := map[uint64]int{}
+	fr := &fakeReader{remotes: []*pb.PVERemoteInfo{activeRemote("remote-a")}, readFn: func(req *pb.ReadPVERequest) (*pb.ReadPVEResponse, error) {
+		switch req.Method {
+		case pb.PVEReadMethod_PVE_READ_METHOD_GUESTS:
+			return &pb.ReadPVEResponse{Payload: &pb.ReadPVEResponse_Guests{Guests: &pb.PVEGuests{
+				State: pb.PVEDatasetState_PVE_DATASET_STATE_AVAILABLE,
+				Guests: []*pb.PVEGuest{
+					{Vmid: 100, Kind: "qemu", Node: "p1", Status: "running", Generation: 1},
+					{Vmid: 101, Kind: "qemu", Node: "p1", Status: "stopped", Generation: 1},
+					{Vmid: 200, Kind: "lxc", Node: "p1", Status: "running", Generation: 1},
+				},
+			}}}, nil
+		case pb.PVEReadMethod_PVE_READ_METHOD_GUEST_AGENT:
+			mu.Lock()
+			agentReads[req.GetGuest().GetVmid()]++
+			mu.Unlock()
+		}
+		return defaultReadFn(req)
+	}}
+	c, spool, _ := newTestCollector(t, fr)
+	if _, err := c.PollOnce(context.Background()); err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	if len(agentReads) != 1 || agentReads[100] != 1 {
+		t.Fatalf("agent reads = %v, want only guest 100", agentReads)
+	}
+	names, err := spool.List(context.Background())
+	if err != nil || len(names) != 1 {
+		t.Fatalf("spool: %v %v", names, err)
+	}
+	obs, err := spool.ReadFile(context.Background(), names[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !obs.Complete {
+		t.Fatalf("observation incomplete: %q", obs.Reason)
+	}
+	want := map[uint64]string{100: "", 101: reasonAgentNotRunning, 200: reasonAgentContainer}
+	for _, g := range obs.Guests.Value {
+		if g.Agent.Reason != want[g.VMID] || g.Agent.IsAvailable() != (g.VMID == 100) {
+			t.Fatalf("guest %d agent = %+v", g.VMID, g.Agent)
+		}
+	}
+}

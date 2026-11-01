@@ -401,6 +401,13 @@ var (
 	pciDeviceRe      = regexp.MustCompile(`^PCI-[0-9a-f]{4}:[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]$`)
 	pciTargetRe      = regexp.MustCompile(`^(?:[0-9a-f]{4}:)?[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]$`)
 	printableNoSpace = regexp.MustCompile(`^[\x21-\x7e]+$`)
+	// snapshotNameRe is a PVE snapshot name, which keeps its case.
+	snapshotNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
+	// poolIDRe is a PVE pool ID, which keeps its case.
+	poolIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	// windowsMountRe is a Windows drive root or path as the guest agent
+	// reports it ("C:\\", "D:\\data").
+	windowsMountRe = regexp.MustCompile(`^[A-Za-z]:\\`)
 )
 
 // validNodeName reports whether s is a valid PVE node name (DNS host name).
@@ -729,7 +736,7 @@ func validateGuestConfig(where string, c GuestConfig, add func(format string, ar
 		}
 		seenTag[t] = struct{}{}
 	}
-	if c.Pool != "" && !slugRe.MatchString(c.Pool) {
+	if c.Pool != "" && !poolIDRe.MatchString(c.Pool) {
 		add("%s: pool %q is malformed", where, c.Pool)
 	}
 	validateCapabilities(where+".capabilities", c.Capabilities, add)
@@ -809,7 +816,7 @@ func validateGuestAgent(where string, a GuestAgent, add func(format string, args
 		add("%s: too many filesystems (%d > %d)", where, len(a.Filesystems), MaxFilesystemsPerGuest)
 	}
 	for i, fs := range a.Filesystems {
-		if !strings.HasPrefix(fs.MountPoint, "/") || len(fs.MountPoint) > MaxLabelBytes {
+		if !(strings.HasPrefix(fs.MountPoint, "/") || windowsMountRe.MatchString(fs.MountPoint)) || len(fs.MountPoint) > MaxLabelBytes {
 			add("%s: filesystems[%d]: mount_point %q is malformed", where, i, fs.MountPoint)
 		}
 		if !slugRe.MatchString(fs.FSType) {
@@ -827,7 +834,7 @@ func validateSnapshots(where string, ss []Snapshot, add func(format string, args
 	}
 	names := map[string]struct{}{}
 	for i, s := range ss {
-		if !slugRe.MatchString(s.Name) {
+		if !snapshotNameRe.MatchString(s.Name) {
 			add("%s[%d]: name %q is malformed", where, i, s.Name)
 		}
 		names[s.Name] = struct{}{}

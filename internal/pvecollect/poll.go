@@ -353,12 +353,20 @@ func (c *Collector) readRemote(ctx context.Context, remoteID string, now time.Ti
 	// Phase 2: per-guest detail reads, only when the guest list is usable.
 	if obs.Guests.IsAvailable() && len(vmids) > 0 {
 		var phase2 []readReq
-		for _, vmid := range vmids {
+		for i := range obs.Guests.Value {
+			g := &obs.Guests.Value[i]
+			phase2 = append(phase2, readReq{method: pb.PVEReadMethod_PVE_READ_METHOD_GUEST_CONFIG, vmid: g.VMID})
+			// Only a running QEMU guest can have a guest agent. For the
+			// others the dataset is not applicable rather than missing, so
+			// it costs no request and does not mark the page incomplete.
+			if reason := agentNotApplicable(*g); reason != "" {
+				g.Agent = pvecontract.UnavailableDataset[pvecontract.GuestAgent](reason)
+			} else {
+				phase2 = append(phase2, readReq{method: pb.PVEReadMethod_PVE_READ_METHOD_GUEST_AGENT, vmid: g.VMID})
+			}
 			phase2 = append(phase2,
-				readReq{method: pb.PVEReadMethod_PVE_READ_METHOD_GUEST_CONFIG, vmid: vmid},
-				readReq{method: pb.PVEReadMethod_PVE_READ_METHOD_GUEST_AGENT, vmid: vmid},
-				readReq{method: pb.PVEReadMethod_PVE_READ_METHOD_SNAPSHOTS, vmid: vmid},
-				readReq{method: pb.PVEReadMethod_PVE_READ_METHOD_BACKUPS, vmid: vmid},
+				readReq{method: pb.PVEReadMethod_PVE_READ_METHOD_SNAPSHOTS, vmid: g.VMID},
+				readReq{method: pb.PVEReadMethod_PVE_READ_METHOD_BACKUPS, vmid: g.VMID},
 			)
 		}
 		err := c.runReads(ctx, remoteID, phase2, func(res readResult) error {
@@ -380,6 +388,23 @@ func (c *Collector) readRemote(ctx context.Context, remoteID string, now time.Ti
 		obs.Reason = "one or more datasets were not read"
 	}
 	return obs, nil
+}
+
+// Reasons for a guest agent dataset that does not apply to the guest.
+const (
+	reasonAgentContainer  = "not applicable: containers have no guest agent"
+	reasonAgentNotRunning = "not applicable: guest is not running"
+)
+
+// agentNotApplicable returns why g cannot have a guest agent, or "".
+func agentNotApplicable(g pvecontract.GuestObservation) string {
+	switch {
+	case g.Kind != pvecontract.GuestQEMU:
+		return reasonAgentContainer
+	case g.Status != pvecontract.GuestRunning:
+		return reasonAgentNotRunning
+	}
+	return ""
 }
 
 // runReads streams results through a fixed worker pool. Each worker holds at

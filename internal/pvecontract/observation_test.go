@@ -230,6 +230,10 @@ func TestDecodeObservation(t *testing.T) {
 		}, "used_bytes"},
 		{"snapshot parent unknown", func(o *Observation) { o.Guests.Value[0].Snapshots.Value[0].Parent = "ghost" }, "parent"},
 		{"snapshot name malformed", func(o *Observation) { o.Guests.Value[0].Snapshots.Value[0].Name = "before upgrade" }, "name"},
+		{"snapshot name with dot", func(o *Observation) { o.Guests.Value[0].Snapshots.Value[0].Name = "v1.2" }, "name"},
+		{"pool with space", func(o *Observation) { o.Guests.Value[0].Config.Value.Pool = "a b" }, "pool"},
+		{"windows mount without drive", func(o *Observation) { o.Guests.Value[0].Agent.Value.Filesystems[0].MountPoint = `\\server\share` }, "mount_point"},
+		{"windows mount drive only", func(o *Observation) { o.Guests.Value[0].Agent.Value.Filesystems[0].MountPoint = "C:" }, "mount_point"},
 		{"backup source unknown", func(o *Observation) { o.Guests.Value[0].Backups.Value[0].Source = "borg" }, "source"},
 		{"backup kind unknown", func(o *Observation) { o.Guests.Value[0].Backups.Value[0].Kind = "image" }, "kind"},
 		{"backup task status unknown", func(o *Observation) { o.Guests.Value[0].Backups.Value[0].Status = "ok" }, "status"},
@@ -507,5 +511,25 @@ func TestValidationErrorIsErrInvalid(t *testing.T) {
 	}
 	if !errors.Is(err, ErrInvalid) {
 		t.Fatalf("errors.Is(err, ErrInvalid) = false for %v", err)
+	}
+}
+
+// PVE keeps the case of snapshot names and pool IDs, and Windows guests
+// report drive-letter mount points; all are valid observations.
+func TestValidateObservationAcceptsPVEStyleNames(t *testing.T) {
+	cases := map[string]func(o *Observation){
+		"mixed-case snapshot": func(o *Observation) {
+			o.Guests.Value[0].Snapshots.Value = []Snapshot{{Name: "Pre-Upgrade", TimeUnix: 1}, {Name: "After_Fix", TimeUnix: 2, Parent: "Pre-Upgrade"}}
+		},
+		"mixed-case pool":       func(o *Observation) { o.Guests.Value[0].Config.Value.Pool = "Prod.Web" },
+		"windows drive root":    func(o *Observation) { o.Guests.Value[0].Agent.Value.Filesystems[0].MountPoint = `C:\` },
+		"windows drive subpath": func(o *Observation) { o.Guests.Value[0].Agent.Value.Filesystems[0].MountPoint = `D:\data` },
+	}
+	for name, mutate := range cases {
+		o := baseObservation()
+		mutate(&o)
+		if _, err := ValidateObservation(o); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }
