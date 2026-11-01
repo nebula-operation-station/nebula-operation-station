@@ -201,6 +201,13 @@ func TestDecodeObservation(t *testing.T) {
 		{"guest uuid malformed", func(o *Observation) { o.Guests.Value[0].UUID = "not-a-uuid" }, "uuid"},
 		{"config cpu_count zero", func(o *Observation) { o.Guests.Value[0].Config.Value.CPUCount = 0 }, "cpu_count"},
 		{"disk volume malformed", func(o *Observation) { o.Guests.Value[0].Config.Value.Disks[0].Volume = "LOCAL-LVM:vm" }, "volume"},
+		{"disk volume parent component", func(o *Observation) { o.Guests.Value[0].Config.Value.Disks[0].Volume = "local:../etc/shadow" }, "volume"},
+		{"disk volume two components", func(o *Observation) { o.Guests.Value[0].Config.Value.Disks[0].Volume = "local:iso/a/b.iso" }, "volume"},
+		{"disk volume absolute", func(o *Observation) { o.Guests.Value[0].Config.Value.Disks[0].Volume = "local:/etc/shadow" }, "volume"},
+		{"disk volume dot component", func(o *Observation) { o.Guests.Value[0].Config.Value.Disks[0].Volume = "local:iso/.hidden" }, "volume"},
+		{"disk volume oversize", func(o *Observation) {
+			o.Guests.Value[0].Config.Value.Disks[0].Volume = "local:" + strings.Repeat("a", 200) + "/" + strings.Repeat("b", 60)
+		}, "volume"},
 		{"disk volume duplicated", func(o *Observation) {
 			o.Guests.Value[0].Config.Value.Disks = append(o.Guests.Value[0].Config.Value.Disks, o.Guests.Value[0].Config.Value.Disks[0])
 		}, "duplicated"},
@@ -507,5 +514,15 @@ func TestValidationErrorIsErrInvalid(t *testing.T) {
 	}
 	if !errors.Is(err, ErrInvalid) {
 		t.Fatalf("errors.Is(err, ErrInvalid) = false for %v", err)
+	}
+}
+
+func TestValidateObservationAcceptsDirStorageVolumes(t *testing.T) {
+	for _, vol := range []string{"local:100/vm-100-disk-0.qcow2", "local:iso/Debian-12.4_amd64+netinst.iso", "local-lvm:vm-100-disk-0", "rbd"} {
+		o := baseObservation()
+		o.Guests.Value[0].Config.Value.Disks[0].Volume = vol
+		if _, err := ValidateObservation(o); err != nil {
+			t.Errorf("%s: %v", vol, err)
+		}
 	}
 }

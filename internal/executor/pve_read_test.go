@@ -289,7 +289,9 @@ func TestReadPVEDeniedWithoutCoveringGrant(t *testing.T) {
 	}
 	// Methods without a mapping yet stay Unimplemented; the collector role
 	// cannot reach anything else.
-	_, err = e.read(pb.PVEReadMethod_PVE_READ_METHOD_TASKS)
+	_, err = e.read(pb.PVEReadMethod_PVE_READ_METHOD_METRICS)
+	wantPveCode(t, err, codes.Unimplemented)
+	_, err = e.readGuest(pb.PVEReadMethod_PVE_READ_METHOD_BACKUPS, 100)
 	wantPveCode(t, err, codes.Unimplemented)
 }
 

@@ -282,3 +282,49 @@ func TestProviderReadRecoveryAndStorageFailClosed(t *testing.T) {
 		t.Fatal("tampered grant authorized a read")
 	}
 }
+
+// Per-guest methods keep one interval per guest, so a collection cycle can
+// read every guest once, while all of them spend the one remote budget.
+func TestProviderGuestReadIntervalIsPerGuest(t *testing.T) {
+	e, _ := newLeaseEnv(t, ModeStandard)
+	doc := providerDocAt(e.clk.Now(), rgID, 3)
+	doc.ProviderTargets[0].Methods = []string{ProviderMethodSnapshots}
+	approveReadGrant(t, e, readGrantRaw(t, doc))
+	guest := func(vmid uint64) ProviderRead {
+		r := providerRead(ProviderMethodSnapshots)
+		r.VMID = vmid
+		return r
+	}
+	for _, vmid := range []uint64{100, 101} {
+		if _, err := e.auth.AuthorizeProviderRead(guest(vmid)); err != nil {
+			t.Fatalf("guest %d: %v", vmid, err)
+		}
+	}
+	_, err := e.auth.AuthorizeProviderRead(guest(100))
+	wantCode(t, err, CodeLeaseBudget)
+	if _, err := e.auth.AuthorizeProviderRead(guest(102)); err != nil {
+		t.Fatal(err)
+	}
+	e.clk.Add(time.Minute)
+	_, err = e.auth.AuthorizeProviderRead(guest(100))
+	wantCode(t, err, CodeLeaseBudget) // the remote budget of 3 is spent
+}
+
+func TestProviderReadRejectsMisplacedVMID(t *testing.T) {
+	e, _ := newLeaseEnv(t, ModeStandard)
+	doc := providerDocAt(e.clk.Now(), rgID, 240)
+	doc.ProviderTargets[0].Methods = []string{ProviderMethodNodes, ProviderMethodGuestConfig}
+	approveReadGrant(t, e, readGrantRaw(t, doc))
+	for name, r := range map[string]ProviderRead{
+		"guest method without vmid": providerRead(ProviderMethodGuestConfig),
+		"remote method with vmid":   func() ProviderRead { r := providerRead(ProviderMethodNodes); r.VMID = 100; return r }(),
+		"vmid below range":          func() ProviderRead { r := providerRead(ProviderMethodGuestConfig); r.VMID = 99; return r }(),
+		"vmid above contract range": func() ProviderRead { r := providerRead(ProviderMethodGuestConfig); r.VMID = 1e10; return r }(),
+	} {
+		_, err := e.auth.AuthorizeProviderRead(r)
+		if err == nil {
+			t.Fatalf("%s: authorized", name)
+		}
+		wantCode(t, err, CodeLeaseInvalid)
+	}
+}

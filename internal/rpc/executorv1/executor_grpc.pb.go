@@ -405,8 +405,8 @@ type ExecutorServiceClient interface {
 	// provider read grant (read-grant-v2, rate_profile "provider", ADR 0007
 	// E08) naming the remote's current trust pin, trust generation and read
 	// credential version and the method; it spends that grant's per-method
-	// interval and per-remote request budget. NODES, GUESTS, STORAGE and
-	// CLUSTER are wired; the other methods answer Unimplemented.
+	// interval and per-remote request budget. BACKUPS and METRICS answer
+	// Unimplemented; every other method is wired.
 	ReadPVE(ctx context.Context, in *ReadPVERequest, opts ...grpc.CallOption) (*ReadPVEResponse, error)
 }
 
@@ -1574,8 +1574,8 @@ type ExecutorServiceServer interface {
 	// provider read grant (read-grant-v2, rate_profile "provider", ADR 0007
 	// E08) naming the remote's current trust pin, trust generation and read
 	// credential version and the method; it spends that grant's per-method
-	// interval and per-remote request budget. NODES, GUESTS, STORAGE and
-	// CLUSTER are wired; the other methods answer Unimplemented.
+	// interval and per-remote request budget. BACKUPS and METRICS answer
+	// Unimplemented; every other method is wired.
 	ReadPVE(context.Context, *ReadPVERequest) (*ReadPVEResponse, error)
 	mustEmbedUnimplementedExecutorServiceServer()
 }
