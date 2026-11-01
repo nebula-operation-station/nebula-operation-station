@@ -117,6 +117,8 @@ type entry struct {
 	snapshots []Snapshot
 	failed    int
 	size      int64
+	// rollout is the member stage state, set when the batch is approved.
+	rollout *memberRollout
 }
 
 // Authority serializes batch approval transitions. Plans, challenges and
@@ -131,6 +133,9 @@ type Authority struct {
 	epoch   uint64
 	// retained is the sum of entry.size over entries (MaxRetainedBytes).
 	retained int64
+	// batchExecIndex maps a claimed member's execution ID to its batch, member
+	// and ordering key, so outcomes and postchecks can be recorded by ID.
+	batchExecIndex map[string]batchExecRef
 }
 
 // New creates an authority with no pending or approved plans.
@@ -150,7 +155,7 @@ func New(o Options) (*Authority, error) {
 	if o.Scan == nil {
 		o.Scan = permit.ScanBounded
 	}
-	return &Authority{options: o, entries: map[canonical.Digest]*entry{}, members: map[string]*MemberPermit{}, seen: map[string]struct{}{}}, nil
+	return &Authority{options: o, entries: map[canonical.Digest]*entry{}, members: map[string]*MemberPermit{}, seen: map[string]struct{}{}, batchExecIndex: map[string]batchExecRef{}}, nil
 }
 
 func failure(code permit.Code, detail string) error { return &permit.Error{Code: code, Detail: detail} }
@@ -289,6 +294,7 @@ func (a *Authority) Propose(ctx context.Context, raw []byte, inputs []MemberInpu
 	a.seen[plan.BatchID] = struct{}{}
 	a.emit("batch_proposed", digest, "", "")
 	if p.State == permit.StateApproved {
+		e.rollout = newMemberRollout(&p.Plan)
 		a.emit("batch_approved", digest, "", p.ApprovedBy)
 	}
 	return cloneApproval(p), nil
@@ -511,6 +517,7 @@ func (a *Authority) approveLocked(e *entry, who string) Approval {
 	p.Challenge = nil
 	p.ApprovedAt = a.options.Now()
 	p.ApprovedBy = who
+	e.rollout = newMemberRollout(&p.Plan)
 	a.emit("batch_approved", p.Digest, "", p.ApprovedBy)
 	return cloneApproval(*p)
 }
@@ -539,10 +546,11 @@ func (a *Authority) Check(ctx context.Context, d canonical.Digest) (Approval, er
 func (a *Authority) Lock() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.epoch++
 	clear(a.entries)
 	clear(a.members)
+	clear(a.batchExecIndex)
 	a.retained = 0
+	a.epoch++
 	a.emit("batch_locked", canonical.Digest{}, "", "")
 }
 
@@ -557,6 +565,11 @@ func (a *Authority) gcLocked() {
 	for key, mp := range a.members {
 		if _, ok := a.entries[mp.ParentDigest]; !ok {
 			delete(a.members, key)
+		}
+	}
+	for execID, ref := range a.batchExecIndex {
+		if _, ok := a.entries[ref.digest]; !ok {
+			delete(a.batchExecIndex, execID)
 		}
 	}
 }

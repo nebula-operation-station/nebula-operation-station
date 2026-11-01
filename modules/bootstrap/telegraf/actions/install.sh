@@ -1,0 +1,45 @@
+# Idempotent: re-running reconciles the component to the module's state.
+set -eu
+
+fail() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+json_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\\"/g'
+}
+
+emit() {
+  {
+    printf '{"ok":%s' "$1"
+    shift
+    while [ "$#" -ge 2 ]; do
+      printf ',"%s":"%s"' "$(json_escape "$1")" "$(json_escape "$2")"
+      shift 2
+    done
+    printf '}\n'
+  } > "$NEBULA_RESULT"
+}
+
+scheme=$NEBULA_P_INFLUX_SCHEME
+host=$NEBULA_P_INFLUX_HOST
+org=$NEBULA_P_INFLUX_ORG
+bucket=$NEBULA_P_INFLUX_BUCKET
+printf '%s\n' "$host" | grep -Eqx '[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?' || fail "influx_host must be host or host:port"
+printf '%s\n' "$org" | grep -Eqx '[a-z][a-z0-9_-]{0,63}' || fail "influx_org is not a valid organization name"
+printf '%s\n' "$bucket" | grep -Eqx '[a-z][a-z0-9_-]{0,63}' || fail "influx_bucket is not a valid bucket name"
+export DEBIAN_FRONTEND=noninteractive
+. /etc/os-release
+codename=$VERSION_CODENAME
+apt-get update -qq
+apt-get install -y -qq ca-certificates curl gnupg
+curl -fsSL https://repos.influxdata.com/influxdata.key | gpg --dearmor > /usr/share/keyrings/influxdata-archive-keyring.gpg
+printf 'deb [signed-by=/usr/share/keyrings/influxdata-archive-keyring.gpg] https://repos.influxdata.com/debian %s main\n' "$codename" > /etc/apt/sources.list.d/influxdata.list
+apt-get update -qq
+apt-get install -y -qq telegraf
+install -d -m 0755 /etc/telegraf/telegraf.d
+printf '[[outputs.influxdb_v2]]\n  urls = ["%s://%s"]\n  token_file = "/etc/telegraf/telegraf.d/nebula.token"\n  organization = "%s"\n  bucket = "%s"\n' "$scheme" "$host" "$org" "$bucket" > /etc/telegraf/telegraf.d/nebula.conf
+install -m 0600 "$NEBULA_SECRET_INFLUX_TOKEN" /etc/telegraf/telegraf.d/nebula.token
+systemctl restart telegraf
+emit true action install

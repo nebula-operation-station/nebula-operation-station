@@ -1,0 +1,56 @@
+name: qemu-guest-agent
+version: 1.0.0
+title: QEMU guest agent
+description: >
+  Installs and manages qemu-guest-agent so the hypervisor can manage
+  the guest (graceful shutdown, fsfreeze, time sync). Targets Debian
+  12/13 and Ubuntu 22.04/24.04.
+actions:
+  install:
+    title: Install QEMU guest agent
+    description: >
+      Installs qemu-guest-agent from the distribution archives and
+      enables and starts the service. No-op when already installed.
+    script: actions/install.sh
+    risk: medium
+    durable: true
+    timeout: 600s
+    params: []
+    secrets: []
+    declares: [requires_root, network_access]
+  verify:
+    title: Verify QEMU guest agent
+    description: >
+      Read-only check that the package is installed and the service
+      is active. Exits non-zero when it is not.
+    script: actions/verify.sh
+    risk: low
+    durable: false
+    timeout: 120s
+    params: []
+    secrets: []
+    declares: []
+  update:
+    title: Update QEMU guest agent
+    description: >
+      Upgrades qemu-guest-agent and restarts the service. No-op when
+      current.
+    script: actions/update.sh
+    risk: medium
+    durable: true
+    timeout: 600s
+    params: []
+    secrets: []
+    declares: [requires_root, network_access]
+  uninstall:
+    title: Uninstall QEMU guest agent
+    description: >
+      Stops and disables the service and purges the package. No-op
+      when not installed.
+    script: actions/uninstall.sh
+    risk: medium
+    durable: true
+    timeout: 600s
+    params: []
+    secrets: []
+    declares: [requires_root, network_access]
