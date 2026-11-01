@@ -127,7 +127,30 @@ func TestPackLoadRoundTrip(t *testing.T) {
 		t.Fatalf("install trust risk = %s, want MEDIUM (declares root)", install.TrustRisk())
 	}
 	if m.Lock.Actions[ActionVerify].Risk != "LOW" {
-		t.Fatalf("verify risk = %s", m.Lock.Actions[ActionVerify].Risk)
+		t.Fatalf("verify risk = %s, want LOW", m.Lock.Actions[ActionVerify].Risk)
+	}
+}
+
+func TestLoadRejectsHighRiskVerify(t *testing.T) {
+	dir := writeTree(t, t.TempDir())
+	y, err := os.ReadFile(filepath.Join(dir, "module.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	y = []byte(strings.Replace(string(y), "    script: actions/verify.sh\n    risk: low",
+		"    script: actions/verify.sh\n    risk: high", 1))
+	if err := os.WriteFile(filepath.Join(dir, "module.yaml"), y, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := Pack(dir)
+	if err != nil {
+		t.Fatalf("Pack: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, LockFile), lock, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(filepath.Dir(dir)); err == nil || !strings.Contains(err.Error(), "LOW or MEDIUM") {
+		t.Fatalf("Load with HIGH-risk verify: %v", err)
 	}
 }
 

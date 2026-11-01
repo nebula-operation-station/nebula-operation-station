@@ -9,8 +9,9 @@
 // update and uninstall. install, update and uninstall are durable and
 // idempotent by contract: re-running one reconciles the component to the
 // module's state instead of failing on it. verify is a read-only health
-// check: LOW risk, not durable, no secret slots, and it exits non-zero
-// when the component is not in place.
+// check: not durable, no secret slots, at most MEDIUM risk (MEDIUM only
+// when it needs root to query state), and it exits non-zero when the
+// component is not in place.
 //
 // Secrets are never values in a module or in a deploy profile. An action
 // declares secret slots (e.g. NetBird's setup_key, Telegraf's InfluxDB
@@ -130,8 +131,10 @@ func loadOne(dir string) (Module, error) {
 }
 
 // checkContract enforces the bootstrap action contract (ADR 0008
-// section 5): the four required actions, verify read-only and LOW risk,
-// the mutating actions durable.
+// section 5): the four required actions, verify read-only (not durable,
+// no secret slots, at most MEDIUM risk — MEDIUM when it needs root to
+// query state, which the lock's risk check already forces), the
+// mutating actions durable.
 func (m Module) checkContract() error {
 	for _, a := range RequiredActions {
 		act, ok := m.Lock.Actions[a]
@@ -140,8 +143,8 @@ func (m Module) checkContract() error {
 		}
 		switch a {
 		case ActionVerify:
-			if act.Risk != "LOW" {
-				return fmt.Errorf("action verify must be LOW risk")
+			if act.Risk != "LOW" && act.Risk != "MEDIUM" {
+				return fmt.Errorf("action verify must be LOW or MEDIUM risk")
 			}
 			if act.Durable {
 				return fmt.Errorf("action verify must not be durable")
