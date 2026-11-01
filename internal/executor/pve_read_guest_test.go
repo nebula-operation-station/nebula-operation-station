@@ -4,6 +4,7 @@ package executor
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"strings"
 	"testing"
@@ -307,7 +308,9 @@ func TestReadPVEGuestDetailIntervalIsPerGuest(t *testing.T) {
 	wantPveCode(t, err, codes.ResourceExhausted)
 }
 
-func TestReadPVETasksTruncatedWindowUnavailable(t *testing.T) {
+// A busy node keeps its newest pveTasksPerNode tasks and the result is
+// flagged truncated, so the cut window never looks complete.
+func TestReadPVETasksTruncatedWindowFlagged(t *testing.T) {
 	e := guestPveEnv(t)
 	now := e.clock.Now()
 	var rows []string
@@ -322,7 +325,142 @@ func TestReadPVETasksTruncatedWindowUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tk := got.GetTasks(); tk.GetState() != pveUnav || tk.GetReason() != pveReasonTruncated || len(tk.GetTasks()) != 0 {
+	tk := got.GetTasks()
+	if tk.GetState() != pveAvail || !tk.GetTruncated() || len(tk.GetTasks()) != pveTasksPerNode {
+		t.Fatalf("tasks = state %v truncated %v len %d", tk.GetState(), tk.GetTruncated(), len(tk.GetTasks()))
+	}
+	if tk.GetTasks()[0].GetStartedUnix() != now.Add(-time.Second).Unix() {
+		t.Fatalf("newest task not kept first: %v", tk.GetTasks()[0])
+	}
+}
+
+// A node within its limit is not flagged.
+func TestReadPVETasksCompleteWindowNotFlagged(t *testing.T) {
+	e := guestPveEnv(t)
+	e.pve.set("/api2/json/nodes/pve1/tasks", `{"data":[]}`)
+	got, err := e.read(pb.PVEReadMethod_PVE_READ_METHOD_TASKS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tk := got.GetTasks(); tk.GetState() != pveAvail || tk.GetTruncated() {
 		t.Fatalf("tasks = %v", tk)
+	}
+}
+
+func TestReadPVEBackupsReportsTaskEvidenceAndUnavailableCatalog(t *testing.T) {
+	e := guestPveEnv(t)
+	now := e.clock.Now()
+	e.pve.set("/api2/json/nodes/pve1/tasks", fmt.Sprintf(`{"data":[
+		{"upid":%q,"status":"RUNNING","user":"root@pam"},
+		{"upid":%q,"endtime":%d,"status":"OK","user":"root@pam"},
+		{"upid":%q,"endtime":%d,"status":"WARNINGS: 1","user":"root@pam"},
+		{"upid":%q,"endtime":%d,"status":"job errors: s3cr3t <script>","user":"root@pam"},
+		{"upid":%q,"endtime":%d,"status":"OK","user":"root@pam"},
+		{"upid":%q,"endtime":%d,"status":"OK","user":"root@pam"}]}`,
+		upid("pve1", now.Add(-time.Minute), "vzdump", "100"),
+		upid("pve1", now.Add(-time.Hour), "vzdump", "100"), now.Add(-time.Hour+time.Minute).Unix(),
+		upid("pve1", now.Add(-2*time.Hour), "vzdump", "100"), now.Add(-2*time.Hour+time.Minute).Unix(),
+		upid("pve1", now.Add(-3*time.Hour), "vzdump", "100"), now.Add(-3*time.Hour+time.Minute).Unix(),
+		// Another guest and another task type never count for 100.
+		upid("pve1", now.Add(-4*time.Hour), "vzdump", "1000"), now.Add(-4*time.Hour+time.Minute).Unix(),
+		upid("pve1", now.Add(-5*time.Hour), "qmstart", "100"), now.Add(-5*time.Hour+time.Minute).Unix()))
+	got, err := e.readGuest(pb.PVEReadMethod_PVE_READ_METHOD_BACKUPS, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := got.GetBackups()
+	if b.GetState() != pveAvail || b.GetVmid() != 100 {
+		t.Fatalf("backups = %v", b)
+	}
+	// The catalog is never an empty "no backups" list.
+	if b.GetCatalogState() != pveUnav || b.GetCatalogReason() != pveReasonCatalogScope {
+		t.Fatalf("catalog = %v %q", b.GetCatalogState(), b.GetCatalogReason())
+	}
+	var rows []string
+	for _, x := range b.GetBackups() {
+		if x.GetKind() != "task" || x.GetSource() != "vzdump" || x.GetVerified() != "unknown" {
+			t.Fatalf("evidence = %v", x)
+		}
+		rows = append(rows, x.GetStatus())
+	}
+	if strings.Join(rows, ",") != "running,success,unknown,failed" {
+		t.Fatalf("statuses = %v", rows)
+	}
+	if s := fmt.Sprint(got); strings.Contains(s, "s3cr3t") || strings.Contains(s, "<script>") {
+		t.Fatal("raw task status reached the result")
+	}
+}
+
+func TestReadPVEBackupsUnavailableWhenANodeFails(t *testing.T) {
+	e := guestPveEnv(t)
+	e.pve.set("/api2/json/nodes", `{"data":[{"node":"pve1","status":"online"},{"node":"pve2","status":"online"}]}`)
+	e.pve.set("/api2/json/nodes/pve1/tasks", `{"data":[]}`)
+	got, err := e.readGuest(pb.PVEReadMethod_PVE_READ_METHOD_BACKUPS, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := got.GetBackups()
+	if b.GetState() != pveUnav || b.GetReason() != pveReasonPartial || len(b.GetBackups()) != 0 || b.GetCatalogState() != pveUnav {
+		t.Fatalf("backups = %v", b)
+	}
+}
+
+func TestReadPVEBackupsHostileTaskListUnavailable(t *testing.T) {
+	for name, body := range map[string]string{
+		"not a list":       `{"data":"<script>"}`,
+		"node mismatch":    fmt.Sprintf(`{"data":[{"upid":%q,"status":"OK","endtime":2}]}`, upid("evil", time.Unix(1, 0), "vzdump", "100")),
+		"end before start": fmt.Sprintf(`{"data":[{"upid":%q,"status":"OK","endtime":1}]}`, upid("pve1", time.Unix(1000, 0), "vzdump", "100")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := guestPveEnv(t)
+			e.pve.set("/api2/json/nodes/pve1/tasks", body)
+			got, err := e.readGuest(pb.PVEReadMethod_PVE_READ_METHOD_BACKUPS, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if b := got.GetBackups(); b.GetState() != pveUnav || b.GetReason() != pveReasonPartial || len(b.GetBackups()) != 0 {
+				t.Fatalf("backups = %v", b)
+			}
+		})
+	}
+}
+
+func TestReadPVEBackupsNeedsBackupsGrant(t *testing.T) {
+	e := newPveReadEnv(t, pvecontract.KindStandalone)
+	e.approve(e.grantDoc(pveReadGrantID, 240, permit.ProviderMethodTasks, permit.ProviderMethodSnapshots))
+	_, err := e.readGuest(pb.PVEReadMethod_PVE_READ_METHOD_BACKUPS, 100)
+	wantPveCode(t, err, codes.PermissionDenied)
+	if n := e.pve.requests.Load(); n != 0 {
+		t.Fatalf("%d requests reached PVE without authority", n)
+	}
+}
+
+// The backups interval is per guest and the budget is shared per remote.
+func TestReadPVEBackupsIntervalAndBudget(t *testing.T) {
+	e := newPveReadEnv(t, pvecontract.KindStandalone)
+	e.approve(e.grantDoc(pveReadGrantID, 2, permit.ProviderMethodBackups))
+	e.pve.set("/api2/json/nodes/pve1/tasks", `{"data":[]}`)
+	if _, err := e.readGuest(pb.PVEReadMethod_PVE_READ_METHOD_BACKUPS, 100); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.readGuest(pb.PVEReadMethod_PVE_READ_METHOD_BACKUPS, 100)
+	wantPveCode(t, err, codes.ResourceExhausted)
+	if _, err := e.readGuest(pb.PVEReadMethod_PVE_READ_METHOD_BACKUPS, 200); err != nil {
+		t.Fatal(err)
+	}
+	e.clock.Add(2 * time.Minute)
+	_, err = e.readGuest(pb.PVEReadMethod_PVE_READ_METHOD_BACKUPS, 100)
+	wantPveCode(t, err, codes.ResourceExhausted)
+}
+
+func TestReadPVEBackupsTrustChangeBlocksRemote(t *testing.T) {
+	e := guestPveEnv(t)
+	impostor := makeTestChain(t)
+	e.pve.srv.TLS.Certificates = []tls.Certificate{impostor.tls}
+	e.pve.srv.CloseClientConnections()
+	_, err := e.readGuest(pb.PVEReadMethod_PVE_READ_METHOD_BACKUPS, 100)
+	wantPveCode(t, err, codes.FailedPrecondition)
+	if e.pve.requests.Load() != 0 || e.pve.badAuth.Load() != 0 {
+		t.Fatal("a request reached the impostor")
 	}
 }

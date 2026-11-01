@@ -415,9 +415,6 @@ var (
 	windowsMountRe = regexp.MustCompile(`^[A-Za-z]:\\`)
 )
 
-// ValidNodeName reports whether s is a valid PVE node name (DNS host name).
-func ValidNodeName(s string) bool { return validNodeName(s) }
-
 // validNodeName reports whether s is a valid PVE node name (DNS host name).
 func validNodeName(s string) bool {
 	if s == "" || len(s) > MaxNodeNameBytes {

@@ -4,7 +4,9 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -32,6 +34,17 @@ const (
 	// requests to one remote (one request per second).
 	pveMetricsRequestSpacing = time.Second
 )
+
+// pveMetricsTarget maps the request parameter onto the grant's target type.
+func pveMetricsTarget(p *pb.PVEReadMetricsParams) permit.ProviderMetricsTarget {
+	return permit.ProviderMetricsTarget{Node: p.GetNode(), Kind: p.GetKind(), VMID: p.GetVmid(), Generation: p.GetGeneration()}
+}
+
+// pveMetricsGateKey names one exact live target, generation included, so a
+// recreated guest never inherits the live slot of its predecessor.
+func pveMetricsGateKey(t permit.ProviderMetricsTarget) string {
+	return t.Key() + "@" + strconv.FormatUint(t.Generation, 10)
+}
 
 // pveMetricsGate enforces the per-remote live-target and request-rate caps.
 type pveMetricsGate struct {
@@ -177,6 +190,20 @@ func readPveMetrics(ctx context.Context, base string, hc *http.Client, token pve
 		addInt(pveMetricNetInSum, pveUnitBytes, m.NetInBytes)
 		addInt(pveMetricNetOutSum, pveUnitBytes, m.NetOutBytes)
 	}
+	var used, total float64
+	var haveUsed, haveTotal bool
+	for _, m := range out.Metrics {
+		switch m.Name {
+		case pveMetricMemUsed:
+			used, haveUsed = m.Value, true
+		case pveMetricMemTotal:
+			total, haveTotal = m.Value, true
+		}
+	}
+	if haveUsed && haveTotal && used > total {
+		out.Metrics, out.Status = nil, ""
+		return unavailable(pveReasonInvalid)
+	}
 	out.State = pveAvailable
 	return out
 }
@@ -185,7 +212,7 @@ func readPveMetrics(ctx context.Context, base string, hc *http.Client, token pve
 // text never reaches the caller.
 func pveMetricsReason(err error) string {
 	switch {
-	case errorsIsAny(err, pveapi.ErrInvalidRange, pveapi.ErrTooLarge):
+	case errors.Is(err, pveapi.ErrInvalidRange), errors.Is(err, pveapi.ErrTooLarge), errors.Is(err, pveapi.ErrMalformed):
 		return pveReasonInvalid
 	default:
 		return pveReasonRead

@@ -1795,11 +1795,20 @@ message PVECluster {
   repeated PVEHAResource ha_resources = 5;
 }
 
+// PVEClusterNode is one cluster member. vote_state ("yes", "no",
+// "unknown") reports whether the node carries a corosync quorum vote
+// (GET /cluster/config/nodes); maintenance_state reports whether its HA
+// local resource manager is in maintenance mode (GET
+// /cluster/ha/status/current). Either is "unknown" when PVE did not report
+// it (no Sys.Audit, no HA, no LRM entry). vote and maintenance are true
+// only for "yes": false never means a known "no" without the state field.
 message PVEClusterNode {
   string node = 1;
   string status = 2;
   bool vote = 3;
   bool maintenance = 4;
+  string vote_state = 5;
+  string maintenance_state = 6;
 }
 
 message PVEHAResource {
@@ -1812,10 +1821,15 @@ message PVEHAResource {
 }
 
 // PVETasks is the bounded task metadata read. Never raw task logs.
+// PVETasks is the task metadata of the last 24 hours of every online node,
+// newest first per node. truncated reports that at least one node had more
+// tasks in the window than its per-node share: its oldest tasks in the
+// window are missing, so the list is not that node's complete history.
 message PVETasks {
   PVEDatasetState state = 1;
   string reason = 2;
   repeated PVETask tasks = 3;
+  bool truncated = 4;
 }
 
 message PVETask {
@@ -1828,11 +1842,27 @@ message PVETask {
 }
 
 // PVEBackups is the 5-minute nonsecret backup evidence read for one guest.
+// It has two independent parts:
+//
+//   - state/reason cover task evidence: the newest vzdump task summaries
+//     whose target is this VMID on every online node within the evidence
+//     window (kind "task", status success/failed/running/unknown,
+//     verified "unknown"). Task success is evidence of a past run, never
+//     proof that a backup exists or is restorable.
+//   - catalog_state/catalog_reason cover catalog evidence (kind "catalog",
+//     status present/unknown, verified yes/no/unknown). PVE silently
+//     filters storage content listings for tokens without VM.Backup and
+//     Datastore.AllocateSpace, and the registry does not record the read
+//     token's privileges, so the catalog is UNAVAILABLE until the executor
+//     learns the scope. backups then contains no catalog entry; a consumer
+//     must never read the absence of catalog entries as "no backups".
 message PVEBackups {
   PVEDatasetState state = 1;
   string reason = 2;
   uint64 vmid = 3;
   repeated PVEBackupEvidence backups = 4;
+  PVEDatasetState catalog_state = 5;
+  string catalog_reason = 6;
 }
 
 message PVEBackupEvidence {

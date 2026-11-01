@@ -287,12 +287,16 @@ func TestReadPVEDeniedWithoutCoveringGrant(t *testing.T) {
 	if e.pve.requests.Load() != 0 {
 		t.Fatalf("%d requests reached PVE without authority", e.pve.requests.Load())
 	}
-	// Methods without a mapping yet stay Unimplemented; the collector role
-	// cannot reach anything else.
-	_, err = e.read(pb.PVEReadMethod_PVE_READ_METHOD_METRICS)
-	wantPveCode(t, err, codes.Unimplemented)
+	// METRICS and BACKUPS are denied under an inventory grant that does not
+	// name them.
+	_, err = e.svc.ReadPVE(context.Background(), &pb.ReadPVERequest{RemoteId: pveReadRemote, Method: pb.PVEReadMethod_PVE_READ_METHOD_METRICS,
+		Params: &pb.ReadPVERequest_Metrics{Metrics: &pb.PVEReadMetricsParams{Node: "pve1", Kind: "node"}}})
+	wantPveCode(t, err, codes.PermissionDenied)
 	_, err = e.readGuest(pb.PVEReadMethod_PVE_READ_METHOD_BACKUPS, 100)
-	wantPveCode(t, err, codes.Unimplemented)
+	wantPveCode(t, err, codes.PermissionDenied)
+	if e.pve.requests.Load() != 0 {
+		t.Fatalf("%d requests reached PVE without authority", e.pve.requests.Load())
+	}
 }
 
 func TestReadPVEEnforcesIntervalAndBudget(t *testing.T) {
