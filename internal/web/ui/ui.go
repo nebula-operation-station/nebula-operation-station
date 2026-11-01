@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"sort"
 	"time"
 
 	"google.golang.org/grpc"
@@ -31,6 +32,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/middleware"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui/invsort"
 	"github.com/nebula-operation-station/nebula-operation-station/web/static"
 	"github.com/nebula-operation-station/nebula-operation-station/web/templates"
 )
@@ -81,7 +83,9 @@ type Options struct {
 	// Hosts returns the managed hosts for the inventory page. Nil means
 	// no hosts. Values are untrusted host data and are rendered as text
 	// only. An error makes the page show "Inventory unavailable"; the
-	// error detail goes to the log only.
+	// error detail goes to the log only. The returned hosts are sorted
+	// into natural IP-aware order (invsort) before rendering, so the
+	// table's default order holds without JavaScript.
 	Hosts func(ctx context.Context) ([]inventory.Host, error)
 	// HostKeys returns the executor's host key pins for the inventory
 	// page. Nil (or an error) makes the SSH key column show "executor
@@ -219,13 +223,32 @@ func New(o Options) (*Handler, error) {
 	if serverIP == nil {
 		serverIP = serverPrivateIPv4
 	}
+	hosts := o.Hosts
+	if hosts != nil {
+		inner := hosts
+		hosts = func(ctx context.Context) ([]inventory.Host, error) {
+			got, err := inner(ctx)
+			if err != nil {
+				return nil, err
+			}
+			// Sort at the data source so every consumer (inventory
+			// table, dashboard) sees the same natural IP-aware order.
+			// Copy first: the provider may reuse its backing array.
+			sorted := make([]inventory.Host, len(got))
+			copy(sorted, got)
+			sort.SliceStable(sorted, func(i, j int) bool {
+				return inventoryHostLess(sorted[i], sorted[j])
+			})
+			return sorted, nil
+		}
+	}
 	return &Handler{
 		publicOrigin:   o.PublicOrigin,
 		pages:          pages,
 		staticFS:       staticFS,
 		status:         o.Status,
 		hostNames:      o.HostNames,
-		hosts:          o.Hosts,
+		hosts:          hosts,
 		hostKeys:       o.HostKeys,
 		inventory:      o.Inventory,
 		operations:     o.Operations,
@@ -251,6 +274,44 @@ func New(o Options) (*Handler, error) {
 		now:            o.Now,
 		log:            log,
 	}, nil
+}
+
+// inventoryHostLess orders inventory rows: by the shown name (display
+// name, falling back to the ID) in natural IP-aware order (invsort),
+// the primary endpoint address as tiebreaker.
+func inventoryHostLess(a, b inventory.Host) bool {
+	na, nb := inventoryShownName(a), inventoryShownName(b)
+	if na != nb {
+		return invsort.Less(na, nb)
+	}
+	pa, oka := inventoryPrimaryAddress(a)
+	pb, okb := inventoryPrimaryAddress(b)
+	switch {
+	case oka && okb:
+		return invsort.Less(pa, pb)
+	case oka:
+		return true // an address sorts before none
+	case okb:
+		return false
+	}
+	return false
+}
+
+// inventoryShownName is the name the inventory table shows for a host.
+func inventoryShownName(h inventory.Host) string {
+	if h.DisplayName != "" {
+		return h.DisplayName
+	}
+	return h.ID
+}
+
+// inventoryPrimaryAddress is the host's first endpoint address, if it
+// has any.
+func inventoryPrimaryAddress(h inventory.Host) (string, bool) {
+	if len(h.Endpoints) == 0 {
+		return "", false
+	}
+	return h.Endpoints[0].Address, true
 }
 
 // pageFiles maps a content name to the template file that defines its
@@ -450,7 +511,8 @@ type pageData struct {
 	// InventoryUnavailable is true when the hosts could not be listed;
 	// the page then shows "Inventory unavailable".
 	InventoryUnavailable bool
-	// Inventory is the table of managed hosts, in ID order.
+	// Inventory is the table of managed hosts, in natural IP-aware
+	// order (invsort).
 	Inventory []hostView
 	// Chart is the data of the inventory org chart page.
 	Chart *chartData
