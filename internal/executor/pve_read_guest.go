@@ -329,7 +329,8 @@ func readPveSnapshots(ctx context.Context, remoteID, base string, hc *http.Clien
 
 // readPveTasks reads the task metadata of the last pveTaskWindow from every
 // online node, newest first per node, at most pveTasksPerNode per node and
-// MaxObjectsPerPage in total. It never reads task logs or status detail.
+// MaxObjectsPerPage in total; a node with more tasks in the window makes
+// the dataset unavailable. It never reads task logs or status detail.
 func readPveTasks(ctx context.Context, remoteID, base string, hc *http.Client, token pveapi.TokenSupplier, at time.Time) *pb.PVETasks {
 	inv, err := pveapi.New(base, hc, token, pveapi.WithTimeout(pveReadRequestTimeout))
 	if err != nil {
@@ -356,6 +357,11 @@ func readPveTasks(ctx context.Context, remoteID, base string, hc *http.Client, t
 		if err != nil || !list.Available {
 			return &pb.PVETasks{State: pveUnavailable, Reason: pveReasonPartial}
 		}
+		// PVETasks carries no truncation flag: a cut-off window must not
+		// look like the node's complete task history.
+		if list.Truncated {
+			return &pb.PVETasks{State: pveUnavailable, Reason: pveReasonTruncated}
+		}
 		for _, t := range list.Tasks {
 			obs = append(obs, pveTaskObservation(t))
 		}
@@ -381,7 +387,8 @@ func pveTaskObservation(t pveapi.TaskSummary) pvecontract.TaskObservation {
 	}
 	switch {
 	case t.End.IsZero():
-	case t.Status == pveapi.TaskExitOK:
+	case t.Status == pveapi.TaskExitOK, strings.HasPrefix(t.Status, "WARNINGS:"):
+		// PVE ends a task that completed with warnings as "WARNINGS: n".
 		o.ExitStatus = "success"
 	default:
 		o.ExitStatus = "error"

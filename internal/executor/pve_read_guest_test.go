@@ -173,7 +173,7 @@ func TestReadPVETasksReadsBoundedMetadata(t *testing.T) {
 	now := e.clock.Now()
 	e.pve.set("/api2/json/nodes/pve1/tasks", fmt.Sprintf(`{"data":[
 		{"upid":%q,"status":"RUNNING","user":"root@pam"},
-		{"upid":%q,"endtime":%d,"status":"OK","user":"root@pam"},
+		{"upid":%q,"endtime":%d,"status":"WARNINGS: 2","user":"root@pam"},
 		{"upid":%q,"endtime":%d,"status":"command 'apt-get update' failed: exit code 100","user":"root@pam"}]}`,
 		upid("pve1", now.Add(-time.Minute), "vzdump", "100"),
 		upid("pve1", now.Add(-time.Hour), "qmstart", "100"), now.Add(-time.Hour+time.Second).Unix(),
@@ -305,4 +305,24 @@ func TestReadPVEGuestDetailIntervalIsPerGuest(t *testing.T) {
 	}
 	_, err := e.readGuest(pb.PVEReadMethod_PVE_READ_METHOD_SNAPSHOTS, 100)
 	wantPveCode(t, err, codes.ResourceExhausted)
+}
+
+func TestReadPVETasksTruncatedWindowUnavailable(t *testing.T) {
+	e := guestPveEnv(t)
+	now := e.clock.Now()
+	var rows []string
+	// The fake serves the same full page for every offset, so the second page
+	// pushes the node past pveTasksPerNode.
+	for i := range pveTasksPerNode {
+		rows = append(rows, fmt.Sprintf(`{"upid":%q,"status":"RUNNING","user":"root@pam"}`,
+			upid("pve1", now.Add(-time.Duration(i+1)*time.Second), "qmstart", "100")))
+	}
+	e.pve.set("/api2/json/nodes/pve1/tasks", `{"data":[`+strings.Join(rows, ",")+`]}`)
+	got, err := e.read(pb.PVEReadMethod_PVE_READ_METHOD_TASKS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tk := got.GetTasks(); tk.GetState() != pveUnav || tk.GetReason() != pveReasonTruncated || len(tk.GetTasks()) != 0 {
+		t.Fatalf("tasks = %v", tk)
+	}
 }

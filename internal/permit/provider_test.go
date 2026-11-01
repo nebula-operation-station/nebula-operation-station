@@ -287,7 +287,7 @@ func TestProviderReadRecoveryAndStorageFailClosed(t *testing.T) {
 // read every guest once, while all of them spend the one remote budget.
 func TestProviderGuestReadIntervalIsPerGuest(t *testing.T) {
 	e, _ := newLeaseEnv(t, ModeStandard)
-	doc := providerDocAt(e.clk.Now(), rgID, 3)
+	doc := providerDocAt(e.clk.Now(), rgID, 4)
 	doc.ProviderTargets[0].Methods = []string{ProviderMethodSnapshots}
 	approveReadGrant(t, e, readGrantRaw(t, doc))
 	guest := func(vmid uint64) ProviderRead {
@@ -300,14 +300,19 @@ func TestProviderGuestReadIntervalIsPerGuest(t *testing.T) {
 			t.Fatalf("guest %d: %v", vmid, err)
 		}
 	}
+	// Budget is left (2 of 4), so this denial is the guest's own interval.
 	_, err := e.auth.AuthorizeProviderRead(guest(100))
 	wantCode(t, err, CodeLeaseBudget)
+	e.clk.Add(time.Minute)
+	if _, err := e.auth.AuthorizeProviderRead(guest(100)); err != nil {
+		t.Fatalf("guest 100 after its interval: %v", err)
+	}
 	if _, err := e.auth.AuthorizeProviderRead(guest(102)); err != nil {
 		t.Fatal(err)
 	}
-	e.clk.Add(time.Minute)
-	_, err = e.auth.AuthorizeProviderRead(guest(100))
-	wantCode(t, err, CodeLeaseBudget) // the remote budget of 3 is spent
+	// All guests spend the one remote budget of 4.
+	_, err = e.auth.AuthorizeProviderRead(guest(103))
+	wantCode(t, err, CodeLeaseBudget)
 }
 
 func TestProviderReadRejectsMisplacedVMID(t *testing.T) {
