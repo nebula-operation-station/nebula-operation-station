@@ -320,14 +320,17 @@ func TestE21BatchSubstitutionAndReplayFail(t *testing.T) {
 		{"other credential version", p.Digest, 0, substitute(func(m *canonical.BatchMember) { m.CredentialVersions[0].Version = 2 })},
 		{"member at another index", p.Digest, 1, frozen[0]},
 		{"inserted member index", p.Digest, 2, frozen[0]},
-		{"unapproved parent", q.Digest, 1, frozen[0]},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := b.a.ClaimMember(ctx, tc.parent, tc.index, tc.member); err == nil {
-				t.Fatal("substituted member claimed")
-			}
+			_, err := b.a.ClaimMember(ctx, tc.parent, tc.index, tc.member)
+			// The refusal must be the plan comparison itself, not a side
+			// effect of an earlier (wrongly) successful claim.
+			wantPermitCode(t, err, permit.CodeInvalidRequest)
 		})
 	}
+	// Claims under a parent that was never approved.
+	_, err = b.a.ClaimMember(ctx, q.Digest, 1, frozen[0])
+	wantPermitCode(t, err, permit.CodeWrongState)
 	// Concurrent claims of the exact member: exactly one permit.
 	const racers = 16
 	var wins atomic.Int32
