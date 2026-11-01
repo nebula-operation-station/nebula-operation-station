@@ -232,3 +232,29 @@ func TestParseRegistryInfo(t *testing.T) {
 		t.Errorf("empty = %+v, want empty", info)
 	}
 }
+
+func TestParseRegistryHostResult(t *testing.T) {
+	// Per-host result: image -> {tags, releaseNotes}.
+	m := parseRegistryHostResult([]byte(`{
+		"nginx:1.25": {"tags": ["1.25", "1.26"], "releaseNotes": {"1.26": "new"}},
+		"redis:7": {"tags": ["7", "7.1"]}
+	}`))
+	if len(m) != 2 {
+		t.Fatalf("got %d images, want 2", len(m))
+	}
+	nginx := m["nginx:1.25"]
+	if len(nginx.Tags) != 2 || nginx.ReleaseNotes["1.26"] != "new" {
+		t.Errorf("nginx = %+v, want 2 tags and 1.26 notes", nginx)
+	}
+	if len(m["redis:7"].Tags) != 2 {
+		t.Errorf("redis tags = %+v, want 2", m["redis:7"].Tags)
+	}
+	// Garbage yields an empty map.
+	if got := parseRegistryHostResult([]byte(`not json`)); len(got) != 0 {
+		t.Errorf("garbage = %+v, want empty", got)
+	}
+	// Empty yields an empty map.
+	if got := parseRegistryHostResult(nil); len(got) != 0 {
+		t.Errorf("empty = %+v, want empty", got)
+	}
+}

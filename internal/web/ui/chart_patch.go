@@ -198,3 +198,23 @@ func parseRegistryInfo(result []byte) registryInfo {
 	}
 	return registryInfo{}
 }
+
+// parseRegistryHostResult decodes a stored per-host registry.tags result
+// into a per-image registry metadata map. The result is a JSON object
+// mapping an image reference to a {tags, releaseNotes} object; anything
+// else (or untrusted garbage) yields an empty map, which renders the stable
+// version as unknown.
+func parseRegistryHostResult(result []byte) map[string]registryInfo {
+	out := map[string]registryInfo{}
+	if len(result) == 0 {
+		return out
+	}
+	var doc map[string]registryInfo
+	if err := json.Unmarshal(result, &doc); err != nil {
+		return out
+	}
+	for img, info := range doc {
+		out[img] = info
+	}
+	return out
+}

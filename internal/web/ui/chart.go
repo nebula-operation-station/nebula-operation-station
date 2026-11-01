@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/dockerhost"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
@@ -32,6 +33,21 @@ type chartContainer struct {
 	HealthClass string
 	// Project is the Compose project name, "" for standalone.
 	Project string
+	// SameTagText/SameTagClass are the same-tag status (has the
+	// registry's digest for the running tag changed?).
+	SameTagText  string
+	SameTagClass string
+	// StableText/StableClass are the stable-version status (is a newer
+	// stable version tag available?), kept distinct from the same-tag
+	// status.
+	StableText  string
+	StableClass string
+	// Note is the same-tag note from docker.check_updates, rendered
+	// escaped.
+	Note string
+	// ReleaseNotes are the notes for the stable version, rendered
+	// escaped.
+	ReleaseNotes string
 }
 
 // chartGroup is one column of container boxes: a Compose project (Name
@@ -58,16 +74,42 @@ type chartHost struct {
 	// PatchClass its badge CSS class.
 	PatchText  string
 	PatchClass string
+	// Patch is the full OS patch state (source, list age, counts),
+	// shown in the details panel and the badge.
+	Patch patchStateView
 	// ContainerCount is the number of stored containers.
 	ContainerCount int
 	// Groups are the container groups in first-seen order: Compose
 	// projects (Name set) and, last, the standalone containers.
 	Groups []chartGroup
+	// Details is the read-only details side panel (config, snapshots,
+	// updates, backups). It has no controls that change anything.
+	Details chartDetails
 	// Expanded opens the subtree by default (hosts with problems).
 	Expanded bool
 	// WorstClass is the border colour class: critical (unreachable),
 	// warning (updates pending) or neutral.
 	WorstClass string
+}
+
+// kv is one key/value row in a details panel section.
+type kv struct {
+	// K is the label, V the value; both are rendered escaped.
+	K, V string
+}
+
+// chartDetails is the server-rendered details side panel of one box
+// (ADR 0006 P1-33). It is read-only: it shows stored data and plain links
+// to the normal detail pages, and it has no controls that change anything.
+type chartDetails struct {
+	// Config is the box configuration, in display order.
+	Config []kv
+	// Snapshots is the snapshot summary ("none collected" or a count).
+	Snapshots string
+	// Backups is the backup summary ("none collected" or a count).
+	Backups string
+	// DetailURL links to the normal detail page (no-JS navigation).
+	DetailURL string
 }
 
 // chartData is the /inventory/chart page data.
@@ -256,9 +298,18 @@ func pveTreeToView(tree pveinventory.Tree) []pveNodeView {
 
 // chartHosts builds the org chart columns from the batch reads.
 func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins map[string]*pb.HostKeyPin, pinsUnavailable bool, b batchData) []chartHost {
+	now := time.Now()
+	// Registry metadata (stable version + release notes) per host, from
+	// the stored registry.tags result. Absent while the registry lookup
+	// is not wired; the stable version then renders "unknown".
+	var registryTags map[string]executions.LastResultRow
+	if h.operations != nil {
+		registryTags, _ = h.operations.LastResults(ctx, "registry.tags")
+	}
 	out := make([]chartHost, 0, len(hosts))
 	for _, host := range hosts {
-		v := viewHost(host, pins, pinsUnavailable, b, time.Now())
+		v := viewHost(host, pins, pinsUnavailable, b, now)
+		patch := newPatchStateView(b.updates[host.ID], now)
 		ch := chartHost{
 			ID:             host.ID,
 			DisplayName:    v.DisplayName,
@@ -266,15 +317,9 @@ func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins m
 			StateLabel:     v.StateLabel,
 			StateClass:     v.StateClass,
 			ContainerCount: v.ContainersTotal,
-		}
-		switch {
-		case v.UpdatesChecked.IsZero():
-			ch.PatchText, ch.PatchClass = "unknown", "badge--unknown"
-		case v.UpdatesTotal > 0:
-			ch.PatchText = "⬆ " + strconv.Itoa(v.UpdatesTotal)
-			ch.PatchClass = "badge--warning"
-		default:
-			ch.PatchText, ch.PatchClass = "✓", "badge--ok"
+			Patch:          patch,
+			PatchText:      patch.Text,
+			PatchClass:     patch.Class,
 		}
 		// Border colour = worst state: red unreachable, yellow
 		// updates pending, grey otherwise.
@@ -288,6 +333,36 @@ func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins m
 		}
 		// Problem hosts open by default, the rest collapsed.
 		ch.Expanded = ch.WorstClass != "chart__node--neutral"
+		// Read-only details side panel: config, snapshots, updates,
+		// backups. No controls that change anything.
+		os := v.OS
+		if os == "" {
+			os = "unknown"
+		}
+		ch.Details = chartDetails{
+			Config: []kv{
+				{"State", v.StateLabel},
+				{"OS", os},
+				{"Containers", strconv.Itoa(v.ContainersTotal)},
+			},
+			Snapshots: "none collected",
+			Backups:   "none collected",
+			DetailURL: "/hosts/" + host.ID,
+		}
+		// Same-tag status per image, from the stored check_updates
+		// result; registry metadata per image for the stable version.
+		var ups dockerhost.ImageUpdates
+		if upRow, ok := b.dockerUp[host.ID]; ok {
+			ups, _ = dockerhost.ParseImageUpdates(upRow.Result)
+		}
+		upByImage := map[string]dockerhost.ImageUpdate{}
+		for _, iu := range ups.Images {
+			upByImage[iu.Image] = iu
+		}
+		regByImage := map[string]registryInfo{}
+		if regRow, ok := registryTags[host.ID]; ok {
+			regByImage = parseRegistryHostResult(regRow.Result)
+		}
 		if row, ok := b.docker[host.ID]; ok {
 			if list, err := dockerhost.ParseList(row.Result); err == nil {
 				// Compose projects keep first-seen order; the
@@ -295,9 +370,14 @@ func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins m
 				index := map[string]int{}
 				var standalone []chartContainer
 				for _, c := range list.Containers {
+					iu := upByImage[c.Image]
+					cu := newContainerUpdateView(imageTag(c.Image), iu.Status, iu.Note, regByImage[c.Image])
 					cv := chartContainer{Name: c.Name, Image: c.Image, State: c.State,
 						StateClass: containerStateClass(c.State), Health: c.Health,
-						HealthClass: containerHealthClass(c.Health), Project: c.Project}
+						HealthClass: containerHealthClass(c.Health), Project: c.Project,
+						SameTagText: cu.SameTagText, SameTagClass: cu.SameTagClass,
+						StableText: cu.StableText, StableClass: cu.StableClass,
+						Note: cu.Note, ReleaseNotes: cu.ReleaseNotes}
 					if c.Project == "" {
 						standalone = append(standalone, cv)
 						continue
