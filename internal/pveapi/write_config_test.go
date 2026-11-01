@@ -215,6 +215,7 @@ func TestSecretNeverFormatsValue(t *testing.T) {
 	}
 	for _, s := range []string{
 		fmt.Sprint(r), fmt.Sprintf("%v", r), fmt.Sprintf("%+v", r), fmt.Sprintf("%#v", r),
+		//lint:ignore S1025 the %s verb itself is what this test checks for redaction
 		fmt.Sprintf("%s", r.CIPassword), fmt.Sprintf("%q", r.CIPassword), string(j),
 	} {
 		if strings.Contains(s, testPassword) {
