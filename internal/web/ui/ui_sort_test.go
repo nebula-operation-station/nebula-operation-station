@@ -115,3 +115,35 @@ func TestInventoryDefaultOrderFallsBackToID(t *testing.T) {
 		t.Fatalf("ID-ordered rows out of order (alpha=%d zeta=%d)", ia, iz)
 	}
 }
+
+// TestInventorySortableHeaders checks that the Host, OS, Status,
+// Updates and Last seen columns carry a keyboard-accessible sort
+// button with aria-sort, and that rows carry the data attributes the
+// script sorts by (data-os, data-status, data-updates, data-ts).
+func TestInventorySortableHeaders(t *testing.T) {
+	hosts := []inventory.Host{
+		sortTestHost("h-25", "192.168.0.25", "192.168.0.25"),
+	}
+	h, err := ui.New(ui.Options{
+		PublicOrigin: "https://nebula.example.org",
+		Hosts:        func(context.Context) ([]inventory.Host, error) { return hosts, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := getInventoryBody(t, h)
+	for _, key := range []string{"host", "os", "status", "updates", "lastseen"} {
+		if !strings.Contains(body, `data-sort="`+key+`"`) {
+			t.Errorf("no sort button for column %q", key)
+		}
+	}
+	// The sortable headers expose aria-sort, initially "none".
+	if n := strings.Count(body, `aria-sort="none"`); n < 5 {
+		t.Errorf(`count of aria-sort="none" = %d, want at least 5`, n)
+	}
+	for _, attr := range []string{`data-os="`, `data-status="`, `data-updates="`, `data-ts="`} {
+		if !strings.Contains(body, attr) {
+			t.Errorf("row missing %s attribute", attr)
+		}
+	}
+}
