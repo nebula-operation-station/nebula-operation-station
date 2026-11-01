@@ -736,7 +736,7 @@ func (s *TelemetryScheduler) plan(ctx context.Context, now time.Time, rep *Telem
 		switch {
 		case len(sc.attempts) >= c.lease.RunBudget:
 			reason = DeferBudget
-		case c.read.Target.Source == TelemetryProvider && (usedScope[sk] || !sc.lastRequest.IsZero() && !now.Before(sc.lastRequest) && now.Sub(sc.lastRequest) < ProviderMetricsSpacing):
+		case c.read.Target.Source == TelemetryProvider && (usedScope[sk] || sc.inFlight > 0 || !sc.lastRequest.IsZero() && !now.Before(sc.lastRequest) && now.Sub(sc.lastRequest) < ProviderMetricsSpacing):
 			reason = DeferRequestRate
 		case c.read.Target.Source == TelemetrySSH && (usedScope[sk] || sc.inFlight > 0):
 			reason = DeferHostBusy
@@ -764,10 +764,17 @@ func (s *TelemetryScheduler) plan(ctx context.Context, now time.Time, rep *Telem
 	return out
 }
 
-// RunOnce plans the reads due now, performs them concurrently (at most one
-// per remote/host) and records the validated samples. It returns when all
-// reads have finished.
-func (s *TelemetryScheduler) RunOnce(ctx context.Context) TelemetryReport {
+// telemetryOutcome is the result of one performed read.
+type telemetryOutcome struct {
+	recorded, discarded int
+	failed              bool
+}
+
+// start plans the reads due now and starts each one in its own goroutine
+// tracked by wg (at most one in flight per remote/host, also across
+// passes). Each goroutine writes only its own element of the returned
+// slice; read it only after wg.Wait.
+func (s *TelemetryScheduler) start(ctx context.Context, wg *sync.WaitGroup) (TelemetryReport, []telemetryOutcome) {
 	s.mu.Lock()
 	now := s.cfg.Now()
 	rep := TelemetryReport{Now: now}
@@ -775,20 +782,24 @@ func (s *TelemetryScheduler) RunOnce(ctx context.Context) TelemetryReport {
 	s.mu.Unlock()
 	rep.Issued = len(reads)
 
-	type outcome struct {
-		recorded, discarded int
-		failed              bool
-	}
-	results := make([]outcome, len(reads))
-	var wg sync.WaitGroup
+	results := make([]telemetryOutcome, len(reads))
 	for i, p := range reads {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			rec, disc, failed := s.perform(p)
-			results[i] = outcome{rec, disc, failed}
+			results[i] = telemetryOutcome{rec, disc, failed}
 		}()
 	}
+	return rep, results
+}
+
+// RunOnce plans the reads due now, performs them concurrently (at most one
+// per remote/host) and records the validated samples. It returns when the
+// reads started by this pass have finished.
+func (s *TelemetryScheduler) RunOnce(ctx context.Context) TelemetryReport {
+	var wg sync.WaitGroup
+	rep, results := s.start(ctx, &wg)
 	wg.Wait()
 	for _, o := range results {
 		rep.Recorded += o.recorded
@@ -825,9 +836,13 @@ func (s *TelemetryScheduler) perform(p planned) (recorded, discarded int, failed
 	now := s.cfg.Now()
 	if err != nil {
 		switch status.Code(err) {
-		case codes.PermissionDenied, codes.NotFound, codes.FailedPrecondition, codes.Unauthenticated:
-			// The executor no longer honours this lease for the target:
-			// stop until the leases are refreshed.
+		case codes.PermissionDenied, codes.NotFound:
+			// The executor no longer honours this lease for the target
+			// (grant inactive or not covering it, remote removed): stop
+			// until the leases are refreshed. FailedPrecondition and
+			// Unauthenticated also cover temporary executor states (vault
+			// locked, recovery pending, credential being replaced) that
+			// only pause reads, so those are retried at the next interval.
 			s.denied[p.read.GrantID+"\x00"+k] = true
 		}
 		s.mu.Unlock()
@@ -882,12 +897,19 @@ func validSample(smp TelemetrySample, t TelemetryTarget) bool {
 	return !math.IsNaN(smp.Value) && !math.IsInf(smp.Value, 0) && smp.Value >= 0 && smp.Value <= 1
 }
 
-// Run calls RunOnce every Tick until ctx is cancelled.
+// Run plans a pass every Tick until ctx is cancelled. It does not wait for
+// the reads of one pass before planning the next, so a slow read on one
+// remote/host does not delay due reads elsewhere; the per-target and
+// per-remote/host in-flight bookkeeping keeps overlapping passes apart.
+// Run returns after the reads it started have finished; cancelling ctx
+// cancels them.
 func (s *TelemetryScheduler) Run(ctx context.Context) error {
 	t := time.NewTicker(s.cfg.Tick)
 	defer t.Stop()
+	var wg sync.WaitGroup
+	defer wg.Wait()
 	for {
-		s.RunOnce(ctx)
+		s.start(ctx, &wg)
 		select {
 		case <-ctx.Done():
 			return nil

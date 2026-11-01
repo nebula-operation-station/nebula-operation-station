@@ -633,7 +633,7 @@ func TestTelemetryChangedDigestDiscardsInFlight(t *testing.T) {
 }
 
 func TestTelemetryExecutorRefusalStopsTarget(t *testing.T) {
-	for _, code := range []codes.Code{codes.PermissionDenied, codes.NotFound, codes.FailedPrecondition} {
+	for _, code := range []codes.Code{codes.PermissionDenied, codes.NotFound} {
 		tg := provTarget("remote-a", 101, 1)
 		r := &telReader{fn: func(context.Context, TelemetryRead) ([]TelemetrySample, error) {
 			return nil, status.Error(code, "read_grant_inactive")
@@ -649,6 +649,122 @@ func TestTelemetryExecutorRefusalStopsTarget(t *testing.T) {
 		if _, err := s.Request("v", tg); !errors.Is(err, ErrTelemetryNotAuthorized) {
 			t.Fatalf("%v: live request after refusal: %v", code, err)
 		}
+	}
+}
+
+// Spec 17: lock/restart pauses reads. A locked or recovering executor
+// answers FailedPrecondition/Unauthenticated; that must not switch the
+// target off until the next SetLeases.
+func TestTelemetryExecutorPauseIsRetriedAfterInterval(t *testing.T) {
+	for _, tc := range []struct {
+		code codes.Code
+		msg  string
+	}{
+		{codes.FailedPrecondition, "read pve: the executor vault is locked"},
+		{codes.FailedPrecondition, "recovery pending"},
+		{codes.FailedPrecondition, "read pve: read credential is unavailable or changed"},
+		{codes.Unauthenticated, "executor session expired"},
+	} {
+		tg := provTarget("remote-a", 101, 1)
+		var mu sync.Mutex
+		paused := true
+		r := &telReader{fn: func(_ context.Context, rd TelemetryRead) ([]TelemetrySample, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if paused {
+				return nil, status.Error(tc.code, tc.msg)
+			}
+			return []TelemetrySample{{Target: rd.Target, Metric: TelemetryMetricCPU, Value: 0.2}}, nil
+		}}
+		s, clk, sink := newTel(t, r, lease("g1", true, true, telT0.Add(time.Hour), 100, tg))
+		if rep := s.RunOnce(context.Background()); rep.Failed != 1 {
+			t.Fatalf("%v %q: %+v", tc.code, tc.msg, rep)
+		}
+		if _, err := s.Request("v", tg); err != nil {
+			t.Fatalf("%v %q: live request after a pause: %v", tc.code, tc.msg, err)
+		}
+		mu.Lock()
+		paused = false
+		mu.Unlock()
+		clk.Add(TelemetryHistoryInterval)
+		if rep := s.RunOnce(context.Background()); rep.Issued == 0 || rep.Recorded == 0 || sink.count() == 0 {
+			t.Fatalf("%v %q: not retried after the interval: %+v", tc.code, tc.msg, rep)
+		}
+	}
+}
+
+// waitFor receives from ch or fails after a generous real-time bound.
+func waitFor(t *testing.T, ch <-chan TelemetryRead, what string) TelemetryRead {
+	t.Helper()
+	select {
+	case rd := <-ch:
+		return rd
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+		return TelemetryRead{}
+	}
+}
+
+// A slow read on one host/remote must not hold up due reads elsewhere, and
+// the one-in-flight rule per host/remote must hold across Run's passes.
+func TestTelemetryRunSlowReadDoesNotStallOtherTargets(t *testing.T) {
+	hostA1, hostA2 := sshTarget("host-a", "host.metrics"), sshTarget("host-a", "filesystem.list")
+	slowC1, slowC2 := provTarget("remote-c", 101, 1), provTarget("remote-c", 102, 1)
+	fastB := provTarget("remote-b", 101, 1)
+
+	var mu sync.Mutex
+	slowReads := map[string]int{}
+	fast := make(chan TelemetryRead, 16)
+	slowStarted := make(chan TelemetryRead, 16)
+	r := &telReader{fn: func(ctx context.Context, rd TelemetryRead) ([]TelemetrySample, error) {
+		if rd.Target.scope() == fastB.scope() {
+			fast <- rd
+			return []TelemetrySample{{Target: rd.Target, Metric: TelemetryMetricCPU, Value: 0.1}}, nil
+		}
+		mu.Lock()
+		slowReads[rd.Target.scope()]++
+		mu.Unlock()
+		slowStarted <- rd
+		<-ctx.Done() // hangs until timeout or shutdown
+		return nil, ctx.Err()
+	}}
+	clk := &fakeClock{t: telT0}
+	s, err := NewTelemetryScheduler(r, &telSink{}, TelemetryConfig{Now: clk.Now, Tick: 5 * time.Millisecond, ReadTimeout: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetLeases([]TelemetryLease{lease("g1", true, true, telT0.Add(time.Hour), 1000, hostA1, hostA2, slowC1, slowC2, fastB)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Request("v", fastB); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx) }()
+
+	waitFor(t, fast, "first live read on remote-b")
+	waitFor(t, slowStarted, "first slow read")
+	waitFor(t, slowStarted, "second slow read")
+	for i := range 3 {
+		clk.Add(TelemetryLiveInterval)
+		if _, err := s.Request("v", fastB); err != nil {
+			t.Fatal(err)
+		}
+		if rd := waitFor(t, fast, "next live read on remote-b"); !rd.Live {
+			t.Fatalf("pass %d: read on remote-b not live: %+v", i, rd)
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if slowReads[hostA1.scope()] != 1 || slowReads[slowC1.scope()] != 1 {
+		t.Fatalf("more than one read in flight per host/remote across passes: %v", slowReads)
 	}
 }
 
