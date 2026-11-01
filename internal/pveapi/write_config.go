@@ -124,7 +124,9 @@ type ConfigRequest struct {
 	// CIUser is the cloud-init default user.
 	CIUser string
 	// SSHKeys are OpenSSH public keys; each is re-encoded canonically, so
-	// authorized_keys options and comments are dropped.
+	// comments are dropped. Keys with authorized_keys options (command=,
+	// from=, restrict, ...) are rejected: re-encoding would otherwise
+	// install them without their restrictions.
 	SSHKeys []string
 	// CIPassword is the cloud-init password. It is sent only as
 	// "cipassword" and never appears in errors.
@@ -301,8 +303,9 @@ func (c IPConfig) encode() (string, error) {
 	return v, nil
 }
 
-// encodeSSHKeys parses each key, re-encodes it canonically (type and
-// base64 only) and percent-encodes the newline-joined list, which is the
+// encodeSSHKeys parses each key, rejects keys with authorized_keys
+// options, re-encodes it canonically (type and base64 only) and
+// percent-encodes the newline-joined list, which is the
 // encoding PVE expects for the sshkeys parameter.
 func encodeSSHKeys(keys []string) (string, error) {
 	const op = "config"
@@ -314,8 +317,8 @@ func encodeSSHKeys(keys []string) (string, error) {
 		if len(k) > MaxSSHKeysBytes || strings.ContainsAny(k, "\r\n") {
 			return "", invalid(op, "sshkeys")
 		}
-		pub, _, _, rest, err := ssh.ParseAuthorizedKey([]byte(k))
-		if err != nil || len(strings.TrimSpace(string(rest))) != 0 {
+		pub, _, opts, rest, err := ssh.ParseAuthorizedKey([]byte(k))
+		if err != nil || len(opts) != 0 || len(strings.TrimSpace(string(rest))) != 0 {
 			return "", invalid(op, "sshkeys")
 		}
 		lines = append(lines, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub))))

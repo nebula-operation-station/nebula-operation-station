@@ -268,8 +268,12 @@ func TestWriteRejectsHostileResponses(t *testing.T) {
 		{"wrong type", 200, upidBody(strings.Replace(upidStart, "qmstart", "qmstop", 1)), ReasonSchema, true},
 		{"wrong vmid", 200, upidBody(strings.Replace(upidStart, ":120:", ":121:", 1)), ReasonSchema, true},
 		{"forbidden", 403, `{"message":"secret-echo"}`, ReasonHTTPError, false},
-		{"redirect", 302, ``, ReasonHTTPError, false},
-		{"server error", 500, `{"data":null}`, ReasonHTTPError, false},
+		{"bad request", 400, `{"errors":{"vmid":"x"}}`, ReasonHTTPError, false},
+		{"not found", 404, ``, ReasonHTTPError, false},
+		{"redirect", 302, ``, ReasonHTTPError, true},
+		{"server error", 500, `{"data":null}`, ReasonHTTPError, true},
+		{"bad gateway", 502, ``, ReasonHTTPError, true},
+		{"gateway timeout", 504, ``, ReasonHTTPError, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

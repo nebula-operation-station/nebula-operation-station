@@ -38,7 +38,7 @@ func fullConfigRequest(t *testing.T) ConfigRequest {
 		Net0:          &NetConfig{Bridge: "vmbr0", Tag: 30, MAC: "bc:24:11:00:00:01"},
 		IPConfig0:     &IPConfig{Address: netip.MustParsePrefix("10.0.30.5/24"), Gateway: netip.MustParseAddr("10.0.30.1")},
 		CIUser:        "nos",
-		SSHKeys:       []string{testAuthorizedKey(t, 1) + " nos@automation", `command="x" ` + testAuthorizedKey(t, 2)},
+		SSHKeys:       []string{testAuthorizedKey(t, 1) + " nos@automation", testAuthorizedKey(t, 2)},
 		CIPassword:    NewSecret(testPassword),
 		Nameservers:   []netip.Addr{netip.MustParseAddr("10.0.30.1"), netip.MustParseAddr("2001:db8::53")},
 		SearchDomains: []string{"lab.example", "example"},
@@ -79,7 +79,7 @@ func TestSetConfigSendsOnlyAllowlistedFields(t *testing.T) {
 		}
 	}
 	// The PVE-side decoding of sshkeys yields canonical keys without
-	// options or comments.
+	// comments.
 	dec, err := url.QueryUnescape(r.form.Get("sshkeys"))
 	if err != nil || dec != keys {
 		t.Errorf("decoded sshkeys = %q, %v", dec, err)
@@ -138,6 +138,10 @@ func TestSetConfigRejectsInvalidFields(t *testing.T) {
 		"sshkeys garbage":      func(r *ConfigRequest) { r.SSHKeys = []string{"ssh-ed25519 AAAA notakey"} },
 		"sshkeys newline":      func(r *ConfigRequest) { r.SSHKeys = []string{testAuthorizedKey(t, 1) + "\n" + testAuthorizedKey(t, 2)} },
 		"sshkeys too many":     func(r *ConfigRequest) { r.SSHKeys = make([]string, MaxSSHKeys+1) },
+		"sshkeys command opt":  func(r *ConfigRequest) { r.SSHKeys = []string{`command="x" ` + testAuthorizedKey(t, 2)} },
+		"sshkeys from opt":     func(r *ConfigRequest) { r.SSHKeys = []string{`from="10.0.0.0/8" ` + testAuthorizedKey(t, 2)} },
+		"sshkeys restrict opt": func(r *ConfigRequest) { r.SSHKeys = []string{"restrict " + testAuthorizedKey(t, 2)} },
+		"sshkeys no-pty opt":   func(r *ConfigRequest) { r.SSHKeys = []string{"no-pty " + testAuthorizedKey(t, 2)} },
 		"password short":       func(r *ConfigRequest) { r.CIPassword = NewSecret("short") },
 		"password control":     func(r *ConfigRequest) { r.CIPassword = NewSecret("password\nwith-newline") },
 		"password long":        func(r *ConfigRequest) { r.CIPassword = NewSecret(strings.Repeat("p", MaxPasswordBytes+1)) },

@@ -93,11 +93,21 @@ func (e *WriteError) Unwrap() error { return e.cause }
 
 // OutcomeUnknown reports whether the request may have reached PVE and
 // started a task although no valid UPID was returned (transport failure,
-// timeout, or a 200 response that failed validation). Callers must then
-// reconcile through the task list and never redispatch blindly (ADR 0008).
-// An HTTP error status or a missing token means PVE did not start a task.
+// timeout, a 200 response that failed validation, or a non-4xx error
+// status). Callers must then reconcile through the task list and never
+// redispatch blindly (ADR 0008). Only a missing token or an HTTP 4xx
+// status proves PVE did not start a task: a 5xx (e.g. a proxy 502/504, or
+// pveproxy failing after the target node accepted the request) or an
+// unfollowed 3xx does not.
 func (e *WriteError) OutcomeUnknown() bool {
-	return e.Reason != ReasonHTTPError && e.Reason != ReasonNoToken
+	switch e.Reason {
+	case ReasonNoToken:
+		return false
+	case ReasonHTTPError:
+		return e.Status < 400 || e.Status >= 500
+	default:
+		return true
+	}
 }
 
 // NewWriter creates a Writer for the PVE API at base (e.g.
