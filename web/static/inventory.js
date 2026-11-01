@@ -30,6 +30,160 @@
     });
   }
 
+  // IP-aware natural comparison — a port of internal/web/ui/invsort.
+  // IPs compare numerically (IPv4 before IPv6, IPs before non-IPs);
+  // everything else compares case-insensitively with digit runs as
+  // numbers, so "node2" < "node10" and "192.168.0.25" < "192.168.0.221".
+  const v4Re = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+  const v6GroupRe = /^[0-9a-f]{1,4}$/;
+  const parseIPv6 = (s) => {
+    let addr = s.toLowerCase();
+    const v4 = addr.match(/:(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (v4) {
+      const o = v4.slice(1).map(Number);
+      if (o.some((p) => p > 255)) return null;
+      addr = addr.slice(0, -v4[0].length) +
+        ((o[0] << 8) | o[1]).toString(16) + ':' + ((o[2] << 8) | o[3]).toString(16);
+    }
+    const halves = addr.split('::');
+    if (halves.length > 2) return null;
+    const groups = (half) => {
+      if (half === '') return [];
+      const g = half.split(':');
+      if (g.length > 8) return null;
+      const out = [];
+      for (const x of g) {
+        if (!v6GroupRe.test(x)) return null;
+        out.push(parseInt(x, 16));
+      }
+      return out;
+    };
+    if (halves.length === 2) {
+      const head = groups(halves[0]);
+      const tail = groups(halves[1]);
+      if (!head || !tail || head.length + tail.length > 7) return null;
+      return head.concat(new Array(8 - head.length - tail.length).fill(0), tail);
+    }
+    const full = groups(addr);
+    return full && full.length === 8 ? full : null;
+  };
+  const parseIP = (s) => {
+    const t = (s || '').trim();
+    const m = t.match(v4Re);
+    if (m) {
+      const parts = m.slice(1).map(Number);
+      if (parts.some((p) => p > 255)) return null;
+      return { kind: 0, parts };
+    }
+    const v6 = parseIPv6(t);
+    return v6 ? { kind: 1, parts: v6 } : null;
+  };
+  const ipCompare = (a, b) => {
+    const pa = parseIP(a);
+    const pb = parseIP(b);
+    if (pa && pb) {
+      if (pa.kind !== pb.kind) return pa.kind - pb.kind;
+      for (let i = 0; i < pa.parts.length; i++) {
+        if (pa.parts[i] !== pb.parts[i]) return pa.parts[i] - pb.parts[i];
+      }
+      return 0;
+    }
+    if (pa) return -1;
+    if (pb) return 1;
+    return naturalCompare(a, b);
+  };
+  const digitRun = (chars, i) => {
+    let j = i;
+    while (j < chars.length && chars[j] >= '0' && chars[j] <= '9') j++;
+    let k = i;
+    while (k < j && chars[k] === '0') k++;
+    return { text: chars.slice(k, j).join(''), next: j };
+  };
+  const naturalCompare = (a, b) => {
+    const ra = Array.from(a || '');
+    const rb = Array.from(b || '');
+    let i = 0;
+    let j = 0;
+    while (i < ra.length && j < rb.length) {
+      const da = ra[i] >= '0' && ra[i] <= '9';
+      const db = rb[j] >= '0' && rb[j] <= '9';
+      if (da && db) {
+        const na = digitRun(ra, i);
+        const nb = digitRun(rb, j);
+        let c = 0;
+        if (na.text.length !== nb.text.length) c = na.text.length - nb.text.length;
+        else if (na.text !== nb.text) c = na.text < nb.text ? -1 : 1;
+        if (c !== 0) return c;
+        i = na.next;
+        j = nb.next;
+        continue;
+      }
+      const la = ra[i].toLowerCase();
+      const lb = rb[j].toLowerCase();
+      if (la !== lb) return la < lb ? -1 : 1;
+      i++;
+      j++;
+    }
+    return ra.length - rb.length;
+  };
+
+  // Sortable columns: the Host, OS, Status, Updates and Last seen
+  // headers hold a button; clicking it (or Enter/Space, since it is a
+  // real button) toggles ascending/descending and sets aria-sort on the
+  // column. The Host column uses the same IP-aware natural order as the
+  // server default (internal/web/ui/invsort); Last seen sorts by the
+  // row's data-ts (milliseconds, empty when never seen). Re-appending
+  // rows keeps the text filter's hidden state, so both keep working.
+  const table = document.querySelector('table.inventory');
+  if (table) {
+    const tbody = table.querySelector('tbody');
+    const sortDefs = {
+      host: {
+        value: (row) => {
+          const name = row.querySelector('.host-name');
+          return name ? name.textContent : (row.dataset.id || '');
+        },
+        compare: ipCompare,
+      },
+      os: { value: (row) => row.dataset.os || '', compare: naturalCompare },
+      status: { value: (row) => row.dataset.status || '', compare: naturalCompare },
+      updates: { value: (row) => Number(row.dataset.updates || '0'), compare: (a, b) => a - b },
+      lastseen: {
+        value: (row, dir) => {
+          const ts = row.dataset.ts;
+          if (ts === undefined || ts === '') return dir === 'ascending' ? Infinity : -Infinity;
+          return Number(ts);
+        },
+        compare: (a, b) => a - b,
+      },
+    };
+    let sortKey = null;
+    let sortDir = 'ascending';
+    const applySort = (key, dir) => {
+      sortKey = key;
+      sortDir = dir;
+      for (const th of table.querySelectorAll('th[aria-sort]')) {
+        const btn = th.querySelector('button[data-sort]');
+        th.setAttribute('aria-sort', btn && btn.dataset.sort === key ? dir : 'none');
+      }
+      const def = sortDefs[key];
+      const rows = Array.from(tbody.querySelectorAll('tr[data-id]'));
+      rows.sort((a, b) => def.compare(def.value(a, dir), def.value(b, dir)));
+      if (dir === 'descending') rows.reverse();
+      for (const row of rows) tbody.appendChild(row);
+    };
+    for (const btn of table.querySelectorAll('th button[data-sort]')) {
+      btn.addEventListener('click', () => {
+        const key = btn.dataset.sort;
+        if (sortKey === key) {
+          applySort(key, sortDir === 'ascending' ? 'descending' : 'ascending');
+        } else {
+          applySort(key, 'ascending');
+        }
+      });
+    }
+  }
+
   // Selection and bulk actions: refresh the reads behind the columns for
   // the selected hosts, or open the reboot form with them preselected.
   const bulkbar = document.getElementById('bulkbar');

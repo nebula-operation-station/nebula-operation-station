@@ -77,18 +77,18 @@
     <thead>
       <tr>
         {{if $.InventoryEditable}}<th class="select"><input type="checkbox" id="select-all" aria-label="Select all shown hosts"></th>{{end}}
-        <th>Host</th>
-        <th>OS</th>
-        <th>Status</th>
-        <th>Updates</th>
+        <th aria-sort="none"><button type="button" class="button button--secondary button--small" data-sort="host">Host</button></th>
+        <th aria-sort="none"><button type="button" class="button button--secondary button--small" data-sort="os">OS</button></th>
+        <th aria-sort="none"><button type="button" class="button button--secondary button--small" data-sort="status">Status</button></th>
+        <th aria-sort="none"><button type="button" class="button button--secondary button--small" data-sort="updates">Updates</button></th>
         <th>Containers</th>
         <th>Key</th>
-        <th>Last seen</th>
+        <th aria-sort="none"><button type="button" class="button button--secondary button--small" data-sort="lastseen">Last seen</button></th>
       </tr>
     </thead>
     <tbody>
       {{range .Inventory}}
-      <tr data-id="{{.ID}}" data-search="{{.Search}}" data-state="{{.StateFilter}}" data-environment="{{.Environment}}">
+      <tr data-id="{{.ID}}" data-search="{{.Search}}" data-state="{{.StateFilter}}" data-environment="{{.Environment}}" data-os="{{.OS}}" data-status="{{.StateLabel}}" data-updates="{{.UpdatesTotal}}" data-ts="{{if .LastSeenSet}}{{.LastSeen.UnixMilli}}{{end}}">
         {{if $.InventoryEditable}}<td class="select"><input type="checkbox" class="host-select" value="{{.ID}}" aria-label="Select {{.ID}}"></td>{{end}}
         <td class="host-cell">
           <a class="host-link" href="/hosts/{{.ID}}">
