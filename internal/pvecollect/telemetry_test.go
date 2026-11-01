@@ -342,12 +342,11 @@ func TestTelemetryRemoteLiveTargetCap(t *testing.T) {
 	}
 	other := provTarget("remote-b", 0, 0)
 	s, clk, _ := newTel(t, r, lease("g1", false, true, telT0.Add(time.Hour), 4096, append(tgs, other)...))
-	for i, tg := range tgs {
+	for _, tg := range tgs {
 		if _, err := s.Request("v", tg); err != nil {
 			t.Fatal(err)
 		}
 		clk.Add(time.Millisecond) // order of first request = priority
-		_ = i
 	}
 	if _, err := s.Request("v", other); err != nil {
 		t.Fatal(err)
