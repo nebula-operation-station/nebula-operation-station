@@ -33,8 +33,26 @@ type Result struct {
 // module bytes and provenance, applies the active/predecessor transitions
 // and tombstones, then garbage-collects only what retention allows. On
 // any error nothing is changed. It does not create trust tuples or
-// execution authority.
+// execution authority. Admit collects every eligible version; use
+// AdmitPinned to keep versions pinned by a retained execution or an open
+// review (spec 10, "not otherwise pinned").
 func (s *Store) Admit(in release.Candidate, reviewed Review) (Result, error) {
+	return s.admit(in, reviewed, nil)
+}
+
+// AdmitPinned is Admit with pins: versions in pinned (keyed name@version)
+// are skipped by garbage collection even when they are beyond the two most
+// recent predecessors and their 90-day floor has passed. A retained
+// execution or an open review pins the versions it references, so their
+// bytes are never collected while the pin holds (spec 10, "not otherwise
+// pinned").
+func (s *Store) AdmitPinned(in release.Candidate, reviewed Review, pinned map[string]bool) (Result, error) {
+	return s.admit(in, reviewed, pinned)
+}
+
+// admit is the shared admission path; pinned lists name@version keys that
+// garbage collection must skip.
+func (s *Store) admit(in release.Candidate, reviewed Review, pinned map[string]bool) (Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if reviewed.Generation != s.idx.Generation {
@@ -109,8 +127,8 @@ func (s *Store) Admit(in release.Candidate, reviewed Review) (Result, error) {
 	// predecessors never block an admission; protected history (two most
 	// recent predecessors, 90-day floors) is never counted as freed.
 	// Collected objects are deleted only after the index is committed.
-	if !s.clockBackward() {
-		res.Collected = collect(&x, now)
+	if !s.clockBackward() && !s.clockForward() {
+		res.Collected = collect(&x, now, pinned)
 	}
 	// Reserve the worst case before changing anything.
 	if err := s.reserve(x, c, newBytes); err != nil {
@@ -202,14 +220,16 @@ func setSignature(x *index, digest, sigSum string) {
 
 // collect drops predecessors that are beyond the two most recent and
 // whose 90-day floor has passed, and provenance no retained version
-// references. Tombstones are kept.
-func collect(x *index, now time.Time) []string {
+// references. Versions in pinned (keyed name@version) are never collected,
+// whatever their age or depth (spec 10, "not otherwise pinned").
+// Tombstones are kept.
+func collect(x *index, now time.Time, pinned map[string]bool) []string {
 	var out []string
 	for i := range x.Modules {
 		m := &x.Modules[i]
 		kept := m.History[:0:0]
 		for j, h := range m.History {
-			if j < KeepPredecessors || now.Before(h.RetainUntil) {
+			if j < KeepPredecessors || now.Before(h.RetainUntil) || pinned[m.Name+"@"+h.Version] {
 				kept = append(kept, h)
 				continue
 			}
