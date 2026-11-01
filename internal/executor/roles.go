@@ -145,8 +145,10 @@ func validPVENodeName(s string) bool {
 //   - guest methods (GUEST_CONFIG, GUEST_AGENT, SNAPSHOTS, BACKUPS)
 //     require a guest parameter with vmid >= 1;
 //   - NODES takes an optional node parameter with a valid PVE node name;
-//   - remote methods (GUESTS, STORAGE, CLUSTER, TASKS, METRICS) take no
-//     parameter.
+//   - remote methods (GUESTS, STORAGE, CLUSTER, TASKS) take no parameter;
+//   - METRICS requires a metrics parameter naming one exact metrics target
+//     (permit.ProviderMetricsTarget: node, kind node/qemu/lxc, VMID and
+//     local guest generation; a node target has VMID 0 and generation 0).
 func ValidateReadPVERequest(req *pb.ReadPVERequest) error {
 	if req == nil {
 		return status.Error(codes.InvalidArgument, "read pve: request is nil")
@@ -156,8 +158,9 @@ func ValidateReadPVERequest(req *pb.ReadPVERequest) error {
 	}
 	switch req.Method {
 	case pb.PVEReadMethod_PVE_READ_METHOD_NODES:
-		if _, ok := req.Params.(*pb.ReadPVERequest_Guest); ok {
-			return status.Error(codes.InvalidArgument, "read pve: nodes method does not take a guest parameter")
+		switch req.Params.(type) {
+		case *pb.ReadPVERequest_Guest, *pb.ReadPVERequest_Metrics:
+			return status.Error(codes.InvalidArgument, "read pve: nodes method takes only a node parameter")
 		}
 		if p := req.GetNode(); p != nil && !validPVENodeName(p.Node) {
 			return status.Error(codes.InvalidArgument, "read pve: malformed node name")
@@ -172,10 +175,14 @@ func ValidateReadPVERequest(req *pb.ReadPVERequest) error {
 	case pb.PVEReadMethod_PVE_READ_METHOD_GUESTS,
 		pb.PVEReadMethod_PVE_READ_METHOD_STORAGE,
 		pb.PVEReadMethod_PVE_READ_METHOD_CLUSTER,
-		pb.PVEReadMethod_PVE_READ_METHOD_TASKS,
-		pb.PVEReadMethod_PVE_READ_METHOD_METRICS:
-		if req.GetNode() != nil || req.GetGuest() != nil {
+		pb.PVEReadMethod_PVE_READ_METHOD_TASKS:
+		if req.Params != nil {
 			return status.Error(codes.InvalidArgument, "read pve: method takes no parameter")
+		}
+	case pb.PVEReadMethod_PVE_READ_METHOD_METRICS:
+		p := req.GetMetrics()
+		if p == nil || !pveMetricsTarget(p).Valid() {
+			return status.Error(codes.InvalidArgument, "read pve: metrics method requires one exact metrics target")
 		}
 	default:
 		return status.Error(codes.InvalidArgument, "read pve: unknown method")

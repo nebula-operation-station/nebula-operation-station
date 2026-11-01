@@ -125,6 +125,9 @@ func readPveGuestConfig(ctx context.Context, remoteID, base string, hc *http.Cli
 		return unavailable(pveReasonTruncated)
 	}
 	cfg := pveGuestConfig(raw)
+	if len(raw.HostPCI) > 0 {
+		cfg.HostPCI = pveHostPCI(ctx, base, hc, token, ref.guest.Node, raw.HostPCI)
+	}
 	g := ref.observation()
 	g.Config = pvecontract.AvailableDataset(cfg)
 	if !pveGuestValid(remoteID, at, g) {
@@ -140,6 +143,43 @@ func readPveGuestConfig(ctx context.Context, remoteID, base string, hc *http.Cli
 	if ip := cfg.CloudInitIP; ip != nil {
 		out.CloudInitIp = &pb.PVECloudInitIP{Ip: ip.IP, Gateway: ip.Gateway, Nameservers: ip.Nameservers}
 	}
+	for _, h := range cfg.HostPCI {
+		out.Hostpci = append(out.Hostpci, &pb.PVEHostPCI{Id: h.ID, Device: h.Device, Target: h.Target})
+	}
+	return out
+}
+
+// pveHostPCI resolves the guest's passthrough entries against the node's
+// PCI device list (GET /nodes/{node}/hardware/pci) into the contract's
+// device identity "PCI-vendor:device:bus:slot.fn" with the host address as
+// target. The list is all or nothing: if any entry names no single exact
+// function (all functions, a device list, a resource mapping) or is not in
+// the node's list, or the list cannot be read, no entry is reported, so a
+// partial device list never looks complete. Passthrough itself stays
+// visible through the capabilities (live migration and RAM snapshots "no").
+func pveHostPCI(ctx context.Context, base string, hc *http.Client, token pveapi.TokenSupplier, node string, entries []pveapi.HostPCI) []pvecontract.HostPCI {
+	none := []pvecontract.HostPCI{}
+	if len(entries) > pvecontract.MaxPCIDevicesPerGuest {
+		return none
+	}
+	c := &pveapi.Client{HTTP: hc, BaseURL: base + "/api2/json", Token: token, Timeout: pveReadRequestTimeout}
+	list, err := c.NodePCIDevices(ctx, node)
+	if err != nil || !list.Available {
+		return none
+	}
+	byAddr := make(map[string]pveapi.PCIDevice, len(list.Devices))
+	for _, d := range list.Devices {
+		byAddr[d.Address] = d
+	}
+	out := make([]pvecontract.HostPCI, 0, len(entries))
+	for _, e := range entries {
+		addr, ok := pveapi.NormalizePCIAddress(e.PCIAddress)
+		d, found := byAddr[addr]
+		if !ok || !found || e.Mapping != "" {
+			return none
+		}
+		out = append(out, pvecontract.HostPCI{ID: e.Device, Device: "PCI-" + d.Vendor + ":" + d.Device + ":" + addr[5:], Target: addr})
+	}
 	return out
 }
 
@@ -151,9 +191,9 @@ var pveVolumeFormats = map[string]bool{"raw": true, "qcow2": true, "vmdk": true,
 // paths, bind mounts) are omitted; a volume attached twice is listed once.
 // A volume without an explicit format takes it from its file extension,
 // "subvol" for container subvolumes, and otherwise "raw" (block storages
-// keep raw images without an extension). PCI passthrough is reflected in
-// the capabilities only: the node's PCI identity (vendor:device) that the
-// contract's device field requires is not part of the guest config.
+// keep raw images without an extension). PCI passthrough sets the
+// capabilities here; the device list needs the node's PCI identity
+// (vendor:device), which pveHostPCI resolves separately.
 func pveGuestConfig(raw *pveapi.GuestConfig) pvecontract.GuestConfig {
 	cfg := pvecontract.GuestConfig{
 		CPUCount: uint32(min(max(raw.CPUs, 0), pvecontract.MaxCPUCores+1)),
@@ -329,8 +369,9 @@ func readPveSnapshots(ctx context.Context, remoteID, base string, hc *http.Clien
 
 // readPveTasks reads the task metadata of the last pveTaskWindow from every
 // online node, newest first per node, at most pveTasksPerNode per node and
-// MaxObjectsPerPage in total; a node with more tasks in the window makes
-// the dataset unavailable. It never reads task logs or status detail.
+// MaxObjectsPerPage in total; a node with more tasks in the window keeps
+// its newest and sets PVETasks.truncated. It never reads task logs or
+// status detail.
 func readPveTasks(ctx context.Context, remoteID, base string, hc *http.Client, token pveapi.TokenSupplier, at time.Time) *pb.PVETasks {
 	inv, err := pveapi.New(base, hc, token, pveapi.WithTimeout(pveReadRequestTimeout))
 	if err != nil {
@@ -352,16 +393,15 @@ func readPveTasks(ctx context.Context, remoteID, base string, hc *http.Client, t
 	}
 	c := &pveapi.Client{HTTP: hc, BaseURL: base + "/api2/json", Token: token, Timeout: pveReadRequestTimeout}
 	obs := []pvecontract.TaskObservation{}
+	truncated := false
 	for _, node := range online {
 		list, err := c.NodeTasks(ctx, node, pveapi.TaskFilter{Since: at.Add(-pveTaskWindow), Limit: perNode})
 		if err != nil || !list.Available {
 			return &pb.PVETasks{State: pveUnavailable, Reason: pveReasonPartial}
 		}
-		// PVETasks carries no truncation flag: a cut-off window must not
-		// look like the node's complete task history.
-		if list.Truncated {
-			return &pb.PVETasks{State: pveUnavailable, Reason: pveReasonTruncated}
-		}
+		// A busy node keeps its newest tasks; the flag marks that the
+		// window is not the node's complete task history.
+		truncated = truncated || list.Truncated
 		for _, t := range list.Tasks {
 			obs = append(obs, pveTaskObservation(t))
 		}
@@ -369,7 +409,7 @@ func readPveTasks(ctx context.Context, remoteID, base string, hc *http.Client, t
 	if !pveReadValid(remoteID, at, func(o *pvecontract.Observation) { o.Tasks = pvecontract.AvailableDataset(obs) }) {
 		return &pb.PVETasks{State: pveUnavailable, Reason: pveReasonInvalid}
 	}
-	out := &pb.PVETasks{State: pveAvailable}
+	out := &pb.PVETasks{State: pveAvailable, Truncated: truncated}
 	for _, t := range obs {
 		out.Tasks = append(out.Tasks, &pb.PVETask{Node: t.Node, Actor: t.Actor, Type: t.Type, Target: t.Target,
 			StartedUnix: t.StartedUnix, ExitStatus: t.ExitStatus})
