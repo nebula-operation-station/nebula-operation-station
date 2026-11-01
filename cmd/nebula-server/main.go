@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/auditlog"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/deployprofile"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/discovery"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/discoveryjob"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
@@ -284,6 +285,8 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	// Runbooks (M7-2) are planned like built-in actions.
 	rb := runbooks.New(db)
 	ops.SetRunbooks(rb)
+	// Deploy profiles (ADR 0008 PV-04): versioned, secret-free presets.
+	deployProfiles := deployprofile.New(db)
 	// Modules (M7-5): the executor verifies their signatures.
 	mods := modules.New(db, exec)
 	ops.SetModules(mods)
@@ -341,31 +344,32 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	go disc.Run(connCtx)
 
 	h, err := ui.New(ui.Options{
-		PublicOrigin: cfg.PublicOrigin,
-		Status:       exec,
-		HostNames:    hostNames,
-		Hosts:        store.List,
-		HostKeys:     hostKeys,
-		Inventory:    store,
-		Operations:   ops,
-		Pins:         store,
-		Schedules:    ops,
-		Runbooks:     rb,
-		Trust:        exec,
-		Modules:      mods,
-		LastResult:   ops.LastResult,
-		Network:      ipamStore,
-		Discovery:    disc,
-		PVE:          pveStore,
-		PVEChart:     func(ctx context.Context) (pveinventory.Tree, error) { return pveStore.ChartTree(ctx, time.Now()) },
-		PVERemotes:   pveRemotes,
-		Events:       exec,
-		Audit:        audit,
-		Repin:        exec,
-		Enroll:       exec,
-		SecurityKeys: securityKeys,
-		TOTPStatus:   totpStatus,
-		Log:          log,
+		PublicOrigin:   cfg.PublicOrigin,
+		Status:         exec,
+		HostNames:      hostNames,
+		Hosts:          store.List,
+		HostKeys:       hostKeys,
+		Inventory:      store,
+		Operations:     ops,
+		Pins:           store,
+		Schedules:      ops,
+		Runbooks:       rb,
+		DeployProfiles: deployProfiles,
+		Trust:          exec,
+		Modules:        mods,
+		LastResult:     ops.LastResult,
+		Network:        ipamStore,
+		Discovery:      disc,
+		PVE:            pveStore,
+		PVEChart:       func(ctx context.Context) (pveinventory.Tree, error) { return pveStore.ChartTree(ctx, time.Now()) },
+		PVERemotes:     pveRemotes,
+		Events:         exec,
+		Audit:          audit,
+		Repin:          exec,
+		Enroll:         exec,
+		SecurityKeys:   securityKeys,
+		TOTPStatus:     totpStatus,
+		Log:            log,
 	})
 	if err != nil {
 		return err
