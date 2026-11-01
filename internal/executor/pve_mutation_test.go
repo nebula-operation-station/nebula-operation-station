@@ -980,3 +980,73 @@ func TestPveMutationNineDigitPstartUPID(t *testing.T) {
 		}
 	})
 }
+
+// TestPveMutationOpenStepSurvivesRepin: a step left open when the remote
+// is blocked and re-pinned (trust generation bumped) is still reconciled
+// through the new pin, read-only and bound to its stored task identity, so
+// the guest is not blocked for new mutations forever.
+func TestPveMutationOpenStepSurvivesRepin(t *testing.T) {
+	cases := map[string]struct {
+		visible   bool
+		wantState string
+	}{
+		"task identified after re-pin": {true, executordb.PveJobSucceeded},
+		"task never found":             {false, executordb.PveJobUnknown},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newPveMutEnv(t, true)
+			req := e.approve(mutRequest("guest.start"))
+			var upid string
+			e.client.onDispatch = func(int, string) (string, error) {
+				upid = testUPIDAt("pve1", time.Now(), 101, 9)
+				return "", errors.New("connection reset")
+			}
+			res, err := e.m.Run(context.Background(), req)
+			if !errors.Is(err, ErrPveDispatchUncertain) || len(res.Steps) != 1 || res.Steps[0].State != executordb.PveJobReconciling {
+				t.Fatalf("run: %v %+v", err, res.Steps)
+			}
+			// Trust failure, then the documented recovery: re-pin.
+			if _, err := e.pe.db.BlockRemote(mutRemote, "trust failure", "executor"); err != nil {
+				t.Fatal(err)
+			}
+			rm, _, err := e.pe.db.GetRemote(mutRemote)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rm, err = e.pe.db.RepinRemote(mutRemote, rm.TrustPin, fpHex(makeTestChain(t).ca), "admin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rm.TrustGeneration != res.Steps[0].TrustGeneration+1 {
+				t.Fatalf("generation %d, step %d", rm.TrustGeneration, res.Steps[0].TrustGeneration)
+			}
+			e.restart()
+			e.client.onDispatch = nil
+			if c.visible {
+				e.client.recent = []string{testUPIDAt("pve1", time.Now(), 999, 8), upid}
+			} else {
+				e.passMatchWindow()
+			}
+			if err := e.m.Reconcile(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			j, _, _ := e.pe.db.PveJob(res.ExecutionID, 1)
+			if j.State != c.wantState || (c.visible && j.UPID != upid) {
+				t.Fatalf("job after re-pin: %+v", j)
+			}
+			if !strings.Contains(e.logs.String(), "pve_mutation_reconcile_repinned") {
+				t.Fatal("generation change not audited")
+			}
+			if e.client.dispatchCount() != 1 {
+				t.Fatalf("redispatched: %d", e.client.dispatchCount())
+			}
+			// The guest takes new mutations again.
+			e.m.Now = nil
+			next := e.approve(mutRequest("guest.start"))
+			if _, err := e.m.Run(context.Background(), next); err != nil {
+				t.Fatalf("after re-pin: %v", err)
+			}
+		})
+	}
+}

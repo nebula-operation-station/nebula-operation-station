@@ -673,8 +673,10 @@ func (m *PveMutations) observe(ctx context.Context, rm executordb.PveRemote, job
 // marked unknown; a step with one is polled once. Persisted steps confer
 // observation authority only: Reconcile never dispatches, and a job whose
 // step finishes here is not continued with its next step. It needs the
-// vault unlocked and skips remotes that are not active (trust failure), and
-// it skips the steps of jobs a Run of the same engine is executing.
+// vault unlocked and skips remotes that are not active (trust failure); a
+// step recorded under an older trust generation is observed through the
+// remote's current pin after a re-pin, with an audit event. It also
+// skips the steps of jobs a Run of the same engine is executing.
 func (m *PveMutations) Reconcile(ctx context.Context) error {
 	if m.DB == nil || m.Vault == nil || m.Client == nil {
 		return errors.New("executor: pve mutations: DB, Vault and Client are required")
@@ -699,9 +701,18 @@ func (m *PveMutations) Reconcile(ctx context.Context) error {
 		if err != nil {
 			return ErrPveJobStore
 		}
-		if !ok || rm.State != executordb.StateActive || rm.TrustGeneration != job.TrustGeneration {
+		if !ok || rm.State != executordb.StateActive || rm.TrustGeneration < job.TrustGeneration {
 			// No pinned identity to observe through; the step stays open.
 			continue
+		}
+		if rm.TrustGeneration > job.TrustGeneration {
+			// The remote was re-pinned after the step's intent. Observing
+			// through the current pin is a read with the read token, and
+			// identification stays bound to the step's stored node, guest,
+			// task type and token user; otherwise the step (and its target)
+			// would stay open forever.
+			m.log().Warn("audit", "kind", "pve_mutation_reconcile_repinned", "remote", job.RemoteID, "execution", job.ExecutionID, "step", job.Step,
+				"step_gen", job.TrustGeneration, "gen", rm.TrustGeneration)
 		}
 		read, err := m.readToken(rm)
 		if err != nil {
