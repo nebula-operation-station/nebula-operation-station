@@ -224,8 +224,11 @@ func validate(p Profile) error {
 	}
 	seenNS := map[string]bool{}
 	for _, ns := range p.DNS.Nameservers {
-		if _, err := netip.ParseAddr(ns); err != nil {
-			return fmt.Errorf("nameservers are IP literals")
+		// Canonical form only: no IPv6 zone (free text that would reach
+		// cloud-init), no IPv4-mapped IPv6, no case variants, so the
+		// duplicate check below compares like with like.
+		if a, err := netip.ParseAddr(ns); err != nil || a.Zone() != "" || a.Is4In6() || a.String() != ns {
+			return fmt.Errorf("nameservers are canonical IP literals without zone")
 		}
 		if seenNS[ns] {
 			return fmt.Errorf("nameserver %q is listed twice", ns)
@@ -359,7 +362,7 @@ func (p Profile) Doc() ([]byte, error) {
 		return nil, err
 	}
 	if len(b) > MaxDoc {
-		return nil, fmt.Errorf("profile document is at most %d bytes", MaxDoc)
+		return nil, &InvalidError{Err: fmt.Errorf("profile document is at most %d bytes", MaxDoc)}
 	}
 	return b, nil
 }

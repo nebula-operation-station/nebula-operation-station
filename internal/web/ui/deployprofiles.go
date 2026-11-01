@@ -206,7 +206,7 @@ func (h *Handler) handleDeployProfileEdit(w http.ResponseWriter, r *http.Request
 		title = "Edit profile " + slug
 	}
 	h.render(w, r, pageData{Title: title, Active: "deploy", Content: "deploy_profile_edit",
-		Scripts: []string{"deployprofiles.js"}, DeployProfiles: &deployProfilesData{Edit: edit}})
+		Scripts: []string{"webauthn.js", "deployprofiles.js"}, DeployProfiles: &deployProfilesData{Edit: edit}})
 }
 
 // marshalDraft renders the profile for the edit form's data attribute.

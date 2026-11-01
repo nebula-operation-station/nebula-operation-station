@@ -57,6 +57,11 @@ func TestDeployProfilePages(t *testing.T) {
 	if page := getBody(t, h, "/deploy"); !strings.Contains(page, "No deploy profiles yet.") {
 		t.Fatal(page)
 	}
+	// deployprofiles.js uses the nebulaWebAuthn global from webauthn.js.
+	editor := getBody(t, h, "/deploy/new")
+	if i, j := strings.Index(editor, "/static/webauthn.js"), strings.Index(editor, "/static/deployprofiles.js"); i < 0 || j < 0 || i > j {
+		t.Fatalf("editor must load webauthn.js before deployprofiles.js: %s", editor)
+	}
 	if code, body := postJSON(t, h, "/deploy/save", validProfile); code != http.StatusOK || !strings.Contains(body, `"version":1`) {
 		t.Fatalf("%d %s", code, body)
 	}

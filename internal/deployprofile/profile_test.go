@@ -66,6 +66,9 @@ func TestValidate(t *testing.T) {
 			p.DNS.Nameservers = []string{"10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5", "10.0.0.6"}
 		},
 		"ns duplicate": func(p *Profile) { p.DNS.Nameservers = []string{"10.0.0.2", "10.0.0.2"} },
+		"ns zone":      func(p *Profile) { p.DNS.Nameservers = []string{"fe80::1%x\nnameserver 6.6.6.6"} },
+		"ns uppercase": func(p *Profile) { p.DNS.Nameservers = []string{"2001:DB8::1"} },
+		"ns 4in6":      func(p *Profile) { p.DNS.Nameservers = []string{"::ffff:1.1.1.1"} },
 		"domain long": func(p *Profile) {
 			p.DNS.SearchDomain = strings.Repeat(strings.Repeat("a", 63)+".", 5) + strings.Repeat("a", 63)
 		},
