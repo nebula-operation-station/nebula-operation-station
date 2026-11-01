@@ -76,8 +76,9 @@ type TaskList struct {
 }
 
 // TaskSummary is one task object from /nodes/{node}/tasks. It is task
-// metadata only (actor, type, time, target, status); the client never
-// fetches task logs, task status detail or command output.
+// metadata only (actor, type, time, target, status); NodeTasks never
+// fetches task logs, task status detail or command output. Status of a
+// single task started by a Writer is read with Writer.TaskStatus.
 type TaskSummary struct {
 	Actor        string
 	Target       string
