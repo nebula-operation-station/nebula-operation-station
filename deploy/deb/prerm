@@ -6,7 +6,7 @@ set -e
 case "$1" in
   remove)
     if [ -d /run/systemd/system ]; then
-      systemctl disable --now nebula-discovery.path nebula-discovery.timer nebula-server.service nebula-executor.service 2>/dev/null || true
+      systemctl disable --now nebula-discovery.path nebula-discovery.timer nebula-server.service nebula-executor.service nebula-pve-collector.service 2>/dev/null || true
     fi
     ;;
 esac

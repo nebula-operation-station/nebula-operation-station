@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# One image with the four binaries (decision 5 of the M10 plan). The build
-# context holds the binaries (GoReleaser's dockers step, or `make build`
-# and `docker build -f deploy/container/Dockerfile bin/`). compose.yaml
-# runs executor, server and discovery as three containers from it, each
-# with its own fixed UID, as the systemd units do with OS users.
+# One image with the binaries (CLI, server, executor, discovery and PVE
+# collector; decision 5 of the M10 plan). The build context holds the
+# binaries (GoReleaser's dockers step, or `make build` and `docker build
+# -f deploy/container/Dockerfile bin/`). compose.yaml runs executor, server,
+# discovery and the PVE collector as containers from it, each with its own
+# fixed UID, as the systemd units do with OS users.
 FROM debian:12-slim
 
 # nmap for discovery, with the raw-socket capability as a file capability:
@@ -21,10 +22,12 @@ RUN groupadd --system --gid 10010 nebula-rpc \
  && groupadd --system --gid 10001 nebula-executor \
  && groupadd --system --gid 10002 nebula-server \
  && groupadd --system --gid 10003 nebula-discovery \
+ && groupadd --system --gid 10004 nebula-pve-collector \
  && groupadd --gid 10100 nebula-admin \
  && useradd --system --uid 10001 --gid 10001 --groups nebula-rpc --home-dir /var/lib/nebula/executor --shell /usr/sbin/nologin nebula-executor \
  && useradd --system --uid 10002 --gid 10002 --groups nebula-rpc --home-dir /var/lib/nebula/server --shell /usr/sbin/nologin nebula-server \
  && useradd --system --uid 10003 --gid 10003 --home-dir /var/lib/nebula/discovery --shell /usr/sbin/nologin nebula-discovery \
+ && useradd --system --uid 10004 --gid 10004 --groups nebula-rpc --home-dir /var/lib/nebula/pve --shell /usr/sbin/nologin nebula-pve-collector \
  && useradd --uid 10100 --gid 10100 --groups nebula-rpc --create-home --shell /bin/bash nebula-admin \
  && install -d -m 0755 /var/lib/nebula /etc/nebula \
  && install -d -m 0700 -o nebula-executor -g nebula-executor /var/lib/nebula/executor /var/lib/nebula/executor/keys \
@@ -32,9 +35,11 @@ RUN groupadd --system --gid 10010 nebula-rpc \
  && install -d -m 0755 /var/lib/nebula/discovery \
  && install -d -m 2750 -o nebula-server -g nebula-discovery /var/lib/nebula/discovery/jobs \
  && install -d -m 2750 -o nebula-discovery -g nebula-server /var/lib/nebula/discovery/results \
+ && install -d -m 2750 -o nebula-pve-collector -g nebula-rpc /var/lib/nebula/pve \
+ && install -d -m 2770 -o nebula-pve-collector -g nebula-rpc /var/lib/nebula/pve/results \
  && install -d -m 0750 -o nebula-executor -g nebula-rpc /run/nebula
 
-COPY nebula nebula-server nebula-executor nebula-discovery /usr/bin/
+COPY nebula nebula-server nebula-executor nebula-discovery nebula-pve-collector /usr/bin/
 
 # No default command: compose.yaml names one per container.
 USER 65534:65534
