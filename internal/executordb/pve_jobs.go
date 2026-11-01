@@ -101,11 +101,6 @@ type PveJob struct {
 	FinishedAt    time.Time // zero until terminal
 }
 
-// Terminal reports whether the step reached a final state.
-func (j PveJob) Terminal() bool {
-	return j.State == PveJobSucceeded || j.State == PveJobFailed || j.State == PveJobUnknown
-}
-
 func validatePveJob(j PveJob) error {
 	switch {
 	case j.ExecutionID == "" || len(j.ExecutionID) > 64:

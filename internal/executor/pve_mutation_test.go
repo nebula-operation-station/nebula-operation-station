@@ -45,7 +45,6 @@ type mutDispatch struct {
 // fakeMutClient records every call and the credential it was given.
 type fakeMutClient struct {
 	mu            sync.Mutex
-	db            *executordb.DB
 	liveNode      string
 	configDigest  string
 	dispatches    []mutDispatch
@@ -151,7 +150,7 @@ func (e *pveMutEnv) restart() {
 		e.t.Fatal(err)
 	}
 	if e.client == nil {
-		e.client = &fakeMutClient{db: e.pe.db, liveNode: "pve1", configDigest: strings.Repeat("cd", 32)}
+		e.client = &fakeMutClient{liveNode: "pve1", configDigest: strings.Repeat("cd", 32)}
 	}
 	e.m = &PveMutations{DB: e.pe.db, Auth: e.auth, Vault: e.pe.vault, Client: e.client, PollInterval: time.Millisecond,
 		MaxWait: 2 * time.Second, Log: slog.New(slog.NewTextHandler(e.logs, nil))}
