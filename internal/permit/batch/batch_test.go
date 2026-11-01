@@ -834,15 +834,10 @@ func TestRetainedBytesBudgetBoundsMemoryAndIsReleased(t *testing.T) {
 	if e.policy.reads() != reads {
 		t.Fatal("over-budget proposal still read policy state")
 	}
-	// Budget just below the limit: storing the plan would exceed it. The
-	// plan gets fresh execution IDs: the first proposal spent its own.
+	// Budget just below the limit: storing the plan would exceed it.
 	e.a.mu.Lock()
 	e.a.retained = MaxRetainedBytes - 1
 	e.a.mu.Unlock()
-	for i := range b.Members {
-		b.Members[i].Request.ExecutionID = fmt.Sprintf("00000000-0000-4000-8000-%012d", 300+i)
-	}
-	raw, _ = json.Marshal(b)
 	_, err = e.a.Propose(ctx, raw, in)
 	wantCode(t, err, permit.CodeLimit)
 	// Lock releases everything.

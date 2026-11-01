@@ -359,3 +359,40 @@ func TestClaimedMemberPermitBindings(t *testing.T) {
 		t.Fatal("mutating a returned permit changed the authority state")
 	}
 }
+
+// A proposal that is rejected (here: a LOW batch without a privileged
+// session) spends no execution ID, so the identical plan can be proposed
+// again once the session exists.
+func TestRejectedProposalSpendsNoExecutionIDs(t *testing.T) {
+	e := setup(t, permit.ModeStandard)
+	raw, in := e.plan(t, canonical.RiskLow, canonical.RiskLow)
+	e.active.Store(false)
+	_, err := e.a.Propose(ctx, raw, in)
+	wantCode(t, err, permit.CodeSessionRequired)
+	if n := e.store.boundCount(); n != 0 {
+		t.Fatalf("rejected proposal spent %d execution IDs", n)
+	}
+	e.active.Store(true)
+	if _, err := e.a.Propose(ctx, raw, in); err != nil {
+		t.Fatalf("retry of the identical plan: %v", err)
+	}
+	if n := e.store.boundCount(); n != 2 {
+		t.Fatalf("approved plan spent %d execution IDs, want 2", n)
+	}
+}
+
+// A plan reusing one already spent ID spends none of its other IDs.
+func TestPartlyReusedPlanSpendsNothing(t *testing.T) {
+	e := setup(t, permit.ModeStandard)
+	raw, in := e.plan(t, canonical.RiskLow, canonical.RiskLow)
+	var b canonical.Batch
+	if err := json.Unmarshal(raw, &b); err != nil {
+		t.Fatal(err)
+	}
+	e.store.forceBind(b.Members[1].Request.ExecutionID, canonical.Digest{1})
+	_, err := e.a.Propose(ctx, raw, in)
+	wantCode(t, err, permit.CodeExecutionIDReused)
+	if _, ok, _ := e.store.LookupExecution(b.Members[0].Request.ExecutionID); ok {
+		t.Fatal("member 0's execution ID was spent by a rejected plan")
+	}
+}

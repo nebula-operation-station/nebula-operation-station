@@ -108,11 +108,21 @@ func (a *Authority) Member(parent canonical.Digest, memberID string) (MemberPerm
 	return mp.clone(), true
 }
 
-// bindExecutionIDs durably spends every member execution ID of the approved
-// plan, bound to the parent digest. The caller holds a.mu.
+// bindExecutionIDs durably spends every member execution ID of the plan,
+// bound to the parent digest. The caller holds a.mu, so no other proposal
+// of this authority interleaves; a store failure part-way leaves the
+// earlier IDs spent, which only ever fails closed.
 func (a *Authority) bindExecutionIDs(plan canonical.Batch, digest canonical.Digest, expiry time.Time) error {
 	if a.options.Store == nil {
 		return failure(permit.CodeStorage, "execution ID store unavailable")
+	}
+	// Check every ID first, so a plan that reuses one ID spends none.
+	for _, m := range plan.Members {
+		if _, ok, err := a.options.Store.LookupExecution(m.Request.ExecutionID); err != nil {
+			return failure(permit.CodeStorage, "execution ID store unavailable")
+		} else if ok {
+			return failure(permit.CodeExecutionIDReused, "execution ID already spent")
+		}
 	}
 	for _, m := range plan.Members {
 		if err := a.options.Store.BindExecution(m.Request.ExecutionID, digest, expiry); err != nil {

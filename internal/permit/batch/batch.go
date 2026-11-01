@@ -264,11 +264,6 @@ func (a *Authority) Propose(ctx context.Context, raw []byte, inputs []MemberInpu
 	if len(a.entries) >= permit.MaxPending || len(a.seen) >= permit.MaxExecutionIDs {
 		return Approval{}, failure(permit.CodeLimit, "batch approval capacity reached")
 	}
-	// Spend every member execution ID durably before the approval exists:
-	// an unapproved, expired or abandoned proposal can never reissue them.
-	if err := a.bindExecutionIDs(p.Plan, digest, time.Unix(p.Plan.ExpiryUnix, 0)); err != nil {
-		return Approval{}, err
-	}
 	if p.Requirement == permit.RequireNone {
 		if !a.sessionActive() {
 			return Approval{}, failure(permit.CodeSessionRequired, "LOW batch requires a privileged session")
@@ -280,6 +275,13 @@ func (a *Authority) Propose(ctx context.Context, raw []byte, inputs []MemberInpu
 	size := retainedSize(p)
 	if a.retained+size > MaxRetainedBytes {
 		return Approval{}, failure(permit.CodeLimit, "batch approval memory budget reached")
+	}
+	// Spend every member execution ID durably as the last step before the
+	// approval exists (the spent-ID discipline of single requests): a
+	// rejected proposal spends nothing, while an unapproved, expired or
+	// abandoned one can never reissue its IDs.
+	if err := a.bindExecutionIDs(p.Plan, digest, time.Unix(p.Plan.ExpiryUnix, 0)); err != nil {
+		return Approval{}, err
 	}
 	e := &entry{approval: p, snapshots: snapshots, size: size}
 	a.entries[digest] = e
