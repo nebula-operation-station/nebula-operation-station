@@ -25,6 +25,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit/batch"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/stageplan"
@@ -49,6 +50,10 @@ type Service struct {
 	pb.UnimplementedExecutorServiceServer
 
 	auth *permit.Authority
+	// batchAuth is the batch read-grant authority (ADR 0007, E19b); nil
+	// until the executor wires it, in which case the batch RPCs are
+	// Unimplemented.
+	batchAuth *batch.Authority
 	keys *keyring.Keyring
 	db   *executordb.DB
 	reg  *webauthnreg.Registrar
