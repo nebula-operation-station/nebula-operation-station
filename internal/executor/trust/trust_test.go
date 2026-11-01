@@ -3,6 +3,7 @@
 package trust
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -403,5 +404,120 @@ func TestApplyRotationIsDurableAndBindsAdmission(t *testing.T) {
 	e.reopen()
 	if len(e.s.Roots()) != 1 || e.s.Roots()[0].ID != "root-2" {
 		t.Fatalf("roots after restart: %+v", e.s.Roots())
+	}
+}
+
+// Regression (review of PR 134): history whose 90-day floor has passed
+// must not block an admission; protected history still does.
+func TestExpiredHistoryDoesNotBlockAdmission(t *testing.T) {
+	e := newEnv(t)
+	day := 24 * time.Hour
+	var sizes []int64
+	for i, v := range []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0"} {
+		c := e.candidate("1.0."+string(rune('0'+i)), docker(v, scriptV1+"# "+v+"\n"))
+		sizes = append(sizes, c.Manifest.Modules[0].Size)
+		e.admit(c)
+		e.now = e.now.Add(day)
+	}
+	// History holds 1.3.0..1.0.0; allow exactly that much.
+	e.s.limits.history = sizes[0] + sizes[1] + sizes[2] + sizes[3]
+	e.now = e.now.Add(200 * day)
+	_, res := e.admit(e.candidate("2.0.0", docker("1.5.0", scriptV1+"# 1.5.0\n")))
+	if len(res.Collected) != 3 {
+		t.Fatalf("collected %v, want the three expired predecessors", res.Collected)
+	}
+	// Protected history (two most recent, within 90 days) still counts.
+	e.s.limits.history = 1
+	c := e.candidate("2.0.1", docker("1.6.0", scriptV1+"# 1.6.0\n"))
+	r, _ := e.s.Review(c)
+	if _, err := e.s.Admit(c, r); !errors.Is(err, ErrQuota) {
+		t.Fatalf("protected history ignored: %v", err)
+	}
+}
+
+// Regression (review of PR 134): admission re-derives everything from the
+// exact signed bytes; altered derived fields are rejected or ignored.
+func TestAdmitRederivesCandidate(t *testing.T) {
+	e := newEnv(t)
+	c := e.candidate("1.0.0", docker("1.0.0", scriptV1))
+	r, _ := e.s.Review(c)
+	bad := c
+	bad.ManifestBytes = append(append([]byte{}, c.ManifestBytes...), ' ')
+	if _, err := e.s.Admit(bad, r); err == nil {
+		t.Fatal("altered manifest bytes admitted")
+	}
+	bad = c
+	bad.Signature = []byte("x")
+	if _, err := e.s.Admit(bad, r); err == nil {
+		t.Fatal("altered signature admitted")
+	}
+	// Display content comes from the tar, not from caller-supplied Files.
+	shown := c
+	shown.Modules = append([]release.ModuleBundle{}, c.Modules...)
+	shown.Modules[0].Files = map[string][]byte{"actions/restart.sh": []byte("#!/bin/sh\ntrue\n")}
+	rv, err := e.s.Review(shown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rv.Modules[0].Actions[0].Diff[2].Text; got != "systemctl restart docker" {
+		t.Fatalf("review shows caller-supplied content %q", got)
+	}
+	if _, err := e.s.Admit(c, r); err != nil {
+		t.Fatal(err)
+	}
+	// Provenance objects are on disk and referenced.
+	for _, p := range []string{hexSum(c.ManifestBytes), hexSum(c.Signature)} {
+		if _, err := os.Stat(filepath.Join(e.dir, objectsDir, p)); err != nil {
+			t.Fatalf("provenance object %s missing: %v", p, err)
+		}
+	}
+}
+
+func TestApplyRotationChecksSpace(t *testing.T) {
+	e := newEnv(t)
+	e.free = 10
+	doc := canon(t, map[string]any{"format": release.RotationFormat, "sequence": 1, "previous_sha256": release.ZeroDigest,
+		"add": []any{map[string]any{"id": "root-2", "public_key": release.FormatRootKey(newTestSK(t).pub)}}, "revoke": []any{}})
+	if _, err := e.s.ApplyRotation(doc, e.k.sign(t, doc)); !errors.Is(err, ErrQuota) {
+		t.Fatalf("rotation without space: %v", err)
+	}
+	if e.s.RootState().Sequence != 0 {
+		t.Fatal("root state changed")
+	}
+}
+
+func TestOpenRejectsInconsistentHistoryAndTrailingData(t *testing.T) {
+	e := newEnv(t)
+	for i, v := range []string{"1.0.0", "1.1.0", "1.2.0"} {
+		e.admit(e.candidate("1.0."+string(rune('0'+i)), docker(v, scriptV1+"# "+v+"\n")))
+		e.now = e.now.Add(time.Hour)
+	}
+	idx := filepath.Join(e.dir, indexFile)
+	raw, _ := os.ReadFile(idx)
+	var x index
+	if err := json.Unmarshal(raw, &x); err != nil {
+		t.Fatal(err)
+	}
+	write := func(x index) {
+		b, _ := json.Marshal(x)
+		os.WriteFile(idx, b, 0o600)
+	}
+	for name, mut := range map[string]func(x *index){
+		"history order": func(x *index) {
+			h := x.Modules[0].History
+			h[0], h[1] = h[1], h[0]
+		},
+		"shortened floor": func(x *index) { x.Modules[0].History[0].RetainUntil = x.Modules[0].History[0].SupersededAt },
+	} {
+		y := x.clone()
+		mut(&y)
+		write(y)
+		if _, err := Open(e.dir, e.k.anchors(), nil); !errors.Is(err, ErrCorrupt) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	os.WriteFile(idx, append(append([]byte{}, raw...), []byte(`{}`)...), 0o600)
+	if _, err := Open(e.dir, e.k.anchors(), nil); !errors.Is(err, ErrCorrupt) {
+		t.Errorf("trailing data: %v", err)
 	}
 }

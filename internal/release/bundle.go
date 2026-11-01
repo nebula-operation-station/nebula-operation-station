@@ -163,7 +163,8 @@ func readRegular(r *os.Root, name string, max int64) ([]byte, error) {
 	if fi, err := r.Lstat(name); err != nil || !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("%w: %s is not a regular file", ErrBundle, name)
 	}
-	f, err := r.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	// O_NONBLOCK: a FIFO swapped in after Lstat must not hang the open.
+	f, err := r.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, fmt.Errorf("%w: open %s: %v", ErrBundle, name, err)
 	}

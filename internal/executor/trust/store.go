@@ -193,6 +193,8 @@ type Store struct {
 	// freeSpace reports free bytes on the store's filesystem; injected
 	// for tests.
 	freeSpace func(string) (uint64, error)
+	// limits are the storage ceilings; tests shrink them.
+	limits limits
 
 	mu  sync.Mutex
 	idx index
@@ -212,7 +214,7 @@ func Open(dir string, anchors []release.Anchor, now func() time.Time) (*Store, e
 	if err := fsguard.EnsurePrivateDir(filepath.Join(dir, objectsDir)); err != nil {
 		return nil, fmt.Errorf("trust: objects directory: %w", err)
 	}
-	s := &Store{dir: dir, now: now, freeSpace: statfsFree}
+	s := &Store{dir: dir, now: now, freeSpace: statfsFree, limits: defaultLimits}
 	raw, err := readBounded(filepath.Join(dir, indexFile), MaxMetadata)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -242,6 +244,9 @@ func Open(dir string, anchors []release.Anchor, now func() time.Time) (*Store, e
 	if err := dec.Decode(&idx); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrCorrupt, err)
 	}
+	if dec.More() || !bytes.Equal(bytes.TrimSpace(raw[dec.InputOffset():]), nil) {
+		return nil, fmt.Errorf("%w: trailing data after the index", ErrCorrupt)
+	}
 	if err := idx.validate(); err != nil {
 		return nil, err
 	}
@@ -267,6 +272,9 @@ func (x index) validate() error {
 		if r.Sequence != int64(i+1) || !validHex(r.Digest) || !validHex(r.SignatureSHA256) {
 			return bad("rotation record %d is malformed", i)
 		}
+	}
+	if n := len(x.Rotations); n > 0 && x.Rotations[n-1].Digest != x.Roots.Digest {
+		return bad("root state digest does not match the last rotation record")
 	}
 	if len(x.Modules) > MaxNames || len(x.Tombstones) > MaxTombstones {
 		return bad("count limits exceeded")
@@ -304,8 +312,9 @@ func (x index) validate() error {
 			}
 			seen[m.Active.Version] = true
 		}
-		for _, h := range m.History {
-			if seen[h.Version] || h.SupersededAt.IsZero() {
+		for j, h := range m.History {
+			if seen[h.Version] || h.SupersededAt.IsZero() || h.RetainUntil.Before(h.SupersededAt.Add(Retention)) ||
+				(j > 0 && h.SupersededAt.After(m.History[j-1].SupersededAt)) {
 				return bad("module %s history is inconsistent", m.Name)
 			}
 			seen[h.Version] = true
@@ -421,6 +430,9 @@ func (s *Store) ApplyRotation(raw, sig []byte) (release.Rotation, error) {
 		return release.Rotation{}, err
 	}
 	now := s.clock()
+	if err := s.reserveMetadata(int64(len(raw) + len(sig))); err != nil {
+		return release.Rotation{}, err
+	}
 	sigSum, err := s.putObject(sig)
 	if err != nil {
 		return release.Rotation{}, err
@@ -547,7 +559,7 @@ func (s *Store) getObject(sum string, size int64) ([]byte, error) {
 // readBounded reads a regular file of at most max bytes without
 // following a symlink at the final component.
 func readBounded(path string, max int64) ([]byte, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -578,3 +590,37 @@ func encodedSize(x index) (int64, error) {
 	}
 	return int64(len(raw)), nil
 }
+
+// reserveMetadata checks that extra metadata bytes fit the metadata
+// ceiling and the free disk space, before anything is written.
+func (s *Store) reserveMetadata(extra int64) error {
+	idxSize, err := encodedSize(s.idx)
+	if err != nil {
+		return err
+	}
+	meta := extra + idxSize + 1024
+	for _, p := range s.idx.Provenance {
+		meta += p.ManifestSize + p.SignatureSize
+	}
+	for _, r := range s.idx.Rotations {
+		meta += r.Size + r.SignatureSize
+	}
+	if meta > s.limits.metadata {
+		return fmt.Errorf("%w: metadata would be %d bytes, limit %d", ErrQuota, meta, s.limits.metadata)
+	}
+	free, err := s.freeSpace(s.dir)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrQuota, err)
+	}
+	if need := uint64(extra + 2*idxSize + 1024); free < need {
+		return fmt.Errorf("%w: %d bytes free, %d needed", ErrQuota, free, need)
+	}
+	return nil
+}
+
+// limits are the byte ceilings admission enforces.
+type limits struct {
+	active, history, staging, metadata, total int64
+}
+
+var defaultLimits = limits{active: MaxActive, history: MaxHistory, staging: MaxStaging, metadata: MaxMetadata, total: MaxTotal}

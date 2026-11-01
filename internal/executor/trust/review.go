@@ -102,12 +102,40 @@ func (r Review) NeedsConfirmation() bool {
 func (s *Store) Review(c release.Candidate) (Review, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.review(c)
+	r, _, err := s.review(c)
+	return r, err
 }
 
-func (s *Store) review(c release.Candidate) (Review, error) {
+// rederive rebuilds a candidate from its exact signed bytes: the manifest
+// signature is verified again against the current durable roots and every
+// module is re-read from its tar, so neither the review nor admission
+// trusts derived fields a caller could have altered.
+func (s *Store) rederive(c release.Candidate) (release.Candidate, error) {
+	m, err := release.VerifyManifest(s.idx.Roots.Active(), c.ManifestBytes, c.Signature)
+	if err != nil {
+		return release.Candidate{}, err
+	}
+	if m.Digest != c.Manifest.Digest || len(c.Modules) != len(m.Modules) {
+		return release.Candidate{}, fmt.Errorf("%w: candidate does not match its signed manifest", ErrStale)
+	}
+	out := release.Candidate{Manifest: m, ManifestBytes: c.ManifestBytes, Signature: c.Signature}
+	for i, md := range m.Modules {
+		mb, err := release.ParseModuleTar(md, c.Modules[i].Tar)
+		if err != nil {
+			return release.Candidate{}, fmt.Errorf("%w: module %s bytes changed after verification: %v", ErrStale, md.Name, err)
+		}
+		out.Modules = append(out.Modules, mb)
+	}
+	return out, nil
+}
+
+func (s *Store) review(in release.Candidate) (Review, release.Candidate, error) {
+	c, err := s.rederive(in)
+	if err != nil {
+		return Review{}, release.Candidate{}, err
+	}
 	if err := s.checkCandidate(c); err != nil {
-		return Review{}, err
+		return Review{}, release.Candidate{}, err
 	}
 	r := Review{ManifestDigest: c.Manifest.Digest, ReleaseVersion: c.Manifest.ReleaseVersion,
 		RootID: c.Manifest.SignedBy.ID, RootFingerprint: c.Manifest.SignedBy.Fingerprint(), Generation: s.idx.Generation}
@@ -116,7 +144,7 @@ func (s *Store) review(c release.Candidate) (Review, error) {
 		inRelease[mb.Module.Name] = true
 		mr, err := s.reviewModule(mb)
 		if err != nil {
-			return Review{}, err
+			return Review{}, release.Candidate{}, err
 		}
 		r.Modules = append(r.Modules, mr)
 	}
@@ -138,7 +166,7 @@ func (s *Store) review(c release.Candidate) (Review, error) {
 	}
 	sortModules(r.Modules)
 	r.Digest = reviewDigest(r, c)
-	return r, nil
+	return r, c, nil
 }
 
 // checkCandidate rechecks the candidate's module bytes against its

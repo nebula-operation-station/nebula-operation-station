@@ -21,6 +21,10 @@ type Result struct {
 	Activated, Superseded []string
 	// Collected lists name@version whose bytes were garbage-collected.
 	Collected []string
+	// CleanupFailures counts unreferenced objects that could not be
+	// deleted; callers audit it. Committed state is unaffected and the
+	// next admission retries.
+	CleanupFailures int
 }
 
 // Admit commits a reviewed candidate atomically: it recomputes the review
@@ -30,13 +34,13 @@ type Result struct {
 // and tombstones, then garbage-collects only what retention allows. On
 // any error nothing is changed. It does not create trust tuples or
 // execution authority.
-func (s *Store) Admit(c release.Candidate, reviewed Review) (Result, error) {
+func (s *Store) Admit(in release.Candidate, reviewed Review) (Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if reviewed.Generation != s.idx.Generation {
 		return Result{}, fmt.Errorf("%w: the store changed since the review (generation %d, now %d)", ErrStale, reviewed.Generation, s.idx.Generation)
 	}
-	fresh, err := s.review(c)
+	fresh, c, err := s.review(in)
 	if err != nil {
 		return Result{}, err
 	}
@@ -101,8 +105,14 @@ func (s *Store) Admit(c release.Candidate, reviewed Review) (Result, error) {
 	sort.Slice(x.Modules, func(i, j int) bool { return x.Modules[i].Name < x.Modules[j].Name })
 	addProvenance(&x, c, now)
 
-	// Reserve the worst case before changing anything: no byte is assumed
-	// freed by garbage collection.
+	// Collect what retention allows in the same index write, so expired
+	// predecessors never block an admission; protected history (two most
+	// recent predecessors, 90-day floors) is never counted as freed.
+	// Collected objects are deleted only after the index is committed.
+	if !s.clockBackward() {
+		res.Collected = collect(&x, now)
+	}
+	// Reserve the worst case before changing anything.
 	if err := s.reserve(x, c, newBytes); err != nil {
 		return Result{}, err
 	}
@@ -119,9 +129,6 @@ func (s *Store) Admit(c release.Candidate, reviewed Review) (Result, error) {
 		}
 	}
 	setSignature(&x, c.Manifest.Digest, sigSum)
-	if !s.clockBackward() {
-		res.Collected = collect(&x, now)
-	}
 	x.Generation++
 	x.ClockHighWater = maxTime(x.ClockHighWater, now)
 	if err := x.validate(); err != nil {
@@ -131,7 +138,7 @@ func (s *Store) Admit(c release.Candidate, reviewed Review) (Result, error) {
 		return Result{}, err
 	}
 	s.idx = x
-	s.removeUnreferenced()
+	res.CleanupFailures = s.removeUnreferenced()
 	res.Generation = x.Generation
 	return res, nil
 }
@@ -266,11 +273,11 @@ func (s *Store) reserve(x index, c release.Candidate, newBytes map[string][]byte
 	}
 	meta += idxSize
 	for _, e := range []error{
-		quota("active module bytes", active, MaxActive),
-		quota("historical module bytes", history, MaxHistory),
-		quota("staging bytes", staging, MaxStaging),
-		quota("metadata bytes", meta, MaxMetadata),
-		quota("total bytes", active+history+staging+meta, MaxTotal),
+		quota("active module bytes", active, s.limits.active),
+		quota("historical module bytes", history, s.limits.history),
+		quota("staging bytes", staging, s.limits.staging),
+		quota("metadata bytes", meta, s.limits.metadata),
+		quota("total bytes", active+history+staging+meta, s.limits.total),
 	} {
 		if e != nil {
 			return e
@@ -287,9 +294,10 @@ func (s *Store) reserve(x index, c release.Candidate, newBytes map[string][]byte
 	return nil
 }
 
-// removeUnreferenced deletes object files nothing in the index refers to.
-// Failures are left for the next run; they never affect committed state.
-func (s *Store) removeUnreferenced() {
+// removeUnreferenced deletes object files nothing in the index refers to
+// and returns how many deletions failed. Failures are retried next time;
+// they never affect committed state.
+func (s *Store) removeUnreferenced() int {
 	used := map[string]bool{}
 	for _, m := range s.idx.Modules {
 		for _, v := range versions(m) {
@@ -305,11 +313,15 @@ func (s *Store) removeUnreferenced() {
 	dir := filepath.Join(s.dir, objectsDir)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return
+		return 1
 	}
+	failed := 0
 	for _, e := range entries {
 		if !used[e.Name()] {
-			os.Remove(filepath.Join(dir, e.Name()))
+			if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+				failed++
+			}
 		}
 	}
+	return failed
 }
