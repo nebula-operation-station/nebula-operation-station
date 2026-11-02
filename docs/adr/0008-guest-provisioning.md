@@ -114,10 +114,12 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
 
   Each step stores its UPID before dispatch and reconciles on restart or
   lost response; nothing is ever redispatched blindly.
-- **Risk:** base MEDIUM (creates, destroys nothing). HIGH when the node or
-  remote criticality is high, when PCI passthrough is requested, or when the
-  plan over-commits node RAM or storage. Unknown criticality is HIGH, as in
-  ADR 0006.
+- **Risk:** LOW, always (maintainer decision 2026-11-02, open question 2):
+  no automatic raise for production profiles, node or remote criticality,
+  PCI passthrough, over-commit or unknown criticality. The operator raises it
+  where wanted through the executor's risk policy (spec 10); the floor never
+  drops below what that policy declares. (Draft before: base MEDIUM, HIGH on
+  high or unknown criticality, passthrough or over-commit.)
 - **Failure:** a failed deployment leaves the guest for inspection. Deleting
   it is a separate HIGH action, never automatic.
 - **Access and password:** cloud-init `sshkeys` always contains the NOS
@@ -136,6 +138,8 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
     without trust-on-first-use. This requires the guest agent in the image;
     see the open questions.
   - Fallback: the existing fingerprint review, shown on the deployment page.
+    This is the default path for vendor cloud images (decision on open
+    question 1); the bootstrap module then installs `qemu-guest-agent`.
 - **Linking:** the inventory host is linked to the PVE guest (remote, node,
   VMID, generation), so the org chart shows it as enrolled.
 
@@ -209,25 +213,19 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
   write methods are typed (clone, config set of named fields, resize, start,
   download-url, template) with no URL or raw-path input.
 
-## Open questions
+## Decisions on the open questions (maintainer, 2026-11-02)
 
-1. **Guest agent in cloud images:**
-   - The vendor Ubuntu/Debian cloud images do not ship
-     `qemu-guest-agent`, and PVE's API cannot upload a cloud-init vendor
-     snippet. Options:
-     - (a) Accept fingerprint review for the first enrollment and install
-       the agent via the bootstrap module.
-     - (b) Require a snippet storage, written once by the operator, and
-       reference it with `cicustom`.
-     - (c) Bake a NOS-prepared image.
-   - The draft prefers (a) now and (b) as an opt-in.
-2. **Risk of the provision action:** should a production-environment
-   profile always be HIGH?
-3. **VMID allocation:** next free VMID from the cluster, or operator-defined
-   ranges per remote?
+1. **Guest agent in cloud images:** (a). The first enrollment of a guest from
+   a vendor cloud image uses the fingerprint review; the bootstrap module
+   installs `qemu-guest-agent` afterwards. A snippet storage with `cicustom`
+   (b) may follow as an opt-in; a NOS-built image (c) is not planned.
+2. **Risk of the provision action:** always LOW, including production
+   profiles; the operator raises it through the risk policy where wanted
+   (section 3).
+3. **VMID allocation:** the next free VMID from the cluster.
 4. **Windows and other OS families:** out of scope for this track.
-5. **LXC containers:** provisioning containers from `vztmpl` templates is a
-   natural follow-up with the same profile model; not in this track.
+5. **LXC containers:** a follow-up with the same profile model; not in this
+   track.
 
 ## Tickets (milestone `pve-provision`)
 
