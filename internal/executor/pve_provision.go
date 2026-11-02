@@ -32,8 +32,8 @@ import (
 // pin, generation, action token version and endpoints), node and storage,
 // the prepared template record, the new VMID (reserved against the live
 // guest list), name, size, NIC, the IPAM reservation or DHCP, the
-// cloud-init fields, start-after-create, the observed risk facts and the
-// digest of the complete configuration. The steps are full clone,
+// cloud-init fields, start-after-create, the observed capacity information
+// and the digest of the complete configuration. The steps are full clone,
 // allowlisted config set, disk resize and (optionally) start; each stores
 // its UPID before the next one and reconciles without redispatch. A failed
 // provisioning leaves the guest for inspection: no step ever deletes it.
@@ -202,10 +202,6 @@ type PveProvisioner struct {
 	Images *PveImages
 	Reader PveProvisionReader
 	VMIDs  PveVMIDStore
-	// Floors records the risk floor of each proposal; the executor's
-	// permit authority must use GuestProvisionRiskFloor with the same
-	// value.
-	Floors *PveProvisionRiskFloors
 	// Passwords is the vault holding guest passwords.
 	Passwords pveGuestPasswordVault
 	// AutomationKey is the NOS automation public key (authorized_keys
@@ -222,9 +218,9 @@ type PveProvisionProposal struct {
 	Parameters []byte
 	// VMID is the reserved VMID of the new guest.
 	VMID uint64
-	// Facts are the observed risk facts; Request.RiskClass is at least
-	// their floor.
-	Facts PveProvisionRiskFacts
+	// Capacity is the observed capacity information (display warnings
+	// only; it does not change the risk).
+	Capacity PveProvisionCapacity
 }
 
 // PveProvisionResult reports one provisioning run.
@@ -243,9 +239,9 @@ type PveProvisionResult struct {
 }
 
 func (p *PveProvisioner) checkDeps() error {
-	if p.Mutations == nil || p.Images == nil || p.Reader == nil || p.VMIDs == nil || p.Floors == nil || p.Passwords == nil ||
+	if p.Mutations == nil || p.Images == nil || p.Reader == nil || p.VMIDs == nil || p.Passwords == nil ||
 		len(p.Artifact) == 0 || p.ModuleVersion == "" {
-		return errors.New("executor: pve provisioner: Mutations, Images, Reader, VMIDs, Floors, Passwords, Artifact and ModuleVersion are required")
+		return errors.New("executor: pve provisioner: Mutations, Images, Reader, VMIDs, Passwords, Artifact and ModuleVersion are required")
 	}
 	if _, err := canonicalAuthorizedKey(p.AutomationKey); err != nil {
 		return errors.New("executor: pve provisioner: AutomationKey is not a valid public key")
@@ -408,16 +404,13 @@ type (
 		CloudInit pveProvisionCloudInit `json:"cloud_init"`
 		Start     bool                  `json:"start_after_create"`
 	}
-	pveProvisionRisk struct {
-		Class canonical.Risk        `json:"class"`
-		Facts PveProvisionRiskFacts `json:"facts"`
-	}
 	pveProvisionPlan struct {
 		Version int `json:"version"`
 		pveProvisionConfig
-		Risk         pveProvisionRisk  `json:"risk"`
-		ConfigDigest string            `json:"config_digest"`
-		Steps        []PveMutationStep `json:"steps"`
+		// Capacity is information for the reviewer, not a risk input.
+		Capacity     PveProvisionCapacity `json:"capacity"`
+		ConfigDigest string               `json:"config_digest"`
+		Steps        []PveMutationStep    `json:"steps"`
 	}
 )
 
@@ -634,11 +627,11 @@ func (p *PveProvisioner) password(req PveProvisionRequest) (*pveProvisionPasswor
 
 // observed is what the executor reads for one provisioning.
 type pveProvisionObserved struct {
-	rm    executordb.PveRemote
-	tpl   PveTemplateRecord
-	live  map[uint64]bool
-	facts PveProvisionRiskFacts
-	pw    *pveProvisionPassword
+	rm   executordb.PveRemote
+	tpl  PveTemplateRecord
+	live map[uint64]bool
+	cap  PveProvisionCapacity
+	pw   *pveProvisionPassword
 }
 
 // observe binds the template and reads the guest list, the storage and the
@@ -681,14 +674,13 @@ func (p *PveProvisioner) observe(ctx context.Context, req PveProvisionRequest) (
 	if err != nil {
 		return o, err
 	}
-	o.facts.PCIPassthrough = req.PCIPassthrough
-	o.facts.MemoryOvercommit, o.facts.StorageOvercommit = pveCapacityFacts(inv, st, req.Node, req.MemoryMiB, req.DiskGiB)
+	o.cap.MemoryOvercommit, o.cap.StorageOvercommit = pveCapacityFacts(inv, st, req.Node, req.MemoryMiB, req.DiskGiB)
 	o.rm, o.tpl, o.live, o.pw = rm, tpl, live, pw
 	return o, nil
 }
 
 // mutation builds the exact mutation request: the complete configuration,
-// its digest, the risk facts and the step plan.
+// its digest, the capacity information and the step plan.
 func (p *PveProvisioner) mutation(req PveProvisionRequest, vmid uint64, o pveProvisionObserved) (PveMutationRequest, error) {
 	cfg, err := p.config(req, vmid)
 	if err != nil {
@@ -705,7 +697,7 @@ func (p *PveProvisioner) mutation(req PveProvisionRequest, vmid uint64, o pvePro
 		return PveMutationRequest{}, ErrPveMutationPlan
 	}
 	plan := pveProvisionPlan{Version: pveProvisionPlanVersion, pveProvisionConfig: cfg, ConfigDigest: digest,
-		Risk: pveProvisionRisk{Class: o.facts.Risk(), Facts: o.facts}}
+		Capacity: o.cap}
 	id := int64(vmid)
 	g, ci := cfg.Guest, cfg.CloudInit
 	ca := pveConfigArgs{VMID: id, Name: g.Name, Cores: g.Cores, MemoryMiB: g.MemoryMiB, Agent: true, Net0: g.Net0,
@@ -749,9 +741,8 @@ func (p *PveProvisioner) mutation(req PveProvisionRequest, vmid uint64, o pvePro
 // pve.guest.provision proposal for executionID. It binds the template
 // record (checked live), reserves the VMID (req.VMID, or the next free one)
 // against the complete live guest list and the open reservations, reads the
-// node's capacity and records the risk floor of exactly these parameters.
-// The risk is raised to the floor of the observed facts; the authority
-// raises it further for criticality (GuestProvisionRiskFloor). On error
+// node's capacity (information only). The risk is at least MEDIUM; the
+// authority raises it for criticality (GuestProvisionRiskFloor). On error
 // nothing stays reserved.
 func (p *PveProvisioner) ProposalRequest(ctx context.Context, req PveProvisionRequest, executionID string, risk canonical.Risk, stagePlanHash string, expiry time.Time) (PveProvisionProposal, error) {
 	if err := p.checkDeps(); err != nil {
@@ -784,19 +775,14 @@ func (p *PveProvisioner) ProposalRequest(ctx context.Context, req PveProvisionRe
 		release()
 		return PveProvisionProposal{}, err
 	}
-	floor := o.facts.Risk()
-	rq, params, err := p.Mutations.ProposalRequest(ctx, mr, executionID, canonical.MaxRisk(risk, floor), stagePlanHash, expiry)
+	rq, params, err := p.Mutations.ProposalRequest(ctx, mr, executionID, canonical.MaxRisk(risk, pveProvisionBaseRisk), stagePlanHash, expiry)
 	if err != nil {
-		release()
-		return PveProvisionProposal{}, err
-	}
-	if err := p.Floors.record(rq, floor, strings.Join(o.facts.reasons(), "; ")); err != nil {
 		release()
 		return PveProvisionProposal{}, err
 	}
 	p.Mutations.log().Info("audit", "kind", "pve_guest_provision_proposed", "remote", req.RemoteID, "node", req.Node, "vmid", vmid,
 		"execution", executionID, "risk", string(rq.RiskClass), "password", o.pw != nil, "network", mrNetworkMode(req))
-	return PveProvisionProposal{Request: rq, Parameters: params, VMID: vmid, Facts: o.facts}, nil
+	return PveProvisionProposal{Request: rq, Parameters: params, VMID: vmid, Capacity: o.cap}, nil
 }
 
 func mrNetworkMode(req PveProvisionRequest) string {
@@ -821,7 +807,7 @@ func withTemplate(live map[uint64]bool, tpl uint64) map[uint64]bool {
 // it binds the template again, checks that the VMID is still absent from
 // the complete live guest list and reserved for req.ExecutionID, and
 // rebuilds the exact parameters from fresh reads (a changed template,
-// password version, capacity fact or anything else refuses the permit).
+// password version, capacity warning or anything else refuses the permit).
 // The steps then run through the mutation engine. A failure after the
 // clone may have been sent leaves the guest in PVE (GuestKept): it is never
 // deleted automatically.

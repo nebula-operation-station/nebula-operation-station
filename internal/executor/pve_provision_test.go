@@ -158,7 +158,6 @@ type provisionEnv struct {
 	pc       *provisionClient
 	reader   *fakeProvisionReader
 	vmids    *FilePveVMIDStore
-	floors   *PveProvisionRiskFloors
 	prov     *PveProvisioner
 	tpl      PveTemplateRecord
 	autoKey  string
@@ -174,12 +173,11 @@ func newProvisionEnv(t *testing.T, next permit.RiskPolicy) *provisionEnv {
 	pc := &provisionClient{imageClient: ie.client}
 	ie.m.Client = pc
 	tpl := ie.prepare(prepareReq(imgUbuntuID, 9000))
-	floors := &PveProvisionRiskFloors{}
 	v, err := webauthnverify.New(webauthnverify.Config{RPID: "mut.test", Origins: []string{"https://mut.test"}, Counters: ie.pe.db}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	auth, err := permit.New(permit.Options{Verifier: v, Store: ie.pe.db, RiskPolicy: GuestProvisionRiskFloor{Next: next, Floors: floors}})
+	auth, err := permit.New(permit.Options{Verifier: v, Store: ie.pe.db, RiskPolicy: GuestProvisionRiskFloor{Next: next}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,9 +190,9 @@ func newProvisionEnv(t *testing.T, next permit.RiskPolicy) *provisionEnv {
 		storage: pveapi.Storage{ID: "local-lvm", Active: true, CapacityKnown: true, TotalBytes: 500 * gib, UsedBytes: 100 * gib},
 	}
 	vmids := &FilePveVMIDStore{Path: filepath.Join(t.TempDir(), "pve-vmids.json")}
-	e := &provisionEnv{imagesEnv: ie, pc: pc, reader: reader, vmids: vmids, floors: floors, tpl: tpl,
+	e := &provisionEnv{imagesEnv: ie, pc: pc, reader: reader, vmids: vmids, tpl: tpl,
 		autoKey: testAuthorizedKey(t, "nos-automation"), extraKey: testAuthorizedKey(t, "alice@laptop")}
-	e.prov = &PveProvisioner{Mutations: ie.m, Images: ie.imgs, Reader: reader, VMIDs: vmids, Floors: floors, Passwords: ie.pe.vault,
+	e.prov = &PveProvisioner{Mutations: ie.m, Images: ie.imgs, Reader: reader, VMIDs: vmids, Passwords: ie.pe.vault,
 		AutomationKey: e.autoKey, Artifact: provArtifact, ModuleVersion: "1.0.0"}
 	return e
 }
@@ -317,7 +315,7 @@ func TestProvisionProposalBindsExactConfiguration(t *testing.T) {
 	if ci.Password == nil || ci.Password.Ref != "pve-guestpw-web1" || ci.Password.Version != 1 {
 		t.Fatalf("password binding %+v", ci.Password)
 	}
-	if !plan.Start || plan.Risk.Class != canonical.RiskMedium || plan.Risk.Facts != (PveProvisionRiskFacts{}) || !validHexDigest(plan.ConfigDigest) {
+	if !plan.Start || plan.Capacity != (PveProvisionCapacity{}) || !validHexDigest(plan.ConfigDigest) {
 		t.Fatalf("plan %+v", plan)
 	}
 	var methods []string
@@ -646,44 +644,55 @@ func TestPveMutationRefusesPermitOfAnotherExecution(t *testing.T) {
 	}
 }
 
-func TestProvisionRiskFactsRaiseAndRecheckBeforeRun(t *testing.T) {
+func TestProvisionCapacityNeverRaisesRiskAndIsRecheckedBeforeRun(t *testing.T) {
 	e := newProvisionEnv(t, fixedRisk{})
-	// Fits: MEDIUM.
-	if p, _ := e.propose(e.request()); p.Request.RiskClass != canonical.RiskMedium {
-		t.Fatalf("fits: %s", p.Request.RiskClass)
+	// Fits: MEDIUM, no warning.
+	if p, pp := e.propose(e.request()); p.Request.RiskClass != canonical.RiskMedium || pp.Capacity != (PveProvisionCapacity{}) {
+		t.Fatalf("fits: %s %+v", p.Request.RiskClass, pp.Capacity)
 	}
-	// A disk larger than the free storage is HIGH.
+	// A disk larger than the free storage is a warning, still MEDIUM (ADR
+	// 0008 decision 2: no automatic raise).
 	big := e.request()
 	big.DiskGiB = 401
-	if p, pp := e.propose(big); p.Request.RiskClass != canonical.RiskHigh || !pp.Facts.StorageOvercommit {
-		t.Fatalf("storage over-commit: %s %+v", p.Request.RiskClass, pp.Facts)
+	if p, pp := e.propose(big); p.Request.RiskClass != canonical.RiskMedium || !pp.Capacity.StorageOvercommit {
+		t.Fatalf("storage over-commit: %s %+v", p.Request.RiskClass, pp.Capacity)
 	}
-	// RAM beyond the node is HIGH.
+	// RAM beyond the node is a warning, still MEDIUM.
 	ram := e.request()
 	ram.MemoryMiB = 64 << 10
-	if p, pp := e.propose(ram); p.Request.RiskClass != canonical.RiskHigh || !pp.Facts.MemoryOvercommit {
-		t.Fatalf("ram over-commit: %s %+v", p.Request.RiskClass, pp.Facts)
+	p, pp := e.propose(ram)
+	if p.Request.RiskClass != canonical.RiskMedium || !pp.Capacity.MemoryOvercommit {
+		t.Fatalf("ram over-commit: %s %+v", p.Request.RiskClass, pp.Capacity)
 	}
-	// A server proposal of the executor's parameters below the observed floor
-	// is refused.
-	pp, err := e.prov.ProposalRequest(context.Background(), big, nextProvExec(), canonical.RiskMedium, strings.Repeat("c", 64), time.Now().Add(time.Hour))
+	if !strings.Contains(string(p.Parameters), `"memory_overcommit":true`) {
+		t.Fatalf("warning not in the frozen plan: %s", p.Parameters)
+	}
+	// PCI passthrough is refused, not raised.
+	pci := e.request()
+	pci.PCIPassthrough = true
+	if _, err := e.prov.ProposalRequest(context.Background(), pci, nextProvExec(), canonical.RiskMedium, strings.Repeat("c", 64), time.Now().Add(time.Hour)); !errors.Is(err, ErrPveProvisionUnsupported) {
+		t.Fatalf("pci: %v", err)
+	}
+	// A server proposal below MEDIUM is refused.
+	pp, err := e.prov.ProposalRequest(context.Background(), e.request(), nextProvExec(), canonical.RiskMedium, strings.Repeat("c", 64), time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
 	low := pp.Request
-	low.RiskClass = canonical.RiskMedium
+	low.RiskClass = canonical.RiskLow
 	if _, err := e.auth.Propose(low, pp.Parameters); err == nil {
-		t.Fatal("proposal below the observed floor accepted")
+		t.Fatal("LOW proposal accepted")
 	}
 
-	// Capacity that changes after approval refuses the run before dispatch.
+	// A capacity warning that changes after approval refuses the run before
+	// dispatch: the reviewer approved another plan.
 	approved := e.approve(e.request())
 	e.reader.addGuest("pve1", 300, 62*gib)
 	if _, err := e.prov.Provision(context.Background(), approved); !errors.Is(err, ErrPveMutationDenied) {
 		t.Fatalf("capacity changed: %v", err)
 	}
 	if len(e.pc.provisionSteps()) != 0 {
-		t.Fatal("dispatched after the risk facts changed")
+		t.Fatal("dispatched after the capacity changed")
 	}
 	// Nothing was sent, so the VMID is free again.
 	if _, ok, _ := e.vmids.VMIDHolder(mutRemote, approved.VMID, time.Now()); ok {

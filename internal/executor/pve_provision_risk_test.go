@@ -3,6 +3,7 @@
 package executor
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -71,16 +72,25 @@ func TestProvisionCapacityFactsFailClosed(t *testing.T) {
 	if m, _ := pveCapacityFacts(hostile, st, "pve1", 1024, 1); !m {
 		t.Fatal("overflowing guest memory is not over-commit")
 	}
+	// A duplicated node entry fails closed, whichever entry comes last.
+	for _, nodes := range [][]pveapi.Node{
+		{{Name: "pve1", MaxMemory: 16 * gib}, {Name: "pve1", MaxMemory: 1 << 62}},
+		{{Name: "pve1", MaxMemory: 1 << 62}, {Name: "pve1", MaxMemory: 16 * gib}},
+	} {
+		dup := inv
+		dup.Nodes = nodes
+		if m, _ := pveCapacityFacts(dup, st, "pve1", 1024, 1); !m {
+			t.Fatalf("duplicated node %+v clears the memory warning", nodes)
+		}
+	}
 }
 
-func TestProvisionRiskFactsRaiseToHigh(t *testing.T) {
-	if r := (PveProvisionRiskFacts{}).Risk(); r != canonical.RiskMedium {
-		t.Fatalf("base = %s", r)
+func TestProvisionCapacityWarningsAreInformationOnly(t *testing.T) {
+	if w := (PveProvisionCapacity{}).Warnings(); len(w) != 0 {
+		t.Fatalf("warnings without facts: %v", w)
 	}
-	for _, f := range []PveProvisionRiskFacts{{PCIPassthrough: true}, {MemoryOvercommit: true}, {StorageOvercommit: true}} {
-		if r := f.Risk(); r != canonical.RiskHigh {
-			t.Fatalf("%+v = %s", f, r)
-		}
+	if w := (PveProvisionCapacity{MemoryOvercommit: true, StorageOvercommit: true}).Warnings(); len(w) != 2 {
+		t.Fatalf("warnings %v", w)
 	}
 }
 
@@ -103,24 +113,32 @@ func TestGuestProvisionRiskFloorRules(t *testing.T) {
 	pin := strings.Repeat("ab", 32)
 	remote, _ := PveRemoteRiskTarget(pin)
 	node := canonical.Target{HostID: "pvm-0123456789abcdef0123456789abcdef", HostKeyFingerprint: remote.HostKeyFingerprint}
-	now := time.Unix(1_800_000_000, 0)
-	req := canonical.Request{ActionID: PveGuestProvisionAction, ParametersHash: strings.Repeat("1", 64), ExpiryUnix: now.Add(time.Hour).Unix()}
-
-	floors := &PveProvisionRiskFloors{Now: func() time.Time { return now }}
-	if err := floors.record(req, canonical.RiskMedium, "facts"); err != nil {
-		t.Fatal(err)
+	linked := canonical.Target{HostID: "host-1", HostKeyFingerprint: "SHA256:" + strings.Repeat("A", 43)}
+	req := canonical.Request{ActionID: PveGuestProvisionAction, ParametersHash: strings.Repeat("1", 64), ExpiryUnix: time.Now().Add(time.Hour).Unix()}
+	linkedOf := func(hosts ...canonical.Target) PveLinkedHosts {
+		return func(_ canonical.Request, n canonical.Target) ([]canonical.Target, error) {
+			if n != node {
+				return nil, errors.New("unexpected node")
+			}
+			return hosts, nil
+		}
 	}
 	cases := []struct {
-		name  string
-		hosts map[canonical.Target]canonical.Risk
-		want  canonical.Risk
+		name   string
+		hosts  map[canonical.Target]canonical.Risk
+		linked PveLinkedHosts
+		want   canonical.Risk
 	}{
-		{"low remote and node", map[canonical.Target]canonical.Risk{remote: canonical.RiskLow, node: canonical.RiskLow}, canonical.RiskMedium},
-		{"unknown node", map[canonical.Target]canonical.Risk{remote: canonical.RiskLow}, canonical.RiskHigh},
-		{"unknown remote", map[canonical.Target]canonical.Risk{node: canonical.RiskLow}, canonical.RiskHigh},
-		{"high node", map[canonical.Target]canonical.Risk{remote: canonical.RiskLow, node: canonical.RiskHigh}, canonical.RiskHigh},
-		{"high remote", map[canonical.Target]canonical.Risk{remote: canonical.RiskHigh, node: canonical.RiskMedium}, canonical.RiskHigh},
-		{"critical remote", map[canonical.Target]canonical.Risk{remote: canonical.RiskCritical, node: canonical.RiskLow}, canonical.RiskCritical},
+		{"low remote and node", map[canonical.Target]canonical.Risk{remote: canonical.RiskLow, node: canonical.RiskLow}, nil, canonical.RiskMedium},
+		{"medium remote and node", map[canonical.Target]canonical.Risk{remote: canonical.RiskMedium, node: canonical.RiskMedium}, nil, canonical.RiskMedium},
+		{"unknown node", map[canonical.Target]canonical.Risk{remote: canonical.RiskLow}, nil, canonical.RiskHigh},
+		{"unknown remote", map[canonical.Target]canonical.Risk{node: canonical.RiskLow}, nil, canonical.RiskHigh},
+		{"high node", map[canonical.Target]canonical.Risk{remote: canonical.RiskLow, node: canonical.RiskHigh}, nil, canonical.RiskHigh},
+		{"high remote", map[canonical.Target]canonical.Risk{remote: canonical.RiskHigh, node: canonical.RiskMedium}, nil, canonical.RiskHigh},
+		{"critical remote", map[canonical.Target]canonical.Risk{remote: canonical.RiskCritical, node: canonical.RiskLow}, nil, canonical.RiskCritical},
+		{"low linked host", map[canonical.Target]canonical.Risk{remote: canonical.RiskLow, node: canonical.RiskLow, linked: canonical.RiskLow}, linkedOf(linked), canonical.RiskMedium},
+		{"unknown linked host", map[canonical.Target]canonical.Risk{remote: canonical.RiskLow, node: canonical.RiskLow}, linkedOf(linked), canonical.RiskHigh},
+		{"critical linked host", map[canonical.Target]canonical.Risk{remote: canonical.RiskLow, node: canonical.RiskLow, linked: canonical.RiskCritical}, linkedOf(linked), canonical.RiskCritical},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -128,7 +146,7 @@ func TestGuestProvisionRiskFloorRules(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, why, err := GuestProvisionRiskFloor{Next: pol, Floors: floors}.MinimumRisk(req, []canonical.Target{node})
+			got, why, err := GuestProvisionRiskFloor{Next: pol, Linked: c.linked}.MinimumRisk(req, []canonical.Target{node})
 			if err != nil || got != c.want {
 				t.Fatalf("floor = %s (%s) %v, want %s", got, why, err, c.want)
 			}
@@ -137,39 +155,24 @@ func TestGuestProvisionRiskFloorRules(t *testing.T) {
 
 	low := critSource{artifact: canonical.RiskLow, hosts: map[canonical.Target]canonical.Risk{remote: canonical.RiskLow, node: canonical.RiskLow}}
 	pol, _ := riskpolicy.New(low)
-	// Base MEDIUM even for an artifact trusted as LOW.
-	if r, _, _ := (GuestProvisionRiskFloor{Next: pol, Floors: floors}).MinimumRisk(req, []canonical.Target{node}); r != canonical.RiskMedium {
+	// Base MEDIUM, never LOW, even for an artifact trusted as LOW.
+	if r, _, _ := (GuestProvisionRiskFloor{Next: pol}).MinimumRisk(req, []canonical.Target{node}); r != canonical.RiskMedium {
 		t.Fatalf("low artifact = %s", r)
 	}
-	// Facts recorded as HIGH raise the floor.
-	high := req
-	high.ParametersHash = strings.Repeat("2", 64)
-	if err := floors.record(high, canonical.RiskHigh, "storage"); err != nil {
-		t.Fatal(err)
-	}
-	if r, _, _ := (GuestProvisionRiskFloor{Next: pol, Floors: floors}).MinimumRisk(high, []canonical.Target{node}); r != canonical.RiskHigh {
-		t.Fatalf("high facts = %s", r)
-	}
-	// A later lower record does not lower it.
-	if err := floors.record(high, canonical.RiskMedium, "again"); err != nil {
-		t.Fatal(err)
-	}
-	if r, _, _ := (GuestProvisionRiskFloor{Next: pol, Floors: floors}).MinimumRisk(high, []canonical.Target{node}); r != canonical.RiskHigh {
-		t.Fatalf("lowered by a later record: %s", r)
-	}
-	// Parameters the executor never observed are HIGH.
+	// Parameters the executor never built get no extra raise of their own:
+	// only criticality counts (ADR 0008 decision 2).
 	foreign := req
 	foreign.ParametersHash = strings.Repeat("3", 64)
-	if r, _, _ := (GuestProvisionRiskFloor{Next: pol, Floors: floors}).MinimumRisk(foreign, []canonical.Target{node}); r != canonical.RiskHigh {
-		t.Fatalf("unrecorded parameters = %s", r)
+	if r, _, _ := (GuestProvisionRiskFloor{Next: pol}).MinimumRisk(foreign, []canonical.Target{node}); r != canonical.RiskMedium {
+		t.Fatalf("unbuilt parameters = %s", r)
 	}
-	// An expired record no longer counts.
-	later := &PveProvisionRiskFloors{Now: func() time.Time { return now.Add(2 * time.Hour) }, m: floors.m}
-	if r, _, _ := (GuestProvisionRiskFloor{Next: pol, Floors: later}).MinimumRisk(req, []canonical.Target{node}); r != canonical.RiskHigh {
-		t.Fatalf("expired record = %s", r)
+	// A failing linked-host source fails closed.
+	failing := func(canonical.Request, canonical.Target) ([]canonical.Target, error) { return nil, errors.New("down") }
+	if _, _, err := (GuestProvisionRiskFloor{Next: pol, Linked: failing}).MinimumRisk(req, []canonical.Target{node}); err == nil {
+		t.Fatal("linked-host error ignored")
 	}
 	// Without a criticality source everything is HIGH.
-	if r, _, _ := (GuestProvisionRiskFloor{Floors: floors}).MinimumRisk(req, []canonical.Target{node}); r != canonical.RiskHigh {
+	if r, _, _ := (GuestProvisionRiskFloor{}).MinimumRisk(req, []canonical.Target{node}); r != canonical.RiskHigh {
 		t.Fatalf("no next policy = %s", r)
 	}
 	// Other actions pass through unchanged.
@@ -180,37 +183,4 @@ func TestGuestProvisionRiskFloorRules(t *testing.T) {
 	if r, _, _ := (GuestProvisionRiskFloor{}).MinimumRisk(other, nil); r != canonical.RiskLow {
 		t.Fatalf("other action without next = %s", r)
 	}
-}
-
-func TestProvisionRiskFloorsAreBounded(t *testing.T) {
-	now := time.Unix(1_800_000_000, 0)
-	f := &PveProvisionRiskFloors{Now: func() time.Time { return now }}
-	for i := range maxPveProvisionFloors {
-		r := canonical.Request{ParametersHash: strings.Repeat("0", 56) + hex8(i), ExpiryUnix: now.Add(time.Hour).Unix()}
-		if err := f.record(r, canonical.RiskMedium, ""); err != nil {
-			t.Fatal(err)
-		}
-	}
-	extra := canonical.Request{ParametersHash: strings.Repeat("f", 64), ExpiryUnix: now.Add(time.Hour).Unix()}
-	if err := f.record(extra, canonical.RiskMedium, ""); err != ErrPveProvisionFloors {
-		t.Fatalf("over the bound: %v", err)
-	}
-	f.Now = func() time.Time { return now.Add(2 * time.Hour) }
-	extra.ExpiryUnix = now.Add(3 * time.Hour).Unix()
-	if err := f.record(extra, canonical.RiskMedium, ""); err != nil {
-		t.Fatalf("expired records not pruned: %v", err)
-	}
-	if err := f.record(canonical.Request{ParametersHash: "short"}, canonical.RiskMedium, ""); err == nil {
-		t.Fatal("malformed hash recorded")
-	}
-}
-
-func hex8(i int) string {
-	const digits = "0123456789abcdef"
-	b := make([]byte, 8)
-	for j := 7; j >= 0; j-- {
-		b[j] = digits[i&15]
-		i >>= 4
-	}
-	return string(b)
 }
