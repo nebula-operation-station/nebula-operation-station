@@ -4,6 +4,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
@@ -20,6 +21,9 @@ const (
 	// LineStats is the runtime stats line of a container box
 	// (docker.stats).
 	LineStats = "stats"
+	// LineCVE is the image-scan CVE count line of a host box
+	// (image.vulnerabilities).
+	LineCVE = "cve"
 )
 
 // chartLine is one optional extra line of an org-chart box (GPU, CVE,
@@ -52,6 +56,7 @@ type chartResults struct {
 	pci   map[string]executions.LastResultRow
 	gpu   map[string]executions.LastResultRow
 	stats map[string]executions.LastResultRow
+	vulns map[string]executions.LastResultRow
 }
 
 // loadChartResults reads the extra-line sources. A nil operations service
@@ -72,6 +77,7 @@ func (h *Handler) loadChartResults(ctx context.Context) chartResults {
 	r.pci = read("pci.inventory")
 	r.gpu = read("gpu.status")
 	r.stats = read("docker.stats")
+	r.vulns = read("image.vulnerabilities")
 	return r
 }
 
@@ -252,6 +258,81 @@ func statsLine(cs containerStats, c dockerhost.Container) []chartLine {
 	return []chartLine{l}
 }
 
+// shortImageRef shortens a digest reference ("repo@sha256:<64 hex>") to
+// the repository and the first 12 digest digits.
+func shortImageRef(ref string) string {
+	repo, digest, ok := strings.Cut(ref, "@sha256:")
+	if !ok || len(digest) < 12 {
+		return ref
+	}
+	return repo + "@" + digest[:12]
+}
+
+// cveLine builds the image-scan line of a host box from its stored
+// image.vulnerabilities result (ADR 0006 P1-30/P1-34): counts by severity
+// of the scanned image. No result (or a malformed one) hides the line. A
+// scan that did not complete (no Trivy, old database, failed, busy, ...)
+// is "scan unknown" — never zero CVEs; an old result is "stale". Critical
+// CVEs are critical, high ones a warning. Severity counts alone do not
+// imply exploitability; the details (platform, database age, coverage)
+// are in the title.
+func cveLine(r *executions.LastResultRow, now time.Time, staleAfter time.Duration) []chartLine {
+	if r == nil || len(r.Result) == 0 {
+		return nil
+	}
+	v, err := dockerhost.ParseImageVulns(r.Result)
+	if err != nil {
+		return nil
+	}
+	l := chartLine{Kind: LineCVE, Label: "CVE"}
+	img := "image"
+	if v.Image != "" {
+		img = shortImageRef(v.Image)
+		l.Title = v.Image
+	}
+	switch {
+	case v.Phase != "done":
+		l.Text = img + " · scan unknown (not run)"
+		l.State = StateUnknown
+	case v.Status == dockerhost.VulnsStale:
+		l.Text = img + " · scan stale (database old)"
+		l.State = StateStale
+	case v.Status != dockerhost.VulnsOK:
+		l.Text = img + " · scan unknown (" + v.Status + ")"
+		l.State = StateUnknown
+	case isStale(r.FinishedAt, now, staleAfter):
+		l.Text = img + " · scan stale"
+		l.State = StateStale
+	default:
+		crit, high := v.Severity["CRITICAL"], v.Severity["HIGH"]
+		l.Text = fmt.Sprintf("%s · %d critical · %d high · %d medium · %d low", img,
+			crit, high, v.Severity["MEDIUM"], v.Severity["LOW"])
+		switch {
+		case crit > 0:
+			l.State = StateCrit
+		case high > 0:
+			l.State = StateWarn
+		default:
+			l.State = StateOK
+		}
+		details := []string{fmt.Sprintf("%d total", v.Total), fmt.Sprintf("%d targets", v.Targets)}
+		if v.Platform != "" {
+			details = append(details, v.Platform)
+		}
+		if v.DBAgeH != nil {
+			details = append(details, fmt.Sprintf("database %d h old", *v.DBAgeH))
+		}
+		if v.Cached {
+			details = append(details, "cached")
+		}
+		if l.Title != "" {
+			details = append([]string{l.Title}, details...)
+		}
+		l.Title = strings.Join(details, " · ")
+	}
+	return []chartLine{l}
+}
+
 // worstClass maps a worst state to the box border class: red for
 // critical, yellow for warning, grey otherwise (unknown/stale are labelled
 // on their lines and never turn the border healthy-green).
@@ -267,10 +348,11 @@ func worstClass(s IndicatorState) string {
 }
 
 // hostLines builds the extra lines of one managed host box, in display
-// order: GPUs.
+// order: GPUs, image CVEs.
 func hostLines(res chartResults, hostID string, now time.Time) []chartLine {
 	var lines []chartLine
 	lines = append(lines, gpuLines(rowFor(res.pci, hostID), rowFor(res.gpu, hostID), now, indicatorStaleAfter)...)
+	lines = append(lines, cveLine(rowFor(res.vulns, hostID), now, indicatorStaleAfter)...)
 	return lines
 }
 
