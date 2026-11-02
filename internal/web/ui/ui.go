@@ -181,6 +181,7 @@ type Handler struct {
 	pins           PinStore
 	schedules      Schedules
 	leases         Leases
+	leaseProposals *leaseProposals
 	runbooks       Runbooks
 	deployProfiles DeployProfiles
 	trust          ArtifactTrust
@@ -259,6 +260,7 @@ func New(o Options) (*Handler, error) {
 		pins:           o.Pins,
 		schedules:      o.Schedules,
 		leases:         o.Leases,
+		leaseProposals: newLeaseProposals(),
 		runbooks:       o.Runbooks,
 		deployProfiles: o.DeployProfiles,
 		trust:          o.Trust,
@@ -338,6 +340,7 @@ var pageFiles = map[string]string{
 	"schedules":           "schedules.html",
 	"leases":              "leases.html",
 	"lease":               "leases.html",
+	"lease_new":           "lease_new.html",
 	"runbooks":            "runbooks.html",
 	"runbook":             "runbook.html",
 	"runbook_edit":        "runbook_edit.html",
@@ -408,6 +411,13 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("GET /leases", h.handleLeases)
 	mux.HandleFunc("GET /leases/{id}", h.handleLease)
 	mux.HandleFunc("POST /leases/revoke", h.handleLeaseRevoke)
+	// Read lease proposals (ADR 0007 E06, part 3): the form, the
+	// throttled preview (fetch post, redirect to the frozen proposal),
+	// and the security key approval (JSON, from schedules.js).
+	mux.HandleFunc("GET /leases/new", h.handleLeaseNew)
+	mux.HandleFunc("POST /leases/preview", h.handleLeasePreview)
+	mux.HandleFunc("GET /leases/proposals/{digest}", h.handleLeaseProposal)
+	mux.HandleFunc("POST /leases/commit", h.handleLeaseCommit)
 	// Runbooks (M7-2).
 	mux.HandleFunc("GET /runbooks", h.handleRunbooks)
 	mux.HandleFunc("GET /runbooks/new", h.handleRunbookEdit)
@@ -564,6 +574,8 @@ type pageData struct {
 	Leases *leasesData
 	// Lease is the data of a read lease detail page.
 	Lease *leaseDetail
+	// LeaseNew is the data of the read lease form and preview pages.
+	LeaseNew *leaseNewData
 	// Runbooks is the data of the runbook pages.
 	Runbooks *runbooksData
 	// DeployProfiles is the data of the deploy profile pages.

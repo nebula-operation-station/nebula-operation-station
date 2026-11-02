@@ -24,18 +24,15 @@ import (
 // shows the frozen host list open by default.
 const leaseDetailOpenMax = 20
 
-// Leases lists and revokes read grants. executions.Service satisfies it.
-type Leases interface {
-	ReadGrants(ctx context.Context) ([]executions.ReadGrantView, error)
-	RevokeReadGrant(ctx context.Context, user, id string) error
-}
-
 // leaseRow is one row of the lease list table.
 type leaseRow struct {
 	ID, Short, State, StateClass, Scope string
 	ActionCount, HostCount              int
 	Expiry                              time.Time
 	ExpirySet                           bool
+	// RefreshURL is the form pre-filled with this grant's scope (a new
+	// grant); empty when the grant cannot be refreshed.
+	RefreshURL string
 }
 
 // leaseDetail is the data of one lease detail page.
@@ -50,6 +47,7 @@ type leaseDetail struct {
 	CreatedSet, ExpirySet, RevokedSet   bool
 	Legacy                              bool
 	Revocable                           bool // show the Revoke form
+	RefreshURL                          string
 }
 
 // leasesData is the data of the lease list page.
@@ -139,7 +137,7 @@ func (h *Handler) handleLeases(w http.ResponseWriter, r *http.Request) {
 			ID: v.ID, Short: leaseShort(v.ID), State: v.State,
 			StateClass: leaseStateClass(v.State), Scope: leaseScope(v),
 			ActionCount: len(v.Actions), HostCount: len(v.Hosts),
-			Expiry: v.Expiry.UTC(),
+			Expiry: v.Expiry.UTC(), RefreshURL: leaseRefreshURL(v),
 		}
 		if !v.Expiry.IsZero() {
 			row.ExpirySet = true
@@ -185,7 +183,7 @@ func (h *Handler) handleLease(w http.ResponseWriter, r *http.Request) {
 		Actions: v.Actions, Remotes: v.Remotes, Hosts: v.Hosts,
 		HostsOpen: len(v.Hosts) > 0 && len(v.Hosts) <= leaseDetailOpenMax,
 		Digest:    v.Digest, ApprovedBy: v.ApprovedBy, Legacy: v.Legacy,
-		Revocable: leaseRevocable(v.State),
+		Revocable: leaseRevocable(v.State), RefreshURL: leaseRefreshURL(*v),
 	}
 	if !v.Created.IsZero() {
 		d.Created, d.CreatedSet = v.Created.UTC(), true

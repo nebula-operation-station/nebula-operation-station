@@ -27,13 +27,17 @@
   {{else}}
   <p class="hint">no host list</p>
   {{end}}
-  {{if $l.Revocable}}
+  {{if or $l.Revocable $l.RefreshURL}}
   <div class="actions">
+    {{if $l.RefreshURL}}<a class="button button--small" href="{{$l.RefreshURL}}">Refresh</a>{{end}}
+    {{if $l.Revocable}}
     <form method="post" action="/leases/revoke" data-fetch>
       <input type="hidden" name="id" value="{{$l.ID}}">
       <button type="submit" class="button button--small button--danger">Revoke</button>
     </form>
+    {{end}}
   </div>
+  {{if $l.RefreshURL}}<p class="hint">Refresh proposes a new lease with this scope; this one stays until it expires or is revoked.</p>{{end}}
   {{end}}
 </section>
 {{else}}
@@ -41,6 +45,7 @@
 <h1>Read leases</h1>
 <section class="panel" aria-label="Read leases">
   <p class="hint">A read lease is approved once and lets the executor read from its hosts until it expires or is revoked. It carries no write authority.</p>
+  <div class="actions"><a class="button button--small" href="/leases/new">New read lease</a></div>
   {{if $d.Unavailable}}
   <p>The read leases could not be listed.</p>
   {{else if $d.Rows}}
@@ -54,6 +59,7 @@
         <th>Hosts</th>
         <th>Expires</th>
         <th>State</th>
+        <th>Refresh</th>
       </tr>
     </thead>
     <tbody>
@@ -65,6 +71,7 @@
         <td>{{.HostCount}}</td>
         <td>{{if .ExpirySet}}{{timeTag .Expiry}}{{else}}—{{end}}</td>
         <td><span class="badge {{.StateClass}}">{{.State}}</span></td>
+        <td>{{if .RefreshURL}}<a href="{{.RefreshURL}}">Refresh</a>{{end}}</td>
       </tr>
       {{end}}
     </tbody>
