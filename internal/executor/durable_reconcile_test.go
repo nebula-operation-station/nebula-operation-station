@@ -201,13 +201,10 @@ func (s *testSSH) session(ch ssh.Channel, reqs <-chan *ssh.Request) {
 // closedAddr returns a loopback address with nothing listening on it.
 func closedAddr(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
-	return addr
+	// Port 1 (tcpmux) is privileged and never bound by these tests. A
+	// listen-then-close ephemeral port could be reused by a concurrent
+	// test listener now that reconcile tests run in parallel.
+	return "127.0.0.1:1"
 }
 
 // fakeClock is the injected service clock for the reconcile tests.
