@@ -673,20 +673,23 @@ func (s *Service) recheckRegistryRead(ctx context.Context, epoch uint64, l *load
 	if st, err := s.vault.State(); err != nil || st != vault.StateUnlocked || s.vault.LockGeneration() != epoch {
 		return status.Error(codes.FailedPrecondition, "read private registry: the executor was locked during the read")
 	}
-	list, err := s.vault.List()
-	if err != nil {
+	// Re-open the record and credential instead of comparing vault
+	// version numbers alone: versions restart at 1 after Remove, so a
+	// registry removed and re-added during the read would match by version.
+	// The config digest covers the record's random nonce and the
+	// credential carries its own random id, so a re-added registry or a
+	// replaced credential never matches.
+	now, err := s.loadRegistry(l.rec.ID)
+	switch {
+	case errors.Is(err, errRegistryNotFound), errors.Is(err, errRegistryCorrupt):
+		return status.Error(codes.Aborted, "read private registry: the registry or its credential changed during the read")
+	case err != nil:
 		return status.Error(codes.Unavailable, "read private registry: vault unavailable")
 	}
-	var cfgOK, credOK bool
-	for _, i := range list {
-		switch i.ID {
-		case registryConfigID(l.rec.ID):
-			cfgOK = i.Version == l.configVersion
-		case registryCredID(l.rec.ID):
-			credOK = i.Version == l.credVersion
-		}
-	}
-	if !cfgOK || !credOK {
+	same := now.configVersion == l.configVersion && now.configDigest == l.configDigest &&
+		now.credVersion == l.credVersion && now.cred.ID == l.cred.ID
+	now.wipe()
+	if !same {
 		return status.Error(codes.Aborted, "read private registry: the registry or its credential changed during the read")
 	}
 	if !s.clock().Before(time.Unix(l.cred.ExpiresUnix, 0)) {

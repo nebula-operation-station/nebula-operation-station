@@ -542,6 +542,38 @@ func TestPrivateRegistryReAddNeverMatchesOldGrantBinding(t *testing.T) {
 	}
 }
 
+// TestPrivateRegistryReAddDuringReadIsDiscarded removes and re-adds the
+// registry while a read is in flight. Vault versions restart at 1, so the
+// re-added registry has the same version numbers; the read must still be
+// discarded because the record and credential identity changed.
+func TestPrivateRegistryReAddDuringReadIsDiscarded(t *testing.T) {
+	e := newRegistryEnv(t)
+	e.add(t)
+	var once sync.Once
+	var reAddErr error
+	e.reg.onRequest = func() {
+		once.Do(func() {
+			if _, err := e.svc.RemovePrivateRegistry(context.Background(), &pb.RemovePrivateRegistryRequest{RegistryId: "corp"}); err != nil {
+				reAddErr = err
+				return
+			}
+			_, reAddErr = e.svc.AddPrivateRegistry(context.Background(), e.addRequest())
+		})
+	}
+	_, err := e.svc.ReadPrivateRegistry(context.Background(), digestRead())
+	if reAddErr != nil {
+		t.Fatalf("remove and re-add during the read: %v", reAddErr)
+	}
+	if status.Code(err) != codes.Aborted {
+		t.Fatalf("read across remove and re-add = %v, want Aborted", err)
+	}
+	// The re-added registry serves reads again.
+	e.reg.onRequest = nil
+	if _, err := e.svc.ReadPrivateRegistry(context.Background(), digestRead()); err != nil {
+		t.Fatalf("read after re-add: %v", err)
+	}
+}
+
 func TestPrivateRegistryTagListDropsInvalidTags(t *testing.T) {
 	e := newRegistryEnv(t)
 	e.reg.tags = []string{"1.0.0", "bad\u0007tag", "-lead"}
