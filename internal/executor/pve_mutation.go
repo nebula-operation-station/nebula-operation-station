@@ -66,6 +66,10 @@ var (
 	// ErrPveMutationDenied is returned when no approved permit covers the
 	// exact mutation, or the claim was voided by lock or revocation.
 	ErrPveMutationDenied = errors.New("executor: no approved permit covers this pve mutation")
+	// ErrPveMutationAlreadyRun is returned, together with
+	// ErrPveMutationDenied, when the permit was already used by another
+	// run of the same execution (which may be dispatching right now).
+	ErrPveMutationAlreadyRun = errors.New("executor: pve mutation permit already used")
 	// ErrPveMutationPlan is returned for approved parameters without a
 	// valid step list.
 	ErrPveMutationPlan = errors.New("executor: pve mutation has no valid step plan")
@@ -211,6 +215,14 @@ func (m *PveMutations) end(executionID string) {
 	if m.inflight[executionID]--; m.inflight[executionID] <= 0 {
 		delete(m.inflight, executionID)
 	}
+}
+
+// inflight returns the number of runs (Run or Provision) of executionID
+// in progress.
+func (m *PveMutations) inflightRuns(executionID string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.inflight[executionID]
 }
 
 func (m *PveMutations) running(executionID string) bool {
@@ -460,6 +472,9 @@ func (m *PveMutations) Run(ctx context.Context, req PveMutationRequest) (PveMuta
 	claim, err := m.Auth.AuthorizeProviderMutation(req.Digest, mutationOf(req, t))
 	if err != nil {
 		m.log().Warn("audit", "kind", "pve_mutation_denied", "remote", rm.RemoteID, "action", req.ActionID, "code", string(permit.CodeOf(err)))
+		if permit.CodeOf(err) == permit.CodeHostAlreadyRun {
+			return PveMutationResult{}, fmt.Errorf("%w: %w", ErrPveMutationDenied, ErrPveMutationAlreadyRun)
+		}
 		return PveMutationResult{}, ErrPveMutationDenied
 	}
 	if req.ExecutionID != "" && claim.ExecutionID != req.ExecutionID {
@@ -696,6 +711,20 @@ func (m *PveMutations) identify(ctx context.Context, rm executordb.PveRemote, jo
 		}
 		if match = append(match, upid); len(match) > 1 {
 			break
+		}
+	}
+	// The narrowing was decided before the listing; a provisioning that
+	// started meanwhile (for example another clone of the same template)
+	// can make it ambiguous. Decide again now that the candidates are
+	// known: a changed answer adopts nothing.
+	if len(match) == 1 {
+		again, err := m.narrowTaskID(*job, step)
+		if errors.Is(err, ErrPveJobStore) {
+			return ErrPveJobStore
+		}
+		if err != nil || again != wantID {
+			m.log().Warn("audit", "kind", "pve_mutation_narrowing_changed", "remote", job.RemoteID, "execution", job.ExecutionID, "step", job.Step)
+			match = append(match, "")
 		}
 	}
 	if len(match) == 0 && m.now().Before(job.CreatedAt.Add(pveTaskMatchWindow+pveTaskMatchSkew)) {

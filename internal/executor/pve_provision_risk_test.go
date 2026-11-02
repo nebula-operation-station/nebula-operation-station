@@ -184,7 +184,7 @@ func TestGuestProvisionRiskFloorRules(t *testing.T) {
 	if r, _, _ := (GuestProvisionRiskFloor{Next: fixedRisk{}}).MinimumRisk(other, nil); r != canonical.RiskMedium {
 		t.Fatalf("other action = %s", r)
 	}
-	if r, _, _ := (GuestProvisionRiskFloor{}).MinimumRisk(other, nil); r != canonical.RiskLow {
+	if r, _, _ := (GuestProvisionRiskFloor{}).MinimumRisk(other, nil); r != canonical.RiskHigh {
 		t.Fatalf("other action without next = %s", r)
 	}
 }

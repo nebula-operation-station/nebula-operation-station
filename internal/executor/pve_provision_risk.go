@@ -140,7 +140,7 @@ type PveLinkedHosts func(r canonical.Request, node canonical.Target) ([]canonica
 //     the floor to it; without Next, HIGH.
 //
 // Nothing else raises it: no capacity, PCI or profile fact. Other requests
-// get Next's floor unchanged.
+// get Next's floor unchanged, or HIGH without Next.
 type GuestProvisionRiskFloor struct {
 	Next permit.RiskPolicy
 	// Linked, if set, names the managed hosts linked to the node.
@@ -151,7 +151,8 @@ type GuestProvisionRiskFloor struct {
 func (p GuestProvisionRiskFloor) MinimumRisk(r canonical.Request, targets []canonical.Target) (canonical.Risk, string, error) {
 	if r.ActionID != PveGuestProvisionAction {
 		if p.Next == nil {
-			return canonical.RiskLow, "", nil
+			// No risk policy to defer to: fail closed.
+			return canonical.RiskHigh, "no risk policy configured", nil
 		}
 		return p.Next.MinimumRisk(r, targets)
 	}

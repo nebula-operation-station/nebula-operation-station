@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -213,6 +214,11 @@ type PveProvisioner struct {
 	// Artifact and ModuleVersion identify the action the permit binds.
 	Artifact      []byte
 	ModuleVersion string
+
+	// settle serializes every decision about a started reservation (start,
+	// settle after a run, releaseSettled) with the in-flight count it
+	// relies on, so no check is acted on after it went stale.
+	settle sync.Mutex
 }
 
 // PveProvisionProposal is a provisioning proposal built by the executor.
@@ -838,13 +844,6 @@ func (p *PveProvisioner) Provision(ctx context.Context, req PveProvisionRequest)
 	if o.live[req.VMID] {
 		return res, fmt.Errorf("vmid %d exists: %w", req.VMID, ErrPveVMIDTaken)
 	}
-	h, ok, err := p.VMIDs.VMIDHolder(req.RemoteID, req.VMID, p.Mutations.now())
-	if err != nil {
-		return res, ErrPveJobStore
-	}
-	if !ok || h.ExecutionID != req.ExecutionID {
-		return res, fmt.Errorf("vmid %d not reserved for this execution: %w", req.VMID, ErrPveVMIDTaken)
-	}
 	mr, err := p.mutation(req, req.VMID, o)
 	if err != nil {
 		return res, err
@@ -852,13 +851,16 @@ func (p *PveProvisioner) Provision(ctx context.Context, req PveProvisionRequest)
 	// Started before the run: the guest may exist from the first dispatch
 	// on, so the reservation must not expire under it. It also records the
 	// template, so a lost step can be narrowed after a restart. The
-	// execution counts as running from here, so releaseSettled leaves it.
-	p.Mutations.begin(req.ExecutionID)
-	defer p.Mutations.end(req.ExecutionID)
-	if err := p.VMIDs.StartVMID(req.RemoteID, req.VMID, req.ExecutionID, req.Template.VMID); err != nil {
-		return res, ErrPveJobStore
+	// execution counts as running from here, so releaseSettled leaves it;
+	// the holder check, the in-flight mark and the start happen under one
+	// lock with releaseSettled.
+	if err := p.start(req); err != nil {
+		return res, err
 	}
+	defer p.Mutations.end(req.ExecutionID)
 	run, runErr := p.Mutations.Run(ctx, mr)
+	p.settle.Lock()
+	defer p.settle.Unlock()
 	res.Steps = run.Steps
 	if run.ExecutionID != "" {
 		res.ExecutionID = run.ExecutionID
@@ -874,6 +876,16 @@ func (p *PveProvisioner) Provision(ctx context.Context, req PveProvisionRequest)
 	}
 	res.Steps = steps
 	release, mayExist := vmidSettlement(steps)
+	if p.Mutations.inflightRuns(req.ExecutionID) > 1 || errors.Is(runErr, ErrPveMutationAlreadyRun) {
+		// Another run of this execution holds the permit and may be
+		// dispatching right now: it owns the reservation. Nothing here
+		// releases or unstarts it.
+		res.GuestKept = len(steps) > 0
+		if runErr == nil {
+			return res, nil
+		}
+		return res, runErr
+	}
 	if len(steps) == 0 && runErr != nil && !errors.Is(runErr, ErrPveMutationDenied) {
 		// Nothing was sent, but the failure may be transient (store, vault,
 		// token, remote read): the approved execution keeps its VMID for a
@@ -911,6 +923,27 @@ func (p *PveProvisioner) Provision(ctx context.Context, req PveProvisionRequest)
 	p.Mutations.log().Info("audit", "kind", "pve_guest_provisioned", "remote", req.RemoteID, "node", req.Node, "vmid", req.VMID,
 		"execution", res.ExecutionID, "started", req.Start)
 	return res, nil
+}
+
+// start checks under the settle lock that req's VMID is still reserved for
+// its execution, marks the execution in flight and marks the reservation
+// started. On success the caller must end the in-flight mark.
+func (p *PveProvisioner) start(req PveProvisionRequest) error {
+	p.settle.Lock()
+	defer p.settle.Unlock()
+	h, ok, err := p.VMIDs.VMIDHolder(req.RemoteID, req.VMID, p.Mutations.now())
+	if err != nil {
+		return ErrPveJobStore
+	}
+	if !ok || h.ExecutionID != req.ExecutionID {
+		return fmt.Errorf("vmid %d not reserved for this execution: %w", req.VMID, ErrPveVMIDTaken)
+	}
+	p.Mutations.begin(req.ExecutionID)
+	if err := p.VMIDs.StartVMID(req.RemoteID, req.VMID, req.ExecutionID, req.Template.VMID); err != nil {
+		p.Mutations.end(req.ExecutionID)
+		return ErrPveJobStore
+	}
+	return nil
 }
 
 // pveJobOpen reports whether a step has not reached a terminal state.
@@ -986,6 +1019,8 @@ func (p *PveProvisioner) ReleaseSettledVMIDs(ctx context.Context, remoteID strin
 // releaseSettled implements ReleaseSettledVMIDs over a complete live guest
 // set. Executions this engine is running are left alone.
 func (p *PveProvisioner) releaseSettled(remoteID string, live map[uint64]bool) (int, error) {
+	p.settle.Lock()
+	defer p.settle.Unlock()
 	recs, err := p.VMIDs.Reservations(remoteID, p.Mutations.now())
 	if err != nil {
 		return 0, ErrPveJobStore

@@ -59,9 +59,31 @@ type provisionClient struct {
 	psteps []PveMutationStep
 	// onStep may replace the UPID of the n-th provisioning step (1-based).
 	onStep func(n int, step PveMutationStep, upid string) (string, error)
+	// onRecent runs before every task listing.
+	onRecent func()
+	// onTaskType runs before every provisioning task type lookup.
+	onTaskType func()
+}
+
+func (c *provisionClient) RecentTasks(ctx context.Context, rm executordb.PveRemote, node string, since time.Time, tok pveapi.TokenSupplier) ([]string, error) {
+	c.pmu.Lock()
+	on := c.onRecent
+	c.pmu.Unlock()
+	if on != nil {
+		on()
+	}
+	return c.imageClient.RecentTasks(ctx, rm, node, since, tok)
 }
 
 func (c *provisionClient) TaskType(method string) (string, bool) {
+	c.pmu.Lock()
+	on := c.onTaskType
+	c.pmu.Unlock()
+	if on != nil {
+		if _, ok := ProvisionStepTaskType(method); ok {
+			on()
+		}
+	}
 	if tt, ok := ProvisionStepTaskType(method); ok {
 		return tt, true
 	}
@@ -946,8 +968,8 @@ func TestProvisionRejectsInvalidRequests(t *testing.T) {
 		t.Fatal("dispatched")
 	}
 	// A provisioner without a valid automation key refuses to work.
-	bad := *e.prov
-	bad.AutomationKey = "not a key"
+	bad := &PveProvisioner{Mutations: e.prov.Mutations, Images: e.prov.Images, Reader: e.prov.Reader, VMIDs: e.prov.VMIDs,
+		Passwords: e.prov.Passwords, AutomationKey: "not a key", Artifact: e.prov.Artifact, ModuleVersion: e.prov.ModuleVersion}
 	if _, err := bad.ProposalRequest(context.Background(), e.request(), nextProvExec(), canonical.RiskMedium, strings.Repeat("c", 64), time.Now().Add(time.Hour)); err == nil {
 		t.Fatal("no automation key accepted")
 	}
@@ -1258,5 +1280,72 @@ func TestProvisionTransientFailureBeforeDispatchKeepsReservationForRetry(t *test
 	e.client.fakeMutClient.mu.Unlock()
 	if _, err := e.prov.Provision(context.Background(), approved); err != nil {
 		t.Fatalf("retry: %v", err)
+	}
+}
+
+func TestProvisionNarrowingIsRecheckedAfterTheListing(t *testing.T) {
+	e := newProvisionEnv(t, fixedRisk{})
+	approved := e.approve(e.request())
+	// A clone task of template 9000 by the same token, not A's.
+	other := testTaskUPID("pve1", time.Now(), "qmclone", "9000", mutActionUser, 960)
+	e.loseStep(1, func(string) []string { return []string{other} })
+	// Between A's narrowing check and the listing, another provisioning of
+	// the same template starts (its clone task is unrecorded).
+	var once sync.Once
+	e.pc.pmu.Lock()
+	e.pc.onRecent = func() {
+		once.Do(func() {
+			c := nextProvExec()
+			if _, err := e.vmids.ReserveVMID(mutRemote, c, 150, nil, time.Now().Add(time.Hour), time.Now()); err != nil {
+				t.Error(err)
+			}
+			if err := e.vmids.StartVMID(mutRemote, 150, c, 9000); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	e.pc.pmu.Unlock()
+	res, err := e.prov.Provision(context.Background(), approved)
+	if !errors.Is(err, ErrPveDispatchUncertain) {
+		t.Fatalf("err = %v", err)
+	}
+	if res.Steps[0].UPID == other || res.Steps[0].UPID != "" {
+		t.Fatalf("task adopted although the narrowing changed: %+v", res.Steps[0])
+	}
+	if !strings.Contains(e.logs.String(), "pve_mutation_narrowing_changed") {
+		t.Fatal("no audit of the changed narrowing")
+	}
+}
+
+func TestProvisionConcurrentRunOfTheSameExecutionKeepsTheReservation(t *testing.T) {
+	e := newProvisionEnv(t, fixedRisk{})
+	approved := e.approve(e.request())
+	// The first run blocks after consuming the permit, before its clone
+	// intent is recorded.
+	blocked, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	e.pc.pmu.Lock()
+	e.pc.onTaskType = func() { once.Do(func() { close(blocked); <-release }) }
+	e.pc.pmu.Unlock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.prov.Provision(context.Background(), approved)
+		done <- err
+	}()
+	<-blocked
+	res, err := e.prov.Provision(context.Background(), approved)
+	if !errors.Is(err, ErrPveMutationDenied) || !errors.Is(err, ErrPveMutationAlreadyRun) || len(res.Steps) != 0 {
+		t.Fatalf("second run: %v %+v", err, res)
+	}
+	h, ok, _ := e.vmids.VMIDHolder(mutRemote, approved.VMID, time.Now().Add(2*time.Hour))
+	if !ok || !h.Started || h.ExecutionID != approved.ExecutionID {
+		t.Fatalf("second run touched the first run's reservation: %+v %v", h, ok)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if strings.Join(e.pc.methods(), ",") != "pve.guest.clone,pve.guest.config,pve.guest.resize,pve.guest.start" {
+		t.Fatalf("dispatched %v", e.pc.methods())
 	}
 }
