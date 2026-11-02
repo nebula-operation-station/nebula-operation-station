@@ -6,16 +6,19 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 )
 
 // Read lease pages (ADR 0007 E06, part 2): the list and detail of the
-// read grants the executor holds, and the revoke of an active grant.
+// read grants the executor holds, and the revoke of a grant.
 // The executor is the source of truth for the grant documents; the pages
 // render them as text only (host names and approved-by are untrusted
-// input).
+// input). Active and legacy read-schedule-v1 grants can be revoked.
 
 // leaseDetailOpenMax is the number of hosts up to which the detail page
 // shows the frozen host list open by default.
@@ -46,6 +49,7 @@ type leaseDetail struct {
 	Created, Expiry, Revoked            time.Time
 	CreatedSet, ExpirySet, RevokedSet   bool
 	Legacy                              bool
+	Revocable                           bool // show the Revoke form
 }
 
 // leasesData is the data of the lease list page.
@@ -70,10 +74,31 @@ func leaseStateClass(state string) string {
 	}
 }
 
-// leaseShort bounds the id shown in the UI and the page title.
+// leaseIDRe is the executor's grant id form: a lowercase UUIDv4, the same
+// form internal/executions checks (readGrantIDRe). The revoke handler
+// checks the posted id against it before any lookup or log line.
+var leaseIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
+// leaseRevocable reports whether a grant in this state can be revoked:
+// active grants and legacy read-schedule-v1 grants (ADR 0007: "offer
+// revoke or explicitly approved replacement" for legacy grants).
+func leaseRevocable(state string) bool {
+	return state == "active" || state == "legacy"
+}
+
+// leaseShort bounds the id shown in the UI and the page title. Invalid
+// UTF-8 in a malformed executor-supplied id is replaced first, and the
+// cut is made after the eighth rune, so the result is always valid UTF-8.
 func leaseShort(id string) string {
-	if len(id) >= 8 {
-		return id[:8]
+	if !utf8.ValidString(id) {
+		id = strings.ToValidUTF8(id, "\uFFFD")
+	}
+	n := 0
+	for i := range id {
+		if n == 8 {
+			return id[:i]
+		}
+		n++
 	}
 	return id
 }
@@ -157,6 +182,7 @@ func (h *Handler) handleLease(w http.ResponseWriter, r *http.Request) {
 		Actions: v.Actions, Remotes: v.Remotes, Hosts: v.Hosts,
 		HostsOpen: len(v.Hosts) > 0 && len(v.Hosts) <= leaseDetailOpenMax,
 		Digest:    v.Digest, ApprovedBy: v.ApprovedBy, Legacy: v.Legacy,
+		Revocable: leaseRevocable(v.State),
 	}
 	if !v.Created.IsZero() {
 		d.Created, d.CreatedSet = v.Created.UTC(), true
@@ -167,22 +193,33 @@ func (h *Handler) handleLease(w http.ResponseWriter, r *http.Request) {
 	if !v.Revoked.IsZero() {
 		d.Revoked, d.RevokedSet = v.Revoked.UTC(), true
 	}
-	h.render(w, r, pageData{Title: "Read lease " + d.Short, Active: "operations", Content: "lease", Lease: d})
+	h.render(w, r, pageData{Title: "Read lease " + d.Short, Active: "operations", Content: "lease", Lease: d,
+		Scripts: []string{"formpost.js"}})
 }
 
-// handleLeaseRevoke revokes an active read grant. It uses the same
-// origin-checked POST pattern and audit handling as handleScheduleRevoke:
-// the middleware rejects cross-origin posts, and the executions service
-// writes the audit line. Only active grants can be revoked.
+// handleLeaseRevoke revokes an active or legacy read grant. The page
+// submits the form with fetch (data-fetch, formpost.js), which sends the
+// real Origin; the security middleware rejects cross-origin posts and
+// plain form posts (Origin: null under Referrer-Policy: no-referrer). The
+// executions service writes the audit line.
 func (h *Handler) handleLeaseRevoke(w http.ResponseWriter, r *http.Request) {
 	if !h.leasesEnabled(w, r) {
 		return
 	}
 	if err := r.ParseForm(); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "the form could not be read", http.StatusBadRequest)
 		return
 	}
 	id := r.PostFormValue("id")
+	if !leaseIDRe.MatchString(id) {
+		http.Error(w, "invalid lease id", http.StatusBadRequest)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
 	defer cancel()
 	v, err := h.findLease(ctx, id)
@@ -195,8 +232,8 @@ func (h *Handler) handleLeaseRevoke(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if v.State != "active" {
-		http.Error(w, "only an active lease can be revoked", http.StatusConflict)
+	if !leaseRevocable(v.State) {
+		http.Error(w, "only an active or legacy lease can be revoked", http.StatusConflict)
 		return
 	}
 	if err := h.leases.RevokeReadGrant(ctx, webUser(r), id); err != nil {

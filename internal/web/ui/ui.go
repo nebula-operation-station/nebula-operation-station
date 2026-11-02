@@ -402,9 +402,9 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("POST /schedules/create", h.handleScheduleCreate)
 	mux.HandleFunc("POST /schedules/approve", h.handleScheduleApprove)
 	mux.HandleFunc("POST /schedules/revoke", h.handleScheduleRevoke)
-	// Read leases (ADR 0007 E06, part 2). The revoke endpoint is a
-	// plain form POST, origin-checked by the middleware like the other
-	// state-changing routes.
+	// Read leases (ADR 0007 E06, part 2). The revoke form is posted
+	// with fetch (data-fetch, formpost.js) and origin-checked by the
+	// middleware like the other state-changing routes.
 	mux.HandleFunc("GET /leases", h.handleLeases)
 	mux.HandleFunc("GET /leases/{id}", h.handleLease)
 	mux.HandleFunc("POST /leases/revoke", h.handleLeaseRevoke)

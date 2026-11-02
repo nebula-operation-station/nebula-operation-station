@@ -27,9 +27,9 @@
   {{else}}
   <p class="hint">no host list</p>
   {{end}}
-  {{if eq $l.State "active"}}
+  {{if $l.Revocable}}
   <div class="actions">
-    <form method="post" action="/leases/revoke">
+    <form method="post" action="/leases/revoke" data-fetch>
       <input type="hidden" name="id" value="{{$l.ID}}">
       <button type="submit" class="button button--small button--danger">Revoke</button>
     </form>
