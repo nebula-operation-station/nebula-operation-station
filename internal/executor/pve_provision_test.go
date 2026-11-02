@@ -149,14 +149,21 @@ type fakeProvisionReader struct {
 	inv     pveapi.ClusterInventory
 	storage pveapi.Storage
 	headers []string
+	// afterInventory runs (unlocked) after a guest list was copied out, so
+	// a test can change the cluster right behind a reader.
+	afterInventory func()
 }
 
 func (r *fakeProvisionReader) ClusterInventory(ctx context.Context, _ executordb.PveRemote, tok pveapi.TokenSupplier) (pveapi.ClusterInventory, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.headers = append(r.headers, header(ctx, tok))
 	inv := r.inv
 	inv.Guests = append([]pveapi.Guest(nil), r.inv.Guests...)
+	after := r.afterInventory
+	r.mu.Unlock()
+	if after != nil {
+		after()
+	}
 	return inv, nil
 }
 
@@ -485,9 +492,17 @@ func TestProvisionRunsCloneConfigResizeStartAsTypedCalls(t *testing.T) {
 			t.Fatalf("dispatch used %q", d.header)
 		}
 	}
-	// The reservation ends once the guest exists.
+	// The reservation stays until the guest is in the complete live guest
+	// list (TestProvisionSuccessKeepsVMIDUntilTheGuestIsListed), then ends.
+	if _, ok, _ := e.vmids.VMIDHolder(mutRemote, 101, time.Now()); !ok {
+		t.Fatal("reservation released before the guest is listed")
+	}
+	e.reader.addGuest("pve1", 101, 4*gib)
+	if n, err := e.prov.ReleaseSettledVMIDs(context.Background(), mutRemote); err != nil || n != 1 {
+		t.Fatalf("release once listed: %d %v", n, err)
+	}
 	if _, ok, _ := e.vmids.VMIDHolder(mutRemote, 101, time.Now()); ok {
-		t.Fatal("reservation kept after success")
+		t.Fatal("reservation kept after the guest is listed")
 	}
 
 	// The approved steps become exactly these PVE calls.
@@ -1463,6 +1478,95 @@ func TestProvisionConsumedPermitWithoutStepReleasesVMID(t *testing.T) {
 				t.Fatalf("vmid not free again: %v", err)
 			}
 		})
+	}
+}
+
+// TestProvisionSuccessKeepsVMIDUntilTheGuestIsListed pins PR #162 review
+// round 7: a guest the clone created protects its VMID only once the live
+// guest list shows it. Until then the reservation stays, so a proposal
+// working from a list read before the clone finished cannot take the VMID.
+func TestProvisionSuccessKeepsVMIDUntilTheGuestIsListed(t *testing.T) {
+	e := newProvisionEnv(t, fixedRisk{})
+	ok := e.approve(e.request())
+	if _, err := e.prov.Provision(context.Background(), ok); err != nil {
+		t.Fatal(err)
+	}
+	// A later step fails after the clone succeeded: the guest exists too.
+	failed := e.approve(e.request())
+	e.pc.pmu.Lock()
+	e.pc.onStep = func(n int, step PveMutationStep, upid string) (string, error) {
+		if step.Method == pveStepGuestConfig {
+			return "", fmt.Errorf("test: %w", ErrPveRejected)
+		}
+		return upid, nil
+	}
+	e.pc.pmu.Unlock()
+	res, err := e.prov.Provision(context.Background(), failed)
+	if !errors.Is(err, ErrPveStepFailed) || !res.GuestKept || res.Steps[0].State != executordb.PveJobSucceeded {
+		t.Fatalf("failed config: %v %+v", err, res)
+	}
+	for _, vmid := range []uint64{ok.VMID, failed.VMID} {
+		// The guest list (stale) does not show the guest yet.
+		if h, held, _ := e.vmids.VMIDHolder(mutRemote, vmid, time.Now()); !held || !h.Started {
+			t.Fatalf("vmid %d released before its guest is listed: %+v %v", vmid, h, held)
+		}
+		req := e.request()
+		req.VMID = vmid
+		if _, err := e.prov.ProposalRequest(context.Background(), req, nextProvExec(), canonical.RiskMedium, strings.Repeat("c", 64), time.Now().Add(time.Hour)); !errors.Is(err, ErrPveVMIDTaken) {
+			t.Fatalf("vmid %d of a created guest handed out: %v", vmid, err)
+		}
+	}
+	if _, pp := e.propose(e.request()); pp.VMID == ok.VMID || pp.VMID == failed.VMID {
+		t.Fatalf("next free vmid %d is a created guest's", pp.VMID)
+	}
+	if n, err := e.prov.ReleaseSettledVMIDs(context.Background(), mutRemote); err != nil || n != 0 {
+		t.Fatalf("released %d %v before the guests are listed", n, err)
+	}
+	e.reader.addGuest("pve1", int(ok.VMID), 4*gib)
+	e.reader.addGuest("pve1", int(failed.VMID), 4*gib)
+	if n, err := e.prov.ReleaseSettledVMIDs(context.Background(), mutRemote); err != nil || n != 2 {
+		t.Fatalf("released %d %v once listed, want 2", n, err)
+	}
+}
+
+// TestProvisionSuccessReleasesVMIDWhenTheGuestIsListed: a guest already in
+// the live list right after the run releases the reservation at once.
+func TestProvisionSuccessReleasesVMIDWhenTheGuestIsListed(t *testing.T) {
+	e := newProvisionEnv(t, fixedRisk{})
+	approved := e.approve(e.request())
+	e.pc.pmu.Lock()
+	e.pc.onStep = func(n int, step PveMutationStep, upid string) (string, error) {
+		if step.Method == pveStepGuestClone {
+			e.reader.addGuest("pve1", int(approved.VMID), 4*gib)
+		}
+		return upid, nil
+	}
+	e.pc.pmu.Unlock()
+	if _, err := e.prov.Provision(context.Background(), approved); err != nil {
+		t.Fatal(err)
+	}
+	if h, held, _ := e.vmids.VMIDHolder(mutRemote, approved.VMID, time.Now()); held {
+		t.Fatalf("reservation kept although the guest is listed: %+v", h)
+	}
+}
+
+// TestProvisionProposalRechecksTheLiveListAfterReserving: a guest that
+// appears between the proposal's guest list read and its reservation (a
+// reservation released by another proposal that saw the guest) is caught
+// by a fresh read after reserving; nothing stays reserved.
+func TestProvisionProposalRechecksTheLiveListAfterReserving(t *testing.T) {
+	e := newProvisionEnv(t, fixedRisk{})
+	var once sync.Once
+	e.reader.mu.Lock()
+	e.reader.afterInventory = func() { once.Do(func() { e.reader.addGuest("pve1", 150, 4*gib) }) }
+	e.reader.mu.Unlock()
+	req := e.request()
+	req.VMID = 150
+	if _, err := e.prov.ProposalRequest(context.Background(), req, nextProvExec(), canonical.RiskMedium, strings.Repeat("c", 64), time.Now().Add(time.Hour)); !errors.Is(err, ErrPveVMIDTaken) {
+		t.Fatalf("vmid listed after the first read: %v", err)
+	}
+	if h, held, _ := e.vmids.VMIDHolder(mutRemote, 150, time.Now()); held {
+		t.Fatalf("reservation left behind: %+v", h)
 	}
 }
 

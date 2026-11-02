@@ -665,18 +665,9 @@ func (p *PveProvisioner) observe(ctx context.Context, req PveProvisionRequest) (
 	if err != nil {
 		return o, err
 	}
-	inv, err := p.Reader.ClusterInventory(ctx, rm, read)
+	inv, live, err := p.liveGuests(ctx, rm, read)
 	if err != nil {
-		return o, ErrPveTargetChanged
-	}
-	if inv.Partial || inv.Truncated {
-		return o, ErrPveInventoryIncomplete
-	}
-	live := make(map[uint64]bool, len(inv.Guests))
-	for _, g := range inv.Guests {
-		if g.VMID > 0 {
-			live[uint64(g.VMID)] = true
-		}
+		return o, err
 	}
 	st, err := p.Reader.NodeStorage(ctx, rm, req.Node, req.Storage, read)
 	if err != nil || st.ID != req.Storage {
@@ -689,6 +680,26 @@ func (p *PveProvisioner) observe(ctx context.Context, req PveProvisionRequest) (
 	o.cap.MemoryOvercommit, o.cap.StorageOvercommit = pveCapacityFacts(inv, st, req.Node, req.MemoryMiB, req.DiskGiB)
 	o.rm, o.tpl, o.live, o.pw = rm, tpl, live, pw
 	return o, nil
+}
+
+// liveGuests reads the cluster guest list and returns it with the set of
+// its VMIDs. Only a complete list is returned: a partial or truncated one
+// cannot prove a VMID free or a guest present.
+func (p *PveProvisioner) liveGuests(ctx context.Context, rm executordb.PveRemote, read pveapi.TokenSupplier) (pveapi.ClusterInventory, map[uint64]bool, error) {
+	inv, err := p.Reader.ClusterInventory(ctx, rm, read)
+	if err != nil {
+		return pveapi.ClusterInventory{}, nil, ErrPveTargetChanged
+	}
+	if inv.Partial || inv.Truncated {
+		return pveapi.ClusterInventory{}, nil, ErrPveInventoryIncomplete
+	}
+	live := make(map[uint64]bool, len(inv.Guests))
+	for _, g := range inv.Guests {
+		if g.VMID > 0 {
+			live[uint64(g.VMID)] = true
+		}
+	}
+	return inv, live, nil
 }
 
 // mutation builds the exact mutation request: the complete configuration,
@@ -784,6 +795,23 @@ func (p *PveProvisioner) ProposalRequest(ctx context.Context, req PveProvisionRe
 		return PveProvisionProposal{}, err
 	}
 	release := func() { _ = p.VMIDs.ReleaseVMID(req.RemoteID, vmid, executionID) }
+	// The guest list above may predate a clone that finished since and
+	// whose reservation another proposal released after seeing the guest
+	// listed. A list read after reserving shows such a guest.
+	read, err := p.Mutations.readToken(o.rm)
+	if err != nil {
+		release()
+		return PveProvisionProposal{}, err
+	}
+	_, live, err := p.liveGuests(ctx, o.rm, read)
+	if err != nil {
+		release()
+		return PveProvisionProposal{}, err
+	}
+	if live[vmid] {
+		release()
+		return PveProvisionProposal{}, fmt.Errorf("vmid %d exists: %w", vmid, ErrPveVMIDTaken)
+	}
 	req.Digest, req.ExecutionID = canonical.Digest{}, ""
 	mr, err := p.mutation(req, vmid, o)
 	if err != nil {
@@ -925,6 +953,11 @@ func (p *PveProvisioner) Provision(ctx context.Context, req PveProvisionRequest)
 		return res, ErrPveTargetChanged
 	}
 	res.GuestConfigDigest = digest
+	// The reservation goes only once a complete live guest list shows the
+	// guest; otherwise releaseSettled releases it later.
+	if _, live, err := p.liveGuests(ctx, o.rm, read); err == nil && live[req.VMID] && cloneSettled(steps) {
+		_ = p.VMIDs.ReleaseVMID(req.RemoteID, req.VMID, req.ExecutionID)
+	}
 	p.Mutations.log().Info("audit", "kind", "pve_guest_provisioned", "remote", req.RemoteID, "node", req.Node, "vmid", req.VMID,
 		"execution", res.ExecutionID, "started", req.Start)
 	return res, nil
@@ -967,7 +1000,9 @@ func pveJobOpen(j executordb.PveJob) bool {
 //   - no step: nothing was sent (the intent is durable before dispatch);
 //   - a step still open: kept, reconciliation narrows it by the
 //     reservation;
-//   - clone succeeded: released, the live guest list protects the VMID;
+//   - clone succeeded: kept until the guest is in a complete live guest
+//     list (cloneSettled), which then protects the VMID; a list read
+//     before the clone finished does not show it;
 //   - clone failed (PVE ran and refused it): released, no guest;
 //   - clone unknown: kept until the guest is seen (releaseSettled).
 func vmidSettlement(steps []executordb.PveJob) (release, guestMayExist bool) {
@@ -979,13 +1014,19 @@ func vmidSettlement(steps []executordb.PveJob) (release, guestMayExist bool) {
 			return false, true
 		}
 	}
-	switch steps[0].State {
-	case executordb.PveJobSucceeded:
-		return true, true
-	case executordb.PveJobFailed:
+	if steps[0].State == executordb.PveJobFailed {
 		return true, false
 	}
 	return false, true
+}
+
+// cloneSettled reports whether the clone of a provisioning succeeded and
+// no step is still open: its reservation goes once the guest is listed.
+func cloneSettled(steps []executordb.PveJob) bool {
+	if len(steps) == 0 || steps[0].State != executordb.PveJobSucceeded {
+		return false
+	}
+	return !slices.ContainsFunc(steps, pveJobOpen)
 }
 
 // ReleaseSettledVMIDs releases the started VMID reservations of remoteID
@@ -1005,18 +1046,9 @@ func (p *PveProvisioner) ReleaseSettledVMIDs(ctx context.Context, remoteID strin
 	if err != nil {
 		return 0, err
 	}
-	inv, err := p.Reader.ClusterInventory(ctx, rm, read)
+	_, live, err := p.liveGuests(ctx, rm, read)
 	if err != nil {
-		return 0, ErrPveTargetChanged
-	}
-	if inv.Partial || inv.Truncated {
-		return 0, ErrPveInventoryIncomplete
-	}
-	live := make(map[uint64]bool, len(inv.Guests))
-	for _, g := range inv.Guests {
-		if g.VMID > 0 {
-			live[uint64(g.VMID)] = true
-		}
+		return 0, err
 	}
 	return p.releaseSettled(remoteID, live)
 }
@@ -1040,6 +1072,10 @@ func (p *PveProvisioner) releaseSettled(remoteID string, live map[uint64]bool) (
 			return n, ErrPveJobStore
 		}
 		release, _ := vmidSettlement(steps)
+		if !release && cloneSettled(steps) && live[r.VMID] {
+			// The created guest is listed: the live list protects the VMID.
+			release = true
+		}
 		if !release && len(steps) == 1 && steps[0].State == executordb.PveJobUnknown && live[r.VMID] {
 			// An unknown clone whose guest exists: the live list protects
 			// the VMID. The reservation is also the marker that makes a
