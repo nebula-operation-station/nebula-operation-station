@@ -11,6 +11,8 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/dockerhost"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/gpuhost"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/servicecheck"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
 )
 
 // Extra line kinds of an org-chart box (ADR 0006 P1-34 part 3). Only this
@@ -28,6 +30,8 @@ const (
 	// LineLatency is the service-check outcome and latency line of a host
 	// box (service.check).
 	LineLatency = "latency"
+	// LineBackup is the backup freshness line of a PVE guest box (P1-29).
+	LineBackup = "backup"
 )
 
 // chartLine is one optional extra line of an org-chart box (GPU, CVE,
@@ -382,6 +386,72 @@ func latencyLine(r *executions.LastResultRow, now time.Time, staleAfter time.Dur
 	return []chartLine{l}
 }
 
+// maxChartBackupReads bounds the per-guest backup freshness reads of one
+// chart page (each is a few store queries). Guests beyond it show "backup
+// unknown (not loaded)", never a healthy state.
+const maxChartBackupReads = 200
+
+// chartBackupReader is the optional backup freshness read of the PVE store
+// (ADR 0006 P1-29). The chart uses it when the configured store provides
+// it; otherwise the backup lines are hidden.
+type chartBackupReader interface {
+	GuestBackupFreshness(ctx context.Context, remoteID string, vmid, generation uint64, maxAge time.Duration) (pveinventory.Freshness, error)
+}
+
+// backupConfidenceText summarizes the three confidence channels, kept
+// separate: a count alone never implies restore safety.
+func backupConfidenceText(f pveinventory.Freshness) string {
+	catalog := "absent"
+	if f.Catalog.Present {
+		catalog = "present"
+	}
+	verified := string(f.Verification.State)
+	if verified == "" {
+		verified = string(pvecontract.Unknown)
+	}
+	return fmt.Sprintf("tasks %d · catalog %s · verified %s", f.Task.Count, catalog, verified)
+}
+
+// backupLine builds the backup freshness line of a PVE guest box from the
+// P1-29 verdict: ok, overdue and failed (both warnings), stale evidence,
+// expected off, unknown. Unknown is never safe. The reason (which may
+// carry stored PVE text) and the confidence channels are in the title.
+func backupLine(f pveinventory.Freshness, now time.Time) chartLine {
+	l := chartLine{Kind: LineBackup, Label: "Backup"}
+	last := ""
+	if f.LastSuccessUnix > 0 {
+		last = ageText(now, time.Unix(f.LastSuccessUnix, 0))
+	}
+	switch f.State {
+	case pveinventory.FreshnessOK:
+		l.Text, l.State = "ok", StateOK
+		if last != "" {
+			l.Text = "ok · last " + last
+		}
+	case pveinventory.FreshnessOverdue:
+		l.Text, l.State = "overdue · no successful backup", StateWarn
+		if last != "" {
+			l.Text = "overdue · last " + last
+		}
+	case pveinventory.FreshnessFailed:
+		l.Text, l.State = "failed", StateWarn
+		if last != "" {
+			l.Text = "failed · last success " + last
+		}
+	case pveinventory.FreshnessStaleData:
+		l.Text, l.State = "backup data stale", StateStale
+	case pveinventory.FreshnessExpectedOff:
+		l.Text, l.State = "expected off", StateOK
+	default:
+		l.Text, l.State = "backup unknown", StateUnknown
+	}
+	l.Title = backupConfidenceText(f)
+	if f.Reason != "" {
+		l.Title = f.Reason + " · " + l.Title
+	}
+	return l
+}
+
 // worstClass maps a worst state to the box border class: red for
 // critical, yellow for warning, grey otherwise (unknown/stale are labelled
 // on their lines and never turn the border healthy-green).
@@ -417,20 +487,46 @@ func guestLines(res chartResults, g pveGuestView, now time.Time) []chartLine {
 	return lines
 }
 
-// addPVELines fills the guest extra lines and folds their states into
-// each node's worst-state border.
-func addPVELines(nodes []pveNodeView, res chartResults, now time.Time) {
+// addPVELines fills the guest extra lines (linked-host GPUs, backup
+// freshness) and folds their states into each node's worst-state border.
+// Backup lines need the optional store read; without it they are hidden.
+func (h *Handler) addPVELines(ctx context.Context, nodes []pveNodeView, res chartResults, now time.Time) {
+	backups, _ := h.pve.(chartBackupReader)
+	reads := 0
 	for i := range nodes {
 		n := &nodes[i]
 		worst := n.worst
 		for j := range n.Guests {
-			n.Guests[j].Lines = guestLines(res, n.Guests[j], now)
-			worst = worstState(append(lineStates(n.Guests[j].Lines), worst)...)
+			g := &n.Guests[j]
+			g.Lines = guestLines(res, *g, now)
+			if backups != nil {
+				g.Lines = append(g.Lines, h.guestBackupLine(ctx, backups, n.remoteID, *g, now, &reads))
+			}
+			worst = worstState(append(lineStates(g.Lines), worst)...)
 		}
 		n.worst = worst
 		n.WorstClass = worstClass(worst)
 		n.Expanded = n.WorstClass != "chart__node--neutral"
 	}
+}
+
+// guestBackupLine reads one guest's backup freshness, within the page's
+// read budget. A failed read or an exhausted budget is "backup unknown";
+// the error detail goes to the log only.
+func (h *Handler) guestBackupLine(ctx context.Context, r chartBackupReader, remoteID string, g pveGuestView, now time.Time, reads *int) chartLine {
+	unknown := func(text string) chartLine {
+		return chartLine{Kind: LineBackup, Label: "Backup", Text: text, State: StateUnknown}
+	}
+	if *reads >= maxChartBackupReads {
+		return unknown("backup unknown (not loaded)")
+	}
+	*reads++
+	f, err := r.GuestBackupFreshness(ctx, remoteID, g.VMID, g.generation, 0)
+	if err != nil {
+		h.log.Warn("org chart: backup freshness read failed", "remote", remoteID, "vmid", g.VMID, "error", err)
+		return unknown("backup unknown")
+	}
+	return backupLine(f, now)
 }
 
 // rowFor returns a pointer to host's row in m, nil when absent.

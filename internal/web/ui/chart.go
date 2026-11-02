@@ -163,6 +163,8 @@ type pveNodeView struct {
 	// worst is the tree's worst state of the node and its descendants;
 	// the guest extra lines are folded in by addPVELines.
 	worst IndicatorState
+	// remoteID is the node's PVE remote, for the per-guest reads.
+	remoteID string
 }
 
 // pveGuestView is one guest box under a PVE node.
@@ -185,6 +187,8 @@ type pveGuestView struct {
 	// driver, backup freshness); absent when the source has no usable
 	// result.
 	Lines []chartLine
+	// generation is the guest incarnation, for the exact backup read.
+	generation uint64
 }
 
 // pveStorageView is one storage (datastore) box under a PVE node.
@@ -278,6 +282,7 @@ func pveTreeToView(tree pveinventory.Tree) []pveNodeView {
 			StateClass:  pveStateClass(string(r.State)),
 			StateReason: r.StateReason,
 			Stale:       r.Stale,
+			remoteID:    r.RemoteID,
 		}
 		switch r.Worst {
 		case pveinventory.StateCritical:
@@ -300,6 +305,7 @@ func pveTreeToView(tree pveinventory.Tree) []pveNodeView {
 					StateReason: c.StateReason,
 					Stale:       c.Stale,
 					HostID:      c.HostID,
+					generation:  c.Generation,
 				})
 			case pveinventory.KindStorage:
 				n.Storages = append(n.Storages, pveStorageView{
@@ -507,7 +513,7 @@ func (h *Handler) handleInventoryChart(w http.ResponseWriter, r *http.Request) {
 			data.Chart.PVEUnavailable = true
 		} else {
 			data.Chart.PVENodes = pveTreeToView(tree)
-			addPVELines(data.Chart.PVENodes, res, h.pveNow())
+			h.addPVELines(ctx, data.Chart.PVENodes, res, h.pveNow())
 		}
 	}
 	h.render(w, r, data)
