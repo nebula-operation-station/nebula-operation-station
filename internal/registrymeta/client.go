@@ -5,6 +5,7 @@ package registrymeta
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -190,6 +191,9 @@ type Client struct {
 	sleep     func(ctx context.Context, d time.Duration) error
 	jitter    func() time.Duration
 	allowLoop bool
+	// priv is set only for a PrivateClient's credentialed client; the public
+	// anonymous client never carries credential behavior.
+	priv *privateConfig
 
 	mu       sync.Mutex
 	regs     map[string]*regState
@@ -199,6 +203,11 @@ type Client struct {
 // NewClient creates a Client. It fails closed on an empty or invalid
 // allowlist.
 func NewClient(o Options) (*Client, error) {
+	return newClient(o, nil, nil)
+}
+
+// newClient builds a client; priv and roots are set only by NewPrivateClient.
+func newClient(o Options, priv *privateConfig, roots *x509.CertPool) (*Client, error) {
 	if len(o.Origins) == 0 {
 		return nil, fmt.Errorf("%w: the allowlist is empty", ErrOriginNotAllowed)
 	}
@@ -251,6 +260,7 @@ func NewClient(o Options) (*Client, error) {
 		sleep:     sleep,
 		jitter:    jitter,
 		allowLoop: o.AllowLoopback,
+		priv:      priv,
 		regs:      map[string]*regState{},
 		inflight:  map[string]*call{},
 	}
@@ -265,7 +275,7 @@ func NewClient(o Options) (*Client, error) {
 			ForceAttemptHTTP2:   false,
 			MaxIdleConnsPerHost: MaxConcurrentPerRegistry,
 			IdleConnTimeout:     30 * time.Second,
-			TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
+			TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots},
 		}},
 	}
 	return c, nil
@@ -283,6 +293,12 @@ func parseOrigin(s string) (*url.URL, error) {
 // checkRedirect confines redirects to the original metadata resource and
 // method on an approved origin, or to a configured token endpoint.
 func (c *Client) checkRedirect(req *http.Request, via []*http.Request) error {
+	if c.priv != nil {
+		// Credentialed requests never follow redirects (ADR 0006: no
+		// redirects), so a credential or authenticated token cannot be
+		// carried to another resource or origin.
+		return fmt.Errorf("%w: credentialed registry requests do not follow redirects", ErrRedirectNotAllowed)
+	}
 	if len(via) == 0 || len(via) >= MaxRedirects {
 		return fmt.Errorf("%w: more than %d redirects", ErrRedirectNotAllowed, MaxRedirects)
 	}
@@ -331,7 +347,8 @@ func (c *Client) dialContext(ctx context.Context, network, addr string) (net.Con
 	var lastErr error
 	for _, ipa := range ips {
 		ip := ipa.IP
-		if !c.allowLoop && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified()) {
+		if !c.allowLoop && (ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() ||
+			(ip.IsPrivate() && (c.priv == nil || !c.priv.allowPrivate))) {
 			return nil, fmt.Errorf("registrymeta: %s: %w", host, ErrPrivateAddress)
 		}
 		var conn net.Conn
@@ -541,6 +558,11 @@ type budgetTransport struct {
 func (t *budgetTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	c := t.client
 	reg := originOf(req.URL)
+	if c.priv != nil {
+		if err := c.priv.allowRequest(req); err != nil {
+			return nil, err
+		}
+	}
 	if err := c.acquire(req.Context(), reg); err != nil {
 		return nil, err
 	}
@@ -574,6 +596,15 @@ func (b *budgetBody) Close() error {
 
 // do issues one HTTP request with an optional bearer token.
 func (c *Client) do(ctx context.Context, method, u, token string, hdrs map[string]string) (*http.Response, error) {
+	authz := ""
+	if token != "" {
+		authz = "Bearer " + token
+	}
+	return c.doAuthz(ctx, method, u, authz, hdrs)
+}
+
+// doAuthz issues one HTTP request with an optional Authorization value.
+func (c *Client) doAuthz(ctx context.Context, method, u, authz string, hdrs map[string]string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, u, nil)
 	if err != nil {
 		return nil, err
@@ -581,8 +612,8 @@ func (c *Client) do(ctx context.Context, method, u, token string, hdrs map[strin
 	for k, v := range hdrs {
 		req.Header.Set(k, v)
 	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	if authz != "" {
+		req.Header.Set("Authorization", authz)
 	}
 	return c.http.Do(req)
 }
@@ -591,6 +622,14 @@ func (c *Client) do(ctx context.Context, method, u, token string, hdrs map[strin
 // endpoint (Docker Hub, ghcr.io and quay.io all speak the OCI distribution
 // auth flow).
 func (c *Client) fetchToken(ctx context.Context, ref Ref, repo string) (string, error) {
+	return c.fetchTokenAuth(ctx, ref, repo, "")
+}
+
+// fetchTokenAuth obtains a pull-scope token. basic, when non-empty, is the
+// Basic Authorization value of a private registry credential; only a
+// PrivateClient passes one, and its transport sends it nowhere but the
+// approved token realm.
+func (c *Client) fetchTokenAuth(ctx context.Context, ref Ref, repo, basic string) (string, error) {
 	og := c.byOrigin[ref.Registry]
 	q := url.Values{}
 	q.Set("scope", "repository:"+repo+":pull")
@@ -598,13 +637,16 @@ func (c *Client) fetchToken(ctx context.Context, ref Ref, repo string) (string, 
 		q.Set("service", og.Service)
 	}
 	tu := og.Auth + og.AuthPath + "?" + q.Encode()
-	resp, err := c.do(ctx, http.MethodGet, tu, "", nil)
+	resp, err := c.doAuthz(ctx, http.MethodGet, tu, basic, nil)
 	if err != nil {
 		return "", fmt.Errorf("registrymeta: token for %s: %w", repo, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusTooManyRequests {
 		return "", fmt.Errorf("%w: %s", ErrRateLimited, originOf(resp.Request.URL))
+	}
+	if basic != "" && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+		return "", fmt.Errorf("%w: the token realm refused the credential for %s", ErrCredentialRejected, repo)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("registrymeta: token endpoint for %s: unexpected status %d", repo, resp.StatusCode)
@@ -634,6 +676,9 @@ func (c *Client) fetchToken(ctx context.Context, ref Ref, repo string) (string, 
 // anonymous token on 401 and applying the 429 backoff policy. The caller
 // owns the returned response body.
 func (c *Client) doWithToken(ctx context.Context, ref Ref, repo, method, u string, hdrs map[string]string) (*http.Response, error) {
+	if c.priv != nil {
+		return nil, errPrivateNeedsCredential
+	}
 	token := ""
 	for attempt := 0; attempt < 2; attempt++ {
 		resp, err := c.do(ctx, method, u, token, hdrs)
@@ -681,12 +726,21 @@ type DigestResult struct {
 // ListTags returns the tag list of ref.Repository. It coalesces in-flight
 // lookups and caches results (TTLTagList) and failures (TTLFailure).
 func (c *Client) ListTags(ctx context.Context, ref Ref) (TagsResult, error) {
+	if c.priv != nil {
+		return TagsResult{}, errPrivateNeedsCredential
+	}
+	return c.listTags(ctx, ref, nil, "")
+}
+
+// listTags is ListTags with an optional private credential; keyPrefix keeps
+// credentialed cache entries apart per credential scope and version.
+func (c *Client) listTags(ctx context.Context, ref Ref, cred *Credential, keyPrefix string) (TagsResult, error) {
 	repo, err := c.checkRef(ref)
 	if err != nil {
 		return TagsResult{}, err
 	}
 	ref.Repository = repo
-	key := "tags|" + ref.Registry + "|" + repo
+	key := keyPrefix + "tags|" + ref.Registry + "|" + repo
 	if v, ok := c.cache.Get(key); ok {
 		r := v.(TagsResult)
 		r.FromCache = true
@@ -704,7 +758,7 @@ func (c *Client) ListTags(ctx context.Context, ref Ref) (TagsResult, error) {
 			return c.cachedTags(key)
 		}
 	}
-	res, err := c.fetchTags(ctx, ref, repo)
+	res, err := c.fetchTags(ctx, ref, repo, cred)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			c.cache.Set(key+"|err", err, TTLFailure)
@@ -733,6 +787,15 @@ func (c *Client) cachedTags(key string) (TagsResult, error) {
 // body or any layer (ADR 0006). Tag results are cached for TTLSameTag,
 // digest-pinned metadata for TTLDigest.
 func (c *Client) TagDigest(ctx context.Context, ref Ref) (DigestResult, error) {
+	if c.priv != nil {
+		return DigestResult{}, errPrivateNeedsCredential
+	}
+	return c.tagDigest(ctx, ref, nil, "")
+}
+
+// tagDigest is TagDigest with an optional private credential; keyPrefix
+// keeps credentialed cache entries apart per credential scope and version.
+func (c *Client) tagDigest(ctx context.Context, ref Ref, cred *Credential, keyPrefix string) (DigestResult, error) {
 	repo, err := c.checkRef(ref)
 	if err != nil {
 		return DigestResult{}, err
@@ -745,7 +808,7 @@ func (c *Client) TagDigest(ctx context.Context, ref Ref) (DigestResult, error) {
 	if name == "" {
 		return DigestResult{}, fmt.Errorf("%w: a tag or digest is required", ErrBadRef)
 	}
-	key := "digest|" + ref.Registry + "|" + repo + "|" + name
+	key := keyPrefix + "digest|" + ref.Registry + "|" + repo + "|" + name
 	ttl := TTLSameTag
 	if ref.Digest != "" {
 		ttl = TTLDigest
@@ -767,7 +830,7 @@ func (c *Client) TagDigest(ctx context.Context, ref Ref) (DigestResult, error) {
 			return c.cachedDigest(key)
 		}
 	}
-	res, err := c.fetchDigest(ctx, ref, repo)
+	res, err := c.fetchDigest(ctx, ref, repo, cred)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			c.cache.Set(key+"|err", err, TTLFailure)
@@ -839,7 +902,7 @@ func (c *Client) checkRef(ref Ref) (string, error) {
 
 // fetchTags lists the tags of a repository, following Link pagination
 // within the page and tag budgets.
-func (c *Client) fetchTags(ctx context.Context, ref Ref, repo string) (TagsResult, error) {
+func (c *Client) fetchTags(ctx context.Context, ref Ref, repo string, cred *Credential) (TagsResult, error) {
 	listPath := "/v2/" + repo + "/tags/list"
 	urlStr := ref.Registry + listPath
 	var (
@@ -851,9 +914,9 @@ func (c *Client) fetchTags(ctx context.Context, ref Ref, repo string) (TagsResul
 			incomplete = true
 			break
 		}
-		resp, err := c.doWithToken(ctx, ref, repo, http.MethodGet, urlStr, map[string]string{
+		resp, err := c.request(ctx, ref, repo, http.MethodGet, urlStr, map[string]string{
 			"Accept": "application/json",
-		})
+		}, cred)
 		if err != nil {
 			return TagsResult{}, err
 		}
@@ -907,15 +970,15 @@ func (c *Client) fetchTags(ctx context.Context, ref Ref, repo string) (TagsResul
 
 // fetchDigest resolves the digest of a tag or digest pin with a manifest
 // HEAD.
-func (c *Client) fetchDigest(ctx context.Context, ref Ref, repo string) (DigestResult, error) {
+func (c *Client) fetchDigest(ctx context.Context, ref Ref, repo string, cred *Credential) (DigestResult, error) {
 	name := ref.Tag
 	if ref.Digest != "" {
 		name = ref.Digest
 	}
 	u := ref.Registry + "/v2/" + repo + "/manifests/" + name
-	resp, err := c.doWithToken(ctx, ref, repo, http.MethodHead, u, map[string]string{
+	resp, err := c.request(ctx, ref, repo, http.MethodHead, u, map[string]string{
 		"Accept": strings.Join(manifestMediaTypes, ", "),
-	})
+	}, cred)
 	if err != nil {
 		return DigestResult{}, err
 	}
