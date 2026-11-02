@@ -206,6 +206,10 @@ type PveMutationRequest struct {
 	// Parameters are the action parameters; they must carry the step plan
 	// ({"steps":[{"method":...,"args":{...}}, ...], ...}).
 	Parameters json.RawMessage
+	// ExecutionID, if set, is the execution the caller prepared the run
+	// for (for example the holder of a reservation); a permit with another
+	// execution ID is refused before anything is dispatched.
+	ExecutionID string
 }
 
 // PveMutationResult reports the durable job of one mutation.
@@ -428,6 +432,10 @@ func (m *PveMutations) Run(ctx context.Context, req PveMutationRequest) (PveMuta
 	claim, err := m.Auth.AuthorizeProviderMutation(req.Digest, mutationOf(req, t))
 	if err != nil {
 		m.log().Warn("audit", "kind", "pve_mutation_denied", "remote", rm.RemoteID, "action", req.ActionID, "code", string(permit.CodeOf(err)))
+		return PveMutationResult{}, ErrPveMutationDenied
+	}
+	if req.ExecutionID != "" && claim.ExecutionID != req.ExecutionID {
+		m.log().Warn("audit", "kind", "pve_mutation_denied", "remote", rm.RemoteID, "action", req.ActionID, "code", "execution_mismatch")
 		return PveMutationResult{}, ErrPveMutationDenied
 	}
 	steps, err := approvedSteps(claim.Parameters)
