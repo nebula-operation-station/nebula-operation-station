@@ -13,9 +13,12 @@ func TestLeaseShortRuneBoundary(t *testing.T) {
 		{"abc", "abc"},
 		{"", ""},
 		{"abcdefgh", "abcdefgh"},
-		{"abcdefgäöü", "abcdefgä"},                    // multibyte rune at the cut
-		{"abcdefg\xc3", "abcdefg�"},                   // truncated rune
-		{"\xff\xfe\xfd\xfc\xfb\xfa\xf9\xf8\xf7", "�"}, // invalid run collapses
+		// multibyte rune at the cut
+		{"abcdefgäöü", "abcdefgä"},
+		// truncated rune
+		{"abcdefg\xc3", "abcdefg�"},
+		// invalid run collapses
+		{"\xff\xfe\xfd\xfc\xfb\xfa\xf9\xf8\xf7", "�"},
 	} {
 		got := leaseShort(tc.in)
 		if !utf8.ValidString(got) {
