@@ -91,6 +91,9 @@ type Service struct {
 	pveRead pveReadState
 	// pveMetrics caps live metrics targets and metrics requests per remote.
 	pveMetrics pveMetricsGate
+	// registry holds private registry administration, read authority and
+	// clients (ADR 0006, P1-32).
+	registry privateRegistryState
 	// reconcileInterval is the interval passed to Reconcile; ReconcileOnce
 	// uses it to compute the backoff between failed attempts (issue #70).
 	reconcileInterval time.Duration

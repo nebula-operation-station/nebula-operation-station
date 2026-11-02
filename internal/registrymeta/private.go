@@ -182,12 +182,26 @@ type Credential struct {
 	Secret []byte
 }
 
-func (c Credential) basic() (string, error) {
+// Validate checks the credential's shape without revealing it in errors.
+func (c Credential) Validate() error {
 	if c.Username == "" || len(c.Username) > MaxUsernameLen || strings.ContainsRune(c.Username, ':') || !printable(c.Username) {
-		return "", fmt.Errorf("%w: invalid user name", ErrCredentialRejected)
+		return fmt.Errorf("%w: invalid user name", ErrCredentialRejected)
 	}
 	if len(c.Secret) == 0 || len(c.Secret) > MaxSecretLen {
-		return "", fmt.Errorf("%w: invalid secret", ErrCredentialRejected)
+		return fmt.Errorf("%w: invalid secret", ErrCredentialRejected)
+	}
+	return nil
+}
+
+// ValidTag reports whether s is a valid registry tag.
+func ValidTag(s string) bool { return len(s) <= MaxTagLen && tagRe.MatchString(s) }
+
+// ValidDigest reports whether s is a valid content digest.
+func ValidDigest(s string) bool { return len(s) <= MaxImageLen && digestRe.MatchString(s) }
+
+func (c Credential) basic() (string, error) {
+	if err := c.Validate(); err != nil {
+		return "", err
 	}
 	buf := make([]byte, 0, len(c.Username)+1+len(c.Secret))
 	buf = append(buf, c.Username...)
