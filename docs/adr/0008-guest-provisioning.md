@@ -121,8 +121,12 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
   the floor, criticality and affected linked-host floors; unknown
   criticality HIGH) still applies, scored on the remote and node (and any
   recorded floor): the guest that provisioning creates does not exist yet,
-  so its criticality does not count as unknown. Setting criticality is the
-  operator's way to raise provisioning on a node or remote. A template
+  so its criticality does not count as unknown. Unset remote or node
+  criticality is unknown and therefore HIGH, and a PVE node that is also a
+  managed host defaults to HIGH (spec 11); out of the box provisioning is
+  HIGH until the operator records a normal or low criticality for the remote
+  and node, which brings it to MEDIUM. Criticality is the operator's knob in
+  both directions. A template
   prepared from a Local-trust entry does not raise provisioning either;
   only its preparation is HIGH. The allowlisted
   config set on the newly cloned guest is a step of `pve.guest.provision`
@@ -238,8 +242,9 @@ and alternatives; 4 and 5 were already settled in the draft.
    an opt-in.)
 2. **Risk of the provision action** (question: should a production-environment
    profile always be HIGH?): no. Base MEDIUM with no automatic raise from
-   ADR 0008; criticality raises it as in spec 11 "PVE action profiles and
-   risks" (see section 3 above).
+   ADR 0008. Criticality still applies as in spec 11 "PVE action profiles
+   and risks": unset criticality is HIGH, so the operator records the
+   remote's and node's criticality to get MEDIUM (see section 3 above).
 3. **VMID allocation** (next free VMID from the cluster, or operator-defined
    ranges per remote?): the next free VMID from the cluster.
 4. **Windows and other OS families:** out of scope for this track.
