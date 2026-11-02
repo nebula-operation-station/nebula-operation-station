@@ -376,3 +376,20 @@ func (l *lazyExecutor) CommitPVERepin(ctx context.Context, in *pb.CommitPVERepin
 	}
 	return nil, errNotConnected
 }
+
+// ListReadGrants and RevokeReadGrant back the lease pages (ADR 0007 E06).
+// executions.Service reaches them through a type assertion, so a missing
+// method here would silently disable the pages in the real binary.
+func (l *lazyExecutor) ListReadGrants(ctx context.Context, in *pb.ListReadGrantsRequest, opts ...grpc.CallOption) (*pb.ListReadGrantsResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ListReadGrants(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) RevokeReadGrant(ctx context.Context, in *pb.RevokeReadGrantRequest, opts ...grpc.CallOption) (*pb.RevokeReadGrantResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.RevokeReadGrant(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
