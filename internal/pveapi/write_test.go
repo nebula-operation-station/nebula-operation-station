@@ -393,7 +393,9 @@ func TestWriteBadRequestKeepsOnlySentParamNames(t *testing.T) {
 // TestWriterMethodSetIsAllowlist pins the Writer API to the ADR 0008
 // allowlist; a new write method must be added here deliberately.
 func TestWriterMethodSetIsAllowlist(t *testing.T) {
-	want := []string{"CloneVM", "ConvertToTemplate", "DownloadURL", "ResizeDisk", "SetConfig", "StartVM", "TaskStatus"}
+	// CreateImageVM: ADR 0008 section 2, "create a VM from the imported disk
+	// with a cloud-init drive and agent=1" (PV-03).
+	want := []string{"CloneVM", "ConvertToTemplate", "CreateImageVM", "DownloadURL", "ResizeDisk", "SetConfig", "StartVM", "TaskStatus"}
 	typ := reflect.TypeFor[*Writer]()
 	var got []string
 	for i := range typ.NumMethod() {
