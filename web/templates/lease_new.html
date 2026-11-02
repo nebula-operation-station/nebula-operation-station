@@ -1,0 +1,95 @@
+{{define "content"}}
+{{$d := .LeaseNew}}
+{{if $d.Preview}}
+{{$p := $d.Preview}}
+<h1>Approve read lease</h1>
+<section class="panel" aria-label="Read lease preview">
+  <p class="hint">This is the complete read lease the executor will hold, exactly as it returned it. The host list is frozen:
+     hosts enrolled or tagged later never join it. Check every host and action before you approve.</p>
+  <dl class="schedule-meta">
+    <dt>Scope</dt><dd>{{$p.ScopeKind}}{{if $p.ScopeValue}}: {{$p.ScopeValue}}{{end}}</dd>
+    <dt>Digest</dt><dd class="mono" id="lease-digest">{{$p.Digest}}</dd>
+    <dt>Lease</dt><dd class="mono">{{$p.ID}}</dd>
+    <dt>Issuer</dt><dd class="mono">{{$p.Issuer}}</dd>
+    <dt>Created</dt><dd>{{timeTag $p.Created}}</dd>
+    <dt>Expires</dt><dd>{{timeTag $p.Expiry}}</dd>
+    <dt>Trigger</dt><dd>{{$p.Trigger}}</dd>
+    <dt>Rate profile</dt><dd>{{$p.RateProfile}}, at most {{$p.RunBudget}} runs per host per hour, each action at most every {{$d.MinInterval}}</dd>
+  </dl>
+  <h2>{{$d.ActionCount}} actions</h2>
+  <div class="table-wrap">
+  <table class="inventory" aria-label="Actions">
+    <thead><tr><th>Action</th><th>Version</th><th>Artifact SHA-256</th><th>Parameters hash</th></tr></thead>
+    <tbody>
+      {{range $p.Actions}}
+      <tr><td class="mono">{{.ActionID}}</td><td class="mono">{{.ModuleVersion}}</td><td class="mono">{{.ArtifactSHA256}}</td><td class="mono">{{.ParametersHash}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  <h2>{{$d.HostCount}} hosts</h2>
+  <div class="table-wrap">
+  <table class="inventory" aria-label="Hosts">
+    <thead><tr><th>Host</th><th>Host key</th><th>Credential</th><th>Credential version</th></tr></thead>
+    <tbody>
+      {{range $p.Targets}}
+      <tr class="lease-host"><td class="mono">{{.HostID}}</td><td class="mono">{{.HostKeyFingerprint}}</td><td class="mono">{{.CredentialRef}}</td><td class="mono">{{.CredentialVersion}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{if $p.Excluded}}
+  <h2>Not included</h2>
+  <ul>
+    {{range $p.Excluded}}<li><span class="mono">{{.HostID}}</span>: {{.Reason}}</li>{{end}}
+  </ul>
+  {{end}}
+  <div class="actions">
+    {{if $p.CLI}}
+    <p>This executor is in hardened mode. Approve the lease on the executor host; the command shows the complete lease first:</p>
+    <pre class="mono" id="lease-cli">{{$d.CLICommand}}</pre>
+    {{else}}
+    {{if not $p.ChallengeExpiry.IsZero}}<p class="hint">Approve before {{timeTag $p.ChallengeExpiry}}; after that, preview again.</p>{{end}}
+    <button type="button" class="button schedule-approve" data-id="{{$p.Digest}}" data-options="{{$d.Options}}" data-commit="/leases/commit">Approve with security key</button>
+    {{end}}
+    <a class="button button--small" href="/leases">Cancel</a>
+  </div>
+</section>
+{{else}}
+<h1>New read lease{{if $d.Refresh}} (refresh of {{$d.Refresh}}){{end}}</h1>
+<section class="panel" aria-label="New read lease">
+  <p class="hint">A read lease lets the executor run the chosen read-only actions on a frozen list of hosts until it expires or is
+     revoked. The next step shows every host and action the executor will hold; nothing is approved before that.
+     {{if $d.Refresh}}The lease you refresh stays until it expires or is revoked.{{end}}</p>
+  <form method="post" action="/leases/preview" class="form" data-fetch>
+    <fieldset>
+      <legend>Scope</legend>
+      <label class="choice"><input type="radio" name="scope" value="all"{{if eq $d.Kind "all"}} checked{{end}}> All managed hosts</label>
+      <label class="choice"><input type="radio" name="scope" value="tag"{{if eq $d.Kind "tag"}} checked{{end}}> Hosts with a tag (key=value)</label>
+      <label class="choice"><input type="radio" name="scope" value="environment"{{if eq $d.Kind "environment"}} checked{{end}}> Hosts of an environment</label>
+      <label>Tag or environment
+        <input type="text" name="value" value="{{$d.Value}}" maxlength="200" list="lease-scope-values" autocomplete="off"></label>
+      <datalist id="lease-scope-values">
+        {{range $d.ScopeOptions}}<option value="{{.}}">{{end}}
+      </datalist>
+    </fieldset>
+    <fieldset>
+      <legend>Actions (read-only)</legend>
+      {{range $d.Actions}}
+      <label class="choice"><input type="checkbox" name="action" value="{{.ID}}"{{if .Checked}} checked{{end}}> {{if .Title}}<strong>{{.Title}}</strong> {{end}}({{.ID}})
+        {{if .Description}}<span class="hint">{{.Description}}</span>{{end}}</label>
+      {{end}}
+    </fieldset>
+    <label>Lasts
+      <select name="days">
+        {{range $d.DayOptions}}<option value="{{.}}"{{if eq . $d.Days}} selected{{end}}>{{.}} days</option>{{end}}
+      </select></label>
+    <div class="actions">
+      <button type="submit" class="button">Preview</button>
+      <a class="button button--small" href="/leases">Cancel</a>
+    </div>
+  </form>
+</section>
+{{end}}
+<p id="message" class="message" role="status" aria-live="polite"></p>
+{{end}}

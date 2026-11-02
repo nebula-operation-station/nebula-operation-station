@@ -172,12 +172,21 @@ func TestChartDetailsPanelIsServerRendered(t *testing.T) {
 	}
 }
 
+// The chart has no mutation controls before phase 2: no forms, no inline
+// handlers, no method attributes. P1-35 adds read-only navigation
+// controls (fit, per-host details buttons); those are the only buttons
+// allowed in the chart section.
 func TestChartHasNoMutationControls(t *testing.T) {
 	body := getBody(t, patchChartHandler(t).Handler(), "/inventory/chart")
 	section := chartSection(t, body)
-	for _, bad := range []string{"<form", "<button", "onsubmit", "onclick", "method="} {
+	for _, bad := range []string{"<form", "onsubmit", "onclick", "method="} {
 		if strings.Contains(strings.ToLower(section), bad) {
 			t.Errorf("chart section contains a mutation control %q", bad)
+		}
+	}
+	for _, tag := range buttonTagRe.FindAllString(section, -1) {
+		if !strings.Contains(tag, `id="chart-fit"`) && !strings.Contains(tag, `class="chart__dpanel-btn"`) {
+			t.Errorf("chart section has a non-navigation button: %s", tag)
 		}
 	}
 }
