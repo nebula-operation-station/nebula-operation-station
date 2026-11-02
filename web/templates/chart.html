@@ -3,6 +3,7 @@
 <div class="toolbar">
   <h1>Inventory chart</h1>
   <div class="actions">
+    <button type="button" id="chart-fit" class="button button--secondary" hidden>Fit</button>
     <a class="button button--secondary" href="/inventory">Back to list</a>
   </div>
 </div>
@@ -67,6 +68,7 @@
             <a class="chart__name" href="/hosts/{{.ID}}" title="{{if .DisplayName}}{{.DisplayName}}{{else}}{{.ID}}{{end}}">{{if .DisplayName}}{{.DisplayName}}{{else}}{{.ID}}{{end}}</a>
           </span>
           <span class="chart__sub" title="{{.StateLabel}}{{if .OS}} · {{.OS}}{{end}}">{{.StateLabel}}{{if .OS}} · {{.OS}}{{end}}</span>
+          <button type="button" class="chart__dpanel-btn" hidden data-nos-dpanel-btn="{{.ID}}">Details</button>
           <span class="chart__patch">
             <span class="badge {{.PatchClass}}">{{.PatchText}}</span>
             {{if .Patch.Known}}
@@ -100,7 +102,7 @@
           {{end}}
         </summary>
         <div class="chart__children">
-          <aside class="chart__dpanel" aria-label="Details">
+          <aside class="chart__dpanel" data-nos-dpanel="{{.ID}}" tabindex="-1" aria-label="Details">
             <section class="chart__dpanel-sec">
               <h4 class="chart__dpanel-h">Config</h4>
               <dl class="chart__dpanel-kv">
@@ -162,6 +164,7 @@
     </li>
     {{end}}
   </ul>
+  <div class="dpanel-sheet" id="chart-sheet" hidden role="dialog" aria-modal="true" aria-label="Host details"></div>
 </section>
 {{else}}
 <section class="panel" aria-label="Inventory chart">
