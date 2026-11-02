@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/dockerhost"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/gpuhost"
 )
 
@@ -16,6 +17,9 @@ const (
 	// LineGPU is one NVIDIA GPU of the box's machine (pci.inventory +
 	// gpu.status).
 	LineGPU = "gpu"
+	// LineStats is the runtime stats line of a container box
+	// (docker.stats).
+	LineStats = "stats"
 )
 
 // chartLine is one optional extra line of an org-chart box (GPU, CVE,
@@ -45,8 +49,9 @@ type chartLine struct {
 // once per page (never once per host). A nil map means the source is not
 // available: its lines are hidden.
 type chartResults struct {
-	pci map[string]executions.LastResultRow
-	gpu map[string]executions.LastResultRow
+	pci   map[string]executions.LastResultRow
+	gpu   map[string]executions.LastResultRow
+	stats map[string]executions.LastResultRow
 }
 
 // loadChartResults reads the extra-line sources. A nil operations service
@@ -66,6 +71,7 @@ func (h *Handler) loadChartResults(ctx context.Context) chartResults {
 	}
 	r.pci = read("pci.inventory")
 	r.gpu = read("gpu.status")
+	r.stats = read("docker.stats")
 	return r
 }
 
@@ -179,6 +185,71 @@ func gpuLines(pciRow, gpuRow *executions.LastResultRow, now time.Time, staleAfte
 		lines = append(lines, l)
 	}
 	return lines
+}
+
+// containerStats is one host's parsed docker.stats snapshot, indexed by
+// full container ID. ok is false when the host has no usable snapshot:
+// the container stats lines are then hidden.
+type containerStats struct {
+	ok    bool
+	stale bool
+	byID  map[string]dockerhost.ContainerStats
+}
+
+// newContainerStats parses a host's stored docker.stats result.
+func newContainerStats(r *executions.LastResultRow, now time.Time, staleAfter time.Duration) containerStats {
+	if r == nil || len(r.Result) == 0 {
+		return containerStats{}
+	}
+	s, err := dockerhost.ParseStats(r.Result)
+	if err != nil || s.Phase != "done" || !s.Present {
+		return containerStats{}
+	}
+	cs := containerStats{ok: true, stale: isStale(r.FinishedAt, now, staleAfter), byID: make(map[string]dockerhost.ContainerStats, len(s.Containers))}
+	for _, c := range s.Containers {
+		cs.byID[c.FullID] = c
+	}
+	return cs
+}
+
+// statsLine builds the runtime stats line of one container box (ADR 0006
+// P1-34: CPU % and RAM usage as numbers). There is no line without a
+// usable docker.stats snapshot, nor for a container that does not run
+// (stopped containers have no stats, not zeros). A running container
+// missing from the snapshot (or without a full ID to match it by) is
+// "stats unknown"; an old snapshot "stale". The level follows the RAM
+// share of the container's limit; CPU % is per core and carries none.
+func statsLine(cs containerStats, c dockerhost.Container) []chartLine {
+	if !cs.ok || !c.Running() {
+		return nil
+	}
+	l := chartLine{Kind: LineStats, Label: "Stats"}
+	st, found := cs.byID[c.FullID]
+	switch {
+	case c.FullID == "" || !found:
+		l.Text = "stats unknown"
+		l.State = StateUnknown
+	case cs.stale:
+		l.Text = "stats stale"
+		l.State = StateStale
+	default:
+		cpu := "CPU ?"
+		if st.CPUPercent != nil {
+			cpu = "CPU " + indicatorText(*st.CPUPercent)
+		}
+		ram := "RAM ?"
+		if st.MemUsedBytes != nil && st.MemLimitBytes != nil {
+			ram = "RAM " + humanBytes(uint64(*st.MemUsedBytes)) + " / " + humanBytes(uint64(*st.MemLimitBytes))
+		}
+		l.Text = cpu + " · " + ram
+		if st.MemPercent != nil {
+			l.State = levelOf(*st.MemPercent)
+			l.Title = "RAM " + indicatorText(*st.MemPercent) + " of limit"
+		} else {
+			l.State = StateUnknown
+		}
+	}
+	return []chartLine{l}
 }
 
 // worstClass maps a worst state to the box border class: red for

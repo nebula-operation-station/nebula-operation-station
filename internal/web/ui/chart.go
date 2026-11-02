@@ -49,6 +49,9 @@ type chartContainer struct {
 	// ReleaseNotes are the notes for the stable version, rendered
 	// escaped.
 	ReleaseNotes string
+	// Lines are the optional extra lines (runtime stats, CVE counts);
+	// absent when the source has no usable result.
+	Lines []chartLine
 }
 
 // chartGroup is one column of container boxes: a Compose project (Name
@@ -396,10 +399,8 @@ func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins m
 		}
 		// The extra lines with a level (GPU, CVE, service check) count
 		// for the border too.
+		// The container lines join below, once the containers are built.
 		worst = worstState(append(lineStates(ch.Lines), worst)...)
-		ch.WorstClass = worstClass(worst)
-		// Problem hosts open by default, the rest collapsed.
-		ch.Expanded = ch.WorstClass != "chart__node--neutral"
 		// Read-only details side panel: config, snapshots, updates,
 		// backups. No controls that change anything.
 		os := v.OS
@@ -430,6 +431,7 @@ func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins m
 		if regRow, ok := registryTags[host.ID]; ok {
 			regByImage = parseRegistryHostResult(regRow.Result)
 		}
+		stats := newContainerStats(rowFor(res.stats, host.ID), now, indicatorStaleAfter)
 		if row, ok := b.docker[host.ID]; ok {
 			if list, err := dockerhost.ParseList(row.Result); err == nil {
 				// Compose projects keep first-seen order; the
@@ -444,7 +446,9 @@ func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins m
 						HealthClass: containerHealthClass(c.Health), Project: c.Project,
 						SameTagText: cu.SameTagText, SameTagClass: cu.SameTagClass,
 						StableText: cu.StableText, StableClass: cu.StableClass,
-						Note: cu.Note, ReleaseNotes: cu.ReleaseNotes}
+						Note: cu.Note, ReleaseNotes: cu.ReleaseNotes,
+						Lines: statsLine(stats, c)}
+					worst = worstState(append(lineStates(cv.Lines), worst)...)
 					if c.Project == "" {
 						standalone = append(standalone, cv)
 						continue
@@ -461,6 +465,9 @@ func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins m
 				}
 			}
 		}
+		ch.WorstClass = worstClass(worst)
+		// Problem hosts open by default, the rest collapsed.
+		ch.Expanded = ch.WorstClass != "chart__node--neutral"
 		out = append(out, ch)
 	}
 	return out

@@ -148,6 +148,7 @@
                 {{if .Note}}<span class="chart__note" title="{{.Note}}">{{.Note}}</span>{{end}}
                 {{if .ReleaseNotes}}<span class="chart__note chart__note--release" title="{{.ReleaseNotes}}">{{.ReleaseNotes}}</span>{{end}}
               </span>
+              {{template "chart_lines" .Lines}}
             </li>
             {{end}}
           </ul>

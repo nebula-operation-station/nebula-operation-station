@@ -33,6 +33,7 @@ func linesOptions(t *testing.T, extra map[string]map[string]executions.LastResul
 		updates: map[string]executions.HostUpdates{},
 		metrics: map[string]executions.LastResultRow{},
 		filesys: map[string]executions.LastResultRow{},
+		docker:  extra["docker.list"],
 		extra:   extra,
 	}
 	var log strings.Builder
