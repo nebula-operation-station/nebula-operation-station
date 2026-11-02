@@ -9,6 +9,7 @@ import (
 	"errors"
 	"sort"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -43,7 +44,8 @@ type ReadGrantView struct {
 	Created    time.Time
 	Expiry     time.Time
 	Revoked    time.Time
-	// State is "active", "expired", "revoked" or "invalid" (unparsable).
+	// State is "active", "expired", "revoked", "legacy" (read-schedule-v1,
+	// never on-demand read authority) or "invalid" (unparsable).
 	State  string
 	Legacy bool // read-schedule-v1 document; never active read authority
 }
@@ -96,6 +98,9 @@ func (s *Service) ReadGrants(ctx context.Context) ([]ReadGrantView, error) {
 // RevokeReadGrant revokes a read grant on the executor (no session or
 // assertion) and audits it, like RevokeSchedule.
 func (s *Service) RevokeReadGrant(ctx context.Context, user, id string) error {
+	if id == "" || len(id) > maxViewIDLen || !utf8.ValidString(id) {
+		return ErrReadGrantNotFound
+	}
 	exec, ok := s.exec.(readGrantExecutor)
 	if !ok {
 		return ErrReadGrantRevokeFailed
@@ -138,18 +143,33 @@ func decodeReadGrant(g *pb.ReadGrant, inv []inventory.Host, haveInv bool, now ti
 		ApprovedBy: g.GetApprovedBy(),
 		Created:    time.Unix(g.GetCreatedUnix(), 0),
 		Expiry:     time.Unix(g.GetExpiryUnix(), 0),
-		Revoked:    time.Unix(g.GetRevokedUnix(), 0),
 		Hosts:      []string{},
 		Actions:    []string{},
 	}
+	// The executor sends RevokedUnix 0 for a grant that is not revoked.
+	if r := g.GetRevokedUnix(); r != 0 {
+		v.Revoked = time.Unix(r, 0)
+	}
+	raw := g.GetCanonicalGrant()
+	if len(raw) == 0 || len(raw) > permit.MaxReadGrantDocSize || !utf8.Valid(raw) {
+		return invalidView(v)
+	}
 	var doc permit.ReadGrantDoc
-	dec := json.NewDecoder(bytes.NewReader(g.GetCanonicalGrant()))
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&doc); err != nil || (doc.Grant != schedgrant.ReadFormat && doc.Grant != schedgrant.Format) {
-		v.State = "invalid"
-		v.Hosts = nil
-		v.Actions = nil
-		return v
+	if err := dec.Decode(&doc); err != nil || (doc.Grant != schedgrant.ReadFormat && doc.Grant != schedgrant.Format) ||
+		len(doc.Targets) > permit.MaxReadGrantTargets || len(doc.Actions) > permit.MaxReadGrantActions {
+		return invalidView(v)
+	}
+	for _, t := range doc.Targets {
+		if t.HostID == "" || len(t.HostID) > maxViewIDLen {
+			return invalidView(v)
+		}
+	}
+	for _, a := range doc.Actions {
+		if a.ActionID == "" || len(a.ActionID) > maxViewIDLen {
+			return invalidView(v)
+		}
 	}
 	v.Legacy = doc.Grant == schedgrant.Format
 	seen := map[string]bool{}
@@ -167,11 +187,25 @@ func decodeReadGrant(g *pb.ReadGrant, inv []inventory.Host, haveInv bool, now ti
 	switch {
 	case !v.Revoked.IsZero():
 		v.State = "revoked"
-	case now.After(v.Expiry):
+	case !now.Before(v.Expiry):
 		v.State = "expired"
+	case v.Legacy:
+		// A legacy read-schedule-v1 grant is never on-demand read authority.
+		v.State = "legacy"
 	default:
 		v.State = "active"
 	}
+	return v
+}
+
+// maxViewIDLen bounds host and action IDs taken from the untrusted document.
+const maxViewIDLen = 256
+
+// invalidView marks a grant whose document could not be decoded safely.
+func invalidView(v ReadGrantView) ReadGrantView {
+	v.State = "invalid"
+	v.Hosts = nil
+	v.Actions = nil
 	return v
 }
 

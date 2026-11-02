@@ -116,7 +116,7 @@ func pbGrant(id string, created, expiry, revoked time.Time, doc []byte) *pb.Read
 	return &pb.ReadGrant{
 		GrantId: id, GrantDigest: "digest-" + id, CanonicalGrant: doc,
 		ApprovedBy: "alice", CreatedUnix: created.Unix(),
-		ExpiryUnix: expiry.Unix(), RevokedUnix: revoked.Unix(),
+		ExpiryUnix: expiry.Unix(), RevokedUnix: revokedUnix(revoked),
 	}
 }
 
@@ -159,7 +159,7 @@ func TestReadGrantsDecode(t *testing.T) {
 			name:    "legacy schedule",
 			doc:     grantDoc(t, schedgrant.Format, []string{"dev"}, now.Add(-time.Hour), now.Add(time.Hour), zero),
 			created: now.Add(-time.Hour), expiry: now.Add(time.Hour),
-			wantState: "active", wantScope: "environment", wantValue: "dev", wantHosts: []string{"dev"},
+			wantState: "legacy", wantScope: "environment", wantValue: "dev", wantHosts: []string{"dev"},
 			wantLegacy: true,
 		},
 		{
@@ -286,4 +286,44 @@ func sameStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// revokedUnix mirrors the executor: RevokedUnix is 0 when not revoked.
+func revokedUnix(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
+}
+
+// TestDecodeReadGrantExecutorEncoding pins what the real executor sends:
+// RevokedUnix 0 is "not revoked", expiry is exclusive, and oversized or
+// malformed documents are invalid.
+func TestDecodeReadGrantExecutorEncoding(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	var zero time.Time
+	doc := grantDoc(t, schedgrant.ReadFormat, []string{"web"}, now.Add(-time.Hour), now.Add(time.Hour), zero)
+	g := &pb.ReadGrant{GrantId: "g", CreatedUnix: now.Add(-time.Hour).Unix(), ExpiryUnix: now.Add(time.Hour).Unix(), RevokedUnix: 0, CanonicalGrant: doc}
+	if v := decodeReadGrant(g, nil, false, now); v.State != "active" || !v.Revoked.IsZero() {
+		t.Fatalf("RevokedUnix 0: state %q revoked %v, want active and zero", v.State, v.Revoked)
+	}
+	g.ExpiryUnix = now.Unix()
+	if v := decodeReadGrant(g, nil, false, now); v.State != "expired" {
+		t.Fatalf("at the expiry second: state %q, want expired", v.State)
+	}
+	g.ExpiryUnix = now.Add(time.Hour).Unix()
+	for name, raw := range map[string][]byte{
+		"oversize": append(append([]byte{}, doc...), make([]byte, permit.MaxReadGrantDocSize)...),
+		"bad utf8": {0xff, 0xfe},
+		"empty":    nil,
+	} {
+		g.CanonicalGrant = raw
+		if v := decodeReadGrant(g, nil, false, now); v.State != "invalid" || v.Hosts != nil {
+			t.Errorf("%s: state %q hosts %v, want invalid with no hosts", name, v.State, v.Hosts)
+		}
+	}
+	g.CanonicalGrant = grantDoc(t, schedgrant.ReadFormat, []string{""}, now.Add(-time.Hour), now.Add(time.Hour), zero)
+	if v := decodeReadGrant(g, nil, false, now); v.State != "invalid" {
+		t.Errorf("empty host id: state %q, want invalid", v.State)
+	}
 }
