@@ -1,4 +1,5 @@
 {{define "content"}}
+<link rel="stylesheet" href="/static/chart-indicators.css">
 <div class="toolbar">
   <h1>Inventory chart</h1>
   <div class="actions">
@@ -72,11 +73,28 @@
             {{else}}<span class="chart__listage chart__listage--unknown" title="patch state unknown (never checked)">list unknown</span>{{end}}
             <span class="chart__count">{{.ContainerCount}} containers</span>
           </span>
-          <span class="chart__bars" role="img" aria-label="CPU, RAM and disk usage not collected yet">
-            <span class="chart__bar"><span class="chart__bar__name">CPU</span><span class="chart__bar__track"><span class="chart__bar__fill"></span></span><span class="chart__bar__val">–</span></span>
-            <span class="chart__bar"><span class="chart__bar__name">RAM</span><span class="chart__bar__track"><span class="chart__bar__fill"></span></span><span class="chart__bar__val">–</span></span>
-            <span class="chart__bar"><span class="chart__bar__name">DISK</span><span class="chart__bar__track"><span class="chart__bar__fill"></span></span><span class="chart__bar__val">–</span></span>
+          <span class="chart__indicators">
+            {{range .Indicators}}
+            <span class="chart__ind-row chart__ind-row--{{.State}}">
+              <span class="chart__ind-name">{{.Label}}</span>
+              <span class="chart__ind-cur">{{.CurrentText}}</span>
+              <span class="chart__ind-avg" title="24-h average">{{.AvgText}}</span>
+              {{if .HasValue}}
+              <meter class="chart__ind-meter chart__ind-meter--{{.State}}" min="0" max="100" low="70" high="90" optimum="0" value="{{.MeterValue}}">{{.MeterValue}}%</meter>
+              {{end}}
+            </span>
+            {{end}}
           </span>
+          {{if .Filesystems}}
+          <div class="chart__fs">
+            <span class="chart__fs__trigger" tabindex="0" aria-label="Show filesystems">fs</span>
+            <ul class="chart__fs__list" role="list" aria-label="Filesystems">
+              {{range .Filesystems}}
+              <li class="chart__fs__item"><span class="chart__fs__mount">{{.Mount}}</span><span class="chart__fs__percent">{{.PercentText}}</span></li>
+              {{end}}
+            </ul>
+          </div>
+          {{end}}
         </summary>
         <div class="chart__children">
           <aside class="chart__dpanel" aria-label="Details">
