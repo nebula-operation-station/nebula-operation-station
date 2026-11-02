@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"sort"
 	"time"
 	"unicode/utf8"
@@ -15,8 +16,10 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/schedgrant"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui/invsort"
@@ -33,12 +36,16 @@ type ReadGrantView struct {
 	Digest string
 	// ScopeKind is how the frozen host list was selected: "all" (every
 	// host), "tag" (one tag's hosts), "environment" (one environment's
-	// hosts) or "hosts" (an explicit list matching no current selection).
+	// hosts), "hosts" (an explicit list matching no current selection) or
+	// "provider" (a provider grant scoped to the PVE remotes in Remotes).
 	ScopeKind  string
 	ScopeValue string // tag "key=value" or environment name; empty otherwise
 	// Hosts is the frozen, complete target list in invsort order.
 	Hosts   []string
 	Actions []string
+	// Remotes is the sorted PVE remote list of a provider grant; empty for
+	// SSH grants.
+	Remotes []string
 	// ApprovedBy and the times come from the executor's registry.
 	ApprovedBy string
 	Created    time.Time
@@ -151,39 +158,52 @@ func decodeReadGrant(g *pb.ReadGrant, inv []inventory.Host, haveInv bool, now ti
 		v.Revoked = time.Unix(r, 0)
 	}
 	raw := g.GetCanonicalGrant()
-	if len(raw) == 0 || len(raw) > permit.MaxReadGrantDocSize || !utf8.Valid(raw) {
+	if len(raw) == 0 || len(raw) > permit.MaxReadGrantDocSize || !utf8.Valid(raw) || rejectDuplicateMembers(raw) != nil {
 		return invalidView(v)
 	}
 	var doc permit.ReadGrantDoc
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&doc); err != nil || (doc.Grant != schedgrant.ReadFormat && doc.Grant != schedgrant.Format) ||
-		len(doc.Targets) > permit.MaxReadGrantTargets || len(doc.Actions) > permit.MaxReadGrantActions {
+	if err := dec.Decode(&doc); err != nil || dec.More() || !knownReadGrantFormat(doc.Grant) ||
+		len(doc.Targets) > permit.MaxReadGrantTargets || len(doc.Actions) > permit.MaxReadGrantActions ||
+		len(doc.ProviderTargets) > permit.MaxProviderTargets {
 		return invalidView(v)
 	}
-	for _, t := range doc.Targets {
-		if t.HostID == "" || len(t.HostID) > maxViewIDLen {
-			return invalidView(v)
-		}
-	}
-	for _, a := range doc.Actions {
-		if a.ActionID == "" || len(a.ActionID) > maxViewIDLen {
-			return invalidView(v)
-		}
-	}
-	v.Legacy = doc.Grant == schedgrant.Format
+	// Host, action and remote IDs are rendered, so each must be a valid
+	// identifier (bounded, ASCII) and listed once; anything else marks the
+	// whole document invalid rather than showing a silently repaired scope.
 	seen := map[string]bool{}
 	for _, t := range doc.Targets {
-		if !seen[t.HostID] {
-			seen[t.HostID] = true
-			v.Hosts = append(v.Hosts, t.HostID)
+		if !canonical.ValidHostID(t.HostID) || seen["t:"+t.HostID] {
+			return invalidView(v)
 		}
+		seen["t:"+t.HostID] = true
+		v.Hosts = append(v.Hosts, t.HostID)
 	}
-	sort.Slice(v.Hosts, func(i, j int) bool { return invsort.Less(v.Hosts[i], v.Hosts[j]) })
 	for _, a := range doc.Actions {
+		key := "a:" + a.ActionID + "@" + a.ModuleVersion
+		if !canonical.ValidActionID(a.ActionID) || seen[key] {
+			return invalidView(v)
+		}
+		seen[key] = true
 		v.Actions = append(v.Actions, a.ActionID)
 	}
-	v.ScopeKind, v.ScopeValue = scopeLabel(v.Hosts, inv, haveInv)
+	for _, p := range doc.ProviderTargets {
+		if !pvecontract.ValidRemoteID(p.RemoteID) || seen["p:"+p.RemoteID] {
+			return invalidView(v)
+		}
+		seen["p:"+p.RemoteID] = true
+		v.Remotes = append(v.Remotes, p.RemoteID)
+	}
+	v.Legacy = doc.Grant == schedgrant.Format
+	sort.Slice(v.Hosts, func(i, j int) bool { return invsort.Less(v.Hosts[i], v.Hosts[j]) })
+	sort.Strings(v.Remotes)
+	if len(v.Remotes) > 0 {
+		// A provider grant's scope is its PVE remotes, not SSH hosts.
+		v.ScopeKind = "provider"
+	} else {
+		v.ScopeKind, v.ScopeValue = scopeLabel(v.Hosts, inv, haveInv)
+	}
 	switch {
 	case !v.Revoked.IsZero():
 		v.State = "revoked"
@@ -198,14 +218,85 @@ func decodeReadGrant(g *pb.ReadGrant, inv []inventory.Host, haveInv bool, now ti
 	return v
 }
 
-// maxViewIDLen bounds host and action IDs taken from the untrusted document.
+// maxViewIDLen bounds a caller-supplied grant id before it is sent to the
+// executor or written to the audit log.
 const maxViewIDLen = 256
+
+// previousReadGrantFormat is the stored read-grant-v1 format the executor
+// still holds (permit keeps the constant unexported).
+const previousReadGrantFormat = "read-grant-v1"
+
+// knownReadGrantFormat reports whether format is one the executor's registry
+// can hold: read-grant-v2, the stored read-grant-v1, or a legacy
+// read-schedule-v1 document.
+func knownReadGrantFormat(format string) bool {
+	return format == schedgrant.ReadFormat || format == previousReadGrantFormat || format == schedgrant.Format
+}
+
+// maxViewJSONDepth bounds nesting while scanning the untrusted document.
+const maxViewJSONDepth = 16
+
+// rejectDuplicateMembers rejects a document that is not exactly one JSON
+// object or that repeats a member name in any object, so one document cannot
+// show one scope and carry another. It mirrors permit's unexported check.
+func rejectDuplicateMembers(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return errors.New("the top level must be an object")
+	}
+	if err := walkJSONValue(dec, tok, 1); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return errors.New("trailing data after the document")
+	}
+	return nil
+}
+
+// walkJSONValue consumes the rest of a value whose first token is first.
+func walkJSONValue(dec *json.Decoder, first json.Token, depth int) error {
+	d, ok := first.(json.Delim)
+	if !ok {
+		return nil
+	}
+	if depth > maxViewJSONDepth {
+		return errors.New("the document is nested too deep")
+	}
+	seen := map[string]bool{}
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if e, ok := tok.(json.Delim); ok && (e == '}' || e == ']') {
+			return nil
+		}
+		if d == '{' {
+			name, ok := tok.(string)
+			if !ok || seen[name] {
+				return errors.New("malformed object or duplicate member")
+			}
+			seen[name] = true
+			if tok, err = dec.Token(); err != nil {
+				return err
+			}
+		}
+		if err := walkJSONValue(dec, tok, depth+1); err != nil {
+			return err
+		}
+	}
+}
 
 // invalidView marks a grant whose document could not be decoded safely.
 func invalidView(v ReadGrantView) ReadGrantView {
 	v.State = "invalid"
 	v.Hosts = nil
 	v.Actions = nil
+	v.Remotes = nil
 	return v
 }
 
