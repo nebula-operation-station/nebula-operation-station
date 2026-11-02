@@ -1,6 +1,6 @@
 # ADR 0008: Guest provisioning from deploy profiles
 
-Status: proposed (draft by Claude for maintainer review), 2026-11-01
+Status: proposed (draft by Claude for maintainer review), 2026-11-01; open questions decided by the maintainer 2026-11-02
 
 ## Context
 
@@ -114,12 +114,16 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
 
   Each step stores its UPID before dispatch and reconciles on restart or
   lost response; nothing is ever redispatched blindly.
-- **Risk:** LOW, always (maintainer decision 2026-11-02, open question 2):
-  no automatic raise for production profiles, node or remote criticality,
-  PCI passthrough, over-commit or unknown criticality. The operator raises it
-  where wanted through the executor's risk policy (spec 10); the floor never
-  drops below what that policy declares. (Draft before: base MEDIUM, HIGH on
-  high or unknown criticality, passthrough or over-commit.)
+- **Risk:** base MEDIUM, never LOW (spec 11: LOW remains read-only), and
+  ADR 0008 adds no automatic raise of its own: a production profile, PCI
+  passthrough or over-commit does not raise it (maintainer decision
+  2026-11-02, open question 2). The general PVE rule of spec 11 still
+  applies: effective risk is the maximum of this floor and the
+  executor-owned remote/node criticality, and unknown criticality is HIGH.
+  Setting a node's or remote's criticality is the operator's way to raise
+  provisioning there. (Draft before: HIGH also on passthrough or
+  over-commit; the decision of 2026-11-02 first read "always LOW" and was
+  corrected the same day because LOW is reserved for read-only actions.)
 - **Failure:** a failed deployment leaves the guest for inspection. Deleting
   it is a separate HIGH action, never automatic.
 - **Access and password:** cloud-init `sshkeys` always contains the NOS
@@ -135,11 +139,12 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
 - **Host-key pin:** the guest's SSH host key is pinned in one of two ways:
   - Preferred: read `/etc/ssh/ssh_host_ed25519_key.pub` through the QEMU
     guest agent over the authenticated, pinned PVE channel, then enroll
-    without trust-on-first-use. This requires the guest agent in the image;
-    see the open questions.
+    without trust-on-first-use. This requires the guest agent in the image,
+    so it applies to images that already ship it (local catalog entries,
+    re-enrollment); see decision 1.
   - Fallback: the existing fingerprint review, shown on the deployment page.
-    This is the default path for vendor cloud images (decision on open
-    question 1); the bootstrap module then installs `qemu-guest-agent`.
+    This is the default path for vendor cloud images (decision 1); the
+    bootstrap module then installs `qemu-guest-agent`.
 - **Linking:** the inventory host is linked to the PVE guest (remote, node,
   VMID, generation), so the org chart shows it as enrolled.
 
@@ -215,17 +220,24 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
 
 ## Decisions on the open questions (maintainer, 2026-11-02)
 
-1. **Guest agent in cloud images:** (a). The first enrollment of a guest from
-   a vendor cloud image uses the fingerprint review; the bootstrap module
-   installs `qemu-guest-agent` afterwards. A snippet storage with `cicustom`
-   (b) may follow as an opt-in; a NOS-built image (c) is not planned.
-2. **Risk of the provision action:** always LOW, including production
-   profiles; the operator raises it through the risk policy where wanted
-   (section 3).
-3. **VMID allocation:** the next free VMID from the cluster.
+The questions were open in the draft of 2026-11-01; each entry keeps the
+question and the alternatives.
+
+1. **Guest agent in cloud images:** the vendor Ubuntu/Debian cloud images do
+   not ship `qemu-guest-agent`, and PVE's API cannot upload a cloud-init
+   vendor snippet. Decided: (a) fingerprint review for the first enrollment,
+   the bootstrap module installs the agent. (b) a snippet storage written
+   once by the operator and referenced with `cicustom` may follow as an
+   opt-in; (c) a NOS-prepared image is not planned. (Draft: (a) now, (b) as
+   an opt-in.)
+2. **Risk of the provision action** (question: should a production-environment
+   profile always be HIGH?): no. Base MEDIUM with no automatic raise from
+   ADR 0008; criticality raises it as in spec 11 (section 3).
+3. **VMID allocation** (next free VMID from the cluster, or operator-defined
+   ranges per remote?): the next free VMID from the cluster.
 4. **Windows and other OS families:** out of scope for this track.
-5. **LXC containers:** a follow-up with the same profile model; not in this
-   track.
+5. **LXC containers:** provisioning containers from `vztmpl` templates is a
+   follow-up with the same profile model; not in this track.
 
 ## Tickets (milestone `pve-provision`)
 
