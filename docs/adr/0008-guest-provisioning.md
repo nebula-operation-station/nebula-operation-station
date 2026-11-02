@@ -1,6 +1,6 @@
 # ADR 0008: Guest provisioning from deploy profiles
 
-Status: proposed (draft by Claude for maintainer review), 2026-11-01
+Status: proposed (draft by Claude for maintainer review), 2026-11-01; open questions decided by the maintainer 2026-11-02
 
 ## Context
 
@@ -114,10 +114,28 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
 
   Each step stores its UPID before dispatch and reconciles on restart or
   lost response; nothing is ever redispatched blindly.
-- **Risk:** base MEDIUM (creates, destroys nothing). HIGH when the node or
-  remote criticality is high, when PCI passthrough is requested, or when the
-  plan over-commits node RAM or storage. Unknown criticality is HIGH, as in
-  ADR 0006.
+- **Risk:** base MEDIUM, never LOW (spec 11: LOW remains read-only). ADR 0008
+  adds no automatic raise of its own: a production profile does not raise it,
+  and neither does any other provisioning-specific condition (decision 2).
+  The general rule of spec 11 ("PVE action profiles and risks": maximum of
+  the floor, criticality and affected linked-host floors; unknown
+  criticality HIGH) still applies, scored on the remote and node (and any
+  recorded floor): the guest that provisioning creates does not exist yet,
+  so its criticality does not count as unknown. Unset remote or node
+  criticality is unknown and therefore HIGH, and a PVE node that is also a
+  managed host defaults to HIGH (spec 11); out of the box provisioning is
+  HIGH until the operator records criticality LOW or MEDIUM (spec 12) for the remote
+  and the node in the executor registry and, when the node is also an
+  enrolled host, for that linked host (it counts as affected, because the
+  guest is created on it); then it is MEDIUM. Criticality is the operator's
+  knob in both directions. A template
+  prepared from a Local-trust entry does not raise provisioning either;
+  only its preparation is HIGH. The allowlisted
+  config set on the newly cloned guest is a step of `pve.guest.provision`
+  and covered by its floor, not a separate configuration-change action.
+  (Draft before: HIGH also on PCI passthrough or over-commit; the decision
+  of 2026-11-02 first read "always LOW" and was corrected the same day
+  because LOW is reserved for read-only actions.)
 - **Failure:** a failed deployment leaves the guest for inspection. Deleting
   it is a separate HIGH action, never automatic.
 - **Access and password:** cloud-init `sshkeys` always contains the NOS
@@ -131,11 +149,14 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
 - After first boot the executor enrolls the new guest as a managed host with
   the normal enrollment path.
 - **Host-key pin:** the guest's SSH host key is pinned in one of two ways:
-  - Preferred: read `/etc/ssh/ssh_host_ed25519_key.pub` through the QEMU
-    guest agent over the authenticated, pinned PVE channel, then enroll
-    without trust-on-first-use. This requires the guest agent in the image;
-    see the open questions.
-  - Fallback: the existing fingerprint review, shown on the deployment page.
+  - Agent read, when the image ships the QEMU guest agent (a local catalog
+    entry may ship it, or the opt-in `cicustom` snippet of decision 1
+    installs it): read `/etc/ssh/ssh_host_ed25519_key.pub` through the agent
+    over the authenticated, pinned PVE channel and enroll without
+    trust-on-first-use. The executor tries a bounded agent read first.
+  - Fingerprint review (default for vendor cloud images, decision 1): the
+    existing review, shown on the deployment page; the bootstrap module then
+    installs `qemu-guest-agent`.
 - **Linking:** the inventory host is linked to the PVE guest (remote, node,
   VMID, generation), so the org chart shows it as enrolled.
 
@@ -209,22 +230,25 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
   write methods are typed (clone, config set of named fields, resize, start,
   download-url, template) with no URL or raw-path input.
 
-## Open questions
+## Decisions on the open questions (maintainer, 2026-11-02)
 
-1. **Guest agent in cloud images:**
-   - The vendor Ubuntu/Debian cloud images do not ship
-     `qemu-guest-agent`, and PVE's API cannot upload a cloud-init vendor
-     snippet. Options:
-     - (a) Accept fingerprint review for the first enrollment and install
-       the agent via the bootstrap module.
-     - (b) Require a snippet storage, written once by the operator, and
-       reference it with `cicustom`.
-     - (c) Bake a NOS-prepared image.
-   - The draft prefers (a) now and (b) as an opt-in.
-2. **Risk of the provision action:** should a production-environment
-   profile always be HIGH?
-3. **VMID allocation:** next free VMID from the cluster, or operator-defined
-   ranges per remote?
+Questions 1–3 were open in the draft of 2026-11-01 and keep their question
+and alternatives; 4 and 5 were already settled in the draft.
+
+1. **Guest agent in cloud images:** the vendor Ubuntu/Debian cloud images do
+   not ship `qemu-guest-agent`, and PVE's API cannot upload a cloud-init
+   vendor snippet. Decided: (a) fingerprint review for the first enrollment,
+   the bootstrap module installs the agent. (b) a snippet storage written
+   once by the operator and referenced with `cicustom` may follow as an
+   opt-in; (c) a NOS-prepared image is not planned. (Draft: (a) now, (b) as
+   an opt-in.)
+2. **Risk of the provision action** (question: should a production-environment
+   profile always be HIGH?): no. Base MEDIUM with no automatic raise from
+   ADR 0008. Criticality still applies as in spec 11 "PVE action profiles
+   and risks": unset criticality is HIGH, so the operator records the
+   remote's and node's criticality to get MEDIUM (see section 3 above).
+3. **VMID allocation** (next free VMID from the cluster, or operator-defined
+   ranges per remote?): the next free VMID from the cluster.
 4. **Windows and other OS families:** out of scope for this track.
 5. **LXC containers:** provisioning containers from `vztmpl` templates is a
    natural follow-up with the same profile model; not in this track.
@@ -233,7 +257,7 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
 
 | Ticket | Scope | Depends on |
 | --- | --- | --- |
-| PV-00 | This ADR accepted; spec revision for spec 07/10/12 | — |
+| PV-00 | This ADR accepted; spec revision for spec 07/10/11/12 (spec 11: PVE action rows for `pve.guest.provision` MEDIUM and `pve.image.prepare` HIGH) | — |
 | PV-01 | Minimal phase-2 mutation foundation: action-token use, exact-target mutation permit, UPID persistence and reconciliation (executor, executordb, permit; protected) | PV-00 |
 | PV-02 | `pveapi` typed write methods: clone, allowlisted config set, resize, start, download-url, template conversion, task status; httptest only | PV-00 |
 | PV-03 | Signed image catalog and `pve.image.prepare` | PV-01, PV-02 |

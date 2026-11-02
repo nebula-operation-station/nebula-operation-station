@@ -1,0 +1,78 @@
+{{define "content"}}
+{{if .Lease}}
+{{$l := .Lease}}
+<h1>Read lease {{$l.Short}}</h1>
+<section class="panel" aria-label="Read lease">
+  <header>
+    <span class="mono">{{$l.Short}}</span>
+    <span class="badge {{$l.StateClass}}">{{$l.State}}</span>
+    {{if $l.Legacy}}<span class="badge badge--unknown">legacy read-schedule-v1</span>{{end}}
+  </header>
+  {{if $l.Legacy}}<p class="hint">legacy read-schedule-v1 - no on-demand read authority</p>{{end}}
+  <dl class="schedule-meta">
+    <dt>Scope</dt><dd>{{if $l.Scope}}{{$l.Scope}}{{else}}—{{end}}</dd>
+    <dt>Actions</dt><dd class="mono">{{if $l.Actions}}{{range $i, $a := $l.Actions}}{{if $i}}, {{end}}{{$a}}{{end}}{{else}}—{{end}}</dd>
+    {{if $l.Remotes}}<dt>Remotes</dt><dd class="mono">{{range $i, $r := $l.Remotes}}{{if $i}}, {{end}}{{$r}}{{end}}</dd>{{end}}
+    <dt>Digest</dt><dd class="mono">{{if $l.Digest}}{{$l.Digest}}{{else}}—{{end}}</dd>
+    <dt>Approved by</dt><dd>{{if $l.ApprovedBy}}{{$l.ApprovedBy}}{{else}}—{{end}}</dd>
+    <dt>Created</dt><dd>{{if $l.CreatedSet}}{{timeTag $l.Created}}{{else}}—{{end}}</dd>
+    <dt>Expires</dt><dd>{{if $l.ExpirySet}}{{timeTag $l.Expiry}}{{else}}—{{end}}</dd>
+    {{if $l.RevokedSet}}<dt>Revoked</dt><dd>{{timeTag $l.Revoked}}</dd>{{end}}
+  </dl>
+  {{if $l.Hosts}}
+  <details{{if $l.HostsOpen}} open{{end}}>
+    <summary>{{len $l.Hosts}} hosts</summary>
+    <ul class="mono">{{range $l.Hosts}}<li>{{.}}</li>{{end}}</ul>
+  </details>
+  {{else}}
+  <p class="hint">no host list</p>
+  {{end}}
+  {{if $l.Revocable}}
+  <div class="actions">
+    <form method="post" action="/leases/revoke" data-fetch>
+      <input type="hidden" name="id" value="{{$l.ID}}">
+      <button type="submit" class="button button--small button--danger">Revoke</button>
+    </form>
+  </div>
+  {{end}}
+</section>
+{{else}}
+{{$d := .Leases}}
+<h1>Read leases</h1>
+<section class="panel" aria-label="Read leases">
+  <p class="hint">A read lease is approved once and lets the executor read from its hosts until it expires or is revoked. It carries no write authority.</p>
+  {{if $d.Unavailable}}
+  <p>The read leases could not be listed.</p>
+  {{else if $d.Rows}}
+  <div class="table-wrap">
+  <table class="inventory">
+    <thead>
+      <tr>
+        <th>Lease</th>
+        <th>Scope</th>
+        <th>Actions</th>
+        <th>Hosts</th>
+        <th>Expires</th>
+        <th>State</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range $d.Rows}}
+      <tr>
+        <td class="mono">{{if .ID}}<a href="/leases/{{.ID}}">{{.Short}}</a>{{else}}—{{end}}</td>
+        <td>{{if .Scope}}{{.Scope}}{{else}}—{{end}}</td>
+        <td>{{.ActionCount}}</td>
+        <td>{{.HostCount}}</td>
+        <td>{{if .ExpirySet}}{{timeTag .Expiry}}{{else}}—{{end}}</td>
+        <td><span class="badge {{.StateClass}}">{{.State}}</span></td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p>No read leases.</p>
+  {{end}}
+</section>
+{{end}}
+{{end}}

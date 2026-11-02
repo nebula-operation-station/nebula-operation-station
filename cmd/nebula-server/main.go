@@ -353,6 +353,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		Operations:     ops,
 		Pins:           store,
 		Schedules:      ops,
+		Leases:         ops,
 		Runbooks:       rb,
 		DeployProfiles: deployProfiles,
 		Trust:          exec,

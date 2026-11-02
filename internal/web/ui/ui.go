@@ -103,6 +103,9 @@ type Options struct {
 	Pins PinStore
 	// Schedules manages scheduled read-only checks. Nil hides them.
 	Schedules Schedules
+	// Leases lists and revokes read grants (ADR 0007 E06). Nil hides the
+	// read lease pages.
+	Leases Leases
 	// Runbooks stores runbooks. Nil leaves the runbooks page empty.
 	Runbooks Runbooks
 	// DeployProfiles stores deploy profiles (ADR 0008 section 1). Nil
@@ -177,6 +180,7 @@ type Handler struct {
 	operations     Operations
 	pins           PinStore
 	schedules      Schedules
+	leases         Leases
 	runbooks       Runbooks
 	deployProfiles DeployProfiles
 	trust          ArtifactTrust
@@ -254,6 +258,7 @@ func New(o Options) (*Handler, error) {
 		operations:     o.Operations,
 		pins:           o.Pins,
 		schedules:      o.Schedules,
+		leases:         o.Leases,
 		runbooks:       o.Runbooks,
 		deployProfiles: o.DeployProfiles,
 		trust:          o.Trust,
@@ -331,6 +336,8 @@ var pageFiles = map[string]string{
 	"operation_new":       "operation_new.html",
 	"operation":           "operation.html",
 	"schedules":           "schedules.html",
+	"leases":              "leases.html",
+	"lease":               "leases.html",
 	"runbooks":            "runbooks.html",
 	"runbook":             "runbook.html",
 	"runbook_edit":        "runbook_edit.html",
@@ -395,6 +402,12 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("POST /schedules/create", h.handleScheduleCreate)
 	mux.HandleFunc("POST /schedules/approve", h.handleScheduleApprove)
 	mux.HandleFunc("POST /schedules/revoke", h.handleScheduleRevoke)
+	// Read leases (ADR 0007 E06, part 2). The revoke form is posted
+	// with fetch (data-fetch, formpost.js) and origin-checked by the
+	// middleware like the other state-changing routes.
+	mux.HandleFunc("GET /leases", h.handleLeases)
+	mux.HandleFunc("GET /leases/{id}", h.handleLease)
+	mux.HandleFunc("POST /leases/revoke", h.handleLeaseRevoke)
 	// Runbooks (M7-2).
 	mux.HandleFunc("GET /runbooks", h.handleRunbooks)
 	mux.HandleFunc("GET /runbooks/new", h.handleRunbookEdit)
@@ -547,6 +560,10 @@ type pageData struct {
 	EnrollEnabled bool
 	// Schedules is the data of the scheduled-checks page.
 	Schedules *schedulesData
+	// Leases is the data of the read lease list page.
+	Leases *leasesData
+	// Lease is the data of a read lease detail page.
+	Lease *leaseDetail
 	// Runbooks is the data of the runbook pages.
 	Runbooks *runbooksData
 	// DeployProfiles is the data of the deploy profile pages.
