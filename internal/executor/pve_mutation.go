@@ -66,6 +66,15 @@ var (
 	// ErrPveMutationDenied is returned when no approved permit covers the
 	// exact mutation, or the claim was voided by lock or revocation.
 	ErrPveMutationDenied = errors.New("executor: no approved permit covers this pve mutation")
+	// ErrPveMutationAlreadyRun is returned, together with
+	// ErrPveMutationDenied, when the permit was already used by another
+	// run of the same execution (which may be dispatching right now).
+	ErrPveMutationAlreadyRun = errors.New("executor: pve mutation permit already used")
+	// ErrPvePermitFinal is wrapped with ErrPveMutationDenied when the
+	// permit can never authorize this run (gone, expired, in another state,
+	// its rollout ended, or the approved plan no longer matches). Every
+	// other denial may be transient and leaves the approval usable.
+	ErrPvePermitFinal = errors.New("executor: pve mutation permit can never authorize this run")
 	// ErrPveMutationPlan is returned for approved parameters without a
 	// valid step list.
 	ErrPveMutationPlan = errors.New("executor: pve mutation has no valid step plan")
@@ -73,6 +82,10 @@ var (
 	// remote but its UPID is not known; the step is reconciling, never
 	// redispatched.
 	ErrPveDispatchUncertain = errors.New("executor: pve mutation step outcome is uncertain; reconciling")
+	// ErrPveTaskIDAmbiguous is returned by a PveJobTaskIDs when the task
+	// ID a stored step's task must carry cannot be determined
+	// unambiguously; the step is then never matched to a listed task.
+	ErrPveTaskIDAmbiguous = errors.New("executor: pve step task id is ambiguous")
 	// ErrPveStepFailed is returned when a step was refused or its task did
 	// not finish with OK. Later steps are not dispatched.
 	ErrPveStepFailed = errors.New("executor: pve mutation step failed")
@@ -140,6 +153,26 @@ type PveMutationClient interface {
 	TargetState(ctx context.Context, rm executordb.PveRemote, kind, node string, vmid uint64, read pveapi.TokenSupplier) (liveNode, configDigest string, err error)
 }
 
+// PveStepTaskIDer may be implemented by a PveMutationClient. TaskID returns
+// the ID field (the VMID or storage) the PVE task of step carries. While
+// the step runs, the engine then accepts and identifies only tasks with
+// that ID, also for a node-level job.
+type PveStepTaskIDer interface {
+	TaskID(step PveMutationStep) (string, bool)
+}
+
+// PveJobTaskIDs resolves, from durable state, the ID field the PVE task of
+// a stored step must carry. Reconciliation after a restart has only the
+// stored job, not the step's arguments; for a node-level job (which binds
+// no guest) this narrows the match to the guest the step acts on. ok false
+// means the resolver does not narrow this job. An error wrapping
+// ErrPveJobStore leaves the step for the next pass; any other error (such
+// as ErrPveTaskIDAmbiguous) means the ID cannot be determined
+// unambiguously, so no listed task is ever adopted for the step.
+type PveJobTaskIDs interface {
+	JobTaskID(job executordb.PveJob) (id string, ok bool, err error)
+}
+
 // pveSecrets is the part of the vault the engine needs.
 type pveSecrets interface {
 	State() (vault.State, error)
@@ -160,6 +193,10 @@ type PveMutations struct {
 	MaxWait time.Duration
 	// Log receives non-secret audit events. Default: discarded.
 	Log *slog.Logger
+	// TaskIDs narrows the identification of lost node-level steps from
+	// durable state (PveProvisioner implements it). Provisioning steps are
+	// never identified without it.
+	TaskIDs PveJobTaskIDs
 
 	// inflight counts the Run calls per execution ID; Reconcile leaves
 	// their steps alone, so a step being dispatched right now is never
@@ -185,6 +222,14 @@ func (m *PveMutations) end(executionID string) {
 	}
 }
 
+// inflight returns the number of runs (Run or Provision) of executionID
+// in progress.
+func (m *PveMutations) inflightRuns(executionID string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.inflight[executionID]
+}
+
 func (m *PveMutations) running(executionID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -206,6 +251,10 @@ type PveMutationRequest struct {
 	// Parameters are the action parameters; they must carry the step plan
 	// ({"steps":[{"method":...,"args":{...}}, ...], ...}).
 	Parameters json.RawMessage
+	// ExecutionID, if set, is the execution the caller prepared the run
+	// for (for example the holder of a reservation); a permit with another
+	// execution ID is refused before anything is dispatched.
+	ExecutionID string
 }
 
 // PveMutationResult reports the durable job of one mutation.
@@ -406,6 +455,21 @@ func requestDigest(node string, step PveMutationStep) (string, error) {
 	return c, nil
 }
 
+// permitDenialFinal reports whether a permit denial code means the permit
+// can never authorize the run. Unknown codes are not final: keeping state
+// (a VMID reservation) until the proposal expires is the safe direction.
+func permitDenialFinal(c permit.Code) bool {
+	switch c {
+	case permit.CodeNotFound, permit.CodeWrongState, permit.CodeExpired,
+		permit.CodeRolloutStopped, permit.CodeRolloutAborted, permit.CodeGateInvalid, permit.CodeStagePlan,
+		permit.CodeInvalidRequest, permit.CodeTypedCountMismatch, permit.CodeTargetNotPermitted,
+		permit.CodeArtifactMismatch, permit.CodeParametersMismatch, permit.CodeActionMismatch,
+		permit.CodeCredentialMismatch:
+		return true
+	}
+	return false
+}
+
 // Run executes one approved mutation. Before anything is sent it rebuilds
 // the exact target from the registry and a live read and consumes the
 // permit for it. For each step it then re-checks the claim (lock,
@@ -428,6 +492,16 @@ func (m *PveMutations) Run(ctx context.Context, req PveMutationRequest) (PveMuta
 	claim, err := m.Auth.AuthorizeProviderMutation(req.Digest, mutationOf(req, t))
 	if err != nil {
 		m.log().Warn("audit", "kind", "pve_mutation_denied", "remote", rm.RemoteID, "action", req.ActionID, "code", string(permit.CodeOf(err)))
+		if permit.CodeOf(err) == permit.CodeHostAlreadyRun {
+			return PveMutationResult{}, fmt.Errorf("%w: %w", ErrPveMutationDenied, ErrPveMutationAlreadyRun)
+		}
+		if permitDenialFinal(permit.CodeOf(err)) {
+			return PveMutationResult{}, fmt.Errorf("%w: %w", ErrPveMutationDenied, ErrPvePermitFinal)
+		}
+		return PveMutationResult{}, ErrPveMutationDenied
+	}
+	if req.ExecutionID != "" && claim.ExecutionID != req.ExecutionID {
+		m.log().Warn("audit", "kind", "pve_mutation_denied", "remote", rm.RemoteID, "action", req.ActionID, "code", "execution_mismatch")
 		return PveMutationResult{}, ErrPveMutationDenied
 	}
 	steps, err := approvedSteps(claim.Parameters)
@@ -441,7 +515,16 @@ func (m *PveMutations) Run(ctx context.Context, req PveMutationRequest) (PveMuta
 	for i, step := range steps {
 		n := i + 1
 		err := m.runStep(ctx, claim, t, digest, req.ActionID, n, step)
-		res.Steps, _ = m.DB.PveJobSteps(claim.ExecutionID)
+		recorded, serr := m.DB.PveJobSteps(claim.ExecutionID)
+		if serr != nil {
+			// What was recorded is unknown: stop and report a store
+			// failure; callers must not take the result as complete.
+			if err == nil {
+				err = ErrPveJobStore
+			}
+			return res, err
+		}
+		res.Steps = recorded
 		if err != nil {
 			return res, err
 		}
@@ -478,6 +561,16 @@ func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, 
 	if err != nil {
 		return err
 	}
+	// A node-level job does not bind a guest; a client that knows the task
+	// ID of the step (the guest or storage it names) narrows the match, so a
+	// returned task of another guest on the node is never taken for this
+	// step. A lost task is identified with narrowTaskID instead.
+	var wantID string
+	if ider, ok := m.Client.(PveStepTaskIDer); ok {
+		if id, ok := ider.TaskID(step); ok {
+			wantID = id
+		}
+	}
 	job := executordb.PveJob{
 		ExecutionID: claim.ExecutionID, Step: n, Digest: digest, Action: action, RemoteID: t.RemoteID,
 		TrustGeneration: t.TrustGeneration, Kind: t.Kind, Node: t.Node, VMID: t.VMID, RequestDigest: rd,
@@ -505,18 +598,18 @@ func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, 
 	}
 	if err != nil {
 		// Lost response: never retry, identify the task instead.
-		return m.reconcileLost(ctx, rm, job, readTok)
+		return m.reconcileLost(ctx, rm, job, readTok, &step)
 	}
 	u, ok := executordb.ParsePveUPID(upid)
-	if !ok || !taskMatches(u, job) {
+	if !ok || !taskMatches(u, job) || (wantID != "" && u.ID != wantID) {
 		// A malformed or foreign task ID cannot be observed as this
 		// step's task; treat it as lost.
-		return m.reconcileLost(ctx, rm, job, readTok)
+		return m.reconcileLost(ctx, rm, job, readTok, &step)
 	}
 	err = m.DB.RecordPveJobUPID(claim.ExecutionID, n, upid, u.Node)
 	if errors.Is(err, executordb.ErrPveUPIDRecorded) {
 		// The remote answered with another step's task: not ours.
-		return m.reconcileLost(ctx, rm, job, readTok)
+		return m.reconcileLost(ctx, rm, job, readTok, &step)
 	}
 	if err != nil {
 		_ = m.DB.MarkPveJobReconciling(claim.ExecutionID, n)
@@ -528,7 +621,7 @@ func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, 
 }
 
 // reconcileLost handles a step whose dispatch outcome is unknown.
-func (m *PveMutations) reconcileLost(ctx context.Context, rm executordb.PveRemote, job executordb.PveJob, read pveapi.TokenSupplier) error {
+func (m *PveMutations) reconcileLost(ctx context.Context, rm executordb.PveRemote, job executordb.PveJob, read pveapi.TokenSupplier, step *PveMutationStep) error {
 	if err := m.DB.MarkPveJobReconciling(job.ExecutionID, job.Step); err != nil {
 		return ErrPveJobStore
 	}
@@ -539,13 +632,49 @@ func (m *PveMutations) reconcileLost(ctx context.Context, rm executordb.PveRemot
 		return ErrPveJobStore
 	}
 	job = stored
-	if err := m.identify(ctx, rm, &job, read); err != nil {
+	if err := m.identify(ctx, rm, &job, read, step); err != nil {
 		return err
 	}
 	if job.UPID == "" {
 		return ErrPveDispatchUncertain
 	}
 	return m.await(ctx, rm, job, read)
+}
+
+// narrowTaskID returns the task ID a step's task must carry ("" for no
+// narrowing). The client derives it from the step's arguments during a
+// Run; TaskIDs derives it from durable state, also after a restart, and
+// both must agree. A provisioning step is never left unnarrowed: its job
+// is node-level, so without an ID a task of another guest made with the
+// same action token on the node could be taken for it.
+func (m *PveMutations) narrowTaskID(job executordb.PveJob, step *PveMutationStep) (string, error) {
+	var stepID string
+	if step != nil {
+		if ider, ok := m.Client.(PveStepTaskIDer); ok {
+			if id, ok := ider.TaskID(*step); ok {
+				stepID = id
+			}
+		}
+	}
+	if m.TaskIDs != nil {
+		id, ok, err := m.TaskIDs.JobTaskID(job)
+		if errors.Is(err, ErrPveJobStore) {
+			return "", ErrPveJobStore
+		}
+		if err != nil {
+			return "", ErrPveTaskIDAmbiguous
+		}
+		if ok {
+			if id == "" || (stepID != "" && id != stepID) {
+				return "", ErrPveTaskIDAmbiguous
+			}
+			return id, nil
+		}
+	}
+	if job.Action == PveGuestProvisionAction {
+		return "", ErrPveTaskIDAmbiguous
+	}
+	return stepID, nil
 }
 
 // taskMatches reports whether u can be the task of job: same node, the
@@ -564,8 +693,25 @@ func taskMatches(u executordb.PveUPID, job executordb.PveJob) bool {
 // unknown, and none marks it unknown only once the start window has
 // passed (until then it stays reconciling). Nothing is ever dispatched. A read error leaves the step
 // reconciling for the next pass.
-func (m *PveMutations) identify(ctx context.Context, rm executordb.PveRemote, job *executordb.PveJob, read pveapi.TokenSupplier) error {
+// step is the step's arguments when a Run has them (nil after a restart);
+// the candidate must also carry the task ID narrowTaskID derives. A task
+// ID that cannot be determined unambiguously matches no task.
+func (m *PveMutations) identify(ctx context.Context, rm executordb.PveRemote, job *executordb.PveJob, read pveapi.TokenSupplier, step *PveMutationStep) error {
 	since := job.CreatedAt.Add(-pveTaskMatchSkew)
+	wantID, err := m.narrowTaskID(*job, step)
+	if errors.Is(err, ErrPveJobStore) {
+		return ErrPveJobStore
+	}
+	if err != nil {
+		if m.now().Before(job.CreatedAt.Add(pveTaskMatchWindow + pveTaskMatchSkew)) {
+			return ErrPveDispatchUncertain
+		}
+		if err := m.DB.FinishPveJob(job.ExecutionID, job.Step, executordb.PveJobUnknown, ""); err != nil {
+			return ErrPveJobStore
+		}
+		m.log().Warn("audit", "kind", "pve_mutation_unknown", "remote", job.RemoteID, "execution", job.ExecutionID, "step", job.Step, "reason", "task id ambiguous")
+		return ErrPveDispatchUncertain
+	}
 	upids, err := m.Client.RecentTasks(ctx, rm, job.Node, since, read)
 	if err != nil {
 		return ErrPveDispatchUncertain
@@ -575,7 +721,7 @@ func (m *PveMutations) identify(ctx context.Context, rm executordb.PveRemote, jo
 	var match []string
 	for _, upid := range upids {
 		u, ok := executordb.ParsePveUPID(upid)
-		if !ok || !taskMatches(u, *job) || u.StartTime.Before(since) || u.StartTime.After(job.CreatedAt.Add(pveTaskMatchWindow)) {
+		if !ok || !taskMatches(u, *job) || (wantID != "" && u.ID != wantID) || u.StartTime.Before(since) || u.StartTime.After(job.CreatedAt.Add(pveTaskMatchWindow)) {
 			continue
 		}
 		used, err := m.DB.PveUPIDRecorded(upid)
@@ -588,6 +734,20 @@ func (m *PveMutations) identify(ctx context.Context, rm executordb.PveRemote, jo
 		}
 		if match = append(match, upid); len(match) > 1 {
 			break
+		}
+	}
+	// The narrowing was decided before the listing; a provisioning that
+	// started meanwhile (for example another clone of the same template)
+	// can make it ambiguous. Decide again now that the candidates are
+	// known: a changed answer adopts nothing.
+	if len(match) == 1 {
+		again, err := m.narrowTaskID(*job, step)
+		if errors.Is(err, ErrPveJobStore) {
+			return ErrPveJobStore
+		}
+		if err != nil || again != wantID {
+			m.log().Warn("audit", "kind", "pve_mutation_narrowing_changed", "remote", job.RemoteID, "execution", job.ExecutionID, "step", job.Step)
+			match = append(match, "")
 		}
 	}
 	if len(match) == 0 && m.now().Before(job.CreatedAt.Add(pveTaskMatchWindow+pveTaskMatchSkew)) {
@@ -724,7 +884,7 @@ func (m *PveMutations) Reconcile(ctx context.Context) error {
 					return ErrPveJobStore
 				}
 			}
-			if err := m.identify(ctx, rm, &job, read); errors.Is(err, ErrPveJobStore) {
+			if err := m.identify(ctx, rm, &job, read, nil); errors.Is(err, ErrPveJobStore) {
 				return err
 			}
 			if job.UPID == "" {
