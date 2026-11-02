@@ -154,6 +154,14 @@ func (t ProviderMutationTarget) canonicalTarget() (canonical.Target, error) {
 	}, nil
 }
 
+// RiskTarget returns the synthetic canonical target the authority binds
+// and hands to the risk policy for t. Its host ID and fingerprint are what
+// an executor criticality record must name to set the target's floor
+// (ADR 0006: executor-owned remote/node/guest criticality).
+func (t ProviderMutationTarget) RiskTarget() (canonical.Target, error) {
+	return t.canonicalTarget()
+}
+
 // ProviderMutation is one typed PVE mutation as the executor presents it,
 // both when proposing and again at dispatch time. Target and Parameters
 // are rebuilt from the executor's registry and live reads each time.
