@@ -50,6 +50,10 @@ type PveVMIDReservation struct {
 	// not expire and is released only explicitly, because the guest may
 	// exist even if the run's outcome is unknown.
 	Started bool `json:"started"`
+	// TemplateVMID is the template the provisioning clones, recorded when
+	// it starts. With VMID it is what reconciliation after a restart needs
+	// to narrow a lost step to this provisioning's tasks.
+	TemplateVMID uint64 `json:"template_vmid,omitempty"`
 }
 
 func (r PveVMIDReservation) live(now time.Time) bool {
@@ -67,10 +71,14 @@ type PveVMIDStore interface {
 	// VMIDHolder returns the reservation of vmid on remoteID that is still
 	// in force at now.
 	VMIDHolder(remoteID string, vmid uint64, now time.Time) (PveVMIDReservation, bool, error)
-	// StartVMID marks executionID's reservation as started.
-	StartVMID(remoteID string, vmid uint64, executionID string) error
+	// StartVMID marks executionID's reservation as started and records
+	// the template it clones.
+	StartVMID(remoteID string, vmid uint64, executionID string, templateVMID uint64) error
 	// ReleaseVMID drops executionID's reservation of vmid.
 	ReleaseVMID(remoteID string, vmid uint64, executionID string) error
+	// Reservations returns every reservation of remoteID still in force at
+	// now.
+	Reservations(remoteID string, now time.Time) ([]PveVMIDReservation, error)
 }
 
 // FilePveVMIDStore keeps VMID reservations in one JSON file, written
@@ -192,11 +200,31 @@ func (s *FilePveVMIDStore) VMIDHolder(remoteID string, vmid uint64, now time.Tim
 }
 
 // StartVMID implements PveVMIDStore.
-func (s *FilePveVMIDStore) StartVMID(remoteID string, vmid uint64, executionID string) error {
+func (s *FilePveVMIDStore) StartVMID(remoteID string, vmid uint64, executionID string, templateVMID uint64) error {
+	if !validVMID(templateVMID) || templateVMID == vmid {
+		return ErrPveMutationPlan
+	}
 	return s.update(remoteID, vmid, executionID, func(recs []PveVMIDReservation, i int) []PveVMIDReservation {
-		recs[i].Started = true
+		recs[i].Started, recs[i].TemplateVMID = true, templateVMID
 		return recs
 	})
+}
+
+// Reservations implements PveVMIDStore.
+func (s *FilePveVMIDStore) Reservations(remoteID string, now time.Time) ([]PveVMIDReservation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	recs, err := s.load()
+	if err != nil {
+		return nil, err
+	}
+	var out []PveVMIDReservation
+	for _, r := range recs {
+		if r.RemoteID == remoteID && r.live(now) {
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }
 
 // ReleaseVMID implements PveVMIDStore.

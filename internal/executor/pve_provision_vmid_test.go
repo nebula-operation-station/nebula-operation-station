@@ -71,10 +71,10 @@ func TestVMIDReservationExpiresUnlessStarted(t *testing.T) {
 	if _, err := s.ReserveVMID("lab", "exec-b", 301, nil, exp, vmidNow); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.StartVMID("lab", 301, "exec-b"); err != nil {
+	if err := s.StartVMID("lab", 301, "exec-b", 9000); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.StartVMID("lab", 301, "exec-a"); !errors.Is(err, ErrPveVMIDTaken) {
+	if err := s.StartVMID("lab", 301, "exec-a", 9000); !errors.Is(err, ErrPveVMIDTaken) {
 		t.Fatalf("start by a non-holder: %v", err)
 	}
 	later := vmidNow.Add(2 * time.Minute)
@@ -86,8 +86,20 @@ func TestVMIDReservationExpiresUnlessStarted(t *testing.T) {
 		t.Fatalf("started reservation expired: %v", err)
 	}
 	h, ok, err := s.VMIDHolder("lab", 301, later)
-	if err != nil || !ok || h.ExecutionID != "exec-b" || !h.Started {
+	if err != nil || !ok || h.ExecutionID != "exec-b" || !h.Started || h.TemplateVMID != 9000 {
 		t.Fatalf("holder = %+v %v %v", h, ok, err)
+	}
+	for _, tpl := range []uint64{0, 301} {
+		if err := s.StartVMID("lab", 301, "exec-b", tpl); err == nil {
+			t.Fatalf("template %d accepted", tpl)
+		}
+	}
+	recs, err := s.Reservations("lab", later)
+	if err != nil || len(recs) != 2 {
+		t.Fatalf("reservations at %v: %+v %v", later, recs, err)
+	}
+	if recs, _ := s.Reservations("other", later); len(recs) != 0 {
+		t.Fatalf("reservations of another remote: %+v", recs)
 	}
 	if err := s.ReleaseVMID("lab", 301, "exec-b"); err != nil {
 		t.Fatal(err)

@@ -194,7 +194,18 @@ func newProvisionEnv(t *testing.T, next permit.RiskPolicy) *provisionEnv {
 		autoKey: testAuthorizedKey(t, "nos-automation"), extraKey: testAuthorizedKey(t, "alice@laptop")}
 	e.prov = &PveProvisioner{Mutations: ie.m, Images: ie.imgs, Reader: reader, VMIDs: vmids, Passwords: ie.pe.vault,
 		AutomationKey: e.autoKey, Artifact: provArtifact, ModuleVersion: "1.0.0"}
+	ie.m.TaskIDs = e.prov
 	return e
+}
+
+// restartProvisioner simulates an executor restart: a new engine (no
+// in-memory state) wired to the same provisioner, stores and client.
+func (e *provisionEnv) restartProvisioner() {
+	e.t.Helper()
+	e.restart()
+	e.m.Client = e.pc
+	e.m.TaskIDs = e.prov
+	e.prov.Mutations = e.m
 }
 
 func (e *provisionEnv) request() PveProvisionRequest {
@@ -849,8 +860,7 @@ func TestProvisionUnidentifiedStepStaysOpenAndKeepsGuest(t *testing.T) {
 		t.Fatalf("config step %+v", res.Steps[1])
 	}
 	// Reconciliation after a restart observes, never dispatches.
-	e.restart()
-	e.m.Client = e.pc
+	e.restartProvisioner()
 	e.passMatchWindow()
 	if err := e.m.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
@@ -940,5 +950,219 @@ func TestProvisionRejectsInvalidRequests(t *testing.T) {
 	bad.AutomationKey = "not a key"
 	if _, err := bad.ProposalRequest(context.Background(), e.request(), nextProvExec(), canonical.RiskMedium, strings.Repeat("c", 64), time.Now().Add(time.Hour)); err == nil {
 		t.Fatal("no automation key accepted")
+	}
+}
+
+// loseStep makes the response of step lost (1-based) of the next
+// provisioning run get lost; the node then lists listed(upid).
+func (e *provisionEnv) loseStep(lost int, listed func(upid string) []string) {
+	base := len(e.pc.provisionSteps())
+	e.pc.onStep = func(n int, step PveMutationStep, upid string) (string, error) {
+		if n-base == lost {
+			e.client.fakeMutClient.mu.Lock()
+			e.client.fakeMutClient.recent = listed(upid)
+			e.client.fakeMutClient.mu.Unlock()
+			return "", errors.New("connection reset")
+		}
+		return upid, nil
+	}
+}
+
+func (e *provisionEnv) listTasks(upids ...string) {
+	e.client.fakeMutClient.mu.Lock()
+	e.client.fakeMutClient.recent = upids
+	e.client.fakeMutClient.mu.Unlock()
+}
+
+func TestProvisionRestartReconcileNeverAdoptsAnotherGuestsTask(t *testing.T) {
+	e := newProvisionEnv(t, fixedRisk{})
+	approved := e.approve(e.request())
+	e.loseStep(2, func(string) []string { return nil })
+	res, err := e.prov.Provision(context.Background(), approved)
+	if !errors.Is(err, ErrPveDispatchUncertain) || !res.GuestKept || res.Steps[1].State != executordb.PveJobReconciling {
+		t.Fatalf("err = %v result %+v", err, res)
+	}
+	// The step is open, so the reservation stays: it is what narrows the
+	// step after the restart.
+	if h, ok, _ := e.vmids.VMIDHolder(mutRemote, approved.VMID, time.Now()); !ok || !h.Started || h.TemplateVMID != 9000 {
+		t.Fatalf("reservation %+v %v", h, ok)
+	}
+
+	// After the restart the node lists only a qmconfig task of another
+	// guest (105), started by the same action token inside the window.
+	e.restartProvisioner()
+	foreign := testTaskUPID("pve1", time.Now(), "qmconfig", "105", mutActionUser, 900)
+	e.listTasks(foreign)
+	if err := e.m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	steps, _ := e.pe.db.PveJobSteps(res.ExecutionID)
+	if steps[1].UPID != "" || steps[1].State != executordb.PveJobReconciling {
+		t.Fatalf("foreign task adopted at restart: %+v", steps[1])
+	}
+	e.passMatchWindow()
+	if err := e.m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	steps, _ = e.pe.db.PveJobSteps(res.ExecutionID)
+	if steps[1].UPID != "" || steps[1].State != executordb.PveJobUnknown {
+		t.Fatalf("foreign task adopted at restart: %+v", steps[1])
+	}
+	if len(e.pc.provisionSteps()) != 2 {
+		t.Fatalf("reconcile dispatched: %v", e.pc.methods())
+	}
+}
+
+func TestProvisionRestartReconcileAdoptsOnlyTheGuestsOwnTask(t *testing.T) {
+	e := newProvisionEnv(t, fixedRisk{})
+	approved := e.approve(e.request())
+	e.loseStep(2, func(string) []string { return nil })
+	res, err := e.prov.Provision(context.Background(), approved)
+	if !errors.Is(err, ErrPveDispatchUncertain) {
+		t.Fatalf("err = %v", err)
+	}
+	e.restartProvisioner()
+	foreign := testTaskUPID("pve1", time.Now(), "qmconfig", "105", mutActionUser, 900)
+	own := testTaskUPID("pve1", time.Now(), "qmconfig", fmt.Sprint(approved.VMID), mutActionUser, 901)
+	e.listTasks(foreign, own)
+	if err := e.m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	steps, _ := e.pe.db.PveJobSteps(res.ExecutionID)
+	if steps[1].UPID != own || steps[1].State != executordb.PveJobSucceeded {
+		t.Fatalf("own task not identified: %+v", steps[1])
+	}
+	// The job settled (no step open, clone succeeded): the reservation is
+	// released once the guest is in the live list.
+	e.reader.addGuest("pve1", int(approved.VMID), 4*gib)
+	if n, err := e.prov.ReleaseSettledVMIDs(context.Background(), mutRemote); err != nil || n != 1 {
+		t.Fatalf("released %d %v", n, err)
+	}
+}
+
+func TestProvisionRestartWithoutTaskIDSourceFailsClosed(t *testing.T) {
+	e := newProvisionEnv(t, fixedRisk{})
+	approved := e.approve(e.request())
+	e.loseStep(2, func(string) []string { return nil })
+	res, _ := e.prov.Provision(context.Background(), approved)
+	// An engine without the provisioner's task ID source cannot narrow the
+	// node-level step, so even a task with the right ID is not adopted.
+	e.restart()
+	e.m.Client = e.pc
+	e.listTasks(testTaskUPID("pve1", time.Now(), "qmconfig", fmt.Sprint(approved.VMID), mutActionUser, 901))
+	e.passMatchWindow()
+	if err := e.m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	steps, _ := e.pe.db.PveJobSteps(res.ExecutionID)
+	if steps[1].UPID != "" || steps[1].State != executordb.PveJobUnknown {
+		t.Fatalf("unnarrowed step identified: %+v", steps[1])
+	}
+	// A provisioner on an engine without it refuses to run at all.
+	e.prov.Mutations = e.m
+	if _, err := e.prov.Provision(context.Background(), e.request()); err == nil || errors.Is(err, ErrPveProvisionInvalid) {
+		t.Fatalf("unwired provisioner: %v", err)
+	}
+}
+
+func TestProvisionLostCloneIsAmbiguousWhileAnotherCloneOfTheTemplateIsUnknown(t *testing.T) {
+	e := newProvisionEnv(t, fixedRisk{})
+	a := e.approve(e.request())
+	b := e.approve(e.request())
+	// A's clone response is lost and its task is not listed in time: A's
+	// clone ends unknown and A keeps its reservation.
+	var cloneA string
+	e.loseStep(1, func(upid string) []string { cloneA = upid; return nil })
+	ra, err := e.prov.Provision(context.Background(), a)
+	if !errors.Is(err, ErrPveDispatchUncertain) {
+		t.Fatalf("a: %v", err)
+	}
+	e.passMatchWindow()
+	if err := e.m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if steps, _ := e.pe.db.PveJobSteps(ra.ExecutionID); steps[0].State != executordb.PveJobUnknown {
+		t.Fatalf("a clone %+v", steps[0])
+	}
+	if h, ok, _ := e.vmids.VMIDHolder(mutRemote, a.VMID, time.Now()); !ok || h.ExecutionID != a.ExecutionID {
+		t.Fatal("unknown clone released its reservation")
+	}
+	// B clones the same template; its response is lost and the node lists
+	// only A's clone task (same template ID, same token). B must not adopt it.
+	e.m.Now = nil
+	e.loseStep(1, func(string) []string { return []string{cloneA} })
+	rb, err := e.prov.Provision(context.Background(), b)
+	if !errors.Is(err, ErrPveDispatchUncertain) {
+		t.Fatalf("b: %v", err)
+	}
+	if rb.Steps[0].UPID == cloneA {
+		t.Fatal("b adopted a's clone task")
+	}
+	e.passMatchWindow()
+	if err := e.m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	steps, _ := e.pe.db.PveJobSteps(rb.ExecutionID)
+	if steps[0].UPID != "" || steps[0].State != executordb.PveJobUnknown {
+		t.Fatalf("b clone %+v", steps[0])
+	}
+}
+
+func TestProvisionFailedCloneReleasesAndUnknownCloneKeepsReservation(t *testing.T) {
+	e := newProvisionEnv(t, fixedRisk{})
+	approved := e.approve(e.request())
+	e.client.fakeMutClient.mu.Lock()
+	e.client.fakeMutClient.status = func(upid string) (PveTaskStatus, error) {
+		return PveTaskStatus{ExitStatus: "clone failed: storage error"}, nil
+	}
+	e.client.fakeMutClient.mu.Unlock()
+	res, err := e.prov.Provision(context.Background(), approved)
+	if !errors.Is(err, ErrPveStepFailed) || res.GuestKept || len(res.Steps) != 1 || res.Steps[0].State != executordb.PveJobFailed {
+		t.Fatalf("err = %v result %+v", err, res)
+	}
+	if _, ok, _ := e.vmids.VMIDHolder(mutRemote, approved.VMID, time.Now()); ok {
+		t.Fatal("definitively failed clone leaks its reservation")
+	}
+
+	// An unknown clone stays reserved until its guest is seen.
+	e.client.fakeMutClient.mu.Lock()
+	e.client.fakeMutClient.status = func(string) (PveTaskStatus, error) { return PveTaskStatus{ExitStatus: "OK"}, nil }
+	e.client.fakeMutClient.mu.Unlock()
+	approved = e.approve(e.request())
+	e.loseStep(1, func(string) []string { return nil })
+	res, err = e.prov.Provision(context.Background(), approved)
+	if !errors.Is(err, ErrPveDispatchUncertain) || !res.GuestKept {
+		t.Fatalf("err = %v result %+v", err, res)
+	}
+	e.passMatchWindow()
+	if err := e.m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := e.prov.ReleaseSettledVMIDs(context.Background(), mutRemote); err != nil || n != 0 {
+		t.Fatalf("unknown clone released: %d %v", n, err)
+	}
+	if _, ok, _ := e.vmids.VMIDHolder(mutRemote, approved.VMID, time.Now()); !ok {
+		t.Fatal("unknown clone lost its reservation")
+	}
+	e.reader.addGuest("pve1", int(approved.VMID), 4*gib)
+	if n, err := e.prov.ReleaseSettledVMIDs(context.Background(), mutRemote); err != nil || n != 1 {
+		t.Fatalf("seen guest not released: %d %v", n, err)
+	}
+}
+
+func TestProvisionJobStoreFailureKeepsReservation(t *testing.T) {
+	e := newProvisionEnv(t, fixedRisk{})
+	approved := e.approve(e.request())
+	e.pc.onStep = func(n int, step PveMutationStep, upid string) (string, error) {
+		// The clone reached PVE; then the job store becomes unreadable.
+		_ = e.pe.db.Close()
+		return upid, nil
+	}
+	res, err := e.prov.Provision(context.Background(), approved)
+	if err == nil || !res.GuestKept {
+		t.Fatalf("err = %v result %+v", err, res)
+	}
+	if h, ok, _ := e.vmids.VMIDHolder(mutRemote, approved.VMID, time.Now()); !ok || h.ExecutionID != approved.ExecutionID {
+		t.Fatal("reservation freed although the steps could not be read")
 	}
 }

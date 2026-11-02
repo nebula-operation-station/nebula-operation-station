@@ -197,6 +197,9 @@ type pveGuestPasswordVault interface {
 
 // PveProvisioner proposes and runs pve.guest.provision.
 type PveProvisioner struct {
+	// Mutations is the engine; its TaskIDs must be this provisioner, so a
+	// lost step is narrowed to this provisioning's guest also after a
+	// restart.
 	Mutations *PveMutations
 	// Images binds the template record.
 	Images *PveImages
@@ -245,6 +248,9 @@ func (p *PveProvisioner) checkDeps() error {
 	}
 	if _, err := canonicalAuthorizedKey(p.AutomationKey); err != nil {
 		return errors.New("executor: pve provisioner: AutomationKey is not a valid public key")
+	}
+	if p.Mutations.TaskIDs != PveJobTaskIDs(p) {
+		return errors.New("executor: pve provisioner: Mutations.TaskIDs must be the provisioner")
 	}
 	return p.Mutations.checkDeps()
 }
@@ -764,6 +770,9 @@ func (p *PveProvisioner) ProposalRequest(ctx context.Context, req PveProvisionRe
 	if err != nil {
 		return PveProvisionProposal{}, err
 	}
+	// Best effort: reservations of settled provisionings are released
+	// first; one that cannot be checked stays (fail closed).
+	_, _ = p.releaseSettled(req.RemoteID, o.live)
 	vmid, err := p.VMIDs.ReserveVMID(req.RemoteID, executionID, req.VMID, withTemplate(o.live, req.Template.VMID), expiry, p.Mutations.now())
 	if err != nil {
 		return PveProvisionProposal{}, err
@@ -841,8 +850,12 @@ func (p *PveProvisioner) Provision(ctx context.Context, req PveProvisionRequest)
 		return res, err
 	}
 	// Started before the run: the guest may exist from the first dispatch
-	// on, so the reservation must not expire under it.
-	if err := p.VMIDs.StartVMID(req.RemoteID, req.VMID, req.ExecutionID); err != nil {
+	// on, so the reservation must not expire under it. It also records the
+	// template, so a lost step can be narrowed after a restart. The
+	// execution counts as running from here, so releaseSettled leaves it.
+	p.Mutations.begin(req.ExecutionID)
+	defer p.Mutations.end(req.ExecutionID)
+	if err := p.VMIDs.StartVMID(req.RemoteID, req.VMID, req.ExecutionID, req.Template.VMID); err != nil {
 		return res, ErrPveJobStore
 	}
 	run, runErr := p.Mutations.Run(ctx, mr)
@@ -850,23 +863,30 @@ func (p *PveProvisioner) Provision(ctx context.Context, req PveProvisionRequest)
 	if run.ExecutionID != "" {
 		res.ExecutionID = run.ExecutionID
 	}
+	// The durable steps decide the reservation, never the in-memory
+	// result: a store that cannot be read keeps the VMID reserved.
+	steps, err := p.Mutations.DB.PveJobSteps(req.ExecutionID)
+	if err != nil {
+		res.GuestKept = true
+		p.Mutations.log().Error("audit", "kind", "pve_guest_provision_failed", "remote", req.RemoteID, "node", req.Node, "vmid", req.VMID,
+			"execution", res.ExecutionID, "reason", "job_store_unreadable", "guest_kept", true)
+		return res, ErrPveJobStore
+	}
+	res.Steps = steps
+	release, mayExist := vmidSettlement(steps)
+	if release {
+		_ = p.VMIDs.ReleaseVMID(req.RemoteID, req.VMID, req.ExecutionID)
+	}
 	if runErr != nil {
-		if len(run.Steps) == 0 {
-			// Nothing was sent: the VMID is free again.
-			_ = p.VMIDs.ReleaseVMID(req.RemoteID, req.VMID, req.ExecutionID)
+		if len(steps) == 0 {
 			return res, runErr
 		}
-		res.GuestKept = true
-		if run.Steps[0].State == executordb.PveJobSucceeded {
-			// The clone exists; the live guest list now protects the VMID.
-			_ = p.VMIDs.ReleaseVMID(req.RemoteID, req.VMID, req.ExecutionID)
-		}
-		failed := run.Steps[len(run.Steps)-1]
+		res.GuestKept = mayExist
+		failed := steps[len(steps)-1]
 		p.Mutations.log().Error("audit", "kind", "pve_guest_provision_failed", "remote", req.RemoteID, "node", req.Node, "vmid", req.VMID,
-			"execution", res.ExecutionID, "step", failed.Step, "state", string(failed.State), "guest_kept", true)
+			"execution", res.ExecutionID, "step", failed.Step, "state", string(failed.State), "guest_kept", mayExist, "vmid_reserved", !release)
 		return res, runErr
 	}
-	_ = p.VMIDs.ReleaseVMID(req.RemoteID, req.VMID, req.ExecutionID)
 	read, err := p.Mutations.readToken(o.rm)
 	if err != nil {
 		res.GuestKept = true
@@ -883,6 +903,163 @@ func (p *PveProvisioner) Provision(ctx context.Context, req PveProvisionRequest)
 	p.Mutations.log().Info("audit", "kind", "pve_guest_provisioned", "remote", req.RemoteID, "node", req.Node, "vmid", req.VMID,
 		"execution", res.ExecutionID, "started", req.Start)
 	return res, nil
+}
+
+// pveJobOpen reports whether a step has not reached a terminal state.
+func pveJobOpen(j executordb.PveJob) bool {
+	switch j.State {
+	case executordb.PveJobDispatching, executordb.PveJobRunning, executordb.PveJobReconciling:
+		return true
+	}
+	return false
+}
+
+// vmidSettlement decides from the durable steps of one provisioning
+// whether its VMID reservation can be released and whether the guest may
+// exist:
+//
+//   - no step: nothing was sent (the intent is durable before dispatch);
+//   - a step still open: kept, reconciliation narrows it by the
+//     reservation;
+//   - clone succeeded: released, the live guest list protects the VMID;
+//   - clone failed (PVE ran and refused it): released, no guest;
+//   - clone unknown: kept until the guest is seen (releaseSettled).
+func vmidSettlement(steps []executordb.PveJob) (release, guestMayExist bool) {
+	if len(steps) == 0 {
+		return true, false
+	}
+	for _, j := range steps {
+		if pveJobOpen(j) {
+			return false, true
+		}
+	}
+	switch steps[0].State {
+	case executordb.PveJobSucceeded:
+		return true, true
+	case executordb.PveJobFailed:
+		return true, false
+	}
+	return false, true
+}
+
+// ReleaseSettledVMIDs releases the started VMID reservations of remoteID
+// whose provisioning has settled (vmidSettlement), and those of an unknown
+// clone once the guest is in the complete live guest list (it then
+// protects the VMID). A reservation that cannot be checked stays. It
+// returns the number released.
+func (p *PveProvisioner) ReleaseSettledVMIDs(ctx context.Context, remoteID string) (int, error) {
+	if err := p.checkDeps(); err != nil {
+		return 0, err
+	}
+	rm, err := p.Mutations.activeRemote(remoteID)
+	if err != nil {
+		return 0, err
+	}
+	read, err := p.Mutations.readToken(rm)
+	if err != nil {
+		return 0, err
+	}
+	inv, err := p.Reader.ClusterInventory(ctx, rm, read)
+	if err != nil {
+		return 0, ErrPveTargetChanged
+	}
+	if inv.Partial || inv.Truncated {
+		return 0, ErrPveInventoryIncomplete
+	}
+	live := make(map[uint64]bool, len(inv.Guests))
+	for _, g := range inv.Guests {
+		if g.VMID > 0 {
+			live[uint64(g.VMID)] = true
+		}
+	}
+	return p.releaseSettled(remoteID, live)
+}
+
+// releaseSettled implements ReleaseSettledVMIDs over a complete live guest
+// set. Executions this engine is running are left alone.
+func (p *PveProvisioner) releaseSettled(remoteID string, live map[uint64]bool) (int, error) {
+	recs, err := p.VMIDs.Reservations(remoteID, p.Mutations.now())
+	if err != nil {
+		return 0, ErrPveJobStore
+	}
+	n := 0
+	for _, r := range recs {
+		if !r.Started || p.Mutations.running(r.ExecutionID) {
+			continue
+		}
+		steps, err := p.Mutations.DB.PveJobSteps(r.ExecutionID)
+		if err != nil {
+			return n, ErrPveJobStore
+		}
+		release, _ := vmidSettlement(steps)
+		if !release && len(steps) == 1 && steps[0].State == executordb.PveJobUnknown && live[r.VMID] {
+			// An unknown clone whose guest exists: the live list protects it.
+			release = true
+		}
+		if !release {
+			continue
+		}
+		if err := p.VMIDs.ReleaseVMID(remoteID, r.VMID, r.ExecutionID); err != nil {
+			return n, ErrPveJobStore
+		}
+		p.Mutations.log().Info("audit", "kind", "pve_vmid_released", "remote", remoteID, "vmid", r.VMID, "execution", r.ExecutionID)
+		n++
+	}
+	return n, nil
+}
+
+// JobTaskID implements PveJobTaskIDs for pve.guest.provision steps from the
+// started VMID reservation of the step's execution: the config, resize and
+// start tasks carry the new VMID, the clone task the template's VMID. PVE
+// names a clone task by its source only, so two provisionings cloning the
+// same template cannot be told apart by the task: while another started
+// provisioning of that template has a clone without a recorded task, a
+// lost clone is ambiguous and never matched. A missing or duplicated
+// reservation is ambiguous as well.
+func (p *PveProvisioner) JobTaskID(job executordb.PveJob) (string, bool, error) {
+	if job.Action != PveGuestProvisionAction {
+		return "", false, nil
+	}
+	if job.Kind != permit.ProviderKindNode || p.VMIDs == nil || p.Mutations == nil || p.Mutations.DB == nil {
+		return "", false, ErrPveTaskIDAmbiguous
+	}
+	recs, err := p.VMIDs.Reservations(job.RemoteID, p.Mutations.now())
+	if err != nil {
+		return "", false, ErrPveJobStore
+	}
+	var own PveVMIDReservation
+	found := 0
+	for _, r := range recs {
+		if r.ExecutionID == job.ExecutionID && r.Started {
+			own, found = r, found+1
+		}
+	}
+	if found != 1 || !validVMID(own.VMID) {
+		return "", false, ErrPveTaskIDAmbiguous
+	}
+	switch job.TaskType {
+	case pveProvisionTaskTypes[pveStepGuestConfig], pveProvisionTaskTypes[pveStepGuestResize], pveProvisionTaskTypes[pveStepGuestStart]:
+		return fmt.Sprint(own.VMID), true, nil
+	case pveProvisionTaskTypes[pveStepGuestClone]:
+	default:
+		return "", false, ErrPveTaskIDAmbiguous
+	}
+	if !validVMID(own.TemplateVMID) {
+		return "", false, ErrPveTaskIDAmbiguous
+	}
+	for _, r := range recs {
+		if r.ExecutionID == job.ExecutionID || !r.Started || r.TemplateVMID != own.TemplateVMID {
+			continue
+		}
+		steps, err := p.Mutations.DB.PveJobSteps(r.ExecutionID)
+		if err != nil {
+			return "", false, ErrPveJobStore
+		}
+		if len(steps) == 0 || steps[0].UPID == "" {
+			return "", false, ErrPveTaskIDAmbiguous
+		}
+	}
+	return fmt.Sprint(own.TemplateVMID), true, nil
 }
 
 // ProvisionStepTaskType returns the PVE task type of a provisioning step
