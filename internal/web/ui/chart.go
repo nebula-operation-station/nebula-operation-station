@@ -332,7 +332,7 @@ func pveTreeToView(tree pveinventory.Tree) []pveNodeView {
 
 // chartHosts builds the org chart columns from the batch reads.
 func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins map[string]*pb.HostKeyPin, pinsUnavailable bool, b batchData, res chartResults) []chartHost {
-	now := h.pveNow()
+	now := h.clockNow()
 	// Fetch the latest stored readings once per page, not once per host.
 	// A nil operations service (or a read error) leaves the maps empty:
 	// the indicators then render as unknown, never as zero.
@@ -521,7 +521,7 @@ func (h *Handler) handleInventoryChart(w http.ResponseWriter, r *http.Request) {
 			data.Chart.PVEUnavailable = true
 		} else {
 			data.Chart.PVENodes = pveTreeToView(tree)
-			h.addPVELines(ctx, data.Chart.PVENodes, res, h.pveNow())
+			h.addPVELines(ctx, data.Chart.PVENodes, res, h.clockNow())
 		}
 	}
 	h.render(w, r, data)

@@ -81,7 +81,8 @@
         </form>
         <!-- Privileged session display (ADR 0007 E20): the executor-reported
              state, remaining time and the single Extend action. Driven by
-             web/static/webauthn.js; no inline handlers (strict CSP). -->
+             web/static/nav.js, which renders the display the server computes
+             (internal/web/ui/session); no inline handlers (strict CSP). -->
         <div id="session-display" class="session-display" data-state="loading" hidden>
           <span class="session-display__label" id="session-state" aria-live="polite">Session</span>
           <span class="session-display__time" id="session-time"></span>

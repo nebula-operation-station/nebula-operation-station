@@ -1,32 +1,30 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package session defines the display contract for the privileged approval
-// session in the web UI (ADR 0007, E20).
+// Package session computes the display of the privileged approval session
+// in the web UI (ADR 0007, E20).
 //
 // The page topbar shows the executor-reported session state: the remaining
 // time while a session is active, an expired state once it is gone, and a
 // single Extend action that opens or extends the session with one fresh
 // WebAuthn user-verification assertion.
 //
-// This package is the source of truth for how the browser maps the poll
-// response of GET /privileged/session onto those display states. The client
-// implementation lives in web/static/webauthn.js and mirrors the functions
-// here one-to-one; the tests in this package pin down the semantics:
+// The server is the source of truth for the display: GET /privileged/session
+// (internal/web/ui/privileged_session.go) runs Display on every poll and
+// sends the resulting View. The browser (web/static/nav.js) only
+// renders that View, counts the reported remaining seconds down and polls
+// again; it derives no state of its own. The properties pinned down here:
 //
 //   - the remaining time is derived from the executor-reported expiry only;
 //   - a session that was active and is now gone is displayed as expired,
 //     and the same single assertion opens a new session;
 //   - no amount of browsing activity (repeated polls) can renew or extend
-//     a session: the state machine is pure and only the executor-reported
-//     poll and the clock decide the state;
-//   - at most one assertion flow may be in flight, so one click extends
-//     the session exactly once and extensions never accumulate;
+//     a session: Display is pure and only the executor-reported state and
+//     the clock decide it;
 //   - an unreachable executor fails closed to an unknown state with no
 //     action offered.
 package session
 
 import (
-	"fmt"
 	"time"
 )
 
@@ -34,16 +32,15 @@ import (
 // highlighted as running out.
 const LowThreshold = time.Minute
 
-// Poll mirrors the JSON response of GET /privileged/session
-// (internal/web/ui/privileged_session.go).
+// Poll is the executor-reported session status a display is computed from.
 type Poll struct {
 	// Active reports whether the executor has an open privileged session.
-	Active bool `json:"active"`
+	Active bool
 	// Available reports whether the executor could be reached at all.
-	Available bool `json:"available"`
+	Available bool
 	// ExpiryUnix is the executor-reported expiry of an active session in
 	// seconds since the Unix epoch. Zero when the session is not active.
-	ExpiryUnix int64 `json:"expiry_unix"`
+	ExpiryUnix int64
 }
 
 // State is a display state of the privileged session in the web UI.
@@ -66,7 +63,8 @@ const (
 )
 
 // String returns the stable name of the state. The client uses it as the
-// data-state attribute of the display element.
+// data-state attribute of the display element and sends it back as the
+// prev query parameter of the next poll.
 func (s State) String() string {
 	switch s {
 	case StateNone:
@@ -77,6 +75,21 @@ func (s State) String() string {
 		return "expired"
 	default:
 		return "unknown"
+	}
+}
+
+// ParseState returns the state named s (see State.String). Anything else,
+// including the empty string, is StateUnknown.
+func ParseState(s string) State {
+	switch s {
+	case "none":
+		return StateNone
+	case "active":
+		return StateActive
+	case "expired":
+		return StateExpired
+	default:
+		return StateUnknown
 	}
 }
 
@@ -121,24 +134,6 @@ func Remaining(p Poll, now time.Time) time.Duration {
 	return d
 }
 
-// FormatRemaining renders a remaining time for the display: "1h 04m" for
-// an hour or more, "12m 09s" for a minute or more, "45s" below that.
-// Negative durations render as "0s".
-func FormatRemaining(d time.Duration) string {
-	if d < 0 {
-		d = 0
-	}
-	d = d.Round(time.Second)
-	switch {
-	case d >= time.Hour:
-		return fmt.Sprintf("%dh %02dm", int(d.Hours()), int(d.Minutes())%60)
-	case d >= time.Minute:
-		return fmt.Sprintf("%dm %02ds", int(d.Minutes()), int(d.Seconds())%60)
-	default:
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	}
-}
-
 // CanExtend reports whether the Extend action is offered in the display
 // state s. An active session is extended and an expired session is opened
 // again with one fresh WebAuthn assertion. A session that was never opened
@@ -146,14 +141,6 @@ func FormatRemaining(d time.Duration) string {
 // action (fail closed).
 func CanExtend(s State) bool {
 	return s == StateActive || s == StateExpired
-}
-
-// Extending reports whether a new extend flow may be started in the display
-// state s while inFlight assertion flows are in progress. At most one flow
-// runs at a time: one click extends the session exactly once, and a second
-// click while the first is running starts nothing.
-func Extending(s State, inFlight bool) bool {
-	return !inFlight && CanExtend(s)
 }
 
 // StateLabel returns the short label shown for the display state s.
@@ -168,4 +155,40 @@ func StateLabel(s State) string {
 	default:
 		return "Session unavailable"
 	}
+}
+
+// View is the computed display the poll endpoint sends to the browser.
+// The client renders it as is.
+type View struct {
+	// State is the display state name (State.String).
+	State string `json:"state"`
+	// Label is the text shown for the state (StateLabel).
+	Label string `json:"label"`
+	// RemainingSeconds is the remaining time of an active session, rounded
+	// up to whole seconds so an active session always reports at least 1;
+	// zero in every other state. The client counts it down locally and
+	// polls again when it reaches zero.
+	RemainingSeconds int64 `json:"remaining_seconds"`
+	// Extendable reports whether the Extend action is offered (CanExtend).
+	Extendable bool `json:"extendable"`
+	// LowThresholdSeconds is LowThreshold in seconds: the client highlights
+	// the display while the remaining time is at or below it.
+	LowThresholdSeconds int64 `json:"low_threshold_seconds"`
+}
+
+// Display computes the View for the poll p at time now, given the state
+// prev the client displayed before (Next).
+func Display(prev State, p Poll, now time.Time) View {
+	s := Next(prev, p, now)
+	v := View{
+		State:               s.String(),
+		Label:               StateLabel(s),
+		Extendable:          CanExtend(s),
+		LowThresholdSeconds: int64(LowThreshold / time.Second),
+	}
+	if s == StateActive {
+		d := Remaining(p, now)
+		v.RemainingSeconds = int64((d + time.Second - 1) / time.Second)
+	}
+	return v
 }

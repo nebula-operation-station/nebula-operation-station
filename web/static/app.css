@@ -345,7 +345,7 @@ code {
 
 /* --- Privileged session display (ADR 0007 E20). ---
    Topbar widget on authenticated pages. The state comes from the
-   executor via web/static/webauthn.js; the data-state attribute drives
+   server via web/static/nav.js; the data-state attribute drives
    the accent: ok while time remains, warn under the low threshold,
    crit when expired, muted when the executor is unavailable. */
 .session-display {

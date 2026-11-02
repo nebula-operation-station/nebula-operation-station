@@ -3,7 +3,6 @@
 package session
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -13,34 +12,6 @@ import (
 
 // testNow is a fixed reference time for the table tests.
 var testNow = time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
-
-func TestPollJSONContract(t *testing.T) {
-	// The shapes are exactly what GET /privileged/session sends
-	// (internal/web/ui/privileged_session.go).
-	cases := []struct {
-		name string
-		json string
-		want Poll
-	}{
-		{"active", `{"active":true,"available":true,"expiry_unix":1762112400}`,
-			Poll{Active: true, Available: true, ExpiryUnix: 1762112400}},
-		{"inactive", `{"active":false,"available":true}`,
-			Poll{Active: false, Available: true}},
-		{"unavailable", `{"available":false}`,
-			Poll{Active: false, Available: false}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var got Poll
-			if err := json.Unmarshal([]byte(tc.json), &got); err != nil {
-				t.Fatalf("unmarshal %s: %v", tc.json, err)
-			}
-			if got != tc.want {
-				t.Errorf("got %+v, want %+v", got, tc.want)
-			}
-		})
-	}
-}
 
 func TestNext(t *testing.T) {
 	future := testNow.Add(30 * time.Minute).Unix()
@@ -106,6 +77,73 @@ func TestNextActivityNeverRenews(t *testing.T) {
 	}
 }
 
+func TestParseState(t *testing.T) {
+	for _, st := range []State{StateUnknown, StateNone, StateActive, StateExpired} {
+		if got := ParseState(st.String()); got != st {
+			t.Errorf("ParseState(%q) = %v, want %v", st.String(), got, st)
+		}
+	}
+	// Anything the client might send that is not a state name is unknown.
+	for _, in := range []string{"", "ACTIVE", "active ", "loading", "1", strings.Repeat("a", 4096)} {
+		if got := ParseState(in); got != StateUnknown {
+			t.Errorf("ParseState(%q) = %v, want unknown", in, got)
+		}
+	}
+}
+
+func TestDisplay(t *testing.T) {
+	cases := []struct {
+		name string
+		prev State
+		poll Poll
+		now  time.Time
+		want View
+	}{
+		{"active", StateNone, Poll{Active: true, Available: true, ExpiryUnix: testNow.Add(90 * time.Second).Unix()}, testNow,
+			View{State: "active", Label: "Session", RemainingSeconds: 90, Extendable: true, LowThresholdSeconds: 60}},
+		{"active rounds up", StateActive, Poll{Active: true, Available: true, ExpiryUnix: testNow.Add(90 * time.Second).Unix()}, testNow.Add(500 * time.Millisecond),
+			View{State: "active", Label: "Session", RemainingSeconds: 90, Extendable: true, LowThresholdSeconds: 60}},
+		{"last fraction of a second is still at least 1", StateActive, Poll{Active: true, Available: true, ExpiryUnix: testNow.Unix()}, testNow.Add(-time.Millisecond),
+			View{State: "active", Label: "Session", RemainingSeconds: 1, Extendable: true, LowThresholdSeconds: 60}},
+		{"expired at expiry", StateActive, Poll{Active: true, Available: true, ExpiryUnix: testNow.Unix()}, testNow,
+			View{State: "expired", Label: "Session expired", Extendable: true, LowThresholdSeconds: 60}},
+		{"gone after active", StateActive, Poll{Available: true}, testNow,
+			View{State: "expired", Label: "Session expired", Extendable: true, LowThresholdSeconds: 60}},
+		{"none", StateUnknown, Poll{Available: true}, testNow,
+			View{State: "none", Label: "No session", LowThresholdSeconds: 60}},
+		{"unavailable", StateActive, Poll{Active: true, ExpiryUnix: testNow.Add(time.Hour).Unix()}, testNow,
+			View{State: "unknown", Label: "Session unavailable", LowThresholdSeconds: 60}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Display(tc.prev, tc.poll, tc.now); got != tc.want {
+				t.Errorf("Display = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDisplayActivityNeverRenews: polling Display with a fixed
+// executor-reported expiry only ever counts down; the remaining time never
+// grows and nothing but a new expiry from the executor moves it back up.
+func TestDisplayActivityNeverRenews(t *testing.T) {
+	poll := Poll{Active: true, Available: true, ExpiryUnix: testNow.Add(5 * time.Minute).Unix()}
+	prev := StateNone
+	last := int64(1 << 62)
+	for i := 0; i < 2000; i++ {
+		now := testNow.Add(time.Duration(i) * 250 * time.Millisecond)
+		v := Display(prev, poll, now)
+		if v.RemainingSeconds > last {
+			t.Fatalf("poll %d: remaining grew from %d to %d", i, last, v.RemainingSeconds)
+		}
+		last = v.RemainingSeconds
+		prev = ParseState(v.State)
+	}
+	if prev != StateExpired || last != 0 {
+		t.Fatalf("after the expiry: state %v remaining %d, want expired 0", prev, last)
+	}
+}
+
 func TestRemaining(t *testing.T) {
 	cases := []struct {
 		name string
@@ -128,29 +166,6 @@ func TestRemaining(t *testing.T) {
 	}
 }
 
-func TestFormatRemaining(t *testing.T) {
-	cases := []struct {
-		in   time.Duration
-		want string
-	}{
-		{0, "0s"},
-		{-time.Second, "0s"},
-		{45 * time.Second, "45s"},
-		{59 * time.Second, "59s"},
-		{60 * time.Second, "1m 00s"},
-		{90 * time.Second, "1m 30s"},
-		{12*time.Minute + 9*time.Second, "12m 09s"},
-		{time.Hour, "1h 00m"},
-		{time.Hour + 4*time.Minute, "1h 04m"},
-		{2*time.Hour + 59*time.Minute, "2h 59m"},
-	}
-	for _, tc := range cases {
-		if got := FormatRemaining(tc.in); got != tc.want {
-			t.Errorf("FormatRemaining(%v) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
-
 func TestCanExtend(t *testing.T) {
 	cases := []struct {
 		state State
@@ -165,32 +180,6 @@ func TestCanExtend(t *testing.T) {
 		if got := CanExtend(tc.state); got != tc.want {
 			t.Errorf("CanExtend(%v) = %v, want %v", tc.state, got, tc.want)
 		}
-	}
-}
-
-// TestExtending pins down extend-once: at most one assertion flow may be
-// in flight, so a click extends the session exactly once and a second
-// click while the first is running starts nothing.
-func TestExtending(t *testing.T) {
-	cases := []struct {
-		name     string
-		state    State
-		inFlight bool
-		want     bool
-	}{
-		{"active idle", StateActive, false, true},
-		{"expired idle", StateExpired, false, true},
-		{"active in flight", StateActive, true, false},
-		{"expired in flight", StateExpired, true, false},
-		{"none never", StateNone, false, false},
-		{"unknown never", StateUnknown, false, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := Extending(tc.state, tc.inFlight); got != tc.want {
-				t.Errorf("Extending(%v, %v) = %v, want %v", tc.state, tc.inFlight, got, tc.want)
-			}
-		})
 	}
 }
 

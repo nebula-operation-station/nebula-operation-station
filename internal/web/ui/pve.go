@@ -348,7 +348,7 @@ func (h *Handler) handlePVEList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	metas := h.pveMeta(ctx)
-	now := h.pveNow()
+	now := h.clockNow()
 	rows := make([]pveRemoteRow, 0, len(remotes))
 	for _, rm := range remotes {
 		meta := metas[rm.RemoteID]
@@ -415,7 +415,7 @@ func (h *Handler) handlePVEDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	meta := h.pveMeta(ctx)[id]
-	now := h.pveNow()
+	now := h.clockNow()
 
 	// The registry name is approved metadata; the stored name is
 	// collector-provided and only a fallback.
@@ -494,7 +494,8 @@ func (h *Handler) handlePVEDetail(w http.ResponseWriter, r *http.Request) {
 	h.render(w, r, pageData{Title: "PVE remote " + rm.Name, Active: "pve", Content: "pve_detail", PVEDetail: d})
 }
 
-func (h *Handler) pveNow() time.Time {
+// clockNow is the handler clock (Options.Now, else time.Now).
+func (h *Handler) clockNow() time.Time {
 	if h.now != nil {
 		return h.now()
 	}
