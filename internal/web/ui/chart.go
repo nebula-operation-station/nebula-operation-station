@@ -10,6 +10,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/dockerhost"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/hostmetrics"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
@@ -87,9 +88,15 @@ type chartHost struct {
 	Details chartDetails
 	// Expanded opens the subtree by default (hosts with problems).
 	Expanded bool
-	// WorstClass is the border colour class: critical (unreachable),
-	// warning (updates pending) or neutral.
+	// WorstClass is the border colour class: critical (unreachable or a
+	// critical indicator), warning (updates pending or a warning
+	// indicator) or neutral.
 	WorstClass string
+	// Indicators are the CPU/RAM/disk rows (ADR 0006 P1-34).
+	Indicators []chartIndicator
+	// Filesystems are the per-filesystem details rows (all real mounts);
+	// nil when the host reported none.
+	Filesystems []chartFilesystem
 }
 
 // kv is one key/value row in a details panel section.
@@ -298,7 +305,15 @@ func pveTreeToView(tree pveinventory.Tree) []pveNodeView {
 
 // chartHosts builds the org chart columns from the batch reads.
 func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins map[string]*pb.HostKeyPin, pinsUnavailable bool, b batchData) []chartHost {
-	now := time.Now()
+	now := h.pveNow()
+	// Fetch the latest stored readings once per page, not once per host.
+	// A nil operations service (or a read error) leaves the maps empty:
+	// the indicators then render as unknown, never as zero.
+	var hostMetrics, hostFilesystems map[string]executions.LastResultRow
+	if h.operations != nil {
+		hostMetrics, _ = h.operations.LastResults(ctx, "host.metrics")
+		hostFilesystems, _ = h.operations.LastResults(ctx, "filesystem.list")
+	}
 	// Registry metadata (stable version + release notes) per host, from
 	// the stored registry.tags result. Absent while the registry lookup
 	// is not wired; the stable version then renders "unknown".
@@ -321,12 +336,52 @@ func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins m
 			PatchText:      patch.Text,
 			PatchClass:     patch.Class,
 		}
-		// Border colour = worst state: red unreachable, yellow
-		// updates pending, grey otherwise.
+		// CPU/RAM/disk indicators (ADR 0006 P1-34): parse the stored
+		// host.metrics and filesystem.list results. Missing or unreadable
+		// readings are unknown, never zero; a reading older than
+		// indicatorStaleAfter is stale.
+		var m hostmetrics.Metrics
+		var fs hostmetrics.Filesystems
+		var observedAt time.Time
+		if row, ok := hostMetrics[host.ID]; ok && len(row.Result) > 0 {
+			observedAt = row.FinishedAt
+			if parsed, err := hostmetrics.ParseMetrics(row.Result); err == nil {
+				m = parsed
+			}
+		}
+		if row, ok := hostFilesystems[host.ID]; ok && len(row.Result) > 0 {
+			if parsed, err := hostmetrics.ParseFilesystems(row.Result); err == nil {
+				fs = parsed
+			}
+		}
+		// TODO(p134c): fill Avg24h from the P1-25 24-h buckets once the
+		// managed hosts have them. The chart does not load 24-h buckets
+		// for managed hosts yet (the P1-25 buckets are PVE-only), so
+		// hostIndicators passes nil and the 24-h average renders a dash.
+		// Do not invent a data source.
+		indicators := hostIndicators(m, fs, observedAt, now, indicatorStaleAfter)
+		ch.Indicators = summaryIndicatorRows(indicators)
+		ch.Filesystems = filesystemRows(fs)
+		// Border colour = worst state: red unreachable or a critical
+		// indicator, yellow updates pending or a warning indicator, grey
+		// otherwise.
+		var hostState IndicatorState
 		switch {
 		case v.StateFilter == "critical":
-			ch.WorstClass = "chart__node--critical"
+			hostState = StateCrit
 		case v.UpdatesTotal > 0 || v.FailedServices > 0:
+			hostState = StateWarn
+		default:
+			hostState = StateOK
+		}
+		worst := hostState
+		for _, ind := range indicators {
+			worst = worstState(worst, ind.State)
+		}
+		switch {
+		case worst == StateCrit:
+			ch.WorstClass = "chart__node--critical"
+		case worst == StateWarn:
 			ch.WorstClass = "chart__node--warning"
 		default:
 			ch.WorstClass = "chart__node--neutral"
