@@ -325,3 +325,25 @@ func TestOpenVersionReportsDecryptedVersion(t *testing.T) {
 		t.Fatalf("locked vault opened version %d: %v", ver, err)
 	}
 }
+
+// LockGeneration increases on every Lock, so a lock followed by an unlock
+// during a slow read is still visible to the caller.
+func TestLockGenerationIncreasesOnEveryLock(t *testing.T) {
+	db, _ := newDB(t)
+	v := newTestVault(db)
+	if err := v.Init([]byte(pass), testParams, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	g0 := v.LockGeneration()
+	v.Lock()
+	g1 := v.LockGeneration()
+	if g1 <= g0 {
+		t.Fatalf("generation %d after lock, was %d", g1, g0)
+	}
+	if err := v.Unlock([]byte(pass)); err != nil {
+		t.Fatal(err)
+	}
+	if g := v.LockGeneration(); g != g1 {
+		t.Fatalf("unlock changed the generation: %d -> %d", g1, g)
+	}
+}

@@ -123,6 +123,16 @@ func MethodRoles() map[string][]peercred.Role {
 
 		pb.ExecutorService_ListPVERemotes_FullMethodName: {server, admin, peercred.RolePVECollector},
 		pb.ExecutorService_ReadPVE_FullMethodName:        {peercred.RolePVECollector, admin},
+
+		// Private registries (ADR 0006, P1-32). Credentials enter only
+		// through the admin methods; the server can list metadata and ask
+		// for typed reads, but can never supply, rotate or read a
+		// credential (no server credential exception).
+		pb.ExecutorService_AddPrivateRegistry_FullMethodName:              {admin},
+		pb.ExecutorService_RotatePrivateRegistryCredential_FullMethodName: {admin},
+		pb.ExecutorService_RemovePrivateRegistry_FullMethodName:           {admin},
+		pb.ExecutorService_ListPrivateRegistries_FullMethodName:           {server, admin},
+		pb.ExecutorService_ReadPrivateRegistry_FullMethodName:             {server, admin},
 	}
 }
 

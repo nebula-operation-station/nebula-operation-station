@@ -152,6 +152,11 @@ func (v *Vault) generation() uint64 {
 	return v.gen
 }
 
+// LockGeneration returns a counter that increases on every Lock. A caller
+// that used a secret across a slow operation compares it before and after,
+// so a lock (and any later unlock) in between discards the result.
+func (v *Vault) LockGeneration() uint64 { return v.generation() }
+
 // State reports whether the vault exists and is unlocked.
 func (v *Vault) State() (State, error) {
 	v.mu.RLock()
