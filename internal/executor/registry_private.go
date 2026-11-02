@@ -5,6 +5,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
@@ -86,11 +87,16 @@ type RegistryRead struct {
 	Method     string
 	Repository string
 	// ConfigDigest is the SHA-256 of the stored registry record: it pins
-	// the registry origin, auth realm, service and repository scope.
+	// the registry origin, auth realm, service, repository scope and the
+	// record's random nonce, so a removed and re-added registry differs.
 	ConfigDigest string
 	// ConfigVersion and CredentialVersion are the vault versions used.
 	ConfigVersion     int64
 	CredentialVersion int64
+	// CredentialID is the random identity of the stored credential, new on
+	// every add or rotation, so a version number reused after a removal
+	// never matches an old grant.
+	CredentialID string
 }
 
 // RegistryReadClaim is one reserved read. Check re-verifies it (lock,
@@ -156,13 +162,26 @@ type privateRegistryRecord struct {
 	CAPEM               string   `json:"ca_pem"`
 	CreatedBy           string   `json:"created_by"`
 	CreatedUnix         int64    `json:"created_unix"`
+	Nonce               string   `json:"nonce"`
 }
 
 // privateRegistryCred is the stored credential.
 type privateRegistryCred struct {
+	ID          string `json:"id"`
 	Username    string `json:"username"`
 	Secret      []byte `json:"secret"`
 	ExpiresUnix int64  `json:"expires_unix"`
+}
+
+var registryNonceRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// newRegistryNonce returns 128 random bits as hex.
+func newRegistryNonce() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
 }
 
 func registryConfigID(id string) string { return "registry." + id + ".config" }
@@ -175,7 +194,7 @@ func (r privateRegistryRecord) meta() registrymeta.PrivateRegistry {
 
 // validate checks the record and returns its CA pool (nil: system roots).
 func (r privateRegistryRecord) validate() (*x509.CertPool, error) {
-	if r.Format != privateRegistryFormat || !registryIDRe.MatchString(r.ID) {
+	if r.Format != privateRegistryFormat || !registryIDRe.MatchString(r.ID) || !registryNonceRe.MatchString(r.Nonce) {
 		return nil, errors.New("invalid registry record")
 	}
 	if _, err := r.meta().Validate(); err != nil {
@@ -195,8 +214,8 @@ func (r privateRegistryRecord) validate() (*x509.CertPool, error) {
 }
 
 func (c privateRegistryCred) validate() error {
-	if c.ExpiresUnix <= 0 {
-		return errors.New("credential has no expiry")
+	if c.ExpiresUnix <= 0 || !registryNonceRe.MatchString(c.ID) {
+		return errors.New("credential has no expiry or identity")
 	}
 	return registrymeta.Credential{Username: c.Username, Secret: c.Secret}.Validate()
 }
@@ -343,13 +362,21 @@ func (s *Service) AddPrivateRegistry(ctx context.Context, in *pb.AddPrivateRegis
 	default:
 		return nil, status.Error(codes.InvalidArgument, "unsupported private registry auth mode")
 	}
+	nonce, err := newRegistryNonce()
+	if err != nil {
+		return nil, status.Error(codes.Internal, "random source unavailable")
+	}
+	credID, err := newRegistryNonce()
+	if err != nil {
+		return nil, status.Error(codes.Internal, "random source unavailable")
+	}
 	rec := privateRegistryRecord{Format: privateRegistryFormat, ID: in.GetRegistryId(), Registry: in.GetRegistryOrigin(), Mode: mode,
 		Realm: in.GetRealm(), Service: in.GetService(), Repositories: slices.Clone(in.GetRepositories()),
-		AllowPrivateNetwork: in.GetAllowPrivateNetwork(), CAPEM: in.GetCaPem(), CreatedBy: who, CreatedUnix: s.clock().Unix()}
+		AllowPrivateNetwork: in.GetAllowPrivateNetwork(), CAPEM: in.GetCaPem(), CreatedBy: who, CreatedUnix: s.clock().Unix(), Nonce: nonce}
 	if _, err := rec.validate(); err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid private registry: "+err.Error())
 	}
-	cred := privateRegistryCred{Username: in.GetUsername(), Secret: in.GetSecret(), ExpiresUnix: in.GetCredentialExpiresUnix()}
+	cred := privateRegistryCred{ID: credID, Username: in.GetUsername(), Secret: in.GetSecret(), ExpiresUnix: in.GetCredentialExpiresUnix()}
 	if err := cred.validate(); err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid private registry credential")
 	}
@@ -404,7 +431,11 @@ func (s *Service) RotatePrivateRegistryCredential(ctx context.Context, in *pb.Ro
 	if !registryIDRe.MatchString(id) {
 		return nil, status.Error(codes.InvalidArgument, "invalid registry id")
 	}
-	cred := privateRegistryCred{Username: in.GetUsername(), Secret: in.GetSecret(), ExpiresUnix: in.GetCredentialExpiresUnix()}
+	credID, err := newRegistryNonce()
+	if err != nil {
+		return nil, status.Error(codes.Internal, "random source unavailable")
+	}
+	cred := privateRegistryCred{ID: credID, Username: in.GetUsername(), Secret: in.GetSecret(), ExpiresUnix: in.GetCredentialExpiresUnix()}
 	if err := cred.validate(); err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid private registry credential")
 	}
@@ -581,7 +612,7 @@ func (s *Service) ReadPrivateRegistry(ctx context.Context, in *pb.ReadPrivateReg
 		return nil, status.Error(codes.PermissionDenied, "read private registry: repository is outside the approved scope")
 	}
 	read := RegistryRead{RegistryID: l.rec.ID, Method: method, Repository: in.GetRepository(), ConfigDigest: l.configDigest,
-		ConfigVersion: l.configVersion, CredentialVersion: l.credVersion}
+		ConfigVersion: l.configVersion, CredentialVersion: l.credVersion, CredentialID: l.cred.ID}
 	claim, err := s.registryAuthorizer().AuthorizeRegistryRead(read)
 	if err != nil {
 		return nil, registryGrantStatus(err)
@@ -594,7 +625,9 @@ func (s *Service) ReadPrivateRegistry(ctx context.Context, in *pb.ReadPrivateReg
 		return nil, registryGrantStatus(err)
 	}
 	cred := registrymeta.Credential{Username: l.cred.Username, Secret: l.cred.Secret}
-	scope := l.rec.ID + "/" + l.configDigest[:16] + "/c" + strconv.FormatInt(l.credVersion, 10)
+	// Cache entries are keyed by the exact record and credential identity
+	// (ADR 0006: private entries also key on credential scope/version).
+	scope := l.rec.ID + "/" + l.configDigest + "/" + l.cred.ID + "/v" + strconv.FormatInt(l.credVersion, 10)
 	ref := registrymeta.Ref{Registry: l.rec.Registry, Repository: in.GetRepository(), Tag: in.GetTag(), Digest: in.GetDigest()}
 	out := &pb.ReadPrivateRegistryResponse{RegistryId: l.rec.ID, Repository: in.GetRepository(), ObservedAtUnix: s.clock().Unix(),
 		ConfigVersion: l.configVersion, CredentialVersion: l.credVersion}

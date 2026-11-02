@@ -517,6 +517,31 @@ func TestPrivateRegistryAdminValidation(t *testing.T) {
 	}
 }
 
+// A removed and re-added registry restarts its vault versions at 1, but its
+// record digest and credential identity are new, so a grant bound to the
+// old registry cannot cover it.
+func TestPrivateRegistryReAddNeverMatchesOldGrantBinding(t *testing.T) {
+	e := newRegistryEnv(t)
+	e.add(t)
+	if _, err := e.svc.ReadPrivateRegistry(context.Background(), digestRead()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.RemovePrivateRegistry(context.Background(), &pb.RemovePrivateRegistryRequest{RegistryId: "corp"}); err != nil {
+		t.Fatal(err)
+	}
+	e.add(t)
+	if _, err := e.svc.ReadPrivateRegistry(context.Background(), digestRead()); err != nil {
+		t.Fatal(err)
+	}
+	first, second := e.grants.reads[0], e.grants.reads[1]
+	if first.CredentialVersion != second.CredentialVersion || first.ConfigVersion != second.ConfigVersion {
+		t.Fatalf("versions differ unexpectedly: %+v vs %+v", first, second)
+	}
+	if first.ConfigDigest == second.ConfigDigest || first.CredentialID == second.CredentialID || len(second.CredentialID) != 32 {
+		t.Fatalf("re-added registry reuses the old identity: %+v vs %+v", first, second)
+	}
+}
+
 func TestPrivateRegistryTagListDropsInvalidTags(t *testing.T) {
 	e := newRegistryEnv(t)
 	e.reg.tags = []string{"1.0.0", "bad\u0007tag", "-lead"}
