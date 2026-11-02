@@ -263,6 +263,10 @@ type PveMutationRequest struct {
 type PveMutationResult struct {
 	ExecutionID string
 	Steps       []executordb.PveJob
+	// PermitConsumed is set once the run consumed the single-use permit of
+	// its execution: no later run of the execution can be authorized, so a
+	// failure without a recorded step can never be retried.
+	PermitConsumed bool
 }
 
 func (m *PveMutations) now() time.Time {
@@ -515,13 +519,14 @@ func (m *PveMutations) Run(ctx context.Context, req PveMutationRequest) (PveMuta
 		m.log().Warn("audit", "kind", "pve_mutation_denied", "remote", rm.RemoteID, "action", req.ActionID, "code", "execution_mismatch")
 		return PveMutationResult{}, ErrPveMutationDenied
 	}
+	// From here the permit of this execution is used.
+	res := PveMutationResult{ExecutionID: claim.ExecutionID, PermitConsumed: true}
 	steps, err := approvedSteps(claim.Parameters)
 	if err != nil {
-		return PveMutationResult{}, err
+		return res, err
 	}
 	m.begin(claim.ExecutionID)
 	defer m.end(claim.ExecutionID)
-	res := PveMutationResult{ExecutionID: claim.ExecutionID}
 	digest := hex.EncodeToString(req.Digest[:])
 	for i, step := range steps {
 		n := i + 1

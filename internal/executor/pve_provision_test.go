@@ -1394,6 +1394,78 @@ func TestProvisionConcurrentRunOfTheSameExecutionKeepsTheReservation(t *testing.
 	}
 }
 
+// TestProvisionConsumedPermitWithoutStepReleasesVMID pins PR #162 review
+// round 7: a transient failure after the run consumed its single-use permit
+// but before the first job intent was recorded sends nothing, and no retry
+// can ever run (the permit is used), so the VMID is released instead of
+// being kept for a retry that can only fail with ErrPveMutationAlreadyRun.
+func TestProvisionConsumedPermitWithoutStepReleasesVMID(t *testing.T) {
+	cases := map[string]struct {
+		block, unblock func(e *provisionEnv)
+	}{
+		"target busy": {
+			block: func(e *provisionEnv) {
+				// Another open node-level step on pve1.
+				job := executordb.PveJob{ExecutionID: "00000000-0000-4000-a000-888888888888", Step: 1, Digest: strings.Repeat("a", 64),
+					Action: "pve.test.mutation", RemoteID: mutRemote, TrustGeneration: 1, Kind: permit.ProviderKindNode, Node: "pve1",
+					RequestDigest: strings.Repeat("b", 64), TaskType: "qmclone", TaskUser: mutActionUser}
+				if err := e.pe.db.CreatePveJobIntent(job); err != nil {
+					e.t.Fatal(err)
+				}
+			},
+			unblock: func(e *provisionEnv) {
+				if err := e.pe.db.FinishPveJob("00000000-0000-4000-a000-888888888888", 1, executordb.PveJobFailed, "test"); err != nil {
+					e.t.Fatal(err)
+				}
+			},
+		},
+		"vault locked after the claim": {
+			block: func(e *provisionEnv) {
+				var once sync.Once
+				e.pc.pmu.Lock()
+				e.pc.onTaskType = func() { once.Do(e.pe.vault.Lock) }
+				e.pc.pmu.Unlock()
+			},
+			unblock: func(e *provisionEnv) {
+				if err := e.pe.vault.Unlock([]byte(e.pe.passphrase)); err != nil {
+					e.t.Fatal(err)
+				}
+			},
+		},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newProvisionEnv(t, fixedRisk{})
+			approved := e.approve(e.request())
+			c.block(e)
+			res, err := e.prov.Provision(context.Background(), approved)
+			if err == nil || len(res.Steps) != 0 || res.GuestKept {
+				t.Fatalf("blocked run: %v %+v", err, res)
+			}
+			if len(e.pc.provisionSteps()) != 0 {
+				t.Fatal("dispatched")
+			}
+			if h, ok, _ := e.vmids.VMIDHolder(mutRemote, approved.VMID, time.Now()); ok {
+				t.Fatalf("vmid kept for a retry that can never run: %+v", h)
+			}
+			c.unblock(e)
+			// The retry the reservation was kept for is refused by the permit.
+			if _, err := e.prov.Provision(context.Background(), approved); err == nil {
+				t.Fatal("retry ran on a consumed permit")
+			}
+			if len(e.pc.provisionSteps()) != 0 {
+				t.Fatal("retry dispatched")
+			}
+			// The VMID is free for a new proposal.
+			req := e.request()
+			req.VMID = approved.VMID
+			if _, err := e.prov.ProposalRequest(context.Background(), req, nextProvExec(), canonical.RiskMedium, strings.Repeat("c", 64), time.Now().Add(time.Hour)); err != nil {
+				t.Fatalf("vmid not free again: %v", err)
+			}
+		})
+	}
+}
+
 // noLinkedHosts is a linked-host source for nodes that are not enrolled hosts.
 func noLinkedHosts(canonical.Request, canonical.Target) ([]canonical.Target, error) { return nil, nil }
 
