@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"regexp"
 	"sort"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"google.golang.org/grpc"
@@ -105,7 +107,7 @@ func (s *Service) ReadGrants(ctx context.Context) ([]ReadGrantView, error) {
 // RevokeReadGrant revokes a read grant on the executor (no session or
 // assertion) and audits it, like RevokeSchedule.
 func (s *Service) RevokeReadGrant(ctx context.Context, user, id string) error {
-	if id == "" || len(id) > maxViewIDLen || !utf8.ValidString(id) {
+	if !validReadGrantID(id) {
 		return ErrReadGrantNotFound
 	}
 	exec, ok := s.exec.(readGrantExecutor)
@@ -157,6 +159,18 @@ func decodeReadGrant(g *pb.ReadGrant, inv []inventory.Host, haveInv bool, now ti
 	if r := g.GetRevokedUnix(); r != 0 {
 		v.Revoked = time.Unix(r, 0)
 	}
+	if !validReadGrantID(v.ID) {
+		v.ID = ""
+		return invalidView(v)
+	}
+	if !canonical.ValidSHA256Hex(v.Digest) {
+		v.Digest = ""
+		return invalidView(v)
+	}
+	if !validApprovedBy(v.ApprovedBy) {
+		v.ApprovedBy = ""
+		return invalidView(v)
+	}
 	raw := g.GetCanonicalGrant()
 	if len(raw) == 0 || len(raw) > permit.MaxReadGrantDocSize || !utf8.Valid(raw) || rejectDuplicateMembers(raw) != nil {
 		return invalidView(v)
@@ -166,7 +180,8 @@ func decodeReadGrant(g *pb.ReadGrant, inv []inventory.Host, haveInv bool, now ti
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&doc); err != nil || dec.More() || !knownReadGrantFormat(doc.Grant) ||
 		len(doc.Targets) > permit.MaxReadGrantTargets || len(doc.Actions) > permit.MaxReadGrantActions ||
-		len(doc.ProviderTargets) > permit.MaxProviderTargets {
+		len(doc.ProviderTargets) > permit.MaxProviderTargets ||
+		!structurallyValid(doc) || !matchesRegistry(doc, g) {
 		return invalidView(v)
 	}
 	// Host, action and remote IDs are rendered, so each must be a valid
@@ -218,9 +233,72 @@ func decodeReadGrant(g *pb.ReadGrant, inv []inventory.Host, haveInv bool, now ti
 	return v
 }
 
-// maxViewIDLen bounds a caller-supplied grant id before it is sent to the
-// executor or written to the audit log.
-const maxViewIDLen = 256
+// readGrantIDRe is the executor's grant id form: a lowercase UUIDv4, as
+// permit and schedgrant require of every read and schedule grant document
+// (both keep their pattern unexported).
+var readGrantIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
+// validReadGrantID reports whether id is a lowercase UUIDv4. It bounds both
+// caller-supplied ids (before they reach the executor or the audit log) and
+// the ids the executor reports.
+func validReadGrantID(id string) bool { return readGrantIDRe.MatchString(id) }
+
+// maxApprovedByLen bounds the executor-reported approver
+// ("webauthn:<credential hex>" or "cli:<admin>").
+const maxApprovedByLen = 256
+
+// validApprovedBy reports whether the executor-reported approver is
+// non-empty, bounded, valid UTF-8 and printable (no control or format
+// characters that could disguise it when rendered).
+func validApprovedBy(s string) bool {
+	if s == "" || len(s) > maxApprovedByLen || !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// structurallyValid rejects documents no executor could have approved: an
+// SSH grant needs at least one target and one action and no provider
+// remotes; a provider grant (read-grant-v2 only) needs remotes and no SSH
+// targets, actions or credentials; the older formats carry no v2 bindings,
+// and a read-schedule-v1 document carries none of the read-grant members.
+func structurallyValid(d permit.ReadGrantDoc) bool {
+	if d.RateProfile == permit.ProviderReadProfile || d.RateProfile == permit.ProviderTelemetryProfile {
+		return d.Grant == schedgrant.ReadFormat && len(d.ProviderTargets) > 0 &&
+			len(d.Targets) == 0 && len(d.Actions) == 0 && len(d.Credentials) == 0
+	}
+	if len(d.ProviderTargets) != 0 || len(d.Targets) == 0 || len(d.Actions) == 0 {
+		return false
+	}
+	switch d.Grant {
+	case schedgrant.ReadFormat:
+		return d.RateProfile == schedgrant.OrdinaryReadProfile || d.RateProfile == schedgrant.TelemetryReadProfile
+	case previousReadGrantFormat:
+		return d.RateProfile == "" && len(d.Credentials) == 0
+	default: // schedgrant.Format
+		return d.RateProfile == "" && len(d.Credentials) == 0 && d.Issuer == "" &&
+			d.CreatedUnix == 0 && d.Trigger == "" && d.RunBudget == 0
+	}
+}
+
+// matchesRegistry checks the document against the registry entry carrying
+// it: the same id and expiry, and (except for read-schedule-v1, which has no
+// created_unix) a document created no later than the registry's creation
+// time, which is when the executor approved and stored the grant.
+func matchesRegistry(d permit.ReadGrantDoc, g *pb.ReadGrant) bool {
+	if d.ID != g.GetGrantId() || d.ExpiryUnix != g.GetExpiryUnix() {
+		return false
+	}
+	if d.Grant == schedgrant.Format {
+		return true
+	}
+	return d.CreatedUnix > 0 && d.CreatedUnix <= g.GetCreatedUnix() && d.CreatedUnix < d.ExpiryUnix
+}
 
 // previousReadGrantFormat is the stored read-grant-v1 format the executor
 // still holds (permit keeps the constant unexported).
@@ -233,12 +311,22 @@ func knownReadGrantFormat(format string) bool {
 	return format == schedgrant.ReadFormat || format == previousReadGrantFormat || format == schedgrant.Format
 }
 
+// memberNameRe is the form of every member name in a read-grant document.
+var memberNameRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+
+// errJSONTooDeep reports a document nested beyond maxViewJSONDepth.
+var errJSONTooDeep = errors.New("the document is nested too deep")
+
 // maxViewJSONDepth bounds nesting while scanning the untrusted document.
 const maxViewJSONDepth = 16
 
 // rejectDuplicateMembers rejects a document that is not exactly one JSON
 // object or that repeats a member name in any object, so one document cannot
-// show one scope and carry another. It mirrors permit's unexported check.
+// show one scope and carry another. It mirrors permit's unexported check and
+// additionally requires every member name to be lowercase ASCII: the
+// document's members all are, and encoding/json matches names
+// case-insensitively (including Unicode folds such as U+212A for "k"), so
+// "GRANT" next to "grant" would otherwise silently override it.
 func rejectDuplicateMembers(raw []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	tok, err := dec.Token()
@@ -264,7 +352,7 @@ func walkJSONValue(dec *json.Decoder, first json.Token, depth int) error {
 		return nil
 	}
 	if depth > maxViewJSONDepth {
-		return errors.New("the document is nested too deep")
+		return errJSONTooDeep
 	}
 	seen := map[string]bool{}
 	for {
@@ -277,7 +365,7 @@ func walkJSONValue(dec *json.Decoder, first json.Token, depth int) error {
 		}
 		if d == '{' {
 			name, ok := tok.(string)
-			if !ok || seen[name] {
+			if !ok || !memberNameRe.MatchString(name) || seen[name] {
 				return errors.New("malformed object or duplicate member")
 			}
 			seen[name] = true

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -82,17 +83,31 @@ func readGrantHostsFrom(inv []inventory.Host) readGrantHosts {
 	return readGrantHosts{fakeHosts: m, all: inv}
 }
 
+// testGrantID, testDigest and testApprover are registry values in the
+// executor's real forms.
+const (
+	testGrantID  = "6f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f7"
+	testApprover = "cli:alice"
+)
+
+var testDigest = strings.Repeat("ab", 32)
+
 // grantDoc marshals a read-grant document with the given format, targets and
-// times (the times are also what the executor registry reports).
-func grantDoc(t *testing.T, format string, targets []string, created, expiry, revoked time.Time) []byte {
+// times, carrying testGrantID. Older formats carry only their own members.
+func grantDoc(t *testing.T, format string, targets []string, created, expiry, _ time.Time) []byte {
 	t.Helper()
+	return marshalDoc(t, grantDocValue(format, targets, created, expiry))
+}
+
+// grantDocValue is grantDoc before marshalling, for tests that alter it.
+func grantDocValue(format string, targets []string, created, expiry time.Time) permit.ReadGrantDoc {
 	var tg []canonical.Target
 	for _, id := range targets {
 		tg = append(tg, canonical.Target{HostID: id, HostKeyFingerprint: "fp"})
 	}
 	doc := permit.ReadGrantDoc{
 		Grant:       format,
-		ID:          "g1",
+		ID:          testGrantID,
 		Issuer:      "test",
 		CreatedUnix: created.Unix(),
 		ExpiryUnix:  expiry.Unix(),
@@ -106,6 +121,17 @@ func grantDoc(t *testing.T, format string, targets []string, created, expiry, re
 		RunBudget:    5,
 		RateProfile:  "ordinary",
 	}
+	switch format {
+	case "read-grant-v1":
+		doc.RateProfile = ""
+	case schedgrant.Format:
+		doc.RateProfile, doc.Issuer, doc.CreatedUnix, doc.Trigger, doc.RunBudget = "", "", 0, "", 0
+	}
+	return doc
+}
+
+func marshalDoc(t *testing.T, doc permit.ReadGrantDoc) []byte {
+	t.Helper()
 	raw, err := json.Marshal(doc)
 	if err != nil {
 		t.Fatal(err)
@@ -113,10 +139,11 @@ func grantDoc(t *testing.T, format string, targets []string, created, expiry, re
 	return raw
 }
 
-func pbGrant(id string, created, expiry, revoked time.Time, doc []byte) *pb.ReadGrant {
+// pbGrant is the registry entry the executor sends for doc.
+func pbGrant(created, expiry, revoked time.Time, doc []byte) *pb.ReadGrant {
 	return &pb.ReadGrant{
-		GrantId: id, GrantDigest: "digest-" + id, CanonicalGrant: doc,
-		ApprovedBy: "alice", CreatedUnix: created.Unix(),
+		GrantId: testGrantID, GrantDigest: testDigest, CanonicalGrant: doc,
+		ApprovedBy: testApprover, CreatedUnix: created.Unix(),
 		ExpiryUnix: expiry.Unix(), RevokedUnix: revokedUnix(revoked),
 	}
 }
@@ -180,7 +207,7 @@ func TestReadGrantsDecode(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &readGrantFake{fakeExec: &fakeExec{}, grants: []*pb.ReadGrant{
-				pbGrant("g1", tc.created, tc.expiry, tc.revoked, tc.doc),
+				pbGrant(tc.created, tc.expiry, tc.revoked, tc.doc),
 			}}
 			s := newReadGrantService(t, f, readGrantHostsFrom(inv))
 			s.now = func() time.Time { return now }
@@ -208,7 +235,7 @@ func TestReadGrantsDecode(t *testing.T) {
 			if got.Legacy != tc.wantLegacy {
 				t.Errorf("legacy = %v, want %v", got.Legacy, tc.wantLegacy)
 			}
-			if got.ID != "g1" || got.Digest != "digest-g1" || got.ApprovedBy != "alice" {
+			if got.ID != testGrantID || got.Digest != testDigest || got.ApprovedBy != testApprover {
 				t.Errorf("identity = %+v", got)
 			}
 			if tc.wantState == "invalid" {
@@ -239,21 +266,21 @@ func TestRevokeReadGrant(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 	s := New(context.Background(), f, db, readGrantHostsFrom(testInventory()), log)
 
-	if err := s.RevokeReadGrant(context.Background(), "alice", "grant-1"); err != nil {
+	if err := s.RevokeReadGrant(context.Background(), "alice", testGrantID); err != nil {
 		t.Fatalf("RevokeReadGrant: %v", err)
 	}
-	if f.revokeID != "grant-1" {
-		t.Errorf("revoke id = %q, want grant-1", f.revokeID)
+	if f.revokeID != testGrantID {
+		t.Errorf("revoke id = %q, want %s", f.revokeID, testGrantID)
 	}
-	if !strings.Contains(audit.String(), "read_grant_revoked") || !strings.Contains(audit.String(), "grant-1") {
-		t.Errorf("audit missing read_grant_revoked/grant-1: %s", audit.String())
+	if !strings.Contains(audit.String(), "read_grant_revoked") || !strings.Contains(audit.String(), testGrantID) {
+		t.Errorf("audit missing read_grant_revoked/%s: %s", testGrantID, audit.String())
 	}
 }
 
 func TestRevokeReadGrantNotFound(t *testing.T) {
 	f := &readGrantFake{fakeExec: &fakeExec{}, revokeErr: status.Error(codes.NotFound, "nope")}
 	s := newReadGrantService(t, f, readGrantHostsFrom(testInventory()))
-	if err := s.RevokeReadGrant(context.Background(), "alice", "missing"); err != ErrReadGrantNotFound {
+	if err := s.RevokeReadGrant(context.Background(), "alice", "0a1b2c3d-4e5f-4a6b-9c7d-8e9f0a1b2c3d"); err != ErrReadGrantNotFound {
 		t.Fatalf("want ErrReadGrantNotFound, got %v", err)
 	}
 }
@@ -261,8 +288,43 @@ func TestRevokeReadGrantNotFound(t *testing.T) {
 func TestRevokeReadGrantFailed(t *testing.T) {
 	f := &readGrantFake{fakeExec: &fakeExec{}, revokeErr: status.Error(codes.Internal, "boom")}
 	s := newReadGrantService(t, f, readGrantHostsFrom(testInventory()))
-	if err := s.RevokeReadGrant(context.Background(), "alice", "g1"); err != ErrReadGrantRevokeFailed {
+	if err := s.RevokeReadGrant(context.Background(), "alice", testGrantID); err != ErrReadGrantRevokeFailed {
 		t.Fatalf("want ErrReadGrantRevokeFailed, got %v", err)
+	}
+}
+
+// TestRevokeReadGrantRejectsBadID pins that an id not in the executor's
+// lowercase UUIDv4 form is neither sent to the executor nor audited.
+func TestRevokeReadGrantRejectsBadID(t *testing.T) {
+	var audit bytes.Buffer
+	f := &readGrantFake{fakeExec: &fakeExec{}}
+	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	s := New(context.Background(), f, db, readGrantHostsFrom(testInventory()), slog.New(slog.NewTextHandler(&audit, nil)))
+	for name, id := range map[string]string{
+		"empty":             "",
+		"not a uuid":        "grant-1",
+		"uppercase":         strings.ToUpper(testGrantID),
+		"trailing newline":  testGrantID + "\n",
+		"embedded newline":  testGrantID[:8] + "\n" + testGrantID[9:],
+		"control character": testGrantID + "\x1b",
+		"not version 4":     "6f1c2a3b-4d5e-1f60-8a71-92b3c4d5e6f7",
+		"oversize":          testGrantID + strings.Repeat("a", 300),
+		"bad utf8":          testGrantID[:35] + "\xff",
+	} {
+		f.revokeID = "unset"
+		if err := s.RevokeReadGrant(context.Background(), "alice", id); err != ErrReadGrantNotFound {
+			t.Errorf("%s: err %v, want ErrReadGrantNotFound", name, err)
+		}
+		if f.revokeID != "unset" {
+			t.Errorf("%s: id was sent to the executor", name)
+		}
+	}
+	if strings.Contains(audit.String(), "read_grant_revoked") {
+		t.Errorf("a rejected id was audited: %s", audit.String())
 	}
 }
 
@@ -297,91 +359,240 @@ func revokedUnix(t time.Time) int64 {
 	return t.Unix()
 }
 
-// TestDecodeReadGrantExecutorEncoding pins what the real executor sends:
-// RevokedUnix 0 is "not revoked", expiry is exclusive, and oversized or
-// malformed documents are invalid.
-func TestDecodeReadGrantExecutorEncoding(t *testing.T) {
-	now := time.Unix(1_800_000_000, 0)
-	var zero time.Time
-	doc := grantDoc(t, schedgrant.ReadFormat, []string{"web"}, now.Add(-time.Hour), now.Add(time.Hour), zero)
-	g := &pb.ReadGrant{GrantId: "g", CreatedUnix: now.Add(-time.Hour).Unix(), ExpiryUnix: now.Add(time.Hour).Unix(), RevokedUnix: 0, CanonicalGrant: doc}
-	if v := decodeReadGrant(g, nil, false, now); v.State != "active" || !v.Revoked.IsZero() {
-		t.Fatalf("RevokedUnix 0: state %q revoked %v, want active and zero", v.State, v.Revoked)
-	}
-	g.ExpiryUnix = now.Unix()
-	if v := decodeReadGrant(g, nil, false, now); v.State != "expired" {
-		t.Fatalf("at the expiry second: state %q, want expired", v.State)
-	}
-	g.ExpiryUnix = now.Add(time.Hour).Unix()
-	for name, raw := range map[string][]byte{
-		"oversize": append(append([]byte{}, doc...), make([]byte, permit.MaxReadGrantDocSize)...),
-		"bad utf8": {0xff, 0xfe},
-		"empty":    nil,
-	} {
-		g.CanonicalGrant = raw
-		if v := decodeReadGrant(g, nil, false, now); v.State != "invalid" || v.Hosts != nil {
-			t.Errorf("%s: state %q hosts %v, want invalid with no hosts", name, v.State, v.Hosts)
-		}
-	}
-	g.CanonicalGrant = grantDoc(t, schedgrant.ReadFormat, []string{""}, now.Add(-time.Hour), now.Add(time.Hour), zero)
-	if v := decodeReadGrant(g, nil, false, now); v.State != "invalid" {
-		t.Errorf("empty host id: state %q, want invalid", v.State)
+// decodeTimes are the document and registry times of the decode tests: the
+// document is created an hour before the executor approved it.
+var (
+	decodeNow     = time.Unix(1_800_000_000, 0)
+	decodeCreated = decodeNow.Add(-2 * time.Hour)
+	decodeStored  = decodeNow.Add(-time.Hour)
+	decodeExpiry  = decodeNow.Add(time.Hour)
+)
+
+// decodeRaw decodes raw as the registry entry for testGrantID.
+func decodeRaw(raw []byte) ReadGrantView {
+	return decodeReadGrant(pbGrant(decodeStored, decodeExpiry, time.Time{}, raw), nil, false, decodeNow)
+}
+
+// validDoc is an active SSH grant for host "web" at the decode times.
+func validDoc() permit.ReadGrantDoc {
+	return grantDocValue(schedgrant.ReadFormat, []string{"web"}, decodeCreated, decodeExpiry)
+}
+
+// wantInvalid fails unless v is invalid with nothing shown.
+func wantInvalid(t *testing.T, name string, v ReadGrantView) {
+	t.Helper()
+	if v.State != "invalid" || v.Hosts != nil || v.Actions != nil || v.Remotes != nil {
+		t.Errorf("%s: state %q hosts %v actions %v remotes %v, want invalid with nothing shown", name, v.State, v.Hosts, v.Actions, v.Remotes)
 	}
 }
 
-// TestDecodeReadGrantRejectsMalformedScope pins that a document whose scope
-// is ambiguous or not a valid identifier list is shown as invalid, never as
-// a silently repaired scope.
-func TestDecodeReadGrantRejectsMalformedScope(t *testing.T) {
-	now := time.Unix(1_800_000_000, 0)
-	var zero time.Time
-	created, expiry := now.Add(-time.Hour), now.Add(time.Hour)
-	valid := grantDoc(t, schedgrant.ReadFormat, []string{"web"}, created, expiry, zero)
-	withActions := func(ids ...string) []byte {
-		var doc map[string]any
-		if err := json.Unmarshal(valid, &doc); err != nil {
-			t.Fatal(err)
-		}
-		var acts []map[string]string
-		for _, id := range ids {
-			acts = append(acts, map[string]string{"action_id": id, "module_version": "1.0.0", "artifact_sha256": "sha", "parameters_hash": "ph"})
-		}
-		doc["actions"] = acts
-		raw, err := json.Marshal(doc)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return raw
+// TestDecodeReadGrantExecutorEncoding pins what the real executor sends:
+// RevokedUnix 0 is "not revoked" and expiry is exclusive.
+func TestDecodeReadGrantExecutorEncoding(t *testing.T) {
+	g := pbGrant(decodeStored, decodeExpiry, time.Time{}, marshalDoc(t, validDoc()))
+	if g.RevokedUnix != 0 {
+		t.Fatalf("helper sends RevokedUnix %d, want 0", g.RevokedUnix)
 	}
-	many := make([]string, permit.MaxReadGrantTargets+1)
-	for i := range many {
-		many[i] = "h" + strconv.Itoa(i)
+	if v := decodeReadGrant(g, nil, false, decodeNow); v.State != "active" || !v.Revoked.IsZero() {
+		t.Fatalf("RevokedUnix 0: state %q revoked %v, want active and zero", v.State, v.Revoked)
 	}
+	if v := decodeReadGrant(g, nil, false, decodeExpiry); v.State != "expired" {
+		t.Fatalf("at the expiry second: state %q, want expired", v.State)
+	}
+	if v := decodeReadGrant(g, nil, false, decodeExpiry.Add(-time.Second)); v.State != "active" {
+		t.Fatalf("one second before expiry: state %q, want active", v.State)
+	}
+	g.RevokedUnix = decodeNow.Add(-time.Minute).Unix()
+	if v := decodeReadGrant(g, nil, false, decodeNow); v.State != "revoked" {
+		t.Fatalf("revoked grant: state %q, want revoked", v.State)
+	}
+}
+
+// TestDecodeReadGrantLimits pins each size and count limit with a document
+// that is otherwise valid, so each case fails only on its own check.
+func TestDecodeReadGrantLimits(t *testing.T) {
+	oversize := validDoc()
+	oversize.Issuer = strings.Repeat("a", permit.MaxReadGrantDocSize)
+	targets := validDoc()
+	targets.Targets = nil
+	for i := 0; i <= permit.MaxReadGrantTargets; i++ {
+		targets.Targets = append(targets.Targets, canonical.Target{HostID: "h" + strconv.Itoa(i), HostKeyFingerprint: "fp"})
+	}
+	actions := validDoc()
+	actions.Actions = nil
+	for i := 0; i <= permit.MaxReadGrantActions; i++ {
+		actions.Actions = append(actions.Actions, permit.ReadGrantAction{ActionID: "core.a" + strconv.Itoa(i), ModuleVersion: "1.0.0"})
+	}
+	remotes := providerDoc()
+	remotes.ProviderTargets = nil
+	for i := 0; i <= permit.MaxProviderTargets; i++ {
+		remotes.ProviderTargets = append(remotes.ProviderTargets, permit.ProviderTarget{RemoteID: "pve-" + strconv.Itoa(i)})
+	}
+	cases := map[string][]byte{
+		"oversize":         marshalDoc(t, oversize),
+		"bad utf8":         bytes.Replace(marshalDoc(t, validDoc()), []byte(`"issuer":"test"`), []byte("\"issuer\":\"te\xffst\""), 1),
+		"empty":            nil,
+		"too many targets": marshalDoc(t, targets),
+		"too many actions": marshalDoc(t, actions),
+		"too many remotes": marshalDoc(t, remotes),
+	}
+	for name, raw := range cases {
+		wantInvalid(t, name, decodeRaw(raw))
+	}
+	if v := decodeRaw(marshalDoc(t, validDoc())); v.State != "active" {
+		t.Fatalf("control document: state %q, want active", v.State)
+	}
+	if v := decodeRaw(marshalDoc(t, providerDoc())); v.State != "active" {
+		t.Fatalf("control provider document: state %q, want active", v.State)
+	}
+}
+
+// TestRejectDuplicateMembersDepth pins the nesting bound of the member scan
+// (no document member accepts arbitrary values, so it is tested directly).
+func TestRejectDuplicateMembersDepth(t *testing.T) {
+	deep := []byte(`{"a":` + strings.Repeat("[", maxViewJSONDepth+1) + strings.Repeat("]", maxViewJSONDepth+1) + `}`)
+	if err := rejectDuplicateMembers(deep); !errors.Is(err, errJSONTooDeep) {
+		t.Fatalf("deep document: err %v, want errJSONTooDeep", err)
+	}
+	ok := []byte(`{"a":` + strings.Repeat("[", maxViewJSONDepth-1) + strings.Repeat("]", maxViewJSONDepth-1) + `}`)
+	if err := rejectDuplicateMembers(ok); err != nil {
+		t.Fatalf("document within the bound: %v", err)
+	}
+}
+
+// TestDecodeReadGrantRejectsAmbiguousMembers pins that a member cannot be
+// repeated or spelled in another case: encoding/json matches names
+// case-insensitively, so either would let a hidden member win.
+func TestDecodeReadGrantRejectsAmbiguousMembers(t *testing.T) {
+	valid := marshalDoc(t, validDoc())
 	cases := map[string][]byte{
 		"duplicate member":    append([]byte(`{"grant":"read-grant-v2",`), valid[1:]...),
 		"duplicate nested":    bytes.Replace(valid, []byte(`"host_id":"web"`), []byte(`"host_id":"web","host_id":"db"`), 1),
+		"case duplicate":      bytes.Replace(valid, []byte(`"issuer":"test"`), []byte(`"issuer":"test","ISSUER":"x"`), 1),
+		"case duplicate host": bytes.Replace(valid, []byte(`"host_id":"web"`), []byte(`"host_id":"web","Host_ID":"db"`), 1),
+		"uppercase name":      bytes.Replace(valid, []byte(`"issuer":`), []byte(`"Issuer":`), 1),
+		"unicode-folded name": bytes.Replace(valid, []byte(`"host_key_fingerprint":`), []byte("\"host_\u212aey_fingerprint\":"), 1),
 		"trailing data":       append(append([]byte{}, valid...), []byte(` {}`)...),
 		"top-level array":     []byte(`[1]`),
-		"duplicate host":      grantDoc(t, schedgrant.ReadFormat, []string{"web", "web"}, created, expiry, zero),
-		"uppercase host":      grantDoc(t, schedgrant.ReadFormat, []string{"WEB"}, created, expiry, zero),
-		"overlong host":       grantDoc(t, schedgrant.ReadFormat, []string{strings.Repeat("a", 64)}, created, expiry, zero),
-		"non-ascii host":      grantDoc(t, schedgrant.ReadFormat, []string{"wéb"}, created, expiry, zero),
-		"too many targets":    grantDoc(t, schedgrant.ReadFormat, many, created, expiry, zero),
-		"duplicate action":    withActions("core.facts", "core.facts"),
-		"empty action":        withActions(""),
-		"malformed action":    withActions("Core Facts"),
-		"too many actions":    withActions(strings.Split(strings.Repeat("core.facts,", permit.MaxReadGrantActions+1), ",")[:permit.MaxReadGrantActions+1]...),
-		"deeply nested value": bytes.Replace(valid, []byte(`"issuer":"test"`), []byte(`"issuer":`+strings.Repeat("[", 40)+strings.Repeat("]", 40)), 1),
+		"invalid json":        []byte("not a document"),
+		"unknown member":      bytes.Replace(valid, []byte(`"issuer":"test"`), []byte(`"issuer":"test","extra":1`), 1),
 	}
 	for name, raw := range cases {
-		g := &pb.ReadGrant{GrantId: "g", CreatedUnix: created.Unix(), ExpiryUnix: expiry.Unix(), CanonicalGrant: raw}
-		if v := decodeReadGrant(g, nil, false, now); v.State != "invalid" || v.Hosts != nil || v.Actions != nil {
-			t.Errorf("%s: state %q hosts %v actions %v, want invalid with nothing shown", name, v.State, v.Hosts, v.Actions)
+		wantInvalid(t, name, decodeRaw(raw))
+	}
+}
+
+// TestDecodeReadGrantRejectsMalformedScope pins that invalid or repeated
+// identifiers mark the grant invalid, never a silently repaired scope.
+func TestDecodeReadGrantRejectsMalformedScope(t *testing.T) {
+	withHosts := func(ids ...string) []byte {
+		d := validDoc()
+		d.Targets = nil
+		for _, id := range ids {
+			d.Targets = append(d.Targets, canonical.Target{HostID: id, HostKeyFingerprint: "fp"})
+		}
+		return marshalDoc(t, d)
+	}
+	withActions := func(ids ...string) []byte {
+		d := validDoc()
+		d.Actions = nil
+		for _, id := range ids {
+			d.Actions = append(d.Actions, permit.ReadGrantAction{ActionID: id, ModuleVersion: "1.0.0"})
+		}
+		return marshalDoc(t, d)
+	}
+	withRemotes := func(ids ...string) []byte {
+		d := providerDoc()
+		d.ProviderTargets = nil
+		for _, id := range ids {
+			d.ProviderTargets = append(d.ProviderTargets, permit.ProviderTarget{RemoteID: id})
+		}
+		return marshalDoc(t, d)
+	}
+	cases := map[string][]byte{
+		"duplicate host":   withHosts("web", "web"),
+		"empty host":       withHosts(""),
+		"uppercase host":   withHosts("WEB"),
+		"overlong host":    withHosts(strings.Repeat("a", 64)),
+		"non-ascii host":   withHosts("wéb"),
+		"duplicate action": withActions("core.facts", "core.facts"),
+		"empty action":     withActions(""),
+		"malformed action": withActions("Core Facts"),
+		"duplicate remote": withRemotes("pve-a", "pve-a"),
+		"malformed remote": withRemotes("PVE A"),
+	}
+	for name, raw := range cases {
+		wantInvalid(t, name, decodeRaw(raw))
+	}
+}
+
+// TestDecodeReadGrantRejectsImpossibleStructure pins that documents no
+// executor could have approved are invalid.
+func TestDecodeReadGrantRejectsImpossibleStructure(t *testing.T) {
+	alter := func(base permit.ReadGrantDoc, f func(*permit.ReadGrantDoc)) []byte {
+		f(&base)
+		return marshalDoc(t, base)
+	}
+	remote := []permit.ProviderTarget{{RemoteID: "pve-a"}}
+	cases := map[string][]byte{
+		"ssh without targets":        alter(validDoc(), func(d *permit.ReadGrantDoc) { d.Targets = nil }),
+		"ssh without actions":        alter(validDoc(), func(d *permit.ReadGrantDoc) { d.Actions = nil }),
+		"ssh with provider targets":  alter(validDoc(), func(d *permit.ReadGrantDoc) { d.ProviderTargets = remote }),
+		"unknown rate profile":       alter(validDoc(), func(d *permit.ReadGrantDoc) { d.RateProfile = "fast" }),
+		"provider without remotes":   alter(providerDoc(), func(d *permit.ReadGrantDoc) { d.ProviderTargets = nil }),
+		"provider with ssh targets":  alter(providerDoc(), func(d *permit.ReadGrantDoc) { d.Targets = []canonical.Target{{HostID: "web"}} }),
+		"provider with actions":      alter(providerDoc(), func(d *permit.ReadGrantDoc) { d.Actions = validDoc().Actions }),
+		"provider on read-grant-v1":  alter(providerDoc(), func(d *permit.ReadGrantDoc) { d.Grant = "read-grant-v1" }),
+		"read-grant-v1 with profile": alter(grantDocValue("read-grant-v1", []string{"web"}, decodeCreated, decodeExpiry), func(d *permit.ReadGrantDoc) { d.RateProfile = "ordinary" }),
+		"schedule with remotes":      alter(grantDocValue(schedgrant.Format, []string{"web"}, decodeCreated, decodeExpiry), func(d *permit.ReadGrantDoc) { d.ProviderTargets = remote }),
+		"schedule with v2 members":   alter(grantDocValue(schedgrant.Format, []string{"web"}, decodeCreated, decodeExpiry), func(d *permit.ReadGrantDoc) { d.Issuer = "test" }),
+		"schedule with provider kind": alter(grantDocValue(schedgrant.Format, nil, decodeCreated, decodeExpiry), func(d *permit.ReadGrantDoc) {
+			d.Actions = nil
+			d.RateProfile = permit.ProviderReadProfile
+			d.ProviderTargets = remote
+		}),
+	}
+	for name, raw := range cases {
+		wantInvalid(t, name, decodeRaw(raw))
+	}
+}
+
+// TestDecodeReadGrantChecksRegistry pins that the registry fields are
+// validated and must agree with the document they carry.
+func TestDecodeReadGrantChecksRegistry(t *testing.T) {
+	raw := marshalDoc(t, validDoc())
+	cases := map[string]func(*pb.ReadGrant){
+		"id differs from doc":     func(g *pb.ReadGrant) { g.GrantId = "0a1b2c3d-4e5f-4a6b-9c7d-8e9f0a1b2c3d" },
+		"expiry differs from doc": func(g *pb.ReadGrant) { g.ExpiryUnix++ },
+		"stored before created":   func(g *pb.ReadGrant) { g.CreatedUnix = decodeCreated.Unix() - 1 },
+		"digest not hex":          func(g *pb.ReadGrant) { g.GrantDigest = "digest-g1" },
+		"digest uppercase":        func(g *pb.ReadGrant) { g.GrantDigest = strings.ToUpper(testDigest) },
+		"approver empty":          func(g *pb.ReadGrant) { g.ApprovedBy = "" },
+		"approver oversize":       func(g *pb.ReadGrant) { g.ApprovedBy = "cli:" + strings.Repeat("a", maxApprovedByLen) },
+		"approver bad utf8":       func(g *pb.ReadGrant) { g.ApprovedBy = "cli:\xff" },
+		"approver newline":        func(g *pb.ReadGrant) { g.ApprovedBy = "cli:alice\nwebauthn:x" },
+		"approver bidi override":  func(g *pb.ReadGrant) { g.ApprovedBy = "cli:\u202eecila" },
+	}
+	for name, mutate := range cases {
+		g := pbGrant(decodeStored, decodeExpiry, time.Time{}, raw)
+		mutate(g)
+		wantInvalid(t, name, decodeReadGrant(g, nil, false, decodeNow))
+	}
+	// A malformed registry id is invalid even when the document agrees.
+	for name, id := range map[string]string{"id not a uuid": "g1", "uppercase id": strings.ToUpper(testGrantID), "id with newline": testGrantID + "\n"} {
+		d := validDoc()
+		d.ID = id
+		g := pbGrant(decodeStored, decodeExpiry, time.Time{}, marshalDoc(t, d))
+		g.GrantId = id
+		v := decodeReadGrant(g, nil, false, decodeNow)
+		wantInvalid(t, name, v)
+		if v.ID != "" {
+			t.Errorf("%s: malformed id %q is shown", name, v.ID)
 		}
 	}
-	g := &pb.ReadGrant{GrantId: "g", CreatedUnix: created.Unix(), ExpiryUnix: expiry.Unix(), CanonicalGrant: valid}
-	if v := decodeReadGrant(g, nil, false, now); v.State != "active" {
-		t.Fatalf("control document: state %q, want active", v.State)
+	g := pbGrant(decodeCreated, decodeExpiry, time.Time{}, raw)
+	if v := decodeReadGrant(g, nil, false, decodeNow); v.State != "active" {
+		t.Fatalf("stored at the creation second: state %q, want active", v.State)
 	}
 }
 
@@ -389,75 +600,33 @@ func TestDecodeReadGrantRejectsMalformedScope(t *testing.T) {
 // the stored read-grant-v1 is a normal grant, and a legacy read-schedule-v1
 // document is never shown as active, whatever its times.
 func TestDecodeReadGrantFormats(t *testing.T) {
-	now := time.Unix(1_800_000_000, 0)
-	var zero time.Time
-	created, expiry := now.Add(-time.Hour), now.Add(time.Hour)
-	v1 := grantDoc(t, "read-grant-v1", []string{"web"}, created, expiry, zero)
-	g := &pb.ReadGrant{GrantId: "g", CreatedUnix: created.Unix(), ExpiryUnix: expiry.Unix(), CanonicalGrant: v1}
-	if v := decodeReadGrant(g, nil, false, now); v.State != "active" || v.Legacy {
+	v1 := grantDoc(t, "read-grant-v1", []string{"web"}, decodeCreated, decodeExpiry, time.Time{})
+	if v := decodeRaw(v1); v.State != "active" || v.Legacy {
 		t.Errorf("read-grant-v1: state %q legacy %v, want active and not legacy", v.State, v.Legacy)
 	}
-	g.CanonicalGrant = grantDoc(t, schedgrant.Format, []string{"web"}, created, expiry, zero)
-	for _, exp := range []time.Time{expiry, now.Add(-time.Minute)} {
-		g.ExpiryUnix = exp.Unix()
-		if v := decodeReadGrant(g, nil, false, now); v.State == "active" || !v.Legacy {
+	for _, exp := range []time.Time{decodeExpiry, decodeNow.Add(-time.Minute)} {
+		doc := grantDoc(t, schedgrant.Format, []string{"web"}, decodeCreated, exp, time.Time{})
+		v := decodeReadGrant(pbGrant(decodeStored, exp, time.Time{}, doc), nil, false, decodeNow)
+		if v.State == "active" || v.State == "invalid" || !v.Legacy {
 			t.Errorf("read-schedule-v1 expiring %v: state %q legacy %v, want non-active legacy", exp, v.State, v.Legacy)
 		}
 	}
 }
 
+// providerDoc is a valid provider grant over two PVE remotes.
+func providerDoc() permit.ReadGrantDoc {
+	return permit.ReadGrantDoc{Grant: schedgrant.ReadFormat, ID: testGrantID, Issuer: "test", CreatedUnix: decodeCreated.Unix(),
+		ExpiryUnix: decodeExpiry.Unix(), Trigger: permit.TriggerBoth, MinIntervalS: 900, RunBudget: 5,
+		RateProfile:     permit.ProviderReadProfile,
+		ProviderTargets: []permit.ProviderTarget{{RemoteID: "pve-b"}, {RemoteID: "pve-a"}}}
+}
+
 // TestDecodeReadGrantProviderScope pins that a provider grant shows its PVE
 // remotes instead of an empty SSH host list.
 func TestDecodeReadGrantProviderScope(t *testing.T) {
-	now := time.Unix(1_800_000_000, 0)
-	created, expiry := now.Add(-time.Hour), now.Add(time.Hour)
-	doc := func(remotes ...string) []byte {
-		d := permit.ReadGrantDoc{Grant: schedgrant.ReadFormat, ID: "g1", Issuer: "test", CreatedUnix: created.Unix(),
-			ExpiryUnix: expiry.Unix(), Trigger: permit.TriggerBoth, RunBudget: 5, RateProfile: permit.ProviderReadProfile,
-			Actions: []permit.ReadGrantAction{{ActionID: "pve.inventory", ModuleVersion: "1.0.0"}}}
-		for _, r := range remotes {
-			d.ProviderTargets = append(d.ProviderTargets, permit.ProviderTarget{RemoteID: r})
-		}
-		raw, err := json.Marshal(d)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return raw
-	}
-	g := &pb.ReadGrant{GrantId: "g", CreatedUnix: created.Unix(), ExpiryUnix: expiry.Unix(), CanonicalGrant: doc("pve-b", "pve-a")}
-	v := decodeReadGrant(g, testInventory(), true, now)
+	g := pbGrant(decodeStored, decodeExpiry, time.Time{}, marshalDoc(t, providerDoc()))
+	v := decodeReadGrant(g, testInventory(), true, decodeNow)
 	if v.State != "active" || v.ScopeKind != "provider" || !sameStrings(v.Remotes, []string{"pve-a", "pve-b"}) || len(v.Hosts) != 0 {
 		t.Fatalf("provider grant: state %q scope %q remotes %v hosts %v", v.State, v.ScopeKind, v.Remotes, v.Hosts)
-	}
-	for name, raw := range map[string][]byte{"duplicate remote": doc("pve-a", "pve-a"), "malformed remote": doc("PVE A")} {
-		g.CanonicalGrant = raw
-		if v := decodeReadGrant(g, nil, false, now); v.State != "invalid" || v.Remotes != nil {
-			t.Errorf("%s: state %q remotes %v, want invalid", name, v.State, v.Remotes)
-		}
-	}
-}
-
-// TestRevokeReadGrantRejectsBadID pins that a malformed id is neither sent
-// to the executor nor written to the audit log.
-func TestRevokeReadGrantRejectsBadID(t *testing.T) {
-	var audit bytes.Buffer
-	f := &readGrantFake{fakeExec: &fakeExec{}}
-	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	s := New(context.Background(), f, db, readGrantHostsFrom(testInventory()), slog.New(slog.NewTextHandler(&audit, nil)))
-	for name, id := range map[string]string{"empty": "", "oversize": strings.Repeat("a", maxViewIDLen+1), "bad utf8": "g\xff"} {
-		f.revokeID = "unset"
-		if err := s.RevokeReadGrant(context.Background(), "alice", id); err != ErrReadGrantNotFound {
-			t.Errorf("%s: err %v, want ErrReadGrantNotFound", name, err)
-		}
-		if f.revokeID != "unset" {
-			t.Errorf("%s: id was sent to the executor", name)
-		}
-	}
-	if strings.Contains(audit.String(), "read_grant_revoked") {
-		t.Errorf("a rejected id was audited: %s", audit.String())
 	}
 }
