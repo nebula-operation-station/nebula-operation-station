@@ -452,6 +452,55 @@ func backupLine(f pveinventory.Freshness, now time.Time) chartLine {
 	return l
 }
 
+// maxChartGuestConfigReads bounds the per-guest config reads of one chart
+// page for the passthrough lines; guests beyond it get no passthrough
+// line (the guest box itself is unaffected).
+const maxChartGuestConfigReads = 200
+
+// nvidiaVendor is NVIDIA's PCI vendor ID.
+const nvidiaVendor = "10de"
+
+// chartGuestConfigReader is the optional stored guest config read of the
+// PVE store. The chart uses it for the hostpci passthrough lines when the
+// configured store provides it; otherwise those lines are hidden.
+type chartGuestConfigReader interface {
+	GetGuestConfig(ctx context.Context, remoteID string, vmid, generation uint64) (pveinventory.GuestConfig, error)
+}
+
+// passthroughLines builds the node-box lines for a guest's NVIDIA hostpci
+// passthrough devices (ADR 0006 P1-34: "GPU → guest (VMID)"). The device
+// is named by its PCI vendor:device ID (the node's own pci.inventory is
+// not linked to the PVE node); the node has no driver for a passed-through
+// device, so the line says so and never implies host telemetry. Non-NVIDIA
+// devices are left out; an old config is stale.
+func passthroughLines(cfg pveinventory.GuestConfig, g pveGuestView, now time.Time, staleAfter time.Duration) []chartLine {
+	var lines []chartLine
+	for _, p := range cfg.HostPCI {
+		// Device is validated on ingest as PCI-vvvv:dddd:bb:dd.f.
+		rest, ok := strings.CutPrefix(p.Device, "PCI-")
+		if !ok {
+			continue
+		}
+		parts := strings.SplitN(rest, ":", 3)
+		if len(parts) != 3 || parts[0] != nvidiaVendor {
+			continue
+		}
+		l := chartLine{
+			Kind:  LineGPU,
+			Label: "GPU",
+			Text:  fmt.Sprintf("NVIDIA %s:%s (%s) → %s (%d) · passthrough, no host telemetry", parts[0], parts[1], parts[2], g.Name, g.VMID),
+			Title: p.ID + " " + p.Device,
+			State: StateUnknown,
+		}
+		if isStale(cfg.ObservedAt, now, staleAfter) {
+			l.Text = fmt.Sprintf("NVIDIA %s:%s (%s) → %s (%d) · config stale", parts[0], parts[1], parts[2], g.Name, g.VMID)
+			l.State = StateStale
+		}
+		lines = append(lines, l)
+	}
+	return lines
+}
+
 // worstClass maps a worst state to the box border class: red for
 // critical, yellow for warning, grey otherwise (unknown/stale are labelled
 // on their lines and never turn the border healthy-green).
@@ -492,7 +541,8 @@ func guestLines(res chartResults, g pveGuestView, now time.Time) []chartLine {
 // Backup lines need the optional store read; without it they are hidden.
 func (h *Handler) addPVELines(ctx context.Context, nodes []pveNodeView, res chartResults, now time.Time) {
 	backups, _ := h.pve.(chartBackupReader)
-	reads := 0
+	configs, _ := h.pve.(chartGuestConfigReader)
+	reads, configReads := 0, 0
 	for i := range nodes {
 		n := &nodes[i]
 		worst := n.worst
@@ -503,7 +553,18 @@ func (h *Handler) addPVELines(ctx context.Context, nodes []pveNodeView, res char
 				g.Lines = append(g.Lines, h.guestBackupLine(ctx, backups, n.remoteID, *g, now, &reads))
 			}
 			worst = worstState(append(lineStates(g.Lines), worst)...)
+			if configs != nil && configReads < maxChartGuestConfigReads {
+				configReads++
+				cfg, err := configs.GetGuestConfig(ctx, n.remoteID, g.VMID, g.generation)
+				if err != nil {
+					// No stored config (e.g. LXC, not yet collected):
+					// no passthrough line.
+					continue
+				}
+				n.Lines = append(n.Lines, passthroughLines(cfg, *g, now, indicatorStaleAfter)...)
+			}
 		}
+		worst = worstState(append(lineStates(n.Lines), worst)...)
 		n.worst = worst
 		n.WorstClass = worstClass(worst)
 		n.Expanded = n.WorstClass != "chart__node--neutral"

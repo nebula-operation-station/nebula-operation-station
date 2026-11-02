@@ -25,6 +25,7 @@
             <span class="chart__name" title="{{.Name}}">{{.Name}}</span>
           </span>
           <span class="chart__sub">PVE node{{if .Stale}} · stale{{end}}</span>
+          {{template "chart_lines" .Lines}}
         </summary>
         <div class="chart__children">
           <ul class="chart__list">

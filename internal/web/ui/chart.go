@@ -160,6 +160,9 @@ type pveNodeView struct {
 	// Storages are the storage (datastore) boxes, sorted after the
 	// guests.
 	Storages []pveStorageView
+	// Lines are the node's extra lines: NVIDIA GPUs passed through to its
+	// guests (hostpci targets).
+	Lines []chartLine
 	// worst is the tree's worst state of the node and its descendants;
 	// the guest extra lines are folded in by addPVELines.
 	worst IndicatorState

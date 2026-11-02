@@ -12,6 +12,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
 
 // plainPVEStore is a PVE store without the backup freshness read.
@@ -69,15 +70,10 @@ func backupTree(n int) pveinventory.Tree {
 }
 
 // backupBody renders the chart with the given PVE store and tree.
-func backupBody(t *testing.T, store any, tree pveinventory.Tree) string {
+func backupBody(t *testing.T, store ui.PVEStore, tree pveinventory.Tree) string {
 	t.Helper()
 	o := linesOptions(t, map[string]map[string]executions.LastResultRow{})
-	switch s := store.(type) {
-	case *backupPVEStore:
-		o.PVE = s
-	case plainPVEStore:
-		o.PVE = s
-	}
+	o.PVE = store
 	o.PVEChart = func(context.Context) (pveinventory.Tree, error) { return tree, nil }
 	return getBody(t, newTestHandler(t, o).Handler(), "/inventory/chart")
 }
@@ -135,7 +131,7 @@ func TestChartBackupLineHiddenWithoutSource(t *testing.T) {
 	if body := backupBody(t, plainPVEStore{}, backupTree(2)); strings.Contains(body, "chart__line--backup") {
 		t.Error("backup line rendered although the store has no freshness read")
 	}
-	if body := backupBody(t, nil, backupTree(2)); strings.Contains(body, "chart__line--backup") {
+	if body := backupBody(t, nil, backupTree(2)); strings.Contains(body, "chart__line--") {
 		t.Error("backup line rendered without a PVE store")
 	}
 }

@@ -11,6 +11,9 @@ import (
 // signature drift must fail the build, not silently hide the backup lines.
 var _ chartBackupReader = (*pveinventory.Store)(nil)
 
+// The same holds for the stored guest config read (passthrough lines).
+var _ chartGuestConfigReader = (*pveinventory.Store)(nil)
+
 func TestShortImageRef(t *testing.T) {
 	digest := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	cases := map[string]string{
