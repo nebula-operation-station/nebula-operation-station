@@ -129,13 +129,13 @@ func TestGuestProvisionRiskFloorRules(t *testing.T) {
 		linked PveLinkedHosts
 		want   canonical.Risk
 	}{
-		{"low remote and node", map[canonical.Target]canonical.Risk{remote: canonical.RiskLow, node: canonical.RiskLow}, nil, canonical.RiskMedium},
-		{"medium remote and node", map[canonical.Target]canonical.Risk{remote: canonical.RiskMedium, node: canonical.RiskMedium}, nil, canonical.RiskMedium},
-		{"unknown node", map[canonical.Target]canonical.Risk{remote: canonical.RiskLow}, nil, canonical.RiskHigh},
-		{"unknown remote", map[canonical.Target]canonical.Risk{node: canonical.RiskLow}, nil, canonical.RiskHigh},
-		{"high node", map[canonical.Target]canonical.Risk{remote: canonical.RiskLow, node: canonical.RiskHigh}, nil, canonical.RiskHigh},
-		{"high remote", map[canonical.Target]canonical.Risk{remote: canonical.RiskHigh, node: canonical.RiskMedium}, nil, canonical.RiskHigh},
-		{"critical remote", map[canonical.Target]canonical.Risk{remote: canonical.RiskCritical, node: canonical.RiskLow}, nil, canonical.RiskCritical},
+		{"low remote and node", map[canonical.Target]canonical.Risk{remote: canonical.RiskLow, node: canonical.RiskLow}, linkedOf(), canonical.RiskMedium},
+		{"medium remote and node", map[canonical.Target]canonical.Risk{remote: canonical.RiskMedium, node: canonical.RiskMedium}, linkedOf(), canonical.RiskMedium},
+		{"unknown node", map[canonical.Target]canonical.Risk{remote: canonical.RiskLow}, linkedOf(), canonical.RiskHigh},
+		{"unknown remote", map[canonical.Target]canonical.Risk{node: canonical.RiskLow}, linkedOf(), canonical.RiskHigh},
+		{"high node", map[canonical.Target]canonical.Risk{remote: canonical.RiskLow, node: canonical.RiskHigh}, linkedOf(), canonical.RiskHigh},
+		{"high remote", map[canonical.Target]canonical.Risk{remote: canonical.RiskHigh, node: canonical.RiskMedium}, linkedOf(), canonical.RiskHigh},
+		{"critical remote", map[canonical.Target]canonical.Risk{remote: canonical.RiskCritical, node: canonical.RiskLow}, linkedOf(), canonical.RiskCritical},
 		{"low linked host", map[canonical.Target]canonical.Risk{remote: canonical.RiskLow, node: canonical.RiskLow, linked: canonical.RiskLow}, linkedOf(linked), canonical.RiskMedium},
 		{"unknown linked host", map[canonical.Target]canonical.Risk{remote: canonical.RiskLow, node: canonical.RiskLow}, linkedOf(linked), canonical.RiskHigh},
 		{"critical linked host", map[canonical.Target]canonical.Risk{remote: canonical.RiskLow, node: canonical.RiskLow, linked: canonical.RiskCritical}, linkedOf(linked), canonical.RiskCritical},
@@ -156,15 +156,19 @@ func TestGuestProvisionRiskFloorRules(t *testing.T) {
 	low := critSource{artifact: canonical.RiskLow, hosts: map[canonical.Target]canonical.Risk{remote: canonical.RiskLow, node: canonical.RiskLow}}
 	pol, _ := riskpolicy.New(low)
 	// Base MEDIUM, never LOW, even for an artifact trusted as LOW.
-	if r, _, _ := (GuestProvisionRiskFloor{Next: pol}).MinimumRisk(req, []canonical.Target{node}); r != canonical.RiskMedium {
+	if r, _, _ := (GuestProvisionRiskFloor{Next: pol, Linked: linkedOf()}).MinimumRisk(req, []canonical.Target{node}); r != canonical.RiskMedium {
 		t.Fatalf("low artifact = %s", r)
 	}
 	// Parameters the executor never built get no extra raise of their own:
 	// only criticality counts (ADR 0008 decision 2).
 	foreign := req
 	foreign.ParametersHash = strings.Repeat("3", 64)
-	if r, _, _ := (GuestProvisionRiskFloor{Next: pol}).MinimumRisk(foreign, []canonical.Target{node}); r != canonical.RiskMedium {
+	if r, _, _ := (GuestProvisionRiskFloor{Next: pol, Linked: linkedOf()}).MinimumRisk(foreign, []canonical.Target{node}); r != canonical.RiskMedium {
 		t.Fatalf("unbuilt parameters = %s", r)
+	}
+	// Without a linked-host source the linked hosts are unknown: HIGH.
+	if r, _, _ := (GuestProvisionRiskFloor{Next: pol}).MinimumRisk(req, []canonical.Target{node}); r != canonical.RiskHigh {
+		t.Fatalf("no linked-host source = %s, want HIGH", r)
 	}
 	// A failing linked-host source fails closed.
 	failing := func(canonical.Request, canonical.Target) ([]canonical.Target, error) { return nil, errors.New("down") }

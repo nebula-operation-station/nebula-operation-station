@@ -137,13 +137,16 @@ type PveLinkedHosts func(r canonical.Request, node canonical.Target) ([]canonica
 //   - Next for the bound node target, the remote's risk target and the
 //     hosts Linked returns for the node, so unknown criticality is HIGH
 //     and a recorded HIGH or CRITICAL node, remote or linked host raises
-//     the floor to it; without Next, HIGH.
+//     the floor to it; without Next or without Linked, HIGH (a node that
+//     is also an enrolled host defaults to HIGH, spec 11, so an unknown
+//     set of linked hosts must not be read as "none").
 //
 // Nothing else raises it: no capacity, PCI or profile fact. Other requests
 // get Next's floor unchanged, or HIGH without Next.
 type GuestProvisionRiskFloor struct {
 	Next permit.RiskPolicy
-	// Linked, if set, names the managed hosts linked to the node.
+	// Linked names the managed hosts linked to the node (an empty result
+	// means none). Without it the floor is HIGH: fail closed.
 	Linked PveLinkedHosts
 }
 
@@ -160,6 +163,9 @@ func (p GuestProvisionRiskFloor) MinimumRisk(r canonical.Request, targets []cano
 	if p.Next == nil {
 		return canonical.RiskHigh, strings.Join(append(reasons, "no criticality source: unknown criticality is HIGH"), "; "), nil
 	}
+	if p.Linked == nil {
+		return canonical.RiskHigh, strings.Join(append(reasons, "no linked-host source: unknown criticality is HIGH"), "; "), nil
+	}
 	if len(targets) == 0 {
 		// No node target: its criticality is unknown.
 		return canonical.RiskHigh, strings.Join(append(reasons, "no node target: unknown criticality is HIGH"), "; "), nil
@@ -171,13 +177,11 @@ func (p GuestProvisionRiskFloor) MinimumRisk(r canonical.Request, targets []cano
 			seen[t.HostKeyFingerprint] = true
 			ext = append(ext, remoteRiskTarget(t.HostKeyFingerprint))
 		}
-		if p.Linked != nil {
-			hosts, err := p.Linked(r, t)
-			if err != nil {
-				return "", "", fmt.Errorf("provision risk floor: linked hosts: %w", err)
-			}
-			ext = append(ext, hosts...)
+		hosts, err := p.Linked(r, t)
+		if err != nil {
+			return "", "", fmt.Errorf("provision risk floor: linked hosts: %w", err)
 		}
+		ext = append(ext, hosts...)
 	}
 	nr, why, err := p.Next.MinimumRisk(r, ext)
 	if err != nil {

@@ -199,7 +199,7 @@ func newProvisionEnv(t *testing.T, next permit.RiskPolicy) *provisionEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	auth, err := permit.New(permit.Options{Verifier: v, Store: ie.pe.db, RiskPolicy: GuestProvisionRiskFloor{Next: next}})
+	auth, err := permit.New(permit.Options{Verifier: v, Store: ie.pe.db, RiskPolicy: GuestProvisionRiskFloor{Next: next, Linked: noLinkedHosts}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1349,3 +1349,6 @@ func TestProvisionConcurrentRunOfTheSameExecutionKeepsTheReservation(t *testing.
 		t.Fatalf("dispatched %v", e.pc.methods())
 	}
 }
+
+// noLinkedHosts is a linked-host source for nodes that are not enrolled hosts.
+func noLinkedHosts(canonical.Request, canonical.Target) ([]canonical.Target, error) { return nil, nil }
