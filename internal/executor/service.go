@@ -25,6 +25,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit/batch"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/stageplan"
@@ -53,6 +54,11 @@ type Service struct {
 	db   *executordb.DB
 	reg  *webauthnreg.Registrar
 	log  *slog.Logger
+
+	// batchAuth is the batch approval authority (ADR 0007, E19b); nil until
+	// SetBatchAuthority wires it, in which case the batch RPCs are
+	// Unimplemented.
+	batchAuth *batch.Authority
 	// transport is the SSH client configuration (spec 08 defaults).
 	transport sshtransport.Config
 	// recovery limits wrong TOTP recovery codes.
