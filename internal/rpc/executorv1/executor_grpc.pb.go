@@ -21,97 +21,102 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ExecutorService_GetStatus_FullMethodName                 = "/nebula.executor.v1.ExecutorService/GetStatus"
-	ExecutorService_ProposeExecution_FullMethodName          = "/nebula.executor.v1.ExecutorService/ProposeExecution"
-	ExecutorService_SubmitAssertion_FullMethodName           = "/nebula.executor.v1.ExecutorService/SubmitAssertion"
-	ExecutorService_BeginPrivilegedSession_FullMethodName    = "/nebula.executor.v1.ExecutorService/BeginPrivilegedSession"
-	ExecutorService_CompletePrivilegedSession_FullMethodName = "/nebula.executor.v1.ExecutorService/CompletePrivilegedSession"
-	ExecutorService_GetSessionState_FullMethodName           = "/nebula.executor.v1.ExecutorService/GetSessionState"
-	ExecutorService_AuthorizeRun_FullMethodName              = "/nebula.executor.v1.ExecutorService/AuthorizeRun"
-	ExecutorService_RunAttached_FullMethodName               = "/nebula.executor.v1.ExecutorService/RunAttached"
-	ExecutorService_StartDurable_FullMethodName              = "/nebula.executor.v1.ExecutorService/StartDurable"
-	ExecutorService_GetRun_FullMethodName                    = "/nebula.executor.v1.ExecutorService/GetRun"
-	ExecutorService_Unlock_FullMethodName                    = "/nebula.executor.v1.ExecutorService/Unlock"
-	ExecutorService_Lock_FullMethodName                      = "/nebula.executor.v1.ExecutorService/Lock"
-	ExecutorService_ListPending_FullMethodName               = "/nebula.executor.v1.ExecutorService/ListPending"
-	ExecutorService_ApproveCLI_FullMethodName                = "/nebula.executor.v1.ExecutorService/ApproveCLI"
-	ExecutorService_GetPermitState_FullMethodName            = "/nebula.executor.v1.ExecutorService/GetPermitState"
-	ExecutorService_TrustArtifact_FullMethodName             = "/nebula.executor.v1.ExecutorService/TrustArtifact"
-	ExecutorService_UntrustArtifact_FullMethodName           = "/nebula.executor.v1.ExecutorService/UntrustArtifact"
-	ExecutorService_ListTrustedArtifacts_FullMethodName      = "/nebula.executor.v1.ExecutorService/ListTrustedArtifacts"
-	ExecutorService_SetHostCriticality_FullMethodName        = "/nebula.executor.v1.ExecutorService/SetHostCriticality"
-	ExecutorService_ListHostCriticality_FullMethodName       = "/nebula.executor.v1.ExecutorService/ListHostCriticality"
-	ExecutorService_CreateRegistrationCode_FullMethodName    = "/nebula.executor.v1.ExecutorService/CreateRegistrationCode"
-	ExecutorService_BeginRegistration_FullMethodName         = "/nebula.executor.v1.ExecutorService/BeginRegistration"
-	ExecutorService_FinishRegistration_FullMethodName        = "/nebula.executor.v1.ExecutorService/FinishRegistration"
-	ExecutorService_ListWebAuthnCredentials_FullMethodName   = "/nebula.executor.v1.ExecutorService/ListWebAuthnCredentials"
-	ExecutorService_RemoveWebAuthnCredential_FullMethodName  = "/nebula.executor.v1.ExecutorService/RemoveWebAuthnCredential"
-	ExecutorService_BeginLogin_FullMethodName                = "/nebula.executor.v1.ExecutorService/BeginLogin"
-	ExecutorService_FinishLogin_FullMethodName               = "/nebula.executor.v1.ExecutorService/FinishLogin"
-	ExecutorService_CheckCredential_FullMethodName           = "/nebula.executor.v1.ExecutorService/CheckCredential"
-	ExecutorService_BeginTOTPSetup_FullMethodName            = "/nebula.executor.v1.ExecutorService/BeginTOTPSetup"
-	ExecutorService_ConfirmTOTPSetup_FullMethodName          = "/nebula.executor.v1.ExecutorService/ConfirmTOTPSetup"
-	ExecutorService_RemoveTOTP_FullMethodName                = "/nebula.executor.v1.ExecutorService/RemoveTOTP"
-	ExecutorService_GetTOTPStatus_FullMethodName             = "/nebula.executor.v1.ExecutorService/GetTOTPStatus"
-	ExecutorService_RecoveryLogin_FullMethodName             = "/nebula.executor.v1.ExecutorService/RecoveryLogin"
-	ExecutorService_FinishRecovery_FullMethodName            = "/nebula.executor.v1.ExecutorService/FinishRecovery"
-	ExecutorService_ProbeHostKey_FullMethodName              = "/nebula.executor.v1.ExecutorService/ProbeHostKey"
-	ExecutorService_PinHostKey_FullMethodName                = "/nebula.executor.v1.ExecutorService/PinHostKey"
-	ExecutorService_UnpinHostKey_FullMethodName              = "/nebula.executor.v1.ExecutorService/UnpinHostKey"
-	ExecutorService_ListHostKeys_FullMethodName              = "/nebula.executor.v1.ExecutorService/ListHostKeys"
-	ExecutorService_ProposeRepin_FullMethodName              = "/nebula.executor.v1.ExecutorService/ProposeRepin"
-	ExecutorService_CommitRepin_FullMethodName               = "/nebula.executor.v1.ExecutorService/CommitRepin"
-	ExecutorService_ProposeEnroll_FullMethodName             = "/nebula.executor.v1.ExecutorService/ProposeEnroll"
-	ExecutorService_CommitEnroll_FullMethodName              = "/nebula.executor.v1.ExecutorService/CommitEnroll"
-	ExecutorService_GetSSHPublicKey_FullMethodName           = "/nebula.executor.v1.ExecutorService/GetSSHPublicKey"
-	ExecutorService_TestConnection_FullMethodName            = "/nebula.executor.v1.ExecutorService/TestConnection"
-	ExecutorService_InitVault_FullMethodName                 = "/nebula.executor.v1.ExecutorService/InitVault"
-	ExecutorService_SetSecret_FullMethodName                 = "/nebula.executor.v1.ExecutorService/SetSecret"
-	ExecutorService_ListSecrets_FullMethodName               = "/nebula.executor.v1.ExecutorService/ListSecrets"
-	ExecutorService_DeleteSecret_FullMethodName              = "/nebula.executor.v1.ExecutorService/DeleteSecret"
-	ExecutorService_BeginGate_FullMethodName                 = "/nebula.executor.v1.ExecutorService/BeginGate"
-	ExecutorService_CommitGate_FullMethodName                = "/nebula.executor.v1.ExecutorService/CommitGate"
-	ExecutorService_AbortRollout_FullMethodName              = "/nebula.executor.v1.ExecutorService/AbortRollout"
-	ExecutorService_GetRollout_FullMethodName                = "/nebula.executor.v1.ExecutorService/GetRollout"
-	ExecutorService_ApproveGateCLI_FullMethodName            = "/nebula.executor.v1.ExecutorService/ApproveGateCLI"
-	ExecutorService_BeginTrustArtifact_FullMethodName        = "/nebula.executor.v1.ExecutorService/BeginTrustArtifact"
-	ExecutorService_CommitTrustArtifact_FullMethodName       = "/nebula.executor.v1.ExecutorService/CommitTrustArtifact"
-	ExecutorService_GetArtifactTrust_FullMethodName          = "/nebula.executor.v1.ExecutorService/GetArtifactTrust"
-	ExecutorService_RegisterModule_FullMethodName            = "/nebula.executor.v1.ExecutorService/RegisterModule"
-	ExecutorService_AddSigner_FullMethodName                 = "/nebula.executor.v1.ExecutorService/AddSigner"
-	ExecutorService_RemoveSigner_FullMethodName              = "/nebula.executor.v1.ExecutorService/RemoveSigner"
-	ExecutorService_ConfirmModuleSigner_FullMethodName       = "/nebula.executor.v1.ExecutorService/ConfirmModuleSigner"
-	ExecutorService_ListSigners_FullMethodName               = "/nebula.executor.v1.ExecutorService/ListSigners"
-	ExecutorService_ProposeScheduleGrant_FullMethodName      = "/nebula.executor.v1.ExecutorService/ProposeScheduleGrant"
-	ExecutorService_CommitScheduleGrant_FullMethodName       = "/nebula.executor.v1.ExecutorService/CommitScheduleGrant"
-	ExecutorService_ListPendingScheduleGrants_FullMethodName = "/nebula.executor.v1.ExecutorService/ListPendingScheduleGrants"
-	ExecutorService_ApproveScheduleGrantCLI_FullMethodName   = "/nebula.executor.v1.ExecutorService/ApproveScheduleGrantCLI"
-	ExecutorService_ListScheduleGrants_FullMethodName        = "/nebula.executor.v1.ExecutorService/ListScheduleGrants"
-	ExecutorService_RevokeScheduleGrant_FullMethodName       = "/nebula.executor.v1.ExecutorService/RevokeScheduleGrant"
-	ExecutorService_RunScheduled_FullMethodName              = "/nebula.executor.v1.ExecutorService/RunScheduled"
-	ExecutorService_ProposeReadGrant_FullMethodName          = "/nebula.executor.v1.ExecutorService/ProposeReadGrant"
-	ExecutorService_CommitReadGrant_FullMethodName           = "/nebula.executor.v1.ExecutorService/CommitReadGrant"
-	ExecutorService_ListPendingReadGrants_FullMethodName     = "/nebula.executor.v1.ExecutorService/ListPendingReadGrants"
-	ExecutorService_ApproveReadGrantCLI_FullMethodName       = "/nebula.executor.v1.ExecutorService/ApproveReadGrantCLI"
-	ExecutorService_ListReadGrants_FullMethodName            = "/nebula.executor.v1.ExecutorService/ListReadGrants"
-	ExecutorService_RevokeReadGrant_FullMethodName           = "/nebula.executor.v1.ExecutorService/RevokeReadGrant"
-	ExecutorService_RunReadGrant_FullMethodName              = "/nebula.executor.v1.ExecutorService/RunReadGrant"
-	ExecutorService_ProposeBatch_FullMethodName              = "/nebula.executor.v1.ExecutorService/ProposeBatch"
-	ExecutorService_CommitBatch_FullMethodName               = "/nebula.executor.v1.ExecutorService/CommitBatch"
-	ExecutorService_ReviewBatch_FullMethodName               = "/nebula.executor.v1.ExecutorService/ReviewBatch"
-	ExecutorService_ApproveBatchCLI_FullMethodName           = "/nebula.executor.v1.ExecutorService/ApproveBatchCLI"
-	ExecutorService_GetBatchStatus_FullMethodName            = "/nebula.executor.v1.ExecutorService/GetBatchStatus"
-	ExecutorService_ListEvents_FullMethodName                = "/nebula.executor.v1.ExecutorService/ListEvents"
-	ExecutorService_BackupExecutor_FullMethodName            = "/nebula.executor.v1.ExecutorService/BackupExecutor"
-	ExecutorService_ProbePVERemote_FullMethodName            = "/nebula.executor.v1.ExecutorService/ProbePVERemote"
-	ExecutorService_AddPVERemote_FullMethodName              = "/nebula.executor.v1.ExecutorService/AddPVERemote"
-	ExecutorService_RotatePVEToken_FullMethodName            = "/nebula.executor.v1.ExecutorService/RotatePVEToken"
-	ExecutorService_RemovePVERemote_FullMethodName           = "/nebula.executor.v1.ExecutorService/RemovePVERemote"
-	ExecutorService_ListPVEAdminRemotes_FullMethodName       = "/nebula.executor.v1.ExecutorService/ListPVEAdminRemotes"
-	ExecutorService_ProposePVERepin_FullMethodName           = "/nebula.executor.v1.ExecutorService/ProposePVERepin"
-	ExecutorService_CommitPVERepin_FullMethodName            = "/nebula.executor.v1.ExecutorService/CommitPVERepin"
-	ExecutorService_ListPVERemotes_FullMethodName            = "/nebula.executor.v1.ExecutorService/ListPVERemotes"
-	ExecutorService_ReadPVE_FullMethodName                   = "/nebula.executor.v1.ExecutorService/ReadPVE"
+	ExecutorService_GetStatus_FullMethodName                       = "/nebula.executor.v1.ExecutorService/GetStatus"
+	ExecutorService_ProposeExecution_FullMethodName                = "/nebula.executor.v1.ExecutorService/ProposeExecution"
+	ExecutorService_SubmitAssertion_FullMethodName                 = "/nebula.executor.v1.ExecutorService/SubmitAssertion"
+	ExecutorService_BeginPrivilegedSession_FullMethodName          = "/nebula.executor.v1.ExecutorService/BeginPrivilegedSession"
+	ExecutorService_CompletePrivilegedSession_FullMethodName       = "/nebula.executor.v1.ExecutorService/CompletePrivilegedSession"
+	ExecutorService_GetSessionState_FullMethodName                 = "/nebula.executor.v1.ExecutorService/GetSessionState"
+	ExecutorService_AuthorizeRun_FullMethodName                    = "/nebula.executor.v1.ExecutorService/AuthorizeRun"
+	ExecutorService_RunAttached_FullMethodName                     = "/nebula.executor.v1.ExecutorService/RunAttached"
+	ExecutorService_StartDurable_FullMethodName                    = "/nebula.executor.v1.ExecutorService/StartDurable"
+	ExecutorService_GetRun_FullMethodName                          = "/nebula.executor.v1.ExecutorService/GetRun"
+	ExecutorService_Unlock_FullMethodName                          = "/nebula.executor.v1.ExecutorService/Unlock"
+	ExecutorService_Lock_FullMethodName                            = "/nebula.executor.v1.ExecutorService/Lock"
+	ExecutorService_ListPending_FullMethodName                     = "/nebula.executor.v1.ExecutorService/ListPending"
+	ExecutorService_ApproveCLI_FullMethodName                      = "/nebula.executor.v1.ExecutorService/ApproveCLI"
+	ExecutorService_GetPermitState_FullMethodName                  = "/nebula.executor.v1.ExecutorService/GetPermitState"
+	ExecutorService_TrustArtifact_FullMethodName                   = "/nebula.executor.v1.ExecutorService/TrustArtifact"
+	ExecutorService_UntrustArtifact_FullMethodName                 = "/nebula.executor.v1.ExecutorService/UntrustArtifact"
+	ExecutorService_ListTrustedArtifacts_FullMethodName            = "/nebula.executor.v1.ExecutorService/ListTrustedArtifacts"
+	ExecutorService_SetHostCriticality_FullMethodName              = "/nebula.executor.v1.ExecutorService/SetHostCriticality"
+	ExecutorService_ListHostCriticality_FullMethodName             = "/nebula.executor.v1.ExecutorService/ListHostCriticality"
+	ExecutorService_CreateRegistrationCode_FullMethodName          = "/nebula.executor.v1.ExecutorService/CreateRegistrationCode"
+	ExecutorService_BeginRegistration_FullMethodName               = "/nebula.executor.v1.ExecutorService/BeginRegistration"
+	ExecutorService_FinishRegistration_FullMethodName              = "/nebula.executor.v1.ExecutorService/FinishRegistration"
+	ExecutorService_ListWebAuthnCredentials_FullMethodName         = "/nebula.executor.v1.ExecutorService/ListWebAuthnCredentials"
+	ExecutorService_RemoveWebAuthnCredential_FullMethodName        = "/nebula.executor.v1.ExecutorService/RemoveWebAuthnCredential"
+	ExecutorService_BeginLogin_FullMethodName                      = "/nebula.executor.v1.ExecutorService/BeginLogin"
+	ExecutorService_FinishLogin_FullMethodName                     = "/nebula.executor.v1.ExecutorService/FinishLogin"
+	ExecutorService_CheckCredential_FullMethodName                 = "/nebula.executor.v1.ExecutorService/CheckCredential"
+	ExecutorService_BeginTOTPSetup_FullMethodName                  = "/nebula.executor.v1.ExecutorService/BeginTOTPSetup"
+	ExecutorService_ConfirmTOTPSetup_FullMethodName                = "/nebula.executor.v1.ExecutorService/ConfirmTOTPSetup"
+	ExecutorService_RemoveTOTP_FullMethodName                      = "/nebula.executor.v1.ExecutorService/RemoveTOTP"
+	ExecutorService_GetTOTPStatus_FullMethodName                   = "/nebula.executor.v1.ExecutorService/GetTOTPStatus"
+	ExecutorService_RecoveryLogin_FullMethodName                   = "/nebula.executor.v1.ExecutorService/RecoveryLogin"
+	ExecutorService_FinishRecovery_FullMethodName                  = "/nebula.executor.v1.ExecutorService/FinishRecovery"
+	ExecutorService_ProbeHostKey_FullMethodName                    = "/nebula.executor.v1.ExecutorService/ProbeHostKey"
+	ExecutorService_PinHostKey_FullMethodName                      = "/nebula.executor.v1.ExecutorService/PinHostKey"
+	ExecutorService_UnpinHostKey_FullMethodName                    = "/nebula.executor.v1.ExecutorService/UnpinHostKey"
+	ExecutorService_ListHostKeys_FullMethodName                    = "/nebula.executor.v1.ExecutorService/ListHostKeys"
+	ExecutorService_ProposeRepin_FullMethodName                    = "/nebula.executor.v1.ExecutorService/ProposeRepin"
+	ExecutorService_CommitRepin_FullMethodName                     = "/nebula.executor.v1.ExecutorService/CommitRepin"
+	ExecutorService_ProposeEnroll_FullMethodName                   = "/nebula.executor.v1.ExecutorService/ProposeEnroll"
+	ExecutorService_CommitEnroll_FullMethodName                    = "/nebula.executor.v1.ExecutorService/CommitEnroll"
+	ExecutorService_GetSSHPublicKey_FullMethodName                 = "/nebula.executor.v1.ExecutorService/GetSSHPublicKey"
+	ExecutorService_TestConnection_FullMethodName                  = "/nebula.executor.v1.ExecutorService/TestConnection"
+	ExecutorService_InitVault_FullMethodName                       = "/nebula.executor.v1.ExecutorService/InitVault"
+	ExecutorService_SetSecret_FullMethodName                       = "/nebula.executor.v1.ExecutorService/SetSecret"
+	ExecutorService_ListSecrets_FullMethodName                     = "/nebula.executor.v1.ExecutorService/ListSecrets"
+	ExecutorService_DeleteSecret_FullMethodName                    = "/nebula.executor.v1.ExecutorService/DeleteSecret"
+	ExecutorService_BeginGate_FullMethodName                       = "/nebula.executor.v1.ExecutorService/BeginGate"
+	ExecutorService_CommitGate_FullMethodName                      = "/nebula.executor.v1.ExecutorService/CommitGate"
+	ExecutorService_AbortRollout_FullMethodName                    = "/nebula.executor.v1.ExecutorService/AbortRollout"
+	ExecutorService_GetRollout_FullMethodName                      = "/nebula.executor.v1.ExecutorService/GetRollout"
+	ExecutorService_ApproveGateCLI_FullMethodName                  = "/nebula.executor.v1.ExecutorService/ApproveGateCLI"
+	ExecutorService_BeginTrustArtifact_FullMethodName              = "/nebula.executor.v1.ExecutorService/BeginTrustArtifact"
+	ExecutorService_CommitTrustArtifact_FullMethodName             = "/nebula.executor.v1.ExecutorService/CommitTrustArtifact"
+	ExecutorService_GetArtifactTrust_FullMethodName                = "/nebula.executor.v1.ExecutorService/GetArtifactTrust"
+	ExecutorService_RegisterModule_FullMethodName                  = "/nebula.executor.v1.ExecutorService/RegisterModule"
+	ExecutorService_AddSigner_FullMethodName                       = "/nebula.executor.v1.ExecutorService/AddSigner"
+	ExecutorService_RemoveSigner_FullMethodName                    = "/nebula.executor.v1.ExecutorService/RemoveSigner"
+	ExecutorService_ConfirmModuleSigner_FullMethodName             = "/nebula.executor.v1.ExecutorService/ConfirmModuleSigner"
+	ExecutorService_ListSigners_FullMethodName                     = "/nebula.executor.v1.ExecutorService/ListSigners"
+	ExecutorService_ProposeScheduleGrant_FullMethodName            = "/nebula.executor.v1.ExecutorService/ProposeScheduleGrant"
+	ExecutorService_CommitScheduleGrant_FullMethodName             = "/nebula.executor.v1.ExecutorService/CommitScheduleGrant"
+	ExecutorService_ListPendingScheduleGrants_FullMethodName       = "/nebula.executor.v1.ExecutorService/ListPendingScheduleGrants"
+	ExecutorService_ApproveScheduleGrantCLI_FullMethodName         = "/nebula.executor.v1.ExecutorService/ApproveScheduleGrantCLI"
+	ExecutorService_ListScheduleGrants_FullMethodName              = "/nebula.executor.v1.ExecutorService/ListScheduleGrants"
+	ExecutorService_RevokeScheduleGrant_FullMethodName             = "/nebula.executor.v1.ExecutorService/RevokeScheduleGrant"
+	ExecutorService_RunScheduled_FullMethodName                    = "/nebula.executor.v1.ExecutorService/RunScheduled"
+	ExecutorService_ProposeReadGrant_FullMethodName                = "/nebula.executor.v1.ExecutorService/ProposeReadGrant"
+	ExecutorService_CommitReadGrant_FullMethodName                 = "/nebula.executor.v1.ExecutorService/CommitReadGrant"
+	ExecutorService_ListPendingReadGrants_FullMethodName           = "/nebula.executor.v1.ExecutorService/ListPendingReadGrants"
+	ExecutorService_ApproveReadGrantCLI_FullMethodName             = "/nebula.executor.v1.ExecutorService/ApproveReadGrantCLI"
+	ExecutorService_ListReadGrants_FullMethodName                  = "/nebula.executor.v1.ExecutorService/ListReadGrants"
+	ExecutorService_RevokeReadGrant_FullMethodName                 = "/nebula.executor.v1.ExecutorService/RevokeReadGrant"
+	ExecutorService_RunReadGrant_FullMethodName                    = "/nebula.executor.v1.ExecutorService/RunReadGrant"
+	ExecutorService_ProposeBatch_FullMethodName                    = "/nebula.executor.v1.ExecutorService/ProposeBatch"
+	ExecutorService_CommitBatch_FullMethodName                     = "/nebula.executor.v1.ExecutorService/CommitBatch"
+	ExecutorService_ReviewBatch_FullMethodName                     = "/nebula.executor.v1.ExecutorService/ReviewBatch"
+	ExecutorService_ApproveBatchCLI_FullMethodName                 = "/nebula.executor.v1.ExecutorService/ApproveBatchCLI"
+	ExecutorService_GetBatchStatus_FullMethodName                  = "/nebula.executor.v1.ExecutorService/GetBatchStatus"
+	ExecutorService_ListEvents_FullMethodName                      = "/nebula.executor.v1.ExecutorService/ListEvents"
+	ExecutorService_BackupExecutor_FullMethodName                  = "/nebula.executor.v1.ExecutorService/BackupExecutor"
+	ExecutorService_ProbePVERemote_FullMethodName                  = "/nebula.executor.v1.ExecutorService/ProbePVERemote"
+	ExecutorService_AddPVERemote_FullMethodName                    = "/nebula.executor.v1.ExecutorService/AddPVERemote"
+	ExecutorService_RotatePVEToken_FullMethodName                  = "/nebula.executor.v1.ExecutorService/RotatePVEToken"
+	ExecutorService_RemovePVERemote_FullMethodName                 = "/nebula.executor.v1.ExecutorService/RemovePVERemote"
+	ExecutorService_ListPVEAdminRemotes_FullMethodName             = "/nebula.executor.v1.ExecutorService/ListPVEAdminRemotes"
+	ExecutorService_ProposePVERepin_FullMethodName                 = "/nebula.executor.v1.ExecutorService/ProposePVERepin"
+	ExecutorService_CommitPVERepin_FullMethodName                  = "/nebula.executor.v1.ExecutorService/CommitPVERepin"
+	ExecutorService_ListPVERemotes_FullMethodName                  = "/nebula.executor.v1.ExecutorService/ListPVERemotes"
+	ExecutorService_ReadPVE_FullMethodName                         = "/nebula.executor.v1.ExecutorService/ReadPVE"
+	ExecutorService_AddPrivateRegistry_FullMethodName              = "/nebula.executor.v1.ExecutorService/AddPrivateRegistry"
+	ExecutorService_RotatePrivateRegistryCredential_FullMethodName = "/nebula.executor.v1.ExecutorService/RotatePrivateRegistryCredential"
+	ExecutorService_RemovePrivateRegistry_FullMethodName           = "/nebula.executor.v1.ExecutorService/RemovePrivateRegistry"
+	ExecutorService_ListPrivateRegistries_FullMethodName           = "/nebula.executor.v1.ExecutorService/ListPrivateRegistries"
+	ExecutorService_ReadPrivateRegistry_FullMethodName             = "/nebula.executor.v1.ExecutorService/ReadPrivateRegistry"
 )
 
 // ExecutorServiceClient is the client API for ExecutorService service.
@@ -430,6 +435,21 @@ type ExecutorServiceClient interface {
 	// interval and per-remote request budget. BACKUPS and METRICS answer
 	// Unimplemented; every other method is wired.
 	ReadPVE(ctx context.Context, in *ReadPVERequest, opts ...grpc.CallOption) (*ReadPVEResponse, error)
+	// Private registry administration (ADR 0006, P1-32). Role: admin only.
+	// Credentials enter the executor vault here and never leave it: no
+	// response carries a user name, secret or authenticated token, and the
+	// server has no way to supply or read one.
+	AddPrivateRegistry(ctx context.Context, in *AddPrivateRegistryRequest, opts ...grpc.CallOption) (*AddPrivateRegistryResponse, error)
+	RotatePrivateRegistryCredential(ctx context.Context, in *RotatePrivateRegistryCredentialRequest, opts ...grpc.CallOption) (*RotatePrivateRegistryCredentialResponse, error)
+	RemovePrivateRegistry(ctx context.Context, in *RemovePrivateRegistryRequest, opts ...grpc.CallOption) (*RemovePrivateRegistryResponse, error)
+	// Role: server, admin. Metadata only (origins, scope, versions, expiry).
+	ListPrivateRegistries(ctx context.Context, in *ListPrivateRegistriesRequest, opts ...grpc.CallOption) (*ListPrivateRegistriesResponse, error)
+	// Private registry metadata read (ADR 0006, P1-32). Role: server, admin.
+	// One bounded typed read (manifest digest by HEAD or tag list) of one
+	// approved repository, performed by the executor with the vault
+	// credential under a read grant. Never pulls manifests bodies or layers;
+	// results are sanitized; lock, rotation and expiry pause reads.
+	ReadPrivateRegistry(ctx context.Context, in *ReadPrivateRegistryRequest, opts ...grpc.CallOption) (*ReadPrivateRegistryResponse, error)
 }
 
 type executorServiceClient struct {
@@ -1350,6 +1370,56 @@ func (c *executorServiceClient) ReadPVE(ctx context.Context, in *ReadPVERequest,
 	return out, nil
 }
 
+func (c *executorServiceClient) AddPrivateRegistry(ctx context.Context, in *AddPrivateRegistryRequest, opts ...grpc.CallOption) (*AddPrivateRegistryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AddPrivateRegistryResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_AddPrivateRegistry_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) RotatePrivateRegistryCredential(ctx context.Context, in *RotatePrivateRegistryCredentialRequest, opts ...grpc.CallOption) (*RotatePrivateRegistryCredentialResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RotatePrivateRegistryCredentialResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_RotatePrivateRegistryCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) RemovePrivateRegistry(ctx context.Context, in *RemovePrivateRegistryRequest, opts ...grpc.CallOption) (*RemovePrivateRegistryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RemovePrivateRegistryResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_RemovePrivateRegistry_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ListPrivateRegistries(ctx context.Context, in *ListPrivateRegistriesRequest, opts ...grpc.CallOption) (*ListPrivateRegistriesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListPrivateRegistriesResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ListPrivateRegistries_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ReadPrivateRegistry(ctx context.Context, in *ReadPrivateRegistryRequest, opts ...grpc.CallOption) (*ReadPrivateRegistryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadPrivateRegistryResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ReadPrivateRegistry_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExecutorServiceServer is the server API for ExecutorService service.
 // All implementations must embed UnimplementedExecutorServiceServer
 // for forward compatibility.
@@ -1666,6 +1736,21 @@ type ExecutorServiceServer interface {
 	// interval and per-remote request budget. BACKUPS and METRICS answer
 	// Unimplemented; every other method is wired.
 	ReadPVE(context.Context, *ReadPVERequest) (*ReadPVEResponse, error)
+	// Private registry administration (ADR 0006, P1-32). Role: admin only.
+	// Credentials enter the executor vault here and never leave it: no
+	// response carries a user name, secret or authenticated token, and the
+	// server has no way to supply or read one.
+	AddPrivateRegistry(context.Context, *AddPrivateRegistryRequest) (*AddPrivateRegistryResponse, error)
+	RotatePrivateRegistryCredential(context.Context, *RotatePrivateRegistryCredentialRequest) (*RotatePrivateRegistryCredentialResponse, error)
+	RemovePrivateRegistry(context.Context, *RemovePrivateRegistryRequest) (*RemovePrivateRegistryResponse, error)
+	// Role: server, admin. Metadata only (origins, scope, versions, expiry).
+	ListPrivateRegistries(context.Context, *ListPrivateRegistriesRequest) (*ListPrivateRegistriesResponse, error)
+	// Private registry metadata read (ADR 0006, P1-32). Role: server, admin.
+	// One bounded typed read (manifest digest by HEAD or tag list) of one
+	// approved repository, performed by the executor with the vault
+	// credential under a read grant. Never pulls manifests bodies or layers;
+	// results are sanitized; lock, rotation and expiry pause reads.
+	ReadPrivateRegistry(context.Context, *ReadPrivateRegistryRequest) (*ReadPrivateRegistryResponse, error)
 	mustEmbedUnimplementedExecutorServiceServer()
 }
 
@@ -1948,6 +2033,21 @@ func (UnimplementedExecutorServiceServer) ListPVERemotes(context.Context, *ListP
 }
 func (UnimplementedExecutorServiceServer) ReadPVE(context.Context, *ReadPVERequest) (*ReadPVEResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReadPVE not implemented")
+}
+func (UnimplementedExecutorServiceServer) AddPrivateRegistry(context.Context, *AddPrivateRegistryRequest) (*AddPrivateRegistryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AddPrivateRegistry not implemented")
+}
+func (UnimplementedExecutorServiceServer) RotatePrivateRegistryCredential(context.Context, *RotatePrivateRegistryCredentialRequest) (*RotatePrivateRegistryCredentialResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RotatePrivateRegistryCredential not implemented")
+}
+func (UnimplementedExecutorServiceServer) RemovePrivateRegistry(context.Context, *RemovePrivateRegistryRequest) (*RemovePrivateRegistryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RemovePrivateRegistry not implemented")
+}
+func (UnimplementedExecutorServiceServer) ListPrivateRegistries(context.Context, *ListPrivateRegistriesRequest) (*ListPrivateRegistriesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListPrivateRegistries not implemented")
+}
+func (UnimplementedExecutorServiceServer) ReadPrivateRegistry(context.Context, *ReadPrivateRegistryRequest) (*ReadPrivateRegistryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReadPrivateRegistry not implemented")
 }
 func (UnimplementedExecutorServiceServer) mustEmbedUnimplementedExecutorServiceServer() {}
 func (UnimplementedExecutorServiceServer) testEmbeddedByValue()                         {}
@@ -3608,6 +3708,96 @@ func _ExecutorService_ReadPVE_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_AddPrivateRegistry_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddPrivateRegistryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).AddPrivateRegistry(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_AddPrivateRegistry_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).AddPrivateRegistry(ctx, req.(*AddPrivateRegistryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_RotatePrivateRegistryCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RotatePrivateRegistryCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).RotatePrivateRegistryCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_RotatePrivateRegistryCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).RotatePrivateRegistryCredential(ctx, req.(*RotatePrivateRegistryCredentialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_RemovePrivateRegistry_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemovePrivateRegistryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).RemovePrivateRegistry(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_RemovePrivateRegistry_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).RemovePrivateRegistry(ctx, req.(*RemovePrivateRegistryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ListPrivateRegistries_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListPrivateRegistriesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ListPrivateRegistries(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ListPrivateRegistries_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ListPrivateRegistries(ctx, req.(*ListPrivateRegistriesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ReadPrivateRegistry_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadPrivateRegistryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ReadPrivateRegistry(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ReadPrivateRegistry_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ReadPrivateRegistry(ctx, req.(*ReadPrivateRegistryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ExecutorService_ServiceDesc is the grpc.ServiceDesc for ExecutorService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -3978,6 +4168,26 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReadPVE",
 			Handler:    _ExecutorService_ReadPVE_Handler,
+		},
+		{
+			MethodName: "AddPrivateRegistry",
+			Handler:    _ExecutorService_AddPrivateRegistry_Handler,
+		},
+		{
+			MethodName: "RotatePrivateRegistryCredential",
+			Handler:    _ExecutorService_RotatePrivateRegistryCredential_Handler,
+		},
+		{
+			MethodName: "RemovePrivateRegistry",
+			Handler:    _ExecutorService_RemovePrivateRegistry_Handler,
+		},
+		{
+			MethodName: "ListPrivateRegistries",
+			Handler:    _ExecutorService_ListPrivateRegistries_Handler,
+		},
+		{
+			MethodName: "ReadPrivateRegistry",
+			Handler:    _ExecutorService_ReadPrivateRegistry_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

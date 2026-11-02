@@ -419,6 +419,23 @@ service ExecutorService {
   // interval and per-remote request budget. BACKUPS and METRICS answer
   // Unimplemented; every other method is wired.
   rpc ReadPVE(ReadPVERequest) returns (ReadPVEResponse);
+
+  // Private registry administration (ADR 0006, P1-32). Role: admin only.
+  // Credentials enter the executor vault here and never leave it: no
+  // response carries a user name, secret or authenticated token, and the
+  // server has no way to supply or read one.
+  rpc AddPrivateRegistry(AddPrivateRegistryRequest) returns (AddPrivateRegistryResponse);
+  rpc RotatePrivateRegistryCredential(RotatePrivateRegistryCredentialRequest) returns (RotatePrivateRegistryCredentialResponse);
+  rpc RemovePrivateRegistry(RemovePrivateRegistryRequest) returns (RemovePrivateRegistryResponse);
+  // Role: server, admin. Metadata only (origins, scope, versions, expiry).
+  rpc ListPrivateRegistries(ListPrivateRegistriesRequest) returns (ListPrivateRegistriesResponse);
+
+  // Private registry metadata read (ADR 0006, P1-32). Role: server, admin.
+  // One bounded typed read (manifest digest by HEAD or tag list) of one
+  // approved repository, performed by the executor with the vault
+  // credential under a read grant. Never pulls manifests bodies or layers;
+  // results are sanitized; lock, rotation and expiry pause reads.
+  rpc ReadPrivateRegistry(ReadPrivateRegistryRequest) returns (ReadPrivateRegistryResponse);
 }
 
 enum RiskClass {
@@ -2256,4 +2273,110 @@ message GetBatchStatusResponse {
   // Parent stage plan hash, and each member's execution ID in member order.
   string stage_plan_hash = 9;
   repeated string member_execution_ids = 10;
+}
+
+// Private registries (ADR 0006, P1-32).
+
+enum PrivateRegistryAuthMode {
+  PRIVATE_REGISTRY_AUTH_MODE_UNSPECIFIED = 0;
+  // HTTP Basic credentials sent to the registry origin only.
+  PRIVATE_REGISTRY_AUTH_MODE_BASIC = 1;
+  // Basic credentials exchanged at the approved token realm only.
+  PRIVATE_REGISTRY_AUTH_MODE_TOKEN = 2;
+}
+
+enum PrivateRegistryReadMethod {
+  PRIVATE_REGISTRY_READ_METHOD_UNSPECIFIED = 0;
+  // Manifest digest of one tag or digest pin (manifest HEAD).
+  PRIVATE_REGISTRY_READ_METHOD_TAG_DIGEST = 1;
+  // Bounded tag list of one repository.
+  PRIVATE_REGISTRY_READ_METHOD_LIST_TAGS = 2;
+}
+
+message AddPrivateRegistryRequest {
+  string registry_id = 1;
+  // Exact HTTPS origin, for example "https://registry.example.org".
+  string registry_origin = 2;
+  PrivateRegistryAuthMode auth_mode = 3;
+  // Exact HTTPS token realm URL for token auth; empty for basic auth.
+  string realm = 4;
+  string service = 5;
+  // Exact approved repositories; no wildcards.
+  repeated string repositories = 6;
+  // Permit RFC 1918/ULA addresses for this registry.
+  bool allow_private_network = 7;
+  // Optional PEM CA bundle that replaces the system roots for this registry.
+  string ca_pem = 8;
+  string username = 9;
+  bytes secret = 10;
+  // Absolute credential expiry; reads pause at it until rotation.
+  int64 credential_expires_unix = 11;
+}
+
+message AddPrivateRegistryResponse {
+  PrivateRegistryInfo registry = 1;
+}
+
+message RotatePrivateRegistryCredentialRequest {
+  string registry_id = 1;
+  string username = 2;
+  bytes secret = 3;
+  int64 credential_expires_unix = 4;
+}
+
+message RotatePrivateRegistryCredentialResponse {
+  PrivateRegistryInfo registry = 1;
+}
+
+message RemovePrivateRegistryRequest {
+  string registry_id = 1;
+}
+
+message RemovePrivateRegistryResponse {}
+
+message ListPrivateRegistriesRequest {}
+
+message ListPrivateRegistriesResponse {
+  repeated PrivateRegistryInfo registries = 1;
+}
+
+// PrivateRegistryInfo is metadata only: it never carries the user name,
+// secret or any token.
+message PrivateRegistryInfo {
+  string registry_id = 1;
+  string registry_origin = 2;
+  PrivateRegistryAuthMode auth_mode = 3;
+  string realm = 4;
+  string service = 5;
+  repeated string repositories = 6;
+  bool allow_private_network = 7;
+  bool custom_ca = 8;
+  int64 config_version = 9;
+  int64 credential_version = 10;
+  int64 credential_expires_unix = 11;
+}
+
+message ReadPrivateRegistryRequest {
+  string registry_id = 1;
+  PrivateRegistryReadMethod method = 2;
+  string repository = 3;
+  // Exactly one of tag or digest for TAG_DIGEST; neither for LIST_TAGS.
+  string tag = 4;
+  string digest = 5;
+}
+
+message ReadPrivateRegistryResponse {
+  string registry_id = 1;
+  string repository = 2;
+  int64 observed_at_unix = 3;
+  // TAG_DIGEST: the validated manifest digest.
+  string digest = 4;
+  // LIST_TAGS: validated tags; incomplete when a budget ran out or invalid
+  // tags were dropped, and then never "up to date".
+  repeated string tags = 5;
+  bool incomplete = 6;
+  bool from_cache = 7;
+  // The configuration and credential versions the read used.
+  int64 config_version = 8;
+  int64 credential_version = 9;
 }
