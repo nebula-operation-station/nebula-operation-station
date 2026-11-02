@@ -70,6 +70,11 @@ var (
 	// ErrPveMutationDenied, when the permit was already used by another
 	// run of the same execution (which may be dispatching right now).
 	ErrPveMutationAlreadyRun = errors.New("executor: pve mutation permit already used")
+	// ErrPvePermitFinal is wrapped with ErrPveMutationDenied when the
+	// permit can never authorize this run (gone, expired, in another state,
+	// its rollout ended, or the approved plan no longer matches). Every
+	// other denial may be transient and leaves the approval usable.
+	ErrPvePermitFinal = errors.New("executor: pve mutation permit can never authorize this run")
 	// ErrPveMutationPlan is returned for approved parameters without a
 	// valid step list.
 	ErrPveMutationPlan = errors.New("executor: pve mutation has no valid step plan")
@@ -450,6 +455,21 @@ func requestDigest(node string, step PveMutationStep) (string, error) {
 	return c, nil
 }
 
+// permitDenialFinal reports whether a permit denial code means the permit
+// can never authorize the run. Unknown codes are not final: keeping state
+// (a VMID reservation) until the proposal expires is the safe direction.
+func permitDenialFinal(c permit.Code) bool {
+	switch c {
+	case permit.CodeNotFound, permit.CodeWrongState, permit.CodeExpired,
+		permit.CodeRolloutStopped, permit.CodeRolloutAborted, permit.CodeGateInvalid, permit.CodeStagePlan,
+		permit.CodeInvalidRequest, permit.CodeTypedCountMismatch, permit.CodeTargetNotPermitted,
+		permit.CodeArtifactMismatch, permit.CodeParametersMismatch, permit.CodeActionMismatch,
+		permit.CodeCredentialMismatch:
+		return true
+	}
+	return false
+}
+
 // Run executes one approved mutation. Before anything is sent it rebuilds
 // the exact target from the registry and a live read and consumes the
 // permit for it. For each step it then re-checks the claim (lock,
@@ -474,6 +494,9 @@ func (m *PveMutations) Run(ctx context.Context, req PveMutationRequest) (PveMuta
 		m.log().Warn("audit", "kind", "pve_mutation_denied", "remote", rm.RemoteID, "action", req.ActionID, "code", string(permit.CodeOf(err)))
 		if permit.CodeOf(err) == permit.CodeHostAlreadyRun {
 			return PveMutationResult{}, fmt.Errorf("%w: %w", ErrPveMutationDenied, ErrPveMutationAlreadyRun)
+		}
+		if permitDenialFinal(permit.CodeOf(err)) {
+			return PveMutationResult{}, fmt.Errorf("%w: %w", ErrPveMutationDenied, ErrPvePermitFinal)
 		}
 		return PveMutationResult{}, ErrPveMutationDenied
 	}

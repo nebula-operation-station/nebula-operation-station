@@ -721,8 +721,8 @@ func TestProvisionCapacityNeverRaisesRiskAndIsRecheckedBeforeRun(t *testing.T) {
 	// dispatch: the reviewer approved another plan.
 	approved := e.approve(e.request())
 	e.reader.addGuest("pve1", 300, 62*gib)
-	if _, err := e.prov.Provision(context.Background(), approved); !errors.Is(err, ErrPveMutationDenied) {
-		t.Fatalf("capacity changed: %v", err)
+	if _, err := e.prov.Provision(context.Background(), approved); !errors.Is(err, ErrPveMutationDenied) || !errors.Is(err, ErrPvePermitFinal) {
+		t.Fatalf("capacity changed: %v, want a final denial", err)
 	}
 	if len(e.pc.provisionSteps()) != 0 {
 		t.Fatal("dispatched after the capacity changed")
@@ -1352,3 +1352,46 @@ func TestProvisionConcurrentRunOfTheSameExecutionKeepsTheReservation(t *testing.
 
 // noLinkedHosts is a linked-host source for nodes that are not enrolled hosts.
 func noLinkedHosts(canonical.Request, canonical.Target) ([]canonical.Target, error) { return nil, nil }
+
+// switchRisk is a risk policy whose answer a test can change after approval.
+type switchRisk struct{ r *canonical.Risk }
+
+func (s switchRisk) MinimumRisk(canonical.Request, []canonical.Target) (canonical.Risk, string, error) {
+	return *s.r, "test", nil
+}
+
+// TestProvisionTransientDenialKeepsVMID pins the review finding of PR #162
+// round 6: a denial that can change again (here the risk rose above the
+// approval after a criticality change) sends nothing and keeps the VMID
+// reserved for the approved execution, so a retry is not refused with
+// ErrPveVMIDTaken and no other proposal can take the VMID meanwhile.
+func TestProvisionTransientDenialKeepsVMID(t *testing.T) {
+	risk := canonical.RiskMedium
+	e := newProvisionEnv(t, switchRisk{r: &risk})
+	approved := e.approve(e.request())
+	risk = canonical.RiskHigh
+	_, err := e.prov.Provision(context.Background(), approved)
+	if !errors.Is(err, ErrPveMutationDenied) || errors.Is(err, ErrPvePermitFinal) {
+		t.Fatalf("risk above approval: %v, want a non-final denial", err)
+	}
+	if len(e.pc.provisionSteps()) != 0 {
+		t.Fatal("dispatched above the approved risk")
+	}
+	h, ok, err := e.vmids.VMIDHolder(mutRemote, approved.VMID, time.Now())
+	if err != nil || !ok || h.ExecutionID != approved.ExecutionID {
+		t.Fatalf("reservation after a transient denial: holder %+v ok %v err %v, want kept for %s", h, ok, err, approved.ExecutionID)
+	}
+}
+
+func TestPermitDenialFinal(t *testing.T) {
+	for _, c := range []permit.Code{permit.CodeNotFound, permit.CodeExpired, permit.CodeWrongState, permit.CodeParametersMismatch, permit.CodeRolloutAborted} {
+		if !permitDenialFinal(c) {
+			t.Errorf("%s not final", c)
+		}
+	}
+	for _, c := range []permit.Code{permit.CodeStorage, permit.CodeRiskAboveApproval, permit.CodeStageNotOpen, permit.CodeSessionRequired, permit.CodeLimit, permit.CodeHostAlreadyRun, permit.Code("future_code")} {
+		if permitDenialFinal(c) {
+			t.Errorf("%s final, want transient", c)
+		}
+	}
+}

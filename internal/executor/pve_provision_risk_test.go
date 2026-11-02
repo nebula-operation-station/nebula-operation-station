@@ -176,7 +176,8 @@ func TestGuestProvisionRiskFloorRules(t *testing.T) {
 		t.Fatal("linked-host error ignored")
 	}
 	// Without a node target the criticality is unknown: HIGH.
-	if r, _, _ := (GuestProvisionRiskFloor{Next: pol}).MinimumRisk(req, nil); r != canonical.RiskHigh {
+	// Linked is set so the empty-targets check itself decides.
+	if r, _, _ := (GuestProvisionRiskFloor{Next: pol, Linked: linkedOf()}).MinimumRisk(req, nil); r != canonical.RiskHigh {
 		t.Fatalf("no targets = %s", r)
 	}
 	// Without a criticality source everything is HIGH.

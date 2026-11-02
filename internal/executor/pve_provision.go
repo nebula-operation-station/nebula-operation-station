@@ -886,11 +886,13 @@ func (p *PveProvisioner) Provision(ctx context.Context, req PveProvisionRequest)
 		}
 		return res, runErr
 	}
-	if len(steps) == 0 && runErr != nil && !errors.Is(runErr, ErrPveMutationDenied) {
+	if len(steps) == 0 && runErr != nil && !errors.Is(runErr, ErrPvePermitFinal) {
 		// Nothing was sent, but the failure may be transient (store, vault,
-		// token, remote read): the approved execution keeps its VMID for a
-		// retry, and the reservation expires with the proposal again. Only
-		// a refused permit releases it.
+		// token, remote read, or a denial that can change: a storage or
+		// risk-policy error, risk above the approval, a stage not open yet):
+		// the approved execution keeps its VMID for a retry, and the
+		// reservation expires with the proposal again. Only a permit that
+		// can never authorize this run releases it.
 		release = false
 		_ = p.VMIDs.UnstartVMID(req.RemoteID, req.VMID, req.ExecutionID)
 	}
