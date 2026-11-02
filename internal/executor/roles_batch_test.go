@@ -209,7 +209,7 @@ func newBatchRPCEnv(t *testing.T, adminUID uint32) *batchRPCEnv {
 	}
 	p := &batchRPCPolicy{states: map[string]batch.Snapshot{}}
 	a, err := batch.New(batch.Options{
-		Mode: permit.ModeStandard, Verifier: v, Policy: p, AdminUID: adminUID, Now: e.clock.Now,
+		Mode: permit.ModeStandard, Verifier: v, Policy: p, AdminUID: adminUID, Now: e.clock.Now, Store: e.db,
 		Session: func() (bool, time.Time) { return true, e.clock.Now().Add(time.Hour) },
 	})
 	if err != nil {
