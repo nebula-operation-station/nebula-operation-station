@@ -25,6 +25,12 @@ type fakeLeases struct {
 	err       error
 	revokeErr error
 	revoked   []string
+
+	preview    executions.ReadGrantPreview
+	proposeErr error
+	proposed   []executions.ReadGrantRequest
+	commitErr  error
+	committed  []string
 }
 
 // ReadGrants returns the configured grants.
@@ -36,6 +42,18 @@ func (f *fakeLeases) ReadGrants(context.Context) ([]executions.ReadGrantView, er
 func (f *fakeLeases) RevokeReadGrant(_ context.Context, _, id string) error {
 	f.revoked = append(f.revoked, id)
 	return f.revokeErr
+}
+
+// ProposeReadGrant records the request and returns the configured preview.
+func (f *fakeLeases) ProposeReadGrant(_ context.Context, _ string, in executions.ReadGrantRequest) (executions.ReadGrantPreview, error) {
+	f.proposed = append(f.proposed, in)
+	return f.preview, f.proposeErr
+}
+
+// CommitReadGrant records the digest and assertion.
+func (f *fakeLeases) CommitReadGrant(_ context.Context, _, digest string, assertion []byte) error {
+	f.committed = append(f.committed, digest+" "+string(assertion))
+	return f.commitErr
 }
 
 func leaseHandler(t *testing.T, f *fakeLeases) http.Handler {

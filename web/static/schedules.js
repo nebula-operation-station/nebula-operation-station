@@ -6,10 +6,12 @@
 (() => {
   const w = nebulaWebAuthn;
 
-  const approve = async (id, options) => {
+  // commit is the approval endpoint: /schedules/approve, or the button's
+  // data-commit (the read lease preview posts to /leases/commit).
+  const approve = async (id, options, commit = '/schedules/approve') => {
     w.show('Touch your security key…', false);
     const cred = await navigator.credentials.get(w.requestOptions(options));
-    await w.post('/schedules/approve', { id, assertion: w.assertionJSON(cred) });
+    await w.post(commit, { id, assertion: w.assertionJSON(cred) });
   };
 
   const form = document.getElementById('schedule-form');
@@ -49,7 +51,7 @@
     b.addEventListener('click', async () => {
       b.disabled = true;
       try {
-        await approve(b.dataset.id, JSON.parse(b.dataset.options));
+        await approve(b.dataset.id, JSON.parse(b.dataset.options), b.dataset.commit);
         window.location.reload();
       } catch (err) {
         w.show(err.name === 'NotAllowedError' ? 'Cancelled or timed out.' : (err.message || 'Could not approve.'), true);
