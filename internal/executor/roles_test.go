@@ -59,6 +59,60 @@ func TestMethodRolesServerReadAccess(t *testing.T) {
 	}
 }
 
+// TestMethodRolesServerMayReadSSHPublicKey pins the read-grant follow-up
+// (ADR 0007, E06): the server may read the executor's SSH public key,
+// because read-grant-v2 binds every target to the key's SHA-256
+// fingerprint (credential_version). It is a public key; the change grants
+// nothing else. Approve and key/vault administration methods stay
+// admin-only.
+func TestMethodRolesServerMayReadSSHPublicKey(t *testing.T) {
+	const serverUID, adminUID uint32 = 30001, 30002
+	policy := peercred.NewPolicy(
+		map[uint32][]peercred.Role{
+			serverUID: {peercred.RoleServer},
+			adminUID:  {peercred.RoleAdmin},
+		},
+		MethodRoles(),
+	)
+
+	roles := MethodRoles()[pb.ExecutorService_GetSSHPublicKey_FullMethodName]
+	if len(roles) != 2 || !slices.Contains(roles, peercred.RoleServer) || !slices.Contains(roles, peercred.RoleAdmin) {
+		t.Fatalf("GetSSHPublicKey roles = %v, want exactly [server admin]", roles)
+	}
+	for _, uid := range []uint32{serverUID, adminUID} {
+		if _, ok := policy.Allowed(uid, pb.ExecutorService_GetSSHPublicKey_FullMethodName); !ok {
+			t.Errorf("uid %d may not call GetSSHPublicKey, want allowed", uid)
+		}
+	}
+
+	for _, method := range []string{
+		pb.ExecutorService_ApproveReadGrantCLI_FullMethodName,
+		pb.ExecutorService_ListPendingReadGrants_FullMethodName,
+		pb.ExecutorService_ApproveScheduleGrantCLI_FullMethodName,
+		pb.ExecutorService_ApproveCLI_FullMethodName,
+		pb.ExecutorService_ApproveGateCLI_FullMethodName,
+		pb.ExecutorService_ApproveBatchCLI_FullMethodName,
+		pb.ExecutorService_ReviewBatch_FullMethodName,
+		pb.ExecutorService_ListPending_FullMethodName,
+		pb.ExecutorService_Unlock_FullMethodName,
+		pb.ExecutorService_PinHostKey_FullMethodName,
+		pb.ExecutorService_UnpinHostKey_FullMethodName,
+		pb.ExecutorService_TestConnection_FullMethodName,
+		pb.ExecutorService_InitVault_FullMethodName,
+		pb.ExecutorService_SetSecret_FullMethodName,
+		pb.ExecutorService_ListSecrets_FullMethodName,
+		pb.ExecutorService_TrustArtifact_FullMethodName,
+		pb.ExecutorService_AddSigner_FullMethodName,
+	} {
+		if _, ok := policy.Allowed(serverUID, method); ok {
+			t.Errorf("server role may call %s, want admin-only", method)
+		}
+		if _, ok := policy.Allowed(adminUID, method); !ok {
+			t.Errorf("admin role may not call %s, want allowed", method)
+		}
+	}
+}
+
 // TestMethodRolesPVEReadSurface pins the PVE read role table (ADR 0006,
 // P1-05): the entries are final. pve-collector may call ONLY
 // ListPVERemotes and ReadPVE; server may call ListPVERemotes (metadata);
