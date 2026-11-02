@@ -6,6 +6,179 @@
 // text is shown with textContent only, never innerHTML.
 'use strict';
 
+// Org chart interaction (ADR 0006 P1-35): pan, Ctrl+wheel zoom, fit,
+// automatic list mode and the details panel/sheet. It runs first and on
+// its own, so the inventory page code below (which stops early on pages
+// without the add-host dialog) can never keep it from starting. The chart
+// is never re-rendered, so expansion (native details) and focus are
+// preserved. Untrusted values stay server-rendered text.
+(() => {
+  const chartSection = document.querySelector('.chart');
+  if (!chartSection) return;
+  const chartHosts = chartSection.querySelector('.chart__hosts');
+  if (!chartHosts) return;
+  const fitBtn = document.getElementById('chart-fit');
+  const sheet = document.getElementById('chart-sheet');
+  const narrow = window.matchMedia('(max-width: 600px)');
+  let tx = 0, ty = 0, scale = 1;
+
+  const panning = () => chartSection.classList.contains('chart--pan');
+  const applyTransform = () => {
+    chartHosts.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+  };
+  const fit = () => { tx = 0; ty = 0; scale = 1; applyTransform(); };
+
+  // Automatic mode: pan/zoom canvas on wide screens, plain list on
+  // narrow ones (the CSS list layout below 600px stays in charge).
+  const setMode = () => {
+    const pan = !narrow.matches && chartHosts.children.length > 0;
+    chartSection.classList.toggle('chart--pan', pan);
+    if (fitBtn) fitBtn.hidden = !pan;
+    if (!pan) { tx = 0; ty = 0; scale = 1; chartHosts.style.transform = ''; }
+  };
+
+  // Ctrl+wheel zooms around the cursor; a plain wheel keeps scrolling.
+  chartSection.addEventListener('wheel', (e) => {
+    if (!e.ctrlKey || !panning()) return;
+    e.preventDefault();
+    const rect = chartSection.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const next = Math.min(3, Math.max(0.4, scale * Math.exp(-e.deltaY * 0.0015)));
+    const f = next / scale;
+    tx = mx - (mx - tx) * f;
+    ty = my - (my - ty) * f;
+    scale = next;
+    applyTransform();
+  }, { passive: false });
+
+  // Drag pans the canvas; interactive elements keep their behaviour.
+  let drag = null;
+  chartSection.addEventListener('pointerdown', (e) => {
+    if (!panning() || e.button !== 0) return;
+    if (e.target.closest('a, button, summary, input, select, textarea, meter')) return;
+    drag = { x: e.clientX, y: e.clientY, tx, ty };
+    chartSection.setPointerCapture(e.pointerId);
+  });
+  chartSection.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    tx = drag.tx + (e.clientX - drag.x);
+    ty = drag.ty + (e.clientY - drag.y);
+    applyTransform();
+  });
+  const endDrag = () => { drag = null; };
+  chartSection.addEventListener('pointerup', endDrag);
+  chartSection.addEventListener('pointercancel', endDrag);
+
+  // Keyboard pan: the canvas is a labelled, focusable region; arrow
+  // keys pan, 0 fits. Keys aimed at a control inside are left alone.
+  chartSection.tabIndex = 0;
+  chartSection.addEventListener('keydown', (e) => {
+    if (!panning() || e.target !== chartSection) return;
+    const step = 48;
+    let handled = true;
+    switch (e.key) {
+      case 'ArrowLeft': tx += step; break;
+      case 'ArrowRight': tx -= step; break;
+      case 'ArrowUp': ty += step; break;
+      case 'ArrowDown': ty -= step; break;
+      case '0': fit(); break;
+      default: handled = false;
+    }
+    if (handled) { e.preventDefault(); applyTransform(); }
+  });
+
+  // Pan-to-focus: in pan mode the canvas clips (overflow hidden), so a
+  // focused host, link or button outside the visible area is moved into
+  // view; keyboard focus never lands on something the user cannot see.
+  const margin = 16;
+  const revealFocus = (el) => {
+    if (!panning() || !chartHosts.contains(el)) return;
+    const view = chartSection.getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    let dx = 0, dy = 0;
+    if (r.left < view.left + margin) dx = view.left + margin - r.left;
+    else if (r.right > view.right - margin) dx = Math.max(view.left + margin - r.left, view.right - margin - r.right);
+    if (r.top < view.top + margin) dy = view.top + margin - r.top;
+    else if (r.bottom > view.bottom - margin) dy = Math.max(view.top + margin - r.top, view.bottom - margin - r.bottom);
+    if (dx || dy) { tx += dx; ty += dy; applyTransform(); }
+  };
+  chartSection.addEventListener('focusin', (e) => revealFocus(e.target));
+
+  if (fitBtn) fitBtn.addEventListener('click', fit);
+
+  // Details: on wide screens the server-rendered side panel is the
+  // target (its host is expanded, then it is scrolled into view and
+  // focused); on narrow screens a clone moves into the bottom sheet.
+  // The original panel is never changed beyond opening its host.
+  let lastOpener = null;
+  let closeBtn = null;
+  const closeSheet = () => {
+    if (!sheet || sheet.hidden) return;
+    for (const node of Array.from(sheet.children)) {
+      if (node !== closeBtn) node.remove();
+    }
+    sheet.hidden = true;
+    if (lastOpener && document.contains(lastOpener)) lastOpener.focus();
+  };
+  if (sheet) {
+    closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'dpanel-sheet__close';
+    closeBtn.textContent = 'Close';
+    sheet.appendChild(closeBtn);
+    closeBtn.addEventListener('click', closeSheet);
+    document.addEventListener('keydown', (e) => {
+      if (sheet.hidden) return;
+      if (e.key === 'Escape') { e.preventDefault(); closeSheet(); return; }
+      if (e.key !== 'Tab') return;
+      // Focus loop for the modal sheet. The close button is always the
+      // first stop, so the loop works even when the panel has no links.
+      const stops = [closeBtn, ...Array.from(sheet.querySelectorAll(
+        'a[href], button, summary, input, select, textarea, [tabindex]:not([tabindex="-1"])'
+      )).filter((el) => el !== closeBtn && !el.hidden)];
+      const first = stops[0], last = stops[stops.length - 1];
+      if (!sheet.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+      else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    });
+  }
+
+  for (const btn of chartSection.querySelectorAll('.chart__dpanel-btn')) {
+    btn.hidden = false;
+    btn.addEventListener('click', (e) => {
+      // The button sits in the host's <summary>: do not toggle it.
+      e.preventDefault();
+      e.stopPropagation();
+      const id = btn.dataset.nosDpanelBtn;
+      if (!id) return;
+      const panel = chartSection.querySelector('.chart__dpanel[data-nos-dpanel="' + CSS.escape(id) + '"]');
+      if (!panel) return;
+      lastOpener = btn;
+      if (narrow.matches && sheet) {
+        closeSheet();
+        const clone = panel.cloneNode(true);
+        clone.removeAttribute('tabindex');
+        clone.removeAttribute('data-nos-dpanel');
+        sheet.appendChild(clone);
+        sheet.hidden = false;
+        closeBtn.focus();
+        return;
+      }
+      const host = panel.closest('details');
+      if (host && !host.open) host.open = true;
+      panel.scrollIntoView({ block: 'nearest' });
+      panel.focus();
+      revealFocus(panel);
+    });
+  }
+
+  const onModeChange = () => { closeSheet(); setMode(); };
+  setMode();
+  if (typeof narrow.addEventListener === 'function') narrow.addEventListener('change', onModeChange);
+  else narrow.addListener(onModeChange);
+})();
+
 (() => {
   const w = nebulaWebAuthn;
 
@@ -468,141 +641,4 @@
       submit.disabled = false;
     }
   });
-
-  // ------------------------------------------------------------------
-  // Org chart interaction (ADR 0006 P1-35): pan, Ctrl+wheel zoom, fit,
-  // automatic list mode and the details sheet. The chart is never
-  // re-rendered, so expansion (native details) and focus are preserved.
-  // Strict CSP: no inline handlers, no external resources; untrusted
-  // values stay server-rendered text.
-  const chartSection = document.querySelector('.chart');
-  if (chartSection) {
-    const chartHosts = chartSection.querySelector('.chart__hosts');
-    const fitBtn = document.getElementById('chart-fit');
-    const sheet = document.getElementById('chart-sheet');
-    const narrow = window.matchMedia('(max-width: 600px)');
-    let tx = 0, ty = 0, scale = 1;
-
-    const applyTransform = () => {
-      chartHosts.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
-    };
-    const fit = () => { tx = 0; ty = 0; scale = 1; applyTransform(); };
-
-    // Automatic mode: pan/zoom canvas on wide screens, plain list on
-    // narrow ones (the CSS list layout below 600px stays in charge).
-    const setMode = () => {
-      const pan = !narrow.matches && chartHosts.children.length > 0;
-      chartSection.classList.toggle('chart--pan', pan);
-      if (fitBtn) fitBtn.hidden = !pan;
-      if (!pan) fit();
-    };
-
-    // Ctrl+wheel zooms around the cursor; a plain wheel keeps scrolling.
-    chartSection.addEventListener('wheel', (e) => {
-      if (!e.ctrlKey || !chartSection.classList.contains('chart--pan')) return;
-      e.preventDefault();
-      const rect = chartSection.getBoundingClientRect();
-      const mx = e.clientX - rect.left;
-      const my = e.clientY - rect.top;
-      const next = Math.min(3, Math.max(0.4, scale * Math.exp(-e.deltaY * 0.0015)));
-      const f = next / scale;
-      tx = mx - (mx - tx) * f;
-      ty = my - (my - ty) * f;
-      scale = next;
-      applyTransform();
-    }, { passive: false });
-
-    // Drag pans the canvas; interactive elements keep their behaviour.
-    let drag = null;
-    chartSection.addEventListener('pointerdown', (e) => {
-      if (!chartSection.classList.contains('chart--pan') || e.button !== 0) return;
-      if (e.target.closest('a, button, summary, input, select, textarea, meter')) return;
-      drag = { x: e.clientX, y: e.clientY, tx, ty };
-      chartSection.setPointerCapture(e.pointerId);
-    });
-    chartSection.addEventListener('pointermove', (e) => {
-      if (!drag) return;
-      tx = drag.tx + (e.clientX - drag.x);
-      ty = drag.ty + (e.clientY - drag.y);
-      applyTransform();
-    });
-    const endDrag = () => { drag = null; };
-    chartSection.addEventListener('pointerup', endDrag);
-    chartSection.addEventListener('pointercancel', endDrag);
-
-    // Keyboard pan: the canvas is a labelled, focusable region; arrow
-    // keys pan, 0 fits.
-    chartSection.tabIndex = 0;
-    chartSection.addEventListener('keydown', (e) => {
-      if (!chartSection.classList.contains('chart--pan')) return;
-      const step = 48;
-      let handled = true;
-      switch (e.key) {
-        case 'ArrowLeft': tx += step; break;
-        case 'ArrowRight': tx -= step; break;
-        case 'ArrowUp': ty += step; break;
-        case 'ArrowDown': ty -= step; break;
-        case '0': fit(); break;
-        default: handled = false;
-      }
-      if (handled) { e.preventDefault(); applyTransform(); }
-    });
-
-    if (fitBtn) fitBtn.addEventListener('click', fit);
-    for (const btn of chartSection.querySelectorAll('.chart__dpanel-btn')) btn.hidden = false;
-
-    // Details: on wide screens the server-rendered side panel is the
-    // target (scroll + focus); on narrow screens a clone moves into the
-    // bottom sheet. The original panel is never touched, so expansion
-    // state is preserved.
-    let lastOpener = null;
-    const closeBtn = document.createElement('button');
-    closeBtn.type = 'button';
-    closeBtn.className = 'dpanel-sheet__close';
-    closeBtn.textContent = 'Close';
-    sheet.appendChild(closeBtn);
-    const closeSheet = () => {
-      if (sheet.hidden) return;
-      for (const node of Array.from(sheet.children)) {
-        if (node !== closeBtn) node.remove();
-      }
-      sheet.hidden = true;
-      if (lastOpener) lastOpener.focus();
-    };
-    closeBtn.addEventListener('click', closeSheet);
-    document.addEventListener('keydown', (e) => {
-      if (sheet.hidden) return;
-      if (e.key === 'Escape') { closeSheet(); return; }
-      if (e.key !== 'Tab') return;
-      // Minimal focus loop for the modal sheet.
-      const list = [closeBtn, ...sheet.querySelectorAll('a[href], button')].filter((el) => el !== closeBtn);
-      const first = list[0], last = list[list.length - 1];
-      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
-    });
-
-    for (const btn of chartSection.querySelectorAll('.chart__dpanel-btn')) {
-      btn.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const panel = chartSection.querySelector('.chart__dpanel[data-nos-dpanel="' + CSS.escape(btn.dataset.dpanelBtn) + '"]');
-        if (!panel) return;
-        lastOpener = btn;
-        if (narrow.matches) {
-          const clone = panel.cloneNode(true);
-          clone.removeAttribute('tabindex');
-          sheet.appendChild(clone);
-          sheet.hidden = false;
-          closeBtn.focus();
-        } else {
-          panel.scrollIntoView({ block: 'nearest' });
-          panel.focus();
-        }
-      });
-    }
-
-    setMode();
-    if (typeof narrow.addEventListener === 'function') narrow.addEventListener('change', setMode);
-    else narrow.addListener(setMode);
-  }
 })();

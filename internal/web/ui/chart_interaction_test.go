@@ -177,3 +177,43 @@ func TestChartScriptIsOneSmallScript(t *testing.T) {
 		}
 	}
 }
+
+// Review of PR #165 (HIGH): the chart interaction must start on the chart
+// page. inventory.js stops early on pages without the add-host dialog and
+// throws without webauthn.js, so the chart code has to be its own block
+// that runs before the inventory page code.
+func TestChartInteractionRunsBeforeInventoryCode(t *testing.T) {
+	js, err := os.ReadFile(filepath.Join("..", "..", "..", "web", "static", "inventory.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(js)
+	chart := strings.Index(src, "document.querySelector('.chart')")
+	inv := strings.Index(src, "const w = nebulaWebAuthn;")
+	early := strings.Index(src, "if (!dialog || !form) return;")
+	if chart < 0 || inv < 0 || early < 0 {
+		t.Fatalf("markers missing: chart %d, inventory %d, early return %d", chart, inv, early)
+	}
+	if chart > inv || chart > early {
+		t.Errorf("chart interaction starts at %d, after the inventory code (%d) or its early return (%d): it never runs on the chart page", chart, inv, early)
+	}
+}
+
+// Review of PR #165 (HIGH): the Details lookup reads the dataset key that
+// matches the rendered attribute (data-nos-dpanel-btn -> nosDpanelBtn).
+func TestChartDetailsDatasetKeyMatchesTemplate(t *testing.T) {
+	body := getBody(t, chartHandler(t).Handler(), "/inventory/chart")
+	if !strings.Contains(body, "data-nos-dpanel-btn=") || !strings.Contains(body, "data-nos-dpanel=") {
+		t.Fatal("chart page lost the details button/panel attributes")
+	}
+	js, err := os.ReadFile(filepath.Join("..", "..", "..", "web", "static", "inventory.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(js), "dataset.nosDpanelBtn") {
+		t.Error("inventory.js does not read dataset.nosDpanelBtn")
+	}
+	if strings.Contains(string(js), "dataset.dpanelBtn") {
+		t.Error("inventory.js reads dataset.dpanelBtn, which no element carries")
+	}
+}
