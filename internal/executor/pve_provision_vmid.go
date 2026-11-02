@@ -207,10 +207,27 @@ func (s *FilePveVMIDStore) StartVMID(remoteID string, vmid uint64, executionID s
 	if !validVMID(templateVMID) || templateVMID == vmid {
 		return ErrPveMutationPlan
 	}
-	return s.update(remoteID, vmid, executionID, func(recs []PveVMIDReservation, i int) []PveVMIDReservation {
+	// The template VMID is the durable narrowing marker for the clone step
+	// (JobTaskID, same-template ambiguity). Once recorded it never changes:
+	// a later Provision call for the same execution that names another
+	// template is refused before it can rewrite the marker, even though
+	// its Run would be denied anyway (StartVMID runs before the permit).
+	conflict := false
+	err := s.update(remoteID, vmid, executionID, func(recs []PveVMIDReservation, i int) []PveVMIDReservation {
+		if recs[i].TemplateVMID != 0 && recs[i].TemplateVMID != templateVMID {
+			conflict = true
+			return recs
+		}
 		recs[i].Started, recs[i].TemplateVMID = true, templateVMID
 		return recs
 	})
+	if err != nil {
+		return err
+	}
+	if conflict {
+		return fmt.Errorf("vmid %d: reservation is bound to template %d: %w", vmid, templateVMID, ErrPveMutationPlan)
+	}
+	return nil
 }
 
 // Reservations implements PveVMIDStore.

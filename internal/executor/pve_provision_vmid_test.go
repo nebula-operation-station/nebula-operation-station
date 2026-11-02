@@ -174,3 +174,26 @@ func TestVMIDUnstartRestoresExpiry(t *testing.T) {
 		t.Fatal("unstarted reservation does not expire")
 	}
 }
+
+// TestVMIDStartKeepsTheTemplateMarker checks that a second start for the
+// same execution cannot rewrite the recorded template VMID, the durable
+// narrowing marker of the clone step.
+func TestVMIDStartKeepsTheTemplateMarker(t *testing.T) {
+	s := newVMIDStore(t)
+	if _, err := s.ReserveVMID("lab", "exec-a", 300, nil, vmidNow.Add(time.Minute), vmidNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.StartVMID("lab", 300, "exec-a", 9000); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.StartVMID("lab", 300, "exec-a", 9001); !errors.Is(err, ErrPveMutationPlan) {
+		t.Fatalf("start with another template: %v, want ErrPveMutationPlan", err)
+	}
+	if err := s.StartVMID("lab", 300, "exec-a", 9000); err != nil {
+		t.Fatalf("start again with the same template: %v", err)
+	}
+	recs, err := s.Reservations("lab", vmidNow)
+	if err != nil || len(recs) != 1 || recs[0].TemplateVMID != 9000 || !recs[0].Started {
+		t.Fatalf("reservations = %+v %v, want one started with template 9000", recs, err)
+	}
+}
