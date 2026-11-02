@@ -114,3 +114,61 @@ func TestReserveIsAtomicUnderConcurrency(t *testing.T) {
 		t.Fatalf("%d concurrent reservations of one address succeeded", ok)
 	}
 }
+
+func TestSetEntryNeverOverwritesAHeldReservation(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t, nil)
+	lan(t, s)
+	if _, err := s.Reserve(ctx, "admin", "lan", "servers", addr("192.168.10.12"), "provision web1"); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{EntryReserved, EntryExcluded} {
+		err := s.SetEntry(ctx, "bob", addr("192.168.10.12"), kind, "mine")
+		var ve *ValidationError
+		if !errors.Is(err, ErrAddressTaken) || !errors.As(err, &ve) {
+			t.Fatalf("%s over a held reservation: %v", kind, err)
+		}
+	}
+	if v := statusOf(t, s, "lan")["192.168.10.12"]; v.Status != Reserved || v.Entry == nil || v.Entry.Note != "provision web1" || v.Entry.By != "admin" {
+		t.Fatalf("held reservation changed: %+v", v)
+	}
+	// An ordinary entry can still be changed, and a cleared held entry is
+	// an ordinary address again.
+	if err := s.SetEntry(ctx, "admin", addr("192.168.10.14"), EntryReserved, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetEntry(ctx, "bob", addr("192.168.10.14"), EntryExcluded, "b"); err != nil {
+		t.Fatalf("ordinary entry: %v", err)
+	}
+	if err := s.ClearEntry(ctx, addr("192.168.10.12")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetEntry(ctx, "bob", addr("192.168.10.12"), EntryExcluded, "printer"); err != nil {
+		t.Fatalf("after clear: %v", err)
+	}
+}
+
+func TestReserveAndSetEntryRaceKeepsTheReservation(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t, nil)
+	lan(t, s)
+	for i := 0; i < 20; i++ {
+		ad := netip.AddrFrom4([4]byte{192, 168, 10, byte(100 + i)})
+		var wg sync.WaitGroup
+		var reserveErr, setErr error
+		wg.Add(2)
+		go func() { defer wg.Done(); _, reserveErr = s.Reserve(ctx, "admin", "lan", "", ad, "provision") }()
+		go func() { defer wg.Done(); setErr = s.SetEntry(ctx, "bob", ad, EntryExcluded, "manual") }()
+		wg.Wait()
+		v := statusOf(t, s, "lan")[ad.String()]
+		switch {
+		case reserveErr == nil && (v.Entry == nil || v.Entry.Note != "provision"):
+			t.Fatalf("%s: reservation overwritten (set: %v): %+v", ad, setErr, v)
+		case reserveErr == nil && setErr == nil:
+			// SetEntry ran first and Reserve still succeeded: impossible.
+			t.Fatalf("%s: both succeeded: %+v", ad, v)
+		case reserveErr != nil && !errors.Is(reserveErr, ErrAddressTaken):
+			t.Fatalf("%s: reserve: %v", ad, reserveErr)
+		}
+	}
+}

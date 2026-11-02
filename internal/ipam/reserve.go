@@ -36,7 +36,8 @@ type Reservation struct {
 // insert fails when any reservation or exclusion of the address exists, so
 // of two concurrent reservations exactly one succeeds. An address that is
 // not FREE, including one discovery saw at any time, is refused with
-// ErrAddressTaken; a suggestion is not a reservation.
+// ErrAddressTaken; a suggestion is not a reservation. The entry is held:
+// SetEntry never overwrites it, only ClearEntry releases it.
 func (s *Store) Reserve(ctx context.Context, user, networkID, pool string, ad netip.Addr, note string) (Reservation, error) {
 	switch {
 	case !userRe.MatchString(user):
@@ -77,8 +78,9 @@ func (s *Store) Reserve(ctx context.Context, user, networkID, pool string, ad ne
 		return Reservation{}, fmt.Errorf("reserve %s (%s): %w", ad, v.Status, ErrAddressTaken)
 	}
 	// No upsert: the primary key on address makes the reservation atomic
-	// against every other entry, including a concurrent Reserve.
-	_, err = s.db.ExecContext(ctx, `INSERT INTO ip_entries (address, kind, note, by_user, at) VALUES (?, ?, ?, ?, ?)`,
+	// against every other entry, including a concurrent Reserve. The entry
+	// is held, so SetEntry never overwrites it.
+	_, err = s.db.ExecContext(ctx, `INSERT INTO ip_entries (address, kind, note, by_user, at, held) VALUES (?, ?, ?, ?, ?, 1)`,
 		ad.String(), EntryReserved, note, user, now.Unix())
 	if err != nil {
 		var exists int

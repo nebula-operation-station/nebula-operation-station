@@ -492,7 +492,10 @@ func (s *Store) Network(ctx context.Context, id string) (Network, error) {
 
 // --- entries ---
 
-// SetEntry reserves or excludes an address.
+// SetEntry reserves or excludes an address, or changes an existing entry.
+// An entry Reserve took for a consumer (held) is never overwritten: that
+// is refused with a ValidationError wrapping ErrAddressTaken; ClearEntry
+// releases it first.
 func (s *Store) SetEntry(ctx context.Context, user string, ad netip.Addr, kind, note string) error {
 	switch {
 	case !userRe.MatchString(user):
@@ -504,10 +507,19 @@ func (s *Store) SetEntry(ctx context.Context, user string, ad netip.Addr, kind, 
 	case !plain(note, maxNote, false):
 		return invalid("the note must be at most %d characters of plain text", maxNote)
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO ip_entries (address, kind, note, by_user, at) VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT (address) DO UPDATE SET kind = excluded.kind, note = excluded.note, by_user = excluded.by_user, at = excluded.at`,
+	// One statement: the held check and the upsert are atomic against a
+	// concurrent Reserve.
+	res, err := s.db.ExecContext(ctx, `INSERT INTO ip_entries (address, kind, note, by_user, at) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT (address) DO UPDATE SET kind = excluded.kind, note = excluded.note, by_user = excluded.by_user, at = excluded.at
+		WHERE ip_entries.held = 0`,
 		ad.Unmap().String(), kind, note, user, s.now().Unix())
-	return err
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return fmt.Errorf("set entry %s: %w: %w", ad.Unmap(), invalid("the address is held by a reservation (for example a provisioning); clear it first"), ErrAddressTaken)
+	}
+	return nil
 }
 
 // ClearEntry removes a reservation or exclusion.
