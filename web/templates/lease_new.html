@@ -49,6 +49,7 @@
     <p>This executor is in hardened mode. Approve the lease on the executor host; the command shows the complete lease first:</p>
     <pre class="mono" id="lease-cli">{{$d.CLICommand}}</pre>
     {{else}}
+    {{if not $p.ChallengeExpiry.IsZero}}<p class="hint">Approve before {{timeTag $p.ChallengeExpiry}}; after that, preview again.</p>{{end}}
     <button type="button" class="button schedule-approve" data-id="{{$p.Digest}}" data-options="{{$d.Options}}" data-commit="/leases/commit">Approve with security key</button>
     {{end}}
     <a class="button button--small" href="/leases">Cancel</a>

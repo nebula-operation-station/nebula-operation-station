@@ -47,7 +47,8 @@ func leasePreview(n int) executions.ReadGrantPreview {
 			{ActionID: "core.facts", ModuleVersion: "1.0.0", ArtifactSHA256: strings.Repeat("a", 64), ParametersHash: strings.Repeat("b", 64)},
 			{ActionID: "package.list_updates", ModuleVersion: "1.0.0", ArtifactSHA256: strings.Repeat("d", 64), ParametersHash: strings.Repeat("b", 64)},
 		},
-		Options: []byte(`{"publicKey":{"challenge":"abc"}}`),
+		Options:         []byte(`{"publicKey":{"challenge":"abc"}}`),
+		ChallengeExpiry: time.Unix(1_800_000_300, 0).UTC(),
 	}
 	for i := 0; i < n; i++ {
 		v.Targets = append(v.Targets, executions.ReadGrantPreviewTarget{
@@ -193,7 +194,7 @@ func TestLeasePreviewListsEveryHostAndDigest(t *testing.T) {
 		`class="button schedule-approve" data-id="` + leaseDigest + `"`,
 		`data-commit="/leases/commit"`,
 		`data-options="{&#34;publicKey&#34;:{&#34;challenge&#34;:&#34;abc&#34;}}"`,
-		`/static/webauthn.js`, `/static/schedules.js`,
+		`/static/webauthn.js`, `/static/schedules.js`, "Approve before",
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("preview misses %q", want)
