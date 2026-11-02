@@ -145,7 +145,7 @@ for user in "${raw_users[@]}"; do
     exit 1
   fi
   case "$user" in
-    root|nebula-server|nebula-executor|nebula-discovery)
+    root|nebula-server|nebula-executor|nebula-discovery|nebula-pve-collector)
       echo "install.sh: $user cannot be an admin user; use a personal account" >&2
       exit 1
       ;;
@@ -181,14 +181,14 @@ drop_in="${drop_in_dir}/10-local.conf"
 unit_dir="${systemd_dir}"
 if [[ ${from_package} -eq 1 ]]; then
   unit_dir=/lib/systemd/system
-  for bin in nebula nebula-server nebula-executor nebula-discovery; do
+  for bin in nebula nebula-server nebula-executor nebula-discovery nebula-pve-collector; do
     if [[ ! -x "${bin_dir}/${bin}" ]]; then
       echo "install.sh: ${bin_dir}/${bin} not found; is the package installed?" >&2
       exit 1
     fi
   done
 else
-  for bin in nebula nebula-server nebula-executor nebula-discovery; do
+  for bin in nebula nebula-server nebula-executor nebula-discovery nebula-pve-collector; do
     if [[ ! -f "${tarball_root}/${bin}" ]]; then
       echo "install.sh: ${tarball_root}/${bin} not found" >&2
       echo "install.sh: run this script from the extracted release tarball" >&2
@@ -217,6 +217,12 @@ if ! getent passwd nebula-discovery >/dev/null; then
   useradd --system --home-dir "${var_lib}/discovery" \
     --shell /usr/sbin/nologin nebula-discovery
 fi
+# PVE collector (ADR 0006, P1-14): its own system user with the pve-collector
+# peercred role. It is in nebula-rpc to reach the executor socket; the unit
+# gives it no capabilities and no network (nebula-pve-collector.service).
+if ! getent passwd nebula-pve-collector >/dev/null; then
+  useradd --system --home-dir "${var_lib}/pve" --shell /usr/sbin/nologin -G "${group_name}" nebula-pve-collector
+fi
 
 # Admin users need the nebula-rpc group for the CLI socket; usermod -aG
 # is a no-op when the membership already exists.
@@ -238,6 +244,12 @@ install -d -m 0755 -o root -g root "${var_lib}/discovery"
 # reader's, so the other side can read it (review m105).
 install -d -m 2750 -o nebula-server -g nebula-discovery "${var_lib}/discovery/jobs"
 install -d -m 2750 -o nebula-discovery -g nebula-server "${var_lib}/discovery/results"
+# PVE spool (ADR 0006, P1-14): the collector owns the root and writes the
+# results; the server group (nebula-rpc) reads the results. setgid so a file
+# written by the collector inherits the shared group, which the server can
+# read. The root is 0750 (not world-readable) because it holds PVE data.
+install -d -m 2750 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve"
+install -d -m 2770 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/results"
 
 # --- Pre-upgrade backup (spec 15) --------------------------------------------
 # Before an existing install is replaced, the new CLI makes a backup (as
@@ -261,7 +273,7 @@ fi
 
 # --- Binaries (replaced on every run; detect real changes) ------------------
 bin_changed=0
-[[ ${from_package} -eq 1 ]] || for bin in nebula nebula-server nebula-executor nebula-discovery; do
+[[ ${from_package} -eq 1 ]] || for bin in nebula nebula-server nebula-executor nebula-discovery nebula-pve-collector; do
   old_sum=""
   if [[ -f "${bin_dir}/${bin}" ]]; then
     old_sum=$(sha256sum "${bin_dir}/${bin}" | cut -d' ' -f1)
@@ -278,7 +290,7 @@ shopt -s nullglob
 installed_units=()
 if [[ ${from_package} -eq 1 ]]; then
   # The package ships the units; enable the ones not enabled yet.
-  for name in nebula-server.service nebula-discovery.path nebula-discovery.timer nebula-executor.service; do
+  for name in nebula-server.service nebula-discovery.path nebula-discovery.timer nebula-executor.service nebula-pve-collector.service; do
     if ! systemctl is-enabled --quiet "${name}" 2>/dev/null; then
       installed_units+=("${name}")
     fi

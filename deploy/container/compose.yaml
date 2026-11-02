@@ -67,9 +67,29 @@ services:
       - discovery-jobs:/var/lib/nebula/discovery/jobs:ro
       - discovery-results:/var/lib/nebula/discovery/results
 
+  pve-collector:
+    <<: *hardening
+    image: ${NEBULA_IMAGE:-ghcr.io/nebula-operation-station/nebula:latest}
+    user: "10004:10004"
+    group_add: ["10010"]
+    depends_on: [executor]
+    # The collector has no network listener and no capabilities: it only
+    # reaches the executor socket (on the shared rpc volume) and the spool.
+    # No cap_add, no host network — the default bridge is unused.
+    command:
+      - nebula-pve-collector
+      - -socket=/run/nebula/executor.sock
+      - -executor-user=nebula-executor
+      - -spool=/var/lib/nebula/pve
+      - -interval=1m
+    volumes:
+      - rpc:/run/nebula
+      - pve-spool:/var/lib/nebula/pve
+
 volumes:
   executor-data:
   server-data:
   rpc:
   discovery-jobs:
   discovery-results:
+  pve-spool:

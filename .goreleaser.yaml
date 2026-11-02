@@ -73,6 +73,20 @@ builds:
       - -s -w
       - -X github.com/nebula-operation-station/nebula-operation-station/internal/version.Version={{.Version}}
       - -X github.com/nebula-operation-station/nebula-operation-station/internal/version.Commit={{.ShortCommit}}
+  - id: nebula-pve-collector
+    main: ./cmd/nebula-pve-collector
+    binary: nebula-pve-collector
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/nebula-operation-station/nebula-operation-station/internal/version.Version={{.Version}}
+      - -X github.com/nebula-operation-station/nebula-operation-station/internal/version.Commit={{.ShortCommit}}
 
 archives:
   - id: nebula
@@ -87,7 +101,7 @@ archives:
 nfpms:
   - id: nebula
     package_name: nebula-operation-station
-    ids: [nebula, nebula-server, nebula-executor, nebula-discovery]
+    ids: [nebula, nebula-server, nebula-executor, nebula-discovery, nebula-pve-collector]
     file_name_template: "nebula-operation-station_{{ .Version }}_{{ .Arch }}"
     vendor: Nebula Operation Station
     homepage: https://github.com/nebula-operation-station/nebula-operation-station
@@ -109,6 +123,8 @@ nfpms:
         dst: /lib/systemd/system/nebula-discovery.path
       - src: deploy/systemd/nebula-discovery.timer
         dst: /lib/systemd/system/nebula-discovery.timer
+      - src: deploy/systemd/nebula-pve-collector.service
+        dst: /lib/systemd/system/nebula-pve-collector.service
       - src: deploy/install.sh
         dst: /usr/share/nebula/deploy/install.sh
         file_info: {mode: 0755}
@@ -123,12 +139,12 @@ nfpms:
       postinstall: deploy/deb/postinst
       preremove: deploy/deb/prerm
 
-# The container image (decision 5 of the M10 plan): the four binaries on
+# The container image (decision 5 of the M10 plan): the binaries on
 # debian:12-slim; deploy/container/compose.yaml runs it. Pushing happens
 # offline with the release, like publishing.
 dockers:
   - id: nebula
-    ids: [nebula, nebula-server, nebula-executor, nebula-discovery]
+    ids: [nebula, nebula-server, nebula-executor, nebula-discovery, nebula-pve-collector]
     goos: linux
     goarch: amd64
     dockerfile: deploy/container/Dockerfile

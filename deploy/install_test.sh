@@ -115,6 +115,7 @@ run_rc 1 "empty label in rp-id rejected" -- --admin-users "$test_user" --rp-id a
 run_rc 1 "nonexistent admin user rejected" -- --admin-users definitely-not-a-user-12345 --rp-id nebula.example.org
 run_rc 1 "root rejected as admin user" -- --admin-users root --rp-id nebula.example.org
 run_rc 1 "nebula-server rejected as admin user" -- --admin-users nebula-server --rp-id nebula.example.org
+run_rc 1 "nebula-pve-collector rejected as admin user" -- --admin-users nebula-pve-collector --rp-id nebula.example.org
 run_rc 1 "empty entry in admin list rejected" -- --admin-users "${test_user},,${test_user}" --rp-id nebula.example.org
 run_rc 1 "second of two users missing" -- --admin-users "$test_user,definitely-not-a-user-12345" --rp-id nebula.example.org
 
