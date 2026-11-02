@@ -114,16 +114,18 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
 
   Each step stores its UPID before dispatch and reconciles on restart or
   lost response; nothing is ever redispatched blindly.
-- **Risk:** base MEDIUM, never LOW (spec 11: LOW remains read-only), and
-  ADR 0008 adds no automatic raise of its own: a production profile, PCI
-  passthrough or over-commit does not raise it (maintainer decision
-  2026-11-02, open question 2). The general PVE rule of spec 11 still
-  applies: effective risk is the maximum of this floor and the
-  executor-owned remote/node criticality, and unknown criticality is HIGH.
-  Setting a node's or remote's criticality is the operator's way to raise
-  provisioning there. (Draft before: HIGH also on passthrough or
-  over-commit; the decision of 2026-11-02 first read "always LOW" and was
-  corrected the same day because LOW is reserved for read-only actions.)
+- **Risk:** base MEDIUM, never LOW (spec 11: LOW remains read-only). ADR 0008
+  adds no automatic raise of its own: a production profile does not raise it,
+  and neither does any other provisioning-specific condition (decision 2).
+  The general rule of spec 11 ("PVE action profiles and risks": maximum of
+  the floor, criticality and affected linked-host floors; unknown
+  criticality HIGH) still applies unchanged; setting criticality is the
+  operator's way to raise provisioning on a node or remote. The allowlisted
+  config set on the newly cloned guest is a step of `pve.guest.provision`
+  and covered by its floor, not a separate configuration-change action.
+  (Draft before: HIGH also on PCI passthrough or over-commit; the decision
+  of 2026-11-02 first read "always LOW" and was corrected the same day
+  because LOW is reserved for read-only actions.)
 - **Failure:** a failed deployment leaves the guest for inspection. Deleting
   it is a separate HIGH action, never automatic.
 - **Access and password:** cloud-init `sshkeys` always contains the NOS
@@ -140,8 +142,9 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
   - Preferred: read `/etc/ssh/ssh_host_ed25519_key.pub` through the QEMU
     guest agent over the authenticated, pinned PVE channel, then enroll
     without trust-on-first-use. This requires the guest agent in the image,
-    so it applies to images that already ship it (local catalog entries,
-    re-enrollment); see decision 1.
+    so it applies only to images that ship the agent (a local catalog
+    entry may); the executor tries a bounded agent read and falls back to
+    the fingerprint review. See decision 1.
   - Fallback: the existing fingerprint review, shown on the deployment page.
     This is the default path for vendor cloud images (decision 1); the
     bootstrap module then installs `qemu-guest-agent`.
@@ -232,7 +235,8 @@ question and the alternatives.
    an opt-in.)
 2. **Risk of the provision action** (question: should a production-environment
    profile always be HIGH?): no. Base MEDIUM with no automatic raise from
-   ADR 0008; criticality raises it as in spec 11 (section 3).
+   ADR 0008; criticality raises it as in spec 11 "PVE action profiles and
+   risks" (see section 3 above).
 3. **VMID allocation** (next free VMID from the cluster, or operator-defined
    ranges per remote?): the next free VMID from the cluster.
 4. **Windows and other OS families:** out of scope for this track.
@@ -243,7 +247,7 @@ question and the alternatives.
 
 | Ticket | Scope | Depends on |
 | --- | --- | --- |
-| PV-00 | This ADR accepted; spec revision for spec 07/10/12 | — |
+| PV-00 | This ADR accepted; spec revision for spec 07/10/11/12 (spec 11: PVE action rows for `pve.guest.provision` MEDIUM and `pve.image.prepare` HIGH) | — |
 | PV-01 | Minimal phase-2 mutation foundation: action-token use, exact-target mutation permit, UPID persistence and reconciliation (executor, executordb, permit; protected) | PV-00 |
 | PV-02 | `pveapi` typed write methods: clone, allowlisted config set, resize, start, download-url, template conversion, task status; httptest only | PV-00 |
 | PV-03 | Signed image catalog and `pve.image.prepare` | PV-01, PV-02 |
