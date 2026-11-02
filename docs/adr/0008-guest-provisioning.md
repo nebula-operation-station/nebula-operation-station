@@ -124,7 +124,7 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
   so its criticality does not count as unknown. Unset remote or node
   criticality is unknown and therefore HIGH, and a PVE node that is also a
   managed host defaults to HIGH (spec 11); out of the box provisioning is
-  HIGH until the operator records a normal or low criticality for the remote
+  HIGH until the operator records criticality LOW or MEDIUM (spec 12) for the remote
   and the node in the executor registry and, when the node is also an
   enrolled host, for that linked host (it counts as affected, because the
   guest is created on it); then it is MEDIUM. Criticality is the operator's
