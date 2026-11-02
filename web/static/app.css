@@ -1602,8 +1602,50 @@ details[open] summary { color: var(--text); margin-bottom: var(--space-2); }
 }
 .chart__note--release { color: var(--text-faint); }
 
+/* P1-35 interaction layer (web/static/inventory.js): pan/zoom canvas,
+   fit control, per-host details buttons and the mobile details sheet.
+   Without JS the buttons and the sheet carry the hidden attribute and
+   the page stays the plain server-rendered chart. */
+.chart--pan { height: 75vh; min-height: 420px; overflow: hidden; cursor: grab; touch-action: none; }
+.chart--pan:active { cursor: grabbing; }
+.chart--pan .chart__hosts { transform-origin: 0 0; will-change: transform; }
+.chart__dpanel-btn {
+  align-self: flex-start;
+  font-size: 0.75rem; color: var(--text-muted);
+  background: var(--surface-3);
+  border: 1px solid var(--border); border-radius: 3px;
+  padding: 0.125rem 0.5rem; cursor: pointer;
+}
+.chart__dpanel-btn:hover { color: var(--text); border-color: var(--border-strong); }
+.chart__dpanel-btn:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+/* Programmatic focus target for the details panel (desktop). */
+.chart__dpanel:focus { outline: none; }
+.chart__dpanel:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+/* Mobile details sheet: the sheet (not the chart) owns its scroll area. */
+.dpanel-sheet {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+  max-height: 80vh; overflow: auto;
+  background: var(--surface);
+  border-top: 2px solid var(--border-strong);
+  border-radius: var(--radius) var(--radius) 0 0;
+  padding: var(--space-2) var(--space-3) calc(var(--space-3) + env(safe-area-inset-bottom, 0px));
+}
+.dpanel-sheet .chart__dpanel { margin-bottom: 0; }
+.dpanel-sheet__close {
+  float: right; margin-left: var(--space-2);
+  font-size: 0.8rem; color: var(--text-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 3px;
+  padding: 0.25rem 0.75rem; cursor: pointer;
+}
+.dpanel-sheet__close:hover { color: var(--text); border-color: var(--border-strong); }
+.dpanel-sheet__close:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
 /* Narrow screens: fall back to an indented list (CSS only). */
 @media (max-width: 600px) {
+  /* The pan/zoom canvas is a desktop enhancement; the list mode owns
+     the page scroll on narrow screens. */
+  .chart--pan { height: auto; min-height: 0; overflow: visible; cursor: auto; touch-action: auto; }
   .chart__details { flex-direction: column; }
   .chart__box--host { flex-basis: auto; width: 100%; min-height: 0; }
   .chart__box--node { flex-basis: auto; width: 100%; min-height: 0; }

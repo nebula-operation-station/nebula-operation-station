@@ -22,6 +22,8 @@ import (
 var (
 	scriptTagRe = regexp.MustCompile(`<script[^>]*>`)
 	scriptSrcRe = regexp.MustCompile(`<script src="(/static/[^"]+)"`)
+	// buttonTagRe extracts every button opening tag from a chart section.
+	buttonTagRe = regexp.MustCompile(`<button[^>]*>`)
 )
 
 // The chart page loads the shared inventory.js, every script it references
