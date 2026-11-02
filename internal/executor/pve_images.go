@@ -105,6 +105,11 @@ type PveImage struct {
 // PveImageCatalog holds the verified signed catalog and the local
 // entries. It is safe for concurrent use.
 type PveImageCatalog struct {
+	// State durably records the highest accepted signed catalog, so the
+	// rollback check holds across executor restarts. It is required:
+	// without it no signed catalog is loaded.
+	State PveCatalogStateStore
+
 	mu     sync.Mutex
 	signed *release.Catalog
 	local  map[string]release.Image
@@ -112,7 +117,10 @@ type PveImageCatalog struct {
 
 // LoadSigned verifies a signed catalog with the active release roots of
 // the executor's durable root state and makes it current. A catalog with a
-// lower sequence, or the same sequence and other bytes, is refused.
+// lower sequence than the highest one ever accepted, or the same sequence
+// and other bytes, is refused, also after an executor restart. A newer
+// catalog is persisted in State before it becomes current; an unreadable
+// or unwritable state refuses the catalog and keeps the current one.
 func (c *PveImageCatalog) LoadSigned(roots []release.Root, raw, sig []byte) error {
 	cat, err := release.VerifyCatalog(roots, raw, sig)
 	if err != nil {
@@ -120,9 +128,25 @@ func (c *PveImageCatalog) LoadSigned(roots []release.Root, raw, sig []byte) erro
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if cur := c.signed; cur != nil &&
-		(cat.Sequence < cur.Sequence || (cat.Sequence == cur.Sequence && cat.Digest != cur.Digest)) {
-		return fmt.Errorf("load image catalog sequence %d over %d: %w", cat.Sequence, cur.Sequence, ErrPveCatalogRollback)
+	if c.State == nil {
+		return fmt.Errorf("load image catalog: no state store: %w", ErrPveCatalogState)
+	}
+	floor, ok, err := c.State.PveCatalogState()
+	if err != nil {
+		return fmt.Errorf("load image catalog: %w: %w", ErrPveCatalogState, err)
+	}
+	if cur := c.signed; cur != nil && (!ok || cur.Sequence > floor.Sequence) {
+		// Never below what this process already accepted, even if the
+		// state file was replaced underneath it.
+		floor, ok = PveCatalogState{Sequence: cur.Sequence, Digest: cur.Digest}, true
+	}
+	if ok && (cat.Sequence < floor.Sequence || (cat.Sequence == floor.Sequence && cat.Digest != floor.Digest)) {
+		return fmt.Errorf("load image catalog sequence %d over %d: %w", cat.Sequence, floor.Sequence, ErrPveCatalogRollback)
+	}
+	if !ok || cat.Sequence > floor.Sequence {
+		if err := c.State.PutPveCatalogState(PveCatalogState{Sequence: cat.Sequence, Digest: cat.Digest}); err != nil {
+			return fmt.Errorf("load image catalog sequence %d: %w: %w", cat.Sequence, ErrPveCatalogState, err)
+		}
 	}
 	c.signed = &cat
 	return nil
@@ -431,12 +455,16 @@ func (p *PveImages) Prepare(ctx context.Context, req PveImagePrepareRequest) (Pv
 	if err != nil {
 		return PveTemplateRecord{}, err
 	}
+	// From here on the template exists in PVE; every failure leaves a
+	// template without a record, which the operator must see.
 	rm, err := p.Mutations.activeRemote(req.RemoteID)
 	if err != nil {
+		p.auditUnrecorded(req, res.ExecutionID, "remote_not_active")
 		return PveTemplateRecord{}, err
 	}
 	digest, err := p.liveTemplate(ctx, rm, req.Node, req.VMID)
 	if err != nil {
+		p.auditUnrecorded(req, res.ExecutionID, "template_unreadable")
 		return PveTemplateRecord{}, err
 	}
 	rec := PveTemplateRecord{
@@ -448,13 +476,22 @@ func (p *PveImages) Prepare(ctx context.Context, req PveImagePrepareRequest) (Pv
 		rec.Generation = prev.Generation + 1
 	}
 	if err := p.Templates.PutPveTemplate(rec); err != nil {
-		p.Mutations.log().Error("pve template record not written", "execution", res.ExecutionID)
+		p.auditUnrecorded(req, res.ExecutionID, "record_not_written")
 		return PveTemplateRecord{}, ErrPveTemplateStore
 	}
 	p.Mutations.log().Info("audit", "kind", "pve_template_prepared", "remote", rec.RemoteID, "node", rec.Node, "storage", rec.Storage,
 		"image", rec.ImageID, "trust", string(rec.Trust), "vmid", rec.VMID, "generation", rec.Generation, "source_sha256", rec.SourceSHA256,
 		"execution", rec.ExecutionID)
 	return rec, nil
+}
+
+// auditUnrecorded writes the operator-visible audit line of a template
+// that pve.image.prepare built in PVE but the executor did not record. No
+// binding can use it until it is prepared again; the operator may remove
+// it in PVE. reason is a fixed token, never an error text.
+func (p *PveImages) auditUnrecorded(req PveImagePrepareRequest, executionID, reason string) {
+	p.Mutations.log().Error("audit", "kind", "pve_template_unrecorded", "remote", req.RemoteID, "node", req.Node,
+		"storage", req.Storage, "image", req.ImageID, "vmid", req.VMID, "execution", executionID, "reason", reason)
 }
 
 // liveTemplate reads the template's live configuration digest with the

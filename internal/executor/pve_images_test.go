@@ -186,7 +186,7 @@ func newImagesEnv(t *testing.T) *imagesEnv {
 	ic := &imageClient{fakeMutClient: me.client, templateDigest: strings.Repeat("e1", 32)}
 	me.m.Client = ic
 	sk := newReleaseSK(t)
-	cat := &PveImageCatalog{}
+	cat := newCatalogAt(filepath.Join(t.TempDir(), "pve-catalog.json"))
 	raw := catalogDoc(t, 1, ubuntuEntry(imgUbuntuSHA))
 	if err := cat.LoadSigned([]release.Root{sk.root()}, raw, sk.sign(t, raw)); err != nil {
 		t.Fatal(err)
@@ -338,7 +338,7 @@ func TestImagePrepareRiskFloorRaisesAnyPrepareRequest(t *testing.T) {
 }
 
 func TestImageCatalogRefusesUntrustedSigner(t *testing.T) {
-	c := &PveImageCatalog{}
+	c := newCatalogAt(filepath.Join(t.TempDir(), "pve-catalog.json"))
 	trusted, other := newReleaseSK(t), newReleaseSK(t)
 	raw := catalogDoc(t, 1, ubuntuEntry(imgUbuntuSHA))
 	if err := c.LoadSigned([]release.Root{trusted.root()}, raw, other.sign(t, raw)); !errors.Is(err, release.ErrUntrusted) {
@@ -353,7 +353,7 @@ func TestImageCatalogRefusesUntrustedSigner(t *testing.T) {
 }
 
 func TestImageCatalogRefusesRollback(t *testing.T) {
-	c := &PveImageCatalog{}
+	c := newCatalogAt(filepath.Join(t.TempDir(), "pve-catalog.json"))
 	sk := newReleaseSK(t)
 	roots := []release.Root{sk.root()}
 	v2 := catalogDoc(t, 2, ubuntuEntry(imgUbuntuSHA))
