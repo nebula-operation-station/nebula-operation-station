@@ -10,6 +10,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/dockerhost"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/gpuhost"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/servicecheck"
 )
 
 // Extra line kinds of an org-chart box (ADR 0006 P1-34 part 3). Only this
@@ -24,6 +25,9 @@ const (
 	// LineCVE is the image-scan CVE count line of a host box
 	// (image.vulnerabilities).
 	LineCVE = "cve"
+	// LineLatency is the service-check outcome and latency line of a host
+	// box (service.check).
+	LineLatency = "latency"
 )
 
 // chartLine is one optional extra line of an org-chart box (GPU, CVE,
@@ -57,6 +61,7 @@ type chartResults struct {
 	gpu   map[string]executions.LastResultRow
 	stats map[string]executions.LastResultRow
 	vulns map[string]executions.LastResultRow
+	svc   map[string]executions.LastResultRow
 }
 
 // loadChartResults reads the extra-line sources. A nil operations service
@@ -78,6 +83,7 @@ func (h *Handler) loadChartResults(ctx context.Context) chartResults {
 	r.gpu = read("gpu.status")
 	r.stats = read("docker.stats")
 	r.vulns = read("image.vulnerabilities")
+	r.svc = read("service.check")
 	return r
 }
 
@@ -333,6 +339,49 @@ func cveLine(r *executions.LastResultRow, now time.Time, staleAfter time.Duratio
 	return []chartLine{l}
 }
 
+// latencyLine builds the service-check line of a host box from its stored
+// service.check result (ADR 0006 P1-27/P1-34): the probe outcome and its
+// latency, distinct from systemd/Docker runtime state. No result (no
+// check configured) or a result that is not the fixed contract hides the
+// line. An old result is "stale". A redirect is a warning; an HTTP error
+// or a failed probe (refused, timeout, ...) is critical. The result only
+// carries the fixed status, latency and HTTP code — no host text.
+func latencyLine(r *executions.LastResultRow, now time.Time, staleAfter time.Duration) []chartLine {
+	if r == nil || len(r.Result) == 0 {
+		return nil
+	}
+	res, err := servicecheck.ParseResult(r.Result)
+	if err != nil {
+		return nil
+	}
+	l := chartLine{Kind: LineLatency, Label: "Service", Title: "latest service check"}
+	ms := fmt.Sprintf("%d ms", res.Latency.Milliseconds())
+	switch res.Status {
+	case servicecheck.StatusOK:
+		l.Text = "ok · " + ms
+		if res.HTTPStatus != 0 {
+			l.Text = fmt.Sprintf("ok %d · %s", res.HTTPStatus, ms)
+		}
+		l.State = StateOK
+	case servicecheck.StatusRedirect:
+		l.Text = fmt.Sprintf("redirect %d · %s", res.HTTPStatus, ms)
+		l.State = StateWarn
+	case servicecheck.StatusHTTPError:
+		l.Text = fmt.Sprintf("HTTP %d · %s", res.HTTPStatus, ms)
+		l.State = StateCrit
+	default:
+		// refused, unresolved, timeout, tls-error, error: a fixed word,
+		// no meaningful latency.
+		l.Text = string(res.Status)
+		l.State = StateCrit
+	}
+	if isStale(r.FinishedAt, now, staleAfter) {
+		l.Text = string(res.Status) + " · stale"
+		l.State = StateStale
+	}
+	return []chartLine{l}
+}
+
 // worstClass maps a worst state to the box border class: red for
 // critical, yellow for warning, grey otherwise (unknown/stale are labelled
 // on their lines and never turn the border healthy-green).
@@ -348,11 +397,12 @@ func worstClass(s IndicatorState) string {
 }
 
 // hostLines builds the extra lines of one managed host box, in display
-// order: GPUs, image CVEs.
+// order: GPUs, image CVEs, service check.
 func hostLines(res chartResults, hostID string, now time.Time) []chartLine {
 	var lines []chartLine
 	lines = append(lines, gpuLines(rowFor(res.pci, hostID), rowFor(res.gpu, hostID), now, indicatorStaleAfter)...)
 	lines = append(lines, cveLine(rowFor(res.vulns, hostID), now, indicatorStaleAfter)...)
+	lines = append(lines, latencyLine(rowFor(res.svc, hostID), now, indicatorStaleAfter)...)
 	return lines
 }
 
