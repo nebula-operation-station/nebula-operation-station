@@ -312,8 +312,11 @@ func TestH05_OnlyTheAdminEnrolls(t *testing.T) {
 	wantCode(t, err, codes.PermissionDenied, "")
 	_, err = h.client.TestConnection(h.ctx(), &pb.TestConnectionRequest{HostId: "dockerflux", Endpoints: []string{d.endpoint()}})
 	wantCode(t, err, codes.PermissionDenied, "")
+	// The server may read the public key (ADR 0007 E06: read-grant-v2
+	// binds hosts to its fingerprint), so the role check passes; the
+	// keyring here is locked, so nothing is returned and nothing connects.
 	_, err = h.client.GetSSHPublicKey(h.ctx(), &pb.GetSSHPublicKeyRequest{CredentialRef: credRef})
-	wantCode(t, err, codes.PermissionDenied, "")
+	wantCode(t, err, codes.FailedPrecondition, "locked")
 	if d.conns.Load() != 0 {
 		t.Fatal("server role made the executor connect")
 	}
