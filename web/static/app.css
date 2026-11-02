@@ -343,6 +343,60 @@ code {
   white-space: nowrap;
 }
 
+/* --- Privileged session display (ADR 0007 E20). ---
+   Topbar widget on authenticated pages. The state comes from the
+   executor via web/static/webauthn.js; the data-state attribute drives
+   the accent: ok while time remains, warn under the low threshold,
+   crit when expired, muted when the executor is unavailable. */
+.session-display {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+  flex: none;
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+.session-display__time {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+.session-display__error {
+  color: var(--crit);
+  font-size: 0.8rem;
+}
+.session-display__extend { margin-left: 0.25rem; }
+
+/* Active: green accent while time remains. */
+.session-display[data-state="active"] {
+  border-color: var(--ok-border);
+  background: var(--ok-bg);
+}
+.session-display[data-state="active"] .session-display__time { color: var(--ok); }
+
+/* Little time left (session.LowThreshold): warn accent. */
+.session-display--low {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+}
+.session-display--low .session-display__time { color: var(--warn); }
+
+/* Expired: red accent. */
+.session-display[data-state="expired"] {
+  border-color: var(--crit-border);
+  background: var(--crit-bg);
+}
+.session-display[data-state="expired"] .session-display__label,
+.session-display[data-state="expired"] .session-display__time { color: var(--crit); }
+
+/* Executor unavailable: muted, no status accent. */
+.session-display[data-state="unknown"] { color: var(--text-faint); }
+.session-display[data-state="none"] .session-display__label { color: var(--text-muted); }
+
 /* Mobile menu button: hidden on wide screens, shown on narrow. */
 .topbar__menu {
   display: none;
