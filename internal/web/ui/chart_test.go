@@ -30,6 +30,9 @@ type chartOps struct {
 	registry map[string]executions.LastResultRow
 	metrics  map[string]executions.LastResultRow
 	filesys  map[string]executions.LastResultRow
+	// extra serves the extra-line sources (pci.inventory, gpu.status,
+	// ...) by action ID; an absent action returns an empty map.
+	extra map[string]map[string]executions.LastResultRow
 }
 
 func (c *chartOps) AllOpsStates(context.Context) (map[string]executions.OpsState, error) {
@@ -54,6 +57,9 @@ func (c *chartOps) LastResults(_ context.Context, actionID string) (map[string]e
 		return c.metrics, nil
 	case "filesystem.list":
 		return c.filesys, nil
+	}
+	if m, ok := c.extra[actionID]; ok {
+		return m, nil
 	}
 	return map[string]executions.LastResultRow{}, nil
 }
