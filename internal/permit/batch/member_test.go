@@ -396,3 +396,119 @@ func TestPartlyReusedPlanSpendsNothing(t *testing.T) {
 		t.Fatal("member 0's execution ID was spent by a rejected plan")
 	}
 }
+
+// RevalidateMember re-evaluates trust and risk at the dispatch boundary: a
+// claimed member whose trust or risk changed after the claim is refused with
+// ErrInvalidated, and the whole batch, including its other claims, is
+// revoked. An unchanged member returns the exact claimed permit.
+func TestRevalidateMemberRefusesClaimAfterTrustOrRiskChange(t *testing.T) {
+	changes := map[string]Snapshot{
+		"untrust": {Risk: canonical.RiskLow, Trust: sha256.Sum256([]byte("withdrawn"))},
+		"risk":    {Risk: canonical.RiskHigh, Trust: sha256.Sum256([]byte("member-1"))},
+	}
+	for name, s := range changes {
+		t.Run(name, func(t *testing.T) {
+			e := setup(t, permit.ModeStandard)
+			p := propose(t, e, canonical.RiskLow, canonical.RiskLow)
+			claimed, err := e.a.ClaimMember(ctx, p.Digest, 0, p.Plan.Members[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := e.a.ClaimMember(ctx, p.Digest, 1, p.Plan.Members[1]); err != nil {
+				t.Fatal(err)
+			}
+			got, err := e.a.RevalidateMember(ctx, p.Digest, "member-0")
+			if err != nil {
+				t.Fatalf("revalidate unchanged member: %v", err)
+			}
+			if !reflect.DeepEqual(got, claimed) {
+				t.Fatalf("revalidated permit %+v differs from claim %+v", got, claimed)
+			}
+			// The change concerns member 1; member 0's dispatch is refused
+			// too, because any change revokes the entire batch.
+			e.policy.set("member-1", s)
+			if _, err := e.a.RevalidateMember(ctx, p.Digest, "member-0"); !errors.Is(err, ErrInvalidated) {
+				t.Fatalf("revalidate after %s: %v, want ErrInvalidated", name, err)
+			}
+			for _, id := range []string{"member-0", "member-1"} {
+				if _, ok := e.a.Member(p.Digest, id); ok {
+					t.Fatalf("%s permit survived the %s", id, name)
+				}
+				if _, err := e.a.RevalidateMember(ctx, p.Digest, id); err == nil {
+					t.Fatalf("%s revalidated after the %s", id, name)
+				}
+			}
+			// Restoring the old state does not resurrect the batch.
+			e.policy.set("member-1", Snapshot{Risk: canonical.RiskLow, Trust: sha256.Sum256([]byte("member-1"))})
+			if _, err := e.a.RevalidateMember(ctx, p.Digest, "member-0"); err == nil {
+				t.Fatal("invalidated batch revalidated after restore")
+			}
+		})
+	}
+}
+
+// RevalidateMember fails closed for every other reason a permit is not
+// live: never claimed, Lock, expiry, unknown parent and an unreadable
+// trust/risk state.
+func TestRevalidateMemberFailsClosed(t *testing.T) {
+	cases := map[string]struct {
+		prepare func(e *environment, p Approval)
+		member  string
+		check   func(t *testing.T, err error)
+	}{
+		"never claimed": {member: "member-1", check: func(t *testing.T, err error) {
+			if !errors.Is(err, ErrMemberNotClaimed) {
+				t.Fatalf("got %v, want ErrMemberNotClaimed", err)
+			}
+		}},
+		"lock": {member: "member-0", prepare: func(e *environment, _ Approval) { e.a.Lock() },
+			check: func(t *testing.T, err error) { wantCode(t, err, permit.CodeNotFound) }},
+		"expiry": {member: "member-0", prepare: func(e *environment, p Approval) { e.unix.Store(p.Plan.ExpiryUnix) },
+			check: func(t *testing.T, err error) { wantCode(t, err, permit.CodeExpired) }},
+		"state unavailable": {member: "member-0", prepare: func(e *environment, _ Approval) {
+			e.policy.mu.Lock()
+			e.policy.err = errors.New("db down")
+			e.policy.mu.Unlock()
+		}, check: func(t *testing.T, err error) { wantCode(t, err, permit.CodeStorage) }},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := setup(t, permit.ModeStandard)
+			p := propose(t, e, canonical.RiskLow, canonical.RiskLow)
+			if _, err := e.a.ClaimMember(ctx, p.Digest, 0, p.Plan.Members[0]); err != nil {
+				t.Fatal(err)
+			}
+			if tc.prepare != nil {
+				tc.prepare(e, p)
+			}
+			_, err := e.a.RevalidateMember(ctx, p.Digest, tc.member)
+			if err == nil {
+				t.Fatal("revalidation succeeded")
+			}
+			tc.check(t, err)
+		})
+	}
+	e := setup(t, permit.ModeStandard)
+	_, err := e.a.RevalidateMember(ctx, canonical.Digest{9}, "member-0")
+	wantCode(t, err, permit.CodeNotFound)
+}
+
+// A Lock while the trust/risk state is read (the mutex is released for the
+// I/O) revokes the member: revalidation never returns a permit Lock removed.
+func TestRevalidateMemberLockDuringEvaluation(t *testing.T) {
+	e := setup(t, permit.ModeStandard)
+	p := propose(t, e, canonical.RiskLow)
+	if _, err := e.a.ClaimMember(ctx, p.Digest, 0, p.Plan.Members[0]); err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	e.policy.mu.Lock()
+	e.policy.hook = func() { once.Do(e.a.Lock) }
+	e.policy.mu.Unlock()
+	if _, err := e.a.RevalidateMember(ctx, p.Digest, "member-0"); err == nil {
+		t.Fatal("member revalidated across a lock")
+	}
+	if _, ok := e.a.Member(p.Digest, "member-0"); ok {
+		t.Fatal("member permit survived the lock")
+	}
+}
