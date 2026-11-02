@@ -80,7 +80,14 @@ type Run struct {
 // (batch.Authority implements it). A permit is gone once Lock, expiry,
 // invalidation or a restart revoked it.
 type Permits interface {
+	// Member returns the live claimed permit without re-evaluating trust
+	// or risk.
 	Member(parent canonical.Digest, memberID string) (batch.MemberPermit, bool)
+	// RevalidateMember returns the live claimed permit only after
+	// re-evaluating the batch's trust and risk against the approved
+	// snapshot; a change revokes the batch and returns
+	// batch.ErrInvalidated. Any error means the member must not run.
+	RevalidateMember(ctx context.Context, parent canonical.Digest, memberID string) (batch.MemberPermit, error)
 }
 
 // The batch authority is the production Permits.
@@ -195,10 +202,12 @@ func samePermit(mp batch.MemberPermit, run Run) bool {
 
 // Dispatch executes the claimed member (parent, memberID) exactly once.
 // The run is built from the live member permit; without one the call is
-// refused with ErrNotClaimed before anything is recorded. The permit is
-// checked again after the intent is durable and before the transport is
-// called, so a Lock, expiry or invalidation in between ends the run as
-// OutcomeNotExecuted. A second call for the same execution ID —
+// refused with ErrNotClaimed before anything is recorded. After the intent
+// is durable and immediately before the transport is called, the permit is
+// revalidated, including trust and risk, so a Lock, expiry, invalidation or
+// trust/risk change in between ends the run as OutcomeNotExecuted with
+// ErrNotClaimed (wrapping batch.ErrInvalidated for a trust or risk
+// change). A second call for the same execution ID —
 // concurrent, or after any outcome, in this process or after a restart —
 // is refused with ErrAlreadyDispatched. An uncertain outcome comes back as
 // OutcomeUnknown with the transport error.
@@ -240,7 +249,14 @@ func (d *Dispatcher) Dispatch(ctx context.Context, parent canonical.Digest, memb
 	// Outcomes are recorded even when the caller's context ended: that is
 	// exactly when reconciliation needs them.
 	octx := context.WithoutCancel(ctx)
-	if cur, ok := d.permits.Member(parent, memberID); !ok || !samePermit(cur, run) {
+	// Last check before the target: trust, risk, invalidation, Lock and
+	// expiry are re-evaluated now, not taken from the claim (ADR 0007 E21).
+	cur, err := d.permits.RevalidateMember(ctx, parent, memberID)
+	if err != nil {
+		d.finish(octx, run, OutcomeNotExecuted)
+		return OutcomeNotExecuted, fmt.Errorf("%w: revoked before dispatch: %s: %w", ErrNotClaimed, run.ExecutionID, err)
+	}
+	if !samePermit(cur, run) {
 		d.finish(octx, run, OutcomeNotExecuted)
 		return OutcomeNotExecuted, fmt.Errorf("%w: revoked before dispatch: %s", ErrNotClaimed, run.ExecutionID)
 	}

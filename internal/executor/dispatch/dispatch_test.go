@@ -82,6 +82,25 @@ type fakePermits struct {
 	// onLookup runs on every lookup (before the result is read).
 	onLookup func(n int)
 	lookups  int
+	// revalidateErr, when set, is what RevalidateMember returns, as the
+	// batch authority does after a trust or risk change.
+	revalidateErr error
+	revalidations int
+}
+
+func (f *fakePermits) RevalidateMember(_ context.Context, parent canonical.Digest, memberID string) (batch.MemberPermit, error) {
+	f.mu.Lock()
+	f.revalidations++
+	err := f.revalidateErr
+	f.mu.Unlock()
+	if err != nil {
+		return batch.MemberPermit{}, err
+	}
+	mp, ok := f.Member(parent, memberID)
+	if !ok {
+		return batch.MemberPermit{}, batch.ErrMemberNotClaimed
+	}
+	return mp, nil
 }
 
 func newFakePermits() *fakePermits { return &fakePermits{permits: map[string]batch.MemberPermit{}} }
@@ -443,6 +462,53 @@ func TestRevocationBeforeTransportIsNotExecuted(t *testing.T) {
 	}
 	if o, ok := rec.outcome(c.ExecutionID); !ok || o != OutcomeNotExecuted {
 		t.Fatalf("outcome %q recorded=%v, want not_executed", o, ok)
+	}
+}
+
+// A trust or risk change after the claim is seen at the transport boundary:
+// the permit still exists for a plain lookup, but the revalidating lookup
+// refuses it, so the run ends not executed with batch.ErrInvalidated and
+// nothing reaches the target.
+func TestTrustChangeBeforeTransportIsNotExecuted(t *testing.T) {
+	for name, cause := range map[string]error{
+		"invalidated":   batch.ErrInvalidated,
+		"state unknown": errors.New("executor trust/risk state unavailable"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := newFakeRecorder()
+			perms := newFakePermits()
+			var calls atomic.Int32
+			d, err := New(Options{Permits: perms, Recorder: rec, Transport: func(context.Context, Run) (Outcome, error) {
+				calls.Add(1)
+				return OutcomeSuccess, nil
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := perms.claim("00000000-0000-4000-8000-000000000022")
+			perms.revalidateErr = cause
+			outcome, err := d.Dispatch(ctx, c.parent, c.member)
+			if outcome != OutcomeNotExecuted || !errors.Is(err, ErrNotClaimed) || !errors.Is(err, cause) {
+				t.Fatalf("dispatch = %v %v, want not executed wrapping %v", outcome, err, cause)
+			}
+			if calls.Load() != 0 {
+				t.Fatal("a member with withdrawn trust reached the transport")
+			}
+			if perms.revalidations != 1 {
+				t.Fatalf("revalidations = %d, want 1 before the transport", perms.revalidations)
+			}
+			if o, ok := rec.outcome(c.ExecutionID); !ok || o != OutcomeNotExecuted {
+				t.Fatalf("outcome %q recorded=%v, want not_executed", o, ok)
+			}
+			// The consumed run is never dispatched again.
+			perms.revalidateErr = nil
+			if _, err := d.Dispatch(ctx, c.parent, c.member); !errors.Is(err, ErrAlreadyDispatched) {
+				t.Fatalf("redispatch: %v, want ErrAlreadyDispatched", err)
+			}
+			if calls.Load() != 0 {
+				t.Fatal("redispatch reached the transport")
+			}
+		})
 	}
 }
 

@@ -612,3 +612,11 @@ func (s stalePermits) Member(parent canonical.Digest, memberID string) (batch.Me
 	}
 	return batch.MemberPermit{}, false
 }
+
+// RevalidateMember pretends the stale permit also passes revalidation.
+func (s stalePermits) RevalidateMember(_ context.Context, parent canonical.Digest, memberID string) (batch.MemberPermit, error) {
+	if mp, ok := s.Member(parent, memberID); ok {
+		return mp, nil
+	}
+	return batch.MemberPermit{}, batch.ErrMemberNotClaimed
+}
