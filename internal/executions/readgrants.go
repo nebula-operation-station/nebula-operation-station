@@ -159,16 +159,19 @@ func decodeReadGrant(g *pb.ReadGrant, inv []inventory.Host, haveInv bool, now ti
 	if r := g.GetRevokedUnix(); r != 0 {
 		v.Revoked = time.Unix(r, 0)
 	}
+	// Check every rendered registry field before returning, so an invalid
+	// one never leaves another unvalidated field in the view.
+	bad := false
 	if !validReadGrantID(v.ID) {
-		v.ID = ""
-		return invalidView(v)
+		v.ID, bad = "", true
 	}
 	if !canonical.ValidSHA256Hex(v.Digest) {
-		v.Digest = ""
-		return invalidView(v)
+		v.Digest, bad = "", true
 	}
 	if !validApprovedBy(v.ApprovedBy) {
-		v.ApprovedBy = ""
+		v.ApprovedBy, bad = "", true
+	}
+	if bad {
 		return invalidView(v)
 	}
 	raw := g.GetCanonicalGrant()

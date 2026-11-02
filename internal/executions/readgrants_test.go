@@ -590,9 +590,47 @@ func TestDecodeReadGrantChecksRegistry(t *testing.T) {
 			t.Errorf("%s: malformed id %q is shown", name, v.ID)
 		}
 	}
-	g := pbGrant(decodeCreated, decodeExpiry, time.Time{}, raw)
+	// One bad registry field must not leave another unvalidated field in
+	// the view: a bad id or digest next to a hostile approver clears both.
+	for name, mutate := range map[string]func(*pb.ReadGrant){
+		"bad id":     func(g *pb.ReadGrant) { g.GrantId = "g1" },
+		"bad digest": func(g *pb.ReadGrant) { g.GrantDigest = "digest-g1" },
+	} {
+		g := pbGrant(decodeStored, decodeExpiry, time.Time{}, raw)
+		mutate(g)
+		g.ApprovedBy = "cli:\u202eecila\nwebauthn:x"
+		v := decodeReadGrant(g, nil, false, decodeNow)
+		wantInvalid(t, name, v)
+		if v.ApprovedBy != "" {
+			t.Errorf("%s: hostile approver %q is shown", name, v.ApprovedBy)
+		}
+	}
+	g := pbGrant(decodeStored, decodeExpiry, time.Time{}, raw)
+	g.GrantId = "g1"
+	g.GrantDigest = "digest-g1"
+	if v := decodeReadGrant(g, nil, false, decodeNow); v.ID != "" || v.Digest != "" {
+		t.Errorf("bad id and digest: shown as %q / %q", v.ID, v.Digest)
+	}
+	g = pbGrant(decodeCreated, decodeExpiry, time.Time{}, raw)
 	if v := decodeReadGrant(g, nil, false, decodeNow); v.State != "active" {
 		t.Fatalf("stored at the creation second: state %q, want active", v.State)
+	}
+}
+
+// TestDecodeReadGrantStateOrder pins the state precedence: revoked over
+// expired over legacy.
+func TestDecodeReadGrantStateOrder(t *testing.T) {
+	revoked := decodeNow.Add(-time.Minute)
+	g := pbGrant(decodeStored, decodeExpiry, revoked, marshalDoc(t, validDoc()))
+	if v := decodeReadGrant(g, nil, false, decodeExpiry.Add(time.Hour)); v.State != "revoked" {
+		t.Errorf("revoked and expired: state %q, want revoked", v.State)
+	}
+	legacy := grantDoc(t, schedgrant.Format, []string{"web"}, decodeCreated, decodeExpiry, time.Time{})
+	if v := decodeReadGrant(pbGrant(decodeStored, decodeExpiry, revoked, legacy), nil, false, decodeNow); v.State != "revoked" {
+		t.Errorf("revoked and legacy: state %q, want revoked", v.State)
+	}
+	if v := decodeReadGrant(pbGrant(decodeStored, decodeExpiry, time.Time{}, legacy), nil, false, decodeExpiry); v.State != "expired" {
+		t.Errorf("expired and legacy: state %q, want expired", v.State)
 	}
 }
 
@@ -604,11 +642,11 @@ func TestDecodeReadGrantFormats(t *testing.T) {
 	if v := decodeRaw(v1); v.State != "active" || v.Legacy {
 		t.Errorf("read-grant-v1: state %q legacy %v, want active and not legacy", v.State, v.Legacy)
 	}
-	for _, exp := range []time.Time{decodeExpiry, decodeNow.Add(-time.Minute)} {
+	for exp, want := range map[time.Time]string{decodeExpiry: "legacy", decodeNow.Add(-time.Minute): "expired"} {
 		doc := grantDoc(t, schedgrant.Format, []string{"web"}, decodeCreated, exp, time.Time{})
 		v := decodeReadGrant(pbGrant(decodeStored, exp, time.Time{}, doc), nil, false, decodeNow)
-		if v.State == "active" || v.State == "invalid" || !v.Legacy {
-			t.Errorf("read-schedule-v1 expiring %v: state %q legacy %v, want non-active legacy", exp, v.State, v.Legacy)
+		if v.State != want || !v.Legacy {
+			t.Errorf("read-schedule-v1 expiring %v: state %q legacy %v, want %s and legacy", exp, v.State, v.Legacy, want)
 		}
 	}
 }
