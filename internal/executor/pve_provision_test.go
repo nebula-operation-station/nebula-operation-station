@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -173,6 +174,12 @@ func (r *fakeProvisionReader) addGuest(node string, vmid int, mem uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.inv.Guests = append(r.inv.Guests, pveapi.Guest{Node: node, VMID: vmid, MaxMemory: int64(mem)})
+}
+
+func (r *fakeProvisionReader) removeGuest(vmid int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.inv.Guests = slices.DeleteFunc(r.inv.Guests, func(g pveapi.Guest) bool { return g.VMID == vmid })
 }
 
 type provisionEnv struct {
@@ -718,18 +725,55 @@ func TestProvisionCapacityNeverRaisesRiskAndIsRecheckedBeforeRun(t *testing.T) {
 	}
 
 	// A capacity warning that changes after approval refuses the run before
-	// dispatch: the reviewer approved another plan.
+	// dispatch: the reviewer approved another plan. The capacity flags are
+	// live facts that can flip back, so the denial is not final and the
+	// approved execution keeps its VMID (PR #162 review round 7).
 	approved := e.approve(e.request())
 	e.reader.addGuest("pve1", 300, 62*gib)
-	if _, err := e.prov.Provision(context.Background(), approved); !errors.Is(err, ErrPveMutationDenied) || !errors.Is(err, ErrPvePermitFinal) {
-		t.Fatalf("capacity changed: %v, want a final denial", err)
+	if _, err := e.prov.Provision(context.Background(), approved); !errors.Is(err, ErrPveMutationDenied) || errors.Is(err, ErrPvePermitFinal) {
+		t.Fatalf("capacity changed: %v, want a non-final denial", err)
 	}
 	if len(e.pc.provisionSteps()) != 0 {
 		t.Fatal("dispatched after the capacity changed")
 	}
-	// Nothing was sent, so the VMID is free again.
-	if _, ok, _ := e.vmids.VMIDHolder(mutRemote, approved.VMID, time.Now()); ok {
-		t.Fatal("reservation kept although nothing was sent")
+	if h, ok, _ := e.vmids.VMIDHolder(mutRemote, approved.VMID, time.Now()); !ok || h.ExecutionID != approved.ExecutionID {
+		t.Fatalf("reservation after a capacity change: %+v %v, want kept for %s", h, ok, approved.ExecutionID)
+	}
+	// Another proposal cannot take the kept VMID meanwhile.
+	if _, other := e.propose(e.request()); other.VMID == approved.VMID {
+		t.Fatalf("vmid %d handed out again", other.VMID)
+	}
+	// The capacity flips back: the same approval now runs on its VMID.
+	e.reader.removeGuest(300)
+	res, err := e.prov.Provision(context.Background(), approved)
+	if err != nil || res.VMID != approved.VMID {
+		t.Fatalf("after the capacity flipped back: %v %+v", err, res)
+	}
+}
+
+// TestProvisionRacingTheApprovalKeepsVMID pins PR #162 review round 7: a
+// Provision of a permit that is still pending (it can still be approved)
+// is a transient denial; the VMID stays with the execution and the run
+// succeeds once the permit is approved.
+func TestProvisionRacingTheApprovalKeepsVMID(t *testing.T) {
+	e := newProvisionEnv(t, fixedRisk{})
+	req := e.request()
+	p, pp := e.propose(req)
+	req.Digest, req.ExecutionID, req.VMID = p.Digest, p.Request.ExecutionID, pp.VMID
+	if _, err := e.prov.Provision(context.Background(), req); !errors.Is(err, ErrPveMutationDenied) || errors.Is(err, ErrPvePermitFinal) {
+		t.Fatalf("pending permit: %v, want a non-final denial", err)
+	}
+	if len(e.pc.provisionSteps()) != 0 {
+		t.Fatal("dispatched on a pending permit")
+	}
+	if h, ok, _ := e.vmids.VMIDHolder(mutRemote, req.VMID, time.Now()); !ok || h.ExecutionID != req.ExecutionID || h.Started {
+		t.Fatalf("reservation after a pending-permit denial: %+v %v", h, ok)
+	}
+	if _, err := e.auth.ApproveCLI(p.Digest, 0, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.prov.Provision(context.Background(), req); err != nil {
+		t.Fatalf("after approval: %v", err)
 	}
 }
 
@@ -1384,12 +1428,16 @@ func TestProvisionTransientDenialKeepsVMID(t *testing.T) {
 }
 
 func TestPermitDenialFinal(t *testing.T) {
-	for _, c := range []permit.Code{permit.CodeNotFound, permit.CodeExpired, permit.CodeWrongState, permit.CodeParametersMismatch, permit.CodeRolloutAborted} {
+	for _, c := range []permit.Code{permit.CodeNotFound, permit.CodeExpired, permit.CodeRolloutAborted, permit.CodeArtifactMismatch, permit.CodeActionMismatch} {
 		if !permitDenialFinal(c) {
 			t.Errorf("%s not final", c)
 		}
 	}
-	for _, c := range []permit.Code{permit.CodeStorage, permit.CodeRiskAboveApproval, permit.CodeStageNotOpen, permit.CodeSessionRequired, permit.CodeLimit, permit.CodeHostAlreadyRun, permit.Code("future_code")} {
+	for _, c := range []permit.Code{permit.CodeStorage, permit.CodeRiskAboveApproval, permit.CodeStageNotOpen, permit.CodeSessionRequired, permit.CodeLimit, permit.CodeHostAlreadyRun, permit.Code("future_code"),
+		// A pending permit can still be approved (the authority has only
+		// pending and approved permits); the bound parameters carry live
+		// capacity flags that can flip back.
+		permit.CodeWrongState, permit.CodeParametersMismatch} {
 		if permitDenialFinal(c) {
 			t.Errorf("%s final, want transient", c)
 		}

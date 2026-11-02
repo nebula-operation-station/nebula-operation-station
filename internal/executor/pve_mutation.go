@@ -71,9 +71,11 @@ var (
 	// run of the same execution (which may be dispatching right now).
 	ErrPveMutationAlreadyRun = errors.New("executor: pve mutation permit already used")
 	// ErrPvePermitFinal is wrapped with ErrPveMutationDenied when the
-	// permit can never authorize this run (gone, expired, in another state,
-	// its rollout ended, or the approved plan no longer matches). Every
-	// other denial may be transient and leaves the approval usable.
+	// permit can never authorize this run (gone, expired, its rollout
+	// ended, or the approved target, action or artifact no longer
+	// matches). Every other denial (a permit still pending, parameters
+	// that differ in live facts such as capacity) may be transient and
+	// leaves the approval usable.
 	ErrPvePermitFinal = errors.New("executor: pve mutation permit can never authorize this run")
 	// ErrPveMutationPlan is returned for approved parameters without a
 	// valid step list.
@@ -458,12 +460,21 @@ func requestDigest(node string, step PveMutationStep) (string, error) {
 // permitDenialFinal reports whether a permit denial code means the permit
 // can never authorize the run. Unknown codes are not final: keeping state
 // (a VMID reservation) until the proposal expires is the safe direction.
+//
+// Two codes are deliberately not final:
+//   - CodeWrongState: the authority keeps only pending and approved
+//     permits (a used or revoked one is gone: CodeNotFound), so it means
+//     the permit is still pending and can yet be approved;
+//   - CodeParametersMismatch: the bound parameters include live facts the
+//     executor re-reads before every run (the capacity flags of a
+//     provisioning), which can change back. The authority does not tell a
+//     capacity change from another mismatch, so none is taken as final.
 func permitDenialFinal(c permit.Code) bool {
 	switch c {
-	case permit.CodeNotFound, permit.CodeWrongState, permit.CodeExpired,
+	case permit.CodeNotFound, permit.CodeExpired,
 		permit.CodeRolloutStopped, permit.CodeRolloutAborted, permit.CodeGateInvalid, permit.CodeStagePlan,
 		permit.CodeInvalidRequest, permit.CodeTypedCountMismatch, permit.CodeTargetNotPermitted,
-		permit.CodeArtifactMismatch, permit.CodeParametersMismatch, permit.CodeActionMismatch,
+		permit.CodeArtifactMismatch, permit.CodeActionMismatch,
 		permit.CodeCredentialMismatch:
 		return true
 	}
