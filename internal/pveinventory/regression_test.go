@@ -405,6 +405,7 @@ func TestDriftVersionMigrationPreservesExistingDecisions(t *testing.T) {
   DROP TABLE pve_service_placements;
   DROP TABLE deploy_profile_versions;
   DROP TABLE deploy_profiles;
+  ALTER TABLE ip_entries DROP COLUMN held;
   DELETE FROM schema_migrations WHERE version >= 22;`); err != nil {
 		t.Fatal(err)
 	}

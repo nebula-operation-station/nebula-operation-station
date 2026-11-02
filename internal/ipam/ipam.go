@@ -516,7 +516,11 @@ func (s *Store) SetEntry(ctx context.Context, user string, ad netip.Addr, kind, 
 	if err != nil {
 		return err
 	}
-	if n, err := res.RowsAffected(); err != nil || n == 0 {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set entry %s: %w", ad.Unmap(), err)
+	}
+	if n == 0 {
 		return fmt.Errorf("set entry %s: %w: %w", ad.Unmap(), invalid("the address is held by a reservation (for example a provisioning); clear it first"), ErrAddressTaken)
 	}
 	return nil
