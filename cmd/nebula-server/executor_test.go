@@ -6,6 +6,8 @@ import (
 	"context"
 	"testing"
 
+	"google.golang.org/grpc"
+
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
@@ -53,4 +55,24 @@ func TestLazyExecutorPVEAdminRPCsNotConnected(t *testing.T) {
 			t.Fatalf("got (%v, %v), want (nil, errNotConnected)", response, err)
 		}
 	})
+}
+
+// TestLazyExecutorReadGrants guards the lease pages: executions.Service
+// finds the read-grant RPCs by type assertion on the executor it gets, and
+// in nebula-server that executor is a *lazyExecutor.
+func TestLazyExecutorReadGrants(t *testing.T) {
+	var exec any = new(lazyExecutor)
+	rg, ok := exec.(interface {
+		ListReadGrants(context.Context, *pb.ListReadGrantsRequest, ...grpc.CallOption) (*pb.ListReadGrantsResponse, error)
+		RevokeReadGrant(context.Context, *pb.RevokeReadGrantRequest, ...grpc.CallOption) (*pb.RevokeReadGrantResponse, error)
+	})
+	if !ok {
+		t.Fatal("lazyExecutor does not implement the read-grant RPCs; the lease pages would be unavailable")
+	}
+	if r, err := rg.ListReadGrants(context.Background(), &pb.ListReadGrantsRequest{}); r != nil || err != errNotConnected {
+		t.Fatalf("ListReadGrants = (%v, %v), want (nil, errNotConnected)", r, err)
+	}
+	if r, err := rg.RevokeReadGrant(context.Background(), &pb.RevokeReadGrantRequest{GrantId: "x"}); r != nil || err != errNotConnected {
+		t.Fatalf("RevokeReadGrant = (%v, %v), want (nil, errNotConnected)", r, err)
+	}
 }
