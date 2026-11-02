@@ -25,6 +25,7 @@
             <span class="chart__name" title="{{.Name}}">{{.Name}}</span>
           </span>
           <span class="chart__sub">PVE node{{if .Stale}} · stale{{end}}</span>
+          {{template "chart_lines" .Lines}}
         </summary>
         <div class="chart__children">
           <ul class="chart__list">
@@ -33,6 +34,7 @@
               <span class="chart__dot {{.StateClass}}" aria-hidden="true"></span>
               <span class="chart__gname" title="{{.Name}}">{{.Name}}</span>
               <span class="chart__vmid">VM {{.VMID}}</span>
+              {{template "chart_lines" .Lines}}
             </li>
             {{end}}
             {{range .Storages}}
@@ -85,6 +87,7 @@
             </span>
             {{end}}
           </span>
+          {{template "chart_lines" .Lines}}
           {{if .Filesystems}}
           <div class="chart__fs">
             <span class="chart__fs__trigger" tabindex="0" aria-label="Show filesystems">fs</span>
@@ -146,6 +149,7 @@
                 {{if .Note}}<span class="chart__note" title="{{.Note}}">{{.Note}}</span>{{end}}
                 {{if .ReleaseNotes}}<span class="chart__note chart__note--release" title="{{.ReleaseNotes}}">{{.ReleaseNotes}}</span>{{end}}
               </span>
+              {{template "chart_lines" .Lines}}
             </li>
             {{end}}
           </ul>
@@ -165,3 +169,14 @@
 </section>
 {{end}}
 {{end}}
+{{define "chart_lines"}}{{if .}}
+<span class="chart__lines">
+  {{range .}}
+  <span class="chart__line chart__line--{{.Kind}} chart__line--{{.State}}"{{if .Title}} title="{{.Title}}"{{end}}>
+    <span class="chart__line-name">{{.Label}}</span>
+    <span class="chart__line-text">{{.Text}}</span>
+    {{if .HasMeter}}<meter class="chart__ind-meter chart__ind-meter--{{.State}}" min="0" max="100" low="70" high="90" optimum="0" value="{{.MeterValue}}">{{.MeterValue}}%</meter>{{end}}
+  </span>
+  {{end}}
+</span>
+{{end}}{{end}}

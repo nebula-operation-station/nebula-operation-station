@@ -49,6 +49,9 @@ type chartContainer struct {
 	// ReleaseNotes are the notes for the stable version, rendered
 	// escaped.
 	ReleaseNotes string
+	// Lines are the optional extra lines (runtime stats, CVE counts);
+	// absent when the source has no usable result.
+	Lines []chartLine
 }
 
 // chartGroup is one column of container boxes: a Compose project (Name
@@ -97,6 +100,9 @@ type chartHost struct {
 	// Filesystems are the per-filesystem details rows (all real mounts);
 	// nil when the host reported none.
 	Filesystems []chartFilesystem
+	// Lines are the optional extra lines (GPU, CVE, service latency);
+	// a line is absent when its data source has no usable result.
+	Lines []chartLine
 }
 
 // kv is one key/value row in a details panel section.
@@ -154,6 +160,14 @@ type pveNodeView struct {
 	// Storages are the storage (datastore) boxes, sorted after the
 	// guests.
 	Storages []pveStorageView
+	// Lines are the node's extra lines: NVIDIA GPUs passed through to its
+	// guests (hostpci targets).
+	Lines []chartLine
+	// worst is the tree's worst state of the node and its descendants;
+	// the guest extra lines are folded in by addPVELines.
+	worst IndicatorState
+	// remoteID is the node's PVE remote, for the per-guest reads.
+	remoteID string
 }
 
 // pveGuestView is one guest box under a PVE node.
@@ -169,6 +183,15 @@ type pveGuestView struct {
 	StateReason string
 	// Stale marks a stale guest observation.
 	Stale bool
+	// HostID is the managed host linked to the guest by a reviewed link
+	// ("" when unlinked); display information only.
+	HostID string
+	// Lines are the optional extra lines (GPU of a linked host with the
+	// driver, backup freshness); absent when the source has no usable
+	// result.
+	Lines []chartLine
+	// generation is the guest incarnation, for the exact backup read.
+	generation uint64
 }
 
 // pveStorageView is one storage (datastore) box under a PVE node.
@@ -262,15 +285,17 @@ func pveTreeToView(tree pveinventory.Tree) []pveNodeView {
 			StateClass:  pveStateClass(string(r.State)),
 			StateReason: r.StateReason,
 			Stale:       r.Stale,
+			remoteID:    r.RemoteID,
 		}
 		switch r.Worst {
 		case pveinventory.StateCritical:
-			n.WorstClass = "chart__node--critical"
+			n.worst = StateCrit
 		case pveinventory.StateWarning:
-			n.WorstClass = "chart__node--warning"
+			n.worst = StateWarn
 		default:
-			n.WorstClass = "chart__node--neutral"
+			n.worst = StateOK
 		}
+		n.WorstClass = worstClass(n.worst)
 		n.Expanded = n.WorstClass != "chart__node--neutral"
 		for _, c := range r.Children {
 			switch c.Kind {
@@ -282,6 +307,8 @@ func pveTreeToView(tree pveinventory.Tree) []pveNodeView {
 					StateClass:  pveStateClass(string(c.State)),
 					StateReason: c.StateReason,
 					Stale:       c.Stale,
+					HostID:      c.HostID,
+					generation:  c.Generation,
 				})
 			case pveinventory.KindStorage:
 				n.Storages = append(n.Storages, pveStorageView{
@@ -304,7 +331,7 @@ func pveTreeToView(tree pveinventory.Tree) []pveNodeView {
 }
 
 // chartHosts builds the org chart columns from the batch reads.
-func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins map[string]*pb.HostKeyPin, pinsUnavailable bool, b batchData) []chartHost {
+func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins map[string]*pb.HostKeyPin, pinsUnavailable bool, b batchData, res chartResults) []chartHost {
 	now := h.pveNow()
 	// Fetch the latest stored readings once per page, not once per host.
 	// A nil operations service (or a read error) leaves the maps empty:
@@ -362,6 +389,7 @@ func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins m
 		indicators := hostIndicators(m, fs, observedAt, now, indicatorStaleAfter)
 		ch.Indicators = summaryIndicatorRows(indicators)
 		ch.Filesystems = filesystemRows(fs)
+		ch.Lines = hostLines(res, host.ID, now)
 		// Border colour = worst state: red unreachable or a critical
 		// indicator, yellow updates pending or a warning indicator, grey
 		// otherwise.
@@ -378,16 +406,10 @@ func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins m
 		for _, ind := range indicators {
 			worst = worstState(worst, ind.State)
 		}
-		switch {
-		case worst == StateCrit:
-			ch.WorstClass = "chart__node--critical"
-		case worst == StateWarn:
-			ch.WorstClass = "chart__node--warning"
-		default:
-			ch.WorstClass = "chart__node--neutral"
-		}
-		// Problem hosts open by default, the rest collapsed.
-		ch.Expanded = ch.WorstClass != "chart__node--neutral"
+		// The extra lines with a level (GPU, CVE, service check) count
+		// for the border too.
+		// The container lines join below, once the containers are built.
+		worst = worstState(append(lineStates(ch.Lines), worst)...)
 		// Read-only details side panel: config, snapshots, updates,
 		// backups. No controls that change anything.
 		os := v.OS
@@ -418,6 +440,7 @@ func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins m
 		if regRow, ok := registryTags[host.ID]; ok {
 			regByImage = parseRegistryHostResult(regRow.Result)
 		}
+		stats := newContainerStats(rowFor(res.stats, host.ID), now, indicatorStaleAfter)
 		if row, ok := b.docker[host.ID]; ok {
 			if list, err := dockerhost.ParseList(row.Result); err == nil {
 				// Compose projects keep first-seen order; the
@@ -432,7 +455,9 @@ func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins m
 						HealthClass: containerHealthClass(c.Health), Project: c.Project,
 						SameTagText: cu.SameTagText, SameTagClass: cu.SameTagClass,
 						StableText: cu.StableText, StableClass: cu.StableClass,
-						Note: cu.Note, ReleaseNotes: cu.ReleaseNotes}
+						Note: cu.Note, ReleaseNotes: cu.ReleaseNotes,
+						Lines: statsLine(stats, c)}
+					worst = worstState(append(lineStates(cv.Lines), worst)...)
 					if c.Project == "" {
 						standalone = append(standalone, cv)
 						continue
@@ -449,6 +474,9 @@ func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins m
 				}
 			}
 		}
+		ch.WorstClass = worstClass(worst)
+		// Problem hosts open by default, the rest collapsed.
+		ch.Expanded = ch.WorstClass != "chart__node--neutral"
 		out = append(out, ch)
 	}
 	return out
@@ -476,7 +504,8 @@ func (h *Handler) handleInventoryChart(w http.ResponseWriter, r *http.Request) {
 	}
 	pins, pinsUnavailable := h.hostKeyPins(ctx)
 	b := h.batchData(ctx)
-	data.Chart = &chartData{Hosts: h.chartHosts(ctx, hosts, pins, pinsUnavailable, b)}
+	res := h.loadChartResults(ctx)
+	data.Chart = &chartData{Hosts: h.chartHosts(ctx, hosts, pins, pinsUnavailable, b, res)}
 	// PVE section: node boxes with guest and storage (datastore)
 	// children. A nil provider hides the section; an error shows
 	// "PVE unavailable" (the detail goes to the log only).
@@ -487,6 +516,7 @@ func (h *Handler) handleInventoryChart(w http.ResponseWriter, r *http.Request) {
 			data.Chart.PVEUnavailable = true
 		} else {
 			data.Chart.PVENodes = pveTreeToView(tree)
+			h.addPVELines(ctx, data.Chart.PVENodes, res, h.pveNow())
 		}
 	}
 	h.render(w, r, data)
