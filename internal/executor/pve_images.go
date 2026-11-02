@@ -608,26 +608,39 @@ func DispatchImageStep(ctx context.Context, w PveImageWriter, node string, step 
 	default:
 		return "", fmt.Errorf("dispatch image step: %w", ErrPveRejected)
 	}
+	return pveWriteResult(step.Method, upid, err)
+}
+
+// pveWriteResult maps the result of one pveapi write: an argument the
+// writer refused before sending, or an answer that proves PVE refused it,
+// wraps ErrPveRejected; any other error means the request may have been
+// received.
+func pveWriteResult(method, upid string, err error) (string, error) {
 	if err == nil {
 		return upid, nil
 	}
 	var we *pveapi.WriteError
 	if errors.Is(err, pveapi.ErrInvalidArgument) || (errors.As(err, &we) && !we.OutcomeUnknown()) {
-		return "", fmt.Errorf("dispatch %s: %w: %w", step.Method, ErrPveRejected, err)
+		return "", fmt.Errorf("dispatch %s: %w: %w", method, ErrPveRejected, err)
 	}
-	return "", fmt.Errorf("dispatch %s: %w", step.Method, err)
+	return "", fmt.Errorf("dispatch %s: %w", method, err)
 }
 
-// decodeStepArgs decodes args into dst with a size limit, no unknown
-// fields and no trailing data; a malformed step is refused unsent.
+// decodeStepArgs decodes image step args into dst (see decodeStepArgsMax).
 func decodeStepArgs(args json.RawMessage, dst any) error {
-	if len(args) == 0 || len(args) > maxPveImageStepArgs {
-		return fmt.Errorf("decode image step: %w", ErrPveRejected)
+	return decodeStepArgsMax(args, dst, maxPveImageStepArgs)
+}
+
+// decodeStepArgsMax decodes args into dst with a size limit, no unknown
+// fields and no trailing data; a malformed step is refused unsent.
+func decodeStepArgsMax(args json.RawMessage, dst any, limit int) error {
+	if len(args) == 0 || len(args) > limit {
+		return fmt.Errorf("decode step: %w", ErrPveRejected)
 	}
 	dec := json.NewDecoder(bytes.NewReader(args))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil || dec.More() {
-		return fmt.Errorf("decode image step: %w", ErrPveRejected)
+		return fmt.Errorf("decode step: %w", ErrPveRejected)
 	}
 	return nil
 }

@@ -209,3 +209,31 @@ func TestRevokeProviderMutationsOnlyTouchesThatRemote(t *testing.T) {
 		t.Fatal("SSH permit revoked")
 	}
 }
+
+func TestProviderMutationRiskTargetIsTheBoundTarget(t *testing.T) {
+	tg := mutationTarget()
+	rt, err := tg.RiskTarget()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rq, _, err := ProviderMutationRequest(mutation(tg), "00000000-0000-4000-9000-999999999999", canonical.RiskMedium, strings.Repeat("c", 64), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rq.ResolvedTargets) != 1 || rq.ResolvedTargets[0] != rt {
+		t.Fatalf("risk target %+v, request targets %+v", rt, rq.ResolvedTargets)
+	}
+	if !canonical.ValidHostID(rt.HostID) || !canonical.ValidHostKeyFingerprint(rt.HostKeyFingerprint) {
+		t.Fatalf("malformed risk target %+v", rt)
+	}
+	other := mutationTarget()
+	other.Node = "pve2"
+	if ot, _ := other.RiskTarget(); ot.HostID == rt.HostID {
+		t.Fatal("two nodes share a risk target")
+	}
+	bad := mutationTarget()
+	bad.TrustPin = "zz"
+	if _, err := bad.RiskTarget(); err == nil {
+		t.Fatal("malformed pin accepted")
+	}
+}
