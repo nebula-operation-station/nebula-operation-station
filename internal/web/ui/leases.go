@@ -80,10 +80,13 @@ func leaseStateClass(state string) string {
 var leaseIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 // leaseRevocable reports whether a grant in this state can be revoked:
-// active grants and legacy read-schedule-v1 grants (ADR 0007: "offer
-// revoke or explicitly approved replacement" for legacy grants).
+// active grants, legacy read-schedule-v1 grants (ADR 0007: "offer revoke
+// or explicitly approved replacement" for legacy grants) and grants the
+// server cannot decode ("invalid", e.g. a newer format during version
+// skew). Revoke only reduces authority and needs just the validated id,
+// so an undecodable grant that may still be live stays revocable.
 func leaseRevocable(state string) bool {
-	return state == "active" || state == "legacy"
+	return state == "active" || state == "legacy" || state == "invalid"
 }
 
 // leaseShort bounds the id shown in the UI and the page title. Invalid
@@ -197,7 +200,7 @@ func (h *Handler) handleLease(w http.ResponseWriter, r *http.Request) {
 		Scripts: []string{"formpost.js"}})
 }
 
-// handleLeaseRevoke revokes an active or legacy read grant. The page
+// handleLeaseRevoke revokes an active, legacy or undecodable read grant. The page
 // submits the form with fetch (data-fetch, formpost.js), which sends the
 // real Origin; the security middleware rejects cross-origin posts and
 // plain form posts (Origin: null under Referrer-Policy: no-referrer). The
@@ -233,7 +236,7 @@ func (h *Handler) handleLeaseRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !leaseRevocable(v.State) {
-		http.Error(w, "only an active or legacy lease can be revoked", http.StatusConflict)
+		http.Error(w, "an expired or revoked lease cannot be revoked", http.StatusConflict)
 		return
 	}
 	if err := h.leases.RevokeReadGrant(ctx, webUser(r), id); err != nil {

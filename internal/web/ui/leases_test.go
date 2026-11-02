@@ -189,7 +189,7 @@ func TestLeaseRevokeActive(t *testing.T) {
 }
 
 func TestLeaseRevokeNonRevocableRefused(t *testing.T) {
-	for _, state := range []string{"expired", "revoked", "invalid"} {
+	for _, state := range []string{"expired", "revoked"} {
 		t.Run(state, func(t *testing.T) {
 			f := &fakeLeases{grants: []executions.ReadGrantView{{ID: leaseID, State: state, Expiry: time.Now().Add(-time.Hour)}}}
 			code, _ := postLeaseForm(t, leaseHandler(t, f), "/leases/revoke", "id="+leaseID)
@@ -200,6 +200,19 @@ func TestLeaseRevokeNonRevocableRefused(t *testing.T) {
 				t.Fatalf("%s lease must not be revoked", state)
 			}
 		})
+	}
+}
+
+// TestLeaseRevokeInvalid checks that a grant the server cannot decode is
+// still revocable by its id (it may be live on the executor).
+func TestLeaseRevokeInvalid(t *testing.T) {
+	f := &fakeLeases{grants: []executions.ReadGrantView{{ID: leaseID, State: "invalid"}}}
+	code, _ := postLeaseForm(t, leaseHandler(t, f), "/leases/revoke", "id="+leaseID)
+	if code != http.StatusSeeOther {
+		t.Fatalf("revoke of invalid lease = %d, want 303", code)
+	}
+	if len(f.revoked) != 1 || f.revoked[0] != leaseID {
+		t.Fatalf("revoked = %v, want [%s]", f.revoked, leaseID)
 	}
 }
 
@@ -227,7 +240,7 @@ func TestLeaseDetailRevokeFormOnlyWhenRevocable(t *testing.T) {
 		{"legacy", true},
 		{"expired", false},
 		{"revoked", false},
-		{"invalid", false},
+		{"invalid", true},
 	} {
 		t.Run(tc.state, func(t *testing.T) {
 			f := &fakeLeases{grants: []executions.ReadGrantView{{
@@ -319,6 +332,9 @@ func TestLeasesDisabledIs404(t *testing.T) {
 		if code := statusOf(t, h, path); code != http.StatusNotFound {
 			t.Fatalf("%s without leases = %d, want 404", path, code)
 		}
+	}
+	if code, _ := postLeaseForm(t, h, "/leases/revoke", "id="+leaseID); code != http.StatusNotFound {
+		t.Fatalf("POST /leases/revoke without leases = %d, want 404", code)
 	}
 }
 
