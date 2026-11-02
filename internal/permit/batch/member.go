@@ -121,6 +121,42 @@ func (a *Authority) Member(parent canonical.Digest, memberID string) (MemberPerm
 	return mp.clone(), true
 }
 
+// ErrMemberNotClaimed means the batch is live but holds no claimed permit for
+// the member: it was never claimed or its claim was revoked.
+var ErrMemberNotClaimed = errors.New("batch member not claimed")
+
+// RevalidateMember is the dispatch-boundary lookup of a claimed member
+// permit. Unlike Member it re-evaluates every member's trust and risk
+// against the frozen snapshot first, exactly like Check: any change revokes
+// the entire batch, including every claimed permit, and returns
+// ErrInvalidated. Lock, expiry, an unknown parent, an unreadable trust/risk
+// state and a missing claim fail closed as well. Callers must call it
+// immediately before anything reaches the target.
+func (a *Authority) RevalidateMember(ctx context.Context, parent canonical.Digest, memberID string) (MemberPermit, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	e, err := a.getLocked(parent, permit.StateApproved)
+	if err != nil {
+		return MemberPermit{}, err
+	}
+	if err := a.freshLocked(ctx, parent, e, permit.StateApproved); err != nil {
+		return MemberPermit{}, err
+	}
+	// freshLocked released the mutex for the trust/risk reads and verified
+	// the entry is still live; the claim is looked up only now, so a Lock
+	// or invalidation during the reads cannot be missed.
+	key := memberKey(parent, memberID)
+	mp, ok := a.members[key]
+	if !ok {
+		return MemberPermit{}, ErrMemberNotClaimed
+	}
+	if !a.options.Now().Before(mp.Expiry) {
+		delete(a.members, key)
+		return MemberPermit{}, failure(permit.CodeExpired, "batch member permit expired")
+	}
+	return mp.clone(), nil
+}
+
 // bindExecutionIDs durably spends every member execution ID of the plan,
 // bound to the parent digest. The caller holds a.mu, so no other proposal
 // of this authority interleaves; a store failure part-way leaves the
