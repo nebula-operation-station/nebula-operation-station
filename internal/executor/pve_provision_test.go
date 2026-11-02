@@ -1166,3 +1166,97 @@ func TestProvisionJobStoreFailureKeepsReservation(t *testing.T) {
 		t.Fatal("reservation freed although the steps could not be read")
 	}
 }
+
+func TestProvisionReleasedUnknownCloneNeverLetsAnotherCloneAdoptItsTask(t *testing.T) {
+	e := newProvisionEnv(t, fixedRisk{})
+	a := e.approve(e.request())
+	b := e.approve(e.request())
+	// A's clone ends unknown; its unrecorded task appears in the list later.
+	var cloneA string
+	e.loseStep(1, func(upid string) []string { cloneA = upid; return nil })
+	if _, err := e.prov.Provision(context.Background(), a); !errors.Is(err, ErrPveDispatchUncertain) {
+		t.Fatalf("a: %v", err)
+	}
+	e.passMatchWindow()
+	if err := e.m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// A's guest appears, so A's reservation becomes releasable by itself.
+	e.reader.addGuest("pve1", int(a.VMID), 4*gib)
+	// B's clone response is lost while A's task is listed: B stays
+	// reconciling inside its window.
+	e.m.Now = nil
+	e.loseStep(1, func(string) []string { return []string{cloneA} })
+	rb, err := e.prov.Provision(context.Background(), b)
+	if !errors.Is(err, ErrPveDispatchUncertain) || rb.Steps[0].State != executordb.PveJobReconciling || rb.Steps[0].UPID != "" {
+		t.Fatalf("b: %v %+v", err, rb.Steps)
+	}
+	// While B is still identifying, A's reservation (the ambiguity marker)
+	// is not released, even after A's own window passed.
+	e.passMatchWindow()
+	if n, err := e.prov.ReleaseSettledVMIDs(context.Background(), mutRemote); err != nil || n != 0 {
+		t.Fatalf("released %d %v while b reconciles", n, err)
+	}
+	if err := e.m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	steps, _ := e.pe.db.PveJobSteps(rb.ExecutionID)
+	if steps[0].UPID == cloneA || steps[0].State != executordb.PveJobUnknown {
+		t.Fatalf("b adopted a's clone task: %+v", steps[0])
+	}
+	// With B settled, A's reservation goes (B's stays: its guest is unseen).
+	if n, err := e.prov.ReleaseSettledVMIDs(context.Background(), mutRemote); err != nil || n != 1 {
+		t.Fatalf("released %d %v", n, err)
+	}
+	if _, ok, _ := e.vmids.VMIDHolder(mutRemote, b.VMID, time.Now()); !ok {
+		t.Fatal("b's unknown clone lost its reservation")
+	}
+}
+
+func TestProvisionUnknownCloneIsNotReleasedInsideItsTaskWindow(t *testing.T) {
+	e := newProvisionEnv(t, fixedRisk{})
+	a := e.approve(e.request())
+	e.loseStep(1, func(string) []string { return nil })
+	if _, err := e.prov.Provision(context.Background(), a); !errors.Is(err, ErrPveDispatchUncertain) {
+		t.Fatalf("a: %v", err)
+	}
+	// Mark the clone unknown at once (ambiguous candidates), still inside
+	// the window of a clone step started now.
+	e.listTasks(testTaskUPID("pve1", time.Now(), "qmclone", "9000", mutActionUser, 950),
+		testTaskUPID("pve1", time.Now(), "qmclone", "9000", mutActionUser, 951))
+	if err := e.m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e.reader.addGuest("pve1", int(a.VMID), 4*gib)
+	if n, err := e.prov.ReleaseSettledVMIDs(context.Background(), mutRemote); err != nil || n != 0 {
+		t.Fatalf("released inside the task window: %d %v", n, err)
+	}
+}
+
+func TestProvisionTransientFailureBeforeDispatchKeepsReservationForRetry(t *testing.T) {
+	e := newProvisionEnv(t, fixedRisk{})
+	approved := e.approve(e.request())
+	e.client.fakeMutClient.mu.Lock()
+	e.client.fakeMutClient.liveNode = "pve9"
+	e.client.fakeMutClient.mu.Unlock()
+	if _, err := e.prov.Provision(context.Background(), approved); err == nil || errors.Is(err, ErrPveMutationDenied) {
+		t.Fatalf("transient target read: %v", err)
+	}
+	if len(e.pc.provisionSteps()) != 0 {
+		t.Fatal("dispatched")
+	}
+	h, ok, _ := e.vmids.VMIDHolder(mutRemote, approved.VMID, time.Now())
+	if !ok || h.ExecutionID != approved.ExecutionID || h.Started {
+		t.Fatalf("reservation after a transient failure: %+v %v", h, ok)
+	}
+	// It expires with the proposal again, and the approved run can retry.
+	if _, ok, _ := e.vmids.VMIDHolder(mutRemote, approved.VMID, time.Now().Add(2*time.Hour)); ok {
+		t.Fatal("unstarted reservation does not expire")
+	}
+	e.client.fakeMutClient.mu.Lock()
+	e.client.fakeMutClient.liveNode = "pve1"
+	e.client.fakeMutClient.mu.Unlock()
+	if _, err := e.prov.Provision(context.Background(), approved); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+}

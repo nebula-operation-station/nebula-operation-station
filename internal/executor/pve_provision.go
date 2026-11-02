@@ -874,6 +874,14 @@ func (p *PveProvisioner) Provision(ctx context.Context, req PveProvisionRequest)
 	}
 	res.Steps = steps
 	release, mayExist := vmidSettlement(steps)
+	if len(steps) == 0 && runErr != nil && !errors.Is(runErr, ErrPveMutationDenied) {
+		// Nothing was sent, but the failure may be transient (store, vault,
+		// token, remote read): the approved execution keeps its VMID for a
+		// retry, and the reservation expires with the proposal again. Only
+		// a refused permit releases it.
+		release = false
+		_ = p.VMIDs.UnstartVMID(req.RemoteID, req.VMID, req.ExecutionID)
+	}
 	if release {
 		_ = p.VMIDs.ReleaseVMID(req.RemoteID, req.VMID, req.ExecutionID)
 	}
@@ -993,8 +1001,18 @@ func (p *PveProvisioner) releaseSettled(remoteID string, live map[uint64]bool) (
 		}
 		release, _ := vmidSettlement(steps)
 		if !release && len(steps) == 1 && steps[0].State == executordb.PveJobUnknown && live[r.VMID] {
-			// An unknown clone whose guest exists: the live list protects it.
-			release = true
+			// An unknown clone whose guest exists: the live list protects
+			// the VMID. The reservation is also the marker that makes a
+			// lost clone of the same template ambiguous (JobTaskID), since
+			// this clone's task is unrecorded and may still be listed. It
+			// goes only once that task can no longer fall into the window
+			// of a later clone step, and while no other clone of the same
+			// template is still being identified.
+			busy, err := p.sameTemplateCloneOpen(recs, r)
+			if err != nil {
+				return n, err
+			}
+			release = !busy && p.Mutations.now().After(steps[0].CreatedAt.Add(pveTaskMatchWindow+2*pveTaskMatchSkew))
 		}
 		if !release {
 			continue
@@ -1006,6 +1024,27 @@ func (p *PveProvisioner) releaseSettled(remoteID string, live map[uint64]bool) (
 		n++
 	}
 	return n, nil
+}
+
+// sameTemplateCloneOpen reports whether another started provisioning of
+// r's template has a clone step that is open without a recorded task.
+func (p *PveProvisioner) sameTemplateCloneOpen(recs []PveVMIDReservation, r PveVMIDReservation) (bool, error) {
+	for _, o := range recs {
+		if o.ExecutionID == r.ExecutionID || !o.Started || o.TemplateVMID != r.TemplateVMID {
+			continue
+		}
+		if p.Mutations.running(o.ExecutionID) {
+			return true, nil
+		}
+		steps, err := p.Mutations.DB.PveJobSteps(o.ExecutionID)
+		if err != nil {
+			return false, ErrPveJobStore
+		}
+		if len(steps) > 0 && steps[0].UPID == "" && pveJobOpen(steps[0]) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // JobTaskID implements PveJobTaskIDs for pve.guest.provision steps from the

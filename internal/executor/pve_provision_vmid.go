@@ -74,6 +74,9 @@ type PveVMIDStore interface {
 	// StartVMID marks executionID's reservation as started and records
 	// the template it clones.
 	StartVMID(remoteID string, vmid uint64, executionID string, templateVMID uint64) error
+	// UnstartVMID clears the started mark of executionID's reservation, so
+	// it expires again at its original expiry (a run that sent nothing).
+	UnstartVMID(remoteID string, vmid uint64, executionID string) error
 	// ReleaseVMID drops executionID's reservation of vmid.
 	ReleaseVMID(remoteID string, vmid uint64, executionID string) error
 	// Reservations returns every reservation of remoteID still in force at
@@ -225,6 +228,14 @@ func (s *FilePveVMIDStore) Reservations(remoteID string, now time.Time) ([]PveVM
 		}
 	}
 	return out, nil
+}
+
+// UnstartVMID implements PveVMIDStore.
+func (s *FilePveVMIDStore) UnstartVMID(remoteID string, vmid uint64, executionID string) error {
+	return s.update(remoteID, vmid, executionID, func(recs []PveVMIDReservation, i int) []PveVMIDReservation {
+		recs[i].Started = false
+		return recs
+	})
 }
 
 // ReleaseVMID implements PveVMIDStore.

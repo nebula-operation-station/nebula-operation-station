@@ -159,6 +159,10 @@ func (p GuestProvisionRiskFloor) MinimumRisk(r canonical.Request, targets []cano
 	if p.Next == nil {
 		return canonical.RiskHigh, strings.Join(append(reasons, "no criticality source: unknown criticality is HIGH"), "; "), nil
 	}
+	if len(targets) == 0 {
+		// No node target: its criticality is unknown.
+		return canonical.RiskHigh, strings.Join(append(reasons, "no node target: unknown criticality is HIGH"), "; "), nil
+	}
 	ext := append([]canonical.Target(nil), targets...)
 	seen := map[string]bool{}
 	for _, t := range targets {

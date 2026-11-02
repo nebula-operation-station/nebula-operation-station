@@ -155,3 +155,22 @@ func TestVMIDConcurrentReservationsAreDistinct(t *testing.T) {
 		seen[v] = true
 	}
 }
+
+func TestVMIDUnstartRestoresExpiry(t *testing.T) {
+	s := newVMIDStore(t)
+	if _, err := s.ReserveVMID("lab", "exec-a", 300, nil, vmidNow.Add(time.Minute), vmidNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.StartVMID("lab", 300, "exec-a", 9000); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UnstartVMID("lab", 300, "exec-b"); !errors.Is(err, ErrPveVMIDTaken) {
+		t.Fatalf("unstart by a non-holder: %v", err)
+	}
+	if err := s.UnstartVMID("lab", 300, "exec-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := s.VMIDHolder("lab", 300, vmidNow.Add(2*time.Minute)); ok {
+		t.Fatal("unstarted reservation does not expire")
+	}
+}

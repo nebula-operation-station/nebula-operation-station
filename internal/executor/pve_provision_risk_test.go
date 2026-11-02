@@ -171,6 +171,10 @@ func TestGuestProvisionRiskFloorRules(t *testing.T) {
 	if _, _, err := (GuestProvisionRiskFloor{Next: pol, Linked: failing}).MinimumRisk(req, []canonical.Target{node}); err == nil {
 		t.Fatal("linked-host error ignored")
 	}
+	// Without a node target the criticality is unknown: HIGH.
+	if r, _, _ := (GuestProvisionRiskFloor{Next: pol}).MinimumRisk(req, nil); r != canonical.RiskHigh {
+		t.Fatalf("no targets = %s", r)
+	}
 	// Without a criticality source everything is HIGH.
 	if r, _, _ := (GuestProvisionRiskFloor{}).MinimumRisk(req, []canonical.Target{node}); r != canonical.RiskHigh {
 		t.Fatalf("no next policy = %s", r)
