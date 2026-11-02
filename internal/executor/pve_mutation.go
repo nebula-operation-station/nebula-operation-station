@@ -140,6 +140,15 @@ type PveMutationClient interface {
 	TargetState(ctx context.Context, rm executordb.PveRemote, kind, node string, vmid uint64, read pveapi.TokenSupplier) (liveNode, configDigest string, err error)
 }
 
+// PveStepTaskIDer may be implemented by a PveMutationClient. TaskID returns
+// the ID field (the VMID or storage) the PVE task of step carries. While
+// the step runs, the engine then accepts and identifies only tasks with
+// that ID, also for a node-level job; reconciliation after a restart has
+// only the stored job and matches without it.
+type PveStepTaskIDer interface {
+	TaskID(step PveMutationStep) (string, bool)
+}
+
 // pveSecrets is the part of the vault the engine needs.
 type pveSecrets interface {
 	State() (vault.State, error)
@@ -486,6 +495,15 @@ func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, 
 	if err != nil {
 		return err
 	}
+	// A node-level job does not bind a guest; a client that knows the task
+	// ID of the step (the guest or storage it names) narrows the match, so a
+	// task of another guest on the node is never taken for this step.
+	var wantID string
+	if ider, ok := m.Client.(PveStepTaskIDer); ok {
+		if id, ok := ider.TaskID(step); ok {
+			wantID = id
+		}
+	}
 	job := executordb.PveJob{
 		ExecutionID: claim.ExecutionID, Step: n, Digest: digest, Action: action, RemoteID: t.RemoteID,
 		TrustGeneration: t.TrustGeneration, Kind: t.Kind, Node: t.Node, VMID: t.VMID, RequestDigest: rd,
@@ -513,18 +531,18 @@ func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, 
 	}
 	if err != nil {
 		// Lost response: never retry, identify the task instead.
-		return m.reconcileLost(ctx, rm, job, readTok)
+		return m.reconcileLost(ctx, rm, job, readTok, wantID)
 	}
 	u, ok := executordb.ParsePveUPID(upid)
-	if !ok || !taskMatches(u, job) {
+	if !ok || !taskMatches(u, job) || (wantID != "" && u.ID != wantID) {
 		// A malformed or foreign task ID cannot be observed as this
 		// step's task; treat it as lost.
-		return m.reconcileLost(ctx, rm, job, readTok)
+		return m.reconcileLost(ctx, rm, job, readTok, wantID)
 	}
 	err = m.DB.RecordPveJobUPID(claim.ExecutionID, n, upid, u.Node)
 	if errors.Is(err, executordb.ErrPveUPIDRecorded) {
 		// The remote answered with another step's task: not ours.
-		return m.reconcileLost(ctx, rm, job, readTok)
+		return m.reconcileLost(ctx, rm, job, readTok, wantID)
 	}
 	if err != nil {
 		_ = m.DB.MarkPveJobReconciling(claim.ExecutionID, n)
@@ -535,8 +553,9 @@ func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, 
 	return m.await(ctx, rm, job, readTok)
 }
 
-// reconcileLost handles a step whose dispatch outcome is unknown.
-func (m *PveMutations) reconcileLost(ctx context.Context, rm executordb.PveRemote, job executordb.PveJob, read pveapi.TokenSupplier) error {
+// reconcileLost handles a step whose dispatch outcome is unknown. wantID,
+// if set, is the task ID the step's task must carry.
+func (m *PveMutations) reconcileLost(ctx context.Context, rm executordb.PveRemote, job executordb.PveJob, read pveapi.TokenSupplier, wantID string) error {
 	if err := m.DB.MarkPveJobReconciling(job.ExecutionID, job.Step); err != nil {
 		return ErrPveJobStore
 	}
@@ -547,7 +566,7 @@ func (m *PveMutations) reconcileLost(ctx context.Context, rm executordb.PveRemot
 		return ErrPveJobStore
 	}
 	job = stored
-	if err := m.identify(ctx, rm, &job, read); err != nil {
+	if err := m.identify(ctx, rm, &job, read, wantID); err != nil {
 		return err
 	}
 	if job.UPID == "" {
@@ -572,7 +591,8 @@ func taskMatches(u executordb.PveUPID, job executordb.PveJob) bool {
 // unknown, and none marks it unknown only once the start window has
 // passed (until then it stays reconciling). Nothing is ever dispatched. A read error leaves the step
 // reconciling for the next pass.
-func (m *PveMutations) identify(ctx context.Context, rm executordb.PveRemote, job *executordb.PveJob, read pveapi.TokenSupplier) error {
+// wantID, if set, is the task ID the candidate must carry as well.
+func (m *PveMutations) identify(ctx context.Context, rm executordb.PveRemote, job *executordb.PveJob, read pveapi.TokenSupplier, wantID string) error {
 	since := job.CreatedAt.Add(-pveTaskMatchSkew)
 	upids, err := m.Client.RecentTasks(ctx, rm, job.Node, since, read)
 	if err != nil {
@@ -583,7 +603,7 @@ func (m *PveMutations) identify(ctx context.Context, rm executordb.PveRemote, jo
 	var match []string
 	for _, upid := range upids {
 		u, ok := executordb.ParsePveUPID(upid)
-		if !ok || !taskMatches(u, *job) || u.StartTime.Before(since) || u.StartTime.After(job.CreatedAt.Add(pveTaskMatchWindow)) {
+		if !ok || !taskMatches(u, *job) || (wantID != "" && u.ID != wantID) || u.StartTime.Before(since) || u.StartTime.After(job.CreatedAt.Add(pveTaskMatchWindow)) {
 			continue
 		}
 		used, err := m.DB.PveUPIDRecorded(upid)
@@ -732,7 +752,7 @@ func (m *PveMutations) Reconcile(ctx context.Context) error {
 					return ErrPveJobStore
 				}
 			}
-			if err := m.identify(ctx, rm, &job, read); errors.Is(err, ErrPveJobStore) {
+			if err := m.identify(ctx, rm, &job, read, ""); errors.Is(err, ErrPveJobStore) {
 				return err
 			}
 			if job.UPID == "" {

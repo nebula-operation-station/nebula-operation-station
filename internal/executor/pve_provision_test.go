@@ -68,6 +68,10 @@ func (c *provisionClient) TaskType(method string) (string, bool) {
 	return ImageStepTaskType(method)
 }
 
+func (c *provisionClient) TaskID(step PveMutationStep) (string, bool) {
+	return ProvisionStepTaskID(step)
+}
+
 func stepVMIDs(step PveMutationStep) (src, dst string) {
 	var a map[string]any
 	_ = json.Unmarshal(step.Args, &a)
@@ -753,6 +757,42 @@ func TestProvisionFailedStepKeepsGuest(t *testing.T) {
 	}
 	if len(e.pc.provisionSteps()) != 2 {
 		t.Fatal("redispatched")
+	}
+}
+
+func TestProvisionLostResponseNeverAdoptsAnotherGuestsTask(t *testing.T) {
+	e := newProvisionEnv(t, fixedRisk{})
+	approved := e.approve(e.request())
+	e.pc.onStep = func(n int, step PveMutationStep, upid string) (string, error) {
+		if n == 2 {
+			// The config response is lost; the node lists only a qmconfig
+			// task of another guest by the same action token.
+			foreign := testTaskUPID("pve1", time.Now(), "qmconfig", "105", mutActionUser, 900)
+			e.client.fakeMutClient.mu.Lock()
+			e.client.fakeMutClient.recent = []string{foreign}
+			e.client.fakeMutClient.mu.Unlock()
+			return "", errors.New("connection reset")
+		}
+		return upid, nil
+	}
+	res, err := e.prov.Provision(context.Background(), approved)
+	if !errors.Is(err, ErrPveDispatchUncertain) || !res.GuestKept {
+		t.Fatalf("err = %v result %+v", err, res)
+	}
+	if res.Steps[1].UPID != "" || res.Steps[1].State != executordb.PveJobReconciling {
+		t.Fatalf("foreign task adopted: %+v", res.Steps[1])
+	}
+	if len(e.pc.provisionSteps()) != 2 {
+		t.Fatalf("dispatched %v", e.pc.methods())
+	}
+	if id, ok := ProvisionStepTaskID(e.pc.provisionSteps()[0]); !ok || id != "9000" {
+		t.Fatalf("clone task id %q", id)
+	}
+	if id, ok := ProvisionStepTaskID(e.pc.provisionSteps()[1]); !ok || id != "101" {
+		t.Fatalf("config task id %q", id)
+	}
+	if _, ok := ProvisionStepTaskID(PveMutationStep{Method: "pve.guest.delete", Args: json.RawMessage(`{"vmid":101}`)}); ok {
+		t.Fatal("task id for a foreign method")
 	}
 }
 

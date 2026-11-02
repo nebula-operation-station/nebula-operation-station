@@ -906,6 +906,27 @@ func ProvisionStepTaskType(method string) (string, bool) {
 	return tt, ok
 }
 
+// ProvisionStepTaskID returns the ID field of the PVE task a provisioning
+// step creates (the clone's source VMID, otherwise the new guest's VMID),
+// for a PveMutationClient's PveStepTaskIDer.
+func ProvisionStepTaskID(step PveMutationStep) (string, bool) {
+	var a struct {
+		SourceVMID int64 `json:"source_vmid"`
+		VMID       int64 `json:"vmid"`
+	}
+	if _, ok := pveProvisionTaskTypes[step.Method]; !ok || json.Unmarshal(step.Args, &a) != nil {
+		return "", false
+	}
+	id := a.VMID
+	if step.Method == pveStepGuestClone {
+		id = a.SourceVMID
+	}
+	if id < pvecontract.MinVMID {
+		return "", false
+	}
+	return fmt.Sprint(id), true
+}
+
 // PveGuestWriter is the part of pveapi.Writer the provisioning steps use.
 type PveGuestWriter interface {
 	CloneVM(ctx context.Context, r pveapi.CloneRequest) (string, error)
