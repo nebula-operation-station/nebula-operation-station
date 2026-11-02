@@ -119,8 +119,12 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
   and neither does any other provisioning-specific condition (decision 2).
   The general rule of spec 11 ("PVE action profiles and risks": maximum of
   the floor, criticality and affected linked-host floors; unknown
-  criticality HIGH) still applies unchanged; setting criticality is the
-  operator's way to raise provisioning on a node or remote. The allowlisted
+  criticality HIGH) still applies, scored on the remote and node (and any
+  recorded floor): the guest that provisioning creates does not exist yet,
+  so its criticality does not count as unknown. Setting criticality is the
+  operator's way to raise provisioning on a node or remote. A template
+  prepared from a Local-trust entry does not raise provisioning either;
+  only its preparation is HIGH. The allowlisted
   config set on the newly cloned guest is a step of `pve.guest.provision`
   and covered by its floor, not a separate configuration-change action.
   (Draft before: HIGH also on PCI passthrough or over-commit; the decision
@@ -139,15 +143,14 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
 - After first boot the executor enrolls the new guest as a managed host with
   the normal enrollment path.
 - **Host-key pin:** the guest's SSH host key is pinned in one of two ways:
-  - Preferred: read `/etc/ssh/ssh_host_ed25519_key.pub` through the QEMU
-    guest agent over the authenticated, pinned PVE channel, then enroll
-    without trust-on-first-use. This requires the guest agent in the image,
-    so it applies only to images that ship the agent (a local catalog
-    entry may); the executor tries a bounded agent read and falls back to
-    the fingerprint review. See decision 1.
-  - Fallback: the existing fingerprint review, shown on the deployment page.
-    This is the default path for vendor cloud images (decision 1); the
-    bootstrap module then installs `qemu-guest-agent`.
+  - Agent read, when the image ships the QEMU guest agent (a local catalog
+    entry may ship it, or the opt-in `cicustom` snippet of decision 1
+    installs it): read `/etc/ssh/ssh_host_ed25519_key.pub` through the agent
+    over the authenticated, pinned PVE channel and enroll without
+    trust-on-first-use. The executor tries a bounded agent read first.
+  - Fingerprint review (default for vendor cloud images, decision 1): the
+    existing review, shown on the deployment page; the bootstrap module then
+    installs `qemu-guest-agent`.
 - **Linking:** the inventory host is linked to the PVE guest (remote, node,
   VMID, generation), so the org chart shows it as enrolled.
 
@@ -223,8 +226,8 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
 
 ## Decisions on the open questions (maintainer, 2026-11-02)
 
-The questions were open in the draft of 2026-11-01; each entry keeps the
-question and the alternatives.
+Questions 1–3 were open in the draft of 2026-11-01 and keep their question
+and alternatives; 4 and 5 were already settled in the draft.
 
 1. **Guest agent in cloud images:** the vendor Ubuntu/Debian cloud images do
    not ship `qemu-guest-agent`, and PVE's API cannot upload a cloud-init
@@ -241,7 +244,7 @@ question and the alternatives.
    ranges per remote?): the next free VMID from the cluster.
 4. **Windows and other OS families:** out of scope for this track.
 5. **LXC containers:** provisioning containers from `vztmpl` templates is a
-   follow-up with the same profile model; not in this track.
+   natural follow-up with the same profile model; not in this track.
 
 ## Tickets (milestone `pve-provision`)
 
