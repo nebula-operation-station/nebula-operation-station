@@ -65,7 +65,10 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_ProposeEnroll_FullMethodName:             {server},
 		pb.ExecutorService_CommitEnroll_FullMethodName:              {server},
 		pb.ExecutorService_TestConnection_FullMethodName:            {admin},
-		pb.ExecutorService_GetSSHPublicKey_FullMethodName:           {admin},
+		// The server may read the executor's SSH public key (never the
+		// private key): it needs the key's SHA-256 fingerprint as the
+		// credential_version of a read-grant-v2 proposal (ADR 0007, E06).
+		pb.ExecutorService_GetSSHPublicKey_FullMethodName:           {server, admin},
 		pb.ExecutorService_InitVault_FullMethodName:                 {admin},
 		pb.ExecutorService_SetSecret_FullMethodName:                 {admin},
 		pb.ExecutorService_ListSecrets_FullMethodName:               {admin},
