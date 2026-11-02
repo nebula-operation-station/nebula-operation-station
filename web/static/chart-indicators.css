@@ -1,0 +1,192 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+/*
+ * Chart CPU/RAM/disk indicators (ADR 0006 P1-34).
+ *
+ * The color variables (--ok/--warn/--crit/--unknown, --surface-3, --text-*)
+ * come from app.css :root; this file only adds the indicator layout and the
+ * meter fill colours. No inline styles (CSP style-src 'self'): the numeric
+ * value lives in the <meter> value attribute, the colour in these classes.
+ */
+
+/* The three indicator rows under the host box title. */
+.chart__indicators {
+  display: grid;
+  gap: 0.25rem;
+  margin-top: auto;
+}
+
+/* One row: label, current value, 24-h average, meter. */
+.chart__ind-row {
+  display: grid;
+  grid-template-columns: 2.5rem 3rem 3rem 1fr;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.chart__ind-name {
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.chart__ind-cur {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.chart__ind-avg {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--text-faint);
+}
+
+/* unknown / stale rows: the value is a word, not a number. */
+.chart__ind-row--unknown .chart__ind-cur,
+.chart__ind-row--stale .chart__ind-cur {
+  color: var(--unknown);
+  font-style: italic;
+}
+
+/* The meter track. */
+.chart__ind-meter {
+  width: 100%;
+  height: 6px;
+  border: none;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--surface-3);
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+}
+
+.chart__ind-meter::-webkit-meter-bar {
+  background: var(--surface-3);
+  border: none;
+  border-radius: 3px;
+}
+
+/* Meter fill colour by state (ok/warn/crit), covering every fill
+ * pseudo-element so the colour holds regardless of the optimum range. */
+.chart__ind-meter--ok::-webkit-meter-optimum-value,
+.chart__ind-meter--ok::-webkit-meter-sub-optimum-value,
+.chart__ind-meter--ok::-webkit-meter-even-less-good-value {
+  border-radius: 3px;
+  background: var(--ok);
+}
+.chart__ind-meter--warn::-webkit-meter-optimum-value,
+.chart__ind-meter--warn::-webkit-meter-sub-optimum-value,
+.chart__ind-meter--warn::-webkit-meter-even-less-good-value {
+  border-radius: 3px;
+  background: var(--warn);
+}
+.chart__ind-meter--crit::-webkit-meter-optimum-value,
+.chart__ind-meter--crit::-webkit-meter-sub-optimum-value,
+.chart__ind-meter--crit::-webkit-meter-even-less-good-value {
+  border-radius: 3px;
+  background: var(--crit);
+}
+.chart__ind-meter--stale::-webkit-meter-optimum-value,
+.chart__ind-meter--stale::-webkit-meter-sub-optimum-value,
+.chart__ind-meter--stale::-webkit-meter-even-less-good-value {
+  border-radius: 3px;
+  background: var(--unknown);
+}
+.chart__ind-meter--unknown::-webkit-meter-optimum-value,
+.chart__ind-meter--unknown::-webkit-meter-sub-optimum-value,
+.chart__ind-meter--unknown::-webkit-meter-even-less-good-value {
+  border-radius: 3px;
+  background: var(--unknown);
+}
+
+/* Firefox */
+.chart__ind-meter--ok::-moz-meter-bar {
+  border-radius: 3px;
+  background: var(--ok);
+}
+.chart__ind-meter--warn::-moz-meter-bar {
+  border-radius: 3px;
+  background: var(--warn);
+}
+.chart__ind-meter--crit::-moz-meter-bar {
+  border-radius: 3px;
+  background: var(--crit);
+}
+.chart__ind-meter--stale::-moz-meter-bar {
+  border-radius: 3px;
+  background: var(--unknown);
+}
+.chart__ind-meter--unknown::-moz-meter-bar {
+  border-radius: 3px;
+  background: var(--unknown);
+}
+
+/*
+ * Filesystem details list: a focusable trigger that reveals every real
+ * mount on hover AND keyboard focus (:focus-within). No JavaScript.
+ */
+.chart__fs {
+  position: relative;
+  display: inline-block;
+  margin-top: 0.375rem;
+}
+
+.chart__fs__trigger {
+  display: inline-block;
+  padding: 0.125rem 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.chart__fs__trigger:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+}
+
+.chart__fs__list {
+  display: none;
+  position: absolute;
+  top: calc(100% + 0.25rem);
+  left: 0;
+  z-index: 30;
+  min-width: 14rem;
+  margin: 0;
+  padding: 0.375rem 0.5rem;
+  list-style: none;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-lg);
+}
+
+.chart__fs:hover .chart__fs__list,
+.chart__fs:focus-within .chart__fs__list {
+  display: block;
+}
+
+.chart__fs__item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.75rem;
+  padding: 0.125rem 0;
+  font-size: 0.75rem;
+  color: var(--text);
+}
+
+.chart__fs__mount {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+.chart__fs__percent {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}

@@ -28,6 +28,8 @@ type chartOps struct {
 	facts    map[string]executions.LastResultRow
 	dockerUp map[string]executions.LastResultRow
 	registry map[string]executions.LastResultRow
+	metrics  map[string]executions.LastResultRow
+	filesys  map[string]executions.LastResultRow
 }
 
 func (c *chartOps) AllOpsStates(context.Context) (map[string]executions.OpsState, error) {
@@ -48,6 +50,10 @@ func (c *chartOps) LastResults(_ context.Context, actionID string) (map[string]e
 		return c.dockerUp, nil
 	case "registry.tags":
 		return c.registry, nil
+	case "host.metrics":
+		return c.metrics, nil
+	case "filesystem.list":
+		return c.filesys, nil
 	}
 	return map[string]executions.LastResultRow{}, nil
 }
