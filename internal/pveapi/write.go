@@ -152,6 +152,29 @@ type writeRequest struct {
 // envelope. It enforces the response size limit and UTF-8, and maps every
 // failure to a fixed-reason *WriteError.
 func (w *Writer) call(ctx context.Context, r writeRequest) (json.RawMessage, error) {
+	raw, err := w.doWrite(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	var env struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil, &WriteError{Op: r.op, Reason: ReasonInvalidJSON}
+	}
+	if len(env.Data) == 0 || bytes.Equal(env.Data, []byte("null")) {
+		return nil, &WriteError{Op: r.op, Reason: ReasonSchema}
+	}
+	return env.Data, nil
+}
+
+// doWrite performs the shared transport path of one write request: token
+// retrieval, per-call timeout, request construction, response size limit,
+// UTF-8 validation, HTTP status mapping (including 400 parameter extraction
+// and redirect refusal) and timeout → OutcomeUnknown. It returns the
+// validated response body; the caller performs envelope decoding, which is
+// the only difference between the call paths (call and nodeStatusCall).
+func (w *Writer) doWrite(ctx context.Context, r writeRequest) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -205,16 +228,7 @@ func (w *Writer) call(ctx context.Context, r writeRequest) (json.RawMessage, err
 	if !utf8.Valid(raw) {
 		return nil, &WriteError{Op: r.op, Reason: ReasonInvalidUTF8}
 	}
-	var env struct {
-		Data json.RawMessage `json:"data"`
-	}
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil, &WriteError{Op: r.op, Reason: ReasonInvalidJSON}
-	}
-	if len(env.Data) == 0 || bytes.Equal(env.Data, []byte("null")) {
-		return nil, &WriteError{Op: r.op, Reason: ReasonSchema}
-	}
-	return env.Data, nil
+	return raw, nil
 }
 
 // rejectedParams extracts the parameter names from a PVE 400 body

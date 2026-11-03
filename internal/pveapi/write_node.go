@@ -6,21 +6,22 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
-	"io"
 	"net/http"
 	"net/url"
-	"strings"
-	"unicode/utf8"
 )
 
 // RebootNode reboots one exact PVE node (POST /nodes/{node}/status with
 // command=reboot). PVE answers a node reboot without a UPID: only the
 // documented {"data":null} response is accepted, and anything else is a
-// *WriteError. A timeout is OutcomeUnknown like the other writes, so callers
-// reconcile through the task list and never redispatch blindly (ADR 0006,
-// phase 2: "Node reboot: HIGH standalone; CRITICAL cluster; exact node").
-// Shutdown is not offered: the only command sent is "reboot".
+// *WriteError. A timeout is OutcomeUnknown like the other writes.
+//
+// Because the answer carries no UPID, the task list cannot settle an unknown
+// outcome. Callers reconcile by observing the node's uptime — the read
+// client's ListNodes reports UptimeSeconds per node, and a completed reboot
+// shows the node back online with a fresh, lower uptime (a new boot) — and
+// must never redispatch the reboot (ADR 0006, phase 2: "Node reboot: HIGH
+// standalone; CRITICAL cluster; exact node"). Shutdown is not offered: the
+// only command sent is "reboot".
 //
 // The node is validated before anything is sent; an invalid node name is
 // refused with ErrInvalidArgument and no request is made.
@@ -47,67 +48,25 @@ func (w *Writer) RebootNode(ctx context.Context, node string) error {
 }
 
 // nodeStatusCall performs one POST to a node status endpoint and returns the
-// raw "data" member of the response envelope. It mirrors call in write.go
-// exactly (token, timeout, request construction, size limit, UTF-8, JSON
-// envelope, HTTP status mapping, 400 parameter extraction, redirect refusal,
-// and timeout → OutcomeUnknown), with one deliberate difference: it does not
-// reject a null data member, because a node reboot answers without a UPID,
-// but it requires an object envelope whose only member is "data". The
-// caller (RebootNode) decides whether the returned data is the documented
-// null response.
+// raw "data" member of the response envelope. It shares the full transport
+// path with call in write.go through doWrite (token, timeout, request
+// construction, size limit, UTF-8, HTTP status mapping, 400 parameter
+// extraction, redirect refusal, and timeout → OutcomeUnknown), with one
+// deliberate difference in data acceptance: it does not reject a null data
+// member, because a node reboot answers without a UPID, but it requires an
+// object envelope whose only member is "data" and rejects a repeated
+// top-level key. The caller (RebootNode) decides whether the returned data
+// is the documented null response.
 func (w *Writer) nodeStatusCall(ctx context.Context, r writeRequest) (json.RawMessage, error) {
-	if err := ctx.Err(); err != nil {
+	raw, err := w.doWrite(ctx, r)
+	if err != nil {
 		return nil, err
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, w.timeout)
-	defer cancel()
-
-	tok, err := w.token(reqCtx)
-	if err != nil {
-		return nil, &WriteError{Op: r.op, Reason: ReasonNoToken}
-	}
-	var body io.Reader
-	if r.form != nil {
-		body = strings.NewReader(r.form.Encode())
-	}
-	req, err := http.NewRequestWithContext(reqCtx, r.method, w.base+apiRoot+r.path, body)
-	if err != nil {
-		return nil, &WriteError{Op: r.op, Reason: ReasonTransport}
-	}
-	req.Header.Set("Authorization", tok)
-	req.Header.Set("Accept", "application/json")
-	if r.form != nil {
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	}
-
-	resp, err := w.http.Do(req)
-	if err != nil {
-		if cerr := ctx.Err(); cerr != nil {
-			return nil, &WriteError{Op: r.op, Reason: ReasonTransport, cause: cerr}
-		}
-		if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
-			return nil, &WriteError{Op: r.op, Reason: ReasonTimeout, cause: context.DeadlineExceeded}
-		}
-		return nil, &WriteError{Op: r.op, Reason: ReasonTransport}
-	}
-	defer resp.Body.Close()
-
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, MaxWriteResponseBytes+1))
-	if resp.StatusCode != http.StatusOK {
-		e := &WriteError{Op: r.op, Reason: ReasonHTTPError, Status: resp.StatusCode}
-		if resp.StatusCode == http.StatusBadRequest && readErr == nil && len(raw) <= MaxWriteResponseBytes {
-			e.Params = rejectedParams(raw, r.form)
-		}
-		return nil, e
-	}
-	if readErr != nil {
-		return nil, &WriteError{Op: r.op, Reason: ReasonTransport}
-	}
-	if len(raw) > MaxWriteResponseBytes {
-		return nil, &WriteError{Op: r.op, Reason: ReasonOversize}
-	}
-	if !utf8.Valid(raw) {
-		return nil, &WriteError{Op: r.op, Reason: ReasonInvalidUTF8}
+	// A repeated top-level key is not the documented answer: the map below
+	// keeps only the last value, so {"data":"UPID:…","data":null} would
+	// otherwise read as the null success response.
+	if duplicateTopLevelKeys(raw) {
+		return nil, &WriteError{Op: r.op, Reason: ReasonSchema}
 	}
 	// The envelope must be an object whose only member is "data": a bare
 	// null, an empty object, or an error-shaped body ("errors", "message")
@@ -121,4 +80,41 @@ func (w *Writer) nodeStatusCall(ctx context.Context, r writeRequest) (json.RawMe
 		return nil, &WriteError{Op: r.op, Reason: ReasonSchema}
 	}
 	return data, nil
+}
+
+// duplicateTopLevelKeys reports whether raw is a JSON object that repeats a
+// top-level key name. Decoding such an object into a map keeps only the last
+// value, so a hostile {"data":"UPID:…","data":null} envelope must be
+// rejected before the map decode. Non-object or malformed input reports
+// false; the caller's unmarshal fails on it with its own reason.
+func duplicateTopLevelKeys(raw []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return false
+	}
+	d, ok := tok.(json.Delim)
+	if !ok || d != '{' {
+		return false
+	}
+	seen := make(map[string]struct{})
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return false
+		}
+		if _, dup := seen[key]; dup {
+			return true
+		}
+		seen[key] = struct{}{}
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return false
+		}
+	}
+	return false
 }
