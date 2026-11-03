@@ -622,7 +622,8 @@ all the displayed additions and changes at once. Before committing, the
 executor rehashes the trust store and compares its generation, so a file
 swapped or a concurrent change is refused. For each old version you decide
 to keep it (`--pin name@version`) or retire it (`--retire name@version`);
-retirement revokes any read grant that covered it. The flow is CLI-only in
+retirement revokes any authority that covered it — permits and grants —
+and never retargets it to the new bytes. The flow is CLI-only in
 both modes — there is no browser bulk-trust endpoint — and the individual
 `nebula artifact trust`/`untrust` commands still work. Scanner and host
 floors still apply, and the admin UID and every old/new trust tuple are
