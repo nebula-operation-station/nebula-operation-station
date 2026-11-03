@@ -32,6 +32,7 @@ type recordedRequest struct {
 	auth   string
 	ctype  string
 	form   url.Values
+	query  string
 }
 
 // fakeWriteServer answers every request with a fixed status and body and
@@ -49,7 +50,7 @@ func (f *fakeWriteServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.reqs = append(f.reqs, recordedRequest{
 		method: r.Method, path: r.URL.Path, auth: r.Header.Get("Authorization"),
-		ctype: r.Header.Get("Content-Type"), form: form,
+		ctype: r.Header.Get("Content-Type"), form: form, query: r.URL.RawQuery,
 	})
 	status, body := f.status, f.body
 	f.mu.Unlock()

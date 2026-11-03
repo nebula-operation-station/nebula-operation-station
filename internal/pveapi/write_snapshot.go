@@ -4,6 +4,8 @@ package pveapi
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -46,14 +48,18 @@ func validWriteSnapshotName(name string) bool {
 }
 
 // validSnapshotDescription reports whether desc is a snapshot description we
-// may send (ADR 0006 P2-01): at most MaxSnapshotDescriptionChars characters
-// and no control characters.
+// may send (ADR 0006 P2-01): valid UTF-8, at most MaxSnapshotDescriptionChars
+// characters (runes, not bytes), no control characters (Cc) and no format
+// characters (Cf, e.g. bidi overrides such as U+202E or zero-width marks)
+// and no line or paragraph separators (U+2028, U+2029), since the
+// description is later shown in the UI.
 func validSnapshotDescription(desc string) bool {
-	if utf8.RuneCountInString(desc) > MaxSnapshotDescriptionChars {
+	if !utf8.ValidString(desc) || utf8.RuneCountInString(desc) > MaxSnapshotDescriptionChars {
 		return false
 	}
 	for _, r := range desc {
-		if unicode.IsControl(r) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) ||
+			unicode.In(r, unicode.Zl, unicode.Zp) {
 			return false
 		}
 	}
@@ -136,28 +142,118 @@ func (w *Writer) DeleteSnapshot(ctx context.Context, kind GuestKind, node string
 		node, wantType, strconv.FormatInt(vmid, 10))
 }
 
-// RollbackSnapshot rolls a guest back to a snapshot by exact name and returns
-// the UPID of the rollback task (qmrollback for QEMU, vzrollback for LXC). The
-// start flag is always sent explicitly (start=1/0) so the post-rollback power
-// state is never left to a default.
-func (w *Writer) RollbackSnapshot(ctx context.Context, kind GuestKind, node string, vmid int64, name string, start bool) (string, error) {
-	const op = "snapshot-rollback"
-	path, err := guestKindPath(op, kind, node, vmid)
-	if err != nil {
-		return "", err
+// ErrSnapshotNotFound reports that the exact snapshot named for a rollback
+// is not in the guest's snapshot list.
+var ErrSnapshotNotFound = errors.New("pveapi: snapshot not found")
+
+// SnapshotRollbackPlan is the checked input of RollbackSnapshot. It is built
+// only by Client.PlanSnapshotRollback, which reads the snapshot's RAM flag
+// with the read token (ADR 0006: prechecks use the read token) so the
+// rollback's power-state side effect is known before anything is sent. A
+// zero or hand-built plan is refused by RollbackSnapshot.
+type SnapshotRollbackPlan struct {
+	// Kind is the guest family (QEMU or LXC).
+	Kind GuestKind
+	// Node is the node holding the guest.
+	Node string
+	// VMID is the guest.
+	VMID int64
+	// Name is the exact snapshot name.
+	Name string
+	// Start is the requested start flag, always sent explicitly (start=1/0).
+	Start bool
+	// HasVMState reports that the snapshot includes RAM (vmstate). Only a
+	// QEMU snapshot can include RAM.
+	HasVMState bool
+	// GuestRunsAfter reports whether the guest will be running after a
+	// successful rollback. It is true when Start is set, and also for a
+	// QEMU snapshot with RAM: PVE resumes such a guest from the saved RAM
+	// regardless of start, so start=0 is not honoured there. Callers that
+	// present the rollback for approval must show this side effect.
+	GuestRunsAfter bool
+	// checked is set only by PlanSnapshotRollback.
+	checked bool
+}
+
+// PlanSnapshotRollback checks a rollback before it is dispatched: it
+// validates the arguments, reads the guest's snapshot list with the read
+// token and finds the exact snapshot to learn whether it includes RAM. A
+// missing snapshot returns ErrSnapshotNotFound; a read failure returns
+// ErrUnavailable. Nothing is mutated.
+func (c *Client) PlanSnapshotRollback(ctx context.Context, kind GuestKind, node string, vmid int64, name string, start bool) (SnapshotRollbackPlan, error) {
+	const op = "snapshot-rollback-plan"
+	if _, err := guestKindPath(op, kind, node, vmid); err != nil {
+		return SnapshotRollbackPlan{}, err
 	}
 	if !validWriteSnapshotName(name) {
-		return "", invalid(op, "name")
+		return SnapshotRollbackPlan{}, invalid(op, "name")
+	}
+	list, err := c.ListSnapshots(ctx, node, string(kind), vmid)
+	if err != nil {
+		return SnapshotRollbackPlan{}, err
+	}
+	for _, s := range list.Snapshots {
+		if s.Name != name {
+			continue
+		}
+		if s.HasVMState && kind != GuestQEMU {
+			// PVE has no RAM snapshots for containers; a flag here is
+			// a response we do not understand.
+			return SnapshotRollbackPlan{}, schemaErr(fmt.Sprintf("/nodes/%s/%s/%d/snapshot", node, kind, vmid))
+		}
+		return SnapshotRollbackPlan{
+			Kind: kind, Node: node, VMID: vmid, Name: name, Start: start,
+			HasVMState:     s.HasVMState,
+			GuestRunsAfter: start || s.HasVMState,
+			checked:        true,
+		}, nil
+	}
+	return SnapshotRollbackPlan{}, fmt.Errorf("%w: %s", ErrSnapshotNotFound, name)
+}
+
+// RollbackResult is the outcome of dispatching a rollback.
+type RollbackResult struct {
+	// UPID is the rollback task (qmrollback for QEMU, vzrollback for LXC).
+	UPID string
+	// HasVMState and GuestRunsAfter repeat the plan's side effects, so the
+	// result records them next to the task.
+	HasVMState bool
+	// GuestRunsAfter reports whether the guest will run after the rollback
+	// (see SnapshotRollbackPlan.GuestRunsAfter).
+	GuestRunsAfter bool
+}
+
+// RollbackSnapshot rolls a guest back to a snapshot by exact name, using a
+// plan from Client.PlanSnapshotRollback, and returns the UPID of the rollback
+// task with the plan's side effects. The start flag is always sent explicitly
+// (start=1/0). For a QEMU snapshot that includes RAM, PVE starts (resumes)
+// the guest even with start=0; the plan and result report this as
+// GuestRunsAfter instead of hiding it.
+func (w *Writer) RollbackSnapshot(ctx context.Context, plan SnapshotRollbackPlan) (RollbackResult, error) {
+	const op = "snapshot-rollback"
+	if !plan.checked {
+		return RollbackResult{}, invalid(op, "plan")
+	}
+	path, err := guestKindPath(op, plan.Kind, plan.Node, plan.VMID)
+	if err != nil {
+		return RollbackResult{}, err
+	}
+	if !validWriteSnapshotName(plan.Name) {
+		return RollbackResult{}, invalid(op, "name")
 	}
 	wantType := "qmrollback"
-	if kind == GuestLXC {
+	if plan.Kind == GuestLXC {
 		wantType = "vzrollback"
 	}
 	startVal := "0"
-	if start {
+	if plan.Start {
 		startVal = "1"
 	}
 	form := url.Values{"start": {startVal}}
-	return w.dispatch(ctx, writeRequest{op: op, method: http.MethodPost, path: path + "/snapshot/" + url.PathEscape(name) + "/rollback", form: form},
-		node, wantType, strconv.FormatInt(vmid, 10))
+	upid, err := w.dispatch(ctx, writeRequest{op: op, method: http.MethodPost, path: path + "/snapshot/" + url.PathEscape(plan.Name) + "/rollback", form: form},
+		plan.Node, wantType, strconv.FormatInt(plan.VMID, 10))
+	if err != nil {
+		return RollbackResult{}, err
+	}
+	return RollbackResult{UPID: upid, HasVMState: plan.HasVMState, GuestRunsAfter: plan.GuestRunsAfter}, nil
 }
