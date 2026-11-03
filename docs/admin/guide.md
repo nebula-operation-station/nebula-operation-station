@@ -656,20 +656,28 @@ and the declared risk, labelled `built-in release <version>` in `nebula
 artifact list`. Nothing else is trusted — no version range, no other
 bytes — and unchanged modules keep the entries they got when they were
 committed. The store commit happens only after the executor has checked
-these entries and has already revoked the trust of every version you
-retire, so a failure never leaves a retired version trusted. If recording
-the new entries fails after the store committed, the command says so: the
-store is committed, the retired versions are untrusted, and none of the
-new entries was recorded, so the new versions stay untrusted for risk
-(HIGH, as before). A re-run of trust-builtins does not add them (the
-modules are now unchanged); trust each action with `nebula artifact trust
---action ID --version X.Y.Z --risk LEVEL FILE`. The
-`builtin_trust_artifacts_failed` audit record lists every entry that was
-revoked and every entry that was not recorded. If revoking the retired
-versions fails, nothing is committed; review and commit again. If the
-store commit itself fails after that revocation, the command names the
-revoked entries; the old versions are still in the store, and you trust
-them again with `nebula artifact trust` if you keep using them.
+these entries, written a pending record of the change (in the trust store
+directory), and revoked the trust of every version you retire, so a
+failure never leaves a retired version trusted. If something fails after
+that, the command prints the exact state and you repair it by running
+`nebula artifact trust-builtins` again — there is no file to find and no
+entry to type by hand:
+
+- *Store committed, new entries not recorded* (`builtin_trust_artifacts_failed`):
+  the retired versions are untrusted and the new versions stay untrusted
+  for risk (HIGH, as before). The next `trust-builtins` run records the
+  listed entries from the pending record before it shows the review.
+- *Store commit failed* (`builtin_trust_store_failed`): the executor puts
+  the revoked entries back at once and nothing has changed; review and
+  commit again. If putting them back fails too, the command lists them and
+  the next `trust-builtins` run restores them.
+- *Revoking failed*: nothing is committed; review and commit again.
+
+Each failure record lists the generation, the retired versions and every
+revoked, restored and unrecorded (action, version, SHA-256, risk) entry;
+the repair is audited as `builtin_trust_pending_recovered`. A corrupt
+pending record blocks the review until you restore the trust store
+directory from backup.
 
 For each old version you decide to keep it (`--pin name@version`) or
 retire it (`--retire name@version`). **Retaining** keeps the old version's

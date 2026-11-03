@@ -155,3 +155,26 @@ func TestApplyBuiltinTrustRejectsMalformedAtomically(t *testing.T) {
 		})
 	}
 }
+
+// BuiltinTrustRows lists exactly the entries a retirement would revoke and
+// writes nothing; a malformed version is rejected.
+func TestBuiltinTrustRowsListsWithoutWriting(t *testing.T) {
+	db := openT(t, privateDir(t))
+	if _, err := db.ApplyBuiltinTrust(BuiltinTrustChange{Trust: []TrustedArtifact{
+		builtinRow(sumA, "docker.restart", "1.0.0", canonical.RiskLow),
+		builtinRow(sumB, "docker.stop", "1.1.0", canonical.RiskLow),
+		builtinRow(sumA, "dockerx.restart", "1.0.0", canonical.RiskLow),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.BuiltinTrustRows([]BuiltinVersion{{Module: "docker", Version: "1.0.0"}})
+	if err != nil || len(rows) != 1 || rows[0].ActionID != "docker.restart" || rows[0].SHA256 != sumA {
+		t.Fatalf("rows = %+v, %v", rows, err)
+	}
+	if list, err := db.ListTrustedArtifacts(); err != nil || len(list) != 3 {
+		t.Fatalf("list = %+v, %v", list, err)
+	}
+	if _, err := db.BuiltinTrustRows([]BuiltinVersion{{Module: "Docker!", Version: "1.0.0"}}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("malformed version err = %v", err)
+	}
+}

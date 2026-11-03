@@ -88,20 +88,31 @@ change) a commit wrote only the store, so built-ins stayed HIGH.
 
 Ordering and failure: the executor first derives and validates the rows
 (`CheckBuiltinTrust`), the manifest digest and the retain/retire decisions
-(`trust.CheckDecisions`), then deletes the retired versions' rows
-(`ApplyBuiltinTrust` with only the retirements), then commits the store,
-then applies the rows (retiring again in the same transaction). Revoking
-before the store commit is fail closed: no failure leaves a retired version
-trusted while the store no longer lists it (previously the rows were
-deleted only after the store commit, so a failure there kept them, and a
-re-run could not repair it because the modules were then unchanged). If
-the revocation fails, nothing is committed. If the store commit fails after
-it, the error names the revoked rows. If applying fails after the store
-committed, `CommitBuiltinTrust` returns `FailedPrecondition`
-(`*BuiltinArtifactTrustError`, `errors.Is` `ErrBuiltinArtifactTrust`) and
-audits `builtin_trust_artifacts_failed` with the generation, the retired
-versions, the revoked rows and the rows not recorded; the new versions stay
-at the untrusted floor (fail closed) and can be trusted per action.
+(`trust.CheckDecisions`), lists the rows the retirement will delete
+(`BuiltinTrustRows`) and writes a write-ahead record
+(`trust.PendingFile` in the store directory: base generation, digest, the
+change and those rows). Then it deletes the retired versions' rows,
+commits the store, applies the rows (retiring again in the same
+transaction) and removes the record. Revoking before the store commit is
+fail closed: no failure leaves a retired version trusted while the store
+no longer lists it (previously, in round 1 of this change, the rows were
+deleted only after the store commit, and before that a re-run could not
+repair a failure because the modules were then unchanged).
+
+Failures after the revoke return `*BuiltinTrustCommitError` and are
+audited. Store commit failed (`ErrBuiltinTrustStoreCommit`, audit
+`builtin_trust_store_failed`): the revoked rows are re-inserted at once;
+if that fails the record stays. Apply failed after the store committed
+(`ErrBuiltinArtifactTrust`, audit `builtin_trust_artifacts_failed`): the
+new versions stay at the untrusted floor and the record stays. The next
+`ReviewBuiltinTrust` resolves a record first (audit
+`builtin_trust_pending_recovered`): store still at the base generation →
+restore the rows; store's active versions are the record's new versions →
+apply the change; otherwise → repeat only the retirements (fail closed).
+`CommitBuiltinTrust` refuses while a record exists. Recovery therefore
+needs no artifact file: module artifacts are built by the executor
+(`modulelock.Artifact`, prelude plus script) and are not exported anywhere
+an admin could pass to `nebula artifact trust`.
 
 Wiring: `cmd/nebula-executor` calls `Service.SetBuiltinTrust` with
 `NewDirBuiltinTrust(<-builtin-trust-dir, default <data-dir>/trust>,

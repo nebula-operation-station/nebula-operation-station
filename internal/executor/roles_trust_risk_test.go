@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,7 +17,9 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executor/trust"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/release"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
@@ -289,7 +293,10 @@ type failingArtifacts struct {
 	failCheck, failApply bool
 	// failTrustApply fails only an apply that records trust entries.
 	failTrustApply bool
-	applied        int
+	// failRestore fails only an apply that records entries and retires
+	// nothing (a restore of revoked entries).
+	failRestore bool
+	applied     int
 }
 
 func (f *failingArtifacts) CheckBuiltinTrust(c executordb.BuiltinTrustChange) error {
@@ -301,7 +308,7 @@ func (f *failingArtifacts) CheckBuiltinTrust(c executordb.BuiltinTrustChange) er
 
 func (f *failingArtifacts) ApplyBuiltinTrust(c executordb.BuiltinTrustChange) ([]executordb.TrustedArtifact, error) {
 	f.applied++
-	if f.failApply || (f.failTrustApply && len(c.Trust) > 0) {
+	if f.failApply || (f.failTrustApply && len(c.Trust) > 0) || (f.failRestore && len(c.Trust) > 0 && len(c.Retire) == 0) {
 		return nil, errors.New("disk full")
 	}
 	return f.DB.ApplyBuiltinTrust(c)
@@ -381,6 +388,7 @@ func TestBuiltinTrustApplyFailureAfterRetireLeavesRetiredUntrusted(t *testing.T)
 		t.Fatal(err)
 	}
 	_, err = adminCommitReq(t, s, &pb.CommitBuiltinTrustRequest{ManifestDigest: rev2.ManifestDigest, Retire: []string{"docker@1.0.0"}})
+	commitErr := err
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("commit err = %v", err)
 	}
@@ -414,6 +422,139 @@ func TestBuiltinTrustApplyFailureAfterRetireLeavesRetiredUntrusted(t *testing.T)
 	if r := auditStrings(t, recs[0], "untrusted"); len(r) == 0 || !strings.Contains(strings.Join(r, " "), "docker.restart@1.1.0") {
 		t.Fatalf("audit untrusted = %v", r)
 	}
+	if !strings.Contains(commitErr.Error(), "docker.restart@1.1.0 "+restartArtifact(t, rev2)) {
+		t.Fatalf("error does not name the unrecorded entry: %v", commitErr)
+	}
+
+	// The next review completes the pending trust: the new version is
+	// trusted, the retired one stays revoked.
+	e.bt.artifacts = e.db
+	if _, err := adminReview(t, s); err != nil {
+		t.Fatal(err)
+	}
+	if got := minimumRisk(t, e.db, "docker.restart", "1.1.0", restartArtifact(t, rev2)); got != canonical.RiskLow {
+		t.Fatalf("after recovery: new version floor %s, want LOW", got)
+	}
+	if got := minimumRisk(t, e.db, "docker.restart", "1.0.0", oldSum); got != riskpolicy.UntrustedFloor {
+		t.Fatalf("after recovery: retired version floor %s", got)
+	}
+	rec := auditLines(t, &buf, "builtin_trust_pending_recovered")
+	if len(rec) != 1 || rec[0]["outcome"] != "completed" {
+		t.Fatalf("recovery audit = %v", rec)
+	}
+	assertNoPending(t, e)
+}
+
+// A corrupt pending record blocks the review instead of being guessed at.
+func TestBuiltinTrustCorruptPendingBlocksReview(t *testing.T) {
+	e := newBundleEnv(t)
+	s := e.service()
+	if err := trust.WritePending(e.storeDir, []byte(`{"format":9}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adminReview(t, s); status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "corrupt") {
+		t.Fatalf("review err = %v", err)
+	}
+}
+
+// assertNoPending checks that no pending record is left.
+func assertNoPending(t *testing.T, e *bundleEnv) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(e.storeDir, trust.PendingFile)); !os.IsNotExist(err) {
+		t.Fatalf("pending record left: %v", err)
+	}
+}
+
+// failStoreCommit makes the committing store BulkAdmit fail with a quota
+// error after the retired versions' trust was revoked.
+func failStoreCommit(e *bundleEnv) {
+	e.bt.commitStore = func(*trust.Store, release.Candidate, trust.BulkAdmitOpts) (trust.BulkAdmitResult, error) {
+		return trust.BulkAdmitResult{}, fmt.Errorf("%w: disk quota", trust.ErrQuota)
+	}
+}
+
+// A store commit that fails after the retired versions' trust was revoked
+// restores the revoked entries, reports the state and audits it.
+func TestBuiltinTrustStoreCommitFailureRestoresRevoked(t *testing.T) {
+	e := newBundleEnv(t)
+	recordLowHost(t, e.db)
+	s := e.service()
+	rev1, _ := reviewAndCommit(t, s, nil, nil)
+	oldSum := restartArtifact(t, rev1)
+	gen := e.storeGeneration(t)
+
+	writeDockerBundle(t, e.k, e.bundleDir, "2026.12.0", "1.1.0", "echo restart v2\n")
+	failStoreCommit(e)
+	var buf bytes.Buffer
+	s.log = slog.New(slog.NewJSONHandler(&buf, nil))
+	rev2, err := adminReview(t, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = adminCommitReq(t, s, &pb.CommitBuiltinTrustRequest{ManifestDigest: rev2.ManifestDigest, Retire: []string{"docker@1.0.0"}})
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("commit err = %v", err)
+	}
+	if g := e.storeGeneration(t); g != gen {
+		t.Fatalf("store generation %d, want %d", g, gen)
+	}
+	if got := minimumRisk(t, e.db, "docker.restart", "1.0.0", oldSum); got != canonical.RiskLow {
+		t.Fatalf("old version floor %s, want LOW (restored)", got)
+	}
+	recs := auditLines(t, &buf, "builtin_trust_store_failed")
+	if len(recs) != 1 || recs[0]["restored"] != true || recs[0]["store_committed"] != false {
+		t.Fatalf("store failure audit = %v (%s)", recs, buf.String())
+	}
+	if r := auditStrings(t, recs[0], "revoked"); len(r) == 0 || !strings.Contains(strings.Join(r, " "), oldSum) {
+		t.Fatalf("audit revoked = %v", r)
+	}
+	if !strings.Contains(err.Error(), "nothing changed") {
+		t.Fatalf("commit err = %v", err)
+	}
+	assertNoPending(t, e)
+}
+
+// If the revoked entries cannot be restored after a failed store commit,
+// the error says so and the next review restores them.
+func TestBuiltinTrustStoreCommitFailureReviewRestores(t *testing.T) {
+	e := newBundleEnv(t)
+	recordLowHost(t, e.db)
+	s := e.service()
+	rev1, _ := reviewAndCommit(t, s, nil, nil)
+	oldSum := restartArtifact(t, rev1)
+
+	writeDockerBundle(t, e.k, e.bundleDir, "2026.12.0", "1.1.0", "echo restart v2\n")
+	failStoreCommit(e)
+	e.bt.artifacts = &failingArtifacts{DB: e.db, failRestore: true}
+	var buf bytes.Buffer
+	s.log = slog.New(slog.NewJSONHandler(&buf, nil))
+	rev2, err := adminReview(t, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = adminCommitReq(t, s, &pb.CommitBuiltinTrustRequest{ManifestDigest: rev2.ManifestDigest, Retire: []string{"docker@1.0.0"}})
+	if status.Code(err) != codes.ResourceExhausted || !strings.Contains(err.Error(), "could not be restored") ||
+		!strings.Contains(err.Error(), "nebula artifact trust-builtins") || !strings.Contains(err.Error(), oldSum) {
+		t.Fatalf("commit err = %v", err)
+	}
+	if got := minimumRisk(t, e.db, "docker.restart", "1.0.0", oldSum); got != riskpolicy.UntrustedFloor {
+		t.Fatalf("old version floor %s, want %s (revoked, not restored)", got, riskpolicy.UntrustedFloor)
+	}
+	if recs := auditLines(t, &buf, "builtin_trust_store_failed"); len(recs) != 1 || recs[0]["restored"] != false {
+		t.Fatalf("store failure audit = %v", recs)
+	}
+
+	e.bt.artifacts, e.bt.commitStore = e.db, nil
+	if _, err := adminReview(t, s); err != nil {
+		t.Fatal(err)
+	}
+	if got := minimumRisk(t, e.db, "docker.restart", "1.0.0", oldSum); got != canonical.RiskLow {
+		t.Fatalf("after recovery: old version floor %s, want LOW", got)
+	}
+	if rec := auditLines(t, &buf, "builtin_trust_pending_recovered"); len(rec) != 1 || rec[0]["outcome"] != "restored" {
+		t.Fatalf("recovery audit = %v", rec)
+	}
+	assertNoPending(t, e)
 }
 
 // A failure to revoke the retired versions commits nothing: the store and

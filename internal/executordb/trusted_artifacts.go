@@ -95,6 +95,28 @@ func (db *DB) ApplyBuiltinTrust(c BuiltinTrustChange) ([]TrustedArtifact, error)
 	return revoked, nil
 }
 
+// BuiltinTrustRows returns every entry a retirement of vs would delete
+// (whoever trusted it), without writing.
+func (db *DB) BuiltinTrustRows(vs []BuiltinVersion) ([]TrustedArtifact, error) {
+	if _, err := checkBuiltinTrust(BuiltinTrustChange{Retire: vs}); err != nil {
+		return nil, err
+	}
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("executordb: list built-in trust: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }() // read-only
+	var out []TrustedArtifact
+	for _, v := range vs {
+		rows, err := retiredRows(tx, v)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rows...)
+	}
+	return out, nil
+}
+
 // retiredRows lists the entries a retirement of v deletes, ordered by
 // action and artifact.
 func retiredRows(tx *sql.Tx, v BuiltinVersion) ([]TrustedArtifact, error) {

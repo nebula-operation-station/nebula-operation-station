@@ -80,6 +80,26 @@ type BulkAdmitResult struct {
 	// revoked. BulkAdmit leaves both empty; the executor's trust
 	// transaction fills them after recording ArtifactTrustFor.
 	ArtifactsTrusted, ArtifactsRevoked []ArtifactTuple
+	// Recovered is the pending artifact trust of an interrupted commit
+	// that the executor completed or undid before this review; nil if
+	// there was none.
+	Recovered *PendingRecovery
+}
+
+// PendingRecovery is how the executor resolved the pending artifact trust
+// of an interrupted built-in trust commit.
+type PendingRecovery struct {
+	// Outcome is "completed" (the store had committed: the new entries
+	// were recorded and the retirements repeated), "restored" (the store
+	// had not committed: the revoked entries were restored) or "retired"
+	// (the store state was ambiguous: only the retirements were repeated).
+	Outcome string
+	// BaseGeneration is the store generation the pending commit started
+	// from.
+	BaseGeneration int64
+	// Trusted, Revoked and Restored are the entries recorded, revoked and
+	// restored.
+	Trusted, Revoked, Restored []ArtifactTuple
 }
 
 // BulkAdmit reviews a verified candidate, scans its new/changed actions,
