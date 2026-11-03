@@ -155,6 +155,10 @@ type chartData struct {
 	PVENodes []pveNodeView
 	// PVEUnavailable is true when the PVE tree could not be read.
 	PVEUnavailable bool
+	// Staged is the staged OS update section (ADR 0006, P2-02 part
+	// 2): the selection form on the chart page, or the frozen host
+	// list on the confirmation page. Nil hides the section.
+	Staged *stagedUpdateData
 }
 
 // pveNodeView is one PVE node box in the org chart, with its guest and
@@ -614,6 +618,10 @@ func (h *Handler) handleInventoryChart(w http.ResponseWriter, r *http.Request) {
 	b := h.batchData(ctx)
 	res := h.loadChartResults(ctx)
 	data.Chart = &chartData{Hosts: h.chartHosts(ctx, hosts, pins, pinsUnavailable, b, res)}
+	// Staged OS update selection (ADR 0006, P2-02 part 2): one
+	// checkbox per enrolled managed host; hidden when operations are
+	// off or enrollment cannot be determined.
+	data.Chart.Staged = h.stagedUpdateSection(hosts, pins, pinsUnavailable)
 	// PVE section: node boxes with guest and storage (datastore)
 	// children. A nil provider hides the section; an error shows
 	// "PVE unavailable" (the detail goes to the log only).
