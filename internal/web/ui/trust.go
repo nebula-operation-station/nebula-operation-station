@@ -66,6 +66,10 @@ type builtinTrustView struct {
 	// Command is the local CLI command, shown in <code>; empty when the
 	// state is not untrusted.
 	Command string
+	// Limitation says what Command does not do today: it does not change
+	// the executor's risk decisions (docs/admin/guide.md section 8.2).
+	// Empty when Command is.
+	Limitation string
 	// Affected lists the built-ins whose current state is not trusted.
 	Affected []builtinTrustEntryView
 	// Detail is the closing guidance sentence.
@@ -98,6 +102,7 @@ func unavailableBuiltinTrust() *builtinTrustView {
 // builtinTrustBanner maps the executor's built-in trust status to the
 // layout banner (ADR 0007 E17). A fully trusted status yields nil (no
 // banner). Untrusted names the affected modules, the local CLI command
+// (run with sudo), that the command does not change risk decisions today,
 // and the lease-replacement rule. Unavailable is a distinct
 // "unreachable" state: it is not a trust verdict and names no versions.
 //
@@ -110,9 +115,14 @@ func builtinTrustBanner(st *pb.GetBuiltinTrustStatusResponse) *builtinTrustView 
 	case pb.BuiltinTrustState_BUILTIN_TRUST_STATE_UNTRUSTED:
 		v := &builtinTrustView{
 			Kind:     "untrusted",
-			Headline: "Built-ins are untrusted: every operation using them needs UV until you trust them.",
-			Command:  "nebula artifact trust-builtins",
-			Detail:   "Trusting new built-in versions does not amend existing read leases: approve a replacement grant for those exact versions.",
+			Headline: "Built-ins are untrusted: the executor's built-in trust store does not cover the built-ins of the installed release.",
+			Command:  "sudo nebula artifact trust-builtins --bundle DIR",
+			// The risk policy reads only the per-action trust in the
+			// executor database; trust-builtins writes the separate
+			// built-in trust store, so it must not promise that the
+			// user-verified approval goes away.
+			Limitation: "Today this does not change risk decisions: operations using these built-ins still need a user-verified approval until their actions are trusted one by one with nebula artifact trust. See docs/admin/guide.md section 8.2.",
+			Detail:     "Trusting new built-in versions does not amend existing read leases: approve a replacement grant for those exact versions.",
 		}
 		omitted := 0
 		for _, m := range st.GetModules() {

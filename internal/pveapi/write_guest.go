@@ -30,6 +30,30 @@ func guestPath(op, node string, vmid int64) (string, error) {
 	return "/nodes/" + url.PathEscape(node) + "/qemu/" + strconv.FormatInt(vmid, 10), nil
 }
 
+// Guest kinds for the power operations; the GuestKind type is shared with
+// the read path (inventory.go).
+const (
+	// GuestQEMU is a QEMU/KVM virtual machine.
+	GuestQEMU = KindQemu
+	// GuestLXC is an LXC container.
+	GuestLXC = KindLxc
+)
+
+// guestKindPath returns the escaped API path of one guest of the given kind
+// after validating kind, node and VMID.
+func guestKindPath(op string, kind GuestKind, node string, vmid int64) (string, error) {
+	if validGuestKind(string(kind)) != nil {
+		return "", invalid(op, "kind")
+	}
+	if validNodeName(node) != nil {
+		return "", invalid(op, "node")
+	}
+	if validVMID(vmid) != nil {
+		return "", invalid(op, "vmid")
+	}
+	return "/nodes/" + url.PathEscape(node) + "/" + string(kind) + "/" + strconv.FormatInt(vmid, 10), nil
+}
+
 // CloneRequest is a full clone of a QEMU template or guest on the same node
 // (POST /nodes/{node}/qemu/{vmid}/clone). Linked clones are not offered.
 type CloneRequest struct {
