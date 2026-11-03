@@ -380,10 +380,12 @@ mitigations M1 and M2.
   alone is not sufficient.
 - **M2, `VM.Audit` precondition.** At proposal time, and again right
   before the config step, the executor reads the effective ACLs for the
-  target path (`/vms/<vmid>`, `/vms`, `/`, and the target pool) through the
+  target path (`/vms/<vmid>`, `/vms`, `/`, the target pool, and the snippet
+  storage `/storage/<snippets>`) through the
   read token (`GET /access/acl` needs `Sys.Audit` on `/access`, which the
   read token's `Sys.Audit` on `/` propagates to, *verify*). `preset` is
-  offered only if every principal with `VM.Audit` there is the NOS read
+  offered only if every principal with `VM.Audit` (or, on the snippet
+  storage, `Datastore.Audit`) there is the NOS read
   token, the NOS action token or `root@pam` (previously also holders of a
   role with `VM.Console`; removed, because console access alone neither
   gives root in a cloud-image guest nor lets the holder impersonate it, so
@@ -395,10 +397,14 @@ mitigations M1 and M2.
 
 ### If the lab check fails
 
-If PK-10a shows that `cloudinit/dump` (or another `VM.Audit` endpoint)
-returns the snippet content **and** M2 cannot be implemented reliably
-(ACL read not permitted, roles not resolvable), then (c) is not viable as
-specified. The maintainer then chooses among:
+If M1 and M2 cannot both hold, (c) is not viable as specified. That is the
+case when PK-10a shows any of: M2 cannot be implemented reliably (ACL read
+not permitted, roles not resolvable); M1 does not work (for example,
+clearing `cicustom` regenerates the cloud-init drive before cloud-init has
+read it, or the snippet cannot be removed in time); or a `VM.Audit` or
+`Datastore.Audit` endpoint returns the snippet content in a way M1 and M2
+do not cover. (Previously: only when dump exposure was confirmed and M2
+could not be built.) The maintainer then chooses among:
 
 1. Review stays the only method (status quo, decision 1); the PK tickets
    are closed except the documentation of this finding.
@@ -413,7 +419,9 @@ specified. The maintainer then chooses among:
 ### Decision
 
 Decisions 1–9 apply only once the amendment is accepted, and only with
-M1 and M2 (or with a PK-10a result that makes M2 unnecessary).
+M1 and M2 together; a PK-10a result can make (c) not viable, but it can
+never waive M1 or M2 (previously: "or with a PK-10a result that makes M2
+unnecessary").
 
 1. **Method bound in the permit.** At proposal time the executor decides
    the host-key method, `preset` or `review`, and binds it into the
@@ -553,7 +561,7 @@ to rotation.
 | Executor memory | From generation until the snippet write returns | Executor process (already holds every SSH key) | Never persisted; same "stated limit" as spec 06 |
 | SSH channel to the node | Snippet write | Nobody outside the pinned, authenticated node session | stdin, not argv (not visible in `ps`) |
 | Snippet file on the node | From write until early cleanup (seconds to minutes) | Root on that node; admins of the storage if it were shared; node filesystem backups | Node-local storage only: registry refuses shared types (nfs, cifs, cephfs, glusterfs, pbs) **and** any storage flagged `shared 1`; the put action refuses a network filesystem; mode 0600; M1 |
-| **PVE API: `cloudinit/dump` and any storage read of the snippet (*verify*, PK-10a)** | While `cicustom` is set and the snippet exists | Worst case: every `VM.Audit` holder on the guest, including the NOS read token and read-only users or monitoring | M2 refuses `preset` when a `VM.Audit` holder exists who does not already control the guest; M1 shortens the window; executor never calls the endpoint for preset guests |
+| **PVE API: `cloudinit/dump` and any storage read of the snippet (*verify*, PK-10a)** | While `cicustom` is set and the snippet exists | Worst case: every `VM.Audit` holder on the guest, including the NOS read token and read-only users or monitoring | M2 refuses `preset` when any principal other than the NOS tokens and `root@pam` holds `VM.Audit` on the guest path or `Datastore.Audit` on the snippet storage (`/storage/<snippets>`); M1 shortens the window; executor never calls the endpoint for preset guests |
 | Generated cloud-init drive (`vm-<vmid>-cloudinit`) on VM storage | Until the next regeneration after cleanup | Root on the node, storage admins; PVE users able to attach that volume elsewhere (*verify* ACL) | Rotation limits later use; vzdump skips cloud-init drives (*verify*) |
 | Guest: `/etc/ssh`, `/var/lib/cloud/instance/vendor-data.txt*`, CD-ROM device | Until rotation; the cache until the bootstrap cleanup step | Guest root; members of group `cdrom` while the drive is attached (the Ubuntu default user is one, and is a sudoer anyway) | Rotation; bootstrap removes the cached vendor-data |
 | PVE config, `/etc/pve`, config reads, read-token spool | Always | Only the `cicustom` reference, no key material | — |

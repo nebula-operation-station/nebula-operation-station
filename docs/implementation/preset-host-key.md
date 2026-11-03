@@ -16,8 +16,9 @@ tickets below are dropped (see the amendment, "If the lab check fails").
   through the PVE node's SSH enrollment into an operator-provisioned,
   node-local snippet storage. It references the snippet with
   `cicustom: vendor=…`.
-- `preset` is offered only if no principal besides NOS's tokens, `root@pam`
-  and console-capable roles holds `VM.Audit` on the guest path (M2), and
+- `preset` is offered only if no principal besides NOS's tokens and
+  `root@pam` holds `VM.Audit` on the guest path or `Datastore.Audit` on the
+  snippet storage (M2), and
   `cicustom` plus the snippet are removed as soon as the start task returns
   (M1).
 - The join pins the recorded public key before first contact. A mismatch
@@ -48,7 +49,7 @@ Protected paths (`.github/protected-paths.txt`) are marked **P**.
 
 | Ticket | Scope | Files | Acceptance tests | Depends on |
 | --- | --- | --- | --- | --- |
-| PK-00 | Maintainer accepts amendment 1 (or records it as not viable) after PK-10a and answers its open questions. Spec revision: spec 06 (transient guest host key custody: never at rest on the executor), spec 07/11 (snippet put/remove node action, `cicustom` step, rotation as reserved action, risk unchanged), spec 08 (preset enrollment, rotation re-pin over the pinned channel), spec 16 item 3 (preset as a third way to avoid blind trust) | `docs/spec/*` **P**, ADR status | Spec links resolve; every new authority is listed; the decision records the PK-10a result and whether M1/M2 are required | PK-10a |
+| PK-00 | Maintainer accepts amendment 1 (or records it as not viable) after PK-10a and answers its open questions. Spec revision: spec 06 (transient guest host key custody: never at rest on the executor), spec 07/11 (snippet put/remove node action, `cicustom` step, rotation as reserved action, risk unchanged), spec 08 (preset enrollment, rotation re-pin over the pinned channel), spec 16 item 3 (preset as a third way to avoid blind trust) | `docs/spec/*` **P**, ADR status | Spec links resolve; every new authority is listed; the decision records the PK-10a result; M1 and M2 stay required in every case | PK-10a |
 | PK-01 | `pveapi`: `ConfigRequest.CIVendor` (volume ID `<storage>:snippets/<file>`, storage ID and file name allowlisted, no other `cicustom` parts). Typed `DeleteConfigField` for `cicustom` only. Storage read that returns type, content and nodes. | `internal/pveapi/write_config.go`, `write_config_test.go`, new `write_delete.go` + test | httptest: encoding, rejection of `user=`/`network=`/`meta=`, of path traversal, foreign content type and over-long names; delete refuses any other field; no raw path input | PK-00 |
 | PK-02 | Executor registry: per-remote/node snippet storage (`storage_id`, directory, node's enrolled host ID and fingerprint). Admin CLI `nebula pve snippets set|remove`. Registration verifies over the read token that the storage is type `dir`, has content `snippets` and is available on the node, and refuses shared types (nfs, cifs, cephfs, glusterfs, pbs) and any storage flagged `shared 1`. | `internal/executordb/` **P**, migration, `internal/executor/` **P**, `cmd/nebula/` **P** | Shared type refused; `dir` with `shared 1` refused; mismatched node refused; host link must match a pin; only the admin UID can set or remove; audit without secrets | PK-00, PK-01 |
 | PK-03 | Vendor-data renderer and key generation: a deterministic YAML renderer from typed input only (ed25519 pair, fixed drop-in). The key pair comes from `crypto/ed25519` plus `ssh.MarshalPrivateKey`. A `Secret`-style wrapper never prints the private part. | New `internal/cloudinitseed/` | Golden output (with a fixed test key generated in the test, never a fixture secret); no caller string reaches the YAML; `%v`/JSON redaction; fuzz parse round trip; size limit constant | PK-00 |
