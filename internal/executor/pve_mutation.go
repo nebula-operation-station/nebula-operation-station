@@ -178,6 +178,13 @@ type PveTargetState struct {
 	// ("running", "stopped", ...); untrusted, compared only. Empty if not
 	// reported.
 	Status string
+	// QMPStatus is a QEMU guest's QMP run state ("qmpstatus" of
+	// GET .../status/current: "running", "paused", "suspended", ...);
+	// untrusted, compared only. PVE reports a paused or suspended QEMU
+	// guest with Status "running", so a power action on a QEMU guest
+	// requires this to be "running" too; empty (not reported) fails
+	// closed. Unused for LXC and node targets.
+	QMPStatus string
 }
 
 // PveStepTaskIDer may be implemented by a PveMutationClient. TaskID returns
@@ -384,15 +391,10 @@ func (m *PveMutations) readToken(rm executordb.PveRemote) (pveapi.TokenSupplier,
 	return tok, err
 }
 
-// target builds the exact target of req from the registry and a live read.
-// The caller-selected kind, node and VMID are validated before any read, so
-// a malformed request never causes I/O with a credential.
-func (m *PveMutations) target(ctx context.Context, rm executordb.PveRemote, req PveMutationRequest) (permit.ProviderMutationTarget, error) {
-	t, _, err := m.targetLive(ctx, rm, req)
-	return t, err
-}
-
-// targetLive is target, also returning the live state it was built from.
+// targetLive builds the exact target of req from the registry and a live
+// read, and returns the live state it was built from. The caller-selected
+// kind, node and VMID are validated before any read, so a malformed
+// request never causes I/O with a credential.
 func (m *PveMutations) targetLive(ctx context.Context, rm executordb.PveRemote, req PveMutationRequest) (permit.ProviderMutationTarget, PveTargetState, error) {
 	if err := permit.ValidateProviderMutationShape(req.Kind, req.Node, req.VMID); err != nil {
 		return permit.ProviderMutationTarget{}, PveTargetState{}, ErrPveMutationRequest
