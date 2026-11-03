@@ -96,6 +96,34 @@ func TestProviderMutationClaimReleaseMakesPermitUsableAgain(t *testing.T) {
 	wantCode(t, err, CodeHostAlreadyRun)
 }
 
+// TestProviderMutationStaleClaimReleaseKeepsLaterUse: once a claim was
+// released and the permit authorized again, the stale first claim can no
+// longer release it, so the permit is not usable a third time.
+func TestProviderMutationStaleClaimReleaseKeepsLaterUse(t *testing.T) {
+	e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
+	d := e.approvedMutation(mutationTarget())
+	first, err := e.auth.AuthorizeProviderMutation(d, mutation(mutationTarget()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.Release("target busy") {
+		t.Fatal("release refused")
+	}
+	second, err := e.auth.AuthorizeProviderMutation(d, mutation(mutationTarget()))
+	if err != nil {
+		t.Fatalf("released permit refused: %v", err)
+	}
+	if first.Release("stale") {
+		t.Fatal("stale claim released a later claim's use")
+	}
+	_, err = e.auth.AuthorizeProviderMutation(d, mutation(mutationTarget()))
+	wantCode(t, err, CodeHostAlreadyRun)
+	// The owning claim still can.
+	if !second.Release("target busy") {
+		t.Fatal("owning claim's release refused")
+	}
+}
+
 func TestProviderMutationClaimReleaseRefusedAfterLockOrRevoke(t *testing.T) {
 	cases := map[string]func(*env){
 		"lock":          func(e *env) { e.auth.Lock("admin") },

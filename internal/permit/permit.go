@@ -196,6 +196,10 @@ type Permit struct {
 
 	failed int
 	used   map[string]struct{}
+	// claim is the token of the provider mutation claim that owns the
+	// current use of the permit; 0 if none. Only that claim may release
+	// the use (MutationClaim.Release).
+	claim  uint64
 	stages *stages
 	// staged: the request carried a stage plan document.
 	staged bool
@@ -295,6 +299,8 @@ type Authority struct {
 	// lockEpoch is incremented on lock; a provider mutation claim made
 	// before a lock is void (MutationClaim.Check).
 	lockEpoch uint64
+	// claimSeq numbers provider mutation claims; see Permit.claim.
+	claimSeq uint64
 	// trusts holds browser trust requests until their assertion (M7-4).
 	trusts map[string]*PendingTrust
 

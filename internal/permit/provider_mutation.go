@@ -309,17 +309,21 @@ type MutationClaim struct {
 	hostID     string
 	authority  *Authority
 	epoch      uint64
+	// token ties the claim to the use it made of the permit (Permit.claim).
+	token uint64
 }
 
 // Release makes the claim's permit usable again. The executor calls it only
 // when the run provably dispatched nothing: no step intent was recorded,
 // for example because another mutation of the same target was still open.
 // It fails (false) after a lock since the claim, and for a permit that was
-// revoked, expired or is not approved. It reports whether the permit was
-// released.
+// revoked, expired or is not approved. It also fails unless the current use
+// of the permit is still the one this claim made: a claim releases at most
+// once, and a stale claim never undoes a later claim's use. It reports
+// whether the permit was released.
 func (c MutationClaim) Release(reason string) bool {
 	a := c.authority
-	if a == nil {
+	if a == nil || c.token == 0 {
 		return false
 	}
 	a.mu.Lock()
@@ -327,7 +331,15 @@ func (c MutationClaim) Release(reason string) bool {
 	if c.epoch != a.lockEpoch {
 		return false
 	}
-	return a.releaseHostLocked(c.digest, c.hostID, "provider mutation not dispatched: "+reason)
+	p, ok := a.permits[c.digest]
+	if !ok || p.claim != c.token {
+		return false
+	}
+	if !a.releaseHostLocked(c.digest, c.hostID, "provider mutation not dispatched: "+reason) {
+		return false
+	}
+	p.claim = 0
+	return true
 }
 
 // AuthorizeProviderMutation checks m, rebuilt by the executor from its
@@ -369,7 +381,16 @@ func (a *Authority) AuthorizeProviderMutation(d canonical.Digest, m ProviderMuta
 	if err != nil {
 		return MutationClaim{}, err
 	}
-	return MutationClaim{ExecutionID: g.ExecutionID, Parameters: g.Parameters, digest: d, hostID: target.HostID, authority: a, epoch: epoch}, nil
+	// The use just made belongs to this claim. A stale claim's Release
+	// in between finds no matching token and does nothing.
+	a.mu.Lock()
+	a.claimSeq++
+	token := a.claimSeq
+	if p, ok := a.permits[d]; ok {
+		p.claim = token
+	}
+	a.mu.Unlock()
+	return MutationClaim{ExecutionID: g.ExecutionID, Parameters: g.Parameters, digest: d, hostID: target.HostID, authority: a, epoch: epoch, token: token}, nil
 }
 
 // Check reports whether the claim is still in force: no lock since it was
