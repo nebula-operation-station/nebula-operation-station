@@ -145,8 +145,11 @@ wired it, so `GetBuiltinTrustStatus` always answered UNAVAILABLE.
   generation, every old/new module tuple, every trusted and revoked
   artifact tuple, and the retained, retired and collected versions. No
   script content.
-- Retain keeps the old version's trust rows and protects its bytes from
-  this commit's garbage collection (pins are not persisted). Retire deletes
+- Retain keeps the old version's trust rows and saves a pin in the trust
+  store, so no later commit collects its bytes until the admin runs
+  `nebula artifact unpin name@ver` (admin role, `UnpinBuiltinVersion`,
+  audited as `builtin_trust_unpinned`; deletes and revokes nothing) or
+  retires the version (previously: pins were not persisted). Retire deletes
   the old version's trust rows; because the executor rechecks risk on every
   run, permits, read leases and schedule grants bound to it fall to the
   untrusted floor and stop running at their old risk. They are never

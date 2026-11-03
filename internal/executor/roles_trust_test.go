@@ -49,6 +49,7 @@ type fakeBuiltinTrust struct {
 	statuses int
 	confirms []fakeConfirm
 	commits  []fakeCommit
+	unpins   []string
 }
 
 type fakeConfirm struct {
@@ -90,6 +91,11 @@ func (f *fakeBuiltinTrust) requireConfirmedOnce(t *testing.T) {
 func (f *fakeBuiltinTrust) Commit(_ context.Context, digest string, pins map[string]bool, retired []string, uid int) (trust.BulkAdmitResult, int64, error) {
 	f.commits = append(f.commits, fakeCommit{digest: digest, pins: pins, retired: retired, uid: uid})
 	return f.commit, f.commitGen, f.commitErr
+}
+
+func (f *fakeBuiltinTrust) Unpin(_ context.Context, version string) (int64, []string, error) {
+	f.unpins = append(f.unpins, version)
+	return f.commitGen, nil, f.commitErr
 }
 
 // trustPolicy maps one UID to each role.
@@ -146,6 +152,7 @@ func TestBuiltinTrustMethodRoles(t *testing.T) {
 	methods := map[string][]peercred.Role{
 		pb.ExecutorService_ReviewBuiltinTrust_FullMethodName:    {peercred.RoleAdmin},
 		pb.ExecutorService_CommitBuiltinTrust_FullMethodName:    {peercred.RoleAdmin},
+		pb.ExecutorService_UnpinBuiltinVersion_FullMethodName:   {peercred.RoleAdmin},
 		pb.ExecutorService_GetBuiltinTrustStatus_FullMethodName: {peercred.RoleServer, peercred.RoleAdmin},
 	}
 	roles := []peercred.Role{peercred.RoleServer, peercred.RoleAdmin, peercred.RolePVECollector, peercred.Role("discovery")}

@@ -189,6 +189,11 @@ type BuiltinTrust interface {
 	// retired old versions. It returns the result and the new store generation. Every
 	// call consumes the confirmed review, whether it commits or fails.
 	Commit(ctx context.Context, digest string, pins map[string]bool, retired []string, adminUID int) (trust.BulkAdmitResult, int64, error)
+	// Unpin clears the saved retention pin of version (name@version) and
+	// returns the new store generation and the pins left. It deletes and
+	// revokes nothing; a version that is not pinned is trust.ErrNotPinned.
+	// It consumes any confirmed review, since the generation changes.
+	Unpin(ctx context.Context, version string) (int64, []string, error)
 }
 
 // SetBuiltinTrust wires the built-in trust transaction. It must be called
@@ -561,6 +566,27 @@ func (d *dirBuiltinTrust) Commit(_ context.Context, digest string, pins map[stri
 	return res, st.Generation(), nil
 }
 
+// Unpin implements BuiltinTrust. It needs no bundle: it opens the existing
+// store and clears one saved pin. While a pending record of an interrupted
+// commit exists it refuses, because that record's recovery compares the
+// store generation with the record's base generation.
+func (d *dirBuiltinTrust) Unpin(_ context.Context, version string) (int64, []string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.pending, d.reviewed = nil, nil
+	st, err := trust.OpenExisting(d.storeDir, d.now)
+	if err != nil {
+		return 0, nil, fmt.Errorf("built-in trust: open store: %w", err)
+	}
+	if _, err := trust.ReadPending(d.storeDir); !errors.Is(err, os.ErrNotExist) {
+		return 0, nil, fmt.Errorf("%w: an interrupted commit is pending (%v); run `nebula artifact trust-builtins` first", trust.ErrStale, err)
+	}
+	if err := st.Unpin(version); err != nil {
+		return 0, nil, err
+	}
+	return st.Generation(), st.Pins(), nil
+}
+
 // diskGeneration re-reads the store generation from index.json.
 func (d *dirBuiltinTrust) diskGeneration() (int64, error) {
 	st, err := trust.OpenExisting(d.storeDir, d.now)
@@ -762,6 +788,8 @@ func builtinTrustStatus(err error) error {
 		return status.Error(codes.Aborted, err.Error())
 	case errors.Is(err, trust.ErrQuota):
 		return status.Error(codes.ResourceExhausted, err.Error())
+	case errors.Is(err, trust.ErrNotPinned):
+		return status.Error(codes.NotFound, err.Error())
 	default:
 		// Unavailable bundle, substitution, invalid provenance, corrupt or
 		// missing state and rejected retain/retire decisions.
@@ -965,6 +993,38 @@ func (s *Service) CommitBuiltinTrust(ctx context.Context, req *pb.CommitBuiltinT
 		})
 	}
 	return out, nil
+}
+
+// UnpinBuiltinVersion clears the saved retention pin of one old built-in
+// version (local admin only), so normal retention applies again and a later
+// commit may collect it. It deletes and revokes nothing. A version that is
+// not pinned is NotFound and changes nothing. The admin UID is taken from
+// peer credentials, never from the request; the unpin is audited as
+// builtin_trust_unpinned.
+func (s *Service) UnpinBuiltinVersion(ctx context.Context, req *pb.UnpinBuiltinVersionRequest) (*pb.UnpinBuiltinVersionResponse, error) {
+	if err := validateBuiltinTrustMessage(req); err != nil {
+		return nil, err
+	}
+	if !validBuiltinVersionRef(req.GetVersion()) {
+		return nil, status.Error(codes.InvalidArgument, "built-in trust: malformed name@version")
+	}
+	uid, err := builtinTrustAdmin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if s.builtinTrust == nil {
+		return nil, errBuiltinTrustUnconfigured
+	}
+	gen, remaining, err := s.builtinTrust.Unpin(ctx, req.GetVersion())
+	if err != nil {
+		return nil, builtinTrustStatus(err)
+	}
+	if s.log != nil {
+		s.log.Info("audit", "kind", "builtin_trust_unpinned", "by", callerName(ctx), "admin_uid", uid,
+			"version", req.GetVersion(), "generation", gen, "remaining_pins", remaining)
+	}
+	return &pb.UnpinBuiltinVersionResponse{Version: req.GetVersion(), Generation: gen, AdminUid: uid,
+		RemainingPins: append([]string(nil), remaining...)}, nil
 }
 
 // GetBuiltinTrustStatus reports which built-in versions are trusted and which

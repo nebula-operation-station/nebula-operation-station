@@ -278,9 +278,10 @@ private key is probably readable by every `VM.Audit` holder through PVE's
 cloud-init dump endpoint (see "Exposure through the PVE API" below). Until
 the lab check PK-10a answers that, the decision is recorded as **"(c)
 accepted only with mitigations M1 and M2 together, lab check required"**
-(previously "M1 or M2"; M1 alone is not sufficient, see the variants). If
-they cannot both hold, (c) is not viable as specified and the options are listed
-under "If the lab check fails". Mechanism and threat model written by
+(previously "M1 or M2"; M1 alone is not sufficient, see the variants).
+(c) is not viable whenever M1 or M2 cannot hold, including M1 failing or an
+endpoint M1/M2 do not cover (previously "if they cannot both hold"); the
+options are then listed under "If the lab check fails". Mechanism and threat model written by
 Claude. Nothing here was tried in a lab; every PVE and cloud-init behaviour
 marked *verify* is a release gate (ticket PK-10).
 
@@ -380,12 +381,17 @@ mitigations M1 and M2.
   alone is not sufficient.
 - **M2, `VM.Audit` precondition.** At proposal time, and again right
   before the config step, the executor reads the effective ACLs for the
-  target path (`/vms/<vmid>`, `/vms`, `/`, the target pool, and the snippet
-  storage `/storage/<snippets>`) through the
+  target path (`/vms/<vmid>`, `/vms`, `/`, the target pool, the snippet
+  storage `/storage/<snippets>`, its parent `/storage`, and every pool
+  `/pool/<pool>` that contains the snippet storage, because ACLs on all of
+  these propagate `Datastore.Audit` to the snippet storage; previously only
+  `/storage/<snippets>`) through the
   read token (`GET /access/acl` needs `Sys.Audit` on `/access`, which the
   read token's `Sys.Audit` on `/` propagates to, *verify*). `preset` is
   offered only if every principal with `VM.Audit` (or, on the snippet
-  storage, `Datastore.Audit`) there is the NOS read
+  storage, `Datastore.Audit` or any other `Datastore.*` privilege, because
+  which of them allow listing or downloading `snippets` content is
+  unverified, PK-10a; previously only `Datastore.Audit`) there is the NOS read
   token, the NOS action token or `root@pam` (previously also holders of a
   role with `VM.Console`; removed, because console access alone neither
   gives root in a cloud-image guest nor lets the holder impersonate it, so
@@ -397,8 +403,9 @@ mitigations M1 and M2.
 
 ### If the lab check fails
 
-If M1 and M2 cannot both hold, (c) is not viable as specified. That is the
-case when PK-10a shows any of: M2 cannot be implemented reliably (ACL read
+(c) is not viable whenever M1 or M2 cannot hold, including M1 failing or an
+endpoint M1/M2 do not cover (previously "if M1 and M2 cannot both hold").
+That is the case when PK-10a shows any of: M2 cannot be implemented reliably (ACL read
 not permitted, roles not resolvable); M1 does not work (for example,
 clearing `cicustom` regenerates the cloud-init drive before cloud-init has
 read it, or the snippet cannot be removed in time); or a `VM.Audit` or
@@ -411,10 +418,12 @@ could not be built.) The maintainer then chooses among:
 2. Option (a), a scoped guest-agent token on enabled guests only, with its
    known cost (guest file read as root) and the bootstrap gap on vendor
    images.
-3. (c) as an explicit per-remote operator opt-in with the risk stated in
-   the UI ("every user with read access to this guest can impersonate it
-   until first contact"), never the default. Claude does not recommend
-   this.
+
+There is no third option within this amendment. (Previously: "3. (c) as an
+explicit per-remote operator opt-in with the risk stated in the UI". Removed,
+because it would allow (c) without M1 and M2, which this amendment never
+allows. Any opt-in of that kind would be a separate future amendment with its
+own review and is not proposed here.)
 
 ### Decision
 
@@ -433,8 +442,10 @@ unnecessary").
 2. **Key generation.** The executor generates an ed25519 key pair with
    `crypto/ed25519` and encodes it with `golang.org/x/crypto/ssh`
    (`MarshalPrivateKey`); no self-written cryptography. It persists only the
-   public key and fingerprint (`executor.db`, with the provisioning job)
-   and fsyncs before writing the snippet. The private key is never stored
+   public key, its fingerprint and the generation timestamp from the
+   injected clock (`executor.db`, with the provisioning job; previously
+   public key and fingerprint only, which left the age bound without a
+   persisted reference) and fsyncs before writing the snippet. The private key is never stored
    on the executor: not on disk, not in the vault, not in a result, log or
    audit line. It lives in executor memory only until the snippet write
    returns. Spec 06's rule that the vault holds no SSH keys is therefore
@@ -480,9 +491,23 @@ unnecessary").
       It returns absent, or present with the SHA-256 fingerprint of the
       `ed25519_public` entry it parses (public data only; the private part
       is never read into the result).
-   2. Present and the fingerprint equals the recorded one: the write is
-      adopted as done. The executor needs no private key for this.
-   3. Absent, unparsable, or another fingerprint: generate a new pair,
+   2. Present, the fingerprint equals the recorded one, the recorded key
+      was generated less than the preset key age bound ago (a named
+      constant next to the reconciler, `presetKeyMaxAge`, proposed 15
+      minutes) and the job has not failed: the write is adopted as done.
+      The executor needs no private key for this. A key at or over the
+      bound is never adopted (previously: adopted at any age), because it
+      has sat on the node as a live secret for longer than the design
+      allows. Age is measured with the executor's injected clock
+      (`Now func() time.Time`, AGENTS.md), never the wall clock directly.
+      The same bound is checked on the normal path right before the start
+      request is dispatched (previously: only when a lost write was
+      reconciled, so a slow clone or resize kept the key on the node past
+      the bound unchecked): a recorded key at or over the bound is
+      replaced as in step 3 before start. After start dispatch the bound
+      no longer applies; M1 then removes the snippet.
+   3. Absent, unparsable, another fingerprint, or a recorded key at or over
+      the age bound: generate a new pair,
       replace the recorded public key and fsync, then run
       `pve.snippet.put` with `replace=true`. Replace is accepted only for
       the exact name of this job, renames atomically over the old file and
@@ -494,6 +519,8 @@ unnecessary").
    Once a start request has been dispatched (even if its outcome is
    unknown) the recorded key is fixed: no stat-adopt, no replace. If the
    guest then presents another key, the join fails closed (decision 5).
+   An unknown start outcome is reconciled as in decision 7 ("Start outcome
+   unknown").
 5. **Join.** With `preset` bound, enrollment pins the recorded public key
    and connects. If the endpoint presents another key, the join stops with a
    key mismatch. It does **not** fall back to fingerprint review on its
@@ -531,14 +558,102 @@ unnecessary").
    that one field) and removes the snippet with the node action right after
    the start task returns OK (previously: after rotation). Both are
    audited. A bootstrap step removes the cached vendor-data in the guest
-   after rotation. A failed provisioning before start leaves guest and
-   snippet for inspection (section 3); removing the snippet of an abandoned
-   provisioning is an explicit operator action. Because the snippet holds a
-   live secret, the run page shows every leftover snippet prominently.
+   after rotation. If either step fails (for example node unreachable),
+   the same retry and "snippet cleanup pending" flag apply as for failure
+   cleanup below (previously: retry and flag were defined only for
+   failures before start), and the join is not marked done while the flag
+   is set.
+
+   **Failure cleanup** (previously: "a failed provisioning before start
+   leaves guest and snippet for inspection; removing the snippet of an
+   abandoned provisioning is an explicit operator action", which left a
+   live private key on the node until an operator acted and let a later
+   reconciliation adopt it). On every failure path before start, the
+   executor removes the snippet automatically and, if it was set, clears
+   `cicustom`, within the limits of *Authority for cleanup* below. That
+   covers a failed or refused snippet write, clone, M2 recheck, config set
+   or resize, a forward step refused because the target or registry no
+   longer matches the permit, cancellation, and a start task that resolves
+   as failed (previously also "an executor restart that finds the job
+   failed", which conflicted with spec 03; a restart now only raises the
+   flag, see below). Only the guest stays for inspection (section 3); the
+   snippet does not stay by design. Removal is idempotent (absent counts
+   as removed) and audited as `guest_hostkey_snippet_removed` with the
+   failure reason. The recorded key of a failed job is marked revoked at
+   the moment of failure: it is never adopted, never pinned by a join and
+   never reused; a new attempt uses a new generation and a new pair.
+
+   *Start outcome unknown* (previously undefined, so the snippet could stay
+   on the node indefinitely). If a start request was dispatched and its
+   outcome is unknown, the executor reconciles it from the stored UPID
+   without redispatching. Resolved OK → M1; resolved failed → failure
+   cleanup. If it stays unresolved past `startOutcomeMaxWait` (named
+   constant, proposed 10 minutes, measured with the injected clock), no
+   cleanup step runs, because the guest may still be booting from the
+   drive; the run is flagged "snippet cleanup pending".
+
+   *Authority for cleanup* (previously: "the permit authorizes the job's
+   compensating steps" with automatic cleanup and retry across a restart,
+   which conflicted with spec 03 v23-03-05 "Durable authority and volatile
+   approval" and ADR 0007: every restart or lock revokes mutation
+   authority, and persisted job intent never grants redispatch). Cleanup
+   is part of the approved job: the derived permit authorizes, besides the
+   forward steps, the job's own compensating steps (`cicustom` delete,
+   `pve.snippet.remove`) for exactly its recorded target, and nothing
+   beyond it. Automatic cleanup runs only inside the same executor
+   lifetime and only while that permit is still valid. A forward step
+   refused because the target or registry changed stops the forward steps
+   but leaves the permit valid for the compensating steps. After a restart
+   or lock, or once the permit has expired or been revoked, nothing runs
+   automatically: the job persists "snippet cleanup pending" and cleanup
+   runs only through the PK-08 operator action, which needs a fresh
+   approval under the existing semantics (a new permit for the cleanup
+   steps only, at the job's risk level). The persisted retry state holds
+   only the pending flag and the recorded target; it grants no authority.
+
+   *Recorded target.* The snippet storage ID, directory and file name are
+   recorded in the job when the snippet is written, and cleanup uses the
+   recorded values, never the current registry, so a registry change after
+   approval cannot redirect removal. Each step has its own check
+   (previously one check for both, which refused snippet removal after a
+   failed or refused clone, when no guest owns the VMID):
+   - `pve.snippet.remove` is bound only to the recorded node (enrolled host
+     ID and fingerprint) and the recorded path. It runs whether or not a
+     guest exists.
+   - The `cicustom` delete also requires that the VMID still belongs to
+     this job's guest. The proof is the SMBIOS UUID (`smbios1 uuid`) and
+     `vmgenid` read from the guest config right after the clone and
+     recorded in the job, never the guest name. A PVE user with
+     `VM.Config.*` rights on the guest can change those values, so a match
+     is not proof against such a user (M2 already refuses `preset` when a
+     foreign principal can see the guest; config rights are not checked
+     separately), while a mismatch always refuses.
+   If a check fails (VMID reused, node gone or re-enrolled with another
+   fingerprint), that step does nothing on the current object and the run
+   is flagged "snippet cleanup pending".
+
+   *Retry and flag.* If a cleanup step fails within the same executor
+   lifetime under a valid permit (for example node unreachable), the
+   executor retries with exponential backoff from 30 seconds capped at 10
+   minutes (named constants, injected clock; previously no interval was
+   given) until it succeeds or the permit ends. From the first failure the
+   run is flagged "snippet cleanup pending" (persisted; a failed run stays
+   failed) and the run page shows it prominently. This applies to every
+   cleanup, including M1 after a successful start.
+
+   *Resolving the flag* (previously undefined for a target mismatch). The
+   operator resolves a pending flag with the PK-08 action, under a fresh
+   approval, in one of two ways: (a) manual removal bound only to the
+   node identity shown in that approval (the recorded host, or its
+   re-enrolled successor named explicitly) and the recorded path (plus the `cicustom` delete when the
+   VMID proof still matches); or (b) an explicit acknowledgement "key
+   remains on node, rotate/destroy", audited as
+   `guest_hostkey_cleanup_acknowledged`. The flag clears only when removal
+   is confirmed (stat shows absent) or the acknowledgement is recorded.
 8. **Audit.** Executor events `guest_hostkey_generated`,
    `guest_hostkey_snippet_written`, `guest_hostkey_snippet_replaced`,
    `guest_hostkey_pinned`, `guest_hostkey_rotated`,
-   `guest_hostkey_snippet_removed` and `guest_hostkey_preset_refused` (M2
+   `guest_hostkey_snippet_removed`, `guest_hostkey_cleanup_acknowledged` and `guest_hostkey_preset_refused` (M2
    failure, with the offending principal's role, not its token) carry
    execution, remote, node, VMID, generation, path and fingerprints, never
    key material.
@@ -560,8 +675,8 @@ to rotation.
 | --- | --- | --- | --- |
 | Executor memory | From generation until the snippet write returns | Executor process (already holds every SSH key) | Never persisted; same "stated limit" as spec 06 |
 | SSH channel to the node | Snippet write | Nobody outside the pinned, authenticated node session | stdin, not argv (not visible in `ps`) |
-| Snippet file on the node | From write until early cleanup (seconds to minutes) | Root on that node; admins of the storage if it were shared; node filesystem backups | Node-local storage only: registry refuses shared types (nfs, cifs, cephfs, glusterfs, pbs) **and** any storage flagged `shared 1`; the put action refuses a network filesystem; mode 0600; M1 |
-| **PVE API: `cloudinit/dump` and any storage read of the snippet (*verify*, PK-10a)** | While `cicustom` is set and the snippet exists | Worst case: every `VM.Audit` holder on the guest, including the NOS read token and read-only users or monitoring | M2 refuses `preset` when any principal other than the NOS tokens and `root@pam` holds `VM.Audit` on the guest path or `Datastore.Audit` on the snippet storage (`/storage/<snippets>`); M1 shortens the window; executor never calls the endpoint for preset guests |
+| Snippet file on the node | From write until early cleanup or automatic failure cleanup (normally seconds to minutes); while "snippet cleanup pending" is set (node unreachable, restart, expired permit, target mismatch, start outcome unresolved) it stays until the operator removes it or acknowledges it (previously: "seconds to minutes" only) | Root on that node; admins of the storage if it were shared; node filesystem backups | Node-local storage only: registry refuses shared types (nfs, cifs, cephfs, glusterfs, pbs) **and** any storage flagged `shared 1`; the put action refuses a network filesystem; mode 0600; M1 |
+| **PVE API: `cloudinit/dump` and any storage read of the snippet (*verify*, PK-10a)** | While `cicustom` is set and the snippet exists | Worst case: every `VM.Audit` holder on the guest, including the NOS read token and read-only users or monitoring | M2 refuses `preset` when any principal other than the NOS tokens and `root@pam` holds `VM.Audit` on the guest path or `Datastore.Audit` (or any other `Datastore.*` privilege) on the snippet storage (`/storage/<snippets>`, inherited from `/storage`, `/` or a pool containing the storage); M1 shortens the window; executor never calls the endpoint for preset guests |
 | Generated cloud-init drive (`vm-<vmid>-cloudinit`) on VM storage | Until the next regeneration after cleanup | Root on the node, storage admins; PVE users able to attach that volume elsewhere (*verify* ACL) | Rotation limits later use; vzdump skips cloud-init drives (*verify*) |
 | Guest: `/etc/ssh`, `/var/lib/cloud/instance/vendor-data.txt*`, CD-ROM device | Until rotation; the cache until the bootstrap cleanup step | Guest root; members of group `cdrom` while the drive is attached (the Ubuntu default user is one, and is a sudoer anyway) | Rotation; bootstrap removes the cached vendor-data |
 | PVE config, `/etc/pve`, config reads, read-token spool | Always | Only the `cicustom` reference, no key material | — |
