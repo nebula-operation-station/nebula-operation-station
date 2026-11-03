@@ -150,6 +150,14 @@ func MethodRoles() map[string][]peercred.Role {
 		// power. The server may propose; only the local admin commits.
 		pb.ExecutorService_ProposePVEGuestSnapshot_FullMethodName: {server, admin},
 		pb.ExecutorService_CommitPVEGuestSnapshot_FullMethodName:  {admin},
+		// Guest provisioning (ADR 0008 section 3, amendment 2026-11-03,
+		// variant B like guest join): server and admin may propose; server
+		// and admin may commit, which runs the provisioning only with a
+		// permit approved under the normal approval semantics (MEDIUM
+		// presence, HIGH user verification, hardened HIGH via CLI). The
+		// server starts the run after the WebAuthn approval.
+		pb.ExecutorService_ProposePVEGuestProvision_FullMethodName: {server, admin},
+		pb.ExecutorService_CommitPVEGuestProvision_FullMethodName:  {server, admin},
 
 		pb.ExecutorService_ListPVERemotes_FullMethodName: {server, admin, peercred.RolePVECollector},
 		pb.ExecutorService_ReadPVE_FullMethodName:        {peercred.RolePVECollector, admin},
