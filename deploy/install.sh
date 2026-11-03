@@ -250,6 +250,12 @@ install -d -m 2750 -o nebula-discovery -g nebula-server "${var_lib}/discovery/re
 # read. The root is 0750 (not world-readable) because it holds PVE data.
 install -d -m 2750 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve"
 install -d -m 2770 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/results"
+# Live handoff (ADR 0006 P1-37): the server writes the want-list to requests/
+# (group-writable; the server drop-in below makes only this one writable) and reads the
+# collector's samples from live/ (group read-only). The server never reads
+# Proxmox itself.
+install -d -m 2770 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/requests"
+install -d -m 2750 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/live"
 
 # --- Pre-upgrade backup (spec 15) --------------------------------------------
 # Before an existing install is replaced, the new CLI makes a backup (as
@@ -337,7 +343,8 @@ rm -f "${tmp_drop_in}"
 
 # --- Server drop-in (rewritten on every run) -----------------------------
 # The server unit uses ProtectSystem=strict; it may write the discovery
-# job spool and nothing else outside its state directory.
+# job spool and the PVE live want-list (pve/requests) and nothing else
+# outside its state directory. pve/live and pve/results stay read-only.
 server_drop_in_dir="${systemd_dir}/nebula-server.service.d"
 server_drop_in="${server_drop_in_dir}/20-discovery.conf"
 server_drop_in_changed=1
@@ -348,6 +355,9 @@ cat > "${tmp_server_drop_in}" <<EOF
 # nebula-server queues discovery scans here (spec 12).
 [Service]
 ReadWritePaths=${var_lib}/discovery/jobs
+# nebula-server writes the live want-list for nebula-pve-collector here
+# (ADR 0006 P1-37); it never reads Proxmox itself.
+ReadWritePaths=${var_lib}/pve/requests
 EOF
 if [[ -f "${server_drop_in}" ]] && cmp -s "${tmp_server_drop_in}" "${server_drop_in}"; then
   server_drop_in_changed=0
