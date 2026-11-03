@@ -37,3 +37,12 @@ func (c *Client) GetBuiltinTrustStatus(ctx context.Context, in *pb.GetBuiltinTru
 	resp, err := c.rpc.GetBuiltinTrustStatus(ctx, in, opts...)
 	return resp, mapCallError(ctx, err)
 }
+
+// UnpinBuiltinVersion clears the saved retention pin of one old built-in
+// version (admin role only). It deletes and revokes nothing.
+func (c *Client) UnpinBuiltinVersion(ctx context.Context, in *pb.UnpinBuiltinVersionRequest, opts ...grpc.CallOption) (*pb.UnpinBuiltinVersionResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.UnpinBuiltinVersion(ctx, in, opts...)
+	return resp, mapCallError(ctx, err)
+}

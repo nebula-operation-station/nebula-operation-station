@@ -636,7 +636,10 @@ status is unreachable. The executor checks the bundle against the release
 trust root, then the command shows, action by action: the old and new version, the
 first 12 hex characters of both hashes, the artifact SHA-256 that will be
 trusted, the risk, the full script diff and
-the executor Safety Scanner's findings. New actions are shown in full and
+the executor Safety Scanner's findings. Each displayed diff line is cut at
+4000 bytes (control characters are shown escaped); a longer line is
+truncated on screen only, the executor reviews and hashes the complete
+bytes. New actions are shown in full and
 removed actions explicitly; on first use every byte is shown, and a
 missing previous version is always reviewed, never "unchanged". Actions
 whose bytes did not change need no confirmation. Same-version changed
@@ -644,10 +647,14 @@ bytes or invalid provenance are rejected.
 
 One local confirmation — the reviewed manifest digest typed back — commits
 all the displayed additions and changes at once. At commit time the
-executor re-reviews and rehashes the bundle and compares the trust store's
-generation, so a bundle file swapped after the
-review or a concurrent commit is refused; it does not rehash the objects
-already in the store.
+executor reads the bundle once more into memory, re-reviews and rehashes
+it and compares the trust store's generation: a bundle whose manifest
+digest is no longer the reviewed one (swapped between review and commit)
+or a concurrent commit is refused. From that read on, the commit uses only
+the bytes in memory — they are what is verified, hashed and stored — so a
+bundle file swapped on disk during the commit is not refused but simply
+not used. It does not rehash the objects already in the store.
+(Previously this section said any swap after the review is refused.)
 
 The commit trusts every action of every new, changed or reactivated
 built-in version exactly as `nebula artifact trust` would: one entry per
@@ -688,14 +695,40 @@ Trust is never retargeted to the new bytes. The executor rechecks trust
 before every run, so permits, read leases and schedule grants bound to a
 retired version no longer run at their old risk: an untrusted action is
 at least HIGH, which a lease never covers. Revoke those leases and grants
-to tidy up (*Revoke* on the Read leases page, section 9.4; `nebula
-schedule revoke <id>` for a legacy schedule grant) and approve
-replacements for the new versions; a lease is never amended to new
-versions. The pin itself is not saved, so a later commit can collect a
-version pinned now unless you pin it again; any old version is collected
-once it is no longer among the two most recent predecessors and its
-90-day retention has passed. `nebula artifact untrust` still withdraws any
-single entry later.
+to tidy up (*Revoke* on the Read leases page or `nebula read-grant revoke
+<id>`, section 9.4; `nebula schedule revoke <id>` for a legacy schedule
+grant) and approve replacements for the new versions; a lease is never
+amended to new versions.
+
+> **Changed (previously a limitation):** the pin used to apply to the one
+> commit only, so a later commit could collect a version pinned earlier.
+
+A pin is saved in the built-in trust store with the version: no later
+commit collects a pinned version, whatever its age or depth, until it is
+unpinned or retired. To unpin, run as your admin user (not with sudo;
+the executor commits it, like `trust-builtins`):
+
+```sh
+nebula artifact unpin docker@1.0.0
+```
+
+Unpinning deletes and revokes nothing; the version falls back to normal
+retention and the next commit may collect it. The command prints the new
+store generation, your admin UID and the pins that remain; the executor
+audits it as `builtin_trust_unpinned` (admin UID, version, generation,
+remaining pins). A version that is not pinned is refused and nothing
+changes; so is an unpin while an interrupted commit is pending (run
+`nebula artifact trust-builtins` first). An unpin changes the store
+generation, so a review shown before it must be repeated before you
+commit. Retiring a version (`--retire`) also clears its pin, for example
+for a pinned version that was reactivated and is superseded again. An old
+version that is not pinned is collected once it is no longer among the
+two most recent predecessors and its 90-day retention has passed. A trust
+store that holds a pin cannot be read by an executor older than this
+change (it refuses the unknown field as corrupt), so before a downgrade
+unpin every saved pin with `nebula artifact unpin MODULE@VERSION` (the
+remaining pins are listed after each unpin).
+`nebula artifact untrust` still withdraws any single trust entry later.
 
 The flow is CLI-only in both modes — there is no browser bulk-trust
 endpoint — and the individual `nebula artifact trust`/`untrust` commands
@@ -708,6 +741,11 @@ and the retained, retired and collected versions; a failure to record the
 trust is audited as `builtin_trust_artifacts_failed`. The command prints
 the same summary. Non-interactive (a script, or the upgrade step):
 `nebula artifact trust-builtins --yes-digest DIGEST --pin … --retire …`.
+With `--yes-digest`, every old version the review lists needs exactly one
+decision: one `--pin name@version` or one `--retire name@version` (not
+both, none missing, no version the review does not list); otherwise
+nothing is committed. Run it once without `--yes-digest` to see the digest
+and the old versions.
 
 ### 8.3 Module signers
 
@@ -877,7 +915,8 @@ scheduler retries on its next check after an unlock, without catching up
 missed runs. Runs with secrets cannot be leased.
 
 Managing. *Revoke* (on the lease page) stops a lease at once and needs no
-assertion; `nebula read-grant pending` shows leases awaiting approval.
+assertion; on the executor host `nebula read-grant revoke <id>` does the
+same. `nebula read-grant pending` shows leases awaiting approval.
 
 Legacy schedules. The *Operations → Scheduled checks* page (`/schedules`)
 still proposes `read-schedule-v1` grants: chosen hosts and actions, an
@@ -1198,18 +1237,24 @@ while paused still counts toward the grant's expiry, so a paused grant may
 have already expired by the time you unlock.
 
 Revoke needs no assertion and blocks every future run of that grant. A
-read lease can be revoked only from the web page (*Revoke* on the lease
-page); the CLI has no lease revocation (`nebula read-grant` knows only
-`pending` and `approve`), so from the executor host `nebula lock` is the
-way to pause every lease at once. `nebula schedule revoke <id>` revokes a
+read lease is revoked from the web page (*Revoke* on the lease page) or on
+the executor host with `nebula read-grant revoke <id>` (the complete
+lowercase grant id shown on the lease page). Both make the same executor
+call with the same authorization and refuse an unknown, already revoked or
+expired lease. (Previously the CLI had no lease revocation.) `nebula lock`
+pauses every lease at once. `nebula schedule revoke <id>` revokes a
 legacy `read-schedule-v1` schedule grant only, not a read lease. Locking and
 revocation are serialized with dispatch, but neither undoes a remote
 operation that has already been dispatched — already-dispatched work may
 finish. Re-pinning a host, removing it, rotating a credential, withdrawing
 trust, or raising the risk floor blocks the affected scope; a change of
-identity or artifact version requires a replacement grant. Removing or
-recovering a credential pauses the grants that use it until you review and
-unlock locally.
+identity or artifact version requires a replacement grant. Removing a
+security key (WebAuthn credential) or a TOTP recovery login locks the
+approval authority as `nebula lock` does, but not the SSH keys or the
+vault: it revokes every execution permit, discards every pending proposal
+and pauses every approved read grant — all of them, not only those the
+key approved — until you review and unlock locally. (Previously this said
+only the grants that use the credential are paused.)
 
 ## 12. Backup and restore
 
@@ -1453,9 +1498,10 @@ Run as an admin user on the Nebula machine (`nebula` without a command prints th
 | `pending`, `approve <digest>`, `approve --stage N <digest>`, `approve --skip HOST <digest>` | Hardened path: approvals, rollout stages, skipping a host |
 | `batch review \| approve \| stage N \| skip MEMBER <digest>` | Batch rollouts: review the plan, approve all (rejects CRITICAL members), open a stage, skip a member |
 | `schedule pending \| approve <digest> \| list \| revoke <id>` | Scheduled checks (legacy `read-schedule-v1`, section 9.4) |
-| `read-grant pending \| approve <digest>` | Read leases (section 9.4); hardened approval, full digest |
+| `read-grant pending \| approve <digest> \| revoke <id>` | Read leases (section 9.4); hardened approval, full digest; revoke like the web lease page |
 | `artifact trust --action ID --version X.Y.Z --risk LEVEL [--label TEXT] FILE`, `artifact untrust …`, `artifact list` | Trusted scripts |
 | `artifact trust-builtins [--yes-digest DIGEST [--pin name@ver] [--retire name@ver]]` | Review the executor's configured release bundle and trust all its changed built-ins at once, exactly like `artifact trust`; retiring an old version revokes its trust (section 8.2) |
+| `artifact unpin MODULE@VERSION` | Clear a pin saved by `trust-builtins --pin`; deletes nothing, normal retention applies again (section 8.2) |
 | `signer add --name NAME FILE \| list \| remove SHA256:…`, `module confirm-signer MODULE SHA256:…` | Module signers |
 | `module pack [--archive OUT.tar.gz] DIR` | Build a module (author side; no executor needed) |
 | `backup [--out FILE] [--full] [--no-encrypt] [--pre-upgrade]`, `restore [--identity FILE] ARCHIVE` | With `sudo`; section 12 (`--full` only labels the archive, every backup is full; `--pre-upgrade` asks nothing and exits 3 when it makes no backup) |
