@@ -222,14 +222,16 @@ func (r PveGuestPowerRequest) mutation() (PveMutationRequest, error) {
 	}, nil
 }
 
-// PveGuestPowerBindings holds the exact target and verb (or snapshot op)
-// each bound parameters hash of a power (or snapshot) action stands for, so
-// GuestPowerRiskFloor and GuestSnapshotRiskFloor can score the guest's node
-// and remote (which the canonical request does not name) whenever the
-// authority asks: when proposing, approving and authorizing the run. Power
-// and snapshot bindings live in separate tables with their own capacity:
-// each floor reads only its own family's table, and a flood of one family's
-// proposals cannot exhaust the other's. An entry lives while a call holds
+// PveGuestPowerBindings holds the exact target and verb (snapshot op, or
+// backup/migration op) each bound parameters hash of a power, snapshot,
+// backup or migration action stands for, so GuestPowerRiskFloor,
+// GuestSnapshotRiskFloor and GuestOpRiskFloor can score the guest's node,
+// remote and (migration) destination node (which the canonical request
+// does not name) whenever the authority asks: when proposing, approving
+// and authorizing the run. Each family (power, snapshot, backup,
+// migration) has its own table with its own capacity: each floor reads
+// only its own family's table, and a flood of one family's proposals
+// cannot exhaust another's. An entry lives while a call holds
 // it and, for a proposed permit, until the permit's expiry. Like permits it
 // is in memory only; a hash without an entry is scored HIGH.
 type PveGuestPowerBindings struct {
@@ -246,7 +248,8 @@ type pveBindingFamily int
 const (
 	pveBindPower pveBindingFamily = iota
 	pveBindSnapshot
-	pveBindBackupMigrate
+	pveBindBackup
+	pveBindMigrate
 	pveBindingFamilies
 )
 
@@ -254,8 +257,8 @@ const (
 var pveBindingCapacity = [pveBindingFamilies]int{
 	pveBindPower:    maxPveGuestPowerBindings,
 	pveBindSnapshot: maxPveGuestSnapshotBindings,
-	// Backup and migrate share one table: one floor scores both.
-	pveBindBackupMigrate: maxPveGuestSnapshotBindings,
+	pveBindBackup:   maxPveGuestBackupBindings,
+	pveBindMigrate:  maxPveGuestMigrateBindings,
 }
 
 func validFamily(fam pveBindingFamily) bool { return fam >= 0 && fam < pveBindingFamilies }
@@ -559,11 +562,13 @@ func NewGuestPowerRiskFloor(next permit.RiskPolicy, crit PveCriticality, binding
 // the executor database in production), wrapped by the provisioning floor
 // (GuestProvisionRiskFloor: node, remote and the registry's linked hosts;
 // the remote is resolved in the registry if src is one, PveRemoteLister),
-// by the guest snapshot floor and by the guest power floor, both over src,
-// the registry's linked hosts and bindings. Power and snapshot requests
-// share the bindings instance but not its tables: each floor reads only
-// its own family's table and accepts only its own op or verb and artifact. Pass the same bindings to
-// Service.SetPveGuestPowerBindings.
+// by the guest backup/migration floor (GuestOpRiskFloor), the guest
+// snapshot floor and the guest power floor, all over src, the registry's
+// linked hosts and bindings. Power, snapshot, backup and migration
+// requests share the bindings instance but not its tables: each floor
+// reads only its own family's table and accepts only its own op or verb
+// and artifact. Pass the same bindings to Service.SetPveGuestPowerBindings
+// and to the backup and migration engines.
 func NewExecutorRiskPolicy(src riskpolicy.Source, bindings *PveGuestPowerBindings) (permit.RiskPolicy, error) {
 	if src == nil || bindings == nil {
 		return nil, errors.New("executor: risk policy needs a risk source and the guest power bindings")
@@ -576,13 +581,14 @@ func NewExecutorRiskPolicy(src riskpolicy.Source, bindings *PveGuestPowerBinding
 	if reg, ok := src.(PveRemoteLister); ok {
 		prov.Remote = PveRegistryRemoteOf(reg)
 	}
-	snap := NewGuestSnapshotRiskFloor(prov, src, bindings)
+	ops := NewGuestOpRiskFloor(prov, src, bindings)
+	snap := NewGuestSnapshotRiskFloor(ops, src, bindings)
 	return NewGuestPowerRiskFloor(snap, src, bindings), nil
 }
 
 // SetPveGuestPowerBindings makes the guest power and snapshot actions bind
-// their targets in b, which must be the Bindings of the GuestPowerRiskFloor
-// and GuestSnapshotRiskFloor the authority uses as its risk policy
+// their targets in b, which must be the Bindings of the floors the
+// authority uses as its risk policy
 // (NewExecutorRiskPolicy). The authority then re-evaluates the full floor
 // (node, remote and linked hosts included) when the permit is approved and
 // when the run is authorized. Call it before serving. Without it, or with

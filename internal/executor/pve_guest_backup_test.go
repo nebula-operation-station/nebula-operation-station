@@ -571,3 +571,255 @@ func TestDispatchGuestBackupStepRejectsMalformedArgs(t *testing.T) {
 		t.Fatalf("unknown method: %v", err)
 	}
 }
+
+// targetRisk is a risk policy that scores r only when the scored targets
+// include hit, and LOW otherwise: a floor that passes Next the wrong
+// targets (or none) does not see r.
+type targetRisk struct {
+	hit canonical.Target
+	r   canonical.Risk
+}
+
+func (p targetRisk) MinimumRisk(_ canonical.Request, targets []canonical.Target) (canonical.Risk, string, error) {
+	for _, t := range targets {
+		if t == p.hit {
+			return p.r, "target " + t.HostID + " is " + string(p.r), nil
+		}
+	}
+	return canonical.RiskLow, "", nil
+}
+
+// TestGuestOpRiskFloorFailClosedRaisesToNext: every fail-closed branch of
+// GuestOpRiskFloor (unbound, wrong table, no bindings, no criticality, no
+// linked hosts) reports Next's CRITICAL floor for the request's own
+// target, and HIGH when Next scores that target lower.
+func TestGuestOpRiskFloorFailClosedRaisesToNext(t *testing.T) {
+	bt, guest, crit := floorFixture(t)
+	other := bt
+	other.VMID = 102
+	og, _, _, err := PveGuestRiskTargets(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	for action, art := range map[string][]byte{PveGuestBackupAction: pveBackupArtifact(), PveGuestMigrateAction: pveMigrateArtifact()} {
+		rq := canonical.Request{ActionID: action, ParametersHash: hash, ArtifactSHA256: sha256Hex(art)}
+		// The binding sits in the other action's table: unbound for this
+		// action.
+		wrong := &PveGuestPowerBindings{}
+		fam := pveBindMigrate
+		if action == PveGuestMigrateAction {
+			fam = pveBindBackup
+		}
+		release, err := wrong.hold(fam, hash, bt, pveGuestOpBackup)
+		if err != nil {
+			t.Fatal(err)
+		}
+		next := targetRisk{hit: guest, r: canonical.RiskCritical}
+		for name, f := range map[string]GuestOpRiskFloor{
+			"unbound":        {Next: next, Criticality: crit, Linked: noLinkedHosts, Bindings: &PveGuestPowerBindings{}},
+			"other table":    {Next: next, Criticality: crit, Linked: noLinkedHosts, Bindings: wrong},
+			"no bindings":    {Next: next, Criticality: crit, Linked: noLinkedHosts},
+			"no criticality": {Next: next, Linked: noLinkedHosts, Bindings: &PveGuestPowerBindings{}},
+			"no linked":      {Next: next, Criticality: crit, Bindings: &PveGuestPowerBindings{}},
+		} {
+			if got, why, err := f.MinimumRisk(rq, []canonical.Target{guest}); err != nil || got != canonical.RiskCritical {
+				t.Errorf("%s %s: %s (%s) %v, want CRITICAL", action, name, got, why, err)
+			}
+			// Next does not score another guest CRITICAL: HIGH.
+			if got, why, err := f.MinimumRisk(rq, []canonical.Target{og}); err != nil || got != canonical.RiskHigh {
+				t.Errorf("%s %s, other guest: %s (%s) %v, want HIGH", action, name, got, why, err)
+			}
+		}
+		release()
+	}
+	rq := canonical.Request{ActionID: PveGuestBackupAction, ParametersHash: hash}
+	if got, _, err := (GuestOpRiskFloor{}).MinimumRisk(rq, []canonical.Target{guest}); err != nil || got != canonical.RiskHigh {
+		t.Fatalf("no next: %s %v", got, err)
+	}
+}
+
+// TestGuestOpFloorNeverAcceptsOtherFamilies: the backup floor scores a
+// backup binding at its MEDIUM base only from the backup table with the
+// backup artifact; a binding in the power, snapshot or migration table,
+// or another action's artifact, is HIGH (or Next's CRITICAL).
+func TestGuestOpFloorNeverAcceptsOtherFamilies(t *testing.T) {
+	M, H := canonical.RiskMedium, canonical.RiskHigh
+	mk := func(next permit.RiskPolicy, crit PveCriticality, b *PveGuestPowerBindings) permit.RiskPolicy {
+		return GuestOpRiskFloor{Next: next, Criticality: crit, Linked: noLinkedHosts, Bindings: b}
+	}
+	runFloorCases(t, PveGuestBackupAction, mk, []floorCase{
+		{"control backup binding", pveBindBackup, pveGuestOpBackup, pveBackupArtifact(), false, M},
+		{"migration table holding a backup op", pveBindMigrate, pveGuestOpBackup, pveBackupArtifact(), false, H},
+		{"snapshot table holding a backup op", pveBindSnapshot, pveGuestOpBackup, pveBackupArtifact(), false, H},
+		{"power table holding a backup op", pveBindPower, pveGuestOpBackup, pveBackupArtifact(), false, H},
+		{"backup table holding a migration op", pveBindBackup, pveGuestOpMigratePrefix + "pve2", pveBackupArtifact(), false, H},
+		{"backup table holding a snapshot op", pveBindBackup, PveSnapshotCreate, pveBackupArtifact(), false, H},
+		{"backup op with migration artifact", pveBindBackup, pveGuestOpBackup, pveMigrateArtifact(), false, H},
+		{"backup op with snapshot artifact", pveBindBackup, pveGuestOpBackup, pveSnapshotArtifact(PveSnapshotCreate), false, H},
+		{"other target", pveBindBackup, pveGuestOpBackup, pveBackupArtifact(), true, H},
+	})
+
+	// A migration's base is HIGH, so its control is told apart by the
+	// destination node: recorded CRITICAL, only a binding the floor
+	// accepts (migration table, migration artifact) reports CRITICAL.
+	bt, guest, crit := floorFixture(t)
+	dest := bt
+	dest.Node = "pve2"
+	_, dn, _, err := PveGuestRiskTargets(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crit.hosts[dn] = canonical.RiskCritical
+	const hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	low := canonical.RiskLow
+	for _, c := range []struct {
+		name     string
+		fam      pveBindingFamily
+		op       string
+		artifact []byte
+		want     canonical.Risk
+	}{
+		{"control migration binding", pveBindMigrate, pveGuestOpMigratePrefix + "pve2", pveMigrateArtifact(), canonical.RiskCritical},
+		{"backup table holding a migration op", pveBindBackup, pveGuestOpMigratePrefix + "pve2", pveMigrateArtifact(), H},
+		{"snapshot table holding a migration op", pveBindSnapshot, pveGuestOpMigratePrefix + "pve2", pveMigrateArtifact(), H},
+		{"power table holding a migration op", pveBindPower, pveGuestOpMigratePrefix + "pve2", pveMigrateArtifact(), H},
+		{"migration op with backup artifact", pveBindMigrate, pveGuestOpMigratePrefix + "pve2", pveBackupArtifact(), H},
+		{"migration table holding a backup op", pveBindMigrate, pveGuestOpBackup, pveMigrateArtifact(), H},
+		{"migration to the guest's own node", pveBindMigrate, pveGuestOpMigratePrefix + "pve1", pveMigrateArtifact(), H},
+	} {
+		b := &PveGuestPowerBindings{}
+		release, err := b.hold(c.fam, hash, bt, c.op)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f := GuestOpRiskFloor{Next: switchRisk{r: &low}, Criticality: crit, Linked: noLinkedHosts, Bindings: b}
+		rq := canonical.Request{ActionID: PveGuestMigrateAction, ParametersHash: hash, ArtifactSHA256: sha256Hex(c.artifact)}
+		if got, why, err := f.MinimumRisk(rq, []canonical.Target{guest}); err != nil || got != c.want {
+			t.Errorf("%s: %s (%s) %v, want %s", c.name, got, why, err, c.want)
+		}
+		release()
+	}
+}
+
+// useExecutorPolicy rebuilds the authority with the production policy
+// (NewExecutorRiskPolicy over e.crit) and the backup and migration engines
+// with the same bindings, as cmd/nebula-executor wires them.
+func (e *opEnv) useExecutorPolicy() {
+	e.t.Helper()
+	v, err := webauthnverify.New(webauthnverify.Config{RPID: "power.test", Origins: []string{"https://power.test"}, Counters: e.pe.db}, nil)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	b := &PveGuestPowerBindings{}
+	pol, err := NewExecutorRiskPolicy(e.crit, b)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	e.auth, err = permit.New(permit.Options{Verifier: v, Store: e.pe.db, RiskPolicy: pol})
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	next, err := riskpolicy.New(e.crit)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	m := e.backup.Mutations
+	m.Auth = e.auth
+	floor := NewGuestOpRiskFloor(next, e.crit, b)
+	e.bindings = b
+	e.backup = &PveGuestBackup{Mutations: m, Bindings: b, Floor: floor}
+	e.migrate = &PveGuestMigrate{Mutations: m, Bindings: b, Floor: floor}
+}
+
+// TestGuestOpAuthorityReevaluatesFloor: with the production authority
+// policy, the backup/migration floor is re-evaluated on approval and run
+// authorization. A node raised to CRITICAL after approval stops the run of
+// a backup and of a migration, a destination node raised after approval
+// stops the migration, and a node raised after the proposal stops the
+// approval; nothing is sent. With the records back the approved permits
+// run.
+func TestGuestOpAuthorityReevaluatesFloor(t *testing.T) {
+	e := newOpEnv(t, permit.ProviderKindQemu)
+	e.useExecutorPolicy()
+	ctx := context.Background()
+	_, node, _ := e.nodeTargets(permit.ProviderKindQemu, "pve1")
+	_, dest, _ := e.nodeTargets(permit.ProviderKindQemu, "pve2")
+	medium := func() {
+		e.crit.hosts[node] = canonical.RiskMedium
+		e.crit.hosts[dest] = canonical.RiskMedium
+	}
+
+	// Backup: node raised after approval.
+	medium()
+	breq, bp := e.approveBackup(backupReq(permit.ProviderKindQemu))
+	if bp.Request.RiskClass != canonical.RiskMedium {
+		t.Fatalf("backup risk %s, want MEDIUM", bp.Request.RiskClass)
+	}
+	e.crit.hosts[node] = canonical.RiskCritical
+	if _, err := e.backup.Run(ctx, breq); !errors.Is(err, ErrPveMutationDenied) {
+		t.Fatalf("backup after node raised: %v", err)
+	}
+	// Migration: node raised after approval, destination raised after
+	// approval.
+	medium()
+	mreq, mp := e.approveMigrate(migrateReq())
+	if mp.Request.RiskClass != canonical.RiskHigh {
+		t.Fatalf("migrate risk %s, want HIGH", mp.Request.RiskClass)
+	}
+	e.crit.hosts[node] = canonical.RiskCritical
+	if _, err := e.migrate.Run(ctx, mreq); !errors.Is(err, ErrPveMutationDenied) {
+		t.Fatalf("migrate after node raised: %v", err)
+	}
+	medium()
+	e.crit.hosts[dest] = canonical.RiskCritical
+	if _, err := e.migrate.Run(ctx, mreq); !errors.Is(err, ErrPveMutationDenied) {
+		t.Fatalf("migrate after destination raised: %v", err)
+	}
+	// A destination record removed after approval is HIGH, which the
+	// approved HIGH migration still covers; a removed guest-node record
+	// raises a MEDIUM backup to HIGH and stops it.
+	medium()
+	delete(e.crit.hosts, node)
+	if _, err := e.backup.Run(ctx, breq); !errors.Is(err, ErrPveMutationDenied) {
+		t.Fatalf("backup after node record removed: %v", err)
+	}
+	if n := e.oc.sentSteps(); n != 0 {
+		t.Fatalf("dispatched %d after criticality was raised", n)
+	}
+
+	// Raised after the proposal: the approval refuses.
+	medium()
+	p, err := e.backup.Propose(ctx, backupReq(permit.ProviderKindQemu), nextOpExec(), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.crit.hosts[node] = canonical.RiskCritical
+	if _, err := e.auth.ApproveCLI(p.Digest, 0, "admin"); err == nil {
+		t.Fatal("backup approval accepted after the node was raised to CRITICAL")
+	}
+	medium()
+	p, err = e.proposeMigrate(migrateReq())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.crit.hosts[dest] = canonical.RiskCritical
+	if _, err := e.auth.ApproveCLI(p.Digest, 0, "admin"); err == nil {
+		t.Fatal("migrate approval accepted after the destination was raised to CRITICAL")
+	}
+	if n := e.oc.sentSteps(); n != 0 {
+		t.Fatalf("dispatched %d", n)
+	}
+
+	// Control: with the records back the approved permits run.
+	medium()
+	if _, err := e.backup.Run(ctx, breq); err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+	if _, err := e.migrate.Run(ctx, mreq); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if n := e.oc.sentSteps(); n != 2 {
+		t.Fatalf("dispatched %d, want 2", n)
+	}
+}

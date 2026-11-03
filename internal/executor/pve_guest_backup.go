@@ -54,6 +54,13 @@ const (
 	pveBackupContent = "backup"
 	// maxPveBackupConfigKeys bounds the members of a guest config read.
 	maxPveBackupConfigKeys = 1024
+	// maxPveGuestBackupBindings bounds the backup bindings held at one
+	// time (one per proposal or run in progress), in their own table.
+	maxPveGuestBackupBindings = 256
+	// maxPveGuestMigrateBindings bounds the migration bindings held at one
+	// time, in their own table: a flood of backup proposals cannot exhaust
+	// migration capacity, nor the other way round.
+	maxPveGuestMigrateBindings = 256
 )
 
 var (
@@ -360,7 +367,11 @@ func proposeGuestOp(ctx context.Context, m *PveMutations, bindings *PveGuestPowe
 	if err != nil {
 		return permit.Permit{}, err
 	}
-	release, err := bindings.hold(pveBindBackupMigrate, rq.ParametersHash, t, op)
+	fam, ok := guestOpFamily(mreq.ActionID)
+	if !ok {
+		return permit.Permit{}, ErrPveMutationPlan
+	}
+	release, err := bindings.hold(fam, rq.ParametersHash, t, op)
 	if err != nil {
 		return permit.Permit{}, err
 	}
@@ -378,7 +389,7 @@ func proposeGuestOp(ctx context.Context, m *PveMutations, bindings *PveGuestPowe
 	if err != nil {
 		return permit.Permit{}, err
 	}
-	bindings.keep(pveBindBackupMigrate, rq.ParametersHash, time.Unix(res.Permit.Request.ExpiryUnix, 0))
+	bindings.keep(fam, rq.ParametersHash, time.Unix(res.Permit.Request.ExpiryUnix, 0))
 	m.log().Info("audit", "kind", "pve_guest_op_proposed", "action", mreq.ActionID, "remote", t.RemoteID, "node", t.Node, "vmid", t.VMID,
 		"risk", string(res.Permit.Request.RiskClass), "execution", executionID)
 	return res.Permit, nil
@@ -406,7 +417,11 @@ func runGuestOp(ctx context.Context, m *PveMutations, bindings *PveGuestPowerBin
 	if err != nil {
 		return PveMutationResult{}, ErrPveMutationPlan
 	}
-	release, err := bindings.hold(pveBindBackupMigrate, hash, t, op)
+	fam, ok := guestOpFamily(mreq.ActionID)
+	if !ok {
+		return PveMutationResult{}, ErrPveMutationPlan
+	}
+	release, err := bindings.hold(fam, hash, t, op)
 	if err != nil {
 		return PveMutationResult{}, err
 	}
@@ -564,6 +579,17 @@ const (
 	pveGuestOpMigratePrefix = "migrate>"
 )
 
+// guestOpFamily is the binding table of a backup or migration action.
+func guestOpFamily(actionID string) (pveBindingFamily, bool) {
+	switch actionID {
+	case PveGuestBackupAction:
+		return pveBindBackup, true
+	case PveGuestMigrateAction:
+		return pveBindMigrate, true
+	}
+	return 0, false
+}
+
 // NewGuestOpRiskFloor returns the executor's production floor of the
 // backup and migration actions: next for everything else and for artifact
 // trust, the criticality records of crit, the executor registry's linked
@@ -576,9 +602,14 @@ func NewGuestOpRiskFloor(next permit.RiskPolicy, crit PveCriticality, bindings *
 // and pve.guest.migrate (base HIGH) requests: the maximum of the base, the
 // criticality of the guest, its node, the remote and (migration) the
 // destination node, and of every host Linked returns for the guest or a
-// node (no exact record: at least HIGH), and Next's floor. Anything it
-// cannot establish is HIGH. Other requests get Next's floor (HIGH without
-// Next).
+// node (no exact record: at least HIGH; a CRITICAL record stays
+// CRITICAL), and Next's floor. Anything it cannot establish is HIGH raised
+// to Next's floor for the request's own targets (failClosedRisk). Other
+// requests get Next's floor (HIGH without Next). Part of the authority's
+// policy (NewExecutorRiskPolicy), it is enforced when proposing, approving
+// and authorizing the run, so a criticality raised after the proposal
+// stops the run. Backup bindings are read from the backup table only,
+// migration bindings from the migration table only.
 type GuestOpRiskFloor struct {
 	Next        permit.RiskPolicy
 	Criticality PveCriticality
@@ -595,12 +626,13 @@ func (p GuestOpRiskFloor) MinimumRisk(r canonical.Request, targets []canonical.T
 		return p.Next.MinimumRisk(r, targets)
 	}
 	high := func(why string) (canonical.Risk, string, error) {
-		return canonical.RiskHigh, r.ActionID + ": " + why + ": unknown criticality is HIGH", nil
+		return failClosedRisk(p.Next, r, targets, r.ActionID+": "+why+": unknown criticality is HIGH")
 	}
 	if p.Next == nil || p.Criticality == nil || p.Linked == nil || p.Bindings == nil {
 		return high("risk sources not configured")
 	}
-	t, op, ok := p.Bindings.lookup(pveBindBackupMigrate, r.ParametersHash)
+	fam, _ := guestOpFamily(r.ActionID)
+	t, op, ok := p.Bindings.lookup(fam, r.ParametersHash)
 	if !ok {
 		return high("no exact target bound to the parameters")
 	}
