@@ -391,6 +391,72 @@ func TestDirBuiltinTrustConfirmMismatchBindsNothing(t *testing.T) {
 	}
 }
 
+// Every commit attempt consumes the review, also one that fails: a commit
+// rejected inside the trust store (an old version neither retained nor
+// retired) or one that cannot read the bundle leaves nothing to retry, and
+// the corrected commit needs a fresh review.
+func TestBuiltinTrustFailedCommitConsumesReview(t *testing.T) {
+	cases := map[string]func(t *testing.T, e *bundleEnv, s *Service, digest string) codes.Code{
+		"undecided old version": func(t *testing.T, _ *bundleEnv, s *Service, digest string) codes.Code {
+			_, err := adminCommitReq(t, s, &pb.CommitBuiltinTrustRequest{ManifestDigest: digest})
+			return status.Code(err)
+		},
+		"unknown retired version": func(t *testing.T, _ *bundleEnv, s *Service, digest string) codes.Code {
+			_, err := adminCommitReq(t, s, &pb.CommitBuiltinTrustRequest{ManifestDigest: digest, Retire: []string{"docker@1.0.0", "nope@9.9.9"}})
+			return status.Code(err)
+		},
+		"bundle unreadable": func(t *testing.T, e *bundleEnv, s *Service, digest string) codes.Code {
+			away := e.bundleDir + ".away"
+			if err := os.Rename(e.bundleDir, away); err != nil {
+				t.Fatal(err)
+			}
+			_, err := adminCommitReq(t, s, &pb.CommitBuiltinTrustRequest{ManifestDigest: digest, Retire: []string{"docker@1.0.0"}})
+			if err := os.Rename(away, e.bundleDir); err != nil {
+				t.Fatal(err)
+			}
+			return status.Code(err)
+		},
+	}
+	for name, fail := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newBundleEnv(t)
+			s := e.service()
+			rev, err := adminReview(t, s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := adminCommit(t, s, rev.ManifestDigest); err != nil {
+				t.Fatal(err)
+			}
+			writeDockerBundle(t, e.k, e.bundleDir, "2026.12.0", "1.1.0", "echo restart v2\n")
+			rev, err = adminReview(t, s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := fail(t, e, s, rev.ManifestDigest); code != codes.FailedPrecondition {
+				t.Fatalf("failing commit: %v, want FailedPrecondition", code)
+			}
+			if e.bt.reviewed != nil || e.bt.pending != nil {
+				t.Fatal("failed commit left a commit binding")
+			}
+			good := &pb.CommitBuiltinTrustRequest{ManifestDigest: rev.ManifestDigest, Retire: []string{"docker@1.0.0"}}
+			if _, err := adminCommitReq(t, s, good); status.Code(err) != codes.Aborted {
+				t.Fatalf("retry without a new review: %v, want Aborted", err)
+			}
+			if g := e.storeGeneration(t); g != 1 {
+				t.Fatalf("store generation %d, want 1", g)
+			}
+			// A fresh review makes the corrected commit possible.
+			if _, err := adminReview(t, s); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := adminCommitReq(t, s, good); err != nil || out.Generation != 2 {
+				t.Fatalf("commit after a fresh review: %+v, %v", out, err)
+			}
+		})
+	}
+}
+
 // confirmSwappingTrust is a handler-side wiring bug: it forwards every call
 // but confirms the review with a different generation.
 type confirmSwappingTrust struct{ *dirBuiltinTrust }

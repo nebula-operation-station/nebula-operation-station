@@ -62,7 +62,8 @@ type BuiltinTrust interface {
 	// Commit reviews again and commits atomically when digest matches the
 	// reviewed manifest digest and the store generation is still the one
 	// the last confirmed Review saw; pins are retained and retired retired old
-	// versions. It returns the result and the new store generation.
+	// versions. It returns the result and the new store generation. Every
+	// call consumes the confirmed review, whether it commits or fails.
 	Commit(ctx context.Context, digest string, pins map[string]bool, retired []string, adminUID int) (trust.BulkAdmitResult, int64, error)
 }
 
@@ -241,16 +242,17 @@ func (d *dirBuiltinTrust) statusCacheKey(generation int64) (string, error) {
 
 // Commit implements BuiltinTrust. It requires a prior admin Review of the
 // same manifest digest at the store's current generation; a store that
-// changed since that review rejects the commit as stale.
+// changed since that review rejects the commit as stale. Every attempt
+// consumes the review, also one that fails, so a retry needs a new review.
 func (d *dirBuiltinTrust) Commit(_ context.Context, digest string, pins map[string]bool, retired []string, adminUID int) (trust.BulkAdmitResult, int64, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	rb := d.reviewed
+	d.pending, d.reviewed = nil, nil
 	st, c, err := d.open()
 	if err != nil {
 		return trust.BulkAdmitResult{}, 0, err
 	}
-	rb := d.reviewed
-	d.pending = nil
 	switch {
 	case rb == nil:
 		return trust.BulkAdmitResult{}, 0, fmt.Errorf("%w: no review to commit", trust.ErrStale)
@@ -264,7 +266,6 @@ func (d *dirBuiltinTrust) Commit(_ context.Context, digest string, pins map[stri
 	if err != nil {
 		return trust.BulkAdmitResult{}, 0, err
 	}
-	d.reviewed = nil
 	return res, st.Generation(), nil
 }
 
