@@ -314,7 +314,7 @@ type pveRebootStepArgs struct {
 // bindNodeReboot derives the bound facts of a reboot of node with the
 // accepted list from live facts, refusing whatever the reboot does not
 // allow. remoteKind is the registered kind of the remote.
-func bindNodeReboot(node string, accepted []PveRebootGuestRef, remoteKind pvecontract.Kind, f PveNodeRebootFacts, now time.Time) (pveRebootBound, error) {
+func bindNodeReboot(node string, accepted []PveRebootGuestRef, remoteKind pvecontract.Kind, f PveNodeRebootFacts) (pveRebootBound, error) {
 	self, ok := uniqueNode(f.Nodes, node)
 	if !ok || self.Status != "online" {
 		return pveRebootBound{}, ErrPveRebootState
@@ -326,7 +326,7 @@ func bindNodeReboot(node string, accepted []PveRebootGuestRef, remoteKind pvecon
 		if remoteKind != pvecontract.KindStandalone || len(f.Nodes) != 1 {
 			return pveRebootBound{}, ErrPveRebootState
 		}
-	} else if err := bindRebootCluster(node, f, now, &b); err != nil {
+	} else if err := bindRebootCluster(node, f, &b); err != nil {
 		return pveRebootBound{}, err
 	}
 	guests, err := bindRebootGuests(node, accepted, f, b)
@@ -352,7 +352,7 @@ func uniqueNode(nodes []pveapi.Node, node string) (pveapi.Node, bool) {
 
 // bindRebootCluster applies the cluster gates: quorum, every other member
 // online and settled, votes and QDevice, HA state.
-func bindRebootCluster(node string, f PveNodeRebootFacts, now time.Time, b *pveRebootBound) error {
+func bindRebootCluster(node string, f PveNodeRebootFacts, b *pveRebootBound) error {
 	c := f.Cluster
 	if !c.Quorum || c.Name == "" || len(c.Members) < 1 || c.NodesTotal != len(c.Members) {
 		return ErrPveRebootQuorum
@@ -569,7 +569,7 @@ func (g *PveNodeReboot) prepare(ctx context.Context, rc PveNodeRebootClient, req
 		return PveMutationRequest{}, ErrPveRebootState
 	}
 	accepted := req.accepted()
-	b, err := bindNodeReboot(req.Node, accepted, rm.Kind, f, m.now())
+	b, err := bindNodeReboot(req.Node, accepted, rm.Kind, f)
 	if err != nil {
 		return PveMutationRequest{}, err
 	}
@@ -602,7 +602,7 @@ func (g *PveNodeReboot) prepare(ctx context.Context, rc PveNodeRebootClient, req
 		if err != nil {
 			return ErrPveRebootState
 		}
-		again, err := bindNodeReboot(req.Node, accepted, rm.Kind, f, m.now())
+		again, err := bindNodeReboot(req.Node, accepted, rm.Kind, f)
 		if err != nil {
 			return err
 		}
@@ -703,7 +703,7 @@ type PveNodeRebootReader interface {
 // only if the hash of the bound facts is the approved one. Any refusal
 // before sending, or by PVE, wraps ErrPveRejected; a reboot whose answer
 // was lost returns another error (it may have been sent).
-func DispatchNodeRebootStep(ctx context.Context, w PveNodeRebootWriter, rd PveNodeRebootReader, remoteKind pvecontract.Kind, node string, step PveMutationStep, now time.Time) error {
+func DispatchNodeRebootStep(ctx context.Context, w PveNodeRebootWriter, rd PveNodeRebootReader, remoteKind pvecontract.Kind, node string, step PveMutationStep) error {
 	if step.Method != pveNodeRebootMethod || w == nil || rd == nil {
 		return fmt.Errorf("dispatch node reboot: %w", ErrPveRejected)
 	}
@@ -722,7 +722,7 @@ func DispatchNodeRebootStep(ctx context.Context, w PveNodeRebootWriter, rd PveNo
 	if err != nil {
 		return reject("facts")
 	}
-	b, err := bindNodeReboot(node, a.Accepted, remoteKind, f, now)
+	b, err := bindNodeReboot(node, a.Accepted, remoteKind, f)
 	if err != nil {
 		return reject("gates")
 	}
@@ -900,11 +900,7 @@ func (c *pveMutationClient) DispatchNodeReboot(ctx context.Context, rm executord
 	if err != nil {
 		return fmt.Errorf("dispatch %s: %w", step.Method, ErrPveRejected)
 	}
-	now := c.now
-	if now == nil {
-		now = time.Now
-	}
-	err = DispatchNodeRebootStep(ctx, w, pveRebootFactReader{hc: hc, base: base, read: read}, rm.Kind, node, step, now())
+	err = DispatchNodeRebootStep(ctx, w, pveRebootFactReader{hc: hc, base: base, read: read}, rm.Kind, node, step)
 	if watch.failed.Load() {
 		c.blockRemote(rm)
 		return fmt.Errorf("dispatch %s: %w: %w", step.Method, ErrPveRejected, errPveReadTrust)
