@@ -492,11 +492,11 @@ func (h *Handler) handleInventoryChart(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	// P1-35: the shared inventory.js carries the chart interaction
-	// layer (pan, Ctrl+wheel zoom, fit, list mode, details sheet).
-	// webauthn.js is loaded for parity with the other pages (the
-	// script references nebulaWebAuthn unconditionally).
+	// layer (pan, Ctrl+wheel zoom, fit, list mode, details sheet). The
+	// chart page has no add-host dialog, so webauthn.js is not loaded;
+	// inventory.js guards its nebulaWebAuthn reference.
 	data := pageData{Title: "Inventory chart", Active: "chart", Content: "chart",
-		Scripts: []string{"webauthn.js", "inventory.js"}}
+		Scripts: []string{"inventory.js"}}
 	if h.hosts == nil {
 		h.render(w, r, data)
 		return

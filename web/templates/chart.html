@@ -61,6 +61,7 @@
     {{end}}
     {{range .Chart.Hosts}}{{$h := .}}
     <li class="chart__node {{.WorstClass}}">
+      <button type="button" class="chart__dpanel-btn" hidden data-nos-dpanel-btn="{{.ID}}">Details</button>
       <details class="chart__details"{{if .Expanded}} open{{end}}>
         <summary class="chart__box chart__box--host">
           <span class="chart__title">
@@ -68,7 +69,6 @@
             <a class="chart__name" href="/hosts/{{.ID}}" title="{{if .DisplayName}}{{.DisplayName}}{{else}}{{.ID}}{{end}}">{{if .DisplayName}}{{.DisplayName}}{{else}}{{.ID}}{{end}}</a>
           </span>
           <span class="chart__sub" title="{{.StateLabel}}{{if .OS}} · {{.OS}}{{end}}">{{.StateLabel}}{{if .OS}} · {{.OS}}{{end}}</span>
-          <button type="button" class="chart__dpanel-btn" hidden data-nos-dpanel-btn="{{.ID}}">Details</button>
           <span class="chart__patch">
             <span class="badge {{.PatchClass}}">{{.PatchText}}</span>
             {{if .Patch.Known}}
@@ -164,6 +164,7 @@
     </li>
     {{end}}
   </ul>
+  <div class="dpanel-backdrop" id="chart-sheet-backdrop" hidden></div>
   <div class="dpanel-sheet" id="chart-sheet" hidden role="dialog" aria-modal="true" aria-label="Host details"></div>
 </section>
 {{else}}
