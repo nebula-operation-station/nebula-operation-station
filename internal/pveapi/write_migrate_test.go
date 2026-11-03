@@ -103,7 +103,7 @@ func TestMigrateGuestSendsLXCMigrate(t *testing.T) {
 		{
 			name: "restart with storage",
 			req:  MigrateRequest{Kind: GuestLXC, Node: "pve1", VMID: 120, Target: "pve2", Restart: true, TimeoutSec: 60, TargetStorage: "local"},
-			want: url.Values{"target": {"pve2"}, "restart": {"1"}, "timeout": {"60"}, "targetstorage": {"local"}},
+			want: url.Values{"target": {"pve2"}, "restart": {"1"}, "timeout": {"60"}, "target-storage": {"local"}},
 		},
 	}
 	for _, tc := range cases {
@@ -188,6 +188,7 @@ func TestMigrateGuestRejectsInvalidArguments(t *testing.T) {
 		"qemu restart":              {Kind: GuestQEMU, Node: "pve1", VMID: 120, Target: "pve2", Online: true, Restart: true},
 		"qemu timeout":              {Kind: GuestQEMU, Node: "pve1", VMID: 120, Target: "pve2", Online: true, TimeoutSec: 60},
 		"lxc online":                {Kind: GuestLXC, Node: "pve1", VMID: 120, Target: "pve2", Online: true},
+		"lxc with local disks":      {Kind: GuestLXC, Node: "pve1", VMID: 120, Target: "pve2", WithLocalDisks: true},
 		"lxc restart no timeout":    {Kind: GuestLXC, Node: "pve1", VMID: 120, Target: "pve2", Restart: true},
 		"lxc restart timeout above": {Kind: GuestLXC, Node: "pve1", VMID: 120, Target: "pve2", Restart: true, TimeoutSec: MaxPowerTimeoutSec + 1},
 		"lxc live with timeout":     {Kind: GuestLXC, Node: "pve1", VMID: 120, Target: "pve2", Restart: false, TimeoutSec: 60},

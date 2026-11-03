@@ -81,6 +81,10 @@ func (w *Writer) MigrateGuest(ctx context.Context, r MigrateRequest) (string, er
 		if r.Online {
 			return "", invalid(op, "online")
 		}
+		if r.WithLocalDisks {
+			// with-local-disks exists only on the QEMU migrate endpoint.
+			return "", invalid(op, "with_local_disks")
+		}
 		if r.Restart {
 			if !validPowerTimeout(r.TimeoutSec) {
 				return "", invalid(op, "timeout")
@@ -110,7 +114,12 @@ func (w *Writer) MigrateGuest(ctx context.Context, r MigrateRequest) (string, er
 		form.Set("with-local-disks", "1")
 	}
 	if r.TargetStorage != "" {
-		form.Set("targetstorage", r.TargetStorage)
+		// The QEMU endpoint names it targetstorage, pct migrate target-storage.
+		key := "targetstorage"
+		if r.Kind == GuestLXC {
+			key = "target-storage"
+		}
+		form.Set(key, r.TargetStorage)
 	}
 	return w.dispatch(ctx, writeRequest{op: op, method: http.MethodPost, path: path + "/migrate", form: form},
 		r.Node, wantType, strconv.FormatInt(r.VMID, 10))
