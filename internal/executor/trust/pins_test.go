@@ -142,3 +142,39 @@ func TestTransientPinNotPersisted(t *testing.T) {
 		t.Fatalf("transient pin was persisted: %v", got)
 	}
 }
+
+// TestRetiringPinnedVersionClearsPin: a pinned version that is reactivated
+// keeps its pin while active; when it is superseded again and the admin
+// retires it, the retirement clears the stored pin, so normal retention
+// applies and a later admission collects it.
+func TestRetiringPinnedVersionClearsPin(t *testing.T) {
+	e := newEnv(t)
+	e.bulkCommit("1.0.0", nil, nil, docker("1.0.0", "echo 1"))
+	e.now = e.now.Add(24 * time.Hour)
+	e.bulkCommit("1.1.0", map[string]bool{"docker@1.0.0": true}, nil, docker("1.1.0", "echo 1"))
+	e.now = e.now.Add(24 * time.Hour)
+	e.bulkCommit("1.2.0", nil, []string{"docker@1.1.0"}, docker("1.0.0", "echo 1")) // reactivate 1.0.0
+	if got := e.s.Pins(); !slices.Equal(got, []string{"docker@1.0.0"}) {
+		t.Fatalf("Pins() after reactivation = %v, want [docker@1.0.0]", got)
+	}
+	e.now = e.now.Add(24 * time.Hour)
+	e.bulkCommit("1.3.0", nil, []string{"docker@1.0.0"}, docker("1.2.0", "echo 1"))
+	e.reopen()
+	if got := e.s.Pins(); len(got) != 0 {
+		t.Fatalf("Pins() after retiring docker@1.0.0 = %v, want none", got)
+	}
+	e.now = e.now.Add(200 * 24 * time.Hour)
+	var collected []string
+	for _, st := range []struct{ release, version, old string }{
+		{"1.4.0", "1.3.0", "docker@1.2.0"},
+		{"1.5.0", "1.4.0", "docker@1.3.0"},
+		{"1.6.0", "1.5.0", "docker@1.4.0"},
+	} {
+		e.now = e.now.Add(24 * time.Hour)
+		out := e.bulkCommit(st.release, nil, []string{st.old}, docker(st.version, "echo 1"))
+		collected = append(collected, out.Collected...)
+	}
+	if !inCollected(collected, "docker@1.0.0") {
+		t.Fatalf("the retired docker@1.0.0 was never collected: %v", collected)
+	}
+}

@@ -37,7 +37,7 @@ type Result struct {
 // AdmitPinned to keep versions pinned by a retained execution or an open
 // review (spec 10, "not otherwise pinned").
 func (s *Store) Admit(in release.Candidate, reviewed Review) (Result, error) {
-	return s.admit(in, reviewed, nil, nil)
+	return s.admit(in, reviewed, nil, nil, nil)
 }
 
 // AdmitPinned is Admit with pins: versions in pinned (keyed name@version)
@@ -49,13 +49,14 @@ func (s *Store) Admit(in release.Candidate, reviewed Review) (Result, error) {
 // durable admin pins are recorded by BulkAdmit (VersionRecord.Pinned) and
 // honoured by every admission.
 func (s *Store) AdmitPinned(in release.Candidate, reviewed Review, pinned map[string]bool) (Result, error) {
-	return s.admit(in, reviewed, pinned, nil)
+	return s.admit(in, reviewed, pinned, nil, nil)
 }
 
 // admit is the shared admission path; pinned lists name@version keys that
 // garbage collection must skip in this admission, keep the keys whose
-// records are durably marked Pinned in the committed index.
-func (s *Store) admit(in release.Candidate, reviewed Review, pinned, keep map[string]bool) (Result, error) {
+// records are durably marked Pinned in the committed index, and drop the
+// keys (retired versions) whose stored pin is cleared.
+func (s *Store) admit(in release.Candidate, reviewed Review, pinned, keep, drop map[string]bool) (Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if reviewed.Generation != s.idx.Generation {
@@ -125,7 +126,7 @@ func (s *Store) admit(in release.Candidate, reviewed Review, pinned, keep map[st
 	}
 	sort.Slice(x.Modules, func(i, j int) bool { return x.Modules[i].Name < x.Modules[j].Name })
 	addProvenance(&x, c, now)
-	markPinned(&x, keep)
+	markPinned(&x, keep, drop)
 
 	// Collect what retention allows in the same index write, so expired
 	// predecessors never block an admission; protected history (two most
@@ -222,21 +223,30 @@ func setSignature(x *index, digest, sigSum string) {
 	}
 }
 
-// markPinned durably pins the retained records named in keep (keyed
-// name@version); it never clears an existing pin.
-func markPinned(x *index, keep map[string]bool) {
-	if len(keep) == 0 {
+// markPinned durably pins the retained records named in keep and clears
+// the stored pin of the retired records named in drop (both keyed
+// name@version), so retiring a version that kept a pin (for example one
+// reactivated and superseded again) leaves it to normal retention, as the
+// retirement says. Other pins are left as they are.
+func markPinned(x *index, keep, drop map[string]bool) {
+	if len(keep) == 0 && len(drop) == 0 {
 		return
+	}
+	set := func(name string, v *VersionRecord) {
+		switch key := name + "@" + v.Version; {
+		case keep[key]:
+			v.Pinned = true
+		case drop[key]:
+			v.Pinned = false
+		}
 	}
 	for i := range x.Modules {
 		m := &x.Modules[i]
-		if m.Active != nil && keep[m.Name+"@"+m.Active.Version] {
-			m.Active.Pinned = true
+		if m.Active != nil {
+			set(m.Name, m.Active)
 		}
 		for j := range m.History {
-			if keep[m.Name+"@"+m.History[j].Version] {
-				m.History[j].Pinned = true
-			}
+			set(m.Name, &m.History[j])
 		}
 	}
 }

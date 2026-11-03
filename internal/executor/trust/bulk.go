@@ -159,7 +159,11 @@ func (s *Store) BulkAdmit(c release.Candidate, o BulkAdmitOpts) (BulkAdmitResult
 		return BulkAdmitResult{}, err
 	}
 	// Atomic commit.
-	res, err := s.admit(c, r, o.Pins, o.Pins)
+	drop := make(map[string]bool, len(o.Retired))
+	for _, v := range o.Retired {
+		drop[v] = true
+	}
+	res, err := s.admit(c, r, o.Pins, o.Pins, drop)
 	if err != nil {
 		return BulkAdmitResult{}, err
 	}
