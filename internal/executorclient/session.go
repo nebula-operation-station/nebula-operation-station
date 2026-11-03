@@ -18,5 +18,5 @@ func (c *Client) GetSessionState(ctx context.Context, in *pb.GetSessionStateRequ
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.GetSessionState(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }

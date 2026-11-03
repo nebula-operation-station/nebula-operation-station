@@ -16,7 +16,7 @@ func (c *Client) ReviewBuiltinTrust(ctx context.Context, in *pb.ReviewBuiltinTru
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ReviewBuiltinTrust(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // CommitBuiltinTrust commits the reviewed built-in trust change bound to the
@@ -26,7 +26,7 @@ func (c *Client) CommitBuiltinTrust(ctx context.Context, in *pb.CommitBuiltinTru
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.CommitBuiltinTrust(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // GetBuiltinTrustStatus reads which built-in versions are trusted and which
@@ -35,5 +35,5 @@ func (c *Client) GetBuiltinTrustStatus(ctx context.Context, in *pb.GetBuiltinTru
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.GetBuiltinTrustStatus(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
