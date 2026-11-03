@@ -587,13 +587,46 @@ unnecessary").
    never reused; a new attempt uses a new generation and a new pair.
 
    *Start outcome unknown* (previously undefined, so the snippet could stay
-   on the node indefinitely). If a start request was dispatched and its
-   outcome is unknown, the executor reconciles it from the stored UPID
-   without redispatching. Resolved OK → M1; resolved failed → failure
-   cleanup. If it stays unresolved past `startOutcomeMaxWait` (named
-   constant, proposed 10 minutes, measured with the injected clock), no
-   cleanup step runs, because the guest may still be booting from the
-   drive; the run is flagged "snippet cleanup pending".
+   on the node indefinitely; later "Resolved OK → M1; resolved failed →
+   failure cleanup" without a lifetime limit, which could be read as
+   allowing a mutation after a reconciliation following a restart, which
+   spec 03 v23-03-05 forbids). If a start request was dispatched and its
+   outcome is unknown, the executor never redispatches the start. It
+   reconciles read-only:
+   - *UPID stored.* The executor polls the stored UPID with the read
+     credential. This observation is allowed in any executor lifetime and
+     grants no mutation authority.
+   - *No UPID stored* (the start request was sent after its intent was
+     persisted, but the response was lost before the UPID was persisted).
+     The job enters `reconciling` (ADR 0006). The executor may identify the
+     task read-only from the task list of the recorded node: a `qmstart`
+     task for the recorded VMID, issued by the NOS mutation token, started
+     no earlier than the persisted intent timestamp. Exactly one match →
+     its UPID is persisted and reconciliation continues as above. Zero or
+     several matches, an unreadable task list, or an expired task record →
+     the outcome stays `unknown`: no cleanup step runs (the guest may be
+     booting from the drive), the power state alone is never taken as
+     success, and the run is flagged "snippet cleanup pending".
+   - *Mutations after resolution.* M1 (resolved OK) or failure cleanup
+     (resolved failed) runs automatically **only** if the resolution is
+     observed within the same executor lifetime that dispatched the start
+     **and** the job's permit is still valid then (not expired, not
+     revoked, no risk raise, no external change that ends compensation
+     authority), each step under the single-dispatch rule below. A
+     resolution observed after a restart or lock, or after the permit
+     ended, triggers no mutation: the run is flagged "snippet cleanup
+     pending" and only the PK-08 action under fresh approval cleans up.
+   - *`startOutcomeMaxWait`* (named constant, proposed 10 minutes,
+     measured with the injected clock). If the task is still unresolved
+     when it elapses, no cleanup step runs and the run is flagged "snippet
+     cleanup pending". Read-only polling continues while the permit is
+     valid. If the task then resolves OK (or failed) within the same
+     executor lifetime while the permit is still valid, M1 (or failure
+     cleanup) still runs automatically, because the reason for waiting
+     (the guest may still read the drive) is gone and removal shortens the
+     exposure; the flag clears only when removal is confirmed (stat
+     absent). Once the permit ends, polling no longer leads to any
+     mutation.
 
    *Authority for cleanup* (previously: "the permit authorizes the job's
    compensating steps" with automatic cleanup and retry across a restart,
