@@ -52,6 +52,10 @@ const (
 	// labelled with the age of its last observation (the 10-s live
 	// interval plus slack).
 	staleAfter = 15 * time.Second
+	// StaleAfter is staleAfter for feeds outside this package (the live
+	// provider handoff): a sample older than it is not sent as a fresh
+	// value, only aged by Tick.
+	StaleAfter = staleAfter
 	// maxAgeSeconds bounds the age a label reports.
 	maxAgeSeconds = 24 * 3600
 )
