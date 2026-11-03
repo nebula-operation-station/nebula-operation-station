@@ -45,7 +45,7 @@ func TestReadGrantMethodRoles(t *testing.T) {
 		pb.ExecutorService_CommitReadGrant_FullMethodName:       {peercred.RoleServer},
 		pb.ExecutorService_ListPendingReadGrants_FullMethodName: {peercred.RoleAdmin},
 		pb.ExecutorService_ApproveReadGrantCLI_FullMethodName:   {peercred.RoleAdmin},
-		pb.ExecutorService_ListReadGrants_FullMethodName:        {peercred.RoleServer, peercred.RoleAdmin},
+		pb.ExecutorService_ListReadGrants_FullMethodName:        {peercred.RoleServer, peercred.RoleAdmin, peercred.RolePVECollector},
 		pb.ExecutorService_RevokeReadGrant_FullMethodName:       {peercred.RoleServer, peercred.RoleAdmin},
 		pb.ExecutorService_RunReadGrant_FullMethodName:          {peercred.RoleServer},
 	}
