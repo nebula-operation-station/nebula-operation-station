@@ -228,9 +228,12 @@
   }
   if (!els.size) return;
   let viewer = '', renew = 10, timer = 0, es = null, busy = 0, again = 0;
+  // Own clock: runs whatever the stream does (410, no hello, offline).
+  setInterval(() => {
+    for (const b of els.values()) if (b.t && Date.now() - b.at > 15e3) show(b, Math.round((Date.now() - b.at) / 1e3));
+  }, 1e3);
   const send = async () => {
     clearTimeout(timer);
-    for (const b of els.values()) if (b.t && Date.now() - b.at > 15e3) show(b, Math.round((Date.now() - b.at) / 1e3));
     const v = viewer;
     if (busy || !v) { again = busy; return; }
     busy = 1; again = 0;

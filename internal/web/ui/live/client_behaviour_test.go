@@ -37,10 +37,11 @@ func TestLiveClientBehaviour(t *testing.T) {
 	}
 	block := liveClientBlock(t) + "\n})();\n"
 	for _, scenario := range []string{
-		"boxes",  // node, guest and host boxes are requested; values render
-		"drop",   // a box not granted loses its live line
-		"stale",  // no value for 15 s shows the age without any event
-		"hidden", // a hidden page releases every box
+		"boxes",    // node, guest and host boxes are requested; values render
+		"drop",     // a box not granted loses its live line
+		"stale",    // no value for 15 s shows the age without any event
+		"stale410", // after a 410 the stale check keeps running
+		"hidden",   // a hidden page releases every box
 	} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
