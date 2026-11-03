@@ -608,16 +608,32 @@ unnecessary").
    the start below; for a config set or resize, also the guest config read
    with the read credential). What counts as resolved (previously "the
    guest config read" without a rule, so an unchanged config could count
-   as failed while an async config task was still pending):
-   - *Resolved OK*: the identified task is terminal OK, or the config read
-     shows the requested change applied.
-   - *Resolved failed*: only the exact task identified (stored UPID, or a
-     single task-list match as for the start below) and in a terminal
-     failed state, or proof that no task can still apply the change (the
-     task is identified as terminal, whatever its status, and the config
-     does not show the change). An unchanged config read alone never
-     counts as resolved failed while a task may be pending; a request for
-     which no task can be identified stays `unknown`.
+   as failed while an async config task was still pending). The rules are
+   disjoint: every combination of task state and config read maps to
+   exactly one of resolved OK, resolved failed or `unknown` (previously an
+   identified task terminal OK with a config read lacking the change
+   matched both "resolved OK" and "resolved failed", so it was undefined
+   whether the job took the next forward step or ran failure cleanup).
+   "Identified task" means the exact task (stored UPID, or a single
+   task-list match as for the start below); "change visible" applies to a
+   config set or resize only (the guest config read shows the requested
+   change applied); a clone has no config check.
+   - *Resolved OK*: the identified task is terminal OK and, for a config
+     set or resize, the change is visible; or, for a config set or resize
+     for which no task can be identified, the change is visible.
+   - *Resolved failed*: the identified task is terminal failed and, for a
+     config set or resize, the change is not visible.
+   - *Conflict*: the identified task is terminal OK but the change is not
+     visible, or terminal failed but the change is visible. The outcome
+     stays `unknown` permanently for that step (later reads do not resolve
+     it), no further forward step and no automatic cleanup step runs, and
+     the run is flagged "snippet cleanup pending" with the reason
+     "outcome conflict"; only the PK-08 action under fresh approval
+     proceeds, and its approval shows both observations.
+   - Everything else stays `unknown`: an identified task not yet terminal;
+     no identifiable task and the change not visible (an unchanged config
+     read alone never counts as resolved failed while a task may be
+     pending); no identifiable task for a clone.
    Only within the same executor lifetime and while the job's permit is
    still valid:
    - resolved failed → failure cleanup as above;
