@@ -402,3 +402,12 @@ func (l *lazyExecutor) RevokeReadGrant(ctx context.Context, in *pb.RevokeReadGra
 	}
 	return nil, errNotConnected
 }
+
+// RunReadGrant backs the live chart's SSH telemetry reads (ADR 0006
+// P1-26/P1-37); the executor re-authorizes every run against its grant.
+func (l *lazyExecutor) RunReadGrant(ctx context.Context, in *pb.RunReadGrantRequest, opts ...grpc.CallOption) (*pb.RunReadGrantResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.RunReadGrant(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
