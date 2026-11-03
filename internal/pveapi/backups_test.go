@@ -139,7 +139,7 @@ func TestGetJSONRejectsOversizedBody(t *testing.T) {
 	c, _ := backupTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(make([]byte, 64))
 	}))
-	c.MaxResponseBytes = 16
+	c.MaxBody = 16
 	err := c.getJSON(context.Background(), "/cluster/backup", nil, &struct{}{})
 	if err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("error = %v, want size-limit error", err)

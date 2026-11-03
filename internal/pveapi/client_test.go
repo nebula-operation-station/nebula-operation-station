@@ -26,7 +26,7 @@ func testClient(t *testing.T, ts *httptest.Server) *Client {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	c.RequestTimeout = 2 * time.Second
+	c.Timeout = 2 * time.Second
 	return c
 }
 
@@ -168,7 +168,7 @@ func TestGetUnavailableTimeout(t *testing.T) {
 	}))
 	defer ts.Close()
 	c := testClient(t, ts)
-	c.RequestTimeout = 50 * time.Millisecond
+	c.Timeout = 50 * time.Millisecond
 	var out []string
 	err := c.get(context.Background(), "/nodes/n1/storage", &out)
 	if !errors.Is(err, ErrUnavailable) {

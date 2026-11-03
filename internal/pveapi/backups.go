@@ -283,11 +283,11 @@ func NewBackupClient(baseURL string, httpc *http.Client, token func() string) (*
 		httpc = &http.Client{}
 	}
 	return &Client{
-		BaseURL:          u.Scheme + "://" + u.Host + u.Path,
-		HTTP:             httpc,
-		TokenHeader:      token,
-		Timeout:          backupDefaultTimeout,
-		MaxResponseBytes: defaultMaxResponseBytes,
+		BaseURL: u.Scheme + "://" + u.Host + u.Path,
+		HTTP:    httpc,
+		Token:   func(context.Context) (string, error) { return token(), nil },
+		Timeout: backupDefaultTimeout,
+		MaxBody: defaultMaxResponseBytes,
 	}, nil
 }
 
@@ -399,16 +399,19 @@ func (c *Client) getJSON(ctx context.Context, path string, query url.Values, out
 	if err := validatePath(path); err != nil {
 		return err
 	}
-	token := c.TokenHeader()
+	if err := c.ready(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.callTimeout())
+	defer cancel()
+	token, err := c.Token(ctx)
+	if err != nil {
+		return fmt.Errorf("pveapi: token supplier: %w", err)
+	}
 	if token == "" {
 		return errors.New("pveapi: token header supplier returned no token")
 	}
-	if c.Timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, c.Timeout)
-		defer cancel()
-	}
-	endpoint := c.BaseURL + path
+	endpoint := c.endpoint(path)
 	if len(query) > 0 {
 		endpoint += "?" + query.Encode()
 	}
@@ -417,7 +420,7 @@ func (c *Client) getJSON(ctx context.Context, path string, query url.Values, out
 		return fmt.Errorf("pveapi: build request: %w", err)
 	}
 	req.Header.Set("Authorization", token)
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.send(req)
 	if err != nil {
 		return fmt.Errorf("pveapi: get %s: %w", path, err)
 	}
@@ -429,7 +432,7 @@ func (c *Client) getJSON(ctx context.Context, path string, query url.Values, out
 	default:
 		return fmt.Errorf("pveapi: get %s: unexpected status %d", path, resp.StatusCode)
 	}
-	max := c.MaxResponseBytes
+	max := c.maxBody()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
 	if err != nil {
 		return fmt.Errorf("pveapi: get %s: read: %w", path, err)

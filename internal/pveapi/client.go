@@ -56,9 +56,6 @@ const (
 	MaxConfigExtras = 128
 	// MaxErrorMessageBytes bounds sanitized error text from responses.
 	MaxErrorMessageBytes = 512
-	// defaultCallTimeout bounds every API call (ADR 0006: 10 s connect /
-	// 30 s request).
-	defaultCallTimeout = 30 * time.Second
 )
 
 // apiRoot is the Proxmox VE JSON API root appended to the base URL.
@@ -77,33 +74,79 @@ var ErrResponseTooLarge = errors.New("pveapi: response exceeds size limit")
 type TokenSupplier func(ctx context.Context) (string, error)
 
 // Client is a read-only Proxmox VE API client. It is safe for concurrent
-// use.
+// use once constructed; do not change its fields while calls are running.
+//
+// Every read method (inventory, config, guest agent, storage, snapshots,
+// cluster, HA, tasks, hardware, backups) uses the same four connection
+// fields below. NewClient, New and NewBackupClient fill them; a literal
+// &Client{HTTP: ..., BaseURL: ..., Token: ...} is equivalent. A Client
+// missing HTTP, BaseURL or Token fails every call with ErrIncompleteClient.
+//
+// Guest config reads (GetQemuConfig, GetLxcConfig) use PVE's default
+// GET .../config view, which has pending changes applied; they do not send
+// current=1. The default view is what PVE shows as the guest's
+// configuration and what takes effect on the next guest start. Neither view
+// alone lists both a pending removal and a pending addition, so callers
+// that gate risky actions on config facts must not assume either view is
+// complete; PVE's own migrate and backup checks evaluate both sections.
 type Client struct {
-	// TokenHeader supplies backup request credentials for callers without a context-aware supplier.
-	TokenHeader func() string
-	// MaxResponseBytes bounds backup responses; zero uses the backup default.
-	MaxResponseBytes int64
-
-	// HTTP is the transport. Required.
+	// HTTP is the transport. Required. It must carry the remote's TLS trust
+	// and pinning policy. Its redirect policy is ignored: the client never
+	// follows redirects, so credentials never reach another destination.
 	HTTP *http.Client
-	// BaseURL is the PVE API root, e.g.
+	// BaseURL is the PVE API root including "/api2/json", e.g.
 	// "https://pve.example:8006/api2/json". Required.
 	BaseURL string
 	// Token supplies the value of the Authorization header for each call
-	// (e.g. "PVEAPIToken=user!realm!token"). Required. Its error value must
-	// not contain the token.
-	Token func(ctx context.Context) (string, error)
+	// (e.g. "PVEAPIToken=user@realm!token=<value>"). Required. Its error
+	// value must not contain the token.
+	Token TokenSupplier
 	// Timeout bounds each API call. Zero means DefaultTimeout.
 	Timeout time.Duration
-	// MaxBody caps the decoded response size in bytes. Zero means
-	// DefaultMaxBody.
+	// MaxBody caps the response size in bytes. Zero means DefaultMaxBody.
+	// Reads with a smaller fixed per-endpoint limit keep that limit.
 	MaxBody int64
-	base    string
-	http    *http.Client
-	token   TokenSupplier
-	timeout time.Duration
-	// RequestTimeout bounds storage and snapshot requests; zero uses the client timeout.
-	RequestTimeout time.Duration
+}
+
+// ErrIncompleteClient reports a Client without HTTP, BaseURL or Token.
+var ErrIncompleteClient = errors.New("pveapi: incomplete client")
+
+// ready reports whether c has every connection field set.
+func (c *Client) ready() error {
+	if c == nil || c.HTTP == nil || c.BaseURL == "" || c.Token == nil {
+		return ErrIncompleteClient
+	}
+	return nil
+}
+
+// callTimeout returns the per-call timeout.
+func (c *Client) callTimeout() time.Duration {
+	if c.Timeout > 0 {
+		return c.Timeout
+	}
+	return DefaultTimeout
+}
+
+// maxBody returns the response size limit.
+func (c *Client) maxBody() int64 {
+	if c.MaxBody > 0 {
+		return c.MaxBody
+	}
+	return DefaultMaxBody
+}
+
+// endpoint returns the absolute URL for an API path below BaseURL. path
+// may carry an already encoded query.
+func (c *Client) endpoint(path string) string {
+	return strings.TrimRight(c.BaseURL, "/") + path
+}
+
+// send performs req with a copy of c.HTTP that never follows redirects.
+// The copy leaves the caller's client and its redirect policy untouched.
+func (c *Client) send(req *http.Request) (*http.Response, error) {
+	hc := *c.HTTP
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return hc.Do(req)
 }
 
 // Option configures a Client.
@@ -113,15 +156,16 @@ type Option func(*Client)
 func WithTimeout(d time.Duration) Option {
 	return func(c *Client) {
 		if d > 0 {
-			c.timeout = d
+			c.Timeout = d
 		}
 	}
 }
 
 // New creates a Client for the PVE API at base (e.g.
-// "https://pve.example:8006"). hc must already carry the TLS trust and
-// pinning policy; token supplies the Authorization header value for each
-// request.
+// "https://pve.example:8006"), without the "/api2/json" root, which New
+// appends. It is NewClient for a plain host URL. hc must already carry the
+// TLS trust and pinning policy; token supplies the Authorization header
+// value for each request.
 func New(base string, hc *http.Client, token TokenSupplier, opts ...Option) (*Client, error) {
 	u, err := url.Parse(base)
 	if err != nil {
@@ -130,17 +174,9 @@ func New(base string, hc *http.Client, token TokenSupplier, opts ...Option) (*Cl
 	if (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
 		return nil, fmt.Errorf("pveapi: base URL %q must be a plain http(s) host", base)
 	}
-	if hc == nil {
-		return nil, errors.New("pveapi: nil *http.Client")
-	}
-	if token == nil {
-		return nil, errors.New("pveapi: nil token supplier")
-	}
-	c := &Client{
-		base:    u.Scheme + "://" + u.Host,
-		http:    hc,
-		token:   token,
-		timeout: defaultCallTimeout,
+	c, err := NewClient(hc, u.Scheme+"://"+u.Host+apiRoot, token)
+	if err != nil {
+		return nil, err
 	}
 	for _, o := range opts {
 		o(c)
@@ -168,30 +204,34 @@ func (e *StatusError) Error() string {
 // field of the response envelope for inventory and guest-agent calls.
 // It never logs the request or the response.
 func (c *Client) do(ctx context.Context, path string) (json.RawMessage, error) {
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	if err := c.ready(); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.callTimeout())
 	defer cancel()
 
-	tok, err := c.token(ctx)
+	tok, err := c.Token(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("pveapi: token: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+apiRoot+path, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint(path), nil)
 	if err != nil {
 		return nil, fmt.Errorf("pveapi: request %s: %w", path, err)
 	}
 	req.Header.Set("Authorization", tok)
 
-	resp, err := c.http.Do(req)
+	resp, err := c.send(req)
 	if err != nil {
 		return nil, fmt.Errorf("pveapi: GET %s: %w", path, err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes+1))
+	limit := c.maxBody()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return nil, fmt.Errorf("pveapi: GET %s: %w", path, err)
 	}
-	if len(body) > MaxResponseBytes {
+	if int64(len(body)) > limit {
 		return nil, fmt.Errorf("%w: %s", ErrResponseTooLarge, path)
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -344,10 +384,12 @@ func (e *UnavailableError) Is(target error) bool {
 	return target == ErrUnavailable
 }
 
-// NewClient returns a read-only client for baseURL. httpClient must be
-// non-nil and should configure a ~10 s dial timeout for the connect phase
-// (ADR 0006). token must be non-nil. baseURL must be an absolute http or
-// https URL.
+// NewClient returns a read-only client for baseURL, the PVE API root
+// including "/api2/json" (e.g. "https://pve.example:8006/api2/json").
+// httpClient must be non-nil and should configure a ~10 s dial timeout for
+// the connect phase (ADR 0006). token must be non-nil. baseURL must be an
+// absolute http or https URL. The returned client serves every read method
+// with the default timeout and size limit.
 func NewClient(httpClient *http.Client, baseURL string, token TokenSupplier) (*Client, error) {
 	if httpClient == nil {
 		return nil, errors.New("pveapi: httpClient is nil")
@@ -362,40 +404,31 @@ func NewClient(httpClient *http.Client, baseURL string, token TokenSupplier) (*C
 	if !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return nil, fmt.Errorf("pveapi: base url %q must be an absolute http(s) URL", baseURL)
 	}
-	timeout := DefaultRequestTimeout
-	// Keep the caller's transport and timeouts, but never forward credentials
-	// to a redirect destination, including another port on the same host.
-	client := *httpClient
-	client.CheckRedirect = func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
-	return &Client{http: &client, base: strings.TrimRight(u.String(), "/"), timeout: timeout, token: token, RequestTimeout: timeout}, nil
+	// Redirects are refused per request (Client.send), so the caller's
+	// client is kept as is and credentials never reach a redirect target.
+	return &Client{HTTP: httpClient, BaseURL: strings.TrimRight(u.String(), "/"), Token: token, Timeout: DefaultRequestTimeout}, nil
 }
 
 // get performs a GET request against the remote and decodes the JSON body
 // into out. Failures are reported as *UnavailableError with a fixed reason;
 // caller context cancellation is returned unchanged.
 func (c *Client) get(ctx context.Context, path string, out any) error {
-	timeout := c.RequestTimeout
-	if timeout <= 0 {
-		timeout = c.timeout
-		if timeout <= 0 {
-			timeout = DefaultRequestTimeout
-		}
+	if err := c.ready(); err != nil {
+		return err
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	reqCtx, cancel := context.WithTimeout(ctx, c.callTimeout())
 	defer cancel()
 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	u, err := url.JoinPath(c.base, path)
+	u, err := url.JoinPath(strings.TrimRight(c.BaseURL, "/"), path)
 	if err != nil {
 		return fmt.Errorf("pveapi: build url: %w", err)
 	}
 
-	tok, err := c.token(ctx)
+	tok, err := c.Token(ctx)
 	if err != nil {
 		return &UnavailableError{Endpoint: path, Reason: ReasonNoToken}
 	}
@@ -406,7 +439,7 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 	}
 	req.Header.Set("Authorization", tok)
 
-	resp, err := c.http.Do(req)
+	resp, err := c.send(req)
 	if err != nil {
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
@@ -422,11 +455,12 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 		return &UnavailableError{Endpoint: path, Reason: ReasonHTTPError, Status: resp.StatusCode}
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes+1))
+	limit := c.maxBody()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return &UnavailableError{Endpoint: path, Reason: ReasonTransport}
 	}
-	if len(body) > MaxResponseBytes {
+	if int64(len(body)) > limit {
 		return &UnavailableError{Endpoint: path, Reason: ReasonOversize}
 	}
 	if !utf8.Valid(body) {
