@@ -11,6 +11,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -20,18 +21,32 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
 )
 
-// fakeAgentFiles is a guest agent file-read stub.
+// fakeAgentFiles is a guest agent stub: the live guest name and a file
+// read.
 type fakeAgentFiles struct {
-	data  []byte
-	err   error
-	calls []string
-	max   int
-	token string
+	name      string
+	nameErr   error
+	nameCalls []string
+	data      []byte
+	err       error
+	calls     []string
+	max       int
+	token     string
+	// deadline is the time left on the file read's context.
+	deadline time.Duration
+}
+
+func (f *fakeAgentFiles) LiveGuestName(_ context.Context, rm executordb.PveRemote, node string, vmid uint64, _ pveapi.TokenSupplier) (string, error) {
+	f.nameCalls = append(f.nameCalls, rm.RemoteID+"|"+node+"|"+uintString(vmid))
+	return f.name, f.nameErr
 }
 
 func (f *fakeAgentFiles) AgentFileRead(ctx context.Context, rm executordb.PveRemote, node string, vmid uint64, path string, maxBytes int, read pveapi.TokenSupplier) ([]byte, error) {
 	f.calls = append(f.calls, rm.RemoteID+"|"+node+"|"+uintString(vmid)+"|"+path)
 	f.max = maxBytes
+	if d, ok := ctx.Deadline(); ok {
+		f.deadline = time.Until(d)
+	}
 	if read != nil {
 		f.token, _ = read(ctx)
 	}
@@ -140,14 +155,14 @@ func newJoinEnv(t *testing.T, withAgent bool) *joinEnv {
 	e := &joinEnv{reconcileEnv: re, ssh: srv, join: &PveGuestJoin{Service: re.svc}}
 	if withAgent {
 		e.mut = newPveMutEnv(t, false)
-		e.agent = &fakeAgentFiles{data: authorizedLine(srv.hostKey.PublicKey(), "root@web1")}
+		e.agent = &fakeAgentFiles{name: "web1.lab.test", data: authorizedLine(srv.hostKey.PublicKey(), "root@web1")}
 		e.join.Mutations, e.join.Agent = e.mut.m, e.agent
 	}
 	return e
 }
 
 func (e *joinEnv) request() PveGuestJoinRequest {
-	return PveGuestJoinRequest{RemoteID: mutRemote, Node: "pve1", VMID: 101, Generation: 1,
+	return PveGuestJoinRequest{RemoteID: mutRemote, Node: "pve1", VMID: 101, Generation: 1, GuestName: "web1.lab.test",
 		HostID: "web1", Endpoint: e.ssh.addr, SSHUser: "nos", CredentialRef: "cred"}
 }
 
@@ -246,6 +261,8 @@ func TestGuestJoinRejectsMalformedRequest(t *testing.T) {
 		"vmid low":     func(r *PveGuestJoinRequest) { r.VMID = 99 },
 		"vmid high":    func(r *PveGuestJoinRequest) { r.VMID = 10_000_000_000 },
 		"generation":   func(r *PveGuestJoinRequest) { r.Generation = 0 },
+		"guest name":   func(r *PveGuestJoinRequest) { r.GuestName = "Web 1" },
+		"no name":      func(r *PveGuestJoinRequest) { r.GuestName = "" },
 		"host":         func(r *PveGuestJoinRequest) { r.HostID = "Web 1" },
 		"endpoint":     func(r *PveGuestJoinRequest) { r.Endpoint = "ssh://x" },
 		"user":         func(r *PveGuestJoinRequest) { r.SSHUser = "root;id" },

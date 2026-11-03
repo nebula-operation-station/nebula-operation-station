@@ -218,6 +218,12 @@ func enrollRequest(entries []enrollEntry, now time.Time) (canonical.Request, []b
 	if err != nil {
 		return canonical.Request{}, nil, err
 	}
+	return enrollRequestWith(entries, params, now)
+}
+
+// enrollRequestWith builds the enrollment request of entries with the
+// given canonical parameter document.
+func enrollRequestWith(entries []enrollEntry, params []byte, now time.Time) (canonical.Request, []byte, error) {
 	ph, err := canonical.HashParameters(params)
 	if err != nil {
 		return canonical.Request{}, nil, err

@@ -23,7 +23,7 @@ import (
 // This file is the join of a provisioned guest (ADR 0008 section 4,
 // PV-06). After first boot the guest is enrolled with the normal
 // enrollment path (nebula.host_key.enroll, approval at least HIGH,
-// committed by CommitEnroll); the join only decides how the fingerprint
+// committed by CommitGuestJoin); the join only decides how the fingerprint
 // the approval binds was established:
 //
 //   - agent read: the executor reads /etc/ssh/ssh_host_ed25519_key.pub
@@ -36,8 +36,16 @@ import (
 //     for review, as for every other enrollment; the bootstrap module
 //     installs qemu-guest-agent afterwards.
 //
-// The inventory host and its link to the guest (remote, node, VMID,
-// generation) are created on the server (pveinventory.JoinProvisionedGuest).
+// The approval binds, next to the normal enrollment entry, the guest
+// (remote, node, VMID, generation, name) and the join method, so the
+// approver sees whether the key was agent-verified, and the commit
+// (CommitGuestJoin) must repeat exactly that binding. The inventory host
+// and its link to the guest are created on the server
+// (pveinventory.JoinProvisionedGuest) from the committed binding only.
+//
+// Before the agent is read, the live guest at (node, VMID) must carry the
+// provisioned name, so a VMID reused by another guest is never read and
+// accepted as agent-verified.
 
 // Join methods reported in PveGuestJoinProposal.Method.
 const (
@@ -80,11 +88,18 @@ var (
 	ErrPveJoinUnreachable = errors.New("executor: guest SSH endpoint presents no usable host key")
 )
 
-// PveGuestAgentReader reads one file inside a guest through the QEMU guest
-// agent over the remote's pinned API channel (PVE: GET
-// /nodes/{node}/qemu/{vmid}/agent/file-read). An implementation must not
-// return more than maxBytes; the join checks the size again.
+// PveGuestAgentReader reads a provisioned guest over the remote's pinned
+// API channel with the read token. pveGuestAgentAPI is the production
+// implementation.
 type PveGuestAgentReader interface {
+	// LiveGuestName returns the name of the QEMU guest vmid on node, read
+	// live (PVE: GET /nodes/{node}/qemu/{vmid}/config); an error means the
+	// guest is not there.
+	LiveGuestName(ctx context.Context, rm executordb.PveRemote, node string, vmid uint64, read pveapi.TokenSupplier) (string, error)
+	// AgentFileRead reads one file inside the guest through the QEMU guest
+	// agent (PVE: GET /nodes/{node}/qemu/{vmid}/agent/file-read). It must
+	// not return more than maxBytes and must fail on a truncated read; the
+	// join checks the size again.
 	AgentFileRead(ctx context.Context, rm executordb.PveRemote, node string, vmid uint64, path string, maxBytes int, read pveapi.TokenSupplier) ([]byte, error)
 }
 
@@ -95,6 +110,9 @@ type PveGuestJoinRequest struct {
 	VMID     uint64
 	// Generation is the guest incarnation the server links the host to.
 	Generation uint64
+	// GuestName is the name the provisioning gave the guest; the live
+	// guest must carry it before its agent is read.
+	GuestName string
 
 	HostID string
 	// Endpoint is the guest's SSH endpoint (its IPAM address or DHCP lease).
@@ -111,9 +129,11 @@ type PveGuestJoinProposal struct {
 	KeyType     string
 	// AgentDetail says, in fixed text, why the agent read was not used.
 	AgentDetail string
-	// Host is the normalized enrollment entry; CommitEnroll takes it as
-	// is after approval.
+	// Host is the normalized enrollment entry; CommitGuestJoin takes it
+	// as is after approval.
 	Host *pb.EnrollHost
+	// Guest is the guest binding the approval covers.
+	Guest *pb.GuestJoinTarget
 	// Permit is the pending enrollment approval.
 	Permit *pb.ProposeExecutionResponse
 }
@@ -172,6 +192,8 @@ func (req PveGuestJoinRequest) validate() (enrollEntry, error) {
 		return enrollEntry{}, fmt.Errorf("%w: vmid out of range", ErrPveJoinInvalid)
 	case req.Generation < 1:
 		return enrollEntry{}, fmt.Errorf("%w: generation", ErrPveJoinInvalid)
+	case !validDNSName(req.GuestName):
+		return enrollEntry{}, fmt.Errorf("%w: guest name", ErrPveJoinInvalid)
 	}
 	e, err := normalizeEnroll(&pb.EnrollHost{HostId: req.HostID, Endpoint: req.Endpoint, SshUser: req.SSHUser, CredentialRef: req.CredentialRef})
 	if err != nil {
@@ -182,8 +204,8 @@ func (req PveGuestJoinRequest) validate() (enrollEntry, error) {
 
 // Propose establishes the guest's host key (agent read when possible,
 // otherwise fingerprint review) and proposes its enrollment for approval.
-// It never pins anything: CommitEnroll pins after approval, re-reading the
-// key and pinning only the approved one.
+// It never pins anything: Commit pins after approval, re-reading the key
+// and pinning only the approved one.
 func (j *PveGuestJoin) Propose(ctx context.Context, req PveGuestJoinRequest) (PveGuestJoinProposal, error) {
 	s := j.Service
 	if s == nil {
@@ -225,7 +247,9 @@ func (j *PveGuestJoin) Propose(ctx context.Context, req PveGuestJoinRequest) (Pv
 	}
 	e.Fingerprint = fp
 
-	r, params, err := enrollRequest([]enrollEntry{e}, s.clock())
+	b := pveGuestBinding{RemoteID: req.RemoteID, Node: req.Node, VMID: req.VMID, Generation: req.Generation,
+		Name: req.GuestName, JoinMethod: method}
+	r, params, err := guestJoinRequest(e, b, s.clock())
 	if err != nil {
 		return PveGuestJoinProposal{}, fmt.Errorf("join %s: enroll request: %w", e.HostID, err)
 	}
@@ -244,6 +268,7 @@ func (j *PveGuestJoin) Propose(ctx context.Context, req PveGuestJoinRequest) (Pv
 		Method: method, Fingerprint: fp, KeyType: k.Type(), AgentDetail: detail,
 		Host: &pb.EnrollHost{HostId: e.HostID, Endpoint: e.Endpoint, SshUser: e.User, CredentialRef: e.Credential,
 			Fingerprint: fp, KeyType: k.Type()},
+		Guest:  b.proto(),
 		Permit: resp,
 	}, nil
 }
@@ -269,6 +294,17 @@ func (j *PveGuestJoin) agentKey(ctx context.Context, req PveGuestJoinRequest) (s
 	}
 	actx, cancel := context.WithTimeout(ctx, pveAgentReadTimeout)
 	defer cancel()
+	// The VMID must still hold the provisioned guest: a reused VMID's new
+	// occupant is never read as the provisioned guest.
+	name, err := j.Agent.LiveGuestName(actx, rm, req.Node, req.VMID, read)
+	if err != nil {
+		return nil, "live guest not readable"
+	}
+	if name != req.GuestName {
+		j.Service.log.Warn("audit", "kind", "guest_join_identity_mismatch", "remote", req.RemoteID, "node", req.Node,
+			"vmid", req.VMID, "generation", req.Generation)
+		return nil, "the live guest is not the provisioned guest"
+	}
 	raw, err := j.Agent.AgentFileRead(actx, rm, req.Node, req.VMID, pveJoinHostKeyPath, maxPveAgentHostKeyBytes, read)
 	if err != nil {
 		return nil, "guest agent unavailable"
