@@ -777,13 +777,15 @@ run a fixed set of read-only actions on a fixed set of hosts for a
 bounded time and a bounded number of runs. A lease names its triggers:
 `scheduled` and `on_demand` (runs requested outside a schedule). Leases
 created on the Read leases page allow both, with the fixed 15-minute
-per-action floor as their interval. Today the only caller that runs leases
-is the telemetry collector (telemetry leases: 5-minute history and the
-10-second live view, see Budgets below). The server's scheduler runs only
-legacy schedule grants (see Legacy schedules below), and there is no button
-that runs an ordinary lease on demand — so an ordinary lease created on
-the Read leases page is approved and listed but is not run by anything
-yet. For recurring checks today, use the legacy *Scheduled checks* page.
+per-action floor as their interval. The server's scheduler runs every
+approved, unexpired, unrevoked ordinary lease with a `scheduled` trigger:
+each action on each frozen host once per 15-minute interval, within the
+host's rolling-hour run budget (see Budgets below), checking once a
+minute. A host whose key was re-pinned or that was blocked or removed is
+skipped; it needs a new lease. Telemetry leases are run by the telemetry
+collector instead (5-minute history and the 10-second live view), legacy
+schedule grants by the same scheduler as before (see Legacy schedules
+below). There is no button yet that runs an ordinary lease on demand.
 Both triggers share the same executor authorization, the same
 revocation and the same run budget, so a lease cannot outlive the consent
 that created it.
@@ -822,10 +824,13 @@ Telemetry is a separately approved profile (10-second live reads,
 
 Running. Each run gets a fresh execution ID, is audited like any run, and
 rechecks the lease's expiry, revocation, parameters, artifact bytes, LOW
-risk and pin state before it runs. Results of legacy scheduled checks
-appear as operations created by "schedule"; telemetry results feed the
-host charts. A lease survives restarts of the executor, but nothing runs
-while it is locked (section 11). Runs with secrets cannot be leased.
+risk and pin state before it runs; the executor's refusal always wins
+over the server's schedule. Results of scheduled ordinary lease runs and
+of legacy scheduled checks appear as operations created by "schedule";
+telemetry results feed the host charts. A lease survives restarts of the
+executor, but nothing runs while it is locked (section 11); the
+scheduler retries on its next check after an unlock, without catching up
+missed runs. Runs with secrets cannot be leased.
 
 Managing. *Revoke* (on the lease page) stops a lease at once and needs no
 assertion; `nebula read-grant pending` shows leases awaiting approval.

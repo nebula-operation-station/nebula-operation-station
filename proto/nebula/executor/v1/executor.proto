@@ -231,6 +231,24 @@ service ExecutorService {
   // unlocked.
   rpc CommitEnroll(CommitEnrollRequest) returns (CommitEnrollResponse);
 
+  // Role: server. Join of a provisioned PVE guest (ADR 0008 section 4,
+  // PV-06): proposes the guest's enrollment with the normal enrollment
+  // approval (at least HIGH). The executor checks the live guest, tries a
+  // bounded guest agent read of the guest's ed25519 host key over the
+  // remote's pinned API channel with a scoped guest-agent credential,
+  // never the read token (join method "agent", no trust on first use),
+  // and otherwise proposes the probed fingerprint for review (join method
+  // "review"; today always, as no such credential exists). The approval
+  // binds the host entry, the guest (remote, node, VMID, generation,
+  // name, UUID) and the join method.
+  rpc ProposeGuestJoin(ProposeGuestJoinRequest) returns (ProposeGuestJoinResponse);
+
+  // Role: server. Pins the host key of an approved guest join whose
+  // endpoint still presents the approved key. The request must repeat the
+  // approved host, guest and join method exactly; the response echoes the
+  // approved binding for the server's inventory join.
+  rpc CommitGuestJoin(CommitGuestJoinRequest) returns (CommitGuestJoinResponse);
+
   // Role: admin. Returns the public half of a loaded SSH key (the keyring
   // must be unlocked), for the enrollment script.
   rpc GetSSHPublicKey(GetSSHPublicKeyRequest) returns (GetSSHPublicKeyResponse);
@@ -1109,6 +1127,58 @@ message EnrollResult {
 
 message CommitEnrollResponse {
   repeated EnrollResult results = 1;
+}
+
+// GuestJoinTarget is the provisioned guest a join enrolls (ADR 0008
+// section 4).
+message GuestJoinTarget {
+  string remote_id = 1;
+  string node = 2;
+  uint64 vmid = 3;
+  // The guest incarnation the server links the host to.
+  uint64 generation = 4;
+  // The name the provisioning gave the guest; the live guest must carry
+  // it before its agent is read.
+  string guest_name = 5;
+  // The incarnation's UUID as the inventory recorded it (lowercase); the
+  // live guest must carry it before and after the agent read. Empty
+  // disables the agent read.
+  string guest_uuid = 6;
+}
+
+message ProposeGuestJoinRequest {
+  GuestJoinTarget guest = 1;
+  // host_id, endpoint, ssh_user and credential_ref.
+  EnrollHost host = 2;
+}
+
+message ProposeGuestJoinResponse {
+  // "agent" (the guest agent reported the key the endpoint presents) or
+  // "review" (the operator must compare the fingerprint).
+  string join_method = 1;
+  // Fixed text: why the agent read was not used ("review" only).
+  string agent_detail = 2;
+  // The normalized host entry with fingerprint and key type.
+  EnrollHost host = 3;
+  GuestJoinTarget guest = 4;
+  ProposeExecutionResponse permit = 5;
+}
+
+message CommitGuestJoinRequest {
+  string execution_digest = 1;
+  // Exactly as returned by ProposeGuestJoin.
+  GuestJoinTarget guest = 2;
+  EnrollHost host = 3;
+  string join_method = 4;
+}
+
+message CommitGuestJoinResponse {
+  EnrollResult result = 1;
+  // The approved binding, echoed from the authorized request.
+  string execution_digest = 2;
+  GuestJoinTarget guest = 3;
+  EnrollHost host = 4;
+  string join_method = 5;
 }
 
 message TestConnectionRequest {

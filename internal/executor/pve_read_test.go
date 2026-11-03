@@ -47,6 +47,9 @@ type fakePVE struct {
 	badAuth  atomic.Int64
 	// before runs before each response (lock/revoke while in flight).
 	before func()
+	// tokens maps a path to the only token it accepts (default: the read
+	// token).
+	tokens map[string]string
 }
 
 func defaultPVEBodies() map[string]string {
@@ -65,7 +68,13 @@ func newFakePVE(t *testing.T, cert tls.Certificate) *fakePVE {
 	t.Helper()
 	f := &fakePVE{bodies: defaultPVEBodies()}
 	f.srv = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "PVEAPIToken="+pveReadToken {
+		want := "PVEAPIToken=" + pveReadToken
+		f.mu.Lock()
+		if tok, ok := f.tokens[r.URL.Path]; ok {
+			want = tok
+		}
+		f.mu.Unlock()
+		if r.Header.Get("Authorization") != want {
 			f.badAuth.Add(1)
 			w.WriteHeader(http.StatusUnauthorized)
 			return

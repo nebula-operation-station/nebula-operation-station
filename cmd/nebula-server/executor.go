@@ -141,6 +141,20 @@ func (l *lazyExecutor) ProposeEnroll(ctx context.Context, in *pb.ProposeEnrollRe
 	return nil, errNotConnected
 }
 
+func (l *lazyExecutor) ProposeGuestJoin(ctx context.Context, in *pb.ProposeGuestJoinRequest, opts ...grpc.CallOption) (*pb.ProposeGuestJoinResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ProposeGuestJoin(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) CommitGuestJoin(ctx context.Context, in *pb.CommitGuestJoinRequest, opts ...grpc.CallOption) (*pb.CommitGuestJoinResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.CommitGuestJoin(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
 func (l *lazyExecutor) CommitEnroll(ctx context.Context, in *pb.CommitEnrollRequest, opts ...grpc.CallOption) (*pb.CommitEnrollResponse, error) {
 	if c := l.c.Load(); c != nil {
 		return c.CommitEnroll(ctx, in, opts...)
