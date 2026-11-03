@@ -143,6 +143,15 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
   executor side (CLI secret input, as for PVE tokens). It is stored in the
   vault, sent only as `cipassword` and never shown or logged. SSH-key-only
   access stays the default.
+- **Roles of the provision RPCs** (amendment, decided 2026-11-03 by the
+  maintainer, variant B, like guest join; previously open): proposing a
+  provision (`ProposePVEGuestProvision`) is allowed for the `server` and
+  `admin` roles; committing, that is running an approved provision
+  (`CommitPVEGuestProvision`), is allowed for `server` and `admin` too, but
+  only with a valid permit approved under the existing approval semantics
+  (MEDIUM: user presence, HIGH: user verification, hardened HIGH: CLI
+  approval only). The server starts the run after the WebAuthn approval;
+  the PV-08 run page follows it. Every other role is denied both RPCs.
 
 ### 4. Join (enrollment)
 
