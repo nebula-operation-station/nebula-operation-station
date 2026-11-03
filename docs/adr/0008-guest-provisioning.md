@@ -278,9 +278,10 @@ private key is probably readable by every `VM.Audit` holder through PVE's
 cloud-init dump endpoint (see "Exposure through the PVE API" below). Until
 the lab check PK-10a answers that, the decision is recorded as **"(c)
 accepted only with mitigations M1 and M2 together, lab check required"**
-(previously "M1 or M2"; M1 alone is not sufficient, see the variants). If
-they cannot both hold, (c) is not viable as specified and the options are listed
-under "If the lab check fails". Mechanism and threat model written by
+(previously "M1 or M2"; M1 alone is not sufficient, see the variants).
+(c) is not viable whenever M1 or M2 cannot hold, including M1 failing or an
+endpoint M1/M2 do not cover (previously "if they cannot both hold"); the
+options are then listed under "If the lab check fails". Mechanism and threat model written by
 Claude. Nothing here was tried in a lab; every PVE and cloud-init behaviour
 marked *verify* is a release gate (ticket PK-10).
 
@@ -397,8 +398,9 @@ mitigations M1 and M2.
 
 ### If the lab check fails
 
-If M1 and M2 cannot both hold, (c) is not viable as specified. That is the
-case when PK-10a shows any of: M2 cannot be implemented reliably (ACL read
+(c) is not viable whenever M1 or M2 cannot hold, including M1 failing or an
+endpoint M1/M2 do not cover (previously "if M1 and M2 cannot both hold").
+That is the case when PK-10a shows any of: M2 cannot be implemented reliably (ACL read
 not permitted, roles not resolvable); M1 does not work (for example,
 clearing `cicustom` regenerates the cloud-init drive before cloud-init has
 read it, or the snippet cannot be removed in time); or a `VM.Audit` or
@@ -411,10 +413,12 @@ could not be built.) The maintainer then chooses among:
 2. Option (a), a scoped guest-agent token on enabled guests only, with its
    known cost (guest file read as root) and the bootstrap gap on vendor
    images.
-3. (c) as an explicit per-remote operator opt-in with the risk stated in
-   the UI ("every user with read access to this guest can impersonate it
-   until first contact"), never the default. Claude does not recommend
-   this.
+
+There is no third option within this amendment. (Previously: "3. (c) as an
+explicit per-remote operator opt-in with the risk stated in the UI". Removed,
+because it would allow (c) without M1 and M2, which this amendment never
+allows. Any opt-in of that kind would be a separate future amendment with its
+own review and is not proposed here.)
 
 ### Decision
 
