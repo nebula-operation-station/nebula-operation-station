@@ -8,9 +8,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/netip"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -35,20 +39,128 @@ var pveRepinArtifact = []byte("nebula.pve.repin 1.0.0\nReplace the approved remo
 // that time. Its Client is the production pveMutationClient over the
 // remote's pinned trust (pveReadTrust) and approved endpoints: writes
 // carry only the action token, reads only the read token, and a write is
-// never failed over or resent once it may have reached an endpoint. A
-// pin or trust failure seen by any of its calls blocks the remote
-// persistently (blockPveRead), so further mutations are refused.
-// TaskIDs stays unset: provisioning (PveProvisioner) is not wired here
-// (pv05w), so provisioning steps are never identified by this engine.
+// never failed over or resent once it may have reached an endpoint. The
+// client dispatches the guest power, provisioning and image steps
+// (DispatchGuestPowerStep, DispatchProvisionStep, DispatchImageStep) and
+// names their task types and IDs. A pin or trust failure seen by any of
+// its calls blocks the remote persistently (blockPveRead), so further
+// mutations are refused. When the executor has a state directory
+// (SetBackupDirs, called before serving), TaskIDs is the executor's one
+// PveProvisioner (pveProvisioner), so provisioning steps are identified
+// and reconciled also after a restart; without one, provisioning is
+// unavailable and its steps are never identified.
 func (s *Service) pveMutations() *PveMutations {
 	s.pveMutOnce.Do(func() {
 		client := &pveMutationClient{trust: s.pveReadTrust, secrets: s.vault, now: s.clock,
 			// A trust failure on the mutation path blocks the remote as
 			// on the read path; the step itself already fails closed.
 			block: func(remoteID string) { _ = s.blockPveRead(remoteID) }}
-		s.pveMut = &PveMutations{DB: s.db, Auth: s.auth, Vault: s.vault, Client: client, Now: s.clock, Log: s.log}
+		m := &PveMutations{DB: s.db, Auth: s.auth, Vault: s.vault, Client: client, Now: s.clock, Log: s.log}
+		if p := s.newPveProvisioner(m); p != nil {
+			m.TaskIDs = p
+		}
+		s.pveMut = m
 	})
 	return s.pveMut
+}
+
+// Fixed identity of the provisioning and template actions the executor
+// proposes itself.
+const (
+	pveGuestProvisionVersion = "1.0.0"
+	pveImagePrepareVersion   = "1.0.0"
+	// pveGuestProvisionLifetime is how long a proposed provisioning permit
+	// (and its VMID reservation) can be approved and run.
+	pveGuestProvisionLifetime = 30 * time.Minute
+	// State files of provisioning in the executor's data directory.
+	pveTemplatesFile    = "pve-templates.json"
+	pveVMIDsFile        = "pve-vmids.json"
+	pveCatalogStateFile = "pve-catalog.json"
+)
+
+var (
+	pveGuestProvisionArtifact = []byte(PveGuestProvisionAction + " " + pveGuestProvisionVersion + "\nProvision one guest from a prepared template.\n")
+	pveImagePrepareArtifact   = []byte(PveImagePrepareAction + " " + pveImagePrepareVersion + "\nPrepare a PVE template from a catalog image.\n")
+	// pveGuestProvisionStagePlan is the stage plan hash of a provisioning
+	// (one node, the fixed step plan in the parameters).
+	pveGuestProvisionStagePlan = func() string {
+		s, _ := canonical.HashParameters([]byte(`{"plan":"pve-guest-provision-v1"}`))
+		return s
+	}()
+)
+
+// newPveProvisioner builds the executor's one provisioner on m, with its
+// state in the data directory: template records, VMID reservations and the
+// image catalog rollback state. The NOS automation key is the public key
+// of the keyring credential a request names; the reader uses the read
+// token over the remote's pinned transport (pveProvisionReaderAPI). It
+// returns nil when the executor has no data directory.
+func (s *Service) newPveProvisioner(m *PveMutations) *PveProvisioner {
+	if s.dataDir == "" {
+		return nil
+	}
+	imgs := &PveImages{Mutations: m,
+		Catalog:   &PveImageCatalog{State: &FilePveCatalogState{Path: filepath.Join(s.dataDir, pveCatalogStateFile)}},
+		Templates: &FilePveTemplateStore{Path: filepath.Join(s.dataDir, pveTemplatesFile)},
+		Artifact:  pveImagePrepareArtifact, ModuleVersion: pveImagePrepareVersion}
+	return &PveProvisioner{Mutations: m, Images: imgs, Reader: pveProvisionReaderAPI{agent: pveGuestAgentAPI{s: s}},
+		VMIDs: &FilePveVMIDStore{Path: filepath.Join(s.dataDir, pveVMIDsFile)}, Passwords: s.vault,
+		AutomationKeys: s.automationKey, Artifact: pveGuestProvisionArtifact, ModuleVersion: pveGuestProvisionVersion}
+}
+
+// automationKey returns the authorized_keys form of the public key of the
+// keyring credential ref. It fails while the keyring is locked.
+func (s *Service) automationKey(ref string) (string, error) {
+	if s.keys == nil {
+		return "", errors.New("executor: no keyring")
+	}
+	signer, err := s.keys.Signer(ref)
+	if err != nil {
+		return "", fmt.Errorf("automation credential: %w", err)
+	}
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey()))), nil
+}
+
+// pveProvisioner returns the executor's one provisioner (the TaskIDs of
+// its one mutation engine), or nil when provisioning is unavailable.
+func (s *Service) pveProvisioner() *PveProvisioner {
+	p, _ := s.pveMutations().TaskIDs.(*PveProvisioner)
+	return p
+}
+
+// pveProvisionReaderAPI is the production PveProvisionReader: typed pveapi
+// reads with the read token over the remote's pinned TLS channel, with the
+// read slots and trust blocking of every provider read.
+type pveProvisionReaderAPI struct {
+	agent pveGuestAgentAPI
+}
+
+// ClusterInventory implements PveProvisionReader.
+func (r pveProvisionReaderAPI) ClusterInventory(ctx context.Context, rm executordb.PveRemote, read pveapi.TokenSupplier) (pveapi.ClusterInventory, error) {
+	c, watch, release, err := r.agent.client(ctx, rm, read)
+	if err != nil {
+		return pveapi.ClusterInventory{}, err
+	}
+	defer release()
+	inv, err := c.EnumerateCluster(ctx)
+	if terr := r.agent.checkTrust(rm, watch); terr != nil {
+		return pveapi.ClusterInventory{}, terr
+	}
+	return inv, err
+}
+
+// NodeStorage implements PveProvisionReader.
+func (r pveProvisionReaderAPI) NodeStorage(ctx context.Context, rm executordb.PveRemote, node, storage string, read pveapi.TokenSupplier) (pveapi.Storage, error) {
+	c, watch, release, err := r.agent.client(ctx, rm, read)
+	if err != nil {
+		return pveapi.Storage{}, err
+	}
+	defer release()
+	st, err := c.GetStorage(ctx, node, storage)
+	if terr := r.agent.checkTrust(rm, watch); terr != nil {
+		return pveapi.Storage{}, terr
+	}
+	return st, err
 }
 
 // ReconcilePVEMutations observes open PVE mutation steps until ctx ends:
@@ -563,6 +675,210 @@ func (s *Service) CommitPVEGuestPower(ctx context.Context, in *pb.CommitPVEGuest
 	out := &pb.CommitPVEGuestPowerResponse{ExecutionId: res.ExecutionID}
 	for _, st := range res.Steps {
 		out.Steps = append(out.Steps, &pb.PVEGuestPowerStep{State: st.State, Upid: st.UPID, TaskType: st.TaskType})
+	}
+	return out, nil
+}
+
+// Limits of a provisioning spec from the RPC, checked before parsing; the
+// provisioner validates every field again (PveProvisioner.config).
+const (
+	// maxPveProvisionSSHKeys bounds the further keys (the automation key
+	// takes one of pveapi.MaxSSHKeys).
+	maxPveProvisionSSHKeys = pveapi.MaxSSHKeys - 1
+	// maxPveProvisionAddrBytes bounds one textual address or prefix.
+	maxPveProvisionAddrBytes = 64
+)
+
+// errPveProvisionSpec is a malformed provisioning spec from the RPC.
+var errPveProvisionSpec = fmt.Errorf("%w: malformed spec", ErrPveProvisionInvalid)
+
+func parsePveAddr(s string) (netip.Addr, error) {
+	if len(s) > maxPveProvisionAddrBytes {
+		return netip.Addr{}, errPveProvisionSpec
+	}
+	a, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Addr{}, errPveProvisionSpec
+	}
+	return a, nil
+}
+
+// provisionRequestFromProto converts an untrusted spec. Counts and numeric
+// ranges are checked before conversion; everything else is validated by
+// the provisioner.
+func provisionRequestFromProto(in *pb.PVEGuestProvisionSpec) (PveProvisionRequest, error) {
+	if in == nil || in.GetTemplate() == nil || in.GetNic() == nil {
+		return PveProvisionRequest{}, errPveProvisionSpec
+	}
+	if len(in.GetSshKeys()) > maxPveProvisionSSHKeys || len(in.GetNameservers()) > pveapi.MaxNameservers ||
+		len(in.GetSearchDomains()) > pveapi.MaxSearchDomains ||
+		in.GetCores() > pveapi.MaxCores || in.GetMemoryMib() > pveapi.MaxMemoryMiB || in.GetDiskGib() > pveapi.MaxDiskGiB ||
+		in.GetNic().GetVlan() > pveapi.MaxVLANTag {
+		return PveProvisionRequest{}, errPveProvisionSpec
+	}
+	t, nic := in.GetTemplate(), in.GetNic()
+	req := PveProvisionRequest{
+		RemoteID: in.GetRemoteId(), Node: in.GetNode(), Storage: in.GetStorage(),
+		Template: PveTemplateBinding{
+			PveTemplateKey: PveTemplateKey{RemoteID: t.GetRemoteId(), Node: t.GetNode(), Storage: t.GetStorage(), ImageID: t.GetImageId()},
+			VMID:           t.GetVmid(), Generation: t.GetGeneration(), SourceSHA256: t.GetSourceSha256(),
+		},
+		VMID: in.GetVmid(), Name: in.GetName(), Cores: int(in.GetCores()), MemoryMiB: int(in.GetMemoryMib()),
+		Disk: in.GetDisk(), DiskGiB: int64(in.GetDiskGib()),
+		NIC:    PveProvisionNIC{Model: nic.GetModel(), Bridge: nic.GetBridge(), VLAN: int(nic.GetVlan()), MAC: nic.GetMac()},
+		CIUser: in.GetCiUser(), SSHKeys: append([]string(nil), in.GetSshKeys()...),
+		SearchDomains: append([]string(nil), in.GetSearchDomains()...),
+		PasswordID:    in.GetPasswordId(), Start: in.GetStart(), AutomationCredentialRef: in.GetAutomationCredentialRef(),
+	}
+	for _, s := range in.GetNameservers() {
+		a, err := parsePveAddr(s)
+		if err != nil {
+			return PveProvisionRequest{}, err
+		}
+		req.Nameservers = append(req.Nameservers, a)
+	}
+	if b := in.GetIpam(); b != nil {
+		if b.GetVlan() > pveapi.MaxVLANTag || len(b.GetPrefix()) > maxPveProvisionAddrBytes {
+			return PveProvisionRequest{}, errPveProvisionSpec
+		}
+		prefix, err := netip.ParsePrefix(b.GetPrefix())
+		if err != nil {
+			return PveProvisionRequest{}, errPveProvisionSpec
+		}
+		addr, err := parsePveAddr(b.GetAddress())
+		if err != nil {
+			return PveProvisionRequest{}, err
+		}
+		var gw netip.Addr
+		if b.GetGateway() != "" {
+			if gw, err = parsePveAddr(b.GetGateway()); err != nil {
+				return PveProvisionRequest{}, err
+			}
+		}
+		req.IPAM = &PveIPAMBinding{NetworkID: b.GetNetworkId(), Pool: b.GetPool(), Prefix: prefix, Gateway: gw,
+			VLAN: int(b.GetVlan()), Address: addr, ReservedBy: b.GetReservedBy(), ReservedAtUnix: b.GetReservedAtUnix()}
+	}
+	return req, nil
+}
+
+// pveGuestProvisionRPCError maps provisioning errors to fixed status
+// texts; no remote text reaches the caller.
+func pveGuestProvisionRPCError(err error) error {
+	switch {
+	case permit.CodeOf(err) != "":
+		return toStatus(err)
+	case errors.Is(err, ErrPveProvisionInvalid), errors.Is(err, ErrPveProvisionUnsupported), errors.Is(err, ErrPveMutationRequest):
+		return status.Error(codes.InvalidArgument, "pve guest provision: invalid or unsupported spec, template, network, key or password id")
+	case errors.Is(err, ErrPveTemplateNotPrepared), errors.Is(err, ErrPveTemplateChanged):
+		return status.Error(codes.FailedPrecondition, "pve guest provision: the template is not prepared or changed; prepare it again")
+	case errors.Is(err, ErrPveVMIDTaken):
+		return status.Error(codes.FailedPrecondition, "pve guest provision: the vmid is in use or not reserved for this execution")
+	case errors.Is(err, ErrPveInventoryIncomplete):
+		return status.Error(codes.FailedPrecondition, "pve guest provision: the cluster guest list is incomplete; a free vmid cannot be proven")
+	case errors.Is(err, ErrPveGuestPassword):
+		return status.Error(codes.FailedPrecondition, "pve guest provision: the guest password is missing or changed")
+	case errors.Is(err, ErrPveTargetChanged), errors.Is(err, ErrPveRemoteChanged):
+		return status.Error(codes.FailedPrecondition, "pve guest provision: the node, storage or remote changed; propose again")
+	case errors.Is(err, ErrPveReadOnly):
+		return status.Error(codes.FailedPrecondition, "pve guest provision: the remote has no action credential")
+	case errors.Is(err, ErrPveTargetBusy):
+		return status.Error(codes.Unavailable, "pve guest provision: another mutation of the node is in progress")
+	case errors.Is(err, ErrPveMutationDenied), errors.Is(err, ErrPvePermitFinal), errors.Is(err, ErrPveMutationAlreadyRun):
+		return status.Error(codes.PermissionDenied, "pve guest provision: no approved permit covers this provisioning")
+	case errors.Is(err, vault.ErrLocked):
+		return status.Error(codes.FailedPrecondition, "pve guest provision requires an unlocked vault")
+	case errors.Is(err, executordb.ErrRemoteNotFound):
+		return status.Error(codes.NotFound, "pve remote not found")
+	default:
+		return status.Error(codes.Internal, "pve guest provision failed")
+	}
+}
+
+// pveProvisionRunOutcome reports whether err is the outcome of steps this
+// run dispatched (reported with their durable states), not a refusal.
+func pveProvisionRunOutcome(err error) bool {
+	if errors.Is(err, ErrPveMutationDenied) || errors.Is(err, ErrPveJobStore) || permit.CodeOf(err) != "" {
+		return false
+	}
+	return errors.Is(err, ErrPveStepFailed) || errors.Is(err, ErrPveStepRunning) || errors.Is(err, ErrPveDispatchUncertain)
+}
+
+// errPveProvisionUnavailable is returned when the executor has no
+// provisioner (no data directory).
+var errPveProvisionUnavailable = status.Error(codes.FailedPrecondition, "pve guest provision: provisioning is not available on this executor")
+
+// ProposePVEGuestProvision proposes one pve.guest.provision (ADR 0008
+// section 3; roles server and admin). The executor binds the template
+// record, reserves the VMID against the live guest list and registers the
+// permit at its own floor (base MEDIUM; the authority's risk policy raises
+// it for criticality). The caller's input cannot lower it.
+func (s *Service) ProposePVEGuestProvision(ctx context.Context, in *pb.ProposePVEGuestProvisionRequest) (*pb.ProposePVEGuestProvisionResponse, error) {
+	req, err := provisionRequestFromProto(in.GetSpec())
+	if err != nil {
+		return nil, pveGuestProvisionRPCError(err)
+	}
+	p := s.pveProvisioner()
+	if p == nil {
+		return nil, errPveProvisionUnavailable
+	}
+	id, err := newExecutionID()
+	if err != nil {
+		return nil, status.Error(codes.Internal, "execution id")
+	}
+	pp, err := p.ProposalRequest(ctx, req, id, canonical.RiskMedium, pveGuestProvisionStagePlan, s.clock().Add(pveGuestProvisionLifetime))
+	if err != nil {
+		return nil, pveGuestProvisionRPCError(err)
+	}
+	res, err := s.auth.ProposeAtLeastMinimum(pp.Request, pp.Parameters)
+	if err != nil {
+		// No permit: the reservation would only block the VMID.
+		_ = p.VMIDs.ReleaseVMID(req.RemoteID, pp.VMID, id)
+		return nil, pveGuestProvisionRPCError(err)
+	}
+	out, err := s.permitResponse(res.Permit)
+	if err != nil {
+		return nil, err
+	}
+	return &pb.ProposePVEGuestProvisionResponse{Permit: out, ExecutionId: id, Vmid: pp.VMID, CapacityWarnings: pp.Capacity.Warnings()}, nil
+}
+
+// CommitPVEGuestProvision runs an approved pve.guest.provision (roles
+// server and admin). It runs only with the permit approved for exactly
+// this spec, execution and VMID under the normal approval semantics; the
+// provisioner rebuilds the parameters from fresh reads, so anything that
+// changed refuses the permit. Once a step is recorded the response carries
+// the durable step states; an uncertain step is reconciled, never resent.
+// A failed run leaves the guest for inspection (guest_kept).
+func (s *Service) CommitPVEGuestProvision(ctx context.Context, in *pb.CommitPVEGuestProvisionRequest) (*pb.CommitPVEGuestProvisionResponse, error) {
+	req, err := provisionRequestFromProto(in.GetSpec())
+	if err != nil {
+		return nil, pveGuestProvisionRPCError(err)
+	}
+	d, err := canonical.ParseDigest(in.GetExecutionDigest())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "pve guest provision: malformed execution digest")
+	}
+	req.Digest, req.ExecutionID = d, in.GetExecutionId()
+	p := s.pveProvisioner()
+	if p == nil {
+		return nil, errPveProvisionUnavailable
+	}
+	res, err := p.Provision(ctx, req)
+	// Only this run's outcome is reported as step states: success, or a
+	// step that failed, is still running or is uncertain. Any other error
+	// (no approved permit, the permit already used, a changed spec) is
+	// refused as such, even when the execution has steps from an earlier
+	// run, so a replay never reads like a run.
+	if len(res.Steps) == 0 || (err != nil && !pveProvisionRunOutcome(err)) {
+		if err == nil {
+			err = ErrPveJobStore
+		}
+		return nil, pveGuestProvisionRPCError(err)
+	}
+	out := &pb.CommitPVEGuestProvisionResponse{ExecutionId: res.ExecutionID, Vmid: res.VMID,
+		GuestConfigDigest: res.GuestConfigDigest, GuestKept: res.GuestKept}
+	for _, st := range res.Steps {
+		out.Steps = append(out.Steps, &pb.PVEGuestPowerStep{State: string(st.State), Upid: st.UPID, TaskType: st.TaskType})
 	}
 	return out, nil
 }
