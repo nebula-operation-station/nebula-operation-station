@@ -561,8 +561,9 @@ unnecessary").
    after rotation. If either step fails (for example node unreachable),
    the same single-dispatch rule and "snippet cleanup pending" flag apply
    as for failure cleanup below (previously: retry and flag were defined
-   only for failures before start; later: an automatic retry with backoff,
-   see *One dispatch per step*), and the join is not marked done while the
+   only for failures before start; later an automatic retry with backoff,
+   since superseded by the single-dispatch rule, see *One dispatch per
+   step*), and the join is not marked done while the
    flag is set.
 
    **Failure cleanup** (previously: "a failed provisioning before start
@@ -586,6 +587,27 @@ unnecessary").
    the moment of failure: it is never adopted, never pinned by a join and
    never reused; a new attempt uses a new generation and a new pair.
 
+   *Forward step outcome unknown* (previously undefined: the trigger list
+   covered only failed or refused forward steps, so a lost response of a
+   clone, config set or resize left open whether cleanup ran). Consistent
+   with spec 07 "no automatic rollback ... after an uncertain mutation", a
+   clone, config set or resize whose outcome is unknown (for example the
+   response was lost) triggers no automatic `cicustom` delete and no
+   snippet removal while it is unknown, and is never redispatched. (A lost
+   snippet put is covered by *Reconciling a lost snippet write*.) The
+   executor reconciles read-only (stored UPID, or the node task list as for
+   the start below; for a config set or resize, the guest config read with
+   the read credential). Only within the same executor lifetime and while
+   the job's permit is still valid:
+   - resolved failed → failure cleanup as above;
+   - resolved OK → the job continues with its next forward step;
+   - unresolved when `forwardOutcomeMaxWait` (named constant, proposed 10
+     minutes, injected clock) elapses → no further forward or cleanup step,
+     the run is flagged "snippet cleanup pending", and only the PK-08
+     action under fresh approval cleans up.
+   A resolution observed after a restart or lock, or after the permit
+   ended, triggers no mutation: the run is flagged and PK-08 applies.
+
    *Start outcome unknown* (previously undefined, so the snippet could stay
    on the node indefinitely; later "Resolved OK → M1; resolved failed →
    failure cleanup" without a lifetime limit, which could be read as
@@ -601,7 +623,16 @@ unnecessary").
      The job enters `reconciling` (ADR 0006). The executor may identify the
      task read-only from the task list of the recorded node: a `qmstart`
      task for the recorded VMID, issued by the NOS mutation token, started
-     no earlier than the persisted intent timestamp. Exactly one match →
+     no earlier than the persisted intent timestamp minus
+     `taskClockSkewMax` (named constant, proposed 2 minutes; previously the
+     node's task start time was compared with the executor's timestamp
+     without a skew rule, so a node clock running ahead could make an
+     earlier NOS `qmstart` the single match). The widened window makes an
+     earlier start within the skew an ambiguous second match, a task whose
+     UPID is already recorded for another job or step is excluded, and the
+     executor reads the node's clock (`GET /nodes/{node}/time`, read
+     credential); an offset larger than `taskClockSkewMax` leaves the
+     outcome `unknown`. Exactly one match →
      its UPID is persisted and reconciliation continues as above. Zero or
      several matches, an unreadable task list, or an expired task record →
      the outcome stays `unknown`: no cleanup step runs (the guest may be
@@ -644,8 +675,11 @@ unnecessary").
    PK-08 operator action, which needs a fresh approval under the existing
    semantics (a new permit for the cleanup steps only, at the job's risk
    level or, after a risk raise, at the raised level; never lower). The
-   persisted cleanup state holds only the pending flag and the recorded
-   target; it grants no authority.
+   persisted cleanup state holds the pending flag, the recorded target and
+   the spent step claims with their fsynced intents, which the read-only
+   reconciliation of an unknown outcome needs (previously "only the
+   pending flag and the recorded target", which contradicted the persisted
+   claims); none of it grants authority.
 
    *External change and compensation authority* (previously: "a forward
    step refused because the target or registry changed stops the forward
@@ -745,6 +779,23 @@ unnecessary").
      which again claims one single-use authorization per dispatch. A failed
      `cicustom` delete does not stop the independent `pve.snippet.remove`
      step, and vice versa; each is claimed and dispatched once.
+   - *Serialization with PK-08* (previously undefined, so after
+     `startOutcomeMaxWait` an automatic step and a PK-08 approval could
+     both dispatch on one recorded target under different step IDs, which
+     the spent-ID check does not catch). The executor holds one cleanup
+     lock per recorded target (recorded node host ID plus snippet path for
+     `pve.snippet.remove`; remote, node and VMID for the `cicustom`
+     delete). Every cleanup dispatch, automatic or PK-08, takes that lock
+     in the same atomic step as its claim and holds it until the dispatch
+     call returns. Whichever acquires the lock first wins; the other
+     refuses without dispatching. When a PK-08 approval claims its first
+     step, every not yet claimed automatic cleanup authorization of the job
+     is revoked in the same transaction, so no automatic step fires
+     afterwards. A PK-08 claim that meets an in-flight automatic step
+     refuses ("automatic cleanup in flight"); its approval is not spent and
+     the operator re-approves once that outcome is shown. Automatic cleanup
+     exists only within one executor lifetime, so the lock needs no
+     persistence; the spent claims are persisted as above.
    - Read-only checks (for example `pve.snippet.stat`, reading the guest
      config for the VMID proof, polling a stored UPID) are not mutations and
      may repeat; they never grant or extend mutation authority.
