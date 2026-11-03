@@ -35,6 +35,16 @@ const (
 	// stream; each write extends the write deadline by writeWindow.
 	keepAliveInterval = 15 * time.Second
 	writeWindow       = 2 * keepAliveInterval
+	// streamRecheckInterval is how often an open stream re-validates its
+	// session (without recording activity); after logout or expiry the
+	// stream ends within it and frees its slot.
+	streamRecheckInterval = 15 * time.Second
+	// maxStreamLifetime caps one stream; the client then reconnects
+	// (EventSource does so on its own) and the reconnect is checked like
+	// any new request. The session's absolute expiry ends it earlier.
+	maxStreamLifetime = 30 * time.Minute
+	// recheckTimeout bounds one session re-validation.
+	recheckTimeout = 5 * time.Second
 )
 
 // Options configure the live endpoints.
@@ -51,6 +61,13 @@ type Options struct {
 	// Leases returns the current telemetry leases (P1-26). Nil means no
 	// box is ever resolved.
 	Leases func(ctx context.Context) ([]pvecollect.TelemetryLease, error)
+	// Recheck re-validates the session of an open stream and returns its
+	// absolute expiry (zero if unknown). It must not record activity (a
+	// stream must not keep an idle session alive); PeekSession builds it
+	// from auth.Store.Peek. It runs when the stream opens and every
+	// streamRecheckInterval; the stream ends once it reports false. Nil
+	// means only maxStreamLifetime bounds a stream.
+	Recheck func(ctx context.Context, r *http.Request) (time.Time, bool)
 	// Tree returns the org-chart tree; it binds a node box to its remote
 	// and a guest box to the incarnation generation (and managed-host
 	// link) the chart shows. Nil means node and guest boxes are not
@@ -65,6 +82,11 @@ type Handler struct {
 	session func(r *http.Request) (string, bool)
 	leases  func(ctx context.Context) ([]pvecollect.TelemetryLease, error)
 	tree    func(ctx context.Context) (pveinventory.Tree, error)
+	recheck func(ctx context.Context, r *http.Request) (time.Time, bool)
+	// recheckEvery and maxLifetime are streamRecheckInterval and
+	// maxStreamLifetime; tests shorten them.
+	recheckEvery time.Duration
+	maxLifetime  time.Duration
 }
 
 // New returns a Handler. Hub is required.
@@ -78,7 +100,39 @@ func New(o Options) (*Handler, error) {
 	if o.Log == nil {
 		o.Log = slog.Default()
 	}
-	return &Handler{hub: o.Hub, log: o.Log, session: o.Session, leases: o.Leases, tree: o.Tree}, nil
+	return &Handler{
+		hub: o.Hub, log: o.Log, session: o.Session, leases: o.Leases, tree: o.Tree, recheck: o.Recheck,
+		recheckEvery: streamRecheckInterval, maxLifetime: maxStreamLifetime,
+	}, nil
+}
+
+// PeekSession returns an Options.Recheck over a session store's Peek
+// (auth.Store.Peek, which never moves last_seen): the stream's session
+// cookie must still name a valid session, and the same one the login
+// wrapper authenticated the stream with.
+func PeekSession(peek func(ctx context.Context, token string) (auth.Session, error)) func(context.Context, *http.Request) (time.Time, bool) {
+	return func(ctx context.Context, r *http.Request) (time.Time, bool) {
+		c, err := r.Cookie(auth.CookieName)
+		if err != nil {
+			return time.Time{}, false
+		}
+		sess, err := peek(ctx, c.Value)
+		if err != nil {
+			return time.Time{}, false
+		}
+		if orig, ok := auth.SessionFrom(r.Context()); ok &&
+			(orig.CredentialID != sess.CredentialID || !orig.CreatedAt.Equal(sess.CreatedAt)) {
+			return time.Time{}, false
+		}
+		return sess.ExpiresAt, true
+	}
+}
+
+// recheckSession runs h.recheck with a bounded context.
+func (h *Handler) recheckSession(r *http.Request) (time.Time, bool) {
+	ctx, cancel := context.WithTimeout(r.Context(), recheckTimeout)
+	defer cancel()
+	return h.recheck(ctx, r)
 }
 
 // webSession keys a request by its web session: the credential and the
@@ -101,7 +155,9 @@ func (h *Handler) Register(mux *http.ServeMux) {
 // server wraps it in the login check; this check is the backstop). On
 // connect it sends a "hello" event carrying the viewer ID; the client
 // then posts its visible boxes to Targets with that ID. Disconnecting
-// releases every target of the viewer.
+// releases every target of the viewer. The stream re-validates its
+// session every streamRecheckInterval and ends when the session is gone,
+// at the session's absolute expiry, or after maxStreamLifetime.
 func (h *Handler) Events(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -111,6 +167,17 @@ func (h *Handler) Events(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		http.Error(w, "login required", http.StatusUnauthorized)
 		return
+	}
+	deadline := time.Now().Add(h.maxLifetime)
+	if h.recheck != nil {
+		exp, ok := h.recheckSession(r)
+		if !ok {
+			http.Error(w, "login required", http.StatusUnauthorized)
+			return
+		}
+		if !exp.IsZero() && exp.Before(deadline) {
+			deadline = exp
+		}
 	}
 	viewerID, err := newViewerID()
 	if err != nil {
@@ -139,10 +206,32 @@ func (h *Handler) Events(w http.ResponseWriter, r *http.Request) {
 	}
 	keep := time.NewTicker(keepAliveInterval)
 	defer keep.Stop()
+	life := time.NewTimer(time.Until(deadline))
+	defer life.Stop()
+	var recheckC <-chan time.Time
+	if h.recheck != nil {
+		rt := time.NewTicker(h.recheckEvery)
+		defer rt.Stop()
+		recheckC = rt.C
+	}
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-life.C:
+			// Lifetime cap or session expiry: the client reconnects.
+			return
+		case <-recheckC:
+			exp, ok := h.recheckSession(r)
+			if !ok {
+				// Logged out or expired: end the stream (the deferred
+				// Remove releases its targets and frees its slot).
+				return
+			}
+			if !exp.IsZero() && exp.Before(deadline) {
+				deadline = exp
+				life.Reset(time.Until(deadline))
+			}
 		case <-keep.C:
 			if writeRaw(w, rc, ": keepalive\n\n") != nil {
 				return

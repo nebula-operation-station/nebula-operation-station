@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync/atomic"
 	"time"
 
@@ -50,7 +51,10 @@ func (s *hubSink) RecordTelemetry(ctx context.Context, smp pvecollect.TelemetryS
 
 // newLiveChart builds the live chart: an on-demand-only telemetry
 // scheduler over SSH telemetry reads, the fan-out hub and the handler.
-func newLiveChart(exec liveExecutor, hosts pvecollect.TelemetryHosts, tree func(context.Context) (pveinventory.Tree, error), log *slog.Logger) (*liveChart, error) {
+// recheck re-validates an open stream's session without recording
+// activity (live.PeekSession over the web session store).
+func newLiveChart(exec liveExecutor, hosts pvecollect.TelemetryHosts, tree func(context.Context) (pveinventory.Tree, error),
+	recheck func(context.Context, *http.Request) (time.Time, bool), log *slog.Logger) (*liveChart, error) {
 	lc := &liveChart{exec: exec, log: log, now: time.Now}
 	lc.leases.Store(&[]pvecollect.TelemetryLease{})
 	sink := &hubSink{}
@@ -69,7 +73,8 @@ func newLiveChart(exec liveExecutor, hosts pvecollect.TelemetryHosts, tree func(
 		Leases: func(context.Context) ([]pvecollect.TelemetryLease, error) {
 			return *lc.leases.Load(), nil
 		},
-		Tree: tree,
+		Tree:    tree,
+		Recheck: recheck,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("live chart handler: %w", err)

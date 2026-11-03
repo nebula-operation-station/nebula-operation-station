@@ -43,6 +43,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/middleware"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui/live"
 )
 
 // DefaultConfigPath is the default location of the server configuration
@@ -381,7 +382,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	// Live org-chart values (ADR 0006 P1-37): SSE behind the same
 	// session check as the pages.
 	chartTree := func(ctx context.Context) (pveinventory.Tree, error) { return pveStore.ChartTree(ctx, time.Now()) }
-	lc, err := newLiveChart(exec, store, chartTree, log)
+	lc, err := newLiveChart(exec, store, chartTree, live.PeekSession(sessions.Peek), log)
 	if err != nil {
 		return err
 	}

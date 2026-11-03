@@ -69,7 +69,7 @@ func (noHosts) Get(context.Context, string) (inventory.Host, error) {
 }
 
 func TestLiveRefreshFailureClearsLeases(t *testing.T) {
-	lc, err := newLiveChart(failingExec{}, noHosts{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	lc, err := newLiveChart(failingExec{}, noHosts{}, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

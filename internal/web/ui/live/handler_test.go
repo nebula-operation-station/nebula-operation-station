@@ -11,11 +11,13 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecollect"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
 )
 
 const sessionHeader = "X-Test-Session"
@@ -386,5 +388,142 @@ func TestDisconnectedStreamReleasesTargets(t *testing.T) {
 	}
 	if code, _ := postTargets(t, srv.URL, "s", boxesBody(s.viewer)); code != http.StatusGone {
 		t.Fatalf("targets after disconnect = %d, want 410", code)
+	}
+}
+
+func viewerCount(h *Hub) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.viewers)
+}
+
+// recheckRig serves a handler whose Recheck answers from valid/expires.
+type recheckRig struct {
+	hub     *Hub
+	sched   *recSched
+	hd      *Handler
+	srv     *httptest.Server
+	valid   atomic.Bool
+	expires atomic.Pointer[time.Time]
+}
+
+func newRecheckRig(t *testing.T, recheck bool, every, life time.Duration) *recheckRig {
+	t.Helper()
+	h, sched, _ := newRecHub(t)
+	rr := &recheckRig{hub: h, sched: sched}
+	rr.valid.Store(true)
+	rr.expires.Store(&time.Time{})
+	o := Options{Hub: h, Session: testSession,
+		Leases: func(context.Context) ([]pvecollect.TelemetryLease, error) {
+			return []pvecollect.TelemetryLease{{OnDemand: true, Targets: []pvecollect.TelemetryTarget{hostTarget("web01")}}}, nil
+		},
+	}
+	if recheck {
+		o.Recheck = func(context.Context, *http.Request) (time.Time, bool) {
+			return *rr.expires.Load(), rr.valid.Load()
+		}
+	}
+	hd, err := New(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hd.recheckEvery, hd.maxLifetime = every, life
+	mux := http.NewServeMux()
+	hd.Register(mux)
+	rr.hd, rr.srv = hd, httptest.NewServer(mux)
+	t.Cleanup(rr.srv.Close)
+	return rr
+}
+
+// streamEnds waits until the server ends the stream and the viewer's
+// slot and targets are freed.
+func (rr *recheckRig) streamEnds(t *testing.T, s *stream) {
+	t.Helper()
+	if name, _ := s.next(t); name != "" {
+		t.Fatalf("stream delivered %q instead of ending", name)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for viewerCount(rr.hub) != 0 || rr.sched.activeCount(s.viewer) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("after the stream ended: %d viewers, %d targets", viewerCount(rr.hub), rr.sched.activeCount(s.viewer))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// Logout (or idle expiry) ends an open stream at the next re-check and
+// frees its slot and targets.
+func TestLogoutEndsOpenStream(t *testing.T) {
+	rr := newRecheckRig(t, true, 50*time.Millisecond, time.Hour)
+	s := openStream(t, rr.srv.URL, "s")
+	if code, out := postTargets(t, rr.srv.URL, "s", boxesBody(s.viewer, `{"kind":"host","id":"web01"}`)); code != http.StatusOK || len(out.Granted) != 1 {
+		t.Fatalf("targets = %d %+v", code, out)
+	}
+	// Still valid: the stream survives several re-checks.
+	time.Sleep(200 * time.Millisecond)
+	if viewerCount(rr.hub) != 1 {
+		t.Fatal("stream ended while the session was valid")
+	}
+	rr.valid.Store(false)
+	rr.streamEnds(t, s)
+}
+
+// A stream ends at its session's absolute expiry.
+func TestStreamEndsAtSessionExpiry(t *testing.T) {
+	rr := newRecheckRig(t, true, time.Hour, time.Hour)
+	exp := time.Now().Add(300 * time.Millisecond)
+	rr.expires.Store(&exp)
+	s := openStream(t, rr.srv.URL, "s")
+	rr.streamEnds(t, s)
+}
+
+// A stream ends after its maximum lifetime (the client reconnects).
+func TestStreamLifetimeIsCapped(t *testing.T) {
+	if maxStreamLifetime > time.Hour || maxStreamLifetime <= 0 {
+		t.Fatalf("maxStreamLifetime = %s", maxStreamLifetime)
+	}
+	rr := newRecheckRig(t, false, time.Hour, 300*time.Millisecond)
+	s := openStream(t, rr.srv.URL, "s")
+	rr.streamEnds(t, s)
+}
+
+// A stream is refused when the re-check already fails on open.
+func TestStreamRefusedWhenRecheckFails(t *testing.T) {
+	rr := newRecheckRig(t, true, time.Hour, time.Hour)
+	rr.valid.Store(false)
+	req, _ := http.NewRequest(http.MethodGet, rr.srv.URL+EventsPath, nil)
+	req.Header.Set(sessionHeader, "s")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized || viewerCount(rr.hub) != 0 {
+		t.Fatalf("events with a gone session = %d (%d viewers)", resp.StatusCode, viewerCount(rr.hub))
+	}
+}
+
+func TestPeekSessionUsesTheStreamCookie(t *testing.T) {
+	exp := time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC)
+	var gotToken string
+	recheck := PeekSession(func(_ context.Context, token string) (auth.Session, error) {
+		gotToken = token
+		if token != "tok" {
+			return auth.Session{}, auth.ErrNoSession
+		}
+		return auth.Session{CredentialID: "c", ExpiresAt: exp}, nil
+	})
+	r := httptest.NewRequest(http.MethodGet, EventsPath, nil)
+	if _, ok := recheck(context.Background(), r); ok {
+		t.Fatal("no cookie accepted")
+	}
+	r.AddCookie(&http.Cookie{Name: auth.CookieName, Value: "gone"})
+	if _, ok := recheck(context.Background(), r); ok || gotToken != "gone" {
+		t.Fatalf("gone session accepted (token %q)", gotToken)
+	}
+	r = httptest.NewRequest(http.MethodGet, EventsPath, nil)
+	r.AddCookie(&http.Cookie{Name: auth.CookieName, Value: "tok"})
+	if got, ok := recheck(context.Background(), r); !ok || !got.Equal(exp) {
+		t.Fatalf("valid session = %v, %v", got, ok)
 	}
 }
