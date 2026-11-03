@@ -115,6 +115,8 @@ const (
 	ExecutorService_ListPVEAdminRemotes_FullMethodName             = "/nebula.executor.v1.ExecutorService/ListPVEAdminRemotes"
 	ExecutorService_ProposePVERepin_FullMethodName                 = "/nebula.executor.v1.ExecutorService/ProposePVERepin"
 	ExecutorService_CommitPVERepin_FullMethodName                  = "/nebula.executor.v1.ExecutorService/CommitPVERepin"
+	ExecutorService_ProposePVEGuestPower_FullMethodName            = "/nebula.executor.v1.ExecutorService/ProposePVEGuestPower"
+	ExecutorService_CommitPVEGuestPower_FullMethodName             = "/nebula.executor.v1.ExecutorService/CommitPVEGuestPower"
 	ExecutorService_ListPVERemotes_FullMethodName                  = "/nebula.executor.v1.ExecutorService/ListPVERemotes"
 	ExecutorService_ReadPVE_FullMethodName                         = "/nebula.executor.v1.ExecutorService/ReadPVE"
 	ExecutorService_AddPrivateRegistry_FullMethodName              = "/nebula.executor.v1.ExecutorService/AddPrivateRegistry"
@@ -454,6 +456,14 @@ type ExecutorServiceClient interface {
 	// Proposes a HIGH permit bound to current trust, endpoints and credentials.
 	ProposePVERepin(ctx context.Context, in *ProposePVERepinRequest, opts ...grpc.CallOption) (*ProposePVERepinResponse, error)
 	CommitPVERepin(ctx context.Context, in *CommitPVERepinRequest, opts ...grpc.CallOption) (*CommitPVERepinResponse, error)
+	// Typed PVE guest power actions (ADR 0006 P2-01): shutdown and reboot
+	// (base MEDIUM), stop and reset (base HIGH, reset QEMU only). The
+	// executor binds the exact live guest and verb and sets the risk to its
+	// own floor (verb base, guest/node/remote and linked-host criticality,
+	// unknown HIGH). Propose: role server or admin. Commit dispatches the
+	// approved action: role admin only.
+	ProposePVEGuestPower(ctx context.Context, in *ProposePVEGuestPowerRequest, opts ...grpc.CallOption) (*ProposePVEGuestPowerResponse, error)
+	CommitPVEGuestPower(ctx context.Context, in *CommitPVEGuestPowerRequest, opts ...grpc.CallOption) (*CommitPVEGuestPowerResponse, error)
 	// PVE provider reads (ADR 0006, P1-05). Role: server, admin,
 	// pve-collector. Metadata only: which remotes exist, their kind, ordered
 	// endpoints, trust generation and state. The trust pin is a SHA-256
@@ -1437,6 +1447,26 @@ func (c *executorServiceClient) CommitPVERepin(ctx context.Context, in *CommitPV
 	return out, nil
 }
 
+func (c *executorServiceClient) ProposePVEGuestPower(ctx context.Context, in *ProposePVEGuestPowerRequest, opts ...grpc.CallOption) (*ProposePVEGuestPowerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProposePVEGuestPowerResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ProposePVEGuestPower_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) CommitPVEGuestPower(ctx context.Context, in *CommitPVEGuestPowerRequest, opts ...grpc.CallOption) (*CommitPVEGuestPowerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitPVEGuestPowerResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_CommitPVEGuestPower_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *executorServiceClient) ListPVERemotes(ctx context.Context, in *ListPVERemotesRequest, opts ...grpc.CallOption) (*ListPVERemotesResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListPVERemotesResponse)
@@ -1837,6 +1867,14 @@ type ExecutorServiceServer interface {
 	// Proposes a HIGH permit bound to current trust, endpoints and credentials.
 	ProposePVERepin(context.Context, *ProposePVERepinRequest) (*ProposePVERepinResponse, error)
 	CommitPVERepin(context.Context, *CommitPVERepinRequest) (*CommitPVERepinResponse, error)
+	// Typed PVE guest power actions (ADR 0006 P2-01): shutdown and reboot
+	// (base MEDIUM), stop and reset (base HIGH, reset QEMU only). The
+	// executor binds the exact live guest and verb and sets the risk to its
+	// own floor (verb base, guest/node/remote and linked-host criticality,
+	// unknown HIGH). Propose: role server or admin. Commit dispatches the
+	// approved action: role admin only.
+	ProposePVEGuestPower(context.Context, *ProposePVEGuestPowerRequest) (*ProposePVEGuestPowerResponse, error)
+	CommitPVEGuestPower(context.Context, *CommitPVEGuestPowerRequest) (*CommitPVEGuestPowerResponse, error)
 	// PVE provider reads (ADR 0006, P1-05). Role: server, admin,
 	// pve-collector. Metadata only: which remotes exist, their kind, ordered
 	// endpoints, trust generation and state. The trust pin is a SHA-256
@@ -2161,6 +2199,12 @@ func (UnimplementedExecutorServiceServer) ProposePVERepin(context.Context, *Prop
 }
 func (UnimplementedExecutorServiceServer) CommitPVERepin(context.Context, *CommitPVERepinRequest) (*CommitPVERepinResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CommitPVERepin not implemented")
+}
+func (UnimplementedExecutorServiceServer) ProposePVEGuestPower(context.Context, *ProposePVEGuestPowerRequest) (*ProposePVEGuestPowerResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ProposePVEGuestPower not implemented")
+}
+func (UnimplementedExecutorServiceServer) CommitPVEGuestPower(context.Context, *CommitPVEGuestPowerRequest) (*CommitPVEGuestPowerResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CommitPVEGuestPower not implemented")
 }
 func (UnimplementedExecutorServiceServer) ListPVERemotes(context.Context, *ListPVERemotesRequest) (*ListPVERemotesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListPVERemotes not implemented")
@@ -3896,6 +3940,42 @@ func _ExecutorService_CommitPVERepin_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_ProposePVEGuestPower_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProposePVEGuestPowerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ProposePVEGuestPower(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ProposePVEGuestPower_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ProposePVEGuestPower(ctx, req.(*ProposePVEGuestPowerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_CommitPVEGuestPower_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommitPVEGuestPowerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).CommitPVEGuestPower(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_CommitPVEGuestPower_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).CommitPVEGuestPower(ctx, req.(*CommitPVEGuestPowerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ExecutorService_ListPVERemotes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListPVERemotesRequest)
 	if err := dec(in); err != nil {
@@ -4404,6 +4484,14 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CommitPVERepin",
 			Handler:    _ExecutorService_CommitPVERepin_Handler,
+		},
+		{
+			MethodName: "ProposePVEGuestPower",
+			Handler:    _ExecutorService_ProposePVEGuestPower_Handler,
+		},
+		{
+			MethodName: "CommitPVEGuestPower",
+			Handler:    _ExecutorService_CommitPVEGuestPower_Handler,
 		},
 		{
 			MethodName: "ListPVERemotes",

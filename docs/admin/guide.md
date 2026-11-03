@@ -419,6 +419,8 @@ The executor is configured by flags in its unit. `install.sh` writes
 | `-origin` | `https://<rp-id>` | Allowed WebAuthn origin (repeatable) |
 | `-hardened` | off | HIGH and CRITICAL operations need `nebula approve` on the machine; trusting from the browser is refused |
 | `-session-minutes` | 60 | Length of the privileged session |
+| `-builtin-bundle-dir` | `/usr/share/nebula/release` | Locally verified release bundle that `nebula artifact trust-builtins` reviews (section 8.2) |
+| `-builtin-trust-dir` | `<data-dir>/trust` | Built-in trust store (retained built-in bytes and provenance) |
 
 Every other caller UID is refused. The executor refuses to start as root,
 with root or a Nebula system user as admin, or without `-rp-id` and an
@@ -577,10 +579,12 @@ less ~/nebula-actions-0.9/*.sh
 Without this, every operation needs a user-verified approval.
 `nebula artifact list` shows what is trusted, `nebula artifact untrust`
 withdraws a trust. Trust again after every upgrade that changes an
-action's version, one action at a time as shown here. Only this per-action
-trust (`nebula artifact trust`, kept in the executor's trusted-artifact
-table) changes the risk the executor assigns; `nebula artifact
-trust-builtins` (section 8.2) does not replace it today.
+action's version: one action at a time as shown here, or all built-ins of
+the release at once with `nebula artifact trust-builtins` (section 8.2).
+Both write the same exact entries (action, version, artifact SHA-256 and
+declared risk) to the executor's trusted-artifact table, the only trust
+the executor's risk decision reads; `nebula artifact list` shows them
+either way.
 
 The executor also runs the **Safety Scanner** over every script, trusted
 or not: downloading and executing, `eval` or encoded payloads,
@@ -597,37 +601,41 @@ bytes (the executor still scans them before the run).
 
 ### 8.2 Trusting the built-ins together after an upgrade
 
-> **Current limitation:** `trust-builtins` records the reviewed release
-> only in the executor's built-in trust store
-> (`/var/lib/nebula/executor/trust`). The executor's risk policy does not
-> read that store — it reads only the per-action trust that `nebula
-> artifact trust` writes (section 8.1). After `trust-builtins` the
-> built-ins therefore still count as untrusted (at least HIGH, a
-> user-verified approval per operation) until you also run the per-action
-> `nebula artifact trust` commands. Check with `nebula artifact list`. The
-> executor does not yet serve the built-in trust status, so the web banner
-> always shows "Built-in trust status is unreachable", before and after
-> `trust-builtins`; it is not a sign that the command failed.
+> **Changed (previously a limitation):** `trust-builtins` used to record
+> the reviewed release only in the built-in trust store, so the built-ins
+> stayed untrusted for risk, and the web banner always said "Built-in
+> trust status is unreachable". Now the commit also writes the exact
+> per-action trust entries that `nebula artifact trust` writes (section
+> 8.1), the executor serves the trust status, and the commit is audited.
+> Built-in versions committed with the earlier `sudo` command before this
+> change have no trust entries: their actions stay untrusted until the next
+> release you commit, or until you trust them with `nebula artifact trust`.
 
 `nebula artifact trust-builtins` reviews the whole new release's
-built-ins in one step and commits that review atomically to the built-in
-trust store. Run it with
-`sudo` on the executor host: it does not go through the executor's socket
-but opens and writes the executor's built-in trust store directly
-(default `/var/lib/nebula/executor/trust`, `--store DIR` to change it) and
-hands the files back to the executor user afterwards, so it needs root:
+built-ins in one step and commits that review atomically. Run it on the
+executor host as your admin user (not with `sudo`; the command refuses
+root). It talks to the executor over its socket, and the executor does
+the work under its own identity: it reads its configured release bundle,
+reviews it against its built-in trust store, and on commit records the
+trust:
 
 ```
-sudo nebula artifact trust-builtins --bundle /path/to/release-bundle
+nebula artifact trust-builtins
 ```
 
-`--bundle DIR` must hold the new release's verified built-in bundle —
-exactly `builtins.tar`, `release-manifest.json` and its signature
+The executor reads the bundle only from its own configuration
+(`-builtin-bundle-dir`, default `/usr/share/nebula/release`; the store is
+`-builtin-trust-dir`, default `/var/lib/nebula/executor/trust`). The
+directory must hold the new release's verified built-in bundle — exactly
+`builtins.tar`, `release-manifest.json` and its signature
 `release-manifest.json.sig` — taken from the locally verified NOS release,
 not a server-exported directory (a server directory alone is not proof of
-built-in provenance). The command checks the bundle against the release
-trust root, then shows, action by action: the old and new version, the
-first 12 hex characters of both hashes, the risk, the full script diff and
+built-in provenance; neither the server nor the command can pass a path).
+If it is missing, the command fails and the web banner says the trust
+status is unreachable. The executor checks the bundle against the release
+trust root, then the command shows, action by action: the old and new version, the
+first 12 hex characters of both hashes, the artifact SHA-256 that will be
+trusted, the risk, the full script diff and
 the executor Safety Scanner's findings. New actions are shown in full and
 removed actions explicitly; on first use every byte is shown, and a
 missing previous version is always reviewed, never "unchanged". Actions
@@ -636,34 +644,70 @@ bytes or invalid provenance are rejected.
 
 One local confirmation — the reviewed manifest digest typed back — commits
 all the displayed additions and changes at once. At commit time the
-command re-reviews and rehashes the bundle and compares the trust store's
+executor re-reviews and rehashes the bundle and compares the trust store's
 generation, so a bundle file swapped after the
 review or a concurrent commit is refused; it does not rehash the objects
-already in the store. For each old version you decide
-to keep it (`--pin name@version`) or retire it (`--retire name@version`).
-These decisions only steer the trust store's garbage collection during
-this one commit: a pinned version is not collected by this commit, a
-retired one is not protected. The pin is not saved, so a later commit can
-collect a version pinned now unless you pin it again; any old version is
-collected once it is no longer among the two most recent predecessors and
-its 90-day retention has passed. Retiring revokes nothing — no permit,
-read lease or schedule grant is touched. Those are bound to the exact
-action, version and artifact hash, so they are never retargeted to the new
-bytes, but they stay valid for the old version. To end that authority,
-revoke the leases and grants that name the old version (*Revoke* on the
-Read leases page, section 9.4; `nebula schedule revoke <id>` for a legacy
-schedule grant), or `nebula lock` to revoke every pending and approved
-execution permit and pause all approved grants at once (section 11.1).
+already in the store.
+
+The commit trusts every action of every new, changed or reactivated
+built-in version exactly as `nebula artifact trust` would: one entry per
+action with its module version, the SHA-256 of the exact artifact bytes
+and the declared risk, labelled `built-in release <version>` in `nebula
+artifact list`. Nothing else is trusted — no version range, no other
+bytes — and unchanged modules keep the entries they got when they were
+committed. The store commit happens only after the executor has checked
+these entries, written a pending record of the change (in the trust store
+directory), and revoked the trust of every version you retire, so a
+failure never leaves a retired version trusted. If something fails after
+that, the command prints the exact state and you repair it by running
+`nebula artifact trust-builtins` again — there is no file to find and no
+entry to type by hand:
+
+- *Store committed, new entries not recorded* (`builtin_trust_artifacts_failed`):
+  the retired versions are untrusted and the new versions stay untrusted
+  for risk (HIGH, as before). The next `trust-builtins` run records the
+  listed entries from the pending record before it shows the review.
+- *Store commit failed* (`builtin_trust_store_failed`): the executor puts
+  the revoked entries back at once and nothing has changed; review and
+  commit again. If putting them back fails too, the command lists them and
+  the next `trust-builtins` run restores them.
+- *Revoking failed*: nothing is committed; review and commit again.
+
+Each failure record lists the generation, the retired versions and every
+revoked, restored and unrecorded (action, version, SHA-256, risk) entry;
+the repair is audited as `builtin_trust_pending_recovered`. A corrupt
+pending record blocks the review until you restore the trust store
+directory from backup.
+
+For each old version you decide to keep it (`--pin name@version`) or
+retire it (`--retire name@version`). **Retaining** keeps the old version's
+trust entries and protects its bytes from this commit's garbage
+collection. **Retiring** revokes every trust entry of that module version
+in the same commit (whoever created it) and leaves its bytes unprotected.
+Trust is never retargeted to the new bytes. The executor rechecks trust
+before every run, so permits, read leases and schedule grants bound to a
+retired version no longer run at their old risk: an untrusted action is
+at least HIGH, which a lease never covers. Revoke those leases and grants
+to tidy up (*Revoke* on the Read leases page, section 9.4; `nebula
+schedule revoke <id>` for a legacy schedule grant) and approve
+replacements for the new versions; a lease is never amended to new
+versions. The pin itself is not saved, so a later commit can collect a
+version pinned now unless you pin it again; any old version is collected
+once it is no longer among the two most recent predecessors and its
+90-day retention has passed. `nebula artifact untrust` still withdraws any
+single entry later.
+
 The flow is CLI-only in both modes — there is no browser bulk-trust
 endpoint — and the individual `nebula artifact trust`/`untrust` commands
-still work. Scanner and host floors still apply. After the commit the
-command prints the admin UID (the `sudo` caller), the new generation and
-every old/new trust tuple, plus the pinned, retired and collected versions,
-to its standard output; it writes no audit record or event of its own, so
-keep that output if you need it. (Only the executor's `CommitBuiltinTrust`
-RPC logs a "built-in trust committed" line, and this command does not use
-it.) Non-interactive (a script, or the upgrade step):
-`sudo nebula artifact trust-builtins --bundle DIR --yes-digest DIGEST --pin … --retire …`.
+still work. Scanner and host floors still apply. The executor writes an
+audit record (`builtin_trust_committed` in the signed event log, see
+`nebula events`) with your admin UID (taken from the socket's peer
+credentials), the manifest digest and new generation, every old/new module
+tuple, every trusted and revoked (action, version, SHA-256, risk) entry,
+and the retained, retired and collected versions; a failure to record the
+trust is audited as `builtin_trust_artifacts_failed`. The command prints
+the same summary. Non-interactive (a script, or the upgrade step):
+`nebula artifact trust-builtins --yes-digest DIGEST --pin … --retire …`.
 
 ### 8.3 Module signers
 
@@ -845,6 +889,62 @@ use the 7/30-day policy. Legacy grants are listed with the new leases,
 share the executor's target ceiling, and can be revoked or replaced by an
 explicitly approved new lease.
 
+#### Live values for Proxmox nodes and guests
+
+The 10-second live values on a Proxmox node or guest box come from
+`nebula-pve-collector`, never from the server: **the server never reads
+Proxmox itself** and has no way to. Only the executor holds the Proxmox
+API credentials; the collector asks it for each read, and the executor
+re-checks every read against the approved lease.
+
+How it flows:
+
+1. While a node or guest box is visible in a browser, the server writes
+   the want-list `/var/lib/nebula/pve/requests/live.json` (the visible
+   boxes, with a short expiry; rewritten every 10 seconds, emptied when
+   the server stops).
+2. The collector reads the want-list every second. A box is read only if
+   an approved, unexpired, unrevoked read lease with the `on_demand`
+   trigger covers exactly that remote, node and guest, and the remote is
+   configured and active. The want-list itself grants nothing.
+3. The collector reads the metrics through the executor (at most every
+   10 seconds per box, at most four live boxes per remote, within the
+   lease's budget) and writes `/var/lib/nebula/pve/live/<remote>.json`.
+4. The server reads that file and shows the values.
+
+| Directory | Mode | Collector | Server |
+| --- | --- | --- | --- |
+| `/var/lib/nebula/pve/requests/` | `nebula-pve-collector:nebula-rpc`, 2770 | reads | writes (only this path, via the `20-discovery.conf` drop-in) |
+| `/var/lib/nebula/pve/live/` | `nebula-pve-collector:nebula-rpc`, 2750 | writes | reads only |
+
+`install.sh` (also with `--from-package`) and the container image create
+both directories; in containers the server mounts only the `pve-requests`
+volume and `pve-live` read-only. The collector runs the live reads by
+default; `-live=false` on its command line turns them off.
+
+A read lease is required: without an approved lease with the `on_demand`
+trigger that lists the box, the box shows no live values. Revoking the
+lease, or a box leaving the screen, stops its reads within about
+10 seconds; stale samples are removed after 30 seconds and all of them
+when the collector stops.
+
+Troubleshooting (no live values on a Proxmox box):
+
+- `systemctl status nebula-pve-collector` — the collector must be running.
+- `journalctl -u nebula-pve-collector` — `live want-list refused` (the
+  server's file is malformed or too large), `live lease refresh` (the
+  executor is locked or unreachable), `live leases refused` / `live target
+  requests refused` (no lease covers the box, or the live limits are
+  reached), `publish live samples` (cannot write `live/`).
+- `ls -ld /var/lib/nebula/pve/requests /var/lib/nebula/pve/live` — both
+  must exist with the modes above; re-run `install.sh` after an upgrade
+  if they are missing.
+- `systemctl cat nebula-server` — the drop-in must list
+  `ReadWritePaths=/var/lib/nebula/pve/requests`; otherwise the server
+  cannot publish the want-list (re-run `install.sh`).
+- Check the lease on *Operations → Read leases*: approved, not expired,
+  `on_demand` trigger, and the box among its targets.
+
 ### 9.5 Runbooks
 
 *Runbooks → New runbook* holds your own scripts (POSIX `sh`). A runbook
@@ -945,7 +1045,7 @@ work; nothing runs without the usual review and approval.
 | Operation shows `precheck_failed` | Read the reason on the operation page; nothing was installed |
 | Host `UNREACHABLE` | Check the endpoints; `nebula host test HOST ENDPOINT` |
 | Waiting approvals on the hardened path | `nebula pending`, then `nebula approve <digest>` |
-| After an upgrade | `nebula unlock`; re-trust actions whose version changed with `nebula artifact trust` (section 8.1); `sudo nebula artifact trust-builtins` (section 8.2) does not replace this today |
+| After an upgrade | `nebula unlock`; re-trust built-ins whose version changed with `nebula artifact trust-builtins` (section 8.2) or per action with `nebula artifact trust` (section 8.1) |
 | Weekly | Look at the dashboard and *History*; copy `nebula events list --json` offsite |
 | Monthly | Test a restore of the latest backup on a spare VM |
 
@@ -1222,29 +1322,26 @@ nebula unlock
 `docker compose up -d`, then unlock.
 
 After any upgrade: `nebula status`, `nebula events verify`, and trust the
-built-in actions again if their versions changed, one action at a time
-with `nebula artifact trust` (section 8.1). `nebula artifact
-trust-builtins` (section 8.2) can review the whole release in one step and
-updates the built-in trust store, but it changes no other executor state
-(not the risk decisions, not the web banner), so it does not replace the
-per-action trust. In hardened mode the whole upgrade is a CLI walkthrough
-on the executor host:
+built-in actions again if their versions changed: all at once with
+`nebula artifact trust-builtins` (section 8.2), or one action at a time
+with `nebula artifact trust` (section 8.1). Both write the same per-action
+trust the risk decision reads; the web banner shows the executor's
+verdict afterwards. In hardened mode the whole upgrade is a CLI
+walkthrough on the executor host:
 
 ```
 sudo nebula backup
 sudo systemctl restart nebula-executor nebula-server
 nebula unlock
-nebula-server -export-actions ~/nebula-actions-NEW   # prints one trust command per action
-less ~/nebula-actions-NEW/*.sh
-# run the printed `nebula artifact trust ...` commands for the changed actions
-sudo nebula artifact trust-builtins --bundle /path/to/release-bundle   # optional, section 8.2
+nebula artifact trust-builtins   # section 8.2: review, retain/retire, confirm the digest
 nebula artifact list
 nebula status && nebula events verify
 ```
 
-`trust-builtins` runs as root because it writes the executor's trust store
-directly (section 8.2). It shows every changed built-in and needs one
-digest-bound confirmation; unchanged actions need none. Trusting an action at its
+`trust-builtins` runs as your admin user; the executor reads its
+configured release bundle and commits (section 8.2). It shows every
+changed built-in and needs one digest-bound confirmation; unchanged
+actions need none. Trusting an action at its
 declared risk does not change how its runs are approved — a HIGH or
 CRITICAL built-in still needs the per-run approval (section 8.1).
 
@@ -1329,13 +1426,15 @@ from `~nebula/.ssh/authorized_keys` (or the user: `userdel -r nebula`),
 | `/etc/systemd/system/nebula-*.service`, `nebula-discovery.path`, `.timer` | root, 0644 | Units (package: `/lib/systemd/system/`) |
 | `/etc/systemd/system/nebula-executor.service.d/10-local.conf` | root, 0644 | Executor flags, rewritten by `install.sh` |
 | `/etc/systemd/system/nebula-executor.service.d/20-local.conf` | root, 0644 | Your own executor flags (optional) |
-| `/etc/systemd/system/nebula-server.service.d/20-discovery.conf` | root, 0644 | Lets the server write the job spool |
+| `/etc/systemd/system/nebula-server.service.d/20-discovery.conf` | root, 0644 | Lets the server write the job spool and `pve/requests/` |
 | `/etc/nebula/server.json` | `root:nebula-server`, 0640 | Server configuration |
 | `/etc/nebula/backup-recipients` | root | age recipients for backups |
 | `/var/lib/nebula/executor/` | `nebula-executor`, 0700 | `executor.db` (permits, pins, counters, vault, events), `executor.db.installed`, `events.key`, `keys/<ref>.key` |
 | `/var/lib/nebula/server/` | `nebula-server`, 0750 | `server.db` (inventory, operations, logs, runbooks, modules, IPAM, audit) |
 | `/var/lib/nebula/discovery/jobs/` | `nebula-server:nebula-discovery`, 2750 | Queued scans |
 | `/var/lib/nebula/discovery/results/` | `nebula-discovery:nebula-server`, 2750 | Scan results |
+| `/var/lib/nebula/pve/requests/` | `nebula-pve-collector:nebula-rpc`, 2770 | Live want-list `live.json` (server writes, collector reads; section 9.4) |
+| `/var/lib/nebula/pve/live/` | `nebula-pve-collector:nebula-rpc`, 2750 | Live samples `<remote>.json` (collector writes, server reads) |
 | `/run/nebula/executor.sock` | `nebula-executor:nebula-rpc`, 0660 | The executor's socket |
 | `~<admin>/nebula-backups/` | the admin | Backup archives |
 
@@ -1346,7 +1445,7 @@ in `/var/lib/nebula/jobs/` and run directories (with secrets) in
 
 ### 17.2 The `nebula` CLI
 
-Run as an admin user on the Nebula machine (`nebula` without a command prints the same list); `backup`, `restore` and `artifact trust-builtins` need `sudo` instead:
+Run as an admin user on the Nebula machine (`nebula` without a command prints the same list); `backup` and `restore` need `sudo` instead:
 
 | Command | Purpose |
 | --- | --- |
@@ -1356,7 +1455,7 @@ Run as an admin user on the Nebula machine (`nebula` without a command prints th
 | `schedule pending \| approve <digest> \| list \| revoke <id>` | Scheduled checks (legacy `read-schedule-v1`, section 9.4) |
 | `read-grant pending \| approve <digest>` | Read leases (section 9.4); hardened approval, full digest |
 | `artifact trust --action ID --version X.Y.Z --risk LEVEL [--label TEXT] FILE`, `artifact untrust …`, `artifact list` | Trusted scripts |
-| `artifact trust-builtins --bundle DIR [--store DIR] [--yes-digest DIGEST] [--pin name@ver] [--retire name@ver]` | With `sudo`; review a release's built-ins and record them in the built-in trust store (section 8.2; does not change risk decisions, use `artifact trust` for that) |
+| `artifact trust-builtins [--yes-digest DIGEST [--pin name@ver] [--retire name@ver]]` | Review the executor's configured release bundle and trust all its changed built-ins at once, exactly like `artifact trust`; retiring an old version revokes its trust (section 8.2) |
 | `signer add --name NAME FILE \| list \| remove SHA256:…`, `module confirm-signer MODULE SHA256:…` | Module signers |
 | `module pack [--archive OUT.tar.gz] DIR` | Build a module (author side; no executor needed) |
 | `backup [--out FILE] [--full] [--no-encrypt] [--pre-upgrade]`, `restore [--identity FILE] ARCHIVE` | With `sudo`; section 12 (`--full` only labels the archive, every backup is full; `--pre-upgrade` asks nothing and exits 3 when it makes no backup) |

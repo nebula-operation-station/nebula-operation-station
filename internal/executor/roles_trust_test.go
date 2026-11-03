@@ -536,7 +536,7 @@ func TestDirBuiltinTrustMissingBundleIsUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bt, err := NewDirBuiltinTrust(filepath.Join(dir, "trust"), filepath.Join(dir, "no-such-bundle"), anchors, func() time.Time { return time.Unix(1_800_000_000, 0) })
+	bt, err := NewDirBuiltinTrust(filepath.Join(dir, "trust"), filepath.Join(dir, "no-such-bundle"), anchors, func() time.Time { return time.Unix(1_800_000_000, 0) }, openTrustTestDB(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -566,7 +566,7 @@ func TestNewDirBuiltinTrustRejectsBadDirs(t *testing.T) {
 		"relative bundle": {abs, "bundle"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := NewDirBuiltinTrust(dirs[0], dirs[1], nil, nil); err == nil {
+			if _, err := NewDirBuiltinTrust(dirs[0], dirs[1], nil, nil, openTrustTestDB(t)); err == nil {
 				t.Fatal("want error")
 			}
 		})

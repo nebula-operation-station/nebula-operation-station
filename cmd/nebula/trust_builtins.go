@@ -4,26 +4,26 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"os/user"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/nebula-operation-station/nebula-operation-station/internal/executor/trust"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/release"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/textdiff"
+	"google.golang.org/grpc"
+
+	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
-// defaultTrustStoreDir is where the executor keeps its built-in trust store,
-// under the executor data dir.
-const defaultTrustStoreDir = "/var/lib/nebula/executor/trust"
+// trustBuiltinsTimeout bounds one review-and-commit session, including the
+// time the admin takes to read the review and confirm.
+const trustBuiltinsTimeout = 2 * time.Hour
+
+// maxBuiltinDiffLine bounds one rendered diff line.
+const maxBuiltinDiffLine = 4000
 
 // trustVersionsFlag is a repeatable flag holding old versions (name@version).
 type trustVersionsFlag []string
@@ -35,21 +35,37 @@ func (f *trustVersionsFlag) Set(s string) error {
 }
 
 // artifactTrustBuiltins implements `nebula artifact trust-builtins` (ADR 0007
-// E16). It runs as root (sudo), reads a locally verified release bundle,
-// reviews it against the executor's built-in trust store, shows every
-// addition, change and removal with the executor scanner's findings, and after
-// one digest-bound confirmation commits the whole review atomically. Each old
-// version is explicitly retained (pinned) or retired.
+// E16). It runs as a local admin user and talks to the executor, which reads
+// its own configured, locally verified release bundle, reviews it against
+// its built-in trust store and, after one digest-bound confirmation, commits
+// the whole review atomically: the store, the exact artifact trust the risk
+// policy reads (as `nebula artifact trust` writes it) and an audit record
+// with the admin UID and every old/new trust tuple. Each old version is
+// explicitly retained or retired; retirement revokes its trust.
 func artifactTrustBuiltins(args []string) error {
-	return artifactTrustBuiltinsIO(args, os.Stdin, os.Stdout)
+	if os.Geteuid() == 0 {
+		return errors.New("run `nebula artifact trust-builtins` as your admin user, not as root or with sudo: the executor commits it and records your UID")
+	}
+	conn, err := dialExecutor()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), trustBuiltinsTimeout)
+	defer cancel()
+	return artifactTrustBuiltinsIO(ctx, pb.NewExecutorServiceClient(conn), args, os.Stdin, os.Stdout)
+}
+
+// builtinTrustClient is the part of the executor client the command uses.
+type builtinTrustClient interface {
+	ReviewBuiltinTrust(ctx context.Context, in *pb.ReviewBuiltinTrustRequest, opts ...grpc.CallOption) (*pb.ReviewBuiltinTrustResponse, error)
+	CommitBuiltinTrust(ctx context.Context, in *pb.CommitBuiltinTrustRequest, opts ...grpc.CallOption) (*pb.CommitBuiltinTrustResponse, error)
 }
 
 // artifactTrustBuiltinsIO is the testable core of artifactTrustBuiltins.
-func artifactTrustBuiltinsIO(args []string, in io.Reader, out io.Writer) error {
+func artifactTrustBuiltinsIO(ctx context.Context, c builtinTrustClient, args []string, in io.Reader, out io.Writer) error {
 	fs := flag.NewFlagSet("artifact trust-builtins", flag.ContinueOnError)
 	fs.SetOutput(out)
-	bundle := fs.String("bundle", "", "the locally verified release bundle directory (required)")
-	store := fs.String("store", defaultTrustStoreDir, "the built-in trust store directory")
 	yesDigest := fs.String("yes-digest", "", "non-interactive: the reviewed manifest digest to commit")
 	var pins, retired trustVersionsFlag
 	fs.Var(&pins, "pin", "non-interactive: old version name@version to retain (repeatable)")
@@ -57,204 +73,171 @@ func artifactTrustBuiltinsIO(args []string, in io.Reader, out io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *bundle == "" {
-		return errors.New("usage: nebula artifact trust-builtins --bundle DIR [--store DIR] [--yes-digest DIGEST] [--pin name@ver] [--retire name@ver]")
-	}
-	return runTrustBuiltins(*bundle, *store, *yesDigest, pins, retired, in, out)
-}
-
-// runTrustBuiltins opens the trust store with the release anchors, reviews the
-// bundle, shows the review and, after one digest-bound confirmation, commits
-// it atomically.
-func runTrustBuiltins(bundleDir, storeDir, yesDigest string, pins, retired trustVersionsFlag, in io.Reader, out io.Writer) error {
-	anchors, err := release.Anchors()
-	if err != nil {
-		return fmt.Errorf("release anchors: %w", err)
-	}
-	s, err := trust.Open(storeDir, anchors, time.Now)
-	if err != nil {
-		return fmt.Errorf("open trust store %s: %w", storeDir, err)
+	if fs.NArg() != 0 || (*yesDigest == "" && (len(pins) > 0 || len(retired) > 0)) {
+		return errors.New("usage: nebula artifact trust-builtins [--yes-digest DIGEST [--pin name@ver] [--retire name@ver]]")
 	}
 
-	c, err := release.ReadBundleDir(bundleDir, s.Roots())
+	rev, err := c.ReviewBuiltinTrust(ctx, &pb.ReviewBuiltinTrustRequest{})
 	if err != nil {
-		return fmt.Errorf("read bundle %s: %w", bundleDir, err)
+		return fmt.Errorf("review built-ins: %w", err)
 	}
-
-	// Dry run: review + scanner floors, no commit.
-	dry, err := s.BulkAdmit(c, trust.BulkAdmitOpts{})
-	if err != nil {
-		return fmt.Errorf("review bundle: %w", err)
-	}
-	printTrustReview(out, dry)
-
-	if !dry.NeedsConfirmation {
+	printTrustReview(out, rev)
+	if !rev.GetNeedsConfirmation() {
 		fmt.Fprintln(out, "no changes: every action is unchanged, nothing to commit")
 		return nil
 	}
 
-	pinSet := map[string]bool{}
-	retiredList := []string{}
-	if yesDigest != "" {
-		for _, v := range pins {
-			pinSet[v] = true
-		}
-		retiredList = append(retiredList, retired...)
+	var retain, retire []string
+	if *yesDigest != "" {
+		retain, retire = pins, retired
 	} else {
-		pinSet, retiredList, err = promptOldVersions(dry.OldVersions, in, out)
+		// One scanner for every answer, so no prompt swallows the next line.
+		sc := bufio.NewScanner(in)
+		pinSet, retiredList, err := promptOldVersions(rev.GetOldVersions(), sc, out)
 		if err != nil {
 			return err
 		}
-		yesDigest, err = promptDigest(dry.ManifestDigest, in, out)
-		if err != nil {
+		for _, v := range rev.GetOldVersions() {
+			if pinSet[v] {
+				retain = append(retain, v)
+			}
+		}
+		retire = retiredList
+		if *yesDigest, err = promptDigest(rev.GetManifestDigest(), sc, out); err != nil {
 			return err
 		}
 	}
 
-	res, err := s.BulkAdmit(c, trust.BulkAdmitOpts{
-		ConfirmedDigest: yesDigest,
-		Pins:            pinSet,
-		Retired:         retiredList,
-		AdminUID:        adminUID(),
+	res, err := c.CommitBuiltinTrust(ctx, &pb.CommitBuiltinTrustRequest{
+		ManifestDigest: *yesDigest, Retain: retain, Retire: retire,
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("commit built-ins: %w", err)
 	}
-	printTrustResult(out, res, s.Generation())
-
-	// We ran as root; hand the store back to the executor so it stays
-	// executor-owned.
-	if err := chownTrustStore(storeDir); err != nil {
-		return fmt.Errorf("restore trust store ownership: %w", err)
-	}
+	printTrustResult(out, res)
 	return nil
 }
 
 // printTrustReview shows the executor-verdict banner and the action-by-action
 // review (old/new versions, hashes, risk, full script diff, scanner findings).
-// Script content and scanner excerpts are host-author text: rendered as text
-// only.
-func printTrustReview(out io.Writer, res trust.BulkAdmitResult) {
-	r := res.Review
-	fmt.Fprintln(out, "Built-ins are untrusted: every operation using them needs UV until you trust them.")
+// Everything from the bundle is rendered as escaped text only.
+func printTrustReview(out io.Writer, r *pb.ReviewBuiltinTrustResponse) {
+	if r.GetNeedsConfirmation() {
+		fmt.Fprintln(out, "Built-ins are untrusted: every operation using them needs UV until you trust them.")
+	}
 	fmt.Fprintln(out, "Trust may restore declared risks; it never approves a mutation.")
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "  release:  %s\n", r.ReleaseVersion)
-	fmt.Fprintf(out, "  manifest: %s\n", r.ManifestDigest)
-	fmt.Fprintf(out, "  root:     %s (%s)\n", r.RootID, r.RootFingerprint)
-	fmt.Fprintf(out, "  store:    generation %d\n", r.Generation)
+	fmt.Fprintf(out, "  release:  %s\n", safe(r.GetReleaseVersion()))
+	fmt.Fprintf(out, "  manifest: %s\n", safe(r.GetManifestDigest()))
+	fmt.Fprintf(out, "  root:     %s (%s)\n", safe(r.GetRootId()), safe(r.GetRootFingerprint()))
+	fmt.Fprintf(out, "  store:    generation %d\n", r.GetGeneration())
 	fmt.Fprintln(out)
 
-	for _, m := range r.Modules {
-		printModuleReview(out, m, res.Scans)
+	for _, m := range r.GetModules() {
+		printModuleReview(out, m)
 	}
 
-	if len(res.OldVersions) > 0 {
-		fmt.Fprintln(out, "Old versions to decide (retain or retire):")
-		for _, v := range res.OldVersions {
-			fmt.Fprintf(out, "  %s\n", v)
+	if len(r.GetOldVersions()) > 0 {
+		fmt.Fprintln(out, "Old versions to decide (retain keeps their trust, retire revokes it):")
+		for _, v := range r.GetOldVersions() {
+			fmt.Fprintf(out, "  %s\n", safe(v))
 		}
 		fmt.Fprintln(out)
 	}
 }
 
-func printModuleReview(out io.Writer, m trust.ModuleReview, scans []trust.ScanFinding) {
-	fmt.Fprintf(out, "MODULE %s\n", m.Name)
-	fmt.Fprintf(out, "  status:  %s\n", m.Status)
-	if m.FullReview {
-		fmt.Fprintf(out, "  full:    yes (%s)\n", m.Reason)
+func printModuleReview(out io.Writer, m *pb.BuiltinModuleReview) {
+	fmt.Fprintf(out, "MODULE %s\n", safe(m.GetName()))
+	fmt.Fprintf(out, "  status:  %s\n", changeName(m.GetChange()))
+	if m.GetFullReview() {
+		fmt.Fprintf(out, "  full:    yes (%s)\n", safe(m.GetFullReviewReason()))
 	}
 	switch {
-	case m.OldVersion != "" && m.NewVersion != "":
-		fmt.Fprintf(out, "  version: %s -> %s\n", m.OldVersion, m.NewVersion)
-		fmt.Fprintf(out, "  sha256:  %s -> %s\n", shortHash(m.OldSHA256), shortHash(m.NewSHA256))
-	case m.OldVersion != "":
-		fmt.Fprintf(out, "  version: %s -> (removed)\n", m.OldVersion)
+	case m.GetOldVersion() != "" && m.GetNewVersion() != "":
+		fmt.Fprintf(out, "  version: %s -> %s\n", safe(m.GetOldVersion()), safe(m.GetNewVersion()))
+		fmt.Fprintf(out, "  sha256:  %s -> %s\n", shortHash(m.GetOldSha256()), shortHash(m.GetNewSha256()))
+	case m.GetOldVersion() != "":
+		fmt.Fprintf(out, "  version: %s -> (removed)\n", safe(m.GetOldVersion()))
 	default:
-		fmt.Fprintf(out, "  version: (new) -> %s\n", m.NewVersion)
+		fmt.Fprintf(out, "  version: (new) -> %s\n", safe(m.GetNewVersion()))
 	}
-	for _, a := range m.Actions {
-		printActionReview(out, a, scans)
+	for _, a := range m.GetActions() {
+		printActionReview(out, a)
 	}
 	fmt.Fprintln(out)
 }
 
-func printActionReview(out io.Writer, a trust.ActionReview, scans []trust.ScanFinding) {
-	fmt.Fprintf(out, "  ACTION %s\n", a.ActionID)
-	fmt.Fprintf(out, "    status: %s\n", a.Status)
-	fmt.Fprintf(out, "    risk:   %s -> %s\n", orDash(a.OldRisk), orDash(a.NewRisk))
-	fmt.Fprintf(out, "    script: %s -> %s\n", shortHash(a.OldScriptSHA256), shortHash(a.NewScriptSHA256))
-	if len(a.Diff) > 0 {
+func printActionReview(out io.Writer, a *pb.BuiltinActionReview) {
+	fmt.Fprintf(out, "  ACTION %s\n", safe(a.GetActionId()))
+	fmt.Fprintf(out, "    status:   %s\n", changeName(a.GetChange()))
+	fmt.Fprintf(out, "    risk:     %s -> %s\n", orDash(safe(a.GetOldRisk())), orDash(safe(a.GetNewRisk())))
+	fmt.Fprintf(out, "    script:   %s -> %s\n", shortHash(a.GetOldScriptSha256()), shortHash(a.GetNewScriptSha256()))
+	fmt.Fprintf(out, "    artifact: %s -> %s\n", orDash(a.GetOldArtifactSha256()), orDash(a.GetNewArtifactSha256()))
+	if len(a.GetDiff()) > 0 {
 		fmt.Fprintln(out, "    diff:")
-		for _, l := range a.Diff {
+		for _, l := range a.GetDiff() {
 			prefix := "      "
-			switch l.Op {
-			case textdiff.Insert:
+			switch l.GetOp() {
+			case pb.BuiltinDiffOp_BUILTIN_DIFF_OP_INSERT:
 				prefix = "      +"
-			case textdiff.Delete:
+			case pb.BuiltinDiffOp_BUILTIN_DIFF_OP_DELETE:
 				prefix = "      -"
 			}
-			fmt.Fprintf(out, "%s%s\n", prefix, displaySafe([]byte(l.Text), 4000))
+			fmt.Fprintf(out, "%s%s\n", prefix, displaySafe([]byte(l.GetText()), maxBuiltinDiffLine))
 		}
 	}
-	if sf := findScan(scans, a.ActionID); sf != nil {
-		if len(sf.Findings) == 0 {
-			fmt.Fprintf(out, "    scanner: clean (floor %s)\n", orDash(sf.Floor))
+	if a.GetScannerFloor() != pb.RiskClass_RISK_CLASS_UNSPECIFIED || len(a.GetFindings()) > 0 {
+		if len(a.GetFindings()) == 0 {
+			fmt.Fprintf(out, "    scanner: clean (floor %s)\n", shortRisk(a.GetScannerFloor()))
 		} else {
-			fmt.Fprintf(out, "    scanner: floor %s\n", orDash(sf.Floor))
-			for _, f := range sf.Findings {
-				fmt.Fprintf(out, "      [%s] line %d: %s\n", f.Risk, f.Line, displaySafe([]byte(f.Excerpt), 200))
+			fmt.Fprintf(out, "    scanner: floor %s\n", shortRisk(a.GetScannerFloor()))
+			for _, f := range a.GetFindings() {
+				fmt.Fprintf(out, "      [%s] line %d: %s\n", shortRisk(f.GetRisk()), f.GetLine(), displaySafe([]byte(f.GetExcerpt()), 200))
 			}
 		}
 	}
 }
 
-func findScan(scans []trust.ScanFinding, actionID string) *trust.ScanFinding {
-	for i := range scans {
-		if scans[i].ActionID == actionID {
-			return &scans[i]
-		}
+// printTrustResult shows the executor's commit result: the audit facts
+// (admin UID, old/new trust tuples, retained, retired and collected
+// versions, cleanup failures).
+func printTrustResult(out io.Writer, r *pb.CommitBuiltinTrustResponse) {
+	fmt.Fprintln(out, "committed:")
+	fmt.Fprintf(out, "  admin uid:  %d\n", r.GetAdminUid())
+	fmt.Fprintf(out, "  generation: %d\n", r.GetGeneration())
+	fmt.Fprintf(out, "  manifest:   %s\n", safe(r.GetManifestDigest()))
+	for _, t := range r.GetTuples() {
+		fmt.Fprintf(out, "  trust: %s %s -> %s (%s)\n", safe(t.GetModule()), orDash(safe(t.GetOldVersion())),
+			orDash(safe(t.GetNewVersion())), changeName(t.GetChange()))
 	}
-	return nil
+	if len(r.GetRetained()) > 0 {
+		fmt.Fprintf(out, "  retained:  %s\n", safe(strings.Join(r.GetRetained(), ", ")))
+	}
+	if len(r.GetRetired()) > 0 {
+		fmt.Fprintf(out, "  retired:   %s (trust revoked)\n", safe(strings.Join(r.GetRetired(), ", ")))
+	}
+	if len(r.GetCollected()) > 0 {
+		fmt.Fprintf(out, "  collected: %s\n", safe(strings.Join(r.GetCollected(), ", ")))
+	}
+	if r.GetCleanupFailures() > 0 {
+		fmt.Fprintf(out, "  cleanup failures: %d unreferenced object(s) could not be deleted\n", r.GetCleanupFailures())
+	}
+	fmt.Fprintln(out, "The committed versions are now trusted exactly like `nebula artifact trust` (see `nebula artifact list`).")
+	fmt.Fprintln(out, "Read leases bind exact versions: approve a replacement lease for new versions.")
 }
 
-// printTrustResult shows the commit result: the retirement audit (admin UID,
-// old/new trust tuples, pinned, retired, collected versions, cleanup failures).
-func printTrustResult(out io.Writer, res trust.BulkAdmitResult, newGen int64) {
-	if !res.Committed {
-		fmt.Fprintln(out, "not committed")
-		return
-	}
-	fmt.Fprintln(out, "committed:")
-	fmt.Fprintf(out, "  admin uid:  %d\n", res.AdminUID)
-	fmt.Fprintf(out, "  generation: %d\n", newGen)
-	fmt.Fprintf(out, "  manifest:   %s\n", res.ManifestDigest)
-	fmt.Fprintf(out, "  release:    %s\n", res.Review.ReleaseVersion)
-	for _, t := range res.Tuples {
-		fmt.Fprintf(out, "  trust: %s %s -> %s (%s)\n", t.Module, orDash(t.OldVersion), orDash(t.NewVersion), t.Status)
-	}
-	if len(res.Pinned) > 0 {
-		fmt.Fprintf(out, "  pinned:    %s\n", strings.Join(res.Pinned, ", "))
-	}
-	if len(res.Retired) > 0 {
-		fmt.Fprintf(out, "  retired:   %s\n", strings.Join(res.Retired, ", "))
-	}
-	if len(res.Collected) > 0 {
-		fmt.Fprintf(out, "  collected: %s\n", strings.Join(res.Collected, ", "))
-	}
-	if res.CleanupFailures > 0 {
-		fmt.Fprintf(out, "  cleanup failures: %d unreferenced object(s) could not be deleted\n", res.CleanupFailures)
-	}
+// changeName is the lower-case review status.
+func changeName(c pb.BuiltinTrustChange) string {
+	return strings.ToLower(strings.TrimPrefix(c.String(), "BUILTIN_TRUST_CHANGE_"))
 }
 
 // promptOldVersions asks the admin to retain or retire each old version.
-func promptOldVersions(oldVersions []string, in io.Reader, out io.Writer) (map[string]bool, []string, error) {
+func promptOldVersions(oldVersions []string, sc *bufio.Scanner, out io.Writer) (map[string]bool, []string, error) {
 	pins := map[string]bool{}
 	retired := []string{}
-	sc := bufio.NewScanner(in)
 	for _, v := range oldVersions {
 		for {
-			fmt.Fprintf(out, "retain %s [r] or retire [t]? ", v)
+			fmt.Fprintf(out, "retain %s [r] or retire [t]? ", safe(v))
 			if !sc.Scan() {
 				return nil, nil, errors.New("reading decision")
 			}
@@ -275,8 +258,7 @@ func promptOldVersions(oldVersions []string, in io.Reader, out io.Writer) (map[s
 
 // promptDigest asks the admin to type the reviewed manifest digest to commit.
 // An empty line aborts.
-func promptDigest(digest string, in io.Reader, out io.Writer) (string, error) {
-	sc := bufio.NewScanner(in)
+func promptDigest(digest string, sc *bufio.Scanner, out io.Writer) (string, error) {
 	for {
 		fmt.Fprintf(out, "type the manifest digest to commit (empty to abort): ")
 		if !sc.Scan() {
@@ -293,56 +275,15 @@ func promptDigest(digest string, in io.Reader, out io.Writer) (string, error) {
 	}
 }
 
-// adminUID is the UID of the admin running the command: SUDO_USER when we run
-// as root (sudo), the current user otherwise.
-func adminUID() int {
-	if os.Geteuid() != 0 {
-		return os.Getuid()
-	}
-	if su := os.Getenv("SUDO_USER"); su != "" {
-		if uid, err := peercred.LookupUID(su); err == nil {
-			return int(uid)
-		}
-	}
-	return 0
-}
-
-// chownTrustStore hands the trust store back to the executor user after we
-// (as root) wrote to it. It is a no-op when not running as root.
-func chownTrustStore(dir string) error {
-	if os.Geteuid() != 0 {
-		return nil
-	}
-	name := envOr("NEBULA_EXECUTOR_USER", "nebula-executor")
-	u, err := user.Lookup(name)
-	if err != nil {
-		return fmt.Errorf("executor user %s: %w", name, err)
-	}
-	uid, err := strconv.Atoi(u.Uid)
-	if err != nil {
-		return fmt.Errorf("executor uid %q: %w", u.Uid, err)
-	}
-	gid, err := strconv.Atoi(u.Gid)
-	if err != nil {
-		return fmt.Errorf("executor gid %q: %w", u.Gid, err)
-	}
-	return filepath.Walk(dir, func(p string, _ os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		return os.Lchown(p, uid, gid)
-	})
-}
-
 // shortHash shows the first 12 hex chars of a hash (or a dash when empty).
 func shortHash(h string) string {
 	if h == "" {
 		return "-"
 	}
 	if len(h) > 12 {
-		return h[:12]
+		return safe(h[:12])
 	}
-	return h
+	return safe(h)
 }
 
 // orDash shows a string or a dash when empty.

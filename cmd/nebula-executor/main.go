@@ -30,7 +30,6 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/version"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnreg"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
@@ -58,6 +57,8 @@ func run() error {
 		rpID        = flag.String("rp-id", "", "WebAuthn RP ID: the fixed hostname Nebula is served under")
 		hardened    = flag.Bool("hardened", false, "require `nebula approve` for HIGH and CRITICAL")
 		sessionMin  = flag.Int("session-minutes", int(permit.DefaultSessionLength/time.Minute), "privileged session length in minutes (15–240)")
+		trustDir    = flag.String("builtin-trust-dir", "", "built-in trust store (default <data-dir>/trust)")
+		bundleDir   = flag.String("builtin-bundle-dir", defaultBuiltinBundleDir, "locally verified NOS release bundle that `nebula artifact trust-builtins` reviews")
 		showVersion = flag.Bool("version", false, "print version and exit")
 		origins     stringList
 	)
@@ -159,7 +160,12 @@ func run() error {
 	if *hardened {
 		mode = permit.ModeHardened
 	}
-	risk, err := riskpolicy.New(db)
+	// The guest power floor (node, remote and linked hosts of a guest) is
+	// part of the authority's policy, so it is enforced again on approval
+	// and run authorization; the service binds its targets in the same
+	// bindings (SetPveGuestPowerBindings below).
+	powerBindings := &executor.PveGuestPowerBindings{}
+	risk, err := executor.NewExecutorRiskPolicy(db, powerBindings)
 	if err != nil {
 		return err
 	}
@@ -183,8 +189,12 @@ func run() error {
 	}
 	keys := keyring.New(keysDir)
 	svc := executor.NewService(auth, keys, db, reg, log)
+	svc.SetPveGuestPowerBindings(powerBindings)
 	svc.SetEventKey(chain.PublicKey())
 	svc.SetBackupDirs(*dataDir, keysDir)
+	// Built-in trust (ADR 0007 E16): commits record exact artifact trust
+	// in executor.db, the same entries the risk policy reads.
+	setupBuiltinTrust(svc, *dataDir, *trustDir, *bundleDir, db, log)
 
 	lis, err := peercred.Listen(peercred.ListenOptions{Path: *socketPath, Mode: 0o660, Group: *socketGroup})
 	if err != nil {

@@ -3,125 +3,145 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"errors"
-	"os"
+	"reflect"
 	"strings"
 	"testing"
 
-	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/executor/trust"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/scanner"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/textdiff"
+	"google.golang.org/grpc"
+
+	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
-// sampleResult builds a BulkAdmitResult with one changed module/action, a
-// scanner finding and one old version, for the display tests.
-func sampleResult() trust.BulkAdmitResult {
-	return trust.BulkAdmitResult{
-		Review: trust.Review{
-			ManifestDigest:  "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
-			ReleaseVersion:  "1.2.3",
-			RootID:          "nebula-root-1",
-			RootFingerprint: "fp123",
-			Generation:      4,
-			Modules: []trust.ModuleReview{{
-				Name:       "core",
-				Status:     trust.StatusChanged,
-				OldVersion: "1.0.0",
-				NewVersion: "1.1.0",
-				OldSHA256:  "oldsha",
-				NewSHA256:  "newsha",
-				Actions: []trust.ActionReview{{
-					ActionID:        "core.install",
-					Status:          trust.StatusChanged,
-					OldRisk:         "low",
-					NewRisk:         "high",
-					OldScriptSHA256: "oldscript",
-					NewScriptSHA256: "newscript",
-					Diff: []textdiff.Line{
-						{Op: textdiff.Delete, Text: "old line"},
-						{Op: textdiff.Insert, Text: "new line"},
-					},
-				}},
-			}},
-		},
-		ManifestDigest:    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+const sampleDigest = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+// sampleReview builds a review with one changed module/action, a scanner
+// finding and two old versions, for the display and flow tests.
+func sampleReview() *pb.ReviewBuiltinTrustResponse {
+	return &pb.ReviewBuiltinTrustResponse{
+		ManifestDigest:    sampleDigest,
+		ReleaseVersion:    "1.2.3",
+		RootId:            "nebula-root-1",
+		RootFingerprint:   "fp123",
+		Generation:        4,
 		NeedsConfirmation: true,
-		OldVersions:       []string{"core@1.0.0"},
-		Scans: []trust.ScanFinding{{
-			Module:   "core",
-			ActionID: "core.install",
-			Floor:    "HIGH",
-			Findings: []scanner.Finding{{
-				Category: "network",
-				Risk:     canonical.RiskHigh,
-				Line:     3,
-				Excerpt:  "curl http://...",
+		OldVersions:       []string{"core@1.0.0", "core@0.9.0"},
+		Modules: []*pb.BuiltinModuleReview{{
+			Name:       "core",
+			Change:     pb.BuiltinTrustChange_BUILTIN_TRUST_CHANGE_CHANGED,
+			OldVersion: "1.0.0",
+			NewVersion: "1.1.0",
+			OldSha256:  "oldsha",
+			NewSha256:  "newsha",
+			Actions: []*pb.BuiltinActionReview{{
+				ActionId:          "core.install",
+				Change:            pb.BuiltinTrustChange_BUILTIN_TRUST_CHANGE_CHANGED,
+				OldRisk:           "LOW",
+				NewRisk:           "HIGH",
+				OldScriptSha256:   "oldscript",
+				NewScriptSha256:   "newscript",
+				NewArtifactSha256: "newartifact",
+				Diff: []*pb.BuiltinDiffLine{
+					{Op: pb.BuiltinDiffOp_BUILTIN_DIFF_OP_DELETE, Text: "old line"},
+					{Op: pb.BuiltinDiffOp_BUILTIN_DIFF_OP_INSERT, Text: "new line \x1b[2J"},
+				},
+				ScannerFloor: pb.RiskClass_RISK_CLASS_HIGH,
+				Findings: []*pb.BuiltinScanFinding{{
+					Category: "network", Risk: pb.RiskClass_RISK_CLASS_HIGH, Line: 3, Excerpt: "curl http://...",
+				}},
 			}},
 		}},
 	}
 }
 
+// fakeTrustClient records the requests sent to the executor.
+type fakeTrustClient struct {
+	review    *pb.ReviewBuiltinTrustResponse
+	reviewErr error
+	commitErr error
+	reviews   int
+	commits   []*pb.CommitBuiltinTrustRequest
+}
+
+func (f *fakeTrustClient) ReviewBuiltinTrust(context.Context, *pb.ReviewBuiltinTrustRequest, ...grpc.CallOption) (*pb.ReviewBuiltinTrustResponse, error) {
+	f.reviews++
+	return f.review, f.reviewErr
+}
+
+func (f *fakeTrustClient) CommitBuiltinTrust(_ context.Context, r *pb.CommitBuiltinTrustRequest, _ ...grpc.CallOption) (*pb.CommitBuiltinTrustResponse, error) {
+	f.commits = append(f.commits, r)
+	if f.commitErr != nil {
+		return nil, f.commitErr
+	}
+	return &pb.CommitBuiltinTrustResponse{ManifestDigest: r.ManifestDigest, Generation: 5, AdminUid: 1000,
+		Retained: r.Retain, Retired: r.Retire,
+		Tuples: []*pb.BuiltinTrustTuple{{Module: "core", OldVersion: "1.0.0", NewVersion: "1.1.0", Change: pb.BuiltinTrustChange_BUILTIN_TRUST_CHANGE_CHANGED}}}, nil
+}
+
+var _ builtinTrustClient = pb.ExecutorServiceClient(nil)
+
 func TestPrintTrustReview(t *testing.T) {
 	var out bytes.Buffer
-	printTrustReview(&out, sampleResult())
+	printTrustReview(&out, sampleReview())
 	got := out.String()
 	for _, want := range []string{
 		"Built-ins are untrusted",
 		"release:  1.2.3",
-		"manifest: abcdef012345",
+		"manifest: " + sampleDigest,
 		"root:     nebula-root-1 (fp123)",
 		"store:    generation 4",
 		"MODULE core",
 		"status:  changed",
 		"version: 1.0.0 -> 1.1.0",
 		"ACTION core.install",
-		"risk:   low -> high",
+		"risk:     LOW -> HIGH",
+		"artifact: - -> newartifact",
 		"-old line",
-		"+new line",
+		"+new line \\u001b[2J",
 		"scanner: floor HIGH",
 		"[HIGH] line 3: curl http://...",
-		"Old versions to decide (retain or retire):",
+		"Old versions to decide",
 		"core@1.0.0",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("output missing %q\ngot:\n%s", want, got)
 		}
 	}
+	if strings.Contains(got, "\x1b") {
+		t.Error("terminal escape from the bundle reached the output")
+	}
 }
 
 func TestPrintTrustResult(t *testing.T) {
-	res := trust.BulkAdmitResult{
-		Committed:       true,
-		AdminUID:        1000,
+	res := &pb.CommitBuiltinTrustResponse{
+		AdminUid:        1000,
+		Generation:      5,
 		ManifestDigest:  "abcdef0123456789",
-		Review:          trust.Review{ReleaseVersion: "1.2.3"},
-		Pinned:          []string{"core@1.0.0"},
+		Retained:        []string{"core@1.0.0"},
 		Retired:         []string{"core@0.9.0"},
 		Collected:       []string{"core@0.8.0"},
 		CleanupFailures: 2,
-		Tuples: []trust.TrustTuple{{
-			Module:     "core",
-			OldVersion: "1.0.0",
-			NewVersion: "1.1.0",
-			Status:     "changed",
+		Tuples: []*pb.BuiltinTrustTuple{{
+			Module: "core", OldVersion: "1.0.0", NewVersion: "1.1.0", Change: pb.BuiltinTrustChange_BUILTIN_TRUST_CHANGE_CHANGED,
 		}},
 	}
 	var out bytes.Buffer
-	printTrustResult(&out, res, 5)
+	printTrustResult(&out, res)
 	got := out.String()
 	for _, want := range []string{
 		"committed:",
 		"admin uid:  1000",
 		"generation: 5",
 		"manifest:   abcdef0123456789",
-		"release:    1.2.3",
 		"trust: core 1.0.0 -> 1.1.0 (changed)",
-		"pinned:    core@1.0.0",
-		"retired:   core@0.9.0",
+		"retained:  core@1.0.0",
+		"retired:   core@0.9.0 (trust revoked)",
 		"collected: core@0.8.0",
 		"cleanup failures: 2",
+		"trusted exactly like `nebula artifact trust`",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("output missing %q\ngot:\n%s", want, got)
@@ -129,18 +149,84 @@ func TestPrintTrustResult(t *testing.T) {
 	}
 }
 
-func TestPrintTrustResultNotCommitted(t *testing.T) {
+// The interactive flow reviews through the executor, asks for every old
+// version and the digest on one input stream, and commits exactly the
+// reviewed digest with the decisions.
+func TestTrustBuiltinsInteractiveCommitsThroughExecutor(t *testing.T) {
+	f := &fakeTrustClient{review: sampleReview()}
 	var out bytes.Buffer
-	printTrustResult(&out, trust.BulkAdmitResult{Committed: false}, 0)
-	if got := out.String(); !strings.Contains(got, "not committed") {
-		t.Errorf("expected 'not committed', got:\n%s", got)
+	in := strings.NewReader("r\nt\n" + sampleDigest + "\n")
+	if err := artifactTrustBuiltinsIO(context.Background(), f, nil, in, &out); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if f.reviews != 1 || len(f.commits) != 1 {
+		t.Fatalf("reviews %d commits %d", f.reviews, len(f.commits))
+	}
+	c := f.commits[0]
+	if c.ManifestDigest != sampleDigest || !reflect.DeepEqual(c.Retain, []string{"core@1.0.0"}) || !reflect.DeepEqual(c.Retire, []string{"core@0.9.0"}) {
+		t.Fatalf("commit = %+v", c)
+	}
+	if !strings.Contains(out.String(), "admin uid:  1000") {
+		t.Fatalf("result not shown:\n%s", out.String())
+	}
+}
+
+// Non-interactive: the flags carry digest and decisions; nothing is read.
+func TestTrustBuiltinsNonInteractive(t *testing.T) {
+	f := &fakeTrustClient{review: sampleReview()}
+	var out bytes.Buffer
+	args := []string{"--yes-digest", sampleDigest, "--pin", "core@1.0.0", "--retire", "core@0.9.0"}
+	if err := artifactTrustBuiltinsIO(context.Background(), f, args, strings.NewReader(""), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.commits) != 1 || f.commits[0].ManifestDigest != sampleDigest ||
+		!reflect.DeepEqual(f.commits[0].Retain, []string{"core@1.0.0"}) || !reflect.DeepEqual(f.commits[0].Retire, []string{"core@0.9.0"}) {
+		t.Fatalf("commits = %+v", f.commits)
+	}
+}
+
+// An unchanged release commits nothing.
+func TestTrustBuiltinsNoChanges(t *testing.T) {
+	r := sampleReview()
+	r.NeedsConfirmation = false
+	f := &fakeTrustClient{review: r}
+	var out bytes.Buffer
+	if err := artifactTrustBuiltinsIO(context.Background(), f, nil, strings.NewReader(""), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.commits) != 0 || !strings.Contains(out.String(), "no changes") {
+		t.Fatalf("commits %d, output:\n%s", len(f.commits), out.String())
+	}
+	if strings.Contains(out.String(), "Built-ins are untrusted") {
+		t.Fatal("untrusted banner shown for a trusted release")
+	}
+}
+
+// Review and commit failures are reported; an aborted digest commits
+// nothing.
+func TestTrustBuiltinsErrors(t *testing.T) {
+	var out bytes.Buffer
+	f := &fakeTrustClient{reviewErr: errors.New("unavailable")}
+	if err := artifactTrustBuiltinsIO(context.Background(), f, nil, strings.NewReader(""), &out); err == nil || !strings.Contains(err.Error(), "review built-ins") {
+		t.Fatalf("review err = %v", err)
+	}
+	f = &fakeTrustClient{review: sampleReview(), commitErr: errors.New("stale")}
+	if err := artifactTrustBuiltinsIO(context.Background(), f, []string{"--yes-digest", sampleDigest}, nil, &out); err == nil || !strings.Contains(err.Error(), "commit built-ins") {
+		t.Fatalf("commit err = %v", err)
+	}
+	f = &fakeTrustClient{review: sampleReview()}
+	if err := artifactTrustBuiltinsIO(context.Background(), f, nil, strings.NewReader("r\nt\n\n"), &out); err == nil {
+		t.Fatal("aborted digest committed")
+	}
+	if len(f.commits) != 0 {
+		t.Fatalf("commits after abort: %d", len(f.commits))
 	}
 }
 
 func TestPromptOldVersions(t *testing.T) {
-	in := strings.NewReader("r\nt\n")
+	sc := bufio.NewScanner(strings.NewReader("r\nt\n"))
 	var out bytes.Buffer
-	pins, retired, err := promptOldVersions([]string{"core@1.0.0", "core@0.9.0"}, in, &out)
+	pins, retired, err := promptOldVersions([]string{"core@1.0.0", "core@0.9.0"}, sc, &out)
 	if err != nil {
 		t.Fatalf("promptOldVersions: %v", err)
 	}
@@ -153,9 +239,9 @@ func TestPromptOldVersions(t *testing.T) {
 }
 
 func TestPromptOldVersionsInvalidThenRetain(t *testing.T) {
-	in := strings.NewReader("x\nretain\n")
+	sc := bufio.NewScanner(strings.NewReader("x\nretain\n"))
 	var out bytes.Buffer
-	pins, retired, err := promptOldVersions([]string{"core@1.0.0"}, in, &out)
+	pins, retired, err := promptOldVersions([]string{"core@1.0.0"}, sc, &out)
 	if err != nil {
 		t.Fatalf("promptOldVersions: %v", err)
 	}
@@ -169,9 +255,8 @@ func TestPromptOldVersionsInvalidThenRetain(t *testing.T) {
 
 func TestPromptDigestMatch(t *testing.T) {
 	digest := "abcdef0123456789"
-	in := strings.NewReader(digest + "\n")
 	var out bytes.Buffer
-	got, err := promptDigest(digest, in, &out)
+	got, err := promptDigest(digest, bufio.NewScanner(strings.NewReader(digest+"\n")), &out)
 	if err != nil {
 		t.Fatalf("promptDigest: %v", err)
 	}
@@ -182,9 +267,8 @@ func TestPromptDigestMatch(t *testing.T) {
 
 func TestPromptDigestMismatchThenMatch(t *testing.T) {
 	digest := "abcdef0123456789"
-	in := strings.NewReader("wrong\n" + digest + "\n")
 	var out bytes.Buffer
-	got, err := promptDigest(digest, in, &out)
+	got, err := promptDigest(digest, bufio.NewScanner(strings.NewReader("wrong\n"+digest+"\n")), &out)
 	if err != nil {
 		t.Fatalf("promptDigest: %v", err)
 	}
@@ -194,19 +278,24 @@ func TestPromptDigestMismatchThenMatch(t *testing.T) {
 }
 
 func TestPromptDigestAbort(t *testing.T) {
-	in := strings.NewReader("\n")
 	var out bytes.Buffer
-	if _, err := promptDigest("abcdef", in, &out); err == nil {
+	if _, err := promptDigest("abcdef", bufio.NewScanner(strings.NewReader("\n")), &out); err == nil {
 		t.Fatalf("expected abort error, got nil")
 	}
 }
 
+// Decisions without a digest, and stray arguments (the removed --bundle
+// path among them), are usage errors; the executor is not asked.
 func TestArtifactTrustBuiltinsUsage(t *testing.T) {
-	var out bytes.Buffer
-	if err := artifactTrustBuiltinsIO([]string{}, nil, &out); err == nil {
-		t.Fatalf("expected usage error, got nil")
-	} else if !strings.Contains(err.Error(), "usage:") {
-		t.Errorf("expected usage error, got %v", err)
+	for _, args := range [][]string{{"--pin", "core@1.0.0"}, {"--retire", "core@1.0.0"}, {"extra"}, {"--bundle", "/tmp/x"}} {
+		f := &fakeTrustClient{review: sampleReview()}
+		var out bytes.Buffer
+		if err := artifactTrustBuiltinsIO(context.Background(), f, args, nil, &out); err == nil {
+			t.Fatalf("%v: expected usage error, got nil", args)
+		}
+		if f.reviews != 0 {
+			t.Fatalf("%v: executor asked", args)
+		}
 	}
 }
 
@@ -228,25 +317,5 @@ func TestOrDash(t *testing.T) {
 	}
 	if got := orDash("x"); got != "x" {
 		t.Errorf("orDash(x) = %q, want x", got)
-	}
-}
-
-func TestAdminUIDNonRoot(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root; adminUID non-root path not exercised")
-	}
-	if got := adminUID(); got != os.Getuid() {
-		t.Errorf("adminUID() = %d, want %d", got, os.Getuid())
-	}
-}
-
-func TestChownTrustStoreNonRoot(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root; chownTrustStore no-op path not exercised")
-	}
-	// As non-root the chown is a no-op and must not error, even for a
-	// directory that does not exist (it never walks).
-	if err := chownTrustStore("/nonexistent/trust-store"); !errors.Is(err, nil) {
-		t.Errorf("chownTrustStore non-root = %v, want nil", err)
 	}
 }

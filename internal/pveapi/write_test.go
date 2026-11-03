@@ -32,6 +32,7 @@ type recordedRequest struct {
 	auth   string
 	ctype  string
 	form   url.Values
+	query  string
 }
 
 // fakeWriteServer answers every request with a fixed status and body and
@@ -49,7 +50,7 @@ func (f *fakeWriteServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.reqs = append(f.reqs, recordedRequest{
 		method: r.Method, path: r.URL.Path, auth: r.Header.Get("Authorization"),
-		ctype: r.Header.Get("Content-Type"), form: form,
+		ctype: r.Header.Get("Content-Type"), form: form, query: r.URL.RawQuery,
 	})
 	status, body := f.status, f.body
 	f.mu.Unlock()
@@ -400,7 +401,13 @@ func TestWriterMethodSetIsAllowlist(t *testing.T) {
 	// automatic force-stop fallback".
 	// StopGuest, ResetGuest: ADR 0006 phase 2 (P2-01), "Hard stop / reset:
 	// explicit destructive verb; LXC reset unsupported".
-	want := []string{"CloneVM", "ConvertToTemplate", "CreateImageVM", "DownloadURL", "RebootGuest", "ResetGuest", "ResizeDisk", "SetConfig", "ShutdownGuest", "StartVM", "StopGuest", "TaskStatus"}
+	// CreateSnapshot, DeleteSnapshot, RollbackSnapshot: ADR 0006 phase 2
+	// (P2-01), "snapshot create (exact name, disk set, RAM choice), delete
+	// (exact identity, never age-based), rollback (explicit start/RAM side
+	// effects)".
+	// BackupNow: ADR 0006 phase 2 (P2-01), "Backup now: exact guest,
+	// storage, mode and bandwidth; no pruning/deletion flags".
+	want := []string{"BackupNow", "CloneVM", "ConvertToTemplate", "CreateImageVM", "CreateSnapshot", "DeleteSnapshot", "DownloadURL", "RebootGuest", "ResetGuest", "ResizeDisk", "RollbackSnapshot", "SetConfig", "ShutdownGuest", "StartVM", "StopGuest", "TaskStatus"}
 	typ := reflect.TypeFor[*Writer]()
 	var got []string
 	for i := range typ.NumMethod() {
