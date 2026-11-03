@@ -13,10 +13,15 @@ import (
 // RebootNode reboots one exact PVE node (POST /nodes/{node}/status with
 // command=reboot). PVE answers a node reboot without a UPID: only the
 // documented {"data":null} response is accepted, and anything else is a
-// *WriteError. A timeout is OutcomeUnknown like the other writes, so callers
-// reconcile through the task list and never redispatch blindly (ADR 0006,
-// phase 2: "Node reboot: HIGH standalone; CRITICAL cluster; exact node").
-// Shutdown is not offered: the only command sent is "reboot".
+// *WriteError. A timeout is OutcomeUnknown like the other writes.
+//
+// Because the answer carries no UPID, the task list cannot settle an unknown
+// outcome. Callers reconcile by observing the node's uptime — the read
+// client's ListNodes reports UptimeSeconds per node, and a completed reboot
+// shows the node back online with a fresh, lower uptime (a new boot) — and
+// must never redispatch the reboot (ADR 0006, phase 2: "Node reboot: HIGH
+// standalone; CRITICAL cluster; exact node"). Shutdown is not offered: the
+// only command sent is "reboot".
 //
 // The node is validated before anything is sent; an invalid node name is
 // refused with ErrInvalidArgument and no request is made.
