@@ -457,6 +457,117 @@ func TestBuiltinTrustFailedCommitConsumesReview(t *testing.T) {
 	}
 }
 
+// copyStoreTree replaces dst with a copy of the directory tree src (only
+// directories and regular files), keeping permission bits.
+func copyStoreTree(t *testing.T, src, dst string) {
+	t.Helper()
+	if err := os.RemoveAll(dst); err != nil {
+		t.Fatal(err)
+	}
+	err := filepath.Walk(src, func(p string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		switch {
+		case fi.IsDir():
+			if err := os.Mkdir(target, fi.Mode().Perm()); err != nil {
+				return err
+			}
+			return os.Chmod(target, fi.Mode().Perm())
+		case fi.Mode().IsRegular():
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(target, b, fi.Mode().Perm()); err != nil {
+				return err
+			}
+			return os.Chmod(target, fi.Mode().Perm())
+		default:
+			return fmt.Errorf("unexpected store entry %s (%v)", p, fi.Mode())
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A commit rejected by the binding checks themselves (a digest other than
+// the reviewed one, or a store generation other than the reviewed one)
+// also consumes the review: committing the reviewed digest afterwards, at
+// the reviewed generation, is still stale. Clearing the binding only after
+// those checks would leave the review committable here.
+func TestBuiltinTrustRejectedCommitConsumesReview(t *testing.T) {
+	const otherDigest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	cases := map[string]func(t *testing.T, e *bundleEnv, s *Service, digest string){
+		"other digest": func(t *testing.T, _ *bundleEnv, s *Service, _ string) {
+			if err := adminCommit(t, s, otherDigest); status.Code(err) != codes.Aborted {
+				t.Fatalf("commit of another digest: %v, want Aborted", err)
+			}
+		},
+		"other generation": func(t *testing.T, e *bundleEnv, s *Service, digest string) {
+			// Another local writer commits after the review, the admin's
+			// commit is stale, and then the store returns to the reviewed
+			// generation (restored from a copy taken at review time).
+			snap := filepath.Join(t.TempDir(), "snap")
+			copyStoreTree(t, e.storeDir, snap)
+			other, err := trust.Open(e.storeDir, e.k.anchors(), e.now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c, err := release.ReadBundleDir(e.bundleDir, other.Roots())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := other.BulkAdmit(c, trust.BulkAdmitOpts{ConfirmedDigest: c.Manifest.Digest}); err != nil {
+				t.Fatal(err)
+			}
+			if err := adminCommit(t, s, digest); status.Code(err) != codes.Aborted {
+				t.Fatalf("commit at a changed generation: %v, want Aborted", err)
+			}
+			copyStoreTree(t, snap, e.storeDir)
+			if g := e.storeGeneration(t); g != 0 {
+				t.Fatalf("restored store generation %d, want 0", g)
+			}
+		},
+	}
+	for name, reject := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newBundleEnv(t)
+			s := e.service()
+			rev, err := adminReview(t, s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if e.bt.reviewed == nil {
+				t.Fatal("delivered review not bound")
+			}
+			reject(t, e, s, rev.ManifestDigest)
+			if e.bt.reviewed != nil || e.bt.pending != nil {
+				t.Fatal("rejected commit left a commit binding")
+			}
+			if err := adminCommit(t, s, rev.ManifestDigest); status.Code(err) != codes.Aborted {
+				t.Fatalf("commit of the reviewed digest after a rejected commit: %v, want Aborted", err)
+			}
+			if g := e.storeGeneration(t); g != 0 {
+				t.Fatalf("store generation %d, want 0", g)
+			}
+			// A fresh review makes the commit possible again.
+			if _, err := adminReview(t, s); err != nil {
+				t.Fatal(err)
+			}
+			if err := adminCommit(t, s, rev.ManifestDigest); err != nil {
+				t.Fatalf("commit after a fresh review: %v", err)
+			}
+		})
+	}
+}
+
 // confirmSwappingTrust is a handler-side wiring bug: it forwards every call
 // but confirms the review with a different generation.
 type confirmSwappingTrust struct{ *dirBuiltinTrust }
@@ -466,8 +577,10 @@ func (c confirmSwappingTrust) ConfirmReview(ctx context.Context, digest string, 
 }
 
 // A review confirmed with the wrong generation binds nothing, so the
-// handler-driven commit is Aborted. This is what makes the real-bundle tests
-// fail for a handler that confirms with a wrong generation.
+// handler-driven commit is Aborted. The wrapper shifts the generation
+// itself, so this re-tests ConfirmReview's mismatch check end to end; it does
+// not detect a handler that confirms the wrong generation. That handler-level
+// detection comes from TestReviewBuiltinTrustConfirmsDeliveredReview.
 func TestBuiltinTrustWrongGenerationConfirmIsNotCommittable(t *testing.T) {
 	e := newBundleEnv(t)
 	s := &Service{}

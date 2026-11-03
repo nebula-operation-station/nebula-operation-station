@@ -31,6 +31,10 @@ const (
 	trustTestServerUID = 101
 	trustTestAdminUID  = 0
 	trustTestDigest    = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	// trustTestResultDigest is the fixture's top-level result digest. It
+	// differs from the reviewed digest so a handler that confirms or
+	// delivers the wrong field fails requireConfirmedOnce.
+	trustTestResultDigest = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 )
 
 // fakeBuiltinTrust records calls and returns canned results.
@@ -128,7 +132,9 @@ func sampleReview() trust.BulkAdmitResult {
 		},
 		Scans: []trust.ScanFinding{{Module: "docker", ActionID: "docker.restart", Floor: "HIGH",
 			Findings: []scanner.Finding{{Category: "network", Risk: canonical.RiskHigh, Line: 3, Excerpt: `"curl"`}}}},
-		ManifestDigest:    trustTestDigest,
+		// Deliberately not Review.ManifestDigest: the handler must deliver
+		// and confirm the reviewed digest, never the top-level one.
+		ManifestDigest:    trustTestResultDigest,
 		NeedsConfirmation: true,
 		OldVersions:       []string{"docker@1.0.0", "gone@0.9.0"},
 	}
