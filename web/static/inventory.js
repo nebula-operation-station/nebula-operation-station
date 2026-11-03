@@ -179,6 +179,105 @@
   else narrow.addListener(onModeChange);
 })();
 
+// Live chart values (ADR 0006 P1-37): one SSE stream; visible boxes are
+// posted on change and every `renew` s (30-s server lease), none while
+// the page is hidden. Values are numbers, shown via textContent only.
+(() => {
+  const chart = document.querySelector('.chart');
+  if (!chart || !window.EventSource || !window.IntersectionObserver) return;
+  const els = new Map(); // box ID -> {el, ref, v, t}
+  const seen = new Set();
+  const nodeOf = (el) => {
+    const a = el.closest('.chart__node').querySelector('.chart__box--node .chart__name');
+    return a ? a.title : '';
+  };
+  for (const el of chart.querySelectorAll('.chart__box--node,.chart__box--guest,.chart__box--host')) {
+    const c = el.classList, a = el.querySelector('a.chart__name');
+    let ref = null, id = '', m;
+    if (c.contains('chart__box--node')) {
+      ref = { kind: 'node', name: nodeOf(el) };
+      id = 'node:' + ref.name;
+    } else if (c.contains('chart__box--guest')) {
+      if ((m = /^VM (\d+)$/.exec(el.querySelector('.chart__vmid').textContent))) {
+        ref = { kind: 'guest', node: nodeOf(el), vmid: +m[1] };
+        id = 'guest:' + ref.node + ':' + m[1];
+      }
+    } else if (a && (m = /^\/hosts\/([a-z0-9._-]+)$/.exec(a.getAttribute('href')))) {
+      ref = { kind: 'host', id: m[1] };
+      id = 'host:' + m[1];
+    }
+    if (ref && !els.has(id)) {
+      els.set(id, { el, ref, v: {} });
+      el.dataset.nosLive = id;
+    }
+  }
+  if (!els.size) return;
+  let viewer = '', renew = 10, timer = 0, es = null;
+  const send = async () => {
+    clearTimeout(timer);
+    if (!viewer) return;
+    const boxes = document.hidden ? [] : [...seen].slice(0, 32).map((id) => els.get(id).ref);
+    try {
+      const res = await fetch('/chart/live/targets', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ viewer, boxes }),
+      });
+      if (res.status === 410) return open();
+    } catch (_) { /* next renewal retries */ }
+    timer = setTimeout(send, renew * 1000);
+  };
+  const mk = (cls, text) => {
+    const s = document.createElement('span');
+    s.className = cls;
+    s.textContent = text;
+    return s;
+  };
+  const show = (b, age) => {
+    if (!b.t) {
+      const l = mk('chart__line chart__line--live', '');
+      b.t = mk('chart__line-text', '');
+      l.append(mk('chart__line-name', 'Live'), b.t);
+      b.el.appendChild(l);
+    }
+    const p = [['cpu', 'CPU'], ['ram', 'RAM'], ['disk', 'Disk']]
+      .filter(([k]) => typeof b.v[k] === 'number').map(([k, l]) => l + ' ' + Math.round(b.v[k] * 100) + ' %');
+    if (age) p.push('last observed ' + age + ' s ago');
+    b.t.parentNode.classList.toggle('chart__line--stale', !!age);
+    b.t.textContent = p.join(' · ');
+  };
+  const on = (name, f) => es.addEventListener(name, (e) => {
+    let d = null;
+    try { d = JSON.parse(e.data); } catch (_) { return; }
+    if (d) f(d, els.get(d.id));
+  });
+  const open = () => {
+    if (es) es.close();
+    viewer = '';
+    es = new EventSource('/chart/live/events');
+    on('hello', (d) => {
+      viewer = String(d.viewer || '');
+      if (d.renew > 0) renew = d.renew;
+      send();
+    });
+    on('value', (d, b) => {
+      if (!b || typeof d.value !== 'number' || !['cpu', 'ram', 'disk'].includes(d.metric)) return;
+      b.v[d.metric] = d.value;
+      show(b, 0);
+    });
+    on('age', (d, b) => { if (b && Number.isInteger(d.age)) show(b, d.age); });
+  };
+  const soon = () => { clearTimeout(timer); timer = setTimeout(send, 300); };
+  const io = new IntersectionObserver((list) => {
+    for (const en of list) seen[en.isIntersecting ? 'add' : 'delete'](en.target.dataset.nosLive);
+    soon();
+  });
+  for (const b of els.values()) io.observe(b.el);
+  document.addEventListener('visibilitychange', soon);
+  window.addEventListener('pagehide', () => es && es.close());
+  open();
+})();
+
 (() => {
   const w = nebulaWebAuthn;
 
