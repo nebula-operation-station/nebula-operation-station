@@ -146,6 +146,10 @@ func MethodRoles() map[string][]peercred.Role {
 		// action. The server can never commit.
 		pb.ExecutorService_ProposePVEGuestPower_FullMethodName: {server, admin},
 		pb.ExecutorService_CommitPVEGuestPower_FullMethodName:  {admin},
+		// Typed guest snapshots (ADR 0006 P2-01): exactly like guest
+		// power. The server may propose; only the local admin commits.
+		pb.ExecutorService_ProposePVEGuestSnapshot_FullMethodName: {server, admin},
+		pb.ExecutorService_CommitPVEGuestSnapshot_FullMethodName:  {admin},
 
 		pb.ExecutorService_ListPVERemotes_FullMethodName: {server, admin, peercred.RolePVECollector},
 		pb.ExecutorService_ReadPVE_FullMethodName:        {peercred.RolePVECollector, admin},

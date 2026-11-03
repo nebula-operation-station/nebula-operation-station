@@ -118,6 +118,8 @@ const (
 	ExecutorService_CommitPVERepin_FullMethodName                  = "/nebula.executor.v1.ExecutorService/CommitPVERepin"
 	ExecutorService_ProposePVEGuestPower_FullMethodName            = "/nebula.executor.v1.ExecutorService/ProposePVEGuestPower"
 	ExecutorService_CommitPVEGuestPower_FullMethodName             = "/nebula.executor.v1.ExecutorService/CommitPVEGuestPower"
+	ExecutorService_ProposePVEGuestSnapshot_FullMethodName         = "/nebula.executor.v1.ExecutorService/ProposePVEGuestSnapshot"
+	ExecutorService_CommitPVEGuestSnapshot_FullMethodName          = "/nebula.executor.v1.ExecutorService/CommitPVEGuestSnapshot"
 	ExecutorService_ListPVERemotes_FullMethodName                  = "/nebula.executor.v1.ExecutorService/ListPVERemotes"
 	ExecutorService_ReadPVE_FullMethodName                         = "/nebula.executor.v1.ExecutorService/ReadPVE"
 	ExecutorService_AddPrivateRegistry_FullMethodName              = "/nebula.executor.v1.ExecutorService/AddPrivateRegistry"
@@ -470,6 +472,8 @@ type ExecutorServiceClient interface {
 	// approved action: role admin only.
 	ProposePVEGuestPower(ctx context.Context, in *ProposePVEGuestPowerRequest, opts ...grpc.CallOption) (*ProposePVEGuestPowerResponse, error)
 	CommitPVEGuestPower(ctx context.Context, in *CommitPVEGuestPowerRequest, opts ...grpc.CallOption) (*CommitPVEGuestPowerResponse, error)
+	ProposePVEGuestSnapshot(ctx context.Context, in *ProposePVEGuestSnapshotRequest, opts ...grpc.CallOption) (*ProposePVEGuestSnapshotResponse, error)
+	CommitPVEGuestSnapshot(ctx context.Context, in *CommitPVEGuestSnapshotRequest, opts ...grpc.CallOption) (*CommitPVEGuestSnapshotResponse, error)
 	// PVE provider reads (ADR 0006, P1-05). Role: server, admin,
 	// pve-collector. Metadata only: which remotes exist, their kind, ordered
 	// endpoints, trust generation and state. The trust pin is a SHA-256
@@ -1483,6 +1487,26 @@ func (c *executorServiceClient) CommitPVEGuestPower(ctx context.Context, in *Com
 	return out, nil
 }
 
+func (c *executorServiceClient) ProposePVEGuestSnapshot(ctx context.Context, in *ProposePVEGuestSnapshotRequest, opts ...grpc.CallOption) (*ProposePVEGuestSnapshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProposePVEGuestSnapshotResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ProposePVEGuestSnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) CommitPVEGuestSnapshot(ctx context.Context, in *CommitPVEGuestSnapshotRequest, opts ...grpc.CallOption) (*CommitPVEGuestSnapshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitPVEGuestSnapshotResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_CommitPVEGuestSnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *executorServiceClient) ListPVERemotes(ctx context.Context, in *ListPVERemotesRequest, opts ...grpc.CallOption) (*ListPVERemotesResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListPVERemotesResponse)
@@ -1896,6 +1920,8 @@ type ExecutorServiceServer interface {
 	// approved action: role admin only.
 	ProposePVEGuestPower(context.Context, *ProposePVEGuestPowerRequest) (*ProposePVEGuestPowerResponse, error)
 	CommitPVEGuestPower(context.Context, *CommitPVEGuestPowerRequest) (*CommitPVEGuestPowerResponse, error)
+	ProposePVEGuestSnapshot(context.Context, *ProposePVEGuestSnapshotRequest) (*ProposePVEGuestSnapshotResponse, error)
+	CommitPVEGuestSnapshot(context.Context, *CommitPVEGuestSnapshotRequest) (*CommitPVEGuestSnapshotResponse, error)
 	// PVE provider reads (ADR 0006, P1-05). Role: server, admin,
 	// pve-collector. Metadata only: which remotes exist, their kind, ordered
 	// endpoints, trust generation and state. The trust pin is a SHA-256
@@ -2229,6 +2255,12 @@ func (UnimplementedExecutorServiceServer) ProposePVEGuestPower(context.Context, 
 }
 func (UnimplementedExecutorServiceServer) CommitPVEGuestPower(context.Context, *CommitPVEGuestPowerRequest) (*CommitPVEGuestPowerResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CommitPVEGuestPower not implemented")
+}
+func (UnimplementedExecutorServiceServer) ProposePVEGuestSnapshot(context.Context, *ProposePVEGuestSnapshotRequest) (*ProposePVEGuestSnapshotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ProposePVEGuestSnapshot not implemented")
+}
+func (UnimplementedExecutorServiceServer) CommitPVEGuestSnapshot(context.Context, *CommitPVEGuestSnapshotRequest) (*CommitPVEGuestSnapshotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CommitPVEGuestSnapshot not implemented")
 }
 func (UnimplementedExecutorServiceServer) ListPVERemotes(context.Context, *ListPVERemotesRequest) (*ListPVERemotesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListPVERemotes not implemented")
@@ -4018,6 +4050,42 @@ func _ExecutorService_CommitPVEGuestPower_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_ProposePVEGuestSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProposePVEGuestSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ProposePVEGuestSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ProposePVEGuestSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ProposePVEGuestSnapshot(ctx, req.(*ProposePVEGuestSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_CommitPVEGuestSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommitPVEGuestSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).CommitPVEGuestSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_CommitPVEGuestSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).CommitPVEGuestSnapshot(ctx, req.(*CommitPVEGuestSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ExecutorService_ListPVERemotes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListPVERemotesRequest)
 	if err := dec(in); err != nil {
@@ -4538,6 +4606,14 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CommitPVEGuestPower",
 			Handler:    _ExecutorService_CommitPVEGuestPower_Handler,
+		},
+		{
+			MethodName: "ProposePVEGuestSnapshot",
+			Handler:    _ExecutorService_ProposePVEGuestSnapshot_Handler,
+		},
+		{
+			MethodName: "CommitPVEGuestSnapshot",
+			Handler:    _ExecutorService_CommitPVEGuestSnapshot_Handler,
 		},
 		{
 			MethodName: "ListPVERemotes",

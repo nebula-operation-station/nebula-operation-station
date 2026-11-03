@@ -232,7 +232,8 @@ type PveMutations struct {
 	// never identified without it.
 	TaskIDs PveJobTaskIDs
 
-	// powerBindings are the guest power bindings of this engine (see
+	// powerBindings are the guest power and snapshot bindings of this
+	// engine when the service has none shared with the authority (see
 	// PveGuestPowerBindings); one engine, one set.
 	powerBindings PveGuestPowerBindings
 
@@ -300,6 +301,28 @@ type PveMutationRequest struct {
 	// immediately before each step's intent is recorded; a failure sends
 	// nothing.
 	precheck func(PveTargetState) error
+	// liveCheck, if set, checks facts of the target that PveTargetState
+	// does not carry (a guest's disk set, storage capabilities or snapshot
+	// list) with a fresh read of its own, using the read token. Like
+	// precheck it runs at proposal, before authorization and immediately
+	// before each step's intent is recorded; a failure sends nothing.
+	liveCheck pveLiveCheck
+}
+
+// pveLiveCheck is a typed action's own live precondition (see
+// PveMutationRequest.liveCheck).
+type pveLiveCheck func(ctx context.Context, rm executordb.PveRemote, live PveTargetState, read pveapi.TokenSupplier) error
+
+// runLiveCheck applies check (if any) with the read token of rm.
+func (m *PveMutations) runLiveCheck(ctx context.Context, rm executordb.PveRemote, live PveTargetState, check pveLiveCheck) error {
+	if check == nil {
+		return nil
+	}
+	read, err := m.readToken(rm)
+	if err != nil {
+		return err
+	}
+	return check(ctx, rm, live, read)
 }
 
 // PveMutationResult reports the durable job of one mutation.
@@ -466,6 +489,9 @@ func (m *PveMutations) ProposalRequest(ctx context.Context, req PveMutationReque
 			return canonical.Request{}, nil, err
 		}
 	}
+	if err := m.runLiveCheck(ctx, rm, live, req.liveCheck); err != nil {
+		return canonical.Request{}, nil, err
+	}
 	return permit.ProviderMutationRequest(mutationOf(req, t), executionID, risk, stagePlanHash, expiry)
 }
 
@@ -490,9 +516,18 @@ func parsePveSteps(params []byte) ([]PveMutationStep, error) {
 	return doc.Steps, nil
 }
 
-// taskType returns the PVE task type the client expects for step.
+// taskType returns the PVE task type the client expects for step. A
+// guest snapshot step method is known only to a client that implements
+// PveSnapshotClient; no other family can claim it.
 func (m *PveMutations) taskType(step PveMutationStep) (string, error) {
-	tt, ok := m.Client.TaskType(step.Method)
+	var tt string
+	var ok bool
+	if snapTT, isSnap := GuestSnapshotStepTaskType(step.Method); isSnap {
+		_, client := m.Client.(PveSnapshotClient)
+		tt, ok = snapTT, client
+	} else {
+		tt, ok = m.Client.TaskType(step.Method)
+	}
 	if !ok || !pveTaskTypeRe.MatchString(tt) {
 		return "", ErrPveMutationPlan
 	}
@@ -500,6 +535,35 @@ func (m *PveMutations) taskType(step PveMutationStep) (string, error) {
 }
 
 var pveTaskTypeRe = regexp.MustCompile(`^[a-z0-9]{1,32}$`)
+
+// stepTaskID returns the ID field the PVE task of step carries, if known:
+// from the snapshot step arguments, or from a client that implements
+// PveStepTaskIDer.
+func (m *PveMutations) stepTaskID(step PveMutationStep) (string, bool) {
+	if _, isSnap := GuestSnapshotStepTaskType(step.Method); isSnap {
+		return GuestSnapshotStepTaskID(step)
+	}
+	if ider, ok := m.Client.(PveStepTaskIDer); ok {
+		return ider.TaskID(step)
+	}
+	return "", false
+}
+
+// dispatch sends one step: a guest snapshot step through the client's
+// PveSnapshotClient surface (which rechecks the bound snapshot with the
+// read token immediately before sending), everything else through
+// Dispatch. A snapshot step on a client without that surface is refused
+// before anything is sent.
+func (m *PveMutations) dispatch(ctx context.Context, rm executordb.PveRemote, node string, step PveMutationStep, action, read pveapi.TokenSupplier) (string, error) {
+	if _, isSnap := GuestSnapshotStepTaskType(step.Method); isSnap {
+		sc, ok := m.Client.(PveSnapshotClient)
+		if !ok {
+			return "", fmt.Errorf("dispatch %s: %w", step.Method, ErrPveRejected)
+		}
+		return sc.DispatchSnapshot(ctx, rm, node, step, action, read)
+	}
+	return m.Client.Dispatch(ctx, rm, node, step, action)
+}
 
 // approvedSteps reads the step plan from the approved canonical binding.
 func approvedSteps(binding []byte) ([]PveMutationStep, error) {
@@ -582,6 +646,10 @@ func (m *PveMutations) Run(ctx context.Context, req PveMutationRequest) (PveMuta
 			return PveMutationResult{}, err
 		}
 	}
+	if err := m.runLiveCheck(ctx, rm, live, req.liveCheck); err != nil {
+		m.log().Warn("audit", "kind", "pve_mutation_precondition", "remote", rm.RemoteID, "action", req.ActionID, "node", t.Node, "vmid", t.VMID)
+		return PveMutationResult{}, err
+	}
 	claim, err := m.Auth.AuthorizeProviderMutation(req.Digest, mutationOf(req, t))
 	if err != nil {
 		m.log().Warn("audit", "kind", "pve_mutation_denied", "remote", rm.RemoteID, "action", req.ActionID, "code", string(permit.CodeOf(err)))
@@ -608,7 +676,7 @@ func (m *PveMutations) Run(ctx context.Context, req PveMutationRequest) (PveMuta
 	digest := hex.EncodeToString(req.Digest[:])
 	for i, step := range steps {
 		n := i + 1
-		err := m.runStep(ctx, claim, t, digest, req.ActionID, n, step, req.precheck)
+		err := m.runStep(ctx, claim, t, digest, req.ActionID, n, step, req.precheck, req.liveCheck)
 		if n == 1 && errors.Is(err, ErrPveTargetBusy) && claim.Release("target busy") {
 			// Nothing was recorded or sent: another mutation of the target
 			// still holds it. The approval stays usable for a later run.
@@ -633,7 +701,7 @@ func (m *PveMutations) Run(ctx context.Context, req PveMutationRequest) (PveMuta
 	return res, nil
 }
 
-func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, t permit.ProviderMutationTarget, digest, action string, n int, step PveMutationStep, precheck func(PveTargetState) error) error {
+func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, t permit.ProviderMutationTarget, digest, action string, n int, step PveMutationStep, precheck func(PveTargetState) error, liveCheck pveLiveCheck) error {
 	// Lock or revocation since authorization stops undispatched work.
 	if err := claim.Check(); err != nil {
 		return ErrPveMutationDenied
@@ -665,13 +733,8 @@ func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, 
 	// ID of the step (the guest or storage it names) narrows the match, so a
 	// returned task of another guest on the node is never taken for this
 	// step. A lost task is identified with narrowTaskID instead.
-	var wantID string
-	if ider, ok := m.Client.(PveStepTaskIDer); ok {
-		if id, ok := ider.TaskID(step); ok {
-			wantID = id
-		}
-	}
-	if precheck != nil {
+	wantID, _ := m.stepTaskID(step)
+	if precheck != nil || liveCheck != nil {
 		// Identity and state are read again right before the intent: a
 		// guest that changed since authorization gets nothing.
 		live, err := m.Client.TargetState(ctx, rm, t.Kind, t.Node, t.VMID, readTok)
@@ -679,9 +742,17 @@ func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, 
 			m.log().Warn("audit", "kind", "pve_mutation_target_changed", "remote", t.RemoteID, "node", t.Node, "vmid", t.VMID, "execution", claim.ExecutionID, "step", n)
 			return ErrPveTargetChanged
 		}
-		if err := precheck(live); err != nil {
-			m.log().Warn("audit", "kind", "pve_mutation_precondition", "remote", t.RemoteID, "node", t.Node, "vmid", t.VMID, "execution", claim.ExecutionID, "step", n)
-			return err
+		if precheck != nil {
+			if err := precheck(live); err != nil {
+				m.log().Warn("audit", "kind", "pve_mutation_precondition", "remote", t.RemoteID, "node", t.Node, "vmid", t.VMID, "execution", claim.ExecutionID, "step", n)
+				return err
+			}
+		}
+		if liveCheck != nil {
+			if err := liveCheck(ctx, rm, live, readTok); err != nil {
+				m.log().Warn("audit", "kind", "pve_mutation_precondition", "remote", t.RemoteID, "node", t.Node, "vmid", t.VMID, "execution", claim.ExecutionID, "step", n)
+				return err
+			}
 		}
 	}
 	job := executordb.PveJob{
@@ -704,7 +775,7 @@ func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, 
 		return ErrPveMutationDenied
 	}
 	m.log().Info("audit", "kind", "pve_mutation_dispatch", "remote", t.RemoteID, "node", t.Node, "vmid", t.VMID, "action", action, "execution", claim.ExecutionID, "step", n, "method", step.Method)
-	upid, err := m.Client.Dispatch(ctx, rm, t.Node, step, actionTok)
+	upid, err := m.dispatch(ctx, rm, t.Node, step, actionTok, readTok)
 	if errors.Is(err, ErrPveRejected) {
 		_ = m.DB.FinishPveJob(claim.ExecutionID, n, executordb.PveJobFailed, "refused by the remote")
 		return ErrPveStepFailed
@@ -763,11 +834,7 @@ func (m *PveMutations) reconcileLost(ctx context.Context, rm executordb.PveRemot
 func (m *PveMutations) narrowTaskID(job executordb.PveJob, step *PveMutationStep) (string, error) {
 	var stepID string
 	if step != nil {
-		if ider, ok := m.Client.(PveStepTaskIDer); ok {
-			if id, ok := ider.TaskID(*step); ok {
-				stepID = id
-			}
-		}
+		stepID, _ = m.stepTaskID(*step)
 	}
 	if m.TaskIDs != nil {
 		id, ok, err := m.TaskIDs.JobTaskID(job)

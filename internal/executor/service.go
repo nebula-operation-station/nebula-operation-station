@@ -98,8 +98,9 @@ type Service struct {
 	// pveMutations.
 	pveMutOnce sync.Once
 	pveMut     *PveMutations
-	// pveGuestPowerBindings are the guest power bindings the authority's
-	// risk policy reads (SetPveGuestPowerBindings); nil: the engine's own.
+	// pveGuestPowerBindings are the guest power and snapshot bindings the
+	// authority's risk policy reads (SetPveGuestPowerBindings); nil: the
+	// engine's own.
 	pveGuestPowerBindings *PveGuestPowerBindings
 	// registry holds private registry administration, read authority and
 	// clients (ADR 0006, P1-32).

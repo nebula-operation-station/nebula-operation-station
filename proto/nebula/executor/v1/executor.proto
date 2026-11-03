@@ -451,6 +451,8 @@ service ExecutorService {
   // approved action: role admin only.
   rpc ProposePVEGuestPower(ProposePVEGuestPowerRequest) returns (ProposePVEGuestPowerResponse);
   rpc CommitPVEGuestPower(CommitPVEGuestPowerRequest) returns (CommitPVEGuestPowerResponse);
+  rpc ProposePVEGuestSnapshot(ProposePVEGuestSnapshotRequest) returns (ProposePVEGuestSnapshotResponse);
+  rpc CommitPVEGuestSnapshot(CommitPVEGuestSnapshotRequest) returns (CommitPVEGuestSnapshotResponse);
 
   // PVE provider reads (ADR 0006, P1-05). Role: server, admin,
   // pve-collector. Metadata only: which remotes exist, their kind, ordered
@@ -2171,6 +2173,62 @@ message PVEGuestPowerStep {
 }
 
 message CommitPVEGuestPowerResponse {
+  string execution_id = 1;
+  repeated PVEGuestPowerStep steps = 2;
+}
+
+// PVEGuestSnapshotTarget names one snapshot action on one exact guest. The
+// executor reads the guest's configuration, storages and snapshot list
+// itself and binds them in the approval.
+message PVEGuestSnapshotTarget {
+  string remote_id = 1;
+  // "qemu" or "lxc".
+  string kind = 2;
+  string node = 3;
+  uint64 vmid = 4;
+  // "create", "delete" or "rollback". There is no bulk or age-based op.
+  string op = 5;
+  // The exact snapshot name.
+  string name = 6;
+  // create only: include RAM (QEMU, running guest).
+  bool vmstate = 7;
+  // rollback only: the explicit start flag.
+  bool start = 8;
+  // delete and rollback: the exact snapshot identity shown in the
+  // approval; required on commit, checked on propose when set.
+  PVESnapshotIdentity expect = 9;
+}
+
+// PVESnapshotIdentity is one exact snapshot: name, generation (snaptime,
+// parent) and RAM flag.
+message PVESnapshotIdentity {
+  string name = 1;
+  int64 snaptime_unix = 2;
+  string parent = 3;
+  bool vmstate = 4;
+}
+
+message ProposePVEGuestSnapshotRequest {
+  PVEGuestSnapshotTarget target = 1;
+}
+
+message ProposePVEGuestSnapshotResponse {
+  ProposeExecutionResponse permit = 1;
+  // delete and rollback: the exact snapshot bound in the approval.
+  PVESnapshotIdentity snapshot = 2;
+  // rollback: the guest runs after the rollback (start flag, or a RAM
+  // snapshot, which PVE resumes whatever the start flag says).
+  bool guest_runs_after = 3;
+}
+
+message CommitPVEGuestSnapshotRequest {
+  // The same target that was proposed and approved, with expect set for
+  // delete and rollback.
+  PVEGuestSnapshotTarget target = 1;
+  string execution_digest = 2;
+}
+
+message CommitPVEGuestSnapshotResponse {
   string execution_id = 1;
   repeated PVEGuestPowerStep steps = 2;
 }

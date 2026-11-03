@@ -3,10 +3,13 @@
 package executor
 
 import (
+	"context"
 	"slices"
 	"testing"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
@@ -321,5 +324,92 @@ func TestValidateReadPVERequest(t *testing.T) {
 				t.Fatalf("want nil, got %v", err)
 			}
 		})
+	}
+}
+
+// TestMethodRolesCoverEveryRPC: every method and stream of the executor
+// service has a role-table entry with at least one role, and the table
+// names no method the service does not have. A missing entry would make an
+// RPC unreachable (the interceptor denies it for everyone) without any
+// test noticing.
+func TestMethodRolesCoverEveryRPC(t *testing.T) {
+	roles := MethodRoles()
+	desc := pb.ExecutorService_ServiceDesc
+	full := map[string]bool{}
+	for _, m := range desc.Methods {
+		full["/"+desc.ServiceName+"/"+m.MethodName] = true
+	}
+	for _, s := range desc.Streams {
+		full["/"+desc.ServiceName+"/"+s.StreamName] = true
+	}
+	if len(full) == 0 {
+		t.Fatal("service descriptor has no methods")
+	}
+	for m := range full {
+		if len(roles[m]) == 0 {
+			t.Errorf("%s has no role-table entry", m)
+		}
+	}
+	for m := range roles {
+		if !full[m] {
+			t.Errorf("role table names unknown method %s", m)
+		}
+	}
+}
+
+// TestMethodRolesGuestSnapshotThroughInterceptor: through the real
+// interceptor and role table, the server and the admin may propose a
+// guest snapshot action, only the admin may commit it, and every other
+// role (and an unknown UID) is denied before the handler runs.
+func TestMethodRolesGuestSnapshotThroughInterceptor(t *testing.T) {
+	const (
+		serverUID uint32 = 30001
+		adminUID  uint32 = 30002
+		collUID   uint32 = 30003
+		discUID   uint32 = 30004
+		otherUID  uint32 = 30999
+	)
+	policy := peercred.NewPolicy(map[uint32][]peercred.Role{
+		serverUID: {peercred.RoleServer},
+		adminUID:  {peercred.RoleAdmin},
+		collUID:   {peercred.RolePVECollector},
+		discUID:   {peercred.Role("discovery")},
+	}, MethodRoles())
+	propose := pb.ExecutorService_ProposePVEGuestSnapshot_FullMethodName
+	commit := pb.ExecutorService_CommitPVEGuestSnapshot_FullMethodName
+	allowed := map[string]map[uint32]bool{
+		propose: {serverUID: true, adminUID: true},
+		commit:  {adminUID: true},
+	}
+	for method, ok := range allowed {
+		for _, uid := range []uint32{serverUID, adminUID, collUID, discUID, otherUID} {
+			ctx := peer.NewContext(context.Background(), &peer.Peer{AuthInfo: peercred.AuthInfo{UID: uid}})
+			reached := false
+			_, err := policy.UnaryInterceptor(nil)(ctx, nil, &grpc.UnaryServerInfo{FullMethod: method},
+				func(ctx context.Context, _ any) (any, error) {
+					reached = true
+					if c, has := peercred.CallerFrom(ctx); !has || c.UID != uid {
+						t.Errorf("%s uid %d: caller %+v", method, uid, c)
+					}
+					return nil, nil
+				})
+			if ok[uid] {
+				if err != nil || !reached {
+					t.Errorf("%s uid %d: err %v reached %v, want allowed", method, uid, err, reached)
+				}
+			} else if status.Code(err) != codes.PermissionDenied || reached {
+				t.Errorf("%s uid %d: err %v reached %v, want PermissionDenied", method, uid, err, reached)
+			}
+		}
+	}
+	// Exactly mirrors guest power.
+	roles := MethodRoles()
+	for snap, power := range map[string]string{
+		propose: pb.ExecutorService_ProposePVEGuestPower_FullMethodName,
+		commit:  pb.ExecutorService_CommitPVEGuestPower_FullMethodName,
+	} {
+		if !slices.Equal(roles[snap], roles[power]) {
+			t.Errorf("%s roles %v, want %v (as %s)", snap, roles[snap], roles[power], power)
+		}
 	}
 }
