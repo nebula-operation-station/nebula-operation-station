@@ -353,8 +353,8 @@ func TestCreateSnapshotRejectsBadDescription(t *testing.T) {
 // that pin the dispatched request rather than the planning read.
 func checkedRollbackPlan(kind GuestKind, vmid int64, name string, start, vmstate bool) SnapshotRollbackPlan {
 	return SnapshotRollbackPlan{
-		Kind: kind, Node: "pve1", VMID: vmid, Name: name, Start: start,
-		HasVMState: vmstate, GuestRunsAfter: start || vmstate, checked: true,
+		kind: kind, node: "pve1", vmid: vmid, name: name, start: start,
+		hasVMState: vmstate, checked: true,
 	}
 }
 
@@ -410,7 +410,7 @@ func TestRollbackReportsRAMSideEffect(t *testing.T) {
 			if err != nil {
 				t.Fatalf("PlanSnapshotRollback: %v", err)
 			}
-			if plan.HasVMState != tc.wantVMState || plan.GuestRunsAfter != tc.wantRuns || plan.Start != tc.start {
+			if plan.HasVMState() != tc.wantVMState || plan.GuestRunsAfter() != tc.wantRuns || plan.Start() != tc.start {
 				t.Fatalf("plan = %+v, want vmstate=%v runs=%v", plan, tc.wantVMState, tc.wantRuns)
 			}
 			f := &fakeWriteServer{body: upidBody(upidQSnapRollback)}
@@ -441,7 +441,7 @@ func TestPlanSnapshotRollbackLXC(t *testing.T) {
 		`{"data":[{"name":"snap1","snaptime":1793268000},{"name":"current","parent":"snap1"}]}`)
 	c := testClient(t, ts)
 	plan, err := c.PlanSnapshotRollback(context.Background(), GuestLXC, "pve1", 200, "snap1", false)
-	if err != nil || plan.HasVMState || plan.GuestRunsAfter {
+	if err != nil || plan.HasVMState() || plan.GuestRunsAfter() {
 		t.Fatalf("plan = %+v, %v; want no RAM, not running", plan, err)
 	}
 
@@ -483,7 +483,7 @@ func TestRollbackSnapshotRefusesUncheckedPlan(t *testing.T) {
 	f := &fakeWriteServer{body: upidBody(upidQSnapRollback)}
 	w := newTestWriter(t, f)
 	_, err := w.RollbackSnapshot(context.Background(), SnapshotRollbackPlan{
-		Kind: GuestQEMU, Node: "pve1", VMID: 120, Name: "snap1",
+		kind: GuestQEMU, node: "pve1", vmid: 120, name: "snap1",
 	})
 	if !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("err = %v, want ErrInvalidArgument", err)
