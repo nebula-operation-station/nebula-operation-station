@@ -476,7 +476,7 @@ func (s *Store) ApplyRotation(raw, sig []byte) (release.Rotation, error) {
 		RootFingerprint: rot.SignedBy.Fingerprint(), AppliedAt: now})
 	x.Generation++
 	x.ClockHighWater = maxTime(x.ClockHighWater, now)
-	if err := s.persist(x); err != nil {
+	if err := s.persistNext(x); err != nil {
 		return release.Rotation{}, err
 	}
 	s.idx = x
@@ -511,6 +511,31 @@ func maxTime(a, b time.Time) time.Time {
 		return a
 	}
 	return b
+}
+
+// persistNext writes x, the successor of the loaded index, after checking
+// that the index on disk is still the loaded generation: another local
+// process that committed in between makes this change ErrStale instead of
+// being overwritten. The check narrows, but without a file lock does not
+// close, the window between the read and the rename.
+func (s *Store) persistNext(x index) error {
+	raw, err := readBounded(filepath.Join(s.dir, indexFile), MaxMetadata)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w: the index disappeared since it was loaded", ErrStale)
+		}
+		return fmt.Errorf("trust: reread index: %w", err)
+	}
+	var disk struct {
+		Generation int64 `json:"generation"`
+	}
+	if err := json.Unmarshal(raw, &disk); err != nil {
+		return fmt.Errorf("%w: reread index: %v", ErrCorrupt, err)
+	}
+	if disk.Generation != s.idx.Generation {
+		return fmt.Errorf("%w: the store changed on disk (generation %d, loaded %d)", ErrStale, disk.Generation, s.idx.Generation)
+	}
+	return s.persist(x)
 }
 
 // persist writes x as index.json atomically.

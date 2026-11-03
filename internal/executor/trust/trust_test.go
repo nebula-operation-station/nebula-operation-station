@@ -550,3 +550,26 @@ func TestOpenRejectsInconsistentHistoryAndTrailingData(t *testing.T) {
 		t.Errorf("trailing data: %v", err)
 	}
 }
+
+// A store opened before another local process committed does not
+// overwrite that commit: its own admission is stale.
+func TestAdmitRejectsConcurrentDiskCommit(t *testing.T) {
+	e := newEnv(t)
+	stale, err := Open(e.dir, e.k.anchors(), func() time.Time { return e.now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := e.candidate("1.0.0", docker("1.0.0", scriptV1))
+	r, err := stale.Review(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.admit(c)
+	if _, err := stale.Admit(c, r); !errors.Is(err, ErrStale) {
+		t.Fatalf("admit on a stale store: %v, want ErrStale", err)
+	}
+	e.reopen()
+	if e.s.Generation() != 1 {
+		t.Fatalf("generation %d, want 1", e.s.Generation())
+	}
+}

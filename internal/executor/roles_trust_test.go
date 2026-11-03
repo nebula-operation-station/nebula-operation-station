@@ -43,6 +43,7 @@ type fakeBuiltinTrust struct {
 
 	reviews  int
 	statuses int
+	confirms []string
 	commits  []fakeCommit
 }
 
@@ -61,6 +62,10 @@ func (f *fakeBuiltinTrust) Review(context.Context) (trust.BulkAdmitResult, error
 func (f *fakeBuiltinTrust) Status(context.Context) (trust.BulkAdmitResult, error) {
 	f.statuses++
 	return f.review, f.reviewErr
+}
+
+func (f *fakeBuiltinTrust) ConfirmReview(_ context.Context, digest string, _ int64) {
+	f.confirms = append(f.confirms, digest)
 }
 
 func (f *fakeBuiltinTrust) Commit(_ context.Context, digest string, pins map[string]bool, retired []string, uid int) (trust.BulkAdmitResult, int64, error) {
@@ -457,6 +462,9 @@ func TestReviewBuiltinTrustRefusesOversizeResponse(t *testing.T) {
 	_, err := callAs(t, trustTestAdminUID, pb.ExecutorService_ReviewBuiltinTrust_FullMethodName, &pb.ReviewBuiltinTrustRequest{}, s.ReviewBuiltinTrust)
 	if status.Code(err) != codes.ResourceExhausted {
 		t.Fatalf("err = %v, want ResourceExhausted", err)
+	}
+	if len(f.confirms) != 0 {
+		t.Fatalf("refused review confirmed: %v", f.confirms)
 	}
 }
 

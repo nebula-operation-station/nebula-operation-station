@@ -48,16 +48,20 @@ var errBuiltinTrustUnconfigured = status.Error(codes.Unimplemented, "built-in tr
 type BuiltinTrust interface {
 	// Review returns the dry-run review and scanner findings of the local
 	// release bundle against the trust store for the local admin. It
-	// commits nothing and binds the next Commit to the reviewed manifest
-	// digest and store generation.
+	// commits nothing; the review only becomes committable once
+	// ConfirmReview reports it delivered.
 	Review(ctx context.Context) (trust.BulkAdmitResult, error)
+	// ConfirmReview is called after the last Review was delivered to the
+	// admin in full. It binds the next Commit to that review's manifest
+	// digest and store generation; a mismatch binds nothing.
+	ConfirmReview(ctx context.Context, digest string, generation int64)
 	// Status returns the same dry run for the read-only trust status. It
 	// never writes state and never binds a commit; implementations may
 	// cache it while the store and the bundle are unchanged.
 	Status(ctx context.Context) (trust.BulkAdmitResult, error)
 	// Commit reviews again and commits atomically when digest matches the
 	// reviewed manifest digest and the store generation is still the one
-	// the last Review saw; pins are retained and retired retired old
+	// the last confirmed Review saw; pins are retained and retired retired old
 	// versions. It returns the result and the new store generation.
 	Commit(ctx context.Context, digest string, pins map[string]bool, retired []string, adminUID int) (trust.BulkAdmitResult, int64, error)
 }
@@ -77,7 +81,9 @@ type dirBuiltinTrust struct {
 	now                 func() time.Time
 
 	mu sync.Mutex
-	// reviewed binds Commit to the last admin Review.
+	// pending is the last admin Review, not yet confirmed delivered.
+	pending *builtinReviewBinding
+	// reviewed binds Commit to the last confirmed admin Review.
 	reviewed *builtinReviewBinding
 	// status caches the last status dry run under statusKey.
 	status    *trust.BulkAdmitResult
@@ -160,7 +166,7 @@ func (d *dirBuiltinTrust) open() (*trust.Store, release.Candidate, error) {
 func (d *dirBuiltinTrust) Review(_ context.Context) (trust.BulkAdmitResult, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.reviewed = nil
+	d.pending, d.reviewed = nil, nil
 	st, c, err := d.open()
 	if err != nil {
 		return trust.BulkAdmitResult{}, err
@@ -169,8 +175,18 @@ func (d *dirBuiltinTrust) Review(_ context.Context) (trust.BulkAdmitResult, erro
 	if err != nil {
 		return trust.BulkAdmitResult{}, err
 	}
-	d.reviewed = &builtinReviewBinding{digest: res.ManifestDigest, generation: res.Review.Generation}
+	d.pending = &builtinReviewBinding{digest: res.ManifestDigest, generation: res.Review.Generation}
 	return res, nil
+}
+
+// ConfirmReview implements BuiltinTrust.
+func (d *dirBuiltinTrust) ConfirmReview(_ context.Context, digest string, generation int64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if p := d.pending; p != nil && p.digest == digest && p.generation == generation {
+		d.reviewed = p
+	}
+	d.pending = nil
 }
 
 // Status implements BuiltinTrust. The dry run is cached under the store
@@ -234,6 +250,7 @@ func (d *dirBuiltinTrust) Commit(_ context.Context, digest string, pins map[stri
 		return trust.BulkAdmitResult{}, 0, err
 	}
 	rb := d.reviewed
+	d.pending = nil
 	switch {
 	case rb == nil:
 		return trust.BulkAdmitResult{}, 0, fmt.Errorf("%w: no review to commit", trust.ErrStale)
@@ -440,6 +457,8 @@ func (s *Service) ReviewBuiltinTrust(ctx context.Context, req *pb.ReviewBuiltinT
 	if proto.Size(out) > MaxResponseSize {
 		return nil, status.Error(codes.ResourceExhausted, "built-in trust: review exceeds response limit")
 	}
+	// Only a review the admin receives in full becomes committable.
+	s.builtinTrust.ConfirmReview(ctx, r.ManifestDigest, r.Generation)
 	return out, nil
 }
 
