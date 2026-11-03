@@ -1752,3 +1752,13 @@ details[open] summary { color: var(--text); margin-bottom: var(--space-2); }
 .batch-form textarea { width: 100%; box-sizing: border-box; }
 .batch-members td { vertical-align: top; }
 .batch-member--failed, .batch-member--unknown { background: var(--crit-bg); }
+
+/* Staged OS update from the chart (ADR 0006 P2-02): one host per line,
+   unselectable hosts with their reason, the stages of the plan with the
+   gate between them. */
+.staged-update__host { display: block; margin: var(--space-1) 0; }
+.staged-update__host--disabled { opacity: 0.7; }
+.staged-confirm__stages { padding-left: var(--space-3); }
+.staged-confirm__stage { margin-bottom: var(--space-2); }
+.staged-confirm__stage h3 { margin: 0 0 var(--space-1); }
+.staged-confirm__gate { border-left: 3px solid var(--border-strong); padding-left: var(--space-1); }

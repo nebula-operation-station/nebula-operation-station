@@ -5,6 +5,7 @@ package executions
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -349,6 +350,52 @@ func TestBuildStagesRefusesUnusablePlans(t *testing.T) {
 	}
 	if _, err := buildStages(Plan{Preset: PresetWaves, Size: 1, Continue: "manual"}, a, many, env); !errors.As(err, &pe) {
 		t.Fatal(err)
+	}
+}
+
+// TestPlanStagesIsTheProposedLayout: PlanStages (what the inventory chart
+// shows before a staged update is proposed) is exactly the layout
+// buildStages proposes, apart from the planned durations.
+func TestPlanStagesIsTheProposedLayout(t *testing.T) {
+	a, _ := actions.Lookup("core.facts")
+	ts := []target{{host: "p1"}, {host: "d1"}, {host: "q1"}, {host: "p2"}, {host: "d2"}}
+	env := map[string]inventory.Environment{"p1": inventory.EnvProd, "d1": inventory.EnvDev, "q1": inventory.EnvQA, "p2": inventory.EnvProd, "d2": inventory.EnvDev}
+	hosts := []string{"p1", "d1", "q1", "p2", "d2"}
+	for name, p := range map[string]Plan{
+		"environments": {Preset: PresetEnvironments, Continue: stageplan.ContinueManual},
+		"auto":         {Preset: PresetEnvironments, Continue: stageplan.ContinueAuto, MaxFailed: 1},
+		"canary":       {Preset: PresetCanary, Size: 1, Continue: stageplan.ContinueManual, MaxFailed: 2},
+		"waves":        {Preset: PresetWaves, Size: 2, Continue: stageplan.ContinueManual},
+	} {
+		built, err := buildStages(p, a, ts, env)
+		if err != nil {
+			t.Fatalf("%s: buildStages: %v", name, err)
+		}
+		shown, err := PlanStages(p, hosts, env)
+		if err != nil {
+			t.Fatalf("%s: PlanStages: %v", name, err)
+		}
+		for i := range built {
+			if built[i].TimeoutS < stageplan.MinTimeout {
+				t.Errorf("%s: stage %d has no planned duration", name, i+1)
+			}
+			built[i].TimeoutS = 0
+		}
+		if !reflect.DeepEqual(built, shown) {
+			t.Errorf("%s: shown %+v, proposed %+v", name, shown, built)
+		}
+	}
+	got, _ := PlanStages(Plan{Preset: PresetEnvironments, Continue: stageplan.ContinueManual}, hosts, env)
+	var names []string
+	for _, st := range got {
+		names = append(names, st.Name+":"+strings.Join(st.Hosts, ","))
+	}
+	if want := "dev:d1,d2 qa:q1 prod:p1,p2"; strings.Join(names, " ") != want {
+		t.Errorf("environments layout = %q, want %q", strings.Join(names, " "), want)
+	}
+	var pe *PlanError
+	if _, err := PlanStages(Plan{Preset: PresetEnvironments, Continue: stageplan.ContinueManual}, []string{"x"}, env); !errors.As(err, &pe) {
+		t.Errorf("host without environment: %v", err)
 	}
 }
 
