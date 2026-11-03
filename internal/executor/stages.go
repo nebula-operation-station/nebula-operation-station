@@ -113,7 +113,13 @@ func (s *Service) CommitGate(_ context.Context, req *pb.CommitGateRequest) (*pb.
 }
 
 // ApproveGateCLI applies a gate from the hardened CLI path (admin role).
+// A batch digest goes to the batch authority (admin_batch.go).
 func (s *Service) ApproveGateCLI(ctx context.Context, req *pb.ApproveGateCLIRequest) (*pb.ApproveGateCLIResponse, error) {
+	if bd, err := canonical.ParseDigest(req.GetExecutionDigest()); err == nil {
+		if resp, handled, err := s.batchApproveGateCLI(ctx, bd, req.GetGate()); handled {
+			return resp, err
+		}
+	}
 	d, g, err := s.digestAndGate(req.GetExecutionDigest(), req.GetGate())
 	if err != nil {
 		return nil, err
@@ -144,11 +150,15 @@ func (s *Service) AbortRollout(ctx context.Context, req *pb.AbortRolloutRequest)
 	return &pb.AbortRolloutResponse{Rollout: r}, nil
 }
 
-// GetRollout returns the executor's view of a rollout (server, admin).
-func (s *Service) GetRollout(_ context.Context, req *pb.GetRolloutRequest) (*pb.GetRolloutResponse, error) {
+// GetRollout returns the executor's view of a rollout (server, admin),
+// including a batch rollout (admin_batch.go).
+func (s *Service) GetRollout(ctx context.Context, req *pb.GetRolloutRequest) (*pb.GetRolloutResponse, error) {
 	d, err := canonical.ParseDigest(req.GetExecutionDigest())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if resp, handled, err := s.batchGetRollout(ctx, d); handled {
+		return resp, err
 	}
 	r, err := s.rolloutResponse(d)
 	if err != nil {
