@@ -136,8 +136,30 @@ func TestRunServesUIAndShutsDown(t *testing.T) {
 	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != "/login" {
 		t.Fatalf("GET /dashboard without session: %d %q", resp.StatusCode, resp.Header.Get("Location"))
 	}
+	// The live chart stream is behind the same session check (P1-37).
+	resp, err = noRedirect.Get(base + "/chart/live/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusOK || resp.Header.Get("Content-Type") == "text/event-stream" {
+		t.Fatalf("GET live events without session: %d %q", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	req, _ := http.NewRequest("POST", base+"/chart/live/targets", strings.NewReader(`{"viewer":"x","boxes":[]}`))
+	req.Header.Set("Origin", "https://nebula.example.org")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = noRedirect.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusBadRequest {
+		t.Fatalf("POST live targets without session reached the handler: %d", resp.StatusCode)
+	}
 	// Login with the executor down: a fixed message, no detail.
-	req, _ := http.NewRequest("POST", base+"/login/begin", strings.NewReader("{}"))
+	req, _ = http.NewRequest("POST", base+"/login/begin", strings.NewReader("{}"))
 	req.Header.Set("Origin", "https://nebula.example.org")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err = http.DefaultClient.Do(req)

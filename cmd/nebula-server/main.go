@@ -378,8 +378,20 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	// Security middleware first (headers, origin check, body limit), then
 	// the session check, then the pages. The read-only API (spec 13), when
 	// enabled, authenticates with tokens instead of sessions.
+	// Live org-chart values (ADR 0006 P1-37): SSE behind the same
+	// session check as the pages.
+	chartTree := func(ctx context.Context) (pveinventory.Tree, error) { return pveStore.ChartTree(ctx, time.Now()) }
+	lc, err := newLiveChart(exec, store, chartTree, log)
+	if err != nil {
+		return err
+	}
+	go lc.run(connCtx)
+	pages := http.NewServeMux()
+	pages.Handle("/", h.Handler())
+	lc.handler.Register(pages)
+
 	root := http.NewServeMux()
-	root.Handle("/", login.Wrap(h.Handler()))
+	root.Handle("/", login.Wrap(pages))
 	if cfg.API.Enabled {
 		a, err := api.New(api.Options{Tokens: cfg.API.Tokens, Hosts: store.List, Operations: ops, Log: log})
 		if err != nil {
