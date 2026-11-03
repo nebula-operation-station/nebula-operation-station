@@ -108,8 +108,14 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_ReviewBatch_FullMethodName:     {admin},
 		pb.ExecutorService_ApproveBatchCLI_FullMethodName: {admin},
 		pb.ExecutorService_GetBatchStatus_FullMethodName:  {server, admin},
-		pb.ExecutorService_ListEvents_FullMethodName:      {server, admin},
-		pb.ExecutorService_BackupExecutor_FullMethodName:  {admin},
+		// Built-in trust (ADR 0007, E19c). Review and commit are local-admin
+		// only; the server may read the trust status, nothing else. There is
+		// no server bulk trust.
+		pb.ExecutorService_ReviewBuiltinTrust_FullMethodName:    {admin},
+		pb.ExecutorService_CommitBuiltinTrust_FullMethodName:    {admin},
+		pb.ExecutorService_GetBuiltinTrustStatus_FullMethodName: {server, admin},
+		pb.ExecutorService_ListEvents_FullMethodName:            {server, admin},
+		pb.ExecutorService_BackupExecutor_FullMethodName:        {admin},
 		// PVE provider reads (ADR 0006, P1-05). The entries are final:
 		// pve-collector may call ONLY these two methods; server may list the
 		// remotes (metadata); admin may call both. The server never calls

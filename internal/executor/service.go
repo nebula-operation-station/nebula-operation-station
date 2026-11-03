@@ -59,6 +59,9 @@ type Service struct {
 	// SetBatchAuthority wires it, in which case the batch RPCs are
 	// Unimplemented.
 	batchAuth *batch.Authority
+	// builtinTrust is the local built-in trust transaction (ADR 0007, E19c);
+	// nil until SetBuiltinTrust wires it.
+	builtinTrust BuiltinTrust
 	// transport is the SSH client configuration (spec 08 defaults).
 	transport sshtransport.Config
 	// recovery limits wrong TOTP recovery codes.
