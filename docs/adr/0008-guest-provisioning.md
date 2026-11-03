@@ -843,8 +843,8 @@ unnecessary").
      delete). Every cleanup dispatch, automatic or PK-08, takes that lock
      in the same atomic step as its claim and holds it until the outcome of
      that dispatch is resolved (task identified and terminal, or for
-     `pve.snippet.remove` the action's result or `snippetActionTimeout`
-     elapsed, see below) or is explicitly recorded as `unknown` and the run
+     `pve.snippet.remove` the action's result or the node-side
+     bound in *Unresolved prior mutation* below) or is explicitly recorded as `unknown` and the run
      flagged (previously: released when the dispatch call returned, so a
      lost response or a still running PVE task no longer blocked PK-08).
      Whichever acquires the lock first wins; the other refuses without
@@ -853,11 +853,33 @@ unnecessary").
      target after the lock is released. A PK-08 claim against a target with
      an unresolved prior mutation refuses (spec 07, no redispatch after an
      uncertain mutation); PK-08 may first reconcile it read-only. For
-     `pve.snippet.remove` it is resolved once the node action's bounded
-     runtime (`snippetActionTimeout`, named constant, enforced on the node,
-     proposed 60 seconds) plus `taskClockSkewMax` has elapsed since
-     dispatch, because no process can still apply it; `pve.snippet.stat`
-     then shows the result. For the `cicustom` delete it is resolved only
+     `pve.snippet.remove` the bound comes from the node, not from the
+     executor's dispatch (previously "`snippetActionTimeout` plus
+     `taskClockSkewMax` since dispatch", but the node timeout starts when
+     the node process starts, and a request delayed in transit, by TCP
+     retransmission or a slow session setup, can start later than that):
+     - The request carries a start deadline: the persisted (fsynced)
+       intent timestamp of the claim plus `snippetActionStartWindow`
+       (named constant, proposed 30 seconds). The node action checks it
+       against the node clock as its first operation and, if the deadline
+       has passed, refuses with no effect on the file system.
+     - A node-side supervisor kills the action's process group once
+       `snippetActionTimeout` (named constant, proposed 60 seconds) has
+       elapsed since the node-side process start, independent of the SSH
+       session (a dropped session does not extend or end the bound).
+       Because the process starts before it checks the deadline, no effect
+       of the action can happen later than the deadline plus
+       `snippetActionTimeout` on the node clock.
+     - The outcome is resolved once the executor clock has passed the
+       intent timestamp plus `snippetActionStartWindow` plus
+       `snippetActionTimeout` plus `taskClockSkewMax`, and a node clock
+       read (`GET /nodes/{node}/time`, read credential) taken after that
+       point shows an offset of at most `taskClockSkewMax`;
+       `pve.snippet.stat` then shows the result. An unreadable node clock
+       or a larger offset leaves the outcome `unknown`, as does a node
+       action version that does not enforce the deadline and timeout
+       (PK-04).
+     For the `cicustom` delete it is resolved only
      by an identified terminal task as for forward steps. Until then the
      operator's only PK-08 choice for that step is the acknowledgement (b)
      below.
@@ -873,10 +895,26 @@ unnecessary").
      first step, every not yet claimed automatic cleanup authorization of
      the job is revoked in the same transaction, so no automatic step fires
      afterwards. A PK-08 claim refused this way, or because the lock is
-     held ("automatic cleanup in flight"), is not spent. Automatic cleanup
-     exists only within one executor lifetime, so the lock needs no
-     persistence; the dispatch generation, spent claims and outcomes are
+     held ("automatic cleanup in flight"), is not spent. The lock itself is
+     not persisted; the dispatch generation, spent claims and outcomes are
      persisted as above.
+   - *Restart with a dispatch in flight* (previously "automatic cleanup
+     exists only within one executor lifetime, so the lock needs no
+     persistence", which ignored that PK-08 dispatches take the same lock:
+     after a crash, a PK-08 approval made against the already incremented
+     generation could redispatch an uncertain mutation). The persisted
+     claims replace the lock across a restart: at startup, before any
+     cleanup claim is accepted, every spent claim (automatic or PK-08) with
+     an fsynced intent and no recorded outcome is recorded as outcome
+     `unknown` on its target, which is then an unresolved prior mutation
+     as above, and the run is flagged "snippet cleanup pending". A PK-08
+     claim on that target refuses (not spent) until the outcome is
+     reconciled read-only (for `pve.snippet.remove` by the bound above,
+     measured from the persisted intent timestamp; for the `cicustom`
+     delete by an identified terminal task) or the operator records the
+     acknowledgement (b). Read-only reconciliation is allowed in any
+     lifetime and grants no authority; a resolution after the restart only
+     lifts the refusal and never triggers a mutation by itself.
    - Read-only checks (for example `pve.snippet.stat`, reading the guest
      config for the VMID proof, polling a stored UPID) are not mutations and
      may repeat; they never grant or extend mutation authority.
