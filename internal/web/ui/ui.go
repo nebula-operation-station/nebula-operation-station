@@ -154,7 +154,8 @@ type Options struct {
 	// PVE provides the stored PVE inventory for the read-only PVE pages
 	// (ADR 0006, P1-13). Nil hides the pages and the navigation item.
 	PVE PVEStore
-	// Now supplies the clock for PVE observation freshness; nil uses time.Now.
+	// Now supplies the clock for PVE observation freshness and the session
+	// display (GET /privileged/session); nil uses time.Now.
 	Now func() time.Time
 	// PVERemotes returns the registry metadata (approved endpoints,
 	// trust pin, state) of the PVE remotes, for the deep links. Nil or

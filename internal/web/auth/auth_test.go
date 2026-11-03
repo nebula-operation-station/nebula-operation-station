@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -353,6 +354,108 @@ func TestSessionsExpire(t *testing.T) {
 	e.clk.add(auth.IdleTimeout)
 	if res := e.do("GET", "/dashboard", "", c); res.StatusCode != http.StatusSeeOther {
 		t.Fatalf("session past absolute timeout: %d", res.StatusCode)
+	}
+}
+
+// TestPassiveStatusPollDoesNotKeepSessionAlive covers the topbar session
+// display (ADR 0007 E20): an open tab polls GET /privileged/session in the
+// background with auth.PassiveHeader. Those polls are authenticated but
+// are not activity, so an unattended tab still runs into IdleTimeout. The
+// same polls without the marker do keep the session alive, which shows
+// the test would catch a middleware that ignored the marker.
+func TestPassiveStatusPollDoesNotKeepSessionAlive(t *testing.T) {
+	poll := func(e *env, c *http.Cookie, passive bool) int {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, e.srv.URL+"/privileged/session", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if passive {
+			req.Header.Set(auth.PassiveHeader, "1")
+		}
+		req.AddCookie(c)
+		cl := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		res, err := cl.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		return res.StatusCode
+	}
+	// Poll at the touch interval, where an ordinary request would move
+	// last_seen every time.
+	const step = 5 * time.Minute
+
+	t.Run("passive polls expire at the idle timeout", func(t *testing.T) {
+		e := newEnv(t)
+		c := e.login()
+		for elapsed := step; elapsed < auth.IdleTimeout; elapsed += step {
+			e.clk.add(step)
+			if code := poll(e, c, true); code != http.StatusOK {
+				t.Fatalf("passive poll after %v: %d, want 200 (session still within idle timeout)", elapsed, code)
+			}
+		}
+		e.clk.add(step)
+		if code := poll(e, c, true); code != http.StatusSeeOther {
+			t.Fatalf("passive poll past idle timeout: %d, want redirect to login", code)
+		}
+		if res := e.do("GET", "/dashboard", "", c); res.StatusCode != http.StatusSeeOther {
+			t.Fatalf("session kept alive by passive polls: %d", res.StatusCode)
+		}
+	})
+
+	t.Run("unmarked polls are activity", func(t *testing.T) {
+		e := newEnv(t)
+		c := e.login()
+		for elapsed := step; elapsed < auth.IdleTimeout+time.Hour; elapsed += step {
+			e.clk.add(step)
+			if code := poll(e, c, false); code != http.StatusOK {
+				t.Fatalf("active poll after %v: %d", elapsed, code)
+			}
+		}
+	})
+
+	t.Run("marker is ignored on state-changing methods", func(t *testing.T) {
+		e := newEnv(t)
+		c := e.login()
+		e.clk.add(auth.IdleTimeout - time.Minute)
+		req, err := http.NewRequest(http.MethodPost, e.srv.URL+"/executor/lock", strings.NewReader(""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Origin", origin)
+		req.Header.Set(auth.PassiveHeader, "1")
+		req.AddCookie(c)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("lock: %d", res.StatusCode)
+		}
+		// The POST counted as activity despite the marker.
+		e.clk.add(2 * time.Minute)
+		if res := e.do("GET", "/dashboard", "", c); res.StatusCode != 200 {
+			t.Fatalf("POST with passive marker was not recorded as activity: %d", res.StatusCode)
+		}
+	})
+}
+
+func TestStorePeekDoesNotTouch(t *testing.T) {
+	e := newEnv(t)
+	token, _, err := e.store.Create(context.Background(), "cred", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.clk.add(auth.IdleTimeout - time.Minute)
+	s, err := e.store.Peek(context.Background(), token)
+	if err != nil {
+		t.Fatalf("peek within idle timeout: %v", err)
+	}
+	e.clk.add(2 * time.Minute)
+	if _, err := e.store.Peek(context.Background(), token); !errors.Is(err, auth.ErrNoSession) {
+		t.Fatalf("peek past idle timeout (last seen %v): %v, want ErrNoSession", s.LastSeenAt, err)
 	}
 }
 

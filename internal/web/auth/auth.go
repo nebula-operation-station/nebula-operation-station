@@ -40,6 +40,19 @@ import (
 // insist on Secure, Path=/ and no Domain attribute.
 const CookieName = "__Host-nebula_session"
 
+// PassiveHeader marks a background status request (the topbar session
+// display polls GET /privileged/session with it). A GET or HEAD carrying
+// "PassiveHeader: 1" is authenticated like any other request but is not
+// recorded as activity, so an unattended open tab cannot keep a web
+// session alive past IdleTimeout. The header can only withhold a
+// last_seen update; it grants nothing.
+const PassiveHeader = "X-Nebula-Passive"
+
+// passiveRequest reports whether r is a marked passive status request.
+func passiveRequest(r *http.Request) bool {
+	return (r.Method == http.MethodGet || r.Method == http.MethodHead) && r.Header.Get(PassiveHeader) == "1"
+}
+
 // maxJSONBody bounds the JSON bodies of the login and setup endpoints.
 const maxJSONBody = 64 << 10
 
@@ -140,7 +153,11 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 			h.unauthenticated(w, r)
 			return
 		}
-		sess, err := h.sessions.Lookup(r.Context(), c.Value)
+		lookup := h.sessions.Lookup
+		if passiveRequest(r) {
+			lookup = h.sessions.Peek
+		}
+		sess, err := lookup(r.Context(), c.Value)
 		if err != nil {
 			if !errors.Is(err, ErrNoSession) {
 				h.log.Error("session lookup", "error", err)
