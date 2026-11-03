@@ -596,17 +596,38 @@ unnecessary").
    snippet removal while it is unknown, and is never redispatched. (A lost
    snippet put is covered by *Reconciling a lost snippet write*.) The
    executor reconciles read-only (stored UPID, or the node task list as for
-   the start below; for a config set or resize, the guest config read with
-   the read credential). Only within the same executor lifetime and while
-   the job's permit is still valid:
+   the start below; for a config set or resize, also the guest config read
+   with the read credential). What counts as resolved (previously "the
+   guest config read" without a rule, so an unchanged config could count
+   as failed while an async config task was still pending):
+   - *Resolved OK*: the identified task is terminal OK, or the config read
+     shows the requested change applied.
+   - *Resolved failed*: only the exact task identified (stored UPID, or a
+     single task-list match as for the start below) and in a terminal
+     failed state, or proof that no task can still apply the change (the
+     task is identified as terminal, whatever its status, and the config
+     does not show the change). An unchanged config read alone never
+     counts as resolved failed while a task may be pending; a request for
+     which no task can be identified stays `unknown`.
+   Only within the same executor lifetime and while the job's permit is
+   still valid:
    - resolved failed → failure cleanup as above;
    - resolved OK → the job continues with its next forward step;
    - unresolved when `forwardOutcomeMaxWait` (named constant, proposed 10
-     minutes, injected clock) elapses → no further forward or cleanup step,
-     the run is flagged "snippet cleanup pending", and only the PK-08
-     action under fresh approval cleans up.
+     minutes, injected clock) elapses → no further forward step and no
+     cleanup step, the run is flagged "snippet cleanup pending". As for the
+     start (previously undefined after the wait), read-only polling
+     continues while the permit is valid; a late resolved failed in the
+     same lifetime with a valid permit still runs failure cleanup
+     automatically, a late resolved OK runs no further forward step (the
+     job stays failed) but its failure cleanup, because the snippet is no
+     longer needed; otherwise only the PK-08 action under fresh approval
+     cleans up.
    A resolution observed after a restart or lock, or after the permit
    ended, triggers no mutation: the run is flagged and PK-08 applies.
+   Polling of any unresolved task uses `reconcilePollInterval` (named
+   constant, proposed 15 seconds, doubling up to 2 minutes; previously no
+   rate was named).
 
    *Start outcome unknown* (previously undefined, so the snippet could stay
    on the node indefinitely; later "Resolved OK → M1; resolved failed →
@@ -632,7 +653,11 @@ unnecessary").
      UPID is already recorded for another job or step is excluded, and the
      executor reads the node's clock (`GET /nodes/{node}/time`, read
      credential); an offset larger than `taskClockSkewMax` leaves the
-     outcome `unknown`. Exactly one match →
+     outcome `unknown`. The window also has an upper bound (previously
+     none, so a later NOS `qmstart` for the same VMID with an unrecorded
+     UPID could be adopted): the task must have started no later than the
+     persisted dispatch-end timestamp (written when the request returned
+     or timed out) plus `taskClockSkewMax`. Exactly one match →
      its UPID is persisted and reconciliation continues as above. Zero or
      several matches, an unreadable task list, or an expired task record →
      the outcome stays `unknown`: no cleanup step runs (the guest may be
@@ -675,8 +700,9 @@ unnecessary").
    PK-08 operator action, which needs a fresh approval under the existing
    semantics (a new permit for the cleanup steps only, at the job's risk
    level or, after a risk raise, at the raised level; never lower). The
-   persisted cleanup state holds the pending flag, the recorded target and
-   the spent step claims with their fsynced intents, which the read-only
+   persisted cleanup state holds the pending flag, the recorded target, its
+   dispatch generation and outcome, and the spent step claims with their
+   fsynced intents, which the read-only
    reconciliation of an unknown outcome needs (previously "only the
    pending flag and the recorded target", which contradicted the persisted
    claims); none of it grants authority.
@@ -704,6 +730,10 @@ unnecessary").
      dispatched); operator cancellation, which stops undispatched forward
      steps while the approval shows the cleanup steps as running on
      cancellation.
+   Operator cancellation is not a permit revocation: it stops undispatched
+   work (spec 07 "Cancellation stops undispatched work") and leaves the
+   compensating steps their authority, so the "revocation in any form"
+   below does not include it.
    - **Never keeps compensation authority** (the whole job's remaining
      authority ends, forward and compensating; the run is flagged and only
      PK-08 under fresh approval cleans up): a risk raise of the job (ADR
@@ -786,16 +816,42 @@ unnecessary").
      lock per recorded target (recorded node host ID plus snippet path for
      `pve.snippet.remove`; remote, node and VMID for the `cicustom`
      delete). Every cleanup dispatch, automatic or PK-08, takes that lock
-     in the same atomic step as its claim and holds it until the dispatch
-     call returns. Whichever acquires the lock first wins; the other
-     refuses without dispatching. When a PK-08 approval claims its first
-     step, every not yet claimed automatic cleanup authorization of the job
-     is revoked in the same transaction, so no automatic step fires
-     afterwards. A PK-08 claim that meets an in-flight automatic step
-     refuses ("automatic cleanup in flight"); its approval is not spent and
-     the operator re-approves once that outcome is shown. Automatic cleanup
+     in the same atomic step as its claim and holds it until the outcome of
+     that dispatch is resolved (task identified and terminal, or for
+     `pve.snippet.remove` the action's result or `snippetActionTimeout`
+     elapsed, see below) or is explicitly recorded as `unknown` and the run
+     flagged (previously: released when the dispatch call returned, so a
+     lost response or a still running PVE task no longer blocked PK-08).
+     Whichever acquires the lock first wins; the other refuses without
+     dispatching.
+   - *Unresolved prior mutation.* A recorded `unknown` outcome stays on the
+     target after the lock is released. A PK-08 claim against a target with
+     an unresolved prior mutation refuses (spec 07, no redispatch after an
+     uncertain mutation); PK-08 may first reconcile it read-only. For
+     `pve.snippet.remove` it is resolved once the node action's bounded
+     runtime (`snippetActionTimeout`, named constant, enforced on the node,
+     proposed 60 seconds) plus `taskClockSkewMax` has elapsed since
+     dispatch, because no process can still apply it; `pve.snippet.stat`
+     then shows the result. For the `cicustom` delete it is resolved only
+     by an identified terminal task as for forward steps. Until then the
+     operator's only PK-08 choice for that step is the acknowledgement (b)
+     below.
+   - *Two-way invalidation* (previously one-way: a PK-08 claim revoked
+     unclaimed automatic authorizations, but a PK-08 approval issued before
+     an automatic dispatch stayed valid and acted as a pre-approved retry).
+     Each recorded target carries a persisted dispatch generation that
+     every claim, automatic or PK-08, increments in the claim transaction.
+     A PK-08 approval binds the dispatch generation and latest recorded
+     outcome of each target it covers, as shown to the operator; its claim
+     refuses if a newer dispatch happened after approval, and the operator
+     must re-approve on the new outcome. When a PK-08 approval claims its
+     first step, every not yet claimed automatic cleanup authorization of
+     the job is revoked in the same transaction, so no automatic step fires
+     afterwards. A PK-08 claim refused this way, or because the lock is
+     held ("automatic cleanup in flight"), is not spent. Automatic cleanup
      exists only within one executor lifetime, so the lock needs no
-     persistence; the spent claims are persisted as above.
+     persistence; the dispatch generation, spent claims and outcomes are
+     persisted as above.
    - Read-only checks (for example `pve.snippet.stat`, reading the guest
      config for the VMID proof, polling a stored UPID) are not mutations and
      may repeat; they never grant or extend mutation authority.
