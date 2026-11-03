@@ -731,3 +731,35 @@ func TestServiceGuestSnapshotRPC(t *testing.T) {
 		t.Fatalf("remote contacted %d times", n)
 	}
 }
+
+// TestGuestSnapshotLostResponseIsReconciledNotResent: a delete whose
+// response is lost is identified from the task list (node, VMID, task type,
+// action token) and never sent again.
+func TestGuestSnapshotLostResponseIsReconciledNotResent(t *testing.T) {
+	e := newSnapEnv(t, "qemu")
+	req := e.expect(e.approve(snapReq("qemu", PveSnapshotDelete, "base")))
+	upid := testTaskUPID("pve1", time.Now(), "qmdelsnapshot", "101", mutActionUser, 1)
+	other := testTaskUPID("pve1", time.Now(), "qmdelsnapshot", "102", mutActionUser, 2)
+	e.sc.set(func(c *snapClient) {
+		c.dispatchFn = func(PveMutationStep) (string, error) { return "", errors.New("connection reset") }
+	})
+	e.client.mu.Lock()
+	e.client.recent = []string{other, upid}
+	e.client.mu.Unlock()
+	res, err := e.g.Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(res.Steps) != 1 || res.Steps[0].UPID != upid || res.Steps[0].State != executordb.PveJobSucceeded {
+		t.Fatalf("steps %+v", res.Steps)
+	}
+	if n := len(e.sc.sent()); n != 1 {
+		t.Fatalf("sent %d times", n)
+	}
+	if _, err := e.g.Run(context.Background(), req); !errors.Is(err, ErrPveMutationDenied) {
+		t.Fatalf("second run: %v", err)
+	}
+	if n := len(e.sc.sent()); n != 1 {
+		t.Fatalf("resent: %d", n)
+	}
+}
