@@ -389,7 +389,9 @@ mitigations M1 and M2.
   read token (`GET /access/acl` needs `Sys.Audit` on `/access`, which the
   read token's `Sys.Audit` on `/` propagates to, *verify*). `preset` is
   offered only if every principal with `VM.Audit` (or, on the snippet
-  storage, `Datastore.Audit`) there is the NOS read
+  storage, `Datastore.Audit` or any other `Datastore.*` privilege, because
+  which of them allow listing or downloading `snippets` content is
+  unverified, PK-10a; previously only `Datastore.Audit`) there is the NOS read
   token, the NOS action token or `root@pam` (previously also holders of a
   role with `VM.Console`; removed, because console access alone neither
   gives root in a cloud-image guest nor lets the holder impersonate it, so
@@ -494,7 +496,14 @@ unnecessary").
       The executor needs no private key for this. A key at or over the
       bound is never adopted (previously: adopted at any age), because it
       has sat on the node as a live secret for longer than the design
-      allows.
+      allows. Age is measured with the executor's injected clock
+      (`Now func() time.Time`, AGENTS.md), never the wall clock directly.
+      The same bound is checked on the normal path right before the start
+      request is dispatched (previously: only when a lost write was
+      reconciled, so a slow clone or resize kept the key on the node past
+      the bound unchecked): a recorded key at or over the bound is
+      replaced as in step 3 before start. After start dispatch the bound
+      no longer applies; M1 then removes the snippet.
    3. Absent, unparsable, another fingerprint, or a recorded key at or over
       the age bound: generate a new pair,
       replace the recorded public key and fsync, then run
@@ -545,7 +554,11 @@ unnecessary").
    that one field) and removes the snippet with the node action right after
    the start task returns OK (previously: after rotation). Both are
    audited. A bootstrap step removes the cached vendor-data in the guest
-   after rotation.
+   after rotation. If either step fails (for example node unreachable),
+   the same retry and "snippet cleanup pending" flag apply as for failure
+   cleanup below (previously: retry and flag were defined only for
+   failures before start), and the join is not marked done while the flag
+   is set.
 
    **Failure cleanup** (previously: "a failed provisioning before start
    leaves guest and snippet for inspection; removing the snippet of an
@@ -556,17 +569,39 @@ unnecessary").
    `cicustom`. That covers a failed or refused snippet write, clone,
    M2 recheck, config set or resize, a permit or registry refusal,
    cancellation, an executor restart that finds the job failed, and a start
-   task that resolves as failed. Only the guest stays for inspection
+   task that resolves as failed.
+
+   *Authority for cleanup* (previously unstated, which left the PVE write
+   and the node removal after a refused permit unbound). Cleanup is part
+   of the approved job: the permit authorizes, besides the forward steps,
+   the job's own compensating steps (`cicustom` delete, `pve.snippet.remove`)
+   for exactly its recorded target, that is remote, node, VMID, generation
+   and recorded snippet path. A permit or registry refusal stops the
+   forward steps only; it does not revoke this compensating authority,
+   and cleanup grants nothing beyond it. The snippet storage ID, directory
+   and file name are recorded in the job when the snippet is written, and
+   cleanup uses the recorded values, never the current registry, so a
+   registry change after approval cannot redirect removal to another
+   directory. Before each cleanup step the executor checks that the
+   recorded target still matches (the VMID still belongs to this job's
+   guest, the node is still the enrolled host with the recorded
+   fingerprint); if it does not (VMID reused, node gone or re-enrolled),
+   cleanup refuses that step, does nothing on the current object and
+   raises "snippet cleanup pending" for the operator. Only the guest stays for inspection
    (section 3); the snippet never does. Removal is idempotent (absent
    counts as removed) and audited as `guest_hostkey_snippet_removed` with
    the failure reason. The recorded key of a failed job is marked revoked
    at the moment of failure: it is never adopted, never pinned by a join
    and never reused; a new attempt uses a new generation and a new pair. If
    removal itself fails (for example node unreachable or keyring locked),
-   the executor retries until it succeeds, the run stays in a failed state
-   flagged "snippet cleanup pending", and the run page shows it
-   prominently; an operator action to remove it remains available as a
-   manual trigger, not as the only path.
+   the executor retries until it succeeds, with exponential backoff from
+   30 seconds capped at 10 minutes (named constants; previously no
+   interval was given), and the retry state survives an executor restart.
+   From the first failure the run is flagged "snippet cleanup pending"
+   (a failed run stays failed) and the run page shows it prominently; an
+   operator action to remove it remains available as a manual trigger,
+   not as the only path. This retry and flag apply to every cleanup,
+   including M1 after a successful start.
 8. **Audit.** Executor events `guest_hostkey_generated`,
    `guest_hostkey_snippet_written`, `guest_hostkey_snippet_replaced`,
    `guest_hostkey_pinned`, `guest_hostkey_rotated`,
@@ -593,7 +628,7 @@ to rotation.
 | Executor memory | From generation until the snippet write returns | Executor process (already holds every SSH key) | Never persisted; same "stated limit" as spec 06 |
 | SSH channel to the node | Snippet write | Nobody outside the pinned, authenticated node session | stdin, not argv (not visible in `ps`) |
 | Snippet file on the node | From write until early cleanup, or until automatic failure cleanup (seconds to minutes) | Root on that node; admins of the storage if it were shared; node filesystem backups | Node-local storage only: registry refuses shared types (nfs, cifs, cephfs, glusterfs, pbs) **and** any storage flagged `shared 1`; the put action refuses a network filesystem; mode 0600; M1 |
-| **PVE API: `cloudinit/dump` and any storage read of the snippet (*verify*, PK-10a)** | While `cicustom` is set and the snippet exists | Worst case: every `VM.Audit` holder on the guest, including the NOS read token and read-only users or monitoring | M2 refuses `preset` when any principal other than the NOS tokens and `root@pam` holds `VM.Audit` on the guest path or `Datastore.Audit` on the snippet storage (`/storage/<snippets>`, inherited from `/storage`, `/` or a pool containing the storage); M1 shortens the window; executor never calls the endpoint for preset guests |
+| **PVE API: `cloudinit/dump` and any storage read of the snippet (*verify*, PK-10a)** | While `cicustom` is set and the snippet exists | Worst case: every `VM.Audit` holder on the guest, including the NOS read token and read-only users or monitoring | M2 refuses `preset` when any principal other than the NOS tokens and `root@pam` holds `VM.Audit` on the guest path or `Datastore.Audit` (or any other `Datastore.*` privilege) on the snippet storage (`/storage/<snippets>`, inherited from `/storage`, `/` or a pool containing the storage); M1 shortens the window; executor never calls the endpoint for preset guests |
 | Generated cloud-init drive (`vm-<vmid>-cloudinit`) on VM storage | Until the next regeneration after cleanup | Root on the node, storage admins; PVE users able to attach that volume elsewhere (*verify* ACL) | Rotation limits later use; vzdump skips cloud-init drives (*verify*) |
 | Guest: `/etc/ssh`, `/var/lib/cloud/instance/vendor-data.txt*`, CD-ROM device | Until rotation; the cache until the bootstrap cleanup step | Guest root; members of group `cdrom` while the drive is attached (the Ubuntu default user is one, and is a sudoer anyway) | Rotation; bootstrap removes the cached vendor-data |
 | PVE config, `/etc/pve`, config reads, read-token spool | Always | Only the `cicustom` reference, no key material | — |
