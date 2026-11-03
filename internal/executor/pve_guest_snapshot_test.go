@@ -223,9 +223,95 @@ func TestGuestSnapshotRiskFloorFailsClosed(t *testing.T) {
 	if r, _, err := f.MinimumRisk(rq, nil); err != nil || r != canonical.RiskHigh {
 		t.Fatalf("unbound: %s %v", r, err)
 	}
+	// A bound create (MEDIUM base, MEDIUM records) is MEDIUM only with its
+	// own artifact and exact guest; the artifact-mismatch and
+	// target-mismatch branches are HIGH.
+	e.record("qemu", 101, canonical.RiskMedium, canonical.RiskMedium, canonical.RiskMedium)
+	rm, _, err := e.pe.db.GetRemote(mutRemote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bt := permit.ProviderMutationTarget{RemoteID: rm.RemoteID, TrustPin: rm.TrustPin, Kind: "qemu", Node: "pve1", VMID: 101}
+	release, err := e.g.Bindings.hold(pveBindSnapshot, rq.ParametersHash, bt, PveSnapshotCreate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	guest, _, _ := e.targets("qemu", 101)
+	other, _, _ := e.targets("qemu", 102)
+	if r, why, err := f.MinimumRisk(rq, []canonical.Target{guest}); err != nil || r != canonical.RiskMedium {
+		t.Fatalf("control: %s (%s) %v", r, why, err)
+	}
+	for name, c := range map[string]struct {
+		artifact []byte
+		targets  []canonical.Target
+	}{
+		"artifact of another op":      {pveSnapshotArtifact(PveSnapshotDelete), []canonical.Target{guest}},
+		"artifact of a power verb":    {pveGuestPowerArtifact(PveGuestPowerShutdown), []canonical.Target{guest}},
+		"no artifact":                 {nil, []canonical.Target{guest}},
+		"another guest":               {pveSnapshotArtifact(PveSnapshotCreate), []canonical.Target{other}},
+		"no targets":                  {pveSnapshotArtifact(PveSnapshotCreate), nil},
+		"bound guest and another one": {pveSnapshotArtifact(PveSnapshotCreate), []canonical.Target{guest, other}},
+	} {
+		q := rq
+		q.ArtifactSHA256 = sha256Hex(c.artifact)
+		if r, why, err := f.MinimumRisk(q, c.targets); err != nil || r != canonical.RiskHigh {
+			t.Fatalf("%s: %s (%s) %v", name, r, why, err)
+		}
+	}
 	f.Bindings = nil
 	if r, _, err := f.MinimumRisk(rq, nil); err != nil || r != canonical.RiskHigh {
 		t.Fatalf("no bindings: %s %v", r, err)
+	}
+}
+
+// TestGuestSnapshotFloorNeverAcceptsPowerBindings: a power binding or
+// artifact is never scored at a snapshot op's MEDIUM base by the snapshot
+// floor; it is HIGH (or Next's higher floor: every fail-closed branch
+// reports a CRITICAL Next). The control case shows the fixture otherwise
+// yields MEDIUM, so a merged op/verb table, a lookup across both binding
+// tables or a skipped artifact check fails here.
+func TestGuestSnapshotFloorNeverAcceptsPowerBindings(t *testing.T) {
+	M, H := canonical.RiskMedium, canonical.RiskHigh
+	mk := func(next permit.RiskPolicy, crit PveCriticality, b *PveGuestPowerBindings) permit.RiskPolicy {
+		return GuestSnapshotRiskFloor{Next: next, Criticality: crit, Linked: noLinkedHosts, Bindings: b}
+	}
+	runFloorCases(t, PveGuestSnapshotAction, mk, []floorCase{
+		{"control snapshot binding", pveBindSnapshot, PveSnapshotCreate, pveSnapshotArtifact(PveSnapshotCreate), false, M},
+		{"power binding of shutdown", pveBindPower, PveGuestPowerShutdown, pveGuestPowerArtifact(PveGuestPowerShutdown), false, H},
+		{"power table holding a snapshot op", pveBindPower, PveSnapshotCreate, pveSnapshotArtifact(PveSnapshotCreate), false, H},
+		{"snapshot table holding a power verb", pveBindSnapshot, PveGuestPowerShutdown, pveGuestPowerArtifact(PveGuestPowerShutdown), false, H},
+		{"snapshot op with power artifact", pveBindSnapshot, PveSnapshotCreate, pveGuestPowerArtifact(PveGuestPowerShutdown), false, H},
+		{"snapshot op with other op's artifact", pveBindSnapshot, PveSnapshotCreate, pveSnapshotArtifact(PveSnapshotDelete), false, H},
+		{"other target", pveBindSnapshot, PveSnapshotCreate, pveSnapshotArtifact(PveSnapshotCreate), true, H},
+	})
+}
+
+// TestGuestSnapshotFloorFailClosedRaisesToNext: the unbound and
+// unconfigured branches report Next's floor when it is above HIGH.
+func TestGuestSnapshotFloorFailClosedRaisesToNext(t *testing.T) {
+	_, guest, crit := floorFixture(t)
+	rq := canonical.Request{ActionID: PveGuestSnapshotAction, ParametersHash: strings.Repeat("cd", 32),
+		ArtifactSHA256: sha256Hex(pveSnapshotArtifact(PveSnapshotCreate))}
+	for _, nr := range []canonical.Risk{canonical.RiskLow, canonical.RiskHigh, canonical.RiskCritical} {
+		want := canonical.RiskHigh
+		if nr == canonical.RiskCritical {
+			want = nr
+		}
+		r := nr
+		next := switchRisk{r: &r}
+		for name, f := range map[string]GuestSnapshotRiskFloor{
+			"unbound":     {Next: next, Criticality: crit, Linked: noLinkedHosts, Bindings: &PveGuestPowerBindings{}},
+			"no bindings": {Next: next, Criticality: crit, Linked: noLinkedHosts},
+			"no linked":   {Next: next, Criticality: crit, Bindings: &PveGuestPowerBindings{}},
+		} {
+			if got, _, err := f.MinimumRisk(rq, []canonical.Target{guest}); err != nil || got != want {
+				t.Fatalf("%s, next %s: %s %v, want %s", name, nr, got, err, want)
+			}
+		}
+	}
+	if got, _, err := (GuestSnapshotRiskFloor{}).MinimumRisk(rq, nil); err != nil || got != canonical.RiskHigh {
+		t.Fatalf("no next: %s %v", got, err)
 	}
 }
 
