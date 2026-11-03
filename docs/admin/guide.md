@@ -889,6 +889,62 @@ use the 7/30-day policy. Legacy grants are listed with the new leases,
 share the executor's target ceiling, and can be revoked or replaced by an
 explicitly approved new lease.
 
+#### Live values for Proxmox nodes and guests
+
+The 10-second live values on a Proxmox node or guest box come from
+`nebula-pve-collector`, never from the server: **the server never reads
+Proxmox itself** and has no way to. Only the executor holds the Proxmox
+API credentials; the collector asks it for each read, and the executor
+re-checks every read against the approved lease.
+
+How it flows:
+
+1. While a node or guest box is visible in a browser, the server writes
+   the want-list `/var/lib/nebula/pve/requests/live.json` (the visible
+   boxes, with a short expiry; rewritten every 10 seconds, emptied when
+   the server stops).
+2. The collector reads the want-list every second. A box is read only if
+   an approved, unexpired, unrevoked read lease with the `on_demand`
+   trigger covers exactly that remote, node and guest, and the remote is
+   configured and active. The want-list itself grants nothing.
+3. The collector reads the metrics through the executor (at most every
+   10 seconds per box, at most four live boxes per remote, within the
+   lease's budget) and writes `/var/lib/nebula/pve/live/<remote>.json`.
+4. The server reads that file and shows the values.
+
+| Directory | Mode | Collector | Server |
+| --- | --- | --- | --- |
+| `/var/lib/nebula/pve/requests/` | `nebula-pve-collector:nebula-rpc`, 2770 | reads | writes (only this path, via the `20-discovery.conf` drop-in) |
+| `/var/lib/nebula/pve/live/` | `nebula-pve-collector:nebula-rpc`, 2750 | writes | reads only |
+
+`install.sh` (also with `--from-package`) and the container image create
+both directories; in containers the server mounts only the `pve-requests`
+volume and `pve-live` read-only. The collector runs the live reads by
+default; `-live=false` on its command line turns them off.
+
+A read lease is required: without an approved lease with the `on_demand`
+trigger that lists the box, the box shows no live values. Revoking the
+lease, or a box leaving the screen, stops its reads within about
+10 seconds; stale samples are removed after 30 seconds and all of them
+when the collector stops.
+
+Troubleshooting (no live values on a Proxmox box):
+
+- `systemctl status nebula-pve-collector` — the collector must be running.
+- `journalctl -u nebula-pve-collector` — `live want-list refused` (the
+  server's file is malformed or too large), `live lease refresh` (the
+  executor is locked or unreachable), `live leases refused` / `live target
+  requests refused` (no lease covers the box, or the live limits are
+  reached), `publish live samples` (cannot write `live/`).
+- `ls -ld /var/lib/nebula/pve/requests /var/lib/nebula/pve/live` — both
+  must exist with the modes above; re-run `install.sh` after an upgrade
+  if they are missing.
+- `systemctl cat nebula-server` — the drop-in must list
+  `ReadWritePaths=/var/lib/nebula/pve/requests`; otherwise the server
+  cannot publish the want-list (re-run `install.sh`).
+- Check the lease on *Operations → Read leases*: approved, not expired,
+  `on_demand` trigger, and the box among its targets.
+
 ### 9.5 Runbooks
 
 *Runbooks → New runbook* holds your own scripts (POSIX `sh`). A runbook
@@ -1370,13 +1426,15 @@ from `~nebula/.ssh/authorized_keys` (or the user: `userdel -r nebula`),
 | `/etc/systemd/system/nebula-*.service`, `nebula-discovery.path`, `.timer` | root, 0644 | Units (package: `/lib/systemd/system/`) |
 | `/etc/systemd/system/nebula-executor.service.d/10-local.conf` | root, 0644 | Executor flags, rewritten by `install.sh` |
 | `/etc/systemd/system/nebula-executor.service.d/20-local.conf` | root, 0644 | Your own executor flags (optional) |
-| `/etc/systemd/system/nebula-server.service.d/20-discovery.conf` | root, 0644 | Lets the server write the job spool |
+| `/etc/systemd/system/nebula-server.service.d/20-discovery.conf` | root, 0644 | Lets the server write the job spool and `pve/requests/` |
 | `/etc/nebula/server.json` | `root:nebula-server`, 0640 | Server configuration |
 | `/etc/nebula/backup-recipients` | root | age recipients for backups |
 | `/var/lib/nebula/executor/` | `nebula-executor`, 0700 | `executor.db` (permits, pins, counters, vault, events), `executor.db.installed`, `events.key`, `keys/<ref>.key` |
 | `/var/lib/nebula/server/` | `nebula-server`, 0750 | `server.db` (inventory, operations, logs, runbooks, modules, IPAM, audit) |
 | `/var/lib/nebula/discovery/jobs/` | `nebula-server:nebula-discovery`, 2750 | Queued scans |
 | `/var/lib/nebula/discovery/results/` | `nebula-discovery:nebula-server`, 2750 | Scan results |
+| `/var/lib/nebula/pve/requests/` | `nebula-pve-collector:nebula-rpc`, 2770 | Live want-list `live.json` (server writes, collector reads; section 9.4) |
+| `/var/lib/nebula/pve/live/` | `nebula-pve-collector:nebula-rpc`, 2750 | Live samples `<remote>.json` (collector writes, server reads) |
 | `/run/nebula/executor.sock` | `nebula-executor:nebula-rpc`, 0660 | The executor's socket |
 | `~<admin>/nebula-backups/` | the admin | Backup archives |
 

@@ -37,6 +37,8 @@ RUN groupadd --system --gid 10010 nebula-rpc \
  && install -d -m 2750 -o nebula-discovery -g nebula-server /var/lib/nebula/discovery/results \
  && install -d -m 2750 -o nebula-pve-collector -g nebula-rpc /var/lib/nebula/pve \
  && install -d -m 2770 -o nebula-pve-collector -g nebula-rpc /var/lib/nebula/pve/results \
+ && install -d -m 2770 -o nebula-pve-collector -g nebula-rpc /var/lib/nebula/pve/requests \
+ && install -d -m 2750 -o nebula-pve-collector -g nebula-rpc /var/lib/nebula/pve/live \
  && install -d -m 0750 -o nebula-executor -g nebula-rpc /run/nebula
 
 COPY nebula nebula-server nebula-executor nebula-discovery nebula-pve-collector /usr/bin/
