@@ -577,7 +577,8 @@ less ~/nebula-actions-0.9/*.sh
 Without this, every operation needs a user-verified approval.
 `nebula artifact list` shows what is trusted, `nebula artifact untrust`
 withdraws a trust. Trust again after every upgrade that changes an
-action's version.
+action's version — one at a time here, or all at once with `nebula
+artifact trust-builtins` (section 8.2).
 
 The executor also runs the **Safety Scanner** over every script, trusted
 or not: downloading and executing, `eval` or encoded payloads,
@@ -592,7 +593,43 @@ approve` shows the executor's own scan of the bytes it will authorize and
 says "not scanned by the executor" when the proposal carried no script
 bytes (the executor still scans them before the run).
 
-### 8.2 Module signers
+### 8.2 Trusting the built-ins together after an upgrade
+
+Trusting one action at a time is fine for a single change, but an upgrade
+that changes several built-ins means several reads and several
+confirmations. `nebula artifact trust-builtins` reviews the whole new
+release's built-ins in one step and commits them atomically:
+
+```
+nebula artifact trust-builtins --bundle /path/to/release-bundle
+```
+
+`--bundle DIR` must hold the new release's verified built-in bundle —
+exactly `builtins.tar`, `release-manifest.json` and its signature
+`release-manifest.json.sig` — taken from the locally verified NOS release,
+not a server-exported directory (a server directory alone is not proof of
+built-in provenance). The command checks the bundle against the release
+trust root, then shows, action by action: the old and new version, both
+hashes, the risk and read-only contract, the full script diff and the
+executor Safety Scanner's findings. New actions are shown in full and
+removed actions explicitly; on first use every byte is shown, and a
+missing previous version is always reviewed, never "unchanged". Actions
+whose bytes did not change need no confirmation. Same-version changed
+bytes or invalid provenance are rejected.
+
+One local confirmation — the reviewed manifest digest typed back — commits
+all the displayed additions and changes at once. Before committing, the
+executor rehashes the trust store and compares its generation, so a file
+swapped or a concurrent change is refused. For each old version you decide
+to keep it (`--pin name@version`) or retire it (`--retire name@version`);
+retirement revokes any read grant that covered it. The flow is CLI-only in
+both modes — there is no browser bulk-trust endpoint — and the individual
+`nebula artifact trust`/`untrust` commands still work. Scanner and host
+floors still apply, and the admin UID and every old/new trust tuple are
+recorded. Non-interactive (a script, or the upgrade step):
+`--yes-digest DIGEST --pin … --retire …`.
+
+### 8.3 Module signers
 
 Modules signed by someone you trust run at their declared risk. Get the
 author's public key (`ssh-ed25519 …`) and its fingerprint on two
@@ -607,7 +644,7 @@ shows the current and the new signer and asks you to type the new
 fingerprint). Unsigned modules always need your security key (at least
 HIGH).
 
-### 8.3 Writing and importing modules
+### 8.4 Writing and importing modules
 
 A module bundles actions others wrote. Its author keeps a `module.yaml`
 (name, version, title, actions with script, risk, timeout, parameters,
