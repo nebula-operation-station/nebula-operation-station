@@ -390,6 +390,142 @@ func (s *Service) ProposePVEGuestPower(ctx context.Context, in *pb.ProposePVEGue
 	return &pb.ProposePVEGuestPowerResponse{Permit: out}, nil
 }
 
+// pveGuestSnapshot returns the guest snapshot actions on the executor's
+// single mutation engine with the full executor floor evaluated at
+// proposal (GuestSnapshotRiskFloor over the executor's criticality records
+// and registry links).
+func (s *Service) pveGuestSnapshot() (*PveGuestSnapshot, error) {
+	m := s.pveMutations()
+	next, err := riskpolicy.New(s.db)
+	if err != nil {
+		return nil, err
+	}
+	b := &m.snapshotBindings
+	floor := GuestSnapshotRiskFloor{Next: next, Criticality: s.db, Linked: PveRegistryLinkedHosts, Bindings: b}
+	return &PveGuestSnapshot{Mutations: m, Bindings: b, Floor: floor}, nil
+}
+
+func guestSnapshotRequestFromProto(in *pb.PVEGuestSnapshotTarget) (PveGuestSnapshotRequest, error) {
+	if in == nil {
+		return PveGuestSnapshotRequest{}, ErrPveSnapshotRequest
+	}
+	r := PveGuestSnapshotRequest{RemoteID: in.GetRemoteId(), Kind: in.GetKind(), Node: in.GetNode(), VMID: in.GetVmid(),
+		Op: in.GetOp(), Name: in.GetName(), VMState: in.GetVmstate(), Start: in.GetStart()}
+	if e := in.GetExpect(); e != nil {
+		r.Expect = &PveSnapshotIdentity{Name: e.GetName(), SnapTimeUnix: e.GetSnaptimeUnix(), Parent: e.GetParent(), VMState: e.GetVmstate()}
+	}
+	return r, nil
+}
+
+// pveGuestSnapshotRPCError maps guest snapshot errors to fixed status
+// texts; no remote text reaches the caller.
+func pveGuestSnapshotRPCError(err error) error {
+	switch {
+	case errors.Is(err, ErrPveSnapshotRequest), errors.Is(err, ErrPveMutationRequest):
+		return status.Error(codes.InvalidArgument, "pve guest snapshot: unsupported op, name, flag, identity or target")
+	case errors.Is(err, ErrPveSnapshotStorage):
+		return status.Error(codes.FailedPrecondition, "pve guest snapshot: a disk is not on verified snapshot-capable storage")
+	case errors.Is(err, ErrPveSnapshotChanged):
+		return status.Error(codes.FailedPrecondition, "pve guest snapshot: the snapshot, disk set or guest state changed; propose again")
+	case errors.Is(err, ErrPveSnapshotState):
+		return status.Error(codes.FailedPrecondition, "pve guest snapshot: the guest is locked, not running for RAM, or its lists are unreadable")
+	case errors.Is(err, ErrPveSnapshotUnavailable):
+		return status.Error(codes.FailedPrecondition, "pve guest snapshot: not available")
+	case errors.Is(err, ErrPveSnapshotRisk):
+		return status.Error(codes.Internal, "pve guest snapshot: risk floor unavailable")
+	case errors.Is(err, ErrPveTargetChanged), errors.Is(err, ErrPveRemoteChanged):
+		return status.Error(codes.FailedPrecondition, "pve guest snapshot: the guest or remote changed; propose again")
+	case errors.Is(err, ErrPveReadOnly):
+		return status.Error(codes.FailedPrecondition, "pve guest snapshot: the remote has no action credential")
+	case errors.Is(err, ErrPveTargetBusy), errors.Is(err, ErrPveGuestPowerBusy):
+		return status.Error(codes.Unavailable, "pve guest snapshot: another mutation of the guest is in progress")
+	case errors.Is(err, ErrPveMutationDenied):
+		return status.Error(codes.PermissionDenied, "pve guest snapshot: no approved permit covers this action")
+	case errors.Is(err, vault.ErrLocked):
+		return status.Error(codes.FailedPrecondition, "pve guest snapshot requires an unlocked vault")
+	case errors.Is(err, executordb.ErrRemoteNotFound):
+		return status.Error(codes.NotFound, "pve remote not found")
+	default:
+		return status.Error(codes.Internal, "pve guest snapshot failed")
+	}
+}
+
+// ProposePVEGuestSnapshot proposes one typed snapshot action on one exact
+// guest. The executor binds the disk set (create) or the exact snapshot
+// and rollback side effects (delete, rollback) and sets the risk; the
+// caller's input cannot lower it.
+func (s *Service) ProposePVEGuestSnapshot(ctx context.Context, in *pb.ProposePVEGuestSnapshotRequest) (*pb.ProposePVEGuestSnapshotResponse, error) {
+	req, err := guestSnapshotRequestFromProto(in.GetTarget())
+	if err != nil {
+		return nil, pveGuestSnapshotRPCError(err)
+	}
+	g, err := s.pveGuestSnapshot()
+	if err != nil {
+		return nil, status.Error(codes.FailedPrecondition, "pve guest snapshot: pve mutations are not available")
+	}
+	id, err := newExecutionID()
+	if err != nil {
+		return nil, status.Error(codes.Internal, "execution id")
+	}
+	p, err := g.Propose(ctx, req, id, s.clock().Add(pveGuestPowerLifetime))
+	if err != nil {
+		if permit.CodeOf(err) != "" {
+			return nil, toStatus(err)
+		}
+		return nil, pveGuestSnapshotRPCError(err)
+	}
+	out, err := s.permitResponse(p)
+	if err != nil {
+		return nil, err
+	}
+	resp := &pb.ProposePVEGuestSnapshotResponse{Permit: out}
+	var doc struct {
+		Parameters pveSnapshotParams `json:"parameters"`
+	}
+	if err := json.Unmarshal(p.Parameters, &doc); err != nil {
+		return nil, status.Error(codes.Internal, "pve guest snapshot: bound parameters unreadable")
+	}
+	if sn := doc.Parameters.Snapshot; sn != nil {
+		resp.Snapshot = &pb.PVESnapshotIdentity{Name: sn.Name, SnaptimeUnix: sn.SnapTimeUnix, Parent: sn.Parent, Vmstate: sn.VMState}
+	}
+	if rb := doc.Parameters.Rollback; rb != nil {
+		resp.GuestRunsAfter = rb.GuestRunsAfter
+	}
+	return resp, nil
+}
+
+// CommitPVEGuestSnapshot runs the approved snapshot action. The bound
+// snapshot, disk set and guest state are checked again before the step is
+// sent. Once a step is recorded the response carries its durable state;
+// an uncertain step is reconciled, never resent.
+func (s *Service) CommitPVEGuestSnapshot(ctx context.Context, in *pb.CommitPVEGuestSnapshotRequest) (*pb.CommitPVEGuestSnapshotResponse, error) {
+	req, err := guestSnapshotRequestFromProto(in.GetTarget())
+	if err != nil {
+		return nil, pveGuestSnapshotRPCError(err)
+	}
+	d, err := canonical.ParseDigest(in.GetExecutionDigest())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "pve guest snapshot: malformed execution digest")
+	}
+	req.Digest = d
+	g, err := s.pveGuestSnapshot()
+	if err != nil {
+		return nil, status.Error(codes.FailedPrecondition, "pve guest snapshot: pve mutations are not available")
+	}
+	res, err := g.Run(ctx, req)
+	if len(res.Steps) == 0 || errors.Is(err, ErrPveJobStore) {
+		if err == nil {
+			err = ErrPveJobStore
+		}
+		return nil, pveGuestSnapshotRPCError(err)
+	}
+	out := &pb.CommitPVEGuestSnapshotResponse{ExecutionId: res.ExecutionID}
+	for _, st := range res.Steps {
+		out.Steps = append(out.Steps, &pb.PVEGuestPowerStep{State: st.State, Upid: st.UPID, TaskType: st.TaskType})
+	}
+	return out, nil
+}
+
 // CommitPVEGuestPower runs the approved power action. The guest's identity
 // and running state are checked again before the step is sent. Once a step
 // is recorded the response carries its durable state (succeeded, failed,

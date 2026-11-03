@@ -18,7 +18,11 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveapi"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
+	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // snapClient is a fake PVE client with the snapshot surface. It embeds the
@@ -122,7 +126,9 @@ func (e *snapEnv) restartSnap() {
 	m.Client = e.sc
 	bindings := &PveGuestPowerBindings{}
 	floor := GuestSnapshotRiskFloor{Next: next, Criticality: e.crit, Bindings: bindings,
-		Linked: func(_ canonical.Request, t canonical.Target) ([]canonical.Target, error) { return e.linked[t.HostID], nil }}
+		Linked: func(_ canonical.Request, t canonical.Target) ([]canonical.Target, error) {
+			return e.linked[t.HostID], nil
+		}}
 	e.g = &PveGuestSnapshot{Mutations: m, Bindings: bindings, Floor: floor}
 }
 
@@ -226,7 +232,11 @@ func TestGuestSnapshotRiskFloorFailsClosed(t *testing.T) {
 func TestGuestSnapshotRequestValidation(t *testing.T) {
 	e := newSnapEnv(t, "lxc")
 	bad := []PveGuestSnapshotRequest{
-		func() PveGuestSnapshotRequest { r := snapReq("lxc", PveSnapshotCreate, "x1"); r.VMState = true; return r }(),
+		func() PveGuestSnapshotRequest {
+			r := snapReq("lxc", PveSnapshotCreate, "x1")
+			r.VMState = true
+			return r
+		}(),
 		snapReq("lxc", "prune", "x1"),
 		snapReq("lxc", PveSnapshotCreate, "current"),
 		snapReq("lxc", PveSnapshotCreate, "1abc"),
@@ -240,7 +250,11 @@ func TestGuestSnapshotRequestValidation(t *testing.T) {
 			r.Expect = &PveSnapshotIdentity{Name: "x1"}
 			return r
 		}(),
-		func() PveGuestSnapshotRequest { r := snapReq("lxc", PveSnapshotDelete, "base"); r.Start = true; return r }(),
+		func() PveGuestSnapshotRequest {
+			r := snapReq("lxc", PveSnapshotDelete, "base")
+			r.Start = true
+			return r
+		}(),
 	}
 	for i, r := range bad {
 		if _, err := e.propose(r); !errors.Is(err, ErrPveSnapshotRequest) {
@@ -670,5 +684,50 @@ func TestGuestSnapshotStepTaskTypesAndIDs(t *testing.T) {
 	}
 	if _, ok := GuestSnapshotStepTaskType("guest.qemu.stop"); ok {
 		t.Fatal("power method claimed")
+	}
+}
+
+// TestServiceGuestSnapshotRPC: the wired engine's production client has
+// the snapshot surface; malformed requests are refused before any read,
+// and a read-only remote is never contacted.
+func TestServiceGuestSnapshotRPC(t *testing.T) {
+	e := newPveReadEnv(t, pvecontract.KindStandalone)
+	ctx := context.Background()
+	if _, ok := e.svc.pveMutations().Client.(PveSnapshotClient); !ok {
+		t.Fatal("production client has no snapshot surface")
+	}
+	g, err := e.svc.pveGuestSnapshot()
+	if err != nil || g.Mutations != e.svc.pveMutations() || g.Bindings != &g.Mutations.snapshotBindings || g.Floor == nil {
+		t.Fatalf("snapshot engine: %v", err)
+	}
+	codeOf := func(err error) codes.Code { return status.Code(err) }
+	bad := []*pb.PVEGuestSnapshotTarget{
+		nil,
+		{RemoteId: pveReadRemote, Kind: "lxc", Node: "pve1", Vmid: 101, Op: "create", Name: "s1", Vmstate: true},
+		{RemoteId: pveReadRemote, Kind: "qemu", Node: "pve1", Vmid: 101, Op: "prune", Name: "s1"},
+		{RemoteId: pveReadRemote, Kind: "qemu", Node: "pve1", Vmid: 101, Op: "delete", Name: "current"},
+	}
+	for i, tg := range bad {
+		if _, err := e.svc.ProposePVEGuestSnapshot(ctx, &pb.ProposePVEGuestSnapshotRequest{Target: tg}); codeOf(err) != codes.InvalidArgument {
+			t.Fatalf("%d: %v", i, err)
+		}
+	}
+	del := &pb.PVEGuestSnapshotTarget{RemoteId: pveReadRemote, Kind: "qemu", Node: "pve1", Vmid: 101, Op: "delete", Name: "base"}
+	if _, err := e.svc.CommitPVEGuestSnapshot(ctx, &pb.CommitPVEGuestSnapshotRequest{Target: del, ExecutionDigest: strings.Repeat("ab", 32)}); codeOf(err) != codes.InvalidArgument {
+		t.Fatalf("commit without identity: %v", err)
+	}
+	del.Expect = &pb.PVESnapshotIdentity{Name: "base", SnaptimeUnix: 1700000000}
+	if _, err := e.svc.CommitPVEGuestSnapshot(ctx, &pb.CommitPVEGuestSnapshotRequest{Target: del, ExecutionDigest: "nope"}); codeOf(err) != codes.InvalidArgument {
+		t.Fatalf("bad digest: %v", err)
+	}
+	create := &pb.PVEGuestSnapshotTarget{RemoteId: pveReadRemote, Kind: "qemu", Node: "pve1", Vmid: 101, Op: "create", Name: "s1"}
+	if _, err := e.svc.ProposePVEGuestSnapshot(ctx, &pb.ProposePVEGuestSnapshotRequest{Target: create}); codeOf(err) != codes.FailedPrecondition {
+		t.Fatalf("read-only remote: %v", err)
+	}
+	if _, err := e.svc.CommitPVEGuestSnapshot(ctx, &pb.CommitPVEGuestSnapshotRequest{Target: del, ExecutionDigest: strings.Repeat("ab", 32)}); codeOf(err) != codes.FailedPrecondition {
+		t.Fatalf("commit on read-only remote: %v", err)
+	}
+	if n := e.pve.requests.Load(); n != 0 {
+		t.Fatalf("remote contacted %d times", n)
 	}
 }
