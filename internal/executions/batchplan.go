@@ -53,14 +53,12 @@ const (
 
 // Errors of batch planning. Callers branch on them.
 var (
-	ErrBatchUnavailable  = errors.New("the executor does not offer batch approval")
-	ErrBatchCredentials  = errors.New("the executor's credential versions could not be read")
-	ErrBatchNotFound     = errors.New("batch not found")
-	ErrBatchNotPending   = errors.New("the batch is not waiting for approval")
-	ErrBatchCritical     = errors.New("CRITICAL members cannot be approved in a batch")
-	ErrBatchAnswer       = errors.New("the executor's batch answer does not match the proposed plan")
-	ErrBatchContainer    = errors.New("no fresh container details for this container; refresh them first")
-	ErrBatchApprovalGone = errors.New("the executor no longer holds this batch approval")
+	ErrBatchCredentials = errors.New("the executor's credential versions could not be read")
+	ErrBatchNotFound    = errors.New("batch not found")
+	ErrBatchNotPending  = errors.New("the batch is not waiting for approval")
+	ErrBatchCritical    = errors.New("CRITICAL members cannot be approved in a batch")
+	ErrBatchAnswer      = errors.New("the executor's batch answer does not match the proposed plan")
+	ErrBatchContainer   = errors.New("no fresh container details for this container; refresh them first")
 )
 
 // BatchInputError describes an invalid batch request (shown to the user).

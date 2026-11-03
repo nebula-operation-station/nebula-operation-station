@@ -114,7 +114,6 @@ type batchPage struct {
 	Error   string
 	List    []batchRow
 	Batch   *batchDetail
-	Plan    string
 }
 
 type batchRow struct {
