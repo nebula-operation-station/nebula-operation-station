@@ -501,11 +501,11 @@ func (p *PveImages) liveTemplate(ctx context.Context, rm executordb.PveRemote, n
 	if err != nil {
 		return "", err
 	}
-	liveNode, digest, err := p.Mutations.Client.TargetState(ctx, rm, permit.ProviderKindQemu, node, vmid, read)
-	if err != nil || liveNode != node || !validHexDigest(digest) {
+	live, err := p.Mutations.Client.TargetState(ctx, rm, permit.ProviderKindQemu, node, vmid, read)
+	if err != nil || live.Node != node || !validHexDigest(live.ConfigDigest) {
 		return "", ErrPveTemplateChanged
 	}
-	return digest, nil
+	return live.ConfigDigest, nil
 }
 
 func validHexDigest(s string) bool {

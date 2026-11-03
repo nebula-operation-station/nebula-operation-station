@@ -470,6 +470,10 @@ type PveAdmin struct {
 	// remote's credentials or trust. Nil revokes nothing (tests); the
 	// executor service wires permit.Authority.RevokeProviderGrants.
 	RevokeGrants func(remoteID, reason string) error
+	// Mutations is the engine that runs this executor's PVE mutations.
+	// CloseOpenJobs requires it and never closes a step of a run still
+	// in flight there.
+	Mutations *PveMutations
 	// Now is the clock. Default: time.Now.
 	Now func() time.Time
 	// Log receives non-secret lifecycle events. Default: a discarding

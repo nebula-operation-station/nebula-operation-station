@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"time"
 	"unicode/utf8"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 )
 
 // PVE mutation job states (migration 0017).
@@ -31,6 +33,9 @@ const (
 	MaxPveUPIDBytes = 255
 	// MaxPveExitStatusBytes bounds the stored task exit status.
 	MaxPveExitStatusBytes = 128
+	// maxPveUPIDStartUnix bounds a UPID start time (2100-01-01, as in
+	// pveapi); a start time of 0 is refused too.
+	maxPveUPIDStartUnix = 4102444800
 )
 
 var (
@@ -57,12 +62,40 @@ var (
 	// serialized so a lost task is never attributed to another job.
 	ErrPveTargetBusy = errors.New("executordb: another pve job step on the target is still open")
 
-	// pveUPIDRe follows the pveapi UPID grammar for the numeric fields:
-	// pstart (clock ticks since boot) grows to nine hex digits once a
-	// node's uptime passes about 497 days at USER_HZ=100.
-	pveUPIDRe     = regexp.MustCompile(`^UPID:([A-Za-z0-9][A-Za-z0-9-]{0,62}):[0-9A-F]{8}:[0-9A-F]{8,9}:([0-9A-F]{8}):([a-z0-9]{1,32}):([A-Za-z0-9._-]{0,64}):([A-Za-z0-9_.@!-]{1,128}):$`)
+	// ErrPveRemoteActive is returned when an admin tries to close the open
+	// steps of a remote that is still active: reconciliation observes
+	// those through the current pin and must decide them.
+	ErrPveRemoteActive = errors.New("executordb: pve remote is active; its open steps are reconciled, not closed")
+
+	// pveUPIDRe is the strict UPID grammar of the durable job record. It
+	// is deliberately a subset of the pveapi task-list grammar
+	// (internal/pveapi/tasks.go), which is a read-only display parser and
+	// stays lenient so that no task disappears from a listing. This record
+	// decides which task a mutation step is bound to, so it only takes what
+	// a PVE mutation of this engine can produce:
+	//   - node: permit.PveNodePattern, the same rule as the permit target
+	//     and validatePveJob. The pveapi listing also takes uppercase and
+	//     any length; the pveapi writer takes '_' but no uppercase;
+	//   - pid, pstart, starttime: uppercase hex as PVE writes it; pstart
+	//     (clock ticks since boot) has eight or nine digits, because it grows
+	//     to nine once a node's uptime passes about 497 days at USER_HZ=100
+	//     (pveapi also takes lowercase). starttime lies in (0, 2100-01-01],
+	//     as in pveapi;
+	//   - type: [a-z0-9]{1,32}, as in validatePveJob (pveapi: 1 to 64
+	//     characters other than ':', '/' and whitespace);
+	//   - id: at most 64 of [A-Za-z0-9._-] (pveapi: any number, including
+	//     none, of characters other than ':', '/' and whitespace);
+	//   - user: at most 128 of [A-Za-z0-9_.@!-], the task_user column bound
+	//     (pveapi: 1 to 256 characters other than ':', '/' and whitespace).
+	// pveapi counts characters (runes), not bytes; whitespace there is the
+	// RE2 \s class (space, \t, \n, \f, \r).
+	// TestPveUPIDGrammarIsSubsetOfPveapi only spot-checks this: it feeds a
+	// fixed corpus of UPIDs accepted here (including the length and digit
+	// bounds) to the pveapi writer's TaskStatus. It does not exercise the
+	// tasks.go listing parser, and it cannot prove that a widened regexp
+	// here stays a subset.
+	pveUPIDRe     = regexp.MustCompile(`^UPID:(` + permit.PveNodePattern + `):[0-9A-F]{8}:[0-9A-F]{8,9}:([0-9A-F]{8}):([a-z0-9]{1,32}):([A-Za-z0-9._-]{0,64}):([A-Za-z0-9_.@!-]{1,128}):$`)
 	pveHex64Re    = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	pveNodeRe     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,62}$`)
 	pveActionRe   = regexp.MustCompile(`^pve\.[a-z0-9_.]{1,60}$`)
 	pveTaskTypeRe = regexp.MustCompile(`^[a-z0-9]{1,32}$`)
 	pveTaskUserRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+![A-Za-z0-9_.-]+$`)
@@ -90,7 +123,7 @@ func ParsePveUPID(upid string) (PveUPID, bool) {
 		return PveUPID{}, false
 	}
 	start, err := strconv.ParseUint(m[2], 16, 32)
-	if err != nil {
+	if err != nil || start == 0 || start > maxPveUPIDStartUnix {
 		return PveUPID{}, false
 	}
 	return PveUPID{Node: m[1], StartTime: time.Unix(int64(start), 0), Type: m[3], ID: m[4], User: m[5]}, true
@@ -123,6 +156,91 @@ type PveJob struct {
 	DispatchedAt time.Time // zero until the UPID is stored
 	UpdatedAt    time.Time
 	FinishedAt   time.Time // zero until terminal
+	// ClosedBy and ClosedReason are set when an admin closed the open step
+	// (ClosePveJobs); empty otherwise.
+	ClosedBy     string
+	ClosedReason string
+}
+
+// MaxPveJobCloseReason bounds the reason an admin gives for closing steps.
+const MaxPveJobCloseReason = 256
+
+// ClosePveJobs moves every open step of remoteID to unknown and records who
+// closed it and why. It is the admin path for a remote whose open steps
+// reconciliation can never observe: one that is removed, or blocked and
+// not re-pinned. It fails with ErrPveRemoteActive for an active remote
+// (reconciliation decides those steps) and with ErrRemoteNotFound for an
+// unknown one. The remote state is checked in the same transaction, so a
+// concurrent re-pin cannot slip in between. It returns the closed steps.
+// Nothing is sent to the remote; a task that did run stays done there.
+//
+// check is called for every open step inside the transaction, before
+// anything is written; if it returns an error for any step, nothing is
+// closed and that error is returned. The executor uses it to refuse steps
+// whose run is still in flight in this process or whose task match window
+// has not passed. check is required.
+func (db *DB) ClosePveJobs(remoteID, by, reason string, check func(PveJob) error) ([]PveJob, error) {
+	if err := checkText("actor", by, maxActorLen, false); err != nil {
+		return nil, err
+	}
+	if err := checkText("reason", reason, MaxPveJobCloseReason, false); err != nil {
+		return nil, err
+	}
+	if check == nil {
+		return nil, fmt.Errorf("executordb: %w: close pve jobs needs a step check", ErrInvalid)
+	}
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("executordb: close pve jobs: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }() // a no-op after Commit
+	var state string
+	err = tx.QueryRow(`SELECT state FROM pve_remotes WHERE remote_id = ?`, remoteID).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: %s", ErrRemoteNotFound, remoteID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("executordb: close pve jobs: %w", err)
+	}
+	if state == StateActive {
+		return nil, ErrPveRemoteActive
+	}
+	rows, err := tx.Query(`SELECT `+pveJobColumns+` FROM pve_jobs WHERE remote_id = ? AND state IN ('dispatching', 'running', 'reconciling')
+		ORDER BY created_at, execution_id, step`, remoteID)
+	if err != nil {
+		return nil, fmt.Errorf("executordb: close pve jobs: %w", err)
+	}
+	var closed []PveJob
+	for rows.Next() {
+		j, err := scanPveJob(rows)
+		if err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("executordb: close pve jobs: %w", err)
+		}
+		closed = append(closed, j)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("executordb: close pve jobs: %w", err)
+	}
+	for _, j := range closed {
+		if err := check(j); err != nil {
+			return nil, err
+		}
+	}
+	now := db.now().Unix()
+	for i := range closed {
+		if _, err := tx.Exec(`UPDATE pve_jobs SET state = 'unknown', closed_by = ?, closed_reason = ?, updated_at = ?, finished_at = ?
+			WHERE execution_id = ? AND step = ? AND state IN ('dispatching', 'running', 'reconciling')`, by, reason, now, now, closed[i].ExecutionID, closed[i].Step); err != nil {
+			return nil, fmt.Errorf("executordb: close pve jobs: %w", err)
+		}
+		closed[i].State, closed[i].ClosedBy, closed[i].ClosedReason = PveJobUnknown, by, reason
+		closed[i].UpdatedAt, closed[i].FinishedAt = time.Unix(now, 0), time.Unix(now, 0)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("executordb: close pve jobs: %w", err)
+	}
+	return closed, nil
 }
 
 func validatePveJob(j PveJob) error {
@@ -137,7 +255,7 @@ func validatePveJob(j PveJob) error {
 		return fmt.Errorf("executordb: %w: pve job action", ErrInvalid)
 	case j.RemoteID == "" || len(j.RemoteID) > 64 || j.TrustGeneration < 1 || j.TrustGeneration > 1<<48-1:
 		return fmt.Errorf("executordb: %w: pve job remote", ErrInvalid)
-	case !pveNodeRe.MatchString(j.Node) || j.VMID > 9999999999:
+	case !permit.ValidPveNodeName(j.Node) || j.VMID > 9999999999:
 		return fmt.Errorf("executordb: %w: pve job target", ErrInvalid)
 	case !pveTaskTypeRe.MatchString(j.TaskType) || len(j.TaskUser) > 128 || !pveTaskUserRe.MatchString(j.TaskUser):
 		return fmt.Errorf("executordb: %w: pve job task type or user", ErrInvalid)
@@ -329,13 +447,14 @@ func (db *DB) pveJobChanged(res sql.Result, executionID string, step int) error 
 }
 
 const pveJobColumns = `execution_id, step, digest, action, remote_id, trust_generation, kind, node, vmid, request_digest, task_type, task_user, state,
-	COALESCE(upid, ''), COALESCE(task_node, ''), exit_status, created_at, COALESCE(dispatched_at, 0), updated_at, COALESCE(finished_at, 0)`
+	COALESCE(upid, ''), COALESCE(task_node, ''), exit_status, created_at, COALESCE(dispatched_at, 0), updated_at, COALESCE(finished_at, 0),
+	COALESCE(closed_by, ''), COALESCE(closed_reason, '')`
 
 func scanPveJob(r rowScanner) (PveJob, error) {
 	var j PveJob
 	var gen, vmid, created, dispatched, updated, finished int64
 	if err := r.Scan(&j.ExecutionID, &j.Step, &j.Digest, &j.Action, &j.RemoteID, &gen, &j.Kind, &j.Node, &vmid, &j.RequestDigest, &j.TaskType, &j.TaskUser, &j.State,
-		&j.UPID, &j.TaskNode, &j.ExitStatus, &created, &dispatched, &updated, &finished); err != nil {
+		&j.UPID, &j.TaskNode, &j.ExitStatus, &created, &dispatched, &updated, &finished, &j.ClosedBy, &j.ClosedReason); err != nil {
 		return PveJob{}, err
 	}
 	j.TrustGeneration, j.VMID = uint64(gen), uint64(vmid)

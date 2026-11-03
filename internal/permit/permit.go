@@ -196,6 +196,10 @@ type Permit struct {
 
 	failed int
 	used   map[string]struct{}
+	// claim is the token of the provider mutation claim that owns the
+	// current use of the permit; 0 if none. Only that claim may release
+	// the use (MutationClaim.Release).
+	claim  uint64
 	stages *stages
 	// staged: the request carried a stage plan document.
 	staged bool
@@ -295,6 +299,8 @@ type Authority struct {
 	// lockEpoch is incremented on lock; a provider mutation claim made
 	// before a lock is void (MutationClaim.Check).
 	lockEpoch uint64
+	// claimSeq numbers provider mutation claims; see Permit.claim.
+	claimSeq uint64
 	// trusts holds browser trust requests until their assertion (M7-4).
 	trusts map[string]*PendingTrust
 
@@ -738,6 +744,14 @@ func (a *Authority) Authorize(d canonical.Digest, run Run) error {
 // AuthorizeGrant checks one host run against an approved permit and, if
 // every check passes, marks the host as used. Nothing is marked on failure.
 func (a *Authority) AuthorizeGrant(d canonical.Digest, run Run) (Grant, error) {
+	return a.authorizeGrant(d, run, nil)
+}
+
+// authorizeGrant is AuthorizeGrant. onUse, if not nil, runs with a.mu held
+// right after the host was marked used, so a provider mutation claim takes
+// ownership of the use in the same critical section (Permit.claim).
+// Without onUse the use has no owning claim.
+func (a *Authority) authorizeGrant(d canonical.Digest, run Run, onUse func(p *Permit)) (Grant, error) {
 	// Hash outside the lock; artifacts can be large.
 	if len(run.Artifact) == 0 || len(run.Artifact) > MaxArtifactSize {
 		return Grant{}, fail(CodeArtifactMismatch, "artifact size %d outside 1..%d", len(run.Artifact), MaxArtifactSize)
@@ -805,6 +819,10 @@ func (a *Authority) AuthorizeGrant(d canonical.Digest, run Run) (Grant, error) {
 	}
 
 	p.used[run.HostID] = struct{}{}
+	p.claim = 0
+	if onUse != nil {
+		onUse(p)
+	}
 	a.emit(Event{Kind: "authorized", Digest: d.String(), Host: run.HostID})
 	return Grant{ExecutionID: p.Request.ExecutionID, Parameters: slices.Clone(p.Parameters)}, nil
 }
@@ -816,8 +834,19 @@ func (a *Authority) AuthorizeGrant(d canonical.Digest, run Run) (Grant, error) {
 // the stage engine's Retry of an unreachable host relies on it). It
 // reports whether the host was released.
 func (a *Authority) ReleaseHost(d canonical.Digest, hostID string) bool {
+	return a.releaseHost(d, hostID, "host unreachable; nothing ran")
+}
+
+// releaseHost undoes the use of hostID by the approved, unexpired permit d
+// and records detail with the event.
+func (a *Authority) releaseHost(d canonical.Digest, hostID, detail string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.releaseHostLocked(d, hostID, detail)
+}
+
+// releaseHostLocked is releaseHost with a.mu held.
+func (a *Authority) releaseHostLocked(d canonical.Digest, hostID, detail string) bool {
 	p, ok := a.permits[d]
 	if !ok || p.State != StateApproved || !a.now().Before(time.Unix(p.Request.ExpiryUnix, 0)) {
 		return false
@@ -826,7 +855,9 @@ func (a *Authority) ReleaseHost(d canonical.Digest, hostID string) bool {
 		return false
 	}
 	delete(p.used, hostID)
-	a.emit(Event{Kind: "released", Digest: d.String(), Host: hostID, Detail: "host unreachable; nothing ran"})
+	// The use ends here, so no claim owns it any more.
+	p.claim = 0
+	a.emit(Event{Kind: "released", Digest: d.String(), Host: hostID, Detail: detail})
 	return true
 }
 
