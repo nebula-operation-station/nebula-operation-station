@@ -138,10 +138,13 @@ func PveRemoteRiskTarget(trustPin string) (canonical.Target, error) {
 // error fails closed.
 type PveLinkedHosts func(r canonical.Request, node canonical.Target) ([]canonical.Target, error)
 
-// PveRemoteOf returns the trust pin of the registered remote a node risk
-// target belongs to, ok false if it belongs to none. An error fails
-// closed.
-type PveRemoteOf func(node canonical.Target) (trustPin string, ok bool, err error)
+// PveRemoteOf resolves the remotes of a request's node risk targets in one
+// step: for every target that belongs to a registered remote it returns the
+// trust pin of that remote; a target missing from the result belongs to
+// none. GuestProvisionRiskFloor calls it once per MinimumRisk call, so a
+// registry behind it is read once however many targets the request names.
+// An error fails closed.
+type PveRemoteOf func(nodes []canonical.Target) (map[canonical.Target]string, error)
 
 // PveRemoteLister is the part of the executor registry PveRegistryRemoteOf
 // reads (executordb implements it).
@@ -149,27 +152,37 @@ type PveRemoteLister interface {
 	ListRemotes() ([]executordb.PveRemote, error)
 }
 
-// PveRegistryRemoteOf returns the executor's production PveRemoteOf: the
+// PveRegistryRemoteOf returns the executor's production PveRemoteOf: it
+// lists the registry once per call and maps each node target to the
 // registered remote (tombstones included; their actions fail elsewhere)
-// whose trust pin the node target's fingerprint was made with
+// whose trust pin the target's fingerprint was made with
 // (permit.ProviderRiskFingerprint). Pins are unique in the registry, so at
 // most one remote matches. A nil registry resolves nothing.
 func PveRegistryRemoteOf(reg PveRemoteLister) PveRemoteOf {
-	return func(node canonical.Target) (string, bool, error) {
-		if reg == nil {
-			return "", false, nil
+	return func(nodes []canonical.Target) (map[canonical.Target]string, error) {
+		out := map[canonical.Target]string{}
+		if reg == nil || len(nodes) == 0 {
+			return out, nil
 		}
 		rms, err := reg.ListRemotes()
 		if err != nil {
-			return "", false, fmt.Errorf("pve remote of risk target: %w", err)
+			return nil, fmt.Errorf("pve remote of risk target: %w", err)
 		}
-		for _, rm := range rms {
-			fp, err := permit.ProviderRiskFingerprint(rm.TrustPin, node.HostID)
-			if err == nil && fp == node.HostKeyFingerprint {
-				return rm.TrustPin, true, nil
+		done := map[canonical.Target]bool{}
+		for _, n := range nodes {
+			if done[n] {
+				continue
+			}
+			done[n] = true
+			for _, rm := range rms {
+				fp, err := permit.ProviderRiskFingerprint(rm.TrustPin, n.HostID)
+				if err == nil && fp == n.HostKeyFingerprint {
+					out[n] = rm.TrustPin
+					break
+				}
 			}
 		}
-		return "", false, nil
+		return out, nil
 	}
 }
 
@@ -196,8 +209,9 @@ type GuestProvisionRiskFloor struct {
 	// Linked names the managed hosts linked to the node (an empty result
 	// means none). Without it the floor is HIGH: fail closed.
 	Linked PveLinkedHosts
-	// Remote names the remote of a node target, whose risk target is
-	// scored with the node. Without it the floor is HIGH: fail closed.
+	// Remote resolves the remotes of the node targets, once per call; each
+	// remote's risk target is scored with its nodes. Without it the floor
+	// is HIGH: fail closed.
 	Remote PveRemoteOf
 }
 
@@ -229,28 +243,44 @@ func (p GuestProvisionRiskFloor) MinimumRisk(r canonical.Request, targets []cano
 		risk = canonical.RiskHigh
 		reasons = append(reasons, "no remote source: unknown criticality is HIGH")
 	}
+	// The remotes of all targets are resolved in one step, so a registry
+	// behind Remote is read once per call.
+	var pins map[canonical.Target]string
+	if p.Remote != nil {
+		var err error
+		if pins, err = p.Remote(targets); err != nil {
+			return "", "", fmt.Errorf("provision risk floor: remote: %w", err)
+		}
+	}
 	ext := append([]canonical.Target(nil), targets...)
-	seen := map[string]bool{}
+	seenPin, seenNode := map[string]bool{}, map[canonical.Target]bool{}
+	unknown, firstUnknown := 0, ""
 	for _, t := range targets {
+		if seenNode[t] {
+			continue
+		}
+		seenNode[t] = true
 		if p.Remote != nil {
-			pin, ok, err := p.Remote(t)
-			if err != nil {
-				return "", "", fmt.Errorf("provision risk floor: remote: %w", err)
-			}
-			if fp, ferr := permit.ProviderRiskFingerprint(pin, t.HostID); !ok || ferr != nil || fp != t.HostKeyFingerprint {
-				// Unknown remote: HIGH is a floor, the known targets are
-				// still scored.
-				risk = canonical.RiskHigh
-				reasons = append(reasons, "remote of node target "+t.HostID+" unknown: unknown criticality is HIGH")
-			} else if !seen[pin] {
-				seen[pin] = true
-				remote, err := PveRemoteRiskTarget(pin)
-				if err != nil {
-					risk = canonical.RiskHigh
-					reasons = append(reasons, "remote of node target "+t.HostID+" unknown: unknown criticality is HIGH")
-				} else {
-					ext = append(ext, remote)
+			// The pin is checked against the target's fingerprint, so a
+			// source naming the wrong remote cannot pick its record.
+			pin, ok := pins[t]
+			known := false
+			if fp, ferr := permit.ProviderRiskFingerprint(pin, t.HostID); ok && ferr == nil && fp == t.HostKeyFingerprint {
+				known = true
+				if !seenPin[pin] {
+					seenPin[pin] = true
+					remote, err := PveRemoteRiskTarget(pin)
+					known = err == nil
+					if known {
+						ext = append(ext, remote)
+					}
 				}
+			}
+			if !known {
+				if unknown == 0 {
+					firstUnknown = t.HostID
+				}
+				unknown++
 			}
 		}
 		if p.Linked != nil {
@@ -259,6 +289,16 @@ func (p GuestProvisionRiskFloor) MinimumRisk(r canonical.Request, targets []cano
 				return "", "", fmt.Errorf("provision risk floor: linked hosts: %w", err)
 			}
 			ext = append(ext, hosts...)
+		}
+	}
+	if unknown > 0 {
+		// Unknown remote: HIGH is a floor, the known targets are still
+		// scored. One reason however many targets are affected.
+		risk = canonical.RiskHigh
+		if unknown == 1 {
+			reasons = append(reasons, "remote of node target "+firstUnknown+" unknown: unknown criticality is HIGH")
+		} else {
+			reasons = append(reasons, fmt.Sprintf("remotes of %d node targets unknown (first %s): unknown criticality is HIGH", unknown, firstUnknown))
 		}
 	}
 	nr, why, err := p.Next.MinimumRisk(r, ext)
