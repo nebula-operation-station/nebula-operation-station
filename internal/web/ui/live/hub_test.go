@@ -530,3 +530,172 @@ func TestFullQueueDoesNotBlock(t *testing.T) {
 		t.Fatal("Record blocked on a full viewer queue")
 	}
 }
+
+// hookSched is a recSched whose first Release runs a hook.
+type hookSched struct {
+	*recSched
+	once sync.Once
+	hook func()
+}
+
+func (s *hookSched) Release(v string, t pvecollect.TelemetryTarget) {
+	s.once.Do(s.hook)
+	s.recSched.Release(v, t)
+}
+
+// An expiry in Tick must not undo a renewal that arrives while Tick
+// releases the expired targets: the renewed target stays requested.
+func TestTickDoesNotUndoConcurrentRenewal(t *testing.T) {
+	c := newClock()
+	s := &hookSched{recSched: newRecSched()}
+	h, err := NewHub(s, nil, c.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(h.Close)
+	v := mustViewer(t)
+	if _, err := h.Add(v, "s"); err != nil {
+		t.Fatal(err)
+	}
+	tgt := nodeTarget("remote-a", "pve1")
+	boxes := map[string][]pvecollect.TelemetryTarget{"node:pve1": {tgt}}
+	s.hook = func() {} // the first SetBoxes releases nothing
+	if _, err := h.SetBoxes(v, "s", boxes); err != nil {
+		t.Fatal(err)
+	}
+	c.Advance(viewerLease + time.Second)
+	renewed := make(chan error, 1)
+	s.once = sync.Once{}
+	s.hook = func() {
+		// Tick is releasing the expired target: the client renews now.
+		go func() {
+			_, err := h.SetBoxes(v, "s", boxes)
+			renewed <- err
+		}()
+		select {
+		case err := <-renewed:
+			// Ran to completion inside the release (the old,
+			// unsynchronised order); report it after Tick.
+			renewed <- err
+		case <-time.After(200 * time.Millisecond):
+			// Blocked behind the expiry: it renews after it.
+		}
+	}
+	h.Tick()
+	if err := <-renewed; err != nil {
+		t.Fatal(err)
+	}
+	if !s.recSched.isActive(v, tgt) {
+		t.Fatal("renewal undone: the renewed target is no longer requested")
+	}
+	h.mu.Lock()
+	n := len(h.viewers[v].boxes)
+	h.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("viewer boxes after renewal = %d, want 1", n)
+	}
+}
+
+func (s *recSched) isActive(v string, t pvecollect.TelemetryTarget) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.active[v][t]
+}
+
+func (s *recSched) totalActive() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, m := range s.active {
+		n += len(m)
+	}
+	return n
+}
+
+// fullBoxes returns maxViewerBoxes boxes of maxTargetsPerBox distinct
+// targets each, distinct per prefix.
+func fullBoxes(prefix string) map[string][]pvecollect.TelemetryTarget {
+	boxes := map[string][]pvecollect.TelemetryTarget{}
+	for b := 0; b < maxViewerBoxes; b++ {
+		node := prefix + strconv.Itoa(b)
+		var ts []pvecollect.TelemetryTarget
+		for i := 0; i < maxTargetsPerBox; i++ {
+			ts = append(ts, nodeTarget("remote-"+strconv.Itoa(i), node))
+		}
+		boxes["node:"+node] = ts
+	}
+	return boxes
+}
+
+// One session cannot hold more than maxSessionRequests (viewer, target)
+// requests across its viewers; other sessions keep their share, and a
+// released or expired viewer frees its part of the budget.
+func TestSessionRequestBudget(t *testing.T) {
+	if maxSessionRequests*4 > pvecollect.MaxTelemetryViewers {
+		t.Fatalf("maxSessionRequests %d is more than a quarter of the scheduler's %d", maxSessionRequests, pvecollect.MaxTelemetryViewers)
+	}
+	h, s, c := newRecHub(t)
+	var vs []string
+	for i := 0; i < maxViewersPerSession; i++ {
+		v := mustViewer(t)
+		if _, err := h.Add(v, "s"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.SetBoxes(v, "s", fullBoxes("s"+strconv.Itoa(i)+"n")); err != nil {
+			t.Fatal(err)
+		}
+		vs = append(vs, v)
+	}
+	if n := s.totalActive(); n != maxSessionRequests {
+		t.Fatalf("session holds %d requests, want the budget %d", n, maxSessionRequests)
+	}
+	// Another session still gets its own share.
+	o := mustViewer(t)
+	if _, err := h.Add(o, "other"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := h.SetBoxes(o, "other", fullBoxes("o"))
+	if err != nil || len(got) == 0 {
+		t.Fatalf("other session: granted %d, err %v", len(got), err)
+	}
+	if n := s.activeCount(o); n != min(maxSessionRequests, maxViewerBoxes*maxTargetsPerBox) {
+		t.Fatalf("other session holds %d requests", n)
+	}
+	// Renewing within the budget keeps every request.
+	total := s.totalActive()
+	for i, v := range vs {
+		if _, err := h.SetBoxes(v, "s", fullBoxes("s"+strconv.Itoa(i)+"n")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := s.totalActive(); n != total {
+		t.Fatalf("after renewal: %d requests, want %d", n, total)
+	}
+	// Hiding the viewers that hold the budget frees it for the last,
+	// which got nothing while the first viewer held all of it.
+	last := vs[len(vs)-1]
+	if n := s.activeCount(last); n != 0 {
+		t.Fatalf("last viewer holds %d requests over the budget", n)
+	}
+	for _, v := range vs[:len(vs)-1] {
+		if _, err := h.SetBoxes(v, "s", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := h.SetBoxes(last, "s", fullBoxes("last")); err != nil {
+		t.Fatal(err)
+	}
+	if n, want := s.activeCount(last), min(maxSessionRequests, maxViewerBoxes*maxTargetsPerBox); n != want {
+		t.Fatalf("last viewer after release holds %d, want %d", n, want)
+	}
+	// An expired viewer frees its budget too.
+	c.Advance(viewerLease + time.Second)
+	h.Tick()
+	v := vs[0]
+	if _, err := h.SetBoxes(v, "s", fullBoxes("again")); err != nil {
+		t.Fatal(err)
+	}
+	if n, want := s.activeCount(v), min(maxSessionRequests, maxViewerBoxes*maxTargetsPerBox); n != want {
+		t.Fatalf("after expiry the session's viewer holds %d, want %d", n, want)
+	}
+}

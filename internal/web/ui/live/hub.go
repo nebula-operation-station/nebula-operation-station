@@ -11,6 +11,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -29,6 +31,11 @@ const (
 	maxViewers = 256
 	// maxViewersPerSession bounds the open streams of one session (tabs).
 	maxViewersPerSession = 8
+	// maxSessionRequests bounds the (viewer, target) requests all viewers
+	// of one session hold together: a quarter of the scheduler's
+	// MaxTelemetryViewers, so one session cannot starve the others.
+	// Targets past it are not requested (their boxes stay deferred).
+	maxSessionRequests = pvecollect.MaxTelemetryViewers / 4
 	// viewerEventQueue bounds the per-viewer event queue; a viewer whose
 	// queue is full misses events until it catches up.
 	viewerEventQueue = 64
@@ -82,10 +89,14 @@ type viewer struct {
 	ch      chan Event
 	// setMu serializes SetBoxes of this viewer, so two overlapping
 	// updates cannot leave a target requested that neither keeps.
-	setMu   sync.Mutex
-	boxes   map[string][]pvecollect.TelemetryTarget // guarded by Hub.mu
-	renewed time.Time                               // guarded by Hub.mu
-	gone    bool                                    // guarded by Hub.mu
+	setMu sync.Mutex
+	boxes map[string][]pvecollect.TelemetryTarget // guarded by Hub.mu
+	// reserved is the number of distinct targets this viewer holds or
+	// is requesting; it counts against maxSessionRequests. Guarded by
+	// Hub.mu.
+	reserved int
+	renewed  time.Time // guarded by Hub.mu
+	gone     bool      // guarded by Hub.mu
 }
 
 // Hub fans out recorded live samples to the viewers that requested the
@@ -210,6 +221,11 @@ func (h *Hub) SetBoxes(viewerID, sessionKey string, boxes map[string][]pvecollec
 		return nil, ErrUnknownViewer
 	}
 	old := v.boxes
+	// Reserve this viewer's share of the session budget in the same
+	// critical section that reads the other viewers' reservations, so
+	// two viewers of one session cannot both overrun it.
+	boxes = h.withinSessionBudget(v, boxes)
+	v.reserved = distinctTargets(old, boxes)
 	h.mu.Unlock()
 
 	// Request the visible targets. Only the targets the scheduler
@@ -218,7 +234,8 @@ func (h *Hub) SetBoxes(viewerID, sessionKey string, boxes map[string][]pvecollec
 	granted := make([]string, 0, len(boxes))
 	next := make(map[string][]pvecollect.TelemetryTarget, len(boxes))
 	requested := map[pvecollect.TelemetryTarget]bool{}
-	for box, targets := range boxes {
+	for _, box := range slices.Sorted(maps.Keys(boxes)) {
+		targets := boxes[box]
 		var ok []pvecollect.TelemetryTarget
 		for _, t := range targets {
 			if _, err := h.sched.Request(viewerID, t); err == nil {
@@ -249,9 +266,57 @@ func (h *Hub) SetBoxes(viewerID, sessionKey string, boxes map[string][]pvecollec
 		return nil, ErrUnknownViewer
 	}
 	v.boxes = next
+	v.reserved = distinctTargets(next)
 	v.renewed = h.now()
 	h.mu.Unlock()
+	slices.Sort(granted)
 	return granted, nil
+}
+
+// withinSessionBudget returns boxes trimmed so that v's distinct targets
+// plus those every other viewer of v's session reserved stay within
+// maxSessionRequests. Boxes are taken in box-ID order; a target past the
+// budget is dropped (its box is not granted if nothing remains). The
+// caller holds h.mu.
+func (h *Hub) withinSessionBudget(v *viewer, boxes map[string][]pvecollect.TelemetryTarget) map[string][]pvecollect.TelemetryTarget {
+	budget := maxSessionRequests
+	for _, o := range h.viewers {
+		if o != v && o.session == v.session {
+			budget -= o.reserved
+		}
+	}
+	out := make(map[string][]pvecollect.TelemetryTarget, len(boxes))
+	kept := map[pvecollect.TelemetryTarget]bool{}
+	for _, box := range slices.Sorted(maps.Keys(boxes)) {
+		var ts []pvecollect.TelemetryTarget
+		for _, t := range boxes[box] {
+			if !kept[t] {
+				if len(kept) >= budget {
+					continue
+				}
+				kept[t] = true
+			}
+			ts = append(ts, t)
+		}
+		if len(ts) > 0 {
+			out[box] = ts
+		}
+	}
+	return out
+}
+
+// distinctTargets counts the distinct targets of the box sets (the
+// scheduler counts one request per (viewer, target)).
+func distinctTargets(sets ...map[string][]pvecollect.TelemetryTarget) int {
+	seen := map[pvecollect.TelemetryTarget]bool{}
+	for _, boxes := range sets {
+		for _, targets := range boxes {
+			for _, t := range targets {
+				seen[t] = true
+			}
+		}
+	}
+	return len(seen)
 }
 
 // RecordTelemetry implements pvecollect.TelemetrySink: the scheduler
@@ -289,8 +354,10 @@ func (h *Hub) Record(s pvecollect.TelemetrySample) {
 			}
 		}
 	}
-	// Send under the lock: Remove closes the channel under it too, so a
-	// send can never hit a closed channel. Sends never block.
+	// Send under the lock: Remove marks the viewer gone under the lock
+	// and closes the channel only after unlocking; trySend checks
+	// v.gone under the lock, so a send never hits a closed channel.
+	// Sends never block.
 	built := map[string]Event{}
 	for _, f := range out {
 		ev, ok := built[f.box]
@@ -305,7 +372,8 @@ func (h *Hub) Record(s pvecollect.TelemetrySample) {
 	h.mu.Unlock()
 }
 
-// trySend queues ev without blocking; the caller holds Hub.mu.
+// trySend queues ev without blocking unless v is gone (its channel may
+// be closed); the caller holds Hub.mu.
 func trySend(v *viewer, ev Event) {
 	if v.gone {
 		return
@@ -342,20 +410,23 @@ func (h *Hub) Start(ctx context.Context) {
 // never a fresh-looking value).
 func (h *Hub) Tick() {
 	now := h.now()
-	type expiredViewer struct {
-		id    string
-		boxes map[string][]pvecollect.TelemetryTarget
-	}
-	var exp []expiredViewer
+	var exp []*viewer
+	var expIDs []string
 	h.mu.Lock()
 	for id, v := range h.viewers {
 		if expired(v, now) && len(v.boxes) > 0 {
-			exp = append(exp, expiredViewer{id, v.boxes})
-			v.boxes = map[string][]pvecollect.TelemetryTarget{}
+			exp = append(exp, v)
+			expIDs = append(expIDs, id)
 		}
 	}
+	h.mu.Unlock()
+	for i, v := range exp {
+		h.expire(expIDs[i], v, now)
+	}
+
 	// Snapshot the boxes; LastObserved takes the scheduler's lock, which
 	// must not nest inside the hub's.
+	h.mu.Lock()
 	type boxRef struct {
 		id      string
 		box     string
@@ -368,10 +439,6 @@ func (h *Hub) Tick() {
 		}
 	}
 	h.mu.Unlock()
-
-	for _, e := range exp {
-		h.releaseAll(e.id, e.boxes)
-	}
 
 	type label struct {
 		id string
@@ -402,6 +469,24 @@ func (h *Hub) Tick() {
 		}
 	}
 	h.mu.Unlock()
+}
+
+// expire releases the targets of a viewer whose lease ran out. It takes
+// the same lock order as SetBoxes (setMu, then Hub.mu) and re-checks the
+// expiry under both, so a renewal that ran in between is never undone.
+func (h *Hub) expire(id string, v *viewer, now time.Time) {
+	v.setMu.Lock()
+	defer v.setMu.Unlock()
+	h.mu.Lock()
+	if v.gone || !expired(v, now) || len(v.boxes) == 0 {
+		h.mu.Unlock()
+		return
+	}
+	old := v.boxes
+	v.boxes = map[string][]pvecollect.TelemetryTarget{}
+	v.reserved = 0
+	h.mu.Unlock()
+	h.releaseAll(id, old)
 }
 
 // Close ends all viewers (server shutdown).
