@@ -3,6 +3,7 @@
 package pvetransport
 
 import (
+	"crypto/tls"
 	"errors"
 	"io"
 	"net"
@@ -115,6 +116,47 @@ func TestMutationConnectionLostAfterSendNeverFailsOver(t *testing.T) {
 	if err == nil {
 		resp.Body.Close()
 		t.Fatal("mutation succeeded on a dropped connection")
+	}
+	if !errors.Is(err, ErrMaybeSent) {
+		t.Fatalf("err = %v, want ErrMaybeSent", err)
+	}
+	if dropHits.Load() != 1 || fastHits.Load() != 0 {
+		t.Fatalf("hits = %d/%d, want 1/0", dropHits.Load(), fastHits.Load())
+	}
+}
+
+// TestMutationResetAfterSendNeverFailsOver: a TCP reset after the endpoint
+// read the request is a net.Error, the kind of failure reads fail over
+// on; a mutation is still not resent.
+func TestMutationResetAfterSendNeverFailsOver(t *testing.T) {
+	ca := newTestCA(t, "pve-root-ca")
+	var dropHits, fastHits atomic.Int64
+	drop := newTLSServer(t, ca.serverCert(t, leafSpec{ips: []net.IP{loopback}}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		dropHits.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		c, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		if tc, ok := c.(*tls.Conn); ok {
+			if tcp, ok := tc.NetConn().(*net.TCPConn); ok {
+				_ = tcp.SetLinger(0)
+			}
+		}
+		c.Close()
+	}))
+	fast := newTLSServer(t, ca.serverCert(t, leafSpec{ips: []net.IP{loopback}}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fastHits.Add(1)
+	}))
+	client := newTestClient(t, Options{
+		Trust:     Trust{CA: ca.cert},
+		Endpoints: []*url.URL{mustParseURL(t, drop.URL), mustParseURL(t, fast.URL)},
+		Timeout:   5 * time.Second,
+	})
+	resp, err := client.Do(newMutationRequest(t, http.MethodPost, drop.URL+"/api2/json/nodes/pve1/qemu/100/status/stop", true))
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("mutation succeeded on a reset connection")
 	}
 	if !errors.Is(err, ErrMaybeSent) {
 		t.Fatalf("err = %v, want ErrMaybeSent", err)
