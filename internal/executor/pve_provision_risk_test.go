@@ -117,7 +117,7 @@ func TestGuestProvisionRiskFloorRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	remoteOf := func(canonical.Target) (string, bool, error) { return pin, true, nil }
+	remoteOf := eachRemote(func(canonical.Target) (string, bool, error) { return pin, true, nil })
 	linked := canonical.Target{HostID: "host-1", HostKeyFingerprint: "SHA256:" + strings.Repeat("A", 43)}
 	req := canonical.Request{ActionID: PveGuestProvisionAction, ParametersHash: strings.Repeat("1", 64), ExpiryUnix: time.Now().Add(time.Hour).Unix()}
 	linkedOf := func(hosts ...canonical.Target) PveLinkedHosts {
