@@ -342,6 +342,55 @@ func TestDirBuiltinTrustCommitRealBundleUpgrade(t *testing.T) {
 	}
 }
 
+// ConfirmReview with another digest or generation than the pending review
+// binds nothing and drops the pending review, so even a later matching
+// confirm cannot revive it and the commit is stale.
+func TestDirBuiltinTrustConfirmMismatchBindsNothing(t *testing.T) {
+	const otherDigest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	cases := map[string]func(digest string, gen int64) (string, int64){
+		"other digest":     func(_ string, gen int64) (string, int64) { return otherDigest, gen },
+		"other generation": func(d string, gen int64) (string, int64) { return d, gen + 1 },
+		"older generation": func(d string, gen int64) (string, int64) { return d, gen - 1 },
+		"empty digest":     func(_ string, gen int64) (string, int64) { return "", gen },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newBundleEnv(t)
+			ctx := context.Background()
+			rev, err := e.bt.Review(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d, g := mutate(rev.ManifestDigest, rev.Review.Generation)
+			e.bt.ConfirmReview(ctx, d, g)
+			if e.bt.reviewed != nil || e.bt.pending != nil {
+				t.Fatalf("mismatched confirm: reviewed=%+v pending=%+v", e.bt.reviewed, e.bt.pending)
+			}
+			// The pending review is gone: a matching confirm now binds nothing.
+			e.bt.ConfirmReview(ctx, rev.ManifestDigest, rev.Review.Generation)
+			if e.bt.reviewed != nil {
+				t.Fatal("matching confirm after a mismatch revived the review")
+			}
+			if _, _, err := e.bt.Commit(ctx, rev.ManifestDigest, nil, nil, 0); !errors.Is(err, trust.ErrStale) {
+				t.Fatalf("commit err = %v, want ErrStale", err)
+			}
+			if g := e.storeGeneration(t); g != 0 {
+				t.Fatalf("store generation %d, want 0", g)
+			}
+		})
+	}
+	// Control: the matching confirm binds the review.
+	e := newBundleEnv(t)
+	rev, err := e.bt.Review(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.bt.ConfirmReview(context.Background(), rev.ManifestDigest, rev.Review.Generation)
+	if b := e.bt.reviewed; b == nil || b.digest != rev.ManifestDigest || b.generation != rev.Review.Generation {
+		t.Fatalf("matching confirm bound %+v", b)
+	}
+}
+
 // confirmSwappingTrust is a handler-side wiring bug: it forwards every call
 // but confirms the review with a different generation.
 type confirmSwappingTrust struct{ *dirBuiltinTrust }
