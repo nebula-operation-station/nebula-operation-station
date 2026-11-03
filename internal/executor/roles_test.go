@@ -115,8 +115,10 @@ func TestMethodRolesServerMayReadSSHPublicKey(t *testing.T) {
 
 // TestMethodRolesPVEReadSurface pins the PVE read role table (ADR 0006,
 // P1-05): the entries are final. pve-collector may call ONLY
-// ListPVERemotes and ReadPVE; server may call ListPVERemotes (metadata);
-// admin may call both. Remote management is not part of this surface.
+// ListPVERemotes and ReadPVE, plus ListReadGrants (read-only grant
+// metadata for on-demand live reads, autopilot lv00); server may call
+// ListPVERemotes (metadata); admin may call both. Remote management is not
+// part of this surface.
 func TestMethodRolesPVEReadSurface(t *testing.T) {
 	const (
 		serverUID uint32 = 20001
@@ -153,16 +155,18 @@ func TestMethodRolesPVEReadSurface(t *testing.T) {
 		}
 	}
 
-	// The collector may call ONLY the two PVE read methods: loop over every
-	// method in the table.
+	// The collector may call ONLY the two PVE read methods and
+	// ListReadGrants: loop over every method in the table.
+	collectorAllowed := map[string]bool{
+		pb.ExecutorService_ListPVERemotes_FullMethodName: true,
+		pb.ExecutorService_ReadPVE_FullMethodName:        true,
+		pb.ExecutorService_ListReadGrants_FullMethodName: true,
+	}
 	for method := range MethodRoles() {
 		_, allowed := policy.Allowed(collUID, method)
-		if (method == pb.ExecutorService_ListPVERemotes_FullMethodName ||
-			method == pb.ExecutorService_ReadPVE_FullMethodName) != allowed {
+		if collectorAllowed[method] != allowed {
 			t.Errorf("pve-collector may call %s: got allowed=%v, want %v",
-				method, allowed,
-				method == pb.ExecutorService_ListPVERemotes_FullMethodName ||
-					method == pb.ExecutorService_ReadPVE_FullMethodName)
+				method, allowed, collectorAllowed[method])
 		}
 	}
 
@@ -182,6 +186,76 @@ func TestMethodRolesPVEReadSurface(t *testing.T) {
 		if _, ok := policy.Allowed(adminUID, method); !ok {
 			t.Errorf("admin role may not call %s, want allowed", method)
 		}
+	}
+}
+
+// TestMethodRolesCollectorMayListReadGrants pins the read-grant listing
+// for the pve-collector (autopilot lv00): the collector checks on-demand
+// live requests against read-grant leases itself, so a server-supplied
+// target list never widens what is read. It may list approved grants
+// (metadata, read-only) and nothing else in the read-grant, schedule-grant
+// or batch area; the server still may not call ReadPVE.
+func TestMethodRolesCollectorMayListReadGrants(t *testing.T) {
+	const (
+		serverUID uint32 = 40001
+		adminUID  uint32 = 40002
+		collUID   uint32 = 40003
+	)
+	policy := peercred.NewPolicy(
+		map[uint32][]peercred.Role{
+			serverUID: {peercred.RoleServer},
+			adminUID:  {peercred.RoleAdmin},
+			collUID:   {peercred.RolePVECollector},
+		},
+		MethodRoles(),
+	)
+
+	roles := MethodRoles()[pb.ExecutorService_ListReadGrants_FullMethodName]
+	want := []peercred.Role{peercred.RoleServer, peercred.RoleAdmin, peercred.RolePVECollector}
+	if len(roles) != len(want) {
+		t.Fatalf("ListReadGrants roles = %v, want exactly %v", roles, want)
+	}
+	for _, r := range want {
+		if !slices.Contains(roles, r) {
+			t.Errorf("ListReadGrants roles = %v, want %v to be allowed", roles, r)
+		}
+	}
+	for _, uid := range []uint32{serverUID, adminUID, collUID} {
+		if _, ok := policy.Allowed(uid, pb.ExecutorService_ListReadGrants_FullMethodName); !ok {
+			t.Errorf("uid %d may not call ListReadGrants, want allowed", uid)
+		}
+	}
+
+	// The collector may never propose, commit, approve, revoke or run a
+	// grant, list pending grants, or touch schedule grants or batches.
+	for _, method := range []string{
+		pb.ExecutorService_ProposeReadGrant_FullMethodName,
+		pb.ExecutorService_CommitReadGrant_FullMethodName,
+		pb.ExecutorService_ListPendingReadGrants_FullMethodName,
+		pb.ExecutorService_ApproveReadGrantCLI_FullMethodName,
+		pb.ExecutorService_RevokeReadGrant_FullMethodName,
+		pb.ExecutorService_RunReadGrant_FullMethodName,
+		pb.ExecutorService_ProposeScheduleGrant_FullMethodName,
+		pb.ExecutorService_CommitScheduleGrant_FullMethodName,
+		pb.ExecutorService_ListPendingScheduleGrants_FullMethodName,
+		pb.ExecutorService_ApproveScheduleGrantCLI_FullMethodName,
+		pb.ExecutorService_ListScheduleGrants_FullMethodName,
+		pb.ExecutorService_RevokeScheduleGrant_FullMethodName,
+		pb.ExecutorService_RunScheduled_FullMethodName,
+		pb.ExecutorService_ProposeBatch_FullMethodName,
+		pb.ExecutorService_CommitBatch_FullMethodName,
+		pb.ExecutorService_ReviewBatch_FullMethodName,
+		pb.ExecutorService_ApproveBatchCLI_FullMethodName,
+		pb.ExecutorService_GetBatchStatus_FullMethodName,
+	} {
+		if _, ok := policy.Allowed(collUID, method); ok {
+			t.Errorf("pve-collector may call %s, want denied", method)
+		}
+	}
+
+	// The server still never calls ReadPVE.
+	if _, ok := policy.Allowed(serverUID, pb.ExecutorService_ReadPVE_FullMethodName); ok {
+		t.Error("server role may call ReadPVE, want denied")
 	}
 }
 
