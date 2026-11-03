@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"time"
 
@@ -22,25 +23,75 @@ import (
 )
 
 // readGrantUsage is the usage line of the read-grant subcommand.
-const readGrantUsage = "usage: nebula read-grant pending | approve <64-hex digest>"
+const readGrantUsage = "usage: nebula read-grant pending | approve <64-hex digest> | revoke <grant id>"
 
-// readGrantCmd reviews and approves read grants (ADR 0007, E06) on the
-// executor host:
+// readGrantIDRe is the executor's read grant id form, a lowercase UUID v4
+// (the same form the executor and the web lease page check).
+var readGrantIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
+// readGrantNow is the clock revoke judges expiry by; tests replace it.
+var readGrantNow = time.Now
+
+// readGrantCmd reviews, approves and revokes read grants (ADR 0007, E06)
+// on the executor host:
 //
 //	nebula read-grant pending
 //	nebula read-grant approve <digest>   (hardened mode; full 64-hex digest)
+//	nebula read-grant revoke <grant id>  (lowercase UUID v4)
 //
 // Everything shown comes from the executor, never from the web UI. Approval
 // needs the complete digest: a read grant is standing authority over many
-// hosts, so a prefix is not enough.
+// hosts, so a prefix is not enough. Revocation only reduces authority and,
+// like the web lease page, needs just the complete grant id.
 func readGrantCmd(ctx context.Context, c pb.ExecutorServiceClient, args []string, in io.Reader, out io.Writer) error {
 	switch {
 	case len(args) == 1 && args[0] == "pending":
 		return readGrantPending(ctx, c, out)
 	case len(args) == 2 && args[0] == "approve":
 		return readGrantApprove(ctx, c, args[1], in, out)
+	case len(args) == 2 && args[0] == "revoke":
+		return readGrantRevoke(ctx, c, args[1], out)
 	}
 	return errors.New(readGrantUsage)
+}
+
+// readGrantRevoke revokes a stored read grant through the executor's
+// RevokeReadGrant, the call the web lease page makes: the executor admits
+// it for the admin (this CLI) and the server role alike, without a session
+// or assertion, because it only reduces authority. As on the web page, an
+// unknown, already revoked or expired grant is refused before the call;
+// the executor re-checks that the grant is still active.
+func readGrantRevoke(ctx context.Context, c pb.ExecutorServiceClient, id string, out io.Writer) error {
+	if !readGrantIDRe.MatchString(id) {
+		return errors.New("give the complete grant id: a lowercase UUID v4 as shown on the web lease page")
+	}
+	r, err := c.ListReadGrants(ctx, &pb.ListReadGrantsRequest{})
+	if err != nil {
+		return readGrantRPCError("list read grants", err)
+	}
+	var match *pb.ReadGrant
+	for _, g := range r.GetGrants() {
+		if g.GetGrantId() == id {
+			match = g
+			break
+		}
+	}
+	switch {
+	case match == nil:
+		return errors.New("no read grant with that id")
+	case match.GetRevokedUnix() != 0:
+		return fmt.Errorf("read grant %s is already revoked (%s)", id, time.Unix(match.GetRevokedUnix(), 0).Format(time.RFC3339))
+	case !readGrantNow().Before(time.Unix(match.GetExpiryUnix(), 0)):
+		return fmt.Errorf("read grant %s has expired (%s); an expired grant cannot be revoked", id, time.Unix(match.GetExpiryUnix(), 0).Format(time.RFC3339))
+	}
+	if _, err := c.RevokeReadGrant(ctx, &pb.RevokeReadGrantRequest{GrantId: id}); err != nil {
+		if grpcstatus.Code(err) == codes.NotFound {
+			return errors.New("revoke read grant: no active read grant with that id (revoked or expired meanwhile)")
+		}
+		return readGrantRPCError("revoke read grant", err)
+	}
+	fmt.Fprintf(out, "revoked: read grant %s\n", id)
+	return nil
 }
 
 func readGrantPending(ctx context.Context, c pb.ExecutorServiceClient, out io.Writer) error {

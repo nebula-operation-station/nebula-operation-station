@@ -10,7 +10,7 @@
 //	nebula approve <digest-prefix>
 //	nebula batch review|approve|stage|skip
 //	nebula read-grant pending|approve <digest>
-//	nebula artifact trust|untrust|list
+//	nebula artifact trust|untrust|list|trust-builtins|unpin
 //	nebula host probe|pin|unpin|keys|test|criticality|clear|list
 //	nebula webauthn code|list|remove
 //	nebula totp setup|status|remove
@@ -65,6 +65,10 @@ commands:
                       trust a script for one action; LEVEL becomes its minimum risk
   artifact untrust --action ID --version X.Y.Z SHA256
   artifact list       list trusted artifacts (anything else needs at least HIGH)
+  artifact trust-builtins [--yes-digest DIGEST [--pin name@ver] [--retire name@ver]]
+                      review and trust the executor's release built-ins; --pin keeps an old version
+  artifact unpin MODULE@VERSION
+                      clear a saved --pin (deletes nothing; normal retention applies again)
   signer add --name NAME FILE | list | remove SHA256:FINGERPRINT
                       module signers (ssh-ed25519); adding one is CRITICAL (type the fingerprint)
   module confirm-signer MODULE SHA256:FINGERPRINT

@@ -15,7 +15,9 @@ type BulkAdmitOpts struct {
 	// ConfirmedDigest is the manifest digest the admin confirmed; empty
 	// for a dry run (no commit).
 	ConfirmedDigest string
-	// Pins are the old versions to retain (pin); GC keeps them.
+	// Pins are the old versions to retain (pin). The pin is stored with
+	// the version (VersionRecord.Pinned), so no later admission collects
+	// it until Store.Unpin clears it.
 	Pins map[string]bool
 	// Retired are the old versions to retire (not pin); GC may collect
 	// them.
@@ -157,7 +159,11 @@ func (s *Store) BulkAdmit(c release.Candidate, o BulkAdmitOpts) (BulkAdmitResult
 		return BulkAdmitResult{}, err
 	}
 	// Atomic commit.
-	res, err := s.AdmitPinned(c, r, o.Pins)
+	drop := make(map[string]bool, len(o.Retired))
+	for _, v := range o.Retired {
+		drop[v] = true
+	}
+	res, err := s.admit(c, r, o.Pins, o.Pins, drop)
 	if err != nil {
 		return BulkAdmitResult{}, err
 	}
