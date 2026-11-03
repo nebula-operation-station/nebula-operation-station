@@ -2331,6 +2331,9 @@ enum BuiltinDiffOp {
 message BuiltinDiffLine {
   BuiltinDiffOp op = 1;
   string text = 2;
+  // Set when the script line is not valid UTF-8: text is then the Go
+  // quoted (escaped ASCII) form of the exact bytes, never a lossy repair.
+  bool escaped = 3;
 }
 
 // One executor scanner finding; the excerpt is host-author text.

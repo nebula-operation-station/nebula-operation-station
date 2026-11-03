@@ -16094,9 +16094,12 @@ func (x *GetBatchStatusResponse) GetMemberExecutionIds() []string {
 
 // One line of a full script diff; host-author text, render as text only.
 type BuiltinDiffLine struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Op            BuiltinDiffOp          `protobuf:"varint,1,opt,name=op,proto3,enum=nebula.executor.v1.BuiltinDiffOp" json:"op,omitempty"`
-	Text          string                 `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Op    BuiltinDiffOp          `protobuf:"varint,1,opt,name=op,proto3,enum=nebula.executor.v1.BuiltinDiffOp" json:"op,omitempty"`
+	Text  string                 `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
+	// Set when the script line is not valid UTF-8: text is then the Go
+	// quoted (escaped ASCII) form of the exact bytes, never a lossy repair.
+	Escaped       bool `protobuf:"varint,3,opt,name=escaped,proto3" json:"escaped,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -16143,6 +16146,13 @@ func (x *BuiltinDiffLine) GetText() string {
 		return x.Text
 	}
 	return ""
+}
+
+func (x *BuiltinDiffLine) GetEscaped() bool {
+	if x != nil {
+		return x.Escaped
+	}
+	return false
 }
 
 // One executor scanner finding; the excerpt is host-author text.
@@ -18864,10 +18874,11 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"expiryUnix\x12&\n" +
 	"\x0fstage_plan_hash\x18\t \x01(\tR\rstagePlanHash\x120\n" +
 	"\x14member_execution_ids\x18\n" +
-	" \x03(\tR\x12memberExecutionIds\"X\n" +
+	" \x03(\tR\x12memberExecutionIds\"r\n" +
 	"\x0fBuiltinDiffLine\x121\n" +
 	"\x02op\x18\x01 \x01(\x0e2!.nebula.executor.v1.BuiltinDiffOpR\x02op\x12\x12\n" +
-	"\x04text\x18\x02 \x01(\tR\x04text\"\x91\x01\n" +
+	"\x04text\x18\x02 \x01(\tR\x04text\x12\x18\n" +
+	"\aescaped\x18\x03 \x01(\bR\aescaped\"\x91\x01\n" +
 	"\x12BuiltinScanFinding\x12\x1a\n" +
 	"\bcategory\x18\x01 \x01(\tR\bcategory\x121\n" +
 	"\x04risk\x18\x02 \x01(\x0e2\x1d.nebula.executor.v1.RiskClassR\x04risk\x12\x12\n" +
