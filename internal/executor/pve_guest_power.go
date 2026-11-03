@@ -53,8 +53,9 @@ const (
 	pveGuestRunning = "running"
 	// maxPveGuestPowerStepArgs bounds the arguments of one power step.
 	maxPveGuestPowerStepArgs = 128
-	// maxPveGuestPowerBindings bounds the bindings held at one time (one
-	// per proposal or run in progress).
+	// maxPveGuestPowerBindings bounds the power bindings held at one time
+	// (one per proposal or run in progress); snapshot bindings have their
+	// own capacity (maxPveGuestSnapshotBindings).
 	maxPveGuestPowerBindings = 256
 )
 
@@ -221,20 +222,40 @@ func (r PveGuestPowerRequest) mutation() (PveMutationRequest, error) {
 	}, nil
 }
 
-// PveGuestPowerBindings holds the exact target and verb each bound
-// parameters hash of a power action stands for, so GuestPowerRiskFloor can
-// score the guest's node and remote (which the canonical request does not
-// name) whenever the authority asks: when proposing, approving and
-// authorizing the run. An entry lives while a call holds it and, for a
-// proposed permit, until the permit's expiry. Like permits it is in
-// memory only; a hash without an entry is scored HIGH.
+// PveGuestPowerBindings holds the exact target and verb (or snapshot op)
+// each bound parameters hash of a power (or snapshot) action stands for, so
+// GuestPowerRiskFloor and GuestSnapshotRiskFloor can score the guest's node
+// and remote (which the canonical request does not name) whenever the
+// authority asks: when proposing, approving and authorizing the run. Power
+// and snapshot bindings live in separate tables with their own capacity:
+// each floor reads only its own family's table, and a flood of one family's
+// proposals cannot exhaust the other's. An entry lives while a call holds
+// it and, for a proposed permit, until the permit's expiry. Like permits it
+// is in memory only; a hash without an entry is scored HIGH.
 type PveGuestPowerBindings struct {
 	// Now is the clock. Default: time.Now.
 	Now func() time.Time
 
 	mu sync.Mutex
-	m  map[string]*pveGuestPowerBinding
+	m  [pveBindingFamilies]map[string]*pveGuestPowerBinding
 }
+
+// pveBindingFamily selects the binding table of one action family.
+type pveBindingFamily int
+
+const (
+	pveBindPower pveBindingFamily = iota
+	pveBindSnapshot
+	pveBindingFamilies
+)
+
+// pveBindingCapacity bounds each family's table.
+var pveBindingCapacity = [pveBindingFamilies]int{
+	pveBindPower:    maxPveGuestPowerBindings,
+	pveBindSnapshot: maxPveGuestSnapshotBindings,
+}
+
+func validFamily(fam pveBindingFamily) bool { return fam >= 0 && fam < pveBindingFamilies }
 
 type pveGuestPowerBinding struct {
 	target permit.ProviderMutationTarget
@@ -250,21 +271,26 @@ func (b *PveGuestPowerBindings) now() time.Time {
 	return b.Now()
 }
 
-// hold records hash → (target, verb) until the returned release is called
-// (and longer if keep extends it).
-func (b *PveGuestPowerBindings) hold(hash string, t permit.ProviderMutationTarget, verb string) (func(), error) {
+// hold records hash → (target, verb) in fam's table until the returned
+// release is called (and longer if keep extends it). A full table returns
+// ErrPveGuestPowerBusy; the other family's table is not affected.
+func (b *PveGuestPowerBindings) hold(fam pveBindingFamily, hash string, t permit.ProviderMutationTarget, verb string) (func(), error) {
+	if !validFamily(fam) {
+		return nil, ErrPveMutationPlan
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.m == nil {
-		b.m = map[string]*pveGuestPowerBinding{}
+	if b.m[fam] == nil {
+		b.m[fam] = map[string]*pveGuestPowerBinding{}
 	}
+	m := b.m[fam]
 	now := b.now()
-	for h, e := range b.m {
+	for h, e := range m {
 		if e.refs <= 0 && now.After(e.until) {
-			delete(b.m, h)
+			delete(m, h)
 		}
 	}
-	e, ok := b.m[hash]
+	e, ok := m[hash]
 	switch {
 	case ok && (e.verb != verb || !sameBoundTarget(e.target, t)):
 		// The hash binds the target and verb; a different pair under the
@@ -272,30 +298,34 @@ func (b *PveGuestPowerBindings) hold(hash string, t permit.ProviderMutationTarge
 		return nil, ErrPveMutationPlan
 	case ok:
 		e.refs++
-	case len(b.m) >= maxPveGuestPowerBindings:
+	case len(m) >= pveBindingCapacity[fam]:
 		return nil, ErrPveGuestPowerBusy
 	default:
-		b.m[hash] = &pveGuestPowerBinding{target: t, verb: verb, refs: 1}
+		m[hash] = &pveGuestPowerBinding{target: t, verb: verb, refs: 1}
 	}
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			b.mu.Lock()
 			defer b.mu.Unlock()
-			if e := b.m[hash]; e != nil {
+			if e := m[hash]; e != nil {
 				if e.refs--; e.refs <= 0 && b.now().After(e.until) {
-					delete(b.m, hash)
+					delete(m, hash)
 				}
 			}
 		})
 	}, nil
 }
 
-// keep extends a held entry until until (a proposed permit's expiry).
-func (b *PveGuestPowerBindings) keep(hash string, until time.Time) {
+// keep extends a held entry of fam's table until until (a proposed
+// permit's expiry).
+func (b *PveGuestPowerBindings) keep(fam pveBindingFamily, hash string, until time.Time) {
+	if !validFamily(fam) {
+		return
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if e := b.m[hash]; e != nil && until.After(e.until) {
+	if e := b.m[fam][hash]; e != nil && until.After(e.until) {
 		e.until = until
 	}
 }
@@ -306,18 +336,40 @@ func sameBoundTarget(a, b permit.ProviderMutationTarget) bool {
 	return errA == nil && errB == nil && string(x) == string(y)
 }
 
-func (b *PveGuestPowerBindings) lookup(hash string) (permit.ProviderMutationTarget, string, bool) {
-	if b == nil {
+// lookup reads hash from fam's table only.
+func (b *PveGuestPowerBindings) lookup(fam pveBindingFamily, hash string) (permit.ProviderMutationTarget, string, bool) {
+	if b == nil || !validFamily(fam) {
 		return permit.ProviderMutationTarget{}, "", false
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	e, ok := b.m[hash]
+	e, ok := b.m[fam][hash]
 	if !ok || (e.refs <= 0 && b.now().After(e.until)) {
 		// An entry nobody holds outlives neither the call nor the permit.
 		return permit.ProviderMutationTarget{}, "", false
 	}
 	return e.target, e.verb, true
+}
+
+// failClosedRisk is the floor of a request the executor floor cannot
+// establish: HIGH, raised to Next's floor for the request's own targets so
+// a CRITICAL record or an untrusted artifact is not under-reported.
+// Without Next it is HIGH; an error of Next is returned.
+func failClosedRisk(next permit.RiskPolicy, r canonical.Request, targets []canonical.Target, why string) (canonical.Risk, string, error) {
+	if next == nil {
+		return canonical.RiskHigh, why, nil
+	}
+	nr, nwhy, err := next.MinimumRisk(r, targets)
+	if err != nil {
+		return "", "", fmt.Errorf("%s: %w", why, err)
+	}
+	if nr.Rank() > canonical.RiskHigh.Rank() {
+		if nwhy != "" {
+			why += "; " + nwhy
+		}
+		return nr, why, nil
+	}
+	return canonical.RiskHigh, why, nil
 }
 
 // PveGuestPower proposes and runs guest power actions on the executor's
@@ -344,7 +396,7 @@ func (g *PveGuestPower) checkDeps() error {
 // hold binds the exact target and verb of a proposal or run to its
 // parameters hash for the risk floor.
 func (g *PveGuestPower) hold(t permit.ProviderMutationTarget, verb, hash string) (func(), error) {
-	return g.Bindings.hold(hash, t, verb)
+	return g.Bindings.hold(pveBindPower, hash, t, verb)
 }
 
 // boundTarget reads the exact target from a mutation parameters document.
@@ -400,7 +452,7 @@ func (g *PveGuestPower) Propose(ctx context.Context, req PveGuestPowerRequest, e
 	}
 	// The authority checks the floor again on approval and on the run:
 	// the binding stays while the permit can be used.
-	g.Bindings.keep(rq.ParametersHash, time.Unix(res.Permit.Request.ExpiryUnix, 0))
+	g.Bindings.keep(pveBindPower, rq.ParametersHash, time.Unix(res.Permit.Request.ExpiryUnix, 0))
 	g.Mutations.log().Info("audit", "kind", "pve_guest_power_proposed", "remote", t.RemoteID, "node", t.Node, "vmid", t.VMID,
 		"verb", req.Verb, "risk", string(res.Permit.Request.RiskClass), "execution", executionID)
 	return res.Permit, nil
@@ -506,8 +558,8 @@ func NewGuestPowerRiskFloor(next permit.RiskPolicy, crit PveCriticality, binding
 // the remote is resolved in the registry if src is one, PveRemoteLister),
 // by the guest snapshot floor and by the guest power floor, both over src,
 // the registry's linked hosts and bindings. Power and snapshot requests
-// share the bindings (their parameters hashes differ, and each floor only
-// accepts its own op or verb and artifact). Pass the same bindings to
+// share the bindings instance but not its tables: each floor reads only
+// its own family's table and accepts only its own op or verb and artifact. Pass the same bindings to
 // Service.SetPveGuestPowerBindings.
 func NewExecutorRiskPolicy(src riskpolicy.Source, bindings *PveGuestPowerBindings) (permit.RiskPolicy, error) {
 	if src == nil || bindings == nil {
@@ -551,7 +603,9 @@ func (s *Service) SetPveGuestPowerBindings(b *PveGuestPowerBindings) { s.pveGues
 //
 // Anything the floor cannot establish (no Next, Criticality, Linked or
 // Bindings; no binding for the exact parameters; an artifact that is not
-// the verb's; another target than the bound guest) makes it HIGH. Other
+// the verb's; another target than the bound guest) makes it HIGH, or
+// Next's floor for the request's targets if that is higher. Only power
+// bindings are read; a snapshot binding is never scored here. Other
 // requests get Next's floor unchanged, or HIGH without Next.
 //
 // The guest, node and remote risk targets of one remote each have their
@@ -575,12 +629,12 @@ func (p GuestPowerRiskFloor) MinimumRisk(r canonical.Request, targets []canonica
 		return p.Next.MinimumRisk(r, targets)
 	}
 	high := func(why string) (canonical.Risk, string, error) {
-		return canonical.RiskHigh, "pve.guest.power: " + why + ": unknown criticality is HIGH", nil
+		return failClosedRisk(p.Next, r, targets, "pve.guest.power: "+why+": unknown criticality is HIGH")
 	}
 	if p.Next == nil || p.Criticality == nil || p.Linked == nil || p.Bindings == nil {
 		return high("risk sources not configured")
 	}
-	t, verb, ok := p.Bindings.lookup(r.ParametersHash)
+	t, verb, ok := p.Bindings.lookup(pveBindPower, r.ParametersHash)
 	if !ok {
 		return high("no exact target bound to the parameters")
 	}
