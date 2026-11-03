@@ -309,10 +309,11 @@ func TestLiveWantRejectsFutureDated(t *testing.T) {
 		live             bool
 	}{
 		{"current", now, now + LiveWantMaxExpiry, true},
-		{"written within skew", now + LiveClockSkew, now + LiveClockSkew + LiveWantMaxExpiry, true},
+		{"written within skew", now + LiveClockSkew, now + LiveWantMaxExpiry, true},
 		{"written beyond skew", now + LiveClockSkew + 1, now + LiveClockSkew + 1, false},
 		{"far future", now + 1_000_000, now + 1_000_000 + LiveWantMaxExpiry, false},
-		{"expires beyond cap plus skew", now + LiveClockSkew, now + LiveClockSkew + LiveWantMaxExpiry + 1, false},
+		{"expires beyond cap", now, now + LiveWantMaxExpiry + 1, false},
+		{"skew does not extend the cap", now + LiveClockSkew, now + LiveClockSkew + LiveWantMaxExpiry, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -338,7 +339,7 @@ func TestLiveWantCheckClockExpiresAlone(t *testing.T) {
 	// written_unix is within skew, only expires_unix is too far ahead. The
 	// format check alone would reject this too, so build the document
 	// without ValidateLiveWant to isolate the clock check.
-	w := LiveWant{Version: LiveWantVersion, WrittenUnix: 1000, ExpiresUnix: 1000 + LiveWantMaxExpiry + LiveClockSkew + 1}
+	w := LiveWant{Version: LiveWantVersion, WrittenUnix: 1000, ExpiresUnix: 1000 + LiveWantMaxExpiry + 1}
 	if err := w.CheckClock(1000); err == nil || !strings.Contains(err.Error(), "expires_unix is more than") {
 		t.Fatalf("CheckClock = %v, want expires_unix rejection", err)
 	}

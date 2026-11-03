@@ -274,7 +274,7 @@ func TestLiveHandoffWantFutureDatedIsNoTargets(t *testing.T) {
 	}
 	// Within the clock skew the same shape is accepted.
 	near := int64(1000 + pvecontract.LiveClockSkew)
-	if err := h.WriteLiveWant(ctx, testWant(near, near+pvecontract.LiveWantMaxExpiry)); err != nil {
+	if err := h.WriteLiveWant(ctx, testWant(near, 1000+pvecontract.LiveWantMaxExpiry)); err != nil {
 		t.Fatalf("WriteLiveWant: %v", err)
 	}
 	if got, err := h.ReadLiveWant(ctx); err != nil || len(got.Targets) != 2 {

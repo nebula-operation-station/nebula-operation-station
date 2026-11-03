@@ -97,16 +97,16 @@ func (w LiveWant) Expired(nowUnix int64) bool {
 
 // CheckClock rejects a want-list that is dated in the future relative to
 // the reader's clock nowUnix: written_unix may be at most LiveClockSkew
-// seconds ahead and expires_unix at most LiveWantMaxExpiry+LiveClockSkew
-// seconds ahead. Without it a future-dated document would stay live far
+// seconds ahead and expires_unix at most LiveWantMaxExpiry seconds ahead
+// (the skew never extends how long a want-list stays in force). Without it a future-dated document would stay live far
 // longer than LiveWantMaxExpiry.
 func (w LiveWant) CheckClock(nowUnix int64) error {
 	var p []string
 	if w.WrittenUnix > nowUnix+LiveClockSkew {
 		p = append(p, fmt.Sprintf("written_unix is more than %d s in the future", LiveClockSkew))
 	}
-	if w.ExpiresUnix > nowUnix+LiveWantMaxExpiry+LiveClockSkew {
-		p = append(p, fmt.Sprintf("expires_unix is more than %d s in the future", LiveWantMaxExpiry+LiveClockSkew))
+	if w.ExpiresUnix > nowUnix+LiveWantMaxExpiry {
+		p = append(p, fmt.Sprintf("expires_unix is more than %d s in the future", LiveWantMaxExpiry))
 	}
 	if len(p) > 0 {
 		return &ValidationError{Problems: p}
