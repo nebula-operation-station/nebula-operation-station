@@ -1,17 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Inventory page: client-side text filter, row navigation to the host
-// page, and the add-host dialog. The dialog posts JSON to
-// /inventory/hosts (fetch with a real Origin, decision 36); without
-// JavaScript the same form posts as a plain form to /inventory. Server
-// text is shown with textContent only, never innerHTML.
+// Inventory page and org chart. The add-host dialog posts JSON to
+// /inventory/hosts (real Origin, decision 36). Server text is shown with
+// textContent only, never innerHTML.
 'use strict';
 
 // Org chart interaction (ADR 0006 P1-35): pan, Ctrl+wheel zoom, fit,
-// automatic list mode and the details panel/sheet. It runs first and on
-// its own, so the inventory page code below (which stops early on pages
-// without the add-host dialog) can never keep it from starting. The chart
-// is never re-rendered, so expansion (native details) and focus are
-// preserved. Untrusted values stay server-rendered text.
+// list mode, details panel/sheet. Runs first and on its own; the chart
+// is never re-rendered (expansion and focus are kept).
 (() => {
   const chartSection = document.querySelector('.chart');
   if (!chartSection) return;
@@ -26,9 +21,8 @@
   const applyTransform = () => {
     chartHosts.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
   };
-  // The canvas clips (overflow hidden), but the browser can still scroll
-  // it natively (focus, find-in-page); fit() drops that offset and
-  // unscroll() folds it into the transform so nothing jumps.
+  // The clipped canvas can still scroll natively (focus, find); fit()
+  // drops that offset, unscroll() folds it into the transform.
   const fit = () => {
     tx = 0; ty = 0; scale = 1;
     chartSection.scrollTop = 0;
@@ -44,9 +38,7 @@
     applyTransform();
   };
 
-  // Automatic mode: pan/zoom canvas on wide screens, plain list on
-  // narrow ones (the CSS list layout below 600px stays in charge). Only
-  // the pan canvas is a tab stop (arrow keys pan it); the list is not.
+  // Pan canvas on wide screens (a tab stop), plain list below 600px.
   const setMode = () => {
     const pan = !narrow.matches && chartHosts.children.length > 0;
     chartSection.classList.toggle('chart--pan', pan);
@@ -89,9 +81,7 @@
   chartSection.addEventListener('pointerup', endDrag);
   chartSection.addEventListener('pointercancel', endDrag);
 
-  // Keyboard pan: in pan mode the canvas is a labelled, focusable
-  // region; arrow keys pan, 0 fits. Keys aimed at a control inside are
-  // left alone.
+  // Keyboard pan on the focused canvas: arrows pan, 0 fits.
   chartSection.addEventListener('keydown', (e) => {
     if (!panning() || e.target !== chartSection) return;
     const step = 48;
@@ -107,9 +97,8 @@
     if (handled) { e.preventDefault(); applyTransform(); }
   });
 
-  // Pan-to-focus: in pan mode the canvas clips (overflow hidden), so a
-  // focused host, link or button outside the visible area is moved into
-  // view; keyboard focus never lands on something the user cannot see.
+  // Pan-to-focus: a focused element outside the clipped view is moved
+  // into view.
   const margin = 16;
   const revealFocus = (el) => {
     if (!panning() || !chartHosts.contains(el)) return;
@@ -127,12 +116,8 @@
 
   if (fitBtn) fitBtn.addEventListener('click', fit);
 
-  // Details: on wide screens the server-rendered side panel is the
-  // target (its host is expanded, then it is panned into view and
-  // focused); on narrow screens a clone moves into the bottom sheet.
-  // The original panel is never changed beyond opening its host.
-  // The sheet is modal: it and its backdrop move to the end of <body>,
-  // and while it is open every other part of the page is inert.
+  // Details: wide screens open and focus the side panel; narrow ones
+  // show a clone in a modal bottom sheet (the rest of the page inert).
   const backdrop = document.getElementById('chart-sheet-backdrop');
   let lastOpener = null;
   let closeBtn = null;
@@ -180,8 +165,7 @@
       if (sheet.hidden) return;
       if (e.key === 'Escape') { e.preventDefault(); closeSheet(); return; }
       if (e.key !== 'Tab') return;
-      // Focus loop for the modal sheet. The close button is always the
-      // first stop, so the loop works even when the panel has no links.
+      // Focus loop; the close button is always the first stop.
       const stops = [closeBtn, ...Array.from(sheet.querySelectorAll(
         'a[href], button, summary, input, select, textarea, [tabindex]:not([tabindex="-1"])'
       )).filter((el) => el !== closeBtn && !el.hidden)];
@@ -193,8 +177,7 @@
     });
   }
 
-  // The Details button sits beside its host's <details>, not in the
-  // <summary>, so it is valid content and never toggles the host.
+  // The Details button sits beside the host's <summary>, never in it.
   for (const btn of chartSection.querySelectorAll('.chart__dpanel-btn')) {
     btn.hidden = false;
     btn.addEventListener('click', () => {
@@ -225,6 +208,90 @@
   else narrow.addListener(onModeChange);
 })();
 
+// Live chart values (ADR 0006 P1-37): one SSE stream; visible boxes are
+// posted on change and every `renew` s, none while hidden, one POST at a
+// time. Values: textContent only. A box not granted loses its live line;
+// one without a value for 15 s shows its age (never a fresh look).
+(() => {
+  const chart = document.querySelector('.chart');
+  if (!chart || !window.EventSource || !window.IntersectionObserver) return;
+  const els = new Map(), seen = new Set();
+  for (const el of chart.querySelectorAll('.chart__box--node,.chart__box--guest,.chart__box--host')) {
+    const is = (k) => el.classList.contains('chart__box--' + k), a = el.querySelector('a.chart__name');
+    const node = el.closest('.chart__node')?.querySelector('.chart__box--node .chart__name')?.title || '';
+    const m = is('guest') && /^VM (\d+)$/.exec(el.querySelector('.chart__vmid')?.textContent);
+    const h = a && /^\/hosts\/([a-z0-9._-]+)$/.exec(a.getAttribute('href'));
+    const ref = is('node') ? { kind: 'node', name: node } : m ? { kind: 'guest', node, vmid: +m[1] }
+      : !is('guest') && h ? { kind: 'host', id: h[1] } : null;
+    const id = ref && Object.values(ref).join(':');
+    if (ref && !els.has(id)) els.set(el.dataset.nosLive = id, { el, ref, v: {} });
+  }
+  if (!els.size) return;
+  let viewer = '', renew = 10, timer = 0, es = null, busy = 0, again = 0;
+  const send = async () => {
+    clearTimeout(timer);
+    for (const b of els.values()) if (b.t && Date.now() - b.at > 15e3) show(b, Math.round((Date.now() - b.at) / 1e3));
+    const v = viewer;
+    if (busy || !v) { again = busy; return; }
+    busy = 1; again = 0;
+    let gone = 0;
+    const ids = document.hidden ? [] : [...seen].slice(0, 32);
+    try {
+      const res = await fetch('/chart/live/targets', {
+        method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ viewer: v, boxes: ids.map((id) => els.get(id).ref) }),
+      });
+      gone = res.status === 410;
+      const g = res.ok && new Set((await res.json()).granted);
+      // Denied (or over budget): drop the live line, the server value stays.
+      for (const id of g ? ids : []) if (!g.has(id)) drop(els.get(id));
+    } catch (_) { /* next renewal retries */ }
+    busy = 0;
+    if (gone && v === viewer) return open();
+    if (again || v !== viewer) return send();
+    timer = setTimeout(send, renew * 1000);
+  };
+  const mk = (p, c, t) => p.appendChild(Object.assign(document.createElement('span'), { className: c, textContent: t }));
+  const drop = (b) => { if (b.t) { b.t.parentNode.remove(); b.t = null; b.v = {}; } };
+  const show = (b, age) => {
+    if (!b.t) {
+      const l = mk(b.el, 'chart__line chart__line--live', '');
+      mk(l, 'chart__line-name', 'Live');
+      b.t = mk(l, 'chart__line-text', '');
+    }
+    const p = [['cpu', 'CPU'], ['ram', 'RAM'], ['disk', 'Disk']].filter(([k]) => typeof b.v[k] === 'number')
+      .map(([k, l]) => l + ' ' + Math.round(b.v[k] * 100) + ' %');
+    if (age) p.push('last observed ' + age + ' s ago');
+    b.t.parentNode.classList.toggle('chart__line--stale', !!age);
+    b.t.textContent = p.join(' · ');
+  };
+  const on = (name, f) => es.addEventListener(name, (e) => {
+    try { const d = JSON.parse(e.data); if (d) f(d, els.get(d.id)); } catch (_) { /* ignored */ }
+  });
+  const open = () => {
+    if (es) es.close();
+    viewer = '';
+    es = new EventSource('/chart/live/events');
+    on('hello', (d) => { viewer = String(d.viewer || ''); if (d.renew > 0) renew = d.renew; send(); });
+    on('value', (d, b) => {
+      if (!b || typeof d.value !== 'number' || !['cpu', 'ram', 'disk'].includes(d.metric)) return;
+      b.v[d.metric] = d.value;
+      b.at = Date.now();
+      show(b, 0);
+    });
+    on('age', (d, b) => { if (b && Number.isInteger(d.age)) show(b, d.age); });
+  };
+  const soon = () => { clearTimeout(timer); timer = setTimeout(send, 300); };
+  const io = new IntersectionObserver((list) => {
+    for (const en of list) seen[en.isIntersecting ? 'add' : 'delete'](en.target.dataset.nosLive);
+    soon();
+  });
+  for (const b of els.values()) io.observe(b.el);
+  document.addEventListener('visibilitychange', soon);
+  window.addEventListener('pagehide', () => es && es.close());
+  open();
+})();
+
 (() => {
   // webauthn.js is loaded only on pages with the add-host dialog (not on
   // the chart page); the dialog code below stops early without it.
@@ -251,10 +318,9 @@
     });
   }
 
-  // IP-aware natural comparison — a port of internal/web/ui/invsort.
-  // IPs compare numerically (IPv4 before IPv6, IPs before non-IPs);
-  // everything else compares case-insensitively with digit runs as
-  // numbers, so "node2" < "node10" and "192.168.0.25" < "192.168.0.221".
+  // IP-aware natural comparison, a port of internal/web/ui/invsort:
+  // IPs numerically (v4 before v6, IPs first), else case-insensitive
+  // with digit runs as numbers ("node2" < "node10").
   const v4Re = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
   const v6GroupRe = /^[0-9a-f]{1,4}$/;
   const parseIPv6 = (s) => {
@@ -348,13 +414,9 @@
     return ra.length - rb.length;
   };
 
-  // Sortable columns: the Host, OS, Status, Updates and Last seen
-  // headers hold a button; clicking it (or Enter/Space, since it is a
-  // real button) toggles ascending/descending and sets aria-sort on the
-  // column. The Host column uses the same IP-aware natural order as the
-  // server default (internal/web/ui/invsort); Last seen sorts by the
-  // row's data-ts (milliseconds, empty when never seen). Re-appending
-  // rows keeps the text filter's hidden state, so both keep working.
+  // Sortable columns: a header button toggles the order and sets
+  // aria-sort. Host uses the IP-aware order, Last seen the row's data-ts
+  // (ms, empty when never seen). Re-appending rows keeps the filter.
   const table = document.querySelector('table.inventory');
   if (table) {
     const tbody = table.querySelector('tbody');
@@ -405,8 +467,7 @@
     }
   }
 
-  // Selection and bulk actions: refresh the reads behind the columns for
-  // the selected hosts, or open the reboot form with them preselected.
+  // Selection and bulk actions on the selected hosts.
   const bulkbar = document.getElementById('bulkbar');
   if (bulkbar) {
     const boxes = () => Array.from(document.querySelectorAll('input.host-select'));
@@ -415,8 +476,7 @@
     const count = document.getElementById('bulk-count');
     const msg = document.getElementById('bulk-message');
     const toggle = document.getElementById('bulkbar-toggle');
-    // A fresh selection starts collapsed on phones, so the sheet does not
-    // cover the table; the count and refresh stay reachable.
+    // A fresh selection starts collapsed (phones: table stays visible).
     const setCollapsed = () => {
       bulkbar.classList.remove('bulkbar--expanded');
       if (toggle) toggle.setAttribute('aria-expanded', 'false');
@@ -443,8 +503,7 @@
       }
       update();
     });
-    // The selection is what is shown: rows the text filter hides are
-    // unselected, so a bulk action never reaches a host you cannot see.
+    // Rows the filter hides are unselected: no action on unseen hosts.
     if (filter) {
       filter.addEventListener('input', () => {
         for (const b of boxes()) {
@@ -453,10 +512,8 @@
         update();
       });
     }
-    // One-click refresh: make sure the privileged session is open (one
-    // key tap while it is not), create the reads for the selection,
-    // approve what waits for a tap in place, one after the other, and
-    // follow the rest by status; the page reloads when all are done.
+    // One-click refresh: open the privileged session, create the reads,
+    // approve in place, follow the status, reload when done.
     document.getElementById('bulk-refresh').addEventListener('click', async (e) => {
       const hosts = selected();
       if (hosts.length === 0) return;
@@ -494,10 +551,8 @@
         e.target.disabled = false;
       }
     });
-    // "Schedule refresh…" opens the schedules page with the four read
-    // actions and the selected hosts preselected (6 h / 30 days).
-    // Prefill only checks boxes; the schedule is created through the
-    // normal approval flow on that page.
+    // "Schedule refresh…": the schedules page with the read actions and
+    // hosts prefilled (6 h / 30 days); approval happens there.
     document.getElementById('bulk-schedule').addEventListener('click', () => {
       const hosts = selected();
       if (hosts.length === 0) return;
@@ -508,12 +563,9 @@
       q.set('days', '30');
       window.location.assign('/schedules?' + q.toString());
     });
-    // "Reboot…" confirms inline in the bulk bar (no browser dialog),
-    // then creates one system.reboot operation for the whole selection
-    // and approves it in place with the key; the status follows in the
-    // bar. The link keeps the operation form for canary and waves.
-    // The "plan in the form" links carry the action and the selection, so
-    // the operation form opens with the same hosts checked.
+    // "Reboot…" confirms inline, creates one system.reboot operation and
+    // approves it in place. "Plan in the form" links carry the action
+    // and selection to the operation form (canary, waves).
     const planHref = (action, hosts) => {
       const q = new URLSearchParams({ action });
       for (const h of hosts) q.append('host', h);
@@ -532,8 +584,7 @@
       rebootGo.disabled = false;
     });
 
-    // "Install updates…": security or all updates for the selection,
-    // confirmed inline and approved in place with the key, like reboot.
+    // "Install updates…": security or all updates, like reboot.
     const updateConfirm = document.getElementById('bulk-update-confirm');
     const updateGo = document.getElementById('bulk-update-go');
     const updateKind = () => updateConfirm.querySelector('input[name="bulk-update-kind"]:checked').value;
@@ -551,41 +602,28 @@
     document.getElementById('bulk-update-cancel').addEventListener('click', () => {
       updateConfirm.hidden = true;
     });
-    updateGo.addEventListener('click', async () => {
-      const hosts = selected();
-      if (hosts.length === 0) return;
-      updateGo.disabled = true;
-      msg.textContent = '';
-      msg.classList.remove('message--error');
-      try {
-        await nebulaRunOp.ensureSession(msg);
-        const id = await nebulaRunOp.runOperation({ action: updateKind(), hosts }, msg, updateConfirm.parentElement);
-        nebulaRunOp.followStatus(updateConfirm.parentElement, [id], { reloadWhenDone: true });
-      } catch (err) {
-        msg.textContent = err.name === 'NotAllowedError' ? 'Cancelled or timed out.' : (err.message || 'Could not install the updates.');
-        msg.classList.add('message--error');
-        updateGo.disabled = false;
-      }
-    });
     rebootCancel.addEventListener('click', () => {
       rebootConfirm.hidden = true;
     });
-    rebootGo.addEventListener('click', async () => {
+    // Run the confirmed operation and approve it in place.
+    const runInPlace = (go, box, action, opts, fail) => go.addEventListener('click', async () => {
       const hosts = selected();
       if (hosts.length === 0) return;
-      rebootGo.disabled = true;
+      go.disabled = true;
       msg.textContent = '';
       msg.classList.remove('message--error');
       try {
         await nebulaRunOp.ensureSession(msg);
-        const id = await nebulaRunOp.runOperation({ action: 'system.reboot', hosts }, msg, rebootConfirm.parentElement);
-        nebulaRunOp.followStatus(rebootConfirm.parentElement, [id]);
+        const id = await nebulaRunOp.runOperation({ action: action(), hosts }, msg, box.parentElement);
+        nebulaRunOp.followStatus(box.parentElement, [id], opts);
       } catch (err) {
-        msg.textContent = err.name === 'NotAllowedError' ? 'Cancelled or timed out.' : (err.message || 'Could not reboot.');
+        msg.textContent = err.name === 'NotAllowedError' ? 'Cancelled or timed out.' : (err.message || fail);
         msg.classList.add('message--error');
-        rebootGo.disabled = false;
+        go.disabled = false;
       }
     });
+    runInPlace(updateGo, updateConfirm, updateKind, { reloadWhenDone: true }, 'Could not install the updates.');
+    runInPlace(rebootGo, rebootConfirm, () => 'system.reboot', undefined, 'Could not reboot.');
     update();
   }
 
