@@ -467,8 +467,11 @@ func requestDigest(node string, step PveMutationStep) (string, error) {
 //
 // Two codes are deliberately not final:
 //   - CodeWrongState: the authority keeps only pending and approved
-//     permits (a used or revoked one is gone: CodeNotFound), so it means
-//     the permit is still pending and can yet be approved;
+//     permits, so it means the permit is still pending and can yet be
+//     approved (or the executor was locked after authorization). A used
+//     permit answers CodeHostAlreadyRun, which Run maps to
+//     ErrPveMutationAlreadyRun; a revoked or expired one is gone
+//     (CodeNotFound, CodeExpired);
 //   - CodeParametersMismatch: the bound parameters include live facts the
 //     executor re-reads before every run (the capacity flags of a
 //     provisioning), which can change back. The authority does not tell a
