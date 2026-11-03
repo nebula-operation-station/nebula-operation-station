@@ -37,7 +37,7 @@ type Result struct {
 // AdmitPinned to keep versions pinned by a retained execution or an open
 // review (spec 10, "not otherwise pinned").
 func (s *Store) Admit(in release.Candidate, reviewed Review) (Result, error) {
-	return s.admit(in, reviewed, nil)
+	return s.admit(in, reviewed, nil, nil)
 }
 
 // AdmitPinned is Admit with pins: versions in pinned (keyed name@version)
@@ -45,14 +45,17 @@ func (s *Store) Admit(in release.Candidate, reviewed Review) (Result, error) {
 // recent predecessors and their 90-day floor has passed. A retained
 // execution or an open review pins the versions it references, so their
 // bytes are never collected while the pin holds (spec 10, "not otherwise
-// pinned").
+// pinned"). These pins hold for this admission only and are not stored;
+// durable admin pins are recorded by BulkAdmit (VersionRecord.Pinned) and
+// honoured by every admission.
 func (s *Store) AdmitPinned(in release.Candidate, reviewed Review, pinned map[string]bool) (Result, error) {
-	return s.admit(in, reviewed, pinned)
+	return s.admit(in, reviewed, pinned, nil)
 }
 
 // admit is the shared admission path; pinned lists name@version keys that
-// garbage collection must skip.
-func (s *Store) admit(in release.Candidate, reviewed Review, pinned map[string]bool) (Result, error) {
+// garbage collection must skip in this admission, keep the keys whose
+// records are durably marked Pinned in the committed index.
+func (s *Store) admit(in release.Candidate, reviewed Review, pinned, keep map[string]bool) (Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if reviewed.Generation != s.idx.Generation {
@@ -122,6 +125,7 @@ func (s *Store) admit(in release.Candidate, reviewed Review, pinned map[string]b
 	}
 	sort.Slice(x.Modules, func(i, j int) bool { return x.Modules[i].Name < x.Modules[j].Name })
 	addProvenance(&x, c, now)
+	markPinned(&x, keep)
 
 	// Collect what retention allows in the same index write, so expired
 	// predecessors never block an admission; protected history (two most
@@ -218,18 +222,37 @@ func setSignature(x *index, digest, sigSum string) {
 	}
 }
 
+// markPinned durably pins the retained records named in keep (keyed
+// name@version); it never clears an existing pin.
+func markPinned(x *index, keep map[string]bool) {
+	if len(keep) == 0 {
+		return
+	}
+	for i := range x.Modules {
+		m := &x.Modules[i]
+		if m.Active != nil && keep[m.Name+"@"+m.Active.Version] {
+			m.Active.Pinned = true
+		}
+		for j := range m.History {
+			if keep[m.Name+"@"+m.History[j].Version] {
+				m.History[j].Pinned = true
+			}
+		}
+	}
+}
+
 // collect drops predecessors that are beyond the two most recent and
 // whose 90-day floor has passed, and provenance no retained version
-// references. Versions in pinned (keyed name@version) are never collected,
-// whatever their age or depth (spec 10, "not otherwise pinned").
-// Tombstones are kept.
+// references. Versions in pinned (keyed name@version) and versions with a
+// stored pin are never collected, whatever their age or depth (spec 10,
+// "not otherwise pinned"). Tombstones are kept.
 func collect(x *index, now time.Time, pinned map[string]bool) []string {
 	var out []string
 	for i := range x.Modules {
 		m := &x.Modules[i]
 		kept := m.History[:0:0]
 		for j, h := range m.History {
-			if j < KeepPredecessors || now.Before(h.RetainUntil) || pinned[m.Name+"@"+h.Version] {
+			if j < KeepPredecessors || now.Before(h.RetainUntil) || h.Pinned || pinned[m.Name+"@"+h.Version] {
 				kept = append(kept, h)
 				continue
 			}
