@@ -43,6 +43,11 @@ func TestInventoryJSConsumesLiveStream(t *testing.T) {
 		".slice(0, 32)",        // maxViewerBoxes
 		"textContent",          // values rendered as text
 		"renew * 1000",         // server-provided renewal cadence
+		// One POST at a time: a send while one runs is queued and the
+		// newest list goes out after it, so a stale list never lands
+		// after the empty list of a hidden page.
+		"if (busy || !v) { again = busy; return; }",
+		"if (again || v !== viewer) return send();",
 		"kind: 'node'", "kind: 'guest'", "kind: 'host'",
 	} {
 		if !strings.Contains(block, want) {
