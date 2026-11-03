@@ -437,6 +437,15 @@ service ExecutorService {
   rpc ProposePVERepin(ProposePVERepinRequest) returns (ProposePVERepinResponse);
   rpc CommitPVERepin(CommitPVERepinRequest) returns (CommitPVERepinResponse);
 
+  // Typed PVE guest power actions (ADR 0006 P2-01): shutdown and reboot
+  // (base MEDIUM), stop and reset (base HIGH, reset QEMU only). The
+  // executor binds the exact live guest and verb and sets the risk to its
+  // own floor (verb base, guest/node/remote and linked-host criticality,
+  // unknown HIGH). Propose: role server or admin. Commit dispatches the
+  // approved action: role admin only.
+  rpc ProposePVEGuestPower(ProposePVEGuestPowerRequest) returns (ProposePVEGuestPowerResponse);
+  rpc CommitPVEGuestPower(CommitPVEGuestPowerRequest) returns (CommitPVEGuestPowerResponse);
+
   // PVE provider reads (ADR 0006, P1-05). Role: server, admin,
   // pve-collector. Metadata only: which remotes exist, their kind, ordered
   // endpoints, trust generation and state. The trust pin is a SHA-256
@@ -2115,6 +2124,49 @@ message CommitPVERepinResponse {
 
 message ProposePVERepinResponse {
   ProposeExecutionResponse permit = 1;
+}
+
+// PVEGuestPowerTarget names one power action on one exact guest. The
+// executor reads the guest's configuration, generation and state itself.
+message PVEGuestPowerTarget {
+  string remote_id = 1;
+  // "qemu" or "lxc".
+  string kind = 2;
+  string node = 3;
+  uint64 vmid = 4;
+  // "shutdown", "reboot", "stop" or "reset" (QEMU only).
+  string verb = 5;
+  // Shutdown/reboot timeout in seconds (0: executor default); must be 0
+  // for stop and reset.
+  uint32 timeout_sec = 6;
+}
+
+message ProposePVEGuestPowerRequest {
+  PVEGuestPowerTarget target = 1;
+}
+
+message ProposePVEGuestPowerResponse {
+  ProposeExecutionResponse permit = 1;
+}
+
+message CommitPVEGuestPowerRequest {
+  // The same target and verb that were proposed and approved.
+  PVEGuestPowerTarget target = 1;
+  string execution_digest = 2;
+}
+
+// PVEGuestPowerStep is the durable job record of the power step.
+message PVEGuestPowerStep {
+  // "dispatching", "running", "reconciling", "succeeded", "failed" or
+  // "unknown".
+  string state = 1;
+  string upid = 2;
+  string task_type = 3;
+}
+
+message CommitPVEGuestPowerResponse {
+  string execution_id = 1;
+  repeated PVEGuestPowerStep steps = 2;
 }
 
 // ReadGrantTrigger selects one approved trigger for one run. It grants no
