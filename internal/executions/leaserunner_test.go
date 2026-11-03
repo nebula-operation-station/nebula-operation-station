@@ -322,6 +322,32 @@ func TestLeaseRunnerFollowsExecutorRefusals(t *testing.T) {
 	})
 }
 
+func TestSchedulerLoopRunsOrdinaryLeases(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	s, f := setupLeases(t, &now, func(n time.Time) *pb.ReadGrant {
+		return leaseEntry(t, leaseDoc(t, n, []string{"web"}, "core.facts"), n)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { s.RunSchedules(ctx); close(done) }()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		list, err := s.List(context.Background(), 10)
+		if err == nil && len(list) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the scheduler loop never ran the lease")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if len(f.runs) != 1 {
+		t.Fatalf("%d runs", len(f.runs))
+	}
+}
+
 func TestLeaseRunnerNeedsTheReadGrantAPI(t *testing.T) {
 	// An executor without the read-grant API (an older test double) runs
 	// legacy schedules only; the lease runner does nothing.
