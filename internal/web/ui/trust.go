@@ -4,9 +4,12 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/grpc"
 
@@ -28,6 +31,20 @@ const (
 	// refresh. A slower executor makes that render show "unavailable";
 	// the refresh keeps running in the background and fills the cache.
 	builtinTrustPageWait = 300 * time.Millisecond
+)
+
+// Built-in trust banner display limits. The module list comes from the
+// executor and is untrusted input; every page renders the banner, so
+// its size is bounded.
+const (
+	// builtinTrustMaxModules is the most affected built-ins the banner
+	// lists; the rest are counted in the detail sentence.
+	builtinTrustMaxModules = 50
+	// builtinTrustMaxNameBytes caps a displayed module name.
+	builtinTrustMaxNameBytes = 128
+	// builtinTrustMaxVersionBytes caps a displayed release or trusted
+	// version.
+	builtinTrustMaxVersionBytes = 64
 )
 
 // BuiltinTrustProvider reports the executor's built-in trust verdict
@@ -97,16 +114,24 @@ func builtinTrustBanner(st *pb.GetBuiltinTrustStatusResponse) *builtinTrustView 
 			Command:  "nebula artifact trust-builtins",
 			Detail:   "Trusting new built-in versions does not amend existing read leases: approve a replacement grant for those exact versions.",
 		}
+		omitted := 0
 		for _, m := range st.GetModules() {
 			if m.GetChange() == pb.BuiltinTrustChange_BUILTIN_TRUST_CHANGE_UNCHANGED {
 				continue // byte-identical to the trusted version
 			}
+			if len(v.Affected) == builtinTrustMaxModules {
+				omitted++
+				continue
+			}
 			v.Affected = append(v.Affected, builtinTrustEntryView{
-				Name:    m.GetName(),
-				Version: m.GetReleaseVersion(),
-				Trusted: m.GetTrustedVersion(),
+				Name:    clipTrustText(m.GetName(), builtinTrustMaxNameBytes),
+				Version: clipTrustText(m.GetReleaseVersion(), builtinTrustMaxVersionBytes),
+				Trusted: clipTrustText(m.GetTrustedVersion(), builtinTrustMaxVersionBytes),
 				Removed: m.GetChange() == pb.BuiltinTrustChange_BUILTIN_TRUST_CHANGE_REMOVED,
 			})
+		}
+		if omitted > 0 {
+			v.Detail = fmt.Sprintf("%d more affected built-in(s) not listed. %s", omitted, v.Detail)
 		}
 		return v
 	case pb.BuiltinTrustState_BUILTIN_TRUST_STATE_TRUSTED:
@@ -116,6 +141,21 @@ func builtinTrustBanner(st *pb.GetBuiltinTrustStatusResponse) *builtinTrustView 
 		// build does not know: fail closed, never shown as trusted.
 		return unavailableBuiltinTrust()
 	}
+}
+
+// clipTrustText returns s as valid UTF-8 of at most limit bytes. Longer
+// text is cut on a rune boundary and ends in "…" (within the limit).
+func clipTrustText(s string, limit int) string {
+	s = strings.ToValidUTF8(s, "�")
+	if len(s) <= limit {
+		return s
+	}
+	const ellipsis = "…"
+	n := max(limit-len(ellipsis), 0)
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + ellipsis
 }
 
 // builtinTrustCache caches the banner for page renders. One refresh
