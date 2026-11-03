@@ -406,9 +406,7 @@ func bindRebootCluster(node string, f PveNodeRebootFacts, b *pveRebootBound) err
 	if !f.HA.Available && !f.HA.NotConfigured {
 		return ErrPveRebootState
 	}
-	switch f.HAShutdownPolicy {
-	case "freeze", "failover", pveHAPolicyConditional, pveHAPolicyMigrate:
-	default:
+	if !validHAPolicy(f.HAShutdownPolicy) {
 		return ErrPveRebootState
 	}
 	b.Cluster, b.TotalVotes, b.RemainingVotes, b.HAShutdownPolicy = c.Name, total, remaining, f.HAShutdownPolicy
@@ -818,11 +816,44 @@ func pveHAShutdownPolicy(ctx context.Context, hc *http.Client, base string, read
 	if !ok {
 		return pveHAPolicyConditional, nil
 	}
-	var ha string
-	if err := json.Unmarshal(raw, &ha); err != nil || len(ha) > 256 {
+	return decodeHAOption(raw)
+}
+
+// maxPveHAOptionBytes bounds the datacenter ha option.
+const maxPveHAOptionBytes = 256
+
+// decodeHAOption reads the shutdown policy from the ha option, which PVE
+// renders as a property string or as its parsed object; anything else is
+// refused.
+func decodeHAOption(raw json.RawMessage) (string, error) {
+	if len(raw) > maxPveHAOptionBytes {
 		return "", errPveMutationRead
 	}
-	return parseHAShutdownPolicy(ha)
+	var ha string
+	if err := json.Unmarshal(raw, &ha); err == nil {
+		return parseHAShutdownPolicy(ha)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
+		return "", errPveMutationRead
+	}
+	sp, ok := obj["shutdown_policy"]
+	if !ok {
+		return pveHAPolicyConditional, nil
+	}
+	var policy string
+	if err := json.Unmarshal(sp, &policy); err != nil || !validHAPolicy(policy) {
+		return "", errPveMutationRead
+	}
+	return policy, nil
+}
+
+func validHAPolicy(p string) bool {
+	switch p {
+	case "freeze", "failover", pveHAPolicyConditional, pveHAPolicyMigrate:
+		return true
+	}
+	return false
 }
 
 // parseHAShutdownPolicy reads shutdown_policy from a PVE property string
@@ -842,12 +873,10 @@ func parseHAShutdownPolicy(ha string) (string, error) {
 			return "", errPveMutationRead
 		}
 		seen = true
-		switch v {
-		case "freeze", "failover", pveHAPolicyConditional, pveHAPolicyMigrate:
-			policy = v
-		default:
+		if !validHAPolicy(v) {
 			return "", errPveMutationRead
 		}
+		policy = v
 	}
 	return policy, nil
 }
