@@ -49,6 +49,9 @@ const (
 	maxLeaseThrottleUsers = 1024
 	// maxLeaseScopeOptions bounds the tag/environment suggestions.
 	maxLeaseScopeOptions = 200
+	// maxScopeValueLen is the longest tag/environment value the form
+	// pre-fill accepts.
+	maxScopeValueLen = 200
 	// leaseCLICommand is the hardened-mode approval command; the digest
 	// follows it.
 	leaseCLICommand = "nebula lease approve "
@@ -211,7 +214,7 @@ func leaseFormFromQuery(q url.Values) *leaseNewData {
 		DayOptions: []int{executions.ReadGrantShortDays, executions.ReadGrantLongDays}}
 	switch k := q.Get("scope"); k {
 	case executions.ScopeTag, executions.ScopeEnvironment:
-		if v := q.Get("value"); v != "" && len(v) <= 200 && utf8.ValidString(v) {
+		if v := q.Get("value"); v != "" && len(v) <= maxScopeValueLen && utf8.ValidString(v) {
 			d.Kind, d.Value = k, v
 		}
 	}

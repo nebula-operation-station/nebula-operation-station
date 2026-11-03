@@ -1,0 +1,75 @@
+{{define "content"}}
+{{$b := .Batch}}
+<section class="panel" aria-label="Batch">
+  <div class="panel__head">
+    <span class="mono">{{$b.ID}}</span>
+    <span class="badge {{$b.StateClass}}">{{$b.State}}</span>
+    <span class="badge badge--grey">{{$b.Risk}}</span>
+  </div>
+  <dl class="schedule-meta">
+    <dt>Result</dt><dd>{{$b.Summary}}</dd>
+    <dt>Plan</dt><dd>{{$b.StageSummary}}</dd>
+    <dt>Outcomes</dt><dd>{{$b.Counts.Success}} success, {{$b.Counts.Failed}} failed, {{$b.Counts.Unknown}} unknown, {{$b.Counts.Skipped}} skipped, {{$b.Counts.NotExecuted}} not executed, {{$b.Counts.Dispatched}} running, {{$b.Counts.Planned}} planned</dd>
+    <dt>Digest</dt><dd class="mono batch-hash">{{$b.Digest}}</dd>
+    <dt>Approval</dt><dd>{{if $b.Requirement}}{{$b.Requirement}}{{else}}—{{end}}{{if $b.ApprovedBy}}, approved by {{$b.ApprovedBy}}{{end}}</dd>
+    <dt>Expires</dt><dd>{{timeTag $b.Expiry}}</dd>
+    <dt>Created</dt><dd>{{$b.CreatedBy}} {{timeTag $b.CreatedAt}}</dd>
+    {{if $b.Detail}}<dt>Note</dt><dd>{{$b.Detail}}</dd>{{end}}
+  </dl>
+  <p class="hint">A batch is not a transaction. Members that ran keep their outcome; nothing is retried, redispatched or rolled back automatically. An unknown outcome may have changed its host: check the host. A retry or a rollback is a new batch with a fresh approval.</p>
+  <div class="actions">
+    {{if $b.CanApprove}}<button type="button" class="button schedule-approve" data-id="{{$b.ID}}" data-options="{{$b.OptionsJSON}}" data-commit="/batches/approve">Approve all {{$b.Counts.Total}} members with security key</button>{{end}}
+    {{if $b.CanRefresh}}
+    <form method="post" action="/batches/refresh" data-fetch>
+      <input type="hidden" name="id" value="{{$b.ID}}">
+      <button type="submit" class="button button--small button--secondary">Ask the executor</button>
+    </form>
+    {{end}}
+  </div>
+  {{if $b.CLICommand}}<p class="hint">This batch needs local approval on the executor host, which shows the complete plan again: <code class="batch-hash">{{$b.CLICommand}}</code></p>{{end}}
+</section>
+
+<section class="panel" aria-label="Stages">
+  <h2>Stages</h2>
+  <div class="table-wrap">
+  <table class="inventory batch-table">
+    <thead><tr><th>Stage</th><th>ID</th><th>Gate</th><th>Members</th><th>Failures allowed</th><th>Unreachable allowed</th></tr></thead>
+    <tbody>
+    {{range $b.Stages}}
+    <tr><td>{{.Number}}</td><td class="mono">{{.StageID}}</td><td>{{.Gate}}</td><td>{{.Members}}</td><td>{{.FailureThreshold}}</td><td>{{.UnreachableThreshold}}</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section class="panel" aria-label="Members">
+  <h2>All {{$b.Counts.Total}} members</h2>
+  <div class="table-wrap">
+  <table class="inventory batch-table batch-members">
+    <thead><tr><th>#</th><th>Member</th><th>Stage</th><th>Action</th><th>Target</th><th>Parameters</th><th>Bindings</th><th>Risk</th><th>Outcome</th><th></th></tr></thead>
+    <tbody>
+    {{range $b.MemberRows}}
+    <tr class="batch-member batch-member--{{.Outcome}}">
+      <td>{{.Index}}</td>
+      <td class="mono">{{.MemberID}}</td>
+      <td>{{.Stage}}</td>
+      <td>{{.ActionTitle}}<br><span class="mono">{{.ActionID}} {{.ModuleVersion}}</span></td>
+      <td class="mono">{{.HostID}}<br><span class="batch-hash">{{.Fingerprint}}</span>{{if .ContainerID}}<br>container <span class="batch-hash">{{.ContainerID}}</span>{{end}}</td>
+      <td class="mono batch-hash">{{.Params}}</td>
+      <td class="mono batch-hash">artifact {{.ArtifactSHA256}}<br>parameters {{.ParametersHash}}<br>credential {{.CredentialRef}}<br>execution {{.ExecutionID}}</td>
+      <td>{{.Risk}}</td>
+      <td><span class="badge {{.OutcomeClass}}">{{.OutcomeText}}</span>{{if .Unreachable}} (unreachable){{end}}{{if .Detail}}<br><span class="batch-detail">{{.Detail}}</span>{{end}}</td>
+      <td>{{if .CanSkip}}
+        <form method="post" action="/batches/skip" data-fetch>
+          <input type="hidden" name="id" value="{{$b.ID}}">
+          <input type="hidden" name="member" value="{{.MemberID}}">
+          <button type="submit" class="button button--small button--secondary">Skip</button>
+        </form>{{end}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+</section>
+{{end}}
