@@ -30,7 +30,6 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/version"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnreg"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
@@ -159,7 +158,12 @@ func run() error {
 	if *hardened {
 		mode = permit.ModeHardened
 	}
-	risk, err := riskpolicy.New(db)
+	// The guest power floor (node, remote and linked hosts of a guest) is
+	// part of the authority's policy, so it is enforced again on approval
+	// and run authorization; the service binds its targets in the same
+	// bindings (SetPveGuestPowerBindings below).
+	powerBindings := &executor.PveGuestPowerBindings{}
+	risk, err := executor.NewExecutorRiskPolicy(db, powerBindings)
 	if err != nil {
 		return err
 	}
@@ -183,6 +187,7 @@ func run() error {
 	}
 	keys := keyring.New(keysDir)
 	svc := executor.NewService(auth, keys, db, reg, log)
+	svc.SetPveGuestPowerBindings(powerBindings)
 	svc.SetEventKey(chain.PublicKey())
 	svc.SetBackupDirs(*dataDir, keysDir)
 

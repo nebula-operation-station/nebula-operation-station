@@ -32,11 +32,18 @@ var pveRepinArtifact = []byte("nebula.pve.repin 1.0.0\nReplace the approved remo
 // mutation run and every PveAdmin must use this instance: its in-flight
 // set is what keeps Reconcile and PveAdmin.CloseOpenJobs off the steps of
 // a running execution. It is built on first use, from the service state at
-// that time. Client stays unset until a mutation RPC is exposed; until
-// then Run and Reconcile refuse to work, and CloseOpenJobs sees no run in
+// that time. Client is not wired yet; until it is, Run and Reconcile
+// refuse to work, the guest power RPCs answer FailedPrecondition ("PVE
+// mutation client not configured"), and CloseOpenJobs sees no run in
 // flight.
 func (s *Service) pveMutations() *PveMutations {
 	s.pveMutOnce.Do(func() {
+		// TODO(pv05w): wire the production PveMutationClient here
+		// (provisioning and guest power). For power steps its Dispatch
+		// must route the guest.qemu.* / guest.lxc.* methods to
+		// DispatchGuestPowerStep, TaskType to GuestPowerStepTaskType,
+		// TaskID (PveStepTaskIDer) to GuestPowerStepTaskID, and
+		// TargetState must report Kind, Status and, for QEMU, QMPStatus.
 		s.pveMut = &PveMutations{DB: s.db, Auth: s.auth, Vault: s.vault, Now: s.clock, Log: s.log}
 	})
 	return s.pveMut
@@ -276,17 +283,21 @@ const pveGuestPowerLifetime = 15 * time.Minute
 
 // pveGuestPower returns the guest power actions on the executor's single
 // mutation engine. The proposal evaluates the full executor floor itself
-// (GuestPowerRiskFloor over the executor's criticality records); without
-// a linked-host source that floor is HIGH (fail closed).
+// (NewGuestPowerRiskFloor over the executor's criticality records and
+// registry links); the authority re-evaluates it on approval and run
+// authorization when its risk policy reads the same bindings
+// (SetPveGuestPowerBindings).
 func (s *Service) pveGuestPower() (*PveGuestPower, error) {
 	m := s.pveMutations()
 	next, err := riskpolicy.New(s.db)
 	if err != nil {
 		return nil, err
 	}
-	b := &m.powerBindings
-	return &PveGuestPower{Mutations: m, Bindings: b,
-		Floor: GuestPowerRiskFloor{Next: next, Criticality: s.db, Bindings: b}}, nil
+	b := s.pveGuestPowerBindings
+	if b == nil {
+		b = &m.powerBindings
+	}
+	return &PveGuestPower{Mutations: m, Bindings: b, Floor: NewGuestPowerRiskFloor(next, s.db, b)}, nil
 }
 
 func guestPowerRequestFromProto(in *pb.PVEGuestPowerTarget) (PveGuestPowerRequest, error) {
@@ -309,6 +320,8 @@ func pveGuestPowerRPCError(err error) error {
 		return status.Error(codes.FailedPrecondition, "pve guest power: the guest or remote changed; propose again")
 	case errors.Is(err, ErrPveReadOnly):
 		return status.Error(codes.FailedPrecondition, "pve guest power: the remote has no action credential")
+	case errors.Is(err, ErrPveGuestPowerRisk):
+		return status.Error(codes.Internal, "pve guest power: risk floor unavailable")
 	case errors.Is(err, ErrPveTargetBusy), errors.Is(err, ErrPveGuestPowerBusy):
 		return status.Error(codes.Unavailable, "pve guest power: another mutation of the guest is in progress")
 	case errors.Is(err, ErrPveMutationDenied):
@@ -331,8 +344,12 @@ func (s *Service) ProposePVEGuestPower(ctx context.Context, in *pb.ProposePVEGue
 		return nil, pveGuestPowerRPCError(err)
 	}
 	g, err := s.pveGuestPower()
-	if err != nil || g.Mutations.Client == nil {
+	if err != nil {
 		return nil, status.Error(codes.FailedPrecondition, "pve guest power: pve mutations are not available")
+	}
+	if g.Mutations.Client == nil {
+		// TODO(pv05w): goes away when pveMutations wires the client.
+		return nil, status.Error(codes.FailedPrecondition, "pve guest power: PVE mutation client not configured")
 	}
 	id, err := newExecutionID()
 	if err != nil {
@@ -367,8 +384,12 @@ func (s *Service) CommitPVEGuestPower(ctx context.Context, in *pb.CommitPVEGuest
 	}
 	req.Digest = d
 	g, err := s.pveGuestPower()
-	if err != nil || g.Mutations.Client == nil {
+	if err != nil {
 		return nil, status.Error(codes.FailedPrecondition, "pve guest power: pve mutations are not available")
+	}
+	if g.Mutations.Client == nil {
+		// TODO(pv05w): goes away when pveMutations wires the client.
+		return nil, status.Error(codes.FailedPrecondition, "pve guest power: PVE mutation client not configured")
 	}
 	res, err := g.Run(ctx, req)
 	if len(res.Steps) == 0 || errors.Is(err, ErrPveJobStore) {

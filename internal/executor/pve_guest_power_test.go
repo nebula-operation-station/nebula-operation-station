@@ -31,12 +31,15 @@ import (
 // the guest's kind and power status and creates tasks of the task type
 // the step method names.
 type powerClient struct {
-	mu         sync.Mutex
-	liveNode   string
-	liveKind   string
-	digest     string
-	gen        string
-	statusFn   func(read int) string
+	mu       sync.Mutex
+	liveNode string
+	liveKind string
+	digest   string
+	gen      string
+	statusFn func(read int) string
+	// qmp is the QMP status of a QEMU guest; empty: the same as the
+	// power status.
+	qmp        string
 	reads      int
 	dispatched []PveMutationStep
 	onDispatch func(step PveMutationStep) (string, error)
@@ -86,7 +89,14 @@ func (c *powerClient) TargetState(_ context.Context, _ executordb.PveRemote, _, 
 	if c.statusFn != nil {
 		st = c.statusFn(c.reads)
 	}
-	return PveTargetState{Node: c.liveNode, Kind: c.liveKind, Status: st, ConfigDigest: c.digest, Generation: c.gen}, nil
+	live := PveTargetState{Node: c.liveNode, Kind: c.liveKind, Status: st, ConfigDigest: c.digest, Generation: c.gen}
+	if c.liveKind == permit.ProviderKindQemu {
+		live.QMPStatus = st
+		if c.qmp != "" {
+			live.QMPStatus = c.qmp
+		}
+	}
+	return live, nil
 }
 
 func (c *powerClient) dispatchCount() int {
@@ -640,10 +650,10 @@ func TestServiceGuestPowerRPCRefusals(t *testing.T) {
 	}
 }
 
-// TestServiceGuestPowerFloorWithoutLinkedHostsIsHigh: the service's own
-// floor has no linked-host source, so even a fully recorded MEDIUM guest
-// is proposed HIGH (fail closed) until one exists.
-func TestServiceGuestPowerFloorWithoutLinkedHostsIsHigh(t *testing.T) {
+// TestGuestPowerFloorWithoutLinkedHostsIsHigh: a floor without a
+// linked-host source proposes even a fully recorded MEDIUM guest HIGH
+// (fail closed).
+func TestGuestPowerFloorWithoutLinkedHostsIsHigh(t *testing.T) {
 	e := newPowerEnv(t, "qemu")
 	e.g.Floor = GuestPowerRiskFloor{Next: fixedRisk{}, Criticality: e.crit, Bindings: e.g.Bindings}
 	p, err := e.propose(powerReq("qemu", "shutdown"))
@@ -652,5 +662,243 @@ func TestServiceGuestPowerFloorWithoutLinkedHostsIsHigh(t *testing.T) {
 	}
 	if p.Request.RiskClass != canonical.RiskHigh {
 		t.Fatalf("risk %s", p.Request.RiskClass)
+	}
+}
+
+// newServicePowerEnv is a Service built by NewService whose authority uses
+// the production risk policy (NewExecutorRiskPolicy) with the bindings
+// wired into the service as cmd/nebula-executor does. The authority reads
+// criticality from crit (every target of the guest recorded MEDIUM, the
+// artifacts trusted MEDIUM), so the guest, node and remote can carry
+// distinct records. The service has an action credential and a fake
+// mutation client.
+func newServicePowerEnv(t *testing.T) (*pveReadEnv, *powerClient, critSource, *PveGuestPowerBindings, map[string]canonical.Target) {
+	t.Helper()
+	e := newPveReadEnv(t, pvecontract.KindStandalone)
+	crit := critSource{artifact: canonical.RiskMedium, hosts: map[canonical.Target]canonical.Risk{}}
+	b := &PveGuestPowerBindings{Now: e.clock.Now}
+	pol, err := NewExecutorRiskPolicy(crit, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := webauthnverify.New(webauthnverify.Config{RPID: "reconcile.test", Origins: []string{"https://reconcile.test"}, Counters: e.db}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.svc.auth, err = permit.New(permit.Options{Verifier: v, Store: e.db, RiskPolicy: pol, Leases: e.db, Now: e.clock.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.svc.SetPveGuestPowerBindings(b)
+	actRef := PveVaultID(pveReadRemote, PvePurposeAction)
+	actVersion, err := e.svc.vault.Put(actRef, []byte(mutActionToken), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	creds := e.remote().Credentials
+	creds.ActionRef, creds.ActionVersion = actRef, actVersion
+	if _, err := e.db.SetRemoteCredentials(pveReadRemote, creds, "test"); err != nil {
+		t.Fatal(err)
+	}
+	client := &powerClient{liveNode: "pve1", liveKind: "qemu", digest: strings.Repeat("cd", 32), gen: strings.Repeat("9f", 20)}
+	m := e.svc.pveMutations()
+	m.Client, m.PollInterval, m.MaxWait = client, time.Millisecond, 2*time.Second
+	rm := e.remote()
+	g, n, r, err := PveGuestRiskTargets(permit.ProviderMutationTarget{RemoteID: rm.RemoteID, TrustPin: rm.TrustPin, Kind: "qemu", Node: "pve1", VMID: 101})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := map[string]canonical.Target{"guest": g, "node": n, "remote": r}
+	for _, tg := range targets {
+		crit.hosts[tg] = canonical.RiskMedium
+	}
+	return e, client, crit, b, targets
+}
+
+// TestServiceGuestPowerFloorWiring: the service's own floor reads the
+// registry's linked hosts and the bindings shared with the authority.
+func TestServiceGuestPowerFloorWiring(t *testing.T) {
+	e, _, _, b, _ := newServicePowerEnv(t)
+	g, err := e.svc.pveGuestPower()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, ok := g.Floor.(GuestPowerRiskFloor)
+	if !ok || f.Linked == nil || f.Next == nil || f.Criticality == nil {
+		t.Fatalf("service floor not fully wired: %+v", g.Floor)
+	}
+	if g.Bindings != b || f.Bindings != b {
+		t.Fatal("service does not bind in the authority's bindings")
+	}
+}
+
+// TestGuestPowerProductionFloorIsMediumOnKnownTargets: the production
+// floor (NewGuestPowerRiskFloor, registry linked-host source) proposes a
+// shutdown of a guest whose guest, node and remote are recorded MEDIUM as
+// MEDIUM, and a stop as HIGH.
+func TestGuestPowerProductionFloorIsMediumOnKnownTargets(t *testing.T) {
+	for verb, want := range map[string]canonical.Risk{PveGuestPowerShutdown: canonical.RiskMedium, PveGuestPowerStop: canonical.RiskHigh} {
+		e := newPowerEnv(t, "qemu")
+		next, err := riskpolicy.New(e.crit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.g.Floor = NewGuestPowerRiskFloor(next, e.crit, e.g.Bindings)
+		p, err := e.propose(powerReq("qemu", verb))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.Request.RiskClass != want {
+			t.Fatalf("%s: risk %s, want %s", verb, p.Request.RiskClass, want)
+		}
+	}
+}
+
+// TestServiceGuestPowerAuthorityReevaluatesFloor: with the production
+// authority policy, a node made more critical after the proposal is picked
+// up on approval and on run authorization; nothing is sent.
+func TestServiceGuestPowerAuthorityReevaluatesFloor(t *testing.T) {
+	e, client, crit, _, targets := newServicePowerEnv(t)
+	ctx := context.Background()
+	target := &pb.PVEGuestPowerTarget{RemoteId: pveReadRemote, Kind: "qemu", Node: "pve1", Vmid: 101, Verb: "shutdown"}
+	propose := func() *pb.ProposeExecutionResponse {
+		t.Helper()
+		out, err := e.svc.ProposePVEGuestPower(ctx, &pb.ProposePVEGuestPowerRequest{Target: target})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out.GetPermit()
+	}
+	digestOf := func(p *pb.ProposeExecutionResponse) canonical.Digest {
+		t.Helper()
+		d, err := canonical.ParseDigest(p.GetExecutionDigest())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	node := targets["node"]
+
+	p := propose()
+	if _, err := e.svc.auth.ApproveCLI(digestOf(p), 0, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.CommitPVEGuestPower(ctx, &pb.CommitPVEGuestPowerRequest{Target: target, ExecutionDigest: p.GetExecutionDigest()}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if n := client.dispatchCount(); n != 1 {
+		t.Fatalf("dispatched %d, want 1", n)
+	}
+
+	// Raised after approval: the run authorization refuses.
+	p = propose()
+	if _, err := e.svc.auth.ApproveCLI(digestOf(p), 0, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	crit.hosts[node] = canonical.RiskCritical
+	if _, err := e.svc.CommitPVEGuestPower(ctx, &pb.CommitPVEGuestPowerRequest{Target: target, ExecutionDigest: p.GetExecutionDigest()}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("commit after node raised: %v", err)
+	}
+	if n := client.dispatchCount(); n != 1 {
+		t.Fatalf("dispatched %d after the node was raised", n)
+	}
+
+	// Raised after proposal: the approval refuses the old risk.
+	crit.hosts[node] = canonical.RiskMedium
+	p = propose()
+	crit.hosts[node] = canonical.RiskCritical
+	if _, err := e.svc.auth.ApproveCLI(digestOf(p), 0, "admin"); err == nil {
+		t.Fatal("approval accepted after the node was raised to CRITICAL")
+	}
+}
+
+// TestGuestPowerPausedQemuIsNotRunning: PVE reports a paused or suspended
+// QEMU guest as "running"; its QMP state decides, and an unreported one is
+// refused.
+func TestGuestPowerPausedQemuIsNotRunning(t *testing.T) {
+	for _, qmp := range []string{"paused", "suspended", "prelaunch", "unknown-state"} {
+		e := newPowerEnv(t, "qemu")
+		e.client.qmp = qmp
+		if _, err := e.propose(powerReq("qemu", "reset")); !errors.Is(err, ErrPveGuestState) {
+			t.Fatalf("%s: proposal: %v", qmp, err)
+		}
+		e.client.qmp = ""
+		req := e.approve(powerReq("qemu", "reset"))
+		e.client.qmp = qmp
+		if _, err := e.g.Run(context.Background(), req); !errors.Is(err, ErrPveGuestState) {
+			t.Fatalf("%s: run: %v", qmp, err)
+		}
+		if e.client.dispatchCount() != 0 {
+			t.Fatalf("%s: dispatched", qmp)
+		}
+	}
+	// Not reported: fail closed.
+	err := mustMutation(t, powerReq("qemu", "stop")).precheck(PveTargetState{Node: "pve1", Kind: "qemu", Status: "running"})
+	if !errors.Is(err, ErrPveGuestState) {
+		t.Fatalf("unreported qmp status: %v", err)
+	}
+	// LXC has no QMP state.
+	if err := mustMutation(t, powerReq("lxc", "stop")).precheck(PveTargetState{Node: "pve1", Kind: "lxc", Status: "running"}); err != nil {
+		t.Fatalf("lxc: %v", err)
+	}
+}
+
+func mustMutation(t *testing.T, r PveGuestPowerRequest) PveMutationRequest {
+	t.Helper()
+	m, err := r.mutation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+// TestGuestPowerBindingExpires: an entry nobody holds is not scored after
+// its permit's expiry, even before the next hold prunes it.
+func TestGuestPowerBindingExpires(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	b := &PveGuestPowerBindings{Now: func() time.Time { return now }}
+	tg := permit.ProviderMutationTarget{RemoteID: "r", Kind: "qemu", Node: "pve1", VMID: 101}
+	release, err := b.hold("h", tg, PveGuestPowerShutdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.keep("h", now.Add(time.Minute))
+	release()
+	if _, _, ok := b.lookup("h"); !ok {
+		t.Fatal("binding gone before expiry")
+	}
+	now = now.Add(2 * time.Minute)
+	if _, _, ok := b.lookup("h"); ok {
+		t.Fatal("expired binding still scored")
+	}
+}
+
+// TestGuestPowerFloorErrorIsNotAStoreError: a failing risk source is
+// reported as such, not as a job store failure.
+func TestGuestPowerFloorErrorIsNotAStoreError(t *testing.T) {
+	e := newPowerEnv(t, "qemu")
+	next, _ := riskpolicy.New(e.crit)
+	e.g.Floor = GuestPowerRiskFloor{Next: next, Criticality: e.crit, Bindings: e.g.Bindings,
+		Linked: func(canonical.Request, canonical.Target) ([]canonical.Target, error) { return nil, errors.New("store") }}
+	_, err := e.propose(powerReq("qemu", "shutdown"))
+	if !errors.Is(err, ErrPveGuestPowerRisk) || errors.Is(err, ErrPveJobStore) {
+		t.Fatalf("floor error: %v", err)
+	}
+	if st := status.Convert(pveGuestPowerRPCError(err)); st.Code() != codes.Internal || !strings.Contains(st.Message(), "risk floor") {
+		t.Fatalf("rpc error: %v", st)
+	}
+}
+
+// TestServiceGuestPowerWithoutClientSaysSo: without a mutation client the
+// RPCs say exactly that.
+func TestServiceGuestPowerWithoutClientSaysSo(t *testing.T) {
+	e := newPveReadEnv(t, pvecontract.KindStandalone)
+	target := &pb.PVEGuestPowerTarget{RemoteId: pveReadRemote, Kind: "qemu", Node: "pve1", Vmid: 101, Verb: "shutdown"}
+	_, perr := e.svc.ProposePVEGuestPower(context.Background(), &pb.ProposePVEGuestPowerRequest{Target: target})
+	_, cerr := e.svc.CommitPVEGuestPower(context.Background(), &pb.CommitPVEGuestPowerRequest{Target: target, ExecutionDigest: strings.Repeat("ab", 32)})
+	for _, err := range []error{perr, cerr} {
+		if st := status.Convert(err); st.Code() != codes.FailedPrecondition || !strings.Contains(st.Message(), "PVE mutation client not configured") {
+			t.Fatalf("no client: %v", err)
+		}
 	}
 }

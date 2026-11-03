@@ -15,6 +15,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveapi"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 )
 
 // Typed guest power actions (ADR 0006 "Phase 2 actions, permits and
@@ -68,6 +69,10 @@ var (
 	// ErrPveGuestPowerBusy is returned when too many power proposals or
 	// runs are in progress at once.
 	ErrPveGuestPowerBusy = errors.New("executor: too many pve guest power requests in progress")
+	// ErrPveGuestPowerRisk is returned when the risk floor of a power
+	// proposal cannot be evaluated (a criticality or linked-host source
+	// failed). Nothing is proposed.
+	ErrPveGuestPowerRisk = errors.New("executor: pve guest power risk floor unavailable")
 )
 
 // pveGuestPowerVerbs maps each verb to its base risk.
@@ -199,11 +204,16 @@ func (r PveGuestPowerRequest) mutation() (PveMutationRequest, error) {
 		Parameters: params,
 		precheck: func(live PveTargetState) error {
 			// Exists (the read succeeded), same node (checked by the
-			// engine), same kind and running.
+			// engine), same kind and running. PVE reports a paused or
+			// suspended QEMU guest as "running"; its QMP state must be
+			// running as well (not reported: refused).
 			if live.Kind != kind {
 				return ErrPveTargetChanged
 			}
 			if live.Status != pveGuestRunning {
+				return ErrPveGuestState
+			}
+			if kind == permit.ProviderKindQemu && live.QMPStatus != pveGuestRunning {
 				return ErrPveGuestState
 			}
 			return nil
@@ -303,7 +313,8 @@ func (b *PveGuestPowerBindings) lookup(hash string) (permit.ProviderMutationTarg
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	e, ok := b.m[hash]
-	if !ok {
+	if !ok || (e.refs <= 0 && b.now().After(e.until)) {
+		// An entry nobody holds outlives neither the call nor the permit.
 		return permit.ProviderMutationTarget{}, "", false
 	}
 	return e.target, e.verb, true
@@ -377,7 +388,7 @@ func (g *PveGuestPower) Propose(ctx context.Context, req PveGuestPowerRequest, e
 	if g.Floor != nil {
 		f, _, err := g.Floor.MinimumRisk(rq, rq.ResolvedTargets)
 		if err != nil {
-			return permit.Permit{}, fmt.Errorf("guest power risk: %w", ErrPveJobStore)
+			return permit.Permit{}, fmt.Errorf("%w: %w", ErrPveGuestPowerRisk, err)
 		}
 		if f.Rank() > rq.RiskClass.Rank() {
 			rq.RiskClass = f
@@ -465,9 +476,58 @@ type PveCriticality interface {
 	HostCriticality(hostID, fingerprint string) (canonical.Risk, bool, error)
 }
 
+// PveRegistryLinkedHosts is the executor's production linked-host source
+// for the PVE risk floors: the managed hosts the executor registry links,
+// with admin confirmation, to a PVE guest or node target. Only such links
+// are risk-relevant (spec 11 "PVE action profiles and risks", ADR 0006);
+// display links the server keeps never count. The executor registry holds
+// no host links yet, so no PVE target has a risk-relevant linked host and
+// the result is empty. The guest, node and remote criticality records
+// still apply, unknown ones as HIGH. When the registry gains confirmed
+// links, this is where they must be returned.
+func PveRegistryLinkedHosts(canonical.Request, canonical.Target) ([]canonical.Target, error) {
+	return nil, nil
+}
+
+// NewGuestPowerRiskFloor returns the executor's production guest power
+// floor: next for everything else and for artifact trust, the criticality
+// records of crit, the executor registry's linked hosts and bindings.
+func NewGuestPowerRiskFloor(next permit.RiskPolicy, crit PveCriticality, bindings *PveGuestPowerBindings) GuestPowerRiskFloor {
+	return GuestPowerRiskFloor{Next: next, Criticality: crit, Linked: PveRegistryLinkedHosts, Bindings: bindings}
+}
+
+// NewExecutorRiskPolicy returns the risk policy of the executor's
+// authority: riskpolicy over src (artifact trust and host criticality;
+// the executor database in production), wrapped by the guest power floor
+// over src, the registry's linked hosts and bindings. Pass the same
+// bindings to Service.SetPveGuestPowerBindings.
+func NewExecutorRiskPolicy(src riskpolicy.Source, bindings *PveGuestPowerBindings) (permit.RiskPolicy, error) {
+	if src == nil || bindings == nil {
+		return nil, errors.New("executor: risk policy needs a risk source and the guest power bindings")
+	}
+	base, err := riskpolicy.New(src)
+	if err != nil {
+		return nil, err
+	}
+	return NewGuestPowerRiskFloor(base, src, bindings), nil
+}
+
+// SetPveGuestPowerBindings makes the guest power actions bind their
+// targets in b, which must be the Bindings of the GuestPowerRiskFloor the
+// authority uses as its risk policy (NewGuestPowerRiskFloor). The
+// authority then re-evaluates the full floor (node, remote and linked
+// hosts included) when the permit is approved and when the run is
+// authorized. Call it before serving. Without it, or with another
+// instance, the authority finds no binding and scores power requests HIGH
+// (fail closed).
+func (s *Service) SetPveGuestPowerBindings(b *PveGuestPowerBindings) { s.pveGuestPowerBindings = b }
+
 // GuestPowerRiskFloor wraps the executor's risk policy for pve.guest.power
-// requests. The authority enforces it when proposing and again when
-// authorizing the run. For a power request the floor is the maximum of:
+// requests. Used as the authority's risk policy (cmd/nebula-executor, with
+// the Service's bindings, see SetPveGuestPowerBindings) it is enforced
+// when proposing, when approving and again when authorizing the run, so a
+// criticality raised after the proposal stops the run. For a power request
+// the floor is the maximum of:
 //
 //   - the verb's base: shutdown and reboot MEDIUM, stop and reset HIGH;
 //   - the criticality of the guest, its node and its remote, and of every
@@ -480,6 +540,13 @@ type PveCriticality interface {
 // Bindings; no binding for the exact parameters; an artifact that is not
 // the verb's; another target than the bound guest) makes it HIGH. Other
 // requests get Next's floor unchanged, or HIGH without Next.
+//
+// Known limit: the guest, node and remote risk targets of one remote all
+// carry the remote's trust pin as fingerprint, and the executor database
+// keeps at most one criticality record per fingerprint, so today only one
+// of them can have an exact record and the others count as unknown
+// (HIGH). Over executordb the floor is therefore HIGH until that is
+// resolved; it never errs low.
 type GuestPowerRiskFloor struct {
 	Next        permit.RiskPolicy
 	Criticality PveCriticality
