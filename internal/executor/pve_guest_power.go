@@ -246,6 +246,7 @@ type pveBindingFamily int
 const (
 	pveBindPower pveBindingFamily = iota
 	pveBindSnapshot
+	pveBindBackupMigrate
 	pveBindingFamilies
 )
 
@@ -253,6 +254,8 @@ const (
 var pveBindingCapacity = [pveBindingFamilies]int{
 	pveBindPower:    maxPveGuestPowerBindings,
 	pveBindSnapshot: maxPveGuestSnapshotBindings,
+	// Backup and migrate share one table: one floor scores both.
+	pveBindBackupMigrate: maxPveGuestSnapshotBindings,
 }
 
 func validFamily(fam pveBindingFamily) bool { return fam >= 0 && fam < pveBindingFamilies }

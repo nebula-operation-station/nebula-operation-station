@@ -360,7 +360,7 @@ func proposeGuestOp(ctx context.Context, m *PveMutations, bindings *PveGuestPowe
 	if err != nil {
 		return permit.Permit{}, err
 	}
-	release, err := bindings.hold(rq.ParametersHash, t, op)
+	release, err := bindings.hold(pveBindBackupMigrate, rq.ParametersHash, t, op)
 	if err != nil {
 		return permit.Permit{}, err
 	}
@@ -378,7 +378,7 @@ func proposeGuestOp(ctx context.Context, m *PveMutations, bindings *PveGuestPowe
 	if err != nil {
 		return permit.Permit{}, err
 	}
-	bindings.keep(rq.ParametersHash, time.Unix(res.Permit.Request.ExpiryUnix, 0))
+	bindings.keep(pveBindBackupMigrate, rq.ParametersHash, time.Unix(res.Permit.Request.ExpiryUnix, 0))
 	m.log().Info("audit", "kind", "pve_guest_op_proposed", "action", mreq.ActionID, "remote", t.RemoteID, "node", t.Node, "vmid", t.VMID,
 		"risk", string(res.Permit.Request.RiskClass), "execution", executionID)
 	return res.Permit, nil
@@ -406,7 +406,7 @@ func runGuestOp(ctx context.Context, m *PveMutations, bindings *PveGuestPowerBin
 	if err != nil {
 		return PveMutationResult{}, ErrPveMutationPlan
 	}
-	release, err := bindings.hold(hash, t, op)
+	release, err := bindings.hold(pveBindBackupMigrate, hash, t, op)
 	if err != nil {
 		return PveMutationResult{}, err
 	}
@@ -600,7 +600,7 @@ func (p GuestOpRiskFloor) MinimumRisk(r canonical.Request, targets []canonical.T
 	if p.Next == nil || p.Criticality == nil || p.Linked == nil || p.Bindings == nil {
 		return high("risk sources not configured")
 	}
-	t, op, ok := p.Bindings.lookup(r.ParametersHash)
+	t, op, ok := p.Bindings.lookup(pveBindBackupMigrate, r.ParametersHash)
 	if !ok {
 		return high("no exact target bound to the parameters")
 	}
