@@ -996,6 +996,12 @@ func TestGuestPowerFloorNeverAcceptsSnapshotBindings(t *testing.T) {
 		{"snapshot binding of create", pveBindSnapshot, PveSnapshotCreate, pveSnapshotArtifact(PveSnapshotCreate), false, H},
 		{"snapshot table holding a power verb", pveBindSnapshot, PveGuestPowerShutdown, pveGuestPowerArtifact(PveGuestPowerShutdown), false, H},
 		{"power table holding a snapshot op", pveBindPower, PveSnapshotCreate, pveSnapshotArtifact(PveSnapshotCreate), false, H},
+		{"backup table holding a power verb", pveBindBackup, PveGuestPowerShutdown, pveGuestPowerArtifact(PveGuestPowerShutdown), false, H},
+		{"migration table holding a power verb", pveBindMigrate, PveGuestPowerShutdown, pveGuestPowerArtifact(PveGuestPowerShutdown), false, H},
+		{"backup binding", pveBindBackup, pveGuestOpBackup, pveBackupArtifact(), false, H},
+		{"power table holding a backup op", pveBindPower, pveGuestOpBackup, pveBackupArtifact(), false, H},
+		{"power verb with backup artifact", pveBindPower, PveGuestPowerShutdown, pveBackupArtifact(), false, H},
+		{"power verb with migration artifact", pveBindPower, PveGuestPowerShutdown, pveMigrateArtifact(), false, H},
 		{"power verb with snapshot artifact", pveBindPower, PveGuestPowerShutdown, pveSnapshotArtifact(PveSnapshotCreate), false, H},
 		{"power verb with other verb's artifact", pveBindPower, PveGuestPowerShutdown, pveGuestPowerArtifact(PveGuestPowerReboot), false, H},
 		{"other target", pveBindPower, PveGuestPowerShutdown, pveGuestPowerArtifact(PveGuestPowerShutdown), true, H},
@@ -1030,11 +1036,12 @@ func TestGuestPowerFloorFailClosedRaisesToNext(t *testing.T) {
 	}
 }
 
-// TestGuestSnapshotBindingsDoNotBlockPower: a full snapshot binding table
-// (a flood of snapshot proposals kept until permit expiry) leaves the power
-// table usable, and vice versa; each full table refuses only its own
-// family, and neither table answers for the other's hashes.
-func TestGuestSnapshotBindingsDoNotBlockPower(t *testing.T) {
+// TestGuestBindingFamiliesDoNotBlockEachOther: a full binding table of any
+// family (a flood of proposals kept until permit expiry) leaves the power,
+// snapshot, backup and migration tables of every other family usable; each
+// full table refuses only its own family, and no table answers for
+// another's hashes. Each family has its own named capacity.
+func TestGuestBindingFamiliesDoNotBlockEachOther(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	tg := permit.ProviderMutationTarget{RemoteID: "r", Kind: "qemu", Node: "pve1", VMID: 101}
 	key := func(fam pveBindingFamily, i int) string { return fmt.Sprintf("%d-%d", fam, i) }
@@ -1049,23 +1056,41 @@ func TestGuestSnapshotBindingsDoNotBlockPower(t *testing.T) {
 			release()
 		}
 	}
-	for _, first := range []pveBindingFamily{pveBindSnapshot, pveBindPower} {
-		b := &PveGuestPowerBindings{Now: func() time.Time { return now }}
-		other, verb, otherVerb := pveBindPower, PveSnapshotCreate, PveGuestPowerShutdown
-		if first == pveBindPower {
-			other, verb, otherVerb = pveBindSnapshot, PveGuestPowerShutdown, PveSnapshotCreate
+	verbs := map[pveBindingFamily]string{
+		pveBindPower:    PveGuestPowerShutdown,
+		pveBindSnapshot: PveSnapshotCreate,
+		pveBindBackup:   pveGuestOpBackup,
+		pveBindMigrate:  pveGuestOpMigratePrefix + "pve2",
+	}
+	if len(verbs) != int(pveBindingFamilies) {
+		t.Fatalf("test covers %d of %d families", len(verbs), pveBindingFamilies)
+	}
+	for fam, want := range map[pveBindingFamily]int{
+		pveBindPower: maxPveGuestPowerBindings, pveBindSnapshot: maxPveGuestSnapshotBindings,
+		pveBindBackup: maxPveGuestBackupBindings, pveBindMigrate: maxPveGuestMigrateBindings,
+	} {
+		if pveBindingCapacity[fam] != want || want <= 0 {
+			t.Fatalf("family %d capacity %d, want its own limit %d", fam, pveBindingCapacity[fam], want)
 		}
+	}
+	for first, verb := range verbs {
+		b := &PveGuestPowerBindings{Now: func() time.Time { return now }}
 		fill(b, first, verb)
 		if _, err := b.hold(first, "one-more", tg, verb); !errors.Is(err, ErrPveGuestPowerBusy) {
 			t.Fatalf("full table %d: %v", first, err)
 		}
-		release, err := b.hold(other, "after-flood", tg, otherVerb)
-		if err != nil {
-			t.Fatalf("family %d blocked by a full table %d: %v", other, first, err)
-		}
-		release()
-		if _, _, ok := b.lookup(other, key(first, 0)); ok {
-			t.Fatalf("family %d binding visible in table %d", first, other)
+		for other, otherVerb := range verbs {
+			if other == first {
+				continue
+			}
+			release, err := b.hold(other, "after-flood", tg, otherVerb)
+			if err != nil {
+				t.Fatalf("family %d blocked by a full table %d: %v", other, first, err)
+			}
+			release()
+			if _, _, ok := b.lookup(other, key(first, 0)); ok {
+				t.Fatalf("family %d binding visible in table %d", first, other)
+			}
 		}
 		if _, _, ok := b.lookup(first, key(first, 0)); !ok {
 			t.Fatalf("family %d binding missing", first)

@@ -258,6 +258,12 @@ type HAStatus struct {
 	Available bool
 	// Reason explains an unavailable result.
 	Reason string
+	// NotConfigured is set only on an unavailable result where both HA
+	// endpoints answered 404: the remote is known to run no HA manager.
+	// Every other unavailable result (a failed read, or only one of the
+	// two endpoints missing) leaves the HA state unknown; callers that
+	// must know HA is absent check this flag, never Reason.
+	NotConfigured bool
 	// Resources is the HA state per VMID, in resource-list order.
 	Resources []HAResource
 	// Maintenance maps each node with an HA local resource manager entry
@@ -398,6 +404,32 @@ func haLRM(e haStatusEntry, modes map[string]bool) error {
 	return nil
 }
 
+// HA availability reasons of HAStatus.
+const (
+	// reasonHANotEnabled: both HA endpoints are missing.
+	reasonHANotEnabled = "HA not enabled"
+	// reasonHAPartial: exactly one HA endpoint is missing while the other
+	// answered; the HA state is inconsistent and therefore unknown.
+	reasonHAPartial = "HA status incomplete: one HA endpoint not found"
+)
+
+// haUnavailable classifies an HA read where at least one endpoint gave no
+// body. Only both endpoints answering 404 means "no HA"; a read failure
+// keeps its reason, and one endpoint missing while the other answered is
+// reported as partial.
+func haUnavailable(resMissing bool, resReason string, stMissing bool, stReason string) HAStatus {
+	switch {
+	case resMissing && resReason != reasonNotFound:
+		return HAStatus{Reason: resReason}
+	case stMissing && stReason != reasonNotFound:
+		return HAStatus{Reason: stReason}
+	case resMissing && stMissing:
+		return HAStatus{Reason: reasonHANotEnabled, NotConfigured: true}
+	default:
+		return HAStatus{Reason: reasonHAPartial}
+	}
+}
+
 // HAStatus reads GET /cluster/ha/resources and GET /cluster/ha/status/current
 // and joins service entries by SID.
 func (c *Client) HAStatus(ctx context.Context) (HAStatus, error) {
@@ -410,14 +442,7 @@ func (c *Client) HAStatus(ctx context.Context) (HAStatus, error) {
 		return HAStatus{}, err
 	}
 	if resBody == nil || stBody == nil {
-		reason := "HA not enabled"
-		if resBody == nil && resReason != reasonNotFound {
-			reason = resReason
-		}
-		if stBody == nil && stReason != reasonNotFound {
-			reason = stReason
-		}
-		return HAStatus{Available: false, Reason: reason}, nil
+		return haUnavailable(resBody == nil, resReason, stBody == nil, stReason), nil
 	}
 
 	resources, err := decodeData[[]haResourceData](resBody)
