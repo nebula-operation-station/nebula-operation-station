@@ -27,6 +27,9 @@ const (
 	MaxLiveSamples = 256
 	// LiveWantMaxExpiry bounds expires_unix - written_unix, in seconds.
 	LiveWantMaxExpiry = 30
+	// LiveClockSkew is how far, in seconds, a live document's timestamps may
+	// lie ahead of the reader's clock before the document is refused.
+	LiveClockSkew = 5
 	// LiveWantVersion is the only supported want-list version.
 	LiveWantVersion = 1
 	// LiveSamplesVersion is the only supported samples version.
@@ -90,6 +93,31 @@ type LiveSamples struct {
 // document is valid during [written_unix, expires_unix).
 func (w LiveWant) Expired(nowUnix int64) bool {
 	return nowUnix >= w.ExpiresUnix
+}
+
+// CheckClock rejects a want-list that is dated in the future relative to
+// the reader's clock nowUnix: written_unix may be at most LiveClockSkew
+// seconds ahead and expires_unix at most LiveWantMaxExpiry+LiveClockSkew
+// seconds ahead. Without it a future-dated document would stay live far
+// longer than LiveWantMaxExpiry.
+func (w LiveWant) CheckClock(nowUnix int64) error {
+	var p []string
+	if w.WrittenUnix > nowUnix+LiveClockSkew {
+		p = append(p, fmt.Sprintf("written_unix is more than %d s in the future", LiveClockSkew))
+	}
+	if w.ExpiresUnix > nowUnix+LiveWantMaxExpiry+LiveClockSkew {
+		p = append(p, fmt.Sprintf("expires_unix is more than %d s in the future", LiveWantMaxExpiry+LiveClockSkew))
+	}
+	if len(p) > 0 {
+		return &ValidationError{Problems: p}
+	}
+	return nil
+}
+
+// Live reports whether the want-list is in force at nowUnix: not dated in
+// the future (CheckClock) and not expired.
+func (w LiveWant) Live(nowUnix int64) bool {
+	return w.CheckClock(nowUnix) == nil && !w.Expired(nowUnix)
 }
 
 // validLiveTarget appends problems for one live target, validated like a
@@ -242,6 +270,26 @@ func ValidateLiveSamples(s LiveSamples) (LiveSamples, error) {
 		return LiveSamples{}, &ValidationError{Problems: p}
 	}
 	return s, nil
+}
+
+// CheckClock rejects a samples document dated in the future relative to the
+// reader's clock nowUnix: written_unix and every sample's observed_unix may
+// be at most LiveClockSkew seconds ahead, so a future-dated document cannot
+// look fresh for longer than it is.
+func (s LiveSamples) CheckClock(nowUnix int64) error {
+	var p []string
+	if s.WrittenUnix > nowUnix+LiveClockSkew {
+		p = append(p, fmt.Sprintf("written_unix is more than %d s in the future", LiveClockSkew))
+	}
+	for i, smp := range s.Samples {
+		if smp.ObservedUnix > nowUnix+LiveClockSkew {
+			p = append(p, fmt.Sprintf("sample %d: observed_unix is more than %d s in the future", i, LiveClockSkew))
+		}
+	}
+	if len(p) > 0 {
+		return &ValidationError{Problems: p}
+	}
+	return nil
 }
 
 // DecodeLiveSamples strictly decodes and validates a samples document.

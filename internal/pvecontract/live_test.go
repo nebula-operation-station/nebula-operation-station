@@ -4,7 +4,9 @@ package pvecontract
 
 import (
 	"bytes"
+	"errors"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -75,30 +77,45 @@ func TestLiveWantDeduplicates(t *testing.T) {
 	}
 }
 
+// validLiveWantFixture returns a fresh, valid want-list on every call, so
+// mutations in one test case can never leak into another through a shared
+// Targets backing array.
+func validLiveWantFixture() LiveWant {
+	return mkLiveWant(1000, 1030, LiveTarget{Remote: "remote-a", Kind: LiveKindNode, Node: "pve1"})
+}
+
 func TestLiveWantRejectsLimits(t *testing.T) {
-	valid := mkLiveWant(1000, 1030, LiveTarget{Remote: "remote-a", Kind: LiveKindNode, Node: "pve1"})
+	if _, err := ValidateLiveWant(validLiveWantFixture()); err != nil {
+		t.Fatalf("ValidateLiveWant rejected the base fixture: %v", err)
+	}
 	cases := []struct {
 		name string
 		mut  func(*LiveWant)
+		want string // problem text the rejection must contain
 	}{
-		{"wrong version", func(w *LiveWant) { w.Version = 2 }},
-		{"negative written", func(w *LiveWant) { w.WrittenUnix = -1 }},
-		{"negative expires", func(w *LiveWant) { w.ExpiresUnix = -1 }},
-		{"expires before written", func(w *LiveWant) { w.ExpiresUnix = w.WrittenUnix - 1 }},
-		{"expires too far", func(w *LiveWant) { w.ExpiresUnix = w.WrittenUnix + LiveWantMaxExpiry + 1 }},
-		{"bad remote", func(w *LiveWant) { w.Targets[0].Remote = "Bad_Remote" }},
-		{"bad node", func(w *LiveWant) { w.Targets[0].Node = "bad node" }},
-		{"bad kind", func(w *LiveWant) { w.Targets[0].Kind = "bogus" }},
-		{"node vmid nonzero", func(w *LiveWant) { w.Targets[0].VMID = 101 }},
-		{"qemu vmid low", func(w *LiveWant) { w.Targets[0].Kind = LiveKindQEMU; w.Targets[0].VMID = MinVMID - 1 }},
-		{"qemu vmid high", func(w *LiveWant) { w.Targets[0].Kind = LiveKindQEMU; w.Targets[0].VMID = MaxVMID + 1 }},
+		{"wrong version", func(w *LiveWant) { w.Version = 2 }, "version must be"},
+		{"negative written", func(w *LiveWant) { w.WrittenUnix = -1 }, "written_unix must be non-negative"},
+		{"negative expires", func(w *LiveWant) { w.ExpiresUnix = -1 }, "expires_unix must be non-negative"},
+		{"expires before written", func(w *LiveWant) { w.ExpiresUnix = w.WrittenUnix - 1 }, "expires_unix must be at least written_unix"},
+		{"expires too far", func(w *LiveWant) { w.ExpiresUnix = w.WrittenUnix + LiveWantMaxExpiry + 1 }, "after written_unix"},
+		{"bad remote", func(w *LiveWant) { w.Targets[0].Remote = "Bad_Remote" }, "remote \"Bad_Remote\" is malformed"},
+		{"bad node", func(w *LiveWant) { w.Targets[0].Node = "bad node" }, "node \"bad node\" is malformed"},
+		{"bad kind", func(w *LiveWant) { w.Targets[0].Kind = "bogus" }, "kind \"bogus\" is unknown"},
+		{"node vmid nonzero", func(w *LiveWant) { w.Targets[0].VMID = 101 }, "vmid must be 0 for kind node"},
+		{"qemu vmid low", func(w *LiveWant) { w.Targets[0].Kind = LiveKindQEMU; w.Targets[0].VMID = MinVMID - 1 }, "out of range"},
+		{"qemu vmid high", func(w *LiveWant) { w.Targets[0].Kind = LiveKindQEMU; w.Targets[0].VMID = MaxVMID + 1 }, "out of range"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w := valid
+			w := validLiveWantFixture()
 			tc.mut(&w)
-			if _, err := ValidateLiveWant(w); err == nil {
+			_, err := ValidateLiveWant(w)
+			if err == nil {
 				t.Fatal("ValidateLiveWant accepted an invalid want-list")
+			}
+			var ve *ValidationError
+			if !errors.As(err, &ve) || len(ve.Problems) != 1 || !strings.Contains(ve.Problems[0], tc.want) {
+				t.Fatalf("ValidateLiveWant error = %v, want exactly one problem containing %q", err, tc.want)
 			}
 		})
 	}
@@ -170,31 +187,58 @@ func TestLiveSamplesRoundTrip(t *testing.T) {
 	}
 }
 
+// validLiveSamplesFixture returns a fresh, valid samples document on every
+// call, so mutations in one test case can never leak into another through a
+// shared Samples backing array.
+func validLiveSamplesFixture() LiveSamples {
+	return mkLiveSamples("remote-a", 1000, mkLiveSample(LiveKindNode, "pve1", 0, 0.5))
+}
+
 func TestLiveSamplesRejectsLimits(t *testing.T) {
-	valid := mkLiveSamples("remote-a", 1000, mkLiveSample(LiveKindNode, "pve1", 0, 0.5))
+	if _, err := ValidateLiveSamples(validLiveSamplesFixture()); err != nil {
+		t.Fatalf("ValidateLiveSamples rejected the base fixture: %v", err)
+	}
 	cases := []struct {
 		name string
 		mut  func(*LiveSamples)
+		want string // problem text the rejection must contain
 	}{
-		{"wrong version", func(s *LiveSamples) { s.Version = 2 }},
-		{"bad remote", func(s *LiveSamples) { s.Remote = "Bad_Remote" }},
-		{"negative written", func(s *LiveSamples) { s.WrittenUnix = -1 }},
-		{"bad node", func(s *LiveSamples) { s.Samples[0].Node = "bad node" }},
-		{"bad kind", func(s *LiveSamples) { s.Samples[0].Kind = "bogus" }},
-		{"node vmid nonzero", func(s *LiveSamples) { s.Samples[0].VMID = 101 }},
-		{"cpu negative", func(s *LiveSamples) { s.Samples[0].CPU = -0.1 }},
-		{"cpu above one", func(s *LiveSamples) { s.Samples[0].CPU = 1.1 }},
-		{"mem negative", func(s *LiveSamples) { s.Samples[0].MemUsed = -1 }},
-		{"observed negative", func(s *LiveSamples) { s.Samples[0].ObservedUnix = -1 }},
+		{"wrong version", func(s *LiveSamples) { s.Version = 2 }, "version must be"},
+		{"bad remote", func(s *LiveSamples) { s.Remote = "Bad_Remote" }, "remote \"Bad_Remote\" is malformed"},
+		{"negative written", func(s *LiveSamples) { s.WrittenUnix = -1 }, "written_unix must be non-negative"},
+		{"bad node", func(s *LiveSamples) { s.Samples[0].Node = "bad node" }, "node \"bad node\" is malformed"},
+		{"bad kind", func(s *LiveSamples) { s.Samples[0].Kind = "bogus" }, "kind \"bogus\" is unknown"},
+		{"node vmid nonzero", func(s *LiveSamples) { s.Samples[0].VMID = 101 }, "vmid must be 0 for kind node"},
+		{"qemu vmid low", func(s *LiveSamples) { s.Samples[0].Kind = LiveKindQEMU; s.Samples[0].VMID = MinVMID - 1 }, "out of range"},
+		{"qemu vmid high", func(s *LiveSamples) { s.Samples[0].Kind = LiveKindQEMU; s.Samples[0].VMID = MaxVMID + 1 }, "out of range"},
+		{"cpu negative", func(s *LiveSamples) { s.Samples[0].CPU = -0.1 }, "cpu must be in [0,1]"},
+		{"cpu above one", func(s *LiveSamples) { s.Samples[0].CPU = 1.1 }, "cpu must be in [0,1]"},
+		{"mem negative", func(s *LiveSamples) { s.Samples[0].MemUsed = -1 }, "mem_used must be finite"},
+		{"observed negative", func(s *LiveSamples) { s.Samples[0].ObservedUnix = -1 }, "observed_unix must be non-negative"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s := valid
+			s := validLiveSamplesFixture()
 			tc.mut(&s)
-			if _, err := ValidateLiveSamples(s); err == nil {
+			_, err := ValidateLiveSamples(s)
+			if err == nil {
 				t.Fatal("ValidateLiveSamples accepted an invalid document")
 			}
+			var ve *ValidationError
+			if !errors.As(err, &ve) || len(ve.Problems) != 1 || !strings.Contains(ve.Problems[0], tc.want) {
+				t.Fatalf("ValidateLiveSamples error = %v, want exactly one problem containing %q", err, tc.want)
+			}
 		})
+	}
+}
+
+func TestLiveSamplesAcceptsMaxSamples(t *testing.T) {
+	samples := make([]LiveSample, 0, MaxLiveSamples)
+	for i := 0; i < MaxLiveSamples; i++ {
+		samples = append(samples, mkLiveSample(LiveKindQEMU, "pve1", MinVMID+uint64(i), 0.5))
+	}
+	if _, err := ValidateLiveSamples(mkLiveSamples("remote-a", 1000, samples...)); err != nil {
+		t.Fatalf("ValidateLiveSamples rejected %d samples: %v", MaxLiveSamples, err)
 	}
 }
 
@@ -254,5 +298,77 @@ func TestLiveSamplesRejectsInfFromJSON(t *testing.T) {
 	raw := []byte(`{"version":1,"remote":"remote-a","written_unix":1000,"samples":[{"kind":"node","node":"pve1","vmid":0,"cpu":1e999,"mem_used":1,"mem_total":2,"disk_used":1,"disk_total":2,"net_in":1,"net_out":1,"observed_unix":1}]}`)
 	if _, err := DecodeLiveSamples(raw); err == nil {
 		t.Fatal("DecodeLiveSamples accepted an infinite cpu value")
+	}
+}
+
+func TestLiveWantRejectsFutureDated(t *testing.T) {
+	const now = 1000
+	cases := []struct {
+		name             string
+		written, expires int64
+		live             bool
+	}{
+		{"current", now, now + LiveWantMaxExpiry, true},
+		{"written within skew", now + LiveClockSkew, now + LiveClockSkew + LiveWantMaxExpiry, true},
+		{"written beyond skew", now + LiveClockSkew + 1, now + LiveClockSkew + 1, false},
+		{"far future", now + 1_000_000, now + 1_000_000 + LiveWantMaxExpiry, false},
+		{"expires beyond cap plus skew", now + LiveClockSkew, now + LiveClockSkew + LiveWantMaxExpiry + 1, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := mkLiveWant(tc.written, tc.expires)
+			err := w.CheckClock(now)
+			if tc.live {
+				if err != nil || !w.Live(now) {
+					t.Fatalf("CheckClock = %v, Live = %v; want accepted", err, w.Live(now))
+				}
+				return
+			}
+			if !errors.Is(err, ErrInvalid) {
+				t.Fatalf("CheckClock = %v, want ErrInvalid", err)
+			}
+			if w.Live(now) {
+				t.Fatal("Live accepted a future-dated want-list")
+			}
+		})
+	}
+}
+
+func TestLiveWantCheckClockExpiresAlone(t *testing.T) {
+	// written_unix is within skew, only expires_unix is too far ahead. The
+	// format check alone would reject this too, so build the document
+	// without ValidateLiveWant to isolate the clock check.
+	w := LiveWant{Version: LiveWantVersion, WrittenUnix: 1000, ExpiresUnix: 1000 + LiveWantMaxExpiry + LiveClockSkew + 1}
+	if err := w.CheckClock(1000); err == nil || !strings.Contains(err.Error(), "expires_unix is more than") {
+		t.Fatalf("CheckClock = %v, want expires_unix rejection", err)
+	}
+}
+
+func TestLiveSamplesRejectsFutureDated(t *testing.T) {
+	const now = 1000
+	cases := []struct {
+		name     string
+		mut      func(*LiveSamples)
+		accepted bool
+	}{
+		{"current", func(*LiveSamples) {}, true},
+		{"written within skew", func(s *LiveSamples) { s.WrittenUnix = now + LiveClockSkew }, true},
+		{"written beyond skew", func(s *LiveSamples) { s.WrittenUnix = now + LiveClockSkew + 1 }, false},
+		{"written far future", func(s *LiveSamples) { s.WrittenUnix = now + 1_000_000 }, false},
+		{"observed within skew", func(s *LiveSamples) { s.Samples[0].ObservedUnix = now + LiveClockSkew }, true},
+		{"observed beyond skew", func(s *LiveSamples) { s.Samples[0].ObservedUnix = now + LiveClockSkew + 1 }, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := validLiveSamplesFixture()
+			tc.mut(&s)
+			err := s.CheckClock(now)
+			if tc.accepted && err != nil {
+				t.Fatalf("CheckClock rejected a current document: %v", err)
+			}
+			if !tc.accepted && !errors.Is(err, ErrInvalid) {
+				t.Fatalf("CheckClock = %v, want ErrInvalid", err)
+			}
+		})
 	}
 }

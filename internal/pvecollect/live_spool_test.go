@@ -256,3 +256,105 @@ func TestOpenLiveHandoffRequiresExisting(t *testing.T) {
 		t.Fatal("OpenLiveHandoff succeeded on an empty root")
 	}
 }
+
+func TestLiveHandoffWantFutureDatedIsNoTargets(t *testing.T) {
+	h := newTestHandoff(t)
+	h.now = func() time.Time { return time.Unix(1000, 0) }
+	ctx := context.Background()
+	future := int64(1000 + 1_000_000)
+	if err := h.WriteLiveWant(ctx, testWant(future, future+pvecontract.LiveWantMaxExpiry)); err != nil {
+		t.Fatalf("WriteLiveWant: %v", err)
+	}
+	got, err := h.ReadLiveWant(ctx)
+	if err != nil {
+		t.Fatalf("ReadLiveWant: %v", err)
+	}
+	if len(got.Targets) != 0 {
+		t.Fatalf("future-dated want-list returned targets: %+v", got)
+	}
+	// Within the clock skew the same shape is accepted.
+	near := int64(1000 + pvecontract.LiveClockSkew)
+	if err := h.WriteLiveWant(ctx, testWant(near, near+pvecontract.LiveWantMaxExpiry)); err != nil {
+		t.Fatalf("WriteLiveWant: %v", err)
+	}
+	if got, err := h.ReadLiveWant(ctx); err != nil || len(got.Targets) != 2 {
+		t.Fatalf("ReadLiveWant within skew = %+v, %v; want 2 targets", got, err)
+	}
+}
+
+func TestLiveHandoffWantInvalidIsNoTargets(t *testing.T) {
+	h := newTestHandoff(t)
+	h.now = func() time.Time { return time.Unix(1020, 0) }
+	raw := []byte(`{"version":2,"written_unix":1000,"expires_unix":1030,"targets":[{"remote":"remote-a","kind":"node","node":"pve1","vmid":0}]}`)
+	if err := os.WriteFile(filepath.Join(h.RequestsDir(), "live.json"), raw, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	got, err := h.ReadLiveWant(context.Background())
+	if err != nil {
+		t.Fatalf("ReadLiveWant: %v", err)
+	}
+	if len(got.Targets) != 0 {
+		t.Fatalf("invalid want-list returned targets: %+v", got)
+	}
+}
+
+func TestLiveHandoffSamplesFutureDatedRefused(t *testing.T) {
+	h := newTestHandoff(t)
+	ctx := context.Background()
+	s := testSamples("remote-a")
+	s.WrittenUnix = 1000 + 1_000_000
+	if err := h.WriteLiveSamples(ctx, s); err != nil {
+		t.Fatalf("WriteLiveSamples: %v", err)
+	}
+	h.now = func() time.Time { return time.Unix(1000, 0) }
+	if _, err := h.ReadLiveSamples(ctx, "remote-a"); !errors.Is(err, pvecontract.ErrInvalid) {
+		t.Fatalf("ReadLiveSamples = %v, want ErrInvalid for a future-dated document", err)
+	}
+	s = testSamples("remote-a")
+	s.Samples[0].ObservedUnix = 1000 + pvecontract.LiveClockSkew + 1
+	if err := h.WriteLiveSamples(ctx, s); err != nil {
+		t.Fatalf("WriteLiveSamples: %v", err)
+	}
+	if _, err := h.ReadLiveSamples(ctx, "remote-a"); !errors.Is(err, pvecontract.ErrInvalid) {
+		t.Fatalf("ReadLiveSamples = %v, want ErrInvalid for a future observation", err)
+	}
+}
+
+func TestLiveHandoffWriteReplacesOversizeFile(t *testing.T) {
+	h := newTestHandoff(t)
+	h.now = func() time.Time { return time.Unix(1020, 0) }
+	ctx := context.Background()
+	junk := make([]byte, pvecontract.MaxLiveSamplesBytes+1)
+	if err := os.WriteFile(filepath.Join(h.RequestsDir(), "live.json"), junk, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h.LiveDir(), "remote-a.json"), junk, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.WriteLiveWant(ctx, testWant(1000, 1030)); err != nil {
+		t.Fatalf("WriteLiveWant over an oversize file: %v", err)
+	}
+	if got, err := h.ReadLiveWant(ctx); err != nil || len(got.Targets) != 2 {
+		t.Fatalf("ReadLiveWant = %+v, %v", got, err)
+	}
+	if err := h.WriteLiveSamples(ctx, testSamples("remote-a")); err != nil {
+		t.Fatalf("WriteLiveSamples over an oversize file: %v", err)
+	}
+	if _, err := h.ReadLiveSamples(ctx, "remote-a"); err != nil {
+		t.Fatalf("ReadLiveSamples: %v", err)
+	}
+}
+
+func TestLiveHandoffSamplesWriteSymlinkRefused(t *testing.T) {
+	h := newTestHandoff(t)
+	target := filepath.Join(t.TempDir(), "target.json")
+	if err := os.WriteFile(target, []byte(`{}`), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(h.LiveDir(), "remote-a.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.WriteLiveSamples(context.Background(), testSamples("remote-a")); !errors.Is(err, ErrSymlink) {
+		t.Fatalf("WriteLiveSamples = %v, want ErrSymlink", err)
+	}
+}
