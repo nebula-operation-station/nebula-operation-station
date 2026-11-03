@@ -630,6 +630,11 @@ unnecessary").
      the run is flagged "snippet cleanup pending" with the reason
      "outcome conflict"; only the PK-08 action under fresh approval
      proceeds, and its approval shows both observations.
+   - The first resolution of a step is final (previously unstated): a
+     later observation, for example a terminal-failed task found after "no
+     identifiable task and change visible" resolved OK, does not reopen it;
+     it is audited and shown on the run page, and an inconsistency found
+     this way only flags the run for the operator.
    - Everything else stays `unknown`: an identified task not yet terminal;
      no identifiable task and the change not visible (an unchanged config
      read alone never counts as resolved failed while a task may be
@@ -725,9 +730,14 @@ unnecessary").
    PK-08 operator action, which needs a fresh approval under the existing
    semantics (a new permit for the cleanup steps only, at the job's risk
    level or, after a risk raise, at the raised level; never lower). The
-   persisted cleanup state holds the pending flag, the recorded target, its
-   dispatch generation and outcome, and the spent step claims with their
-   fsynced intents, which the read-only
+   persisted cleanup state holds exactly: the pending flag, the recorded
+   target, its dispatch generation, its outcome per target (including an
+   `unknown` written at startup, see *Restart with a dispatch in flight*),
+   the flag reason, for an "outcome conflict" both observations (task
+   state and config read), and the spent step claims with their fsynced
+   intents (including the node action version, see *Unresolved prior
+   mutation*; previously the flag reason, the conflict observations and
+   the action version were not listed), which the read-only
    reconciliation of an unknown outcome needs (previously "only the
    pending flag and the recorded target", which contradicted the persisted
    claims); none of it grants authority.
@@ -860,7 +870,8 @@ unnecessary").
      retransmission or a slow session setup, can start later than that):
      - The request carries a start deadline: the persisted (fsynced)
        intent timestamp of the claim plus `snippetActionStartWindow`
-       (named constant, proposed 30 seconds). The node action checks it
+       (named constant, proposed 30 seconds), never recomputed from the
+       dispatch time or the current time, also not after a restart. The node action checks it
        against the node clock as its first operation and, if the deadline
        has passed, refuses with no effect on the file system.
      - A node-side supervisor kills the action's process group once
@@ -869,16 +880,48 @@ unnecessary").
        session (a dropped session does not extend or end the bound).
        Because the process starts before it checks the deadline, no effect
        of the action can happen later than the deadline plus
-       `snippetActionTimeout` on the node clock.
+       `snippetActionTimeout` on the node clock, provided the kill took
+       effect. It may not (previously assumed): a process in uninterruptible
+       I/O finishes its unlink or rename after SIGKILL, and a supervisor
+       that dies leaves no bound. The action therefore runs under a
+       supervisor unit named by the claim's dispatch ID (for example a
+       systemd transient unit with a runtime limit, *verify* PK-10), and
+       the bound counts as held only if a read-only node check after the
+       resolution point shows no process of that dispatch ID left;
+       otherwise the outcome stays `unknown`.
+     - *Action version fixed before dispatch* (previously "the result
+       reports the action version", which is missing exactly in the
+       lost-response case the bound exists for). Before the claim, the
+       executor determines the node action version it will invoke (the
+       built-in script version it sends with the request, or for an
+       installed copy a read-only version check right before the claim)
+       and whether that version enforces the start deadline, the timeout
+       and the dispatch-ID supervisor, from its own built-in action table.
+       Both are written into the fsynced intent before dispatch. Whether
+       the bound can resolve the outcome is evaluated from the intent, not
+       from a result: an intent naming a non-enforcing version (or none)
+       stays `unknown`. A result that reports another version than the
+       intent is treated as a conflict (`unknown`, flagged).
      - The outcome is resolved once the executor clock has passed the
        intent timestamp plus `snippetActionStartWindow` plus
-       `snippetActionTimeout` plus `taskClockSkewMax`, and a node clock
-       read (`GET /nodes/{node}/time`, read credential) taken after that
-       point shows an offset of at most `taskClockSkewMax`;
+       `snippetActionTimeout` plus `taskClockSkewMax`, and two node clock
+       reads (`GET /nodes/{node}/time`, read credential), one right before
+       the claim and recorded in the intent and one after that point, each
+       show an offset of at most `taskClockSkewMax`, where the offset is
+       measured against the midpoint of the request and half the
+       round-trip time is added to it, and the two offsets differ by at
+       most `taskClockSkewMax` (previously one read after the point, with
+       no rule for round-trip time and no check across the action window;
+       an NTP step and back between the reads stays a stated residual);
        `pve.snippet.stat` then shows the result. An unreadable node clock
        or a larger offset leaves the outcome `unknown`, as does a node
        action version that does not enforce the deadline and timeout
        (PK-04).
+     The same deadline, timeout, supervisor and recorded action version
+     apply to `pve.snippet.put` (previously defined only for remove), and
+     the stat of *Reconciling a lost snippet write* treats a put as lost
+     only once the same bound has passed, so a late put cannot land after
+     the stat.
      For the `cicustom` delete it is resolved only
      by an identified terminal task as for forward steps. Until then the
      operator's only PK-08 choice for that step is the acknowledgement (b)
@@ -890,7 +933,9 @@ unnecessary").
      every claim, automatic or PK-08, increments in the claim transaction.
      A PK-08 approval binds the dispatch generation and latest recorded
      outcome of each target it covers, as shown to the operator; its claim
-     refuses if a newer dispatch happened after approval, and the operator
+     refuses if a newer dispatch happened or the recorded outcome changed
+     after approval (previously only a newer dispatch, so an approval made
+     on `unknown` could claim after a later resolution), and the operator
      must re-approve on the new outcome. When a PK-08 approval claims its
      first step, every not yet claimed automatic cleanup authorization of
      the job is revoked in the same transaction, so no automatic step fires
