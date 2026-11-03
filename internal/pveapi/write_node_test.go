@@ -37,19 +37,33 @@ func TestRebootNodeSendsExactRequest(t *testing.T) {
 	}
 }
 
-// TestRebootNodeAcceptsEmptyAndNullData pins that only the documented
-// empty/null data response is accepted as success: PVE answers a node reboot
-// with no UPID, so the data member is either JSON null or absent.
-func TestRebootNodeAcceptsEmptyAndNullData(t *testing.T) {
+// TestRebootNodeAcceptsOnlyNullData pins that only the documented
+// {"data":null} answer is success: PVE answers a node reboot with no UPID.
+// A missing data member, a bare null, an empty data value or an error-shaped
+// body is a schema error with an unknown outcome, never a dispatched reboot.
+func TestRebootNodeAcceptsOnlyNullData(t *testing.T) {
+	f := &fakeWriteServer{body: `{"data":null}`}
+	w := newTestWriter(t, f)
+	if err := w.RebootNode(context.Background(), "pve1"); err != nil {
+		t.Fatalf("RebootNode: %v", err)
+	}
 	for name, body := range map[string]string{
-		"null data":    `{"data":null}`,
-		"missing data": `{}`,
+		"missing data":   `{}`,
+		"bare null":      `null`,
+		"errors":         `{"errors":{"node":"bad"}}`,
+		"message":        `{"message":"permission denied"}`,
+		"data and error": `{"data":null,"errors":{"x":"y"}}`,
+		"empty string":   `{"data":""}`,
+		"object data":    `{"data":{}}`,
+		"upid data":      `{"data":"UPID:pve1:00000001:00000001:00000001:srvreboot::root@pam:"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := &fakeWriteServer{body: body}
 			w := newTestWriter(t, f)
-			if err := w.RebootNode(context.Background(), "pve1"); err != nil {
-				t.Fatalf("RebootNode: %v", err)
+			err := w.RebootNode(context.Background(), "pve1")
+			var we *WriteError
+			if !errors.As(err, &we) || we.Reason != ReasonSchema || !we.OutcomeUnknown() {
+				t.Fatalf("err = %v, want schema WriteError with unknown outcome", err)
 			}
 		})
 	}

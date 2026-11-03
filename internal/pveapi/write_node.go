@@ -16,7 +16,7 @@ import (
 
 // RebootNode reboots one exact PVE node (POST /nodes/{node}/status with
 // command=reboot). PVE answers a node reboot without a UPID: only the
-// documented empty/null data response is accepted, and anything else is a
+// documented {"data":null} response is accepted, and anything else is a
 // *WriteError. A timeout is OutcomeUnknown like the other writes, so callers
 // reconcile through the task list and never redispatch blindly (ADR 0006,
 // phase 2: "Node reboot: HIGH standalone; CRITICAL cluster; exact node").
@@ -38,10 +38,9 @@ func (w *Writer) RebootNode(ctx context.Context, node string) error {
 	if err != nil {
 		return err
 	}
-	// PVE answers a node reboot without a UPID: accept only the documented
-	// empty/null data response; anything else is a schema error with an
-	// unknown outcome.
-	if len(data) != 0 && !bytes.Equal(data, []byte("null")) {
+	// PVE answers a node reboot without a UPID: accept only an explicit
+	// {"data":null}; anything else is a schema error with an unknown outcome.
+	if !bytes.Equal(data, []byte("null")) {
 		return &WriteError{Op: op, Reason: ReasonSchema}
 	}
 	return nil
@@ -52,9 +51,10 @@ func (w *Writer) RebootNode(ctx context.Context, node string) error {
 // exactly (token, timeout, request construction, size limit, UTF-8, JSON
 // envelope, HTTP status mapping, 400 parameter extraction, redirect refusal,
 // and timeout → OutcomeUnknown), with one deliberate difference: it does not
-// reject an empty/null data member, because a node reboot answers without a
-// UPID. The caller (RebootNode) decides whether the returned data is the
-// documented empty/null response.
+// reject a null data member, because a node reboot answers without a UPID,
+// but it requires an object envelope whose only member is "data". The
+// caller (RebootNode) decides whether the returned data is the documented
+// null response.
 func (w *Writer) nodeStatusCall(ctx context.Context, r writeRequest) (json.RawMessage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -109,11 +109,16 @@ func (w *Writer) nodeStatusCall(ctx context.Context, r writeRequest) (json.RawMe
 	if !utf8.Valid(raw) {
 		return nil, &WriteError{Op: r.op, Reason: ReasonInvalidUTF8}
 	}
-	var env struct {
-		Data json.RawMessage `json:"data"`
-	}
+	// The envelope must be an object whose only member is "data": a bare
+	// null, an empty object, or an error-shaped body ("errors", "message")
+	// is not the documented answer and must not read as success.
+	var env map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return nil, &WriteError{Op: r.op, Reason: ReasonInvalidJSON}
 	}
-	return env.Data, nil
+	data, ok := env["data"]
+	if env == nil || !ok || len(env) != 1 {
+		return nil, &WriteError{Op: r.op, Reason: ReasonSchema}
+	}
+	return data, nil
 }
