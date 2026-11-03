@@ -303,3 +303,82 @@ func TestBuiltinTrustCacheLogsFailureOncePerStateChange(t *testing.T) {
 		t.Fatalf("%d error log lines after fail/recover/fail, want 2:\n%s", n, logged.String())
 	}
 }
+
+// A failed refresh is cached for failTTL: renders within that window
+// show unavailable without asking the executor again.
+func TestBuiltinTrustCacheFailureCachedForFailTTL(t *testing.T) {
+	p := &countingTrust{err: errors.New("dial unix: connection refused")}
+	clk := &fakeClock{t: time.Unix(1_000_000, 0)}
+	c := testTrustCache(p, clk, nil)
+	if v := c.get(context.Background()); v == nil || v.Kind != "unavailable" {
+		t.Fatalf("RPC failure: banner %+v, want unavailable", v)
+	}
+	for range 3 {
+		clk.advance(builtinTrustFailTTL / 4)
+		if v := c.get(context.Background()); v == nil || v.Kind != "unavailable" {
+			t.Fatalf("cached failure: banner %+v, want unavailable", v)
+		}
+	}
+	if n := p.calls.Load(); n != 1 {
+		t.Fatalf("%d RPCs within failTTL after a failure, want 1", n)
+	}
+	clk.advance(builtinTrustFailTTL / 2) // now past failTTL
+	c.get(context.Background())
+	if n := p.calls.Load(); n != 2 {
+		t.Fatalf("%d RPCs after failTTL expired, want 2", n)
+	}
+}
+
+// ctxBlockingTrust blocks every call until its context is done and
+// records whether the context carried a deadline.
+type ctxBlockingTrust struct {
+	hadDeadline atomic.Bool
+}
+
+func (f *ctxBlockingTrust) GetBuiltinTrustStatus(ctx context.Context, in *pb.GetBuiltinTrustStatusRequest, opts ...grpc.CallOption) (*pb.GetBuiltinTrustStatusResponse, error) {
+	_, ok := ctx.Deadline()
+	f.hadDeadline.Store(ok)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// The background refresh is detached from the request but bounded by
+// callTimeout: a hung executor cannot pin the single-flight slot.
+func TestBuiltinTrustCacheRefreshBoundedByCallTimeout(t *testing.T) {
+	p := &ctxBlockingTrust{}
+	clk := &fakeClock{t: time.Unix(1_000_000, 0)}
+	c := testTrustCache(p, clk, nil)
+	c.wait = 10 * time.Millisecond
+	c.callTimeout = 100 * time.Millisecond
+
+	start := time.Now()
+	if v := c.get(context.Background()); v == nil || v.Kind != "unavailable" {
+		t.Fatalf("hung executor: banner %+v, want unavailable", v)
+	}
+	c.mu.Lock()
+	ch := c.inflight
+	c.mu.Unlock()
+	if ch == nil {
+		t.Fatal("no refresh in flight after a timed-out render")
+	}
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatal("background refresh still running 5s after callTimeout: it has no deadline")
+	}
+	if d := time.Since(start); d < c.callTimeout {
+		t.Fatalf("refresh ended after %v, before callTimeout %v", d, c.callTimeout)
+	}
+	if !p.hadDeadline.Load() {
+		t.Fatal("refresh context had no deadline")
+	}
+	c.mu.Lock()
+	inflight := c.inflight
+	c.mu.Unlock()
+	if inflight != nil {
+		t.Fatal("single-flight slot still held after the refresh ended")
+	}
+	if v := c.get(context.Background()); v == nil || v.Kind != "unavailable" {
+		t.Fatalf("after timed-out refresh: banner %+v, want unavailable", v)
+	}
+}
