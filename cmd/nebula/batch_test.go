@@ -240,13 +240,13 @@ func TestBatchApproveRefusals(t *testing.T) {
 // bidi override reaches the approval screen.
 func TestBatchReviewEscapesUntrustedText(t *testing.T) {
 	rev := batchReview(t, 2, canonical.RiskMedium)
-	rev.MemberFindings[0].Findings = []*pb.BatchFinding{{Category: "x\x1b[2J", Line: 1, Excerpt: "rm‮ -rf"}}
+	rev.MemberFindings[0].Findings = []*pb.BatchFinding{{Category: "x\x1b[2J", Line: 1, Excerpt: "rm\u202e -rf"}}
 	f := &fakeBatch{review: rev}
 	var out bytes.Buffer
 	if err := runBatch(f, []string{"review", rev.GetBatchDigest()}, "", &out); err != nil {
 		t.Fatal(err)
 	}
-	if strings.ContainsAny(out.String(), "\x1b‮") {
+	if strings.ContainsAny(out.String(), "\x1b\u202e") {
 		t.Fatalf("raw control text on screen: %q", out.String())
 	}
 	if len(f.approved) != 0 {
