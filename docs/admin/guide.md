@@ -990,11 +990,13 @@ place.
 ## 11. Operating securely
 
 - **Hardened mode** (`-hardened`, section 6.2): HIGH and CRITICAL
-  operations, opening their stages and approving schedules need the CLI
-  on the machine (`nebula pending`, `nebula approve`), which shows what
-  the executor will really run: the Safety Scanner's findings and the
-  script's first 40 lines (at most 4 KiB), not just its hash. Use it when
-  the web server could be exposed to more than you.
+  operations, opening their stages, approving schedules and read leases
+  and approving batch rollouts need the CLI on the machine (`nebula
+  pending`, `nebula approve`, `nebula read-grant approve`, `nebula batch
+  approve`), which shows what the executor will really run: the Safety
+  Scanner's findings and the script's first 40 lines (at most 4 KiB), not
+  just its hash. Use it when the web server could be exposed to more than
+  you.
 - **Lock** when you leave (`nebula lock` or the dashboard). An unlocked
   executor holds keys and secrets in memory.
 - **Who is admin** is decided by the executor's `-admin-users`, not by
@@ -1012,6 +1014,34 @@ place.
   Nebula machine visible afterwards.
 - What Nebula protects against and what not:
   [`docs/threat-model.md`](../threat-model.md).
+
+### 11.1 Locking, unlocking and restarting
+
+`nebula lock` is the hard stop. It revokes every pending and approved
+execution permit, discards the pending proposals (permits, pending schedule
+and read grants, pending trust decisions), pauses all approved read grants,
+wipes the SSH keys, locks the credential vault and resets the WebAuthn
+registrar — in that order, so no run can be authorized between the
+revocation and the key wipe. Execution IDs stay reserved, so a revoked
+request cannot be re-bound to different content under the same ID.
+
+A locked executor starts locked after a restart: the keys stay wiped until
+you run `nebula unlock` locally, and no browser session can unlock it.
+Approved grants and the run budgets already spent survive the restart and
+the lock; only the pending proposals are discarded. Unlocking resumes any
+still-valid lease without a browser session — but the time that passed
+while paused still counts toward the grant's expiry, so a paused grant may
+have already expired by the time you unlock.
+
+Revoke (on the lease or schedule page, or `nebula schedule revoke <id>`)
+needs no assertion and blocks every future run of that grant. Locking and
+revocation are serialized with dispatch, but neither undoes a remote
+operation that has already been dispatched — already-dispatched work may
+finish. Re-pinning a host, removing it, rotating a credential, withdrawing
+trust, or raising the risk floor blocks the affected scope; a change of
+identity or artifact version requires a replacement grant. Removing or
+recovering a credential pauses the grants that use it until you review and
+unlock locally.
 
 ## 12. Backup and restore
 
