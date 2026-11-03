@@ -25,8 +25,23 @@ const pveRepinAction = "nebula.pve.repin"
 
 var pveRepinArtifact = []byte("nebula.pve.repin 1.0.0\nReplace the approved remote trust fingerprint and invalidate dependent authority.\n")
 
+// pveMutations returns the executor's single PVE mutation engine. Every
+// mutation run and every PveAdmin must use this instance: its in-flight
+// set is what keeps Reconcile and PveAdmin.CloseOpenJobs off the steps of
+// a running execution. It is built on first use, from the service state at
+// that time. Client stays unset until a mutation RPC is exposed; until
+// then Run and Reconcile refuse to work, and CloseOpenJobs sees no run in
+// flight.
+func (s *Service) pveMutations() *PveMutations {
+	s.pveMutOnce.Do(func() {
+		s.pveMut = &PveMutations{DB: s.db, Auth: s.auth, Vault: s.vault, Now: s.clock, Log: s.log}
+	})
+	return s.pveMut
+}
+
 func (s *Service) pveAdmin() *PveAdmin {
 	return &PveAdmin{DB: s.db, Vault: s.vault, Now: s.clock, Log: s.log, AuthorizeRepin: s.authorizePVERepin,
+		Mutations: s.pveMutations(),
 		RevokeGrants: func(remoteID, reason string) error {
 			// Trust, credential and state changes also void every mutation
 			// permit of the remote, including one whose job is in flight.

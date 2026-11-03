@@ -357,7 +357,6 @@ func (a *Authority) AuthorizeProviderMutation(d canonical.Digest, m ProviderMuta
 		return MutationClaim{}, a.deny(d, "", CodeTargetNotPermitted, "malformed provider mutation")
 	}
 	a.mu.Lock()
-	epoch := a.lockEpoch
 	p, ok := a.permits[d]
 	var approved ProviderMutationTarget
 	bound := false
@@ -374,22 +373,22 @@ func (a *Authority) AuthorizeProviderMutation(d canonical.Digest, m ProviderMuta
 	if field := approved.diff(m.Target); field != "" {
 		return MutationClaim{}, a.deny(d, target.HostID, CodeTargetNotPermitted, "provider target "+field+" differs from approval")
 	}
-	g, err := a.AuthorizeGrant(d, Run{
+	// The use belongs to this claim from the moment it is made: the token
+	// and the lock epoch are taken under the lock that marks the host
+	// used, so no Release, ReleaseHost or Lock can come in between.
+	var token, epoch uint64
+	g, err := a.authorizeGrant(d, Run{
 		HostID: target.HostID, HostKeyFingerprint: target.HostKeyFingerprint, ActionID: m.ActionID,
 		ModuleVersion: m.ModuleVersion, Artifact: m.Artifact, ParametersJSON: params, CredentialRef: m.Target.CredentialRef,
+	}, func(p *Permit) {
+		a.claimSeq++
+		token = a.claimSeq
+		epoch = a.lockEpoch
+		p.claim = token
 	})
 	if err != nil {
 		return MutationClaim{}, err
 	}
-	// The use just made belongs to this claim. A stale claim's Release
-	// in between finds no matching token and does nothing.
-	a.mu.Lock()
-	a.claimSeq++
-	token := a.claimSeq
-	if p, ok := a.permits[d]; ok {
-		p.claim = token
-	}
-	a.mu.Unlock()
 	return MutationClaim{ExecutionID: g.ExecutionID, Parameters: g.Parameters, digest: d, hostID: target.HostID, authority: a, epoch: epoch, token: token}, nil
 }
 

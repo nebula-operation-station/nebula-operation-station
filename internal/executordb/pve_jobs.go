@@ -81,11 +81,14 @@ var (
 	//     to nine once a node's uptime passes about 497 days at USER_HZ=100
 	//     (pveapi also takes lowercase). starttime lies in (0, 2100-01-01],
 	//     as in pveapi;
-	//   - type: [a-z0-9]{1,32}, as in validatePveJob (pveapi: up to 64
-	//     non-colon bytes);
-	//   - id: at most 64 of [A-Za-z0-9._-] (pveapi: any non-colon text);
+	//   - type: [a-z0-9]{1,32}, as in validatePveJob (pveapi: 1 to 64
+	//     characters other than ':', '/' and whitespace);
+	//   - id: at most 64 of [A-Za-z0-9._-] (pveapi: any number, including
+	//     none, of characters other than ':', '/' and whitespace);
 	//   - user: at most 128 of [A-Za-z0-9_.@!-], the task_user column bound
-	//     (pveapi: up to 256 non-colon bytes).
+	//     (pveapi: 1 to 256 characters other than ':', '/' and whitespace).
+	// pveapi counts characters (runes), not bytes; whitespace there is the
+	// RE2 \s class (space, \t, \n, \f, \r).
 	// TestPveUPIDGrammarIsSubsetOfPveapi only spot-checks this: it feeds a
 	// fixed corpus of UPIDs accepted here (including the length and digit
 	// bounds) to the pveapi writer's TaskStatus. It does not exercise the
