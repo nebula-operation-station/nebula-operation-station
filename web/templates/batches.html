@@ -1,0 +1,27 @@
+{{define "content"}}
+<section class="panel" aria-label="Batches">
+  <p class="hint">A batch is one reviewed plan of explicitly listed members (one action on one host each), approved once. It is not a transaction: every member keeps its own outcome, and nothing is retried or rolled back automatically.</p>
+  <div class="actions"><a class="button button--small" href="/batches/new">New batch</a></div>
+  {{if .List}}
+  <div class="table-wrap">
+  <table class="inventory batch-table">
+    <thead><tr><th>Batch</th><th>State</th><th>Risk</th><th>Members</th><th>Result</th><th>Created</th></tr></thead>
+    <tbody>
+    {{range .List}}
+    <tr>
+      <td class="mono"><a href="/batches/{{.ID}}">{{.ID}}</a></td>
+      <td><span class="badge {{.StateClass}}">{{.State}}</span></td>
+      <td>{{.Risk}}</td>
+      <td>{{.Counts.Total}} ({{.Counts.Success}} success, {{.Counts.Failed}} failed, {{.Counts.Unknown}} unknown, {{.Counts.Skipped}} skipped, {{.Counts.NotExecuted}} not executed, {{.Counts.Planned}} planned, {{.Counts.Dispatched}} running)</td>
+      <td>{{.Summary}}</td>
+      <td>{{.CreatedBy}} {{timeTag .CreatedAt}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p class="hint">No batches yet.</p>
+  {{end}}
+</section>
+{{end}}
