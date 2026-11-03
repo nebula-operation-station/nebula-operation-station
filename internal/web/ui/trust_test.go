@@ -68,11 +68,24 @@ func TestBuiltinTrustBannerUntrustedListsAffectedVersions(t *testing.T) {
 	if v.Kind != "untrusted" {
 		t.Errorf("Kind %q, want untrusted", v.Kind)
 	}
-	if v.Command != "nebula artifact trust-builtins" {
-		t.Errorf("Command %q, want the local CLI command", v.Command)
+	if !strings.HasPrefix(v.Command, "sudo nebula artifact trust-builtins") {
+		t.Errorf("Command %q, want the local CLI command run with sudo", v.Command)
 	}
 	if v.Headline == "" {
 		t.Error("headline empty")
+	}
+	// trust-builtins does not change risk decisions today (the risk
+	// policy reads only executordb trusted_artifacts): the banner must
+	// say so and must not promise the UV requirement goes away.
+	if !strings.Contains(v.Limitation, "does not change risk decisions") ||
+		!strings.Contains(v.Limitation, "docs/admin/guide.md section 8.2") ||
+		!strings.Contains(v.Limitation, "nebula artifact trust") {
+		t.Errorf("Limitation %q does not explain that trust-builtins leaves the risk unchanged", v.Limitation)
+	}
+	for _, s := range []string{v.Headline, v.Limitation, v.Detail} {
+		if strings.Contains(s, "until you trust them") {
+			t.Errorf("banner promises the UV requirement disappears after trusting: %q", s)
+		}
 	}
 	// Lease-replacement guidance (ADR 0007 E17).
 	if !strings.Contains(v.Detail, "lease") {
@@ -106,7 +119,7 @@ func TestBuiltinTrustBannerUnavailableIsDistinct(t *testing.T) {
 	if v.Kind != "unavailable" {
 		t.Errorf("Kind %q, want unavailable", v.Kind)
 	}
-	if v.Command != "" || len(v.Affected) != 0 {
+	if v.Command != "" || v.Limitation != "" || len(v.Affected) != 0 {
 		t.Errorf("unavailable banner must name no command or versions, got %+v", v)
 	}
 	if v.Headline == untrusted.Headline {

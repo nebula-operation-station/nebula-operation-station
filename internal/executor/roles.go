@@ -101,9 +101,14 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_CommitReadGrant_FullMethodName:           {server},
 		pb.ExecutorService_ListPendingReadGrants_FullMethodName:     {admin},
 		pb.ExecutorService_ApproveReadGrantCLI_FullMethodName:       {admin},
-		pb.ExecutorService_ListReadGrants_FullMethodName:            {server, admin},
-		pb.ExecutorService_RevokeReadGrant_FullMethodName:           {server, admin},
-		pb.ExecutorService_RunReadGrant_FullMethodName:              {server},
+		// The pve-collector may list approved read grants (metadata,
+		// read-only): it checks on-demand live requests against the
+		// read-grant leases itself, so a server-supplied target list never
+		// widens what is read (autopilot lv00, lv02/lv04). It may not
+		// propose, commit, approve, revoke or run a grant.
+		pb.ExecutorService_ListReadGrants_FullMethodName:  {server, admin, peercred.RolePVECollector},
+		pb.ExecutorService_RevokeReadGrant_FullMethodName: {server, admin},
+		pb.ExecutorService_RunReadGrant_FullMethodName:    {server},
 		// Batch read grants (ADR 0007, E19b). The server proposes and relays a
 		// user-verified assertion; only the admin reviews and approves. The
 		// server can never approve a batch.
@@ -121,7 +126,8 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_ListEvents_FullMethodName:            {server, admin},
 		pb.ExecutorService_BackupExecutor_FullMethodName:        {admin},
 		// PVE provider reads (ADR 0006, P1-05). The entries are final:
-		// pve-collector may call ONLY these two methods; server may list the
+		// pve-collector may call ONLY these two methods (plus ListReadGrants,
+		// see the read-grant entries above); server may list the
 		// remotes (metadata); admin may call both. The server never calls
 		// ReadPVE: it writes poll requests to the spool and the pve-collector
 		// schedules the reads. Remote management (add/rotate/remove/repin) is

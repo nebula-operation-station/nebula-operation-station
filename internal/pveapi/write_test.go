@@ -395,7 +395,12 @@ func TestWriteBadRequestKeepsOnlySentParamNames(t *testing.T) {
 func TestWriterMethodSetIsAllowlist(t *testing.T) {
 	// CreateImageVM: ADR 0008 section 2, "create a VM from the imported disk
 	// with a cloud-init drive and agent=1" (PV-03).
-	want := []string{"CloneVM", "ConvertToTemplate", "CreateImageVM", "DownloadURL", "ResizeDisk", "SetConfig", "StartVM", "TaskStatus"}
+	// ShutdownGuest, RebootGuest: ADR 0006 phase 2 (P2-01), "Graceful
+	// shutdown / reboot: ACPI/guest-agent or LXC graceful operation; no
+	// automatic force-stop fallback".
+	// StopGuest, ResetGuest: ADR 0006 phase 2 (P2-01), "Hard stop / reset:
+	// explicit destructive verb; LXC reset unsupported".
+	want := []string{"CloneVM", "ConvertToTemplate", "CreateImageVM", "DownloadURL", "RebootGuest", "ResetGuest", "ResizeDisk", "SetConfig", "ShutdownGuest", "StartVM", "StopGuest", "TaskStatus"}
 	typ := reflect.TypeFor[*Writer]()
 	var got []string
 	for i := range typ.NumMethod() {

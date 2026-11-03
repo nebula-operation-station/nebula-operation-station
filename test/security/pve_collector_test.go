@@ -26,8 +26,9 @@ func validReadPVE() *pb.ReadPVERequest {
 
 // TestPVECollectorBoundary is the acceptance test for the pve-collector
 // role. The test process runs as the pve-collector UID: it may call ONLY
-// ListPVERemotes and ReadPVE and is denied PermissionDenied for every
-// other method of the executor service.
+// ListPVERemotes, ReadPVE and ListReadGrants (read-only grant metadata,
+// autopilot lv00) and is denied PermissionDenied for every other method of
+// the executor service.
 func TestPVECollectorBoundary(t *testing.T) {
 	h := newHarness(t, harnessOptions{
 		uidRoles: map[uint32][]peercred.Role{uint32(os.Getuid()): {peercred.RolePVECollector}},
@@ -44,7 +45,8 @@ func TestPVECollectorBoundary(t *testing.T) {
 	}
 
 	// Loop over every method of the executor service: the collector is
-	// denied for all of them except the two PVE read methods.
+	// denied for all of them except the two PVE read methods and
+	// ListReadGrants.
 	conn, err := grpc.NewClient("unix://"+h.socket, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)
@@ -53,7 +55,8 @@ func TestPVECollectorBoundary(t *testing.T) {
 	for method := range executor.MethodRoles() {
 		err := conn.Invoke(h.ctx(), method, &pb.GetStatusRequest{}, &pb.GetStatusResponse{})
 		allowed := method == pb.ExecutorService_ListPVERemotes_FullMethodName ||
-			method == pb.ExecutorService_ReadPVE_FullMethodName
+			method == pb.ExecutorService_ReadPVE_FullMethodName ||
+			method == pb.ExecutorService_ListReadGrants_FullMethodName
 		if allowed {
 			if status.Code(err) == codes.PermissionDenied {
 				t.Errorf("%s: collector wants allowed, got PermissionDenied", method)
