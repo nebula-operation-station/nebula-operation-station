@@ -885,7 +885,7 @@ work; nothing runs without the usual review and approval.
 | Operation shows `precheck_failed` | Read the reason on the operation page; nothing was installed |
 | Host `UNREACHABLE` | Check the endpoints; `nebula host test HOST ENDPOINT` |
 | Waiting approvals on the hardened path | `nebula pending`, then `nebula approve <digest>` |
-| After an upgrade | `nebula unlock`; re-trust actions whose version changed (section 8.1) |
+| After an upgrade | `nebula unlock`; re-trust actions whose version changed (section 8.1), or all at once with `nebula artifact trust-builtins` (section 8.2) |
 | Weekly | Look at the dashboard and *History*; copy `nebula events list --json` offsite |
 | Monthly | Test a restore of the latest backup on a spare VM |
 
@@ -1154,7 +1154,23 @@ nebula unlock
 `docker compose up -d`, then unlock.
 
 After any upgrade: `nebula status`, `nebula events verify`, and trust the
-built-in actions again if their versions changed (section 8.1).
+built-in actions again if their versions changed — one at a time (section
+8.1) or all at once with `nebula artifact trust-builtins` (section 8.2).
+In hardened mode the whole upgrade is a CLI walkthrough on the executor
+host:
+
+```
+sudo nebula backup
+sudo systemctl restart nebula-executor nebula-server
+nebula unlock
+nebula artifact trust-builtins --bundle /path/to/release-bundle
+nebula status && nebula events verify
+```
+
+`trust-builtins` shows every changed built-in and needs one digest-bound
+confirmation; unchanged actions need none. Trusting an action at its
+declared risk does not change how its runs are approved — a HIGH or
+CRITICAL built-in still needs the per-run approval (section 8.1).
 
 ## 14. Monitoring and logs
 
@@ -1260,8 +1276,11 @@ Run as an admin user on the Nebula machine (`nebula` without a command prints th
 | --- | --- |
 | `status`, `unlock`, `lock` | Executor state; decrypt or wipe keys and vault |
 | `pending`, `approve <digest>`, `approve --stage N <digest>`, `approve --skip HOST <digest>` | Hardened path: approvals, rollout stages, skipping a host |
-| `schedule pending \| approve <digest> \| list \| revoke <id>` | Scheduled checks |
+| `batch review \| approve \| stage N \| skip MEMBER <digest>` | Batch rollouts: review the plan, approve all (rejects CRITICAL members), open a stage, skip a member |
+| `schedule pending \| approve <digest> \| list \| revoke <id>` | Scheduled checks (legacy `read-schedule-v1`, section 9.4) |
+| `read-grant pending \| approve <digest>` | Read leases (section 9.4); hardened approval, full digest |
 | `artifact trust --action ID --version X.Y.Z --risk LEVEL [--label TEXT] FILE`, `artifact untrust …`, `artifact list` | Trusted scripts |
+| `artifact trust-builtins --bundle DIR [--store DIR] [--yes-digest DIGEST] [--pin name@ver] [--retire name@ver]` | Trust a release's built-ins in one review (section 8.2) |
 | `signer add --name NAME FILE \| list \| remove SHA256:…`, `module confirm-signer MODULE SHA256:…` | Module signers |
 | `module pack [--archive OUT.tar.gz] DIR` | Build a module (author side; no executor needed) |
 | `backup [--out FILE] [--full] [--no-encrypt] [--pre-upgrade]`, `restore [--identity FILE] ARCHIVE` | With `sudo`; section 12 (`--full` only labels the archive, every backup is full; `--pre-upgrade` asks nothing and exits 3 when it makes no backup) |
