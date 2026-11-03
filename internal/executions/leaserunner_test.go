@@ -204,9 +204,20 @@ func TestOnlyActiveScheduledOrdinaryLeasesRun(t *testing.T) {
 			d.RateProfile = schedgrant.TelemetryReadProfile
 			return leaseEntry(t, d, n)
 		},
+		// A valid provider lease (parses, real digest). It binds no SSH
+		// actions or hosts, so it cannot produce an SSH run even without the
+		// profile filter; the filter itself is pinned by "telemetry profile".
 		"provider profile": func(n time.Time) *pb.ReadGrant {
-			d := leaseDoc(t, n, []string{"web"}, "core.facts")
+			d := leaseDoc(t, n, nil)
+			d.Actions = []permit.ReadGrantAction{}
 			d.RateProfile = permit.ProviderReadProfile
+			d.MinIntervalS = int64(permit.ProviderMinInterval / time.Second)
+			d.RunBudget = 1
+			d.ProviderTargets = []permit.ProviderTarget{{RemoteID: "pve-1", TrustPin: strings.Repeat("11", 32),
+				TrustGeneration: 1, CredentialVersion: 1, Methods: []string{permit.ProviderMethodNodes}}}
+			if _, _, _, err := permit.ParseReadGrant(marshalDoc(t, d), n); err != nil {
+				t.Fatalf("provider fixture does not parse: %v", err)
+			}
 			return leaseEntry(t, d, n)
 		},
 		"on-demand only": func(n time.Time) *pb.ReadGrant {
