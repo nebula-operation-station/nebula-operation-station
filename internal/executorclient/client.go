@@ -457,6 +457,25 @@ func (c *Client) CommitEnroll(ctx context.Context, in *pb.CommitEnrollRequest, o
 	return resp, mapCallError(ctx, err)
 }
 
+// ProposeGuestJoin: Proposes the enrollment of a provisioned PVE guest
+// (server role only). It probes one endpoint and may read the guest agent,
+// so it gets the enrollment timeout.
+func (c *Client) ProposeGuestJoin(ctx context.Context, in *pb.ProposeGuestJoinRequest, opts ...grpc.CallOption) (*pb.ProposeGuestJoinResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout+2*time.Minute)
+	defer cancel()
+	resp, err := c.rpc.ProposeGuestJoin(ctx, in, opts...)
+	return resp, mapCallError(ctx, err)
+}
+
+// CommitGuestJoin: Pins the host key of an approved guest join (server
+// role only).
+func (c *Client) CommitGuestJoin(ctx context.Context, in *pb.CommitGuestJoinRequest, opts ...grpc.CallOption) (*pb.CommitGuestJoinResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout+2*time.Minute)
+	defer cancel()
+	resp, err := c.rpc.CommitGuestJoin(ctx, in, opts...)
+	return resp, mapCallError(ctx, err)
+}
+
 // TestConnection: Tests the SSH connection to a pinned host (admin role only).
 func (c *Client) TestConnection(ctx context.Context, in *pb.TestConnectionRequest, opts ...grpc.CallOption) (*pb.TestConnectionResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)

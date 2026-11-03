@@ -63,6 +63,8 @@ const (
 	ExecutorService_CommitRepin_FullMethodName                     = "/nebula.executor.v1.ExecutorService/CommitRepin"
 	ExecutorService_ProposeEnroll_FullMethodName                   = "/nebula.executor.v1.ExecutorService/ProposeEnroll"
 	ExecutorService_CommitEnroll_FullMethodName                    = "/nebula.executor.v1.ExecutorService/CommitEnroll"
+	ExecutorService_ProposeGuestJoin_FullMethodName                = "/nebula.executor.v1.ExecutorService/ProposeGuestJoin"
+	ExecutorService_CommitGuestJoin_FullMethodName                 = "/nebula.executor.v1.ExecutorService/CommitGuestJoin"
 	ExecutorService_GetSSHPublicKey_FullMethodName                 = "/nebula.executor.v1.ExecutorService/GetSSHPublicKey"
 	ExecutorService_TestConnection_FullMethodName                  = "/nebula.executor.v1.ExecutorService/TestConnection"
 	ExecutorService_InitVault_FullMethodName                       = "/nebula.executor.v1.ExecutorService/InitVault"
@@ -283,6 +285,20 @@ type ExecutorServiceClient interface {
 	// still presents the approved key, and tries a login when the keys are
 	// unlocked.
 	CommitEnroll(ctx context.Context, in *CommitEnrollRequest, opts ...grpc.CallOption) (*CommitEnrollResponse, error)
+	// Role: server. Join of a provisioned PVE guest (ADR 0008 section 4,
+	// PV-06): proposes the guest's enrollment with the normal enrollment
+	// approval (at least HIGH). The executor checks the live guest, tries a
+	// bounded guest agent read of the guest's ed25519 host key over the
+	// remote's pinned API channel (join method "agent", no trust on first
+	// use) and otherwise proposes the probed fingerprint for review (join
+	// method "review"). The approval binds the host entry and the guest
+	// (remote, node, VMID, generation, name) and the join method.
+	ProposeGuestJoin(ctx context.Context, in *ProposeGuestJoinRequest, opts ...grpc.CallOption) (*ProposeGuestJoinResponse, error)
+	// Role: server. Pins the host key of an approved guest join whose
+	// endpoint still presents the approved key. The request must repeat the
+	// approved host, guest and join method exactly; the response echoes the
+	// approved binding for the server's inventory join.
+	CommitGuestJoin(ctx context.Context, in *CommitGuestJoinRequest, opts ...grpc.CallOption) (*CommitGuestJoinResponse, error)
 	// Role: admin. Returns the public half of a loaded SSH key (the keyring
 	// must be unlocked), for the enrollment script.
 	GetSSHPublicKey(ctx context.Context, in *GetSSHPublicKeyRequest, opts ...grpc.CallOption) (*GetSSHPublicKeyResponse, error)
@@ -893,6 +909,26 @@ func (c *executorServiceClient) CommitEnroll(ctx context.Context, in *CommitEnro
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CommitEnrollResponse)
 	err := c.cc.Invoke(ctx, ExecutorService_CommitEnroll_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ProposeGuestJoin(ctx context.Context, in *ProposeGuestJoinRequest, opts ...grpc.CallOption) (*ProposeGuestJoinResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProposeGuestJoinResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ProposeGuestJoin_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) CommitGuestJoin(ctx context.Context, in *CommitGuestJoinRequest, opts ...grpc.CallOption) (*CommitGuestJoinResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitGuestJoinResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_CommitGuestJoin_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1630,6 +1666,20 @@ type ExecutorServiceServer interface {
 	// still presents the approved key, and tries a login when the keys are
 	// unlocked.
 	CommitEnroll(context.Context, *CommitEnrollRequest) (*CommitEnrollResponse, error)
+	// Role: server. Join of a provisioned PVE guest (ADR 0008 section 4,
+	// PV-06): proposes the guest's enrollment with the normal enrollment
+	// approval (at least HIGH). The executor checks the live guest, tries a
+	// bounded guest agent read of the guest's ed25519 host key over the
+	// remote's pinned API channel (join method "agent", no trust on first
+	// use) and otherwise proposes the probed fingerprint for review (join
+	// method "review"). The approval binds the host entry and the guest
+	// (remote, node, VMID, generation, name) and the join method.
+	ProposeGuestJoin(context.Context, *ProposeGuestJoinRequest) (*ProposeGuestJoinResponse, error)
+	// Role: server. Pins the host key of an approved guest join whose
+	// endpoint still presents the approved key. The request must repeat the
+	// approved host, guest and join method exactly; the response echoes the
+	// approved binding for the server's inventory join.
+	CommitGuestJoin(context.Context, *CommitGuestJoinRequest) (*CommitGuestJoinResponse, error)
 	// Role: admin. Returns the public half of a loaded SSH key (the keyring
 	// must be unlocked), for the enrollment script.
 	GetSSHPublicKey(context.Context, *GetSSHPublicKeyRequest) (*GetSSHPublicKeyResponse, error)
@@ -1951,6 +2001,12 @@ func (UnimplementedExecutorServiceServer) ProposeEnroll(context.Context, *Propos
 }
 func (UnimplementedExecutorServiceServer) CommitEnroll(context.Context, *CommitEnrollRequest) (*CommitEnrollResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CommitEnroll not implemented")
+}
+func (UnimplementedExecutorServiceServer) ProposeGuestJoin(context.Context, *ProposeGuestJoinRequest) (*ProposeGuestJoinResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ProposeGuestJoin not implemented")
+}
+func (UnimplementedExecutorServiceServer) CommitGuestJoin(context.Context, *CommitGuestJoinRequest) (*CommitGuestJoinResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CommitGuestJoin not implemented")
 }
 func (UnimplementedExecutorServiceServer) GetSSHPublicKey(context.Context, *GetSSHPublicKeyRequest) (*GetSSHPublicKeyResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetSSHPublicKey not implemented")
@@ -2896,6 +2952,42 @@ func _ExecutorService_CommitEnroll_Handler(srv interface{}, ctx context.Context,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ExecutorServiceServer).CommitEnroll(ctx, req.(*CommitEnrollRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ProposeGuestJoin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProposeGuestJoinRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ProposeGuestJoin(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ProposeGuestJoin_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ProposeGuestJoin(ctx, req.(*ProposeGuestJoinRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_CommitGuestJoin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommitGuestJoinRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).CommitGuestJoin(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_CommitGuestJoin_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).CommitGuestJoin(ctx, req.(*CommitGuestJoinRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -4100,6 +4192,14 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CommitEnroll",
 			Handler:    _ExecutorService_CommitEnroll_Handler,
+		},
+		{
+			MethodName: "ProposeGuestJoin",
+			Handler:    _ExecutorService_ProposeGuestJoin_Handler,
+		},
+		{
+			MethodName: "CommitGuestJoin",
+			Handler:    _ExecutorService_CommitGuestJoin_Handler,
 		},
 		{
 			MethodName: "GetSSHPublicKey",
