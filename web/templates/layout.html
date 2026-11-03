@@ -79,6 +79,16 @@
           <svg aria-hidden="true"><use href="/static/icons.svg#i-search"></use></svg>
           <input type="search" name="q" maxlength="100" placeholder="Search hosts, IPs, assets …" aria-label="Search"{{with .Search}} value="{{.Query}}"{{end}}>
         </form>
+        <!-- Privileged session display (ADR 0007 E20): the executor-reported
+             state, remaining time and the single Extend action. Driven by
+             web/static/nav.js, which renders the display the server computes
+             (internal/web/ui/session); no inline handlers (strict CSP). -->
+        <div id="session-display" class="session-display" data-state="loading" hidden>
+          <span class="session-display__label" id="session-state" aria-live="polite">Session</span>
+          <span class="session-display__time" id="session-time"></span>
+          <span class="session-display__error" id="session-error" aria-live="polite" hidden></span>
+          <button type="button" class="button button--secondary button--small session-display__extend" id="session-extend" hidden>Extend session</button>
+        </div>
         <button type="button" class="topbar__logout button button--secondary button--small" id="logout">Log out</button>
       </header>
       <main class="main content">
