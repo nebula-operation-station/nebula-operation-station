@@ -734,21 +734,56 @@ healthy and is not anymore is FAILED; a container that is not healthy,
 changed published ports or a different number of containers is a
 WARNING. Run Check image updates first to see what will change.
 
-### 9.4 Scheduled checks
+### 9.4 Read leases and scheduled checks
 
-*Operations → Scheduled checks* lets Nebula run read-only checks on its
-own, for example a daily update check on all hosts. You choose actions,
-hosts, an interval (hour, 6 hours, day, week) and a duration (at most 90
-days), and approve the schedule once with your security key (hardened
-mode: `nebula schedule approve <digest>` on the executor host). The
-executor accepts only actions it rates LOW on every chosen host: the
-built-in script trusted as LOW (section 8.1) and the host recorded with a
-criticality (`nebula host pin --criticality`). It runs each action on
-each host at most once per interval and checks the trust again on every
-run; *Revoke* (or `nebula schedule revoke <id>`) stops a schedule at
-once. Results appear as operations created by "schedule". A schedule
-survives restarts of the executor, but nothing runs while it is locked.
-Runs with secrets cannot be scheduled.
+A **read lease** (a read grant) is a standing, executor-held authority to
+run a fixed set of read-only actions on a fixed set of hosts — on a
+schedule, on demand ("Refresh"), or both — for a bounded time and a
+bounded number of runs. Scheduled and on-demand runs share the same
+executor authorization, the same revocation and the same run budget, so a
+lease cannot outlive the consent that created it.
+
+Creating one. *Operations → Read leases → New read lease* proposes a
+lease: actions, hosts, an interval (hour, 6 hours, day, week) and a
+duration. New leases default to 7 days and run at most 30 days; renewal
+("Refresh") proposes a new lease with the same scope and needs a fresh
+approval — the old one stays until it expires or is revoked. Approve it
+once with your security key; in hardened mode the page shows `nebula
+read-grant approve <digest>` and you run it on the executor host, which
+lists the complete grant first (a full digest, never a prefix). The
+executor accepts only actions it rates LOW on every chosen host and that
+are on the read allowlist — `core.facts`, `package.list_updates`,
+`docker.list`, `docker.inspect`, `docker.check_updates`, `service.list`,
+`service.status`, plus the reviewed telemetry actions: a built-in trusted
+as LOW (section 8.1) with the host recorded at a criticality (`nebula host
+pin --criticality`). `package.refresh`, `docker.logs` and secret-bearing
+actions are excluded even when rated LOW.
+
+Budgets. Each host may run the lease at most 24 times in a rolling hour by
+default, at most 240; the allowance is shared across actions and both
+triggers, with a 15-minute per-action floor. "Refresh" on one host, a
+selection or all hosts spends the same allowance; when throttled the page
+shows the cached age and the next eligible time. Failed or disconnected
+attempts spend budget once claimed, and there is no catch-up burst.
+Telemetry is a separately approved profile (10-second live reads,
+5-minute history, its own budget).
+
+Running. Each run gets a fresh execution ID, is audited like any run, and
+rechecks the lease's expiry, revocation, parameters, artifact bytes, LOW
+risk and pin state before it runs. Results appear as operations created by
+"schedule". A lease survives restarts of the executor, but nothing runs
+while it is locked (section 11). Runs with secrets cannot be leased.
+
+Managing. *Revoke* (on the lease page) stops a lease at once and needs no
+assertion; `nebula read-grant pending` shows leases awaiting approval.
+
+Legacy schedules. The older *Operations → Scheduled checks* page proposed
+`read-schedule-v1` grants: schedule-only, up to 90 days. Those grants keep
+their original scope and expiry — including existing 90-day grants — and
+are never reinterpreted as on-demand permission. New leases and renewals
+use the 7/30-day policy. Legacy grants are listed with the new leases,
+share the executor's target ceiling, and can be revoked or replaced by an
+explicitly approved new lease.
 
 ### 9.5 Runbooks
 
