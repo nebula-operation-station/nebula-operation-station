@@ -816,8 +816,19 @@ func (a *Authority) AuthorizeGrant(d canonical.Digest, run Run) (Grant, error) {
 // the stage engine's Retry of an unreachable host relies on it). It
 // reports whether the host was released.
 func (a *Authority) ReleaseHost(d canonical.Digest, hostID string) bool {
+	return a.releaseHost(d, hostID, "host unreachable; nothing ran")
+}
+
+// releaseHost undoes the use of hostID by the approved, unexpired permit d
+// and records detail with the event.
+func (a *Authority) releaseHost(d canonical.Digest, hostID, detail string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.releaseHostLocked(d, hostID, detail)
+}
+
+// releaseHostLocked is releaseHost with a.mu held.
+func (a *Authority) releaseHostLocked(d canonical.Digest, hostID, detail string) bool {
 	p, ok := a.permits[d]
 	if !ok || p.State != StateApproved || !a.now().Before(time.Unix(p.Request.ExpiryUnix, 0)) {
 		return false
@@ -826,7 +837,7 @@ func (a *Authority) ReleaseHost(d canonical.Digest, hostID string) bool {
 		return false
 	}
 	delete(p.used, hostID)
-	a.emit(Event{Kind: "released", Digest: d.String(), Host: hostID, Detail: "host unreachable; nothing ran"})
+	a.emit(Event{Kind: "released", Digest: d.String(), Host: hostID, Detail: detail})
 	return true
 }
 

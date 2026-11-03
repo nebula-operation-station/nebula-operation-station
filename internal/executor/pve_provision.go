@@ -949,8 +949,9 @@ func (p *PveProvisioner) Provision(ctx context.Context, req PveProvisionRequest)
 		res.GuestKept = true
 		return res, err
 	}
-	liveNode, digest, err := p.Mutations.Client.TargetState(ctx, o.rm, permit.ProviderKindQemu, req.Node, req.VMID, read)
-	if err != nil || liveNode != req.Node || !validHexDigest(digest) {
+	live, err := p.Mutations.Client.TargetState(ctx, o.rm, permit.ProviderKindQemu, req.Node, req.VMID, read)
+	digest := live.ConfigDigest
+	if err != nil || live.Node != req.Node || !validHexDigest(digest) {
 		res.GuestKept = true
 		p.Mutations.log().Error("audit", "kind", "pve_guest_provision_failed", "remote", req.RemoteID, "node", req.Node, "vmid", req.VMID,
 			"execution", res.ExecutionID, "reason", "guest_unreadable_after_run", "guest_kept", true)

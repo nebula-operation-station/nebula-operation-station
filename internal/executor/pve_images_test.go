@@ -150,14 +150,14 @@ func (c *imageClient) Dispatch(ctx context.Context, rm executordb.PveRemote, nod
 	return testTaskUPID(node, time.Now(), tt, "9000", mutActionUser, 100+n), nil
 }
 
-func (c *imageClient) TargetState(ctx context.Context, rm executordb.PveRemote, kind, node string, vmid uint64, tok pveapi.TokenSupplier) (string, string, error) {
-	live, digest, err := c.fakeMutClient.TargetState(ctx, rm, kind, node, vmid, tok)
+func (c *imageClient) TargetState(ctx context.Context, rm executordb.PveRemote, kind, node string, vmid uint64, tok pveapi.TokenSupplier) (PveTargetState, error) {
+	live, err := c.fakeMutClient.TargetState(ctx, rm, kind, node, vmid, tok)
 	if kind == permit.ProviderKindQemu {
 		c.mu.Lock()
-		digest = c.templateDigest
+		live.ConfigDigest = c.templateDigest
 		c.mu.Unlock()
 	}
-	return live, digest, err
+	return live, err
 }
 
 func (c *imageClient) setTemplateDigest(d string) {
