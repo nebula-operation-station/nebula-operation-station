@@ -2,14 +2,14 @@
 
 // Package live delivers sanitized 10-s telemetry values to the logged-in
 // chart viewers over server-sent events (ADR 0006 P1-37). It fans out the
-// samples the pvecollect scheduler records to the viewers that requested
-// the exact target; the scheduler keeps every read within the approved
-// leases (P1-26), and this package adds no authority of its own.
+// live samples the pvecollect scheduler records to the viewers that
+// requested the exact target; the scheduler keeps every read within the
+// approved leases (P1-26), and this package adds no authority of its own.
 package live
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -22,23 +22,53 @@ const (
 	// maxViewerBoxes bounds the visible boxes of one viewer.
 	maxViewerBoxes = 32
 	// maxTargetsPerBox bounds the exact targets one box may resolve to
-	// (a node name can exist on several remotes, a host carries two
+	// (a node name can exist on several remotes, a host carries several
 	// telemetry actions).
 	maxTargetsPerBox = 8
+	// maxViewers bounds the open streams of the whole server.
+	maxViewers = 256
+	// maxViewersPerSession bounds the open streams of one session (tabs).
+	maxViewersPerSession = 8
 	// viewerEventQueue bounds the per-viewer event queue; a viewer whose
-	// queue stays full simply misses events until it catches up or the
-	// connection drops.
+	// queue is full misses events until it catches up.
 	viewerEventQueue = 64
-	// ageTick is the cadence of the deferred-box age labels.
-	ageTick = 5 * time.Second
+	// viewerLease is how long a viewer's visible boxes stay requested
+	// without a renewal (ADR 0006 P1-37: 30-s target leases). It equals
+	// the scheduler's own renewal window.
+	viewerLease = pvecollect.TelemetryViewerRenewal
+	// clientRenewal is the cadence the client re-posts its visible boxes
+	// (well inside viewerLease, so one lost update does not expire it).
+	clientRenewal = 10 * time.Second
+	// tickInterval is the cadence of expiry and deferred-box age labels.
+	tickInterval = 5 * time.Second
 	// staleAfter: a box whose newest observation is older than this is
 	// labelled with the age of its last observation (the 10-s live
 	// interval plus slack).
 	staleAfter = 15 * time.Second
-	// maxAgeSeconds bounds the age a label reports; a sample older than
-	// this is reported at the bound.
+	// maxAgeSeconds bounds the age a label reports.
 	maxAgeSeconds = 24 * 3600
 )
+
+// Errors of the hub.
+var (
+	// ErrUnknownViewer is returned for a viewer ID the hub does not hold
+	// for the calling session (expired stream, or another session's).
+	ErrUnknownViewer = errors.New("live: unknown viewer")
+	// ErrTooManyViewers is returned when a stream limit is reached.
+	ErrTooManyViewers = errors.New("live: too many viewers")
+	// ErrInvalid is returned for malformed input.
+	ErrInvalid = errors.New("live: invalid input")
+	// ErrClosed is returned after Close.
+	ErrClosed = errors.New("live: hub closed")
+)
+
+// Scheduler is the P1-26 telemetry scheduler surface the hub uses.
+// *pvecollect.TelemetryScheduler implements it.
+type Scheduler interface {
+	Request(viewerID string, t pvecollect.TelemetryTarget) (time.Time, error)
+	Release(viewerID string, t pvecollect.TelemetryTarget)
+	LastObserved(t pvecollect.TelemetryTarget) (time.Time, bool)
+}
 
 // Event is one server-sent event. Name is a fixed token ("hello",
 // "value", "age"); Data is a sanitized JSON payload.
@@ -50,13 +80,18 @@ type Event struct {
 type viewer struct {
 	session string
 	ch      chan Event
-	boxes   map[string][]pvecollect.TelemetryTarget
+	// setMu serializes SetBoxes of this viewer, so two overlapping
+	// updates cannot leave a target requested that neither keeps.
+	setMu   sync.Mutex
+	boxes   map[string][]pvecollect.TelemetryTarget // guarded by Hub.mu
+	renewed time.Time                               // guarded by Hub.mu
+	gone    bool                                    // guarded by Hub.mu
 }
 
-// Hub fans out recorded telemetry samples to the viewers that requested
-// the exact target. It is safe for concurrent use.
+// Hub fans out recorded live samples to the viewers that requested the
+// exact target. It is safe for concurrent use.
 type Hub struct {
-	sched *pvecollect.TelemetryScheduler
+	sched Scheduler
 	log   *slog.Logger
 	now   func() time.Time
 
@@ -67,9 +102,9 @@ type Hub struct {
 
 // NewHub returns a hub over sched. log may be nil (slog.Default); now
 // may be nil (time.Now).
-func NewHub(sched *pvecollect.TelemetryScheduler, log *slog.Logger, now func() time.Time) *Hub {
+func NewHub(sched Scheduler, log *slog.Logger, now func() time.Time) (*Hub, error) {
 	if sched == nil {
-		return nil
+		return nil, errors.New("live: scheduler is required")
 	}
 	if log == nil {
 		log = slog.Default()
@@ -77,7 +112,7 @@ func NewHub(sched *pvecollect.TelemetryScheduler, log *slog.Logger, now func() t
 	if now == nil {
 		now = time.Now
 	}
-	return &Hub{sched: sched, log: log, now: now, viewers: map[string]*viewer{}}
+	return &Hub{sched: sched, log: log, now: now, viewers: map[string]*viewer{}}, nil
 }
 
 // Add registers a new viewer and returns its event channel. sessionKey
@@ -85,80 +120,103 @@ func NewHub(sched *pvecollect.TelemetryScheduler, log *slog.Logger, now func() t
 // SetBoxes only accepts that session.
 func (h *Hub) Add(viewerID, sessionKey string) (<-chan Event, error) {
 	if !validViewerID(viewerID) || sessionKey == "" {
-		return nil, fmt.Errorf("live: invalid viewer or session")
+		return nil, ErrInvalid
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return nil, fmt.Errorf("live: hub closed")
+		return nil, ErrClosed
 	}
 	if _, ok := h.viewers[viewerID]; ok {
-		return nil, fmt.Errorf("live: viewer exists")
+		return nil, ErrInvalid
 	}
-	h.viewers[viewerID] = &viewer{
+	if len(h.viewers) >= maxViewers {
+		return nil, ErrTooManyViewers
+	}
+	n := 0
+	for _, v := range h.viewers {
+		if v.session == sessionKey {
+			n++
+		}
+	}
+	if n >= maxViewersPerSession {
+		return nil, ErrTooManyViewers
+	}
+	v := &viewer{
 		session: sessionKey,
 		ch:      make(chan Event, viewerEventQueue),
 		boxes:   map[string][]pvecollect.TelemetryTarget{},
+		renewed: h.now(),
 	}
-	return h.viewers[viewerID].ch, nil
+	h.viewers[viewerID] = v
+	return v.ch, nil
 }
 
-// Remove ends the viewer: all of its target requests are released and
-// its channel is closed.
+// Remove ends the viewer (disconnect): all of its target requests are
+// released and its channel is closed.
 func (h *Hub) Remove(viewerID string) {
 	h.mu.Lock()
 	v, ok := h.viewers[viewerID]
-	if ok {
-		delete(h.viewers, viewerID)
-	}
-	h.mu.Unlock()
 	if !ok {
+		h.mu.Unlock()
 		return
 	}
-	for _, targets := range v.boxes {
+	delete(h.viewers, viewerID)
+	v.gone = true
+	old := v.boxes
+	v.boxes = nil
+	h.mu.Unlock()
+	h.releaseAll(viewerID, old)
+	close(v.ch)
+}
+
+func (h *Hub) releaseAll(viewerID string, boxes map[string][]pvecollect.TelemetryTarget) {
+	for _, targets := range boxes {
 		for _, t := range targets {
 			h.sched.Release(viewerID, t)
 		}
 	}
-	close(v.ch)
 }
 
-// SetBoxes replaces the viewer's visible boxes: targets that are no
-// longer visible are released, the visible ones are requested (renewing
-// the 30-s viewer lease). sessionKey must be the session that opened the
-// viewer. It returns the box IDs with at least one requested target.
+// SetBoxes replaces the viewer's visible boxes and renews its 30-s
+// lease: targets that are no longer visible are released (hidden box),
+// the visible ones are requested from the scheduler, which accepts only
+// targets an active on-demand lease lists. sessionKey must be the
+// session that opened the viewer. It returns the box IDs with at least
+// one requested target.
 func (h *Hub) SetBoxes(viewerID, sessionKey string, boxes map[string][]pvecollect.TelemetryTarget) ([]string, error) {
-	if !validViewerID(viewerID) || sessionKey == "" {
-		return nil, fmt.Errorf("live: invalid viewer or session")
+	if !validViewerID(viewerID) || sessionKey == "" || len(boxes) > maxViewerBoxes {
+		return nil, ErrInvalid
 	}
-	if len(boxes) > maxViewerBoxes {
-		return nil, fmt.Errorf("live: more than %d boxes", maxViewerBoxes)
-	}
-	for _, targets := range boxes {
-		if len(targets) > maxTargetsPerBox {
-			return nil, fmt.Errorf("live: more than %d targets per box", maxTargetsPerBox)
+	for box, targets := range boxes {
+		if !validBoxID(box) || len(targets) > maxTargetsPerBox {
+			return nil, ErrInvalid
 		}
 	}
 	h.mu.Lock()
 	v, ok := h.viewers[viewerID]
-	if !ok {
+	if !ok || v.session != sessionKey {
 		h.mu.Unlock()
-		return nil, fmt.Errorf("live: unknown viewer")
+		return nil, ErrUnknownViewer
 	}
-	if v.session != sessionKey {
+	h.mu.Unlock()
+
+	v.setMu.Lock()
+	defer v.setMu.Unlock()
+
+	h.mu.Lock()
+	if v.gone {
 		h.mu.Unlock()
-		return nil, fmt.Errorf("live: session mismatch")
+		return nil, ErrUnknownViewer
 	}
 	old := v.boxes
 	h.mu.Unlock()
 
-	// Request the visible targets; a box is granted when at least one
-	// of its targets is still covered by an on-demand lease. Only the
-	// requested targets are kept: a target without a live request
-	// records no live sample, and its history samples must not reach
-	// the viewer through this stream.
+	// Request the visible targets. Only the targets the scheduler
+	// accepted are kept, so a target without a live request never
+	// reaches this viewer.
 	granted := make([]string, 0, len(boxes))
-	next := map[string][]pvecollect.TelemetryTarget{}
+	next := make(map[string][]pvecollect.TelemetryTarget, len(boxes))
 	requested := map[pvecollect.TelemetryTarget]bool{}
 	for box, targets := range boxes {
 		var ok []pvecollect.TelemetryTarget
@@ -173,9 +231,7 @@ func (h *Hub) SetBoxes(viewerID, sessionKey string, boxes map[string][]pvecollec
 			granted = append(granted, box)
 		}
 	}
-
-	// Release every old target that is no longer requested (hidden
-	// box, or its lease no longer covers it).
+	// Release every old target that is no longer requested.
 	for _, targets := range old {
 		for _, t := range targets {
 			if !requested[t] {
@@ -185,9 +241,15 @@ func (h *Hub) SetBoxes(viewerID, sessionKey string, boxes map[string][]pvecollec
 	}
 
 	h.mu.Lock()
-	if v, ok := h.viewers[viewerID]; ok {
-		v.boxes = next
+	if v.gone {
+		// Removed (disconnect) while requesting: release what this call
+		// requested, so nothing outlives the stream.
+		h.mu.Unlock()
+		h.releaseAll(viewerID, next)
+		return nil, ErrUnknownViewer
 	}
+	v.boxes = next
+	v.renewed = h.now()
 	h.mu.Unlock()
 	return granted, nil
 }
@@ -200,17 +262,24 @@ func (h *Hub) RecordTelemetry(_ context.Context, s pvecollect.TelemetrySample) e
 	return nil
 }
 
-// Record fans out one recorded sample to the viewers that requested its
-// exact target. It is the sink hook of the scheduler; samples of
-// unrequested targets reach no viewer.
+// Record fans out one recorded live sample to the unexpired viewers that
+// requested its exact target. History samples and samples of targets no
+// viewer requested reach no viewer.
 func (h *Hub) Record(s pvecollect.TelemetrySample) {
-	h.mu.Lock()
+	if !s.Live {
+		return
+	}
+	now := h.now()
 	type fanout struct {
 		v   *viewer
 		box string
 	}
 	var out []fanout
+	h.mu.Lock()
 	for _, v := range h.viewers {
+		if expired(v, now) {
+			continue
+		}
 		for box, targets := range v.boxes {
 			for _, t := range targets {
 				if t == s.Target {
@@ -220,83 +289,119 @@ func (h *Hub) Record(s pvecollect.TelemetrySample) {
 			}
 		}
 	}
-	h.mu.Unlock()
-	if len(out) == 0 {
-		return
-	}
-	// The same target can be visible under different box IDs in
-	// different viewers (a host box and a guest box linked to that
-	// host); the payload carries the viewer's own box ID.
-	byBox := map[string]Event{}
+	// Send under the lock: Remove closes the channel under it too, so a
+	// send can never hit a closed channel. Sends never block.
+	built := map[string]Event{}
 	for _, f := range out {
-		ev, cached := byBox[f.box]
-		if !cached {
-			built, ok := valueEvent(f.box, s)
-			if !ok {
+		ev, ok := built[f.box]
+		if !ok {
+			if ev, ok = valueEvent(f.box, s); !ok {
 				continue
 			}
-			ev = built
-			byBox[f.box] = ev
+			built[f.box] = ev
 		}
-		select {
-		case f.v.ch <- ev:
-		default:
-			h.log.Warn("live: dropping event for full viewer queue", "box", f.box)
-		}
+		trySend(f.v, ev)
+	}
+	h.mu.Unlock()
+}
+
+// trySend queues ev without blocking; the caller holds Hub.mu.
+func trySend(v *viewer, ev Event) {
+	if v.gone {
+		return
+	}
+	select {
+	case v.ch <- ev:
+	default:
 	}
 }
 
-// Start sends the deferred-box age labels until ctx is done.
+func expired(v *viewer, now time.Time) bool {
+	return now.Sub(v.renewed) > viewerLease
+}
+
+// Start runs expiry and the deferred-box age labels until ctx is done.
 func (h *Hub) Start(ctx context.Context) {
-	t := time.NewTicker(ageTick)
+	t := time.NewTicker(tickInterval)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			h.tickAges()
+			h.Tick()
 		}
 	}
 }
 
-// tickAges labels every box whose newest observation is stale with the
-// age of its last observation (ADR 0006 P1-37: deferred boxes show the
-// age, never a fresh-looking value).
-func (h *Hub) tickAges() {
+// Tick expires viewers whose 30-s lease was not renewed (hidden page,
+// suspended tab): their requests are released and their boxes cleared;
+// the stream stays open and the next renewal requests them again. Then
+// every box whose newest observation is stale is labelled with the age
+// of its last observation (ADR 0006 P1-37: deferred boxes show the age,
+// never a fresh-looking value).
+func (h *Hub) Tick() {
 	now := h.now()
-	h.mu.Lock()
-	type boxAge struct {
-		v    *viewer
-		box  string
-		age  time.Duration
+	type expiredViewer struct {
+		id    string
+		boxes map[string][]pvecollect.TelemetryTarget
 	}
-	var out []boxAge
-	for _, v := range h.viewers {
+	var exp []expiredViewer
+	h.mu.Lock()
+	for id, v := range h.viewers {
+		if expired(v, now) && len(v.boxes) > 0 {
+			exp = append(exp, expiredViewer{id, v.boxes})
+			v.boxes = map[string][]pvecollect.TelemetryTarget{}
+		}
+	}
+	// Snapshot the boxes; LastObserved takes the scheduler's lock, which
+	// must not nest inside the hub's.
+	type boxRef struct {
+		id      string
+		box     string
+		targets []pvecollect.TelemetryTarget
+	}
+	var boxes []boxRef
+	for id, v := range h.viewers {
 		for box, targets := range v.boxes {
-			var newest time.Time
-			for _, t := range targets {
-				if ts, ok := h.sched.LastObserved(t); ok && ts.After(newest) {
-					newest = ts
-				}
-			}
-			if newest.IsZero() || now.Sub(newest) <= staleAfter {
-				continue
-			}
-			out = append(out, boxAge{v, box, now.Sub(newest)})
+			boxes = append(boxes, boxRef{id, box, targets})
 		}
 	}
 	h.mu.Unlock()
-	for _, b := range out {
-		ev, ok := ageEvent(b.box, b.age)
-		if !ok {
+
+	for _, e := range exp {
+		h.releaseAll(e.id, e.boxes)
+	}
+
+	type label struct {
+		id string
+		ev Event
+	}
+	var labels []label
+	for _, b := range boxes {
+		var newest time.Time
+		for _, t := range b.targets {
+			if ts, ok := h.sched.LastObserved(t); ok && ts.After(newest) {
+				newest = ts
+			}
+		}
+		if newest.IsZero() || now.Sub(newest) <= staleAfter {
 			continue
 		}
-		select {
-		case b.v.ch <- ev:
-		default:
+		if ev, ok := ageEvent(b.box, now.Sub(newest)); ok {
+			labels = append(labels, label{b.id, ev})
 		}
 	}
+	if len(labels) == 0 {
+		return
+	}
+	h.mu.Lock()
+	for _, l := range labels {
+		if v, ok := h.viewers[l.id]; ok {
+			trySend(v, l.ev)
+		}
+	}
+	h.mu.Unlock()
 }
 
 // Close ends all viewers (server shutdown).
@@ -318,5 +423,14 @@ func (h *Hub) Close() {
 }
 
 func validViewerID(id string) bool {
-	return id != "" && len(id) <= pvecollect.MaxViewerIDBytes
+	if len(id) != 32 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }

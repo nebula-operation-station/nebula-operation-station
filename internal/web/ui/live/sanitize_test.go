@@ -157,13 +157,19 @@ func TestValidBoxID(t *testing.T) {
 		{"node:pve1", true},
 		{"node:", false},
 		{"guest:pve1:101", true},
-		{"guest:pve1:101:2", true}, // last segment is the VMID
+		{"guest:pve1:101:2", false}, // "pve1:101" is no node name
 		{"guest:pve1:", false},
 		{"guest::101", false},
 		{"guest:pve1:10a", false},
+		{"guest:pve1:0101", false}, // non-canonical decimal
+		{"guest:pve1:99", false},   // below MinVMID
 		{"guest:pve1:" + strings.Repeat("9", 11), false},
+		{"node:pve1\nevent: x", false},
+		{"node:pve_1", false},
 		{"host:web01", true},
 		{"host:", false},
+		{"host:web 01", false},
+		{"host:<b>", false},
 		{"", false},
 		{"pve1", false},
 		{"node:" + strings.Repeat("a", 200), false},

@@ -7,25 +7,29 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecollect"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 )
 
 // randRead is crypto/rand, replaceable in tests.
 var randRead = func(p []byte) (int, error) { return rand.Read(p) }
 
-// maxBoxIDBytes bounds a box ID (the client-echoed identity of a visible
-// box: fixed kind prefix plus bounded node name / VMID / host ID).
+// maxBoxIDBytes bounds a box ID (fixed kind prefix plus bounded node
+// name / VMID / host ID).
 const maxBoxIDBytes = 128
 
 // valueEvent builds the sanitized SSE payload of one sample for one box.
 // It returns false when the sample carries nothing the client may show:
-// an unknown metric, an out-of-range value, or an invalid box ID. The
-// payload holds only the box ID (which the client itself sent), a fixed
-// metric token, a fraction in [0,1] and a unix timestamp — no host
-// names, endpoints, keys or free text (ADR 0006 P1-37: sanitized values).
+// an unknown metric, an out-of-range value, a missing timestamp or an
+// invalid box ID. The payload holds only the server-built box ID, a
+// fixed metric token, a fraction in [0,1] and a unix timestamp — no
+// host names beyond the box ID, endpoints, keys or free text (ADR 0006
+// P1-37: sanitized values).
 func valueEvent(boxID string, s pvecollect.TelemetrySample) (Event, bool) {
 	if !validBoxID(boxID) {
 		return Event{}, false
@@ -80,43 +84,45 @@ func ageEvent(boxID string, age time.Duration) (Event, bool) {
 }
 
 // helloData is the first event of a stream: the server-generated viewer
-// ID the client posts back with its visible-box updates.
+// ID the client posts back with its visible-box updates, and the renewal
+// interval the client must keep.
 func helloData(viewerID string) []byte {
-	b, _ := json.Marshal(struct {
+	b, err := json.Marshal(struct {
 		Viewer string `json:"viewer"`
-	}{viewerID})
+		Renew  int    `json:"renew"`
+	}{viewerID, int(clientRenewal / time.Second)})
+	if err != nil {
+		return []byte("{}")
+	}
 	return b
 }
 
-// validBoxID accepts the three box ID shapes the resolver builds:
-// "node:<name>", "guest:<name>:<vmid>", "host:<id>". The client never
-// sends box IDs directly; it sends the fields and the server builds the
-// ID, so an event can only ever be echoed back to its own viewer.
+// validBoxID accepts exactly the three box ID shapes boxRef.boxID
+// builds — "node:<name>", "guest:<name>:<vmid>", "host:<id>" — checked
+// with the same validators (PVE node name, VMID range, canonical host
+// ID). An ID that could not have been built server-side is never sent.
 func validBoxID(id string) bool {
 	if id == "" || len(id) > maxBoxIDBytes {
 		return false
 	}
 	switch {
 	case strings.HasPrefix(id, "node:"):
-		return len(id) > len("node:")
+		return pvecontract.ValidNodeName(id[len("node:"):])
 	case strings.HasPrefix(id, "guest:"):
 		rest := id[len("guest:"):]
 		i := strings.LastIndex(rest, ":")
-		if i <= 0 || i == len(rest)-1 {
+		if i <= 0 {
 			return false
 		}
-		vmid := rest[i+1:]
-		if vmid == "" || len(vmid) > 10 {
+		digits := rest[i+1:]
+		vmid, err := strconv.ParseUint(digits, 10, 64)
+		if err != nil || vmid < pvecontract.MinVMID || vmid > pvecontract.MaxVMID ||
+			strconv.FormatUint(vmid, 10) != digits {
 			return false
 		}
-		for _, r := range vmid {
-			if r < '0' || r > '9' {
-				return false
-			}
-		}
-		return true
+		return pvecontract.ValidNodeName(rest[:i])
 	case strings.HasPrefix(id, "host:"):
-		return len(id) > len("host:")
+		return canonical.ValidHostID(id[len("host:"):])
 	}
 	return false
 }

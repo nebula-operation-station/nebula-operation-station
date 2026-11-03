@@ -11,15 +11,31 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecollect"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
 )
 
-// maxTargetsBodyBytes bounds the visible-box update body.
-const maxTargetsBodyBytes = 16 * 1024
+// Routes of the live endpoints (served behind the login wrapper).
+const (
+	// EventsPath is the SSE stream of one viewer.
+	EventsPath = "/chart/live/events"
+	// TargetsPath receives the viewer's visible boxes.
+	TargetsPath = "/chart/live/targets"
+)
+
+const (
+	// maxTargetsBodyBytes bounds the visible-box update body.
+	maxTargetsBodyBytes = 16 * 1024
+	// keepAliveInterval is the cadence of SSE comment lines on an idle
+	// stream; each write extends the write deadline by writeWindow.
+	keepAliveInterval = 15 * time.Second
+	writeWindow       = 2 * keepAliveInterval
+)
 
 // Options configure the live endpoints.
 type Options struct {
@@ -28,16 +44,16 @@ type Options struct {
 	// Log receives resolution errors (the client only sees a denied
 	// list). Nil means slog.Default().
 	Log *slog.Logger
-	// Session returns the key of the authenticated session of a
-	// request. Required: the live endpoints are logged-in only.
+	// Session returns a stable, non-secret key of the authenticated
+	// session of a request. Nil means the web session set by the login
+	// wrapper (auth.SessionFrom). The live endpoints are logged-in only.
 	Session func(r *http.Request) (string, bool)
-	// Leases returns the current telemetry leases (P1-26). Nil means
-	// no live targets are ever resolved.
+	// Leases returns the current telemetry leases (P1-26). Nil means no
+	// box is ever resolved.
 	Leases func(ctx context.Context) ([]pvecollect.TelemetryLease, error)
-	// Tree returns the org-chart tree; it binds a guest box to its
-	// incarnation generation so a box can never be answered from
-	// another generation's samples. Nil means guest boxes are not
-	// resolved.
+	// Tree returns the org-chart tree; it binds a guest box to the
+	// incarnation generation (and managed-host link) the chart shows.
+	// Nil means guest boxes are not resolved.
 	Tree func(ctx context.Context) (pveinventory.Tree, error)
 }
 
@@ -50,13 +66,13 @@ type Handler struct {
 	tree    func(ctx context.Context) (pveinventory.Tree, error)
 }
 
-// New returns a Handler. Hub and Session are required.
+// New returns a Handler. Hub is required.
 func New(o Options) (*Handler, error) {
 	if o.Hub == nil {
 		return nil, errors.New("live: hub is required")
 	}
 	if o.Session == nil {
-		return nil, errors.New("live: session is required")
+		o.Session = webSession
 	}
 	if o.Log == nil {
 		o.Log = slog.Default()
@@ -64,10 +80,27 @@ func New(o Options) (*Handler, error) {
 	return &Handler{hub: o.Hub, log: o.Log, session: o.Session, leases: o.Leases, tree: o.Tree}, nil
 }
 
+// webSession keys a request by its web session: the credential and the
+// session's creation time (never the session token).
+func webSession(r *http.Request) (string, bool) {
+	s, ok := auth.SessionFrom(r.Context())
+	if !ok || s.CredentialID == "" {
+		return "", false
+	}
+	return s.CredentialID + "\x00" + strconv.FormatInt(s.CreatedAt.UnixNano(), 10), true
+}
+
+// Register adds the live routes to mux.
+func (h *Handler) Register(mux *http.ServeMux) {
+	mux.HandleFunc(EventsPath, h.Events)
+	mux.HandleFunc(TargetsPath, h.Targets)
+}
+
 // Events is the SSE stream of one viewer. It requires a session (the
-// server wraps it; the check here is the testable backstop). On connect
-// it sends a "hello" event carrying the viewer ID; the client then posts
-// its visible boxes to Targets with that ID.
+// server wraps it in the login check; this check is the backstop). On
+// connect it sends a "hello" event carrying the viewer ID; the client
+// then posts its visible boxes to Targets with that ID. Disconnecting
+// releases every target of the viewer.
 func (h *Handler) Events(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -78,38 +111,48 @@ func (h *Handler) Events(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "login required", http.StatusUnauthorized)
 		return
 	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-		return
-	}
 	viewerID, err := newViewerID()
 	if err != nil {
+		h.log.Error("live: viewer id", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	ch, err := h.hub.Add(viewerID, sess)
+	if errors.Is(err, ErrTooManyViewers) {
+		http.Error(w, "too many live views", http.StatusTooManyRequests)
+		return
+	}
 	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		http.Error(w, "live values unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	defer h.hub.Remove(viewerID)
 
+	rc := http.NewResponseController(w)
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
-	writeEvent(w, flusher, Event{Name: "hello", Data: helloData(viewerID)})
-
+	if writeEvent(w, rc, Event{Name: "hello", Data: helloData(viewerID)}) != nil {
+		return
+	}
+	keep := time.NewTicker(keepAliveInterval)
+	defer keep.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-keep.C:
+			if writeRaw(w, rc, ": keepalive\n\n") != nil {
+				return
+			}
 		case ev, ok := <-ch:
 			if !ok {
 				return
 			}
-			writeEvent(w, flusher, ev)
+			if writeEvent(w, rc, ev) != nil {
+				return
+			}
 		}
 	}
 }
@@ -124,16 +167,17 @@ type boxRef struct {
 	ID   string  `json:"id"`   // host ID (kind "host")
 }
 
-// Targets sets the viewer's visible boxes. The body is JSON:
+// Targets sets the viewer's visible boxes and renews its 30-s lease.
+// The body is JSON:
 //
 //	{"viewer": "<id>", "boxes": [{"kind":"node","name":"pve1"},
 //	                               {"kind":"guest","node":"pve1","vmid":101},
-//	                               {"kind":"host","id":"host-1"}]}
+//	                               {"kind":"host","id":"web01"}]}
 //
-// It answers {"granted": [...], "denied": [...]} with box IDs. A box is
-// granted when at least one of its exact targets is still covered by an
-// on-demand lease (P1-26); everything else is denied and the client
-// keeps the server-rendered value with its age.
+// An empty box list (hidden page) releases every target. It answers
+// {"granted": [...], "denied": [...]} with box IDs. A box is granted when
+// at least one of its exact targets is covered by an on-demand lease
+// (P1-26); a denied box keeps its server-rendered value.
 func (h *Handler) Targets(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -164,22 +208,23 @@ func (h *Handler) Targets(w http.ResponseWriter, r *http.Request) {
 	boxes, denied := h.resolve(r.Context(), req.Boxes)
 	granted, err := h.hub.SetBoxes(req.Viewer, sess, boxes)
 	if err != nil {
-		// Unknown viewer or session mismatch: the stream is gone or
-		// belongs to someone else; the client must reopen it.
+		// Unknown viewer or another session's: the client must reopen
+		// its own stream.
 		http.Error(w, "viewer expired", http.StatusGone)
 		return
 	}
-	writeJSON(w, http.StatusOK, struct {
+	writeJSON(w, struct {
 		Granted []string `json:"granted"`
 		Denied  []string `json:"denied"`
 	}{granted, denied})
 }
 
 // resolve maps the refs to the exact leased targets. A ref matches every
-// lease target with the same identity fields (a node name can exist on
+// on-demand lease target with the same identity (a node name can exist on
 // several remotes; a guest is bound to its tree generation; a host
-// matches both of its telemetry actions). Nothing is ever added that a
-// lease does not list — the live endpoints widen no scope.
+// matches each of its telemetry actions). Nothing is added that a lease
+// does not list — the live endpoints widen no scope — and the scheduler
+// re-checks every target on Request.
 func (h *Handler) resolve(ctx context.Context, refs []boxRef) (map[string][]pvecollect.TelemetryTarget, []string) {
 	boxes := map[string][]pvecollect.TelemetryTarget{}
 	denied := []string{}
@@ -190,9 +235,10 @@ func (h *Handler) resolve(ctx context.Context, refs []boxRef) (map[string][]pvec
 	if h.leases != nil {
 		ls, err := h.leases(ctx)
 		if err != nil {
-			h.log.Error("live: list leases", "err", err)
-		} else {
-			for _, l := range ls {
+			h.log.Error("live: list leases", "error", err)
+		}
+		for _, l := range ls {
+			if l.OnDemand {
 				targets = append(targets, l.Targets...)
 			}
 		}
@@ -201,7 +247,7 @@ func (h *Handler) resolve(ctx context.Context, refs []boxRef) (map[string][]pvec
 	if h.tree != nil {
 		t, err := h.tree(ctx)
 		if err != nil {
-			h.log.Error("live: chart tree", "err", err)
+			h.log.Error("live: chart tree", "error", err)
 		} else {
 			tree = t
 		}
@@ -211,9 +257,14 @@ func (h *Handler) resolve(ctx context.Context, refs []boxRef) (map[string][]pvec
 		if !ok {
 			continue
 		}
+		if _, dup := boxes[box]; dup {
+			continue
+		}
 		var match []pvecollect.TelemetryTarget
+		seen := map[pvecollect.TelemetryTarget]bool{}
 		for _, t := range targets {
-			if ref.matches(t, tree) {
+			if !seen[t] && ref.matches(t, tree) {
+				seen[t] = true
 				match = append(match, t)
 			}
 		}
@@ -262,68 +313,61 @@ func (ref boxRef) matches(t pvecollect.TelemetryTarget, tree pveinventory.Tree) 
 		return t.Source == pvecollect.TelemetryProvider &&
 			t.Kind == pvecollect.TelemetryKindNode && t.Node == ref.Name
 	case "guest":
-		if t.Source == pvecollect.TelemetryProvider {
-			if t.Kind != pvecollect.TelemetryKindQEMU && t.Kind != pvecollect.TelemetryKindLXC {
-				return false
-			}
-			if t.Node != ref.Node || t.VMID != *ref.VMID {
-				return false
-			}
-			// Bind the box to the incarnation the chart shows; without
-			// the tree the generation is unknown and the guest is not
-			// resolved (no scope widening through a stale DOM).
-			return t.Generation == guestGeneration(tree, ref.Node, *ref.VMID)
+		g, ok := treeGuest(tree, ref.Node, *ref.VMID)
+		if !ok {
+			// Without the guest in the tree its incarnation is unknown:
+			// not resolved (no scope widening through a stale page).
+			return false
 		}
-		// A guest box linked to a managed host shows that host's
-		// observations; the link is display-only and the target stays
-		// the exact leased host target.
-		return t.Source == pvecollect.TelemetrySSH && t.HostID == guestHostID(tree, ref.Node, *ref.VMID)
+		if t.Source == pvecollect.TelemetryProvider {
+			return (t.Kind == pvecollect.TelemetryKindQEMU || t.Kind == pvecollect.TelemetryKindLXC) &&
+				t.Node == ref.Node && t.VMID == *ref.VMID && t.RemoteID == g.RemoteID &&
+				g.Generation != 0 && t.Generation == g.Generation
+		}
+		// A guest linked to a managed host shows that host's
+		// observations; the target stays the exact leased host target.
+		return t.Source == pvecollect.TelemetrySSH && g.HostID != "" && t.HostID == g.HostID
 	case "host":
 		return t.Source == pvecollect.TelemetrySSH && t.HostID == ref.ID
 	}
 	return false
 }
 
-// guestGeneration returns the generation of the guest box in the tree,
-// or 0 when the tree does not contain that guest (no match).
-func guestGeneration(tree pveinventory.Tree, node string, vmid uint64) uint64 {
+// treeGuest returns the guest box of the tree under node with vmid.
+func treeGuest(tree pveinventory.Tree, node string, vmid uint64) (pveinventory.Box, bool) {
 	for _, root := range tree.Roots {
 		if root.Kind != pveinventory.KindPVENode || root.Name != node {
 			continue
 		}
 		for _, g := range root.Children {
 			if g.Kind == pveinventory.KindGuest && g.VMID == vmid {
-				return g.Generation
+				if g.RemoteID == "" {
+					g.RemoteID = root.RemoteID
+				}
+				return g, true
 			}
 		}
 	}
-	return 0
+	return pveinventory.Box{}, false
 }
 
-// guestHostID returns the managed host linked to the guest box, or ""
-// when the tree does not contain that guest or it is not linked (no
-// SSH target matches, since lease targets always carry a host ID).
-func guestHostID(tree pveinventory.Tree, node string, vmid uint64) string {
-	for _, root := range tree.Roots {
-		if root.Kind != pveinventory.KindPVENode || root.Name != node {
-			continue
-		}
-		for _, g := range root.Children {
-			if g.Kind == pveinventory.KindGuest && g.VMID == vmid {
-				return g.HostID
-			}
-		}
+func writeEvent(w io.Writer, rc *http.ResponseController, ev Event) error {
+	return writeRaw(w, rc, fmt.Sprintf("event: %s\ndata: %s\n\n", ev.Name, ev.Data))
+}
+
+// writeRaw writes and flushes one SSE chunk, extending the server's
+// write deadline first (the stream outlives the per-request timeout).
+func writeRaw(w io.Writer, rc *http.ResponseController, s string) error {
+	_ = rc.SetWriteDeadline(time.Now().Add(writeWindow))
+	if _, err := io.WriteString(w, s); err != nil {
+		return err
 	}
-	return ""
+	return rc.Flush()
 }
 
-func writeEvent(w http.ResponseWriter, f http.Flusher, ev Event) {
-	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Name, ev.Data)
-	f.Flush()
-}
-
-func writeJSON(w http.ResponseWriter, code int, v any) {
+func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(v)
 }
