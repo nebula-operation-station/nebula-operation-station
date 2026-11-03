@@ -75,6 +75,11 @@ type BulkAdmitResult struct {
 	CleanupFailures int
 	// Tuples are the old/new trust tuples.
 	Tuples []TrustTuple
+	// ArtifactsTrusted are the exact artifact trust tuples the executor
+	// recorded for this commit, and ArtifactsRevoked the ones retirement
+	// revoked. BulkAdmit leaves both empty; the executor's trust
+	// transaction fills them after recording ArtifactTrustFor.
+	ArtifactsTrusted, ArtifactsRevoked []ArtifactTuple
 }
 
 // BulkAdmit reviews a verified candidate, scans its new/changed actions,
