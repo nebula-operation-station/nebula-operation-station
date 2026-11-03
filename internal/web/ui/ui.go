@@ -189,7 +189,7 @@ type Handler struct {
 	runbooks       Runbooks
 	deployProfiles DeployProfiles
 	trust          ArtifactTrust
-	builtinTrust   BuiltinTrustProvider
+	builtinTrust   *builtinTrustCache
 	modules        Modules
 	lastResult     LastResultFunc
 	network        NetworkStore
@@ -252,12 +252,11 @@ func New(o Options) (*Handler, error) {
 			return sorted, nil
 		}
 	}
-	return &Handler{
+	h := &Handler{
 		publicOrigin:   o.PublicOrigin,
 		pages:          pages,
 		staticFS:       staticFS,
 		status:         o.Status,
-		builtinTrust:   o.BuiltinTrust,
 		hostNames:      o.HostNames,
 		hosts:          hosts,
 		hostKeys:       o.HostKeys,
@@ -286,7 +285,11 @@ func New(o Options) (*Handler, error) {
 		pveRemotes:     o.PVERemotes,
 		now:            o.Now,
 		log:            log,
-	}, nil
+	}
+	if o.BuiltinTrust != nil {
+		h.builtinTrust = newBuiltinTrustCache(o.BuiltinTrust, h.clockNow, log)
+	}
+	return h, nil
 }
 
 // inventoryHostLess orders inventory rows: by the shown name (display
@@ -617,7 +620,8 @@ type pageData struct {
 	// PVENav shows the PVE navigation item (Options.PVE is set).
 	PVENav bool
 	// BuiltinTrust is the layout's built-in trust banner (ADR 0007
-	// E17); nil hides it. render fills it from the executor.
+	// E17); nil hides it. render fills it from the cached executor
+	// verdict (builtinTrustCache).
 	BuiltinTrust *builtinTrustView
 	// InventoryEditable is true when Options.Inventory is set; the
 	// page then shows the add-host form and the per-row edit and
@@ -779,7 +783,7 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, data pageData) 
 	data.NavCollapsed = navStateFromRequest(r) == navCollapsed
 	data.PVENav = h.pve != nil
 	if !data.Bare && h.builtinTrust != nil {
-		data.BuiltinTrust = h.builtinTrustStatus(r.Context())
+		data.BuiltinTrust = h.builtinTrust.get(r.Context())
 	}
 	set, ok := h.pages[data.Content]
 	if !ok {

@@ -4,10 +4,30 @@ package ui
 
 import (
 	"context"
+	"log/slog"
+	"sync"
+	"time"
 
 	"google.golang.org/grpc"
 
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+)
+
+// Built-in trust banner cache limits. Every non-bare page shows the
+// banner, so the server caches the executor's verdict instead of asking
+// it (a full dry-run review) on every render.
+const (
+	// builtinTrustTTL is how long a fetched verdict is shown. After it
+	// expires the verdict is stale and is never shown again: a stale
+	// status renders as unavailable until a refresh succeeds.
+	builtinTrustTTL = 30 * time.Second
+	// builtinTrustFailTTL is how long an RPC failure is cached before
+	// the next refresh is attempted.
+	builtinTrustFailTTL = 5 * time.Second
+	// builtinTrustPageWait bounds how long a page render waits for a
+	// refresh. A slower executor makes that render show "unavailable";
+	// the refresh keeps running in the background and fills the cache.
+	builtinTrustPageWait = 300 * time.Millisecond
 )
 
 // BuiltinTrustProvider reports the executor's built-in trust verdict
@@ -29,7 +49,7 @@ type builtinTrustView struct {
 	// Command is the local CLI command, shown in <code>; empty when the
 	// state is not untrusted.
 	Command string
-	// Affected lists the built-in versions that are not trusted yet.
+	// Affected lists the built-ins whose current state is not trusted.
 	Affected []builtinTrustEntryView
 	// Detail is the closing guidance sentence.
 	Detail string
@@ -39,18 +59,35 @@ type builtinTrustView struct {
 type builtinTrustEntryView struct {
 	// Name is the module name from the executor.
 	Name string
-	// Version is the version in the local release.
+	// Version is the version in the local release; empty when Removed.
 	Version string
-	// Trusted is the trusted version when a different one is trusted;
-	// empty when none is.
+	// Trusted is the trusted version; empty when none is.
 	Trusted string
+	// Removed is true when the module is trusted locally but absent
+	// from the release.
+	Removed bool
+}
+
+// unavailableBuiltinTrust is the "unreachable" banner: not a trust
+// verdict, no versions.
+func unavailableBuiltinTrust() *builtinTrustView {
+	return &builtinTrustView{
+		Kind:     "unavailable",
+		Headline: "Built-in trust status is unreachable: the executor could not read its local release bundle or trust store.",
+		Detail:   "This is not a trust verdict: whether the built-ins are trusted is unknown. Check the executor on its host.",
+	}
 }
 
 // builtinTrustBanner maps the executor's built-in trust status to the
 // layout banner (ADR 0007 E17). A fully trusted status yields nil (no
-// banner). Untrusted names the affected versions, the local CLI command
+// banner). Untrusted names the affected modules, the local CLI command
 // and the lease-replacement rule. Unavailable is a distinct
 // "unreachable" state: it is not a trust verdict and names no versions.
+//
+// Which modules are affected is the executor's per-module verdict
+// (Change), not re-derived from versions and hashes: the executor can
+// mark a module CHANGED with identical versions and hashes (its
+// retained bytes are missing or corrupt).
 func builtinTrustBanner(st *pb.GetBuiltinTrustStatusResponse) *builtinTrustView {
 	switch st.GetState() {
 	case pb.BuiltinTrustState_BUILTIN_TRUST_STATE_UNTRUSTED:
@@ -61,40 +98,111 @@ func builtinTrustBanner(st *pb.GetBuiltinTrustStatusResponse) *builtinTrustView 
 			Detail:   "Trusting new built-in versions does not amend existing read leases: approve a replacement grant for those exact versions.",
 		}
 		for _, m := range st.GetModules() {
-			if m.GetReleaseVersion() == "" {
-				continue // not part of the local release
-			}
-			if m.GetTrustedVersion() == m.GetReleaseVersion() && m.GetTrustedSha256() == m.GetReleaseSha256() {
-				continue // this exact version is trusted
+			if m.GetChange() == pb.BuiltinTrustChange_BUILTIN_TRUST_CHANGE_UNCHANGED {
+				continue // byte-identical to the trusted version
 			}
 			v.Affected = append(v.Affected, builtinTrustEntryView{
 				Name:    m.GetName(),
 				Version: m.GetReleaseVersion(),
 				Trusted: m.GetTrustedVersion(),
+				Removed: m.GetChange() == pb.BuiltinTrustChange_BUILTIN_TRUST_CHANGE_REMOVED,
 			})
 		}
 		return v
 	case pb.BuiltinTrustState_BUILTIN_TRUST_STATE_UNAVAILABLE:
-		return &builtinTrustView{
-			Kind:     "unavailable",
-			Headline: "Built-in trust status is unreachable: the executor could not read its local release bundle or trust store.",
-			Detail:   "This is not a trust verdict: whether the built-ins are trusted is unknown. Check the executor on its host.",
-		}
+		return unavailableBuiltinTrust()
 	default:
 		return nil // trusted (or unspecified): no banner
 	}
 }
 
-// builtinTrustStatus fetches the banner state for a page render. An RPC
-// failure is the same "unreachable" state as UNAVAILABLE: it is logged,
-// never shown raw, and never conflated with "untrusted".
-func (h *Handler) builtinTrustStatus(ctx context.Context) *builtinTrustView {
-	ctx, cancel := context.WithTimeout(ctx, statusCallTimeout)
-	defer cancel()
-	st, err := h.builtinTrust.GetBuiltinTrustStatus(ctx, &pb.GetBuiltinTrustStatusRequest{})
-	if err != nil {
-		h.log.Error("builtin trust status", "error", err)
-		return builtinTrustBanner(&pb.GetBuiltinTrustStatusResponse{State: pb.BuiltinTrustState_BUILTIN_TRUST_STATE_UNAVAILABLE})
+// builtinTrustCache caches the banner for page renders. One refresh
+// runs at a time (single flight), detached from the request and bounded
+// by callTimeout; a render waits at most wait for it. A verdict is shown
+// only while fresh: an expired, failed or still-pending status renders
+// as unavailable, never as trusted.
+type builtinTrustCache struct {
+	provider    BuiltinTrustProvider
+	now         func() time.Time
+	log         *slog.Logger
+	ttl         time.Duration
+	failTTL     time.Duration
+	wait        time.Duration
+	callTimeout time.Duration
+
+	mu       sync.Mutex
+	view     *builtinTrustView
+	expires  time.Time
+	have     bool
+	inflight chan struct{} // closed when the running refresh finishes
+	failing  bool          // last refresh failed (logged once per change)
+}
+
+func newBuiltinTrustCache(p BuiltinTrustProvider, now func() time.Time, log *slog.Logger) *builtinTrustCache {
+	return &builtinTrustCache{
+		provider:    p,
+		now:         now,
+		log:         log,
+		ttl:         builtinTrustTTL,
+		failTTL:     builtinTrustFailTTL,
+		wait:        builtinTrustPageWait,
+		callTimeout: statusCallTimeout,
 	}
-	return builtinTrustBanner(st)
+}
+
+// get returns the banner for a page render (nil: no banner).
+func (c *builtinTrustCache) get(ctx context.Context) *builtinTrustView {
+	c.mu.Lock()
+	if c.have && c.now().Before(c.expires) {
+		v := c.view
+		c.mu.Unlock()
+		return v
+	}
+	ch := c.inflight
+	if ch == nil {
+		ch = make(chan struct{})
+		c.inflight = ch
+		go c.refresh(ch)
+	}
+	c.mu.Unlock()
+
+	t := time.NewTimer(c.wait)
+	defer t.Stop()
+	select {
+	case <-ch:
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.have {
+			return c.view // just fetched
+		}
+	case <-t.C:
+	case <-ctx.Done():
+	}
+	return unavailableBuiltinTrust()
+}
+
+// refresh fetches the status once and stores it, then closes ch. An RPC
+// failure is stored as the unreachable state; it is logged once per
+// change of state, never shown raw.
+func (c *builtinTrustCache) refresh(ch chan struct{}) {
+	ctx, cancel := context.WithTimeout(context.Background(), c.callTimeout)
+	st, err := c.provider.GetBuiltinTrustStatus(ctx, &pb.GetBuiltinTrustStatusRequest{})
+	cancel()
+	view, ttl := builtinTrustBanner(st), c.ttl
+	if err != nil {
+		view, ttl = unavailableBuiltinTrust(), c.failTTL
+	}
+
+	c.mu.Lock()
+	switch {
+	case err != nil && !c.failing:
+		c.log.Error("builtin trust status", "error", err)
+	case err == nil && c.failing:
+		c.log.Info("builtin trust status reachable again")
+	}
+	c.failing = err != nil
+	c.view, c.have, c.expires = view, true, c.now().Add(ttl)
+	c.inflight = nil
+	c.mu.Unlock()
+	close(ch)
 }

@@ -100,7 +100,7 @@
         {{if .Affected}}
         <p class="trust-banner__detail">Affected built-ins:</p>
         <ul class="trust-banner__list">
-          {{range .Affected}}<li><code>{{.Name}}</code> <code>{{.Version}}</code>{{if .Trusted}} (trusted: <code>{{.Trusted}}</code>){{end}}</li>
+          {{range .Affected}}<li><code>{{.Name}}</code> {{if .Removed}}removed from the local release{{else}}<code>{{.Version}}</code>{{end}}{{if .Trusted}} (trusted: <code>{{.Trusted}}</code>){{end}}</li>
           {{end}}
         </ul>
         {{end}}

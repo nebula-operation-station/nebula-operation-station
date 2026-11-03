@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 
@@ -140,5 +142,51 @@ func TestTrustBannerNotOnBarePages(t *testing.T) {
 	}, nil), "/login")
 	if strings.Contains(body, "trust-banner") {
 		t.Error("bare page rendered the trust banner")
+	}
+}
+
+// countingBuiltinTrust counts RPCs made by page renders.
+type countingBuiltinTrust struct {
+	calls atomic.Int32
+	resp  *pb.GetBuiltinTrustStatusResponse
+}
+
+func (f *countingBuiltinTrust) GetBuiltinTrustStatus(ctx context.Context, in *pb.GetBuiltinTrustStatusRequest, opts ...grpc.CallOption) (*pb.GetBuiltinTrustStatusResponse, error) {
+	f.calls.Add(1)
+	return f.resp, nil
+}
+
+func TestTrustBannerCachedAcrossPageRenders(t *testing.T) {
+	p := &countingBuiltinTrust{resp: &pb.GetBuiltinTrustStatusResponse{State: pb.BuiltinTrustState_BUILTIN_TRUST_STATE_UNTRUSTED}}
+	now := time.Unix(1_000_000, 0)
+	h := newTestHandler(t, ui.Options{
+		PublicOrigin: "https://nebula.example.org",
+		BuiltinTrust: p,
+		Now:          func() time.Time { return now },
+	}).Handler()
+	for _, path := range []string{"/dashboard", "/inventory", "/dashboard"} {
+		if body := getBody(t, h, path); !strings.Contains(body, "trust-banner--untrusted") {
+			t.Fatalf("GET %s: untrusted banner missing", path)
+		}
+	}
+	if n := p.calls.Load(); n != 1 {
+		t.Fatalf("%d trust RPCs for three page renders within the TTL, want 1", n)
+	}
+}
+
+func TestTrustBannerRendersRemovedModule(t *testing.T) {
+	body := getBody(t, trustHandler(t, &pb.GetBuiltinTrustStatusResponse{
+		State: pb.BuiltinTrustState_BUILTIN_TRUST_STATE_UNTRUSTED,
+		Modules: []*pb.BuiltinTrustEntry{
+			{Name: "oldmod", Change: pb.BuiltinTrustChange_BUILTIN_TRUST_CHANGE_REMOVED, TrustedVersion: "0.9.0", TrustedSha256: "ee"},
+		},
+	}, nil), "/dashboard")
+	for _, want := range []string{
+		"Affected built-ins:",
+		"<code>oldmod</code> removed from the local release (trusted: <code>0.9.0</code>)",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dashboard missing %q", want)
+		}
 	}
 }
