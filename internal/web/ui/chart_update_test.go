@@ -531,6 +531,22 @@ func TestChartStagedUpdateNoParentCheckboxes(t *testing.T) {
 	if n := len(hostCheckboxes(t, before)); n != 0 {
 		t.Errorf("host checkboxes outside the form: %d", n)
 	}
+	// Every input the page submits as "host", of any type and anywhere
+	// on the page, is one of the enrolled managed hosts and inside the
+	// staged update form: no tree box adds ids to the selection.
+	all := regexp.MustCompile(`<input[^>]*name="host"[^>]*>`).FindAllString(body, -1)
+	if len(all) != 3 {
+		t.Errorf("inputs named host on the page = %d (%v), want 3", len(all), all)
+	}
+	for _, in := range all {
+		if !strings.Contains(form, in) {
+			t.Errorf("input %s is outside the staged update form", in)
+		}
+		m := regexp.MustCompile(`value="([^"]*)"`).FindStringSubmatch(in)
+		if m == nil || (m[1] != "ci-01" && m[1] != "db-01" && m[1] != "web-01") {
+			t.Errorf("input %s submits a host that is not an enrolled managed host", in)
+		}
+	}
 }
 
 func TestChartStagedUpdateRefusesUnknownHost(t *testing.T) {

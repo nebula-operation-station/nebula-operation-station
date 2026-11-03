@@ -175,9 +175,18 @@
   {{if .Chart.Staged.Confirm}}
   <section class="panel staged-confirm" aria-label="Confirm staged OS update">
     <h2>Confirm staged OS update</h2>
-    <p>{{.Chart.Staged.Confirm.ActionLabel}} will run on the {{len .Chart.Staged.Confirm.Hosts}} host(s) below, in the order shown. The list is frozen: nothing runs before you confirm.</p>
-    <ol class="staged-confirm__hosts">
-      {{range .Chart.Staged.Confirm.Hosts}}<li>{{.Name}}</li>
+    <p>{{.Chart.Staged.Confirm.ActionLabel}} on {{len .Chart.Staged.Confirm.Hosts}} host(s), proposed as the staged rollout below: {{len .Chart.Staged.Confirm.Stages}} stage(s) by inventory environment (DEV, then QA, then PROD), one after the other. The plan is frozen: nothing is proposed before you confirm.</p>
+    <ol class="staged-confirm__stages">
+      {{range .Chart.Staged.Confirm.Stages}}<li class="staged-confirm__stage">
+        <h3>Stage {{.Num}}: {{.Name}}</h3>
+        <p class="muted">{{if eq .MaxFailed 0}}No failed or unreachable host tolerated.{{else}}Up to {{.MaxFailed}} failed and {{.MaxFailed}} unreachable host(s) tolerated.{{end}}</p>
+        <ul class="staged-confirm__hosts">
+          {{range .Hosts}}<li>{{.Name}}</li>
+          {{end}}
+        </ul>
+        {{if .GateManual}}<p class="staged-confirm__gate">Gate: stage {{.Num}} must pass, then you continue to the next stage manually on the operation page.</p>{{end}}
+        {{if .GateAuto}}<p class="staged-confirm__gate">Gate: the next stage opens automatically once stage {{.Num}} passed.</p>{{end}}
+      </li>
       {{end}}
     </ol>
     <form method="post" action="/inventory/chart/staged">
@@ -192,12 +201,13 @@
   {{else}}
   <section class="panel staged-update" aria-label="Staged OS update">
     <h2>Staged OS update</h2>
-    <p class="muted">Select the hosts to update. Only enrolled managed hosts are selectable: selecting a host never includes its containers, and PVE nodes and guests are never offered.</p>
+    <p class="muted">Select the hosts to update. Only enrolled managed hosts with a DEV, QA or PROD environment are selectable: selecting a host never includes its containers, and PVE nodes and guests are never offered. The update runs in stages by environment (DEV, then QA, then PROD) with a manual gate between stages; the next page shows the plan before anything is proposed.</p>
     <form method="post" action="/inventory/chart/staged">
       <fieldset>
         <legend>Hosts</legend>
-        {{range .Chart.Staged.Form.Hosts}}<label class="staged-update__host"><input type="checkbox" name="host" value="{{.ID}}"> {{.Name}}</label>
-        {{end}}
+        {{range .Chart.Staged.Form.Hosts}}{{if .Unselectable}}<label class="staged-update__host staged-update__host--disabled"><input type="checkbox" value="{{.ID}}" disabled> {{.Name}} <span class="muted">(not selectable: {{.Unselectable}})</span></label>
+        {{else}}<label class="staged-update__host"><input type="checkbox" name="host" value="{{.ID}}"> {{.Name}}</label>
+        {{end}}{{end}}
       </fieldset>
       <label>Action
         <select name="action">

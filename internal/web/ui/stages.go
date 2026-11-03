@@ -225,16 +225,34 @@ func (h *Handler) handleOperationRetry(w http.ResponseWriter, r *http.Request) {
 // authorizes its descendants: the form offers managed hosts only, and
 // the frozen list is handed to the existing stage proposal
 // (Operations.CreateStaged) with the DEV/QA/PROD preset and a manual
-// gate after every stage.
+// gate after every stage. The confirmation page shows the stages that
+// preset lays out (executions.PlanStages, the layout CreateStaged
+// proposes), not just the host list.
 
 const (
 	// stagedMaxHosts bounds one staged update selection from the form.
 	stagedMaxHosts = 1000
+	// stagedMaxBody bounds the form body (1000 host ids and the rest
+	// fit with room to spare).
+	stagedMaxBody = 1 << 20
+	// stagedMaxEcho bounds a client-supplied host id echoed in an
+	// error.
+	stagedMaxEcho = 64
 	// stagedActionSecurity and stagedActionAll are the two update
 	// actions of the form.
 	stagedActionSecurity = "package.install_security"
 	stagedActionAll      = "package.install_all"
+	// stagedNoEnvironment is why an enrolled host without a DEV, QA or
+	// PROD environment cannot be selected: the preset has no stage
+	// for it.
+	stagedNoEnvironment = "no environment (DEV, QA or PROD), so it fits no stage"
 )
+
+// stagedPlan is the plan of every staged update from the chart: the
+// DEV/QA/PROD stages by the hosts' inventory environment, a manual
+// gate after every stage, no failed host tolerated. The confirmation
+// page and the proposal both use it.
+var stagedPlan = executions.Plan{Preset: executions.PresetEnvironments, Continue: stageplan.ContinueManual, MaxFailed: 0}
 
 var stagedUpdateActions = []stagedAction{
 	{ID: stagedActionSecurity, Label: "Security updates"},
@@ -249,12 +267,15 @@ type stagedAction struct {
 	Label string
 }
 
-// stagedHost is one selectable host of the staged update form.
+// stagedHost is one host of the staged update form.
 type stagedHost struct {
 	// ID is the inventory host id (the checkbox value).
 	ID string
 	// Name is the displayed host name.
 	Name string
+	// Unselectable is why the host cannot be selected (shown next to
+	// its disabled checkbox); empty when it can.
+	Unselectable string
 }
 
 // stagedFormData is the selection form on the chart page.
@@ -265,10 +286,33 @@ type stagedFormData struct {
 	Actions []stagedAction
 }
 
-// stagedConfirmData is the frozen host list on the confirmation page.
-type stagedConfirmData struct {
-	// Hosts is the frozen selection, in submitted order.
+// stagedStageView is one stage of the plan on the confirmation page.
+type stagedStageView struct {
+	// Num is the stage number (from 1).
+	Num int
+	// Name is the stage name of the plan (dev, qa, prod).
+	Name string
+	// Hosts are the stage's hosts, in plan order.
 	Hosts []stagedHost
+	// MaxFailed is the number of failed (and of unreachable) hosts the
+	// stage tolerates.
+	MaxFailed int
+	// GateManual: a manual gate follows the stage (the next stage opens
+	// only when someone continues); false on the last stage and when
+	// the next stage opens automatically.
+	GateManual bool
+	// GateAuto: the next stage opens automatically once this stage
+	// passed.
+	GateAuto bool
+}
+
+// stagedConfirmData is the frozen selection on the confirmation page.
+type stagedConfirmData struct {
+	// Hosts is the frozen selection, in submitted order (the hidden
+	// inputs of the confirm form).
+	Hosts []stagedHost
+	// Stages is the staged plan that the confirm form proposes.
+	Stages []stagedStageView
 	// Action is the selected action id.
 	Action string
 	// ActionLabel is the selected action label.
@@ -287,7 +331,8 @@ type stagedUpdateData struct {
 }
 
 // stagedUpdateSection builds the staged update selection of the chart
-// page: one checkbox per enrolled managed host. PVE nodes, guests and
+// page: one checkbox per enrolled managed host, disabled with the
+// reason for a host the plan has no stage for. PVE nodes, guests and
 // containers are never offered. It returns nil (section hidden) when
 // operations are off or the enrollment cannot be determined.
 func (h *Handler) stagedUpdateSection(hosts []inventory.Host, pins map[string]*pb.HostKeyPin, pinsUnavailable bool) *stagedUpdateData {
@@ -296,9 +341,14 @@ func (h *Handler) stagedUpdateSection(hosts []inventory.Host, pins map[string]*p
 	}
 	var enrolled []stagedHost
 	for _, host := range hosts {
-		if hostKeyStatus(host.ID, pins, pinsUnavailable) == "pinned" {
-			enrolled = append(enrolled, stagedHost{ID: host.ID, Name: inventoryShownName(host)})
+		if hostKeyStatus(host.ID, pins, pinsUnavailable) != "pinned" {
+			continue
 		}
+		sh := stagedHost{ID: host.ID, Name: inventoryShownName(host)}
+		if !executions.HasStageEnvironment(host.Environment) {
+			sh.Unselectable = stagedNoEnvironment
+		}
+		enrolled = append(enrolled, sh)
 	}
 	if len(enrolled) == 0 {
 		return nil
@@ -316,13 +366,52 @@ func stagedActionLabel(id string) (string, bool) {
 	return "", false
 }
 
+// stagedEcho bounds a client-supplied id for an error message.
+func stagedEcho(id string) string {
+	if len(id) > stagedMaxEcho {
+		return strconv.Quote(id[:stagedMaxEcho]) + "..."
+	}
+	return strconv.Quote(id)
+}
+
+// stagedStages lays out the stagedPlan stages over the frozen hosts
+// with executions.PlanStages, the layout CreateStaged proposes for
+// the same hosts and plan.
+func stagedStages(frozen []stagedHost, envOf map[string]inventory.Environment) ([]stagedStageView, error) {
+	ids := make([]string, len(frozen))
+	byID := make(map[string]stagedHost, len(frozen))
+	for i, host := range frozen {
+		ids[i] = host.ID
+		byID[host.ID] = host
+	}
+	stages, err := executions.PlanStages(stagedPlan, ids, envOf)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]stagedStageView, len(stages))
+	for i, st := range stages {
+		v := stagedStageView{Num: i + 1, Name: st.Name, MaxFailed: st.MaxFailed}
+		if i < len(stages)-1 {
+			v.GateManual = st.Continue == stageplan.ContinueManual
+			v.GateAuto = st.Continue == stageplan.ContinueAuto
+		}
+		for _, id := range st.Hosts {
+			v.Hosts = append(v.Hosts, byID[id])
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+
 // handleChartStaged is the staged OS update form of the inventory
 // chart (ADR 0006, P2-02 part 2). The first POST validates the
-// checkbox selection and answers the confirmation page, which lists
-// every frozen host; the confirmed POST proposes the frozen list to
-// the existing stage proposal and redirects to the operation page.
-// Every host id is checked against the inventory: unknown or
-// unenrolled hosts are refused before anything is proposed.
+// checkbox selection and answers the confirmation page, which shows
+// the staged plan (stages in order, their hosts, the gates between
+// them); the confirmed POST proposes the frozen list with the same
+// plan and redirects to the operation page. Every host id is checked
+// against the inventory: unknown or unenrolled hosts, and hosts
+// without a DEV, QA or PROD environment, are refused before anything
+// is proposed.
 func (h *Handler) handleChartStaged(w http.ResponseWriter, r *http.Request) {
 	if !h.operationsEnabled(w, r) {
 		return
@@ -335,6 +424,7 @@ func (h *Handler) handleChartStaged(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, stagedMaxBody)
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
@@ -349,7 +439,6 @@ func (h *Handler) handleChartStaged(w http.ResponseWriter, r *http.Request) {
 	for _, host := range hosts {
 		byID[host.ID] = host
 	}
-	pins, pinsUnavailable := h.hostKeyPins(ctx)
 	ids := r.Form["host"]
 	if len(ids) == 0 {
 		http.Error(w, "select at least one host", http.StatusBadRequest)
@@ -359,7 +448,13 @@ func (h *Handler) handleChartStaged(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "too many hosts selected", http.StatusBadRequest)
 		return
 	}
+	pins, pinsUnavailable := h.hostKeyPins(ctx)
+	if pinsUnavailable {
+		http.Error(w, "host enrollment unavailable (executor unreachable); nothing was proposed", http.StatusServiceUnavailable)
+		return
+	}
 	frozen := make([]stagedHost, 0, len(ids))
+	envOf := make(map[string]inventory.Environment, len(ids))
 	seen := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		if id == "" || seen[id] {
@@ -368,13 +463,18 @@ func (h *Handler) handleChartStaged(w http.ResponseWriter, r *http.Request) {
 		seen[id] = true
 		host, ok := byID[id]
 		if !ok {
-			http.Error(w, "unknown host: "+id, http.StatusBadRequest)
+			http.Error(w, "unknown host: "+stagedEcho(id), http.StatusBadRequest)
 			return
 		}
-		if hostKeyStatus(id, pins, pinsUnavailable) != "pinned" {
-			http.Error(w, "host not enrolled for updates: "+id, http.StatusBadRequest)
+		if hostKeyStatus(id, pins, false) != "pinned" {
+			http.Error(w, "host not enrolled for updates: "+stagedEcho(id), http.StatusBadRequest)
 			return
 		}
+		if !executions.HasStageEnvironment(host.Environment) {
+			http.Error(w, "host "+stagedEcho(id)+" cannot be updated in stages: "+stagedNoEnvironment+"; set its environment in the inventory or leave it out", http.StatusBadRequest)
+			return
+		}
+		envOf[id] = host.Environment
 		frozen = append(frozen, stagedHost{ID: host.ID, Name: inventoryShownName(host)})
 	}
 	if len(frozen) == 0 {
@@ -387,25 +487,28 @@ func (h *Handler) handleChartStaged(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown action", http.StatusBadRequest)
 		return
 	}
+	// The plan shown and the plan proposed come from the same layout
+	// (executions.PlanStages with stagedPlan).
+	stages, err := stagedStages(frozen, envOf)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if r.FormValue("confirm") != "1" {
 		data := pageData{Title: "Confirm staged OS update", Active: "chart", Content: "chart"}
 		data.Chart = &chartData{Staged: &stagedUpdateData{Confirm: &stagedConfirmData{
-			Hosts: frozen, Action: action, ActionLabel: label,
+			Hosts: frozen, Stages: stages, Action: action, ActionLabel: label,
 		}}}
 		h.render(w, r, data)
 		return
 	}
-	// The frozen list goes to the existing stage proposal: DEV/QA/
-	// PROD by the hosts' inventory environment, a manual gate after
-	// every stage, no failed host tolerated.
-	plan := executions.Plan{Preset: executions.PresetEnvironments, Continue: stageplan.ContinueManual, MaxFailed: 0}
 	hostIDs := make([]string, len(frozen))
 	for i, host := range frozen {
 		hostIDs[i] = host.ID
 	}
 	cctx, cancel := context.WithTimeout(ctx, operationsCallTimeout)
 	defer cancel()
-	created, err := h.operations.CreateStaged(cctx, webUser(r), action, hostIDs, nil, plan)
+	created, err := h.operations.CreateStaged(cctx, webUser(r), action, hostIDs, nil, stagedPlan)
 	var he *executions.HostError
 	var pe *executions.ParamError
 	var ple *executions.PlanError
@@ -415,11 +518,30 @@ func (h *Handler) handleChartStaged(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, executions.ErrUnknownAction), errors.Is(err, executions.ErrNoHosts), errors.Is(err, executions.ErrTooManyHosts), errors.As(err, &he), errors.As(err, &pe), errors.As(err, &ple):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	default:
-		if st, ok := status.FromError(err); ok && st.Code() != codes.Unknown {
-			h.executorRefusal(w, "propose staged update", err)
-			return
-		}
+		h.stagedFormRefusal(w, err)
+	}
+}
+
+// stagedFormRefusal answers an executor error of the staged update
+// form as a plain-text error page (the form posts without JavaScript,
+// so no JSON): a refusal is 409 with the executor's reason, anything
+// else 502 or 503 without detail.
+func (h *Handler) stagedFormRefusal(w http.ResponseWriter, err error) {
+	st, ok := status.FromError(err)
+	if !ok || st.Code() == codes.Unknown {
 		h.log.Error("create staged execution", "error", err)
 		http.Error(w, "operations unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	switch st.Code() {
+	case codes.InvalidArgument, codes.FailedPrecondition, codes.PermissionDenied, codes.ResourceExhausted, codes.AlreadyExists, codes.NotFound:
+		msg := st.Message()
+		if len(msg) > 300 {
+			msg = msg[:300]
+		}
+		http.Error(w, "the executor refused: "+msg, http.StatusConflict)
+	default:
+		h.log.Error("propose staged update", "error", err)
+		http.Error(w, "executor unavailable", http.StatusBadGateway)
 	}
 }
