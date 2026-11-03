@@ -143,7 +143,7 @@ func (c *Client) GetStatus(ctx context.Context, in *pb.GetStatusRequest, opts ..
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.GetStatus(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // Unlock decrypts the vault with the given passphrase.
@@ -151,7 +151,7 @@ func (c *Client) Unlock(ctx context.Context, in *pb.UnlockRequest, opts ...grpc.
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.Unlock(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // BeginPrivilegedSession starts a privileged session and returns the
@@ -160,7 +160,7 @@ func (c *Client) BeginPrivilegedSession(ctx context.Context, in *pb.BeginPrivile
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.BeginPrivilegedSession(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // CompletePrivilegedSession verifies the WebAuthn assertion and opens the
@@ -169,7 +169,7 @@ func (c *Client) CompletePrivilegedSession(ctx context.Context, in *pb.CompleteP
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.CompletePrivilegedSession(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ProposeExecution stores an execution request and returns the permit
@@ -178,7 +178,7 @@ func (c *Client) ProposeExecution(ctx context.Context, in *pb.ProposeExecutionRe
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ProposeExecution(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // SubmitAssertion approves a proposed execution with a WebAuthn assertion.
@@ -186,7 +186,7 @@ func (c *Client) SubmitAssertion(ctx context.Context, in *pb.SubmitAssertionRequ
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.SubmitAssertion(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // AuthorizeRun verifies a single run against its permit. It uses the
@@ -195,7 +195,7 @@ func (c *Client) AuthorizeRun(ctx context.Context, in *pb.AuthorizeRunRequest, o
 	ctx, cancel := context.WithTimeout(ctx, c.authorizeTimeout)
 	defer cancel()
 	resp, err := c.rpc.AuthorizeRun(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // Lock re-encrypts and drops the vault keys.
@@ -203,7 +203,7 @@ func (c *Client) Lock(ctx context.Context, in *pb.LockRequest, opts ...grpc.Call
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.Lock(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ListPending lists executions that still need an approval.
@@ -211,7 +211,7 @@ func (c *Client) ListPending(ctx context.Context, in *pb.ListPendingRequest, opt
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ListPending(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ApproveCLI approves a pending execution from the CLI (hardened mode).
@@ -219,7 +219,7 @@ func (c *Client) ApproveCLI(ctx context.Context, in *pb.ApproveCLIRequest, opts 
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ApproveCLI(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // GetPermitState returns the state of the live permit for the execution
@@ -228,7 +228,7 @@ func (c *Client) GetPermitState(ctx context.Context, in *pb.GetPermitStateReques
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.GetPermitState(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ListPVERemotes lists the registered PVE remotes with their nonsecret
@@ -237,7 +237,7 @@ func (c *Client) ListPVERemotes(ctx context.Context, in *pb.ListPVERemotesReques
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ListPVERemotes(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ReadPVE performs one typed PVE read against one remote and returns a
@@ -248,7 +248,7 @@ func (c *Client) ReadPVE(ctx context.Context, in *pb.ReadPVERequest, opts ...grp
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ReadPVE(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ProbePVERemote probes PVE endpoints without credentials (admin role).
@@ -256,7 +256,7 @@ func (c *Client) ProbePVERemote(ctx context.Context, in *pb.ProbePVERemoteReques
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ProbePVERemote(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // AddPVERemote registers a PVE remote (admin role).
@@ -264,7 +264,7 @@ func (c *Client) AddPVERemote(ctx context.Context, in *pb.AddPVERemoteRequest, o
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.AddPVERemote(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // RotatePVEToken replaces a PVE remote token (admin role).
@@ -272,7 +272,7 @@ func (c *Client) RotatePVEToken(ctx context.Context, in *pb.RotatePVETokenReques
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.RotatePVEToken(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // RemovePVERemote removes a PVE remote (admin role).
@@ -280,7 +280,7 @@ func (c *Client) RemovePVERemote(ctx context.Context, in *pb.RemovePVERemoteRequ
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.RemovePVERemote(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ListPVEAdminRemotes lists PVE remote administration metadata (admin role).
@@ -288,7 +288,7 @@ func (c *Client) ListPVEAdminRemotes(ctx context.Context, in *pb.ListPVEAdminRem
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ListPVEAdminRemotes(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ProposePVERepin proposes a PVE remote trust change (admin role).
@@ -296,7 +296,7 @@ func (c *Client) ProposePVERepin(ctx context.Context, in *pb.ProposePVERepinRequ
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ProposePVERepin(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // CommitPVERepin commits an approved PVE remote trust change (admin role).
@@ -304,7 +304,7 @@ func (c *Client) CommitPVERepin(ctx context.Context, in *pb.CommitPVERepinReques
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.CommitPVERepin(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // The risk-data methods below are admin-only on the executor (H01); the
@@ -316,7 +316,7 @@ func (c *Client) TrustArtifact(ctx context.Context, in *pb.TrustArtifactRequest,
 	ctx, cancel := context.WithTimeout(ctx, c.authorizeTimeout)
 	defer cancel()
 	resp, err := c.rpc.TrustArtifact(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // UntrustArtifact withdraws trust (admin role only).
@@ -324,7 +324,7 @@ func (c *Client) UntrustArtifact(ctx context.Context, in *pb.UntrustArtifactRequ
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.UntrustArtifact(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ListTrustedArtifacts lists trusted artifacts (admin role only).
@@ -332,7 +332,7 @@ func (c *Client) ListTrustedArtifacts(ctx context.Context, in *pb.ListTrustedArt
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ListTrustedArtifacts(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // SetHostCriticality sets or clears a host's criticality (admin role only).
@@ -340,7 +340,7 @@ func (c *Client) SetHostCriticality(ctx context.Context, in *pb.SetHostCriticali
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.SetHostCriticality(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ListHostCriticality lists host criticality records (admin role only).
@@ -348,7 +348,7 @@ func (c *Client) ListHostCriticality(ctx context.Context, in *pb.ListHostCritica
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ListHostCriticality(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // CreateRegistrationCode: Creates a one-time registration code (admin role only).
@@ -356,7 +356,7 @@ func (c *Client) CreateRegistrationCode(ctx context.Context, in *pb.CreateRegist
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.CreateRegistrationCode(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // BeginRegistration: Starts a WebAuthn registration.
@@ -364,7 +364,7 @@ func (c *Client) BeginRegistration(ctx context.Context, in *pb.BeginRegistration
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.BeginRegistration(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // FinishRegistration: Completes a WebAuthn registration.
@@ -372,7 +372,7 @@ func (c *Client) FinishRegistration(ctx context.Context, in *pb.FinishRegistrati
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.FinishRegistration(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ListWebAuthnCredentials: Lists registered credentials (admin role only).
@@ -380,7 +380,7 @@ func (c *Client) ListWebAuthnCredentials(ctx context.Context, in *pb.ListWebAuth
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ListWebAuthnCredentials(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // RemoveWebAuthnCredential: Removes a credential and locks the executor (admin role only).
@@ -388,7 +388,7 @@ func (c *Client) RemoveWebAuthnCredential(ctx context.Context, in *pb.RemoveWebA
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.RemoveWebAuthnCredential(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ProbeHostKey: Reads a host key for enrollment (admin role only).
@@ -396,7 +396,7 @@ func (c *Client) ProbeHostKey(ctx context.Context, in *pb.ProbeHostKeyRequest, o
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ProbeHostKey(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // PinHostKey: Pins a host key (admin role only).
@@ -404,7 +404,7 @@ func (c *Client) PinHostKey(ctx context.Context, in *pb.PinHostKeyRequest, opts 
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.PinHostKey(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // UnpinHostKey: Removes a host key pin (admin role only).
@@ -412,7 +412,7 @@ func (c *Client) UnpinHostKey(ctx context.Context, in *pb.UnpinHostKeyRequest, o
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.UnpinHostKey(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ListHostKeys: Lists the pinned host keys.
@@ -420,7 +420,7 @@ func (c *Client) ListHostKeys(ctx context.Context, in *pb.ListHostKeysRequest, o
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ListHostKeys(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ProposeRepin: Proposes re-pinning a blocked host (server role only).
@@ -428,7 +428,7 @@ func (c *Client) ProposeRepin(ctx context.Context, in *pb.ProposeRepinRequest, o
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ProposeRepin(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // CommitRepin: Carries out an approved re-pin (server role only). It
@@ -437,7 +437,7 @@ func (c *Client) CommitRepin(ctx context.Context, in *pb.CommitRepinRequest, opt
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout+30*time.Second)
 	defer cancel()
 	resp, err := c.rpc.CommitRepin(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ProposeEnroll: Reads host keys and proposes a bulk enrollment (server
@@ -446,7 +446,7 @@ func (c *Client) ProposeEnroll(ctx context.Context, in *pb.ProposeEnrollRequest,
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout+2*time.Minute)
 	defer cancel()
 	resp, err := c.rpc.ProposeEnroll(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // CommitEnroll: Pins the hosts of an approved enrollment (server role only).
@@ -454,7 +454,7 @@ func (c *Client) CommitEnroll(ctx context.Context, in *pb.CommitEnrollRequest, o
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout+5*time.Minute)
 	defer cancel()
 	resp, err := c.rpc.CommitEnroll(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // TestConnection: Tests the SSH connection to a pinned host (admin role only).
@@ -462,7 +462,7 @@ func (c *Client) TestConnection(ctx context.Context, in *pb.TestConnectionReques
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.TestConnection(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // BeginLogin: Starts a web login (server role).
@@ -470,7 +470,7 @@ func (c *Client) BeginLogin(ctx context.Context, in *pb.BeginLoginRequest, opts 
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.BeginLogin(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // FinishLogin: Completes a web login (server role).
@@ -478,7 +478,7 @@ func (c *Client) FinishLogin(ctx context.Context, in *pb.FinishLoginRequest, opt
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.FinishLogin(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // CheckCredential: Reports whether a credential is still registered (server role).
@@ -486,7 +486,7 @@ func (c *Client) CheckCredential(ctx context.Context, in *pb.CheckCredentialRequ
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.CheckCredential(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // BeginTOTPSetup: Creates a new TOTP recovery secret (admin role only).
@@ -494,7 +494,7 @@ func (c *Client) BeginTOTPSetup(ctx context.Context, in *pb.BeginTOTPSetupReques
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.BeginTOTPSetup(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ConfirmTOTPSetup: Activates the TOTP secret (admin role only).
@@ -502,7 +502,7 @@ func (c *Client) ConfirmTOTPSetup(ctx context.Context, in *pb.ConfirmTOTPSetupRe
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ConfirmTOTPSetup(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // RemoveTOTP: Removes the TOTP secret (admin role only).
@@ -510,7 +510,7 @@ func (c *Client) RemoveTOTP(ctx context.Context, in *pb.RemoveTOTPRequest, opts 
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.RemoveTOTP(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // GetTOTPStatus: Reports the TOTP and recovery state (admin role only).
@@ -518,7 +518,7 @@ func (c *Client) GetTOTPStatus(ctx context.Context, in *pb.GetTOTPStatusRequest,
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.GetTOTPStatus(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // RecoveryLogin: Verifies a TOTP recovery code (server role).
@@ -526,7 +526,7 @@ func (c *Client) RecoveryLogin(ctx context.Context, in *pb.RecoveryLoginRequest,
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.RecoveryLogin(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // FinishRecovery: Ends a pending recovery (admin role only).
@@ -534,7 +534,7 @@ func (c *Client) FinishRecovery(ctx context.Context, in *pb.FinishRecoveryReques
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.FinishRecovery(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // GetSSHPublicKey: Returns a loaded SSH public key (admin role only).
@@ -542,7 +542,7 @@ func (c *Client) GetSSHPublicKey(ctx context.Context, in *pb.GetSSHPublicKeyRequ
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.GetSSHPublicKey(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // InitVault: Creates the vault (admin role only).
@@ -550,7 +550,7 @@ func (c *Client) InitVault(ctx context.Context, in *pb.InitVaultRequest, opts ..
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.InitVault(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // SetSecret: Stores a vault secret (admin role only).
@@ -558,7 +558,7 @@ func (c *Client) SetSecret(ctx context.Context, in *pb.SetSecretRequest, opts ..
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.SetSecret(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ListSecrets: Lists vault secret IDs (admin role only).
@@ -566,7 +566,7 @@ func (c *Client) ListSecrets(ctx context.Context, in *pb.ListSecretsRequest, opt
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ListSecrets(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // DeleteSecret: Deletes a vault secret (admin role only).
@@ -574,7 +574,7 @@ func (c *Client) DeleteSecret(ctx context.Context, in *pb.DeleteSecretRequest, o
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.DeleteSecret(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // RunAttached: Runs one authorized host run attached (server role). The
@@ -587,7 +587,7 @@ func (c *Client) RunAttached(ctx context.Context, in *pb.RunAttachedRequest, opt
 	ctx, cancel := context.WithTimeout(ctx, t+time.Minute)
 	defer cancel()
 	resp, err := c.rpc.RunAttached(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // StartDurable: Starts one authorized host run as a durable job (server role).
@@ -595,7 +595,7 @@ func (c *Client) StartDurable(ctx context.Context, in *pb.StartDurableRequest, o
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	resp, err := c.rpc.StartDurable(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // GetRun: The state of a durable run (server role).
@@ -603,7 +603,7 @@ func (c *Client) GetRun(ctx context.Context, in *pb.GetRunRequest, opts ...grpc.
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.GetRun(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // BeginGate: Checks a gate and returns what it needs (server role).
@@ -611,7 +611,7 @@ func (c *Client) BeginGate(ctx context.Context, in *pb.BeginGateRequest, opts ..
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.BeginGate(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // CommitGate: Applies a gate (server role).
@@ -619,7 +619,7 @@ func (c *Client) CommitGate(ctx context.Context, in *pb.CommitGateRequest, opts 
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.CommitGate(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // AbortRollout: Stops a rollout (server role).
@@ -627,7 +627,7 @@ func (c *Client) AbortRollout(ctx context.Context, in *pb.AbortRolloutRequest, o
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.AbortRollout(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // GetRollout: The executor's view of a rollout (server and admin roles).
@@ -635,7 +635,7 @@ func (c *Client) GetRollout(ctx context.Context, in *pb.GetRolloutRequest, opts 
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.GetRollout(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ApproveGateCLI: Hardened gate path (admin role).
@@ -643,7 +643,7 @@ func (c *Client) ApproveGateCLI(ctx context.Context, in *pb.ApproveGateCLIReques
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ApproveGateCLI(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ProposeScheduleGrant: Checks a schedule grant document (server role).
@@ -651,7 +651,7 @@ func (c *Client) ProposeScheduleGrant(ctx context.Context, in *pb.ProposeSchedul
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ProposeScheduleGrant(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // CommitScheduleGrant: Approves a schedule grant (server role).
@@ -659,7 +659,7 @@ func (c *Client) CommitScheduleGrant(ctx context.Context, in *pb.CommitScheduleG
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.CommitScheduleGrant(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ListPendingScheduleGrants: Proposed schedule grants (admin role).
@@ -667,7 +667,7 @@ func (c *Client) ListPendingScheduleGrants(ctx context.Context, in *pb.ListPendi
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ListPendingScheduleGrants(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ApproveScheduleGrantCLI: Hardened grant approval (admin role).
@@ -675,7 +675,7 @@ func (c *Client) ApproveScheduleGrantCLI(ctx context.Context, in *pb.ApproveSche
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ApproveScheduleGrantCLI(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ListScheduleGrants: Stored schedule grants (server and admin roles).
@@ -683,7 +683,7 @@ func (c *Client) ListScheduleGrants(ctx context.Context, in *pb.ListScheduleGran
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ListScheduleGrants(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // RevokeScheduleGrant: Revokes a schedule grant (server and admin roles).
@@ -691,7 +691,7 @@ func (c *Client) RevokeScheduleGrant(ctx context.Context, in *pb.RevokeScheduleG
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.RevokeScheduleGrant(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // RunScheduled: Runs one host run under a schedule grant (server role).
@@ -704,7 +704,7 @@ func (c *Client) RunScheduled(ctx context.Context, in *pb.RunScheduledRequest, o
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout+t)
 	defer cancel()
 	resp, err := c.rpc.RunScheduled(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // BeginTrustArtifact: Starts trusting an artifact from the browser (server role).
@@ -712,7 +712,7 @@ func (c *Client) BeginTrustArtifact(ctx context.Context, in *pb.BeginTrustArtifa
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.BeginTrustArtifact(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // CommitTrustArtifact: Trusts the artifact with the security key's assertion (server role).
@@ -720,7 +720,7 @@ func (c *Client) CommitTrustArtifact(ctx context.Context, in *pb.CommitTrustArti
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.CommitTrustArtifact(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // GetArtifactTrust: Whether the executor trusts an artifact (server and admin roles).
@@ -728,7 +728,7 @@ func (c *Client) GetArtifactTrust(ctx context.Context, in *pb.GetArtifactTrustRe
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.GetArtifactTrust(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // RegisterModule: Verifies and registers a signed module (server role).
@@ -736,7 +736,7 @@ func (c *Client) RegisterModule(ctx context.Context, in *pb.RegisterModuleReques
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.RegisterModule(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // AddSigner: Trusts a module signer (admin role).
@@ -744,7 +744,7 @@ func (c *Client) AddSigner(ctx context.Context, in *pb.AddSignerRequest, opts ..
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.AddSigner(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // RemoveSigner: Removes a module signer (admin role).
@@ -752,7 +752,7 @@ func (c *Client) RemoveSigner(ctx context.Context, in *pb.RemoveSignerRequest, o
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.RemoveSigner(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ConfirmModuleSigner: Accepts a module's new signer (admin role).
@@ -760,7 +760,7 @@ func (c *Client) ConfirmModuleSigner(ctx context.Context, in *pb.ConfirmModuleSi
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ConfirmModuleSigner(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ListSigners: Lists module signers (server and admin roles).
@@ -768,7 +768,7 @@ func (c *Client) ListSigners(ctx context.Context, in *pb.ListSignersRequest, opt
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ListSigners(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ListEvents reads the executor's signed event chain (M10-1).
@@ -776,7 +776,7 @@ func (c *Client) ListEvents(ctx context.Context, in *pb.ListEventsRequest, opts 
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ListEvents(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // BackupExecutor is admin-only on the executor; the server's calls are
@@ -785,7 +785,7 @@ func (c *Client) BackupExecutor(ctx context.Context, in *pb.BackupExecutorReques
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.BackupExecutor(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // Compile-time check: the client must implement the generated interface so

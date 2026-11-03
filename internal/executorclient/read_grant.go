@@ -16,7 +16,7 @@ func (c *Client) ProposeReadGrant(ctx context.Context, in *pb.ProposeReadGrantRe
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ProposeReadGrant(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // CommitReadGrant relays an assertion for executor UV verification (server role).
@@ -24,7 +24,7 @@ func (c *Client) CommitReadGrant(ctx context.Context, in *pb.CommitReadGrantRequ
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.CommitReadGrant(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ListPendingReadGrants retrieves complete proposals for local review (admin role).
@@ -32,7 +32,7 @@ func (c *Client) ListPendingReadGrants(ctx context.Context, in *pb.ListPendingRe
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ListPendingReadGrants(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ApproveReadGrantCLI approves a locally reviewed digest (admin role only).
@@ -40,7 +40,7 @@ func (c *Client) ApproveReadGrantCLI(ctx context.Context, in *pb.ApproveReadGran
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ApproveReadGrantCLI(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ListReadGrants lists approved read grants (server and admin roles).
@@ -48,7 +48,7 @@ func (c *Client) ListReadGrants(ctx context.Context, in *pb.ListReadGrantsReques
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ListReadGrants(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // RevokeReadGrant revokes authority without an assertion (server and admin roles).
@@ -56,7 +56,7 @@ func (c *Client) RevokeReadGrant(ctx context.Context, in *pb.RevokeReadGrantRequ
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.RevokeReadGrant(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // RunReadGrant executes one scheduled or on-demand read (server role).
@@ -69,5 +69,5 @@ func (c *Client) RunReadGrant(ctx context.Context, in *pb.RunReadGrantRequest, o
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout+t)
 	defer cancel()
 	resp, err := c.rpc.RunReadGrant(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
