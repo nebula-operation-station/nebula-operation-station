@@ -66,6 +66,10 @@ const (
 	maxPveSnapshotConfigValue = 4096
 	// maxPveSnapshotConfigKeys bounds the members of a guest config read.
 	maxPveSnapshotConfigKeys = 1024
+	// maxPveGuestSnapshotBindings bounds the snapshot bindings held at one
+	// time (one per proposal or run in progress); separate from the power
+	// bindings' capacity, so snapshot proposals cannot block power ones.
+	maxPveGuestSnapshotBindings = 256
 )
 
 var (
@@ -688,7 +692,7 @@ func (g *PveGuestSnapshot) Propose(ctx context.Context, req PveGuestSnapshotRequ
 	if err != nil {
 		return permit.Permit{}, err
 	}
-	release, err := g.Bindings.hold(rq.ParametersHash, t, req.Op)
+	release, err := g.Bindings.hold(pveBindSnapshot, rq.ParametersHash, t, req.Op)
 	if err != nil {
 		return permit.Permit{}, err
 	}
@@ -706,7 +710,7 @@ func (g *PveGuestSnapshot) Propose(ctx context.Context, req PveGuestSnapshotRequ
 	if err != nil {
 		return permit.Permit{}, err
 	}
-	g.Bindings.keep(rq.ParametersHash, time.Unix(res.Permit.Request.ExpiryUnix, 0))
+	g.Bindings.keep(pveBindSnapshot, rq.ParametersHash, time.Unix(res.Permit.Request.ExpiryUnix, 0))
 	g.Mutations.log().Info("audit", "kind", "pve_guest_snapshot_proposed", "remote", t.RemoteID, "node", t.Node, "vmid", t.VMID,
 		"op", req.Op, "risk", string(res.Permit.Request.RiskClass), "execution", executionID)
 	return res.Permit, nil
@@ -749,7 +753,7 @@ func (g *PveGuestSnapshot) Run(ctx context.Context, req PveGuestSnapshotRequest)
 	if err != nil {
 		return PveMutationResult{}, ErrPveMutationPlan
 	}
-	release, err := g.Bindings.hold(hash, t, req.Op)
+	release, err := g.Bindings.hold(pveBindSnapshot, hash, t, req.Op)
 	if err != nil {
 		return PveMutationResult{}, err
 	}
@@ -770,8 +774,10 @@ func NewGuestSnapshotRiskFloor(next permit.RiskPolicy, crit PveCriticality, bind
 // rollback HIGH), the criticality of the guest, its node and remote and of
 // every host Linked returns for the guest or node (no exact record: at
 // least HIGH; a CRITICAL record stays CRITICAL), and Next's floor.
-// Anything it cannot establish is HIGH. Other requests get Next's floor
-// (HIGH without Next). Part of the authority's policy
+// Anything it cannot establish is HIGH, or Next's floor for the request's
+// targets if that is higher. Only snapshot bindings are read; a power
+// binding is never scored here. Other requests get Next's floor (HIGH
+// without Next). Part of the authority's policy
 // (NewExecutorRiskPolicy), it is enforced when proposing, approving and
 // authorizing the run, so a criticality raised after the proposal stops
 // the run.
@@ -791,12 +797,12 @@ func (p GuestSnapshotRiskFloor) MinimumRisk(r canonical.Request, targets []canon
 		return p.Next.MinimumRisk(r, targets)
 	}
 	high := func(why string) (canonical.Risk, string, error) {
-		return canonical.RiskHigh, "pve.guest.snapshot: " + why + ": unknown criticality is HIGH", nil
+		return failClosedRisk(p.Next, r, targets, "pve.guest.snapshot: "+why+": unknown criticality is HIGH")
 	}
 	if p.Next == nil || p.Criticality == nil || p.Linked == nil || p.Bindings == nil {
 		return high("risk sources not configured")
 	}
-	t, op, ok := p.Bindings.lookup(r.ParametersHash)
+	t, op, ok := p.Bindings.lookup(pveBindSnapshot, r.ParametersHash)
 	if !ok {
 		return high("no exact target bound to the parameters")
 	}
