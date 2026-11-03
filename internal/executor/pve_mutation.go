@@ -170,6 +170,14 @@ type PveTargetState struct {
 	// GET .../config, 40 lowercase hex). Empty for a node target; the
 	// engine ignores it there.
 	Generation string
+	// Kind is the guest kind the remote reports ("qemu" or "lxc"); empty
+	// for a node target or a client that does not report it. A reported
+	// kind other than the requested one is a changed target.
+	Kind string
+	// Status is the guest's power status as the remote reports it
+	// ("running", "stopped", ...); untrusted, compared only. Empty if not
+	// reported.
+	Status string
 }
 
 // PveStepTaskIDer may be implemented by a PveMutationClient. TaskID returns
@@ -216,6 +224,10 @@ type PveMutations struct {
 	// durable state (PveProvisioner implements it). Provisioning steps are
 	// never identified without it.
 	TaskIDs PveJobTaskIDs
+
+	// powerBindings are the guest power bindings of this engine (see
+	// PveGuestPowerBindings); one engine, one set.
+	powerBindings PveGuestPowerBindings
 
 	// inflight counts the Run calls per execution ID; Reconcile leaves
 	// their steps alone, so a step being dispatched right now is never
@@ -274,6 +286,13 @@ type PveMutationRequest struct {
 	// for (for example the holder of a reservation); a permit with another
 	// execution ID is refused before anything is dispatched.
 	ExecutionID string
+
+	// precheck, if set, checks the live state of the target (a typed
+	// action's precondition, such as "guest running"). Run applies it to
+	// the read made before authorization and again to a fresh read
+	// immediately before each step's intent is recorded; a failure sends
+	// nothing.
+	precheck func(PveTargetState) error
 }
 
 // PveMutationResult reports the durable job of one mutation.
@@ -369,19 +388,25 @@ func (m *PveMutations) readToken(rm executordb.PveRemote) (pveapi.TokenSupplier,
 // The caller-selected kind, node and VMID are validated before any read, so
 // a malformed request never causes I/O with a credential.
 func (m *PveMutations) target(ctx context.Context, rm executordb.PveRemote, req PveMutationRequest) (permit.ProviderMutationTarget, error) {
+	t, _, err := m.targetLive(ctx, rm, req)
+	return t, err
+}
+
+// targetLive is target, also returning the live state it was built from.
+func (m *PveMutations) targetLive(ctx context.Context, rm executordb.PveRemote, req PveMutationRequest) (permit.ProviderMutationTarget, PveTargetState, error) {
 	if err := permit.ValidateProviderMutationShape(req.Kind, req.Node, req.VMID); err != nil {
-		return permit.ProviderMutationTarget{}, ErrPveMutationRequest
+		return permit.ProviderMutationTarget{}, PveTargetState{}, ErrPveMutationRequest
 	}
 	read, err := m.readToken(rm)
 	if err != nil {
-		return permit.ProviderMutationTarget{}, err
+		return permit.ProviderMutationTarget{}, PveTargetState{}, err
 	}
 	live, err := m.Client.TargetState(ctx, rm, req.Kind, req.Node, req.VMID, read)
 	if err != nil {
-		return permit.ProviderMutationTarget{}, ErrPveTargetChanged
+		return permit.ProviderMutationTarget{}, PveTargetState{}, ErrPveTargetChanged
 	}
-	if live.Node != req.Node {
-		return permit.ProviderMutationTarget{}, ErrPveTargetChanged
+	if live.Node != req.Node || (live.Kind != "" && live.Kind != req.Kind) {
+		return permit.ProviderMutationTarget{}, PveTargetState{}, ErrPveTargetChanged
 	}
 	generation := live.Generation
 	if req.Kind == permit.ProviderKindNode {
@@ -395,9 +420,18 @@ func (m *PveMutations) target(ctx context.Context, rm executordb.PveRemote, req 
 		Kind:         req.Kind, Node: live.Node, VMID: req.VMID, ConfigDigest: live.ConfigDigest, Generation: generation,
 	}
 	if err := t.Validate(); err != nil {
-		return permit.ProviderMutationTarget{}, ErrPveTargetChanged
+		return permit.ProviderMutationTarget{}, PveTargetState{}, ErrPveTargetChanged
 	}
-	return t, nil
+	return t, live, nil
+}
+
+// sameLiveTarget reports whether a fresh live read still shows the exact
+// target t binds: same node, configuration, guest generation and kind.
+func sameLiveTarget(live PveTargetState, t permit.ProviderMutationTarget) bool {
+	if live.Node != t.Node || live.ConfigDigest != t.ConfigDigest || (live.Kind != "" && live.Kind != t.Kind) {
+		return false
+	}
+	return t.Kind == permit.ProviderKindNode || live.Generation == t.Generation
 }
 
 // ProposalRequest builds the canonical request and parameters of a new
@@ -421,9 +455,14 @@ func (m *PveMutations) ProposalRequest(ctx context.Context, req PveMutationReque
 			return canonical.Request{}, nil, err
 		}
 	}
-	t, err := m.target(ctx, rm, req)
+	t, live, err := m.targetLive(ctx, rm, req)
 	if err != nil {
 		return canonical.Request{}, nil, err
+	}
+	if req.precheck != nil {
+		if err := req.precheck(live); err != nil {
+			return canonical.Request{}, nil, err
+		}
 	}
 	return permit.ProviderMutationRequest(mutationOf(req, t), executionID, risk, stagePlanHash, expiry)
 }
@@ -530,9 +569,16 @@ func (m *PveMutations) Run(ctx context.Context, req PveMutationRequest) (PveMuta
 	if err != nil {
 		return PveMutationResult{}, err
 	}
-	t, err := m.target(ctx, rm, req)
+	t, live, err := m.targetLive(ctx, rm, req)
 	if err != nil {
 		return PveMutationResult{}, err
+	}
+	if req.precheck != nil {
+		// A failed precondition refuses the run before the permit is used.
+		if err := req.precheck(live); err != nil {
+			m.log().Warn("audit", "kind", "pve_mutation_precondition", "remote", rm.RemoteID, "action", req.ActionID, "node", t.Node, "vmid", t.VMID)
+			return PveMutationResult{}, err
+		}
 	}
 	claim, err := m.Auth.AuthorizeProviderMutation(req.Digest, mutationOf(req, t))
 	if err != nil {
@@ -560,7 +606,7 @@ func (m *PveMutations) Run(ctx context.Context, req PveMutationRequest) (PveMuta
 	digest := hex.EncodeToString(req.Digest[:])
 	for i, step := range steps {
 		n := i + 1
-		err := m.runStep(ctx, claim, t, digest, req.ActionID, n, step)
+		err := m.runStep(ctx, claim, t, digest, req.ActionID, n, step, req.precheck)
 		if n == 1 && errors.Is(err, ErrPveTargetBusy) && claim.Release("target busy") {
 			// Nothing was recorded or sent: another mutation of the target
 			// still holds it. The approval stays usable for a later run.
@@ -585,7 +631,7 @@ func (m *PveMutations) Run(ctx context.Context, req PveMutationRequest) (PveMuta
 	return res, nil
 }
 
-func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, t permit.ProviderMutationTarget, digest, action string, n int, step PveMutationStep) error {
+func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, t permit.ProviderMutationTarget, digest, action string, n int, step PveMutationStep, precheck func(PveTargetState) error) error {
 	// Lock or revocation since authorization stops undispatched work.
 	if err := claim.Check(); err != nil {
 		return ErrPveMutationDenied
@@ -621,6 +667,19 @@ func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, 
 	if ider, ok := m.Client.(PveStepTaskIDer); ok {
 		if id, ok := ider.TaskID(step); ok {
 			wantID = id
+		}
+	}
+	if precheck != nil {
+		// Identity and state are read again right before the intent: a
+		// guest that changed since authorization gets nothing.
+		live, err := m.Client.TargetState(ctx, rm, t.Kind, t.Node, t.VMID, readTok)
+		if err != nil || !sameLiveTarget(live, t) {
+			m.log().Warn("audit", "kind", "pve_mutation_target_changed", "remote", t.RemoteID, "node", t.Node, "vmid", t.VMID, "execution", claim.ExecutionID, "step", n)
+			return ErrPveTargetChanged
+		}
+		if err := precheck(live); err != nil {
+			m.log().Warn("audit", "kind", "pve_mutation_precondition", "remote", t.RemoteID, "node", t.Node, "vmid", t.VMID, "execution", claim.ExecutionID, "step", n)
+			return err
 		}
 	}
 	job := executordb.PveJob{
