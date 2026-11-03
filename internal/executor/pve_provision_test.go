@@ -1424,25 +1424,11 @@ func TestProvisionConcurrentRunOfTheSameExecutionKeepsTheReservation(t *testing.
 // can ever run (the permit is used), so the VMID is released instead of
 // being kept for a retry that can only fail with ErrPveMutationAlreadyRun.
 func TestProvisionConsumedPermitWithoutStepReleasesVMID(t *testing.T) {
+	// A busy target no longer consumes the permit (PR #151 review L1); see
+	// TestProvisionBusyTargetKeepsApprovalAndVMID.
 	cases := map[string]struct {
 		block, unblock func(e *provisionEnv)
 	}{
-		"target busy": {
-			block: func(e *provisionEnv) {
-				// Another open node-level step on pve1.
-				job := executordb.PveJob{ExecutionID: "00000000-0000-4000-a000-888888888888", Step: 1, Digest: strings.Repeat("a", 64),
-					Action: "pve.test.mutation", RemoteID: mutRemote, TrustGeneration: 1, Kind: permit.ProviderKindNode, Node: "pve1",
-					RequestDigest: strings.Repeat("b", 64), TaskType: "qmclone", TaskUser: mutActionUser}
-				if err := e.pe.db.CreatePveJobIntent(job); err != nil {
-					e.t.Fatal(err)
-				}
-			},
-			unblock: func(e *provisionEnv) {
-				if err := e.pe.db.FinishPveJob("00000000-0000-4000-a000-888888888888", 1, executordb.PveJobFailed, "test"); err != nil {
-					e.t.Fatal(err)
-				}
-			},
-		},
 		"vault locked after the claim": {
 			block: func(e *provisionEnv) {
 				var once sync.Once
@@ -1497,6 +1483,38 @@ func TestProvisionConsumedPermitWithoutStepReleasesVMID(t *testing.T) {
 				t.Fatalf("vmid not free again: %v", err)
 			}
 		})
+	}
+}
+
+// TestProvisionBusyTargetKeepsApprovalAndVMID: a provisioning refused
+// because another node-level step on the node is still open dispatched
+// nothing and released its permit, so the execution keeps its VMID and the
+// same approval provisions once the node is free (PR #151 review L1).
+func TestProvisionBusyTargetKeepsApprovalAndVMID(t *testing.T) {
+	e := newProvisionEnv(t, fixedRisk{})
+	approved := e.approve(e.request())
+	other := executordb.PveJob{ExecutionID: "00000000-0000-4000-a000-888888888888", Step: 1, Digest: strings.Repeat("a", 64),
+		Action: "pve.test.mutation", RemoteID: mutRemote, TrustGeneration: 1, Kind: permit.ProviderKindNode, Node: "pve1",
+		RequestDigest: strings.Repeat("b", 64), TaskType: "qmclone", TaskUser: mutActionUser}
+	if err := e.pe.db.CreatePveJobIntent(other); err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.prov.Provision(context.Background(), approved)
+	if !errors.Is(err, ErrPveTargetBusy) || len(res.Steps) != 0 || res.GuestKept {
+		t.Fatalf("busy run: %v %+v", err, res)
+	}
+	if len(e.pc.provisionSteps()) != 0 {
+		t.Fatal("dispatched")
+	}
+	if h, ok, _ := e.vmids.VMIDHolder(mutRemote, approved.VMID, time.Now()); !ok || h.ExecutionID != approved.ExecutionID {
+		t.Fatalf("vmid not kept for the retry: %+v %v", h, ok)
+	}
+	if err := e.pe.db.FinishPveJob(other.ExecutionID, 1, executordb.PveJobFailed, "test"); err != nil {
+		t.Fatal(err)
+	}
+	res, err = e.prov.Provision(context.Background(), approved)
+	if err != nil || len(res.Steps) == 0 || len(e.pc.provisionSteps()) == 0 {
+		t.Fatalf("retry with the same approval: %v %+v", err, res)
 	}
 }
 

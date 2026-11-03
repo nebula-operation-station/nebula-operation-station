@@ -20,10 +20,12 @@ var mutationArtifact = []byte("pve.guest.start 1.0.0\nStart one exact guest.\n")
 
 func mutationTarget() ProviderMutationTarget {
 	return ProviderMutationTarget{
+		Version:  PveTargetVersion,
 		RemoteID: "pve-lab", TrustPin: strings.Repeat("ab", 32), TrustGeneration: 3,
 		CredentialRef: "pve-0011223344556677-action", CredentialVersion: 2,
 		APIEndpoints: []pvecontract.Endpoint{{Host: "pve1.lab.test", Port: 8006}, {Host: "pve2.lab.test", Port: 8006}},
 		Kind:         ProviderKindQemu, Node: "pve1", VMID: 101, ConfigDigest: strings.Repeat("cd", 32),
+		Generation: strings.Repeat("9f", 20),
 	}
 }
 
@@ -70,10 +72,11 @@ func TestProviderMutationPermitBindsExactTarget(t *testing.T) {
 		"reordered api endpoints": func(x *ProviderMutationTarget) {
 			x.APIEndpoints = []pvecontract.Endpoint{x.APIEndpoints[1], x.APIEndpoints[0]}
 		},
-		"guest moved to node":   func(x *ProviderMutationTarget) { x.Node = "pve2" },
-		"other vmid":            func(x *ProviderMutationTarget) { x.VMID = 102 },
-		"lxc with same vmid":    func(x *ProviderMutationTarget) { x.Kind = ProviderKindLXC },
-		"configuration changed": func(x *ProviderMutationTarget) { x.ConfigDigest = strings.Repeat("00", 32) },
+		"guest moved to node":      func(x *ProviderMutationTarget) { x.Node = "pve2" },
+		"other vmid":               func(x *ProviderMutationTarget) { x.VMID = 102 },
+		"lxc with same vmid":       func(x *ProviderMutationTarget) { x.Kind = ProviderKindLXC },
+		"configuration changed":    func(x *ProviderMutationTarget) { x.ConfigDigest = strings.Repeat("00", 32) },
+		"guest generation changed": func(x *ProviderMutationTarget) { x.Generation = strings.Repeat("0a", 20) },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -140,7 +143,18 @@ func TestProviderMutationRejectsMalformedTarget(t *testing.T) {
 		"duplicate api endpoint": func(m *ProviderMutation) {
 			m.Target.APIEndpoints = []pvecontract.Endpoint{{Host: "a.test", Port: 8006}, {Host: "a.test", Port: 8006}}
 		},
-		"array params": func(m *ProviderMutation) { m.Parameters = json.RawMessage(`[1]`) },
+		"no target version":     func(m *ProviderMutation) { m.Target.Version = "" },
+		"other target version":  func(m *ProviderMutation) { m.Target.Version = "pve-target-v0" },
+		"guest no generation":   func(m *ProviderMutation) { m.Target.Generation = "" },
+		"generation uppercase":  func(m *ProviderMutation) { m.Target.Generation = strings.Repeat("9F", 20) },
+		"generation sha256 len": func(m *ProviderMutation) { m.Target.Generation = strings.Repeat("9f", 32) },
+		"node with generation": func(m *ProviderMutation) {
+			m.Target.Kind, m.Target.VMID = ProviderKindNode, 0
+		},
+		"dotted node":          func(m *ProviderMutation) { m.Target.Node = "pve1.lab.test" },
+		"node trailing hyphen": func(m *ProviderMutation) { m.Target.Node = "pve1-" },
+		"node label too long":  func(m *ProviderMutation) { m.Target.Node = strings.Repeat("a", 64) },
+		"array params":         func(m *ProviderMutation) { m.Parameters = json.RawMessage(`[1]`) },
 		"huge params": func(m *ProviderMutation) {
 			m.Parameters = json.RawMessage(`{"x":"` + strings.Repeat("a", maxProviderMutationParams) + `"}`)
 		},

@@ -102,6 +102,9 @@ var (
 	// dispatched. Mutations of one target are serialized so a lost task is
 	// never attributed to another job.
 	ErrPveTargetBusy = errors.New("executor: another pve mutation of the target is still open")
+	// ErrPveMutationRequest is returned for a request whose kind, node or
+	// VMID is malformed; nothing is read from the remote.
+	ErrPveMutationRequest = errors.New("executor: malformed pve mutation target")
 
 	// ErrPveRejected is the sentinel a PveMutationClient wraps when the
 	// remote answered and refused a mutation, so no task exists. Any other
@@ -149,10 +152,24 @@ type PveMutationClient interface {
 	// RecentTasks lists the UPIDs of tasks on node that started at or after
 	// since, with the read token.
 	RecentTasks(ctx context.Context, rm executordb.PveRemote, node string, since time.Time, read pveapi.TokenSupplier) ([]string, error)
-	// TargetState reads the live node and the hex SHA-256 of the complete
-	// configuration of the target (a guest, or a node when vmid is 0),
-	// with the read token.
-	TargetState(ctx context.Context, rm executordb.PveRemote, kind, node string, vmid uint64, read pveapi.TokenSupplier) (liveNode, configDigest string, err error)
+	// TargetState reads the live state of the target (a guest, or a node
+	// when vmid is 0) with the read token.
+	TargetState(ctx context.Context, rm executordb.PveRemote, kind, node string, vmid uint64, read pveapi.TokenSupplier) (PveTargetState, error)
+}
+
+// PveTargetState is the live state of a mutation target, read from the
+// remote (untrusted; the engine validates every member).
+type PveTargetState struct {
+	// Node is the node the target lives on now.
+	Node string
+	// ConfigDigest is the hex SHA-256 of the target's complete
+	// configuration.
+	ConfigDigest string
+	// Generation is the guest generation: the configuration digest PVE
+	// returns with the guest's config (the "digest" member of
+	// GET .../config, 40 lowercase hex). Empty for a node target; the
+	// engine ignores it there.
+	Generation string
 }
 
 // PveStepTaskIDer may be implemented by a PveMutationClient. TaskID returns
@@ -349,23 +366,33 @@ func (m *PveMutations) readToken(rm executordb.PveRemote) (pveapi.TokenSupplier,
 }
 
 // target builds the exact target of req from the registry and a live read.
+// The caller-selected kind, node and VMID are validated before any read, so
+// a malformed request never causes I/O with a credential.
 func (m *PveMutations) target(ctx context.Context, rm executordb.PveRemote, req PveMutationRequest) (permit.ProviderMutationTarget, error) {
+	if err := permit.ValidateProviderMutationShape(req.Kind, req.Node, req.VMID); err != nil {
+		return permit.ProviderMutationTarget{}, ErrPveMutationRequest
+	}
 	read, err := m.readToken(rm)
 	if err != nil {
 		return permit.ProviderMutationTarget{}, err
 	}
-	liveNode, digest, err := m.Client.TargetState(ctx, rm, req.Kind, req.Node, req.VMID, read)
+	live, err := m.Client.TargetState(ctx, rm, req.Kind, req.Node, req.VMID, read)
 	if err != nil {
 		return permit.ProviderMutationTarget{}, ErrPveTargetChanged
 	}
-	if liveNode != req.Node {
+	if live.Node != req.Node {
 		return permit.ProviderMutationTarget{}, ErrPveTargetChanged
 	}
+	generation := live.Generation
+	if req.Kind == permit.ProviderKindNode {
+		generation = ""
+	}
 	t := permit.ProviderMutationTarget{
+		Version:  permit.PveTargetVersion,
 		RemoteID: rm.RemoteID, TrustPin: rm.TrustPin, TrustGeneration: rm.TrustGeneration,
 		CredentialRef: rm.Credentials.ActionRef, CredentialVersion: rm.Credentials.ActionVersion,
 		APIEndpoints: slices.Clone(rm.Endpoints),
-		Kind:         req.Kind, Node: liveNode, VMID: req.VMID, ConfigDigest: digest,
+		Kind:         req.Kind, Node: live.Node, VMID: req.VMID, ConfigDigest: live.ConfigDigest, Generation: generation,
 	}
 	if err := t.Validate(); err != nil {
 		return permit.ProviderMutationTarget{}, ErrPveTargetChanged
@@ -534,6 +561,12 @@ func (m *PveMutations) Run(ctx context.Context, req PveMutationRequest) (PveMuta
 	for i, step := range steps {
 		n := i + 1
 		err := m.runStep(ctx, claim, t, digest, req.ActionID, n, step)
+		if n == 1 && errors.Is(err, ErrPveTargetBusy) && claim.Release("target busy") {
+			// Nothing was recorded or sent: another mutation of the target
+			// still holds it. The approval stays usable for a later run.
+			m.log().Info("audit", "kind", "pve_mutation_permit_released", "remote", t.RemoteID, "execution", claim.ExecutionID, "reason", "target busy")
+			res.PermitConsumed = false
+		}
 		recorded, serr := m.DB.PveJobSteps(claim.ExecutionID)
 		if serr != nil {
 			// What was recorded is unknown: stop and report a store

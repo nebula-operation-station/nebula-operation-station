@@ -19,11 +19,18 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 )
 
-// ProviderMutationBinding names version 1 of the exact-target binding of a
+// ProviderMutationBinding names version 2 of the exact-target binding of a
 // PVE mutation permit (ADR 0006 "Phase 2 actions, permits and
 // reconciliation", ADR 0008 PV-01). The executor builds the binding from its
 // own registry and live reads; nothing in it is taken from the caller.
-const ProviderMutationBinding = "pve-mutation-v1"
+// Version 2 (previously pve-mutation-v1) carries a versioned provider target
+// (PveTargetVersion) that includes the guest generation.
+const ProviderMutationBinding = "pve-mutation-v2"
+
+// PveTargetVersion is the version of the ProviderMutationTarget layout. A
+// target of any other version is malformed, and a permit approved for one
+// target version never authorizes a mutation built with another.
+const PveTargetVersion = "pve-target-v1"
 
 // ProviderMutationActionPrefix is the namespace of typed PVE mutation
 // actions. Only actions in it may carry a provider mutation binding.
@@ -46,15 +53,57 @@ var (
 	ErrProviderMutationTarget = errors.New("permit: malformed provider mutation target")
 	credRefRe                 = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 	hex64Re                   = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	// pveGenerationRe is the PVE configuration digest (SHA-1, lowercase
+	// hex) that a guest's config read returns.
+	pveGenerationRe = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	pveNodeRe       = regexp.MustCompile(`^` + PveNodePattern + `$`)
 )
 
-// ProviderMutationTarget is the exact target of one PVE mutation. Every
-// member is bound into the permit digest; any difference at dispatch time
-// (re-pin, new trust generation, rotated action token, changed API
-// endpoint set, guest moved to
-// another node, VMID reuse or a changed configuration) refuses the run and
-// needs a new proposal.
+// PveNodePattern is the one node-name grammar of PVE mutations: a single
+// lowercase DNS label of 1..63 characters. PVE node names are host names
+// without a domain, and the pveapi writer that dispatches mutations takes
+// only lowercase node names. The permit target, the durable job record
+// (executordb) and the node field of a stored UPID all use this pattern.
+// So a target that passes authorization can always be recorded,
+// dispatched and matched to its tasks.
+const PveNodePattern = `[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?`
+
+// ValidPveNodeName reports whether s matches PveNodePattern.
+func ValidPveNodeName(s string) bool { return len(s) <= 63 && pveNodeRe.MatchString(s) }
+
+// ValidateProviderMutationShape checks the caller-selected part of a
+// mutation target (kind, node, vmid) on its own. The executor calls it
+// before any read of the remote, so a malformed request never causes I/O
+// with a credential.
+func ValidateProviderMutationShape(kind, node string, vmid uint64) error {
+	if !ValidPveNodeName(node) {
+		return fmt.Errorf("%w: node", ErrProviderMutationTarget)
+	}
+	switch kind {
+	case ProviderKindQemu, ProviderKindLXC:
+		if vmid < pvecontract.MinVMID || vmid > pvecontract.MaxVMID {
+			return fmt.Errorf("%w: vmid out of range", ErrProviderMutationTarget)
+		}
+	case ProviderKindNode:
+		if vmid != 0 {
+			return fmt.Errorf("%w: a node target has no vmid", ErrProviderMutationTarget)
+		}
+	default:
+		return fmt.Errorf("%w: kind", ErrProviderMutationTarget)
+	}
+	return nil
+}
+
+// ProviderMutationTarget is the versioned exact target of one PVE mutation
+// (ADR 0006: "versioned canonical provider targets"). Every member is bound
+// into the permit's parameters hash. Any difference at dispatch time refuses
+// the run and needs a new proposal: a re-pin, a new trust generation, a
+// rotated action token, a changed API endpoint set, the guest moved to
+// another node, VMID reuse, a changed configuration or guest generation, or
+// another target version.
 type ProviderMutationTarget struct {
+	// Version is PveTargetVersion.
+	Version         string `json:"target_version"`
 	RemoteID        string `json:"remote_id"`
 	TrustPin        string `json:"trust_pin"`
 	TrustGeneration uint64 `json:"trust_generation"`
@@ -73,11 +122,20 @@ type ProviderMutationTarget struct {
 	// ConfigDigest is the hex SHA-256 of the complete configuration the
 	// approval was made against (precondition digest).
 	ConfigDigest string `json:"config_digest"`
+	// Generation is the guest generation: the configuration digest that PVE
+	// itself returns with a guest's config (40 lowercase hex). PVE changes
+	// it on every write of the guest's config file, including pending
+	// changes and snapshot sections that ConfigDigest may not cover. It is
+	// also the optimistic-lock token that PVE's own config writes accept.
+	// Empty for a node target.
+	Generation string `json:"generation"`
 }
 
 // Validate checks the shape of t.
 func (t ProviderMutationTarget) Validate() error {
 	switch {
+	case t.Version != PveTargetVersion:
+		return fmt.Errorf("%w: target version", ErrProviderMutationTarget)
 	case !pvecontract.ValidRemoteID(t.RemoteID) || !pvecontract.ValidTrustPin(t.TrustPin):
 		return fmt.Errorf("%w: remote identity", ErrProviderMutationTarget)
 	case t.TrustGeneration < 1 || t.TrustGeneration > maxProviderTrustGeneration:
@@ -88,22 +146,18 @@ func (t ProviderMutationTarget) Validate() error {
 		return fmt.Errorf("%w: action credential version out of range", ErrProviderMutationTarget)
 	case !validAPIEndpoints(t):
 		return fmt.Errorf("%w: api endpoint set", ErrProviderMutationTarget)
-	case !pvecontract.ValidNodeName(t.Node):
-		return fmt.Errorf("%w: node", ErrProviderMutationTarget)
 	case !hex64Re.MatchString(t.ConfigDigest):
 		return fmt.Errorf("%w: config digest", ErrProviderMutationTarget)
 	}
-	switch t.Kind {
-	case ProviderKindQemu, ProviderKindLXC:
-		if t.VMID < pvecontract.MinVMID || t.VMID > pvecontract.MaxVMID {
-			return fmt.Errorf("%w: vmid out of range", ErrProviderMutationTarget)
+	if err := ValidateProviderMutationShape(t.Kind, t.Node, t.VMID); err != nil {
+		return err
+	}
+	if t.Kind == ProviderKindNode {
+		if t.Generation != "" {
+			return fmt.Errorf("%w: a node target has no guest generation", ErrProviderMutationTarget)
 		}
-	case ProviderKindNode:
-		if t.VMID != 0 {
-			return fmt.Errorf("%w: a node target has no vmid", ErrProviderMutationTarget)
-		}
-	default:
-		return fmt.Errorf("%w: kind", ErrProviderMutationTarget)
+	} else if !pveGenerationRe.MatchString(t.Generation) {
+		return fmt.Errorf("%w: guest generation", ErrProviderMutationTarget)
 	}
 	return nil
 }
@@ -122,6 +176,8 @@ func validAPIEndpoints(t ProviderMutationTarget) bool {
 // equal. Member names are not secret.
 func (t ProviderMutationTarget) diff(u ProviderMutationTarget) string {
 	switch {
+	case t.Version != u.Version:
+		return "target version"
 	case t.RemoteID != u.RemoteID:
 		return "remote"
 	case t.TrustPin != u.TrustPin || t.TrustGeneration != u.TrustGeneration:
@@ -134,14 +190,19 @@ func (t ProviderMutationTarget) diff(u ProviderMutationTarget) string {
 		return "node or vmid"
 	case t.ConfigDigest != u.ConfigDigest:
 		return "config digest"
+	case t.Generation != u.Generation:
+		return "guest generation"
 	}
 	return ""
 }
 
-// canonicalTarget is the permit target of t: a host ID derived from the
-// exact resource and the trust pin as fingerprint. It is not an SSH host;
-// the provider namespace "pvm-" cannot collide with an inventory host
-// because the full tuple is bound in the parameters as well.
+// canonicalTarget is the replay and risk key of t inside the canonical
+// request: a host ID derived from the exact resource, with the trust pin in
+// the fingerprint slot. It is not an SSH host and grants nothing by itself.
+// The versioned target is bound in the parameters, and
+// AuthorizeProviderMutation compares it member by member. The key exists
+// only because canonical.Request (protected, frozen spec) has no provider
+// target slot yet; replacing it is an open maintainer decision.
 func (t ProviderMutationTarget) canonicalTarget() (canonical.Target, error) {
 	pin, err := hex.DecodeString(t.TrustPin)
 	if err != nil || len(pin) != sha256.Size {
@@ -228,7 +289,7 @@ func ProviderMutationRequest(m ProviderMutation, executionID string, risk canoni
 // provider mutation permit.
 func approvedMutationTarget(p *Permit) (ProviderMutationTarget, bool) {
 	var doc providerMutationDoc
-	if err := json.Unmarshal(p.Parameters, &doc); err != nil || doc.Binding != ProviderMutationBinding {
+	if err := json.Unmarshal(p.Parameters, &doc); err != nil || doc.Binding != ProviderMutationBinding || doc.Target.Version != PveTargetVersion {
 		return ProviderMutationTarget{}, false
 	}
 	return doc.Target, true
@@ -245,8 +306,40 @@ type MutationClaim struct {
 	// Parameters are the approved canonical parameters.
 	Parameters []byte
 	digest     canonical.Digest
+	hostID     string
 	authority  *Authority
 	epoch      uint64
+	// token ties the claim to the use it made of the permit (Permit.claim).
+	token uint64
+}
+
+// Release makes the claim's permit usable again. The executor calls it only
+// when the run provably dispatched nothing: no step intent was recorded,
+// for example because another mutation of the same target was still open.
+// It fails (false) after a lock since the claim, and for a permit that was
+// revoked, expired or is not approved. It also fails unless the current use
+// of the permit is still the one this claim made: a claim releases at most
+// once, and a stale claim never undoes a later claim's use. It reports
+// whether the permit was released.
+func (c MutationClaim) Release(reason string) bool {
+	a := c.authority
+	if a == nil || c.token == 0 {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if c.epoch != a.lockEpoch {
+		return false
+	}
+	p, ok := a.permits[c.digest]
+	if !ok || p.claim != c.token {
+		return false
+	}
+	if !a.releaseHostLocked(c.digest, c.hostID, "provider mutation not dispatched: "+reason) {
+		return false
+	}
+	p.claim = 0
+	return true
 }
 
 // AuthorizeProviderMutation checks m, rebuilt by the executor from its
@@ -288,7 +381,16 @@ func (a *Authority) AuthorizeProviderMutation(d canonical.Digest, m ProviderMuta
 	if err != nil {
 		return MutationClaim{}, err
 	}
-	return MutationClaim{ExecutionID: g.ExecutionID, Parameters: g.Parameters, digest: d, authority: a, epoch: epoch}, nil
+	// The use just made belongs to this claim. A stale claim's Release
+	// in between finds no matching token and does nothing.
+	a.mu.Lock()
+	a.claimSeq++
+	token := a.claimSeq
+	if p, ok := a.permits[d]; ok {
+		p.claim = token
+	}
+	a.mu.Unlock()
+	return MutationClaim{ExecutionID: g.ExecutionID, Parameters: g.Parameters, digest: d, hostID: target.HostID, authority: a, epoch: epoch, token: token}, nil
 }
 
 // Check reports whether the claim is still in force: no lock since it was
