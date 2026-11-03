@@ -130,6 +130,8 @@ func (w *LiveWatcher) Run(ctx context.Context) error {
 		case <-t.C:
 		}
 	}
+	// stop cancels the in-flight reads; once they have finished, sweep the
+	// samples files again in case a read completed during the first sweep.
 	w.stop(context.WithoutCancel(ctx))
 	wg.Wait()
 	w.sweep(context.WithoutCancel(ctx), nil)
@@ -147,8 +149,7 @@ func (w *LiveWatcher) step(ctx context.Context, wg *sync.WaitGroup) {
 		want = pvecontract.LiveWant{}
 	}
 	if len(want.Targets) == 0 || !want.Live(now.Unix()) {
-		w.stop(ctx)
-		w.sweep(ctx, nil)
+		w.stop(ctx) // flush sweeps every samples file
 		return
 	}
 	if !w.refreshed || now.Before(w.lastRefresh) || now.Sub(w.lastRefresh) >= liveLeaseRefresh {
