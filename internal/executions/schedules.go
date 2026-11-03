@@ -321,12 +321,14 @@ func (s *Service) RevokeSchedule(ctx context.Context, user, id string) error {
 	return nil
 }
 
-// RunSchedules runs due scheduled checks until ctx ends.
+// RunSchedules runs due scheduled checks (legacy schedules, then ordinary
+// read leases) until ctx ends.
 func (s *Service) RunSchedules(ctx context.Context) {
 	t := time.NewTicker(scheduleTick)
 	defer t.Stop()
 	for {
 		s.RunDueSchedules(ctx)
+		s.RunDueReadGrants(ctx)
 		select {
 		case <-ctx.Done():
 			return
