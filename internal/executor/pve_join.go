@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -14,6 +16,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveapi"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
@@ -88,19 +91,39 @@ var (
 	ErrPveJoinUnreachable = errors.New("executor: guest SSH endpoint presents no usable host key")
 )
 
+// PveGuestIdentity is the live identity of a guest incarnation.
+type PveGuestIdentity struct {
+	Name string
+	// UUID is the guest's UUID as the node's guest list reports it (the
+	// VMID-reuse hint the inventory derives its generations from).
+	UUID string
+}
+
 // PveGuestAgentReader reads a provisioned guest over the remote's pinned
-// API channel with the read token. pveGuestAgentAPI is the production
-// implementation.
+// API channel. pveGuestAgentAPI is the production implementation.
 type PveGuestAgentReader interface {
-	// LiveGuestName returns the name of the QEMU guest vmid on node, read
-	// live (PVE: GET /nodes/{node}/qemu/{vmid}/config); an error means the
-	// guest is not there.
-	LiveGuestName(ctx context.Context, rm executordb.PveRemote, node string, vmid uint64, read pveapi.TokenSupplier) (string, error)
+	// LiveGuest returns the identity of the QEMU guest vmid on node from
+	// the node's live guest list (PVE: GET /nodes/{node}/qemu) with the
+	// read token; an error means the guest is not there.
+	LiveGuest(ctx context.Context, rm executordb.PveRemote, node string, vmid uint64, read pveapi.TokenSupplier) (PveGuestIdentity, error)
 	// AgentFileRead reads one file inside the guest through the QEMU guest
-	// agent (PVE: GET /nodes/{node}/qemu/{vmid}/agent/file-read). It must
-	// not return more than maxBytes and must fail on a truncated read; the
+	// agent (PVE: GET /nodes/{node}/qemu/{vmid}/agent/file-read) with the
+	// scoped guest-agent credential, never the read token. It must not
+	// return more than maxBytes and must fail on a truncated read; the
 	// join checks the size again.
-	AgentFileRead(ctx context.Context, rm executordb.PveRemote, node string, vmid uint64, path string, maxBytes int, read pveapi.TokenSupplier) ([]byte, error)
+	AgentFileRead(ctx context.Context, rm executordb.PveRemote, node string, vmid uint64, path string, maxBytes int, agent pveapi.TokenSupplier) ([]byte, error)
+}
+
+// PveGuestAgentCredentials supplies a remote's scoped guest-agent
+// credential (a PVE token limited to the guest agent file read of
+// provisioned guests). It is separate from the read and action tokens.
+// No implementation exists yet: whether such a credential or a spec
+// change is the way to an agent-verified join is open (maintainer
+// decision), so production joins use fingerprint review.
+type PveGuestAgentCredentials interface {
+	// AgentToken returns the credential of rm; ok is false when none is
+	// configured.
+	AgentToken(rm executordb.PveRemote) (tok pveapi.TokenSupplier, ok bool, err error)
 }
 
 // PveGuestJoinRequest names the provisioned guest and the host it becomes.
@@ -113,6 +136,9 @@ type PveGuestJoinRequest struct {
 	// GuestName is the name the provisioning gave the guest; the live
 	// guest must carry it before its agent is read.
 	GuestName string
+	// GuestUUID is the incarnation's UUID as the inventory recorded it
+	// (lowercase); empty disables the agent read.
+	GuestUUID string
 
 	HostID string
 	// Endpoint is the guest's SSH endpoint (its IPAM address or DHCP lease).
@@ -149,6 +175,10 @@ type PveGuestJoin struct {
 	// Agent reads the guest's host key; nil means fingerprint review only
 	// (the default until the bootstrap module installed the agent).
 	Agent PveGuestAgentReader
+	// AgentCredentials supplies the scoped guest-agent credential; nil
+	// (production today) disables the agent read: every join is a
+	// fingerprint review.
+	AgentCredentials PveGuestAgentCredentials
 }
 
 // ParseAgentHostKey validates guest agent output as exactly one plain
@@ -194,6 +224,8 @@ func (req PveGuestJoinRequest) validate() (enrollEntry, error) {
 		return enrollEntry{}, fmt.Errorf("%w: generation", ErrPveJoinInvalid)
 	case !validDNSName(req.GuestName):
 		return enrollEntry{}, fmt.Errorf("%w: guest name", ErrPveJoinInvalid)
+	case req.GuestUUID != "" && !pveGuestUUIDRe.MatchString(req.GuestUUID):
+		return enrollEntry{}, fmt.Errorf("%w: guest uuid", ErrPveJoinInvalid)
 	}
 	e, err := normalizeEnroll(&pb.EnrollHost{HostId: req.HostID, Endpoint: req.Endpoint, SshUser: req.SSHUser, CredentialRef: req.CredentialRef})
 	if err != nil {
@@ -239,6 +271,9 @@ func (j *PveGuestJoin) Propose(ctx context.Context, req PveGuestJoinRequest) (Pv
 			return PveGuestJoinProposal{}, ErrPveJoinKeyMismatch
 		}
 		method, detail = PveJoinMethodAgent, ""
+	} else {
+		s.log.Warn("audit", "kind", "guest_join_agent_fallback", "remote", req.RemoteID, "node", req.Node,
+			"vmid", req.VMID, "generation", req.Generation, "host", e.HostID, "reason", detail)
 	}
 	if other, err := s.db.HostByFingerprint(fp); err != nil {
 		return PveGuestJoinProposal{}, fmt.Errorf("join %s: host key store: %w", e.HostID, err)
@@ -248,7 +283,7 @@ func (j *PveGuestJoin) Propose(ctx context.Context, req PveGuestJoinRequest) (Pv
 	e.Fingerprint = fp
 
 	b := pveGuestBinding{RemoteID: req.RemoteID, Node: req.Node, VMID: req.VMID, Generation: req.Generation,
-		Name: req.GuestName, JoinMethod: method}
+		Name: req.GuestName, UUID: req.GuestUUID, JoinMethod: method}
 	r, params, err := guestJoinRequest(e, b, s.clock())
 	if err != nil {
 		return PveGuestJoinProposal{}, fmt.Errorf("join %s: enroll request: %w", e.HostID, err)
@@ -273,11 +308,38 @@ func (j *PveGuestJoin) Propose(ctx context.Context, req PveGuestJoinRequest) (Pv
 	}, nil
 }
 
+// pveGuestUUIDRe is the lowercase guest UUID form the inventory stores.
+var pveGuestUUIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// Fixed reasons for the fallback to fingerprint review.
+const (
+	pveJoinNoReader     = "no guest agent reader configured"
+	pveJoinNoCredential = "no scoped guest-agent credential configured for the remote (the read token has no guest file access: ADR 0006, spec 06)"
+)
+
 // agentKey tries the bounded agent read. It returns the key, or nil and a
 // fixed-text reason; agent output never reaches the reason or the log.
+//
+// The read token is never used for the agent: ADR 0006 gives neither
+// default token guest file access and spec 06 forbids VM.Monitor on the
+// read token. The agent read needs a separately configured, scoped
+// guest-agent credential (PveGuestJoin.AgentCredentials); without one the
+// join always falls back to fingerprint review. The read token is used
+// only for the guest list (incarnation identity) under a read grant
+// covering "guests".
 func (j *PveGuestJoin) agentKey(ctx context.Context, req PveGuestJoinRequest) (ssh.PublicKey, string) {
 	if j.Agent == nil || j.Mutations == nil || j.Mutations.DB == nil || j.Mutations.Vault == nil {
-		return nil, "no guest agent reader configured"
+		return nil, pveJoinNoReader
+	}
+	if j.AgentCredentials == nil {
+		return nil, pveJoinNoCredential
+	}
+	s := j.Service
+	if err := s.checkNotRecovering(); err != nil {
+		return nil, "executor recovery pending"
+	}
+	if req.GuestUUID == "" {
+		return nil, "the provisioned guest has no recorded incarnation identity"
 	}
 	rm, ok, err := j.Mutations.DB.GetRemote(req.RemoteID)
 	switch {
@@ -288,32 +350,63 @@ func (j *PveGuestJoin) agentKey(ctx context.Context, req PveGuestJoinRequest) (s
 	case rm.Credentials.ReadRef != PveVaultID(rm.RemoteID, PvePurposeRead) || rm.Credentials.ReadVersion < 1:
 		return nil, "remote read token not registered"
 	}
+	agentTok, ok, err := j.AgentCredentials.AgentToken(rm)
+	switch {
+	case err != nil:
+		return nil, "guest-agent credential unavailable"
+	case !ok || agentTok == nil:
+		return nil, pveJoinNoCredential
+	}
 	read, err := j.Mutations.readToken(rm)
 	if err != nil {
 		return nil, "remote read token unavailable"
 	}
+	// The identity reads use the read token, so they need a read grant
+	// like every other read-token request (ReadPVE).
+	claim, err := s.auth.AuthorizeProviderRead(permit.ProviderRead{RemoteID: rm.RemoteID, Method: permit.ProviderMethodGuests,
+		TrustPin: rm.TrustPin, TrustGeneration: rm.TrustGeneration, CredentialVersion: rm.Credentials.ReadVersion})
+	if err != nil {
+		return nil, "no read grant covers the guest list"
+	}
 	actx, cancel := context.WithTimeout(ctx, pveAgentReadTimeout)
 	defer cancel()
-	// The VMID must still hold the provisioned guest: a reused VMID's new
-	// occupant is never read as the provisioned guest.
-	name, err := j.Agent.LiveGuestName(actx, rm, req.Node, req.VMID, read)
-	if err != nil {
-		return nil, "live guest not readable"
+	// The VMID must hold the provisioned incarnation (name and UUID, the
+	// identity the inventory derives its generations from) before and
+	// after the read, so neither a reused VMID nor a swap between the
+	// calls is read as the provisioned guest.
+	if reason := j.sameGuest(actx, rm, req, read, "before"); reason != "" {
+		return nil, reason
 	}
-	if name != req.GuestName {
-		j.Service.log.Warn("audit", "kind", "guest_join_identity_mismatch", "remote", req.RemoteID, "node", req.Node,
-			"vmid", req.VMID, "generation", req.Generation)
-		return nil, "the live guest is not the provisioned guest"
-	}
-	raw, err := j.Agent.AgentFileRead(actx, rm, req.Node, req.VMID, pveJoinHostKeyPath, maxPveAgentHostKeyBytes, read)
+	raw, err := j.Agent.AgentFileRead(actx, rm, req.Node, req.VMID, pveJoinHostKeyPath, maxPveAgentHostKeyBytes, agentTok)
 	if err != nil {
 		return nil, "guest agent unavailable"
 	}
+	if reason := j.sameGuest(actx, rm, req, read, "after"); reason != "" {
+		return nil, reason
+	}
+	if err := claim.Check(); err != nil {
+		return nil, "the read grant was revoked during the read"
+	}
 	k, err := ParseAgentHostKey(raw)
 	if err != nil {
-		j.Service.log.Warn("audit", "kind", "guest_join_agent_key_malformed", "remote", req.RemoteID, "node", req.Node,
+		s.log.Warn("audit", "kind", "guest_join_agent_key_malformed", "remote", req.RemoteID, "node", req.Node,
 			"vmid", req.VMID, "bytes", len(raw))
 		return nil, "guest agent returned no valid ed25519 host key"
 	}
 	return k, ""
+}
+
+// sameGuest checks the live incarnation at (node, VMID) against the
+// provisioned guest and returns a fixed reason when it differs.
+func (j *PveGuestJoin) sameGuest(ctx context.Context, rm executordb.PveRemote, req PveGuestJoinRequest, read pveapi.TokenSupplier, when string) string {
+	live, err := j.Agent.LiveGuest(ctx, rm, req.Node, req.VMID, read)
+	if err != nil {
+		return "live guest not readable"
+	}
+	if live.Name != req.GuestName || strings.ToLower(live.UUID) != req.GuestUUID {
+		j.Service.log.Warn("audit", "kind", "guest_join_identity_mismatch", "remote", req.RemoteID, "node", req.Node,
+			"vmid", req.VMID, "generation", req.Generation, "when", when)
+		return "the live guest is not the provisioned guest"
+	}
+	return ""
 }

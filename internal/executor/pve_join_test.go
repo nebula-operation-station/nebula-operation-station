@@ -13,20 +13,31 @@ import (
 	"testing"
 	"time"
 
+	"encoding/json"
+
 	"golang.org/x/crypto/ssh"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveapi"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
 )
 
-// fakeAgentFiles is a guest agent stub: the live guest name and a file
-// read.
+// fakeAgentFiles is a guest agent stub: the live guest identity and a
+// file read.
 type fakeAgentFiles struct {
 	name      string
+	uuid      string
 	nameErr   error
 	nameCalls []string
+	// liveTokens are the credentials the identity reads used.
+	liveTokens []string
+	// afterRead, when set, replaces the live identity after the file read
+	// (a swap between the calls).
+	afterRead *PveGuestIdentity
 	data      []byte
 	err       error
 	calls     []string
@@ -36,10 +47,37 @@ type fakeAgentFiles struct {
 	deadline time.Duration
 }
 
-func (f *fakeAgentFiles) LiveGuestName(_ context.Context, rm executordb.PveRemote, node string, vmid uint64, _ pveapi.TokenSupplier) (string, error) {
+func (f *fakeAgentFiles) LiveGuest(ctx context.Context, rm executordb.PveRemote, node string, vmid uint64, read pveapi.TokenSupplier) (PveGuestIdentity, error) {
 	f.nameCalls = append(f.nameCalls, rm.RemoteID+"|"+node+"|"+uintString(vmid))
-	return f.name, f.nameErr
+	if read != nil {
+		tok, _ := read(ctx)
+		f.liveTokens = append(f.liveTokens, tok)
+	}
+	if f.afterRead != nil && len(f.calls) > 0 {
+		return *f.afterRead, nil
+	}
+	return PveGuestIdentity{Name: f.name, UUID: f.uuid}, f.nameErr
 }
+
+// fakeAgentCreds is a scoped guest-agent credential stub.
+type fakeAgentCreds struct {
+	token string
+	none  bool
+	err   error
+}
+
+func (c *fakeAgentCreds) AgentToken(executordb.PveRemote) (pveapi.TokenSupplier, bool, error) {
+	if c.err != nil || c.none {
+		return nil, false, c.err
+	}
+	tok := c.token
+	return func(context.Context) (string, error) { return tok, nil }, true, nil
+}
+
+const (
+	testAgentToken = "PVEAPIToken=nosagent@pve!agent=agentsecret"
+	testJoinUUID   = "0f8fad5b-d9cb-469f-a165-70867728950e"
+)
 
 func (f *fakeAgentFiles) AgentFileRead(ctx context.Context, rm executordb.PveRemote, node string, vmid uint64, path string, maxBytes int, read pveapi.TokenSupplier) ([]byte, error) {
 	f.calls = append(f.calls, rm.RemoteID+"|"+node+"|"+uintString(vmid)+"|"+path)
@@ -145,7 +183,10 @@ type joinEnv struct {
 	ssh   *testSSH
 	mut   *pveMutEnv
 	agent *fakeAgentFiles
+	creds *fakeAgentCreds
 	join  *PveGuestJoin
+	// reqMod adjusts request() in table tests.
+	reqMod func(r *PveGuestJoinRequest)
 }
 
 func newJoinEnv(t *testing.T, withAgent bool) *joinEnv {
@@ -155,15 +196,61 @@ func newJoinEnv(t *testing.T, withAgent bool) *joinEnv {
 	e := &joinEnv{reconcileEnv: re, ssh: srv, join: &PveGuestJoin{Service: re.svc}}
 	if withAgent {
 		e.mut = newPveMutEnv(t, false)
-		e.agent = &fakeAgentFiles{name: "web1.lab.test", data: authorizedLine(srv.hostKey.PublicKey(), "root@web1")}
-		e.join.Mutations, e.join.Agent = e.mut.m, e.agent
+		e.agent = &fakeAgentFiles{name: "web1.lab.test", uuid: strings.ToUpper(testJoinUUID),
+			data: authorizedLine(srv.hostKey.PublicKey(), "root@web1")}
+		e.creds = &fakeAgentCreds{token: testAgentToken}
+		e.join.Mutations, e.join.Agent, e.join.AgentCredentials = e.mut.m, e.agent, e.creds
+		e.grantGuestReads()
 	}
 	return e
 }
 
+// grantGuestReads gives the service an authority with leases and an
+// approved read grant covering the mutation remote's guest list.
+func (e *joinEnv) grantGuestReads() {
+	e.t.Helper()
+	v, err := webauthnverify.New(webauthnverify.Config{RPID: "reconcile.test", Origins: []string{"https://reconcile.test"}, Counters: e.db}, nil)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	risk, err := riskpolicy.New(e.db)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	e.svc.auth, err = permit.New(permit.Options{Verifier: v, Store: e.db, RiskPolicy: risk, Leases: e.db, Now: e.clock.Now})
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	if err := e.svc.auth.ResumeReadDispatch(); err != nil {
+		e.t.Fatal(err)
+	}
+	rm, _, err := e.mut.pe.db.GetRemote(mutRemote)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	now := e.clock.Now()
+	raw, err := json.Marshal(permit.ReadGrantDoc{
+		Grant: permit.ReadGrantFormat, ID: "00000000-0000-4000-8000-0000000000f6", Issuer: "root", CreatedUnix: now.Unix(),
+		ExpiryUnix: now.Add(permit.DefaultReadGrantLifetime).Unix(), Trigger: permit.TriggerScheduled,
+		Actions: []permit.ReadGrantAction{}, MinIntervalS: 60, RunBudget: 240, RateProfile: permit.ProviderReadProfile,
+		ProviderTargets: []permit.ProviderTarget{{RemoteID: rm.RemoteID, TrustPin: rm.TrustPin, TrustGeneration: rm.TrustGeneration,
+			CredentialVersion: rm.Credentials.ReadVersion, Methods: []string{permit.ProviderMethodGuests}}},
+	})
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	p, err := e.svc.auth.ProposeReadGrant(raw)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	if _, err := e.svc.auth.ApproveReadGrantCLI(p.Digest, "test"); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
 func (e *joinEnv) request() PveGuestJoinRequest {
 	return PveGuestJoinRequest{RemoteID: mutRemote, Node: "pve1", VMID: 101, Generation: 1, GuestName: "web1.lab.test",
-		HostID: "web1", Endpoint: e.ssh.addr, SSHUser: "nos", CredentialRef: "cred"}
+		GuestUUID: testJoinUUID, HostID: "web1", Endpoint: e.ssh.addr, SSHUser: "nos", CredentialRef: "cred"}
 }
 
 func (e *joinEnv) pending() int {
@@ -191,8 +278,11 @@ func TestGuestJoinAgentReadBindsTheAgentKey(t *testing.T) {
 	if e.agent.max != maxPveAgentHostKeyBytes {
 		t.Fatalf("agent read limit = %d", e.agent.max)
 	}
-	if !strings.Contains(e.agent.token, mutReadToken) {
-		t.Fatal("the agent read must use the remote's read token")
+	if e.agent.token != testAgentToken {
+		t.Fatal("the agent read must use the scoped guest-agent credential")
+	}
+	if len(e.agent.liveTokens) != 2 || !strings.Contains(e.agent.liveTokens[0], mutReadToken) || !strings.Contains(e.agent.liveTokens[1], mutReadToken) {
+		t.Fatalf("the identity reads (before and after) must use the read token: %d reads", len(e.agent.liveTokens))
 	}
 	if p.Host.GetHostId() != "web1" || p.Host.GetFingerprint() != want || p.Host.GetSshUser() != "nos" || p.Host.GetCredentialRef() != "cred" {
 		t.Fatalf("host = %+v", p.Host)

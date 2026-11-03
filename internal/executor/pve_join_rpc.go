@@ -35,13 +35,15 @@ type pveGuestBinding struct {
 	VMID       uint64 `json:"vmid"`
 	Generation uint64 `json:"generation"`
 	Name       string `json:"name"`
+	// UUID is the incarnation's recorded UUID ("" when unknown).
+	UUID string `json:"uuid"`
 	// JoinMethod is PveJoinMethodAgent or PveJoinMethodReview; the
 	// approver sees whether the key was agent-verified.
 	JoinMethod string `json:"join_method"`
 }
 
 func (b pveGuestBinding) proto() *pb.GuestJoinTarget {
-	return &pb.GuestJoinTarget{RemoteId: b.RemoteID, Node: b.Node, Vmid: b.VMID, Generation: b.Generation, GuestName: b.Name}
+	return &pb.GuestJoinTarget{RemoteId: b.RemoteID, Node: b.Node, Vmid: b.VMID, Generation: b.Generation, GuestName: b.Name, GuestUuid: b.UUID}
 }
 
 // guestJoinParams is the canonical parameter document of a guest join: the
@@ -81,7 +83,7 @@ func (j *PveGuestJoin) Commit(ctx context.Context, d canonical.Digest, host *pb.
 		return PveGuestJoinCommit{}, errors.New("executor: pve guest join: Service is required")
 	}
 	req := PveGuestJoinRequest{RemoteID: guest.GetRemoteId(), Node: guest.GetNode(), VMID: guest.GetVmid(),
-		Generation: guest.GetGeneration(), GuestName: guest.GetGuestName(), HostID: host.GetHostId(),
+		Generation: guest.GetGeneration(), GuestName: guest.GetGuestName(), GuestUUID: guest.GetGuestUuid(), HostID: host.GetHostId(),
 		Endpoint: host.GetEndpoint(), SSHUser: host.GetSshUser(), CredentialRef: host.GetCredentialRef()}
 	e, err := req.validate()
 	if err != nil {
@@ -95,7 +97,7 @@ func (j *PveGuestJoin) Commit(ctx context.Context, d canonical.Digest, host *pb.
 	}
 	e.Fingerprint = host.GetFingerprint()
 	b := pveGuestBinding{RemoteID: req.RemoteID, Node: req.Node, VMID: req.VMID, Generation: req.Generation,
-		Name: req.GuestName, JoinMethod: method}
+		Name: req.GuestName, UUID: req.GuestUUID, JoinMethod: method}
 	params, err := guestJoinParams(e, b)
 	if err != nil {
 		return PveGuestJoinCommit{}, fmt.Errorf("join %s: parameters: %w", e.HostID, err)
@@ -115,15 +117,19 @@ func (j *PveGuestJoin) Commit(ctx context.Context, d canonical.Digest, host *pb.
 		"method", method, "pinned", res.Pinned)
 	return PveGuestJoinCommit{
 		Result: res,
+		// key_type is not part of the approval and is not echoed.
 		Host: &pb.EnrollHost{HostId: e.HostID, Endpoint: e.Endpoint, SshUser: e.User, CredentialRef: e.Credential,
-			Fingerprint: e.Fingerprint, KeyType: host.GetKeyType()},
+			Fingerprint: e.Fingerprint},
 		Guest:      b.proto(),
 		JoinMethod: method,
 	}, nil
 }
 
-// pveGuestJoin is the guest join of this executor: the agent read uses the
-// remote registry, the vault and the pinned PVE read channel.
+// pveGuestJoin is the guest join of this executor. AgentCredentials stays
+// nil: no scoped guest-agent credential exists yet (ADR 0006 gives the
+// default tokens no guest file access; separate credential or spec change
+// is a maintainer decision), so every production join is a fingerprint
+// review and the agent reader below is not used.
 func (s *Service) pveGuestJoin() *PveGuestJoin {
 	return &PveGuestJoin{Service: s, Mutations: s.pveMutations(), Agent: pveGuestAgentAPI{s: s}}
 }
@@ -152,7 +158,7 @@ func pveJoinStatus(err error) error {
 func (s *Service) ProposeGuestJoin(ctx context.Context, in *pb.ProposeGuestJoinRequest) (*pb.ProposeGuestJoinResponse, error) {
 	g, h := in.GetGuest(), in.GetHost()
 	p, err := s.pveGuestJoin().Propose(ctx, PveGuestJoinRequest{RemoteID: g.GetRemoteId(), Node: g.GetNode(),
-		VMID: g.GetVmid(), Generation: g.GetGeneration(), GuestName: g.GetGuestName(), HostID: h.GetHostId(),
+		VMID: g.GetVmid(), Generation: g.GetGeneration(), GuestName: g.GetGuestName(), GuestUUID: g.GetGuestUuid(), HostID: h.GetHostId(),
 		Endpoint: h.GetEndpoint(), SSHUser: h.GetSshUser(), CredentialRef: h.GetCredentialRef()})
 	if err != nil {
 		return nil, pveJoinStatus(err)
@@ -188,7 +194,7 @@ type pveGuestAgentAPI struct {
 // watch and the release of the remote's request slot.
 func (a pveGuestAgentAPI) client(ctx context.Context, rm executordb.PveRemote, read pveapi.TokenSupplier) (*pveapi.Client, *pveTrustWatch, func(), error) {
 	if read == nil {
-		return nil, nil, nil, errors.New("executor: guest agent read: no read token")
+		return nil, nil, nil, errors.New("executor: guest read: no credential")
 	}
 	release, err := a.s.pveRead.acquire(ctx, rm.RemoteID)
 	if err != nil {
@@ -225,26 +231,31 @@ func (a pveGuestAgentAPI) checkTrust(rm executordb.PveRemote, watch *pveTrustWat
 	return nil
 }
 
-// LiveGuestName implements PveGuestAgentReader.
-func (a pveGuestAgentAPI) LiveGuestName(ctx context.Context, rm executordb.PveRemote, node string, vmid uint64, read pveapi.TokenSupplier) (string, error) {
+// LiveGuest implements PveGuestAgentReader.
+func (a pveGuestAgentAPI) LiveGuest(ctx context.Context, rm executordb.PveRemote, node string, vmid uint64, read pveapi.TokenSupplier) (PveGuestIdentity, error) {
 	c, watch, release, err := a.client(ctx, rm, read)
 	if err != nil {
-		return "", err
+		return PveGuestIdentity{}, err
 	}
 	defer release()
-	cfg, err := c.GetQemuConfig(ctx, node, int(vmid))
+	guests, err := c.ListQemu(ctx, node)
 	if terr := a.checkTrust(rm, watch); terr != nil {
-		return "", terr
+		return PveGuestIdentity{}, terr
 	}
 	if err != nil {
-		return "", err
+		return PveGuestIdentity{}, err
 	}
-	return cfg.Name, nil
+	for _, g := range guests {
+		if uint64(max(g.VMID, 0)) == vmid {
+			return PveGuestIdentity{Name: g.Name, UUID: g.UUID}, nil
+		}
+	}
+	return PveGuestIdentity{}, fmt.Errorf("executor: guest %d not on node %s", vmid, node)
 }
 
 // AgentFileRead implements PveGuestAgentReader.
-func (a pveGuestAgentAPI) AgentFileRead(ctx context.Context, rm executordb.PveRemote, node string, vmid uint64, path string, maxBytes int, read pveapi.TokenSupplier) ([]byte, error) {
-	c, watch, release, err := a.client(ctx, rm, read)
+func (a pveGuestAgentAPI) AgentFileRead(ctx context.Context, rm executordb.PveRemote, node string, vmid uint64, path string, maxBytes int, agent pveapi.TokenSupplier) ([]byte, error) {
+	c, watch, release, err := a.client(ctx, rm, agent)
 	if err != nil {
 		return nil, err
 	}

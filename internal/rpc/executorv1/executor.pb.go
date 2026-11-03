@@ -5978,7 +5978,11 @@ type GuestJoinTarget struct {
 	Generation uint64 `protobuf:"varint,4,opt,name=generation,proto3" json:"generation,omitempty"`
 	// The name the provisioning gave the guest; the live guest must carry
 	// it before its agent is read.
-	GuestName     string `protobuf:"bytes,5,opt,name=guest_name,json=guestName,proto3" json:"guest_name,omitempty"`
+	GuestName string `protobuf:"bytes,5,opt,name=guest_name,json=guestName,proto3" json:"guest_name,omitempty"`
+	// The incarnation's UUID as the inventory recorded it (lowercase); the
+	// live guest must carry it before and after the agent read. Empty
+	// disables the agent read.
+	GuestUuid     string `protobuf:"bytes,6,opt,name=guest_uuid,json=guestUuid,proto3" json:"guest_uuid,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6044,6 +6048,13 @@ func (x *GuestJoinTarget) GetGeneration() uint64 {
 func (x *GuestJoinTarget) GetGuestName() string {
 	if x != nil {
 		return x.GuestName
+	}
+	return ""
+}
+
+func (x *GuestJoinTarget) GetGuestUuid() string {
+	if x != nil {
+		return x.GuestUuid
 	}
 	return ""
 }
@@ -18509,7 +18520,7 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\blogin_ok\x18\x05 \x01(\bR\aloginOk\x12!\n" +
 	"\flogin_detail\x18\x06 \x01(\tR\vloginDetail\"R\n" +
 	"\x14CommitEnrollResponse\x12:\n" +
-	"\aresults\x18\x01 \x03(\v2 .nebula.executor.v1.EnrollResultR\aresults\"\x95\x01\n" +
+	"\aresults\x18\x01 \x03(\v2 .nebula.executor.v1.EnrollResultR\aresults\"\xb4\x01\n" +
 	"\x0fGuestJoinTarget\x12\x1b\n" +
 	"\tremote_id\x18\x01 \x01(\tR\bremoteId\x12\x12\n" +
 	"\x04node\x18\x02 \x01(\tR\x04node\x12\x12\n" +
@@ -18518,7 +18529,9 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"generation\x18\x04 \x01(\x04R\n" +
 	"generation\x12\x1d\n" +
 	"\n" +
-	"guest_name\x18\x05 \x01(\tR\tguestName\"\x88\x01\n" +
+	"guest_name\x18\x05 \x01(\tR\tguestName\x12\x1d\n" +
+	"\n" +
+	"guest_uuid\x18\x06 \x01(\tR\tguestUuid\"\x88\x01\n" +
 	"\x17ProposeGuestJoinRequest\x129\n" +
 	"\x05guest\x18\x01 \x01(\v2#.nebula.executor.v1.GuestJoinTargetR\x05guest\x122\n" +
 	"\x04host\x18\x02 \x01(\v2\x1e.nebula.executor.v1.EnrollHostR\x04host\"\x93\x02\n" +

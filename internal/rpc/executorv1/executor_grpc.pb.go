@@ -289,10 +289,12 @@ type ExecutorServiceClient interface {
 	// PV-06): proposes the guest's enrollment with the normal enrollment
 	// approval (at least HIGH). The executor checks the live guest, tries a
 	// bounded guest agent read of the guest's ed25519 host key over the
-	// remote's pinned API channel (join method "agent", no trust on first
-	// use) and otherwise proposes the probed fingerprint for review (join
-	// method "review"). The approval binds the host entry and the guest
-	// (remote, node, VMID, generation, name) and the join method.
+	// remote's pinned API channel with a scoped guest-agent credential,
+	// never the read token (join method "agent", no trust on first use),
+	// and otherwise proposes the probed fingerprint for review (join method
+	// "review"; today always, as no such credential exists). The approval
+	// binds the host entry, the guest (remote, node, VMID, generation,
+	// name, UUID) and the join method.
 	ProposeGuestJoin(ctx context.Context, in *ProposeGuestJoinRequest, opts ...grpc.CallOption) (*ProposeGuestJoinResponse, error)
 	// Role: server. Pins the host key of an approved guest join whose
 	// endpoint still presents the approved key. The request must repeat the
@@ -1670,10 +1672,12 @@ type ExecutorServiceServer interface {
 	// PV-06): proposes the guest's enrollment with the normal enrollment
 	// approval (at least HIGH). The executor checks the live guest, tries a
 	// bounded guest agent read of the guest's ed25519 host key over the
-	// remote's pinned API channel (join method "agent", no trust on first
-	// use) and otherwise proposes the probed fingerprint for review (join
-	// method "review"). The approval binds the host entry and the guest
-	// (remote, node, VMID, generation, name) and the join method.
+	// remote's pinned API channel with a scoped guest-agent credential,
+	// never the read token (join method "agent", no trust on first use),
+	// and otherwise proposes the probed fingerprint for review (join method
+	// "review"; today always, as no such credential exists). The approval
+	// binds the host entry, the guest (remote, node, VMID, generation,
+	// name, UUID) and the join method.
 	ProposeGuestJoin(context.Context, *ProposeGuestJoinRequest) (*ProposeGuestJoinResponse, error)
 	// Role: server. Pins the host key of an approved guest join whose
 	// endpoint still presents the approved key. The request must repeat the
