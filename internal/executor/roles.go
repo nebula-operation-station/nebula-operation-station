@@ -64,7 +64,11 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_CommitRepin_FullMethodName:               {server},
 		pb.ExecutorService_ProposeEnroll_FullMethodName:             {server},
 		pb.ExecutorService_CommitEnroll_FullMethodName:              {server},
-		pb.ExecutorService_TestConnection_FullMethodName:            {admin},
+		// Join of a provisioned PVE guest (ADR 0008 section 4, PV-06): the
+		// normal enrollment approval, proposed and committed by the server.
+		pb.ExecutorService_ProposeGuestJoin_FullMethodName: {server},
+		pb.ExecutorService_CommitGuestJoin_FullMethodName:  {server},
+		pb.ExecutorService_TestConnection_FullMethodName:   {admin},
 		// The server may read the executor's SSH public key (never the
 		// private key): it needs the key's SHA-256 fingerprint as the
 		// credential_version of a read-grant-v2 proposal (ADR 0007, E06).
