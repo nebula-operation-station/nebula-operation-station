@@ -1745,7 +1745,9 @@ func TestReleaseSettledFreesAStartedVMIDWhoseGuestIsProvenAbsent(t *testing.T) {
 			bound := e.quietBound(approved.ExecutionID)
 			// Inside the window (up to its last instant) a lost or late
 			// task could still create the guest: kept.
-			for _, ts := range []time.Time{bound.Add(-time.Minute), bound} {
+			// The store keeps whole seconds, so up to one second past bound
+			// the intent may still be inside its window.
+			for _, ts := range []time.Time{bound.Add(-time.Minute), bound, bound.Add(500 * time.Millisecond), bound.Add(time.Second)} {
 				e.at(ts)
 				if n, err := e.prov.ReleaseSettledVMIDs(context.Background(), mutRemote); err != nil || n != 0 {
 					t.Fatalf("released inside the task window at %v: %d %v", ts, n, err)
@@ -1798,8 +1800,8 @@ func TestReleaseSettledFreesAStartedVMIDWithoutStep(t *testing.T) {
 }
 
 // TestReleaseSettledKeepsAVMIDWithAnOpenStep: a step still open may yet
-// create or change the guest; no live list releases its reservation, however
-// late.
+// create or change the guest; no live list lets the sweep release its
+// reservation or touch the step, however late.
 func TestReleaseSettledKeepsAVMIDWithAnOpenStep(t *testing.T) {
 	e := newProvisionEnv(t, fixedRisk{})
 	approved := e.approve(e.request())
@@ -1812,12 +1814,227 @@ func TestReleaseSettledKeepsAVMIDWithAnOpenStep(t *testing.T) {
 	if n, err := e.prov.ReleaseSettledVMIDs(context.Background(), mutRemote); err != nil || n != 0 {
 		t.Fatalf("released with an open step: %d %v", n, err)
 	}
-	if _, err := e.prov.ReleaseVMIDReservation(context.Background(), PveVMIDRelease{RemoteID: mutRemote, VMID: approved.VMID,
-		ConfirmGuestAbsent: true, By: "admin"}); !errors.Is(err, ErrPveVMIDReleaseRefused) {
-		t.Fatalf("admin release with an open step: %v", err)
-	}
 	if !e.held(approved.VMID) {
 		t.Fatal("reservation with an open step released")
+	}
+	if steps, _ := e.pe.db.PveJobSteps(approved.ExecutionID); steps[0].State != executordb.PveJobReconciling {
+		t.Fatalf("sweep changed an open step: %+v", steps[0])
+	}
+	if strings.Contains(e.logs.String(), "pve_job_abandoned") {
+		t.Fatal("sweep abandoned a step")
+	}
+}
+
+// stuckProvision leaves approved with a step that never leaves an open
+// state: its node's task list (lost clone) or task status (config step)
+// cannot be read any more, e.g. because the node left the cluster.
+// It returns the stuck step's number.
+func stuckProvision(t *testing.T, e *provisionEnv, approved PveProvisionRequest, kind string) int {
+	t.Helper()
+	switch kind {
+	case "lost clone, task list unreadable":
+		e.loseStep(1, func(string) []string { return nil })
+		e.client.fakeMutClient.mu.Lock()
+		e.client.fakeMutClient.recentErr = errors.New("test: node unreachable")
+		e.client.fakeMutClient.mu.Unlock()
+		if _, err := e.prov.Provision(context.Background(), approved); !errors.Is(err, ErrPveDispatchUncertain) {
+			t.Fatalf("lost clone: %v", err)
+		}
+		return 1
+	case "config running, task status unreadable":
+		e.client.fakeMutClient.mu.Lock()
+		e.client.fakeMutClient.status = func(upid string) (PveTaskStatus, error) {
+			if strings.Contains(upid, ":qmconfig:") {
+				return PveTaskStatus{}, errors.New("test: node unreachable")
+			}
+			return PveTaskStatus{ExitStatus: "OK"}, nil
+		}
+		e.client.fakeMutClient.mu.Unlock()
+		if _, err := e.prov.Provision(context.Background(), approved); err == nil {
+			t.Fatal("provision with an unreadable task status succeeded")
+		}
+		return 2
+	}
+	t.Fatalf("unknown case %q", kind)
+	return 0
+}
+
+// TestReleaseVMIDReservationAbandonsStuckSteps pins PR #175 review
+// (MEDIUM, LOW): a started reservation whose step is stuck open forever is
+// kept by the sweep, but the operator path frees it fail-closed once the
+// operator confirms, every task window is over and a complete live list
+// read now does not show the guest. The stuck steps are finished as
+// unknown (abandoned) and audited, so no reconciliation adopts a task for
+// them later. Only the operator path can resolve this case.
+func TestReleaseVMIDReservationAbandonsStuckSteps(t *testing.T) {
+	for _, kind := range []string{"lost clone, task list unreadable", "config running, task status unreadable"} {
+		t.Run(kind, func(t *testing.T) {
+			e := newProvisionEnv(t, fixedRisk{})
+			approved := e.approve(e.request())
+			n := stuckProvision(t, e, approved, kind)
+			bound := e.quietBound(approved.ExecutionID)
+			stepState := func() executordb.PveJob {
+				t.Helper()
+				steps, err := e.pe.db.PveJobSteps(approved.ExecutionID)
+				if err != nil || len(steps) != n {
+					t.Fatalf("steps: %v %+v", err, steps)
+				}
+				return steps[n-1]
+			}
+			if !pveJobOpen(stepState()) {
+				t.Fatalf("step not stuck open: %+v", stepState())
+			}
+			e.at(bound.Add(time.Hour))
+			if err := e.m.Reconcile(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if n, err := e.prov.ReleaseSettledVMIDs(context.Background(), mutRemote); err != nil || n != 0 {
+				t.Fatalf("sweep released a stuck reservation: %d %v", n, err)
+			}
+			if !pveJobOpen(stepState()) || !e.held(approved.VMID) {
+				t.Fatalf("sweep resolved the stuck step: %+v", stepState())
+			}
+			ok := PveVMIDRelease{RemoteID: mutRemote, VMID: approved.VMID, ConfirmGuestAbsent: true, By: "alice"}
+			refuse := func(name string, in PveVMIDRelease, want error) {
+				t.Helper()
+				if _, err := e.prov.ReleaseVMIDReservation(context.Background(), in); !errors.Is(err, want) {
+					t.Fatalf("%s: err = %v, want %v", name, err, want)
+				}
+				if !e.held(approved.VMID) || !pveJobOpen(stepState()) {
+					t.Fatalf("%s: released or abandoned: %+v", name, stepState())
+				}
+			}
+			unconfirmed := ok
+			unconfirmed.ConfirmGuestAbsent = false
+			refuse("unconfirmed", unconfirmed, ErrPveVMIDReleaseRefused)
+			// Inside the task window (up to its whole-second margin) a
+			// late task could still create the guest.
+			for _, ts := range []time.Time{bound, bound.Add(time.Second)} {
+				e.at(ts)
+				refuse(fmt.Sprintf("inside the window at %v", ts), ok, ErrPveVMIDReleaseRefused)
+			}
+			e.at(bound.Add(time.Hour))
+			// The guest is listed (the config case's clone created it): the
+			// operator's confirmation is wrong.
+			e.reader.addGuest("pve1", int(approved.VMID), 4*gib)
+			refuse("guest listed", ok, ErrPveVMIDReleaseRefused)
+			e.reader.removeGuest(int(approved.VMID))
+			e.setPartial(true)
+			refuse("partial list", ok, ErrPveInventoryIncomplete)
+			e.setPartial(false)
+			if strings.Contains(e.logs.String(), "pve_job_abandoned") {
+				t.Fatal("refused release abandoned a step")
+			}
+
+			if _, err := e.prov.ReleaseVMIDReservation(context.Background(), ok); err != nil {
+				t.Fatal(err)
+			}
+			if e.held(approved.VMID) {
+				t.Fatal("stuck reservation kept after the operator release")
+			}
+			j := stepState()
+			if j.State != executordb.PveJobUnknown || j.ExitStatus != pveStepAbandoned {
+				t.Fatalf("stuck step not abandoned: %+v", j)
+			}
+			logs := e.logs.String()
+			for _, want := range []string{"kind=pve_job_abandoned", fmt.Sprintf("step=%d", n), "by=alice", "kind=pve_vmid_release_confirmed", "abandoned=1"} {
+				if !strings.Contains(logs, want) {
+					t.Fatalf("audit lacks %q:\n%s", want, logs)
+				}
+			}
+			// The node comes back and lists a task that would match the
+			// step: nothing adopts it, the step stays abandoned.
+			upidBefore := j.UPID
+			e.client.fakeMutClient.mu.Lock()
+			e.client.fakeMutClient.recentErr = nil
+			e.client.fakeMutClient.status = nil
+			e.client.fakeMutClient.recent = []string{testTaskUPID("pve1", j.CreatedAt, "qmclone", fmt.Sprint(approved.Template.VMID), mutActionUser, 900)}
+			e.client.fakeMutClient.mu.Unlock()
+			if err := e.m.Reconcile(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if j := stepState(); j.State != executordb.PveJobUnknown || j.UPID != upidBefore {
+				t.Fatalf("abandoned step changed by reconciliation: %+v", j)
+			}
+			if open, _ := e.pe.db.OpenPveJobs(); len(open) != 0 {
+				t.Fatalf("open steps left: %+v", open)
+			}
+		})
+	}
+}
+
+// TestReleaseVMIDReservationFreesAStuckCloneBlockingItsTemplate: a clone
+// stuck open without a recorded task blocks the release of every unknown
+// clone of the same template (sameTemplateCloneOpen) for as long as no
+// reconciliation pass resolves it (none runs here). The operator path
+// abandons and releases the stuck one, and the sweep then frees the other.
+func TestReleaseVMIDReservationFreesAStuckCloneBlockingItsTemplate(t *testing.T) {
+	e := newProvisionEnv(t, fixedRisk{})
+	a := e.approve(e.request())
+	b := e.approve(e.request())
+	e.loseStep(1, func(string) []string { return nil })
+	if _, err := e.prov.Provision(context.Background(), a); !errors.Is(err, ErrPveDispatchUncertain) {
+		t.Fatalf("a: %v", err)
+	}
+	e.passMatchWindow()
+	if err := e.m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e.m.Now = nil
+	stuckProvision(t, e, b, "lost clone, task list unreadable")
+	// A's guest appeared; A would go but for B's stuck clone.
+	e.reader.addGuest("pve1", int(a.VMID), 4*gib)
+	e.at(e.quietBound(b.ExecutionID).Add(time.Hour))
+	if n, err := e.prov.ReleaseSettledVMIDs(context.Background(), mutRemote); err != nil || n != 0 {
+		t.Fatalf("sweep released %d %v while b's clone is stuck", n, err)
+	}
+	if !e.held(a.VMID) || !e.held(b.VMID) {
+		t.Fatal("reservation lost while a same-template clone is stuck")
+	}
+	if _, err := e.prov.ReleaseVMIDReservation(context.Background(), PveVMIDRelease{RemoteID: mutRemote, VMID: b.VMID, ConfirmGuestAbsent: true, By: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := e.prov.ReleaseSettledVMIDs(context.Background(), mutRemote); err != nil || n != 1 {
+		t.Fatalf("sweep released %d %v after the stuck clone was abandoned, want 1", n, err)
+	}
+	if e.held(a.VMID) || e.held(b.VMID) {
+		t.Fatal("reservations kept")
+	}
+}
+
+// TestReleaseVMIDReservationRefusedWhileProvisionRuns pins PR #175 review
+// (MEDIUM): a Provision of the execution in flight before its first intent
+// has a started reservation without a step; the operator release must not
+// free it under the running run.
+func TestReleaseVMIDReservationRefusedWhileProvisionRuns(t *testing.T) {
+	e := newProvisionEnv(t, fixedRisk{})
+	approved := e.approve(e.request())
+	blocked, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	e.pc.pmu.Lock()
+	e.pc.onTaskType = func() { once.Do(func() { close(blocked); <-release }) }
+	e.pc.pmu.Unlock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.prov.Provision(context.Background(), approved)
+		done <- err
+	}()
+	<-blocked
+	h, ok, _ := e.vmids.VMIDHolder(mutRemote, approved.VMID, time.Now())
+	if !ok || !h.Started {
+		t.Fatalf("reservation not started by the run: %+v %v", h, ok)
+	}
+	_, err := e.prov.ReleaseVMIDReservation(context.Background(), PveVMIDRelease{RemoteID: mutRemote, VMID: approved.VMID, ConfirmGuestAbsent: true, By: "alice"})
+	held := e.held(approved.VMID)
+	close(release)
+	if runErr := <-done; runErr != nil {
+		t.Fatalf("run: %v", runErr)
+	}
+	if !errors.Is(err, ErrPveVMIDReleaseRefused) || !held {
+		t.Fatalf("operator release under a running provision: %v, held %v", err, held)
+	}
+	if !strings.Contains(e.logs.String(), "reason=running") {
+		t.Fatalf("refusal not audited as running:\n%s", e.logs.String())
 	}
 }
 
@@ -1890,7 +2107,8 @@ func TestReleaseVMIDReservationAdmin(t *testing.T) {
 	unconfirmed := ok
 	unconfirmed.ConfirmGuestAbsent = false
 	refuse("unconfirmed", unconfirmed, ErrPveVMIDReleaseRefused)
-	for _, by := range []string{"", " ", "al\nice", "al\x00ice", strings.Repeat("a", 129), "\xff"} {
+	for _, by := range []string{"", " ", "al\nice", "al\x00ice", strings.Repeat("a", 129), "\xff",
+		"\u202ealice", "al\u200bice", "\ufeffalice", "al\u2066ice"} {
 		in := ok
 		in.By = by
 		refuse(fmt.Sprintf("by %q", by), in, ErrPveProvisionInvalid)

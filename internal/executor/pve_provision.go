@@ -1170,8 +1170,10 @@ func (p *PveProvisioner) settledReason(recs []PveVMIDReservation, r PveVMIDReser
 
 // ErrPveVMIDReleaseRefused is returned when an operator release of a VMID
 // reservation is refused: unconfirmed, no started reservation, the guest
-// listed, a step open or running, the task window not over, or a clone of
-// the same template still being identified. Nothing was released.
+// listed, the execution running in this engine, the task window not over,
+// or a clone of the same template still being identified. Nothing was
+// released (steps abandoned before a same-template refusal stay
+// abandoned).
 var ErrPveVMIDReleaseRefused = errors.New("executor: vmid reservation release refused")
 
 // maxPveOperatorID bounds the operator identity of an audited release.
@@ -1194,18 +1196,25 @@ func validOperatorID(by string) bool {
 	if by == "" || len(by) > maxPveOperatorID || !utf8.ValidString(by) || strings.TrimSpace(by) == "" {
 		return false
 	}
-	return !strings.ContainsFunc(by, unicode.IsControl)
+	// Controls (Cc) and format characters (Cf: bidi overrides, zero-width
+	// characters) would let the audited identity misrender.
+	return !strings.ContainsFunc(by, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) })
 }
 
 // ReleaseVMIDReservation is the admin-only operator path for one started
 // VMID reservation that ReleaseSettledVMIDs has not released. It runs
-// inside the executor; only the authenticated admin may reach it. It
-// releases only with the operator's confirmation that the guest is absent
-// and only when the release would be safe without it: no run of the
-// execution in this engine, no open step, a complete live guest list read
-// after the last step's task window not showing the VMID, and no clone of
-// the same template being identified. The release is audited with the
-// operator. It returns the released reservation.
+// inside the executor; only the authenticated admin may reach it. It needs
+// the operator's confirmation that the guest is absent, no run of the
+// execution in this engine, a complete live guest list read now (after
+// the last step's task window plus skew) not showing the VMID, and no
+// other clone of the same template being identified.
+//
+// Unlike the sweep, it also frees a reservation whose steps are stuck
+// open (dispatching, running or reconciling), e.g. because the task
+// status or task list of their node can no longer be read: those steps
+// are first finished as unknown ("abandoned"), each audited, so no
+// reconciliation can later adopt a task for them. The release is audited
+// with the operator. It returns the released reservation.
 func (p *PveProvisioner) ReleaseVMIDReservation(ctx context.Context, in PveVMIDRelease) (PveVMIDReservation, error) {
 	if err := p.checkDeps(); err != nil {
 		return PveVMIDReservation{}, err
@@ -1258,19 +1267,69 @@ func (p *PveProvisioner) ReleaseVMIDReservation(ctx context.Context, in PveVMIDR
 	if err != nil {
 		return PveVMIDReservation{}, ErrPveJobStore
 	}
+	abandoned := 0
+	if slices.ContainsFunc(steps, pveJobOpen) {
+		// The operator's extra power over the sweep: steps stuck open
+		// (their task status or task list unreadable for good, e.g. the
+		// node left the cluster) are abandoned once every task of the
+		// provisioning had to start and a complete live list read now
+		// does not show the guest. Never inside the window.
+		if !listedAt.After(stepsQuietAt(steps)) {
+			return refuse("task_window_open")
+		}
+		if abandoned, err = p.abandonOpenSteps(in, steps); err != nil {
+			return PveVMIDReservation{}, err
+		}
+		if steps, err = p.Mutations.DB.PveJobSteps(r.ExecutionID); err != nil {
+			return PveVMIDReservation{}, ErrPveJobStore
+		}
+	}
 	reason, err := p.settledReason(recs, r, steps, live, listedAt)
 	if err != nil {
 		return PveVMIDReservation{}, err
 	}
 	if reason == "" {
+		// The abandoned steps stay abandoned: the reservation keeps
+		// marking their unrecorded clone task ambiguous (JobTaskID).
 		return refuse("not_settled")
 	}
 	if err := p.VMIDs.ReleaseVMID(in.RemoteID, r.VMID, r.ExecutionID); err != nil {
 		return PveVMIDReservation{}, ErrPveJobStore
 	}
 	p.Mutations.log().Info("audit", "kind", "pve_vmid_release_confirmed", "remote", in.RemoteID, "vmid", r.VMID,
-		"execution", r.ExecutionID, "by", in.By, "reason", reason, "steps", len(steps))
+		"execution", r.ExecutionID, "by", in.By, "reason", reason, "steps", len(steps), "abandoned", abandoned)
 	return r, nil
+}
+
+// pveStepAbandoned is the exit status recorded for a step the operator
+// abandoned.
+const pveStepAbandoned = "abandoned by operator: guest absent after the task window"
+
+// abandonOpenSteps finishes every open step of steps as unknown, so no
+// reconciliation can later identify or adopt a task for it (a terminal
+// step is never reopened), and audits each with the operator. A step
+// that changed meanwhile (reconciliation finished it) is left as it is;
+// any other store error stops. It returns the number abandoned. The
+// caller holds the settle lock and has checked the task window and the
+// live list.
+func (p *PveProvisioner) abandonOpenSteps(in PveVMIDRelease, steps []executordb.PveJob) (int, error) {
+	n := 0
+	for _, j := range steps {
+		if !pveJobOpen(j) {
+			continue
+		}
+		err := p.Mutations.DB.FinishPveJob(j.ExecutionID, j.Step, executordb.PveJobUnknown, pveStepAbandoned)
+		if errors.Is(err, executordb.ErrPveJobState) {
+			continue
+		}
+		if err != nil {
+			return n, ErrPveJobStore
+		}
+		p.Mutations.log().Warn("audit", "kind", "pve_job_abandoned", "remote", in.RemoteID, "vmid", in.VMID, "execution", j.ExecutionID,
+			"step", j.Step, "was", j.State, "upid", j.UPID != "", "by", in.By)
+		n++
+	}
+	return n, nil
 }
 
 // sameTemplateCloneOpen reports whether another started provisioning of
