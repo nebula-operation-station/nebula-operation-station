@@ -29,6 +29,7 @@
           {{template "chart_lines" .Lines}}
         </summary>
         <div class="chart__children">
+          <p class="chart__pveupd chart__pveupd--node">{{template "chart_updates" .}}</p>
           <ul class="chart__list">
             {{range .Guests}}
             <li class="chart__box chart__box--guest" title="{{.StateReason}}">
@@ -36,6 +37,7 @@
               <span class="chart__gname" title="{{.Name}}">{{.Name}}</span>
               <span class="chart__vmid">VM {{.VMID}}</span>
               {{template "chart_lines" .Lines}}
+              <span class="chart__pveupd">{{template "chart_updates" .}}</span>
             </li>
             {{end}}
             {{range .Storages}}
@@ -120,6 +122,9 @@
               {{end}}
             </section>
             <section class="chart__dpanel-sec">
+              {{template "chart_updates" .Details}}
+            </section>
+            <section class="chart__dpanel-sec">
               <h4 class="chart__dpanel-h">Snapshots</h4>
               <p class="chart__unknown">{{.Details.Snapshots}}</p>
             </section>
@@ -184,3 +189,4 @@
   {{end}}
 </span>
 {{end}}{{end}}
+{{define "chart_updates"}}{{range .UpdateLinks}}<a class="chart__dpanel-link" href="{{.URL}}">{{.Label}}</a>{{else}}{{if .UpdatesReadonly}}<span class="chart__unknown">{{.UpdatesReadonly}}</span>{{end}}{{end}}{{end}}

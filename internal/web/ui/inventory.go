@@ -227,17 +227,12 @@ func viewHost(host inventory.Host, pins map[string]*pb.HostKeyPin, pinsUnavailab
 			}
 		}
 	}
-	if pinsUnavailable {
-		v.KeyStatus = "unavailable"
-	} else if pin, ok := pins[host.ID]; ok {
-		if pin.GetBlocked() {
-			v.KeyStatus = "blocked"
-		} else {
-			v.KeyStatus = "pinned"
-			v.KeyType = pin.GetKeyType()
-			v.KeyFingerprint = pin.GetFingerprint()
-			v.KeyShort = shortFingerprint(pin.GetFingerprint())
-		}
+	v.KeyStatus = hostKeyStatus(host.ID, pins, pinsUnavailable)
+	if v.KeyStatus == "pinned" {
+		pin := pins[host.ID]
+		v.KeyType = pin.GetKeyType()
+		v.KeyFingerprint = pin.GetFingerprint()
+		v.KeyShort = shortFingerprint(pin.GetFingerprint())
 	}
 	keyStatusText := "not enrolled"
 	switch v.KeyStatus {

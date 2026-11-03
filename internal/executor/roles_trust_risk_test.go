@@ -626,3 +626,188 @@ func TestNewDirBuiltinTrustRequiresArtifactTrust(t *testing.T) {
 	}
 	var _ BuiltinArtifactTrust = (*executordb.DB)(nil)
 }
+
+// failStoreCommitAfterRename makes the committing store BulkAdmit commit
+// on disk (index.json renamed into place) through a second store instance
+// and then fail, as a failed directory fsync after the rename does: the
+// store passed in still reports the base generation.
+func failStoreCommitAfterRename(e *bundleEnv) {
+	e.bt.commitStore = func(_ *trust.Store, c release.Candidate, opts trust.BulkAdmitOpts) (trust.BulkAdmitResult, error) {
+		disk, err := trust.OpenExisting(e.storeDir, e.now)
+		if err != nil {
+			return trust.BulkAdmitResult{}, err
+		}
+		if _, err := disk.BulkAdmit(c, opts); err != nil {
+			return trust.BulkAdmitResult{}, err
+		}
+		return trust.BulkAdmitResult{}, errors.New("trust: sync directory: input/output error")
+	}
+}
+
+// A store commit that errors after index.json was renamed into place is
+// judged from the on-disk generation: the commit happened, so the retired
+// versions stay revoked, the pending record is kept and the next review
+// completes the new trust. Nothing is reported as unchanged.
+func TestBuiltinTrustStoreErrorAfterRenameIsCommitted(t *testing.T) {
+	for _, retire := range []bool{true, false} {
+		name := map[bool]string{true: "upgrade-retire", false: "first-commit"}[retire]
+		t.Run(name, func(t *testing.T) {
+			e := newBundleEnv(t)
+			recordLowHost(t, e.db)
+			s := e.service()
+			var oldSum string
+			var retired []string
+			if retire {
+				rev1, _ := reviewAndCommit(t, s, nil, nil)
+				oldSum = restartArtifact(t, rev1)
+				writeDockerBundle(t, e.k, e.bundleDir, "2026.12.0", "1.1.0", "echo restart v2\n")
+				retired = []string{"docker@1.0.0"}
+			}
+			gen := e.storeGeneration(t)
+			failStoreCommitAfterRename(e)
+			var buf bytes.Buffer
+			s.log = slog.New(slog.NewJSONHandler(&buf, nil))
+			rev, err := adminReview(t, s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			newVersion := map[bool]string{true: "1.1.0", false: "1.0.0"}[retire]
+			newSum := restartArtifact(t, rev)
+			_, err = adminCommitReq(t, s, &pb.CommitBuiltinTrustRequest{ManifestDigest: rev.ManifestDigest, Retire: retired})
+			if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "artifact trust was not recorded") ||
+				strings.Contains(err.Error(), "nothing changed") || !strings.Contains(err.Error(), "docker.restart@"+newVersion+" "+newSum) {
+				t.Fatalf("commit err = %v", err)
+			}
+			disk := e.storeGeneration(t)
+			if disk == gen {
+				t.Fatal("seam did not commit the store on disk")
+			}
+			if retire {
+				if got := minimumRisk(t, e.db, "docker.restart", "1.0.0", oldSum); got != riskpolicy.UntrustedFloor {
+					t.Fatalf("retired version floor %s, want %s (not restored)", got, riskpolicy.UntrustedFloor)
+				}
+			}
+			if got := minimumRisk(t, e.db, "docker.restart", newVersion, newSum); got != riskpolicy.UntrustedFloor {
+				t.Fatalf("new version floor %s before recovery, want %s", got, riskpolicy.UntrustedFloor)
+			}
+			if _, err := trust.ReadPending(e.storeDir); err != nil {
+				t.Fatalf("pending record removed: %v", err)
+			}
+			recs := auditLines(t, &buf, "builtin_trust_artifacts_failed")
+			if len(recs) != 1 || recs[0]["store_committed"] != true || recs[0]["generation"] != float64(disk) {
+				t.Fatalf("failure audit = %v (%s)", recs, buf.String())
+			}
+			if recs := auditLines(t, &buf, "builtin_trust_store_failed"); len(recs) != 0 {
+				t.Fatalf("store failure audited for a committed store: %v", recs)
+			}
+
+			// The next review completes the pending record from the store.
+			e.bt.commitStore = nil
+			if _, err := adminReview(t, s); err != nil {
+				t.Fatal(err)
+			}
+			if got := minimumRisk(t, e.db, "docker.restart", newVersion, newSum); got != canonical.RiskLow {
+				t.Fatalf("after recovery: new version floor %s, want LOW", got)
+			}
+			if retire {
+				if got := minimumRisk(t, e.db, "docker.restart", "1.0.0", oldSum); got != riskpolicy.UntrustedFloor {
+					t.Fatalf("after recovery: retired version floor %s", got)
+				}
+			}
+			if rec := auditLines(t, &buf, "builtin_trust_pending_recovered"); len(rec) != 1 || rec[0]["outcome"] != "completed" {
+				t.Fatalf("recovery audit = %v", rec)
+			}
+			assertNoPending(t, e)
+		})
+	}
+}
+
+// If the store's on-disk state cannot be re-read after a failed store
+// commit, nothing is restored (fail closed) and the pending record is kept
+// for the next review.
+func TestBuiltinTrustStoreErrorUnreadableStateKeepsRevoked(t *testing.T) {
+	e := newBundleEnv(t)
+	recordLowHost(t, e.db)
+	s := e.service()
+	rev1, _ := reviewAndCommit(t, s, nil, nil)
+	oldSum := restartArtifact(t, rev1)
+
+	writeDockerBundle(t, e.k, e.bundleDir, "2026.12.0", "1.1.0", "echo restart v2\n")
+	e.bt.commitStore = func(*trust.Store, release.Candidate, trust.BulkAdmitOpts) (trust.BulkAdmitResult, error) {
+		if err := os.WriteFile(filepath.Join(e.storeDir, "index.json"), []byte("{"), 0o600); err != nil {
+			return trust.BulkAdmitResult{}, err
+		}
+		return trust.BulkAdmitResult{}, errors.New("trust: sync directory: input/output error")
+	}
+	var buf bytes.Buffer
+	s.log = slog.New(slog.NewJSONHandler(&buf, nil))
+	rev2, err := adminReview(t, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = adminCommitReq(t, s, &pb.CommitBuiltinTrustRequest{ManifestDigest: rev2.ManifestDigest, Retire: []string{"docker@1.0.0"}})
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "could not be re-read") ||
+		strings.Contains(err.Error(), "nothing changed") || !strings.Contains(err.Error(), oldSum) {
+		t.Fatalf("commit err = %v", err)
+	}
+	if got := minimumRisk(t, e.db, "docker.restart", "1.0.0", oldSum); got != riskpolicy.UntrustedFloor {
+		t.Fatalf("old version floor %s, want %s (fail closed)", got, riskpolicy.UntrustedFloor)
+	}
+	if _, err := trust.ReadPending(e.storeDir); err != nil {
+		t.Fatalf("pending record removed: %v", err)
+	}
+	recs := auditLines(t, &buf, "builtin_trust_store_failed")
+	if len(recs) != 1 || recs[0]["restored"] != false || recs[0]["store_state_err"] == "" {
+		t.Fatalf("store failure audit = %v (%s)", recs, buf.String())
+	}
+}
+
+// A review whose dry run fails after it resolved a pending record still
+// audits the recovery; the next review finds nothing left to recover.
+func TestBuiltinTrustRecoveryAuditedWhenDryRunFails(t *testing.T) {
+	e := newBundleEnv(t)
+	recordLowHost(t, e.db)
+	s := e.service()
+	rev1, _ := reviewAndCommit(t, s, nil, nil)
+	oldSum := restartArtifact(t, rev1)
+
+	writeDockerBundle(t, e.k, e.bundleDir, "2026.12.0", "1.1.0", "echo restart v2\n")
+	failStoreCommit(e)
+	e.bt.artifacts = &failingArtifacts{DB: e.db, failRestore: true}
+	var buf bytes.Buffer
+	s.log = slog.New(slog.NewJSONHandler(&buf, nil))
+	rev2, err := adminReview(t, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adminCommitReq(t, s, &pb.CommitBuiltinTrustRequest{ManifestDigest: rev2.ManifestDigest, Retire: []string{"docker@1.0.0"}}); err == nil {
+		t.Fatal("commit succeeded")
+	}
+
+	e.bt.artifacts, e.bt.commitStore = e.db, nil
+	e.bt.reviewStore = func(*trust.Store, release.Candidate, trust.BulkAdmitOpts) (trust.BulkAdmitResult, error) {
+		return trust.BulkAdmitResult{}, fmt.Errorf("%w: disk quota", trust.ErrQuota)
+	}
+	if _, err := adminReview(t, s); status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("review err = %v", err)
+	}
+	if got := minimumRisk(t, e.db, "docker.restart", "1.0.0", oldSum); got != canonical.RiskLow {
+		t.Fatalf("after recovery: old version floor %s, want LOW", got)
+	}
+	rec := auditLines(t, &buf, "builtin_trust_pending_recovered")
+	if len(rec) != 1 || rec[0]["outcome"] != "restored" || rec[0]["admin_uid"] != float64(trustTestAdminUID) {
+		t.Fatalf("recovery audit = %v (%s)", rec, buf.String())
+	}
+	if r := auditStrings(t, rec[0], "restored"); len(r) == 0 || !strings.Contains(strings.Join(r, " "), oldSum) {
+		t.Fatalf("audit restored = %v", r)
+	}
+	assertNoPending(t, e)
+
+	e.bt.reviewStore = nil
+	if _, err := adminReview(t, s); err != nil {
+		t.Fatal(err)
+	}
+	if rec := auditLines(t, &buf, "builtin_trust_pending_recovered"); len(rec) != 1 {
+		t.Fatalf("recovery audited again: %v", rec)
+	}
+}

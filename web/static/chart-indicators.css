@@ -249,3 +249,25 @@
   font-style: italic;
   color: var(--text-muted);
 }
+
+/*
+ * Update section of PVE node and guest boxes (ADR 0006 P2-02 part 1):
+ * the "Propose ..." links of a linked, enrolled host, or the read-only
+ * reason. It takes its own row in the guest box.
+ */
+.chart__box--guest {
+  flex-wrap: wrap;
+}
+
+.chart__pveupd {
+  display: flex;
+  flex-wrap: wrap;
+  flex-basis: 100%;
+  gap: 0.125rem 0.5rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.chart__pveupd--node {
+  margin: 0 0 0.375rem;
+}

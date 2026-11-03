@@ -156,6 +156,41 @@ else
   fail=$((fail + 1))
 fi
 
+# --- Live handoff provisioning (static) ---------------------------------------
+# The server writes only requests/ and reads only live/; the collector owns
+# both. The modes match internal/pvecollect/live_spool.go.
+# check_line <name> <file> <exact line>
+check_line() {
+  if grep -qxF -- "$3" "$2"; then
+    echo "ok   $1"
+    pass=$((pass + 1))
+  else
+    echo "FAIL $1: line not found in $2: $3"
+    fail=$((fail + 1))
+  fi
+}
+check_line "install.sh provisions pve/requests 2770" "$install_sh" \
+  'install -d -m 2770 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/requests"'
+check_line "install.sh provisions pve/live 2750" "$install_sh" \
+  'install -d -m 2750 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/live"'
+# The server drop-in grants exactly the discovery jobs and pve/requests;
+# the server unit itself grants no write path.
+rw=$(grep '^ReadWritePaths=' "$install_sh" | tr '\n' ' ')
+if [[ "$rw" == 'ReadWritePaths=${var_lib}/discovery/jobs ReadWritePaths=${var_lib}/pve/requests ' ]]; then
+  echo "ok   server drop-in may write only discovery/jobs and pve/requests"
+  pass=$((pass + 1))
+else
+  echo "FAIL server drop-in ReadWritePaths: ${rw:-none}"
+  fail=$((fail + 1))
+fi
+if ! grep -q '^ReadWritePaths=' "${script_dir}/systemd/nebula-server.service"; then
+  echo "ok   server unit grants no write path itself"
+  pass=$((pass + 1))
+else
+  echo "FAIL server unit has a ReadWritePaths line"
+  fail=$((fail + 1))
+fi
+
 # --- Root-gated: real runs of install.sh and uninstall.sh -------------------
 # These two cases exercise the systemd handling, which the dry-run mode
 # exits before reaching. They need root and a running systemd; the first

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -123,6 +124,23 @@ type chartDetails struct {
 	Backups string
 	// DetailURL links to the normal detail page (no-JS navigation).
 	DetailURL string
+	// UpdateLinks are the "Propose ..." links to the existing operation
+	// proposal (package.install_security / package.install_all) with this
+	// host preselected; empty when the host is not enrolled for SSH
+	// updates (ADR 0006 P2-02 part 1).
+	UpdateLinks []chartUpdateLink
+	// UpdatesReadonly is shown instead of the links when the host is not
+	// enrolled for SSH updates.
+	UpdatesReadonly string
+}
+
+// chartUpdateLink is one "Propose ..." link in the details panel, to the
+// existing operation proposal with the host preselected.
+type chartUpdateLink struct {
+	// Label is the link text.
+	Label string
+	// URL is the operation proposal form with the action and host prefilled.
+	URL string
 }
 
 // chartData is the /inventory/chart page data.
@@ -163,6 +181,11 @@ type pveNodeView struct {
 	// Lines are the node's extra lines: NVIDIA GPUs passed through to its
 	// guests (hostpci targets).
 	Lines []chartLine
+	// UpdatesReadonly is the read-only reason of the node's update
+	// section: a PVE node is never updated through the chart; UpdateLinks
+	// is always empty (it exists for the shared chart_updates template).
+	UpdateLinks     []chartUpdateLink
+	UpdatesReadonly string
 	// worst is the tree's worst state of the node and its descendants;
 	// the guest extra lines are folded in by addPVELines.
 	worst IndicatorState
@@ -190,6 +213,11 @@ type pveGuestView struct {
 	// driver, backup freshness); absent when the source has no usable
 	// result.
 	Lines []chartLine
+	// UpdateLinks are the "Propose ..." links of the linked managed host
+	// when it is enrolled for SSH updates; otherwise UpdatesReadonly is
+	// the read-only reason (P2-02 part 1).
+	UpdateLinks     []chartUpdateLink
+	UpdatesReadonly string
 	// generation is the guest incarnation, for the exact backup read.
 	generation uint64
 }
@@ -330,6 +358,76 @@ func pveTreeToView(tree pveinventory.Tree) []pveNodeView {
 	return out
 }
 
+// Read-only reasons of the update section (P2-02 part 1).
+const (
+	updatesNotEnrolled = "read-only: not enrolled for updates"
+	updatesBlocked     = "read-only: host key mismatch (BLOCKED)"
+	updatesUnavailable = "read-only: executor unavailable"
+	updatesGuestNoHost = "read-only: not enrolled as a managed host"
+	updatesPVENode     = "read-only: PVE node — updates via the node's own enrollment"
+)
+
+// updateSection returns the update section of a managed host: the two
+// "Propose ..." links to the existing operation proposal with the host
+// preselected when the host is enrolled for SSH updates (pinned key),
+// otherwise no links and the read-only reason for its key status. No new
+// authority, and a pending reboot is never part of these links.
+func updateSection(hostID, keyStatus string) ([]chartUpdateLink, string) {
+	switch keyStatus {
+	case "pinned":
+		id := url.QueryEscape(hostID)
+		return []chartUpdateLink{
+			{Label: "Propose security updates", URL: "/operations/new?action=package.install_security&host=" + id},
+			{Label: "Propose all updates", URL: "/operations/new?action=package.install_all&host=" + id},
+		}, ""
+	case "blocked":
+		return nil, updatesBlocked
+	case "unavailable":
+		return nil, updatesUnavailable
+	default:
+		return nil, updatesNotEnrolled
+	}
+}
+
+// hostKeyStatus is a host's key status for the update gate: "pinned",
+// "blocked", "not enrolled" or "unavailable".
+func hostKeyStatus(hostID string, pins map[string]*pb.HostKeyPin, pinsUnavailable bool) string {
+	if pinsUnavailable {
+		return "unavailable"
+	}
+	pin, ok := pins[hostID]
+	switch {
+	case !ok:
+		return "not enrolled"
+	case pin.GetBlocked():
+		return "blocked"
+	default:
+		return "pinned"
+	}
+}
+
+// addPVEUpdates fills the update sections of the PVE node and guest
+// boxes. A guest linked to a managed inventory host gets that host's
+// update section; an unlinked guest and every node are read-only with
+// the reason.
+func addPVEUpdates(nodes []pveNodeView, hosts []inventory.Host, pins map[string]*pb.HostKeyPin, pinsUnavailable bool) {
+	known := make(map[string]bool, len(hosts))
+	for _, host := range hosts {
+		known[host.ID] = true
+	}
+	for i := range nodes {
+		nodes[i].UpdatesReadonly = updatesPVENode
+		for j := range nodes[i].Guests {
+			g := &nodes[i].Guests[j]
+			if g.HostID == "" || !known[g.HostID] {
+				g.UpdatesReadonly = updatesGuestNoHost
+				continue
+			}
+			g.UpdateLinks, g.UpdatesReadonly = updateSection(g.HostID, hostKeyStatus(g.HostID, pins, pinsUnavailable))
+		}
+	}
+}
+
 // chartHosts builds the org chart columns from the batch reads.
 func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins map[string]*pb.HostKeyPin, pinsUnavailable bool, b batchData, res chartResults) []chartHost {
 	now := h.clockNow()
@@ -426,6 +524,11 @@ func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins m
 			Backups:   "none collected",
 			DetailURL: "/hosts/" + host.ID,
 		}
+		// P2-02 part 1: enrolled (pinned) hosts get the two "Propose ..."
+		// links to the existing operation proposal with this host
+		// preselected; other hosts show read-only. No new authority, and a
+		// pending reboot is never part of these links.
+		ch.Details.UpdateLinks, ch.Details.UpdatesReadonly = updateSection(host.ID, v.KeyStatus)
 		// Same-tag status per image, from the stored check_updates
 		// result; registry metadata per image for the stable version.
 		var ups dockerhost.ImageUpdates
@@ -522,6 +625,7 @@ func (h *Handler) handleInventoryChart(w http.ResponseWriter, r *http.Request) {
 		} else {
 			data.Chart.PVENodes = pveTreeToView(tree)
 			h.addPVELines(ctx, data.Chart.PVENodes, res, h.clockNow())
+			addPVEUpdates(data.Chart.PVENodes, hosts, pins, pinsUnavailable)
 		}
 	}
 	h.render(w, r, data)
