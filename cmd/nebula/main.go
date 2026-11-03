@@ -8,6 +8,7 @@
 //	nebula lock
 //	nebula pending
 //	nebula approve <digest-prefix>
+//	nebula read-grant pending|approve <digest>
 //	nebula artifact trust|untrust|list
 //	nebula host probe|pin|unpin|keys|test|criticality|clear|list
 //	nebula webauthn code|list|remove
@@ -51,6 +52,9 @@ commands:
                       open the next stage of a rollout, or skip a host (hardened path)
   schedule pending | approve <digest> | list | revoke <grant-id>
                       schedule grants: standing permission for LOW read-only checks
+  read-grant pending | approve <digest>
+                      read grants (hardened path); approve needs the full 64-hex digest
+                      and shows every host, credential version and action first
   artifact trust --action ID --version X.Y.Z --risk LEVEL [--label TEXT] FILE
                       trust a script for one action; LEVEL becomes its minimum risk
   artifact untrust --action ID --version X.Y.Z SHA256
@@ -179,6 +183,8 @@ func run(cmd string, args []string) error {
 		return approve(ctx, c, args[0], os.Stdin, os.Stdout)
 	case "schedule":
 		return scheduleCmd(ctx, c, args, os.Stdin, os.Stdout)
+	case "read-grant":
+		return readGrantCmd(ctx, c, args, os.Stdin, os.Stdout)
 	case "artifact":
 		return artifactCmd(ctx, c, args)
 	case "signer":
