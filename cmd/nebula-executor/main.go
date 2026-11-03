@@ -160,10 +160,10 @@ func run() error {
 	if *hardened {
 		mode = permit.ModeHardened
 	}
-	// The guest power floor (node, remote and linked hosts of a guest) is
-	// part of the authority's policy, so it is enforced again on approval
-	// and run authorization; the service binds its targets in the same
-	// bindings (SetPveGuestPowerBindings below).
+	// The guest power and snapshot floors (node, remote and linked hosts
+	// of a guest) are part of the authority's policy, so they are enforced
+	// again on approval and run authorization; the service binds its
+	// targets in the same bindings (SetPveGuestPowerBindings below).
 	powerBindings := &executor.PveGuestPowerBindings{}
 	risk, err := executor.NewExecutorRiskPolicy(db, powerBindings)
 	if err != nil {

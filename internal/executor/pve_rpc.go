@@ -391,17 +391,22 @@ func (s *Service) ProposePVEGuestPower(ctx context.Context, in *pb.ProposePVEGue
 }
 
 // pveGuestSnapshot returns the guest snapshot actions on the executor's
-// single mutation engine with the full executor floor evaluated at
-// proposal (GuestSnapshotRiskFloor over the executor's criticality records
-// and registry links).
+// single mutation engine. The proposal evaluates the full executor floor
+// itself (GuestSnapshotRiskFloor over the executor's criticality records
+// and registry links); the authority re-evaluates it on approval and run
+// authorization when its risk policy (NewExecutorRiskPolicy) reads the
+// same bindings (SetPveGuestPowerBindings), exactly like guest power.
 func (s *Service) pveGuestSnapshot() (*PveGuestSnapshot, error) {
 	m := s.pveMutations()
 	next, err := riskpolicy.New(s.db)
 	if err != nil {
 		return nil, err
 	}
-	b := &m.snapshotBindings
-	floor := GuestSnapshotRiskFloor{Next: next, Criticality: s.db, Linked: PveRegistryLinkedHosts, Bindings: b}
+	b := s.pveGuestPowerBindings
+	if b == nil {
+		b = &m.powerBindings
+	}
+	floor := NewGuestSnapshotRiskFloor(next, s.db, b)
 	return &PveGuestSnapshot{Mutations: m, Bindings: b, Floor: floor}, nil
 }
 

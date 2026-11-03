@@ -232,12 +232,10 @@ type PveMutations struct {
 	// never identified without it.
 	TaskIDs PveJobTaskIDs
 
-	// powerBindings are the guest power bindings of this engine (see
+	// powerBindings are the guest power and snapshot bindings of this
+	// engine when the service has none shared with the authority (see
 	// PveGuestPowerBindings); one engine, one set.
 	powerBindings PveGuestPowerBindings
-	// snapshotBindings are the guest snapshot bindings of this engine (see
-	// GuestSnapshotRiskFloor).
-	snapshotBindings PveGuestPowerBindings
 
 	// inflight counts the Run calls per execution ID; Reconcile leaves
 	// their steps alone, so a step being dispatched right now is never

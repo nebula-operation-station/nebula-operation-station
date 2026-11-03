@@ -697,7 +697,7 @@ func TestServiceGuestSnapshotRPC(t *testing.T) {
 		t.Fatal("production client has no snapshot surface")
 	}
 	g, err := e.svc.pveGuestSnapshot()
-	if err != nil || g.Mutations != e.svc.pveMutations() || g.Bindings != &g.Mutations.snapshotBindings || g.Floor == nil {
+	if err != nil || g.Mutations != e.svc.pveMutations() || g.Bindings != &g.Mutations.powerBindings || g.Floor == nil {
 		t.Fatalf("snapshot engine: %v", err)
 	}
 	codeOf := func(err error) codes.Code { return status.Code(err) }
@@ -861,38 +861,56 @@ func TestGuestSnapshotDiskSetRefusesUnknownDiskKeys(t *testing.T) {
 	}
 }
 
-// dupSnapReader answers a snapshot list with whatever it holds.
-type dupSnapReader struct{ list pveapi.SnapshotList }
+// dupSnapReader answers ListSnapshots with whatever it holds; rollback
+// plans come from a real pveapi client (plan) whose own read sees one
+// snapshot, so a rollback reaches the duplicate check and would be sent
+// without it.
+type dupSnapReader struct {
+	list pveapi.SnapshotList
+	plan *pveapi.Client
+}
 
 func (r dupSnapReader) ListSnapshots(context.Context, string, string, int64) (pveapi.SnapshotList, error) {
 	return r.list, nil
 }
 
-func (r dupSnapReader) PlanSnapshotRollback(context.Context, pveapi.GuestKind, string, int64, string, bool) (pveapi.SnapshotRollbackPlan, error) {
-	return pveapi.SnapshotRollbackPlan{}, errors.New("not planned")
+func (r dupSnapReader) PlanSnapshotRollback(ctx context.Context, kind pveapi.GuestKind, node string, vmid int64, name string, start bool) (pveapi.SnapshotRollbackPlan, error) {
+	return r.plan.PlanSnapshotRollback(ctx, kind, node, vmid, name, start)
 }
 
 // TestDispatchGuestSnapshotStepRefusesDuplicateNames: a list with the
 // name twice is ambiguous; nothing is sent for any op, even when one of
-// the entries matches the bound identity exactly.
+// the entries matches the bound identity exactly. Every case is sent once
+// the duplicate is gone, so each refusal is the duplicate check's.
 func TestDispatchGuestSnapshotStepRefusesDuplicateNames(t *testing.T) {
-	rd := dupSnapReader{list: pveapi.SnapshotList{Complete: true, Snapshots: []pveapi.Snapshot{
-		{Name: "base", SnapTimeUnix: 1700000000},
-		{Name: "base", SnapTimeUnix: 1700000000},
-	}}}
-	for _, method := range []string{"snapshot.qemu.delete", "snapshot.qemu.rollback", "snapshot.lxc.delete"} {
-		args, _ := json.Marshal(pveSnapshotStepArgs{VMID: 101, Name: "base", SnapTime: 1700000000})
-		w := &fakeSnapWriter{}
-		if _, err := DispatchGuestSnapshotStep(context.Background(), w, rd, "pve1", PveMutationStep{Method: method, Args: args}); !errors.Is(err, ErrPveRejected) || len(w.calls) != 0 {
-			t.Fatalf("%s: %v %v", method, err, w.calls)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api2/json/nodes/pve1/qemu/101/snapshot", "/api2/json/nodes/pve1/lxc/101/snapshot":
+			_, _ = w.Write([]byte(`{"data":[{"name":"base","snaptime":1700000000},{"name":"current","parent":"base"}]}`))
+		default:
+			http.NotFound(w, r)
 		}
+	}))
+	defer srv.Close()
+	plan, err := pveapi.NewClient(srv.Client(), srv.URL+"/api2/json", func(context.Context) (string, error) { return "PVEAPIToken=r@pve!r=x", nil })
+	if err != nil {
+		t.Fatal(err)
 	}
-	// The same list without the duplicate is sent.
-	rd.list.Snapshots = rd.list.Snapshots[:1]
+	dup := []pveapi.Snapshot{{Name: "base", SnapTimeUnix: 1700000000}, {Name: "base", SnapTimeUnix: 1700000000}}
 	args, _ := json.Marshal(pveSnapshotStepArgs{VMID: 101, Name: "base", SnapTime: 1700000000})
-	w := &fakeSnapWriter{}
-	if _, err := DispatchGuestSnapshotStep(context.Background(), w, rd, "pve1", PveMutationStep{Method: "snapshot.qemu.delete", Args: args}); err != nil || len(w.calls) != 1 {
-		t.Fatalf("single: %v %v", err, w.calls)
+	for _, method := range []string{"snapshot.qemu.delete", "snapshot.qemu.rollback", "snapshot.lxc.delete", "snapshot.lxc.rollback"} {
+		step := PveMutationStep{Method: method, Args: args}
+		w := &fakeSnapWriter{}
+		rd := dupSnapReader{list: pveapi.SnapshotList{Complete: true, Snapshots: dup}, plan: plan}
+		if _, err := DispatchGuestSnapshotStep(context.Background(), w, rd, "pve1", step); !errors.Is(err, ErrPveRejected) || len(w.calls) != 0 {
+			t.Errorf("%s duplicate: %v %v", method, err, w.calls)
+			continue
+		}
+		// The same list without the duplicate is sent.
+		rd.list.Snapshots = dup[:1]
+		if _, err := DispatchGuestSnapshotStep(context.Background(), w, rd, "pve1", step); err != nil || len(w.calls) != 1 {
+			t.Fatalf("%s single: %v %v", method, err, w.calls)
+		}
 	}
 }
 
@@ -967,5 +985,223 @@ func TestGuestSnapshotRollbackBindsQMPStatus(t *testing.T) {
 	}
 	if res, err := e3.g.Run(context.Background(), req3); !errors.Is(err, ErrPveSnapshotChanged) || !res.PermitConsumed || len(e3.sc.sent()) != 0 {
 		t.Fatalf("qmp raced: %v %+v", err, res)
+	}
+}
+
+// TestGuestSnapshotCreateBindsStateStorage: the RAM state storage of a
+// create with RAM is part of the approved facts; another (or no) state
+// storage at the run, or one changed between authorization and the step's
+// intent, sends nothing.
+func TestGuestSnapshotCreateBindsStateStorage(t *testing.T) {
+	ramReq := func() PveGuestSnapshotRequest {
+		r := snapReq("qemu", PveSnapshotCreate, "with-ram")
+		r.VMState = true
+		return r
+	}
+	withState := func(id string) func(c *snapClient) {
+		return func(c *snapClient) {
+			if id == "" {
+				delete(c.config, "vmstatestorage")
+			} else {
+				c.config["vmstatestorage"] = id
+			}
+		}
+	}
+	e := newSnapEnv(t, "qemu")
+	e.sc.set(withState("local-zfs"))
+	p, err := e.propose(ramReq())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params := boundParams(t, p); params.StateStorage != "local-zfs" {
+		t.Fatalf("state storage %q", params.StateStorage)
+	}
+	if _, err := e.auth.ApproveCLI(p.Digest, 0, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	req := ramReq()
+	req.Digest = p.Digest
+	for _, other := range []string{"local", ""} {
+		e.sc.set(withState(other))
+		if _, err := e.g.Run(context.Background(), req); !errors.Is(err, ErrPveMutationDenied) {
+			t.Fatalf("state storage %q at run: %v", other, err)
+		}
+		if len(e.sc.sent()) != 0 {
+			t.Fatalf("state storage %q: dispatched", other)
+		}
+	}
+	e.sc.set(withState("local-zfs"))
+	if _, err := e.g.Run(context.Background(), req); err != nil {
+		t.Fatalf("unchanged: %v", err)
+	}
+	if len(e.sc.sent()) != 1 {
+		t.Fatal("not dispatched")
+	}
+
+	// Changed after the run's own read (authorization), before the intent.
+	e2 := newSnapEnv(t, "qemu")
+	e2.sc.set(withState("local-zfs"))
+	req2 := e2.approve(ramReq())
+	e2.sc.set(func(c *snapClient) {
+		base := c.factReads
+		c.onFacts = func(n int, c *snapClient) {
+			if n > base+1 { // the run's prepare read stays unchanged
+				c.config["vmstatestorage"] = "local"
+			}
+		}
+	})
+	if res, err := e2.g.Run(context.Background(), req2); !errors.Is(err, ErrPveSnapshotChanged) || len(e2.sc.sent()) != 0 {
+		t.Fatalf("raced: %v %+v", err, res)
+	}
+
+	// Without RAM the state storage is not part of the approval.
+	e3 := newSnapEnv(t, "qemu")
+	e3.sc.set(withState("local-zfs"))
+	p3, err := e3.propose(snapReq("qemu", PveSnapshotCreate, "disk-only"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params := boundParams(t, p3); params.StateStorage != "" {
+		t.Fatalf("disk-only binds state storage %q", params.StateStorage)
+	}
+}
+
+// newServiceSnapEnv is newServicePowerEnv (production authority policy,
+// NewExecutorRiskPolicy, bindings shared with the service) with the
+// snapshot surface on the fake mutation client.
+func newServiceSnapEnv(t *testing.T) (*pveReadEnv, *snapClient, critSource, map[string]canonical.Target) {
+	t.Helper()
+	e, client, crit, _, targets := newServicePowerEnv(t)
+	sc := &snapClient{powerClient: client,
+		config:    map[string]string{"scsi0": "local-zfs:vm-101-disk-0,size=32G"},
+		storages:  []pveapi.Storage{{ID: "local-zfs", Type: "zfspool", Active: true}},
+		snapshots: []pveapi.Snapshot{{Name: "base", SnapTimeUnix: 1700000000}}}
+	e.svc.pveMutations().Client = sc
+	return e, sc, crit, targets
+}
+
+// TestServiceGuestSnapshotAuthorityReevaluatesFloor: with the production
+// authority policy, the snapshot floor is evaluated at proposal, approval
+// and run authorization over the bindings the service shares with the
+// authority. A node raised to CRITICAL after the proposal stops a delete
+// or rollback at approval, after approval at the run; a record removed
+// after the proposal of a MEDIUM create makes it HIGH (unknown criticality
+// is a floor) and stops it; a CRITICAL node proposes CRITICAL.
+func TestServiceGuestSnapshotAuthorityReevaluatesFloor(t *testing.T) {
+	e, sc, crit, targets := newServiceSnapEnv(t)
+	ctx := context.Background()
+	node := targets["node"]
+	g, err := e.svc.pveGuestSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.Bindings != e.svc.pveGuestPowerBindings {
+		t.Fatal("snapshot engine does not bind in the authority's bindings")
+	}
+	if f, ok := g.Floor.(GuestSnapshotRiskFloor); !ok || f.Bindings != g.Bindings || f.Linked == nil || f.Criticality == nil || f.Next == nil {
+		t.Fatalf("service floor not fully wired: %+v", g.Floor)
+	}
+	target := func(op string) *pb.PVEGuestSnapshotTarget {
+		return &pb.PVEGuestSnapshotTarget{RemoteId: pveReadRemote, Kind: "qemu", Node: "pve1", Vmid: 101, Op: op, Name: "base"}
+	}
+	propose := func(tg *pb.PVEGuestSnapshotTarget) *pb.ProposePVEGuestSnapshotResponse {
+		t.Helper()
+		out, err := e.svc.ProposePVEGuestSnapshot(ctx, &pb.ProposePVEGuestSnapshotRequest{Target: tg})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	digestOf := func(p *pb.ProposePVEGuestSnapshotResponse) canonical.Digest {
+		t.Helper()
+		d, err := canonical.ParseDigest(p.GetPermit().GetExecutionDigest())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	commit := func(tg *pb.PVEGuestSnapshotTarget, p *pb.ProposePVEGuestSnapshotResponse) error {
+		tg.Expect = p.GetSnapshot()
+		_, err := e.svc.CommitPVEGuestSnapshot(ctx, &pb.CommitPVEGuestSnapshotRequest{Target: tg, ExecutionDigest: p.GetPermit().GetExecutionDigest()})
+		return err
+	}
+	riskOf := func(p *pb.ProposePVEGuestSnapshotResponse) canonical.Risk {
+		t.Helper()
+		var doc struct {
+			Risk canonical.Risk `json:"risk_class"`
+		}
+		if err := json.Unmarshal(p.GetPermit().GetCanonicalRequest(), &doc); err != nil {
+			t.Fatal(err)
+		}
+		return doc.Risk
+	}
+
+	for _, op := range []string{PveSnapshotDelete, PveSnapshotRollback} {
+		crit.hosts[node] = canonical.RiskMedium
+		// Raised after approval: the run authorization refuses.
+		p := propose(target(op))
+		if r := riskOf(p); r != canonical.RiskHigh {
+			t.Fatalf("%s: risk %s, want HIGH", op, r)
+		}
+		if _, err := e.svc.auth.ApproveCLI(digestOf(p), 0, "admin"); err != nil {
+			t.Fatal(err)
+		}
+		crit.hosts[node] = canonical.RiskCritical
+		if err := commit(target(op), p); status.Code(err) != codes.PermissionDenied {
+			t.Fatalf("%s: commit after node raised: %v", op, err)
+		}
+		if n := len(sc.sent()); n != 0 {
+			t.Fatalf("%s: dispatched %d after the node was raised", op, n)
+		}
+		// Raised after proposal: the approval refuses the old risk.
+		crit.hosts[node] = canonical.RiskMedium
+		p = propose(target(op))
+		crit.hosts[node] = canonical.RiskCritical
+		if _, err := e.svc.auth.ApproveCLI(digestOf(p), 0, "admin"); err == nil {
+			t.Fatalf("%s: approval accepted after the node was raised to CRITICAL", op)
+		}
+		// CRITICAL stays CRITICAL at proposal.
+		if r := riskOf(propose(target(op))); r != canonical.RiskCritical {
+			t.Fatalf("%s: risk %s with a CRITICAL node", op, r)
+		}
+	}
+
+	// A MEDIUM create whose node record disappears after the approval is
+	// HIGH at the run: refused, nothing sent. The service's own proposal
+	// floor reads the executor database, the test authority reads crit:
+	// the engine's floor is pointed at crit too so the create proposes
+	// MEDIUM.
+	crit.hosts[node] = canonical.RiskMedium
+	next, err := riskpolicy.New(crit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.Floor = NewGuestSnapshotRiskFloor(next, crit, g.Bindings)
+	create := PveGuestSnapshotRequest{RemoteID: pveReadRemote, Kind: "qemu", Node: "pve1", VMID: 101, Op: PveSnapshotCreate, Name: "new"}
+	pc, err := g.Propose(ctx, create, "00000000-0000-4000-d000-000000000001", e.clock.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pc.Request.RiskClass != canonical.RiskMedium {
+		t.Fatalf("create: risk %s, want MEDIUM", pc.Request.RiskClass)
+	}
+	if _, err := e.svc.auth.ApproveCLI(pc.Digest, 0, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	create.Digest = pc.Digest
+	delete(crit.hosts, node)
+	if _, err := g.Run(ctx, create); !errors.Is(err, ErrPveMutationDenied) {
+		t.Fatalf("create after node record removed: %v", err)
+	}
+	if n := len(sc.sent()); n != 0 {
+		t.Fatalf("dispatched %d", n)
+	}
+	// With the record back the approved create runs.
+	crit.hosts[node] = canonical.RiskMedium
+	if _, err := g.Run(ctx, create); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if n := len(sc.sent()); n != 1 {
+		t.Fatalf("dispatched %d, want 1", n)
 	}
 }

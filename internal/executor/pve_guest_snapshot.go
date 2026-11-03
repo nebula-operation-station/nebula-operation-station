@@ -207,6 +207,10 @@ type pveSnapshotParams struct {
 	VMState bool `json:"vmstate"`
 	// Disks is the disk set of a create.
 	Disks []PveSnapshotDisk `json:"disks,omitempty"`
+	// StateStorage is the explicit RAM state storage (vmstatestorage) of
+	// a create with RAM; empty: none configured (PVE's default). It must
+	// be unchanged at the run.
+	StateStorage string `json:"state_storage,omitempty"`
 	// Snapshot is the exact snapshot of a delete or rollback.
 	Snapshot *PveSnapshotIdentity `json:"snapshot,omitempty"`
 	// Rollback holds a rollback's side effects.
@@ -305,9 +309,10 @@ func (r PveGuestSnapshotRequest) validate(run bool) error {
 
 // pveSnapshotBound are the live facts a request binds.
 type pveSnapshotBound struct {
-	disks    []PveSnapshotDisk
-	snapshot *PveSnapshotIdentity
-	rollback *pveSnapshotRollbackEffects
+	disks        []PveSnapshotDisk
+	stateStorage string
+	snapshot     *PveSnapshotIdentity
+	rollback     *pveSnapshotRollbackEffects
 }
 
 // bind derives the bound facts of r from live state and facts, refusing
@@ -343,12 +348,13 @@ func (r PveGuestSnapshotRequest) bind(live PveTargetState, f PveSnapshotFacts) (
 		if err != nil {
 			return pveSnapshotBound{}, err
 		}
+		b := pveSnapshotBound{disks: disks}
 		if r.VMState {
-			if err := snapshotStateStorage(f); err != nil {
+			if b.stateStorage, err = snapshotStateStorage(f); err != nil {
 				return pveSnapshotBound{}, err
 			}
 		}
-		return pveSnapshotBound{disks: disks}, nil
+		return b, nil
 	}
 	if found == nil || (r.Expect != nil && *found != *r.Expect) {
 		return pveSnapshotBound{}, ErrPveSnapshotChanged
@@ -426,17 +432,18 @@ func snapshotDiskSet(kind string, f PveSnapshotFacts) ([]PveSnapshotDisk, error)
 }
 
 // snapshotStateStorage checks the explicit RAM state storage of a QEMU
-// guest, if configured: listed and active.
-func snapshotStateStorage(f PveSnapshotFacts) error {
+// guest, if configured: listed and active. It returns the storage ID
+// (empty if none is configured), which the approval binds.
+func snapshotStateStorage(f PveSnapshotFacts) (string, error) {
 	id, ok := f.Config["vmstatestorage"]
 	if !ok {
-		return nil
+		return "", nil
 	}
 	st, ok := findStorage(f.Storages, id)
-	if !ok || !st.Active {
-		return ErrPveSnapshotStorage
+	if !ok || !st.Active || id == "" {
+		return "", ErrPveSnapshotStorage
 	}
-	return nil
+	return id, nil
 }
 
 func findStorage(list []pveapi.Storage, id string) (pveapi.Storage, bool) {
@@ -528,7 +535,7 @@ func (r PveGuestSnapshotRequest) mutation(sc PveSnapshotClient, b pveSnapshotBou
 	switch r.Op {
 	case PveSnapshotCreate:
 		args.VMState, params.VMState = r.VMState, r.VMState
-		params.Disks = b.disks
+		params.Disks, params.StateStorage = b.disks, b.stateStorage
 		if params.Disks == nil {
 			params.Disks = []PveSnapshotDisk{}
 		}
@@ -589,15 +596,17 @@ func (r PveGuestSnapshotRequest) mutation(sc PveSnapshotClient, b pveSnapshotBou
 
 func sameSnapshotBound(a, b pveSnapshotBound) bool {
 	x, errA := json.Marshal(struct {
-		D []PveSnapshotDisk
-		S *PveSnapshotIdentity
-		R *pveSnapshotRollbackEffects
-	}{a.disks, a.snapshot, a.rollback})
+		D  []PveSnapshotDisk
+		SS string
+		S  *PveSnapshotIdentity
+		R  *pveSnapshotRollbackEffects
+	}{a.disks, a.stateStorage, a.snapshot, a.rollback})
 	y, errB := json.Marshal(struct {
-		D []PveSnapshotDisk
-		S *PveSnapshotIdentity
-		R *pveSnapshotRollbackEffects
-	}{b.disks, b.snapshot, b.rollback})
+		D  []PveSnapshotDisk
+		SS string
+		S  *PveSnapshotIdentity
+		R  *pveSnapshotRollbackEffects
+	}{b.disks, b.stateStorage, b.snapshot, b.rollback})
 	return errA == nil && errB == nil && string(x) == string(y)
 }
 
@@ -606,7 +615,8 @@ func sameSnapshotBound(a, b pveSnapshotBound) bool {
 type PveGuestSnapshot struct {
 	Mutations *PveMutations
 	// Bindings maps bound parameters hashes to the exact target and op for
-	// GuestSnapshotRiskFloor.
+	// GuestSnapshotRiskFloor; it must be the instance the authority's
+	// policy reads (NewExecutorRiskPolicy, SetPveGuestPowerBindings).
 	Bindings *PveGuestPowerBindings
 	// Floor, if set, is evaluated by Propose (with the binding held) and
 	// raises the proposed risk to it; it can only raise the risk.
@@ -747,12 +757,24 @@ func (g *PveGuestSnapshot) Run(ctx context.Context, req PveGuestSnapshotRequest)
 	return m.Run(ctx, mreq)
 }
 
+// NewGuestSnapshotRiskFloor returns the executor's production guest
+// snapshot floor: next for everything else and for artifact trust, the
+// criticality records of crit, the executor registry's linked hosts and
+// bindings.
+func NewGuestSnapshotRiskFloor(next permit.RiskPolicy, crit PveCriticality, bindings *PveGuestPowerBindings) GuestSnapshotRiskFloor {
+	return GuestSnapshotRiskFloor{Next: next, Criticality: crit, Linked: PveRegistryLinkedHosts, Bindings: bindings}
+}
+
 // GuestSnapshotRiskFloor is the executor floor of pve.guest.snapshot
 // requests: the maximum of the op's base (create MEDIUM, delete and
 // rollback HIGH), the criticality of the guest, its node and remote and of
 // every host Linked returns for the guest or node (no exact record: at
-// least HIGH), and Next's floor. Anything it cannot establish is HIGH.
-// Other requests get Next's floor (HIGH without Next).
+// least HIGH; a CRITICAL record stays CRITICAL), and Next's floor.
+// Anything it cannot establish is HIGH. Other requests get Next's floor
+// (HIGH without Next). Part of the authority's policy
+// (NewExecutorRiskPolicy), it is enforced when proposing, approving and
+// authorizing the run, so a criticality raised after the proposal stops
+// the run.
 type GuestSnapshotRiskFloor struct {
 	Next        permit.RiskPolicy
 	Criticality PveCriticality

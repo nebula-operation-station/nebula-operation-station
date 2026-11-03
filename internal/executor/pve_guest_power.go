@@ -503,9 +503,12 @@ func NewGuestPowerRiskFloor(next permit.RiskPolicy, crit PveCriticality, binding
 // authority: riskpolicy over src (artifact trust and host criticality;
 // the executor database in production), wrapped by the provisioning floor
 // (GuestProvisionRiskFloor: node, remote and the registry's linked hosts;
-// the remote is resolved in the registry if src is one, PveRemoteLister)
-// and by the guest power floor over src, the registry's linked hosts and
-// bindings. Pass the same bindings to Service.SetPveGuestPowerBindings.
+// the remote is resolved in the registry if src is one, PveRemoteLister),
+// by the guest snapshot floor and by the guest power floor, both over src,
+// the registry's linked hosts and bindings. Power and snapshot requests
+// share the bindings (their parameters hashes differ, and each floor only
+// accepts its own op or verb and artifact). Pass the same bindings to
+// Service.SetPveGuestPowerBindings.
 func NewExecutorRiskPolicy(src riskpolicy.Source, bindings *PveGuestPowerBindings) (permit.RiskPolicy, error) {
 	if src == nil || bindings == nil {
 		return nil, errors.New("executor: risk policy needs a risk source and the guest power bindings")
@@ -518,17 +521,18 @@ func NewExecutorRiskPolicy(src riskpolicy.Source, bindings *PveGuestPowerBinding
 	if reg, ok := src.(PveRemoteLister); ok {
 		prov.Remote = PveRegistryRemoteOf(reg)
 	}
-	return NewGuestPowerRiskFloor(prov, src, bindings), nil
+	snap := NewGuestSnapshotRiskFloor(prov, src, bindings)
+	return NewGuestPowerRiskFloor(snap, src, bindings), nil
 }
 
-// SetPveGuestPowerBindings makes the guest power actions bind their
-// targets in b, which must be the Bindings of the GuestPowerRiskFloor the
-// authority uses as its risk policy (NewGuestPowerRiskFloor). The
-// authority then re-evaluates the full floor (node, remote and linked
-// hosts included) when the permit is approved and when the run is
-// authorized. Call it before serving. Without it, or with another
-// instance, the authority finds no binding and scores power requests HIGH
-// (fail closed).
+// SetPveGuestPowerBindings makes the guest power and snapshot actions bind
+// their targets in b, which must be the Bindings of the GuestPowerRiskFloor
+// and GuestSnapshotRiskFloor the authority uses as its risk policy
+// (NewExecutorRiskPolicy). The authority then re-evaluates the full floor
+// (node, remote and linked hosts included) when the permit is approved and
+// when the run is authorized. Call it before serving. Without it, or with
+// another instance, the authority finds no binding and scores power and
+// snapshot requests HIGH (fail closed).
 func (s *Service) SetPveGuestPowerBindings(b *PveGuestPowerBindings) { s.pveGuestPowerBindings = b }
 
 // GuestPowerRiskFloor wraps the executor's risk policy for pve.guest.power
