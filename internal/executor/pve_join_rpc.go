@@ -184,16 +184,19 @@ func (s *Service) CommitGuestJoin(ctx context.Context, in *pb.CommitGuestJoinReq
 
 // pveGuestAgentAPI is the production PveGuestAgentReader: typed pveapi
 // reads over the remote's pinned TLS channel (the same trust and transport
-// as ReadPVE), with the read token. A trust failure blocks the remote as
-// for every other read.
+// as ReadPVE). Each call uses the credential its caller passes: LiveGuest
+// the read token, AgentFileRead the scoped guest-agent credential (never
+// the read token). A trust failure blocks the remote as for every other
+// read.
 type pveGuestAgentAPI struct {
 	s *Service
 }
 
 // client builds the pinned API client of rm and returns it with its trust
-// watch and the release of the remote's request slot.
-func (a pveGuestAgentAPI) client(ctx context.Context, rm executordb.PveRemote, read pveapi.TokenSupplier) (*pveapi.Client, *pveTrustWatch, func(), error) {
-	if read == nil {
+// watch and the release of the remote's request slot. cred is the
+// credential of the one call (read token or scoped guest-agent credential).
+func (a pveGuestAgentAPI) client(ctx context.Context, rm executordb.PveRemote, cred pveapi.TokenSupplier) (*pveapi.Client, *pveTrustWatch, func(), error) {
+	if cred == nil {
 		return nil, nil, nil, errors.New("executor: guest read: no credential")
 	}
 	release, err := a.s.pveRead.acquire(ctx, rm.RemoteID)
@@ -214,7 +217,7 @@ func (a pveGuestAgentAPI) client(ctx context.Context, rm executordb.PveRemote, r
 		release()
 		return nil, nil, nil, err
 	}
-	c, err := pveapi.New(base, hc, read, pveapi.WithTimeout(pveReadRequestTimeout))
+	c, err := pveapi.New(base, hc, cred, pveapi.WithTimeout(pveReadRequestTimeout))
 	if err != nil {
 		release()
 		return nil, nil, nil, err
