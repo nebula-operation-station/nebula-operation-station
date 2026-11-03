@@ -94,6 +94,10 @@ type Service struct {
 	pveRead pveReadState
 	// pveMetrics caps live metrics targets and metrics requests per remote.
 	pveMetrics pveMetricsGate
+	// pveMut is the one PVE mutation engine of this executor; see
+	// pveMutations.
+	pveMutOnce sync.Once
+	pveMut     *PveMutations
 	// registry holds private registry administration, read authority and
 	// clients (ADR 0006, P1-32).
 	registry privateRegistryState
