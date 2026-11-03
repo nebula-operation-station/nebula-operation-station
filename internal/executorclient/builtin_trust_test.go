@@ -7,6 +7,7 @@ import "testing"
 func TestBuiltinTrustRPCsForwardWithTimeoutAndMapErrors(t *testing.T) {
 	t.Run("ReviewBuiltinTrust", func(t *testing.T) { checkPVEAdminRPC(t, "ReviewBuiltinTrust", (*Client).ReviewBuiltinTrust) })
 	t.Run("CommitBuiltinTrust", func(t *testing.T) { checkPVEAdminRPC(t, "CommitBuiltinTrust", (*Client).CommitBuiltinTrust) })
+	t.Run("UnpinBuiltinVersion", func(t *testing.T) { checkPVEAdminRPC(t, "UnpinBuiltinVersion", (*Client).UnpinBuiltinVersion) })
 	t.Run("GetBuiltinTrustStatus", func(t *testing.T) {
 		checkPVEAdminRPC(t, "GetBuiltinTrustStatus", (*Client).GetBuiltinTrustStatus)
 	})
