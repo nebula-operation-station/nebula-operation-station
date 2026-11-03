@@ -326,8 +326,29 @@ func TestGuestProvisionFloorRemoteRules(t *testing.T) {
 	if r, _, _ := (GuestProvisionRiskFloor{Next: fixedRisk{}, Linked: noLinkedHosts, Remote: lying}).MinimumRisk(req, []canonical.Target{node}); r != canonical.RiskHigh {
 		t.Fatalf("mismatched pin: %s", r)
 	}
+	// A CRITICAL node stays CRITICAL when its remote is unknown or
+	// mismatched: HIGH is only a floor, the known targets are still scored.
+	critical := criticalNodeRisk{fp: node.HostKeyFingerprint}
+	for name, src := range map[string]PveRemoteOf{"unknown": unknown, "mismatched": lying} {
+		if r, _, err := (GuestProvisionRiskFloor{Next: critical, Linked: noLinkedHosts, Remote: src}).MinimumRisk(req, []canonical.Target{node}); err != nil || r != canonical.RiskCritical {
+			t.Fatalf("critical node, %s remote: %s %v", name, r, err)
+		}
+	}
 	failing := func(canonical.Target) (string, bool, error) { return "", false, errors.New("boom") }
 	if _, _, err := (GuestProvisionRiskFloor{Next: fixedRisk{}, Linked: noLinkedHosts, Remote: failing}).MinimumRisk(req, []canonical.Target{node}); err == nil {
 		t.Fatal("remote source error swallowed")
 	}
+}
+
+// criticalNodeRisk scores a target with fingerprint fp as CRITICAL and
+// everything else as MEDIUM.
+type criticalNodeRisk struct{ fp string }
+
+func (c criticalNodeRisk) MinimumRisk(_ canonical.Request, targets []canonical.Target) (canonical.Risk, string, error) {
+	for _, t := range targets {
+		if t.HostKeyFingerprint == c.fp {
+			return canonical.RiskCritical, "node is CRITICAL", nil
+		}
+	}
+	return canonical.RiskMedium, "test", nil
 }

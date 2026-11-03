@@ -232,15 +232,19 @@ func (p GuestProvisionRiskFloor) MinimumRisk(r canonical.Request, targets []cano
 			return "", "", fmt.Errorf("provision risk floor: remote: %w", err)
 		}
 		if fp, ferr := permit.ProviderRiskFingerprint(pin, t.HostID); !ok || ferr != nil || fp != t.HostKeyFingerprint {
-			return canonical.RiskHigh, strings.Join(append(reasons, "remote of node target "+t.HostID+" unknown: unknown criticality is HIGH"), "; "), nil
-		}
-		if !seen[pin] {
+			// Unknown remote: HIGH is a floor, but the known targets are
+			// still scored so a CRITICAL node or linked host stays CRITICAL.
+			risk = canonical.RiskHigh
+			reasons = append(reasons, "remote of node target "+t.HostID+" unknown: unknown criticality is HIGH")
+		} else if !seen[pin] {
 			seen[pin] = true
 			remote, err := PveRemoteRiskTarget(pin)
 			if err != nil {
-				return canonical.RiskHigh, strings.Join(append(reasons, "remote of node target "+t.HostID+" unknown: unknown criticality is HIGH"), "; "), nil
+				risk = canonical.RiskHigh
+				reasons = append(reasons, "remote of node target "+t.HostID+" unknown: unknown criticality is HIGH")
+			} else {
+				ext = append(ext, remote)
 			}
-			ext = append(ext, remote)
 		}
 		hosts, err := p.Linked(r, t)
 		if err != nil {
