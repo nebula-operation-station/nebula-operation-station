@@ -18,6 +18,7 @@ import (
 // approved binding.
 type fakeJoinExecutor struct {
 	proposals int
+	proposed  []*pb.ProposeGuestJoinRequest
 	commits   []*pb.CommitGuestJoinRequest
 	pinned    bool
 	// echo overrides the committed binding the executor reports.
@@ -26,6 +27,7 @@ type fakeJoinExecutor struct {
 
 func (f *fakeJoinExecutor) ProposeGuestJoin(_ context.Context, in *pb.ProposeGuestJoinRequest, _ ...grpc.CallOption) (*pb.ProposeGuestJoinResponse, error) {
 	f.proposals++
+	f.proposed = append(f.proposed, in)
 	h := in.GetHost()
 	return &pb.ProposeGuestJoinResponse{JoinMethod: JoinMethodReview, AgentDetail: "guest agent unavailable",
 		Host: &pb.EnrollHost{HostId: h.GetHostId(), Endpoint: h.GetEndpoint() + ":22", SshUser: "nebula",
@@ -65,6 +67,9 @@ func TestGuestJoinFlowCreatesHostFromCommittedBinding(t *testing.T) {
 	p, err := f.Propose(ctx, flowProposal())
 	if err != nil {
 		t.Fatal(err)
+	}
+	if ex.proposed[0].GetGuest().GetGuestUuid() != testGuestUUID {
+		t.Fatalf("the proposal must carry the recorded incarnation UUID: %v", ex.proposed[0].GetGuest())
 	}
 	got, err := f.Commit(ctx, p, flowHost(), "alice")
 	if err != nil {

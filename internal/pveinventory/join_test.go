@@ -17,9 +17,13 @@ func joinFixture(t *testing.T) *Store {
 	if err := s.UpsertRemote(context.Background(), remoteA()); err != nil {
 		t.Fatalf("UpsertRemote: %v", err)
 	}
-	mustIngestGuest(t, s, newObsA().guests(mkGuest(120, 1, "web1.lab.test")).build())
+	g := mkGuest(120, 1, "web1.lab.test")
+	g.UUID = testGuestUUID
+	mustIngestGuest(t, s, newObsA().guests(g).build())
 	return s
 }
+
+const testGuestUUID = "0f8fad5b-d9cb-469f-a165-70867728950e"
 
 func joinRequest() GuestJoin {
 	return GuestJoin{
@@ -30,7 +34,7 @@ func joinRequest() GuestJoin {
 		Enrollment: CommittedEnrollment{
 			Digest: strings.Repeat("ab", 32), HostID: "web1", Endpoint: "192.168.10.12:22", CredentialRef: "nebula-default",
 			Fingerprint: "SHA256:" + strings.Repeat("A", 43), RemoteID: "remote-a", Node: "p1", VMID: 120, Generation: 1,
-			GuestName: "web1.lab.test", JoinMethod: JoinMethodAgent, Pinned: true,
+			GuestName: "web1.lab.test", GuestUUID: testGuestUUID, JoinMethod: JoinMethodAgent, Pinned: true,
 		},
 	}
 }
@@ -115,6 +119,8 @@ func TestJoinProvisionedGuestRefusesWrongIncarnation(t *testing.T) {
 		"other generation": {func(j *GuestJoin) { j.Generation = 2 }, ErrGuestNotFound},
 		"other vmid":       {func(j *GuestJoin) { j.VMID = 121 }, ErrGuestNotFound},
 		"other remote":     {func(j *GuestJoin) { j.RemoteID = "remote-b" }, ErrGuestNotFound},
+		"other uuid":       {func(j *GuestJoin) { j.Enrollment.GuestUUID = "11111111-2222-4333-8444-555555555555" }, ErrJoinGuestMismatch},
+		"uuid unbound":     {func(j *GuestJoin) { j.Enrollment.GuestUUID = "" }, ErrJoinGuestMismatch},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -196,6 +202,7 @@ func TestJoinProvisionedGuestRefusesUnapprovedJoin(t *testing.T) {
 			j.Host.Endpoints = append(j.Host.Endpoints, inventory.Endpoint{Address: "10.0.0.9", Port: 22})
 		},
 		"other credential":  func(j *GuestJoin) { j.Host.CredentialRef = "other" },
+		"empty credential":  func(j *GuestJoin) { j.Host.CredentialRef = "" },
 		"other remote":      func(j *GuestJoin) { j.Enrollment.RemoteID = "remote-b" },
 		"other node":        func(j *GuestJoin) { j.Enrollment.Node = "p2" },
 		"other vmid":        func(j *GuestJoin) { j.Enrollment.VMID = 121 },

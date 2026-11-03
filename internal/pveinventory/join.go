@@ -61,6 +61,9 @@ type CommittedEnrollment struct {
 	VMID          uint64
 	Generation    uint64
 	GuestName     string
+	// GuestUUID is the incarnation UUID the approval bound ("" when the
+	// inventory had none); it must still be the stored one.
+	GuestUUID string
 	// JoinMethod is JoinMethodAgent or JoinMethodReview.
 	JoinMethod string
 	// Pinned is set when the executor pinned the approved key.
@@ -128,8 +131,8 @@ func (j GuestJoin) checkEnrollment() error {
 	case c.RemoteID != j.RemoteID || c.Node != j.Node || c.VMID != j.VMID || c.Generation != j.Generation ||
 		c.GuestName != j.GuestName:
 		return fmt.Errorf("%w: guest %s/%d/%d is not the approved guest", ErrJoinNotApproved, j.RemoteID, j.VMID, j.Generation)
-	case j.Host.CredentialRef != "" && j.Host.CredentialRef != c.CredentialRef:
-		return fmt.Errorf("%w: credential", ErrJoinNotApproved)
+	case j.Host.CredentialRef == "" || j.Host.CredentialRef != c.CredentialRef:
+		return fmt.Errorf("%w: the host must carry the pinned credential", ErrJoinNotApproved)
 	case len(j.Host.Endpoints) != 1:
 		return fmt.Errorf("%w: the host must have exactly the approved endpoint", ErrJoinNotApproved)
 	}
@@ -165,8 +168,8 @@ func (j GuestJoin) validate() error {
 // JoinProvisionedGuest creates the managed host for a provisioned guest and
 // links it to the guest incarnation in one transaction. j.Enrollment must
 // be the executor's committed, pinned enrollment of exactly this host (ID,
-// only endpoint, credential) and guest (remote, node, VMID, generation,
-// name). The incarnation must be active and be the provisioned guest
+// only endpoint, credential, which must be set) and guest (remote, node,
+// VMID, generation, name, UUID). The incarnation must be active and be the provisioned guest
 // (QEMU, node and name); the host ID must be new. Nothing is left behind
 // on error. GuestJoinFlow.Commit is the caller that obtains j.Enrollment.
 func (s *Store) JoinProvisionedGuest(ctx context.Context, j GuestJoin) (GuestJoinResult, error) {
@@ -183,17 +186,17 @@ func (s *Store) JoinProvisionedGuest(ctx context.Context, j GuestJoin) (GuestJoi
 	}
 	defer tx.Rollback()
 
-	var kind, node, name string
-	err = tx.QueryRowContext(ctx, `SELECT kind, node, name FROM pve_guests
+	var kind, node, name, uuid string
+	err = tx.QueryRowContext(ctx, `SELECT kind, node, name, uuid FROM pve_guests
 		WHERE remote_id = ? AND vmid = ? AND generation = ? AND tombstoned = 0`,
-		j.RemoteID, j.VMID, j.Generation).Scan(&kind, &node, &name)
+		j.RemoteID, j.VMID, j.Generation).Scan(&kind, &node, &name, &uuid)
 	if errors.Is(err, sql.ErrNoRows) {
 		return GuestJoinResult{}, fmt.Errorf("%w: %s/%d/%d", ErrGuestNotFound, j.RemoteID, j.VMID, j.Generation)
 	}
 	if err != nil {
 		return GuestJoinResult{}, fmt.Errorf("pveinventory: join: load guest %s/%d/%d: %w", j.RemoteID, j.VMID, j.Generation, err)
 	}
-	if kind != string(pvecontract.GuestQEMU) || node != j.Node || name != j.GuestName {
+	if kind != string(pvecontract.GuestQEMU) || node != j.Node || name != j.GuestName || uuid != j.Enrollment.GuestUUID {
 		return GuestJoinResult{}, fmt.Errorf("%w: %s/%d/%d", ErrJoinGuestMismatch, j.RemoteID, j.VMID, j.Generation)
 	}
 

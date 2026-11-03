@@ -64,12 +64,14 @@ func (f *GuestJoinFlow) Propose(ctx context.Context, p GuestJoinProposal) (*pb.P
 	if f.Store == nil || f.Executor == nil {
 		return nil, errors.New("pveinventory: guest join flow: Store and Executor are required")
 	}
-	if err := f.Store.checkJoinable(ctx, p.RemoteID, p.Node, p.VMID, p.Generation, p.GuestName, p.HostID); err != nil {
+	uuid, err := f.Store.checkJoinable(ctx, p.RemoteID, p.Node, p.VMID, p.Generation, p.GuestName, p.HostID)
+	if err != nil {
 		return nil, err
 	}
 	return f.Executor.ProposeGuestJoin(ctx, &pb.ProposeGuestJoinRequest{
-		Guest: &pb.GuestJoinTarget{RemoteId: p.RemoteID, Node: p.Node, Vmid: p.VMID, Generation: p.Generation, GuestName: p.GuestName},
-		Host:  &pb.EnrollHost{HostId: p.HostID, Endpoint: p.Endpoint, SshUser: p.SSHUser, CredentialRef: p.CredentialRef},
+		Guest: &pb.GuestJoinTarget{RemoteId: p.RemoteID, Node: p.Node, Vmid: p.VMID, Generation: p.Generation,
+			GuestName: p.GuestName, GuestUuid: uuid},
+		Host: &pb.EnrollHost{HostId: p.HostID, Endpoint: p.Endpoint, SshUser: p.SSHUser, CredentialRef: p.CredentialRef},
 	})
 }
 
@@ -100,31 +102,32 @@ func (f *GuestJoinFlow) Commit(ctx context.Context, proposal *pb.ProposeGuestJoi
 			Digest: c.GetExecutionDigest(), HostID: h.GetHostId(), Endpoint: h.GetEndpoint(),
 			CredentialRef: h.GetCredentialRef(), Fingerprint: c.GetResult().GetFingerprint(),
 			RemoteID: g.GetRemoteId(), Node: g.GetNode(), VMID: g.GetVmid(), Generation: g.GetGeneration(),
-			GuestName: g.GetGuestName(), JoinMethod: c.GetJoinMethod(), Pinned: true,
+			GuestName: g.GetGuestName(), GuestUUID: g.GetGuestUuid(), JoinMethod: c.GetJoinMethod(), Pinned: true,
 		},
 	})
 }
 
 // checkJoinable is the read-only precheck of a join: the incarnation is
-// the active provisioned guest and the host ID is new.
-func (s *Store) checkJoinable(ctx context.Context, remoteID, node string, vmid, generation uint64, name, hostID string) error {
-	var kind, gotNode, gotName string
-	err := s.db.QueryRowContext(ctx, `SELECT kind, node, name FROM pve_guests
+// the active provisioned guest and the host ID is new. It returns the
+// incarnation's recorded UUID.
+func (s *Store) checkJoinable(ctx context.Context, remoteID, node string, vmid, generation uint64, name, hostID string) (string, error) {
+	var kind, gotNode, gotName, uuid string
+	err := s.db.QueryRowContext(ctx, `SELECT kind, node, name, uuid FROM pve_guests
 		WHERE remote_id = ? AND vmid = ? AND generation = ? AND tombstoned = 0`,
-		remoteID, vmid, generation).Scan(&kind, &gotNode, &gotName)
+		remoteID, vmid, generation).Scan(&kind, &gotNode, &gotName, &uuid)
 	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("%w: %s/%d/%d", ErrGuestNotFound, remoteID, vmid, generation)
+		return "", fmt.Errorf("%w: %s/%d/%d", ErrGuestNotFound, remoteID, vmid, generation)
 	}
 	if err != nil {
-		return fmt.Errorf("pveinventory: join: load guest %s/%d/%d: %w", remoteID, vmid, generation, err)
+		return "", fmt.Errorf("pveinventory: join: load guest %s/%d/%d: %w", remoteID, vmid, generation, err)
 	}
 	if kind != string(pvecontract.GuestQEMU) || gotNode != node || gotName != name {
-		return fmt.Errorf("%w: %s/%d/%d", ErrJoinGuestMismatch, remoteID, vmid, generation)
+		return "", fmt.Errorf("%w: %s/%d/%d", ErrJoinGuestMismatch, remoteID, vmid, generation)
 	}
 	if _, err := s.hostStore().Get(ctx, hostID); err == nil {
-		return fmt.Errorf("pveinventory: join: %w: %s", inventory.ErrHostExists, hostID)
+		return "", fmt.Errorf("pveinventory: join: %w: %s", inventory.ErrHostExists, hostID)
 	} else if !errors.Is(err, inventory.ErrHostNotFound) {
-		return fmt.Errorf("pveinventory: join: load host %s: %w", hostID, err)
+		return "", fmt.Errorf("pveinventory: join: load host %s: %w", hostID, err)
 	}
-	return nil
+	return uuid, nil
 }
