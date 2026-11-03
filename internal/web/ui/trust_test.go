@@ -29,8 +29,19 @@ func TestBuiltinTrustBannerTrustedHidesBanner(t *testing.T) {
 	if v := builtinTrustBanner(st); v != nil {
 		t.Fatalf("trusted state: banner %+v, want nil", v)
 	}
-	if v := builtinTrustBanner(&pb.GetBuiltinTrustStatusResponse{}); v != nil {
-		t.Fatalf("unspecified state: banner %+v, want nil", v)
+}
+
+func TestBuiltinTrustBannerFailsClosed(t *testing.T) {
+	for name, st := range map[string]*pb.GetBuiltinTrustStatusResponse{
+		"unspecified":  {},
+		"nil response": nil,
+		"unknown enum": {State: pb.BuiltinTrustState(9999)},
+		"unavailable":  {State: pb.BuiltinTrustState_BUILTIN_TRUST_STATE_UNAVAILABLE},
+	} {
+		v := builtinTrustBanner(st)
+		if v == nil || v.Kind != unavailableBuiltinTrust().Kind {
+			t.Errorf("%s: banner %+v, want the unavailable banner", name, v)
+		}
 	}
 }
 

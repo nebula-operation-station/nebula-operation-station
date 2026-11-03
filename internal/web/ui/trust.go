@@ -109,10 +109,12 @@ func builtinTrustBanner(st *pb.GetBuiltinTrustStatusResponse) *builtinTrustView 
 			})
 		}
 		return v
-	case pb.BuiltinTrustState_BUILTIN_TRUST_STATE_UNAVAILABLE:
-		return unavailableBuiltinTrust()
+	case pb.BuiltinTrustState_BUILTIN_TRUST_STATE_TRUSTED:
+		return nil // the executor says trusted: no banner
 	default:
-		return nil // trusted (or unspecified): no banner
+		// Unavailable, unspecified, a nil response or a state this
+		// build does not know: fail closed, never shown as trusted.
+		return unavailableBuiltinTrust()
 	}
 }
 
