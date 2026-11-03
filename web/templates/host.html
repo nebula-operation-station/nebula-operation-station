@@ -125,8 +125,12 @@
         <input type="hidden" name="tab" value="updates">
         <button type="submit" class="button button--small">Refresh</button>
       </form>
-      <a class="button button--small" href="/operations/new?action=package.install_security&amp;host={{.ID}}">Install security updates</a>
-      <a class="button button--small" href="/operations/new?action=package.install_all&amp;host={{.ID}}">Install all updates</a>
+      {{if eq .KeyStatus "pinned"}}
+      <a class="button button--small" href="/operations/new?action=package.install_security&amp;host={{.ID}}">Propose security updates</a>
+      <a class="button button--small" href="/operations/new?action=package.install_all&amp;host={{.ID}}">Propose all updates</a>
+      {{else}}
+      <span class="hint">read-only: not enrolled for updates</span>
+      {{end}}
     </div>
   </div>
   {{if .Packages}}
