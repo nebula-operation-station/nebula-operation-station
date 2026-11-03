@@ -141,7 +141,21 @@ type ProviderRead struct {
 	TrustPin          string
 	TrustGeneration   uint64
 	CredentialVersion int64
+	// JoinStep is empty for every read except a guest join's identity
+	// reads (ProviderJoinStepBefore, ProviderJoinStepAfter): a guests read
+	// for the joined guest's VMID with its own per-step, per-guest
+	// interval, so a join and the scheduled guest list never delay each
+	// other. Each step spends one unit of the remote budget.
+	JoinStep string
 }
+
+// Guest join identity read steps (ProviderRead.JoinStep).
+const (
+	// ProviderJoinStepBefore is the guest list read before the agent read.
+	ProviderJoinStepBefore = "join_before"
+	// ProviderJoinStepAfter is the guest list read after the agent read.
+	ProviderJoinStepAfter = "join_after"
+)
 
 // providerBudgetKey is the budget and interval target of one remote. The
 // prefix keeps it disjoint from SSH host IDs, which cannot contain ':'.
@@ -159,6 +173,10 @@ func validProviderRead(r ProviderRead) bool {
 	if !pvecontract.ValidRemoteID(r.RemoteID) || !ValidProviderMethod(r.Method) {
 		return false
 	}
+	if r.JoinStep != "" {
+		return (r.JoinStep == ProviderJoinStepBefore || r.JoinStep == ProviderJoinStepAfter) &&
+			r.Method == ProviderMethodGuests && r.VMID >= pvecontract.MinVMID && r.VMID <= maxProviderVMID
+	}
 	if slices.Contains(providerGuestMethods, r.Method) {
 		return r.VMID >= pvecontract.MinVMID && r.VMID <= maxProviderVMID
 	}
@@ -166,8 +184,12 @@ func validProviderRead(r ProviderRead) bool {
 }
 
 // providerActionKey is the interval key of one read: the method, and for
-// per-guest methods the guest, so each guest keeps its own cadence.
+// per-guest methods the guest, so each guest keeps its own cadence. A join
+// step is keyed by step and guest, disjoint from "pve.guests".
 func providerActionKey(r ProviderRead) string {
+	if r.JoinStep != "" {
+		return "pve." + r.Method + "." + r.JoinStep + ":" + strconv.FormatUint(r.VMID, 10)
+	}
 	if r.VMID != 0 {
 		return "pve." + r.Method + ":" + strconv.FormatUint(r.VMID, 10)
 	}
