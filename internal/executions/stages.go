@@ -82,21 +82,44 @@ func stageTimeout(a actions.Action, n int) int {
 	return min(max(s, stageplan.MinTimeout), stageplan.MaxTimeout)
 }
 
-// buildStages turns a preset into stages over targets (in request order).
+// buildStages turns a preset into stages over targets (in request order):
+// the layout of PlanStages plus each stage's planned duration.
 func buildStages(p Plan, a actions.Action, targets []target, envOf map[string]inventory.Environment) ([]stageplan.Stage, error) {
+	hosts := make([]string, len(targets))
+	for i, t := range targets {
+		hosts[i] = t.host
+	}
+	out, err := PlanStages(p, hosts, envOf)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].TimeoutS = stageTimeout(a, len(out[i].Hosts))
+	}
+	return out, nil
+}
+
+// HasStageEnvironment reports whether env places a host in a stage of
+// the environments preset (DEV, QA or PROD).
+func HasStageEnvironment(env inventory.Environment) bool {
+	return env == inventory.EnvDev || env == inventory.EnvQA || env == inventory.EnvProd
+}
+
+// PlanStages lays out the stages of a preset over hosts (no duplicates,
+// in request order), with the environment of each host for the
+// environments preset. It is the layout CreateStaged proposes, without
+// the planned durations (TimeoutS is 0): pages that show a plan before
+// it is proposed call it so that what is shown is what is proposed.
+func PlanStages(p Plan, hosts []string, envOf map[string]inventory.Environment) ([]stageplan.Stage, error) {
 	if p.Continue != stageplan.ContinueManual && p.Continue != stageplan.ContinueAuto {
 		return nil, &PlanError{"continue must be manual or auto"}
 	}
 	if p.MaxFailed < 0 || p.MaxFailed > MaxHosts {
 		return nil, &PlanError{"max failed hosts per stage must be 0 or more"}
 	}
-	hosts := make([]string, len(targets))
-	for i, t := range targets {
-		hosts[i] = t.host
-	}
 	stage := func(name string, hs []string, maxFailed int) stageplan.Stage {
 		mf := min(maxFailed, len(hs))
-		return stageplan.Stage{Name: name, Hosts: hs, MaxFailed: mf, MaxUnreachable: mf, Continue: p.Continue, TimeoutS: stageTimeout(a, len(hs))}
+		return stageplan.Stage{Name: name, Hosts: hs, MaxFailed: mf, MaxUnreachable: mf, Continue: p.Continue}
 	}
 	var out []stageplan.Stage
 	switch p.Preset {
@@ -119,7 +142,7 @@ func buildStages(p Plan, a actions.Action, targets []target, envOf map[string]in
 		by := map[inventory.Environment][]string{}
 		for _, h := range hosts {
 			env := envOf[h]
-			if env != inventory.EnvDev && env != inventory.EnvQA && env != inventory.EnvProd {
+			if !HasStageEnvironment(env) {
 				return nil, &PlanError{fmt.Sprintf("host %s has no environment (DEV, QA or PROD)", h)}
 			}
 			by[env] = append(by[env], h)

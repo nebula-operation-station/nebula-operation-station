@@ -197,22 +197,53 @@ func (t ProviderMutationTarget) diff(u ProviderMutationTarget) string {
 }
 
 // canonicalTarget is the replay and risk key of t inside the canonical
-// request: a host ID derived from the exact resource, with the trust pin in
-// the fingerprint slot. It is not an SSH host and grants nothing by itself.
-// The versioned target is bound in the parameters, and
-// AuthorizeProviderMutation compares it member by member. The key exists
-// only because canonical.Request (protected, frozen spec) has no provider
-// target slot yet; replacing it is an open maintainer decision.
+// request: a host ID derived from the exact resource and a synthetic
+// fingerprint (ProviderRiskFingerprint) that binds the host ID to the trust
+// pin. It is not an SSH host and grants nothing by itself. The versioned
+// target is bound in the parameters, and AuthorizeProviderMutation compares
+// it member by member. The key exists only because canonical.Request
+// (protected, frozen spec) has no provider target slot yet; replacing it is
+// an open maintainer decision.
+//
+// Every node and guest of a remote has its own fingerprint, so each can
+// carry its own exact executor criticality record (the executor keeps at
+// most one record per fingerprint). Earlier the bare trust pin filled the
+// fingerprint slot, which let only one target per remote have a record.
 func (t ProviderMutationTarget) canonicalTarget() (canonical.Target, error) {
-	pin, err := hex.DecodeString(t.TrustPin)
-	if err != nil || len(pin) != sha256.Size {
-		return canonical.Target{}, fmt.Errorf("%w: trust pin", ErrProviderMutationTarget)
-	}
 	sum := sha256.Sum256([]byte(t.RemoteID + "\x00" + t.Kind + "\x00" + t.Node + "\x00" + strconv.FormatUint(t.VMID, 10)))
-	return canonical.Target{
-		HostID:             "pvm-" + hex.EncodeToString(sum[:16]),
-		HostKeyFingerprint: "SHA256:" + base64.RawStdEncoding.EncodeToString(pin),
-	}, nil
+	hostID := "pvm-" + hex.EncodeToString(sum[:16])
+	fp, err := ProviderRiskFingerprint(t.TrustPin, hostID)
+	if err != nil {
+		return canonical.Target{}, err
+	}
+	return canonical.Target{HostID: hostID, HostKeyFingerprint: fp}, nil
+}
+
+// providerRiskDomain separates the synthetic PVE target fingerprints from
+// every other SHA-256 the project computes.
+const providerRiskDomain = "nebula-pve-risk-target-v1\x00"
+
+// ProviderRiskFingerprint returns the synthetic fingerprint of the PVE risk
+// target hostID under the remote trust pin trustPin (hex SHA-256): the
+// domain-separated SHA-256 of the raw pin and the host ID, in the
+// "SHA256:<base64>" form of a host key fingerprint. It is stable, distinct
+// for every host ID, and changes when the remote is re-pinned, so a record
+// made for the old pin no longer matches exactly (fail closed). A risk
+// policy that knows the remote's pin can check with it that a target
+// belongs to that remote.
+func ProviderRiskFingerprint(trustPin, hostID string) (string, error) {
+	pin, err := hex.DecodeString(trustPin)
+	if err != nil || len(pin) != sha256.Size {
+		return "", fmt.Errorf("%w: trust pin", ErrProviderMutationTarget)
+	}
+	if !canonical.ValidHostID(hostID) {
+		return "", fmt.Errorf("%w: risk target host id", ErrProviderMutationTarget)
+	}
+	h := sha256.New()
+	h.Write([]byte(providerRiskDomain))
+	h.Write(pin)
+	h.Write([]byte(hostID))
+	return "SHA256:" + base64.RawStdEncoding.EncodeToString(h.Sum(nil)), nil
 }
 
 // RiskTarget returns the synthetic canonical target the authority binds

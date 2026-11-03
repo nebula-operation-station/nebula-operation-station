@@ -410,7 +410,10 @@ func TestWriterMethodSetIsAllowlist(t *testing.T) {
 	// MigrateGuest: ADR 0006 phase 2 (P2-01), "Intra-cluster migration:
 	// exact source/destination nodes and storage mapping; no passthrough
 	// live migration".
-	want := []string{"BackupNow", "CloneVM", "ConvertToTemplate", "CreateImageVM", "CreateSnapshot", "DeleteSnapshot", "DownloadURL", "MigrateGuest", "RebootGuest", "ResetGuest", "ResizeDisk", "RollbackSnapshot", "SetConfig", "ShutdownGuest", "StartVM", "StopGuest", "TaskStatus"}
+	// RebootNode: ADR 0006 phase 2 (P2-01), "Node reboot: HIGH standalone;
+	// CRITICAL cluster; exact node". command=reboot only; PVE answers without
+	// a UPID (empty/null data response); shutdown is not offered.
+	want := []string{"BackupNow", "CloneVM", "ConvertToTemplate", "CreateImageVM", "CreateSnapshot", "DeleteSnapshot", "DownloadURL", "MigrateGuest", "RebootGuest", "RebootNode", "ResetGuest", "ResizeDisk", "RollbackSnapshot", "SetConfig", "ShutdownGuest", "StartVM", "StopGuest", "TaskStatus"}
 	typ := reflect.TypeFor[*Writer]()
 	var got []string
 	for i := range typ.NumMethod() {

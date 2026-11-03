@@ -11,7 +11,11 @@
 // consulted.
 //
 // Failover follows the ADR: only connection failures and timeouts move the
-// request to the next endpoint. A trust mismatch (ErrTrustMismatch) is
+// request to the next endpoint. A mutating request (any method other than
+// GET, HEAD or OPTIONS) moves on only if no verified connection to the
+// failed endpoint was ever established, so nothing of it can have been
+// sent; once it may have reached an endpoint, a failure is terminal
+// (ErrMaybeSent) and the request is never resent. A trust mismatch (ErrTrustMismatch) is
 // terminal and stops all endpoints, as do redirects, which are refused
 // outright (ErrRedirect). Environment proxies are ignored (Proxy: nil).
 //
@@ -32,10 +36,22 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 )
+
+// safeMethod reports whether method is a read that may be failed over and
+// resent (GET, HEAD, OPTIONS). Every other method is a mutation.
+func safeMethod(method string) bool {
+	switch method {
+	case "", http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	return false
+}
 
 // Sentinel errors returned by the transport.
 var (
@@ -55,6 +71,13 @@ var (
 	// ErrResponseTooLarge is returned when the response body exceeds
 	// Options.MaxResponseBytes.
 	ErrResponseTooLarge = errors.New("pvetransport: response body exceeds limit")
+
+	// ErrMaybeSent is returned when a mutating request (any method other
+	// than GET, HEAD or OPTIONS) failed after a verified connection to an
+	// endpoint was established: the endpoint may have received and acted
+	// on it. Such a request is never failed over or resent (ADR 0008:
+	// nothing is ever redispatched blindly); the caller must reconcile.
+	ErrMaybeSent = errors.New("pvetransport: mutation may have been sent; not resent")
 )
 
 // Defaults for Options fields left zero.
@@ -279,12 +302,22 @@ func (rt *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 		// only; failover would send it twice.
 		attempts = attempts[:1]
 	}
+	mutation := !safeMethod(req.Method)
 	var firstErr error
 	for _, ec := range attempts {
-		resp, err := rt.attempt(req, ec)
+		resp, connected, err := rt.attempt(req, ec)
+		if err != nil && mutation && connected && !errors.Is(err, ErrTrustMismatch) {
+			// The endpoint may have received the mutation: never fail
+			// over, never resend.
+			return nil, fmt.Errorf("%w: %w", ErrMaybeSent, err)
+		}
 		if err == nil {
 			if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 				resp.Body.Close()
+				if mutation {
+					// The endpoint answered, so it received the mutation.
+					return nil, fmt.Errorf("%w: %w", ErrMaybeSent, ErrRedirect)
+				}
 				return nil, ErrRedirect
 			}
 			resp.Body = newLimitedBody(resp.Body, rt.opts.MaxResponseBytes, ErrResponseTooLarge)
@@ -312,13 +345,22 @@ func (rt *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 // transport writes the request only after the TLS handshake — which
 // verifies the pinned trust — has succeeded, so credentials are never
 // transmitted to an endpoint that failed pin verification.
-func (rt *roundTripper) attempt(req *http.Request, ec *endpointConn) (*http.Response, error) {
+//
+// connected reports whether the transport obtained a (pin-verified)
+// connection to the endpoint for this attempt, that is whether any byte of
+// the request may have been written to it.
+func (rt *roundTripper) attempt(req *http.Request, ec *endpointConn) (resp *http.Response, connected bool, err error) {
+	var gotConn atomic.Bool
 	ctx, cancel := context.WithTimeout(req.Context(), rt.opts.Timeout)
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) { gotConn.Store(true) },
+	})
 	bodyReturned := false
 	defer func() {
 		if !bodyReturned {
 			cancel()
 		}
+		connected = gotConn.Load()
 	}()
 
 	attemptReq := req.Clone(ctx)
@@ -337,7 +379,7 @@ func (rt *roundTripper) attempt(req *http.Request, ec *endpointConn) (*http.Resp
 	if req.Body != nil {
 		body, err := rt.requestBody(req)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		attemptReq.Body = body
 	}
@@ -345,7 +387,7 @@ func (rt *roundTripper) attempt(req *http.Request, ec *endpointConn) (*http.Resp
 	if rt.opts.Auth != nil {
 		auth, err := rt.opts.Auth(ctx)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if auth != "" {
 			if attemptReq.Header == nil {
@@ -355,13 +397,13 @@ func (rt *roundTripper) attempt(req *http.Request, ec *endpointConn) (*http.Resp
 		}
 	}
 
-	resp, err := ec.transport.RoundTrip(attemptReq)
+	resp, err = ec.transport.RoundTrip(attemptReq)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	resp.Body = &cancelBody{ReadCloser: resp.Body, cancel: cancel}
 	bodyReturned = true
-	return resp, nil
+	return resp, false, nil
 }
 
 // cancelBody releases the attempt context when the response is consumed
