@@ -1,0 +1,21 @@
+{{define "batch_layout"}}<!DOCTYPE html>
+<html lang="en" data-theme="{{.Theme}}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} — Nebula Operation Station</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <main class="batch-page">
+    <nav class="batch-nav" aria-label="Batch navigation">
+      <a href="/dashboard">Dashboard</a> · <a href="/operations">Operations</a> · <a href="/batches">Batches</a>
+    </nav>
+    <h1>{{.Title}}</h1>
+    <p id="message" class="message" role="status"></p>
+    {{if .Error}}<p class="message message--error" role="alert">{{.Error}}</p>{{end}}
+    {{template "content" .}}
+  </main>
+  {{range .Scripts}}<script src="/static/{{.}}"></script>{{end}}
+</body>
+</html>{{end}}

@@ -1,0 +1,16 @@
+{{define "content"}}
+<section class="panel" aria-label="New batch">
+  <p class="hint">List every member explicitly, one per line: <code>action host name=value …</code>. There are no wildcards: updating 12 hosts and restarting 3 containers is 15 lines. A line <code>stage manual failures=0 unreachable=0</code> starts a new stage; the first stage is manual with zero thresholds. With zero thresholds the first failed or unreachable member stops all work that was not dispatched yet. Container actions name the container by its full 64-character ID and need fresh container details (at most one hour old).</p>
+  <p class="hint">At most 100 members and 20 stages; larger work needs separately reviewed batches. Members the executor rates CRITICAL reject the whole batch: remove them and approve them separately.</p>
+  <form method="post" action="/batches/create" data-fetch class="batch-form">
+    <label for="batch-plan">Plan</label>
+    <textarea id="batch-plan" name="plan" rows="20" cols="100" class="mono" required spellcheck="false" autocomplete="off" placeholder="stage manual
+package.install_all web-01
+package.install_all web-02
+stage manual
+docker.restart web-01 container=0123…"></textarea>
+    <div class="actions"><button type="submit" class="button">Review plan</button></div>
+  </form>
+  <p class="hint">Review plan proposes the batch to the executor and shows the complete frozen plan. Nothing runs before it is approved.</p>
+</section>
+{{end}}
