@@ -51,6 +51,11 @@ services:
       - rpc:/run/nebula
       - discovery-jobs:/var/lib/nebula/discovery/jobs
       - discovery-results:/var/lib/nebula/discovery/results:ro
+      # Live handoff (ADR 0006 P1-37): the server writes only the want-list
+      # (requests) and only reads the collector's samples (live); it never
+      # sees the rest of the PVE spool and never reads Proxmox itself.
+      - pve-requests:/var/lib/nebula/pve/requests
+      - pve-live:/var/lib/nebula/pve/live:ro
       - ./server.json:/etc/nebula/server.json:ro
 
   discovery:
@@ -85,6 +90,8 @@ services:
     volumes:
       - rpc:/run/nebula
       - pve-spool:/var/lib/nebula/pve
+      - pve-requests:/var/lib/nebula/pve/requests
+      - pve-live:/var/lib/nebula/pve/live
 
 volumes:
   executor-data:
@@ -93,3 +100,5 @@ volumes:
   discovery-jobs:
   discovery-results:
   pve-spool:
+  pve-requests:
+  pve-live:
