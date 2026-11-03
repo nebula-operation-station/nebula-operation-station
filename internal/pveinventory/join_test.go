@@ -5,6 +5,7 @@ package pveinventory
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
@@ -26,7 +27,19 @@ func joinRequest() GuestJoin {
 		Host: inventory.Host{ID: "web1", DisplayName: "web1.lab.test",
 			Endpoints: []inventory.Endpoint{{Address: "192.168.10.12", Port: 22}}, CredentialRef: "nebula-default"},
 		Actor: "alice",
+		Enrollment: CommittedEnrollment{
+			Digest: strings.Repeat("ab", 32), HostID: "web1", Endpoint: "192.168.10.12:22", CredentialRef: "nebula-default",
+			Fingerprint: "SHA256:" + strings.Repeat("A", 43), RemoteID: "remote-a", Node: "p1", VMID: 120, Generation: 1,
+			GuestName: "web1.lab.test", JoinMethod: JoinMethodAgent, Pinned: true,
+		},
 	}
+}
+
+// approvedAsIs makes the committed enrollment name j's guest, as if the
+// executor had approved and pinned exactly that guest.
+func approvedAsIs(j *GuestJoin) {
+	j.Enrollment.RemoteID, j.Enrollment.Node, j.Enrollment.VMID = j.RemoteID, j.Node, j.VMID
+	j.Enrollment.Generation, j.Enrollment.GuestName = j.Generation, j.GuestName
 }
 
 func TestJoinProvisionedGuestCreatesHostAndLink(t *testing.T) {
@@ -108,6 +121,7 @@ func TestJoinProvisionedGuestRefusesWrongIncarnation(t *testing.T) {
 			s := joinFixture(t)
 			req := joinRequest()
 			c.mod(&req)
+			approvedAsIs(&req)
 			if _, err := s.JoinProvisionedGuest(context.Background(), req); !errors.Is(err, c.want) {
 				t.Fatalf("err = %v, want %v", err, c.want)
 			}
@@ -168,5 +182,58 @@ func TestJoinProvisionedGuestRefusesLinkedIncarnationAtomically(t *testing.T) {
 	}
 	if _, err := s.hostStore().Get(context.Background(), "web1"); !errors.Is(err, inventory.ErrHostNotFound) {
 		t.Fatalf("the host must be rolled back with the link: %v", err)
+	}
+}
+
+func TestJoinProvisionedGuestRefusesUnapprovedJoin(t *testing.T) {
+	cases := map[string]func(j *GuestJoin){
+		"not pinned":     func(j *GuestJoin) { j.Enrollment.Pinned = false },
+		"no enrollment":  func(j *GuestJoin) { j.Enrollment = CommittedEnrollment{} },
+		"other host id":  func(j *GuestJoin) { j.Host.ID = "web2" },
+		"other endpoint": func(j *GuestJoin) { j.Host.Endpoints = []inventory.Endpoint{{Address: "192.168.10.13", Port: 22}} },
+		"other port":     func(j *GuestJoin) { j.Host.Endpoints = []inventory.Endpoint{{Address: "192.168.10.12", Port: 2222}} },
+		"extra endpoint": func(j *GuestJoin) {
+			j.Host.Endpoints = append(j.Host.Endpoints, inventory.Endpoint{Address: "10.0.0.9", Port: 22})
+		},
+		"other credential":  func(j *GuestJoin) { j.Host.CredentialRef = "other" },
+		"other remote":      func(j *GuestJoin) { j.Enrollment.RemoteID = "remote-b" },
+		"other node":        func(j *GuestJoin) { j.Enrollment.Node = "p2" },
+		"other vmid":        func(j *GuestJoin) { j.Enrollment.VMID = 121 },
+		"other generation":  func(j *GuestJoin) { j.Enrollment.Generation = 2 },
+		"other guest name":  func(j *GuestJoin) { j.Enrollment.GuestName = "db1.lab.test" },
+		"unknown method":    func(j *GuestJoin) { j.Enrollment.JoinMethod = "tofu" },
+		"bad digest":        func(j *GuestJoin) { j.Enrollment.Digest = "nope" },
+		"bad fingerprint":   func(j *GuestJoin) { j.Enrollment.Fingerprint = "MD5:aa" },
+		"bad endpoint form": func(j *GuestJoin) { j.Enrollment.Endpoint = "ssh://192.168.10.12" },
+	}
+	for name, mod := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := joinFixture(t)
+			req := joinRequest()
+			mod(&req)
+			if _, err := s.JoinProvisionedGuest(context.Background(), req); !errors.Is(err, ErrJoinNotApproved) {
+				t.Fatalf("err = %v, want ErrJoinNotApproved", err)
+			}
+			if _, err := s.hostStore().Get(context.Background(), req.Host.ID); !errors.Is(err, inventory.ErrHostNotFound) {
+				t.Fatalf("no host may be created: %v", err)
+			}
+			if _, err := s.GetLink(context.Background(), "remote-a", 120, 1); !errors.Is(err, ErrLinkNotFound) {
+				t.Fatalf("no link may be created: %v", err)
+			}
+		})
+	}
+}
+
+func TestJoinProvisionedGuestAcceptsDefaultPortAndReportsPin(t *testing.T) {
+	s := joinFixture(t)
+	req := joinRequest()
+	req.Host.Endpoints = []inventory.Endpoint{{Address: "192.168.10.12"}}
+	req.Enrollment.JoinMethod = JoinMethodReview
+	got, err := s.JoinProvisionedGuest(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Fingerprint != req.Enrollment.Fingerprint || got.JoinMethod != JoinMethodReview {
+		t.Fatalf("result = %+v", got)
 	}
 }
