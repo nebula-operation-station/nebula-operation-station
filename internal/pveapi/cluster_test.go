@@ -360,6 +360,40 @@ func TestHAStatusNotEnabled(t *testing.T) {
 	if !strings.Contains(got.Reason, "HA not enabled") {
 		t.Errorf("Reason = %q, want HA not enabled", got.Reason)
 	}
+	if !got.NotConfigured {
+		t.Error("both endpoints 404: want NotConfigured")
+	}
+}
+
+// TestHAStatusPartialIsNotNotConfigured: only both HA endpoints answering
+// 404 means "no HA". One endpoint missing while the other answers, or a
+// failed read next to a 404, leaves the HA state unknown.
+func TestHAStatusPartialIsNotNotConfigured(t *testing.T) {
+	listed := `{"data":[{"sid":"vm:100","type":"vm","state":"started"}]}`
+	cases := map[string]struct{ res, st fakeRoute }{
+		"resources listed, status 404": {fakeRoute{body: listed}, fakeRoute{status: http.StatusNotFound}},
+		"resources empty, status 404":  {fakeRoute{body: `{"data":[]}`}, fakeRoute{status: http.StatusNotFound}},
+		"resources 404, status read":   {fakeRoute{status: http.StatusNotFound}, fakeRoute{body: `{"data":[]}`}},
+		"resources 404, status 403":    {fakeRoute{status: http.StatusNotFound}, fakeRoute{status: http.StatusForbidden}},
+		"resources 403, status 404":    {fakeRoute{status: http.StatusForbidden}, fakeRoute{status: http.StatusNotFound}},
+		"resources 500, status 500":    {fakeRoute{status: http.StatusInternalServerError}, fakeRoute{status: http.StatusInternalServerError}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newFakePVE(t, map[string]fakeRoute{
+				"/api2/json/cluster/ha/resources":      tc.res,
+				"/api2/json/cluster/ha/status/current": tc.st,
+			})
+			got, err := clusterTestClient(t, f).HAStatus(context.Background())
+			if err != nil {
+				t.Fatalf("HAStatus: %v", err)
+			}
+			wantUnavailable(t, got.Available, got.Reason, name)
+			if got.NotConfigured || got.Reason == "HA not enabled" {
+				t.Fatalf("partial HA state classified as not configured: %+v", got)
+			}
+		})
+	}
 }
 
 func TestHAStatusEmpty(t *testing.T) {

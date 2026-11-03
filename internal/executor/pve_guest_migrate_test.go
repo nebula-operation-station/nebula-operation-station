@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -201,6 +202,42 @@ func TestGuestMigrateRefusals(t *testing.T) {
 		{"ha state unreadable", "qemu", func(e *opEnv, _ *PveGuestMigrateRequest) {
 			e.oc.ha = pveapi.HAStatus{Reason: "http status 403"}
 		}, ErrPveMigrateState},
+		{"ha state partial", "qemu", func(e *opEnv, _ *PveGuestMigrateRequest) {
+			e.oc.ha = pveapi.HAStatus{Reason: "HA status incomplete: one HA endpoint not found"}
+		}, ErrPveMigrateState},
+		{"ha not-enabled reason without the typed flag", "qemu", func(e *opEnv, _ *PveGuestMigrateRequest) {
+			e.oc.ha = pveapi.HAStatus{Reason: "HA not enabled"}
+		}, ErrPveMigrateState},
+		{"snapshot-only volume on unmapped storage", "qemu", func(e *opEnv, _ *PveGuestMigrateRequest) {
+			e.oc.storages = append(e.oc.storages, pveapi.Storage{ID: "slow", Type: "lvmthin", Content: []string{"images"}, Active: true})
+			e.oc.snapshots = map[string]map[string]string{"s1": {"scsi0": "local-zfs:vm-101-disk-0", "scsi1": "slow:vm-101-disk-3", "snaptime": "1700000000"}}
+		}, ErrPveMigrateStorage},
+		{"vmstate volume on unmapped storage", "qemu", func(e *opEnv, _ *PveGuestMigrateRequest) {
+			e.oc.storages = append(e.oc.storages, pveapi.Storage{ID: "slow", Type: "lvmthin", Content: []string{"images"}, Active: true})
+			e.oc.snapshots = map[string]map[string]string{"s1": {"scsi0": "local-zfs:vm-101-disk-0", "vmstate": "slow:vm-101-state-s1"}}
+		}, ErrPveMigrateStorage},
+		{"snapshot volume on unlisted storage", "qemu", func(e *opEnv, _ *PveGuestMigrateRequest) {
+			e.oc.snapshots = map[string]map[string]string{"s1": {"vmstate": "gone:vm-101-state-s1"}}
+		}, ErrPveMigrateStorage},
+		{"snapshots not completely read", "qemu", func(e *opEnv, _ *PveGuestMigrateRequest) { e.oc.snapshotsIncomplete = true }, ErrPveMigrateState},
+		{"snapshot being deleted", "qemu", func(e *opEnv, _ *PveGuestMigrateRequest) {
+			e.oc.snapshots = map[string]map[string]string{"s1": {"scsi0": "local-zfs:vm-101-disk-0", "snapstate": "delete"}}
+		}, ErrPveMigrateState},
+		{"snapshot unknown disk-like key", "qemu", func(e *opEnv, _ *PveGuestMigrateRequest) {
+			e.oc.snapshots = map[string]map[string]string{"s1": {"efidisk1": "local-zfs:vm-101-disk-9"}}
+		}, ErrPveMigrateState},
+		{"vmstate on a container snapshot", "lxc", func(e *opEnv, _ *PveGuestMigrateRequest) {
+			e.oc.snapshots = map[string]map[string]string{"s1": {"rootfs": "local-zfs:subvol-101-disk-0", "vmstate": "local-zfs:x"}}
+		}, ErrPveMigrateState},
+		{"snapshot mount point on unmapped storage", "lxc", func(e *opEnv, _ *PveGuestMigrateRequest) {
+			e.oc.snapshots = map[string]map[string]string{"s1": {"rootfs": "local-zfs:subvol-101-disk-0", "mp0": "ceph:vm-101-disk-4,mp=/old"}}
+		}, ErrPveMigrateStorage},
+		{"too many snapshots", "qemu", func(e *opEnv, _ *PveGuestMigrateRequest) {
+			e.oc.snapshots = map[string]map[string]string{}
+			for i := 0; i <= maxPveMigrateSnapshots; i++ {
+				e.oc.snapshots[fmt.Sprintf("s%d", i)] = map[string]string{"scsi0": "local-zfs:vm-101-disk-0"}
+			}
+		}, ErrPveMigrateState},
 		{"live with hostpci", "qemu", func(e *opEnv, _ *PveGuestMigrateRequest) {
 			e.oc.config["hostpci0"] = "0000:65:00,pcie=1,x-vga=1"
 		}, ErrPveMigratePassthrough},
@@ -272,6 +309,12 @@ func TestGuestMigrateRecheckBeforeDispatch(t *testing.T) {
 		{"target went offline", func(_ *opEnv, c *opClient) { c.cluster.Members[1].Online = false }, ErrPveMigrateTarget},
 		{"hostpci added", func(_ *opEnv, c *opClient) { c.config["hostpci0"] = "0000:01:00.0" }, ErrPveMigratePassthrough},
 		{"disk added", func(_ *opEnv, c *opClient) { c.config["scsi2"] = "local-zfs:vm-101-disk-5" }, ErrPveMigrateChanged},
+		{"snapshot with RAM taken", func(_ *opEnv, c *opClient) {
+			c.snapshots = map[string]map[string]string{"s1": {"scsi0": "local-zfs:vm-101-disk-0", "vmstate": "local-zfs:vm-101-state-s1"}}
+		}, ErrPveMigrateChanged},
+		{"ha became partial", func(_ *opEnv, c *opClient) {
+			c.ha = pveapi.HAStatus{Reason: "HA status incomplete: one HA endpoint not found"}
+		}, ErrPveMigrateState},
 		{"target storage gone", func(_ *opEnv, c *opClient) { c.targetStorages = c.targetStorages[:1] }, ErrPveMigrateStorage},
 	}
 	for _, tc := range cases {
@@ -495,7 +538,7 @@ func TestDispatchGuestMigrateStepSendsExactForm(t *testing.T) {
 	}
 	e := &opClient{cluster: pveapi.ClusterStatus{Available: true, Quorum: true,
 		Members: []pveapi.ClusterMember{{Name: "pve1", Online: true}, {Name: "pve2", Online: true}}},
-		ha: pveapi.HAStatus{Reason: pveHANotEnabled}}
+		ha: pveapi.HAStatus{Reason: "HA not enabled", NotConfigured: true}}
 	args, _ := json.Marshal(pveMigrateStepArgs{VMID: 101, Target: "pve2", Online: true, TargetStorage: "local-zfs:fast-zfs", WithLocalDisks: true})
 	if _, err := DispatchGuestMigrateStep(context.Background(), w, &opReader{c: e}, "pve1", PveMutationStep{Method: "migrate.qemu", Args: args}); err != nil {
 		t.Fatal(err)
@@ -539,5 +582,162 @@ func TestDispatchGuestMigrateStepRejectsMalformedArgs(t *testing.T) {
 	}
 	if len(oc.migrations) != 0 {
 		t.Fatalf("sent %+v", oc.migrations)
+	}
+}
+
+// TestGuestMigrateBindsSnapshotVolumes: volumes referenced only by a
+// snapshot section (a removed disk, a RAM-snapshot vmstate volume) are part
+// of the bound disk set and need the approved mapping; a volume both the
+// current config and a snapshot reference appears once.
+func TestGuestMigrateBindsSnapshotVolumes(t *testing.T) {
+	e := newOpEnv(t, permit.ProviderKindQemu)
+	e.oc.storages = append(e.oc.storages, pveapi.Storage{ID: "slow", Type: "lvmthin", Content: []string{"images"}, Active: true})
+	e.oc.snapshots = map[string]map[string]string{
+		"s1": {"scsi0": "local-zfs:vm-101-disk-0,size=32G", "scsi1": "slow:vm-101-disk-3,size=8G", "efidisk0": "ceph:vm-101-disk-1,size=1M",
+			"vmstate": "local-zfs:vm-101-state-s1", "snaptime": "1700000000"},
+	}
+	req := migrateReq()
+	req.StorageMap["slow"] = "fast-zfs"
+	req, p := e.approveMigrate(req)
+	mp := migrateParams(t, p)
+	keys := []string{}
+	for _, d := range mp.Bound.Disks {
+		keys = append(keys, d.Key+"="+d.Volume+">"+d.TargetStorage)
+	}
+	want := "efidisk0=ceph:vm-101-disk-1>ceph,scsi0=local-zfs:vm-101-disk-0>fast-zfs," +
+		"snapshot/s1/scsi1=slow:vm-101-disk-3>fast-zfs,snapshot/s1/vmstate=local-zfs:vm-101-state-s1>fast-zfs"
+	if got := strings.Join(keys, ","); got != want {
+		t.Fatalf("disks %s, want %s", got, want)
+	}
+	if _, err := e.migrate.Run(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.oc.migrations) != 1 || e.oc.migrations[0].TargetStorage != "ceph:ceph,local-zfs:fast-zfs,slow:fast-zfs" {
+		t.Fatalf("sent %+v", e.oc.migrations)
+	}
+}
+
+// TestGuestMigrateHANotConfiguredAllowed: a remote whose HA endpoints are
+// both absent (typed NotConfigured) has no HA-managed guests.
+func TestGuestMigrateHANotConfiguredAllowed(t *testing.T) {
+	e := newOpEnv(t, permit.ProviderKindQemu)
+	e.oc.ha = pveapi.HAStatus{Reason: "HA not enabled", NotConfigured: true}
+	req, _ := e.approveMigrate(migrateReq())
+	if _, err := e.migrate.Run(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.oc.migrations) != 1 {
+		t.Fatalf("sent %+v", e.oc.migrations)
+	}
+}
+
+// TestDispatchGuestMigrateStepRefusesPartialHA: the dispatcher's HA
+// recheck treats a partial HA read as unknown and sends nothing.
+func TestDispatchGuestMigrateStepRefusesPartialHA(t *testing.T) {
+	for name, ha := range map[string]pveapi.HAStatus{
+		"partial":                 {Reason: "HA status incomplete: one HA endpoint not found"},
+		"reason without the flag": {Reason: "HA not enabled"},
+		"read failed":             {Reason: "http status 500"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			oc := &opClient{cluster: pveapi.ClusterStatus{Available: true, Quorum: true,
+				Members: []pveapi.ClusterMember{{Name: "pve1", Online: true}, {Name: "pve2", Online: true}}}, ha: ha}
+			args, _ := json.Marshal(pveMigrateStepArgs{VMID: 101, Target: "pve2", Online: true})
+			_, err := DispatchGuestMigrateStep(context.Background(), &opWriter{c: oc}, &opReader{c: oc}, "pve1", PveMutationStep{Method: "migrate.qemu", Args: args})
+			if !errors.Is(err, ErrPveRejected) || len(oc.migrations) != 0 {
+				t.Fatalf("got %v, sent %+v", err, oc.migrations)
+			}
+		})
+	}
+}
+
+// TestPveMigrateFactsReadsSnapshotSections: the production facts reader,
+// against a fake PVE HTTP API with both HA endpoints absent, reads every
+// snapshot's configuration (including vmstate) and fails the whole read
+// when a snapshot configuration cannot be read or is malformed.
+func TestPveMigrateFactsReadsSnapshotSections(t *testing.T) {
+	var mu sync.Mutex
+	snapCfg := map[string]string{}
+	snapList := `[{"name":"s1","snaptime":1700000000,"vmstate":1},{"name":"current","parent":"s1"}]`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		switch p := r.URL.Path; {
+		case p == "/api2/json/nodes/pve1/qemu/101/config":
+			_, _ = w.Write([]byte(`{"data":{"scsi0":"local-zfs:vm-101-disk-0,size=32G","memory":2048}}`))
+		case p == "/api2/json/nodes/pve1/storage" || p == "/api2/json/nodes/pve2/storage":
+			_, _ = w.Write([]byte(`{"data":[{"storage":"local-zfs","type":"zfspool","active":1,"content":"images,rootdir","shared":0}]}`))
+		case p == "/api2/json/cluster/status":
+			_, _ = w.Write([]byte(`{"data":[{"type":"cluster","id":"cluster","name":"lab","quorate":1,"nodes":2,"version":2},` +
+				`{"type":"node","id":"node/pve1","name":"pve1","online":1,"nodeid":1,"local":1},{"type":"node","id":"node/pve2","name":"pve2","online":1,"nodeid":2}]}`))
+		case p == "/api2/json/nodes/pve1/qemu/101/snapshot":
+			_, _ = w.Write([]byte(`{"data":` + snapList + `}`))
+		case strings.HasPrefix(p, "/api2/json/nodes/pve1/qemu/101/snapshot/") && strings.HasSuffix(p, "/config"):
+			name := strings.TrimSuffix(strings.TrimPrefix(p, "/api2/json/nodes/pve1/qemu/101/snapshot/"), "/config")
+			body, ok := snapCfg[name]
+			if !ok {
+				http.Error(w, "boom", http.StatusInternalServerError)
+				return
+			}
+			_, _ = w.Write([]byte(`{"data":` + body + `}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	read := func(context.Context) (string, error) { return "PVEAPIToken=r@pve!r=x", nil }
+	facts := func(cfg string) (PveMigrateFacts, error) {
+		mu.Lock()
+		if cfg == "" {
+			delete(snapCfg, "s1")
+		} else {
+			snapCfg["s1"] = cfg
+		}
+		mu.Unlock()
+		return pveMigrateFacts(context.Background(), srv.Client(), srv.URL, read, "qemu", "pve1", 101, "pve2")
+	}
+
+	f, err := facts(`{"scsi0":"local-zfs:vm-101-disk-0","scsi1":"local-zfs:vm-101-disk-3","vmstate":"local-zfs:vm-101-state-s1","snaptime":1700000000}`)
+	if err != nil {
+		t.Fatalf("facts: %v", err)
+	}
+	if !f.SnapshotsComplete || len(f.Snapshots) != 1 || f.Snapshots["s1"]["vmstate"] != "local-zfs:vm-101-state-s1" ||
+		f.Snapshots["s1"]["scsi1"] != "local-zfs:vm-101-disk-3" || !f.HA.NotConfigured || f.HA.Available ||
+		!f.Cluster.Available || !f.Cluster.Quorum || len(f.Cluster.Members) != 2 {
+		t.Fatalf("facts %+v", f)
+	}
+	disks, err := migrateDiskSet("qemu", f.Config, f.Snapshots)
+	if err != nil || len(disks) != 3 {
+		t.Fatalf("disk set %+v %v", disks, err)
+	}
+
+	for name, cfg := range map[string]string{
+		"snapshot config unreadable": "",
+		"vmstate not a string":       `{"scsi0":"local-zfs:vm-101-disk-0","vmstate":1}`,
+		"snapshot disk not a string": `{"scsi0":"local-zfs:vm-101-disk-0","scsi1":{"file":"x:y"}}`,
+		"snapshot config empty":      `{}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := facts(cfg); err == nil {
+				t.Fatal("facts read despite an unreadable snapshot configuration")
+			}
+		})
+	}
+
+	// A truncated snapshot list is reported incomplete, and bind refuses.
+	mu.Lock()
+	var many []string
+	for i := 0; i <= maxPveMigrateSnapshots; i++ {
+		many = append(many, fmt.Sprintf(`{"name":"s%d","snaptime":1700000000}`, i))
+	}
+	snapList = "[" + strings.Join(many, ",") + "]"
+	mu.Unlock()
+	f, err = facts(`{"scsi0":"local-zfs:vm-101-disk-0"}`)
+	if err != nil || f.SnapshotsComplete {
+		t.Fatalf("too many snapshots: complete=%v err=%v", f.SnapshotsComplete, err)
 	}
 }

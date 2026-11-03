@@ -37,7 +37,11 @@ type opClient struct {
 	targetStorages []pveapi.Storage
 	cluster        pveapi.ClusterStatus
 	ha             pveapi.HAStatus
-	factReads      int
+	// snapshots are the guest's snapshot sections by name;
+	// snapshotsIncomplete reports them as not completely read.
+	snapshots           map[string]map[string]string
+	snapshotsIncomplete bool
+	factReads           int
 	// onFacts, if set, may change the facts before read n is answered.
 	onFacts func(n int, c *opClient)
 	// onRecheck, if set, may change the facts after the engine's last
@@ -74,8 +78,15 @@ func (c *opClient) MigrateFacts(_ context.Context, _ executordb.PveRemote, _, _ 
 	defer c.omu.Unlock()
 	c.targetAsked = append(c.targetAsked, target)
 	cfg, src, dst := c.facts()
+	snaps := map[string]map[string]string{}
+	for name, sc := range c.snapshots {
+		snaps[name] = map[string]string{}
+		for k, v := range sc {
+			snaps[name][k] = v
+		}
+	}
 	return PveMigrateFacts{Config: cfg, SourceStorages: src, SourceStoragesComplete: true, TargetStorages: dst, TargetStoragesComplete: true,
-		Cluster: c.cluster, HA: c.ha}, nil
+		Cluster: c.cluster, HA: c.ha, Snapshots: snaps, SnapshotsComplete: !c.snapshotsIncomplete}, nil
 }
 
 func (c *opClient) record(step PveMutationStep) (int, bool) {

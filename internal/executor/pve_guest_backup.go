@@ -136,7 +136,11 @@ type PveGuestBackupRequest struct {
 	Storage string
 	// Mode is the vzdump mode: snapshot, suspend or stop.
 	Mode string
-	// BandwidthKiB is the bandwidth limit in KiB/s; 0 means no limit.
+	// BandwidthKiB is the requested bandwidth limit in KiB/s. 0 sends no
+	// bwlimit, so the remote's configured default (vzdump.conf, datacenter
+	// or storage bandwidth limits) applies: 0 means "remote default", never
+	// "unlimited". A positive value is sent as bwlimit; PVE may still cap it
+	// at a configured limit the token lacks the privilege to raise.
 	BandwidthKiB int
 }
 
@@ -165,10 +169,12 @@ type pveBackupStepArgs struct {
 
 // pveBackupParams are the action parameters bound in the approval.
 type pveBackupParams struct {
-	Kind         string `json:"kind"`
-	Storage      string `json:"storage"`
-	StorageType  string `json:"storage_type"`
-	Mode         string `json:"mode"`
+	Kind        string `json:"kind"`
+	Storage     string `json:"storage"`
+	StorageType string `json:"storage_type"`
+	Mode        string `json:"mode"`
+	// BandwidthKiB is the requested limit; 0 is the remote's default
+	// (see PveGuestBackupRequest.BandwidthKiB).
 	BandwidthKiB int    `json:"bwlimit_kib"`
 	Compress     string `json:"compress"`
 	// Prune is always false: the action never prunes or deletes backups.
@@ -497,8 +503,15 @@ func pveBackupFacts(ctx context.Context, hc *http.Client, base string, read pvea
 // for which relevant reports true and that is not a bounded string fails
 // the read rather than being dropped.
 func pveGuestConfigStrings(ctx context.Context, hc *http.Client, base string, read pveapi.TokenSupplier, kind, node string, vmid uint64, relevant func(string) bool) (map[string]string, error) {
+	return pveConfigStrings(ctx, hc, base, read, "/nodes/"+node+"/"+kind+"/"+strconv.FormatUint(vmid, 10)+"/config", relevant)
+}
+
+// pveConfigStrings reads one configuration object at path (a guest's
+// current config or one of its snapshot sections) like
+// pveGuestConfigStrings.
+func pveConfigStrings(ctx context.Context, hc *http.Client, base string, read pveapi.TokenSupplier, path string, relevant func(string) bool) (map[string]string, error) {
 	var raw map[string]json.RawMessage
-	if err := pveGetData(ctx, hc, base, read, "/nodes/"+node+"/"+kind+"/"+strconv.FormatUint(vmid, 10)+"/config", nil, &raw); err != nil {
+	if err := pveGetData(ctx, hc, base, read, path, nil, &raw); err != nil {
 		return nil, err
 	}
 	if len(raw) == 0 || len(raw) > maxPveBackupConfigKeys {

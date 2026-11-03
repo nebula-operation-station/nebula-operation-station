@@ -47,7 +47,9 @@ type BackupRequest struct {
 	// Mode is the vzdump mode: "snapshot", "suspend" or "stop".
 	Mode string
 	// BandwidthKiB is the optional bandwidth limit in KiB/s. Zero sends no
-	// bwlimit; 1..MaxBackupBandwidthKiB is sent.
+	// bwlimit, so PVE applies its configured default limit (vzdump.conf,
+	// datacenter or storage), not "unlimited"; 1..MaxBackupBandwidthKiB is
+	// sent.
 	BandwidthKiB int
 	// Compress is the vzdump compression: "zstd" (the default when empty),
 	// "lzo", "gzip" or "0" (no compression).

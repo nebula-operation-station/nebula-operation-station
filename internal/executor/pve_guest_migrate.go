@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"slices"
 	"sort"
@@ -28,26 +29,35 @@ import (
 // destination node of the same cluster, the explicit mode (QEMU: online or
 // offline; LXC: restart or offline, as the guest's power state requires),
 // the guest's complete disk set and a complete storage mapping: every
-// storage holding a disk (including unused volumes) maps to a storage of
-// the destination node that is active and takes the guest's disk content;
-// shared storage maps to itself. The action refuses:
+// storage holding a volume PVE migrates (disks and unused volumes of the
+// current config, and every volume referenced only by a snapshot section,
+// including RAM-snapshot vmstate volumes) maps to a storage of the
+// destination node that is active and takes the guest's disk content;
+// shared storage maps to itself. PVE maps a storage missing from
+// targetstorage to the same storage ID, so a volume whose storage the
+// approved mapping does not cover is refused. The action refuses:
 //
 //   - destination == source, a destination that is not an online member of
 //     the remote's quorate cluster, or a remote without a cluster;
 //   - a guest under HA management (no HA-aware migration path exists yet;
-//     ADR 0006 forbids bypassing HA), or HA state that cannot be read;
+//     ADR 0006 forbids bypassing HA), or HA state that cannot be read
+//     completely (only both HA endpoints being absent means "no HA");
 //   - a live migration of a guest with any hostpci passthrough device;
 //   - a storage mapping that misses a disk's storage or names one the guest
 //     does not use;
+//   - a snapshot list or snapshot configuration that cannot be read
+//     completely, or more than maxPveMigrateSnapshots snapshots;
 //   - a locked guest, or a guest whose power state does not fit the mode.
 //
 // The bound facts and the guest's node, state and configuration digest are
 // read again before authorization and immediately before the step's intent
 // is recorded; the dispatcher re-reads cluster membership and HA state with
-// the read token right before sending. Any drift sends nothing. Intent,
-// UPID, lost-response identification and restart reconciliation are the
-// PveMutations engine's: the qmigrate/vzmigrate task runs on the source
-// node and carries the VMID.
+// the read token right before sending. Passthrough devices, the disk set
+// (snapshots included) and storages are not re-read at send time: a change
+// between the last liveCheck and the send is not seen. Any drift that is
+// seen sends nothing. Intent, UPID, lost-response identification and
+// restart reconciliation are the PveMutations engine's: the
+// qmigrate/vzmigrate task runs on the source node and carries the VMID.
 
 // PveGuestMigrateAction is the action ID of the intra-cluster migration.
 const PveGuestMigrateAction = "pve.guest.migrate"
@@ -59,12 +69,12 @@ const (
 	pveGuestMigrateVersion = "1.0.0"
 	// maxPveMigrateStepArgs bounds the arguments of one migration step.
 	maxPveMigrateStepArgs = 1024
-	// maxPveMigrateDisks bounds the disk set of one guest.
+	// maxPveMigrateDisks bounds the disk set of one guest (distinct
+	// volumes of the current config and all snapshot sections).
 	maxPveMigrateDisks = 64
-	// pveHANotEnabled is the pveapi.HAStatus reason of a remote whose HA
-	// endpoints do not exist: HA is known to be absent. Every other
-	// unavailable reason means the HA state is unknown.
-	pveHANotEnabled = "HA not enabled"
+	// maxPveMigrateSnapshots bounds the snapshots whose configuration a
+	// migration reads; a guest with more is refused.
+	maxPveMigrateSnapshots = 64
 )
 
 var (
@@ -91,8 +101,9 @@ var (
 	// sent.
 	ErrPveMigrateStorage = errors.New("executor: the storage mapping does not cover the guest's disks on usable storage")
 	// ErrPveMigrateState is returned when the guest is locked, its power
-	// state does not fit the requested mode, or the configuration, storage,
-	// cluster or HA state could not be read completely. Nothing is sent.
+	// state does not fit the requested mode, or the configuration,
+	// snapshot, storage, cluster or HA state could not be read completely.
+	// Nothing is sent.
 	ErrPveMigrateState = errors.New("executor: pve guest state does not allow the migration")
 	// ErrPveMigrateChanged is returned when facts bound in the approval
 	// (disks, mapping, power state, cluster) changed. Nothing is sent.
@@ -128,8 +139,16 @@ var (
 // migration (a disk, unused volume or passthrough device); such a member
 // must be a bounded string.
 func pveMigrateRelevantConfigKey(k string) bool {
-	return pveSnapshotRelevantConfigKey(k) || strings.HasPrefix(k, "unused") || strings.HasPrefix(k, "hostpci")
+	return pveSnapshotRelevantConfigKey(k) || strings.HasPrefix(k, "unused") || strings.HasPrefix(k, "hostpci") ||
+		k == pveMigrateVMStateKey || k == pveMigrateSnapStateKey
 }
+
+// Snapshot section keys a migration reads: the RAM state volume of a QEMU
+// snapshot, and the marker of a snapshot that is being created or deleted.
+const (
+	pveMigrateVMStateKey   = "vmstate"
+	pveMigrateSnapStateKey = "snapstate"
+)
 
 // PveMigrateFacts are the live facts a migration binds, read with the read
 // token (untrusted; validated by the action).
@@ -147,6 +166,12 @@ type PveMigrateFacts struct {
 	Cluster pveapi.ClusterStatus
 	// HA is the remote's HA state.
 	HA pveapi.HAStatus
+	// Snapshots holds the string-valued members of every snapshot
+	// section of the guest, by snapshot name. SnapshotsComplete is true
+	// only when the snapshot list was complete and every snapshot's
+	// configuration was read; the migration is refused otherwise.
+	Snapshots         map[string]map[string]string
+	SnapshotsComplete bool
 }
 
 // PveMigrateClient is the migration surface of a PveMutationClient. The
@@ -270,7 +295,8 @@ func (r PveGuestMigrateRequest) bind(live PveTargetState, f PveMigrateFacts) (pv
 	if live.Kind != r.Kind || live.Node != r.Node {
 		return pveMigrateBound{}, ErrPveTargetChanged
 	}
-	if len(f.Config) == 0 || len(f.Config) > maxPveBackupConfigKeys || !f.SourceStoragesComplete || !f.TargetStoragesComplete {
+	if len(f.Config) == 0 || len(f.Config) > maxPveBackupConfigKeys || !f.SourceStoragesComplete || !f.TargetStoragesComplete ||
+		!f.SnapshotsComplete || len(f.Snapshots) > maxPveMigrateSnapshots {
 		return pveMigrateBound{}, ErrPveMigrateState
 	}
 	if _, locked := f.Config["lock"]; locked {
@@ -292,7 +318,7 @@ func (r PveGuestMigrateRequest) bind(live PveTargetState, f PveMigrateFacts) (pv
 			}
 		}
 	}
-	disks, err := migrateDiskSet(r.Kind, f.Config)
+	disks, err := migrateDiskSet(r.Kind, f.Config, f.Snapshots)
 	if err != nil {
 		return pveMigrateBound{}, err
 	}
@@ -307,7 +333,8 @@ func (r PveGuestMigrateRequest) bind(live PveTargetState, f PveMigrateFacts) (pv
 		}
 		dst, mapped := r.StorageMap[d.Storage]
 		if !mapped {
-			// The mapping misses a disk: PVE would pick a default.
+			// The mapping misses a volume: PVE would keep the storage ID
+			// on the destination, outside the approval.
 			return pveMigrateBound{}, ErrPveMigrateStorage
 		}
 		ts, ok := findStorage(f.TargetStorages, dst)
@@ -396,10 +423,13 @@ func migrateClusterCheck(c pveapi.ClusterStatus, source, target string) error {
 	return nil
 }
 
-// migrateHACheck refuses an HA-managed guest and unknown HA state.
+// migrateHACheck refuses an HA-managed guest and unknown HA state. An
+// unavailable status means "no HA" only when pveapi classified it as not
+// configured (both HA endpoints absent); a partial or failed read is
+// unknown.
 func migrateHACheck(ha pveapi.HAStatus, vmid uint64) error {
 	if !ha.Available {
-		if ha.Reason == pveHANotEnabled {
+		if ha.NotConfigured {
 			return nil
 		}
 		return ErrPveMigrateState
@@ -412,41 +442,83 @@ func migrateHACheck(ha pveapi.HAStatus, vmid uint64) error {
 	return nil
 }
 
-// migrateDiskSet parses every volume of the guest (disks and unused
-// volumes; CD-ROM drives are not migrated volumes) sorted by key.
-// Passthrough devices, bind mounts and disk-like keys this code does not
-// know are refused rather than left out.
-func migrateDiskSet(kind string, cfg map[string]string) ([]PveMigrateDisk, error) {
+// migrateDiskSet parses every volume PVE migrates with the guest: disks
+// and unused volumes of the current config, then the volumes of every
+// snapshot section (disks, unused volumes and a QEMU snapshot's vmstate
+// RAM volume) that the current config does not reference. CD-ROM drives
+// are not migrated volumes. A snapshot volume's key is
+// "snapshot/<name>/<key>". The set is sorted by key; each volume appears
+// once. Passthrough devices, bind mounts, disk-like keys this code does
+// not know and a snapshot still being created or deleted are refused
+// rather than left out.
+func migrateDiskSet(kind string, cfg map[string]string, snapshots map[string]map[string]string) ([]PveMigrateDisk, error) {
+	var disks []PveMigrateDisk
+	seen := map[string]bool{}
+	if err := migrateSectionDisks(kind, "", cfg, seen, &disks); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(snapshots))
+	for name := range snapshots {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		sc := snapshots[name]
+		if len(sc) == 0 || len(sc) > maxPveBackupConfigKeys || !pveSnapshotNameRe.MatchString(name) {
+			return nil, ErrPveMigrateState
+		}
+		if _, busy := sc[pveMigrateSnapStateKey]; busy {
+			return nil, ErrPveMigrateState
+		}
+		if err := migrateSectionDisks(kind, "snapshot/"+name+"/", sc, seen, &disks); err != nil {
+			return nil, err
+		}
+	}
+	slices.SortFunc(disks, func(a, b PveMigrateDisk) int { return strings.Compare(a.Key, b.Key) })
+	return disks, nil
+}
+
+// migrateSectionDisks appends the volumes of one config section (the
+// current config with prefix "", or a snapshot section) that are not yet
+// in seen.
+func migrateSectionDisks(kind, prefix string, cfg map[string]string, seen map[string]bool, disks *[]PveMigrateDisk) error {
 	keyRe := pveQemuDiskKeyRe
 	if kind == permit.ProviderKindLXC {
 		keyRe = pveLXCDiskKeyRe
 	}
-	var disks []PveMigrateDisk
-	for key, val := range cfg {
-		unused := pveUnusedDiskKeyRe.MatchString(key)
-		if !keyRe.MatchString(key) && !unused {
-			if key != "vmstatestorage" && pveMigrateRelevantConfigKey(key) && !pveHostPCIKeyRe.MatchString(key) {
-				return nil, ErrPveMigrateState
+	snapshot := prefix != ""
+	keys := make([]string, 0, len(cfg))
+	for key := range cfg {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		val := cfg[key]
+		volume := keyRe.MatchString(key) || pveUnusedDiskKeyRe.MatchString(key) ||
+			(snapshot && kind == permit.ProviderKindQemu && key == pveMigrateVMStateKey)
+		if !volume {
+			if key != "vmstatestorage" && key != pveMigrateSnapStateKey && pveMigrateRelevantConfigKey(key) && !pveHostPCIKeyRe.MatchString(key) {
+				return ErrPveMigrateState
 			}
 			continue
 		}
 		d, skip, err := parseSnapshotDisk(kind, key, val)
 		if errors.Is(err, ErrPveSnapshotStorage) {
-			return nil, ErrPveMigrateStorage
+			return ErrPveMigrateStorage
 		}
 		if err != nil {
-			return nil, ErrPveMigrateState
+			return ErrPveMigrateState
 		}
-		if skip {
+		if skip || seen[d.Volume] {
 			continue
 		}
-		if len(disks) >= maxPveMigrateDisks {
-			return nil, ErrPveMigrateState
+		if len(*disks) >= maxPveMigrateDisks {
+			return ErrPveMigrateState
 		}
-		disks = append(disks, PveMigrateDisk{Key: d.Key, Volume: d.Volume, Storage: d.Storage})
+		seen[d.Volume] = true
+		*disks = append(*disks, PveMigrateDisk{Key: prefix + d.Key, Volume: d.Volume, Storage: d.Storage})
 	}
-	slices.SortFunc(disks, func(a, b PveMigrateDisk) int { return strings.Compare(a.Key, b.Key) })
-	return disks, nil
+	return nil
 }
 
 func (r PveGuestMigrateRequest) mutation(mc PveMigrateClient, b pveMigrateBound) (PveMutationRequest, error) {
@@ -636,6 +708,10 @@ type PveGuestMigrateReader interface {
 // with rd that source and destination are online members of a quorate
 // cluster and that the guest is not HA-managed, and sends the step with
 // w. Any refusal before sending, or by PVE, wraps ErrPveRejected.
+// Passthrough devices, the disk set and storages are not rechecked here;
+// the engine's liveCheck checked them just before the intent was recorded,
+// so a change in the short window between that check and this send is not
+// seen.
 func DispatchGuestMigrateStep(ctx context.Context, w PveGuestMigrateWriter, rd PveGuestMigrateReader, node string, step PveMutationStep) (string, error) {
 	m, ok := pveMigrateMethods[step.Method]
 	if !ok || w == nil || rd == nil {
@@ -708,16 +784,51 @@ func pveMigrateFacts(ctx context.Context, hc *http.Client, base string, read pve
 	if err != nil {
 		return PveMigrateFacts{}, errPveMutationRead
 	}
-	cs, err := pc.ClusterStatus(ctx)
+	cr := pveClusterReader(hc, base, read)
+	cs, err := cr.ClusterStatus(ctx)
 	if err != nil {
 		return PveMigrateFacts{}, errPveMutationRead
 	}
-	ha, err := pc.HAStatus(ctx)
+	ha, err := cr.HAStatus(ctx)
 	if err != nil {
 		return PveMigrateFacts{}, errPveMutationRead
+	}
+	snaps, complete, err := pveMigrateSnapshotConfigs(ctx, hc, base, read, pc, kind, node, vmid)
+	if err != nil {
+		return PveMigrateFacts{}, err
 	}
 	return PveMigrateFacts{Config: cfg, SourceStorages: src.Storages, SourceStoragesComplete: src.Complete,
-		TargetStorages: dst.Storages, TargetStoragesComplete: dst.Complete, Cluster: cs, HA: ha}, nil
+		TargetStorages: dst.Storages, TargetStoragesComplete: dst.Complete, Cluster: cs, HA: ha,
+		Snapshots: snaps, SnapshotsComplete: complete}, nil
+}
+
+// pveMigrateSnapshotConfigs reads the guest's snapshot list and the
+// configuration of every snapshot (GET .../snapshot/{name}/config). A
+// failed read of any of them fails the whole read; complete is false when
+// the list was truncated or has more than maxPveMigrateSnapshots entries,
+// and then no snapshot configuration is read.
+func pveMigrateSnapshotConfigs(ctx context.Context, hc *http.Client, base string, read pveapi.TokenSupplier, pc *pveapi.Client,
+	kind, node string, vmid uint64) (map[string]map[string]string, bool, error) {
+	list, err := pc.ListSnapshots(ctx, node, kind, int64(vmid))
+	if err != nil {
+		return nil, false, errPveMutationRead
+	}
+	if !list.Complete || len(list.Snapshots) > maxPveMigrateSnapshots {
+		return nil, false, nil
+	}
+	out := make(map[string]map[string]string, len(list.Snapshots))
+	prefix := "/nodes/" + node + "/" + kind + "/" + strconv.FormatUint(vmid, 10) + "/snapshot/"
+	for _, s := range list.Snapshots {
+		if !pveSnapshotNameRe.MatchString(s.Name) {
+			return nil, false, errPveMutationRead
+		}
+		sc, err := pveConfigStrings(ctx, hc, base, read, prefix+url.PathEscape(s.Name)+"/config", pveMigrateRelevantConfigKey)
+		if err != nil {
+			return nil, false, err
+		}
+		out[s.Name] = sc
+	}
+	return out, true, nil
 }
 
 // DispatchMigrate implements PveMigrateClient: DispatchGuestMigrateStep
@@ -735,14 +846,17 @@ func (c *pveMutationClient) DispatchMigrate(ctx context.Context, rm executordb.P
 	if err != nil {
 		return "", fmt.Errorf("dispatch %s: %w", step.Method, ErrPveRejected)
 	}
-	rd, err := pveapi.NewClient(hc, base+"/api2/json", read)
-	if err != nil {
-		return "", fmt.Errorf("dispatch %s: %w", step.Method, ErrPveRejected)
-	}
-	upid, err := DispatchGuestMigrateStep(ctx, w, rd, node, step)
+	upid, err := DispatchGuestMigrateStep(ctx, w, pveClusterReader(hc, base, read), node, step)
 	if watch.failed.Load() {
 		c.blockRemote(rm)
 		return "", fmt.Errorf("dispatch %s: %w: %w", step.Method, ErrPveRejected, errPveReadTrust)
 	}
 	return upid, err
+}
+
+// pveClusterReader returns a pveapi client for the cluster and HA reads
+// (ClusterStatus, HAStatus) with the read token over hc. Those methods use
+// the exported connection fields, which pveapi.NewClient does not set.
+func pveClusterReader(hc *http.Client, base string, read pveapi.TokenSupplier) *pveapi.Client {
+	return &pveapi.Client{HTTP: hc, BaseURL: base + "/api2/json", Token: read, Timeout: pveMutationRequestTimeout}
 }
