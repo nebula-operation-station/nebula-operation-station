@@ -154,7 +154,7 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 			return
 		}
 		lookup := h.sessions.Lookup
-		if passiveRequest(r) {
+		if !recordsActivity(r) {
 			lookup = h.sessions.Peek
 		}
 		sess, err := lookup(r.Context(), c.Value)

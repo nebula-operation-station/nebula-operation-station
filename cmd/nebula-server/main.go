@@ -383,7 +383,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	// Live org-chart values (ADR 0006 P1-37): SSE behind the same
 	// session check as the pages.
 	chartTree := func(ctx context.Context) (pveinventory.Tree, error) { return pveStore.ChartTree(ctx, time.Now()) }
-	lc, err := newLiveChart(exec, store, chartTree, live.PeekSession(sessions.Peek), log)
+	lc, err := newLiveChart(exec, store, chartTree, live.PeekSession(login.PeekRegistered), log)
 	if err != nil {
 		return err
 	}

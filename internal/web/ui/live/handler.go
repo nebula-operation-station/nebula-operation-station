@@ -24,8 +24,10 @@ import (
 const (
 	// EventsPath is the SSE stream of one viewer.
 	EventsPath = "/chart/live/events"
-	// TargetsPath receives the viewer's visible boxes.
-	TargetsPath = "/chart/live/targets"
+	// TargetsPath receives the viewer's visible boxes. The login wrapper
+	// authenticates its POST without recording activity (the client
+	// renews every 10 s on its own), so it is auth.LiveTargetsPath.
+	TargetsPath = auth.LiveTargetsPath
 )
 
 const (
@@ -63,10 +65,12 @@ type Options struct {
 	Leases func(ctx context.Context) ([]pvecollect.TelemetryLease, error)
 	// Recheck re-validates the session of an open stream and returns its
 	// absolute expiry (zero if unknown). It must not record activity (a
-	// stream must not keep an idle session alive); PeekSession builds it
-	// from auth.Store.Peek. It runs when the stream opens and every
-	// streamRecheckInterval; the stream ends once it reports false. Nil
-	// means only maxStreamLifetime bounds a stream.
+	// stream must not keep an idle session alive) and must fail once the
+	// session's credential is removed (the stream does not pass the login
+	// wrapper again); PeekSession builds it from auth.Handler.PeekRegistered.
+	// It runs when the stream opens and every streamRecheckInterval; the
+	// stream ends once it reports false. Nil means only maxStreamLifetime
+	// bounds a stream.
 	Recheck func(ctx context.Context, r *http.Request) (time.Time, bool)
 	// Tree returns the org-chart tree; it binds a node box to its remote
 	// and a guest box to the incarnation generation (and managed-host
@@ -106,10 +110,11 @@ func New(o Options) (*Handler, error) {
 	}, nil
 }
 
-// PeekSession returns an Options.Recheck over a session store's Peek
-// (auth.Store.Peek, which never moves last_seen): the stream's session
-// cookie must still name a valid session, and the same one the login
-// wrapper authenticated the stream with.
+// PeekSession returns an Options.Recheck over a non-touching session
+// lookup (auth.Handler.PeekRegistered in production: never moves
+// last_seen and fails once the credential is removed): the stream's
+// session cookie must still name a valid session, and the same one the
+// login wrapper authenticated the stream with.
 func PeekSession(peek func(ctx context.Context, token string) (auth.Session, error)) func(context.Context, *http.Request) (time.Time, bool) {
 	return func(ctx context.Context, r *http.Request) (time.Time, bool) {
 		c, err := r.Cookie(auth.CookieName)
