@@ -382,6 +382,25 @@ service ExecutorService {
   // parent/member linkage. The server polls this before dispatch.
   rpc GetBatchStatus(GetBatchStatusRequest) returns (GetBatchStatusResponse);
 
+  // Built-in trust (ADR 0007, E19c). The executor reads the built-in bundle
+  // from its locally configured, verified NOS release directory; no request
+  // names a path, a bundle or bytes. Bulk trust is local-admin only: there is
+  // no server or browser bulk trust method.
+  // Role: admin only. The complete review of the local release bundle
+  // against the executor trust store: old/new versions, hashes, risks, full
+  // script diffs and executor scanner findings. Commits nothing.
+  rpc ReviewBuiltinTrust(ReviewBuiltinTrustRequest) returns (ReviewBuiltinTrustResponse);
+
+  // Role: admin only. Commits the reviewed additions/changes atomically,
+  // bound to the reviewed manifest digest; every old version is explicitly
+  // retained or retired. The admin UID comes from peer credentials.
+  rpc CommitBuiltinTrust(CommitBuiltinTrustRequest) returns (CommitBuiltinTrustResponse);
+
+  // Role: server, admin. Read-only trust status for the banner: which
+  // built-in versions are trusted and which are untrusted. No diffs, no
+  // script bytes, no scanner excerpts, no paths. Grants nothing.
+  rpc GetBuiltinTrustStatus(GetBuiltinTrustStatusRequest) returns (GetBuiltinTrustStatusResponse);
+
   // Signed events (M10-1). Role: server, admin. Read-only: the chain of
   // the executor's audit events with the key to verify it.
   rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
@@ -2273,6 +2292,152 @@ message GetBatchStatusResponse {
   // Parent stage plan hash, and each member's execution ID in member order.
   string stage_plan_hash = 9;
   repeated string member_execution_ids = 10;
+}
+
+// Built-in trust (ADR 0007, E19c).
+
+enum BuiltinTrustChange {
+  BUILTIN_TRUST_CHANGE_UNSPECIFIED = 0;
+  // No locally retained predecessor; shown in full.
+  BUILTIN_TRUST_CHANGE_NEW = 1;
+  // Differs from the trusted version.
+  BUILTIN_TRUST_CHANGE_CHANGED = 2;
+  // Byte-identical to the trusted version; needs no confirmation.
+  BUILTIN_TRUST_CHANGE_UNCHANGED = 3;
+  // Returns to a retained earlier version.
+  BUILTIN_TRUST_CHANGE_REACTIVATED = 4;
+  // Trusted locally but absent from the release.
+  BUILTIN_TRUST_CHANGE_REMOVED = 5;
+}
+
+enum BuiltinTrustState {
+  BUILTIN_TRUST_STATE_UNSPECIFIED = 0;
+  // Every built-in in the local release is trusted.
+  BUILTIN_TRUST_STATE_TRUSTED = 1;
+  // At least one built-in in the local release is not trusted yet.
+  BUILTIN_TRUST_STATE_UNTRUSTED = 2;
+  // No verified local release bundle or trust store is available.
+  BUILTIN_TRUST_STATE_UNAVAILABLE = 3;
+}
+
+enum BuiltinDiffOp {
+  BUILTIN_DIFF_OP_UNSPECIFIED = 0;
+  BUILTIN_DIFF_OP_EQUAL = 1;
+  BUILTIN_DIFF_OP_INSERT = 2;
+  BUILTIN_DIFF_OP_DELETE = 3;
+}
+
+// One line of a full script diff; host-author text, render as text only.
+message BuiltinDiffLine {
+  BuiltinDiffOp op = 1;
+  string text = 2;
+  // Set when the script line is not valid UTF-8: text is then the Go
+  // quoted (escaped ASCII) form of the exact bytes, never a lossy repair.
+  bool escaped = 3;
+}
+
+// One executor scanner finding; the excerpt is host-author text.
+message BuiltinScanFinding {
+  string category = 1;
+  RiskClass risk = 2;
+  int32 line = 3;
+  string excerpt = 4;
+}
+
+message BuiltinActionReview {
+  string action_id = 1;
+  BuiltinTrustChange change = 2;
+  string old_risk = 3;
+  string new_risk = 4;
+  string old_script_sha256 = 5;
+  string new_script_sha256 = 6;
+  string old_artifact_sha256 = 7;
+  string new_artifact_sha256 = 8;
+  repeated BuiltinDiffLine diff = 9;
+  repeated BuiltinScanFinding findings = 10;
+  // Highest risk among the findings; unspecified when clean.
+  RiskClass scanner_floor = 11;
+}
+
+message BuiltinModuleReview {
+  string name = 1;
+  BuiltinTrustChange change = 2;
+  string old_version = 3;
+  string old_sha256 = 4;
+  string new_version = 5;
+  string new_sha256 = 6;
+  // Set when no exact previous bytes are available: nothing is inferred
+  // unchanged.
+  bool full_review = 7;
+  string full_review_reason = 8;
+  repeated BuiltinActionReview actions = 9;
+}
+
+message ReviewBuiltinTrustRequest {}
+
+message ReviewBuiltinTrustResponse {
+  string manifest_digest = 1;
+  string release_version = 2;
+  string root_id = 3;
+  string root_fingerprint = 4;
+  int64 generation = 5;
+  bool needs_confirmation = 6;
+  repeated BuiltinModuleReview modules = 7;
+  // Old versions (name@version) the commit must retain or retire.
+  repeated string old_versions = 8;
+}
+
+message CommitBuiltinTrustRequest {
+  // The reviewed manifest digest the admin confirmed.
+  string manifest_digest = 1;
+  // Old versions (name@version) to retain (pin).
+  repeated string retain = 2;
+  // Old versions (name@version) to retire.
+  repeated string retire = 3;
+}
+
+// One old/new trust tuple of the commit audit.
+message BuiltinTrustTuple {
+  string module = 1;
+  string old_version = 2;
+  string old_sha256 = 3;
+  string new_version = 4;
+  string new_sha256 = 5;
+  BuiltinTrustChange change = 6;
+}
+
+message CommitBuiltinTrustResponse {
+  string manifest_digest = 1;
+  int64 generation = 2;
+  uint32 admin_uid = 3;
+  repeated string retained = 4;
+  repeated string retired = 5;
+  repeated string collected = 6;
+  int32 cleanup_failures = 7;
+  repeated BuiltinTrustTuple tuples = 8;
+}
+
+message GetBuiltinTrustStatusRequest {}
+
+// The trust state of one built-in module version; metadata only.
+message BuiltinTrustEntry {
+  string name = 1;
+  BuiltinTrustChange change = 2;
+  // The trusted version; empty when none.
+  string trusted_version = 3;
+  string trusted_sha256 = 4;
+  // The local release's version; empty when removed.
+  string release_version = 5;
+  string release_sha256 = 6;
+}
+
+message GetBuiltinTrustStatusResponse {
+  BuiltinTrustState state = 1;
+  string manifest_digest = 2;
+  string release_version = 3;
+  int64 generation = 4;
+  // Every module of the review, sorted by name.
+  repeated BuiltinTrustEntry modules = 5;
 }
 
 // Private registries (ADR 0006, P1-32).

@@ -69,6 +69,15 @@ func (l *lazyExecutor) GetStatus(ctx context.Context, in *pb.GetStatusRequest, o
 	return nil, errNotConnected
 }
 
+// GetBuiltinTrustStatus implements ui.BuiltinTrustProvider for the
+// built-in trust banner (ADR 0007 E17).
+func (l *lazyExecutor) GetBuiltinTrustStatus(ctx context.Context, in *pb.GetBuiltinTrustStatusRequest, opts ...grpc.CallOption) (*pb.GetBuiltinTrustStatusResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.GetBuiltinTrustStatus(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
 func (l *lazyExecutor) BeginLogin(ctx context.Context, in *pb.BeginLoginRequest, opts ...grpc.CallOption) (*pb.BeginLoginResponse, error) {
 	if c := l.c.Load(); c != nil {
 		return c.BeginLogin(ctx, in, opts...)
@@ -390,6 +399,15 @@ func (l *lazyExecutor) ListReadGrants(ctx context.Context, in *pb.ListReadGrants
 func (l *lazyExecutor) RevokeReadGrant(ctx context.Context, in *pb.RevokeReadGrantRequest, opts ...grpc.CallOption) (*pb.RevokeReadGrantResponse, error) {
 	if c := l.c.Load(); c != nil {
 		return c.RevokeReadGrant(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+// RunReadGrant backs the live chart's SSH telemetry reads (ADR 0006
+// P1-26/P1-37); the executor re-authorizes every run against its grant.
+func (l *lazyExecutor) RunReadGrant(ctx context.Context, in *pb.RunReadGrantRequest, opts ...grpc.CallOption) (*pb.RunReadGrantResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.RunReadGrant(ctx, in, opts...)
 	}
 	return nil, errNotConnected
 }

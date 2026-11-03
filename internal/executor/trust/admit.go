@@ -152,7 +152,7 @@ func (s *Store) admit(in release.Candidate, reviewed Review, pinned map[string]b
 	if err := x.validate(); err != nil {
 		return Result{}, err
 	}
-	if err := s.persist(x); err != nil {
+	if err := s.persistNext(x); err != nil {
 		return Result{}, err
 	}
 	s.idx = x

@@ -36,6 +36,35 @@ func TestOpenBootstrapsAndPersists(t *testing.T) {
 	}
 }
 
+// OpenExisting never creates, bootstraps or persists: a missing store or
+// index (even with an empty objects directory) is ErrStateMissing.
+func TestOpenExistingIsReadOnly(t *testing.T) {
+	e := newEnv(t)
+	e.admit(e.candidate("1.0.0", docker("1.0.0", scriptV1)))
+	s, err := OpenExisting(e.dir, nil)
+	if err != nil || s.Generation() != 1 {
+		t.Fatalf("open existing: %v", err)
+	}
+	fresh := filepath.Join(t.TempDir(), "trust")
+	if _, err := OpenExisting(fresh, nil); err == nil {
+		t.Fatal("missing store opened")
+	}
+	if _, err := os.Stat(fresh); !os.IsNotExist(err) {
+		t.Fatalf("store directory created: %v", err)
+	}
+	empty := newEnv(t)
+	idx := filepath.Join(empty.dir, indexFile)
+	if err := os.Remove(idx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenExisting(empty.dir, nil); !errors.Is(err, ErrStateMissing) {
+		t.Fatalf("missing index: %v", err)
+	}
+	if _, err := os.Stat(idx); !os.IsNotExist(err) {
+		t.Fatalf("index recreated: %v", err)
+	}
+}
+
 func TestOpenBlocksOnMissingOrCorruptState(t *testing.T) {
 	e := newEnv(t)
 	e.admit(e.candidate("1.0.0", docker("1.0.0", scriptV1)))
@@ -519,5 +548,28 @@ func TestOpenRejectsInconsistentHistoryAndTrailingData(t *testing.T) {
 	os.WriteFile(idx, append(append([]byte{}, raw...), []byte(`{}`)...), 0o600)
 	if _, err := Open(e.dir, e.k.anchors(), nil); !errors.Is(err, ErrCorrupt) {
 		t.Errorf("trailing data: %v", err)
+	}
+}
+
+// A store opened before another local process committed does not
+// overwrite that commit: its own admission is stale.
+func TestAdmitRejectsConcurrentDiskCommit(t *testing.T) {
+	e := newEnv(t)
+	stale, err := Open(e.dir, e.k.anchors(), func() time.Time { return e.now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := e.candidate("1.0.0", docker("1.0.0", scriptV1))
+	r, err := stale.Review(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.admit(c)
+	if _, err := stale.Admit(c, r); !errors.Is(err, ErrStale) {
+		t.Fatalf("admit on a stale store: %v, want ErrStale", err)
+	}
+	e.reopen()
+	if e.s.Generation() != 1 {
+		t.Fatalf("generation %d, want 1", e.s.Generation())
 	}
 }

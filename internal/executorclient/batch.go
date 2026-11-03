@@ -16,7 +16,7 @@ func (c *Client) ProposeBatch(ctx context.Context, in *pb.ProposeBatchRequest, o
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ProposeBatch(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // CommitBatch relays a user-verified assertion for the batch-bound challenge
@@ -25,7 +25,7 @@ func (c *Client) CommitBatch(ctx context.Context, in *pb.CommitBatchRequest, opt
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.CommitBatch(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ReviewBatch retrieves the complete frozen plan for local review (admin role).
@@ -33,7 +33,7 @@ func (c *Client) ReviewBatch(ctx context.Context, in *pb.ReviewBatchRequest, opt
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ReviewBatch(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ApproveBatchCLI approves a locally reviewed batch digest (admin role only).
@@ -41,7 +41,7 @@ func (c *Client) ApproveBatchCLI(ctx context.Context, in *pb.ApproveBatchCLIRequ
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ApproveBatchCLI(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // GetBatchStatus confirms a batch is approved and fresh and returns its
@@ -50,5 +50,5 @@ func (c *Client) GetBatchStatus(ctx context.Context, in *pb.GetBatchStatusReques
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.GetBatchStatus(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
