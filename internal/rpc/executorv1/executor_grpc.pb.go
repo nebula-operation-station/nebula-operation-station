@@ -105,6 +105,7 @@ const (
 	ExecutorService_GetBatchStatus_FullMethodName                  = "/nebula.executor.v1.ExecutorService/GetBatchStatus"
 	ExecutorService_ReviewBuiltinTrust_FullMethodName              = "/nebula.executor.v1.ExecutorService/ReviewBuiltinTrust"
 	ExecutorService_CommitBuiltinTrust_FullMethodName              = "/nebula.executor.v1.ExecutorService/CommitBuiltinTrust"
+	ExecutorService_UnpinBuiltinVersion_FullMethodName             = "/nebula.executor.v1.ExecutorService/UnpinBuiltinVersion"
 	ExecutorService_GetBuiltinTrustStatus_FullMethodName           = "/nebula.executor.v1.ExecutorService/GetBuiltinTrustStatus"
 	ExecutorService_ListEvents_FullMethodName                      = "/nebula.executor.v1.ExecutorService/ListEvents"
 	ExecutorService_BackupExecutor_FullMethodName                  = "/nebula.executor.v1.ExecutorService/BackupExecutor"
@@ -437,6 +438,11 @@ type ExecutorServiceClient interface {
 	// bound to the reviewed manifest digest; every old version is explicitly
 	// retained or retired. The admin UID comes from peer credentials.
 	CommitBuiltinTrust(ctx context.Context, in *CommitBuiltinTrustRequest, opts ...grpc.CallOption) (*CommitBuiltinTrustResponse, error)
+	// Role: admin only. Clears the saved retention pin of one old built-in
+	// version (name@version) so normal retention applies again; deletes and
+	// revokes nothing. A version that is not pinned is refused. The admin UID
+	// comes from peer credentials.
+	UnpinBuiltinVersion(ctx context.Context, in *UnpinBuiltinVersionRequest, opts ...grpc.CallOption) (*UnpinBuiltinVersionResponse, error)
 	// Role: server, admin. Read-only trust status for the banner: which
 	// built-in versions are trusted and which are untrusted. No diffs, no
 	// script bytes, no scanner excerpts, no paths. Grants nothing.
@@ -1347,6 +1353,16 @@ func (c *executorServiceClient) CommitBuiltinTrust(ctx context.Context, in *Comm
 	return out, nil
 }
 
+func (c *executorServiceClient) UnpinBuiltinVersion(ctx context.Context, in *UnpinBuiltinVersionRequest, opts ...grpc.CallOption) (*UnpinBuiltinVersionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UnpinBuiltinVersionResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_UnpinBuiltinVersion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *executorServiceClient) GetBuiltinTrustStatus(ctx context.Context, in *GetBuiltinTrustStatusRequest, opts ...grpc.CallOption) (*GetBuiltinTrustStatusResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetBuiltinTrustStatusResponse)
@@ -1848,6 +1864,11 @@ type ExecutorServiceServer interface {
 	// bound to the reviewed manifest digest; every old version is explicitly
 	// retained or retired. The admin UID comes from peer credentials.
 	CommitBuiltinTrust(context.Context, *CommitBuiltinTrustRequest) (*CommitBuiltinTrustResponse, error)
+	// Role: admin only. Clears the saved retention pin of one old built-in
+	// version (name@version) so normal retention applies again; deletes and
+	// revokes nothing. A version that is not pinned is refused. The admin UID
+	// comes from peer credentials.
+	UnpinBuiltinVersion(context.Context, *UnpinBuiltinVersionRequest) (*UnpinBuiltinVersionResponse, error)
 	// Role: server, admin. Read-only trust status for the banner: which
 	// built-in versions are trusted and which are untrusted. No diffs, no
 	// script bytes, no scanner excerpts, no paths. Grants nothing.
@@ -2169,6 +2190,9 @@ func (UnimplementedExecutorServiceServer) ReviewBuiltinTrust(context.Context, *R
 }
 func (UnimplementedExecutorServiceServer) CommitBuiltinTrust(context.Context, *CommitBuiltinTrustRequest) (*CommitBuiltinTrustResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CommitBuiltinTrust not implemented")
+}
+func (UnimplementedExecutorServiceServer) UnpinBuiltinVersion(context.Context, *UnpinBuiltinVersionRequest) (*UnpinBuiltinVersionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UnpinBuiltinVersion not implemented")
 }
 func (UnimplementedExecutorServiceServer) GetBuiltinTrustStatus(context.Context, *GetBuiltinTrustStatusRequest) (*GetBuiltinTrustStatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetBuiltinTrustStatus not implemented")
@@ -3760,6 +3784,24 @@ func _ExecutorService_CommitBuiltinTrust_Handler(srv interface{}, ctx context.Co
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_UnpinBuiltinVersion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UnpinBuiltinVersionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).UnpinBuiltinVersion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_UnpinBuiltinVersion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).UnpinBuiltinVersion(ctx, req.(*UnpinBuiltinVersionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ExecutorService_GetBuiltinTrustStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetBuiltinTrustStatusRequest)
 	if err := dec(in); err != nil {
@@ -4444,6 +4486,10 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CommitBuiltinTrust",
 			Handler:    _ExecutorService_CommitBuiltinTrust_Handler,
+		},
+		{
+			MethodName: "UnpinBuiltinVersion",
+			Handler:    _ExecutorService_UnpinBuiltinVersion_Handler,
 		},
 		{
 			MethodName: "GetBuiltinTrustStatus",

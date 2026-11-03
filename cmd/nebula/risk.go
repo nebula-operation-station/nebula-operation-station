@@ -25,7 +25,7 @@ import (
 
 func artifactCmd(ctx context.Context, c pb.ExecutorServiceClient, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: nebula artifact trust|untrust|list|trust-builtins")
+		return errors.New("usage: nebula artifact trust|untrust|list|trust-builtins|unpin")
 	}
 	switch args[0] {
 	case "trust":
@@ -35,10 +35,12 @@ func artifactCmd(ctx context.Context, c pb.ExecutorServiceClient, args []string)
 	case "list":
 		return artifactList(ctx, c, os.Stdout)
 	case "trust-builtins":
-		// Executor-local (ADR 0007 E16): reads a locally verified bundle and
-		// commits it to the built-in trust store directly, as root. It does
-		// not use the gRPC client.
+		// Local admin only (ADR 0007 E16): the executor reviews its locally
+		// verified bundle and commits it to its built-in trust store. It
+		// dials its own connection with a longer timeout.
 		return artifactTrustBuiltins(args[1:])
+	case "unpin":
+		return artifactUnpin(ctx, c, args[1:])
 	default:
 		return fmt.Errorf("unknown artifact command %q", args[0])
 	}

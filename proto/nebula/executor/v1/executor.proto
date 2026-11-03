@@ -414,6 +414,12 @@ service ExecutorService {
   // retained or retired. The admin UID comes from peer credentials.
   rpc CommitBuiltinTrust(CommitBuiltinTrustRequest) returns (CommitBuiltinTrustResponse);
 
+  // Role: admin only. Clears the saved retention pin of one old built-in
+  // version (name@version) so normal retention applies again; deletes and
+  // revokes nothing. A version that is not pinned is refused. The admin UID
+  // comes from peer credentials.
+  rpc UnpinBuiltinVersion(UnpinBuiltinVersionRequest) returns (UnpinBuiltinVersionResponse);
+
   // Role: server, admin. Read-only trust status for the banner: which
   // built-in versions are trusted and which are untrusted. No diffs, no
   // script bytes, no scanner excerpts, no paths. Grants nothing.
@@ -2526,6 +2532,19 @@ message BuiltinTrustTuple {
   string new_version = 4;
   string new_sha256 = 5;
   BuiltinTrustChange change = 6;
+}
+
+message UnpinBuiltinVersionRequest {
+  // The pinned version (name@version) to unpin.
+  string version = 1;
+}
+
+message UnpinBuiltinVersionResponse {
+  string version = 1;
+  int64 generation = 2;
+  uint32 admin_uid = 3;
+  // The versions still pinned after the unpin (name@version).
+  repeated string remaining_pins = 4;
 }
 
 message CommitBuiltinTrustResponse {

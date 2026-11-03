@@ -705,13 +705,29 @@ amended to new versions.
 
 A pin is saved in the built-in trust store with the version: no later
 commit collects a pinned version, whatever its age or depth, until it is
-unpinned. Unpinning (`trust.Store.Unpin`) deletes nothing; the version
-falls back to normal retention and the next commit may collect it. There
-is no `nebula` command for unpinning yet. An old version that is not
-pinned is collected once it is no longer among the two most recent
-predecessors and its 90-day retention has passed. A trust store that
-holds a pin cannot be read by an executor older than this change (it
-refuses the unknown field as corrupt), so unpin before a downgrade.
+unpinned or retired. To unpin, run as your admin user (not with sudo;
+the executor commits it, like `trust-builtins`):
+
+```sh
+nebula artifact unpin docker@1.0.0
+```
+
+Unpinning deletes and revokes nothing; the version falls back to normal
+retention and the next commit may collect it. The command prints the new
+store generation, your admin UID and the pins that remain; the executor
+audits it as `builtin_trust_unpinned` (admin UID, version, generation,
+remaining pins). A version that is not pinned is refused and nothing
+changes; so is an unpin while an interrupted commit is pending (run
+`nebula artifact trust-builtins` first). An unpin changes the store
+generation, so a review shown before it must be repeated before you
+commit. Retiring a version (`--retire`) also clears its pin, for example
+for a pinned version that was reactivated and is superseded again. An old
+version that is not pinned is collected once it is no longer among the
+two most recent predecessors and its 90-day retention has passed. A trust
+store that holds a pin cannot be read by an executor older than this
+change (it refuses the unknown field as corrupt), so before a downgrade
+unpin every saved pin with `nebula artifact unpin MODULE@VERSION` (the
+remaining pins are listed after each unpin).
 `nebula artifact untrust` still withdraws any single trust entry later.
 
 The flow is CLI-only in both modes — there is no browser bulk-trust
@@ -1485,6 +1501,7 @@ Run as an admin user on the Nebula machine (`nebula` without a command prints th
 | `read-grant pending \| approve <digest> \| revoke <id>` | Read leases (section 9.4); hardened approval, full digest; revoke like the web lease page |
 | `artifact trust --action ID --version X.Y.Z --risk LEVEL [--label TEXT] FILE`, `artifact untrust …`, `artifact list` | Trusted scripts |
 | `artifact trust-builtins [--yes-digest DIGEST [--pin name@ver] [--retire name@ver]]` | Review the executor's configured release bundle and trust all its changed built-ins at once, exactly like `artifact trust`; retiring an old version revokes its trust (section 8.2) |
+| `artifact unpin MODULE@VERSION` | Clear a pin saved by `trust-builtins --pin`; deletes nothing, normal retention applies again (section 8.2) |
 | `signer add --name NAME FILE \| list \| remove SHA256:…`, `module confirm-signer MODULE SHA256:…` | Module signers |
 | `module pack [--archive OUT.tar.gz] DIR` | Build a module (author side; no executor needed) |
 | `backup [--out FILE] [--full] [--no-encrypt] [--pre-upgrade]`, `restore [--identity FILE] ARCHIVE` | With `sudo`; section 12 (`--full` only labels the archive, every backup is full; `--pre-upgrade` asks nothing and exits 3 when it makes no backup) |

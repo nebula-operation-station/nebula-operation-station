@@ -122,6 +122,7 @@ func MethodRoles() map[string][]peercred.Role {
 		// no server bulk trust.
 		pb.ExecutorService_ReviewBuiltinTrust_FullMethodName:    {admin},
 		pb.ExecutorService_CommitBuiltinTrust_FullMethodName:    {admin},
+		pb.ExecutorService_UnpinBuiltinVersion_FullMethodName:   {admin},
 		pb.ExecutorService_GetBuiltinTrustStatus_FullMethodName: {server, admin},
 		pb.ExecutorService_ListEvents_FullMethodName:            {server, admin},
 		pb.ExecutorService_BackupExecutor_FullMethodName:        {admin},
