@@ -26,13 +26,32 @@
   const applyTransform = () => {
     chartHosts.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
   };
-  const fit = () => { tx = 0; ty = 0; scale = 1; applyTransform(); };
+  // The canvas clips (overflow hidden), but the browser can still scroll
+  // it natively (focus, find-in-page); fit() drops that offset and
+  // unscroll() folds it into the transform so nothing jumps.
+  const fit = () => {
+    tx = 0; ty = 0; scale = 1;
+    chartSection.scrollTop = 0;
+    chartSection.scrollLeft = 0;
+    applyTransform();
+  };
+  const unscroll = () => {
+    if (!chartSection.scrollLeft && !chartSection.scrollTop) return;
+    tx -= chartSection.scrollLeft;
+    ty -= chartSection.scrollTop;
+    chartSection.scrollLeft = 0;
+    chartSection.scrollTop = 0;
+    applyTransform();
+  };
 
   // Automatic mode: pan/zoom canvas on wide screens, plain list on
-  // narrow ones (the CSS list layout below 600px stays in charge).
+  // narrow ones (the CSS list layout below 600px stays in charge). Only
+  // the pan canvas is a tab stop (arrow keys pan it); the list is not.
   const setMode = () => {
     const pan = !narrow.matches && chartHosts.children.length > 0;
     chartSection.classList.toggle('chart--pan', pan);
+    if (pan) chartSection.tabIndex = 0;
+    else chartSection.removeAttribute('tabindex');
     if (fitBtn) fitBtn.hidden = !pan;
     if (!pan) { tx = 0; ty = 0; scale = 1; chartHosts.style.transform = ''; }
   };
@@ -70,9 +89,9 @@
   chartSection.addEventListener('pointerup', endDrag);
   chartSection.addEventListener('pointercancel', endDrag);
 
-  // Keyboard pan: the canvas is a labelled, focusable region; arrow
-  // keys pan, 0 fits. Keys aimed at a control inside are left alone.
-  chartSection.tabIndex = 0;
+  // Keyboard pan: in pan mode the canvas is a labelled, focusable
+  // region; arrow keys pan, 0 fits. Keys aimed at a control inside are
+  // left alone.
   chartSection.addEventListener('keydown', (e) => {
     if (!panning() || e.target !== chartSection) return;
     const step = 48;
@@ -94,6 +113,7 @@
   const margin = 16;
   const revealFocus = (el) => {
     if (!panning() || !chartHosts.contains(el)) return;
+    unscroll();
     const view = chartSection.getBoundingClientRect();
     const r = el.getBoundingClientRect();
     let dx = 0, dy = 0;
@@ -108,26 +128,54 @@
   if (fitBtn) fitBtn.addEventListener('click', fit);
 
   // Details: on wide screens the server-rendered side panel is the
-  // target (its host is expanded, then it is scrolled into view and
+  // target (its host is expanded, then it is panned into view and
   // focused); on narrow screens a clone moves into the bottom sheet.
   // The original panel is never changed beyond opening its host.
+  // The sheet is modal: it and its backdrop move to the end of <body>,
+  // and while it is open every other part of the page is inert.
+  const backdrop = document.getElementById('chart-sheet-backdrop');
   let lastOpener = null;
   let closeBtn = null;
+  let madeInert = [];
+  const setInert = (on) => {
+    if (!on) {
+      for (const el of madeInert) el.inert = false;
+      madeInert = [];
+      return;
+    }
+    for (const el of Array.from(document.body.children)) {
+      if (el === sheet || el === backdrop || el.tagName === 'SCRIPT' || el.inert) continue;
+      el.inert = on;
+      madeInert.push(el);
+    }
+  };
+  const openSheet = (clone) => {
+    sheet.appendChild(clone);
+    sheet.hidden = false;
+    backdrop.hidden = false;
+    setInert(true);
+    closeBtn.focus({ preventScroll: true });
+  };
   const closeSheet = () => {
     if (!sheet || sheet.hidden) return;
     for (const node of Array.from(sheet.children)) {
       if (node !== closeBtn) node.remove();
     }
     sheet.hidden = true;
-    if (lastOpener && document.contains(lastOpener)) lastOpener.focus();
+    backdrop.hidden = true;
+    setInert(false);
+    if (lastOpener && document.contains(lastOpener)) lastOpener.focus({ preventScroll: true });
   };
-  if (sheet) {
+  if (sheet && backdrop) {
+    document.body.appendChild(backdrop);
+    document.body.appendChild(sheet);
     closeBtn = document.createElement('button');
     closeBtn.type = 'button';
     closeBtn.className = 'dpanel-sheet__close';
     closeBtn.textContent = 'Close';
     sheet.appendChild(closeBtn);
     closeBtn.addEventListener('click', closeSheet);
+    backdrop.addEventListener('click', closeSheet);
     document.addEventListener('keydown', (e) => {
       if (sheet.hidden) return;
       if (e.key === 'Escape') { e.preventDefault(); closeSheet(); return; }
@@ -138,37 +186,35 @@
         'a[href], button, summary, input, select, textarea, [tabindex]:not([tabindex="-1"])'
       )).filter((el) => el !== closeBtn && !el.hidden)];
       const first = stops[0], last = stops[stops.length - 1];
-      if (!sheet.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
-      else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      const to = !sheet.contains(document.activeElement) ? first
+        : e.shiftKey && document.activeElement === first ? last
+          : !e.shiftKey && document.activeElement === last ? first : null;
+      if (to) { e.preventDefault(); to.focus({ preventScroll: true }); }
     });
   }
 
+  // The Details button sits beside its host's <details>, not in the
+  // <summary>, so it is valid content and never toggles the host.
   for (const btn of chartSection.querySelectorAll('.chart__dpanel-btn')) {
     btn.hidden = false;
-    btn.addEventListener('click', (e) => {
-      // The button sits in the host's <summary>: do not toggle it.
-      e.preventDefault();
-      e.stopPropagation();
+    btn.addEventListener('click', () => {
       const id = btn.dataset.nosDpanelBtn;
       if (!id) return;
       const panel = chartSection.querySelector('.chart__dpanel[data-nos-dpanel="' + CSS.escape(id) + '"]');
       if (!panel) return;
       lastOpener = btn;
-      if (narrow.matches && sheet) {
+      if (narrow.matches && closeBtn) {
         closeSheet();
         const clone = panel.cloneNode(true);
         clone.removeAttribute('tabindex');
         clone.removeAttribute('data-nos-dpanel');
-        sheet.appendChild(clone);
-        sheet.hidden = false;
-        closeBtn.focus();
+        openSheet(clone);
         return;
       }
       const host = panel.closest('details');
       if (host && !host.open) host.open = true;
-      panel.scrollIntoView({ block: 'nearest' });
-      panel.focus();
+      // Focus without native scrolling, then pan the canvas to it.
+      panel.focus({ preventScroll: true });
       revealFocus(panel);
     });
   }
@@ -180,7 +226,9 @@
 })();
 
 (() => {
-  const w = nebulaWebAuthn;
+  // webauthn.js is loaded only on pages with the add-host dialog (not on
+  // the chart page); the dialog code below stops early without it.
+  const w = typeof nebulaWebAuthn === 'undefined' ? null : nebulaWebAuthn;
 
   // Client-side text filter: the row's search text (id, name, endpoint,
   // OS) is built server side and lowercased there.
@@ -543,7 +591,7 @@
 
   const dialog = document.getElementById('add-host-dialog');
   const form = document.getElementById('host-form');
-  if (!dialog || !form) return; // read-only page: no inventory store configured
+  if (!dialog || !form || !w) return; // read-only page: no inventory store configured
 
   const idInput = document.getElementById('host-id');
   const nameInput = document.getElementById('host-display-name');
