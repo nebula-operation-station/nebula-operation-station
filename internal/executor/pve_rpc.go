@@ -32,21 +32,37 @@ var pveRepinArtifact = []byte("nebula.pve.repin 1.0.0\nReplace the approved remo
 // mutation run and every PveAdmin must use this instance: its in-flight
 // set is what keeps Reconcile and PveAdmin.CloseOpenJobs off the steps of
 // a running execution. It is built on first use, from the service state at
-// that time. Client is not wired yet; until it is, Run and Reconcile
-// refuse to work, the guest power RPCs answer FailedPrecondition ("PVE
-// mutation client not configured"), and CloseOpenJobs sees no run in
-// flight.
+// that time. Its Client is the production pveMutationClient over the
+// remote's pinned trust (pveReadTrust) and approved endpoints: writes
+// carry only the action token, reads only the read token, and a write is
+// never failed over or resent once it may have reached an endpoint.
+// TaskIDs stays unset: provisioning (PveProvisioner) is not wired here
+// (pv05w), so provisioning steps are never identified by this engine.
 func (s *Service) pveMutations() *PveMutations {
 	s.pveMutOnce.Do(func() {
-		// TODO(pv05w): wire the production PveMutationClient here
-		// (provisioning and guest power). For power steps its Dispatch
-		// must route the guest.qemu.* / guest.lxc.* methods to
-		// DispatchGuestPowerStep, TaskType to GuestPowerStepTaskType,
-		// TaskID (PveStepTaskIDer) to GuestPowerStepTaskID, and
-		// TargetState must report Kind, Status and, for QEMU, QMPStatus.
-		s.pveMut = &PveMutations{DB: s.db, Auth: s.auth, Vault: s.vault, Now: s.clock, Log: s.log}
+		client := &pveMutationClient{trust: s.pveReadTrust, secrets: s.vault, now: s.clock}
+		s.pveMut = &PveMutations{DB: s.db, Auth: s.auth, Vault: s.vault, Client: client, Now: s.clock, Log: s.log}
 	})
 	return s.pveMut
+}
+
+// ReconcilePVEMutations observes open PVE mutation steps until ctx ends:
+// once per interval while the vault is unlocked, also those left open by
+// an earlier process. It only reads (task status and task list with the
+// read token); nothing is ever dispatched.
+func (s *Service) ReconcilePVEMutations(ctx context.Context, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		if err := s.pveMutations().Reconcile(ctx); err != nil && !errors.Is(err, vault.ErrLocked) && ctx.Err() == nil {
+			s.log.Error("audit", "kind", "pve_reconcile_failed")
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
 }
 
 func (s *Service) pveAdmin() *PveAdmin {
@@ -348,7 +364,7 @@ func (s *Service) ProposePVEGuestPower(ctx context.Context, in *pb.ProposePVEGue
 		return nil, status.Error(codes.FailedPrecondition, "pve guest power: pve mutations are not available")
 	}
 	if g.Mutations.Client == nil {
-		// TODO(pv05w): goes away when pveMutations wires the client.
+		// Defensive: pveMutations always wires the production client.
 		return nil, status.Error(codes.FailedPrecondition, "pve guest power: PVE mutation client not configured")
 	}
 	id, err := newExecutionID()
@@ -388,7 +404,7 @@ func (s *Service) CommitPVEGuestPower(ctx context.Context, in *pb.CommitPVEGuest
 		return nil, status.Error(codes.FailedPrecondition, "pve guest power: pve mutations are not available")
 	}
 	if g.Mutations.Client == nil {
-		// TODO(pv05w): goes away when pveMutations wires the client.
+		// Defensive: pveMutations always wires the production client.
 		return nil, status.Error(codes.FailedPrecondition, "pve guest power: PVE mutation client not configured")
 	}
 	res, err := g.Run(ctx, req)
