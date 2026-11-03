@@ -51,9 +51,10 @@ type Options struct {
 	// Leases returns the current telemetry leases (P1-26). Nil means no
 	// box is ever resolved.
 	Leases func(ctx context.Context) ([]pvecollect.TelemetryLease, error)
-	// Tree returns the org-chart tree; it binds a guest box to the
-	// incarnation generation (and managed-host link) the chart shows.
-	// Nil means guest boxes are not resolved.
+	// Tree returns the org-chart tree; it binds a node box to its remote
+	// and a guest box to the incarnation generation (and managed-host
+	// link) the chart shows. Nil means node and guest boxes are not
+	// resolved (host boxes still are).
 	Tree func(ctx context.Context) (pveinventory.Tree, error)
 }
 
@@ -220,8 +221,8 @@ func (h *Handler) Targets(w http.ResponseWriter, r *http.Request) {
 }
 
 // resolve maps the refs to the exact leased targets. A ref matches every
-// on-demand lease target with the same identity (a node name can exist on
-// several remotes; a guest is bound to its tree generation; a host
+// on-demand lease target with the same identity (a node is bound to its
+// remote in the tree; a guest to its remote and tree generation; a host
 // matches each of its telemetry actions). Nothing is added that a lease
 // does not list — the live endpoints widen no scope — and the scheduler
 // re-checks every target on Request.
@@ -310,8 +311,14 @@ func (ref boxRef) boxID() (string, bool) {
 func (ref boxRef) matches(t pvecollect.TelemetryTarget, tree pveinventory.Tree) bool {
 	switch ref.Kind {
 	case "node":
+		remote, ok := treeNodeRemote(tree, ref.Name)
+		if !ok {
+			// Not in the chart, or the name is ambiguous across
+			// remotes: not resolved.
+			return false
+		}
 		return t.Source == pvecollect.TelemetryProvider &&
-			t.Kind == pvecollect.TelemetryKindNode && t.Node == ref.Name
+			t.Kind == pvecollect.TelemetryKindNode && t.Node == ref.Name && t.RemoteID == remote
 	case "guest":
 		g, ok := treeGuest(tree, ref.Node, *ref.VMID)
 		if !ok {
@@ -333,17 +340,34 @@ func (ref boxRef) matches(t pvecollect.TelemetryTarget, tree pveinventory.Tree) 
 	return false
 }
 
-// treeGuest returns the guest box of the tree under node with vmid.
+// treeNodeRemote returns the remote of the single PVE node box named
+// node. A name shown under several remotes is ambiguous (the page cannot
+// tell the boxes apart) and resolves to nothing.
+func treeNodeRemote(tree pveinventory.Tree, node string) (string, bool) {
+	remote, n := "", 0
+	for _, root := range tree.Roots {
+		if root.Kind == pveinventory.KindPVENode && root.Name == node {
+			remote = root.RemoteID
+			n++
+		}
+	}
+	return remote, n == 1 && remote != ""
+}
+
+// treeGuest returns the guest box with vmid under the single PVE node
+// box named node; its RemoteID is the node's remote.
 func treeGuest(tree pveinventory.Tree, node string, vmid uint64) (pveinventory.Box, bool) {
+	remote, ok := treeNodeRemote(tree, node)
+	if !ok {
+		return pveinventory.Box{}, false
+	}
 	for _, root := range tree.Roots {
 		if root.Kind != pveinventory.KindPVENode || root.Name != node {
 			continue
 		}
 		for _, g := range root.Children {
 			if g.Kind == pveinventory.KindGuest && g.VMID == vmid {
-				if g.RemoteID == "" {
-					g.RemoteID = root.RemoteID
-				}
+				g.RemoteID = remote
 				return g, true
 			}
 		}
