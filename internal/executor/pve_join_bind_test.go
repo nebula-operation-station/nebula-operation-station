@@ -230,6 +230,95 @@ func TestGuestJoinSwapDuringAgentReadFallsBack(t *testing.T) {
 	}
 }
 
+// replaceProviderGrant revokes the env's grants and approves a new one.
+func (e *joinEnv) replaceProviderGrant(budget int64, methods ...string) {
+	e.t.Helper()
+	grants, err := e.svc.auth.ReadGrants()
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	for _, g := range grants {
+		if err := e.svc.auth.RevokeReadGrant(g.ID, "test"); err != nil {
+			e.t.Fatal(err)
+		}
+	}
+	e.approveProviderGrant("00000000-0000-4000-8000-0000000000f7", budget, methods...)
+}
+
+// scheduledRead reserves one scheduled (non-join) provider read of method.
+func (e *joinEnv) scheduledRead(method string) error {
+	e.t.Helper()
+	rm, _, err := e.mut.pe.db.GetRemote(mutRemote)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	_, err = e.svc.auth.AuthorizeProviderRead(permit.ProviderRead{RemoteID: rm.RemoteID, Method: method,
+		TrustPin: rm.TrustPin, TrustGeneration: rm.TrustGeneration, CredentialVersion: rm.Credentials.ReadVersion})
+	return err
+}
+
+// Each read-token guest-list request of the join (before and after the
+// agent read) spends its own unit of the remote's provider budget.
+func TestGuestJoinSpendsOneReadUnitPerGuestListRequest(t *testing.T) {
+	e := newJoinEnv(t, true)
+	e.replaceProviderGrant(3, permit.ProviderMethodGuests, permit.ProviderMethodNodes)
+	p, err := e.join.Propose(context.Background(), e.request())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Method != PveJoinMethodAgent || len(e.agent.nameCalls) != 2 {
+		t.Fatalf("proposal %+v after %d guest-list reads, want agent-verified after 2", p, len(e.agent.nameCalls))
+	}
+	// Two of three units are spent: one more read fits, a second does not.
+	if err := e.scheduledRead(permit.ProviderMethodNodes); err != nil {
+		t.Fatalf("third unit: %v", err)
+	}
+	if err := e.scheduledRead(permit.ProviderMethodGuests); permit.CodeOf(err) != permit.CodeLeaseBudget {
+		t.Fatalf("read past the budget: %v, want %s", err, permit.CodeLeaseBudget)
+	}
+}
+
+// A budget without room for both guest-list requests stops before the
+// agent is read.
+func TestGuestJoinWithoutBudgetForBothReadsFallsBack(t *testing.T) {
+	e := newJoinEnv(t, true)
+	e.replaceProviderGrant(1, permit.ProviderMethodGuests)
+	p, err := e.join.Propose(context.Background(), e.request())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Method != PveJoinMethodReview || p.AgentDetail != pveJoinReadBudget {
+		t.Fatalf("proposal = %+v, want review for %q", p, pveJoinReadBudget)
+	}
+	if len(e.agent.calls) != 0 || len(e.agent.nameCalls) != 1 {
+		t.Fatalf("reads %d/%d: only the first, paid request may be sent", len(e.agent.calls), len(e.agent.nameCalls))
+	}
+}
+
+// A join and the scheduled inventory's guest-list read have separate
+// intervals: neither blocks the other.
+func TestGuestJoinDoesNotShareTheScheduledGuestsInterval(t *testing.T) {
+	e := newJoinEnv(t, true)
+	if err := e.scheduledRead(permit.ProviderMethodGuests); err != nil {
+		t.Fatal(err)
+	}
+	p, err := e.join.Propose(context.Background(), e.request())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Method != PveJoinMethodAgent {
+		t.Fatalf("join right after a scheduled guest read: %+v, want agent-verified", p)
+	}
+
+	e = newJoinEnv(t, true)
+	if p, err := e.join.Propose(context.Background(), e.request()); err != nil || p.Method != PveJoinMethodAgent {
+		t.Fatalf("join = %+v, %v", p, err)
+	}
+	if err := e.scheduledRead(permit.ProviderMethodGuests); err != nil {
+		t.Fatalf("scheduled guest read right after a join: %v", err)
+	}
+}
+
 // guardDetails are the fixed reasons a guard must report itself (another
 // guard could otherwise mask a missing one).
 var guardDetails = map[string]string{

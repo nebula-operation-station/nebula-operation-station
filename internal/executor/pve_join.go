@@ -315,6 +315,7 @@ var pveGuestUUIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0
 const (
 	pveJoinNoReader     = "no guest agent reader configured"
 	pveJoinNoCredential = "no scoped guest-agent credential configured for the remote (the read token has no guest file access: ADR 0006, spec 06)"
+	pveJoinReadBudget   = "the read grant's interval or request budget leaves no room for the guest list reads"
 )
 
 // agentKey tries the bounded agent read. It returns the key, or nil and a
@@ -325,8 +326,9 @@ const (
 // read token. The agent read needs a separately configured, scoped
 // guest-agent credential (PveGuestJoin.AgentCredentials); without one the
 // join always falls back to fingerprint review. The read token is used
-// only for the guest list (incarnation identity) under a read grant
-// covering "guests".
+// only for the two guest-list requests (incarnation identity before and
+// after the agent read), each paid with its own unit of a read grant
+// covering "guests" (reserveGuestRead).
 func (j *PveGuestJoin) agentKey(ctx context.Context, req PveGuestJoinRequest) (ssh.PublicKey, string) {
 	if j.Agent == nil || j.Mutations == nil || j.Mutations.DB == nil || j.Mutations.Vault == nil {
 		return nil, pveJoinNoReader
@@ -361,20 +363,24 @@ func (j *PveGuestJoin) agentKey(ctx context.Context, req PveGuestJoinRequest) (s
 	if err != nil {
 		return nil, "remote read token unavailable"
 	}
-	// The identity reads use the read token, so they need a read grant
-	// like every other read-token request (ReadPVE).
-	claim, err := s.auth.AuthorizeProviderRead(permit.ProviderRead{RemoteID: rm.RemoteID, Method: permit.ProviderMethodGuests,
-		TrustPin: rm.TrustPin, TrustGeneration: rm.TrustGeneration, CredentialVersion: rm.Credentials.ReadVersion})
-	if err != nil {
-		return nil, "no read grant covers the guest list"
-	}
 	actx, cancel := context.WithTimeout(ctx, pveAgentReadTimeout)
 	defer cancel()
 	// The VMID must hold the provisioned incarnation (name and UUID, the
 	// identity the inventory derives its generations from) before and
 	// after the read, so neither a reused VMID nor a swap between the
-	// calls is read as the provisioned guest.
+	// calls is read as the provisioned guest. Each of the two guest-list
+	// requests uses the read token and so reserves its own unit of a read
+	// grant, like every other read-token request (ReadPVE); both are paid
+	// before the agent is read.
+	before, reason := j.reserveGuestRead(rm, req, permit.ProviderJoinStepBefore)
+	if reason != "" {
+		return nil, reason
+	}
 	if reason := j.sameGuest(actx, rm, req, read, "before"); reason != "" {
+		return nil, reason
+	}
+	after, reason := j.reserveGuestRead(rm, req, permit.ProviderJoinStepAfter)
+	if reason != "" {
 		return nil, reason
 	}
 	raw, err := j.Agent.AgentFileRead(actx, rm, req.Node, req.VMID, pveJoinHostKeyPath, maxPveAgentHostKeyBytes, agentTok)
@@ -384,8 +390,10 @@ func (j *PveGuestJoin) agentKey(ctx context.Context, req PveGuestJoinRequest) (s
 	if reason := j.sameGuest(actx, rm, req, read, "after"); reason != "" {
 		return nil, reason
 	}
-	if err := claim.Check(); err != nil {
-		return nil, "the read grant was revoked during the read"
+	for _, claim := range []permit.ProviderClaim{before, after} {
+		if err := claim.Check(); err != nil {
+			return nil, "the read grant was revoked during the read"
+		}
 	}
 	k, err := ParseAgentHostKey(raw)
 	if err != nil {
@@ -394,6 +402,25 @@ func (j *PveGuestJoin) agentKey(ctx context.Context, req PveGuestJoinRequest) (s
 		return nil, "guest agent returned no valid ed25519 host key"
 	}
 	return k, ""
+}
+
+// reserveGuestRead reserves one unit of a read grant covering the guest
+// list for one join request (step). Join reads have their own per-step,
+// per-guest interval (permit.ProviderRead.JoinStep), so they neither delay
+// nor are delayed by the scheduled inventory's guest-list read, and each
+// spends the remote's request budget. It returns a fixed reason on denial.
+func (j *PveGuestJoin) reserveGuestRead(rm executordb.PveRemote, req PveGuestJoinRequest, step string) (permit.ProviderClaim, string) {
+	claim, err := j.Service.auth.AuthorizeProviderRead(permit.ProviderRead{RemoteID: rm.RemoteID, Method: permit.ProviderMethodGuests,
+		VMID: req.VMID, JoinStep: step, TrustPin: rm.TrustPin, TrustGeneration: rm.TrustGeneration,
+		CredentialVersion: rm.Credentials.ReadVersion})
+	switch {
+	case err == nil:
+		return claim, ""
+	case permit.CodeOf(err) == permit.CodeLeaseBudget:
+		return permit.ProviderClaim{}, pveJoinReadBudget
+	default:
+		return permit.ProviderClaim{}, "no read grant covers the guest list"
+	}
 }
 
 // sameGuest checks the live incarnation at (node, VMID) against the
