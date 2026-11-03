@@ -4,11 +4,16 @@ package live
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -147,5 +152,148 @@ func TestLogoutThroughLoginWrapEndsStream(t *testing.T) {
 			t.Fatal("slot not freed after logout")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// storeClock is the session store's clock in the login tests.
+type storeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *storeClock) now() time.Time      { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
+func (c *storeClock) add(d time.Duration) { c.mu.Lock(); c.t = c.t.Add(d); c.mu.Unlock() }
+
+// revocableExec answers CheckCredential from a flag the test flips.
+type revocableExec struct {
+	auth.Executor
+	removed atomic.Bool
+}
+
+func (e *revocableExec) CheckCredential(context.Context, *pb.CheckCredentialRequest, ...grpc.CallOption) (*pb.CheckCredentialResponse, error) {
+	return &pb.CheckCredentialResponse{Registered: !e.removed.Load()}, nil
+}
+
+// newClockedLogin is newLogin with a test clock on the store and a
+// revocable credential; it returns one session.
+func newClockedLogin(t *testing.T) (*auth.Store, *auth.Handler, *storeClock, *revocableExec, string, auth.Session) {
+	t.Helper()
+	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	clk := &storeClock{t: time.Now()}
+	exec := &revocableExec{}
+	store := auth.NewStore(db, clk.now)
+	login, err := auth.New(auth.Options{Executor: exec, Sessions: store, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, sess, err := store.Create(context.Background(), "cred-a", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store, login, clk, exec, tok, sess
+}
+
+// The 10 s target renewal goes through login.Wrap like any request but
+// must not move last_seen: an unattended chart tab still reaches the
+// idle timeout, and its renewals then get 401.
+func TestTargetRenewalThroughLoginWrapDoesNotTouchSession(t *testing.T) {
+	store, login, clk, _, tok, sess := newClockedLogin(t)
+	h, _, _ := newRecHub(t)
+	hd, err := New(Options{Hub: h, Recheck: PeekSession(login.PeekRegistered)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	hd.Register(mux)
+	srv := login.Wrap(mux)
+	viewer := mustViewer(t)
+	key := sess.CredentialID + "\x00" + strconv.FormatInt(sess.CreatedAt.UnixNano(), 10)
+	if _, err := h.Add(viewer, key); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"viewer":%q,"boxes":[]}`, viewer)
+	renew := func() int {
+		r := httptest.NewRequest(http.MethodPost, TargetsPath, strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, withCookie(r, tok))
+		return rec.Code
+	}
+	const step = 10 * time.Minute // past the store's touch interval
+	for elapsed := step; elapsed < auth.IdleTimeout; elapsed += step {
+		clk.add(step)
+		if code := renew(); code != http.StatusOK {
+			t.Fatalf("renewal after %v: %d, want 200", elapsed, code)
+		}
+		got, err := store.Peek(context.Background(), tok)
+		if err != nil {
+			t.Fatalf("session gone after %v: %v", elapsed, err)
+		}
+		if !got.LastSeenAt.Equal(sess.LastSeenAt) {
+			t.Fatalf("renewal after %v moved last_seen to %v (was %v)", elapsed, got.LastSeenAt, sess.LastSeenAt)
+		}
+	}
+	clk.add(step)
+	if code := renew(); code != http.StatusUnauthorized {
+		t.Fatalf("renewal past the idle timeout: %d, want 401", code)
+	}
+}
+
+// End to end through login.Wrap and the production re-check: removing
+// the session's credential on the executor ends the open stream (no POST
+// needed) and frees its slot.
+func TestRevokedCredentialEndsOpenStream(t *testing.T) {
+	store, login, clk, exec, tok, _ := newClockedLogin(t)
+	h, _, _ := newRecHub(t)
+	hd, err := New(Options{Hub: h, Recheck: PeekSession(login.PeekRegistered)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hd.recheckEvery = 50 * time.Millisecond
+	mux := http.NewServeMux()
+	hd.Register(mux)
+	srv := httptest.NewServer(login.Wrap(mux))
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+EventsPath, nil)
+	req.AddCookie(&http.Cookie{Name: auth.CookieName, Value: tok})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("events = %d", resp.StatusCode)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := viewerCount(h); n != 1 {
+		t.Fatalf("viewers = %d while registered, want 1", n)
+	}
+	exec.removed.Store(true)
+	clk.add(auth.CredentialCheckInterval + time.Second) // past the cached check
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream still open 5 s after the credential was removed")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for viewerCount(h) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("slot not freed after revocation")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := store.Peek(context.Background(), tok); err == nil {
+		t.Fatal("session of the removed credential still stored")
 	}
 }

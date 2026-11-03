@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 )
 
@@ -87,6 +88,45 @@ func (s *Store) Lookup(ctx context.Context, token string) (Session, error) {
 // alive. It serves passive status requests (see PassiveHeader).
 func (s *Store) Peek(ctx context.Context, token string) (Session, error) {
 	return s.lookup(ctx, token, false)
+}
+
+// LiveTargetsPath is the live chart's visible-box endpoint. An open chart
+// tab POSTs to it every 10 s on its own (lease renewal), so that POST is
+// background traffic, not user activity.
+const LiveTargetsPath = "/chart/live/targets"
+
+// recordsActivity reports whether an authenticated request moves the
+// session's last_seen. Marked passive status polls (PassiveHeader) and the
+// live target renewal do not: an unattended open tab cannot keep a web
+// session alive past IdleTimeout. Such requests are authenticated with
+// Peek, which validates exactly like Lookup; they gain nothing.
+func recordsActivity(r *http.Request) bool {
+	if r.Method == http.MethodPost && r.URL.Path == LiveTargetsPath {
+		return false
+	}
+	return !passiveRequest(r)
+}
+
+// PeekRegistered is Peek plus the credential check the login wrapper runs
+// on every request: once the executor reports the session's credential
+// removed, the session is deleted and ErrNoSession returned. It never
+// records activity. It re-validates long-lived requests that do not pass
+// the wrapper again (the live chart's SSE stream); the executor is asked
+// at most once per CredentialCheckInterval per session.
+func (h *Handler) PeekRegistered(ctx context.Context, token string) (Session, error) {
+	sess, err := h.sessions.Peek(ctx, token)
+	if err != nil {
+		return Session{}, err
+	}
+	if !h.credentialStillRegistered(ctx, token, sess) {
+		if err := h.sessions.Delete(ctx, token); err != nil {
+			h.log.Error("delete revoked session", "error", err)
+		}
+		h.log.Info("audit", "kind", "web_session_revoked", "user", sess.UserName, "credential", sess.CredentialID,
+			"reason", "credential no longer registered")
+		return Session{}, ErrNoSession
+	}
+	return sess, nil
 }
 
 func (s *Store) lookup(ctx context.Context, token string, touch bool) (Session, error) {
