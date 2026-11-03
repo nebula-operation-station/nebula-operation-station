@@ -3,10 +3,14 @@
 package ui_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -14,6 +18,9 @@ import (
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/middleware"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
 
@@ -463,5 +470,125 @@ func TestLeaseProposalRoutesNeedLeases(t *testing.T) {
 	}
 	if code, _ := postLeaseForm(t, h, "/leases/preview", leaseForm); code != http.StatusNotFound {
 		t.Errorf("POST /leases/preview without leases = %d", code)
+	}
+}
+
+// leaseOwnerEnv serves the lease pages behind the real login middleware
+// chain (middleware + auth.Wrap) with one web session per user, so a test
+// can act as two different users.
+type leaseOwnerEnv struct {
+	srv      *httptest.Server
+	sessions *auth.Store
+}
+
+func newLeaseOwnerEnv(t *testing.T, f *fakeLeases) *leaseOwnerEnv {
+	t.Helper()
+	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatalf("open server DB: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	u := newTestHandler(t, ui.Options{PublicOrigin: leaseOrigin, Leases: f})
+	sessions := auth.NewStore(db, time.Now)
+	a, err := auth.New(auth.Options{
+		Executor: pveFakeExec{}, Sessions: sessions,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("auth.New: %v", err)
+	}
+	ts := httptest.NewServer(middleware.Handler(middleware.Options{PublicOrigin: leaseOrigin}, a.Wrap(u.Handler())))
+	t.Cleanup(ts.Close)
+	return &leaseOwnerEnv{srv: ts, sessions: sessions}
+}
+
+// login opens a web session for user and returns its cookie.
+func (e *leaseOwnerEnv) login(t *testing.T, user string) *http.Cookie {
+	t.Helper()
+	token, _, err := e.sessions.Create(context.Background(), "cred-"+user, user)
+	if err != nil {
+		t.Fatalf("create session for %s: %v", user, err)
+	}
+	return &http.Cookie{Name: auth.CookieName, Value: token}
+}
+
+// do sends one request with the session cookie and returns the status,
+// body and headers without following redirects.
+func (e *leaseOwnerEnv) do(t *testing.T, c *http.Cookie, method, path, contentType, body string) (int, string, http.Header) {
+	t.Helper()
+	req, err := http.NewRequest(method, e.srv.URL+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.AddCookie(c)
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	req.Header.Set("Origin", leaseOrigin)
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	res, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	b, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res.StatusCode, string(b), res.Header
+}
+
+// TestLeaseProposalVisibleOnlyToProposer checks that a previewed proposal
+// page is reachable only by the user who proposed it: a second user gets
+// 404 for the same digest.
+func TestLeaseProposalVisibleOnlyToProposer(t *testing.T) {
+	f := &fakeLeases{preview: leasePreview(1)}
+	e := newLeaseOwnerEnv(t, f)
+	alice := e.login(t, "alice")
+	bob := e.login(t, "bob")
+
+	code, _, hdr := e.do(t, alice, http.MethodPost, "/leases/preview", "application/x-www-form-urlencoded", leaseForm)
+	if code != http.StatusSeeOther {
+		t.Fatalf("alice preview = %d, want 303", code)
+	}
+	loc := hdr.Get("Location")
+	if loc != "/leases/proposals/"+leaseDigest {
+		t.Fatalf("redirect to %q", loc)
+	}
+
+	code, body, _ := e.do(t, alice, http.MethodGet, loc, "", "")
+	if code != http.StatusOK || !strings.Contains(body, leaseDigest) {
+		t.Fatalf("proposer page = %d, misses the digest", code)
+	}
+	if code, _, _ := e.do(t, bob, http.MethodGet, loc, "", ""); code != http.StatusNotFound {
+		t.Fatalf("second user sees the proposal page: %d, want 404", code)
+	}
+}
+
+// TestLeaseCommitOnlyByProposer checks that a second user cannot commit
+// another user's proposal (404, the executor never sees it) while the
+// proposer can.
+func TestLeaseCommitOnlyByProposer(t *testing.T) {
+	f := &fakeLeases{preview: leasePreview(1)}
+	e := newLeaseOwnerEnv(t, f)
+	alice := e.login(t, "alice")
+	bob := e.login(t, "bob")
+
+	if code, _, _ := e.do(t, alice, http.MethodPost, "/leases/preview", "application/x-www-form-urlencoded", leaseForm); code != http.StatusSeeOther {
+		t.Fatalf("alice preview = %d, want 303", code)
+	}
+
+	commit := `{"id":"` + leaseDigest + `","assertion":{"id":"cred"}}`
+	if code, body, _ := e.do(t, bob, http.MethodPost, "/leases/commit", "application/json", commit); code != http.StatusNotFound {
+		t.Fatalf("second user commits another user's proposal: %d %s, want 404", code, body)
+	}
+	if len(f.committed) != 0 {
+		t.Fatalf("the second user's commit reached the executor: %v", f.committed)
+	}
+	if code, body, _ := e.do(t, alice, http.MethodPost, "/leases/commit", "application/json", commit); code != http.StatusOK {
+		t.Fatalf("proposer commit = %d %s, want 200", code, body)
+	}
+	if len(f.committed) != 1 {
+		t.Fatalf("committed %v", f.committed)
 	}
 }
