@@ -386,6 +386,9 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("/dashboard", h.handleDashboard)
 	mux.HandleFunc("/inventory", h.handleInventory)
 	mux.HandleFunc("GET /inventory/chart", h.handleInventoryChart)
+	// Staged OS update (ADR 0006, P2-02 part 2): the no-JavaScript
+	// checkbox form on the chart page posts the frozen host list here.
+	mux.HandleFunc("POST /inventory/chart/staged", h.handleChartStaged)
 	mux.HandleFunc("/inventory/new", h.handleInventoryNew)
 	// Host changes are JSON POSTs only (decision 36: never plain form
 	// posts). Without Options.Inventory they answer 404.
