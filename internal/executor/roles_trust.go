@@ -67,7 +67,9 @@ const maxErrorTuples = 16
 // selects ErrBuiltinArtifactTrust (the store committed at Generation; none
 // of Untrusted is recorded) or ErrBuiltinTrustStoreCommit (the store is
 // unchanged at Generation; Revoked were revoked and, if Restored, put
-// back). Anything not yet repaired is repaired from the executor's pending
+// back; with StoreStateErr the store's outcome is unknown and Revoked stay
+// revoked). Committed is judged from the store's on-disk generation after
+// the attempt. Anything not yet repaired is repaired from the executor's pending
 // record by the next `nebula artifact trust-builtins` review.
 type BuiltinTrustCommitError struct {
 	// Committed reports whether the store commit succeeded.
@@ -84,6 +86,10 @@ type BuiltinTrustCommitError struct {
 	RestoreErr error
 	// Untrusted are the new entries not recorded (store committed).
 	Untrusted []trust.ArtifactTuple
+	// StoreStateErr is why the store's on-disk generation could not be
+	// re-read after the failed store commit: whether it committed is
+	// unknown, so Revoked stay revoked until the next review decides.
+	StoreStateErr error
 	// Err is the cause.
 	Err error
 }
@@ -99,6 +105,13 @@ func (e *BuiltinTrustCommitError) Error() string {
 			"(audit kind builtin_trust_pending_recovered), then shows the review. Not recorded:",
 			ErrBuiltinArtifactTrust, e.Generation, e.Err, e.Retired, len(e.Revoked), len(e.Untrusted))
 		writeTuples(&b, e.Untrusted)
+	case e.StoreStateErr != nil:
+		fmt.Fprintf(&b, "%v (store generation %d before the commit): %v. State: the store's on-disk state could not be re-read (%v), "+
+			"so whether it committed is unknown; %d entries of the retired versions %v stay revoked (fail closed) and no new entry is recorded. "+
+			"Repair: run `nebula artifact trust-builtins` again; the executor first resolves its pending record against the store "+
+			"(audit kind builtin_trust_pending_recovered). Revoked:",
+			ErrBuiltinTrustStoreCommit, e.Generation, e.Err, e.StoreStateErr, len(e.Revoked), e.Retired)
+		writeTuples(&b, e.Revoked)
 	case e.Restored:
 		fmt.Fprintf(&b, "%v (store generation %d): %v. State: nothing changed; the %d revoked entries of %v were restored. "+
 			"Repair: none needed; review and commit again.", ErrBuiltinTrustStoreCommit, e.Generation, e.Err, len(e.Revoked), e.Retired)
@@ -158,7 +171,8 @@ type BuiltinTrust interface {
 	// Review returns the dry-run review and scanner findings of the local
 	// release bundle against the trust store for the local admin. It
 	// commits nothing to the store; it first resolves the pending artifact
-	// trust of an interrupted commit (reported in Recovered). The review
+	// trust of an interrupted commit (reported in Recovered, also together
+	// with an error when the review fails after the recovery). The review
 	// only becomes committable once ConfirmReview reports it delivered.
 	Review(ctx context.Context) (trust.BulkAdmitResult, error)
 	// ConfirmReview is called after the last Review was delivered to the
@@ -206,6 +220,9 @@ type dirBuiltinTrust struct {
 	// commitStore is the committing BulkAdmit; nil means st.BulkAdmit.
 	// Tests replace it to fail the store commit.
 	commitStore func(*trust.Store, release.Candidate, trust.BulkAdmitOpts) (trust.BulkAdmitResult, error)
+	// reviewStore is Review's dry-run BulkAdmit; nil means st.BulkAdmit.
+	// Tests replace it to fail the dry run.
+	reviewStore func(*trust.Store, release.Candidate, trust.BulkAdmitOpts) (trust.BulkAdmitResult, error)
 }
 
 // builtinReviewBinding is what an admin Review saw.
@@ -296,13 +313,19 @@ func (d *dirBuiltinTrust) Review(_ context.Context) (trust.BulkAdmitResult, erro
 	}
 	// Complete or undo an interrupted commit first, so the review and the
 	// risk policy see consistent trust.
+	// A recovery that changed the artifact trust is returned in Recovered
+	// also when the review fails afterwards, so it is always audited.
 	rec, err := d.recoverPending(st)
 	if err != nil {
-		return trust.BulkAdmitResult{}, err
+		return trust.BulkAdmitResult{Recovered: rec}, err
 	}
-	res, err := st.BulkAdmit(c, trust.BulkAdmitOpts{})
+	dryRun := d.reviewStore
+	if dryRun == nil {
+		dryRun = (*trust.Store).BulkAdmit
+	}
+	res, err := dryRun(st, c, trust.BulkAdmitOpts{})
 	if err != nil {
-		return trust.BulkAdmitResult{}, err
+		return trust.BulkAdmitResult{Recovered: rec}, err
 	}
 	res.Recovered = rec
 	d.pending = &builtinReviewBinding{digest: res.ManifestDigest, generation: res.Review.Generation}
@@ -480,15 +503,38 @@ func (d *dirBuiltinTrust) Commit(_ context.Context, digest string, pins map[stri
 	if commitStore == nil {
 		commitStore = (*trust.Store).BulkAdmit
 	}
+	base := st.Generation()
 	res, err := commitStore(st, c, trust.BulkAdmitOpts{ConfirmedDigest: digest, Pins: pins, Retired: retired, AdminUID: adminUID})
 	d.status = nil
 	if err != nil {
+		// The store may have failed after index.json was renamed into
+		// place (a failed directory fsync), so judge the outcome from the
+		// on-disk generation, not from st, which keeps the base. ErrStale
+		// is rejected before anything is written.
+		disk, derr := base, error(nil)
+		if !errors.Is(err, trust.ErrStale) {
+			disk, derr = d.diskGeneration()
+		}
+		switch {
+		case derr != nil:
+			// Unknown: restore nothing (fail closed) and keep the pending
+			// record; the next review decides from the store.
+			return trust.BulkAdmitResult{}, 0, &BuiltinTrustCommitError{Generation: base, Retired: retired,
+				Revoked: tuples(revoked), StoreStateErr: derr, Err: err}
+		case disk != base:
+			// Committed on disk: the retirement stands; the new entries are
+			// recorded by the next review from the kept pending record,
+			// which also restores the revoked entries should the rename not
+			// have survived.
+			return trust.BulkAdmitResult{}, 0, &BuiltinTrustCommitError{Committed: true, Generation: disk, Retired: retired,
+				Revoked: tuples(revoked), Untrusted: tuples(change.Trust), Err: err}
+		}
 		if len(revoked) == 0 {
 			_ = trust.RemovePending(d.storeDir)
 			return trust.BulkAdmitResult{}, 0, err
 		}
 		// Undo the revocation: the store still lists the old versions.
-		e := &BuiltinTrustCommitError{Generation: st.Generation(), Retired: retired, Revoked: tuples(revoked), Err: err}
+		e := &BuiltinTrustCommitError{Generation: base, Retired: retired, Revoked: tuples(revoked), Err: err}
 		if _, rerr := d.artifacts.ApplyBuiltinTrust(executordb.BuiltinTrustChange{Trust: revoked}); rerr != nil {
 			e.RestoreErr = rerr // the pending record restores them at the next review
 		} else {
@@ -513,6 +559,15 @@ func (d *dirBuiltinTrust) Commit(_ context.Context, digest string, pins map[stri
 	res.ArtifactsRevoked = append(res.ArtifactsRevoked, tuples(revoked)...)
 	res.ArtifactsRevoked = append(res.ArtifactsRevoked, tuples(again)...)
 	return res, st.Generation(), nil
+}
+
+// diskGeneration re-reads the store generation from index.json.
+func (d *dirBuiltinTrust) diskGeneration() (int64, error) {
+	st, err := trust.OpenExisting(d.storeDir, d.now)
+	if err != nil {
+		return 0, fmt.Errorf("built-in trust: re-read the store: %w", err)
+	}
+	return st.Generation(), nil
 }
 
 // pendingFormat is the pending record format.
@@ -567,7 +622,9 @@ func (d *dirBuiltinTrust) recoverPending(st *trust.Store) (*trust.PendingRecover
 	}
 	out.Revoked = tuples(revoked)
 	if err := trust.RemovePending(d.storeDir); err != nil {
-		return nil, fmt.Errorf("built-in trust: %w", err)
+		// The change is applied: report it for the audit. The next review
+		// repeats the same change from the leftover record.
+		return out, fmt.Errorf("built-in trust: %w", err)
 	}
 	return out, nil
 }
@@ -795,13 +852,15 @@ func (s *Service) ReviewBuiltinTrust(ctx context.Context, req *pb.ReviewBuiltinT
 		return nil, errBuiltinTrustUnconfigured
 	}
 	res, err := s.builtinTrust.Review(ctx)
-	if err != nil {
-		return nil, builtinTrustStatus(err)
-	}
+	// The recovery changed the artifact trust; audit it even when the
+	// review failed after it.
 	if rec := res.Recovered; rec != nil && s.log != nil {
 		s.log.Info("audit", "kind", "builtin_trust_pending_recovered", "by", callerName(ctx), "admin_uid", uid,
 			"outcome", rec.Outcome, "base_generation", rec.BaseGeneration, "trusted", artifactAudit(rec.Trusted),
 			"revoked", artifactAudit(rec.Revoked), "restored", artifactAudit(rec.Restored))
+	}
+	if err != nil {
+		return nil, builtinTrustStatus(err)
 	}
 	r := res.Review
 	out := &pb.ReviewBuiltinTrustResponse{
@@ -868,14 +927,17 @@ func (s *Service) CommitBuiltinTrust(ctx context.Context, req *pb.CommitBuiltinT
 			if ce.Committed {
 				kind = "builtin_trust_artifacts_failed"
 			}
-			restoreErr := ""
+			restoreErr, stateErr := "", ""
 			if ce.RestoreErr != nil {
 				restoreErr = ce.RestoreErr.Error()
+			}
+			if ce.StoreStateErr != nil {
+				stateErr = ce.StoreStateErr.Error()
 			}
 			s.log.Error("audit", "kind", kind, "by", callerName(ctx), "admin_uid", uid,
 				"manifest_digest", req.GetManifestDigest(), "generation", ce.Generation, "store_committed", ce.Committed,
 				"retired", ce.Retired, "revoked", artifactAudit(ce.Revoked), "restored", ce.Restored,
-				"untrusted", artifactAudit(ce.Untrusted), "err", ce.Err.Error(), "restore_err", restoreErr)
+				"untrusted", artifactAudit(ce.Untrusted), "err", ce.Err.Error(), "restore_err", restoreErr, "store_state_err", stateErr)
 		}
 		return nil, builtinTrustStatus(err)
 	}
