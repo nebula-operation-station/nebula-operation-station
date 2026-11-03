@@ -577,8 +577,10 @@ less ~/nebula-actions-0.9/*.sh
 Without this, every operation needs a user-verified approval.
 `nebula artifact list` shows what is trusted, `nebula artifact untrust`
 withdraws a trust. Trust again after every upgrade that changes an
-action's version — one at a time here, or all at once with `nebula
-artifact trust-builtins` (section 8.2).
+action's version, one action at a time as shown here. Only this per-action
+trust (`nebula artifact trust`, kept in the executor's trusted-artifact
+table) changes the risk the executor assigns; `nebula artifact
+trust-builtins` (section 8.2) does not replace it today.
 
 The executor also runs the **Safety Scanner** over every script, trusted
 or not: downloading and executing, `eval` or encoded payloads,
@@ -595,10 +597,20 @@ bytes (the executor still scans them before the run).
 
 ### 8.2 Trusting the built-ins together after an upgrade
 
-Trusting one action at a time is fine for a single change, but an upgrade
-that changes several built-ins means several reads and several
-confirmations. `nebula artifact trust-builtins` reviews the whole new
-release's built-ins in one step and commits them atomically. Run it with
+> **Current limitation:** `trust-builtins` records the reviewed release
+> only in the executor's built-in trust store
+> (`/var/lib/nebula/executor/trust`). The executor's risk policy does not
+> read that store — it reads only the per-action trust that `nebula
+> artifact trust` writes (section 8.1). After `trust-builtins` the
+> built-ins therefore still count as untrusted (at least HIGH, a
+> user-verified approval per operation) until you also run the per-action
+> `nebula artifact trust` commands. Check with `nebula artifact list`. The
+> web "Built-ins are untrusted" banner reads the built-in trust store, so
+> it disappears after `trust-builtins` even though the risk is unchanged.
+
+`nebula artifact trust-builtins` reviews the whole new release's
+built-ins in one step and commits that review atomically to the built-in
+trust store. Run it with
 `sudo` on the executor host: it does not go through the executor's socket
 but opens and writes the executor's built-in trust store directly
 (default `/var/lib/nebula/executor/trust`, `--store DIR` to change it) and
@@ -613,23 +625,27 @@ exactly `builtins.tar`, `release-manifest.json` and its signature
 `release-manifest.json.sig` — taken from the locally verified NOS release,
 not a server-exported directory (a server directory alone is not proof of
 built-in provenance). The command checks the bundle against the release
-trust root, then shows, action by action: the old and new version, both
-hashes, the risk and read-only contract, the full script diff and the
-executor Safety Scanner's findings. New actions are shown in full and
+trust root, then shows, action by action: the old and new version, the
+first 12 hex characters of both hashes, the risk, the full script diff and
+the executor Safety Scanner's findings. New actions are shown in full and
 removed actions explicitly; on first use every byte is shown, and a
 missing previous version is always reviewed, never "unchanged". Actions
 whose bytes did not change need no confirmation. Same-version changed
 bytes or invalid provenance are rejected.
 
 One local confirmation — the reviewed manifest digest typed back — commits
-all the displayed additions and changes at once. Before committing, the
-command rehashes the trust store and compares its generation, so a file
-swapped or a concurrent change is refused. For each old version you decide
+all the displayed additions and changes at once. At commit time the
+command re-reviews and rehashes the bundle and compares the trust store's
+generation, so a bundle file swapped after the
+review or a concurrent commit is refused; it does not rehash the objects
+already in the store. For each old version you decide
 to keep it (`--pin name@version`) or retire it (`--retire name@version`).
-These decisions only steer the trust store's garbage collection: a pinned
-version is never collected; a retired one is merely left unpinned, so it
-is collected once it is no longer among the two most recent predecessors
-and its 90-day retention has passed. Retiring revokes nothing — no permit,
+These decisions only steer the trust store's garbage collection during
+this one commit: a pinned version is not collected by this commit, a
+retired one is not protected. The pin is not saved, so a later commit can
+collect a version pinned now unless you pin it again; any old version is
+collected once it is no longer among the two most recent predecessors and
+its 90-day retention has passed. Retiring revokes nothing — no permit,
 read lease or schedule grant is touched. Those are bound to the exact
 action, version and artifact hash, so they are never retargeted to the new
 bytes, but they stay valid for the old version. To end that authority,
@@ -758,26 +774,36 @@ WARNING. Run Check image updates first to see what will change.
 A **read lease** (a read grant) is a standing, executor-held authority to
 run a fixed set of read-only actions on a fixed set of hosts for a
 bounded time and a bounded number of runs. A lease names its triggers:
-`scheduled` (runs at the lease's interval) and `on_demand` (runs requested
-outside the schedule). Leases created on the Read leases page allow both;
-today the only on-demand caller is the telemetry live view (10-second live
-reads, see Budgets below) — there is no button that runs an ordinary lease
-on demand. Both triggers share the same executor authorization, the same
+`scheduled` and `on_demand` (runs requested outside a schedule). Leases
+created on the Read leases page allow both, with the fixed 15-minute
+per-action floor as their interval. Today the only caller that runs leases
+is the telemetry collector (telemetry leases: 5-minute history and the
+10-second live view, see Budgets below). The server's scheduler runs only
+legacy schedule grants (see Legacy schedules below), and there is no button
+that runs an ordinary lease on demand — so an ordinary lease created on
+the Read leases page is approved and listed but is not run by anything
+yet. For recurring checks today, use the legacy *Scheduled checks* page.
+Both triggers share the same executor authorization, the same
 revocation and the same run budget, so a lease cannot outlive the consent
 that created it.
 
 Creating one. *Operations → Read leases → New read lease* proposes a
-lease: actions, hosts, an interval (hour, 6 hours, day, week) and a
-duration. New leases default to 7 days and run at most 30 days. *Refresh*
+lease from a scope (all hosts, a tag or an environment; the matching hosts
+are frozen into the lease), the read-only actions and a duration of 7 or
+30 days (7 is the default). There is no interval field: every lease gets
+the 15-minute minimum interval and the default run budget. *Refresh*
 (on an active or expired lease scoped to all hosts, a tag or an
 environment, in the list and on its page) is renewal:
 it opens the new-lease form pre-filled with that lease's scope, actions
 and duration, and submitting it proposes a new lease that needs a fresh
 approval — the old one stays until it expires or is revoked. *Refresh*
 never runs anything. Approve it
-once with your security key; in hardened mode the page shows `nebula
-read-grant approve <digest>` and you run it on the executor host, which
-lists the complete grant first (a full digest, never a prefix). The
+once with your security key; in hardened mode run `nebula read-grant
+approve <digest>` on the executor host, which lists the complete grant
+first (a full digest, never a prefix). Note: the proposal page currently
+prints this command as `nebula lease approve <digest>`, which the CLI does
+not have — use `nebula read-grant approve` with the same digest (`nebula
+read-grant pending` lists it). The
 executor accepts only actions it rates LOW on every chosen host and that
 are on the read allowlist — `core.facts`, `package.list_updates`,
 `docker.list`, `docker.inspect`, `docker.check_updates`, `service.list`,
@@ -795,15 +821,18 @@ Telemetry is a separately approved profile (10-second live reads,
 
 Running. Each run gets a fresh execution ID, is audited like any run, and
 rechecks the lease's expiry, revocation, parameters, artifact bytes, LOW
-risk and pin state before it runs. Results appear as operations created by
-"schedule". A lease survives restarts of the executor, but nothing runs
+risk and pin state before it runs. Results of legacy scheduled checks
+appear as operations created by "schedule"; telemetry results feed the
+host charts. A lease survives restarts of the executor, but nothing runs
 while it is locked (section 11). Runs with secrets cannot be leased.
 
 Managing. *Revoke* (on the lease page) stops a lease at once and needs no
 assertion; `nebula read-grant pending` shows leases awaiting approval.
 
-Legacy schedules. The older *Operations → Scheduled checks* page proposed
-`read-schedule-v1` grants: schedule-only, up to 90 days. Those grants keep
+Legacy schedules. The *Operations → Scheduled checks* page (`/schedules`)
+still proposes `read-schedule-v1` grants: chosen hosts and actions, an
+interval (15 minutes to 7 days, default a day), schedule-only, up to 90
+days (default 30). The server's scheduler runs these. Those grants keep
 their original scope and expiry — including existing 90-day grants — and
 are never reinterpreted as on-demand permission. New leases and renewals
 use the 7/30-day policy. Legacy grants are listed with the new leases,
@@ -910,7 +939,7 @@ work; nothing runs without the usual review and approval.
 | Operation shows `precheck_failed` | Read the reason on the operation page; nothing was installed |
 | Host `UNREACHABLE` | Check the endpoints; `nebula host test HOST ENDPOINT` |
 | Waiting approvals on the hardened path | `nebula pending`, then `nebula approve <digest>` |
-| After an upgrade | `nebula unlock`; re-trust actions whose version changed (section 8.1), or all at once with `sudo nebula artifact trust-builtins` (section 8.2) |
+| After an upgrade | `nebula unlock`; re-trust actions whose version changed with `nebula artifact trust` (section 8.1); `sudo nebula artifact trust-builtins` (section 8.2) does not replace this today |
 | Weekly | Look at the dashboard and *History*; copy `nebula events list --json` offsite |
 | Monthly | Test a restore of the latest backup on a spare VM |
 
@@ -1187,16 +1216,23 @@ nebula unlock
 `docker compose up -d`, then unlock.
 
 After any upgrade: `nebula status`, `nebula events verify`, and trust the
-built-in actions again if their versions changed — one at a time (section
-8.1) or all at once with `nebula artifact trust-builtins` (section 8.2).
-In hardened mode the whole upgrade is a CLI walkthrough on the executor
-host:
+built-in actions again if their versions changed, one action at a time
+with `nebula artifact trust` (section 8.1). `nebula artifact
+trust-builtins` (section 8.2) can review the whole release in one step and
+updates the built-in trust store and the web banner, but it does not
+change the executor's risk decisions, so it does not replace the
+per-action trust. In hardened mode the whole upgrade is a CLI walkthrough
+on the executor host:
 
 ```
 sudo nebula backup
 sudo systemctl restart nebula-executor nebula-server
 nebula unlock
-sudo nebula artifact trust-builtins --bundle /path/to/release-bundle
+nebula-server -export-actions ~/nebula-actions-NEW   # prints one trust command per action
+less ~/nebula-actions-NEW/*.sh
+# run the printed `nebula artifact trust ...` commands for the changed actions
+sudo nebula artifact trust-builtins --bundle /path/to/release-bundle   # optional, section 8.2
+nebula artifact list
 nebula status && nebula events verify
 ```
 
@@ -1314,7 +1350,7 @@ Run as an admin user on the Nebula machine (`nebula` without a command prints th
 | `schedule pending \| approve <digest> \| list \| revoke <id>` | Scheduled checks (legacy `read-schedule-v1`, section 9.4) |
 | `read-grant pending \| approve <digest>` | Read leases (section 9.4); hardened approval, full digest |
 | `artifact trust --action ID --version X.Y.Z --risk LEVEL [--label TEXT] FILE`, `artifact untrust …`, `artifact list` | Trusted scripts |
-| `artifact trust-builtins --bundle DIR [--store DIR] [--yes-digest DIGEST] [--pin name@ver] [--retire name@ver]` | With `sudo`; trust a release's built-ins in one review (section 8.2) |
+| `artifact trust-builtins --bundle DIR [--store DIR] [--yes-digest DIGEST] [--pin name@ver] [--retire name@ver]` | With `sudo`; review a release's built-ins and record them in the built-in trust store (section 8.2; does not change risk decisions, use `artifact trust` for that) |
 | `signer add --name NAME FILE \| list \| remove SHA256:…`, `module confirm-signer MODULE SHA256:…` | Module signers |
 | `module pack [--archive OUT.tar.gz] DIR` | Build a module (author side; no executor needed) |
 | `backup [--out FILE] [--full] [--no-encrypt] [--pre-upgrade]`, `restore [--identity FILE] ARCHIVE` | With `sudo`; section 12 (`--full` only labels the archive, every backup is full; `--pre-upgrade` asks nothing and exits 3 when it makes no backup) |

@@ -63,9 +63,16 @@ a key per operation.
 ## Built-in trust (`trust-builtins`)
 
 After an upgrade the built-in actions' versions change and their trust
-decisions must be re-made. `trust-builtins` does that in one review from a
-locally verified release bundle, instead of one `nebula artifact trust` per
-action.
+decisions must be re-made. `trust-builtins` reviews a locally verified
+release bundle in one step and commits it to the built-in trust store
+(`internal/executor/trust`). **It does not replace `nebula artifact
+trust` today:** the risk policy (`internal/riskpolicy`) reads only the
+executordb `trusted_artifacts` table (`ArtifactRisk`), which only
+`TrustArtifact` / `nebula artifact trust` writes. Nothing copies the
+built-in trust store into that table, so built-ins stay untrusted for
+risk purposes until they are trusted per action. The store is read by
+`GetBuiltinTrustStatus`, which drives the web "Built-ins are untrusted"
+banner.
 
 `cmd/nebula/trust_builtins.go`:
 
@@ -88,10 +95,12 @@ action.
   the pinned, retired and collected versions — is printed to standard
   output only; the command writes no audit record or event. (The
   `CommitBuiltinTrust` RPC logs its own "built-in trust committed" line.)
-- Pin and retire only steer the trust store's garbage collection
-  (`internal/executor/trust/bulk.go`, `admit.go`): pinned versions are
-  never collected, retired ones are left unpinned and collected once beyond
-  the two most recent predecessors and past their 90-day retention.
+- Pin and retire only steer the trust store's garbage collection in this
+  one commit (`internal/executor/trust/bulk.go`, `admit.go`): pins are
+  passed to that `AdmitPinned`/`collect` call and are not persisted, so a
+  later admission can collect a version pinned now once it is beyond the
+  two most recent predecessors and past its 90-day retention; retired
+  versions are simply not protected.
   Retiring revokes no permit, read grant or schedule grant; those must be
   revoked separately (web *Revoke*, `nebula schedule revoke` for legacy
   grants, or `nebula lock`).

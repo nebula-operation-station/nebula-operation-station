@@ -94,8 +94,14 @@ A read grant document:
 - **Trigger** — `scheduled` (a fixed interval, floor 15 minutes) and/or
   `on_demand` (runs requested outside the schedule, through
   `RunReadGrant`). Leases proposed from the Read leases page carry both
-  (`internal/executions/readgrants_propose.go`); the only on-demand caller
-  today is the telemetry live view (`internal/pvecollect`). The trigger only
+  (`internal/executions/readgrants_propose.go`), with `min_interval_s`
+  fixed to `schedgrant.MinInterval` (15 minutes; the form has no interval
+  field) and durations of 7 or 30 days. The only `RunReadGrant` caller
+  today is the telemetry collector (`internal/pvecollect`, scheduled
+  history and the on-demand live view), and it skips `ordinary`-profile
+  leases; the server scheduler (`internal/executions/schedules.go`) runs
+  only legacy `read-schedule-v1` grants. Ordinary leases from the Read
+  leases page are therefore not run by anything yet. The trigger only
   selects which runs are allowed; it grants no other rights. The "Refresh"
   link on the Read leases page is unrelated: it is renewal, opening the
   new-lease form pre-filled with the lease's scope
@@ -106,7 +112,10 @@ A read grant document:
   persisted and survive a restart.
 
 Approval is a user-verified WebAuthn assertion, or `nebula read-grant
-approve <digest>` in hardened mode (full 64-hex digest). Revoking needs no
+approve <digest>` in hardened mode (full 64-hex digest). The hardened
+proposal page currently prints `nebula lease approve <digest>`
+(`leaseCLICommand` in `internal/web/ui/leases_new.go`), a command the CLI
+does not have. Revoking needs no
 approval. While the executor is locked, read grants are paused (not
 deleted); unlocking resumes any still-valid grant, but elapsed time counts
 toward the expiry.
