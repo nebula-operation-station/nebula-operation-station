@@ -74,6 +74,10 @@ type dirBuiltinTrust struct {
 // and the locally verified release bundle in bundleDir. Both must be
 // absolute executor-local paths; anchors are the compiled release anchors
 // (release.Anchors) and now is the injected clock (nil means time.Now).
+//
+// The store is opened once here, at executor startup, so a fresh store is
+// bootstrapped by the executor itself; later calls (including the server's
+// status read) only reopen an existing index and never initialize state.
 func NewDirBuiltinTrust(storeDir, bundleDir string, anchors []release.Anchor, now func() time.Time) (BuiltinTrust, error) {
 	if storeDir == "" || !filepath.IsAbs(storeDir) {
 		return nil, fmt.Errorf("built-in trust: store directory %q must be absolute", storeDir)
@@ -84,7 +88,11 @@ func NewDirBuiltinTrust(storeDir, bundleDir string, anchors []release.Anchor, no
 	if now == nil {
 		now = time.Now
 	}
-	return &dirBuiltinTrust{storeDir: filepath.Clean(storeDir), bundleDir: filepath.Clean(bundleDir), anchors: anchors, now: now}, nil
+	d := &dirBuiltinTrust{storeDir: filepath.Clean(storeDir), bundleDir: filepath.Clean(bundleDir), anchors: anchors, now: now}
+	if _, err := trust.Open(d.storeDir, d.anchors, d.now); err != nil {
+		return nil, fmt.Errorf("built-in trust: open store %s: %w", d.storeDir, err)
+	}
+	return d, nil
 }
 
 // open checks for the bundle, opens the store and reads the bundle against

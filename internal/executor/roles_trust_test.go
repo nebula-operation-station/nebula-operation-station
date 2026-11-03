@@ -21,6 +21,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor/trust"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/release"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/scanner"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/textdiff"
@@ -457,9 +458,17 @@ func TestReviewBuiltinTrustRefusesOversizeResponse(t *testing.T) {
 // as unavailable and never bootstraps from a server-supplied path.
 func TestDirBuiltinTrustMissingBundleIsUnavailable(t *testing.T) {
 	dir := t.TempDir()
-	bt, err := NewDirBuiltinTrust(filepath.Join(dir, "trust"), filepath.Join(dir, "no-such-bundle"), nil, func() time.Time { return time.Unix(1_800_000_000, 0) })
+	anchors, err := release.Anchors()
 	if err != nil {
 		t.Fatal(err)
+	}
+	bt, err := NewDirBuiltinTrust(filepath.Join(dir, "trust"), filepath.Join(dir, "no-such-bundle"), anchors, func() time.Time { return time.Unix(1_800_000_000, 0) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The executor bootstrapped the store at construction.
+	if _, err := os.Stat(filepath.Join(dir, "trust", "index.json")); err != nil {
+		t.Fatalf("store not bootstrapped at construction: %v", err)
 	}
 	if _, err := bt.Review(context.Background()); !errors.Is(err, ErrBuiltinTrustUnavailable) {
 		t.Fatalf("review err = %v, want ErrBuiltinTrustUnavailable", err)
