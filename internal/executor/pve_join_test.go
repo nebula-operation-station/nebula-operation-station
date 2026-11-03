@@ -224,17 +224,24 @@ func (e *joinEnv) grantGuestReads() {
 	if err := e.svc.auth.ResumeReadDispatch(); err != nil {
 		e.t.Fatal(err)
 	}
+	e.approveProviderGrant("00000000-0000-4000-8000-0000000000f6", 240, permit.ProviderMethodGuests)
+}
+
+// approveProviderGrant approves a provider read grant for the mutation
+// remote with the given request budget and methods.
+func (e *joinEnv) approveProviderGrant(id string, budget int64, methods ...string) {
+	e.t.Helper()
 	rm, _, err := e.mut.pe.db.GetRemote(mutRemote)
 	if err != nil {
 		e.t.Fatal(err)
 	}
 	now := e.clock.Now()
 	raw, err := json.Marshal(permit.ReadGrantDoc{
-		Grant: permit.ReadGrantFormat, ID: "00000000-0000-4000-8000-0000000000f6", Issuer: "root", CreatedUnix: now.Unix(),
+		Grant: permit.ReadGrantFormat, ID: id, Issuer: "root", CreatedUnix: now.Unix(),
 		ExpiryUnix: now.Add(permit.DefaultReadGrantLifetime).Unix(), Trigger: permit.TriggerScheduled,
-		Actions: []permit.ReadGrantAction{}, MinIntervalS: 60, RunBudget: 240, RateProfile: permit.ProviderReadProfile,
+		Actions: []permit.ReadGrantAction{}, MinIntervalS: 60, RunBudget: budget, RateProfile: permit.ProviderReadProfile,
 		ProviderTargets: []permit.ProviderTarget{{RemoteID: rm.RemoteID, TrustPin: rm.TrustPin, TrustGeneration: rm.TrustGeneration,
-			CredentialVersion: rm.Credentials.ReadVersion, Methods: []string{permit.ProviderMethodGuests}}},
+			CredentialVersion: rm.Credentials.ReadVersion, Methods: methods}},
 	})
 	if err != nil {
 		e.t.Fatal(err)
