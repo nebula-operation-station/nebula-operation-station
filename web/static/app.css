@@ -1711,3 +1711,13 @@ details[open] summary { color: var(--text); margin-bottom: var(--space-2); }
   .chart__box--guest, .chart__box--storage { width: 100%; }
   .chart__box--guest::before, .chart__box--storage::before { display: none; }
 }
+
+/* Batch pages (ADR 0007 E13): the complete plan is shown, so long hashes
+   and parameter documents wrap instead of being cut off. */
+.batch-page { max-width: 110rem; margin: 0 auto; padding: var(--space-2); }
+.batch-nav { margin-bottom: var(--space-1); }
+.batch-hash { word-break: break-all; overflow-wrap: anywhere; }
+.batch-detail { white-space: pre-wrap; overflow-wrap: anywhere; }
+.batch-form textarea { width: 100%; box-sizing: border-box; }
+.batch-members td { vertical-align: top; }
+.batch-member--failed, .batch-member--unknown { background: var(--crit-bg); }
