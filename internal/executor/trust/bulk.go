@@ -75,6 +75,31 @@ type BulkAdmitResult struct {
 	CleanupFailures int
 	// Tuples are the old/new trust tuples.
 	Tuples []TrustTuple
+	// ArtifactsTrusted are the exact artifact trust tuples the executor
+	// recorded for this commit, and ArtifactsRevoked the ones retirement
+	// revoked. BulkAdmit leaves both empty; the executor's trust
+	// transaction fills them after recording ArtifactTrustFor.
+	ArtifactsTrusted, ArtifactsRevoked []ArtifactTuple
+	// Recovered is the pending artifact trust of an interrupted commit
+	// that the executor completed or undid before this review; nil if
+	// there was none.
+	Recovered *PendingRecovery
+}
+
+// PendingRecovery is how the executor resolved the pending artifact trust
+// of an interrupted built-in trust commit.
+type PendingRecovery struct {
+	// Outcome is "completed" (the store had committed: the new entries
+	// were recorded and the retirements repeated), "restored" (the store
+	// had not committed: the revoked entries were restored) or "retired"
+	// (the store state was ambiguous: only the retirements were repeated).
+	Outcome string
+	// BaseGeneration is the store generation the pending commit started
+	// from.
+	BaseGeneration int64
+	// Trusted, Revoked and Restored are the entries recorded, revoked and
+	// restored.
+	Trusted, Revoked, Restored []ArtifactTuple
 }
 
 // BulkAdmit reviews a verified candidate, scans its new/changed actions,
@@ -164,6 +189,13 @@ func scriptBytes(c release.Candidate, moduleName, actionID string) ([]byte, bool
 		}
 	}
 	return nil, false
+}
+
+// CheckDecisions validates retirement decisions against the old versions
+// of a dry run exactly as a committing BulkAdmit does, so a caller can
+// reject them before acting on them.
+func CheckDecisions(old []string, pins map[string]bool, retired []string) error {
+	return validateDecisions(old, pins, retired)
 }
 
 // validateDecisions checks that the admin's retirement decisions exactly
