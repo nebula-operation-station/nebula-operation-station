@@ -451,7 +451,10 @@ func (g *PveGuestPower) Run(ctx context.Context, req PveGuestPowerRequest) (PveM
 // PveGuestRiskTargets returns the synthetic risk targets of a guest
 // target: the guest itself (the permit's bound target), its node and its
 // remote. Executor criticality records of these targets set the guest,
-// node and remote criticality of power actions.
+// node and remote criticality of power actions. The three are distinct in
+// host ID and fingerprint (permit.ProviderRiskFingerprint,
+// PveRemoteRiskTarget), so each can carry its own exact record; an admin
+// records them with the host ID and fingerprint returned here.
 func PveGuestRiskTargets(t permit.ProviderMutationTarget) (guest, node, remote canonical.Target, err error) {
 	guest, err = t.RiskTarget()
 	if err != nil {
@@ -498,9 +501,11 @@ func NewGuestPowerRiskFloor(next permit.RiskPolicy, crit PveCriticality, binding
 
 // NewExecutorRiskPolicy returns the risk policy of the executor's
 // authority: riskpolicy over src (artifact trust and host criticality;
-// the executor database in production), wrapped by the guest power floor
-// over src, the registry's linked hosts and bindings. Pass the same
-// bindings to Service.SetPveGuestPowerBindings.
+// the executor database in production), wrapped by the provisioning floor
+// (GuestProvisionRiskFloor: node, remote and the registry's linked hosts;
+// the remote is resolved in the registry if src is one, PveRemoteLister)
+// and by the guest power floor over src, the registry's linked hosts and
+// bindings. Pass the same bindings to Service.SetPveGuestPowerBindings.
 func NewExecutorRiskPolicy(src riskpolicy.Source, bindings *PveGuestPowerBindings) (permit.RiskPolicy, error) {
 	if src == nil || bindings == nil {
 		return nil, errors.New("executor: risk policy needs a risk source and the guest power bindings")
@@ -509,7 +514,11 @@ func NewExecutorRiskPolicy(src riskpolicy.Source, bindings *PveGuestPowerBinding
 	if err != nil {
 		return nil, err
 	}
-	return NewGuestPowerRiskFloor(base, src, bindings), nil
+	prov := GuestProvisionRiskFloor{Next: base, Linked: PveRegistryLinkedHosts}
+	if reg, ok := src.(PveRemoteLister); ok {
+		prov.Remote = PveRegistryRemoteOf(reg)
+	}
+	return NewGuestPowerRiskFloor(prov, src, bindings), nil
 }
 
 // SetPveGuestPowerBindings makes the guest power actions bind their
@@ -541,12 +550,10 @@ func (s *Service) SetPveGuestPowerBindings(b *PveGuestPowerBindings) { s.pveGues
 // the verb's; another target than the bound guest) makes it HIGH. Other
 // requests get Next's floor unchanged, or HIGH without Next.
 //
-// Known limit: the guest, node and remote risk targets of one remote all
-// carry the remote's trust pin as fingerprint, and the executor database
-// keeps at most one criticality record per fingerprint, so today only one
-// of them can have an exact record and the others count as unknown
-// (HIGH). Over executordb the floor is therefore HIGH until that is
-// resolved; it never errs low.
+// The guest, node and remote risk targets of one remote each have their
+// own synthetic host ID and fingerprint (PveGuestRiskTargets), so the
+// executor database, which keeps at most one criticality record per
+// fingerprint, can hold an exact record for each of them.
 type GuestPowerRiskFloor struct {
 	Next        permit.RiskPolicy
 	Criticality PveCriticality

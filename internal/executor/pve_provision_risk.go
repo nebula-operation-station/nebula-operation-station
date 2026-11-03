@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveapi"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
@@ -28,8 +29,8 @@ import (
 // Criticality is the executor's own host criticality record of the
 // synthetic risk targets: the node target the permit binds
 // (permit.ProviderMutationTarget.RiskTarget) and the remote target
-// (PveRemoteRiskTarget). The executor's risk policy (riskpolicy) gives an
-// unrecorded target HIGH.
+// (PveRemoteRiskTarget), each with its own synthetic fingerprint. The
+// executor's risk policy (riskpolicy) gives an unrecorded target HIGH.
 
 // PveGuestProvisionAction is the action ID of guest provisioning.
 const PveGuestProvisionAction = "pve.guest.provision"
@@ -101,11 +102,20 @@ func pveCapacityFacts(inv pveapi.ClusterInventory, st pveapi.Storage, node strin
 	return memory, storage
 }
 
+// pveRemoteRiskDomain separates the remote risk target's fingerprint from
+// the node and guest fingerprints (permit.ProviderRiskFingerprint).
+const pveRemoteRiskDomain = "nebula-pve-remote-risk-target-v1\x00"
+
 // PveRemoteRiskTarget returns the synthetic risk target of a whole PVE
 // remote, by its trust pin (hex SHA-256). An executor host criticality
-// record of this target sets the remote's criticality for provisioning;
-// without one the remote counts as HIGH. The ID follows the pin, so a
-// re-pinned remote needs its record again (fail closed).
+// record of this target sets the remote's criticality; without one the
+// remote counts as HIGH. Its fingerprint is a domain-separated digest of
+// the pin, distinct from the fingerprints of the remote's node and guest
+// targets, so all of them can carry exact records at the same time. The
+// host ID is unchanged from the earlier scheme (which used the bare pin as
+// fingerprint), so an old record still raises the target but no longer
+// matches exactly. Both follow the pin: a re-pinned remote needs its
+// record again (fail closed).
 func PveRemoteRiskTarget(trustPin string) (canonical.Target, error) {
 	if !pvecontract.ValidTrustPin(trustPin) {
 		return canonical.Target{}, ErrPveRemoteChanged
@@ -114,12 +124,12 @@ func PveRemoteRiskTarget(trustPin string) (canonical.Target, error) {
 	if err != nil || len(pin) != sha256.Size {
 		return canonical.Target{}, ErrPveRemoteChanged
 	}
-	return remoteRiskTarget("SHA256:" + base64.RawStdEncoding.EncodeToString(pin)), nil
-}
-
-func remoteRiskTarget(fingerprint string) canonical.Target {
-	sum := sha256.Sum256([]byte("pve-remote\x00" + fingerprint))
-	return canonical.Target{HostID: "pvr-" + hex.EncodeToString(sum[:16]), HostKeyFingerprint: fingerprint}
+	id := sha256.Sum256([]byte("pve-remote\x00SHA256:" + base64.RawStdEncoding.EncodeToString(pin)))
+	fp := sha256.Sum256(append([]byte(pveRemoteRiskDomain), pin...))
+	return canonical.Target{
+		HostID:             "pvr-" + hex.EncodeToString(id[:16]),
+		HostKeyFingerprint: "SHA256:" + base64.RawStdEncoding.EncodeToString(fp[:]),
+	}, nil
 }
 
 // PveLinkedHosts returns the managed hosts linked to a PVE node (a node
@@ -127,6 +137,41 @@ func remoteRiskTarget(fingerprint string) canonical.Target {
 // the guest is created on them, so their criticality counts (spec 11). An
 // error fails closed.
 type PveLinkedHosts func(r canonical.Request, node canonical.Target) ([]canonical.Target, error)
+
+// PveRemoteOf returns the trust pin of the registered remote a node risk
+// target belongs to, ok false if it belongs to none. An error fails
+// closed.
+type PveRemoteOf func(node canonical.Target) (trustPin string, ok bool, err error)
+
+// PveRemoteLister is the part of the executor registry PveRegistryRemoteOf
+// reads (executordb implements it).
+type PveRemoteLister interface {
+	ListRemotes() ([]executordb.PveRemote, error)
+}
+
+// PveRegistryRemoteOf returns the executor's production PveRemoteOf: the
+// registered remote (tombstones included; their actions fail elsewhere)
+// whose trust pin the node target's fingerprint was made with
+// (permit.ProviderRiskFingerprint). Pins are unique in the registry, so at
+// most one remote matches. A nil registry resolves nothing.
+func PveRegistryRemoteOf(reg PveRemoteLister) PveRemoteOf {
+	return func(node canonical.Target) (string, bool, error) {
+		if reg == nil {
+			return "", false, nil
+		}
+		rms, err := reg.ListRemotes()
+		if err != nil {
+			return "", false, fmt.Errorf("pve remote of risk target: %w", err)
+		}
+		for _, rm := range rms {
+			fp, err := permit.ProviderRiskFingerprint(rm.TrustPin, node.HostID)
+			if err == nil && fp == node.HostKeyFingerprint {
+				return rm.TrustPin, true, nil
+			}
+		}
+		return "", false, nil
+	}
+}
 
 // GuestProvisionRiskFloor wraps the executor's risk policy for
 // pve.guest.provision requests, whoever builds them. The authority
@@ -139,7 +184,10 @@ type PveLinkedHosts func(r canonical.Request, node canonical.Target) ([]canonica
 //     and a recorded HIGH or CRITICAL node, remote or linked host raises
 //     the floor to it; without Next or without Linked, HIGH (a node that
 //     is also an enrolled host defaults to HIGH, spec 11, so an unknown
-//     set of linked hosts must not be read as "none").
+//     set of linked hosts must not be read as "none");
+//   - HIGH if the remote of a node target cannot be established: no
+//     Remote, a node of no known remote, or a node whose fingerprint was
+//     not made with the pin Remote names.
 //
 // Nothing else raises it: no capacity, PCI or profile fact. Other requests
 // get Next's floor unchanged, or HIGH without Next.
@@ -148,6 +196,9 @@ type GuestProvisionRiskFloor struct {
 	// Linked names the managed hosts linked to the node (an empty result
 	// means none). Without it the floor is HIGH: fail closed.
 	Linked PveLinkedHosts
+	// Remote names the remote of a node target, whose risk target is
+	// scored with the node. Without it the floor is HIGH: fail closed.
+	Remote PveRemoteOf
 }
 
 // MinimumRisk implements permit.RiskPolicy.
@@ -166,6 +217,9 @@ func (p GuestProvisionRiskFloor) MinimumRisk(r canonical.Request, targets []cano
 	if p.Linked == nil {
 		return canonical.RiskHigh, strings.Join(append(reasons, "no linked-host source: unknown criticality is HIGH"), "; "), nil
 	}
+	if p.Remote == nil {
+		return canonical.RiskHigh, strings.Join(append(reasons, "no remote source: unknown criticality is HIGH"), "; "), nil
+	}
 	if len(targets) == 0 {
 		// No node target: its criticality is unknown.
 		return canonical.RiskHigh, strings.Join(append(reasons, "no node target: unknown criticality is HIGH"), "; "), nil
@@ -173,9 +227,20 @@ func (p GuestProvisionRiskFloor) MinimumRisk(r canonical.Request, targets []cano
 	ext := append([]canonical.Target(nil), targets...)
 	seen := map[string]bool{}
 	for _, t := range targets {
-		if !seen[t.HostKeyFingerprint] {
-			seen[t.HostKeyFingerprint] = true
-			ext = append(ext, remoteRiskTarget(t.HostKeyFingerprint))
+		pin, ok, err := p.Remote(t)
+		if err != nil {
+			return "", "", fmt.Errorf("provision risk floor: remote: %w", err)
+		}
+		if fp, ferr := permit.ProviderRiskFingerprint(pin, t.HostID); !ok || ferr != nil || fp != t.HostKeyFingerprint {
+			return canonical.RiskHigh, strings.Join(append(reasons, "remote of node target "+t.HostID+" unknown: unknown criticality is HIGH"), "; "), nil
+		}
+		if !seen[pin] {
+			seen[pin] = true
+			remote, err := PveRemoteRiskTarget(pin)
+			if err != nil {
+				return canonical.RiskHigh, strings.Join(append(reasons, "remote of node target "+t.HostID+" unknown: unknown criticality is HIGH"), "; "), nil
+			}
+			ext = append(ext, remote)
 		}
 		hosts, err := p.Linked(r, t)
 		if err != nil {
