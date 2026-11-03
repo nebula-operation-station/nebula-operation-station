@@ -605,8 +605,9 @@ bytes (the executor still scans them before the run).
 > built-ins therefore still count as untrusted (at least HIGH, a
 > user-verified approval per operation) until you also run the per-action
 > `nebula artifact trust` commands. Check with `nebula artifact list`. The
-> web "Built-ins are untrusted" banner reads the built-in trust store, so
-> it disappears after `trust-builtins` even though the risk is unchanged.
+> executor does not yet serve the built-in trust status, so the web banner
+> always shows "Built-in trust status is unreachable", before and after
+> `trust-builtins`; it is not a sign that the command failed.
 
 `nebula artifact trust-builtins` reviews the whole new release's
 built-ins in one step and commits that review atomically to the built-in
@@ -1219,8 +1220,8 @@ After any upgrade: `nebula status`, `nebula events verify`, and trust the
 built-in actions again if their versions changed, one action at a time
 with `nebula artifact trust` (section 8.1). `nebula artifact
 trust-builtins` (section 8.2) can review the whole release in one step and
-updates the built-in trust store and the web banner, but it does not
-change the executor's risk decisions, so it does not replace the
+updates the built-in trust store, but it changes no other executor state
+(not the risk decisions, not the web banner), so it does not replace the
 per-action trust. In hardened mode the whole upgrade is a CLI walkthrough
 on the executor host:
 

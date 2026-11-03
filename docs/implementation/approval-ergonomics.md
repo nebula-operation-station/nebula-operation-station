@@ -70,9 +70,12 @@ trust` today:** the risk policy (`internal/riskpolicy`) reads only the
 executordb `trusted_artifacts` table (`ArtifactRisk`), which only
 `TrustArtifact` / `nebula artifact trust` writes. Nothing copies the
 built-in trust store into that table, so built-ins stay untrusted for
-risk purposes until they are trusted per action. The store is read by
-`GetBuiltinTrustStatus`, which drives the web "Built-ins are untrusted"
-banner.
+risk purposes until they are trusted per action. `GetBuiltinTrustStatus`
+(which drives the web banner) would read the store, but production does
+not wire it: `cmd/nebula-executor` never calls `Service.SetBuiltinTrust`,
+so the RPC always answers UNAVAILABLE. Once wired, it compares the store
+with the executor's own configured bundle directory, not the `--bundle`
+the admin passed to `trust-builtins`.
 
 `cmd/nebula/trust_builtins.go`:
 
