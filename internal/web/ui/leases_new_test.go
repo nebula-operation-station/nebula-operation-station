@@ -6,6 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,6 +16,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -26,6 +30,89 @@ import (
 )
 
 var leaseDigest = strings.Repeat("c0", 32)
+
+// cliCommandWords collects the command words cmd/nebula dispatches on:
+// the string constants of its switch cases ("read-grant") and of its
+// equality tests (args[0] == "approve"). It reads the CLI's source, so a
+// command the web UI tells operators to run must exist there. top holds
+// main.go's case constants (the top-level commands), sub all of them.
+func cliCommandWords(t *testing.T) (top, sub map[string]bool) {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join("..", "..", "..", "cmd", "nebula", "*.go"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("find cmd/nebula sources: %v (%d files)", err, len(files))
+	}
+	lit := func(e ast.Expr) (string, bool) {
+		b, ok := e.(*ast.BasicLit)
+		if !ok || b.Kind != token.STRING {
+			return "", false
+		}
+		s, err := strconv.Unquote(b.Value)
+		return s, err == nil
+	}
+	fset := token.NewFileSet()
+	top, sub = map[string]bool{}, map[string]bool{}
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		isMain := filepath.Base(name) == "main.go"
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.CaseClause:
+				for _, e := range x.List {
+					if s, ok := lit(e); ok {
+						sub[s] = true
+						if isMain {
+							top[s] = true
+						}
+					}
+				}
+			case *ast.BinaryExpr:
+				if x.Op == token.EQL {
+					if s, ok := lit(x.Y); ok {
+						sub[s] = true
+					}
+				}
+			}
+			return true
+		})
+	}
+	return top, sub
+}
+
+// requireCLICommand fails unless words ("nebula", command, subcommand...)
+// name a command cmd/nebula dispatches: the command in main.go's switch,
+// every further word among the CLI's dispatch constants.
+func requireCLICommand(t *testing.T, words []string) {
+	t.Helper()
+	if len(words) < 2 || words[0] != "nebula" {
+		t.Fatalf("CLI command %q does not start with nebula <command>", words)
+	}
+	top, sub := cliCommandWords(t)
+	if !top[words[1]] {
+		t.Errorf("CLI command %q: cmd/nebula has no command %q", words, words[1])
+	}
+	for _, w := range words[2:] {
+		if !sub[w] {
+			t.Errorf("CLI command %q: cmd/nebula has no subcommand %q", words, w)
+		}
+	}
+}
+
+func TestCLICommandCheckTellsKnownFromUnknownCommands(t *testing.T) {
+	top, sub := cliCommandWords(t)
+	if top["lease"] {
+		t.Error("cmd/nebula has a lease command: the check cannot tell the old command apart")
+	}
+	if !top["read-grant"] || !sub["approve"] || !top["artifact"] || !sub["trust-builtins"] {
+		t.Error("the check does not find read-grant approve or artifact trust-builtins")
+	}
+}
 
 // leaseClock is a settable clock for the preview throttle.
 type leaseClock struct {
@@ -208,7 +295,7 @@ func TestLeasePreviewListsEveryHostAndDigest(t *testing.T) {
 			t.Errorf("preview misses %q", want)
 		}
 	}
-	if strings.Contains(page, "nebula lease approve") {
+	if strings.Contains(page, `id="lease-cli"`) || strings.Contains(page, "read-grant approve") {
 		t.Error("browser preview shows the CLI command")
 	}
 	// No new script: only scripts that exist already.
@@ -232,9 +319,18 @@ func TestLeasePreviewHardenedShowsCLI(t *testing.T) {
 	v := leasePreview(3)
 	v.CLI, v.Options = true, nil
 	page := previewThrough(t, leaseNewHandler(t, &fakeLeases{preview: v}, nil))
-	if !strings.Contains(page, `<pre class="mono" id="lease-cli">nebula lease approve `+leaseDigest+`</pre>`) {
+	if !strings.Contains(page, `<pre class="mono" id="lease-cli">nebula read-grant approve `+leaseDigest+`</pre>`) {
 		t.Error("hardened preview misses the CLI command with the full digest")
 	}
+	m := regexp.MustCompile(`<pre class="mono" id="lease-cli">([^<]*)</pre>`).FindStringSubmatch(page)
+	if m == nil {
+		t.Fatal("hardened preview has no CLI command")
+	}
+	words := strings.Fields(m[1])
+	if len(words) != 4 || words[3] != leaseDigest {
+		t.Fatalf("CLI command %q, want nebula <command> <subcommand> <digest>", m[1])
+	}
+	requireCLICommand(t, words[:3])
 	for _, never := range []string{"schedule-approve", "Approve with security key", "/static/webauthn.js", "/static/schedules.js"} {
 		if strings.Contains(page, never) {
 			t.Errorf("hardened preview shows %q", never)
