@@ -329,9 +329,27 @@ func TestGuestProvisionFloorRemoteRules(t *testing.T) {
 	// A CRITICAL node stays CRITICAL when its remote is unknown or
 	// mismatched: HIGH is only a floor, the known targets are still scored.
 	critical := criticalNodeRisk{fp: node.HostKeyFingerprint}
-	for name, src := range map[string]PveRemoteOf{"unknown": unknown, "mismatched": lying} {
+	for name, src := range map[string]PveRemoteOf{"unknown": unknown, "mismatched": lying, "no source": nil} {
 		if r, _, err := (GuestProvisionRiskFloor{Next: critical, Linked: noLinkedHosts, Remote: src}).MinimumRisk(req, []canonical.Target{node}); err != nil || r != canonical.RiskCritical {
 			t.Fatalf("critical node, %s remote: %s %v", name, r, err)
+		}
+	}
+	if r, _, err := (GuestProvisionRiskFloor{Next: critical, Remote: known}).MinimumRisk(req, []canonical.Target{node}); err != nil || r != canonical.RiskCritical {
+		t.Fatalf("critical node, no linked-host source: %s %v", r, err)
+	}
+	if r, _, _ := (GuestProvisionRiskFloor{Next: fixedRisk{}, Remote: known}).MinimumRisk(req, []canonical.Target{node}); r != canonical.RiskHigh {
+		t.Fatalf("no linked-host source: %s", r)
+	}
+	// A CRITICAL linked host is still scored when the remote is unknown or
+	// no remote source is configured.
+	linkedHost := canonical.Target{HostID: "host-crit", HostKeyFingerprint: strings.Repeat("ef", 32)}
+	linked := func(canonical.Request, canonical.Target) ([]canonical.Target, error) {
+		return []canonical.Target{linkedHost}, nil
+	}
+	critLinked := criticalNodeRisk{fp: linkedHost.HostKeyFingerprint}
+	for name, src := range map[string]PveRemoteOf{"unknown": unknown, "no source": nil} {
+		if r, _, err := (GuestProvisionRiskFloor{Next: critLinked, Linked: linked, Remote: src}).MinimumRisk(req, []canonical.Target{node}); err != nil || r != canonical.RiskCritical {
+			t.Fatalf("critical linked host, %s remote: %s %v", name, r, err)
 		}
 	}
 	failing := func(canonical.Target) (string, bool, error) { return "", false, errors.New("boom") }
