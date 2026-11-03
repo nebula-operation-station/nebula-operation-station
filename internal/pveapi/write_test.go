@@ -405,7 +405,9 @@ func TestWriterMethodSetIsAllowlist(t *testing.T) {
 	// (P2-01), "snapshot create (exact name, disk set, RAM choice), delete
 	// (exact identity, never age-based), rollback (explicit start/RAM side
 	// effects)".
-	want := []string{"CloneVM", "ConvertToTemplate", "CreateImageVM", "CreateSnapshot", "DeleteSnapshot", "DownloadURL", "RebootGuest", "ResetGuest", "ResizeDisk", "RollbackSnapshot", "SetConfig", "ShutdownGuest", "StartVM", "StopGuest", "TaskStatus"}
+	// BackupNow: ADR 0006 phase 2 (P2-01), "Backup now: exact guest,
+	// storage, mode and bandwidth; no pruning/deletion flags".
+	want := []string{"BackupNow", "CloneVM", "ConvertToTemplate", "CreateImageVM", "CreateSnapshot", "DeleteSnapshot", "DownloadURL", "RebootGuest", "ResetGuest", "ResizeDisk", "RollbackSnapshot", "SetConfig", "ShutdownGuest", "StartVM", "StopGuest", "TaskStatus"}
 	typ := reflect.TypeFor[*Writer]()
 	var got []string
 	for i := range typ.NumMethod() {
