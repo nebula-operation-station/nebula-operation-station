@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
@@ -30,6 +32,7 @@ type liveExec struct {
 	reads      []*pb.PVEReadMetricsParams
 	readAt     []time.Time
 	readRemote []string
+	readErr    map[string]error // by metrics kind
 	clk        *fakeClock
 }
 
@@ -56,6 +59,9 @@ func (e *liveExec) ReadPVE(_ context.Context, req *pb.ReadPVERequest, _ ...grpc.
 	e.reads = append(e.reads, m)
 	e.readAt = append(e.readAt, e.clk.Now())
 	e.readRemote = append(e.readRemote, req.GetRemoteId())
+	if err := e.readErr[m.GetKind()]; err != nil {
+		return nil, err
+	}
 	return metricsResp(req.GetRemoteId(), m.GetNode(), m.GetKind(), m.GetVmid(),
 		&pb.PVEMetric{Name: "cpu", Unit: "ratio", Value: 0.25},
 		&pb.PVEMetric{Name: "mem_used", Unit: "bytes", Value: 1 << 30},
@@ -528,5 +534,158 @@ func TestLiveWatcherRunStopsAndCleansUp(t *testing.T) {
 	}
 	if files := f.liveFiles(); len(files) != 0 {
 		t.Fatalf("live files after Run = %v", files)
+	}
+}
+
+// readTimes returns the read times of each metrics kind.
+func (e *liveExec) readTimes() map[string][]time.Time {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := map[string][]time.Time{}
+	for i, r := range e.reads {
+		out[r.GetKind()] = append(out[r.GetKind()], e.readAt[i])
+	}
+	return out
+}
+
+func TestLiveWatcherWantChurnKeepsTargetCadence(t *testing.T) {
+	// A server that changes the want-list every second must not get a
+	// box read more often than max(TelemetryLiveInterval, MinInterval).
+	type churn struct {
+		name string
+		sets [][]pvecontract.LiveTarget
+	}
+	churns := []churn{
+		{"alternate targets", [][]pvecontract.LiveTarget{{wantNode}, {wantGuest}}},
+		{"target leaves and returns", [][]pvecontract.LiveTarget{{wantNode, wantGuest}, {wantGuest}}},
+		{"want-list emptied", [][]pvecontract.LiveTarget{{wantNode}, nil}},
+	}
+	for _, minS := range []int64{10, 30} {
+		for _, c := range churns {
+			t.Run(c.name+"/min "+itoa(int(minS))+"s", func(t *testing.T) {
+				f := newLiveFixture(t, grantFixture(t, gid1, telT0, func(d *permit.ReadGrantDoc) {
+					d.Trigger = permit.TriggerOnDemand
+					d.MinIntervalS = minS
+				}))
+				for i := range 90 {
+					if set := c.sets[i%len(c.sets)]; set != nil {
+						f.want(set...)
+					} else {
+						writeWantRaw(t, f, []byte("{}"))
+					}
+					f.tick()
+					f.clk.Add(time.Second)
+				}
+				gap := max(TelemetryLiveInterval, time.Duration(minS)*time.Second)
+				times := f.exec.readTimes()
+				if len(times["node"]) < 2 {
+					t.Fatalf("node reads = %v", times["node"])
+				}
+				for kind, ts := range times {
+					for i := 1; i < len(ts); i++ {
+						if d := ts[i].Sub(ts[i-1]); d < gap {
+							t.Fatalf("%s read %v apart, want at least %v (reads %v)", kind, d, gap, ts)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestLiveWatcherGrantMinIntervalAboveLiveInterval(t *testing.T) {
+	f := newLiveFixture(t, grantFixture(t, gid1, telT0, func(d *permit.ReadGrantDoc) {
+		d.Trigger = permit.TriggerOnDemand
+		d.MinIntervalS = 45
+	}))
+	for range 120 {
+		f.want(wantNode)
+		f.tick()
+		f.clk.Add(time.Second)
+	}
+	ts := f.exec.readTimes()["node"]
+	if len(ts) != 3 {
+		t.Fatalf("node reads = %v, want one per 45 s", ts)
+	}
+	for i := 1; i < len(ts); i++ {
+		if d := ts[i].Sub(ts[i-1]); d < 45*time.Second {
+			t.Fatalf("node read %v apart", d)
+		}
+	}
+}
+
+func TestLiveWatcherDeniedTargetNotRetriedWhenItReturns(t *testing.T) {
+	for _, code := range []codes.Code{codes.PermissionDenied, codes.NotFound} {
+		t.Run(code.String(), func(t *testing.T) {
+			f := newLiveFixture(t, grantFixture(t, gid1, telT0, onDemandMut))
+			f.exec.readErr = map[string]error{"qemu": status.Error(code, "refused")}
+			f.want(wantGuest)
+			f.tick()
+			if n := len(f.exec.readTimes()["qemu"]); n != 1 {
+				t.Fatalf("guest reads = %d", n)
+			}
+			// The guest leaves and returns every other second, other
+			// targets churn too, and the leases are refreshed meanwhile.
+			sets := [][]pvecontract.LiveTarget{{wantNode}, {wantGuest}, {wantGuest, wantNode}, nil}
+			for i := 0; time.Duration(i)*time.Second < liveDenyBackoff-2*time.Second; i++ {
+				f.clk.Add(time.Second)
+				if set := sets[i%len(sets)]; set != nil {
+					f.want(set...)
+				} else {
+					writeWantRaw(t, f, []byte("{}"))
+				}
+				f.tick()
+			}
+			if ts := f.exec.readTimes()["qemu"]; len(ts) != 1 {
+				t.Fatalf("denied guest retried before its backoff: %v", ts)
+			}
+			// After the backoff the guest is tried again.
+			for range 15 {
+				f.clk.Add(time.Second)
+				f.want(wantGuest)
+				f.tick()
+			}
+			if ts := f.exec.readTimes()["qemu"]; len(ts) != 2 {
+				t.Fatalf("guest reads after the backoff = %v", ts)
+			}
+		})
+	}
+}
+
+func TestLiveWatcherDenialEndsWithNewGrantVersion(t *testing.T) {
+	f := newLiveFixture(t, grantFixture(t, gid1, telT0, onDemandMut))
+	f.exec.readErr = map[string]error{"qemu": status.Error(codes.PermissionDenied, "refused")}
+	f.want(wantGuest)
+	f.tick()
+	// A re-approved grant (new digest) is a new authorization: the target
+	// is tried again after the next lease refresh.
+	f.exec.setGrants(grantFixture(t, gid1, telT0, func(d *permit.ReadGrantDoc) {
+		d.Trigger = permit.TriggerOnDemand
+		d.RunBudget = 599
+	}))
+	for range int(liveLeaseRefresh/time.Second) + 1 {
+		f.clk.Add(time.Second)
+		f.want(wantGuest)
+		f.tick()
+	}
+	if ts := f.exec.readTimes()["qemu"]; len(ts) != 2 {
+		t.Fatalf("guest reads = %v, want a retry under the new grant version", ts)
+	}
+}
+
+func TestLiveCadenceBounded(t *testing.T) {
+	c := newLiveCadence()
+	now := telT0
+	for i := range maxLiveCadenceEntries + 50 {
+		tg := provTarget("remote-a", uint64(pvecontract.MinVMID+i), 1)
+		c.recordRead(tg, TelemetryLiveInterval, now)
+		c.recordDenied(tg, gid1, "d", now)
+	}
+	if len(c.reads) > maxLiveCadenceEntries || len(c.denied) > maxLiveCadenceEntries {
+		t.Fatalf("cadence entries = %d reads, %d denials", len(c.reads), len(c.denied))
+	}
+	c.prune(now.Add(liveDenyBackoff + TelemetryLiveInterval))
+	if len(c.reads) != 0 || len(c.denied) != 0 {
+		t.Fatalf("aged entries kept: %d reads, %d denials", len(c.reads), len(c.denied))
 	}
 }

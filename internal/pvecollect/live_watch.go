@@ -7,9 +7,14 @@
 // reads. The want-list adds no authority: a wanted box is read only if an
 // on-demand provider_telemetry lease the collector derived itself from the
 // executor's approved read grants lists it exactly, and its remote is
-// currently configured and active. All reads go through the shared
+// currently configured and active. All reads go through the watcher's own
 // TelemetryScheduler, so ProviderMetricsSpacing, the live target cap and the
-// leases' run budgets apply. The executor re-authorizes every read.
+// leases' run budgets apply to the live reads; that scheduler does not share
+// its spacing or budget counters with other schedulers in the process. A
+// box's last read and an executor refusal are remembered across want-list
+// changes, so a churning want-list cannot shorten the grant's MinInterval or
+// the live cadence, nor retry a refused box early. The executor
+// re-authorizes every read.
 
 package pvecollect
 
@@ -20,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"slices"
 	"strconv"
@@ -29,6 +35,7 @@ import (
 
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
@@ -53,6 +60,12 @@ const (
 	liveDirBatch = 256
 	// liveViewerID is the scheduler viewer that stands for the want-list.
 	liveViewerID = "live-want"
+	// liveDenyBackoff is how long a box the executor refused under a grant
+	// version (PermissionDenied, NotFound) is not read again under it.
+	liveDenyBackoff = 5 * time.Minute
+	// maxLiveCadenceEntries bounds the remembered reads and the remembered
+	// refusals each.
+	maxLiveCadenceEntries = MaxTelemetryTargets
 )
 
 // errLiveUnwanted is returned by the live sink for a sample of a target that
@@ -82,6 +95,7 @@ type LiveWatcher struct {
 	h     *LiveHandoff
 	sched *TelemetryScheduler
 	sink  *liveSink
+	cad   *liveCadence
 	now   func() time.Time
 	log   *slog.Logger
 
@@ -91,7 +105,9 @@ type LiveWatcher struct {
 	remotes     map[string]bool  // active remote IDs at the last refresh
 	leases      []TelemetryLease // on-demand provider leases at the last refresh
 	leaseSig    string           // signature of the leases given to the scheduler
+	refusedSig  string           // signature of a lease set SetLeases refused
 	active      map[string]TelemetryTarget
+	refused     map[string]bool // targets whose viewer request was refused
 }
 
 // NewLiveWatcher builds a live watcher reading through exec and publishing
@@ -107,13 +123,15 @@ func NewLiveWatcher(exec LiveExecutor, h *LiveHandoff, cfg LiveWatcherConfig) (*
 		cfg.Log = slog.Default()
 	}
 	sink := &liveSink{wanted: map[string]TelemetryTarget{}, entries: map[string]*liveEntry{}, dirty: map[string]bool{}}
-	sched, err := NewTelemetryScheduler(ProviderTelemetryReader{Reader: exec}, sink, TelemetryConfig{Now: cfg.Now})
+	cad := newLiveCadence()
+	reader := liveReader{r: ProviderTelemetryReader{Reader: exec}, cad: cad, now: cfg.Now}
+	sched, err := NewTelemetryScheduler(reader, sink, TelemetryConfig{Now: cfg.Now})
 	if err != nil {
 		return nil, fmt.Errorf("pvecollect: live scheduler: %w", err)
 	}
 	return &LiveWatcher{
-		exec: exec, h: h, sched: sched, sink: sink, now: cfg.Now, log: cfg.Log,
-		active: map[string]TelemetryTarget{},
+		exec: exec, h: h, sched: sched, sink: sink, cad: cad, now: cfg.Now, log: cfg.Log,
+		active: map[string]TelemetryTarget{}, refused: map[string]bool{},
 	}, nil
 }
 
@@ -143,6 +161,7 @@ func (w *LiveWatcher) Run(ctx context.Context) error {
 // that are due. Reads run in goroutines tracked by wg.
 func (w *LiveWatcher) step(ctx context.Context, wg *sync.WaitGroup) {
 	now := w.now()
+	w.cad.prune(now)
 	want, err := w.h.ReadLiveWant(ctx)
 	if err != nil {
 		w.log.Warn("live want-list refused", "error", err)
@@ -155,7 +174,7 @@ func (w *LiveWatcher) step(ctx context.Context, wg *sync.WaitGroup) {
 	if !w.refreshed || now.Before(w.lastRefresh) || now.Sub(w.lastRefresh) >= liveLeaseRefresh {
 		w.refresh(ctx, now)
 	}
-	w.apply(w.effective(want, now))
+	w.apply(w.effective(want, now), now)
 	w.flush(ctx, now)
 	w.sched.start(ctx, wg)
 }
@@ -163,8 +182,9 @@ func (w *LiveWatcher) step(ctx context.Context, wg *sync.WaitGroup) {
 // stop drops every live target: no further reads, in-flight reads are
 // cancelled and their results discarded.
 func (w *LiveWatcher) stop(ctx context.Context) {
-	w.apply(nil)
-	w.flush(ctx, w.now())
+	now := w.now()
+	w.apply(nil, now)
+	w.flush(ctx, now)
 }
 
 // refresh re-derives the on-demand provider leases from the executor's
@@ -193,6 +213,7 @@ func (w *LiveWatcher) refresh(ctx context.Context, now time.Time) {
 	}
 	w.remotes = remotes
 	w.leases = liveLeases(TelemetryLeasesFromGrants(gs.GetGrants(), TelemetryIdentities{Remotes: rs.GetRemotes()}, now))
+	w.cad.setGrants(w.leases)
 }
 
 // liveLeases keeps the on-demand leases and only their provider targets.
@@ -252,13 +273,28 @@ func (w *LiveWatcher) effective(want pvecontract.LiveWant, now time.Time) map[st
 }
 
 // apply hands the effective targets to the scheduler: leases restricted to
-// those targets and one renewed viewer request per target.
-func (w *LiveWatcher) apply(eff map[string]TelemetryTarget) {
+// the targets that may be read now and one renewed viewer request per
+// target. A target that is not already being served waits until its last
+// read (remembered across want-list changes) is max(TelemetryLiveInterval,
+// MinInterval) old; a target the executor refused under a grant version is
+// left out of that lease until its backoff ends.
+func (w *LiveWatcher) apply(eff map[string]TelemetryTarget, now time.Time) {
+	ready := map[string]TelemetryTarget{}
+	for k, t := range eff {
+		iv, ok := w.liveInterval(t, now)
+		if !ok {
+			continue
+		}
+		if _, served := w.active[k]; !served && !w.cad.due(t, iv, now) {
+			continue
+		}
+		ready[k] = t
+	}
 	var leases []TelemetryLease
 	for _, l := range w.leases {
 		var ts []TelemetryTarget
 		for _, t := range l.Targets {
-			if _, ok := eff[t.key()]; ok {
+			if _, ok := ready[t.key()]; ok && !w.cad.isDenied(t, l.GrantID, l.GrantDigest, now) {
 				ts = append(ts, t)
 			}
 		}
@@ -268,38 +304,75 @@ func (w *LiveWatcher) apply(eff map[string]TelemetryTarget) {
 		l.Targets = ts
 		leases = append(leases, l)
 	}
-	if len(eff) == 0 {
-		leases = nil
-	}
 	if sig := leaseSignature(leases); sig != w.leaseSig {
-		if err := w.sched.SetLeases(leases); err != nil {
-			w.log.Warn("live leases refused", "error", err)
-			_ = w.sched.SetLeases(nil)
-			w.sink.setWanted(nil)
-			w.leaseSig = ""
-			w.active = map[string]TelemetryTarget{}
+		if sig == w.refusedSig {
+			w.dropAll()
 			return
 		}
-		w.leaseSig = sig
+		if err := w.sched.SetLeases(leases); err != nil {
+			// Logged once per refused set; retried only when it changes.
+			w.log.Warn("live leases refused", "error", err)
+			w.refusedSig = sig
+			w.dropAll()
+			return
+		}
+		w.leaseSig, w.refusedSig = sig, ""
 	}
 	w.sink.setWanted(eff)
 	for k, t := range w.active {
-		if _, ok := eff[k]; !ok {
+		if _, ok := ready[k]; !ok {
 			w.sched.Release(liveViewerID, t)
 		}
 	}
 	w.active = map[string]TelemetryTarget{}
-	for k, t := range eff {
+	refused := map[string]bool{}
+	var firstErr error
+	for k, t := range ready {
 		if _, err := w.sched.Request(liveViewerID, t); err != nil {
-			w.log.Warn("live target request refused", "remote", t.RemoteID, "error", err)
+			refused[k] = true
+			if firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
 		w.active[k] = t
 	}
+	if len(refused) > 0 && !maps.Equal(refused, w.refused) {
+		w.log.Warn("live target requests refused", "targets", len(refused), "error", firstErr)
+	}
+	w.refused = refused
+}
+
+// dropAll clears the scheduler's leases and every live target.
+func (w *LiveWatcher) dropAll() {
+	if w.leaseSig != "" {
+		_ = w.sched.SetLeases(nil)
+		w.leaseSig = ""
+	}
+	w.sink.setWanted(nil)
+	w.active = map[string]TelemetryTarget{}
+}
+
+// liveInterval returns the read spacing of t: max(TelemetryLiveInterval,
+// the largest MinInterval of the leases listing t that have not been
+// refused for it). ok is false when no such lease exists.
+func (w *LiveWatcher) liveInterval(t TelemetryTarget, now time.Time) (iv time.Duration, ok bool) {
+	iv = TelemetryLiveInterval
+	k := t.key()
+	for i := range w.leases {
+		l := &w.leases[i]
+		if !slices.ContainsFunc(l.Targets, func(x TelemetryTarget) bool { return x.key() == k }) ||
+			w.cad.isDenied(t, l.GrantID, l.GrantDigest, now) {
+			continue
+		}
+		iv, ok = max(iv, l.MinInterval), true
+	}
+	return iv, ok
 }
 
 // leaseSignature identifies a lease set so the scheduler is only updated
-// when it changes (SetLeases resets the executor-refusal memory).
+// when it changes. SetLeases resets the scheduler's executor-refusal
+// memory; the watcher keeps its own in liveCadence.
 func leaseSignature(ls []TelemetryLease) string {
 	parts := make([]string, 0, len(ls))
 	for _, l := range ls {
@@ -356,11 +429,13 @@ func (w *LiveWatcher) sweep(ctx context.Context, keep map[string]bool) {
 				stale = append(stale, remote)
 			}
 		}
-		if errors.Is(err, io.EOF) || len(names) < liveDirBatch {
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				w.log.Warn("sweep live directory", "error", err)
+			}
 			break
 		}
-		if err != nil {
-			w.log.Warn("sweep live directory", "error", err)
+		if len(names) < liveDirBatch {
 			break
 		}
 	}
@@ -479,4 +554,169 @@ func (s *liveSink) take(now time.Time) (map[string][]pvecontract.LiveSample, map
 	}
 	s.dirty = map[string]bool{}
 	return publish, keep
+}
+
+// liveReader wraps the provider reader and remembers each read and each
+// executor refusal in the watcher's cadence state.
+type liveReader struct {
+	r   TelemetryReader
+	cad *liveCadence
+	now func() time.Time
+}
+
+// ReadTelemetry records the read, performs it and records a refusal.
+func (l liveReader) ReadTelemetry(ctx context.Context, read TelemetryRead) ([]TelemetrySample, error) {
+	l.cad.noteRead(read, l.now())
+	smp, err := l.r.ReadTelemetry(ctx, read)
+	if err != nil {
+		switch status.Code(err) {
+		case codes.PermissionDenied, codes.NotFound:
+			l.cad.noteDenied(read, l.now())
+		}
+	}
+	return smp, err
+}
+
+// liveRead is the last read of one target.
+type liveRead struct {
+	at        time.Time // when the read started
+	holdUntil time.Time // earliest next read under the interval at that time
+}
+
+// liveGrant is what the cadence state needs of a current lease.
+type liveGrant struct {
+	digest      string
+	minInterval time.Duration
+}
+
+// liveCadence is the per-target read cadence and executor-refusal memory
+// of the live watcher. It is keyed by the exact target identity and
+// independent of the want-list, bounded, and aged out once an entry can no
+// longer delay a read. It is safe for concurrent use.
+type liveCadence struct {
+	mu     sync.Mutex
+	reads  map[string]liveRead  // target key → last read
+	denied map[string]time.Time // grant ID, digest, target key → refused until
+	grants map[string]liveGrant // grant ID → current lease facts
+}
+
+func newLiveCadence() *liveCadence {
+	return &liveCadence{reads: map[string]liveRead{}, denied: map[string]time.Time{}, grants: map[string]liveGrant{}}
+}
+
+func deniedKey(t TelemetryTarget, grantID, digest string) string {
+	return grantID + "\x00" + digest + "\x00" + t.key()
+}
+
+// setGrants records the current leases' digests and minimum intervals.
+func (c *liveCadence) setGrants(ls []TelemetryLease) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.grants = make(map[string]liveGrant, len(ls))
+	for _, l := range ls {
+		c.grants[l.GrantID] = liveGrant{digest: l.GrantDigest, minInterval: l.MinInterval}
+	}
+}
+
+// noteRead records a read issued under read.GrantID at now.
+func (c *liveCadence) noteRead(read TelemetryRead, now time.Time) {
+	c.mu.Lock()
+	g := c.grants[read.GrantID]
+	c.mu.Unlock()
+	c.recordRead(read.Target, max(TelemetryLiveInterval, g.minInterval), now)
+}
+
+// noteDenied records an executor refusal of read at now.
+func (c *liveCadence) noteDenied(read TelemetryRead, now time.Time) {
+	c.mu.Lock()
+	g := c.grants[read.GrantID]
+	c.mu.Unlock()
+	c.recordDenied(read.Target, read.GrantID, g.digest, now)
+}
+
+// recordRead remembers a read of t at now that holds the next read back
+// for interval. When full, the entry that expires first is evicted.
+func (c *liveCadence) recordRead(t TelemetryTarget, interval time.Duration, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	k := t.key()
+	hold := now.Add(interval)
+	if e, ok := c.reads[k]; ok && e.holdUntil.After(hold) {
+		hold = e.holdUntil
+	}
+	if _, ok := c.reads[k]; !ok && len(c.reads) >= maxLiveCadenceEntries {
+		evictFirst(c.reads, func(e liveRead) time.Time { return e.holdUntil })
+	}
+	c.reads[k] = liveRead{at: now, holdUntil: hold}
+}
+
+// recordDenied remembers that the executor refused t under the grant
+// version until now+liveDenyBackoff. When full, the entry that expires
+// first is evicted.
+func (c *liveCadence) recordDenied(t TelemetryTarget, grantID, digest string, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	k := deniedKey(t, grantID, digest)
+	if _, ok := c.denied[k]; !ok && len(c.denied) >= maxLiveCadenceEntries {
+		evictFirst(c.denied, func(u time.Time) time.Time { return u })
+	}
+	c.denied[k] = now.Add(liveDenyBackoff)
+}
+
+// evictFirst deletes the entry of m with the earliest expiry.
+func evictFirst[V any](m map[string]V, expiry func(V) time.Time) {
+	first, found := "", false
+	var at time.Time
+	for k, v := range m {
+		if e := expiry(v); !found || e.Before(at) || e.Equal(at) && k < first {
+			first, at, found = k, e, true
+		}
+	}
+	if found {
+		delete(m, first)
+	}
+}
+
+// isDenied reports whether the executor refused t under the grant version
+// and the backoff has not ended at now.
+func (c *liveCadence) isDenied(t TelemetryTarget, grantID, digest string, now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	u, ok := c.denied[deniedKey(t, grantID, digest)]
+	return ok && now.Before(u)
+}
+
+// due reports whether t may be read at now: its last read is at least
+// interval old and its hold has ended. A clock step backwards restarts the
+// hold at now instead of reading early.
+func (c *liveCadence) due(t TelemetryTarget, interval time.Duration, now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	k := t.key()
+	e, ok := c.reads[k]
+	if !ok {
+		return true
+	}
+	if now.Before(e.at) {
+		c.reads[k] = liveRead{at: now, holdUntil: now.Add(e.holdUntil.Sub(e.at))}
+		return false
+	}
+	return !now.Before(e.holdUntil) && now.Sub(e.at) >= interval
+}
+
+// prune forgets reads whose hold has ended and refusals whose backoff has
+// ended at now.
+func (c *liveCadence) prune(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k, e := range c.reads {
+		if !now.Before(e.holdUntil) && !now.Before(e.at) {
+			delete(c.reads, k)
+		}
+	}
+	for k, u := range c.denied {
+		if !now.Before(u) {
+			delete(c.denied, k)
+		}
+	}
 }
