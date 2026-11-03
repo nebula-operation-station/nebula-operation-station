@@ -61,6 +61,18 @@ func Open(path string) (*sql.DB, error) {
 // as a DSN query string, so either character in the path would silently
 // change which pragmas apply.
 func OpenWithOptions(path string, opts Options) (*sql.DB, error) {
+	return openWithOptions(path, opts, -1)
+}
+
+// OpenAt is like Open but applies only the embedded migrations with
+// version <= v, leaving the database at schema version v. It exists for
+// tests that need a database at a historical schema version; production
+// code must use Open so a database is never left behind head.
+func OpenAt(path string, v int) (*sql.DB, error) {
+	return openWithOptions(path, Options{}, v)
+}
+
+func openWithOptions(path string, opts Options, maxVersion int) (*sql.DB, error) {
 	if strings.ContainsAny(path, "#?") {
 		return nil, fmt.Errorf("serverdb: open %s: path must not contain '?' or '#'", path)
 	}
@@ -89,25 +101,34 @@ func OpenWithOptions(path string, opts Options) (*sql.DB, error) {
 		return nil, fmt.Errorf("serverdb: open %s: %w", path, err)
 	}
 
-	if err := migrate(db, now); err != nil {
+	if err := migrateUpTo(db, now, maxVersion); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return db, nil
 }
 
-// migrate loads the embedded migrations and applies any pending ones to db,
-// recording them in schema_migrations. It is idempotent: already-applied
-// migrations are skipped.
-func migrate(db *sql.DB, now func() time.Time) error {
+// migrateUpTo applies the embedded migrations with version <= maxVersion to
+// db, recording them in schema_migrations; a negative maxVersion applies all
+// of them. It is idempotent: already-applied migrations are skipped.
+func migrateUpTo(db *sql.DB, now func() time.Time, maxVersion int) error {
 	migrations, err := loadMigrations()
 	if err != nil {
 		return err
 	}
+	if maxVersion >= 0 {
+		var capped []migration
+		for _, m := range migrations {
+			if m.version <= maxVersion {
+				capped = append(capped, m)
+			}
+		}
+		migrations = capped
+	}
 	return migrateWith(db, migrations, now)
 }
 
-// migrateWith applies the given migrations to db. See migrate for the
+// migrateWith applies the given migrations to db. See migrateUpTo for the
 // contract: in version order, each in its own transaction, recorded in
 // schema_migrations, a newer database version is refused.
 func migrateWith(db *sql.DB, migrations []migration, now func() time.Time) error {

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -383,40 +384,21 @@ func TestDriftDisappearedDifferenceInvalidatesConfirmation(t *testing.T) {
 
 func TestDriftVersionMigrationPreservesExistingDecisions(t *testing.T) {
 	ctx := context.Background()
-	_, db, _ := newTestStore(t)
-	// Rebuild the pre-versioning drift table with both an open hint and an
-	// audited decision, then reopen through the normal migration path.
+	// Build the pre-versioning schema directly from the embedded migrations:
+	// everything up to version 21, the state just before migration 0022
+	// (drift versioning). Migrations added after 0022 are applied by
+	// serverdb.Open below and need no change in this test.
+	path := filepath.Join(t.TempDir(), "test.db")
+	db, err := serverdb.OpenAt(path, 21)
+	if err != nil {
+		t.Fatalf("open at schema version 21: %v", err)
+	}
+	// Seed the legacy table with both an open hint and an audited decision,
+	// then reopen through the normal migration path.
 	if _, err := db.ExecContext(ctx, `
-  DROP TABLE pve_drift_hints;
-  CREATE TABLE pve_drift_hints (
-   id INTEGER PRIMARY KEY, remote_id TEXT NOT NULL, vmid INTEGER NOT NULL,
-   generation INTEGER NOT NULL, host_id TEXT NOT NULL, field TEXT NOT NULL,
-   inventory_value TEXT NOT NULL, pve_value TEXT NOT NULL, created_at TEXT NOT NULL,
-   resolved_at TEXT NOT NULL DEFAULT '', resolution TEXT NOT NULL DEFAULT '',
-   resolved_by TEXT NOT NULL DEFAULT '', UNIQUE(host_id, field));
   INSERT INTO pve_drift_hints VALUES
    (41, 'remote-a', 100, 1, 'web1', 'ram', '8 GiB', '4 GiB', '2026-10-29T12:00:00Z', '2026-10-29T12:00:00Z', 'ignored', 'alice'),
-   (42, 'remote-a', 100, 1, 'web1', 'state', 'stopped', 'running', '2026-10-29T12:00:00Z', '', '', '');
-  DROP INDEX idx_pve_backup_task_freshness;
-  DROP INDEX idx_pve_backup_catalog_freshness;
-  DROP TABLE pve_metric_buckets;
-  DROP TABLE pve_metric_current;
-  DROP TRIGGER tombstone_service_placements_on_host_delete;
-  DROP TABLE pve_service_placements;
-  DROP TABLE deploy_profile_versions;
-  DROP TABLE deploy_profiles;
-  ALTER TABLE ip_entries DROP COLUMN held;
-  DROP TABLE batch_members;
-  DROP TABLE batch_stages;
-  DROP INDEX batches_created;
-  DROP TABLE batches;
-  DELETE FROM schema_migrations WHERE version >= 22;`); err != nil {
-		t.Fatal(err)
-	}
-	var path string
-	var seq int
-	var name string
-	if err := db.QueryRowContext(ctx, `PRAGMA database_list`).Scan(&seq, &name, &path); err != nil {
+   (42, 'remote-a', 100, 1, 'web1', 'state', 'stopped', 'running', '2026-10-29T12:00:00Z', '', '', '');`); err != nil {
 		t.Fatal(err)
 	}
 	before, err := scanLegacyDriftDecision(ctx, db)
