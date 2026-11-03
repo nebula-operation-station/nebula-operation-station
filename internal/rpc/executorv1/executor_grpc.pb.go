@@ -101,6 +101,9 @@ const (
 	ExecutorService_ReviewBatch_FullMethodName                     = "/nebula.executor.v1.ExecutorService/ReviewBatch"
 	ExecutorService_ApproveBatchCLI_FullMethodName                 = "/nebula.executor.v1.ExecutorService/ApproveBatchCLI"
 	ExecutorService_GetBatchStatus_FullMethodName                  = "/nebula.executor.v1.ExecutorService/GetBatchStatus"
+	ExecutorService_ReviewBuiltinTrust_FullMethodName              = "/nebula.executor.v1.ExecutorService/ReviewBuiltinTrust"
+	ExecutorService_CommitBuiltinTrust_FullMethodName              = "/nebula.executor.v1.ExecutorService/CommitBuiltinTrust"
+	ExecutorService_GetBuiltinTrustStatus_FullMethodName           = "/nebula.executor.v1.ExecutorService/GetBuiltinTrustStatus"
 	ExecutorService_ListEvents_FullMethodName                      = "/nebula.executor.v1.ExecutorService/ListEvents"
 	ExecutorService_BackupExecutor_FullMethodName                  = "/nebula.executor.v1.ExecutorService/BackupExecutor"
 	ExecutorService_ProbePVERemote_FullMethodName                  = "/nebula.executor.v1.ExecutorService/ProbePVERemote"
@@ -402,6 +405,22 @@ type ExecutorServiceClient interface {
 	// Role: server, admin. Confirms the batch is approved and fresh, with the
 	// parent/member linkage. The server polls this before dispatch.
 	GetBatchStatus(ctx context.Context, in *GetBatchStatusRequest, opts ...grpc.CallOption) (*GetBatchStatusResponse, error)
+	// Built-in trust (ADR 0007, E19c). The executor reads the built-in bundle
+	// from its locally configured, verified NOS release directory; no request
+	// names a path, a bundle or bytes. Bulk trust is local-admin only: there is
+	// no server or browser bulk trust method.
+	// Role: admin only. The complete review of the local release bundle
+	// against the executor trust store: old/new versions, hashes, risks, full
+	// script diffs and executor scanner findings. Commits nothing.
+	ReviewBuiltinTrust(ctx context.Context, in *ReviewBuiltinTrustRequest, opts ...grpc.CallOption) (*ReviewBuiltinTrustResponse, error)
+	// Role: admin only. Commits the reviewed additions/changes atomically,
+	// bound to the reviewed manifest digest; every old version is explicitly
+	// retained or retired. The admin UID comes from peer credentials.
+	CommitBuiltinTrust(ctx context.Context, in *CommitBuiltinTrustRequest, opts ...grpc.CallOption) (*CommitBuiltinTrustResponse, error)
+	// Role: server, admin. Read-only trust status for the banner: which
+	// built-in versions are trusted and which are untrusted. No diffs, no
+	// script bytes, no scanner excerpts, no paths. Grants nothing.
+	GetBuiltinTrustStatus(ctx context.Context, in *GetBuiltinTrustStatusRequest, opts ...grpc.CallOption) (*GetBuiltinTrustStatusResponse, error)
 	// Signed events (M10-1). Role: server, admin. Read-only: the chain of
 	// the executor's audit events with the key to verify it.
 	ListEvents(ctx context.Context, in *ListEventsRequest, opts ...grpc.CallOption) (*ListEventsResponse, error)
@@ -1260,6 +1279,36 @@ func (c *executorServiceClient) GetBatchStatus(ctx context.Context, in *GetBatch
 	return out, nil
 }
 
+func (c *executorServiceClient) ReviewBuiltinTrust(ctx context.Context, in *ReviewBuiltinTrustRequest, opts ...grpc.CallOption) (*ReviewBuiltinTrustResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReviewBuiltinTrustResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ReviewBuiltinTrust_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) CommitBuiltinTrust(ctx context.Context, in *CommitBuiltinTrustRequest, opts ...grpc.CallOption) (*CommitBuiltinTrustResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitBuiltinTrustResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_CommitBuiltinTrust_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) GetBuiltinTrustStatus(ctx context.Context, in *GetBuiltinTrustStatusRequest, opts ...grpc.CallOption) (*GetBuiltinTrustStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetBuiltinTrustStatusResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_GetBuiltinTrustStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *executorServiceClient) ListEvents(ctx context.Context, in *ListEventsRequest, opts ...grpc.CallOption) (*ListEventsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListEventsResponse)
@@ -1703,6 +1752,22 @@ type ExecutorServiceServer interface {
 	// Role: server, admin. Confirms the batch is approved and fresh, with the
 	// parent/member linkage. The server polls this before dispatch.
 	GetBatchStatus(context.Context, *GetBatchStatusRequest) (*GetBatchStatusResponse, error)
+	// Built-in trust (ADR 0007, E19c). The executor reads the built-in bundle
+	// from its locally configured, verified NOS release directory; no request
+	// names a path, a bundle or bytes. Bulk trust is local-admin only: there is
+	// no server or browser bulk trust method.
+	// Role: admin only. The complete review of the local release bundle
+	// against the executor trust store: old/new versions, hashes, risks, full
+	// script diffs and executor scanner findings. Commits nothing.
+	ReviewBuiltinTrust(context.Context, *ReviewBuiltinTrustRequest) (*ReviewBuiltinTrustResponse, error)
+	// Role: admin only. Commits the reviewed additions/changes atomically,
+	// bound to the reviewed manifest digest; every old version is explicitly
+	// retained or retired. The admin UID comes from peer credentials.
+	CommitBuiltinTrust(context.Context, *CommitBuiltinTrustRequest) (*CommitBuiltinTrustResponse, error)
+	// Role: server, admin. Read-only trust status for the banner: which
+	// built-in versions are trusted and which are untrusted. No diffs, no
+	// script bytes, no scanner excerpts, no paths. Grants nothing.
+	GetBuiltinTrustStatus(context.Context, *GetBuiltinTrustStatusRequest) (*GetBuiltinTrustStatusResponse, error)
 	// Signed events (M10-1). Role: server, admin. Read-only: the chain of
 	// the executor's audit events with the key to verify it.
 	ListEvents(context.Context, *ListEventsRequest) (*ListEventsResponse, error)
@@ -2000,6 +2065,15 @@ func (UnimplementedExecutorServiceServer) ApproveBatchCLI(context.Context, *Appr
 }
 func (UnimplementedExecutorServiceServer) GetBatchStatus(context.Context, *GetBatchStatusRequest) (*GetBatchStatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetBatchStatus not implemented")
+}
+func (UnimplementedExecutorServiceServer) ReviewBuiltinTrust(context.Context, *ReviewBuiltinTrustRequest) (*ReviewBuiltinTrustResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReviewBuiltinTrust not implemented")
+}
+func (UnimplementedExecutorServiceServer) CommitBuiltinTrust(context.Context, *CommitBuiltinTrustRequest) (*CommitBuiltinTrustResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CommitBuiltinTrust not implemented")
+}
+func (UnimplementedExecutorServiceServer) GetBuiltinTrustStatus(context.Context, *GetBuiltinTrustStatusRequest) (*GetBuiltinTrustStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetBuiltinTrustStatus not implemented")
 }
 func (UnimplementedExecutorServiceServer) ListEvents(context.Context, *ListEventsRequest) (*ListEventsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListEvents not implemented")
@@ -3510,6 +3584,60 @@ func _ExecutorService_GetBatchStatus_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_ReviewBuiltinTrust_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReviewBuiltinTrustRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ReviewBuiltinTrust(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ReviewBuiltinTrust_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ReviewBuiltinTrust(ctx, req.(*ReviewBuiltinTrustRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_CommitBuiltinTrust_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommitBuiltinTrustRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).CommitBuiltinTrust(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_CommitBuiltinTrust_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).CommitBuiltinTrust(ctx, req.(*CommitBuiltinTrustRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_GetBuiltinTrustStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetBuiltinTrustStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).GetBuiltinTrustStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_GetBuiltinTrustStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).GetBuiltinTrustStatus(ctx, req.(*GetBuiltinTrustStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ExecutorService_ListEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListEventsRequest)
 	if err := dec(in); err != nil {
@@ -4124,6 +4252,18 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetBatchStatus",
 			Handler:    _ExecutorService_GetBatchStatus_Handler,
+		},
+		{
+			MethodName: "ReviewBuiltinTrust",
+			Handler:    _ExecutorService_ReviewBuiltinTrust_Handler,
+		},
+		{
+			MethodName: "CommitBuiltinTrust",
+			Handler:    _ExecutorService_CommitBuiltinTrust_Handler,
+		},
+		{
+			MethodName: "GetBuiltinTrustStatus",
+			Handler:    _ExecutorService_GetBuiltinTrustStatus_Handler,
 		},
 		{
 			MethodName: "ListEvents",
