@@ -517,14 +517,21 @@ func parsePveSteps(params []byte) ([]PveMutationStep, error) {
 }
 
 // taskType returns the PVE task type the client expects for step. A
-// guest snapshot step method is known only to a client that implements
-// PveSnapshotClient; no other family can claim it.
+// guest snapshot, backup or migration step method is known only to a
+// client that implements PveSnapshotClient, PveBackupClient or
+// PveMigrateClient respectively; no other family can claim it.
 func (m *PveMutations) taskType(step PveMutationStep) (string, error) {
 	var tt string
 	var ok bool
 	if snapTT, isSnap := GuestSnapshotStepTaskType(step.Method); isSnap {
 		_, client := m.Client.(PveSnapshotClient)
 		tt, ok = snapTT, client
+	} else if bTT, isBackup := GuestBackupStepTaskType(step.Method); isBackup {
+		_, client := m.Client.(PveBackupClient)
+		tt, ok = bTT, client
+	} else if mTT, isMigrate := GuestMigrateStepTaskType(step.Method); isMigrate {
+		_, client := m.Client.(PveMigrateClient)
+		tt, ok = mTT, client
 	} else {
 		tt, ok = m.Client.TaskType(step.Method)
 	}
@@ -537,11 +544,17 @@ func (m *PveMutations) taskType(step PveMutationStep) (string, error) {
 var pveTaskTypeRe = regexp.MustCompile(`^[a-z0-9]{1,32}$`)
 
 // stepTaskID returns the ID field the PVE task of step carries, if known:
-// from the snapshot step arguments, or from a client that implements
-// PveStepTaskIDer.
+// from the snapshot, backup or migration step arguments, or from a client
+// that implements PveStepTaskIDer.
 func (m *PveMutations) stepTaskID(step PveMutationStep) (string, bool) {
 	if _, isSnap := GuestSnapshotStepTaskType(step.Method); isSnap {
 		return GuestSnapshotStepTaskID(step)
+	}
+	if _, isBackup := GuestBackupStepTaskType(step.Method); isBackup {
+		return GuestBackupStepTaskID(step)
+	}
+	if _, isMigrate := GuestMigrateStepTaskType(step.Method); isMigrate {
+		return GuestMigrateStepTaskID(step)
 	}
 	if ider, ok := m.Client.(PveStepTaskIDer); ok {
 		return ider.TaskID(step)
@@ -551,9 +564,11 @@ func (m *PveMutations) stepTaskID(step PveMutationStep) (string, bool) {
 
 // dispatch sends one step: a guest snapshot step through the client's
 // PveSnapshotClient surface (which rechecks the bound snapshot with the
-// read token immediately before sending), everything else through
-// Dispatch. A snapshot step on a client without that surface is refused
-// before anything is sent.
+// read token immediately before sending), a backup step through
+// PveBackupClient, a migration step through PveMigrateClient (which
+// rechecks cluster membership and HA state before sending), everything
+// else through Dispatch. A step of such a family on a client without its
+// surface is refused before anything is sent.
 func (m *PveMutations) dispatch(ctx context.Context, rm executordb.PveRemote, node string, step PveMutationStep, action, read pveapi.TokenSupplier) (string, error) {
 	if _, isSnap := GuestSnapshotStepTaskType(step.Method); isSnap {
 		sc, ok := m.Client.(PveSnapshotClient)
@@ -561,6 +576,20 @@ func (m *PveMutations) dispatch(ctx context.Context, rm executordb.PveRemote, no
 			return "", fmt.Errorf("dispatch %s: %w", step.Method, ErrPveRejected)
 		}
 		return sc.DispatchSnapshot(ctx, rm, node, step, action, read)
+	}
+	if _, isBackup := GuestBackupStepTaskType(step.Method); isBackup {
+		bc, ok := m.Client.(PveBackupClient)
+		if !ok {
+			return "", fmt.Errorf("dispatch %s: %w", step.Method, ErrPveRejected)
+		}
+		return bc.DispatchBackup(ctx, rm, node, step, action)
+	}
+	if _, isMigrate := GuestMigrateStepTaskType(step.Method); isMigrate {
+		mc, ok := m.Client.(PveMigrateClient)
+		if !ok {
+			return "", fmt.Errorf("dispatch %s: %w", step.Method, ErrPveRejected)
+		}
+		return mc.DispatchMigrate(ctx, rm, node, step, action, read)
 	}
 	return m.Client.Dispatch(ctx, rm, node, step, action)
 }
