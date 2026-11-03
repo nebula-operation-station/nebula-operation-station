@@ -277,8 +277,9 @@ over widening the read token (option b). Review then found that the preset
 private key is probably readable by every `VM.Audit` holder through PVE's
 cloud-init dump endpoint (see "Exposure through the PVE API" below). Until
 the lab check PK-10a answers that, the decision is recorded as **"(c)
-accepted only with mitigation M1 or M2, lab check required"**. If neither
-mitigation holds, (c) is not viable as specified and the options are listed
+accepted only with mitigations M1 and M2 together, lab check required"**
+(previously "M1 or M2"; M1 alone is not sufficient, see the variants). If
+they cannot both hold, (c) is not viable as specified and the options are listed
 under "If the lab check fails". Mechanism and threat model written by
 Claude. Nothing here was tried in a lab; every PVE and cloud-init behaviour
 marked *verify* is a release gate (ticket PK-10).
@@ -303,7 +304,7 @@ vendor-data.
 
 | Path | Needs | Failure modes | Verdict |
 | --- | --- | --- | --- |
-| (i) Operator-provisioned snippet storage plus a per-guest `cicustom` vendor-data file that NOS writes on the node | Once, by the operator: a node-local `dir` storage with content `snippets`, recorded in the executor registry. Each time: the PVE node is an enrolled managed host (spec 16 item 3, ADR 0006 "node's ordinary NOS SSH enrollment") and a new typed SSH action writes or removes exactly one file in that directory. The action token gets the `cicustom` field under `VM.Config.Cloudinit` (already part of the configuration extension) and, *verify*, the volume access check on `/storage/<snippets>` (expected `Datastore.Audit`). No new broad PVE privilege; no guest privilege. | Node not enrolled, blocked or keyring locked; storage absent on the target node; HA or manual move to a node without the file before cleanup (PVE regenerates the cloud-init drive at start and refuses a missing volume, *verify*); image with vendor-data disabled; changing `cicustom` later changes the NoCloud instance-id (*verify*); **the rendered vendor-data is probably readable by every `VM.Audit` holder through `cloudinit/dump` until cleanup (*verify*, PK-10a)** | Chosen, conditional on M1 or M2 |
+| (i) Operator-provisioned snippet storage plus a per-guest `cicustom` vendor-data file that NOS writes on the node | Once, by the operator: a node-local `dir` storage with content `snippets`, recorded in the executor registry. Each time: the PVE node is an enrolled managed host (spec 16 item 3, ADR 0006 "node's ordinary NOS SSH enrollment") and a new typed SSH action writes or removes exactly one file in that directory. The action token gets the `cicustom` field under `VM.Config.Cloudinit` (already part of the configuration extension) and, *verify*, the volume access check on `/storage/<snippets>` (expected `Datastore.Audit`). No new broad PVE privilege; no guest privilege. | Node not enrolled, blocked or keyring locked; storage absent on the target node; HA or manual move to a node without the file before cleanup (PVE regenerates the cloud-init drive at start and refuses a missing volume, *verify*); image with vendor-data disabled; changing `cicustom` later changes the NoCloud instance-id (*verify*); **the rendered vendor-data is probably readable by every `VM.Audit` holder through `cloudinit/dump` until cleanup (*verify*, PK-10a)** | Chosen, conditional on M1 and M2 together |
 | (ii) A generic, secret-free snippet that makes the guest fetch its key once from NOS over an authenticated one-time channel | A NOS endpoint the guest can reach: the executor has no network listener (spec 02) and the server must not hold secrets, so either rule would have to break. A per-guest one-time token still has to reach the guest through a PVE field or snippet, which is as exposed as the key itself. A network path from every new guest to NOS. | Guest network or DNS not ready at first boot; listener exposed to every guest network; token theft before the real guest fetches (see variant V3 below for what one-time use does and does not buy) | Rejected: adds a network-facing endpoint and does not remove the exposure of (i) |
 | (iii-a) Per-guest NoCloud seed ISO (`cidata`) uploaded through the API and attached as a CD-ROM | `Datastore.AllocateTemplate` on a dedicated ISO storage, `VM.Config.CDROM`, a volume delete right (*verify*); NOS replaces PVE's cloud-init drive, so it must render user-data and network-config itself; an ISO9660 writer in Go without a new dependency | Any PVE user who can attach ISOs from that storage can read the key; two `cidata` sources when the template keeps its cloud-init drive; more generated format code | Not now; alternative for remotes whose nodes cannot be enrolled (open question 2) |
 | (iii-b) Guest agent `file-write`, `args`/`fw_cfg`, SMBIOS strings | Guest file access (forbidden by spec 06); `args` is `root@pam` only; SMBIOS values sit in the VM config that every `VM.Audit` holder, including the read token, can read | — | Rejected. Note: if PK-10a shows that `cloudinit/dump` renders `cicustom` content, path (i) has the same `VM.Audit` exposure as SMBIOS and is not better on that axis |
@@ -383,8 +384,10 @@ mitigations M1 and M2.
   read token (`GET /access/acl` needs `Sys.Audit` on `/access`, which the
   read token's `Sys.Audit` on `/` propagates to, *verify*). `preset` is
   offered only if every principal with `VM.Audit` there is the NOS read
-  token, the NOS action token, `root@pam`, or a holder of a role that
-  already includes `VM.Console` on the guest (they already control it). Group membership is resolved; an unknown role or an
+  token, the NOS action token or `root@pam` (previously also holders of a
+  role with `VM.Console`; removed, because console access alone neither
+  gives root in a cloud-image guest nor lets the holder impersonate it, so
+  such a reader could still use a leaked preset key). Group membership is resolved; an unknown role or an
   unreadable ACL means `review`. The result is bound in the permit and a
   change between proposal and the config step stops the plan. M2 cannot
   see a principal created after the check, which is why M1 is also
