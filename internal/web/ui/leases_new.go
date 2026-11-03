@@ -52,9 +52,9 @@ const (
 	// maxScopeValueLen is the longest tag/environment value the form
 	// pre-fill accepts.
 	maxScopeValueLen = 200
-	// leaseCLICommand is the hardened-mode approval command; the digest
-	// follows it.
-	leaseCLICommand = "nebula lease approve "
+	// leaseCLICommand is the hardened-mode approval command of cmd/nebula
+	// (readgrant.go); the full digest follows it.
+	leaseCLICommand = "nebula read-grant approve "
 )
 
 // Leases lists, proposes, approves and revokes read grants.
