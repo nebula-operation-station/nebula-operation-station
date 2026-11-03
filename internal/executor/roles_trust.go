@@ -6,8 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -221,12 +223,43 @@ func (d *dirBuiltinTrust) Status(_ context.Context) (trust.BulkAdmitResult, erro
 	return res, nil
 }
 
-// statusCacheKey identifies the store generation and the bundle files by
-// device, inode, size, mtime and ctime. A replaced or rewritten bundle
-// file changes its ctime, so the key changes with any substitution.
+// statusKeyDirEntries bounds the bundle directory listing read for the
+// status cache key: the three bundle files plus one, so any extra entry
+// (which ReadBundleDir rejects) changes the key.
+const statusKeyDirEntries = 4
+
+// bundleDirNames returns up to statusKeyDirEntries entry names of the
+// bundle directory, sorted.
+func (d *dirBuiltinTrust) bundleDirNames() ([]string, error) {
+	f, err := os.Open(d.bundleDir)
+	if err != nil {
+		return nil, fmt.Errorf("built-in trust: open bundle directory: %w", err)
+	}
+	defer f.Close()
+	names, err := f.Readdirnames(statusKeyDirEntries)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("built-in trust: list bundle directory: %w", err)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// statusCacheKey identifies the store generation, the bundle directory
+// listing and the bundle files by device, inode, size, mtime and ctime. A
+// replaced or rewritten bundle file changes its ctime and an added or
+// removed entry changes the listing, so the key changes with any
+// substitution.
 func (d *dirBuiltinTrust) statusCacheKey(generation int64) (string, error) {
 	var b strings.Builder
 	b.WriteString(strconv.FormatInt(generation, 10))
+	names, err := d.bundleDirNames()
+	if err != nil {
+		return "", err
+	}
+	fmt.Fprintf(&b, "|dir %d", len(names))
+	for _, n := range names {
+		b.WriteString(" " + strconv.QuoteToASCII(n))
+	}
 	for _, name := range []string{release.ManifestFile, release.SignatureFile, release.BundleArtifact} {
 		fi, err := os.Lstat(filepath.Join(d.bundleDir, name))
 		if err != nil {

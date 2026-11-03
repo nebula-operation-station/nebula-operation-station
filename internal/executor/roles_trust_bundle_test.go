@@ -532,6 +532,45 @@ func TestDirBuiltinTrustStatusIsCached(t *testing.T) {
 	}
 }
 
+// The status cache key covers the bundle directory listing: an extra entry,
+// which ReadBundleDir rejects, invalidates a cached status even though the
+// three bundle files are untouched. Removing it again recomputes the status.
+func TestDirBuiltinTrustStatusCacheCoversDirListing(t *testing.T) {
+	for _, extra := range []string{"extra", "manifest.json.bak", ".hidden"} {
+		t.Run(extra, func(t *testing.T) {
+			e := newBundleEnv(t)
+			ctx := context.Background()
+			if _, err := e.bt.Status(ctx); err != nil {
+				t.Fatal(err)
+			}
+			p := filepath.Join(e.bundleDir, extra)
+			if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := e.bt.Status(ctx); !errors.Is(err, release.ErrBundle) {
+				t.Fatalf("status with an extra entry: %v, want ErrBundle", err)
+			}
+			if e.bt.status != nil {
+				t.Fatal("rejected bundle left a cached status")
+			}
+			s := e.service()
+			if st := serverStatus(t, s); st.State != pb.BuiltinTrustState_BUILTIN_TRUST_STATE_UNAVAILABLE {
+				t.Fatalf("server status = %+v, want UNAVAILABLE", st)
+			}
+			if err := os.Remove(p); err != nil {
+				t.Fatal(err)
+			}
+			runs := e.bt.statusRuns
+			if res, err := e.bt.Status(ctx); err != nil || !res.NeedsConfirmation {
+				t.Fatalf("status after removal: %+v, %v", res, err)
+			}
+			if e.bt.statusRuns != runs+1 {
+				t.Fatalf("status after removal not recomputed: runs %d -> %d", runs, e.bt.statusRuns)
+			}
+		})
+	}
+}
+
 // storeGeneration reads the durable store generation.
 func (e *bundleEnv) storeGeneration(t *testing.T) int64 {
 	t.Helper()
