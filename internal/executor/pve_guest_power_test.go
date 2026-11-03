@@ -858,17 +858,17 @@ func TestGuestPowerBindingExpires(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	b := &PveGuestPowerBindings{Now: func() time.Time { return now }}
 	tg := permit.ProviderMutationTarget{RemoteID: "r", Kind: "qemu", Node: "pve1", VMID: 101}
-	release, err := b.hold("h", tg, PveGuestPowerShutdown)
+	release, err := b.hold(pveBindPower, "h", tg, PveGuestPowerShutdown)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b.keep("h", now.Add(time.Minute))
+	b.keep(pveBindPower, "h", now.Add(time.Minute))
 	release()
-	if _, _, ok := b.lookup("h"); !ok {
+	if _, _, ok := b.lookup(pveBindPower, "h"); !ok {
 		t.Fatal("binding gone before expiry")
 	}
 	now = now.Add(2 * time.Minute)
-	if _, _, ok := b.lookup("h"); ok {
+	if _, _, ok := b.lookup(pveBindPower, "h"); ok {
 		t.Fatal("expired binding still scored")
 	}
 }
@@ -905,5 +905,177 @@ func TestServiceGuestPowerWithoutClientSaysSo(t *testing.T) {
 		if st := status.Convert(err); st.Code() != codes.FailedPrecondition || !strings.Contains(st.Message(), "PVE mutation client not configured") {
 			t.Fatalf("no client: %v", err)
 		}
+	}
+}
+
+// floorFixture is a bound guest whose guest, node and remote have exact LOW
+// records, so a correctly bound request is scored at its op or verb base.
+func floorFixture(t *testing.T) (permit.ProviderMutationTarget, canonical.Target, critSource) {
+	t.Helper()
+	bt := permit.ProviderMutationTarget{RemoteID: mutRemote, TrustPin: strings.Repeat("ab", 32), Kind: permit.ProviderKindQemu, Node: "pve1", VMID: 101}
+	g, n, r, err := PveGuestRiskTargets(bt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crit := critSource{hosts: map[canonical.Target]canonical.Risk{g: canonical.RiskLow, n: canonical.RiskLow, r: canonical.RiskLow}}
+	return bt, g, crit
+}
+
+// floorCase binds verb (a power verb or snapshot op) in fam's table and
+// scores a request of the floor's action with artifact.
+type floorCase struct {
+	name     string
+	fam      pveBindingFamily
+	verb     string
+	artifact []byte
+	// otherTarget scores the request for another guest than the bound one.
+	otherTarget bool
+	want        canonical.Risk
+}
+
+// floorMaker builds the floor under test over next, crit and b.
+type floorMaker func(next permit.RiskPolicy, crit PveCriticality, b *PveGuestPowerBindings) permit.RiskPolicy
+
+// runFloorCases scores every case with Next LOW (the result is exactly
+// want) and with Next CRITICAL (the result is CRITICAL: no branch
+// under-reports Next).
+func runFloorCases(t *testing.T, action string, mk floorMaker, cases []floorCase) {
+	t.Helper()
+	const hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	for _, c := range cases {
+		for _, nextRisk := range []canonical.Risk{canonical.RiskLow, canonical.RiskCritical} {
+			t.Run(c.name+"/next "+string(nextRisk), func(t *testing.T) {
+				bt, guest, crit := floorFixture(t)
+				b := &PveGuestPowerBindings{}
+				release, err := b.hold(c.fam, hash, bt, c.verb)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer release()
+				nr := nextRisk
+				f := mk(switchRisk{r: &nr}, crit, b)
+				targets := []canonical.Target{guest}
+				if c.otherTarget {
+					o := bt
+					o.VMID = 102
+					og, _, _, err := PveGuestRiskTargets(o)
+					if err != nil {
+						t.Fatal(err)
+					}
+					targets = []canonical.Target{og}
+				}
+				rq := canonical.Request{ActionID: action, ParametersHash: hash, ArtifactSHA256: sha256Hex(c.artifact)}
+				got, why, err := f.MinimumRisk(rq, targets)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := c.want
+				if nextRisk == canonical.RiskCritical {
+					want = canonical.RiskCritical
+				}
+				if got != want {
+					t.Fatalf("risk %s (%s), want %s", got, why, want)
+				}
+			})
+		}
+	}
+}
+
+// TestGuestPowerFloorNeverAcceptsSnapshotBindings: a snapshot binding or
+// artifact is never scored at a power verb's MEDIUM base by the power
+// floor; it is HIGH (or Next's higher floor). The control case shows the
+// fixture otherwise yields MEDIUM, so a merged op/verb table, a lookup
+// across both binding tables or a skipped artifact check fails here.
+func TestGuestPowerFloorNeverAcceptsSnapshotBindings(t *testing.T) {
+	M, H := canonical.RiskMedium, canonical.RiskHigh
+	mk := func(next permit.RiskPolicy, crit PveCriticality, b *PveGuestPowerBindings) permit.RiskPolicy {
+		return GuestPowerRiskFloor{Next: next, Criticality: crit, Linked: noLinkedHosts, Bindings: b}
+	}
+	runFloorCases(t, PveGuestPowerAction, mk, []floorCase{
+		{"control power binding", pveBindPower, PveGuestPowerShutdown, pveGuestPowerArtifact(PveGuestPowerShutdown), false, M},
+		{"snapshot binding of create", pveBindSnapshot, PveSnapshotCreate, pveSnapshotArtifact(PveSnapshotCreate), false, H},
+		{"snapshot table holding a power verb", pveBindSnapshot, PveGuestPowerShutdown, pveGuestPowerArtifact(PveGuestPowerShutdown), false, H},
+		{"power table holding a snapshot op", pveBindPower, PveSnapshotCreate, pveSnapshotArtifact(PveSnapshotCreate), false, H},
+		{"power verb with snapshot artifact", pveBindPower, PveGuestPowerShutdown, pveSnapshotArtifact(PveSnapshotCreate), false, H},
+		{"power verb with other verb's artifact", pveBindPower, PveGuestPowerShutdown, pveGuestPowerArtifact(PveGuestPowerReboot), false, H},
+		{"other target", pveBindPower, PveGuestPowerShutdown, pveGuestPowerArtifact(PveGuestPowerShutdown), true, H},
+	})
+}
+
+// TestGuestPowerFloorFailClosedRaisesToNext: the unbound and unconfigured
+// branches report Next's floor when it is above HIGH, and HIGH otherwise.
+func TestGuestPowerFloorFailClosedRaisesToNext(t *testing.T) {
+	_, guest, crit := floorFixture(t)
+	rq := canonical.Request{ActionID: PveGuestPowerAction, ParametersHash: strings.Repeat("cd", 32),
+		ArtifactSHA256: sha256Hex(pveGuestPowerArtifact(PveGuestPowerShutdown))}
+	for _, nr := range []canonical.Risk{canonical.RiskLow, canonical.RiskHigh, canonical.RiskCritical} {
+		want := canonical.RiskHigh
+		if nr == canonical.RiskCritical {
+			want = nr
+		}
+		r := nr
+		next := switchRisk{r: &r}
+		for name, f := range map[string]GuestPowerRiskFloor{
+			"unbound":        {Next: next, Criticality: crit, Linked: noLinkedHosts, Bindings: &PveGuestPowerBindings{}},
+			"no bindings":    {Next: next, Criticality: crit, Linked: noLinkedHosts},
+			"no criticality": {Next: next, Linked: noLinkedHosts, Bindings: &PveGuestPowerBindings{}},
+		} {
+			if got, _, err := f.MinimumRisk(rq, []canonical.Target{guest}); err != nil || got != want {
+				t.Fatalf("%s, next %s: %s %v, want %s", name, nr, got, err, want)
+			}
+		}
+	}
+	if got, _, err := (GuestPowerRiskFloor{}).MinimumRisk(rq, nil); err != nil || got != canonical.RiskHigh {
+		t.Fatalf("no next: %s %v", got, err)
+	}
+}
+
+// TestGuestSnapshotBindingsDoNotBlockPower: a full snapshot binding table
+// (a flood of snapshot proposals kept until permit expiry) leaves the power
+// table usable, and vice versa; each full table refuses only its own
+// family, and neither table answers for the other's hashes.
+func TestGuestSnapshotBindingsDoNotBlockPower(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	tg := permit.ProviderMutationTarget{RemoteID: "r", Kind: "qemu", Node: "pve1", VMID: 101}
+	key := func(fam pveBindingFamily, i int) string { return fmt.Sprintf("%d-%d", fam, i) }
+	fill := func(b *PveGuestPowerBindings, fam pveBindingFamily, verb string) {
+		t.Helper()
+		for i := range pveBindingCapacity[fam] {
+			release, err := b.hold(fam, key(fam, i), tg, verb)
+			if err != nil {
+				t.Fatalf("family %d entry %d: %v", fam, i, err)
+			}
+			b.keep(fam, key(fam, i), now.Add(time.Hour))
+			release()
+		}
+	}
+	for _, first := range []pveBindingFamily{pveBindSnapshot, pveBindPower} {
+		b := &PveGuestPowerBindings{Now: func() time.Time { return now }}
+		other, verb, otherVerb := pveBindPower, PveSnapshotCreate, PveGuestPowerShutdown
+		if first == pveBindPower {
+			other, verb, otherVerb = pveBindSnapshot, PveGuestPowerShutdown, PveSnapshotCreate
+		}
+		fill(b, first, verb)
+		if _, err := b.hold(first, "one-more", tg, verb); !errors.Is(err, ErrPveGuestPowerBusy) {
+			t.Fatalf("full table %d: %v", first, err)
+		}
+		release, err := b.hold(other, "after-flood", tg, otherVerb)
+		if err != nil {
+			t.Fatalf("family %d blocked by a full table %d: %v", other, first, err)
+		}
+		release()
+		if _, _, ok := b.lookup(other, key(first, 0)); ok {
+			t.Fatalf("family %d binding visible in table %d", first, other)
+		}
+		if _, _, ok := b.lookup(first, key(first, 0)); !ok {
+			t.Fatalf("family %d binding missing", first)
+		}
+	}
+	b := &PveGuestPowerBindings{}
+	if _, err := b.hold(pveBindingFamilies, "x", tg, PveGuestPowerShutdown); !errors.Is(err, ErrPveMutationPlan) {
+		t.Fatalf("unknown family: %v", err)
+	}
+	if _, _, ok := b.lookup(-1, "x"); ok {
+		t.Fatal("unknown family looked up")
 	}
 }
