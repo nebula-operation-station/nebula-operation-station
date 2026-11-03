@@ -22,8 +22,6 @@ import (
 var (
 	scriptTagRe = regexp.MustCompile(`<script[^>]*>`)
 	scriptSrcRe = regexp.MustCompile(`<script src="(/static/[^"]+)"`)
-	// buttonTagRe extracts every button opening tag from a chart section.
-	buttonTagRe = regexp.MustCompile(`<button[^>]*>`)
 )
 
 // The chart page loads the shared inventory.js, every script it references
@@ -53,8 +51,9 @@ func TestChartPageLoadsOnlyEmbeddedScripts(t *testing.T) {
 	}
 }
 
-// The page-specific scripts are exactly the shared pair: no second chart
-// runtime is loaded.
+// The page-specific script is exactly the shared inventory.js: no second
+// chart runtime, and no webauthn.js (the chart page has no add-host
+// dialog; inventory.js guards its nebulaWebAuthn reference instead).
 func TestChartPageScriptSet(t *testing.T) {
 	body := getBody(t, chartHandler(t).Handler(), "/inventory/chart")
 	srcs := map[string]bool{}
@@ -64,8 +63,8 @@ func TestChartPageScriptSet(t *testing.T) {
 	delete(srcs, "/static/htmx.min.js")
 	delete(srcs, "/static/time.js")
 	delete(srcs, "/static/nav.js")
-	if len(srcs) != 2 || !srcs["/static/webauthn.js"] || !srcs["/static/inventory.js"] {
-		t.Errorf("chart page scripts = %v, want webauthn.js + inventory.js only", srcs)
+	if len(srcs) != 1 || !srcs["/static/inventory.js"] {
+		t.Errorf("chart page scripts = %v, want inventory.js only", srcs)
 	}
 }
 
@@ -189,8 +188,8 @@ func TestChartInteractionRunsBeforeInventoryCode(t *testing.T) {
 	}
 	src := string(js)
 	chart := strings.Index(src, "document.querySelector('.chart')")
-	inv := strings.Index(src, "const w = nebulaWebAuthn;")
-	early := strings.Index(src, "if (!dialog || !form) return;")
+	inv := strings.Index(src, guardedWebAuthn)
+	early := strings.Index(src, "if (!dialog || !form || !w) return;")
 	if chart < 0 || inv < 0 || early < 0 {
 		t.Fatalf("markers missing: chart %d, inventory %d, early return %d", chart, inv, early)
 	}
@@ -215,5 +214,157 @@ func TestChartDetailsDatasetKeyMatchesTemplate(t *testing.T) {
 	}
 	if strings.Contains(string(js), "dataset.dpanelBtn") {
 		t.Error("inventory.js reads dataset.dpanelBtn, which no element carries")
+	}
+}
+
+// guardedWebAuthn is the only way inventory.js may reach nebulaWebAuthn:
+// the global exists only where webauthn.js is loaded, which the chart
+// page no longer does.
+const guardedWebAuthn = "const w = typeof nebulaWebAuthn === 'undefined' ? null : nebulaWebAuthn;"
+
+// inventoryJS reads web/static/inventory.js.
+func inventoryJS(t *testing.T) string {
+	t.Helper()
+	js, err := os.ReadFile(filepath.Join("..", "..", "..", "web", "static", "inventory.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(js)
+}
+
+// chartJS returns the chart interaction block of inventory.js (the first
+// IIFE), so checks on it cannot be satisfied by the inventory page code.
+func chartJS(t *testing.T) string {
+	t.Helper()
+	src := inventoryJS(t)
+	start := strings.Index(src, "document.querySelector('.chart')")
+	end := strings.Index(src, "\n})();")
+	if start < 0 || end < start {
+		t.Fatalf("chart block not found (start %d, end %d)", start, end)
+	}
+	return src[start:end]
+}
+
+// jsFunc returns the body of an arrow function declared at block level as
+// "  const <name> = (...) => {" up to its closing "\n  };".
+func jsFunc(t *testing.T, block, name string) string {
+	t.Helper()
+	re := regexp.MustCompile(`(?s)\n  const ` + regexp.QuoteMeta(name) + ` = \([^)]*\) => \{(.*?)\n  \};`)
+	m := re.FindStringSubmatch(block)
+	if m == nil {
+		t.Fatalf("function %s not found in the chart block", name)
+	}
+	return m[1]
+}
+
+// Review of PR #165 (item 7): the inventory page code reaches
+// nebulaWebAuthn only through the typeof guard and stops before using it
+// when the global or the add-host dialog is absent.
+func TestInventoryJSGuardsWebAuthn(t *testing.T) {
+	src := inventoryJS(t)
+	if !strings.Contains(src, guardedWebAuthn) {
+		t.Fatalf("inventory.js lost the guarded nebulaWebAuthn reference")
+	}
+	if n := strings.Count(src, "nebulaWebAuthn"); n != 2 {
+		t.Errorf("inventory.js mentions nebulaWebAuthn %d times, want only the guard (2)", n)
+	}
+	early := strings.Index(src, "if (!dialog || !form || !w) return;")
+	if early < 0 {
+		t.Fatal("inventory page code does not stop without the dialog or webauthn.js")
+	}
+	for _, use := range regexp.MustCompile(`\bw\.(show|post)\(`).FindAllStringIndex(src, -1) {
+		if use[0] < early {
+			t.Errorf("w used at %d before the early return at %d", use[0], early)
+		}
+	}
+}
+
+// Review of PR #165 (item 3): the chart is a tab stop only in pan mode.
+// setMode adds it for pan and removes it for list mode; nothing else
+// touches the chart's tab order.
+func TestChartTabbableOnlyInPanMode(t *testing.T) {
+	block := chartJS(t)
+	setMode := jsFunc(t, block, "setMode")
+	re := regexp.MustCompile(`if \(pan\) chartSection\.tabIndex = 0;\s*else chartSection\.removeAttribute\('tabindex'\);`)
+	if !re.MatchString(setMode) {
+		t.Errorf("setMode does not add the tab stop in pan mode and remove it in list mode:\n%s", setMode)
+	}
+	if n := strings.Count(block, "tabIndex"); n != 1 {
+		t.Errorf("chart block sets tabIndex %d times, want only in setMode (1)", n)
+	}
+}
+
+// Review of PR #165 (item 5): the pan canvas clips (overflow hidden), so
+// native scrolling of it is undone: fit() resets scrollTop/scrollLeft,
+// every focus call passes preventScroll, nothing calls scrollIntoView, and
+// revealFocus folds a browser focus scroll into the transform.
+func TestChartFocusAndFitNeverScrollCanvas(t *testing.T) {
+	block := chartJS(t)
+	fit := jsFunc(t, block, "fit")
+	for _, want := range []string{"chartSection.scrollTop = 0", "chartSection.scrollLeft = 0", "applyTransform()"} {
+		if !strings.Contains(fit, want) {
+			t.Errorf("fit() lacks %q:\n%s", want, fit)
+		}
+	}
+	if strings.Contains(block, "scrollIntoView") {
+		t.Error("chart block calls scrollIntoView (scrolls the clipped canvas)")
+	}
+	calls := regexp.MustCompile(`\.focus\(([^)]*)\)`).FindAllStringSubmatch(block, -1)
+	if len(calls) == 0 {
+		t.Fatal("no focus calls found in the chart block")
+	}
+	for _, c := range calls {
+		if c[1] != "{ preventScroll: true }" {
+			t.Errorf("focus call without preventScroll: %s", c[0])
+		}
+	}
+	unscroll := jsFunc(t, block, "unscroll")
+	for _, want := range []string{"tx -= chartSection.scrollLeft", "ty -= chartSection.scrollTop"} {
+		if !strings.Contains(unscroll, want) {
+			t.Errorf("unscroll lacks %q:\n%s", want, unscroll)
+		}
+	}
+	if !strings.Contains(jsFunc(t, block, "revealFocus"), "unscroll()") {
+		t.Error("revealFocus does not fold the native scroll offset into the transform")
+	}
+}
+
+// Review of PR #165 (item 6): while the modal sheet is open the rest of
+// the page is inert, and a backdrop click closes it.
+func TestChartSheetInertAndBackdropClose(t *testing.T) {
+	block := chartJS(t)
+	for _, want := range []string{
+		"document.getElementById('chart-sheet-backdrop')",
+		"backdrop.addEventListener('click', closeSheet)",
+		"closeBtn.addEventListener('click', closeSheet)",
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("chart block lacks %q", want)
+		}
+	}
+	openFn := jsFunc(t, block, "openSheet")
+	closeFn := jsFunc(t, block, "closeSheet")
+	if !strings.Contains(openFn, "setInert(true)") || !strings.Contains(openFn, "backdrop.hidden = false") {
+		t.Errorf("openSheet does not make the page inert and show the backdrop:\n%s", openFn)
+	}
+	if !strings.Contains(closeFn, "setInert(false)") || !strings.Contains(closeFn, "backdrop.hidden = true") {
+		t.Errorf("closeSheet does not restore the page and hide the backdrop:\n%s", closeFn)
+	}
+	setInert := jsFunc(t, block, "setInert")
+	for _, want := range []string{"document.body.children", "el === sheet", "el === backdrop", "el.inert = on"} {
+		if !strings.Contains(setInert, want) {
+			t.Errorf("setInert lacks %q:\n%s", want, setInert)
+		}
+	}
+}
+
+// Strict CSP and untrusted text: inventory.js builds no markup from
+// strings, evaluates no code and sets styles through CSSOM only.
+func TestInventoryJSUsesNoMarkupStrings(t *testing.T) {
+	src := inventoryJS(t)
+	for _, bad := range []string{".innerHTML", ".outerHTML", ".insertAdjacentHTML", "document.write", "setAttribute('style'", "eval(", "new Function"} {
+		if strings.Contains(src, bad) {
+			t.Errorf("inventory.js uses %s", bad)
+		}
 	}
 }
