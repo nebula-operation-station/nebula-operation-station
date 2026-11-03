@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -46,10 +47,17 @@ var errBuiltinTrustUnconfigured = status.Error(codes.Unimplemented, "built-in tr
 // configured location; callers never pass a path or bundle bytes.
 type BuiltinTrust interface {
 	// Review returns the dry-run review and scanner findings of the local
-	// release bundle against the trust store. It commits nothing.
+	// release bundle against the trust store for the local admin. It
+	// commits nothing and binds the next Commit to the reviewed manifest
+	// digest and store generation.
 	Review(ctx context.Context) (trust.BulkAdmitResult, error)
+	// Status returns the same dry run for the read-only trust status. It
+	// never writes state and never binds a commit; implementations may
+	// cache it while the store and the bundle are unchanged.
+	Status(ctx context.Context) (trust.BulkAdmitResult, error)
 	// Commit reviews again and commits atomically when digest matches the
-	// reviewed manifest digest; pins are retained and retired retired old
+	// reviewed manifest digest and the store generation is still the one
+	// the last Review saw; pins are retained and retired retired old
 	// versions. It returns the result and the new store generation.
 	Commit(ctx context.Context, digest string, pins map[string]bool, retired []string, adminUID int) (trust.BulkAdmitResult, int64, error)
 }
@@ -61,13 +69,27 @@ func (s *Service) SetBuiltinTrust(t BuiltinTrust) { s.builtinTrust = t }
 
 // dirBuiltinTrust is the directory-backed BuiltinTrust: the store and the
 // bundle directory are fixed at construction from executor-local
-// configuration. Calls are serialized and every call reopens the store, so a
-// review always reflects the durable index and generation.
+// configuration. Calls are serialized and every call reopens the existing
+// store read-only, so a review always reflects the durable index and
+// generation and never initializes or resets state.
 type dirBuiltinTrust struct {
 	storeDir, bundleDir string
-	anchors             []release.Anchor
 	now                 func() time.Time
-	mu                  sync.Mutex
+
+	mu sync.Mutex
+	// reviewed binds Commit to the last admin Review.
+	reviewed *builtinReviewBinding
+	// status caches the last status dry run under statusKey.
+	status    *trust.BulkAdmitResult
+	statusKey string
+	// statusRuns counts uncached status dry runs.
+	statusRuns int
+}
+
+// builtinReviewBinding is what an admin Review saw.
+type builtinReviewBinding struct {
+	digest     string
+	generation int64
 }
 
 // NewDirBuiltinTrust returns a BuiltinTrust over the trust store in storeDir
@@ -77,7 +99,9 @@ type dirBuiltinTrust struct {
 //
 // The store is opened once here, at executor startup, so a fresh store is
 // bootstrapped by the executor itself; later calls (including the server's
-// status read) only reopen an existing index and never initialize state.
+// status read) only open an existing index read-only and never initialize
+// or persist state. A store whose index disappears later stays unavailable
+// until local recovery.
 func NewDirBuiltinTrust(storeDir, bundleDir string, anchors []release.Anchor, now func() time.Time) (BuiltinTrust, error) {
 	if storeDir == "" || !filepath.IsAbs(storeDir) {
 		return nil, fmt.Errorf("built-in trust: store directory %q must be absolute", storeDir)
@@ -88,29 +112,46 @@ func NewDirBuiltinTrust(storeDir, bundleDir string, anchors []release.Anchor, no
 	if now == nil {
 		now = time.Now
 	}
-	d := &dirBuiltinTrust{storeDir: filepath.Clean(storeDir), bundleDir: filepath.Clean(bundleDir), anchors: anchors, now: now}
-	if _, err := trust.Open(d.storeDir, d.anchors, d.now); err != nil {
+	d := &dirBuiltinTrust{storeDir: filepath.Clean(storeDir), bundleDir: filepath.Clean(bundleDir), now: now}
+	if _, err := trust.Open(d.storeDir, anchors, d.now); err != nil {
 		return nil, fmt.Errorf("built-in trust: open store %s: %w", d.storeDir, err)
 	}
 	return d, nil
 }
 
-// open checks for the bundle, opens the store and reads the bundle against
-// the store's current durable roots.
-func (d *dirBuiltinTrust) open() (*trust.Store, release.Candidate, error) {
+// openStore checks for the bundle and opens the existing store read-only.
+func (d *dirBuiltinTrust) openStore() (*trust.Store, error) {
 	if _, err := os.Stat(d.bundleDir); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, release.Candidate{}, ErrBuiltinTrustUnavailable
+			return nil, ErrBuiltinTrustUnavailable
 		}
-		return nil, release.Candidate{}, fmt.Errorf("built-in trust: stat bundle: %w", err)
+		return nil, fmt.Errorf("built-in trust: stat bundle: %w", err)
 	}
-	st, err := trust.Open(d.storeDir, d.anchors, d.now)
+	st, err := trust.OpenExisting(d.storeDir, d.now)
 	if err != nil {
-		return nil, release.Candidate{}, fmt.Errorf("built-in trust: open store: %w", err)
+		return nil, fmt.Errorf("built-in trust: open store: %w", err)
 	}
+	return st, nil
+}
+
+// readBundle reads the bundle against the store's current durable roots.
+func (d *dirBuiltinTrust) readBundle(st *trust.Store) (release.Candidate, error) {
 	c, err := release.ReadBundleDir(d.bundleDir, st.Roots())
 	if err != nil {
-		return nil, release.Candidate{}, fmt.Errorf("built-in trust: read bundle: %w", err)
+		return release.Candidate{}, fmt.Errorf("built-in trust: read bundle: %w", err)
+	}
+	return c, nil
+}
+
+// open opens the store and reads the bundle.
+func (d *dirBuiltinTrust) open() (*trust.Store, release.Candidate, error) {
+	st, err := d.openStore()
+	if err != nil {
+		return nil, release.Candidate{}, err
+	}
+	c, err := d.readBundle(st)
+	if err != nil {
+		return nil, release.Candidate{}, err
 	}
 	return st, c, nil
 }
@@ -119,14 +160,72 @@ func (d *dirBuiltinTrust) open() (*trust.Store, release.Candidate, error) {
 func (d *dirBuiltinTrust) Review(_ context.Context) (trust.BulkAdmitResult, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.reviewed = nil
 	st, c, err := d.open()
 	if err != nil {
 		return trust.BulkAdmitResult{}, err
 	}
-	return st.BulkAdmit(c, trust.BulkAdmitOpts{})
+	res, err := st.BulkAdmit(c, trust.BulkAdmitOpts{})
+	if err != nil {
+		return trust.BulkAdmitResult{}, err
+	}
+	d.reviewed = &builtinReviewBinding{digest: res.ManifestDigest, generation: res.Review.Generation}
+	return res, nil
 }
 
-// Commit implements BuiltinTrust.
+// Status implements BuiltinTrust. The dry run is cached under the store
+// generation and the bundle files' identity, size and times, so polling
+// does not repeat it while nothing changed; Commit drops the cache.
+func (d *dirBuiltinTrust) Status(_ context.Context) (trust.BulkAdmitResult, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	st, err := d.openStore()
+	if err != nil {
+		return trust.BulkAdmitResult{}, err
+	}
+	key, err := d.statusCacheKey(st.Generation())
+	if err != nil {
+		return trust.BulkAdmitResult{}, err
+	}
+	if d.status != nil && d.statusKey == key {
+		return *d.status, nil
+	}
+	d.status = nil
+	d.statusRuns++
+	c, err := d.readBundle(st)
+	if err != nil {
+		return trust.BulkAdmitResult{}, err
+	}
+	res, err := st.BulkAdmit(c, trust.BulkAdmitOpts{})
+	if err != nil {
+		return trust.BulkAdmitResult{}, err
+	}
+	d.status, d.statusKey = &res, key
+	return res, nil
+}
+
+// statusCacheKey identifies the store generation and the bundle files by
+// device, inode, size, mtime and ctime. A replaced or rewritten bundle
+// file changes its ctime, so the key changes with any substitution.
+func (d *dirBuiltinTrust) statusCacheKey(generation int64) (string, error) {
+	var b strings.Builder
+	b.WriteString(strconv.FormatInt(generation, 10))
+	for _, name := range []string{release.ManifestFile, release.SignatureFile, release.BundleArtifact} {
+		fi, err := os.Lstat(filepath.Join(d.bundleDir, name))
+		if err != nil {
+			return "", fmt.Errorf("built-in trust: stat bundle file %s: %w", name, err)
+		}
+		fmt.Fprintf(&b, "|%s %o %d %d", name, fi.Mode(), fi.Size(), fi.ModTime().UnixNano())
+		if sys, ok := fi.Sys().(*syscall.Stat_t); ok {
+			fmt.Fprintf(&b, " %d %d %d.%d", sys.Dev, sys.Ino, sys.Ctim.Sec, sys.Ctim.Nsec)
+		}
+	}
+	return b.String(), nil
+}
+
+// Commit implements BuiltinTrust. It requires a prior admin Review of the
+// same manifest digest at the store's current generation; a store that
+// changed since that review rejects the commit as stale.
 func (d *dirBuiltinTrust) Commit(_ context.Context, digest string, pins map[string]bool, retired []string, adminUID int) (trust.BulkAdmitResult, int64, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -134,10 +233,21 @@ func (d *dirBuiltinTrust) Commit(_ context.Context, digest string, pins map[stri
 	if err != nil {
 		return trust.BulkAdmitResult{}, 0, err
 	}
+	rb := d.reviewed
+	switch {
+	case rb == nil:
+		return trust.BulkAdmitResult{}, 0, fmt.Errorf("%w: no review to commit", trust.ErrStale)
+	case rb.digest != digest:
+		return trust.BulkAdmitResult{}, 0, fmt.Errorf("%w: confirmed digest %s is not the reviewed manifest digest %s", trust.ErrStale, digest, rb.digest)
+	case rb.generation != st.Generation():
+		return trust.BulkAdmitResult{}, 0, fmt.Errorf("%w: the store changed since the review (generation %d, now %d)", trust.ErrStale, rb.generation, st.Generation())
+	}
 	res, err := st.BulkAdmit(c, trust.BulkAdmitOpts{ConfirmedDigest: digest, Pins: pins, Retired: retired, AdminUID: adminUID})
+	d.status = nil
 	if err != nil {
 		return trust.BulkAdmitResult{}, 0, err
 	}
+	d.reviewed = nil
 	return res, st.Generation(), nil
 }
 
@@ -394,7 +504,7 @@ func (s *Service) GetBuiltinTrustStatus(ctx context.Context, req *pb.GetBuiltinT
 	if s.builtinTrust == nil {
 		return unavailable, nil
 	}
-	res, err := s.builtinTrust.Review(ctx)
+	res, err := s.builtinTrust.Status(ctx)
 	if err != nil {
 		if s.log != nil {
 			s.log.Warn("built-in trust status unavailable", "err", err)

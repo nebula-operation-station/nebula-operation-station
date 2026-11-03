@@ -238,6 +238,35 @@ func Open(dir string, anchors []release.Anchor, now func() time.Time) (*Store, e
 	case err != nil:
 		return nil, fmt.Errorf("trust: read index: %w", err)
 	}
+	return s.load(raw)
+}
+
+// OpenExisting opens an existing store in dir strictly read-only: it never
+// creates directories, bootstraps or persists anything. A missing index is
+// ErrStateMissing, whether or not objects exist. now is injected.
+func OpenExisting(dir string, now func() time.Time) (*Store, error) {
+	if now == nil {
+		now = time.Now
+	}
+	if err := fsguard.CheckPrivateDir(dir); err != nil {
+		return nil, fmt.Errorf("trust: store directory %s: %w", dir, err)
+	}
+	if err := fsguard.CheckPrivateDir(filepath.Join(dir, objectsDir)); err != nil {
+		return nil, fmt.Errorf("trust: objects directory: %w", err)
+	}
+	s := &Store{dir: dir, now: now, freeSpace: statfsFree, limits: defaultLimits}
+	raw, err := readBounded(filepath.Join(dir, indexFile), MaxMetadata)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil, ErrStateMissing
+	case err != nil:
+		return nil, fmt.Errorf("trust: read index: %w", err)
+	}
+	return s.load(raw)
+}
+
+// load decodes and validates a persisted index into s.
+func (s *Store) load(raw []byte) (*Store, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var idx index

@@ -41,8 +41,9 @@ type fakeBuiltinTrust struct {
 	commitGen int64
 	commitErr error
 
-	reviews int
-	commits []fakeCommit
+	reviews  int
+	statuses int
+	commits  []fakeCommit
 }
 
 type fakeCommit struct {
@@ -54,6 +55,11 @@ type fakeCommit struct {
 
 func (f *fakeBuiltinTrust) Review(context.Context) (trust.BulkAdmitResult, error) {
 	f.reviews++
+	return f.review, f.reviewErr
+}
+
+func (f *fakeBuiltinTrust) Status(context.Context) (trust.BulkAdmitResult, error) {
+	f.statuses++
 	return f.review, f.reviewErr
 }
 
@@ -173,8 +179,8 @@ func TestServerCannotReviewOrCommitBuiltinTrust(t *testing.T) {
 	if status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("server commit: %v, want PermissionDenied", err)
 	}
-	if f.reviews != 0 || len(f.commits) != 0 {
-		t.Fatalf("trust transaction touched: reviews=%d commits=%d", f.reviews, len(f.commits))
+	if f.reviews != 0 || f.statuses != 0 || len(f.commits) != 0 {
+		t.Fatalf("trust transaction touched: reviews=%d statuses=%d commits=%d", f.reviews, f.statuses, len(f.commits))
 	}
 }
 
@@ -209,8 +215,8 @@ func TestBuiltinTrustHandlersRequireAdminCaller(t *testing.T) {
 			t.Fatalf("%s as server: %v, want PermissionDenied", m, err)
 		}
 	}
-	if f.reviews != 0 || len(f.commits) != 0 {
-		t.Fatalf("trust transaction touched: reviews=%d commits=%d", f.reviews, len(f.commits))
+	if f.reviews != 0 || f.statuses != 0 || len(f.commits) != 0 {
+		t.Fatalf("trust transaction touched: reviews=%d statuses=%d commits=%d", f.reviews, f.statuses, len(f.commits))
 	}
 }
 

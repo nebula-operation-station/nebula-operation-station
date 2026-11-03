@@ -36,6 +36,35 @@ func TestOpenBootstrapsAndPersists(t *testing.T) {
 	}
 }
 
+// OpenExisting never creates, bootstraps or persists: a missing store or
+// index (even with an empty objects directory) is ErrStateMissing.
+func TestOpenExistingIsReadOnly(t *testing.T) {
+	e := newEnv(t)
+	e.admit(e.candidate("1.0.0", docker("1.0.0", scriptV1)))
+	s, err := OpenExisting(e.dir, nil)
+	if err != nil || s.Generation() != 1 {
+		t.Fatalf("open existing: %v", err)
+	}
+	fresh := filepath.Join(t.TempDir(), "trust")
+	if _, err := OpenExisting(fresh, nil); err == nil {
+		t.Fatal("missing store opened")
+	}
+	if _, err := os.Stat(fresh); !os.IsNotExist(err) {
+		t.Fatalf("store directory created: %v", err)
+	}
+	empty := newEnv(t)
+	idx := filepath.Join(empty.dir, indexFile)
+	if err := os.Remove(idx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenExisting(empty.dir, nil); !errors.Is(err, ErrStateMissing) {
+		t.Fatalf("missing index: %v", err)
+	}
+	if _, err := os.Stat(idx); !os.IsNotExist(err) {
+		t.Fatalf("index recreated: %v", err)
+	}
+}
+
 func TestOpenBlocksOnMissingOrCorruptState(t *testing.T) {
 	e := newEnv(t)
 	e.admit(e.candidate("1.0.0", docker("1.0.0", scriptV1)))
