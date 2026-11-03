@@ -6,12 +6,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
-	"io"
 	"net/http"
 	"net/url"
-	"strings"
-	"unicode/utf8"
 )
 
 // RebootNode reboots one exact PVE node (POST /nodes/{node}/status with
@@ -47,67 +43,19 @@ func (w *Writer) RebootNode(ctx context.Context, node string) error {
 }
 
 // nodeStatusCall performs one POST to a node status endpoint and returns the
-// raw "data" member of the response envelope. It mirrors call in write.go
-// exactly (token, timeout, request construction, size limit, UTF-8, JSON
-// envelope, HTTP status mapping, 400 parameter extraction, redirect refusal,
-// and timeout → OutcomeUnknown), with one deliberate difference: it does not
-// reject a null data member, because a node reboot answers without a UPID,
-// but it requires an object envelope whose only member is "data". The
-// caller (RebootNode) decides whether the returned data is the documented
-// null response.
+// raw "data" member of the response envelope. It shares the full transport
+// path with call in write.go through doWrite (token, timeout, request
+// construction, size limit, UTF-8, HTTP status mapping, 400 parameter
+// extraction, redirect refusal, and timeout → OutcomeUnknown), with one
+// deliberate difference in data acceptance: it does not reject a null data
+// member, because a node reboot answers without a UPID, but it requires an
+// object envelope whose only member is "data" and rejects a repeated
+// top-level key. The caller (RebootNode) decides whether the returned data
+// is the documented null response.
 func (w *Writer) nodeStatusCall(ctx context.Context, r writeRequest) (json.RawMessage, error) {
-	if err := ctx.Err(); err != nil {
+	raw, err := w.doWrite(ctx, r)
+	if err != nil {
 		return nil, err
-	}
-	reqCtx, cancel := context.WithTimeout(ctx, w.timeout)
-	defer cancel()
-
-	tok, err := w.token(reqCtx)
-	if err != nil {
-		return nil, &WriteError{Op: r.op, Reason: ReasonNoToken}
-	}
-	var body io.Reader
-	if r.form != nil {
-		body = strings.NewReader(r.form.Encode())
-	}
-	req, err := http.NewRequestWithContext(reqCtx, r.method, w.base+apiRoot+r.path, body)
-	if err != nil {
-		return nil, &WriteError{Op: r.op, Reason: ReasonTransport}
-	}
-	req.Header.Set("Authorization", tok)
-	req.Header.Set("Accept", "application/json")
-	if r.form != nil {
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	}
-
-	resp, err := w.http.Do(req)
-	if err != nil {
-		if cerr := ctx.Err(); cerr != nil {
-			return nil, &WriteError{Op: r.op, Reason: ReasonTransport, cause: cerr}
-		}
-		if errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
-			return nil, &WriteError{Op: r.op, Reason: ReasonTimeout, cause: context.DeadlineExceeded}
-		}
-		return nil, &WriteError{Op: r.op, Reason: ReasonTransport}
-	}
-	defer resp.Body.Close()
-
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, MaxWriteResponseBytes+1))
-	if resp.StatusCode != http.StatusOK {
-		e := &WriteError{Op: r.op, Reason: ReasonHTTPError, Status: resp.StatusCode}
-		if resp.StatusCode == http.StatusBadRequest && readErr == nil && len(raw) <= MaxWriteResponseBytes {
-			e.Params = rejectedParams(raw, r.form)
-		}
-		return nil, e
-	}
-	if readErr != nil {
-		return nil, &WriteError{Op: r.op, Reason: ReasonTransport}
-	}
-	if len(raw) > MaxWriteResponseBytes {
-		return nil, &WriteError{Op: r.op, Reason: ReasonOversize}
-	}
-	if !utf8.Valid(raw) {
-		return nil, &WriteError{Op: r.op, Reason: ReasonInvalidUTF8}
 	}
 	// A repeated top-level key is not the documented answer: the map below
 	// keeps only the last value, so {"data":"UPID:…","data":null} would
