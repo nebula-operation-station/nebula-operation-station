@@ -293,6 +293,26 @@ func NewWithNow(db *sql.DB, now func() time.Time) *Store {
 // opts.OSHint is "proxmox" (Proxmox VE hosts default to HIGH, spec 12).
 // A host ID that is already taken is rejected with ErrHostExists.
 func (s *Store) Create(ctx context.Context, h Host, opts CreateOptions) (Host, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Host{}, fmt.Errorf("inventory: create host %s: begin: %w", h.ID, err)
+	}
+	defer tx.Rollback()
+	h, err = s.CreateTx(ctx, tx, h, opts)
+	if err != nil {
+		return Host{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Host{}, fmt.Errorf("inventory: create host %s: commit: %w", h.ID, err)
+	}
+	return h, nil
+}
+
+// CreateTx is Create inside the caller's transaction, so a host can be
+// created together with records that refer to it (a PVE guest link). The
+// caller commits or rolls back; defaults and validation are those of
+// Create.
+func (s *Store) CreateTx(ctx context.Context, tx *sql.Tx, h Host, opts CreateOptions) (Host, error) {
 	h = normalize(h)
 	if h.Environment == "" {
 		h.Environment = EnvDev
@@ -306,12 +326,6 @@ func (s *Store) Create(ctx context.Context, h Host, opts CreateOptions) (Host, e
 	if err := Validate(h); err != nil {
 		return Host{}, err
 	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return Host{}, fmt.Errorf("inventory: create host %s: begin: %w", h.ID, err)
-	}
-	defer tx.Rollback()
 
 	ts := s.now().UTC().Format(time.RFC3339)
 	res, err := tx.ExecContext(ctx, `
@@ -330,9 +344,6 @@ func (s *Store) Create(ctx context.Context, h Host, opts CreateOptions) (Host, e
 	}
 	if err := storeRelations(ctx, tx, hid, h, ts); err != nil {
 		return Host{}, fmt.Errorf("inventory: create host %s: %w", h.ID, err)
-	}
-	if err := tx.Commit(); err != nil {
-		return Host{}, fmt.Errorf("inventory: create host %s: commit: %w", h.ID, err)
 	}
 	return h, nil
 }
