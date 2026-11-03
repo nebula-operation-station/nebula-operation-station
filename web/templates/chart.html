@@ -120,6 +120,13 @@
               {{end}}
             </section>
             <section class="chart__dpanel-sec">
+              {{if .Details.UpdateLinks}}
+              {{range .Details.UpdateLinks}}<a class="chart__dpanel-link" href="{{.URL}}">{{.Label}}</a>{{end}}
+              {{else if .Details.UpdatesReadonly}}
+              <p class="chart__unknown">{{.Details.UpdatesReadonly}}</p>
+              {{end}}
+            </section>
+            <section class="chart__dpanel-sec">
               <h4 class="chart__dpanel-h">Snapshots</h4>
               <p class="chart__unknown">{{.Details.Snapshots}}</p>
             </section>

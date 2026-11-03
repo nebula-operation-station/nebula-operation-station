@@ -123,6 +123,23 @@ type chartDetails struct {
 	Backups string
 	// DetailURL links to the normal detail page (no-JS navigation).
 	DetailURL string
+	// UpdateLinks are the "Propose ..." links to the existing operation
+	// proposal (package.install_security / package.install_all) with this
+	// host preselected; empty when the host is not enrolled for SSH
+	// updates (ADR 0006 P2-02 part 1).
+	UpdateLinks []chartUpdateLink
+	// UpdatesReadonly is shown instead of the links when the host is not
+	// enrolled for SSH updates.
+	UpdatesReadonly string
+}
+
+// chartUpdateLink is one "Propose ..." link in the details panel, to the
+// existing operation proposal with the host preselected.
+type chartUpdateLink struct {
+	// Label is the link text.
+	Label string
+	// URL is the operation proposal form with the action and host prefilled.
+	URL string
 }
 
 // chartData is the /inventory/chart page data.
@@ -425,6 +442,18 @@ func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins m
 			Snapshots: "none collected",
 			Backups:   "none collected",
 			DetailURL: "/hosts/" + host.ID,
+		}
+		// P2-02 part 1: enrolled (pinned) hosts get the two "Propose ..."
+		// links to the existing operation proposal with this host
+		// preselected; other hosts show read-only. No new authority, and a
+		// pending reboot is never part of these links.
+		if v.KeyStatus == "pinned" {
+			ch.Details.UpdateLinks = []chartUpdateLink{
+				{Label: "Propose security updates", URL: "/operations/new?action=package.install_security&host=" + host.ID},
+				{Label: "Propose all updates", URL: "/operations/new?action=package.install_all&host=" + host.ID},
+			}
+		} else {
+			ch.Details.UpdatesReadonly = "read-only: not enrolled for updates"
 		}
 		// Same-tag status per image, from the stored check_updates
 		// result; registry metadata per image for the stable version.
