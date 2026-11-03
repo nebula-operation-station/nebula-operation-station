@@ -6,6 +6,13 @@ that the admin creates with the security key, for a fixed set of actions
 and hosts, with an expiry, revocable and audited, limited to actions the
 executor itself rates LOW.
 
+> **ADR 0007 (merged):** the schedule grant below is now the **legacy**
+> mechanism (`read-schedule-v1`, 90-day ceiling). The current mechanism is
+> the **read grant** (`read-grant-v2`), documented at the end of this file,
+> which adds on-demand runs, per-target run budgets and a 30-day ceiling.
+> The operator-facing behaviour and the 90-day migration path are in the
+> admin guide, section 9.4.
+
 ## Grant
 
 The server proposes a grant document; the executor canonicalizes it
@@ -58,3 +65,50 @@ expiry.
 
 The server's scheduler and the `/schedules` page are decision 62 in
 `m0.md`.
+
+## Read grants (ADR 0007): `read-grant-v2`
+
+The current mechanism is the **read grant** (`read-grant-v2`,
+`internal/permit/lease.go`), a standing executor-held grant for read-only
+runs. One approval binds an explicit action allowlist, an explicit frozen
+target list, an absolute expiry and a per-target run budget.
+`internal/executordb` persists approved grants and their spent budgets; the
+executor enforces both before every run.
+
+A read grant document:
+
+- **Actions** — up to 32 (`MaxReadGrantActions`), each pinned to an action
+  ID, version, artifact SHA-256 and parameters hash. Only actions on the
+  read-only allowlist are accepted (`core.facts`, `package.list_updates`,
+  `docker.list`, `docker.inspect`, `docker.check_updates`, `service.list`,
+  `service.status`, plus the reviewed SSH telemetry actions). A built-in
+  trusted as LOW is read-only by the admin's declaration; effective LOW
+  alone is not sufficient (e.g. `package.refresh`, `docker.logs` and
+  secret-bearing actions are excluded even when rated LOW).
+- **Targets** — up to 1000 (`MaxReadGrantTargets` = `canonical.MaxTargets`),
+  each a pinned host with its exact host-key fingerprint and, for SSH, its
+  exact credential version.
+- **Lifetime** — 1 hour to 30 days after creation
+  (`ReadGrantMinLifetime` / `ReadGrantMaxLifetime`); the default is 7 days
+  (`DefaultReadGrantLifetime`).
+- **Trigger** — `on_demand` (the "Refresh" button on the Read leases page)
+  and/or `scheduled` (a fixed interval, floor 15 minutes). The trigger only
+  selects which runs are allowed; it grants no other rights.
+- **Run budget** — a per-target rolling-hour ceiling: default 24
+  (`DefaultRunBudget`), max 240 (`MaxRunBudget`); telemetry grants may use
+  the higher `schedgrant.MaxTelemetryRunBudget` ceiling. Spent budgets are
+  persisted and survive a restart.
+
+Approval is a user-verified WebAuthn assertion, or `nebula read-grant
+approve <digest>` in hardened mode (full 64-hex digest). Revoking needs no
+approval. While the executor is locked, read grants are paused (not
+deleted); unlocking resumes any still-valid grant, but elapsed time counts
+toward the expiry.
+
+## Legacy migration (`read-schedule-v1`)
+
+Existing M6 schedule grants keep their format, scope and expiry and are
+revoked one by one; they are **never** converted to on-demand and stay
+bounded by the 90-day ceiling in `internal/schedgrant`. New grants are
+created as `read-grant-v2`. The operator-facing behaviour and the 90-day
+migration path are in the admin guide, section 9.4.
