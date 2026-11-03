@@ -39,10 +39,10 @@ func TestClosePveJobsOnlyForInactiveRemote(t *testing.T) {
 	}
 
 	// An active remote's steps are reconciled, never closed by hand.
-	if _, err := db.ClosePveJobs("pve-lab", "admin", "remote decommissioned"); !errors.Is(err, ErrPveRemoteActive) {
+	if _, err := db.ClosePveJobs("pve-lab", "admin", "remote decommissioned", closeAll); !errors.Is(err, ErrPveRemoteActive) {
 		t.Fatalf("close on active remote: %v", err)
 	}
-	if _, err := db.ClosePveJobs("pve-none", "admin", "x"); !errors.Is(err, ErrRemoteNotFound) {
+	if _, err := db.ClosePveJobs("pve-none", "admin", "x", closeAll); !errors.Is(err, ErrRemoteNotFound) {
 		t.Fatalf("close on unknown remote: %v", err)
 	}
 	if open, _ := db.OpenPveJobs(); len(open) != 3 {
@@ -52,7 +52,7 @@ func TestClosePveJobsOnlyForInactiveRemote(t *testing.T) {
 	if _, err := db.BlockRemote("pve-lab", "trust verification failed", "admin"); err != nil {
 		t.Fatal(err)
 	}
-	closed, err := db.ClosePveJobs("pve-lab", "alice", "certificate replaced; host reinstalled")
+	closed, err := db.ClosePveJobs("pve-lab", "alice", "certificate replaced; host reinstalled", closeAll)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,8 +77,47 @@ func TestClosePveJobsOnlyForInactiveRemote(t *testing.T) {
 	if _, err := db.RemoveRemote("pve-other", "admin"); err != nil {
 		t.Fatal(err)
 	}
-	if again, err := db.ClosePveJobs("pve-other", "alice", "removed"); err != nil || len(again) != 1 {
+	if again, err := db.ClosePveJobs("pve-other", "alice", "removed", closeAll); err != nil || len(again) != 1 {
 		t.Fatalf("close on removed remote: %v %+v", err, again)
+	}
+}
+
+// closeAll is a ClosePveJobs step check that accepts every step.
+func closeAll(PveJob) error { return nil }
+
+// TestClosePveJobsCheckRefusalClosesNothing: a step the check refuses
+// aborts the whole close, so no step of the remote is closed; a missing
+// check is refused.
+func TestClosePveJobsCheckRefusalClosesNothing(t *testing.T) {
+	db := pveDB(t)
+	addPveRemote(t, db, pveClusterRemote("pve-lab", pinOf("lab-ca")))
+	a := pveJobOn("pve-lab", "00000000-0000-4000-9000-00000000000a", 101, 1)
+	b := pveJobOn("pve-lab", "00000000-0000-4000-9000-00000000000b", 102, 1)
+	for _, j := range []PveJob{a, b} {
+		if err := db.CreatePveJobIntent(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.BlockRemote("pve-lab", "trust verification failed", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ClosePveJobs("pve-lab", "alice", "reason", nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("close without check: %v", err)
+	}
+	errBusy := errors.New("still in flight")
+	var checked []string
+	_, err := db.ClosePveJobs("pve-lab", "alice", "reason", func(j PveJob) error {
+		checked = append(checked, j.ExecutionID)
+		if j.ExecutionID == b.ExecutionID {
+			return errBusy
+		}
+		return nil
+	})
+	if !errors.Is(err, errBusy) || len(checked) != 2 {
+		t.Fatalf("refused close: %v, checked %v", err, checked)
+	}
+	if open, _ := db.OpenPveJobs(); len(open) != 2 || open[0].ClosedBy != "" || open[1].ClosedBy != "" {
+		t.Fatalf("refused close changed steps: %+v", open)
 	}
 }
 
@@ -97,7 +136,7 @@ func TestClosePveJobsRejectsBadActorOrReason(t *testing.T) {
 		"invalid utf8":   {"admin", "\xff"},
 	}
 	for name, c := range cases {
-		if _, err := db.ClosePveJobs("pve-lab", c[0], c[1]); !errors.Is(err, ErrInvalid) {
+		if _, err := db.ClosePveJobs("pve-lab", c[0], c[1], closeAll); !errors.Is(err, ErrInvalid) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
@@ -129,9 +168,12 @@ func TestPveUPIDRejectsOutOfRangeStartTime(t *testing.T) {
 	}
 }
 
-// TestPveUPIDGrammarIsSubsetOfPveapi: every UPID the job record accepts is
-// also accepted by the pveapi writer, which dispatches mutations and reads
-// their task status. The writer is served by a loopback test server.
+// TestPveUPIDGrammarIsSubsetOfPveapi spot-checks that the job record's UPID
+// grammar stays within pveapi: a fixed corpus of UPIDs the record accepts,
+// including its length and digit bounds, is also accepted by the pveapi
+// writer, which dispatches mutations and reads their task status. It does
+// not cover the tasks.go listing parser. The writer is served by a
+// loopback test server.
 func TestPveUPIDGrammarIsSubsetOfPveapi(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, rest, _ := strings.Cut(r.URL.Path, "/tasks/")

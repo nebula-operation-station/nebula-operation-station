@@ -86,8 +86,11 @@ var (
 	//   - id: at most 64 of [A-Za-z0-9._-] (pveapi: any non-colon text);
 	//   - user: at most 128 of [A-Za-z0-9_.@!-], the task_user column bound
 	//     (pveapi: up to 256 non-colon bytes).
-	// TestPveUPIDGrammarIsSubsetOfPveapi checks that every UPID accepted
-	// here is accepted by pveapi.
+	// TestPveUPIDGrammarIsSubsetOfPveapi only spot-checks this: it feeds a
+	// fixed corpus of UPIDs accepted here (including the length and digit
+	// bounds) to the pveapi writer's TaskStatus. It does not exercise the
+	// tasks.go listing parser, and it cannot prove that a widened regexp
+	// here stays a subset.
 	pveUPIDRe     = regexp.MustCompile(`^UPID:(` + permit.PveNodePattern + `):[0-9A-F]{8}:[0-9A-F]{8,9}:([0-9A-F]{8}):([a-z0-9]{1,32}):([A-Za-z0-9._-]{0,64}):([A-Za-z0-9_.@!-]{1,128}):$`)
 	pveHex64Re    = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	pveActionRe   = regexp.MustCompile(`^pve\.[a-z0-9_.]{1,60}$`)
@@ -167,12 +170,21 @@ const MaxPveJobCloseReason = 256
 // unknown one. The remote state is checked in the same transaction, so a
 // concurrent re-pin cannot slip in between. It returns the closed steps.
 // Nothing is sent to the remote; a task that did run stays done there.
-func (db *DB) ClosePveJobs(remoteID, by, reason string) ([]PveJob, error) {
+//
+// check is called for every open step inside the transaction, before
+// anything is written; if it returns an error for any step, nothing is
+// closed and that error is returned. The executor uses it to refuse steps
+// whose run is still in flight in this process or whose task match window
+// has not passed. check is required.
+func (db *DB) ClosePveJobs(remoteID, by, reason string, check func(PveJob) error) ([]PveJob, error) {
 	if err := checkText("actor", by, maxActorLen, false); err != nil {
 		return nil, err
 	}
 	if err := checkText("reason", reason, MaxPveJobCloseReason, false); err != nil {
 		return nil, err
+	}
+	if check == nil {
+		return nil, fmt.Errorf("executordb: %w: close pve jobs needs a step check", ErrInvalid)
 	}
 	tx, err := db.sql.Begin()
 	if err != nil {
@@ -208,10 +220,15 @@ func (db *DB) ClosePveJobs(remoteID, by, reason string) ([]PveJob, error) {
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("executordb: close pve jobs: %w", err)
 	}
+	for _, j := range closed {
+		if err := check(j); err != nil {
+			return nil, err
+		}
+	}
 	now := db.now().Unix()
 	for i := range closed {
 		if _, err := tx.Exec(`UPDATE pve_jobs SET state = 'unknown', closed_by = ?, closed_reason = ?, updated_at = ?, finished_at = ?
-			WHERE execution_id = ? AND step = ?`, by, reason, now, now, closed[i].ExecutionID, closed[i].Step); err != nil {
+			WHERE execution_id = ? AND step = ? AND state IN ('dispatching', 'running', 'reconciling')`, by, reason, now, now, closed[i].ExecutionID, closed[i].Step); err != nil {
 			return nil, fmt.Errorf("executordb: close pve jobs: %w", err)
 		}
 		closed[i].State, closed[i].ClosedBy, closed[i].ClosedReason = PveJobUnknown, by, reason

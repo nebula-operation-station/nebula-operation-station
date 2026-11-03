@@ -183,6 +183,7 @@ func (e *pveMutEnv) restart() {
 	}
 	e.m = &PveMutations{DB: e.pe.db, Auth: e.auth, Vault: e.pe.vault, Client: e.client, PollInterval: time.Millisecond,
 		MaxWait: 2 * time.Second, Log: slog.New(slog.NewTextHandler(e.logs, nil))}
+	e.pe.admin.Mutations = e.m
 }
 
 // passMatchWindow moves the engine clock past the start window of every

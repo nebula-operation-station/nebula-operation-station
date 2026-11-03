@@ -155,7 +155,16 @@ func TestPveAdminCloseOpenJobsOfUnobservableRemote(t *testing.T) {
 				t.Fatalf("close on active remote: %v", err)
 			}
 			makeUnobservable(e)
+			// Inside the step's task match window a lost task may still
+			// start, so the close is refused and audited.
+			if _, err := e.pe.admin.CloseOpenJobs(context.Background(), in); !errors.Is(err, ErrPveJobMatchWindowOpen) {
+				t.Fatalf("close inside the match window: %v", err)
+			}
+			if !strings.Contains(audit.String(), "pve_mutation_close_refused") {
+				t.Fatalf("refused close not audited: %s", audit.String())
+			}
 			e.passMatchWindow()
+			e.pe.admin.Now = e.m.Now
 			if err := e.m.Reconcile(context.Background()); err != nil {
 				t.Fatal(err)
 			}
@@ -190,5 +199,49 @@ func TestPveAdminCloseOpenJobsOfUnobservableRemote(t *testing.T) {
 				t.Fatalf("close not audited: %s", log)
 			}
 		})
+	}
+}
+
+// TestPveAdminCloseOpenJobsRefusesInFlightRun: a step whose run is still
+// in flight in this executor is never closed, even when its remote was
+// blocked meanwhile and its match window has passed: the task may still
+// be dispatched or running, and freeing the target could attribute it to
+// another job. Once the run has ended, the close goes through.
+func TestPveAdminCloseOpenJobsRefusesInFlightRun(t *testing.T) {
+	e := newPveMutEnv(t, true)
+	var audit bytes.Buffer
+	e.pe.admin.Log = slog.New(slog.NewTextHandler(&audit, nil))
+	later := time.Now().Add(pveTaskMatchWindow + pveTaskMatchSkew + time.Minute)
+	e.pe.admin.Now = func() time.Time { return later }
+	req := e.approve(mutRequest("guest.start"))
+	in := PveCloseJobs{RemoteID: mutRemote, Reason: "remote blocked during dispatch", By: "alice"}
+
+	var closeErr error
+	e.client.onDispatch = func(int, string) (string, error) {
+		if _, err := e.pe.db.BlockRemote(mutRemote, "trust verification failed", "admin"); err != nil {
+			t.Error(err)
+		}
+		_, closeErr = e.pe.admin.CloseOpenJobs(context.Background(), in)
+		return "", errors.New("connection reset")
+	}
+	res, err := e.m.Run(context.Background(), req)
+	e.client.onDispatch = nil
+	if !errors.Is(closeErr, ErrPveJobInFlight) {
+		t.Fatalf("close during dispatch: %v", closeErr)
+	}
+	if !strings.Contains(audit.String(), "pve_mutation_close_refused") {
+		t.Fatalf("refused close not audited: %s", audit.String())
+	}
+	if !errors.Is(err, ErrPveDispatchUncertain) || len(res.Steps) != 1 || res.Steps[0].State != executordb.PveJobReconciling {
+		t.Fatalf("run: %v %+v", err, res.Steps)
+	}
+	j, _, _ := e.pe.db.PveJob(res.ExecutionID, 1)
+	if j.ClosedBy != "" || j.State != executordb.PveJobReconciling {
+		t.Fatalf("in-flight step was closed: %+v", j)
+	}
+
+	closed, err := e.pe.admin.CloseOpenJobs(context.Background(), in)
+	if err != nil || len(closed) != 1 || closed[0].ExecutionID != res.ExecutionID {
+		t.Fatalf("close after the run: %v %+v", err, closed)
 	}
 }
