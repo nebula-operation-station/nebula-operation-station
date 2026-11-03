@@ -487,9 +487,16 @@ unnecessary").
       It returns absent, or present with the SHA-256 fingerprint of the
       `ed25519_public` entry it parses (public data only; the private part
       is never read into the result).
-   2. Present and the fingerprint equals the recorded one: the write is
-      adopted as done. The executor needs no private key for this.
-   3. Absent, unparsable, or another fingerprint: generate a new pair,
+   2. Present, the fingerprint equals the recorded one, the recorded key
+      was generated less than the preset key age bound ago (a named
+      constant next to the reconciler, `presetKeyMaxAge`, proposed 15
+      minutes) and the job has not failed: the write is adopted as done.
+      The executor needs no private key for this. A key at or over the
+      bound is never adopted (previously: adopted at any age), because it
+      has sat on the node as a live secret for longer than the design
+      allows.
+   3. Absent, unparsable, another fingerprint, or a recorded key at or over
+      the age bound: generate a new pair,
       replace the recorded public key and fsync, then run
       `pve.snippet.put` with `replace=true`. Replace is accepted only for
       the exact name of this job, renames atomically over the old file and
@@ -538,10 +545,28 @@ unnecessary").
    that one field) and removes the snippet with the node action right after
    the start task returns OK (previously: after rotation). Both are
    audited. A bootstrap step removes the cached vendor-data in the guest
-   after rotation. A failed provisioning before start leaves guest and
-   snippet for inspection (section 3); removing the snippet of an abandoned
-   provisioning is an explicit operator action. Because the snippet holds a
-   live secret, the run page shows every leftover snippet prominently.
+   after rotation.
+
+   **Failure cleanup** (previously: "a failed provisioning before start
+   leaves guest and snippet for inspection; removing the snippet of an
+   abandoned provisioning is an explicit operator action", which left a
+   live private key on the node until an operator acted and let a later
+   reconciliation adopt it). On every failure path before start, the
+   executor removes the snippet automatically and, if it was set, clears
+   `cicustom`. That covers a failed or refused snippet write, clone,
+   M2 recheck, config set or resize, a permit or registry refusal,
+   cancellation, an executor restart that finds the job failed, and a start
+   task that resolves as failed. Only the guest stays for inspection
+   (section 3); the snippet never does. Removal is idempotent (absent
+   counts as removed) and audited as `guest_hostkey_snippet_removed` with
+   the failure reason. The recorded key of a failed job is marked revoked
+   at the moment of failure: it is never adopted, never pinned by a join
+   and never reused; a new attempt uses a new generation and a new pair. If
+   removal itself fails (for example node unreachable or keyring locked),
+   the executor retries until it succeeds, the run stays in a failed state
+   flagged "snippet cleanup pending", and the run page shows it
+   prominently; an operator action to remove it remains available as a
+   manual trigger, not as the only path.
 8. **Audit.** Executor events `guest_hostkey_generated`,
    `guest_hostkey_snippet_written`, `guest_hostkey_snippet_replaced`,
    `guest_hostkey_pinned`, `guest_hostkey_rotated`,
@@ -567,7 +592,7 @@ to rotation.
 | --- | --- | --- | --- |
 | Executor memory | From generation until the snippet write returns | Executor process (already holds every SSH key) | Never persisted; same "stated limit" as spec 06 |
 | SSH channel to the node | Snippet write | Nobody outside the pinned, authenticated node session | stdin, not argv (not visible in `ps`) |
-| Snippet file on the node | From write until early cleanup (seconds to minutes) | Root on that node; admins of the storage if it were shared; node filesystem backups | Node-local storage only: registry refuses shared types (nfs, cifs, cephfs, glusterfs, pbs) **and** any storage flagged `shared 1`; the put action refuses a network filesystem; mode 0600; M1 |
+| Snippet file on the node | From write until early cleanup, or until automatic failure cleanup (seconds to minutes) | Root on that node; admins of the storage if it were shared; node filesystem backups | Node-local storage only: registry refuses shared types (nfs, cifs, cephfs, glusterfs, pbs) **and** any storage flagged `shared 1`; the put action refuses a network filesystem; mode 0600; M1 |
 | **PVE API: `cloudinit/dump` and any storage read of the snippet (*verify*, PK-10a)** | While `cicustom` is set and the snippet exists | Worst case: every `VM.Audit` holder on the guest, including the NOS read token and read-only users or monitoring | M2 refuses `preset` when any principal other than the NOS tokens and `root@pam` holds `VM.Audit` on the guest path or `Datastore.Audit` on the snippet storage (`/storage/<snippets>`, inherited from `/storage`, `/` or a pool containing the storage); M1 shortens the window; executor never calls the endpoint for preset guests |
 | Generated cloud-init drive (`vm-<vmid>-cloudinit`) on VM storage | Until the next regeneration after cleanup | Root on the node, storage admins; PVE users able to attach that volume elsewhere (*verify* ACL) | Rotation limits later use; vzdump skips cloud-init drives (*verify*) |
 | Guest: `/etc/ssh`, `/var/lib/cloud/instance/vendor-data.txt*`, CD-ROM device | Until rotation; the cache until the bootstrap cleanup step | Guest root; members of group `cdrom` while the drive is attached (the Ubuntu default user is one, and is a sudoer anyway) | Rotation; bootstrap removes the cached vendor-data |
