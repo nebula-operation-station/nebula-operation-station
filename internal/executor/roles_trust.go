@@ -23,6 +23,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor/trust"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/release"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
@@ -40,6 +41,23 @@ const (
 // ErrBuiltinTrustUnavailable is returned when no verified local release
 // bundle is present in the executor-configured directory.
 var ErrBuiltinTrustUnavailable = errors.New("built-in trust: no local release bundle available")
+
+// ErrBuiltinArtifactTrust is a built-in trust commit whose store commit
+// succeeded but whose artifact trust could not be recorded: the new
+// built-in versions stay untrusted for risk (fail closed) until the admin
+// trusts them individually.
+var ErrBuiltinArtifactTrust = errors.New("built-in trust: store committed, but the artifact trust was not recorded")
+
+// BuiltinArtifactTrust records the execution authority of a built-in trust
+// commit in the executor's artifact trust, the only trust the risk policy
+// reads (internal/riskpolicy, ArtifactRisk). *executordb.DB implements it.
+type BuiltinArtifactTrust interface {
+	// CheckBuiltinTrust validates a change without writing.
+	CheckBuiltinTrust(executordb.BuiltinTrustChange) error
+	// ApplyBuiltinTrust records a change atomically and returns the
+	// revoked entries.
+	ApplyBuiltinTrust(executordb.BuiltinTrustChange) ([]executordb.TrustedArtifact, error)
+}
 
 // errBuiltinTrustUnconfigured is returned while no trust transaction is wired.
 var errBuiltinTrustUnconfigured = status.Error(codes.Unimplemented, "built-in trust: not configured")
@@ -82,6 +100,8 @@ func (s *Service) SetBuiltinTrust(t BuiltinTrust) { s.builtinTrust = t }
 type dirBuiltinTrust struct {
 	storeDir, bundleDir string
 	now                 func() time.Time
+	// artifacts receives the exact artifact trust of every commit.
+	artifacts BuiltinArtifactTrust
 
 	mu sync.Mutex
 	// pending is the last admin Review, not yet confirmed delivered.
@@ -105,23 +125,30 @@ type builtinReviewBinding struct {
 // and the locally verified release bundle in bundleDir. Both must be
 // absolute executor-local paths; anchors are the compiled release anchors
 // (release.Anchors) and now is the injected clock (nil means time.Now).
+// artifacts is required: every commit records the exact (action, version,
+// sha256) trust of the committed versions there and revokes the retired
+// ones, so committed built-ins count for risk exactly like
+// `nebula artifact trust`.
 //
 // The store is opened once here, at executor startup, so a fresh store is
 // bootstrapped by the executor itself; later calls (including the server's
 // status read) only open an existing index read-only and never initialize
 // or persist state. A store whose index disappears later stays unavailable
 // until local recovery.
-func NewDirBuiltinTrust(storeDir, bundleDir string, anchors []release.Anchor, now func() time.Time) (BuiltinTrust, error) {
+func NewDirBuiltinTrust(storeDir, bundleDir string, anchors []release.Anchor, now func() time.Time, artifacts BuiltinArtifactTrust) (BuiltinTrust, error) {
 	if storeDir == "" || !filepath.IsAbs(storeDir) {
 		return nil, fmt.Errorf("built-in trust: store directory %q must be absolute", storeDir)
 	}
 	if bundleDir == "" || !filepath.IsAbs(bundleDir) {
 		return nil, fmt.Errorf("built-in trust: bundle directory %q must be absolute", bundleDir)
 	}
+	if artifacts == nil {
+		return nil, errors.New("built-in trust: an artifact trust store is required")
+	}
 	if now == nil {
 		now = time.Now
 	}
-	d := &dirBuiltinTrust{storeDir: filepath.Clean(storeDir), bundleDir: filepath.Clean(bundleDir), now: now}
+	d := &dirBuiltinTrust{storeDir: filepath.Clean(storeDir), bundleDir: filepath.Clean(bundleDir), now: now, artifacts: artifacts}
 	if _, err := trust.Open(d.storeDir, anchors, d.now); err != nil {
 		return nil, fmt.Errorf("built-in trust: open store %s: %w", d.storeDir, err)
 	}
@@ -294,12 +321,85 @@ func (d *dirBuiltinTrust) Commit(_ context.Context, digest string, pins map[stri
 	case rb.generation != st.Generation():
 		return trust.BulkAdmitResult{}, 0, fmt.Errorf("%w: the store changed since the review (generation %d, now %d)", trust.ErrStale, rb.generation, st.Generation())
 	}
+	// Check the artifact trust the commit implies before the store
+	// commits, so a malformed tuple cannot leave committed built-ins
+	// without their recorded trust.
+	dry, err := st.BulkAdmit(c, trust.BulkAdmitOpts{})
+	if err != nil {
+		return trust.BulkAdmitResult{}, 0, err
+	}
+	change, err := builtinTrustChange(dry.Review, retired, adminUID)
+	if err != nil {
+		return trust.BulkAdmitResult{}, 0, err
+	}
+	if err := d.artifacts.CheckBuiltinTrust(change); err != nil {
+		return trust.BulkAdmitResult{}, 0, fmt.Errorf("built-in trust: %w", err)
+	}
 	res, err := st.BulkAdmit(c, trust.BulkAdmitOpts{ConfirmedDigest: digest, Pins: pins, Retired: retired, AdminUID: adminUID})
 	d.status = nil
 	if err != nil {
 		return trust.BulkAdmitResult{}, 0, err
 	}
+	// Record the committed review's authority (ADR 0007 E16).
+	change, err = builtinTrustChange(res.Review, res.Retired, adminUID)
+	if err != nil {
+		return trust.BulkAdmitResult{}, 0, fmt.Errorf("%w (generation %d): %v", ErrBuiltinArtifactTrust, st.Generation(), err)
+	}
+	revoked, err := d.artifacts.ApplyBuiltinTrust(change)
+	if err != nil {
+		return trust.BulkAdmitResult{}, 0, fmt.Errorf("%w (generation %d): %v", ErrBuiltinArtifactTrust, st.Generation(), err)
+	}
+	for _, a := range change.Trust {
+		res.ArtifactsTrusted = append(res.ArtifactsTrusted, artifactTuple(a))
+	}
+	for _, a := range revoked {
+		res.ArtifactsRevoked = append(res.ArtifactsRevoked, artifactTuple(a))
+	}
 	return res, st.Generation(), nil
+}
+
+// builtinTrustChange maps the artifact trust a review implies, committed
+// with the retired old versions, to trust entries: exact tuples recorded
+// for the admin as `nebula artifact trust` records them.
+func builtinTrustChange(r trust.Review, retired []string, adminUID int) (executordb.BuiltinTrustChange, error) {
+	at, err := trust.ArtifactTrustFor(r, retired)
+	if err != nil {
+		return executordb.BuiltinTrustChange{}, err
+	}
+	var out executordb.BuiltinTrustChange
+	by := string(peercred.RoleAdmin) + ":uid" + strconv.Itoa(adminUID)
+	for _, t := range at.Trust {
+		out.Trust = append(out.Trust, executordb.TrustedArtifact{SHA256: t.SHA256, ActionID: t.ActionID,
+			ModuleVersion: t.ModuleVersion, Risk: canonical.Risk(t.Risk), Label: "built-in release " + r.ReleaseVersion, TrustedBy: by})
+	}
+	for _, v := range at.Retire {
+		out.Retire = append(out.Retire, executordb.BuiltinVersion{Module: v.Module, Version: v.Version})
+	}
+	return out, nil
+}
+
+// artifactTuple is the audit form of a trust entry.
+func artifactTuple(a executordb.TrustedArtifact) trust.ArtifactTuple {
+	return trust.ArtifactTuple{ActionID: a.ActionID, ModuleVersion: a.ModuleVersion, SHA256: a.SHA256, Risk: string(a.Risk)}
+}
+
+// builtinTupleAudit renders the module-level old/new trust tuples for the
+// audit log: names, versions, hashes and statuses only.
+func builtinTupleAudit(ts []trust.TrustTuple) []string {
+	out := make([]string, 0, len(ts))
+	for _, t := range ts {
+		out = append(out, fmt.Sprintf("%s %s:%s -> %s:%s (%s)", t.Module, t.OldVersion, t.OldSHA256, t.NewVersion, t.NewSHA256, t.Status))
+	}
+	return out
+}
+
+// artifactAudit renders exact artifact trust tuples for the audit log.
+func artifactAudit(ts []trust.ArtifactTuple) []string {
+	out := make([]string, 0, len(ts))
+	for _, t := range ts {
+		out = append(out, t.ActionID+"@"+t.ModuleVersion+" "+t.SHA256+" "+t.Risk)
+	}
+	return out
 }
 
 // builtinTrustAdmin returns the local admin caller's UID from peer
@@ -519,11 +619,18 @@ func (s *Service) CommitBuiltinTrust(ctx context.Context, req *pb.CommitBuiltinT
 	retired := append([]string(nil), req.GetRetire()...)
 	res, gen, err := s.builtinTrust.Commit(ctx, req.GetManifestDigest(), pins, retired, int(uid))
 	if err != nil {
+		if errors.Is(err, ErrBuiltinArtifactTrust) && s.log != nil {
+			s.log.Error("audit", "kind", "builtin_trust_artifacts_failed", "by", callerName(ctx), "admin_uid", uid,
+				"manifest_digest", req.GetManifestDigest(), "err", err.Error())
+		}
 		return nil, builtinTrustStatus(err)
 	}
 	if s.log != nil {
-		s.log.Info("built-in trust committed", "manifest_digest", res.ManifestDigest, "generation", gen,
-			"admin_uid", uid, "retained", res.Pinned, "retired", res.Retired, "cleanup_failures", res.CleanupFailures)
+		s.log.Info("audit", "kind", "builtin_trust_committed", "by", callerName(ctx), "admin_uid", uid,
+			"manifest_digest", res.ManifestDigest, "release", res.Review.ReleaseVersion, "generation", gen,
+			"tuples", builtinTupleAudit(res.Tuples), "trusted", artifactAudit(res.ArtifactsTrusted),
+			"revoked", artifactAudit(res.ArtifactsRevoked), "retained", res.Pinned, "retired", res.Retired,
+			"collected", res.Collected, "cleanup_failures", res.CleanupFailures)
 	}
 	out := &pb.CommitBuiltinTrustResponse{
 		ManifestDigest:  res.ManifestDigest,

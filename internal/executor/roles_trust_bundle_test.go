@@ -28,6 +28,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor/trust"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/modulelock"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/prelude"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/release"
@@ -181,6 +182,8 @@ type bundleEnv struct {
 	storeDir, bundleDir string
 	now                 func() time.Time
 	bt                  *dirBuiltinTrust
+	// db holds the executor's artifact trust (the risk authority).
+	db *executordb.DB
 }
 
 func newBundleEnv(t *testing.T) *bundleEnv {
@@ -188,8 +191,9 @@ func newBundleEnv(t *testing.T) *bundleEnv {
 	dir := t.TempDir()
 	e := &bundleEnv{k: newBundleSK(t), storeDir: filepath.Join(dir, "trust"), bundleDir: filepath.Join(dir, "bundle"),
 		now: func() time.Time { return time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC) }}
+	e.db = openTrustTestDB(t)
 	writeDockerBundle(t, e.k, e.bundleDir, "2026.11.0", "1.0.0", "echo restart\n")
-	bt, err := NewDirBuiltinTrust(e.storeDir, e.bundleDir, e.k.anchors(), e.now)
+	bt, err := NewDirBuiltinTrust(e.storeDir, e.bundleDir, e.k.anchors(), e.now, e.db)
 	if err != nil {
 		t.Fatal(err)
 	}
