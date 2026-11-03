@@ -135,6 +135,10 @@ type hostPageData struct {
 	// Updates.
 	Packages    []packageRow
 	UpdatesAsOf time.Time
+	// UpdateLinks are the "Propose ..." links of the Updates tab for an
+	// enrolled host; otherwise UpdatesReadonly is the read-only reason.
+	UpdateLinks     []chartUpdateLink
+	UpdatesReadonly string
 
 	// Containers.
 	Containers     []containerRow
@@ -224,6 +228,7 @@ func (h *Handler) fillHost(ctx context.Context, host *inventory.Host, hp *hostPa
 	hp.StateReason = v.StateReason
 	hp.Endpoints = v.Endpoints
 	hp.KeyStatus = v.KeyStatus
+	hp.UpdateLinks, hp.UpdatesReadonly = updateSection(id, v.KeyStatus)
 	hp.KeyShort = v.KeyShort
 	hp.KeyFingerprint = v.KeyFingerprint
 	hp.LastSeenSet = v.LastSeenSet
