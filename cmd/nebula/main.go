@@ -8,6 +8,7 @@
 //	nebula lock
 //	nebula pending
 //	nebula approve <digest-prefix>
+//	nebula batch review|approve|stage|skip
 //	nebula read-grant pending|approve <digest>
 //	nebula artifact trust|untrust|list
 //	nebula host probe|pin|unpin|keys|test|criticality|clear|list
@@ -50,6 +51,11 @@ commands:
   approve <digest>    approve a pending permit (hardened path); a unique prefix is enough
   approve --stage N DIGEST | approve --skip HOST DIGEST
                       open the next stage of a rollout, or skip a host (hardened path)
+  batch review DIGEST | approve DIGEST
+                      the executor's complete batch plan; approve it locally (needed for
+                      HIGH batches in hardened mode); "approve DIGEST" works too
+  batch stage N DIGEST | skip MEMBER DIGEST
+                      open the next stage of an approved batch, or skip a member
   schedule pending | approve <digest> | list | revoke <grant-id>
                       schedule grants: standing permission for LOW read-only checks
   read-grant pending | approve <digest>
@@ -181,6 +187,8 @@ func run(cmd string, args []string) error {
 			return errors.New("usage: nebula approve <digest-prefix>")
 		}
 		return approve(ctx, c, args[0], os.Stdin, os.Stdout)
+	case "batch":
+		return batchCmd(ctx, c, args, os.Stdin, os.Stdout)
 	case "schedule":
 		return scheduleCmd(ctx, c, args, os.Stdin, os.Stdout)
 	case "read-grant":
@@ -286,6 +294,11 @@ func approve(ctx context.Context, c pb.ExecutorServiceClient, prefix string, in 
 		}
 	}
 	if match == nil {
+		// A full digest that is no pending permit may be a batch (ADR 0007:
+		// `nebula approve <batch digest>`); a prefix never selects a batch.
+		if _, err := canonical.ParseDigest(prefix); err == nil {
+			return batchApprove(ctx, c, prefix, in, out)
+		}
 		return errors.New("no pending permit with that prefix")
 	}
 
