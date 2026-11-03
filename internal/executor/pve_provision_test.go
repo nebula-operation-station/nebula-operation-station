@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -148,14 +149,21 @@ type fakeProvisionReader struct {
 	inv     pveapi.ClusterInventory
 	storage pveapi.Storage
 	headers []string
+	// afterInventory runs (unlocked) after a guest list was copied out, so
+	// a test can change the cluster right behind a reader.
+	afterInventory func()
 }
 
 func (r *fakeProvisionReader) ClusterInventory(ctx context.Context, _ executordb.PveRemote, tok pveapi.TokenSupplier) (pveapi.ClusterInventory, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.headers = append(r.headers, header(ctx, tok))
 	inv := r.inv
 	inv.Guests = append([]pveapi.Guest(nil), r.inv.Guests...)
+	after := r.afterInventory
+	r.mu.Unlock()
+	if after != nil {
+		after()
+	}
 	return inv, nil
 }
 
@@ -173,6 +181,12 @@ func (r *fakeProvisionReader) addGuest(node string, vmid int, mem uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.inv.Guests = append(r.inv.Guests, pveapi.Guest{Node: node, VMID: vmid, MaxMemory: int64(mem)})
+}
+
+func (r *fakeProvisionReader) removeGuest(vmid int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.inv.Guests = slices.DeleteFunc(r.inv.Guests, func(g pveapi.Guest) bool { return g.VMID == vmid })
 }
 
 type provisionEnv struct {
@@ -478,9 +492,17 @@ func TestProvisionRunsCloneConfigResizeStartAsTypedCalls(t *testing.T) {
 			t.Fatalf("dispatch used %q", d.header)
 		}
 	}
-	// The reservation ends once the guest exists.
+	// The reservation stays until the guest is in the complete live guest
+	// list (TestProvisionSuccessKeepsVMIDUntilTheGuestIsListed), then ends.
+	if _, ok, _ := e.vmids.VMIDHolder(mutRemote, 101, time.Now()); !ok {
+		t.Fatal("reservation released before the guest is listed")
+	}
+	e.reader.addGuest("pve1", 101, 4*gib)
+	if n, err := e.prov.ReleaseSettledVMIDs(context.Background(), mutRemote); err != nil || n != 1 {
+		t.Fatalf("release once listed: %d %v", n, err)
+	}
 	if _, ok, _ := e.vmids.VMIDHolder(mutRemote, 101, time.Now()); ok {
-		t.Fatal("reservation kept after success")
+		t.Fatal("reservation kept after the guest is listed")
 	}
 
 	// The approved steps become exactly these PVE calls.
@@ -718,18 +740,55 @@ func TestProvisionCapacityNeverRaisesRiskAndIsRecheckedBeforeRun(t *testing.T) {
 	}
 
 	// A capacity warning that changes after approval refuses the run before
-	// dispatch: the reviewer approved another plan.
+	// dispatch: the reviewer approved another plan. The capacity flags are
+	// live facts that can flip back, so the denial is not final and the
+	// approved execution keeps its VMID (PR #162 review round 7).
 	approved := e.approve(e.request())
 	e.reader.addGuest("pve1", 300, 62*gib)
-	if _, err := e.prov.Provision(context.Background(), approved); !errors.Is(err, ErrPveMutationDenied) || !errors.Is(err, ErrPvePermitFinal) {
-		t.Fatalf("capacity changed: %v, want a final denial", err)
+	if _, err := e.prov.Provision(context.Background(), approved); !errors.Is(err, ErrPveMutationDenied) || errors.Is(err, ErrPvePermitFinal) {
+		t.Fatalf("capacity changed: %v, want a non-final denial", err)
 	}
 	if len(e.pc.provisionSteps()) != 0 {
 		t.Fatal("dispatched after the capacity changed")
 	}
-	// Nothing was sent, so the VMID is free again.
-	if _, ok, _ := e.vmids.VMIDHolder(mutRemote, approved.VMID, time.Now()); ok {
-		t.Fatal("reservation kept although nothing was sent")
+	if h, ok, _ := e.vmids.VMIDHolder(mutRemote, approved.VMID, time.Now()); !ok || h.ExecutionID != approved.ExecutionID {
+		t.Fatalf("reservation after a capacity change: %+v %v, want kept for %s", h, ok, approved.ExecutionID)
+	}
+	// Another proposal cannot take the kept VMID meanwhile.
+	if _, other := e.propose(e.request()); other.VMID == approved.VMID {
+		t.Fatalf("vmid %d handed out again", other.VMID)
+	}
+	// The capacity flips back: the same approval now runs on its VMID.
+	e.reader.removeGuest(300)
+	res, err := e.prov.Provision(context.Background(), approved)
+	if err != nil || res.VMID != approved.VMID {
+		t.Fatalf("after the capacity flipped back: %v %+v", err, res)
+	}
+}
+
+// TestProvisionRacingTheApprovalKeepsVMID pins PR #162 review round 7: a
+// Provision of a permit that is still pending (it can still be approved)
+// is a transient denial; the VMID stays with the execution and the run
+// succeeds once the permit is approved.
+func TestProvisionRacingTheApprovalKeepsVMID(t *testing.T) {
+	e := newProvisionEnv(t, fixedRisk{})
+	req := e.request()
+	p, pp := e.propose(req)
+	req.Digest, req.ExecutionID, req.VMID = p.Digest, p.Request.ExecutionID, pp.VMID
+	if _, err := e.prov.Provision(context.Background(), req); !errors.Is(err, ErrPveMutationDenied) || errors.Is(err, ErrPvePermitFinal) {
+		t.Fatalf("pending permit: %v, want a non-final denial", err)
+	}
+	if len(e.pc.provisionSteps()) != 0 {
+		t.Fatal("dispatched on a pending permit")
+	}
+	if h, ok, _ := e.vmids.VMIDHolder(mutRemote, req.VMID, time.Now()); !ok || h.ExecutionID != req.ExecutionID || h.Started {
+		t.Fatalf("reservation after a pending-permit denial: %+v %v", h, ok)
+	}
+	if _, err := e.auth.ApproveCLI(p.Digest, 0, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.prov.Provision(context.Background(), req); err != nil {
+		t.Fatalf("after approval: %v", err)
 	}
 }
 
@@ -1350,6 +1409,167 @@ func TestProvisionConcurrentRunOfTheSameExecutionKeepsTheReservation(t *testing.
 	}
 }
 
+// TestProvisionConsumedPermitWithoutStepReleasesVMID pins PR #162 review
+// round 7: a transient failure after the run consumed its single-use permit
+// but before the first job intent was recorded sends nothing, and no retry
+// can ever run (the permit is used), so the VMID is released instead of
+// being kept for a retry that can only fail with ErrPveMutationAlreadyRun.
+func TestProvisionConsumedPermitWithoutStepReleasesVMID(t *testing.T) {
+	cases := map[string]struct {
+		block, unblock func(e *provisionEnv)
+	}{
+		"target busy": {
+			block: func(e *provisionEnv) {
+				// Another open node-level step on pve1.
+				job := executordb.PveJob{ExecutionID: "00000000-0000-4000-a000-888888888888", Step: 1, Digest: strings.Repeat("a", 64),
+					Action: "pve.test.mutation", RemoteID: mutRemote, TrustGeneration: 1, Kind: permit.ProviderKindNode, Node: "pve1",
+					RequestDigest: strings.Repeat("b", 64), TaskType: "qmclone", TaskUser: mutActionUser}
+				if err := e.pe.db.CreatePveJobIntent(job); err != nil {
+					e.t.Fatal(err)
+				}
+			},
+			unblock: func(e *provisionEnv) {
+				if err := e.pe.db.FinishPveJob("00000000-0000-4000-a000-888888888888", 1, executordb.PveJobFailed, "test"); err != nil {
+					e.t.Fatal(err)
+				}
+			},
+		},
+		"vault locked after the claim": {
+			block: func(e *provisionEnv) {
+				var once sync.Once
+				e.pc.pmu.Lock()
+				e.pc.onTaskType = func() { once.Do(e.pe.vault.Lock) }
+				e.pc.pmu.Unlock()
+			},
+			unblock: func(e *provisionEnv) {
+				if err := e.pe.vault.Unlock([]byte(e.pe.passphrase)); err != nil {
+					e.t.Fatal(err)
+				}
+			},
+		},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newProvisionEnv(t, fixedRisk{})
+			approved := e.approve(e.request())
+			c.block(e)
+			res, err := e.prov.Provision(context.Background(), approved)
+			if err == nil || len(res.Steps) != 0 || res.GuestKept {
+				t.Fatalf("blocked run: %v %+v", err, res)
+			}
+			if len(e.pc.provisionSteps()) != 0 {
+				t.Fatal("dispatched")
+			}
+			if h, ok, _ := e.vmids.VMIDHolder(mutRemote, approved.VMID, time.Now()); ok {
+				t.Fatalf("vmid kept for a retry that can never run: %+v", h)
+			}
+			c.unblock(e)
+			// The retry the reservation was kept for is refused by the permit.
+			if _, err := e.prov.Provision(context.Background(), approved); err == nil {
+				t.Fatal("retry ran on a consumed permit")
+			}
+			if len(e.pc.provisionSteps()) != 0 {
+				t.Fatal("retry dispatched")
+			}
+			// The VMID is free for a new proposal.
+			req := e.request()
+			req.VMID = approved.VMID
+			if _, err := e.prov.ProposalRequest(context.Background(), req, nextProvExec(), canonical.RiskMedium, strings.Repeat("c", 64), time.Now().Add(time.Hour)); err != nil {
+				t.Fatalf("vmid not free again: %v", err)
+			}
+		})
+	}
+}
+
+// TestProvisionSuccessKeepsVMIDUntilTheGuestIsListed pins PR #162 review
+// round 7: a guest the clone created protects its VMID only once the live
+// guest list shows it. Until then the reservation stays, so a proposal
+// working from a list read before the clone finished cannot take the VMID.
+func TestProvisionSuccessKeepsVMIDUntilTheGuestIsListed(t *testing.T) {
+	e := newProvisionEnv(t, fixedRisk{})
+	ok := e.approve(e.request())
+	if _, err := e.prov.Provision(context.Background(), ok); err != nil {
+		t.Fatal(err)
+	}
+	// A later step fails after the clone succeeded: the guest exists too.
+	failed := e.approve(e.request())
+	e.pc.pmu.Lock()
+	e.pc.onStep = func(n int, step PveMutationStep, upid string) (string, error) {
+		if step.Method == pveStepGuestConfig {
+			return "", fmt.Errorf("test: %w", ErrPveRejected)
+		}
+		return upid, nil
+	}
+	e.pc.pmu.Unlock()
+	res, err := e.prov.Provision(context.Background(), failed)
+	if !errors.Is(err, ErrPveStepFailed) || !res.GuestKept || res.Steps[0].State != executordb.PveJobSucceeded {
+		t.Fatalf("failed config: %v %+v", err, res)
+	}
+	for _, vmid := range []uint64{ok.VMID, failed.VMID} {
+		// The guest list (stale) does not show the guest yet.
+		if h, held, _ := e.vmids.VMIDHolder(mutRemote, vmid, time.Now()); !held || !h.Started {
+			t.Fatalf("vmid %d released before its guest is listed: %+v %v", vmid, h, held)
+		}
+		req := e.request()
+		req.VMID = vmid
+		if _, err := e.prov.ProposalRequest(context.Background(), req, nextProvExec(), canonical.RiskMedium, strings.Repeat("c", 64), time.Now().Add(time.Hour)); !errors.Is(err, ErrPveVMIDTaken) {
+			t.Fatalf("vmid %d of a created guest handed out: %v", vmid, err)
+		}
+	}
+	if _, pp := e.propose(e.request()); pp.VMID == ok.VMID || pp.VMID == failed.VMID {
+		t.Fatalf("next free vmid %d is a created guest's", pp.VMID)
+	}
+	if n, err := e.prov.ReleaseSettledVMIDs(context.Background(), mutRemote); err != nil || n != 0 {
+		t.Fatalf("released %d %v before the guests are listed", n, err)
+	}
+	e.reader.addGuest("pve1", int(ok.VMID), 4*gib)
+	e.reader.addGuest("pve1", int(failed.VMID), 4*gib)
+	if n, err := e.prov.ReleaseSettledVMIDs(context.Background(), mutRemote); err != nil || n != 2 {
+		t.Fatalf("released %d %v once listed, want 2", n, err)
+	}
+}
+
+// TestProvisionSuccessReleasesVMIDWhenTheGuestIsListed: a guest already in
+// the live list right after the run releases the reservation at once.
+func TestProvisionSuccessReleasesVMIDWhenTheGuestIsListed(t *testing.T) {
+	e := newProvisionEnv(t, fixedRisk{})
+	approved := e.approve(e.request())
+	e.pc.pmu.Lock()
+	e.pc.onStep = func(n int, step PveMutationStep, upid string) (string, error) {
+		if step.Method == pveStepGuestClone {
+			e.reader.addGuest("pve1", int(approved.VMID), 4*gib)
+		}
+		return upid, nil
+	}
+	e.pc.pmu.Unlock()
+	if _, err := e.prov.Provision(context.Background(), approved); err != nil {
+		t.Fatal(err)
+	}
+	if h, held, _ := e.vmids.VMIDHolder(mutRemote, approved.VMID, time.Now()); held {
+		t.Fatalf("reservation kept although the guest is listed: %+v", h)
+	}
+}
+
+// TestProvisionProposalRechecksTheLiveListAfterReserving: a guest that
+// appears between the proposal's guest list read and its reservation (a
+// reservation released by another proposal that saw the guest) is caught
+// by a fresh read after reserving; nothing stays reserved.
+func TestProvisionProposalRechecksTheLiveListAfterReserving(t *testing.T) {
+	e := newProvisionEnv(t, fixedRisk{})
+	var once sync.Once
+	e.reader.mu.Lock()
+	e.reader.afterInventory = func() { once.Do(func() { e.reader.addGuest("pve1", 150, 4*gib) }) }
+	e.reader.mu.Unlock()
+	req := e.request()
+	req.VMID = 150
+	if _, err := e.prov.ProposalRequest(context.Background(), req, nextProvExec(), canonical.RiskMedium, strings.Repeat("c", 64), time.Now().Add(time.Hour)); !errors.Is(err, ErrPveVMIDTaken) {
+		t.Fatalf("vmid listed after the first read: %v", err)
+	}
+	if h, held, _ := e.vmids.VMIDHolder(mutRemote, 150, time.Now()); held {
+		t.Fatalf("reservation left behind: %+v", h)
+	}
+}
+
 // noLinkedHosts is a linked-host source for nodes that are not enrolled hosts.
 func noLinkedHosts(canonical.Request, canonical.Target) ([]canonical.Target, error) { return nil, nil }
 
@@ -1384,12 +1604,16 @@ func TestProvisionTransientDenialKeepsVMID(t *testing.T) {
 }
 
 func TestPermitDenialFinal(t *testing.T) {
-	for _, c := range []permit.Code{permit.CodeNotFound, permit.CodeExpired, permit.CodeWrongState, permit.CodeParametersMismatch, permit.CodeRolloutAborted} {
+	for _, c := range []permit.Code{permit.CodeNotFound, permit.CodeExpired, permit.CodeRolloutAborted, permit.CodeArtifactMismatch, permit.CodeActionMismatch} {
 		if !permitDenialFinal(c) {
 			t.Errorf("%s not final", c)
 		}
 	}
-	for _, c := range []permit.Code{permit.CodeStorage, permit.CodeRiskAboveApproval, permit.CodeStageNotOpen, permit.CodeSessionRequired, permit.CodeLimit, permit.CodeHostAlreadyRun, permit.Code("future_code")} {
+	for _, c := range []permit.Code{permit.CodeStorage, permit.CodeRiskAboveApproval, permit.CodeStageNotOpen, permit.CodeSessionRequired, permit.CodeLimit, permit.CodeHostAlreadyRun, permit.Code("future_code"),
+		// A pending permit can still be approved (the authority has only
+		// pending and approved permits); the bound parameters carry live
+		// capacity flags that can flip back.
+		permit.CodeWrongState, permit.CodeParametersMismatch} {
 		if permitDenialFinal(c) {
 			t.Errorf("%s final, want transient", c)
 		}
