@@ -79,6 +79,17 @@ func (s *Store) Create(ctx context.Context, credentialID, userName string) (stri
 // Lookup returns the session for token if it is neither idle-expired nor
 // past its absolute expiry, and records the activity.
 func (s *Store) Lookup(ctx context.Context, token string) (Session, error) {
+	return s.lookup(ctx, token, true)
+}
+
+// Peek is Lookup without recording activity: it validates the session the
+// same way but never moves last_seen, so it cannot keep an idle session
+// alive. It serves passive status requests (see PassiveHeader).
+func (s *Store) Peek(ctx context.Context, token string) (Session, error) {
+	return s.lookup(ctx, token, false)
+}
+
+func (s *Store) lookup(ctx context.Context, token string, touch bool) (Session, error) {
 	h, ok := hashToken(token)
 	if !ok {
 		return Session{}, ErrNoSession
@@ -99,7 +110,7 @@ func (s *Store) Lookup(ctx context.Context, token string) (Session, error) {
 		_, _ = s.db.ExecContext(ctx, `DELETE FROM web_sessions WHERE token_hash = ?`, h)
 		return Session{}, ErrNoSession
 	}
-	if now.Sub(sess.LastSeenAt) >= touchInterval {
+	if touch && now.Sub(sess.LastSeenAt) >= touchInterval {
 		if _, err := s.db.ExecContext(ctx, `UPDATE web_sessions SET last_seen_at = ? WHERE token_hash = ?`, now.Unix(), h); err == nil {
 			sess.LastSeenAt = now.Truncate(time.Second)
 		}

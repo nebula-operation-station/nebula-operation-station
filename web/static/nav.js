@@ -106,3 +106,223 @@
     narrow.addEventListener('change', apply);
   }
 })();
+
+// --- Topbar privileged-session display (ADR 0007 E20) ----------------
+//
+// It lives in nav.js because nav.js is the one script every non-bare page
+// loads; pages whose own scripts do not include webauthn.js still get the
+// display, and the assertion helpers are loaded on the first Extend click.
+//
+// The server is the source of truth: GET /privileged/session answers with
+// the display it computed (internal/web/ui/session.View: state, label,
+// remaining_seconds, extendable, low_threshold_seconds). This file only
+// renders that view, counts the reported remaining seconds down and polls
+// again; it derives no session state of its own. It sends the state it
+// shows as ?prev= so the server can tell "expired" from "never opened".
+//
+// Polls are read-only and marked passive (X-Nebula-Passive, see
+// internal/web/auth.PassiveHeader), so an open tab is not user activity
+// and cannot keep the web login alive. Polling pauses while the tab is
+// hidden and refreshes when it becomes visible.
+//
+// The only state-changing call is the explicit Extend click, which runs
+// one fresh WebAuthn assertion (begin -> credentials.get -> finish). At
+// most one flow runs at a time, so one click extends the session exactly
+// once. Every poll carries a sequence number; an answer that is not for
+// the latest poll is dropped, so a stale answer can never overwrite the
+// state after an extend.
+(() => {
+  const el = document.getElementById('session-display');
+  if (!el) return; // bare pages (login, setup): no session display
+  const stateEl = document.getElementById('session-state');
+  const timeEl = document.getElementById('session-time');
+  const errEl = document.getElementById('session-error');
+  const btn = document.getElementById('session-extend');
+  if (!stateEl || !timeEl || !errEl || !btn) return;
+
+  const POLL_MS = 30000;            // background refresh of the state
+  const PASSIVE_HEADER = 'X-Nebula-Passive';
+  const STATES = ['unknown', 'none', 'active', 'expired'];
+  const MAX_SECONDS = 7 * 24 * 3600; // sanity bound for any duration
+  const MAX_LABEL = 64;
+  // Fail closed: anything unexpected is shown as unknown, without action.
+  const UNKNOWN = Object.freeze({
+    state: 'unknown', label: 'Session unavailable', remaining: 0, extendable: false, low: 0,
+  });
+
+  let view = UNKNOWN;
+  let deadline = 0;        // Date.now() at which the remaining time hits 0
+  let expiryPolled = false; // the poll at zero was sent for this view
+  let inFlight = false;    // at most one assertion flow (extend once)
+  let seq = 0;             // sequence number of the latest poll
+  let pollTimer = 0;
+  let tickTimer = 0;
+
+  // parseView validates the poll answer field by field and returns the
+  // unknown view on anything malformed.
+  function parseView(p) {
+    if (!p || typeof p !== 'object') return UNKNOWN;
+    const s = p.state;
+    const l = p.label;
+    const r = p.remaining_seconds;
+    const x = p.extendable;
+    const t = p.low_threshold_seconds;
+    if (typeof s !== 'string' || STATES.indexOf(s) < 0) return UNKNOWN;
+    if (typeof l !== 'string' || l.length === 0 || l.length > MAX_LABEL) return UNKNOWN;
+    if (!Number.isInteger(r) || r < 0 || r > MAX_SECONDS) return UNKNOWN;
+    if (!Number.isInteger(t) || t < 0 || t > MAX_SECONDS) return UNKNOWN;
+    if (typeof x !== 'boolean') return UNKNOWN;
+    return { state: s, label: l, remaining: r, extendable: x, low: t };
+  }
+
+  // formatRemaining renders seconds as "1h 04m", "12m 09s" or "45s".
+  function formatRemaining(sec) {
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    if (h > 0) return h + 'h ' + String(m).padStart(2, '0') + 'm';
+    if (m > 0) return m + 'm ' + String(s).padStart(2, '0') + 's';
+    return s + 's';
+  }
+
+  // loadWebAuthn returns the assertion helpers of webauthn.js, loading
+  // that file (same origin, allowed by script-src 'self') on pages that do
+  // not include it. The global must not be declared twice, so the file is
+  // only added when it is not there yet.
+  function loadWebAuthn() {
+    if (typeof nebulaWebAuthn !== 'undefined') return Promise.resolve(nebulaWebAuthn);
+    return new Promise((resolve, reject) => {
+      const fail = () => reject(new Error('Could not load the security key helper.'));
+      const s = document.createElement('script');
+      s.src = '/static/webauthn.js';
+      s.addEventListener('load', () => {
+        if (typeof nebulaWebAuthn !== 'undefined') resolve(nebulaWebAuthn); else fail();
+      });
+      s.addEventListener('error', fail);
+      document.head.appendChild(s);
+    });
+  }
+
+  function stopTick() {
+    if (tickTimer) { clearInterval(tickTimer); tickTimer = 0; }
+  }
+
+  // tick counts the server-reported remaining time down. At zero it asks
+  // the server once; the server decides whether the session expired.
+  function tick() {
+    const rem = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+    timeEl.textContent = formatRemaining(rem);
+    el.classList.toggle('session-display--low', rem <= view.low);
+    if (rem === 0 && !expiryPolled && !document.hidden && !inFlight) {
+      expiryPolled = true;
+      poll();
+    }
+  }
+
+  function render() {
+    el.hidden = false;
+    el.dataset.state = view.state;
+    stateEl.textContent = view.label; // text only
+    btn.hidden = !view.extendable && !inFlight;
+    btn.disabled = inFlight;
+    btn.textContent = inFlight ? 'Verifying…' : 'Extend session';
+    if (view.state === 'active') {
+      tick();
+      if (!tickTimer) tickTimer = setInterval(tick, 1000);
+    } else {
+      stopTick();
+      timeEl.textContent = '';
+      el.classList.remove('session-display--low');
+    }
+  }
+
+  function showError(text) {
+    errEl.textContent = text; // text only
+    errEl.hidden = false;
+  }
+
+  function clearError() {
+    errEl.textContent = '';
+    errEl.hidden = true;
+  }
+
+  function apply(next) {
+    view = next;
+    deadline = Date.now() + next.remaining * 1000;
+    expiryPolled = false;
+    if (next.state !== 'unknown') clearError();
+    render();
+  }
+
+  async function poll() {
+    const mine = ++seq;
+    let next;
+    try {
+      const res = await fetch('/privileged/session?prev=' + encodeURIComponent(view.state), {
+        credentials: 'same-origin',
+        headers: { [PASSIVE_HEADER]: '1' },
+      });
+      if (!res.ok) throw new Error(String(res.status));
+      next = parseView(await res.json());
+    } catch (_) {
+      next = UNKNOWN; // fail closed
+    }
+    if (mine !== seq) return; // a newer poll or an extend superseded this one
+    apply(next);
+  }
+
+  // backgroundPoll is the interval and visibility refresh. It does not run
+  // while the tab is hidden or an assertion flow is in progress.
+  function backgroundPoll() {
+    if (document.hidden || inFlight) return;
+    poll();
+  }
+
+  function startPolling() {
+    if (!pollTimer) pollTimer = setInterval(backgroundPoll, POLL_MS);
+  }
+
+  function stopPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = 0; }
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      stopPolling();
+      stopTick();
+    } else {
+      backgroundPoll();
+      startPolling();
+    }
+  });
+
+  btn.addEventListener('click', async () => {
+    // One assertion flow at a time: one click extends exactly once.
+    if (inFlight) return;
+    inFlight = true;
+    seq++; // drop the answer of any poll that is still under way
+    clearError();
+    render();
+    let ok = false;
+    try {
+      const w = await loadWebAuthn();
+      const begin = await w.post('/privileged/begin');
+      const cred = await navigator.credentials.get(w.requestOptions(begin.options));
+      await w.post('/privileged/finish', { assertion: w.assertionJSON(cred) });
+      ok = true;
+    } catch (e) {
+      showError(e && e.name === 'NotAllowedError'
+        ? 'Verification cancelled.'
+        : ((e && e.message) || 'Could not extend the session.'));
+    } finally {
+      inFlight = false;
+      render();
+    }
+    if (ok) await poll(); // the server now reports the new expiry
+  });
+
+  if (!document.hidden) {
+    poll();
+    startPolling();
+  }
+})();

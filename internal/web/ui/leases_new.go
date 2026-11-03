@@ -312,7 +312,7 @@ func (h *Handler) handleLeasePreview(w http.ResponseWriter, r *http.Request) {
 		in.ScopeValue = "" // the value field may still hold a tag
 	}
 	user := webUser(r)
-	now := h.pveNow()
+	now := h.clockNow()
 	if !h.leaseProposals.allow(user, now) {
 		w.Header().Set("Retry-After", strconv.Itoa(int(leasePreviewInterval/time.Second)))
 		http.Error(w, "at most one read lease preview every 10 seconds: wait and try again", http.StatusTooManyRequests)
@@ -354,7 +354,7 @@ func (h *Handler) handleLeaseProposal(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	p, ok := h.leaseProposals.get(webUser(r), digest, h.pveNow())
+	p, ok := h.leaseProposals.get(webUser(r), digest, h.clockNow())
 	if !ok {
 		http.NotFound(w, r)
 		return
@@ -394,7 +394,7 @@ func (h *Handler) handleLeaseCommit(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "read lease proposal not found")
 		return
 	}
-	p, ok := h.leaseProposals.get(user, in.ID, h.pveNow())
+	p, ok := h.leaseProposals.get(user, in.ID, h.clockNow())
 	if !ok || p.committed || p.preview.CLI {
 		writeJSONError(w, http.StatusNotFound, "read lease proposal not found")
 		return

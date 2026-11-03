@@ -201,13 +201,10 @@ func (s *testSSH) session(ch ssh.Channel, reqs <-chan *ssh.Request) {
 // closedAddr returns a loopback address with nothing listening on it.
 func closedAddr(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
-	return addr
+	// Port 1 (tcpmux) is privileged and never bound by these tests. A
+	// listen-then-close ephemeral port could be reused by a concurrent
+	// test listener now that reconcile tests run in parallel.
+	return "127.0.0.1:1"
 }
 
 // fakeClock is the injected service clock for the reconcile tests.
@@ -292,6 +289,47 @@ type reconcileEnv struct {
 
 const testPassphrase = "reconcile-test-passphrase-0123456789"
 
+// sharedCredKey is the passphrase-protected credential key every
+// reconcileEnv writes into its own key directory. Encrypting it runs the
+// bcrypt KDF, which takes about 1.5 s under -race, so it is done once per
+// test binary. Each env still gets its own directory, keyring and Unlock,
+// so a test that locks its keyring does not affect any other test.
+var sharedCredKey struct {
+	once sync.Once
+	pem  []byte
+	pub  ssh.PublicKey
+	err  error
+}
+
+// testCredentialKey returns the encrypted OpenSSH PEM of the shared
+// credential key and its public key. The PEM slice is a fresh copy.
+func testCredentialKey(t *testing.T) ([]byte, ssh.PublicKey) {
+	t.Helper()
+	k := &sharedCredKey
+	k.once.Do(func() {
+		_, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			k.err = fmt.Errorf("generate credential key: %w", err)
+			return
+		}
+		block, err := ssh.MarshalPrivateKeyWithPassphrase(priv, "test", []byte(testPassphrase))
+		if err != nil {
+			k.err = fmt.Errorf("encrypt credential key: %w", err)
+			return
+		}
+		pub, err := ssh.NewPublicKey(priv.Public())
+		if err != nil {
+			k.err = fmt.Errorf("credential public key: %w", err)
+			return
+		}
+		k.pem, k.pub = pem.EncodeToMemory(block), pub
+	})
+	if k.err != nil {
+		t.Fatal(k.err)
+	}
+	return append([]byte(nil), k.pem...), k.pub
+}
+
 func newReconcileEnv(t *testing.T) *reconcileEnv {
 	t.Helper()
 	dir := t.TempDir()
@@ -308,23 +346,12 @@ func newReconcileEnv(t *testing.T) *reconcileEnv {
 	if err := os.MkdirAll(keysDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	block, err := ssh.MarshalPrivateKeyWithPassphrase(priv, "test", []byte(testPassphrase))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(keysDir, "cred.key"), pem.EncodeToMemory(block), 0o600); err != nil {
+	keyPEM, userPub := testCredentialKey(t)
+	if err := os.WriteFile(filepath.Join(keysDir, "cred.key"), keyPEM, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	kr := keyring.New(keysDir)
 	if _, err := kr.Unlock([]byte(testPassphrase)); err != nil {
-		t.Fatal(err)
-	}
-	userPub, err := ssh.NewPublicKey(priv.Public())
-	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -491,6 +518,7 @@ func (e *reconcileEnv) reconcile(ctx context.Context) {
 // the deadline the run stays open; after it the run is finished as unknown
 // and the job is never dispatched again.
 func TestReconcileClosesRunAfterDeadlineWhenSessionsFail(t *testing.T) {
+	t.Parallel()
 	e := newReconcileEnv(t)
 	srv := startTestSSH(t, e.userPub, sshModeReject)
 	e.pin(srv.hostKey)
@@ -537,6 +565,7 @@ func TestReconcileClosesRunAfterDeadlineWhenSessionsFail(t *testing.T) {
 // TestReconcileClosesRunAfterDeadlineWhenUnreachable: nothing listens on the
 // endpoint; the run is finished as unknown once the deadline passes.
 func TestReconcileClosesRunAfterDeadlineWhenUnreachable(t *testing.T) {
+	t.Parallel()
 	e := newReconcileEnv(t)
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -575,6 +604,7 @@ func TestReconcileClosesRunAfterDeadlineWhenUnreachable(t *testing.T) {
 // second ReconcileOnce right after a failure does not connect; the delay
 // doubles after each failure and is capped at maxReconcileBackoff.
 func TestReconcileBacksOffBetweenFailures(t *testing.T) {
+	t.Parallel()
 	e := newReconcileEnv(t)
 	srv := startTestSSH(t, e.userPub, sshModeReject)
 	e.pin(srv.hostKey)
@@ -633,6 +663,7 @@ func TestReconcileBacksOffBetweenFailures(t *testing.T) {
 // TestReconcileWaitingForRebootKeepsRebootDeadline: a run that waits for a
 // reboot is governed by its reboot deadline, not the reconcile deadline.
 func TestReconcileWaitingForRebootKeepsRebootDeadline(t *testing.T) {
+	t.Parallel()
 	e := newReconcileEnv(t)
 	srv := startTestSSH(t, e.userPub, sshModeNormal)
 	e.pin(srv.hostKey)
@@ -700,6 +731,7 @@ func TestReconcileWaitingForRebootKeepsRebootDeadline(t *testing.T) {
 // backoff; once the host is checkable again the run finishes and the
 // failure state is cleared.
 func TestReconcileSuccessClearsBackoff(t *testing.T) {
+	t.Parallel()
 	e := newReconcileEnv(t)
 	srv := startTestSSH(t, e.userPub, sshModeReject)
 	e.pin(srv.hostKey)
