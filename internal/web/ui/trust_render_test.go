@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -56,19 +57,34 @@ func TestTrustBannerUntrustedRendersAffectedVersionsEscaped(t *testing.T) {
 
 	for _, want := range []string{
 		`class="trust-banner trust-banner--untrusted"`,
-		"Built-ins are untrusted: every operation using them needs UV until you trust them.",
+		"Built-ins are untrusted",
 		"Affected built-ins:",
 		"&lt;img src=x onerror=alert(1)&gt;",
 		"&lt;b&gt;2.1.0&lt;/b&gt;",
 		"<code>1.1.0</code>",
 		"(trusted: <code>1.0.0</code>)",
-		"nebula artifact trust-builtins",
+		"<code>sudo nebula artifact trust-builtins --bundle DIR</code>",
+		"does not change risk decisions",
+		"docs/admin/guide.md section 8.2",
 		"does not amend existing read leases",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("dashboard missing %q", want)
 		}
 	}
+	if strings.Contains(body, "until you trust them") {
+		t.Error("banner promises the UV requirement disappears after trust-builtins")
+	}
+	// The command shown must exist in cmd/nebula.
+	m := regexp.MustCompile(`<code>sudo (nebula [^<]*)</code>`).FindStringSubmatch(body)
+	if m == nil {
+		t.Fatal("banner shows no sudo command")
+	}
+	words := strings.Fields(m[1])
+	if len(words) < 3 {
+		t.Fatalf("banner command %q too short", m[1])
+	}
+	requireCLICommand(t, words[:3])
 	for _, raw := range []string{"<img src=x onerror=alert(1)>", "<b>2.1.0</b>"} {
 		if strings.Contains(body, raw) {
 			t.Errorf("dashboard renders untrusted executor text as HTML: %q", raw)
