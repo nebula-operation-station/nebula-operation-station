@@ -87,11 +87,21 @@ its own module family (`trust.ArtifactTrustFor`). Previously (before this
 change) a commit wrote only the store, so built-ins stayed HIGH.
 
 Ordering and failure: the executor first derives and validates the rows
-(`CheckBuiltinTrust`), then commits the store, then applies the rows. If
-applying fails after the store committed, `CommitBuiltinTrust` returns
-`FailedPrecondition` (`ErrBuiltinArtifactTrust`) and audits
-`builtin_trust_artifacts_failed`; the new versions stay at the untrusted
-floor (fail closed) and can be trusted per action.
+(`CheckBuiltinTrust`), the manifest digest and the retain/retire decisions
+(`trust.CheckDecisions`), then deletes the retired versions' rows
+(`ApplyBuiltinTrust` with only the retirements), then commits the store,
+then applies the rows (retiring again in the same transaction). Revoking
+before the store commit is fail closed: no failure leaves a retired version
+trusted while the store no longer lists it (previously the rows were
+deleted only after the store commit, so a failure there kept them, and a
+re-run could not repair it because the modules were then unchanged). If
+the revocation fails, nothing is committed. If the store commit fails after
+it, the error names the revoked rows. If applying fails after the store
+committed, `CommitBuiltinTrust` returns `FailedPrecondition`
+(`*BuiltinArtifactTrustError`, `errors.Is` `ErrBuiltinArtifactTrust`) and
+audits `builtin_trust_artifacts_failed` with the generation, the retired
+versions, the revoked rows and the rows not recorded; the new versions stay
+at the untrusted floor (fail closed) and can be trusted per action.
 
 Wiring: `cmd/nebula-executor` calls `Service.SetBuiltinTrust` with
 `NewDirBuiltinTrust(<-builtin-trust-dir, default <data-dir>/trust>,

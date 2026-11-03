@@ -43,10 +43,42 @@ const (
 var ErrBuiltinTrustUnavailable = errors.New("built-in trust: no local release bundle available")
 
 // ErrBuiltinArtifactTrust is a built-in trust commit whose store commit
-// succeeded but whose artifact trust could not be recorded: the new
+// succeeded but whose new artifact trust could not be recorded: the new
 // built-in versions stay untrusted for risk (fail closed) until the admin
-// trusts them individually.
+// trusts them individually. The retired versions' trust was already
+// revoked before the store committed. Errors carrying it are
+// *BuiltinArtifactTrustError.
 var ErrBuiltinArtifactTrust = errors.New("built-in trust: store committed, but the artifact trust was not recorded")
+
+// BuiltinArtifactTrustError is the ErrBuiltinArtifactTrust failure with the
+// exact state it left: the store is committed at Generation, every entry
+// in Revoked (the retired versions' trust) is gone, and none of Untrusted
+// (the new versions' entries) was recorded.
+type BuiltinArtifactTrustError struct {
+	// Generation is the committed store generation.
+	Generation int64
+	// Retired are the retired versions (name@version), revoked before the
+	// store committed.
+	Retired []string
+	// Revoked are the entries revoked for Retired.
+	Revoked []trust.ArtifactTuple
+	// Untrusted are the entries the commit meant to record; none was.
+	Untrusted []trust.ArtifactTuple
+	// Err is the cause.
+	Err error
+}
+
+// Error tells the admin the state and what to do.
+func (e *BuiltinArtifactTrustError) Error() string {
+	return fmt.Sprintf("%v (store generation %d): %v; the retired versions %v were revoked before the store commit and are untrusted; "+
+		"none of the %d new action entries was recorded, so they stay untrusted (at least HIGH) and a re-run of trust-builtins does not add them: "+
+		"trust each one with `nebula artifact trust --action ID --version X.Y.Z --risk LEVEL FILE` "+
+		"(the entries are listed in the builtin_trust_artifacts_failed audit record)",
+		ErrBuiltinArtifactTrust, e.Generation, e.Err, e.Retired, len(e.Untrusted))
+}
+
+// Unwrap returns ErrBuiltinArtifactTrust and the cause.
+func (e *BuiltinArtifactTrustError) Unwrap() []error { return []error{ErrBuiltinArtifactTrust, e.Err} }
 
 // BuiltinArtifactTrust records the execution authority of a built-in trust
 // commit in the executor's artifact trust, the only trust the risk policy
@@ -81,8 +113,8 @@ type BuiltinTrust interface {
 	Status(ctx context.Context) (trust.BulkAdmitResult, error)
 	// Commit reviews again and commits atomically when digest matches the
 	// reviewed manifest digest and the store generation is still the one
-	// the last confirmed Review saw; pins are retained and retired retired old
-	// versions. It returns the result and the new store generation. Every
+	// the last confirmed Review saw; pins are retained and retired are the
+	// retired old versions. It returns the result and the new store generation. Every
 	// call consumes the confirmed review, whether it commits or fails.
 	Commit(ctx context.Context, digest string, pins map[string]bool, retired []string, adminUID int) (trust.BulkAdmitResult, int64, error)
 }
@@ -328,6 +360,14 @@ func (d *dirBuiltinTrust) Commit(_ context.Context, digest string, pins map[stri
 	if err != nil {
 		return trust.BulkAdmitResult{}, 0, err
 	}
+	// Reject a changed bundle and invalid decisions before anything is
+	// revoked below.
+	if dry.ManifestDigest != digest {
+		return trust.BulkAdmitResult{}, 0, fmt.Errorf("%w: confirmed digest %s does not match the reviewed manifest digest %s", trust.ErrStale, digest, dry.ManifestDigest)
+	}
+	if err := trust.CheckDecisions(dry.OldVersions, pins, retired); err != nil {
+		return trust.BulkAdmitResult{}, 0, err
+	}
 	change, err := builtinTrustChange(dry.Review, retired, adminUID)
 	if err != nil {
 		return trust.BulkAdmitResult{}, 0, err
@@ -335,26 +375,40 @@ func (d *dirBuiltinTrust) Commit(_ context.Context, digest string, pins map[stri
 	if err := d.artifacts.CheckBuiltinTrust(change); err != nil {
 		return trust.BulkAdmitResult{}, 0, fmt.Errorf("built-in trust: %w", err)
 	}
+	// Revoke the retired versions' trust before the store commits (fail
+	// closed): if anything later fails, no retired version stays trusted
+	// for risk while the store no longer lists it. A failure here commits
+	// nothing.
+	var revoked []executordb.TrustedArtifact
+	if len(change.Retire) > 0 {
+		if revoked, err = d.artifacts.ApplyBuiltinTrust(executordb.BuiltinTrustChange{Retire: change.Retire}); err != nil {
+			return trust.BulkAdmitResult{}, 0, fmt.Errorf("built-in trust: revoke the retired versions %v (nothing committed, the store and the artifact trust are unchanged; review and commit again): %w", retired, err)
+		}
+	}
 	res, err := st.BulkAdmit(c, trust.BulkAdmitOpts{ConfirmedDigest: digest, Pins: pins, Retired: retired, AdminUID: adminUID})
 	d.status = nil
 	if err != nil {
+		if len(revoked) > 0 {
+			return trust.BulkAdmitResult{}, 0, fmt.Errorf("%w (the store was not committed, but the trust of the retired versions %v was already revoked: %s; "+
+				"to keep using them, trust them again with `nebula artifact trust`)", err, retired, strings.Join(artifactAudit(tuples(revoked)), ", "))
+		}
 		return trust.BulkAdmitResult{}, 0, err
 	}
-	// Record the committed review's authority (ADR 0007 E16).
+	// Record the committed review's authority (ADR 0007 E16). The retired
+	// versions are revoked again in the same transaction, so an entry
+	// added for them meanwhile cannot survive the retirement.
 	change, err = builtinTrustChange(res.Review, res.Retired, adminUID)
 	if err != nil {
-		return trust.BulkAdmitResult{}, 0, fmt.Errorf("%w (generation %d): %v", ErrBuiltinArtifactTrust, st.Generation(), err)
+		return trust.BulkAdmitResult{}, 0, &BuiltinArtifactTrustError{Generation: st.Generation(), Retired: retired, Revoked: tuples(revoked), Err: err}
 	}
-	revoked, err := d.artifacts.ApplyBuiltinTrust(change)
+	again, err := d.artifacts.ApplyBuiltinTrust(change)
 	if err != nil {
-		return trust.BulkAdmitResult{}, 0, fmt.Errorf("%w (generation %d): %v", ErrBuiltinArtifactTrust, st.Generation(), err)
+		return trust.BulkAdmitResult{}, 0, &BuiltinArtifactTrustError{Generation: st.Generation(), Retired: res.Retired,
+			Revoked: tuples(revoked), Untrusted: tuples(change.Trust), Err: err}
 	}
-	for _, a := range change.Trust {
-		res.ArtifactsTrusted = append(res.ArtifactsTrusted, artifactTuple(a))
-	}
-	for _, a := range revoked {
-		res.ArtifactsRevoked = append(res.ArtifactsRevoked, artifactTuple(a))
-	}
+	res.ArtifactsTrusted = append(res.ArtifactsTrusted, tuples(change.Trust)...)
+	res.ArtifactsRevoked = append(res.ArtifactsRevoked, tuples(revoked)...)
+	res.ArtifactsRevoked = append(res.ArtifactsRevoked, tuples(again)...)
 	return res, st.Generation(), nil
 }
 
@@ -376,6 +430,15 @@ func builtinTrustChange(r trust.Review, retired []string, adminUID int) (executo
 		out.Retire = append(out.Retire, executordb.BuiltinVersion{Module: v.Module, Version: v.Version})
 	}
 	return out, nil
+}
+
+// tuples is the audit form of trust entries.
+func tuples(as []executordb.TrustedArtifact) []trust.ArtifactTuple {
+	out := make([]trust.ArtifactTuple, 0, len(as))
+	for _, a := range as {
+		out = append(out, artifactTuple(a))
+	}
+	return out
 }
 
 // artifactTuple is the audit form of a trust entry.
@@ -619,9 +682,11 @@ func (s *Service) CommitBuiltinTrust(ctx context.Context, req *pb.CommitBuiltinT
 	retired := append([]string(nil), req.GetRetire()...)
 	res, gen, err := s.builtinTrust.Commit(ctx, req.GetManifestDigest(), pins, retired, int(uid))
 	if err != nil {
-		if errors.Is(err, ErrBuiltinArtifactTrust) && s.log != nil {
+		var ae *BuiltinArtifactTrustError
+		if errors.As(err, &ae) && s.log != nil {
 			s.log.Error("audit", "kind", "builtin_trust_artifacts_failed", "by", callerName(ctx), "admin_uid", uid,
-				"manifest_digest", req.GetManifestDigest(), "err", err.Error())
+				"manifest_digest", req.GetManifestDigest(), "generation", ae.Generation, "retired", ae.Retired,
+				"revoked", artifactAudit(ae.Revoked), "untrusted", artifactAudit(ae.Untrusted), "err", ae.Err.Error())
 		}
 		return nil, builtinTrustStatus(err)
 	}

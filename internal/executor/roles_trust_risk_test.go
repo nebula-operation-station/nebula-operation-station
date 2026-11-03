@@ -287,7 +287,9 @@ func TestBuiltinTrustCommitIsAudited(t *testing.T) {
 type failingArtifacts struct {
 	*executordb.DB
 	failCheck, failApply bool
-	applied              int
+	// failTrustApply fails only an apply that records trust entries.
+	failTrustApply bool
+	applied        int
 }
 
 func (f *failingArtifacts) CheckBuiltinTrust(c executordb.BuiltinTrustChange) error {
@@ -299,7 +301,7 @@ func (f *failingArtifacts) CheckBuiltinTrust(c executordb.BuiltinTrustChange) er
 
 func (f *failingArtifacts) ApplyBuiltinTrust(c executordb.BuiltinTrustChange) ([]executordb.TrustedArtifact, error) {
 	f.applied++
-	if f.failApply {
+	if f.failApply || (f.failTrustApply && len(c.Trust) > 0) {
 		return nil, errors.New("disk full")
 	}
 	return f.DB.ApplyBuiltinTrust(c)
@@ -352,6 +354,122 @@ func TestBuiltinTrustArtifactApplyFailureFailsClosed(t *testing.T) {
 	}
 	if recs := auditLines(t, &buf, "builtin_trust_committed"); len(recs) != 0 {
 		t.Fatalf("success audited on failure: %v", recs)
+	}
+}
+
+// A failure to record the new trust after a store commit that retired an
+// old version leaves no retired version trusted (fail closed): its trust
+// was revoked before the store committed. The error and the audit record
+// name the state.
+func TestBuiltinTrustApplyFailureAfterRetireLeavesRetiredUntrusted(t *testing.T) {
+	e := newBundleEnv(t)
+	recordLowHost(t, e.db)
+	s := e.service()
+	rev1, _ := reviewAndCommit(t, s, nil, nil)
+	oldSum := restartArtifact(t, rev1)
+	if got := minimumRisk(t, e.db, "docker.restart", "1.0.0", oldSum); got != canonical.RiskLow {
+		t.Fatalf("old version floor %s, want LOW", got)
+	}
+	gen := e.storeGeneration(t)
+
+	writeDockerBundle(t, e.k, e.bundleDir, "2026.12.0", "1.1.0", "echo restart v2\n")
+	e.bt.artifacts = &failingArtifacts{DB: e.db, failTrustApply: true}
+	var buf bytes.Buffer
+	s.log = slog.New(slog.NewJSONHandler(&buf, nil))
+	rev2, err := adminReview(t, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = adminCommitReq(t, s, &pb.CommitBuiltinTrustRequest{ManifestDigest: rev2.ManifestDigest, Retire: []string{"docker@1.0.0"}})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("commit err = %v", err)
+	}
+	if g := e.storeGeneration(t); g == gen {
+		t.Fatal("store did not commit")
+	}
+	if got := minimumRisk(t, e.db, "docker.restart", "1.0.0", oldSum); got != riskpolicy.UntrustedFloor {
+		t.Fatalf("retired version floor %s, want %s (fail closed)", got, riskpolicy.UntrustedFloor)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "artifact trust was not recorded") || !strings.Contains(msg, "docker@1.0.0") ||
+		!strings.Contains(msg, "nebula artifact trust") {
+		t.Fatalf("commit err = %v", err)
+	}
+	if got := minimumRisk(t, e.db, "docker.restart", "1.1.0", restartArtifact(t, rev2)); got != riskpolicy.UntrustedFloor {
+		t.Fatalf("new version floor %s, want %s", got, riskpolicy.UntrustedFloor)
+	}
+	list, err := e.db.ListTrustedArtifacts()
+	if err != nil || len(list) != 0 {
+		t.Fatalf("trusted artifacts = %+v, %v", list, err)
+	}
+	recs := auditLines(t, &buf, "builtin_trust_artifacts_failed")
+	if len(recs) != 1 {
+		t.Fatalf("failure audit = %v (%s)", recs, buf.String())
+	}
+	if r := auditStrings(t, recs[0], "retired"); len(r) != 1 || r[0] != "docker@1.0.0" {
+		t.Fatalf("audit retired = %v", r)
+	}
+	if r := auditStrings(t, recs[0], "revoked"); len(r) == 0 || !strings.Contains(strings.Join(r, " "), oldSum) {
+		t.Fatalf("audit revoked = %v", r)
+	}
+	if r := auditStrings(t, recs[0], "untrusted"); len(r) == 0 || !strings.Contains(strings.Join(r, " "), "docker.restart@1.1.0") {
+		t.Fatalf("audit untrusted = %v", r)
+	}
+}
+
+// A failure to revoke the retired versions commits nothing: the store and
+// the artifact trust are unchanged.
+func TestBuiltinTrustRevokeFailureCommitsNothing(t *testing.T) {
+	e := newBundleEnv(t)
+	recordLowHost(t, e.db)
+	s := e.service()
+	rev1, _ := reviewAndCommit(t, s, nil, nil)
+	oldSum := restartArtifact(t, rev1)
+	gen := e.storeGeneration(t)
+
+	writeDockerBundle(t, e.k, e.bundleDir, "2026.12.0", "1.1.0", "echo restart v2\n")
+	e.bt.artifacts = &failingArtifacts{DB: e.db, failApply: true}
+	rev2, err := adminReview(t, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = adminCommitReq(t, s, &pb.CommitBuiltinTrustRequest{ManifestDigest: rev2.ManifestDigest, Retire: []string{"docker@1.0.0"}})
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "nothing committed") {
+		t.Fatalf("commit err = %v", err)
+	}
+	if g := e.storeGeneration(t); g != gen {
+		t.Fatalf("store generation %d, want %d", g, gen)
+	}
+	if got := minimumRisk(t, e.db, "docker.restart", "1.0.0", oldSum); got != canonical.RiskLow {
+		t.Fatalf("old version floor %s, want LOW", got)
+	}
+}
+
+// Invalid retirement decisions are rejected before any trust is revoked.
+func TestBuiltinTrustInvalidRetireRevokesNothing(t *testing.T) {
+	e := newBundleEnv(t)
+	recordLowHost(t, e.db)
+	s := e.service()
+	rev1, _ := reviewAndCommit(t, s, nil, nil)
+	oldSum := restartArtifact(t, rev1)
+
+	writeDockerBundle(t, e.k, e.bundleDir, "2026.12.0", "1.1.0", "echo restart v2\n")
+	fa := &failingArtifacts{DB: e.db}
+	e.bt.artifacts = fa
+	rev2, err := adminReview(t, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// docker@1.0.0 retired, but docker@9.9.9 is no old version: invalid.
+	_, err = adminCommitReq(t, s, &pb.CommitBuiltinTrustRequest{ManifestDigest: rev2.ManifestDigest,
+		Retire: []string{"docker@1.0.0", "docker@9.9.9"}})
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "not an old version") {
+		t.Fatalf("commit err = %v", err)
+	}
+	if fa.applied != 0 {
+		t.Fatalf("apply called %d times", fa.applied)
+	}
+	if got := minimumRisk(t, e.db, "docker.restart", "1.0.0", oldSum); got != canonical.RiskLow {
+		t.Fatalf("old version floor %s, want LOW", got)
 	}
 }
 

@@ -171,6 +171,13 @@ func scriptBytes(c release.Candidate, moduleName, actionID string) ([]byte, bool
 	return nil, false
 }
 
+// CheckDecisions validates retirement decisions against the old versions
+// of a dry run exactly as a committing BulkAdmit does, so a caller can
+// reject them before acting on them.
+func CheckDecisions(old []string, pins map[string]bool, retired []string) error {
+	return validateDecisions(old, pins, retired)
+}
+
 // validateDecisions checks that the admin's retirement decisions exactly
 // cover the old versions: every old version is retained (in Pins) or
 // retired (in Retired), and Pins and Retired hold no other version.

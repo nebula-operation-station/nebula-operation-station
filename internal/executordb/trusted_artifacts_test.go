@@ -129,7 +129,7 @@ func TestApplyBuiltinTrustRejectsMalformedAtomically(t *testing.T) {
 		"action":        {Trust: []TrustedArtifact{good, builtinRow(sumB, "Docker restart", "1.1.0", canonical.RiskLow)}},
 		"version":       {Trust: []TrustedArtifact{good, builtinRow(sumB, "docker.stop", "v1", canonical.RiskLow)}},
 		"risk":          {Trust: []TrustedArtifact{good, builtinRow(sumB, "docker.stop", "1.1.0", "low")}},
-		"label":         {Trust: []TrustedArtifact{good, {SHA256: sumB, ActionID: "docker.stop", ModuleVersion: "1.1.0", Risk: canonical.RiskLow, Label: "x‮y", TrustedBy: "admin:uid1"}}},
+		"label":         {Trust: []TrustedArtifact{good, {SHA256: sumB, ActionID: "docker.stop", ModuleVersion: "1.1.0", Risk: canonical.RiskLow, Label: "x\u202ey", TrustedBy: "admin:uid1"}}},
 		"actor":         {Trust: []TrustedArtifact{good, {SHA256: sumB, ActionID: "docker.stop", ModuleVersion: "1.1.0", Risk: canonical.RiskLow}}},
 		"retire module": {Trust: []TrustedArtifact{good}, Retire: []BuiltinVersion{{Module: "docker.x", Version: "1.0.0"}}},
 		"retire empty":  {Trust: []TrustedArtifact{good}, Retire: []BuiltinVersion{{Module: "", Version: "1.0.0"}}},
