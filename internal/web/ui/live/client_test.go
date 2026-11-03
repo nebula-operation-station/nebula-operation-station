@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // liveClientBlock returns the live-values block of inventory.js.
@@ -48,6 +49,15 @@ func TestInventoryJSConsumesLiveStream(t *testing.T) {
 		// after the empty list of a hidden page.
 		"if (busy || !v) { again = busy; return; }",
 		"if (again || v !== viewer) return send();",
+		// A box the server did not grant (denied, revoked or expired
+		// grant, over budget) loses its live line, and a box without a
+		// value for staleAfter shows its age: never a fresh-looking
+		// old value (P1-37).
+		"new Set((await res.json()).granted)",
+		"if (!g.has(id)) drop(els.get(id));",
+		"b.t.parentNode.remove()",
+		"b.at = Date.now();",
+		"Date.now() - b.at > 15e3) show(b, ",
 		"kind: 'node'", "kind: 'guest'", "kind: 'host'",
 	} {
 		if !strings.Contains(block, want) {
@@ -62,7 +72,25 @@ func TestInventoryJSConsumesLiveStream(t *testing.T) {
 	if maxViewerBoxes != 32 {
 		t.Errorf("maxViewerBoxes = %d; update the client slice", maxViewerBoxes)
 	}
+	if staleAfter != 15*time.Second {
+		t.Errorf("staleAfter = %s; update the client's 15e3 stale threshold", staleAfter)
+	}
 	if clientRenewal >= viewerLease {
 		t.Errorf("client renewal %s must be shorter than the viewer lease %s", clientRenewal, viewerLease)
+	}
+}
+
+// inventoryJSBudget is the size budget of inventory.js; it equals the
+// limit of TestChartScriptIsOneSmallScript in internal/web/ui, checked
+// here too because the live block is the part of the script that grows.
+const inventoryJSBudget = 30 * 1024
+
+func TestInventoryJSStaysWithinBudget(t *testing.T) {
+	fi, err := os.Stat(filepath.Join("..", "..", "..", "..", "web", "static", "inventory.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Size() > inventoryJSBudget {
+		t.Errorf("inventory.js is %d bytes, over its %d-byte budget", fi.Size(), inventoryJSBudget)
 	}
 }

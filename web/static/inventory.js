@@ -165,8 +165,7 @@
       if (sheet.hidden) return;
       if (e.key === 'Escape') { e.preventDefault(); closeSheet(); return; }
       if (e.key !== 'Tab') return;
-      // Focus loop for the modal sheet. The close button is always the
-      // first stop, so the loop works even when the panel has no links.
+      // Focus loop; the close button is always the first stop.
       const stops = [closeBtn, ...Array.from(sheet.querySelectorAll(
         'a[href], button, summary, input, select, textarea, [tabindex]:not([tabindex="-1"])'
       )).filter((el) => el !== closeBtn && !el.hidden)];
@@ -178,8 +177,7 @@
     });
   }
 
-  // The Details button sits beside its host's <details>, not in the
-  // <summary>, so it is valid content and never toggles the host.
+  // The Details button sits beside the host's <summary>, never in it.
   for (const btn of chartSection.querySelectorAll('.chart__dpanel-btn')) {
     btn.hidden = false;
     btn.addEventListener('click', () => {
@@ -212,8 +210,8 @@
 
 // Live chart values (ADR 0006 P1-37): one SSE stream; visible boxes are
 // posted on change and every `renew` s, none while hidden, one POST at a
-// time (so a stale list never lands last). Values: textContent only. A
-// stream the server ends (lifetime cap) reconnects with a new viewer.
+// time. Values: textContent only. A box not granted loses its live line;
+// one without a value for 15 s shows its age (never a fresh look).
 (() => {
   const chart = document.querySelector('.chart');
   if (!chart || !window.EventSource || !window.IntersectionObserver) return;
@@ -232,16 +230,21 @@
   let viewer = '', renew = 10, timer = 0, es = null, busy = 0, again = 0;
   const send = async () => {
     clearTimeout(timer);
+    for (const b of els.values()) if (b.t && Date.now() - b.at > 15e3) show(b, Math.round((Date.now() - b.at) / 1e3));
     const v = viewer;
     if (busy || !v) { again = busy; return; }
     busy = 1; again = 0;
     let gone = 0;
+    const ids = document.hidden ? [] : [...seen].slice(0, 32);
     try {
       const res = await fetch('/chart/live/targets', {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ viewer: v, boxes: document.hidden ? [] : [...seen].slice(0, 32).map((id) => els.get(id).ref) }),
+        body: JSON.stringify({ viewer: v, boxes: ids.map((id) => els.get(id).ref) }),
       });
       gone = res.status === 410;
+      const g = res.ok && new Set((await res.json()).granted);
+      // Denied (or over budget): drop the live line, the server value stays.
+      for (const id of g ? ids : []) if (!g.has(id)) drop(els.get(id));
     } catch (_) { /* next renewal retries */ }
     busy = 0;
     if (gone && v === viewer) return open();
@@ -249,6 +252,7 @@
     timer = setTimeout(send, renew * 1000);
   };
   const mk = (p, c, t) => p.appendChild(Object.assign(document.createElement('span'), { className: c, textContent: t }));
+  const drop = (b) => { if (b.t) { b.t.parentNode.remove(); b.t = null; b.v = {}; } };
   const show = (b, age) => {
     if (!b.t) {
       const l = mk(b.el, 'chart__line chart__line--live', '');
@@ -272,6 +276,7 @@
     on('value', (d, b) => {
       if (!b || typeof d.value !== 'number' || !['cpu', 'ram', 'disk'].includes(d.metric)) return;
       b.v[d.metric] = d.value;
+      b.at = Date.now();
       show(b, 0);
     });
     on('age', (d, b) => { if (b && Number.isInteger(d.age)) show(b, d.age); });
@@ -462,8 +467,7 @@
     }
   }
 
-  // Selection and bulk actions: refresh the reads behind the columns for
-  // the selected hosts, or open the reboot form with them preselected.
+  // Selection and bulk actions on the selected hosts.
   const bulkbar = document.getElementById('bulkbar');
   if (bulkbar) {
     const boxes = () => Array.from(document.querySelectorAll('input.host-select'));
@@ -472,8 +476,7 @@
     const count = document.getElementById('bulk-count');
     const msg = document.getElementById('bulk-message');
     const toggle = document.getElementById('bulkbar-toggle');
-    // A fresh selection starts collapsed on phones, so the sheet does not
-    // cover the table; the count and refresh stay reachable.
+    // A fresh selection starts collapsed (phones: table stays visible).
     const setCollapsed = () => {
       bulkbar.classList.remove('bulkbar--expanded');
       if (toggle) toggle.setAttribute('aria-expanded', 'false');
@@ -500,8 +503,7 @@
       }
       update();
     });
-    // The selection is what is shown: rows the text filter hides are
-    // unselected, so a bulk action never reaches a host you cannot see.
+    // Rows the filter hides are unselected: no action on unseen hosts.
     if (filter) {
       filter.addEventListener('input', () => {
         for (const b of boxes()) {
@@ -582,8 +584,7 @@
       rebootGo.disabled = false;
     });
 
-    // "Install updates…": security or all updates for the selection,
-    // confirmed inline and approved in place with the key, like reboot.
+    // "Install updates…": security or all updates, like reboot.
     const updateConfirm = document.getElementById('bulk-update-confirm');
     const updateGo = document.getElementById('bulk-update-go');
     const updateKind = () => updateConfirm.querySelector('input[name="bulk-update-kind"]:checked').value;
@@ -601,41 +602,28 @@
     document.getElementById('bulk-update-cancel').addEventListener('click', () => {
       updateConfirm.hidden = true;
     });
-    updateGo.addEventListener('click', async () => {
-      const hosts = selected();
-      if (hosts.length === 0) return;
-      updateGo.disabled = true;
-      msg.textContent = '';
-      msg.classList.remove('message--error');
-      try {
-        await nebulaRunOp.ensureSession(msg);
-        const id = await nebulaRunOp.runOperation({ action: updateKind(), hosts }, msg, updateConfirm.parentElement);
-        nebulaRunOp.followStatus(updateConfirm.parentElement, [id], { reloadWhenDone: true });
-      } catch (err) {
-        msg.textContent = err.name === 'NotAllowedError' ? 'Cancelled or timed out.' : (err.message || 'Could not install the updates.');
-        msg.classList.add('message--error');
-        updateGo.disabled = false;
-      }
-    });
     rebootCancel.addEventListener('click', () => {
       rebootConfirm.hidden = true;
     });
-    rebootGo.addEventListener('click', async () => {
+    // Run the confirmed operation and approve it in place.
+    const runInPlace = (go, box, action, opts, fail) => go.addEventListener('click', async () => {
       const hosts = selected();
       if (hosts.length === 0) return;
-      rebootGo.disabled = true;
+      go.disabled = true;
       msg.textContent = '';
       msg.classList.remove('message--error');
       try {
         await nebulaRunOp.ensureSession(msg);
-        const id = await nebulaRunOp.runOperation({ action: 'system.reboot', hosts }, msg, rebootConfirm.parentElement);
-        nebulaRunOp.followStatus(rebootConfirm.parentElement, [id]);
+        const id = await nebulaRunOp.runOperation({ action: action(), hosts }, msg, box.parentElement);
+        nebulaRunOp.followStatus(box.parentElement, [id], opts);
       } catch (err) {
-        msg.textContent = err.name === 'NotAllowedError' ? 'Cancelled or timed out.' : (err.message || 'Could not reboot.');
+        msg.textContent = err.name === 'NotAllowedError' ? 'Cancelled or timed out.' : (err.message || fail);
         msg.classList.add('message--error');
-        rebootGo.disabled = false;
+        go.disabled = false;
       }
     });
+    runInPlace(updateGo, updateConfirm, updateKind, { reloadWhenDone: true }, 'Could not install the updates.');
+    runInPlace(rebootGo, rebootConfirm, () => 'system.reboot', undefined, 'Could not reboot.');
     update();
   }
 
