@@ -744,6 +744,14 @@ func (a *Authority) Authorize(d canonical.Digest, run Run) error {
 // AuthorizeGrant checks one host run against an approved permit and, if
 // every check passes, marks the host as used. Nothing is marked on failure.
 func (a *Authority) AuthorizeGrant(d canonical.Digest, run Run) (Grant, error) {
+	return a.authorizeGrant(d, run, nil)
+}
+
+// authorizeGrant is AuthorizeGrant. onUse, if not nil, runs with a.mu held
+// right after the host was marked used, so a provider mutation claim takes
+// ownership of the use in the same critical section (Permit.claim).
+// Without onUse the use has no owning claim.
+func (a *Authority) authorizeGrant(d canonical.Digest, run Run, onUse func(p *Permit)) (Grant, error) {
 	// Hash outside the lock; artifacts can be large.
 	if len(run.Artifact) == 0 || len(run.Artifact) > MaxArtifactSize {
 		return Grant{}, fail(CodeArtifactMismatch, "artifact size %d outside 1..%d", len(run.Artifact), MaxArtifactSize)
@@ -811,6 +819,10 @@ func (a *Authority) AuthorizeGrant(d canonical.Digest, run Run) (Grant, error) {
 	}
 
 	p.used[run.HostID] = struct{}{}
+	p.claim = 0
+	if onUse != nil {
+		onUse(p)
+	}
 	a.emit(Event{Kind: "authorized", Digest: d.String(), Host: run.HostID})
 	return Grant{ExecutionID: p.Request.ExecutionID, Parameters: slices.Clone(p.Parameters)}, nil
 }
@@ -843,6 +855,8 @@ func (a *Authority) releaseHostLocked(d canonical.Digest, hostID, detail string)
 		return false
 	}
 	delete(p.used, hostID)
+	// The use ends here, so no claim owns it any more.
+	p.claim = 0
 	a.emit(Event{Kind: "released", Digest: d.String(), Host: hostID, Detail: detail})
 	return true
 }

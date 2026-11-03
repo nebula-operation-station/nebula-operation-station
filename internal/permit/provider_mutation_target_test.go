@@ -148,3 +148,76 @@ func TestProviderMutationClaimReleaseRefusedAfterLockOrRevoke(t *testing.T) {
 		t.Fatal("zero claim released")
 	}
 }
+
+// mutationRun is the plain host run AuthorizeProviderMutation authorizes
+// for m.
+func mutationRun(t *testing.T, m ProviderMutation) Run {
+	t.Helper()
+	params, err := m.BindingJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := m.Target.canonicalTarget()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Run{
+		HostID: target.HostID, HostKeyFingerprint: target.HostKeyFingerprint, ActionID: m.ActionID,
+		ModuleVersion: m.ModuleVersion, Artifact: m.Artifact, ParametersJSON: params, CredentialRef: m.Target.CredentialRef,
+	}
+}
+
+// TestProviderMutationReleaseHostClearsClaim: ReleaseHost ends the claim's
+// use, so the claim must not release a later use it did not make.
+func TestProviderMutationReleaseHostClearsClaim(t *testing.T) {
+	e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
+	d := e.approvedMutation(mutationTarget())
+	m := mutation(mutationTarget())
+	c, err := e.auth.AuthorizeProviderMutation(d, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !e.auth.ReleaseHost(d, mutationRun(t, m).HostID) {
+		t.Fatal("ReleaseHost refused")
+	}
+	if _, err := e.auth.AuthorizeGrant(d, mutationRun(t, m)); err != nil {
+		t.Fatalf("released permit refused: %v", err)
+	}
+	if c.Release("stale") {
+		t.Fatal("claim released a use made after ReleaseHost")
+	}
+	_, err = e.auth.AuthorizeProviderMutation(d, m)
+	wantCode(t, err, CodeHostAlreadyRun)
+}
+
+// TestProviderMutationClaimOwnsItsUse: the claim token is set together
+// with the use; a plain grant leaves the permit without an owning claim.
+func TestProviderMutationClaimOwnsItsUse(t *testing.T) {
+	e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
+	d := e.approvedMutation(mutationTarget())
+	m := mutation(mutationTarget())
+	c, err := e.auth.AuthorizeProviderMutation(d, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimOf := func() uint64 {
+		e.auth.mu.Lock()
+		defer e.auth.mu.Unlock()
+		return e.auth.permits[d].claim
+	}
+	if c.token == 0 || claimOf() != c.token {
+		t.Fatalf("claim token %d, permit claim %d", c.token, claimOf())
+	}
+	if !c.Release("target busy") {
+		t.Fatal("release refused")
+	}
+	if claimOf() != 0 {
+		t.Fatal("release left the claim token")
+	}
+	if _, err := e.auth.AuthorizeGrant(d, mutationRun(t, m)); err != nil {
+		t.Fatal(err)
+	}
+	if claimOf() != 0 {
+		t.Fatal("plain grant carries a claim token")
+	}
+}
