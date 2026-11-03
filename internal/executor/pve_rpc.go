@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/netip"
 	"path/filepath"
 	"strings"
@@ -129,19 +130,52 @@ func (s *Service) pveProvisioner() *PveProvisioner {
 }
 
 // pveProvisionReaderAPI is the production PveProvisionReader: typed pveapi
-// reads with the read token over the remote's pinned TLS channel, with the
-// read slots and trust blocking of every provider read.
+// reads with the read token over the remote's pinned TLS channel (the
+// trust and transport of ReadPVE), with the read slots and trust blocking
+// of every provider read.
 type pveProvisionReaderAPI struct {
 	agent pveGuestAgentAPI
 }
 
+// conn builds the pinned HTTP client of rm and returns it with its trust
+// watch, base URL and the release of the remote's request slot.
+func (r pveProvisionReaderAPI) conn(ctx context.Context, rm executordb.PveRemote, read pveapi.TokenSupplier) (*http.Client, *pveTrustWatch, string, func(), error) {
+	s := r.agent.s
+	if read == nil {
+		return nil, nil, "", nil, errors.New("executor: provisioning read: no read token")
+	}
+	release, err := s.pveRead.acquire(ctx, rm.RemoteID)
+	if err != nil {
+		return nil, nil, "", nil, err
+	}
+	trust, err := s.pveReadTrust(ctx, rm)
+	if errors.Is(err, errPveReadTrust) {
+		release()
+		return nil, nil, "", nil, s.blockPveRead(rm.RemoteID)
+	}
+	if err != nil {
+		release()
+		return nil, nil, "", nil, err
+	}
+	hc, watch, base, err := pveReadHTTP(rm, trust, s.clock)
+	if err != nil {
+		release()
+		return nil, nil, "", nil, err
+	}
+	return hc, watch, base, release, nil
+}
+
 // ClusterInventory implements PveProvisionReader.
 func (r pveProvisionReaderAPI) ClusterInventory(ctx context.Context, rm executordb.PveRemote, read pveapi.TokenSupplier) (pveapi.ClusterInventory, error) {
-	c, watch, release, err := r.agent.client(ctx, rm, read)
+	hc, watch, base, release, err := r.conn(ctx, rm, read)
 	if err != nil {
 		return pveapi.ClusterInventory{}, err
 	}
 	defer release()
+	c, err := pveapi.New(base, hc, read, pveapi.WithTimeout(pveReadRequestTimeout))
+	if err != nil {
+		return pveapi.ClusterInventory{}, err
+	}
 	inv, err := c.EnumerateCluster(ctx)
 	if terr := r.agent.checkTrust(rm, watch); terr != nil {
 		return pveapi.ClusterInventory{}, terr
@@ -151,11 +185,16 @@ func (r pveProvisionReaderAPI) ClusterInventory(ctx context.Context, rm executor
 
 // NodeStorage implements PveProvisionReader.
 func (r pveProvisionReaderAPI) NodeStorage(ctx context.Context, rm executordb.PveRemote, node, storage string, read pveapi.TokenSupplier) (pveapi.Storage, error) {
-	c, watch, release, err := r.agent.client(ctx, rm, read)
+	hc, watch, base, release, err := r.conn(ctx, rm, read)
 	if err != nil {
 		return pveapi.Storage{}, err
 	}
 	defer release()
+	c, err := pveapi.NewClient(hc, base+"/api2/json", read)
+	if err != nil {
+		return pveapi.Storage{}, err
+	}
+	c.RequestTimeout = pveReadRequestTimeout
 	st, err := c.GetStorage(ctx, node, storage)
 	if terr := r.agent.checkTrust(rm, watch); terr != nil {
 		return pveapi.Storage{}, terr

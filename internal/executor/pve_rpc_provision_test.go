@@ -4,6 +4,7 @@ package executor
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"log/slog"
@@ -75,6 +76,74 @@ func TestPveMutationsWiresProductionProvisioner(t *testing.T) {
 	}
 	if e.svc.pveProvisioner() != p {
 		t.Fatal("provisioner is not single")
+	}
+}
+
+// TestPveProvisionReaderReadsOverThePinnedChannel: the production reader
+// lists the cluster guests and reads one storage with the read token over
+// the remote's pinned TLS channel.
+func TestPveProvisionReaderReadsOverThePinnedChannel(t *testing.T) {
+	e := newPveReadEnv(t, pvecontract.KindStandalone)
+	e.pve.mu.Lock()
+	e.pve.bodies["/api2/json/nodes/pve1/storage/local/status"] = `{"data":{"type":"dir","content":"images,import","active":1,"shared":0,"used":100,"total":1000}}`
+	e.pve.mu.Unlock()
+	r := pveProvisionReaderAPI{agent: pveGuestAgentAPI{s: e.svc}}
+	ctx := context.Background()
+	inv, err := r.ClusterInventory(ctx, e.remote(), tokenOf(pveReadToken))
+	if err != nil {
+		t.Fatalf("inventory: %v", err)
+	}
+	vmids := map[int]bool{}
+	for _, g := range inv.Guests {
+		vmids[g.VMID] = true
+	}
+	if len(inv.Nodes) != 1 || inv.Nodes[0].Name != "pve1" || !vmids[100] || !vmids[200] || inv.Partial || inv.Truncated {
+		t.Fatalf("inventory %+v", inv)
+	}
+	st, err := r.NodeStorage(ctx, e.remote(), "pve1", "local", tokenOf(pveReadToken))
+	if err != nil || st.ID != "local" {
+		t.Fatalf("storage %+v %v", st, err)
+	}
+	if n := e.pve.badAuth.Load(); n != 0 {
+		t.Fatalf("%d requests without the read token", n)
+	}
+	// Without a credential nothing is sent.
+	before := e.pve.requests.Load()
+	if _, err := r.ClusterInventory(ctx, e.remote(), nil); err == nil {
+		t.Fatal("inventory without a read token")
+	}
+	if e.pve.requests.Load() != before {
+		t.Fatal("a request was sent without a credential")
+	}
+}
+
+// TestPveProvisionReaderTrustChangeBlocksRemote: a remote presenting
+// another certificate gets no read token and is blocked, as on the read
+// path.
+func TestPveProvisionReaderTrustChangeBlocksRemote(t *testing.T) {
+	for _, read := range []string{"inventory", "storage"} {
+		t.Run(read, func(t *testing.T) {
+			e := newPveReadEnv(t, pvecontract.KindStandalone)
+			r := pveProvisionReaderAPI{agent: pveGuestAgentAPI{s: e.svc}}
+			impostor := makeTestChain(t)
+			e.pve.srv.TLS.Certificates = []tls.Certificate{impostor.tls}
+			e.pve.srv.CloseClientConnections()
+			var err error
+			if read == "inventory" {
+				_, err = r.ClusterInventory(context.Background(), e.remote(), tokenOf(pveReadToken))
+			} else {
+				_, err = r.NodeStorage(context.Background(), e.remote(), "pve1", "local", tokenOf(pveReadToken))
+			}
+			if err == nil {
+				t.Fatal("read from an impostor succeeded")
+			}
+			if e.pve.requests.Load() != 0 || e.pve.badAuth.Load() != 0 {
+				t.Fatal("a request reached the impostor")
+			}
+			if rm := e.remote(); rm.State != executordb.StateBlocked {
+				t.Fatalf("remote state = %s, want blocked", rm.State)
+			}
+		})
 	}
 }
 
