@@ -69,6 +69,63 @@ func TestRebootNodeAcceptsOnlyNullData(t *testing.T) {
 	}
 }
 
+// TestRebootNodeRejectsDuplicateEnvelopeKeys pins that a repeated top-level
+// key in the response envelope is a schema error with an unknown outcome:
+// the envelope decodes into a map that keeps only the last value, so
+// {"data":"UPID:…","data":null} must not read as the documented null answer
+// nor as a dispatched task.
+func TestRebootNodeRejectsDuplicateEnvelopeKeys(t *testing.T) {
+	for name, body := range map[string]string{
+		"upid then null": `{"data":"UPID:pve1:00000001:00000001:00000001:srvreboot::root@pam:","data":null}`,
+		"null then upid": `{"data":null,"data":"UPID:pve1:00000001:00000001:00000001:srvreboot::root@pam:"}`,
+		"null then null": `{"data":null,"data":null}`,
+		"null then text": `{"data":null,"data":"rebooted"}`,
+		"dup other key":  `{"data":null,"x":1,"x":2}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeWriteServer{body: body}
+			w := newTestWriter(t, f)
+			err := w.RebootNode(context.Background(), "pve1")
+			var we *WriteError
+			if !errors.As(err, &we) || we.Reason != ReasonSchema || !we.OutcomeUnknown() {
+				t.Fatalf("err = %v, want schema WriteError with unknown outcome", err)
+			}
+		})
+	}
+}
+
+// TestDuplicateTopLevelKeys pins the token walk: only a repeated top-level
+// key of a JSON object reports true; nested duplicates, other value types
+// and malformed input report false (the caller's unmarshal fails on the
+// latter with its own reason).
+func TestDuplicateTopLevelKeys(t *testing.T) {
+	for name, tc := range map[string]struct {
+		raw  string
+		want bool
+	}{
+		"single key":     {`{"data":null}`, false},
+		"empty object":   {`{}`, false},
+		"distinct keys":  {`{"data":null,"errors":{}}`, false},
+		"dup data":       {`{"data":"UPID:x","data":null}`, true},
+		"dup data null":  {`{"data":null,"data":null}`, true},
+		"dup other key":  {`{"data":null,"x":1,"x":2}`, true},
+		"nested dup":     {`{"data":{"a":1,"a":2}}`, false},
+		"dup in array":   {`{"data":[1,{"a":1,"a":2}]}`, false},
+		"not object":     {`null`, false},
+		"array":          {`[1,2]`, false},
+		"scalar":         {`"x"`, false},
+		"malformed":      {`{"data":`, false},
+		"trailing data":  {`{"data":null}x`, false},
+		"whitespace dup": {` { "data" : null , "data" : 1 } `, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := duplicateTopLevelKeys([]byte(tc.raw)); got != tc.want {
+				t.Fatalf("duplicateTopLevelKeys(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestRebootNodeRejectsInvalidNode checks that an invalid node name is
 // refused before anything is sent (no request reaches the server).
 func TestRebootNodeRejectsInvalidNode(t *testing.T) {
