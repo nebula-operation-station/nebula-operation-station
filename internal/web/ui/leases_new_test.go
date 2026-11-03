@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -590,5 +591,18 @@ func TestLeaseCommitOnlyByProposer(t *testing.T) {
 	}
 	if len(f.committed) != 1 {
 		t.Fatalf("committed %v", f.committed)
+	}
+}
+
+// TestLeaseFormScopeValueLimit checks the pre-fill value limit: exactly
+// 200 bytes are kept, one more byte drops the whole pre-fill back to the
+// defaults.
+func TestLeaseFormScopeValueLimit(t *testing.T) {
+	h := leaseNewHandler(t, &fakeLeases{}, nil)
+	if page := getBody(t, h, "/leases/new?scope=tag&value="+url.QueryEscape(strings.Repeat("a", 200))); !strings.Contains(page, `name="value" value="`+strings.Repeat("a", 200)+`"`) {
+		t.Error("a 200-byte scope value was dropped")
+	}
+	if page := getBody(t, h, "/leases/new?scope=tag&value="+url.QueryEscape(strings.Repeat("a", 201))); !strings.Contains(page, `name="scope" value="all" checked`) {
+		t.Error("a 201-byte scope value was not reset to the defaults")
 	}
 }
