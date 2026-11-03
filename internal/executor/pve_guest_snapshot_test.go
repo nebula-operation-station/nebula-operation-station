@@ -763,3 +763,209 @@ func TestGuestSnapshotLostResponseIsReconciledNotResent(t *testing.T) {
 		t.Fatalf("resent: %d", n)
 	}
 }
+
+// TestPveSnapshotFactsReaderFailsClosed: the production facts reader,
+// against a fake PVE HTTP API, keeps every disk and refuses a disk-like
+// config member (or the RAM state storage) that is not a bounded string
+// instead of silently dropping it from the disk set; other members that
+// are not strings (numbers, oversized descriptions) are skipped.
+func TestPveSnapshotFactsReaderFailsClosed(t *testing.T) {
+	var mu sync.Mutex
+	config := ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		switch r.URL.Path {
+		case "/api2/json/nodes/pve1/qemu/101/config", "/api2/json/nodes/pve1/lxc/101/config":
+			_, _ = w.Write([]byte(`{"data":` + config + `}`))
+		case "/api2/json/nodes/pve1/storage":
+			_, _ = w.Write([]byte(`{"data":[{"storage":"local-zfs","type":"zfspool","active":1,"content":"images,rootdir","shared":0}]}`))
+		case "/api2/json/nodes/pve1/qemu/101/snapshot", "/api2/json/nodes/pve1/lxc/101/snapshot":
+			_, _ = w.Write([]byte(`{"data":[{"name":"base","snaptime":1700000000},{"name":"current","parent":"base"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	read := func(context.Context) (string, error) { return "PVEAPIToken=r@pve!r=x", nil }
+	facts := func(kind, cfg string) (PveSnapshotFacts, error) {
+		mu.Lock()
+		config = cfg
+		mu.Unlock()
+		return pveSnapshotFacts(context.Background(), srv.Client(), srv.URL, read, kind, "pve1", 101)
+	}
+	long := `"` + strings.Repeat("a", maxPveSnapshotConfigValue+1) + `"`
+
+	// A well-formed config: disks kept, numbers and an oversized
+	// description skipped, a non-string lock still seen.
+	f, err := facts("qemu", `{"scsi0":"local-zfs:vm-101-disk-0,size=32G","memory":2048,"cores":2,"description":`+long+`,"lock":1}`)
+	if err != nil {
+		t.Fatalf("facts: %v", err)
+	}
+	if f.Config["scsi0"] != "local-zfs:vm-101-disk-0,size=32G" || f.Config["lock"] != "?" || !f.StoragesComplete || !f.SnapshotsComplete || len(f.Snapshots) != 1 {
+		t.Fatalf("facts %+v", f)
+	}
+	if _, ok := f.Config["memory"]; ok {
+		t.Fatal("number kept as a string")
+	}
+	if _, ok := f.Config["description"]; ok {
+		t.Fatal("oversized description kept")
+	}
+	disks, err := snapshotDiskSet("qemu", PveSnapshotFacts{Config: map[string]string{"scsi0": f.Config["scsi0"]}, Storages: f.Storages, StoragesComplete: true})
+	if err != nil || len(disks) != 1 || disks[0].Storage != "local-zfs" {
+		t.Fatalf("disk set %+v %v", disks, err)
+	}
+
+	for name, c := range map[string]struct{ kind, cfg string }{
+		"qemu disk number":         {"qemu", `{"scsi0":"local-zfs:vm-101-disk-0","scsi1":7}`},
+		"qemu disk object":         {"qemu", `{"scsi0":"local-zfs:vm-101-disk-0","virtio3":{"file":"x:y"}}`},
+		"qemu disk null":           {"qemu", `{"scsi0":"local-zfs:vm-101-disk-0","sata0":null}`},
+		"qemu disk oversized":      {"qemu", `{"scsi0":"local-zfs:vm-101-disk-0","ide1":` + long + `}`},
+		"qemu efidisk oversized":   {"qemu", `{"scsi0":"local-zfs:vm-101-disk-0","efidisk0":` + long + `}`},
+		"qemu tpmstate number":     {"qemu", `{"scsi0":"local-zfs:vm-101-disk-0","tpmstate0":1}`},
+		"qemu unknown disk index":  {"qemu", `{"scsi0":"local-zfs:vm-101-disk-0","scsi100":1}`},
+		"qemu vmstatestorage list": {"qemu", `{"scsi0":"local-zfs:vm-101-disk-0","vmstatestorage":["a"]}`},
+		"lxc rootfs number":        {"lxc", `{"rootfs":5,"hostname":"ct"}`},
+		"lxc mount point oversize": {"lxc", `{"rootfs":"local-zfs:subvol-101-disk-0","mp3":` + long + `}`},
+	} {
+		if _, err := facts(c.kind, c.cfg); !errors.Is(err, ErrPveSnapshotState) {
+			t.Errorf("%s: %v, want ErrPveSnapshotState", name, err)
+		}
+	}
+}
+
+// TestGuestSnapshotDiskSetRefusesUnknownDiskKeys: a disk-like key outside
+// the disk patterns of the guest kind is refused, not left out of the set.
+func TestGuestSnapshotDiskSetRefusesUnknownDiskKeys(t *testing.T) {
+	st := []pveapi.Storage{{ID: "local-zfs", Type: "zfspool", Active: true}}
+	for kind, key := range map[string]string{"qemu": "scsi100", "lxc": "scsi0"} {
+		cfg := map[string]string{"scsi0": "local-zfs:vm-101-disk-0", "rootfs": "local-zfs:subvol-101-disk-0", key: "local-zfs:vm-101-disk-9"}
+		if kind == "qemu" {
+			delete(cfg, "rootfs")
+		} else {
+			delete(cfg, "scsi0")
+			cfg[key] = "local-zfs:vm-101-disk-9"
+		}
+		if _, err := snapshotDiskSet(kind, PveSnapshotFacts{Config: cfg, Storages: st, StoragesComplete: true}); !errors.Is(err, ErrPveSnapshotState) {
+			t.Errorf("%s %s: %v", kind, key, err)
+		}
+	}
+	// The RAM state storage is not a disk.
+	cfg := map[string]string{"scsi0": "local-zfs:vm-101-disk-0", "vmstatestorage": "local-zfs"}
+	if d, err := snapshotDiskSet("qemu", PveSnapshotFacts{Config: cfg, Storages: st, StoragesComplete: true}); err != nil || len(d) != 1 {
+		t.Fatalf("vmstatestorage: %+v %v", d, err)
+	}
+}
+
+// dupSnapReader answers a snapshot list with whatever it holds.
+type dupSnapReader struct{ list pveapi.SnapshotList }
+
+func (r dupSnapReader) ListSnapshots(context.Context, string, string, int64) (pveapi.SnapshotList, error) {
+	return r.list, nil
+}
+
+func (r dupSnapReader) PlanSnapshotRollback(context.Context, pveapi.GuestKind, string, int64, string, bool) (pveapi.SnapshotRollbackPlan, error) {
+	return pveapi.SnapshotRollbackPlan{}, errors.New("not planned")
+}
+
+// TestDispatchGuestSnapshotStepRefusesDuplicateNames: a list with the
+// name twice is ambiguous; nothing is sent for any op, even when one of
+// the entries matches the bound identity exactly.
+func TestDispatchGuestSnapshotStepRefusesDuplicateNames(t *testing.T) {
+	rd := dupSnapReader{list: pveapi.SnapshotList{Complete: true, Snapshots: []pveapi.Snapshot{
+		{Name: "base", SnapTimeUnix: 1700000000},
+		{Name: "base", SnapTimeUnix: 1700000000},
+	}}}
+	for _, method := range []string{"snapshot.qemu.delete", "snapshot.qemu.rollback", "snapshot.lxc.delete"} {
+		args, _ := json.Marshal(pveSnapshotStepArgs{VMID: 101, Name: "base", SnapTime: 1700000000})
+		w := &fakeSnapWriter{}
+		if _, err := DispatchGuestSnapshotStep(context.Background(), w, rd, "pve1", PveMutationStep{Method: method, Args: args}); !errors.Is(err, ErrPveRejected) || len(w.calls) != 0 {
+			t.Fatalf("%s: %v %v", method, err, w.calls)
+		}
+	}
+	// The same list without the duplicate is sent.
+	rd.list.Snapshots = rd.list.Snapshots[:1]
+	args, _ := json.Marshal(pveSnapshotStepArgs{VMID: 101, Name: "base", SnapTime: 1700000000})
+	w := &fakeSnapWriter{}
+	if _, err := DispatchGuestSnapshotStep(context.Background(), w, rd, "pve1", PveMutationStep{Method: "snapshot.qemu.delete", Args: args}); err != nil || len(w.calls) != 1 {
+		t.Fatalf("single: %v %v", err, w.calls)
+	}
+}
+
+// TestGuestSnapshotRollbackBindsQMPStatus: the QMP run state is part of
+// the approved rollback effects; a guest paused (or resumed) since the
+// approval is refused and nothing is sent.
+func TestGuestSnapshotRollbackBindsQMPStatus(t *testing.T) {
+	e := newSnapEnv(t, "qemu")
+	p, err := e.propose(snapReq("qemu", PveSnapshotRollback, "base"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params := boundParams(t, p); params.Rollback == nil || params.Rollback.StatusBefore != "running" || params.Rollback.QMPStatusBefore != "running" {
+		t.Fatalf("params %+v", params.Rollback)
+	}
+	if _, err := e.auth.ApproveCLI(p.Digest, 0, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	req := e.expect(snapReq("qemu", PveSnapshotRollback, "base"))
+	req.Digest = p.Digest
+	e.client.qmp = "paused"
+	if _, err := e.g.Run(context.Background(), req); !errors.Is(err, ErrPveMutationDenied) && !errors.Is(err, ErrPveSnapshotChanged) {
+		t.Fatalf("paused run: %v", err)
+	}
+	if len(e.sc.sent()) != 0 {
+		t.Fatal("dispatched to a paused guest")
+	}
+
+	// A paused guest's rollback binds "paused"; resuming it before the run
+	// is refused as well.
+	e2 := newSnapEnv(t, "qemu")
+	e2.client.qmp = "paused"
+	p2, err := e2.propose(snapReq("qemu", PveSnapshotRollback, "base"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params := boundParams(t, p2); params.Rollback == nil || params.Rollback.StatusBefore != "running" || params.Rollback.QMPStatusBefore != "paused" {
+		t.Fatalf("params %+v", params.Rollback)
+	}
+	if _, err := e2.auth.ApproveCLI(p2.Digest, 0, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	req2 := e2.expect(snapReq("qemu", PveSnapshotRollback, "base"))
+	req2.Digest = p2.Digest
+	e2.client.qmp = ""
+	if _, err := e2.g.Run(context.Background(), req2); !errors.Is(err, ErrPveMutationDenied) && !errors.Is(err, ErrPveSnapshotChanged) {
+		t.Fatalf("resumed run: %v", err)
+	}
+	if len(e2.sc.sent()) != 0 {
+		t.Fatal("dispatched to a resumed guest")
+	}
+	e2.client.qmp = "paused"
+	if _, err := e2.g.Run(context.Background(), req2); err != nil {
+		t.Fatalf("unchanged run: %v", err)
+	}
+	if len(e2.sc.sent()) != 1 {
+		t.Fatal("not dispatched")
+	}
+
+	// The QMP state changes between authorization and the step's intent:
+	// the pre-intent precheck refuses it.
+	e3 := newSnapEnv(t, "qemu")
+	req3 := e3.expect(e3.approve(snapReq("qemu", PveSnapshotRollback, "base")))
+	e3.client.mu.Lock()
+	base := e3.client.reads
+	e3.client.mu.Unlock()
+	e3.client.statusFn = func(n int) string {
+		if n > base+3 { // prepare, Run, engine pre-authorization
+			e3.client.qmp = "paused"
+		}
+		return "running"
+	}
+	if res, err := e3.g.Run(context.Background(), req3); !errors.Is(err, ErrPveSnapshotChanged) || !res.PermitConsumed || len(e3.sc.sent()) != 0 {
+		t.Fatalf("qmp raced: %v %+v", err, res)
+	}
+}

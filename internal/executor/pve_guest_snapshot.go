@@ -192,6 +192,10 @@ type pveSnapshotRollbackEffects struct {
 	// StatusBefore is the guest's power status at proposal; a running
 	// guest is stopped by the rollback. It must be unchanged at the run.
 	StatusBefore string `json:"status_before"`
+	// QMPStatusBefore is a QEMU guest's QMP run state at proposal (empty
+	// for a container): a guest paused or resumed since the approval is
+	// another side effect. It must be unchanged at the run.
+	QMPStatusBefore string `json:"qmp_status_before"`
 }
 
 // pveSnapshotParams are the action parameters bound in the approval.
@@ -354,11 +358,11 @@ func (r PveGuestSnapshotRequest) bind(live PveTargetState, f PveSnapshotFacts) (
 	}
 	b := pveSnapshotBound{snapshot: found}
 	if r.Op == PveSnapshotRollback {
-		if !validPveStatus(live.Status) {
+		if !validPveStatus(live.Status) || (live.QMPStatus != "" && !validPveStatus(live.QMPStatus)) {
 			return pveSnapshotBound{}, ErrPveSnapshotState
 		}
 		b.rollback = &pveSnapshotRollbackEffects{Start: r.Start, RestoresRAM: found.VMState,
-			GuestRunsAfter: r.Start || found.VMState, StatusBefore: live.Status}
+			GuestRunsAfter: r.Start || found.VMState, StatusBefore: live.Status, QMPStatusBefore: live.QMPStatus}
 	}
 	return b, nil
 }
@@ -385,6 +389,11 @@ func snapshotDiskSet(kind string, f PveSnapshotFacts) ([]PveSnapshotDisk, error)
 	var disks []PveSnapshotDisk
 	for key, val := range f.Config {
 		if !keyRe.MatchString(key) {
+			if key != "vmstatestorage" && pveSnapshotRelevantConfigKey(key) {
+				// Disk-like but not a disk of this guest kind as known
+				// here: refuse rather than leave it out of the set.
+				return nil, ErrPveSnapshotState
+			}
 			continue
 		}
 		d, skip, err := parseSnapshotDisk(kind, key, val)
@@ -440,6 +449,18 @@ func findStorage(list []pveapi.Storage, id string) (pveapi.Storage, bool) {
 		}
 	}
 	return out, n == 1
+}
+
+// pveSnapshotConfigKeyRe matches every config key that is or may be a disk
+// of either guest kind (wider than the disk set's own patterns, so that an
+// unexpected index is still treated as a disk) and the RAM state storage.
+var pveSnapshotConfigKeyRe = regexp.MustCompile(`^(?:(?:ide|sata|scsi|virtio|efidisk|tpmstate|mp)[0-9]+|rootfs|vmstatestorage)$`)
+
+// pveSnapshotRelevantConfigKey reports whether the facts reader must keep
+// the config member k: a disk-like key or the RAM state storage. Only other
+// keys may be skipped when their value is not a bounded string.
+func pveSnapshotRelevantConfigKey(k string) bool {
+	return pveSnapshotConfigKeyRe.MatchString(k)
 }
 
 // parseSnapshotDisk parses one disk config value. skip is set for a CD-ROM.
@@ -542,7 +563,7 @@ func (r PveGuestSnapshotRequest) mutation(sc PveSnapshotClient, b pveSnapshotBou
 			if live.Kind != kind {
 				return ErrPveTargetChanged
 			}
-			if b.rollback != nil && live.Status != b.rollback.StatusBefore {
+			if b.rollback != nil && (live.Status != b.rollback.StatusBefore || live.QMPStatus != b.rollback.QMPStatusBefore) {
 				// The power state the rollback's side effects were approved
 				// for changed.
 				return ErrPveSnapshotChanged
@@ -876,6 +897,10 @@ func DispatchGuestSnapshotStep(ctx context.Context, w PveGuestSnapshotWriter, rd
 	var found *pveapi.Snapshot
 	for i := range list.Snapshots {
 		if list.Snapshots[i].Name == a.Name {
+			if found != nil {
+				// Ambiguous: like bind, a duplicate name is refused.
+				return reject("duplicate snapshot name")
+			}
 			found = &list.Snapshots[i]
 		}
 	}
@@ -931,10 +956,19 @@ func pveSnapshotFacts(ctx context.Context, hc *http.Client, base string, read pv
 	f := PveSnapshotFacts{Config: make(map[string]string, len(cfg))}
 	for k, raw := range cfg {
 		var s string
-		if json.Unmarshal(raw, &s) == nil && len(s) <= maxPveSnapshotConfigValue {
+		// A JSON null would decode as "": only a string literal counts.
+		if len(raw) > 0 && raw[0] == '"' && json.Unmarshal(raw, &s) == nil && len(s) <= maxPveSnapshotConfigValue {
 			f.Config[k] = s
-		} else if k == "lock" {
+			continue
+		}
+		switch {
+		case k == "lock":
 			f.Config[k] = "?"
+		case pveSnapshotRelevantConfigKey(k):
+			// A disk (or the RAM state storage) that is not a bounded
+			// string cannot be checked: refuse instead of dropping it
+			// from the disk set.
+			return PveSnapshotFacts{}, ErrPveSnapshotState
 		}
 	}
 	pc, err := pveapi.NewClient(hc, base+"/api2/json", read)
