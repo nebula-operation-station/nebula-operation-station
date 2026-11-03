@@ -91,9 +91,15 @@ A read grant document:
 - **Lifetime** — 1 hour to 30 days after creation
   (`ReadGrantMinLifetime` / `ReadGrantMaxLifetime`); the default is 7 days
   (`DefaultReadGrantLifetime`).
-- **Trigger** — `on_demand` (the "Refresh" button on the Read leases page)
-  and/or `scheduled` (a fixed interval, floor 15 minutes). The trigger only
-  selects which runs are allowed; it grants no other rights.
+- **Trigger** — `scheduled` (a fixed interval, floor 15 minutes) and/or
+  `on_demand` (runs requested outside the schedule, through
+  `RunReadGrant`). Leases proposed from the Read leases page carry both
+  (`internal/executions/readgrants_propose.go`); the only on-demand caller
+  today is the telemetry live view (`internal/pvecollect`). The trigger only
+  selects which runs are allowed; it grants no other rights. The "Refresh"
+  link on the Read leases page is unrelated: it is renewal, opening the
+  new-lease form pre-filled with the lease's scope
+  (`internal/web/ui/leases_new.go`), and never runs anything.
 - **Run budget** — a per-target rolling-hour ceiling: default 24
   (`DefaultRunBudget`), max 240 (`MaxRunBudget`); telemetry grants may use
   the higher `schedgrant.MaxTelemetryRunBudget` ceiling. Spent budgets are

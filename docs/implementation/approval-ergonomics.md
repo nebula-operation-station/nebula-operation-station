@@ -20,9 +20,13 @@ instead of one run at a time.
   claim, dispatch and stage gate. The approval binds the plan, not the
   ability to run.
 - The plan is frozen: the CLI re-derives the canonical plan from the
-  executor and refuses to approve if the typed plan, any member's artifact
-  bytes or any parameters hash differs from the reviewed digest
-  (`cmd/nebula/batch.go`). Nothing is truncated in the review.
+  executor and refuses to approve if the canonical plan's digest differs
+  from the requested one, if any typed member's member or execution ID
+  differs from the canonical plan, or if any member's parameters do not
+  hash to the planned parameters hash (`reviewBatch` in
+  `cmd/nebula/batch.go`). It does not re-check artifact bytes; those are
+  bound by the artifact hash inside the digested plan. Nothing is truncated
+  in the review, but the script itself is not shown.
 - A batch whose members include a **CRITICAL** run is rejected as a whole
   (`ErrCritical`); CRITICAL members must be approved individually.
 - After approval, stages open one at a time with `nebula batch stage N
@@ -76,8 +80,21 @@ action.
   (old versions handled by `--pin name@ver` / `--retire name@ver`); without
   it the command prompts for the old versions to pin or retire and then for
   the manifest digest to commit (empty aborts).
-- The commit result reports what was pinned, retired and the retirement
-  audit (admin UID, old versions).
+- It runs as root (`sudo`): it opens and writes the built-in trust store
+  directly (default `/var/lib/nebula/executor/trust`), not through the
+  executor socket, and chowns the store back to the executor user after the
+  commit. It does not call the executor's `CommitBuiltinTrust` RPC.
+- The commit result — admin UID, generation, every old/new trust tuple and
+  the pinned, retired and collected versions — is printed to standard
+  output only; the command writes no audit record or event. (The
+  `CommitBuiltinTrust` RPC logs its own "built-in trust committed" line.)
+- Pin and retire only steer the trust store's garbage collection
+  (`internal/executor/trust/bulk.go`, `admit.go`): pinned versions are
+  never collected, retired ones are left unpinned and collected once beyond
+  the two most recent predecessors and past their 90-day retention.
+  Retiring revokes no permit, read grant or schedule grant; those must be
+  revoked separately (web *Revoke*, `nebula schedule revoke` for legacy
+  grants, or `nebula lock`).
 - Trusting a built-in at its declared risk does not change how its runs are
   approved; the Safety Scanner findings and the host criticality floor still
   apply on every run.
