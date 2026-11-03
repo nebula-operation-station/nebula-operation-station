@@ -31,6 +31,10 @@ const (
 	trustTestServerUID = 101
 	trustTestAdminUID  = 0
 	trustTestDigest    = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	// trustTestResultDigest is the fixture's top-level result digest. It
+	// differs from the reviewed digest so a handler that confirms or
+	// delivers the wrong field fails requireConfirmedOnce.
+	trustTestResultDigest = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 )
 
 // fakeBuiltinTrust records calls and returns canned results.
@@ -43,8 +47,13 @@ type fakeBuiltinTrust struct {
 
 	reviews  int
 	statuses int
-	confirms []string
+	confirms []fakeConfirm
 	commits  []fakeCommit
+}
+
+type fakeConfirm struct {
+	digest     string
+	generation int64
 }
 
 type fakeCommit struct {
@@ -64,8 +73,18 @@ func (f *fakeBuiltinTrust) Status(context.Context) (trust.BulkAdmitResult, error
 	return f.review, f.reviewErr
 }
 
-func (f *fakeBuiltinTrust) ConfirmReview(_ context.Context, digest string, _ int64) {
-	f.confirms = append(f.confirms, digest)
+func (f *fakeBuiltinTrust) ConfirmReview(_ context.Context, digest string, generation int64) {
+	f.confirms = append(f.confirms, fakeConfirm{digest: digest, generation: generation})
+}
+
+// requireConfirmedOnce fails unless the delivered review was confirmed
+// exactly once, with the reviewed manifest digest and store generation.
+func (f *fakeBuiltinTrust) requireConfirmedOnce(t *testing.T) {
+	t.Helper()
+	want := fakeConfirm{digest: f.review.Review.ManifestDigest, generation: f.review.Review.Generation}
+	if len(f.confirms) != 1 || f.confirms[0] != want {
+		t.Fatalf("confirms = %+v, want exactly [%+v]", f.confirms, want)
+	}
 }
 
 func (f *fakeBuiltinTrust) Commit(_ context.Context, digest string, pins map[string]bool, retired []string, uid int) (trust.BulkAdmitResult, int64, error) {
@@ -113,7 +132,9 @@ func sampleReview() trust.BulkAdmitResult {
 		},
 		Scans: []trust.ScanFinding{{Module: "docker", ActionID: "docker.restart", Floor: "HIGH",
 			Findings: []scanner.Finding{{Category: "network", Risk: canonical.RiskHigh, Line: 3, Excerpt: `"curl"`}}}},
-		ManifestDigest:    trustTestDigest,
+		// Deliberately not Review.ManifestDigest: the handler must deliver
+		// and confirm the reviewed digest, never the top-level one.
+		ManifestDigest:    trustTestResultDigest,
 		NeedsConfirmation: true,
 		OldVersions:       []string{"docker@1.0.0", "gone@0.9.0"},
 	}
@@ -283,6 +304,45 @@ func TestAdminReviewBuiltinTrustIsComplete(t *testing.T) {
 	}
 	if _, err := proto.Marshal(out); err != nil {
 		t.Fatalf("response does not marshal: %v", err)
+	}
+	f.requireConfirmedOnce(t)
+}
+
+// A delivered review is confirmed exactly once with the digest and the
+// generation it showed; a different generation would bind another review.
+func TestReviewBuiltinTrustConfirmsDeliveredReview(t *testing.T) {
+	for _, gen := range []int64{0, 7, 1 << 40} {
+		t.Run(fmt.Sprint(gen), func(t *testing.T) {
+			r := sampleReview()
+			r.Review.Generation = gen
+			f := &fakeBuiltinTrust{review: r}
+			s := &Service{}
+			s.SetBuiltinTrust(f)
+			out, err := callAs(t, trustTestAdminUID, pb.ExecutorService_ReviewBuiltinTrust_FullMethodName, &pb.ReviewBuiltinTrustRequest{}, s.ReviewBuiltinTrust)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out.ManifestDigest != r.Review.ManifestDigest || out.Generation != gen {
+				t.Fatalf("delivered digest %s generation %d", out.ManifestDigest, out.Generation)
+			}
+			f.requireConfirmedOnce(t)
+			if len(f.commits) != 0 {
+				t.Fatal("review committed")
+			}
+		})
+	}
+}
+
+// A failed review is never confirmed.
+func TestFailedReviewBuiltinTrustIsNotConfirmed(t *testing.T) {
+	f := &fakeBuiltinTrust{review: sampleReview(), reviewErr: fmt.Errorf("x: %w", trust.ErrCorrupt)}
+	s := &Service{}
+	s.SetBuiltinTrust(f)
+	if _, err := callAs(t, trustTestAdminUID, pb.ExecutorService_ReviewBuiltinTrust_FullMethodName, &pb.ReviewBuiltinTrustRequest{}, s.ReviewBuiltinTrust); err == nil {
+		t.Fatal("review succeeded")
+	}
+	if len(f.confirms) != 0 {
+		t.Fatalf("failed review confirmed: %+v", f.confirms)
 	}
 }
 
