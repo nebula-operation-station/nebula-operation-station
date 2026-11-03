@@ -116,8 +116,21 @@ var errStopLeases = errors.New("lease runs stopped for this tick")
 // paused on the executor).
 var errStopLease = errors.New("lease stopped for this tick")
 
+// executorLockedCode prefixes the executor's FailedPrecondition refusal
+// when its vault is locked (internal/executor prepareRun). It is the only
+// FailedPrecondition that stops every lease; the others name one host or
+// credential.
+const executorLockedCode = "vault_locked"
+
+// leaseRefusalIsLock reports whether err is the executor's lock refusal.
+func leaseRefusalIsLock(err error) bool {
+	st := status.Convert(err)
+	return st.Code() == codes.FailedPrecondition && strings.HasPrefix(st.Message(), executorLockedCode+":")
+}
+
 // errSkipTarget ends one target's runs of a lease for this tick (its budget
-// is spent on the executor, or the host is gone).
+// is spent on the executor, the host is gone, not pinned or blocked, or its
+// credential is unavailable).
 var errSkipTarget = errors.New("target skipped for this tick")
 
 // errSkipRun skips one refused run (not covered, artifact or risk changed);
@@ -260,10 +273,15 @@ func (s *Service) runLeaseAction(ctx context.Context, exec readGrantRunner, l or
 		code == codes.PermissionDenied && strings.HasPrefix(status.Convert(err).Message(), string(permit.CodeLeaseInactive)):
 		s.log.Info("read lease inactive", "grant", l.id, "error", refusal(err))
 		return errStopLease
-	case code == codes.FailedPrecondition, code == codes.Unavailable, code == codes.Unimplemented,
+	case leaseRefusalIsLock(err), code == codes.Unavailable, code == codes.Unimplemented,
 		code == codes.DeadlineExceeded, code == codes.Canceled:
 		s.log.Warn("read lease runs paused", "grant", l.id, "error", refusal(err))
 		return errStopLeases
+	case code == codes.FailedPrecondition:
+		// Host not pinned or blocked, or its credential unavailable: only
+		// this target is refused; other targets and leases go on.
+		s.log.Warn("read lease target refused", "grant", l.id, "host", t.HostID, "error", refusal(err))
+		return errSkipTarget
 	default:
 		s.log.Warn("read lease run refused", "grant", l.id, "action", a.ID, "host", t.HostID, "error", refusal(err))
 		return errSkipRun

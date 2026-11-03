@@ -318,10 +318,32 @@ func TestLeaseRunnerFollowsExecutorRefusals(t *testing.T) {
 			return leaseEntry(t, d, n)
 		}
 		s, f := setupLeases(t, &now, twoHosts, second)
-		f.runErr = status.Error(codes.FailedPrecondition, "credential unavailable for read")
+		// The executor's real lock refusal (prepareRun in internal/executor).
+		f.runErr = status.Error(codes.FailedPrecondition, "vault_locked: run `nebula unlock` on the executor host")
 		s.RunDueReadGrants(ctx)
 		if len(f.runs) != 1 {
 			t.Fatalf("%d runs while locked", len(f.runs))
+		}
+		if list, _ := s.List(ctx, 10); len(list) != 0 {
+			t.Fatal("a refused run was stored")
+		}
+	})
+	t.Run("a lock after a per-target refusal still stops all leases", func(t *testing.T) {
+		second := func(n time.Time) *pb.ReadGrant {
+			d := leaseDoc(t, n, []string{"db"}, "core.facts")
+			d.ID = "7f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f8"
+			return leaseEntry(t, d, n)
+		}
+		s, f := setupLeases(t, &now, twoHosts, second)
+		f.errFor = map[string]error{
+			"web": status.Error(codes.FailedPrecondition, "credential unavailable for read"),
+			"db":  status.Error(codes.FailedPrecondition, "vault_locked: run `nebula unlock` on the executor host"),
+		}
+		s.RunDueReadGrants(ctx)
+		// web refused once (target skipped), db refused once (tick stopped):
+		// the second lease is not asked.
+		if len(f.runs) != 2 {
+			t.Fatalf("%d runs, want 2", len(f.runs))
 		}
 	})
 	t.Run("a target not covered is skipped, the lease goes on", func(t *testing.T) {
@@ -332,6 +354,72 @@ func TestLeaseRunnerFollowsExecutorRefusals(t *testing.T) {
 			t.Fatalf("%d runs", len(f.runs))
 		}
 	})
+}
+
+func TestPerTargetPreconditionDoesNotBlockLaterLeases(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	ctx := context.Background()
+	// The executor's per-host and per-credential FailedPrecondition refusals
+	// on the RunReadGrant path (prepareRun and RunRead in internal/executor).
+	for name, refusal := range map[string]error{
+		"credential unavailable for read": status.Error(codes.FailedPrecondition, "credential unavailable for read"),
+		"credential not in the keyring":   status.Error(codes.FailedPrecondition, "credential_unavailable: nebula-default"),
+		"host not pinned":                 status.Error(codes.FailedPrecondition, "host has no pinned key; enroll it first"),
+		"host blocked":                    status.Error(codes.FailedPrecondition, "host_key_mismatch: host is blocked after a host key mismatch; re-pin it on the executor host"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			// The refused lease comes first, so a tick-wide stop would starve
+			// the second lease on every tick.
+			first := func(n time.Time) *pb.ReadGrant {
+				return leaseEntry(t, leaseDoc(t, n, []string{"web"}, "core.facts", "docker.list"), n)
+			}
+			second := func(n time.Time) *pb.ReadGrant {
+				d := leaseDoc(t, n, []string{"db"}, "core.facts", "docker.list")
+				d.ID = "7f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f8"
+				return leaseEntry(t, d, n)
+			}
+			s, f := setupLeases(t, &now, first, second)
+			f.errFor = map[string]error{"web": refusal}
+			s.RunDueReadGrants(ctx)
+			web, db := 0, 0
+			for _, r := range f.runs {
+				if r.GetRun().GetHostId() == "web" {
+					web++
+				} else {
+					db++
+				}
+			}
+			// The refused target is asked once and then skipped for the tick;
+			// the later lease runs all its due actions.
+			if web != 1 || db != 2 {
+				t.Fatalf("web %d db %d, want 1 and 2", web, db)
+			}
+			list, _ := s.List(ctx, 10)
+			if len(list) != 2 {
+				t.Fatalf("%d stored, want 2", len(list))
+			}
+			for _, e := range list {
+				var sched string
+				if err := s.db.QueryRowContext(ctx, `SELECT schedule_id FROM executions WHERE id = ?`, e.ID).Scan(&sched); err != nil ||
+					sched != "7f1c2a3b-4d5e-4f60-8a71-92b3c4d5e6f8" {
+					t.Fatalf("schedule_id %q %v", sched, err)
+				}
+			}
+		})
+	}
+}
+
+func TestPreconditionWithoutLockPrefixIsNotALock(t *testing.T) {
+	// Only the prefix marks the lock; a message that merely mentions it does not.
+	if leaseRefusalIsLock(status.Error(codes.FailedPrecondition, "credential unavailable for read (not vault_locked)")) {
+		t.Fatal("a per-target refusal was taken for the lock")
+	}
+	if leaseRefusalIsLock(status.Error(codes.PermissionDenied, "vault_locked: run `nebula unlock` on the executor host")) {
+		t.Fatal("a non-FailedPrecondition status was taken for the lock")
+	}
+	if !leaseRefusalIsLock(status.Error(codes.FailedPrecondition, "vault_locked: run `nebula unlock` on the executor host")) {
+		t.Fatal("the executor's lock refusal was not recognised")
+	}
 }
 
 func TestSchedulerLoopRunsOrdinaryLeases(t *testing.T) {
