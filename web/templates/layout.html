@@ -91,6 +91,23 @@
         </div>
         <button type="button" class="topbar__logout button button--secondary button--small" id="logout">Log out</button>
       </header>
+      <!-- Built-in trust status banner (ADR 0007 E17): the executor's
+           verdict, the affected versions and the local CLI command.
+           Unreachable is a distinct state, not a trust verdict. -->
+      {{with .BuiltinTrust}}
+      <div class="trust-banner trust-banner--{{.Kind}}">
+        <p class="trust-banner__headline">{{.Headline}}</p>
+        {{if .Affected}}
+        <p class="trust-banner__detail">Affected built-ins:</p>
+        <ul class="trust-banner__list">
+          {{range .Affected}}<li><code>{{.Name}}</code> <code>{{.Version}}</code>{{if .Trusted}} (trusted: <code>{{.Trusted}}</code>){{end}}</li>
+          {{end}}
+        </ul>
+        {{end}}
+        {{with .Command}}<p class="trust-banner__detail">Trust them on the executor host with <code>{{.}}</code>.</p>{{end}}
+        {{with .Detail}}<p class="trust-banner__detail">{{.}}</p>{{end}}
+      </div>
+      {{end}}
       <main class="main content">
         {{template "content" .}}
       </main>

@@ -357,6 +357,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		Runbooks:       rb,
 		DeployProfiles: deployProfiles,
 		Trust:          exec,
+		BuiltinTrust:   exec,
 		Modules:        mods,
 		LastResult:     ops.LastResult,
 		Network:        ipamStore,

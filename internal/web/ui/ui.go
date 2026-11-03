@@ -114,6 +114,9 @@ type Options struct {
 	// Trust asks the executor about artifact trust (runbook pages). Nil
 	// shows "unknown" and no trust button.
 	Trust ArtifactTrust
+	// BuiltinTrust reports the built-in trust verdict for the layout
+	// banner (ADR 0007 E17). Nil disables the banner.
+	BuiltinTrust BuiltinTrustProvider
 	// Modules imports and lists modules. Nil hides the modules pages.
 	Modules Modules
 	// LastResult feeds the module cards on host pages. Nil shows none.
@@ -186,6 +189,7 @@ type Handler struct {
 	runbooks       Runbooks
 	deployProfiles DeployProfiles
 	trust          ArtifactTrust
+	builtinTrust   BuiltinTrustProvider
 	modules        Modules
 	lastResult     LastResultFunc
 	network        NetworkStore
@@ -253,6 +257,7 @@ func New(o Options) (*Handler, error) {
 		pages:          pages,
 		staticFS:       staticFS,
 		status:         o.Status,
+		builtinTrust:   o.BuiltinTrust,
 		hostNames:      o.HostNames,
 		hosts:          hosts,
 		hostKeys:       o.HostKeys,
@@ -611,6 +616,9 @@ type pageData struct {
 	PVEDetail *pveDetailData
 	// PVENav shows the PVE navigation item (Options.PVE is set).
 	PVENav bool
+	// BuiltinTrust is the layout's built-in trust banner (ADR 0007
+	// E17); nil hides it. render fills it from the executor.
+	BuiltinTrust *builtinTrustView
 	// InventoryEditable is true when Options.Inventory is set; the
 	// page then shows the add-host form and the per-row edit and
 	// delete controls.
@@ -770,6 +778,9 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, data pageData) 
 	}
 	data.NavCollapsed = navStateFromRequest(r) == navCollapsed
 	data.PVENav = h.pve != nil
+	if !data.Bare && h.builtinTrust != nil {
+		data.BuiltinTrust = h.builtinTrustStatus(r.Context())
+	}
 	set, ok := h.pages[data.Content]
 	if !ok {
 		http.Error(w, "internal error: unknown page", http.StatusInternalServerError)

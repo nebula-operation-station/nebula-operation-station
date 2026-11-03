@@ -69,6 +69,15 @@ func (l *lazyExecutor) GetStatus(ctx context.Context, in *pb.GetStatusRequest, o
 	return nil, errNotConnected
 }
 
+// GetBuiltinTrustStatus implements ui.BuiltinTrustProvider for the
+// built-in trust banner (ADR 0007 E17).
+func (l *lazyExecutor) GetBuiltinTrustStatus(ctx context.Context, in *pb.GetBuiltinTrustStatusRequest, opts ...grpc.CallOption) (*pb.GetBuiltinTrustStatusResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.GetBuiltinTrustStatus(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
 func (l *lazyExecutor) BeginLogin(ctx context.Context, in *pb.BeginLoginRequest, opts ...grpc.CallOption) (*pb.BeginLoginResponse, error) {
 	if c := l.c.Load(); c != nil {
 		return c.BeginLogin(ctx, in, opts...)
