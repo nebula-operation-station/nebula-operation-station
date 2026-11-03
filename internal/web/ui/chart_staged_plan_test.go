@@ -147,7 +147,7 @@ func noEnvHandler(t *testing.T) (*ui.Handler, *fakeOps) {
 	h := newTestHandler(t, ui.Options{
 		Hosts: func(context.Context) ([]inventory.Host, error) {
 			return []inventory.Host{
-				{ID: "web-01", Environment: inventory.EnvProd},
+				{ID: "web-01", Environment: inventory.EnvProd, Endpoints: []inventory.Endpoint{{Address: "10.0.0.13", Port: 22}}},
 				{ID: "noenv-01", DisplayName: "No env"},
 			}, nil
 		},
@@ -191,6 +191,69 @@ func TestChartStagedRefusesHostWithoutEnvironment(t *testing.T) {
 			t.Errorf("%s: status = %d, want 400", form, rec.Code)
 		}
 		if msg := rec.Body.String(); !strings.Contains(msg, `"noenv-01"`) || !strings.Contains(msg, "no environment (DEV, QA or PROD)") {
+			t.Errorf("%s: unclear error %q", form, msg)
+		}
+		if strings.Contains(rec.Body.String(), "Confirm staged OS update") {
+			t.Errorf("%s: confirmation page shown", form)
+		}
+	}
+	if len(ops.createdCalls) != 0 {
+		t.Errorf("a proposal was made: %v", ops.createdCalls)
+	}
+}
+
+// noEndpointHandler serves web-01 (PROD, with an endpoint) and
+// noep-01 (PROD, no endpoints), both enrolled.
+func noEndpointHandler(t *testing.T) (*ui.Handler, *fakeOps) {
+	t.Helper()
+	ops := &fakeOps{}
+	h := newTestHandler(t, ui.Options{
+		Hosts: func(context.Context) ([]inventory.Host, error) {
+			return []inventory.Host{
+				{ID: "web-01", Environment: inventory.EnvProd, Endpoints: []inventory.Endpoint{{Address: "10.0.0.13", Port: 22}}},
+				{ID: "noep-01", DisplayName: "No endpoints", Environment: inventory.EnvProd, Criticality: inventory.CriticalityLow},
+			}, nil
+		},
+		HostKeys: func(context.Context) ([]*pb.HostKeyPin, error) {
+			return []*pb.HostKeyPin{
+				{HostId: "web-01", KeyType: "ssh-ed25519", Fingerprint: "SHA256:AAAA"},
+				{HostId: "noep-01", KeyType: "ssh-ed25519", Fingerprint: "SHA256:BBBB"},
+			}, nil
+		},
+		Operations:   ops,
+		Log:          slog.New(slog.NewTextHandler(&strings.Builder{}, nil)),
+		PublicOrigin: "https://nebula.example",
+	})
+	return h, ops
+}
+
+func TestChartStagedHostWithoutEndpointsNotSelectable(t *testing.T) {
+	h, _ := noEndpointHandler(t)
+	body := getBody(t, h.Handler(), "/inventory/chart")
+	if got := hostCheckboxes(t, body); !reflect.DeepEqual(got, []string{"web-01"}) {
+		t.Errorf("selectable hosts = %v, want [web-01]", got)
+	}
+	if !strings.Contains(body, `<input type="checkbox" value="noep-01" disabled>`) {
+		t.Error("no disabled checkbox for the host without endpoints")
+	}
+	if !strings.Contains(body, "not selectable: no endpoints") {
+		t.Error("the reason is not shown")
+	}
+}
+
+func TestChartStagedRefusesHostWithoutEndpoints(t *testing.T) {
+	h, ops := noEndpointHandler(t)
+	for _, form := range []string{
+		"host=noep-01&action=package.install_security",
+		"host=web-01&host=noep-01&action=package.install_security",
+		"confirm=1&host=web-01&host=noep-01&action=package.install_security",
+	} {
+		rec := httptest.NewRecorder()
+		h.Handler().ServeHTTP(rec, formPost("/inventory/chart/staged", form))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", form, rec.Code)
+		}
+		if msg := rec.Body.String(); !strings.Contains(msg, `"noep-01"`) || !strings.Contains(msg, "no endpoints") {
 			t.Errorf("%s: unclear error %q", form, msg)
 		}
 		if strings.Contains(rec.Body.String(), "Confirm staged OS update") {

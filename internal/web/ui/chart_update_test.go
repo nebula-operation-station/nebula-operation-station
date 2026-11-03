@@ -400,10 +400,14 @@ func TestOperationFormHostPrefill(t *testing.T) {
 // without a pin.
 func stagedHosts() []inventory.Host {
 	return []inventory.Host{
-		{ID: "ci-01", DisplayName: "CI runner", Environment: inventory.EnvDev, Criticality: inventory.CriticalityLow},
-		{ID: "db-01", DisplayName: "DB server", Environment: inventory.EnvQA, Criticality: inventory.CriticalityHigh},
-		{ID: "web-01", Environment: inventory.EnvProd, Criticality: inventory.CriticalityMedium},
-		{ID: "plain-01", DisplayName: "Plain", Environment: inventory.EnvProd, Criticality: inventory.CriticalityLow},
+		{ID: "ci-01", DisplayName: "CI runner", Environment: inventory.EnvDev, Criticality: inventory.CriticalityLow,
+			Endpoints: []inventory.Endpoint{{Address: "10.0.0.11", Port: 22}}},
+		{ID: "db-01", DisplayName: "DB server", Environment: inventory.EnvQA, Criticality: inventory.CriticalityHigh,
+			Endpoints: []inventory.Endpoint{{Address: "10.0.0.12", Port: 22}}},
+		{ID: "web-01", Environment: inventory.EnvProd, Criticality: inventory.CriticalityMedium,
+			Endpoints: []inventory.Endpoint{{Address: "10.0.0.13", Port: 22}}},
+		{ID: "plain-01", DisplayName: "Plain", Environment: inventory.EnvProd, Criticality: inventory.CriticalityLow,
+			Endpoints: []inventory.Endpoint{{Address: "10.0.0.14", Port: 22}}},
 	}
 }
 
@@ -655,7 +659,8 @@ func TestChartStagedUpdateEscaping(t *testing.T) {
 	ops := &fakeOps{}
 	h := newTestHandler(t, ui.Options{
 		Hosts: func(context.Context) ([]inventory.Host, error) {
-			return []inventory.Host{{ID: "evil-01", DisplayName: "<script>alert(1)</script>", Environment: inventory.EnvProd}}, nil
+			return []inventory.Host{{ID: "evil-01", DisplayName: "<script>alert(1)</script>", Environment: inventory.EnvProd,
+				Endpoints: []inventory.Endpoint{{Address: "10.0.0.15", Port: 22}}}}, nil
 		},
 		HostKeys:     hostKeysFor("evil-01", keyPinned),
 		Operations:   ops,

@@ -246,6 +246,9 @@ const (
 	// PROD environment cannot be selected: the preset has no stage
 	// for it.
 	stagedNoEnvironment = "no environment (DEV, QA or PROD), so it fits no stage"
+	// stagedNoEndpoints is why an enrolled host without endpoints
+	// cannot be selected: the executor has nowhere to reach it.
+	stagedNoEndpoints = "no endpoints, so the executor cannot reach it"
 )
 
 // stagedPlan is the plan of every staged update from the chart: the
@@ -345,8 +348,11 @@ func (h *Handler) stagedUpdateSection(hosts []inventory.Host, pins map[string]*p
 			continue
 		}
 		sh := stagedHost{ID: host.ID, Name: inventoryShownName(host)}
-		if !executions.HasStageEnvironment(host.Environment) {
+		switch {
+		case !executions.HasStageEnvironment(host.Environment):
 			sh.Unselectable = stagedNoEnvironment
+		case len(host.Endpoints) == 0:
+			sh.Unselectable = stagedNoEndpoints
 		}
 		enrolled = append(enrolled, sh)
 	}
@@ -472,6 +478,10 @@ func (h *Handler) handleChartStaged(w http.ResponseWriter, r *http.Request) {
 		}
 		if !executions.HasStageEnvironment(host.Environment) {
 			http.Error(w, "host "+stagedEcho(id)+" cannot be updated in stages: "+stagedNoEnvironment+"; set its environment in the inventory or leave it out", http.StatusBadRequest)
+			return
+		}
+		if len(host.Endpoints) == 0 {
+			http.Error(w, "host "+stagedEcho(id)+" cannot be updated in stages: "+stagedNoEndpoints+"; add an endpoint in the inventory or leave it out", http.StatusBadRequest)
 			return
 		}
 		envOf[id] = host.Environment
