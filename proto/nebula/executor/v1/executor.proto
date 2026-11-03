@@ -454,6 +454,16 @@ service ExecutorService {
   rpc ProposePVEGuestSnapshot(ProposePVEGuestSnapshotRequest) returns (ProposePVEGuestSnapshotResponse);
   rpc CommitPVEGuestSnapshot(CommitPVEGuestSnapshotRequest) returns (CommitPVEGuestSnapshotResponse);
 
+  // Guest provisioning, pve.guest.provision (ADR 0008 section 3, PV-05).
+  // The executor binds the template record, reserves the VMID against the
+  // live guest list and sets the risk to its own floor (base MEDIUM, never
+  // LOW). Propose: role server or admin. Commit runs an approved
+  // provisioning (clone, config, resize, optional start) only with a
+  // permit approved under the normal approval semantics: role server or
+  // admin (ADR 0008 section 3 amendment of 2026-11-03, variant B).
+  rpc ProposePVEGuestProvision(ProposePVEGuestProvisionRequest) returns (ProposePVEGuestProvisionResponse);
+  rpc CommitPVEGuestProvision(CommitPVEGuestProvisionRequest) returns (CommitPVEGuestProvisionResponse);
+
   // PVE provider reads (ADR 0006, P1-05). Role: server, admin,
   // pve-collector. Metadata only: which remotes exist, their kind, ordered
   // endpoints, trust generation and state. The trust pin is a SHA-256
@@ -2231,6 +2241,110 @@ message CommitPVEGuestSnapshotRequest {
 message CommitPVEGuestSnapshotResponse {
   string execution_id = 1;
   repeated PVEGuestPowerStep steps = 2;
+}
+
+// PVETemplateRef binds one prepared template record (pve.image.prepare) at
+// an exact VMID, generation and source digest.
+message PVETemplateRef {
+  string remote_id = 1;
+  string node = 2;
+  string storage = 3;
+  string image_id = 4;
+  uint64 vmid = 5;
+  uint64 generation = 6;
+  string source_sha256 = 7;
+}
+
+// PVEProvisionNIC is net0 of the new guest.
+message PVEProvisionNIC {
+  // "virtio" (default when empty) or "e1000".
+  string model = 1;
+  string bridge = 2;
+  // 802.1Q tag; 0 means untagged.
+  uint32 vlan = 3;
+  // A fixed unicast MAC, or empty to let PVE generate one.
+  string mac = 4;
+}
+
+// PVEIPAMBinding is the IPAM reservation the server took for the guest;
+// it is the only source of ipconfig0.
+message PVEIPAMBinding {
+  string network_id = 1;
+  string pool = 2;
+  // CIDR prefix, e.g. "192.168.10.0/24".
+  string prefix = 3;
+  // Empty when the network has no gateway.
+  string gateway = 4;
+  uint32 vlan = 5;
+  string address = 6;
+  string reserved_by = 7;
+  int64 reserved_at_unix = 8;
+}
+
+// PVEGuestProvisionSpec is one guest provisioning. Commit must present the
+// exact proposed spec with vmid set to the VMID the proposal reserved.
+message PVEGuestProvisionSpec {
+  string remote_id = 1;
+  string node = 2;
+  // Storage receiving the full clone's disks.
+  string storage = 3;
+  PVETemplateRef template = 4;
+  // Propose: 0 asks for the next free VMID. Commit: the reserved VMID.
+  uint64 vmid = 5;
+  // Guest name and hostname (lowercase DNS name).
+  string name = 6;
+  uint32 cores = 7;
+  uint32 memory_mib = 8;
+  // Disk slot to resize (default scsi0) and its size.
+  string disk = 9;
+  uint64 disk_gib = 10;
+  PVEProvisionNIC nic = 11;
+  // Unset: DHCP.
+  PVEIPAMBinding ipam = 12;
+  string ci_user = 13;
+  // Further OpenSSH public keys; the NOS automation key is always first.
+  repeated string ssh_keys = 14;
+  repeated string nameservers = 15;
+  repeated string search_domains = 16;
+  // Names a guest password entered on the executor; empty: SSH keys only.
+  string password_id = 17;
+  bool start = 18;
+  // Keyring reference of the NOS automation key that cloud-init always
+  // installs (the credential the later guest join uses). Only its public
+  // key is bound.
+  string automation_credential_ref = 19;
+}
+
+message ProposePVEGuestProvisionRequest {
+  PVEGuestProvisionSpec spec = 1;
+}
+
+message ProposePVEGuestProvisionResponse {
+  ProposeExecutionResponse permit = 1;
+  // The execution the VMID reservation is held for; commit presents it.
+  string execution_id = 2;
+  // The reserved VMID of the new guest.
+  uint64 vmid = 3;
+  // Display-only capacity warnings; they do not change the risk.
+  repeated string capacity_warnings = 4;
+}
+
+message CommitPVEGuestProvisionRequest {
+  // The proposed spec with vmid set to the reserved VMID.
+  PVEGuestProvisionSpec spec = 1;
+  string execution_id = 2;
+  string execution_digest = 3;
+}
+
+message CommitPVEGuestProvisionResponse {
+  string execution_id = 1;
+  uint64 vmid = 2;
+  repeated PVEGuestPowerStep steps = 3;
+  // The new guest's configuration digest after a successful run.
+  string guest_config_digest = 4;
+  // Set when the run failed after the clone may have created the guest;
+  // it is left in PVE for inspection, never deleted.
+  bool guest_kept = 5;
 }
 
 // ReadGrantTrigger selects one approved trigger for one run. It grants no

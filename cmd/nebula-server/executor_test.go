@@ -76,3 +76,23 @@ func TestLazyExecutorReadGrants(t *testing.T) {
 		t.Fatalf("RevokeReadGrant = (%v, %v), want (nil, errNotConnected)", r, err)
 	}
 }
+
+// TestLazyExecutorGuestProvision: the provisioning pass-throughs exist
+// (the PV-08 run page finds them by type assertion like the read grants)
+// and fail with errNotConnected without an executor.
+func TestLazyExecutorGuestProvision(t *testing.T) {
+	var exec any = new(lazyExecutor)
+	pv, ok := exec.(interface {
+		ProposePVEGuestProvision(context.Context, *pb.ProposePVEGuestProvisionRequest, ...grpc.CallOption) (*pb.ProposePVEGuestProvisionResponse, error)
+		CommitPVEGuestProvision(context.Context, *pb.CommitPVEGuestProvisionRequest, ...grpc.CallOption) (*pb.CommitPVEGuestProvisionResponse, error)
+	})
+	if !ok {
+		t.Fatal("lazyExecutor does not implement the guest provisioning RPCs")
+	}
+	if r, err := pv.ProposePVEGuestProvision(context.Background(), &pb.ProposePVEGuestProvisionRequest{}); r != nil || err != errNotConnected {
+		t.Fatalf("ProposePVEGuestProvision = (%v, %v), want (nil, errNotConnected)", r, err)
+	}
+	if r, err := pv.CommitPVEGuestProvision(context.Background(), &pb.CommitPVEGuestProvisionRequest{}); r != nil || err != errNotConnected {
+		t.Fatalf("CommitPVEGuestProvision = (%v, %v), want (nil, errNotConnected)", r, err)
+	}
+}

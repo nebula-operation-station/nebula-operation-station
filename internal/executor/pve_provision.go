@@ -177,6 +177,10 @@ type PveProvisionRequest struct {
 	PasswordID string
 	// Start starts the guest after creation.
 	Start bool
+	// AutomationCredentialRef, if set, names the keyring credential whose
+	// public key is the NOS automation key of this guest (resolved by
+	// PveProvisioner.AutomationKeys); empty uses PveProvisioner.AutomationKey.
+	AutomationCredentialRef string
 	// PCIPassthrough requests PCI passthrough. The allowlisted config set
 	// does not offer it yet, so such a request is refused.
 	PCIPassthrough bool
@@ -212,6 +216,10 @@ type PveProvisioner struct {
 	// AutomationKey is the NOS automation public key (authorized_keys
 	// format) that cloud-init always installs.
 	AutomationKey string
+	// AutomationKeys, if set, resolves a request's AutomationCredentialRef
+	// to the authorized_keys form of that credential's public key (the
+	// executor's keyring in production). Only the public key is bound.
+	AutomationKeys func(ref string) (string, error)
 	// Artifact and ModuleVersion identify the action the permit binds.
 	Artifact      []byte
 	ModuleVersion string
@@ -253,8 +261,8 @@ func (p *PveProvisioner) checkDeps() error {
 		len(p.Artifact) == 0 || p.ModuleVersion == "" {
 		return errors.New("executor: pve provisioner: Mutations, Images, Reader, VMIDs, Passwords, Artifact and ModuleVersion are required")
 	}
-	if _, err := canonicalAuthorizedKey(p.AutomationKey); err != nil {
-		return errors.New("executor: pve provisioner: AutomationKey is not a valid public key")
+	if _, err := canonicalAuthorizedKey(p.AutomationKey); err != nil && p.AutomationKeys == nil {
+		return errors.New("executor: pve provisioner: AutomationKey is not a valid public key and no AutomationKeys is set")
 	}
 	if p.Mutations.TaskIDs != PveJobTaskIDs(p) {
 		return errors.New("executor: pve provisioner: Mutations.TaskIDs must be the provisioner")
@@ -574,7 +582,18 @@ func (p *PveProvisioner) config(req PveProvisionRequest, vmid uint64) (pveProvis
 	if err != nil {
 		return pveProvisionConfig{}, err
 	}
-	auto, err := canonicalAuthorizedKey(p.AutomationKey)
+	autoKey := p.AutomationKey
+	if req.AutomationCredentialRef != "" {
+		if p.AutomationKeys == nil {
+			return bad("automation credential")
+		}
+		k, err := p.AutomationKeys(req.AutomationCredentialRef)
+		if err != nil {
+			return bad("automation credential")
+		}
+		autoKey = k
+	}
+	auto, err := canonicalAuthorizedKey(autoKey)
 	if err != nil {
 		return bad("automation key")
 	}

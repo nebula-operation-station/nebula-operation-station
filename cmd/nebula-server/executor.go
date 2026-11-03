@@ -155,6 +155,24 @@ func (l *lazyExecutor) CommitGuestJoin(ctx context.Context, in *pb.CommitGuestJo
 	return nil, errNotConnected
 }
 
+// ProposePVEGuestProvision passes a guest provisioning proposal through
+// (ADR 0008 section 3; the PV-08 deploy wizard is its caller).
+func (l *lazyExecutor) ProposePVEGuestProvision(ctx context.Context, in *pb.ProposePVEGuestProvisionRequest, opts ...grpc.CallOption) (*pb.ProposePVEGuestProvisionResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ProposePVEGuestProvision(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+// CommitPVEGuestProvision passes the run of an approved guest provisioning
+// through; the executor checks the approved permit.
+func (l *lazyExecutor) CommitPVEGuestProvision(ctx context.Context, in *pb.CommitPVEGuestProvisionRequest, opts ...grpc.CallOption) (*pb.CommitPVEGuestProvisionResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.CommitPVEGuestProvision(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
 func (l *lazyExecutor) CommitEnroll(ctx context.Context, in *pb.CommitEnrollRequest, opts ...grpc.CallOption) (*pb.CommitEnrollResponse, error) {
 	if c := l.c.Load(); c != nil {
 		return c.CommitEnroll(ctx, in, opts...)
