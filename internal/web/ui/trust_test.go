@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/grpc"
 
@@ -144,6 +146,106 @@ func TestBuiltinTrustBannerListsRemovedOnly(t *testing.T) {
 	want := builtinTrustEntryView{Name: "oldmod", Trusted: "0.9.0", Removed: true}
 	if v == nil || len(v.Affected) != 1 || v.Affected[0] != want {
 		t.Fatalf("banner %+v, want Affected [%+v]", v, want)
+	}
+}
+
+// The executor's module list is untrusted input: the banner lists at
+// most builtinTrustMaxModules entries and says how many it left out.
+func TestBuiltinTrustBannerCapsModuleCount(t *testing.T) {
+	for _, tc := range []struct {
+		n        int
+		omitted  int
+		wantNote bool
+	}{
+		{n: builtinTrustMaxModules, omitted: 0},
+		{n: builtinTrustMaxModules + 1, omitted: 1, wantNote: true},
+		{n: builtinTrustMaxModules + 500, omitted: 500, wantNote: true},
+	} {
+		st := &pb.GetBuiltinTrustStatusResponse{State: pb.BuiltinTrustState_BUILTIN_TRUST_STATE_UNTRUSTED}
+		// Unchanged modules are not affected and must not count.
+		st.Modules = append(st.Modules, &pb.BuiltinTrustEntry{Name: "same", Change: pb.BuiltinTrustChange_BUILTIN_TRUST_CHANGE_UNCHANGED})
+		for i := range tc.n {
+			st.Modules = append(st.Modules, &pb.BuiltinTrustEntry{
+				Name: fmt.Sprintf("mod%d", i), Change: pb.BuiltinTrustChange_BUILTIN_TRUST_CHANGE_NEW, ReleaseVersion: "1.0.0",
+			})
+		}
+		v := builtinTrustBanner(st)
+		if v == nil {
+			t.Fatalf("n=%d: banner nil", tc.n)
+		}
+		if want := tc.n - tc.omitted; len(v.Affected) != want {
+			t.Errorf("n=%d: %d affected listed, want %d", tc.n, len(v.Affected), want)
+		}
+		if len(v.Affected) > 0 && v.Affected[0].Name != "mod0" {
+			t.Errorf("n=%d: first listed %q, want mod0 (executor order kept)", tc.n, v.Affected[0].Name)
+		}
+		note := fmt.Sprintf("%d more affected built-in", tc.omitted)
+		if got := strings.Contains(v.Detail, note); got != tc.wantNote {
+			t.Errorf("n=%d: Detail %q contains %q = %v, want %v", tc.n, v.Detail, note, got, tc.wantNote)
+		}
+		if !strings.Contains(v.Detail, "lease") {
+			t.Errorf("n=%d: Detail %q lost the lease guidance", tc.n, v.Detail)
+		}
+	}
+}
+
+// Module names and versions are capped in bytes, cut on a rune
+// boundary, marked with an ellipsis and always valid UTF-8.
+func TestBuiltinTrustBannerCapsNameAndVersionLength(t *testing.T) {
+	longName := strings.Repeat("n", builtinTrustMaxNameBytes+100)
+	longVer := strings.Repeat("v", builtinTrustMaxVersionBytes+100)
+	// Multi-byte runes straddle the cut.
+	runeName := strings.Repeat("é", builtinTrustMaxNameBytes)
+	// Invalid UTF-8 expands to U+FFFD (3 bytes each): still capped.
+	badName := strings.Repeat("\xff", builtinTrustMaxNameBytes)
+	exactName := strings.Repeat("x", builtinTrustMaxNameBytes)
+	exactVer := strings.Repeat("y", builtinTrustMaxVersionBytes)
+
+	v := builtinTrustBanner(&pb.GetBuiltinTrustStatusResponse{
+		State: pb.BuiltinTrustState_BUILTIN_TRUST_STATE_UNTRUSTED,
+		Modules: []*pb.BuiltinTrustEntry{
+			{Name: longName, Change: pb.BuiltinTrustChange_BUILTIN_TRUST_CHANGE_CHANGED, ReleaseVersion: longVer, TrustedVersion: longVer},
+			{Name: runeName, Change: pb.BuiltinTrustChange_BUILTIN_TRUST_CHANGE_NEW, ReleaseVersion: "1"},
+			{Name: badName, Change: pb.BuiltinTrustChange_BUILTIN_TRUST_CHANGE_NEW, ReleaseVersion: "\xfe1.0"},
+			{Name: exactName, Change: pb.BuiltinTrustChange_BUILTIN_TRUST_CHANGE_NEW, ReleaseVersion: exactVer},
+		},
+	})
+	if v == nil || len(v.Affected) != 4 {
+		t.Fatalf("banner %+v, want 4 affected", v)
+	}
+	for i, e := range v.Affected {
+		for _, f := range []struct {
+			what, s string
+			max     int
+		}{
+			{"Name", e.Name, builtinTrustMaxNameBytes},
+			{"Version", e.Version, builtinTrustMaxVersionBytes},
+			{"Trusted", e.Trusted, builtinTrustMaxVersionBytes},
+		} {
+			if len(f.s) > f.max {
+				t.Errorf("Affected[%d].%s: %d bytes, limit %d", i, f.what, len(f.s), f.max)
+			}
+			if !utf8.ValidString(f.s) {
+				t.Errorf("Affected[%d].%s: invalid UTF-8 %q", i, f.what, f.s)
+			}
+		}
+	}
+	long := v.Affected[0]
+	if !strings.HasPrefix(long.Name, "nnnn") || !strings.HasSuffix(long.Name, "…") {
+		t.Errorf("long name %q: want kept prefix and ellipsis", long.Name)
+	}
+	if !strings.HasPrefix(long.Version, "vvvv") || !strings.HasSuffix(long.Version, "…") ||
+		!strings.HasSuffix(long.Trusted, "…") {
+		t.Errorf("long versions %q / %q: want kept prefix and ellipsis", long.Version, long.Trusted)
+	}
+	if !strings.HasPrefix(v.Affected[1].Name, "éé") || !strings.HasSuffix(v.Affected[1].Name, "…") {
+		t.Errorf("multi-byte name %q: want kept prefix and ellipsis", v.Affected[1].Name)
+	}
+	if !strings.Contains(v.Affected[2].Version, "1.0") {
+		t.Errorf("invalid UTF-8 version %q lost its valid text", v.Affected[2].Version)
+	}
+	if v.Affected[3].Name != exactName || v.Affected[3].Version != exactVer {
+		t.Errorf("values at the limit were changed: %+v", v.Affected[3])
 	}
 }
 
@@ -301,5 +403,84 @@ func TestBuiltinTrustCacheLogsFailureOncePerStateChange(t *testing.T) {
 	c.get(context.Background())
 	if n := strings.Count(logged.String(), "level=ERROR"); n != 2 {
 		t.Fatalf("%d error log lines after fail/recover/fail, want 2:\n%s", n, logged.String())
+	}
+}
+
+// A failed refresh is cached for failTTL: renders within that window
+// show unavailable without asking the executor again.
+func TestBuiltinTrustCacheFailureCachedForFailTTL(t *testing.T) {
+	p := &countingTrust{err: errors.New("dial unix: connection refused")}
+	clk := &fakeClock{t: time.Unix(1_000_000, 0)}
+	c := testTrustCache(p, clk, nil)
+	if v := c.get(context.Background()); v == nil || v.Kind != "unavailable" {
+		t.Fatalf("RPC failure: banner %+v, want unavailable", v)
+	}
+	for range 3 {
+		clk.advance(builtinTrustFailTTL / 4)
+		if v := c.get(context.Background()); v == nil || v.Kind != "unavailable" {
+			t.Fatalf("cached failure: banner %+v, want unavailable", v)
+		}
+	}
+	if n := p.calls.Load(); n != 1 {
+		t.Fatalf("%d RPCs within failTTL after a failure, want 1", n)
+	}
+	clk.advance(builtinTrustFailTTL / 2) // now past failTTL
+	c.get(context.Background())
+	if n := p.calls.Load(); n != 2 {
+		t.Fatalf("%d RPCs after failTTL expired, want 2", n)
+	}
+}
+
+// ctxBlockingTrust blocks every call until its context is done and
+// records whether the context carried a deadline.
+type ctxBlockingTrust struct {
+	hadDeadline atomic.Bool
+}
+
+func (f *ctxBlockingTrust) GetBuiltinTrustStatus(ctx context.Context, in *pb.GetBuiltinTrustStatusRequest, opts ...grpc.CallOption) (*pb.GetBuiltinTrustStatusResponse, error) {
+	_, ok := ctx.Deadline()
+	f.hadDeadline.Store(ok)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// The background refresh is detached from the request but bounded by
+// callTimeout: a hung executor cannot pin the single-flight slot.
+func TestBuiltinTrustCacheRefreshBoundedByCallTimeout(t *testing.T) {
+	p := &ctxBlockingTrust{}
+	clk := &fakeClock{t: time.Unix(1_000_000, 0)}
+	c := testTrustCache(p, clk, nil)
+	c.wait = 10 * time.Millisecond
+	c.callTimeout = 100 * time.Millisecond
+
+	start := time.Now()
+	if v := c.get(context.Background()); v == nil || v.Kind != "unavailable" {
+		t.Fatalf("hung executor: banner %+v, want unavailable", v)
+	}
+	c.mu.Lock()
+	ch := c.inflight
+	c.mu.Unlock()
+	if ch == nil {
+		t.Fatal("no refresh in flight after a timed-out render")
+	}
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatal("background refresh still running 5s after callTimeout: it has no deadline")
+	}
+	if d := time.Since(start); d < c.callTimeout {
+		t.Fatalf("refresh ended after %v, before callTimeout %v", d, c.callTimeout)
+	}
+	if !p.hadDeadline.Load() {
+		t.Fatal("refresh context had no deadline")
+	}
+	c.mu.Lock()
+	inflight := c.inflight
+	c.mu.Unlock()
+	if inflight != nil {
+		t.Fatal("single-flight slot still held after the refresh ended")
+	}
+	if v := c.get(context.Background()); v == nil || v.Kind != "unavailable" {
+		t.Fatalf("after timed-out refresh: banner %+v, want unavailable", v)
 	}
 }
