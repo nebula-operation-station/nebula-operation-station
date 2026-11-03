@@ -104,7 +104,8 @@
           {{end}}
         </ul>
         {{end}}
-        {{with .Command}}<p class="trust-banner__detail">Trust them on the executor host with <code>{{.}}</code>.</p>{{end}}
+        {{with .Command}}<p class="trust-banner__detail">Record the reviewed release in the built-in trust store on the executor host with <code>{{.}}</code>.</p>{{end}}
+        {{with .Limitation}}<p class="trust-banner__detail">{{.}}</p>{{end}}
         {{with .Detail}}<p class="trust-banner__detail">{{.}}</p>{{end}}
       </div>
       {{end}}
