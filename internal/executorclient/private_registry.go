@@ -21,7 +21,7 @@ func (c *Client) AddPrivateRegistry(ctx context.Context, in *pb.AddPrivateRegist
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.AddPrivateRegistry(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // RotatePrivateRegistryCredential replaces a private registry credential
@@ -30,7 +30,7 @@ func (c *Client) RotatePrivateRegistryCredential(ctx context.Context, in *pb.Rot
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.RotatePrivateRegistryCredential(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // RemovePrivateRegistry removes a private registry and its credential
@@ -39,7 +39,7 @@ func (c *Client) RemovePrivateRegistry(ctx context.Context, in *pb.RemovePrivate
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.RemovePrivateRegistry(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ListPrivateRegistries lists private registry metadata without
@@ -48,7 +48,7 @@ func (c *Client) ListPrivateRegistries(ctx context.Context, in *pb.ListPrivateRe
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ListPrivateRegistries(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }
 
 // ReadPrivateRegistry asks the executor for one typed, sanitized private
@@ -57,5 +57,5 @@ func (c *Client) ReadPrivateRegistry(ctx context.Context, in *pb.ReadPrivateRegi
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.ReadPrivateRegistry(ctx, in, opts...)
-	return resp, mapError(err)
+	return resp, mapCallError(ctx, err)
 }

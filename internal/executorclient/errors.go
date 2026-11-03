@@ -3,6 +3,8 @@
 package executorclient
 
 import (
+	"context"
+	"errors"
 	"strings"
 
 	"google.golang.org/grpc/codes"
@@ -233,6 +235,24 @@ func mapError(err error) error {
 		e.Code, e.Detail = codeInternal, msg
 	}
 	return e
+}
+
+// mapCallError is mapError for the result of a call made with the per-call
+// context ctx. When ctx has hit its deadline, the transport may still report
+// Canceled, Unavailable or another status, depending on which side noticed
+// first; the failure is then reported as ErrDeadlineExceeded, keeping the
+// gRPC error as cause. A coded failure the executor actually sent is kept,
+// so a real answer is never hidden behind a deadline that fired after it
+// arrived. A nil err stays nil.
+func mapCallError(ctx context.Context, err error) error {
+	mapped := mapError(err)
+	if mapped == nil || !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return mapped
+	}
+	if _, _, ok := splitCode(status.Convert(err).Message()); ok {
+		return mapped
+	}
+	return &Error{Code: codeDeadlineExceeded, Detail: context.DeadlineExceeded.Error(), cause: err}
 }
 
 // splitCode parses "<code>: <detail>" status messages. Only known codes are
