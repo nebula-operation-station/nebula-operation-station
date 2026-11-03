@@ -213,7 +213,7 @@ func newProvisionEnv(t *testing.T, next permit.RiskPolicy) *provisionEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	auth, err := permit.New(permit.Options{Verifier: v, Store: ie.pe.db, RiskPolicy: GuestProvisionRiskFloor{Next: next, Linked: noLinkedHosts}})
+	auth, err := permit.New(permit.Options{Verifier: v, Store: ie.pe.db, RiskPolicy: GuestProvisionRiskFloor{Next: next, Linked: noLinkedHosts, Remote: PveRegistryRemoteOf(ie.pe.db)}})
 	if err != nil {
 		t.Fatal(err)
 	}

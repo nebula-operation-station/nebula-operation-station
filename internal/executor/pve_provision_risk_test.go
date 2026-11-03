@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveapi"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 )
@@ -112,7 +113,11 @@ func TestPveRemoteRiskTargetIsStableAndValid(t *testing.T) {
 func TestGuestProvisionRiskFloorRules(t *testing.T) {
 	pin := strings.Repeat("ab", 32)
 	remote, _ := PveRemoteRiskTarget(pin)
-	node := canonical.Target{HostID: "pvm-0123456789abcdef0123456789abcdef", HostKeyFingerprint: remote.HostKeyFingerprint}
+	node, err := (permit.ProviderMutationTarget{RemoteID: "pve-lab", TrustPin: pin, Kind: permit.ProviderKindNode, Node: "pve1"}).RiskTarget()
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteOf := func(canonical.Target) (string, bool, error) { return pin, true, nil }
 	linked := canonical.Target{HostID: "host-1", HostKeyFingerprint: "SHA256:" + strings.Repeat("A", 43)}
 	req := canonical.Request{ActionID: PveGuestProvisionAction, ParametersHash: strings.Repeat("1", 64), ExpiryUnix: time.Now().Add(time.Hour).Unix()}
 	linkedOf := func(hosts ...canonical.Target) PveLinkedHosts {
@@ -146,7 +151,7 @@ func TestGuestProvisionRiskFloorRules(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, why, err := GuestProvisionRiskFloor{Next: pol, Linked: c.linked}.MinimumRisk(req, []canonical.Target{node})
+			got, why, err := GuestProvisionRiskFloor{Next: pol, Linked: c.linked, Remote: remoteOf}.MinimumRisk(req, []canonical.Target{node})
 			if err != nil || got != c.want {
 				t.Fatalf("floor = %s (%s) %v, want %s", got, why, err, c.want)
 			}
@@ -156,28 +161,28 @@ func TestGuestProvisionRiskFloorRules(t *testing.T) {
 	low := critSource{artifact: canonical.RiskLow, hosts: map[canonical.Target]canonical.Risk{remote: canonical.RiskLow, node: canonical.RiskLow}}
 	pol, _ := riskpolicy.New(low)
 	// Base MEDIUM, never LOW, even for an artifact trusted as LOW.
-	if r, _, _ := (GuestProvisionRiskFloor{Next: pol, Linked: linkedOf()}).MinimumRisk(req, []canonical.Target{node}); r != canonical.RiskMedium {
+	if r, _, _ := (GuestProvisionRiskFloor{Next: pol, Linked: linkedOf(), Remote: remoteOf}).MinimumRisk(req, []canonical.Target{node}); r != canonical.RiskMedium {
 		t.Fatalf("low artifact = %s", r)
 	}
 	// Parameters the executor never built get no extra raise of their own:
 	// only criticality counts (ADR 0008 decision 2).
 	foreign := req
 	foreign.ParametersHash = strings.Repeat("3", 64)
-	if r, _, _ := (GuestProvisionRiskFloor{Next: pol, Linked: linkedOf()}).MinimumRisk(foreign, []canonical.Target{node}); r != canonical.RiskMedium {
+	if r, _, _ := (GuestProvisionRiskFloor{Next: pol, Linked: linkedOf(), Remote: remoteOf}).MinimumRisk(foreign, []canonical.Target{node}); r != canonical.RiskMedium {
 		t.Fatalf("unbuilt parameters = %s", r)
 	}
 	// Without a linked-host source the linked hosts are unknown: HIGH.
-	if r, _, _ := (GuestProvisionRiskFloor{Next: pol}).MinimumRisk(req, []canonical.Target{node}); r != canonical.RiskHigh {
+	if r, _, _ := (GuestProvisionRiskFloor{Next: pol, Remote: remoteOf}).MinimumRisk(req, []canonical.Target{node}); r != canonical.RiskHigh {
 		t.Fatalf("no linked-host source = %s, want HIGH", r)
 	}
 	// A failing linked-host source fails closed.
 	failing := func(canonical.Request, canonical.Target) ([]canonical.Target, error) { return nil, errors.New("down") }
-	if _, _, err := (GuestProvisionRiskFloor{Next: pol, Linked: failing}).MinimumRisk(req, []canonical.Target{node}); err == nil {
+	if _, _, err := (GuestProvisionRiskFloor{Next: pol, Linked: failing, Remote: remoteOf}).MinimumRisk(req, []canonical.Target{node}); err == nil {
 		t.Fatal("linked-host error ignored")
 	}
 	// Without a node target the criticality is unknown: HIGH.
 	// Linked is set so the empty-targets check itself decides.
-	if r, _, _ := (GuestProvisionRiskFloor{Next: pol, Linked: linkedOf()}).MinimumRisk(req, nil); r != canonical.RiskHigh {
+	if r, _, _ := (GuestProvisionRiskFloor{Next: pol, Linked: linkedOf(), Remote: remoteOf}).MinimumRisk(req, nil); r != canonical.RiskHigh {
 		t.Fatalf("no targets = %s", r)
 	}
 	// Without a criticality source everything is HIGH.
