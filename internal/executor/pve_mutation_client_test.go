@@ -24,6 +24,9 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveapi"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvetransport"
+	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // fakeMutPVE is a pinned TLS PVE API that accepts the allowlisted writes
@@ -684,5 +687,21 @@ func TestPveMutationsWiresProductionClient(t *testing.T) {
 	}
 	if e.svc.pveMutations() != m {
 		t.Fatal("engine is not single")
+	}
+}
+
+// TestServiceGuestPowerReachesTheRemoteChecks: with the wired client the
+// RPCs go on to the remote checks (here: no action credential) instead of
+// answering "not configured".
+func TestServiceGuestPowerReachesTheRemoteChecks(t *testing.T) {
+	e := newPveReadEnv(t, pvecontract.KindStandalone)
+	target := &pb.PVEGuestPowerTarget{RemoteId: pveReadRemote, Kind: "qemu", Node: "pve1", Vmid: 101, Verb: "shutdown"}
+	_, err := e.svc.ProposePVEGuestPower(context.Background(), &pb.ProposePVEGuestPowerRequest{Target: target})
+	st := status.Convert(err)
+	if st.Code() != codes.FailedPrecondition || !strings.Contains(st.Message(), "no action credential") {
+		t.Fatalf("propose: %v", err)
+	}
+	if e.pve.requests.Load() != 0 {
+		t.Fatalf("a read-only remote was contacted: %d", e.pve.requests.Load())
 	}
 }
