@@ -700,7 +700,14 @@ unnecessary").
    - The `cicustom` delete also requires that the VMID still belongs to
      this job's guest. The proof is the SMBIOS UUID (`smbios1 uuid`) and
      `vmgenid` read from the guest config right after the clone and
-     recorded in the job, never the guest name. A PVE user with
+     recorded in the job, never the guest name. The proof assumes that
+     every clone (full and linked) gets a fresh `smbios1 uuid` and
+     `vmgenid` that differ from the template's and from those of any later
+     guest that reuses the VMID (*verify*, PK-10; previously stated as
+     fact). Until PK-10 confirms this per supported PVE version, `preset`
+     stays disabled; if it does not hold, or a recorded value is empty, the
+     `cicustom` delete is refused (flagged) and the proof needs a
+     replacement. A PVE user with
      `VM.Config.*` rights on the guest can change those values, so a match
      is not proof against such a user (M2 already refuses `preset` when a
      foreign principal can see the guest; config rights are not checked
