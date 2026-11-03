@@ -47,6 +47,8 @@ type fakeMutClient struct {
 	mu            sync.Mutex
 	liveNode      string
 	configDigest  string
+	generation    string // "" means a fixed valid generation
+	targetReads   int
 	dispatches    []mutDispatch
 	readHeaders   []string
 	onDispatch    func(n int, node string) (string, error)
@@ -103,11 +105,16 @@ func (f *fakeMutClient) RecentTasks(ctx context.Context, _ executordb.PveRemote,
 	return f.recent, f.recentErr
 }
 
-func (f *fakeMutClient) TargetState(ctx context.Context, _ executordb.PveRemote, _, _ string, _ uint64, tok pveapi.TokenSupplier) (string, string, error) {
+func (f *fakeMutClient) TargetState(ctx context.Context, _ executordb.PveRemote, _, _ string, _ uint64, tok pveapi.TokenSupplier) (PveTargetState, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.readHeaders = append(f.readHeaders, header(ctx, tok))
-	return f.liveNode, f.configDigest, nil
+	f.targetReads++
+	gen := f.generation
+	if gen == "" {
+		gen = strings.Repeat("9f", 20)
+	}
+	return PveTargetState{Node: f.liveNode, ConfigDigest: f.configDigest, Generation: gen}, nil
 }
 
 func (f *fakeMutClient) dispatchCount() int {
@@ -176,6 +183,7 @@ func (e *pveMutEnv) restart() {
 	}
 	e.m = &PveMutations{DB: e.pe.db, Auth: e.auth, Vault: e.pe.vault, Client: e.client, PollInterval: time.Millisecond,
 		MaxWait: 2 * time.Second, Log: slog.New(slog.NewTextHandler(e.logs, nil))}
+	e.pe.admin.Mutations = e.m
 }
 
 // passMatchWindow moves the engine clock past the start window of every
@@ -334,6 +342,7 @@ func TestPveMutationRefusesChangedTarget(t *testing.T) {
 	cases := map[string]func(*pveMutEnv){
 		"guest moved":       func(e *pveMutEnv) { e.client.liveNode = "pve2" },
 		"config changed":    func(e *pveMutEnv) { e.client.configDigest = strings.Repeat("00", 32) },
+		"generation bumped": func(e *pveMutEnv) { e.client.generation = strings.Repeat("0a", 20) },
 		"action rotated":    func(e *pveMutEnv) { e.rotateAction() },
 		"remote blocked":    func(e *pveMutEnv) { _, _ = e.pe.db.BlockRemote(mutRemote, "test", "admin") },
 		"endpoints changed": func(e *pveMutEnv) { e.setEndpoints("pve1.example.test", "evil.example.test") },
