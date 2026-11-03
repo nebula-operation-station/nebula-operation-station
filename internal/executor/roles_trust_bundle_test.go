@@ -197,15 +197,25 @@ func newBundleEnv(t *testing.T) *bundleEnv {
 	return e
 }
 
-// review runs an admin review and confirms it delivered, as the
-// ReviewBuiltinTrust handler does.
-func (e *bundleEnv) review(t *testing.T) (trust.BulkAdmitResult, error) {
+// service returns a Service wired to the directory-backed transaction.
+func (e *bundleEnv) service() *Service {
+	s := &Service{}
+	s.SetBuiltinTrust(e.bt)
+	return s
+}
+
+// adminReview runs the ReviewBuiltinTrust handler as the local admin. Only
+// the handler confirms the review, so a handler that does not confirm, or
+// confirms another digest or generation, leaves nothing committable.
+func adminReview(t *testing.T, s *Service) (*pb.ReviewBuiltinTrustResponse, error) {
 	t.Helper()
-	res, err := e.bt.Review(context.Background())
-	if err == nil {
-		e.bt.ConfirmReview(context.Background(), res.ManifestDigest, res.Review.Generation)
-	}
-	return res, err
+	return callAs(t, trustTestAdminUID, pb.ExecutorService_ReviewBuiltinTrust_FullMethodName, &pb.ReviewBuiltinTrustRequest{}, s.ReviewBuiltinTrust)
+}
+
+// adminCommitReq runs the CommitBuiltinTrust handler as the local admin.
+func adminCommitReq(t *testing.T, s *Service, req *pb.CommitBuiltinTrustRequest) (*pb.CommitBuiltinTrustResponse, error) {
+	t.Helper()
+	return callAs(t, trustTestAdminUID, pb.ExecutorService_CommitBuiltinTrust_FullMethodName, req, s.CommitBuiltinTrust)
 }
 
 // The server's status path never bootstraps or rewrites trust state: with
@@ -243,46 +253,42 @@ func TestBuiltinTrustStatusNeverBootstraps(t *testing.T) {
 	}
 }
 
-// A real bundle commits through the directory-backed transaction: the
-// commit returns the new store generation, a second commit of the same
-// review is stale, and a store changed by a concurrent commit since the
-// admin's review rejects the commit as stale.
+// A real bundle commits through the handlers and the directory-backed
+// transaction: the commit returns the new store generation, a second
+// commit of the same review is stale, and a store changed by a concurrent
+// commit since the admin's review rejects the commit as stale.
 func TestDirBuiltinTrustCommitRealBundle(t *testing.T) {
 	e := newBundleEnv(t)
-	ctx := context.Background()
-	rev, err := e.review(t)
+	s := e.service()
+	rev, err := adminReview(t, s)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !rev.NeedsConfirmation || rev.Review.Generation != 0 || len(rev.OldVersions) != 0 {
+	if !rev.NeedsConfirmation || rev.Generation != 0 || len(rev.OldVersions) != 0 {
 		t.Fatalf("review = %+v", rev)
 	}
-	res, gen, err := e.bt.Commit(ctx, rev.ManifestDigest, nil, nil, 0)
+	out, err := adminCommitReq(t, s, &pb.CommitBuiltinTrustRequest{ManifestDigest: rev.ManifestDigest})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Committed || gen != 1 {
-		t.Fatalf("commit = %+v, generation %d; want committed at 1", res, gen)
+	if out.Generation != 1 || out.ManifestDigest != rev.ManifestDigest || out.AdminUid != trustTestAdminUID {
+		t.Fatalf("commit = %+v; want committed at 1", out)
 	}
-	st, err := trust.OpenExisting(e.storeDir, e.now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st.Generation() != gen {
-		t.Fatalf("durable generation %d, commit returned %d", st.Generation(), gen)
+	if g := e.storeGeneration(t); g != out.Generation {
+		t.Fatalf("durable generation %d, commit returned %d", g, out.Generation)
 	}
 	// The review was consumed: committing it again is stale.
-	if _, _, err := e.bt.Commit(ctx, rev.ManifestDigest, nil, nil, 0); !errors.Is(err, trust.ErrStale) {
-		t.Fatalf("recommit err = %v, want ErrStale", err)
+	if err := adminCommit(t, s, rev.ManifestDigest); status.Code(err) != codes.Aborted {
+		t.Fatalf("recommit err = %v, want Aborted", err)
 	}
 
 	// A new release; the admin reviews it at generation 1.
 	writeDockerBundle(t, e.k, e.bundleDir, "2026.12.0", "1.1.0", "echo restart v2\n")
-	rev, err = e.review(t)
+	rev, err = adminReview(t, s)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rev.Review.Generation != 1 || len(rev.OldVersions) != 1 || rev.OldVersions[0] != "docker@1.0.0" {
+	if rev.Generation != 1 || len(rev.OldVersions) != 1 || rev.OldVersions[0] != "docker@1.0.0" {
 		t.Fatalf("review = %+v", rev)
 	}
 	// Meanwhile another local writer commits to the same store.
@@ -298,11 +304,71 @@ func TestDirBuiltinTrustCommitRealBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The admin's commit of the generation-1 review is now stale.
-	if _, _, err := e.bt.Commit(ctx, rev.ManifestDigest, nil, []string{"docker@1.0.0"}, 0); !errors.Is(err, trust.ErrStale) {
-		t.Fatalf("stale commit err = %v, want ErrStale", err)
+	_, err = adminCommitReq(t, s, &pb.CommitBuiltinTrustRequest{ManifestDigest: rev.ManifestDigest, Retire: []string{"docker@1.0.0"}})
+	if status.Code(err) != codes.Aborted {
+		t.Fatalf("stale commit err = %v, want Aborted", err)
 	}
-	if st, err := trust.OpenExisting(e.storeDir, e.now); err != nil || st.Generation() != 2 {
-		t.Fatalf("store after stale commit: %v, %v", st, err)
+	if g := e.storeGeneration(t); g != 2 {
+		t.Fatalf("store generation after stale commit %d, want 2", g)
+	}
+}
+
+// The second release commits through the handlers with its old version
+// retired, at the generation the review showed.
+func TestDirBuiltinTrustCommitRealBundleUpgrade(t *testing.T) {
+	e := newBundleEnv(t)
+	s := e.service()
+	rev, err := adminReview(t, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adminCommitReq(t, s, &pb.CommitBuiltinTrustRequest{ManifestDigest: rev.ManifestDigest}); err != nil {
+		t.Fatal(err)
+	}
+	writeDockerBundle(t, e.k, e.bundleDir, "2026.12.0", "1.1.0", "echo restart v2\n")
+	rev, err = adminReview(t, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := adminCommitReq(t, s, &pb.CommitBuiltinTrustRequest{ManifestDigest: rev.ManifestDigest, Retire: []string{"docker@1.0.0"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Generation != 2 || len(out.Retired) != 1 || out.Retired[0] != "docker@1.0.0" {
+		t.Fatalf("commit = %+v", out)
+	}
+	if st := serverStatus(t, s); st.State != pb.BuiltinTrustState_BUILTIN_TRUST_STATE_TRUSTED || st.ReleaseVersion != "2026.12.0" {
+		t.Fatalf("status after upgrade = %+v", st)
+	}
+}
+
+// confirmSwappingTrust is a handler-side wiring bug: it forwards every call
+// but confirms the review with a different generation.
+type confirmSwappingTrust struct{ *dirBuiltinTrust }
+
+func (c confirmSwappingTrust) ConfirmReview(ctx context.Context, digest string, generation int64) {
+	c.dirBuiltinTrust.ConfirmReview(ctx, digest, generation+1)
+}
+
+// A review confirmed with the wrong generation binds nothing, so the
+// handler-driven commit is Aborted. This is what makes the real-bundle tests
+// fail for a handler that confirms with a wrong generation.
+func TestBuiltinTrustWrongGenerationConfirmIsNotCommittable(t *testing.T) {
+	e := newBundleEnv(t)
+	s := &Service{}
+	s.SetBuiltinTrust(confirmSwappingTrust{e.bt})
+	rev, err := adminReview(t, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.bt.reviewed != nil || e.bt.pending != nil {
+		t.Fatal("mismatched confirm left a binding")
+	}
+	if err := adminCommit(t, s, rev.ManifestDigest); status.Code(err) != codes.Aborted {
+		t.Fatalf("commit err = %v, want Aborted", err)
+	}
+	if g := e.storeGeneration(t); g != 0 {
+		t.Fatalf("store generation %d, want 0", g)
 	}
 }
 
@@ -323,11 +389,12 @@ func TestDirBuiltinTrustStatusIsCached(t *testing.T) {
 	if e.bt.statusRuns != 1 {
 		t.Fatalf("status dry runs = %d, want 1", e.bt.statusRuns)
 	}
-	rev, err := e.review(t)
+	s := e.service()
+	rev, err := adminReview(t, s)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := e.bt.Commit(ctx, rev.ManifestDigest, nil, nil, 0); err != nil {
+	if err := adminCommit(t, s, rev.ManifestDigest); err != nil {
 		t.Fatal(err)
 	}
 	res, err := e.bt.Status(ctx)
@@ -363,8 +430,7 @@ func (e *bundleEnv) storeGeneration(t *testing.T) int64 {
 // adminCommit commits digest through the handler as the local admin.
 func adminCommit(t *testing.T, s *Service, digest string) error {
 	t.Helper()
-	_, err := callAs(t, trustTestAdminUID, pb.ExecutorService_CommitBuiltinTrust_FullMethodName,
-		&pb.CommitBuiltinTrustRequest{ManifestDigest: digest}, s.CommitBuiltinTrust)
+	_, err := adminCommitReq(t, s, &pb.CommitBuiltinTrustRequest{ManifestDigest: digest})
 	return err
 }
 
