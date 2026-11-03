@@ -33,6 +33,18 @@ CREATE TABLE batches (
 
 CREATE INDEX batches_created ON batches (created_at);
 
+-- The approved stage gates and thresholds (absolute counts; zero stops on
+-- the first failed or unreachable member).
+CREATE TABLE batch_stages (
+    batch_id              TEXT    NOT NULL REFERENCES batches (id) ON DELETE CASCADE,
+    stage                 INTEGER NOT NULL CHECK (stage BETWEEN 1 AND 20),
+    stage_id              TEXT    NOT NULL CHECK (length(stage_id) BETWEEN 1 AND 64),
+    gate                  TEXT    NOT NULL CHECK (gate IN ('manual', 'automatic')),
+    failure_threshold     INTEGER NOT NULL CHECK (failure_threshold BETWEEN 0 AND 100),
+    unreachable_threshold INTEGER NOT NULL CHECK (unreachable_threshold BETWEEN 0 AND 100),
+    PRIMARY KEY (batch_id, stage)
+) WITHOUT ROWID;
+
 CREATE TABLE batch_members (
     batch_id        TEXT    NOT NULL REFERENCES batches (id) ON DELETE CASCADE,
     idx             INTEGER NOT NULL CHECK (idx BETWEEN 0 AND 99),

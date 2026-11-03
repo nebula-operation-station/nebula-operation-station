@@ -26,7 +26,7 @@ func insertBatchMember(db *sql.DB, batch string, idx int, member, exec, outcome 
 
 func TestBatchTablesExistAfterMigration(t *testing.T) {
 	db := openTemp(t)
-	for _, name := range []string{"batches", "batch_members"} {
+	for _, name := range []string{"batches", "batch_stages", "batch_members"} {
 		if !tableExists(t, db, name) {
 			t.Errorf("table %s missing", name)
 		}
