@@ -198,8 +198,9 @@ func TestOnlyActiveScheduledOrdinaryLeasesRun(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	for name, mk := range map[string]func(time.Time) *pb.ReadGrant{
 		"telemetry profile": func(n time.Time) *pb.ReadGrant {
-			d := leaseDoc(t, n, []string{"web"}, "core.facts")
-			d.Actions[0].ActionID = "host.metrics"
+			// A valid telemetry lease (real host.metrics artifact, 15-min
+			// interval): only the profile filter keeps it from running.
+			d := leaseDoc(t, n, []string{"web"}, "host.metrics")
 			d.RateProfile = schedgrant.TelemetryReadProfile
 			return leaseEntry(t, d, n)
 		},
