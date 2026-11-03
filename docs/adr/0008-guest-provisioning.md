@@ -499,7 +499,18 @@ unnecessary").
    1. Run the read-only node action `pve.snippet.stat` for the exact name.
       It returns absent, or present with the SHA-256 fingerprint of the
       `ed25519_public` entry it parses (public data only; the private part
-      is never read into the result).
+      is never read into the result). Until the node bound of the lost
+      put has passed and is established as in *Unresolved prior mutation*
+      (decision 7: intent timestamp plus `snippetActionStartWindow` plus
+      `snippetActionTimeout` plus `taskClockSkewMax`, both clock reads,
+      recorded enforcing action version, no process of the dispatch
+      left), only a present file with the recorded fingerprint can be
+      adopted (step 2); absent, unparsable or another fingerprint leave
+      the put `unknown`, and no new pair is generated and no replace-put
+      is made (previously stat "absent" led straight to step 3, so a late
+      first put could land after the stat). If the bound cannot be
+      established, the put stays `unknown`, no start is dispatched and
+      the run is flagged "snippet cleanup pending" (PK-08).
    2. Present, the fingerprint equals the recorded one, the recorded key
       was generated less than the preset key age bound ago (a named
       constant next to the reconciler, `presetKeyMaxAge`, proposed 15
@@ -515,8 +526,9 @@ unnecessary").
       the bound unchecked): a recorded key at or over the bound is
       replaced as in step 3 before start. After start dispatch the bound
       no longer applies; M1 then removes the snippet.
-   3. Absent, unparsable, another fingerprint, or a recorded key at or over
-      the age bound: generate a new pair,
+   3. Only after that bound is established: absent, unparsable, another
+      fingerprint, or a recorded key at or over the age bound: generate a
+      new pair,
       replace the recorded public key and fsync, then run
       `pve.snippet.put` with `replace=true`. Replace is accepted only for
       the exact name of this job, renames atomically over the old file and
@@ -630,11 +642,17 @@ unnecessary").
      the run is flagged "snippet cleanup pending" with the reason
      "outcome conflict"; only the PK-08 action under fresh approval
      proceeds, and its approval shows both observations.
+     Because the task is terminal, a conflict is not an unresolved prior
+     mutation on the cleanup targets (previously unstated): PK-08 removal
+     (a) stays available, not only acknowledgement (b).
    - The first resolution of a step is final (previously unstated): a
      later observation, for example a terminal-failed task found after "no
      identifiable task and change visible" resolved OK, does not reopen it;
      it is audited and shown on the run page, and an inconsistency found
-     this way only flags the run for the operator.
+     this way only flags the run for the operator. The result therefore
+     depends on the order of observations (the same evidence seen together
+     is a permanent conflict); this asymmetry is intended, and both orders
+     are safe because neither redispatches.
    - Everything else stays `unknown`: an identified task not yet terminal;
      no identifiable task and the change not visible (an unchanged config
      read alone never counts as resolved failed while a task may be
@@ -735,9 +753,10 @@ unnecessary").
    `unknown` written at startup, see *Restart with a dispatch in flight*),
    the flag reason, for an "outcome conflict" both observations (task
    state and config read), and the spent step claims with their fsynced
-   intents (including the node action version, see *Unresolved prior
-   mutation*; previously the flag reason, the conflict observations and
-   the action version were not listed), which the read-only
+   intents (including the node action version, its enforcement flag and
+   the pre-claim node clock read, see *Unresolved prior mutation*;
+   previously the flag reason, the conflict observations, the action
+   version, the enforcement flag and the clock read were not listed), which the read-only
    reconciliation of an unknown outcome needs (previously "only the
    pending flag and the recorded target", which contradicted the persisted
    claims); none of it grants authority.
@@ -869,11 +888,27 @@ unnecessary").
      the node process starts, and a request delayed in transit, by TCP
      retransmission or a slow session setup, can start later than that):
      - The request carries a start deadline: the persisted (fsynced)
-       intent timestamp of the claim plus `snippetActionStartWindow`
-       (named constant, proposed 30 seconds), never recomputed from the
-       dispatch time or the current time, also not after a restart. The node action checks it
-       against the node clock as its first operation and, if the deadline
-       has passed, refuses with no effect on the file system.
+       intent timestamp of the claim plus `snippetActionStartWindow`,
+       never recomputed from the dispatch time or the current time. A
+       claim is dispatched only in the executor lifetime that made it;
+       after a restart, a spent claim with an intent and no outcome is
+       `unknown` (*Restart with a dispatch in flight*, spec 03 v23-03-05,
+       spec 07) and is never dispatched, and a PK-08 dispatch after a
+       restart is always a new claim with a new intent under a fresh
+       approval, whose deadline comes from that new intent (previously
+       "also not after a restart", which read as dispatching a pre-restart
+       claim later). The node action checks the deadline against the node
+       clock as its first operation and, if it has passed, refuses with no
+       effect on the file system.
+     - `snippetActionStartWindow` must tolerate the accepted skew
+       (previously proposed 30 seconds, smaller than `taskClockSkewMax`,
+       so a node clock running ahead within the accepted skew made the
+       node refuse every put and remove): it is `taskClockSkewMax` plus a
+       30-second margin (proposed 2.5 minutes), a relation checked by a
+       unit test on the constants. In addition, if the pre-claim node
+       clock read shows an offset over `taskClockSkewMax`, the executor
+       refuses the dispatch before the claim (no claim, no generation
+       increment) and flags the run.
      - A node-side supervisor kills the action's process group once
        `snippetActionTimeout` (named constant, proposed 60 seconds) has
        elapsed since the node-side process start, independent of the SSH
@@ -885,17 +920,23 @@ unnecessary").
        I/O finishes its unlink or rename after SIGKILL, and a supervisor
        that dies leaves no bound. The action therefore runs under a
        supervisor unit named by the claim's dispatch ID (for example a
-       systemd transient unit with a runtime limit, *verify* PK-10), and
-       the bound counts as held only if a read-only node check after the
+       systemd transient unit with a runtime limit, *verify* PK-10). The
+       dispatch ID (previously undefined) is the execution ID, step ID and
+       dispatch generation of the claim, rendered by the executor in a
+       fixed format (`nos-<execution>-<step>-<generation>`, ASCII letters,
+       digits and hyphens only, validated by the node action before use)
+       and recorded in the intent; it maps to spec 07's per-execution
+       transient unit (*verify* the naming in PK-04). The
+       bound counts as held only if a read-only node check after the
        resolution point shows no process of that dispatch ID left;
        otherwise the outcome stays `unknown`.
      - *Action version fixed before dispatch* (previously "the result
        reports the action version", which is missing exactly in the
        lost-response case the bound exists for). Before the claim, the
-       executor determines the node action version it will invoke (the
-       built-in script version it sends with the request, or for an
-       installed copy a read-only version check right before the claim)
-       and whether that version enforces the start deadline, the timeout
+       executor determines the node action version it will invoke, which
+       is always the built-in script it sends with the request (previously
+       also an installed copy checked read-only before the claim, which
+       could change before the invocation) and whether that version enforces the start deadline, the timeout
        and the dispatch-ID supervisor, from its own built-in action table.
        Both are written into the fsynced intent before dispatch. Whether
        the bound can resolve the outcome is evaluated from the intent, not
@@ -912,11 +953,14 @@ unnecessary").
        round-trip time is added to it, and the two offsets differ by at
        most `taskClockSkewMax` (previously one read after the point, with
        no rule for round-trip time and no check across the action window;
-       an NTP step and back between the reads stays a stated residual);
-       `pve.snippet.stat` then shows the result. An unreadable node clock
-       or a larger offset leaves the outcome `unknown`, as does a node
-       action version that does not enforce the deadline and timeout
-       (PK-04).
+       an NTP step and back between the reads stays a stated residual),
+       and a read-only process check by dispatch ID after that point shows
+       no process of that dispatch left (previously listed separately from
+       this rule); `pve.snippet.stat` then shows the result. An unreadable
+       node clock, a larger offset, a process of the dispatch still
+       present or an unreadable process check leaves the outcome
+       `unknown`, as does an intent naming a node action version that does
+       not enforce the deadline and timeout (PK-04).
      The same deadline, timeout, supervisor and recorded action version
      apply to `pve.snippet.put` (previously defined only for remove), and
      the stat of *Reconciling a lost snippet write* treats a put as lost
