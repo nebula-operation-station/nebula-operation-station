@@ -890,9 +890,14 @@ func TestGuestPowerFloorErrorIsNotAStoreError(t *testing.T) {
 }
 
 // TestServiceGuestPowerWithoutClientSaysSo: without a mutation client the
-// RPCs say exactly that.
+// RPCs say exactly that. pveMutations always wires the production client
+// now (TestPveMutationsWiresProductionClient); the engine here is built
+// without one to keep the defensive check covered.
 func TestServiceGuestPowerWithoutClientSaysSo(t *testing.T) {
 	e := newPveReadEnv(t, pvecontract.KindStandalone)
+	e.svc.pveMutOnce.Do(func() {
+		e.svc.pveMut = &PveMutations{DB: e.svc.db, Auth: e.svc.auth, Vault: e.svc.vault, Now: e.svc.clock, Log: e.svc.log}
+	})
 	target := &pb.PVEGuestPowerTarget{RemoteId: pveReadRemote, Kind: "qemu", Node: "pve1", Vmid: 101, Verb: "shutdown"}
 	_, perr := e.svc.ProposePVEGuestPower(context.Background(), &pb.ProposePVEGuestPowerRequest{Target: target})
 	_, cerr := e.svc.CommitPVEGuestPower(context.Background(), &pb.CommitPVEGuestPowerRequest{Target: target, ExecutionDigest: strings.Repeat("ab", 32)})

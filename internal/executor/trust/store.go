@@ -105,6 +105,10 @@ type VersionRecord struct {
 	SupersededAt time.Time `json:"superseded_at,omitzero"`
 	// RetainUntil is the 90-day floor; it is never shortened.
 	RetainUntil time.Time `json:"retain_until,omitzero"`
+	// Pinned is an admin's durable retention pin (trust-builtins --pin):
+	// garbage collection never collects a pinned version, whatever its
+	// age or depth, until Unpin clears it.
+	Pinned bool `json:"pinned,omitempty"`
 }
 
 // ModuleRecord is a module family. Records are never deleted.

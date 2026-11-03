@@ -207,6 +207,10 @@ func run() error {
 	// Durable runs (spec 07): reconciled in the background, also those
 	// left open by an earlier process, once the keyring is unlocked.
 	go svc.Reconcile(ctx, reconcileInterval)
+	// Open PVE mutation steps (ADR 0008): observed and identified through
+	// the task list with the read token while the vault is unlocked; a
+	// step is never redispatched.
+	go svc.ReconcilePVEMutations(ctx, reconcileInterval)
 	go func() {
 		<-ctx.Done()
 		keys.Lock()
