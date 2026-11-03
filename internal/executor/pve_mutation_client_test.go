@@ -682,11 +682,22 @@ func TestPveMutationsWiresProductionClient(t *testing.T) {
 	e := newReconcileEnv(t)
 	m := e.svc.pveMutations()
 	c, ok := m.Client.(*pveMutationClient)
-	if !ok || c.trust == nil || c.secrets == nil || c.now == nil {
+	if !ok || c.trust == nil || c.secrets == nil || c.now == nil || c.block == nil {
 		t.Fatalf("client = %#v", m.Client)
 	}
 	if e.svc.pveMutations() != m {
 		t.Fatal("engine is not single")
+	}
+}
+
+// TestPveMutationsClientBlocksLikeTheReadPath: the wired client's trust
+// failure hook is blockPveRead, the persistent block of the read path.
+func TestPveMutationsClientBlocksLikeTheReadPath(t *testing.T) {
+	e := newPveReadEnv(t, pvecontract.KindStandalone)
+	c := e.svc.pveMutations().Client.(*pveMutationClient)
+	c.block(pveReadRemote)
+	if got := remoteState(t, e.svc.db, pveReadRemote); got != executordb.StateBlocked {
+		t.Fatalf("remote state = %s, want blocked", got)
 	}
 }
 

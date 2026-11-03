@@ -78,6 +78,11 @@ type pveMutationClient struct {
 	secrets pveSecrets
 	// now is the clock for certificate validity.
 	now func() time.Time
+	// block persistently blocks a remote that failed trust verification
+	// (Service.blockPveRead: registry block plus revocation of its
+	// provider grants and mutation permits), as the read path does. Nil
+	// only in tests that do not exercise trust failures.
+	block func(remoteID string)
 }
 
 var _ PveMutationClient = (*pveMutationClient)(nil)
@@ -161,13 +166,17 @@ func imageStepTaskID(step PveMutationStep) (string, bool) {
 	return "", false
 }
 
-// conn builds the pinned HTTP client of rm for one call.
+// conn builds the pinned HTTP client of rm for one call. A trust source
+// that reports a changed trust identity (errPveReadTrust) blocks rm.
 func (c *pveMutationClient) conn(ctx context.Context, rm executordb.PveRemote) (*http.Client, *pveTrustWatch, string, error) {
 	if c.trust == nil {
 		return nil, nil, "", errors.New("executor: pve mutation client: no trust source")
 	}
 	trust, err := c.trust(ctx, rm)
 	if err != nil {
+		if errors.Is(err, errPveReadTrust) {
+			c.blockRemote(rm)
+		}
 		return nil, nil, "", fmt.Errorf("pve trust of remote %s: %w", rm.RemoteID, err)
 	}
 	now := c.now
@@ -175,6 +184,25 @@ func (c *pveMutationClient) conn(ctx context.Context, rm executordb.PveRemote) (
 		now = time.Now
 	}
 	return pveReadHTTP(rm, trust, now)
+}
+
+// blockRemote blocks rm after a trust failure seen by this client.
+func (c *pveMutationClient) blockRemote(rm executordb.PveRemote) {
+	if c.block != nil {
+		c.block(rm.RemoteID)
+	}
+}
+
+// checkTrust blocks rm when any request of this call failed pin
+// verification and then reports the call as a trust failure, whatever its
+// own result: a remote that presented another identity is blocked until
+// an admin re-pins it (spec: the whole remote, persistently).
+func (c *pveMutationClient) checkTrust(rm executordb.PveRemote, watch *pveTrustWatch, err error) error {
+	if !watch.failed.Load() && !errors.Is(err, errPveReadTrust) {
+		return err
+	}
+	c.blockRemote(rm)
+	return fmt.Errorf("%w: %w", errPveMutationRead, errPveReadTrust)
 }
 
 // Dispatch implements PveMutationClient. It routes guest.qemu.* and
@@ -210,10 +238,12 @@ func (c *pveMutationClient) Dispatch(ctx context.Context, rm executordb.PveRemot
 	default:
 		upid, err = DispatchImageStep(ctx, w, node, step)
 	}
-	if err != nil && !errors.Is(err, ErrPveRejected) && watch.failed.Load() {
+	if watch.failed.Load() {
 		// The TLS handshake that verifies the pin precedes every request
-		// byte, and a mutation is never failed over once a verified
-		// connection carried it: a trust failure means nothing was sent.
+		// byte, a trust failure is terminal (no failover), and a mutation
+		// is never failed over once a verified connection carried it: a
+		// trust failure means nothing was sent. The remote is blocked.
+		c.blockRemote(rm)
 		return "", fmt.Errorf("dispatch %s: %w: %w", step.Method, ErrPveRejected, errPveReadTrust)
 	}
 	return upid, err
@@ -225,7 +255,7 @@ func (c *pveMutationClient) TaskStatus(ctx context.Context, rm executordb.PveRem
 	if !ok || u.Node != node || read == nil {
 		return PveTaskStatus{}, errPveMutationRead
 	}
-	hc, _, base, err := c.conn(ctx, rm)
+	hc, watch, base, err := c.conn(ctx, rm)
 	if err != nil {
 		return PveTaskStatus{}, err
 	}
@@ -234,6 +264,9 @@ func (c *pveMutationClient) TaskStatus(ctx context.Context, rm executordb.PveRem
 		return PveTaskStatus{}, errPveMutationRead
 	}
 	st, err := w.TaskStatus(ctx, upid)
+	if terr := c.checkTrust(rm, watch, nil); terr != nil {
+		return PveTaskStatus{}, terr
+	}
 	if err != nil {
 		// PVE reports a missing task record like any other failure, so no
 		// answer is taken as "task gone": the step stays reconciling.
@@ -256,11 +289,23 @@ func (c *pveMutationClient) RecentTasks(ctx context.Context, rm executordb.PveRe
 	if !permit.ValidPveNodeName(node) || read == nil {
 		return nil, errPveMutationRead
 	}
-	hc, _, base, err := c.conn(ctx, rm)
+	hc, watch, base, err := c.conn(ctx, rm)
 	if err != nil {
 		return nil, err
 	}
+	out, err := pveRecentTasks(ctx, hc, base, read, node, since)
+	if err = c.checkTrust(rm, watch, err); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// pveRecentTasks pages through node's task list. PVE pages by offset, so
+// a task that starts between two page reads shifts the list and the last
+// entry of a page reappears on the next one: every UPID is returned once.
+func pveRecentTasks(ctx context.Context, hc *http.Client, base string, read pveapi.TokenSupplier, node string, since time.Time) ([]string, error) {
 	var out []string
+	seen := map[string]bool{}
 	for page := 0; page < pveMutationMaxTaskPages; page++ {
 		q := url.Values{
 			"source": {"all"},
@@ -277,7 +322,8 @@ func (c *pveMutationClient) RecentTasks(ctx context.Context, rm executordb.PveRe
 			return nil, err
 		}
 		for _, e := range entries {
-			if u, ok := executordb.ParsePveUPID(e.UPID); ok && u.Node == node {
+			if u, ok := executordb.ParsePveUPID(e.UPID); ok && u.Node == node && !seen[e.UPID] {
+				seen[e.UPID] = true
 				out = append(out, e.UPID)
 			}
 		}
@@ -298,10 +344,19 @@ func (c *pveMutationClient) TargetState(ctx context.Context, rm executordb.PveRe
 	if err := permit.ValidateProviderMutationShape(kind, node, vmid); err != nil || read == nil {
 		return PveTargetState{}, ErrPveMutationRequest
 	}
-	hc, _, base, err := c.conn(ctx, rm)
+	hc, watch, base, err := c.conn(ctx, rm)
 	if err != nil {
 		return PveTargetState{}, err
 	}
+	live, err := pveTargetState(ctx, hc, base, read, kind, node, vmid)
+	if err = c.checkTrust(rm, watch, err); err != nil {
+		return PveTargetState{}, err
+	}
+	return live, nil
+}
+
+// pveTargetState reads the live state of one validated target.
+func pveTargetState(ctx context.Context, hc *http.Client, base string, read pveapi.TokenSupplier, kind, node string, vmid uint64) (PveTargetState, error) {
 	if kind == permit.ProviderKindNode {
 		return pveNodeTargetState(ctx, hc, base, read, node)
 	}

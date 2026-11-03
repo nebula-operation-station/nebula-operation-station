@@ -246,3 +246,49 @@ func TestReadTimeoutStillFailsOver(t *testing.T) {
 		t.Fatalf("hits = %d, want 1", hits.Load())
 	}
 }
+
+// TestMutationRedirectIsMaybeSentNeverFailsOver: an endpoint that answers
+// a mutation with a 3xx received it, so the answer is ErrMaybeSent (the
+// writer then reports an unknown outcome, never "not sent") and the
+// mutation goes neither to the redirect target nor to the next endpoint.
+// A read gets a plain ErrRedirect.
+func TestMutationRedirectIsMaybeSentNeverFailsOver(t *testing.T) {
+	ca := newTestCA(t, "pve-root-ca")
+	var redirectHits, fastHits atomic.Int64
+	fast := newTLSServer(t, ca.serverCert(t, leafSpec{ips: []net.IP{loopback}}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fastHits.Add(1)
+	}))
+	redirect := newTLSServer(t, ca.serverCert(t, leafSpec{ips: []net.IP{loopback}}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectHits.Add(1)
+		http.Redirect(w, r, fast.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	client := newTestClient(t, Options{
+		Trust:     Trust{CA: ca.cert},
+		Endpoints: []*url.URL{mustParseURL(t, redirect.URL), mustParseURL(t, fast.URL)},
+		Timeout:   5 * time.Second,
+	})
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+		resp, err := client.Do(newMutationRequest(t, method, redirect.URL+"/api2/json/nodes/pve1/qemu/100/status/stop", method != http.MethodDelete))
+		if err == nil {
+			resp.Body.Close()
+			t.Fatalf("%s: redirected mutation succeeded", method)
+		}
+		if !errors.Is(err, ErrMaybeSent) || !errors.Is(err, ErrRedirect) {
+			t.Fatalf("%s: err = %v, want ErrMaybeSent and ErrRedirect", method, err)
+		}
+	}
+	if redirectHits.Load() != 3 || fastHits.Load() != 0 {
+		t.Fatalf("hits = %d/%d, want 3/0", redirectHits.Load(), fastHits.Load())
+	}
+	resp, err := client.Get(redirect.URL + "/api2/json/nodes")
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("redirected read succeeded")
+	}
+	if !errors.Is(err, ErrRedirect) || errors.Is(err, ErrMaybeSent) {
+		t.Fatalf("read: err = %v, want ErrRedirect only", err)
+	}
+	if fastHits.Load() != 0 {
+		t.Fatalf("read followed the redirect: %d", fastHits.Load())
+	}
+}

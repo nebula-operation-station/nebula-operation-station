@@ -35,12 +35,17 @@ var pveRepinArtifact = []byte("nebula.pve.repin 1.0.0\nReplace the approved remo
 // that time. Its Client is the production pveMutationClient over the
 // remote's pinned trust (pveReadTrust) and approved endpoints: writes
 // carry only the action token, reads only the read token, and a write is
-// never failed over or resent once it may have reached an endpoint.
+// never failed over or resent once it may have reached an endpoint. A
+// pin or trust failure seen by any of its calls blocks the remote
+// persistently (blockPveRead), so further mutations are refused.
 // TaskIDs stays unset: provisioning (PveProvisioner) is not wired here
 // (pv05w), so provisioning steps are never identified by this engine.
 func (s *Service) pveMutations() *PveMutations {
 	s.pveMutOnce.Do(func() {
-		client := &pveMutationClient{trust: s.pveReadTrust, secrets: s.vault, now: s.clock}
+		client := &pveMutationClient{trust: s.pveReadTrust, secrets: s.vault, now: s.clock,
+			// A trust failure on the mutation path blocks the remote as
+			// on the read path; the step itself already fails closed.
+			block: func(remoteID string) { _ = s.blockPveRead(remoteID) }}
 		s.pveMut = &PveMutations{DB: s.db, Auth: s.auth, Vault: s.vault, Client: client, Now: s.clock, Log: s.log}
 	})
 	return s.pveMut
