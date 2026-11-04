@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { startTrafficMap, STATUS, MAX_FRAME_FAILURES } from "./main.js";
+import { startTrafficMap, STATUS, MAX_FRAME_FAILURES, REBUILD_BACKOFF_BASE_MS, REBUILD_BACKOFF_MAX_MS, rebuildBackoffMs } from "./main.js";
 import { OUT } from "./bridge.js";
 import { segmentVisible } from "./canvas2d.js";
 
@@ -79,6 +79,7 @@ function fakeGL(state, fail) {
       if (fail.gl) throw new Error("fake GL failure");
     },
     bufferData() {
+      state.bufferDataCalls++;
       if (fail.upload) throw new Error("fake upload failure");
     },
     createShader() {
@@ -130,7 +131,7 @@ class FakeCanvas extends FakeElement {
     super(doc, "canvas");
     this.env = env;
     this.kind = null;
-    this.glState = { lost: false, released: false };
+    this.glState = { lost: false, released: false, bufferDataCalls: 0 };
   }
   getContext(type) {
     if (this.kind !== null && this.kind !== type) return null;
@@ -316,6 +317,30 @@ test("FailingCanvas2DFramesDoNotFreezeAndRecover", () => {
   h.env.fail.d2 = false;
   h.tick(1);
   assert.equal(h.status(), STATUS.fallback);
+  h.map.stop();
+});
+
+test("RebuildBackoffIsExponentialWithACap", () => {
+  assert.equal(rebuildBackoffMs(1), REBUILD_BACKOFF_BASE_MS);
+  assert.equal(rebuildBackoffMs(2), REBUILD_BACKOFF_BASE_MS * 2);
+  assert.equal(rebuildBackoffMs(3), REBUILD_BACKOFF_BASE_MS * 4);
+  assert.equal(rebuildBackoffMs(4), REBUILD_BACKOFF_BASE_MS * 8);
+  assert.equal(rebuildBackoffMs(5), REBUILD_BACKOFF_BASE_MS * 16);
+  assert.equal(rebuildBackoffMs(6), REBUILD_BACKOFF_BASE_MS * 32);
+  assert.equal(rebuildBackoffMs(7), REBUILD_BACKOFF_MAX_MS, "the delay is capped");
+  assert.equal(rebuildBackoffMs(100), REBUILD_BACKOFF_MAX_MS, "the delay stays capped");
+});
+
+test("FailingRebuildsAreBackedOffInsteadOfRetriedEveryFrame", () => {
+  const h = setup();
+  h.env.fail.upload = true;
+  h.sendModel();
+  h.tick(1);
+  const gl = h.webglCanvas();
+  assert.equal(gl.glState.bufferDataCalls, 1, "the first frame uploads the scene");
+  h.tick(6);
+  assert.equal(gl.glState.bufferDataCalls, 1, "the backoff suppresses scene rebuilds while failures persist");
+  assert.equal(h.backendMessages().at(-1).backend, "canvas2d", "the degrade still switches backends");
   h.map.stop();
 });
 

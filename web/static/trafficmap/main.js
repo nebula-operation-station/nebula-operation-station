@@ -25,6 +25,24 @@ export const DRAG_THRESHOLD_PX = 4;
  */
 export const MAX_FRAME_FAILURES = 3;
 
+/**
+ * REBUILD_BACKOFF_BASE_MS is the delay before a scene rebuild is retried
+ * after one failed frame; it doubles with every further failure.
+ * REBUILD_BACKOFF_MAX_MS caps that delay, so a persistently failing rebuild
+ * is not retried on every frame.
+ */
+export const REBUILD_BACKOFF_BASE_MS = 100;
+export const REBUILD_BACKOFF_MAX_MS = 4000;
+
+/**
+ * rebuildBackoffMs is the delay in ms before the next scene rebuild attempt
+ * after the failures-th consecutive failed frame: exponential from
+ * REBUILD_BACKOFF_BASE_MS up to REBUILD_BACKOFF_MAX_MS.
+ */
+export function rebuildBackoffMs(failures) {
+  return Math.min(REBUILD_BACKOFF_BASE_MS * 2 ** (failures - 1), REBUILD_BACKOFF_MAX_MS);
+}
+
 /** User-facing status texts (English UI strings). */
 export const STATUS = Object.freeze({
   waiting: "Waiting for map data.",
@@ -98,6 +116,8 @@ export function startTrafficMap(root, opts = {}) {
   let generation = 0;
   let failures = 0;
   let degradeAt = MAX_FRAME_FAILURES;
+  let nextRebuildAt = 0;
+  let rebuildSuppressed = false;
 
   root.style.position = "relative";
   root.style.overflow = "hidden";
@@ -147,6 +167,7 @@ export function startTrafficMap(root, opts = {}) {
     backend = r.backend;
     resize();
     dirty = true;
+    nextRebuildAt = 0;
     if (!backend) {
       setStatus(STATUS.none);
       send(win, OUT.backend, { backend: "none", fallback: true });
@@ -315,6 +336,7 @@ export function startTrafficMap(root, opts = {}) {
   }
 
   function step(ts) {
+    rebuildSuppressed = false;
     if (switchToFallback === null && backend && backend.name !== "canvas2d" && backend.isLost()) {
       switchToFallback = STATUS.lost;
     }
@@ -324,65 +346,106 @@ export function startTrafficMap(root, opts = {}) {
       install(false, switchToFallback);
       switchToFallback = null;
     }
-    if (!backend || !cam || !model) return;
+    if (!backend || !cam || !model) return false;
     const lvl = cameraLevel(cam);
     if (lvl !== level) {
       level = lvl;
       dirty = true;
     }
     if (dirty) {
-      scene = buildScene(model, layout, { level, focus });
-      backend.setScene(scene);
-      dirty = false;
-      redraw = true;
+      if (failures > 0 && ts < nextRebuildAt) {
+        // Rebuilds are backed off while failures persist; the last scene
+        // keeps rendering instead of rebuilding every frame.
+        rebuildSuppressed = true;
+        if (scene === null) return false;
+      } else {
+        scene = buildScene(model, layout, { level, focus });
+        backend.setScene(scene);
+        dirty = false;
+        redraw = true;
+      }
     }
     const reduced = motion !== null && motion.matches;
     if (redraw || !reduced) {
       const time = reduced ? 0 : ts / 1000;
+      let drew = false;
       try {
-        backend.render(cam, dpr, time);
+        drew = backend.render(cam, dpr, time);
       } catch (err) {
         if (backend.name === "canvas2d") throw err;
         // A failing WebGL2 draw is not retried: switch on the next frame.
         switchToFallback = STATUS.failed;
         redraw = true;
-        return;
+        return false;
       }
       drawOverlay(octx, scene, cam, dpr, time, painter, icons, nodeById);
       redraw = false;
+      return drew;
     }
+    return false;
   }
 
   // frame re-arms itself first, so no exception can stop the loop. Failed
-  // frames are retried; repeated failures degrade the renderer.
+  // frames are retried with a growing backoff on the scene rebuild;
+  // repeated failures degrade the renderer.
   function frame(ts) {
     if (stopped) return;
     win.requestAnimationFrame(frame);
+    let threw = false;
+    let drew = false;
     try {
-      step(ts);
+      drew = step(ts);
     } catch {
+      threw = true;
+    }
+    if (threw) {
       failures++;
+      nextRebuildAt = ts + rebuildBackoffMs(failures);
       dirty = true;
       redraw = true;
       if (failures === 1) {
         setStatus(STATUS.frameError);
         send(win, OUT.error, { errors: ["render: drawing a frame failed"] });
       }
-      if (failures >= degradeAt) {
-        degradeAt += MAX_FRAME_FAILURES;
-        if (backend && backend.name !== "canvas2d") {
-          switchToFallback = STATUS.failed;
-        } else if (icons.size > 0) {
-          releaseIcons(new Map());
-          icons = new Map();
-        }
+      degrade();
+      return;
+    }
+    if (rebuildSuppressed) {
+      // The rebuild of the current model is backed off. A frame that still
+      // drew the last scene means the renderer is healthy again and the
+      // streak ends; otherwise the failure continues.
+      if (drew) {
+        failures = 0;
+        degradeAt = MAX_FRAME_FAILURES;
+        nextRebuildAt = 0;
+        setStatus(!backend ? STATUS.none : model ? backendStatus : STATUS.waiting);
+      } else {
+        failures++;
+        nextRebuildAt = ts + rebuildBackoffMs(failures);
+        degrade();
       }
       return;
     }
     if (failures > 0) {
       failures = 0;
       degradeAt = MAX_FRAME_FAILURES;
+      nextRebuildAt = 0;
       setStatus(!backend ? STATUS.none : model ? backendStatus : STATUS.waiting);
+    }
+  }
+
+  // degrade applies the stepwise degradation for a persistent failure
+  // streak: WebGL2 is replaced by Canvas 2D, and on Canvas 2D the icons
+  // are dropped.
+  function degrade() {
+    if (failures >= degradeAt) {
+      degradeAt += MAX_FRAME_FAILURES;
+      if (backend && backend.name !== "canvas2d") {
+        switchToFallback = STATUS.failed;
+      } else if (icons.size > 0) {
+        releaseIcons(new Map());
+        icons = new Map();
+      }
     }
   }
 
