@@ -27,7 +27,6 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnreg"
@@ -342,18 +341,17 @@ func newReconcileEnv(t *testing.T) *reconcileEnv {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	keysDir := filepath.Join(dir, "keys")
-	if err := os.MkdirAll(keysDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	keyPEM, userPub := testCredentialKey(t)
-	if err := os.WriteFile(filepath.Join(keysDir, "cred.key"), keyPEM, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	kr := keyring.New(keysDir)
-	if _, err := kr.Unlock([]byte(testPassphrase)); err != nil {
-		t.Fatal(err)
-	}
+	// The keyring is shared (see sharedKeys); a test that locks it must
+	// switch to a private one first.
+	kr, userPub := sharedTestKeyring(t)
+	t.Cleanup(func() {
+		if !kr.Unlocked() {
+			t.Error("test locked the shared keyring; call usePrivateKeyring before locking")
+			if _, err := kr.Unlock([]byte(testPassphrase)); err != nil {
+				t.Errorf("re-unlock shared keyring: %v", err)
+			}
+		}
+	})
 
 	clk := &fakeClock{t: time.Now()}
 	verifier, err := webauthnverify.New(webauthnverify.Config{

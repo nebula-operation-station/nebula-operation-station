@@ -176,9 +176,9 @@ func newPveTestEnv(t *testing.T) *pveTestEnv {
 		t.Fatal(err)
 	}
 	v := vault.New(db)
-	v.SetMinParams(vault.MinParams)
+	v.SetMinParams(testVaultParams)
 	pass := strings.Repeat("correct-horse-battery-staple-", 4)
-	if err := v.Init([]byte(pass), vault.MinParams, "test"); err != nil {
+	if err := v.Init([]byte(pass), testVaultParams, "test"); err != nil {
 		t.Fatal(err)
 	}
 	if err := v.Unlock([]byte(pass)); err != nil {
@@ -926,7 +926,7 @@ func TestPveRotationRollsBackSecretWhenRegistryWriteFails(t *testing.T) {
 				t.Fatal(err)
 			}
 			v := vault.New(db)
-			v.SetMinParams(vault.MinParams)
+			v.SetMinParams(testVaultParams)
 			if err := v.Unlock([]byte(e.passphrase)); err != nil {
 				t.Fatal(err)
 			}
@@ -953,7 +953,7 @@ func TestPveRotationRollsBackSecretWhenRegistryWriteFails(t *testing.T) {
 				t.Fatal("failed rotation changed encrypted secret")
 			}
 			v = vault.New(db)
-			v.SetMinParams(vault.MinParams)
+			v.SetMinParams(testVaultParams)
 			if err := v.Unlock([]byte(e.passphrase)); err != nil {
 				t.Fatal(err)
 			}
