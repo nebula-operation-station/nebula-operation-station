@@ -32,6 +32,23 @@ const (
 	// longest IPv6 form (45 bytes), "%" and a maxZoneLen zone, rounded
 	// up. Longer text is rejected before it is parsed.
 	maxAddrLen = 64
+	// maxAddrsPerIf bounds the "addr_info" list of one interface in an
+	// `ip -j addr` document. A single interface carrying more than this
+	// many addresses is truncated and the table is marked incomplete.
+	maxAddrsPerIf = 1000
+	// maxVLANID bounds an 802.1Q VLAN id: the tag field is 12 bits, so a
+	// valid id is 0..4095. Host data outside this range is dropped.
+	maxVLANID = 4095
+	// maxVLANsPerPort bounds the distinct VLANs one bridge port may
+	// carry in a `bridge -j vlan` document. A port can hold at most one
+	// entry per VLAN id 0..4095, so 4096 is the protocol maximum; a
+	// larger list is truncated and the table is marked incomplete.
+	maxVLANsPerPort = 4096
+	// maxKindLen bounds the link kind string from `ip -j -d link`
+	// (linkinfo.info_kind). Known kinds (vlan, bridge, veth, wireguard,
+	// macvlan, openvswitch, ...) are short; a longer string is not a
+	// real kind name and is dropped.
+	maxKindLen = 32
 )
 
 // validIfName reports whether s is an acceptable interface name: 1..

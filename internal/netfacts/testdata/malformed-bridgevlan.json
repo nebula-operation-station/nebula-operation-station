@@ -1,0 +1,7 @@
+[
+  {"ifname":"eth0","vlans":[{"vlan":1,"flags":["PVID","Egress Untagged"]},{"vlan":100}]},
+  {"ifname":"bad\u0001name","vlans":[{"vlan":1}]},
+  {"ifname":"eth1","vlans":[{"vlan":100},{"vlan":99999}]},
+  {"ifname":"eth2","vlans":[]},
+  {"vlans":[{"vlan":1}]}
+]

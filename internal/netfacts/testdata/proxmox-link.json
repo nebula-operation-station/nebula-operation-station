@@ -1,0 +1,7 @@
+[
+  {"ifindex":1,"ifname":"lo","address":"00:00:00:00:00:00","mtu":65536,"qdisc":"noqueue"},
+  {"ifindex":2,"ifname":"eth0","address":"bc:24:11:aa:bb:01","mtu":1500,"qdisc":"fq_codel"},
+  {"ifindex":5,"ifname":"eth0.100","address":"bc:24:11:aa:bb:01","mtu":1500,"link":"eth0","linkinfo":{"info_kind":"vlan","info_data":{"id":100}}},
+  {"ifindex":7,"ifname":"vmbr0","address":"bc:24:11:aa:bb:02","mtu":1500,"linkinfo":{"info_kind":"bridge"}},
+  {"ifindex":9,"ifname":"tap101","address":"ba:d0:00:10:00:01","mtu":1500,"master":"vmbr0","linkinfo":{"info_kind":"tun"}}
+]

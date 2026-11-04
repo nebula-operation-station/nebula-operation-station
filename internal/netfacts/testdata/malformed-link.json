@@ -1,0 +1,8 @@
+[
+  {"ifname":"eth0","address":"bc:24:11:aa:bb:01"},
+  {"ifname":"bad\u0001name","address":"bc:24:11:aa:bb:01"},
+  {"ifname":"eth1","address":"not-a-mac","master":"vmbr0"},
+  {"ifname":"eth2","address":"bc:24:11:aa:bb:02","link":"bad\u0001parent","master":"vmbr0"},
+  {"ifname":"eth3","address":"bc:24:11:aa:bb:03","linkinfo":{"info_kind":"vlan","info_data":{"id":99999}}},
+  {"address":"bc:24:11:aa:bb:04"}
+]
