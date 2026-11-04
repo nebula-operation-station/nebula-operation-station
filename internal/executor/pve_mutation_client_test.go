@@ -5,6 +5,7 @@ package executor
 import (
 	"context"
 	"crypto/tls"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -19,12 +21,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveapi"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvetransport"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -691,14 +696,179 @@ func TestPveMutationsWiresProductionClient(t *testing.T) {
 }
 
 // TestPveMutationsClientBlocksLikeTheReadPath: the wired client's trust
-// failure hook is blockPveRead, the persistent block of the read path.
+// failure hook blocks the remote persistently, as the read path does, and
+// revokes its provider grants.
 func TestPveMutationsClientBlocksLikeTheReadPath(t *testing.T) {
 	e := newPveReadEnv(t, pvecontract.KindStandalone)
+	e.approve(e.grantDoc(pveReadGrantID, 240, permit.ProviderMethodNodes))
 	c := e.svc.pveMutations().Client.(*pveMutationClient)
 	c.block(pveReadRemote)
 	if got := remoteState(t, e.svc.db, pveReadRemote); got != executordb.StateBlocked {
 		t.Fatalf("remote state = %s, want blocked", got)
 	}
+	assertGrantsRevoked(t, e)
+}
+
+func assertGrantsRevoked(t *testing.T, e *pveReadEnv) {
+	t.Helper()
+	grants, err := e.svc.auth.ReadGrants()
+	if err != nil || len(grants) != 1 || grants[0].RevokedAt.IsZero() {
+		t.Fatalf("provider grant not revoked: %+v %v", grants, err)
+	}
+}
+
+// approvedServicePower proposes and approves a guest power action on the
+// service env's remote: a live mutation permit of the remote.
+func approvedServicePower(t *testing.T, e *pveReadEnv) {
+	t.Helper()
+	target := &pb.PVEGuestPowerTarget{RemoteId: pveReadRemote, Kind: "qemu", Node: "pve1", Vmid: 101, Verb: "shutdown"}
+	out, err := e.svc.ProposePVEGuestPower(context.Background(), &pb.ProposePVEGuestPowerRequest{Target: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := canonical.ParseDigest(out.GetPermit().GetExecutionDigest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.auth.ApproveCLI(d, 0, "admin"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPveMutationClientTrustHookRevokesAuthority: the production trust
+// failure hook revokes the remote's provider grants and mutation permits
+// with the block; a hook that only changed the remote's state fails here.
+func TestPveMutationClientTrustHookRevokesAuthority(t *testing.T) {
+	e, _, _, _, _ := newServicePowerEnv(t)
+	e.approve(e.grantDoc(pveReadGrantID, 240, permit.ProviderMethodNodes))
+	approvedServicePower(t, e)
+	e.svc.newPveMutationClient().block(pveReadRemote)
+	if got := remoteState(t, e.svc.db, pveReadRemote); got != executordb.StateBlocked {
+		t.Fatalf("remote state = %s, want blocked", got)
+	}
+	assertGrantsRevoked(t, e)
+	if n := e.svc.auth.RevokeProviderMutations(pveReadRemote, "test probe"); n != 0 {
+		t.Fatalf("%d mutation permits of the blocked remote still live", n)
+	}
+	// A second trust failure of the now blocked remote is not a failure.
+	if err := e.svc.blockPveMutation(pveReadRemote); err != nil {
+		t.Fatalf("block of a blocked remote: %v", err)
+	}
+}
+
+// TestPveMutationClientUnrecordedBlockFailsClosed: when the block of a
+// remote that failed trust verification cannot be persisted, the error is
+// logged, the remote's mutation permits are revoked anyway, and every
+// further call of the client to the remote is refused with a distinct
+// error before any connection, until the block is persisted.
+func TestPveMutationClientUnrecordedBlockFailsClosed(t *testing.T) {
+	e, _, _, _, _ := newServicePowerEnv(t)
+	approvedServicePower(t, e)
+	rm := e.remote()
+	// The registry write of the block fails (SQLite trigger); the
+	// authority keeps its permits in memory.
+	reopenServiceDB(t, e, `CREATE TRIGGER reject_pve_block BEFORE UPDATE OF state ON pve_remotes WHEN NEW.state = 'blocked' BEGIN SELECT RAISE(ABORT, 'injected block failure'); END`)
+
+	c := e.svc.newPveMutationClient()
+	c.block(pveReadRemote)
+	if got := remoteState(t, e.svc.db, pveReadRemote); got != executordb.StateActive {
+		t.Fatalf("remote state = %s, want the injected failure to keep it active", got)
+	}
+	if !unrecordedBlockLogged(e) {
+		t.Fatal("unrecorded block not logged")
+	}
+	if n := e.svc.auth.RevokeProviderMutations(pveReadRemote, "test probe"); n != 0 {
+		t.Fatalf("%d mutation permits live after an unrecorded block", n)
+	}
+	if err := e.svc.blockPveMutation(pveReadRemote); !errors.Is(err, errPveTrustBlockNotRecorded) {
+		t.Fatalf("failing block store: %v", err)
+	}
+
+	ctx := context.Background()
+	read := tokenOf(mutReadToken)
+	upid := testTaskUPID("pve1", time.Now(), "qmstop", "101", mutActionUser, 1)
+	calls := map[string]func() error{
+		"dispatch": func() error {
+			_, err := c.Dispatch(ctx, rm, "pve1", mkStep("guest.qemu.stop", `{"vmid":101}`), tokenOf(mutActionToken))
+			if err != nil && !errors.Is(err, ErrPveRejected) {
+				return fmt.Errorf("not reported unsent: %w", err)
+			}
+			return err
+		},
+		"target state": func() error { _, err := c.TargetState(ctx, rm, "qemu", "pve1", 101, read); return err },
+		"task status":  func() error { _, err := c.TaskStatus(ctx, rm, "pve1", upid, read); return err },
+		"task list":    func() error { _, err := c.RecentTasks(ctx, rm, "pve1", time.Time{}, read); return err },
+	}
+	for name, call := range calls {
+		if err := call(); !errors.Is(err, errPveTrustBlockNotRecorded) {
+			t.Fatalf("%s: err = %v, want the unrecorded block", name, err)
+		}
+	}
+	if n := e.pve.requests.Load(); n != 0 {
+		t.Fatalf("requests reached the endpoint: %d", n)
+	}
+
+	// Once the store accepts the block again, the next call records it
+	// and is still refused.
+	db := reopenServiceDB(t, e, `DROP TRIGGER reject_pve_block`)
+	v, err := webauthnverify.New(webauthnverify.Config{RPID: "reconcile.test", Origins: []string{"https://reconcile.test"}, Counters: db}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	risk, err := riskpolicy.New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.svc.auth, err = permit.New(permit.Options{Verifier: v, Store: db, RiskPolicy: risk, Leases: db, Now: e.clock.Now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.RecentTasks(ctx, rm, "pve1", time.Time{}, read); err == nil || errors.Is(err, errPveTrustBlockNotRecorded) {
+		t.Fatalf("call after the store recovered: %v", err)
+	}
+	if got := remoteState(t, e.svc.db, pveReadRemote); got != executordb.StateBlocked {
+		t.Fatalf("remote state = %s, want blocked", got)
+	}
+	if n := e.pve.requests.Load(); n != 0 {
+		t.Fatalf("requests reached the endpoint: %d", n)
+	}
+}
+
+// reopenServiceDB closes the service database of e, applies stmt to the
+// file over a plain SQLite connection (the executor DB locks it
+// exclusively while open) and gives the service the reopened database.
+func reopenServiceDB(t *testing.T, e *pveReadEnv, stmt string) *executordb.DB {
+	t.Helper()
+	dir := filepath.Dir(e.jobs.JobRoot)
+	if err := e.svc.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", filepath.Join(dir, executordb.FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = raw.Exec(stmt)
+	closeErr := raw.Close()
+	if err != nil || closeErr != nil {
+		t.Fatal(err, closeErr)
+	}
+	db, err := executordb.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	e.svc.db = db
+	return db
+}
+
+func unrecordedBlockLogged(e *pveReadEnv) bool {
+	e.logs.mu.Lock()
+	defer e.logs.mu.Unlock()
+	for _, r := range e.logs.records {
+		if r.msg == "pve mutation trust block not recorded" && r.attrs["remote"] == pveReadRemote && r.attrs["err"] != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // TestServiceGuestPowerReachesTheRemoteChecks: with the wired client the
