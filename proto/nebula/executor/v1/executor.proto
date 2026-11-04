@@ -1733,6 +1733,12 @@ message PVERemoteInfo {
   string trust_pin = 5;
   uint64 trust_generation = 6;
   PVERemoteState state = 7;
+  // Current version of the remote's read credential in the executor vault
+  // (registry ReadVersion), so that the server can bind a provider read
+  // lease to it (ADR 0007 E08). 0 when the remote has no valid read
+  // credential. A version number only: credential references and values
+  // stay excluded.
+  int64 read_credential_version = 8;
 }
 
 message ListPVERemotesRequest {}

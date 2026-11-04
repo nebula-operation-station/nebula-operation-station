@@ -221,3 +221,42 @@ func TestListPVERemotesRegistryErrorIsSanitized(t *testing.T) {
 		t.Fatalf("registry error: response=%v error=%v", got, err)
 	}
 }
+
+// TestListPVERemotesReportsReadCredentialVersionOnly: the metadata carries the
+// read credential's version (what a provider read lease binds to) only when
+// the registry holds this remote's own read credential, and never the action
+// version or any credential reference.
+func TestListPVERemotesReportsReadCredentialVersionOnly(t *testing.T) {
+	e := newReconcileEnv(t)
+	for _, tc := range []struct {
+		id, pin string
+		creds   executordb.PveRemoteCredentials
+	}{
+		{"withread", "c", executordb.PveRemoteCredentials{ReadRef: PveVaultID("withread", PvePurposeRead), ReadVersion: 3, ActionRef: PveVaultID("withread", PvePurposeAction), ActionVersion: 7}},
+		{"foreignref", "d", executordb.PveRemoteCredentials{ReadRef: PveVaultID("other", PvePurposeRead), ReadVersion: 2}},
+		{"noread", "e", executordb.PveRemoteCredentials{}},
+	} {
+		_, err := e.svc.db.AddRemote(pvecontract.Remote{RemoteID: tc.id, Name: tc.id, Kind: pvecontract.KindStandalone, Endpoints: []pvecontract.Endpoint{{Host: "pve.lab", Port: 8006}}, TrustPin: strings.Repeat(tc.pin, 64), TrustGeneration: 1}, tc.creds, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := e.svc.ListPVERemotes(context.Background(), &pb.ListPVERemotesRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int64{"withread": 3, "foreignref": 0, "noread": 0}
+	for _, r := range got.GetRemotes() {
+		v, ok := want[r.GetRemoteId()]
+		if !ok {
+			t.Fatalf("unexpected remote %q", r.GetRemoteId())
+		}
+		if r.GetReadCredentialVersion() != v {
+			t.Errorf("remote %s: read credential version %d, want %d", r.GetRemoteId(), r.GetReadCredentialVersion(), v)
+		}
+		delete(want, r.GetRemoteId())
+	}
+	if len(want) != 0 {
+		t.Fatalf("remotes missing from the metadata: %v", want)
+	}
+}

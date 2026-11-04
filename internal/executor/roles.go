@@ -254,7 +254,9 @@ func ValidateReadPVERequest(req *pb.ReadPVERequest) error {
 }
 
 // ListPVERemotes returns public registry metadata for server and collector
-// reads. Credential references and values are excluded from this surface.
+// reads. Credential references and values are excluded from this surface;
+// only the read credential's version number is reported, under the same
+// condition ReadPVE uses, so that a provider read lease can bind to it.
 func (s *Service) ListPVERemotes(ctx context.Context, _ *pb.ListPVERemotesRequest) (*pb.ListPVERemotesResponse, error) {
 	s.pveMu.Lock()
 	defer s.pveMu.Unlock()
@@ -265,6 +267,9 @@ func (s *Service) ListPVERemotes(ctx context.Context, _ *pb.ListPVERemotesReques
 	out := &pb.ListPVERemotesResponse{}
 	for _, r := range rows {
 		info := &pb.PVERemoteInfo{RemoteId: r.RemoteID, Name: r.Name, TrustPin: r.TrustPin, TrustGeneration: r.TrustGeneration}
+		if r.Credentials.ReadRef == PveVaultID(r.RemoteID, PvePurposeRead) && r.Credentials.ReadVersion >= 1 {
+			info.ReadCredentialVersion = r.Credentials.ReadVersion
+		}
 		switch r.Kind {
 		case pvecontract.KindCluster:
 			info.Kind = pb.PVERemoteKind_PVE_REMOTE_KIND_CLUSTER
