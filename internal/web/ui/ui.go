@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"slices"
 	"sort"
 	"time"
 
@@ -164,6 +165,11 @@ type Options struct {
 	// trust pin, state) of the PVE remotes, for the deep links. Nil or
 	// an error renders the pages without deep links.
 	PVERemotes PVERemoteMetaFunc
+	// GuestPower proposes and runs typed guest power actions (ADR 0006
+	// P2-01, px01). It needs PVE and PVERemotes: the chart then shows a
+	// Power section on running guests of active remotes. Nil hides the
+	// controls and the power endpoints answer 404.
+	GuestPower GuestPower
 	// Log receives executor status errors (the page itself only shows
 	// "Executor unavailable"). Nil means slog.Default().
 	Log *slog.Logger
@@ -206,6 +212,9 @@ type Handler struct {
 	now            func() time.Time
 	pve            PVEStore
 	pveRemotes     PVERemoteMetaFunc
+	// guestPower and guestPowerProposals serve the guest power controls.
+	guestPower          GuestPower
+	guestPowerProposals *guestPowerProposals
 }
 
 // New parses the embedded templates and builds a Handler.
@@ -283,8 +292,11 @@ func New(o Options) (*Handler, error) {
 		pveChart:       o.PVEChart,
 		pve:            o.PVE,
 		pveRemotes:     o.PVERemotes,
+		guestPower:     o.GuestPower,
 		now:            o.Now,
-		log:            log,
+
+		guestPowerProposals: newGuestPowerProposals(),
+		log:                 log,
 	}
 	if o.BuiltinTrust != nil {
 		h.builtinTrust = newBuiltinTrustCache(o.BuiltinTrust, h.clockNow, log)
@@ -369,6 +381,7 @@ var pageFiles = map[string]string{
 	"discovery_job":       "discovery_job.html",
 	"pve":                 "pve.html",
 	"pve_detail":          "pve_detail.html",
+	"guest_action":        "guest_action.html",
 }
 
 // pagePartials are extra template files a page uses.
@@ -488,6 +501,13 @@ func (h *Handler) Handler() http.Handler {
 	// PVE remotes (ADR 0006, P1-13): read-only, stored inventory only.
 	mux.HandleFunc("GET /pve", h.handlePVEList)
 	mux.HandleFunc("GET /pve/{id}", h.handlePVEDetail)
+	// Guest power actions (ADR 0006 P2-01): the chart's fetch-posted
+	// forms propose, the proposal page shows the executor's binding and
+	// risk, approval reuses the schedule button (JSON) or the CLI.
+	mux.HandleFunc("POST /pve/guests/power", h.handleGuestPowerPropose)
+	mux.HandleFunc("GET /pve/guests/power/{digest}", h.handleGuestPowerProposal)
+	mux.HandleFunc("POST /pve/guests/power/commit", h.handleGuestPowerCommit)
+	mux.HandleFunc("POST /pve/guests/power/run", h.handleGuestPowerRun)
 	mux.HandleFunc("POST /hostkeys/repin/propose", h.handleRepinPropose)
 	mux.HandleFunc("POST /hostkeys/repin/commit", h.handleRepinCommit)
 	mux.HandleFunc("GET /inventory/enroll", h.handleEnrollPage)
@@ -551,6 +571,11 @@ type pageData struct {
 	Inventory []hostView
 	// Chart is the data of the inventory org chart page.
 	Chart *chartData
+	// GuestPower are the Power sections of the chart's guests, keyed by
+	// remote and VMID (guestPowerKey); render fills it. See PowerFor.
+	GuestPower map[string]*guestPowerView
+	// GuestAction is the data of the guest power proposal page.
+	GuestAction *guestActionData
 	// InventoryDialogOpen shows the add-host dialog with the open
 	// attribute (the no-JavaScript form at /inventory/new, or a form
 	// error).
@@ -787,6 +812,14 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, data pageData) 
 	data.PVENav = h.pve != nil
 	if !data.Bare && h.builtinTrust != nil {
 		data.BuiltinTrust = h.builtinTrust.get(r.Context())
+	}
+	// Guest power controls (ADR 0006 P2-01) on the chart's PVE guests;
+	// their forms are posted with formpost.js.
+	if data.Content == "chart" && data.Chart != nil && len(data.Chart.PVENodes) > 0 {
+		data.GuestPower = h.chartGuestPower(r.Context(), data.Chart.PVENodes)
+		if len(data.GuestPower) > 0 && !slices.Contains(data.Scripts, "formpost.js") {
+			data.Scripts = append(slices.Clone(data.Scripts), "formpost.js")
+		}
 	}
 	set, ok := h.pages[data.Content]
 	if !ok {
