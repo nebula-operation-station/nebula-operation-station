@@ -400,6 +400,26 @@ service ExecutorService {
   // parent/member linkage. The server polls this before dispatch.
   rpc GetBatchStatus(GetBatchStatusRequest) returns (GetBatchStatusResponse);
 
+  // Role: server, admin. Read-only. Returns the executor's current version
+  // of each named SSH credential reference, so the server binds exact
+  // versions into a batch plan (canonical BatchMember.credential_versions).
+  // Versions and public-key fingerprints only, never key material.
+  // Unimplemented while no batch authority is configured (like the other
+  // batch RPCs); FailedPrecondition while the keyring is locked; NotFound
+  // for a reference that is not loaded.
+  rpc GetBatchCredentialVersions(GetBatchCredentialVersionsRequest) returns (GetBatchCredentialVersionsResponse);
+
+  // Role: server. Runs one member of an approved batch exactly once (ADR
+  // 0007 E11). The request names only the parent digest and the member ID;
+  // the executor takes everything that runs from the frozen plan, claims
+  // the member's single-use permit (stage, dependency and same-host gates),
+  // records the intent durably, re-checks trust, risk and credential
+  // versions immediately before the target and then runs it attached. A
+  // refusal before the claim is an error status and nothing ran; once the
+  // member is claimed every outcome is a response and the member is never
+  // run again. At most one batch member runs per target at a time.
+  rpc RunBatchMember(RunBatchMemberRequest) returns (RunBatchMemberResponse);
+
   // Built-in trust (ADR 0007, E19c). The executor reads the built-in bundle
   // from its locally configured, verified NOS release directory; no request
   // names a path, a bundle or bytes. Bulk trust is local-admin only: there is
@@ -2607,6 +2627,82 @@ message GetBatchStatusResponse {
   // Parent stage plan hash, and each member's execution ID in member order.
   string stage_plan_hash = 9;
   repeated string member_execution_ids = 10;
+}
+
+message GetBatchCredentialVersionsRequest {
+  // At most 32 distinct references. An empty list only asks whether batches
+  // are available on this executor.
+  repeated string credential_refs = 1;
+}
+
+// BatchCredentialVersion is the executor's current version of one SSH
+// credential reference. It carries no secret.
+message BatchCredentialVersion {
+  string credential_ref = 1;
+  // Version derived from the public key, in 1..2^53-1 so a canonical batch
+  // binds it exactly; it changes when the key behind the reference changes.
+  uint64 version = 2;
+  // SHA-256 fingerprint of the public key ("SHA256:..."), for display.
+  string public_key_fingerprint = 3;
+}
+
+message GetBatchCredentialVersionsResponse {
+  // One entry per requested reference, in request order.
+  repeated BatchCredentialVersion versions = 1;
+  // True only when this executor runs approved batch members (a production
+  // batch dispatcher is wired). Credential versions and batch approval
+  // alone do not make a batch runnable; a server must not propose a batch
+  // that would be approved and never executed.
+  bool batch_execution_available = 2;
+}
+
+message RunBatchMemberRequest {
+  // Hex SHA-256 digest of the approved batch.
+  string batch_digest = 1;
+  // The member ID inside the approved plan.
+  string member_id = 2;
+  // Endpoints to try in order (from the inventory); the pinned host key of
+  // the member's frozen target decides whether a host is the right one.
+  repeated string endpoints = 3;
+  // 0 means 600 s; at most 600 s.
+  uint32 timeout_seconds = 4;
+  // The member's exact artifact bytes. Its SHA-256 must equal the frozen
+  // member's artifact hash; the approval binds only the hash.
+  bytes artifact = 5;
+}
+
+enum BatchMemberOutcome {
+  BATCH_MEMBER_OUTCOME_UNSPECIFIED = 0;
+  // The member ran and the target reported success.
+  BATCH_MEMBER_OUTCOME_SUCCESS = 1;
+  // Definitive failure: the script failed, or nothing reached the target
+  // (unreachable, host key mismatch, authentication failure).
+  BATCH_MEMBER_OUTCOME_FAILURE = 2;
+  // The member may have run; its outcome cannot be known. Never rerun.
+  BATCH_MEMBER_OUTCOME_UNKNOWN = 3;
+  // The member was claimed but nothing reached the target: lock, expiry,
+  // a trust/risk change or a rotated credential revoked it. Never rerun.
+  BATCH_MEMBER_OUTCOME_NOT_EXECUTED = 4;
+}
+
+message RunBatchMemberResponse {
+  BatchMemberOutcome outcome = 1;
+  // The member's single-use execution ID.
+  string execution_id = 2;
+  // The run class as in RunAttachedResponse, or not_executed.
+  string class = 3;
+  // Secret-free explanation.
+  string detail = 4;
+  int32 exit_code = 5;
+  // Untrusted host output, bounded as in RunAttachedResponse.
+  bytes result = 6;
+  bytes log = 7;
+  bool log_truncated = 8;
+  string endpoint = 9;
+  int64 duration_ms = 10;
+  // Nothing reached the host because no endpoint answered (counted
+  // against the stage's unreachable threshold).
+  bool unreachable = 11;
 }
 
 // Built-in trust (ADR 0007, E19c).

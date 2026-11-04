@@ -1,0 +1,4 @@
+[
+  {"ifindex":1,"ifname":"lo","address":"00:00:00:00:00:00","operstate":"UNKNOWN","addr_info":[{"family":"inet","local":"127.0.0.1","prefixlen":8},{"family":"inet6","local":"::1","prefixlen":128}]},
+  {"ifindex":2,"ifname":"ens18","address":"52:54:00:12:34:56","operstate":"UP","addr_info":[{"family":"inet","local":"10.0.0.15","prefixlen":24},{"family":"inet6","local":"fe80::5054:ff:fe12:3456","prefixlen":64}]}
+]

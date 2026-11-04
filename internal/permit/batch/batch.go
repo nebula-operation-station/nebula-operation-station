@@ -76,16 +76,19 @@ type Policy interface {
 }
 
 // Options provides executor-owned dependencies. Session can be permit.Authority.Session.
-// AdminUID must come from local configuration; transport code must obtain CLI
+// AdminUIDs must come from local configuration; transport code must obtain CLI
 // peer UIDs from authenticated local peer credentials, never request fields.
 type Options struct {
 	Mode     permit.Mode
 	Verifier *webauthnverify.Verifier
 	Policy   Policy
 	Session  func() (active bool, until time.Time)
-	AdminUID uint32
-	Now      func() time.Time
-	Audit    func(permit.Event)
+	// AdminUIDs are the executor-local admins who may review and approve
+	// batches from the CLI (every configured admin user). Empty means no
+	// peer may: CLI review and approval fail closed.
+	AdminUIDs []uint32
+	Now       func() time.Time
+	Audit     func(permit.Event)
 	// Scan runs the Safety Scanner. Default permit.ScanBounded, which shares
 	// the executor-wide scan limit with ordinary proposals; tests may inject.
 	Scan func(context.Context, []byte) ([]scanner.Finding, canonical.Risk, error)
@@ -155,6 +158,7 @@ func New(o Options) (*Authority, error) {
 	if o.Scan == nil {
 		o.Scan = permit.ScanBounded
 	}
+	o.AdminUIDs = slices.Clone(o.AdminUIDs)
 	return &Authority{options: o, entries: map[canonical.Digest]*entry{}, members: map[string]*MemberPermit{}, seen: map[string]struct{}{}, batchExecIndex: map[string]batchExecRef{}}, nil
 }
 
@@ -474,11 +478,16 @@ func (a *Authority) SubmitAssertion(ctx context.Context, d canonical.Digest, ass
 	return a.approveLocked(e, "webauthn:"+hex.EncodeToString(credID)), nil
 }
 
+// isAdmin reports whether peerUID is a configured executor-local admin.
+func (a *Authority) isAdmin(peerUID uint32) bool {
+	return slices.Contains(a.options.AdminUIDs, peerUID)
+}
+
 // ReviewCLI retrieves every frozen member, parameters and scanner findings for
 // an authenticated executor-local admin. The CLI must display all of it before
 // confirming; no browser session is necessary. Text escaping belongs to the UI.
 func (a *Authority) ReviewCLI(ctx context.Context, d canonical.Digest, peerUID uint32) (Approval, error) {
-	if peerUID != a.options.AdminUID {
+	if !a.isAdmin(peerUID) {
 		return Approval{}, ErrAdminRequired
 	}
 	a.mu.Lock()
@@ -496,7 +505,7 @@ func (a *Authority) ReviewCLI(ctx context.Context, d canonical.Digest, peerUID u
 // ApproveCLI confirms the frozen digest as an authenticated local admin, after
 // ReviewCLI's full executor-owned view. It needs no privileged browser session.
 func (a *Authority) ApproveCLI(ctx context.Context, d canonical.Digest, peerUID uint32) (Approval, error) {
-	if peerUID != a.options.AdminUID {
+	if !a.isAdmin(peerUID) {
 		return Approval{}, ErrAdminRequired
 	}
 	a.mu.Lock()

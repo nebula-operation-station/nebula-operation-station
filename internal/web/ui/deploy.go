@@ -54,7 +54,8 @@ import (
 // The run page follows the states of ADR 0008 section 6: proposed,
 // approved, creating, booting, enrolling (fingerprint review), bootstrapping,
 // done or failed, with the PVE task UPIDs and step outcomes. A server
-// without a batch planner ends a run with a staged plan at "joined"
+// without a batch planner, or whose executor does not run batches
+// (DeployBatchProbe), ends a run with a staged plan at "joined"
 // (enrolled, plan not run) instead of leaving it in bootstrapping. An idle
 // run that does not progress fails when its deadline passes (the
 // proposal's request expiry, deployEnrollWindow, deployBootstrapWindow),
@@ -101,6 +102,28 @@ type DeployIPAM interface {
 type DeployBatches interface {
 	ProposeBatch(ctx context.Context, user string, req executions.BatchRequest) (executions.BatchCreated, error)
 	Batch(ctx context.Context, id string) (executions.BatchView, error)
+}
+
+// DeployBatchProbe is optionally implemented by a DeployBatches value.
+// BatchesAvailable reports whether the executor runs batches end to end
+// (executorclient.BatchesAvailable): false means it lacks the capability
+// (no batch authority, no credential-version read, or no batch execution),
+// and a run with a staged plan then ends at
+// "joined" as on a server without a batch planner. An error is treated as
+// transient: the run stays in bootstrapping, where proposing the plan
+// reports the failure and may be retried.
+type DeployBatchProbe interface {
+	BatchesAvailable(ctx context.Context) (bool, error)
+}
+
+// DeployBatchGate is optionally implemented by a DeployBatches value whose
+// ProposeBatch itself refuses unless the executor runs batches at that
+// moment (executions.ErrBatchExecutionUnavailable or
+// executions.ErrBatchExecutionUnknown), probing under its own bounded
+// deadline. When ProposalsGated reports true, proposing the staged plan
+// relies on that check instead of probing a second time first.
+type DeployBatchGate interface {
+	ProposalsGated() bool
 }
 
 // Run states (ADR 0008 section 6).
@@ -160,6 +183,9 @@ const (
 	// deployJoinTimeout bounds the enrollment commit (an SSH probe and the
 	// inventory transaction).
 	deployJoinTimeout = 2 * time.Minute
+	// deployBatchProbeTimeout bounds the batch-support probe after the
+	// enrollment commit (its own budget, not what the commit left over).
+	deployBatchProbeTimeout = 10 * time.Second
 	// maxDeployNameLen is the longest guest name; it is also the inventory
 	// host ID, which allows 63 characters.
 	maxDeployNameLen = 63
@@ -1813,7 +1839,18 @@ func (h *Handler) commitDeployJoin(r *http.Request, run deployRun, user string) 
 		})
 		return errors.New(msg)
 	}
-	batches := h.deployBatches != nil
+	batches, noBatchesMsg := h.deployBatches != nil, deployNoBatchesMessage
+	if p, ok := h.deployBatches.(DeployBatchProbe); ok && hasBatchSteps(run.plan) {
+		pctx, pcancel := context.WithTimeout(context.WithoutCancel(r.Context()), deployBatchProbeTimeout)
+		avail, err := p.BatchesAvailable(pctx)
+		pcancel()
+		switch {
+		case err != nil:
+			h.log.Warn("deploy: probe batch support", "run", run.id, "error", err)
+		case !avail:
+			batches, noBatchesMsg = false, deployExecutorNoBatchesMessage
+		}
+	}
 	h.deployRuns.set(run.id, func(x *deployRun) {
 		x.joined, x.join.approving, x.message = &res, false, ""
 		switch {
@@ -1824,7 +1861,7 @@ func (h *Handler) commitDeployJoin(r *http.Request, run deployRun, user string) 
 			// instead of waiting in bootstrapping for a plan that can
 			// never be proposed.
 			x.state, x.expires = deployJoined, now.Add(deployRunTTL)
-			x.message = deployNoBatchesMessage
+			x.message = noBatchesMsg
 		default:
 			x.state, x.deadline = deployBootstrapping, now.Add(deployBootstrapWindow)
 		}
@@ -1837,6 +1874,11 @@ func (h *Handler) commitDeployJoin(r *http.Request, run deployRun, user string) 
 // deployNoBatchesMessage explains a run that ended at "joined".
 const deployNoBatchesMessage = "bootstrap steps not available: this server has no batch planner, so the staged plan was not run; " +
 	"the guest is enrolled, run the plan's steps as separate operations on the host"
+
+// deployExecutorNoBatchesMessage explains a run that ended at "joined"
+// because the executor does not run batches.
+const deployExecutorNoBatchesMessage = "bootstrap steps not available: the executor does not run batches (no batch execution, batch authority or credential-version read), " +
+	"so the staged plan was not run; the guest is enrolled, run the plan's steps as separate operations on the host"
 
 func hasBatchSteps(plan []deployPlanStep) bool {
 	for _, s := range plan {
@@ -1888,7 +1930,40 @@ func (h *Handler) handleDeployPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer h.deployRuns.set(run.id, func(x *deployRun) { x.approving = false })
-	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
+	// Probe again: the run may be in bootstrapping only because the probe
+	// at join time failed transiently. A plan is never proposed to an
+	// executor that would approve it and never run it. A planner that
+	// gates its own proposals (DeployBatchGate) probes once inside
+	// ProposeBatch, whose refusals are handled below; probing here as well
+	// would ask the executor twice. The probe has its own deadline, so it
+	// never shortens the proposal's.
+	gated := false
+	if g, ok := h.deployBatches.(DeployBatchGate); ok {
+		gated = g.ProposalsGated()
+	}
+	if p, ok := h.deployBatches.(DeployBatchProbe); ok && !gated {
+		pctx, pcancel := context.WithTimeout(r.Context(), deployBatchProbeTimeout)
+		avail, err := p.BatchesAvailable(pctx)
+		pcancel()
+		switch {
+		case err != nil:
+			h.log.Warn("deploy: probe batch support", "run", run.id, "error", err)
+			msg := "the staged plan could not be proposed: the executor could not be asked whether it runs batches; propose it again"
+			h.deployRuns.set(run.id, func(x *deployRun) { x.batchErr = msg })
+			http.Error(w, msg, http.StatusConflict)
+			return
+		case !avail:
+			h.endDeployWithoutBatches(w, run.id)
+			return
+		}
+	}
+	// A gated planner's probe runs inside the proposal under its own
+	// bound; the proposal keeps its full call budget on top of it.
+	budget := operationsCallTimeout
+	if gated {
+		budget += deployBatchProbeTimeout
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), budget)
 	defer cancel()
 	c, err := h.deployBatches.ProposeBatch(ctx, user, run.batchRequest())
 	if err != nil {
@@ -1896,12 +1971,25 @@ func (h *Handler) handleDeployPlan(w http.ResponseWriter, r *http.Request) {
 		var he *executions.HostError
 		msg := "the staged plan could not be proposed"
 		switch {
+		case errors.Is(err, executions.ErrBatchExecutionUnavailable):
+			// The planner's own gate: the executor stopped running
+			// batches since the probe above.
+			h.endDeployWithoutBatches(w, run.id)
+			return
+		case errors.Is(err, executions.ErrBatchExecutionUnknown):
+			h.log.Warn("deploy: propose staged plan", "run", run.id, "error", err)
+			msg += ": the executor could not be asked whether it runs batches; propose it again"
 		case errors.As(err, &ie):
 			msg += ": " + cleanText(ie.Reason)
 		case errors.As(err, &he):
 			msg += ": " + cleanText(he.Error())
 		case errors.Is(err, executions.ErrBatchCritical):
 			msg += ": " + cleanText(err.Error())
+		case errors.Is(err, executions.ErrBatchCredentials):
+			// Usually a locked executor keyring; nothing was proposed and
+			// the plan may be proposed again once it is unlocked.
+			h.log.Warn("deploy: propose staged plan", "run", run.id, "error", err)
+			msg += ": " + executions.ErrBatchCredentials.Error() + " (is the executor unlocked?); propose it again"
 		default:
 			h.log.Error("deploy: propose staged plan", "run", run.id, "error", err)
 		}
@@ -1912,6 +2000,16 @@ func (h *Handler) handleDeployPlan(w http.ResponseWriter, r *http.Request) {
 	h.deployRuns.set(run.id, func(x *deployRun) { x.batchID, x.batchErr = c.ID, "" })
 	h.log.Info("audit", "kind", "deployment_plan_proposed", "run", run.id, "batch", c.ID, "user", user)
 	http.Redirect(w, r, "/batches/"+url.PathEscape(c.ID), http.StatusSeeOther)
+}
+
+// endDeployWithoutBatches ends a bootstrapping run at "joined" because the
+// executor does not run batches; nothing was proposed.
+func (h *Handler) endDeployWithoutBatches(w http.ResponseWriter, id string) {
+	now := time.Now()
+	h.deployRuns.set(id, func(x *deployRun) {
+		x.state, x.expires, x.message, x.batchErr = deployJoined, now.Add(deployRunTTL), deployExecutorNoBatchesMessage, ""
+	})
+	http.Error(w, deployExecutorNoBatchesMessage, http.StatusConflict)
 }
 
 // followBatch moves a bootstrapping run on from its batch:

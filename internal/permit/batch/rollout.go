@@ -555,7 +555,7 @@ func (a *Authority) CommitGate(ctx context.Context, d canonical.Digest, g Gate, 
 // ApproveGateCLI applies a batch gate from the hardened CLI as the
 // executor-local admin.
 func (a *Authority) ApproveGateCLI(d canonical.Digest, g Gate, peerUID uint32) error {
-	if peerUID != a.options.AdminUID {
+	if !a.isAdmin(peerUID) {
 		return ErrAdminRequired
 	}
 	a.mu.Lock()

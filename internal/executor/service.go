@@ -59,6 +59,12 @@ type Service struct {
 	// SetBatchAuthority wires it, in which case the batch RPCs are
 	// Unimplemented.
 	batchAuth *batch.Authority
+	// batchExecution reports that a production batch dispatcher runs
+	// approved batch members; false until EnableBatchExecution.
+	batchExecution bool
+	// batchRun is the production batch member dispatch
+	// (EnableBatchExecution); nil leaves RunBatchMember Unimplemented.
+	batchRun *batchExec
 	// builtinTrust is the local built-in trust transaction (ADR 0007, E19c);
 	// nil until SetBuiltinTrust wires it.
 	builtinTrust BuiltinTrust
@@ -400,6 +406,11 @@ func (s *Service) Lock(ctx context.Context, _ *pb.LockRequest) (*pb.LockResponse
 	// Revoke permits before wiping keys so that no AuthorizeRun can succeed
 	// in between.
 	s.auth.Lock(who)
+	// Batch approvals and member permits are revoked with the keyring
+	// (spec 05: lock revokes pending and approved batch authority).
+	if s.batchAuth != nil {
+		s.batchAuth.Lock()
+	}
 	s.keys.Lock()
 	s.vault.Lock()
 	s.reg.Reset("executor locked")
