@@ -125,8 +125,11 @@ type bucket struct {
 type reporterState struct {
 	idx uint32
 	// seq holds the accepted reports per tier as sorted, disjoint runs
-	// (see seqAccepts); empty means none.
-	seq [numTiers][]timeRun
+	// (see seqAccepts); empty means none. floor holds, per tier, the end
+	// of the newest run dropped at maxSeqRuns (see addRun); zero means
+	// none.
+	seq   [numTiers][]timeRun
+	floor [numTiers]time.Time
 	// buckets counts the buckets this host created and that still exist.
 	buckets int
 	// capped counts the parts dropped at
@@ -153,10 +156,11 @@ func (rs *reporterState) latest() time.Time {
 type timeRun struct{ from, to time.Time }
 
 // excursion reports the kind of the run at ingest horizon (now plus
-// Limits.MaxClockSkew): an excursion run ends after horizon, so it was
-// accepted while the clock ran ahead of now; a normal run ends at or
-// before horizon. The kind is taken at every ingest rather than stored,
-// as an excursion run turns normal once the clock passes it.
+// Limits.MaxClockSkew): an excursion run ends after horizon; a normal run
+// ends at or before horizon. The kind is taken at every ingest rather
+// than stored, as an excursion run turns normal once the clock passes it.
+// While the clock runs ahead the horizon runs ahead with it, so the runs
+// sent then count as normal until the clock returns.
 func (r timeRun) excursion(horizon time.Time) bool { return r.to.After(horizon) }
 
 // maxSeqRuns bounds the runs kept per host and tier. Contiguous reports
@@ -166,32 +170,41 @@ func (r timeRun) excursion(horizon time.Time) bool { return r.to.After(horizon) 
 const maxSeqRuns = 4
 
 // seqAccepts reports whether a report from..to may follow the accepted
-// runs at ingest horizon (now plus Limits.MaxClockSkew).
+// runs and floor (see addRun) at ingest horizon (now plus
+// Limits.MaxClockSkew).
 //
-// Runs that end at or before horizon are the host's report sequence: the
-// report must start at or after, and end strictly after, the newest of
-// them. Runs that end after horizon were accepted while the clock ran
-// ahead (a clock excursion). They do not hold back reports after the
-// clock returned, but a report that overlaps one of them, or a
-// zero-length report inside one, is refused, so their bytes are not
-// counted twice; an exact replay of such a report ends after horizon and
-// is refused by the ingest window anyway. Once the clock has passed an
-// excursion run it is part of the sequence again.
+// Runs that end at or before horizon, and the floor once it is at or
+// before horizon, are the host's report sequence: the report must start
+// at or after, and end strictly after, the newest of them. Runs that end
+// after horizon were accepted while the clock ran ahead (a clock
+// excursion). They do not hold back reports after the clock returned,
+// but a report that overlaps one of them, or a zero-length report inside
+// one, is refused, so their bytes are not counted twice; an exact replay
+// of such a report ends after horizon and is refused by the ingest window
+// anyway. Once the clock has passed an excursion run it is part of the
+// sequence again.
 //
-// An excursion run that starts at or before horizon (a report sent while
-// the clock ran ahead that continued the sequence from before the jump)
-// covers the present after the return; reports there are refused until
-// the clock passes its end. Such a run starts in the present, so the
-// refusal lasts about as long as the jump. addRun never extends it by a
-// merge (see addRun).
+// An excursion run that starts at or before horizon covers the present
+// after the return; reports there are refused until the clock passes its
+// end. A run never ends later than MaxClockSkew after the clock reading
+// at which its last report was accepted, so that refusal lasts at most
+// as long as the jump plus MaxClockSkew. Such a run holds a report sent
+// while the clock ran ahead that reaches back into the present, or one
+// joined to the host's earlier reports across a gap of at most
+// MaxInterval (see addRun).
 //
 // The runs are sorted and disjoint, so their ends increase and the runs
 // at or before horizon are a prefix.
-func seqAccepts(runs []timeRun, from, to, horizon time.Time) bool {
+func seqAccepts(runs []timeRun, floor, from, to, horizon time.Time) bool {
 	var last time.Time
+	if !floor.After(horizon) {
+		last = floor
+	}
 	for _, s := range runs {
 		if !s.excursion(horizon) {
-			last = s.to
+			if s.to.After(last) {
+				last = s.to
+			}
 			continue
 		}
 		if from.Equal(to) {
@@ -206,32 +219,40 @@ func seqAccepts(runs []timeRun, from, to, horizon time.Time) bool {
 }
 
 // addRun adds the accepted report from..to, which seqAccepts allowed at
-// horizon, and returns the updated runs. Runs that touch are merged only
-// when they are of the same kind at horizon (see timeRun.excursion): a
-// normal run joined with an excursion run would become an excursion run
-// reaching back into the present, and after the clock returned it would
-// refuse every report there until the clock passes its end. Gaps between
-// runs are kept, as the clock may return into one after an excursion.
+// horizon, and returns the updated runs and floor. Runs that touch are
+// merged only when they are of the same kind at horizon (see
+// timeRun.excursion), so no merge done after the clock returned joins a
+// run in the present with one sent while the clock ran ahead. Gaps
+// between runs are kept, as the clock may return into one after an
+// excursion.
 //
-// Past maxSeqRuns two neighbouring runs of the same kind are merged, never
-// a normal run with an excursion run:
+// Past maxSeqRuns the bound merges the two neighbouring runs with the
+// shortest gap between them (the oldest such pair on a tie), among those
+// whose merge covers no more of horizon than the two did (both end at or
+// before horizon, or the older one starts after it) and that are at most
+// maxGap (Limits.MaxInterval) apart or both start after horizon. That
+// refuses reports in the gap, which lies before the host's newest report
+// or after horizon, where reports are refused only once the clock
+// reaches the gap. If no pair qualifies, at least three runs end at or
+// before horizon, more than maxGap apart, and the oldest of them is
+// dropped; the floor keeps the latest end of the dropped runs, which
+// seqAccepts treats as a run reaching back without limit while it is at
+// or before horizon. That refuses every report the dropped run refused
+// while the floor is at or before horizon; while it lies after horizon
+// the newer runs refuse those reports for as long as they end at or
+// before horizon.
 //
-//   - With at least two normal runs, the two oldest merge. That only
-//     refuses reports in the gap between them, which lies before the
-//     newest normal run, where seqAccepts refuses reports anyway; the
-//     oldest gap is the one a later backwards clock step is least likely
-//     to reach again.
-//   - Otherwise (at most one normal run, so at least maxSeqRuns excursion
-//     runs) the two excursion runs with the shortest gap between them
-//     merge (the oldest such pair on a tie). The gap lies after horizon,
-//     so no report the host can send now is refused; once the clock
-//     reaches the gap, reports in it are refused until the clock passes
-//     the merged run. An excursion run is never dropped instead: an exact
-//     replay of its reports would be accepted once the clock reaches them.
+// The kind is taken at horizon, which runs ahead with the clock, so
+// while the clock runs ahead a run sent before the jump and one sent
+// during it both count as normal and may be joined, but only across a
+// gap of at most maxGap. A longer gap is joined only while it lies after
+// horizon, so right after the clock returns no run that covers the
+// present spans one; such a run refuses reports until the clock passes
+// its end (see seqAccepts).
 //
 // The runs are sorted and disjoint, so their ends increase and the normal
 // runs are a prefix.
-func addRun(runs []timeRun, from, to, horizon time.Time) []timeRun {
+func addRun(runs []timeRun, floor, from, to, horizon time.Time, maxGap time.Duration) ([]timeRun, time.Time) {
 	i, _ := slices.BinarySearchFunc(runs, from, func(r timeRun, t time.Time) int { return r.from.Compare(t) })
 	runs = slices.Insert(runs, i, timeRun{from, to})
 	out := runs[:0]
@@ -245,23 +266,28 @@ func addRun(runs []timeRun, from, to, horizon time.Time) []timeRun {
 		out = append(out, r)
 	}
 	for len(out) > maxSeqRuns {
-		normal := 0
-		for normal < len(out) && !out[normal].excursion(horizon) {
-			normal++
-		}
-		j := 0
-		if normal < 2 {
-			j = normal
-			for k := normal + 1; k+1 < len(out); k++ {
-				if out[k+1].from.Sub(out[k].to) < out[j+1].from.Sub(out[j].to) {
-					j = k
-				}
+		j := -1
+		for k := 0; k+1 < len(out); k++ {
+			gap := out[k+1].from.Sub(out[k].to)
+			ahead := out[k].from.After(horizon)
+			if (out[k+1].excursion(horizon) && !ahead) || (gap > maxGap && !ahead) {
+				continue
 			}
+			if j < 0 || gap < out[j+1].from.Sub(out[j].to) {
+				j = k
+			}
+		}
+		if j < 0 {
+			if out[0].to.After(floor) {
+				floor = out[0].to
+			}
+			out = slices.Delete(out, 0, 1)
+			continue
 		}
 		out[j].to = out[j+1].to
 		out = slices.Delete(out, j+1, j+2)
 	}
-	return out
+	return out, floor
 }
 
 // IngestResult tells what happened to the observations of an accepted
@@ -506,8 +532,11 @@ func reporterEnd(o *Observation) netip.Addr {
 // restarts or start over with a baseline. Reports accepted while the
 // clock ran ahead (ending after now plus Limits.MaxClockSkew) do not
 // hold back the host's reports after the clock returned; only reports
-// overlapping them are refused (see seqAccepts), and they are never merged
-// with the host's other reports into a run that covers the present.
+// overlapping them are refused (see seqAccepts). They hold back reports
+// in the present right after the return only through a report that
+// reaches back into the present or lies within Limits.MaxInterval of the
+// host's earlier reports, and then only until the clock passes them, at
+// most the jump plus Limits.MaxClockSkew (see seqAccepts and addRun).
 //
 // For every flow and hour the bytes reported by the server end are used
 // when present; the client end's report is kept as confirmation and used
@@ -564,7 +593,7 @@ func (a *Aggregator) Ingest(r Report, own []netip.Addr) (IngestResult, error) {
 	horizon := now.Add(a.limits.MaxClockSkew)
 	rs := a.reporters[r.Host]
 	if rs != nil {
-		if !seqAccepts(rs.seq[ti], r.From, r.To, horizon) {
+		if !seqAccepts(rs.seq[ti], rs.floor[ti], r.From, r.To, horizon) {
 			return IngestResult{}, fmt.Errorf("%w: host %q tier %q: report %s..%s overlaps or precedes an accepted report", ErrDuplicateReport,
 				r.Host, r.Tier, r.From.UTC().Format(time.RFC3339), r.To.UTC().Format(time.RFC3339))
 		}
@@ -576,7 +605,7 @@ func (a *Aggregator) Ingest(r Report, own []netip.Addr) (IngestResult, error) {
 		rs = &reporterState{idx: a.nextIdx}
 		a.reporters[r.Host] = rs
 	}
-	rs.seq[ti] = addRun(rs.seq[ti], r.From, r.To, horizon)
+	rs.seq[ti], rs.floor[ti] = addRun(rs.seq[ti], rs.floor[ti], r.From, r.To, horizon, a.limits.MaxInterval)
 
 	var res IngestResult
 	limit := max(cutoff.Unix(), floor)
