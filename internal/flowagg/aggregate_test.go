@@ -798,6 +798,77 @@ func TestIngestPerReporterBucketCap(t *testing.T) {
 	}
 }
 
+// TestCappedMarkerExpiresWithPrunedHours pins the ADR 0009 D7 contract:
+// the truncated marker of a host must reflect the data that still exists,
+// so it goes away when the hours holding the capped parts are pruned.
+func TestCappedMarkerExpiresWithPrunedHours(t *testing.T) {
+	cur := t0
+	l := DefaultLimits()
+	l.MaxBuckets = 10
+	l.MaxBucketsPerReporter = 3
+	a := NewAggregator(l, func() time.Time { return cur })
+	noisy := manyFlows("10.0.0.1", 8)
+	if res := mustIngest(t, a, report("noisy", t0, t0, noisy...)); res.Applied != 3 || res.Capped != 5 {
+		t.Fatalf("hour 0: %+v", res)
+	}
+	cur = t0.Add(time.Hour)
+	if res := mustIngest(t, a, report("noisy", t0.Add(time.Hour), t0.Add(time.Hour), noisy...)); res.Applied != 0 || res.Capped != 8 {
+		t.Fatalf("hour 1: %+v", res)
+	}
+	// A later report keeps the host tracked after the capped hours are
+	// gone, so the marker cannot hide behind the reporter's removal.
+	cur = t0.Add(2 * time.Hour)
+	mustIngest(t, a, report("noisy", t0.Add(2*time.Hour), t0.Add(2*time.Hour), noisy[0]))
+	if got := a.CappedHosts(); !slices.Equal(got, []string{"noisy"}) {
+		t.Fatalf("CappedHosts = %v, want [noisy]", got)
+	}
+	// Prune hour 0 only: hour 1 is still capped, so the marker stays.
+	cur = t0.Add(Retention + time.Hour + 30*time.Minute)
+	mustIngest(t, a, report("quiet", cur, cur))
+	if got := a.CappedHosts(); !slices.Equal(got, []string{"noisy"}) {
+		t.Fatalf("after hour 0 pruned: CappedHosts = %v, want [noisy]", got)
+	}
+	// Prune hour 1 as well: every capped part is gone, so is the marker.
+	cur = cur.Add(time.Hour)
+	mustIngest(t, a, report("quiet", cur, cur))
+	if got := a.CappedHosts(); len(got) != 0 {
+		t.Fatalf("after all capped hours pruned: CappedHosts = %v, want none", got)
+	}
+}
+
+// TestPruneAdvancesFloorBlocksReplayAfterBackwardsClockStep pins the
+// replay protection: the automatic prune removes hours and reporters, so
+// it must advance the floor too; otherwise a replayed report from a
+// pruned reporter is counted again after the clock steps backwards.
+func TestPruneAdvancesFloorBlocksReplayAfterBackwardsClockStep(t *testing.T) {
+	cur := t0
+	a := NewAggregator(DefaultLimits(), func() time.Time { return cur })
+	old := report("h", t0, t0.Add(time.Minute), Observation{Key: key22, BytesAB: 1, ServerReported: true})
+	mustIngest(t, a, old)
+	// The automatic prune removes the hour and the reporter of "h".
+	cur = cur.Add(Retention + 2*time.Hour)
+	mustIngest(t, a, report("other", cur, cur))
+	if a.Reporters() != 1 {
+		t.Fatalf("reporters = %d, want only the live one", a.Reporters())
+	}
+	// The clock steps backwards: the replayed report is inside the
+	// stepped-back window, but its hour was pruned, so it must still be
+	// refused and not counted again.
+	cur = t0.Add(time.Hour)
+	if _, err := a.Ingest(old, ownOf(old)); !errors.Is(err, ErrOutOfWindow) {
+		t.Fatalf("replay after backwards clock step = %v, want ErrOutOfWindow", err)
+	}
+	// A host the aggregator has not seen cannot bring the hour back
+	// either.
+	late := report("late", t0, t0.Add(time.Minute), Observation{Key: key22, BytesAB: 5})
+	if _, err := a.Ingest(late, ownOf(late)); !errors.Is(err, ErrOutOfWindow) {
+		t.Fatalf("late report = %v, want ErrOutOfWindow", err)
+	}
+	if got := a.TopN(addr("10.0.0.1"), Window{From: t0, To: t0.Add(2 * time.Hour)}, 10); len(got) != 0 {
+		t.Fatalf("pruned hour came back: %+v", got)
+	}
+}
+
 func TestIngestPerReporterCapClampedToGlobal(t *testing.T) {
 	a := NewAggregator(Limits{MaxBuckets: 2, MaxBucketsPerReporter: 100}, func() time.Time { return t0 })
 	if a.limits.MaxBucketsPerReporter != 2 {
