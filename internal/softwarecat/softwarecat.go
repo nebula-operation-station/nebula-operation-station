@@ -67,24 +67,49 @@ type Result struct {
 	Known   bool
 }
 
-// sanitize maps an observed identifier onto the key character set.
-// ASCII letters are lowercased, digits and '.', '_', '-' are kept,
-// every other byte (control characters, non-ASCII, punctuation)
-// becomes a single '-', leading separators are stripped, and the
-// result is truncated to maxKeyLen bytes. An empty result becomes
-// "unknown".
-func sanitize(s string) string {
+// prepare bounds and case-folds an untrusted identifier. It truncates
+// to maxInputLen bytes first, before any other processing, and then
+// lowercases ASCII letters only. Non-ASCII bytes are left untouched, so
+// Unicode case folding can never map a homoglyph (Kelvin sign U+212A,
+// dotted capital I U+0130) onto an ASCII seed identifier. Every
+// normalizer goes through prepare, so all of them agree on how an
+// identifier is folded.
+func prepare(s string) string {
 	if len(s) > maxInputLen {
 		s = s[:maxInputLen]
 	}
-	var b []byte
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c >= 'A' && c <= 'Z' {
+			b := []byte(s)
+			for j := i; j < len(b); j++ {
+				if b[j] >= 'A' && b[j] <= 'Z' {
+					b[j] += 'a' - 'A'
+				}
+			}
+			return string(b)
+		}
+	}
+	return s
+}
+
+// isSep reports whether c is a key separator byte.
+func isSep(c byte) bool {
+	return c == '-' || c == '.' || c == '_'
+}
+
+// sanitize maps an observed identifier onto the key character set.
+// The input is passed through prepare (truncation, ASCII-only
+// lowercasing), digits and '.', '_', '-' are kept, every other byte
+// (control characters, non-ASCII, punctuation) becomes a single '-',
+// the result is truncated to maxKeyLen bytes and leading and trailing
+// separators are stripped. An empty result becomes "unknown".
+func sanitize(s string) string {
+	s = prepare(s)
+	b := make([]byte, 0, len(s))
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
-		case c >= 'A' && c <= 'Z':
-			b = append(b, c+32)
-		case (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-			c == '.' || c == '_' || c == '-':
+		case (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || isSep(c):
 			b = append(b, c)
 		default:
 			if len(b) > 0 && b[len(b)-1] != '-' {
@@ -92,11 +117,14 @@ func sanitize(s string) string {
 			}
 		}
 	}
-	for len(b) > 0 && (b[0] == '-' || b[0] == '.' || b[0] == '_') {
+	for len(b) > 0 && isSep(b[0]) {
 		b = b[1:]
 	}
 	if len(b) > maxKeyLen {
 		b = b[:maxKeyLen]
+	}
+	for len(b) > 0 && isSep(b[len(b)-1]) {
+		b = b[:len(b)-1]
 	}
 	if len(b) == 0 {
 		return unknownKey
@@ -129,10 +157,7 @@ func FromOSRelease(id string, proxmox bool) Result {
 // ghcr.io/foo/bar@sha256:... becomes "bar", netbirdio/netbird becomes
 // "netbird".
 func FromImage(ref string) Result {
-	ref = strings.ToLower(ref)
-	if len(ref) > maxInputLen {
-		ref = ref[:maxInputLen]
-	}
+	ref = prepare(ref)
 	// Strip digest.
 	if i := strings.IndexByte(ref, '@'); i >= 0 {
 		ref = ref[:i]
@@ -215,10 +240,7 @@ var unitSuffixes = []string{
 // and the unit type suffix are stripped, so postgresql@16.service
 // maps to "postgres" and nginx.service to "nginx".
 func FromUnit(name string) Result {
-	n := strings.ToLower(name)
-	if len(n) > maxInputLen {
-		n = n[:maxInputLen]
-	}
+	n := prepare(name)
 	if i := strings.IndexByte(n, '@'); i >= 0 {
 		n = n[:i]
 	}

@@ -58,6 +58,9 @@ influxdb2:
 grafana:
   key: grafana
   display: Grafana
+grafana-server:
+  key: grafana
+  display: Grafana
 postgres:
   key: postgres
   display: PostgreSQL

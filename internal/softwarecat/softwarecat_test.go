@@ -71,7 +71,8 @@ func TestFromOSRelease(t *testing.T) {
 		{"id with spaces", "openSUSE Leap", false, "opensuse-leap", "", false},
 		{"empty", "", false, "unknown", "", false},
 		{"control chars", "ub\x00untu", false, "ub-untu", "", false},
-		{"unicode", "Übontü", false, "bont-", "", false},
+		{"unicode", "Übontü", false, "bont", "", false},
+		{"trailing separators", "foo!?", false, "foo", "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -224,8 +225,11 @@ func TestFromUnit(t *testing.T) {
 		{"service", "nginx.service", "nginx", "Nginx", true},
 		{"template service", "postgresql@16.service", "postgres", "PostgreSQL", true},
 		{"socket", "docker.socket", "docker", "Docker", true},
-		{"timer", "netbird.service", "netbird", "Netbird", true},
-		{"grafana", "grafana-server.service", "grafana-server", "", false},
+		{"timer", "netbird.timer", "netbird", "Netbird", true},
+		{"target", "netbird.target", "netbird", "Netbird", true},
+		{"mount", "minio.mount", "minio", "MinIO", true},
+		{"plain service", "netbird.service", "netbird", "Netbird", true},
+		{"grafana", "grafana-server.service", "grafana", "Grafana", true},
 		{"unknown unit", "foo-bar.service", "foo-bar", "", false},
 		{"uppercase", "NGINX.SERVICE", "nginx", "Nginx", true},
 		{"template only", "postgresql@", "postgres", "PostgreSQL", true},
@@ -306,8 +310,8 @@ func TestDeterministic(t *testing.T) {
 }
 
 func TestSeedMap(t *testing.T) {
-	if ErrSeed != nil {
-		t.Fatalf("embedded seed map failed to load: %v", ErrSeed)
+	if err := SeedError(); err != nil {
+		t.Fatalf("embedded seed map failed to load: %v", err)
 	}
 	if len(seed) == 0 {
 		t.Fatal("seed map is empty")
@@ -353,5 +357,115 @@ func TestSeedMap(t *testing.T) {
 		if !found {
 			t.Errorf("required catalog key %q not present in seed map", key)
 		}
+	}
+}
+
+// normalizers lists every normalizer under one signature so tests can
+// check they agree with each other.
+var normalizers = []struct {
+	name string
+	fn   func(string) Result
+}{
+	{"FromOSRelease", func(s string) Result { return FromOSRelease(s, false) }},
+	{"FromImage", FromImage},
+	{"FromPackage", FromPackage},
+	{"FromUnit", FromUnit},
+}
+
+func TestNoUnicodeFolding(t *testing.T) {
+	// Homoglyphs that Unicode case folding maps onto ASCII must never
+	// resolve to a seed entry, in any normalizer.
+	inputs := []string{
+		// Kelvin sign K (U+212A), plain and uppercase rest.
+		"\u212Aeycloak",
+		"\u212AEYCLOAK",
+		// Dotted capital I (U+0130) and dotless small i (U+0131).
+		"M\u0130N\u0130O",
+		"m\u0131n\u0131o",
+		// Image tag and unit suffix variants.
+		"\u212Aeycloak:24",
+		"\u212Aeycloak.service",
+	}
+	for _, in := range inputs {
+		for _, n := range normalizers {
+			got := n.fn(in)
+			if got.Known {
+				t.Errorf("%s(%q) = %+v, homoglyph mapped to a known entry", n.name, in, got)
+			}
+			if got.Key == "keycloak" || got.Key == "minio" {
+				t.Errorf("%s(%q) key = %q, homoglyph folded into ASCII", n.name, in, got.Key)
+			}
+			if _, err := NewKey(string(got.Key)); err != nil {
+				t.Errorf("%s(%q) key %q invalid: %v", n.name, in, got.Key, err)
+			}
+		}
+	}
+}
+
+func TestNormalizersAgree(t *testing.T) {
+	// For bare names without image, unit or version syntax, every
+	// normalizer must produce the same result.
+	inputs := []string{
+		"keycloak", "KEYCLOAK", "\u212Aeycloak", "M\u0130N\u0130O",
+		"Übontü", "ng\x00inx", "\xff\xfeRedis", "foo bar", "",
+		strings.Repeat("Ab", 1000),
+	}
+	for _, in := range inputs {
+		want := normalizers[0].fn(in)
+		for _, n := range normalizers[1:] {
+			if got := n.fn(in); got != want {
+				t.Errorf("%s(%q) = %+v, %s gives %+v", n.name, in, got, normalizers[0].name, want)
+			}
+		}
+	}
+}
+
+func TestInputTruncatedBeforeProcessing(t *testing.T) {
+	// A known name that only appears after maxInputLen bytes must not
+	// be seen by any normalizer.
+	pad := strings.Repeat("x", maxInputLen)
+	for _, n := range normalizers {
+		for _, in := range []string{pad + "/keycloak", pad + "@keycloak", pad + "keycloak"} {
+			got := n.fn(in)
+			if got.Known {
+				t.Errorf("%s: name after byte %d was processed: %+v", n.name, maxInputLen, got)
+			}
+		}
+	}
+	// Multi-KB hostile input is handled by every normalizer, and
+	// invalid UTF-8 does not change the processed window.
+	hostile := []string{
+		strings.Repeat("\u212A", 4000),
+		strings.Repeat("\xff", 8000),
+		strings.Repeat("A/", 4000),
+		strings.Repeat("@:", 4000),
+	}
+	for _, n := range normalizers {
+		for _, in := range hostile {
+			got := n.fn(in)
+			if _, err := NewKey(string(got.Key)); err != nil {
+				t.Errorf("%s: hostile input gave invalid key %q: %v", n.name, got.Key, err)
+			}
+			if got.Known {
+				t.Errorf("%s: hostile input mapped to known entry %+v", n.name, got)
+			}
+		}
+	}
+	if got := FromImage(strings.Repeat("\xff", maxInputLen-8) + "keycloak"); got.Key != "keycloak" {
+		t.Errorf("FromImage window shifted by invalid UTF-8: key %q", got.Key)
+	}
+}
+
+func TestLoadSeedAllOrNothing(t *testing.T) {
+	bad := []byte("a:\n  key: a\n  display: A\nb:\n  key: \"B!\"\n  display: B\n")
+	m, err := loadSeed(bad)
+	if err == nil {
+		t.Fatal("loadSeed accepted an invalid entry")
+	}
+	if len(m) != 0 {
+		t.Fatalf("loadSeed returned partial map on error: %v", m)
+	}
+	if _, err := loadSeed([]byte("{")); err == nil {
+		t.Fatal("loadSeed accepted malformed YAML")
 	}
 }
