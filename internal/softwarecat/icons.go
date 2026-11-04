@@ -76,19 +76,30 @@ func (s IconSubject) validate() error {
 // IconChange is one row of an icon history: the subject's icon changed
 // from PrevSHA to SHA ("" is the generic symbol). RollbackOf is the ID
 // of the change this one rolled back, 0 for an ordinary change.
+// AssetDeleted marks the end of a deleted asset's history (recorded by
+// the database, ChangedBy "system"; PrevSHA is the override the delete
+// removed, "" if there was none); that change and every older one
+// belong to the deleted asset and cannot be rolled back.
 type IconChange struct {
-	ID         int64
-	Subject    IconSubject
-	SHA        string
-	PrevSHA    string
-	RollbackOf int64
-	ChangedBy  string
-	ChangedAt  time.Time
+	ID           int64
+	Subject      IconSubject
+	SHA          string
+	PrevSHA      string
+	RollbackOf   int64
+	AssetDeleted bool
+	ChangedBy    string
+	ChangedAt    time.Time
 }
 
+// assetDeletedMark is the rollback_of value of the history row that
+// migration 0033 writes when an asset with icon history is deleted.
+const assetDeletedMark = -1
+
 // validSourceURL checks an icon source URL for storage: printable
-// ASCII, bounded, absolute https with a host and without user info.
-// The URL is stored for audit only; the fetch policy itself is
+// ASCII, bounded, absolute https with a host, without user info and
+// without query string or fragment (signed or tokenized URLs carry
+// their secret there, and the URL ends up in the audit detail). The URL
+// is stored for audit only; the fetch policy itself is
 // internal/iconfetch's.
 func validSourceURL(raw string) error {
 	if raw == "" || len(raw) > maxSourceURLLen {
@@ -97,6 +108,9 @@ func validSourceURL(raw string) error {
 	for i := 0; i < len(raw); i++ {
 		if c := raw[i]; c <= ' ' || c >= 0x7f {
 			return fmt.Errorf("icon source URL byte %d: %w", i, ErrInvalidInput)
+		}
+		if c := raw[i]; c == '?' || c == '#' {
+			return fmt.Errorf("icon source URL with query string or fragment: %w", ErrInvalidInput)
 		}
 	}
 	u, err := url.Parse(raw)
@@ -212,7 +226,12 @@ func (s *Store) SetIcon(ctx context.Context, actor string, subject IconSubject, 
 // RollbackIcon undoes the icon change changeID of subject: the subject
 // gets the icon it had before that change (one-click rollback is
 // RollbackIcon with the newest change). The rollback is itself audited
-// and appended to the history, so it can be rolled back too.
+// (as icon_rollback, for catalog keys and asset overrides alike) and
+// appended to the history, so it can be rolled back too. This holds
+// also when the subject already has the icon the rollback restores.
+// For an asset, the asset must exist, and changes of an earlier asset
+// with the same ID (up to and including the change that recorded its
+// deletion) are not found.
 func (s *Store) RollbackIcon(ctx context.Context, actor string, subject IconSubject, changeID int64) error {
 	if err := validActor(actor); err != nil {
 		return err
@@ -225,14 +244,30 @@ func (s *Store) RollbackIcon(ctx context.Context, actor string, subject IconSubj
 	}
 	return s.adminChange(ctx, func(tx *sql.Tx, now time.Time) error {
 		var prev sql.NullString
+		var mark int64
 		err := tx.QueryRowContext(ctx,
-			`SELECT prev_sha FROM software_icon_history WHERE id = ? AND subject_kind = ? AND subject_id = ?`,
-			changeID, string(subject.Kind), subject.ID).Scan(&prev)
+			`SELECT prev_sha, rollback_of FROM software_icon_history WHERE id = ? AND subject_kind = ? AND subject_id = ?`,
+			changeID, string(subject.Kind), subject.ID).Scan(&prev, &mark)
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("icon change %d of %s %s: %w", changeID, subject.Kind, subject.ID, ErrNotFound)
 		}
 		if err != nil {
 			return fmt.Errorf("read icon change %d: %w", changeID, err)
+		}
+		if subject.Kind == SubjectAsset {
+			// A change at or before an asset deletion belongs to the
+			// deleted asset, not to a later one with the same ID.
+			var later int
+			err := tx.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM software_icon_history
+				 WHERE subject_kind = 'asset' AND subject_id = ? AND id >= ? AND rollback_of = ?`,
+				subject.ID, changeID, assetDeletedMark).Scan(&later)
+			if err != nil {
+				return fmt.Errorf("read icon history of asset %s: %w", subject.ID, err)
+			}
+			if mark == assetDeletedMark || later > 0 {
+				return fmt.Errorf("icon change %d of asset %s (asset deleted since): %w", changeID, subject.ID, ErrNotFound)
+			}
 		}
 		_, err = s.applyIcon(ctx, tx, now, actor, subject, prev.String, changeID)
 		return err
@@ -240,7 +275,10 @@ func (s *Store) RollbackIcon(ctx context.Context, actor string, subject IconSubj
 }
 
 // applyIcon sets subject's icon to sha inside tx, appends the history
-// row and the audit row. It reports whether anything changed.
+// row and the audit row. Setting the current icon again (rollbackOf 0)
+// writes nothing; a rollback (rollbackOf > 0) is always recorded and
+// audited as icon_rollback, also when it lands on the current icon. It
+// reports whether a history row was written.
 func (s *Store) applyIcon(ctx context.Context, tx *sql.Tx, now time.Time, actor string, subject IconSubject, sha string, rollbackOf int64) (bool, error) {
 	if sha != "" {
 		var one int
@@ -265,29 +303,20 @@ func (s *Store) applyIcon(ctx context.Context, tx *sql.Tx, now time.Time, actor 
 			return false, fmt.Errorf("icon of %s (merged into %s): %w", subject.ID, e.MergedInto, ErrMerged)
 		}
 		cur = e.IconSHA
+		action = "icon_set"
 		if cur == sha {
-			return false, nil
+			break
 		}
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE software_catalog SET icon_sha = ?, updated_by = ?, updated_at = ? WHERE key = ?`,
 			nullSHA(sha), actor, ts, subject.ID); err != nil {
 			return false, fmt.Errorf("set icon of %s: %w", subject.ID, err)
 		}
-		action = "icon_set"
 	case SubjectAsset:
-		err := tx.QueryRowContext(ctx, `SELECT icon_sha FROM asset_icon_overrides WHERE asset_id = ?`, subject.ID).Scan(&cur)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return false, fmt.Errorf("read icon override of asset %s: %w", subject.ID, err)
-		}
-		if cur == sha {
-			return false, nil
-		}
-		if sha == "" {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM asset_icon_overrides WHERE asset_id = ?`, subject.ID); err != nil {
-				return false, fmt.Errorf("clear icon override of asset %s: %w", subject.ID, err)
-			}
-			action = "asset_icon_clear"
-		} else {
+		// Setting an override and any rollback need the asset; only
+		// clearing an override (a no-op for a missing asset, whose
+		// override the foreign key already removed) does not.
+		if sha != "" || rollbackOf > 0 {
 			var one int
 			err := tx.QueryRowContext(ctx, `SELECT 1 FROM assets WHERE id = ?`, subject.ID).Scan(&one)
 			if errors.Is(err, sql.ErrNoRows) {
@@ -296,6 +325,20 @@ func (s *Store) applyIcon(ctx context.Context, tx *sql.Tx, now time.Time, actor 
 			if err != nil {
 				return false, fmt.Errorf("read asset %s: %w", subject.ID, err)
 			}
+		}
+		err := tx.QueryRowContext(ctx, `SELECT icon_sha FROM asset_icon_overrides WHERE asset_id = ?`, subject.ID).Scan(&cur)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return false, fmt.Errorf("read icon override of asset %s: %w", subject.ID, err)
+		}
+		if cur == sha {
+			break
+		}
+		if sha == "" {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM asset_icon_overrides WHERE asset_id = ?`, subject.ID); err != nil {
+				return false, fmt.Errorf("clear icon override of asset %s: %w", subject.ID, err)
+			}
+			action = "asset_icon_clear"
+		} else {
 			if _, err := tx.ExecContext(ctx,
 				`INSERT INTO asset_icon_overrides (asset_id, icon_sha, updated_by, updated_at) VALUES (?, ?, ?, ?)
 				 ON CONFLICT (asset_id) DO UPDATE SET icon_sha = excluded.icon_sha, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
@@ -305,18 +348,29 @@ func (s *Store) applyIcon(ctx context.Context, tx *sql.Tx, now time.Time, actor 
 			action = "asset_icon_set"
 		}
 	}
+	unchanged := cur == sha
+	if unchanged && rollbackOf == 0 {
+		// Setting the current icon again is not a change. A rollback
+		// is an admin decision and is recorded even when it lands on
+		// the current icon.
+		return false, nil
+	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO software_icon_history (subject_kind, subject_id, icon_sha, prev_sha, rollback_of, changed_by, changed_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		string(subject.Kind), subject.ID, nullSHA(sha), nullSHA(cur), rollbackOf, actor, ts); err != nil {
 		return false, fmt.Errorf("record icon history of %s %s: %w", subject.Kind, subject.ID, err)
 	}
-	if rollbackOf > 0 && subject.Kind == SubjectCatalog {
-		action = "icon_rollback"
-	}
 	detail := fmt.Sprintf("%s -> %s", orNone(cur), orNone(sha))
 	if rollbackOf > 0 {
-		detail += fmt.Sprintf(" (rollback of change %d)", rollbackOf)
+		// Rollbacks of catalog icons and of asset overrides share one
+		// action; the detail names the subject kind.
+		action = "icon_rollback"
+		detail = fmt.Sprintf("%s: %s (rollback of change %d", subject.Kind, detail, rollbackOf)
+		if unchanged {
+			detail += ", no change"
+		}
+		detail += ")"
 	}
 	if err := audit(ctx, tx, now, actor, action, subject.ID, detail); err != nil {
 		return false, err
@@ -354,6 +408,9 @@ func (s *Store) IconHistory(ctx context.Context, subject IconSubject, limit int)
 		var at int64
 		if err := rows.Scan(&c.ID, &c.SHA, &c.PrevSHA, &c.RollbackOf, &c.ChangedBy, &at); err != nil {
 			return nil, fmt.Errorf("read icon history of %s %s: %w", subject.Kind, subject.ID, err)
+		}
+		if c.RollbackOf == assetDeletedMark {
+			c.RollbackOf, c.AssetDeleted = 0, true
 		}
 		c.ChangedAt = time.Unix(0, at)
 		out = append(out, c)
