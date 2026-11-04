@@ -100,7 +100,7 @@ func (s *Service) checkMemberCredentials(where string, member canonical.BatchMem
 // public-key fingerprints only. Like the other batch RPCs it is
 // Unimplemented while no batch authority is wired. The response also says
 // whether approved batch members are executed (batch_execution_available),
-// which is false unless SetBatchExecutionAvailable was called.
+// which is false unless EnableBatchExecution wired the dispatcher.
 func (s *Service) GetBatchCredentialVersions(_ context.Context, req *pb.GetBatchCredentialVersionsRequest) (*pb.GetBatchCredentialVersionsResponse, error) {
 	if err := validateBatchMessage(req); err != nil {
 		return nil, err

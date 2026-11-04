@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
@@ -25,18 +26,27 @@ type probedBatches struct {
 	probeErr   error
 	probes     int
 	proposeErr error
+	// probeLeft and proposeLeft are the time left on the last probe's and
+	// proposal's deadlines when they were called.
+	probeLeft, proposeLeft time.Duration
 }
 
-func (p *probedBatches) BatchesAvailable(context.Context) (bool, error) {
+func (p *probedBatches) BatchesAvailable(ctx context.Context) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.probes++
+	if d, ok := ctx.Deadline(); ok {
+		p.probeLeft = time.Until(d)
+	}
 	return p.available, p.probeErr
 }
 
 func (p *probedBatches) ProposeBatch(ctx context.Context, user string, req executions.BatchRequest) (executions.BatchCreated, error) {
 	p.mu.Lock()
 	err := p.proposeErr
+	if d, ok := ctx.Deadline(); ok {
+		p.proposeLeft = time.Until(d)
+	}
 	p.mu.Unlock()
 	if err != nil {
 		return executions.BatchCreated{}, err
@@ -52,6 +62,58 @@ func newProbedDPEnv(t *testing.T, available bool, probeErr error) (*dpEnv, *prob
 		o.DeployBatches = p
 	})
 	return e, p
+}
+
+// gatedBatches is a planner whose proposals probe the executor themselves
+// (the server's deployBatches).
+type gatedBatches struct{ *probedBatches }
+
+func (gatedBatches) ProposalsGated() bool { return true }
+
+// Proposing the staged plan probes with its own deadline, separate from
+// the proposal's: the probe's time never comes out of the proposal's
+// budget (review #256).
+func TestDeployPlanProbeHasItsOwnDeadline(t *testing.T) {
+	e, p := newProbedDPEnv(t, true, nil)
+	id, run := e.toBootstrapping(t)
+	e.waitState(t, run, "bootstrapping")
+	e.proposePlan(t, id, "batch-1")
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.probeLeft <= 0 || p.probeLeft > 10*time.Second {
+		t.Errorf("probe deadline %s, want its own bound of at most 10s", p.probeLeft)
+	}
+	if p.proposeLeft <= p.probeLeft {
+		t.Errorf("proposal deadline %s not independent of the probe's %s", p.proposeLeft, p.probeLeft)
+	}
+}
+
+// A planner that gates its own proposals is not probed a second time when
+// the plan is proposed: the executor is asked once, inside the proposal,
+// whose deadline leaves room for that probe.
+func TestDeployPlanGatedPlannerProbesOnce(t *testing.T) {
+	p := &probedBatches{available: true}
+	e := newDPEnvWith(t, func(o *ui.Options) {
+		p.fakeDeployBatches = o.DeployBatches.(*fakeDeployBatches)
+		o.DeployBatches = gatedBatches{p}
+	})
+	id, run := e.toBootstrapping(t)
+	e.waitState(t, run, "bootstrapping")
+	p.mu.Lock()
+	before := p.probes
+	p.mu.Unlock()
+	e.proposePlan(t, id, "batch-1")
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.probes != before {
+		t.Errorf("the plan probed %d more times; the gated planner probes itself", p.probes-before)
+	}
+	if p.proposeLeft <= 10*time.Second {
+		t.Errorf("proposal deadline %s leaves no room for the planner's probe", p.proposeLeft)
+	}
+	if len(e.batches.requests) != 1 {
+		t.Fatalf("staged plan = %+v", e.batches.requests)
+	}
 }
 
 // With batches available on the executor, a run with bootstrap modules and

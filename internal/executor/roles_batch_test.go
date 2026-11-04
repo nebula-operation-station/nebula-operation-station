@@ -37,6 +37,7 @@ func TestBatchMethodRoles(t *testing.T) {
 		pb.ExecutorService_ReviewBatch_FullMethodName:     {peercred.RoleAdmin},
 		pb.ExecutorService_ApproveBatchCLI_FullMethodName: {peercred.RoleAdmin},
 		pb.ExecutorService_GetBatchStatus_FullMethodName:  {peercred.RoleServer, peercred.RoleAdmin},
+		pb.ExecutorService_RunBatchMember_FullMethodName:  {peercred.RoleServer},
 	}
 	roles := []peercred.Role{peercred.RoleServer, peercred.RoleAdmin, peercred.RolePVECollector, peercred.Role("discovery")}
 	uids := map[uint32][]peercred.Role{}

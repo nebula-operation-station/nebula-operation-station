@@ -34,10 +34,12 @@ type batchConfig struct {
 }
 
 // setupBatchAuthority builds the batch approval authority (ADR 0007 E19b)
-// with the executor's production batch policy and wires it into svc, so the
-// batch RPCs, including GetBatchCredentialVersions, are served. The caller
-// locks the returned authority on shutdown; Service.Lock locks it with the
-// keyring.
+// with the executor's production batch policy, wires it into svc, so the
+// batch RPCs, including GetBatchCredentialVersions, are served, and wires
+// the production batch dispatcher (EnableBatchExecution, E11), so approved
+// members run through RunBatchMember and batch execution is advertised.
+// The caller locks the returned authority on shutdown; Service.Lock locks
+// it with the keyring.
 func setupBatchAuthority(svc *executor.Service, c batchConfig) (*batch.Authority, error) {
 	pol, err := executor.NewBatchPolicy(svc, c.Risk, c.Source)
 	if err != nil {
@@ -51,6 +53,9 @@ func setupBatchAuthority(svc *executor.Service, c batchConfig) (*batch.Authority
 		return nil, fmt.Errorf("batch authority: %w", err)
 	}
 	svc.SetBatchAuthority(a)
+	if err := svc.EnableBatchExecution(); err != nil {
+		return nil, fmt.Errorf("batch execution: %w", err)
+	}
 	return a, nil
 }
 
