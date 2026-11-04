@@ -5,8 +5,8 @@ package trafficstore
 import (
 	"cmp"
 	"context"
+	"database/sql"
 	"fmt"
-	"math"
 	"net/netip"
 	"slices"
 	"strings"
@@ -15,21 +15,65 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/flowagg"
 )
 
-// bucketRow is one stored flow_buckets row.
-type bucketRow struct {
-	hour           int64
-	key            flowagg.FlowKey
-	bytesAB        int64
-	bytesBA        int64
-	conns          int64
-	lowerBound     bool
-	serverReported bool
-	reporter       string
-}
+// Query bounds, next to the code that enforces them.
+const (
+	// MaxTopN is the largest per-node result size TopN and
+	// OverviewUnion accept.
+	MaxTopN = 20
+	// MaxOverviewNodes is the largest node list OverviewUnion accepts; it
+	// bounds the queries one call runs and its result to
+	// MaxOverviewNodes*MaxTopN flows.
+	MaxOverviewNodes = 4096
+	// maxTopRows bounds the rows one per-node query returns to Go. The
+	// SQL keeps the flows ranked within the top n by total bytes,
+	// including ties at the boundary; when more than maxTopRows flows tie,
+	// the extra ones are cut in SQL's (deterministic) key order.
+	maxTopRows = 256
+)
 
-const bucketSelect = `SELECT hour, a, b, proto, server_port, server_side, tier,
-    bytes_ab, bytes_ba, connections, lower_bound, server_reported, reporter
-    FROM flow_buckets`
+// topFlowsSQL computes the top flows of one node in SQL, so no more than
+// maxTopRows rows reach Go. Parameters: ?1 node address, ?2/?3 the
+// inclusive hour range, ?4 n, ?5 the row cap.
+//
+// per_hour applies the flowagg merge per flow and hour: there is at most
+// one row per side, and the server end's row is used when present,
+// otherwise the client end's; an hour is confirmed when both sides
+// reported. per_flow sums the hours (maxStoredCounter leaves headroom for
+// these sums); a flow is confirmed when every counted hour is.
+const topFlowsSQL = `
+WITH node_rows AS (
+	SELECT hour, a, b, proto, server_port, server_side, tier, server_reported,
+	       bytes_ab, bytes_ba, connections, lower_bound
+	FROM flow_buckets WHERE a = ?1 AND hour BETWEEN ?2 AND ?3
+	UNION ALL
+	SELECT hour, a, b, proto, server_port, server_side, tier, server_reported,
+	       bytes_ab, bytes_ba, connections, lower_bound
+	FROM flow_buckets WHERE b = ?1 AND hour BETWEEN ?2 AND ?3
+), per_hour AS (
+	SELECT a, b, proto, server_port, server_side, tier, hour,
+	       MAX(server_reported) AS has_server,
+	       COUNT(*) AS sides,
+	       COALESCE(MAX(CASE WHEN server_reported = 1 THEN bytes_ab END), MAX(bytes_ab)) AS ab,
+	       COALESCE(MAX(CASE WHEN server_reported = 1 THEN bytes_ba END), MAX(bytes_ba)) AS ba,
+	       COALESCE(MAX(CASE WHEN server_reported = 1 THEN connections END), MAX(connections)) AS conns,
+	       COALESCE(MAX(CASE WHEN server_reported = 1 THEN lower_bound END), MAX(lower_bound)) AS lb
+	FROM node_rows
+	GROUP BY a, b, proto, server_port, server_side, tier, hour
+), per_flow AS (
+	SELECT a, b, proto, server_port, server_side, tier,
+	       SUM(ab) AS ab, SUM(ba) AS ba, SUM(conns) AS conns,
+	       MAX(lb) AS lb, MAX(has_server) AS has_server, MIN(sides) AS min_sides,
+	       MIN(hour) AS first_hour, MAX(hour) AS last_hour
+	FROM per_hour
+	GROUP BY a, b, proto, server_port, server_side, tier
+), ranked AS (
+	SELECT *, RANK() OVER (ORDER BY ab + ba DESC) AS rnk FROM per_flow
+)
+SELECT a, b, proto, server_port, server_side, tier, ab, ba, conns, lb, has_server, min_sides,
+       first_hour, last_hour
+FROM ranked WHERE rnk <= ?4
+ORDER BY rnk, a, b, proto, server_port, server_side, tier
+LIMIT ?5`
 
 // checkWindow validates a query window: non-empty and no wider than the
 // retention.
@@ -43,17 +87,20 @@ func checkWindow(w flowagg.Window, retention time.Duration) error {
 	return nil
 }
 
-// hourRange returns the inclusive range of hours that overlap w.
-func hourRange(w flowagg.Window) (min, max int64) {
-	from := w.From.Unix()
-	to := w.To.Unix()
-	min = floorDiv(from, secondsPerHour)
-	if to%secondsPerHour == 0 {
-		max = to/secondsPerHour - 1
-	} else {
-		max = to / secondsPerHour
+// checkN applies the default to n and bounds it by MaxTopN.
+func checkN(n int) (int, error) {
+	if n <= 0 {
+		return flowagg.DefaultOverviewN, nil
 	}
-	return min, max
+	if n > MaxTopN {
+		return 0, fmt.Errorf("%w: n %d exceeds %d", ErrInvalidQuery, n, MaxTopN)
+	}
+	return n, nil
+}
+
+// hourRange returns the inclusive range of hours that overlap w.
+func hourRange(w flowagg.Window) (lo, hi int64) {
+	return floorDiv(w.From.Unix(), secondsPerHour), floorDiv(w.To.Unix()-1, secondsPerHour)
 }
 
 func floorDiv(a, b int64) int64 {
@@ -64,132 +111,91 @@ func floorDiv(a, b int64) int64 {
 	return q
 }
 
-func validNode(a netip.Addr) error {
-	n := a.Unmap().WithZone("")
-	switch {
-	case !n.IsValid():
-		return fmt.Errorf("%w: invalid node", ErrInvalidWindow)
-	case n.IsUnspecified() || n.IsLoopback():
-		return fmt.Errorf("%w: unspecified or loopback node", ErrInvalidWindow)
+// normalizeNode returns the stored form of a query node.
+func normalizeNode(a netip.Addr) (netip.Addr, error) {
+	n, err := normalizeAddress(a)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("%w: node %s: %v", ErrInvalidQuery, a, err)
 	}
-	return nil
+	return n, nil
 }
 
-// queryRows returns the stored rows where a or b is endpoint and the
-// hour lies in [hMin, hMax]. The indexes (a, hour) and (b, hour) back
-// the two range scans.
-func (s *Store) queryRows(ctx context.Context, endpoint string, hMin, hMax int64) ([]bucketRow, error) {
-	rows, err := s.db.QueryContext(ctx,
-		bucketSelect+` WHERE (a = ? OR b = ?) AND hour >= ? AND hour <= ?`,
-		endpoint, endpoint, hMin, hMax)
+// parseStoredAddr parses an address read from flow_buckets.
+func parseStoredAddr(col, s string) (netip.Addr, error) {
+	a, err := netip.ParseAddr(s)
 	if err != nil {
-		return nil, fmt.Errorf("trafficstore: query buckets: %w", err)
+		return netip.Addr{}, fmt.Errorf("trafficstore: stored flow end %s %q: %w", col, s, err)
+	}
+	return a, nil
+}
+
+// topFlows returns the top-n flows of node in hours [lo, hi], largest
+// first with ties ordered by flow key, merged with flowagg semantics.
+// stmt runs topFlowsSQL; OverviewUnion prepares it once for all nodes.
+func topFlows(ctx context.Context, stmt *sql.Stmt, node netip.Addr, lo, hi int64, n int) ([]flowagg.FlowTotal, error) {
+	rows, err := stmt.QueryContext(ctx, node.String(), lo, hi, n, maxTopRows)
+	if err != nil {
+		return nil, fmt.Errorf("trafficstore: query top flows of %s: %w", node, err)
 	}
 	defer rows.Close()
-	var out []bucketRow
+	out := make([]flowagg.FlowTotal, 0, n)
 	for rows.Next() {
-		var r bucketRow
-		var a, b, tier, reporter string
-		var proto, port, side, lower, server int64
-		if err := rows.Scan(&r.hour, &a, &b, &proto, &port, &side, &tier,
-			&r.bytesAB, &r.bytesBA, &r.conns, &lower, &server, &reporter); err != nil {
-			return nil, fmt.Errorf("trafficstore: query buckets: %w", err)
+		var a, b, tier string
+		var proto, port, side, ab, ba, conns, lb, server, minSides, first, last int64
+		if err := rows.Scan(&a, &b, &proto, &port, &side, &tier, &ab, &ba, &conns, &lb, &server, &minSides, &first, &last); err != nil {
+			return nil, fmt.Errorf("trafficstore: query top flows of %s: %w", node, err)
 		}
-		// The database is written only by this package's validated
-		// writers; MustParse cannot fail on stored values.
-		r.key = flowagg.FlowKey{
-			A:          netip.MustParseAddr(a),
-			B:          netip.MustParseAddr(b),
-			Proto:      flowagg.Proto(proto),
-			ServerPort: uint16(port),
-			Server:     flowagg.Side(side),
-			Tier:       tier,
+		t, err := storedTotal(a, b, tier, proto, port, side)
+		if err != nil {
+			return nil, err
 		}
-		r.lowerBound = lower != 0
-		r.serverReported = server != 0
-		r.reporter = reporter
-		out = append(out, r)
+		if ab < 0 || ba < 0 || conns < 0 {
+			return nil, fmt.Errorf("trafficstore: stored flow %s-%s: negative counter", a, b)
+		}
+		t.BytesAB, t.BytesBA, t.Connections = uint64(ab), uint64(ba), uint64(conns)
+		t.LowerBound = lb != 0
+		t.ServerReported = server != 0
+		t.Confirmed = minSides >= 2
+		t.FirstSeen = time.Unix(first*secondsPerHour, 0).UTC()
+		t.LastSeen = time.Unix((last+1)*secondsPerHour, 0).UTC()
+		out = append(out, t)
 	}
 	if err := rows.Close(); err != nil {
-		return nil, fmt.Errorf("trafficstore: query buckets: %w", err)
+		return nil, fmt.Errorf("trafficstore: query top flows of %s: %w", node, err)
+	}
+	sortTotals(out)
+	if len(out) > n {
+		out = out[:n]
 	}
 	return out, nil
 }
 
-// hourSides holds the chosen server and client row of one flow in one
-// hour; when several reporters claim a side, the lexicographically
-// smallest reporter wins (deterministic, fail-closed).
-type hourSides struct {
-	server, client *bucketRow
-}
-
-// mergeRows merges stored rows into per-flow totals with flowagg
-// semantics: per flow and hour the server end's report is used when
-// present, otherwise the client end's; Confirmed means both ends
-// reported in every counted hour.
-func mergeRows(rows []bucketRow) map[flowagg.FlowKey]*flowagg.FlowTotal {
-	byHour := make(map[flowagg.FlowKey]map[int64]*hourSides)
-	for i := range rows {
-		r := &rows[i]
-		hm := byHour[r.key]
-		if hm == nil {
-			hm = make(map[int64]*hourSides)
-			byHour[r.key] = hm
-		}
-		hs := hm[r.hour]
-		if hs == nil {
-			hs = &hourSides{}
-			hm[r.hour] = hs
-		}
-		slot := &hs.client
-		if r.serverReported {
-			slot = &hs.server
-		}
-		if *slot == nil || r.reporter < (*slot).reporter {
-			*slot = r
-		}
+// storedTotal builds the key of a stored flow, checking the stored
+// values instead of trusting them.
+func storedTotal(a, b, tier string, proto, port, side int64) (flowagg.FlowTotal, error) {
+	addrA, err := parseStoredAddr("a", a)
+	if err != nil {
+		return flowagg.FlowTotal{}, err
 	}
-	out := make(map[flowagg.FlowKey]*flowagg.FlowTotal, len(byHour))
-	for k, hm := range byHour {
-		t := &flowagg.FlowTotal{Key: k}
-		counted, confirmed := 0, 0
-		for _, hs := range hm {
-			eff := hs.client
-			if hs.server != nil {
-				eff = hs.server
-				t.ServerReported = true
-			}
-			if eff == nil {
-				continue
-			}
-			start := time.Unix(eff.hour*secondsPerHour, 0).UTC()
-			end := time.Unix((eff.hour+1)*secondsPerHour, 0).UTC()
-			if counted == 0 || start.Before(t.FirstSeen) {
-				t.FirstSeen = start
-			}
-			if counted == 0 || end.After(t.LastSeen) {
-				t.LastSeen = end
-			}
-			counted++
-			if hs.server != nil && hs.client != nil {
-				confirmed++
-			}
-			t.BytesAB = satAdd(t.BytesAB, uint64(eff.bytesAB))
-			t.BytesBA = satAdd(t.BytesBA, uint64(eff.bytesBA))
-			t.Connections = satAdd(t.Connections, uint64(eff.conns))
-			t.LowerBound = t.LowerBound || eff.lowerBound
-		}
-		t.Confirmed = counted > 0 && confirmed == counted
-		out[k] = t
+	addrB, err := parseStoredAddr("b", b)
+	if err != nil {
+		return flowagg.FlowTotal{}, err
 	}
-	return out
-}
-
-func satAdd(a, b uint64) uint64 {
-	if a > math.MaxUint64-b {
-		return math.MaxUint64
+	if port < 1 || port > 65535 || proto < 0 || proto > 255 || side < 0 || side > 255 {
+		return flowagg.FlowTotal{}, fmt.Errorf("trafficstore: stored flow %s-%s: proto/port/side out of range", a, b)
 	}
-	return a + b
+	k := flowagg.FlowKey{
+		A:          addrA,
+		B:          addrB,
+		Proto:      flowagg.Proto(proto),
+		ServerPort: uint16(port),
+		Server:     flowagg.Side(side),
+		Tier:       tier,
+	}
+	if err := validKey(k); err != nil {
+		return flowagg.FlowTotal{}, fmt.Errorf("trafficstore: stored flow %s-%s: %v", a, b, err)
+	}
+	return flowagg.FlowTotal{Key: k}, nil
 }
 
 // compareKey orders flow keys deterministically, mirroring
@@ -213,105 +219,91 @@ func compareKey(a, b flowagg.FlowKey) int {
 	return strings.Compare(a.Tier, b.Tier)
 }
 
-// topOf sorts the totals by total bytes (both directions) descending,
-// ties by flow key, and returns the first n.
-func topOf(ts []*flowagg.FlowTotal, n int) []*flowagg.FlowTotal {
-	slices.SortFunc(ts, func(a, b *flowagg.FlowTotal) int {
+// sortTotals orders by total bytes (both directions) descending, ties by
+// flow key.
+func sortTotals(ts []flowagg.FlowTotal) {
+	slices.SortFunc(ts, func(a, b flowagg.FlowTotal) int {
 		if c := cmp.Compare(b.Total(), a.Total()); c != 0 {
 			return c
 		}
 		return compareKey(a.Key, b.Key)
 	})
-	if len(ts) > n {
-		ts = ts[:n]
-	}
-	return ts
 }
 
 // TopN returns the n flows of node with the most bytes (both directions)
 // in w, largest first; ties are ordered by flow key. n <= 0 returns the
-// top 5 (flowagg.DefaultOverviewN). The stored rows are merged with
+// top 5 (flowagg.DefaultOverviewN); n above MaxTopN is refused with
+// ErrInvalidQuery. The stored rows are merged and ranked in SQL with
 // flowagg semantics: per flow and hour the server end's report is used
 // when present, otherwise the client end's.
 func (s *Store) TopN(ctx context.Context, node netip.Addr, w flowagg.Window, n int) ([]flowagg.FlowTotal, error) {
-	if n <= 0 {
-		n = flowagg.DefaultOverviewN
+	n, err := checkN(n)
+	if err != nil {
+		return nil, err
 	}
 	if err := checkWindow(w, s.retention); err != nil {
 		return nil, err
 	}
-	if err := validNode(node); err != nil {
-		return nil, err
-	}
-	hMin, hMax := hourRange(w)
-	node = node.Unmap().WithZone("")
-	rows, err := s.queryRows(ctx, node.String(), hMin, hMax)
+	node, err = normalizeNode(node)
 	if err != nil {
 		return nil, err
 	}
-	merged := mergeRows(rows)
-	totals := make([]*flowagg.FlowTotal, 0, len(merged))
-	for _, t := range merged {
-		totals = append(totals, t)
+	lo, hi := hourRange(w)
+	stmt, err := s.db.PrepareContext(ctx, topFlowsSQL)
+	if err != nil {
+		return nil, fmt.Errorf("trafficstore: prepare top flows: %w", err)
 	}
-	out := make([]flowagg.FlowTotal, 0, n)
-	for _, t := range topOf(totals, n) {
-		out = append(out, *t)
-	}
-	return out, nil
+	defer stmt.Close()
+	return topFlows(ctx, stmt, node, lo, hi, n)
 }
 
 // OverviewUnion returns the union of the top-n sets of every node in
 // nodes over w, largest first with ties ordered by key. n <= 0 means
-// flowagg.DefaultOverviewN. Duplicate nodes are ignored.
+// flowagg.DefaultOverviewN; n above MaxTopN and more than
+// MaxOverviewNodes nodes are refused with ErrInvalidQuery. Duplicate
+// nodes are ignored. It runs one bounded query per node, so the result
+// holds at most MaxOverviewNodes*MaxTopN flows.
 func (s *Store) OverviewUnion(ctx context.Context, nodes []netip.Addr, w flowagg.Window, n int) ([]flowagg.FlowTotal, error) {
-	if n <= 0 {
-		n = flowagg.DefaultOverviewN
+	n, err := checkN(n)
+	if err != nil {
+		return nil, err
+	}
+	if len(nodes) > MaxOverviewNodes {
+		return nil, fmt.Errorf("%w: %d nodes exceed %d", ErrInvalidQuery, len(nodes), MaxOverviewNodes)
 	}
 	if err := checkWindow(w, s.retention); err != nil {
 		return nil, err
 	}
-	set := make(map[string]struct{}, len(nodes))
+	set := make([]netip.Addr, 0, len(nodes))
 	for _, nd := range nodes {
-		if err := validNode(nd); err != nil {
-			return nil, err
-		}
-		set[nd.Unmap().WithZone("").String()] = struct{}{}
-	}
-	hMin, hMax := hourRange(w)
-	var rows []bucketRow
-	for addr := range set {
-		r, err := s.queryRows(ctx, addr, hMin, hMax)
+		a, err := normalizeNode(nd)
 		if err != nil {
 			return nil, err
 		}
-		rows = append(rows, r...)
+		set = append(set, a)
 	}
-	merged := mergeRows(rows)
-	perNode := make(map[string][]*flowagg.FlowTotal, len(set))
-	for _, t := range merged {
-		if _, ok := set[t.Key.A.String()]; ok {
-			perNode[t.Key.A.String()] = append(perNode[t.Key.A.String()], t)
-		}
-		if _, ok := set[t.Key.B.String()]; ok {
-			perNode[t.Key.B.String()] = append(perNode[t.Key.B.String()], t)
-		}
+	slices.SortFunc(set, netip.Addr.Compare)
+	set = slices.Compact(set)
+	lo, hi := hourRange(w)
+	stmt, err := s.db.PrepareContext(ctx, topFlowsSQL)
+	if err != nil {
+		return nil, fmt.Errorf("trafficstore: prepare top flows: %w", err)
 	}
-	union := make(map[flowagg.FlowKey]*flowagg.FlowTotal, n*len(set))
-	for _, ts := range perNode {
-		for _, t := range topOf(ts, n) {
+	defer stmt.Close()
+	union := make(map[flowagg.FlowKey]flowagg.FlowTotal)
+	for _, nd := range set {
+		ts, err := topFlows(ctx, stmt, nd, lo, hi, n)
+		if err != nil {
+			return nil, err
+		}
+		for _, t := range ts {
 			union[t.Key] = t
 		}
 	}
 	out := make([]flowagg.FlowTotal, 0, len(union))
 	for _, t := range union {
-		out = append(out, *t)
+		out = append(out, t)
 	}
-	slices.SortFunc(out, func(a, b flowagg.FlowTotal) int {
-		if c := cmp.Compare(b.Total(), a.Total()); c != 0 {
-			return c
-		}
-		return compareKey(a.Key, b.Key)
-	})
+	sortTotals(out)
 	return out, nil
 }

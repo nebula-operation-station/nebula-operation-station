@@ -7,30 +7,41 @@
 // It is the durable mirror of internal/flowagg's in-memory aggregator:
 //
 //   - net_endpoints holds the deduplicated endpoints observed on the
-//     network (one row per MAC, or per first-seen address when no MAC is
-//     known), with the addresses, VLAN, vendor OUI, hostname, first/last
-//     seen, source tier, reporter, and the link to the matching IPAM
-//     asset or managed host;
-//   - flow_buckets holds one row per (hour, flow key, reporter) with the
-//     bytes and connections that reporter attributed to the flow in that
-//     hour.
+//     network (at most one row per MAC, otherwise one per address-only
+//     observation) with the VLAN, vendor OUI, hostname, first/last seen,
+//     source tier, owner (the reporter that created it) and the link to
+//     the matching IPAM asset or managed host; net_endpoint_reporters is
+//     the seen-by set and net_endpoint_addresses attributes every address
+//     to the reporter that saw it;
+//   - flow_buckets holds at most one row per (hour, flow key, reporting
+//     side) with the bytes and connections that side's reporter
+//     attributed to the flow in that hour.
 //
 // Every value comes from a managed host and is untrusted input: it is
 // validated against explicit limits before it touches the database.
 //
+// Ownership (D7 "never affect other reporters"): a flow observation is
+// accepted only when the end it claims belongs to the reporter (the
+// caller passes the reporter's addresses from the server's own records,
+// as for flowagg.Aggregator.Ingest), and the first reporter of a side
+// holds it. An endpoint's descriptive fields are changed only by its
+// owner; other reporters add themselves to the seen-by set and attach
+// addresses under their own name and their own caps.
+//
 // Retention (D3): default 21 days, configurable lower only. Prune
 // removes flow bucket rows whose hour ends at or before now-retention
-// and endpoint rows whose last_seen lies before it. The store runs Prune
-// at most once per clock hour on writes; the server schedule invokes it
-// hourly.
+// and endpoint observations whose last_seen lies before it. The store
+// runs Prune at most once per clock hour on writes; the server schedule
+// invokes it hourly.
 //
 // Caps (D7): the total number of endpoint and bucket rows, and the number
-// of rows per reporter, are bounded. A reporter that reaches its cap is
-// refused; other reporters' rows are never evicted.
+// of rows per reporter, are bounded. The counts are kept by triggers in
+// traffic_counts, so a cap check is a primary-key lookup. A reporter that
+// reaches its cap is refused; other reporters' rows are never evicted.
 //
-// Queries (TopN, OverviewUnion) take internal/flowagg types and merge
-// the stored rows with flowagg semantics: per flow and hour the server
-// end's report is used when present, otherwise the client end's.
+// Queries (TopN, OverviewUnion) return internal/flowagg types and merge
+// the stored rows with flowagg semantics in SQL: per flow and hour the
+// server end's report is used when present, otherwise the client end's.
 package trafficstore
 
 import (
@@ -56,8 +67,11 @@ const (
 	// MaxEndpointsPerReporter bounds the endpoints one reporter may
 	// create (ADR 0009 D7: per-host bounds).
 	MaxEndpointsPerReporter = 5_000
-	// MaxAddressesPerEndpoint bounds the addresses of one endpoint.
+	// MaxAddressesPerEndpoint bounds the addresses one reporter attaches
+	// to one endpoint.
 	MaxAddressesPerEndpoint = 64
+	// MaxReportersPerEndpoint bounds the seen-by set of one endpoint.
+	MaxReportersPerEndpoint = 32
 	// MaxBuckets bounds the persisted flow bucket rows; it matches the
 	// in-memory aggregator's bound.
 	MaxBuckets = flowagg.DefaultMaxBuckets
@@ -73,10 +87,14 @@ const (
 	maxIDLen = 128
 	// secondsPerHour is the hour grain of flow_buckets.
 	secondsPerHour = 3600
-	// maxStoredCounter is the largest counter value a row may hold;
-	// SQLite stores counters as signed 64-bit integers and upserts
-	// saturate at this value.
-	maxStoredCounter = math.MaxInt64
+	// counterHeadroom is how many stored counters the queries may add
+	// up in SQLite's signed 64-bit integers: both directions of every
+	// hour of a window no wider than DefaultRetention.
+	counterHeadroom = 1024
+	// maxStoredCounter is the largest counter value a row may hold
+	// (about 9 PB per flow and hour). Inputs and upserts saturate at it,
+	// so the SQL sums of TopN can never overflow.
+	maxStoredCounter = math.MaxInt64 / counterHeadroom
 )
 
 // Sentinel errors callers branch on.
@@ -92,6 +110,15 @@ var (
 	ErrOutOfRange = errors.New("trafficstore: outside the retention window")
 	// ErrLimit marks a write that would exceed an endpoint or bucket cap.
 	ErrLimit = errors.New("trafficstore: storage limit reached")
+	// ErrInvalidQuery marks a query with an invalid node or result size,
+	// or too many nodes.
+	ErrInvalidQuery = errors.New("trafficstore: invalid query")
+	// ErrForeign marks a flow observation whose claimed end is not one of
+	// the reporter's own addresses (flowagg's Foreign).
+	ErrForeign = errors.New("trafficstore: observation for a foreign flow end")
+	// ErrConflict marks a flow observation for a side another reporter
+	// already holds in that hour (flowagg's Conflicts).
+	ErrConflict = errors.New("trafficstore: flow side held by another reporter")
 	// ErrNotFound marks a missing endpoint.
 	ErrNotFound = errors.New("trafficstore: not found")
 )
@@ -167,14 +194,65 @@ func Open(path string) (*Store, *sql.DB, error) {
 	return New(db), db, nil
 }
 
-// hourOf returns the hour start of t as unix seconds.
+// hourOf returns the hour index of t: unix seconds divided by 3600,
+// floored. It is what flow_buckets.hour stores.
 func hourOf(t time.Time) int64 {
-	s := t.Unix()
-	h := s / secondsPerHour
-	if s%secondsPerHour < 0 {
-		h--
+	return floorDiv(t.Unix(), secondsPerHour)
+}
+
+// querier is the subset of *sql.Tx the write helpers use.
+type querier interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// writeTx runs fn in a transaction that takes the database write lock
+// with its first statement, before any read: concurrent writers wait on
+// the busy timeout and are serialized instead of failing a read-to-write
+// upgrade, and the cap checks read counts no other writer can change
+// before the commit.
+func (s *Store) writeTx(ctx context.Context, what string, fn func(tx *sql.Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("trafficstore: begin %s: %w", what, err)
 	}
-	return h
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE traffic_store_lock SET id = 1 WHERE id = 1`); err != nil {
+		return fmt.Errorf("trafficstore: lock for %s: %w", what, err)
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("trafficstore: commit %s: %w", what, err)
+	}
+	return nil
+}
+
+// Counter names in traffic_counts (see migration 0031).
+const (
+	countBuckets      = "buckets"
+	countEndpoints    = "endpoints"
+	countEndpointSeen = "endpoint_seen"
+	// countTotal is the reporter key of a total; reporter names are
+	// never empty.
+	countTotal = ""
+)
+
+// readCount returns the maintained row count name/reporter (0 when
+// there is none).
+func readCount(ctx context.Context, q querier, name, reporter string) (int, error) {
+	var n int
+	err := q.QueryRowContext(ctx,
+		`SELECT n FROM traffic_counts WHERE name = ? AND reporter = ?`, name, reporter).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("trafficstore: read count %s: %w", name, err)
+	}
+	return n, nil
 }
 
 // autoPrune runs Prune at most once per clock hour, before a write, so
@@ -192,30 +270,71 @@ func (s *Store) autoPrune(ctx context.Context) {
 	_, _, _ = s.Prune(ctx)
 }
 
+// SQL of Prune; package-level so the tests can check the query plans.
+const (
+	// pruneBucketsSQL compares the hour column itself with a precomputed
+	// bound, so the primary key's leading hour column serves it.
+	pruneBucketsSQL      = `DELETE FROM flow_buckets WHERE hour <= ?`
+	pruneEndpointSeenSQL = `DELETE FROM net_endpoint_reporters WHERE last_seen < ?`
+	pruneEndpointsSQL    = `DELETE FROM net_endpoints WHERE last_seen < ?`
+	transferOwnershipSQL = `
+		UPDATE net_endpoints SET owner = COALESCE((
+			SELECT r.reporter FROM net_endpoint_reporters r
+			WHERE r.endpoint_id = net_endpoints.id
+			ORDER BY r.first_seen, r.reporter LIMIT 1), owner)
+		WHERE NOT EXISTS (
+			SELECT 1 FROM net_endpoint_reporters r
+			WHERE r.endpoint_id = net_endpoints.id AND r.reporter = net_endpoints.owner)`
+)
+
+// pruneHourBound returns the largest hour whose end lies at or before
+// cutoff (unix seconds): (hour+1)*3600 <= cutoff.
+func pruneHourBound(cutoff int64) int64 {
+	return floorDiv(cutoff, secondsPerHour) - 1
+}
+
 // Prune removes flow bucket rows whose hour ends at or before
-// now-retention and endpoint rows whose last_seen lies before
-// now-retention, and returns the number of removed rows per table. It is
+// now-retention, seen-by rows (with their addresses) whose last_seen
+// lies before now-retention, and endpoints no reporter has seen since,
+// and returns the number of removed bucket and endpoint rows. An
+// endpoint whose owner's observation expired while other reporters
+// still see it passes to the earliest remaining reporter. Prune is
 // idempotent and safe to call more often than hourly; the store also
 // runs it automatically at most once per clock hour on writes.
 func (s *Store) Prune(ctx context.Context) (buckets, endpoints int64, err error) {
 	cutoff := s.now().Add(-s.retention).Unix()
-	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM flow_buckets WHERE hour * ? + ? <= ?`, secondsPerHour, secondsPerHour, cutoff)
+	err = s.writeTx(ctx, "prune", func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, pruneBucketsSQL, pruneHourBound(cutoff))
+		if err != nil {
+			return fmt.Errorf("trafficstore: prune flow_buckets: %w", err)
+		}
+		if buckets, err = res.RowsAffected(); err != nil {
+			return fmt.Errorf("trafficstore: prune flow_buckets: %w", err)
+		}
+		res, err = tx.ExecContext(ctx, pruneEndpointSeenSQL, cutoff)
+		if err != nil {
+			return fmt.Errorf("trafficstore: prune net_endpoint_reporters: %w", err)
+		}
+		seen, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("trafficstore: prune net_endpoint_reporters: %w", err)
+		}
+		res, err = tx.ExecContext(ctx, pruneEndpointsSQL, cutoff)
+		if err != nil {
+			return fmt.Errorf("trafficstore: prune net_endpoints: %w", err)
+		}
+		if endpoints, err = res.RowsAffected(); err != nil {
+			return fmt.Errorf("trafficstore: prune net_endpoints: %w", err)
+		}
+		if seen > 0 {
+			if _, err := tx.ExecContext(ctx, transferOwnershipSQL); err != nil {
+				return fmt.Errorf("trafficstore: transfer endpoint ownership: %w", err)
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		return 0, 0, fmt.Errorf("trafficstore: prune flow_buckets: %w", err)
-	}
-	buckets, err = res.RowsAffected()
-	if err != nil {
-		return 0, 0, fmt.Errorf("trafficstore: prune flow_buckets: %w", err)
-	}
-	res, err = s.db.ExecContext(ctx,
-		`DELETE FROM net_endpoints WHERE last_seen < ?`, cutoff)
-	if err != nil {
-		return buckets, 0, fmt.Errorf("trafficstore: prune net_endpoints: %w", err)
-	}
-	endpoints, err = res.RowsAffected()
-	if err != nil {
-		return buckets, 0, fmt.Errorf("trafficstore: prune net_endpoints: %w", err)
+		return 0, 0, err
 	}
 	return buckets, endpoints, nil
 }
