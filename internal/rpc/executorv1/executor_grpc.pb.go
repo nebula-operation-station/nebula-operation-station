@@ -103,6 +103,7 @@ const (
 	ExecutorService_ReviewBatch_FullMethodName                     = "/nebula.executor.v1.ExecutorService/ReviewBatch"
 	ExecutorService_ApproveBatchCLI_FullMethodName                 = "/nebula.executor.v1.ExecutorService/ApproveBatchCLI"
 	ExecutorService_GetBatchStatus_FullMethodName                  = "/nebula.executor.v1.ExecutorService/GetBatchStatus"
+	ExecutorService_GetBatchCredentialVersions_FullMethodName      = "/nebula.executor.v1.ExecutorService/GetBatchCredentialVersions"
 	ExecutorService_ReviewBuiltinTrust_FullMethodName              = "/nebula.executor.v1.ExecutorService/ReviewBuiltinTrust"
 	ExecutorService_CommitBuiltinTrust_FullMethodName              = "/nebula.executor.v1.ExecutorService/CommitBuiltinTrust"
 	ExecutorService_UnpinBuiltinVersion_FullMethodName             = "/nebula.executor.v1.ExecutorService/UnpinBuiltinVersion"
@@ -431,6 +432,14 @@ type ExecutorServiceClient interface {
 	// Role: server, admin. Confirms the batch is approved and fresh, with the
 	// parent/member linkage. The server polls this before dispatch.
 	GetBatchStatus(ctx context.Context, in *GetBatchStatusRequest, opts ...grpc.CallOption) (*GetBatchStatusResponse, error)
+	// Role: server, admin. Read-only. Returns the executor's current version
+	// of each named SSH credential reference, so the server binds exact
+	// versions into a batch plan (canonical BatchMember.credential_versions).
+	// Versions and public-key fingerprints only, never key material.
+	// Unimplemented while no batch authority is configured (like the other
+	// batch RPCs); FailedPrecondition while the keyring is locked; NotFound
+	// for a reference that is not loaded.
+	GetBatchCredentialVersions(ctx context.Context, in *GetBatchCredentialVersionsRequest, opts ...grpc.CallOption) (*GetBatchCredentialVersionsResponse, error)
 	// Built-in trust (ADR 0007, E19c). The executor reads the built-in bundle
 	// from its locally configured, verified NOS release directory; no request
 	// names a path, a bundle or bytes. Bulk trust is local-admin only: there is
@@ -1352,6 +1361,16 @@ func (c *executorServiceClient) GetBatchStatus(ctx context.Context, in *GetBatch
 	return out, nil
 }
 
+func (c *executorServiceClient) GetBatchCredentialVersions(ctx context.Context, in *GetBatchCredentialVersionsRequest, opts ...grpc.CallOption) (*GetBatchCredentialVersionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetBatchCredentialVersionsResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_GetBatchCredentialVersions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *executorServiceClient) ReviewBuiltinTrust(ctx context.Context, in *ReviewBuiltinTrustRequest, opts ...grpc.CallOption) (*ReviewBuiltinTrustResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ReviewBuiltinTrustResponse)
@@ -1921,6 +1940,14 @@ type ExecutorServiceServer interface {
 	// Role: server, admin. Confirms the batch is approved and fresh, with the
 	// parent/member linkage. The server polls this before dispatch.
 	GetBatchStatus(context.Context, *GetBatchStatusRequest) (*GetBatchStatusResponse, error)
+	// Role: server, admin. Read-only. Returns the executor's current version
+	// of each named SSH credential reference, so the server binds exact
+	// versions into a batch plan (canonical BatchMember.credential_versions).
+	// Versions and public-key fingerprints only, never key material.
+	// Unimplemented while no batch authority is configured (like the other
+	// batch RPCs); FailedPrecondition while the keyring is locked; NotFound
+	// for a reference that is not loaded.
+	GetBatchCredentialVersions(context.Context, *GetBatchCredentialVersionsRequest) (*GetBatchCredentialVersionsResponse, error)
 	// Built-in trust (ADR 0007, E19c). The executor reads the built-in bundle
 	// from its locally configured, verified NOS release directory; no request
 	// names a path, a bundle or bytes. Bulk trust is local-admin only: there is
@@ -2267,6 +2294,9 @@ func (UnimplementedExecutorServiceServer) ApproveBatchCLI(context.Context, *Appr
 }
 func (UnimplementedExecutorServiceServer) GetBatchStatus(context.Context, *GetBatchStatusRequest) (*GetBatchStatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetBatchStatus not implemented")
+}
+func (UnimplementedExecutorServiceServer) GetBatchCredentialVersions(context.Context, *GetBatchCredentialVersionsRequest) (*GetBatchCredentialVersionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetBatchCredentialVersions not implemented")
 }
 func (UnimplementedExecutorServiceServer) ReviewBuiltinTrust(context.Context, *ReviewBuiltinTrustRequest) (*ReviewBuiltinTrustResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReviewBuiltinTrust not implemented")
@@ -3846,6 +3876,24 @@ func _ExecutorService_GetBatchStatus_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_GetBatchCredentialVersions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetBatchCredentialVersionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).GetBatchCredentialVersions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_GetBatchCredentialVersions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).GetBatchCredentialVersions(ctx, req.(*GetBatchCredentialVersionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ExecutorService_ReviewBuiltinTrust_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ReviewBuiltinTrustRequest)
 	if err := dec(in); err != nil {
@@ -4666,6 +4714,10 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetBatchStatus",
 			Handler:    _ExecutorService_GetBatchStatus_Handler,
+		},
+		{
+			MethodName: "GetBatchCredentialVersions",
+			Handler:    _ExecutorService_GetBatchCredentialVersions_Handler,
 		},
 		{
 			MethodName: "ReviewBuiltinTrust",

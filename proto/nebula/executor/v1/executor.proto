@@ -400,6 +400,15 @@ service ExecutorService {
   // parent/member linkage. The server polls this before dispatch.
   rpc GetBatchStatus(GetBatchStatusRequest) returns (GetBatchStatusResponse);
 
+  // Role: server, admin. Read-only. Returns the executor's current version
+  // of each named SSH credential reference, so the server binds exact
+  // versions into a batch plan (canonical BatchMember.credential_versions).
+  // Versions and public-key fingerprints only, never key material.
+  // Unimplemented while no batch authority is configured (like the other
+  // batch RPCs); FailedPrecondition while the keyring is locked; NotFound
+  // for a reference that is not loaded.
+  rpc GetBatchCredentialVersions(GetBatchCredentialVersionsRequest) returns (GetBatchCredentialVersionsResponse);
+
   // Built-in trust (ADR 0007, E19c). The executor reads the built-in bundle
   // from its locally configured, verified NOS release directory; no request
   // names a path, a bundle or bytes. Bulk trust is local-admin only: there is
@@ -2607,6 +2616,28 @@ message GetBatchStatusResponse {
   // Parent stage plan hash, and each member's execution ID in member order.
   string stage_plan_hash = 9;
   repeated string member_execution_ids = 10;
+}
+
+message GetBatchCredentialVersionsRequest {
+  // At most 32 distinct references. An empty list only asks whether batches
+  // are available on this executor.
+  repeated string credential_refs = 1;
+}
+
+// BatchCredentialVersion is the executor's current version of one SSH
+// credential reference. It carries no secret.
+message BatchCredentialVersion {
+  string credential_ref = 1;
+  // Nonzero version derived from the public key; it changes when the key
+  // behind the reference changes.
+  uint64 version = 2;
+  // SHA-256 fingerprint of the public key ("SHA256:..."), for display.
+  string public_key_fingerprint = 3;
+}
+
+message GetBatchCredentialVersionsResponse {
+  // One entry per requested reference, in request order.
+  repeated BatchCredentialVersion versions = 1;
 }
 
 // Built-in trust (ADR 0007, E19c).
