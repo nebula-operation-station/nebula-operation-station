@@ -43,12 +43,27 @@ const (
 	classBatchNotExecuted = "not_executed"
 )
 
+// A member run whose remote process may outlive the attached session
+// (timeout, cancelled request, lost session) keeps its target held until
+// the host shows the run gone: checked every batchHoldPoll for at most
+// batchHoldWait before the member's response, then again (bounded by
+// batchHoldRecheck) whenever another batch member asks for the target.
+const (
+	batchHoldWait    = 2 * time.Minute
+	batchHoldPoll    = 5 * time.Second
+	batchHoldRecheck = 15 * time.Second
+)
+
 // errBatchExecutionUnconfigured is returned while no dispatcher is wired.
 var errBatchExecutionUnconfigured = status.Error(codes.Unimplemented, "batch: execution not configured")
 
 // attachedRunner runs one script attached (hostrun.Attached; tests replace
 // it because the attached bootstrap needs sudo on the target).
 type attachedRunner func(ctx context.Context, client *ssh.Client, executionID string, params, script []byte, timeout time.Duration, secrets ...hostrun.Secret) (hostrun.Result, error)
+
+// runVisibleFunc reports whether a process of a run is still running on
+// the host (hostrun.RunVisible; tests replace it).
+type runVisibleFunc func(ctx context.Context, client *ssh.Client, executionID string) (bool, error)
 
 // batchMemberCall is the per-call state of one claimed member run, keyed by
 // its single-use execution ID. It holds only what the request supplied and
@@ -63,20 +78,39 @@ type batchMemberCall struct {
 	secrets     []hostrun.Secret
 	timeout     time.Duration
 	resp        *pb.RunBatchMemberResponse
+	// remoteMayRun: the attached run ended without the remote shell's
+	// exit status, so it may still be running on the target.
+	remoteMayRun bool
+}
+
+// heldTarget is a target whose last batch member may still be running
+// there.
+type heldTarget struct {
+	call        *batchMemberCall
+	executionID string
+	// checking: a recheck is in flight.
+	checking bool
 }
 
 // batchExec is the executor's production batch execution state.
 type batchExec struct {
 	disp     *dispatch.Dispatcher
 	attached attachedRunner
+	visible  runVisibleFunc
+	// holdWait and holdPoll bound the wait for a possibly still running
+	// remote process (batchHoldWait, batchHoldPoll; tests shorten them).
+	holdWait, holdPoll time.Duration
 
 	mu sync.Mutex
 	// calls are the claimed member runs in flight, by execution ID.
 	calls map[string]*batchMemberCall
 	// hosts are the targets a batch member runs on right now (host ID to
 	// execution ID): at most one batch member per target at a time, across
-	// every batch, in addition to the per-batch same-host ordering.
+	// every batch, in addition to the per-batch same-host ordering. A
+	// target whose last member may still run there stays in it and in
+	// held until the host shows that run gone.
 	hosts map[string]string
+	held  map[string]*heldTarget
 }
 
 // EnableBatchExecution wires the production batch dispatcher and only then
@@ -87,7 +121,8 @@ func (s *Service) EnableBatchExecution() error {
 	if s.batchAuth == nil {
 		return errors.New("executor: batch execution needs the batch authority")
 	}
-	x := &batchExec{attached: hostrun.Attached, calls: map[string]*batchMemberCall{}, hosts: map[string]string{}}
+	x := &batchExec{attached: hostrun.Attached, visible: hostrun.RunVisible, holdWait: batchHoldWait, holdPoll: batchHoldPoll,
+		calls: map[string]*batchMemberCall{}, hosts: map[string]string{}, held: map[string]*heldTarget{}}
 	d, err := dispatch.New(dispatch.Options{
 		Permits:  s.batchAuth,
 		Recorder: batchRunRecorder{s: s, x: x},
@@ -197,6 +232,46 @@ func (x *batchExec) reserveHost(hostID, executionID string) bool {
 	return true
 }
 
+// holdHost keeps hostID reserved after its member returned: the run may
+// still be running there.
+func (x *batchExec) holdHost(hostID, executionID string, call *batchMemberCall) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	// Only what reaching the target needs; the run's secrets and
+	// artifact are not kept.
+	x.held[hostID] = &heldTarget{executionID: executionID,
+		call: &batchMemberCall{hostID: call.hostID, fingerprint: call.fingerprint, eps: slices.Clone(call.eps)}}
+}
+
+// recheckHeld asks a held target once more whether its run is still
+// running and frees the target when it is gone. It reports whether the
+// target was freed; a target that is not held, or is being rechecked
+// already, is not.
+func (s *Service) recheckHeld(ctx context.Context, x *batchExec, hostID string) bool {
+	x.mu.Lock()
+	h := x.held[hostID]
+	if h == nil || h.checking {
+		x.mu.Unlock()
+		return false
+	}
+	h.checking = true
+	x.mu.Unlock()
+	cctx, cancel := context.WithTimeout(ctx, batchHoldRecheck)
+	running, err := s.remoteRunVisible(cctx, x, h.call, h.executionID)
+	cancel()
+	gone := err == nil && !running
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	h.checking = false
+	if gone && x.held[hostID] == h {
+		delete(x.held, hostID)
+		delete(x.hosts, hostID)
+		s.log.Info("audit", "kind", "batch_target_released", "execution", h.executionID, "host", hostID,
+			"detail", "the held run is no longer running on the target")
+	}
+	return gone
+}
+
 func (x *batchExec) releaseHost(hostID string) {
 	x.mu.Lock()
 	defer x.mu.Unlock()
@@ -224,8 +299,9 @@ func (x *batchExec) setCall(executionID string, c *batchMemberCall) {
 // role, ADR 0007 E11). Refusals before the claim (malformed request, no
 // batch execution, locked keyring, unknown or unapproved batch, unknown
 // member, artifact not matching the frozen hash, unpinned or blocked host,
-// another batch member running on the target, stage/dependency/same-host
-// gates, an already claimed member) are error statuses and nothing ran.
+// another batch member running (or possibly still running) on the target,
+// stage/dependency/same-host gates, an already claimed member) are error
+// statuses and nothing ran.
 // After the claim every outcome is a response; the member is never run
 // again, whatever the outcome.
 func (s *Service) RunBatchMember(ctx context.Context, req *pb.RunBatchMemberRequest) (*pb.RunBatchMemberResponse, error) {
@@ -264,19 +340,27 @@ func (s *Service) RunBatchMember(ctx context.Context, req *pb.RunBatchMemberRequ
 		return nil, err
 	}
 	execID := member.Request.ExecutionID
-	if !x.reserveHost(target.HostID, execID) {
+	if !x.reserveHost(target.HostID, execID) && (!s.recheckHeld(ctx, x, target.HostID) || !x.reserveHost(target.HostID, execID)) {
 		s.log.Warn("audit", "kind", "batch_member_refused", "batch", d.String(), "member", member.MemberID, "host", target.HostID,
 			"detail", "another batch member runs on the target")
 		return nil, status.Error(codes.FailedPrecondition, "batch_host_busy: another batch member runs on the target")
 	}
-	defer x.releaseHost(target.HostID)
+	// The target is released when the member's run is over; a run that
+	// may still be running there keeps it held (fail closed).
+	release := true
+	defer func() {
+		if release {
+			x.releaseHost(target.HostID)
+		}
+	}()
 	if _, err := s.batchAuth.ClaimMember(ctx, d, index, member); err != nil {
 		return nil, batchStatus(err)
 	}
 	// From here the member is spent: every outcome is a response.
 	resp := &pb.RunBatchMemberResponse{ExecutionId: execID, ExitCode: -1}
-	x.setCall(execID, &batchMemberCall{hostID: target.HostID, fingerprint: target.HostKeyFingerprint, endpoints: slices.Clone(req.GetEndpoints()),
-		eps: eps, artifact: req.GetArtifact(), secrets: secrets, timeout: timeout, resp: resp})
+	call := &batchMemberCall{hostID: target.HostID, fingerprint: target.HostKeyFingerprint, endpoints: slices.Clone(req.GetEndpoints()),
+		eps: eps, artifact: req.GetArtifact(), secrets: secrets, timeout: timeout, resp: resp}
+	x.setCall(execID, call)
 	defer x.setCall(execID, nil)
 	// The reconciler leaves the run alone while it is in flight here.
 	key := execID + "/" + target.HostID
@@ -303,6 +387,21 @@ func (s *Service) RunBatchMember(ctx context.Context, req *pb.RunBatchMemberRequ
 	}
 	if derr != nil && (outcome == dispatch.OutcomeNotExecuted || outcome == dispatch.OutcomeUnknown) {
 		resp.Detail = derr.Error()
+	}
+	// A run that may still be running keeps the target held until the
+	// host shows it gone, so no other batch member starts there meanwhile
+	// (whatever the stop policy decides for the rest of the rollout).
+	if call.remoteMayRun {
+		if s.awaitRemoteEnd(ctx, x, call, execID) {
+			s.log.Info("audit", "kind", "batch_target_released", "batch", d.String(), "member", member.MemberID, "execution", execID,
+				"host", target.HostID, "detail", "the run is no longer running on the target")
+		} else {
+			release = false
+			x.holdHost(target.HostID, execID, call)
+			resp.Detail += "; the target stays held: no batch member starts there until the target shows this run gone"
+			s.log.Warn("audit", "kind", "batch_target_held", "batch", d.String(), "member", member.MemberID, "execution", execID,
+				"host", target.HostID, "detail", "the run may still be running on the target; no batch member starts there until it is gone")
+		}
 	}
 	// The rollout decides on the executor's own outcome: it frees the
 	// target for the batch's next member and applies the stop policy. An
@@ -389,10 +488,53 @@ func (s *Service) batchTransport(ctx context.Context, x *batchExec, run dispatch
 	}
 	resp.Class, resp.Detail, resp.ExitCode = res.Class, res.Detail, int32(res.ExitCode)
 	resp.Result, resp.Log, resp.LogTruncated = res.Result, res.Log, res.LogTruncated
+	if res.RemoteMayRun {
+		// No exit status: the script may have run, partly or wholly, and
+		// may still be running. That is unknown, never a definitive
+		// failure.
+		call.remoteMayRun = true
+		resp.Detail = res.Class + ": " + res.Detail + "; the run may still be running on the target"
+		return dispatch.OutcomeUnknown, errors.New(resp.Detail)
+	}
 	if res.Class == hostrun.ClassSuccess {
 		return dispatch.OutcomeSuccess, nil
 	}
 	return dispatch.OutcomeFailure, nil
+}
+
+// awaitRemoteEnd waits, bounded by x.holdWait, until the target shows
+// the run gone (hostrun.RunVisible). Any probe error counts as still
+// running. It reports whether the run was seen gone.
+func (s *Service) awaitRemoteEnd(ctx context.Context, x *batchExec, call *batchMemberCall, executionID string) bool {
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), x.holdWait)
+	defer cancel()
+	for {
+		running, err := s.remoteRunVisible(wctx, x, call, executionID)
+		if err == nil && !running {
+			return true
+		}
+		if err != nil {
+			s.log.Warn("batch: check for a still running member", "execution", executionID, "host", call.hostID, "error", err)
+		}
+		t := time.NewTimer(x.holdPoll)
+		select {
+		case <-wctx.Done():
+			t.Stop()
+			return false
+		case <-t.C:
+		}
+	}
+}
+
+// remoteRunVisible asks the target over a new connection whether the run
+// is still running there.
+func (s *Service) remoteRunVisible(ctx context.Context, x *batchExec, call *batchMemberCall, executionID string) (bool, error) {
+	c, err := s.Connect(ctx, call.hostID, call.fingerprint, call.eps)
+	if err != nil {
+		return true, err
+	}
+	defer c.Close()
+	return x.visible(ctx, c.Client, executionID)
 }
 
 // batchRunRecorder is the production dispatch.Recorder: the executor's

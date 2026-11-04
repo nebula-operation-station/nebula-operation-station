@@ -43,6 +43,39 @@ type fakeAttached struct {
 	class   string
 	started chan string
 	block   chan struct{}
+	// mayRun makes the next runs return like hostrun.Attached after a
+	// timeout: no exit status, the remote process may still run.
+	mayRun bool
+}
+
+// fakeVisible replaces hostrun.RunVisible: running is what the target
+// reports about the run.
+type fakeVisible struct {
+	mu      sync.Mutex
+	running bool
+	checks  int
+}
+
+func (f *fakeVisible) run(_ context.Context, client *ssh.Client, _ string) (bool, error) {
+	if client == nil {
+		return true, fmt.Errorf("no connection")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.checks++
+	return f.running, nil
+}
+
+func (f *fakeVisible) set(running bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.running = running
+}
+
+func (f *fakeVisible) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.checks
 }
 
 func (f *fakeAttached) run(ctx context.Context, client *ssh.Client, executionID string, params, script []byte, _ time.Duration, _ ...hostrun.Secret) (hostrun.Result, error) {
@@ -51,7 +84,7 @@ func (f *fakeAttached) run(ctx context.Context, client *ssh.Client, executionID 
 	}
 	f.mu.Lock()
 	f.calls = append(f.calls, attachedCall{executionID: executionID, params: bytes.Clone(params), script: bytes.Clone(script)})
-	class, started, block := f.class, f.started, f.block
+	class, started, block, mayRun := f.class, f.started, f.block, f.mayRun
 	f.mu.Unlock()
 	if started != nil {
 		started <- executionID
@@ -61,6 +94,9 @@ func (f *fakeAttached) run(ctx context.Context, client *ssh.Client, executionID 
 		case <-block:
 		case <-ctx.Done():
 		}
+	}
+	if mayRun {
+		return hostrun.Result{Class: hostrun.ClassExecutionTimeout, Detail: "no result within 1m0s", ExitCode: -1, RemoteMayRun: true}, nil
 	}
 	if class == "" {
 		class = hostrun.ClassSuccess
@@ -91,9 +127,13 @@ type dispatchEnv struct {
 	*batchRPCEnv
 	ssh      map[string]*testSSH
 	attached *fakeAttached
+	visible  *fakeVisible
 	admin    pb.ExecutorServiceClient
 	server   pb.ExecutorServiceClient
 	next     int
+	// failureThreshold is the failure threshold of the stages of plans
+	// proposed from now on (capped at each stage's size).
+	failureThreshold int
 }
 
 func newDispatchEnv(t *testing.T, hosts ...string) *dispatchEnv {
@@ -106,7 +146,10 @@ func newDispatchEnv(t *testing.T, hosts ...string) *dispatchEnv {
 	}
 	f := &fakeAttached{}
 	env.svc.batchRun.attached = f.run
-	e := &dispatchEnv{batchRPCEnv: env, ssh: map[string]*testSSH{}, attached: f,
+	v := &fakeVisible{}
+	env.svc.batchRun.visible = v.run
+	env.svc.batchRun.holdWait, env.svc.batchRun.holdPoll = 300*time.Millisecond, 20*time.Millisecond
+	e := &dispatchEnv{batchRPCEnv: env, ssh: map[string]*testSSH{}, attached: f, visible: v,
 		admin: readRPCClient(t, env.svc, peercred.RoleAdmin), server: readRPCClient(t, env.svc, peercred.RoleServer)}
 	for _, h := range hosts {
 		srv := startTestSSH(t, env.userPub, sshModeNormal)
@@ -183,6 +226,9 @@ func (e *dispatchEnv) propose(t *testing.T, gate string, approve bool, members .
 		e.policy.mu.Lock()
 		e.policy.states[id] = batch.Snapshot{Risk: risk, Trust: sha256.Sum256([]byte(id))}
 		e.policy.mu.Unlock()
+	}
+	for i := range b.StagePlan.Stages {
+		b.StagePlan.Stages[i].FailureThreshold = min(e.failureThreshold, len(b.StagePlan.Stages[i].MemberIDs))
 	}
 	h, err := canonical.BatchStagePlanHash(b.StagePlan)
 	if err != nil {
@@ -627,4 +673,114 @@ func TestBatchMemberCrashReconciles(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A member whose attached run returned without an exit status (timeout,
+// cancelled request) may still be running on its target: its outcome is
+// unknown, never a definitive failure, and while the target reports the
+// run, no other batch member starts there, even when the stage's
+// threshold lets the rollout go on and even from another batch. The
+// target is freed once it shows the run gone.
+func TestRunBatchMemberTimeoutHoldsTarget(t *testing.T) {
+	e := newDispatchEnv(t, "web-1", "web-2")
+	ctx := context.Background()
+	e.failureThreshold = 1
+	d, members, n := e.propose(t, canonical.BatchGateAutomatic, true,
+		dispatchMember{host: "web-1"}, dispatchMember{host: "web-1"}, dispatchMember{host: "web-2"})
+	dB, membersB, nB := e.propose(t, canonical.BatchGateAutomatic, true, dispatchMember{host: "web-1"})
+
+	e.visible.set(true)
+	e.attached.mu.Lock()
+	e.attached.mayRun = true
+	e.attached.mu.Unlock()
+	resp, err := e.server.RunBatchMember(ctx, e.runReq(d, n, 0, "web-1"))
+	if err != nil || resp.GetOutcome() != pb.BatchMemberOutcome_BATCH_MEMBER_OUTCOME_UNKNOWN || resp.GetClass() != classUnknown ||
+		!strings.Contains(resp.GetDetail(), hostrun.ClassExecutionTimeout) || !strings.Contains(resp.GetDetail(), "held") {
+		t.Fatalf("timed-out member: %+v %v", resp, err)
+	}
+	if run, err := e.db.GetRun(members[0].Request.ExecutionID, "web-1"); err != nil || run.Class != classUnknown || run.State != executordb.RunFinished {
+		t.Fatalf("run record %+v %v", run, err)
+	}
+	if e.visible.count() == 0 {
+		t.Fatal("the target was never asked whether the run is gone")
+	}
+	e.attached.mu.Lock()
+	e.attached.mayRun = false
+	e.attached.mu.Unlock()
+
+	// The threshold lets the rollout go on, but the next member on the
+	// same target must not start while the run may still be there.
+	_, err = e.server.RunBatchMember(ctx, e.runReq(d, n, 1, "web-1"))
+	e.requireRefused(t, err, codes.FailedPrecondition, members[1], 1)
+	if !strings.Contains(status.Convert(err).Message(), "batch_host_busy") {
+		t.Errorf("refusal = %v", err)
+	}
+	_, err = e.server.RunBatchMember(ctx, e.runReq(dB, nB, 0, "web-1"))
+	e.requireRefused(t, err, codes.FailedPrecondition, membersB[0], 1)
+	// Another target is not held up.
+	if resp, err := e.server.RunBatchMember(ctx, e.runReq(d, n, 2, "web-2")); err != nil || resp.GetOutcome() != pb.BatchMemberOutcome_BATCH_MEMBER_OUTCOME_SUCCESS {
+		t.Fatalf("other target: %+v %v", resp, err)
+	}
+
+	// The run ended on the target: the refused member was never claimed
+	// and now runs.
+	e.visible.set(false)
+	if resp, err := e.server.RunBatchMember(ctx, e.runReq(d, n, 1, "web-1")); err != nil || resp.GetOutcome() != pb.BatchMemberOutcome_BATCH_MEMBER_OUTCOME_SUCCESS {
+		t.Fatalf("after the run is gone: %+v %v", resp, err)
+	}
+	if e.attached.count() != 3 {
+		t.Fatalf("%d runs, want 3", e.attached.count())
+	}
+}
+
+// A timed-out member whose run the target already shows gone frees the
+// target before its response: the next member runs at once.
+func TestRunBatchMemberTimeoutReleasesWhenGone(t *testing.T) {
+	e := newDispatchEnv(t, "web-1")
+	ctx := context.Background()
+	e.failureThreshold = 1
+	d, _, n := e.propose(t, canonical.BatchGateAutomatic, true, dispatchMember{host: "web-1"}, dispatchMember{host: "web-1"})
+	e.attached.mu.Lock()
+	e.attached.mayRun = true
+	e.attached.mu.Unlock()
+	resp, err := e.server.RunBatchMember(ctx, e.runReq(d, n, 0, "web-1"))
+	if err != nil || resp.GetOutcome() != pb.BatchMemberOutcome_BATCH_MEMBER_OUTCOME_UNKNOWN || strings.Contains(resp.GetDetail(), "held") {
+		t.Fatalf("timed-out member: %+v %v", resp, err)
+	}
+	e.attached.mu.Lock()
+	e.attached.mayRun = false
+	e.attached.mu.Unlock()
+	if resp, err := e.server.RunBatchMember(ctx, e.runReq(d, n, 1, "web-1")); err != nil || resp.GetOutcome() != pb.BatchMemberOutcome_BATCH_MEMBER_OUTCOME_SUCCESS {
+		t.Fatalf("next member: %+v %v", resp, err)
+	}
+}
+
+// A target that cannot be asked (unreachable) stays held: fail closed.
+func TestRunBatchMemberHeldTargetUnreachableStaysHeld(t *testing.T) {
+	e := newDispatchEnv(t, "web-1")
+	ctx := context.Background()
+	e.failureThreshold = 1
+	d, members, n := e.propose(t, canonical.BatchGateAutomatic, true, dispatchMember{host: "web-1"}, dispatchMember{host: "web-1"})
+	e.attached.mu.Lock()
+	e.attached.mayRun = true
+	e.attached.mu.Unlock()
+	e.visible.set(true)
+	if _, err := e.server.RunBatchMember(ctx, e.runReq(d, n, 0, "web-1")); err != nil {
+		t.Fatal(err)
+	}
+	e.attached.mu.Lock()
+	e.attached.mayRun = false
+	e.attached.mu.Unlock()
+	// The target is gone from the network: no answer is not "finished",
+	// although the host would say so if it could be reached.
+	eps, err := parseEndpoints([]string{closedAddr(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.svc.batchRun.mu.Lock()
+	e.svc.batchRun.held["web-1"].call.eps = eps
+	e.svc.batchRun.mu.Unlock()
+	e.visible.set(false)
+	_, err = e.server.RunBatchMember(ctx, e.runReq(d, n, 1, "web-1"))
+	e.requireRefused(t, err, codes.FailedPrecondition, members[1], 1)
 }

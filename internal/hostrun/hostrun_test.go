@@ -8,6 +8,8 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -135,5 +137,47 @@ func TestCommandIsFixed(t *testing.T) {
 	a, _ := hostrun.Command(execID)
 	if !strings.HasPrefix(a, "exec /bin/sh -c '") || strings.Count(a, execID) != 1 {
 		t.Fatalf("command %q", a)
+	}
+}
+
+// A run that outlives its attached session (timeout, the remote process
+// detached from the killed process group) is reported as possibly still
+// running, and RunVisible sees it until it ends.
+func TestRunVisibleAfterTimeout(t *testing.T) {
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skip("needs setsid")
+	}
+	c := client(t)
+	if running, err := hostrun.RunVisible(context.Background(), c, execID); err != nil || running {
+		t.Fatalf("before the run: %v %v", running, err)
+	}
+	stop := filepath.Join(t.TempDir(), "stop")
+	r := run(t, c, `{}`, `setsid /bin/sh -c 'until [ -e "$1" ]; do sleep 0.1; done' sh `+stop+` </dev/null >/dev/null 2>&1 & sleep 30; echo '{}'`,
+		300*time.Millisecond)
+	if r.Class != hostrun.ClassExecutionTimeout || !r.RemoteMayRun {
+		t.Fatalf("timed-out run: %+v", r)
+	}
+	if running, err := hostrun.RunVisible(context.Background(), c, execID); err != nil || !running {
+		t.Fatalf("detached remote process not seen: %v %v", running, err)
+	}
+	if err := os.WriteFile(stop, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		running, err := hostrun.RunVisible(context.Background(), c, execID)
+		if err == nil && !running {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("remote process still reported after it ended: %v %v", running, err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if r := run(t, c, `{}`, `echo '{}'`, 0); r.RemoteMayRun {
+		t.Fatalf("finished run reported as possibly running: %+v", r)
+	}
+	if _, err := hostrun.RunVisible(context.Background(), c, "not-a-uuid"); err == nil {
+		t.Fatal("invalid execution ID accepted")
 	}
 }
