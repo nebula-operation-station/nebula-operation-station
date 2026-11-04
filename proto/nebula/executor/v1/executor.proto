@@ -1733,6 +1733,10 @@ message PVERemoteInfo {
   string trust_pin = 5;
   uint64 trust_generation = 6;
   PVERemoteState state = 7;
+  // The current read credential version (registry Credentials.ReadVersion);
+  // 0 when the remote has no valid read credential. A version number, not a
+  // secret: credential references and values are never exposed here.
+  int64 read_credential_version = 8;
 }
 
 message ListPVERemotesRequest {}
