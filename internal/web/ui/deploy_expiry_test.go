@@ -504,14 +504,23 @@ func TestDeployProposeRunStoreFullKeepsTheAddress(t *testing.T) {
 	}
 	e.prov.holdIPAM = make(chan struct{})
 	e.prov.holdIPAMStarted = make(chan struct{})
-	xres := make(chan struct{ code int; body string })
+	xres := make(chan struct {
+		code int
+		body string
+	})
 	go func() {
 		code, body, err := do("user10", gpFormCT, dpForm().Encode())
 		if err != nil {
-			xres <- struct{ code int; body string }{0, err.Error()}
+			xres <- struct {
+				code int
+				body string
+			}{0, err.Error()}
 			return
 		}
-		xres <- struct{ code int; body string }{code, body}
+		xres <- struct {
+			code int
+			body string
+		}{code, body}
 	}()
 	<-e.prov.holdIPAMStarted
 	// A second proposal fills the store while the first is in flight.
