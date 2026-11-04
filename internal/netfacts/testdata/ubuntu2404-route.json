@@ -1,0 +1,38 @@
+[
+    {
+        "dst": "default",
+        "gateway": "10.0.0.1",
+        "dev": "ens18",
+        "protocol": "dhcp",
+        "prefsrc": "10.0.0.23",
+        "metric": 100,
+        "flags": []
+    },
+    {
+        "dst": "10.0.0.0/24",
+        "dev": "ens18",
+        "protocol": "kernel",
+        "scope": "link",
+        "prefsrc": "10.0.0.23",
+        "metric": 100,
+        "flags": []
+    },
+    {
+        "dst": "10.0.0.1",
+        "dev": "ens18",
+        "protocol": "dhcp",
+        "scope": "link",
+        "prefsrc": "10.0.0.23",
+        "metric": 100,
+        "flags": []
+    },
+    {
+        "dst": "10.0.0.53",
+        "gateway": "10.0.0.1",
+        "dev": "ens18",
+        "protocol": "dhcp",
+        "prefsrc": "10.0.0.23",
+        "metric": 100,
+        "flags": []
+    }
+]
