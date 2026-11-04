@@ -65,7 +65,8 @@ const apiRoot = "/api2/json"
 // reachable. Callers should display it as "unavailable", not as a failure.
 var ErrAgentUnavailable = errors.New("pveapi: guest agent unavailable")
 
-// ErrResponseTooLarge reports a response larger than MaxResponseBytes.
+// ErrResponseTooLarge reports a response larger than the client's limit
+// (MaxBody, else DefaultMaxBody; the backup default for ReadBackups).
 var ErrResponseTooLarge = errors.New("pveapi: response exceeds size limit")
 
 // TokenSupplier returns the value of the Authorization header for each
@@ -356,7 +357,7 @@ const (
 	ReasonHTTPError = "http_error"
 	// ReasonNoToken covers token supplier failures.
 	ReasonNoToken = "no_token"
-	// ReasonOversize covers responses larger than MaxResponseBytes.
+	// ReasonOversize covers responses larger than the client's body limit.
 	ReasonOversize = "response_oversize"
 	// ReasonInvalidUTF8 covers non-UTF-8 response bodies.
 	ReasonInvalidUTF8 = "invalid_utf8"
