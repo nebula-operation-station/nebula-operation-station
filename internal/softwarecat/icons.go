@@ -76,10 +76,10 @@ func (s IconSubject) validate() error {
 // IconChange is one row of an icon history: the subject's icon changed
 // from PrevSHA to SHA ("" is the generic symbol). RollbackOf is the ID
 // of the change this one rolled back, 0 for an ordinary change.
-// AssetDeleted marks the change that removed an asset's override
-// because the asset was deleted (recorded by the database, ChangedBy
-// "system"); that change and every older one belong to the deleted
-// asset and cannot be rolled back.
+// AssetDeleted marks the end of a deleted asset's history (recorded by
+// the database, ChangedBy "system"; PrevSHA is the override the delete
+// removed, "" if there was none); that change and every older one
+// belong to the deleted asset and cannot be rolled back.
 type IconChange struct {
 	ID           int64
 	Subject      IconSubject
@@ -92,8 +92,7 @@ type IconChange struct {
 }
 
 // assetDeletedMark is the rollback_of value of the history row that
-// migration 0033's trigger writes when an asset with an override is
-// deleted.
+// migration 0033 writes when an asset with icon history is deleted.
 const assetDeletedMark = -1
 
 // validSourceURL checks an icon source URL for storage: printable

@@ -1136,7 +1136,84 @@ func TestAssetDeleteClearsIconOverride(t *testing.T) {
 	}
 }
 
-func TestAssetDeleteWithoutOverrideRecordsNothing(t *testing.T) {
+// TestAssetDeleteAfterClearEndsHistory deletes an asset whose override
+// was already cleared: no override is removed, so nothing is audited,
+// but the history still ends there, so rolling back the old "clear"
+// (or the set before it) cannot put the old icon on a new asset with
+// the same ID.
+func TestAssetDeleteAfterClearEndsHistory(t *testing.T) {
+	s, db, _ := newTestStore(t)
+	ctx := context.Background()
+	if _, err := db.Exec(`INSERT INTO assets (id, name, kind, updated_at) VALUES ('nas-1', 'NAS', 'nas', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RegisterIcon(ctx, "alice", shaA, IconUpload, ""); err != nil {
+		t.Fatal(err)
+	}
+	subj := IconSubject{Kind: SubjectAsset, ID: "nas-1"}
+	if err := s.SetIcon(ctx, "alice", subj, shaA); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetIcon(ctx, "alice", subj, ""); err != nil {
+		t.Fatal(err)
+	}
+	audits := countRows(t, db, "software_catalog_audit")
+	if _, err := db.Exec(`DELETE FROM assets WHERE id = 'nas-1'`); err != nil {
+		t.Fatal(err)
+	}
+	if a := countRows(t, db, "software_catalog_audit"); a != audits {
+		t.Fatalf("delete without override audited: %d -> %d", audits, a)
+	}
+	if _, err := db.Exec(`INSERT INTO assets (id, name, kind, updated_at) VALUES ('nas-1', 'Other', 'nas', 2)`); err != nil {
+		t.Fatal(err)
+	}
+	h, err := s.IconHistory(ctx, subj, 0)
+	if err != nil || len(h) != 3 {
+		t.Fatalf("history %+v %v", h, err)
+	}
+	if d := h[0]; !d.AssetDeleted || d.SHA != "" || d.PrevSHA != "" || d.RollbackOf != 0 || d.ChangedBy != "system" {
+		t.Fatalf("delete history row %+v", d)
+	}
+	for _, c := range h {
+		if err := s.RollbackIcon(ctx, "carol", subj, c.ID); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("rollback of change %+v onto reused asset ID: %v", c, err)
+		}
+	}
+	if sha, _ := s.AssetIcon(ctx, "nas-1"); sha != "" {
+		t.Fatalf("reused asset ID got override %q", sha)
+	}
+	// Deleting the new asset, which has no icon change of its own, does
+	// not end the history a second time.
+	history := countRows(t, db, "software_icon_history")
+	if _, err := db.Exec(`DELETE FROM assets WHERE id = 'nas-1'`); err != nil {
+		t.Fatal(err)
+	}
+	if n := countRows(t, db, "software_icon_history"); n != history {
+		t.Fatalf("second delete recorded: history %d -> %d", history, n)
+	}
+	if _, err := db.Exec(`INSERT INTO assets (id, name, kind, updated_at) VALUES ('nas-1', 'Third', 'nas', 3)`); err != nil {
+		t.Fatal(err)
+	}
+	// The new asset's own changes roll back as usual.
+	if err := s.SetIcon(ctx, "alice", subj, shaA); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetIcon(ctx, "alice", subj, ""); err != nil {
+		t.Fatal(err)
+	}
+	h, err = s.IconHistory(ctx, subj, 1)
+	if err != nil || len(h) != 1 {
+		t.Fatalf("history %+v %v", h, err)
+	}
+	if err := s.RollbackIcon(ctx, "carol", subj, h[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if sha, _ := s.AssetIcon(ctx, "nas-1"); sha != shaA {
+		t.Fatalf("rollback of the new asset's clear gave %q", sha)
+	}
+}
+
+func TestAssetDeleteWithoutIconHistoryRecordsNothing(t *testing.T) {
 	s, db, _ := newTestStore(t)
 	ctx := context.Background()
 	for _, q := range []string{
@@ -1150,8 +1227,8 @@ func TestAssetDeleteWithoutOverrideRecordsNothing(t *testing.T) {
 	if _, err := s.RegisterIcon(ctx, "alice", shaA, IconUpload, ""); err != nil {
 		t.Fatal(err)
 	}
-	// nas-2 has an override; deleting nas-1 must not record anything,
-	// for nas-1 or for nas-2.
+	// nas-2 has an override; deleting nas-1, which has no icon history,
+	// must not record anything, for nas-1 or for nas-2.
 	if err := s.SetIcon(ctx, "alice", IconSubject{Kind: SubjectAsset, ID: "nas-2"}, shaA); err != nil {
 		t.Fatal(err)
 	}
