@@ -237,6 +237,10 @@ type PveMutations struct {
 	// RebootMaxWait bounds the wait for a rebooted node to return, from the
 	// step's intent; after it the outcome is unknown. Default 20 min.
 	RebootMaxWait time.Duration
+	// RebootEvacuationWait bounds how long a node reboot Run waits for HA
+	// to move the guests its approval lists for HA evacuation off the node
+	// before anything is authorized or sent. Default 15 min.
+	RebootEvacuationWait time.Duration
 
 	// rebootMu guards rebooting: the remotes with a node reboot Run in
 	// progress (at most one node of a remote at a time).

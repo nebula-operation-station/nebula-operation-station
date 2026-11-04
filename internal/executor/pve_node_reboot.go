@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -29,27 +30,54 @@ import (
 // (name, members, corosync votes, the HA shutdown policy and the node's HA
 // maintenance flag) and every guest on the node (kind, VMID, power status,
 // whether HA evacuates it, whether the request accepts its downtime). The
-// action refuses:
+// request names every running guest on the node explicitly, either as
+// accepted downtime or as a guest HA is to evacuate, and the permit's
+// targets are the node plus each of those guests: the typed count of a
+// CRITICAL approval is 1 + the number of guests the reboot takes down or
+// moves, and the parameters list each target's synthetic host ID with its
+// kind, VMID and effect. The action refuses:
 //
-//   - a read-only remote (no action credential; offsite remotes such as
-//     ProxmoxOFS1 are registered that way) with ErrPveReadOnly, before
-//     anything is read;
+//   - a read-only remote (no action credential) with ErrPveReadOnly, and a
+//     remote whose admin-set site marker is offsite (ErrPveRebootOffsite;
+//     ADR 0006: an offsite node reboot is CRITICAL, manual and needs an
+//     agreed recovery path, which NOS does not offer) or not set
+//     (ErrPveRebootSite: unknown never lowers the risk), before anything
+//     is read;
 //   - a node that is not listed online exactly once;
 //   - in a cluster: a cluster without quorum; any other member offline or
 //     booted less than pveRebootSettle ago (it is rebooting or settling);
-//     an open pve.node.reboot step or a running reboot on the same remote
-//     (at most one node at a time); remaining corosync votes that are not a
-//     strict majority of all configured votes; a configured or unknown
-//     QDevice (its votes are not modelled); unknown HA state;
-//   - a cluster remote whose cluster status cannot be read, or a standalone
-//     remote that does not list exactly one node;
-//   - any running guest on the node that HA does not evacuate and that the
-//     request does not list as accepted downtime, and an accepted entry that
-//     names no running guest of the node. HA evacuates a guest only when it
-//     is HA-managed with requested state "started" and either the
-//     cluster-wide HA shutdown_policy is "migrate" or the node's LRM is in
-//     maintenance mode; under the PVE default (conditional) a reboot freezes
-//     HA guests in place, so they count as downtime.
+//     an open pve.node.reboot step or a running reboot on the same remote,
+//     or an unknown one whose node was not seen back yet (at most one node
+//     at a time); remaining corosync votes that are not a strict majority
+//     of all configured votes; a configured or unknown QDevice (its votes
+//     are not modelled); unknown HA state;
+//   - a cluster remote whose cluster status cannot be read, a standalone
+//     remote that does not list exactly one node, and a remote registered
+//     standalone that reports a cluster (the one-node-at-a-time lock is
+//     per remote, and a cluster is registered once, by its CA pin);
+//   - any running guest on the node the request does not list, a listed
+//     guest that is not on the node, an accepted entry for a stopped
+//     guest, and an HA-evacuation entry for a guest that is not provably
+//     movable (ErrPveRebootNotEvacuable; such a guest must be listed as
+//     accepted downtime). A guest is provably movable only while the node
+//     is in HA maintenance mode (HA moves guests off before the reboot;
+//     under shutdown_policy=migrate the move would happen only after the
+//     reboot was sent, so nothing could be checked first), the guest is
+//     HA-managed with requested state "started" and running, its
+//     configuration has no passthrough or local device (hostpci, usb,
+//     virtiofs, ivshmem, LXC dev) and no disk, unused volume or attached
+//     CD image on storage that is not shared, its HA group and HA
+//     node-affinity rules (PVE 9) allow another online member (any other
+//     HA rule is not modelled and counts as not movable), and that member
+//     has free memory for it (first fit over all evacuating guests).
+//
+// Before anything is authorized, a Run with HA-evacuation entries waits
+// (bounded by RebootEvacuationWait) until every one of them has left the
+// node and HA reports it started on another online member; the cluster
+// gates (quorum, votes, QDevice, members) are evaluated again on those
+// fresh facts, and the dispatcher repeats the same post-evacuation check
+// right before sending. HA not finishing the evacuation refuses the Run
+// with ErrPveRebootEvacuation; nothing is sent.
 //
 // The bound facts are read again before authorization, immediately before
 // the step's intent is recorded, and by the dispatcher right before the
@@ -64,8 +92,10 @@ import (
 // recorded with a NOS observation record in the UPID column (task type
 // pveNodeRebootTaskType, process fields zero; PVE never creates such a
 // task). A node that does not return within RebootMaxWait leaves the step
-// unknown. A lost response is never sent again: it is observed the same
-// way, and Reconcile does so after a restart.
+// unknown; an unknown step keeps blocking further reboots of the remote
+// until its node is seen with a boot after the step's intent, or for
+// pveRebootUnknownHold. A lost response is never sent again: it is
+// observed the same way, and Reconcile does so after a restart.
 
 // PveNodeRebootAction is the action ID of the node reboot.
 const PveNodeRebootAction = "pve.node.reboot"
@@ -82,7 +112,8 @@ const (
 	// maxPveRebootGuests bounds the guests on the node a reboot binds; a
 	// node with more is refused.
 	maxPveRebootGuests = 128
-	// maxPveRebootAccepted bounds the accepted-downtime list.
+	// maxPveRebootAccepted bounds the accepted-downtime and HA-evacuation
+	// lists together.
 	maxPveRebootAccepted = 128
 	// maxPveRebootStepArgs bounds the arguments of the reboot step.
 	maxPveRebootStepArgs = 8 << 10
@@ -99,6 +130,21 @@ const (
 	pveNodeRebootMaxWait = 20 * time.Minute
 	// maxPveNodeUptime bounds a reported uptime (about 100 years).
 	maxPveNodeUptime = 100 * 366 * 24 * 3600
+	// pveNodeRebootEvacuationWait is the default bound of a Run's wait for
+	// HA to move the listed guests off the node.
+	pveNodeRebootEvacuationWait = 15 * time.Minute
+	// pveRebootUnknownHold is how long an unknown reboot step whose node
+	// was never seen back blocks further reboots of the remote.
+	pveRebootUnknownHold = 24 * time.Hour
+	// maxPveHARules bounds the HA groups and rules a reboot reads.
+	maxPveHARules = 256
+)
+
+// Effects of a reboot target, as listed in the parameters.
+const (
+	pveRebootEffectReboot     = "reboot"
+	pveRebootEffectDowntime   = "downtime"
+	pveRebootEffectEvacuation = "ha_evacuation"
 )
 
 // HA shutdown policies (datacenter option ha: shutdown_policy=...).
@@ -136,11 +182,29 @@ var (
 	// ErrPveRebootRisk is returned when the risk floor could not be
 	// established.
 	ErrPveRebootRisk = errors.New("executor: pve node reboot risk could not be established")
+	// ErrPveRebootNotEvacuable is returned when a guest the request lists
+	// for HA evacuation is not provably movable by HA; it must be listed as
+	// accepted downtime instead. Nothing is sent.
+	ErrPveRebootNotEvacuable = errors.New("executor: a guest listed for HA evacuation is not provably movable; list it as accepted downtime")
+	// ErrPveRebootEvacuation is returned when HA did not move every guest
+	// listed for evacuation off the node (started on another online
+	// member) in time, or one came back. Nothing is sent.
+	ErrPveRebootEvacuation = errors.New("executor: HA did not finish evacuating the listed guests")
+	// ErrPveRebootOffsite is returned for a remote the admin marked
+	// offsite: NOS does not offer an offsite node reboot (ADR 0006).
+	ErrPveRebootOffsite = errors.New("executor: pve node reboot of an offsite remote is not offered")
+	// ErrPveRebootSite is returned for a remote whose site marker is not
+	// set (nebula pve remote set-site): unknown is treated as offsite.
+	ErrPveRebootSite = errors.New("executor: pve remote site is not set; node reboot needs it set to onsite")
+
+	// errPveRebootEvacuating is returned by the post-evacuation check while
+	// a listed guest is still on the node or not yet started elsewhere.
+	errPveRebootEvacuating = fmt.Errorf("%w: still evacuating", ErrPveRebootEvacuation)
 )
 
 func pveNodeRebootArtifact() []byte {
 	return []byte(PveNodeRebootAction + " " + pveNodeRebootVersion + "\n" +
-		"Reboot the exact node; in a cluster only while the remaining nodes keep quorum, no other node is offline or rebooting, and every running guest is HA-evacuated or accepted downtime.\n")
+		"Reboot the exact node of an onsite remote; in a cluster only while the remaining nodes keep quorum, no other node is offline or rebooting, and every running guest is accepted downtime or was moved off by HA before the reboot is sent.\n")
 }
 
 var pveNodeRebootStagePlan = func() string {
@@ -181,6 +245,23 @@ type PveNodeRebootFacts struct {
 	HAShutdownPolicy string
 	// Guests are the QEMU and LXC guests on the node.
 	Guests []pveapi.Guest
+	// Placement holds what limits HA in moving each HA-managed guest on the
+	// node with requested state "started" (read only for a cluster with
+	// HA); a guest without an entry is not provably movable.
+	Placement map[PveRebootGuestRef]PveRebootPlacement
+}
+
+// PveRebootPlacement is what limits HA in moving one guest off the node.
+type PveRebootPlacement struct {
+	// Known is set when the configuration, the node's storages and every
+	// HA group and rule naming the guest were read and are modelled.
+	Known bool
+	// LocalResources is set when the guest has a passthrough or local
+	// device, or a volume on storage that is not shared.
+	LocalResources bool
+	// Restricted is set when HA may place the guest only on AllowedNodes.
+	Restricted   bool
+	AllowedNodes []string
 }
 
 // PveNodeBoot is the observed state of a node after a reboot was sent.
@@ -221,18 +302,23 @@ type PveNodeRebootRequest struct {
 	RemoteID string
 	Node     string
 	// AcceptedDowntime lists the running guests on the node whose downtime
-	// the approval accepts. Every running guest HA does not evacuate must
-	// be listed; an entry for a guest that is not running on the node is
-	// refused.
+	// the approval accepts. An entry for a guest that is not running on
+	// the node is refused.
 	AcceptedDowntime []PveRebootGuestRef
+	// HAEvacuate lists the running guests on the node the approval expects
+	// HA to move off before the reboot (the node in HA maintenance mode).
+	// Each must be provably movable when proposed, and must have left the
+	// node, started elsewhere, before the reboot is sent. Every running
+	// guest on the node is in exactly one of the two lists.
+	HAEvacuate []PveRebootGuestRef
 }
 
 func (r PveNodeRebootRequest) validate() error {
-	if !permit.ValidPveNodeName(r.Node) || len(r.AcceptedDowntime) > maxPveRebootAccepted {
+	if !permit.ValidPveNodeName(r.Node) || len(r.AcceptedDowntime)+len(r.HAEvacuate) > maxPveRebootAccepted {
 		return ErrPveRebootRequest
 	}
 	seen := map[PveRebootGuestRef]bool{}
-	for _, g := range r.AcceptedDowntime {
+	for _, g := range slices.Concat(r.AcceptedDowntime, r.HAEvacuate) {
 		if (g.Kind != permit.ProviderKindQemu && g.Kind != permit.ProviderKindLXC) || !validVMID(g.VMID) || seen[g] {
 			return ErrPveRebootRequest
 		}
@@ -243,7 +329,14 @@ func (r PveNodeRebootRequest) validate() error {
 
 // accepted returns the accepted-downtime list sorted by kind and VMID.
 func (r PveNodeRebootRequest) accepted() []PveRebootGuestRef {
-	out := slices.Clone(r.AcceptedDowntime)
+	return sortedGuestRefs(r.AcceptedDowntime)
+}
+
+// evacuate returns the HA-evacuation list sorted by kind and VMID.
+func (r PveNodeRebootRequest) evacuate() []PveRebootGuestRef { return sortedGuestRefs(r.HAEvacuate) }
+
+func sortedGuestRefs(in []PveRebootGuestRef) []PveRebootGuestRef {
+	out := slices.Clone(in)
 	if out == nil {
 		out = []PveRebootGuestRef{}
 	}
@@ -293,13 +386,29 @@ type pveRebootBound struct {
 	Guests           []PveRebootGuest  `json:"guests"`
 }
 
+// PveRebootTarget is one target of the reboot permit as listed in its
+// parameters: the synthetic host ID and fingerprint the permit binds, the
+// object it stands for and what the reboot does to it.
+type PveRebootTarget struct {
+	HostID      string `json:"host_id"`
+	Fingerprint string `json:"host_key_fingerprint"`
+	Kind        string `json:"kind"`
+	Node        string `json:"node"`
+	VMID        uint64 `json:"vmid,omitempty"`
+	Effect      string `json:"effect"`
+}
+
 // pveRebootParams are the action parameters bound in the approval.
 type pveRebootParams struct {
 	Node             string              `json:"node"`
 	Risk             canonical.Risk      `json:"risk"`
 	AcceptedDowntime []PveRebootGuestRef `json:"accepted_downtime"`
-	Bound            pveRebootBound      `json:"bound"`
-	Steps            []PveMutationStep   `json:"steps"`
+	HAEvacuate       []PveRebootGuestRef `json:"ha_evacuate"`
+	// Targets are the permit's targets (the typed count of a CRITICAL
+	// approval): the node, then every guest it takes down or HA moves.
+	Targets []PveRebootTarget `json:"targets"`
+	Bound   pveRebootBound    `json:"bound"`
+	Steps   []PveMutationStep `json:"steps"`
 }
 
 // pveRebootStepArgs are the arguments of the reboot step: what the
@@ -308,13 +417,28 @@ type pveRebootStepArgs struct {
 	Node        string              `json:"node"`
 	Clustered   bool                `json:"clustered"`
 	Accepted    []PveRebootGuestRef `json:"accepted_downtime"`
+	Evacuate    []PveRebootGuestRef `json:"ha_evacuate"`
 	BoundSHA256 string              `json:"bound_sha256"`
 }
 
+// rebootPhase selects how bindNodeReboot treats the HA-evacuation list.
+type rebootPhase int
+
+const (
+	// rebootPropose: every guest listed for evacuation is still on the node
+	// and provably movable.
+	rebootPropose rebootPhase = iota
+	// rebootSend (post-evacuation, before authorization and sending):
+	// every guest listed for evacuation has left the node and HA reports
+	// it started on another online member.
+	rebootSend
+)
+
 // bindNodeReboot derives the bound facts of a reboot of node with the
-// accepted list from live facts, refusing whatever the reboot does not
-// allow. remoteKind is the registered kind of the remote.
-func bindNodeReboot(node string, accepted []PveRebootGuestRef, remoteKind pvecontract.Kind, f PveNodeRebootFacts) (pveRebootBound, error) {
+// accepted and HA-evacuation lists from live facts, refusing whatever the
+// reboot does not allow in phase. remoteKind is the registered kind of the
+// remote. Both phases bind the same facts for the same reboot.
+func bindNodeReboot(node string, accepted, evacuate []PveRebootGuestRef, remoteKind pvecontract.Kind, f PveNodeRebootFacts, phase rebootPhase) (pveRebootBound, error) {
 	self, ok := uniqueNode(f.Nodes, node)
 	if !ok || self.Status != "online" {
 		return pveRebootBound{}, ErrPveRebootState
@@ -326,10 +450,15 @@ func bindNodeReboot(node string, accepted []PveRebootGuestRef, remoteKind pvecon
 		if remoteKind != pvecontract.KindStandalone || len(f.Nodes) != 1 {
 			return pveRebootBound{}, ErrPveRebootState
 		}
+	} else if remoteKind != pvecontract.KindCluster {
+		// A remote registered standalone that is in a cluster: the reboot
+		// lock is per remote, so the cluster's other remotes would not see
+		// it. It must be registered as the cluster.
+		return pveRebootBound{}, ErrPveRebootState
 	} else if err := bindRebootCluster(node, f, &b); err != nil {
 		return pveRebootBound{}, err
 	}
-	guests, err := bindRebootGuests(node, accepted, f, b)
+	guests, err := bindRebootGuests(node, accepted, evacuate, f, b, phase)
 	if err != nil {
 		return pveRebootBound{}, err
 	}
@@ -414,28 +543,31 @@ func bindRebootCluster(node string, f PveNodeRebootFacts, b *pveRebootBound) err
 	return nil
 }
 
-// bindRebootGuests binds every guest on the node and requires each running
-// guest to be HA-evacuated or accepted downtime.
-func bindRebootGuests(node string, accepted []PveRebootGuestRef, f PveNodeRebootFacts, b pveRebootBound) ([]PveRebootGuest, error) {
+// bindRebootGuests binds every guest on the node: each running guest is
+// accepted downtime or listed for HA evacuation, every listed guest exists
+// as phase requires. A guest HA evacuates is bound with status "running"
+// whether it is still on the node (propose) or already moved (send).
+func bindRebootGuests(node string, accepted, evacuate []PveRebootGuestRef, f PveNodeRebootFacts, b pveRebootBound, phase rebootPhase) ([]PveRebootGuest, error) {
 	if len(f.Guests) > maxPveRebootGuests {
 		return nil, ErrPveRebootState
 	}
-	evacuation := b.Clustered && (b.HAShutdownPolicy == pveHAPolicyMigrate || b.Maintenance)
-	haStarted := map[uint64]bool{}
-	if b.Clustered && f.HA.Available {
-		for _, res := range f.HA.Resources {
-			if res.VMID > 0 && res.Managed && res.DesiredState == "started" {
-				haStarted[uint64(res.VMID)] = true
-			}
-		}
-	}
-	want := map[PveRebootGuestRef]bool{}
+	acc, evac := map[PveRebootGuestRef]bool{}, map[PveRebootGuestRef]bool{}
 	for _, a := range accepted {
-		want[a] = true
+		acc[a] = true
 	}
-	used := map[PveRebootGuestRef]bool{}
+	for _, e := range evacuate {
+		if acc[e] {
+			return nil, ErrPveRebootRequest
+		}
+		evac[e] = true
+	}
+	var evacuable map[PveRebootGuestRef]bool
+	if phase == rebootPropose {
+		evacuable = rebootEvacuable(node, evacuate, f, b)
+	}
+	present := map[PveRebootGuestRef]bool{}
 	seen := map[uint64]bool{}
-	out := make([]PveRebootGuest, 0, len(f.Guests))
+	out := make([]PveRebootGuest, 0, len(f.Guests)+len(evacuate))
 	for _, g := range f.Guests {
 		kind := string(g.Kind)
 		if g.Node != node || (kind != permit.ProviderKindQemu && kind != permit.ProviderKindLXC) || g.VMID <= 0 ||
@@ -445,30 +577,135 @@ func bindRebootGuests(node string, accepted []PveRebootGuestRef, f PveNodeReboot
 		vmid := uint64(g.VMID)
 		seen[vmid] = true
 		ref := PveRebootGuestRef{Kind: kind, VMID: vmid}
-		bg := PveRebootGuest{Kind: kind, VMID: vmid, Status: g.Status}
-		if g.Status != "stopped" {
-			bg.HAEvacuates = evacuation && haStarted[vmid]
-			bg.AcceptedDowntime = want[ref]
-			if !bg.HAEvacuates && !bg.AcceptedDowntime {
+		present[ref] = true
+		switch {
+		case evac[ref]:
+			if phase == rebootSend {
+				return nil, errPveRebootEvacuating
+			}
+			if !evacuable[ref] {
+				return nil, ErrPveRebootNotEvacuable
+			}
+			out = append(out, PveRebootGuest{Kind: kind, VMID: vmid, Status: "running", HAEvacuates: true})
+		case acc[ref]:
+			if g.Status == "stopped" {
+				// The approval would accept downtime of a guest that is
+				// not running: it would not describe the reboot.
 				return nil, ErrPveRebootGuests
 			}
-			if bg.AcceptedDowntime {
-				used[ref] = true
-			}
+			out = append(out, PveRebootGuest{Kind: kind, VMID: vmid, Status: g.Status, AcceptedDowntime: true})
+		case g.Status != "stopped":
+			return nil, ErrPveRebootGuests
+		default:
+			out = append(out, PveRebootGuest{Kind: kind, VMID: vmid, Status: g.Status})
 		}
-		out = append(out, bg)
 	}
 	for _, a := range accepted {
-		if !used[a] {
-			// The approval would accept downtime of a guest that is not
-			// running on the node: it would not describe the reboot.
+		if !present[a] {
 			return nil, ErrPveRebootGuests
 		}
+	}
+	for _, e := range evacuate {
+		if present[e] {
+			continue
+		}
+		if phase == rebootPropose {
+			// Not on the node: the reboot does not impact it.
+			return nil, ErrPveRebootGuests
+		}
+		if !haStartedElsewhere(f.HA, e, node, b) {
+			return nil, errPveRebootEvacuating
+		}
+		out = append(out, PveRebootGuest{Kind: e.Kind, VMID: e.VMID, Status: "running", HAEvacuates: true})
 	}
 	slices.SortFunc(out, func(x, y PveRebootGuest) int {
 		return cmpGuestRef(PveRebootGuestRef{Kind: x.Kind, VMID: x.VMID}, PveRebootGuestRef{Kind: y.Kind, VMID: y.VMID})
 	})
 	return out, nil
+}
+
+// haSIDType is the HA resource type of a guest kind.
+func haSIDType(kind string) string {
+	if kind == permit.ProviderKindLXC {
+		return "ct"
+	}
+	return "vm"
+}
+
+// haResourceOf returns the HA resource of ref, if HA manages it.
+func haResourceOf(ha pveapi.HAStatus, ref PveRebootGuestRef) (pveapi.HAResource, bool) {
+	if !ha.Available {
+		return pveapi.HAResource{}, false
+	}
+	for _, r := range ha.Resources {
+		if r.VMID > 0 && uint64(r.VMID) == ref.VMID && r.Type == haSIDType(ref.Kind) && r.Managed {
+			return r, true
+		}
+	}
+	return pveapi.HAResource{}, false
+}
+
+// haStartedElsewhere reports whether HA reports ref started on another
+// member of the bound cluster (every member is online, bindRebootCluster).
+func haStartedElsewhere(ha pveapi.HAStatus, ref PveRebootGuestRef, node string, b pveRebootBound) bool {
+	r, ok := haResourceOf(ha, ref)
+	if !ok || r.DesiredState != "started" || r.State != "started" || r.Node == node {
+		return false
+	}
+	return slices.ContainsFunc(b.Members, func(m PveRebootMember) bool { return m.Name == r.Node })
+}
+
+// rebootEvacuable returns the guests of evacuate that HA provably moves
+// off node before the reboot: the node is in HA maintenance mode, and each
+// such guest is running on the node, HA-managed with requested state
+// "started", its placement is known without local resources, and a member
+// HA may place it on has free memory for it (first fit, in list order, so
+// the evacuating guests together fit).
+func rebootEvacuable(node string, evacuate []PveRebootGuestRef, f PveNodeRebootFacts, b pveRebootBound) map[PveRebootGuestRef]bool {
+	out := map[PveRebootGuestRef]bool{}
+	if !b.Clustered || !b.Maintenance || len(evacuate) == 0 {
+		return out
+	}
+	free := map[string]uint64{}
+	var names []string
+	for _, m := range b.Members {
+		n, ok := uniqueNode(f.Nodes, m.Name)
+		if m.Name == node || !ok || n.Status != "online" || n.MaxMemory == 0 || n.Memory > n.MaxMemory {
+			continue
+		}
+		free[m.Name] = n.MaxMemory - n.Memory
+		names = append(names, m.Name)
+	}
+	slices.Sort(names)
+	guests := map[PveRebootGuestRef]pveapi.Guest{}
+	for _, g := range f.Guests {
+		if g.Node == node && g.VMID > 0 {
+			guests[PveRebootGuestRef{Kind: string(g.Kind), VMID: uint64(g.VMID)}] = g
+		}
+	}
+	for _, e := range evacuate {
+		g, ok := guests[e]
+		if !ok || g.Status != "running" || g.MaxMemory <= 0 {
+			continue
+		}
+		if r, ok := haResourceOf(f.HA, e); !ok || r.DesiredState != "started" {
+			continue
+		}
+		p, ok := f.Placement[e]
+		if !ok || !p.Known || p.LocalResources {
+			continue
+		}
+		need := uint64(g.MaxMemory)
+		for _, name := range names {
+			if (p.Restricted && !slices.Contains(p.AllowedNodes, name)) || free[name] < need {
+				continue
+			}
+			free[name] -= need
+			out[e] = true
+			break
+		}
+	}
+	return out
 }
 
 func pveRebootBoundHash(b pveRebootBound) (string, error) {
@@ -548,9 +785,66 @@ func (g *PveNodeReboot) risk(rm executordb.PveRemote, node string, b pveRebootBo
 	return risk, nil
 }
 
-func (g *PveNodeReboot) prepare(ctx context.Context, rc PveNodeRebootClient, req PveNodeRebootRequest) (PveMutationRequest, error) {
+// checkRebootSite refuses a remote that is not marked onsite: offsite is
+// never offered, an unset marker is unknown and treated alike.
+func checkRebootSite(rm executordb.PveRemote) error {
+	switch rm.Site {
+	case executordb.SiteOnsite:
+		return nil
+	case executordb.SiteOffsite:
+		return ErrPveRebootOffsite
+	}
+	return ErrPveRebootSite
+}
+
+// rebootRemote returns the active remote with an action credential that
+// is marked onsite.
+func (m *PveMutations) rebootRemote(remoteID string) (executordb.PveRemote, error) {
+	rm, err := m.activeRemote(remoteID)
+	if err != nil {
+		return executordb.PveRemote{}, err
+	}
+	if err := checkRebootSite(rm); err != nil {
+		return executordb.PveRemote{}, err
+	}
+	return rm, nil
+}
+
+// rebootTargets returns the permit targets of a reboot of node with the
+// bound facts b: the node, then every guest it takes down or HA moves, in
+// bound order.
+func rebootTargets(rm executordb.PveRemote, node string, b pveRebootBound) ([]canonical.Target, []PveRebootTarget, error) {
+	add := func(ts []canonical.Target, ls []PveRebootTarget, kind string, vmid uint64, effect string) ([]canonical.Target, []PveRebootTarget, error) {
+		t, err := (permit.ProviderMutationTarget{RemoteID: rm.RemoteID, TrustPin: rm.TrustPin, Kind: kind, Node: node, VMID: vmid}).RiskTarget()
+		if err != nil {
+			return nil, nil, ErrPveMutationPlan
+		}
+		return append(ts, t), append(ls, PveRebootTarget{HostID: t.HostID, Fingerprint: t.HostKeyFingerprint, Kind: kind, Node: node, VMID: vmid, Effect: effect}), nil
+	}
+	ts, ls, err := add(nil, nil, permit.ProviderKindNode, 0, pveRebootEffectReboot)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, g := range b.Guests {
+		effect := ""
+		switch {
+		case g.HAEvacuates:
+			effect = pveRebootEffectEvacuation
+		case g.AcceptedDowntime:
+			effect = pveRebootEffectDowntime
+		default:
+			continue
+		}
+		if ts, ls, err = add(ts, ls, g.Kind, g.VMID, effect); err != nil {
+			return nil, nil, err
+		}
+	}
+	return ts, ls, nil
+}
+
+func (g *PveNodeReboot) prepare(ctx context.Context, rc PveNodeRebootClient, req PveNodeRebootRequest, phase rebootPhase) (PveMutationRequest, error) {
 	m := g.Mutations
-	rm, err := m.activeRemote(req.RemoteID)
+	rm, err := m.rebootRemote(req.RemoteID)
 	if err != nil {
 		return PveMutationRequest{}, err
 	}
@@ -566,12 +860,14 @@ func (g *PveNodeReboot) prepare(ctx context.Context, rc PveNodeRebootClient, req
 	if err != nil {
 		return PveMutationRequest{}, ErrPveRebootState
 	}
-	accepted := req.accepted()
-	b, err := bindNodeReboot(req.Node, accepted, rm.Kind, f)
-	if err != nil {
+	// One node at a time first: an open or unknown reboot of the remote
+	// refuses whatever the guests look like.
+	if err := m.openNodeReboot(rm.RemoteID, f); err != nil {
 		return PveMutationRequest{}, err
 	}
-	if err := m.openNodeReboot(rm.RemoteID); err != nil {
+	accepted, evacuate := req.accepted(), req.evacuate()
+	b, err := bindNodeReboot(req.Node, accepted, evacuate, rm.Kind, f, phase)
+	if err != nil {
 		return PveMutationRequest{}, err
 	}
 	risk, err := g.risk(rm, req.Node, b)
@@ -582,17 +878,24 @@ func (g *PveNodeReboot) prepare(ctx context.Context, rc PveNodeRebootClient, req
 	if err != nil {
 		return PveMutationRequest{}, err
 	}
-	rawArgs, err := json.Marshal(pveRebootStepArgs{Node: req.Node, Clustered: b.Clustered, Accepted: accepted, BoundSHA256: hash})
+	_, targets, err := rebootTargets(rm, req.Node, b)
+	if err != nil {
+		return PveMutationRequest{}, err
+	}
+	rawArgs, err := json.Marshal(pveRebootStepArgs{Node: req.Node, Clustered: b.Clustered, Accepted: accepted, Evacuate: evacuate, BoundSHA256: hash})
 	if err != nil || len(rawArgs) > maxPveRebootStepArgs {
 		return PveMutationRequest{}, ErrPveMutationPlan
 	}
-	params, err := json.Marshal(pveRebootParams{Node: req.Node, Risk: risk, AcceptedDowntime: accepted, Bound: b,
-		Steps: []PveMutationStep{{Method: pveNodeRebootMethod, Args: rawArgs}}})
+	params, err := json.Marshal(pveRebootParams{Node: req.Node, Risk: risk, AcceptedDowntime: accepted, HAEvacuate: evacuate,
+		Targets: targets, Bound: b, Steps: []PveMutationStep{{Method: pveNodeRebootMethod, Args: rawArgs}}})
 	if err != nil {
 		return PveMutationRequest{}, ErrPveMutationPlan
 	}
 	base.Digest, base.ActionID, base.ModuleVersion, base.Artifact, base.Parameters = req.Digest, PveNodeRebootAction, pveNodeRebootVersion, pveNodeRebootArtifact(), params
 	base.liveCheck = func(ctx context.Context, rm executordb.PveRemote, live PveTargetState, read pveapi.TokenSupplier) error {
+		if err := checkRebootSite(rm); err != nil {
+			return err
+		}
 		if live.Node != req.Node {
 			return ErrPveTargetChanged
 		}
@@ -600,23 +903,28 @@ func (g *PveNodeReboot) prepare(ctx context.Context, rc PveNodeRebootClient, req
 		if err != nil {
 			return ErrPveRebootState
 		}
-		again, err := bindNodeReboot(req.Node, accepted, rm.Kind, f)
+		// One node at a time, also across restarts: no reboot step of the
+		// remote may still be open or unknown with its node not seen back.
+		if err := m.openNodeReboot(rm.RemoteID, f); err != nil {
+			return err
+		}
+		again, err := bindNodeReboot(req.Node, accepted, evacuate, rm.Kind, f, phase)
 		if err != nil {
 			return err
 		}
 		if h, err := pveRebootBoundHash(again); err != nil || h != hash {
 			return ErrPveRebootChanged
 		}
-		// One node at a time, also across restarts: no reboot step of the
-		// remote may still be open.
-		return m.openNodeReboot(rm.RemoteID)
+		return nil
 	}
 	return base, nil
 }
 
 // Propose proposes req for the exact node, binding the cluster membership
 // snapshot and every guest on the node. The risk is HIGH for a standalone
-// node and CRITICAL in a cluster, raised by Criticality and Floor.
+// node and CRITICAL in a cluster, raised by Criticality and Floor. The
+// permit's targets are the node and every guest the reboot takes down or
+// HA moves, so a CRITICAL approval types their number.
 func (g *PveNodeReboot) Propose(ctx context.Context, req PveNodeRebootRequest, executionID string, expiry time.Time) (permit.Permit, error) {
 	if err := req.validate(); err != nil {
 		return permit.Permit{}, err
@@ -629,7 +937,7 @@ func (g *PveNodeReboot) Propose(ctx context.Context, req PveNodeRebootRequest, e
 	if m.nodeRebootRunning(req.RemoteID) {
 		return permit.Permit{}, ErrPveRebootBusy
 	}
-	mreq, err := g.prepare(ctx, rc, req)
+	mreq, err := g.prepare(ctx, rc, req, rebootPropose)
 	if err != nil {
 		return permit.Permit{}, err
 	}
@@ -640,6 +948,14 @@ func (g *PveNodeReboot) Propose(ctx context.Context, req PveNodeRebootRequest, e
 	rq, params, err := m.ProposalRequest(ctx, mreq, executionID, doc.Risk, pveNodeRebootStagePlan, expiry)
 	if err != nil {
 		return permit.Permit{}, err
+	}
+	if len(rq.ResolvedTargets) != 1 || len(doc.Targets) == 0 ||
+		rq.ResolvedTargets[0] != (canonical.Target{HostID: doc.Targets[0].HostID, HostKeyFingerprint: doc.Targets[0].Fingerprint}) {
+		return permit.Permit{}, ErrPveMutationPlan
+	}
+	rq.ResolvedTargets = make([]canonical.Target, 0, len(doc.Targets))
+	for _, t := range doc.Targets {
+		rq.ResolvedTargets = append(rq.ResolvedTargets, canonical.Target{HostID: t.HostID, HostKeyFingerprint: t.Fingerprint})
 	}
 	if g.Floor != nil {
 		f, _, err := g.Floor.MinimumRisk(rq, rq.ResolvedTargets)
@@ -655,15 +971,18 @@ func (g *PveNodeReboot) Propose(ctx context.Context, req PveNodeRebootRequest, e
 		return permit.Permit{}, err
 	}
 	m.log().Info("audit", "kind", "pve_node_reboot_proposed", "remote", req.RemoteID, "node", req.Node,
-		"guests", len(doc.Bound.Guests), "risk", string(res.Permit.Request.RiskClass), "execution", executionID)
+		"guests", len(doc.Bound.Guests), "targets", len(doc.Targets), "risk", string(res.Permit.Request.RiskClass), "execution", executionID)
 	return res.Permit, nil
 }
 
 // Run runs the approved reboot req.Digest. At most one reboot per remote
-// runs at a time. Every bound fact is read again before authorization,
-// immediately before the step's intent and by the dispatcher before the
-// reboot is sent; the risk is derived again and is part of the bound
-// parameters. Run then waits (bounded) for the node to return.
+// runs at a time. With HA-evacuation entries it first waits, bounded by
+// RebootEvacuationWait, until HA moved every listed guest off the node
+// (post-evacuation check, nothing authorized yet). Every bound fact is
+// read again before authorization, immediately before the step's intent
+// and by the dispatcher before the reboot is sent; the risk is derived
+// again and is part of the bound parameters. Run then waits (bounded) for
+// the node to return.
 func (g *PveNodeReboot) Run(ctx context.Context, req PveNodeRebootRequest) (PveMutationResult, error) {
 	if err := req.validate(); err != nil {
 		return PveMutationResult{}, err
@@ -677,11 +996,70 @@ func (g *PveNodeReboot) Run(ctx context.Context, req PveNodeRebootRequest) (PveM
 		return PveMutationResult{}, ErrPveRebootBusy
 	}
 	defer release()
-	mreq, err := g.prepare(ctx, rc, req)
+	if len(req.HAEvacuate) > 0 {
+		if err := g.awaitEvacuation(ctx, rc, req); err != nil {
+			return PveMutationResult{}, err
+		}
+	}
+	mreq, err := g.prepare(ctx, rc, req, rebootSend)
 	if err != nil {
 		return PveMutationResult{}, err
 	}
 	return g.Mutations.Run(ctx, mreq)
+}
+
+func (m *PveMutations) rebootEvacuationWait() time.Duration {
+	if m.RebootEvacuationWait > 0 {
+		return m.RebootEvacuationWait
+	}
+	return pveNodeRebootEvacuationWait
+}
+
+func (m *PveMutations) rebootPollInterval() time.Duration {
+	if m.RebootPollInterval > 0 {
+		return m.RebootPollInterval
+	}
+	return pveNodeRebootPollInterval
+}
+
+// awaitEvacuation polls the facts until the post-evacuation check of req
+// passes: every listed guest left the node and runs started on another
+// online member, with all cluster gates met. Any other refusal ends the
+// wait at once; unreadable facts and guests still moving keep waiting
+// until RebootEvacuationWait passed (ErrPveRebootEvacuation).
+func (g *PveNodeReboot) awaitEvacuation(ctx context.Context, rc PveNodeRebootClient, req PveNodeRebootRequest) error {
+	m := g.Mutations
+	rm, err := m.rebootRemote(req.RemoteID)
+	if err != nil {
+		return err
+	}
+	read, err := m.readToken(rm)
+	if err != nil {
+		return err
+	}
+	accepted, evacuate := req.accepted(), req.evacuate()
+	deadline := m.now().Add(m.rebootEvacuationWait())
+	for {
+		f, err := rc.NodeRebootFacts(ctx, rm, req.Node, read)
+		if err == nil {
+			_, err = bindNodeReboot(req.Node, accepted, evacuate, rm.Kind, f, rebootSend)
+			if err == nil {
+				return nil
+			}
+			if !errors.Is(err, errPveRebootEvacuating) {
+				return err
+			}
+		}
+		if !m.now().Before(deadline) {
+			m.log().Warn("audit", "kind", "pve_node_reboot_refused", "remote", req.RemoteID, "node", req.Node, "reason", "HA evacuation not finished")
+			return ErrPveRebootEvacuation
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%w: %w", ErrPveRebootEvacuation, ctx.Err())
+		case <-time.After(m.rebootPollInterval()):
+		}
+	}
 }
 
 // PveNodeRebootWriter is the part of pveapi.Writer the reboot step uses
@@ -712,15 +1090,17 @@ func DispatchNodeRebootStep(ctx context.Context, w PveNodeRebootWriter, rd PveNo
 	reject := func(why string) error {
 		return fmt.Errorf("dispatch %s: %s: %w", step.Method, why, ErrPveRejected)
 	}
-	req := PveNodeRebootRequest{Node: a.Node, AcceptedDowntime: a.Accepted}
-	if a.Node != node || req.validate() != nil || !slices.IsSortedFunc(a.Accepted, cmpGuestRef) {
+	req := PveNodeRebootRequest{Node: a.Node, AcceptedDowntime: a.Accepted, HAEvacuate: a.Evacuate}
+	if a.Node != node || req.validate() != nil || !slices.IsSortedFunc(a.Accepted, cmpGuestRef) || !slices.IsSortedFunc(a.Evacuate, cmpGuestRef) {
 		return reject("arguments")
 	}
 	f, err := rd.NodeRebootFacts(ctx, node)
 	if err != nil {
 		return reject("facts")
 	}
-	b, err := bindNodeReboot(node, a.Accepted, remoteKind, f)
+	// Post-evacuation check: every guest listed for HA evacuation has left
+	// the node, started elsewhere, and the cluster gates hold without it.
+	b, err := bindNodeReboot(node, a.Accepted, a.Evacuate, remoteKind, f, rebootSend)
 	if err != nil {
 		return reject("gates")
 	}
@@ -762,13 +1142,26 @@ func (c *pveMutationClient) NodeRebootFacts(ctx context.Context, rm executordb.P
 	return f, nil
 }
 
+// pveRebootInventory returns the pveapi client for the node and guest
+// lists (ListNodes, ListQemu, ListLxc add the API root themselves) and the
+// one for the storage list (relative to the API root).
+func pveRebootInventory(hc *http.Client, base string, read pveapi.TokenSupplier) (inv, pc *pveapi.Client, err error) {
+	if inv, err = pveapi.New(base, hc, read, pveapi.WithTimeout(pveMutationRequestTimeout)); err != nil {
+		return nil, nil, errPveMutationRead
+	}
+	if pc, err = pveapi.NewClient(hc, base+"/api2/json", read); err != nil {
+		return nil, nil, errPveMutationRead
+	}
+	return inv, pc, nil
+}
+
 func pveNodeRebootFacts(ctx context.Context, hc *http.Client, base string, read pveapi.TokenSupplier, node string) (PveNodeRebootFacts, error) {
-	pc, err := pveapi.NewClient(hc, base+"/api2/json", read)
+	inv, pc, err := pveRebootInventory(hc, base, read)
 	if err != nil {
-		return PveNodeRebootFacts{}, errPveMutationRead
+		return PveNodeRebootFacts{}, err
 	}
 	var f PveNodeRebootFacts
-	if f.Nodes, err = pc.ListNodes(ctx); err != nil {
+	if f.Nodes, err = inv.ListNodes(ctx); err != nil {
 		return PveNodeRebootFacts{}, errPveMutationRead
 	}
 	cr := pveClusterReader(hc, base, read)
@@ -790,11 +1183,11 @@ func pveNodeRebootFacts(ctx context.Context, hc *http.Client, base string, read 
 			return PveNodeRebootFacts{}, err
 		}
 	}
-	qemu, err := pc.ListQemu(ctx, node)
+	qemu, err := inv.ListQemu(ctx, node)
 	if err != nil {
 		return PveNodeRebootFacts{}, errPveMutationRead
 	}
-	lxc, err := pc.ListLxc(ctx, node)
+	lxc, err := inv.ListLxc(ctx, node)
 	if err != nil {
 		return PveNodeRebootFacts{}, errPveMutationRead
 	}
@@ -802,7 +1195,269 @@ func pveNodeRebootFacts(ctx context.Context, hc *http.Client, base string, read 
 		return PveNodeRebootFacts{}, errPveMutationRead
 	}
 	f.Guests = append(qemu, lxc...)
+	if f.Cluster.Available && f.HA.Available {
+		f.Placement = pveRebootPlacements(ctx, hc, base, read, pc, node, f)
+	}
 	return f, nil
+}
+
+// pveRebootPlacements reads the placement of every HA-managed guest on
+// node with requested state "started". A read that fails or returns
+// something not modelled leaves that guest's placement unknown (not
+// provably movable); a failed trust check is still seen by the caller's
+// trust watch.
+func pveRebootPlacements(ctx context.Context, hc *http.Client, base string, read pveapi.TokenSupplier, pc *pveapi.Client, node string, f PveNodeRebootFacts) map[PveRebootGuestRef]PveRebootPlacement {
+	out := map[PveRebootGuestRef]PveRebootPlacement{}
+	var refs []PveRebootGuestRef
+	for _, g := range f.Guests {
+		ref := PveRebootGuestRef{Kind: string(g.Kind), VMID: uint64(max(g.VMID, 0))}
+		if r, ok := haResourceOf(f.HA, ref); ok && g.Node == node && r.DesiredState == "started" {
+			refs = append(refs, ref)
+		}
+	}
+	if len(refs) == 0 {
+		return out
+	}
+	var shared map[string]bool
+	if list, err := pc.ListStorages(ctx, node); err == nil && list.Complete {
+		shared = make(map[string]bool, len(list.Storages))
+		for _, st := range list.Storages {
+			shared[st.ID] = st.Shared && st.Active
+		}
+	}
+	ha := pveReadHAPlacement(ctx, hc, base, read)
+	for _, ref := range refs {
+		p := PveRebootPlacement{}
+		if shared != nil && ha.known {
+			cfg, err := pveGuestConfigStrings(ctx, hc, base, read, ref.Kind, node, ref.VMID, pveRebootPlacementKey)
+			if err == nil {
+				p.Restricted, p.AllowedNodes, p.Known = ha.placement(haSIDType(ref.Kind) + ":" + strconv.FormatUint(ref.VMID, 10))
+				p.LocalResources = rebootLocalResources(ref.Kind, cfg, shared)
+			}
+		}
+		out[ref] = p
+	}
+	return out
+}
+
+var (
+	pveRebootLocalDeviceRe = regexp.MustCompile(`^(?:hostpci|usb|virtiofs|ivshmem)[0-9]*$`)
+	pveRebootLXCDeviceRe   = regexp.MustCompile(`^dev[0-9]+$`)
+)
+
+// pveRebootPlacementKey reports whether a config member matters to HA
+// moving the guest; such a member must be a bounded string.
+func pveRebootPlacementKey(k string) bool {
+	return pveMigrateRelevantConfigKey(k) || pveRebootLocalDeviceRe.MatchString(k) || pveRebootLXCDeviceRe.MatchString(k)
+}
+
+// rebootLocalResources reports whether the guest configuration ties the
+// guest to its node: a passthrough or local device, a CD image or a volume
+// (disk or unused) on storage that is not shared and active, a passthrough
+// disk or bind mount, or a config the disk parser does not accept.
+func rebootLocalResources(kind string, cfg map[string]string, shared map[string]bool) bool {
+	for k, v := range cfg {
+		if pveRebootLocalDeviceRe.MatchString(k) || (kind == permit.ProviderKindLXC && pveRebootLXCDeviceRe.MatchString(k)) {
+			return true
+		}
+		if kind == permit.ProviderKindQemu && pveQemuDiskKeyRe.MatchString(k) && slices.Contains(strings.Split(v, ","), "media=cdrom") {
+			vol, _, _ := strings.Cut(v, ",")
+			if vol == "none" || vol == "cdrom" {
+				continue
+			}
+			storage, _, ok := strings.Cut(vol, ":")
+			if !ok || !shared[storage] {
+				return true
+			}
+		}
+	}
+	disks, err := migrateDiskSet(kind, cfg, nil)
+	if err != nil {
+		return true
+	}
+	for _, d := range disks {
+		if !shared[d.Storage] {
+			return true
+		}
+	}
+	return false
+}
+
+// pveHAPlacementRule is one HA group (PVE 8) or HA rule (PVE 9) as far as
+// it limits where HA may place a resource.
+type pveHAPlacementRule struct {
+	// nodeAffinity is set for a group or a node-affinity rule; any other
+	// rule type naming a resource makes its placement unknown.
+	nodeAffinity bool
+	// strict is set for a restricted group or a strict rule: HA places the
+	// resource only on nodes.
+	strict bool
+	nodes  []string
+}
+
+// pveHAPlacement is the HA configuration that limits placement.
+type pveHAPlacement struct {
+	known bool
+	// groupOf maps a resource SID to its HA group ("" for none).
+	groupOf map[string]string
+	groups  map[string]pveHAPlacementRule
+	// rules maps a resource SID to the enabled HA rules naming it.
+	rules map[string][]pveHAPlacementRule
+}
+
+// placement returns whether HA may place sid only on allowed, and whether
+// that is known.
+func (h pveHAPlacement) placement(sid string) (restricted bool, allowed []string, known bool) {
+	if !h.known {
+		return false, nil, false
+	}
+	var rules []pveHAPlacementRule
+	if g := h.groupOf[sid]; g != "" {
+		grp, ok := h.groups[g]
+		if !ok {
+			return false, nil, false
+		}
+		rules = append(rules, grp)
+	}
+	rules = append(rules, h.rules[sid]...)
+	for _, r := range rules {
+		if !r.nodeAffinity {
+			return false, nil, false
+		}
+		if !r.strict {
+			continue
+		}
+		if !restricted {
+			restricted, allowed = true, slices.Clone(r.nodes)
+			continue
+		}
+		allowed = slices.DeleteFunc(allowed, func(n string) bool { return !slices.Contains(r.nodes, n) })
+	}
+	return restricted, allowed, true
+}
+
+// pveReadHAPlacement reads GET /cluster/ha/resources (group of each
+// resource), GET /cluster/ha/groups when a resource names a group, and GET
+// /cluster/ha/rules (PVE 9; absent on PVE 8). Anything unreadable or
+// malformed leaves it unknown.
+func pveReadHAPlacement(ctx context.Context, hc *http.Client, base string, read pveapi.TokenSupplier) pveHAPlacement {
+	h := pveHAPlacement{groupOf: map[string]string{}, groups: map[string]pveHAPlacementRule{}, rules: map[string][]pveHAPlacementRule{}}
+	var res []map[string]json.RawMessage
+	if err := pveGetData(ctx, hc, base, read, "/cluster/ha/resources", nil, &res); err != nil || len(res) > maxPveHARules {
+		return pveHAPlacement{}
+	}
+	needGroups := false
+	for _, r := range res {
+		sid, ok := haString(r, "sid")
+		if !ok || sid == "" {
+			return pveHAPlacement{}
+		}
+		group, ok := haString(r, "group")
+		if !ok {
+			return pveHAPlacement{}
+		}
+		h.groupOf[sid] = group
+		needGroups = needGroups || group != ""
+	}
+	if needGroups {
+		var groups []map[string]json.RawMessage
+		if err := pveGetData(ctx, hc, base, read, "/cluster/ha/groups", nil, &groups); err != nil || len(groups) > maxPveHARules {
+			return pveHAPlacement{}
+		}
+		for _, g := range groups {
+			name, ok1 := haString(g, "group")
+			nodes, ok2 := haNodeList(g)
+			restricted, ok3 := haFlag(g, "restricted")
+			if !ok1 || !ok2 || !ok3 || name == "" {
+				return pveHAPlacement{}
+			}
+			h.groups[name] = pveHAPlacementRule{nodeAffinity: true, strict: restricted, nodes: nodes}
+		}
+	}
+	var rules []map[string]json.RawMessage
+	found, err := pveGetOptionalData(ctx, hc, base, read, "/cluster/ha/rules", &rules)
+	if err != nil || len(rules) > maxPveHARules {
+		return pveHAPlacement{}
+	}
+	if found {
+		for _, r := range rules {
+			typ, ok1 := haString(r, "type")
+			resources, ok2 := haString(r, "resources")
+			disabled, ok3 := haFlag(r, "disable")
+			strict, ok4 := haFlag(r, "strict")
+			if !ok1 || !ok2 || !ok3 || !ok4 {
+				return pveHAPlacement{}
+			}
+			if disabled {
+				continue
+			}
+			rule := pveHAPlacementRule{nodeAffinity: typ == "node-affinity", strict: strict}
+			if rule.nodeAffinity {
+				nodes, ok := haNodeList(r)
+				if !ok {
+					return pveHAPlacement{}
+				}
+				rule.nodes = nodes
+			}
+			for _, sid := range strings.Split(resources, ",") {
+				if sid = strings.TrimSpace(sid); sid != "" {
+					h.rules[sid] = append(h.rules[sid], rule)
+				}
+			}
+		}
+	}
+	h.known = true
+	return h
+}
+
+// haString returns the string member key of m; absent is "".
+func haString(m map[string]json.RawMessage, key string) (string, bool) {
+	raw, ok := m[key]
+	if !ok {
+		return "", true
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil || len(s) > 4096 {
+		return "", false
+	}
+	return s, true
+}
+
+// haFlag returns the 0/1 (or boolean) member key of m; absent is false.
+func haFlag(m map[string]json.RawMessage, key string) (bool, bool) {
+	raw, ok := m[key]
+	if !ok {
+		return false, true
+	}
+	switch strings.TrimSpace(string(raw)) {
+	case "0", "false", `"0"`:
+		return false, true
+	case "1", "true", `"1"`:
+		return true, true
+	}
+	return false, false
+}
+
+// haNodeList parses the "nodes" member ("pve1:2,pve2") into node names.
+func haNodeList(m map[string]json.RawMessage) ([]string, bool) {
+	s, ok := haString(m, "nodes")
+	if !ok || s == "" {
+		return nil, false
+	}
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		name, prio, hasPrio := strings.Cut(strings.TrimSpace(part), ":")
+		if !permit.ValidPveNodeName(name) {
+			return nil, false
+		}
+		if hasPrio {
+			if _, err := strconv.ParseUint(prio, 10, 16); err != nil {
+				return nil, false
+			}
+		}
+		out = append(out, name)
+	}
+	return out, true
 }
 
 // pveHAShutdownPolicy reads the datacenter HA shutdown_policy from
@@ -898,11 +1553,11 @@ func (c *pveMutationClient) NodeBoot(ctx context.Context, rm executordb.PveRemot
 }
 
 func pveNodeBoot(ctx context.Context, hc *http.Client, base string, read pveapi.TokenSupplier, node string) (PveNodeBoot, error) {
-	pc, err := pveapi.NewClient(hc, base+"/api2/json", read)
+	inv, _, err := pveRebootInventory(hc, base, read)
 	if err != nil {
-		return PveNodeBoot{}, errPveMutationRead
+		return PveNodeBoot{}, err
 	}
-	nodes, err := pc.ListNodes(ctx)
+	nodes, err := inv.ListNodes(ctx)
 	if err != nil {
 		return PveNodeBoot{}, errPveMutationRead
 	}
@@ -920,6 +1575,9 @@ func pveNodeBoot(ctx context.Context, hc *http.Client, base string, read pveapi.
 func (c *pveMutationClient) DispatchNodeReboot(ctx context.Context, rm executordb.PveRemote, node string, step PveMutationStep, action, read pveapi.TokenSupplier) error {
 	if step.Method != pveNodeRebootMethod || action == nil || read == nil || !permit.ValidPveNodeName(node) {
 		return fmt.Errorf("dispatch %s: %w", step.Method, ErrPveRejected)
+	}
+	if err := checkRebootSite(rm); err != nil {
+		return fmt.Errorf("dispatch %s: %w: %w", step.Method, ErrPveRejected, err)
 	}
 	hc, watch, base, err := c.conn(ctx, rm)
 	if err != nil {
@@ -956,10 +1614,7 @@ func nodeRebootStep(step PveMutationStep) bool { return step.Method == pveNodeRe
 // not return in time leaves the step unknown; a cancelled ctx leaves it
 // open for Reconcile.
 func (m *PveMutations) awaitNodeReboot(ctx context.Context, rm executordb.PveRemote, job executordb.PveJob, read pveapi.TokenSupplier) error {
-	interval := m.RebootPollInterval
-	if interval <= 0 {
-		interval = pveNodeRebootPollInterval
-	}
+	interval := m.rebootPollInterval()
 	for {
 		done, err := m.observeNodeReboot(ctx, rm, job, read)
 		if done || err != nil {
@@ -1050,14 +1705,32 @@ func (m *PveMutations) reconcileNodeReboot(ctx context.Context, rm executordb.Pv
 	return err
 }
 
-// openNodeReboot refuses while any reboot step of the remote is open.
-func (m *PveMutations) openNodeReboot(remoteID string) error {
+// openNodeReboot refuses while any reboot step of the remote is open, or
+// unknown (its node did not return in time) while its node was not seen
+// in f with a boot after the step's intent and pveRebootUnknownHold has
+// not passed: the node may still be going down.
+func (m *PveMutations) openNodeReboot(remoteID string, f PveNodeRebootFacts) error {
 	open, err := m.DB.OpenPveJobs()
 	if err != nil {
 		return ErrPveJobStore
 	}
 	for _, j := range open {
 		if j.RemoteID == remoteID && j.Action == PveNodeRebootAction {
+			return ErrPveRebootBusy
+		}
+	}
+	unknown, err := m.DB.UnknownPveJobs(PveNodeRebootAction)
+	if err != nil {
+		return ErrPveJobStore
+	}
+	now := m.now()
+	for _, j := range unknown {
+		if j.RemoteID != remoteID || !now.Before(j.CreatedAt.Add(pveRebootUnknownHold)) {
+			continue
+		}
+		n, ok := uniqueNode(f.Nodes, j.Node)
+		if !ok || n.Status != "online" || n.UptimeSeconds == 0 || n.UptimeSeconds > maxPveNodeUptime ||
+			!now.Add(-time.Duration(n.UptimeSeconds)*time.Second).After(j.CreatedAt) {
 			return ErrPveRebootBusy
 		}
 	}

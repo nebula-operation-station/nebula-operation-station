@@ -828,3 +828,50 @@ func TestPveMigrationUniquePinIndex(t *testing.T) {
 		t.Fatalf("duplicate pin left a row behind")
 	}
 }
+
+func TestPveRemoteSiteMarker(t *testing.T) {
+	db := pveDB(t)
+	rm := addPveRemote(t, db, pveStandaloneRemote("pve-ofs", pinOf("leaf-ofs")))
+	if rm.Site != SiteUnset {
+		t.Fatalf("new remote site %q, want unset", rm.Site)
+	}
+	for _, bad := range []string{"", "Offsite", "remote", "onsite "} {
+		if _, err := db.SetRemoteSite("pve-ofs", bad, "admin"); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("site %q: %v", bad, err)
+		}
+	}
+	rm, err := db.SetRemoteSite("pve-ofs", SiteOffsite, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPveRemotePersisted(t, db, rm)
+	if rm.Site != SiteOffsite {
+		t.Fatalf("site %q", rm.Site)
+	}
+	if rm, err = db.SetRemoteSite("pve-ofs", SiteOnsite, "admin"); err != nil || rm.Site != SiteOnsite {
+		t.Fatalf("onsite: %+v %v", rm, err)
+	}
+	changes, err := db.RemoteChanges("pve-ofs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) != 3 || changes[1].ChangeType != ChangeSite || changes[1].Detail != "site=offsite (was unset)" ||
+		changes[2].Detail != "site=onsite (was offsite)" {
+		t.Fatalf("change trail: %+v", changes)
+	}
+	if _, err := db.SetRemoteSite("nope", SiteOnsite, "admin"); !errors.Is(err, ErrRemoteNotFound) {
+		t.Fatalf("missing remote: %v", err)
+	}
+	if _, err := db.BlockRemote("pve-ofs", "mismatch", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if rm, err = db.SetRemoteSite("pve-ofs", SiteOffsite, "admin"); err != nil || rm.Site != SiteOffsite {
+		t.Fatalf("blocked remote: %+v %v", rm, err)
+	}
+	if _, err := db.RemoveRemote("pve-ofs", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SetRemoteSite("pve-ofs", SiteOnsite, "admin"); !errors.Is(err, ErrRemoteState) {
+		t.Fatalf("removed remote: %v", err)
+	}
+}

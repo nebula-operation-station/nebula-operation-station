@@ -384,3 +384,37 @@ func TestPveConfirmationInputIsBounded(t *testing.T) {
 		}
 	}
 }
+
+func TestPveRemoteSetSite(t *testing.T) {
+	dir := pveTestDataDir(t)
+	endpoint, pin := pvePinningServer(t, pveSelfSignedCert(t))
+	var out bytes.Buffer
+	if err := pveCmd([]string{"remote", "add", "testlab", "--kind", "standalone", "--endpoint", endpoint},
+		strings.NewReader(pin+"\n"), pveTestAsk(t), &out); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	for _, args := range [][]string{{"remote", "set-site", "testlab"}, {"remote", "set-site", "testlab", "elsewhere"}, {"remote", "set-site", "--x", "onsite"}} {
+		if err := pveCmd(args, strings.NewReader("yes\n"), pveTestAsk(t), &out); err == nil {
+			t.Fatalf("%v accepted", args)
+		}
+	}
+	if err := pveCmd([]string{"remote", "set-site", "testlab", "offsite"}, strings.NewReader("no\n"), pveTestAsk(t), &out); err == nil {
+		t.Fatal("set-site accepted a 'no' confirmation")
+	}
+	if rm, ok := pvePeekRemote(t, dir); !ok || rm.Site != executordb.SiteUnset {
+		t.Fatalf("site changed although not confirmed: %+v", rm)
+	}
+	if err := pveCmd([]string{"remote", "set-site", "testlab", "offsite"}, strings.NewReader("yes\n"), pveTestAsk(t), &out); err != nil {
+		t.Fatalf("set-site: %v", err)
+	}
+	if rm, ok := pvePeekRemote(t, dir); !ok || rm.Site != executordb.SiteOffsite {
+		t.Fatalf("site not recorded: %+v", rm)
+	}
+	var listOut bytes.Buffer
+	if err := pveCmd([]string{"remote", "list"}, strings.NewReader(""), pveTestAsk(t), &listOut); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if !strings.Contains(listOut.String(), "SITE") || !strings.Contains(listOut.String(), "offsite") {
+		t.Fatalf("list output: %s", listOut.String())
+	}
+}
