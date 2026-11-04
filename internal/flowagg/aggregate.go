@@ -178,6 +178,13 @@ const maxSeqRuns = 4
 // is refused by the ingest window anyway. Once the clock has passed an
 // excursion run it is part of the sequence again.
 //
+// An excursion run that starts at or before horizon (a report sent while
+// the clock ran ahead that continued the sequence from before the jump)
+// covers the present after the return; reports there are refused until
+// the clock passes its end. Such a run starts in the present, so the
+// refusal lasts about as long as the jump. addRun never extends it by a
+// merge (see addRun).
+//
 // The runs are sorted and disjoint, so their ends increase and the runs
 // at or before horizon are a prefix.
 func seqAccepts(runs []timeRun, from, to, horizon time.Time) bool {
@@ -499,7 +506,8 @@ func reporterEnd(o *Observation) netip.Addr {
 // restarts or start over with a baseline. Reports accepted while the
 // clock ran ahead (ending after now plus Limits.MaxClockSkew) do not
 // hold back the host's reports after the clock returned; only reports
-// overlapping them are refused (see seqAccepts).
+// overlapping them are refused (see seqAccepts), and they are never merged
+// with the host's other reports into a run that covers the present.
 //
 // For every flow and hour the bytes reported by the server end are used
 // when present; the client end's report is kept as confirmation and used
