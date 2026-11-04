@@ -1,0 +1,7 @@
+[
+  {"ifindex":1,"ifname":"lo","address":"00:00:00:00:00:00","operstate":"UNKNOWN","addr_info":[{"family":"inet","local":"127.0.0.1","prefixlen":8},{"family":"inet6","local":"::1","prefixlen":128}]},
+  {"ifindex":2,"ifname":"eth0","address":"bc:24:11:aa:bb:01","operstate":"UP","addr_info":[{"family":"inet","local":"192.168.178.10","prefixlen":24}]},
+  {"ifindex":5,"ifname":"eth0.100","address":"bc:24:11:aa:bb:01","operstate":"UP","addr_info":[{"family":"inet","local":"10.0.100.2","prefixlen":24}]},
+  {"ifindex":7,"ifname":"vmbr0","address":"bc:24:11:aa:bb:02","operstate":"UP","addr_info":[{"family":"inet","local":"192.168.178.2","prefixlen":24},{"family":"inet6","local":"fe80::1","prefixlen":64}]},
+  {"ifindex":9,"ifname":"tap101","address":"ba:d0:00:10:00:01","operstate":"UP","addr_info":[{"family":"inet","local":"10.0.101.5","prefixlen":24}]}
+]
