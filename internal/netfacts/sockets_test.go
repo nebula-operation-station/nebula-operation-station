@@ -40,10 +40,14 @@ func TestParseSocketsDebian12(t *testing.T) {
 }
 
 func TestParseSocketsUbuntu2404WithProcess(t *testing.T) {
-	got, err := ParseSockets(readFixture(t, "ubuntu2404-ss.txt"))
+	res, err := ParseSocketTable(readFixture(t, "ubuntu2404-ss.txt"))
 	if err != nil {
-		t.Fatalf("ParseSockets: %v", err)
+		t.Fatalf("ParseSocketTable: %v", err)
 	}
+	if res.Incomplete || res.Dropped != 0 {
+		t.Fatalf("complete fixture marked Incomplete=%v Dropped=%d", res.Incomplete, res.Dropped)
+	}
+	got := res.Entries
 	want := []Socket{
 		{Proto: ProtoUDP, State: "UNCONN", Local: ap("127.0.0.54:53"), Peer: ap("0.0.0.0:0"), Listening: true, Process: "systemd-resolve"},
 		{Proto: ProtoUDP, State: "UNCONN", Local: ap("127.0.0.53:53"), Peer: ap("0.0.0.0:0"), Dev: "lo", Listening: true, Process: "systemd-resolve"},
@@ -222,8 +226,8 @@ func TestParseSocketsProcessName(t *testing.T) {
 		{`users:(("` + strings.Repeat("a", maxProcessLen) + `",pid=1,fd=3))`, strings.Repeat("a", maxProcessLen), false},
 		{`users:(("` + strings.Repeat("a", maxProcessLen+1) + `",pid=1,fd=3))`, "", true},
 		{`users:(("",pid=1,fd=3))`, "", true},
-		{`users:(("evil` + "‮" + `",pid=1,fd=3))`, "", true},
-		{`users:(("x` + "​" + `",pid=1,fd=3))`, "", true},
+		{`users:(("evil` + "\u202e" + `",pid=1,fd=3))`, "", true},
+		{`users:(("x` + "\u200b" + `",pid=1,fd=3))`, "", true},
 		{`ino:12345 sk:1`, "", false},
 	}
 	for _, c := range cases {
@@ -250,6 +254,17 @@ func TestParseSocketsMalformedUsersColumnDropsSocket(t *testing.T) {
 		"tcp ESTAB 0 0 10.0.0.1:22 10.0.0.2:5000 users:((sshd,pid=1,fd=3))\n",
 		"tcp ESTAB 0 0 10.0.0.1:22 10.0.0.2:5000 users:((\"x\npid=1\",pid=1,fd=3))\n",
 		"tcp ESTAB 0 0 10.0.0.1:22 10.0.0.2:5000 users:((\"x\n\tbytes_acked:9\",pid=1,fd=3))\n\t cubic bytes_acked:1\n",
+		// The first part has the users:(( prefix, contains `",pid=` and
+		// ends in "))", and the remainder is a valid info line: a check
+		// of only the column ends would keep the socket with
+		// bytes_acked 9.
+		"tcp ESTAB 0 0 10.0.0.1:22 10.0.0.2:5000 users:((\"sshd\",pid=1,fd=3),(\"))\n\tbytes_acked:9 \",pid=2,fd=3))\n\t cubic bytes_acked:1\n",
+		"tcp ESTAB 0 0 10.0.0.1:22 10.0.0.2:5000 users:((\"sshd\",pid=1,fd=3),(\"))\n\tbytes_acked:9\",pid=2,fd=3))\n",
+		// Entry structure is checked, not only the ends.
+		"tcp ESTAB 0 0 10.0.0.1:22 10.0.0.2:5000 users:((\"\",pid=))\n",
+		"tcp ESTAB 0 0 10.0.0.1:22 10.0.0.2:5000 users:((\"a\",pid=1,fd=3),x))\n",
+		"tcp ESTAB 0 0 10.0.0.1:22 10.0.0.2:5000 users:((\"a\",pid=1,fd=3)))\n",
+		"tcp ESTAB 0 0 10.0.0.1:22 10.0.0.2:5000 users:((\"a\",pid=,fd=3))\n",
 	} {
 		res, err := ParseSocketTable([]byte(in))
 		if err != nil {
@@ -258,6 +273,25 @@ func TestParseSocketsMalformedUsersColumnDropsSocket(t *testing.T) {
 		if len(res.Entries) != 0 || res.Dropped == 0 || !res.Incomplete {
 			t.Fatalf("%q: got %+v", in, res)
 		}
+	}
+}
+
+func TestParseSocketsSplitLineAtCommLimit(t *testing.T) {
+	// The longest first part a 15-byte comm can complete:
+	// `",pid=1,fd=1))` plus the newline. The column is well formed with
+	// an empty name, so the socket stays without a process and the
+	// table is Incomplete; the remainder cannot start with whitespace,
+	// is dropped as a socket line, and its info lines are skipped.
+	in := "tcp ESTAB 0 0 10.0.0.1:22 10.0.0.2:5000 users:((\"\",pid=1,fd=1))\n" +
+		"\",pid=4242,fd=3))\n" +
+		"\t cubic bytes_acked:9 bytes_received:9\n"
+	res, err := ParseSocketTable([]byte(in))
+	if err != nil {
+		t.Fatalf("ParseSocketTable: %v", err)
+	}
+	want := []Socket{{Proto: ProtoTCP, State: "ESTAB", Local: ap("10.0.0.1:22"), Peer: ap("10.0.0.2:5000")}}
+	if !reflect.DeepEqual(res.Entries, want) || res.Dropped != 1 || !res.Incomplete {
+		t.Fatalf("got %+v", res)
 	}
 }
 
@@ -304,7 +338,7 @@ func TestParseSocketAddrRejects(t *testing.T) {
 		"10.0.0.1:022", "10.0.0.1:65536", "10.0.0.1:2a", "10.0.0.1%:22",
 		"10.0.0.1%bad;dev:22", "10.0.0.1%" + strings.Repeat("e", 16) + ":22",
 		"[10.0.0.1]:22", "[fe80::1:22", "[::1]x:22", "[::1]%:22", "[]:22",
-		"[fe80::1%eth0]%eth1:1", "[fe80::1%eth0%x]:1", "[fe80::1%‮]:1",
+		"[fe80::1%eth0]%eth1:1", "[fe80::1%eth0%x]:1", "[fe80::1%\u202e]:1",
 		"1.2.3.4:22:33", "host.example:22", "*:", "**:22", "[*]:22",
 		"[::1]]:22", "[[::1]:22", "10.0.0.1%eth0%eth1:22",
 		strings.Repeat("1", 200) + ":22",
@@ -316,23 +350,68 @@ func TestParseSocketAddrRejects(t *testing.T) {
 }
 
 func TestListeners(t *testing.T) {
-	socks, err := ParseSockets(readFixture(t, "ubuntu2404-ss.txt"))
+	socks, err := ParseSockets(readFixture(t, "debian12-ss.txt"))
 	if err != nil {
 		t.Fatalf("ParseSockets: %v", err)
 	}
-	// A second listener on the same port (SO_REUSEPORT) must not
-	// duplicate the entry.
-	socks = append(socks, Socket{Proto: ProtoTCP, State: "LISTEN", Local: ap("[::]:22"), Listening: true})
+	// A second listener on the same address (SO_REUSEPORT) must not
+	// duplicate the entry; listeners bound to the same address on
+	// different interfaces must stay separate.
+	socks = append(socks,
+		Socket{Proto: ProtoTCP, State: "LISTEN", Local: ap("[::]:22"), Listening: true},
+		Socket{Proto: ProtoUDP, State: "UNCONN", Local: ap("0.0.0.0:67"), Dev: "eth1", Listening: true},
+		Socket{Proto: ProtoUDP, State: "UNCONN", Local: ap("0.0.0.0:67"), Dev: "eth0", Listening: true},
+	)
 	got := Listeners(socks)
-	want := map[Proto][]netip.AddrPort{
-		ProtoTCP: {ap("127.0.0.53:53"), ap("[::]:22")},
-		ProtoUDP: {ap("10.0.0.21:68"), ap("127.0.0.53:53"), ap("127.0.0.54:53"), ap("[::]:5353")},
+	// The fixture has a V6ONLY "[::]:22" and a dual-stack "*:9100"; both
+	// are [::] addresses and only DualStack tells them apart.
+	want := map[Proto][]Listener{
+		ProtoTCP: {
+			{Local: ap("0.0.0.0:22")},
+			{Local: ap("[::]:22")},
+			{Local: ap("[::]:9100"), DualStack: true},
+		},
+		ProtoUDP: {
+			{Local: ap("0.0.0.0:67"), Dev: "eth0"},
+			{Local: ap("0.0.0.0:67"), Dev: "eth1"},
+			{Local: ap("0.0.0.0:68")},
+			{Local: ap("127.0.0.1:323")},
+			{Local: ap("[::1]:323")},
+		},
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %v, want %v", got, want)
+		t.Fatalf("got %+v, want %+v", got, want)
 	}
 	if l := Listeners(nil); len(l) != 0 {
 		t.Fatalf("Listeners(nil) = %v", l)
+	}
+
+	// Server-side detection for the fixture's connections: an IPv4
+	// connection on 9100 ends at the dual-stack listener, an IPv4
+	// connection to port 22 must not be attributed to the V6ONLY one.
+	tcp := got[ProtoTCP]
+	v6only, dual := tcp[1], tcp[2]
+	cases := []struct {
+		l     Listener
+		local string
+		want  bool
+	}{
+		{dual, "192.168.178.37:9100", true},
+		{dual, "[::ffff:192.168.178.37]:9100", true},
+		{dual, "[2001:db8::1]:9100", true},
+		{dual, "192.168.178.37:9101", false},
+		{v6only, "192.168.178.37:22", false},
+		{v6only, "[2001:db8::1]:22", true},
+		{tcp[0], "192.168.178.37:22", true},
+		{tcp[0], "[2001:db8::1]:22", false},
+		{Listener{Local: ap("10.0.0.1:80")}, "10.0.0.1:80", true},
+		{Listener{Local: ap("10.0.0.1:80")}, "10.0.0.2:80", false},
+		{Listener{Local: ap("[::]:0"), DualStack: true}, "10.0.0.1:0", false},
+	}
+	for _, c := range cases {
+		if g := c.l.Serves(ap(c.local)); g != c.want {
+			t.Fatalf("%+v.Serves(%s) = %v, want %v", c.l, c.local, g, c.want)
+		}
 	}
 }
 

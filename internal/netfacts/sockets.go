@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"fmt"
 	"net/netip"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -100,7 +101,9 @@ type Socket struct {
 	// Process is the command name of the first process owning the
 	// socket, from a users:(("name",pid=...,fd=...)) column when the
 	// input has one (`ss -p`). Printable UTF-8, at most maxProcessLen
-	// bytes; empty otherwise.
+	// bytes; empty otherwise. The name is cut at the first `",pid=N,fd=N)`,
+	// so a comm containing that text is shortened. comm is freely set by
+	// the process: Process is a display hint, never an identity.
 	Process string
 }
 
@@ -146,9 +149,10 @@ func ParseSockets(raw []byte) ([]Socket, error) {
 // `ss` state name, the queues decimal, the addresses IP literals (or "*")
 // with an optional interface name and a port. A line that fails is
 // skipped and counted in Dropped together with its info lines. A
-// users:((...)) column that is not well formed also drops the socket: a
-// process can put a newline into its command name and so split the line,
-// and the remainder must not be mistaken for socket data. The fixed
+// users:((...)) column that is not well formed as a whole also drops the
+// socket: a process can put a newline into its command name and so split
+// the line, and neither part may be mistaken for socket data or for an
+// info line (see parseProcess for why a split cannot pass). The fixed
 // columns cannot be forged through a command name (comm is at most 15
 // bytes and every column is validated), and info lines after a dropped
 // socket line are skipped.
@@ -157,9 +161,15 @@ func ParseSockets(raw []byte) ([]Socket, error) {
 // that is truncated or invalid is dropped (zero). Input that does not end
 // in a newline has a truncated last line: a socket line there is dropped,
 // an info line there drops the counters of its socket. Every such loss
-// sets Incomplete. Sockets beyond maxEntries are not parsed and set
-// Incomplete. Input above maxInputSize is an error; there is no other
-// error.
+// sets Incomplete. The caller must therefore pass the output exactly as
+// `ss` printed it, final newline included; net.facts carries it as a
+// base64 section (ADR 0009 D1), which keeps the bytes unchanged.
+//
+// Sockets beyond maxEntries are not parsed and set Incomplete rather
+// than failing the document: a busy host easily has more sockets, and a
+// truncated model must say so instead of silently dropping data (ADR
+// 0009 D7, spec 09). Input above maxInputSize is an error; there is no
+// other error.
 func ParseSocketTable(raw []byte) (SocketTable, error) {
 	if len(raw) > maxInputSize {
 		return SocketTable{}, fmt.Errorf("socket document exceeds %d bytes", maxInputSize)
@@ -391,26 +401,38 @@ func isQueueLen(s string) bool {
 	return true
 }
 
+// usersColumn matches a complete users:((...)) column as `ss -p` prints
+// it: one or more ("name",pid=N,fd=N) entries separated by commas.
+// Submatch 1 is the first name, cut at the first `",pid=N,fd=N)` (a
+// name may itself contain quotes). Go regexps run in linear time.
+var usersColumn = regexp.MustCompile(
+	`^users:\(\("(.*?)",pid=[0-9]{1,10},fd=[0-9]{1,10}\)` +
+		`(?:,\(".*?",pid=[0-9]{1,10},fd=[0-9]{1,10}\))*\)$`)
+
 // parseProcess extracts the first command name from the trailing column
 // rest of a socket line. Trailing text that is not a users:((...))
 // column is ignored. malformed is true when rest starts a users:((...))
-// column that is not well formed (the socket line must be dropped);
-// lossy is true when a well-formed column carries a name that is not
-// acceptable.
+// column that does not match usersColumn as a whole (the socket line
+// must be dropped); lossy is true when a well-formed column carries a
+// name that is not acceptable.
+//
+// The whole column is checked, not only its ends: a process can put a
+// newline into its command name to split the line, and the first part
+// of a split line ends inside a name. To pass, that part would have to
+// end in `",pid=N,fd=N))` (at least 14 bytes) before the newline, and
+// the remainder would have to start with whitespace to pass as an info
+// line; comm is at most 15 bytes, so no command name can do both. A
+// remainder that does not start with whitespace fails the socket-line
+// checks and is dropped.
 func parseProcess(rest string) (name string, malformed, lossy bool) {
-	const prefix = `users:((`
-	if !strings.HasPrefix(rest, prefix) {
+	if !strings.HasPrefix(rest, "users:((") {
 		return "", false, false
 	}
-	body, ok := strings.CutPrefix(rest, prefix+`"`)
-	if !ok || !strings.HasSuffix(body, "))") {
+	m := usersColumn.FindStringSubmatch(rest)
+	if m == nil {
 		return "", true, false
 	}
-	i := strings.Index(body, `",pid=`)
-	if i < 0 {
-		return "", true, false
-	}
-	name = body[:i]
+	name = m[1]
 	if name == "" || len(name) > maxProcessLen || !isPrintable(name) {
 		return "", false, true
 	}
@@ -536,30 +558,92 @@ func parseSocketAddr(s string) (ap netip.AddrPort, dev string, dual, ok bool) {
 	return netip.AddrPortFrom(a, port), dev, dual, true
 }
 
-// Listeners returns the local addresses of the listening sockets
-// (Socket.Listening) per protocol, without duplicates and sorted, for
-// server-side detection: a connection whose local address:port is a
-// listener of the same protocol is the server end. A "*" or [::]
-// listener with DualStack set also serves IPv4; callers matching IPv4
-// connections must take that into account.
-func Listeners(socks []Socket) map[Proto][]netip.AddrPort {
-	out := map[Proto][]netip.AddrPort{}
-	seen := map[Proto]map[netip.AddrPort]bool{}
+// Listener is one listening socket address as returned by Listeners.
+type Listener struct {
+	// Local is the listening address and port (Socket.Local).
+	Local netip.AddrPort
+	// Dev is the interface the listener is bound to (Socket.Dev), or
+	// empty. A bound listener only accepts connections arriving on Dev.
+	Dev string
+	// DualStack is true for a "*" listener (Socket.DualStack): an IPv6
+	// wildcard without IPV6_V6ONLY that also accepts IPv4. A [::]
+	// listener without DualStack (printed by `ss` as "[::]") is IPv6
+	// only.
+	DualStack bool
+}
+
+// Serves reports whether a connection with local address:port local
+// ends at this listener, i.e. local is the server side (ADR 0009 D3).
+// The ports must be equal; the address must be equal, or the listener
+// is a wildcard of the same family: 0.0.0.0 serves every IPv4 address,
+// [::] every IPv6 address, and [::] with DualStack also every IPv4
+// address. An IPv4-mapped local address is treated as IPv4. Dev is not
+// checked: the caller must compare it with the interface the connection
+// uses when it knows it.
+func (l Listener) Serves(local netip.AddrPort) bool {
+	if local.Port() == 0 || local.Port() != l.Local.Port() {
+		return false
+	}
+	la, a := l.Local.Addr(), local.Addr().Unmap()
+	switch {
+	case la == a:
+		return true
+	case !la.IsUnspecified():
+		return false
+	case la.Is4():
+		return a.Is4()
+	case a.Is6():
+		return true
+	default:
+		return a.Is4() && l.DualStack
+	}
+}
+
+// compareListeners orders listeners by address and port, then Dev, with
+// a V6ONLY listener before a dual-stack one.
+func compareListeners(a, b Listener) int {
+	if c := a.Local.Compare(b.Local); c != 0 {
+		return c
+	}
+	if c := strings.Compare(a.Dev, b.Dev); c != 0 {
+		return c
+	}
+	switch {
+	case a.DualStack == b.DualStack:
+		return 0
+	case b.DualStack:
+		return -1
+	default:
+		return 1
+	}
+}
+
+// Listeners returns the listening sockets (Socket.Listening) per
+// protocol, without duplicates and sorted (compareListeners), for
+// server-side detection: a connection whose local address:port is
+// served by a listener of the same protocol (Listener.Serves) is the
+// server end. Listeners keeps DualStack, so a V6ONLY "[::]:22" and a
+// dual-stack "*:22" stay distinguishable, and Dev, so listeners bound to
+// the same address:port on different interfaces stay separate entries.
+func Listeners(socks []Socket) map[Proto][]Listener {
+	out := map[Proto][]Listener{}
+	seen := map[Proto]map[Listener]bool{}
 	for _, s := range socks {
 		if !s.Listening {
 			continue
 		}
+		l := Listener{Local: s.Local, Dev: s.Dev, DualStack: s.DualStack}
 		if seen[s.Proto] == nil {
-			seen[s.Proto] = map[netip.AddrPort]bool{}
+			seen[s.Proto] = map[Listener]bool{}
 		}
-		if seen[s.Proto][s.Local] {
+		if seen[s.Proto][l] {
 			continue
 		}
-		seen[s.Proto][s.Local] = true
-		out[s.Proto] = append(out[s.Proto], s.Local)
+		seen[s.Proto][l] = true
+		out[s.Proto] = append(out[s.Proto], l)
 	}
-	for _, aps := range out {
-		slices.SortFunc(aps, netip.AddrPort.Compare)
+	for _, ls := range out {
+		slices.SortFunc(ls, compareListeners)
 	}
 	return out
 }
