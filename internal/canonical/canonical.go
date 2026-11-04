@@ -118,6 +118,10 @@ func ValidActionID(s string) bool { return actionRe.MatchString(s) }
 // ValidModuleVersion reports whether s is a well-formed module_version.
 func ValidModuleVersion(s string) bool { return semverRe.MatchString(s) }
 
+// ValidCredentialRef reports whether s is a well-formed credential
+// reference (credential_refs, batch credential versions).
+func ValidCredentialRef(s string) bool { return credRefRe.MatchString(s) }
+
 // ValidHostID reports whether s is a well-formed host_id.
 func ValidHostID(s string) bool { return hostIDRe.MatchString(s) }
 

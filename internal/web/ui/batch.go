@@ -50,7 +50,10 @@ const (
 )
 
 // BatchPlanner plans, proposes and follows batches.
-// executions.Batches satisfies it.
+// executions.Batches satisfies it. The server passes a planner whose
+// ProposeBatch and ApproveBatch refuse with
+// executions.ErrBatchExecutionUnavailable or ErrBatchExecutionUnknown
+// unless the executor runs batches.
 type BatchPlanner interface {
 	ListBatches(ctx context.Context) ([]executions.BatchSummary, error)
 	Batch(ctx context.Context, id string) (executions.BatchView, error)
@@ -270,6 +273,11 @@ func (p *BatchPages) handleCreate(w http.ResponseWriter, r *http.Request) {
 		var he *executions.HostError
 		var ce *executions.BatchCriticalError
 		switch {
+		case errors.Is(err, executions.ErrBatchExecutionUnavailable):
+			textError(w, http.StatusConflict, "Refused: the executor does not run batches; nothing was proposed")
+		case errors.Is(err, executions.ErrBatchExecutionUnknown):
+			p.log.Warn("propose batch: probe batch execution", "error", err)
+			textError(w, http.StatusServiceUnavailable, "Refused: the executor could not be asked whether it runs batches; nothing was proposed, try again")
 		case errors.As(err, &ce):
 			var b strings.Builder
 			b.WriteString("Refused: CRITICAL members cannot be approved in a batch. Remove them and approve each separately:")
@@ -308,6 +316,11 @@ func (p *BatchPages) handleApprove(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	if err := p.batches.ApproveBatch(ctx, webUser(r), in.ID, in.Assertion); err != nil {
 		switch {
+		case errors.Is(err, executions.ErrBatchExecutionUnavailable):
+			writeJSONError(w, http.StatusConflict, "refused: the executor does not run batches; the batch was not approved")
+		case errors.Is(err, executions.ErrBatchExecutionUnknown):
+			p.log.Warn("approve batch: probe batch execution", "batch", in.ID, "error", err)
+			writeJSONError(w, http.StatusServiceUnavailable, "refused: the executor could not be asked whether it runs batches; the batch was not approved, try again")
 		case errors.Is(err, executions.ErrBatchNotFound):
 			writeJSONError(w, http.StatusNotFound, err.Error())
 		case errors.Is(err, executions.ErrBatchNotPending):
