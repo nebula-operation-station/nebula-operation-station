@@ -361,8 +361,8 @@ func TestInvalidTargetsAreRejected(t *testing.T) {
 func TestHostileIdentifierIsStoredAsCleanText(t *testing.T) {
 	s, _, _ := newTestStore(t)
 	ctx := context.Background()
-	id := "‮evil\u0007os" + strings.Repeat("x", 400)
-	if _, err := s.IngestCoreFacts(ctx, host1, factsDoc("ID="+id+"\nVERSION_ID=1‏\n", false), t0); err != nil {
+	id := "\u202eevil\u0007os" + strings.Repeat("x", 400)
+	if _, err := s.IngestCoreFacts(ctx, host1, factsDoc("ID="+id+"\nVERSION_ID=1\u200f\n", false), t0); err != nil {
 		t.Fatal(err)
 	}
 	obs, err := s.Observations(ctx, "h1")
@@ -373,7 +373,7 @@ func TestHostileIdentifierIsStoredAsCleanText(t *testing.T) {
 	if _, err := NewKey(string(o.Key)); err != nil {
 		t.Errorf("key %q: %v", o.Key, err)
 	}
-	if len(o.Identifier) > maxIdentifierLen || strings.ContainsAny(o.Identifier, "‮\u0007") || strings.ContainsRune(o.Version, '‏') {
+	if len(o.Identifier) > maxIdentifierLen || strings.ContainsAny(o.Identifier, "\u202e\u0007") || strings.ContainsRune(o.Version, '\u200f') {
 		t.Errorf("identifier %q version %q not cleaned", o.Identifier, o.Version)
 	}
 }
@@ -388,7 +388,7 @@ func TestCleanText(t *testing.T) {
 		{" padded ", 64, "padded"},
 		{"a\x00b", 64, "a�b"},
 		{"bad\xffutf8", 64, "bad�utf8"},
-		{"rtl‮override", 64, "rtl�override"},
+		{"rtl\u202eoverride", 64, "rtl�override"},
 		{strings.Repeat("ä", 10), 7, strings.Repeat("ä", 3)}, // cut at a rune boundary
 		{strings.Repeat("x", 10_000), 8, "xxxxxxxx"},
 	} {
@@ -545,7 +545,7 @@ func TestRenameConfirmsEntryAndIsAudited(t *testing.T) {
 	}{
 		{"empty display", "alice", "", "widgetd", ErrInvalidInput},
 		{"control char", "alice", "Wid\nget", "widgetd", ErrInvalidInput},
-		{"bidi", "alice", "Wid‮get", "widgetd", ErrInvalidInput},
+		{"bidi", "alice", "Wid\u202eget", "widgetd", ErrInvalidInput},
 		{"too long", "alice", strings.Repeat("w", maxDisplayLen+1), "widgetd", ErrInvalidInput},
 		{"empty actor", "", "W", "widgetd", ErrInvalidInput},
 		{"bad key", "alice", "W", "Widget", ErrInvalidKey},
