@@ -177,6 +177,9 @@ type Store struct {
 	now func() time.Time
 	// caps, defaulted from the constants above; tests may lower them.
 	maxCatalog, maxQueuePerHost, maxObsPerHost int
+	// capsDone, when set (tests only), sees the cap counters of every
+	// observe call before it commits.
+	capsDone func(*capCounts)
 }
 
 // NewStore returns a Store on an open server database.
@@ -383,7 +386,7 @@ func (s *Store) observe(ctx context.Context, items []item, at time.Time) (Ingest
 	}
 	defer func() { _ = tx.Rollback() }()
 	ts := at.UnixNano()
-	caps := &capCounts{catalog: -1, hosts: map[string]int{}}
+	caps := &capCounts{catalog: -1, hosts: map[string]int{}, hostReads: map[string]int{}}
 	for _, it := range items {
 		if it.res.Key == unknownKey {
 			rep.Skipped++
@@ -414,6 +417,9 @@ func (s *Store) observe(ctx context.Context, items []item, at time.Time) (Ingest
 		}
 		rep.Observed++
 	}
+	if s.capsDone != nil {
+		s.capsDone(caps)
+	}
 	if err := tx.Commit(); err != nil {
 		return IngestReport{}, fmt.Errorf("record observations: commit: %w", err)
 	}
@@ -434,10 +440,14 @@ const (
 // is read from the database at most once per call (the transaction
 // holds the write lock, so nobody else changes them) and then kept up
 // to date by ensureEntry. catalog is -1 until read; hosts holds the
-// counts read so far, by host ID.
+// counts read so far, by host ID. catalogReads and hostReads count the
+// database reads, so tests can check the at-most-once property.
 type capCounts struct {
 	catalog int
 	hosts   map[string]int
+
+	catalogReads int
+	hostReads    map[string]int
 }
 
 // catalogCount returns the number of catalog rows, at most limit.
@@ -446,6 +456,7 @@ func (c *capCounts) catalogCount(ctx context.Context, tx *sql.Tx, limit int) (in
 		if err := tx.QueryRowContext(ctx, countCatalogQuery, limit).Scan(&c.catalog); err != nil {
 			return 0, fmt.Errorf("count catalog: %w", err)
 		}
+		c.catalogReads++
 	}
 	return c.catalog, nil
 }
@@ -459,6 +470,7 @@ func (c *capCounts) hostCount(ctx context.Context, tx *sql.Tx, host string, limi
 			return 0, fmt.Errorf("count catalog entries of host %s: %w", host, err)
 		}
 		c.hosts[host] = n
+		c.hostReads[host]++
 	}
 	return n, nil
 }

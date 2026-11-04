@@ -508,6 +508,23 @@ func TestCapsAreCountedOncePerIngest(t *testing.T) {
 	s, _, _ := newTestStore(t)
 	s.maxCatalog = 5
 	s.maxQueuePerHost = 3
+	// Each counter is read from the database at most once per ingest,
+	// however many items need it.
+	var calls int
+	s.capsDone = func(c *capCounts) {
+		calls++
+		if c.catalogReads > 1 {
+			t.Errorf("ingest %d: catalog count read %d times", calls, c.catalogReads)
+		}
+		for h, n := range c.hostReads {
+			if n > 1 {
+				t.Errorf("ingest %d: count of host %s read %d times", calls, h, n)
+			}
+		}
+		if c.catalogReads != 1 || len(c.hostReads) != 1 {
+			t.Errorf("ingest %d: counters not read: catalog %d, hosts %v", calls, c.catalogReads, c.hostReads)
+		}
+	}
 	// One ingest with many new keys: the counters taken once at the
 	// start must track every creation inside the transaction.
 	rep, err := s.IngestServiceList(ctx, host1, unitsDoc("b1.service loaded", "b2.service loaded", "b3.service loaded", "b4.service loaded", "b5.service loaded"), t0)
@@ -523,6 +540,9 @@ func TestCapsAreCountedOncePerIngest(t *testing.T) {
 	}
 	if rep.Created != 2 || rep.Limited != 1 {
 		t.Fatalf("catalog report %+v", rep)
+	}
+	if calls != 2 {
+		t.Fatalf("capsDone called %d times", calls)
 	}
 }
 
@@ -1071,8 +1091,143 @@ func TestAssetDeleteClearsIconOverride(t *testing.T) {
 	if sha, err := s.AssetIcon(ctx, "nas-1"); err != nil || sha != "" {
 		t.Fatalf("reused asset ID inherited override %q %v", sha, err)
 	}
-	// The history is kept.
-	if h, err := s.IconHistory(ctx, subj, 0); err != nil || len(h) != 1 {
+	// The history is kept, and the delete is recorded in it.
+	h, err := s.IconHistory(ctx, subj, 0)
+	if err != nil || len(h) != 2 {
 		t.Fatalf("history %+v %v", h, err)
+	}
+	if d := h[0]; !d.AssetDeleted || d.SHA != "" || d.PrevSHA != shaA || d.RollbackOf != 0 || d.ChangedBy != "system" || d.ChangedAt.IsZero() {
+		t.Fatalf("delete history row %+v", d)
+	}
+	if h[1].AssetDeleted {
+		t.Fatalf("set history row marked as delete %+v", h[1])
+	}
+	// ... and audited as asset_icon_clear by "system".
+	recs, err := s.AuditTrail(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := recs[0]; a.Action != "asset_icon_clear" || a.Subject != "nas-1" || a.Actor != "system" || a.Detail != shaA+" -> none (asset deleted)" {
+		t.Fatalf("delete audit %+v", a)
+	}
+	// Neither the delete nor the old asset's changes can be rolled back
+	// onto the new asset with the same ID.
+	for _, c := range h {
+		if err := s.RollbackIcon(ctx, "carol", subj, c.ID); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("rollback of change %+v onto reused asset ID: %v", c, err)
+		}
+	}
+	if sha, _ := s.AssetIcon(ctx, "nas-1"); sha != "" {
+		t.Fatalf("reused asset ID got override %q", sha)
+	}
+	// Changes of the new asset roll back as usual.
+	if err := s.SetIcon(ctx, "alice", subj, shaA); err != nil {
+		t.Fatal(err)
+	}
+	h, err = s.IconHistory(ctx, subj, 1)
+	if err != nil || len(h) != 1 {
+		t.Fatalf("history %+v %v", h, err)
+	}
+	if err := s.RollbackIcon(ctx, "carol", subj, h[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if sha, _ := s.AssetIcon(ctx, "nas-1"); sha != "" {
+		t.Fatalf("rollback left override %q", sha)
+	}
+}
+
+func TestAssetDeleteWithoutOverrideRecordsNothing(t *testing.T) {
+	s, db, _ := newTestStore(t)
+	ctx := context.Background()
+	for _, q := range []string{
+		`INSERT INTO assets (id, name, kind, updated_at) VALUES ('nas-1', 'NAS', 'nas', 1)`,
+		`INSERT INTO assets (id, name, kind, updated_at) VALUES ('nas-2', 'NAS 2', 'nas', 1)`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.RegisterIcon(ctx, "alice", shaA, IconUpload, ""); err != nil {
+		t.Fatal(err)
+	}
+	// nas-2 has an override; deleting nas-1 must not record anything,
+	// for nas-1 or for nas-2.
+	if err := s.SetIcon(ctx, "alice", IconSubject{Kind: SubjectAsset, ID: "nas-2"}, shaA); err != nil {
+		t.Fatal(err)
+	}
+	audits, history := countRows(t, db, "software_catalog_audit"), countRows(t, db, "software_icon_history")
+	if _, err := db.Exec(`DELETE FROM assets WHERE id = 'nas-1'`); err != nil {
+		t.Fatal(err)
+	}
+	if a, h := countRows(t, db, "software_catalog_audit"), countRows(t, db, "software_icon_history"); a != audits || h != history {
+		t.Fatalf("delete without override recorded: audit %d -> %d, history %d -> %d", audits, a, history, h)
+	}
+	if sha, _ := s.AssetIcon(ctx, "nas-2"); sha != shaA {
+		t.Fatalf("other asset's override %q", sha)
+	}
+}
+
+func TestAssetDeleteIsRecordedInTheDeleteTransaction(t *testing.T) {
+	s, db, _ := newTestStore(t)
+	ctx := context.Background()
+	if _, err := db.Exec(`INSERT INTO assets (id, name, kind, updated_at) VALUES ('nas-1', 'NAS', 'nas', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RegisterIcon(ctx, "alice", shaA, IconUpload, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetIcon(ctx, "alice", IconSubject{Kind: SubjectAsset, ID: "nas-1"}, shaA); err != nil {
+		t.Fatal(err)
+	}
+	audits, history := countRows(t, db, "software_catalog_audit"), countRows(t, db, "software_icon_history")
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`DELETE FROM assets WHERE id = 'nas-1'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if a, h := countRows(t, db, "software_catalog_audit"), countRows(t, db, "software_icon_history"); a != audits || h != history {
+		t.Fatalf("rolled back delete left records: audit %d -> %d, history %d -> %d", audits, a, history, h)
+	}
+	if sha, _ := s.AssetIcon(ctx, "nas-1"); sha != shaA {
+		t.Fatalf("override after rolled back delete %q", sha)
+	}
+}
+
+func TestRollbackOfDeletedAssetIsNotFound(t *testing.T) {
+	s, db, _ := newTestStore(t)
+	ctx := context.Background()
+	if _, err := db.Exec(`INSERT INTO assets (id, name, kind, updated_at) VALUES ('nas-1', 'NAS', 'nas', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RegisterIcon(ctx, "alice", shaA, IconUpload, ""); err != nil {
+		t.Fatal(err)
+	}
+	subj := IconSubject{Kind: SubjectAsset, ID: "nas-1"}
+	if err := s.SetIcon(ctx, "alice", subj, shaA); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetIcon(ctx, "alice", subj, ""); err != nil {
+		t.Fatal(err)
+	}
+	h, err := s.IconHistory(ctx, subj, 0)
+	if err != nil || len(h) != 2 {
+		t.Fatalf("history %+v %v", h, err)
+	}
+	if _, err := db.Exec(`DELETE FROM assets WHERE id = 'nas-1'`); err != nil {
+		t.Fatal(err)
+	}
+	audits, history := countRows(t, db, "software_catalog_audit"), countRows(t, db, "software_icon_history")
+	// Rolling back the first change lands on "none", the current state
+	// of the missing asset; it must not be recorded as a no-op rollback.
+	if err := s.RollbackIcon(ctx, "carol", subj, h[1].ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("rollback on deleted asset: %v", err)
+	}
+	if a, n := countRows(t, db, "software_catalog_audit"), countRows(t, db, "software_icon_history"); a != audits || n != history {
+		t.Fatalf("rollback on deleted asset recorded: audit %d -> %d, history %d -> %d", audits, a, history, n)
 	}
 }
