@@ -3,10 +3,12 @@ package ui_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/netip"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,7 +16,9 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/ipam"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
+	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
 
@@ -105,6 +109,143 @@ func TestDeployRefusedCommitReleasesTheAddress(t *testing.T) {
 			t.Fatal("the reservation of a refused commit is kept")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestDeployAmbiguousRefusalKeepsTheAddress: PermissionDenied (also the
+// permit already used by an earlier run, or final) and FailedPrecondition
+// (also the VMID now existing) do not prove that no run of the execution
+// created the guest, so the address stays reserved, in key mode and in CLI
+// mode, also after the proposal of a CLI run expires.
+func TestDeployAmbiguousRefusalKeepsTheAddress(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cli  bool
+		err  error
+	}{
+		{"key already run", false, status.Error(codes.PermissionDenied, "pve guest provision: no approved permit covers this provisioning")},
+		{"key vmid exists", false, status.Error(codes.FailedPrecondition, "pve guest provision: the vmid is in use or not reserved for this execution")},
+		{"cli already run", true, status.Error(codes.PermissionDenied, "pve guest provision: no approved permit covers this provisioning")},
+		{"cli vmid exists", true, status.Error(codes.FailedPrecondition, "pve guest provision: the vmid is in use or not reserved for this execution")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newDPEnv(t)
+			if tc.cli {
+				e.prov.requirement = pb.ApprovalRequirement_APPROVAL_REQUIREMENT_CLI_ONLY
+			}
+			e.prov.commitErr = tc.err
+			run := e.propose(t, dpForm())
+			id := strings.TrimPrefix(run, "/deployments/")
+			var body string
+			if tc.cli {
+				if code, _, _ := e.do(t, http.MethodPost, "/deployments/run", gpFormCT, url.Values{"id": {id}}.Encode()); code != http.StatusSeeOther {
+					t.Fatalf("run = %d", code)
+				}
+				body = e.waitState(t, run, "proposed")
+			} else {
+				if code, b, _ := e.do(t, http.MethodPost, "/deployments/approve", "application/json", approveJSON(id)); code != http.StatusOK {
+					t.Fatalf("approve = %d %q", code, b)
+				}
+				body = e.waitState(t, run, "failed")
+			}
+			if !strings.Contains(body, "stays reserved because an earlier run of this execution may have created the guest") {
+				t.Errorf("refused run does not say the address is kept: %s", body)
+			}
+			if e.addressFree(t) {
+				t.Fatal("the address was released after an ambiguous refusal")
+			}
+			if tc.cli {
+				// The proposal of the reset run expires: still kept.
+				e.advance(6 * time.Minute)
+				body = e.waitState(t, run, "failed")
+				if !strings.Contains(body, "the address stays reserved") || strings.Contains(body, "nothing was created") {
+					t.Errorf("expired CLI run after a refusal: %s", body)
+				}
+				if e.addressFree(t) {
+					t.Fatal("the expiry released the address of a refused CLI run")
+				}
+			}
+			e.advance(25 * time.Hour)
+			e.do(t, http.MethodGet, "/deployments", "", "")
+			if e.addressFree(t) {
+				t.Error("the address was released after the TTL")
+			}
+		})
+	}
+}
+
+// flakyIPAM fails ClearEntry while fail is set.
+type flakyIPAM struct {
+	*ipam.Store
+	mu    sync.Mutex
+	fail  bool
+	calls int
+}
+
+func (f *flakyIPAM) ClearEntry(ctx context.Context, ad netip.Addr) error {
+	f.mu.Lock()
+	f.calls++
+	fail := f.fail
+	f.mu.Unlock()
+	if fail {
+		return errors.New("database is locked")
+	}
+	return f.Store.ClearEntry(ctx, ad)
+}
+
+func (f *flakyIPAM) set(fail bool) (calls int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fail = fail
+	return f.calls
+}
+
+// TestDeployFailedReleaseIsRetried: a ClearEntry that fails leaves the
+// release pending; the run is not pruned past its TTL, and the next
+// settle (any deployment page) clears the reservation.
+func TestDeployFailedReleaseIsRetried(t *testing.T) {
+	var fl *flakyIPAM
+	e := newDPEnvWith(t, func(o *ui.Options) {
+		fl = &flakyIPAM{Store: o.DeployIPAM.(*ipam.Store), fail: true}
+		o.DeployIPAM = fl
+	})
+	e.prov.commitErr = status.Error(codes.InvalidArgument, "pve guest provision: invalid or unsupported spec")
+	run := e.propose(t, dpForm())
+	id := strings.TrimPrefix(run, "/deployments/")
+	if code, body, _ := e.do(t, http.MethodPost, "/deployments/approve", "application/json", approveJSON(id)); code != http.StatusOK {
+		t.Fatalf("approve = %d %q", code, body)
+	}
+	e.waitState(t, run, "failed")
+	deadline := time.Now().Add(3 * time.Second)
+	for fl.set(true) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no release was attempted")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if e.addressFree(t) {
+		t.Fatal("the address is free although ClearEntry failed")
+	}
+	// Past the TTL the run waits for its release instead of being pruned.
+	e.advance(25 * time.Hour)
+	before := fl.set(true)
+	if code, _, _ := e.do(t, http.MethodGet, run, "", ""); code != http.StatusOK {
+		t.Fatalf("run with a pending release pruned: %d", code)
+	}
+	if fl.set(true) <= before {
+		t.Error("the failed release was not retried")
+	}
+	if e.addressFree(t) {
+		t.Fatal("the address is free although ClearEntry failed again")
+	}
+	// Once ClearEntry works the retry clears it, and the run is pruned.
+	fl.set(false)
+	e.do(t, http.MethodGet, "/deployments", "", "")
+	if !e.addressFree(t) {
+		t.Fatal("the retried release did not clear the reservation")
+	}
+	if code, _, _ := e.do(t, http.MethodGet, run, "", ""); code != http.StatusNotFound {
+		t.Errorf("released run still shown after its TTL: %d", code)
 	}
 }
 

@@ -314,6 +314,14 @@ func (x *deployRun) final() bool {
 	return x.state == deployDone || x.state == deployFailed || x.state == deployJoined
 }
 
+// releasePending reports whether the run's address is still to be
+// cleared (marked, in flight, or waiting for a retry after a failed
+// ClearEntry): such a run is neither pruned nor evicted, or the
+// reservation would never be released.
+func (x *deployRun) releasePending() bool {
+	return x.address == ipamRelease || x.address == ipamReleasing
+}
+
 // busy reports whether a background call holds the run.
 func (x *deployRun) busy() bool {
 	return x.approving || x.state == deployApproved || x.state == deployCreating || (x.join != nil && x.join.approving)
@@ -384,12 +392,12 @@ func (p *deployRuns) room(user string, now time.Time) error {
 }
 
 // prune settles idle unfinished runs past their deadline and drops
-// finished runs past their TTL that no background call or address release
-// holds. Unfinished runs are never dropped.
+// finished runs past their TTL that no background call or pending address
+// release holds. Unfinished runs are never dropped.
 func (p *deployRuns) prune(now time.Time) {
 	p.expire(now)
 	for id, x := range p.runs {
-		if x.final() && !now.Before(x.expires) && !x.busy() && x.address != ipamReleasing {
+		if x.final() && !now.Before(x.expires) && !x.busy() && !x.releasePending() {
 			delete(p.runs, id)
 		}
 	}
@@ -410,6 +418,10 @@ func (p *deployRuns) expire(now time.Time) {
 			x.message = "the proposal expired unapproved; nothing was created"
 			if x.ipam != nil && x.address == ipamHeld {
 				x.address = ipamRelease
+			} else if x.address == ipamKept {
+				// A refused run left it ambiguous whether an earlier run
+				// of the execution created the guest.
+				x.message = "the proposal expired; the address stays reserved because an earlier run of this execution may have created the guest"
 			}
 		case deployBooting, deployEnrolling:
 			x.message = "expired: the guest was not enrolled within " + deployEnrollWindow.String() +
@@ -473,10 +485,12 @@ func (h *Handler) settleDeployRuns(ctx context.Context) time.Time {
 	return now
 }
 
+// oldestFinal returns the finished run that expires first, skipping runs
+// whose address release is pending.
 func (p *deployRuns) oldestFinal() string {
 	var id string
 	for k, x := range p.runs {
-		if x.final() && (id == "" || x.expires.Before(p.runs[id].expires)) {
+		if x.final() && !x.releasePending() && (id == "" || x.expires.Before(p.runs[id].expires)) {
 			id = k
 		}
 	}
@@ -484,7 +498,8 @@ func (p *deployRuns) oldestFinal() string {
 }
 
 // put stores a new run, evicting the finished run that expires first when
-// full; an unfinished run is never evicted.
+// full; an unfinished run, or one whose address release is pending, is
+// never evicted.
 func (p *deployRuns) put(x *deployRun, now time.Time) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1432,18 +1447,35 @@ func (h *Handler) startDeployCommit(r *http.Request, run deployRun) {
 			st, _ := status.FromError(err)
 			switch st.Code() {
 			case codes.InvalidArgument, codes.FailedPrecondition, codes.PermissionDenied, codes.NotFound, codes.Aborted:
-				// A refusal comes before the executor sends any PVE
-				// step of this run: nothing was created, so a run that
-				// ends here releases its address.
+				// A refusal: this call sent no PVE step. Whether an
+				// earlier run of the same execution (another commit, for
+				// example through the CLI) created the guest is only
+				// ruled out for InvalidArgument, which the executor
+				// returns while validating the request itself. The other
+				// codes are ambiguous: PermissionDenied also means the
+				// permit was already used or is final, FailedPrecondition
+				// also means the VMID now exists, NotFound a remote or key
+				// removed after a run. There the address stays reserved
+				// (a leaked reservation is safe, a released address in use
+				// is not).
 				msg := "the executor refused: " + cleanText(st.Message())
+				release := st.Code() == codes.InvalidArgument
 				h.deployRuns.set(run.id, func(x *deployRun) {
 					x.message = msg
+					if !release && x.ipam != nil && x.address == ipamHeld {
+						x.address = ipamKept
+					}
+					if x.ipam != nil && x.address == ipamKept {
+						x.message += "; the address " + x.ipam.GetAddress() + " stays reserved because an earlier run of this execution may have created the guest"
+					}
 					if run.requirement != "key" && (st.Code() == codes.PermissionDenied || st.Code() == codes.FailedPrecondition) {
-						x.state = deployProposed // approve with the CLI, then run again
+						// Approve with the CLI, then run again. The address
+						// is kept (above), so an expiry does not release it.
+						x.state = deployProposed
 						return
 					}
 					x.state, x.failedIn, x.expires = deployFailed, deployCreating, now.Add(deployRunTTL)
-					if x.ipam != nil && x.address == ipamHeld {
+					if release && x.ipam != nil && x.address == ipamHeld {
 						x.address = ipamRelease
 					}
 				})

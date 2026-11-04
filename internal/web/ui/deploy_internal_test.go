@@ -123,3 +123,62 @@ func TestDeployRunsExpiredProposalIsReleasedOnce(t *testing.T) {
 		t.Error("run pruned while its address release is in flight")
 	}
 }
+
+func TestDeployRunsPendingReleaseIsNeverDropped(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	for _, addr := range []string{ipamRelease, ipamReleasing} {
+		p := newDeployRuns()
+		pending := dpRun("pending", "alice", deployFailed, now.Add(-time.Hour))
+		pending.ipam = &pb.PVEIPAMBinding{Address: "192.168.10.50"}
+		pending.address = addr
+		if err := p.put(pending, now); err != nil {
+			t.Fatal(err)
+		}
+		for i := 1; i < maxDeployRuns; i++ {
+			if err := p.put(dpRun(fmt.Sprintf("r%d", i), fmt.Sprintf("user%d", i), deployFailed, now), now); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// Full: the eviction skips the pending run although it expires
+		// first.
+		if err := p.put(dpRun("new", "bob", deployProposed, now), now); err != nil {
+			t.Fatal(err)
+		}
+		if p.runs["pending"] == nil {
+			t.Fatalf("%s: put evicted a run whose release is pending", addr)
+		}
+		// Past every TTL only the pending (and the live) run remain.
+		p.mu.Lock()
+		p.prune(now.Add(48 * time.Hour))
+		p.mu.Unlock()
+		if p.runs["pending"] == nil {
+			t.Fatalf("%s: prune dropped a run whose release is pending", addr)
+		}
+		if len(p.runs) != 2 {
+			t.Errorf("%s: %d runs after the prune, want 2", addr, len(p.runs))
+		}
+		// Released, it is pruned like any finished run.
+		pending.address = ipamReleased
+		p.mu.Lock()
+		p.prune(now.Add(48 * time.Hour))
+		p.mu.Unlock()
+		if p.runs["pending"] != nil {
+			t.Errorf("%s: released run kept past its TTL", addr)
+		}
+	}
+	// Only pending runs: nothing can be evicted.
+	p := newDeployRuns()
+	for i := range maxDeployRuns {
+		x := dpRun(fmt.Sprintf("r%d", i), fmt.Sprintf("user%d", i), deployFailed, now)
+		x.ipam, x.address = &pb.PVEIPAMBinding{Address: "192.168.10.50"}, ipamRelease
+		if err := p.put(x, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := p.room("bob", now); !errors.Is(err, errDeployFull) {
+		t.Errorf("room with only pending releases = %v", err)
+	}
+	if err := p.put(dpRun("new", "bob", deployProposed, now), now); !errors.Is(err, errDeployFull) {
+		t.Errorf("put with only pending releases = %v", err)
+	}
+}
