@@ -33,14 +33,6 @@ var errBatchUnconfigured = status.Error(codes.Unimplemented, "batch: authority n
 // batch RPCs Unimplemented. The caller owns the authority's Lock lifecycle.
 func (s *Service) SetBatchAuthority(a *batch.Authority) { s.batchAuth = a }
 
-// SetBatchExecutionAvailable records that a production batch dispatcher
-// runs approved batch members, which GetBatchCredentialVersions advertises
-// as batch_execution_available. It must be called before the server starts
-// serving, and only by the code that wires that dispatcher: the shipped
-// executor has none, so it never calls this and servers do not propose
-// batches that would be approved and never run.
-func (s *Service) SetBatchExecutionAvailable(v bool) { s.batchExecution = v }
-
 // validateBatchMessage enforces the executor-wide message bound on a batch
 // request. The gRPC layer already caps messages at MaxMessageSize; this is
 // defense in depth for direct calls.

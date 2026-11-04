@@ -92,7 +92,9 @@ func TestBatchCredentialVersionsReturnsPublicVersions(t *testing.T) {
 	if resp.GetBatchExecutionAvailable() {
 		t.Error("batch execution advertised without a dispatcher")
 	}
-	env.svc.SetBatchExecutionAvailable(true)
+	if err := env.svc.EnableBatchExecution(); err != nil {
+		t.Fatal(err)
+	}
 	if got, err := env.svc.GetBatchCredentialVersions(ctx, &pb.GetBatchCredentialVersionsRequest{}); err != nil || !got.GetBatchExecutionAvailable() {
 		t.Errorf("execution not advertised once set: %v %v", got, err)
 	}
