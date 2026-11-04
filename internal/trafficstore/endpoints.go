@@ -308,9 +308,14 @@ func authoritative(e *Endpoint, own Identity, ownAddrs []netip.Addr) bool {
 //     former owner, whose records no longer hold the MAC: the caller
 //     leaves out MACs more than one host claims), and the owner loses
 //     ownership when its records no longer hold the MAC;
-//   - a MAC-less endpoint is owned by an authoritative reporter (taking
-//     over likewise); its owner keeps it while it still holds one of the
-//     endpoint's addresses by its records, and loses it otherwise.
+//   - a MAC-less endpoint is owned by an authoritative reporter; its owner
+//     keeps it while it still holds one of the endpoint's addresses by
+//     its records, and loses it otherwise. An authoritative reporter
+//     takes over a MAC-less endpoint of another owner only when that
+//     owner attests none of the endpoint's addresses besides the ones the
+//     reporter now holds; otherwise only those addresses are released
+//     from the endpoint, which keeps its owner, ID and history, and the
+//     observation is matched anew (or gets an endpoint of its own).
 //
 // When the owner's observation expires, the endpoint has no owner until
 // an authoritative report arrives.
@@ -422,6 +427,11 @@ func (s *Store) UpsertEndpoint(ctx context.Context, e Endpoint, own Identity) er
 		if err != nil {
 			return err
 		}
+		if auth && e.MAC == "" && m.mac == "" && m.owner != "" && m.owner != e.Reporter {
+			if m, err = claimMACLess(ctx, tx, &e, m, attested, own.MACs); err != nil {
+				return err
+			}
+		}
 		if m.id == "" {
 			owner, addrs := "", e.Addresses
 			if auth {
@@ -495,6 +505,39 @@ func (s *Store) UpsertEndpoint(ctx context.Context, e Endpoint, own Identity) er
 		}
 		return s.joinEndpoint(ctx, tx, m.id, e.Reporter, owner, obs, addrs)
 	})
+}
+
+// claimMACLess resolves an authoritative MAC-less observation e that
+// matched m, a MAC-less endpoint owned by another reporter. e.Reporter
+// holds the observed addresses (attested) by the server's records, which
+// give an address to one host only, so the other owners' attestations of
+// them are stale and are released. The former owner keeps m while it
+// still attests another of m's addresses: then e must not take m over
+// (its ID, owner or history), and it is matched anew, now without the
+// released attestations. Otherwise m has lost its owner and e takes it
+// over.
+func claimMACLess(ctx context.Context, tx *sql.Tx, e *Endpoint, m endpointMatch, attested []netip.Addr, ownMACs []string) (endpointMatch, error) {
+	if err := releaseAttested(ctx, tx, "", e.Reporter, attested); err != nil {
+		return endpointMatch{}, err
+	}
+	var owner string
+	if err := tx.QueryRowContext(ctx, endpointOwnerSQL, m.id).Scan(&owner); err != nil {
+		return endpointMatch{}, fmt.Errorf("trafficstore: read owner of endpoint %s: %w", m.id, err)
+	}
+	if owner == "" {
+		m.owner = ""
+		return m, nil
+	}
+	n, err := findEndpoint(ctx, tx, e, true, ownMACs)
+	if err != nil {
+		return endpointMatch{}, err
+	}
+	if n.mac == "" && n.owner != "" && n.owner != e.Reporter {
+		// Not reachable while no other owner attests the observed
+		// addresses; never hand another owner's endpoint over.
+		return endpointMatch{}, nil
+	}
+	return n, nil
 }
 
 // dropUnattested removes the addresses reporter attached to endpoint id
@@ -710,6 +753,8 @@ const (
 	// endpoint.
 	countReporterAddressesSQL = `
 		SELECT COUNT(*) FROM net_endpoint_addresses WHERE endpoint_id = ? AND reporter = ?`
+	// endpointOwnerSQL reads one endpoint's owner. Argument: id.
+	endpointOwnerSQL = `SELECT owner FROM net_endpoints WHERE id = ?`
 	// clearUnattestedOwnerSQL drops the owner of a MAC-less endpoint
 	// that has no address attested by its owner. Argument: id.
 	clearUnattestedOwnerSQL = `

@@ -287,6 +287,8 @@ func TestQueryPlansUseIndexes(t *testing.T) {
 		{"release stale attestations", releaseAttestedSQL("?,?"), []any{"10.0.0.1", "10.0.0.2", "ep-x", "o"},
 			[]string{"SEARCH net_endpoint_addresses USING INDEX idx_net_endpoint_addresses_address", "SEARCH e USING INDEX sqlite_autoindex_net_endpoints_1"},
 			"SCAN net_endpoint_addresses"},
+		{"endpoint owner", endpointOwnerSQL, []any{"ep-x"},
+			[]string{"SEARCH net_endpoints USING INDEX sqlite_autoindex_net_endpoints_1"}, "SCAN"},
 		{"clear unattested owner", clearUnattestedOwnerSQL, []any{"ep-x"},
 			[]string{"SEARCH net_endpoints USING INDEX sqlite_autoindex_net_endpoints_1", "SEARCH a USING"}, "SCAN"},
 		// ReconcileIdentities.
