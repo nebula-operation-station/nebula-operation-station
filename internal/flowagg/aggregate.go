@@ -129,8 +129,12 @@ type reporterState struct {
 	lastTo [numTiers]time.Time
 	// buckets counts the buckets this host created and that still exist.
 	buckets int
-	// capped counts the parts dropped at Limits.MaxBucketsPerReporter.
-	capped uint64
+	// capped counts the parts dropped at
+	// Limits.MaxBucketsPerReporter; cappedByHour keeps the same per the
+	// hour the part fell into, so the marker expires with the pruned
+	// hours.
+	capped       uint64
+	cappedByHour map[int64]uint64
 }
 
 // latest returns the end of the host's most recent report of any tier.
@@ -234,9 +238,14 @@ type Aggregator struct {
 	dropped   uint64
 	capped    uint64
 	// floor is the unix second before which data was removed by Cutoff
-	// (with a retention shorter than Limits.Retention). Reports and parts
-	// before it are not accepted again.
+	// or the automatic prune. Reports and parts before it are not
+	// accepted again, so replay protection survives a backwards clock
+	// step.
 	floor int64
+	// cappedHours indexes, per hour, the reporters that had parts
+	// dropped in it, so pruning the hour drops their capped marker
+	// with it.
+	cappedHours map[int64]map[*reporterState]struct{}
 	// prunedHour is the hour of now at the last automatic prune.
 	prunedHour int64
 	pruned     bool
@@ -267,10 +276,11 @@ func NewAggregator(l Limits, now func() time.Time) *Aggregator {
 	}
 	l.MaxInterval = min(l.MaxInterval, l.Retention)
 	return &Aggregator{
-		limits:    l,
-		now:       now,
-		hours:     make(map[int64]map[FlowKey]*bucket),
-		reporters: make(map[string]*reporterState),
+		limits:      l,
+		now:         now,
+		hours:       make(map[int64]map[FlowKey]*bucket),
+		reporters:   make(map[string]*reporterState),
+		cappedHours: make(map[int64]map[*reporterState]struct{}),
 	}
 }
 
@@ -345,6 +355,12 @@ func reporterEnd(o *Observation) netip.Addr {
 
 // Ingest adds a report to the hourly buckets.
 //
+// The caller sets r.Host from the server's own record of the execution's
+// target — the managed host the collection ran on — never from the host's
+// output (Snapshot.Host): the report arrives over SSH from that host, so
+// a value it chose would let it report under another host's identity and
+// reuse or corrupt that host's report sequence.
+//
 // own lists the addresses that belong to the reporting host r.Host. The
 // caller takes them from the server's own records of that managed host
 // (for example its registered and inventoried addresses), never from the
@@ -412,10 +428,13 @@ func (a *Aggregator) Ingest(r Report, own []netip.Addr) (IngestResult, error) {
 		return IngestResult{}, fmt.Errorf("%w: host %q: report ends %s, in an hour removed by cutoff", ErrOutOfWindow, r.Host,
 			r.To.UTC().Format(time.RFC3339))
 	}
-	// Prune at most once per hour of the clock, before the limit check, so
-	// expired reporters do not keep new hosts out.
+	// Prune at most once per hour of the clock, before the limit check,
+	// so expired reporters do not keep new hosts out. The floor advances
+	// with the pruned hours, so a replayed report from a pruned reporter
+	// is refused even after a backwards clock step.
 	if h := hourOf(now); !a.pruned || h != a.prunedHour {
 		a.pruneLocked(cutoff, cutoff)
+		a.advanceFloorLocked(cutoff)
 		a.pruned, a.prunedHour = true, h
 	}
 	rs := a.reporters[r.Host]
@@ -486,6 +505,7 @@ func (a *Aggregator) applyLocked(o *Observation, p *hourPart, rs *reporterState)
 			return dropped
 		}
 		if rs.buckets >= a.limits.MaxBucketsPerReporter {
+			a.noteCappedLocked(rs, p.hour)
 			return capped
 		}
 		if hm == nil {
@@ -512,6 +532,40 @@ func (a *Aggregator) applyLocked(o *Observation, p *hourPart, rs *reporterState)
 	return applied
 }
 
+// noteCappedLocked records one part dropped at the per-reporter limit in
+// hour, so the host's truncated marker (CappedHosts) expires with the
+// hour. The per-host and global counters are updated by applyLocked.
+func (a *Aggregator) noteCappedLocked(rs *reporterState, hour int64) {
+	if rs.cappedByHour == nil {
+		rs.cappedByHour = make(map[int64]uint64)
+	}
+	rs.cappedByHour[hour]++
+	if a.cappedHours[hour] == nil {
+		a.cappedHours[hour] = make(map[*reporterState]struct{})
+	}
+	a.cappedHours[hour][rs] = struct{}{}
+}
+
+// dropCappedLocked drops the capped parts of the pruned hour, so a host
+// is not marked truncated for data that no longer exists.
+func (a *Aggregator) dropCappedLocked(hour int64) {
+	for rs := range a.cappedHours[hour] {
+		if c := rs.cappedByHour[hour]; c > 0 {
+			delete(rs.cappedByHour, hour)
+			rs.capped -= c
+		}
+	}
+	delete(a.cappedHours, hour)
+}
+
+// advanceFloorLocked moves the floor to the start of the hour containing
+// t, whichever is later.
+func (a *Aggregator) advanceFloorLocked(t time.Time) {
+	if start := hourOf(t) * secondsPerHour; start > a.floor {
+		a.floor = start
+	}
+}
+
 // Cutoff removes every hour that ends at or before now-retention. It
 // returns the number of removed buckets.
 //
@@ -524,9 +578,7 @@ func (a *Aggregator) Cutoff(now time.Time, retention time.Duration) int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	hours := now.Add(-retention)
-	if hourEnd := hourOf(hours) * secondsPerHour; hourEnd > a.floor {
-		a.floor = hourEnd
-	}
+	a.advanceFloorLocked(hours)
 	return a.pruneLocked(hours, now.Add(-max(retention, a.limits.Retention)))
 }
 
@@ -546,6 +598,15 @@ func (a *Aggregator) pruneLocked(hours, reporters time.Time) int {
 		}
 	}
 	a.buckets -= removed
+	// Capped parts expire with their hour, so the truncated marker of a
+	// host reflects the data that still exists. The capped hours are
+	// walked separately: a host can be capped in an hour in which it
+	// holds no bucket.
+	for h := range a.cappedHours {
+		if (h+1)*secondsPerHour <= limit {
+			a.dropCappedLocked(h)
+		}
+	}
 	// A reporter goes with the hour of its last report (of any tier). All
 	// its buckets lie in that hour or earlier, so reporters is never after
 	// hours and a host never meets its own buckets under a new index.
@@ -589,8 +650,10 @@ func (a *Aggregator) Capped() uint64 {
 }
 
 // CappedHosts returns the tracked hosts that had parts dropped at the
-// per-reporter bucket limit, sorted, so the map can mark their flows as
-// truncated (ADR 0009 D7).
+// per-reporter bucket limit in an hour that still exists, sorted, so the
+// map can mark their flows as truncated (ADR 0009 D7). The marker expires
+// with the pruned hours: once every hour holding a capped part of a host
+// is gone, the host is no longer reported.
 func (a *Aggregator) CappedHosts() []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
