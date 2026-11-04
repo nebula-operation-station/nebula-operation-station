@@ -91,6 +91,14 @@ func (c *provisionClient) TaskType(method string) (string, bool) {
 	return ImageStepTaskType(method)
 }
 
+// TargetState fails once ctx has ended, as a real read does.
+func (c *provisionClient) TargetState(ctx context.Context, rm executordb.PveRemote, kind, node string, vmid uint64, tok pveapi.TokenSupplier) (PveTargetState, error) {
+	if err := ctx.Err(); err != nil {
+		return PveTargetState{}, err
+	}
+	return c.imageClient.TargetState(ctx, rm, kind, node, vmid, tok)
+}
+
 func (c *provisionClient) TaskID(step PveMutationStep) (string, bool) {
 	return ProvisionStepTaskID(step)
 }

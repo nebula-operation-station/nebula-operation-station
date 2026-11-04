@@ -12,8 +12,37 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
+
+// TestCommitPVEGuestProvisionDeadlineCoversTheRun: the deadline the commit
+// call actually carries leaves the executor its whole run bound (which the
+// executor's own tests check against the steps it runs and its per-step
+// wait), and in any case four 30 min task waits: the clone, config, resize
+// and start of a full provisioning (the 30 min wait before covered one).
+func TestCommitPVEGuestProvisionDeadlineCoversTheRun(t *testing.T) {
+	var remain time.Duration
+	c := &Client{defaultTimeout: time.Second, rpc: pb.NewExecutorServiceClient(pveAdminConn{
+		invoke: func(ctx context.Context, _ string, _, _ any, _ ...grpc.CallOption) error {
+			dl, ok := ctx.Deadline()
+			if !ok {
+				t.Fatal("commit without a deadline")
+			}
+			remain = time.Until(dl)
+			return nil
+		},
+	})}
+	if _, err := c.CommitPVEGuestProvision(context.Background(), &pb.CommitPVEGuestProvisionRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if remain < executor.PveGuestProvisionRunBound {
+		t.Fatalf("commit deadline %v shorter than the executor run bound %v", remain, executor.PveGuestProvisionRunBound)
+	}
+	if remain < 4*30*time.Minute {
+		t.Fatalf("commit deadline %v does not cover four 30 min task waits", remain)
+	}
+}
 
 func TestProposePVEGuestProvisionForwardsWithDefaultTimeout(t *testing.T) {
 	checkPVEAdminRPC(t, "ProposePVEGuestProvision", (*Client).ProposePVEGuestProvision)
