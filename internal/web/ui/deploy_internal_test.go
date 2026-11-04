@@ -5,6 +5,7 @@ package ui
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -94,91 +95,65 @@ func TestDeployRunsBusyRunsAreNeverExpired(t *testing.T) {
 	}
 }
 
-func TestDeployRunsExpiredProposalIsReleasedOnce(t *testing.T) {
+// TestDeployRunsExpiredProposalKeepsItsAddress: the expiry of a proposal
+// with an IPAM reservation marks the address kept ("may be in use"), never
+// for release: the execution may have been committed out of band. A
+// proposal without a reservation (DHCP) has nothing to keep.
+func TestDeployRunsExpiredProposalKeepsItsAddress(t *testing.T) {
 	p := newDeployRuns()
 	now := time.Unix(1_800_000_000, 0)
 	x := dpRun("a", "alice", deployProposed, now)
-	x.ipam = &pb.PVEIPAMBinding{Address: "192.168.10.50"}
-	if err := p.put(x, now); err != nil {
-		t.Fatal(err)
+	x.ipam, x.vmid = &pb.PVEIPAMBinding{Address: "192.168.10.50"}, 123
+	dhcp := dpRun("b", "alice", deployProposed, now)
+	for _, r := range []*deployRun{x, dhcp} {
+		if err := p.put(r, now); err != nil {
+			t.Fatal(err)
+		}
 	}
 	p.mu.Lock()
 	p.prune(now.Add(2 * time.Hour))
 	p.mu.Unlock()
-	if x.state != deployFailed || x.failedIn != deployProposed || x.address != ipamRelease {
+	if x.state != deployFailed || x.failedIn != deployProposed || x.address != ipamKept {
 		t.Fatalf("expired proposal: %s in %s, address %q", x.state, x.failedIn, x.address)
 	}
-	got := p.releases()
-	if len(got) != 1 || got["a"].String() != "192.168.10.50" || x.address != ipamReleasing {
-		t.Fatalf("releases = %v (%q)", got, x.address)
+	for _, want := range []string{"may be in use", "192.168.10.50", "VMID 123"} {
+		if !strings.Contains(x.message, want) {
+			t.Errorf("expired proposal message lacks %q: %s", want, x.message)
+		}
 	}
-	if again := p.releases(); len(again) != 0 {
-		t.Errorf("an address in flight was handed out twice: %v", again)
+	if dhcp.state != deployFailed || dhcp.address != ipamHeld || strings.Contains(dhcp.message, "nothing was created") {
+		t.Errorf("expired DHCP proposal: %s, address %q, %q", dhcp.state, dhcp.address, dhcp.message)
 	}
-	// A run whose release is in flight is not pruned.
+	// A kept address holds no run: past the TTL both are pruned (the
+	// reservation itself stays in the IPAM).
 	p.mu.Lock()
 	p.prune(now.Add(72 * time.Hour))
 	p.mu.Unlock()
-	if p.runs["a"] == nil {
-		t.Error("run pruned while its address release is in flight")
+	if len(p.runs) != 0 {
+		t.Errorf("%d runs left past the TTL", len(p.runs))
 	}
 }
 
-func TestDeployRunsPendingReleaseIsNeverDropped(t *testing.T) {
+// TestDeployRunsKeptAddressesNeverBlockTheLimit: finished runs that keep
+// their address are evicted like any finished run, so a store full of them
+// never refuses a new deployment.
+func TestDeployRunsKeptAddressesNeverBlockTheLimit(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
-	for _, addr := range []string{ipamRelease, ipamReleasing} {
-		p := newDeployRuns()
-		pending := dpRun("pending", "alice", deployFailed, now.Add(-time.Hour))
-		pending.ipam = &pb.PVEIPAMBinding{Address: "192.168.10.50"}
-		pending.address = addr
-		if err := p.put(pending, now); err != nil {
-			t.Fatal(err)
-		}
-		for i := 1; i < maxDeployRuns; i++ {
-			if err := p.put(dpRun(fmt.Sprintf("r%d", i), fmt.Sprintf("user%d", i), deployFailed, now), now); err != nil {
-				t.Fatal(err)
-			}
-		}
-		// Full: the eviction skips the pending run although it expires
-		// first.
-		if err := p.put(dpRun("new", "bob", deployProposed, now), now); err != nil {
-			t.Fatal(err)
-		}
-		if p.runs["pending"] == nil {
-			t.Fatalf("%s: put evicted a run whose release is pending", addr)
-		}
-		// Past every TTL only the pending (and the live) run remain.
-		p.mu.Lock()
-		p.prune(now.Add(48 * time.Hour))
-		p.mu.Unlock()
-		if p.runs["pending"] == nil {
-			t.Fatalf("%s: prune dropped a run whose release is pending", addr)
-		}
-		if len(p.runs) != 2 {
-			t.Errorf("%s: %d runs after the prune, want 2", addr, len(p.runs))
-		}
-		// Released, it is pruned like any finished run.
-		pending.address = ipamReleased
-		p.mu.Lock()
-		p.prune(now.Add(48 * time.Hour))
-		p.mu.Unlock()
-		if p.runs["pending"] != nil {
-			t.Errorf("%s: released run kept past its TTL", addr)
-		}
-	}
-	// Only pending runs: nothing can be evicted.
 	p := newDeployRuns()
 	for i := range maxDeployRuns {
 		x := dpRun(fmt.Sprintf("r%d", i), fmt.Sprintf("user%d", i), deployFailed, now)
-		x.ipam, x.address = &pb.PVEIPAMBinding{Address: "192.168.10.50"}, ipamRelease
+		x.ipam, x.address = &pb.PVEIPAMBinding{Address: "192.168.10.50"}, ipamKept
 		if err := p.put(x, now); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := p.room("bob", now); !errors.Is(err, errDeployFull) {
-		t.Errorf("room with only pending releases = %v", err)
+	if err := p.room("bob", now); err != nil {
+		t.Errorf("room with only kept-address runs = %v", err)
 	}
-	if err := p.put(dpRun("new", "bob", deployProposed, now), now); !errors.Is(err, errDeployFull) {
-		t.Errorf("put with only pending releases = %v", err)
+	if err := p.put(dpRun("new", "bob", deployProposed, now), now); err != nil {
+		t.Errorf("put with only kept-address runs = %v", err)
+	}
+	if len(p.runs) != maxDeployRuns {
+		t.Errorf("%d runs, want %d", len(p.runs), maxDeployRuns)
 	}
 }

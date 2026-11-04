@@ -56,9 +56,13 @@ import (
 // (enrolled, plan not run) instead of leaving it in bootstrapping. An idle
 // run that does not progress fails when its deadline passes (the
 // proposal's request expiry, deployEnrollWindow, deployBootstrapWindow),
-// so abandoned runs never hold the per-user or global run limit; an
-// expired or refused proposal releases its IPAM reservation, a run whose
-// guest may exist keeps it. Enrollment uses
+// so abandoned runs never hold the per-user or global run limit. Only a
+// proposal the executor refused releases its IPAM reservation at once;
+// once the executor may hold a permit for the execution, the reservation
+// is kept: an admin may approve and commit that execution out of band
+// (nebula approve, CommitPVEGuestProvision), and the executor cannot tell
+// a consumed permit from an expired one. A kept address is cleared by the
+// operator on the network page. Enrollment uses
 // pveinventory.GuestJoinFlow (PV-06): propose on the executor, show the
 // fingerprint the executor read, approve, commit; the inventory host and
 // its guest link are created from the executor's committed binding only.
@@ -148,6 +152,9 @@ const (
 	// deployCommitTimeout bounds the background provisioning commit; the
 	// executor client adds its own task wait.
 	deployCommitTimeout = 35 * time.Minute
+	// deployReleaseTimeout bounds the one ClearEntry of a refused
+	// proposal.
+	deployReleaseTimeout = 10 * time.Second
 	// deployJoinTimeout bounds the enrollment commit (an SSH probe and the
 	// inventory transaction).
 	deployJoinTimeout = 2 * time.Minute
@@ -295,31 +302,20 @@ type deployRun struct {
 	batchErr string
 }
 
-// What happens to a run's IPAM reservation.
+// What happens to a run's IPAM reservation. A run never releases its
+// reservation: from the proposal on, the executor may hold a permit an
+// admin can commit out of band, so the address may be in use.
 const (
-	// ipamHeld: the reservation is held for the run (or there is none).
+	// ipamHeld: the reservation is held for the live run (or there is none).
 	ipamHeld = ""
-	// ipamRelease: nothing was created; the reservation is to be cleared.
-	ipamRelease = "release"
-	// ipamReleasing: settle handed the reservation to a release call.
-	ipamReleasing = "releasing"
-	// ipamReleased: the reservation was cleared.
-	ipamReleased = "released"
-	// ipamKept: a created guest may use the address; it stays reserved.
+	// ipamKept: the run ended and a guest may use the address; it stays
+	// reserved until the operator clears it.
 	ipamKept = "kept"
 )
 
 // final reports whether the run ended.
 func (x *deployRun) final() bool {
 	return x.state == deployDone || x.state == deployFailed || x.state == deployJoined
-}
-
-// releasePending reports whether the run's address is still to be
-// cleared (marked, in flight, or waiting for a retry after a failed
-// ClearEntry): such a run is neither pruned nor evicted, or the
-// reservation would never be released.
-func (x *deployRun) releasePending() bool {
-	return x.address == ipamRelease || x.address == ipamReleasing
 }
 
 // busy reports whether a background call holds the run.
@@ -392,12 +388,12 @@ func (p *deployRuns) room(user string, now time.Time) error {
 }
 
 // prune settles idle unfinished runs past their deadline and drops
-// finished runs past their TTL that no background call or pending address
-// release holds. Unfinished runs are never dropped.
+// finished runs past their TTL that no background call holds. Unfinished
+// runs are never dropped; dropping a run leaves its reservation in place.
 func (p *deployRuns) prune(now time.Time) {
 	p.expire(now)
 	for id, x := range p.runs {
-		if x.final() && !now.Before(x.expires) && !x.busy() && !x.releasePending() {
+		if x.final() && !now.Before(x.expires) && !x.busy() {
 			delete(p.runs, id)
 		}
 	}
@@ -405,9 +401,12 @@ func (p *deployRuns) prune(now time.Time) {
 
 // expire ends every idle unfinished run whose deadline has passed: it
 // fails in the state it was in with a visible reason, stops counting
-// against the caps and is pruned after deployRunTTL. An expired proposal
-// created nothing, so its address is released; a guest that was created
-// keeps its address.
+// against the caps and is pruned after deployRunTTL. No expiry releases an
+// address. An expired proposal was not run from this page, but an admin may
+// have approved and committed the same execution out of band; the
+// executor's only read (GetPermitState) reports "no live permit" for a
+// consumed and an expired permit alike, so whether a guest exists cannot be
+// told and the address is kept as "may be in use".
 func (p *deployRuns) expire(now time.Time) {
 	for _, x := range p.runs {
 		if x.final() || x.busy() || x.deadline.IsZero() || now.Before(x.deadline) {
@@ -415,13 +414,19 @@ func (p *deployRuns) expire(now time.Time) {
 		}
 		switch x.state {
 		case deployProposed:
-			x.message = "the proposal expired unapproved; nothing was created"
-			if x.ipam != nil && x.address == ipamHeld {
-				x.address = ipamRelease
-			} else if x.address == ipamKept {
+			vmid := "VMID " + strconv.FormatUint(x.vmid, 10) + " on " + x.form.Remote
+			x.message = "the proposal expired without a run from this page"
+			switch {
+			case x.address == ipamKept:
 				// A refused run left it ambiguous whether an earlier run
 				// of the execution created the guest.
 				x.message = "the proposal expired; the address stays reserved because an earlier run of this execution may have created the guest"
+			case x.ipam != nil:
+				x.address = ipamKept
+				x.message += "; the address " + x.ipam.GetAddress() + " stays reserved and may be in use, because the execution may have been approved and committed outside this page (nebula approve). Clear the reservation on the network page once no guest with " +
+					vmid + " exists"
+			default:
+				x.message += "; it may have been approved and committed outside this page (nebula approve): check for a guest with " + vmid
 			}
 		case deployBooting, deployEnrolling:
 			x.message = "expired: the guest was not enrolled within " + deployEnrollWindow.String() +
@@ -436,61 +441,24 @@ func (p *deployRuns) expire(now time.Time) {
 	}
 }
 
-// releases hands every reservation marked for release to the caller (who
-// clears it outside the lock) and marks it in flight.
-func (p *deployRuns) releases() map[string]netip.Addr {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	var out map[string]netip.Addr
-	for id, x := range p.runs {
-		if x.address != ipamRelease || x.ipam == nil {
-			continue
-		}
-		a, err := netip.ParseAddr(x.ipam.GetAddress())
-		if err != nil {
-			x.address = ipamKept
-			continue
-		}
-		if out == nil {
-			out = map[string]netip.Addr{}
-		}
-		x.address = ipamReleasing
-		out[id] = a
-	}
-	return out
-}
-
-// settleDeployRuns expires idle runs past their deadline, prunes finished
-// runs past their TTL and releases the addresses of runs that created
-// nothing; it returns the time it used. A
-// failed release is retried on the next call. Settling is lazy: every
-// deployment page and form calls it, there is no background sweep.
-func (h *Handler) settleDeployRuns(ctx context.Context) time.Time {
+// settleDeployRuns expires idle runs past their deadline and prunes
+// finished runs past their TTL; it returns the time it used. Settling is
+// lazy (every deployment page and form calls it, there is no background
+// sweep) and only touches memory: it never calls the IPAM store, so no
+// page request waits on the store or retries a failing one.
+func (h *Handler) settleDeployRuns() time.Time {
 	now := h.clockNow()
 	h.deployRuns.mu.Lock()
 	h.deployRuns.prune(now)
 	h.deployRuns.mu.Unlock()
-	for id, a := range h.deployRuns.releases() {
-		next := ipamReleased
-		if h.deployIPAM == nil {
-			next = ipamKept
-		} else if err := h.deployIPAM.ClearEntry(context.WithoutCancel(ctx), a); err != nil {
-			h.log.Error("deploy: release address", "run", id, "address", a.String(), "error", err)
-			next = ipamRelease
-		} else {
-			h.log.Info("audit", "kind", "deployment_address_released", "run", id, "address", a.String())
-		}
-		h.deployRuns.set(id, func(x *deployRun) { x.address = next })
-	}
 	return now
 }
 
-// oldestFinal returns the finished run that expires first, skipping runs
-// whose address release is pending.
+// oldestFinal returns the finished run that expires first.
 func (p *deployRuns) oldestFinal() string {
 	var id string
 	for k, x := range p.runs {
-		if x.final() && !x.releasePending() && (id == "" || x.expires.Before(p.runs[id].expires)) {
+		if x.final() && (id == "" || x.expires.Before(p.runs[id].expires)) {
 			id = k
 		}
 	}
@@ -498,8 +466,7 @@ func (p *deployRuns) oldestFinal() string {
 }
 
 // put stores a new run, evicting the finished run that expires first when
-// full; an unfinished run, or one whose address release is pending, is
-// never evicted.
+// full; an unfinished run is never evicted.
 func (p *deployRuns) put(x *deployRun, now time.Time) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -645,7 +612,7 @@ func (h *Handler) handleDeployWizard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Expired proposals free their addresses before the suggestion.
-	h.settleDeployRuns(r.Context())
+	h.settleDeployRuns()
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
 	defer cancel()
 	q := r.URL.Query()
@@ -1122,7 +1089,7 @@ func (h *Handler) handleDeployPropose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := webUser(r)
-	now := h.settleDeployRuns(r.Context())
+	now := h.settleDeployRuns()
 	if !h.deployRuns.allow(user, now) {
 		w.Header().Set("Retry-After", strconv.Itoa(int(guestPowerProposeInterval/time.Second)))
 		http.Error(w, "too many deployment proposals: wait a moment and try again", http.StatusTooManyRequests)
@@ -1207,15 +1174,38 @@ func (h *Handler) handleDeployPropose(w http.ResponseWriter, r *http.Request) {
 		}
 		spec.Ipam = b
 	}
+	// release clears the reservation once, bounded, when the executor
+	// refused the proposal: it then holds no permit (it releases the VMID
+	// too), so no guest can be created with the address.
 	release := func() {
-		if reserved.IsValid() {
-			if err := h.deployIPAM.ClearEntry(context.WithoutCancel(ctx), reserved); err != nil {
-				h.log.Error("deploy: release address", "address", reserved.String(), "error", err)
-			}
+		if !reserved.IsValid() {
+			return
 		}
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deployReleaseTimeout)
+		defer cancel()
+		if err := h.deployIPAM.ClearEntry(rctx, reserved); err != nil {
+			h.log.Error("deploy: release address", "address", reserved.String(), "error", err)
+		}
+	}
+	// keep leaves the reservation in place when the executor may hold a
+	// permit for the execution (the outcome of the call is unknown, or it
+	// answered with a proposal this page refuses): an admin may approve
+	// and commit it out of band, and the guest would use the address. It
+	// returns the note for the user.
+	keep := func(execution string) string {
+		if !reserved.IsValid() {
+			return ""
+		}
+		h.log.Warn("audit", "kind", "deployment_address_kept", "address", reserved.String(), "execution", execution, "user", user)
+		return "; the address " + reserved.String() + " stays reserved because the executor may hold a permit for this deployment: clear it on the network page once no guest uses it"
 	}
 	resp, err := h.deploy.ProposePVEGuestProvision(ctx, &pb.ProposePVEGuestProvisionRequest{Spec: spec})
 	if err != nil {
+		if !proposeRefused(err) {
+			h.log.Error("propose guest provision", "error", err)
+			http.Error(w, "the executor did not confirm the proposal (unavailable or busy); its outcome is unknown"+keep(""), http.StatusBadGateway)
+			return
+		}
 		release()
 		h.guestPowerRefusal(w, "propose guest provision", err)
 		return
@@ -1233,15 +1223,13 @@ func (h *Handler) handleDeployPropose(w http.ResponseWriter, r *http.Request) {
 	risk := riskWord(perm.GetRiskClass())
 	if !guestPowerDigestRe.MatchString(digest) || perm.GetRiskClass() == pb.RiskClass_RISK_CLASS_UNSPECIFIED || strings.HasPrefix(risk, "RISK") ||
 		run.vmid == 0 || run.executionID == "" {
-		release()
-		http.Error(w, "the executor returned no usable proposal", http.StatusBadGateway)
+		http.Error(w, "the executor returned no usable proposal"+keep(run.executionID), http.StatusBadGateway)
 		return
 	}
 	bound, err := parseGuestPowerCanonical(perm.GetCanonicalRequest(), digest)
 	if err != nil {
-		release()
 		h.log.Error("deploy: unusable canonical request", "remote", form.Remote, "error", err)
-		http.Error(w, err.Error()+": the proposal is refused, nothing can be approved", http.StatusBadGateway)
+		http.Error(w, err.Error()+": the proposal is refused, nothing can be approved here"+keep(run.executionID), http.StatusBadGateway)
 		return
 	}
 	run.bound, run.digest, run.risk = bound, digest, risk
@@ -1254,8 +1242,7 @@ func (h *Handler) handleDeployPropose(w http.ResponseWriter, r *http.Request) {
 		run.challengeAt = time.Unix(e, 0)
 	}
 	if run.requirement == "key" && run.options == "" && len(run.mismatch) == 0 {
-		release()
-		http.Error(w, "the executor returned no approval challenge", http.StatusBadGateway)
+		http.Error(w, "the executor returned no approval challenge"+keep(run.executionID), http.StatusBadGateway)
 		return
 	}
 	// Commit presents the proposed spec with the reserved VMID; the
@@ -1275,21 +1262,18 @@ func (h *Handler) handleDeployPropose(w http.ResponseWriter, r *http.Request) {
 		var ie *deployprofile.InvalidError
 		switch {
 		case errors.As(err, &ie):
-			release()
-			http.Error(w, "the profile could not be saved: "+ie.Error(), http.StatusBadRequest)
+			http.Error(w, "the profile could not be saved: "+ie.Error()+keep(run.executionID), http.StatusBadRequest)
 			return
 		case err != nil:
-			release()
 			h.log.Error("deploy: save ad-hoc profile", "error", err)
-			http.Error(w, "the profile could not be saved", http.StatusInternalServerError)
+			http.Error(w, "the profile could not be saved"+keep(run.executionID), http.StatusInternalServerError)
 			return
 		}
 		run.form.ProfileSlug, run.form.ProfileVersion = saved.Profile.Slug, saved.Version
 		h.log.Info("audit", "kind", "deploy_profile_saved", "profile", saved.Profile.Slug, "version", saved.Version, "user", user)
 	}
 	if err := h.deployRuns.put(run, now); err != nil {
-		release()
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		http.Error(w, err.Error()+keep(run.executionID), http.StatusServiceUnavailable)
 		return
 	}
 	if len(run.mismatch) > 0 {
@@ -1298,6 +1282,25 @@ func (h *Handler) handleDeployPropose(w http.ResponseWriter, r *http.Request) {
 	h.log.Info("audit", "kind", "deployment_proposed", "run", id, "remote", form.Remote, "node", form.Node,
 		"name", form.Name, "vmid", run.vmid, "risk", risk, "user", user)
 	http.Redirect(w, r, "/deployments/"+id, http.StatusSeeOther)
+}
+
+// proposeRefused reports whether a ProposePVEGuestProvision error is the
+// executor's refusal. A refusal leaves no runnable permit: the executor
+// returns an error only before the permit is registered, or after
+// releasing the VMID the commit requires. The codes gRPC itself produces
+// for a call whose response was lost (unavailable, deadline, cancelled,
+// unknown, internal, a response too large) leave the outcome unknown: the
+// executor may hold an approvable permit.
+func proposeRefused(err error) bool {
+	st, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+	switch st.Code() {
+	case codes.OK, codes.Unavailable, codes.DeadlineExceeded, codes.Canceled, codes.Unknown, codes.Internal, codes.ResourceExhausted, codes.DataLoss:
+		return false
+	}
+	return true
 }
 
 // deployInputError answers a form error as 400 and anything else as 500.
@@ -1370,7 +1373,7 @@ func (h *Handler) handleDeployApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := webUser(r)
-	now := h.settleDeployRuns(r.Context())
+	now := h.settleDeployRuns()
 	if !deployRunIDRe.MatchString(in.ID) || len(in.Assertion) == 0 || string(in.Assertion) == "null" {
 		writeJSONError(w, http.StatusNotFound, "deployment not found")
 		return
@@ -1420,7 +1423,7 @@ func (h *Handler) handleDeployRun(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PostForm.Get("id")
 	user := webUser(r)
-	now := h.settleDeployRuns(r.Context())
+	now := h.settleDeployRuns()
 	run, ok := h.deployRuns.update(user, id, func(x *deployRun) bool { return x.requirement != "key" && x.approvable(now) },
 		func(x *deployRun) { x.state, x.message = deployApproved, "" })
 	if !ok {
@@ -1447,25 +1450,23 @@ func (h *Handler) startDeployCommit(r *http.Request, run deployRun) {
 			st, _ := status.FromError(err)
 			switch st.Code() {
 			case codes.InvalidArgument, codes.FailedPrecondition, codes.PermissionDenied, codes.NotFound, codes.Aborted:
-				// A refusal: this call sent no PVE step. Whether an
-				// earlier run of the same execution (another commit, for
-				// example through the CLI) created the guest is only
-				// ruled out for InvalidArgument, which the executor
-				// returns while validating the request itself. The other
-				// codes are ambiguous: PermissionDenied also means the
-				// permit was already used or is final, FailedPrecondition
-				// also means the VMID now exists, NotFound a remote or key
-				// removed after a run. There the address stays reserved
-				// (a leaked reservation is safe, a released address in use
-				// is not).
+				// A refusal: this call sent no PVE step. No refusal
+				// rules out that an earlier run of the same execution
+				// (another commit, for example by an admin with the CLI)
+				// created the guest: InvalidArgument is not only request
+				// validation (the executor also wraps automation key
+				// lookup errors in it and answers one fixed text for every
+				// cause), PermissionDenied also means the permit was
+				// already used or is final, FailedPrecondition also means
+				// the VMID now exists, NotFound a remote or key removed
+				// after a run, Aborted a concurrent change. So the address
+				// always stays reserved (a leaked reservation is safe, a
+				// released address in use is not).
 				msg := "the executor refused: " + cleanText(st.Message())
-				release := st.Code() == codes.InvalidArgument
 				h.deployRuns.set(run.id, func(x *deployRun) {
 					x.message = msg
-					if !release && x.ipam != nil && x.address == ipamHeld {
+					if x.ipam != nil {
 						x.address = ipamKept
-					}
-					if x.ipam != nil && x.address == ipamKept {
 						x.message += "; the address " + x.ipam.GetAddress() + " stays reserved because an earlier run of this execution may have created the guest"
 					}
 					if run.requirement != "key" && (st.Code() == codes.PermissionDenied || st.Code() == codes.FailedPrecondition) {
@@ -1475,11 +1476,7 @@ func (h *Handler) startDeployCommit(r *http.Request, run deployRun) {
 						return
 					}
 					x.state, x.failedIn, x.expires = deployFailed, deployCreating, now.Add(deployRunTTL)
-					if release && x.ipam != nil && x.address == ipamHeld {
-						x.address = ipamRelease
-					}
 				})
-				h.settleDeployRuns(ctx)
 			default:
 				// Outcome unknown: a guest may exist and use the address.
 				h.log.Error("commit guest provision", "run", run.id, "error", err)
@@ -1538,7 +1535,7 @@ func (h *Handler) handleDeployJoin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "the form could not be read", http.StatusBadRequest)
 		return
 	}
-	h.settleDeployRuns(r.Context())
+	h.settleDeployRuns()
 	id := r.PostForm.Get("id")
 	user := webUser(r)
 	run, ok := h.deployRuns.get(user, id)
@@ -1693,7 +1690,7 @@ func (h *Handler) handleDeployJoinApprove(w http.ResponseWriter, r *http.Request
 		writeJSONError(w, http.StatusNotFound, "deployment not found")
 		return
 	}
-	h.settleDeployRuns(r.Context())
+	h.settleDeployRuns()
 	run, ok := h.deployRuns.update(user, in.ID, joinApprovable("key"), func(x *deployRun) { x.join.approving, x.message = true, "" })
 	if !ok {
 		writeJSONError(w, http.StatusNotFound, "no enrollment waiting for approval")
@@ -1729,7 +1726,7 @@ func (h *Handler) handleDeployJoinRun(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PostForm.Get("id")
 	user := webUser(r)
-	h.settleDeployRuns(r.Context())
+	h.settleDeployRuns()
 	run, ok := h.deployRuns.update(user, id, joinApprovable("cli"), func(x *deployRun) { x.join.approving, x.message = true, "" })
 	if !ok {
 		http.NotFound(w, r)
@@ -1849,7 +1846,7 @@ func (h *Handler) handleDeployPlan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "batches are not available on this server", http.StatusConflict)
 		return
 	}
-	h.settleDeployRuns(r.Context())
+	h.settleDeployRuns()
 	id := r.PostForm.Get("id")
 	user := webUser(r)
 	run, ok := h.deployRuns.update(user, id, func(x *deployRun) bool {
@@ -2065,7 +2062,7 @@ func (h *Handler) handleDeployRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var rows []deployRunRow
-	for _, x := range h.deployRuns.list(webUser(r), h.settleDeployRuns(r.Context())) {
+	for _, x := range h.deployRuns.list(webUser(r), h.settleDeployRuns()) {
 		rows = append(rows, deployRunRow{ID: x.id, Name: x.form.Name, Remote: x.form.Remote, Node: x.form.Node,
 			State: x.state, StateClass: deployStateClass(x.state), Risk: x.risk, VMID: x.vmid, Created: x.created.UTC()})
 	}
@@ -2082,7 +2079,7 @@ func (h *Handler) handleDeployRunPage(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	now := h.settleDeployRuns(r.Context())
+	now := h.settleDeployRuns()
 	run, ok := h.deployRuns.get(webUser(r), id)
 	if !ok {
 		http.NotFound(w, r)
