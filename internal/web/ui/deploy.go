@@ -1458,6 +1458,9 @@ func (h *Handler) checkJoin(resp *pb.ProposeGuestJoinResponse, run deployRun, en
 	if bound.Risk != risk {
 		j.mismatch = append(j.mismatch, "the risk in the bound request differs from the executor's answer")
 	}
+	if bound.Expiry.IsZero() || !h.clockNow().Before(bound.Expiry) {
+		j.mismatch = append(j.mismatch, "the bound enrollment request has no expiry or has expired")
+	}
 	if j.requirement == "key" && j.options == "" && len(j.mismatch) == 0 {
 		return nil, errors.New("the executor returned no approval challenge for the enrollment")
 	}
