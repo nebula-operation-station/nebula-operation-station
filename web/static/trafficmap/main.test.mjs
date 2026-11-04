@@ -81,7 +81,8 @@ function fakeGL(state, fail) {
     },
     bufferData() {
       state.bufferDataCalls++;
-      if (fail.upload) throw new Error("fake upload failure");
+      const up = fail.upload;
+      if (up && (typeof up !== "function" || up(state.bufferDataCalls))) throw new Error("fake upload failure");
     },
     createShader() {
       if (fail.compile) throw new Error("fake compile failure");
@@ -143,7 +144,7 @@ class FakeCanvas extends FakeElement {
     }
     if (type === "2d") {
       this.kind = type;
-      return fake2d(this.env.fail);
+      return (this.ctx2d ??= fake2d(this.env.fail));
     }
     return null;
   }
@@ -235,6 +236,8 @@ function setup({ webgl = true, prepare = () => {}, build = undefined, reducedMot
     backendMessages: () => sent.filter((m) => m.data.type === OUT.backend).map((m) => m.data),
     errorMessages: () => sent.filter((m) => m.data.type === OUT.error),
     webglCanvas: () => env.canvases.find((c) => c.kind === "webgl2"),
+    // The overlay canvas is the first canvas startTrafficMap creates.
+    overlay: () => env.canvases[0],
     sendModel: () => post(modelMessage()),
     sendFocus: (id) => post({ type: "nos.trafficmap.focus", id }),
     sendIcons: (icons) => post({ type: "nos.trafficmap.icons", icons }),
@@ -397,6 +400,80 @@ test("FailedFirstRebuildIsRetriedAfterTheBackoff", () => {
   assert.equal(b.calls, 2, "the rebuild is retried after the backoff");
   assert.equal(h.status(), STATUS.fallback, "the map draws again");
   assert.equal(h.errorMessages().length, 1);
+  h.map.stop();
+});
+
+// overlayCounts wraps the overlay's 2D context and counts the calls that
+// draw text or wipe the canvas, so a test can tell whether the overlay
+// drew labels or was cleared.
+function overlayCounts(h) {
+  const octx = h.overlay().ctx2d;
+  const counts = { fillText: 0, clearRect: 0 };
+  octx.fillText = () => counts.fillText++;
+  octx.clearRect = () => counts.clearRect++;
+  return counts;
+}
+
+test("HalfUploadedWebGL2SceneDrawsNoOverlay", () => {
+  const h = setup();
+  h.sendModel();
+  h.tick(1);
+  const gl = h.webglCanvas();
+  assert.equal(gl.glState.bufferDataCalls, 4, "the first scene is fully uploaded");
+  // From the next setScene on, the second upload fails: the buffers hold
+  // a mix of the new and the old scene.
+  h.env.fail.upload = (n) => n > 4 && n % 4 === 2;
+  const counts = overlayCounts(h);
+  h.sendModel();
+  h.tick(1);
+  assert.equal(gl.glState.bufferDataCalls, 6, "the upload fails halfway through the scene");
+  assert.equal(h.status(), STATUS.frameError);
+  h.tick(1);
+  assert.ok(counts.clearRect > 0, "the overlay is cleared over the mixed base");
+  assert.equal(counts.fillText, 0, "no labels are drawn over the mixed base");
+  h.map.stop();
+});
+
+test("OverlayIsClearedOverAnEmptyFallbackBase", () => {
+  const b = flakyBuild((n) => n >= 2);
+  const h = setup({ build: b.build });
+  h.sendModel();
+  h.tick(1);
+  assert.equal(h.status(), STATUS.webgl, "the first scene draws");
+  const counts = overlayCounts(h);
+  h.sendModel();
+  h.tick(1);
+  let reset = false;
+  h.advance(1000, () => {
+    // Reset once, right after the frame that installs the fallback, so
+    // only the frames drawn on the new (empty) base are counted.
+    if (!reset && h.backendMessages().at(-1).backend === "canvas2d") {
+      reset = true;
+      counts.clearRect = 0;
+      counts.fillText = 0;
+    }
+  });
+  assert.equal(h.backendMessages().at(-1).backend, "canvas2d", "the degrade installs the fallback");
+  assert.ok(counts.clearRect > 0, "the overlay is cleared over the empty base");
+  assert.equal(counts.fillText, 0, "no stale labels are drawn after the fallback install");
+  h.map.stop();
+});
+
+test("FastModelUpdatesCannotPostponeTheDegrade", () => {
+  const b = flakyBuild(() => true);
+  const h = setup({ webgl: false, build: b.build });
+  const bmp = new FakeBitmap();
+  h.sendIcons({ docker: bmp });
+  // Models arrive faster than the failure streak can reset: every rebuild
+  // fails, yet the degrade must still be reached. MAX_FRAME_FAILURES is 3
+  // in main.js; two extra models must not postpone the degrade.
+  for (let i = 0; i < 5; i++) {
+    h.sendModel();
+    h.tick(1);
+  }
+  assert.ok(bmp.closed, "the degrade is reached despite the new models");
+  assert.equal(h.status(), STATUS.frameError);
+  assert.equal(h.errorMessages().length, 1, "the parent is told once per failure streak");
   h.map.stop();
 });
 
