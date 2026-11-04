@@ -1296,6 +1296,18 @@ func TestPveNodeRebootFactsProductionReader(t *testing.T) {
 		"usb device": {func(b map[string]string) {
 			b["/nodes/pve1/qemu/201/config"] = `{"data":{"scsi0":"ceph:vm-201-disk-0","usb0":"host=1234:5678"}}`
 		}, func(f PveNodeRebootFacts) bool { return f.Placement[q201].LocalResources }},
+		"serial host device": {func(b map[string]string) {
+			b["/nodes/pve1/qemu/201/config"] = `{"data":{"scsi0":"ceph:vm-201-disk-0","serial0":"/dev/ttyS0"}}`
+		}, func(f PveNodeRebootFacts) bool { return f.Placement[q201].Known && f.Placement[q201].LocalResources }},
+		"serial socket is movable": {func(b map[string]string) {
+			b["/nodes/pve1/qemu/201/config"] = `{"data":{"scsi0":"ceph:vm-201-disk-0","serial0":"socket"}}`
+		}, func(f PveNodeRebootFacts) bool { return f.Placement[q201].Known && !f.Placement[q201].LocalResources }},
+		"parallel device": {func(b map[string]string) {
+			b["/nodes/pve1/qemu/201/config"] = `{"data":{"scsi0":"ceph:vm-201-disk-0","parallel0":"/dev/parport0"}}`
+		}, func(f PveNodeRebootFacts) bool { return f.Placement[q201].Known && f.Placement[q201].LocalResources }},
+		"serial not a string": {func(b map[string]string) {
+			b["/nodes/pve1/qemu/201/config"] = `{"data":{"scsi0":"ceph:vm-201-disk-0","serial0":7}}`
+		}, func(f PveNodeRebootFacts) bool { return !f.Placement[q201].Known }},
 		"local disk": {func(b map[string]string) {
 			b["/nodes/pve1/qemu/201/config"] = `{"data":{"scsi0":"ceph:vm-201-disk-0","scsi1":"local:201/vm-201-disk-1.qcow2"}}`
 		}, func(f PveNodeRebootFacts) bool { return f.Placement[q201].LocalResources }},

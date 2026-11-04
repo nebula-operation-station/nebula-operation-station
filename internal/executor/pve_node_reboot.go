@@ -65,9 +65,9 @@ import (
 //     reboot was sent, so nothing could be checked first), the guest is
 //     HA-managed with requested state "started" and running, its
 //     configuration has no passthrough or local device (hostpci, usb,
-//     virtiofs, ivshmem, LXC dev) and no disk, unused volume or attached
-//     CD image on storage that is not shared, its HA group and HA
-//     node-affinity rules (PVE 9) allow another online member (any other
+//     virtiofs, ivshmem, a serial port other than socket, a parallel port,
+//     LXC dev) and no disk, unused volume or attached CD image on storage
+//     that is not shared, its HA group and HA node-affinity rules (PVE 9) allow another online member (any other
 //     HA rule is not modelled and counts as not movable), and that member
 //     has free memory for it (first fit over all evacuating guests).
 //
@@ -1243,21 +1243,34 @@ func pveRebootPlacements(ctx context.Context, hc *http.Client, base string, read
 var (
 	pveRebootLocalDeviceRe = regexp.MustCompile(`^(?:hostpci|usb|virtiofs|ivshmem)[0-9]*$`)
 	pveRebootLXCDeviceRe   = regexp.MustCompile(`^dev[0-9]+$`)
+	// pveRebootCharDeviceRe matches the QEMU serial and parallel ports: a
+	// parallel port and a serial port other than "socket" use a host
+	// device, which PVE treats as a local resource.
+	pveRebootCharDeviceRe = regexp.MustCompile(`^(?:serial|parallel)[0-9]+$`)
 )
+
+// pveRebootSerialSocket is the serial port value that uses no host device.
+const pveRebootSerialSocket = "socket"
 
 // pveRebootPlacementKey reports whether a config member matters to HA
 // moving the guest; such a member must be a bounded string.
 func pveRebootPlacementKey(k string) bool {
-	return pveMigrateRelevantConfigKey(k) || pveRebootLocalDeviceRe.MatchString(k) || pveRebootLXCDeviceRe.MatchString(k)
+	return pveMigrateRelevantConfigKey(k) || pveRebootLocalDeviceRe.MatchString(k) || pveRebootLXCDeviceRe.MatchString(k) ||
+		pveRebootCharDeviceRe.MatchString(k)
 }
 
 // rebootLocalResources reports whether the guest configuration ties the
 // guest to its node: a passthrough or local device, a CD image or a volume
-// (disk or unused) on storage that is not shared and active, a passthrough
-// disk or bind mount, or a config the disk parser does not accept.
+// (disk or unused) on storage that is not shared and active, a serial port
+// on a host device or a parallel port, a passthrough disk or bind mount, or
+// a config the disk parser does not accept.
 func rebootLocalResources(kind string, cfg map[string]string, shared map[string]bool) bool {
 	for k, v := range cfg {
 		if pveRebootLocalDeviceRe.MatchString(k) || (kind == permit.ProviderKindLXC && pveRebootLXCDeviceRe.MatchString(k)) {
+			return true
+		}
+		if kind == permit.ProviderKindQemu && pveRebootCharDeviceRe.MatchString(k) &&
+			(strings.HasPrefix(k, "parallel") || v != pveRebootSerialSocket) {
 			return true
 		}
 		if kind == permit.ProviderKindQemu && pveQemuDiskKeyRe.MatchString(k) && slices.Contains(strings.Split(v, ","), "media=cdrom") {
