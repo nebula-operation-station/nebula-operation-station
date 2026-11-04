@@ -14,9 +14,17 @@ import (
 // time may lie relative to the importer's clock.
 const GuestNetClockSkew = 5 * time.Minute
 
+// ErrGuestNetStale is returned (wrapped) by a GuestNetSink for a record
+// older than what it already holds or outside its retention; the
+// importer drops such a record as replayed.
+var ErrGuestNetStale = errors.New("pvecollect: stale guest nic record")
+
 // GuestNetSink receives validated guest NIC records on the server side,
-// for example the traffic store's endpoint enrichment. A sink must treat
-// the record as the collector's claim about the remote, not as inventory.
+// for example the traffic store's provider guest links
+// (GuestNetStoreSink). A sink must treat the record as the collector's
+// claim about the remote, not as inventory. An error wrapping
+// ErrGuestNetStale or ErrGuestNetInvalid makes the importer drop the
+// record; any other error keeps it for the next pass.
 type GuestNetSink interface {
 	ImportGuestNet(ctx context.Context, rec GuestNetRecord) error
 }
@@ -97,8 +105,19 @@ func (im *GuestNetImporter) ImportOnce(ctx context.Context) (GuestNetImportRepor
 			continue
 		}
 		if err := im.sink.ImportGuestNet(ctx, rec); err != nil {
-			// Kept for the next pass; the sink's error text may quote
-			// record values, so only a fixed code is logged.
+			// The sink's error text may quote record values, so only a
+			// fixed code is logged.
+			switch {
+			case errors.Is(err, ErrGuestNetStale):
+				rep.Replayed++
+				im.drop(ctx, name, "stale_record")
+				continue
+			case errors.Is(err, ErrGuestNetInvalid):
+				rep.Rejected++
+				im.drop(ctx, name, "sink_rejected")
+				continue
+			}
+			// Kept for the next pass.
 			rep.Failed++
 			im.log.Warn("pvecollect: guest nic import failed", "file", name, "reason", "sink_failed")
 			continue

@@ -5,10 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"google.golang.org/grpc"
 )
@@ -147,6 +152,390 @@ func newTestCollector(t *testing.T, fr Reader) (*Collector, *Spool, *time.Time) 
 
 func activeRemote(id string) *pb.PVERemoteInfo {
 	return &pb.PVERemoteInfo{RemoteId: id, State: pb.PVERemoteState_PVE_REMOTE_STATE_ACTIVE}
+}
+
+func TestPollOnceSpoolsGuestNICsAndServerImportsWithoutReads(t *testing.T) {
+	ctx := context.Background()
+	fr := &fakeReader{remotes: []*pb.PVERemoteInfo{activeRemote("remote-a")}}
+	fr.readFn = func(req *pb.ReadPVERequest) (*pb.ReadPVEResponse, error) {
+		resp, err := defaultReadFn(req)
+		if req.Method == pb.PVEReadMethod_PVE_READ_METHOD_GUESTS {
+			resp.GetGuests().Guests = append(resp.GetGuests().Guests, &pb.PVEGuest{
+				Vmid: 200, Kind: "lxc", Node: "p1", Status: "stopped", Generation: 1,
+			})
+		}
+		if cfg := resp.GetGuestConfig(); cfg != nil {
+			cfg.Nics = []*pb.PVEGuestNIC{{Device: "net31", Bridge: "vnet_1", Vlan: 4094, Mac: "02:00:00:00:00:31"},
+				{Device: "net0", Bridge: "vmbr0", Vlan: 42, Mac: "02:00:00:00:00:01"}}
+			if cfg.Vmid == 200 {
+				cfg.Nics = []*pb.PVEGuestNIC{{Device: "net1", Mac: "aa:bb:cc:dd:ee:02"}}
+			}
+		}
+		return resp, err
+	}
+	c, spool, now := newTestCollector(t, fr)
+	rep, err := c.PollOnce(ctx)
+	if err != nil || rep.Polled != 1 || rep.Failed != 0 {
+		t.Fatalf("poll = %+v, %v", rep, err)
+	}
+	names, err := spool.ListGuestNet(ctx)
+	if err != nil || len(names) != 1 {
+		t.Fatalf("guest network files = %v, %v", names, err)
+	}
+	got, err := spool.ReadGuestNet(ctx, names[0])
+	want := GuestNetRecord{Version: GuestNetVersion, Remote: "remote-a", ObservedUnix: now.Unix(), NICs: []GuestNIC{
+		{VMID: 100, Kind: pvecontract.GuestQEMU, Index: 0, Bridge: "vmbr0", VLAN: 42, MAC: "02:00:00:00:00:01"},
+		{VMID: 100, Kind: pvecontract.GuestQEMU, Index: 31, Bridge: "vnet_1", VLAN: 4094, MAC: "02:00:00:00:00:31"},
+		{VMID: 200, Kind: pvecontract.GuestLXC, Index: 1, MAC: "aa:bb:cc:dd:ee:02"},
+	}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("record = %+v, %v; want %+v", got, err, want)
+	}
+	if got.NICs[0].Tap() != "tap100i0" || got.NICs[2].Tap() != "veth200i1" {
+		t.Fatal("guest to tap mapping lost")
+	}
+	// A separate server-side importer consumes only the spool, even when
+	// any further executor call would fail.
+	reads := fr.readCalls
+	fr.readFn = func(*pb.ReadPVERequest) (*pb.ReadPVEResponse, error) {
+		t.Error("server attempted an executor read")
+		return nil, errors.New("executor unavailable")
+	}
+	r, err := OpenSpool(spool.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	sink := &fakeGuestNetSink{}
+	im, err := NewGuestNetImporter(r, sink, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	im.Now = func() time.Time { return *now }
+	if report, err := im.ImportOnce(ctx); err != nil || report.Imported != 1 {
+		t.Fatalf("import = %+v, %v", report, err)
+	}
+	if fr.readCalls != reads || len(sink.got) != 1 || !reflect.DeepEqual(sink.got[0], want) {
+		t.Fatal("server import changed or reread the collector snapshot")
+	}
+}
+
+func hostileGuestNICCases() map[string]func(*pb.PVEGuestConfig) {
+	return map[string]func(*pb.PVEGuestConfig){
+		"nil nic":               func(c *pb.PVEGuestConfig) { c.Nics[0] = nil },
+		"duplicate device":      func(c *pb.PVEGuestConfig) { c.Nics[0].Device = "net1" },
+		"negative index":        func(c *pb.PVEGuestConfig) { c.Nics[0].Device = "net-1" },
+		"index overflow":        func(c *pb.PVEGuestConfig) { c.Nics[0].Device = "net32" },
+		"index alias":           func(c *pb.PVEGuestConfig) { c.Nics[0].Device = "net00" },
+		"oversized index":       func(c *pb.PVEGuestConfig) { c.Nics[0].Device = "net" + strings.Repeat("1", 1024) },
+		"hostile bridge":        func(c *pb.PVEGuestConfig) { c.Nics[0].Bridge = "<script>" },
+		"bridge slash":          func(c *pb.PVEGuestConfig) { c.Nics[0].Bridge = "br/0" },
+		"bridge dotdot":         func(c *pb.PVEGuestConfig) { c.Nics[0].Bridge = ".." },
+		"oversized bridge":      func(c *pb.PVEGuestConfig) { c.Nics[0].Bridge = strings.Repeat("b", 16) },
+		"invalid utf8":          func(c *pb.PVEGuestConfig) { c.Nics[0].Bridge = "br\xff" },
+		"vlan overflow":         func(c *pb.PVEGuestConfig) { c.Nics[0].Vlan = 4095 },
+		"vlan integer overflow": func(c *pb.PVEGuestConfig) { c.Nics[0].Vlan = ^uint32(0) },
+		"empty mac":             func(c *pb.PVEGuestConfig) { c.Nics[0].Mac = "" },
+		"zero mac":              func(c *pb.PVEGuestConfig) { c.Nics[0].Mac = "00:00:00:00:00:00" },
+		"multicast mac":         func(c *pb.PVEGuestConfig) { c.Nics[0].Mac = "01:00:00:00:00:01" },
+		"uppercase mac":         func(c *pb.PVEGuestConfig) { c.Nics[0].Mac = "AA:BB:CC:DD:EE:01" },
+		"hostile mac":           func(c *pb.PVEGuestConfig) { c.Nics[0].Mac = "<script>" },
+		"oversized mac":         func(c *pb.PVEGuestConfig) { c.Nics[0].Mac = strings.Repeat("a", 1024) },
+	}
+}
+
+// guestNICPair is a config with a NIC the cases corrupt (net0) and a valid
+// one that must survive (net1).
+func guestNICPair(vmid uint64) *pb.PVEGuestConfig {
+	return &pb.PVEGuestConfig{State: available, Vmid: vmid, Nics: []*pb.PVEGuestNIC{
+		{Device: "net0", Bridge: "vmbr0", Vlan: 42, Mac: "02:00:00:00:00:01"},
+		{Device: "net1", Bridge: "br-lan", Mac: "02:00:00:00:00:02"},
+	}}
+}
+
+func TestConvertGuestNICsDropsOnlyInvalidNIC(t *testing.T) {
+	for name, mutate := range hostileGuestNICCases() {
+		t.Run(name, func(t *testing.T) {
+			cfg := guestNICPair(100)
+			mutate(cfg)
+			nics, complete := convertGuestNICs(cfg, 100, pvecontract.GuestQEMU)
+			want := []GuestNIC{{VMID: 100, Kind: pvecontract.GuestQEMU, Index: 1, Bridge: "br-lan", MAC: "02:00:00:00:00:02"}}
+			if name == "duplicate device" {
+				// The first net1 wins; the second is dropped.
+				want[0] = GuestNIC{VMID: 100, Kind: pvecontract.GuestQEMU, Index: 1, Bridge: "vmbr0", VLAN: 42, MAC: "02:00:00:00:00:01"}
+			}
+			if complete || !reflect.DeepEqual(nics, want) {
+				t.Fatalf("nics=%+v complete=%v; want %+v, incomplete", nics, complete, want)
+			}
+		})
+	}
+	t.Run("valid pair", func(t *testing.T) {
+		if nics, complete := convertGuestNICs(guestNICPair(100), 100, pvecontract.GuestQEMU); !complete || len(nics) != 2 {
+			t.Fatalf("nics=%+v complete=%v", nics, complete)
+		}
+	})
+	t.Run("executor marked incomplete", func(t *testing.T) {
+		cfg := guestNICPair(100)
+		cfg.NicsIncomplete = true
+		if nics, complete := convertGuestNICs(cfg, 100, pvecontract.GuestQEMU); complete || len(nics) != 2 {
+			t.Fatalf("nics=%+v complete=%v", nics, complete)
+		}
+	})
+	t.Run("wrong guest", func(t *testing.T) {
+		if nics, complete := convertGuestNICs(guestNICPair(101), 100, pvecontract.GuestQEMU); complete || len(nics) != 0 {
+			t.Fatalf("nics=%+v complete=%v", nics, complete)
+		}
+	})
+	t.Run("too many nics", func(t *testing.T) {
+		cfg := &pb.PVEGuestConfig{State: available, Vmid: 100}
+		// net0..net31 are each valid on their own; only the count guard
+		// drops them all (without it, net32 alone would be dropped).
+		for i := range MaxGuestNetNICIndex + 1 {
+			cfg.Nics = append(cfg.Nics, &pb.PVEGuestNIC{Device: fmt.Sprintf("net%d", i), Bridge: "vmbr0", Mac: fmt.Sprintf("02:00:00:00:00:%02x", i+1)})
+		}
+		if nics, complete := convertGuestNICs(cfg, 100, pvecontract.GuestQEMU); complete || len(nics) != 0 {
+			t.Fatalf("oversized NIC list kept %d entries", len(nics))
+		}
+		cfg.Nics = cfg.Nics[:MaxGuestNetNICIndex]
+		if nics, complete := convertGuestNICs(cfg, 100, pvecontract.GuestQEMU); !complete || len(nics) != MaxGuestNetNICIndex {
+			t.Fatalf("maximum NIC list: %d entries, complete=%v", len(nics), complete)
+		}
+	})
+}
+
+func TestPollOnceHostileGuestNICKeepsGuestConfig(t *testing.T) {
+	cases := hostileGuestNICCases()
+	cases["executor marked incomplete"] = func(c *pb.PVEGuestConfig) { c.NicsIncomplete = true }
+	cases["too many nics"] = func(c *pb.PVEGuestConfig) {
+		c.Nics = nil
+		for i := range MaxGuestNetNICIndex + 1 {
+			c.Nics = append(c.Nics, &pb.PVEGuestNIC{Device: fmt.Sprintf("net%d", i), Mac: fmt.Sprintf("02:00:00:00:00:%02x", i+1)})
+		}
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			fr := &fakeReader{remotes: []*pb.PVERemoteInfo{activeRemote("remote-a")}}
+			fr.readFn = func(req *pb.ReadPVERequest) (*pb.ReadPVEResponse, error) {
+				resp, err := defaultReadFn(req)
+				if cfg := resp.GetGuestConfig(); cfg != nil {
+					cfg.Nics = guestNICPair(cfg.Vmid).Nics
+					mutate(cfg)
+				}
+				return resp, err
+			}
+			c, spool, _ := newTestCollector(t, fr)
+			rep, err := c.PollOnce(ctx)
+			if err != nil || rep.Failed != 0 || rep.Polled != 1 {
+				t.Fatalf("poll = %+v, %v; want success", rep, err)
+			}
+			// A partial NIC list never replaces the previous snapshot.
+			if names, err := spool.ListGuestNet(ctx); err != nil || len(names) != 0 {
+				t.Fatalf("incomplete NIC snapshot was published: %v, %v", names, err)
+			}
+			names, err := spool.List(ctx)
+			if err != nil || len(names) != 1 {
+				t.Fatalf("observation files = %v, %v", names, err)
+			}
+			obs, err := spool.ReadFile(ctx, names[0])
+			if err != nil || !obs.Guests.IsAvailable() || len(obs.Guests.Value) != 1 {
+				t.Fatalf("observation = %+v, %v", obs, err)
+			}
+			if cfg := obs.Guests.Value[0].Config; !cfg.IsAvailable() || cfg.Value.CPUCount != 2 {
+				t.Fatalf("guest config lost: %+v", cfg)
+			}
+		})
+	}
+}
+
+func TestPollOnceSpoolsPVEBridgeNames(t *testing.T) {
+	ctx := context.Background()
+	fr := &fakeReader{remotes: []*pb.PVERemoteInfo{activeRemote("remote-a")}}
+	fr.readFn = func(req *pb.ReadPVERequest) (*pb.ReadPVEResponse, error) {
+		resp, err := defaultReadFn(req)
+		if cfg := resp.GetGuestConfig(); cfg != nil {
+			cfg.Nics = []*pb.PVEGuestNIC{{Device: "net0", Bridge: "vmbr0.100", Mac: "02:00:00:00:00:01"},
+				{Device: "net1", Bridge: "br-lan", Vlan: 7, Mac: "02:00:00:00:00:02"}}
+		}
+		return resp, err
+	}
+	c, spool, _ := newTestCollector(t, fr)
+	if rep, err := c.PollOnce(ctx); err != nil || rep.Polled != 1 {
+		t.Fatalf("poll = %+v, %v", rep, err)
+	}
+	names, err := spool.ListGuestNet(ctx)
+	if err != nil || len(names) != 1 {
+		t.Fatalf("guest network files = %v, %v", names, err)
+	}
+	rec, err := spool.ReadGuestNet(ctx, names[0])
+	if err != nil || len(rec.NICs) != 2 || rec.NICs[0].Bridge != "vmbr0.100" || rec.NICs[1].Bridge != "br-lan" {
+		t.Fatalf("record = %+v, %v", rec, err)
+	}
+}
+
+func TestPollOnceGuestNetSnapshotAvailability(t *testing.T) {
+	for _, mode := range []string{"empty nics", "no guests", "unavailable config", "config error", "nil config", "unavailable guests", "agent error"} {
+		t.Run(mode, func(t *testing.T) {
+			fr := &fakeReader{remotes: []*pb.PVERemoteInfo{activeRemote("remote-a")}}
+			fr.readFn = func(req *pb.ReadPVERequest) (*pb.ReadPVEResponse, error) {
+				resp, err := defaultReadFn(req)
+				if req.Method == pb.PVEReadMethod_PVE_READ_METHOD_GUESTS {
+					if mode == "no guests" {
+						resp.GetGuests().Guests = nil
+					}
+					if mode == "unavailable guests" {
+						resp.GetGuests().State = pb.PVEDatasetState_PVE_DATASET_STATE_UNAVAILABLE
+						resp.GetGuests().Reason = "unavailable"
+					}
+				}
+				if cfg := resp.GetGuestConfig(); cfg != nil {
+					switch mode {
+					case "unavailable config":
+						cfg.State = pb.PVEDatasetState_PVE_DATASET_STATE_UNAVAILABLE
+						cfg.Reason = "unavailable"
+					case "config error":
+						return nil, errors.New("config unavailable")
+					case "nil config":
+						return nil, nil
+					}
+				}
+				if mode == "agent error" && req.Method == pb.PVEReadMethod_PVE_READ_METHOD_GUEST_AGENT {
+					return nil, errors.New("agent unavailable")
+				}
+				return resp, err
+			}
+			c, spool, _ := newTestCollector(t, fr)
+			if _, err := c.PollOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			names, err := spool.ListGuestNet(context.Background())
+			want := 0
+			if mode == "empty nics" || mode == "no guests" || mode == "agent error" {
+				want = 1
+			}
+			if err != nil || len(names) != want {
+				t.Fatalf("guest network files = %v, %v; want %d", names, err, want)
+			}
+			if want == 1 {
+				rec, err := spool.ReadGuestNet(context.Background(), names[0])
+				if err != nil || len(rec.NICs) != 0 {
+					t.Fatalf("empty snapshot = %+v, %v", rec, err)
+				}
+			}
+		})
+	}
+}
+
+func TestPollOnceGuestNetWriteFailureFailsPoll(t *testing.T) {
+	fr := &fakeReader{remotes: []*pb.PVERemoteInfo{activeRemote("remote-a")}, readFn: defaultReadFn}
+	c, spool, _ := newTestCollector(t, fr)
+	target := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(spool.root, guestNetDirName)); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := c.PollOnce(context.Background())
+	if err != nil || rep.Failed != 1 || rep.Polled != 0 {
+		t.Fatalf("poll = %+v, %v; want failed guest network write", rep, err)
+	}
+	if entries, err := os.ReadDir(target); err != nil || len(entries) != 0 {
+		t.Fatalf("symlink target was written: %v, %v", entries, err)
+	}
+	// The poll is reported failed, so no observation may be published.
+	if names, err := spool.List(context.Background()); err != nil || len(names) != 0 {
+		t.Fatalf("observation published by a failed poll: %v, %v", names, err)
+	}
+}
+
+func TestPollOnceUnavailableConfigPreservesPreviousGuestNetSnapshot(t *testing.T) {
+	ctx := context.Background()
+	fr := &fakeReader{remotes: []*pb.PVERemoteInfo{activeRemote("remote-a")}}
+	unavailable := false
+	fr.readFn = func(req *pb.ReadPVERequest) (*pb.ReadPVEResponse, error) {
+		resp, err := defaultReadFn(req)
+		if guests := resp.GetGuests(); guests != nil {
+			guests.Guests = append(guests.Guests, &pb.PVEGuest{
+				Vmid: 200, Kind: "lxc", Node: "p1", Status: "stopped", Generation: 1,
+			})
+		}
+		if cfg := resp.GetGuestConfig(); cfg != nil {
+			cfg.Nics = []*pb.PVEGuestNIC{{Device: "net0", Bridge: "vmbr0", Vlan: 42, Mac: "02:00:00:00:00:01"}}
+			if unavailable && cfg.Vmid == 200 {
+				cfg.State = pb.PVEDatasetState_PVE_DATASET_STATE_UNAVAILABLE
+				cfg.Reason = "unavailable"
+			}
+		}
+		return resp, err
+	}
+	c, spool, now := newTestCollector(t, fr)
+	if rep, err := c.PollOnce(ctx); err != nil || rep.Polled != 1 {
+		t.Fatalf("initial poll = %+v, %v", rep, err)
+	}
+	names, err := spool.ListGuestNet(ctx)
+	if err != nil || len(names) != 1 {
+		t.Fatalf("initial snapshots = %v, %v", names, err)
+	}
+	unavailable = true
+	*now = now.Add(time.Minute)
+	if rep, err := c.PollOnce(ctx); err != nil || rep.Failed != 1 {
+		t.Fatalf("unavailable poll = %+v, %v", rep, err)
+	}
+	remaining, err := spool.ListGuestNet(ctx)
+	if err != nil || !reflect.DeepEqual(names, remaining) {
+		t.Fatalf("partial snapshot replaced previous facts: %v, %v", remaining, err)
+	}
+	rec, err := spool.ReadGuestNet(ctx, remaining[0])
+	if err != nil || len(rec.NICs) != 2 {
+		t.Fatalf("previous snapshot = %+v, %v", rec, err)
+	}
+}
+
+func TestPollOnceGuestNetTotalNICLimit(t *testing.T) {
+	for _, count := range []int{MaxGuestNetNICs / MaxGuestNetNICIndex, MaxGuestNetNICs/MaxGuestNetNICIndex + 1} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			fr := &fakeReader{remotes: []*pb.PVERemoteInfo{activeRemote("remote-a")}}
+			fr.readFn = func(req *pb.ReadPVERequest) (*pb.ReadPVEResponse, error) {
+				resp, err := defaultReadFn(req)
+				if guests := resp.GetGuests(); guests != nil {
+					guests.Guests = nil
+					for i := range count {
+						guests.Guests = append(guests.Guests, &pb.PVEGuest{
+							Vmid: uint64(100 + i), Kind: "qemu", Node: "p1", Status: "stopped", Generation: 1,
+						})
+					}
+				}
+				if cfg := resp.GetGuestConfig(); cfg != nil {
+					for i := range MaxGuestNetNICIndex {
+						cfg.Nics = append(cfg.Nics, &pb.PVEGuestNIC{
+							Device: fmt.Sprintf("net%d", i), Mac: "02:00:00:00:00:01",
+						})
+					}
+				}
+				return resp, err
+			}
+			c, spool, _ := newTestCollector(t, fr)
+			rep, err := c.PollOnce(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			names, err := spool.ListGuestNet(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if count*MaxGuestNetNICIndex > MaxGuestNetNICs {
+				if rep.Failed != 1 || len(names) != 0 {
+					t.Fatalf("excess total accepted: %+v, %v", rep, names)
+				}
+			} else {
+				if rep.Polled != 1 || len(names) != 1 {
+					t.Fatalf("maximum total rejected: %+v, %v", rep, names)
+				}
+				rec, err := spool.ReadGuestNet(context.Background(), names[0])
+				if err != nil || len(rec.NICs) != MaxGuestNetNICs {
+					t.Fatalf("maximum snapshot count=%d, %v", len(rec.NICs), err)
+				}
+			}
+		})
+	}
 }
 
 func TestPollOnceWritesObservation(t *testing.T) {

@@ -29,6 +29,7 @@ jobs:
       - run: make fmt-check
       - run: go vet ./...
       - run: make test
+      - run: make test-deploy
       - name: Privileged security tests (multi-UID)
         run: sudo -E env "PATH=$PATH" make test-privileged
 

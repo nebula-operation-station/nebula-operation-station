@@ -1,0 +1,13 @@
+	 cubic cwnd:10 bytes_acked:5
+tcp   ESTAB  0      0         10.0.0.1:22   10.0.0.2:5000
+	 cubic bytes_acked:notanumber bytes_received:99999999999999999999999
+tcp   ESTAB  0      0         10.0.0.1:22
+raw   UNCONN 0      0         0.0.0.0:1   0.0.0.0:*
+tcp   WEIRD  0      0         10.0.0.1:22   10.0.0.2:5000
+tcp   ESTAB  x      0         10.0.0.1:22   10.0.0.2:5000
+tcp   ESTAB  0      0         10.0.0.1:70000   10.0.0.2:5000
+tcp   ESTAB  0      0         [fe80::1%eth0;rm]:22   10.0.0.2:5000
+udp   UNCONN 0      0         10.0.0.1:53   0.0.0.0:*
+	 cubic bytes_acked:12
+
+tcp   ESTAB  0      0         10.0.0.1:22   10.0.0.2:50
