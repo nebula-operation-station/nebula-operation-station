@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -25,6 +26,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveapi"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pvetransport"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vault"
@@ -45,25 +47,87 @@ var pveRepinArtifact = []byte("nebula.pve.repin 1.0.0\nReplace the approved remo
 // client dispatches the guest power, provisioning and image steps
 // (DispatchGuestPowerStep, DispatchProvisionStep, DispatchImageStep) and
 // names their task types and IDs. A pin or trust failure seen by any of
-// its calls blocks the remote persistently (blockPveRead), so further
-// mutations are refused. When the executor has a state directory
+// its calls blocks the remote persistently (newPveMutationClient), so
+// further mutations are refused. When the executor has a state directory
 // (SetBackupDirs, called before serving), TaskIDs is the executor's one
 // PveProvisioner (pveProvisioner), so provisioning steps are identified
 // and reconciled also after a restart; without one, provisioning is
 // unavailable and its steps are never identified.
 func (s *Service) pveMutations() *PveMutations {
 	s.pveMutOnce.Do(func() {
-		client := &pveMutationClient{trust: s.pveReadTrust, secrets: s.vault, now: s.clock,
-			// A trust failure on the mutation path blocks the remote as
-			// on the read path; the step itself already fails closed.
-			block: func(remoteID string) { _ = s.blockPveRead(remoteID) }}
-		m := &PveMutations{DB: s.db, Auth: s.auth, Vault: s.vault, Client: client, Now: s.clock, Log: s.log}
+		m := &PveMutations{DB: s.db, Auth: s.auth, Vault: s.vault, Client: s.newPveMutationClient(), Now: s.clock, Log: s.log}
 		if p := s.newPveProvisioner(m); p != nil {
 			m.TaskIDs = p
 		}
 		s.pveMut = m
 	})
 	return s.pveMut
+}
+
+// errPveTrustBlockNotRecorded is wrapped when a trust failure seen on the
+// mutation path could not be persisted as a block of the remote. Every
+// further call of the production mutation client to that remote wraps it
+// and is refused before any connection.
+var errPveTrustBlockNotRecorded = errors.New("executor: pve trust failure not recorded; the remote stays refused")
+
+// newPveMutationClient returns the production mutation client of the
+// executor. A trust failure seen by any of its calls blocks the remote
+// persistently and revokes its provider grants and mutation permits
+// (blockPveMutation). A block that cannot be persisted is logged, the
+// remote's mutation permits are revoked in memory, and every further call
+// of this client to the remote first retries the block and is refused with
+// errPveTrustBlockNotRecorded while it still fails.
+func (s *Service) newPveMutationClient() *pveMutationClient {
+	var unrecorded sync.Map // remote ID -> struct{}: trust failure seen, block not persisted
+	c := &pveMutationClient{secrets: s.vault, now: s.clock}
+	c.block = func(remoteID string) {
+		if err := s.blockPveMutation(remoteID); err != nil {
+			unrecorded.Store(remoteID, struct{}{})
+			s.log.Error("pve mutation trust block not recorded", "remote", remoteID, "err", err)
+			return
+		}
+		unrecorded.Delete(remoteID)
+	}
+	c.trust = func(ctx context.Context, rm executordb.PveRemote) (pvetransport.Trust, error) {
+		if _, ok := unrecorded.Load(rm.RemoteID); ok {
+			if err := s.blockPveMutation(rm.RemoteID); err != nil {
+				s.log.Error("pve mutation trust block not recorded", "remote", rm.RemoteID, "err", err)
+				return pvetransport.Trust{}, fmt.Errorf("pve remote %s: %w", rm.RemoteID, errPveTrustBlockNotRecorded)
+			}
+			unrecorded.Delete(rm.RemoteID)
+			// rm predates the block that is now recorded: refuse this call.
+			return pvetransport.Trust{}, fmt.Errorf("pve remote %s is blocked after a trust failure", rm.RemoteID)
+		}
+		return s.pveReadTrust(ctx, rm)
+	}
+	return c
+}
+
+// blockPveMutation blocks a remote whose endpoints failed trust
+// verification on the mutation path and revokes its provider grants and
+// mutation permits, as blockPveRead does on the read path. A remote that
+// is no longer active (blocked by a concurrent trust failure, or removed)
+// only has its authority revoked again. On any failure the remote's
+// mutation permits are still revoked in memory, and the error wraps
+// errPveTrustBlockNotRecorded and the cause.
+func (s *Service) blockPveMutation(remoteID string) error {
+	const reason = "pve trust verification failed"
+	s.pveMu.Lock()
+	defer s.pveMu.Unlock()
+	a := s.pveAdmin()
+	err := a.blockTrustFailure(remoteID, "executor", errPveReadTrust)
+	// blockTrustFailure returns the cause itself only on success; its
+	// failures wrap the cause too, so errors.Is cannot tell them apart.
+	if err == errPveReadTrust {
+		return nil
+	}
+	if errors.Is(err, executordb.ErrRemoteState) {
+		if err = a.revoke(remoteID, reason); err == nil {
+			return nil
+		}
+	}
+	s.auth.RevokeProviderMutations(remoteID, reason)
+	return fmt.Errorf("block pve remote %s: %w: %w", remoteID, errPveTrustBlockNotRecorded, err)
 }
 
 // Fixed identity of the provisioning and template actions the executor
