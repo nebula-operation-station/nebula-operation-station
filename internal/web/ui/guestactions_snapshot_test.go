@@ -204,8 +204,11 @@ func newGSEnv(t *testing.T, snaps map[uint64][]pveinventory.Snapshot) *gsEnv {
 			return []ui.PVERemoteMeta{{RemoteID: gpRemote, Name: "PVE lab", State: e.state, TrustPin: gpPin}}, nil
 		},
 		GuestSnapshot: e.exec,
-		Now:           e.clock.now,
-		Log:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		// The power controls are wired too: a snapshot proposal must not
+		// be shown, approved or run under the power routes.
+		GuestPower: &fakeGuestPower{risk: pb.RiskClass_RISK_CLASS_MEDIUM},
+		Now:        e.clock.now,
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}).Handler()
 	return e
 }
@@ -599,5 +602,16 @@ func TestGuestSnapshotProposalNotServedAsPowerProposal(t *testing.T) {
 	e.h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/pve/guests/power/"+e.exec.lastDigest(), nil))
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("snapshot proposal under the power route = %d", rec.Code)
+	}
+	rec = gpPostJSON(t, e.h, "/pve/guests/power/commit", map[string]any{"id": e.exec.lastDigest(), "assertion": map[string]string{"id": "x"}})
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("snapshot proposal approved under the power route = %d", rec.Code)
+	}
+	if n := len(e.exec.commitList()); n != 0 {
+		t.Errorf("%d snapshot commits after a power-route approval", n)
+	}
+	// It is still pending under its own route.
+	if page := getBody(t, e.h, "/pve/guests/snapshots/proposals/"+e.exec.lastDigest()); !strings.Contains(page, "schedule-approve") {
+		t.Error("the snapshot proposal is no longer approvable")
 	}
 }
