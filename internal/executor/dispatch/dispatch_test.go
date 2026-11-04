@@ -598,3 +598,73 @@ func TestDispatchersSharingRecorderDispatchOnce(t *testing.T) {
 		t.Fatalf("transport called %d times, want 1", calls.Load())
 	}
 }
+
+// claimWithCredential stores a member permit that binds version 7 of the
+// credential "cred".
+func (f *fakePermits) claimWithCredential(id string) claimed {
+	c := f.claim(id)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := permitKey(c.parent, c.member)
+	mp := f.permits[k]
+	mp.Member.Request.CredentialRefs = []string{"cred"}
+	mp.Member.CredentialVersions = []canonical.CredentialVersion{{Reference: "cred", Version: 7}}
+	f.permits[k] = mp
+	c.run = runFrom(mp)
+	return c
+}
+
+// The bound credential version is enforced at dispatch: a key rotated
+// between approval and dispatch, an unreadable key or no credential source
+// ends the run as not executed before the transport, audited and recorded;
+// the unchanged key dispatches.
+func TestCredentialRotationBeforeTransportIsNotExecuted(t *testing.T) {
+	cases := []struct {
+		name  string
+		creds func(string) (uint64, error)
+		ok    bool
+	}{
+		{"unchanged", func(string) (uint64, error) { return 7, nil }, true},
+		{"rotated", func(string) (uint64, error) { return 8, nil }, false},
+		{"unreadable", func(string) (uint64, error) { return 0, errors.New("keyring is locked") }, false},
+		{"no source", nil, false},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := newFakeRecorder()
+			perms := newFakePermits()
+			var calls int
+			var events []Event
+			d, err := New(Options{Permits: perms, Recorder: rec, Credentials: tc.creds,
+				Audit: func(e Event) { events = append(events, e) },
+				Transport: func(context.Context, Run) (Outcome, error) {
+					calls++
+					return OutcomeSuccess, nil
+				}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := perms.claimWithCredential(fmt.Sprintf("00000000-0000-4000-8000-%012d", 900+i))
+			out, err := d.Dispatch(ctx, c.parent, c.member)
+			if tc.ok {
+				if err != nil || out != OutcomeSuccess || calls != 1 {
+					t.Fatalf("dispatch = %v %v, %d calls", out, err, calls)
+				}
+				return
+			}
+			if !errors.Is(err, ErrCredentialRotated) || out != OutcomeNotExecuted || calls != 0 {
+				t.Fatalf("dispatch = %v %v, %d calls", out, err, calls)
+			}
+			if o, ok := rec.outcome(c.ExecutionID); !ok || o != OutcomeNotExecuted {
+				t.Errorf("recorded outcome = %v %v", o, ok)
+			}
+			if len(events) == 0 || events[0].Kind != "refused" || !strings.Contains(events[0].Detail, "cred") {
+				t.Errorf("events = %+v", events)
+			}
+			// The run is consumed: it is never dispatched afterwards.
+			if _, err := d.Dispatch(ctx, c.parent, c.member); !errors.Is(err, ErrAlreadyDispatched) {
+				t.Errorf("second dispatch: %v", err)
+			}
+		})
+	}
+}

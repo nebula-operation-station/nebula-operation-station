@@ -196,6 +196,20 @@ func run() error {
 	// Built-in trust (ADR 0007 E16): commits record exact artifact trust
 	// in executor.db, the same entries the risk policy reads.
 	setupBuiltinTrust(svc, *dataDir, *trustDir, *bundleDir, db, log)
+	// Batch approval (ADR 0007 E19b): the batch RPCs, including the
+	// credential-version read the server binds into every plan, are served
+	// only with an authority wired.
+	// Every admin user may review and approve batches from the CLI, as
+	// the role table allows. No batch dispatcher is wired, so the executor
+	// does not advertise batch execution (SetBatchExecutionAvailable) and
+	// servers do not propose batches that would never run.
+	batchAuth, err := setupBatchAuthority(svc, batchConfig{
+		Mode: mode, Verifier: verifier, Risk: risk, Source: db, Store: db,
+		Session: auth.Session, AdminUIDs: batchAdminUIDs(uidRoles), Audit: executor.AuditLogger(log),
+	})
+	if err != nil {
+		return err
+	}
 
 	lis, err := peercred.Listen(peercred.ListenOptions{Path: *socketPath, Mode: 0o660, Group: *socketGroup})
 	if err != nil {
@@ -216,6 +230,7 @@ func run() error {
 		<-ctx.Done()
 		keys.Lock()
 		auth.Lock("shutdown")
+		batchAuth.Lock()
 		srv.GracefulStop()
 	}()
 

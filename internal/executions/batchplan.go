@@ -59,6 +59,13 @@ var (
 	ErrBatchCritical    = errors.New("CRITICAL members cannot be approved in a batch")
 	ErrBatchAnswer      = errors.New("the executor's batch answer does not match the proposed plan")
 	ErrBatchContainer   = errors.New("no fresh container details for this container; refresh them first")
+	// ErrBatchExecutionUnavailable refuses a proposal or approval because
+	// the executor does not advertise batch execution: a batch approved
+	// there would never run.
+	ErrBatchExecutionUnavailable = errors.New("the executor does not run batches")
+	// ErrBatchExecutionUnknown refuses a proposal or approval because the
+	// executor could not be asked whether it runs batches (transient).
+	ErrBatchExecutionUnknown = errors.New("the executor could not be asked whether it runs batches; try again")
 )
 
 // BatchInputError describes an invalid batch request (shown to the user).
