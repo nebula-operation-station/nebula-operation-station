@@ -2,6 +2,7 @@
 package ui_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -302,6 +303,8 @@ type dpEnv struct {
 	batches *fakeDeployBatches
 	state   string
 	gen     uint64
+	// logBuf captures the handler's log (audit entries).
+	logBuf bytes.Buffer
 
 	clockMu sync.Mutex
 	offset  time.Duration
@@ -376,7 +379,7 @@ func newDPEnvWith(t *testing.T, edit func(*ui.Options)) *dpEnv {
 		DeployJoin:    &pveinventory.GuestJoinFlow{Store: e.pve, Executor: e.join},
 		DeployIPAM:    e.ipam,
 		DeployBatches: e.batches,
-		Log:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Log:           slog.New(slog.NewTextHandler(&e.logBuf, nil)),
 	}
 	if edit != nil {
 		edit(&o)

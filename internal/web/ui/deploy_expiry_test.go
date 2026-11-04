@@ -351,6 +351,27 @@ func TestDeployProposeKeepsTheAddressWhenAPermitMayExist(t *testing.T) {
 	})
 }
 
+// TestDeployProposeKeptAuditRecordsReasonRemoteAndVmid: the propose-time
+// deployment_address_kept audit entry records the path that kept the
+// reservation (reason), the remote, the VMID (0 before the executor
+// answered with one) and the user, so the owner of a left-behind
+// reservation can be found in the log.
+func TestDeployProposeKeptAuditRecordsReasonRemoteAndVmid(t *testing.T) {
+	e := newDPEnv(t)
+	e.prov.proposeErr = status.Error(codes.Unavailable, "connection reset")
+	code, body, _ := e.do(t, http.MethodPost, "/deployments/propose", gpFormCT, dpForm().Encode())
+	if code != http.StatusBadGateway || !strings.Contains(body, "stays reserved") {
+		t.Fatalf("propose = %d %q", code, body)
+	}
+	audit := e.logBuf.String()
+	for _, want := range []string{"kind=deployment_address_kept", "reason=unknown_outcome", "address=" + dpAddr,
+		"remote=" + dpRemote, "vmid=0", "user=unknown", "execution="} {
+		if !strings.Contains(audit, want) {
+			t.Errorf("audit log lacks %q: %s", want, audit)
+		}
+	}
+}
+
 func TestDeployUnknownCommitOutcomeKeepsTheAddress(t *testing.T) {
 	e := newDPEnv(t)
 	e.prov.commitErr = status.Error(codes.Unavailable, "connection reset")
