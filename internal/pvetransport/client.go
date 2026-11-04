@@ -288,7 +288,7 @@ type roundTripper struct {
 // endpointConn is one endpoint with its own transport.
 type endpointConn struct {
 	url       *url.URL
-	transport *http.Transport
+	transport http.RoundTripper
 }
 
 // RoundTrip implements http.RoundTripper.
@@ -400,6 +400,14 @@ func (rt *roundTripper) attempt(req *http.Request, ec *endpointConn) (resp *http
 	resp, err = ec.transport.RoundTrip(attemptReq)
 	if err != nil {
 		return nil, false, err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		// The attempt deadline passed while the response was in flight;
+		// the standard transport can still hand it over in that race.
+		// A late response is treated as a timeout, so a mutation reports
+		// ErrMaybeSent (outcome unknown) instead of success.
+		_ = resp.Body.Close()
+		return nil, false, fmt.Errorf("pvetransport: response after the attempt deadline: %w", ctxErr)
 	}
 	resp.Body = &cancelBody{ReadCloser: resp.Body, cancel: cancel}
 	bodyReturned = true
