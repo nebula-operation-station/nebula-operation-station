@@ -292,3 +292,77 @@ func TestMutationRedirectIsMaybeSentNeverFailsOver(t *testing.T) {
 		t.Fatalf("read followed the redirect: %d", fastHits.Load())
 	}
 }
+
+// lateTransport hands over the real response only after the attempt
+// context has ended: the race in which the standard transport delivers a
+// response that arrived as the attempt deadline fired.
+type lateTransport struct{ inner http.RoundTripper }
+
+func (l lateTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := l.inner.RoundTrip(r)
+	if err != nil {
+		return nil, err
+	}
+	<-r.Context().Done()
+	return resp, nil
+}
+
+// TestLateResponseIsATimeout: a response handed over after the attempt
+// deadline is never a success. A mutation reports ErrMaybeSent and is not
+// resent; a safe request fails over like any other timeout.
+func TestLateResponseIsATimeout(t *testing.T) {
+	for _, tc := range []struct {
+		method       string
+		wantMaybe    bool
+		wantFastHits int64
+	}{
+		{http.MethodPost, true, 0},
+		{http.MethodDelete, true, 0},
+		{http.MethodGet, false, 1},
+	} {
+		t.Run(tc.method, func(t *testing.T) {
+			ca := newTestCA(t, "pve-root-ca")
+			var slowHits, fastHits atomic.Int64
+			slow := newTLSServer(t, ca.serverCert(t, leafSpec{ips: []net.IP{loopback}}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				slowHits.Add(1)
+			}))
+			fast := newTLSServer(t, ca.serverCert(t, leafSpec{ips: []net.IP{loopback}}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fastHits.Add(1)
+			}))
+			rt, err := newRoundTripper(Options{
+				Trust:     Trust{CA: ca.cert},
+				Endpoints: []*url.URL{mustParseURL(t, slow.URL), mustParseURL(t, fast.URL)},
+				Timeout:   200 * time.Millisecond,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			rt.endpoints[0].transport = lateTransport{inner: rt.endpoints[0].transport}
+			req, err := http.NewRequest(tc.method, slow.URL+"/api2/json/nodes/pve1/qemu/100/status/stop", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := rt.RoundTrip(req)
+			if tc.wantMaybe {
+				if err == nil {
+					resp.Body.Close()
+					t.Fatal("late response to a mutation returned as success")
+				}
+				if !errors.Is(err, ErrMaybeSent) {
+					t.Fatalf("err = %v, want ErrMaybeSent", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("safe request: err = %v, want failover success", err)
+				}
+				resp.Body.Close()
+			}
+			if got := slowHits.Load(); got != 1 {
+				t.Fatalf("first endpoint hits = %d, want 1", got)
+			}
+			if got := fastHits.Load(); got != tc.wantFastHits {
+				t.Fatalf("second endpoint hits = %d, want %d", got, tc.wantFastHits)
+			}
+		})
+	}
+}
