@@ -114,6 +114,7 @@ const (
 	ExecutorService_RotatePVEToken_FullMethodName                  = "/nebula.executor.v1.ExecutorService/RotatePVEToken"
 	ExecutorService_RemovePVERemote_FullMethodName                 = "/nebula.executor.v1.ExecutorService/RemovePVERemote"
 	ExecutorService_ListPVEAdminRemotes_FullMethodName             = "/nebula.executor.v1.ExecutorService/ListPVEAdminRemotes"
+	ExecutorService_SetPVERemoteSite_FullMethodName                = "/nebula.executor.v1.ExecutorService/SetPVERemoteSite"
 	ExecutorService_ProposePVERepin_FullMethodName                 = "/nebula.executor.v1.ExecutorService/ProposePVERepin"
 	ExecutorService_CommitPVERepin_FullMethodName                  = "/nebula.executor.v1.ExecutorService/CommitPVERepin"
 	ExecutorService_ProposePVEGuestPower_FullMethodName            = "/nebula.executor.v1.ExecutorService/ProposePVEGuestPower"
@@ -463,6 +464,9 @@ type ExecutorServiceClient interface {
 	RotatePVEToken(ctx context.Context, in *RotatePVETokenRequest, opts ...grpc.CallOption) (*RotatePVETokenResponse, error)
 	RemovePVERemote(ctx context.Context, in *RemovePVERemoteRequest, opts ...grpc.CallOption) (*RemovePVERemoteResponse, error)
 	ListPVEAdminRemotes(ctx context.Context, in *ListPVEAdminRemotesRequest, opts ...grpc.CallOption) (*ListPVEAdminRemotesResponse, error)
+	// Records where a remote is (onsite or offsite). Unset means unknown;
+	// node reboot refuses an offsite or unset remote (ADR 0006 P2-01).
+	SetPVERemoteSite(ctx context.Context, in *SetPVERemoteSiteRequest, opts ...grpc.CallOption) (*SetPVERemoteSiteResponse, error)
 	// Proposes a HIGH permit bound to current trust, endpoints and credentials.
 	ProposePVERepin(ctx context.Context, in *ProposePVERepinRequest, opts ...grpc.CallOption) (*ProposePVERepinResponse, error)
 	CommitPVERepin(ctx context.Context, in *CommitPVERepinRequest, opts ...grpc.CallOption) (*CommitPVERepinResponse, error)
@@ -1458,6 +1462,16 @@ func (c *executorServiceClient) ListPVEAdminRemotes(ctx context.Context, in *Lis
 	return out, nil
 }
 
+func (c *executorServiceClient) SetPVERemoteSite(ctx context.Context, in *SetPVERemoteSiteRequest, opts ...grpc.CallOption) (*SetPVERemoteSiteResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetPVERemoteSiteResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_SetPVERemoteSite_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *executorServiceClient) ProposePVERepin(ctx context.Context, in *ProposePVERepinRequest, opts ...grpc.CallOption) (*ProposePVERepinResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ProposePVERepinResponse)
@@ -1940,6 +1954,9 @@ type ExecutorServiceServer interface {
 	RotatePVEToken(context.Context, *RotatePVETokenRequest) (*RotatePVETokenResponse, error)
 	RemovePVERemote(context.Context, *RemovePVERemoteRequest) (*RemovePVERemoteResponse, error)
 	ListPVEAdminRemotes(context.Context, *ListPVEAdminRemotesRequest) (*ListPVEAdminRemotesResponse, error)
+	// Records where a remote is (onsite or offsite). Unset means unknown;
+	// node reboot refuses an offsite or unset remote (ADR 0006 P2-01).
+	SetPVERemoteSite(context.Context, *SetPVERemoteSiteRequest) (*SetPVERemoteSiteResponse, error)
 	// Proposes a HIGH permit bound to current trust, endpoints and credentials.
 	ProposePVERepin(context.Context, *ProposePVERepinRequest) (*ProposePVERepinResponse, error)
 	CommitPVERepin(context.Context, *CommitPVERepinRequest) (*CommitPVERepinResponse, error)
@@ -2283,6 +2300,9 @@ func (UnimplementedExecutorServiceServer) RemovePVERemote(context.Context, *Remo
 }
 func (UnimplementedExecutorServiceServer) ListPVEAdminRemotes(context.Context, *ListPVEAdminRemotesRequest) (*ListPVEAdminRemotesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListPVEAdminRemotes not implemented")
+}
+func (UnimplementedExecutorServiceServer) SetPVERemoteSite(context.Context, *SetPVERemoteSiteRequest) (*SetPVERemoteSiteResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetPVERemoteSite not implemented")
 }
 func (UnimplementedExecutorServiceServer) ProposePVERepin(context.Context, *ProposePVERepinRequest) (*ProposePVERepinResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ProposePVERepin not implemented")
@@ -4024,6 +4044,24 @@ func _ExecutorService_ListPVEAdminRemotes_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_SetPVERemoteSite_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetPVERemoteSiteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).SetPVERemoteSite(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_SetPVERemoteSite_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).SetPVERemoteSite(ctx, req.(*SetPVERemoteSiteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ExecutorService_ProposePVERepin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ProposePVERepinRequest)
 	if err := dec(in); err != nil {
@@ -4672,6 +4710,10 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListPVEAdminRemotes",
 			Handler:    _ExecutorService_ListPVEAdminRemotes_Handler,
+		},
+		{
+			MethodName: "SetPVERemoteSite",
+			Handler:    _ExecutorService_SetPVERemoteSite_Handler,
 		},
 		{
 			MethodName: "ProposePVERepin",

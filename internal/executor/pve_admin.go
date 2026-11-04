@@ -780,6 +780,32 @@ func (a *PveAdmin) blockTrustFailure(remoteID, by string, cause error) error {
 	return cause
 }
 
+// PveSetSite records where a remote is.
+type PveSetSite struct {
+	// RemoteID is the remote to mark.
+	RemoteID string
+	// Site is executordb.SiteOnsite or executordb.SiteOffsite.
+	Site string
+	// By is the authenticated admin identity.
+	By string
+}
+
+// SetSite records the admin-set site marker of a remote that is not
+// removed. A node reboot of an offsite remote, or of one whose site is not
+// set, is refused (ADR 0006: an offsite node reboot is CRITICAL, manual
+// and needs an agreed recovery path, which NOS does not provide).
+func (a *PveAdmin) SetSite(ctx context.Context, in PveSetSite) (executordb.PveRemote, error) {
+	if err := a.checkDB(); err != nil {
+		return executordb.PveRemote{}, err
+	}
+	rm, err := a.DB.SetRemoteSite(in.RemoteID, in.Site, in.By)
+	if err != nil {
+		return executordb.PveRemote{}, fmt.Errorf("executor: pve remote site: %w", err)
+	}
+	a.log().Info("audit", "kind", "pve_remote_site", "remote", in.RemoteID, "site", in.Site, "by", in.By)
+	return rm, nil
+}
+
 // PveRemove carries one `pve remote remove` request.
 type PveRemove struct {
 	// RemoteID is the remote to remove.

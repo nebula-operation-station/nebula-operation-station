@@ -436,6 +436,17 @@ func pveNodeTargetState(ctx context.Context, hc *http.Client, base string, read 
 // HTTP 200, at most pveMutationMaxReadBytes and valid UTF-8 JSON. Errors
 // carry no remote text.
 func pveGetData(ctx context.Context, hc *http.Client, base string, read pveapi.TokenSupplier, path string, q url.Values, out any) error {
+	_, err := pveGet(ctx, hc, base, read, path, q, false, out)
+	return err
+}
+
+// pveGetOptionalData is pveGetData for an endpoint that may not exist on
+// the remote's version: HTTP 404 reports found false and decodes nothing.
+func pveGetOptionalData(ctx context.Context, hc *http.Client, base string, read pveapi.TokenSupplier, path string, out any) (bool, error) {
+	return pveGet(ctx, hc, base, read, path, nil, true, out)
+}
+
+func pveGet(ctx context.Context, hc *http.Client, base string, read pveapi.TokenSupplier, path string, q url.Values, optional bool, out any) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, pveMutationRequestTimeout)
 	defer cancel()
 	u := base + "/api2/json" + path
@@ -444,25 +455,28 @@ func pveGetData(ctx context.Context, hc *http.Client, base string, read pveapi.T
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return errPveMutationRead
+		return false, errPveMutationRead
 	}
 	tok, err := read(ctx)
 	if err != nil || tok == "" {
-		return errPveMutationRead
+		return false, errPveMutationRead
 	}
 	req.Header.Set("Authorization", tok)
 	req.Header.Set("Accept", "application/json")
 	resp, err := hc.Do(req)
 	if err != nil {
 		if errors.Is(err, pvetransport.ErrTrustMismatch) {
-			return fmt.Errorf("%w: %w", errPveMutationRead, errPveReadTrust)
+			return false, fmt.Errorf("%w: %w", errPveMutationRead, errPveReadTrust)
 		}
-		return errPveMutationRead
+		return false, errPveMutationRead
 	}
 	defer resp.Body.Close()
+	if optional && resp.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, pveMutationMaxReadBytes+1))
 	if err != nil || resp.StatusCode != http.StatusOK || len(raw) > pveMutationMaxReadBytes || !utf8.Valid(raw) {
-		return errPveMutationRead
+		return false, errPveMutationRead
 	}
 	var env struct {
 		Data json.RawMessage `json:"data"`
@@ -470,12 +484,12 @@ func pveGetData(ctx context.Context, hc *http.Client, base string, read pveapi.T
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	if err := dec.Decode(&env); err != nil || len(env.Data) == 0 || strings.TrimSpace(string(env.Data)) == "null" {
-		return errPveMutationRead
+		return false, errPveMutationRead
 	}
 	dd := json.NewDecoder(bytes.NewReader(env.Data))
 	dd.UseNumber()
 	if err := dd.Decode(out); err != nil {
-		return errPveMutationRead
+		return false, errPveMutationRead
 	}
-	return nil
+	return true, nil
 }

@@ -30,12 +30,15 @@ const pveUsage = `usage: nebula pve remote add <id> --kind cluster|standalone --
        nebula pve remote rotate-token <id> --purpose read|action
        nebula pve remote remove <id>
        nebula pve remote repin <id>
+       nebula pve remote set-site <id> onsite|offsite
        nebula pve remote list
 
 Runs as a configured local admin through NEBULA_EXECUTOR_SOCKET.
 Unlock the executor vault with nebula unlock first. Tokens are
 asked without echo; the trust fingerprint must be typed back after
-out-of-band comparison. List is metadata only.`
+out-of-band comparison. List is metadata only. set-site records
+where the remote is; a node reboot is refused for an offsite remote
+and for one whose site is not set.`
 
 // pveEndpointsFlag is a repeatable --endpoint host:port flag.
 type pveEndpointsFlag []string
@@ -109,6 +112,8 @@ func pveRemoteCmd(args []string, stdin io.Reader, ask prompter, w io.Writer) err
 		return pveRemoteRemove(args[1:], stdin, ask, w)
 	case "repin":
 		return pveRemoteRepin(args[1:], stdin, ask, w)
+	case "set-site":
+		return pveRemoteSetSite(args[1:], stdin, w)
 	case "list":
 		return pveRemoteList(args[1:], w)
 	}
@@ -364,6 +369,36 @@ func pveRemoteRepin(args []string, stdin io.Reader, ask prompter, w io.Writer) e
 	return nil
 }
 
+// pveRemoteSetSite implements `nebula pve remote set-site`.
+func pveRemoteSetSite(args []string, stdin io.Reader, w io.Writer) error {
+	if len(args) != 2 || strings.HasPrefix(args[0], "-") || (args[1] != "onsite" && args[1] != "offsite") {
+		return errors.New(strings.TrimSpace(pveUsage))
+	}
+	id, site := args[0], args[1]
+	conn, err := dialExecutor()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	c := pb.NewExecutorServiceClient(conn)
+	line, err := pveAskLine(stdin, fmt.Sprintf("Type 'yes' to record remote %s as %s: ", id, site), "confirmation")
+	if err != nil {
+		return err
+	}
+	if line != "yes" {
+		return errors.New("site not changed")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	response, err := c.SetPVERemoteSite(ctx, &pb.SetPVERemoteSiteRequest{RemoteId: id, Site: site})
+	if err != nil {
+		return err
+	}
+	rm := response.GetRemote()
+	fmt.Fprintf(w, "remote %s site: %s\n", rm.RemoteId, rm.Site)
+	return nil
+}
+
 // pveRemoteList implements `nebula pve remote list` (metadata only).
 func pveRemoteList(args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("pve remote list", flag.ContinueOnError)
@@ -391,15 +426,19 @@ func pveRemoteList(args []string, w io.Writer) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tKIND\tSTATE\tPIN (GEN)\tENDPOINTS\tREAD CREDENTIAL\tUPDATED")
+	fmt.Fprintln(tw, "ID\tKIND\tSITE\tSTATE\tPIN (GEN)\tENDPOINTS\tREAD CREDENTIAL\tUPDATED")
 	for _, r := range remotes {
 		eps := make([]string, 0, len(r.Endpoints))
 		for _, ep := range r.Endpoints {
 			eps = append(eps, fmt.Sprintf("%s:%d", ep.Host, ep.Port))
 		}
 		cred := fmt.Sprintf("%s@%d", r.ReadRef, r.ReadVersion)
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s (gen %d)\t%s\t%s\t%s\n",
-			r.RemoteId, r.Kind, r.State, prefix64(r.TrustPin), r.TrustGeneration,
+		site := r.Site
+		if site == "" {
+			site = "unset"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s (gen %d)\t%s\t%s\t%s\n",
+			r.RemoteId, r.Kind, site, r.State, prefix64(r.TrustPin), r.TrustGeneration,
 			strings.Join(eps, " "), cred, time.Unix(r.UpdatedAtUnix, 0).Format(time.RFC3339))
 	}
 	return tw.Flush()

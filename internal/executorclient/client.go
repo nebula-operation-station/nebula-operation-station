@@ -291,6 +291,14 @@ func (c *Client) ListPVEAdminRemotes(ctx context.Context, in *pb.ListPVEAdminRem
 	return resp, mapCallError(ctx, err)
 }
 
+// SetPVERemoteSite records where a PVE remote is (admin role).
+func (c *Client) SetPVERemoteSite(ctx context.Context, in *pb.SetPVERemoteSiteRequest, opts ...grpc.CallOption) (*pb.SetPVERemoteSiteResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.SetPVERemoteSite(ctx, in, opts...)
+	return resp, mapCallError(ctx, err)
+}
+
 // ProposePVERepin proposes a PVE remote trust change (admin role).
 func (c *Client) ProposePVERepin(ctx context.Context, in *pb.ProposePVERepinRequest, opts ...grpc.CallOption) (*pb.ProposePVERepinResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)

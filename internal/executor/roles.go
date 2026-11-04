@@ -138,6 +138,7 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_RotatePVEToken_FullMethodName:      {admin},
 		pb.ExecutorService_RemovePVERemote_FullMethodName:     {admin},
 		pb.ExecutorService_ListPVEAdminRemotes_FullMethodName: {admin},
+		pb.ExecutorService_SetPVERemoteSite_FullMethodName:    {admin},
 		pb.ExecutorService_ProposePVERepin_FullMethodName:     {admin},
 		pb.ExecutorService_CommitPVERepin_FullMethodName:      {admin},
 		// Typed guest power actions (ADR 0006 P2-01): the server may
