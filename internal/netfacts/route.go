@@ -25,7 +25,8 @@ type Route struct {
 	// Dev is the interface the route is installed on.
 	Dev string
 	// Metric is the route metric; 0 when the host reported none.
-	Metric int
+	// iproute2 metrics are unsigned 32-bit values.
+	Metric uint32
 }
 
 // routeDoc is the permissive shape of one `ip -j route` array element.
@@ -34,48 +35,65 @@ type routeDoc struct {
 	Dst     string `json:"dst"`
 	Gateway string `json:"gateway"`
 	Dev     string `json:"dev"`
-	Metric  *int   `json:"metric"`
+	Metric  uint32 `json:"metric"`
+}
+
+// RouteTable is the parsed route table of one `ip -j route` document.
+type RouteTable struct {
+	// Entries holds the valid routes in host order.
+	Entries []Route
+	// Dropped counts array elements that were skipped as malformed or
+	// ambiguous.
+	Dropped int
+	// Incomplete is true when Dropped > 0. An incomplete table must be
+	// presented as such, never as the complete table (spec 09).
+	Incomplete bool
 }
 
 // ParseRoutes parses the JSON array printed by `ip -j route` (IPv4) or
 // `ip -6 -j route` (IPv6).
 //
 // A "default" destination takes the family of the entry's gateway; without
-// a gateway, the family of the first parseable destination or gateway in
-// the document. An entry with no family signal is skipped, never guessed.
-// Entries with an invalid destination, gateway, device, or metric are
-// skipped. Input above maxInputSize, a document that is not a JSON array,
-// or a document with more than maxEntries valid entries is an error. One
-// bad entry never discards the rest of the table.
-func ParseRoutes(raw []byte) ([]Route, error) {
+// a gateway, the family of the first valid route in the document. An
+// entry with no family signal is skipped, never guessed. Entries with an
+// invalid destination, gateway (including an IPv6 zone that is not a
+// short interface name, or a gateway whose family differs from the
+// destination's), device, or metric are skipped and counted in Dropped.
+// Input above maxInputSize, a document that is not a JSON array, or an
+// array with more than maxEntries elements is an error. One bad entry
+// never discards the rest of the table.
+func ParseRoutes(raw []byte) (RouteTable, error) {
 	if len(raw) > maxInputSize {
-		return nil, fmt.Errorf("route document exceeds %d bytes", maxInputSize)
+		return RouteTable{}, fmt.Errorf("route document exceeds %d bytes", maxInputSize)
 	}
 	elems, err := unmarshalArray(raw, "routes")
 	if err != nil {
-		return nil, err
+		return RouteTable{}, err
+	}
+	if len(elems) > maxEntries {
+		return RouteTable{}, fmt.Errorf("route list exceeds %d entries", maxEntries)
 	}
 	docs := make([]routeDoc, 0, len(elems))
+	t := RouteTable{Entries: make([]Route, 0, len(elems))}
 	for _, e := range elems {
 		var d routeDoc
 		if err := json.Unmarshal(e, &d); err != nil {
+			t.Dropped++
 			continue
 		}
 		docs = append(docs, d)
 	}
 	docFamily, hasFamily := documentFamily(docs)
-	out := make([]Route, 0, len(docs))
 	for _, d := range docs {
 		r, ok := parseRouteEntry(d, docFamily, hasFamily)
 		if !ok {
+			t.Dropped++
 			continue
 		}
-		if len(out) >= maxEntries {
-			return nil, fmt.Errorf("route list exceeds %d entries", maxEntries)
-		}
-		out = append(out, r)
+		t.Entries = append(t.Entries, r)
 	}
-	return out, nil
+	t.Incomplete = t.Dropped > 0
+	return t, nil
 }
 
 // parseRouteEntry parses one route element. ok is false for entries that
@@ -84,8 +102,8 @@ func ParseRoutes(raw []byte) ([]Route, error) {
 func parseRouteEntry(d routeDoc, docFamily int, hasFamily bool) (Route, bool) {
 	var gw netip.Addr
 	if d.Gateway != "" {
-		a, err := netip.ParseAddr(d.Gateway)
-		if err != nil {
+		a, ok := parseHostAddr(d.Gateway)
+		if !ok {
 			return Route{}, false
 		}
 		gw = a
@@ -105,23 +123,26 @@ func parseRouteEntry(d routeDoc, docFamily int, hasFamily bool) (Route, bool) {
 			dst = defaultRouteV6
 		}
 	} else {
+		if len(d.Dst) > maxAddrLen {
+			return Route{}, false
+		}
 		p, err := netip.ParsePrefix(d.Dst)
 		if err != nil {
 			return Route{}, false
 		}
 		dst = p
 	}
+	if gw.IsValid() {
+		gwFam, _ := familyOf(gw)
+		dstFam, _ := familyOf(dst.Addr())
+		if gwFam != dstFam {
+			return Route{}, false
+		}
+	}
 	if !printable(d.Dev, maxStringLen) {
 		return Route{}, false
 	}
-	metric := 0
-	if d.Metric != nil {
-		if *d.Metric < 0 || *d.Metric > maxMetric {
-			return Route{}, false
-		}
-		metric = *d.Metric
-	}
-	return Route{Dst: dst, Gateway: gw, Dev: d.Dev, Metric: metric}, true
+	return Route{Dst: dst, Gateway: gw, Dev: d.Dev, Metric: d.Metric}, true
 }
 
 // familyOf returns 4 or 6 for a valid address and ok=false for the zero
@@ -136,19 +157,14 @@ func familyOf(a netip.Addr) (int, bool) {
 	return 6, true
 }
 
-// documentFamily returns the family of the first entry with a parseable
-// prefix destination or gateway, and ok=false when no entry provides one.
+// documentFamily returns the family of the first entry that is a valid
+// route on its own (a prefix destination, or a "default" destination with
+// a gateway), and ok=false when no entry provides one. Entries that are
+// later skipped as invalid never decide the family.
 func documentFamily(docs []routeDoc) (int, bool) {
 	for _, d := range docs {
-		if d.Dst != "default" {
-			if p, err := netip.ParsePrefix(d.Dst); err == nil {
-				return familyOf(p.Addr())
-			}
-		}
-		if d.Gateway != "" {
-			if a, err := netip.ParseAddr(d.Gateway); err == nil {
-				return familyOf(a)
-			}
+		if r, ok := parseRouteEntry(d, 0, false); ok {
+			return familyOf(r.Dst.Addr())
 		}
 	}
 	return 0, false

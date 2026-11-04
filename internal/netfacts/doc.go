@@ -9,6 +9,8 @@
 // strings are validated as printable UTF-8, unknown JSON fields are
 // dropped, and malformed entries are skipped rather than guessed. An
 // oversize or non-array document is an error, never an empty result, so
-// incomplete data is never presented as a complete empty dataset. The
-// parsers never panic on any input.
+// incomplete data is never presented as a complete empty dataset. A table
+// that lost entries or fields carries Incomplete (and a Dropped count), so
+// a partial table is never presented as complete. IPv6 zones are accepted
+// only as short interface names. The parsers never panic on any input.
 package netfacts

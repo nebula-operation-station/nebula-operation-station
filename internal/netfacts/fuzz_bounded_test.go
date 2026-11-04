@@ -7,7 +7,51 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"unicode/utf8"
 )
+
+// oracleText is an oracle for host text that is independent of
+// printable(): non-empty, at most limit bytes, valid UTF-8, and no rune
+// from the C0/DEL/C1 control ranges, the bidi controls, the zero-width
+// characters or the line/paragraph separators.
+func oracleText(s string, limit int) bool {
+	if s == "" || len(s) > limit || !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r < 0x20, r >= 0x7f && r <= 0x9f:
+			return false
+		case r >= 0x200b && r <= 0x200f, r >= 0x202a && r <= 0x202e:
+			return false
+		case r >= 0x2066 && r <= 0x2069, r == 0x2028, r == 0x2029, r == 0xfeff:
+			return false
+		}
+	}
+	return true
+}
+
+// oracleAddr checks a stored address independently of parseHostAddr:
+// valid, a zone only of [A-Za-z0-9._@-] and at most 15 bytes, and a
+// bounded rendered length.
+func oracleAddr(t *testing.T, what string, a netip.Addr) {
+	t.Helper()
+	z := a.Zone()
+	if len(z) > 15 {
+		t.Fatalf("%s zone is %d bytes", what, len(z))
+	}
+	for i := 0; i < len(z); i++ {
+		c := z[i]
+		ok := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+			c == '.' || c == '_' || c == '-' || c == '@'
+		if !ok {
+			t.Fatalf("%s zone %q contains byte %#x", what, z, c)
+		}
+	}
+	if n := len(a.String()); n > 64 {
+		t.Fatalf("%s renders as %d bytes", what, n)
+	}
+}
 
 // netfactsFuzzSeeds loads the named testdata fixtures as fuzz seeds so the
 // corpus starts from realistic `ip -j ...` documents.
@@ -34,19 +78,25 @@ func FuzzParseNeighBounds(f *testing.F) {
 	f.Add([]byte(`{}`))
 	f.Add([]byte(`[{"ip":"10.0.0.1","dev":"eth0"}]`))
 	f.Add([]byte(`[{"ip":"fe80::1","dev":"eth0","lladdr":"aa:bb:cc:dd:ee:ff","state":["REACHABLE"]}]`))
+	f.Add([]byte(`[{"ip":"fe80::1%eth0","dev":"eth0"},{"ip":"fe80::2%\u001b[0m\n","dev":"eth0"}]`))
 	f.Fuzz(func(t *testing.T, b []byte) {
-		ns, err := ParseNeigh(b)
+		res, err := ParseNeigh(b)
 		if err != nil {
 			return
 		}
-		if len(ns) > maxEntries {
-			t.Fatalf("neighbor list has %d entries, bound is %d", len(ns), maxEntries)
+		ns := res.Entries
+		if len(ns) > 1000 {
+			t.Fatalf("neighbor list has %d entries, bound is 1000", len(ns))
+		}
+		if res.Dropped < 0 || (res.Dropped > 0 && !res.Incomplete) {
+			t.Fatalf("Dropped=%d with Incomplete=%v", res.Dropped, res.Incomplete)
 		}
 		for _, n := range ns {
 			if !n.IP.IsValid() {
 				t.Fatalf("neighbor carries invalid IP %v", n.IP)
 			}
-			if !printable(n.Dev, maxStringLen) {
+			oracleAddr(t, "neighbor IP", n.IP)
+			if !oracleText(n.Dev, maxStringLen) {
 				t.Fatalf("neighbor dev %q violates its bounds", n.Dev)
 			}
 			if len(n.MAC) != 0 && len(n.MAC) != 6 {
@@ -56,7 +106,7 @@ func FuzzParseNeighBounds(f *testing.F) {
 				t.Fatalf("neighbor has %d states, bound is %d", len(n.State), maxStates)
 			}
 			for _, s := range n.State {
-				if !printable(s, maxStringLen) {
+				if !oracleText(s, maxStringLen) {
 					t.Fatalf("neighbor state %q violates its bounds", s)
 				}
 			}
@@ -75,13 +125,18 @@ func FuzzParseRoutesBounds(f *testing.F) {
 	f.Add([]byte(`{}`))
 	f.Add([]byte(`[{"dst":"default","gateway":"10.0.0.1","dev":"eth0","metric":100}]`))
 	f.Add([]byte(`[{"dst":"default","gateway":"fe80::1","dev":"eth0"}]`))
+	f.Add([]byte(`[{"dst":"default","gateway":"fe80::1%eth0","dev":"eth0"},{"dst":"default","gateway":"fe80::2%\u202e","dev":"eth0"}]`))
 	f.Fuzz(func(t *testing.T, b []byte) {
-		rs, err := ParseRoutes(b)
+		res, err := ParseRoutes(b)
 		if err != nil {
 			return
 		}
-		if len(rs) > maxEntries {
-			t.Fatalf("route list has %d entries, bound is %d", len(rs), maxEntries)
+		rs := res.Entries
+		if len(rs) > 1000 {
+			t.Fatalf("route list has %d entries, bound is 1000", len(rs))
+		}
+		if res.Dropped < 0 || res.Incomplete != (res.Dropped > 0) {
+			t.Fatalf("Dropped=%d with Incomplete=%v", res.Dropped, res.Incomplete)
 		}
 		for _, r := range rs {
 			if !r.Dst.IsValid() {
@@ -90,11 +145,12 @@ func FuzzParseRoutesBounds(f *testing.F) {
 			if !r.Gateway.IsValid() && r.Gateway != (netip.Addr{}) {
 				t.Fatalf("route gateway %v is neither valid nor the zero address", r.Gateway)
 			}
-			if !printable(r.Dev, maxStringLen) {
-				t.Fatalf("route dev %q violates its bounds", r.Dev)
+			oracleAddr(t, "route gateway", r.Gateway)
+			if r.Gateway.IsValid() && r.Gateway.Is4() != r.Dst.Addr().Is4() {
+				t.Fatalf("route gateway %v family differs from dst %v", r.Gateway, r.Dst)
 			}
-			if r.Metric < 0 || r.Metric > maxMetric {
-				t.Fatalf("route metric %d outside [0, %d]", r.Metric, maxMetric)
+			if !oracleText(r.Dev, maxStringLen) {
+				t.Fatalf("route dev %q violates its bounds", r.Dev)
 			}
 		}
 	})

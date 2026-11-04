@@ -47,53 +47,90 @@ func unmarshalArray(raw []byte, what string) ([]json.RawMessage, error) {
 	return elems, nil
 }
 
+// NeighborTable is the parsed neighbor table of one `ip -j neigh`
+// document.
+type NeighborTable struct {
+	// Entries holds the valid neighbors in host order.
+	Entries []Neighbor
+	// Dropped counts array elements that were skipped as malformed.
+	Dropped int
+	// Incomplete is true when the host reported data the parser did not
+	// keep: a skipped element (Dropped > 0), an invalid link-layer
+	// address, an invalid state, or a state list truncated at maxStates.
+	// An incomplete table must be presented as such, never as the
+	// complete table (spec 09).
+	Incomplete bool
+}
+
 // ParseNeigh parses the JSON array printed by `ip -j neigh`.
 //
-// Entries without a valid IP or without a valid device are skipped. An
-// invalid or non-Ethernet link-layer address is dropped (MAC stays empty).
-// Invalid state strings are dropped and the state list is truncated at
-// maxStates. Input above maxInputSize, a document that is not a JSON
-// array, or a document with more than maxEntries valid entries is an
-// error. One bad entry never discards the rest of the table.
-func ParseNeigh(raw []byte) ([]Neighbor, error) {
+// Entries without a valid IP (including an IPv6 zone that is not a short
+// interface name) or without a valid device are skipped and counted in
+// Dropped. An invalid or non-Ethernet link-layer address is dropped (MAC
+// stays empty). Invalid state strings are dropped and the state list is
+// truncated at maxStates. Every such loss sets Incomplete. Input above
+// maxInputSize, a document that is not a JSON array, or an array with
+// more than maxEntries elements is an error. One bad entry never discards
+// the rest of the table.
+func ParseNeigh(raw []byte) (NeighborTable, error) {
 	if len(raw) > maxInputSize {
-		return nil, fmt.Errorf("neighbor document exceeds %d bytes", maxInputSize)
+		return NeighborTable{}, fmt.Errorf("neighbor document exceeds %d bytes", maxInputSize)
 	}
 	elems, err := unmarshalArray(raw, "neighbors")
 	if err != nil {
-		return nil, err
+		return NeighborTable{}, err
 	}
-	out := make([]Neighbor, 0, len(elems))
+	if len(elems) > maxEntries {
+		return NeighborTable{}, fmt.Errorf("neighbor list exceeds %d entries", maxEntries)
+	}
+	t := NeighborTable{Entries: make([]Neighbor, 0, len(elems))}
 	for _, e := range elems {
-		var d neighDoc
-		if err := json.Unmarshal(e, &d); err != nil {
+		n, lossy, ok := parseNeighEntry(e)
+		if !ok {
+			t.Dropped++
+			t.Incomplete = true
 			continue
 		}
-		ip, err := netip.ParseAddr(d.IP)
-		if err != nil {
-			continue
+		if lossy {
+			t.Incomplete = true
 		}
-		if !printable(d.Dev, maxStringLen) {
-			continue
-		}
-		n := Neighbor{IP: ip, Dev: d.Dev}
-		if d.LLAddr != "" {
-			if mac, err := net.ParseMAC(d.LLAddr); err == nil && len(mac) == 6 {
-				n.MAC = mac
-			}
-		}
-		for _, s := range d.State {
-			if len(n.State) >= maxStates {
-				break
-			}
-			if printable(s, maxStringLen) {
-				n.State = append(n.State, s)
-			}
-		}
-		if len(out) >= maxEntries {
-			return nil, fmt.Errorf("neighbor list exceeds %d entries", maxEntries)
-		}
-		out = append(out, n)
+		t.Entries = append(t.Entries, n)
 	}
-	return out, nil
+	return t, nil
+}
+
+// parseNeighEntry parses one neighbor element. ok is false for skipped
+// elements; lossy is true when fields of a kept entry were dropped.
+func parseNeighEntry(e json.RawMessage) (n Neighbor, lossy, ok bool) {
+	var d neighDoc
+	if err := json.Unmarshal(e, &d); err != nil {
+		return Neighbor{}, false, false
+	}
+	ip, ok := parseHostAddr(d.IP)
+	if !ok {
+		return Neighbor{}, false, false
+	}
+	if !printable(d.Dev, maxStringLen) {
+		return Neighbor{}, false, false
+	}
+	n = Neighbor{IP: ip, Dev: d.Dev}
+	if d.LLAddr != "" {
+		if mac, err := net.ParseMAC(d.LLAddr); err == nil && len(mac) == 6 {
+			n.MAC = mac
+		} else {
+			lossy = true
+		}
+	}
+	for _, s := range d.State {
+		if len(n.State) >= maxStates {
+			lossy = true
+			break
+		}
+		if printable(s, maxStringLen) {
+			n.State = append(n.State, s)
+		} else {
+			lossy = true
+		}
+	}
+	return n, lossy, true
 }

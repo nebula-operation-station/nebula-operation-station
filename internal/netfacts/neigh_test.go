@@ -23,9 +23,13 @@ func readFixture(t *testing.T, name string) []byte {
 }
 
 func TestParseNeighDebian12(t *testing.T) {
-	got, err := ParseNeigh(readFixture(t, "debian12-neigh.json"))
+	res, err := ParseNeigh(readFixture(t, "debian12-neigh.json"))
 	if err != nil {
 		t.Fatalf("ParseNeigh: %v", err)
+	}
+	got := res.Entries
+	if res.Incomplete || res.Dropped != 0 {
+		t.Fatalf("complete fixture marked Incomplete=%v Dropped=%d", res.Incomplete, res.Dropped)
 	}
 	want := []Neighbor{
 		{
@@ -58,10 +62,11 @@ func TestParseNeighDebian12(t *testing.T) {
 }
 
 func TestParseNeighUbuntu2404(t *testing.T) {
-	got, err := ParseNeigh(readFixture(t, "ubuntu2404-neigh.json"))
+	res, err := ParseNeigh(readFixture(t, "ubuntu2404-neigh.json"))
 	if err != nil {
 		t.Fatalf("ParseNeigh: %v", err)
 	}
+	got := res.Entries
 	want := []Neighbor{
 		{
 			IP:    netip.MustParseAddr("10.0.0.1"),
@@ -87,10 +92,11 @@ func TestParseNeighUbuntu2404(t *testing.T) {
 }
 
 func TestParseNeighEmptyArray(t *testing.T) {
-	got, err := ParseNeigh(readFixture(t, "empty-neigh.json"))
+	res, err := ParseNeigh(readFixture(t, "empty-neigh.json"))
 	if err != nil {
 		t.Fatalf("ParseNeigh: %v", err)
 	}
+	got := res.Entries
 	if len(got) != 0 {
 		t.Fatalf("got %d neighbors, want 0", len(got))
 	}
@@ -104,15 +110,19 @@ func TestParseNeighSkipsEntriesWithoutValidIP(t *testing.T) {
 		{"ip":42,"dev":"eth0","state":["REACHABLE"]},
 		{"ip":"10.0.0.2","dev":"eth0","state":["STALE"]}
 	]`
-	got, err := ParseNeigh([]byte(doc))
+	res, err := ParseNeigh([]byte(doc))
 	if err != nil {
 		t.Fatalf("ParseNeigh: %v", err)
 	}
+	got := res.Entries
 	if len(got) != 2 {
 		t.Fatalf("got %d neighbors, want 2: %+v", len(got), got)
 	}
 	if got[0].IP != (netip.MustParseAddr("10.0.0.1")) || got[1].IP != (netip.MustParseAddr("10.0.0.2")) {
 		t.Fatalf("got IPs %v %v, want 10.0.0.1 10.0.0.2", got[0].IP, got[1].IP)
+	}
+	if !res.Incomplete || res.Dropped != 3 {
+		t.Fatalf("Incomplete=%v Dropped=%d, want true 3", res.Incomplete, res.Dropped)
 	}
 }
 
@@ -124,10 +134,11 @@ func TestParseNeighDropsInvalidStrings(t *testing.T) {
 		{"ip":"10.0.0.3","dev":"bad\u0001dev","lladdr":"aa:bb:cc:dd:ee:ff","state":["STALE"]},
 		{"ip":"10.0.0.4","dev":"` + longDev + `","state":["STALE"]}
 	]`
-	got, err := ParseNeigh([]byte(doc))
+	res, err := ParseNeigh([]byte(doc))
 	if err != nil {
 		t.Fatalf("ParseNeigh: %v", err)
 	}
+	got := res.Entries
 	if len(got) != 2 {
 		t.Fatalf("got %d neighbors, want 2: %+v", len(got), got)
 	}
@@ -140,6 +151,9 @@ func TestParseNeighDropsInvalidStrings(t *testing.T) {
 	if len(got[1].MAC) != 0 {
 		t.Fatalf("8-byte lladdr not dropped: %v", got[1].MAC)
 	}
+	if !res.Incomplete || res.Dropped != 2 {
+		t.Fatalf("Incomplete=%v Dropped=%d, want true 2", res.Incomplete, res.Dropped)
+	}
 }
 
 func TestParseNeighTruncatesStateList(t *testing.T) {
@@ -148,10 +162,11 @@ func TestParseNeighTruncatesStateList(t *testing.T) {
 		states = append(states, fmt.Sprintf(`"S%d"`, i))
 	}
 	doc := `[{"ip":"10.0.0.1","dev":"eth0","state":[` + strings.Join(states, ",") + `]}]`
-	got, err := ParseNeigh([]byte(doc))
+	res, err := ParseNeigh([]byte(doc))
 	if err != nil {
 		t.Fatalf("ParseNeigh: %v", err)
 	}
+	got := res.Entries
 	if len(got) != 1 {
 		t.Fatalf("got %d neighbors, want 1", len(got))
 	}
@@ -160,6 +175,9 @@ func TestParseNeighTruncatesStateList(t *testing.T) {
 	}
 	if got[0].State[0] != "S0" || got[0].State[maxStates-1] != fmt.Sprintf("S%d", maxStates-1) {
 		t.Fatalf("state list truncated wrongly: %v", got[0].State)
+	}
+	if !res.Incomplete || res.Dropped != 0 {
+		t.Fatalf("Incomplete=%v Dropped=%d, want true 0 (truncation is a loss)", res.Incomplete, res.Dropped)
 	}
 }
 
@@ -180,10 +198,11 @@ func TestParseNeighAcceptsMaxSizeInput(t *testing.T) {
 	if len(doc) != maxInputSize {
 		t.Fatalf("test document is %d bytes, want %d", len(doc), maxInputSize)
 	}
-	got, err := ParseNeigh([]byte(doc))
+	res, err := ParseNeigh([]byte(doc))
 	if err != nil {
 		t.Fatalf("ParseNeigh: %v", err)
 	}
+	got := res.Entries
 	if len(got) != 1 || got[0].IP != (netip.MustParseAddr("10.0.0.1")) || got[0].Dev != "eth0" {
 		t.Fatalf("got %+v, want one neighbor 10.0.0.1 on eth0", got)
 	}
@@ -208,6 +227,56 @@ func TestParseNeighRejectsNonArray(t *testing.T) {
 			t.Fatal("expected error for raw control byte in JSON text")
 		}
 	})
+}
+
+func TestParseNeighRejectsHostileZone(t *testing.T) {
+	for name, zone := range hostileZones() {
+		t.Run(name, func(t *testing.T) {
+			doc := `[{"ip":"fe80::1%` + zone + `","dev":"eth0"},{"ip":"10.0.0.1","dev":"eth0"}]`
+			res, err := ParseNeigh([]byte(doc))
+			if err != nil {
+				t.Fatalf("ParseNeigh: %v", err)
+			}
+			want := []Neighbor{{IP: netip.MustParseAddr("10.0.0.1"), Dev: "eth0"}}
+			if !reflect.DeepEqual(res.Entries, want) {
+				t.Fatalf("got %+v, want only the good entry", res.Entries)
+			}
+			if !res.Incomplete || res.Dropped != 1 {
+				t.Fatalf("Incomplete=%v Dropped=%d, want true 1", res.Incomplete, res.Dropped)
+			}
+		})
+	}
+}
+
+func TestParseNeighAcceptsInterfaceZone(t *testing.T) {
+	res, err := ParseNeigh([]byte(`[{"ip":"fe80::1%ens18","dev":"ens18"}]`))
+	if err != nil {
+		t.Fatalf("ParseNeigh: %v", err)
+	}
+	want := []Neighbor{{IP: netip.MustParseAddr("fe80::1%ens18"), Dev: "ens18"}}
+	if !reflect.DeepEqual(res.Entries, want) || res.Incomplete {
+		t.Fatalf("got %+v (Incomplete=%v), want %+v", res.Entries, res.Incomplete, want)
+	}
+}
+
+func TestParseNeighDropsUnsafeUnicode(t *testing.T) {
+	doc := `[
+		{"ip":"10.0.0.1","dev":"eth\u00850"},
+		{"ip":"10.0.0.2","dev":"eth\u202e0"},
+		{"ip":"10.0.0.3","dev":"eth\u200b0"},
+		{"ip":"10.0.0.4","dev":"eth0","state":["STALE\u2028x"]}
+	]`
+	res, err := ParseNeigh([]byte(doc))
+	if err != nil {
+		t.Fatalf("ParseNeigh: %v", err)
+	}
+	want := []Neighbor{{IP: netip.MustParseAddr("10.0.0.4"), Dev: "eth0"}}
+	if !reflect.DeepEqual(res.Entries, want) {
+		t.Fatalf("got %+v, want %+v", res.Entries, want)
+	}
+	if !res.Incomplete || res.Dropped != 3 {
+		t.Fatalf("Incomplete=%v Dropped=%d, want true 3", res.Incomplete, res.Dropped)
+	}
 }
 
 func TestParseNeighRejectsTooManyEntries(t *testing.T) {
