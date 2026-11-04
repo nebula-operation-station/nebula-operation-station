@@ -828,3 +828,35 @@ func TestAssetIconOverrideHistoryAndRollback(t *testing.T) {
 		t.Fatalf("catalog history leaked: %+v", h)
 	}
 }
+
+func TestAssetDeleteClearsIconOverride(t *testing.T) {
+	s, db, _ := newTestStore(t)
+	ctx := context.Background()
+	if _, err := db.Exec(`INSERT INTO assets (id, name, kind, updated_at) VALUES ('nas-1', 'NAS', 'nas', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RegisterIcon(ctx, "alice", shaA, IconUpload, ""); err != nil {
+		t.Fatal(err)
+	}
+	subj := IconSubject{Kind: SubjectAsset, ID: "nas-1"}
+	if err := s.SetIcon(ctx, "alice", subj, shaA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM assets WHERE id = 'nas-1'`); err != nil {
+		t.Fatal(err)
+	}
+	if sha, err := s.AssetIcon(ctx, "nas-1"); err != nil || sha != "" {
+		t.Fatalf("override survived asset delete: %q %v", sha, err)
+	}
+	// A new asset that reuses the ID does not inherit the override.
+	if _, err := db.Exec(`INSERT INTO assets (id, name, kind, updated_at) VALUES ('nas-1', 'Other', 'nas', 2)`); err != nil {
+		t.Fatal(err)
+	}
+	if sha, err := s.AssetIcon(ctx, "nas-1"); err != nil || sha != "" {
+		t.Fatalf("reused asset ID inherited override %q %v", sha, err)
+	}
+	// The history is kept.
+	if h, err := s.IconHistory(ctx, subj, 0); err != nil || len(h) != 1 {
+		t.Fatalf("history %+v %v", h, err)
+	}
+}
