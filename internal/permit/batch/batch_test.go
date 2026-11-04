@@ -86,7 +86,7 @@ func setup(t *testing.T, mode permit.Mode) *environment {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.options = Options{Mode: mode, Verifier: v, Policy: e.policy, AdminUID: 1000,
+	e.options = Options{Mode: mode, Verifier: v, Policy: e.policy, AdminUIDs: []uint32{1000},
 		Now:     func() time.Time { return time.Unix(e.unix.Load(), 0) },
 		Session: func() (bool, time.Time) { return e.active.Load(), time.Unix(e.unix.Load(), 0).Add(time.Hour) },
 		Audit:   func(ev permit.Event) { e.events = append(e.events, ev) }}
@@ -268,6 +268,52 @@ func TestHardenedHighRequiresLocalAdminReviewAndConfirmation(t *testing.T) {
 	}
 	_, err = e.a.ApproveCLI(ctx, p.Digest, 1000)
 	wantCode(t, err, permit.CodeWrongState)
+}
+
+// Every configured admin may review and approve from the CLI, not only the
+// first; a non-admin may not.
+func TestHardenedCLIApprovalByAnyConfiguredAdmin(t *testing.T) {
+	e := setup(t, permit.ModeHardened)
+	e.options.AdminUIDs = []uint32{1000, 1002}
+	a, err := New(e.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.a = a
+	e.active.Store(false)
+	p := propose(t, e, canonical.RiskHigh)
+	if _, err := e.a.ReviewCLI(ctx, p.Digest, 1001); !errors.Is(err, ErrAdminRequired) {
+		t.Fatalf("non-admin review: %v", err)
+	}
+	if _, err := e.a.ReviewCLI(ctx, p.Digest, 1002); err != nil {
+		t.Fatalf("second admin review: %v", err)
+	}
+	approved, err := e.a.ApproveCLI(ctx, p.Digest, 1002)
+	if err != nil || approved.ApprovedBy != "cli:1002" {
+		t.Fatalf("second admin approve: %+v %v", approved, err)
+	}
+}
+
+// Without configured admins no peer may review or approve from the CLI,
+// including UID 0 (the zero value of a UID).
+func TestCLIApprovalFailsClosedWithoutAdmins(t *testing.T) {
+	e := setup(t, permit.ModeHardened)
+	e.options.AdminUIDs = nil
+	a, err := New(e.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.a = a
+	e.active.Store(false)
+	p := propose(t, e, canonical.RiskHigh)
+	for _, uid := range []uint32{0, 1000} {
+		if _, err := e.a.ReviewCLI(ctx, p.Digest, uid); !errors.Is(err, ErrAdminRequired) {
+			t.Errorf("review %d: %v", uid, err)
+		}
+		if _, err := e.a.ApproveCLI(ctx, p.Digest, uid); !errors.Is(err, ErrAdminRequired) {
+			t.Errorf("approve %d: %v", uid, err)
+		}
+	}
 }
 func TestHardenedMediumStillUsesBrowserSession(t *testing.T) {
 	e := setup(t, permit.ModeHardened)

@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,6 +23,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"google.golang.org/grpc"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/auditlog"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/deployprofile"
@@ -296,6 +299,15 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 	// Scheduled read-only checks run under executor-held schedule grants.
 	go ops.RunSchedules(connCtx)
+	// Batches (ADR 0007): planned here with the executor's credential
+	// versions (GetBatchCredentialVersions), approved once on the batch
+	// page; also the staged post-enrollment plan of a deployment. Proposing
+	// and approving are refused unless the executor advertises batch
+	// execution at that moment (deployBatches).
+	batches, batchPages, err := newBatches(connCtx, serverBatchExecutor{client: lazyBatchRPC(exec)}, db, store, ops, log)
+	if err != nil {
+		return err
+	}
 
 	// Expire pending operations whose approval window ended (issue #71): the
 	// executor drops the permit when the window closes but the server only
@@ -372,18 +384,18 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		Enroll:         exec,
 		// Deployments (ADR 0008 section 6, PV-08): provisioning on the
 		// executor, enrollment through the PV-06 join flow, the static
-		// address from the IPAM. The staged plan needs the batch planner
-		// (ADR 0007), which this server does not mount yet: it has no
-		// source for the executor's credential versions
-		// (executions.BatchOptions.CredentialVersion), so every proposal
-		// would fail. Without DeployBatches a run with bootstrap modules or
-		// runbooks ends at "joined" (enrolled, plan not run) and says so.
-		Deploy:       exec,
-		DeployJoin:   &pveinventory.GuestJoinFlow{Store: pveStore, Executor: exec},
-		DeployIPAM:   ipamStore,
-		SecurityKeys: securityKeys,
-		TOTPStatus:   totpStatus,
-		Log:          log,
+		// address from the IPAM. The staged plan (bootstrap modules,
+		// runbooks) runs as one batch (ADR 0007). The planner probes the
+		// executor (ui.DeployBatchProbe): an executor without batches
+		// (no batch authority, or no credential-version read) ends such
+		// a run at "joined" (enrolled, plan not run) and says so.
+		Deploy:        exec,
+		DeployJoin:    &pveinventory.GuestJoinFlow{Store: pveStore, Executor: exec},
+		DeployIPAM:    ipamStore,
+		DeployBatches: batches,
+		SecurityKeys:  securityKeys,
+		TOTPStatus:    totpStatus,
+		Log:           log,
 	})
 	if err != nil {
 		return err
@@ -402,6 +414,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	pages := http.NewServeMux()
 	pages.Handle("/", h.Handler())
 	lc.handler.Register(pages)
+	batchPages.Register(pages)
 
 	root := http.NewServeMux()
 	root.Handle("/", login.Wrap(pages))
@@ -443,4 +456,147 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	case err := <-serveErr:
 		return fmt.Errorf("serve: %w", err)
 	}
+}
+
+// batchRPC is the executor client's batch surface: the planner's calls
+// (executions.BatchExecutor) and the credential-version read.
+// executorclient.Client satisfies it.
+type batchRPC interface {
+	executions.BatchExecutor
+	executorclient.BatchCredentialReader
+}
+
+// lazyBatchRPC returns the server's executor client once it is connected,
+// nil before.
+func lazyBatchRPC(l *lazyExecutor) func() batchRPC {
+	return func() batchRPC {
+		if c := l.c.Load(); c != nil {
+			return c
+		}
+		return nil
+	}
+}
+
+// serverBatchExecutor serves the batch planner from an executor
+// connection that may come up after the server: while client returns nil
+// every call fails with errNotConnected.
+type serverBatchExecutor struct {
+	client func() batchRPC
+}
+
+func (s serverBatchExecutor) ListHostKeys(ctx context.Context, in *pb.ListHostKeysRequest, opts ...grpc.CallOption) (*pb.ListHostKeysResponse, error) {
+	if c := s.client(); c != nil {
+		return c.ListHostKeys(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (s serverBatchExecutor) ProposeBatch(ctx context.Context, in *pb.ProposeBatchRequest, opts ...grpc.CallOption) (*pb.ProposeBatchResponse, error) {
+	if c := s.client(); c != nil {
+		return c.ProposeBatch(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (s serverBatchExecutor) CommitBatch(ctx context.Context, in *pb.CommitBatchRequest, opts ...grpc.CallOption) (*pb.CommitBatchResponse, error) {
+	if c := s.client(); c != nil {
+		return c.CommitBatch(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (s serverBatchExecutor) GetBatchStatus(ctx context.Context, in *pb.GetBatchStatusRequest, opts ...grpc.CallOption) (*pb.GetBatchStatusResponse, error) {
+	if c := s.client(); c != nil {
+		return c.GetBatchStatus(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (s serverBatchExecutor) GetBatchCredentialVersions(ctx context.Context, in *pb.GetBatchCredentialVersionsRequest, opts ...grpc.CallOption) (*pb.GetBatchCredentialVersionsResponse, error) {
+	if c := s.client(); c != nil {
+		return c.GetBatchCredentialVersions(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+// batchProbeTimeout bounds the executor probe before a batch is proposed
+// or approved.
+const batchProbeTimeout = 10 * time.Second
+
+// deployBatches is the batch planner gated on the executor: every
+// proposal and approval, from the batch pages and from the deployment
+// run, first asks the executor whether it runs batches end to end
+// (executorclient.BatchesAvailable) and is refused fail-closed unless it
+// says so at that moment. It also serves the deployment run's probe
+// (ui.DeployBatchProbe). Reads (list, view, refresh, skip) are not gated.
+type deployBatches struct {
+	*executions.Batches
+	exec serverBatchExecutor
+}
+
+// BatchesAvailable reports whether the executor runs batches end to end
+// (executorclient.BatchesAvailable: it must advertise batch execution, not
+// only serve credential versions); not connected is an error, not false.
+func (d deployBatches) BatchesAvailable(ctx context.Context) (bool, error) {
+	return executorclient.BatchesAvailable(ctx, d.exec)
+}
+
+// requireExecution refuses unless the executor runs batches now: a
+// missing capability is executions.ErrBatchExecutionUnavailable, any
+// probe failure executions.ErrBatchExecutionUnknown. The probe has its
+// own short deadline so it never consumes the caller's call budget.
+func (d deployBatches) requireExecution(ctx context.Context) error {
+	pctx, cancel := context.WithTimeout(ctx, batchProbeTimeout)
+	defer cancel()
+	avail, err := d.BatchesAvailable(pctx)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%w: %w", executions.ErrBatchExecutionUnknown, err)
+	case !avail:
+		return executions.ErrBatchExecutionUnavailable
+	}
+	return nil
+}
+
+// ProposeBatch proposes req only if the executor runs batches.
+func (d deployBatches) ProposeBatch(ctx context.Context, user string, req executions.BatchRequest) (executions.BatchCreated, error) {
+	if err := d.requireExecution(ctx); err != nil {
+		return executions.BatchCreated{}, err
+	}
+	return d.Batches.ProposeBatch(ctx, user, req)
+}
+
+// ApproveBatch relays the approval only if the executor runs batches, so
+// a batch proposed while it did is not approved after it stopped.
+func (d deployBatches) ApproveBatch(ctx context.Context, user, id string, assertion []byte) error {
+	if err := d.requireExecution(ctx); err != nil {
+		return err
+	}
+	return d.Batches.ApproveBatch(ctx, user, id, assertion)
+}
+
+// newBatches builds the batch planner with the executor's credential
+// versions, reconciles batches left by the previous process (before
+// anything is dispatched) and parses the batch pages.
+func newBatches(ctx context.Context, exec serverBatchExecutor, db *sql.DB, hosts executions.Hosts, acts executions.ActionResolver, log *slog.Logger) (deployBatches, *ui.BatchPages, error) {
+	b, err := executions.NewBatches(executions.BatchOptions{
+		Exec: exec, DB: db, Hosts: hosts, Log: log, Actions: acts,
+		CredentialVersion: func(ctx context.Context, ref string) (uint64, error) {
+			return executorclient.CredentialVersion(ctx, exec, ref)
+		},
+	})
+	if err != nil {
+		return deployBatches{}, nil, fmt.Errorf("batch planner: %w", err)
+	}
+	if n, err := b.ReconcileBatches(ctx); err != nil {
+		log.Error("reconcile batches", "error", err)
+	} else if n > 0 {
+		log.Info("reconciled batches", "members", n)
+	}
+	gated := deployBatches{Batches: b, exec: exec}
+	pages, err := ui.NewBatchPages(gated, log)
+	if err != nil {
+		return deployBatches{}, nil, fmt.Errorf("batch pages: %w", err)
+	}
+	return gated, pages, nil
 }
