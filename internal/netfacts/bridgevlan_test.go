@@ -49,6 +49,29 @@ func TestParseBridgeVLANFlatShapeMatchesListShape(t *testing.T) {
 	}
 }
 
+func TestParseBridgeVLANMixedShapesMarkIncomplete(t *testing.T) {
+	// An element carrying both a "vlans" list and a flat "vlan" field
+	// keeps the list and drops the flat field; the dropped field is a
+	// loss, so the table is incomplete (the element itself is kept).
+	doc := `[{"ifname":"eth0","vlan":7,"flags":["PVID"],"vlans":[{"vlan":1,"flags":["Egress Untagged"]}]}]`
+	res, err := ParseBridgeVLAN([]byte(doc))
+	if err != nil {
+		t.Fatalf("ParseBridgeVLAN: %v", err)
+	}
+	want := map[string][]BridgeVLAN{
+		"eth0": {{ID: 1, Untagged: true}},
+	}
+	if !reflect.DeepEqual(res.Ports, want) {
+		t.Fatalf("got %+v, want %+v", res.Ports, want)
+	}
+	if !res.Incomplete {
+		t.Fatal("expected Incomplete for a mixed-shape element")
+	}
+	if res.Dropped != 0 {
+		t.Fatalf("Dropped=%d, want 0 (the element is kept)", res.Dropped)
+	}
+}
+
 func TestParseBridgeVLANUbuntuVM(t *testing.T) {
 	res, err := ParseBridgeVLAN(readFixture(t, "ubuntu-bridgevlan.json"))
 	if err != nil {
