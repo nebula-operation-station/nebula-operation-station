@@ -733,6 +733,125 @@ func TestPveGuestProvisionRunBoundCoversEveryStep(t *testing.T) {
 	}
 }
 
+// highRisk is a risk policy that records every target as HIGH.
+type highRisk struct{}
+
+func (highRisk) MinimumRisk(canonical.Request, []canonical.Target) (canonical.Risk, string, error) {
+	return canonical.RiskHigh, "test", nil
+}
+
+// commitAfterWebAuthn plays the server of variant B (ADR 0008 section 3):
+// it relays the user's assertion over the given challenge to the executor
+// (SubmitAssertion) and then commits the proposed provisioning.
+func (e *provisionRPCEnv) commitAfterWebAuthn(t *testing.T, prop *pb.ProposePVEGuestProvisionResponse, verified bool) (*pb.SubmitAssertionResponse, error, *pb.CommitPVEGuestProvisionResponse, error) {
+	t.Helper()
+	ctx := context.Background()
+	if active, _ := e.auth.Session(); !active {
+		e.openSession(t)
+	}
+	digest := prop.GetPermit().GetExecutionDigest()
+	approved, approveErr := e.svc.SubmitAssertion(ctx, &pb.SubmitAssertionRequest{ExecutionDigest: digest,
+		AssertionJson: e.sign(prop.GetPermit().GetChallenge(), verified)})
+	committed := testProvisionSpec(bindingOf(e.tpl), PveAutomationCredentialRef)
+	committed.Vmid = prop.GetVmid()
+	res, err := e.svc.CommitPVEGuestProvision(ctx, &pb.CommitPVEGuestProvisionRequest{Spec: committed,
+		ExecutionId: prop.GetExecutionId(), ExecutionDigest: digest})
+	return approved, approveErr, res, err
+}
+
+// openSession opens the privileged browser session browser approvals need
+// (a user-verified assertion over the session challenge).
+func (e *provisionRPCEnv) openSession(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	b, err := e.svc.BeginPrivilegedSession(ctx, &pb.BeginPrivilegedSessionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.CompletePrivilegedSession(ctx, &pb.CompletePrivilegedSessionRequest{AssertionJson: e.sign(b.GetChallenge(), true)}); err != nil {
+		t.Fatalf("privileged session: %v", err)
+	}
+}
+
+// TestServiceGuestProvisionRunsAfterWebAuthnPresenceApproval: end to end
+// over the RPCs, variant B. The executor proposes at MEDIUM and asks for a
+// WebAuthn approval with user presence (challenge and request options in
+// the response); within the privileged browser session the server relays
+// the user's presence-only assertion and then starts the run, which
+// provisions the guest with the designated automation key.
+func TestServiceGuestProvisionRunsAfterWebAuthnPresenceApproval(t *testing.T) {
+	e := newProvisionRPCEnv(t)
+	prop, err := e.svc.ProposePVEGuestProvision(context.Background(),
+		&pb.ProposePVEGuestProvisionRequest{Spec: testProvisionSpec(bindingOf(e.tpl), PveAutomationCredentialRef)})
+	if err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	pm := prop.GetPermit()
+	if pm.GetRiskClass() != pb.RiskClass_RISK_CLASS_MEDIUM || pm.GetApprovalRequirement() != pb.ApprovalRequirement_APPROVAL_REQUIREMENT_ASSERTION_PRESENCE ||
+		len(pm.GetChallenge()) == 0 || len(pm.GetRequestOptionsJson()) == 0 {
+		t.Fatalf("permit risk %v requirement %v challenge %d options %d", pm.GetRiskClass(), pm.GetApprovalRequirement(), len(pm.GetChallenge()), len(pm.GetRequestOptionsJson()))
+	}
+	approved, approveErr, res, err := e.commitAfterWebAuthn(t, prop, false)
+	if approveErr != nil || approved.GetState() != pb.PermitState_PERMIT_STATE_APPROVED {
+		t.Fatalf("presence approval: %+v %v", approved, approveErr)
+	}
+	if err != nil {
+		t.Fatalf("commit after approval: %v", err)
+	}
+	want := []string{pveStepGuestClone, pveStepGuestConfig, pveStepGuestResize, pveStepGuestStart}
+	if got := e.pc.methods(); strings.Join(got, ",") != strings.Join(want, ",") || len(res.GetSteps()) != len(want) {
+		t.Fatalf("steps %v (result %d), want %v", got, len(res.GetSteps()), want)
+	}
+	if cfg := string(e.pc.provisionSteps()[1].Args); !strings.Contains(cfg, strings.Fields(e.autoKey)[1]) {
+		t.Fatal("config step does not carry the designated automation key")
+	}
+}
+
+// TestServiceGuestProvisionRaisedRiskNeedsUserVerification: when the
+// authority's risk policy raises the provisioning above MEDIUM, the permit
+// requires WebAuthn user verification. A presence-only assertion is
+// refused, the permit stays pending and the server's commit is refused as
+// unapproved without sending anything; a user-verified assertion approves
+// it and the run goes through.
+func TestServiceGuestProvisionRaisedRiskNeedsUserVerification(t *testing.T) {
+	e := newProvisionRPCEnvWith(t, provisionRPCOptions{risk: highRisk{}})
+	prop, err := e.svc.ProposePVEGuestProvision(context.Background(),
+		&pb.ProposePVEGuestProvisionRequest{Spec: testProvisionSpec(bindingOf(e.tpl), PveAutomationCredentialRef)})
+	if err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	pm := prop.GetPermit()
+	if pm.GetRiskClass() != pb.RiskClass_RISK_CLASS_HIGH || pm.GetApprovalRequirement() != pb.ApprovalRequirement_APPROVAL_REQUIREMENT_ASSERTION_VERIFIED {
+		t.Fatalf("permit risk %v requirement %v, want HIGH with user verification", pm.GetRiskClass(), pm.GetApprovalRequirement())
+	}
+
+	_, approveErr, _, err := e.commitAfterWebAuthn(t, prop, false)
+	if status.Code(approveErr) != codes.PermissionDenied {
+		t.Fatalf("presence-only approval of a HIGH permit: %v, want PermissionDenied", approveErr)
+	}
+	d, perr := canonical.ParseDigest(pm.GetExecutionDigest())
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	if st, ok := e.auth.PermitState(d); !ok || st != permit.StatePending {
+		t.Fatalf("permit state %v %v after a refused approval, want pending", st, ok)
+	}
+	if st := status.Convert(err); st.Code() != codes.PermissionDenied || !strings.Contains(st.Message(), "no approved permit") {
+		t.Fatalf("commit after a refused approval: %v, want PermissionDenied (no approved permit)", err)
+	}
+	if n := len(e.pc.provisionSteps()); n != 0 {
+		t.Fatalf("%d steps sent without user verification", n)
+	}
+
+	approved, approveErr, res, err := e.commitAfterWebAuthn(t, prop, true)
+	if approveErr != nil || approved.GetState() != pb.PermitState_PERMIT_STATE_APPROVED {
+		t.Fatalf("verified approval: %+v %v", approved, approveErr)
+	}
+	if err != nil || len(res.GetSteps()) != 4 {
+		t.Fatalf("commit after verified approval: %+v %v", res, err)
+	}
+}
+
 // proposeApproved proposes the designated-key spec over the RPC and
 // approves it with the CLI.
 func (e *provisionRPCEnv) proposeApproved(t *testing.T, ctx context.Context) (*pb.ProposePVEGuestProvisionResponse, canonical.Digest) {
