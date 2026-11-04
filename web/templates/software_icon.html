@@ -87,6 +87,7 @@
   {{if $v.HistoryErr}}
   <p class="message message--error" role="status">History unavailable.</p>
   {{else if $v.History}}
+  {{if $v.HistoryMore}}<p class="hint" role="status">Only the newest {{len $v.History}} changes are shown; older changes exist. They cannot be restored from this page.</p>{{end}}
   <table class="table sw-table">
     <thead><tr><th scope="col">Change</th><th scope="col">Before</th><th scope="col">After</th><th scope="col">By</th><th scope="col">When</th><th scope="col"><span class="visually-hidden">Rollback</span></th></tr></thead>
     <tbody>

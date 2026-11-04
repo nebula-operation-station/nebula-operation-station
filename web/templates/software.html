@@ -4,9 +4,9 @@
 <p class="hint">Software seen on managed hosts, guests and containers (ADR 0009 D5). Names are text from the catalog; icons come only from this server.</p>
 <nav class="actions" aria-label="Filter by state">
   {{range $v.Filters}}<a class="button button--small{{if not .Active}} button--secondary{{end}}" href="{{.Href}}"{{if .Active}} aria-current="page"{{end}}>{{.Label}}</a>{{end}}
-  <a class="button button--small button--secondary" href="/software/unknown">Unknown software ({{$v.Unknown}})</a>
+  <a class="button button--small button--secondary" href="/software/unknown">Unknown software ({{$v.Unknown}}{{if $v.Truncated}}+{{end}})</a>
 </nav>
-{{if $v.Truncated}}<p class="message message--error" role="status">Only the first rows are shown; the catalog is larger.</p>{{end}}
+{{if $v.Truncated}}<p class="message message--error" role="status">Only the first rows are shown; the catalog is larger. The state filter and the unknown count cover only these rows.</p>{{end}}
 {{if $v.Rows}}
 <table class="table sw-table">
   <thead>
@@ -27,6 +27,6 @@
   </tbody>
 </table>
 {{else}}
-<p class="hint">No catalog entries{{if $v.Filter}} in this state{{end}}.</p>
+<p class="hint">No catalog entries{{if $v.Filter}} in this state{{end}}{{if $v.Truncated}} among the rows read{{end}}.</p>
 {{end}}
 {{end}}

@@ -278,7 +278,10 @@ type catalogView struct {
 	Filter    string
 	Filters   []filterLink
 	Truncated bool
-	Unknown   int // rows in state observed (unmerged), for the queue link
+	// Unknown counts rows in state observed (unmerged), for the queue
+	// link. When Truncated it only covers the rows read, so it is a
+	// lower bound and the filtered view may miss matching entries.
+	Unknown int
 }
 
 type filterLink struct {
@@ -326,6 +329,7 @@ type iconView struct {
 	Allow       []string
 	History     []historyRow
 	HistoryErr  bool
+	HistoryMore bool // older changes exist beyond the rows shown
 
 	CandidatesOn  bool
 	CandidatesErr bool
@@ -559,11 +563,15 @@ func (h *Handler) fillIcon(ctx context.Context, v *iconView, sha string) {
 			v.CurrentBy, v.CurrentAt = ic.AddedBy, ic.AddedAt
 		}
 	}
-	hist, err := h.catalog.IconHistory(ctx, subject, historyPage)
+	// Read one row more than shown to tell whether older changes exist.
+	hist, err := h.catalog.IconHistory(ctx, subject, historyPage+1)
 	if err != nil {
 		h.log.ErrorContext(ctx, "read icon history", "subject_kind", v.Kind, "subject", v.ID, "error", err.Error())
 		v.HistoryErr = true
 		return
+	}
+	if len(hist) > historyPage {
+		hist, v.HistoryMore = hist[:historyPage], true
 	}
 	// Changes at or before an asset deletion belong to the deleted asset
 	// and cannot be rolled back (history is newest first).

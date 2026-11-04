@@ -28,6 +28,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/softwarecat"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui/icons"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui/icons/iconjob"
+	"github.com/nebula-operation-station/nebula-operation-station/web/static"
 )
 
 var t0 = time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
@@ -898,9 +899,11 @@ func TestTemplatesAndScriptAreCSPSafe(t *testing.T) {
 			}
 		}
 	}
-	js, err := os.ReadFile(filepath.Join(root, "web", "static", "software.js"))
+	// Read the script from the embedded FS the server serves, not from
+	// disk, so a file missing from the //go:embed list fails here.
+	js, err := static.FS.ReadFile("software.js")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("software.js is not embedded in web/static: %v", err)
 	}
 	for _, bad := range []string{"innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function", "createElement('img'", "createElement(\"img\"", ".src", "http://", "https://", "setAttribute('href'", "DOMParser"} {
 		if bytes.Contains(js, []byte(bad)) {
@@ -909,5 +912,68 @@ func TestTemplatesAndScriptAreCSPSafe(t *testing.T) {
 	}
 	if !bytes.Contains(js, []byte("textContent")) {
 		t.Error("software.js does not use textContent for messages")
+	}
+}
+
+// TestCatalogTruncatedSaysFilterAndCountArePartial checks that a
+// truncated catalog marks the unknown count as a lower bound and does
+// not claim a state has no entries at all.
+func TestCatalogTruncatedSaysFilterAndCountArePartial(t *testing.T) {
+	f := newFixture(t, func(o *Options, _ *fixture) {
+		o.List = func(context.Context, int) ([]Row, bool, error) {
+			return []Row{{Key: "aaa", Display: "aaa", State: softwarecat.StateObserved}}, true, nil
+		}
+	})
+	code, body := f.get(t, "/software")
+	if code != http.StatusOK {
+		t.Fatalf("GET /software: %d", code)
+	}
+	if !strings.Contains(body, "Unknown software (1+)") {
+		t.Error("truncated catalog does not mark the unknown count as a lower bound")
+	}
+	if !strings.Contains(body, "cover only these rows") {
+		t.Error("truncated catalog does not say the filter and count are partial")
+	}
+	code, body = f.get(t, "/software?state=ignored")
+	if code != http.StatusOK {
+		t.Fatalf("GET /software?state=ignored: %d", code)
+	}
+	if !strings.Contains(body, "No catalog entries in this state among the rows read.") {
+		t.Error("truncated filtered view claims the state has no entries")
+	}
+}
+
+// longHistoryCatalog reports more icon history than one page holds.
+type longHistoryCatalog struct {
+	Catalog
+	n int
+}
+
+func (c longHistoryCatalog) IconHistory(_ context.Context, subject softwarecat.IconSubject, limit int) ([]softwarecat.IconChange, error) {
+	var out []softwarecat.IconChange
+	for i := c.n; i > 0 && len(out) < limit; i-- {
+		out = append(out, softwarecat.IconChange{ID: int64(i), Subject: subject, ChangedBy: admin, ChangedAt: t0})
+	}
+	return out, nil
+}
+
+func TestIconHistorySaysWhenCutOff(t *testing.T) {
+	for _, tc := range []struct {
+		n        int
+		wantMore bool
+	}{{historyPage, false}, {historyPage + 5, true}} {
+		f := newFixture(t, func(o *Options, _ *fixture) {
+			o.Catalog = longHistoryCatalog{Catalog: o.Catalog, n: tc.n}
+		})
+		code, body := f.get(t, "/software/icon/widgetd")
+		if code != http.StatusOK {
+			t.Fatalf("n=%d: GET icon page: %d", tc.n, code)
+		}
+		if got := strings.Count(body, `name="change"`); got != historyPage {
+			t.Errorf("n=%d: %d rollback forms, want %d", tc.n, got, historyPage)
+		}
+		if more := strings.Contains(body, "older changes exist"); more != tc.wantMore {
+			t.Errorf("n=%d: cut-off notice shown %v, want %v", tc.n, more, tc.wantMore)
+		}
 	}
 }
