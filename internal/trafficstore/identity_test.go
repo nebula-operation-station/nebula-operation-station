@@ -363,9 +363,9 @@ func TestReconcileReleasesSilentOwner(t *testing.T) {
 		"host-a": hostIdentity(mac, "10.0.0.1"),
 		"host-c": hostIdentity(macC, "10.0.2.1"),
 	}
-	n, err := s.ReconcileIdentities(ctx, current)
-	if err != nil || n != 1 {
-		t.Fatalf("reconcile = %d, %v, want 1 released", n, err)
+	r, err := s.ReconcileIdentities(ctx, current)
+	if err != nil || r.Released != 1 || len(r.Skipped) != 0 {
+		t.Fatalf("reconcile = %+v, %v, want 1 released, none skipped", r, err)
 	}
 	if g := mustEndpoint(t, s, macID); g.Owner != "host-a" || !slices.Equal(g.Addresses, addrList("10.0.0.1")) {
 		t.Errorf("MAC endpoint = owner %q addresses %v, want host-a with 10.0.0.1", g.Owner, g.Addresses)
@@ -379,8 +379,8 @@ func TestReconcileReleasesSilentOwner(t *testing.T) {
 	// host-a drops out of the records entirely: it loses the MAC endpoint
 	// and its attestations; the observer's own report is kept.
 	delete(current, "host-a")
-	if n, err := s.ReconcileIdentities(ctx, current); err != nil || n != 1 {
-		t.Fatalf("reconcile = %d, %v, want 1 released", n, err)
+	if r, err := s.ReconcileIdentities(ctx, current); err != nil || r.Released != 1 {
+		t.Fatalf("reconcile = %+v, %v, want 1 released", r, err)
 	}
 	g := mustEndpoint(t, s, macID)
 	if g.Owner != "" || !slices.Equal(g.SeenBy, []string{"host-a", "observer"}) ||
@@ -393,24 +393,26 @@ func TestReconcileReleasesSilentOwner(t *testing.T) {
 		t.Errorf("host-c endpoint = owner %q addresses %v, want unchanged", g.Owner, g.Addresses)
 	}
 	// Idempotent; ownership is never granted by reconciling.
-	if n, err := s.ReconcileIdentities(ctx, map[string]Identity{"host-a": ownA, "host-c": hostIdentity(macC, "10.0.2.1")}); err != nil || n != 0 {
-		t.Errorf("reconcile again = %d, %v, want 0", n, err)
+	if r, err := s.ReconcileIdentities(ctx, map[string]Identity{"host-a": ownA, "host-c": hostIdentity(macC, "10.0.2.1")}); err != nil || r.Released != 0 {
+		t.Errorf("reconcile again = %+v, %v, want 0", r, err)
 	}
 	if g := mustEndpoint(t, s, macID); g.Owner != "" {
 		t.Errorf("owner = %q after reconcile, want none until host-a reports", g.Owner)
 	}
 	// A malformed record backs nothing (fail closed) and does not stop
 	// the reconcile of other hosts: host-c's ownership is released, and
-	// the valid record of host-d keeps its endpoint.
+	// the valid record of host-d keeps its endpoint. The malformed records
+	// are reported, so the caller can log them.
 	const macD = "00:11:22:33:44:0d"
 	mustUpsert(t, s, testEndpoint("10.0.3.1", macD, "host-d"), hostIdentity(macD, "10.0.3.1"))
 	dID := mustLookup(t, s, macD, "").ID
-	n, err = s.ReconcileIdentities(ctx, map[string]Identity{
+	r, err = s.ReconcileIdentities(ctx, map[string]Identity{
 		"host-c": {MACs: []string{"bad"}},
 		"host-d": hostIdentity(macD, "10.0.3.1"),
+		"host-e": {Addrs: []netip.Addr{{}}},
 	})
-	if err != nil || n != 1 {
-		t.Fatalf("reconcile with a malformed record = %d, %v, want 1 released", n, err)
+	if err != nil || r.Released != 1 || !slices.Equal(r.Skipped, []string{"host-c", "host-e"}) {
+		t.Fatalf("reconcile with malformed records = %+v, %v, want 1 released, host-c and host-e skipped", r, err)
 	}
 	if g := mustEndpoint(t, s, cID); g.Owner != "" {
 		t.Errorf("host-c owner = %q after its record turned malformed, want released", g.Owner)
