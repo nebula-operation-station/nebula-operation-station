@@ -977,3 +977,62 @@ func TestIconHistorySaysWhenCutOff(t *testing.T) {
 		}
 	}
 }
+
+// longQueueCatalog reports n unknown entries and, like softwarecat.Store,
+// never returns more than softwarecat.MaxQueuePage of them.
+type longQueueCatalog struct {
+	Catalog
+	n      int
+	limits *[]int
+}
+
+func (c longQueueCatalog) UnknownQueue(_ context.Context, limit int) ([]softwarecat.QueueEntry, error) {
+	*c.limits = append(*c.limits, limit)
+	if limit <= 0 || limit > softwarecat.MaxQueuePage {
+		limit = softwarecat.MaxQueuePage
+	}
+	var out []softwarecat.QueueEntry
+	for i := 0; i < c.n && len(out) < limit; i++ {
+		out = append(out, softwarecat.QueueEntry{Entry: softwarecat.Entry{Key: softwarecat.Key(fmt.Sprintf("unit%04d", i)),
+			Display: "x", State: softwarecat.StateObserved}, Hosts: 1, Observations: 1, LastSeen: t0})
+	}
+	return out, nil
+}
+
+// TestUnknownQueueSaysWhenCutOff checks the cut-off notice in both
+// directions: a queue that fits the page shows every entry and no notice,
+// one entry more shows the notice. The page asks for at most what the
+// store returns, so the look-ahead row is not silently capped away.
+func TestUnknownQueueSaysWhenCutOff(t *testing.T) {
+	for _, tc := range []struct {
+		n        int
+		wantRows int
+		wantCut  bool
+	}{
+		{0, 0, false},
+		{queuePage - 1, queuePage - 1, false},
+		{queuePage, queuePage, false},
+		{queuePage + 1, queuePage, true},
+		{softwarecat.MaxQueuePage + 100, queuePage, true},
+	} {
+		var limits []int
+		f := newFixture(t, func(o *Options, _ *fixture) {
+			o.Catalog = longQueueCatalog{Catalog: o.Catalog, n: tc.n, limits: &limits}
+		})
+		code, body := f.get(t, "/software/unknown")
+		if code != http.StatusOK {
+			t.Fatalf("n=%d: GET /software/unknown: %d", tc.n, code)
+		}
+		if got := strings.Count(body, `action="/software/rename"`); got != tc.wantRows {
+			t.Errorf("n=%d: %d rows shown, want %d", tc.n, got, tc.wantRows)
+		}
+		if cut := strings.Contains(body, "Only the most recently seen entries are shown"); cut != tc.wantCut {
+			t.Errorf("n=%d: cut-off notice shown %v, want %v", tc.n, cut, tc.wantCut)
+		}
+		for _, l := range limits {
+			if l <= queuePage || l > softwarecat.MaxQueuePage {
+				t.Errorf("n=%d: queue read with limit %d, want %d < limit <= %d", tc.n, l, queuePage, softwarecat.MaxQueuePage)
+			}
+		}
+	}
+}
