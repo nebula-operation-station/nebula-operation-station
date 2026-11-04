@@ -583,6 +583,7 @@ func TestReadGrantProposalRequiresPinnedTargets(t *testing.T) {
 
 func TestReadGrantRPCLockPausesBothTriggers(t *testing.T) {
 	e, sign, raw := readRPCEnv(t, permit.ModeStandard)
+	e.usePrivateKeyring() // the test locks the executor
 	client := readRPCClient(t, e.svc, peercred.RoleServer)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
