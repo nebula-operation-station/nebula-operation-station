@@ -43,10 +43,11 @@ type routeDoc struct {
 	Nexthops []nexthopDoc `json:"nexthops"`
 }
 
-// viaDoc is the permissive shape of an RFC 5549 "via" field: a next hop
-// of a different family than the destination (an IPv6 next hop for an
-// IPv4 destination), which iproute2 prints as
-// {"family": "inet6", "host": "fe80::1"}.
+// viaDoc is the permissive shape of a "via" next hop, which iproute2
+// prints as {"family": "inet6", "host": "fe80::1"}. iproute2 uses it for
+// RFC 5549 next hops (an IPv6 next hop for an IPv4 destination); a "via"
+// of the destination's own family is accepted as well and treated like
+// a gateway. An IPv4 "via" for an IPv6 destination is rejected.
 type viaDoc struct {
 	Family string `json:"family"`
 	Host   string `json:"host"`
@@ -78,10 +79,12 @@ type RouteTable struct {
 //
 // A destination is "default", a prefix, or a bare address (a host route,
 // stored as /32 or /128); an address destination never carries a zone. A
-// "default" destination takes the family of the entry's gateway (or of
-// its first next-hop gateway); without a gateway, the family of the first
-// valid route in the document. An entry with no family signal is skipped,
-// never guessed. A multipath route (a "nexthops" list and no top-level
+// "default" destination takes the only family its next hops admit (see
+// defaultFamily): the family of a plain gateway, IPv4 for an IPv4 "via";
+// when that leaves both families open (no gateway, or only IPv6 "via"
+// next hops, which fit an IPv6 default and an RFC 5549 IPv4 default),
+// the family of the first valid route in the document. An entry with no
+// family signal is skipped, never guessed. A multipath route (a "nexthops" list and no top-level
 // gateway or device) is expanded into one Route per next hop. Entries
 // with an invalid destination, gateway (including an IPv6 zone that is
 // not a short interface name, or a gateway whose family differs from the
@@ -196,10 +199,11 @@ func parseHop(gateway string, via *viaDoc, dev string) (hop, bool) {
 	return h, true
 }
 
-// parseVia parses one RFC 5549 "via" next hop. The host goes through the
-// same strict parseHostAddr/zone rules as a gateway; the family must be
-// a known family name ("inet" or "inet6") and must match the host's
-// family.
+// parseVia parses one "via" next hop (RFC 5549 or of the destination's
+// own family; the family combination is checked by parseRouteEntry). The
+// host goes through the same strict parseHostAddr/zone rules as a
+// gateway; the family must be a known family name ("inet" or "inet6")
+// and must match the host's family.
 func parseVia(v *viaDoc) (netip.Addr, bool) {
 	var fam int
 	switch v.Family {
@@ -253,26 +257,7 @@ func parseRouteEntry(d routeDoc, docFamily int, hasFamily bool) ([]Route, bool) 
 	}
 	var dst netip.Prefix
 	if d.Dst == "default" {
-		fam, ok := 0, false
-		for _, h := range hops {
-			if f, ok2 := familyOf(h.gw); ok2 {
-				fam, ok = f, true
-				if h.via {
-					// RFC 5549: a "via" next hop has the other
-					// family than the destination: an IPv6 next
-					// hop means an IPv4 destination.
-					if f == 6 {
-						fam = 4
-					} else {
-						fam = 6
-					}
-				}
-				break
-			}
-		}
-		if !ok && hasFamily {
-			fam, ok = docFamily, true
-		}
+		fam, ok := defaultFamily(hops, docFamily, hasFamily)
 		if !ok {
 			return nil, false
 		}
@@ -300,6 +285,45 @@ func parseRouteEntry(d routeDoc, docFamily int, hasFamily bool) ([]Route, bool) 
 		routes = append(routes, Route{Dst: dst, Gateway: h.gw, Dev: h.dev, Metric: d.Metric})
 	}
 	return routes, true
+}
+
+// defaultFamily returns the family (4 or 6) of a "default" destination
+// with the given next hops. Each hop narrows the possible families: a
+// plain gateway allows only its own family; a "via" with an IPv4 host
+// allows only IPv4 (an IPv4 next hop is never accepted for an IPv6
+// destination); a "via" with an IPv6 host allows both, as an IPv6
+// next hop of an IPv6 default or an RFC 5549 next hop of an IPv4
+// default. A single remaining family decides, independent of hop order.
+// When both remain (only IPv6 "via" hops, or no gateway at all), the
+// document family decides, as iproute2 prints one family per document;
+// without one the entry has no family signal and ok is false, never a
+// guess. ok is also false when the hops admit no family (mixed plain
+// gateways).
+func defaultFamily(hops []hop, docFamily int, hasFamily bool) (int, bool) {
+	allow4, allow6 := true, true
+	for _, h := range hops {
+		f, ok := familyOf(h.gw)
+		if !ok {
+			continue
+		}
+		if f == 4 {
+			allow6 = false
+		} else if !h.via {
+			allow4 = false
+		}
+	}
+	switch {
+	case allow4 && allow6:
+		if !hasFamily {
+			return 0, false
+		}
+		return docFamily, true
+	case allow4:
+		return 4, true
+	case allow6:
+		return 6, true
+	}
+	return 0, false
 }
 
 // familyOf returns 4 or 6 for a valid address and ok=false for the zero
