@@ -36,6 +36,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/auditlog"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/deployprofile"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/discovery"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/discoveryjob"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/events"
@@ -51,6 +52,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/modules"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/runbooks"
@@ -342,7 +344,13 @@ func newHarness(preview bool, port, dir string) http.Handler {
 	_, err = inv.Create(context.Background(), inventory.Host{ID: "e2e-two", DisplayName: "E2E second host", Environment: inventory.EnvDev,
 		Criticality: inventory.CriticalityLow, Endpoints: []inventory.Endpoint{{Address: twoAddr, Port: twoPortNum}}}, inventory.CreateOptions{})
 	must(err)
-	ops := executions.New(context.Background(), direct{svc}, sdb, inv, log)
+	// In preview mode the operations executor also serves a fixed demo
+	// read-grant registry (/leases).
+	var opsExec executions.Executor = direct{svc}
+	if preview {
+		opsExec = previewExec{direct: direct{svc}, grants: previewReadGrants(time.Now())}
+	}
+	ops := executions.New(context.Background(), opsExec, sdb, inv, log)
 	rb := runbooks.New(sdb)
 	ops.SetRunbooks(rb)
 	mods := modules.New(sdb, direct{svc})
@@ -366,10 +374,42 @@ func newHarness(preview bool, port, dir string) http.Handler {
 	ipamStore := ipam.New(sdb, ipam.FromInventory(inv.List))
 	disc := discovery.New(sdb, spool, ipamStore, ipam.FromInventory(inv.List), log)
 	audit := auditlog.New(sdb, true)
-	u, err := ui.New(ui.Options{PublicOrigin: origin, Events: direct{svc}, Audit: audit, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Pins: inv, Schedules: ops, Runbooks: rb, Trust: direct{svc}, Modules: mods, LastResult: ops.LastResult, Network: ipamStore, Discovery: disc, Repin: direct{svc}, Enroll: direct{svc}, SecurityKeys: securityKeys, TOTPStatus: totpStatus, Log: slog.New(auditlog.NewHandler(base, audit))})
-	must(err)
+	uiLog := slog.New(auditlog.NewHandler(base, audit))
+	opts := ui.Options{PublicOrigin: origin, Events: direct{svc}, Audit: audit, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Pins: inv, Schedules: ops, Runbooks: rb, Trust: direct{svc}, Modules: mods, LastResult: ops.LastResult, Network: ipamStore, Discovery: disc, Repin: direct{svc}, Enroll: direct{svc}, SecurityKeys: securityKeys, TOTPStatus: totpStatus, Log: uiLog}
+	pages := http.NewServeMux()
+	var pveStore *pveinventory.Store
 	if preview {
-		seedPreview(context.Background(), svc, sdb, inv, rb, sshPub, origin)
+		// The pages the real server (cmd/nebula-server) also registers:
+		// PVE remotes, guest snapshots, read leases, deploy profiles,
+		// deployments and batches; executor calls go to fakes.
+		pveStore = pveinventory.New(sdb)
+		profiles := deployprofile.New(sdb)
+		batches, batchPages := previewBatches(sdb, direct{svc}, inv, ops, uiLog)
+		opts.PVE = pveStore
+		opts.PVEChart = func(ctx context.Context) (pveinventory.Tree, error) { return pveStore.ChartTree(ctx, time.Now()) }
+		opts.PVERemotes = previewRemoteMetas
+		opts.GuestSnapshot = previewSnapshots{}
+		opts.Leases = ops
+		opts.DeployProfiles = profiles
+		opts.Deploy = previewProvision{}
+		opts.DeployJoin = &pveinventory.GuestJoinFlow{Store: pveStore, Executor: previewJoin{}}
+		opts.DeployIPAM = ipamStore
+		opts.DeployBatches = batches
+		batchPages.Register(pages)
+		now := time.Now()
+		ctx := context.Background()
+		seedPreview(ctx, svc, sdb, inv, rb, sshPub, origin)
+		seedPreviewMetrics(ctx, sdb, now)
+		seedPreviewPVE(ctx, pveStore, now)
+		seedPreviewBatch(ctx, sdb, direct{svc}, now)
+		seedPreviewDeployNetwork(ctx, ipamStore)
+		seedPreviewProfile(ctx, profiles)
+	}
+	u, err := ui.New(opts)
+	must(err)
+	pages.Handle("/", u.Handler())
+	if preview {
+		seedPreviewDeployment(context.Background(), pages, pveStore, uiLog)
 	}
 	mux := http.NewServeMux()
 	// Test hook: issue a one-time code like `nebula webauthn code`.
@@ -403,7 +443,7 @@ func newHarness(preview bool, port, dir string) http.Handler {
 		must(disc.Poll(r.Context()))
 		fmt.Fprint(w, len(jobs))
 	})
-	mount := u.Handler()
+	var mount http.Handler = pages
 	if !preview {
 		mount = ah.Wrap(mount)
 	}
