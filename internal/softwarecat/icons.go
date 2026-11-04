@@ -87,8 +87,10 @@ type IconChange struct {
 }
 
 // validSourceURL checks an icon source URL for storage: printable
-// ASCII, bounded, absolute https with a host and without user info.
-// The URL is stored for audit only; the fetch policy itself is
+// ASCII, bounded, absolute https with a host, without user info and
+// without query string or fragment (signed or tokenized URLs carry
+// their secret there, and the URL ends up in the audit detail). The URL
+// is stored for audit only; the fetch policy itself is
 // internal/iconfetch's.
 func validSourceURL(raw string) error {
 	if raw == "" || len(raw) > maxSourceURLLen {
@@ -97,6 +99,9 @@ func validSourceURL(raw string) error {
 	for i := 0; i < len(raw); i++ {
 		if c := raw[i]; c <= ' ' || c >= 0x7f {
 			return fmt.Errorf("icon source URL byte %d: %w", i, ErrInvalidInput)
+		}
+		if c := raw[i]; c == '?' || c == '#' {
+			return fmt.Errorf("icon source URL with query string or fragment: %w", ErrInvalidInput)
 		}
 	}
 	u, err := url.Parse(raw)

@@ -664,6 +664,11 @@ func TestRegisterIconValidatesSource(t *testing.T) {
 		{"control", shaB, IconURL, "https://example.org/\x00"},
 		{"empty url", shaB, IconURL, ""},
 		{"too long", shaB, IconURL, "https://example.org/" + strings.Repeat("a", maxSourceURLLen)},
+		{"query token", shaB, IconURL, "https://example.org/a.png?token=s3cr3t"},
+		{"empty query", shaB, IconURL, "https://example.org/a.png?"},
+		{"fragment", shaB, IconURL, "https://example.org/a.png#access_token=s3cr3t"},
+		{"empty fragment", shaB, IconURL, "https://example.org/a.png#"},
+		{"escaped query", shaB, IconURL, "https://example.org/a.png%3Ftoken=x?y=1"},
 		{"bad kind", shaB, "crawler", ""},
 		{"upper hex", strings.ToUpper(shaB), IconUpload, ""},
 		{"short hash", "abc", IconUpload, ""},
@@ -675,6 +680,15 @@ func TestRegisterIconValidatesSource(t *testing.T) {
 	}
 	if got := auditActions(t, s); len(got) != 1 || got[0] != "icon_register "+shaA+" by alice" {
 		t.Fatalf("audit %v", got)
+	}
+	recs, err := s.AuditTrail(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range recs {
+		if strings.Contains(r.Detail, "s3cr3t") {
+			t.Fatalf("token in audit detail %q", r.Detail)
+		}
 	}
 }
 
