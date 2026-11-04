@@ -14,13 +14,18 @@ import (
 
 // Store limits, next to the code that enforces them (ADR 0009 D7).
 const (
-	// MaxCatalogEntries bounds the number of catalog rows. Automatic
-	// creation stops at this bound; observations of keys without an
-	// entry are then refused and counted as limited.
+	// MaxCatalogEntries bounds the number of catalog rows created for
+	// unknown keys. Automatic creation of unknown keys stops at this
+	// bound; their observations are then refused and counted as
+	// limited. Keys the seed map knows are still created (the seed map
+	// bounds them), so the catalog holds at most MaxCatalogEntries plus
+	// the seed map's size.
 	MaxCatalogEntries = 20_000
-	// MaxQueueEntriesPerHost bounds the "observed" (unknown) catalog
-	// entries one managed host may create, so one host cannot flood the
-	// unknown queue or exhaust MaxCatalogEntries for everyone else.
+	// MaxQueueEntriesPerHost bounds the catalog entries one managed host
+	// may create for unknown keys, so one host cannot flood the unknown
+	// queue or exhaust MaxCatalogEntries for everyone else. Every entry
+	// the host created counts (seed keys included), whatever its state
+	// now, so reviewing a host's entries does not give it room for more.
 	MaxQueueEntriesPerHost = 1_000
 	// MaxObservationsPerHost bounds the observation rows of one managed
 	// host (all its targets and source actions together).
@@ -378,6 +383,7 @@ func (s *Store) observe(ctx context.Context, items []item, at time.Time) (Ingest
 	}
 	defer func() { _ = tx.Rollback() }()
 	ts := at.UnixNano()
+	caps := &capCounts{catalog: -1, hosts: map[string]int{}}
 	for _, it := range items {
 		if it.res.Key == unknownKey {
 			rep.Skipped++
@@ -387,7 +393,7 @@ func (s *Store) observe(ctx context.Context, items []item, at time.Time) (Ingest
 			rep.Skipped++
 			continue
 		}
-		created, ok, err := s.ensureEntry(ctx, tx, it, ts)
+		created, ok, err := s.ensureEntry(ctx, tx, caps, it, ts)
 		if err != nil {
 			return IngestReport{}, err
 		}
@@ -414,10 +420,71 @@ func (s *Store) observe(ctx context.Context, items []item, at time.Time) (Ingest
 	return rep, nil
 }
 
+// Cap count queries. Both are bounded by a LIMIT (the cap itself), so
+// the work under the write lock does not grow with the table; the
+// per-host count uses the partial index software_catalog_first_host
+// (the "first_host <> ''" term lets SQLite prove the index applies).
+const (
+	countCatalogQuery     = `SELECT COUNT(*) FROM (SELECT 1 FROM software_catalog LIMIT ?)`
+	countHostEntriesQuery = `SELECT COUNT(*) FROM (SELECT 1 FROM software_catalog WHERE first_host = ? AND first_host <> '' LIMIT ?)`
+)
+
+// capCounts caches the cap counters of one observe call. Each counter
+// is read from the database at most once per call (the transaction
+// holds the write lock, so nobody else changes them) and then kept up
+// to date by ensureEntry. catalog is -1 until read; hosts holds the
+// counts read so far, by host ID.
+type capCounts struct {
+	catalog int
+	hosts   map[string]int
+}
+
+// catalogCount returns the number of catalog rows, at most limit.
+func (c *capCounts) catalogCount(ctx context.Context, tx *sql.Tx, limit int) (int, error) {
+	if c.catalog < 0 {
+		if err := tx.QueryRowContext(ctx, countCatalogQuery, limit).Scan(&c.catalog); err != nil {
+			return 0, fmt.Errorf("count catalog: %w", err)
+		}
+	}
+	return c.catalog, nil
+}
+
+// hostCount returns the number of catalog rows created by host's
+// observations (any state, merged or not), at most limit.
+func (c *capCounts) hostCount(ctx context.Context, tx *sql.Tx, host string, limit int) (int, error) {
+	n, ok := c.hosts[host]
+	if !ok {
+		if err := tx.QueryRowContext(ctx, countHostEntriesQuery, host, limit).Scan(&n); err != nil {
+			return 0, fmt.Errorf("count catalog entries of host %s: %w", host, err)
+		}
+		c.hosts[host] = n
+	}
+	return n, nil
+}
+
+// created records one new catalog row created by host.
+func (c *capCounts) created(host string) {
+	if c.catalog >= 0 {
+		c.catalog++
+	}
+	if n, ok := c.hosts[host]; ok {
+		c.hosts[host] = n + 1
+	}
+}
+
 // ensureEntry makes sure the item's key has a catalog entry. It reports
 // whether it created one and whether the key may be observed (false when
 // a cap refused the creation).
-func (s *Store) ensureEntry(ctx context.Context, tx *sql.Tx, it item, ts int64) (created, ok bool, err error) {
+//
+// Keys the seed map knows are always created: there are only as many
+// as the seed map has entries, so they cannot exhaust the catalog, and
+// a catalog filled with unknown keys must not hide known software.
+// Unknown keys are refused when the catalog holds maxCatalog rows or
+// when the host already created maxQueuePerHost rows. The per-host count
+// covers every row the host created, whatever its state: reviewing
+// (renaming, ignoring, merging) a host's entries does not give the host
+// room for new ones.
+func (s *Store) ensureEntry(ctx context.Context, tx *sql.Tx, caps *capCounts, it item, ts int64) (created, ok bool, err error) {
 	key := string(it.res.Key)
 	var state, updatedBy string
 	err = tx.QueryRowContext(ctx, `SELECT state, updated_by FROM software_catalog WHERE key = ?`, key).Scan(&state, &updatedBy)
@@ -436,20 +503,19 @@ func (s *Store) ensureEntry(ctx context.Context, tx *sql.Tx, it item, ts int64) 
 	case !errors.Is(err, sql.ErrNoRows):
 		return false, false, fmt.Errorf("read catalog entry %s: %w", key, err)
 	}
-	var total int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM software_catalog`).Scan(&total); err != nil {
-		return false, false, fmt.Errorf("count catalog: %w", err)
-	}
-	if total >= s.maxCatalog {
-		return false, false, nil
-	}
+	host := it.target.HostID
 	state, display := string(StateKnown), it.res.Display
 	if !it.res.Known {
-		var n int
-		if err := tx.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM software_catalog WHERE first_host = ? AND state = 'observed'`,
-			it.target.HostID).Scan(&n); err != nil {
-			return false, false, fmt.Errorf("count queue entries of host %s: %w", it.target.HostID, err)
+		total, err := caps.catalogCount(ctx, tx, s.maxCatalog)
+		if err != nil {
+			return false, false, err
+		}
+		if total >= s.maxCatalog {
+			return false, false, nil
+		}
+		n, err := caps.hostCount(ctx, tx, host, s.maxQueuePerHost)
+		if err != nil {
+			return false, false, err
 		}
 		if n >= s.maxQueuePerHost {
 			return false, false, nil
@@ -461,9 +527,10 @@ func (s *Store) ensureEntry(ctx context.Context, tx *sql.Tx, it item, ts int64) 
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO software_catalog (key, display, state, first_host, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		key, display, state, it.target.HostID, ts, ts); err != nil {
+		key, display, state, host, ts, ts); err != nil {
 		return false, false, fmt.Errorf("create catalog entry %s: %w", key, err)
 	}
+	caps.created(host)
 	return true, true, nil
 }
 

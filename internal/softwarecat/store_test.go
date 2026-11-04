@@ -439,12 +439,126 @@ func TestObservationAndCatalogCaps(t *testing.T) {
 
 	s2, db2, _ := newTestStore(t)
 	s2.maxCatalog = 1
-	rep, err = s2.IngestServiceList(ctx, host1, unitsDoc("a1.service loaded", "nginx.service loaded"), t0)
-	if err != nil || rep.Created != 1 || rep.Limited != 1 {
+	rep, err = s2.IngestServiceList(ctx, host1, unitsDoc("a1.service loaded", "a2.service loaded", "nginx.service loaded"), t0)
+	if err != nil || rep.Created != 2 || rep.Limited != 1 {
 		t.Fatalf("catalog cap report %+v %v", rep, err)
 	}
-	if n := countRows(t, db2, "software_catalog"); n != 1 {
+	if n := countRows(t, db2, "software_catalog"); n != 2 {
 		t.Fatalf("catalog rows %d", n)
+	}
+	if _, err := s2.Entry(ctx, "a2"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown key past the catalog cap was created: %v", err)
+	}
+}
+
+func TestCatalogCapNeverRefusesSeedKeys(t *testing.T) {
+	ctx := context.Background()
+	s, _, _ := newTestStore(t)
+	s.maxCatalog = 2
+	// Other hosts fill the catalog with unknown entries.
+	for i, h := range []string{"h2", "h3"} {
+		u := fmt.Sprintf("junk%d.service loaded", i)
+		if _, err := s.IngestServiceList(ctx, Target{Kind: TargetHost, HostID: h}, unitsDoc(u), t0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A full catalog still accepts keys the seed map knows, but no
+	// further unknown keys.
+	rep, err := s.IngestDockerList(ctx, host1, dockerDoc("27", "postgres:16", "nginx:1", "unknownthing"), t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Docker itself, postgres and nginx are seed keys; unknownthing is not.
+	if rep.Created != 3 || rep.Limited != 1 || rep.Observed != 3 {
+		t.Fatalf("report %+v", rep)
+	}
+	for _, k := range []Key{"docker", "postgres", "nginx"} {
+		if e := mustEntry(t, s, k); e.State != StateKnown {
+			t.Fatalf("%s %+v", k, e)
+		}
+	}
+}
+
+func TestPerHostCapCountsReviewedEntries(t *testing.T) {
+	ctx := context.Background()
+	s, _, _ := newTestStore(t)
+	s.maxQueuePerHost = 2
+	seedUnknown(t, s, "a1", "a2")
+	// Reviewing a host's entries does not give the host new room.
+	if err := s.Ignore(ctx, "admin", "a1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Rename(ctx, "admin", "a2", "A two"); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := s.IngestServiceList(ctx, host1, unitsDoc("a3.service loaded", "a4.service loaded"), t0.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Created != 0 || rep.Limited != 2 {
+		t.Fatalf("report %+v", rep)
+	}
+	if q := queueKeys(t, s); len(q) != 0 {
+		t.Fatalf("queue %v", q)
+	}
+}
+
+func TestCapsAreCountedOncePerIngest(t *testing.T) {
+	ctx := context.Background()
+	s, _, _ := newTestStore(t)
+	s.maxCatalog = 5
+	s.maxQueuePerHost = 3
+	// One ingest with many new keys: the counters taken once at the
+	// start must track every creation inside the transaction.
+	rep, err := s.IngestServiceList(ctx, host1, unitsDoc("b1.service loaded", "b2.service loaded", "b3.service loaded", "b4.service loaded", "b5.service loaded"), t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Created != 3 || rep.Limited != 2 {
+		t.Fatalf("per-host report %+v", rep)
+	}
+	rep, err = s.IngestServiceList(ctx, Target{Kind: TargetHost, HostID: "h2"}, unitsDoc("c1.service loaded", "c2.service loaded", "c3.service loaded"), t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Created != 2 || rep.Limited != 1 {
+		t.Fatalf("catalog report %+v", rep)
+	}
+}
+
+func TestCapCountQueriesAreIndexedAndBounded(t *testing.T) {
+	_, db, _ := newTestStore(t)
+	plan := func(q string, args ...any) string {
+		t.Helper()
+		rows, err := db.Query(`EXPLAIN QUERY PLAN `+q, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = rows.Close() }()
+		var out []string
+		for rows.Next() {
+			var id, parent, notused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, detail)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(out, "; ")
+	}
+	if p := plan(countHostEntriesQuery, "h1", MaxQueueEntriesPerHost); !strings.Contains(p, "USING COVERING INDEX software_catalog_first_host") {
+		t.Fatalf("per-host count plan %q", p)
+	}
+	if p := plan(countCatalogQuery, MaxCatalogEntries); strings.Contains(p, "TEMP B-TREE") {
+		t.Fatalf("catalog count plan %q", p)
+	}
+	for _, q := range []string{countHostEntriesQuery, countCatalogQuery} {
+		if !strings.Contains(q, "LIMIT ?") {
+			t.Fatalf("count query is not bounded: %s", q)
+		}
 	}
 }
 
