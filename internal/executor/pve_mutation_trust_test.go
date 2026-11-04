@@ -29,10 +29,10 @@ type blockRecorder struct {
 	ids []string
 }
 
-func (b *blockRecorder) block(id string) {
+func (b *blockRecorder) block(rm executordb.PveRemote) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.ids = append(b.ids, id)
+	b.ids = append(b.ids, rm.RemoteID)
 }
 
 func (b *blockRecorder) take() []string {
@@ -133,8 +133,8 @@ func (c badDispatchClient) Dispatch(ctx context.Context, rm executordb.PveRemote
 }
 
 // adminBlock blocks a remote the way Service.blockPveMutation does.
-func adminBlock(a *PveAdmin) func(string) {
-	return func(id string) { _ = a.blockTrustFailure(id, "executor", errPveReadTrust) }
+func adminBlock(a *PveAdmin) func(executordb.PveRemote) {
+	return func(rm executordb.PveRemote) { _ = a.blockTrustFailure(rm.RemoteID, "executor", errPveReadTrust) }
 }
 
 // liveRevoke wires the admin revocation of e to its authority as the

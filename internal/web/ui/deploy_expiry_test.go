@@ -7,14 +7,17 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/ipam"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
@@ -51,7 +54,12 @@ func dhcpForm(name string) url.Values {
 	return f
 }
 
-func TestDeployExpiredProposalStopsCountingAndReleasesItsAddress(t *testing.T) {
+// TestDeployExpiredProposalStopsCountingAndKeepsItsAddress: the executor
+// cannot tell whether an execution was committed out of band before its
+// permit expired (GetPermitState answers "no live permit" for consumed and
+// expired alike), so the expiry never releases the address: it stays
+// reserved and the page says it may be in use.
+func TestDeployExpiredProposalStopsCountingAndKeepsItsAddress(t *testing.T) {
 	e := newDPEnv(t)
 	run := e.propose(t, dpForm())
 	if e.addressFree(t) {
@@ -60,22 +68,63 @@ func TestDeployExpiredProposalStopsCountingAndReleasesItsAddress(t *testing.T) {
 	// The executor's bound request expires after five minutes.
 	e.advance(6 * time.Minute)
 	body := e.waitState(t, run, "failed")
-	for _, want := range []string{"Proposed (failed)", "expired unapproved", "nothing was created"} {
+	for _, want := range []string{"Proposed (failed)", "expired without a run from this page", "may be in use", dpAddr,
+		"VMID " + strconv.Itoa(dpVMID)} {
 		if !strings.Contains(body, want) {
 			t.Errorf("expired proposal page lacks %q", want)
 		}
 	}
-	if !e.addressFree(t) {
-		t.Error("the reservation of an expired proposal is kept")
+	if strings.Contains(body, "nothing was created") {
+		t.Error("the expired proposal claims nothing was created")
+	}
+	if e.addressFree(t) {
+		t.Error("the expiry released the address of a proposal that may have been committed out of band")
 	}
 	id := strings.TrimPrefix(run, "/deployments/")
 	if code, _, _ := e.do(t, http.MethodPost, "/deployments/approve", "application/json", approveJSON(id)); code != http.StatusNotFound {
 		t.Errorf("approval of an expired proposal = %d", code)
 	}
-	// After the TTL the settled run is pruned.
+	// After the TTL the settled run is pruned; the reservation stays.
 	e.advance(25 * time.Hour)
 	if code, _, _ := e.do(t, http.MethodGet, run, "", ""); code != http.StatusNotFound {
 		t.Errorf("expired run still shown after its TTL: %d", code)
+	}
+	if e.addressFree(t) {
+		t.Error("pruning the expired run released its address")
+	}
+}
+
+// TestDeployOutOfBandCommitKeepsTheAddressOnExpiry: a CLI-mode proposal is
+// approved and committed outside the web UI (the admin role may call
+// CommitPVEGuestProvision) and never run from the page. When its proposal
+// expires on the page, the guest exists and uses the address: it must stay
+// reserved.
+func TestDeployOutOfBandCommitKeepsTheAddressOnExpiry(t *testing.T) {
+	e := newDPEnv(t)
+	e.prov.requirement = pb.ApprovalRequirement_APPROVAL_REQUIREMENT_CLI_ONLY
+	run := e.propose(t, dpForm())
+	spec := e.prov.proposed[0]
+	// `nebula approve` and a commit by the admin, out of band.
+	resp, err := e.prov.CommitPVEGuestProvision(context.Background(), &pb.CommitPVEGuestProvisionRequest{Spec: spec, ExecutionId: dpExec})
+	if err != nil || len(resp.GetSteps()) == 0 {
+		t.Fatalf("out-of-band commit = %v, %v", resp, err)
+	}
+	e.advance(6 * time.Minute)
+	body := e.waitState(t, run, "failed")
+	if !strings.Contains(body, "may be in use") {
+		t.Errorf("expired CLI proposal does not say the address may be in use: %s", body)
+	}
+	for range 3 {
+		e.do(t, http.MethodGet, "/deployments", "", "")
+		e.do(t, http.MethodGet, "/deployments/new", "", "")
+	}
+	if e.addressFree(t) {
+		t.Fatal("the expiry released the address of a guest committed out of band")
+	}
+	e.advance(25 * time.Hour)
+	e.do(t, http.MethodGet, "/deployments", "", "")
+	if e.addressFree(t) {
+		t.Error("the address of a guest committed out of band was released after the TTL")
 	}
 }
 
@@ -94,39 +143,38 @@ func TestDeployUserCapCountsOnlyLiveRuns(t *testing.T) {
 	e.propose(t, dhcpForm("webz"))
 }
 
-func TestDeployRefusedCommitReleasesTheAddress(t *testing.T) {
-	e := newDPEnv(t)
-	e.prov.commitErr = status.Error(codes.InvalidArgument, "pve guest provision: invalid or unsupported spec")
-	run := e.propose(t, dpForm())
-	id := strings.TrimPrefix(run, "/deployments/")
-	if code, body, _ := e.do(t, http.MethodPost, "/deployments/approve", "application/json", approveJSON(id)); code != http.StatusOK {
-		t.Fatalf("approve = %d %q", code, body)
-	}
-	e.waitState(t, run, "failed")
-	deadline := time.Now().Add(3 * time.Second)
-	for !e.addressFree(t) {
-		if time.Now().After(deadline) {
-			t.Fatal("the reservation of a refused commit is kept")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-// TestDeployAmbiguousRefusalKeepsTheAddress: PermissionDenied (also the
-// permit already used by an earlier run, or final) and FailedPrecondition
-// (also the VMID now existing) do not prove that no run of the execution
-// created the guest, so the address stays reserved, in key mode and in CLI
-// mode, also after the proposal of a CLI run expires.
+// TestDeployAmbiguousRefusalKeepsTheAddress: no refusal of the commit
+// proves that no run of the execution (another commit, for example with the
+// CLI) created the guest. InvalidArgument is not only request validation
+// (the executor also wraps automation key lookup errors in it and sends one
+// fixed text for every cause), PermissionDenied also means the permit was
+// already used or is final, FailedPrecondition also means the VMID now
+// exists, NotFound a remote or key removed after a run, Aborted a
+// concurrent change. The address stays reserved, in key mode and in CLI
+// mode, also after the proposal of a reset CLI run expires.
 func TestDeployAmbiguousRefusalKeepsTheAddress(t *testing.T) {
+	invalid := status.Error(codes.InvalidArgument, "pve guest provision: invalid or unsupported spec, template, network, key or password id")
+	used := status.Error(codes.PermissionDenied, "pve guest provision: no approved permit covers this provisioning")
+	vmid := status.Error(codes.FailedPrecondition, "pve guest provision: the vmid is in use or not reserved for this execution")
+	gone := status.Error(codes.NotFound, "pve guest provision: the NOS automation credential is not in the keyring")
+	aborted := status.Error(codes.Aborted, "pve guest provision: concurrent change")
 	for _, tc := range []struct {
 		name string
 		cli  bool
 		err  error
+		// reset: the CLI run goes back to proposed (approve, run again).
+		reset bool
 	}{
-		{"key already run", false, status.Error(codes.PermissionDenied, "pve guest provision: no approved permit covers this provisioning")},
-		{"key vmid exists", false, status.Error(codes.FailedPrecondition, "pve guest provision: the vmid is in use or not reserved for this execution")},
-		{"cli already run", true, status.Error(codes.PermissionDenied, "pve guest provision: no approved permit covers this provisioning")},
-		{"cli vmid exists", true, status.Error(codes.FailedPrecondition, "pve guest provision: the vmid is in use or not reserved for this execution")},
+		{"key invalid", false, invalid, false},
+		{"key already run", false, used, false},
+		{"key vmid exists", false, vmid, false},
+		{"key not found", false, gone, false},
+		{"key aborted", false, aborted, false},
+		{"cli invalid", true, invalid, false},
+		{"cli already run", true, used, true},
+		{"cli vmid exists", true, vmid, true},
+		{"cli not found", true, gone, false},
+		{"cli aborted", true, aborted, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newDPEnv(t)
@@ -136,25 +184,25 @@ func TestDeployAmbiguousRefusalKeepsTheAddress(t *testing.T) {
 			e.prov.commitErr = tc.err
 			run := e.propose(t, dpForm())
 			id := strings.TrimPrefix(run, "/deployments/")
-			var body string
+			want := "failed"
+			if tc.reset {
+				want = "proposed"
+			}
 			if tc.cli {
 				if code, _, _ := e.do(t, http.MethodPost, "/deployments/run", gpFormCT, url.Values{"id": {id}}.Encode()); code != http.StatusSeeOther {
 					t.Fatalf("run = %d", code)
 				}
-				body = e.waitState(t, run, "proposed")
-			} else {
-				if code, b, _ := e.do(t, http.MethodPost, "/deployments/approve", "application/json", approveJSON(id)); code != http.StatusOK {
-					t.Fatalf("approve = %d %q", code, b)
-				}
-				body = e.waitState(t, run, "failed")
+			} else if code, b, _ := e.do(t, http.MethodPost, "/deployments/approve", "application/json", approveJSON(id)); code != http.StatusOK {
+				t.Fatalf("approve = %d %q", code, b)
 			}
+			body := e.waitState(t, run, want)
 			if !strings.Contains(body, "stays reserved because an earlier run of this execution may have created the guest") {
 				t.Errorf("refused run does not say the address is kept: %s", body)
 			}
 			if e.addressFree(t) {
-				t.Fatal("the address was released after an ambiguous refusal")
+				t.Fatal("the address was released after a refused commit")
 			}
-			if tc.cli {
+			if tc.reset {
 				// The proposal of the reset run expires: still kept.
 				e.advance(6 * time.Minute)
 				body = e.waitState(t, run, "failed")
@@ -200,53 +248,107 @@ func (f *flakyIPAM) set(fail bool) (calls int) {
 	return f.calls
 }
 
-// TestDeployFailedReleaseIsRetried: a ClearEntry that fails leaves the
-// release pending; the run is not pruned past its TTL, and the next
-// settle (any deployment page) clears the reservation.
-func TestDeployFailedReleaseIsRetried(t *testing.T) {
+// TestDeploySettleNeverClearsAnAddress: settling (every deployment page and
+// form) never calls ClearEntry, so no page request waits on the IPAM store
+// and a failing store is never retried per request. Refused, expired and
+// pruned runs leave their reservation for the operator to clear on the
+// network page once no guest uses it.
+func TestDeploySettleNeverClearsAnAddress(t *testing.T) {
 	var fl *flakyIPAM
 	e := newDPEnvWith(t, func(o *ui.Options) {
 		fl = &flakyIPAM{Store: o.DeployIPAM.(*ipam.Store), fail: true}
 		o.DeployIPAM = fl
 	})
-	e.prov.commitErr = status.Error(codes.InvalidArgument, "pve guest provision: invalid or unsupported spec")
-	run := e.propose(t, dpForm())
-	id := strings.TrimPrefix(run, "/deployments/")
+	e.prov.commitErr = status.Error(codes.InvalidArgument, "pve guest provision: invalid or unsupported spec, template, network, key or password id")
+	refused := e.propose(t, dpForm())
+	id := strings.TrimPrefix(refused, "/deployments/")
 	if code, body, _ := e.do(t, http.MethodPost, "/deployments/approve", "application/json", approveJSON(id)); code != http.StatusOK {
 		t.Fatalf("approve = %d %q", code, body)
 	}
-	e.waitState(t, run, "failed")
-	deadline := time.Now().Add(3 * time.Second)
-	for fl.set(true) == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("no release was attempted")
-		}
-		time.Sleep(10 * time.Millisecond)
+	e.waitState(t, refused, "failed")
+	e.advance(3 * time.Second) // past the propose throttle
+	f := dhcpForm("web2")
+	expired := e.propose(t, f)
+	e.advance(6 * time.Minute)
+	e.waitState(t, expired, "failed")
+	for range 5 {
+		e.do(t, http.MethodGet, "/deployments", "", "")
+		e.do(t, http.MethodGet, "/deployments/new", "", "")
+		e.do(t, http.MethodGet, refused, "", "")
 	}
-	if e.addressFree(t) {
-		t.Fatal("the address is free although ClearEntry failed")
-	}
-	// Past the TTL the run waits for its release instead of being pruned.
 	e.advance(25 * time.Hour)
-	before := fl.set(true)
-	if code, _, _ := e.do(t, http.MethodGet, run, "", ""); code != http.StatusOK {
-		t.Fatalf("run with a pending release pruned: %d", code)
-	}
-	if fl.set(true) <= before {
-		t.Error("the failed release was not retried")
+	e.do(t, http.MethodGet, "/deployments", "", "")
+	if n := fl.set(false); n != 0 {
+		t.Errorf("settling called ClearEntry %d times", n)
 	}
 	if e.addressFree(t) {
-		t.Fatal("the address is free although ClearEntry failed again")
+		t.Error("an address was released by settling")
 	}
-	// Once ClearEntry works the retry clears it, and the run is pruned.
-	fl.set(false)
-	e.do(t, http.MethodGet, "/deployments", "", "")
-	if !e.addressFree(t) {
-		t.Fatal("the retried release did not clear the reservation")
+}
+
+// brokenDigestProvision answers with a permit whose digest does not match
+// its bound request: the executor holds a live permit, the page refuses it.
+type brokenDigestProvision struct{ *fakeProvision }
+
+func (b brokenDigestProvision) ProposePVEGuestProvision(ctx context.Context, in *pb.ProposePVEGuestProvisionRequest, opts ...grpc.CallOption) (*pb.ProposePVEGuestProvisionResponse, error) {
+	resp, err := b.fakeProvision.ProposePVEGuestProvision(ctx, in, opts...)
+	if err == nil {
+		resp.GetPermit().ExecutionDigest = strings.Repeat("0", 64)
 	}
-	if code, _, _ := e.do(t, http.MethodGet, run, "", ""); code != http.StatusNotFound {
-		t.Errorf("released run still shown after its TTL: %d", code)
-	}
+	return resp, err
+}
+
+// TestDeployProposeKeepsTheAddressWhenAPermitMayExist: the wizard releases
+// the address only when the executor refused the proposal (it then holds no
+// permit). When the outcome of the call is unknown, or the executor
+// answered with a permit the page cannot use, an admin may still approve
+// and commit that execution out of band, so the address stays reserved.
+func TestDeployProposeKeepsTheAddressWhenAPermitMayExist(t *testing.T) {
+	t.Run("unknown outcome", func(t *testing.T) {
+		e := newDPEnv(t)
+		e.prov.proposeErr = status.Error(codes.Unavailable, "connection reset")
+		code, body, _ := e.do(t, http.MethodPost, "/deployments/propose", gpFormCT, dpForm().Encode())
+		if code < 400 || !strings.Contains(body, "stays reserved") {
+			t.Errorf("propose = %d %q", code, body)
+		}
+		if e.addressFree(t) {
+			t.Error("the address was released although the executor may hold a permit")
+		}
+	})
+	t.Run("unusable permit", func(t *testing.T) {
+		prov := &fakeProvision{risk: canonical.RiskHigh, requirement: pb.ApprovalRequirement_APPROVAL_REQUIREMENT_ASSERTION_VERIFIED}
+		e := newDPEnvWith(t, func(o *ui.Options) { o.Deploy = brokenDigestProvision{prov} })
+		code, body, _ := e.do(t, http.MethodPost, "/deployments/propose", gpFormCT, dpForm().Encode())
+		if code != http.StatusBadGateway || !strings.Contains(body, "stays reserved") {
+			t.Errorf("propose = %d %q", code, body)
+		}
+		if e.addressFree(t) {
+			t.Error("the address was released although the executor holds a permit")
+		}
+	})
+	t.Run("other refusal", func(t *testing.T) {
+		// Shown as the executor's refusal, but only the spec refusal
+		// proves that no permit exists.
+		e := newDPEnv(t)
+		e.prov.proposeErr = status.Error(codes.FailedPrecondition, "pve guest provision: the template is not prepared or changed; prepare it again")
+		code, body, _ := e.do(t, http.MethodPost, "/deployments/propose", gpFormCT, dpForm().Encode())
+		if code != http.StatusConflict || !strings.Contains(body, "the executor refused: pve guest provision: the template is not prepared") || !strings.Contains(body, "stays reserved") {
+			t.Errorf("propose = %d %q", code, body)
+		}
+		if e.addressFree(t) {
+			t.Error("the address was released after a refusal that does not prove the absence of a permit")
+		}
+	})
+	t.Run("spec refusal", func(t *testing.T) {
+		e := newDPEnv(t)
+		e.prov.proposeErr = status.Error(codes.InvalidArgument, "pve guest provision: invalid or unsupported spec, template, network, key or password id")
+		if code, body, _ := e.do(t, http.MethodPost, "/deployments/propose", gpFormCT, dpForm().Encode()); code != http.StatusConflict {
+			t.Errorf("propose = %d %q", code, body)
+		}
+		if !e.addressFree(t) {
+			t.Error("the reservation of a refused proposal is kept")
+		}
+	})
 }
 
 func TestDeployUnknownCommitOutcomeKeepsTheAddress(t *testing.T) {
@@ -433,7 +535,9 @@ func TestDeployWithoutBatchPlannerEndsAtJoined(t *testing.T) {
 
 func TestDeploySaveAsProfileOnlyAfterTheProposal(t *testing.T) {
 	e := newDPEnv(t)
-	e.prov.proposeErr = status.Error(codes.FailedPrecondition, "pve guest provision: the template is not prepared or changed; prepare it again")
+	// The spec refusal releases the address, so the second proposal can
+	// reserve it again.
+	e.prov.proposeErr = status.Error(codes.InvalidArgument, "pve guest provision: invalid or unsupported spec, template, network, key or password id")
 	f := dpForm()
 	f.Del("profile")
 	f.Del("profile_version")

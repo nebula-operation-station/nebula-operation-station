@@ -623,11 +623,14 @@ func TestDeployProposeRejectsBadInputWithoutReservingOrProposing(t *testing.T) {
 	}
 }
 
+// TestDeployProposeRefusalReleasesTheAddress: the executor's spec refusal
+// (sent before it registers a permit) is the one answer that releases the
+// address; other refusals keep it (deploy_expiry_test.go).
 func TestDeployProposeRefusalReleasesTheAddress(t *testing.T) {
 	e := newDPEnv(t)
-	e.prov.proposeErr = status.Error(codes.FailedPrecondition, "pve guest provision: the template is not prepared or changed; prepare it again")
+	e.prov.proposeErr = status.Error(codes.InvalidArgument, "pve guest provision: invalid or unsupported spec, template, network, key or password id")
 	code, body, _ := e.do(t, http.MethodPost, "/deployments/propose", gpFormCT, dpForm().Encode())
-	if code != http.StatusConflict || !strings.Contains(body, "template is not prepared") {
+	if code != http.StatusConflict || !strings.Contains(body, "invalid or unsupported spec") || strings.Contains(body, "stays reserved") {
 		t.Fatalf("propose = %d %q", code, body)
 	}
 	if _, err := e.ipam.Reserve(context.Background(), "bob", "lan", "servers", netip.MustParseAddr("192.168.10.50"), "x"); err != nil {
