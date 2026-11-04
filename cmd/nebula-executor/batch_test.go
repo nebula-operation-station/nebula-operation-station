@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
@@ -100,16 +101,23 @@ func newExecutorUnderTest(t *testing.T) *executorUnderTest {
 	return &executorUnderTest{svc: svc, auth: auth, verifier: verifier, risk: risk, db: db, pub: pub}
 }
 
-// The shipped executor's setup wires the batch authority: before it the
-// batch RPCs are Unimplemented (the server falls back to "joined"); after
-// it batch execution is still not advertised, and the real service answers the credential-version read with a version a
-// canonical batch binds exactly, and takes proposals.
+// The shipped executor's setup wires the batch authority and the batch
+// dispatcher: before it the batch RPCs, including RunBatchMember, are
+// Unimplemented and execution is not advertised (the server falls back to
+// "joined"); after it batch execution is advertised, member runs are
+// served, and the real service answers the credential-version read with a
+// version a canonical batch binds exactly, and takes proposals.
 func TestSetupBatchAuthorityServesBatches(t *testing.T) {
 	e := newExecutorUnderTest(t)
 	ctx := context.Background()
 	read := &pb.GetBatchCredentialVersionsRequest{CredentialRefs: []string{"cred"}}
 	if _, err := e.svc.GetBatchCredentialVersions(ctx, read); status.Code(err) != codes.Unimplemented {
 		t.Fatalf("before setup: %v", err)
+	}
+	member := &pb.RunBatchMemberRequest{BatchDigest: strings.Repeat("0", 64), MemberId: "m", Endpoints: []string{"127.0.0.1:22"},
+		Artifact: []byte("#!/bin/sh\n")}
+	if _, err := e.svc.RunBatchMember(ctx, member); status.Code(err) != codes.Unimplemented {
+		t.Fatalf("member run before setup: %v", err)
 	}
 	a, err := setupBatchAuthority(e.svc, batchConfig{
 		Mode: permit.ModeStandard, Verifier: e.verifier, Risk: e.risk, Source: e.db, Store: e.db,
@@ -119,15 +127,18 @@ func TestSetupBatchAuthorityServesBatches(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 	t.Cleanup(a.Lock)
-	// The shipped executor approves batches but has no batch dispatcher, so
-	// it never advertises batch execution: servers do not propose batches
-	// that would be approved and never run.
+	// The shipped executor runs approved members, so it advertises batch
+	// execution, and member runs reach the authority (an unknown batch is
+	// refused by it, not Unimplemented).
 	probe, err := e.svc.GetBatchCredentialVersions(ctx, &pb.GetBatchCredentialVersionsRequest{})
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
-	if probe.GetBatchExecutionAvailable() {
-		t.Fatal("the shipped executor advertises batch execution")
+	if !probe.GetBatchExecutionAvailable() {
+		t.Fatal("the shipped executor does not advertise batch execution")
+	}
+	if _, err := e.svc.RunBatchMember(ctx, member); status.Code(err) != codes.NotFound {
+		t.Fatalf("member run of an unknown batch: %v", err)
 	}
 	resp, err := e.svc.GetBatchCredentialVersions(ctx, read)
 	if err != nil {
@@ -180,10 +191,10 @@ func TestBatchAdminUIDs(t *testing.T) {
 	}
 }
 
-// run(), the shipped executor's entry point, wires the batch authority with
-// setupBatchAuthority and every admin of the role table, locks it on
-// shutdown, and never advertises batch execution (no dispatcher is wired);
-// the tests above exercise that function with the real service.
+// run(), the shipped executor's entry point, wires the batch authority and
+// dispatcher with setupBatchAuthority and every admin of the role table and
+// locks it on shutdown; the tests above exercise that function with the
+// real service.
 func TestRunWiresBatchAuthority(t *testing.T) {
 	f, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
 	if err != nil {
@@ -216,7 +227,9 @@ func TestRunWiresBatchAuthority(t *testing.T) {
 			t.Errorf("run() does not call %s", want)
 		}
 	}
-	if calls["svc.SetBatchExecutionAvailable"] {
-		t.Error("run() advertises batch execution without a batch dispatcher")
+	// Execution is advertised only by wiring the dispatcher inside
+	// setupBatchAuthority, never separately.
+	if calls["svc.EnableBatchExecution"] {
+		t.Error("run() wires batch execution outside setupBatchAuthority")
 	}
 }
