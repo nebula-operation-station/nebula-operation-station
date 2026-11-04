@@ -124,9 +124,9 @@ type bucket struct {
 // alone; each of the fixed tiers keeps its own report sequence.
 type reporterState struct {
 	idx uint32
-	// lastTo is the end of the last accepted report per tier; zero means
-	// none.
-	lastTo [numTiers]time.Time
+	// seq holds the accepted reports per tier as sorted, disjoint runs
+	// (see seqAccepts); empty means none.
+	seq [numTiers][]timeRun
 	// buckets counts the buckets this host created and that still exist.
 	buckets int
 	// capped counts the parts dropped at
@@ -140,12 +140,87 @@ type reporterState struct {
 // latest returns the end of the host's most recent report of any tier.
 func (rs *reporterState) latest() time.Time {
 	var t time.Time
-	for _, l := range rs.lastTo {
-		if l.After(t) {
-			t = l
+	for _, runs := range rs.seq {
+		if n := len(runs); n > 0 && runs[n-1].to.After(t) {
+			t = runs[n-1].to
 		}
 	}
 	return t
+}
+
+// timeRun is a span from..to covered by accepted reports of one host and
+// tier.
+type timeRun struct{ from, to time.Time }
+
+// maxSeqRuns bounds the runs kept per host and tier. Contiguous reports
+// keep one run; a gap in the reports (a collector that started over with
+// a baseline) or a clock excursion the host reported in adds one (see
+// addRun).
+const maxSeqRuns = 4
+
+// seqAccepts reports whether a report from..to may follow the accepted
+// runs at ingest horizon (now plus Limits.MaxClockSkew).
+//
+// Runs that end at or before horizon are the host's report sequence: the
+// report must start at or after, and end strictly after, the newest of
+// them. Runs that end after horizon were accepted while the clock ran
+// ahead (a clock excursion). They do not hold back reports after the
+// clock returned, but a report that overlaps one of them, or a
+// zero-length report inside one, is refused, so their bytes are not
+// counted twice; an exact replay of such a report ends after horizon and
+// is refused by the ingest window anyway. Once the clock has passed an
+// excursion run it is part of the sequence again.
+//
+// The runs are sorted and disjoint, so their ends increase and the runs
+// at or before horizon are a prefix.
+func seqAccepts(runs []timeRun, from, to, horizon time.Time) bool {
+	var last time.Time
+	for _, s := range runs {
+		if !s.to.After(horizon) {
+			last = s.to
+			continue
+		}
+		if from.Equal(to) {
+			if !to.Before(s.from) && !to.After(s.to) {
+				return false
+			}
+		} else if from.Before(s.to) && to.After(s.from) {
+			return false
+		}
+	}
+	return last.IsZero() || (!from.Before(last) && to.After(last))
+}
+
+// addRun adds the accepted report from..to, which seqAccepts allowed, and
+// returns the updated runs; runs that touch are merged. Gaps between runs
+// are kept, as the clock may return into one after an excursion. Past
+// maxSeqRuns the two runs with the shortest gap between them are merged
+// (the oldest such pair on a tie), which only refuses more reports in
+// that gap and keeps the long gap a clock excursion leaves open.
+func addRun(runs []timeRun, from, to time.Time) []timeRun {
+	i, _ := slices.BinarySearchFunc(runs, from, func(r timeRun, t time.Time) int { return r.from.Compare(t) })
+	runs = slices.Insert(runs, i, timeRun{from, to})
+	out := runs[:0]
+	for _, r := range runs {
+		if n := len(out); n > 0 && !r.from.After(out[n-1].to) {
+			if r.to.After(out[n-1].to) {
+				out[n-1].to = r.to
+			}
+			continue
+		}
+		out = append(out, r)
+	}
+	for len(out) > maxSeqRuns {
+		j := 0
+		for k := 1; k+1 < len(out); k++ {
+			if out[k+1].from.Sub(out[k].to) < out[j+1].from.Sub(out[j].to) {
+				j = k
+			}
+		}
+		out[j].to = out[j+1].to
+		out = slices.Delete(out, j+1, j+2)
+	}
+	return out
 }
 
 // IngestResult tells what happened to the observations of an accepted
@@ -237,11 +312,12 @@ type Aggregator struct {
 	nextIdx   uint32
 	dropped   uint64
 	capped    uint64
-	// floor is the unix second before which data was removed by Cutoff
-	// or the automatic prune. Reports and parts before it are not
-	// accepted again, so replay protection survives a backwards clock
-	// step.
-	floor int64
+	// closed holds the hours removed by Cutoff or the automatic prune,
+	// as sorted, disjoint, non-adjacent runs of hour indices. Reports and
+	// parts before floorLocked(now) are not accepted again, so replay
+	// protection survives a backwards clock step. See floorLocked for the
+	// invariant that keeps clock jumps from locking out reports.
+	closed []hourRange
 	// cappedHours indexes, per hour, the reporters that had parts
 	// dropped in it, so pruning the hour drops their capped marker
 	// with it.
@@ -386,7 +462,10 @@ func reporterEnd(o *Observation) netip.Addr {
 // and r.To strictly after the end of the previous accepted report, so a
 // report submitted twice is rejected with ErrDuplicateReport instead of
 // being counted twice. Collectors must keep the previous snapshot across
-// restarts or start over with a baseline.
+// restarts or start over with a baseline. Reports accepted while the
+// clock ran ahead (ending after now plus Limits.MaxClockSkew) do not
+// hold back the host's reports after the clock returned; only reports
+// overlapping them are refused (see seqAccepts).
 //
 // For every flow and hour the bytes reported by the server end are used
 // when present; the client end's report is kept as confirmation and used
@@ -424,25 +503,28 @@ func (a *Aggregator) Ingest(r Report, own []netip.Addr) (IngestResult, error) {
 		return IngestResult{}, fmt.Errorf("%w: host %q: report ends %s, now %s", ErrOutOfWindow, r.Host,
 			r.To.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339))
 	}
-	if r.To.Unix() < a.floor {
+	floor := a.floorLocked(now)
+	cur := hourOf(now)
+	parts := splitHours(r.From, r.To)
+	if end := parts[len(parts)-1].hour; r.To.Unix() < floor || (end > cur && a.closedLocked(end)) {
 		return IngestResult{}, fmt.Errorf("%w: host %q: report ends %s, in an hour removed by cutoff", ErrOutOfWindow, r.Host,
 			r.To.UTC().Format(time.RFC3339))
 	}
 	// Prune at most once per hour of the clock, before the limit check,
-	// so expired reporters do not keep new hosts out. The floor advances
-	// with the pruned hours, so a replayed report from a pruned reporter
-	// is refused even after a backwards clock step.
+	// so expired reporters do not keep new hosts out. The pruned hours
+	// are closed, so a replayed report from a pruned reporter is refused
+	// even after a backwards clock step.
 	if h := hourOf(now); !a.pruned || h != a.prunedHour {
 		a.pruneLocked(cutoff, cutoff)
-		a.advanceFloorLocked(cutoff)
 		a.pruned, a.prunedHour = true, h
+		floor = a.floorLocked(now)
 	}
+	horizon := now.Add(a.limits.MaxClockSkew)
 	rs := a.reporters[r.Host]
 	if rs != nil {
-		last := rs.lastTo[ti]
-		if !last.IsZero() && (r.From.Before(last) || !r.To.After(last)) {
-			return IngestResult{}, fmt.Errorf("%w: host %q tier %q: report %s..%s, last accepted ended %s", ErrDuplicateReport,
-				r.Host, r.Tier, r.From.UTC().Format(time.RFC3339), r.To.UTC().Format(time.RFC3339), last.UTC().Format(time.RFC3339))
+		if !seqAccepts(rs.seq[ti], r.From, r.To, horizon) {
+			return IngestResult{}, fmt.Errorf("%w: host %q tier %q: report %s..%s overlaps or precedes an accepted report", ErrDuplicateReport,
+				r.Host, r.Tier, r.From.UTC().Format(time.RFC3339), r.To.UTC().Format(time.RFC3339))
 		}
 	} else {
 		if len(a.reporters) >= a.limits.MaxReporters || a.nextIdx == math.MaxUint32 {
@@ -452,11 +534,13 @@ func (a *Aggregator) Ingest(r Report, own []netip.Addr) (IngestResult, error) {
 		rs = &reporterState{idx: a.nextIdx}
 		a.reporters[r.Host] = rs
 	}
-	rs.lastTo[ti] = r.To
+	rs.seq[ti] = addRun(rs.seq[ti], r.From, r.To)
 
 	var res IngestResult
-	parts := splitHours(r.From, r.To)
-	limit := max(cutoff.Unix(), a.floor)
+	limit := max(cutoff.Unix(), floor)
+	parts = slices.DeleteFunc(parts, func(p hourPart) bool {
+		return (p.hour+1)*secondsPerHour <= limit || (p.hour > cur && a.closedLocked(p.hour))
+	})
 	for i := range r.Observations {
 		o := &r.Observations[i]
 		if _, ok := mine[reporterEnd(o)]; !ok {
@@ -465,9 +549,6 @@ func (a *Aggregator) Ingest(r Report, own []netip.Addr) (IngestResult, error) {
 		}
 		for j := range parts {
 			p := &parts[j]
-			if (p.hour+1)*secondsPerHour <= limit {
-				continue
-			}
 			switch a.applyLocked(o, p, rs) {
 			case applied:
 				res.Applied++
@@ -558,11 +639,89 @@ func (a *Aggregator) dropCappedLocked(hour int64) {
 	delete(a.cappedHours, hour)
 }
 
-// advanceFloorLocked moves the floor to the start of the hour containing
-// t, whichever is later.
-func (a *Aggregator) advanceFloorLocked(t time.Time) {
-	if start := hourOf(t) * secondsPerHour; start > a.floor {
-		a.floor = start
+// hourRange is a run of hour indices lo..hi, both inclusive.
+type hourRange struct{ lo, hi int64 }
+
+// maxClosedRanges bounds Aggregator.closed. Steady operation needs one
+// run plus one per quiet gap and per clock jump; beyond the bound the two
+// oldest runs are merged (see closeHoursLocked).
+const maxClosedRanges = 64
+
+// floorLocked returns the unix second before which reports and report
+// parts are refused at clock reading now: the end of the newest closed
+// hour that lies before the hour containing now.
+//
+// Invariant: the floor never exceeds the start of the hour containing
+// now, and every closed hour before that hour lies below the floor.
+//
+//   - No sequence of clock jumps can lock out reports: whatever the clock
+//     did before, a report ending in the current hour of the clock is
+//     never refused for the floor. Hours closed while the clock ran ahead
+//     only count once the clock has passed them again, so a forward jump
+//     of any length followed by a return leaves the floor at the newest
+//     hour pruned before the present, not in the future.
+//   - Replay protection survives a backwards clock step: a report ending
+//     in, or a part falling into, a pruned hour before the current one
+//     is refused. Closed hours after the current one that a report can
+//     still reach through Limits.MaxClockSkew lie above the floor; Ingest
+//     refuses reports ending in and parts falling into them separately
+//     (closedLocked), so they do not reopen either.
+//
+// The only exception to replay protection is the current hour itself
+// after it was pruned while the clock ran at least Retention ahead; its
+// reports are accepted into fresh buckets rather than locking the hour.
+// A jump that long also prunes the hosts whose last report lies at or
+// before that hour, together with their report sequence, so the per-host
+// duplicate check (ErrDuplicateReport) is lost for the hour as well: a
+// report accepted in it before the jump can be accepted a second time
+// after the clock returned. Hosts that reported while the clock ran
+// ahead keep their sequence until the clock has passed those reports.
+func (a *Aggregator) floorLocked(now time.Time) int64 {
+	cur := hourOf(now)
+	floor := int64(math.MinInt64)
+	for _, r := range a.closed {
+		if r.lo >= cur {
+			break
+		}
+		floor = (min(r.hi, cur-1) + 1) * secondsPerHour
+	}
+	return floor
+}
+
+// closedLocked reports whether hour h is in a closed run.
+func (a *Aggregator) closedLocked(h int64) bool {
+	i, found := slices.BinarySearchFunc(a.closed, h, func(r hourRange, h int64) int { return cmp.Compare(r.lo, h) })
+	return found || (i > 0 && a.closed[i-1].hi >= h)
+}
+
+// closeHoursLocked adds the hours lo..hi to the closed runs, merging
+// overlapping and adjacent runs. Past maxClosedRanges the two oldest
+// runs are merged, which closes the quiet hours between them as well:
+// that only refuses more late reports after a backwards clock step and
+// keeps the invariant of floorLocked.
+func (a *Aggregator) closeHoursLocked(lo, hi int64) {
+	if lo > hi {
+		return
+	}
+	i, _ := slices.BinarySearchFunc(a.closed, lo, func(r hourRange, lo int64) int { return cmp.Compare(r.lo, lo) })
+	a.closed = slices.Insert(a.closed, i, hourRange{lo, hi})
+	if i > 0 {
+		i--
+	}
+	j := i
+	out := a.closed[:i]
+	for ; j < len(a.closed); j++ {
+		r := a.closed[j]
+		if n := len(out); n > 0 && r.lo <= out[n-1].hi+1 {
+			out[n-1].hi = max(out[n-1].hi, r.hi)
+			continue
+		}
+		out = append(out, r)
+	}
+	a.closed = out
+	for len(a.closed) > maxClosedRanges {
+		a.closed[1].lo = a.closed[0].lo
+		a.closed = slices.Delete(a.closed, 0, 1)
 	}
 }
 
@@ -578,15 +737,20 @@ func (a *Aggregator) Cutoff(now time.Time, retention time.Duration) int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	hours := now.Add(-retention)
-	a.advanceFloorLocked(hours)
+	// A retention shorter than Limits.Retention closes the hours it cuts
+	// from the ingest window even where they hold no data, so a late
+	// report cannot fill them again.
+	a.closeHoursLocked(hourOf(now.Add(-a.limits.Retention)), hourOf(hours)-1)
 	return a.pruneLocked(hours, now.Add(-max(retention, a.limits.Retention)))
 }
 
 // pruneLocked removes the hours that end at or before hours and the
 // reporters whose last report lies in an hour that ends at or before
-// reporters.
+// reporters. It closes every hour it removed data from, and the hours of
+// the removed reporters' last reports, so they are not filled again.
 func (a *Aggregator) pruneLocked(hours, reporters time.Time) int {
 	removed := 0
+	var gone []int64
 	limit := hours.Unix()
 	for h, hm := range a.hours {
 		if (h+1)*secondsPerHour <= limit {
@@ -595,6 +759,7 @@ func (a *Aggregator) pruneLocked(hours, reporters time.Time) int {
 			}
 			removed += len(hm)
 			delete(a.hours, h)
+			gone = append(gone, h)
 		}
 	}
 	a.buckets -= removed
@@ -605,6 +770,7 @@ func (a *Aggregator) pruneLocked(hours, reporters time.Time) int {
 	for h := range a.cappedHours {
 		if (h+1)*secondsPerHour <= limit {
 			a.dropCappedLocked(h)
+			gone = append(gone, h)
 		}
 	}
 	// A reporter goes with the hour of its last report (of any tier). All
@@ -614,7 +780,21 @@ func (a *Aggregator) pruneLocked(hours, reporters time.Time) int {
 	for k, rs := range a.reporters {
 		if (hourOf(rs.latest())+1)*secondsPerHour <= rlimit {
 			delete(a.reporters, k)
+			for _, runs := range rs.seq {
+				if n := len(runs); n > 0 {
+					gone = append(gone, hourOf(runs[n-1].to))
+				}
+			}
 		}
+	}
+	slices.Sort(gone)
+	for i := 0; i < len(gone); {
+		j := i + 1
+		for j < len(gone) && gone[j] <= gone[j-1]+1 {
+			j++
+		}
+		a.closeHoursLocked(gone[i], gone[j-1])
+		i = j
 	}
 	return removed
 }
