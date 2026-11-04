@@ -199,13 +199,13 @@ func run() error {
 	// Batch approval (ADR 0007 E19b): the batch RPCs, including the
 	// credential-version read the server binds into every plan, are served
 	// only with an authority wired.
-	batchAdmin, err := batchAdminUID(*adminUsers)
-	if err != nil {
-		return err
-	}
+	// Every admin user may review and approve batches from the CLI, as
+	// the role table allows. No batch dispatcher is wired, so the executor
+	// does not advertise batch execution (SetBatchExecutionAvailable) and
+	// servers do not propose batches that would never run.
 	batchAuth, err := setupBatchAuthority(svc, batchConfig{
 		Mode: mode, Verifier: verifier, Risk: risk, Source: db, Store: db,
-		Session: auth.Session, AdminUID: batchAdmin, Audit: executor.AuditLogger(log),
+		Session: auth.Session, AdminUIDs: batchAdminUIDs(uidRoles), Audit: executor.AuditLogger(log),
 	})
 	if err != nil {
 		return err

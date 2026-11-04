@@ -50,8 +50,11 @@ type fakeBatchRPC struct {
 	// which the real executor answers without reading the keyring.
 	credErr  error
 	probeErr error
-	credRefs [][]string
-	proposed []canonical.Batch
+	// execution is the advertised batch_execution_available; the shipped
+	// executor answers false (no batch dispatcher).
+	execution bool
+	credRefs  [][]string
+	proposed  []canonical.Batch
 }
 
 func (f *fakeBatchRPC) ListHostKeys(context.Context, *pb.ListHostKeysRequest, ...grpc.CallOption) (*pb.ListHostKeysResponse, error) {
@@ -66,7 +69,7 @@ func (f *fakeBatchRPC) GetBatchCredentialVersions(_ context.Context, in *pb.GetB
 		if f.probeErr != nil {
 			return nil, f.probeErr
 		}
-		return &pb.GetBatchCredentialVersionsResponse{}, nil
+		return &pb.GetBatchCredentialVersionsResponse{BatchExecutionAvailable: f.execution}, nil
 	}
 	if f.credErr != nil {
 		return nil, f.credErr
@@ -75,7 +78,7 @@ func (f *fakeBatchRPC) GetBatchCredentialVersions(_ context.Context, in *pb.GetB
 	if version == 0 {
 		version = wiringVersion
 	}
-	out := &pb.GetBatchCredentialVersionsResponse{}
+	out := &pb.GetBatchCredentialVersionsResponse{BatchExecutionAvailable: f.execution}
 	for _, ref := range in.GetCredentialRefs() {
 		if ref == wiringCredRef {
 			out.Versions = append(out.Versions, &pb.BatchCredentialVersion{CredentialRef: ref, Version: version, PublicKeyFingerprint: "SHA256:pub"})
@@ -143,8 +146,10 @@ func wiringRequest() executions.BatchRequest {
 // The server's planner binds the executor's credential version for the
 // host's pinned reference into every member, read through the new RPC; it
 // serves the deployment run (with the executor probe) and the batch pages.
+// The executor here advertises batch execution, so the probe reports
+// batches available and a deployment uses the staged path.
 func TestServerBatchesBindExecutorCredentialVersions(t *testing.T) {
-	f := &fakeBatchRPC{}
+	f := &fakeBatchRPC{execution: true}
 	b, pages := newWiringBatches(t, f)
 	var deploy ui.DeployBatches = b
 	probe, ok := deploy.(ui.DeployBatchProbe)
@@ -202,7 +207,7 @@ func TestServerBatchesWithoutCredentialVersions(t *testing.T) {
 		{"unreachable", status.Error(codes.Unavailable, "executor down"), status.Error(codes.Unavailable, "executor down"), false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := &fakeBatchRPC{credErr: tc.credErr, probeErr: tc.probeErr}
+			f := &fakeBatchRPC{credErr: tc.credErr, probeErr: tc.probeErr, execution: true}
 			b, _ := newWiringBatches(t, f)
 			_, err := b.ProposeBatch(ctx, "alice", wiringRequest())
 			if !errors.Is(err, executions.ErrBatchCredentials) {
@@ -216,6 +221,22 @@ func TestServerBatchesWithoutCredentialVersions(t *testing.T) {
 				t.Errorf("available = %v %v", avail, err)
 			}
 		})
+	}
+}
+
+// An executor that serves credential versions and approves batches but does
+// not advertise batch execution (the shipped executor: no batch dispatcher)
+// is reported as without batches, so a deployment with staged steps ends at
+// "joined" and no plan is ever proposed for it.
+func TestServerBatchesRequireExecutorExecution(t *testing.T) {
+	f := &fakeBatchRPC{}
+	b, _ := newWiringBatches(t, f)
+	avail, err := b.BatchesAvailable(context.Background())
+	if avail || err != nil {
+		t.Fatalf("available = %v %v, want false without batch execution", avail, err)
+	}
+	if len(f.proposed) != 0 {
+		t.Error("the probe proposed a batch")
 	}
 }
 

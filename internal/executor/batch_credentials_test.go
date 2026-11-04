@@ -83,10 +83,18 @@ func TestBatchCredentialVersionsReturnsPublicVersions(t *testing.T) {
 	if bytes.Contains(raw, env.userPub.Marshal()) || bytes.Contains(raw, keyPEM) || bytes.Contains(raw, []byte("PRIVATE")) {
 		t.Error("response carries key material")
 	}
-	// An empty request only reports that batches are available.
+	// An empty request only reports the batch capability: approval is
+	// wired, execution is not advertised until a dispatcher is wired.
 	empty, err := env.svc.GetBatchCredentialVersions(ctx, &pb.GetBatchCredentialVersionsRequest{})
-	if err != nil || len(empty.GetVersions()) != 0 {
+	if err != nil || len(empty.GetVersions()) != 0 || empty.GetBatchExecutionAvailable() {
 		t.Errorf("empty request: %v %v", empty, err)
+	}
+	if resp.GetBatchExecutionAvailable() {
+		t.Error("batch execution advertised without a dispatcher")
+	}
+	env.svc.SetBatchExecutionAvailable(true)
+	if got, err := env.svc.GetBatchCredentialVersions(ctx, &pb.GetBatchCredentialVersionsRequest{}); err != nil || !got.GetBatchExecutionAvailable() {
+		t.Errorf("execution not advertised once set: %v %v", got, err)
 	}
 }
 

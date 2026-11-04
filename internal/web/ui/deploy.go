@@ -54,7 +54,7 @@ import (
 // The run page follows the states of ADR 0008 section 6: proposed,
 // approved, creating, booting, enrolling (fingerprint review), bootstrapping,
 // done or failed, with the PVE task UPIDs and step outcomes. A server
-// without a batch planner, or whose executor does not take batches
+// without a batch planner, or whose executor does not run batches
 // (DeployBatchProbe), ends a run with a staged plan at "joined"
 // (enrolled, plan not run) instead of leaving it in bootstrapping. An idle
 // run that does not progress fails when its deadline passes (the
@@ -105,10 +105,10 @@ type DeployBatches interface {
 }
 
 // DeployBatchProbe is optionally implemented by a DeployBatches value.
-// BatchesAvailable reports whether the executor takes batches at all
-// (executorclient.Client.BatchesAvailable): false means it lacks the
-// capability (no batch authority, or an executor without the
-// credential-version read), and a run with a staged plan then ends at
+// BatchesAvailable reports whether the executor runs batches end to end
+// (executorclient.BatchesAvailable): false means it lacks the capability
+// (no batch authority, no credential-version read, or no batch execution),
+// and a run with a staged plan then ends at
 // "joined" as on a server without a batch planner. An error is treated as
 // transient: the run stays in bootstrapping, where proposing the plan
 // reports the failure and may be retried.
@@ -1861,8 +1861,8 @@ const deployNoBatchesMessage = "bootstrap steps not available: this server has n
 	"the guest is enrolled, run the plan's steps as separate operations on the host"
 
 // deployExecutorNoBatchesMessage explains a run that ended at "joined"
-// because the executor does not take batches.
-const deployExecutorNoBatchesMessage = "bootstrap steps not available: the executor does not take batches (no batch authority or no credential-version read), " +
+// because the executor does not run batches.
+const deployExecutorNoBatchesMessage = "bootstrap steps not available: the executor does not run batches (no batch execution, batch authority or credential-version read), " +
 	"so the staged plan was not run; the guest is enrolled, run the plan's steps as separate operations on the host"
 
 func hasBatchSteps(plan []deployPlanStep) bool {
@@ -1917,6 +1917,27 @@ func (h *Handler) handleDeployPlan(w http.ResponseWriter, r *http.Request) {
 	defer h.deployRuns.set(run.id, func(x *deployRun) { x.approving = false })
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
 	defer cancel()
+	// Probe again: the run may be in bootstrapping only because the probe
+	// at join time failed transiently. A plan is never proposed to an
+	// executor that would approve it and never run it.
+	if p, ok := h.deployBatches.(DeployBatchProbe); ok {
+		avail, err := p.BatchesAvailable(ctx)
+		switch {
+		case err != nil:
+			h.log.Warn("deploy: probe batch support", "run", run.id, "error", err)
+			msg := "the staged plan could not be proposed: the executor could not be asked whether it runs batches; propose it again"
+			h.deployRuns.set(run.id, func(x *deployRun) { x.batchErr = msg })
+			http.Error(w, msg, http.StatusConflict)
+			return
+		case !avail:
+			now := time.Now()
+			h.deployRuns.set(run.id, func(x *deployRun) {
+				x.state, x.expires, x.message, x.batchErr = deployJoined, now.Add(deployRunTTL), deployExecutorNoBatchesMessage, ""
+			})
+			http.Error(w, deployExecutorNoBatchesMessage, http.StatusConflict)
+			return
+		}
+	}
 	c, err := h.deployBatches.ProposeBatch(ctx, user, run.batchRequest())
 	if err != nil {
 		var ie *executions.BatchInputError

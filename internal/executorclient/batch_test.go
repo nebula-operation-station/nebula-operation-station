@@ -82,13 +82,18 @@ func TestCredentialVersionNeverGuesses(t *testing.T) {
 	}
 }
 
-// BatchesAvailable distinguishes a missing capability (Unimplemented) from
-// a transient failure.
+// BatchesAvailable requires advertised batch execution, and distinguishes
+// a missing capability (Unimplemented, or no execution) from a transient
+// failure.
 func TestBatchesAvailable(t *testing.T) {
 	var refs []string
-	ok, err := BatchesAvailable(context.Background(), credentialVersionClient(t, &pb.GetBatchCredentialVersionsResponse{}, nil, &refs))
+	ok, err := BatchesAvailable(context.Background(), credentialVersionClient(t, &pb.GetBatchCredentialVersionsResponse{BatchExecutionAvailable: true}, nil, &refs))
 	if !ok || err != nil || len(refs) != 0 {
 		t.Errorf("available: %v %v refs %v", ok, err, refs)
+	}
+	ok, err = BatchesAvailable(context.Background(), credentialVersionClient(t, &pb.GetBatchCredentialVersionsResponse{}, nil, nil))
+	if ok || err != nil {
+		t.Errorf("credential read without execution: %v %v", ok, err)
 	}
 	ok, err = BatchesAvailable(context.Background(), credentialVersionClient(t, nil, status.Error(codes.Unimplemented, "unknown method"), nil))
 	if ok || err != nil {

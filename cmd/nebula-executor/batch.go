@@ -4,8 +4,7 @@ package main
 
 import (
 	"fmt"
-	"math"
-	"strings"
+	"slices"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
@@ -15,10 +14,6 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
 )
-
-// noBatchAdminUID is the batch admin UID when no admin user is configured:
-// (uid_t)-1 is never a real peer, so no local CLI approval matches it.
-const noBatchAdminUID = math.MaxUint32
 
 // batchConfig is what the executor's batch authority is built from; every
 // field comes from the executor's own configuration and state.
@@ -31,9 +26,11 @@ type batchConfig struct {
 	Source riskpolicy.Source
 	Store  permit.Store
 	// Session is the privileged session of the single-action authority.
-	Session  func() (bool, time.Time)
-	AdminUID uint32
-	Audit    func(permit.Event)
+	Session func() (bool, time.Time)
+	// AdminUIDs are the local admins who may review and approve batches
+	// with `nebula approve` (batchAdminUIDs).
+	AdminUIDs []uint32
+	Audit     func(permit.Event)
 }
 
 // setupBatchAuthority builds the batch approval authority (ADR 0007 E19b)
@@ -48,7 +45,7 @@ func setupBatchAuthority(svc *executor.Service, c batchConfig) (*batch.Authority
 	}
 	a, err := batch.New(batch.Options{
 		Mode: c.Mode, Verifier: c.Verifier, Policy: pol, Session: c.Session,
-		AdminUID: c.AdminUID, Audit: c.Audit, Store: c.Store,
+		AdminUIDs: c.AdminUIDs, Audit: c.Audit, Store: c.Store,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("batch authority: %w", err)
@@ -57,20 +54,18 @@ func setupBatchAuthority(svc *executor.Service, c batchConfig) (*batch.Authority
 	return a, nil
 }
 
-// batchAdminUID is the local admin UID that may review and approve batches
-// with `nebula approve`: the first configured admin user. Without one, no
-// peer can approve locally (browser approval still works).
-func batchAdminUID(adminUsers string) (uint32, error) {
-	for _, name := range strings.Split(adminUsers, ",") {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
+// batchAdminUIDs are the local admin UIDs that may review and approve
+// batches with `nebula approve`: every UID the role table (resolveRoles)
+// gives the admin role, the same peers the role check admits to
+// ReviewBatch and ApproveBatchCLI. Without one, no peer can approve
+// locally (browser approval still works). Sorted for a stable order.
+func batchAdminUIDs(roles map[uint32][]peercred.Role) []uint32 {
+	var out []uint32
+	for uid, rs := range roles {
+		if slices.Contains(rs, peercred.RoleAdmin) {
+			out = append(out, uid)
 		}
-		uid, err := peercred.LookupUID(name)
-		if err != nil {
-			return 0, fmt.Errorf("admin user %q: %w", name, err)
-		}
-		return uid, nil
 	}
-	return noBatchAdminUID, nil
+	slices.Sort(out)
+	return out
 }

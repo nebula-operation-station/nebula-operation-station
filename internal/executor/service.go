@@ -59,6 +59,9 @@ type Service struct {
 	// SetBatchAuthority wires it, in which case the batch RPCs are
 	// Unimplemented.
 	batchAuth *batch.Authority
+	// batchExecution reports that a production batch dispatcher runs
+	// approved batch members; false until SetBatchExecutionAvailable.
+	batchExecution bool
 	// builtinTrust is the local built-in trust transaction (ADR 0007, E19c);
 	// nil until SetBuiltinTrust wires it.
 	builtinTrust BuiltinTrust

@@ -2638,6 +2638,11 @@ message BatchCredentialVersion {
 message GetBatchCredentialVersionsResponse {
   // One entry per requested reference, in request order.
   repeated BatchCredentialVersion versions = 1;
+  // True only when this executor runs approved batch members (a production
+  // batch dispatcher is wired). Credential versions and batch approval
+  // alone do not make a batch runnable; a server must not propose a batch
+  // that would be approved and never executed.
+  bool batch_execution_available = 2;
 }
 
 // Built-in trust (ADR 0007, E19c).

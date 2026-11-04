@@ -75,13 +75,13 @@ func TestDeployWithBatchesRunsTheStagedPlan(t *testing.T) {
 	e.waitState(t, run, "done")
 }
 
-// An executor without the capability (no batch authority, or no
-// credential-version read) keeps "joined" as the fallback, with a reason.
+// An executor without the capability (no batch execution, no batch
+// authority, or no credential-version read) keeps "joined" as the fallback, with a reason.
 func TestDeployExecutorWithoutBatchesEndsAtJoined(t *testing.T) {
 	e, _ := newProbedDPEnv(t, false, nil)
 	_, run := e.toBootstrapping(t)
 	body := e.waitState(t, run, "joined")
-	for _, want := range []string{"the executor does not take batches", `id="deploy-no-batches"`, "Bootstrapping (not available)"} {
+	for _, want := range []string{"the executor does not run batches", `id="deploy-no-batches"`, "Bootstrapping (not available)"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("joined page lacks %q", want)
 		}
@@ -94,13 +94,48 @@ func TestDeployExecutorWithoutBatchesEndsAtJoined(t *testing.T) {
 	}
 }
 
-// A failed probe is transient: the run waits in bootstrapping, where the
-// plan can be proposed once the executor answers.
+// A failed probe is transient: the run waits in bootstrapping. Proposing
+// the plan probes again: while the probe fails nothing is proposed, and
+// once the executor reports batch execution the plan is proposed.
 func TestDeployBatchProbeErrorKeepsBootstrapping(t *testing.T) {
-	e, _ := newProbedDPEnv(t, false, errors.New("probe batch support: unavailable"))
+	e, p := newProbedDPEnv(t, false, errors.New("probe batch support: unavailable"))
 	id, run := e.toBootstrapping(t)
 	e.waitState(t, run, "bootstrapping")
+	code, body, _ := e.do(t, http.MethodPost, "/deployments/plan", gpFormCT, url.Values{"id": {id}}.Encode())
+	if code != http.StatusConflict || !strings.Contains(body, "whether it runs batches") {
+		t.Fatalf("plan while the probe fails = %d %q", code, body)
+	}
+	if len(e.batches.requests) != 0 {
+		t.Fatal("a plan was proposed while the probe failed")
+	}
+	e.waitState(t, run, "bootstrapping")
+	p.mu.Lock()
+	p.available, p.probeErr = true, nil
+	p.mu.Unlock()
 	e.proposePlan(t, id, "batch-1")
+}
+
+// A run left in bootstrapping by a failed probe ends at "joined" when the
+// executor then answers that it does not run batches: no plan is proposed,
+// so no batch is approved that would never run.
+func TestDeployPlanProbeWithoutExecutionEndsAtJoined(t *testing.T) {
+	e, p := newProbedDPEnv(t, false, errors.New("probe batch support: unavailable"))
+	id, run := e.toBootstrapping(t)
+	e.waitState(t, run, "bootstrapping")
+	p.mu.Lock()
+	p.probeErr = nil
+	p.mu.Unlock()
+	code, body, _ := e.do(t, http.MethodPost, "/deployments/plan", gpFormCT, url.Values{"id": {id}}.Encode())
+	if code != http.StatusConflict || !strings.Contains(body, "bootstrap steps not available") {
+		t.Fatalf("plan = %d %q", code, body)
+	}
+	if len(e.batches.requests) != 0 {
+		t.Fatal("a plan was proposed to an executor that does not run batches")
+	}
+	page := e.waitState(t, run, "joined")
+	if !strings.Contains(page, "the executor does not run batches") || strings.Contains(page, `action="/deployments/plan"`) {
+		t.Errorf("joined page = %s", page)
+	}
 }
 
 // A proposal without credential versions (locked keyring) proposes

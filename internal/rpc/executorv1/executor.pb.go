@@ -18155,9 +18155,14 @@ func (x *BatchCredentialVersion) GetPublicKeyFingerprint() string {
 type GetBatchCredentialVersionsResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// One entry per requested reference, in request order.
-	Versions      []*BatchCredentialVersion `protobuf:"bytes,1,rep,name=versions,proto3" json:"versions,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Versions []*BatchCredentialVersion `protobuf:"bytes,1,rep,name=versions,proto3" json:"versions,omitempty"`
+	// True only when this executor runs approved batch members (a production
+	// batch dispatcher is wired). Credential versions and batch approval
+	// alone do not make a batch runnable; a server must not propose a batch
+	// that would be approved and never executed.
+	BatchExecutionAvailable bool `protobuf:"varint,2,opt,name=batch_execution_available,json=batchExecutionAvailable,proto3" json:"batch_execution_available,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *GetBatchCredentialVersionsResponse) Reset() {
@@ -18195,6 +18200,13 @@ func (x *GetBatchCredentialVersionsResponse) GetVersions() []*BatchCredentialVer
 		return x.Versions
 	}
 	return nil
+}
+
+func (x *GetBatchCredentialVersionsResponse) GetBatchExecutionAvailable() bool {
+	if x != nil {
+		return x.BatchExecutionAvailable
+	}
+	return false
 }
 
 // One line of a full script diff; host-author text, render as text only.
@@ -21255,9 +21267,10 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x16BatchCredentialVersion\x12%\n" +
 	"\x0ecredential_ref\x18\x01 \x01(\tR\rcredentialRef\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\x04R\aversion\x124\n" +
-	"\x16public_key_fingerprint\x18\x03 \x01(\tR\x14publicKeyFingerprint\"l\n" +
+	"\x16public_key_fingerprint\x18\x03 \x01(\tR\x14publicKeyFingerprint\"\xa8\x01\n" +
 	"\"GetBatchCredentialVersionsResponse\x12F\n" +
-	"\bversions\x18\x01 \x03(\v2*.nebula.executor.v1.BatchCredentialVersionR\bversions\"r\n" +
+	"\bversions\x18\x01 \x03(\v2*.nebula.executor.v1.BatchCredentialVersionR\bversions\x12:\n" +
+	"\x19batch_execution_available\x18\x02 \x01(\bR\x17batchExecutionAvailable\"r\n" +
 	"\x0fBuiltinDiffLine\x121\n" +
 	"\x02op\x18\x01 \x01(\x0e2!.nebula.executor.v1.BuiltinDiffOpR\x02op\x12\x12\n" +
 	"\x04text\x18\x02 \x01(\tR\x04text\x12\x18\n" +

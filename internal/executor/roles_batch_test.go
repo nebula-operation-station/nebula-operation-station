@@ -188,14 +188,14 @@ func (p *batchRPCPolicy) Evaluate(_ context.Context, m canonical.BatchMember) (b
 
 type batchRPCEnv struct {
 	*reconcileEnv
-	policy   *batchRPCPolicy
-	sign     func([]byte) []byte
-	verifier *webauthnverify.Verifier
-	adminUID uint32
-	auth     *batch.Authority
+	policy    *batchRPCPolicy
+	sign      func([]byte) []byte
+	verifier  *webauthnverify.Verifier
+	adminUIDs []uint32
+	auth      *batch.Authority
 }
 
-func newBatchRPCEnv(t *testing.T, adminUID uint32) *batchRPCEnv {
+func newBatchRPCEnv(t *testing.T, adminUIDs ...uint32) *batchRPCEnv {
 	t.Helper()
 	e := newReconcileEnv(t)
 	cred := virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2)
@@ -212,7 +212,7 @@ func newBatchRPCEnv(t *testing.T, adminUID uint32) *batchRPCEnv {
 	}
 	p := &batchRPCPolicy{states: map[string]batch.Snapshot{}}
 	a, err := batch.New(batch.Options{
-		Mode: permit.ModeStandard, Verifier: v, Policy: p, AdminUID: adminUID, Now: e.clock.Now, Store: e.db,
+		Mode: permit.ModeStandard, Verifier: v, Policy: p, AdminUIDs: adminUIDs, Now: e.clock.Now, Store: e.db,
 		Session: func() (bool, time.Time) { return true, e.clock.Now().Add(time.Hour) },
 	})
 	if err != nil {
@@ -224,7 +224,7 @@ func newBatchRPCEnv(t *testing.T, adminUID uint32) *batchRPCEnv {
 		return []byte(virtualwebauthn.CreateAssertionResponse(virtualwebauthn.RelyingParty{Name: "Reconcile", ID: "reconcile.test", Origin: "https://reconcile.test"}, dev, cred,
 			virtualwebauthn.AssertionOptions{Challenge: ch, RelyingPartyID: "reconcile.test"}))
 	}
-	return &batchRPCEnv{reconcileEnv: e, policy: p, sign: sign, verifier: v, adminUID: adminUID, auth: a}
+	return &batchRPCEnv{reconcileEnv: e, policy: p, sign: sign, verifier: v, adminUIDs: adminUIDs, auth: a}
 }
 
 // plan builds a complete two-stage plan with a dependency, one member per risk.
@@ -393,7 +393,7 @@ func TestBatchServerProposesAdminApproves(t *testing.T) {
 	}
 }
 
-// An admin-role peer that is not the configured executor-local admin UID can
+// An admin-role peer that is not a configured executor-local admin UID can
 // neither review nor approve.
 func TestBatchCLIRejectsOtherAdminUID(t *testing.T) {
 	env := newBatchRPCEnv(t, uint32(os.Getuid())+1)
@@ -408,6 +408,25 @@ func TestBatchCLIRejectsOtherAdminUID(t *testing.T) {
 		t.Fatalf("review: %v", err)
 	}
 	if _, err := admin.ApproveBatchCLI(ctx, &pb.ApproveBatchCLIRequest{BatchDigest: prop.GetBatchDigest()}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("approve: %v", err)
+	}
+}
+
+// With two configured admins, the second one (not only the first) can
+// review and approve from the CLI.
+func TestBatchCLISecondAdminApproves(t *testing.T) {
+	env := newBatchRPCEnv(t, uint32(os.Getuid())+1, uint32(os.Getuid()))
+	server := readRPCClient(t, env.svc, peercred.RoleServer)
+	admin := readRPCClient(t, env.svc, peercred.RoleAdmin)
+	ctx := context.Background()
+	prop, err := server.ProposeBatch(ctx, env.plan(t, canonical.RiskMedium))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.ReviewBatch(ctx, &pb.ReviewBatchRequest{BatchDigest: prop.GetBatchDigest()}); err != nil {
+		t.Fatalf("review: %v", err)
+	}
+	if _, err := admin.ApproveBatchCLI(ctx, &pb.ApproveBatchCLIRequest{BatchDigest: prop.GetBatchDigest()}); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 }

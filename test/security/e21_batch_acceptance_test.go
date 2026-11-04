@@ -151,7 +151,7 @@ func newE21Batch(t *testing.T, h *harness) *e21Batch {
 	b := &e21Batch{}
 	b.session.Store(true)
 	b.a, err = batch.New(batch.Options{
-		Mode: permit.ModeStandard, Verifier: h.verifier, Store: h.db, AdminUID: 4242,
+		Mode: permit.ModeStandard, Verifier: h.verifier, Store: h.db, AdminUIDs: []uint32{4242},
 		Policy:  &e21Policy{db: h.db, risk: risk},
 		Session: func() (bool, time.Time) { return b.session.Load(), time.Now().Add(time.Hour) },
 	})

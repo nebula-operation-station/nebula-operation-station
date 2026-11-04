@@ -12,9 +12,9 @@ import (
 	"go/token"
 	"io"
 	"log/slog"
-	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
@@ -25,6 +25,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnreg"
@@ -101,7 +102,7 @@ func newExecutorUnderTest(t *testing.T) *executorUnderTest {
 
 // The shipped executor's setup wires the batch authority: before it the
 // batch RPCs are Unimplemented (the server falls back to "joined"); after
-// it the real service answers the credential-version read with a version a
+// it batch execution is still not advertised, and the real service answers the credential-version read with a version a
 // canonical batch binds exactly, and takes proposals.
 func TestSetupBatchAuthorityServesBatches(t *testing.T) {
 	e := newExecutorUnderTest(t)
@@ -112,14 +113,21 @@ func TestSetupBatchAuthorityServesBatches(t *testing.T) {
 	}
 	a, err := setupBatchAuthority(e.svc, batchConfig{
 		Mode: permit.ModeStandard, Verifier: e.verifier, Risk: e.risk, Source: e.db, Store: e.db,
-		Session: e.auth.Session, AdminUID: noBatchAdminUID, Audit: func(permit.Event) {},
+		Session: e.auth.Session, AdminUIDs: nil, Audit: func(permit.Event) {},
 	})
 	if err != nil || a == nil {
 		t.Fatalf("setup: %v", err)
 	}
 	t.Cleanup(a.Lock)
-	if _, err := e.svc.GetBatchCredentialVersions(ctx, &pb.GetBatchCredentialVersionsRequest{}); err != nil {
+	// The shipped executor approves batches but has no batch dispatcher, so
+	// it never advertises batch execution: servers do not propose batches
+	// that would be approved and never run.
+	probe, err := e.svc.GetBatchCredentialVersions(ctx, &pb.GetBatchCredentialVersionsRequest{})
+	if err != nil {
 		t.Fatalf("probe: %v", err)
+	}
+	if probe.GetBatchExecutionAvailable() {
+		t.Fatal("the shipped executor advertises batch execution")
 	}
 	resp, err := e.svc.GetBatchCredentialVersions(ctx, read)
 	if err != nil {
@@ -156,20 +164,26 @@ func TestSetupBatchAuthorityRequiresPolicyInputs(t *testing.T) {
 	}
 }
 
-// Without an admin user no peer can approve a batch locally.
-func TestBatchAdminUID(t *testing.T) {
-	uid, err := batchAdminUID(" , ")
-	if err != nil || uid != math.MaxUint32 {
-		t.Errorf("no admin: %d %v", uid, err)
+// Every admin in the role table may approve batches locally, not only the
+// first; the server user may not; without admins no peer may.
+func TestBatchAdminUIDs(t *testing.T) {
+	roles := map[uint32][]peercred.Role{
+		2000: {peercred.RoleServer},
+		1002: {peercred.RoleAdmin},
+		1001: {peercred.RoleAdmin},
 	}
-	if _, err := batchAdminUID("no-such-user-nebula-test"); err == nil {
-		t.Error("unknown admin user accepted")
+	if got := batchAdminUIDs(roles); !slices.Equal(got, []uint32{1001, 1002}) {
+		t.Errorf("admins = %v", got)
+	}
+	if got := batchAdminUIDs(map[uint32][]peercred.Role{2000: {peercred.RoleServer}}); len(got) != 0 {
+		t.Errorf("no admin: %v", got)
 	}
 }
 
 // run(), the shipped executor's entry point, wires the batch authority with
-// setupBatchAuthority and locks it on shutdown; the tests above exercise
-// that function with the real service.
+// setupBatchAuthority and every admin of the role table, locks it on
+// shutdown, and never advertises batch execution (no dispatcher is wired);
+// the tests above exercise that function with the real service.
 func TestRunWiresBatchAuthority(t *testing.T) {
 	f, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
 	if err != nil {
@@ -197,9 +211,12 @@ func TestRunWiresBatchAuthority(t *testing.T) {
 			return true
 		})
 	}
-	for _, want := range []string{"setupBatchAuthority", "batchAdminUID", "batchAuth.Lock"} {
+	for _, want := range []string{"setupBatchAuthority", "batchAdminUIDs", "batchAuth.Lock"} {
 		if !calls[want] {
 			t.Errorf("run() does not call %s", want)
 		}
+	}
+	if calls["svc.SetBatchExecutionAvailable"] {
+		t.Error("run() advertises batch execution without a batch dispatcher")
 	}
 }

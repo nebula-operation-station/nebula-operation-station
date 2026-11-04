@@ -94,16 +94,19 @@ func CredentialVersion(ctx context.Context, r BatchCredentialReader, ref string)
 	return vs[0].GetVersion(), nil
 }
 
-// BatchesAvailable reports whether the executor takes batches: false when
-// it does not implement the credential-version read or has no batch
-// authority configured (Unimplemented). Any other failure, such as a locked
-// keyring or an unreachable executor, is returned as an error so callers
-// can tell a transient condition from a missing capability.
+// BatchesAvailable reports whether the executor runs batches end to end:
+// true only when it advertises batch_execution_available. It is false when
+// the executor does not implement the credential-version read or has no
+// batch authority configured (Unimplemented), and also when it serves the
+// read and approves batches but does not execute approved members, since a
+// batch proposed there would be approved and never run. Any other failure,
+// such as a locked keyring or an unreachable executor, is returned as an
+// error so callers can tell a transient condition from a missing capability.
 func BatchesAvailable(ctx context.Context, r BatchCredentialReader) (bool, error) {
-	_, err := r.GetBatchCredentialVersions(ctx, &pb.GetBatchCredentialVersionsRequest{})
+	resp, err := r.GetBatchCredentialVersions(ctx, &pb.GetBatchCredentialVersionsRequest{})
 	switch {
 	case err == nil:
-		return true, nil
+		return resp.GetBatchExecutionAvailable(), nil
 	case status.Code(err) == codes.Unimplemented:
 		return false, nil
 	default:

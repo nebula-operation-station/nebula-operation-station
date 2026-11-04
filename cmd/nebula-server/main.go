@@ -524,8 +524,9 @@ type deployBatches struct {
 	exec serverBatchExecutor
 }
 
-// BatchesAvailable reports whether the executor takes batches
-// (executorclient.BatchesAvailable); not connected is an error, not false.
+// BatchesAvailable reports whether the executor runs batches end to end
+// (executorclient.BatchesAvailable: it must advertise batch execution, not
+// only serve credential versions); not connected is an error, not false.
 func (d deployBatches) BatchesAvailable(ctx context.Context) (bool, error) {
 	return executorclient.BatchesAvailable(ctx, d.exec)
 }

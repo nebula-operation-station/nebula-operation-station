@@ -165,7 +165,7 @@ func (e *batchRPCEnv) productionBatchAuthority(t *testing.T) *batch.Authority {
 		t.Fatal(err)
 	}
 	a, err := batch.New(batch.Options{
-		Mode: permit.ModeStandard, Verifier: e.verifier, Policy: pol, AdminUID: e.adminUID, Now: e.clock.Now, Store: e.db,
+		Mode: permit.ModeStandard, Verifier: e.verifier, Policy: pol, AdminUIDs: e.adminUIDs, Now: e.clock.Now, Store: e.db,
 		Session: func() (bool, time.Time) { return true, e.clock.Now().Add(time.Hour) },
 	})
 	if err != nil {

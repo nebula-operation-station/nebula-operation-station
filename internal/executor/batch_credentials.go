@@ -98,7 +98,9 @@ func (s *Service) checkMemberCredentials(where string, member canonical.BatchMem
 // SSH credential reference (server and admin roles, read-only), so the
 // server can bind exact versions into a batch plan. It returns versions and
 // public-key fingerprints only. Like the other batch RPCs it is
-// Unimplemented while no batch authority is wired.
+// Unimplemented while no batch authority is wired. The response also says
+// whether approved batch members are executed (batch_execution_available),
+// which is false unless SetBatchExecutionAvailable was called.
 func (s *Service) GetBatchCredentialVersions(_ context.Context, req *pb.GetBatchCredentialVersionsRequest) (*pb.GetBatchCredentialVersionsResponse, error) {
 	if err := validateBatchMessage(req); err != nil {
 		return nil, err
@@ -117,7 +119,10 @@ func (s *Service) GetBatchCredentialVersions(_ context.Context, req *pb.GetBatch
 	if s.batchAuth == nil {
 		return nil, errBatchUnconfigured
 	}
-	out := &pb.GetBatchCredentialVersionsResponse{Versions: make([]*pb.BatchCredentialVersion, 0, len(refs))}
+	out := &pb.GetBatchCredentialVersionsResponse{
+		Versions:                make([]*pb.BatchCredentialVersion, 0, len(refs)),
+		BatchExecutionAvailable: s.batchExecution,
+	}
 	for _, ref := range refs {
 		signer, err := s.keys.Signer(ref)
 		if err != nil {
