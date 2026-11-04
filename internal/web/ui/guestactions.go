@@ -91,13 +91,12 @@ const (
 	guestKindLXC  = "lxc"
 )
 
-// guestPowerVerb describes one power verb. Risk is the base risk the
-// button shows; the executor decides the real one, which the proposal
-// page shows.
+// guestPowerVerb describes one power verb. The label names the base risk
+// (MEDIUM or HIGH, as the executor's risk policy sets it); the executor
+// decides the real one, which the proposal page shows.
 type guestPowerVerb struct {
 	Verb        string
 	Label       string // button label
-	Risk        string // base risk (MEDIUM or HIGH)
 	Destructive bool   // hard power action, no guest cooperation
 	Explain     string // spelled out on the proposal page
 	QEMUOnly    bool
@@ -105,13 +104,13 @@ type guestPowerVerb struct {
 
 // guestPowerVerbs are the verbs in button order.
 var guestPowerVerbs = []guestPowerVerb{
-	{Verb: "shutdown", Label: "Shutdown (MEDIUM)", Risk: "MEDIUM",
+	{Verb: "shutdown", Label: "Shutdown (MEDIUM)",
 		Explain: "graceful shutdown: the guest is asked to shut down; there is no forced stop if it does not"},
-	{Verb: "reboot", Label: "Reboot (MEDIUM)", Risk: "MEDIUM",
+	{Verb: "reboot", Label: "Reboot (MEDIUM)",
 		Explain: "graceful reboot: the guest is asked to reboot"},
-	{Verb: "stop", Label: "Stop — hard power off, HIGH", Risk: "HIGH", Destructive: true,
+	{Verb: "stop", Label: "Stop — hard power off, HIGH", Destructive: true,
 		Explain: "hard power off: the guest is cut off immediately, like pulling the plug; unsaved data is lost"},
-	{Verb: "reset", Label: "Reset — hard reset, HIGH", Risk: "HIGH", Destructive: true, QEMUOnly: true,
+	{Verb: "reset", Label: "Reset — hard reset, HIGH", Destructive: true, QEMUOnly: true,
 		Explain: "hard reset: the VM is restarted immediately, like pressing the reset button; unsaved data is lost"},
 }
 
@@ -372,12 +371,12 @@ var guestPowerDigestRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // guestActionData is the data of the proposal page.
 type guestActionData struct {
-	Name, Remote, Node, Kind, KindLabel string
-	VMID, Generation                    uint64
-	Verb                                guestPowerVerb
-	Digest, Risk, RiskClass             string
-	Canonical                           string
-	ChallengeExpiry                     time.Time
+	Name, Remote, Node, KindLabel string
+	VMID, Generation              uint64
+	Verb                          guestPowerVerb
+	Digest, Risk, RiskClass       string
+	Canonical                     string
+	ChallengeExpiry               time.Time
 	// Approval: Options for the security key button, or CLICommand
 	// (hardened mode, or a typed count the button cannot send).
 	Options    string
@@ -579,7 +578,7 @@ func (h *Handler) handleGuestPowerProposal(w http.ResponseWriter, r *http.Reques
 	}
 	t := p.target
 	d := &guestActionData{
-		Name: p.name, Remote: t.GetRemoteId(), Node: t.GetNode(), Kind: t.GetKind(), KindLabel: guestKindLabel(t.GetKind()),
+		Name: p.name, Remote: t.GetRemoteId(), Node: t.GetNode(), KindLabel: guestKindLabel(t.GetKind()),
 		VMID: t.GetVmid(), Generation: p.generation, Verb: p.verb,
 		Digest: p.digest, Risk: p.risk, RiskClass: riskBadgeClass(p.risk), Canonical: p.canonical,
 		ChallengeExpiry: p.challengeAt, State: p.state, Message: p.message, ExecutionID: p.executionID, Steps: p.steps,
