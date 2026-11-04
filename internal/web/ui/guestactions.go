@@ -1190,6 +1190,32 @@ var guestSnapshotArtifacts = func() map[string]string {
 	return out
 }()
 
+// guestSnapshotRiskFloor is the lowest risk the UI accepts per snapshot
+// op, as ADR 0006 sets it (create MEDIUM, delete and rollback HIGH; the
+// executor's GuestSnapshotRiskFloor). A binding below it, or with a risk
+// the UI does not know, is shown as a mismatch, never approved.
+var guestSnapshotRiskFloor = map[string]string{
+	guestSnapshotCreate:   "MEDIUM",
+	guestSnapshotDelete:   "HIGH",
+	guestSnapshotRollback: "HIGH",
+}
+
+// riskRank orders the risk classes; 0 for an unknown one.
+func riskRank(risk string) int {
+	switch risk {
+	case "LOW":
+		return 1
+	case "MEDIUM":
+		return 2
+	case "HIGH":
+		return 3
+	case "CRITICAL":
+		return 4
+	default:
+		return 0
+	}
+}
+
 // guestSnapshotProposal is the snapshot part of a proposal.
 type guestSnapshotProposal struct {
 	// target is what was proposed and is committed (with expect for delete
@@ -1269,6 +1295,11 @@ func guestSnapshotMismatch(b guestPowerBinding, s *guestSnapshotProposal, risk, 
 	wantRuns := t.GetOp() == guestSnapshotRollback && (t.GetStart() || t.GetExpect().GetVmstate())
 	if s.runsAfter != wantRuns {
 		out = append(out, "the executor bound a different power state after the rollback than the start choice and RAM flag give")
+	}
+	// The risk must be at least the op's floor, both as the executor
+	// answered and as it bound (guestTargetMismatch reports a difference).
+	if floor := guestSnapshotRiskFloor[t.GetOp()]; riskRank(risk) < riskRank(floor) || riskRank(b.Risk) < riskRank(floor) {
+		out = append(out, "the executor's risk ("+cleanText(b.Risk)+") is below the floor of a snapshot "+t.GetOp()+" ("+floor+")")
 	}
 	return append(out, guestTargetMismatch(b, guestRef{remote: t.GetRemoteId(), kind: t.GetKind(), node: t.GetNode(), vmid: t.GetVmid()}, risk, trustPin, now)...)
 }
