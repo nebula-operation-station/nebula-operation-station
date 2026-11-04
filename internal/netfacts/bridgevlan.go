@@ -30,9 +30,10 @@ type BridgeVLANTable struct {
 	Dropped int
 	// Incomplete is true when the host reported data the parser did not
 	// keep: a skipped element (Dropped > 0), a missing or out-of-range
-	// VLAN id, an invalid range, or VLANs dropped once the document hit
-	// maxVLANsPerDoc or maxVLANWorkPerDoc. An incomplete table must be
-	// presented as such, never as the complete table (spec 09).
+	// VLAN id, an invalid range, a mixed-shape element (both a "vlans"
+	// list and a flat "vlan" field), or VLANs dropped once the document
+	// hit maxVLANsPerDoc or maxVLANWorkPerDoc. An incomplete table must
+	// be presented as such, never as the complete table (spec 09).
 	Incomplete bool
 }
 
@@ -46,7 +47,9 @@ type BridgeVLANTable struct {
 //     {"ifname":"br0","vlan":1,"flags":["PVID","Egress Untagged"]}.
 //
 // When "vlans" is present it wins; otherwise the flat "vlan" field is
-// used. Unknown fields are dropped (spec 09).
+// used. An element carrying both shapes keeps the "vlans" list and
+// marks the table incomplete (the flat "vlan" field is dropped).
+// Unknown fields are dropped (spec 09).
 type bridgeVLANDoc struct {
 	IfName  string         `json:"ifname"`
 	VLANs   []vlanEntryDoc `json:"vlans"`
@@ -68,10 +71,12 @@ type vlanEntryDoc struct {
 //
 // Each element is a bridge port (or a single port/VLAN pair in the flat
 // shape). An element without a valid port name, or with no VLAN
-// information, is skipped and counted in Dropped. Entries without a VLAN
-// id, VLAN ids outside minVLANID..maxVLANID and inverted ranges are
-// dropped; a range is expanded into one VLAN per id; duplicate ids on a
-// port are merged (flags OR'd). The document as a whole expands to at most
+// information, is skipped and counted in Dropped. An element carrying
+// both a "vlans" list and a flat "vlan" field keeps the list and marks
+// the table incomplete (the flat field is dropped). Entries without a
+// VLAN id, VLAN ids outside minVLANID..maxVLANID and inverted ranges
+// are dropped; a range is expanded into one VLAN per id; duplicate ids
+// on a port are merged (flags OR'd). The document as a whole expands to at most
 // maxVLANsPerDoc distinct (port, VLAN) pairs and visits at most
 // maxVLANWorkPerDoc ids (duplicates included); VLANs beyond either budget
 // are dropped. Every such loss sets Incomplete. Input above
@@ -113,6 +118,11 @@ func ParseBridgeVLAN(raw []byte) (BridgeVLANTable, error) {
 			t.Dropped++
 			t.Incomplete = true
 			continue
+		}
+		if len(entries) > 0 && d.VLAN != nil {
+			// Both shapes in one element: the "vlans" list wins and the
+			// flat "vlan" field is dropped.
+			t.Incomplete = true
 		}
 		m := acc[d.IfName]
 		if m == nil {
