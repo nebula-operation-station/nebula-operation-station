@@ -49,10 +49,13 @@ type fakeAttached struct {
 }
 
 // fakeVisible replaces hostrun.RunVisible: running is what the target
-// reports about the run.
+// reports about the run; err, when set, is returned instead, together
+// with running = false, so that code ignoring the error would free the
+// target.
 type fakeVisible struct {
 	mu      sync.Mutex
 	running bool
+	err     error
 	checks  int
 }
 
@@ -63,7 +66,16 @@ func (f *fakeVisible) run(_ context.Context, client *ssh.Client, _ string) (bool
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.checks++
+	if f.err != nil {
+		return false, f.err
+	}
 	return f.running, nil
+}
+
+func (f *fakeVisible) setErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.err = err
 }
 
 func (f *fakeVisible) set(running bool) {
@@ -783,4 +795,43 @@ func TestRunBatchMemberHeldTargetUnreachableStaysHeld(t *testing.T) {
 	e.visible.set(false)
 	_, err = e.server.RunBatchMember(ctx, e.runReq(d, n, 1, "web-1"))
 	e.requireRefused(t, err, codes.FailedPrecondition, members[1], 1)
+}
+
+// A target that is reachable but cannot tell whether the run is gone
+// (hostrun.ErrVisibilityUnknown) stays held, before the response and on
+// every recheck, until it positively reports the run gone.
+func TestRunBatchMemberHeldTargetVisibilityErrorStaysHeld(t *testing.T) {
+	e := newDispatchEnv(t, "web-1")
+	ctx := context.Background()
+	e.failureThreshold = 1
+	d, members, n := e.propose(t, canonical.BatchGateAutomatic, true, dispatchMember{host: "web-1"}, dispatchMember{host: "web-1"})
+	e.attached.mu.Lock()
+	e.attached.mayRun = true
+	e.attached.mu.Unlock()
+	e.visible.setErr(fmt.Errorf("%w: exit status 3", hostrun.ErrVisibilityUnknown))
+	resp, err := e.server.RunBatchMember(ctx, e.runReq(d, n, 0, "web-1"))
+	if err != nil || resp.GetOutcome() != pb.BatchMemberOutcome_BATCH_MEMBER_OUTCOME_UNKNOWN || !strings.Contains(resp.GetDetail(), "held") {
+		t.Fatalf("timed-out member: %+v %v", resp, err)
+	}
+	e.attached.mu.Lock()
+	e.attached.mayRun = false
+	e.attached.mu.Unlock()
+	before := e.visible.count()
+	_, err = e.server.RunBatchMember(ctx, e.runReq(d, n, 1, "web-1"))
+	e.requireRefused(t, err, codes.FailedPrecondition, members[1], 1)
+	if e.visible.count() == before {
+		t.Fatal("the held target was not rechecked")
+	}
+	e.svc.batchRun.mu.Lock()
+	_, held := e.svc.batchRun.held["web-1"]
+	e.svc.batchRun.mu.Unlock()
+	if !held {
+		t.Fatal("target released on an error")
+	}
+	// Only a positive answer frees it.
+	e.visible.setErr(nil)
+	e.visible.set(false)
+	if resp, err := e.server.RunBatchMember(ctx, e.runReq(d, n, 1, "web-1")); err != nil || resp.GetOutcome() != pb.BatchMemberOutcome_BATCH_MEMBER_OUTCOME_SUCCESS {
+		t.Fatalf("after the run is gone: %+v %v", resp, err)
+	}
 }

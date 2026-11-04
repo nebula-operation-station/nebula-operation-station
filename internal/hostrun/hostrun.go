@@ -79,7 +79,8 @@ type Result struct {
 	Duration     time.Duration
 	// RemoteMayRun is set when Attached returned without the remote
 	// shell's exit status (timeout, cancelled request, connection ended
-	// or session error): the remote process may still be running, and
+	// or session error) or the remote shell was killed by a signal: the
+	// remote process or its children may still be running, and
 	// only RunVisible can tell when it is gone.
 	RemoteMayRun bool
 }
@@ -276,7 +277,10 @@ func run(ctx context.Context, s Session, cmd string, timeout time.Duration, out,
 		var missing *ssh.ExitMissingError
 		switch {
 		case errors.As(runErr, &ee) && ee.Signal() != "":
+			// The remote shell died, but children it started (in the
+			// background or in another process group) may live on.
 			res.Class, res.Detail = ClassScriptInterrupted, "killed by signal "+ee.Signal()
+			res.RemoteMayRun = true
 			return res
 		case errors.As(runErr, &ee):
 			res.ExitCode = ee.ExitStatus()

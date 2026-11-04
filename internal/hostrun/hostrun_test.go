@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -179,5 +180,60 @@ func TestRunVisibleAfterTimeout(t *testing.T) {
 	}
 	if _, err := hostrun.RunVisible(context.Background(), c, "not-a-uuid"); err == nil {
 		t.Fatal("invalid execution ID accepted")
+	}
+}
+
+// The visibility check fails closed: without a working tr it cannot read
+// the processes and reports ErrVisibilityUnknown, never "not running".
+// It does not depend on grep.
+func TestRunVisibleFailsClosed(t *testing.T) {
+	tr, err := exec.LookPath("tr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := func(t *testing.T, files map[string]string) string {
+		d := t.TempDir()
+		for name, body := range files {
+			if err := os.WriteFile(filepath.Join(d, name), []byte(body), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return d
+	}
+	for name, tc := range map[string]struct {
+		files map[string]string
+		ok    bool
+	}{
+		"tr absent":            {files: map[string]string{}},
+		"tr fails":             {files: map[string]string{"tr": "#!/bin/sh\nexit 1\n"}},
+		"tr prints nothing":    {files: map[string]string{"tr": "#!/bin/sh\nexit 0\n"}},
+		"grep absent, tr real": {files: map[string]string{"tr": "#!/bin/sh\nexec " + tr + " \"$@\"\n"}, ok: true},
+		"grep fails, tr real": {files: map[string]string{"tr": "#!/bin/sh\nexec " + tr + " \"$@\"\n", "grep": "#!/bin/sh\nexit 2\n"},
+			ok: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// The test host runs commands with this process's environment.
+			t.Setenv("PATH", stub(t, tc.files))
+			c := client(t)
+			running, err := hostrun.RunVisible(context.Background(), c, execID)
+			if tc.ok {
+				if err != nil || running {
+					t.Fatalf("running %v err %v", running, err)
+				}
+				return
+			}
+			if !errors.Is(err, hostrun.ErrVisibilityUnknown) {
+				t.Fatalf("running %v err %v, want ErrVisibilityUnknown", running, err)
+			}
+		})
+	}
+}
+
+// A remote shell killed by a signal may leave children running.
+func TestKilledBySignalMayRun(t *testing.T) {
+	c := client(t)
+	r := run(t, c, `{}`, `kill -KILL $PPID; sleep 1`, 0)
+	if r.Class != hostrun.ClassScriptInterrupted || !strings.Contains(r.Detail, "signal") || !r.RemoteMayRun {
+		t.Fatalf("%+v", r)
 	}
 }

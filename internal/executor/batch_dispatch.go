@@ -109,6 +109,13 @@ type batchExec struct {
 	// every batch, in addition to the per-batch same-host ordering. A
 	// target whose last member may still run there stays in it and in
 	// held until the host shows that run gone.
+	//
+	// Both live only in memory: an executor restart while a member may
+	// still run frees its target, and the next member there starts
+	// without a RunVisible check. Persisting the hold is follow-up pv08f.
+	// A hold has no time limit and no operator release; only the host
+	// showing the run gone (hostrun.RunVisible, which counts only the SSH
+	// user's own processes) or that restart ends it.
 	hosts map[string]string
 	held  map[string]*heldTarget
 }
