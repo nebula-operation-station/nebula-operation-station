@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -78,15 +79,85 @@ type pveMutationClient struct {
 	secrets pveSecrets
 	// now is the clock for certificate validity.
 	now func() time.Time
-	// block persistently blocks a remote that failed trust verification
-	// (Service.blockPveRead: registry block plus revocation of its
-	// provider grants and mutation permits), as the read path does. Nil
-	// only in tests that do not exercise trust failures.
-	block func(remoteID string)
+	// block persistently blocks a remote whose trust rm (pin and trust
+	// generation) failed verification (Service.pveTrustFailed: registry
+	// block plus revocation of its provider grants and mutation permits,
+	// and the trust fence when the block cannot be recorded), as every
+	// other connection does. Nil only in tests that do not exercise trust
+	// failures.
+	block func(rm executordb.PveRemote)
 }
 
 var _ PveMutationClient = (*pveMutationClient)(nil)
 var _ PveStepTaskIDer = (*pveMutationClient)(nil)
+
+// pveTrustKey is one trust of a remote: its pin and the trust generation
+// it was approved under. An admin re-pin always raises the generation.
+type pveTrustKey struct {
+	pin        string
+	generation uint64
+}
+
+func pveTrustKeyOf(rm executordb.PveRemote) pveTrustKey {
+	return pveTrustKey{pin: rm.TrustPin, generation: rm.TrustGeneration}
+}
+
+// pveTrustFence holds, per remote, the trust that failed verification but
+// whose block could not be recorded in the registry. It fences exactly
+// that trust: a remote record of the failed generation (or an older,
+// stale record) is covered; a record of a newer generation means an admin
+// re-pinned the remote since, and drops the entry. The fence is in memory
+// only: after a restart the pin check fails again on the next connection
+// and the block is retried there.
+type pveTrustFence struct {
+	mu     sync.Mutex
+	failed map[string]pveTrustKey // remote ID -> failed trust
+}
+
+// add fences the trust of rm. An entry of a newer generation is kept: it
+// covers rm's older record too.
+func (f *pveTrustFence) add(rm executordb.PveRemote) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failed == nil {
+		f.failed = map[string]pveTrustKey{}
+	}
+	if k, ok := f.failed[rm.RemoteID]; ok && k.generation > rm.TrustGeneration {
+		return
+	}
+	f.failed[rm.RemoteID] = pveTrustKeyOf(rm)
+}
+
+// covers reports whether rm is fenced and returns the fenced trust. A
+// record of the failed generation is fenced also if its pin differs (that
+// cannot come from a re-pin, so it fails closed). A record of a newer
+// generation drops the entry and is not fenced. A nil fence covers
+// nothing.
+func (f *pveTrustFence) covers(rm executordb.PveRemote) (pveTrustKey, bool) {
+	if f == nil {
+		return pveTrustKey{}, false
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k, ok := f.failed[rm.RemoteID]
+	if !ok {
+		return pveTrustKey{}, false
+	}
+	if rm.TrustGeneration > k.generation {
+		delete(f.failed, rm.RemoteID)
+		return pveTrustKey{}, false
+	}
+	return k, true
+}
+
+// remove drops the entry of remoteID if it still fences k.
+func (f *pveTrustFence) remove(remoteID string, k pveTrustKey) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failed[remoteID] == k {
+		delete(f.failed, remoteID)
+	}
+}
 
 // pveStepFamily is the dispatcher a step method belongs to.
 type pveStepFamily int
@@ -189,7 +260,7 @@ func (c *pveMutationClient) conn(ctx context.Context, rm executordb.PveRemote) (
 // blockRemote blocks rm after a trust failure seen by this client.
 func (c *pveMutationClient) blockRemote(rm executordb.PveRemote) {
 	if c.block != nil {
-		c.block(rm.RemoteID)
+		c.block(rm)
 	}
 }
 
