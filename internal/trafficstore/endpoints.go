@@ -639,7 +639,10 @@ type endpointMatch struct {
 // SQL of the endpoint write path; package-level (or built from the
 // number of placeholders) so the tests can check the query plans.
 const (
-	findByMACSQL = `SELECT id, mac, owner FROM net_endpoints WHERE mac = ?`
+	// findByMACSQL and lookupByMACSQL repeat the partial index's
+	// condition (mac != ''), so SQLite can use idx_net_endpoints_mac.
+	findByMACSQL   = `SELECT id, mac, owner FROM net_endpoints WHERE mac = ? AND mac != ''`
+	lookupByMACSQL = `SELECT id FROM net_endpoints WHERE mac = ? AND mac != ''`
 	// countReportersSQL counts the seen-by rows of one endpoint.
 	countReportersSQL = `SELECT COUNT(*) FROM net_endpoint_reporters WHERE endpoint_id = ?`
 	// countReporterAddressesSQL counts one reporter's addresses on one
@@ -1024,7 +1027,7 @@ func (s *Store) endpointObservations(ctx context.Context, id string) ([]Observat
 func (s *Store) LookupEndpoint(ctx context.Context, mac string, addr netip.Addr) (Endpoint, bool, error) {
 	var id string
 	if mac != "" {
-		err := s.db.QueryRowContext(ctx, `SELECT id FROM net_endpoints WHERE mac = ?`, mac).Scan(&id)
+		err := s.db.QueryRowContext(ctx, lookupByMACSQL, mac).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			return Endpoint{}, false, nil
 		}
