@@ -65,14 +65,10 @@ var (
 // timeout, 404, non-2xx). It never includes headers or bodies in the
 // reason or in a returned error.
 func (c *Client) clusterGet(ctx context.Context, path string) ([]byte, string, error) {
-	if c.HTTP == nil || c.BaseURL == "" || c.Token == nil {
-		return nil, "", errors.New("pveapi: incomplete client")
+	if err := c.ready(); err != nil {
+		return nil, "", err
 	}
-	timeout := c.Timeout
-	if timeout <= 0 {
-		timeout = DefaultTimeout
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	ctx, cancel := context.WithTimeout(ctx, c.callTimeout())
 	defer cancel()
 
 	token, err := c.Token(ctx)
@@ -80,17 +76,13 @@ func (c *Client) clusterGet(ctx context.Context, path string) ([]byte, string, e
 		return nil, "", fmt.Errorf("pveapi: token supplier: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.BaseURL, "/")+path, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint(path), nil)
 	if err != nil {
 		return nil, "", fmt.Errorf("pveapi: build request: %w", err)
 	}
 	req.Header.Set("Authorization", token)
 
-	// Copy the injected client so its redirect policy is neither trusted nor
-	// mutated. Credentials must never be sent to a redirected destination.
-	httpClient := *c.HTTP
-	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	resp, err := httpClient.Do(req)
+	resp, err := c.send(req)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return nil, "request timed out", nil
@@ -107,10 +99,7 @@ func (c *Client) clusterGet(ctx context.Context, path string) ([]byte, string, e
 		return nil, fmt.Sprintf("http status %d", resp.StatusCode), nil
 	}
 
-	maxBody := c.MaxBody
-	if maxBody <= 0 {
-		maxBody = DefaultMaxBody
-	}
+	maxBody := c.maxBody()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
 		return nil, "response read failed", nil

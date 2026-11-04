@@ -784,12 +784,11 @@ func pveMigrateFacts(ctx context.Context, hc *http.Client, base string, read pve
 	if err != nil {
 		return PveMigrateFacts{}, errPveMutationRead
 	}
-	cr := pveClusterReader(hc, base, read)
-	cs, err := cr.ClusterStatus(ctx)
+	cs, err := pc.ClusterStatus(ctx)
 	if err != nil {
 		return PveMigrateFacts{}, errPveMutationRead
 	}
-	ha, err := cr.HAStatus(ctx)
+	ha, err := pc.HAStatus(ctx)
 	if err != nil {
 		return PveMigrateFacts{}, errPveMutationRead
 	}
@@ -846,17 +845,15 @@ func (c *pveMutationClient) DispatchMigrate(ctx context.Context, rm executordb.P
 	if err != nil {
 		return "", fmt.Errorf("dispatch %s: %w", step.Method, ErrPveRejected)
 	}
-	upid, err := DispatchGuestMigrateStep(ctx, w, pveClusterReader(hc, base, read), node, step)
+	rd, err := pveapi.NewClient(hc, base+"/api2/json", read)
+	if err != nil {
+		return "", fmt.Errorf("dispatch %s: %w", step.Method, ErrPveRejected)
+	}
+	rd.Timeout = pveMutationRequestTimeout
+	upid, err := DispatchGuestMigrateStep(ctx, w, rd, node, step)
 	if watch.failed.Load() {
 		c.blockRemote(rm)
 		return "", fmt.Errorf("dispatch %s: %w: %w", step.Method, ErrPveRejected, errPveReadTrust)
 	}
 	return upid, err
-}
-
-// pveClusterReader returns a pveapi client for the cluster and HA reads
-// (ClusterStatus, HAStatus) with the read token over hc. Those methods use
-// the exported connection fields, which pveapi.NewClient does not set.
-func pveClusterReader(hc *http.Client, base string, read pveapi.TokenSupplier) *pveapi.Client {
-	return &pveapi.Client{HTTP: hc, BaseURL: base + "/api2/json", Token: read, Timeout: pveMutationRequestTimeout}
 }

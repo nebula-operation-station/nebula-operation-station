@@ -194,7 +194,7 @@ func (r pveProvisionReaderAPI) NodeStorage(ctx context.Context, rm executordb.Pv
 	if err != nil {
 		return pveapi.Storage{}, err
 	}
-	c.RequestTimeout = pveReadRequestTimeout
+	c.Timeout = pveReadRequestTimeout
 	st, err := c.GetStorage(ctx, node, storage)
 	if terr := r.agent.checkTrust(rm, watch); terr != nil {
 		return pveapi.Storage{}, terr
