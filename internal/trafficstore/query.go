@@ -27,7 +27,8 @@ const (
 	// maxTopRows bounds the rows one per-node query returns to Go. The
 	// SQL keeps the flows ranked within the top n by total bytes,
 	// including ties at the boundary; when more than maxTopRows flows tie,
-	// the extra ones are cut in SQL's (deterministic) key order.
+	// the extra ones are cut in flow key order (ab_key orders the
+	// addresses as netip.Addr.Compare does), as flowagg breaks ties.
 	maxTopRows = 256
 )
 
@@ -42,15 +43,15 @@ const (
 // these sums); a flow is confirmed when every counted hour is.
 const topFlowsSQL = `
 WITH node_rows AS (
-	SELECT hour, a, b, proto, server_port, server_side, tier, server_reported,
+	SELECT hour, a, b, ab_key, proto, server_port, server_side, tier, server_reported,
 	       bytes_ab, bytes_ba, connections, lower_bound
 	FROM flow_buckets WHERE a = ?1 AND hour BETWEEN ?2 AND ?3
 	UNION ALL
-	SELECT hour, a, b, proto, server_port, server_side, tier, server_reported,
+	SELECT hour, a, b, ab_key, proto, server_port, server_side, tier, server_reported,
 	       bytes_ab, bytes_ba, connections, lower_bound
 	FROM flow_buckets WHERE b = ?1 AND hour BETWEEN ?2 AND ?3
 ), per_hour AS (
-	SELECT a, b, proto, server_port, server_side, tier, hour,
+	SELECT a, b, MIN(ab_key) AS ab_key, proto, server_port, server_side, tier, hour,
 	       MAX(server_reported) AS has_server,
 	       COUNT(*) AS sides,
 	       COALESCE(MAX(CASE WHEN server_reported = 1 THEN bytes_ab END), MAX(bytes_ab)) AS ab,
@@ -60,7 +61,7 @@ WITH node_rows AS (
 	FROM node_rows
 	GROUP BY a, b, proto, server_port, server_side, tier, hour
 ), per_flow AS (
-	SELECT a, b, proto, server_port, server_side, tier,
+	SELECT a, b, MIN(ab_key) AS ab_key, proto, server_port, server_side, tier,
 	       SUM(ab) AS ab, SUM(ba) AS ba, SUM(conns) AS conns,
 	       MAX(lb) AS lb, MAX(has_server) AS has_server, MIN(sides) AS min_sides,
 	       MIN(hour) AS first_hour, MAX(hour) AS last_hour
@@ -72,7 +73,7 @@ WITH node_rows AS (
 SELECT a, b, proto, server_port, server_side, tier, ab, ba, conns, lb, has_server, min_sides,
        first_hour, last_hour
 FROM ranked WHERE rnk <= ?4
-ORDER BY rnk, a, b, proto, server_port, server_side, tier
+ORDER BY rnk, ab_key, proto, server_port, server_side, tier
 LIMIT ?5`
 
 // checkWindow validates a query window: non-empty and no wider than the

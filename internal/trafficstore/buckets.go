@@ -160,7 +160,8 @@ var upsertBucketSQL = fmt.Sprintf(`
 // at the stored range, and lower_bound is ORed. Another reporter's
 // observation of the same side is refused with ErrConflict, so it can
 // neither replace nor add to the holder's bytes. The hour must lie within
-// the retention window and not in the future.
+// the retention window and start no later than now plus
+// flowagg.DefaultMaxClockSkew.
 //
 // A new row is refused with ErrLimit when it would exceed MaxBuckets in
 // total or MaxBucketsPerReporter for its reporter (ADR 0009 D7): existing
@@ -181,13 +182,14 @@ func (s *Store) UpsertBucket(ctx context.Context, b Bucket, own []netip.Addr) er
 	if hour <= pruneHourBound(now.Add(-s.retention).Unix()) {
 		return fmt.Errorf("%w: hour %s is older than the retention", ErrOutOfRange, b.Hour.UTC().Format(time.RFC3339))
 	}
-	if hour > hourOf(now) {
+	if hour > hourOf(now.Add(maxClockSkew)) {
 		return fmt.Errorf("%w: hour %s is in the future", ErrOutOfRange, b.Hour.UTC().Format(time.RFC3339))
 	}
 
 	s.autoPrune(ctx)
 
 	a, bb := b.Key.A.String(), b.Key.B.String()
+	abKey := addrOrderKey(b.Key.A, b.Key.B)
 	key := []any{hour, a, bb, int64(b.Key.Proto), int64(b.Key.ServerPort), int64(b.Key.Server), b.Key.Tier, boolInt(b.ServerReported)}
 	ab, ba, conns := clampCounter(b.BytesAB), clampCounter(b.BytesBA), clampCounter(b.Connections)
 	return s.writeTx(ctx, "upsert bucket", func(tx *sql.Tx) error {
@@ -224,15 +226,29 @@ func (s *Store) UpsertBucket(ctx context.Context, b Bucket, own []netip.Addr) er
 		if perReporter >= s.bucketCapReporter {
 			return fmt.Errorf("%w: reporter %s already has %d flow bucket rows, limit %d", ErrLimit, b.Reporter, perReporter, s.bucketCapReporter)
 		}
-		args := append(key, b.Reporter, ab, ba, conns, boolInt(b.LowerBound))
+		args := append(key, b.Reporter, ab, ba, conns, boolInt(b.LowerBound), abKey)
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO flow_buckets (hour, a, b, proto, server_port, server_side, tier, server_reported,
-			                          reporter, bytes_ab, bytes_ba, connections, lower_bound)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, args...); err != nil {
+			                          reporter, bytes_ab, bytes_ba, connections, lower_bound, ab_key)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, args...); err != nil {
 			return fmt.Errorf("trafficstore: insert bucket: %w", err)
 		}
 		return nil
 	})
+}
+
+// addrOrderKey encodes (a, b) so that byte order (SQLite BLOB
+// comparison) equals ordering by a, then b, with netip.Addr.Compare: per
+// address the bit length (IPv4 before IPv6), then the 16-byte form. Keys
+// carry no zones.
+func addrOrderKey(a, b netip.Addr) []byte {
+	out := make([]byte, 0, 34)
+	for _, x := range []netip.Addr{a, b} {
+		out = append(out, byte(x.BitLen()/8))
+		b16 := x.As16()
+		out = append(out, b16[:]...)
+	}
+	return out
 }
 
 func boolInt(b bool) int {

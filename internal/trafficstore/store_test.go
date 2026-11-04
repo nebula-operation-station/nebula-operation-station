@@ -3,6 +3,7 @@
 package trafficstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"math"
 	"net/netip"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -83,6 +85,9 @@ func put(t *testing.T, s *Store, b Bucket) {
 		t.Fatalf("upsert bucket %s-%s:%d by %s: %v", b.Key.A, b.Key.B, b.Key.ServerPort, b.Reporter, err)
 	}
 }
+
+// macIdentity is a reporter Identity that owns the given MACs.
+func macIdentity(macs ...string) Identity { return Identity{MACs: macs} }
 
 func mustLookup(t *testing.T, s *Store, mac, addr string) Endpoint {
 	t.Helper()
@@ -198,6 +203,7 @@ func TestSchemaAndIndexes(t *testing.T) {
 		"idx_flow_buckets_b_hour",
 		"idx_net_endpoints_mac",
 		"idx_net_endpoints_last_seen",
+		"idx_net_endpoints_owner",
 		"idx_net_endpoint_reporters_last_seen",
 		"idx_net_endpoint_addresses_address",
 	} {
@@ -250,6 +256,9 @@ func TestQueryPlansUseIndexes(t *testing.T) {
 		{"top flows", topFlowsSQL, []any{"10.0.0.1", 1, 2, 5, maxTopRows},
 			[]string{"idx_flow_buckets_a_hour (a=? AND hour>? AND hour<?)", "idx_flow_buckets_b_hour (b=? AND hour>? AND hour<?)"},
 			"SCAN flow_buckets"},
+		{"clear expired owners", clearOwnerSQL, nil, []string{"SCAN net_endpoints USING INDEX idx_net_endpoints_owner", "SEARCH r"}, "SCAN net_endpoints\n"},
+		{"lookup owned address", lookupOwnedSQL, []any{"10.0.0.1"}, []string{"idx_net_endpoint_addresses_address"}, "SCAN net_endpoint_addresses"},
+		{"lookup unowned address", lookupUnownedSQL, []any{"10.0.0.1"}, []string{"idx_net_endpoint_addresses_address"}, "SCAN net_endpoint_addresses"},
 		{"cap counter", `SELECT n FROM traffic_counts WHERE name = ? AND reporter = ?`, []any{"buckets", ""},
 			[]string{"SEARCH traffic_counts"}, "SCAN traffic_counts"},
 	}
@@ -273,7 +282,7 @@ func TestUpsertEndpoint(t *testing.T) {
 	ctx := context.Background()
 
 	e := testEndpoint("10.0.0.1", "00:11:22:33:44:55", "reporter-a")
-	if err := s.UpsertEndpoint(ctx, e); err != nil {
+	if err := s.UpsertEndpoint(ctx, e, macIdentity("00:11:22:33:44:55")); err != nil {
 		t.Fatalf("upsert endpoint: %v", err)
 	}
 	got := mustLookup(t, s, "00:11:22:33:44:55", "")
@@ -290,8 +299,8 @@ func TestUpsertEndpoint(t *testing.T) {
 	if len(got.Addresses) != 1 || got.Addresses[0] != netip.MustParseAddr("10.0.0.1") {
 		t.Errorf("addresses = %v", got.Addresses)
 	}
-	if got.Reporter != "reporter-a" || len(got.SeenBy) != 1 || got.SeenBy[0] != "reporter-a" {
-		t.Errorf("owner/seen-by = %q/%v", got.Reporter, got.SeenBy)
+	if got.Owner != "reporter-a" || got.HostID != "reporter-a" || len(got.SeenBy) != 1 || got.SeenBy[0] != "reporter-a" {
+		t.Errorf("owner/host/seen-by = %q/%q/%v", got.Owner, got.HostID, got.SeenBy)
 	}
 
 	// Re-upsert an hour later: last_seen advances, first_seen keeps,
@@ -302,7 +311,7 @@ func TestUpsertEndpoint(t *testing.T) {
 	e2.Hostname = ""
 	e2.FirstSeen = time.Time{}
 	e2.LastSeen = *now
-	if err := s.UpsertEndpoint(ctx, e2); err != nil {
+	if err := s.UpsertEndpoint(ctx, e2, Identity{}); err != nil {
 		t.Fatalf("re-upsert endpoint: %v", err)
 	}
 	got, err := s.Endpoint(ctx, id)
@@ -326,7 +335,7 @@ func TestUpsertEndpoint(t *testing.T) {
 	e3 := testEndpoint("10.0.0.1", "00:11:22:33:44:55", "reporter-a")
 	e3.FirstSeen = testNow.Add(-5 * time.Hour)
 	e3.LastSeen = testNow.Add(-4 * time.Hour)
-	if err := s.UpsertEndpoint(ctx, e3); err != nil {
+	if err := s.UpsertEndpoint(ctx, e3, Identity{}); err != nil {
 		t.Fatalf("upsert earlier observation: %v", err)
 	}
 	got, err = s.Endpoint(ctx, id)
@@ -355,7 +364,7 @@ func TestEndpointAddressNormalization(t *testing.T) {
 		netip.MustParseAddr("fe80::1%eth0"),
 		netip.MustParseAddr("10.0.0.7"),
 	}
-	if err := s.UpsertEndpoint(ctx, e); err != nil {
+	if err := s.UpsertEndpoint(ctx, e, Identity{}); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 	got := mustLookup(t, s, "", "10.0.0.7")
@@ -373,7 +382,7 @@ func TestEndpointAddressNormalization(t *testing.T) {
 	// A zone on a global address makes no sense and is refused.
 	bad := testEndpoint("10.0.0.1", "", "reporter-a")
 	bad.Addresses = []netip.Addr{netip.MustParseAddr("2001:db8::1%eth0")}
-	if err := s.UpsertEndpoint(ctx, bad); !errors.Is(err, ErrInvalidEndpoint) {
+	if err := s.UpsertEndpoint(ctx, bad, Identity{}); !errors.Is(err, ErrInvalidEndpoint) {
 		t.Errorf("zoned global address: err = %v, want ErrInvalidEndpoint", err)
 	}
 	if _, _, err := s.LookupEndpoint(ctx, "", netip.MustParseAddr("2001:db8::1%eth0")); !errors.Is(err, ErrInvalidEndpoint) {
@@ -389,7 +398,7 @@ func TestEndpointMergeByMACAndAddress(t *testing.T) {
 	e1 := testEndpoint("10.0.0.9", "", "reporter-a")
 	e1.LastSeen = testNow.Add(-time.Hour)
 	e1.FirstSeen = testNow.Add(-time.Hour)
-	if err := s.UpsertEndpoint(ctx, e1); err != nil {
+	if err := s.UpsertEndpoint(ctx, e1, Identity{}); err != nil {
 		t.Fatalf("upsert by address: %v", err)
 	}
 	first := mustLookup(t, s, "", "10.0.0.9")
@@ -400,7 +409,7 @@ func TestEndpointMergeByMACAndAddress(t *testing.T) {
 	// The owner's later observation carries the MAC: it merges into the
 	// same row, whose ID does not change.
 	e2 := testEndpoint("10.0.0.9", "00:11:22:33:44:66", "reporter-a")
-	if err := s.UpsertEndpoint(ctx, e2); err != nil {
+	if err := s.UpsertEndpoint(ctx, e2, Identity{}); err != nil {
 		t.Fatalf("upsert with mac: %v", err)
 	}
 	if n := mustCount(t, s.CountEndpoints); n != 1 {
@@ -420,12 +429,12 @@ func TestEndpointMergeByMACAndAddress(t *testing.T) {
 	// Another reporter's MAC observation for an address-only endpoint it
 	// does not own does not merge into it.
 	e3 := testEndpoint("10.0.0.20", "", "reporter-a")
-	if err := s.UpsertEndpoint(ctx, e3); err != nil {
+	if err := s.UpsertEndpoint(ctx, e3, Identity{}); err != nil {
 		t.Fatalf("upsert by address: %v", err)
 	}
 	addrOnlyID := mustLookup(t, s, "", "10.0.0.20").ID
 	e4 := testEndpoint("10.0.0.20", "00:11:22:33:44:77", "reporter-b")
-	if err := s.UpsertEndpoint(ctx, e4); err != nil {
+	if err := s.UpsertEndpoint(ctx, e4, Identity{}); err != nil {
 		t.Fatalf("upsert foreign mac: %v", err)
 	}
 	if n := mustCount(t, s.CountEndpoints); n != 3 {
@@ -435,7 +444,7 @@ func TestEndpointMergeByMACAndAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read address-only endpoint: %v", err)
 	}
-	if addrOnly.MAC != "" || addrOnly.Reporter != "reporter-a" || len(addrOnly.SeenBy) != 1 {
+	if addrOnly.MAC != "" || addrOnly.Owner != "" || len(addrOnly.SeenBy) != 1 || addrOnly.SeenBy[0] != "reporter-a" {
 		t.Errorf("address-only endpoint = %+v, want it untouched", addrOnly)
 	}
 	if mustLookup(t, s, "00:11:22:33:44:77", "").ID == addrOnlyID {
@@ -451,7 +460,7 @@ func TestEndpointDHCPReuseCreatesNewEndpoint(t *testing.T) {
 	old.LastSeen = testNow.Add(-2 * time.Hour)
 	old.FirstSeen = old.LastSeen
 	old.Hostname = "old-device"
-	if err := s.UpsertEndpoint(ctx, old); err != nil {
+	if err := s.UpsertEndpoint(ctx, old, Identity{}); err != nil {
 		t.Fatalf("upsert old device: %v", err)
 	}
 	// A new device with another vendor's MAC gets the same lease.
@@ -459,7 +468,7 @@ func TestEndpointDHCPReuseCreatesNewEndpoint(t *testing.T) {
 	fresh := testEndpoint("10.0.0.9", "aa:bb:cc:00:00:02", "reporter-a")
 	fresh.LastSeen = *now
 	fresh.Hostname = "new-device"
-	if err := s.UpsertEndpoint(ctx, fresh); err != nil {
+	if err := s.UpsertEndpoint(ctx, fresh, Identity{}); err != nil {
 		t.Fatalf("upsert new device: %v", err)
 	}
 	if n := mustCount(t, s.CountEndpoints); n != 2 {
@@ -473,71 +482,344 @@ func TestEndpointDHCPReuseCreatesNewEndpoint(t *testing.T) {
 	if n.ID == o.ID || n.OUI != "aabbcc" || n.Hostname != "new-device" {
 		t.Errorf("new device = %+v", n)
 	}
-	// The address resolves to the most recently seen endpoint, and an
-	// address-only observation joins that one, deterministically.
+	// Neither endpoint has an owner: the address is ambiguous rather than
+	// resolved by a value a reporter controls.
+	if _, found, err := s.LookupEndpoint(ctx, "", netip.MustParseAddr("10.0.0.9")); found || !errors.Is(err, ErrAmbiguous) {
+		t.Errorf("address lookup: found=%v err=%v, want ErrAmbiguous", found, err)
+	}
+	// Once the new device reports its own MAC (server records), its
+	// address resolves to it.
+	self := fresh
+	self.Reporter = "new-device"
+	if err := s.UpsertEndpoint(ctx, self, macIdentity("aa:bb:cc:00:00:02")); err != nil {
+		t.Fatalf("upsert owner: %v", err)
+	}
 	for range 3 {
-		if g := mustLookup(t, s, "", "10.0.0.9"); g.ID != n.ID {
-			t.Fatalf("address lookup = %s, want the new device %s", g.ID, n.ID)
+		if g := mustLookup(t, s, "", "10.0.0.9"); g.ID != n.ID || g.Owner != "new-device" {
+			t.Fatalf("address lookup = %s/%q, want the new device %s", g.ID, g.Owner, n.ID)
 		}
 	}
+	// An address-only observation joins the owned endpoint whose owner
+	// attached the address.
 	addrOnly := testEndpoint("10.0.0.9", "", "reporter-b")
 	addrOnly.LastSeen = *now
-	if err := s.UpsertEndpoint(ctx, addrOnly); err != nil {
+	if err := s.UpsertEndpoint(ctx, addrOnly, Identity{}); err != nil {
 		t.Fatalf("upsert address-only: %v", err)
 	}
-	if g := mustLookup(t, s, "aa:bb:cc:00:00:02", ""); len(g.SeenBy) != 2 {
-		t.Errorf("new device seen by %v, want reporter-a and reporter-b", g.SeenBy)
+	if g := mustLookup(t, s, "aa:bb:cc:00:00:02", ""); len(g.SeenBy) != 3 {
+		t.Errorf("new device seen by %v, want new-device, reporter-a and reporter-b", g.SeenBy)
 	}
 	checkCounters(t, s, db)
 }
 
-func TestEndpointOtherReporterCannotTakeOver(t *testing.T) {
+func TestEndpointHostileFirstClaimer(t *testing.T) {
 	s, db, _ := newTestStore(t)
 	ctx := context.Background()
+	const mac = "00:11:22:33:44:55"
 
-	owner := testEndpoint("10.0.0.1", "00:11:22:33:44:55", "owner")
-	owner.Hostname = ""
-	owner.VLAN = 0
-	if err := s.UpsertEndpoint(ctx, owner); err != nil {
-		t.Fatalf("upsert owner: %v", err)
+	// A hostile host claims the victim's MAC first, with its own values,
+	// a full set of addresses and identity links.
+	evil := testEndpoint("10.0.0.1", mac, "intruder")
+	evil.Hostname = "evil"
+	evil.VLAN = 99
+	evil.Tier = flowagg.TierSensor
+	evil.HostID = "host-x"
+	if err := s.UpsertEndpoint(ctx, evil, Identity{}); !errors.Is(err, ErrInvalidEndpoint) {
+		t.Errorf("reporter-supplied host link: err = %v, want ErrInvalidEndpoint", err)
 	}
-	// Another reporter claims the MAC, with its own values and a full
-	// set of addresses.
-	other := testEndpoint("10.0.0.1", "00:11:22:33:44:55", "intruder")
-	other.Hostname = "evil"
-	other.VLAN = 99
-	other.Tier = flowagg.TierSensor
-	other.HostID = "host-x"
-	other.Addresses = nil
-	for i := 1; i <= MaxAddressesPerEndpoint; i++ {
-		other.Addresses = append(other.Addresses, netip.MustParseAddr("10.9.0."+strconv.Itoa(i)))
+	evil.HostID = ""
+	evil.IPAMAssetID = "asset-x"
+	if err := s.UpsertEndpoint(ctx, evil, Identity{}); !errors.Is(err, ErrInvalidEndpoint) {
+		t.Errorf("reporter-supplied ipam link: err = %v, want ErrInvalidEndpoint", err)
 	}
-	if err := s.UpsertEndpoint(ctx, other); err != nil {
+	evil.IPAMAssetID = ""
+	evil.Addresses = []netip.Addr{netip.MustParseAddr("10.0.0.1")}
+	for i := 1; i < MaxAddressesPerEndpoint; i++ {
+		evil.Addresses = append(evil.Addresses, netip.MustParseAddr("10.9.0."+strconv.Itoa(i)))
+	}
+	if err := s.UpsertEndpoint(ctx, evil, Identity{}); err != nil {
 		t.Fatalf("upsert intruder: %v", err)
 	}
-	got := mustLookup(t, s, "00:11:22:33:44:55", "")
-	if got.Reporter != "owner" || got.Hostname != "" || got.VLAN != 0 || got.Tier != flowagg.TierSocket || got.HostID != "" {
-		t.Errorf("endpoint = %+v, want the owner's fields untouched", got)
+	got := mustLookup(t, s, mac, "")
+	if got.Owner != "" || got.HostID != "" || got.IPAMAssetID != "" {
+		t.Errorf("first claimer became owner or linked: %+v", got)
 	}
-	if len(got.SeenBy) != 2 || got.SeenBy[0] != "intruder" || got.SeenBy[1] != "owner" {
-		t.Errorf("seen-by = %v", got.SeenBy)
+
+	// An honest observer without authority disagrees: the conflicting
+	// fields are flagged and not shown.
+	obs := testEndpoint("10.0.0.1", mac, "observer")
+	obs.Hostname = "victim"
+	if err := s.UpsertEndpoint(ctx, obs, Identity{}); err != nil {
+		t.Fatalf("upsert observer: %v", err)
 	}
+	got = mustLookup(t, s, mac, "")
+	if got.Owner != "" || got.Hostname != "" || got.VLAN != 0 ||
+		!slices.Equal(got.Conflicts, []string{ConflictHostname, ConflictVLAN}) {
+		t.Errorf("unowned endpoint = hostname %q vlan %d conflicts %v, want both flagged", got.Hostname, got.VLAN, got.Conflicts)
+	}
+
+	// The managed host that has the MAC on its own interface (server
+	// records) reports it: it owns the endpoint, its values are shown,
+	// and the intruder's claims stay attributed to the intruder.
+	owner := testEndpoint("10.0.0.1", mac, "owner")
+	owner.Hostname = ""
+	owner.VLAN = 0
+	if err := s.UpsertEndpoint(ctx, owner, macIdentity("aa:aa:aa:aa:aa:aa", mac)); err != nil {
+		t.Fatalf("upsert owner: %v", err)
+	}
+	got = mustLookup(t, s, mac, "")
+	if got.Owner != "owner" || got.HostID != "owner" || got.Hostname != "" || got.VLAN != 0 ||
+		got.Tier != flowagg.TierSocket || len(got.Conflicts) != 0 {
+		t.Errorf("endpoint = %+v, want the owner's values", got)
+	}
+	if !slices.Equal(got.Addresses, []netip.Addr{netip.MustParseAddr("10.0.0.1")}) {
+		t.Errorf("addresses = %v, want only the owner's", got.Addresses)
+	}
+	if !slices.Equal(got.SeenBy, []string{"intruder", "observer", "owner"}) || len(got.Observations) != 3 {
+		t.Fatalf("seen-by = %v", got.SeenBy)
+	}
+	if o := got.Observations[0]; o.Reporter != "intruder" || o.Hostname != "evil" || o.VLAN != 99 ||
+		len(o.Addresses) != MaxAddressesPerEndpoint {
+		t.Errorf("intruder observation = %+v", o)
+	}
+	// The intruder's addresses no longer resolve to the owned endpoint.
+	if _, found, err := s.LookupEndpoint(ctx, "", netip.MustParseAddr("10.9.0.5")); found || err != nil {
+		t.Errorf("lookup of an intruder address: found=%v err=%v, want not found", found, err)
+	}
+	if g := mustLookup(t, s, "", "10.0.0.1"); g.ID != got.ID {
+		t.Errorf("lookup of the owner's address = %s, want %s", g.ID, got.ID)
+	}
+
 	// The owner's updates keep working: its address slots are its own.
 	owner.Addresses = []netip.Addr{netip.MustParseAddr("10.0.0.2")}
 	owner.Hostname = "real"
-	if err := s.UpsertEndpoint(ctx, owner); err != nil {
+	if err := s.UpsertEndpoint(ctx, owner, macIdentity(mac)); err != nil {
 		t.Fatalf("owner update after intruder: %v", err)
 	}
-	got = mustLookup(t, s, "00:11:22:33:44:55", "")
-	if got.Hostname != "real" {
-		t.Errorf("hostname = %q, want real", got.Hostname)
+	got = mustLookup(t, s, mac, "")
+	if got.Hostname != "real" || len(got.Addresses) != 2 {
+		t.Errorf("hostname/addresses = %q/%v, want real and two addresses", got.Hostname, got.Addresses)
 	}
 	// The intruder's further addresses are refused at its own limit.
-	other.Addresses = []netip.Addr{netip.MustParseAddr("10.9.1.1")}
-	if err := s.UpsertEndpoint(ctx, other); !errors.Is(err, ErrLimit) {
+	evil.Addresses = []netip.Addr{netip.MustParseAddr("10.9.1.1")}
+	if err := s.UpsertEndpoint(ctx, evil, Identity{}); !errors.Is(err, ErrLimit) {
 		t.Errorf("intruder beyond its address cap: err = %v, want ErrLimit", err)
 	}
+	// Another host claiming the same MAC by its records does not take
+	// over an owned endpoint (the caller leaves out shared MACs).
+	if err := s.UpsertEndpoint(ctx, testEndpoint("10.0.0.3", mac, "second-claimer"), macIdentity(mac)); err != nil {
+		t.Fatalf("upsert second claimer: %v", err)
+	}
+	if g := mustLookup(t, s, mac, ""); g.Owner != "owner" {
+		t.Errorf("owner = %q after a second claim, want owner", g.Owner)
+	}
+
+	// Links come from server-side matching.
+	if err := s.SetEndpointLinks(ctx, got.ID, "asset-1", "host-1"); err != nil {
+		t.Fatalf("set links: %v", err)
+	}
+	if g := mustLookup(t, s, mac, ""); g.IPAMAssetID != "asset-1" || g.HostID != "host-1" {
+		t.Errorf("links = %q/%q, want asset-1/host-1", g.IPAMAssetID, g.HostID)
+	}
+	if err := s.SetEndpointLinks(ctx, "ep-missing", "", ""); !errors.Is(err, ErrNotFound) {
+		t.Errorf("links of a missing endpoint: err = %v, want ErrNotFound", err)
+	}
+	if err := s.SetEndpointLinks(ctx, got.ID, strings.Repeat("a", maxIDLen+1), ""); !errors.Is(err, ErrInvalidEndpoint) {
+		t.Errorf("overlong link: err = %v, want ErrInvalidEndpoint", err)
+	}
 	checkCounters(t, s, db)
+}
+
+func TestEndpointAddressAttribution(t *testing.T) {
+	s, db, _ := newTestStore(t)
+	ctx := context.Background()
+	addr := netip.MustParseAddr
+
+	// An owned MAC endpoint.
+	owned := testEndpoint("10.0.0.1", "00:11:22:33:44:55", "owner")
+	if err := s.UpsertEndpoint(ctx, owned, macIdentity(owned.MAC)); err != nil {
+		t.Fatalf("upsert owned: %v", err)
+	}
+	ownedID := mustLookup(t, s, owned.MAC, "").ID
+	// A MAC-less observation by another reporter sharing one address
+	// joins it but attaches no new address.
+	intr := testEndpoint("10.0.0.1", "", "intruder")
+	intr.Addresses = []netip.Addr{addr("10.0.0.1"), addr("10.0.0.50"), addr("10.0.0.51")}
+	if err := s.UpsertEndpoint(ctx, intr, Identity{}); err != nil {
+		t.Fatalf("upsert intruder: %v", err)
+	}
+	got, err := s.Endpoint(ctx, ownedID)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(got.Observations) != 2 || got.Observations[0].Reporter != "intruder" ||
+		!slices.Equal(got.Observations[0].Addresses, []netip.Addr{addr("10.0.0.1")}) {
+		t.Errorf("observations = %+v, want the intruder with only the known address", got.Observations)
+	}
+	for _, a := range []string{"10.0.0.50", "10.0.0.51"} {
+		if _, found, err := s.LookupEndpoint(ctx, "", addr(a)); found || err != nil {
+			t.Errorf("lookup %s: found=%v err=%v, want not found", a, found, err)
+		}
+	}
+	// A MAC observation by a non-owner attaches its addresses under its
+	// own name, but they do not resolve to the owned endpoint.
+	intrMAC := testEndpoint("10.0.0.77", owned.MAC, "intruder")
+	if err := s.UpsertEndpoint(ctx, intrMAC, Identity{}); err != nil {
+		t.Fatalf("upsert intruder mac: %v", err)
+	}
+	if _, found, err := s.LookupEndpoint(ctx, "", addr("10.0.0.77")); found || err != nil {
+		t.Errorf("lookup of a non-owner address: found=%v err=%v, want not found", found, err)
+	}
+	if g := mustLookup(t, s, "", "10.0.0.1"); g.ID != ownedID {
+		t.Errorf("lookup of the owner's address = %s, want %s", g.ID, ownedID)
+	}
+
+	// An unowned MAC endpoint: a MAC-less observation attaches only the
+	// addresses it already has.
+	dev := testEndpoint("10.0.1.1", "00:11:22:33:44:66", "observer")
+	if err := s.UpsertEndpoint(ctx, dev, Identity{}); err != nil {
+		t.Fatalf("upsert device: %v", err)
+	}
+	intr2 := testEndpoint("10.0.1.1", "", "intruder")
+	intr2.Addresses = []netip.Addr{addr("10.0.1.1"), addr("10.0.1.2")}
+	if err := s.UpsertEndpoint(ctx, intr2, Identity{}); err != nil {
+		t.Fatalf("upsert intruder 2: %v", err)
+	}
+	if _, found, err := s.LookupEndpoint(ctx, "", addr("10.0.1.2")); found || err != nil {
+		t.Errorf("lookup 10.0.1.2: found=%v err=%v, want not found", found, err)
+	}
+	if g := mustLookup(t, s, "", "10.0.1.1"); g.MAC != dev.MAC {
+		t.Errorf("lookup 10.0.1.1 = %+v, want the device", g)
+	}
+
+	// A MAC-less endpoint without owner collects every reporter's
+	// addresses, attributed.
+	a := testEndpoint("10.0.2.1", "", "reporter-a")
+	b := testEndpoint("10.0.2.1", "", "reporter-b")
+	b.Addresses = []netip.Addr{addr("10.0.2.1"), addr("10.0.2.2")}
+	for _, e := range []Endpoint{a, b} {
+		if err := s.UpsertEndpoint(ctx, e, Identity{}); err != nil {
+			t.Fatalf("upsert %s: %v", e.Reporter, err)
+		}
+	}
+	g := mustLookup(t, s, "", "10.0.2.2")
+	if len(g.Observations) != 2 ||
+		!slices.Equal(g.Observations[0].Addresses, []netip.Addr{addr("10.0.2.1")}) ||
+		!slices.Equal(g.Observations[1].Addresses, []netip.Addr{addr("10.0.2.1"), addr("10.0.2.2")}) ||
+		!slices.Equal(g.Addresses, []netip.Addr{addr("10.0.2.1"), addr("10.0.2.2")}) {
+		t.Errorf("address-only endpoint = %+v", g)
+	}
+
+	// The same address on two owned endpoints is ambiguous.
+	for i, rep := range []string{"host-1", "host-2"} {
+		e := testEndpoint("10.0.3.1", fmt.Sprintf("00:11:22:33:55:0%d", i), rep)
+		if err := s.UpsertEndpoint(ctx, e, macIdentity(e.MAC)); err != nil {
+			t.Fatalf("upsert %s: %v", rep, err)
+		}
+	}
+	if _, found, err := s.LookupEndpoint(ctx, "", addr("10.0.3.1")); found || !errors.Is(err, ErrAmbiguous) {
+		t.Errorf("shared owned address: found=%v err=%v, want ErrAmbiguous", found, err)
+	}
+
+	// A MAC-less endpoint owned by its addresses.
+	self := testEndpoint("10.0.4.1", "", "host-4")
+	if err := s.UpsertEndpoint(ctx, self, Identity{Addrs: []netip.Addr{addr("10.0.4.1")}}); err != nil {
+		t.Fatalf("upsert self: %v", err)
+	}
+	if g := mustLookup(t, s, "", "10.0.4.1"); g.Owner != "host-4" {
+		t.Errorf("owner = %q, want host-4", g.Owner)
+	}
+	checkCounters(t, s, db)
+}
+
+func TestEndpointFirstSeenClamped(t *testing.T) {
+	s, db, now := newTestStore(t)
+	ctx := context.Background()
+	const mac = "00:11:22:33:44:55"
+
+	owner := testEndpoint("10.0.0.1", mac, "owner")
+	if err := s.UpsertEndpoint(ctx, owner, macIdentity(mac)); err != nil {
+		t.Fatalf("upsert owner: %v", err)
+	}
+	// A joining reporter claims the epoch.
+	joiner := testEndpoint("10.0.0.1", mac, "joiner")
+	joiner.FirstSeen = time.Unix(0, 0)
+	if err := s.UpsertEndpoint(ctx, joiner, Identity{}); err != nil {
+		t.Fatalf("upsert joiner: %v", err)
+	}
+	ingest := testNow
+	got := mustLookup(t, s, mac, "")
+	if got.FirstSeen != testNow.Add(-time.Hour) {
+		t.Errorf("first seen = %s, want the owner's %s", got.FirstSeen, testNow.Add(-time.Hour))
+	}
+	if j := got.Observations[0]; j.Reporter != "joiner" || j.FirstSeen != ingest.Add(-MaxFirstSeenLead) {
+		t.Errorf("joiner first seen = %s, want %s", j.FirstSeen, ingest.Add(-MaxFirstSeenLead))
+	}
+	// Later reports cannot move it further back: the bound is the first
+	// receipt, not the current time.
+	*now = now.Add(2 * time.Hour)
+	joiner.LastSeen = *now
+	if err := s.UpsertEndpoint(ctx, joiner, Identity{}); err != nil {
+		t.Fatalf("upsert joiner again: %v", err)
+	}
+	got = mustLookup(t, s, mac, "")
+	if j := got.Observations[0]; j.FirstSeen != ingest.Add(-MaxFirstSeenLead) {
+		t.Errorf("joiner first seen = %s, want %s", j.FirstSeen, ingest.Add(-MaxFirstSeenLead))
+	}
+	// Without an owner the endpoint shows the earliest clamped value.
+	e := testEndpoint("10.0.0.9", "", "reporter-a")
+	e.FirstSeen = time.Unix(0, 0)
+	e.LastSeen = *now
+	if err := s.UpsertEndpoint(ctx, e, Identity{}); err != nil {
+		t.Fatalf("upsert unowned: %v", err)
+	}
+	if g := mustLookup(t, s, "", "10.0.0.9"); g.FirstSeen != now.Add(-MaxFirstSeenLead) {
+		t.Errorf("unowned first seen = %s, want %s", g.FirstSeen, now.Add(-MaxFirstSeenLead))
+	}
+	// An old observation keeps first_seen at or before its last_seen.
+	old := testEndpoint("10.0.0.10", "", "reporter-a")
+	old.FirstSeen = time.Unix(0, 0)
+	old.LastSeen = now.Add(-3 * 24 * time.Hour)
+	if err := s.UpsertEndpoint(ctx, old, Identity{}); err != nil {
+		t.Fatalf("upsert old: %v", err)
+	}
+	if g := mustLookup(t, s, "", "10.0.0.10"); g.FirstSeen != old.LastSeen {
+		t.Errorf("old first seen = %s, want %s", g.FirstSeen, old.LastSeen)
+	}
+	// A shorter retention bounds the lead.
+	s2h, err := NewWithNowAndRetention(db, func() time.Time { return *now }, 2*time.Hour)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	short := testEndpoint("10.0.0.11", "", "reporter-a")
+	short.FirstSeen = time.Unix(0, 0)
+	short.LastSeen = *now
+	if err := s2h.UpsertEndpoint(ctx, short, Identity{}); err != nil {
+		t.Fatalf("upsert short: %v", err)
+	}
+	if g := mustLookup(t, s2h, "", "10.0.0.11"); g.FirstSeen != now.Add(-2*time.Hour) {
+		t.Errorf("short-retention first seen = %s, want %s", g.FirstSeen, now.Add(-2*time.Hour))
+	}
+}
+
+func TestEndpointIdentityValidation(t *testing.T) {
+	s, _, _ := newTestStore(t)
+	ctx := context.Background()
+	e := testEndpoint("10.0.0.1", "00:11:22:33:44:55", "reporter-a")
+	many := make([]string, MaxIdentityMACs+1)
+	for i := range many {
+		many[i] = "00:11:22:33:44:55"
+	}
+	for name, id := range map[string]Identity{
+		"bad mac":        {MACs: []string{"00:11:22:33:44:ZZ"}},
+		"too many macs":  {MACs: many},
+		"invalid addr":   {Addrs: []netip.Addr{{}}},
+		"too many addrs": {Addrs: make([]netip.Addr, flowagg.MaxHostAddrs+1)},
+	} {
+		if err := s.UpsertEndpoint(ctx, e, id); !errors.Is(err, ErrInvalidEndpoint) {
+			t.Errorf("%s: err = %v, want ErrInvalidEndpoint", name, err)
+		}
+	}
 }
 
 func TestEndpointCaps(t *testing.T) {
@@ -551,7 +833,7 @@ func TestEndpointCaps(t *testing.T) {
 	addrs := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"}
 
 	for i, rep := range []string{"reporter-a", "reporter-a", "reporter-a", "reporter-b", "reporter-b"} {
-		err := s.UpsertEndpoint(ctx, testEndpoint(addrs[i], macs[i], rep))
+		err := s.UpsertEndpoint(ctx, testEndpoint(addrs[i], macs[i], rep), Identity{})
 		switch i {
 		case 2:
 			if !errors.Is(err, ErrLimit) {
@@ -572,14 +854,14 @@ func TestEndpointCaps(t *testing.T) {
 	}
 	// reporter-b joins reporter-a's endpoints: that counts against
 	// reporter-b only, and reporter-a's updates keep working.
-	if err := s.UpsertEndpoint(ctx, testEndpoint(addrs[0], macs[0], "reporter-b")); err != nil {
+	if err := s.UpsertEndpoint(ctx, testEndpoint(addrs[0], macs[0], "reporter-b"), Identity{}); err != nil {
 		t.Fatalf("reporter-b joins: %v", err)
 	}
-	if err := s.UpsertEndpoint(ctx, testEndpoint(addrs[1], macs[1], "reporter-b")); !errors.Is(err, ErrLimit) {
+	if err := s.UpsertEndpoint(ctx, testEndpoint(addrs[1], macs[1], "reporter-b"), Identity{}); !errors.Is(err, ErrLimit) {
 		t.Errorf("reporter-b beyond its cap: err = %v, want ErrLimit", err)
 	}
 	for i := range 2 {
-		if err := s.UpsertEndpoint(ctx, testEndpoint(addrs[i], macs[i], "reporter-a")); err != nil {
+		if err := s.UpsertEndpoint(ctx, testEndpoint(addrs[i], macs[i], "reporter-a"), Identity{}); err != nil {
 			t.Errorf("owner update %d: %v", i, err)
 		}
 	}
@@ -590,15 +872,15 @@ func TestEndpointReportersPerEndpointCap(t *testing.T) {
 	s, _, _ := newTestStore(t)
 	ctx := context.Background()
 	for i := range MaxReportersPerEndpoint {
-		if err := s.UpsertEndpoint(ctx, testEndpoint("10.0.0.1", "00:11:22:33:44:55", fmt.Sprintf("r%02d", i))); err != nil {
+		if err := s.UpsertEndpoint(ctx, testEndpoint("10.0.0.1", "00:11:22:33:44:55", fmt.Sprintf("r%02d", i)), Identity{}); err != nil {
 			t.Fatalf("reporter %d: %v", i, err)
 		}
 	}
-	if err := s.UpsertEndpoint(ctx, testEndpoint("10.0.0.1", "00:11:22:33:44:55", "late")); !errors.Is(err, ErrLimit) {
+	if err := s.UpsertEndpoint(ctx, testEndpoint("10.0.0.1", "00:11:22:33:44:55", "late"), Identity{}); !errors.Is(err, ErrLimit) {
 		t.Errorf("reporter beyond the endpoint cap: err = %v, want ErrLimit", err)
 	}
 	// Existing reporters keep updating.
-	if err := s.UpsertEndpoint(ctx, testEndpoint("10.0.0.1", "00:11:22:33:44:55", "r00")); err != nil {
+	if err := s.UpsertEndpoint(ctx, testEndpoint("10.0.0.1", "00:11:22:33:44:55", "r00"), Identity{}); err != nil {
 		t.Errorf("existing reporter: %v", err)
 	}
 }
@@ -645,7 +927,7 @@ func TestEndpointValidation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e := testEndpoint("10.0.0.1", "00:11:22:33:44:55", "reporter-a")
 			tc.mut(&e)
-			err := s.UpsertEndpoint(ctx, e)
+			err := s.UpsertEndpoint(ctx, e, Identity{})
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
 			}
@@ -907,7 +1189,7 @@ func TestPrune(t *testing.T) {
 	ctx := context.Background()
 
 	put(t, s, testBucket("10.0.0.4", 443, 1)) // runs the hour's automatic prune
-	if err := s.UpsertEndpoint(ctx, testEndpoint("10.0.0.8", "00:11:22:33:44:56", "reporter-a")); err != nil {
+	if err := s.UpsertEndpoint(ctx, testEndpoint("10.0.0.8", "00:11:22:33:44:56", "reporter-a"), Identity{}); err != nil {
 		t.Fatalf("upsert kept endpoint: %v", err)
 	}
 
@@ -930,13 +1212,13 @@ func TestPrune(t *testing.T) {
 		{"ep-edge", "00:11:22:33:44:57", cutoff},
 	} {
 		if _, err := db.Exec(`
-			INSERT INTO net_endpoints (id, mac, first_seen, last_seen, tier, owner) VALUES (?, ?, ?, ?, 'socket', 'reporter-a')`,
-			ep.id, ep.mac, ep.seen.Unix(), ep.seen.Unix()); err != nil {
+			INSERT INTO net_endpoints (id, mac, last_seen, owner) VALUES (?, ?, ?, 'reporter-a')`,
+			ep.id, ep.mac, ep.seen.Unix()); err != nil {
 			t.Fatalf("insert endpoint: %v", err)
 		}
 		if _, err := db.Exec(`
-			INSERT INTO net_endpoint_reporters (endpoint_id, reporter, tier, first_seen, last_seen)
-			VALUES (?, 'reporter-a', 'socket', ?, ?)`, ep.id, ep.seen.Unix(), ep.seen.Unix()); err != nil {
+			INSERT INTO net_endpoint_reporters (endpoint_id, reporter, tier, first_seen, first_ingest, last_seen)
+			VALUES (?, 'reporter-a', 'socket', ?, ?, ?)`, ep.id, ep.seen.Unix(), ep.seen.Unix(), ep.seen.Unix()); err != nil {
 			t.Fatalf("insert endpoint reporter: %v", err)
 		}
 		if _, err := db.Exec(`
@@ -980,34 +1262,57 @@ func TestPrune(t *testing.T) {
 	}
 }
 
-func TestPruneTransfersOwnership(t *testing.T) {
+func TestPruneClearsExpiredOwner(t *testing.T) {
 	s, db, now := newTestStore(t)
 	ctx := context.Background()
+	const mac = "00:11:22:33:44:55"
 
-	owner := testEndpoint("10.0.0.1", "00:11:22:33:44:55", "owner")
+	owner := testEndpoint("10.0.0.1", mac, "owner")
 	owner.FirstSeen = testNow.Add(-20 * 24 * time.Hour)
 	owner.LastSeen = owner.FirstSeen
-	if err := s.UpsertEndpoint(ctx, owner); err != nil {
+	if err := s.UpsertEndpoint(ctx, owner, macIdentity(mac)); err != nil {
 		t.Fatalf("upsert owner: %v", err)
 	}
+	// Other reporters, one claiming a far earlier first_seen.
 	for i, r := range []string{"second", "third"} {
-		e := testEndpoint("10.0.0.1", "00:11:22:33:44:55", r)
-		e.FirstSeen = testNow.Add(time.Duration(i-2) * time.Hour)
-		if err := s.UpsertEndpoint(ctx, e); err != nil {
+		e := testEndpoint("10.0.0.1", mac, r)
+		e.FirstSeen = time.Unix(0, 0)
+		e.LastSeen = testNow.Add(time.Duration(i-2) * time.Hour)
+		e.Tier = []string{flowagg.TierConntrack, flowagg.TierSensor}[i]
+		if err := s.UpsertEndpoint(ctx, e, Identity{}); err != nil {
 			t.Fatalf("upsert %s: %v", r, err)
 		}
 	}
-	// Two days later the owner's observation has expired.
+	if g := mustLookup(t, s, mac, ""); g.Owner != "owner" || g.Tier != flowagg.TierSocket {
+		t.Fatalf("owner/tier = %q/%q, want owner/socket", g.Owner, g.Tier)
+	}
+	// Two days later the owner's observation has expired: no reporter
+	// takes over, whatever first_seen it claimed, and the tier is the
+	// most recently seen reporter's.
 	*now = now.Add(2 * 24 * time.Hour)
 	if _, _, err := s.Prune(ctx); err != nil {
 		t.Fatalf("prune: %v", err)
 	}
-	got := mustLookup(t, s, "00:11:22:33:44:55", "")
-	if got.Reporter != "second" {
-		t.Errorf("owner = %q, want second (earliest remaining reporter)", got.Reporter)
+	got := mustLookup(t, s, mac, "")
+	if got.Owner != "" || got.HostID != "" {
+		t.Errorf("owner/host = %q/%q, want none", got.Owner, got.HostID)
 	}
-	if len(got.SeenBy) != 2 {
+	if got.Tier != flowagg.TierSensor {
+		t.Errorf("tier = %q, want the latest reporter's %q", got.Tier, flowagg.TierSensor)
+	}
+	if !slices.Equal(got.SeenBy, []string{"second", "third"}) {
 		t.Errorf("seen-by = %v, want second and third", got.SeenBy)
+	}
+	// The owner reports again: it owns the endpoint and its latest tier
+	// is shown.
+	owner.FirstSeen = time.Time{}
+	owner.LastSeen = *now
+	owner.Tier = flowagg.TierConntrack
+	if err := s.UpsertEndpoint(ctx, owner, macIdentity(mac)); err != nil {
+		t.Fatalf("owner reports again: %v", err)
+	}
+	if g := mustLookup(t, s, mac, ""); g.Owner != "owner" || g.Tier != flowagg.TierConntrack || g.FirstSeen != *now {
+		t.Errorf("owner/tier/first = %q/%q/%s, want owner/conntrack/%s", g.Owner, g.Tier, g.FirstSeen, *now)
 	}
 	checkCounters(t, s, db)
 }
@@ -1045,7 +1350,7 @@ func TestRetentionConfigurableLowerOnly(t *testing.T) {
 	oldE := testEndpoint("10.0.0.9", "00:11:22:33:44:55", "reporter-a")
 	oldE.LastSeen = testNow.Add(-10 * 24 * time.Hour)
 	oldE.FirstSeen = oldE.LastSeen
-	if err := s7.UpsertEndpoint(ctx, oldE); !errors.Is(err, ErrOutOfRange) {
+	if err := s7.UpsertEndpoint(ctx, oldE, Identity{}); !errors.Is(err, ErrOutOfRange) {
 		t.Errorf("upsert 10d old endpoint: err = %v, want ErrOutOfRange", err)
 	}
 	wide := flowagg.Window{From: testNow.Add(-8 * 24 * time.Hour), To: testNow}
@@ -1096,7 +1401,7 @@ func TestConcurrentWritersAreSerialized(t *testing.T) {
 					errs <- err
 				}
 				e := testEndpoint(fmt.Sprintf("10.%d.1.%d", w+1, i+1), "", reporter)
-				if err := s.UpsertEndpoint(ctx, e); err != nil {
+				if err := s.UpsertEndpoint(ctx, e, Identity{}); err != nil {
 					errs <- err
 				}
 			}
@@ -1222,6 +1527,76 @@ func TestTopNTiesBeyondRowCap(t *testing.T) {
 				t.Errorf("totals[%d] = %v, then %v", i, first[i].Key, totals[i].Key)
 			}
 		}
+	}
+}
+
+func TestTopNTiesBeyondRowCapFollowKeyOrder(t *testing.T) {
+	s, _, _ := newTestStore(t)
+	ctx := context.Background()
+	// More tied flows than maxTopRows, where text order of the peers
+	// ("10.10.…" < "10.9.…") differs from address order (10.9 < 10.10):
+	// the result must be flowagg's key order, the smallest peers.
+	for i := range maxTopRows + 10 {
+		put(t, s, testBucket(fmt.Sprintf("10.10.%d.%d", i/250, i%250+1), 443, 7))
+	}
+	for i := 1; i <= 5; i++ {
+		put(t, s, testBucket(fmt.Sprintf("10.9.0.%d", i), 443, 7))
+	}
+	totals, err := s.TopN(ctx, netip.MustParseAddr("10.0.0.1"), testWindow, 5)
+	if err != nil {
+		t.Fatalf("top n: %v", err)
+	}
+	if len(totals) != 5 {
+		t.Fatalf("totals = %d, want 5", len(totals))
+	}
+	for i, tot := range totals {
+		if want := netip.MustParseAddr(fmt.Sprintf("10.9.0.%d", i+1)); tot.Key.B != want {
+			t.Errorf("totals[%d].B = %s, want %s", i, tot.Key.B, want)
+		}
+	}
+}
+
+func TestAddrOrderKeyMatchesCompare(t *testing.T) {
+	addrs := []netip.Addr{
+		netip.MustParseAddr("10.0.0.9"), netip.MustParseAddr("10.0.0.10"),
+		netip.MustParseAddr("9.255.255.255"), netip.MustParseAddr("255.0.0.1"),
+		netip.MustParseAddr("::1:2"), netip.MustParseAddr("2001:db8::1"),
+		netip.MustParseAddr("fe80::1"), netip.MustParseAddr("::ffff:0:1"),
+	}
+	for _, a1 := range addrs {
+		for _, b1 := range addrs {
+			for _, a2 := range addrs {
+				for _, b2 := range addrs {
+					want := a1.Compare(a2)
+					if want == 0 {
+						want = b1.Compare(b2)
+					}
+					got := bytes.Compare(addrOrderKey(a1, b1), addrOrderKey(a2, b2))
+					if got != want {
+						t.Fatalf("order of (%s,%s) vs (%s,%s) = %d, want %d", a1, b1, a2, b2, got, want)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestBucketClockSkewAtHourBoundary(t *testing.T) {
+	s, _, now := newTestStore(t)
+	ctx := context.Background()
+	// The server is two seconds before the hour, the reporter already in
+	// the next one.
+	*now = testNow.Add(time.Hour - 2*time.Second)
+	b := testBucket("10.0.0.2", 443, 1)
+	b.Hour = testNow.Add(time.Hour + time.Second)
+	if err := s.UpsertBucket(ctx, b, ownOf(b)); err != nil {
+		t.Errorf("hour within the clock skew: %v", err)
+	}
+	// Beyond the skew it is refused.
+	*now = testNow.Add(time.Hour - flowagg.DefaultMaxClockSkew - time.Second)
+	b.Key.B = netip.MustParseAddr("10.0.0.3")
+	if err := s.UpsertBucket(ctx, b, ownOf(b)); !errors.Is(err, ErrOutOfRange) {
+		t.Errorf("hour beyond the clock skew: err = %v, want ErrOutOfRange", err)
 	}
 }
 

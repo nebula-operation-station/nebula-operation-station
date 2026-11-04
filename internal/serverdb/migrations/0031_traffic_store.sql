@@ -5,18 +5,27 @@
 -- net_endpoints is the deduplicated set of endpoints observed on the
 -- network: at most one row per MAC (unique index), otherwise one row per
 -- address-only observation. The id is an opaque, store-assigned value
--- that never changes. owner is the reporter that created the row; only
--- the owner updates the descriptive fields (MAC learning, VLAN, OUI,
--- hostname, tier, IPAM/host link). first_seen/last_seen aggregate all
--- reporters.
+-- that never changes. Only server-derived values live here: the MAC, its
+-- OUI (derived from the MAC), last_seen (the latest of all reporters,
+-- for prune), the authoritative owner and the IPAM/host links. owner is
+-- the managed host that has the endpoint's MAC on its own interface (or,
+-- without a MAC, all its addresses) according to the server's own
+-- records, '' when no such host reported it; it is never taken from a
+-- report. ipam_asset_id and host_id are set by server-side matching
+-- only.
 --
 -- net_endpoint_reporters is the seen-by set: one row per (endpoint,
--- reporter) with that reporter's own tier and first/last seen. Per-host
--- caps count these rows, so one reporter's activity never shifts another
--- reporter's count. net_endpoint_addresses attributes every address to
--- the reporter that saw it; the per-endpoint address cap applies per
--- (endpoint, reporter), so another reporter cannot fill the owner's
--- address slots. Rows cascade: endpoint -> reporters -> addresses.
+-- reporter) with everything that reporter claimed (tier, VLAN, hostname,
+-- OUI without MAC) and its first/last seen. first_ingest is the server's
+-- time of the reporter's first report for the endpoint; first_seen is
+-- clamped to it minus a bounded lead, so a reporter cannot claim the
+-- epoch. Reads prefer the owner's row and flag conflicts between
+-- reporters when there is no owner. Per-host caps count these rows, so
+-- one reporter's activity never shifts another reporter's count.
+-- net_endpoint_addresses attributes every address to the reporter that
+-- saw it; the per-endpoint address cap applies per (endpoint, reporter),
+-- so another reporter cannot fill the owner's address slots. Rows
+-- cascade: endpoint -> reporters -> addresses.
 --
 -- flow_buckets holds at most one row per (hour, flow key, reporting
 -- side): server_reported = 1 is the server end's report, 0 the client
@@ -48,27 +57,28 @@
 CREATE TABLE net_endpoints (
     id            TEXT PRIMARY KEY,
     mac           TEXT NOT NULL DEFAULT '',
-    vlan          INTEGER NOT NULL DEFAULT 0,
     oui           TEXT NOT NULL DEFAULT '',
-    hostname      TEXT NOT NULL DEFAULT '',
-    first_seen    INTEGER NOT NULL,
     last_seen     INTEGER NOT NULL,
-    tier          TEXT NOT NULL,
-    owner         TEXT NOT NULL,
+    owner         TEXT NOT NULL DEFAULT '',
     ipam_asset_id TEXT NOT NULL DEFAULT '',
     host_id       TEXT NOT NULL DEFAULT ''
 );
 CREATE UNIQUE INDEX idx_net_endpoints_mac ON net_endpoints (mac) WHERE mac != '';
 CREATE INDEX idx_net_endpoints_last_seen ON net_endpoints (last_seen);
+CREATE INDEX idx_net_endpoints_owner ON net_endpoints (owner) WHERE owner != '';
 CREATE INDEX idx_net_endpoints_ipam_asset ON net_endpoints (ipam_asset_id);
 CREATE INDEX idx_net_endpoints_host ON net_endpoints (host_id);
 
 CREATE TABLE net_endpoint_reporters (
-    endpoint_id TEXT NOT NULL REFERENCES net_endpoints(id) ON DELETE CASCADE,
-    reporter    TEXT NOT NULL,
-    tier        TEXT NOT NULL,
-    first_seen  INTEGER NOT NULL,
-    last_seen   INTEGER NOT NULL,
+    endpoint_id  TEXT NOT NULL REFERENCES net_endpoints(id) ON DELETE CASCADE,
+    reporter     TEXT NOT NULL,
+    tier         TEXT NOT NULL,
+    vlan         INTEGER NOT NULL DEFAULT 0,
+    oui          TEXT NOT NULL DEFAULT '',
+    hostname     TEXT NOT NULL DEFAULT '',
+    first_seen   INTEGER NOT NULL,
+    first_ingest INTEGER NOT NULL,
+    last_seen    INTEGER NOT NULL,
     PRIMARY KEY (endpoint_id, reporter)
 );
 CREATE INDEX idx_net_endpoint_reporters_last_seen ON net_endpoint_reporters (last_seen);
@@ -97,6 +107,10 @@ CREATE TABLE flow_buckets (
     bytes_ba        INTEGER NOT NULL DEFAULT 0,
     connections     INTEGER NOT NULL DEFAULT 0,
     lower_bound     INTEGER NOT NULL DEFAULT 0,
+    -- ab_key orders (a, b) as netip.Addr.Compare does (family byte, then
+    -- the 16-byte address of a, then of b), so SQL tie breaks match
+    -- internal/flowagg's key order; text order of a/b does not.
+    ab_key          BLOB NOT NULL DEFAULT x'',
     -- The leading hour column also serves Prune (hour <= ?).
     PRIMARY KEY (hour, a, b, proto, server_port, server_side, tier, server_reported)
 );

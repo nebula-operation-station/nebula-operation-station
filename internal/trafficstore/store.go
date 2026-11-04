@@ -8,11 +8,12 @@
 //
 //   - net_endpoints holds the deduplicated endpoints observed on the
 //     network (at most one row per MAC, otherwise one per address-only
-//     observation) with the VLAN, vendor OUI, hostname, first/last seen,
-//     source tier, owner (the reporter that created it) and the link to
-//     the matching IPAM asset or managed host; net_endpoint_reporters is
-//     the seen-by set and net_endpoint_addresses attributes every address
-//     to the reporter that saw it;
+//     observation) with the server-derived values: MAC and OUI,
+//     last_seen, the authoritative owner and the links to the matching
+//     IPAM asset or managed host; net_endpoint_reporters is the seen-by
+//     set with each reporter's own claims (tier, VLAN, hostname, OUI,
+//     first/last seen) and net_endpoint_addresses attributes every
+//     address to the reporter that saw it;
 //   - flow_buckets holds at most one row per (hour, flow key, reporting
 //     side) with the bytes and connections that side's reporter
 //     attributed to the flow in that hour.
@@ -24,9 +25,11 @@
 // accepted only when the end it claims belongs to the reporter (the
 // caller passes the reporter's addresses from the server's own records,
 // as for flowagg.Aggregator.Ingest), and the first reporter of a side
-// holds it. An endpoint's descriptive fields are changed only by its
-// owner; other reporters add themselves to the seen-by set and attach
-// addresses under their own name and their own caps.
+// holds it. An endpoint's owner is the managed host that has its MAC on
+// its own interface by the server's records (the caller passes the
+// reporter's Identity), never the first reporter; every reporter's
+// claims are kept under its own name and caps, reads prefer the owner's
+// and flag disagreements, and identity links come only from the server.
 //
 // Retention (D3): default 21 days, configurable lower only. Prune
 // removes flow bucket rows whose hour ends at or before now-retention
@@ -79,8 +82,8 @@ const (
 	// matches the in-memory aggregator's bound.
 	MaxBucketsPerReporter = flowagg.DefaultMaxBucketsPerReporter
 	// maxClockSkew is how far a reported observation time may lie in the
-	// future (matches flowagg.DefaultMaxClockSkew).
-	maxClockSkew = 5 * time.Minute
+	// future.
+	maxClockSkew = flowagg.DefaultMaxClockSkew
 	// maxHostnameLen bounds the observed hostname.
 	maxHostnameLen = 255
 	// maxIDLen bounds the IPAM asset and managed host links.
@@ -121,6 +124,9 @@ var (
 	ErrConflict = errors.New("trafficstore: flow side held by another reporter")
 	// ErrNotFound marks a missing endpoint.
 	ErrNotFound = errors.New("trafficstore: not found")
+	// ErrAmbiguous marks an address lookup that matches several
+	// endpoints at the same level of authority.
+	ErrAmbiguous = errors.New("trafficstore: ambiguous endpoint lookup")
 )
 
 // Store persists traffic map data in the server database.
@@ -277,12 +283,11 @@ const (
 	pruneBucketsSQL      = `DELETE FROM flow_buckets WHERE hour <= ?`
 	pruneEndpointSeenSQL = `DELETE FROM net_endpoint_reporters WHERE last_seen < ?`
 	pruneEndpointsSQL    = `DELETE FROM net_endpoints WHERE last_seen < ?`
-	transferOwnershipSQL = `
-		UPDATE net_endpoints SET owner = COALESCE((
-			SELECT r.reporter FROM net_endpoint_reporters r
-			WHERE r.endpoint_id = net_endpoints.id
-			ORDER BY r.first_seen, r.reporter LIMIT 1), owner)
-		WHERE NOT EXISTS (
+	// clearOwnerSQL drops the ownership of endpoints whose owner's
+	// observation expired; ownership never passes to another reporter.
+	clearOwnerSQL = `
+		UPDATE net_endpoints SET owner = ''
+		WHERE owner != '' AND NOT EXISTS (
 			SELECT 1 FROM net_endpoint_reporters r
 			WHERE r.endpoint_id = net_endpoints.id AND r.reporter = net_endpoints.owner)`
 )
@@ -298,7 +303,7 @@ func pruneHourBound(cutoff int64) int64 {
 // lies before now-retention, and endpoints no reporter has seen since,
 // and returns the number of removed bucket and endpoint rows. An
 // endpoint whose owner's observation expired while other reporters
-// still see it passes to the earliest remaining reporter. Prune is
+// still see it has no owner until its owner reports again. Prune is
 // idempotent and safe to call more often than hourly; the store also
 // runs it automatically at most once per clock hour on writes.
 func (s *Store) Prune(ctx context.Context) (buckets, endpoints int64, err error) {
@@ -327,8 +332,8 @@ func (s *Store) Prune(ctx context.Context) (buckets, endpoints int64, err error)
 			return fmt.Errorf("trafficstore: prune net_endpoints: %w", err)
 		}
 		if seen > 0 {
-			if _, err := tx.ExecContext(ctx, transferOwnershipSQL); err != nil {
-				return fmt.Errorf("trafficstore: transfer endpoint ownership: %w", err)
+			if _, err := tx.ExecContext(ctx, clearOwnerSQL); err != nil {
+				return fmt.Errorf("trafficstore: clear expired endpoint owners: %w", err)
 			}
 		}
 		return nil
