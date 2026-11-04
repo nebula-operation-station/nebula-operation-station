@@ -400,10 +400,14 @@ func TestOperationFormHostPrefill(t *testing.T) {
 // without a pin.
 func stagedHosts() []inventory.Host {
 	return []inventory.Host{
-		{ID: "ci-01", DisplayName: "CI runner", Environment: inventory.EnvDev, Criticality: inventory.CriticalityLow},
-		{ID: "db-01", DisplayName: "DB server", Environment: inventory.EnvQA, Criticality: inventory.CriticalityHigh},
-		{ID: "web-01", Environment: inventory.EnvProd, Criticality: inventory.CriticalityMedium},
-		{ID: "plain-01", DisplayName: "Plain", Environment: inventory.EnvProd, Criticality: inventory.CriticalityLow},
+		{ID: "ci-01", DisplayName: "CI runner", Environment: inventory.EnvDev, Criticality: inventory.CriticalityLow,
+			Endpoints: []inventory.Endpoint{{Address: "10.0.0.11", Port: 22}}},
+		{ID: "db-01", DisplayName: "DB server", Environment: inventory.EnvQA, Criticality: inventory.CriticalityHigh,
+			Endpoints: []inventory.Endpoint{{Address: "10.0.0.12", Port: 22}}},
+		{ID: "web-01", Environment: inventory.EnvProd, Criticality: inventory.CriticalityMedium,
+			Endpoints: []inventory.Endpoint{{Address: "10.0.0.13", Port: 22}}},
+		{ID: "plain-01", DisplayName: "Plain", Environment: inventory.EnvProd, Criticality: inventory.CriticalityLow,
+			Endpoints: []inventory.Endpoint{{Address: "10.0.0.14", Port: 22}}},
 	}
 }
 
@@ -626,10 +630,10 @@ func TestChartStagedUpdateConfirmsThenProposes(t *testing.T) {
 		t.Fatal("a proposal was made before confirmation")
 	}
 	// Confirm: the frozen list reaches the stage proposal unchanged,
-	// with the DEV/QA/PROD preset and a manual gate.
+	// with the DEV/QA/PROD preset and a manual gate. The confirm form
+	// carries the digest of the shown plan.
 	rec = httptest.NewRecorder()
-	h.Handler().ServeHTTP(rec, formPost("/inventory/chart/staged",
-		"confirm=1&host=ci-01&host=db-01&host=web-01&action=package.install_security"))
+	h.Handler().ServeHTTP(rec, formPost("/inventory/chart/staged", confirmFormBody(t, body)))
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("confirm: status = %d, want 303", rec.Code)
 	}
@@ -651,11 +655,55 @@ func TestChartStagedUpdateConfirmsThenProposes(t *testing.T) {
 	}
 }
 
+func TestChartStagedIgnoresQueryParameters(t *testing.T) {
+	h, ops := stagedChartHandler(t, false)
+	// Query parameters cannot select hosts or skip confirmation.
+	rec := httptest.NewRecorder()
+	h.Handler().ServeHTTP(rec, formPost("/inventory/chart/staged?host=web-01&confirm=1&action=package.install_all", ""))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("query-only selection: status = %d, want 400", rec.Code)
+	}
+	if len(ops.createdCalls) != 0 {
+		t.Error("a proposal was made from query parameters")
+	}
+
+	// A query confirm=1 does not skip the confirmation page.
+	rec = httptest.NewRecorder()
+	h.Handler().ServeHTTP(rec, formPost("/inventory/chart/staged?confirm=1", "host=ci-01&action=package.install_all"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("query confirm: status = %d, want 200 (the confirmation page)", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "Confirm staged OS update") {
+		t.Error("confirmation page not shown")
+	}
+	if len(ops.createdCalls) != 0 {
+		t.Error("a proposal was made with a query confirm=1")
+	}
+
+	// A query host= does not add a host to a confirmed selection: the
+	// digest covers the hosts in the body only.
+	rec = httptest.NewRecorder()
+	h.Handler().ServeHTTP(rec, formPost("/inventory/chart/staged", "host=ci-01&action=package.install_all"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("confirmation: status = %d, want 200", rec.Code)
+	}
+	confirmBody := confirmFormBody(t, rec.Body.String())
+	rec = httptest.NewRecorder()
+	h.Handler().ServeHTTP(rec, formPost("/inventory/chart/staged?host=web-01", confirmBody))
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("confirm with a query host: status = %d, want 303", rec.Code)
+	}
+	if len(ops.createdCalls) != 1 || !reflect.DeepEqual(ops.createdCalls[0][2:], []string{"ci-01"}) {
+		t.Errorf("proposed hosts = %v, want [ci-01] (the query host must not be added)", ops.createdCalls)
+	}
+}
+
 func TestChartStagedUpdateEscaping(t *testing.T) {
 	ops := &fakeOps{}
 	h := newTestHandler(t, ui.Options{
 		Hosts: func(context.Context) ([]inventory.Host, error) {
-			return []inventory.Host{{ID: "evil-01", DisplayName: "<script>alert(1)</script>", Environment: inventory.EnvProd}}, nil
+			return []inventory.Host{{ID: "evil-01", DisplayName: "<script>alert(1)</script>", Environment: inventory.EnvProd,
+				Endpoints: []inventory.Endpoint{{Address: "10.0.0.15", Port: 22}}}}, nil
 		},
 		HostKeys:     hostKeysFor("evil-01", keyPinned),
 		Operations:   ops,
