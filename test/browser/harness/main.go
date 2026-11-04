@@ -223,6 +223,13 @@ func main() {
 		panic("usage: harness [-preview] PORT DIR")
 	}
 	port, dir := args[0], args[1]
+	must(http.ListenAndServe("127.0.0.1:"+port, newHarness(preview, port, dir)))
+}
+
+// newHarness builds the executor, the server stores and the UI in dir and
+// returns the root handler. preview serves the UI without the session check
+// and seeds the demo lab (seedPreview, seedPreviewPVE).
+func newHarness(preview bool, port, dir string) http.Handler {
 	origin := "http://localhost:" + port
 	base := slog.NewTextHandler(os.Stderr, nil)
 	exDir := filepath.Join(dir, "ex")
@@ -401,7 +408,7 @@ func main() {
 		mount = ah.Wrap(mount)
 	}
 	mux.Handle("/", middleware.Handler(middleware.Options{PublicOrigin: origin}, mount))
-	must(http.ListenAndServe("127.0.0.1:"+port, mux))
+	return mux
 }
 
 // ---------------------------------------------------------------------------
