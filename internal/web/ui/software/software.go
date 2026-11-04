@@ -62,6 +62,11 @@ const (
 	MaxCandidates = 20
 	// historyPage bounds the icon history rows shown on an icon page.
 	historyPage = 50
+	// queuePage bounds the unknown-queue rows shown. It is one less than
+	// softwarecat.MaxQueuePage, the most the store returns, so the page
+	// reads queuePage+1 rows and only claims a cut-off when that extra
+	// row exists.
+	queuePage = softwarecat.MaxQueuePage - 1
 	// maxFormBytes bounds a url-encoded form body.
 	maxFormBytes = 16 << 10
 	// maxCandidateIDLen bounds a candidate ID.
@@ -301,7 +306,7 @@ type catalogRow struct {
 
 type unknownView struct {
 	Rows []unknownRow
-	Full bool // the queue page limit was reached
+	Full bool // more entries exist than the page shows
 }
 
 type unknownRow struct {
@@ -489,13 +494,17 @@ func matchesFilter(row Row, filter string) bool {
 func (h *Handler) handleUnknown(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), callTimeout)
 	defer cancel()
-	q, err := h.catalog.UnknownQueue(ctx, softwarecat.MaxQueuePage)
+	// Read one row more than shown to tell whether more entries exist.
+	q, err := h.catalog.UnknownQueue(ctx, queuePage+1)
 	if err != nil {
 		h.log.ErrorContext(ctx, "read unknown software queue", "error", err.Error())
 		http.Error(w, "Queue unavailable.", http.StatusInternalServerError)
 		return
 	}
-	v := &unknownView{Full: len(q) >= softwarecat.MaxQueuePage}
+	v := &unknownView{}
+	if len(q) > queuePage {
+		q, v.Full = q[:queuePage], true
+	}
 	for _, e := range q {
 		v.Rows = append(v.Rows, unknownRow{Key: string(e.Key), Display: e.Display, IconSrc: iconSrc(e.IconSHA),
 			Hosts: e.Hosts, Observations: e.Observations, LastSeen: e.LastSeen, FirstHost: e.FirstHost})
