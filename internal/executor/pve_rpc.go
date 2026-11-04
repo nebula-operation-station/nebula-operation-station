@@ -13,7 +13,6 @@ import (
 	"net/netip"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -26,7 +25,6 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveapi"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/pvetransport"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vault"
@@ -64,70 +62,196 @@ func (s *Service) pveMutations() *PveMutations {
 	return s.pveMut
 }
 
-// errPveTrustBlockNotRecorded is wrapped when a trust failure seen on the
-// mutation path could not be persisted as a block of the remote. Every
-// further call of the production mutation client to that remote wraps it
-// and is refused before any connection.
-var errPveTrustBlockNotRecorded = errors.New("executor: pve trust failure not recorded; the remote stays refused")
+var (
+	// errPveTrustBlockNotRecorded is wrapped when a trust failure seen on
+	// any connection to a remote could not be persisted as a block of the
+	// remote. The failed trust stays fenced (pveTrustFence): every further
+	// connection to it (pveReadTrust) and every proposal against it
+	// (checkPveTrustFence) is refused.
+	errPveTrustBlockNotRecorded = errors.New("executor: pve trust failure not recorded; the remote stays refused")
+	// errPveTrustAuthorityNotRevoked is wrapped when the remote is blocked
+	// in the registry (by this call or before it) but revoking its provider
+	// grants failed. The block itself is recorded.
+	errPveTrustAuthorityNotRevoked = errors.New("executor: pve remote blocked; revoking its authority failed")
+	// errPveTrustFenced is wrapped when a connection to a fenced trust is
+	// refused (pveTrustFenceGate), whether or not its block is recorded
+	// by now.
+	errPveTrustFenced = errors.New("executor: pve remote failed trust verification")
+)
 
 // newPveMutationClient returns the production mutation client of the
 // executor. A trust failure seen by any of its calls blocks the remote
 // persistently and revokes its provider grants and mutation permits
-// (blockPveMutation). A block that cannot be persisted is logged, the
-// remote's mutation permits are revoked in memory, and every further call
-// of this client to the remote first retries the block and is refused with
-// errPveTrustBlockNotRecorded while it still fails.
+// (pveTrustFailed). A block that cannot be persisted is logged, the
+// remote's mutation permits and provider grants are revoked as far as the
+// authority allows, and the failed trust (pin and trust generation) is
+// fenced (pveTrustFence): while the fence holds, every connection to that
+// trust, of this client and of every reader, first retries the block and
+// is refused (with errPveTrustBlockNotRecorded while the block still
+// fails), and proposals against it are refused (checkPveTrustFence). A
+// re-pin (a newer trust generation) is not fenced by the old failure.
 func (s *Service) newPveMutationClient() *pveMutationClient {
-	var unrecorded sync.Map // remote ID -> struct{}: trust failure seen, block not persisted
-	c := &pveMutationClient{secrets: s.vault, now: s.clock}
-	c.block = func(remoteID string) {
-		if err := s.blockPveMutation(remoteID); err != nil {
-			unrecorded.Store(remoteID, struct{}{})
-			s.log.Error("pve mutation trust block not recorded", "remote", remoteID, "err", err)
-			return
-		}
-		unrecorded.Delete(remoteID)
-	}
-	c.trust = func(ctx context.Context, rm executordb.PveRemote) (pvetransport.Trust, error) {
-		if _, ok := unrecorded.Load(rm.RemoteID); ok {
-			if err := s.blockPveMutation(rm.RemoteID); err != nil {
-				s.log.Error("pve mutation trust block not recorded", "remote", rm.RemoteID, "err", err)
-				return pvetransport.Trust{}, fmt.Errorf("pve remote %s: %w", rm.RemoteID, errPveTrustBlockNotRecorded)
-			}
-			unrecorded.Delete(rm.RemoteID)
-			// rm predates the block that is now recorded: refuse this call.
-			return pvetransport.Trust{}, fmt.Errorf("pve remote %s is blocked after a trust failure", rm.RemoteID)
-		}
-		return s.pveReadTrust(ctx, rm)
-	}
+	c := &pveMutationClient{secrets: s.vault, now: s.clock, trust: s.pveReadTrust}
+	c.block = func(rm executordb.PveRemote) { _ = s.pveTrustFailed(rm) }
 	return c
 }
 
-// blockPveMutation blocks a remote whose endpoints failed trust
-// verification on the mutation path and revokes its provider grants and
-// mutation permits, as blockPveRead does on the read path. A remote that
-// is no longer active (blocked by a concurrent trust failure, or removed)
-// only has its authority revoked again. On any failure the remote's
-// mutation permits are still revoked in memory, and the error wraps
-// errPveTrustBlockNotRecorded and the cause.
-func (s *Service) blockPveMutation(remoteID string) error {
-	const reason = "pve trust verification failed"
-	s.pveMu.Lock()
-	defer s.pveMu.Unlock()
-	a := s.pveAdmin()
-	err := a.blockTrustFailure(remoteID, "executor", errPveReadTrust)
-	// blockTrustFailure returns the cause itself only on success; its
-	// failures wrap the cause too, so errors.Is cannot tell them apart.
-	if err == errPveReadTrust {
+// pveTrustFailed blocks rm after its trust (pin and trust generation)
+// failed verification on any connection to it (blockPveMutation), fences
+// that trust when the block cannot be recorded, and logs a failing step.
+// It returns the error of blockPveMutation (nil when the block is
+// recorded and the authority revoked, or the failure was superseded).
+func (s *Service) pveTrustFailed(rm executordb.PveRemote) error {
+	return s.pveTrustFailedWith(rm, s.blockPveMutation)
+}
+
+// pveTrustFailedLocked is pveTrustFailed for a caller that holds s.pveMu
+// (the PVE admin RPCs).
+func (s *Service) pveTrustFailedLocked(rm executordb.PveRemote) error {
+	return s.pveTrustFailedWith(rm, s.blockPveMutationLocked)
+}
+
+func (s *Service) pveTrustFailedWith(rm executordb.PveRemote, block func(string, pveTrustKey) error) error {
+	err := block(rm.RemoteID, pveTrustKeyOf(rm))
+	if errors.Is(err, errPveTrustBlockNotRecorded) {
+		s.pveTrustFence().add(rm)
+	}
+	s.logPveMutationBlock(rm.RemoteID, err)
+	return err
+}
+
+// pveTrustFenceGate refuses a connection to rm while its trust is fenced
+// (pveTrustFence). It first retries the block of the fenced trust: while
+// that still fails, the error wraps errPveTrustBlockNotRecorded; once it
+// is recorded (or superseded by a re-pin), the entry is dropped and this
+// call is still refused, since rm predates the block or the re-pin. Every
+// refusal wraps errPveTrustFenced.
+func (s *Service) pveTrustFenceGate(rm executordb.PveRemote) error {
+	return s.pveTrustFenceGateWith(rm, s.blockPveMutation)
+}
+
+// pveTrustFenceGateLocked is pveTrustFenceGate for a caller that holds
+// s.pveMu (the PVE admin RPCs).
+func (s *Service) pveTrustFenceGateLocked(rm executordb.PveRemote) error {
+	return s.pveTrustFenceGateWith(rm, s.blockPveMutationLocked)
+}
+
+func (s *Service) pveTrustFenceGateWith(rm executordb.PveRemote, block func(string, pveTrustKey) error) error {
+	f := s.pveTrustFence()
+	k, ok := f.covers(rm)
+	if !ok {
 		return nil
 	}
-	if errors.Is(err, executordb.ErrRemoteState) {
-		if err = a.revoke(remoteID, reason); err == nil {
-			return nil
-		}
+	err := block(rm.RemoteID, k)
+	s.logPveMutationBlock(rm.RemoteID, err)
+	if errors.Is(err, errPveTrustBlockNotRecorded) {
+		return fmt.Errorf("pve remote %s: %w: %w", rm.RemoteID, errPveTrustFenced, errPveTrustBlockNotRecorded)
 	}
-	s.auth.RevokeProviderMutations(remoteID, reason)
-	return fmt.Errorf("block pve remote %s: %w: %w", remoteID, errPveTrustBlockNotRecorded, err)
+	f.remove(rm.RemoteID, k)
+	return fmt.Errorf("pve remote %s is blocked after a trust failure: %w", rm.RemoteID, errPveTrustFenced)
+}
+
+// logPveMutationBlock logs the failing step of a trust block
+// (blockPveMutation); a successful block logs nothing here.
+func (s *Service) logPveMutationBlock(remoteID string, err error) {
+	if err == nil {
+		return
+	}
+	msg := "pve mutation trust block recorded; authority revocation failed"
+	if errors.Is(err, errPveTrustBlockNotRecorded) {
+		msg = "pve mutation trust block not recorded"
+	}
+	s.log.Error(msg, "remote", remoteID, "err", err)
+}
+
+// pveTrustFence returns the trust fence of the executor: the failed
+// trusts whose block could not be recorded.
+func (s *Service) pveTrustFence() *pveTrustFence {
+	return &s.pveFence
+}
+
+// checkPveTrustFence refuses a proposal or commit (op names it) against a
+// remote whose current trust failed verification without a recorded
+// block, and records the refusal as an audit event. A remote that is not
+// fenced, or not found (the proposal reports that itself), passes.
+func (s *Service) checkPveTrustFence(op, remoteID string) error {
+	f := s.pveTrustFence()
+	rm, ok, err := s.db.GetRemote(remoteID)
+	if err != nil {
+		return status.Error(codes.Internal, op+": registry unavailable")
+	}
+	if !ok {
+		return nil
+	}
+	if _, fenced := f.covers(rm); !fenced {
+		return nil
+	}
+	s.log.Warn("audit", "kind", "pve_proposal_refused_trust_fenced", "remote", remoteID, "action", op,
+		"trust_generation", rm.TrustGeneration)
+	return status.Error(codes.FailedPrecondition, op+": the remote failed trust verification and stays refused until its block is recorded or an admin re-pins it")
+}
+
+// blockPveMutation blocks a remote whose trust (failed: pin and trust
+// generation) failed verification on any connection to it (mutation
+// client, ReadPVE, provisioning and guest join reads; see pveTrustFailed),
+// and revokes its provider grants and mutation permits. Under the PVE
+// admin lock, which re-pins also hold, it first reads the remote: if an
+// admin re-pinned it since (a newer trust generation), the failure is
+// superseded and nothing is blocked or revoked. A remote that is no longer
+// active (blocked by a concurrent trust failure, removed, or no longer in
+// the registry) only has its authority revoked again.
+//
+// The error names the failing step. If the block is not recorded (registry
+// read or write failed), the remote's mutation permits and provider grants
+// are still revoked as far as the authority allows, and the error wraps
+// errPveTrustBlockNotRecorded and the causes. If the block is recorded but
+// revoking the authority failed, it wraps errPveTrustAuthorityNotRevoked
+// (mutation permits are revoked in memory either way).
+func (s *Service) blockPveMutation(remoteID string, failed pveTrustKey) error {
+	s.pveMu.Lock()
+	defer s.pveMu.Unlock()
+	return s.blockPveMutationLocked(remoteID, failed)
+}
+
+// blockPveMutationLocked is blockPveMutation for a caller that holds
+// s.pveMu.
+func (s *Service) blockPveMutationLocked(remoteID string, failed pveTrustKey) error {
+	const reason = "pve trust verification failed"
+	a := s.pveAdmin()
+	notRecorded := func(err error) error {
+		if rerr := a.revoke(remoteID, reason); rerr != nil {
+			err = errors.Join(err, fmt.Errorf("revoke authority: %w", rerr))
+		}
+		return fmt.Errorf("block pve remote %s: %w: %w", remoteID, errPveTrustBlockNotRecorded, err)
+	}
+	cur, ok, err := s.db.GetRemote(remoteID)
+	if err != nil {
+		return notRecorded(fmt.Errorf("read remote: %w", err))
+	}
+	if !ok {
+		// Removed from the registry: nothing is left to block, and no
+		// connection reaches it any more. Its authority is revoked again.
+		if rerr := a.revoke(remoteID, reason); rerr != nil {
+			return fmt.Errorf("block pve remote %s: %w: %w", remoteID, errPveTrustAuthorityNotRevoked, rerr)
+		}
+		return nil
+	}
+	if cur.TrustGeneration > failed.generation {
+		s.log.Info("pve trust failure superseded by a re-pin", "remote", remoteID,
+			"failed_generation", failed.generation, "trust_generation", cur.TrustGeneration)
+		return nil
+	}
+	_, err = s.db.BlockRemote(remoteID, reason, "executor")
+	if err != nil && !errors.Is(err, executordb.ErrRemoteState) {
+		return notRecorded(fmt.Errorf("persist block: %w", err))
+	}
+	if rerr := a.revoke(remoteID, reason); rerr != nil {
+		return fmt.Errorf("block pve remote %s: %w: %w", remoteID, errPveTrustAuthorityNotRevoked, rerr)
+	}
+	if err == nil {
+		s.log.Warn("pve remote blocked", "remote", remoteID, "reason", "trust verification failed")
+	}
+	return nil
 }
 
 // Fixed identity of the provisioning and template actions the executor
@@ -264,32 +388,14 @@ type pveProvisionReaderAPI struct {
 	agent pveGuestAgentAPI
 }
 
-// conn builds the pinned HTTP client of rm and returns it with its trust
-// watch, base URL and the release of the remote's request slot.
+// conn builds the pinned HTTP client of rm (pveReaderConn) and returns it
+// with its trust watch, base URL and the release of the remote's request
+// slot.
 func (r pveProvisionReaderAPI) conn(ctx context.Context, rm executordb.PveRemote, read pveapi.TokenSupplier) (*http.Client, *pveTrustWatch, string, func(), error) {
-	s := r.agent.s
 	if read == nil {
 		return nil, nil, "", nil, errors.New("executor: provisioning read: no read token")
 	}
-	release, err := s.pveRead.acquire(ctx, rm.RemoteID)
-	if err != nil {
-		return nil, nil, "", nil, err
-	}
-	trust, err := s.pveReadTrust(ctx, rm)
-	if errors.Is(err, errPveReadTrust) {
-		release()
-		return nil, nil, "", nil, s.blockPveRead(rm.RemoteID)
-	}
-	if err != nil {
-		release()
-		return nil, nil, "", nil, err
-	}
-	hc, watch, base, err := pveReadHTTP(rm, trust, s.clock)
-	if err != nil {
-		release()
-		return nil, nil, "", nil, err
-	}
-	return hc, watch, base, release, nil
+	return r.agent.s.pveReaderConn(ctx, rm)
 }
 
 // ClusterInventory implements PveProvisionReader.
@@ -384,6 +490,12 @@ func pveEndpointsFromProto(in []*pb.PVEEndpoint) ([]pvecontract.Endpoint, error)
 
 func pveRPCError(err error) error {
 	switch {
+	case errors.Is(err, errPveTrustFenced):
+		return status.Error(codes.FailedPrecondition, "pve remote failed trust verification and stays refused until its block is recorded or an admin re-pins it")
+	case errors.Is(err, errPveTrustBlockNotRecorded):
+		return status.Error(codes.Internal, "pve trust verification failed; the failure could not be recorded and the remote stays refused")
+	case errors.Is(err, errPveTrustAuthorityNotRevoked):
+		return status.Error(codes.Internal, "pve trust verification failed; the remote is blocked but revoking its authority failed")
 	case errors.Is(err, vault.ErrLocked), errors.Is(err, ErrPveApprovalRequired), errors.Is(err, executordb.ErrRemoteState):
 		return status.Error(codes.FailedPrecondition, "pve operation requires an unlocked vault and valid remote state or approval")
 	case errors.Is(err, executordb.ErrRemoteNotFound):
@@ -451,7 +563,15 @@ func (s *Service) RotatePVEToken(ctx context.Context, in *pb.RotatePVETokenReque
 	s.pveMu.Lock()
 	defer s.pveMu.Unlock()
 	defer clear(in.GetToken())
-	r, err := s.pveAdmin().RotateToken(ctx, PveRotateToken{RemoteID: in.GetRemoteId(), Purpose: in.GetPurpose(), Token: in.GetToken(), By: callerName(ctx)})
+	a := s.pveAdmin()
+	// The rotation connects to a registered remote with its pinned trust
+	// (and sends tokens to it), so it goes through the trust fence like
+	// every other connection: a fenced trust is refused before anything
+	// is sent, and a trust failure it sees blocks the remote, keyed by pin
+	// and trust generation, and fences that trust while the block cannot
+	// be recorded. s.pveMu is held, so the locked variants are used.
+	a.TrustGate, a.TrustFailed = s.pveTrustFenceGateLocked, s.pveTrustFailedLocked
+	r, err := a.RotateToken(ctx, PveRotateToken{RemoteID: in.GetRemoteId(), Purpose: in.GetPurpose(), Token: in.GetToken(), By: callerName(ctx)})
 	if err != nil {
 		return nil, pveRPCError(err)
 	}
@@ -626,6 +746,8 @@ func pveGuestPowerRPCError(err error) error {
 		return status.Error(codes.InvalidArgument, "pve guest power: unsupported verb, kind, timeout or target")
 	case errors.Is(err, ErrPveGuestState):
 		return status.Error(codes.FailedPrecondition, "pve guest power: the guest is not running")
+	case errors.Is(err, ErrPveRunExpired):
+		return status.Error(codes.DeadlineExceeded, "pve guest power: the run ended before the next step was sent")
 	case errors.Is(err, ErrPveTargetChanged), errors.Is(err, ErrPveRemoteChanged):
 		return status.Error(codes.FailedPrecondition, "pve guest power: the guest or remote changed; propose again")
 	case errors.Is(err, ErrPveReadOnly):
@@ -660,6 +782,9 @@ func (s *Service) ProposePVEGuestPower(ctx context.Context, in *pb.ProposePVEGue
 	if g.Mutations.Client == nil {
 		// Defensive: pveMutations always wires the production client.
 		return nil, status.Error(codes.FailedPrecondition, "pve guest power: PVE mutation client not configured")
+	}
+	if err := s.checkPveTrustFence("pve guest power", req.RemoteID); err != nil {
+		return nil, err
 	}
 	id, err := newExecutionID()
 	if err != nil {
@@ -727,6 +852,8 @@ func pveGuestSnapshotRPCError(err error) error {
 		return status.Error(codes.FailedPrecondition, "pve guest snapshot: not available")
 	case errors.Is(err, ErrPveSnapshotRisk):
 		return status.Error(codes.Internal, "pve guest snapshot: risk floor unavailable")
+	case errors.Is(err, ErrPveRunExpired):
+		return status.Error(codes.DeadlineExceeded, "pve guest snapshot: the run ended before the next step was sent")
 	case errors.Is(err, ErrPveTargetChanged), errors.Is(err, ErrPveRemoteChanged):
 		return status.Error(codes.FailedPrecondition, "pve guest snapshot: the guest or remote changed; propose again")
 	case errors.Is(err, ErrPveReadOnly):
@@ -756,6 +883,9 @@ func (s *Service) ProposePVEGuestSnapshot(ctx context.Context, in *pb.ProposePVE
 	g, err := s.pveGuestSnapshot()
 	if err != nil {
 		return nil, status.Error(codes.FailedPrecondition, "pve guest snapshot: pve mutations are not available")
+	}
+	if err := s.checkPveTrustFence("pve guest snapshot", req.RemoteID); err != nil {
+		return nil, err
 	}
 	id, err := newExecutionID()
 	if err != nil {
@@ -1017,6 +1147,9 @@ func (s *Service) proposePVEGuestProvision(ctx context.Context, in *pb.ProposePV
 	p := s.pveProvisioner()
 	if p == nil {
 		return nil, errPveProvisionUnavailable
+	}
+	if err := s.checkPveTrustFence("pve guest provision", req.RemoteID); err != nil {
+		return nil, err
 	}
 	id, err := newExecutionID()
 	if err != nil {
