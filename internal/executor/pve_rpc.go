@@ -896,6 +896,12 @@ var errPveProvisionUnavailable = status.Error(codes.FailedPrecondition, "pve gue
 // permit at its own floor (base MEDIUM; the authority's risk policy raises
 // it for criticality). The caller's input cannot lower it.
 func (s *Service) ProposePVEGuestProvision(ctx context.Context, in *pb.ProposePVEGuestProvisionRequest) (*pb.ProposePVEGuestProvisionResponse, error) {
+	return s.proposePVEGuestProvision(ctx, in, s.permitResponse)
+}
+
+// proposePVEGuestProvision is ProposePVEGuestProvision with the step that
+// turns the registered permit into the response (permitResponse) passed in.
+func (s *Service) proposePVEGuestProvision(ctx context.Context, in *pb.ProposePVEGuestProvisionRequest, respond func(permit.Permit) (*pb.ProposeExecutionResponse, error)) (*pb.ProposePVEGuestProvisionResponse, error) {
 	req, err := provisionRequestFromProto(in.GetSpec())
 	if err != nil {
 		return nil, pveGuestProvisionRPCError(err)
@@ -918,8 +924,15 @@ func (s *Service) ProposePVEGuestProvision(ctx context.Context, in *pb.ProposePV
 		_ = p.VMIDs.ReleaseVMID(req.RemoteID, pp.VMID, id)
 		return nil, pveGuestProvisionRPCError(err)
 	}
-	out, err := s.permitResponse(res.Permit)
+	out, err := respond(res.Permit)
 	if err != nil {
+		// The caller never learns the execution or digest, so the pending
+		// permit cannot be approved through it; release the VMID as when
+		// the authority refused. The permit expires unused, and even if
+		// approved it cannot run: Provision requires the VMID reserved for
+		// this execution.
+		_ = p.VMIDs.ReleaseVMID(req.RemoteID, pp.VMID, id)
+		s.log.Warn("audit", "kind", "pve_guest_provision_proposal_dropped", "remote", req.RemoteID, "vmid", pp.VMID, "execution", id)
 		return nil, err
 	}
 	return &pb.ProposePVEGuestProvisionResponse{Permit: out, ExecutionId: id, Vmid: pp.VMID, CapacityWarnings: pp.Capacity.Warnings()}, nil

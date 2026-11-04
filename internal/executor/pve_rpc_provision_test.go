@@ -602,6 +602,54 @@ func TestServiceGuestProvisionCommitRefusesAnUndesignatedKey(t *testing.T) {
 	}
 }
 
+// TestServiceGuestProvisionResponseFailureReleasesTheVMID: when the
+// registered permit cannot be turned into a response, the proposal fails,
+// the VMID reservation is released like after an authority refusal, and
+// the dropped pending permit cannot run even if it is approved later.
+func TestServiceGuestProvisionResponseFailureReleasesTheVMID(t *testing.T) {
+	e := newProvisionRPCEnv(t)
+	ctx := context.Background()
+	var dropped permit.Permit
+	failing := func(p permit.Permit) (*pb.ProposeExecutionResponse, error) {
+		dropped = p
+		return nil, status.Error(codes.Internal, "request options")
+	}
+	const vmid = 4242
+	spec := testProvisionSpec(bindingOf(e.tpl), PveAutomationCredentialRef)
+	spec.Vmid = vmid
+	_, err := e.svc.proposePVEGuestProvision(ctx, &pb.ProposePVEGuestProvisionRequest{Spec: spec}, failing)
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("propose: %v, want the response error", err)
+	}
+	if dropped.Digest == (canonical.Digest{}) {
+		t.Fatal("no permit was registered")
+	}
+	store := e.svc.pveProvisioner().VMIDs.(*FilePveVMIDStore)
+	if r, err := store.Reservations(mutRemote, time.Now()); err != nil || len(r) != 0 {
+		t.Fatalf("reservations after a failed response: %v %v", r, err)
+	}
+
+	// The dropped permit, approved anyway, cannot run: its VMID is no
+	// longer reserved for its execution.
+	if _, err := e.auth.ApproveCLI(dropped.Digest, 0, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = e.svc.CommitPVEGuestProvision(ctx, &pb.CommitPVEGuestProvisionRequest{Spec: spec,
+		ExecutionId: dropped.Request.ExecutionID, ExecutionDigest: dropped.Digest.String()})
+	if st := status.Convert(err); st.Code() != codes.FailedPrecondition || !strings.Contains(st.Message(), "not reserved") {
+		t.Fatalf("commit of the dropped permit: %v, want FailedPrecondition (vmid not reserved)", err)
+	}
+	if n := len(e.pc.provisionSteps()); n != 0 {
+		t.Fatalf("%d steps sent", n)
+	}
+
+	// The VMID is free for the next proposal.
+	prop, err := e.svc.ProposePVEGuestProvision(ctx, &pb.ProposePVEGuestProvisionRequest{Spec: spec})
+	if err != nil || prop.GetVmid() != vmid {
+		t.Fatalf("next proposal: %+v %v, want vmid %d", prop, err, vmid)
+	}
+}
+
 // proposeApproved proposes the designated-key spec over the RPC and
 // approves it with the CLI.
 func (e *provisionRPCEnv) proposeApproved(t *testing.T, ctx context.Context) (*pb.ProposePVEGuestProvisionResponse, canonical.Digest) {
