@@ -404,8 +404,3 @@ export function validateFocus(raw) {
 export function resourceWeight(r) {
   return Math.log2(1 + r.vcpu) + Math.log2(1 + r.ramMiB / 1024) + 2 * Math.log2(1 + r.gpus);
 }
-
-/** linkVolume is the logarithmic traffic measure for beam width. */
-export function linkVolume(l) {
-  return Math.log10(1 + l.bytesAB + l.bytesBA);
-}
