@@ -40,7 +40,9 @@
 // Caps (D7): the total number of endpoint and bucket rows, and the number
 // of rows per reporter, are bounded. The counts are kept by triggers in
 // traffic_counts, so a cap check is a primary-key lookup. A reporter that
-// reaches its cap is refused; other reporters' rows are never evicted.
+// reaches its cap is refused; other reporters' rows are never evicted,
+// except that an endpoint's authoritative owner is always admitted to its
+// seen-by set (the least recently seen other reporter makes room).
 //
 // Queries (TopN, OverviewUnion) return internal/flowagg types and merge
 // the stored rows with flowagg semantics in SQL: per flow and hour the
