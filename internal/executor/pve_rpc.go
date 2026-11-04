@@ -21,6 +21,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveapi"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
@@ -109,11 +110,35 @@ func (s *Service) newPveProvisioner(m *PveMutations) *PveProvisioner {
 		AutomationKeys: s.automationKey, Artifact: pveGuestProvisionArtifact, ModuleVersion: pveGuestProvisionVersion}
 }
 
+// PveAutomationCredentialRef is the keyring credential reference designated
+// as the NOS automation key (ADR 0008 section 3, "Access and password": one
+// NOS automation key; the keyring file nos-automation.key). Provisioning
+// installs only this credential's public key; a request naming any other
+// keyring credential is refused, so the key of an unrelated host credential
+// never reaches a new guest.
+const PveAutomationCredentialRef = "nos-automation"
+
+var (
+	// ErrPveAutomationCredential is returned for an AutomationCredentialRef
+	// that does not name the designated NOS automation credential
+	// (PveAutomationCredentialRef). Nothing is read from the keyring.
+	ErrPveAutomationCredential = errors.New("executor: credential is not the designated nos automation key")
+	// errNoKeyring is returned when the executor has no keyring; it counts
+	// as a locked keyring.
+	errNoKeyring = fmt.Errorf("executor: no keyring: %w", keyring.ErrLocked)
+)
+
 // automationKey returns the authorized_keys form of the public key of the
-// keyring credential ref. It fails while the keyring is locked.
+// keyring credential ref, which must be the designated NOS automation
+// credential (ErrPveAutomationCredential). It fails with keyring.ErrLocked
+// while the keyring is locked and keyring.ErrUnknownRef when the keyring
+// does not hold the credential.
 func (s *Service) automationKey(ref string) (string, error) {
+	if ref != PveAutomationCredentialRef {
+		return "", ErrPveAutomationCredential
+	}
 	if s.keys == nil {
-		return "", errors.New("executor: no keyring")
+		return "", errNoKeyring
 	}
 	signer, err := s.keys.Signer(ref)
 	if err != nil {
@@ -817,6 +842,14 @@ func pveGuestProvisionRPCError(err error) error {
 	switch {
 	case permit.CodeOf(err) != "":
 		return toStatus(err)
+	// The automation credential refusals come before the generic spec
+	// error they are wrapped in, so the caller can tell them apart.
+	case errors.Is(err, ErrPveAutomationCredential):
+		return status.Error(codes.PermissionDenied, "pve guest provision: the automation credential ref does not name the designated NOS automation key")
+	case errors.Is(err, keyring.ErrLocked):
+		return status.Error(codes.FailedPrecondition, "pve guest provision: keyring locked; unlock the executor")
+	case errors.Is(err, keyring.ErrUnknownRef):
+		return status.Error(codes.NotFound, "pve guest provision: the NOS automation credential is not in the keyring")
 	case errors.Is(err, ErrPveProvisionInvalid), errors.Is(err, ErrPveProvisionUnsupported), errors.Is(err, ErrPveMutationRequest):
 		return status.Error(codes.InvalidArgument, "pve guest provision: invalid or unsupported spec, template, network, key or password id")
 	case errors.Is(err, ErrPveTemplateNotPrepared), errors.Is(err, ErrPveTemplateChanged):

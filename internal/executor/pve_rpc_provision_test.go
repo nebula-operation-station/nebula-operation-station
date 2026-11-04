@@ -4,16 +4,21 @@ package executor
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/pem"
 	"errors"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/descope/virtualwebauthn"
 	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -21,6 +26,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vault"
@@ -62,12 +68,17 @@ func TestPveMutationsWiresProductionProvisioner(t *testing.T) {
 	if p.Images.Catalog == nil || p.Images.Catalog.State == nil {
 		t.Fatal("image catalog has no rollback state store")
 	}
-	key, err := p.AutomationKeys("cred")
-	if err != nil || key != strings.TrimSpace(string(ssh.MarshalAuthorizedKey(e.userPub))) {
-		t.Fatalf("automation key = %q, %v", key, err)
+	// Only the designated automation credential resolves: the keyring's
+	// host credential "cred" is refused without a keyring lookup, and the
+	// designated one is not loaded here.
+	if key, err := p.AutomationKeys("cred"); !errors.Is(err, ErrPveAutomationCredential) || key != "" {
+		t.Fatalf("host credential as automation key = %q, %v", key, err)
 	}
-	if _, err := p.AutomationKeys("no-such-ref"); err == nil {
-		t.Fatal("unknown credential ref resolved")
+	if _, err := p.AutomationKeys("no-such-ref"); !errors.Is(err, ErrPveAutomationCredential) {
+		t.Fatalf("unknown credential ref: %v", err)
+	}
+	if _, err := p.AutomationKeys(PveAutomationCredentialRef); !errors.Is(err, keyring.ErrUnknownRef) {
+		t.Fatalf("designated ref not in the keyring: %v", err)
 	}
 	// Provisioning steps get task types and IDs from the production client.
 	c := m.Client.(*pveMutationClient)
@@ -154,7 +165,7 @@ func TestServiceGuestProvisionUnavailableWithoutDataDir(t *testing.T) {
 	if e.svc.pveMutations().TaskIDs != nil {
 		t.Fatal("TaskIDs set without a provisioner")
 	}
-	spec := testProvisionSpec(bindingOf(PveTemplateRecord{PveTemplateKey: PveTemplateKey{RemoteID: mutRemote, Node: "pve1", Storage: "local-lvm", ImageID: imgUbuntuID}, VMID: 9000}), "cred")
+	spec := testProvisionSpec(bindingOf(PveTemplateRecord{PveTemplateKey: PveTemplateKey{RemoteID: mutRemote, Node: "pve1", Storage: "local-lvm", ImageID: imgUbuntuID}, VMID: 9000}), PveAutomationCredentialRef)
 	_, err := e.svc.ProposePVEGuestProvision(context.Background(), &pb.ProposePVEGuestProvisionRequest{Spec: spec})
 	if st := status.Convert(err); st.Code() != codes.FailedPrecondition || !strings.Contains(st.Message(), "not available") {
 		t.Fatalf("propose: %v", err)
@@ -174,9 +185,10 @@ func TestServiceGuestProvisionReachesTheProvisioner(t *testing.T) {
 	e := newPveReadEnv(t, pvecontract.KindStandalone)
 	dir := t.TempDir()
 	e.svc.SetBackupDirs(dir, filepath.Join(dir, "keys"))
+	e.svc.keys = testAutomationKeyring(t)
 	tpl := PveTemplateBinding{PveTemplateKey: PveTemplateKey{RemoteID: pveReadRemote, Node: "pve1", Storage: "local-lvm", ImageID: imgUbuntuID},
 		VMID: 9000, Generation: 1, SourceSHA256: imgUbuntuSHA}
-	spec := testProvisionSpec(tpl, "cred")
+	spec := testProvisionSpec(tpl, PveAutomationCredentialRef)
 	spec.RemoteId = pveReadRemote
 	_, err := e.svc.ProposePVEGuestProvision(context.Background(), &pb.ProposePVEGuestProvisionRequest{Spec: spec})
 	if st := status.Convert(err); st.Code() != codes.FailedPrecondition || !strings.Contains(st.Message(), "no action credential") {
@@ -221,14 +233,14 @@ func TestServiceGuestProvisionRejectsMalformedSpecs(t *testing.T) {
 		"bad ipam vlan":    func(s *pb.PVEGuestProvisionSpec) *pb.PVEGuestProvisionSpec { s.Ipam.Vlan = 5000; return s },
 	} {
 		t.Run(name, func(t *testing.T) {
-			spec := mutate(testProvisionSpec(tpl, "cred"))
+			spec := mutate(testProvisionSpec(tpl, PveAutomationCredentialRef))
 			_, err := e.svc.ProposePVEGuestProvision(context.Background(), &pb.ProposePVEGuestProvisionRequest{Spec: spec})
 			if status.Code(err) != codes.InvalidArgument {
 				t.Fatalf("propose: %v, want InvalidArgument", err)
 			}
 		})
 	}
-	_, err := e.svc.CommitPVEGuestProvision(context.Background(), &pb.CommitPVEGuestProvisionRequest{Spec: testProvisionSpec(tpl, "cred"),
+	_, err := e.svc.CommitPVEGuestProvision(context.Background(), &pb.CommitPVEGuestProvisionRequest{Spec: testProvisionSpec(tpl, PveAutomationCredentialRef),
 		ExecutionId: "00000000-0000-4000-c000-000000000001", ExecutionDigest: "not-a-digest"})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("commit with malformed digest: %v", err)
@@ -254,15 +266,98 @@ func testProvisionSpec(tpl PveTemplateBinding, autoRef string) *pb.PVEGuestProvi
 // the provisioning test doubles (prepared template, fake client and
 // reader), so the RPCs, the permit flow and the engine wiring are tested
 // end to end; the production client and reader are tested on their own.
+//
+// The keyring holds the designated NOS automation credential
+// (PveAutomationCredentialRef, unless noAutomationKey) and an unrelated
+// host credential "cred" with another key. The authority verifies
+// assertions of one virtual authenticator credential; sign answers a
+// challenge with user presence only (presence) or with user verification.
 type provisionRPCEnv struct {
 	*provisionEnv
 	svc     *Service
+	keys    *keyring.Keyring
 	autoKey string
+	hostKey string
+	sign    func(challenge []byte, verified bool) []byte
+}
+
+// provisionRPCOptions configure newProvisionRPCEnvWith.
+type provisionRPCOptions struct {
+	// risk is the authority's risk policy under GuestProvisionRiskFloor
+	// (default fixedRisk: MEDIUM).
+	risk permit.RiskPolicy
+	// noAutomationKey leaves the designated credential out of the keyring.
+	noAutomationKey bool
+}
+
+// sharedAutomationKey is a second credential key, distinct from the
+// shared host credential key (testCredentialKey), generated once.
+var sharedAutomationKey struct {
+	once sync.Once
+	pem  []byte
+	pub  ssh.PublicKey
+	err  error
+}
+
+// testAutomationKey returns the encrypted OpenSSH PEM and public key of
+// the designated automation credential of the RPC tests.
+func testAutomationKey(t *testing.T) ([]byte, ssh.PublicKey) {
+	t.Helper()
+	k := &sharedAutomationKey
+	k.once.Do(func() {
+		_, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			k.err = err
+			return
+		}
+		block, err := ssh.MarshalPrivateKeyWithPassphrase(priv, "automation", []byte(testPassphrase))
+		if err != nil {
+			k.err = err
+			return
+		}
+		pub, err := ssh.NewPublicKey(priv.Public())
+		if err != nil {
+			k.err = err
+			return
+		}
+		k.pem, k.pub = pem.EncodeToMemory(block), pub
+	})
+	if k.err != nil {
+		t.Fatal(k.err)
+	}
+	return append([]byte(nil), k.pem...), k.pub
+}
+
+// testAutomationKeyring returns an unlocked keyring holding only the
+// designated automation credential.
+func testAutomationKeyring(t *testing.T) *keyring.Keyring {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "keys")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	keyPEM, _ := testAutomationKey(t)
+	if err := os.WriteFile(filepath.Join(dir, PveAutomationCredentialRef+".key"), keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	kr := keyring.New(dir)
+	if _, err := kr.Unlock([]byte(testPassphrase)); err != nil {
+		t.Fatal(err)
+	}
+	return kr
 }
 
 func newProvisionRPCEnv(t *testing.T) *provisionRPCEnv {
 	t.Helper()
-	e := newProvisionEnv(t, fixedRisk{})
+	return newProvisionRPCEnvWith(t, provisionRPCOptions{})
+}
+
+func newProvisionRPCEnvWith(t *testing.T, o provisionRPCOptions) *provisionRPCEnv {
+	t.Helper()
+	if o.risk == nil {
+		o.risk = fixedRisk{}
+	}
+	e := newProvisionEnv(t, o.risk)
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -271,21 +366,50 @@ func newProvisionRPCEnv(t *testing.T) *provisionRPCEnv {
 	if err := os.MkdirAll(keysDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	keyPEM, pub := testCredentialKey(t)
-	if err := os.WriteFile(filepath.Join(keysDir, "cred.key"), keyPEM, 0o600); err != nil {
+	hostPEM, hostPub := testCredentialKey(t)
+	if err := os.WriteFile(filepath.Join(keysDir, "cred.key"), hostPEM, 0o600); err != nil {
 		t.Fatal(err)
+	}
+	autoPEM, autoPub := testAutomationKey(t)
+	if !o.noAutomationKey {
+		if err := os.WriteFile(filepath.Join(keysDir, PveAutomationCredentialRef+".key"), autoPEM, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	kr := keyring.New(keysDir)
 	if _, err := kr.Unlock([]byte(testPassphrase)); err != nil {
 		t.Fatal(err)
 	}
-	v, err := webauthnverify.New(webauthnverify.Config{RPID: "mut.test", Origins: []string{"https://mut.test"}, Counters: e.pe.db}, nil)
+	cred := virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2)
+	v, err := webauthnverify.New(webauthnverify.Config{RPID: "mut.test", Origins: []string{"https://mut.test"}, Counters: e.pe.db},
+		[]webauthnverify.Credential{{ID: cred.ID, PublicKey: cred.Key.AttestationData()}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The Service's authority verifies the virtual authenticator; the
+	// provisioning engine of the env uses the same one.
+	auth, err := permit.New(permit.Options{Verifier: v, Store: e.pe.db,
+		RiskPolicy: GuestProvisionRiskFloor{Next: o.risk, Linked: noLinkedHosts, Remote: PveRegistryRemoteOf(e.pe.db)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.auth, e.m.Auth = auth, auth
 	reg, err := webauthnreg.New(webauthnreg.Config{RPID: "mut.test", Origins: []string{"https://mut.test"}}, v, e.pe.db)
 	if err != nil {
 		t.Fatal(err)
+	}
+	present := virtualwebauthn.NewAuthenticatorWithOptions(virtualwebauthn.AuthenticatorOptions{UserNotVerified: true})
+	present.AddCredential(cred)
+	verifying := virtualwebauthn.NewAuthenticator()
+	verifying.AddCredential(cred)
+	rp := virtualwebauthn.RelyingParty{Name: "Mut", ID: "mut.test", Origin: "https://mut.test"}
+	sign := func(challenge []byte, verified bool) []byte {
+		dev := present
+		if verified {
+			dev = verifying
+		}
+		return []byte(virtualwebauthn.CreateAssertionResponse(rp, dev, cred,
+			virtualwebauthn.AssertionOptions{Challenge: challenge, RelyingPartyID: "mut.test"}))
 	}
 	svc := NewService(e.auth, kr, e.pe.db, reg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	svc.vault = e.pe.vault
@@ -301,19 +425,23 @@ func newProvisionRPCEnv(t *testing.T) *provisionRPCEnv {
 	imgs := *e.imgs
 	imgs.Mutations = m
 	p.Images, p.Reader = &imgs, e.reader
-	return &provisionRPCEnv{provisionEnv: e, svc: svc, autoKey: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub)))}
+	return &provisionRPCEnv{provisionEnv: e, svc: svc, keys: kr, sign: sign,
+		autoKey: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(autoPub))),
+		hostKey: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(hostPub)))}
 }
 
 // TestServiceGuestProvisionRunsOnlyWithTheApprovedPermit: the server
 // proposes over the RPC (template bound, VMID reserved, risk at least
-// MEDIUM); a commit before approval sends nothing; after the normal
-// approval the commit runs clone, config, resize and start on the
-// Service's one engine with the keyring's automation key; a second commit
-// and a commit with another spec are refused and send nothing.
+// MEDIUM); a commit before approval is refused as unapproved and sends
+// nothing; after the normal approval the commit runs clone, config, resize
+// and start on the Service's one engine with the designated automation key
+// (never the host credential); a commit with another spec is refused by the
+// permit and a second commit is refused as already used, both sending
+// nothing.
 func TestServiceGuestProvisionRunsOnlyWithTheApprovedPermit(t *testing.T) {
 	e := newProvisionRPCEnv(t)
 	ctx := context.Background()
-	spec := testProvisionSpec(bindingOf(e.tpl), "cred")
+	spec := testProvisionSpec(bindingOf(e.tpl), PveAutomationCredentialRef)
 	prop, err := e.svc.ProposePVEGuestProvision(ctx, &pb.ProposePVEGuestProvisionRequest{Spec: spec})
 	if err != nil {
 		t.Fatalf("propose: %v", err)
@@ -328,13 +456,15 @@ func TestServiceGuestProvisionRunsOnlyWithTheApprovedPermit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	committed := testProvisionSpec(bindingOf(e.tpl), "cred")
+	committed := testProvisionSpec(bindingOf(e.tpl), PveAutomationCredentialRef)
 	committed.Vmid = prop.GetVmid()
 	commit := &pb.CommitPVEGuestProvisionRequest{Spec: committed, ExecutionId: prop.GetExecutionId(), ExecutionDigest: d.String()}
 
-	// Not approved yet: nothing is sent.
-	if _, err := e.svc.CommitPVEGuestProvision(ctx, commit); err == nil {
-		t.Fatal("commit before approval succeeded")
+	// Not approved yet: refused as not covered by an approved permit,
+	// nothing is sent.
+	_, err = e.svc.CommitPVEGuestProvision(ctx, commit)
+	if st := status.Convert(err); st.Code() != codes.PermissionDenied || !strings.Contains(st.Message(), "no approved permit") {
+		t.Fatalf("commit before approval: %v, want PermissionDenied (no approved permit)", err)
 	}
 	if n := len(e.pc.provisionSteps()); n != 0 {
 		t.Fatalf("%d steps sent before approval", n)
@@ -343,11 +473,13 @@ func TestServiceGuestProvisionRunsOnlyWithTheApprovedPermit(t *testing.T) {
 	if _, err := e.auth.ApproveCLI(d, 0, "admin"); err != nil {
 		t.Fatal(err)
 	}
-	// Another spec than the approved one is refused and sends nothing.
-	other := testProvisionSpec(bindingOf(e.tpl), "cred")
+	// Another spec than the approved one is refused by the permit and
+	// sends nothing; the approved permit stays usable.
+	other := testProvisionSpec(bindingOf(e.tpl), PveAutomationCredentialRef)
 	other.Vmid, other.Cores = prop.GetVmid(), 4
-	if _, err := e.svc.CommitPVEGuestProvision(ctx, &pb.CommitPVEGuestProvisionRequest{Spec: other, ExecutionId: commit.ExecutionId, ExecutionDigest: commit.ExecutionDigest}); err == nil {
-		t.Fatal("commit with a changed spec succeeded")
+	_, err = e.svc.CommitPVEGuestProvision(ctx, &pb.CommitPVEGuestProvisionRequest{Spec: other, ExecutionId: commit.ExecutionId, ExecutionDigest: commit.ExecutionDigest})
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("commit with a changed spec: %v, want PermissionDenied", err)
 	}
 	if n := len(e.pc.provisionSteps()); n != 0 {
 		t.Fatalf("%d steps sent for a changed spec", n)
@@ -371,36 +503,119 @@ func TestServiceGuestProvisionRunsOnlyWithTheApprovedPermit(t *testing.T) {
 	}
 	cfg := string(e.pc.provisionSteps()[1].Args)
 	if !strings.Contains(cfg, strings.Fields(e.autoKey)[1]) {
-		t.Fatalf("config step does not carry the keyring automation key: %s", cfg)
+		t.Fatalf("config step does not carry the designated automation key: %s", cfg)
+	}
+	if strings.Contains(cfg, strings.Fields(e.hostKey)[1]) {
+		t.Fatal("config step carries the host credential's key")
 	}
 
-	// Single use: a replay sends nothing.
-	if _, err := e.svc.CommitPVEGuestProvision(ctx, commit); err == nil {
-		t.Fatal("second commit succeeded")
+	// Single use: a replay is refused as already used and sends nothing.
+	_, err = e.svc.CommitPVEGuestProvision(ctx, commit)
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("second commit: %v, want PermissionDenied", err)
 	}
 	if n := len(e.pc.provisionSteps()); n != 4 {
 		t.Fatalf("%d steps after replay, want 4", n)
 	}
 }
 
-// TestServiceGuestProvisionNeedsAKeyringAutomationKey: the production
-// provisioner has no fixed automation key; a spec without a credential
-// ref, or with one the keyring does not hold, is refused and nothing is
-// reserved or sent.
-func TestServiceGuestProvisionNeedsAKeyringAutomationKey(t *testing.T) {
+// TestServiceGuestProvisionNeedsTheDesignatedAutomationKey: the production
+// provisioner has no fixed automation key and installs only the designated
+// NOS automation credential. A spec without a credential ref is a spec
+// error; a ref naming any other keyring credential (an unrelated host
+// credential the keyring does hold, or an unknown name) is refused as not
+// designated; a locked keyring and a keyring without the designated
+// credential get their own errors. Nothing is reserved or sent in any case.
+func TestServiceGuestProvisionNeedsTheDesignatedAutomationKey(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		ref      string
+		opts     provisionRPCOptions
+		lock     bool
+		wantCode codes.Code
+		wantMsg  string
+	}{
+		{name: "no ref", ref: "", wantCode: codes.InvalidArgument, wantMsg: "invalid"},
+		{name: "host credential", ref: "cred", wantCode: codes.PermissionDenied, wantMsg: "designated"},
+		{name: "unknown ref", ref: "no-such-ref", wantCode: codes.PermissionDenied, wantMsg: "designated"},
+		{name: "keyring locked", ref: PveAutomationCredentialRef, lock: true, wantCode: codes.FailedPrecondition, wantMsg: "keyring locked"},
+		{name: "not in keyring", ref: PveAutomationCredentialRef, opts: provisionRPCOptions{noAutomationKey: true}, wantCode: codes.NotFound, wantMsg: "not in the keyring"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newProvisionRPCEnvWith(t, tc.opts)
+			if tc.lock {
+				e.keys.Lock()
+			}
+			spec := testProvisionSpec(bindingOf(e.tpl), tc.ref)
+			_, err := e.svc.ProposePVEGuestProvision(context.Background(), &pb.ProposePVEGuestProvisionRequest{Spec: spec})
+			if st := status.Convert(err); st.Code() != tc.wantCode || !strings.Contains(st.Message(), tc.wantMsg) {
+				t.Fatalf("ref %q: %v, want %v %q", tc.ref, err, tc.wantCode, tc.wantMsg)
+			}
+			if strings.Contains(status.Convert(err).Message(), strings.Fields(e.hostKey)[1]) {
+				t.Fatal("error carries key material")
+			}
+			store := e.svc.pveProvisioner().VMIDs.(*FilePveVMIDStore)
+			if r, err := store.Reservations(mutRemote, time.Now()); err != nil || len(r) != 0 {
+				t.Fatalf("reservations %v %v", r, err)
+			}
+			if n := len(e.pc.provisionSteps()); n != 0 {
+				t.Fatalf("%d steps sent", n)
+			}
+			if p := e.auth.Pending(); len(p) != 0 {
+				t.Fatalf("%d permits registered", len(p))
+			}
+		})
+	}
+}
+
+// TestServiceGuestProvisionCommitRefusesAnUndesignatedKey: a commit whose
+// spec names a host credential is refused before anything is sent, even
+// with a digest of an approved proposal; a locked keyring at commit time
+// is reported as such.
+func TestServiceGuestProvisionCommitRefusesAnUndesignatedKey(t *testing.T) {
 	e := newProvisionRPCEnv(t)
-	for _, ref := range []string{"", "no-such-ref"} {
-		spec := testProvisionSpec(bindingOf(e.tpl), ref)
-		_, err := e.svc.ProposePVEGuestProvision(context.Background(), &pb.ProposePVEGuestProvisionRequest{Spec: spec})
-		if status.Code(err) != codes.InvalidArgument {
-			t.Fatalf("ref %q: %v, want InvalidArgument", ref, err)
-		}
+	ctx := context.Background()
+	prop, d := e.proposeApproved(t, ctx)
+	for _, tc := range []struct {
+		name     string
+		ref      string
+		lock     bool
+		wantCode codes.Code
+	}{
+		{name: "host credential", ref: "cred", wantCode: codes.PermissionDenied},
+		{name: "keyring locked", ref: PveAutomationCredentialRef, lock: true, wantCode: codes.FailedPrecondition},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.lock {
+				e.keys.Lock()
+			}
+			spec := testProvisionSpec(bindingOf(e.tpl), tc.ref)
+			spec.Vmid = prop.GetVmid()
+			_, err := e.svc.CommitPVEGuestProvision(ctx, &pb.CommitPVEGuestProvisionRequest{Spec: spec, ExecutionId: prop.GetExecutionId(), ExecutionDigest: d.String()})
+			if status.Code(err) != tc.wantCode {
+				t.Fatalf("commit: %v, want %v", err, tc.wantCode)
+			}
+			if n := len(e.pc.provisionSteps()); n != 0 {
+				t.Fatalf("%d steps sent", n)
+			}
+		})
 	}
-	store := e.svc.pveProvisioner().VMIDs.(*FilePveVMIDStore)
-	if r, err := store.Reservations(mutRemote, time.Now()); err != nil || len(r) != 0 {
-		t.Fatalf("reservations %v %v", r, err)
+}
+
+// proposeApproved proposes the designated-key spec over the RPC and
+// approves it with the CLI.
+func (e *provisionRPCEnv) proposeApproved(t *testing.T, ctx context.Context) (*pb.ProposePVEGuestProvisionResponse, canonical.Digest) {
+	t.Helper()
+	prop, err := e.svc.ProposePVEGuestProvision(ctx, &pb.ProposePVEGuestProvisionRequest{Spec: testProvisionSpec(bindingOf(e.tpl), PveAutomationCredentialRef)})
+	if err != nil {
+		t.Fatalf("propose: %v", err)
 	}
-	if n := len(e.pc.provisionSteps()); n != 0 {
-		t.Fatalf("%d steps sent", n)
+	d, err := canonical.ParseDigest(prop.GetPermit().GetExecutionDigest())
+	if err != nil {
+		t.Fatal(err)
 	}
+	if _, err := e.auth.ApproveCLI(d, 0, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	return prop, d
 }

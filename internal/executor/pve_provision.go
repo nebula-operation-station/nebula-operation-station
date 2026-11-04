@@ -589,7 +589,9 @@ func (p *PveProvisioner) config(req PveProvisionRequest, vmid uint64) (pveProvis
 		}
 		k, err := p.AutomationKeys(req.AutomationCredentialRef)
 		if err != nil {
-			return bad("automation credential")
+			// The cause (not designated, keyring locked, unknown ref) stays
+			// visible to the caller; it carries no secret.
+			return pveProvisionConfig{}, fmt.Errorf("%w: automation credential: %w", ErrPveProvisionInvalid, err)
 		}
 		autoKey = k
 	}
