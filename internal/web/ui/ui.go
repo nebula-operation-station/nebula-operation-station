@@ -327,7 +327,7 @@ func New(o Options) (*Handler, error) {
 		deployJoin:     o.DeployJoin,
 		deployIPAM:     o.DeployIPAM,
 		deployBatches:  o.DeployBatches,
-		deployRuns:     newDeployRuns(),
+		deployRuns:     newDeployRuns(log),
 		now:            o.Now,
 
 		guestPowerProposals: newGuestPowerProposals(),
