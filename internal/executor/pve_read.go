@@ -320,7 +320,11 @@ func (s *Service) pveReaderTrustFailed(rm executordb.PveRemote) error {
 // It is the one way every connection to a registered remote gets its
 // trust (ReadPVE, the mutation client, the provisioning reader and the
 // guest join reads): a trust fenced after an unrecorded block
-// (pveTrustFenceGate) is refused before anything is fetched.
+// (pveTrustFenceGate) is refused before anything is fetched. Token
+// rotation, which validates the new token over the probed trust, passes
+// the same gate first (RotatePVEToken: PveAdmin.TrustGate). Only the
+// credential-free probes of new endpoints and of a re-pin skip it: they
+// send no token, and a re-pin is the way out of a fenced trust.
 func (s *Service) pveReadTrust(ctx context.Context, rm executordb.PveRemote) (pvetransport.Trust, error) {
 	if err := s.pveTrustFenceGate(rm); err != nil {
 		return pvetransport.Trust{}, err

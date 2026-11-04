@@ -859,18 +859,30 @@ func rebuildServiceAuth(t *testing.T, e *pveReadEnv, db *executordb.DB) {
 func assertProposalFenced(t *testing.T, e *pveReadEnv) {
 	t.Helper()
 	ctx := context.Background()
-	_, perr := e.svc.ProposePVEGuestPower(ctx, &pb.ProposePVEGuestPowerRequest{Target: &pb.PVEGuestPowerTarget{
-		RemoteId: pveReadRemote, Kind: "qemu", Node: "pve1", Vmid: 101, Verb: "shutdown"}})
-	_, serr := e.svc.ProposePVEGuestSnapshot(ctx, &pb.ProposePVEGuestSnapshotRequest{Target: &pb.PVEGuestSnapshotTarget{
-		RemoteId: pveReadRemote, Kind: "qemu", Node: "pve1", Vmid: 101, Op: "create", Name: "fenced"}})
-	for name, err := range map[string]error{"power": perr, "snapshot": serr} {
+	for _, p := range []struct {
+		action  string
+		propose func() error
+	}{
+		{"pve guest power", func() error {
+			_, err := e.svc.ProposePVEGuestPower(ctx, &pb.ProposePVEGuestPowerRequest{Target: &pb.PVEGuestPowerTarget{
+				RemoteId: pveReadRemote, Kind: "qemu", Node: "pve1", Vmid: 101, Verb: "shutdown"}})
+			return err
+		}},
+		{"pve guest snapshot", func() error {
+			_, err := e.svc.ProposePVEGuestSnapshot(ctx, &pb.ProposePVEGuestSnapshotRequest{Target: &pb.PVEGuestSnapshotTarget{
+				RemoteId: pveReadRemote, Kind: "qemu", Node: "pve1", Vmid: 101, Op: "create", Name: "fenced"}})
+			return err
+		}},
+	} {
+		before := auditCount(e, "pve_proposal_refused_trust_fenced", p.action)
+		err := p.propose()
 		st := status.Convert(err)
 		if st.Code() != codes.FailedPrecondition || !strings.Contains(st.Message(), "failed trust verification") {
-			t.Fatalf("%s proposal against a fenced remote: %v", name, err)
+			t.Fatalf("%s proposal against a fenced remote: %v", p.action, err)
 		}
-	}
-	if !auditLogged(e, "pve_proposal_refused_trust_fenced") {
-		t.Fatal("fenced proposal not audited")
+		if auditCount(e, "pve_proposal_refused_trust_fenced", p.action) != before+1 {
+			t.Fatalf("fenced %s proposal not audited", p.action)
+		}
 	}
 	if n := e.pve.requests.Load(); n != 0 {
 		t.Fatalf("requests reached the endpoint: %d", n)
@@ -1080,6 +1092,20 @@ func auditLogged(e *pveReadEnv, kind string) bool {
 		}
 	}
 	return false
+}
+
+// auditCount counts the audit events of kind for the env's remote whose
+// action is action.
+func auditCount(e *pveReadEnv, kind, action string) int {
+	e.logs.mu.Lock()
+	defer e.logs.mu.Unlock()
+	n := 0
+	for _, r := range e.logs.records {
+		if r.msg == "audit" && r.attrs["kind"] == kind && r.attrs["remote"] == pveReadRemote && r.attrs["action"] == action {
+			n++
+		}
+	}
+	return n
 }
 
 // TestServiceGuestPowerReachesTheRemoteChecks: with the wired client the

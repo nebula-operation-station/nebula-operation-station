@@ -102,7 +102,17 @@ func (s *Service) newPveMutationClient() *pveMutationClient {
 // It returns the error of blockPveMutation (nil when the block is
 // recorded and the authority revoked, or the failure was superseded).
 func (s *Service) pveTrustFailed(rm executordb.PveRemote) error {
-	err := s.blockPveMutation(rm.RemoteID, pveTrustKeyOf(rm))
+	return s.pveTrustFailedWith(rm, s.blockPveMutation)
+}
+
+// pveTrustFailedLocked is pveTrustFailed for a caller that holds s.pveMu
+// (the PVE admin RPCs).
+func (s *Service) pveTrustFailedLocked(rm executordb.PveRemote) error {
+	return s.pveTrustFailedWith(rm, s.blockPveMutationLocked)
+}
+
+func (s *Service) pveTrustFailedWith(rm executordb.PveRemote, block func(string, pveTrustKey) error) error {
+	err := block(rm.RemoteID, pveTrustKeyOf(rm))
 	if errors.Is(err, errPveTrustBlockNotRecorded) {
 		s.pveTrustFence().add(rm)
 	}
@@ -117,12 +127,22 @@ func (s *Service) pveTrustFailed(rm executordb.PveRemote) error {
 // call is still refused, since rm predates the block or the re-pin. Every
 // refusal wraps errPveTrustFenced.
 func (s *Service) pveTrustFenceGate(rm executordb.PveRemote) error {
+	return s.pveTrustFenceGateWith(rm, s.blockPveMutation)
+}
+
+// pveTrustFenceGateLocked is pveTrustFenceGate for a caller that holds
+// s.pveMu (the PVE admin RPCs).
+func (s *Service) pveTrustFenceGateLocked(rm executordb.PveRemote) error {
+	return s.pveTrustFenceGateWith(rm, s.blockPveMutationLocked)
+}
+
+func (s *Service) pveTrustFenceGateWith(rm executordb.PveRemote, block func(string, pveTrustKey) error) error {
 	f := s.pveTrustFence()
 	k, ok := f.covers(rm)
 	if !ok {
 		return nil
 	}
-	err := s.blockPveMutation(rm.RemoteID, k)
+	err := block(rm.RemoteID, k)
 	s.logPveMutationBlock(rm.RemoteID, err)
 	if errors.Is(err, errPveTrustBlockNotRecorded) {
 		return fmt.Errorf("pve remote %s: %w: %w", rm.RemoteID, errPveTrustFenced, errPveTrustBlockNotRecorded)
@@ -188,9 +208,15 @@ func (s *Service) checkPveTrustFence(op, remoteID string) error {
 // revoking the authority failed, it wraps errPveTrustAuthorityNotRevoked
 // (mutation permits are revoked in memory either way).
 func (s *Service) blockPveMutation(remoteID string, failed pveTrustKey) error {
-	const reason = "pve trust verification failed"
 	s.pveMu.Lock()
 	defer s.pveMu.Unlock()
+	return s.blockPveMutationLocked(remoteID, failed)
+}
+
+// blockPveMutationLocked is blockPveMutation for a caller that holds
+// s.pveMu.
+func (s *Service) blockPveMutationLocked(remoteID string, failed pveTrustKey) error {
+	const reason = "pve trust verification failed"
 	a := s.pveAdmin()
 	notRecorded := func(err error) error {
 		if rerr := a.revoke(remoteID, reason); rerr != nil {
@@ -464,6 +490,12 @@ func pveEndpointsFromProto(in []*pb.PVEEndpoint) ([]pvecontract.Endpoint, error)
 
 func pveRPCError(err error) error {
 	switch {
+	case errors.Is(err, errPveTrustFenced):
+		return status.Error(codes.FailedPrecondition, "pve remote failed trust verification and stays refused until its block is recorded or an admin re-pins it")
+	case errors.Is(err, errPveTrustBlockNotRecorded):
+		return status.Error(codes.Internal, "pve trust verification failed; the failure could not be recorded and the remote stays refused")
+	case errors.Is(err, errPveTrustAuthorityNotRevoked):
+		return status.Error(codes.Internal, "pve trust verification failed; the remote is blocked but revoking its authority failed")
 	case errors.Is(err, vault.ErrLocked), errors.Is(err, ErrPveApprovalRequired), errors.Is(err, executordb.ErrRemoteState):
 		return status.Error(codes.FailedPrecondition, "pve operation requires an unlocked vault and valid remote state or approval")
 	case errors.Is(err, executordb.ErrRemoteNotFound):
@@ -531,7 +563,15 @@ func (s *Service) RotatePVEToken(ctx context.Context, in *pb.RotatePVETokenReque
 	s.pveMu.Lock()
 	defer s.pveMu.Unlock()
 	defer clear(in.GetToken())
-	r, err := s.pveAdmin().RotateToken(ctx, PveRotateToken{RemoteID: in.GetRemoteId(), Purpose: in.GetPurpose(), Token: in.GetToken(), By: callerName(ctx)})
+	a := s.pveAdmin()
+	// The rotation connects to a registered remote with its pinned trust
+	// (and sends tokens to it), so it goes through the trust fence like
+	// every other connection: a fenced trust is refused before anything
+	// is sent, and a trust failure it sees blocks the remote, keyed by pin
+	// and trust generation, and fences that trust while the block cannot
+	// be recorded. s.pveMu is held, so the locked variants are used.
+	a.TrustGate, a.TrustFailed = s.pveTrustFenceGateLocked, s.pveTrustFailedLocked
+	r, err := a.RotateToken(ctx, PveRotateToken{RemoteID: in.GetRemoteId(), Purpose: in.GetPurpose(), Token: in.GetToken(), By: callerName(ctx)})
 	if err != nil {
 		return nil, pveRPCError(err)
 	}

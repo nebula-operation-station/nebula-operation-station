@@ -252,3 +252,124 @@ func TestPveBlockOfUnknownRemoteIsNotUnrecorded(t *testing.T) {
 		t.Fatal("unknown remote fenced")
 	}
 }
+
+// rotateReadToken rotates the read token of the env's remote over the RPC.
+func rotateReadToken(e *pveReadEnv) error {
+	_, err := e.svc.RotatePVEToken(context.Background(), &pb.RotatePVETokenRequest{
+		RemoteId: pveReadRemote, Purpose: PvePurposeRead, Token: []byte(pveReadToken)})
+	return err
+}
+
+// TestPveRotateTokenRefusesFencedTrust: a token rotation of a remote whose
+// trust is fenced (its block is not recorded, so it is still active) is
+// refused before any secret is opened or any connection is made, so the
+// new token never reaches the failed trust. Once the store accepts the
+// block, the next rotation records it and is still refused.
+func TestPveRotateTokenRefusesFencedTrust(t *testing.T) {
+	e := newPveReadEnv(t, pvecontract.KindStandalone)
+	rm := e.remote()
+	rebuildServiceAuth(t, e, reopenServiceDB(t, e, rejectPveBlockTrigger))
+	e.svc.pveTrustFence().add(rm)
+	conns := e.pve.conns.Load()
+
+	err := rotateReadToken(e)
+	if st := status.Convert(err); st.Code() != codes.FailedPrecondition || !strings.Contains(st.Message(), "failed trust verification") {
+		t.Fatalf("rotation of a fenced trust: %v", err)
+	}
+	if n := e.pve.conns.Load() - conns; n != 0 || e.pve.requests.Load() != 0 || e.pve.badAuth.Load() != 0 {
+		t.Fatalf("rotation of a fenced trust reached the endpoint: %d connections", n)
+	}
+	cur := svcRemote(t, e)
+	if cur.State != executordb.StateActive || cur.Credentials.ReadVersion != rm.Credentials.ReadVersion {
+		t.Fatalf("remote after a refused rotation: %+v", cur)
+	}
+	if k, fenced := e.svc.pveTrustFence().covers(rm); !fenced || k != pveTrustKeyOf(rm) {
+		t.Fatalf("fence = %+v %v, want the failed trust kept", k, fenced)
+	}
+
+	rebuildServiceAuth(t, e, reopenServiceDB(t, e, `DROP TRIGGER reject_pve_block`))
+	if st := status.Convert(rotateReadToken(e)); st.Code() != codes.FailedPrecondition {
+		t.Fatalf("rotation after the store recovered: %v", st.Err())
+	}
+	if got := remoteState(t, e.svc.db, pveReadRemote); got != executordb.StateBlocked {
+		t.Fatalf("remote state = %s, want blocked", got)
+	}
+	if _, fenced := e.svc.pveTrustFence().covers(rm); fenced {
+		t.Fatal("fence kept after the block was recorded")
+	}
+	if n := e.pve.conns.Load() - conns; n != 0 {
+		t.Fatalf("rotation reached the endpoint: %d connections", n)
+	}
+}
+
+// TestPveRotateTokenTrustFailureUsesTheFence: a trust failure that token
+// rotation detects itself takes the path of every other connection
+// (pveTrustFailed): when the block cannot be recorded, the remote's
+// grants are revoked and exactly the failed trust (pin and generation) is
+// fenced; when it can, the remote is blocked. The token is never sent.
+func TestPveRotateTokenTrustFailureUsesTheFence(t *testing.T) {
+	for _, kind := range []pvecontract.Kind{pvecontract.KindStandalone, pvecontract.KindCluster} {
+		for _, recorded := range []bool{false, true} {
+			name := string(kind) + "/unrecorded"
+			if recorded {
+				name = string(kind) + "/recorded"
+			}
+			t.Run(name, func(t *testing.T) {
+				e := newPveReadEnv(t, kind)
+				e.approve(e.grantDoc(pveReadGrantID, 240, permit.ProviderMethodNodes))
+				rm := e.remote()
+				if !recorded {
+					rebuildServiceAuth(t, e, reopenServiceDB(t, e, rejectPveBlockTrigger))
+				}
+				impostor := makeTestChain(t)
+				e.pve.srv.TLS.Certificates = []tls.Certificate{impostor.tls}
+				e.pve.srv.CloseClientConnections()
+
+				err := rotateReadToken(e)
+				st := status.Convert(err)
+				k, fenced := e.svc.pveTrustFence().covers(rm)
+				if recorded {
+					if st.Code() != codes.InvalidArgument {
+						t.Fatalf("rotation against an impostor: %v", err)
+					}
+					if got := remoteState(t, e.svc.db, pveReadRemote); got != executordb.StateBlocked {
+						t.Fatalf("remote state = %s, want blocked", got)
+					}
+					if fenced {
+						t.Fatal("recorded block fenced")
+					}
+				} else {
+					if st.Code() != codes.Internal || !strings.Contains(st.Message(), "could not be recorded") {
+						t.Fatalf("rotation against an impostor: %v", err)
+					}
+					if got := remoteState(t, e.svc.db, pveReadRemote); got != executordb.StateActive {
+						t.Fatalf("remote state = %s, want the injected failure to keep it active", got)
+					}
+					if !blockLogged(e, "pve mutation trust block not recorded") {
+						t.Fatal("unrecorded block not logged")
+					}
+					if !fenced || k != pveTrustKeyOf(rm) {
+						t.Fatalf("fence = %+v %v, want exactly the failed trust", k, fenced)
+					}
+				}
+				assertGrantsRevoked(t, e)
+				if e.pve.requests.Load() != 0 || e.pve.badAuth.Load() != 0 {
+					t.Fatal("a request reached the impostor")
+				}
+				if cur := svcRemote(t, e); cur.Credentials.ReadVersion != rm.Credentials.ReadVersion {
+					t.Fatalf("read version = %d, want %d", cur.Credentials.ReadVersion, rm.Credentials.ReadVersion)
+				}
+			})
+		}
+	}
+}
+
+// svcRemote reads the env's remote from the service's current registry.
+func svcRemote(t *testing.T, e *pveReadEnv) executordb.PveRemote {
+	t.Helper()
+	rm, ok, err := e.svc.db.GetRemote(pveReadRemote)
+	if err != nil || !ok {
+		t.Fatalf("remote: %v %v", ok, err)
+	}
+	return rm
+}
