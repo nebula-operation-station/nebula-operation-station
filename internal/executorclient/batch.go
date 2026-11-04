@@ -67,12 +67,18 @@ func (c *Client) GetBatchCredentialVersions(ctx context.Context, in *pb.GetBatch
 	return resp, mapCallError(ctx, err)
 }
 
+// BatchCredentialReader reads the executor's batch credential versions.
+// Client satisfies it.
+type BatchCredentialReader interface {
+	GetBatchCredentialVersions(ctx context.Context, in *pb.GetBatchCredentialVersionsRequest, opts ...grpc.CallOption) (*pb.GetBatchCredentialVersionsResponse, error)
+}
+
 // CredentialVersion returns the executor's current batch version of one
 // credential reference (executions.BatchOptions.CredentialVersion). A
 // missing, mismatched or zero version is an error: a batch never binds a
 // guessed version.
-func (c *Client) CredentialVersion(ctx context.Context, ref string) (uint64, error) {
-	resp, err := c.GetBatchCredentialVersions(ctx, &pb.GetBatchCredentialVersionsRequest{CredentialRefs: []string{ref}})
+func CredentialVersion(ctx context.Context, r BatchCredentialReader, ref string) (uint64, error) {
+	resp, err := r.GetBatchCredentialVersions(ctx, &pb.GetBatchCredentialVersionsRequest{CredentialRefs: []string{ref}})
 	if err != nil {
 		return 0, fmt.Errorf("read credential version: %w", err)
 	}
@@ -88,8 +94,8 @@ func (c *Client) CredentialVersion(ctx context.Context, ref string) (uint64, err
 // authority configured (Unimplemented). Any other failure, such as a locked
 // keyring or an unreachable executor, is returned as an error so callers
 // can tell a transient condition from a missing capability.
-func (c *Client) BatchesAvailable(ctx context.Context) (bool, error) {
-	_, err := c.GetBatchCredentialVersions(ctx, &pb.GetBatchCredentialVersionsRequest{})
+func BatchesAvailable(ctx context.Context, r BatchCredentialReader) (bool, error) {
+	_, err := r.GetBatchCredentialVersions(ctx, &pb.GetBatchCredentialVersionsRequest{})
 	switch {
 	case err == nil:
 		return true, nil

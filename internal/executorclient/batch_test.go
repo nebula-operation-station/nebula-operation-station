@@ -53,7 +53,7 @@ func credentialVersionClient(t *testing.T, resp *pb.GetBatchCredentialVersionsRe
 func TestCredentialVersionNeverGuesses(t *testing.T) {
 	ok := &pb.GetBatchCredentialVersionsResponse{Versions: []*pb.BatchCredentialVersion{{CredentialRef: "default", Version: 42, PublicKeyFingerprint: "SHA256:x"}}}
 	var refs []string
-	v, err := credentialVersionClient(t, ok, nil, &refs).CredentialVersion(context.Background(), "default")
+	v, err := CredentialVersion(context.Background(), credentialVersionClient(t, ok, nil, &refs), "default")
 	if err != nil || v != 42 || len(refs) != 1 || refs[0] != "default" {
 		t.Fatalf("version %d, refs %v, err %v", v, refs, err)
 	}
@@ -73,7 +73,7 @@ func TestCredentialVersionNeverGuesses(t *testing.T) {
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			v, err := credentialVersionClient(t, c.resp, c.err, nil).CredentialVersion(context.Background(), "default")
+			v, err := CredentialVersion(context.Background(), credentialVersionClient(t, c.resp, c.err, nil), "default")
 			if err == nil || v != 0 {
 				t.Errorf("version %d, err %v", v, err)
 			}
@@ -85,15 +85,15 @@ func TestCredentialVersionNeverGuesses(t *testing.T) {
 // a transient failure.
 func TestBatchesAvailable(t *testing.T) {
 	var refs []string
-	ok, err := credentialVersionClient(t, &pb.GetBatchCredentialVersionsResponse{}, nil, &refs).BatchesAvailable(context.Background())
+	ok, err := BatchesAvailable(context.Background(), credentialVersionClient(t, &pb.GetBatchCredentialVersionsResponse{}, nil, &refs))
 	if !ok || err != nil || len(refs) != 0 {
 		t.Errorf("available: %v %v refs %v", ok, err, refs)
 	}
-	ok, err = credentialVersionClient(t, nil, status.Error(codes.Unimplemented, "unknown method"), nil).BatchesAvailable(context.Background())
+	ok, err = BatchesAvailable(context.Background(), credentialVersionClient(t, nil, status.Error(codes.Unimplemented, "unknown method"), nil))
 	if ok || err != nil {
 		t.Errorf("unimplemented: %v %v", ok, err)
 	}
-	ok, err = credentialVersionClient(t, nil, status.Error(codes.Unavailable, "down"), nil).BatchesAvailable(context.Background())
+	ok, err = BatchesAvailable(context.Background(), credentialVersionClient(t, nil, status.Error(codes.Unavailable, "down"), nil))
 	if ok || !errors.Is(err, ErrUnavailable) {
 		t.Errorf("unavailable: %v %v", ok, err)
 	}
