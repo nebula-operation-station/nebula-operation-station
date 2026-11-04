@@ -1,0 +1,234 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Design prototype for docs/adr/0009-traffic-map.md. Sample data only; UI text is German as in the design discussion. -->
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NOS traffic map prototype</title>
+<style>
+:root{--bg:#f4f5f8;--fg:#14161d;--text-primary:#14161d;--text-secondary:#555b6b;--text-danger:#b3261e;--surface-3:#ffffff;--border:rgba(20,22,29,.16);--control:#ffffff;--accent:#3d5afe;--radius:8px;--font-mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;--font-sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#0b0d14;--fg:#e8eaf2;--text-primary:#e8eaf2;--text-secondary:#9aa1b4;--text-danger:#ff8a80;--surface-3:#1a1d28;--border:rgba(232,234,242,.16);--control:#151824;--accent:#8c9eff;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#0b0d14;--fg:#e8eaf2;--text-primary:#e8eaf2;--text-secondary:#9aa1b4;--text-danger:#ff8a80;--surface-3:#1a1d28;--border:rgba(232,234,242,.16);--control:#151824;--accent:#8c9eff;color-scheme:dark}
+body{background:var(--bg);color:var(--fg);font-family:var(--font-sans);padding-block:20px 32px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+main{max-width:1180px;margin:0 auto}
+header{display:flex;flex-direction:column;gap:4px;margin:0 0 16px}
+header h1{font-size:20px;font-weight:600;margin:0;text-wrap:balance}
+header p{margin:0;font-size:13px;color:var(--text-secondary);max-width:70ch}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+select,button{font:inherit;font-size:13px;color:var(--fg);background:var(--control);border:1px solid var(--border);border-radius:var(--radius);padding:5px 10px}
+button{cursor:pointer}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+input[type=range]{accent-color:var(--accent)}
+</style>
+</head>
+<body>
+<main>
+<header><h1>NOS traffic map prototype</h1><p>Design reference for ADR 0009 with generated sample data. Hosts as stars, connections as light beams, health as star spikes, software as placeholder tiles (no vendor logos). Not served by NOS.</p></header>
+<h2 class="sr-only">WebGL2-Prototyp der NOS-Verkehrskarte: Sterne in VLAN-Farbe mit Health-Spitzen, Lichtstrahlen nach Transfervolumen, Bloom per Fragment-Shader, Detailstufen beim Zoomen, skalierbar auf 100 bis 1000 Hosts.</h2>
+<div style="display:flex;align-items:center;gap:10px 16px;margin:0 0 10px;flex-wrap:wrap;font-size:13px;color:var(--text-secondary)">
+<label style="display:flex;align-items:center;gap:8px">Hosts <select id="hosts"><option value="100">100</option><option value="300">300</option><option value="1000">1000 · Stresstest</option></select></label>
+<label style="display:flex;align-items:center;gap:8px">Top-N <input type="range" id="topn" min="1" max="10" step="1" value="5" style="width:100px"><span id="nOut" style="font-weight:500;color:var(--text-primary);min-width:14px">5</span></label>
+<label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="bloom" checked> Bloom</label>
+<button id="reset" style="margin-left:auto">Übersicht</button>
+</div>
+<div id="wrap" style="position:relative;height:clamp(420px,68vh,680px);border-radius:12px;overflow:hidden;background:#04050c">
+<canvas id="gl" style="position:absolute;left:0;top:0;width:100%;height:100%;touch-action:none;cursor:grab"></canvas>
+<canvas id="ov" style="position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none"></canvas>
+<div id="hud" style="position:absolute;left:10px;bottom:8px;right:10px;font-family:var(--font-mono);font-size:11px;color:rgba(255,255,255,.5);pointer-events:none"></div>
+<div id="tip" style="position:absolute;left:0;top:0;visibility:hidden;pointer-events:none;background:var(--surface-3);border:0.5px solid var(--border);border-radius:var(--radius);padding:7px 10px;font-size:12px;line-height:1.5;color:var(--text-primary);max-width:280px"></div>
+</div>
+<p id="info" style="font-size:12px;color:var(--text-secondary);margin:8px 0 0"></p>
+<p style="font-size:12px;color:var(--text-secondary);margin:4px 0 0">Kern in VLAN-Farbe, Spitzen grün bis rot: oben Patches, links Health (Backup, Dienste, Erreichbarkeit), unten Disk, rechts Last. Kritische Patches pulsieren auch in der Übersicht, grau flackernd heißt nicht erreichbar, ein roter Ring Host-Key-Mismatch. Software-Kacheln sind Platzhalter: erst gesammelt am Proxmox-Host, näher dran unter jeder VM, ganz nah die Container unter Docker.</p>
+<script>
+(()=>{
+const $=id=>document.getElementById(id);
+const wrap=$('wrap'),cv=$('gl'),ov=$('ov'),oc=ov.getContext('2d'),tip=$('tip'),info=$('info'),hud=$('hud');
+const FONT=getComputedStyle(document.body).fontFamily||'sans-serif';
+const DEF='Mausrad zoomt: weit draußen Bündel pro VLAN über den Router-Hop, nah dran Einzelverbindungen. Ziehen verschiebt, Klick auf einen Stern zeigt seine Top-Verbindungen. Beispieldaten.';
+const gl=cv.getContext('webgl2',{antialias:false,alpha:false,depth:false,stencil:false,premultipliedAlpha:false,powerPreference:'high-performance'});
+if(!gl){info.textContent='WebGL2 ist hier nicht verfügbar. In NOS würde jetzt der Canvas-2D-Renderer übernehmen.';return}
+let HDR=!!gl.getExtension('EXT_color_buffer_float');
+const VER='#version 300 es\nprecision highp float;\n';
+const CAM='uniform vec2 uCam;uniform float uScale;uniform vec2 uRes;uniform float uLod;uniform float uDpr;uniform float uTime;uniform float uSS;uniform float uSpk;\n';
+const VS_FULL=VER+'out vec2 vUV;void main(){vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));vUV=p;gl_Position=vec4(p*2.0-1.0,0.0,1.0);}';
+const NOISE='float hs(vec2 p){p=fract(p*vec2(123.34,456.21));p+=dot(p,p+45.32);return fract(p.x*p.y);}float vn(vec2 p){vec2 i=floor(p),f=fract(p),u=f*f*(3.0-2.0*f);return mix(mix(hs(i),hs(i+vec2(1.0,0.0)),u.x),mix(hs(i+vec2(0.0,1.0)),hs(i+vec2(1.0,1.0)),u.x),u.y);}float fbm(vec2 p){float s=0.0,a=0.5;mat2 m=mat2(1.6,1.2,-1.2,1.6);for(int i=0;i<5;i++){s+=a*vn(p);p=m*p;a*=0.5;}return s;}';
+const FS_NEB=VER+CAM+'uniform vec3 uZ[8];uniform vec3 uZC[8];uniform int uN;uniform float uNeb;out vec4 o;'+NOISE+'void main(){vec2 fc=gl_FragCoord.xy-uRes*0.5;vec2 w=uCam+fc/uScale;float n1=fbm(w*0.0035+vec2(uTime*0.012,0.0));float n2=fbm(w*0.008-vec2(0.0,uTime*0.01)+n1*1.7);vec3 c=vec3(0.0);for(int i=0;i<8;i++){if(i>=uN)break;vec2 d=(w-uZ[i].xy)/uZ[i].z;c+=uZC[i]*exp(-dot(d,d)*1.25)*(0.2+1.3*n2*n2);}c*=uNeb;vec2 q=gl_FragCoord.xy+uCam*uScale*0.06;vec2 ce=floor(q/3.0);float h=hs(ce);float st=h>0.9965?hs(ce+7.7)*0.55+0.08:0.0;st*=step(length(fract(q/3.0)-0.5),0.3);o=vec4(c+vec3(st),1.0);}';
+const VS_BEAM=VER+CAM+'layout(location=0) in vec2 aC;layout(location=1) in vec4 aSeg;layout(location=2) in vec3 aC0;layout(location=3) in vec3 aC1;layout(location=4) in vec2 aTL;out vec3 vCol;out float vX;out float vW;out float vI;void main(){vec2 a=(aSeg.xy-uCam)*uScale,b=(aSeg.zw-uCam)*uScale;vec2 d=b-a;float L=max(length(d),1e-4);vec2 t=d/L,n=vec2(-t.y,t.x);float w=(0.6+aTL.x*aTL.x*3.2)*uDpr*clamp(uSS*0.8,0.6,1.4);float h=w*3.0+2.0*uDpr;float s=aC.x*0.5+0.5;vec2 p=mix(a,b,s)+n*aC.y*h;gl_Position=vec4(p*2.0/uRes,0.0,1.0);float l=aTL.y;float la=uLod>1.5?1.0:(l<0.5?1.0-uLod:(l<1.5?mix(0.35,1.0,uLod):mix(0.05,0.4,uLod)));vI=(0.1+0.9*aTL.x)*la*(l<0.5?0.5:0.75);vCol=mix(aC0,aC1,s);vX=aC.y*h;vW=w;}';
+const FS_BEAM=VER+'in vec3 vCol;in float vX;in float vW;in float vI;out vec4 o;void main(){float x=abs(vX)/vW;float core=exp(-x*x*2.0);float glow=exp(-x*1.3)*0.2;o=vec4((vCol*(core*0.8+glow)+vec3(core*0.08))*vI,1.0);}';
+const VS_PART=VER+CAM+'layout(location=0) in vec2 aC;layout(location=1) in vec4 aAB;layout(location=2) in vec2 aM;layout(location=3) in vec4 aPr;layout(location=4) in vec3 aCol;layout(location=5) in float aL;out vec2 vUV;out vec3 vCol;out float vA;void main(){vec2 a=aAB.xy,b=aAB.zw,m=aM;float L1=length(m-a),L2=length(b-m),T=max(L1+L2,1e-3);float p=fract(uTime*aPr.x+aPr.y);if(aPr.z<0.0)p=1.0-p;float d=p*T;vec2 w=d<L1?mix(a,m,d/max(L1,1e-3)):mix(m,b,(d-L1)/max(L2,1e-3));float r=(1.0+aPr.w*1.4)*uDpr*clamp(uSS*0.8,0.6,1.4);vec2 px=(w-uCam)*uScale+aC*r*3.0;gl_Position=vec4(px*2.0/uRes,0.0,1.0);vUV=aC*3.0;vCol=aCol;float la=uLod>1.5?1.0:(aL<0.5?1.0-uLod:(aL<1.5?mix(0.25,1.0,uLod):uLod*0.5));vA=la*smoothstep(0.0,0.05,p)*smoothstep(1.0,0.95,p)*(0.45+0.55*aPr.w);}';
+const FS_PART=VER+'in vec2 vUV;in vec3 vCol;in float vA;out vec4 o;void main(){float d2=dot(vUV,vUV);o=vec4((vec3(1.0)*exp(-d2*2.2)*1.1+vCol*exp(-d2*0.7)*0.45)*vA,1.0);}';
+const VS_STAR=VER+CAM+'layout(location=0) in vec2 aC;layout(location=1) in vec4 aP;layout(location=2) in vec3 aCol;layout(location=3) in vec4 aH;layout(location=4) in vec2 aS;layout(location=5) in float aDim;out vec2 vPx;out vec3 vCol;out vec4 vH;out float vR;out float vL;out float vA;out float vSt;void main(){float r=(1.0+aP.z*0.9)*uDpr*uSS;float L=(12.0+aP.z*2.0)*uDpr*clamp(uSS,0.5,2.6)*aS.y;float h=max(r*(4.0+3.0*min(uSS,1.0)),L*1.1)+2.0;vec2 p=(aP.xy-uCam)*uScale+aC*h;gl_Position=vec4(p*2.0/uRes,0.0,1.0);vPx=aC*h;vCol=aCol;vH=aH;vR=r;vL=L;vSt=aS.x;float tw=0.88+0.12*sin(uTime*1.7+aP.w);if(aS.x>0.5&&aS.x<1.5)tw*=0.35+0.65*abs(sin(uTime*2.6+aP.w));vA=aDim*tw;}';
+const FS_STAR=VER+CAM+'in vec2 vPx;in vec3 vCol;in vec4 vH;in float vR;in float vL;in float vA;in float vSt;out vec4 o;vec3 sev(float s){return s<0.5?mix(vec3(0.15,1.0,0.3),vec3(1.0,0.72,0.08),s*2.0):mix(vec3(1.0,0.72,0.08),vec3(1.0,0.1,0.08),s*2.0-1.0);}float spk(float al,float ac,float len,float w){if(al<0.0||al>len)return 0.0;float a=al/len;return exp(-abs(ac)/w)*(1.0-a);}void main(){vec2 u=vPx/vR;float d2=dot(u,u);vec3 col=(vSt>0.5&&vSt<1.5)?vec3(0.42,0.44,0.5):vCol;float hz=min(uSS,1.0);float hr=4.0+3.0*hz;float core=exp(-d2*1.6);float halo=0.45/(1.0+d2*0.9)*(1.0-smoothstep(hr*hr*0.5,hr*hr,d2))*hz*hz;vec3 c=vec3(1.0)*core*0.9+col*(halo+core*0.9);if(vSt>1.5){float rr=length(u);c+=vec3(1.0,0.12,0.08)*exp(-pow((rr-3.0)*2.0,2.0))*(0.7+0.3*sin(uTime*5.0));}if(vL>0.5){float w=max(1.1*uDpr,vR*0.22);float k=3.2;if(vH.x>=0.0){float cr=step(0.9,vH.x);c+=sev(vH.x)*spk(vPx.y,vPx.x,vL*(0.5+0.5*vH.x),w)*k*max(uSpk,cr)*(1.0-cr*0.225+cr*0.225*sin(uTime*4.0));}if(vH.y>=0.0)c+=sev(vH.y)*spk(-vPx.y,vPx.x,vL*(0.5+0.5*vH.y),w)*k*uSpk;if(vH.z>=0.0)c+=sev(vH.z)*spk(-vPx.x,vPx.y,vL*(0.5+0.5*vH.z),w)*k*uSpk;if(vH.w>=0.0)c+=sev(vH.w)*spk(vPx.x,vPx.y,vL*(0.5+0.5*vH.w),w)*k*uSpk;}o=vec4(c*vA,1.0);}';
+const FS_PRE=VER+'uniform sampler2D uT;uniform vec2 uTx;uniform float uThr;in vec2 vUV;out vec4 o;void main(){vec3 c=(texture(uT,vUV+uTx*vec2(-1.0,-1.0)).rgb+texture(uT,vUV+uTx*vec2(1.0,-1.0)).rgb+texture(uT,vUV+uTx*vec2(-1.0,1.0)).rgb+texture(uT,vUV+uTx).rgb)*0.25;float br=max(c.r,max(c.g,c.b));float k=0.4;float s=clamp(br-uThr+k,0.0,2.0*k);s=s*s/(4.0*k+1e-4);o=vec4(c*max(s,br-uThr)/max(br,1e-4),1.0);}';
+const FS_DOWN=VER+'uniform sampler2D uT;uniform vec2 uTx;in vec2 vUV;out vec4 o;void main(){vec2 h=uTx;vec3 s=texture(uT,vUV).rgb*4.0+texture(uT,vUV-h).rgb+texture(uT,vUV+h).rgb+texture(uT,vUV+vec2(h.x,-h.y)).rgb+texture(uT,vUV+vec2(-h.x,h.y)).rgb;o=vec4(s/8.0,1.0);}';
+const FS_UP=VER+'uniform sampler2D uT;uniform vec2 uTx;uniform float uW;in vec2 vUV;out vec4 o;void main(){vec2 h=uTx;vec3 s=texture(uT,vUV+vec2(-h.x*2.0,0.0)).rgb+texture(uT,vUV+vec2(-h.x,h.y)).rgb*2.0+texture(uT,vUV+vec2(0.0,h.y*2.0)).rgb+texture(uT,vUV+h).rgb*2.0+texture(uT,vUV+vec2(h.x*2.0,0.0)).rgb+texture(uT,vUV+vec2(h.x,-h.y)).rgb*2.0+texture(uT,vUV+vec2(0.0,-h.y*2.0)).rgb+texture(uT,vUV-h).rgb*2.0;o=vec4(s/12.0*uW,1.0);}';
+const FS_COMP=VER+'uniform sampler2D uS;uniform sampler2D uB;uniform float uBl;uniform float uExp;in vec2 vUV;out vec4 o;void main(){vec3 c=texture(uS,vUV).rgb+texture(uB,vUV).rgb*uBl+vec3(0.010,0.012,0.03);c=vec3(1.0)-exp(-c*uExp);float d=fract(sin(dot(gl_FragCoord.xy,vec2(12.9898,78.233)))*43758.5453);o=vec4(c+(d-0.5)/255.0,1.0);}';
+function sh(t,s){const x=gl.createShader(t);gl.shaderSource(x,s);gl.compileShader(x);if(!gl.getShaderParameter(x,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(x));return x}
+function prog(v,f){const p=gl.createProgram();gl.attachShader(p,sh(gl.VERTEX_SHADER,v));gl.attachShader(p,sh(gl.FRAGMENT_SHADER,f));gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(p));const u={};const n=gl.getProgramParameter(p,gl.ACTIVE_UNIFORMS);for(let i=0;i<n;i++){const a=gl.getActiveUniform(p,i);u[a.name.replace(/\[0\]$/,'')]=gl.getUniformLocation(p,a.name)}return{p,u}}
+let Pneb,Pbeam,Ppart,Pstar,Ppre,Pdown,Pup,Pcomp;
+try{Pneb=prog(VS_FULL,FS_NEB);Pbeam=prog(VS_BEAM,FS_BEAM);Ppart=prog(VS_PART,FS_PART);Pstar=prog(VS_STAR,FS_STAR);Ppre=prog(VS_FULL,FS_PRE);Pdown=prog(VS_FULL,FS_DOWN);Pup=prog(VS_FULL,FS_UP);Pcomp=prog(VS_FULL,FS_COMP)}catch(e){info.textContent='Shader-Fehler: '+e.message;return}
+const quad=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,quad);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+function vao(lay){const v=gl.createVertexArray();gl.bindVertexArray(v);gl.bindBuffer(gl.ARRAY_BUFFER,quad);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);const st=lay.reduce((s,l)=>s+l[1],0)*4;let off=0;lay.forEach(([loc,sz])=>{gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,sz,gl.FLOAT,false,st,off);gl.vertexAttribDivisor(loc,1);off+=sz*4});gl.bindVertexArray(null);return{v,b,n:0}}
+const VB=vao([[1,4],[2,3],[3,3],[4,2]]),VP=vao([[1,4],[2,2],[3,4],[4,3],[5,1]]),VS=vao([[1,4],[2,3],[3,4],[4,2]]);
+const dimBuf=gl.createBuffer();gl.bindVertexArray(VS.v);gl.bindBuffer(gl.ARRAY_BUFFER,dimBuf);gl.enableVertexAttribArray(5);gl.vertexAttribPointer(5,1,gl.FLOAT,false,0,0);gl.vertexAttribDivisor(5,1);gl.bindVertexArray(null);
+const EMPTY=gl.createVertexArray();
+let fmt=HDR?[gl.RGBA16F,gl.HALF_FLOAT]:[gl.RGBA8,gl.UNSIGNED_BYTE];
+function rt(w,h){const t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);gl.texImage2D(gl.TEXTURE_2D,0,fmt[0],w,h,0,gl.RGBA,fmt[1],null);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);const f=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,f);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);const ok=gl.checkFramebufferStatus(gl.FRAMEBUFFER)===gl.FRAMEBUFFER_COMPLETE;gl.bindFramebuffer(gl.FRAMEBUFFER,null);return{t,f,w,h,ok}}
+function free(r){if(r){gl.deleteTexture(r.t);gl.deleteFramebuffer(r.f)}}
+const ZONES=[{l:'VLAN 10 · Mgmt',c:[.30,.45,1.0]},{l:'VLAN 20 · Server',c:[.62,.40,1.0]},{l:'VLAN 30 · AI',c:[1.0,.50,.18]},{l:'VLAN 60 · Storage',c:[.22,.75,1.0]},{l:'VLAN 50 · DMZ',c:[1.0,.30,.42]},{l:'VLAN 70 · Lab',c:[.80,.88,.30]},{l:'VLAN 40 · IoT',c:[.25,.92,.58]},{l:'Internet',c:[.62,.66,.78]}];
+const VL=[10,20,30,60,50,70,40,0],GWC=[.9,.92,1.0],SP=34;
+const SW={pve:['PVE','Proxmox VE 8','#f08a3c'],ubuntu:['UBU','Ubuntu 24.04','#f07a52'],debian:['DEB','Debian 12','#f0607f'],alpine:['ALP','Alpine 3.20','#5aa8e6'],docker:['DKR','Docker 27','#4fb0f5'],nvidia:['NV','NVIDIA 550','#9ad94a'],netbird:['NB','NetBird','#f6a05a'],hermes:['HRM','Hermes Agent','#c4a6ff'],influx:['INF','InfluxDB 2','#a9a9ff'],grafana:['GRF','Grafana','#f7a04a'],postgres:['PG','PostgreSQL 16','#7fb0e0'],redis:['RDS','Redis 7','#ff7a70'],nginx:['NGX','nginx','#5fd08a'],gitea:['GIT','Gitea','#8fc25a'],rmq:['RMQ','RabbitMQ','#ff9a55'],ollama:['OLL','Ollama','#e6e6e6'],litellm:['LLM','LiteLLM','#d0d0d0'],pbs:['PBS','Proxmox Backup','#f08a3c'],ceph:['CPH','Ceph','#f2807a'],minio:['MIO','MinIO','#e86a85'],keycloak:['KC','Keycloak','#79b8e6'],nos:['NOS','Nebula Operation Station','#8fa6ff'],traefik:['TRF','Traefik','#5cc6de'],wg:['WG','WireGuard','#e87070']};
+const mul=a=>()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296};
+let N=[],F=[],GW=null,managed=0,BB=null;
+function build(HN){
+const R=mul(1337+HN*7),G=()=>{let u=0;while(!u)u=R();return Math.sqrt(-2*Math.log(u))*Math.cos(6.2831853*R())},pk=a=>a[Math.floor(R()*a.length)],pad=i=>String(i).padStart(2,'0');
+N=[];F=[];const BZ=ZONES.map(()=>[]),cnt=ZONES.map(()=>0);
+const add=(z,kind,l,cpu,ram,gpu,ex)=>{let ip='10.0.0.1';if(z>=0&&z<7){const i=++cnt[z];ip='10.'+VL[z]+'.'+(i>>8)+'.'+(i&255)}const n=Object.assign({i:N.length,z,kind,l,cpu,ram,gpu,ip},ex||{});N.push(n);if(z>=0)BZ[z].push(n);return n};
+GW=add(-1,'gw','core-gw',8,16,0,{lum:5.2,desc:'Router/Firewall · Hop zwischen allen VLANs'});
+const P=Math.max(3,Math.round(HN/14)),rest=HN-P-1,mc=[.10,.38,.10,.08,.10,.24].map(s=>Math.max(1,Math.round(rest*s)));mc[5]=Math.max(1,rest-mc[0]-mc[1]-mc[2]-mc[3]-mc[4]);
+for(let i=1;i<=P;i++)add(0,'pve','pve-'+pad(i),pk([32,48,64,96]),pk([128,256,384,512]),R()<.2?2:0);
+const MG=['nebulaops','netbird-peer','fluxdb','dns-01','ansible','vault','log-01'];
+for(let i=0;i<mc[0];i++)add(0,'vm',i<MG.length?MG[i]:'mgmt-'+pad(i),pk([2,4]),pk([2,4,8]),0);
+[[1,['app','db','docker','web','git','mq','cache','auth'],[2,4,8,16],[4,8,16,32,64],[0]],[2,['gpu','llm','infer','train'],[8,16,32],[32,64,128,256],[1,2,2,4]],[3,['pbs','nas','ceph','minio'],[4,8,16],[16,32,64],[0]],[4,['proxy','mail','vpn','waf','web-ext'],[2,4],[2,4,8],[0]],[5,['lab','test','ci','sandbox'],[2,4,8],[2,4,8,16],[0]]].forEach(([z,nm,cp,rm,gp],k)=>{for(let i=0;i<mc[k+1];i++)add(z,R()<.3?'lxc':'vm',nm[i%nm.length]+'-'+pad(Math.floor(i/nm.length)+1),pk(cp),pk(rm),pk(gp))});
+const IOT=[['esp32','Espressif',.5],['cam','Reolink',.9],['tv','Apple',1.4],['sensor','Shelly',.4],['plug','Shelly',.35],['printer','HP',.7],['speaker','Sonos',1.0],['thermo','tado',.4]];
+for(let i=0,m=Math.round(HN*.55);i<m;i++){const t=IOT[i%IOT.length];add(6,'disc',t[0]+'-'+pad(Math.floor(i/IOT.length)+1),0,0,0,{vendor:t[1],lum:t[2]+R()*.5,iot:t[0]})}
+for(let i=0,m=Math.max(2,Math.round(HN/25));i<m;i++)add(0,'disc',(i%2?'ap-':'switch-')+pad(Math.floor(i/2)+1),0,0,0,{vendor:i%2?'Ubiquiti':'MikroTik',lum:1.2+R()*.4,iot:'net'});
+[['Internet (Rest)',4.6],['github.com',2.6],['registry-1.docker.io',2.6],['deb.debian.org',2.4],['huggingface.co',2.8],['netbird-vps',2.2],['pool.ntp.org',1.6],['1.1.1.1 (DNS)',1.8],['Apple CDN',2.6],['smtp-relay',1.6]].forEach(e=>add(7,'ext',e[0],0,0,0,{lum:e[1],ip:'extern'}));
+for(let i=0,m=Math.round(HN/40);i<m;i++)add(7,'ext','peer-'+pad(i+1),0,0,0,{lum:1.2+R()*.6,ip:'extern'});
+managed=0;
+N.forEach(n=>{if(n.lum==null)n.lum=Math.log2(1+n.cpu+n.ram/8+n.gpu*12);n.ph=R()*6.283;n.man=n.kind==='pve'||n.kind==='vm'||n.kind==='lxc'||n.kind==='gw';if(!n.man)return;managed++;
+n.disk=Math.min(.99,.22+R()*.5+(R()<.14?.3:0));let r=R();n.upd=r<.58?0:1+Math.floor(R()*16);n.crit=r>.9?1+Math.floor(R()*3):0;
+r=R();n.bk=n.kind==='gw'||(n.z===5&&R()<.5)?null:(r<.82?2+R()*20:r<.93?30+R()*120:200+R()*400);n.load=Math.pow(R(),1.8);r=R();n.state=r<.03?1:r<.045?2:0;
+n.fail=R()<.08?1+Math.floor(R()*2):0;n.hs=Math.max(n.bk==null||n.bk<26?0:n.bk<170?.5:1,n.state?1:0,n.fail?.25+.25*n.fail:0);
+n.h=[n.crit?1:n.upd?.5:0,Math.max(0,Math.min(1,(n.disk-.5)/.45)),n.hs,Math.max(0,Math.min(1,(n.load-.3)/.6))]});
+const PV=N.filter(n=>n.kind==='pve'),PG=PV.filter(n=>n.gpu),os=()=>R()<.6?'ubuntu':'debian',DK=(...c)=>({k:'docker',c:c.map(k=>({k}))});let firstLab=true;
+N.forEach(n=>{if(!n.man||n.kind==='gw')return;if(n.kind==='pve'){n.sw=[{k:'pve'}].concat(n.gpu?[{k:'nvidia'}]:[]);return}
+const s=[{k:n.kind==='lxc'?(R()<.5?'alpine':'debian'):os()}],l=n.l,z=n.z;
+if(l==='nebulaops')s.push({k:'nos'});else if(l==='netbird-peer')s.push(DK('netbird'));else if(l==='fluxdb')s.push(DK('influx','grafana'));
+else if(z===1){if(/^db/.test(l))s.push({k:'postgres'});else if(/^cache/.test(l))s.push({k:'redis'});else if(/^mq/.test(l))s.push(DK('rmq'));else if(/^git/.test(l))s.push(DK('gitea','postgres'));else if(/^auth/.test(l))s.push(DK('keycloak','postgres'));else if(/^docker/.test(l)){const c=['nginx','redis','postgres','traefik','grafana'].filter(()=>R()<.45);s.push(DK(...(c.length?c:['nginx'])))}else s.push(DK('nginx',R()<.5?'redis':'postgres'))}
+else if(z===2){s.push({k:'nvidia'},{k:'ollama'});if(R()<.4)s.push(DK('litellm'))}
+else if(z===3){if(/^pbs/.test(l))s.push({k:'pbs'});else if(/^ceph/.test(l))s.push({k:'ceph'});else if(/^minio/.test(l))s.push(DK('minio'))}
+else if(z===4){if(/^proxy/.test(l))s.push(DK('traefik'));else if(/^vpn/.test(l))s.push({k:'wg'});else s.push({k:'nginx'})}
+else if(z===5){if(firstLab){firstLab=false;n.l='hermes';s.push({k:'hermes'},DK('nos'))}else if(R()<.6)s.push(DK(pk(['nginx','postgres','redis','gitea'])))}
+n.sw=s;n.host=z===2&&PG.length?pk(PG):pk(PV)});
+PV.forEach(p=>{p.cnt={};p.guests=0});N.forEach(n=>{if(!n.host)return;const h=n.host,a=k=>h.cnt[k]=(h.cnt[k]||0)+1;h.guests++;n.sw.forEach(x=>{a(x.k);if(x.c)x.c.forEach(c=>a(c.k))})});PV.forEach(p=>p.agg=Object.entries(p.cnt).sort((a,b)=>b[1]-a[1]));
+const FM=new Map(),byName=l=>N.find(n=>n.l===l),M=N.filter(n=>n.man&&n.kind!=='gw');
+const ext=p=>p?byName(p):(R()<.45?byName('Internet (Rest)'):pk(BZ[7]));
+const inZ=(z,s,f)=>{const a=f?BZ[z].filter(f):BZ[z];if(!a.length)return null;for(let k=0;k<6;k++){const n=pk(a);if(n!==s)return n}return null};
+const fl=(a,b,m,svc)=>{if(!a||!b||a===b)return;const v=Math.pow(10,m+G()*.45),key=a.i<b.i?a.i+'-'+b.i:b.i+'-'+a.i;let f=FM.get(key);if(!f){f={a:a.i,b:b.i,in:0,out:0,v:0,svc};FM.set(key,f);F.push(f)}const o=v*(.15+R()*.7);if(f.a===a.i){f.out+=o;f.in+=v-o}else{f.in+=o;f.out+=v-o}f.v+=v};
+const mon=n=>/fluxdb|nebulaops|log-01/.test(n.l),rep=(k,fn)=>{for(let j=0;j<k;j++)fn()};
+N.forEach(n=>{const z=n.z;
+if(n.kind==='pve'){rep(2,()=>fl(n,inZ(3,n,x=>/pbs|ceph/.test(x.l)),1.3,'tcp/8007 PBS'));rep(2,()=>fl(n,inZ(0,n,x=>x.kind==='pve'),.8,'tcp/5404 Corosync'));fl(n,inZ(0,n,mon),-1.4,'tcp/22 SSH');fl(n,ext('deb.debian.org'),-.4,'tcp/443 APT')}
+else if(n.kind==='gw'){fl(n,inZ(0,n,mon),-1.3,'udp/161 SNMP');fl(n,ext('1.1.1.1 (DNS)'),-.6,'udp/53 DNS')}
+else if(n.kind==='ext'){}
+else if(n.kind==='disc'){if(n.iot==='tv'||n.iot==='speaker')fl(n,ext('Apple CDN'),1.2,'tcp/443 Streaming');else if(n.iot==='net')fl(n,inZ(0,n,mon),-2.2,'udp/161 SNMP');else{fl(n,inZ(1,n,x=>/mq/.test(x.l))||inZ(0,n,mon),-3,'tcp/1883 MQTT');if(R()<.5)fl(n,ext(),-2.4,'tcp/443 Cloud')}if(n.iot==='cam')fl(n,inZ(3,n,x=>/nas/.test(x.l)),.6,'tcp/554 RTSP')}
+else if(z===0){rep(mon(n)?4+Math.floor(R()*5):2,()=>fl(n,pk(M),-2,'tcp/22 SSH'));fl(n,ext(),-1.2,'tcp/443')}
+else if(z===1){rep(2+Math.floor(R()*2),()=>fl(n,inZ(1,n),-.6,pk(['tcp/5432 Postgres','tcp/6379 Redis','tcp/443 API','tcp/5672 AMQP'])));fl(n,inZ(3,n),0,'tcp/2049 NFS');fl(n,inZ(0,n,mon),-1.8,'tcp/9100 Metrics');fl(n,ext(),-.8,'tcp/443');if(R()<.4)fl(n,inZ(4,n),-.5,'tcp/8080 Upstream')}
+else if(z===2){rep(2,()=>fl(n,inZ(2,n),.8,'tcp/11434 Ollama'));fl(n,inZ(3,n),.7,'tcp/2049 NFS');fl(n,ext('huggingface.co'),1,'tcp/443 Modelle');fl(n,inZ(1,n),-.4,'tcp/4000 LiteLLM');fl(n,inZ(0,n,mon),-1.8,'tcp/9100 Metrics')}
+else if(z===3){rep(1+Math.floor(R()*2),()=>fl(n,inZ(3,n),.5,'tcp/6789 Ceph'));fl(n,inZ(0,n,mon),-1.6,'tcp/9100 Metrics')}
+else if(z===4){rep(2,()=>fl(n,ext(),.2,'tcp/443 HTTPS'));rep(1+Math.floor(R()*2),()=>fl(n,inZ(1,n),-.3,'tcp/8080 Upstream'));fl(n,inZ(0,n,mon),-1.8,'tcp/9100 Metrics')}
+else if(z===5){rep(2,()=>fl(n,inZ(5,n),-.8,'tcp/22 SSH'));fl(n,ext(R()<.5?'github.com':'registry-1.docker.io'),-.6,'tcp/443 Pull');fl(n,inZ(1,n),-1,'tcp/443 API');fl(n,inZ(0,n,mon),-1.8,'tcp/9100 Metrics')}});
+fl(byName('netbird-peer'),byName('netbird-vps'),.4,'udp/51820 WireGuard');
+let lo=1e9,hi=-1e9;F.forEach(f=>{const l=Math.log10(f.v);lo=Math.min(lo,l);hi=Math.max(hi,l)});F.forEach(f=>f.t=Math.max(0,Math.min(1,(Math.log10(f.v)-lo)/(hi-lo||1))));
+N.forEach(n=>{n.fl=[];n.tin=0;n.tout=0});F.forEach((f,i)=>{const A=N[f.a],B=N[f.b];A.fl.push(i);B.fl.push(i);A.tout+=f.out;A.tin+=f.in;B.tout+=f.in;B.tin+=f.out});N.forEach(n=>n.fl.sort((x,y)=>F[y].v-F[x].v));
+ZONES.forEach((Z,z)=>{Z.r=SP*.57*Math.sqrt(BZ[z].length)+70;Z.inter=0;Z.zo=0;Z.crit=0;Z.off=0});
+const order=[4,1,3,2,5,6,0],D=order.reduce((s,z)=>s+2*ZONES[z].r,0),RR=Math.max(D*1.35/(2*Math.PI),Math.max(...order.map(z=>ZONES[z].r))*1.5+160);let acc=0;
+order.forEach(z=>{const Z=ZONES[z],a=-Math.PI*.22+(acc+Z.r)/D*2*Math.PI;acc+=2*Z.r;Z.x=Math.cos(a)*RR;Z.y=Math.sin(a)*RR;Z.a=a});
+const Wz=ZONES[7],Dz=ZONES[4],rw=RR+Dz.r+Wz.r+150;Wz.x=Math.cos(Dz.a)*rw;Wz.y=Math.sin(Dz.a)*rw;
+GW.x=0;GW.y=0;BZ.forEach((ns,z)=>{const Z=ZONES[z],rot=z*1.3;ns.slice().sort((a,b)=>b.lum-a.lum).forEach((n,k)=>{const rk=SP*Math.sqrt((k+.5)/Math.PI),an=k*2.39996+rot;n.x=Z.x+Math.cos(an)*rk;n.y=Z.y+Math.sin(an)*rk})});
+F.forEach(f=>{const A=N[f.a],B=N[f.b];if(A.z<0||B.z<0||A.z===B.z)return;ZONES[A.z].inter+=f.v;ZONES[A.z].zo+=f.out;ZONES[B.z].inter+=f.v;ZONES[B.z].zo+=f.in});
+const li=ZONES.map(Z=>Math.log10(Z.inter||1e-6)),l0=Math.min(...li),l1=Math.max(...li);ZONES.forEach((Z,z)=>Z.it=(li[z]-l0)/(l1-l0||1));
+N.forEach(n=>{if(n.z<0||!n.man)return;if(n.crit)ZONES[n.z].crit++;if(n.state)ZONES[n.z].off++});
+let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;ZONES.forEach(Z=>{x0=Math.min(x0,Z.x-Z.r);x1=Math.max(x1,Z.x+Z.r);y0=Math.min(y0,Z.y-Z.r);y1=Math.max(y1,Z.y+Z.r)});BB={x0,y0,x1,y1};
+const sd=[];N.forEach(n=>{const c=n.z<0?GWC:ZONES[n.z].c,h=n.man?n.h:[-1,-1,-1,-1];sd.push(n.x,n.y,n.lum,n.ph,c[0],c[1],c[2],h[0],h[1],h[2],h[3],n.man?(n.state||0):0,n.man?1:0)});
+gl.bindBuffer(gl.ARRAY_BUFFER,VS.b);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(sd),gl.STATIC_DRAW);VS.n=N.length;
+N.forEach(n=>n.tw=0);
+}
+let topN=5,focus=null,hover=null,lit=null,bloomOn=true;
+function rebuild(){
+const S=new Set();if(focus!=null)N[focus].fl.slice(0,topN).forEach(i=>S.add(i));else N.forEach(n=>n.fl.slice(0,topN).forEach(i=>S.add(i)));
+const bd=[],pd=[],C=n=>n.z<0?GWC:ZONES[n.z].c,mx=(a,b)=>[(a[0]+b[0])/2,(a[1]+b[1])/2,(a[2]+b[2])/2];let nb=0,np=0;
+const seg=(ax,ay,bx,by,c0,c1,t,l)=>{bd.push(ax,ay,bx,by,c0[0],c0[1],c0[2],c1[0],c1[1],c1[2],t,l);nb++};
+const part=(a,m,b,t,l,c,k,fw)=>{const T=Math.hypot(m.x-a.x,m.y-a.y)+Math.hypot(b.x-m.x,b.y-m.y)||1,sp=(70+t*150)/T;for(let j=0;j<k;j++){pd.push(a.x,a.y,b.x,b.y,m.x,m.y,sp,(j+Math.random()*.5)/k,j<fw?1:-1,t,c[0],c[1],c[2],l);np++}};
+if(focus==null)ZONES.forEach(Z=>{if(!Z.inter)return;const t=.45+.55*Z.it,k=2+Math.round(Z.it*4);seg(Z.x,Z.y,GW.x,GW.y,Z.c,GWC,t,0);part(Z,Z,GW,t,0,Z.c,k,Math.round(k*Z.zo/Z.inter))});
+lit=focus!=null?new Set([focus]):null;
+S.forEach(i=>{const f=F[i],A=N[f.a],B=N[f.b],cr=A.z>=0&&B.z>=0&&A.z!==B.z,l=cr?2:1,cA=C(A),cB=C(B),cm=mx(cA,cB);if(cr){seg(A.x,A.y,GW.x,GW.y,cA,cm,f.t,l);seg(GW.x,GW.y,B.x,B.y,cm,cB,f.t,l)}else seg(A.x,A.y,B.x,B.y,cA,cB,f.t,l);const k=1+Math.round(f.t*3);part(A,cr?GW:A,B,f.t,l,cm,k,Math.round(k*f.out/f.v));if(lit){lit.add(f.a);lit.add(f.b);if(cr)lit.add(GW.i)}});
+gl.bindBuffer(gl.ARRAY_BUFFER,VB.b);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(bd),gl.DYNAMIC_DRAW);VB.n=nb;
+gl.bindBuffer(gl.ARRAY_BUFFER,VP.b);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(pd),gl.DYNAMIC_DRAW);VP.n=np;
+gl.bindBuffer(gl.ARRAY_BUFFER,dimBuf);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(N.map(n=>!lit||lit.has(n.i)?1:.14)),gl.DYNAMIC_DRAW);
+dirty=true}
+let W=1,H=1,cw=1,ch=1,dpr=1,scene=null,mips=[],s0=1,dirty=true;const cam={x:0,y:0,s:1},tgt={x:0,y:0,s:1};
+function resize(){dpr=Math.min(2,window.devicePixelRatio||1);cw=wrap.clientWidth||680;ch=wrap.clientHeight||500;W=Math.max(1,Math.round(cw*dpr));H=Math.max(1,Math.round(ch*dpr));cv.width=W;cv.height=H;ov.width=W;ov.height=H;free(scene);mips.forEach(free);mips=[];scene=rt(W,H);if(!scene.ok&&HDR){HDR=false;fmt=[gl.RGBA8,gl.UNSIGNED_BYTE];free(scene);scene=rt(W,H)}let w=W>>1,h=H>>1;for(let i=0;i<6&&w>=8&&h>=8;i++){mips.push(rt(w,h));w>>=1;h>>=1}if(BB)s0=Math.min(cw/(BB.x1-BB.x0),ch/(BB.y1-BB.y0))*.94;dirty=true}
+function fitAll(now){tgt.x=(BB.x0+BB.x1)/2;tgt.y=(BB.y0+BB.y1)/2;tgt.s=s0;if(now)Object.assign(cam,tgt)}
+function fitFocus(){let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;lit.forEach(i=>{const n=N[i];x0=Math.min(x0,n.x);x1=Math.max(x1,n.x);y0=Math.min(y0,n.y);y1=Math.max(y1,n.y)});const pw=Math.max(x1-x0,160),ph=Math.max(y1-y0,160);tgt.x=(x0+x1)/2;tgt.y=(y0+y1)/2;tgt.s=Math.max(s0,Math.min(s0*12,Math.min(cw/pw,ch/ph)*.72))}
+const toS=(x,y)=>({x:cw/2+(x-cam.x)*cam.s,y:ch/2-(y-cam.y)*cam.s});
+let SS=1,ZZ=1;
+function pick(mx,my){let best=null,bd=1e9;for(const n of N){const p=toS(n.x,n.y),r=Math.max(7,(1+n.lum*.9)*SS*1.8),d=Math.hypot(p.x-mx,p.y-my);if(d<r&&d<bd){bd=d;best=n}}return best}
+const nf=new Intl.NumberFormat('de-DE');
+const fmt2=g=>g>=1000?(g/1000).toFixed(1).replace('.',',')+' TB':g>=1?(g>=10?Math.round(g):g.toFixed(1).replace('.',','))+' GB':g*1024>=1?Math.round(g*1024)+' MB':Math.max(1,Math.round(g*1048576))+' KB';
+const swn=k=>SW[k][1];const swText=n=>n.kind==='pve'?swn('pve')+' · '+n.guests+' Gäste: '+n.agg.slice(0,4).map(([k,c])=>swn(k).split(' ')[0]+' ×'+c).join(', '):'Software: '+n.sw.map(x=>swn(x.k)+(x.c?' ('+x.c.map(c=>swn(c.k).split(' ')[0]).join(', ')+')':'')).join(' · ');
+const age=h=>h<48?Math.round(h)+' h':Math.round(h/24)+' d';
+function lines(n){const L=[[n.l,1],[(n.ip||'')+' · '+(n.z<0?'alle VLANs':ZONES[n.z].l),0]];
+L.push([n.kind==='gw'?n.desc:n.kind==='ext'?'externer Endpunkt':n.kind==='disc'?'entdeckt, nicht verwaltet · '+n.vendor:(n.kind==='pve'?'Proxmox-Node':n.kind==='lxc'?'LXC':'VM')+' · '+n.cpu+' vCPU · '+n.ram+' GB RAM'+(n.gpu?' · '+n.gpu+'× GPU':''),0]);
+if(n.man){if(n.state===1)L.push(['nicht erreichbar seit '+(3+Math.floor(n.ph*7))+' min',2]);if(n.state===2)L.push(['Host-Key-Mismatch · Host blockiert',2]);L.push([(n.upd?n.upd+' Updates'+(n.crit?', '+n.crit+' kritisch':''):'Patches aktuell')+' · Disk '+Math.round(n.disk*100)+' % · Last '+Math.round(n.load*100)+' %',n.crit||n.disk>.9?2:0]);const hp=[n.bk!=null&&n.bk>=26?'Backup vor '+age(n.bk):null,n.fail?n.fail+(n.fail>1?' Dienste':' Dienst')+' fehlgeschlagen':null].filter(Boolean);L.push(['Health: '+(hp.length?hp.join(' · '):n.state?'gestört':'ok')+(n.bk==null&&n.kind!=='gw'?' · kein Backup-Job':''),n.hs>.75?2:0]);if(n.sw)L.push([swText(n),0]);if(n.host)L.push(['läuft auf '+n.host.l,0])}
+L.push(['24 h: in '+fmt2(n.tin)+' · out '+fmt2(n.tout)+' · '+n.fl.length+' Verbindungen',0]);
+n.fl.slice(0,3).forEach(i=>{const f=F[i],p=N[f.a===n.i?f.b:f.a];L.push(['↔ '+p.l+' · '+f.svc+' · '+fmt2(f.v),0])});return L}
+function showTip(n,mx,my){tip.replaceChildren();lines(n).forEach(([t,s])=>{const d=document.createElement('div');d.textContent=t;if(s===1)d.style.fontWeight='500';else d.style.color=s===2?'var(--text-danger)':'var(--text-secondary)';tip.appendChild(d)});tip.style.visibility='visible';const tw=tip.offsetWidth,th=tip.offsetHeight;tip.style.left=Math.max(4,Math.min(mx+14,cw-tw-4))+'px';tip.style.top=Math.max(4,Math.min(my-10,ch-th-4))+'px'}
+const hideTip=()=>{tip.style.visibility='hidden'};
+function updInfo(){if(focus==null){info.textContent=DEF;return}const n=N[focus],k=Math.min(topN,n.fl.length);info.textContent=n.l+': Top '+k+' von '+n.fl.length+' Verbindungen nach Volumen (in + out, 24 h). Klick ins Leere oder „Übersicht“ zeigt wieder alles.'}
+function setFocus(i){focus=i;rebuild();if(i!=null)fitFocus();else fitAll(false);updInfo()}
+function overlay(){oc.setTransform(dpr,0,0,dpr,0,0);oc.clearRect(0,0,cw,ch);oc.font='11px '+FONT;oc.textAlign='center';oc.textBaseline='top';const placed=[];
+const fits=(x,y,w,h)=>{if(x<2||y<2||x+w>cw-2||y+h>ch-22)return false;for(const r of placed)if(x<r[0]+r[2]&&x+w>r[0]&&y<r[1]+r[3]&&y+h>r[1])return false;placed.push([x,y,w,h]);return true};
+ZONES.forEach(Z=>{const extra=(Z.crit?Z.crit+' kritisch':'')+(Z.crit&&Z.off?' · ':'')+(Z.off?Z.off+' gestört':'');const w=Math.max(oc.measureText(Z.l).width,extra?oc.measureText(extra).width:0),hh=extra?28:14;let p=toS(Z.x,Z.y+Z.r*.92),y=p.y-30;if(!fits(p.x-w/2,y,w,hh)){p=toS(Z.x,Z.y-Z.r*.92);y=p.y+4;if(!fits(p.x-w/2,y,w,hh))return}oc.fillStyle='rgba(255,255,255,'+(focus!=null?.28:.55)+')';oc.fillText(Z.l,p.x,y);if(extra){oc.fillStyle='rgba(255,120,110,'+(focus!=null?.35:.85)+')';oc.fillText(extra,p.x,y+14)}});
+let C=[];if(focus!=null){const fN=N[focus];C.push([fN,fN.l]);N[focus].fl.slice(0,topN).forEach(i=>{const f=F[i],p=N[f.a===focus?f.b:f.a];C.push([p,p.l+' · '+fmt2(f.v)])});if(lit.has(GW.i)&&GW.i!==focus)C.push([GW,GW.l])}
+else{for(const n of N){const p=toS(n.x,n.y);if(p.x<-20||p.y<-20||p.x>cw+20||p.y>ch+20)continue;const rc=(1+n.lum*.9)*SS;if(rc>=4.4||n===hover||n===GW)C.push([n,n.l])}C.sort((a,b)=>(b[0]===hover)-(a[0]===hover)||(b[0]===GW)-(a[0]===GW)||b[0].lum-a[0].lum);C=C.slice(0,70)}
+C.forEach(([n,t])=>{oc.font='11px '+FONT;const p=toS(n.x,n.y),rc=(1+n.lum*.9)*SS,w=oc.measureText(t).width,y=p.y+Math.max(rc*1.6,n.man?10:6)+3;if(fits(p.x-w/2,y,w,13)){oc.fillStyle='rgba(255,255,255,.85)';oc.fillText(t,p.x,y);icons(n,p.x,y+17,fits)}})}
+function rr(x,y,w,h,r){oc.beginPath();oc.moveTo(x+r,y);oc.arcTo(x+w,y,x+w,y+h,r);oc.arcTo(x+w,y+h,x,y+h,r);oc.arcTo(x,y+h,x,y,r);oc.arcTo(x,y,x+w,y,r);oc.closePath()}
+function tile(k,x,y,sz,cnt){const d=SW[k];if(!d)return;oc.fillStyle='rgba(10,12,22,.88)';rr(x,y,sz,sz,sz*.24);oc.fill();oc.strokeStyle=d[2];oc.lineWidth=1;oc.stroke();oc.fillStyle=d[2];oc.textBaseline='middle';oc.font='500 '+Math.round(sz*(d[0].length>2?.36:.44))+'px '+FONT;oc.fillText(d[0],x+sz/2,y+sz/2+.5);oc.textBaseline='top';if(cnt>1){oc.font='11px '+FONT;oc.fillStyle='rgba(255,255,255,.7)';oc.fillText('×'+cnt,x+sz/2,y+sz+2)}}
+function icons(n,cx,y,fits){if(!n.sw)return;const host=n.kind==='pve';let row;if(host){if(ZZ<1.2)return;row=n.sw.map(x=>({k:x.k})).concat(n.agg.filter(a=>a[0]!=='nvidia').slice(0,4).map(([k,c])=>({k,n:c})))}else{if(ZZ<2.6)return;row=n.sw}
+const sz=Math.round(Math.max(20,Math.min(32,8+ZZ*3))),g=4,rw=row.length*sz+(row.length-1)*g,showC=!host&&ZZ>=4.5,dk=row.find(x=>x.c),csz=Math.round(sz*.75),ctw=dk?dk.c.length*csz+(dk.c.length-1)*3:0,hh=sz+(host?15:0)+(showC&&dk?csz+10:0),ww=Math.max(rw,ctw);
+if(!fits(cx-ww/2,y,ww,hh))return;
+row.forEach((x,i)=>{const tx=cx-rw/2+i*(sz+g);tile(x.k,tx,y,sz,x.n||0);if(showC&&x.c){const x0=tx+sz/2-ctw/2,yc=y+sz+8;oc.strokeStyle='rgba(255,255,255,.35)';oc.lineWidth=1;oc.beginPath();oc.moveTo(tx+sz/2,y+sz);oc.lineTo(tx+sz/2,yc);oc.stroke();x.c.forEach((c,j)=>tile(c.k,x0+j*(csz+3),yc,csz,0))}})}
+const U=(P,n,...v)=>{const l=P.u[n];if(l!=null)gl['uniform'+v.length+'f'](l,...v)};
+function camU(P,t,lod,spk){U(P,'uCam',cam.x,cam.y);U(P,'uScale',cam.s*dpr);U(P,'uRes',W,H);U(P,'uLod',lod);U(P,'uDpr',dpr);U(P,'uTime',t);U(P,'uSS',SS);U(P,'uSpk',spk)}
+const ss=(a,b,x)=>{const t=Math.max(0,Math.min(1,(x-a)/(b-a)));return t*t*(3-2*t)};
+let last=performance.now(),fps=60,hudT=0,draws=0;const t0=performance.now();
+function frame(now){const dt=Math.min(.1,Math.max(.001,(now-last)/1000));last=now;fps=fps*.93+(1/dt)*.07;
+const k=1-Math.exp(-dt*7),px=cam.x,py=cam.y,ps=cam.s;cam.x+=(tgt.x-cam.x)*k;cam.y+=(tgt.y-cam.y)*k;cam.s=Math.exp(Math.log(cam.s)+(Math.log(tgt.s)-Math.log(cam.s))*k);
+if(Math.abs(cam.x-px)*cam.s>.05||Math.abs(cam.y-py)*cam.s>.05||Math.abs(cam.s/ps-1)>1e-4)dirty=true;
+const t=(now-t0)/1000,lod=focus!=null?2:ss(s0*1.5,s0*3.2,cam.s);ZZ=SP*cam.s/12;SS=Math.max(.35,Math.min(3,ZZ));const spk=.25+.75*ss(.55,1.1,SS);
+const ZU=new Float32Array(24),ZC=new Float32Array(24);ZONES.forEach((Z,i)=>{ZU.set([Z.x,Z.y,Z.r],i*3);ZC.set(Z.c.map(c=>c*(i===7?.5:1)),i*3)});
+gl.bindFramebuffer(gl.FRAMEBUFFER,scene.f);gl.viewport(0,0,W,H);gl.disable(gl.BLEND);gl.bindVertexArray(EMPTY);gl.useProgram(Pneb.p);camU(Pneb,t,lod,spk);gl.uniform3fv(Pneb.u.uZ,ZU);gl.uniform3fv(Pneb.u.uZC,ZC);gl.uniform1i(Pneb.u.uN,8);U(Pneb,'uNeb',.16);gl.drawArrays(gl.TRIANGLES,0,3);draws=1;
+gl.enable(gl.BLEND);gl.blendFunc(gl.ONE,gl.ONE);
+gl.useProgram(Pbeam.p);camU(Pbeam,t,lod,spk);gl.bindVertexArray(VB.v);if(VB.n){gl.drawArraysInstanced(gl.TRIANGLE_STRIP,0,4,VB.n);draws++}
+gl.useProgram(Ppart.p);camU(Ppart,t,lod,spk);gl.bindVertexArray(VP.v);if(VP.n){gl.drawArraysInstanced(gl.TRIANGLE_STRIP,0,4,VP.n);draws++}
+gl.useProgram(Pstar.p);camU(Pstar,t,lod,spk);gl.bindVertexArray(VS.v);gl.drawArraysInstanced(gl.TRIANGLE_STRIP,0,4,VS.n);draws++;
+gl.bindVertexArray(EMPTY);gl.activeTexture(gl.TEXTURE0);
+if(bloomOn&&mips.length){gl.disable(gl.BLEND);gl.useProgram(Ppre.p);gl.bindFramebuffer(gl.FRAMEBUFFER,mips[0].f);gl.viewport(0,0,mips[0].w,mips[0].h);gl.bindTexture(gl.TEXTURE_2D,scene.t);gl.uniform1i(Ppre.u.uT,0);U(Ppre,'uTx',1/W,1/H);U(Ppre,'uThr',.45);gl.drawArrays(gl.TRIANGLES,0,3);draws++;
+gl.useProgram(Pdown.p);gl.uniform1i(Pdown.u.uT,0);for(let i=1;i<mips.length;i++){gl.bindFramebuffer(gl.FRAMEBUFFER,mips[i].f);gl.viewport(0,0,mips[i].w,mips[i].h);gl.bindTexture(gl.TEXTURE_2D,mips[i-1].t);U(Pdown,'uTx',1/mips[i-1].w,1/mips[i-1].h);gl.drawArrays(gl.TRIANGLES,0,3);draws++}
+gl.enable(gl.BLEND);gl.blendFunc(gl.ONE,gl.ONE);gl.useProgram(Pup.p);gl.uniform1i(Pup.u.uT,0);U(Pup,'uW',.9);for(let i=mips.length-2;i>=0;i--){gl.bindFramebuffer(gl.FRAMEBUFFER,mips[i].f);gl.viewport(0,0,mips[i].w,mips[i].h);gl.bindTexture(gl.TEXTURE_2D,mips[i+1].t);U(Pup,'uTx',1/mips[i+1].w,1/mips[i+1].h);gl.drawArrays(gl.TRIANGLES,0,3);draws++}}
+gl.disable(gl.BLEND);gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,W,H);gl.useProgram(Pcomp.p);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,scene.t);gl.uniform1i(Pcomp.u.uS,0);gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,mips[0]?mips[0].t:scene.t);gl.uniform1i(Pcomp.u.uB,1);U(Pcomp,'uBl',bloomOn?.38:0);U(Pcomp,'uExp',1.0);gl.drawArrays(gl.TRIANGLES,0,3);draws++;gl.activeTexture(gl.TEXTURE0);
+if(dirty){overlay();dirty=false}
+if(now-hudT>500){hudT=now;hud.textContent='WebGL2 · '+(bloomOn?(HDR?'HDR-Bloom':'LDR-Bloom'):'ohne Bloom')+' · '+nf.format(N.length)+' Knoten ('+nf.format(managed)+' verwaltet) · '+nf.format(F.length)+' Flows · '+nf.format(VB.n)+' Strahlen · '+nf.format(VP.n)+' Partikel · '+draws+' Draw-Calls · '+Math.round(fps)+' fps'}
+requestAnimationFrame(frame)}
+let down=null;const rel=e=>{const b=cv.getBoundingClientRect();return[e.clientX-b.left,e.clientY-b.top]};
+cv.addEventListener('wheel',e=>{e.preventDefault();const[mx,my]=rel(e),wx=tgt.x+(mx-cw/2)/tgt.s,wy=tgt.y-(my-ch/2)/tgt.s,dy=e.deltaY*(e.deltaMode===1?16:1),ns=Math.min(s0*40,Math.max(s0*.6,tgt.s*Math.exp(-dy*.0016)));tgt.s=ns;tgt.x=wx-(mx-cw/2)/ns;tgt.y=wy+(my-ch/2)/ns;hideTip()},{passive:false});
+cv.addEventListener('pointerdown',e=>{down={x:e.clientX,y:e.clientY,tx:tgt.x,ty:tgt.y,drag:false};try{cv.setPointerCapture(e.pointerId)}catch(_){}});
+cv.addEventListener('pointermove',e=>{const[mx,my]=rel(e);if(down){const dx=e.clientX-down.x,dy=e.clientY-down.y;if(!down.drag&&Math.hypot(dx,dy)>4){down.drag=true;hideTip();cv.style.cursor='grabbing'}if(down.drag){tgt.x=down.tx-dx/tgt.s;tgt.y=down.ty+dy/tgt.s;cam.x=tgt.x;cam.y=tgt.y;dirty=true;return}}const h=pick(mx,my);if(h!==hover){hover=h;dirty=true}if(h)showTip(h,mx,my);else hideTip();cv.style.cursor=h?'pointer':'grab'});
+cv.addEventListener('pointerup',e=>{if(down&&!down.drag){const[mx,my]=rel(e);const h=pick(mx,my);setFocus(h?h.i:null)}down=null;cv.style.cursor='grab'});
+cv.addEventListener('pointerleave',()=>{hover=null;hideTip();dirty=true});
+cv.addEventListener('webglcontextlost',e=>{e.preventDefault();info.textContent='WebGL-Kontext verloren. In NOS würde jetzt der Canvas-2D-Renderer übernehmen.'});
+$('topn').addEventListener('input',e=>{topN=+e.target.value;$('nOut').textContent=topN;rebuild();updInfo()});
+$('bloom').addEventListener('change',e=>{bloomOn=e.target.checked});
+$('reset').addEventListener('click',()=>setFocus(null));
+$('hosts').addEventListener('change',e=>{focus=null;hover=null;build(+e.target.value);resize();rebuild();fitAll(true);updInfo()});
+build(100);resize();rebuild();fitAll(true);updInfo();
+if(window.ResizeObserver)new ResizeObserver(()=>{const w=wrap.clientWidth;if(Math.round(w*dpr)!==W){resize();if(focus==null)fitAll(true)}}).observe(wrap);
+requestAnimationFrame(frame);
+})();
+</script>
+
+</main>
+</body>
+</html>
