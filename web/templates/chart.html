@@ -29,6 +29,7 @@
           {{template "chart_lines" .Lines}}
         </summary>
         <div class="chart__children">
+          {{if $.DeployHere .RemoteID}}<p class="chart__deploy"><a class="button button--small" href="{{.DeployURL}}">Deploy here</a></p>{{end}}
           <p class="chart__pveupd chart__pveupd--node">{{template "chart_updates" .}}</p>
           <ul class="chart__list">
             {{range .Guests}}

@@ -370,9 +370,20 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		Audit:          audit,
 		Repin:          exec,
 		Enroll:         exec,
-		SecurityKeys:   securityKeys,
-		TOTPStatus:     totpStatus,
-		Log:            log,
+		// Deployments (ADR 0008 section 6, PV-08): provisioning on the
+		// executor, enrollment through the PV-06 join flow, the static
+		// address from the IPAM. The staged plan needs the batch planner
+		// (ADR 0007), which this server does not mount yet: it has no
+		// source for the executor's credential versions
+		// (executions.BatchOptions.CredentialVersion), so every proposal
+		// would fail. Without DeployBatches a run with bootstrap modules or
+		// runbooks ends at "joined" (enrolled, plan not run) and says so.
+		Deploy:       exec,
+		DeployJoin:   &pveinventory.GuestJoinFlow{Store: pveStore, Executor: exec},
+		DeployIPAM:   ipamStore,
+		SecurityKeys: securityKeys,
+		TOTPStatus:   totpStatus,
+		Log:          log,
 	})
 	if err != nil {
 		return err

@@ -1,5 +1,6 @@
 {{define "content"}}
 <h1>Deploy Profiles</h1>
+{{template "deploy_tabs" .}}
 <section class="panel" aria-label="Deploy profiles">
   <p class="hint">A deploy profile is a secret-free preset for provisioning a guest: size (S/M/L/XL or a bounded custom
      size), image, network and DNS, the bootstrap modules to run, the runbooks it references and the vault entries it needs

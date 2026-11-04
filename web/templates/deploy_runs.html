@@ -1,0 +1,29 @@
+{{define "content"}}
+<h1>Deployment runs</h1>
+{{template "deploy_tabs" .}}
+<section class="panel" aria-label="Deployment runs">
+  <p class="hint">Your deployments of the last 24 hours, newest first. A run is kept on this server while it is open; runs are not kept across a server restart (the executor's job list and the PVE task log stay authoritative).</p>
+  <div class="actions"><a class="button" href="/deployments/new">New deployment</a></div>
+  {{if .DeployRuns}}
+  <div class="table-wrap">
+  <table class="inventory">
+    <thead><tr><th>Guest</th><th>Target</th><th>VMID</th><th>Risk</th><th>State</th><th>Proposed</th></tr></thead>
+    <tbody>
+      {{range .DeployRuns}}
+      <tr>
+        <td><a href="/deployments/{{.ID}}">{{.Name}}</a></td>
+        <td><span class="mono">{{.Remote}}</span> / <span class="mono">{{.Node}}</span></td>
+        <td class="mono">{{.VMID}}</td>
+        <td>{{.Risk}}</td>
+        <td><span class="badge {{.StateClass}}">{{.State}}</span></td>
+        <td>{{timeTag .Created}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p>No deployments yet.</p>
+  {{end}}
+</section>
+{{end}}

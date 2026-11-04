@@ -117,6 +117,15 @@ type BatchOptions struct {
 	// Containers resolves container incarnations. Nil uses the latest
 	// docker.inspect results in the execution history (InspectBindings).
 	Containers ContainerBindings
+	// Actions resolves module and runbook actions at an exact version
+	// (Service.Action). Nil limits batches to the built-in actions.
+	Actions ActionResolver
+}
+
+// ActionResolver resolves a module or runbook action at an exact version.
+// Service satisfies it.
+type ActionResolver interface {
+	Action(ctx context.Context, id, version string) (actions.Action, bool, error)
 }
 
 // Batches plans, proposes and follows batches. It is safe for concurrent
@@ -129,6 +138,7 @@ type Batches struct {
 	now        func() time.Time
 	credVer    func(ctx context.Context, ref string) (uint64, error)
 	containers ContainerBindings
+	actions    ActionResolver
 }
 
 // NewBatches returns a batch planner.
@@ -136,7 +146,7 @@ func NewBatches(o BatchOptions) (*Batches, error) {
 	if o.Exec == nil || o.DB == nil || o.Hosts == nil {
 		return nil, errors.New("batches: executor, database and inventory are required")
 	}
-	b := &Batches{exec: o.Exec, db: o.DB, hosts: o.Hosts, log: o.Log, now: o.Now, credVer: o.CredentialVersion, containers: o.Containers}
+	b := &Batches{exec: o.Exec, db: o.DB, hosts: o.Hosts, log: o.Log, now: o.Now, credVer: o.CredentialVersion, containers: o.Containers, actions: o.Actions}
 	if b.log == nil {
 		b.log = slog.New(slog.DiscardHandler)
 	}
@@ -152,8 +162,13 @@ func NewBatches(o BatchOptions) (*Batches, error) {
 // BatchMemberSpec is one requested member: one action on one host.
 type BatchMemberSpec struct {
 	ActionID string
-	HostID   string
-	Params   map[string]string
+	// Version is the exact module or runbook version (for example "1.0.0",
+	// or "3.0.0" for runbook version 3). Empty selects the built-in action;
+	// a module or runbook action always needs it, so the frozen plan never
+	// binds "whatever is latest".
+	Version string
+	HostID  string
+	Params  map[string]string
 }
 
 // BatchStageSpec is one requested stage. Thresholds are absolute counts;
@@ -295,9 +310,9 @@ func (b *Batches) plan(ctx context.Context, req BatchRequest) (canonical.Batch, 
 // planMember resolves one member against the inventory and the executor's
 // pins. n is the member's 1-based plan position.
 func (b *Batches) planMember(ctx context.Context, spec BatchMemberSpec, pinOf map[string]*pb.HostKeyPin, versions map[string]uint64, stage, n int) (plannedMember, error) {
-	a, ok := actions.Lookup(spec.ActionID)
-	if !ok {
-		return plannedMember{}, batchInput("member %d: unknown action %q", n, spec.ActionID)
+	a, err := b.lookupAction(ctx, spec, n)
+	if err != nil {
+		return plannedMember{}, err
 	}
 	if why, excluded := batchExcludedActions[a.ID]; excluded {
 		return plannedMember{}, batchInput("member %d: %s", n, why)
@@ -372,6 +387,31 @@ func (b *Batches) planMember(ctx context.Context, spec BatchMemberSpec, pinOf ma
 		m.Container = &c
 	}
 	return plannedMember{stage: stage, action: a, params: paramsJSON, member: m, pin: p}, nil
+}
+
+// lookupAction resolves a member's action: a built-in without a version,
+// or a module or runbook action at exactly spec.Version.
+func (b *Batches) lookupAction(ctx context.Context, spec BatchMemberSpec, n int) (actions.Action, error) {
+	if a, ok := actions.Lookup(spec.ActionID); ok {
+		if spec.Version != "" && spec.Version != a.Version {
+			return actions.Action{}, batchInput("member %d: %q is a built-in action; it has no version %q", n, spec.ActionID, spec.Version)
+		}
+		return a, nil
+	}
+	if b.actions == nil {
+		return actions.Action{}, batchInput("member %d: unknown action %q", n, spec.ActionID)
+	}
+	if spec.Version == "" {
+		return actions.Action{}, batchInput("member %d: name the exact version of %q", n, spec.ActionID)
+	}
+	a, ok, err := b.actions.Action(ctx, spec.ActionID, spec.Version)
+	if err != nil {
+		return actions.Action{}, fmt.Errorf("member %d: resolve %s %s: %w", n, spec.ActionID, spec.Version, err)
+	}
+	if !ok || a.ID != spec.ActionID || a.Version != spec.Version {
+		return actions.Action{}, batchInput("member %d: unknown action %q at version %q", n, spec.ActionID, spec.Version)
+	}
+	return a, nil
 }
 
 // BatchCreated is the result of ProposeBatch.
