@@ -1110,16 +1110,16 @@ func TestDispatchNodeRebootStepRefusesMalformedSteps(t *testing.T) {
 
 func TestDecodeHAOption(t *testing.T) {
 	for in, want := range map[string]string{
-		`"shutdown_policy=migrate"`:              pveHAPolicyMigrate,
-		`{"shutdown_policy":"migrate"}`:          pveHAPolicyMigrate,
-		`{"shutdown_policy":"freeze","other":1}`: "freeze",
-		`{}`:                                     pveHAPolicyConditional,
-		`{"shutdown_policy":"bogus"}`:            "",
-		`{"shutdown_policy":1}`:                  "",
-		`{"shutdown_policy":"migrate,x=y"}`:      "",
-		`null`:                                   "",
-		`["shutdown_policy=migrate"]`:            "",
-		`"` + strings.Repeat("a", 300) + `"`:     "",
+		`"shutdown_policy=migrate"`:                            pveHAPolicyMigrate,
+		`{"shutdown_policy":"migrate"}`:                        pveHAPolicyMigrate,
+		`{"shutdown_policy":"freeze","other":1}`:               "freeze",
+		`{}`:                                                   pveHAPolicyConditional,
+		`{"shutdown_policy":"bogus"}`:                          "",
+		`{"shutdown_policy":1}`:                                "",
+		`{"shutdown_policy":"migrate,x=y"}`:                    "",
+		`null`:                                                 "",
+		`["shutdown_policy=migrate"]`:                          "",
+		`"` + strings.Repeat("a", 300) + `"`:                   "",
 		`{"shutdown_policy":"migrate,shutdown_policy=freeze"}`: "",
 	} {
 		got, err := decodeHAOption(json.RawMessage(in))
