@@ -1074,9 +1074,8 @@ func TestClockReturnKeepsHostSequence(t *testing.T) {
 }
 
 // TestSeqRunsBounded pins the memory bound of a host's report sequence:
-// past maxSeqRuns the runs with the shortest gaps merge, which keeps every
-// accepted report refused and keeps the long gap before a clock excursion
-// open.
+// past maxSeqRuns the oldest normal runs merge, which keeps every accepted
+// report refused and keeps the gap before a clock excursion open.
 func TestSeqRunsBounded(t *testing.T) {
 	horizon := t0
 	var runs, sent []timeRun
@@ -1085,7 +1084,7 @@ func TestSeqRunsBounded(t *testing.T) {
 		if !seqAccepts(runs, from, to, horizon) {
 			t.Fatalf("report %v..%v refused", from, to)
 		}
-		runs = addRun(runs, from, to)
+		runs = addRun(runs, from, to, horizon)
 		sent = append(sent, timeRun{from, to})
 	}
 	// Reports with gaps, then contiguous ones that merge into one run.
@@ -1112,6 +1111,170 @@ func TestSeqRunsBounded(t *testing.T) {
 	// The present before the excursion runs stays open.
 	if !seqAccepts(runs, t0.Add(-time.Minute), t0, horizon) {
 		t.Fatal("report in the present refused")
+	}
+}
+
+// TestContiguousExcursionReportRefusesOnlyItsSpan sends, while the clock
+// runs ahead by less than MaxInterval, a report that continues the host's
+// sequence. After the clock returns, reports overlapping that report's own
+// span are refused (it starts before the horizon and ends after it), but
+// the host is not locked out beyond it: once the clock passes the report
+// the sequence goes on, and every report accepted before stays refused.
+func TestContiguousExcursionReportRefusesOnlyItsSpan(t *testing.T) {
+	A := t0.Add(30 * time.Minute)
+	cur := A
+	a := NewAggregator(DefaultLimits(), func() time.Time { return cur })
+	obs := Observation{Key: key22, BytesAB: 1, ServerReported: true}
+	var sent []Report
+	ingest := func(from, to time.Time) error {
+		r := report("h", from, to, obs)
+		_, err := a.Ingest(r, ownOf(r))
+		if err == nil {
+			sent = append(sent, r)
+		}
+		return err
+	}
+	for _, r := range [][2]time.Duration{{-2 * time.Minute, -time.Minute}, {-time.Minute, 0}} {
+		if err := ingest(A.Add(r[0]), A.Add(r[1])); err != nil {
+			t.Fatalf("report before the jump: %v", err)
+		}
+	}
+	// The clock jumps 40 minutes ahead; the collector's next report
+	// continues the sequence.
+	cur = A.Add(40 * time.Minute)
+	if err := ingest(A, cur); err != nil {
+		t.Fatalf("contiguous report during the jump: %v", err)
+	}
+	// The clock returns. The collector restarts with a baseline and
+	// reports on; both lie inside the report sent during the jump, which
+	// starts before the horizon and ends after it.
+	cur = A.Add(2 * time.Minute)
+	if err := ingest(cur, cur); !errors.Is(err, ErrDuplicateReport) {
+		t.Fatalf("baseline inside the jumped report = %v, want ErrDuplicateReport", err)
+	}
+	cur = A.Add(3 * time.Minute)
+	if err := ingest(cur.Add(-time.Minute), cur); !errors.Is(err, ErrDuplicateReport) {
+		t.Fatalf("report overlapping the jumped report = %v, want ErrDuplicateReport", err)
+	}
+	// A report before the jump stays refused by the sequence.
+	if err := ingest(A.Add(-90*time.Second), A.Add(-30*time.Second)); !errors.Is(err, ErrDuplicateReport) {
+		t.Fatalf("report inside the sequence before the jump = %v, want ErrDuplicateReport", err)
+	}
+	// Once the clock passes the jumped report the host reports again.
+	end := A.Add(40 * time.Minute)
+	cur = end.Add(time.Minute)
+	if err := ingest(end, cur); err != nil {
+		t.Fatalf("report after the jumped report: %v", err)
+	}
+	cur = end.Add(2 * time.Minute)
+	if err := ingest(end.Add(time.Minute), cur); err != nil {
+		t.Fatalf("next report: %v", err)
+	}
+	for _, r := range sent {
+		if _, err := a.Ingest(r, ownOf(r)); !errors.Is(err, ErrDuplicateReport) {
+			t.Fatalf("replay of %v..%v = %v, want ErrDuplicateReport", r.From, r.To, err)
+		}
+	}
+}
+
+// TestSeqRunsMergeKeepsPresentOpenAfterClockReturn fills the bounded
+// report sequence of one host across a forward clock jump and a return so
+// that the shortest gap lies between the newest report after the return
+// and the run sent while the clock ran ahead. The bound must merge older
+// runs instead, so the host keeps reporting in the present; reports
+// overlapping the run from the jump are still refused, and the sequence
+// goes on after it once the clock passes it.
+func TestSeqRunsMergeKeepsPresentOpenAfterClockReturn(t *testing.T) {
+	A := t0.Add(30 * time.Minute)
+	cur := A
+	a := NewAggregator(DefaultLimits(), func() time.Time { return cur })
+	obs := Observation{Key: key22, BytesAB: 1, ServerReported: true}
+	var sent []Report
+	ingest := func(from, to time.Time) error {
+		r := report("h", from, to, obs)
+		_, err := a.Ingest(r, ownOf(r))
+		if err == nil {
+			sent = append(sent, r)
+		}
+		return err
+	}
+	// Three runs an hour apart (collector restarts with a baseline).
+	for i := 3; i >= 1; i-- {
+		cur = A.Add(-time.Duration(i) * time.Hour)
+		if err := ingest(cur.Add(-time.Minute), cur); err != nil {
+			t.Fatalf("report %d before the jump: %v", i, err)
+		}
+	}
+	// The clock jumps ahead and the collector reports from a baseline.
+	cur = A.Add(50 * time.Minute)
+	if err := ingest(A.Add(20*time.Minute), cur); err != nil {
+		t.Fatalf("report during the jump: %v", err)
+	}
+	// The clock returns; the first report after the return makes a fifth
+	// run, 15 minutes before the one from the jump.
+	cur = A.Add(5 * time.Minute)
+	if err := ingest(cur.Add(-time.Minute), cur); err != nil {
+		t.Fatalf("first report after the return: %v", err)
+	}
+	// The host goes on reporting in the present.
+	for i := range 5 {
+		from := cur
+		cur = cur.Add(2 * time.Minute)
+		if err := ingest(from, cur); err != nil {
+			t.Fatalf("report %d after the return: %v", i, err)
+		}
+	}
+	// The clock reaches the run from the jump: a report overlapping it is
+	// refused, by the overlap with the excursion run (it starts before the
+	// horizon and ends after it), not by the order of the sequence.
+	cur = A.Add(25 * time.Minute)
+	if err := ingest(A.Add(15*time.Minute), cur); !errors.Is(err, ErrDuplicateReport) {
+		t.Fatalf("report overlapping the jumped run = %v, want ErrDuplicateReport", err)
+	}
+	// After the jumped run the sequence goes on.
+	cur = A.Add(52 * time.Minute)
+	if err := ingest(A.Add(50*time.Minute), cur); err != nil {
+		t.Fatalf("report after the jumped run: %v", err)
+	}
+	for _, r := range sent {
+		if _, err := a.Ingest(r, ownOf(r)); !errors.Is(err, ErrDuplicateReport) {
+			t.Fatalf("replay of %v..%v = %v, want ErrDuplicateReport", r.From, r.To, err)
+		}
+	}
+}
+
+// TestAddRunKeepsKindsApart pins that addRun never joins a normal run
+// (ending at or before horizon) with an excursion run (ending after it),
+// neither when they touch nor at the maxSeqRuns bound, so no merge covers
+// the present with an excursion run.
+func TestAddRunKeepsKindsApart(t *testing.T) {
+	horizon := t0
+	m := func(d time.Duration) time.Time { return t0.Add(d * time.Minute) }
+	// A normal report touching the start of an excursion run.
+	runs := []timeRun{{m(-5), m(30)}}
+	runs = addRun(runs, m(-10), m(-5), horizon)
+	if len(runs) != 2 || !runs[0].to.Equal(m(-5)) {
+		t.Fatalf("touching runs of different kinds merged: %v", runs)
+	}
+	// At the bound with one normal run, the two excursion runs with the
+	// shortest gap merge (the oldest on a tie); the normal run and the
+	// present before the excursion runs stay as they were.
+	runs = []timeRun{{m(-20), m(-19)}, {m(10), m(11)}, {m(20), m(21)}, {m(30), m(31)}}
+	runs = addRun(runs, m(40), m(41), horizon)
+	want := []timeRun{{m(-20), m(-19)}, {m(10), m(21)}, {m(30), m(31)}, {m(40), m(41)}}
+	if !slices.Equal(runs, want) {
+		t.Fatalf("runs = %v, want %v", runs, want)
+	}
+	if !seqAccepts(runs, m(-1), m(0), horizon) {
+		t.Fatalf("report in the present refused: %v", runs)
+	}
+	// With two normal runs and three excursion runs the oldest normal
+	// runs merge, even though an excursion gap is shorter.
+	runs = []timeRun{{m(-120), m(-119)}, {m(-60), m(-59)}, {m(1), m(2)}, {m(3), m(4)}}
+	runs = addRun(runs, m(-2), m(-1), horizon)
+	want = []timeRun{{m(-120), m(-59)}, {m(-2), m(-1)}, {m(1), m(2)}, {m(3), m(4)}}
+	if !slices.Equal(runs, want) {
+		t.Fatalf("runs = %v, want %v", runs, want)
 	}
 }
 

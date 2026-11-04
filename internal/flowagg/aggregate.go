@@ -152,6 +152,13 @@ func (rs *reporterState) latest() time.Time {
 // tier.
 type timeRun struct{ from, to time.Time }
 
+// excursion reports the kind of the run at ingest horizon (now plus
+// Limits.MaxClockSkew): an excursion run ends after horizon, so it was
+// accepted while the clock ran ahead of now; a normal run ends at or
+// before horizon. The kind is taken at every ingest rather than stored,
+// as an excursion run turns normal once the clock passes it.
+func (r timeRun) excursion(horizon time.Time) bool { return r.to.After(horizon) }
+
 // maxSeqRuns bounds the runs kept per host and tier. Contiguous reports
 // keep one run; a gap in the reports (a collector that started over with
 // a baseline) or a clock excursion the host reported in adds one (see
@@ -176,7 +183,7 @@ const maxSeqRuns = 4
 func seqAccepts(runs []timeRun, from, to, horizon time.Time) bool {
 	var last time.Time
 	for _, s := range runs {
-		if !s.to.After(horizon) {
+		if !s.excursion(horizon) {
 			last = s.to
 			continue
 		}
@@ -191,18 +198,38 @@ func seqAccepts(runs []timeRun, from, to, horizon time.Time) bool {
 	return last.IsZero() || (!from.Before(last) && to.After(last))
 }
 
-// addRun adds the accepted report from..to, which seqAccepts allowed, and
-// returns the updated runs; runs that touch are merged. Gaps between runs
-// are kept, as the clock may return into one after an excursion. Past
-// maxSeqRuns the two runs with the shortest gap between them are merged
-// (the oldest such pair on a tie), which only refuses more reports in
-// that gap and keeps the long gap a clock excursion leaves open.
-func addRun(runs []timeRun, from, to time.Time) []timeRun {
+// addRun adds the accepted report from..to, which seqAccepts allowed at
+// horizon, and returns the updated runs. Runs that touch are merged only
+// when they are of the same kind at horizon (see timeRun.excursion): a
+// normal run joined with an excursion run would become an excursion run
+// reaching back into the present, and after the clock returned it would
+// refuse every report there until the clock passes its end. Gaps between
+// runs are kept, as the clock may return into one after an excursion.
+//
+// Past maxSeqRuns two neighbouring runs of the same kind are merged, never
+// a normal run with an excursion run:
+//
+//   - With at least two normal runs, the two oldest merge. That only
+//     refuses reports in the gap between them, which lies before the
+//     newest normal run, where seqAccepts refuses reports anyway; the
+//     oldest gap is the one a later backwards clock step is least likely
+//     to reach again.
+//   - Otherwise (at most one normal run, so at least maxSeqRuns excursion
+//     runs) the two excursion runs with the shortest gap between them
+//     merge (the oldest such pair on a tie). The gap lies after horizon,
+//     so no report the host can send now is refused; once the clock
+//     reaches the gap, reports in it are refused until the clock passes
+//     the merged run. An excursion run is never dropped instead: an exact
+//     replay of its reports would be accepted once the clock reaches them.
+//
+// The runs are sorted and disjoint, so their ends increase and the normal
+// runs are a prefix.
+func addRun(runs []timeRun, from, to, horizon time.Time) []timeRun {
 	i, _ := slices.BinarySearchFunc(runs, from, func(r timeRun, t time.Time) int { return r.from.Compare(t) })
 	runs = slices.Insert(runs, i, timeRun{from, to})
 	out := runs[:0]
 	for _, r := range runs {
-		if n := len(out); n > 0 && !r.from.After(out[n-1].to) {
+		if n := len(out); n > 0 && !r.from.After(out[n-1].to) && r.excursion(horizon) == out[n-1].excursion(horizon) {
 			if r.to.After(out[n-1].to) {
 				out[n-1].to = r.to
 			}
@@ -211,10 +238,17 @@ func addRun(runs []timeRun, from, to time.Time) []timeRun {
 		out = append(out, r)
 	}
 	for len(out) > maxSeqRuns {
+		normal := 0
+		for normal < len(out) && !out[normal].excursion(horizon) {
+			normal++
+		}
 		j := 0
-		for k := 1; k+1 < len(out); k++ {
-			if out[k+1].from.Sub(out[k].to) < out[j+1].from.Sub(out[j].to) {
-				j = k
+		if normal < 2 {
+			j = normal
+			for k := normal + 1; k+1 < len(out); k++ {
+				if out[k+1].from.Sub(out[k].to) < out[j+1].from.Sub(out[j].to) {
+					j = k
+				}
 			}
 		}
 		out[j].to = out[j+1].to
@@ -534,7 +568,7 @@ func (a *Aggregator) Ingest(r Report, own []netip.Addr) (IngestResult, error) {
 		rs = &reporterState{idx: a.nextIdx}
 		a.reporters[r.Host] = rs
 	}
-	rs.seq[ti] = addRun(rs.seq[ti], r.From, r.To)
+	rs.seq[ti] = addRun(rs.seq[ti], r.From, r.To, horizon)
 
 	var res IngestResult
 	limit := max(cutoff.Unix(), floor)
