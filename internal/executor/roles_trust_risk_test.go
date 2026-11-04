@@ -31,12 +31,7 @@ func openTrustTestDB(t *testing.T) *executordb.DB {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	db, err := executordb.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	return db
+	return openTestDB(t, dir)
 }
 
 const (

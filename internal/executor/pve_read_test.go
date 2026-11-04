@@ -25,7 +25,6 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/vault"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
 )
 
@@ -140,9 +139,9 @@ func newPveReadEnv(t *testing.T, kind pvecontract.Kind) *pveReadEnv {
 	if err := e.svc.auth.ResumeReadDispatch(); err != nil {
 		t.Fatal(err)
 	}
-	e.svc.SetVaultParams(vault.MinParams)
+	e.svc.SetVaultParams(testVaultParams)
 	pass := []byte(strings.Repeat("correct-horse-battery-staple-", 4))
-	if err := e.svc.vault.Init(pass, vault.MinParams, "test"); err != nil {
+	if err := e.svc.vault.Init(pass, testVaultParams, "test"); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.svc.vault.Unlock(pass); err != nil {
