@@ -75,7 +75,10 @@ func (s *Store) ReconcileIdentities(ctx context.Context, current map[string]Iden
 	for host, own := range current {
 		addrs, err := validateIdentity(own)
 		if err != nil {
-			return 0, fmt.Errorf("host %s: %w", host, err)
+			// A malformed record backs nothing: the host is treated
+			// as having no records (fail closed), and the other hosts
+			// are still reconciled.
+			continue
 		}
 		records[host] = record{macs: own.MACs, addrs: addrs}
 	}

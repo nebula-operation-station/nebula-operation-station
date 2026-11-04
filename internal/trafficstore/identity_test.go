@@ -399,12 +399,24 @@ func TestReconcileReleasesSilentOwner(t *testing.T) {
 	if g := mustEndpoint(t, s, macID); g.Owner != "" {
 		t.Errorf("owner = %q after reconcile, want none until host-a reports", g.Owner)
 	}
-	// An invalid identity is refused before anything changes.
-	if _, err := s.ReconcileIdentities(ctx, map[string]Identity{"host-c": {MACs: []string{"bad"}}}); !errors.Is(err, ErrInvalidEndpoint) {
-		t.Errorf("reconcile with invalid identity: err = %v, want ErrInvalidEndpoint", err)
+	// A malformed record backs nothing (fail closed) and does not stop
+	// the reconcile of other hosts: host-c's ownership is released, and
+	// the valid record of host-d keeps its endpoint.
+	const macD = "00:11:22:33:44:0d"
+	mustUpsert(t, s, testEndpoint("10.0.3.1", macD, "host-d"), hostIdentity(macD, "10.0.3.1"))
+	dID := mustLookup(t, s, macD, "").ID
+	n, err = s.ReconcileIdentities(ctx, map[string]Identity{
+		"host-c": {MACs: []string{"bad"}},
+		"host-d": hostIdentity(macD, "10.0.3.1"),
+	})
+	if err != nil || n != 1 {
+		t.Fatalf("reconcile with a malformed record = %d, %v, want 1 released", n, err)
 	}
-	if g := mustEndpoint(t, s, cID); g.Owner != "host-c" {
-		t.Errorf("host-c owner = %q after refused reconcile, want host-c", g.Owner)
+	if g := mustEndpoint(t, s, cID); g.Owner != "" {
+		t.Errorf("host-c owner = %q after its record turned malformed, want released", g.Owner)
+	}
+	if g := mustEndpoint(t, s, dID); g.Owner != "host-d" {
+		t.Errorf("host-d owner = %q, want host-d", g.Owner)
 	}
 	checkCounters(t, s, db)
 }
@@ -452,6 +464,34 @@ func TestReassignedAddressResolvesToNewHolder(t *testing.T) {
 	}
 	if g := mustEndpoint(t, s, aID); g.Owner != "host-a" || len(g.Addresses) != 0 {
 		t.Errorf("host-a endpoint = owner %q addresses %v, want host-a owning by MAC only", g.Owner, g.Addresses)
+	}
+	checkCounters(t, s, db)
+}
+
+func TestOwnerJoinReleasesOtherAttestations(t *testing.T) {
+	s, db, _ := newTestStore(t)
+	const macA, macB = "00:11:22:33:44:1a", "00:11:22:33:44:1b"
+
+	// host-a owns its MAC endpoint with 10.0.0.5; host-b already owns its
+	// own MAC endpoint with 10.0.0.9.
+	ownA := hostIdentity(macA, "10.0.0.1", "10.0.0.5")
+	a := testEndpoint("10.0.0.1", macA, "host-a")
+	a.Addresses = addrList("10.0.0.1", "10.0.0.5")
+	mustUpsert(t, s, a, ownA)
+	aID := mustLookup(t, s, macA, "").ID
+	mustUpsert(t, s, testEndpoint("10.0.0.9", macB, "host-b"), hostIdentity(macB, "10.0.0.9"))
+	bID := mustLookup(t, s, macB, "").ID
+
+	// 10.0.0.5 moves to host-b, which reports its existing endpoint (the
+	// join path, not a new endpoint): host-a's attestation is released.
+	b := testEndpoint("10.0.0.9", macB, "host-b")
+	b.Addresses = addrList("10.0.0.9", "10.0.0.5")
+	mustUpsert(t, s, b, hostIdentity(macB, "10.0.0.9", "10.0.0.5"))
+	if g := mustLookup(t, s, "", "10.0.0.5"); g.ID != bID || g.Owner != "host-b" {
+		t.Errorf("lookup 10.0.0.5 = %s owner %q, want host-b's %s", g.ID, g.Owner, bID)
+	}
+	if g := mustEndpoint(t, s, aID); g.Owner != "host-a" || !slices.Equal(g.Addresses, addrList("10.0.0.1")) {
+		t.Errorf("host-a endpoint = owner %q addresses %v, want host-a with 10.0.0.1 only", g.Owner, g.Addresses)
 	}
 	checkCounters(t, s, db)
 }
