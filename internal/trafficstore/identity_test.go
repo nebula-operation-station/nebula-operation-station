@@ -495,3 +495,130 @@ func TestOwnerJoinReleasesOtherAttestations(t *testing.T) {
 	}
 	checkCounters(t, s, db)
 }
+
+func TestMACLessReassignedAddressKeepsOwnerWhileItHoldsAnother(t *testing.T) {
+	s, db, now := newTestStore(t)
+
+	// host-a owns the MAC-less endpoint E with 10.0.1.1 and 10.0.1.2; an
+	// observer also sees E.
+	ownA := hostIdentity("", "10.0.1.1", "10.0.1.2")
+	a := testEndpoint("10.0.1.1", "", "host-a")
+	a.Addresses = addrList("10.0.1.1", "10.0.1.2")
+	a.Hostname = "host-a"
+	mustUpsert(t, s, a, ownA)
+	eID := mustLookup(t, s, "", "10.0.1.1").ID
+	mustUpsert(t, s, testEndpoint("10.0.1.2", "", "observer"), Identity{})
+
+	// 10.0.1.1 is reassigned to host-b, which reports it authoritatively
+	// before host-a reports again.
+	*now = now.Add(time.Minute)
+	ownB := hostIdentity("", "10.0.1.1")
+	b := testEndpoint("10.0.1.1", "", "host-b")
+	b.Hostname = "host-b"
+	b.LastSeen = *now
+	mustUpsert(t, s, b, ownB)
+
+	// host-a keeps E, its ID and history, with only the address it still
+	// holds; host-b neither owns nor joins E.
+	g := mustEndpoint(t, s, eID)
+	if g.Owner != "host-a" || !slices.Equal(g.Addresses, addrList("10.0.1.2")) ||
+		!slices.Equal(g.SeenBy, []string{"host-a", "observer"}) || g.Hostname != "host-a" {
+		t.Errorf("E = owner %q addresses %v seen by %v hostname %q, want host-a with 10.0.1.2, seen by host-a and observer",
+			g.Owner, g.Addresses, g.SeenBy, g.Hostname)
+	}
+	// host-b gets a separate endpoint of its own for 10.0.1.1.
+	gb := mustLookup(t, s, "", "10.0.1.1")
+	if gb.ID == eID || gb.Owner != "host-b" || !slices.Equal(gb.SeenBy, []string{"host-b"}) ||
+		!slices.Equal(gb.Addresses, addrList("10.0.1.1")) {
+		t.Errorf("lookup 10.0.1.1 = %s owner %q seen by %v addresses %v, want host-b's own endpoint, not %s",
+			gb.ID, gb.Owner, gb.SeenBy, gb.Addresses, eID)
+	}
+	if g := mustLookup(t, s, "", "10.0.1.2"); g.ID != eID {
+		t.Errorf("lookup 10.0.1.2 = %s, want E %s", g.ID, eID)
+	}
+	if n := mustCount(t, s.CountEndpoints); n != 2 {
+		t.Errorf("count = %d, want 2", n)
+	}
+
+	// Further reports keep the split: host-b stays on its endpoint, host-a
+	// (now holding 10.0.1.2 only) on E.
+	mustUpsert(t, s, b, ownB)
+	a.Addresses = addrList("10.0.1.2")
+	mustUpsert(t, s, a, hostIdentity("", "10.0.1.2"))
+	if g := mustEndpoint(t, s, eID); g.Owner != "host-a" || !slices.Equal(g.Addresses, addrList("10.0.1.2")) {
+		t.Errorf("E after further reports = owner %q addresses %v, want host-a with 10.0.1.2", g.Owner, g.Addresses)
+	}
+	if g := mustLookup(t, s, "", "10.0.1.1"); g.ID != gb.ID || g.Owner != "host-b" {
+		t.Errorf("lookup 10.0.1.1 = %s owner %q, want host-b's %s", g.ID, g.Owner, gb.ID)
+	}
+	if n := mustCount(t, s.CountEndpoints); n != 2 {
+		t.Errorf("count = %d, want 2", n)
+	}
+	checkCounters(t, s, db)
+}
+
+func TestMACLessReassignedAddressPrefersReportersOwnEndpoint(t *testing.T) {
+	s, db, _ := newTestStore(t)
+
+	// host-b already owns F with 10.0.1.9; host-a owns E with 10.0.1.1 and
+	// 10.0.1.2.
+	mustUpsert(t, s, testEndpoint("10.0.1.9", "", "host-b"), hostIdentity("", "10.0.1.9"))
+	fID := mustLookup(t, s, "", "10.0.1.9").ID
+	a := testEndpoint("10.0.1.1", "", "host-a")
+	a.Addresses = addrList("10.0.1.1", "10.0.1.2")
+	mustUpsert(t, s, a, hostIdentity("", "10.0.1.1", "10.0.1.2"))
+	eID := mustLookup(t, s, "", "10.0.1.1").ID
+
+	// 10.0.1.1 moves to host-b, which reports it with 10.0.1.9: it joins
+	// F, and E keeps host-a with 10.0.1.2.
+	b := testEndpoint("10.0.1.9", "", "host-b")
+	b.Addresses = addrList("10.0.1.1", "10.0.1.9")
+	mustUpsert(t, s, b, hostIdentity("", "10.0.1.1", "10.0.1.9"))
+	if g := mustEndpoint(t, s, fID); g.Owner != "host-b" || !slices.Equal(g.Addresses, addrList("10.0.1.1", "10.0.1.9")) {
+		t.Errorf("F = owner %q addresses %v, want host-b with 10.0.1.1 and 10.0.1.9", g.Owner, g.Addresses)
+	}
+	if g := mustEndpoint(t, s, eID); g.Owner != "host-a" || !slices.Equal(g.Addresses, addrList("10.0.1.2")) ||
+		!slices.Equal(g.SeenBy, []string{"host-a"}) {
+		t.Errorf("E = owner %q addresses %v seen by %v, want host-a with 10.0.1.2 only", g.Owner, g.Addresses, g.SeenBy)
+	}
+	if g := mustLookup(t, s, "", "10.0.1.1"); g.ID != fID {
+		t.Errorf("lookup 10.0.1.1 = %s, want F %s", g.ID, fID)
+	}
+	if n := mustCount(t, s.CountEndpoints); n != 2 {
+		t.Errorf("count = %d, want 2", n)
+	}
+	checkCounters(t, s, db)
+}
+
+func TestMACLessReassignedSingleAddressMovesToNewHolder(t *testing.T) {
+	s, db, now := newTestStore(t)
+
+	// host-a owns E with its only address 10.0.1.1.
+	a := testEndpoint("10.0.1.1", "", "host-a")
+	mustUpsert(t, s, a, hostIdentity("", "10.0.1.1"))
+	eID := mustLookup(t, s, "", "10.0.1.1").ID
+
+	// 10.0.1.1 is reassigned to host-b: host-a holds none of E's addresses
+	// any more, so host-b, the holder by the records, owns E.
+	*now = now.Add(time.Minute)
+	b := testEndpoint("10.0.1.1", "", "host-b")
+	b.LastSeen = *now
+	mustUpsert(t, s, b, hostIdentity("", "10.0.1.1"))
+	g := mustLookup(t, s, "", "10.0.1.1")
+	if g.ID != eID || g.Owner != "host-b" || !slices.Equal(g.Addresses, addrList("10.0.1.1")) {
+		t.Errorf("lookup 10.0.1.1 = %s owner %q addresses %v, want %s owned by host-b", g.ID, g.Owner, g.Addresses, eID)
+	}
+	if o := observation(t, g, "host-a"); len(o.Addresses) != 0 {
+		t.Errorf("host-a still attests %v on E, want released", o.Addresses)
+	}
+	// host-a's next report, without the address in its records, does not
+	// regain E.
+	mustUpsert(t, s, a, Identity{})
+	if g := mustEndpoint(t, s, eID); g.Owner != "host-b" {
+		t.Errorf("E owner = %q after host-a's report, want host-b", g.Owner)
+	}
+	if n := mustCount(t, s.CountEndpoints); n != 1 {
+		t.Errorf("count = %d, want 1", n)
+	}
+	checkCounters(t, s, db)
+}
