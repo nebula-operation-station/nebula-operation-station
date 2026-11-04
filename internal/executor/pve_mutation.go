@@ -859,6 +859,12 @@ func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, 
 		}
 		if liveCheck != nil {
 			if err := liveCheck(ctx, rm, live, readTok); err != nil {
+				if ctx.Err() != nil {
+					// The check failed because the run ended, not because
+					// a precondition failed: nothing is recorded or sent.
+					m.logRunExpired(t, claim.ExecutionID, n)
+					return ErrPveRunExpired
+				}
 				m.log().Warn("audit", "kind", "pve_mutation_precondition", "remote", t.RemoteID, "node", t.Node, "vmid", t.VMID, "execution", claim.ExecutionID, "step", n)
 				return err
 			}
