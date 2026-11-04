@@ -1,0 +1,111 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Reviewed seed map for software catalog normalization (ADR 0009, D5).
+# Maps known observed identifiers to catalog keys and display names.
+# Display names only: no icons, no URLs.
+
+ubuntu:
+  key: ubuntu
+  display: Ubuntu
+debian:
+  key: debian
+  display: Debian
+alpine:
+  key: alpine
+  display: Alpine Linux
+proxmox:
+  key: proxmox-ve
+  display: Proxmox VE
+proxmox-ve:
+  key: proxmox-ve
+  display: Proxmox VE
+proxmox-backup:
+  key: proxmox-backup
+  display: Proxmox Backup Server
+proxmox-backup-server:
+  key: proxmox-backup
+  display: Proxmox Backup Server
+docker:
+  key: docker
+  display: Docker
+docker-ce:
+  key: docker
+  display: Docker
+docker.io:
+  key: docker
+  display: Docker
+nvidia:
+  key: nvidia
+  display: NVIDIA
+nvidia-driver:
+  key: nvidia
+  display: NVIDIA
+nvidia-utils:
+  key: nvidia
+  display: NVIDIA
+nvidia-smi:
+  key: nvidia
+  display: NVIDIA
+netbird:
+  key: netbird
+  display: Netbird
+influxdb:
+  key: influxdb
+  display: InfluxDB
+influxdb2:
+  key: influxdb
+  display: InfluxDB
+grafana:
+  key: grafana
+  display: Grafana
+postgres:
+  key: postgres
+  display: PostgreSQL
+postgresql:
+  key: postgres
+  display: PostgreSQL
+redis:
+  key: redis
+  display: Redis
+redis-server:
+  key: redis
+  display: Redis
+nginx:
+  key: nginx
+  display: Nginx
+traefik:
+  key: traefik
+  display: Traefik
+gitea:
+  key: gitea
+  display: Gitea
+rabbitmq:
+  key: rabbitmq
+  display: RabbitMQ
+rabbitmq-server:
+  key: rabbitmq
+  display: RabbitMQ
+ollama:
+  key: ollama
+  display: Ollama
+keycloak:
+  key: keycloak
+  display: Keycloak
+minio:
+  key: minio
+  display: MinIO
+ceph:
+  key: ceph
+  display: Ceph
+ceph-osd:
+  key: ceph
+  display: Ceph
+ceph-mon:
+  key: ceph
+  display: Ceph
+wireguard:
+  key: wireguard
+  display: WireGuard
+wireguard-go:
+  key: wireguard
+  display: WireGuard
