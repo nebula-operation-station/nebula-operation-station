@@ -123,6 +123,9 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// This deadline is created before hc.Do starts the client's own timer
+	// for the same duration, so it always expires first; the truncation
+	// guard after io.ReadAll relies on that (TestFetchCleanEOFAfterDeadline).
 	ctx, cancel := context.WithTimeout(ctx, c.hc.Timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
