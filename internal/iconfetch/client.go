@@ -146,6 +146,12 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("icon fetch %s: read body: %w", u.Host, err)
 	}
+	// When the deadline fires mid-body, the transport can end the stream so
+	// that ReadAll sees a clean EOF on a truncated body. A body read past the
+	// deadline is never trusted.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, fmt.Errorf("icon fetch %s: read body: %w", u.Host, ctxErr)
+	}
 	if len(body) > MaxBodyBytes {
 		return nil, fmt.Errorf("%w: more than %d bytes", ErrBodyTooLarge, MaxBodyBytes)
 	}
