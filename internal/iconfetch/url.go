@@ -13,9 +13,10 @@ import (
 	"fmt"
 	"net/netip"
 	"net/url"
-	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/netpolicy"
 )
 
 // MaxURLLen bounds an icon URL before it is parsed.
@@ -24,24 +25,22 @@ const MaxURLLen = 2048
 // maxHostLen is the RFC 1123 maximum for a host name.
 const maxHostLen = 253
 
-// DefaultAllowlist is the set of icon hosts used when no allowlist is given.
-var DefaultAllowlist = []string{
+// defaultAllowlist is the set of icon hosts used when no allowlist is
+// given. It is unexported so no package can widen it at runtime;
+// DefaultAllowlist returns a copy.
+var defaultAllowlist = []string{
 	"avatars.githubusercontent.com",
 	"upload.wikimedia.org",
 }
 
+// DefaultAllowlist returns a copy of the icon hosts used when no allowlist
+// is given.
+func DefaultAllowlist() []string {
+	return append([]string(nil), defaultAllowlist...)
+}
+
 // ErrURL marks an icon URL that violates the URL policy.
 var ErrURL = errors.New("icon URL rejected")
-
-// hostnameRe is a strict RFC 1123 host name: ASCII labels of 1-63
-// characters of [a-z0-9-], starting and ending with [a-z0-9], no trailing
-// dot. It mirrors internal/executions/servicecheck.
-var hostnameRe = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$`)
-
-// numericHostRe matches legacy inet_aton forms (decimal, octal, hex, short
-// dotted) that a resolver could reinterpret as an IPv4 address. It mirrors
-// internal/executions/servicecheck.
-var numericHostRe = regexp.MustCompile(`(?i)^(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+))*$`)
 
 // ValidateURL checks raw against the icon URL policy and returns the parsed
 // URL with a lower-cased host and without the default port. The policy:
@@ -90,7 +89,7 @@ func ValidateURL(raw string, allow []string) (*url.URL, error) {
 	if _, err := netip.ParseAddr(host); err == nil {
 		return nil, fmt.Errorf("%w: IP literals are not allowed", ErrURL)
 	}
-	if !hostnameRe.MatchString(host) || numericHostRe.MatchString(host) {
+	if !netpolicy.IsHostname(host) {
 		return nil, fmt.Errorf("%w: host must be a DNS name, not an IP literal", ErrURL)
 	}
 	// url.Parse decodes percent-escapes in the host. Require that the raw
@@ -115,7 +114,7 @@ func ValidateURL(raw string, allow []string) (*url.URL, error) {
 // (DefaultAllowlist when allow is empty).
 func onAllowlist(host string, allow []string) bool {
 	if len(allow) == 0 {
-		allow = DefaultAllowlist
+		allow = defaultAllowlist
 	}
 	for _, a := range allow {
 		if strings.ToLower(a) == host {

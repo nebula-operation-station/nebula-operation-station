@@ -347,8 +347,15 @@ func TestFetchSlowHeadersTimesOut(t *testing.T) {
 		case <-r.Context().Done():
 		}
 	}), publicResolver, 200*time.Millisecond)
-	if _, err := h.client.Fetch(context.Background(), "https://avatars.githubusercontent.com/slow"); err == nil {
+	_, err := h.client.Fetch(context.Background(), "https://avatars.githubusercontent.com/slow")
+	if err == nil {
 		t.Fatal("slow headers: no error")
+	}
+	// Either the request context or the transport's header timeout may
+	// fire first; both are timeouts, unlike a TLS or dial failure.
+	var ne net.Error
+	if !errors.Is(err, context.DeadlineExceeded) && (!errors.As(err, &ne) || !ne.Timeout()) {
+		t.Fatalf("slow headers: err %v, want a deadline error", err)
 	}
 }
 
@@ -407,5 +414,37 @@ func TestNewUsesProductionDefaults(t *testing.T) {
 	}
 	if tr.DialContext == nil || tr.DialTLSContext != nil {
 		t.Error("dial hooks not exactly the pinning dialer")
+	}
+}
+
+// TestNewRefusesInternalAnswer drives the production client from New: a
+// resolver answering 127.0.0.1 must end in ErrAddress, never a connect.
+func TestNewRefusesInternalAnswer(t *testing.T) {
+	var calls int
+	res := funcResolver{fn: func(string) ([]netip.Addr, error) {
+		calls++
+		return addrs("127.0.0.1"), nil
+	}}
+	_, err := New(Config{Resolver: res}).Fetch(context.Background(), "https://avatars.githubusercontent.com/x")
+	if !errors.Is(err, ErrAddress) {
+		t.Fatalf("Fetch error = %v, want ErrAddress", err)
+	}
+	if calls == 0 {
+		t.Fatal("New did not route the connect through the configured resolver")
+	}
+}
+
+func TestDefaultAllowlistIsACopy(t *testing.T) {
+	a := DefaultAllowlist()
+	if len(a) == 0 {
+		t.Fatal("empty default allowlist")
+	}
+	a[0] = "evil.example"
+	_ = append(a, "evil2.example")
+	if _, err := ValidateURL("https://evil.example/x", nil); !errors.Is(err, ErrURL) {
+		t.Fatalf("mutating the returned allowlist widened the policy: %v", err)
+	}
+	if DefaultAllowlist()[0] == "evil.example" {
+		t.Fatal("DefaultAllowlist returned shared storage")
 	}
 }

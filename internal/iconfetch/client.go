@@ -48,7 +48,7 @@ var (
 
 // Config configures a Client.
 type Config struct {
-	// Allow is the host allowlist; empty means DefaultAllowlist.
+	// Allow is the host allowlist; empty means DefaultAllowlist().
 	Allow []string
 	// Resolver resolves icon hosts; nil means net.DefaultResolver.
 	Resolver Resolver

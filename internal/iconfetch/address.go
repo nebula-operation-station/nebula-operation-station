@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/netpolicy"
 )
 
 // Limits on DNS answers.
@@ -29,59 +31,12 @@ type Resolver interface {
 	LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error)
 }
 
-// extraReserved are IANA special-purpose IPv4 ranges that
-// internal/executions/servicecheck does not list but that an icon source
-// on the public Internet never uses.
-var extraReserved = []struct {
-	prefix netip.Prefix
-	reason string
-}{
-	{netip.MustParsePrefix("192.0.0.0/24"), "192.0.0.0/24 (IETF protocol assignments)"},
-	{netip.MustParsePrefix("192.0.2.0/24"), "192.0.2.0/24 (documentation)"},
-	{netip.MustParsePrefix("198.18.0.0/15"), "198.18.0.0/15 (benchmarking)"},
-	{netip.MustParsePrefix("198.51.100.0/24"), "198.51.100.0/24 (documentation)"},
-	{netip.MustParsePrefix("203.0.113.0/24"), "203.0.113.0/24 (documentation)"},
-}
-
 // forbiddenAddr reports whether the dialer must not connect to addr, with a
-// fixed reason. The IPv4 table mirrors reserved() in
-// internal/executions/servicecheck (which is unexported) plus extraReserved.
-// Like servicecheck, every non-IPv4 address is refused: IPv6 has too many
-// ranges that embed or route to IPv4 (NAT64, 6to4, Teredo, mapped) and both
-// default icon sources are reachable over IPv4.
+// fixed reason: netpolicy.NonPublic, i.e. everything servicecheck treats as
+// internal (every non-mapped IPv6 address included) plus the IANA
+// special-purpose ranges. Both default icon sources are reachable over IPv4.
 func forbiddenAddr(addr netip.Addr) (string, bool) {
-	if !addr.IsValid() {
-		return "invalid address", true
-	}
-	addr = addr.Unmap()
-	if !addr.Is4() {
-		return "IPv6 address", true
-	}
-	o := addr.As4()
-	switch {
-	case o[0] == 0:
-		return "0.0.0.0/8 (this network)", true
-	case o[0] == 10:
-		return "10.0.0.0/8 (private)", true
-	case o[0] == 127:
-		return "127.0.0.0/8 (loopback)", true
-	case o[0] == 169 && o[1] == 254:
-		return "169.254.0.0/16 (link-local, incl. 169.254.169.254 metadata)", true
-	case o[0] == 100 && o[1] >= 64 && o[1] <= 127:
-		return "100.64.0.0/10 (CGNAT)", true
-	case o[0] == 172 && o[1] >= 16 && o[1] <= 31:
-		return "172.16.0.0/12 (private)", true
-	case o[0] == 192 && o[1] == 168:
-		return "192.168.0.0/16 (private)", true
-	case o[0] >= 224:
-		return "224.0.0.0/4 and above (multicast/reserved)", true
-	}
-	for _, r := range extraReserved {
-		if r.prefix.Contains(addr) {
-			return r.reason, true
-		}
-	}
-	return "", false
+	return netpolicy.NonPublic(addr)
 }
 
 // dialer resolves the host itself, refuses the whole answer if any address

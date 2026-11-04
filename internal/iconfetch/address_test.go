@@ -18,7 +18,7 @@ func TestForbiddenAddressClassification(t *testing.T) {
 		"127.0.0.1", "127.255.255.254", // loopback
 		"169.254.169.254", "169.254.0.1", // link-local incl. metadata
 		"100.64.0.1", "100.127.255.255", // CGNAT
-		"192.0.0.1", "192.0.2.1", "198.18.0.1", "198.19.255.255", "198.51.100.1", "203.0.113.1", // special purpose / documentation / benchmarking
+		"192.0.0.1", "192.0.2.1", "192.88.99.1", "198.18.0.1", "198.19.255.255", "198.51.100.1", "203.0.113.1", // special purpose / documentation / benchmarking
 		"224.0.0.1", "239.255.255.250", "240.0.0.1", "255.255.255.255", // multicast / reserved / broadcast
 		"::ffff:127.0.0.1", "::ffff:169.254.169.254", "::ffff:10.0.0.1", // IPv4-mapped
 		"::", "::1", "fe80::1", "fc00::1", "fd12:3456::1", "ff02::1", // IPv6 unspecified, loopback, link-local, ULA, multicast
@@ -176,5 +176,24 @@ func TestDialerCapsAnswers(t *testing.T) {
 	_, _ = d.DialContext(context.Background(), "tcp", "upload.wikimedia.org:443")
 	if len(rec.addrs) != maxDialAttempts {
 		t.Fatalf("dial attempts = %d, want %d", len(rec.addrs), maxDialAttempts)
+	}
+}
+
+func TestDialerRefusesNonTCPNetworks(t *testing.T) {
+	for _, network := range []string{"tcp6", "udp", "udp4", "ip4", "unix", ""} {
+		rec := &recordingDial{}
+		res := &stubResolver{answers: [][]netip.Addr{addrs("140.82.112.3")}}
+		d := &dialer{resolver: res, dial: rec.dial}
+		if _, err := d.DialContext(context.Background(), network, "avatars.githubusercontent.com:443"); !errors.Is(err, ErrAddress) {
+			t.Errorf("DialContext(%q) error = %v, want ErrAddress", network, err)
+		}
+		if res.calls != 0 || len(rec.addrs) != 0 {
+			t.Errorf("DialContext(%q) resolved %d times / dialed %v", network, res.calls, rec.addrs)
+		}
+	}
+	rec := &recordingDial{}
+	d := &dialer{resolver: &stubResolver{answers: [][]netip.Addr{addrs("140.82.112.3")}}, dial: rec.dial}
+	if _, err := d.DialContext(context.Background(), "tcp4", "avatars.githubusercontent.com:443"); !errors.Is(err, errNoConnect) {
+		t.Errorf("DialContext(tcp4) error = %v, want the stub dial error", err)
 	}
 }
