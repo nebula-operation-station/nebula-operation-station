@@ -3,6 +3,7 @@
 package netfacts
 
 import (
+	"encoding/json"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -109,11 +110,50 @@ func FuzzParseNeighBounds(f *testing.F) {
 	})
 }
 
+// oracleViaHosts returns the addresses named by a "via" host anywhere in
+// the route document (top-level or inside a "nexthops" list), decoded
+// independently of ParseRoutes. Only such an address may be an IPv6
+// gateway of an IPv4 destination (RFC 5549).
+func oracleViaHosts(b []byte) map[netip.Addr]bool {
+	type via struct {
+		Host string `json:"host"`
+	}
+	var elems []json.RawMessage
+	if json.Unmarshal(b, &elems) != nil {
+		return nil
+	}
+	hosts := map[netip.Addr]bool{}
+	add := func(v *via) {
+		if v == nil {
+			return
+		}
+		if a, err := netip.ParseAddr(v.Host); err == nil {
+			hosts[a] = true
+		}
+	}
+	for _, e := range elems {
+		var d struct {
+			Via      *via `json:"via"`
+			Nexthops []struct {
+				Via *via `json:"via"`
+			} `json:"nexthops"`
+		}
+		if json.Unmarshal(e, &d) != nil {
+			continue
+		}
+		add(d.Via)
+		for i := range d.Nexthops {
+			add(d.Nexthops[i].Via)
+		}
+	}
+	return hosts
+}
+
 // FuzzParseRoutesBounds checks the hard bounds of ParseRoutes on arbitrary
 // input: no panic, bounded entry count, every returned field within its
 // documented limits.
 func FuzzParseRoutesBounds(f *testing.F) {
-	for _, s := range netfactsFuzzSeeds("debian12-route.json", "ubuntu2404-route.json", "ipv6-route.json", "ipv6-multipath-route.json", "empty-route.json") {
+	for _, s := range netfactsFuzzSeeds("debian12-route.json", "ubuntu2404-route.json", "ipv6-route.json", "ipv6-multipath-route.json", "rfc5549-route.json", "empty-route.json") {
 		f.Add(s)
 	}
 	f.Add([]byte(`null`))
@@ -123,12 +163,15 @@ func FuzzParseRoutesBounds(f *testing.F) {
 	f.Add([]byte(`[{"dst":"10.0.0.1","dev":"eth0"},{"dst":"fe80::1%eth0","dev":"eth0"}]`))
 	f.Add([]byte(`[{"dst":"default","nexthops":[{"gateway":"fe80::1","dev":"eth0"},{"gateway":"fe80::2","dev":"eth1"}]}]`))
 	f.Add([]byte(`[{"dst":"default","gateway":"fe80::1%eth0","dev":"eth0"},{"dst":"default","gateway":"fe80::2%\u202e","dev":"eth0"}]`))
+	f.Add([]byte(`[{"dst":"10.0.0.0/24","dev":"eth0"},{"dst":"default","nexthops":[{"via":{"family":"inet6","host":"fe80::1%eth0"},"dev":"eth0"},{"gateway":"10.0.0.1","dev":"eth1"}]},{"dst":"10.1.0.0/24","via":{"family":"inet","host":"10.0.0.2"},"dev":"eth0"}]`))
+	f.Add([]byte(`[{"dst":"2001:db8::/64","dev":"eth0"},{"dst":"default","via":{"family":"inet6","host":"fe80::1"},"dev":"eth0"},{"dst":"2001:db8:1::/48","via":{"family":"inet","host":"10.0.0.1"},"dev":"eth0"}]`))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		res, err := ParseRoutes(b)
 		if err != nil {
 			return
 		}
 		rs := res.Entries
+		var viaHosts map[netip.Addr]bool
 		if len(rs) > 1000 {
 			t.Fatalf("route list has %d entries, bound is 1000", len(rs))
 		}
@@ -144,7 +187,17 @@ func FuzzParseRoutesBounds(f *testing.F) {
 			}
 			oracleAddr(t, "route gateway", r.Gateway)
 			if r.Gateway.IsValid() && r.Gateway.Is4() != r.Dst.Addr().Is4() {
-				t.Fatalf("route gateway %v family differs from dst %v", r.Gateway, r.Dst)
+				// The only accepted family mix is RFC 5549: an IPv6
+				// gateway for an IPv4 dst, and only from a "via".
+				if r.Gateway.Is4() || !r.Dst.Addr().Is4() {
+					t.Fatalf("route gateway %v family differs from dst %v", r.Gateway, r.Dst)
+				}
+				if viaHosts == nil {
+					viaHosts = oracleViaHosts(b)
+				}
+				if !viaHosts[r.Gateway] {
+					t.Fatalf("route gateway %v for IPv4 dst %v did not come from a via", r.Gateway, r.Dst)
+				}
 			}
 			oracleIfName(t, "route dev", r.Dev)
 			if z := r.Dst.Addr().Zone(); z != "" {

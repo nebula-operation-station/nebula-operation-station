@@ -795,6 +795,84 @@ func TestServiceGuestProvisionRunEndsAfterTheLastStep(t *testing.T) {
 	}
 }
 
+// cancelOnRisk is fixedRisk that, once armed, ends a run context on the
+// next risk evaluation: the run authorization, after which the run has
+// claimed the permit but recorded nothing.
+type cancelOnRisk struct {
+	mu     sync.Mutex
+	cancel func()
+}
+
+func (r *cancelOnRisk) MinimumRisk(rq canonical.Request, ts []canonical.Target) (canonical.Risk, string, error) {
+	r.mu.Lock()
+	cancel := r.cancel
+	r.cancel = nil
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return fixedRisk{}.MinimumRisk(rq, ts)
+}
+
+func (r *cancelOnRisk) arm(cancel func()) {
+	r.mu.Lock()
+	r.cancel = cancel
+	r.mu.Unlock()
+}
+
+// TestServiceGuestProvisionRunEndsBeforeTheFirstStep: when the run context
+// ends after the run authorization but before the clone intent, the
+// commit gets DeadlineExceeded (the run ended, not a refusal or a changed
+// target), nothing is recorded or sent, the claim is released, and the
+// VMID stays reserved for the execution but no longer started. The unused
+// approval then runs.
+func TestServiceGuestProvisionRunEndsBeforeTheFirstStep(t *testing.T) {
+	risk := &cancelOnRisk{}
+	e := newProvisionRPCEnvWith(t, provisionRPCOptions{risk: risk})
+	prop, d := e.proposeApproved(t, context.Background())
+	committed := testProvisionSpec(bindingOf(e.tpl), PveAutomationCredentialRef)
+	committed.Vmid = prop.GetVmid()
+	commit := &pb.CommitPVEGuestProvisionRequest{Spec: committed, ExecutionId: prop.GetExecutionId(), ExecutionDigest: d.String()}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	risk.arm(cancel)
+	res, err := e.svc.CommitPVEGuestProvision(ctx, commit)
+	if st := status.Convert(err); st.Code() != codes.DeadlineExceeded || !strings.Contains(st.Message(), "run ended") || res != nil {
+		t.Fatalf("commit: %+v %v, want DeadlineExceeded", res, err)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("the run context did not end at the run authorization")
+	}
+	if n := len(e.pc.provisionSteps()); n != 0 {
+		t.Fatalf("%d steps sent", n)
+	}
+	if steps, err := e.pe.db.PveJobSteps(prop.GetExecutionId()); err != nil || len(steps) != 0 {
+		t.Fatalf("recorded steps %+v %v", steps, err)
+	}
+	store := e.svc.pveProvisioner().VMIDs.(*FilePveVMIDStore)
+	h, ok, err := store.VMIDHolder(mutRemote, prop.GetVmid(), time.Now())
+	if err != nil || !ok || h.ExecutionID != prop.GetExecutionId() || h.Started {
+		t.Fatalf("vmid holder %+v %v %v, want reserved for the execution and not started", h, ok, err)
+	}
+	logs := e.logs.String()
+	if !strings.Contains(logs, "pve_mutation_run_expired") || !strings.Contains(logs, "pve_mutation_permit_released") {
+		t.Fatalf("the end of the run or the released claim is not logged:\n%s", logs)
+	}
+	if strings.Contains(logs, "pve_mutation_target_changed") || strings.Contains(logs, "pve_mutation_precondition") || strings.Contains(logs, "pve_guest_provision_failed") {
+		t.Fatalf("a run that ended before its first step was logged as a failure:\n%s", logs)
+	}
+
+	// The claim was released: the same approval runs to completion.
+	out, err := e.svc.CommitPVEGuestProvision(context.Background(), commit)
+	if err != nil {
+		t.Fatalf("the unused approval does not run: %v", err)
+	}
+	if len(out.GetSteps()) != 4 || len(e.pc.provisionSteps()) != 4 {
+		t.Fatalf("result %+v, %d steps sent; want all four", out, len(e.pc.provisionSteps()))
+	}
+}
+
 // TestPveProvisionRunContextEndsBeforeTheDeadline: the run context ends
 // the reply margin before the caller's deadline, at most half the
 // remaining time, and has no deadline when the caller has none.
