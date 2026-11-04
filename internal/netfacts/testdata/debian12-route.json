@@ -1,0 +1,24 @@
+[
+    {
+        "dst": "default",
+        "gateway": "192.168.178.1",
+        "dev": "eth0",
+        "protocol": "dhcp",
+        "metric": 100,
+        "flags": 0
+    },
+    {
+        "dst": "192.168.178.0/24",
+        "dev": "eth0",
+        "protocol": "kernel",
+        "scope": "link",
+        "flags": 0
+    },
+    {
+        "dst": "127.0.0.0/8",
+        "dev": "lo",
+        "scope": "host",
+        "src": "127.0.0.1",
+        "flags": 0
+    }
+]

@@ -1,0 +1,23 @@
+[
+    {
+        "dst": "default",
+        "gateway": "fe80::1",
+        "dev": "eth0",
+        "metric": 100,
+        "flags": 0
+    },
+    {
+        "dst": "fe80::/10",
+        "dev": "eth0",
+        "protocol": "kernel",
+        "scope": "link",
+        "flags": 0
+    },
+    {
+        "dst": "2001:db8::/32",
+        "dev": "eth0",
+        "protocol": "dhcp",
+        "metric": 100,
+        "flags": 0
+    }
+]

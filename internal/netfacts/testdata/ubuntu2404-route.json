@@ -1,0 +1,17 @@
+[
+    {
+        "dst": "default",
+        "gateway": "10.0.0.1",
+        "dev": "ens18",
+        "protocol": "dhcp",
+        "metric": 100,
+        "flags": 0
+    },
+    {
+        "dst": "10.0.0.0/24",
+        "dev": "ens18",
+        "protocol": "kernel",
+        "scope": "link",
+        "flags": 0
+    }
+]
