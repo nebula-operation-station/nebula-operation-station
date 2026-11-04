@@ -479,9 +479,10 @@ type PveAdmin struct {
 	// TrustFailed, if set, handles a trust failure that token rotation
 	// detects on a registered remote (Service.pveTrustFailed: block keyed
 	// by pin and trust generation, revocation, fence when the block
-	// cannot be recorded). Nil blocks the remote directly
-	// (blockTrustFailure).
-	TrustFailed func(executordb.PveRemote) error
+	// cannot be recorded). by is the admin whose rotation detected the
+	// failure; the block names them in blocked_by. Nil blocks the remote
+	// directly (blockTrustFailure).
+	TrustFailed func(rm executordb.PveRemote, by string) error
 	// Mutations is the engine that runs this executor's PVE mutations.
 	// CloseOpenJobs requires it and never closes a step of a run still
 	// in flight there.
@@ -788,12 +789,13 @@ func (a *PveAdmin) RotateToken(ctx context.Context, in PveRotateToken) (executor
 
 // rotateTrustFailure handles a trust failure (cause) that token rotation
 // detected on rm, through TrustFailed when set, and returns cause joined
-// with the failing step of the block.
+// with the failing step of the block. Either way the block names by, the
+// admin who requested the rotation, in blocked_by.
 func (a *PveAdmin) rotateTrustFailure(rm executordb.PveRemote, by string, cause error) error {
 	if a.TrustFailed == nil {
 		return a.blockTrustFailure(rm.RemoteID, by, cause)
 	}
-	if err := a.TrustFailed(rm); err != nil {
+	if err := a.TrustFailed(rm, by); err != nil {
 		return errors.Join(cause, err)
 	}
 	return cause
