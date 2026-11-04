@@ -48,6 +48,11 @@
 // owner (MaxReportersPerEndpoint non-owners plus the owner), so the owner
 // is always admitted without evicting anyone.
 //
+// Provider guest NICs (ADR 0009 D1 tier 2, TM14; guestnics.go) live in
+// their own bounded tables under the source SourceProvider and are
+// matched to observed endpoints by MAC at read time only; they never
+// create endpoints or carry addresses.
+//
 // Queries (TopN, OverviewUnion) return internal/flowagg types and merge
 // the stored rows with flowagg semantics in SQL: per flow and hour the
 // server end's report is used when present, otherwise the client end's.
@@ -149,6 +154,9 @@ type Store struct {
 	endpointCapReporter int
 	bucketCap           int
 	bucketCapReporter   int
+	guestNICCap         int
+	guestNICCapRemote   int
+	guestRemoteCap      int
 }
 
 // New opens a Store over an open server database, keeping data for
@@ -194,6 +202,9 @@ func newStore(db *sql.DB, now func() time.Time, retention time.Duration) *Store 
 		endpointCapReporter: MaxEndpointsPerReporter,
 		bucketCap:           MaxBuckets,
 		bucketCapReporter:   MaxBucketsPerReporter,
+		guestNICCap:         MaxGuestNICs,
+		guestNICCapRemote:   MaxGuestNICsPerRemote,
+		guestRemoteCap:      MaxGuestNICRemotes,
 	}
 }
 
@@ -310,8 +321,9 @@ func pruneHourBound(cutoff int64) int64 {
 // lies before now-retention, and endpoints no reporter has seen since,
 // and returns the number of removed bucket and endpoint rows. An
 // endpoint whose owner's observation expired while other reporters
-// still see it has no owner until its owner reports again. Prune is
-// idempotent and safe to call more often than hourly; the store also
+// still see it has no owner until its owner reports again. Provider
+// guest NIC snapshots observed before now-retention are removed with
+// their NICs (not counted in the result). Prune is idempotent and safe to call more often than hourly; the store also
 // runs it automatically at most once per clock hour on writes.
 func (s *Store) Prune(ctx context.Context) (buckets, endpoints int64, err error) {
 	cutoff := s.now().Add(-s.retention).Unix()
@@ -342,6 +354,11 @@ func (s *Store) Prune(ctx context.Context) (buckets, endpoints int64, err error)
 			if _, err := tx.ExecContext(ctx, clearOwnerSQL); err != nil {
 				return fmt.Errorf("trafficstore: clear expired endpoint owners: %w", err)
 			}
+		}
+		// Provider guest NIC snapshots expire with the same retention;
+		// their NICs cascade.
+		if _, err := tx.ExecContext(ctx, pruneGuestSnapshotsSQL, cutoff); err != nil {
+			return fmt.Errorf("trafficstore: prune net_guest_nic_snapshots: %w", err)
 		}
 		return nil
 	})

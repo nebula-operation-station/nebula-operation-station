@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Install root-owned at /etc/nebula/nebula-iconfetch.nft. Loaded atomically
+# by nebula-iconfetch-firewall.service before the helper may start.
+# add is idempotent; flush is scoped to our table (never flush ruleset).
+# UID matching covers every socket of the dedicated, non-reused account.
+# Other users and host firewall rules are unaffected; accept here does not
+# override drops in other base chains. No DNS or established-flow bypass.
+add table inet nebula_iconfetch
+flush table inet nebula_iconfetch
+
+table inet nebula_iconfetch {
+    chain output {
+        type filter hook output priority 0;
+        policy accept;
+        meta skuid "nebula-iconfetch" jump iconfetch
+    }
+
+    chain iconfetch {
+        # The helper dials IPv4 only. All IPv6 is rejected: global IPv6
+        # includes NAT64 (64:ff9b::/96, 64:ff9b:1::/48) and 6to4 (2002::/16)
+        # prefixes that reach internal IPv4 hosts, and the lab's own hosts.
+        meta nfproto ipv6 reject
+        # Includes loopback, RFC1918, CGNAT, metadata/link-local and
+        # multicast. The application's stricter classification also rejects
+        # reserved/documentation ranges and DNS rebinding.
+        ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } reject
+        meta nfproto ipv4 meta l4proto tcp tcp dport 443 accept
+        reject
+    }
+}

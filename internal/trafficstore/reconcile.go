@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/netip"
+	"slices"
 	"strings"
 )
 
@@ -63,32 +64,35 @@ func releaseMACOwnerSQL(macPlaceholders string) string {
 //
 // The work is bounded: one indexed read of the owners, then three
 // indexed statements per owner, each owner in its own short write
-// transaction. It returns the number of endpoints that lost their owner.
-// Callers run it whenever host records change, and periodically (with
-// Prune).
-func (s *Store) ReconcileIdentities(ctx context.Context, current map[string]Identity) (int64, error) {
+// transaction. It returns the number of endpoints that lost their owner
+// and the hosts whose records were malformed; such a record backs
+// nothing (the host is treated as having no records, fail closed) and
+// does not stop the reconcile of the other hosts. On error the result
+// holds what was done before it. Callers run it whenever host records
+// change, and periodically (with Prune), and log the skipped hosts.
+func (s *Store) ReconcileIdentities(ctx context.Context, current map[string]Identity) (ReconcileResult, error) {
 	type record struct {
 		macs  []string
 		addrs []netip.Addr
 	}
+	var res ReconcileResult
 	records := make(map[string]record, len(current))
 	for host, own := range current {
 		addrs, err := validateIdentity(own)
 		if err != nil {
-			// A malformed record backs nothing: the host is treated
-			// as having no records (fail closed), and the other hosts
-			// are still reconciled.
+			res.Skipped = append(res.Skipped, host)
 			continue
 		}
 		records[host] = record{macs: own.MACs, addrs: addrs}
 	}
+	slices.Sort(res.Skipped)
 	owners, err := s.listOwners(ctx)
 	if err != nil {
-		return 0, err
+		return res, err
 	}
-	var released int64
 	for _, owner := range owners {
 		rec := records[owner]
+		var released int64
 		err := s.writeTx(ctx, "reconcile owner", func(tx *sql.Tx) error {
 			addrPlaceholders, addrArgsList := addrArgs(rec.addrs)
 			if _, err := tx.ExecContext(ctx, reconcileAddrsSQL(addrPlaceholders),
@@ -101,30 +105,41 @@ func (s *Store) ReconcileIdentities(ctx context.Context, current map[string]Iden
 			for _, m := range rec.macs {
 				args = append(args, m)
 			}
-			res, err := tx.ExecContext(ctx, releaseMACOwnerSQL(macPlaceholders), args...)
+			r, err := tx.ExecContext(ctx, releaseMACOwnerSQL(macPlaceholders), args...)
 			if err != nil {
 				return fmt.Errorf("trafficstore: reconcile MAC endpoints of %s: %w", owner, err)
 			}
-			n, err := res.RowsAffected()
+			macReleased, err := r.RowsAffected()
 			if err != nil {
 				return fmt.Errorf("trafficstore: reconcile MAC endpoints of %s: %w", owner, err)
 			}
-			released += n
-			res, err = tx.ExecContext(ctx, releaseMACLessOwnerSQL, owner)
+			r, err = tx.ExecContext(ctx, releaseMACLessOwnerSQL, owner)
 			if err != nil {
 				return fmt.Errorf("trafficstore: reconcile MAC-less endpoints of %s: %w", owner, err)
 			}
-			if n, err = res.RowsAffected(); err != nil {
+			lessReleased, err := r.RowsAffected()
+			if err != nil {
 				return fmt.Errorf("trafficstore: reconcile MAC-less endpoints of %s: %w", owner, err)
 			}
-			released += n
+			// Counted only once the transaction can commit.
+			released = macReleased + lessReleased
 			return nil
 		})
 		if err != nil {
-			return released, err
+			return res, err
 		}
+		res.Released += released
 	}
-	return released, nil
+	return res, nil
+}
+
+// ReconcileResult is the outcome of ReconcileIdentities.
+type ReconcileResult struct {
+	// Released is the number of endpoints that lost their owner.
+	Released int64
+	// Skipped lists, sorted, the hosts whose records were malformed and
+	// were therefore treated as having no records.
+	Skipped []string
 }
 
 // listOwners returns the distinct endpoint owners.

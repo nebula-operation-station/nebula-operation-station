@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -235,5 +236,63 @@ func TestPruneResultsRemovesOldFiles(t *testing.T) {
 	s.PruneResults(time.Hour, time.Now().Add(2*time.Hour))
 	if ids, _ := s.FinishedJobs(); len(ids) != 0 {
 		t.Fatal("old result kept")
+	}
+}
+
+func TestReadResultClassifiesUnreadableAsInvalid(t *testing.T) {
+	s := newSpool(t)
+	// A symlinked result (ELOOP from O_NOFOLLOW) can never be read.
+	if err := os.Symlink("/etc/passwd", filepath.Join(s.ResultsDir(), id1+".json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReadResult(id1); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("symlink: %v", err)
+	}
+	if _, err := s.ReadResult(id2); err == nil || errors.Is(err, ErrInvalid) || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing result must stay ErrNotExist: %v", err)
+	}
+	if os.Geteuid() == 0 {
+		t.Log("running as root: EACCES case skipped")
+		return
+	}
+	if err := s.WriteResult(okResult(id2)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(s.ResultsDir(), id2+".json"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReadResult(id2); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unreadable: %v", err)
+	}
+}
+
+func TestFinishedJobsBoundsListing(t *testing.T) {
+	s := newSpool(t)
+	touch := func(dir, id string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, id+".json"), nil, 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Results without a job (the helper's directory) are never listed, no
+	// matter how many there are.
+	for i := 0; i < MaxListEntries+10; i++ {
+		touch(s.ResultsDir(), fmt.Sprintf("%032x", i+1))
+	}
+	if ids, err := s.FinishedJobs(); err != nil || len(ids) != 0 {
+		t.Fatalf("orphan results listed: %d %v", len(ids), err)
+	}
+	// More finished jobs than one listing may read: the call stops at the cap.
+	for i := 0; i < MaxListEntries+10; i++ {
+		touch(s.JobsDir(), fmt.Sprintf("%032x", i+1))
+	}
+	ids, err := s.FinishedJobs()
+	if err != nil || len(ids) != MaxListEntries {
+		t.Fatalf("listed %d, want %d: %v", len(ids), MaxListEntries, err)
+	}
+	for i := 1; i < len(ids); i++ {
+		if ids[i-1] >= ids[i] {
+			t.Fatalf("not sorted at %d: %s %s", i, ids[i-1], ids[i])
+		}
 	}
 }
