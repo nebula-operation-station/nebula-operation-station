@@ -101,7 +101,6 @@ var (
 var (
 	pveGuestPasswordIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 	pveCIUserRe          = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
-	pveBridgeRe          = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,14}$`)
 	pveDiskRe            = regexp.MustCompile(`^(scsi([0-9]|[12][0-9]|30)|virtio([0-9]|1[0-5])|sata[0-5]|ide[0-3])$`)
 	pveStorageIDRe       = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 	pveNetworkIDRe       = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
@@ -571,7 +570,7 @@ func (p *PveProvisioner) config(req PveProvisionRequest, vmid uint64) (pveProvis
 	switch {
 	case model != pveapi.NICVirtio && model != pveapi.NICE1000:
 		return bad("nic model")
-	case !pveBridgeRe.MatchString(req.NIC.Bridge):
+	case !pvecontract.ValidBridgeName(req.NIC.Bridge):
 		return bad("bridge")
 	case req.NIC.VLAN < 0 || req.NIC.VLAN > pveapi.MaxVLANTag:
 		return bad("vlan")
