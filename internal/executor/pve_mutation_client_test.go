@@ -771,7 +771,7 @@ func TestPveMutationClientUnrecordedBlockFailsClosed(t *testing.T) {
 	reopenServiceDB(t, e, `CREATE TRIGGER reject_pve_block BEFORE UPDATE OF state ON pve_remotes WHEN NEW.state = 'blocked' BEGIN SELECT RAISE(ABORT, 'injected block failure'); END`)
 
 	c := e.svc.newPveMutationClient()
-	e.svc.pveMutations().Client = c // the engine's client: its fence is the one proposals see
+	e.svc.pveMutations().Client = c
 	c.block(rm)
 	if got := remoteState(t, e.svc.db, pveReadRemote); got != executordb.StateActive {
 		t.Fatalf("remote state = %s, want the injected failure to keep it active", got)
@@ -823,7 +823,7 @@ func TestPveMutationClientUnrecordedBlockFailsClosed(t *testing.T) {
 	if got := remoteState(t, e.svc.db, pveReadRemote); got != executordb.StateBlocked {
 		t.Fatalf("remote state = %s, want blocked", got)
 	}
-	if _, fenced := c.fence.covers(rm); fenced {
+	if _, fenced := e.svc.pveTrustFence().covers(rm); fenced {
 		t.Fatal("fence kept after the block was recorded")
 	}
 	if n := e.pve.requests.Load(); n != 0 {
@@ -992,7 +992,7 @@ func TestPveRepinClearsUnrecordedTrustFence(t *testing.T) {
 	if got := remoteState(t, db, pveReadRemote); got != executordb.StateActive {
 		t.Fatalf("re-pinned remote state = %s, want active", got)
 	}
-	if _, fenced := c.fence.covers(rm); fenced {
+	if _, fenced := e.svc.pveTrustFence().covers(rm); fenced {
 		t.Fatal("old trust still fenced after the re-pin was seen")
 	}
 }
@@ -1020,7 +1020,7 @@ func TestPveBlockReportsFailedRevocationPrecisely(t *testing.T) {
 	if blockLogged(e, "pve mutation trust block not recorded") {
 		t.Fatal("recorded block logged as not recorded")
 	}
-	if _, fenced := c.fence.covers(rm); fenced {
+	if _, fenced := e.svc.pveTrustFence().covers(rm); fenced {
 		t.Fatal("recorded block fenced as unrecorded")
 	}
 	err := e.svc.blockPveMutation(pveReadRemote, pveTrustKeyOf(rm))

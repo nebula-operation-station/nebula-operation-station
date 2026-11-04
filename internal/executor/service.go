@@ -94,6 +94,9 @@ type Service struct {
 	pveRead pveReadState
 	// pveMetrics caps live metrics targets and metrics requests per remote.
 	pveMetrics pveMetricsGate
+	// pveFence holds the failed trusts whose block could not be recorded;
+	// every connection to a remote passes it (pveReadTrust).
+	pveFence pveTrustFence
 	// pveMut is the one PVE mutation engine of this executor; see
 	// pveMutations.
 	pveMutOnce sync.Once

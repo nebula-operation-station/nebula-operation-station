@@ -80,14 +80,12 @@ type pveMutationClient struct {
 	// now is the clock for certificate validity.
 	now func() time.Time
 	// block persistently blocks a remote whose trust rm (pin and trust
-	// generation) failed verification (Service.blockPveMutation: registry
-	// block plus revocation of its provider grants and mutation permits),
-	// as the read path does. Nil only in tests that do not exercise trust
+	// generation) failed verification (Service.pveTrustFailed: registry
+	// block plus revocation of its provider grants and mutation permits,
+	// and the trust fence when the block cannot be recorded), as every
+	// other connection does. Nil only in tests that do not exercise trust
 	// failures.
 	block func(rm executordb.PveRemote)
-	// fence holds the failed trusts whose block could not be recorded
-	// (newPveMutationClient). Nil in tests that do not exercise it.
-	fence *pveTrustFence
 }
 
 var _ PveMutationClient = (*pveMutationClient)(nil)

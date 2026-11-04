@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -181,6 +182,9 @@ func (s *Service) ReadPVE(ctx context.Context, in *pb.ReadPVERequest) (*pb.ReadP
 	case rm.Credentials.ReadRef != PveVaultID(rm.RemoteID, PvePurposeRead) || rm.Credentials.ReadVersion < 1:
 		return nil, status.Error(codes.FailedPrecondition, "read pve: remote has no read credential")
 	}
+	if err := s.pveTrustFenceGate(rm); err != nil {
+		return nil, pveReadFencedStatus
+	}
 	release, err := s.pveRead.acquire(ctx, rm.RemoteID)
 	if err != nil {
 		return nil, status.FromContextError(err).Err()
@@ -198,7 +202,9 @@ func (s *Service) ReadPVE(ctx context.Context, in *pb.ReadPVERequest) (*pb.ReadP
 	trust, err := s.pveReadTrust(ctx, rm)
 	switch {
 	case errors.Is(err, errPveReadTrust):
-		return nil, s.blockPveRead(rm.RemoteID)
+		return nil, s.blockPveRead(rm)
+	case errors.Is(err, errPveTrustFenced):
+		return nil, pveReadFencedStatus
 	case err != nil:
 		return nil, status.Error(codes.Unavailable, "read pve: remote unreachable")
 	}
@@ -237,7 +243,7 @@ func (s *Service) ReadPVE(ctx context.Context, in *pb.ReadPVERequest) (*pb.ReadP
 		out.Payload = &pb.ReadPVEResponse_Metrics{Metrics: readPveMetrics(ctx, base, hc, supplier, pveMetricsTarget(in.GetMetrics()))}
 	}
 	if watch.failed.Load() {
-		return nil, s.blockPveRead(rm.RemoteID)
+		return nil, s.blockPveRead(rm)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, status.FromContextError(err).Err()
@@ -283,26 +289,53 @@ func (s *Service) authorizePveRead(rm executordb.PveRemote, method string, in *p
 	return claim, nil
 }
 
-// blockPveRead blocks a remote whose endpoints failed trust verification and
-// revokes its provider grants (spec: a changed pin blocks the whole remote
-// persistently until an admin re-pins it).
-func (s *Service) blockPveRead(remoteID string) error {
-	s.pveMu.Lock()
-	defer s.pveMu.Unlock()
-	if err := s.pveAdmin().blockTrustFailure(remoteID, "executor", errPveReadTrust); !errors.Is(err, errPveReadTrust) {
-		s.log.Error("pve remote block failed", "remote", remoteID)
-		return status.Error(codes.Internal, "read pve: trust failure could not be recorded")
+// pveReadFencedStatus refuses a read of a fenced trust (pveTrustFenceGate).
+var pveReadFencedStatus = status.Error(codes.FailedPrecondition, "read pve: the remote failed trust verification and stays refused until its block is recorded or an admin re-pins it")
+
+// blockPveRead blocks rm after its endpoints failed trust verification on
+// ReadPVE (pveTrustFailed: persistent block keyed by the failed pin and
+// trust generation, revocation of its grants and permits, and the trust
+// fence when the block cannot be recorded) and returns the status of the
+// read.
+func (s *Service) blockPveRead(rm executordb.PveRemote) error {
+	err := s.pveTrustFailed(rm)
+	switch {
+	case errors.Is(err, errPveTrustBlockNotRecorded):
+		return status.Error(codes.Internal, "read pve: trust failure could not be recorded; the remote stays refused")
+	case err != nil:
+		return status.Error(codes.Internal, "read pve: trust verification failed; the remote is blocked but revoking its authority failed")
 	}
 	return status.Error(codes.FailedPrecondition, "read pve: trust verification failed; the remote is blocked until an admin re-pins it")
 }
 
-// pveReadTrust returns the pinned transport trust of rm. A standalone remote
+// pveReaderTrustFailed blocks rm after a trust failure seen by a reader
+// that is not an RPC itself (provisioning and guest join reads), exactly
+// as every other connection does (pveTrustFailed), and returns an error
+// wrapping errPveReadTrust and the failing step of the block.
+func (s *Service) pveReaderTrustFailed(rm executordb.PveRemote) error {
+	return errors.Join(fmt.Errorf("pve remote %s: %w", rm.RemoteID, errPveReadTrust), s.pveTrustFailed(rm))
+}
+
+// pveReadTrust returns the pinned transport trust of rm for one connection.
+// It is the one way every connection to a registered remote gets its
+// trust (ReadPVE, the mutation client, the provisioning reader and the
+// guest join reads): a trust fenced after an unrecorded block
+// (pveTrustFenceGate) is refused before anything is fetched.
+func (s *Service) pveReadTrust(ctx context.Context, rm executordb.PveRemote) (pvetransport.Trust, error) {
+	if err := s.pveTrustFenceGate(rm); err != nil {
+		return pvetransport.Trust{}, err
+	}
+	return s.pvePinnedTrust(ctx, rm)
+}
+
+// pvePinnedTrust returns the pinned transport trust of rm, unfenced; every
+// connection uses it through pveReadTrust. A standalone remote
 // is pinned to its leaf fingerprint. A cluster is pinned to its CA, whose
 // certificate the registry does not store: the executor fetches the
 // presented chains credential-free and uses the self-signed certificate
 // whose SHA-256 equals the pin. If endpoints answer but none presents it,
 // the trust identity changed.
-func (s *Service) pveReadTrust(ctx context.Context, rm executordb.PveRemote) (pvetransport.Trust, error) {
+func (s *Service) pvePinnedTrust(ctx context.Context, rm executordb.PveRemote) (pvetransport.Trust, error) {
 	raw, err := hex.DecodeString(rm.TrustPin)
 	if err != nil || len(raw) != 32 {
 		return pvetransport.Trust{}, errPveReadTrust
