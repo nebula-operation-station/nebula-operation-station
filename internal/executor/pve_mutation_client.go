@@ -109,52 +109,75 @@ func pveTrustKeyOf(rm executordb.PveRemote) pveTrustKey {
 // re-pinned the remote since, and drops the entry. The fence is in memory
 // only: after a restart the pin check fails again on the next connection
 // and the block is retried there.
+//
+// Each entry also keeps who detected the failure (an admin, or
+// pveExecutorActor), so a fence retry records the block in their name,
+// whichever connection retries it.
 type pveTrustFence struct {
 	mu     sync.Mutex
-	failed map[string]pveTrustKey // remote ID -> failed trust
+	failed map[string]pveTrustFenceEntry // remote ID -> failed trust
 }
 
-// add fences the trust of rm. An entry of a newer generation is kept: it
-// covers rm's older record too.
-func (f *pveTrustFence) add(rm executordb.PveRemote) {
+// pveTrustFenceEntry is one fenced trust and who detected its failure.
+type pveTrustFenceEntry struct {
+	key pveTrustKey
+	by  string
+}
+
+// add fences the trust of rm, whose failure by detected (an empty by is
+// recorded as pveExecutorActor). An entry of a newer generation is kept:
+// it covers rm's older record too. An entry of the same trust keeps its
+// first detector.
+func (f *pveTrustFence) add(rm executordb.PveRemote, by string) {
+	if by == "" {
+		by = pveExecutorActor
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failed == nil {
-		f.failed = map[string]pveTrustKey{}
+		f.failed = map[string]pveTrustFenceEntry{}
 	}
-	if k, ok := f.failed[rm.RemoteID]; ok && k.generation > rm.TrustGeneration {
+	k := pveTrustKeyOf(rm)
+	if e, ok := f.failed[rm.RemoteID]; ok && (e.key.generation > rm.TrustGeneration || e.key == k) {
 		return
 	}
-	f.failed[rm.RemoteID] = pveTrustKeyOf(rm)
+	f.failed[rm.RemoteID] = pveTrustFenceEntry{key: k, by: by}
 }
 
-// covers reports whether rm is fenced and returns the fenced trust. A
-// record of the failed generation is fenced also if its pin differs (that
-// cannot come from a re-pin, so it fails closed). A record of a newer
-// generation drops the entry and is not fenced. A nil fence covers
-// nothing.
+// covers reports whether rm is fenced and returns the fenced trust
+// (lookup).
 func (f *pveTrustFence) covers(rm executordb.PveRemote) (pveTrustKey, bool) {
+	k, _, ok := f.lookup(rm)
+	return k, ok
+}
+
+// lookup reports whether rm is fenced and returns the fenced trust and
+// who detected its failure. A record of the failed generation is fenced
+// also if its pin differs (that cannot come from a re-pin, so it fails
+// closed). A record of a newer generation drops the entry and is not
+// fenced. A nil fence covers nothing.
+func (f *pveTrustFence) lookup(rm executordb.PveRemote) (pveTrustKey, string, bool) {
 	if f == nil {
-		return pveTrustKey{}, false
+		return pveTrustKey{}, "", false
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	k, ok := f.failed[rm.RemoteID]
+	e, ok := f.failed[rm.RemoteID]
 	if !ok {
-		return pveTrustKey{}, false
+		return pveTrustKey{}, "", false
 	}
-	if rm.TrustGeneration > k.generation {
+	if rm.TrustGeneration > e.key.generation {
 		delete(f.failed, rm.RemoteID)
-		return pveTrustKey{}, false
+		return pveTrustKey{}, "", false
 	}
-	return k, true
+	return e.key, e.by, true
 }
 
 // remove drops the entry of remoteID if it still fences k.
 func (f *pveTrustFence) remove(remoteID string, k pveTrustKey) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.failed[remoteID] == k {
+	if e, ok := f.failed[remoteID]; ok && e.key == k {
 		delete(f.failed, remoteID)
 	}
 }
