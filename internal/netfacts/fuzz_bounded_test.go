@@ -266,6 +266,7 @@ func FuzzParseLinksBounds(f *testing.F) {
 	f.Add([]byte(`[{"ifname":"eth0.100","address":"bc:24:11:aa:bb:cc","link":"eth0","linkinfo":{"info_kind":"vlan","info_data":{"id":100}}}]`))
 	f.Add([]byte(`[{"ifname":"tap101","master":"vmbr0","linkinfo":{"info_kind":"tun"}}]`))
 	f.Add([]byte(`[{"ifname":"eth0","linkinfo":{"info_kind":"vlan","info_data":{"id":99999}}}]`))
+	f.Add([]byte(`[{"ifname":"vx0","linkinfo":{"info_kind":"vxlan","info_data":{"id":100}}},{"ifname":"sit0","address":"0.0.0.0"}]`))
 	f.Add([]byte(fmt.Sprintf(`[{"ifname":"eth0","linkinfo":{"info_kind":"%s"}}]`, strings.Repeat("a", maxKindLen+1))))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		res, err := ParseLinks(b)
@@ -283,8 +284,11 @@ func FuzzParseLinksBounds(f *testing.F) {
 			if len(l.MAC) != 0 && len(l.MAC) != 6 {
 				t.Fatalf("link MAC has %d bytes, want 0 or 6", len(l.MAC))
 			}
-			if l.VLANID != nil && (*l.VLANID < 0 || *l.VLANID > maxVLANID) {
-				t.Fatalf("link VLAN id %d out of range 0..%d", *l.VLANID, maxVLANID)
+			if l.VLANID != nil && (*l.VLANID < minVLANID || *l.VLANID > maxVLANID) {
+				t.Fatalf("link VLAN id %d out of range %d..%d", *l.VLANID, minVLANID, maxVLANID)
+			}
+			if l.VLANID != nil && l.Kind != "vlan" {
+				t.Fatalf("link %s of kind %q has a VLAN id", l.Name, l.Kind)
 			}
 			if l.Parent != "" {
 				oracleIfName(t, "link parent", l.Parent)
@@ -300,7 +304,7 @@ func FuzzParseLinksBounds(f *testing.F) {
 }
 
 // FuzzParseBridgeVLANBounds checks the hard bounds of ParseBridgeVLAN on
-// arbitrary input: no panic, bounded port and per-port VLAN counts, every
+// arbitrary input: no panic, bounded port and total VLAN counts, every
 // returned field within its documented limits.
 func FuzzParseBridgeVLANBounds(f *testing.F) {
 	for _, s := range netfactsFuzzSeeds("proxmox-bridgevlan.json", "proxmox-bridgevlan-flat.json", "ubuntu-bridgevlan.json", "docker-bridgevlan.json", "malformed-bridgevlan.json") {
@@ -312,6 +316,7 @@ func FuzzParseBridgeVLANBounds(f *testing.F) {
 	f.Add([]byte(`[{"ifname":"eth0","vlans":[{"vlan":1,"flags":["PVID","Egress Untagged"]},{"vlan":100}]}]`))
 	f.Add([]byte(`[{"ifname":"eth0","vlan":1,"flags":["PVID","Egress Untagged"]}]`))
 	f.Add([]byte(`[{"ifname":"eth0","vlans":[{"vlan":4096},{"vlan":-1},{"vlan":100,"vlanEnd":50}]}]`))
+	f.Add([]byte(`[{"ifname":"eth0","vlans":[{"flags":["PVID"]},{"vlan":0},{"vlan":1,"vlanEnd":4094}]}]`))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		res, err := ParseBridgeVLAN(b)
 		if err != nil {
@@ -323,19 +328,21 @@ func FuzzParseBridgeVLANBounds(f *testing.F) {
 		if res.Dropped < 0 || (res.Dropped > 0 && !res.Incomplete) {
 			t.Fatalf("Dropped=%d with Incomplete=%v", res.Dropped, res.Incomplete)
 		}
+		total := 0
 		for port, vlans := range res.Ports {
 			oracleIfName(t, "bridge vlan port", port)
-			if len(vlans) > maxVLANsPerPort {
-				t.Fatalf("port %s has %d vlans, bound is %d", port, len(vlans), maxVLANsPerPort)
-			}
+			total += len(vlans)
 			for i, v := range vlans {
-				if v.ID < 0 || v.ID > maxVLANID {
-					t.Fatalf("port %s vlan has id %d out of range 0..%d", port, v.ID, maxVLANID)
+				if v.ID < minVLANID || v.ID > maxVLANID {
+					t.Fatalf("port %s vlan has id %d out of range %d..%d", port, v.ID, minVLANID, maxVLANID)
 				}
 				if i > 0 && vlans[i-1].ID >= v.ID {
 					t.Fatalf("port %s vlans not sorted by id: %d then %d", port, vlans[i-1].ID, v.ID)
 				}
 			}
+		}
+		if total > maxVLANsPerDoc {
+			t.Fatalf("bridge vlan table has %d (port, vlan) pairs, bound is %d", total, maxVLANsPerDoc)
 		}
 	})
 }

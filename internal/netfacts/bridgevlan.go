@@ -10,7 +10,7 @@ import (
 
 // BridgeVLAN is one VLAN a bridge port carries.
 type BridgeVLAN struct {
-	// ID is the 802.1Q VLAN id (0..maxVLANID).
+	// ID is the 802.1Q VLAN id (minVLANID..maxVLANID).
 	ID int
 	// PVID is true when this VLAN is the port's native (PVID) VLAN.
 	PVID bool
@@ -29,10 +29,10 @@ type BridgeVLANTable struct {
 	// Dropped counts array elements that were skipped as malformed.
 	Dropped int
 	// Incomplete is true when the host reported data the parser did not
-	// keep: a skipped element (Dropped > 0), an out-of-range VLAN id, an
-	// invalid range, or a port's VLAN list truncated at
-	// maxVLANsPerPort. An incomplete table must be presented as such,
-	// never as the complete table (spec 09).
+	// keep: a skipped element (Dropped > 0), a missing or out-of-range
+	// VLAN id, an invalid range, or VLANs dropped once the document hit
+	// maxVLANsPerDoc or maxVLANWorkPerDoc. An incomplete table must be
+	// presented as such, never as the complete table (spec 09).
 	Incomplete bool
 }
 
@@ -57,8 +57,9 @@ type bridgeVLANDoc struct {
 
 // vlanEntryDoc is one element of a port's "vlans" list. A range is
 // expressed as "vlan" (start) plus an optional "vlanEnd" (end, inclusive).
+// VLAN is nil when the key is absent; such an entry is rejected.
 type vlanEntryDoc struct {
-	VLAN    int      `json:"vlan"`
+	VLAN    *int     `json:"vlan"`
 	VLANEnd *int     `json:"vlanEnd"`
 	Flags   []string `json:"flags"`
 }
@@ -67,11 +68,13 @@ type vlanEntryDoc struct {
 //
 // Each element is a bridge port (or a single port/VLAN pair in the flat
 // shape). An element without a valid port name, or with no VLAN
-// information, is skipped and counted in Dropped. VLAN ids outside
-// 0..maxVLANID and inverted ranges are dropped; a range is expanded into
-// one VLAN per id; duplicate ids on a port are merged (flags OR'd); and a
-// port's total VLAN count (after range expansion) is truncated at
-// maxVLANsPerPort. Every such loss sets Incomplete. Input above
+// information, is skipped and counted in Dropped. Entries without a VLAN
+// id, VLAN ids outside minVLANID..maxVLANID and inverted ranges are
+// dropped; a range is expanded into one VLAN per id; duplicate ids on a
+// port are merged (flags OR'd). The document as a whole expands to at most
+// maxVLANsPerDoc distinct (port, VLAN) pairs and visits at most
+// maxVLANWorkPerDoc ids (duplicates included); VLANs beyond either budget
+// are dropped. Every such loss sets Incomplete. Input above
 // maxInputSize, a document that is not a JSON array, or an array with
 // more than maxEntries elements is an error. One bad entry never
 // discards the rest of the table.
@@ -87,12 +90,10 @@ func ParseBridgeVLAN(raw []byte) (BridgeVLANTable, error) {
 		return BridgeVLANTable{}, fmt.Errorf("bridge vlan list exceeds %d entries", maxEntries)
 	}
 	t := BridgeVLANTable{Ports: make(map[string][]BridgeVLAN)}
-	// acc collects a port's VLANs by id while parsing, so duplicates and
-	// overlapping ranges merge before the sorted slice is built.
-	acc := make(map[string]map[int]*BridgeVLAN)
-	// iters counts the total VLAN ids a port has reported (after range
-	// expansion), bounding the work a hostile port list can force.
-	iters := make(map[string]int)
+	// acc collects a port's VLAN flags by id while parsing, so duplicates
+	// and overlapping ranges merge before the sorted slice is built.
+	acc := make(map[string]map[int]vlanBits)
+	b := vlanBudget{distinct: maxVLANsPerDoc, work: maxVLANWorkPerDoc}
 	for _, e := range elems {
 		var d bridgeVLANDoc
 		if err := json.Unmarshal(e, &d); err != nil {
@@ -115,29 +116,27 @@ func ParseBridgeVLAN(raw []byte) (BridgeVLANTable, error) {
 		}
 		m := acc[d.IfName]
 		if m == nil {
-			m = make(map[int]*BridgeVLAN)
+			m = make(map[int]vlanBits)
 			acc[d.IfName] = m
 		}
-		it := iters[d.IfName]
 		if flat {
-			if lossy := addVLAN(m, d.VLAN, d.VLANEnd, d.Flags, &it); lossy {
+			if lossy := addVLAN(m, d.VLAN, d.VLANEnd, d.Flags, &b); lossy {
 				t.Incomplete = true
 			}
 		}
 		for _, en := range entries {
-			if lossy := addVLAN(m, &en.VLAN, en.VLANEnd, en.Flags, &it); lossy {
+			if lossy := addVLAN(m, en.VLAN, en.VLANEnd, en.Flags, &b); lossy {
 				t.Incomplete = true
 			}
 		}
-		iters[d.IfName] = it
 	}
 	for port, m := range acc {
 		if len(m) == 0 {
 			continue
 		}
 		vlans := make([]BridgeVLAN, 0, len(m))
-		for _, v := range m {
-			vlans = append(vlans, *v)
+		for id, bits := range m {
+			vlans = append(vlans, BridgeVLAN{ID: id, PVID: bits&vlanPVID != 0, Untagged: bits&vlanUntagged != 0})
 		}
 		sort.Slice(vlans, func(i, j int) bool { return vlans[i].ID < vlans[j].ID })
 		t.Ports[port] = vlans
@@ -145,37 +144,61 @@ func ParseBridgeVLAN(raw []byte) (BridgeVLANTable, error) {
 	return t, nil
 }
 
+// vlanBits holds a bridge port VLAN's flags while parsing.
+type vlanBits uint8
+
+const (
+	vlanPVID vlanBits = 1 << iota
+	vlanUntagged
+)
+
+// vlanBudget is the remaining per-document expansion budget of
+// ParseBridgeVLAN: distinct counts the (port, VLAN) pairs that may still be
+// added, work the ids that may still be visited (duplicates included).
+type vlanBudget struct {
+	distinct int
+	work     int
+}
+
 // addVLAN records one VLAN (or range, when end is not nil) on port m,
-// merging with any existing entry for the same id. iters counts the total
-// VLAN ids the port has reported (after range expansion) and bounds the
-// work at maxVLANsPerPort. It reports lossy=true when the start or end id
-// is out of range, the range is inverted, or the port's total VLAN count
-// was truncated at maxVLANsPerPort.
-func addVLAN(m map[int]*BridgeVLAN, start, end *int, flags []string, iters *int) (lossy bool) {
-	if start == nil || *start < 0 || *start > maxVLANID {
+// merging with any existing entry for the same id. It reports lossy=true
+// when the start id is missing, the start or end id is out of range, the
+// range is inverted, or VLANs were dropped because the document budget b
+// ran out. Only distinct new ids consume b.distinct; every visited id
+// consumes b.work.
+func addVLAN(m map[int]vlanBits, start, end *int, flags []string, b *vlanBudget) (lossy bool) {
+	if start == nil || *start < minVLANID || *start > maxVLANID {
 		return true
 	}
 	lo, hi := *start, *start
 	if end != nil {
-		if *end < 0 || *end > maxVLANID || *end < lo {
+		if *end < minVLANID || *end > maxVLANID || *end < lo {
 			return true
 		}
 		hi = *end
 	}
+	var bits vlanBits
 	pvid, untagged := vlanFlagBits(flags)
+	if pvid {
+		bits |= vlanPVID
+	}
+	if untagged {
+		bits |= vlanUntagged
+	}
 	for id := lo; id <= hi; id++ {
-		if *iters >= maxVLANsPerPort {
-			lossy = true
-			break
+		if b.work <= 0 {
+			return true
 		}
-		*iters++
-		v := m[id]
-		if v == nil {
-			v = &BridgeVLAN{ID: id}
-			m[id] = v
+		b.work--
+		old, seen := m[id]
+		if !seen {
+			if b.distinct <= 0 {
+				lossy = true
+				continue
+			}
+			b.distinct--
 		}
-		v.PVID = v.PVID || pvid
-		v.Untagged = v.Untagged || untagged
+		m[id] = old | bits
 	}
 	return lossy
 }

@@ -271,3 +271,42 @@ func TestParseAddrsRejectsNonInterfaceName(t *testing.T) {
 		})
 	}
 }
+
+func TestParseAddrsRejectsMissingPrefixLen(t *testing.T) {
+	// An addr_info entry without "prefixlen" is not a /0.
+	doc := `[{"ifname":"eth0","addr_info":[{"family":"inet","local":"10.0.0.1"},{"family":"inet6","local":"fe80::1"},{"family":"inet","local":"10.0.0.2","prefixlen":24}]}]`
+	res, err := ParseAddrs([]byte(doc))
+	if err != nil {
+		t.Fatalf("ParseAddrs: %v", err)
+	}
+	want := []netip.Prefix{netip.MustParsePrefix("10.0.0.2/24")}
+	if len(res.Entries) != 1 || !reflect.DeepEqual(res.Entries[0].Addrs, want) {
+		t.Fatalf("got %+v, want only 10.0.0.2/24", res.Entries)
+	}
+	if !res.Incomplete {
+		t.Fatal("expected Incomplete for entries without prefixlen")
+	}
+}
+
+func TestParseAddrsAcceptsNonEthernetLinkAddress(t *testing.T) {
+	// Tunnel devices print an IP literal as their link-layer address and
+	// InfiniBand a 20-byte address; neither is a MAC, neither is a loss.
+	doc := `[
+		{"ifname":"sit0","link_type":"sit","address":"0.0.0.0","operstate":"DOWN","addr_info":[]},
+		{"ifname":"ip6tnl0","link_type":"tunnel6","address":"::","operstate":"DOWN","addr_info":[]},
+		{"ifname":"gre1","link_type":"gre","address":"192.0.2.1","operstate":"UNKNOWN","addr_info":[{"family":"inet","local":"10.9.0.1","prefixlen":30}]},
+		{"ifname":"ib0","link_type":"infiniband","address":"00:00:01:04:fe:80:00:00:00:00:00:00:00:02:c9:03:00:0a:bc:de","operstate":"UP","addr_info":[]}
+	]`
+	res, err := ParseAddrs([]byte(doc))
+	if err != nil {
+		t.Fatalf("ParseAddrs: %v", err)
+	}
+	if res.Incomplete || res.Dropped != 0 || len(res.Entries) != 4 {
+		t.Fatalf("Incomplete=%v Dropped=%d entries=%d, want complete 4", res.Incomplete, res.Dropped, len(res.Entries))
+	}
+	for _, a := range res.Entries {
+		if len(a.MAC) != 0 {
+			t.Fatalf("%s: non-Ethernet address kept as MAC %v", a.Name, a.MAC)
+		}
+	}
+}

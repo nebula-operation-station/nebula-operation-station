@@ -18,8 +18,10 @@ type Link struct {
 	// prints without a "linkinfo" object, or when the reported kind is
 	// longer than maxKindLen.
 	Kind string
-	// VLANID is the 802.1Q VLAN id from linkinfo.info_data.id, when the
-	// host reported one (0..maxVLANID); nil otherwise.
+	// VLANID is the 802.1Q VLAN id of a vlan device (info_kind "vlan")
+	// from linkinfo.info_data.id, when the host reported one within
+	// minVLANID..maxVLANID; nil otherwise. The "id" of other kinds (the
+	// VNI of a vxlan or geneve device) is not a VLAN id and is ignored.
 	VLANID *int
 	// Parent is the underlying device the interface is built on, as
 	// printed in the top-level "link" field (a device name); empty when
@@ -32,7 +34,9 @@ type Link struct {
 	// bridge membership is reported.
 	Master string
 	// MAC is the link-layer address; empty when the host reported none
-	// or the reported address is not a 6-byte Ethernet MAC.
+	// or the reported address is not a 6-byte Ethernet MAC (a tunnel's IP
+	// literal or an InfiniBand address is left out without marking the
+	// table incomplete, see parseLinkLayerAddr).
 	MAC net.HardwareAddr
 }
 
@@ -44,7 +48,7 @@ type LinkTable struct {
 	Dropped int
 	// Incomplete is true when the host reported data the parser did not
 	// keep: a skipped element (Dropped > 0), an invalid link-layer
-	// address, or an out-of-range VLAN id. An incomplete table must be
+	// address, or a vlan device whose VLAN id is missing or out of range. An incomplete table must be
 	// presented as such, never as the complete table (spec 09).
 	Incomplete bool
 }
@@ -71,20 +75,24 @@ type linkInfoDoc struct {
 
 // linkDataDoc is the permissive shape of "info_data". For a vlan device it
 // carries the 802.1Q id; other kinds carry other fields, which are
-// dropped.
+// dropped. ID is nil when the key is absent; it is read only for
+// info_kind "vlan" (a vxlan or geneve "id" is a VNI).
 type linkDataDoc struct {
-	ID int `json:"id"`
+	ID *int `json:"id"`
 }
 
 // ParseLinks parses the JSON array printed by `ip -j -d link`.
 //
 // Each element is one interface. An element without a valid interface
 // name is skipped and counted in Dropped. The kind is read from
-// linkinfo.info_kind (empty for a physical interface), the VLAN id from
-// linkinfo.info_data.id (kept only when it is within 0..maxVLANID), the
+// linkinfo.info_kind (empty for a physical interface), the VLAN id of a
+// vlan device from linkinfo.info_data.id (kept only when it is present and
+// within minVLANID..maxVLANID; ignored for every other kind), the
 // parent from the top-level "link" field and the master from the top-level
 // "master" field (both device names, validated as interface names). The
-// link-layer address is kept only when it is a 6-byte Ethernet MAC. Every
+// link-layer address is kept only when it is a 6-byte Ethernet MAC
+// (another well-formed link-layer address, see parseLinkLayerAddr, is left
+// out without loss). Every
 // such loss sets Incomplete. Input above maxInputSize, a document that is
 // not a JSON array, or an array with more than maxEntries elements is an
 // error. One bad entry never discards the rest of the table.
@@ -128,9 +136,9 @@ func parseLinkEntry(e json.RawMessage) (l Link, lossy, ok bool) {
 	}
 	l = Link{Name: d.IfName}
 	if d.Address != "" {
-		if mac, err := net.ParseMAC(d.Address); err == nil && len(mac) == 6 {
-			l.MAC = mac
-		} else {
+		mac, known := parseLinkLayerAddr(d.Address)
+		l.MAC = mac
+		if !known {
 			lossy = true
 		}
 	}
@@ -157,11 +165,19 @@ func parseLinkEntry(e json.RawMessage) (l Link, lossy, ok bool) {
 		} else if d.LinkInfo.InfoKind != "" {
 			lossy = true
 		}
-		if d.LinkInfo.InfoData != nil && d.LinkInfo.InfoData.ID >= 0 && d.LinkInfo.InfoData.ID <= maxVLANID {
-			id := d.LinkInfo.InfoData.ID
-			l.VLANID = &id
-		} else if d.LinkInfo.InfoData != nil {
-			lossy = true
+		if d.LinkInfo.InfoKind == "vlan" {
+			// A vlan device always carries its id; a missing or
+			// out-of-range id is a loss.
+			var id *int
+			if d.LinkInfo.InfoData != nil {
+				id = d.LinkInfo.InfoData.ID
+			}
+			if id != nil && *id >= minVLANID && *id <= maxVLANID {
+				v := *id
+				l.VLANID = &v
+			} else {
+				lossy = true
+			}
 		}
 	}
 	return l, lossy, true

@@ -22,7 +22,7 @@ func TestParseLinksProxmox(t *testing.T) {
 	}
 	want := []Link{
 		{Name: "lo", MAC: net.HardwareAddr{0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
-		{Name: "eth0", MAC: net.HardwareAddr{0xbc, 0x24, 0x11, 0xaa, 0xbb, 0x01}},
+		{Name: "eth0", MAC: net.HardwareAddr{0xbc, 0x24, 0x11, 0xaa, 0xbb, 0x01}, Master: "vmbr0"},
 		{
 			Name:   "eth0.100",
 			MAC:    net.HardwareAddr{0xbc, 0x24, 0x11, 0xaa, 0xbb, 0x01},
@@ -41,9 +41,110 @@ func TestParseLinksProxmox(t *testing.T) {
 			Kind:   "tun",
 			Master: "vmbr0",
 		},
+		{
+			Name:   "vxlan100",
+			MAC:    net.HardwareAddr{0x5e, 0x3a, 0x91, 0x0c, 0x44, 0x01},
+			Kind:   "vxlan",
+			Master: "vmbr0",
+		},
+		{
+			Name: "vxlan10100",
+			MAC:  net.HardwareAddr{0x5e, 0x3a, 0x91, 0x0c, 0x44, 0x02},
+			Kind: "vxlan",
+		},
 	}
 	if !reflect.DeepEqual(res.Entries, want) {
 		t.Fatalf("got %+v, want %+v", res.Entries, want)
+	}
+	// Only the vlan device has a VLAN id: the bridge, tun and vxlan
+	// devices all carry an info_data object (vxlan even an "id", its VNI),
+	// which must not turn into a VLAN id.
+	for _, l := range res.Entries {
+		if l.Kind != "vlan" && l.VLANID != nil {
+			t.Fatalf("%s (kind %q) has VLANID %d, want nil", l.Name, l.Kind, *l.VLANID)
+		}
+	}
+}
+
+func TestParseLinksIgnoresIDOfNonVLANKinds(t *testing.T) {
+	for name, doc := range map[string]string{
+		"bridge":       `[{"ifname":"vmbr0","linkinfo":{"info_kind":"bridge","info_data":{"forward_delay":1500,"stp_state":0,"priority":32768}}}]`,
+		"tun":          `[{"ifname":"tap0","linkinfo":{"info_kind":"tun","info_data":{"type":"tap","pi":false,"vnet_hdr":true}}}]`,
+		"vxlan small":  `[{"ifname":"vx0","linkinfo":{"info_kind":"vxlan","info_data":{"id":42,"port":4789}}}]`,
+		"vxlan large":  `[{"ifname":"vx1","linkinfo":{"info_kind":"vxlan","info_data":{"id":10100,"port":4789}}}]`,
+		"geneve":       `[{"ifname":"gnv0","linkinfo":{"info_kind":"geneve","info_data":{"id":7,"remote":"192.0.2.1"}}}]`,
+		"empty object": `[{"ifname":"dummy0","linkinfo":{"info_kind":"dummy","info_data":{}}}]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			res, err := ParseLinks([]byte(doc))
+			if err != nil {
+				t.Fatalf("ParseLinks: %v", err)
+			}
+			if len(res.Entries) != 1 || res.Entries[0].VLANID != nil {
+				t.Fatalf("got %+v, want one entry with VLANID nil", res.Entries)
+			}
+			if res.Incomplete {
+				t.Fatal("expected complete")
+			}
+		})
+	}
+}
+
+func TestParseLinksVLANWithoutIDIsIncomplete(t *testing.T) {
+	for name, doc := range map[string]string{
+		"no info_data": `[{"ifname":"eth0.5","link":"eth0","linkinfo":{"info_kind":"vlan"}}]`,
+		"no id key":    `[{"ifname":"eth0.5","link":"eth0","linkinfo":{"info_kind":"vlan","info_data":{"protocol":"802.1Q"}}}]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			res, err := ParseLinks([]byte(doc))
+			if err != nil {
+				t.Fatalf("ParseLinks: %v", err)
+			}
+			if len(res.Entries) != 1 || res.Entries[0].VLANID != nil || res.Entries[0].Kind != "vlan" {
+				t.Fatalf("got %+v, want one vlan entry with VLANID nil", res.Entries)
+			}
+			if !res.Incomplete {
+				t.Fatal("expected Incomplete for a vlan device without id")
+			}
+		})
+	}
+}
+
+func TestParseLinksAcceptsNonEthernetLinkAddress(t *testing.T) {
+	// iproute2 prints tunnel endpoints as IP literals and other link
+	// types as hex bytes of their own length; none is a MAC, none is a
+	// loss.
+	doc := `[
+		{"ifname":"sit0","link_type":"sit","address":"0.0.0.0","linkinfo":{"info_kind":"sit"}},
+		{"ifname":"gre0","link_type":"gre","address":"0.0.0.0"},
+		{"ifname":"ip6tnl0","link_type":"tunnel6","address":"::"},
+		{"ifname":"gre1","link_type":"gre","address":"192.0.2.1"},
+		{"ifname":"ib0","link_type":"infiniband","address":"00:00:01:04:fe:80:00:00:00:00:00:00:00:02:c9:03:00:0a:bc:de"}
+	]`
+	res, err := ParseLinks([]byte(doc))
+	if err != nil {
+		t.Fatalf("ParseLinks: %v", err)
+	}
+	if res.Incomplete || res.Dropped != 0 || len(res.Entries) != 5 {
+		t.Fatalf("Incomplete=%v Dropped=%d entries=%d, want complete 5", res.Incomplete, res.Dropped, len(res.Entries))
+	}
+	for _, l := range res.Entries {
+		if len(l.MAC) != 0 {
+			t.Fatalf("%s: non-Ethernet address kept as MAC %v", l.Name, l.MAC)
+		}
+	}
+}
+
+func TestParseLinksMalformedLinkAddressIsIncomplete(t *testing.T) {
+	for _, addr := range []string{"not-a-mac", "0:1:2", "zz:zz", "00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00"} {
+		doc := `[{"ifname":"eth0","address":"` + addr + `"}]`
+		res, err := ParseLinks([]byte(doc))
+		if err != nil {
+			t.Fatalf("ParseLinks: %v", err)
+		}
+		if len(res.Entries) != 1 || len(res.Entries[0].MAC) != 0 || !res.Incomplete {
+			t.Fatalf("%q: got %+v Incomplete=%v, want MAC dropped and Incomplete", addr, res.Entries, res.Incomplete)
+		}
 	}
 }
 
@@ -125,7 +226,7 @@ func TestParseLinksMalformed(t *testing.T) {
 }
 
 func TestParseLinksExtractsVLANID(t *testing.T) {
-	for _, id := range []int{0, 1, 100, 4095} {
+	for _, id := range []int{1, 100, 4094} {
 		doc := fmt.Sprintf(`[{"ifname":"eth0.%d","link":"eth0","linkinfo":{"info_kind":"vlan","info_data":{"id":%d}}}]`, id, id)
 		res, err := ParseLinks([]byte(doc))
 		if err != nil {
@@ -141,7 +242,7 @@ func TestParseLinksExtractsVLANID(t *testing.T) {
 }
 
 func TestParseLinksDropsOutOfRangeVLANID(t *testing.T) {
-	for _, id := range []int{-1, 4096, 99999} {
+	for _, id := range []int{-1, 0, 4095, 4096, 99999} {
 		doc := fmt.Sprintf(`[{"ifname":"eth0.1","link":"eth0","linkinfo":{"info_kind":"vlan","info_data":{"id":%d}}}]`, id)
 		res, err := ParseLinks([]byte(doc))
 		if err != nil {

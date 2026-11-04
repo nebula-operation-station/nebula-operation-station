@@ -179,19 +179,143 @@ func TestParseBridgeVLANDropsOutOfRangeAndInverted(t *testing.T) {
 	}
 }
 
-func TestParseBridgeVLANTruncatesPortList(t *testing.T) {
-	// Two full ranges report 8192 VLAN ids for one port; the total is
-	// truncated at maxVLANsPerPort and the table is marked incomplete.
-	doc := fmt.Sprintf(`[{"ifname":"eth0","vlans":[{"vlan":0,"vlanEnd":%d},{"vlan":0,"vlanEnd":%d}]}]`, maxVLANID, maxVLANID)
+func TestParseBridgeVLANDropsReservedIDs(t *testing.T) {
+	// 0 and 4095 are reserved; a range touching them is dropped whole.
+	doc := `[{"ifname":"eth0","vlans":[{"vlan":0},{"vlan":4095},{"vlan":0,"vlanEnd":3},{"vlan":4090,"vlanEnd":4095},{"vlan":1},{"vlan":4094}]}]`
 	res, err := ParseBridgeVLAN([]byte(doc))
 	if err != nil {
 		t.Fatalf("ParseBridgeVLAN: %v", err)
 	}
-	if len(res.Ports["eth0"]) != maxVLANsPerPort {
-		t.Fatalf("got %d vlans, want %d", len(res.Ports["eth0"]), maxVLANsPerPort)
+	want := map[string][]BridgeVLAN{"eth0": {{ID: 1}, {ID: 4094}}}
+	if !reflect.DeepEqual(res.Ports, want) {
+		t.Fatalf("got %+v, want %+v", res.Ports, want)
 	}
 	if !res.Incomplete {
-		t.Fatal("expected Incomplete for truncation")
+		t.Fatal("expected Incomplete for reserved ids")
+	}
+}
+
+func TestParseBridgeVLANRejectsEntryWithoutVLAN(t *testing.T) {
+	// A "vlans" element without a "vlan" key is not VLAN 0.
+	doc := `[{"ifname":"eth0","vlans":[{"flags":["PVID","Egress Untagged"]},{"vlanEnd":20},{"vlan":5}]}]`
+	res, err := ParseBridgeVLAN([]byte(doc))
+	if err != nil {
+		t.Fatalf("ParseBridgeVLAN: %v", err)
+	}
+	want := map[string][]BridgeVLAN{"eth0": {{ID: 5}}}
+	if !reflect.DeepEqual(res.Ports, want) {
+		t.Fatalf("got %+v, want %+v", res.Ports, want)
+	}
+	if !res.Incomplete {
+		t.Fatal("expected Incomplete for entries without a vlan id")
+	}
+}
+
+func TestParseBridgeVLANDuplicatesDoNotTruncate(t *testing.T) {
+	// The full range reported twice plus single duplicates is still
+	// every id once: nothing is lost, so the table is complete.
+	doc := fmt.Sprintf(`[{"ifname":"eth0","vlans":[{"vlan":%d,"vlanEnd":%d},{"vlan":%d,"vlanEnd":%d,"flags":["Egress Untagged"]},{"vlan":1,"flags":["PVID"]},{"vlan":%d}]}]`,
+		minVLANID, maxVLANID, minVLANID, maxVLANID, maxVLANID)
+	res, err := ParseBridgeVLAN([]byte(doc))
+	if err != nil {
+		t.Fatalf("ParseBridgeVLAN: %v", err)
+	}
+	vlans := res.Ports["eth0"]
+	if n := maxVLANID - minVLANID + 1; len(vlans) != n {
+		t.Fatalf("got %d vlans, want %d", len(vlans), n)
+	}
+	if res.Incomplete {
+		t.Fatal("expected complete: duplicates are not a loss")
+	}
+	if v := vlans[0]; v.ID != 1 || !v.PVID || !v.Untagged {
+		t.Fatalf("vlan 1 flags not merged: %+v", v)
+	}
+	if v := vlans[len(vlans)-1]; v.ID != maxVLANID || v.PVID || !v.Untagged {
+		t.Fatalf("vlan %d flags: %+v", maxVLANID, v)
+	}
+}
+
+// fullRangePorts builds a `bridge -j vlan` document of n ports, each
+// carrying the full VLAN range once.
+func fullRangePorts(n int) []byte {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"ifname":"p%d","vlans":[{"vlan":%d,"vlanEnd":%d}]}`, i, minVLANID, maxVLANID)
+	}
+	b.WriteByte(']')
+	return []byte(b.String())
+}
+
+func pairCount(ports map[string][]BridgeVLAN) int {
+	n := 0
+	for _, v := range ports {
+		n += len(v)
+	}
+	return n
+}
+
+func TestParseBridgeVLANDocumentBudget(t *testing.T) {
+	// maxEntries ports each with the full range would expand to about
+	// 4M (port, vlan) pairs from ~55 KB of input. The document budget
+	// caps the expansion and marks the table incomplete.
+	doc := fullRangePorts(maxEntries)
+	if len(doc) > 64*1024 {
+		t.Fatalf("test document is %d bytes, expected a small input", len(doc))
+	}
+	res, err := ParseBridgeVLAN(doc)
+	if err != nil {
+		t.Fatalf("ParseBridgeVLAN: %v", err)
+	}
+	if n := pairCount(res.Ports); n != maxVLANsPerDoc {
+		t.Fatalf("got %d (port, vlan) pairs, want the budget %d", n, maxVLANsPerDoc)
+	}
+	if !res.Incomplete {
+		t.Fatal("expected Incomplete when the document budget is exhausted")
+	}
+}
+
+func TestParseBridgeVLANDocumentBudgetFitsFullPorts(t *testing.T) {
+	// A document exactly at the budget (64 ports with the full range,
+	// the Proxmox VLAN-aware default) is complete.
+	ports := maxVLANsPerDoc / (maxVLANID - minVLANID + 1)
+	res, err := ParseBridgeVLAN(fullRangePorts(ports))
+	if err != nil {
+		t.Fatalf("ParseBridgeVLAN: %v", err)
+	}
+	if res.Incomplete || len(res.Ports) != ports || pairCount(res.Ports) != ports*(maxVLANID-minVLANID+1) {
+		t.Fatalf("Incomplete=%v ports=%d pairs=%d, want complete %d full ports", res.Incomplete, len(res.Ports), pairCount(res.Ports), ports)
+	}
+}
+
+func TestParseBridgeVLANWorkBudget(t *testing.T) {
+	// One port repeating the full range: few distinct pairs, but every
+	// repetition is visited. The work budget stops the expansion.
+	reps := maxVLANWorkPerDoc/(maxVLANID-minVLANID+1) + 2
+	var b strings.Builder
+	b.WriteString(`[{"ifname":"eth0","vlans":[`)
+	for i := 0; i < reps; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"vlan":%d,"vlanEnd":%d}`, minVLANID, maxVLANID)
+	}
+	b.WriteString(`]}]`)
+	if b.Len() > maxInputSize {
+		t.Fatalf("test document is %d bytes, above maxInputSize", b.Len())
+	}
+	res, err := ParseBridgeVLAN([]byte(b.String()))
+	if err != nil {
+		t.Fatalf("ParseBridgeVLAN: %v", err)
+	}
+	if len(res.Ports["eth0"]) != maxVLANID-minVLANID+1 {
+		t.Fatalf("got %d vlans, want the full range", len(res.Ports["eth0"]))
+	}
+	if !res.Incomplete {
+		t.Fatal("expected Incomplete when the work budget is exhausted")
 	}
 }
 

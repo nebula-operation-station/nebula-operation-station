@@ -15,7 +15,9 @@ type Addr struct {
 	// validIfName).
 	Name string
 	// MAC is the link-layer address; empty when the host reported none
-	// or the reported address is not a 6-byte Ethernet MAC.
+	// or the reported address is not a 6-byte Ethernet MAC (a tunnel's IP
+	// literal or an InfiniBand address is left out without marking the
+	// table incomplete, see parseLinkLayerAddr).
 	MAC net.HardwareAddr
 	// State is the operational state the host reported (UP, DOWN,
 	// UNKNOWN, ...; see operStates); empty when the host reported none
@@ -59,7 +61,7 @@ type addrDoc struct {
 type addrInfoDoc struct {
 	Family    string `json:"family"`
 	Local     string `json:"local"`
-	PrefixLen int    `json:"prefixlen"`
+	PrefixLen *int   `json:"prefixlen"` // nil when the key is absent
 }
 
 // operStates are the operational state names iproute2 prints
@@ -80,10 +82,13 @@ var operStates = map[string]bool{
 //
 // Each element is one interface. An element without a valid interface
 // name is skipped and counted in Dropped. The link-layer address is kept
-// only when it is a 6-byte Ethernet MAC; the state only when it is a
+// only when it is a 6-byte Ethernet MAC (another well-formed link-layer
+// address, see parseLinkLayerAddr, is left out without loss); the state
+// only when it is a
 // known operational state name. Each "addr_info" entry is combined into a
 // prefix from its bare "local" address and "prefixlen"; an entry with an
-// invalid address, a prefixlen outside the address family's bit width, or
+// invalid address, a missing prefixlen or one outside the address
+// family's bit width, or
 // a family that is neither inet nor inet6 is dropped, and the list is
 // truncated at maxAddrsPerIf. Every such loss sets Incomplete. Input
 // above maxInputSize, a document that is not a JSON array, or an array
@@ -128,9 +133,9 @@ func parseAddrEntry(e json.RawMessage) (a Addr, lossy, ok bool) {
 	}
 	a = Addr{Name: d.IfName}
 	if d.Address != "" {
-		if mac, err := net.ParseMAC(d.Address); err == nil && len(mac) == 6 {
-			a.MAC = mac
-		} else {
+		mac, known := parseLinkLayerAddr(d.Address)
+		a.MAC = mac
+		if !known {
 			lossy = true
 		}
 	}
@@ -158,7 +163,7 @@ func parseAddrEntry(e json.RawMessage) (a Addr, lossy, ok bool) {
 
 // parseAddrInfo combines one "addr_info" entry into a prefix. ok is false
 // when the family is not inet/inet6, the local address is invalid, or the
-// prefixlen is outside the family's bit width.
+// prefixlen is missing or outside the family's bit width.
 func parseAddrInfo(info addrInfoDoc) (netip.Prefix, bool) {
 	ip, ok := parseHostAddr(info.Local)
 	if !ok {
@@ -179,8 +184,8 @@ func parseAddrInfo(info addrInfoDoc) (netip.Prefix, bool) {
 	default:
 		return netip.Prefix{}, false
 	}
-	if info.PrefixLen < 0 || info.PrefixLen > maxBits {
+	if info.PrefixLen == nil || *info.PrefixLen < 0 || *info.PrefixLen > maxBits {
 		return netip.Prefix{}, false
 	}
-	return netip.PrefixFrom(ip, info.PrefixLen), true
+	return netip.PrefixFrom(ip, *info.PrefixLen), true
 }

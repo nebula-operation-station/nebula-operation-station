@@ -2,7 +2,10 @@
 
 package netfacts
 
-import "net/netip"
+import (
+	"net"
+	"net/netip"
+)
 
 // Shared limits for host network facts (ADR 0009 D1, spec 09). Every value
 // read from a managed host is untrusted: bounded size, bounded count, and
@@ -36,19 +39,35 @@ const (
 	// `ip -j addr` document. A single interface carrying more than this
 	// many addresses is truncated and the table is marked incomplete.
 	maxAddrsPerIf = 1000
-	// maxVLANID bounds an 802.1Q VLAN id: the tag field is 12 bits, so a
-	// valid id is 0..4095. Host data outside this range is dropped.
-	maxVLANID = 4095
-	// maxVLANsPerPort bounds the distinct VLANs one bridge port may
-	// carry in a `bridge -j vlan` document. A port can hold at most one
-	// entry per VLAN id 0..4095, so 4096 is the protocol maximum; a
-	// larger list is truncated and the table is marked incomplete.
-	maxVLANsPerPort = 4096
+	// minVLANID and maxVLANID bound an 802.1Q VLAN id of a vlan device or
+	// a bridge port. The tag field is 12 bits, but 0 (priority tag) and
+	// 4095 are reserved: the kernel rejects them for vlan devices and the
+	// bridge carries 1..4094. Host data outside this range is dropped.
+	minVLANID = 1
+	maxVLANID = 4094
+	// maxVLANsPerDoc bounds the distinct (port, VLAN id) pairs one
+	// `bridge -j vlan` document may expand to. iproute2 prints ranges
+	// ("vlan" plus "vlanEnd"), so a small document can describe millions
+	// of pairs (1000 ports x 4094 ids); the budget caps the allocations a
+	// hostile document can force. It holds 64 ports carrying the full
+	// 1..4094 range (a Proxmox VLAN-aware bridge defaults to 2-4094 on
+	// every port). Pairs beyond the budget are dropped and the table is
+	// marked incomplete.
+	maxVLANsPerDoc = 64 * maxVLANID
+	// maxVLANWorkPerDoc bounds the VLAN ids one `bridge -j vlan` document
+	// may make the parser visit while expanding ranges, duplicates and
+	// overlaps included. It bounds the CPU a document of repeated full
+	// ranges can force once maxVLANsPerDoc no longer limits it. Expansion
+	// stops at the budget and the table is marked incomplete.
+	maxVLANWorkPerDoc = 4 * maxVLANsPerDoc
 	// maxKindLen bounds the link kind string from `ip -j -d link`
 	// (linkinfo.info_kind). Known kinds (vlan, bridge, veth, wireguard,
 	// macvlan, openvswitch, ...) are short; a longer string is not a
 	// real kind name and is dropped.
 	maxKindLen = 32
+	// maxLinkAddrLen bounds a link-layer address in bytes (MAX_ADDR_LEN in
+	// the kernel).
+	maxLinkAddrLen = 32
 )
 
 // validIfName reports whether s is an acceptable interface name: 1..
@@ -93,4 +112,46 @@ func parseHostAddr(s string) (netip.Addr, bool) {
 		return netip.Addr{}, false
 	}
 	return a, true
+}
+
+// parseLinkLayerAddr classifies the link-layer address text iproute2
+// prints for an interface (ll_addr_n2a). mac is set for a 6-byte Ethernet
+// MAC, the only kind kept. known is true when the text is either such a
+// MAC or another well-formed link-layer address iproute2 prints: an IP
+// literal for tunnel devices (sit/ipip/gre "0.0.0.0", ip6tnl "::") or
+// colon-separated hex bytes of another length (e.g. a 20-byte InfiniBand
+// address), at most maxLinkAddrLen bytes. A known non-Ethernet address is
+// not kept but is not a loss either; anything else is malformed.
+func parseLinkLayerAddr(s string) (mac net.HardwareAddr, known bool) {
+	if hw, err := net.ParseMAC(s); err == nil && len(hw) == 6 {
+		return hw, true
+	}
+	if _, ok := parseHostAddr(s); ok {
+		return nil, true
+	}
+	return nil, isHexBytes(s)
+}
+
+// isHexBytes reports whether s is 1..maxLinkAddrLen two-digit hex bytes
+// separated by colons, the form iproute2 prints for a link-layer address
+// of a non-tunnel type.
+func isHexBytes(s string) bool {
+	if len(s) < 2 || len(s) > 3*maxLinkAddrLen-1 || len(s)%3 != 2 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if i%3 == 2 {
+			if c != ':' {
+				return false
+			}
+			continue
+		}
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }
