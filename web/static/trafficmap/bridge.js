@@ -23,7 +23,8 @@ export const OUT = Object.freeze({
  * acceptMessage checks one MessageEvent. It returns null for messages that
  * are not for us (wrong source or origin), { kind, value } for valid ones
  * and { kind: "error", errors } for rejected ones. isBitmap decides whether
- * a value is a decoded ImageBitmap.
+ * a value is a decoded ImageBitmap. The bitmaps of a rejected icons message
+ * are closed, so the parent's decoded images are not leaked in the sandbox.
  */
 export function acceptMessage(ev, win, isBitmap) {
   if (!ev || ev.source !== win.parent || ev.origin !== win.location.origin) return null;
@@ -41,8 +42,21 @@ export function acceptMessage(ev, win, isBitmap) {
         return { kind: "error", errors: ["message: unsupported type"] };
     }
   } catch (err) {
+    if (type === MSG_ICONS) closeRejectedIcons(data, isBitmap);
     if (err instanceof ValidationError) return { kind: "error", errors: err.errors };
     return { kind: "error", errors: ["message: could not be processed"] };
+  }
+}
+
+// closeRejectedIcons releases the ImageBitmaps of a rejected icons message.
+// The parent decoded real images for them and they stay alive until closed,
+// so a message that is rejected (bad key, oversized, too many entries) must
+// not leak its bitmaps.
+function closeRejectedIcons(data, isBitmap) {
+  const icons = data !== null && typeof data === "object" ? data.icons : undefined;
+  if (icons === null || typeof icons !== "object" || Array.isArray(icons)) return;
+  for (const v of Object.values(icons)) {
+    if (isBitmap(v)) v.close();
   }
 }
 
