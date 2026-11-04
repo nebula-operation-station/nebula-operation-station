@@ -326,7 +326,20 @@ func TestDeployProposeKeepsTheAddressWhenAPermitMayExist(t *testing.T) {
 			t.Error("the address was released although the executor holds a permit")
 		}
 	})
-	t.Run("refusal", func(t *testing.T) {
+	t.Run("other refusal", func(t *testing.T) {
+		// Shown as the executor's refusal, but only the spec refusal
+		// proves that no permit exists.
+		e := newDPEnv(t)
+		e.prov.proposeErr = status.Error(codes.FailedPrecondition, "pve guest provision: the template is not prepared or changed; prepare it again")
+		code, body, _ := e.do(t, http.MethodPost, "/deployments/propose", gpFormCT, dpForm().Encode())
+		if code != http.StatusConflict || !strings.Contains(body, "the executor refused: pve guest provision: the template is not prepared") || !strings.Contains(body, "stays reserved") {
+			t.Errorf("propose = %d %q", code, body)
+		}
+		if e.addressFree(t) {
+			t.Error("the address was released after a refusal that does not prove the absence of a permit")
+		}
+	})
+	t.Run("spec refusal", func(t *testing.T) {
 		e := newDPEnv(t)
 		e.prov.proposeErr = status.Error(codes.InvalidArgument, "pve guest provision: invalid or unsupported spec, template, network, key or password id")
 		if code, body, _ := e.do(t, http.MethodPost, "/deployments/propose", gpFormCT, dpForm().Encode()); code != http.StatusConflict {
@@ -522,7 +535,9 @@ func TestDeployWithoutBatchPlannerEndsAtJoined(t *testing.T) {
 
 func TestDeploySaveAsProfileOnlyAfterTheProposal(t *testing.T) {
 	e := newDPEnv(t)
-	e.prov.proposeErr = status.Error(codes.FailedPrecondition, "pve guest provision: the template is not prepared or changed; prepare it again")
+	// The spec refusal releases the address, so the second proposal can
+	// reserve it again.
+	e.prov.proposeErr = status.Error(codes.InvalidArgument, "pve guest provision: invalid or unsupported spec, template, network, key or password id")
 	f := dpForm()
 	f.Del("profile")
 	f.Del("profile_version")

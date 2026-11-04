@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/deployprofile"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executorclient"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/ipam"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
@@ -333,10 +335,14 @@ type deployRuns struct {
 	mu   sync.Mutex
 	last map[string]time.Time
 	runs map[string]*deployRun
+	log  *slog.Logger // audit entries of settling; nil discards them
 }
 
-func newDeployRuns() *deployRuns {
-	return &deployRuns{last: map[string]time.Time{}, runs: map[string]*deployRun{}}
+func newDeployRuns(log *slog.Logger) *deployRuns {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	return &deployRuns{last: map[string]time.Time{}, runs: map[string]*deployRun{}, log: log}
 }
 
 var (
@@ -425,6 +431,10 @@ func (p *deployRuns) expire(now time.Time) {
 				x.address = ipamKept
 				x.message += "; the address " + x.ipam.GetAddress() + " stays reserved and may be in use, because the execution may have been approved and committed outside this page (nebula approve). Clear the reservation on the network page once no guest with " +
 					vmid + " exists"
+				// The run's message is pruned with the run; the audit log
+				// keeps which execution and VMID the reservation belongs to.
+				p.log.Warn("audit", "kind", "deployment_address_kept", "reason", "proposal_expired", "address", x.ipam.GetAddress(),
+					"run", x.id, "execution", x.executionID, "remote", x.form.Remote, "vmid", x.vmid, "user", x.user)
 			default:
 				x.message += "; it may have been approved and committed outside this page (nebula approve): check for a guest with " + vmid
 			}
@@ -611,7 +621,7 @@ func (h *Handler) handleDeployWizard(w http.ResponseWriter, r *http.Request) {
 	if !h.deployEnabled(w, r) {
 		return
 	}
-	// Expired proposals free their addresses before the suggestion.
+	// Settle expired runs before the suggestion; expiry keeps addresses.
 	h.settleDeployRuns()
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
 	defer cancel()
@@ -1175,8 +1185,8 @@ func (h *Handler) handleDeployPropose(w http.ResponseWriter, r *http.Request) {
 		spec.Ipam = b
 	}
 	// release clears the reservation once, bounded, when the executor
-	// refused the proposal: it then holds no permit (it releases the VMID
-	// too), so no guest can be created with the address.
+	// refused the proposal before registering a permit (proposeRefused),
+	// so no guest can be created with the address.
 	release := func() {
 		if !reserved.IsValid() {
 			return
@@ -1201,13 +1211,22 @@ func (h *Handler) handleDeployPropose(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.deploy.ProposePVEGuestProvision(ctx, &pb.ProposePVEGuestProvisionRequest{Spec: spec})
 	if err != nil {
-		if !proposeRefused(err) {
-			h.log.Error("propose guest provision", "error", err)
-			http.Error(w, "the executor did not confirm the proposal (unavailable or busy); its outcome is unknown"+keep(""), http.StatusBadGateway)
+		if proposeRefused(err) {
+			release()
+			h.guestPowerRefusal(w, "propose guest provision", err)
 			return
 		}
-		release()
-		h.guestPowerRefusal(w, "propose guest provision", err)
+		h.log.Error("propose guest provision", "error", err)
+		// Any other answer keeps the address; a refusal is still shown as
+		// such.
+		st, _ := status.FromError(err)
+		switch st.Code() {
+		case codes.InvalidArgument, codes.FailedPrecondition, codes.PermissionDenied, codes.ResourceExhausted,
+			codes.AlreadyExists, codes.NotFound, codes.Aborted:
+			http.Error(w, "the executor refused: "+cleanText(st.Message())+keep(""), http.StatusConflict)
+		default:
+			http.Error(w, "the executor did not confirm the proposal (unavailable or busy); its outcome is unknown"+keep(""), http.StatusBadGateway)
+		}
 		return
 	}
 	run := &deployRun{id: id, user: user, created: now, form: form, spec: spec, ipam: spec.GetIpam(), plan: plan,
@@ -1284,23 +1303,35 @@ func (h *Handler) handleDeployPropose(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/deployments/"+id, http.StatusSeeOther)
 }
 
-// proposeRefused reports whether a ProposePVEGuestProvision error is the
-// executor's refusal. A refusal leaves no runnable permit: the executor
-// returns an error only before the permit is registered, or after
-// releasing the VMID the commit requires. The codes gRPC itself produces
-// for a call whose response was lost (unavailable, deadline, cancelled,
-// unknown, internal, a response too large) leave the outcome unknown: the
-// executor may hold an approvable permit.
+// proposeSpecRefusal is the status message of the executor's one
+// propose refusal this page releases an address for: InvalidArgument from
+// pveGuestProvisionRPCError (internal/executor/pve_rpc.go). The executor
+// returns it only from the request decoding and the provisioner's proposal
+// request, both before the authority registers a permit; the step after
+// the registration (the permit response) fails with Internal only.
+const proposeSpecRefusal = "pve guest provision: invalid or unsupported spec, template, network, key or password id"
+
+// proposeRefused reports whether a ProposePVEGuestProvision error proves
+// that the executor holds no permit for the proposal, so the address can
+// be released. It is an allowlist of exactly one answer: the executor's
+// spec refusal (proposeSpecRefusal), sent as such or mapped by
+// executorclient as invalid_request. Everything else keeps the address:
+// any other code (a lost response, a timeout, a permit or authority
+// refusal, an executor-defined code), a refusal the client reports as a
+// deadline, an error wrapped with other text and a non-status error. The
+// response step after the registration in particular (Internal) may leave
+// an approvable permit whose VMID release failed. Leaking a reservation is
+// acceptable; releasing an address a guest may use is not.
 func proposeRefused(err error) bool {
+	var ce *executorclient.Error
+	if errors.As(err, &ce) {
+		if !errors.Is(ce, executorclient.ErrInvalidRequest) || ce.Detail != proposeSpecRefusal {
+			return false
+		}
+		err = ce.Unwrap()
+	}
 	st, ok := status.FromError(err)
-	if !ok {
-		return false
-	}
-	switch st.Code() {
-	case codes.OK, codes.Unavailable, codes.DeadlineExceeded, codes.Canceled, codes.Unknown, codes.Internal, codes.ResourceExhausted, codes.DataLoss:
-		return false
-	}
-	return true
+	return ok && st.Code() == codes.InvalidArgument && st.Message() == proposeSpecRefusal
 }
 
 // deployInputError answers a form error as 400 and anything else as 500.
