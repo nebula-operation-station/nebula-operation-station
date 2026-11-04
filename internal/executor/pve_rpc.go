@@ -101,55 +101,56 @@ func (s *Service) newPveMutationClient() *pveMutationClient {
 // that trust when the block cannot be recorded, and logs a failing step.
 // It returns the error of blockPveMutation (nil when the block is
 // recorded and the authority revoked, or the failure was superseded).
-// The block is recorded as by the executor (pveExecutorActor).
+// The block (and the fence entry) is recorded as by the executor
+// (pveExecutorActor).
 func (s *Service) pveTrustFailed(rm executordb.PveRemote) error {
-	return s.pveTrustFailedWith(rm, s.blockPveMutation)
+	return s.pveTrustFailedWith(rm, pveExecutorActor, s.blockPveMutation)
 }
 
 // pveTrustFailedLocked is pveTrustFailed for a caller that holds s.pveMu
 // (the PVE admin RPCs). by is the admin whose request detected the
-// failure; the block is recorded in their name.
+// failure; the block is recorded in their name, and so is the fence
+// entry, so a later fence retry records it in their name too.
 func (s *Service) pveTrustFailedLocked(rm executordb.PveRemote, by string) error {
-	return s.pveTrustFailedWith(rm, func(remoteID string, failed pveTrustKey) error {
-		return s.blockPveMutationLocked(remoteID, failed, by)
-	})
+	return s.pveTrustFailedWith(rm, by, s.blockPveMutationLocked)
 }
 
-func (s *Service) pveTrustFailedWith(rm executordb.PveRemote, block func(string, pveTrustKey) error) error {
-	err := block(rm.RemoteID, pveTrustKeyOf(rm))
+func (s *Service) pveTrustFailedWith(rm executordb.PveRemote, by string, block func(string, pveTrustKey, string) error) error {
+	err := block(rm.RemoteID, pveTrustKeyOf(rm), by)
 	if errors.Is(err, errPveTrustBlockNotRecorded) {
-		s.pveTrustFence().add(rm)
+		s.pveTrustFence().add(rm, by)
 	}
 	s.logPveMutationBlock(rm.RemoteID, err)
 	return err
 }
 
 // pveTrustFenceGate refuses a connection to rm while its trust is fenced
-// (pveTrustFence). It first retries the block of the fenced trust: while
-// that still fails, the error wraps errPveTrustBlockNotRecorded; once it
-// is recorded (or superseded by a re-pin), the entry is dropped and this
-// call is still refused, since rm predates the block or the re-pin. Every
-// refusal wraps errPveTrustFenced.
+// (pveTrustFence). It first retries the block of the fenced trust, in the
+// name of who detected the failure (kept with the fence entry), not of
+// the connection that retries it: while that still fails, the error
+// wraps errPveTrustBlockNotRecorded; once it is recorded (or superseded
+// by a re-pin), the entry is dropped and this call is still refused,
+// since rm predates the block or the re-pin. Every refusal wraps
+// errPveTrustFenced.
 func (s *Service) pveTrustFenceGate(rm executordb.PveRemote) error {
 	return s.pveTrustFenceGateWith(rm, s.blockPveMutation)
 }
 
 // pveTrustFenceGateLocked is pveTrustFenceGate for a caller that holds
 // s.pveMu (the PVE admin RPCs). A block it records retries an earlier
-// failure, so it is recorded as by the executor, like pveTrustFenceGate.
+// failure, so, like pveTrustFenceGate, it is recorded in the name of who
+// detected that failure, not of the admin whose request retries it.
 func (s *Service) pveTrustFenceGateLocked(rm executordb.PveRemote) error {
-	return s.pveTrustFenceGateWith(rm, func(remoteID string, failed pveTrustKey) error {
-		return s.blockPveMutationLocked(remoteID, failed, pveExecutorActor)
-	})
+	return s.pveTrustFenceGateWith(rm, s.blockPveMutationLocked)
 }
 
-func (s *Service) pveTrustFenceGateWith(rm executordb.PveRemote, block func(string, pveTrustKey) error) error {
+func (s *Service) pveTrustFenceGateWith(rm executordb.PveRemote, block func(string, pveTrustKey, string) error) error {
 	f := s.pveTrustFence()
-	k, ok := f.covers(rm)
+	k, by, ok := f.lookup(rm)
 	if !ok {
 		return nil
 	}
-	err := block(rm.RemoteID, k)
+	err := block(rm.RemoteID, k, by)
 	s.logPveMutationBlock(rm.RemoteID, err)
 	if errors.Is(err, errPveTrustBlockNotRecorded) {
 		return fmt.Errorf("pve remote %s: %w: %w", rm.RemoteID, errPveTrustFenced, errPveTrustBlockNotRecorded)
@@ -215,15 +216,17 @@ func (s *Service) checkPveTrustFence(op, remoteID string) error {
 // revoking the authority failed, it wraps errPveTrustAuthorityNotRevoked
 // (mutation permits are revoked in memory either way).
 //
-// The block is recorded as by the executor (pveExecutorActor).
-func (s *Service) blockPveMutation(remoteID string, failed pveTrustKey) error {
+// by names who detected the failure (an admin, or pveExecutorActor) and
+// is recorded as the block's blocked_by.
+func (s *Service) blockPveMutation(remoteID string, failed pveTrustKey, by string) error {
 	s.pveMu.Lock()
 	defer s.pveMu.Unlock()
-	return s.blockPveMutationLocked(remoteID, failed, pveExecutorActor)
+	return s.blockPveMutationLocked(remoteID, failed, by)
 }
 
 // pveExecutorActor is the blocked_by of a trust block that the executor's
-// own connections (reads, mutations, fence retries) record.
+// own connections (reads, mutations) detect, also when a fence retry on
+// any connection records it later.
 const pveExecutorActor = "executor"
 
 // blockPveMutationLocked is blockPveMutation for a caller that holds

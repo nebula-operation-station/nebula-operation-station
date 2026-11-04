@@ -752,7 +752,7 @@ func TestPveMutationClientTrustHookRevokesAuthority(t *testing.T) {
 		t.Fatalf("%d mutation permits of the blocked remote still live", n)
 	}
 	// A second trust failure of the now blocked remote is not a failure.
-	if err := e.svc.blockPveMutation(pveReadRemote, pveTrustKeyOf(rm)); err != nil {
+	if err := e.svc.blockPveMutation(pveReadRemote, pveTrustKeyOf(rm), pveExecutorActor); err != nil {
 		t.Fatalf("block of a blocked remote: %v", err)
 	}
 }
@@ -782,7 +782,7 @@ func TestPveMutationClientUnrecordedBlockFailsClosed(t *testing.T) {
 	if n := e.svc.auth.RevokeProviderMutations(pveReadRemote, "test probe"); n != 0 {
 		t.Fatalf("%d mutation permits live after an unrecorded block", n)
 	}
-	if err := e.svc.blockPveMutation(pveReadRemote, pveTrustKeyOf(rm)); !errors.Is(err, errPveTrustBlockNotRecorded) {
+	if err := e.svc.blockPveMutation(pveReadRemote, pveTrustKeyOf(rm), pveExecutorActor); !errors.Is(err, errPveTrustBlockNotRecorded) {
 		t.Fatalf("failing block store: %v", err)
 	}
 	// Proposals against the fenced trust are refused and audited.
@@ -902,8 +902,8 @@ func TestPveTrustFenceCoversOnlyTheFailedTrust(t *testing.T) {
 		t.Fatal("nil fence covers")
 	}
 	f := &pveTrustFence{}
-	f.add(failed)
-	f.add(at("pve-a", failed.TrustPin, 2)) // a stale failure keeps the newer entry
+	f.add(failed, pveExecutorActor)
+	f.add(at("pve-a", failed.TrustPin, 2), pveExecutorActor) // a stale failure keeps the newer entry
 	for _, tc := range []struct {
 		name string
 		rm   executordb.PveRemote
@@ -986,7 +986,7 @@ func TestPveRepinClearsUnrecordedTrustFence(t *testing.T) {
 		t.Fatalf("re-pinned remote: %+v %v %v", repinned, ok, err)
 	}
 	// The old failure, retried, does not block the re-pinned remote.
-	if err := e.svc.blockPveMutation(pveReadRemote, pveTrustKeyOf(rm)); err != nil {
+	if err := e.svc.blockPveMutation(pveReadRemote, pveTrustKeyOf(rm), pveExecutorActor); err != nil {
 		t.Fatalf("retried block of the superseded trust: %v", err)
 	}
 	if got := remoteState(t, db, pveReadRemote); got != executordb.StateActive {
@@ -1035,7 +1035,7 @@ func TestPveBlockReportsFailedRevocationPrecisely(t *testing.T) {
 	if _, fenced := e.svc.pveTrustFence().covers(rm); fenced {
 		t.Fatal("recorded block fenced as unrecorded")
 	}
-	err := e.svc.blockPveMutation(pveReadRemote, pveTrustKeyOf(rm))
+	err := e.svc.blockPveMutation(pveReadRemote, pveTrustKeyOf(rm), pveExecutorActor)
 	if !errors.Is(err, errPveTrustAuthorityNotRevoked) || errors.Is(err, errPveTrustBlockNotRecorded) {
 		t.Fatalf("block with failing revocation: %v", err)
 	}
