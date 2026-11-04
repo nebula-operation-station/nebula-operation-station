@@ -32,8 +32,8 @@ export function segmentVisible(ax, ay, bx, by, w, h, margin) {
  * createCanvas2DBackend returns a backend drawing into canvas, or null if
  * no 2D context can be created. Backend interface (shared with WebGL2):
  *   name, setScene(scene), render(cam, dpr, time) -> bool, isLost(),
- *   dispose(). render returns whether the frame was actually drawn, so
- *   the loop can tell a drawn frame apart from a skipped one.
+ *   dispose(). render returns whether a scene was actually drawn (false
+ *   before the first scene, or after a failed upload on WebGL2).
  */
 export function createCanvas2DBackend(canvas) {
   const ctx = canvas.getContext("2d", { alpha: false });
