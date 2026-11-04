@@ -84,7 +84,7 @@ func openSpool(root string, writer bool) (*Spool, error) {
 	}
 	fail := func(err error) (*Spool, error) { dir.Close(); return nil, err }
 	if writer {
-		if err := dir.Chmod(spoolRootMode); err != nil {
+		if err := ensureDirMode(dir, spoolRootMode); err != nil {
 			return fail(fmt.Errorf("pvecollect: chmod spool root: %w", err))
 		}
 		if err := unix.Mkdirat(int(dir.Fd()), resultsDirName, 0o770); err != nil && !errors.Is(err, unix.EEXIST) {
@@ -97,7 +97,7 @@ func openSpool(root string, writer bool) (*Spool, error) {
 	}
 	results := os.NewFile(uintptr(fd), resultsDirName)
 	if writer {
-		if err := results.Chmod(spoolDirMode); err != nil {
+		if err := ensureDirMode(results, spoolDirMode); err != nil {
 			results.Close()
 			return fail(err)
 		}
@@ -441,4 +441,33 @@ func (s *Spool) Remove(_ context.Context, name string) error {
 		return errors.New("pvecollect: nonregular spool file")
 	}
 	return unix.Unlinkat(int(s.resultsDir.Fd()), name, 0)
+}
+
+// chmodDir changes an open directory's mode. It is a variable so that tests
+// can simulate the EPERM that the collector's systemd hardening returns.
+var chmodDir = func(dir *os.File, mode os.FileMode) error { return dir.Chmod(mode) }
+
+// dirModeMask covers the mode bits ensureDirMode compares.
+const dirModeMask = os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky
+
+// ensureDirMode leaves an open directory that already has exactly want
+// (permission bits plus setgid) untouched and changes it otherwise. The
+// collector's unit sets RestrictSUIDSGID=yes, under which every chmod that
+// sets the setgid bit fails with EPERM, even when the bit is already set.
+// Deployments therefore create the spool directories with their final
+// modes (install.sh, the container image), and a running collector never
+// needs to change them.
+func ensureDirMode(dir *os.File, want os.FileMode) error {
+	fi, err := dir.Stat()
+	if err != nil {
+		return err
+	}
+	got := fi.Mode() & dirModeMask
+	if got == want {
+		return nil
+	}
+	if err := chmodDir(dir, want); err != nil {
+		return fmt.Errorf("%s has mode %v, want %v (create it with install.sh): %w", dir.Name(), got, want, err)
+	}
+	return nil
 }

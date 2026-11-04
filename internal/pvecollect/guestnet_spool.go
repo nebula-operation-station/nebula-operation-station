@@ -60,7 +60,7 @@ func (s *Spool) guestNetDir() (*os.File, error) {
 	}
 	dir := os.NewFile(uintptr(fd), guestNetDirName)
 	if s.writer {
-		if err := dir.Chmod(spoolDirMode); err != nil {
+		if err := ensureDirMode(dir, spoolDirMode); err != nil {
 			dir.Close()
 			return nil, fmt.Errorf("pvecollect: chmod guest nic directory: %w", err)
 		}
