@@ -353,13 +353,29 @@ func authoritative(e *Endpoint, own Identity, ownAddrs []netip.Addr) bool {
 // (at most the retention) before the server's first receipt of this
 // reporter's report for the endpoint.
 //
+// An address is held by one host at a time (the caller leaves out
+// addresses more than one host claims), so when the owner attests an
+// address, other owners' attestations of it are stale: they are removed,
+// and a MAC-less endpoint left without an attested address loses its
+// owner. Lookups therefore never see an address attested by two
+// different owners. Owners that stop reporting are reconciled by
+// ReconcileIdentities.
+//
+// An authoritative MAC observation whose addresses are all outside
+// own.Addrs still creates (or keeps) the owned endpoint, with no attested
+// address: the MAC alone attests it, it resolves by MAC, never by
+// address, and non-owners' addresses do not attach to it. There is at
+// most one such endpoint per MAC in own.MACs (MaxIdentityMACs), within
+// the endpoint caps.
+//
 // A new endpoint is refused with ErrLimit when it would exceed
 // MaxEndpoints in total; joining or creating an endpoint is refused when
 // the reporter already sees MaxEndpointsPerReporter endpoints (ADR 0009
-// D7). Joining an endpoint that has MaxReportersPerEndpoint reporters is
-// refused for a non-owner; the owner is always admitted, and the least
-// recently seen other reporter's observation is evicted to make room.
-// Apart from that eviction, other reporters' rows are never evicted.
+// D7). The seen-by set holds at most MaxReportersPerEndpoint reporters
+// besides the owner: a non-owner is refused beyond that, and one slot is
+// reserved for the owner, which is always admitted. Other reporters'
+// rows are never evicted (a former owner keeps its row as an ordinary
+// reporter; until such rows expire, further non-owners are refused).
 //
 // LastSeen must lie within the retention window and at most
 // maxClockSkew in the future. e.HostID and e.IPAMAssetID must be empty:
@@ -469,12 +485,15 @@ func (s *Store) UpsertEndpoint(ctx context.Context, e Endpoint, own Identity) er
 				}
 			}
 			addrs = attested
+			if err := releaseAttested(ctx, tx, m.id, e.Reporter, attested); err != nil {
+				return err
+			}
 		case e.MAC == "" && (mac != "" || owner != ""):
 			if addrs, err = knownAddresses(ctx, tx, m.id, owner, addrs); err != nil {
 				return err
 			}
 		}
-		return s.joinEndpoint(ctx, tx, m.id, e.Reporter, owner == e.Reporter, obs, addrs)
+		return s.joinEndpoint(ctx, tx, m.id, e.Reporter, owner, obs, addrs)
 	})
 }
 
@@ -541,7 +560,49 @@ func (s *Store) insertEndpoint(ctx context.Context, tx *sql.Tx, e *Endpoint, own
 	if err := insertReporter(ctx, tx, id, e.Reporter, obs); err != nil {
 		return err
 	}
+	if owner != "" {
+		if err := releaseAttested(ctx, tx, id, owner, addrs); err != nil {
+			return err
+		}
+	}
 	return addEndpointAddresses(ctx, tx, id, e.Reporter, addrs)
+}
+
+// releaseAttested removes the attestations of addrs by the owners of
+// endpoints other than id and other than owner: owner holds them by the
+// server's current records, which give an address to one host only, so
+// those attestations are stale. A MAC-less endpoint left without any
+// address attested by its owner loses its owner.
+func releaseAttested(ctx context.Context, tx *sql.Tx, id, owner string, addrs []netip.Addr) error {
+	if len(addrs) == 0 {
+		return nil
+	}
+	placeholders, args := addrArgs(addrs)
+	rows, err := tx.QueryContext(ctx, releaseAttestedSQL(placeholders),
+		append(args, id, owner)...)
+	if err != nil {
+		return fmt.Errorf("trafficstore: release stale attestations: %w", err)
+	}
+	defer rows.Close()
+	var released []string
+	for rows.Next() {
+		var eid string
+		if err := rows.Scan(&eid); err != nil {
+			return fmt.Errorf("trafficstore: release stale attestations: %w", err)
+		}
+		if !slices.Contains(released, eid) {
+			released = append(released, eid)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("trafficstore: release stale attestations: %w", err)
+	}
+	for _, eid := range released {
+		if _, err := tx.ExecContext(ctx, clearUnattestedOwnerSQL, eid); err != nil {
+			return fmt.Errorf("trafficstore: clear owner of endpoint %s: %w", eid, err)
+		}
+	}
+	return nil
 }
 
 // insertReporter adds reporter's seen-by row to endpoint id.
@@ -570,11 +631,12 @@ func (s *Store) checkReporterCap(ctx context.Context, tx *sql.Tx, reporter strin
 }
 
 // joinEndpoint records reporter's observation of endpoint id: it adds or
-// updates the reporter's seen-by row and attaches addrs. isOwner reports
-// whether reporter is the endpoint's owner: an owner is never refused at
-// MaxReportersPerEndpoint; the least recently seen other reporter is
-// evicted to make room.
-func (s *Store) joinEndpoint(ctx context.Context, tx *sql.Tx, id, reporter string, isOwner bool, obs reporterObs, addrs []netip.Addr) error {
+// updates the reporter's seen-by row and attaches addrs. owner is the
+// endpoint's owner ("" when none): a non-owner is refused when the
+// endpoint already has MaxReportersPerEndpoint reporters besides the
+// owner; the owner has a reserved slot and is always admitted. No row is
+// ever evicted.
+func (s *Store) joinEndpoint(ctx context.Context, tx *sql.Tx, id, reporter, owner string, obs reporterObs, addrs []netip.Addr) error {
 	// first_seen keeps the minimum, bounded below by lead before the
 	// server's first receipt (first_ingest), or the reported last_seen
 	// when that is earlier.
@@ -596,20 +658,17 @@ func (s *Store) joinEndpoint(ctx context.Context, tx *sql.Tx, id, reporter strin
 		return fmt.Errorf("trafficstore: update endpoint %s reporter: %w", id, err)
 	}
 	if n == 0 {
-		var reporters int
-		if err := tx.QueryRowContext(ctx, countReportersSQL, id).Scan(&reporters); err != nil {
-			return fmt.Errorf("trafficstore: count reporters of endpoint %s: %w", id, err)
-		}
-		if reporters >= MaxReportersPerEndpoint && !isOwner {
-			return fmt.Errorf("%w: endpoint %s already has %d reporters, limit %d", ErrLimit, id, reporters, MaxReportersPerEndpoint)
+		if reporter != owner {
+			var others int
+			if err := tx.QueryRowContext(ctx, countNonOwnersSQL, id, owner).Scan(&others); err != nil {
+				return fmt.Errorf("trafficstore: count reporters of endpoint %s: %w", id, err)
+			}
+			if others >= MaxReportersPerEndpoint {
+				return fmt.Errorf("%w: endpoint %s already has %d reporters besides its owner, limit %d", ErrLimit, id, others, MaxReportersPerEndpoint)
+			}
 		}
 		if err := s.checkReporterCap(ctx, tx, reporter); err != nil {
 			return err
-		}
-		for ; reporters >= MaxReportersPerEndpoint; reporters-- {
-			if err := evictOldestReporter(ctx, tx, id, reporter); err != nil {
-				return err
-			}
 		}
 		if err := insertReporter(ctx, tx, id, reporter, obs); err != nil {
 			return err
@@ -643,18 +702,34 @@ const (
 	// condition (mac != ''), so SQLite can use idx_net_endpoints_mac.
 	findByMACSQL   = `SELECT id, mac, owner FROM net_endpoints WHERE mac = ? AND mac != ''`
 	lookupByMACSQL = `SELECT id FROM net_endpoints WHERE mac = ? AND mac != ''`
-	// countReportersSQL counts the seen-by rows of one endpoint.
-	countReportersSQL = `SELECT COUNT(*) FROM net_endpoint_reporters WHERE endpoint_id = ?`
+	// countNonOwnersSQL counts the seen-by rows of one endpoint other
+	// than its owner's (all of them for owner '').
+	countNonOwnersSQL = `
+		SELECT COUNT(*) FROM net_endpoint_reporters WHERE endpoint_id = ? AND reporter != ?`
 	// countReporterAddressesSQL counts one reporter's addresses on one
 	// endpoint.
 	countReporterAddressesSQL = `
 		SELECT COUNT(*) FROM net_endpoint_addresses WHERE endpoint_id = ? AND reporter = ?`
-	// oldestReporterSQL picks the least recently seen reporter of an
-	// endpoint other than the given one.
-	oldestReporterSQL = `
-		SELECT reporter FROM net_endpoint_reporters WHERE endpoint_id = ? AND reporter != ?
-		ORDER BY last_seen, reporter LIMIT 1`
+	// clearUnattestedOwnerSQL drops the owner of a MAC-less endpoint
+	// that has no address attested by its owner. Argument: id.
+	clearUnattestedOwnerSQL = `
+		UPDATE net_endpoints SET owner = ''
+		WHERE id = ? AND mac = '' AND owner != '' AND NOT EXISTS (
+			SELECT 1 FROM net_endpoint_addresses a
+			WHERE a.endpoint_id = net_endpoints.id AND a.reporter = net_endpoints.owner)`
 )
+
+// releaseAttestedSQL deletes the attestations of a list of addresses by
+// the owners of endpoints other than the given one and other than the
+// given owner, returning the affected endpoints. Arguments: the
+// addresses, the endpoint id, the owner.
+func releaseAttestedSQL(addrPlaceholders string) string {
+	return `
+		DELETE FROM net_endpoint_addresses
+		WHERE address IN (` + addrPlaceholders + `) AND endpoint_id != ? AND reporter != ?
+		  AND reporter = (SELECT e.owner FROM net_endpoints e WHERE e.id = net_endpoint_addresses.endpoint_id)
+		RETURNING endpoint_id`
+}
 
 // learnMACSQL selects the MAC-less endpoint a MAC observation learns its
 // MAC into: one this reporter attached one of the addresses to and that
@@ -716,20 +791,6 @@ func dropUnattestedSQL(addrPlaceholders string) string {
 	return `
 		DELETE FROM net_endpoint_addresses
 		WHERE endpoint_id = ? AND reporter = ? AND address NOT IN (` + addrPlaceholders + `)`
-}
-
-// evictOldestReporter removes the least recently seen reporter of
-// endpoint id other than keep, with its addresses.
-func evictOldestReporter(ctx context.Context, tx *sql.Tx, id, keep string) error {
-	var victim string
-	if err := tx.QueryRowContext(ctx, oldestReporterSQL, id, keep).Scan(&victim); err != nil {
-		return fmt.Errorf("trafficstore: pick reporter of endpoint %s to evict: %w", id, err)
-	}
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM net_endpoint_reporters WHERE endpoint_id = ? AND reporter = ?`, id, victim); err != nil {
-		return fmt.Errorf("trafficstore: evict reporter of endpoint %s: %w", id, err)
-	}
-	return nil
 }
 
 // findEndpoint returns the stored endpoint the observation e belongs to.

@@ -270,8 +270,11 @@ func TestOwnershipFollowsIdentity(t *testing.T) {
 func TestReportersCapKeepsSlotForOwner(t *testing.T) {
 	s, db, _ := newTestStore(t)
 	const mac = "00:11:22:33:44:55"
+	var reporters []string
 	for i := range MaxReportersPerEndpoint {
-		e := testEndpoint("10.0.0.1", mac, fmt.Sprintf("r%02d", i))
+		r := fmt.Sprintf("r%02d", i)
+		reporters = append(reporters, r)
+		e := testEndpoint("10.0.0.1", mac, r)
 		if i == 7 {
 			e.LastSeen = testNow.Add(-time.Hour)
 		}
@@ -280,15 +283,175 @@ func TestReportersCapKeepsSlotForOwner(t *testing.T) {
 	if err := s.UpsertEndpoint(context.Background(), testEndpoint("10.0.0.1", mac, "late"), Identity{}); !errors.Is(err, ErrLimit) {
 		t.Errorf("non-owner beyond the endpoint cap: err = %v, want ErrLimit", err)
 	}
-	// The authoritative reporter is admitted; the least recently seen
-	// non-owner makes room.
+	// The authoritative reporter is admitted into its reserved slot; no
+	// other reporter's observation is evicted.
 	mustUpsert(t, s, testEndpoint("10.0.0.1", mac, "owner"), hostIdentity(mac, "10.0.0.1"))
 	g := mustLookup(t, s, mac, "")
-	if g.Owner != "owner" || len(g.SeenBy) != MaxReportersPerEndpoint || slices.Contains(g.SeenBy, "r07") {
-		t.Errorf("owner %q seen by %d %v, want owner admitted and r07 evicted", g.Owner, len(g.SeenBy), g.SeenBy)
+	want := append(slices.Clone(reporters), "owner")
+	slices.Sort(want)
+	if g.Owner != "owner" || !slices.Equal(g.SeenBy, want) {
+		t.Errorf("owner %q seen by %d %v, want owner admitted and all %d others kept", g.Owner, len(g.SeenBy), g.SeenBy, MaxReportersPerEndpoint)
+	}
+	if o := observation(t, g, "r07"); !slices.Equal(o.Addresses, addrList("10.0.0.1")) {
+		t.Errorf("r07 addresses = %v, want kept", o.Addresses)
+	}
+	// The kept reporters still report; a further non-owner is refused.
+	mustUpsert(t, s, testEndpoint("10.0.0.1", mac, "r07"), Identity{})
+	if err := s.UpsertEndpoint(context.Background(), testEndpoint("10.0.0.1", mac, "late"), Identity{}); !errors.Is(err, ErrLimit) {
+		t.Errorf("non-owner beyond the endpoint cap with owner: err = %v, want ErrLimit", err)
 	}
 	if g := mustLookup(t, s, "", "10.0.0.1"); g.ID == "" || g.Owner != "owner" {
 		t.Errorf("address lookup owner = %q, want owner", g.Owner)
+	}
+	checkCounters(t, s, db)
+}
+
+func TestOwnedMACEndpointWithoutAttestedAddress(t *testing.T) {
+	s, db, _ := newTestStore(t)
+	const mac = "00:11:22:33:44:55"
+
+	// The owner's own MAC observed with addresses outside its records:
+	// the owned endpoint exists, attested by its MAC only.
+	e := testEndpoint("10.0.9.9", mac, "host")
+	e.Addresses = addrList("10.0.9.9", "fe80::1")
+	mustUpsert(t, s, e, hostIdentity(mac, "10.0.0.1"))
+	g := mustLookup(t, s, mac, "")
+	if g.Owner != "host" || len(g.Addresses) != 0 || len(observation(t, g, "host").Addresses) != 0 {
+		t.Errorf("endpoint = owner %q addresses %v obs %v, want owned without addresses", g.Owner, g.Addresses, observation(t, g, "host").Addresses)
+	}
+	// It never resolves by address, and a non-owner's MAC-less report of
+	// such an address does not attach to it.
+	lookupMissing(t, s, "10.0.9.9")
+	mustUpsert(t, s, testEndpoint("10.0.9.9", "", "observer"), Identity{})
+	if g := mustEndpoint(t, s, g.ID); !slices.Equal(g.SeenBy, []string{"host"}) {
+		t.Errorf("owned endpoint seen by %v, want host only", g.SeenBy)
+	}
+	if g2 := mustLookup(t, s, "", "10.0.9.9"); g2.ID == g.ID || g2.Owner != "" {
+		t.Errorf("lookup 10.0.9.9 = %s owner %q, want the observer's own endpoint", g2.ID, g2.Owner)
+	}
+	// One endpoint per MAC: repeated reports keep the single endpoint.
+	e.Addresses = addrList("10.0.9.8")
+	mustUpsert(t, s, e, hostIdentity(mac, "10.0.0.1"))
+	if n := mustCount(t, s.CountEndpoints); n != 2 {
+		t.Errorf("count = %d, want 2", n)
+	}
+	checkCounters(t, s, db)
+}
+
+func TestReconcileReleasesSilentOwner(t *testing.T) {
+	s, db, _ := newTestStore(t)
+	ctx := context.Background()
+	const mac = "00:11:22:33:44:55"
+
+	// host-a owns a MAC endpoint (10.0.0.1, 10.0.0.2) and a MAC-less one
+	// (10.0.1.1); an observer also sees the MAC endpoint.
+	ownA := hostIdentity(mac, "10.0.0.1", "10.0.0.2", "10.0.1.1")
+	e := testEndpoint("10.0.0.1", mac, "host-a")
+	e.Addresses = addrList("10.0.0.1", "10.0.0.2")
+	mustUpsert(t, s, e, ownA)
+	macID := mustLookup(t, s, mac, "").ID
+	mustUpsert(t, s, testEndpoint("10.0.0.1", mac, "observer"), Identity{})
+	mustUpsert(t, s, testEndpoint("10.0.1.1", "", "host-a"), ownA)
+	lessID := mustLookup(t, s, "", "10.0.1.1").ID
+	// host-c owns an endpoint its records still back.
+	const macC = "00:11:22:33:44:0c"
+	mustUpsert(t, s, testEndpoint("10.0.2.1", macC, "host-c"), hostIdentity(macC, "10.0.2.1"))
+	cID := mustLookup(t, s, macC, "").ID
+
+	// host-a's records lose 10.0.0.2 and 10.0.1.1 while it is silent.
+	current := map[string]Identity{
+		"host-a": hostIdentity(mac, "10.0.0.1"),
+		"host-c": hostIdentity(macC, "10.0.2.1"),
+	}
+	n, err := s.ReconcileIdentities(ctx, current)
+	if err != nil || n != 1 {
+		t.Fatalf("reconcile = %d, %v, want 1 released", n, err)
+	}
+	if g := mustEndpoint(t, s, macID); g.Owner != "host-a" || !slices.Equal(g.Addresses, addrList("10.0.0.1")) {
+		t.Errorf("MAC endpoint = owner %q addresses %v, want host-a with 10.0.0.1", g.Owner, g.Addresses)
+	}
+	lookupMissing(t, s, "10.0.0.2")
+	if g := mustEndpoint(t, s, lessID); g.Owner != "" || len(g.Addresses) != 0 {
+		t.Errorf("MAC-less endpoint = owner %q addresses %v, want released", g.Owner, g.Addresses)
+	}
+	lookupMissing(t, s, "10.0.1.1")
+
+	// host-a drops out of the records entirely: it loses the MAC endpoint
+	// and its attestations; the observer's own report is kept.
+	delete(current, "host-a")
+	if n, err := s.ReconcileIdentities(ctx, current); err != nil || n != 1 {
+		t.Fatalf("reconcile = %d, %v, want 1 released", n, err)
+	}
+	g := mustEndpoint(t, s, macID)
+	if g.Owner != "" || !slices.Equal(g.SeenBy, []string{"host-a", "observer"}) ||
+		len(observation(t, g, "host-a").Addresses) != 0 ||
+		!slices.Equal(observation(t, g, "observer").Addresses, addrList("10.0.0.1")) {
+		t.Errorf("MAC endpoint = owner %q seen by %v obs %+v, want no owner, host-a without addresses, observer kept",
+			g.Owner, g.SeenBy, g.Observations)
+	}
+	if g := mustEndpoint(t, s, cID); g.Owner != "host-c" || !slices.Equal(g.Addresses, addrList("10.0.2.1")) {
+		t.Errorf("host-c endpoint = owner %q addresses %v, want unchanged", g.Owner, g.Addresses)
+	}
+	// Idempotent; ownership is never granted by reconciling.
+	if n, err := s.ReconcileIdentities(ctx, map[string]Identity{"host-a": ownA, "host-c": hostIdentity(macC, "10.0.2.1")}); err != nil || n != 0 {
+		t.Errorf("reconcile again = %d, %v, want 0", n, err)
+	}
+	if g := mustEndpoint(t, s, macID); g.Owner != "" {
+		t.Errorf("owner = %q after reconcile, want none until host-a reports", g.Owner)
+	}
+	// An invalid identity is refused before anything changes.
+	if _, err := s.ReconcileIdentities(ctx, map[string]Identity{"host-c": {MACs: []string{"bad"}}}); !errors.Is(err, ErrInvalidEndpoint) {
+		t.Errorf("reconcile with invalid identity: err = %v, want ErrInvalidEndpoint", err)
+	}
+	if g := mustEndpoint(t, s, cID); g.Owner != "host-c" {
+		t.Errorf("host-c owner = %q after refused reconcile, want host-c", g.Owner)
+	}
+	checkCounters(t, s, db)
+}
+
+func TestReassignedAddressResolvesToNewHolder(t *testing.T) {
+	s, db, _ := newTestStore(t)
+	const macA, macB = "00:11:22:33:44:0a", "00:11:22:33:44:0b"
+
+	// host-a owns its MAC endpoint with 10.0.0.5 and a MAC-less endpoint
+	// with 10.0.0.6, then goes silent.
+	ownA := hostIdentity(macA, "10.0.0.1", "10.0.0.5", "10.0.0.6")
+	e := testEndpoint("10.0.0.1", macA, "host-a")
+	e.Addresses = addrList("10.0.0.1", "10.0.0.5")
+	mustUpsert(t, s, e, ownA)
+	aID := mustLookup(t, s, macA, "").ID
+	mustUpsert(t, s, testEndpoint("10.0.0.6", "", "host-a"), ownA)
+	lessID := mustLookup(t, s, "", "10.0.0.6").ID
+
+	// The addresses are reassigned to host-b, which reports its own MAC
+	// with them: they resolve to host-b's endpoint, not ambiguously.
+	ownB := hostIdentity(macB, "10.0.0.5", "10.0.0.6")
+	b := testEndpoint("10.0.0.5", macB, "host-b")
+	b.Addresses = addrList("10.0.0.5", "10.0.0.6")
+	mustUpsert(t, s, b, ownB)
+	bID := mustLookup(t, s, macB, "").ID
+	for _, a := range []string{"10.0.0.5", "10.0.0.6"} {
+		if g := mustLookup(t, s, "", a); g.ID != bID || g.Owner != "host-b" {
+			t.Errorf("lookup %s = %s owner %q, want host-b's %s", a, g.ID, g.Owner, bID)
+		}
+	}
+	// host-a keeps its MAC endpoint with its remaining address; the
+	// MAC-less endpoint, left without an attested address, has no owner.
+	if g := mustEndpoint(t, s, aID); g.Owner != "host-a" || !slices.Equal(g.Addresses, addrList("10.0.0.1")) {
+		t.Errorf("host-a endpoint = owner %q addresses %v, want host-a with 10.0.0.1", g.Owner, g.Addresses)
+	}
+	if g := mustEndpoint(t, s, lessID); g.Owner != "" {
+		t.Errorf("MAC-less endpoint owner = %q, want released", g.Owner)
+	}
+
+	// A new endpoint created by the new holder releases them likewise.
+	const macC = "00:11:22:33:44:0c"
+	mustUpsert(t, s, testEndpoint("10.0.0.1", macC, "host-c"), hostIdentity(macC, "10.0.0.1"))
+	if g := mustLookup(t, s, "", "10.0.0.1"); g.Owner != "host-c" {
+		t.Errorf("lookup 10.0.0.1 owner = %q, want host-c", g.Owner)
+	}
+	if g := mustEndpoint(t, s, aID); g.Owner != "host-a" || len(g.Addresses) != 0 {
+		t.Errorf("host-a endpoint = owner %q addresses %v, want host-a owning by MAC only", g.Owner, g.Addresses)
 	}
 	checkCounters(t, s, db)
 }

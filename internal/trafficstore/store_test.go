@@ -282,10 +282,26 @@ func TestQueryPlansUseIndexes(t *testing.T) {
 			[]string{"SEARCH net_endpoint_addresses USING", "(endpoint_id=? AND reporter=?)"}, "SCAN net_endpoint_addresses"},
 		{"drop unattested without addresses", dropUnattestedSQL(""), []any{"ep-x", "r"},
 			[]string{"SEARCH net_endpoint_addresses USING", "(endpoint_id=? AND reporter=?)"}, "SCAN net_endpoint_addresses"},
-		{"count reporters", countReportersSQL, []any{"ep-x"},
+		{"count non-owner reporters", countNonOwnersSQL, []any{"ep-x", "o"},
 			[]string{"SEARCH net_endpoint_reporters USING", "(endpoint_id=?)"}, "SCAN net_endpoint_reporters"},
-		{"oldest reporter", oldestReporterSQL, []any{"ep-x", "r"},
-			[]string{"SEARCH net_endpoint_reporters USING", "(endpoint_id=?)"}, "SCAN net_endpoint_reporters"},
+		{"release stale attestations", releaseAttestedSQL("?,?"), []any{"10.0.0.1", "10.0.0.2", "ep-x", "o"},
+			[]string{"SEARCH net_endpoint_addresses USING INDEX idx_net_endpoint_addresses_address", "SEARCH e USING INDEX sqlite_autoindex_net_endpoints_1"},
+			"SCAN net_endpoint_addresses"},
+		{"clear unattested owner", clearUnattestedOwnerSQL, []any{"ep-x"},
+			[]string{"SEARCH net_endpoints USING INDEX sqlite_autoindex_net_endpoints_1", "SEARCH a USING"}, "SCAN"},
+		// ReconcileIdentities.
+		{"list owners", listOwnersSQL, nil, []string{"idx_net_endpoints_owner"}, "SCAN net_endpoints\n"},
+		{"reconcile addresses", reconcileAddrsSQL("?,?"), []any{"o", "o", "10.0.0.1", "10.0.0.2"},
+			[]string{"SEARCH net_endpoint_addresses USING", "(endpoint_id=? AND reporter=?)", "idx_net_endpoints_owner (owner=?)"},
+			"SCAN"},
+		{"reconcile addresses without addresses", reconcileAddrsSQL(""), []any{"o", "o"},
+			[]string{"SEARCH net_endpoint_addresses USING", "idx_net_endpoints_owner (owner=?)"}, "SCAN"},
+		{"release mac owner", releaseMACOwnerSQL("?,?"), []any{"o", "00:11:22:33:44:55", "00:11:22:33:44:56"},
+			[]string{"idx_net_endpoints_owner (owner=?)"}, "SCAN"},
+		{"release mac owner without macs", releaseMACOwnerSQL(""), []any{"o"},
+			[]string{"idx_net_endpoints_owner (owner=?)"}, "SCAN"},
+		{"release mac-less owner", releaseMACLessOwnerSQL, []any{"o"},
+			[]string{"idx_net_endpoints_owner (owner=?)", "SEARCH a USING"}, "SCAN"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -746,14 +762,26 @@ func TestEndpointAddressAttribution(t *testing.T) {
 		t.Errorf("address-only endpoint = %+v", g)
 	}
 
-	// The same address on two owned endpoints is ambiguous.
+	// An address the records move to another host resolves to its
+	// current holder: the former owner's attestation is released.
 	for i, rep := range []string{"host-1", "host-2"} {
 		e := testEndpoint("10.0.3.1", fmt.Sprintf("00:11:22:33:55:0%d", i), rep)
 		if err := s.UpsertEndpoint(ctx, e, hostIdentity(e.MAC, "10.0.3.1")); err != nil {
 			t.Fatalf("upsert %s: %v", rep, err)
 		}
 	}
-	if _, found, err := s.LookupEndpoint(ctx, "", addr("10.0.3.1")); found || !errors.Is(err, ErrAmbiguous) {
+	if g := mustLookup(t, s, "", "10.0.3.1"); g.Owner != "host-2" {
+		t.Errorf("moved owned address: owner %q, want host-2", g.Owner)
+	}
+	// The same address on two endpoints of one owner is ambiguous.
+	for i := range 2 {
+		e := testEndpoint("10.0.3.5", fmt.Sprintf("00:11:22:33:56:0%d", i), "host-5")
+		own := Identity{MACs: []string{"00:11:22:33:56:00", "00:11:22:33:56:01"}, Addrs: []netip.Addr{addr("10.0.3.5")}}
+		if err := s.UpsertEndpoint(ctx, e, own); err != nil {
+			t.Fatalf("upsert host-5: %v", err)
+		}
+	}
+	if _, found, err := s.LookupEndpoint(ctx, "", addr("10.0.3.5")); found || !errors.Is(err, ErrAmbiguous) {
 		t.Errorf("shared owned address: found=%v err=%v, want ErrAmbiguous", found, err)
 	}
 
