@@ -409,6 +409,10 @@ func TestServerDeployBatchesGated(t *testing.T) {
 	f := &fakeBatchRPC{}
 	b, _ := newWiringBatches(t, f)
 	var deploy ui.DeployBatches = b
+	// It says so, so the deployment run does not probe a second time.
+	if g, ok := deploy.(ui.DeployBatchGate); !ok || !g.ProposalsGated() {
+		t.Error("the gated planner does not report its gate")
+	}
 	if _, err := deploy.ProposeBatch(ctx, "alice", wiringRequest()); !errors.Is(err, executions.ErrBatchExecutionUnavailable) {
 		t.Errorf("propose = %v, want ErrBatchExecutionUnavailable", err)
 	}

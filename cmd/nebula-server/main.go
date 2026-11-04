@@ -773,6 +773,10 @@ func (d deployBatches) BatchesAvailable(ctx context.Context) (bool, error) {
 	return executorclient.BatchesAvailable(ctx, d.exec)
 }
 
+// ProposalsGated reports that ProposeBatch probes the executor itself
+// (ui.DeployBatchGate), so a deployment run does not probe a second time.
+func (d deployBatches) ProposalsGated() bool { return true }
+
 // requireExecution refuses unless the executor runs batches now: a
 // missing capability is executions.ErrBatchExecutionUnavailable, any
 // probe failure executions.ErrBatchExecutionUnknown. The probe has its
