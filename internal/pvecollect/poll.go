@@ -207,11 +207,19 @@ func (c *Collector) due(remoteID string, now time.Time) bool {
 	return !ok || !now.Before(next)
 }
 
-// pollRemote collects one remote and spools the observation.
+// pollRemote collects one remote and spools the observation. The guest
+// network record is written first: it is enrichment derived from the same
+// validated read, so a failed write fails the poll before the observation
+// is published and never leaves a new observation behind.
 func (c *Collector) pollRemote(ctx context.Context, remoteID string, now time.Time) error {
 	obs, guestNet, err := c.readRemote(ctx, remoteID, now)
 	if err != nil {
 		return err
+	}
+	if guestNet != nil {
+		if _, err := c.spool.WriteGuestNet(ctx, *guestNet); err != nil {
+			return fmt.Errorf("pvecollect: spool guest network %s: %w", remoteID, err)
+		}
 	}
 	gen, err := c.spool.allocateGeneration(ctx, remoteID)
 	if err != nil {
@@ -220,11 +228,6 @@ func (c *Collector) pollRemote(ctx context.Context, remoteID string, now time.Ti
 	obs.CollectionGeneration = gen
 	if _, err := c.spool.WriteFile(ctx, *obs); err != nil {
 		return fmt.Errorf("pvecollect: spool %s: %w", remoteID, err)
-	}
-	if guestNet != nil {
-		if _, err := c.spool.WriteGuestNet(ctx, *guestNet); err != nil {
-			return fmt.Errorf("pvecollect: spool guest network %s: %w", remoteID, err)
-		}
 	}
 	if !obs.Complete {
 		return errors.New("pvecollect: incomplete collection")
@@ -389,9 +392,12 @@ func (c *Collector) readRemote(ctx context.Context, remoteID string, now time.Ti
 				if datasetUnavailable(res) {
 					guestNetComplete = false
 				} else {
-					nics, err := convertGuestNICs(res.resp.GetGuestConfig(), res.req.vmid, guestKinds[res.req.vmid])
-					if err != nil {
-						return err
+					nics, complete := convertGuestNICs(res.resp.GetGuestConfig(), res.req.vmid, guestKinds[res.req.vmid])
+					if !complete {
+						// A dropped NIC cannot prove its absence: keep
+						// the previous snapshot rather than publishing a
+						// partial one. The guest config is unaffected.
+						guestNetComplete = false
 					}
 					if len(guestNet.NICs)+len(nics) > MaxGuestNetNICs {
 						return ErrGuestNetInvalid

@@ -11953,9 +11953,13 @@ type PVEGuestConfig struct {
 	Pool         string                 `protobuf:"bytes,11,opt,name=pool,proto3" json:"pool,omitempty"`
 	Capabilities *PVEGuestCapabilities  `protobuf:"bytes,12,opt,name=capabilities,proto3" json:"capabilities,omitempty"`
 	// At most 32 validated net0..net31 devices, copied from the config read.
-	Nics          []*PVEGuestNIC `protobuf:"bytes,13,rep,name=nics,proto3" json:"nics,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Nics []*PVEGuestNIC `protobuf:"bytes,13,rep,name=nics,proto3" json:"nics,omitempty"`
+	// True when one or more netN entries failed validation and were left out
+	// of nics; the other config fields are unaffected, but nics is then not
+	// the guest's complete NIC list.
+	NicsIncomplete bool `protobuf:"varint,14,opt,name=nics_incomplete,json=nicsIncomplete,proto3" json:"nics_incomplete,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *PVEGuestConfig) Reset() {
@@ -12079,12 +12083,20 @@ func (x *PVEGuestConfig) GetNics() []*PVEGuestNIC {
 	return nil
 }
 
+func (x *PVEGuestConfig) GetNicsIncomplete() bool {
+	if x != nil {
+		return x.NicsIncomplete
+	}
+	return false
+}
+
 // PVEGuestNIC carries only bounded guest network configuration facts.
 type PVEGuestNIC struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Canonical netN device, where N is 0..31.
 	Device string `protobuf:"bytes,1,opt,name=device,proto3" json:"device,omitempty"`
-	// Linux bridge or SDN vnet (at most 15 ASCII characters); empty if absent.
+	// Linux bridge or SDN vnet: 1..15 bytes of [-_.A-Za-z0-9], not "." or
+	// ".." (PVE's bridge-id alphabet); empty if absent.
 	Bridge string `protobuf:"bytes,2,opt,name=bridge,proto3" json:"bridge,omitempty"`
 	// 0 means untagged; otherwise an 802.1Q tag in 1..4094.
 	Vlan uint32 `protobuf:"varint,3,opt,name=vlan,proto3" json:"vlan,omitempty"`
@@ -21141,7 +21153,7 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\n" +
 	"generation\x18\x06 \x01(\x04R\n" +
 	"generation\x12\x12\n" +
-	"\x04uuid\x18\a \x01(\tR\x04uuid\"\xb0\x04\n" +
+	"\x04uuid\x18\a \x01(\tR\x04uuid\"\xd9\x04\n" +
 	"\x0ePVEGuestConfig\x129\n" +
 	"\x05state\x18\x01 \x01(\x0e2#.nebula.executor.v1.PVEDatasetStateR\x05state\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\x12\x12\n" +
@@ -21157,7 +21169,8 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	" \x03(\tR\x04tags\x12\x12\n" +
 	"\x04pool\x18\v \x01(\tR\x04pool\x12L\n" +
 	"\fcapabilities\x18\f \x01(\v2(.nebula.executor.v1.PVEGuestCapabilitiesR\fcapabilities\x123\n" +
-	"\x04nics\x18\r \x03(\v2\x1f.nebula.executor.v1.PVEGuestNICR\x04nics\"c\n" +
+	"\x04nics\x18\r \x03(\v2\x1f.nebula.executor.v1.PVEGuestNICR\x04nics\x12'\n" +
+	"\x0fnics_incomplete\x18\x0e \x01(\bR\x0enicsIncomplete\"c\n" +
 	"\vPVEGuestNIC\x12\x16\n" +
 	"\x06device\x18\x01 \x01(\tR\x06device\x12\x16\n" +
 	"\x06bridge\x18\x02 \x01(\tR\x06bridge\x12\x12\n" +

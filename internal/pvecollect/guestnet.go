@@ -36,10 +36,7 @@ const (
 var ErrGuestNetInvalid = errors.New("pvecollect: invalid guest nic record")
 
 var (
-	// guestNetBridgeRe allowlists Linux bridge and SDN vnet names
-	// (IFNAMSIZ-1), as pveapi accepts them on write.
-	guestNetBridgeRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,14}$`)
-	guestNetMACRe    = regexp.MustCompile(`^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$`)
+	guestNetMACRe = regexp.MustCompile(`^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$`)
 )
 
 // GuestNetRecord is one remote's guest NIC snapshot as written by the
@@ -132,7 +129,9 @@ func validateGuestNIC(n GuestNIC, add func(format string, args ...any)) {
 	if n.Index < 0 || n.Index >= MaxGuestNetNICIndex {
 		add("vmid %d: nic index out of range", n.VMID)
 	}
-	if n.Bridge != "" && !guestNetBridgeRe.MatchString(n.Bridge) {
+	// Bridge names follow PVE's bridge-id alphabet (pvecontract.ValidBridgeName),
+	// so VLAN sub-interfaces ("vmbr0.100") and dashed names ("br-lan") pass.
+	if n.Bridge != "" && !pvecontract.ValidBridgeName(n.Bridge) {
 		add("%s: bridge is malformed", where)
 	}
 	if n.VLAN < 0 || n.VLAN > pvecontract.MaxVLAN {

@@ -1880,13 +1880,18 @@ message PVEGuestConfig {
   PVEGuestCapabilities capabilities = 12;
   // At most 32 validated net0..net31 devices, copied from the config read.
   repeated PVEGuestNIC nics = 13;
+  // True when one or more netN entries failed validation and were left out
+  // of nics; the other config fields are unaffected, but nics is then not
+  // the guest's complete NIC list.
+  bool nics_incomplete = 14;
 }
 
 // PVEGuestNIC carries only bounded guest network configuration facts.
 message PVEGuestNIC {
   // Canonical netN device, where N is 0..31.
   string device = 1;
-  // Linux bridge or SDN vnet (at most 15 ASCII characters); empty if absent.
+  // Linux bridge or SDN vnet: 1..15 bytes of [-_.A-Za-z0-9], not "." or
+  // ".." (PVE's bridge-id alphabet); empty if absent.
   string bridge = 2;
   // 0 means untagged; otherwise an 802.1Q tag in 1..4094.
   uint32 vlan = 3;

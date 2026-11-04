@@ -86,7 +86,7 @@ func TestReadPVEGuestConfigCarriesNICsUsingOnlyGET(t *testing.T) {
 	}
 }
 
-func TestPVEGuestNICsRejectsInvalidOrOversizedInput(t *testing.T) {
+func TestPVEGuestNICsDropsOnlyInvalidEntries(t *testing.T) {
 	valid := pveapi.NIC{Device: "net0", Bridge: "vmbr0", VLAN: 42, MAC: "02:00:00:00:00:01"}
 	cases := map[string]func(*pveapi.NIC){
 		"negative index":     func(n *pveapi.NIC) { n.Device = "net-1" },
@@ -94,6 +94,10 @@ func TestPVEGuestNICsRejectsInvalidOrOversizedInput(t *testing.T) {
 		"noncanonical index": func(n *pveapi.NIC) { n.Device = "net00" },
 		"oversized device":   func(n *pveapi.NIC) { n.Device = "net" + strings.Repeat("1", 1024) },
 		"hostile bridge":     func(n *pveapi.NIC) { n.Bridge = "<script>" },
+		"bridge slash":       func(n *pveapi.NIC) { n.Bridge = "br/0" },
+		"bridge space":       func(n *pveapi.NIC) { n.Bridge = "br 0" },
+		"bridge dot":         func(n *pveapi.NIC) { n.Bridge = "." },
+		"bridge dotdot":      func(n *pveapi.NIC) { n.Bridge = ".." },
 		"oversized bridge":   func(n *pveapi.NIC) { n.Bridge = strings.Repeat("a", 16) },
 		"invalid utf8":       func(n *pveapi.NIC) { n.Bridge = "br\xff" },
 		"negative vlan":      func(n *pveapi.NIC) { n.VLAN = -1 },
@@ -111,14 +115,18 @@ func TestPVEGuestNICsRejectsInvalidOrOversizedInput(t *testing.T) {
 			first.Device = "net1"
 			n := valid
 			mutate(&n)
-			if got, ok := pveGuestNICs([]pveapi.NIC{first, n}); ok || len(got) != 0 {
-				t.Fatal("invalid NIC accepted or partial list returned")
+			got, complete := pveGuestNICs([]pveapi.NIC{first, n})
+			if complete || len(got) != 1 || got[0].Device != "net1" {
+				t.Fatalf("complete=%v nics=%v; want only net1 and incomplete", complete, got)
 			}
 		})
 	}
 	t.Run("duplicate device", func(t *testing.T) {
-		if _, ok := pveGuestNICs([]pveapi.NIC{valid, valid}); ok {
-			t.Fatal("duplicate NIC accepted")
+		dup := valid
+		dup.Bridge = "vmbr1"
+		got, complete := pveGuestNICs([]pveapi.NIC{valid, dup})
+		if complete || len(got) != 1 || got[0].Bridge != "vmbr0" {
+			t.Fatalf("complete=%v nics=%v; want first net0 only", complete, got)
 		}
 	})
 	t.Run("count limit", func(t *testing.T) {
@@ -127,50 +135,80 @@ func TestPVEGuestNICsRejectsInvalidOrOversizedInput(t *testing.T) {
 			nics[i] = valid
 			nics[i].Device = fmt.Sprintf("net%d", i)
 		}
-		if got, ok := pveGuestNICs(nics); !ok || len(got) != 32 {
+		if got, complete := pveGuestNICs(nics); !complete || len(got) != 32 {
 			t.Fatal("maximum NIC list rejected")
 		}
-		if got, ok := pveGuestNICs(append(nics, valid)); ok || len(got) != 0 {
-			t.Fatal("oversized NIC list accepted or truncated")
+		// Distinct devices only: without the count guard the 32 valid
+		// entries would be kept and only net32 dropped.
+		extra := valid
+		extra.Device = "net32"
+		if got, complete := pveGuestNICs(append(nics, extra)); complete || len(got) != 0 {
+			t.Fatalf("oversized NIC list kept %d entries", len(got))
 		}
 	})
 	t.Run("no NICs", func(t *testing.T) {
-		if got, ok := pveGuestNICs(nil); !ok || len(got) != 0 {
+		if got, complete := pveGuestNICs(nil); !complete || len(got) != 0 {
 			t.Fatal("empty NIC list rejected")
 		}
 	})
 	t.Run("untagged without bridge", func(t *testing.T) {
 		n := valid
 		n.Bridge, n.VLAN = "", 0
-		if got, ok := pveGuestNICs([]pveapi.NIC{n}); !ok || len(got) != 1 || got[0].Bridge != "" || got[0].Vlan != 0 {
+		if got, complete := pveGuestNICs([]pveapi.NIC{n}); !complete || len(got) != 1 || got[0].Bridge != "" || got[0].Vlan != 0 {
 			t.Fatal("untagged NIC without a bridge was not preserved")
 		}
 	})
-	t.Run("maximum bridge length", func(t *testing.T) {
-		n := valid
-		n.Bridge = strings.Repeat("a", 15)
-		if got, ok := pveGuestNICs([]pveapi.NIC{n}); !ok || len(got) != 1 || got[0].Bridge != n.Bridge {
-			t.Fatal("maximum bridge name was not preserved")
-		}
-	})
+	for _, bridge := range []string{strings.Repeat("a", 15), "vmbr0.100", "br-lan", "vnet_1"} {
+		t.Run("bridge "+bridge, func(t *testing.T) {
+			n := valid
+			n.Bridge = bridge
+			if got, complete := pveGuestNICs([]pveapi.NIC{n}); !complete || len(got) != 1 || got[0].Bridge != bridge {
+				t.Fatal("valid PVE bridge name was not preserved")
+			}
+		})
+	}
 }
 
-func TestReadPVEGuestConfigInvalidNICMakesConfigUnavailable(t *testing.T) {
+func TestReadPVEGuestConfigAcceptsPVEBridgeNames(t *testing.T) {
+	e := guestPveEnv(t)
+	e.pve.set("/api2/json/nodes/pve1/qemu/100/config", `{"data":{"cores":2,"memory":512,
+		"net0":"virtio=02:00:00:00:00:01,bridge=vmbr0.100",
+		"net1":"virtio=02:00:00:00:00:02,bridge=br-lan,tag=7"}}`)
+	got, err := e.readGuest(pb.PVEReadMethod_PVE_READ_METHOD_GUEST_CONFIG, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := got.GetGuestConfig()
+	if cfg.State != pveAvail || cfg.NicsIncomplete || len(cfg.Nics) != 2 ||
+		cfg.Nics[0].Bridge != "vmbr0.100" || cfg.Nics[1].Bridge != "br-lan" || cfg.Nics[1].Vlan != 7 {
+		t.Fatalf("config = %v", cfg)
+	}
+}
+
+func TestReadPVEGuestConfigInvalidNICDropsOnlyThatNIC(t *testing.T) {
 	for _, nic := range []string{
 		`"net0":"virtio=02:00:00:00:00:01,bridge=<script>"`,
+		`"net0":"virtio=02:00:00:00:00:01,bridge=br/0"`,
 		`"net32":"virtio=02:00:00:00:00:01,bridge=vmbr0"`,
 		`"net0":"virtio=invalid,bridge=vmbr0"`,
 	} {
 		t.Run(nic, func(t *testing.T) {
 			e := guestPveEnv(t)
-			e.pve.set("/api2/json/nodes/pve1/qemu/100/config", `{"data":{"cores":1,`+nic+`}}`)
+			e.pve.set("/api2/json/nodes/pve1/qemu/100/config", `{"data":{"cores":2,"memory":512,"tags":"web",`+nic+
+				`,"net5":"virtio=02:00:00:00:00:05,bridge=vmbr0.100"}}`)
 			got, err := e.readGuest(pb.PVEReadMethod_PVE_READ_METHOD_GUEST_CONFIG, 100)
 			if err != nil {
 				t.Fatal(err)
 			}
 			cfg := got.GetGuestConfig()
-			if cfg.State != pveUnav || cfg.Reason != pveReasonInvalid || len(cfg.Nics) != 0 {
-				t.Fatal("invalid NIC was exposed instead of a fixed unavailable reason")
+			if cfg.State != pveAvail || cfg.CpuCount != 2 || cfg.RamBytes != 512<<20 || len(cfg.Tags) != 1 {
+				t.Fatalf("invalid NIC hid the guest config: %v", cfg)
+			}
+			if !cfg.NicsIncomplete || len(cfg.Nics) != 1 || cfg.Nics[0].Device != "net5" {
+				t.Fatalf("NICs = %v incomplete=%v; want only net5, incomplete", cfg.Nics, cfg.NicsIncomplete)
+			}
+			if strings.Contains(cfg.String(), "script") || strings.Contains(cfg.String(), "br/0") {
+				t.Fatal("hostile NIC text crossed the RPC boundary")
 			}
 		})
 	}

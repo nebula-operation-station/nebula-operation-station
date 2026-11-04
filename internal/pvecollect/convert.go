@@ -9,38 +9,47 @@ import (
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
-const (
-	maxGuestNICBridgeBytes = 15
-	guestNICMACBytes       = 17
-)
+const guestNICMACBytes = 17
 
 // convertGuestNICs validates one available config's network facts separately
 // from the inventory contract, which has no guest NIC configuration fields.
-func convertGuestNICs(p *pb.PVEGuestConfig, vmid uint64, kind pvecontract.GuestKind) ([]GuestNIC, error) {
+// An invalid or duplicate NIC is dropped on its own and the result reported
+// incomplete (complete=false); it never affects the guest config itself. A
+// config for another guest, or with more NICs than PVE allows, yields no
+// NICs and is incomplete.
+func convertGuestNICs(p *pb.PVEGuestConfig, vmid uint64, kind pvecontract.GuestKind) (nics []GuestNIC, complete bool) {
 	if p == nil || p.Vmid != vmid || len(p.Nics) > MaxGuestNetNICIndex {
-		return nil, ErrGuestNetInvalid
+		return nil, false
 	}
-	nics := make([]GuestNIC, 0, len(p.Nics))
+	nics = make([]GuestNIC, 0, len(p.Nics))
+	complete = !p.NicsIncomplete
 	var seen [MaxGuestNetNICIndex]bool
 	for _, n := range p.Nics {
-		if n == nil || len(n.Device) > len("net31") || len(n.Bridge) > maxGuestNICBridgeBytes || len(n.Mac) != guestNICMACBytes || n.Vlan > pvecontract.MaxVLAN {
-			return nil, ErrGuestNetInvalid
+		nic, ok := convertGuestNIC(n, vmid, kind)
+		if !ok || seen[nic.Index] {
+			complete = false
+			continue
 		}
-		suffix, ok := strings.CutPrefix(n.Device, "net")
-		index, err := strconv.Atoi(suffix)
-		if !ok || err != nil || index < 0 || index >= MaxGuestNetNICIndex || strconv.Itoa(index) != suffix || seen[index] {
-			return nil, ErrGuestNetInvalid
-		}
-		nic := GuestNIC{VMID: vmid, Kind: kind, Index: index, Bridge: n.Bridge, VLAN: int(n.Vlan), MAC: n.Mac}
-		valid := true
-		validateGuestNIC(nic, func(string, ...any) { valid = false })
-		if !valid {
-			return nil, ErrGuestNetInvalid
-		}
-		seen[index] = true
+		seen[nic.Index] = true
 		nics = append(nics, nic)
 	}
-	return nics, nil
+	return nics, complete
+}
+
+func convertGuestNIC(n *pb.PVEGuestNIC, vmid uint64, kind pvecontract.GuestKind) (GuestNIC, bool) {
+	if n == nil || len(n.Device) > len("net31") || len(n.Bridge) > pvecontract.MaxBridgeNameBytes ||
+		len(n.Mac) != guestNICMACBytes || n.Vlan > pvecontract.MaxVLAN {
+		return GuestNIC{}, false
+	}
+	suffix, ok := strings.CutPrefix(n.Device, "net")
+	index, err := strconv.Atoi(suffix)
+	if !ok || err != nil || index < 0 || index >= MaxGuestNetNICIndex || strconv.Itoa(index) != suffix {
+		return GuestNIC{}, false
+	}
+	nic := GuestNIC{VMID: vmid, Kind: kind, Index: index, Bridge: n.Bridge, VLAN: int(n.Vlan), MAC: n.Mac}
+	valid := true
+	validateGuestNIC(nic, func(string, ...any) { valid = false })
+	return nic, valid
 }
 
 // maxReasonBytes bounds a carried dataset reason. Reasons come from the

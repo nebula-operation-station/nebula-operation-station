@@ -26,39 +26,45 @@ const (
 	// per-node share of MaxObjectsPerPage is used when it is smaller.
 	pveTasksPerNode = 100
 	// pveMaxGuestNICs bounds both the netN index range and NICs per guest.
-	pveMaxGuestNICs      = 32
-	pveMaxNICBridgeBytes = 15
-	pveNICMACBytes       = 17
+	pveMaxGuestNICs = 32
+	pveNICMACBytes  = 17
 )
 
-var (
-	pveNICDeviceRe = regexp.MustCompile(`^net([0-9]|[12][0-9]|3[01])$`)
-	pveNICBridgeRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,14}$`)
-)
+var pveNICDeviceRe = regexp.MustCompile(`^net([0-9]|[12][0-9]|3[01])$`)
 
-// pveGuestNICs revalidates the parser's NICs before crossing the RPC boundary.
-// Reject the entire config on invalid or excess entries; truncation would
-// incorrectly present a partial NIC list as a complete snapshot.
-func pveGuestNICs(nics []pveapi.NIC) ([]*pb.PVEGuestNIC, bool) {
+// pveGuestNICs revalidates the parser's NICs before crossing the RPC
+// boundary. An invalid or duplicate entry drops only that NIC and reports
+// the list as incomplete (complete=false); the rest of the guest config is
+// unaffected. More than pveMaxGuestNICs entries cannot come from a real
+// config, so the whole list is dropped then rather than trusting any of it.
+func pveGuestNICs(nics []pveapi.NIC) (out []*pb.PVEGuestNIC, complete bool) {
 	if len(nics) > pveMaxGuestNICs {
-		return nil, false
+		return []*pb.PVEGuestNIC{}, false
 	}
-	out := make([]*pb.PVEGuestNIC, 0, len(nics))
+	out = make([]*pb.PVEGuestNIC, 0, len(nics))
+	complete = true
 	seen := make(map[string]bool, len(nics))
 	for _, n := range nics {
-		if len(n.Device) > len("net31") || !pveNICDeviceRe.MatchString(n.Device) || seen[n.Device] ||
-			len(n.Bridge) > pveMaxNICBridgeBytes || (n.Bridge != "" && !pveNICBridgeRe.MatchString(n.Bridge)) ||
-			n.VLAN < 0 || n.VLAN > pvecontract.MaxVLAN || len(n.MAC) != pveNICMACBytes {
-			return nil, false
-		}
-		mac, err := net.ParseMAC(n.MAC)
-		if err != nil || len(mac) != 6 || mac.String() != n.MAC || mac[0]&1 != 0 || n.MAC == "00:00:00:00:00:00" {
-			return nil, false
+		if !pveGuestNICValid(n) || seen[n.Device] {
+			complete = false
+			continue
 		}
 		seen[n.Device] = true
 		out = append(out, &pb.PVEGuestNIC{Device: n.Device, Bridge: n.Bridge, Vlan: uint32(n.VLAN), Mac: n.MAC})
 	}
-	return out, true
+	return out, complete
+}
+
+// pveGuestNICValid checks one NIC: canonical net0..net31 device, PVE bridge
+// name (or none), 802.1Q tag and canonical nonzero unicast MAC.
+func pveGuestNICValid(n pveapi.NIC) bool {
+	if len(n.Device) > len("net31") || !pveNICDeviceRe.MatchString(n.Device) ||
+		(n.Bridge != "" && !pvecontract.ValidBridgeName(n.Bridge)) ||
+		n.VLAN < 0 || n.VLAN > pvecontract.MaxVLAN || len(n.MAC) != pveNICMACBytes {
+		return false
+	}
+	mac, err := net.ParseMAC(n.MAC)
+	return err == nil && len(mac) == 6 && mac.String() == n.MAC && mac[0]&1 == 0 && n.MAC != "00:00:00:00:00:00"
 }
 
 // Fixed reasons for guest-detail reads; raw PVE text never reaches the caller.
@@ -160,10 +166,7 @@ func readPveGuestConfig(ctx context.Context, remoteID, base string, hc *http.Cli
 	if raw.Truncated {
 		return unavailable(pveReasonTruncated)
 	}
-	nics, ok := pveGuestNICs(raw.NICs)
-	if !ok {
-		return unavailable(pveReasonInvalid)
-	}
+	nics, nicsComplete := pveGuestNICs(raw.NICs)
 	cfg := pveGuestConfig(raw)
 	if len(raw.HostPCI) > 0 {
 		cfg.HostPCI = pveHostPCI(ctx, base, hc, token, ref.guest.Node, raw.HostPCI)
@@ -174,7 +177,7 @@ func readPveGuestConfig(ctx context.Context, remoteID, base string, hc *http.Cli
 		return unavailable(pveReasonInvalid)
 	}
 	out := &pb.PVEGuestConfig{State: pveAvailable, Vmid: vmid, CpuCount: cfg.CPUCount, RamBytes: cfg.RAMBytes,
-		BootOrder: cfg.BootOrder, Tags: cfg.Tags, Pool: cfg.Pool, Nics: nics,
+		BootOrder: cfg.BootOrder, Tags: cfg.Tags, Pool: cfg.Pool, Nics: nics, NicsIncomplete: !nicsComplete,
 		Capabilities: &pb.PVEGuestCapabilities{Snapshots: string(cfg.Capabilities.Snapshots),
 			LiveMigration: string(cfg.Capabilities.LiveMigration), RamSnapshots: string(cfg.Capabilities.RAMSnapshots)}}
 	for _, d := range cfg.Disks {
