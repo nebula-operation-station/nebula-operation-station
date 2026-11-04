@@ -238,8 +238,12 @@ func Classify(d Delta, listeners []Listener) (Report, error) {
 	for _, o := range obs {
 		r.Observations = append(r.Observations, *o)
 	}
-	slices.SortFunc(r.Observations, func(a, b Observation) int { return compareKey(a.Key, b.Key) })
+	sortObservations(r.Observations)
 	return r, nil
+}
+
+func sortObservations(o []Observation) {
+	slices.SortFunc(o, func(a, b Observation) int { return compareKey(a.Key, b.Key) })
 }
 
 // Observe is Diff followed by Classify with the listeners of cur.
