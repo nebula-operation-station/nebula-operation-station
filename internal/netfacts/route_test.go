@@ -209,6 +209,29 @@ func TestParseRoutesUnparseableViaNeverDirectRoute(t *testing.T) {
 	}
 }
 
+func TestParseRoutesRFC5549MultipathDefault(t *testing.T) {
+	// An RFC 5549 default route learned over several IPv6 next hops:
+	// the "via" next hops are the only family signal, and they name an
+	// IPv4 default.
+	doc := `[{"dst":"default","nexthops":[` +
+		`{"via":{"family":"inet6","host":"fe80::1"},"dev":"eth0"},` +
+		`{"via":{"family":"inet6","host":"fe80::2"},"dev":"eth0"}]}]`
+	res, err := ParseRoutes([]byte(doc))
+	if err != nil {
+		t.Fatalf("ParseRoutes: %v", err)
+	}
+	want := []Route{
+		{Dst: netip.MustParsePrefix("0.0.0.0/0"), Gateway: netip.MustParseAddr("fe80::1"), Dev: "eth0"},
+		{Dst: netip.MustParsePrefix("0.0.0.0/0"), Gateway: netip.MustParseAddr("fe80::2"), Dev: "eth0"},
+	}
+	if !reflect.DeepEqual(res.Entries, want) || res.Incomplete {
+		t.Fatalf("got %+v (Incomplete=%v), want %+v", res.Entries, res.Incomplete, want)
+	}
+	if gws := DefaultGateways(res.Entries); len(gws) != 2 {
+		t.Fatalf("got %d default gateways, want 2: %+v", len(gws), gws)
+	}
+}
+
 func TestParseRoutesHostRoutes(t *testing.T) {
 	cases := []struct {
 		dst  string
