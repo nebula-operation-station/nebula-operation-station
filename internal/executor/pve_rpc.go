@@ -147,11 +147,13 @@ func (s *Service) newPveProvisioner(m *PveMutations) *PveProvisioner {
 }
 
 // PveAutomationCredentialRef is the keyring credential reference designated
-// as the NOS automation key (ADR 0008 section 3, "Access and password": one
-// NOS automation key; the keyring file nos-automation.key). Provisioning
-// installs only this credential's public key; a request naming any other
-// keyring credential is refused, so the key of an unrelated host credential
-// never reaches a new guest.
+// as the NOS automation key. ADR 0008 section 3 ("Access and password")
+// requires one NOS automation public key but does not name it; this
+// implementation fixes the ref "nos-automation", so the keyring must hold
+// the key as nos-automation.key (docs/operator/proxmox.md tells
+// operators). Provisioning installs only this credential's public key; a
+// request naming any other keyring credential is refused, so the key of an
+// unrelated host credential never reaches a new guest.
 const PveAutomationCredentialRef = "nos-automation"
 
 var (
@@ -896,6 +898,8 @@ func pveGuestProvisionRPCError(err error) error {
 		return status.Error(codes.FailedPrecondition, "pve guest provision: the cluster guest list is incomplete; a free vmid cannot be proven")
 	case errors.Is(err, ErrPveGuestPassword):
 		return status.Error(codes.FailedPrecondition, "pve guest provision: the guest password is missing or changed")
+	case errors.Is(err, ErrPveRunExpired):
+		return status.Error(codes.DeadlineExceeded, "pve guest provision: the run ended before the next step was sent")
 	case errors.Is(err, ErrPveTargetChanged), errors.Is(err, ErrPveRemoteChanged):
 		return status.Error(codes.FailedPrecondition, "pve guest provision: the node, storage or remote changed; propose again")
 	case errors.Is(err, ErrPveReadOnly):
@@ -914,12 +918,16 @@ func pveGuestProvisionRPCError(err error) error {
 }
 
 // pveProvisionRunOutcome reports whether err is the outcome of steps this
-// run dispatched (reported with their durable states), not a refusal.
+// run dispatched (reported with their durable states), not a refusal. A
+// run whose context ended between steps or before the final guest read
+// (ErrPveRunExpired) reports its recorded steps like one that ended
+// during a task wait: guest_kept and no configuration digest.
 func pveProvisionRunOutcome(err error) bool {
 	if errors.Is(err, ErrPveMutationDenied) || errors.Is(err, ErrPveJobStore) || permit.CodeOf(err) != "" {
 		return false
 	}
-	return errors.Is(err, ErrPveStepFailed) || errors.Is(err, ErrPveStepRunning) || errors.Is(err, ErrPveDispatchUncertain)
+	return errors.Is(err, ErrPveStepFailed) || errors.Is(err, ErrPveStepRunning) || errors.Is(err, ErrPveDispatchUncertain) ||
+		errors.Is(err, ErrPveRunExpired)
 }
 
 // errPveProvisionUnavailable is returned when the executor has no
@@ -997,7 +1005,7 @@ func (s *Service) CommitPVEGuestProvision(ctx context.Context, in *pb.CommitPVEG
 	if p == nil {
 		return nil, errPveProvisionUnavailable
 	}
-	runCtx, cancel := pveProvisionRunContext(ctx, time.Now())
+	runCtx, cancel := pveProvisionRunContext(ctx, s.clock())
 	defer cancel()
 	res, err := p.Provision(runCtx, req)
 	// Only this run's outcome is reported as step states: success, or a

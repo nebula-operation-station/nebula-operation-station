@@ -961,8 +961,14 @@ func (p *PveProvisioner) Provision(ctx context.Context, req PveProvisionRequest)
 		}
 		res.GuestKept = mayExist
 		failed := steps[len(steps)-1]
+		reason := "step"
+		if errors.Is(runErr, ErrPveRunExpired) {
+			// The run ended between steps; the last recorded step is not
+			// the cause.
+			reason = "run_ended"
+		}
 		p.Mutations.log().Error("audit", "kind", "pve_guest_provision_failed", "remote", req.RemoteID, "node", req.Node, "vmid", req.VMID,
-			"execution", res.ExecutionID, "step", failed.Step, "state", string(failed.State), "guest_kept", mayExist, "vmid_reserved", !release)
+			"execution", res.ExecutionID, "step", failed.Step, "state", string(failed.State), "reason", reason, "guest_kept", mayExist, "vmid_reserved", !release)
 		return res, runErr
 	}
 	read, err := p.Mutations.readToken(o.rm)
@@ -972,6 +978,15 @@ func (p *PveProvisioner) Provision(ctx context.Context, req PveProvisionRequest)
 	}
 	live, err := p.Mutations.Client.TargetState(ctx, o.rm, permit.ProviderKindQemu, req.Node, req.VMID, read)
 	digest := live.ConfigDigest
+	if err != nil && ctx.Err() != nil {
+		// Every step ran, but the run ended before the guest could be
+		// read: not a changed target. The steps are reported without a
+		// configuration digest and the guest is kept.
+		res.GuestKept = true
+		p.Mutations.log().Error("audit", "kind", "pve_guest_provision_failed", "remote", req.RemoteID, "node", req.Node, "vmid", req.VMID,
+			"execution", res.ExecutionID, "reason", "run_ended_before_guest_read", "guest_kept", true)
+		return res, ErrPveRunExpired
+	}
 	if err != nil || live.Node != req.Node || !validHexDigest(digest) {
 		res.GuestKept = true
 		p.Mutations.log().Error("audit", "kind", "pve_guest_provision_failed", "remote", req.RemoteID, "node", req.Node, "vmid", req.VMID,

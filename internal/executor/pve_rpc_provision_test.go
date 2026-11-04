@@ -3,16 +3,17 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/pem"
 	"errors"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -279,6 +280,29 @@ type provisionRPCEnv struct {
 	autoKey string
 	hostKey string
 	sign    func(challenge []byte, verified bool) []byte
+	// logs holds the Service's log (audit events).
+	logs *syncBuffer
+	// taskWait is the per-step task wait of the Service's engine as
+	// wired, before the test shortens it.
+	taskWait time.Duration
+}
+
+// syncBuffer is a bytes.Buffer safe for a logger and a reader.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
 }
 
 // provisionRPCOptions configure newProvisionRPCEnvWith.
@@ -411,7 +435,8 @@ func newProvisionRPCEnvWith(t *testing.T, o provisionRPCOptions) *provisionRPCEn
 		return []byte(virtualwebauthn.CreateAssertionResponse(rp, dev, cred,
 			virtualwebauthn.AssertionOptions{Challenge: challenge, RelyingPartyID: "mut.test"}))
 	}
-	svc := NewService(e.auth, kr, e.pe.db, reg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	logs := &syncBuffer{}
+	svc := NewService(e.auth, kr, e.pe.db, reg, slog.New(slog.NewTextHandler(logs, nil)))
 	svc.vault = e.pe.vault
 	svc.SetBackupDirs(dir, keysDir)
 	m := svc.pveMutations()
@@ -421,11 +446,12 @@ func newProvisionRPCEnvWith(t *testing.T, o provisionRPCOptions) *provisionRPCEn
 	}
 	// Test doubles for the remote side only; the engine, provisioner,
 	// VMID store and authority are the Service's own.
+	taskWait := m.taskMaxWait()
 	m.Client, m.PollInterval, m.MaxWait = e.pc, time.Millisecond, 2*time.Second
 	imgs := *e.imgs
 	imgs.Mutations = m
 	p.Images, p.Reader = &imgs, e.reader
-	return &provisionRPCEnv{provisionEnv: e, svc: svc, keys: kr, sign: sign,
+	return &provisionRPCEnv{provisionEnv: e, svc: svc, keys: kr, sign: sign, logs: logs, taskWait: taskWait,
 		autoKey: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(autoPub))),
 		hostKey: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(hostPub)))}
 }
@@ -681,6 +707,94 @@ func TestServiceGuestProvisionRepliesBeforeTheCallerDeadline(t *testing.T) {
 	}
 }
 
+// holdTaskPastRunEnd makes the first status read of the task of type
+// taskType wait until the run context (which ends at most half the
+// remaining time before dl) has ended, then report it finished OK, so the
+// step is recorded as succeeded after the run ended.
+func (e *provisionRPCEnv) holdTaskPastRunEnd(taskType string, dl time.Time) {
+	var once sync.Once
+	e.pc.status = func(upid string) (PveTaskStatus, error) {
+		if strings.Contains(upid, ":"+taskType+":") {
+			once.Do(func() { time.Sleep(time.Until(dl.Add(-time.Second))) })
+		}
+		return PveTaskStatus{ExitStatus: "OK"}, nil
+	}
+}
+
+// checkRunEnded checks a commit whose run context ended after want
+// succeeded steps: the step states arrive before the caller's deadline,
+// guest kept and without a configuration digest, nothing more was sent,
+// the VMID stays reserved, and no target change is recorded.
+func (e *provisionRPCEnv) checkRunEnded(t *testing.T, ctx context.Context, prop *pb.ProposePVEGuestProvisionResponse, res *pb.CommitPVEGuestProvisionResponse, err error, want int) {
+	t.Helper()
+	if ctx.Err() != nil {
+		t.Fatalf("commit returned after the caller deadline: %v", ctx.Err())
+	}
+	if err != nil {
+		t.Fatalf("commit: %v, want the step states", err)
+	}
+	if res.GetExecutionId() != prop.GetExecutionId() || len(res.GetSteps()) != want || !res.GetGuestKept() || res.GetGuestConfigDigest() != "" {
+		t.Fatalf("result %+v, want %d steps, guest kept, no digest", res, want)
+	}
+	for i, st := range res.GetSteps() {
+		if st.GetState() != string(executordb.PveJobSucceeded) || st.GetUpid() == "" {
+			t.Fatalf("step %d %+v, want succeeded with its UPID", i+1, st)
+		}
+	}
+	if n := len(e.pc.provisionSteps()); n != want {
+		t.Fatalf("%d steps sent, want %d", n, want)
+	}
+	store := e.svc.pveProvisioner().VMIDs.(*FilePveVMIDStore)
+	if r, err := store.Reservations(mutRemote, time.Now()); err != nil || len(r) != 1 || r[0].VMID != prop.GetVmid() {
+		t.Fatalf("reservations %+v %v, want the vmid kept", r, err)
+	}
+	if logs := e.logs.String(); strings.Contains(logs, "pve_mutation_target_changed") || strings.Contains(logs, "guest_unreadable_after_run") {
+		t.Fatalf("a run that ended was logged as a changed target:\n%s", logs)
+	}
+}
+
+// TestServiceGuestProvisionRunEndsBetweenSteps: when the run context ends
+// after the clone finished but before the config step, the commit reports
+// the recorded clone step (not "target changed"), sends and records
+// nothing more, and logs the end of the run instead of a target change.
+func TestServiceGuestProvisionRunEndsBetweenSteps(t *testing.T) {
+	e := newProvisionRPCEnv(t)
+	prop, d := e.proposeApproved(t, context.Background())
+	committed := testProvisionSpec(bindingOf(e.tpl), PveAutomationCredentialRef)
+	committed.Vmid = prop.GetVmid()
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	dl, _ := ctx.Deadline()
+	e.holdTaskPastRunEnd("qmclone", dl)
+	res, err := e.svc.CommitPVEGuestProvision(ctx, &pb.CommitPVEGuestProvisionRequest{Spec: committed,
+		ExecutionId: prop.GetExecutionId(), ExecutionDigest: d.String()})
+	e.checkRunEnded(t, ctx, prop, res, err, 1)
+	if logs := e.logs.String(); !strings.Contains(logs, "pve_mutation_run_expired") || !strings.Contains(logs, "reason=run_ended") {
+		t.Fatalf("the end of the run is not logged:\n%s", logs)
+	}
+}
+
+// TestServiceGuestProvisionRunEndsAfterTheLastStep: when the run context
+// ends after the start step finished, the final guest read fails because
+// of the ended run, not a changed guest: the commit reports all four
+// recorded steps, guest kept and without a digest.
+func TestServiceGuestProvisionRunEndsAfterTheLastStep(t *testing.T) {
+	e := newProvisionRPCEnv(t)
+	prop, d := e.proposeApproved(t, context.Background())
+	committed := testProvisionSpec(bindingOf(e.tpl), PveAutomationCredentialRef)
+	committed.Vmid = prop.GetVmid()
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	dl, _ := ctx.Deadline()
+	e.holdTaskPastRunEnd("qmstart", dl)
+	res, err := e.svc.CommitPVEGuestProvision(ctx, &pb.CommitPVEGuestProvisionRequest{Spec: committed,
+		ExecutionId: prop.GetExecutionId(), ExecutionDigest: d.String()})
+	e.checkRunEnded(t, ctx, prop, res, err, 4)
+	if logs := e.logs.String(); !strings.Contains(logs, "run_ended_before_guest_read") {
+		t.Fatalf("the end of the run is not logged:\n%s", logs)
+	}
+}
+
 // TestPveProvisionRunContextEndsBeforeTheDeadline: the run context ends
 // the reply margin before the caller's deadline, at most half the
 // remaining time, and has no deadline when the caller has none.
@@ -713,23 +827,39 @@ func TestPveProvisionRunContextEndsBeforeTheDeadline(t *testing.T) {
 }
 
 // TestPveGuestProvisionRunBoundCoversEveryStep: the commit bound a client
-// sizes its deadline by covers the task wait of every step of a full
-// provisioning (clone, config, resize, start) plus slack for the reads.
+// sizes its deadline by covers the task wait of every step a provisioning
+// actually runs, with the per-step wait the Service's engine is wired with,
+// plus the reply margin. The fullest spec (clone, config, resize, start)
+// must not run more steps than pveGuestProvisionMaxSteps, so a step added
+// to the plan without raising the bound fails here.
 func TestPveGuestProvisionRunBoundCoversEveryStep(t *testing.T) {
 	e := newProvisionRPCEnv(t)
 	prop, d := e.proposeApproved(t, context.Background())
 	committed := testProvisionSpec(bindingOf(e.tpl), PveAutomationCredentialRef)
 	committed.Vmid = prop.GetVmid()
+	if !committed.GetStart() || committed.GetDiskGib() == 0 {
+		t.Fatal("the spec must exercise every step (start, resize)")
+	}
 	res, err := e.svc.CommitPVEGuestProvision(context.Background(), &pb.CommitPVEGuestProvisionRequest{Spec: committed,
 		ExecutionId: prop.GetExecutionId(), ExecutionDigest: d.String()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := len(res.GetSteps()); n > pveGuestProvisionMaxSteps {
-		t.Fatalf("%d steps, more than pveGuestProvisionMaxSteps %d", n, pveGuestProvisionMaxSteps)
+	steps := len(e.pc.provisionSteps())
+	if steps != len(res.GetSteps()) {
+		t.Fatalf("%d steps sent, %d reported", steps, len(res.GetSteps()))
 	}
-	if PveGuestProvisionRunBound < time.Duration(pveGuestProvisionMaxSteps)*pveTaskMaxWait+pveProvisionReplyMargin {
-		t.Fatalf("run bound %v does not cover %d task waits of %v", PveGuestProvisionRunBound, pveGuestProvisionMaxSteps, pveTaskMaxWait)
+	if want := []string{pveStepGuestClone, pveStepGuestConfig, pveStepGuestResize, pveStepGuestStart}; !slices.Equal(e.pc.methods(), want) {
+		t.Fatalf("steps %v, want the full plan %v", e.pc.methods(), want)
+	}
+	if steps > pveGuestProvisionMaxSteps {
+		t.Fatalf("%d steps, more than pveGuestProvisionMaxSteps %d", steps, pveGuestProvisionMaxSteps)
+	}
+	if e.taskWait <= 0 || e.taskWait > pveTaskMaxWait {
+		t.Fatalf("the engine waits %v per step, outside the bound's per-step wait %v", e.taskWait, pveTaskMaxWait)
+	}
+	if need := time.Duration(steps)*e.taskWait + pveProvisionReplyMargin; PveGuestProvisionRunBound < need {
+		t.Fatalf("run bound %v does not cover %d task waits of %v plus the reply margin", PveGuestProvisionRunBound, steps, e.taskWait)
 	}
 }
 
