@@ -1,0 +1,41 @@
+[
+    {
+        "dst": "2001:db8:1::/64",
+        "dev": "eth0",
+        "protocol": "ra",
+        "metric": 1024,
+        "expires": 86391,
+        "flags": [],
+        "pref": "medium"
+    },
+    {
+        "dst": "fe80::/64",
+        "dev": "eth0",
+        "protocol": "kernel",
+        "metric": 256,
+        "flags": [],
+        "pref": "medium"
+    },
+    {
+        "dst": "default",
+        "protocol": "ra",
+        "metric": 1024,
+        "expires": 1791,
+        "flags": [],
+        "pref": "medium",
+        "nexthops": [
+            {
+                "gateway": "fe80::1",
+                "dev": "eth0",
+                "weight": 1,
+                "flags": []
+            },
+            {
+                "gateway": "fe80::2",
+                "dev": "eth0",
+                "weight": 1,
+                "flags": []
+            }
+        ]
+    }
+]

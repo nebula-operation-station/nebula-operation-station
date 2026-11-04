@@ -1,0 +1,25 @@
+[
+    {
+        "dst": "10.0.0.1",
+        "dev": "ens18",
+        "lladdr": "00:11:22:33:44:55",
+        "state": [
+            "PERMANENT"
+        ]
+    },
+    {
+        "dst": "10.0.0.7",
+        "dev": "ens18",
+        "state": [
+            "INCOMPLETE"
+        ]
+    },
+    {
+        "dst": "10.0.0.9",
+        "dev": "ens18",
+        "lladdr": "de:ad:be:ef:00:01",
+        "state": [
+            "DELAY"
+        ]
+    }
+]

@@ -122,6 +122,17 @@ Add one `/vms/<vmid>` entry per guest you want to be able to operate later.
 No console, guest exec, guest file access, permission administration,
 storage deletion or HA-configuration privileges belong to either token.
 
+### NOS automation key (guest provisioning)
+
+Guest provisioning (ADR 0008) installs exactly one SSH public key into a new
+guest: the NOS automation key. The executor accepts only the keyring
+credential reference `nos-automation`, so the key must be in the executor
+keyring as `keys/nos-automation.key` (same format, mode and passphrase as
+every other keyring file; see section 3.4 of the admin guide). A provisioning
+that names any other reference is refused with `PermissionDenied`, and one
+whose keyring lacks `nos-automation.key` fails with `NotFound`. The file name
+is fixed by the implementation, not by the ADR.
+
 ## Adding a remote with the nebula CLI
 
 Run these commands on the **executor host** as the configured local admin

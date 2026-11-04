@@ -438,6 +438,38 @@ func TestNodeRebootClusterIsCriticalAndNeedsTargetCount(t *testing.T) {
 	}
 }
 
+// TestNodeRebootLXCEvacuationIsDowntime: HA moves a container by restart
+// migration, so an LXC guest listed for HA evacuation is listed with
+// effect downtime (and how HA moves it); a QEMU guest HA live-migrates.
+func TestNodeRebootLXCEvacuationIsDowntime(t *testing.T) {
+	e := newRebootEnv(t, pvecontract.KindCluster, true)
+	b := pveRebootBound{Guests: []PveRebootGuest{
+		{Kind: "lxc", VMID: 301, Status: "running", HAEvacuates: true},
+		{Kind: "lxc", VMID: 302, Status: "running", AcceptedDowntime: true},
+		{Kind: "qemu", VMID: 201, Status: "running", HAEvacuates: true},
+	}}
+	ts, ls, err := rebootTargets(e.rm, "pve1", b)
+	if err != nil || len(ts) != 4 || len(ls) != 4 {
+		t.Fatalf("targets %+v %v", ls, err)
+	}
+	want := map[string]PveRebootTarget{
+		"node/0":   {Effect: pveRebootEffectReboot},
+		"lxc/301":  {Effect: pveRebootEffectDowntime, HAMove: pveRebootHAMoveRestart},
+		"lxc/302":  {Effect: pveRebootEffectDowntime},
+		"qemu/201": {Effect: pveRebootEffectEvacuation},
+	}
+	for _, l := range ls {
+		w := want[fmt.Sprintf("%s/%d", l.Kind, l.VMID)]
+		if l.Effect != w.Effect || l.HAMove != w.HAMove {
+			t.Fatalf("target %+v, want effect %q ha_move %q", l, w.Effect, w.HAMove)
+		}
+	}
+	raw, err := json.Marshal(ls[1])
+	if err != nil || !strings.Contains(string(raw), `"effect":"downtime"`) || !strings.Contains(string(raw), `"ha_move":"restart_migration"`) {
+		t.Fatalf("listed target %s %v", raw, err)
+	}
+}
+
 func TestNodeRebootTypedCountCoversEveryImpactedGuest(t *testing.T) {
 	e := newRebootEnv(t, pvecontract.KindCluster, true)
 	e.client.facts.HA.Maintenance["pve1"] = false
@@ -1296,6 +1328,18 @@ func TestPveNodeRebootFactsProductionReader(t *testing.T) {
 		"usb device": {func(b map[string]string) {
 			b["/nodes/pve1/qemu/201/config"] = `{"data":{"scsi0":"ceph:vm-201-disk-0","usb0":"host=1234:5678"}}`
 		}, func(f PveNodeRebootFacts) bool { return f.Placement[q201].LocalResources }},
+		"serial host device": {func(b map[string]string) {
+			b["/nodes/pve1/qemu/201/config"] = `{"data":{"scsi0":"ceph:vm-201-disk-0","serial0":"/dev/ttyS0"}}`
+		}, func(f PveNodeRebootFacts) bool { return f.Placement[q201].Known && f.Placement[q201].LocalResources }},
+		"serial socket is movable": {func(b map[string]string) {
+			b["/nodes/pve1/qemu/201/config"] = `{"data":{"scsi0":"ceph:vm-201-disk-0","serial0":"socket"}}`
+		}, func(f PveNodeRebootFacts) bool { return f.Placement[q201].Known && !f.Placement[q201].LocalResources }},
+		"parallel device": {func(b map[string]string) {
+			b["/nodes/pve1/qemu/201/config"] = `{"data":{"scsi0":"ceph:vm-201-disk-0","parallel0":"/dev/parport0"}}`
+		}, func(f PveNodeRebootFacts) bool { return f.Placement[q201].Known && f.Placement[q201].LocalResources }},
+		"serial not a string": {func(b map[string]string) {
+			b["/nodes/pve1/qemu/201/config"] = `{"data":{"scsi0":"ceph:vm-201-disk-0","serial0":7}}`
+		}, func(f PveNodeRebootFacts) bool { return !f.Placement[q201].Known }},
 		"local disk": {func(b map[string]string) {
 			b["/nodes/pve1/qemu/201/config"] = `{"data":{"scsi0":"ceph:vm-201-disk-0","scsi1":"local:201/vm-201-disk-1.qcow2"}}`
 		}, func(f PveNodeRebootFacts) bool { return f.Placement[q201].LocalResources }},
@@ -1365,6 +1409,38 @@ func TestPveNodeRebootFactsProductionReader(t *testing.T) {
 			}
 		})
 	}
+
+	// A remote that stalls the guest config reads cannot hold one facts
+	// read beyond its overall deadline (each request alone could take
+	// pveMutationRequestTimeout): the read fails closed.
+	t.Run("slow config reads hit the facts deadline", func(t *testing.T) {
+		b := pveRebootAPIBodies()
+		fast, _ := pveRebootFakeAPI(t, b)
+		var slowReads atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/config") && strings.Contains(r.URL.Path, "/qemu/") {
+				slowReads.Add(1)
+				select {
+				case <-r.Context().Done():
+				case <-time.After(10 * time.Second):
+				}
+				return
+			}
+			fast.Config.Handler.ServeHTTP(w, r)
+		}))
+		t.Cleanup(srv.Close)
+		start := time.Now()
+		_, err := pveNodeRebootFactsWithin(context.Background(), 200*time.Millisecond, srv.Client(), srv.URL, read, "pve1")
+		if !errors.Is(err, errPveMutationRead) {
+			t.Fatalf("facts read past its deadline: %v", err)
+		}
+		if d := time.Since(start); d > 5*time.Second || slowReads.Load() != 1 {
+			t.Fatalf("facts read took %v with %d slow reads, want the deadline to stop it", d, slowReads.Load())
+		}
+		if pveRebootFactsDeadline <= 0 || pveRebootFactsDeadline >= maxPveRebootGuests*pveMutationRequestTimeout {
+			t.Fatalf("facts deadline %v does not bound the per-guest reads", pveRebootFactsDeadline)
+		}
+	})
 
 	t.Run("node boot", func(t *testing.T) {
 		b := pveRebootAPIBodies()
