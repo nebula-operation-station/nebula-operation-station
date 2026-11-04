@@ -13,21 +13,39 @@ import (
 type Neighbor struct {
 	// IP is the neighbor's IP address.
 	IP netip.Addr
-	// Dev is the interface the neighbor is reachable on.
+	// Dev is the interface the neighbor is reachable on (a Linux
+	// interface name, see validIfName).
 	Dev string
 	// MAC is the link-layer address; empty while the entry is
 	// INCOMPLETE or FAILED, when the host reported none, or when the
 	// reported address is not a 6-byte Ethernet MAC.
 	MAC net.HardwareAddr
-	// State holds the NUD states the host reported (REACHABLE, STALE,
-	// FAILED, INCOMPLETE, ...), in host order, at most maxStates.
+	// State holds the known NUD states the host reported (REACHABLE,
+	// STALE, FAILED, INCOMPLETE, ...; see nudStates), in host order, at
+	// most maxStates.
 	State []string
 }
 
-// neighDoc is the permissive shape of one `ip -j neigh` array element.
+// nudStates are the neighbor state names iproute2 prints (nud_state_n2a).
+// Any other state string from the host is dropped.
+var nudStates = map[string]bool{
+	"INCOMPLETE": true,
+	"REACHABLE":  true,
+	"STALE":      true,
+	"DELAY":      true,
+	"PROBE":      true,
+	"FAILED":     true,
+	"NOARP":      true,
+	"PERMANENT":  true,
+	"NONE":       true,
+}
+
+// neighDoc is the permissive shape of one `ip -j neigh` array element,
+// e.g. {"dst":"10.0.0.1","dev":"eth0","lladdr":"...","router":null,
+// "state":["REACHABLE"]}.
 // Unknown fields are dropped (spec 09).
 type neighDoc struct {
-	IP     string   `json:"ip"`
+	IP     string   `json:"dst"` // iproute2 prints the neighbor address as "dst"
 	Dev    string   `json:"dev"`
 	LLAddr string   `json:"lladdr"`
 	State  []string `json:"state"`
@@ -65,9 +83,10 @@ type NeighborTable struct {
 // ParseNeigh parses the JSON array printed by `ip -j neigh`.
 //
 // Entries without a valid IP (including an IPv6 zone that is not a short
-// interface name) or without a valid device are skipped and counted in
-// Dropped. An invalid or non-Ethernet link-layer address is dropped (MAC
-// stays empty). Invalid state strings are dropped and the state list is
+// interface name) or without a valid interface name as device are skipped
+// and counted in Dropped. An invalid or non-Ethernet link-layer address is
+// dropped (MAC stays empty). State strings that are not known NUD state
+// names are dropped and the state list is
 // truncated at maxStates. Every such loss sets Incomplete. Input above
 // maxInputSize, a document that is not a JSON array, or an array with
 // more than maxEntries elements is an error. One bad entry never discards
@@ -110,7 +129,7 @@ func parseNeighEntry(e json.RawMessage) (n Neighbor, lossy, ok bool) {
 	if !ok {
 		return Neighbor{}, false, false
 	}
-	if !printable(d.Dev, maxStringLen) {
+	if !validIfName(d.Dev) {
 		return Neighbor{}, false, false
 	}
 	n = Neighbor{IP: ip, Dev: d.Dev}
@@ -126,7 +145,7 @@ func parseNeighEntry(e json.RawMessage) (n Neighbor, lossy, ok bool) {
 			lossy = true
 			break
 		}
-		if printable(s, maxStringLen) {
+		if nudStates[s] {
 			n.State = append(n.State, s)
 		} else {
 			lossy = true

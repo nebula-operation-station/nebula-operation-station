@@ -1,37 +1,34 @@
 [
     {
-        "ip": "192.168.178.1",
+        "dst": "192.168.178.1",
         "dev": "eth0",
         "lladdr": "52:54:00:12:34:56",
         "state": [
             "REACHABLE"
-        ],
-        "flags": 0
+        ]
     },
     {
-        "ip": "192.168.178.10",
+        "dst": "192.168.178.10",
         "dev": "eth0",
         "lladdr": "52:54:00:aa:bb:cc",
         "state": [
             "STALE"
-        ],
-        "flags": 0
+        ]
     },
     {
-        "ip": "192.168.178.20",
+        "dst": "192.168.178.20",
         "dev": "eth0",
         "state": [
             "FAILED"
-        ],
-        "flags": 0
+        ]
     },
     {
-        "ip": "fe80::1",
+        "dst": "fe80::1",
         "dev": "eth0",
         "lladdr": "52:54:00:12:34:56",
+        "router": null,
         "state": [
             "STALE"
-        ],
-        "flags": 0
+        ]
     }
 ]

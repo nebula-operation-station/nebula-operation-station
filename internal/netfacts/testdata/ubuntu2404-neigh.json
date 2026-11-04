@@ -1,29 +1,25 @@
 [
     {
-        "ip": "10.0.0.1",
+        "dst": "10.0.0.1",
         "dev": "ens18",
         "lladdr": "00:11:22:33:44:55",
         "state": [
             "PERMANENT"
-        ],
-        "flags": 2
+        ]
     },
     {
-        "ip": "10.0.0.7",
+        "dst": "10.0.0.7",
         "dev": "ens18",
         "state": [
             "INCOMPLETE"
-        ],
-        "flags": 0
+        ]
     },
     {
-        "ip": "10.0.0.9",
+        "dst": "10.0.0.9",
         "dev": "ens18",
         "lladdr": "de:ad:be:ef:00:01",
         "state": [
-            "REACHABLE",
-            "STALE"
-        ],
-        "flags": 0
+            "DELAY"
+        ]
     }
 ]
