@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
@@ -31,6 +32,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/ipam"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/runbooks"
 )
 
 // Deployments (ADR 0008 section 6, PV-08). "Deploy" is one navigation
@@ -49,7 +51,14 @@ import (
 //
 // The run page follows the states of ADR 0008 section 6: proposed,
 // approved, creating, booting, enrolling (fingerprint review), bootstrapping,
-// done or failed, with the PVE task UPIDs and step outcomes. Enrollment uses
+// done or failed, with the PVE task UPIDs and step outcomes. A server
+// without a batch planner ends a run with a staged plan at "joined"
+// (enrolled, plan not run) instead of leaving it in bootstrapping. An idle
+// run that does not progress fails when its deadline passes (the
+// proposal's request expiry, deployEnrollWindow, deployBootstrapWindow),
+// so abandoned runs never hold the per-user or global run limit; an
+// expired or refused proposal releases its IPAM reservation, a run whose
+// guest may exist keeps it. Enrollment uses
 // pveinventory.GuestJoinFlow (PV-06): propose on the executor, show the
 // fingerprint the executor read, approve, commit; the inventory host and
 // its guest link are created from the executor's committed binding only.
@@ -98,6 +107,9 @@ const (
 	deployBootstrapping = "bootstrapping"
 	deployDone          = "done"
 	deployFailed        = "failed"
+	// deployJoined ends a run whose guest is enrolled but whose staged
+	// plan cannot run because this server has no batch planner.
+	deployJoined = "joined"
 )
 
 // deployStates are the states in the order the run page shows them.
@@ -119,6 +131,20 @@ const (
 	maxDeployRunsPerUser = 16
 	// deployRunTTL is how long a finished or expired run stays visible.
 	deployRunTTL = 24 * time.Hour
+	// deployProposalWindow bounds a proposal whose bound request carries
+	// no expiry; normally the executor's request expiry (at most
+	// deployRunTTL away) ends a proposal.
+	deployProposalWindow = time.Hour
+	// deployEnrollWindow bounds booting and enrolling: from the end of
+	// provisioning until the enrollment is committed.
+	deployEnrollWindow = 6 * time.Hour
+	// deployBootstrapWindow bounds bootstrapping: from the enrollment
+	// until the staged plan's batch has ended.
+	deployBootstrapWindow = 24 * time.Hour
+	// deployBatchGrace is how long after its approval or run expiry a
+	// batch the server still records as pending or approved is taken as
+	// ended (the executor's state may arrive late).
+	deployBatchGrace = 5 * time.Minute
 	// deployCommitTimeout bounds the background provisioning commit; the
 	// executor client adds its own task wait.
 	deployCommitTimeout = 35 * time.Minute
@@ -255,6 +281,11 @@ type deployRun struct {
 	steps     []guestPowerStepView
 	guestKept bool
 	expires   time.Time
+	// deadline ends an idle unfinished run (proposed, booting, enrolling,
+	// bootstrapping): settle marks it failed once it has passed.
+	deadline time.Time
+	// address is what happens to the IPAM reservation (ipamHeld etc.).
+	address string
 
 	join   *deployJoin
 	joined *pveinventory.GuestJoinResult
@@ -264,8 +295,24 @@ type deployRun struct {
 	batchErr string
 }
 
+// What happens to a run's IPAM reservation.
+const (
+	// ipamHeld: the reservation is held for the run (or there is none).
+	ipamHeld = ""
+	// ipamRelease: nothing was created; the reservation is to be cleared.
+	ipamRelease = "release"
+	// ipamReleasing: settle handed the reservation to a release call.
+	ipamReleasing = "releasing"
+	// ipamReleased: the reservation was cleared.
+	ipamReleased = "released"
+	// ipamKept: a created guest may use the address; it stays reserved.
+	ipamKept = "kept"
+)
+
 // final reports whether the run ended.
-func (x *deployRun) final() bool { return x.state == deployDone || x.state == deployFailed }
+func (x *deployRun) final() bool {
+	return x.state == deployDone || x.state == deployFailed || x.state == deployJoined
+}
 
 // busy reports whether a background call holds the run.
 func (x *deployRun) busy() bool {
@@ -336,13 +383,94 @@ func (p *deployRuns) room(user string, now time.Time) error {
 	return nil
 }
 
-// prune drops expired runs that no background call holds.
+// prune settles idle unfinished runs past their deadline and drops
+// finished runs past their TTL that no background call or address release
+// holds. Unfinished runs are never dropped.
 func (p *deployRuns) prune(now time.Time) {
+	p.expire(now)
 	for id, x := range p.runs {
-		if !now.Before(x.expires) && !x.busy() && (x.final() || x.state == deployProposed) {
+		if x.final() && !now.Before(x.expires) && !x.busy() && x.address != ipamReleasing {
 			delete(p.runs, id)
 		}
 	}
+}
+
+// expire ends every idle unfinished run whose deadline has passed: it
+// fails in the state it was in with a visible reason, stops counting
+// against the caps and is pruned after deployRunTTL. An expired proposal
+// created nothing, so its address is released; a guest that was created
+// keeps its address.
+func (p *deployRuns) expire(now time.Time) {
+	for _, x := range p.runs {
+		if x.final() || x.busy() || x.deadline.IsZero() || now.Before(x.deadline) {
+			continue
+		}
+		switch x.state {
+		case deployProposed:
+			x.message = "the proposal expired unapproved; nothing was created"
+			if x.ipam != nil && x.address == ipamHeld {
+				x.address = ipamRelease
+			}
+		case deployBooting, deployEnrolling:
+			x.message = "expired: the guest was not enrolled within " + deployEnrollWindow.String() +
+				"; the guest is left in PVE and keeps its address, deleting it is a separate action"
+		case deployBootstrapping:
+			x.message = "expired: the staged plan did not finish within " + deployBootstrapWindow.String() +
+				"; the guest stays enrolled, a batch keeps its own outcome on the batch page"
+		default:
+			continue
+		}
+		x.failedIn, x.state, x.expires = x.state, deployFailed, now.Add(deployRunTTL)
+	}
+}
+
+// releases hands every reservation marked for release to the caller (who
+// clears it outside the lock) and marks it in flight.
+func (p *deployRuns) releases() map[string]netip.Addr {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out map[string]netip.Addr
+	for id, x := range p.runs {
+		if x.address != ipamRelease || x.ipam == nil {
+			continue
+		}
+		a, err := netip.ParseAddr(x.ipam.GetAddress())
+		if err != nil {
+			x.address = ipamKept
+			continue
+		}
+		if out == nil {
+			out = map[string]netip.Addr{}
+		}
+		x.address = ipamReleasing
+		out[id] = a
+	}
+	return out
+}
+
+// settleDeployRuns expires idle runs past their deadline, prunes finished
+// runs past their TTL and releases the addresses of runs that created
+// nothing; it returns the time it used. A
+// failed release is retried on the next call. Settling is lazy: every
+// deployment page and form calls it, there is no background sweep.
+func (h *Handler) settleDeployRuns(ctx context.Context) time.Time {
+	now := h.clockNow()
+	h.deployRuns.mu.Lock()
+	h.deployRuns.prune(now)
+	h.deployRuns.mu.Unlock()
+	for id, a := range h.deployRuns.releases() {
+		next := ipamReleased
+		if h.deployIPAM == nil {
+			next = ipamKept
+		} else if err := h.deployIPAM.ClearEntry(context.WithoutCancel(ctx), a); err != nil {
+			h.log.Error("deploy: release address", "run", id, "address", a.String(), "error", err)
+			next = ipamRelease
+		} else {
+			h.log.Info("audit", "kind", "deployment_address_released", "run", id, "address", a.String())
+		}
+		h.deployRuns.set(id, func(x *deployRun) { x.address = next })
+	}
+	return now
 }
 
 func (p *deployRuns) oldestFinal() string {
@@ -501,6 +629,8 @@ func (h *Handler) handleDeployWizard(w http.ResponseWriter, r *http.Request) {
 	if !h.deployEnabled(w, r) {
 		return
 	}
+	// Expired proposals free their addresses before the suggestion.
+	h.settleDeployRuns(r.Context())
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
 	defer cancel()
 	q := r.URL.Query()
@@ -928,8 +1058,11 @@ func (h *Handler) freezePlan(ctx context.Context, d deployForm) ([]deployPlanSte
 		}
 		for _, ref := range d.Runbooks {
 			v, err := h.runbooks.Get(ctx, ref.Slug, ref.Version)
-			if err != nil {
+			if errors.Is(err, runbooks.ErrNotFound) {
 				return nil, formError("the runbook " + ref.Slug + " version " + strconv.Itoa(ref.Version) + " does not exist")
+			}
+			if err != nil {
+				return nil, fmt.Errorf("read runbook %s version %d: %w", ref.Slug, ref.Version, err)
 			}
 			a := v.Action()
 			out = append(out, deployPlanStep{Kind: "runbook", ActionID: a.ID, Version: a.Version, Title: a.Title,
@@ -974,7 +1107,7 @@ func (h *Handler) handleDeployPropose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := webUser(r)
-	now := h.clockNow()
+	now := h.settleDeployRuns(r.Context())
 	if !h.deployRuns.allow(user, now) {
 		w.Header().Set("Retry-After", strconv.Itoa(int(guestPowerProposeInterval/time.Second)))
 		http.Error(w, "too many deployment proposals: wait a moment and try again", http.StatusTooManyRequests)
@@ -1010,24 +1143,17 @@ func (h *Handler) handleDeployPropose(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	// "Save as profile" is checked now and stored only once the executor
+	// has proposed the deployment, so a refusal leaves no profile behind.
 	if form.SaveAs != "" {
 		if h.deployProfiles == nil {
 			http.Error(w, "deploy profiles are not available", http.StatusConflict)
 			return
 		}
-		saved, err := h.deployProfiles.Save(ctx, user, form.adHocProfile())
-		var ie *deployprofile.InvalidError
-		switch {
-		case errors.As(err, &ie):
-			http.Error(w, "the profile could not be saved: "+ie.Error(), http.StatusBadRequest)
-			return
-		case err != nil:
-			h.log.Error("deploy: save ad-hoc profile", "error", err)
-			http.Error(w, "the profile could not be saved", http.StatusInternalServerError)
+		if err := deployprofile.Validate(form.adHocProfile()); err != nil {
+			http.Error(w, "the profile could not be saved: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		form.ProfileSlug, form.ProfileVersion = saved.Profile.Slug, saved.Version
-		h.log.Info("audit", "kind", "deploy_profile_saved", "profile", saved.Profile.Slug, "version", saved.Version, "user", user)
 	}
 	spec := &pb.PVEGuestProvisionSpec{
 		RemoteId: form.Remote, Node: form.Node, Storage: form.Storage,
@@ -1121,6 +1247,31 @@ func (h *Handler) handleDeployPropose(w http.ResponseWriter, r *http.Request) {
 	// proposal request itself stays as sent.
 	run.spec = proto.Clone(spec).(*pb.PVEGuestProvisionSpec)
 	run.spec.Vmid = run.vmid
+	// The proposal ends with the executor's bound request; one without an
+	// expiry (never approvable) ends after deployProposalWindow.
+	run.deadline = bound.Expiry
+	if run.deadline.IsZero() {
+		run.deadline = now.Add(deployProposalWindow)
+	} else if run.deadline.After(now.Add(deployRunTTL)) {
+		run.deadline = now.Add(deployRunTTL)
+	}
+	if form.SaveAs != "" {
+		saved, err := h.deployProfiles.Save(ctx, user, form.adHocProfile())
+		var ie *deployprofile.InvalidError
+		switch {
+		case errors.As(err, &ie):
+			release()
+			http.Error(w, "the profile could not be saved: "+ie.Error(), http.StatusBadRequest)
+			return
+		case err != nil:
+			release()
+			h.log.Error("deploy: save ad-hoc profile", "error", err)
+			http.Error(w, "the profile could not be saved", http.StatusInternalServerError)
+			return
+		}
+		run.form.ProfileSlug, run.form.ProfileVersion = saved.Profile.Slug, saved.Version
+		h.log.Info("audit", "kind", "deploy_profile_saved", "profile", saved.Profile.Slug, "version", saved.Version, "user", user)
+	}
 	if err := h.deployRuns.put(run, now); err != nil {
 		release()
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
@@ -1204,7 +1355,7 @@ func (h *Handler) handleDeployApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := webUser(r)
-	now := h.clockNow()
+	now := h.settleDeployRuns(r.Context())
 	if !deployRunIDRe.MatchString(in.ID) || len(in.Assertion) == 0 || string(in.Assertion) == "null" {
 		writeJSONError(w, http.StatusNotFound, "deployment not found")
 		return
@@ -1254,7 +1405,7 @@ func (h *Handler) handleDeployRun(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PostForm.Get("id")
 	user := webUser(r)
-	now := h.clockNow()
+	now := h.settleDeployRuns(r.Context())
 	run, ok := h.deployRuns.update(user, id, func(x *deployRun) bool { return x.requirement != "key" && x.approvable(now) },
 		func(x *deployRun) { x.state, x.message = deployApproved, "" })
 	if !ok {
@@ -1281,6 +1432,9 @@ func (h *Handler) startDeployCommit(r *http.Request, run deployRun) {
 			st, _ := status.FromError(err)
 			switch st.Code() {
 			case codes.InvalidArgument, codes.FailedPrecondition, codes.PermissionDenied, codes.NotFound, codes.Aborted:
+				// A refusal comes before the executor sends any PVE
+				// step of this run: nothing was created, so a run that
+				// ends here releases its address.
 				msg := "the executor refused: " + cleanText(st.Message())
 				h.deployRuns.set(run.id, func(x *deployRun) {
 					x.message = msg
@@ -1289,12 +1443,21 @@ func (h *Handler) startDeployCommit(r *http.Request, run deployRun) {
 						return
 					}
 					x.state, x.failedIn, x.expires = deployFailed, deployCreating, now.Add(deployRunTTL)
+					if x.ipam != nil && x.address == ipamHeld {
+						x.address = ipamRelease
+					}
 				})
+				h.settleDeployRuns(ctx)
 			default:
+				// Outcome unknown: a guest may exist and use the address.
 				h.log.Error("commit guest provision", "run", run.id, "error", err)
 				h.deployRuns.set(run.id, func(x *deployRun) {
 					x.state, x.failedIn, x.expires = deployFailed, deployCreating, now.Add(deployRunTTL)
 					x.message = "the run could not be confirmed (executor unavailable); check the executor's job list before deploying again"
+					if x.ipam != nil {
+						x.address = ipamKept
+						x.message += "; the address " + x.ipam.GetAddress() + " stays reserved because the guest may exist"
+					}
 				})
 			}
 			return
@@ -1314,9 +1477,13 @@ func (h *Handler) startDeployCommit(r *http.Request, run deployRun) {
 			if failed || resp.GetGuestKept() || len(steps) == 0 {
 				x.state, x.failedIn, x.expires = deployFailed, deployCreating, now.Add(deployRunTTL)
 				x.message = "provisioning did not complete; the guest (if created) is left in PVE for inspection, deleting it is a separate action"
+				if x.ipam != nil {
+					x.address = ipamKept
+					x.message += "; its address " + x.ipam.GetAddress() + " stays reserved"
+				}
 				return
 			}
-			x.state = deployBooting
+			x.state, x.deadline = deployBooting, now.Add(deployEnrollWindow)
 		})
 		h.log.Info("audit", "kind", "deployment_provisioned", "run", run.id, "vmid", run.vmid, "failed", failed)
 	}()
@@ -1339,6 +1506,7 @@ func (h *Handler) handleDeployJoin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "the form could not be read", http.StatusBadRequest)
 		return
 	}
+	h.settleDeployRuns(r.Context())
 	id := r.PostForm.Get("id")
 	user := webUser(r)
 	run, ok := h.deployRuns.get(user, id)
@@ -1351,8 +1519,11 @@ func (h *Handler) handleDeployJoin(w http.ResponseWriter, r *http.Request) {
 		endpoint = run.ipam.GetAddress()
 	} else {
 		a, err := netip.ParseAddr(strings.TrimSpace(r.PostForm.Get("endpoint")))
-		if err != nil || a.Zone() != "" {
-			http.Error(w, "enter the guest's IP address (its DHCP lease) for the SSH enrollment", http.StatusBadRequest)
+		a = a.Unmap()
+		// Only a usable unicast guest address: no loopback, unspecified,
+		// multicast, link-local or broadcast address reaches the probe.
+		if err != nil || a.Zone() != "" || !a.IsGlobalUnicast() {
+			http.Error(w, "enter the guest's IP address (its DHCP lease, a unicast address) for the SSH enrollment", http.StatusBadRequest)
 			return
 		}
 		endpoint = a.String()
@@ -1490,6 +1661,7 @@ func (h *Handler) handleDeployJoinApprove(w http.ResponseWriter, r *http.Request
 		writeJSONError(w, http.StatusNotFound, "deployment not found")
 		return
 	}
+	h.settleDeployRuns(r.Context())
 	run, ok := h.deployRuns.update(user, in.ID, joinApprovable("key"), func(x *deployRun) { x.join.approving, x.message = true, "" })
 	if !ok {
 		writeJSONError(w, http.StatusNotFound, "no enrollment waiting for approval")
@@ -1525,6 +1697,7 @@ func (h *Handler) handleDeployJoinRun(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PostForm.Get("id")
 	user := webUser(r)
+	h.settleDeployRuns(r.Context())
 	run, ok := h.deployRuns.update(user, id, joinApprovable("cli"), func(x *deployRun) { x.join.approving, x.message = true, "" })
 	if !ok {
 		http.NotFound(w, r)
@@ -1580,17 +1753,30 @@ func (h *Handler) commitDeployJoin(r *http.Request, run deployRun, user string) 
 		})
 		return errors.New(msg)
 	}
+	batches := h.deployBatches != nil
 	h.deployRuns.set(run.id, func(x *deployRun) {
 		x.joined, x.join.approving, x.message = &res, false, ""
-		x.state = deployBootstrapping
-		if !hasBatchSteps(x.plan) {
+		switch {
+		case !hasBatchSteps(x.plan):
 			x.state, x.expires = deployDone, now.Add(deployRunTTL)
+		case !batches:
+			// No batch planner on this server: the run ends enrolled
+			// instead of waiting in bootstrapping for a plan that can
+			// never be proposed.
+			x.state, x.expires = deployJoined, now.Add(deployRunTTL)
+			x.message = deployNoBatchesMessage
+		default:
+			x.state, x.deadline = deployBootstrapping, now.Add(deployBootstrapWindow)
 		}
 	})
 	h.log.Info("audit", "kind", "deployment_joined", "run", run.id, "host", res.Host.ID, "fingerprint", res.Fingerprint,
 		"method", res.JoinMethod, "user", user)
 	return nil
 }
+
+// deployNoBatchesMessage explains a run that ended at "joined".
+const deployNoBatchesMessage = "bootstrap steps not available: this server has no batch planner, so the staged plan was not run; " +
+	"the guest is enrolled, run the plan's steps as separate operations on the host"
 
 func hasBatchSteps(plan []deployPlanStep) bool {
 	for _, s := range plan {
@@ -1631,6 +1817,7 @@ func (h *Handler) handleDeployPlan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "batches are not available on this server", http.StatusConflict)
 		return
 	}
+	h.settleDeployRuns(r.Context())
 	id := r.PostForm.Get("id")
 	user := webUser(r)
 	run, ok := h.deployRuns.update(user, id, func(x *deployRun) bool {
@@ -1667,8 +1854,21 @@ func (h *Handler) handleDeployPlan(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/batches/"+url.PathEscape(c.ID), http.StatusSeeOther)
 }
 
-// followBatch moves a bootstrapping run to done or failed from its batch's
-// member outcomes.
+// followBatch moves a bootstrapping run on from its batch:
+//
+//   - every member succeeded: done;
+//   - no member is open any more and at least one was started (ran,
+//     failed, is unknown or was skipped): failed;
+//   - the batch ended (refused, expired, or past its approval or run
+//     expiry plus deployBatchGrace) before any member was dispatched:
+//     nothing ran, so the batch is detached and the frozen plan may be
+//     proposed again for a fresh approval (ADR 0007: a retry is a new
+//     batch); the bootstrapping deadline still bounds the run;
+//   - the batch ended after some members ran while others never will:
+//     failed, the remaining steps were not executed.
+//
+// A batch with a dispatched member is never decided here: its outcome
+// is still open.
 func (h *Handler) followBatch(ctx context.Context, run *deployRun) *executions.BatchView {
 	if run.batchID == "" || h.deployBatches == nil {
 		return nil
@@ -1681,28 +1881,56 @@ func (h *Handler) followBatch(ctx context.Context, run *deployRun) *executions.B
 	if run.state != deployBootstrapping {
 		return &v
 	}
+	now := h.clockNow()
 	c := v.Counts
 	open := c.Planned + c.Dispatched
-	state := ""
+	started := c.Dispatched + c.Success + c.Failed + c.Unknown + c.Skipped
+	ended := (v.State != "pending" && v.State != "approved") ||
+		(!v.Expiry.IsZero() && !now.Before(v.Expiry.Add(deployBatchGrace))) ||
+		(v.State == "pending" && !v.ApprovalExpiry.IsZero() && !now.Before(v.ApprovalExpiry.Add(deployBatchGrace)))
+	state, msg, detach := "", "", false
 	switch {
 	case c.Total > 0 && c.Success == c.Total:
 		state = deployDone
-	case open == 0 && c.Total > 0:
+	case c.Total == 0 || c.Dispatched > 0:
+	case started == 0 && (ended || open == 0):
+		detach = true
+		msg = "the batch " + run.batchID + " ended (" + cleanText(v.State) + ") before any step ran: nothing was executed; propose the staged plan again for a fresh approval"
+	case open == 0:
 		state = deployFailed
+	case ended:
+		state = deployFailed
+		msg = "the batch " + run.batchID + " ended (" + cleanText(v.State) + ") after some steps ran; the remaining steps were not executed"
 	}
-	if state != "" {
-		now := h.clockNow()
-		h.deployRuns.set(run.id, func(x *deployRun) {
-			if x.state == deployBootstrapping {
-				x.state, x.expires = state, now.Add(deployRunTTL)
-				if state == deployFailed {
-					x.failedIn = deployBootstrapping
-				}
-			}
-		})
-		run.state = state
+	if state == "" && !detach {
+		return &v
+	}
+	id := run.batchID
+	h.deployRuns.set(run.id, func(x *deployRun) {
+		if x.state != deployBootstrapping || x.batchID != id {
+			return
+		}
+		if detach {
+			x.batchID, x.batchErr = "", msg
+			return
+		}
+		x.state, x.expires = state, now.Add(deployRunTTL)
 		if state == deployFailed {
-			run.failedIn = deployBootstrapping
+			x.failedIn = deployBootstrapping
+			if msg != "" {
+				x.message = msg
+			}
+		}
+	})
+	if detach {
+		run.batchID, run.batchErr = "", msg
+		return nil
+	}
+	run.state = state
+	if state == deployFailed {
+		run.failedIn = deployBootstrapping
+		if msg != "" {
+			run.message = msg
 		}
 	}
 	return &v
@@ -1792,7 +2020,7 @@ func deployStateClass(state string) string {
 		return "badge--ok"
 	case deployFailed:
 		return "badge--critical"
-	case deployProposed, deployEnrolling:
+	case deployProposed, deployEnrolling, deployJoined:
 		return "badge--warning"
 	default:
 		return "badge--unknown"
@@ -1805,7 +2033,7 @@ func (h *Handler) handleDeployRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var rows []deployRunRow
-	for _, x := range h.deployRuns.list(webUser(r), h.clockNow()) {
+	for _, x := range h.deployRuns.list(webUser(r), h.settleDeployRuns(r.Context())) {
 		rows = append(rows, deployRunRow{ID: x.id, Name: x.form.Name, Remote: x.form.Remote, Node: x.form.Node,
 			State: x.state, StateClass: deployStateClass(x.state), Risk: x.risk, VMID: x.vmid, Created: x.created.UTC()})
 	}
@@ -1822,6 +2050,7 @@ func (h *Handler) handleDeployRunPage(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	now := h.settleDeployRuns(r.Context())
 	run, ok := h.deployRuns.get(webUser(r), id)
 	if !ok {
 		http.NotFound(w, r)
@@ -1829,7 +2058,6 @@ func (h *Handler) handleDeployRunPage(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
 	defer cancel()
-	now := h.clockNow()
 	batch := h.followBatch(ctx, &run)
 	d := &deployRunData{ID: run.id, State: run.state, StateClass: deployStateClass(run.state), Message: run.message,
 		Form: run.form, Size: sizeLabel(run.form.Size), VMID: run.vmid, ExecutionID: run.executionID, Warnings: run.warnings,
@@ -1904,8 +2132,11 @@ func (h *Handler) handleDeployRunPage(w http.ResponseWriter, r *http.Request) {
 // current one active; a failed run marks the state it failed in.
 func deployStateLine(state, failedIn string) []deployStateView {
 	at := state
-	if state == deployFailed {
+	switch state {
+	case deployFailed:
 		at = failedIn
+	case deployJoined:
+		at = deployDone
 	}
 	cur := -1
 	for i, s := range deployStates {
@@ -1921,6 +2152,10 @@ func deployStateLine(state, failedIn string) []deployStateView {
 			v.Class, v.Label = "failed", s.label+" (failed)"
 		case state == deployFailed && s.name == deployDone:
 			v.Class, v.Label = "todo", "Failed"
+		case state == deployJoined && s.name == deployBootstrapping:
+			v.Class, v.Label = "todo", s.label+" (not available)"
+		case state == deployJoined && s.name == deployDone:
+			v.Class, v.Label = "current", "Joined"
 		case i < cur, state == deployDone:
 			v.Class = "done"
 		case i == cur:

@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -196,24 +197,37 @@ func (f *fakeJoinExec) CommitGuestJoin(_ context.Context, in *pb.CommitGuestJoin
 	}, nil
 }
 
-// fakeDeployBatches records the staged plan.
+// fakeDeployBatches records the staged plan; every proposal is a new
+// batch (batch-1, batch-2, ...).
 type fakeDeployBatches struct {
 	mu       sync.Mutex
 	requests []executions.BatchRequest
 	counts   executions.BatchCounts
+	state    string
+	expiry   time.Time
 }
 
 func (f *fakeDeployBatches) ProposeBatch(_ context.Context, _ string, req executions.BatchRequest) (executions.BatchCreated, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.requests = append(f.requests, req)
-	return executions.BatchCreated{ID: "batch-1", State: "pending"}, nil
+	return executions.BatchCreated{ID: "batch-" + strconv.Itoa(len(f.requests)), State: "pending"}, nil
 }
 
-func (f *fakeDeployBatches) Batch(context.Context, string) (executions.BatchView, error) {
+func (f *fakeDeployBatches) Batch(_ context.Context, id string) (executions.BatchView, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return executions.BatchView{ID: "batch-1", Summary: "running", Counts: f.counts}, nil
+	st := f.state
+	if st == "" {
+		st = "approved"
+	}
+	return executions.BatchView{ID: id, State: st, Expiry: f.expiry, Summary: "running", Counts: f.counts}, nil
+}
+
+func (f *fakeDeployBatches) set(state string, c executions.BatchCounts) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.state, f.counts = state, c
 }
 
 // dpModules serves the real first-party bootstrap modules from the tree.
@@ -288,9 +302,31 @@ type dpEnv struct {
 	batches *fakeDeployBatches
 	state   string
 	gen     uint64
+
+	clockMu sync.Mutex
+	offset  time.Duration
+}
+
+// now is the fake clock: the real time moved forward by advance.
+func (e *dpEnv) now() time.Time {
+	e.clockMu.Lock()
+	defer e.clockMu.Unlock()
+	return time.Now().Add(e.offset)
+}
+
+func (e *dpEnv) advance(d time.Duration) {
+	e.clockMu.Lock()
+	defer e.clockMu.Unlock()
+	e.offset += d
 }
 
 func newDPEnv(t *testing.T) *dpEnv {
+	t.Helper()
+	return newDPEnvWith(t, nil)
+}
+
+// newDPEnvWith builds the environment; edit adjusts the handler options.
+func newDPEnvWith(t *testing.T, edit func(*ui.Options)) *dpEnv {
 	t.Helper()
 	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
 	if err != nil {
@@ -321,8 +357,9 @@ func newDPEnv(t *testing.T) *dpEnv {
 		Runbooks:  []deployprofile.RunbookRef{{Slug: "harden", Version: 3}}, VaultRefs: []deployprofile.VaultRef{}}); err != nil {
 		t.Fatal(err)
 	}
-	e.h = newTestHandler(t, ui.Options{
+	o := ui.Options{
 		PublicOrigin: gpOrigin,
+		Now:          e.now,
 		Hosts:        func(context.Context) ([]inventory.Host, error) { return nil, nil },
 		PVE:          e.pve,
 		PVEChart:     func(ctx context.Context) (pveinventory.Tree, error) { return e.pve.ChartTree(ctx, time.Now()) },
@@ -340,7 +377,11 @@ func newDPEnv(t *testing.T) *dpEnv {
 		DeployIPAM:    e.ipam,
 		DeployBatches: e.batches,
 		Log:           slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}).Handler()
+	}
+	if edit != nil {
+		edit(&o)
+	}
+	e.h = newTestHandler(t, o).Handler()
 	return e
 }
 
