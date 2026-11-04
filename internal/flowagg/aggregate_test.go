@@ -937,3 +937,52 @@ func TestMaxIntervalClampedToRetention(t *testing.T) {
 		t.Fatalf("Ingest = %v, want ErrIntervalTooLong", err)
 	}
 }
+
+// TestForwardClockJumpDoesNotLockOutReports pins the fix for a forward
+// clock jump larger than the retention: the automatic prune must not
+// ratchet the floor past the newest accepted data hour, or every later
+// report gets ErrOutOfWindow until a restart.
+func TestForwardClockJumpDoesNotLockOutReports(t *testing.T) {
+	cur := t0
+	a := NewAggregator(DefaultLimits(), func() time.Time { return cur })
+	obs := Observation{Key: key22, BytesAB: 1, ServerReported: true}
+	mustIngest(t, a, report("h", t0, t0.Add(time.Minute), obs))
+	// The clock jumps forward by more than the retention.
+	cur = t0.Add(Retention + 24*time.Hour)
+	mustIngest(t, a, report("h", cur, cur.Add(time.Minute), obs))
+	// The clock returns to shortly after t0.
+	cur = t0.Add(2 * time.Hour)
+	// A new report must be accepted, not locked out until a restart.
+	if res := mustIngest(t, a, report("h2", cur, cur.Add(time.Minute), Observation{Key: key22, BytesAB: 2})); res.Applied != 1 {
+		t.Fatalf("after clock jump and return: %+v", res)
+	}
+	// Replay protection must survive the jump: the pruned hour stays
+	// closed even after the clock returns.
+	old := report("h", t0, t0.Add(time.Minute), obs)
+	if _, err := a.Ingest(old, ownOf(old)); !errors.Is(err, ErrOutOfWindow) {
+		t.Fatalf("replay after jump = %v, want ErrOutOfWindow", err)
+	}
+}
+
+// TestFloorAdvanceOnMidHourCutoffKeepsLiveData pins the floor advance
+// when the cutoff is not on an hour boundary: the floor moves to the
+// start of the hour containing the cutoff, not one hour later, so a
+// report ending in the partly live cutoff hour is still applied.
+func TestFloorAdvanceOnMidHourCutoffKeepsLiveData(t *testing.T) {
+	cur := t0
+	a := NewAggregator(DefaultLimits(), func() time.Time { return cur })
+	// Prior data so the floor advance is bounded by a real data hour.
+	mustIngest(t, a, report("h", t0, t0.Add(time.Minute), Observation{Key: key22, BytesAB: 1, ServerReported: true}))
+	// The clock moves so the cutoff falls mid-hour: now-Retention is
+	// t0+30min, inside the hour that starts at t0.
+	cur = t0.Add(Retention + 30*time.Minute)
+	// A report ending in that partly live cutoff hour, after the cutoff,
+	// must still be applied.
+	if res := mustIngest(t, a, report("h2", t0.Add(40*time.Minute), t0.Add(45*time.Minute), Observation{Key: key22, BytesAB: 2})); res.Applied != 1 {
+		t.Fatalf("report in the partly live cutoff hour: %+v", res)
+	}
+	// The floor is at the start of the cutoff hour, not one hour later.
+	if a.floor != t0.Unix() {
+		t.Fatalf("floor = %d, want %d (start of the cutoff hour)", a.floor, t0.Unix())
+	}
+}
