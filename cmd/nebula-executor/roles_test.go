@@ -48,7 +48,7 @@ func TestResolveRolesAssignsCollectorRole(t *testing.T) {
 
 func TestResolveRolesCollectorMissingOrDisabled(t *testing.T) {
 	users := map[string]uint32{"srv": 901, "alice": 1000}
-	for _, name := range []string{"coll", "", "   "} {
+	for _, name := range []string{defaultPveCollectorUser, " " + defaultPveCollectorUser + " ", "", "   "} {
 		roles, err := resolveRolesWith(fakeLookup(users), testExecutorUID, "srv", "alice", name, quietLog)
 		if err != nil {
 			t.Fatalf("collector %q: %v", name, err)
@@ -65,16 +65,38 @@ func TestResolveRolesCollectorMissingOrDisabled(t *testing.T) {
 }
 
 func TestResolveRolesRejectsSharedCollectorUID(t *testing.T) {
-	cases := map[string]uint32{
-		"root":     0,
-		"executor": testExecutorUID,
-		"server":   901,
-		"admin":    1000,
+	cases := []struct {
+		name string
+		uid  uint32
+		want error
+	}{
+		{"root", 0, errRootUser},
+		{"executor", testExecutorUID, errExecutorUser},
+		{"server", 901, errSharedUser},
+		{"admin", 1000, errSharedUser},
 	}
-	for name, uid := range cases {
-		users := map[string]uint32{"srv": 901, "alice": 1000, "coll": uid}
-		if roles, err := resolveRolesWith(fakeLookup(users), testExecutorUID, "srv", "alice", "coll", quietLog); err == nil {
-			t.Errorf("collector shares the %s uid: accepted with roles %v", name, roles)
+	for _, c := range cases {
+		users := map[string]uint32{"srv": 901, "alice": 1000, "coll": c.uid}
+		roles, err := resolveRolesWith(fakeLookup(users), testExecutorUID, "srv", "alice", "coll", quietLog)
+		if !errors.Is(err, c.want) {
+			t.Errorf("collector shares the %s uid: err = %v (roles %v), want %v", c.name, err, roles, c.want)
+		}
+	}
+}
+
+// TestResolveRolesMissingConfiguredCollectorStopsStart: a collector user
+// named explicitly (not the default) that does not exist stops the start;
+// only the default name is tolerated as an install without a collector.
+func TestResolveRolesMissingConfiguredCollectorStopsStart(t *testing.T) {
+	users := map[string]uint32{"srv": 901, "alice": 1000}
+	for _, name := range []string{"coll", " coll ", "nebula-pve-colector"} {
+		roles, err := resolveRolesWith(fakeLookup(users), testExecutorUID, "srv", "alice", name, quietLog)
+		if !errors.Is(err, errCollectorUserMissing) {
+			t.Errorf("collector %q: err = %v (roles %v), want errCollectorUserMissing", name, err, roles)
+		}
+		var unknown user.UnknownUserError
+		if !errors.As(err, &unknown) {
+			t.Errorf("collector %q: err = %v, want it to wrap the unknown-user error", name, err)
 		}
 	}
 }
@@ -97,18 +119,30 @@ func TestResolveRolesCollectorLookupFailureStopsStart(t *testing.T) {
 
 func TestResolveRolesServerAndAdminRulesUnchanged(t *testing.T) {
 	users := map[string]uint32{"srv": 901, "alice": 1000, "rootish": 0, "exec": testExecutorUID, "coll": 902}
-	bad := []struct{ name, server, admins string }{
-		{"server is root", "rootish", "alice"},
-		{"server is executor", "exec", "alice"},
-		{"unknown server", "nobody-here", "alice"},
-		{"admin is server", "srv", "srv"},
-		{"admin is executor", "srv", "exec"},
-		{"admin is root", "srv", "rootish"},
-		{"unknown admin", "srv", "nobody-here"},
+	bad := []struct {
+		name, server, admins string
+		want                 error
+	}{
+		{"server is root", "rootish", "alice", errRootUser},
+		{"server is executor", "exec", "alice", errExecutorUser},
+		{"admin is server", "srv", "srv", errSharedUser},
+		{"admin is executor", "srv", "exec", errExecutorUser},
+		{"admin is root", "srv", "rootish", errRootUser},
 	}
 	for _, c := range bad {
-		if _, err := resolveRolesWith(fakeLookup(users), testExecutorUID, c.server, c.admins, "coll", quietLog); err == nil {
-			t.Errorf("%s: accepted", c.name)
+		if _, err := resolveRolesWith(fakeLookup(users), testExecutorUID, c.server, c.admins, "coll", quietLog); !errors.Is(err, c.want) {
+			t.Errorf("%s: err = %v, want %v", c.name, err, c.want)
+		}
+	}
+	unknown := []struct{ name, server, admins string }{
+		{"unknown server", "nobody-here", "alice"},
+		{"unknown admin", "srv", "nobody-here"},
+	}
+	for _, c := range unknown {
+		_, err := resolveRolesWith(fakeLookup(users), testExecutorUID, c.server, c.admins, "coll", quietLog)
+		var uerr user.UnknownUserError
+		if !errors.As(err, &uerr) || string(uerr) != "nobody-here" {
+			t.Errorf("%s: err = %v, want the unknown-user error for nobody-here", c.name, err)
 		}
 	}
 }
