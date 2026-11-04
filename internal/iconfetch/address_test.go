@@ -49,13 +49,11 @@ type stubResolver struct {
 	answers [][]netip.Addr
 	err     error
 	calls   int
-	hosts   []string
 }
 
-func (r *stubResolver) LookupNetIP(_ context.Context, _, host string) ([]netip.Addr, error) {
+func (r *stubResolver) LookupNetIP(_ context.Context, _, _ string) ([]netip.Addr, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.hosts = append(r.hosts, host)
 	i := r.calls
 	r.calls++
 	if r.err != nil {
