@@ -337,6 +337,9 @@ export function createWebGL2Backend(canvas, onLost) {
 
 function buildBackend(canvas, gl, onLost) {
   let lost = false;
+  // sceneComplete is true once a setScene upload finished; a render before
+  // that (or after a failed upload) draws nothing and reports false.
+  let sceneComplete = false;
   const handleLost = (ev) => {
     ev.preventDefault();
     if (lost) return;
@@ -417,6 +420,7 @@ function buildBackend(canvas, gl, onLost) {
     name: bloom ? "webgl2" : "webgl2 (no bloom)",
     setScene(scene) {
       if (lost) return;
+      sceneComplete = false;
       const s = new Float32Array(scene.stars.length * stars.floats);
       scene.stars.forEach((st, i) => {
         s.set([st.x, st.y, st.r, st.rgb[0], st.rgb[1], st.rgb[2], st.brightness], i * stars.floats);
@@ -441,12 +445,13 @@ function buildBackend(canvas, gl, onLost) {
         n.set([nb.x, nb.y, nb.r, nb.rgb[0], nb.rgb[1], nb.rgb[2], nb.seed], i * nebulae.floats);
       });
       upload(gl, nebulae, n, scene.nebulae.length);
+      sceneComplete = true;
     },
     isLost() {
       return lost || gl.isContextLost();
     },
     render(cam, dpr, time) {
-      if (lost || gl.isContextLost()) return;
+      if (lost || gl.isContextLost()) return false;
       const w = gl.drawingBufferWidth;
       const h = gl.drawingBufferHeight;
       const t = ensureTargets(w, h);
@@ -483,6 +488,7 @@ function buildBackend(canvas, gl, onLost) {
         fullscreen(progs.composite, null, w, h);
       }
       gl.bindVertexArray(null);
+      return sceneComplete;
     },
     dispose() {
       canvas.removeEventListener("webglcontextlost", handleLost);

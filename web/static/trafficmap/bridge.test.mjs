@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { acceptMessage, send, OUT } from "./bridge.js";
 import { createBackend } from "./main.js";
-import { validateModel } from "./model.js";
+import { validateModel, MSG_ICONS } from "./model.js";
 import { computeLayout } from "./layout.js";
 import { buildScene, ZOOM } from "./scene.js";
 import { createCamera, pick, worldToScreen, screenToWorld, zoomAt, relativeZoom, MAX_RELATIVE_ZOOM } from "./camera.js";
@@ -44,6 +44,38 @@ test("RejectsUnknownAndInvalidMessages", () => {
   const r = acceptMessage(ev(bad), win, () => false);
   assert.equal(r.kind, "error");
   assert.ok(r.errors.length > 0);
+});
+
+function fakeBitmap(width = 16, height = 16) {
+  const b = { width, height, closed: false, close() { this.closed = true; } };
+  return b;
+}
+
+test("RejectedIconMessagesCloseTheirBitmaps", () => {
+  const win = fakeWindow();
+  const isBitmap = (v) => v !== null && typeof v === "object" && "close" in v;
+  const ev = (data) => ({ source: win.parent, origin: ORIGIN, data });
+
+  const badKey = fakeBitmap();
+  const r1 = acceptMessage(ev({ type: MSG_ICONS, icons: { "Bad Key": badKey } }), win, isBitmap);
+  assert.equal(r1.kind, "error", "a bad catalog key is rejected");
+  assert.ok(badKey.closed, "the bitmap of a bad key is closed");
+
+  const big = fakeBitmap(1000, 16);
+  const r2 = acceptMessage(ev({ type: MSG_ICONS, icons: { docker: big } }), win, isBitmap);
+  assert.equal(r2.kind, "error", "an oversized bitmap is rejected");
+  assert.ok(big.closed, "the oversized bitmap is closed");
+
+  const many = {};
+  for (let i = 0; i < 513; i++) many["k" + i] = fakeBitmap();
+  const r3 = acceptMessage(ev({ type: MSG_ICONS, icons: many }), win, isBitmap);
+  assert.equal(r3.kind, "error", "too many entries is rejected");
+  assert.ok(Object.values(many).every((b) => b.closed), "all bitmaps of a rejected message are closed");
+
+  const good = fakeBitmap();
+  const r4 = acceptMessage(ev({ type: MSG_ICONS, icons: { docker: good } }), win, isBitmap);
+  assert.equal(r4.kind, "icons", "a valid message is accepted");
+  assert.ok(!good.closed, "accepted bitmaps stay open");
 });
 
 test("SendTargetsOwnOriginNeverWildcard", () => {
