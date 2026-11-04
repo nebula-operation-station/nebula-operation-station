@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net/netip"
+	"slices"
 	"testing"
 	"time"
 )
@@ -22,9 +23,20 @@ func report(host string, from, to time.Time, obs ...Observation) Report {
 	return Report{Host: host, Tier: "socket", From: from, To: to, Observations: obs}
 }
 
+// ownOf returns the addresses a report's observations claim for their
+// reporter, for tests that are not about address binding. A report without
+// observations gets a documentation address.
+func ownOf(r Report) []netip.Addr {
+	own := []netip.Addr{addr("192.0.2.254")}
+	for i := range r.Observations {
+		own = append(own, reporterEnd(&r.Observations[i]))
+	}
+	return own
+}
+
 func mustIngest(t *testing.T, a *Aggregator, r Report) IngestResult {
 	t.Helper()
-	res, err := a.Ingest(r)
+	res, err := a.Ingest(r, ownOf(r))
 	if err != nil {
 		t.Fatalf("Ingest(%s %v): %v", r.Host, r.To, err)
 	}
@@ -66,7 +78,7 @@ func TestIngestMergesBothSidesWithoutDoubleCounting(t *testing.T) {
 			want: FlowTotal{Key: key22, BytesAB: 15, BytesBA: 150, Connections: 1, ServerReported: true, Confirmed: true},
 		},
 		{
-			name: "second host claiming the same server side is ignored",
+			name: "second host with the same address claiming the server side is ignored",
 			reports: []Report{
 				report("srv", t0, t0.Add(time.Minute), Observation{Key: key22, BytesAB: 10, BytesBA: 100, Connections: 1, ServerReported: true}),
 				report("imposter", t0, t0.Add(time.Minute), Observation{Key: key22, BytesAB: 1000, BytesBA: 1000, Connections: 9, ServerReported: true}),
@@ -124,7 +136,7 @@ func TestIngestRejectsDuplicateAndOverlappingReports(t *testing.T) {
 		report("srv", t0.Add(time.Minute), t0.Add(3*time.Minute), obs), // overlaps
 		report("srv", t0.Add(-time.Minute), t0.Add(time.Minute), obs),  // older
 	} {
-		if _, err := a.Ingest(r); !errors.Is(err, ErrDuplicateReport) {
+		if _, err := a.Ingest(r, ownOf(r)); !errors.Is(err, ErrDuplicateReport) {
 			t.Fatalf("Ingest(%v..%v) = %v, want ErrDuplicateReport", r.From, r.To, err)
 		}
 	}
@@ -173,14 +185,15 @@ func TestIngestRejectsInvalidReports(t *testing.T) {
 		{"too many observations", report("h", t0, t0, make([]Observation, MaxSocketsPerSnapshot+1)...), ErrInvalidReport},
 		{"older than retention", report("h", now.Add(-Retention-time.Hour), now.Add(-Retention-time.Hour), ok), ErrOutOfWindow},
 		{"from the future", report("h", now.Add(time.Hour), now.Add(time.Hour), ok), ErrOutOfWindow},
+		{"interval too long", report("h", t0, t0.Add(time.Hour+time.Second), ok), ErrIntervalTooLong},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			a := newTestAgg(now, DefaultLimits())
-			if _, err := a.Ingest(tc.r); !errors.Is(err, tc.want) {
+			if _, err := a.Ingest(tc.r, ownOf(tc.r)); !errors.Is(err, tc.want) {
 				t.Fatalf("Ingest = %v, want %v", err, tc.want)
 			}
-			if a.Buckets() != 0 {
+			if a.Buckets() != 0 || a.Reporters() != 0 {
 				t.Fatal("rejected report changed state")
 			}
 		})
@@ -211,7 +224,7 @@ func TestIngestReporterLimit(t *testing.T) {
 	l.MaxReporters = 1
 	a := newTestAgg(t0.Add(time.Hour), l)
 	mustIngest(t, a, report("h1", t0, t0))
-	if _, err := a.Ingest(report("h2", t0, t0)); !errors.Is(err, ErrLimit) {
+	if _, err := a.Ingest(report("h2", t0, t0), ownOf(Report{})); !errors.Is(err, ErrLimit) {
 		t.Fatalf("Ingest = %v, want ErrLimit", err)
 	}
 }
@@ -382,11 +395,15 @@ func TestEndToEndTwoHostsIPv6(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		mustIngest(t, a, r)
+		own := map[string]netip.Addr{"pve": addr("2001:db8::10"), "ws": addr("2001:db8::20")}[r.Host]
+		if _, err := a.Ingest(r, []netip.Addr{own}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	got := a.TopN(addr("2001:db8::20"), Window{From: t0, To: now}, 5)
+	// The first snapshots are baselines: only the traffic after them counts.
 	want := FlowTotal{Key: FlowKey{A: addr("2001:db8::10"), B: addr("2001:db8::20"), Proto: TCP, ServerPort: 8006, Server: SideA, Tier: "socket"},
-		BytesAB: 3000, BytesBA: 300, Connections: 1, ServerReported: true, Confirmed: true}
+		BytesAB: 2000, BytesBA: 200, ServerReported: true, Confirmed: true}
 	if len(got) != 1 {
 		t.Fatalf("TopN = %+v", got)
 	}
@@ -449,30 +466,76 @@ func benchSetup(hosts, flows int) (prev, cur []*Snapshot) {
 
 // runPipeline diffs, classifies and ingests every host, then builds the
 // overview. It is the workload the 100 ms budget applies to.
-func runPipeline(prev, cur []*Snapshot) (int, error) {
+func runPipeline(prev, cur []*Snapshot) ([]FlowTotal, error) {
 	a := NewAggregator(DefaultLimits(), func() time.Time { return t0.Add(time.Hour) })
 	nodes := make([]netip.Addr, 0, len(cur))
 	for i := range cur {
 		r, err := Observe(prev[i], cur[i])
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
-		if _, err := a.Ingest(r); err != nil {
-			return 0, err
+		local := cur[i].Sockets[0].Local.Addr()
+		res, err := a.Ingest(r, []netip.Addr{local})
+		if err != nil {
+			return nil, err
 		}
-		nodes = append(nodes, cur[i].Sockets[0].Local.Addr())
+		if res.Applied != len(r.Observations) {
+			return nil, fmt.Errorf("host %s: %+v", r.Host, res)
+		}
+		nodes = append(nodes, local)
 	}
-	return len(a.OverviewUnion(nodes, Window{From: t0, To: t0.Add(time.Hour)}, DefaultOverviewN)), nil
+	return a.OverviewUnion(nodes, Window{From: t0, To: t0.Add(time.Hour)}, DefaultOverviewN), nil
+}
+
+// expectedOverview computes the overview of benchSetup independently: host
+// h is the client of flow f to host (h+f+1)%hosts on port 443 with
+// 7h+f bytes sent and 13f bytes received in the interval.
+func expectedOverview(hosts, flows int) []FlowTotal {
+	ip := func(h int) netip.Addr { return netip.AddrFrom4([4]byte{10, 1, byte(h >> 8), byte(h)}) }
+	perNode := make(map[netip.Addr][]FlowTotal)
+	for h := 0; h < hosts; h++ {
+		for f := 0; f < flows; f++ {
+			cli, srv := ip(h), ip((h+f+1)%hosts)
+			t := FlowTotal{Key: FlowKey{A: cli, B: srv, Proto: TCP, ServerPort: 443, Server: SideB, Tier: "socket"},
+				BytesAB: uint64(h*7 + f), BytesBA: uint64(f * 13)}
+			if srv.Less(cli) {
+				t.Key.A, t.Key.B, t.Key.Server = srv, cli, SideA
+				t.BytesAB, t.BytesBA = t.BytesBA, t.BytesAB
+			}
+			perNode[cli] = append(perNode[cli], t)
+			perNode[srv] = append(perNode[srv], t)
+		}
+	}
+	union := make(map[FlowKey]FlowTotal)
+	for _, ts := range perNode {
+		slices.SortFunc(ts, func(x, y FlowTotal) int { return compareTotal(&x, &y) })
+		for _, t := range ts[:min(len(ts), DefaultOverviewN)] {
+			union[t.Key] = t
+		}
+	}
+	out := make([]FlowTotal, 0, len(union))
+	for _, t := range union {
+		out = append(out, t)
+	}
+	slices.SortFunc(out, func(x, y FlowTotal) int { return compareTotal(&x, &y) })
+	return out
 }
 
 func TestPipeline1000Hosts(t *testing.T) {
 	prev, cur := benchSetup(1000, 10)
-	n, err := runPipeline(prev, cur)
+	got, err := runPipeline(prev, cur)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n == 0 || n > 1000*DefaultOverviewN {
-		t.Fatalf("overview has %d flows", n)
+	want := expectedOverview(1000, 10)
+	if len(got) != len(want) {
+		t.Fatalf("overview has %d flows, want %d", len(got), len(want))
+	}
+	for i := range want {
+		g := got[i]
+		if g.Key != want[i].Key || g.BytesAB != want[i].BytesAB || g.BytesBA != want[i].BytesBA || g.ServerReported || g.Confirmed {
+			t.Fatalf("pos %d = %+v, want %+v", i, g, want[i])
+		}
 	}
 }
 
@@ -484,4 +547,198 @@ func BenchmarkPipeline1000x10(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+func TestIngestBindsObservationsToReporterAddresses(t *testing.T) {
+	now := t0.Add(time.Hour)
+	w := Window{From: t0, To: now}
+	srvObs := Observation{Key: key22, BytesAB: 10, BytesBA: 100, Connections: 1, ServerReported: true}
+	cliObs := Observation{Key: key22, BytesAB: 9, BytesBA: 99, Connections: 1}
+	fakeSrv := Observation{Key: key22, BytesAB: 1 << 30, BytesBA: 1 << 30, Connections: 9, ServerReported: true}
+	fakeCli := Observation{Key: key22, BytesAB: 1 << 30, BytesBA: 1 << 30, Connections: 9}
+	// The imposter's own flow 10.0.0.2 -> 10.0.0.9:80 is allowed.
+	ownFlow := Observation{Key: FlowKey{A: addr("10.0.0.2"), B: addr("10.0.0.9"), Proto: TCP, ServerPort: 80, Server: SideB, Tier: "socket"}, BytesAB: 5}
+	imposter := []netip.Addr{addr("10.0.0.9")}
+	want := FlowTotal{Key: key22, BytesAB: 10, BytesBA: 100, Connections: 1, ServerReported: true, Confirmed: true}
+
+	check := func(t *testing.T, a *Aggregator) {
+		t.Helper()
+		got := a.TopN(addr("10.0.0.1"), w, 10)
+		if len(got) != 1 {
+			t.Fatalf("TopN = %+v", got)
+		}
+		g := got[0]
+		g.FirstSeen, g.LastSeen = time.Time{}, time.Time{}
+		if g != want {
+			t.Fatalf("total = %+v\nwant    %+v", g, want)
+		}
+	}
+	ingest := func(t *testing.T, a *Aggregator, host string, own []netip.Addr, obs ...Observation) IngestResult {
+		t.Helper()
+		res, err := a.Ingest(report(host, t0, t0.Add(time.Minute), sortObs(obs)...), own)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+
+	t.Run("imposter first", func(t *testing.T) {
+		a := newTestAgg(now, DefaultLimits())
+		res := ingest(t, a, "imposter", imposter, fakeSrv)
+		if res != (IngestResult{Foreign: 1}) || a.Buckets() != 0 {
+			t.Fatalf("imposter server claim: %+v, %d buckets", res, a.Buckets())
+		}
+		res = ingest(t, a, "imposter2", imposter, fakeCli)
+		if res != (IngestResult{Foreign: 1}) || a.Buckets() != 0 {
+			t.Fatalf("imposter client claim: %+v, %d buckets", res, a.Buckets())
+		}
+		if res := ingest(t, a, "srv", []netip.Addr{addr("10.0.0.2")}, srvObs); res != (IngestResult{Applied: 1}) {
+			t.Fatalf("real server: %+v", res)
+		}
+		// A v4-mapped address in own matches the unmapped key.
+		if res := ingest(t, a, "cli", []netip.Addr{addr("::ffff:10.0.0.1")}, cliObs); res != (IngestResult{Applied: 1}) {
+			t.Fatalf("real client: %+v", res)
+		}
+		check(t, a)
+	})
+	t.Run("imposter second", func(t *testing.T) {
+		a := newTestAgg(now, DefaultLimits())
+		ingest(t, a, "srv", []netip.Addr{addr("10.0.0.2")}, srvObs)
+		ingest(t, a, "cli", []netip.Addr{addr("10.0.0.1")}, cliObs)
+		res := ingest(t, a, "imposter", imposter, fakeSrv)
+		if res != (IngestResult{Foreign: 1}) {
+			t.Fatalf("imposter: %+v", res)
+		}
+		check(t, a)
+	})
+	t.Run("only the foreign observations of a report are refused", func(t *testing.T) {
+		a := newTestAgg(now, DefaultLimits())
+		res := ingest(t, a, "imposter", []netip.Addr{addr("10.0.0.2")}, ownFlow, cliObs)
+		if res != (IngestResult{Applied: 1, Foreign: 1}) {
+			t.Fatalf("mixed report: %+v", res)
+		}
+		if got := a.TopN(addr("10.0.0.9"), w, 10); len(got) != 1 || got[0].BytesAB != 5 {
+			t.Fatalf("own flow = %+v", got)
+		}
+		if got := a.TopN(addr("10.0.0.1"), w, 10); len(got) != 0 {
+			t.Fatalf("foreign client claim was stored: %+v", got)
+		}
+	})
+}
+
+func TestIngestRejectsBadReporterAddresses(t *testing.T) {
+	r := report("h", t0, t0, Observation{Key: key22, ServerReported: true})
+	many := make([]netip.Addr, MaxHostAddrs+1)
+	for i := range many {
+		many[i] = netip.AddrFrom4([4]byte{10, 9, byte(i >> 8), byte(i)})
+	}
+	for name, own := range map[string][]netip.Addr{
+		"none":        nil,
+		"invalid":     {{}},
+		"unspecified": {netip.IPv4Unspecified()},
+		"too many":    many,
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := newTestAgg(t0.Add(time.Hour), DefaultLimits())
+			if _, err := a.Ingest(r, own); !errors.Is(err, ErrInvalidReport) {
+				t.Fatalf("Ingest = %v, want ErrInvalidReport", err)
+			}
+			if a.Buckets() != 0 || a.Reporters() != 0 {
+				t.Fatal("rejected report changed state")
+			}
+		})
+	}
+}
+
+func TestIngestSplitsIntervalsAcrossHours(t *testing.T) {
+	now := t0.Add(3 * time.Hour)
+	a := newTestAgg(now, DefaultLimits())
+	h1, h2 := t0.Add(30*time.Minute), t0.Add(time.Hour)
+	// The client reports per hour; the server's collector had a gap and
+	// sends one report for 10:30..11:30.
+	mustIngest(t, a, report("cli", h1, h2, Observation{Key: key22, BytesAB: 300, BytesBA: 3000}))
+	mustIngest(t, a, report("cli", h2, h2.Add(30*time.Minute), Observation{Key: key22, BytesAB: 300, BytesBA: 3000}))
+	res := mustIngest(t, a, report("srv", h1, h2.Add(30*time.Minute), Observation{Key: key22, BytesAB: 601, BytesBA: 6000, Connections: 1, ServerReported: true}))
+	if res.Applied != 2 {
+		t.Fatalf("server report parts: %+v", res)
+	}
+	tests := []struct {
+		w      Window
+		ab, ba uint64
+	}{
+		{Window{From: t0, To: now}, 601, 6000}, // never 300 + 601
+		{Window{From: t0, To: h2}, 300, 3000},
+		{Window{From: h2, To: now}, 301, 3000}, // the rounding remainder goes to the last hour
+	}
+	for _, tc := range tests {
+		got := a.TopN(addr("10.0.0.1"), tc.w, 1)
+		if len(got) != 1 || got[0].BytesAB != tc.ab || got[0].BytesBA != tc.ba || !got[0].ServerReported || !got[0].Confirmed {
+			t.Errorf("window %v..%v = %+v, want %d/%d from the server", tc.w.From, tc.w.To, got, tc.ab, tc.ba)
+		}
+	}
+	if got := a.TopN(addr("10.0.0.1"), Window{From: t0, To: now}, 1); got[0].Connections != 1 {
+		t.Errorf("connections = %d, want 1", got[0].Connections)
+	}
+
+	// After a gap longer than MaxInterval the report is refused; a
+	// baseline report lets the collector continue.
+	long := report("srv", h2.Add(30*time.Minute), now, Observation{Key: key22, BytesAB: 1, ServerReported: true})
+	if _, err := a.Ingest(long, ownOf(long)); !errors.Is(err, ErrIntervalTooLong) {
+		t.Fatalf("long interval = %v, want ErrIntervalTooLong", err)
+	}
+	mustIngest(t, a, report("srv", now, now))
+}
+
+func TestSplitHours(t *testing.T) {
+	tests := []struct {
+		name     string
+		from, to time.Time
+		hours    []int64
+	}{
+		{"zero length", t0.Add(time.Minute), t0.Add(time.Minute), []int64{0}},
+		{"inside one hour", t0, t0.Add(time.Minute), []int64{0}},
+		{"ends on the boundary", t0.Add(59 * time.Minute), t0.Add(time.Hour), []int64{0}},
+		{"zero length on the boundary", t0.Add(time.Hour), t0.Add(time.Hour), []int64{1}},
+		{"spans a boundary", t0.Add(59 * time.Minute), t0.Add(61 * time.Minute), []int64{0, 1}},
+		{"spans three hours", t0.Add(59 * time.Minute), t0.Add(121 * time.Minute), []int64{0, 1, 2}},
+	}
+	base := hourOf(t0)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			parts := splitHours(tc.from, tc.to)
+			if len(parts) != len(tc.hours) {
+				t.Fatalf("parts = %+v", parts)
+			}
+			for _, v := range []uint64{0, 1, 7, 1000, math.MaxUint64} {
+				var sum uint64
+				for i := range parts {
+					if parts[i].hour-base != tc.hours[i] {
+						t.Fatalf("part %d hour %d, want %d", i, parts[i].hour-base, tc.hours[i])
+					}
+					sum += parts[i].share(v)
+				}
+				if sum != v {
+					t.Fatalf("shares of %d sum to %d", v, sum)
+				}
+			}
+		})
+	}
+}
+
+func TestRejectedReportDoesNotPrune(t *testing.T) {
+	cur := t0
+	l := DefaultLimits()
+	l.MaxReporters = 1
+	a := NewAggregator(l, func() time.Time { return cur })
+	mustIngest(t, a, report("h", cur, cur, Observation{Key: key22, BytesAB: 1, ServerReported: true}))
+	cur = cur.Add(Retention + 2*time.Hour)
+	if _, err := a.Ingest(report("other", cur, cur), ownOf(Report{})); !errors.Is(err, ErrLimit) {
+		t.Fatalf("Ingest = %v, want ErrLimit", err)
+	}
+	if a.Buckets() != 1 || a.Reporters() != 1 {
+		t.Fatalf("rejected report pruned: %d buckets, %d reporters", a.Buckets(), a.Reporters())
+	}
+	// Pruning frees the slot once the clock's hour has been pruned.
+	a.Cutoff(cur, Retention)
+	mustIngest(t, a, report("other", cur, cur))
 }

@@ -113,7 +113,8 @@ type Report struct {
 	LowerBound bool
 }
 
-// listenKey identifies a listener; the zero Addr is the wildcard.
+// listenKey identifies a listener. Wildcard listeners keep their
+// unspecified address (0.0.0.0 or ::).
 type listenKey struct {
 	proto Proto
 	addr  netip.Addr
@@ -130,22 +131,23 @@ func listenerSet(ls []Listener) (map[listenKey]struct{}, error) {
 			return nil, fmt.Errorf("%w: listener %d invalid", ErrInvalidSnapshot, i)
 		}
 		a := l.Addr.Addr().Unmap().WithZone("")
-		if a.IsUnspecified() {
-			// 0.0.0.0 and :: both accept every local address; Linux binds
-			// :: dual-stack by default, so :: also matches IPv4 locals.
-			a = netip.Addr{}
-		}
 		set[listenKey{proto: l.Proto, addr: a, port: l.Addr.Port()}] = struct{}{}
 	}
 	return set, nil
 }
 
+// isListening reports whether local matches a listener. 0.0.0.0 matches
+// only IPv4 locals; :: matches IPv6 locals and, because Linux binds ::
+// dual-stack by default, IPv4 locals too.
 func isListening(set map[listenKey]struct{}, proto Proto, local netip.AddrPort) bool {
-	if _, ok := set[listenKey{proto: proto, addr: local.Addr(), port: local.Port()}]; ok {
+	has := func(a netip.Addr) bool {
+		_, ok := set[listenKey{proto: proto, addr: a, port: local.Port()}]
+		return ok
+	}
+	if has(local.Addr()) || has(netip.IPv6Unspecified()) {
 		return true
 	}
-	_, ok := set[listenKey{proto: proto, port: local.Port()}]
-	return ok
+	return local.Addr().Is4() && has(netip.IPv4Unspecified())
 }
 
 // satAdd adds without wrapping; counters come from untrusted hosts.

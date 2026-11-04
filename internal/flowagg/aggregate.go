@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/bits"
 	"net/netip"
 	"slices"
 	"sync"
@@ -24,6 +25,12 @@ const (
 	DefaultMaxReporters = 65536
 	// DefaultMaxClockSkew is how far a report may lie in the future.
 	DefaultMaxClockSkew = 5 * time.Minute
+	// DefaultMaxInterval is the longest accepted report interval. A
+	// collector that was away for longer must start over with a baseline
+	// (Diff with a nil previous snapshot).
+	DefaultMaxInterval = time.Hour
+	// MaxHostAddrs bounds the addresses passed for one reporter.
+	MaxHostAddrs = 1024
 	// DefaultOverviewN is the per-node top set size of the overview.
 	DefaultOverviewN = 5
 )
@@ -42,6 +49,10 @@ var (
 	ErrOutOfWindow = errors.New("flow report outside the accepted time window")
 	// ErrLimit marks a report that would exceed the reporter limit.
 	ErrLimit = errors.New("flow aggregation limit reached")
+	// ErrIntervalTooLong marks a report whose interval exceeds
+	// Limits.MaxInterval. Its bytes cannot be placed in hours reliably; the
+	// collector must start over with a baseline.
+	ErrIntervalTooLong = errors.New("flow report interval too long")
 )
 
 // Limits bounds the memory of an Aggregator. Zero fields take the defaults.
@@ -50,6 +61,9 @@ type Limits struct {
 	MaxReporters int
 	Retention    time.Duration
 	MaxClockSkew time.Duration
+	// MaxInterval bounds From..To of a report; each observation touches
+	// at most MaxInterval/1h+1 hourly buckets.
+	MaxInterval time.Duration
 }
 
 // DefaultLimits returns the package defaults.
@@ -59,6 +73,7 @@ func DefaultLimits() Limits {
 		MaxReporters: DefaultMaxReporters,
 		Retention:    Retention,
 		MaxClockSkew: DefaultMaxClockSkew,
+		MaxInterval:  DefaultMaxInterval,
 	}
 }
 
@@ -73,10 +88,11 @@ type sideAcc struct {
 	first, last int64 // unix seconds of report end times
 }
 
-func (s *sideAcc) add(o *Observation, at int64) {
-	s.ab = satAdd(s.ab, o.BytesAB)
-	s.ba = satAdd(s.ba, o.BytesBA)
-	s.conns = satAdd(s.conns, o.Connections)
+func (s *sideAcc) add(o *Observation, p *hourPart) {
+	at := p.at
+	s.ab = satAdd(s.ab, p.share(o.BytesAB))
+	s.ba = satAdd(s.ba, p.share(o.BytesBA))
+	s.conns = satAdd(s.conns, p.share(o.Connections))
 	s.lowerBound = s.lowerBound || o.LowerBound
 	if s.first == 0 || at < s.first {
 		s.first = at
@@ -99,15 +115,77 @@ type reporterState struct {
 }
 
 // IngestResult tells what happened to the observations of an accepted
-// report.
+// report. An observation whose interval spans an hour boundary is split
+// into one part per hour; Applied, Dropped and Conflicts count parts.
 type IngestResult struct {
-	// Applied observations were added to a bucket.
+	// Applied parts were added to a bucket.
 	Applied int
-	// Dropped observations needed a new bucket beyond Limits.MaxBuckets.
+	// Dropped parts needed a new bucket beyond Limits.MaxBuckets.
 	Dropped int
 	// Conflicts were ignored because another host already reported the
 	// same end of the flow in that hour.
 	Conflicts int
+	// Foreign observations were refused because the end they claim (the
+	// server end if ServerReported, otherwise the client end) is not one
+	// of the reporter's addresses.
+	Foreign int
+}
+
+// hourPart is the share of a report interval that falls into one hour.
+// num/den is the fraction of the interval and done the part of it that
+// lies before this hour.
+type hourPart struct {
+	hour     int64
+	at       int64 // unix seconds of the end of the part
+	num, den uint64
+	done     uint64 // nanoseconds of the interval before this part
+}
+
+// share returns this part's share of v: floor(v*end/den) - floor(v*start/den)
+// over the cumulative interval, so rounding never loses or adds a unit.
+func (p *hourPart) share(v uint64) uint64 {
+	if p.den == 0 {
+		return v
+	}
+	upTo := func(n uint64) uint64 {
+		if n >= p.den {
+			return v
+		}
+		hi, lo := bits.Mul64(v, n)
+		q, _ := bits.Div64(hi, lo, p.den)
+		return q
+	}
+	return upTo(p.done+p.num) - upTo(p.done)
+}
+
+// splitHours divides [from, to) into hourly parts. A zero-length interval
+// is one part in the hour of to; an interval that ends exactly on an hour
+// boundary does not touch the following hour.
+func splitHours(from, to time.Time) []hourPart {
+	total := to.Sub(from)
+	if total <= 0 {
+		return []hourPart{{hour: hourOf(to), at: to.Unix()}}
+	}
+	var parts []hourPart
+	var done uint64
+	for h := hourOf(from); ; h++ {
+		start := time.Unix(h*secondsPerHour, 0)
+		end := time.Unix((h+1)*secondsPerHour, 0)
+		if start.Before(from) {
+			start = from
+		}
+		if end.After(to) {
+			end = to
+		}
+		if seg := end.Sub(start); seg > 0 {
+			parts = append(parts, hourPart{hour: h, at: end.Unix(), num: uint64(seg), den: uint64(total), done: done})
+			done += uint64(seg)
+		}
+		if !end.Before(to) {
+			break
+		}
+	}
+	return parts
 }
 
 // Aggregator holds hourly flow buckets. It is safe for concurrent use.
@@ -120,6 +198,9 @@ type Aggregator struct {
 	reporters map[reporterKey]*reporterState
 	nextIdx   uint32
 	dropped   uint64
+	// prunedHour is the hour of now at the last automatic prune.
+	prunedHour int64
+	pruned     bool
 }
 
 // NewAggregator returns an empty aggregator. now supplies the current time
@@ -137,6 +218,9 @@ func NewAggregator(l Limits, now func() time.Time) *Aggregator {
 	}
 	if l.MaxClockSkew <= 0 {
 		l.MaxClockSkew = d.MaxClockSkew
+	}
+	if l.MaxInterval <= 0 {
+		l.MaxInterval = d.MaxInterval
 	}
 	return &Aggregator{
 		limits:    l,
@@ -183,14 +267,66 @@ func validateReport(r *Report) error {
 	return nil
 }
 
-// Ingest adds a report to the hourly buckets. All observations go into the
-// hour that contains r.To.
+// ownSet validates and normalizes the reporter's addresses.
+func ownSet(host string, own []netip.Addr) (map[netip.Addr]struct{}, error) {
+	if len(own) == 0 {
+		return nil, fmt.Errorf("%w: host %q: no reporter addresses", ErrInvalidReport, host)
+	}
+	if len(own) > MaxHostAddrs {
+		return nil, fmt.Errorf("%w: host %q: %d reporter addresses exceed limit %d", ErrInvalidReport, host, len(own), MaxHostAddrs)
+	}
+	set := make(map[netip.Addr]struct{}, len(own))
+	for i, a := range own {
+		a = normalizeNode(a)
+		if !a.IsValid() || a.IsUnspecified() {
+			return nil, fmt.Errorf("%w: host %q: reporter address %d invalid", ErrInvalidReport, host, i)
+		}
+		set[a] = struct{}{}
+	}
+	return set, nil
+}
+
+// reporterEnd returns the address of the flow end the observation claims
+// for its reporter.
+func reporterEnd(o *Observation) netip.Addr {
+	server := o.Key.ServerAddr()
+	if o.ServerReported {
+		return server
+	}
+	if server == o.Key.A {
+		return o.Key.B
+	}
+	return o.Key.A
+}
+
+// Ingest adds a report to the hourly buckets.
+//
+// own lists the addresses that belong to the reporting host r.Host. The
+// caller takes them from the server's own records of that managed host
+// (for example its registered and inventoried addresses), never from the
+// report itself, and leaves out addresses that more than one host claims.
+// An observation is applied only when the end it claims (the server end if
+// ServerReported, otherwise the client end) is one of these addresses;
+// other observations are refused before they can take a bucket slot and
+// are counted in IngestResult.Foreign. So a host can only speak for its own
+// end of its own flows and cannot displace the reports of two other hosts
+// about their flow. A report without addresses is rejected.
+//
+// Hours: the interval r.From..r.To is split across the hours it covers in
+// proportion to the time spent in each hour (the rate is assumed constant
+// within one report), so every hour of a flow is counted from reports of
+// the same time span on both ends and an hour boundary inside an interval
+// never puts the same bytes into two hours. Intervals longer than
+// Limits.MaxInterval are rejected with ErrIntervalTooLong rather than
+// spread over many hours: after such a gap the collector starts over with
+// a baseline (Diff with a nil previous snapshot), which counts nothing.
+// Parts that fall into hours already outside the retention are skipped.
 //
 // Reports of one (host, tier) must not overlap: r.From must be at or after
 // and r.To strictly after the end of the previous accepted report, so a
 // report submitted twice is rejected with ErrDuplicateReport instead of
 // being counted twice. Collectors must keep the previous snapshot across
-// restarts; a fresh Diff without one counts every socket from its start.
+// restarts or start over with a baseline.
 //
 // For every flow and hour the bytes reported by the server end are used
 // when present; the client end's report is kept as confirmation and used
@@ -200,22 +336,25 @@ func validateReport(r *Report) error {
 // reporters.
 //
 // New buckets beyond Limits.MaxBuckets are dropped and counted; existing
-// buckets keep accepting data.
-func (a *Aggregator) Ingest(r Report) (IngestResult, error) {
+// buckets keep accepting data. A rejected report changes nothing.
+func (a *Aggregator) Ingest(r Report, own []netip.Addr) (IngestResult, error) {
 	if err := validateReport(&r); err != nil {
+		return IngestResult{}, err
+	}
+	if d := r.To.Sub(r.From); d > a.limits.MaxInterval {
+		return IngestResult{}, fmt.Errorf("%w: host %q: interval %s exceeds %s", ErrIntervalTooLong, r.Host, d, a.limits.MaxInterval)
+	}
+	mine, err := ownSet(r.Host, own)
+	if err != nil {
 		return IngestResult{}, err
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := a.now()
-	if r.To.Before(now.Add(-a.limits.Retention)) || r.To.After(now.Add(a.limits.MaxClockSkew)) {
+	cutoff := now.Add(-a.limits.Retention)
+	if r.To.Before(cutoff) || r.To.After(now.Add(a.limits.MaxClockSkew)) {
 		return IngestResult{}, fmt.Errorf("%w: host %q: report ends %s, now %s", ErrOutOfWindow, r.Host,
 			r.To.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339))
-	}
-	hour := hourOf(r.To)
-	if _, ok := a.hours[hour]; !ok {
-		// A new hour starts: drop what fell out of the retention first.
-		a.pruneLocked(now.Add(-a.limits.Retention))
 	}
 	rk := reporterKey{host: r.Host, tier: r.Tier}
 	rs := a.reporters[rk]
@@ -224,10 +363,17 @@ func (a *Aggregator) Ingest(r Report) (IngestResult, error) {
 			return IngestResult{}, fmt.Errorf("%w: host %q tier %q: report %s..%s, last accepted ended %s", ErrDuplicateReport,
 				r.Host, r.Tier, r.From.UTC().Format(time.RFC3339), r.To.UTC().Format(time.RFC3339), rs.lastTo.UTC().Format(time.RFC3339))
 		}
-	} else {
-		if len(a.reporters) >= a.limits.MaxReporters || a.nextIdx == math.MaxUint32 {
-			return IngestResult{}, fmt.Errorf("%w: host %q: %d reporters", ErrLimit, r.Host, len(a.reporters))
-		}
+	} else if len(a.reporters) >= a.limits.MaxReporters || a.nextIdx == math.MaxUint32 {
+		return IngestResult{}, fmt.Errorf("%w: host %q: %d reporters", ErrLimit, r.Host, len(a.reporters))
+	}
+
+	// The report is accepted. Prune at most once per hour of the clock,
+	// then look the reporter up again: pruning may have removed it.
+	if h := hourOf(now); !a.pruned || h != a.prunedHour {
+		a.pruneLocked(cutoff)
+		a.pruned, a.prunedHour = true, h
+	}
+	if rs = a.reporters[rk]; rs == nil {
 		a.nextIdx++
 		rs = &reporterState{idx: a.nextIdx}
 		a.reporters[rk] = rs
@@ -235,41 +381,70 @@ func (a *Aggregator) Ingest(r Report) (IngestResult, error) {
 	rs.lastTo = r.To
 
 	var res IngestResult
-	hm := a.hours[hour]
-	at := r.To.Unix()
+	parts := splitHours(r.From, r.To)
+	limit := cutoff.Unix()
 	for i := range r.Observations {
 		o := &r.Observations[i]
-		b := hm[o.Key]
-		if b == nil {
-			if a.buckets >= a.limits.MaxBuckets {
-				res.Dropped++
-				continue
-			}
-			if hm == nil {
-				hm = make(map[FlowKey]*bucket)
-				a.hours[hour] = hm
-			}
-			b = &bucket{}
-			hm[o.Key] = b
-			a.buckets++
-		}
-		side := &b.client
-		if o.ServerReported {
-			side = &b.server
-		}
-		switch side.reporter {
-		case 0:
-			side.reporter = rs.idx
-		case rs.idx:
-		default:
-			res.Conflicts++
+		if _, ok := mine[reporterEnd(o)]; !ok {
+			res.Foreign++
 			continue
 		}
-		side.add(o, at)
-		res.Applied++
+		for j := range parts {
+			p := &parts[j]
+			if (p.hour+1)*secondsPerHour <= limit {
+				continue
+			}
+			switch a.applyLocked(o, p, rs.idx) {
+			case applied:
+				res.Applied++
+			case dropped:
+				res.Dropped++
+			case conflict:
+				res.Conflicts++
+			}
+		}
 	}
 	a.dropped += uint64(res.Dropped)
 	return res, nil
+}
+
+type applyResult uint8
+
+const (
+	applied applyResult = iota
+	dropped
+	conflict
+)
+
+// applyLocked adds one hourly part of an observation.
+func (a *Aggregator) applyLocked(o *Observation, p *hourPart, idx uint32) applyResult {
+	hm := a.hours[p.hour]
+	b := hm[o.Key]
+	if b == nil {
+		if a.buckets >= a.limits.MaxBuckets {
+			return dropped
+		}
+		if hm == nil {
+			hm = make(map[FlowKey]*bucket)
+			a.hours[p.hour] = hm
+		}
+		b = &bucket{}
+		hm[o.Key] = b
+		a.buckets++
+	}
+	side := &b.client
+	if o.ServerReported {
+		side = &b.server
+	}
+	switch side.reporter {
+	case 0:
+		side.reporter = idx
+	case idx:
+	default:
+		return conflict
+	}
+	side.add(o, p)
+	return applied
 }
 
 // Cutoff removes every hour that ends at or before now-retention and every
@@ -391,6 +566,9 @@ func compareTotal(a, b *FlowTotal) int {
 func normalizeNode(n netip.Addr) netip.Addr { return n.Unmap().WithZone("") }
 
 // totalsLocked sums the buckets in w for flows that touch one of nodes.
+// It walks every bucket of the hours in w under the aggregator mutex (up to
+// Limits.MaxBuckets), so a query blocks ingest for that time; callers that
+// query often should cache results per window.
 func (a *Aggregator) totalsLocked(w Window, nodes map[netip.Addr]struct{}) map[FlowKey]*FlowTotal {
 	out := make(map[FlowKey]*FlowTotal)
 	if !w.From.Before(w.To) || len(nodes) == 0 {

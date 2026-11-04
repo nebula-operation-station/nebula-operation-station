@@ -13,9 +13,11 @@ func addr(s string) netip.Addr { return netip.MustParseAddr(s) }
 
 func classifyOne(t *testing.T, listeners []Listener, socks ...Socket) Report {
 	t.Helper()
+	// An empty previous snapshot makes every socket new, so it counts
+	// from its start.
 	cur := snap("h1", t0, socks...)
 	cur.Listeners = listeners
-	r, err := Observe(nil, cur)
+	r, err := Observe(snap("h1", t0.Add(-time.Minute)), cur)
 	if err != nil {
 		t.Fatalf("Observe: %v", err)
 	}
@@ -54,6 +56,20 @@ func TestClassifyServerSide(t *testing.T) {
 			listeners: []Listener{{Proto: TCP, Addr: ap("[::]:443")}},
 			socks:     []Socket{sock("[::ffff:10.0.0.1]:443", "[::ffff:10.0.0.9]:40000", 7, 3)},
 			want: []Observation{{Key: FlowKey{A: addr("10.0.0.1"), B: addr("10.0.0.9"), Proto: TCP, ServerPort: 443, Server: SideA, Tier: "socket"},
+				BytesAB: 7, BytesBA: 3, Connections: 1, ServerReported: true}},
+		},
+		{
+			name:      "IPv4 wildcard listener does not match IPv6 locals",
+			listeners: []Listener{{Proto: TCP, Addr: ap("0.0.0.0:443")}},
+			socks:     []Socket{sock("[2001:db8::1]:443", "[2001:db8::9]:40000", 7, 3)},
+			want: []Observation{{Key: FlowKey{A: addr("2001:db8::1"), B: addr("2001:db8::9"), Proto: TCP, ServerPort: 40000, Server: SideB, Tier: "socket"},
+				BytesAB: 7, BytesBA: 3, Connections: 1}},
+		},
+		{
+			name:      "IPv6 wildcard listener matches IPv6 locals",
+			listeners: []Listener{{Proto: TCP, Addr: ap("[::]:443")}},
+			socks:     []Socket{sock("[2001:db8::1]:443", "[2001:db8::9]:40000", 7, 3)},
+			want: []Observation{{Key: FlowKey{A: addr("2001:db8::1"), B: addr("2001:db8::9"), Proto: TCP, ServerPort: 443, Server: SideA, Tier: "socket"},
 				BytesAB: 7, BytesBA: 3, Connections: 1, ServerReported: true}},
 		},
 		{

@@ -146,11 +146,7 @@ func TestDiffCountersAndResets(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var prev *Snapshot
-			if tc.prev != nil {
-				prev = snap("h1", t0, tc.prev...)
-			}
-			d, err := Diff(prev, snap("h1", t1, tc.cur...))
+			d, err := Diff(snap("h1", t0, tc.prev...), snap("h1", t1, tc.cur...))
 			if err != nil {
 				t.Fatalf("Diff: %v", err)
 			}
@@ -171,16 +167,20 @@ func TestDiffCountersAndResets(t *testing.T) {
 	}
 }
 
-func TestDiffFirstSnapshotInterval(t *testing.T) {
-	d, err := Diff(nil, snap("h1", t0, sock("10.0.0.1:1", "10.0.0.2:2", 1, 1)))
+func TestDiffFirstSnapshotIsBaseline(t *testing.T) {
+	d, err := Diff(nil, snap("h1", t0, sock("10.0.0.1:1", "10.0.0.2:2", 1<<40, 1<<40)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !d.From.Equal(t0) || !d.To.Equal(t0) || d.Host != "h1" || d.Tier != "socket" {
+	if !d.From.Equal(t0) || !d.To.Equal(t0) || d.Host != "h1" || d.Tier != "socket" || !d.Baseline {
 		t.Fatalf("unexpected header %+v", d)
 	}
-	if !d.Sockets[0].New {
-		t.Fatal("first snapshot sockets must be new")
+	if len(d.Sockets) != 0 || len(d.Vanished) != 0 || d.LowerBound {
+		t.Fatalf("baseline must count nothing: %+v", d)
+	}
+	// The baseline is still validated.
+	if _, err := Diff(nil, &Snapshot{Host: "h1", Tier: "socket"}); err == nil {
+		t.Fatal("invalid baseline accepted")
 	}
 }
 
@@ -214,7 +214,7 @@ func TestDiffOutputIsSorted(t *testing.T) {
 		sock("10.0.0.1:1", "10.0.0.9:22", 1, 1),
 		Socket{Proto: UDP, Local: ap("10.0.0.1:1"), Remote: ap("10.0.0.9:53")},
 	)
-	d, err := Diff(nil, cur)
+	d, err := Diff(snap("h1", t0.Add(-time.Minute)), cur)
 	if err != nil {
 		t.Fatal(err)
 	}

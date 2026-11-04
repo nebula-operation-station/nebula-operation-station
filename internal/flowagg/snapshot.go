@@ -10,6 +10,7 @@
 //  2. Diff compares two snapshots of the same host. Counters that went down
 //     and sockets that vanished are resets; the result never goes negative
 //     and is flagged as a lower bound whenever bytes may have been missed.
+//     The first snapshot of a host is only a baseline and counts nothing.
 //  3. Classify decides which end of each socket is the server (the end that
 //     matches a listener), drops the ephemeral client port and folds the
 //     sockets into canonical flow keys.
@@ -84,7 +85,11 @@ type Socket struct {
 	Remote netip.AddrPort
 	// Cookie optionally identifies the socket instance (for example the
 	// kernel socket cookie or inode). Zero means unknown. A different cookie
-	// on the same tuple is a new connection.
+	// on the same tuple is a new connection. Collectors should send it:
+	// without a cookie, a socket closed and reopened on the same tuple
+	// between two snapshots looks like one socket, and if its new counters
+	// are higher than the old ones the difference counts as plain growth,
+	// so bytes are undercounted without a LowerBound flag.
 	Cookie        uint64
 	BytesSent     uint64
 	BytesReceived uint64
@@ -262,6 +267,10 @@ type Delta struct {
 	// From is the time of the previous snapshot, or of the current one if
 	// there was none. To is the time of the current snapshot.
 	From, To time.Time
+	// Baseline is set when there was no previous snapshot. Sockets and
+	// Vanished are then empty: lifetime counters have no known start time,
+	// so they cannot be assigned to hours and are not counted.
+	Baseline bool
 	// Sockets holds one entry per socket of the current snapshot, sorted by
 	// protocol, local, remote and cookie.
 	Sockets []SocketDelta
@@ -275,8 +284,16 @@ type Delta struct {
 }
 
 // Diff computes the traffic between prev and cur, which must be snapshots
-// of the same host and tier with prev strictly older. prev may be nil for
-// the first snapshot of a host; all sockets then count from their start.
+// of the same host and tier with prev strictly older.
+//
+// prev may be nil for the first snapshot of a host. The result is then a
+// baseline (Delta.Baseline) with no sockets and the zero-length interval
+// cur.Time..cur.Time: the cumulative counters of sockets that already
+// existed say nothing about when their bytes flowed, and booking them into
+// the current hour would count bytes that the other end of the flow
+// reported in earlier hours a second time. Traffic is counted from the next
+// snapshot on. A socket that appears after the baseline counts from its
+// start.
 //
 // The rules keep every value non-negative: a counter that decreased (reset
 // or wrap) counts its current value as the bytes since the reset, and a
@@ -289,25 +306,26 @@ func Diff(prev, cur *Snapshot) (Delta, error) {
 		return Delta{}, fmt.Errorf("current snapshot: %w", err)
 	}
 	d := Delta{Host: cur.Host, Tier: cur.Tier, From: cur.Time, To: cur.Time}
-	var old map[socketID]Socket
-	if prev != nil {
-		if err := prev.Validate(); err != nil {
-			return Delta{}, fmt.Errorf("previous snapshot: %w", err)
-		}
-		switch {
-		case prev.Host != cur.Host:
-			return Delta{}, fmt.Errorf("%w: host %q vs %q", ErrSnapshotMismatch, prev.Host, cur.Host)
-		case prev.Tier != cur.Tier:
-			return Delta{}, fmt.Errorf("%w: host %q: tier %q vs %q", ErrSnapshotMismatch, cur.Host, prev.Tier, cur.Tier)
-		case !prev.Time.Before(cur.Time):
-			return Delta{}, fmt.Errorf("%w: host %q: previous snapshot is not older", ErrSnapshotMismatch, cur.Host)
-		}
-		d.From = prev.Time
-		old = make(map[socketID]Socket, len(prev.Sockets))
-		for _, s := range prev.Sockets {
-			s = normalizeSocket(s)
-			old[s.id()] = s
-		}
+	if prev == nil {
+		d.Baseline = true
+		return d, nil
+	}
+	if err := prev.Validate(); err != nil {
+		return Delta{}, fmt.Errorf("previous snapshot: %w", err)
+	}
+	switch {
+	case prev.Host != cur.Host:
+		return Delta{}, fmt.Errorf("%w: host %q vs %q", ErrSnapshotMismatch, prev.Host, cur.Host)
+	case prev.Tier != cur.Tier:
+		return Delta{}, fmt.Errorf("%w: host %q: tier %q vs %q", ErrSnapshotMismatch, cur.Host, prev.Tier, cur.Tier)
+	case !prev.Time.Before(cur.Time):
+		return Delta{}, fmt.Errorf("%w: host %q: previous snapshot is not older", ErrSnapshotMismatch, cur.Host)
+	}
+	d.From = prev.Time
+	old := make(map[socketID]Socket, len(prev.Sockets))
+	for _, s := range prev.Sockets {
+		s = normalizeSocket(s)
+		old[s.id()] = s
 	}
 	d.Sockets = make([]SocketDelta, 0, len(cur.Sockets))
 	matched := 0
