@@ -493,17 +493,45 @@ func (x *guestPowerProposal) approvable(now time.Time) bool {
 	return len(x.mismatch) == 0 && now.Before(x.bound.Expiry)
 }
 
-// open reports whether a proposal still counts against its user's cap.
-func (x *guestPowerProposal) open() bool {
-	return x.state == "pending" || x.state == "approving" || x.state == "running"
+// lapsed reports whether a pending proposal can no longer be approved: its
+// executor binding expired (the executor's approval window, about five
+// minutes, is shorter than the page's guestPowerProposalTTL), or it differs
+// from the request (a binding without expiry always does). Its page stays
+// visible, but it holds no slot.
+func (x *guestPowerProposal) lapsed(now time.Time) bool {
+	if x.state != "pending" {
+		return false
+	}
+	return len(x.mismatch) > 0 || (!x.bound.Expiry.IsZero() && !now.Before(x.bound.Expiry))
+}
+
+// open reports whether a proposal still counts against its user's cap:
+// it is approving or running, or pending and still approvable.
+func (x *guestPowerProposal) open(now time.Time) bool {
+	switch x.state {
+	case "approving", "running":
+		return true
+	case "pending":
+		return !x.lapsed(now)
+	default:
+		return false
+	}
+}
+
+// settled reports whether a proposal may be evicted for room by any user:
+// it is done or failed, or pending but lapsed (nothing left to approve).
+func (x *guestPowerProposal) settled(now time.Time) bool {
+	return x.state == "done" || x.state == "failed" || x.lapsed(now)
 }
 
 // put stores a proposal, dropping expired ones and, when full, the
-// settled one (done or failed) that expires first, else the proposer's own
-// pending one that expires first. It never drops a running commit or
-// another user's proposal of the same digest or a pending one, so one user
-// cannot evict or take over the proposals others are about to approve;
-// each user has at most maxGuestPowerProposalsPerUser open ones.
+// settled one (done, failed, or pending with a lapsed binding) that
+// expires first, else the proposer's own pending one that expires first.
+// It never drops a running commit, another user's proposal of the same
+// digest or another user's approvable pending one, so one user cannot
+// evict or take over the proposals others are about to approve; each user
+// has at most maxGuestPowerProposalsPerUser open ones, and a pending
+// proposal whose binding lapsed no longer counts.
 func (p *guestPowerProposals) put(x *guestPowerProposal, now time.Time) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -518,7 +546,7 @@ func (p *guestPowerProposals) put(x *guestPowerProposal, now time.Time) error {
 	}
 	n := 0
 	for d, y := range p.props {
-		if y.user == x.user && y.open() && d != x.digest {
+		if y.user == x.user && y.open(now) && d != x.digest {
 			n++
 		}
 	}
@@ -535,7 +563,7 @@ func (p *guestPowerProposals) put(x *guestPowerProposal, now time.Time) error {
 			}
 			return d
 		}
-		d := oldest(func(y *guestPowerProposal) bool { return y.state == "done" || y.state == "failed" })
+		d := oldest(func(y *guestPowerProposal) bool { return y.settled(now) })
 		if d == "" {
 			d = oldest(func(y *guestPowerProposal) bool { return y.state == "pending" && y.user == x.user })
 		}
