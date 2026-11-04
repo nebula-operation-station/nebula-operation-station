@@ -815,16 +815,13 @@ func TestCappedMarkerExpiresWithPrunedHours(t *testing.T) {
 	if res := mustIngest(t, a, report("noisy", t0.Add(time.Hour), t0.Add(time.Hour), noisy...)); res.Applied != 0 || res.Capped != 8 {
 		t.Fatalf("hour 1: %+v", res)
 	}
-	// A later report keeps the host tracked after the capped hours are
-	// gone, so the marker cannot hide behind the reporter's removal.
-	cur = t0.Add(2 * time.Hour)
-	mustIngest(t, a, report("noisy", t0.Add(2*time.Hour), t0.Add(2*time.Hour), noisy[0]))
-	if got := a.CappedHosts(); !slices.Equal(got, []string{"noisy"}) {
-		t.Fatalf("CappedHosts = %v, want [noisy]", got)
-	}
-	// Prune hour 0 only: hour 1 is still capped, so the marker stays.
+	// Prune hour 0: its capped parts go with it, and the freed bucket
+	// slots let the host report cleanly in a new hour, so it stays
+	// tracked after every capped hour is gone.
 	cur = t0.Add(Retention + time.Hour + 30*time.Minute)
-	mustIngest(t, a, report("quiet", cur, cur))
+	if res := mustIngest(t, a, report("noisy", cur, cur, noisy[:3]...)); res.Applied != 3 || res.Capped != 0 {
+		t.Fatalf("after hour 0 pruned: %+v", res)
+	}
 	if got := a.CappedHosts(); !slices.Equal(got, []string{"noisy"}) {
 		t.Fatalf("after hour 0 pruned: CappedHosts = %v, want [noisy]", got)
 	}
