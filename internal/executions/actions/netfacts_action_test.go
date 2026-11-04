@@ -115,6 +115,11 @@ func TestNetFactsScriptBoundsMatchDecoder(t *testing.T) {
 
 // netHost is a PATH with stand-ins for the network tools and only the
 // real utilities the script needs, so absent tools are really absent.
+// mktemp and rm are not among them: the script writes no file.
+//
+// A missing utility fails the test, so a runner without them cannot
+// silently skip every script-level check; NOS_TEST_ALLOW_MISSING_COREUTILS=1
+// turns that into a skip for a deliberately minimal local environment.
 type netHost struct {
 	dir, bin, calls string
 }
@@ -126,10 +131,13 @@ func newNetHost(t *testing.T) *netHost {
 	if err := os.Mkdir(h.bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, tool := range []string{"base64", "head", "cat", "mktemp", "rm", "tr"} {
+	for _, tool := range []string{"base64", "head", "cat", "tr"} {
 		p, err := exec.LookPath(tool)
 		if err != nil {
-			t.Skipf("%s not available: %v", tool, err)
+			if os.Getenv("NOS_TEST_ALLOW_MISSING_COREUTILS") == "1" {
+				t.Skipf("%s not available: %v", tool, err)
+			}
+			t.Fatalf("%s not available: %v (set NOS_TEST_ALLOW_MISSING_COREUTILS=1 to skip)", tool, err)
 		}
 		if err := os.Symlink(p, filepath.Join(h.bin, tool)); err != nil {
 			t.Fatal(err)
@@ -394,5 +402,104 @@ func TestNetFactsScriptOutputDecodes(t *testing.T) {
 	}
 	if !f.Incomplete() || f.Sections[netfacts.SectionConntrack].Status != netfacts.StatusSkipped {
 		t.Fatalf("%+v", f.Sections)
+	}
+}
+
+// The script writes no temporary file: it runs without mktemp and rm,
+// and TMPDIR stays empty, so a run killed at its timeout leaves nothing
+// behind on the host.
+func TestNetFactsScriptWritesNoFile(t *testing.T) {
+	a, _ := Lookup("net.facts")
+	if bytes.Contains(a.Script, []byte("mktemp")) {
+		t.Error("script uses mktemp")
+	}
+	h := newNetHost(t)
+	allNetTools(t, h)
+	h.output(t, "ip -j addr", []byte("[]\n"))
+	tmp := filepath.Join(h.dir, "tmp")
+	if err := os.Mkdir(tmp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(h.dir, "action.sh")
+	if err := os.WriteFile(p, a.Script, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/sh", p)
+	cmd.Dir = h.dir
+	cmd.Env = []string{"PATH=" + h.bin, "TMPDIR=" + tmp}
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("script failed: %v (%q)", err, out)
+	}
+	if !bytes.HasPrefix(out, []byte(`{"format":"net-facts-v1","phase":"done"`)) {
+		t.Fatalf("result %q", out)
+	}
+	left, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 0 {
+		t.Fatalf("files left in TMPDIR: %v", left)
+	}
+}
+
+// On a host booted with ipv6.disable=1, ip -6 exits non-zero with
+// EAFNOSUPPORT: both IPv6 sections are "unavailable", and the result is
+// complete. Any other ip -6 failure stays "failed".
+func TestNetFactsScriptIPv6Disabled(t *testing.T) {
+	read := func(name string) []byte {
+		b, err := os.ReadFile(filepath.Join("..", "..", "netfacts", "testdata", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	h := newNetHost(t)
+	allNetTools(t, h)
+	h.tool(t, "ip", `case "$*" in *-6*) echo "partial"; echo "RTNETLINK answers: Address family not supported by protocol" >&2; exit 2 ;; esac`)
+	h.output(t, "ip -j addr", read("proxmox-addr.json"))
+	h.output(t, "ip -j -d link", read("proxmox-link.json"))
+	h.output(t, "ip -j route", read("debian12-route.json"))
+	h.output(t, "ip -j neigh", read("debian12-neigh.json"))
+	h.output(t, "ss -tinuaH", read("debian12-ss.txt"))
+	h.output(t, "bridge -j vlan", []byte("[]\n"))
+	out, doc := h.run(t)
+	for _, name := range []string{"route6", "neigh6"} {
+		if s, b := section(t, doc, name); s.Status != "unavailable" || s.Truncated || len(b) != 0 {
+			t.Errorf("%s: %+v %q", name, s, b)
+		}
+	}
+	f, err := netfacts.Decode(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Incomplete() || !f.IPv6Unavailable() || len(f.Routes.Entries) == 0 {
+		t.Fatalf("%+v", f.Sections)
+	}
+
+	// Another failure of ip -6 is not mistaken for disabled IPv6, and the
+	// family check is limited to the IPv6 sections.
+	o := newNetHost(t)
+	allNetTools(t, o)
+	o.tool(t, "ip", `case "$*" in *-6*) echo "RTNETLINK answers: Operation not permitted" >&2; exit 2 ;; esac`)
+	o.tool(t, "conntrack", `echo "Address family not supported by protocol" >&2; exit 1`)
+	_, doc = o.run(t)
+	for _, name := range []string{"route6", "neigh6", "conntrack"} {
+		if s, _ := section(t, doc, name); s.Status != "failed" {
+			t.Errorf("%s: %+v", name, s)
+		}
+	}
+}
+
+// A hostile or wrapped ss cannot smuggle data through fd 3 or 4, which
+// the script uses for the exit status.
+func TestNetFactsScriptCommandCannotWriteStatus(t *testing.T) {
+	h := newNetHost(t)
+	allNetTools(t, h)
+	h.tool(t, "ss", `echo "9,1:" >&3 2>/dev/null; echo "9,1:" >&4 2>/dev/null; echo "tcp ESTAB 0 0 10.0.0.2:22 10.0.0.9:51000"`)
+	_, doc := h.run(t)
+	s, b := section(t, doc, "sockets")
+	if s.Status != "ok" || string(b) != "tcp ESTAB 0 0 10.0.0.2:22 10.0.0.9:51000\n" {
+		t.Fatalf("%+v %q", s, b)
 	}
 }

@@ -3,6 +3,7 @@
 package netfacts
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -190,6 +191,10 @@ func TestDecodeRejectsMalformedDocuments(t *testing.T) {
 		{name: "data on failed section", edit: func(m map[string]any) { m["conntrack"] = sec{Status: "failed", Data: "W10="} }},
 		{name: "data on skipped section", edit: func(m map[string]any) { m["conntrack"] = sec{Status: "skipped", Truncated: true, Data: "W10="} }},
 		{name: "skipped not truncated", edit: func(m map[string]any) { m["conntrack"] = sec{Status: "skipped"} }},
+		{name: "unavailable on an IPv4 section", edit: func(m map[string]any) { m["route"] = sec{Status: "unavailable"} }},
+		{name: "unavailable on sockets", edit: func(m map[string]any) { m["sockets"] = sec{Status: "unavailable"} }},
+		{name: "unavailable with data", edit: func(m map[string]any) { m["route6"] = sec{Status: "unavailable", Data: "W10="} }},
+		{name: "unavailable truncated", edit: func(m map[string]any) { m["neigh6"] = sec{Status: "unavailable", Truncated: true} }},
 		{name: "absent truncated", edit: func(m map[string]any) { m["lldp"] = sec{Status: "absent", Truncated: true} }},
 		{name: "section over the cap", edit: func(m map[string]any) { m["conntrack"] = ok(big) }},
 		{name: "sections over the total", edit: func(m map[string]any) {
@@ -214,7 +219,7 @@ func TestDecodeRejectsMalformedDocuments(t *testing.T) {
 
 func TestDecodeAcceptsSectionAtCap(t *testing.T) {
 	m := goodSections(t)
-	m["conntrack"] = ok(make([]byte, MaxSection))
+	m["conntrack"] = ok(bytes.Repeat([]byte("x"), MaxSection))
 	f, err := Decode(encode(t, m))
 	if err != nil {
 		t.Fatal(err)
@@ -234,4 +239,114 @@ func FuzzDecode(f *testing.F) {
 			t.Fatalf("err %v", err)
 		}
 	})
+}
+
+// net.facts runs ss without -p: a sockets section with a users:((...))
+// column (a wrapped or replaced ss) is refused, never handed out as
+// process names.
+func TestDecodeRefusesProcessNames(t *testing.T) {
+	ss := fixture(t, "debian12-ss.txt")
+	for _, tc := range []struct {
+		name string
+		data []byte
+	}{
+		{"users column", []byte("tcp   LISTEN 0      128            0.0.0.0:22         0.0.0.0:*    users:((\"sshd\",pid=1,fd=3))\n")},
+		{"users column among real lines", append(append([]byte{}, ss...),
+			[]byte("tcp   LISTEN 0      128            0.0.0.0:2222       0.0.0.0:*    users:((\"sshd\",pid=1,fd=3))\n")...)},
+		{"malformed users column", []byte("tcp   LISTEN 0      128            0.0.0.0:22         0.0.0.0:*    users:((\"sshd\"\n")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := goodSections(t)
+			m["sockets"] = ok(tc.data)
+			f, err := Decode(encode(t, m))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, s := range f.Sockets.Entries {
+				if s.Process != "" {
+					t.Fatalf("process name %q without ss -p", s.Process)
+				}
+			}
+			if len(f.Sockets.Entries) != 0 || !f.Sections["sockets"].Invalid || !f.Incomplete() {
+				t.Fatalf("users column accepted: %+v %d entries", f.Sections["sockets"], len(f.Sockets.Entries))
+			}
+		})
+	}
+}
+
+// The raw LLDP and conntrack sections are handed out only as valid UTF-8
+// text without control characters other than newline and tab.
+func TestDecodeValidatesRawSections(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		data      []byte
+		truncated bool
+		want      []byte // nil: refused
+	}{
+		{"text", []byte("tcp\t6 431999 ESTABLISHED src=10.0.0.2\n"), false, []byte("tcp\t6 431999 ESTABLISHED src=10.0.0.2\n")},
+		{"utf-8", []byte(`{"descr":"Schalter Küche"}`), false, []byte(`{"descr":"Schalter Küche"}`)},
+		{"empty", []byte{}, false, []byte{}},
+		{"escape", []byte("a\x1b[31mred\n"), false, nil},
+		{"carriage return", []byte("a\rb\n"), false, nil},
+		{"nul", []byte("a\x00b"), false, nil},
+		{"c1 control", []byte("a\u0085b"), false, nil},
+		{"bidi override", []byte("a\u202eb"), false, nil},
+		{"invalid utf-8", []byte("a\xffb"), false, nil},
+		{"cut rune not truncated", []byte("K\xc3"), false, nil},
+		{"cut rune truncated", []byte("K\xc3"), true, []byte("K")},
+		{"cut 3-byte rune truncated", []byte("a\xe2\x82"), true, []byte("a")},
+		{"invalid inside truncated", []byte("a\xffb\xc3"), true, nil},
+	} {
+		for _, name := range []string{"lldp", "conntrack"} {
+			t.Run(tc.name+"/"+name, func(t *testing.T) {
+				m := goodSections(t)
+				m[name] = sec{Status: "ok", Truncated: tc.truncated, Data: base64.StdEncoding.EncodeToString(tc.data)}
+				f, err := Decode(encode(t, m))
+				if err != nil {
+					t.Fatal(err)
+				}
+				got := f.LLDP
+				if name == "conntrack" {
+					got = f.Conntrack
+				}
+				if tc.want == nil {
+					if got != nil || !f.Sections[name].Invalid || !f.Incomplete() {
+						t.Fatalf("accepted %q: %+v", got, f.Sections[name])
+					}
+					return
+				}
+				if got == nil || !bytes.Equal(got, tc.want) || f.Sections[name].Invalid || f.Incomplete() != tc.truncated {
+					t.Fatalf("got %q %+v, want %q", got, f.Sections[name], tc.want)
+				}
+			})
+		}
+	}
+}
+
+// On a host with IPv6 disabled both IPv6 sections are "unavailable": the
+// result is complete and says so.
+func TestDecodeIPv6Unavailable(t *testing.T) {
+	m := goodSections(t)
+	m["route6"] = sec{Status: "unavailable"}
+	m["neigh6"] = sec{Status: "unavailable"}
+	f, err := Decode(encode(t, m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Incomplete() || !f.IPv6Unavailable() || len(f.Routes6.Entries) != 0 || len(f.Routes.Entries) == 0 {
+		t.Fatalf("%+v", f.Sections)
+	}
+	g, err := Decode(encode(t, goodSections(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.IPv6Unavailable() {
+		t.Fatal("IPv6 unavailable on a host with IPv6")
+	}
+	// A failed IPv6 command is still lost data.
+	m = goodSections(t)
+	m["route6"] = sec{Status: "failed"}
+	if f, err := Decode(encode(t, m)); err != nil || !f.Incomplete() || f.IPv6Unavailable() {
+		t.Fatalf("%v %+v", err, f.Sections)
+	}
 }

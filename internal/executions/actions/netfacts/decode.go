@@ -10,7 +10,12 @@
 // A section that was cut, skipped, not parseable or (for a required
 // command) did not run makes the result Incomplete; it is never presented
 // as an empty table. lldpcli and conntrack output has no parser yet and is
-// kept as raw, bounded, untrusted bytes.
+// kept as raw, bounded, untrusted bytes that are valid UTF-8 text without
+// control characters other than newline and tab.
+//
+// net.facts runs ss without -p (ADR 0009 Q3), so a sockets section that
+// carries a users:((...)) column did not come from that command (a wrapped
+// or replaced ss) and is refused: Sockets.Process is always empty.
 package netfacts
 
 import (
@@ -20,6 +25,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"unicode"
+	"unicode/utf8"
 
 	hostnet "github.com/nebula-operation-station/nebula-operation-station/internal/netfacts"
 )
@@ -59,6 +66,10 @@ const (
 	StatusFailed Status = "failed"
 	// StatusSkipped: the total budget was spent; the command did not run.
 	StatusSkipped Status = "skipped"
+	// StatusUnavailable: an IPv6 section whose command failed because the
+	// host has IPv6 disabled (ipv6.disable=1, EAFNOSUPPORT); there is no
+	// data and nothing is lost. Only route6 and neigh6 may carry it.
+	StatusUnavailable Status = "unavailable"
 )
 
 // Section names in script order.
@@ -87,6 +98,12 @@ func optional(name string) bool {
 	return name == SectionBridgeVLAN || name == SectionLLDP || name == SectionConntrack
 }
 
+// ipv6Section reports whether a section is an IPv6 table, which may be
+// unavailable on a host with IPv6 disabled.
+func ipv6Section(name string) bool {
+	return name == SectionRoute6 || name == SectionNeigh6
+}
+
 // Section is the state of one section.
 type Section struct {
 	Status Status
@@ -94,7 +111,9 @@ type Section struct {
 	// was skipped.
 	Truncated bool
 	// Invalid is true when an ok section's data was rejected by its
-	// parser (for example JSON cut by truncation).
+	// parser (for example JSON cut by truncation), when raw LLDP or
+	// conntrack text is not valid UTF-8 or carries control characters, or
+	// when the sockets section carries a users:((...)) column.
 	Invalid bool
 }
 
@@ -110,11 +129,14 @@ type Facts struct {
 	Neigh6     hostnet.NeighborTable
 	BridgeVLAN hostnet.BridgeVLANTable
 	// Sockets is the `ss -tinuaH` table; Process is always empty because
-	// net.facts runs ss without -p (ADR 0009 Q3).
+	// net.facts runs ss without -p (ADR 0009 Q3): a section with a
+	// users:((...)) column is refused (Invalid, empty table).
 	Sockets hostnet.SocketTable
 	// LLDP and Conntrack are the raw, unparsed and untrusted outputs of
 	// `lldpcli -f json show neighbors` and `conntrack -L` (at most
-	// MaxSection bytes each); nil unless their section is ok.
+	// MaxSection bytes each); nil unless their section is ok and valid
+	// UTF-8 text with no control characters but newline and tab. A cut
+	// section loses a trailing incomplete UTF-8 sequence.
 	LLDP      []byte
 	Conntrack []byte
 
@@ -138,6 +160,13 @@ func (f Facts) Incomplete() bool {
 		}
 	}
 	return false
+}
+
+// IPv6Unavailable reports whether the host has IPv6 disabled: both IPv6
+// sections are unavailable.
+func (f Facts) IPv6Unavailable() bool {
+	return f.Sections[SectionRoute6].Status == StatusUnavailable &&
+		f.Sections[SectionNeigh6].Status == StatusUnavailable
 }
 
 type sectionDoc struct {
@@ -193,7 +222,7 @@ func Decode(raw []byte) (Facts, error) {
 	data := make(map[string][]byte, len(SectionNames))
 	total := 0
 	for _, name := range SectionNames {
-		s, b, err := decodeSection(docs[name])
+		s, b, err := decodeSection(name, docs[name])
 		if err != nil {
 			return Facts{}, invalid("section %s: %v", name, err)
 		}
@@ -209,7 +238,7 @@ func Decode(raw []byte) (Facts, error) {
 }
 
 // decodeSection checks one section's schema and returns its data.
-func decodeSection(d *sectionDoc) (Section, []byte, error) {
+func decodeSection(name string, d *sectionDoc) (Section, []byte, error) {
 	if d == nil {
 		return Section{}, nil, errors.New("missing")
 	}
@@ -222,6 +251,14 @@ func decodeSection(d *sectionDoc) (Section, []byte, error) {
 	case StatusAbsent, StatusFailed:
 		if s.Truncated || *d.Data != "" {
 			return Section{}, nil, fmt.Errorf("%s section with data or truncation", s.Status)
+		}
+		return s, nil, nil
+	case StatusUnavailable:
+		if !ipv6Section(name) {
+			return Section{}, nil, errors.New("unavailable status on a section that is not IPv6")
+		}
+		if s.Truncated || *d.Data != "" {
+			return Section{}, nil, errors.New("unavailable section with data or truncation")
 		}
 		return s, nil, nil
 	case StatusSkipped:
@@ -314,14 +351,66 @@ func (f *Facts) parse(data map[string][]byte) {
 		mark(SectionBridgeVLAN, err, t.Incomplete)
 	}
 	if usable(SectionSockets) {
-		t, err := hostnet.ParseSocketTable(data[SectionSockets])
-		f.Sockets = t
-		mark(SectionSockets, err, t.Incomplete)
+		raw := data[SectionSockets]
+		if bytes.Contains(raw, []byte("users:(")) {
+			// ss ran without -p: process names here are not ss output.
+			mark(SectionSockets, errors.New("users column without ss -p"), false)
+		} else {
+			t, err := hostnet.ParseSocketTable(raw)
+			f.Sockets = t
+			mark(SectionSockets, err, t.Incomplete)
+			for _, e := range t.Entries {
+				if e.Process != "" {
+					f.Sockets = hostnet.SocketTable{}
+					mark(SectionSockets, errors.New("process name without ss -p"), false)
+					break
+				}
+			}
+		}
 	}
 	if usable(SectionLLDP) {
-		f.LLDP = data[SectionLLDP]
+		b, err := rawText(data[SectionLLDP], f.Sections[SectionLLDP].Truncated)
+		f.LLDP = b
+		mark(SectionLLDP, err, false)
 	}
 	if usable(SectionConntrack) {
-		f.Conntrack = data[SectionConntrack]
+		b, err := rawText(data[SectionConntrack], f.Sections[SectionConntrack].Truncated)
+		f.Conntrack = b
+		mark(SectionConntrack, err, false)
 	}
+}
+
+// rawText checks an unparsed section: valid UTF-8 with no control or
+// other non-printable characters except newline and tab. A cut section
+// may end inside a multi-byte sequence; that incomplete tail is dropped.
+// It returns nil and an error for anything else.
+func rawText(b []byte, truncated bool) ([]byte, error) {
+	if truncated {
+		b = trimIncompleteRune(b)
+	}
+	if !utf8.Valid(b) {
+		return nil, errors.New("not valid UTF-8")
+	}
+	for _, r := range string(b) {
+		if r != '\n' && r != '\t' && !unicode.IsPrint(r) {
+			return nil, fmt.Errorf("character %U", r)
+		}
+	}
+	if b == nil {
+		b = []byte{}
+	}
+	return b, nil
+}
+
+// trimIncompleteRune drops an incomplete UTF-8 sequence at the end of b.
+func trimIncompleteRune(b []byte) []byte {
+	for i := len(b) - 1; i >= 0 && i >= len(b)-utf8.UTFMax; i-- {
+		if utf8.RuneStart(b[i]) {
+			if !utf8.FullRune(b[i:]) {
+				return b[:i]
+			}
+			break
+		}
+	}
+	return b
 }
