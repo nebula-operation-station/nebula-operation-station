@@ -176,6 +176,20 @@ type Options struct {
 	// must also implement PVESnapshotStore) and PVERemotes. Nil hides the
 	// page and the snapshot endpoints answer 404.
 	GuestSnapshot GuestSnapshot
+	// Deploy proposes and runs guest provisioning (ADR 0008 section 6,
+	// PV-08): the new deployment wizard and the deployment runs. It needs
+	// PVE and PVERemotes. Nil hides the wizard, the runs and the chart's
+	// "Deploy here" shortcut; the routes answer 404.
+	Deploy DeployProvisioner
+	// DeployJoin enrolls a provisioned guest from its run page
+	// (pveinventory.GuestJoinFlow). Nil leaves runs at "booting".
+	DeployJoin DeployJoiner
+	// DeployIPAM reserves a deployment's static address. Nil offers DHCP
+	// only.
+	DeployIPAM DeployIPAM
+	// DeployBatches proposes the staged post-enrollment plan as one batch.
+	// Nil shows the plan without a way to propose it.
+	DeployBatches DeployBatches
 	// Log receives executor status errors (the page itself only shows
 	// "Executor unavailable"). Nil means slog.Default().
 	Log *slog.Logger
@@ -224,6 +238,12 @@ type Handler struct {
 	// guestSnapshot serves the guest snapshot page; its proposals share
 	// guestPowerProposals (throttle, caps and table).
 	guestSnapshot GuestSnapshot
+	// deploy* serve the deployment wizard and runs (deploy.go).
+	deploy        DeployProvisioner
+	deployJoin    DeployJoiner
+	deployIPAM    DeployIPAM
+	deployBatches DeployBatches
+	deployRuns    *deployRuns
 }
 
 // New parses the embedded templates and builds a Handler.
@@ -303,6 +323,11 @@ func New(o Options) (*Handler, error) {
 		pveRemotes:     o.PVERemotes,
 		guestPower:     o.GuestPower,
 		guestSnapshot:  o.GuestSnapshot,
+		deploy:         o.Deploy,
+		deployJoin:     o.DeployJoin,
+		deployIPAM:     o.DeployIPAM,
+		deployBatches:  o.DeployBatches,
+		deployRuns:     newDeployRuns(),
 		now:            o.Now,
 
 		guestPowerProposals: newGuestPowerProposals(),
@@ -378,6 +403,9 @@ var pageFiles = map[string]string{
 	"deploy_profiles":     "deploy_profiles.html",
 	"deploy_profile":      "deploy_profile.html",
 	"deploy_profile_edit": "deploy_profile_edit.html",
+	"deploy_wizard":       "deploy_wizard.html",
+	"deploy_runs":         "deploy_runs.html",
+	"deploy_run":          "deploy_run.html",
 	"modules":             "modules.html",
 	"module":              "module.html",
 	"host":                "host.html",
@@ -400,6 +428,13 @@ var pagePartials = map[string][]string{
 	"network":        {"network_forms.html"},
 	"network_detail": {"network_forms.html"},
 	"asset":          {"network_forms.html"},
+	// The Deploy pages share their tab bar (ADR 0008 section 6).
+	"deploy_profiles":     {"deploy_tabs.html"},
+	"deploy_profile":      {"deploy_tabs.html"},
+	"deploy_profile_edit": {"deploy_tabs.html"},
+	"deploy_wizard":       {"deploy_tabs.html"},
+	"deploy_runs":         {"deploy_tabs.html"},
+	"deploy_run":          {"deploy_tabs.html"},
 }
 
 // Handler returns the UI's http.Handler without the security middleware
@@ -468,6 +503,19 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("GET /deploy/{slug}", h.handleDeployProfile)
 	mux.HandleFunc("GET /deploy/{slug}/edit", h.handleDeployProfileEdit)
 	mux.HandleFunc("POST /deploy/save", h.handleDeployProfileSave)
+	// Deployments (ADR 0008 section 6, PV-08): wizard, runs, run page;
+	// the forms are fetch-posted (formpost.js), approvals are JSON from
+	// the schedule approval button or CLI runs.
+	mux.HandleFunc("GET /deployments", h.handleDeployRuns)
+	mux.HandleFunc("GET /deployments/new", h.handleDeployWizard)
+	mux.HandleFunc("GET /deployments/{id}", h.handleDeployRunPage)
+	mux.HandleFunc("POST /deployments/propose", h.handleDeployPropose)
+	mux.HandleFunc("POST /deployments/approve", h.handleDeployApprove)
+	mux.HandleFunc("POST /deployments/run", h.handleDeployRun)
+	mux.HandleFunc("POST /deployments/join", h.handleDeployJoin)
+	mux.HandleFunc("POST /deployments/join/approve", h.handleDeployJoinApprove)
+	mux.HandleFunc("POST /deployments/join/run", h.handleDeployJoinRun)
+	mux.HandleFunc("POST /deployments/plan", h.handleDeployPlan)
 	// Modules (M7-5).
 	mux.HandleFunc("GET /modules", h.handleModules)
 	mux.HandleFunc("GET /modules/{name}", h.handleModule)
@@ -595,6 +643,16 @@ type pageData struct {
 	GuestAction *guestActionData
 	// GuestSnapshots is the data of a guest's snapshot page.
 	GuestSnapshots *guestSnapshotsData
+	// DeployWizard, DeployRuns and DeployRun are the data of the
+	// deployment pages; DeployEnabled shows their tabs and the chart's
+	// "Deploy here" shortcut (render fills it).
+	DeployWizard  *deployWizardData
+	DeployRuns    []deployRunRow
+	DeployRun     *deployRunData
+	DeployEnabled bool
+	// DeployRemotes are the active remotes whose chart nodes offer
+	// "Deploy here" (see DeployHere).
+	DeployRemotes map[string]bool
 	// InventoryDialogOpen shows the add-host dialog with the open
 	// attribute (the no-JavaScript form at /inventory/new, or a form
 	// error).
@@ -829,6 +887,18 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, data pageData) 
 	}
 	data.NavCollapsed = navStateFromRequest(r) == navCollapsed
 	data.PVENav = h.pve != nil
+	data.DeployEnabled = h.deploy != nil && h.pve != nil && h.pveRemotes != nil
+	// "Deploy here" (ADR 0008 section 6) on the chart's nodes of active
+	// remotes; read-only and blocked remotes get no shortcut.
+	if data.DeployEnabled && data.Content == "chart" && data.Chart != nil && len(data.Chart.PVENodes) > 0 {
+		meta := h.pveMeta(r.Context())
+		data.DeployRemotes = map[string]bool{}
+		for id := range meta {
+			if remoteAllowsMutations(meta, id) {
+				data.DeployRemotes[id] = true
+			}
+		}
+	}
 	if !data.Bare && h.builtinTrust != nil {
 		data.BuiltinTrust = h.builtinTrust.get(r.Context())
 	}

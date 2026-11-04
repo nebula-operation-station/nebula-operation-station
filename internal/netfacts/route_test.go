@@ -117,6 +117,251 @@ func TestParseRoutesIPv6Multipath(t *testing.T) {
 	}
 }
 
+func TestParseRoutesRFC5549(t *testing.T) {
+	res, err := ParseRoutes(readFixture(t, "rfc5549-route.json"))
+	if err != nil {
+		t.Fatalf("ParseRoutes: %v", err)
+	}
+	if res.Incomplete || res.Dropped != 0 {
+		t.Fatalf("complete fixture marked Incomplete=%v Dropped=%d", res.Incomplete, res.Dropped)
+	}
+	// RFC 5549: an IPv4 destination routed via an IPv6 next hop.
+	// iproute2 prints such a next hop as a "via" object, top-level and
+	// inside a multipath "nexthops" list.
+	want := []Route{
+		{
+			Dst:     netip.MustParsePrefix("0.0.0.0/0"),
+			Gateway: netip.MustParseAddr("fe80::1"),
+			Dev:     "eth0",
+			Metric:  100,
+		},
+		{Dst: netip.MustParsePrefix("192.168.178.0/24"), Dev: "eth0"},
+		{
+			Dst:     netip.MustParsePrefix("10.10.0.0/24"),
+			Gateway: netip.MustParseAddr("fe80::2"),
+			Dev:     "eth1",
+			Metric:  50,
+		},
+		{
+			Dst:     netip.MustParsePrefix("10.20.0.0/24"),
+			Gateway: netip.MustParseAddr("fe80::3"),
+			Dev:     "eth0",
+			Metric:  75,
+		},
+		{
+			Dst:     netip.MustParsePrefix("10.20.0.0/24"),
+			Gateway: netip.MustParseAddr("fe80::4"),
+			Dev:     "eth1",
+			Metric:  75,
+		},
+	}
+	if !reflect.DeepEqual(res.Entries, want) {
+		t.Fatalf("got %+v, want %+v", res.Entries, want)
+	}
+	// The RFC 5549 default route must reach DefaultGateways.
+	gws := DefaultGateways(res.Entries)
+	if len(gws) != 1 || gws[0].Dst != netip.MustParsePrefix("0.0.0.0/0") ||
+		gws[0].Gateway != netip.MustParseAddr("fe80::1") {
+		t.Fatalf("got %+v, want the RFC 5549 default route", gws)
+	}
+}
+
+func TestParseRoutesRFC5549ViaInNexthops(t *testing.T) {
+	// A "via" next hop inside a multipath route goes through the same
+	// strict parseHostAddr/zone rules as a top-level "via": a zoned next
+	// hop is accepted only with a short interface-name zone.
+	doc := `[{"dst":"10.30.0.0/24","nexthops":[` +
+		`{"via":{"family":"inet6","host":"fe80::5"},"dev":"eth0"},` +
+		`{"via":{"family":"inet6","host":"fe80::6%eth0.10"},"dev":"eth0.10"}]}]`
+	res, err := ParseRoutes([]byte(doc))
+	if err != nil {
+		t.Fatalf("ParseRoutes: %v", err)
+	}
+	want := []Route{
+		{Dst: netip.MustParsePrefix("10.30.0.0/24"), Gateway: netip.MustParseAddr("fe80::5"), Dev: "eth0"},
+		{
+			Dst:     netip.MustParsePrefix("10.30.0.0/24"),
+			Gateway: netip.MustParseAddr("fe80::6%eth0.10"),
+			Dev:     "eth0.10",
+		},
+	}
+	if !reflect.DeepEqual(res.Entries, want) || res.Incomplete {
+		t.Fatalf("got %+v (Incomplete=%v), want %+v", res.Entries, res.Incomplete, want)
+	}
+}
+
+func TestParseRoutesUnparseableViaNeverDirectRoute(t *testing.T) {
+	// An entry whose "via" next hop cannot be parsed is dropped and the
+	// table is Incomplete; it must never be kept as a direct route
+	// (silent loss of the gateway).
+	doc := `[{"dst":"10.1.0.0/24","via":{"family":"inet6","host":"nope"},"dev":"eth0"},` +
+		`{"dst":"10.0.0.0/24","dev":"eth0"}]`
+	res, err := ParseRoutes([]byte(doc))
+	if err != nil {
+		t.Fatalf("ParseRoutes: %v", err)
+	}
+	want := []Route{{Dst: netip.MustParsePrefix("10.0.0.0/24"), Dev: "eth0"}}
+	if !reflect.DeepEqual(res.Entries, want) {
+		t.Fatalf("got %+v, want only the direct entry (the bad via entry is dropped, never demoted to a direct route)", res.Entries)
+	}
+	if !res.Incomplete || res.Dropped != 1 {
+		t.Fatalf("Incomplete=%v Dropped=%d, want true 1", res.Incomplete, res.Dropped)
+	}
+}
+
+func TestParseRoutesRFC5549MultipathDefault(t *testing.T) {
+	// An RFC 5549 default route learned over several IPv6 next hops in an
+	// IPv4 document: IPv6 "via" next hops fit an IPv4 and an IPv6
+	// default, so the document family decides.
+	doc := `[{"dst":"default","nexthops":[` +
+		`{"via":{"family":"inet6","host":"fe80::1"},"dev":"eth0"},` +
+		`{"via":{"family":"inet6","host":"fe80::2"},"dev":"eth0"}]},` +
+		`{"dst":"192.168.1.0/24","dev":"eth0"}]`
+	res, err := ParseRoutes([]byte(doc))
+	if err != nil {
+		t.Fatalf("ParseRoutes: %v", err)
+	}
+	want := []Route{
+		{Dst: netip.MustParsePrefix("0.0.0.0/0"), Gateway: netip.MustParseAddr("fe80::1"), Dev: "eth0"},
+		{Dst: netip.MustParsePrefix("0.0.0.0/0"), Gateway: netip.MustParseAddr("fe80::2"), Dev: "eth0"},
+		{Dst: netip.MustParsePrefix("192.168.1.0/24"), Dev: "eth0"},
+	}
+	if !reflect.DeepEqual(res.Entries, want) || res.Incomplete {
+		t.Fatalf("got %+v (Incomplete=%v), want %+v", res.Entries, res.Incomplete, want)
+	}
+	if gws := DefaultGateways(res.Entries); len(gws) != 2 {
+		t.Fatalf("got %d default gateways, want 2: %+v", len(gws), gws)
+	}
+}
+
+func TestParseRoutesViaFamilies(t *testing.T) {
+	// The family of a "via" next hop relative to the destination, for
+	// "default" and prefix destinations, single and multipath. v4 and v6
+	// are routes that set the document family.
+	const (
+		v4    = `{"dst":"192.168.1.0/24","dev":"eth0"}`
+		v6    = `{"dst":"2001:db8::/64","dev":"eth0"}`
+		via4  = `"via":{"family":"inet","host":"10.0.0.1"}`
+		via6  = `"via":{"family":"inet6","host":"fe80::1"}`
+		via6b = `"via":{"family":"inet6","host":"fe80::2"}`
+	)
+	v4Route := Route{Dst: netip.MustParsePrefix("192.168.1.0/24"), Dev: "eth0"}
+	v6Route := Route{Dst: netip.MustParsePrefix("2001:db8::/64"), Dev: "eth0"}
+	r := func(dst, gw string) Route {
+		return Route{Dst: netip.MustParsePrefix(dst), Gateway: netip.MustParseAddr(gw), Dev: "eth0"}
+	}
+	cases := []struct {
+		name string
+		doc  string
+		want []Route
+	}{
+		// default x same family
+		{"default same-family inet via", `[{"dst":"default",` + via4 + `,"dev":"eth0"}]`,
+			[]Route{r("0.0.0.0/0", "10.0.0.1")}},
+		{"default same-family inet via in ipv4 document", `[` + v4 + `,{"dst":"default",` + via4 + `,"dev":"eth0"}]`,
+			[]Route{v4Route, r("0.0.0.0/0", "10.0.0.1")}},
+		{"default same-family inet6 via in ipv6 document", `[` + v6 + `,{"dst":"default",` + via6 + `,"dev":"eth0"}]`,
+			[]Route{v6Route, r("::/0", "fe80::1")}},
+		{"default same-family inet6 via, document family after it", `[{"dst":"default",` + via6 + `,"dev":"eth0"},` + v6 + `]`,
+			[]Route{r("::/0", "fe80::1"), v6Route}},
+		// default x cross family
+		{"default rfc5549 inet6 via in ipv4 document", `[` + v4 + `,{"dst":"default",` + via6 + `,"dev":"eth0"}]`,
+			[]Route{v4Route, r("0.0.0.0/0", "fe80::1")}},
+		{"default inet via in ipv6 document is an ipv4 default", `[` + v6 + `,{"dst":"default",` + via4 + `,"dev":"eth0"}]`,
+			[]Route{v6Route, r("0.0.0.0/0", "10.0.0.1")}},
+		{"default inet6 via without family signal", `[{"dst":"default",` + via6 + `,"dev":"eth0"}]`,
+			nil},
+		// prefix x same family
+		{"prefix same-family inet via", `[{"dst":"10.1.0.0/24",` + via4 + `,"dev":"eth0"}]`,
+			[]Route{r("10.1.0.0/24", "10.0.0.1")}},
+		{"prefix same-family inet6 via", `[{"dst":"2001:db8:1::/48",` + via6 + `,"dev":"eth0"}]`,
+			[]Route{r("2001:db8:1::/48", "fe80::1")}},
+		// prefix x cross family
+		{"prefix rfc5549 inet6 via", `[{"dst":"10.1.0.0/24",` + via6 + `,"dev":"eth0"}]`,
+			[]Route{r("10.1.0.0/24", "fe80::1")}},
+		{"prefix inet via on ipv6 dst", `[{"dst":"2001:db8:1::/48",` + via4 + `,"dev":"eth0"}]`,
+			nil},
+		// multipath
+		{"multipath default inet6 vias in ipv6 document", `[` + v6 + `,{"dst":"default","nexthops":[{` + via6 + `,"dev":"eth0"},{` + via6b + `,"dev":"eth0"}]}]`,
+			[]Route{v6Route, r("::/0", "fe80::1"), r("::/0", "fe80::2")}},
+		{"multipath default inet6 vias without family signal", `[{"dst":"default","nexthops":[{` + via6 + `,"dev":"eth0"},{` + via6b + `,"dev":"eth0"}]}]`,
+			nil},
+		{"multipath default inet6 via then ipv4 gateway", `[{"dst":"default","nexthops":[{` + via6 + `,"dev":"eth0"},{"gateway":"10.0.0.1","dev":"eth0"}]}]`,
+			[]Route{r("0.0.0.0/0", "fe80::1"), r("0.0.0.0/0", "10.0.0.1")}},
+		{"multipath default ipv4 gateway then inet6 via", `[{"dst":"default","nexthops":[{"gateway":"10.0.0.1","dev":"eth0"},{` + via6 + `,"dev":"eth0"}]}]`,
+			[]Route{r("0.0.0.0/0", "10.0.0.1"), r("0.0.0.0/0", "fe80::1")}},
+		{"multipath default inet6 via then ipv6 gateway", `[{"dst":"default","nexthops":[{` + via6 + `,"dev":"eth0"},{"gateway":"fe80::2","dev":"eth0"}]}]`,
+			[]Route{r("::/0", "fe80::1"), r("::/0", "fe80::2")}},
+		{"multipath default ipv6 gateway then inet6 via", `[{"dst":"default","nexthops":[{"gateway":"fe80::2","dev":"eth0"},{` + via6 + `,"dev":"eth0"}]}]`,
+			[]Route{r("::/0", "fe80::2"), r("::/0", "fe80::1")}},
+		{"multipath default inet via and ipv6 gateway", `[{"dst":"default","nexthops":[{` + via4 + `,"dev":"eth0"},{"gateway":"fe80::2","dev":"eth0"}]}]`,
+			nil},
+		{"multipath prefix inet via and inet6 via", `[{"dst":"10.1.0.0/24","nexthops":[{` + via4 + `,"dev":"eth0"},{` + via6 + `,"dev":"eth0"}]}]`,
+			[]Route{r("10.1.0.0/24", "10.0.0.1"), r("10.1.0.0/24", "fe80::1")}},
+		{"multipath ipv6 prefix with inet via", `[{"dst":"2001:db8:1::/48","nexthops":[{` + via6 + `,"dev":"eth0"},{` + via4 + `,"dev":"eth0"}]}]`,
+			nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := ParseRoutes([]byte(tc.doc))
+			if err != nil {
+				t.Fatalf("ParseRoutes: %v", err)
+			}
+			if tc.want == nil {
+				if len(res.Entries) != 0 || !res.Incomplete || res.Dropped != 1 {
+					t.Fatalf("got %+v (Incomplete=%v Dropped=%d), want the entry dropped", res.Entries, res.Incomplete, res.Dropped)
+				}
+				return
+			}
+			if !reflect.DeepEqual(res.Entries, tc.want) || res.Incomplete {
+				t.Fatalf("got %+v (Incomplete=%v), want %+v", res.Entries, res.Incomplete, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseRoutesViaHostBounds(t *testing.T) {
+	maxZone := strings.Repeat("e", maxZoneLen)
+	doc := `[{"dst":"10.1.0.0/24","via":{"family":"inet6","host":"fe80::1%` + maxZone + `"},"dev":"eth0"}]`
+	res, err := ParseRoutes([]byte(doc))
+	if err != nil {
+		t.Fatalf("ParseRoutes: %v", err)
+	}
+	want := []Route{{
+		Dst:     netip.MustParsePrefix("10.1.0.0/24"),
+		Gateway: netip.MustParseAddr("fe80::1%" + maxZone),
+		Dev:     "eth0",
+	}}
+	if !reflect.DeepEqual(res.Entries, want) || res.Incomplete {
+		t.Fatalf("zone of maxZoneLen bytes: got %+v (Incomplete=%v), want %+v", res.Entries, res.Incomplete, want)
+	}
+
+	rejected := map[string]string{
+		"zone of maxZoneLen+1 bytes": "fe80::1%" + strings.Repeat("e", maxZoneLen+1),
+		"host above maxAddrLen":      "fe80:" + strings.Repeat("0", maxAddrLen) + "::1",
+	}
+	for name, zone := range hostileZones() {
+		rejected["hostile zone "+name] = "fe80::1%" + zone
+	}
+	for name, host := range rejected {
+		t.Run(name, func(t *testing.T) {
+			for _, entry := range []string{
+				`{"dst":"10.1.0.0/24","via":{"family":"inet6","host":"` + host + `"},"dev":"eth0"}`,
+				`{"dst":"10.1.0.0/24","nexthops":[{"via":{"family":"inet6","host":"` + host + `"},"dev":"eth0"}]}`,
+			} {
+				res, err := ParseRoutes([]byte(`[` + entry + `,{"dst":"10.0.0.0/24","dev":"eth0"}]`))
+				if err != nil {
+					t.Fatalf("ParseRoutes: %v", err)
+				}
+				want := []Route{{Dst: netip.MustParsePrefix("10.0.0.0/24"), Dev: "eth0"}}
+				if !reflect.DeepEqual(res.Entries, want) || !res.Incomplete || res.Dropped != 1 {
+					t.Fatalf("%s: got %+v (Incomplete=%v Dropped=%d), want only the direct entry", entry, res.Entries, res.Incomplete, res.Dropped)
+				}
+			}
+		})
+	}
+}
+
 func TestParseRoutesHostRoutes(t *testing.T) {
 	cases := []struct {
 		dst  string
@@ -241,6 +486,17 @@ func TestParseRoutesSkipsInvalidEntries(t *testing.T) {
 		{"multipath bad hop gateway", `{"dst":"default","nexthops":[{"gateway":"fe80::1%\u202e","dev":"eth0"}]}`},
 		{"multipath mixed families", `{"dst":"default","nexthops":[{"gateway":"10.0.0.1","dev":"eth0"},{"gateway":"fe80::1","dev":"eth0"}]}`},
 		{"multipath too many hops", `{"dst":"default","nexthops":[` + strings.TrimSuffix(strings.Repeat(`{"gateway":"10.0.0.1","dev":"eth0"},`, maxNexthops+1), ",") + `]}`},
+		{"via bad host", `{"dst":"10.1.0.0/24","via":{"family":"inet6","host":"nope"},"dev":"eth0"}`},
+		{"via hostile zone", `{"dst":"10.1.0.0/24","via":{"family":"inet6","host":"fe80::1%\u202e"},"dev":"eth0"}`},
+		{"via family mismatch", `{"dst":"10.1.0.0/24","via":{"family":"inet","host":"fe80::1"},"dev":"eth0"}`},
+		{"via unknown family", `{"dst":"10.1.0.0/24","via":{"family":"inets","host":"10.0.0.1"},"dev":"eth0"}`},
+		{"via missing host", `{"dst":"10.1.0.0/24","via":{"family":"inet6"},"dev":"eth0"}`},
+		{"via string not object", `{"dst":"10.1.0.0/24","via":"fe80::1","dev":"eth0"}`},
+		{"via v4 on v6 dst", `{"dst":"2001:db8::/32","via":{"family":"inet","host":"10.0.0.1"},"dev":"eth0"}`},
+		{"gateway and via both", `{"dst":"10.1.0.0/24","gateway":"10.0.0.1","via":{"family":"inet6","host":"fe80::1"},"dev":"eth0"}`},
+		{"nexthop via bad host", `{"dst":"default","nexthops":[{"via":{"family":"inet6","host":"nope"},"dev":"eth0"}]}`},
+		{"nexthop gateway and via", `{"dst":"default","nexthops":[{"gateway":"10.0.0.1","via":{"family":"inet6","host":"fe80::1"},"dev":"eth0"}]}`},
+		{"multipath with top-level via", `{"dst":"default","via":{"family":"inet6","host":"fe80::1"},"dev":"eth0","nexthops":[{"via":{"family":"inet6","host":"fe80::2"},"dev":"eth0"}]}`},
 		{"C1 control in dev", `{"dst":"10.0.0.0/24","dev":"eth\u00850"}`},
 	}
 	for _, tc := range cases {
@@ -257,6 +513,28 @@ func TestParseRoutesSkipsInvalidEntries(t *testing.T) {
 				t.Fatalf("Incomplete=%v Dropped=%d, want true 1", res.Incomplete, res.Dropped)
 			}
 		})
+	}
+}
+
+func TestParseRoutesAcceptsMaxNexthops(t *testing.T) {
+	// Boundary: exactly maxNexthops next hops are accepted (the
+	// maxNexthops+1 list is rejected by TestParseRoutesSkipsInvalidEntries).
+	var b strings.Builder
+	b.WriteString(`[{"dst":"default","nexthops":[`)
+	for i := 0; i < maxNexthops; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"gateway":"10.0.%d.1","dev":"eth0"}`, i/256)
+	}
+	b.WriteString(`]}]`)
+	res, err := ParseRoutes([]byte(b.String()))
+	if err != nil {
+		t.Fatalf("ParseRoutes: %v", err)
+	}
+	if len(res.Entries) != maxNexthops || res.Incomplete || res.Dropped != 0 {
+		t.Fatalf("got %d entries (Incomplete=%v Dropped=%d), want %d false 0",
+			len(res.Entries), res.Incomplete, res.Dropped, maxNexthops)
 	}
 }
 
