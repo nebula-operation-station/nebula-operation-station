@@ -819,13 +819,101 @@ func TestAssetIconOverrideHistoryAndRollback(t *testing.T) {
 	if sha, _ := s.AssetIcon(ctx, "nas-1"); sha != shaA {
 		t.Fatalf("override after rollback %q", sha)
 	}
-	want := []string{"icon_register " + shaA + " by alice", "asset_icon_set nas-1 by alice", "asset_icon_clear nas-1 by bob", "asset_icon_set nas-1 by carol"}
+	// Rolling back the set (to no override) is audited as a rollback too.
+	if err := s.RollbackIcon(ctx, "carol", subj, h[1].ID); err != nil {
+		t.Fatal(err)
+	}
+	if sha, _ := s.AssetIcon(ctx, "nas-1"); sha != "" {
+		t.Fatalf("override after rollback to none %q", sha)
+	}
+	want := []string{
+		"icon_register " + shaA + " by alice", "asset_icon_set nas-1 by alice", "asset_icon_clear nas-1 by bob",
+		"icon_rollback nas-1 by carol", "icon_rollback nas-1 by carol",
+	}
 	if got := auditActions(t, s); strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("audit %v", got)
+	}
+	recs, err := s.AuditTrail(ctx, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := recs[1].Detail; d != fmt.Sprintf("asset: none -> %s (rollback of change %d)", shaA, h[0].ID) {
+		t.Fatalf("rollback detail %q", d)
 	}
 	// A catalog key with the same name is a different subject.
 	if h, _ := s.IconHistory(ctx, IconSubject{Kind: SubjectCatalog, ID: "nas-1"}, 0); len(h) != 0 {
 		t.Fatalf("catalog history leaked: %+v", h)
+	}
+}
+
+func TestRollbackToCurrentIconIsStillRecorded(t *testing.T) {
+	s, db, c := newTestStore(t)
+	ctx := context.Background()
+	seedUnknown(t, s, "widgetd")
+	if _, err := db.Exec(`INSERT INTO assets (id, name, kind, updated_at) VALUES ('nas-1', 'NAS', 'nas', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, sha := range []string{shaA, shaB} {
+		if _, err := s.RegisterIcon(ctx, "alice", sha, IconUpload, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, subj := range []IconSubject{{Kind: SubjectCatalog, ID: "widgetd"}, {Kind: SubjectAsset, ID: "nas-1"}} {
+		t.Run(string(subj.Kind), func(t *testing.T) {
+			// A -> B -> A: rolling back the first change (none -> A)
+			// would give "none"; rolling back B -> A gives B. Rolling
+			// back A -> B gives A, which is the current icon.
+			for _, sha := range []string{shaA, shaB, shaA} {
+				c.t = c.t.Add(time.Minute)
+				if err := s.SetIcon(ctx, "alice", subj, sha); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h, err := s.IconHistory(ctx, subj, 0)
+			if err != nil || len(h) != 3 {
+				t.Fatalf("history %+v %v", h, err)
+			}
+			before := len(auditActions(t, s))
+			if err := s.RollbackIcon(ctx, "carol", subj, h[1].ID); err != nil {
+				t.Fatal(err)
+			}
+			after, err := s.IconHistory(ctx, subj, 0)
+			if err != nil || len(after) != 4 {
+				t.Fatalf("no-op rollback not in history: %+v %v", after, err)
+			}
+			if r := after[0]; r.SHA != shaA || r.PrevSHA != shaA || r.RollbackOf != h[1].ID || r.ChangedBy != "carol" {
+				t.Fatalf("no-op rollback row %+v", r)
+			}
+			recs, err := s.AuditTrail(ctx, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(auditActions(t, s)); got != before+1 {
+				t.Fatalf("audit rows %d -> %d", before, got)
+			}
+			want := fmt.Sprintf("%s: %s -> %s (rollback of change %d, no change)", subj.Kind, shaA, shaA, h[1].ID)
+			if a := recs[0]; a.Action != "icon_rollback" || a.Subject != subj.ID || a.Actor != "carol" || a.Detail != want {
+				t.Fatalf("audit %+v, want detail %q", a, want)
+			}
+			// The icon itself did not change.
+			var cur string
+			if subj.Kind == SubjectCatalog {
+				cur = mustEntry(t, s, "widgetd").IconSHA
+			} else {
+				cur, _ = s.AssetIcon(ctx, "nas-1")
+			}
+			if cur != shaA {
+				t.Fatalf("icon %q after no-op rollback", cur)
+			}
+		})
+	}
+	// SetIcon to the current icon stays a non-event.
+	before := len(auditActions(t, s))
+	if err := s.SetIcon(ctx, "alice", IconSubject{Kind: SubjectCatalog, ID: "widgetd"}, shaA); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(auditActions(t, s)); got != before {
+		t.Fatalf("no-op SetIcon audited: %d -> %d", before, got)
 	}
 }
 
