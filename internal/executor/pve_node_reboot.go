@@ -65,9 +65,9 @@ import (
 //     reboot was sent, so nothing could be checked first), the guest is
 //     HA-managed with requested state "started" and running, its
 //     configuration has no passthrough or local device (hostpci, usb,
-//     virtiofs, ivshmem, LXC dev) and no disk, unused volume or attached
-//     CD image on storage that is not shared, its HA group and HA
-//     node-affinity rules (PVE 9) allow another online member (any other
+//     virtiofs, ivshmem, a serial port other than socket, a parallel port,
+//     LXC dev) and no disk, unused volume or attached CD image on storage
+//     that is not shared, its HA group and HA node-affinity rules (PVE 9) allow another online member (any other
 //     HA rule is not modelled and counts as not movable), and that member
 //     has free memory for it (first fit over all evacuating guests).
 //
@@ -138,6 +138,11 @@ const (
 	pveRebootUnknownHold = 24 * time.Hour
 	// maxPveHARules bounds the HA groups and rules a reboot reads.
 	maxPveHARules = 256
+	// pveRebootFactsDeadline bounds one read of the reboot facts as a
+	// whole (node, cluster and guest lists, and one config read per HA
+	// guest, each also bounded by pveMutationRequestTimeout); a read that
+	// does not finish in time fails, so nothing is proposed or sent.
+	pveRebootFactsDeadline = 2 * time.Minute
 )
 
 // Effects of a reboot target, as listed in the parameters.
@@ -145,6 +150,10 @@ const (
 	pveRebootEffectReboot     = "reboot"
 	pveRebootEffectDowntime   = "downtime"
 	pveRebootEffectEvacuation = "ha_evacuation"
+	// pveRebootHAMoveRestart marks a guest HA moves by restart migration
+	// (a container): it is stopped, moved and started again, so its
+	// effect is downtime.
+	pveRebootHAMoveRestart = "restart_migration"
 )
 
 // HA shutdown policies (datacenter option ha: shutdown_policy=...).
@@ -396,6 +405,9 @@ type PveRebootTarget struct {
 	Node        string `json:"node"`
 	VMID        uint64 `json:"vmid,omitempty"`
 	Effect      string `json:"effect"`
+	// HAMove is set for a guest HA evacuates with downtime: how HA moves
+	// it (pveRebootHAMoveRestart for a container).
+	HAMove string `json:"ha_move,omitempty"`
 }
 
 // pveRebootParams are the action parameters bound in the approval.
@@ -812,7 +824,8 @@ func (m *PveMutations) rebootRemote(remoteID string) (executordb.PveRemote, erro
 
 // rebootTargets returns the permit targets of a reboot of node with the
 // bound facts b: the node, then every guest it takes down or HA moves, in
-// bound order.
+// bound order. An LXC guest listed for HA evacuation is listed with effect
+// downtime and HAMove pveRebootHAMoveRestart.
 func rebootTargets(rm executordb.PveRemote, node string, b pveRebootBound) ([]canonical.Target, []PveRebootTarget, error) {
 	add := func(ts []canonical.Target, ls []PveRebootTarget, kind string, vmid uint64, effect string) ([]canonical.Target, []PveRebootTarget, error) {
 		t, err := (permit.ProviderMutationTarget{RemoteID: rm.RemoteID, TrustPin: rm.TrustPin, Kind: kind, Node: node, VMID: vmid}).RiskTarget()
@@ -826,8 +839,11 @@ func rebootTargets(rm executordb.PveRemote, node string, b pveRebootBound) ([]ca
 		return nil, nil, err
 	}
 	for _, g := range b.Guests {
-		effect := ""
+		effect, move := "", ""
 		switch {
+		case g.HAEvacuates && g.Kind == permit.ProviderKindLXC:
+			// HA moves a container by restart migration: downtime.
+			effect, move = pveRebootEffectDowntime, pveRebootHAMoveRestart
 		case g.HAEvacuates:
 			effect = pveRebootEffectEvacuation
 		case g.AcceptedDowntime:
@@ -838,6 +854,7 @@ func rebootTargets(rm executordb.PveRemote, node string, b pveRebootBound) ([]ca
 		if ts, ls, err = add(ts, ls, g.Kind, g.VMID, effect); err != nil {
 			return nil, nil, err
 		}
+		ls[len(ls)-1].HAMove = move
 	}
 	return ts, ls, nil
 }
@@ -1155,7 +1172,30 @@ func pveRebootInventory(hc *http.Client, base string, read pveapi.TokenSupplier)
 	return inv, pc, nil
 }
 
+// pveNodeRebootFacts reads the facts of a reboot of node within
+// pveRebootFactsDeadline.
 func pveNodeRebootFacts(ctx context.Context, hc *http.Client, base string, read pveapi.TokenSupplier, node string) (PveNodeRebootFacts, error) {
+	return pveNodeRebootFactsWithin(ctx, pveRebootFactsDeadline, hc, base, read, node)
+}
+
+// pveNodeRebootFactsWithin reads the facts of a reboot of node. The whole
+// read, including one config read per HA guest, must finish within
+// deadline; a read that does not fails closed with errPveMutationRead.
+func pveNodeRebootFactsWithin(ctx context.Context, deadline time.Duration, hc *http.Client, base string, read pveapi.TokenSupplier, node string) (PveNodeRebootFacts, error) {
+	ctx, cancel := context.WithTimeout(ctx, deadline)
+	defer cancel()
+	f, err := readNodeRebootFacts(ctx, hc, base, read, node)
+	if err != nil {
+		return PveNodeRebootFacts{}, err
+	}
+	if ctx.Err() != nil {
+		// A placement read cut short is not a fact; never bind it.
+		return PveNodeRebootFacts{}, errPveMutationRead
+	}
+	return f, nil
+}
+
+func readNodeRebootFacts(ctx context.Context, hc *http.Client, base string, read pveapi.TokenSupplier, node string) (PveNodeRebootFacts, error) {
 	inv, pc, err := pveRebootInventory(hc, base, read)
 	if err != nil {
 		return PveNodeRebootFacts{}, err
@@ -1228,7 +1268,9 @@ func pveRebootPlacements(ctx context.Context, hc *http.Client, base string, read
 	ha := pveReadHAPlacement(ctx, hc, base, read)
 	for _, ref := range refs {
 		p := PveRebootPlacement{}
-		if shared != nil && ha.known {
+		// Past the facts deadline nothing more is read; the caller
+		// discards the facts.
+		if shared != nil && ha.known && ctx.Err() == nil {
 			cfg, err := pveGuestConfigStrings(ctx, hc, base, read, ref.Kind, node, ref.VMID, pveRebootPlacementKey)
 			if err == nil {
 				p.Restricted, p.AllowedNodes, p.Known = ha.placement(haSIDType(ref.Kind) + ":" + strconv.FormatUint(ref.VMID, 10))
@@ -1243,21 +1285,34 @@ func pveRebootPlacements(ctx context.Context, hc *http.Client, base string, read
 var (
 	pveRebootLocalDeviceRe = regexp.MustCompile(`^(?:hostpci|usb|virtiofs|ivshmem)[0-9]*$`)
 	pveRebootLXCDeviceRe   = regexp.MustCompile(`^dev[0-9]+$`)
+	// pveRebootCharDeviceRe matches the QEMU serial and parallel ports: a
+	// parallel port and a serial port other than "socket" use a host
+	// device, which PVE treats as a local resource.
+	pveRebootCharDeviceRe = regexp.MustCompile(`^(?:serial|parallel)[0-9]+$`)
 )
+
+// pveRebootSerialSocket is the serial port value that uses no host device.
+const pveRebootSerialSocket = "socket"
 
 // pveRebootPlacementKey reports whether a config member matters to HA
 // moving the guest; such a member must be a bounded string.
 func pveRebootPlacementKey(k string) bool {
-	return pveMigrateRelevantConfigKey(k) || pveRebootLocalDeviceRe.MatchString(k) || pveRebootLXCDeviceRe.MatchString(k)
+	return pveMigrateRelevantConfigKey(k) || pveRebootLocalDeviceRe.MatchString(k) || pveRebootLXCDeviceRe.MatchString(k) ||
+		pveRebootCharDeviceRe.MatchString(k)
 }
 
 // rebootLocalResources reports whether the guest configuration ties the
 // guest to its node: a passthrough or local device, a CD image or a volume
-// (disk or unused) on storage that is not shared and active, a passthrough
-// disk or bind mount, or a config the disk parser does not accept.
+// (disk or unused) on storage that is not shared and active, a serial port
+// on a host device or a parallel port, a passthrough disk or bind mount, or
+// a config the disk parser does not accept.
 func rebootLocalResources(kind string, cfg map[string]string, shared map[string]bool) bool {
 	for k, v := range cfg {
 		if pveRebootLocalDeviceRe.MatchString(k) || (kind == permit.ProviderKindLXC && pveRebootLXCDeviceRe.MatchString(k)) {
+			return true
+		}
+		if kind == permit.ProviderKindQemu && pveRebootCharDeviceRe.MatchString(k) &&
+			(strings.HasPrefix(k, "parallel") || v != pveRebootSerialSocket) {
 			return true
 		}
 		if kind == permit.ProviderKindQemu && pveQemuDiskKeyRe.MatchString(k) && slices.Contains(strings.Split(v, ","), "media=cdrom") {
