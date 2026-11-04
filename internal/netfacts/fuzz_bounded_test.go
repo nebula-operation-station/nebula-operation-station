@@ -4,9 +4,11 @@ package netfacts
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -203,6 +205,144 @@ func FuzzParseRoutesBounds(f *testing.F) {
 			if z := r.Dst.Addr().Zone(); z != "" {
 				t.Fatalf("route dst %v carries zone %q", r.Dst, z)
 			}
+		}
+	})
+}
+
+// FuzzParseAddrsBounds checks the hard bounds of ParseAddrs on arbitrary
+// input: no panic, bounded entry count, every returned field within its
+// documented limits.
+func FuzzParseAddrsBounds(f *testing.F) {
+	for _, s := range netfactsFuzzSeeds("proxmox-addr.json", "ubuntu-addr.json", "docker-addr.json", "malformed-addr.json") {
+		f.Add(s)
+	}
+	f.Add([]byte(`null`))
+	f.Add([]byte(`{}`))
+	f.Add([]byte(`[]`))
+	f.Add([]byte(`[{"ifname":"eth0","address":"bc:24:11:aa:bb:cc","operstate":"UP","addr_info":[{"family":"inet","local":"192.168.0.37","prefixlen":24}]}]`))
+	f.Add([]byte(`[{"ifname":"eth0","addr_info":[{"family":"inet6","local":"fe80::1","prefixlen":64}]}]`))
+	f.Add([]byte(`[{"ifname":"eth0","addr_info":[{"family":"inet","local":"192.168.0.37","prefixlen":33},{"family":"inet","local":"nope","prefixlen":24},{"family":"inets","local":"1.2.3.4","prefixlen":8}]}]`))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		res, err := ParseAddrs(b)
+		if err != nil {
+			return
+		}
+		if len(res.Entries) > maxEntries {
+			t.Fatalf("addr list has %d entries, bound is %d", len(res.Entries), maxEntries)
+		}
+		if res.Dropped < 0 || (res.Dropped > 0 && !res.Incomplete) {
+			t.Fatalf("Dropped=%d with Incomplete=%v", res.Dropped, res.Incomplete)
+		}
+		for _, a := range res.Entries {
+			oracleIfName(t, "addr name", a.Name)
+			if len(a.MAC) != 0 && len(a.MAC) != 6 {
+				t.Fatalf("addr MAC has %d bytes, want 0 or 6", len(a.MAC))
+			}
+			if a.State != "" && !operStates[a.State] {
+				t.Fatalf("addr state %q is not an operstate name", a.State)
+			}
+			if len(a.Addrs) > maxAddrsPerIf {
+				t.Fatalf("interface %s has %d addrs, bound is %d", a.Name, len(a.Addrs), maxAddrsPerIf)
+			}
+			for _, p := range a.Addrs {
+				if !p.IsValid() {
+					t.Fatalf("addr carries invalid prefix %v", p)
+				}
+			}
+		}
+	})
+}
+
+// FuzzParseLinksBounds checks the hard bounds of ParseLinks on arbitrary
+// input: no panic, bounded entry count, every returned field within its
+// documented limits.
+func FuzzParseLinksBounds(f *testing.F) {
+	for _, s := range netfactsFuzzSeeds("proxmox-link.json", "ubuntu-link.json", "docker-link.json", "malformed-link.json") {
+		f.Add(s)
+	}
+	f.Add([]byte(`null`))
+	f.Add([]byte(`{}`))
+	f.Add([]byte(`[]`))
+	f.Add([]byte(`[{"ifname":"eth0.100","address":"bc:24:11:aa:bb:cc","link":"eth0","linkinfo":{"info_kind":"vlan","info_data":{"id":100}}}]`))
+	f.Add([]byte(`[{"ifname":"tap101","master":"vmbr0","linkinfo":{"info_kind":"tun"}}]`))
+	f.Add([]byte(`[{"ifname":"eth0","linkinfo":{"info_kind":"vlan","info_data":{"id":99999}}}]`))
+	f.Add([]byte(`[{"ifname":"vx0","linkinfo":{"info_kind":"vxlan","info_data":{"id":100}}},{"ifname":"sit0","address":"0.0.0.0"}]`))
+	f.Add([]byte(fmt.Sprintf(`[{"ifname":"eth0","linkinfo":{"info_kind":"%s"}}]`, strings.Repeat("a", maxKindLen+1))))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		res, err := ParseLinks(b)
+		if err != nil {
+			return
+		}
+		if len(res.Entries) > maxEntries {
+			t.Fatalf("link list has %d entries, bound is %d", len(res.Entries), maxEntries)
+		}
+		if res.Dropped < 0 || (res.Dropped > 0 && !res.Incomplete) {
+			t.Fatalf("Dropped=%d with Incomplete=%v", res.Dropped, res.Incomplete)
+		}
+		for _, l := range res.Entries {
+			oracleIfName(t, "link name", l.Name)
+			if len(l.MAC) != 0 && len(l.MAC) != 6 {
+				t.Fatalf("link MAC has %d bytes, want 0 or 6", len(l.MAC))
+			}
+			if l.VLANID != nil && (*l.VLANID < minVLANID || *l.VLANID > maxVLANID) {
+				t.Fatalf("link VLAN id %d out of range %d..%d", *l.VLANID, minVLANID, maxVLANID)
+			}
+			if l.VLANID != nil && l.Kind != "vlan" {
+				t.Fatalf("link %s of kind %q has a VLAN id", l.Name, l.Kind)
+			}
+			if l.Parent != "" {
+				oracleIfName(t, "link parent", l.Parent)
+			}
+			if l.Master != "" {
+				oracleIfName(t, "link master", l.Master)
+			}
+			if len(l.Kind) > maxKindLen {
+				t.Fatalf("link kind is %d bytes, bound is %d", len(l.Kind), maxKindLen)
+			}
+		}
+	})
+}
+
+// FuzzParseBridgeVLANBounds checks the hard bounds of ParseBridgeVLAN on
+// arbitrary input: no panic, bounded port and total VLAN counts, every
+// returned field within its documented limits.
+func FuzzParseBridgeVLANBounds(f *testing.F) {
+	for _, s := range netfactsFuzzSeeds("proxmox-bridgevlan.json", "proxmox-bridgevlan-flat.json", "ubuntu-bridgevlan.json", "docker-bridgevlan.json", "malformed-bridgevlan.json") {
+		f.Add(s)
+	}
+	f.Add([]byte(`null`))
+	f.Add([]byte(`{}`))
+	f.Add([]byte(`[]`))
+	f.Add([]byte(`[{"ifname":"eth0","vlans":[{"vlan":1,"flags":["PVID","Egress Untagged"]},{"vlan":100}]}]`))
+	f.Add([]byte(`[{"ifname":"eth0","vlan":1,"flags":["PVID","Egress Untagged"]}]`))
+	f.Add([]byte(`[{"ifname":"eth0","vlans":[{"vlan":4096},{"vlan":-1},{"vlan":100,"vlanEnd":50}]}]`))
+	f.Add([]byte(`[{"ifname":"eth0","vlans":[{"flags":["PVID"]},{"vlan":0},{"vlan":1,"vlanEnd":4094}]}]`))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		res, err := ParseBridgeVLAN(b)
+		if err != nil {
+			return
+		}
+		if len(res.Ports) > maxEntries {
+			t.Fatalf("bridge vlan table has %d ports, bound is %d", len(res.Ports), maxEntries)
+		}
+		if res.Dropped < 0 || (res.Dropped > 0 && !res.Incomplete) {
+			t.Fatalf("Dropped=%d with Incomplete=%v", res.Dropped, res.Incomplete)
+		}
+		total := 0
+		for port, vlans := range res.Ports {
+			oracleIfName(t, "bridge vlan port", port)
+			total += len(vlans)
+			for i, v := range vlans {
+				if v.ID < minVLANID || v.ID > maxVLANID {
+					t.Fatalf("port %s vlan has id %d out of range %d..%d", port, v.ID, minVLANID, maxVLANID)
+				}
+				if i > 0 && vlans[i-1].ID >= v.ID {
+					t.Fatalf("port %s vlans not sorted by id: %d then %d", port, vlans[i-1].ID, v.ID)
+				}
+			}
+		}
+		if total > maxVLANsPerDoc {
+			t.Fatalf("bridge vlan table has %d (port, vlan) pairs, bound is %d", total, maxVLANsPerDoc)
 		}
 	})
 }
