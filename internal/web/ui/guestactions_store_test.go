@@ -2,6 +2,8 @@
 package ui
 
 import (
+	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,8 +16,8 @@ func TestGuestPowerProposalStoreChecksUserOnEveryPath(t *testing.T) {
 	now := time.Now()
 	p := newGuestPowerProposals()
 	digest := strings.Repeat("ab", 32)
-	if !p.put(&guestPowerProposal{user: "alice", digest: digest, state: "pending", expires: now.Add(time.Minute)}, now) {
-		t.Fatal("put refused")
+	if err := p.put(&guestPowerProposal{user: "alice", digest: digest, state: "pending", expires: now.Add(time.Minute)}, now); err != nil {
+		t.Fatalf("put refused: %v", err)
 	}
 	if _, ok := p.get("bob", digest, now); ok {
 		t.Error("get returns alice's proposal to bob")
@@ -48,5 +50,63 @@ func TestGuestPowerArtifactHashesMatchExecutor(t *testing.T) {
 		if guestPowerArtifacts[h] != verb {
 			t.Errorf("artifact %s = %q, want %q", h, guestPowerArtifacts[h], verb)
 		}
+	}
+}
+
+// TestGuestPowerPutRefusesAnotherUsersDigest checks that a repeated
+// executor digest never hands one user's proposal to another.
+func TestGuestPowerPutRefusesAnotherUsersDigest(t *testing.T) {
+	now := time.Now()
+	p := newGuestPowerProposals()
+	digest := strings.Repeat("ab", 32)
+	if err := p.put(&guestPowerProposal{user: "alice", digest: digest, state: "pending", expires: now.Add(time.Minute)}, now); err != nil {
+		t.Fatal(err)
+	}
+	err := p.put(&guestPowerProposal{user: "bob", digest: digest, state: "pending", expires: now.Add(time.Minute)}, now)
+	if !errors.Is(err, errGuestPowerDigest) {
+		t.Errorf("bob's put of alice's digest = %v", err)
+	}
+	if _, ok := p.get("alice", digest, now); !ok {
+		t.Error("alice lost her proposal")
+	}
+	if _, ok := p.get("bob", digest, now); ok {
+		t.Error("bob took over alice's proposal")
+	}
+	// The same user may renew her own pending proposal.
+	if err := p.put(&guestPowerProposal{user: "alice", digest: digest, state: "pending", expires: now.Add(2 * time.Minute)}, now); err != nil {
+		t.Errorf("alice's renewal = %v", err)
+	}
+}
+
+// TestGuestPowerPutCapsAndTableLimit fills the table with the open
+// proposals of eight users at their cap: a ninth user is refused without
+// evicting anyone until a settled proposal can make room.
+func TestGuestPowerPutCapsAndTableLimit(t *testing.T) {
+	now := time.Now()
+	p := newGuestPowerProposals()
+	digest := func(u, i int) string { return strings.Repeat("0", 60) + strconv.Itoa(1000 + u*100 + i)[:4] }
+	users := maxGuestPowerProposals / maxGuestPowerProposalsPerUser
+	for u := 0; u < users; u++ {
+		for i := 0; i < maxGuestPowerProposalsPerUser; i++ {
+			if err := p.put(&guestPowerProposal{user: "u" + strconv.Itoa(u), digest: digest(u, i), state: "pending", expires: now.Add(time.Minute)}, now); err != nil {
+				t.Fatalf("put u%d/%d: %v", u, i, err)
+			}
+		}
+	}
+	if err := p.put(&guestPowerProposal{user: "u0", digest: digest(9, 0), state: "pending", expires: now.Add(time.Minute)}, now); !errors.Is(err, errGuestPowerUserCap) {
+		t.Errorf("u0 over its cap = %v", err)
+	}
+	if err := p.put(&guestPowerProposal{user: "late", digest: digest(9, 1), state: "pending", expires: now.Add(time.Minute)}, now); !errors.Is(err, errGuestPowerFull) {
+		t.Errorf("a ninth user with a full table = %v", err)
+	}
+	if len(p.props) != maxGuestPowerProposals {
+		t.Fatalf("%d proposals kept", len(p.props))
+	}
+	p.setResult(digest(3, 5), "done", "", "", nil, now)
+	if err := p.put(&guestPowerProposal{user: "late", digest: digest(9, 1), state: "pending", expires: now.Add(time.Minute)}, now); err != nil {
+		t.Errorf("put after a settled proposal = %v", err)
+	}
+	if _, ok := p.props[digest(3, 5)]; ok {
+		t.Error("the settled proposal was not the one evicted")
 	}
 }

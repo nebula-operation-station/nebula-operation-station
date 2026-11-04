@@ -11,7 +11,7 @@
 </section>
 {{end}}
 <section class="panel" aria-label="Guest power proposal">
-  {{if and (eq $d.State "pending") (not $d.Mismatch)}}
+  {{if and (eq $d.State "pending") (not $d.Mismatch) (not $d.Expired)}}
   <p class="hint">Check the request the executor bound — the guest, the action and the risk it decided — then approve. Nothing runs before approval.</p>
   {{end}}
   <h2>Request bound by the executor</h2>
@@ -34,7 +34,10 @@
     <dt>Inventory incarnation</dt><dd class="mono">generation {{$d.UIGeneration}}</dd>
   </dl>
   {{if $d.Message}}<p class="status status--error">{{$d.Message}}</p>{{end}}
-  {{if and (eq $d.State "pending") $d.Mismatch}}
+  {{if and (eq $d.State "pending") $d.Expired}}
+  <p class="status status--error">The executor's bound request has expired: it can no longer be approved. Propose again from the chart.</p>
+  <p><a class="button button--small" href="/inventory/chart">Back to the chart</a></p>
+  {{else if and (eq $d.State "pending") $d.Mismatch}}
   <p><a class="button button--small" href="/inventory/chart">Back to the chart</a></p>
   {{else if eq $d.State "pending"}}
   <div class="actions">

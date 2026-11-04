@@ -102,6 +102,8 @@ func TestGuestPowerBindingMismatchWithholdsApproval(t *testing.T) {
 		{"two targets", func(r *canonical.Request) {
 			r.ResolvedTargets = append(r.ResolvedTargets, r.ResolvedTargets[0])
 		}, "exactly one target"},
+		{"expired", func(r *canonical.Request) { r.ExpiryUnix = time.Now().Add(-time.Minute).Unix() }, "already expired"},
+		{"no expiry", func(r *canonical.Request) { r.ExpiryUnix = 0 }, "has no expiry"},
 	}
 	for _, requirement := range []pb.ApprovalRequirement{
 		pb.ApprovalRequirement_APPROVAL_REQUIREMENT_ASSERTION_VERIFIED, pb.ApprovalRequirement_APPROVAL_REQUIREMENT_CLI_ONLY,
@@ -142,6 +144,11 @@ func TestGuestPowerBindingMismatchWithholdsApproval(t *testing.T) {
 
 func TestGuestPowerRefusesUnshowableCanonicalRequest(t *testing.T) {
 	big, _ := json.Marshal(map[string]string{"action_id": "pve.guest.power", "pad": strings.Repeat("x", 16<<10)})
+	good, err := canonical.Encode(gpCanonical(&pb.PVEGuestPowerTarget{RemoteId: gpRemote, Kind: "qemu", Node: "pve1", Vmid: 100, Verb: "stop"}, "MEDIUM", "exec-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsorted, _ := json.Marshal(gpCanonical(&pb.PVEGuestPowerTarget{RemoteId: gpRemote, Kind: "qemu", Node: "pve1", Vmid: 100, Verb: "stop"}, "MEDIUM", "exec-1"))
 	cases := []struct {
 		name      string
 		raw       []byte
@@ -153,6 +160,12 @@ func TestGuestPowerRefusesUnshowableCanonicalRequest(t *testing.T) {
 		{"empty", []byte{}, false, "cannot be shown"},
 		{"not JSON", []byte("action pve.guest.power"), false, "cannot be shown"},
 		{"digest mismatch", nil, true, "does not match its digest"},
+		// A reader of the full text sees the first action_id; JSON keeps
+		// the last.
+		{"duplicate key", append([]byte(`{"action_id":"pve.guest.snapshot",`), good[1:]...), false, "not in canonical form"},
+		{"trailing brace", append(append([]byte(nil), good...), '}'), false, "not in canonical form"},
+		{"trailing space", append(append([]byte(nil), good...), ' '), false, "not in canonical form"},
+		{"key order", unsorted, false, "not in canonical form"},
 	}
 	for _, requirement := range []pb.ApprovalRequirement{
 		pb.ApprovalRequirement_APPROVAL_REQUIREMENT_ASSERTION_VERIFIED, pb.ApprovalRequirement_APPROVAL_REQUIREMENT_CLI_ONLY,
@@ -448,15 +461,15 @@ func (c *gpClock) add(d time.Duration) {
 	c.mu.Unlock()
 }
 
-// TestGuestPowerProposalLimitKeepsOtherUsersPending fills the 256-entry
-// table with alice's pending proposals: bob's proposal is refused rather
-// than evicting one of hers, and her own next proposal evicts her oldest.
-func TestGuestPowerProposalLimitKeepsOtherUsersPending(t *testing.T) {
+// TestGuestPowerPerUserCapKeepsOthersProposing lets alice fill her cap of
+// open proposals: her next one is refused with 429, bob can still propose,
+// and none of alice's proposals is evicted.
+func TestGuestPowerPerUserCapKeepsOthersProposing(t *testing.T) {
 	clock := &gpClock{t: time.Now()}
 	u := newGPUsers(t, clock.now)
 	alice, bob := u.login(t, "alice"), u.login(t, "bob")
 	var first string
-	for i := 0; i < 256; i++ {
+	for i := 0; i < 32; i++ {
 		if code, body := u.do(t, alice, http.MethodPost, "/pve/guests/power", gpFormCT, gpForm("100", "qemu", "shutdown").Encode()); code != http.StatusSeeOther {
 			t.Fatalf("alice proposal %d = %d %q", i, code, body)
 		}
@@ -465,20 +478,77 @@ func TestGuestPowerProposalLimitKeepsOtherUsersPending(t *testing.T) {
 		}
 		clock.add(2 * time.Second)
 	}
-	code, body := u.do(t, bob, http.MethodPost, "/pve/guests/power", gpFormCT, gpForm("101", "lxc", "shutdown").Encode())
-	if code != http.StatusServiceUnavailable {
-		t.Errorf("bob's proposal with a full table = %d %q, want 503", code, body)
+	code, body := u.do(t, alice, http.MethodPost, "/pve/guests/power", gpFormCT, gpForm("100", "qemu", "shutdown").Encode())
+	if code != http.StatusTooManyRequests || !strings.Contains(body, "too many open power proposals") {
+		t.Errorf("alice's proposal over her cap = %d %q, want 429", code, body)
 	}
 	if code, _ := u.do(t, alice, http.MethodGet, "/pve/guests/power/"+first, "", ""); code != http.StatusOK {
-		t.Errorf("alice's oldest proposal was evicted by bob: %d", code)
+		t.Errorf("alice's oldest proposal was evicted: %d", code)
 	}
-	if code, _ := u.do(t, alice, http.MethodPost, "/pve/guests/power", gpFormCT, gpForm("100", "qemu", "shutdown").Encode()); code != http.StatusSeeOther {
-		t.Fatalf("alice's proposal 257 = %d", code)
+	if code, body := u.do(t, bob, http.MethodPost, "/pve/guests/power", gpFormCT, gpForm("101", "lxc", "shutdown").Encode()); code != http.StatusSeeOther {
+		t.Fatalf("bob's proposal = %d %q", code, body)
 	}
-	if code, _ := u.do(t, alice, http.MethodGet, "/pve/guests/power/"+first, "", ""); code != http.StatusNotFound {
-		t.Errorf("alice's own oldest proposal kept: %d", code)
+	if code, _ := u.do(t, bob, http.MethodGet, "/pve/guests/power/"+u.exec.lastDigest(), "", ""); code != http.StatusOK {
+		t.Errorf("bob's proposal page = %d", code)
 	}
-	if code, _ := u.do(t, alice, http.MethodGet, "/pve/guests/power/"+u.exec.lastDigest(), "", ""); code != http.StatusOK {
-		t.Errorf("alice's newest proposal = %d", code)
+}
+
+// TestGuestPowerBindingExpiresAfterProposal checks that a proposal whose
+// bound request expired while it waited is no longer offered or accepted.
+func TestGuestPowerBindingExpiresAfterProposal(t *testing.T) {
+	for _, requirement := range []pb.ApprovalRequirement{
+		pb.ApprovalRequirement_APPROVAL_REQUIREMENT_ASSERTION_VERIFIED, pb.ApprovalRequirement_APPROVAL_REQUIREMENT_CLI_ONLY,
+	} {
+		t.Run(requirement.String(), func(t *testing.T) {
+			clock := &gpClock{t: time.Now()}
+			e := newGPEnvClock(t, gpGuests(), clock.now)
+			e.exec.requirement = requirement
+			h := e.h.Handler()
+			if rec := gpPost(t, h, "/pve/guests/power", gpForm("100", "qemu", "stop")); rec.Code != http.StatusSeeOther {
+				t.Fatalf("propose = %d", rec.Code)
+			}
+			d := e.exec.lastDigest()
+			if body := getBody(t, h, "/pve/guests/power/"+d); strings.Contains(body, "has expired") {
+				t.Fatal("fresh binding shown as expired")
+			}
+			clock.add(6 * time.Minute) // the fake binds for five minutes
+			body := getBody(t, h, "/pve/guests/power/"+d)
+			if !strings.Contains(body, "has expired") {
+				t.Error("expired binding not shown as expired")
+			}
+			gpNoApproval(t, body)
+			if rec := gpPostJSON(t, h, "/pve/guests/power/commit", map[string]any{"id": d, "assertion": map[string]string{"id": "x"}}); rec.Code != http.StatusNotFound {
+				t.Errorf("commit of an expired binding = %d", rec.Code)
+			}
+			if rec := gpPost(t, h, "/pve/guests/power/run", url.Values{"digest": {d}}); rec.Code != http.StatusNotFound {
+				t.Errorf("run of an expired binding = %d", rec.Code)
+			}
+			time.Sleep(10 * time.Millisecond)
+			if e.exec.commitCount() != 0 || len(e.exec.assertions) != 0 {
+				t.Error("an expired binding reached approval or commit")
+			}
+		})
+	}
+}
+
+func TestGuestPowerAssertionRefusalIsCleanText(t *testing.T) {
+	for _, tc := range []struct {
+		err    error
+		code   int
+		want   string
+		hidden string
+	}{
+		{status.Error(codes.Aborted, "challenge replaced \xff"+strings.Repeat("é", 400)), http.StatusConflict, "the executor refused", "\xff"},
+		{status.Error(codes.Unavailable, "dial tcp 10.1.2.3:7443"), http.StatusBadGateway, "executor unavailable", "10.1.2.3"},
+	} {
+		e := newGPEnv(t, gpGuests())
+		e.exec.assertErr = tc.err
+		h := e.h.Handler()
+		gpPost(t, h, "/pve/guests/power", gpForm("100", "qemu", "shutdown"))
+		rec := gpPostJSON(t, h, "/pve/guests/power/commit", map[string]any{"id": e.exec.lastDigest(), "assertion": map[string]string{"id": "x"}})
+		body := rec.Body.String()
+		if rec.Code != tc.code || !strings.Contains(body, tc.want) || strings.Contains(body, tc.hidden) || len(body) > 600 {
+			t.Errorf("assertion error %v = %d %q", tc.err, rec.Code, body)
+		}
 	}
 }

@@ -75,6 +75,10 @@ const (
 	guestPowerProposalTTL = 15 * time.Minute
 	// maxGuestPowerProposals bounds the proposals kept in memory.
 	maxGuestPowerProposals = 256
+	// maxGuestPowerProposalsPerUser bounds one user's open (pending,
+	// approving or running) proposals, well below maxGuestPowerProposals,
+	// so one user cannot fill the table and lock others out.
+	maxGuestPowerProposalsPerUser = 32
 	// maxGuestPowerThrottleUsers bounds the throttle table.
 	maxGuestPowerThrottleUsers = 1024
 	// guestPowerCommitTimeout bounds one background commit; the executor
@@ -263,15 +267,6 @@ var guestPowerArtifacts = func() map[string]string {
 	return out
 }()
 
-// guestPowerTargetID is the host ID the executor binds a guest target to
-// in the canonical request (permit.ProviderMutationTarget.canonicalTarget):
-// "pvm-" and the first 16 bytes (hex) of the SHA-256 of remote, kind, node
-// and VMID, NUL separated.
-func guestPowerTargetID(t *pb.PVEGuestPowerTarget) string {
-	sum := sha256.Sum256([]byte(t.GetRemoteId() + "\x00" + t.GetKind() + "\x00" + t.GetNode() + "\x00" + strconv.FormatUint(t.GetVmid(), 10)))
-	return "pvm-" + hex.EncodeToString(sum[:16])
-}
-
 // guestPowerBinding is what the executor's canonical request binds, as
 // shown in the headline of the proposal page.
 type guestPowerBinding struct {
@@ -290,7 +285,9 @@ type guestPowerBinding struct {
 var errGuestPowerCanonical = errors.New("the executor's bound request cannot be shown")
 
 // parseGuestPowerCanonical checks that c is the canonical request the
-// digest names and reads what it binds.
+// digest names, in canonical form (canonical.Encode of what it parses to,
+// byte for byte: no duplicate keys, no other order, no trailing data), and
+// reads what it binds.
 func parseGuestPowerCanonical(c []byte, digest string) (guestPowerBinding, error) {
 	switch {
 	case len(c) == 0:
@@ -306,8 +303,11 @@ func parseGuestPowerCanonical(c []byte, digest string) (guestPowerBinding, error
 	var rq canonical.Request
 	dec := json.NewDecoder(bytes.NewReader(c))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&rq); err != nil || dec.More() {
+	if err := dec.Decode(&rq); err != nil {
 		return guestPowerBinding{}, errGuestPowerCanonical
+	}
+	if enc, err := canonical.Encode(rq); err != nil || !bytes.Equal(enc, c) {
+		return guestPowerBinding{}, errors.New("the executor's bound request is not in canonical form")
 	}
 	b := guestPowerBinding{
 		ActionID: rq.ActionID, Verb: guestPowerArtifacts[rq.ArtifactSHA256], Risk: string(rq.RiskClass),
@@ -324,7 +324,10 @@ func parseGuestPowerCanonical(c []byte, digest string) (guestPowerBinding, error
 
 // guestPowerMismatch lists every difference between what the executor
 // bound and what was requested; any difference withholds approval.
-func guestPowerMismatch(b guestPowerBinding, t *pb.PVEGuestPowerTarget, risk, trustPin string) []string {
+// The bound target is compared with permit's own risk target of the
+// requested guest (host ID and trust-pin fingerprint). The proposal names
+// no execution ID (the executor picks it), so there is none to compare.
+func guestPowerMismatch(b guestPowerBinding, t *pb.PVEGuestPowerTarget, risk, trustPin string, now time.Time) []string {
 	var out []string
 	if b.ActionID != guestPowerAction {
 		out = append(out, "the executor bound a different action ("+cleanText(b.ActionID)+")")
@@ -338,17 +341,23 @@ func guestPowerMismatch(b guestPowerBinding, t *pb.PVEGuestPowerTarget, risk, tr
 	if b.Risk != risk {
 		out = append(out, "the risk in the bound request ("+cleanText(b.Risk)+") differs from the executor's answer ("+risk+")")
 	}
-	want := guestPowerTargetID(t)
+	want, err := permit.ProviderMutationTarget{RemoteID: t.GetRemoteId(), TrustPin: trustPin, Kind: t.GetKind(),
+		Node: t.GetNode(), VMID: t.GetVmid()}.RiskTarget()
 	switch {
 	case b.TargetID == "":
 		out = append(out, "the bound request does not name exactly one target")
-	case b.TargetID != want:
-		out = append(out, "the executor bound a different guest ("+cleanText(b.TargetID)+", requested "+want+")")
-	default:
-		fp, err := permit.ProviderRiskFingerprint(trustPin, want)
-		if err != nil || fp != b.Fingerprint {
-			out = append(out, "the bound target does not belong to the PVE remote's current trust pin")
-		}
+	case err != nil:
+		out = append(out, "the PVE remote's current trust pin is unknown: the bound target cannot be checked")
+	case b.TargetID != want.HostID:
+		out = append(out, "the executor bound a different guest ("+cleanText(b.TargetID)+", requested "+want.HostID+")")
+	case b.Fingerprint != want.HostKeyFingerprint:
+		out = append(out, "the bound target does not belong to the PVE remote's current trust pin")
+	}
+	switch {
+	case b.Expiry.IsZero():
+		out = append(out, "the bound request has no expiry")
+	case !now.Before(b.Expiry):
+		out = append(out, "the bound request has already expired")
 	}
 	return out
 }
@@ -417,12 +426,36 @@ func (p *guestPowerProposals) allow(user string, now time.Time) bool {
 	return true
 }
 
+// Refusals of put.
+var (
+	// errGuestPowerUserCap: the user has maxGuestPowerProposalsPerUser
+	// open proposals.
+	errGuestPowerUserCap = errors.New("too many open power proposals of this user")
+	// errGuestPowerFull: the table is full of open proposals.
+	errGuestPowerFull = errors.New("too many power actions in progress")
+	// errGuestPowerDigest: the digest is held by another user's proposal
+	// or by a running one.
+	errGuestPowerDigest = errors.New("the executor returned a digest already in use")
+)
+
+// approvable reports whether the proposal may be offered for approval or
+// run: its binding matches the request and has not expired.
+func (x *guestPowerProposal) approvable(now time.Time) bool {
+	return len(x.mismatch) == 0 && now.Before(x.bound.Expiry)
+}
+
+// open reports whether a proposal still counts against its user's cap.
+func (x *guestPowerProposal) open() bool {
+	return x.state == "pending" || x.state == "approving" || x.state == "running"
+}
+
 // put stores a proposal, dropping expired ones and, when full, the
 // settled one (done or failed) that expires first, else the proposer's own
 // pending one that expires first. It never drops a running commit or
-// another user's pending proposal, so one user cannot evict the proposals
-// others are about to approve.
-func (p *guestPowerProposals) put(x *guestPowerProposal, now time.Time) bool {
+// another user's proposal of the same digest or a pending one, so one user
+// cannot evict or take over the proposals others are about to approve;
+// each user has at most maxGuestPowerProposalsPerUser open ones.
+func (p *guestPowerProposals) put(x *guestPowerProposal, now time.Time) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for d, y := range p.props {
@@ -430,10 +463,20 @@ func (p *guestPowerProposals) put(x *guestPowerProposal, now time.Time) bool {
 			delete(p.props, d)
 		}
 	}
-	if old, ok := p.props[x.digest]; ok && (old.state == "running" || old.state == "approving") {
-		return false
+	old, replaced := p.props[x.digest]
+	if replaced && (old.user != x.user || old.state == "running" || old.state == "approving") {
+		return errGuestPowerDigest
 	}
-	if len(p.props) >= maxGuestPowerProposals {
+	n := 0
+	for d, y := range p.props {
+		if y.user == x.user && y.open() && d != x.digest {
+			n++
+		}
+	}
+	if n >= maxGuestPowerProposalsPerUser {
+		return errGuestPowerUserCap
+	}
+	if !replaced && len(p.props) >= maxGuestPowerProposals {
 		oldest := func(ok func(*guestPowerProposal) bool) string {
 			var d string
 			for k, y := range p.props {
@@ -448,12 +491,12 @@ func (p *guestPowerProposals) put(x *guestPowerProposal, now time.Time) bool {
 			d = oldest(func(y *guestPowerProposal) bool { return y.state == "pending" && y.user == x.user })
 		}
 		if d == "" {
-			return false
+			return errGuestPowerFull
 		}
 		delete(p.props, d)
 	}
 	p.props[x.digest] = x
-	return true
+	return nil
 }
 
 // get returns a copy of user's proposal with this digest.
@@ -515,6 +558,7 @@ type guestActionData struct {
 	Verb                    guestPowerVerb
 	Bound                   guestPowerBinding
 	Mismatch                []string
+	Expired                 bool // the binding expired (no mismatch)
 	UIName                  string
 	UIGeneration            uint64
 	Digest, Risk, RiskClass string
@@ -676,7 +720,7 @@ func (h *Handler) handleGuestPowerPropose(w http.ResponseWriter, r *http.Request
 	}
 	p := &guestPowerProposal{
 		user: user, target: target, verb: verb, bound: bound,
-		mismatch: guestPowerMismatch(bound, target, risk, meta[remote].TrustPin),
+		mismatch: guestPowerMismatch(bound, target, risk, meta[remote].TrustPin, now),
 		uiName:   g.Name, uiGeneration: g.Generation,
 		digest: digest, risk: risk, requirement: requirementText(perm.GetApprovalRequirement()),
 		state: "pending", expires: now.Add(guestPowerProposalTTL),
@@ -691,7 +735,15 @@ func (h *Handler) handleGuestPowerPropose(w http.ResponseWriter, r *http.Request
 		http.Error(w, "the executor returned no approval challenge", http.StatusBadGateway)
 		return
 	}
-	if !h.guestPowerProposals.put(p, now) {
+	switch err := h.guestPowerProposals.put(p, now); {
+	case errors.Is(err, errGuestPowerUserCap):
+		http.Error(w, "too many open power proposals: approve or wait for earlier ones to expire, then try again", http.StatusTooManyRequests)
+		return
+	case errors.Is(err, errGuestPowerDigest):
+		h.log.Error("guest power: executor digest already in use", "remote", remote, "vmid", vmid)
+		http.Error(w, "the executor returned a digest already in use: the proposal is refused", http.StatusBadGateway)
+		return
+	case err != nil:
 		http.Error(w, "too many power actions in progress", http.StatusServiceUnavailable)
 		return
 	}
@@ -740,7 +792,9 @@ func (h *Handler) handleGuestPowerProposal(w http.ResponseWriter, r *http.Reques
 		ChallengeExpiry: p.challengeAt, State: p.state, Message: p.message, ExecutionID: p.executionID, Steps: p.steps,
 	}
 	data := pageData{Title: "Guest power: " + p.verb.Verb, Active: "pve", Content: "guest_action", GuestAction: d}
-	if p.state == "pending" && len(p.mismatch) == 0 {
+	now := h.clockNow()
+	d.Expired = len(p.mismatch) == 0 && !now.Before(p.bound.Expiry)
+	if p.state == "pending" && p.approvable(now) {
 		if p.requirement == "key" {
 			d.Options = p.options
 			data.Scripts = []string{"webauthn.js", "schedules.js"}
@@ -774,7 +828,7 @@ func (h *Handler) handleGuestPowerCommit(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	cur, ok := h.guestPowerProposals.get(user, in.ID, now)
-	if !ok || cur.requirement != "key" || len(cur.mismatch) > 0 || len(in.Assertion) == 0 || string(in.Assertion) == "null" {
+	if !ok || cur.requirement != "key" || !cur.approvable(now) || len(in.Assertion) == 0 || string(in.Assertion) == "null" {
 		writeJSONError(w, http.StatusNotFound, "power proposal not found")
 		return
 	}
@@ -790,8 +844,11 @@ func (h *Handler) handleGuestPowerCommit(w http.ResponseWriter, r *http.Request)
 		switch status.Code(err) {
 		case codes.PermissionDenied, codes.Unauthenticated:
 			writeJSONError(w, http.StatusForbidden, "security key not accepted")
+		case codes.InvalidArgument, codes.FailedPrecondition, codes.ResourceExhausted, codes.AlreadyExists, codes.NotFound, codes.Aborted:
+			writeJSONError(w, http.StatusConflict, "the executor refused: "+cleanText(status.Convert(err).Message()))
 		default:
-			h.executorRefusal(w, "approve guest power", err)
+			h.log.Error("approve guest power", "error", err)
+			writeJSONError(w, http.StatusBadGateway, "executor unavailable")
 		}
 		return
 	}
@@ -823,7 +880,7 @@ func (h *Handler) handleGuestPowerRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cur, ok := h.guestPowerProposals.get(user, digest, now)
-	if !ok || cur.requirement == "key" || len(cur.mismatch) > 0 {
+	if !ok || cur.requirement == "key" || !cur.approvable(now) {
 		http.NotFound(w, r)
 		return
 	}

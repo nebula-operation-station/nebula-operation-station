@@ -121,9 +121,7 @@ func gpArtifactSHA256(verb string) string {
 // (permit.ProviderMutationRequest): the target's host ID, its synthetic
 // fingerprint under the trust pin, the verb's artifact and the risk.
 func gpCanonical(t *pb.PVEGuestPowerTarget, risk string, execID string) canonical.Request {
-	sum := sha256.Sum256([]byte(t.GetRemoteId() + "\x00" + t.GetKind() + "\x00" + t.GetNode() + "\x00" + strconv.FormatUint(t.GetVmid(), 10)))
-	hostID := "pvm-" + hex.EncodeToString(sum[:16])
-	fp, err := permit.ProviderRiskFingerprint(gpPin, hostID)
+	target, err := permit.ProviderMutationTarget{RemoteID: t.GetRemoteId(), TrustPin: gpPin, Kind: t.GetKind(), Node: t.GetNode(), VMID: t.GetVmid()}.RiskTarget()
 	if err != nil {
 		panic(err)
 	}
@@ -131,7 +129,7 @@ func gpCanonical(t *pb.PVEGuestPowerTarget, risk string, execID string) canonica
 		RequestVersion: 1, ExecutionID: execID, ActionID: "pve.guest.power", ModuleVersion: "1.0.0",
 		ArtifactSHA256: gpArtifactSHA256(t.GetVerb()), ParametersHash: strings.Repeat("0d", 32),
 		CredentialRefs: []string{"pve-lab-action"}, RiskClass: canonical.Risk(risk), StagePlanHash: strings.Repeat("5e", 32),
-		ExpiryUnix: time.Now().Add(5 * time.Minute).Unix(), ResolvedTargets: []canonical.Target{{HostID: hostID, HostKeyFingerprint: fp}},
+		ExpiryUnix: time.Now().Add(5 * time.Minute).Unix(), ResolvedTargets: []canonical.Target{target},
 	}
 }
 
@@ -165,7 +163,7 @@ func (f *fakeGuestPower) ProposePVEGuestPower(_ context.Context, in *pb.ProposeP
 	if f.mutate != nil {
 		f.mutate(&rq)
 	}
-	c, err := json.Marshal(rq)
+	c, err := canonical.Encode(rq)
 	if err != nil {
 		return nil, err
 	}
