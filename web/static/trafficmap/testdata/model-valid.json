@@ -1,0 +1,39 @@
+{
+  "type": "nos.trafficmap.model",
+  "version": 1,
+  "window": "24h",
+  "truncated": false,
+  "zones": [
+    {"id": "vlan10", "name": "Mgmt", "color": "#4fa3ff"},
+    {"id": "vlan20", "name": "Servers", "color": "#ffb347"},
+    {"id": "vlan30", "name": "IoT", "color": "#9b6bff"}
+  ],
+  "nodes": [
+    {"id": "gw", "label": "router", "kind": "router", "zone": null},
+    {"id": "pve1", "label": "pve1", "kind": "managed", "zone": "vlan10", "os": "proxmox",
+     "resources": {"vcpu": 32, "ramMiB": 131072, "gpus": 1},
+     "health": {"patches": "warn", "general": "ok", "disk": "crit", "load": "unknown"},
+     "software": [{"key": "docker", "count": 1, "children": [{"key": "postgres", "count": 2}]}]},
+    {"id": "vm101", "label": "db01", "kind": "guest", "zone": "vlan20", "host": "pve1", "os": "debian",
+     "resources": {"vcpu": 4, "ramMiB": 8192},
+     "health": {"patches": "ok", "general": "ok", "disk": "ok", "load": "ok"}},
+    {"id": "vm102", "label": "web01", "kind": "guest", "zone": "vlan20", "host": "pve1", "os": "ubuntu",
+     "resources": {"vcpu": 2, "ramMiB": 2048},
+     "health": {"unreachable": true}},
+    {"id": "nas", "label": "nas", "kind": "asset", "zone": "vlan20"},
+    {"id": "cam1", "label": "camera 1", "kind": "observed", "zone": "vlan30"},
+    {"id": "plug", "label": "plug", "kind": "observed", "zone": "vlan30"}
+  ],
+  "links": [
+    {"a": "vm102", "b": "vm101", "bytesAB": 900000000, "bytesBA": 30000000, "proto": "tcp", "port": 5432, "count": 1200},
+    {"a": "cam1", "b": "nas", "bytesAB": 5000000000, "bytesBA": 1000, "proto": "tcp", "port": 554, "via": "gw"},
+    {"a": "plug", "b": "gw", "bytesAB": 2000, "bytesBA": 3000, "proto": "udp", "port": 53},
+    {"a": "pve1", "b": "nas", "bytesAB": 70000000, "bytesBA": 40000000, "proto": "tcp", "port": 2049, "via": "gw"},
+    {"a": "vm101", "b": "nas", "bytesAB": 10000, "bytesBA": 20000, "proto": "tcp", "port": 22, "via": "gw"},
+    {"a": "vm102", "b": "nas", "bytesAB": 11000, "bytesBA": 21000, "proto": "tcp", "port": 445, "via": "gw"},
+    {"a": "vm101", "b": "pve1", "bytesAB": 500, "bytesBA": 600, "proto": "tcp", "port": 8006, "via": "gw"},
+    {"a": "vm101", "b": "cam1", "bytesAB": 100, "bytesBA": 100, "proto": "tcp", "port": 80, "via": "gw"},
+    {"a": "vm101", "b": "plug", "bytesAB": 50, "bytesBA": 50, "proto": "tcp", "port": 80, "via": "gw"},
+    {"a": "vm101", "b": "gw", "bytesAB": 10, "bytesBA": 10, "proto": "udp", "port": 123}
+  ]
+}

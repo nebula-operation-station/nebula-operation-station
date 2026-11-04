@@ -122,6 +122,17 @@ Add one `/vms/<vmid>` entry per guest you want to be able to operate later.
 No console, guest exec, guest file access, permission administration,
 storage deletion or HA-configuration privileges belong to either token.
 
+### NOS automation key (guest provisioning)
+
+Guest provisioning (ADR 0008) installs exactly one SSH public key into a new
+guest: the NOS automation key. The executor accepts only the keyring
+credential reference `nos-automation`, so the key must be in the executor
+keyring as `keys/nos-automation.key` (same format, mode and passphrase as
+every other keyring file; see section 3.4 of the admin guide). A provisioning
+that names any other reference is refused with `PermissionDenied`, and one
+whose keyring lacks `nos-automation.key` fails with `NotFound`. The file name
+is fixed by the implementation, not by the ADR.
+
 ## Adding a remote with the nebula CLI
 
 Run these commands on the **executor host** as the configured local admin
@@ -223,14 +234,27 @@ tombstone. Nonsecret audit/tombstone data is kept. Revoking the PVE-side
 tokens is still your job. Removal cannot undo PVE tasks that are already
 running.
 
+## Recording the site of a remote
+
+```sh
+nebula pve remote set-site <id> onsite|offsite
+```
+
+Type `yes` to confirm. The marker is executor-owned and set only by the
+local admin; it starts unset. A node reboot is refused for a remote marked
+`offsite` (ADR 0006: an offsite node reboot is CRITICAL, manual and needs an
+agreed recovery path, so NOS does not offer it) and for a remote whose site
+is still unset, even when the remote has an action token. Mark offsite hosts
+such as `ProxmoxOFS1` `offsite`.
+
 ## Listing remotes
 
 ```sh
 nebula pve remote list
 ```
 
-Metadata only (ID, kind, state, pin prefix with generation, endpoints, read
-credential reference and version, updated time). It never prints secrets and
+Metadata only (ID, kind, site, state, pin prefix with generation, endpoints,
+read credential reference and version, updated time). It never prints secrets and
 works while the vault is locked.
 
 ## What the collector reads

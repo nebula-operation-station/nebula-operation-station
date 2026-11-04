@@ -94,6 +94,11 @@ var (
 	// ErrPveStepRunning is returned when a step's task is still running
 	// when the wait ends; reconciliation observes it later.
 	ErrPveStepRunning = errors.New("executor: pve mutation step still running; reconciling later")
+	// ErrPveRunExpired is returned when the run's context ended before the
+	// next step was recorded or sent (or, for a provisioning, before the
+	// final guest read): nothing more is dispatched, the steps recorded so
+	// far keep their durable states, and the target did not change.
+	ErrPveRunExpired = errors.New("executor: pve mutation run ended before the next step was sent")
 	// ErrPveJobStore is returned when the durable job record could not be
 	// written; nothing more is dispatched.
 	ErrPveJobStore = errors.New("executor: pve job record unavailable")
@@ -231,6 +236,21 @@ type PveMutations struct {
 	// durable state (PveProvisioner implements it). Provisioning steps are
 	// never identified without it.
 	TaskIDs PveJobTaskIDs
+	// RebootPollInterval is the node read interval while waiting for a
+	// rebooted node to return. Default 10 s.
+	RebootPollInterval time.Duration
+	// RebootMaxWait bounds the wait for a rebooted node to return, from the
+	// step's intent; after it the outcome is unknown. Default 20 min.
+	RebootMaxWait time.Duration
+	// RebootEvacuationWait bounds how long a node reboot Run waits for HA
+	// to move the guests its approval lists for HA evacuation off the node
+	// before anything is authorized or sent. Default 15 min.
+	RebootEvacuationWait time.Duration
+
+	// rebootMu guards rebooting: the remotes with a node reboot Run in
+	// progress (at most one node of a remote at a time).
+	rebootMu  sync.Mutex
+	rebooting map[string]bool
 
 	// powerBindings are the guest power and snapshot bindings of this
 	// engine when the service has none shared with the authority (see
@@ -267,6 +287,36 @@ func (m *PveMutations) inflightRuns(executionID string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.inflight[executionID]
+}
+
+// lockNodeReboot reserves remoteID for one node reboot Run; false if a
+// reboot of the remote is already running in this engine.
+func (m *PveMutations) lockNodeReboot(remoteID string) (func(), bool) {
+	m.rebootMu.Lock()
+	defer m.rebootMu.Unlock()
+	if m.rebooting[remoteID] {
+		return nil, false
+	}
+	if m.rebooting == nil {
+		m.rebooting = make(map[string]bool)
+	}
+	m.rebooting[remoteID] = true
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.rebootMu.Lock()
+			defer m.rebootMu.Unlock()
+			delete(m.rebooting, remoteID)
+		})
+	}, true
+}
+
+// nodeRebootRunning reports whether a node reboot Run of remoteID is in
+// progress in this engine.
+func (m *PveMutations) nodeRebootRunning(remoteID string) bool {
+	m.rebootMu.Lock()
+	defer m.rebootMu.Unlock()
+	return m.rebooting[remoteID]
 }
 
 func (m *PveMutations) running(executionID string) bool {
@@ -532,6 +582,9 @@ func (m *PveMutations) taskType(step PveMutationStep) (string, error) {
 	} else if mTT, isMigrate := GuestMigrateStepTaskType(step.Method); isMigrate {
 		_, client := m.Client.(PveMigrateClient)
 		tt, ok = mTT, client
+	} else if rTT, isReboot := NodeRebootStepTaskType(step.Method); isReboot {
+		_, client := m.Client.(PveNodeRebootClient)
+		tt, ok = rTT, client
 	} else {
 		tt, ok = m.Client.TaskType(step.Method)
 	}
@@ -590,6 +643,14 @@ func (m *PveMutations) dispatch(ctx context.Context, rm executordb.PveRemote, no
 			return "", fmt.Errorf("dispatch %s: %w", step.Method, ErrPveRejected)
 		}
 		return mc.DispatchMigrate(ctx, rm, node, step, action, read)
+	}
+	if nodeRebootStep(step) {
+		rc, ok := m.Client.(PveNodeRebootClient)
+		if !ok {
+			return "", fmt.Errorf("dispatch %s: %w", step.Method, ErrPveRejected)
+		}
+		// A node reboot creates no task: success returns no UPID.
+		return "", rc.DispatchNodeReboot(ctx, rm, node, step, action, read)
 	}
 	return m.Client.Dispatch(ctx, rm, node, step, action)
 }
@@ -712,6 +773,12 @@ func (m *PveMutations) Run(ctx context.Context, req PveMutationRequest) (PveMuta
 			m.log().Info("audit", "kind", "pve_mutation_permit_released", "remote", t.RemoteID, "execution", claim.ExecutionID, "reason", "target busy")
 			res.PermitConsumed = false
 		}
+		if n == 1 && errors.Is(err, ErrPveRunExpired) && claim.Release("run ended") {
+			// Nothing was recorded or sent: the run ended before its first
+			// step. The approval stays usable for a later run.
+			m.log().Info("audit", "kind", "pve_mutation_permit_released", "remote", t.RemoteID, "execution", claim.ExecutionID, "reason", "run ended")
+			res.PermitConsumed = false
+		}
 		recorded, serr := m.DB.PveJobSteps(claim.ExecutionID)
 		if serr != nil {
 			// What was recorded is unknown: stop and report a store
@@ -734,6 +801,13 @@ func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, 
 	// Lock or revocation since authorization stops undispatched work.
 	if err := claim.Check(); err != nil {
 		return ErrPveMutationDenied
+	}
+	// A run whose context ended (the caller's deadline, or the shortened
+	// run context of a provisioning) records and sends nothing more; a
+	// request sent with a dead context would only leave an uncertain step.
+	if ctx.Err() != nil {
+		m.logRunExpired(t, claim.ExecutionID, n)
+		return ErrPveRunExpired
 	}
 	rm, ok, err := m.DB.GetRemote(t.RemoteID)
 	if err != nil {
@@ -767,6 +841,12 @@ func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, 
 		// Identity and state are read again right before the intent: a
 		// guest that changed since authorization gets nothing.
 		live, err := m.Client.TargetState(ctx, rm, t.Kind, t.Node, t.VMID, readTok)
+		if err != nil && ctx.Err() != nil {
+			// The read failed because the run ended, not because the
+			// target changed: nothing is recorded or sent.
+			m.logRunExpired(t, claim.ExecutionID, n)
+			return ErrPveRunExpired
+		}
 		if err != nil || !sameLiveTarget(live, t) {
 			m.log().Warn("audit", "kind", "pve_mutation_target_changed", "remote", t.RemoteID, "node", t.Node, "vmid", t.VMID, "execution", claim.ExecutionID, "step", n)
 			return ErrPveTargetChanged
@@ -779,6 +859,12 @@ func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, 
 		}
 		if liveCheck != nil {
 			if err := liveCheck(ctx, rm, live, readTok); err != nil {
+				if ctx.Err() != nil {
+					// The check failed because the run ended, not because
+					// a precondition failed: nothing is recorded or sent.
+					m.logRunExpired(t, claim.ExecutionID, n)
+					return ErrPveRunExpired
+				}
 				m.log().Warn("audit", "kind", "pve_mutation_precondition", "remote", t.RemoteID, "node", t.Node, "vmid", t.VMID, "execution", claim.ExecutionID, "step", n)
 				return err
 			}
@@ -809,6 +895,18 @@ func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, 
 		_ = m.DB.FinishPveJob(claim.ExecutionID, n, executordb.PveJobFailed, "refused by the remote")
 		return ErrPveStepFailed
 	}
+	if nodeRebootStep(step) {
+		// No task to match, sent or possibly sent: the step is observed
+		// through the node's return, never sent again.
+		if err := m.DB.MarkPveJobReconciling(claim.ExecutionID, n); err != nil {
+			return ErrPveJobStore
+		}
+		stored, ok, err := m.DB.PveJob(claim.ExecutionID, n)
+		if err != nil || !ok {
+			return ErrPveJobStore
+		}
+		return m.awaitNodeReboot(ctx, rm, stored, readTok)
+	}
 	if err != nil {
 		// Lost response: never retry, identify the task instead.
 		return m.reconcileLost(ctx, rm, job, readTok, &step)
@@ -831,6 +929,11 @@ func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, 
 	}
 	job.UPID, job.TaskNode = upid, u.Node
 	return m.await(ctx, rm, job, readTok)
+}
+
+// logRunExpired records that a run ended before step n was recorded.
+func (m *PveMutations) logRunExpired(t permit.ProviderMutationTarget, executionID string, n int) {
+	m.log().Warn("audit", "kind", "pve_mutation_run_expired", "remote", t.RemoteID, "node", t.Node, "vmid", t.VMID, "execution", executionID, "step", n)
 }
 
 // reconcileLost handles a step whose dispatch outcome is unknown.
@@ -981,14 +1084,11 @@ func (m *PveMutations) identify(ctx context.Context, rm executordb.PveRemote, jo
 // await polls the task of a step with a stored UPID until it stops, the
 // wait bound passes or ctx ends (the step then stays open).
 func (m *PveMutations) await(ctx context.Context, rm executordb.PveRemote, job executordb.PveJob, read pveapi.TokenSupplier) error {
-	interval, maxWait := m.PollInterval, m.MaxWait
+	interval := m.PollInterval
 	if interval <= 0 {
 		interval = pveTaskPollInterval
 	}
-	if maxWait <= 0 {
-		maxWait = pveTaskMaxWait
-	}
-	deadline := m.now().Add(maxWait)
+	deadline := m.now().Add(m.taskMaxWait())
 	for {
 		done, err := m.observe(ctx, rm, job, read)
 		if done || err != nil {
@@ -1003,6 +1103,15 @@ func (m *PveMutations) await(ctx context.Context, rm executordb.PveRemote, job e
 		case <-time.After(interval):
 		}
 	}
+}
+
+// taskMaxWait is how long a Run waits for one step's task (MaxWait, or
+// pveTaskMaxWait when unset).
+func (m *PveMutations) taskMaxWait() time.Duration {
+	if m.MaxWait > 0 {
+		return m.MaxWait
+	}
+	return pveTaskMaxWait
 }
 
 // observe reads a step's task once and records a terminal state.
@@ -1085,6 +1194,13 @@ func (m *PveMutations) Reconcile(ctx context.Context) error {
 		}
 		read, err := m.readToken(rm)
 		if err != nil {
+			continue
+		}
+		if job.Action == PveNodeRebootAction {
+			// A node reboot has no task: it is observed through the node.
+			if err := m.reconcileNodeReboot(ctx, rm, job, read); errors.Is(err, ErrPveJobStore) {
+				return err
+			}
 			continue
 		}
 		if job.UPID == "" {

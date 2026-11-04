@@ -292,3 +292,112 @@ func TestMutationRedirectIsMaybeSentNeverFailsOver(t *testing.T) {
 		t.Fatalf("read followed the redirect: %d", fastHits.Load())
 	}
 }
+
+// lateTransport hands over the real response only after the attempt
+// context has ended: the race in which the standard transport delivers a
+// response that arrived as the attempt deadline fired. It wraps the late
+// response body in trackedBody so the test can assert that the transport
+// closed it and released the connection.
+type lateTransport struct {
+	inner  http.RoundTripper
+	closed atomic.Bool
+}
+
+func (l *lateTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := l.inner.RoundTrip(r)
+	if err != nil {
+		return nil, err
+	}
+	resp.Body = &trackedBody{rc: resp.Body, closed: &l.closed}
+	<-r.Context().Done()
+	return resp, nil
+}
+
+// trackedBody records that its Close was called, so a test can assert a
+// discarded response body was closed and its connection released.
+type trackedBody struct {
+	rc     io.ReadCloser
+	closed *atomic.Bool
+}
+
+// Read implements io.Reader.
+func (b *trackedBody) Read(p []byte) (int, error) { return b.rc.Read(p) }
+
+// Close implements io.Closer.
+func (b *trackedBody) Close() error {
+	b.closed.Store(true)
+	return b.rc.Close()
+}
+
+// TestLateResponseIsATimeout: a response handed over after the attempt
+// deadline is never a success. A mutation reports ErrMaybeSent and is not
+// resent; a safe request fails over like any other timeout.
+func TestLateResponseIsATimeout(t *testing.T) {
+	for _, tc := range []struct {
+		method       string
+		wantMaybe    bool
+		wantFastHits int64
+	}{
+		{http.MethodPost, true, 0},
+		{http.MethodDelete, true, 0},
+		{http.MethodGet, false, 1},
+	} {
+		t.Run(tc.method, func(t *testing.T) {
+			ca := newTestCA(t, "pve-root-ca")
+			var slowHits, fastHits atomic.Int64
+			slow := newTLSServer(t, ca.serverCert(t, leafSpec{ips: []net.IP{loopback}}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				slowHits.Add(1)
+				_, _ = w.Write([]byte("slow-body"))
+			}))
+			fast := newTLSServer(t, ca.serverCert(t, leafSpec{ips: []net.IP{loopback}}), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fastHits.Add(1)
+				_, _ = w.Write([]byte("fast-body"))
+			}))
+			rt, err := newRoundTripper(Options{
+				Trust:     Trust{CA: ca.cert},
+				Endpoints: []*url.URL{mustParseURL(t, slow.URL), mustParseURL(t, fast.URL)},
+				Timeout:   200 * time.Millisecond,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			late := &lateTransport{inner: rt.endpoints[0].transport}
+			rt.endpoints[0].transport = late
+			req, err := http.NewRequest(tc.method, slow.URL+"/api2/json/nodes/pve1/qemu/100/status/stop", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := rt.RoundTrip(req)
+			if tc.wantMaybe {
+				if err == nil {
+					resp.Body.Close()
+					t.Fatal("late response to a mutation returned as success")
+				}
+				if !errors.Is(err, ErrMaybeSent) {
+					t.Fatalf("err = %v, want ErrMaybeSent", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("safe request: err = %v, want failover success", err)
+				}
+				body, err := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if err != nil {
+					t.Fatalf("read failover body: %v", err)
+				}
+				if string(body) != "fast-body" {
+					t.Fatalf("failover result body = %q, want the second endpoint's body", body)
+				}
+			}
+			if !late.closed.Load() {
+				t.Fatal("late response body was not closed: its connection would leak")
+			}
+			if got := slowHits.Load(); got != 1 {
+				t.Fatalf("first endpoint hits = %d, want 1", got)
+			}
+			if got := fastHits.Load(); got != tc.wantFastHits {
+				t.Fatalf("second endpoint hits = %d, want %d", got, tc.wantFastHits)
+			}
+		})
+	}
+}

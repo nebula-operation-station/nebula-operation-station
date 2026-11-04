@@ -17,7 +17,7 @@
   <p class="status status--error">PVE unavailable</p>
   {{end}}
   <ul class="chart__hosts">
-    {{range .Chart.PVENodes}}
+    {{range $n := .Chart.PVENodes}}
     <li class="chart__node {{.WorstClass}}">
       <details class="chart__details"{{if .Expanded}} open{{end}}>
         <summary class="chart__box chart__box--node" title="{{.StateReason}}">
@@ -29,6 +29,7 @@
           {{template "chart_lines" .Lines}}
         </summary>
         <div class="chart__children">
+          {{if $.DeployHere .RemoteID}}<p class="chart__deploy"><a class="button button--small" href="{{.DeployURL}}">Deploy here</a></p>{{end}}
           <p class="chart__pveupd chart__pveupd--node">{{template "chart_updates" .}}</p>
           <ul class="chart__list">
             {{range .Guests}}
@@ -38,6 +39,27 @@
               <span class="chart__vmid">VM {{.VMID}}</span>
               {{template "chart_lines" .Lines}}
               <span class="chart__pveupd">{{template "chart_updates" .}}</span>
+              {{with $.PowerFor $n.RemoteID .VMID}}
+              <section class="chart__dpanel-sec chart__gpower" aria-label="Power">
+                <h4 class="chart__dpanel-h">Power</h4>
+                <p class="chart__dpanel-src">{{.KindLabel}} {{.VMID}} on node {{.Node}}</p>
+                {{$p := .}}
+                {{range .Verbs}}
+                <form method="post" action="/pve/guests/power" class="chart__gpower-form" data-fetch>
+                  <input type="hidden" name="remote" value="{{$p.RemoteID}}">
+                  <input type="hidden" name="vmid" value="{{$p.VMID}}">
+                  <input type="hidden" name="generation" value="{{$p.Generation}}">
+                  <input type="hidden" name="node" value="{{$p.Node}}">
+                  <input type="hidden" name="kind" value="{{$p.Kind}}">
+                  <input type="hidden" name="verb" value="{{.Verb}}">
+                  <button type="submit" class="button button--small{{if .Destructive}} button--danger{{else}} button--secondary{{end}}">{{.Label}}</button>
+                </form>
+                {{else}}
+                <p class="chart__unknown">{{.Note}}</p>
+                {{end}}
+                {{if .Verbs}}<p class="hint">Each button only proposes; the next page shows the exact guest and the risk the executor decided before you approve.</p>{{end}}
+              </section>
+              {{end}}
             </li>
             {{end}}
             {{range .Storages}}

@@ -103,6 +103,8 @@ const (
 	ExecutorService_ReviewBatch_FullMethodName                     = "/nebula.executor.v1.ExecutorService/ReviewBatch"
 	ExecutorService_ApproveBatchCLI_FullMethodName                 = "/nebula.executor.v1.ExecutorService/ApproveBatchCLI"
 	ExecutorService_GetBatchStatus_FullMethodName                  = "/nebula.executor.v1.ExecutorService/GetBatchStatus"
+	ExecutorService_GetBatchCredentialVersions_FullMethodName      = "/nebula.executor.v1.ExecutorService/GetBatchCredentialVersions"
+	ExecutorService_RunBatchMember_FullMethodName                  = "/nebula.executor.v1.ExecutorService/RunBatchMember"
 	ExecutorService_ReviewBuiltinTrust_FullMethodName              = "/nebula.executor.v1.ExecutorService/ReviewBuiltinTrust"
 	ExecutorService_CommitBuiltinTrust_FullMethodName              = "/nebula.executor.v1.ExecutorService/CommitBuiltinTrust"
 	ExecutorService_UnpinBuiltinVersion_FullMethodName             = "/nebula.executor.v1.ExecutorService/UnpinBuiltinVersion"
@@ -114,6 +116,7 @@ const (
 	ExecutorService_RotatePVEToken_FullMethodName                  = "/nebula.executor.v1.ExecutorService/RotatePVEToken"
 	ExecutorService_RemovePVERemote_FullMethodName                 = "/nebula.executor.v1.ExecutorService/RemovePVERemote"
 	ExecutorService_ListPVEAdminRemotes_FullMethodName             = "/nebula.executor.v1.ExecutorService/ListPVEAdminRemotes"
+	ExecutorService_SetPVERemoteSite_FullMethodName                = "/nebula.executor.v1.ExecutorService/SetPVERemoteSite"
 	ExecutorService_ProposePVERepin_FullMethodName                 = "/nebula.executor.v1.ExecutorService/ProposePVERepin"
 	ExecutorService_CommitPVERepin_FullMethodName                  = "/nebula.executor.v1.ExecutorService/CommitPVERepin"
 	ExecutorService_ProposePVEGuestPower_FullMethodName            = "/nebula.executor.v1.ExecutorService/ProposePVEGuestPower"
@@ -430,6 +433,24 @@ type ExecutorServiceClient interface {
 	// Role: server, admin. Confirms the batch is approved and fresh, with the
 	// parent/member linkage. The server polls this before dispatch.
 	GetBatchStatus(ctx context.Context, in *GetBatchStatusRequest, opts ...grpc.CallOption) (*GetBatchStatusResponse, error)
+	// Role: server, admin. Read-only. Returns the executor's current version
+	// of each named SSH credential reference, so the server binds exact
+	// versions into a batch plan (canonical BatchMember.credential_versions).
+	// Versions and public-key fingerprints only, never key material.
+	// Unimplemented while no batch authority is configured (like the other
+	// batch RPCs); FailedPrecondition while the keyring is locked; NotFound
+	// for a reference that is not loaded.
+	GetBatchCredentialVersions(ctx context.Context, in *GetBatchCredentialVersionsRequest, opts ...grpc.CallOption) (*GetBatchCredentialVersionsResponse, error)
+	// Role: server. Runs one member of an approved batch exactly once (ADR
+	// 0007 E11). The request names only the parent digest and the member ID;
+	// the executor takes everything that runs from the frozen plan, claims
+	// the member's single-use permit (stage, dependency and same-host gates),
+	// records the intent durably, re-checks trust, risk and credential
+	// versions immediately before the target and then runs it attached. A
+	// refusal before the claim is an error status and nothing ran; once the
+	// member is claimed every outcome is a response and the member is never
+	// run again. At most one batch member runs per target at a time.
+	RunBatchMember(ctx context.Context, in *RunBatchMemberRequest, opts ...grpc.CallOption) (*RunBatchMemberResponse, error)
 	// Built-in trust (ADR 0007, E19c). The executor reads the built-in bundle
 	// from its locally configured, verified NOS release directory; no request
 	// names a path, a bundle or bytes. Bulk trust is local-admin only: there is
@@ -463,6 +484,9 @@ type ExecutorServiceClient interface {
 	RotatePVEToken(ctx context.Context, in *RotatePVETokenRequest, opts ...grpc.CallOption) (*RotatePVETokenResponse, error)
 	RemovePVERemote(ctx context.Context, in *RemovePVERemoteRequest, opts ...grpc.CallOption) (*RemovePVERemoteResponse, error)
 	ListPVEAdminRemotes(ctx context.Context, in *ListPVEAdminRemotesRequest, opts ...grpc.CallOption) (*ListPVEAdminRemotesResponse, error)
+	// Records where a remote is (onsite or offsite). Unset means unknown;
+	// node reboot refuses an offsite or unset remote (ADR 0006 P2-01).
+	SetPVERemoteSite(ctx context.Context, in *SetPVERemoteSiteRequest, opts ...grpc.CallOption) (*SetPVERemoteSiteResponse, error)
 	// Proposes a HIGH permit bound to current trust, endpoints and credentials.
 	ProposePVERepin(ctx context.Context, in *ProposePVERepinRequest, opts ...grpc.CallOption) (*ProposePVERepinResponse, error)
 	CommitPVERepin(ctx context.Context, in *CommitPVERepinRequest, opts ...grpc.CallOption) (*CommitPVERepinResponse, error)
@@ -1348,6 +1372,26 @@ func (c *executorServiceClient) GetBatchStatus(ctx context.Context, in *GetBatch
 	return out, nil
 }
 
+func (c *executorServiceClient) GetBatchCredentialVersions(ctx context.Context, in *GetBatchCredentialVersionsRequest, opts ...grpc.CallOption) (*GetBatchCredentialVersionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetBatchCredentialVersionsResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_GetBatchCredentialVersions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) RunBatchMember(ctx context.Context, in *RunBatchMemberRequest, opts ...grpc.CallOption) (*RunBatchMemberResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RunBatchMemberResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_RunBatchMember_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *executorServiceClient) ReviewBuiltinTrust(ctx context.Context, in *ReviewBuiltinTrustRequest, opts ...grpc.CallOption) (*ReviewBuiltinTrustResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ReviewBuiltinTrustResponse)
@@ -1452,6 +1496,16 @@ func (c *executorServiceClient) ListPVEAdminRemotes(ctx context.Context, in *Lis
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListPVEAdminRemotesResponse)
 	err := c.cc.Invoke(ctx, ExecutorService_ListPVEAdminRemotes_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) SetPVERemoteSite(ctx context.Context, in *SetPVERemoteSiteRequest, opts ...grpc.CallOption) (*SetPVERemoteSiteResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetPVERemoteSiteResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_SetPVERemoteSite_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1907,6 +1961,24 @@ type ExecutorServiceServer interface {
 	// Role: server, admin. Confirms the batch is approved and fresh, with the
 	// parent/member linkage. The server polls this before dispatch.
 	GetBatchStatus(context.Context, *GetBatchStatusRequest) (*GetBatchStatusResponse, error)
+	// Role: server, admin. Read-only. Returns the executor's current version
+	// of each named SSH credential reference, so the server binds exact
+	// versions into a batch plan (canonical BatchMember.credential_versions).
+	// Versions and public-key fingerprints only, never key material.
+	// Unimplemented while no batch authority is configured (like the other
+	// batch RPCs); FailedPrecondition while the keyring is locked; NotFound
+	// for a reference that is not loaded.
+	GetBatchCredentialVersions(context.Context, *GetBatchCredentialVersionsRequest) (*GetBatchCredentialVersionsResponse, error)
+	// Role: server. Runs one member of an approved batch exactly once (ADR
+	// 0007 E11). The request names only the parent digest and the member ID;
+	// the executor takes everything that runs from the frozen plan, claims
+	// the member's single-use permit (stage, dependency and same-host gates),
+	// records the intent durably, re-checks trust, risk and credential
+	// versions immediately before the target and then runs it attached. A
+	// refusal before the claim is an error status and nothing ran; once the
+	// member is claimed every outcome is a response and the member is never
+	// run again. At most one batch member runs per target at a time.
+	RunBatchMember(context.Context, *RunBatchMemberRequest) (*RunBatchMemberResponse, error)
 	// Built-in trust (ADR 0007, E19c). The executor reads the built-in bundle
 	// from its locally configured, verified NOS release directory; no request
 	// names a path, a bundle or bytes. Bulk trust is local-admin only: there is
@@ -1940,6 +2012,9 @@ type ExecutorServiceServer interface {
 	RotatePVEToken(context.Context, *RotatePVETokenRequest) (*RotatePVETokenResponse, error)
 	RemovePVERemote(context.Context, *RemovePVERemoteRequest) (*RemovePVERemoteResponse, error)
 	ListPVEAdminRemotes(context.Context, *ListPVEAdminRemotesRequest) (*ListPVEAdminRemotesResponse, error)
+	// Records where a remote is (onsite or offsite). Unset means unknown;
+	// node reboot refuses an offsite or unset remote (ADR 0006 P2-01).
+	SetPVERemoteSite(context.Context, *SetPVERemoteSiteRequest) (*SetPVERemoteSiteResponse, error)
 	// Proposes a HIGH permit bound to current trust, endpoints and credentials.
 	ProposePVERepin(context.Context, *ProposePVERepinRequest) (*ProposePVERepinResponse, error)
 	CommitPVERepin(context.Context, *CommitPVERepinRequest) (*CommitPVERepinResponse, error)
@@ -2251,6 +2326,12 @@ func (UnimplementedExecutorServiceServer) ApproveBatchCLI(context.Context, *Appr
 func (UnimplementedExecutorServiceServer) GetBatchStatus(context.Context, *GetBatchStatusRequest) (*GetBatchStatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetBatchStatus not implemented")
 }
+func (UnimplementedExecutorServiceServer) GetBatchCredentialVersions(context.Context, *GetBatchCredentialVersionsRequest) (*GetBatchCredentialVersionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetBatchCredentialVersions not implemented")
+}
+func (UnimplementedExecutorServiceServer) RunBatchMember(context.Context, *RunBatchMemberRequest) (*RunBatchMemberResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RunBatchMember not implemented")
+}
 func (UnimplementedExecutorServiceServer) ReviewBuiltinTrust(context.Context, *ReviewBuiltinTrustRequest) (*ReviewBuiltinTrustResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReviewBuiltinTrust not implemented")
 }
@@ -2283,6 +2364,9 @@ func (UnimplementedExecutorServiceServer) RemovePVERemote(context.Context, *Remo
 }
 func (UnimplementedExecutorServiceServer) ListPVEAdminRemotes(context.Context, *ListPVEAdminRemotesRequest) (*ListPVEAdminRemotesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListPVEAdminRemotes not implemented")
+}
+func (UnimplementedExecutorServiceServer) SetPVERemoteSite(context.Context, *SetPVERemoteSiteRequest) (*SetPVERemoteSiteResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetPVERemoteSite not implemented")
 }
 func (UnimplementedExecutorServiceServer) ProposePVERepin(context.Context, *ProposePVERepinRequest) (*ProposePVERepinResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ProposePVERepin not implemented")
@@ -3826,6 +3910,42 @@ func _ExecutorService_GetBatchStatus_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_GetBatchCredentialVersions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetBatchCredentialVersionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).GetBatchCredentialVersions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_GetBatchCredentialVersions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).GetBatchCredentialVersions(ctx, req.(*GetBatchCredentialVersionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_RunBatchMember_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RunBatchMemberRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).RunBatchMember(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_RunBatchMember_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).RunBatchMember(ctx, req.(*RunBatchMemberRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ExecutorService_ReviewBuiltinTrust_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ReviewBuiltinTrustRequest)
 	if err := dec(in); err != nil {
@@ -4020,6 +4140,24 @@ func _ExecutorService_ListPVEAdminRemotes_Handler(srv interface{}, ctx context.C
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ExecutorServiceServer).ListPVEAdminRemotes(ctx, req.(*ListPVEAdminRemotesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_SetPVERemoteSite_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetPVERemoteSiteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).SetPVERemoteSite(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_SetPVERemoteSite_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).SetPVERemoteSite(ctx, req.(*SetPVERemoteSiteRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -4630,6 +4768,14 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _ExecutorService_GetBatchStatus_Handler,
 		},
 		{
+			MethodName: "GetBatchCredentialVersions",
+			Handler:    _ExecutorService_GetBatchCredentialVersions_Handler,
+		},
+		{
+			MethodName: "RunBatchMember",
+			Handler:    _ExecutorService_RunBatchMember_Handler,
+		},
+		{
 			MethodName: "ReviewBuiltinTrust",
 			Handler:    _ExecutorService_ReviewBuiltinTrust_Handler,
 		},
@@ -4672,6 +4818,10 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListPVEAdminRemotes",
 			Handler:    _ExecutorService_ListPVEAdminRemotes_Handler,
+		},
+		{
+			MethodName: "SetPVERemoteSite",
+			Handler:    _ExecutorService_SetPVERemoteSite_Handler,
 		},
 		{
 			MethodName: "ProposePVERepin",

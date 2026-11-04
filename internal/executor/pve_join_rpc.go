@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -157,6 +158,9 @@ func pveJoinStatus(err error) error {
 // role).
 func (s *Service) ProposeGuestJoin(ctx context.Context, in *pb.ProposeGuestJoinRequest) (*pb.ProposeGuestJoinResponse, error) {
 	g, h := in.GetGuest(), in.GetHost()
+	if err := s.checkPveTrustFence("pve guest join", g.GetRemoteId()); err != nil {
+		return nil, err
+	}
 	p, err := s.pveGuestJoin().Propose(ctx, PveGuestJoinRequest{RemoteID: g.GetRemoteId(), Node: g.GetNode(),
 		VMID: g.GetVmid(), Generation: g.GetGeneration(), GuestName: g.GetGuestName(), GuestUUID: g.GetGuestUuid(), HostID: h.GetHostId(),
 		Endpoint: h.GetEndpoint(), SSHUser: h.GetSshUser(), CredentialRef: h.GetCredentialRef()})
@@ -173,6 +177,9 @@ func (s *Service) CommitGuestJoin(ctx context.Context, in *pb.CommitGuestJoinReq
 	d, err := canonical.ParseDigest(in.GetExecutionDigest())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if err := s.checkPveTrustFence("pve guest join", in.GetGuest().GetRemoteId()); err != nil {
+		return nil, err
 	}
 	c, err := s.pveGuestJoin().Commit(ctx, d, in.GetHost(), in.GetGuest(), in.GetJoinMethod())
 	if err != nil {
@@ -199,22 +206,8 @@ func (a pveGuestAgentAPI) client(ctx context.Context, rm executordb.PveRemote, c
 	if cred == nil {
 		return nil, nil, nil, errors.New("executor: guest read: no credential")
 	}
-	release, err := a.s.pveRead.acquire(ctx, rm.RemoteID)
+	hc, watch, base, release, err := a.s.pveReaderConn(ctx, rm)
 	if err != nil {
-		return nil, nil, nil, err
-	}
-	trust, err := a.s.pveReadTrust(ctx, rm)
-	if errors.Is(err, errPveReadTrust) {
-		release()
-		return nil, nil, nil, a.s.blockPveRead(rm.RemoteID)
-	}
-	if err != nil {
-		release()
-		return nil, nil, nil, err
-	}
-	hc, watch, base, err := pveReadHTTP(rm, trust, a.s.clock)
-	if err != nil {
-		release()
 		return nil, nil, nil, err
 	}
 	c, err := pveapi.New(base, hc, cred, pveapi.WithTimeout(pveReadRequestTimeout))
@@ -226,12 +219,43 @@ func (a pveGuestAgentAPI) client(ctx context.Context, rm executordb.PveRemote, c
 }
 
 // checkTrust blocks the remote when a request of the read failed trust
-// verification.
+// verification (pveReaderTrustFailed).
 func (a pveGuestAgentAPI) checkTrust(rm executordb.PveRemote, watch *pveTrustWatch) error {
 	if watch.failed.Load() {
-		return a.s.blockPveRead(rm.RemoteID)
+		return a.s.pveReaderTrustFailed(rm)
 	}
 	return nil
+}
+
+// pveReaderConn builds the pinned HTTP client of one provisioning or
+// guest join read of rm and returns it with its trust watch, base URL and
+// the release of the remote's request slot. The trust comes from
+// pveReadTrust, so a fenced trust is refused before any connection; a
+// trust failure blocks rm like every other connection
+// (pveReaderTrustFailed).
+func (s *Service) pveReaderConn(ctx context.Context, rm executordb.PveRemote) (*http.Client, *pveTrustWatch, string, func(), error) {
+	if err := s.pveTrustFenceGate(rm); err != nil {
+		return nil, nil, "", nil, err
+	}
+	release, err := s.pveRead.acquire(ctx, rm.RemoteID)
+	if err != nil {
+		return nil, nil, "", nil, err
+	}
+	trust, err := s.pveReadTrust(ctx, rm)
+	if errors.Is(err, errPveReadTrust) {
+		release()
+		return nil, nil, "", nil, s.pveReaderTrustFailed(rm)
+	}
+	if err != nil {
+		release()
+		return nil, nil, "", nil, err
+	}
+	hc, watch, base, err := pveReadHTTP(rm, trust, s.clock)
+	if err != nil {
+		release()
+		return nil, nil, "", nil, err
+	}
+	return hc, watch, base, release, nil
 }
 
 // LiveGuest implements PveGuestAgentReader.

@@ -7,7 +7,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -135,5 +138,102 @@ func TestCommandIsFixed(t *testing.T) {
 	a, _ := hostrun.Command(execID)
 	if !strings.HasPrefix(a, "exec /bin/sh -c '") || strings.Count(a, execID) != 1 {
 		t.Fatalf("command %q", a)
+	}
+}
+
+// A run that outlives its attached session (timeout, the remote process
+// detached from the killed process group) is reported as possibly still
+// running, and RunVisible sees it until it ends.
+func TestRunVisibleAfterTimeout(t *testing.T) {
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skip("needs setsid")
+	}
+	c := client(t)
+	if running, err := hostrun.RunVisible(context.Background(), c, execID); err != nil || running {
+		t.Fatalf("before the run: %v %v", running, err)
+	}
+	stop := filepath.Join(t.TempDir(), "stop")
+	r := run(t, c, `{}`, `setsid /bin/sh -c 'until [ -e "$1" ]; do sleep 0.1; done' sh `+stop+` </dev/null >/dev/null 2>&1 & sleep 30; echo '{}'`,
+		300*time.Millisecond)
+	if r.Class != hostrun.ClassExecutionTimeout || !r.RemoteMayRun {
+		t.Fatalf("timed-out run: %+v", r)
+	}
+	if running, err := hostrun.RunVisible(context.Background(), c, execID); err != nil || !running {
+		t.Fatalf("detached remote process not seen: %v %v", running, err)
+	}
+	if err := os.WriteFile(stop, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		running, err := hostrun.RunVisible(context.Background(), c, execID)
+		if err == nil && !running {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("remote process still reported after it ended: %v %v", running, err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if r := run(t, c, `{}`, `echo '{}'`, 0); r.RemoteMayRun {
+		t.Fatalf("finished run reported as possibly running: %+v", r)
+	}
+	if _, err := hostrun.RunVisible(context.Background(), c, "not-a-uuid"); err == nil {
+		t.Fatal("invalid execution ID accepted")
+	}
+}
+
+// The visibility check fails closed: without a working tr it cannot read
+// the processes and reports ErrVisibilityUnknown, never "not running".
+// It does not depend on grep.
+func TestRunVisibleFailsClosed(t *testing.T) {
+	tr, err := exec.LookPath("tr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := func(t *testing.T, files map[string]string) string {
+		d := t.TempDir()
+		for name, body := range files {
+			if err := os.WriteFile(filepath.Join(d, name), []byte(body), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return d
+	}
+	for name, tc := range map[string]struct {
+		files map[string]string
+		ok    bool
+	}{
+		"tr absent":            {files: map[string]string{}},
+		"tr fails":             {files: map[string]string{"tr": "#!/bin/sh\nexit 1\n"}},
+		"tr prints nothing":    {files: map[string]string{"tr": "#!/bin/sh\nexit 0\n"}},
+		"grep absent, tr real": {files: map[string]string{"tr": "#!/bin/sh\nexec " + tr + " \"$@\"\n"}, ok: true},
+		"grep fails, tr real": {files: map[string]string{"tr": "#!/bin/sh\nexec " + tr + " \"$@\"\n", "grep": "#!/bin/sh\nexit 2\n"},
+			ok: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// The test host runs commands with this process's environment.
+			t.Setenv("PATH", stub(t, tc.files))
+			c := client(t)
+			running, err := hostrun.RunVisible(context.Background(), c, execID)
+			if tc.ok {
+				if err != nil || running {
+					t.Fatalf("running %v err %v", running, err)
+				}
+				return
+			}
+			if !errors.Is(err, hostrun.ErrVisibilityUnknown) {
+				t.Fatalf("running %v err %v, want ErrVisibilityUnknown", running, err)
+			}
+		})
+	}
+}
+
+// A remote shell killed by a signal may leave children running.
+func TestKilledBySignalMayRun(t *testing.T) {
+	c := client(t)
+	r := run(t, c, `{}`, `kill -KILL $PPID; sleep 1`, 0)
+	if r.Class != hostrun.ClassScriptInterrupted || !strings.Contains(r.Detail, "signal") || !r.RemoteMayRun {
+		t.Fatalf("%+v", r)
 	}
 }

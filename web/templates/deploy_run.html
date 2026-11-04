@@ -1,0 +1,186 @@
+{{define "content"}}{{$d := .DeployRun}}
+<h1>Deployment {{$d.Form.Name}}</h1>
+{{template "deploy_tabs" .}}
+<section class="panel" aria-label="Run state">
+  <ol class="tabs" aria-label="Deployment states">
+    {{range $d.States}}<li class="tab{{if eq .Class "current"}} tab--active{{end}}" data-state="{{.Class}}">{{if eq .Class "done"}}✓ {{end}}{{.Label}}</li>
+    {{end}}
+  </ol>
+  <p>State: <span class="badge {{$d.StateClass}}" id="deploy-state">{{$d.State}}</span></p>
+  {{if $d.Message}}<p class="status {{if eq $d.State "joined"}}status--warning{{else}}status--error{{end}}">{{$d.Message}}</p>{{end}}
+</section>
+
+{{if $d.Mismatch}}
+<section class="panel" role="alert" aria-label="Binding mismatch">
+  <h2 class="status status--error">The executor bound something other than what was requested — approval withheld</h2>
+  <ul>
+    {{range $d.Mismatch}}<li class="status status--error">{{.}}</li>
+    {{end}}
+  </ul>
+  <p>Do not approve this digest on the executor host either. Start a new deployment.</p>
+</section>
+{{end}}
+
+<section class="panel" aria-label="Frozen plan">
+  <h2>Frozen plan</h2>
+  <dl class="kv">
+    <dt>Effective risk (decided by the executor)</dt><dd><span class="badge {{$d.RiskClass}}" id="deploy-risk">{{$d.Risk}}</span>
+      <span class="hint">pve.guest.provision is MEDIUM at least; the executor raises it to HIGH while the remote's or node's criticality is unset (spec 11). The staged plan below is risk-rated again by the executor at its batch approval.</span></dd>
+    <dt>Target</dt><dd>remote <span class="mono">{{$d.Form.Remote}}</span>, node <span class="mono">{{$d.Form.Node}}</span>, storage <span class="mono">{{$d.Form.Storage}}</span></dd>
+    <dt>New guest</dt><dd><strong class="mono">{{$d.Form.Name}}</strong>, VMID <span class="mono">{{$d.VMID}}</span> (reserved by the executor), inventory host <span class="mono">{{$d.Form.Name}}</span> ({{$d.Form.Environment}})</dd>
+    <dt>OS</dt><dd>image <span class="mono">{{$d.Form.Image}}</span>, template VMID <span class="mono">{{$d.Form.TemplateVMID}}</span>, image SHA-256 <span class="mono">{{$d.Form.TemplateSHA256}}</span></dd>
+    <dt>Size</dt><dd>{{$d.Size}}</dd>
+    <dt>Network</dt><dd>bridge <span class="mono">{{$d.Form.Bridge}}</span>{{if $d.Form.VLAN}} VLAN {{$d.Form.VLAN}}{{end}}; {{$d.IP}}{{if $d.Gateway}}, gateway <span class="mono">{{$d.Gateway}}</span>{{end}}</dd>
+    {{if $d.Form.Nameservers}}<dt>DNS</dt><dd>{{range $i, $n := $d.Form.Nameservers}}{{if $i}}, {{end}}<span class="mono">{{$n}}</span>{{end}}{{if $d.Form.SearchDomain}}; search {{$d.Form.SearchDomain}}{{end}}</dd>{{end}}
+    <dt>Access</dt><dd>cloud-init user <span class="mono">{{$d.Form.CIUser}}</span> with the NOS automation key; {{if $d.Form.PasswordID}}guest password <span class="mono">{{$d.Form.PasswordID}}</span> from the executor vault{{else}}no password (SSH keys only){{end}}</dd>
+    {{if $d.Form.ProfileSlug}}<dt>Profile</dt><dd><a href="/deploy/{{$d.Form.ProfileSlug}}?version={{$d.Form.ProfileVersion}}">{{$d.Form.ProfileSlug}} v{{$d.Form.ProfileVersion}}</a></dd>{{end}}
+    {{if $d.ExecutionID}}<dt>Execution</dt><dd class="mono">{{$d.ExecutionID}}</dd>{{end}}
+    {{if not $d.Bound.Expiry.IsZero}}<dt>Request expires</dt><dd>{{timeTag $d.Bound.Expiry}}</dd>{{end}}
+    <dt>Digest</dt><dd class="mono">{{$d.Digest}}</dd>
+  </dl>
+  {{if $d.Warnings}}
+  <h3>Capacity warnings (do not change the risk)</h3>
+  <ul>{{range $d.Warnings}}<li class="status status--warning">{{.}}</li>{{end}}</ul>
+  {{end}}
+  <h3>After enrollment: staged plan (one batch approval, stop on the first failure)</h3>
+  {{if $d.Plan}}
+  <table class="table" id="deploy-plan">
+    <thead><tr><th>Stage</th><th>Step</th><th>Action</th><th>Version</th><th>Declared risk</th><th>Parameters</th></tr></thead>
+    <tbody>
+      {{range $d.Plan}}<tr><td>{{.Stage}}</td><td>{{.Kind}}: {{.Title}}</td><td class="mono">{{.ActionID}}</td><td class="mono">{{.Version}}</td><td>{{.Risk}}</td><td class="mono">{{.ParamText}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}<p>No bootstrap modules or runbooks in the batch.</p>{{end}}
+  {{if $d.Separate}}
+  <p class="status status--warning">Not part of the batch:</p>
+  <ul id="deploy-separate">{{range $d.Separate}}<li><span class="mono">{{.ActionID}} {{.Version}}</span>: {{.Separate}}</li>{{end}}</ul>
+  {{end}}
+  <details><summary>Exact canonical request (its SHA-256 is the digest)</summary>
+    <pre class="mono">{{$d.Bound.Canonical}}</pre>
+  </details>
+
+  {{if eq $d.State "proposed"}}
+  {{if $d.Expired}}
+  <p class="status status--error">The executor's bound request has expired: it can no longer be approved. Start a new deployment.</p>
+  {{else if $d.Approving}}
+  <p class="status">Approval in progress…</p>
+  {{else if $d.CLICommand}}
+  <div class="actions">
+    {{if $d.TypedCount}}<p>The executor raised this provisioning to {{$d.Risk}}: it needs the typed number of targets, which only the CLI asks for.</p>
+    {{else}}<p>This executor is in hardened mode. Approve the provisioning on the executor host; the command shows the complete request first:</p>{{end}}
+    <pre class="mono">{{$d.CLICommand}}</pre>
+    <form method="post" action="/deployments/run" class="inline-form" data-fetch>
+      <input type="hidden" name="id" value="{{$d.ID}}">
+      <button type="submit" class="button">Run the approved provisioning</button>
+    </form>
+  </div>
+  {{else if $d.Options}}
+  <div class="actions">
+    {{if not $d.ChallengeExpiry.IsZero}}<p class="hint">Approve before {{timeTag $d.ChallengeExpiry}}.</p>{{end}}
+    <button type="button" class="button schedule-approve" data-id="{{$d.ID}}" data-options="{{$d.Options}}" data-commit="/deployments/approve">Approve provisioning of {{$d.Form.Name}} (VMID {{$d.VMID}}) on {{$d.Form.Node}} with security key</button>
+  </div>
+  {{end}}
+  {{end}}
+</section>
+
+{{if $d.Steps}}
+<section class="panel" aria-label="Provisioning steps">
+  <h2>Provisioning steps</h2>
+  <table class="table" id="deploy-steps">
+    <thead><tr><th>Step state</th><th>Task</th><th>UPID</th></tr></thead>
+    <tbody>
+      {{range $d.Steps}}<tr><td>{{.State}}</td><td class="mono">{{.TaskType}}</td><td class="mono">{{.UPID}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  <p>{{if $d.TaskLink}}<a href="{{$d.TaskLink}}" rel="noopener noreferrer" target="_blank">PVE tasks of node {{$d.Form.Node}}</a>{{end}}{{if $d.GuestLink}} · <a href="{{$d.GuestLink}}" rel="noopener noreferrer" target="_blank">guest {{$d.VMID}} in PVE</a>{{end}}</p>
+  {{if $d.GuestKept}}<p class="status status--warning">The guest is left in PVE for inspection. Deleting it is a separate HIGH action, never automatic.</p>{{end}}
+</section>
+{{else if or (eq $d.State "approved") (eq $d.State "creating")}}
+<section class="panel" aria-label="Provisioning steps"><p class="status">The executor is creating the guest (clone, configuration, disk resize, start) and waits for each PVE task. Reload this page for the result.</p></section>
+{{end}}
+
+{{if eq $d.State "booting"}}
+<section class="panel" aria-label="Enrollment">
+  <h2>Enrollment</h2>
+  <p>The guest was created and started. Once it has booted and the PVE inventory has observed it, propose its enrollment: the executor reads the SSH host key the guest presents and shows its fingerprint for review.</p>
+  <form method="post" action="/deployments/join" class="inline-form" data-fetch>
+    <input type="hidden" name="id" value="{{$d.ID}}">
+    {{if $d.NeedEndpoint}}<label>Guest IP address (DHCP lease) <input type="text" name="endpoint" maxlength="45" required class="mono"></label>{{end}}
+    <button type="submit" class="button">Propose the enrollment</button>
+  </form>
+</section>
+{{end}}
+
+{{with $d.Join}}
+<section class="panel" aria-label="Fingerprint review">
+  <h2>Enrollment: fingerprint review</h2>
+  {{if .Mismatch}}
+  <ul role="alert">{{range .Mismatch}}<li class="status status--error">{{.}}</li>{{end}}</ul>
+  <p class="status status--error">Approval withheld. Propose the enrollment again.</p>
+  {{end}}
+  <dl class="kv">
+    <dt>Host key fingerprint</dt><dd><strong class="mono" id="deploy-fingerprint">{{.Fingerprint}}</strong> ({{.KeyType}})</dd>
+    <dt>How the key was read</dt><dd>{{if eq .Method "agent"}}reported by the guest agent over the pinned PVE channel{{else}}<strong>review</strong>: compare the fingerprint with the guest's console output (cloud-init prints its host keys) before approving{{if .AgentDetail}} — {{.AgentDetail}}{{end}}{{end}}</dd>
+    <dt>Host</dt><dd><span class="mono">{{.HostID}}</span> at <span class="mono">{{.Endpoint}}</span>, user <span class="mono">{{.SSHUser}}</span>, credential <span class="mono">{{.CredentialRef}}</span></dd>
+    <dt>Guest</dt><dd>VMID <span class="mono">{{$d.VMID}}</span>, incarnation generation {{.Generation}}</dd>
+    <dt>Risk (decided by the executor)</dt><dd><span class="badge {{.RiskClass}}">{{.Risk}}</span></dd>
+    <dt>Digest</dt><dd class="mono">{{.Digest}}</dd>
+  </dl>
+  {{if .Approving}}
+  <p class="status">Enrollment in progress…</p>
+  {{else if .CLICommand}}
+  <pre class="mono">{{.CLICommand}}</pre>
+  <form method="post" action="/deployments/join/run" class="inline-form" data-fetch>
+    <input type="hidden" name="id" value="{{$d.ID}}">
+    <button type="submit" class="button">Enroll with the CLI-approved key</button>
+  </form>
+  {{else if .Options}}
+  <div class="actions">
+    <button type="button" class="button schedule-approve" data-id="{{$d.ID}}" data-options="{{.Options}}" data-commit="/deployments/join/approve">The fingerprint matches: approve and pin it with security key</button>
+  </div>
+  {{end}}
+  {{if not .Approving}}
+  <form method="post" action="/deployments/join" class="inline-form" data-fetch>
+    <input type="hidden" name="id" value="{{$d.ID}}">
+    {{if $d.NeedEndpoint}}<input type="hidden" name="endpoint" value="{{.Endpoint}}">{{end}}
+    <button type="submit" class="button button--small">Read the key again</button>
+  </form>
+  {{end}}
+</section>
+{{end}}
+
+{{with $d.Joined}}
+<section class="panel" aria-label="Enrolled host">
+  <h2>Enrolled</h2>
+  <p>Inventory host <a href="/hosts/{{.Host.ID}}">{{.Host.ID}}</a> is linked to guest {{.Link.VMID}} (generation {{.Link.Generation}}) with the pinned key <span class="mono" id="deploy-pinned">{{.Fingerprint}}</span> ({{.JoinMethod}}).</p>
+</section>
+{{end}}
+
+{{if eq $d.State "joined"}}
+<section class="panel" aria-label="Staged plan">
+  <h2>Bootstrap and runbooks</h2>
+  <p class="status status--warning" id="deploy-no-batches">Bootstrap steps not available: this server has no batch planner, so the staged plan above was not proposed or run. The guest is enrolled; run the plan's steps as separate operations on the host page.</p>
+</section>
+{{else if eq $d.State "bootstrapping"}}
+<section class="panel" aria-label="Staged plan">
+  <h2>Bootstrap and runbooks</h2>
+  {{if $d.BatchID}}
+  <p>The staged plan is batch <a href="/batches/{{$d.BatchID}}" class="mono">{{$d.BatchID}}</a>: approve it once there; it runs stage by stage and stops on the first failure.{{with $d.Batch}} Status: {{.Summary}} ({{.Counts.Success}} of {{.Counts.Total}} succeeded{{if .Counts.Failed}}, {{.Counts.Failed}} failed{{end}}).{{end}}</p>
+  {{else}}
+  {{if $d.BatchError}}<p class="status status--error">{{$d.BatchError}}</p>{{end}}
+  <form method="post" action="/deployments/plan" class="inline-form" data-fetch>
+    <input type="hidden" name="id" value="{{$d.ID}}">
+    <button type="submit" class="button">Propose the staged plan for batch approval</button>
+  </form>
+  {{end}}
+</section>
+{{else if $d.BatchID}}
+<section class="panel" aria-label="Staged plan">
+  <h2>Bootstrap and runbooks</h2>
+  <p>Batch <a href="/batches/{{$d.BatchID}}" class="mono">{{$d.BatchID}}</a>{{with $d.Batch}}: {{.Summary}} ({{.Counts.Success}} of {{.Counts.Total}} succeeded{{if .Counts.Failed}}, {{.Counts.Failed}} failed{{end}}{{if .Counts.NotExecuted}}, {{.Counts.NotExecuted}} not executed{{end}}){{end}}.</p>
+</section>
+{{end}}
+<p id="message" class="message" role="status" aria-live="polite"></p>
+{{end}}

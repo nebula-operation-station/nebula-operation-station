@@ -1,0 +1,4 @@
+[
+  {"ifname":"vethdeadbeef01","vlans":[{"vlan":1,"flags":["PVID","Egress Untagged"]}]},
+  {"ifname":"vethcafe123456","vlans":[{"vlan":1,"flags":["PVID","Egress Untagged"]},{"vlan":200}]}
+]

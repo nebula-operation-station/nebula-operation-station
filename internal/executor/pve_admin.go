@@ -470,6 +470,18 @@ type PveAdmin struct {
 	// remote's credentials or trust. Nil revokes nothing (tests); the
 	// executor service wires permit.Authority.RevokeProviderGrants.
 	RevokeGrants func(remoteID, reason string) error
+	// TrustGate, if set, refuses a connection to a registered remote
+	// whose trust is fenced (Service.pveTrustFenceGate). Token rotation
+	// calls it before it opens a secret or connects. Re-pin and the probe
+	// of new endpoints do not: they only fetch the presented chain
+	// credential-free, and re-pin is the way out of a fenced trust.
+	TrustGate func(executordb.PveRemote) error
+	// TrustFailed, if set, handles a trust failure that token rotation
+	// detects on a registered remote (Service.pveTrustFailed: block keyed
+	// by pin and trust generation, revocation, fence when the block
+	// cannot be recorded). Nil blocks the remote directly
+	// (blockTrustFailure).
+	TrustFailed func(executordb.PveRemote) error
 	// Mutations is the engine that runs this executor's PVE mutations.
 	// CloseOpenJobs requires it and never closes a step of a run still
 	// in flight there.
@@ -713,6 +725,11 @@ func (a *PveAdmin) RotateToken(ctx context.Context, in PveRotateToken) (executor
 	if rm.State != executordb.StateActive {
 		return executordb.PveRemote{}, fmt.Errorf("executor: pve rotate token: %w: %s is %s", executordb.ErrRemoteState, in.RemoteID, rm.State)
 	}
+	if a.TrustGate != nil {
+		if err := a.TrustGate(rm); err != nil {
+			return executordb.PveRemote{}, fmt.Errorf("executor: pve rotate token: %w", err)
+		}
+	}
 	metadataToken := in.Token
 	otherRef := rm.Credentials.ActionRef
 	if in.Purpose == PvePurposeAction {
@@ -734,20 +751,20 @@ func (a *PveAdmin) RotateToken(ctx context.Context, in PveRotateToken) (executor
 	res, err := a.probeFn()(ctx, rm.Endpoints)
 	if err != nil {
 		if errors.Is(err, pvetransport.ErrTrustMismatch) {
-			return executordb.PveRemote{}, a.blockTrustFailure(rm.RemoteID, in.By, err)
+			return executordb.PveRemote{}, a.rotateTrustFailure(rm, in.By, err)
 		}
 		return executordb.PveRemote{}, err
 	}
 	pin, trust, err := res.TrustIdentity(rm.Kind)
 	if err != nil {
-		return executordb.PveRemote{}, a.blockTrustFailure(rm.RemoteID, in.By, ErrPvePinMismatch)
+		return executordb.PveRemote{}, a.rotateTrustFailure(rm, in.By, ErrPvePinMismatch)
 	}
 	if pin != rm.TrustPin {
-		return executordb.PveRemote{}, a.blockTrustFailure(rm.RemoteID, in.By, ErrPvePinMismatch)
+		return executordb.PveRemote{}, a.rotateTrustFailure(rm, in.By, ErrPvePinMismatch)
 	}
 	if err := a.validateTokenFn(in.Purpose, metadataToken)(ctx, rm.Endpoints, trust, in.Token); err != nil {
 		if errors.Is(err, pvetransport.ErrTrustMismatch) {
-			return executordb.PveRemote{}, a.blockTrustFailure(rm.RemoteID, in.By, pvetransport.ErrTrustMismatch)
+			return executordb.PveRemote{}, a.rotateTrustFailure(rm, in.By, pvetransport.ErrTrustMismatch)
 		}
 		return executordb.PveRemote{}, err
 	}
@@ -769,6 +786,19 @@ func (a *PveAdmin) RotateToken(ctx context.Context, in PveRotateToken) (executor
 	return rm, nil
 }
 
+// rotateTrustFailure handles a trust failure (cause) that token rotation
+// detected on rm, through TrustFailed when set, and returns cause joined
+// with the failing step of the block.
+func (a *PveAdmin) rotateTrustFailure(rm executordb.PveRemote, by string, cause error) error {
+	if a.TrustFailed == nil {
+		return a.blockTrustFailure(rm.RemoteID, by, cause)
+	}
+	if err := a.TrustFailed(rm); err != nil {
+		return errors.Join(cause, err)
+	}
+	return cause
+}
+
 func (a *PveAdmin) blockTrustFailure(remoteID, by string, cause error) error {
 	if _, err := a.DB.BlockRemote(remoteID, "pve trust verification failed", by); err != nil {
 		return fmt.Errorf("executor: persist pve trust block: %w", errors.Join(cause, err))
@@ -778,6 +808,32 @@ func (a *PveAdmin) blockTrustFailure(remoteID, by string, cause error) error {
 	}
 	a.log().Warn("pve remote blocked", "remote", remoteID, "reason", "trust verification failed")
 	return cause
+}
+
+// PveSetSite records where a remote is.
+type PveSetSite struct {
+	// RemoteID is the remote to mark.
+	RemoteID string
+	// Site is executordb.SiteOnsite or executordb.SiteOffsite.
+	Site string
+	// By is the authenticated admin identity.
+	By string
+}
+
+// SetSite records the admin-set site marker of a remote that is not
+// removed. A node reboot of an offsite remote, or of one whose site is not
+// set, is refused (ADR 0006: an offsite node reboot is CRITICAL, manual
+// and needs an agreed recovery path, which NOS does not provide).
+func (a *PveAdmin) SetSite(ctx context.Context, in PveSetSite) (executordb.PveRemote, error) {
+	if err := a.checkDB(); err != nil {
+		return executordb.PveRemote{}, err
+	}
+	rm, err := a.DB.SetRemoteSite(in.RemoteID, in.Site, in.By)
+	if err != nil {
+		return executordb.PveRemote{}, fmt.Errorf("executor: pve remote site: %w", err)
+	}
+	a.log().Info("audit", "kind", "pve_remote_site", "remote", in.RemoteID, "site", in.Site, "by", in.By)
+	return rm, nil
 }
 
 // PveRemove carries one `pve remote remove` request.

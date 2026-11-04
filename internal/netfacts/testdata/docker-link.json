@@ -1,0 +1,8 @@
+[
+  {"ifindex":1,"ifname":"lo","address":"00:00:00:00:00:00","mtu":65536,"qdisc":"noqueue"},
+  {"ifindex":2,"ifname":"eth0","address":"08:00:27:aa:bb:cc","mtu":1500,"qdisc":"fq_codel"},
+  {"ifindex":4,"ifname":"docker0","address":"02:42:ac:11:00:01","mtu":1500,"linkinfo":{"info_kind":"bridge"}},
+  {"ifindex":6,"ifname":"br-1a2b3c4d5e6f","address":"02:42:ac:12:00:01","mtu":1500,"linkinfo":{"info_kind":"bridge"}},
+  {"ifindex":8,"ifname":"vethdeadbeef01","address":"02:42:ac:11:00:02","mtu":1500,"master":"docker0","linkinfo":{"info_kind":"veth"}},
+  {"ifindex":10,"ifname":"vethcafe123456","address":"02:42:ac:12:00:02","mtu":1500,"master":"br-1a2b3c4d5e6f","linkinfo":{"info_kind":"veth"}}
+]

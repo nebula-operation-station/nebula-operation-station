@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -78,15 +79,85 @@ type pveMutationClient struct {
 	secrets pveSecrets
 	// now is the clock for certificate validity.
 	now func() time.Time
-	// block persistently blocks a remote that failed trust verification
-	// (Service.blockPveRead: registry block plus revocation of its
-	// provider grants and mutation permits), as the read path does. Nil
-	// only in tests that do not exercise trust failures.
-	block func(remoteID string)
+	// block persistently blocks a remote whose trust rm (pin and trust
+	// generation) failed verification (Service.pveTrustFailed: registry
+	// block plus revocation of its provider grants and mutation permits,
+	// and the trust fence when the block cannot be recorded), as every
+	// other connection does. Nil only in tests that do not exercise trust
+	// failures.
+	block func(rm executordb.PveRemote)
 }
 
 var _ PveMutationClient = (*pveMutationClient)(nil)
 var _ PveStepTaskIDer = (*pveMutationClient)(nil)
+
+// pveTrustKey is one trust of a remote: its pin and the trust generation
+// it was approved under. An admin re-pin always raises the generation.
+type pveTrustKey struct {
+	pin        string
+	generation uint64
+}
+
+func pveTrustKeyOf(rm executordb.PveRemote) pveTrustKey {
+	return pveTrustKey{pin: rm.TrustPin, generation: rm.TrustGeneration}
+}
+
+// pveTrustFence holds, per remote, the trust that failed verification but
+// whose block could not be recorded in the registry. It fences exactly
+// that trust: a remote record of the failed generation (or an older,
+// stale record) is covered; a record of a newer generation means an admin
+// re-pinned the remote since, and drops the entry. The fence is in memory
+// only: after a restart the pin check fails again on the next connection
+// and the block is retried there.
+type pveTrustFence struct {
+	mu     sync.Mutex
+	failed map[string]pveTrustKey // remote ID -> failed trust
+}
+
+// add fences the trust of rm. An entry of a newer generation is kept: it
+// covers rm's older record too.
+func (f *pveTrustFence) add(rm executordb.PveRemote) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failed == nil {
+		f.failed = map[string]pveTrustKey{}
+	}
+	if k, ok := f.failed[rm.RemoteID]; ok && k.generation > rm.TrustGeneration {
+		return
+	}
+	f.failed[rm.RemoteID] = pveTrustKeyOf(rm)
+}
+
+// covers reports whether rm is fenced and returns the fenced trust. A
+// record of the failed generation is fenced also if its pin differs (that
+// cannot come from a re-pin, so it fails closed). A record of a newer
+// generation drops the entry and is not fenced. A nil fence covers
+// nothing.
+func (f *pveTrustFence) covers(rm executordb.PveRemote) (pveTrustKey, bool) {
+	if f == nil {
+		return pveTrustKey{}, false
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k, ok := f.failed[rm.RemoteID]
+	if !ok {
+		return pveTrustKey{}, false
+	}
+	if rm.TrustGeneration > k.generation {
+		delete(f.failed, rm.RemoteID)
+		return pveTrustKey{}, false
+	}
+	return k, true
+}
+
+// remove drops the entry of remoteID if it still fences k.
+func (f *pveTrustFence) remove(remoteID string, k pveTrustKey) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failed[remoteID] == k {
+		delete(f.failed, remoteID)
+	}
+}
 
 // pveStepFamily is the dispatcher a step method belongs to.
 type pveStepFamily int
@@ -189,7 +260,7 @@ func (c *pveMutationClient) conn(ctx context.Context, rm executordb.PveRemote) (
 // blockRemote blocks rm after a trust failure seen by this client.
 func (c *pveMutationClient) blockRemote(rm executordb.PveRemote) {
 	if c.block != nil {
-		c.block(rm.RemoteID)
+		c.block(rm)
 	}
 }
 
@@ -436,6 +507,17 @@ func pveNodeTargetState(ctx context.Context, hc *http.Client, base string, read 
 // HTTP 200, at most pveMutationMaxReadBytes and valid UTF-8 JSON. Errors
 // carry no remote text.
 func pveGetData(ctx context.Context, hc *http.Client, base string, read pveapi.TokenSupplier, path string, q url.Values, out any) error {
+	_, err := pveGet(ctx, hc, base, read, path, q, false, out)
+	return err
+}
+
+// pveGetOptionalData is pveGetData for an endpoint that may not exist on
+// the remote's version: HTTP 404 reports found false and decodes nothing.
+func pveGetOptionalData(ctx context.Context, hc *http.Client, base string, read pveapi.TokenSupplier, path string, out any) (bool, error) {
+	return pveGet(ctx, hc, base, read, path, nil, true, out)
+}
+
+func pveGet(ctx context.Context, hc *http.Client, base string, read pveapi.TokenSupplier, path string, q url.Values, optional bool, out any) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, pveMutationRequestTimeout)
 	defer cancel()
 	u := base + "/api2/json" + path
@@ -444,25 +526,28 @@ func pveGetData(ctx context.Context, hc *http.Client, base string, read pveapi.T
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return errPveMutationRead
+		return false, errPveMutationRead
 	}
 	tok, err := read(ctx)
 	if err != nil || tok == "" {
-		return errPveMutationRead
+		return false, errPveMutationRead
 	}
 	req.Header.Set("Authorization", tok)
 	req.Header.Set("Accept", "application/json")
 	resp, err := hc.Do(req)
 	if err != nil {
 		if errors.Is(err, pvetransport.ErrTrustMismatch) {
-			return fmt.Errorf("%w: %w", errPveMutationRead, errPveReadTrust)
+			return false, fmt.Errorf("%w: %w", errPveMutationRead, errPveReadTrust)
 		}
-		return errPveMutationRead
+		return false, errPveMutationRead
 	}
 	defer resp.Body.Close()
+	if optional && resp.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, pveMutationMaxReadBytes+1))
 	if err != nil || resp.StatusCode != http.StatusOK || len(raw) > pveMutationMaxReadBytes || !utf8.Valid(raw) {
-		return errPveMutationRead
+		return false, errPveMutationRead
 	}
 	var env struct {
 		Data json.RawMessage `json:"data"`
@@ -470,12 +555,12 @@ func pveGetData(ctx context.Context, hc *http.Client, base string, read pveapi.T
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	if err := dec.Decode(&env); err != nil || len(env.Data) == 0 || strings.TrimSpace(string(env.Data)) == "null" {
-		return errPveMutationRead
+		return false, errPveMutationRead
 	}
 	dd := json.NewDecoder(bytes.NewReader(env.Data))
 	dd.UseNumber()
 	if err := dd.Decode(out); err != nil {
-		return errPveMutationRead
+		return false, errPveMutationRead
 	}
-	return nil
+	return true, nil
 }

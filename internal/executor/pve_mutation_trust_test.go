@@ -10,12 +10,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveapi"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvetransport"
@@ -27,10 +29,10 @@ type blockRecorder struct {
 	ids []string
 }
 
-func (b *blockRecorder) block(id string) {
+func (b *blockRecorder) block(rm executordb.PveRemote) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.ids = append(b.ids, id)
+	b.ids = append(b.ids, rm.RemoteID)
 }
 
 func (b *blockRecorder) take() []string {
@@ -130,9 +132,39 @@ func (c badDispatchClient) Dispatch(ctx context.Context, rm executordb.PveRemote
 	return c.dispatch.Dispatch(ctx, rm, node, step, action)
 }
 
-// adminBlock blocks a remote the way Service.blockPveRead does.
-func adminBlock(a *PveAdmin) func(string) {
-	return func(id string) { _ = a.blockTrustFailure(id, "executor", errPveReadTrust) }
+// adminBlock blocks a remote the way Service.blockPveMutation does.
+func adminBlock(a *PveAdmin) func(executordb.PveRemote) {
+	return func(rm executordb.PveRemote) { _ = a.blockTrustFailure(rm.RemoteID, "executor", errPveReadTrust) }
+}
+
+// liveRevoke wires the admin revocation of e to its authority as the
+// executor does (Service.pveAdmin: mutation permits and provider grants)
+// and records the remotes it was called for.
+func liveRevoke(e *powerEnv) *recordingRevoke {
+	rec := &recordingRevoke{}
+	e.pe.admin.RevokeGrants = func(remoteID, reason string) error {
+		if err := rec.call(remoteID, reason); err != nil {
+			return err
+		}
+		e.auth.RevokeProviderMutations(remoteID, reason)
+		_, err := e.auth.RevokeProviderGrants(remoteID, reason)
+		return err
+	}
+	return rec
+}
+
+// assertAuthorityRevoked fails unless the provider grants and mutation
+// permits of remote were revoked: a block that only changed the remote's
+// state leaves them live. It consumes the remaining mutation permits of
+// remote.
+func assertAuthorityRevoked(t *testing.T, rec *recordingRevoke, auth *permit.Authority, remote string) {
+	t.Helper()
+	if len(rec.reasons) == 0 || !strings.HasPrefix(rec.reasons[0], remote+" ") {
+		t.Fatalf("revocations = %v, want one of %s", rec.reasons, remote)
+	}
+	if n := auth.RevokeProviderMutations(remote, "test probe"); n != 0 {
+		t.Fatalf("%d mutation permits of the blocked remote still live", n)
+	}
 }
 
 func remoteState(t *testing.T, db *executordb.DB, id string) string {
@@ -150,6 +182,7 @@ func remoteState(t *testing.T, db *executordb.DB, id string) string {
 // refused before any write.
 func TestGuestPowerPinMismatchDuringDispatchBlocksRemote(t *testing.T) {
 	e, f, c := prodPowerEnv(t, "qemu")
+	rec := liveRevoke(e)
 	c.block = adminBlock(e.pe.admin)
 	bad := testMutClient(makeTestChain(t))
 	bad.block = c.block
@@ -163,6 +196,8 @@ func TestGuestPowerPinMismatchDuringDispatchBlocksRemote(t *testing.T) {
 	if got := remoteState(t, e.pe.db, mutRemote); got != executordb.StateBlocked {
 		t.Fatalf("remote state = %s, want blocked", got)
 	}
+	// The approved permit of the next mutation was revoked with the block.
+	assertAuthorityRevoked(t, rec, e.auth, mutRemote)
 	// Further mutations are refused, also with the correct pin again.
 	e.g.Mutations.Client = c
 	if _, err := e.g.Run(context.Background(), next); err == nil {
@@ -182,11 +217,13 @@ func TestGuestPowerPinMismatchDuringDispatchBlocksRemote(t *testing.T) {
 // decided from the untrusted remote, and further mutations are refused.
 func TestGuestPowerPinMismatchDuringReconcileBlocksRemote(t *testing.T) {
 	e, f, c := prodPowerEnv(t, "qemu")
+	rec := liveRevoke(e)
 	c.block = adminBlock(e.pe.admin)
 	f.mu.Lock()
 	f.hang = true
 	f.mu.Unlock()
 	req := e.approve(powerReq("qemu", PveGuestPowerStop))
+	e.approve(powerReq("qemu", PveGuestPowerShutdown)) // live until the block
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	res, err := e.g.Run(ctx, req)
 	cancel()
@@ -201,10 +238,14 @@ func TestGuestPowerPinMismatchDuringReconcileBlocksRemote(t *testing.T) {
 	c.trust = func(context.Context, executordb.PveRemote) (pvetransport.Trust, error) {
 		return pvetransport.Trust{CA: other.ca}, nil
 	}
+	if len(rec.reasons) != 0 {
+		t.Fatalf("revoked before the trust failure: %v", rec.reasons)
+	}
 	_ = e.g.Mutations.Reconcile(context.Background())
 	if got := remoteState(t, e.pe.db, mutRemote); got != executordb.StateBlocked {
 		t.Fatalf("remote state = %s, want blocked", got)
 	}
+	assertAuthorityRevoked(t, rec, e.auth, mutRemote)
 	steps, err := e.pe.db.PveJobSteps(res.ExecutionID)
 	if err != nil || len(steps) != 1 || steps[0].State != executordb.PveJobReconciling {
 		t.Fatalf("steps %+v %v", steps, err)

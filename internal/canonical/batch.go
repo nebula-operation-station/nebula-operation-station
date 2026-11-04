@@ -346,6 +346,11 @@ func normalizeBatchMember(m BatchMember, now time.Time) (BatchMember, error) {
 
 const maxBatchExactInteger = 1<<53 - 1
 
+// MaxCredentialVersion is the largest credential version a batch member can
+// bind: batch integers must round-trip exactly through the RFC 8785 double
+// model. Valid versions are 1..MaxCredentialVersion.
+const MaxCredentialVersion uint64 = maxBatchExactInteger
+
 func validImageDigest(s string) bool {
 	return strings.HasPrefix(s, "sha256:") && hex64.MatchString(strings.TrimPrefix(s, "sha256:"))
 }

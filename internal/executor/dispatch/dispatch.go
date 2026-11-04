@@ -48,6 +48,12 @@ const (
 // retried.
 var ErrAlreadyDispatched = errors.New("dispatch: run already dispatched")
 
+// ErrCredentialRotated means the member binds another version of a
+// credential than the executor holds now (the key was rotated between
+// approval and dispatch), or the current version could not be read. The
+// run ends as OutcomeNotExecuted and needs a fresh plan.
+var ErrCredentialRotated = errors.New("dispatch: credential version changed since approval")
+
 // ErrNotClaimed means no live claimed permit exists for the member: it was
 // never claimed, or Lock, expiry, invalidation or a restart revoked it.
 var ErrNotClaimed = errors.New("dispatch: no claimed member permit")
@@ -142,6 +148,13 @@ type Options struct {
 	Log *slog.Logger
 	// Audit receives dispatch decisions.
 	Audit func(Event)
+	// Credentials returns the current version of the credential behind a
+	// reference (executor.Service.CredentialVersion). Immediately before
+	// the transport, every credential version the member binds is
+	// compared with it; a difference or a read error ends the run as
+	// OutcomeNotExecuted. Without it, a member that binds any credential
+	// version is never dispatched (fail closed).
+	Credentials func(ref string) (uint64, error)
 }
 
 // Dispatcher enforces single-use dispatch of claimed member runs. The
@@ -156,6 +169,7 @@ type Dispatcher struct {
 	now       func() time.Time
 	log       *slog.Logger
 	audit     func(Event)
+	creds     func(ref string) (uint64, error)
 	inFlight  map[string]bool
 }
 
@@ -180,6 +194,7 @@ func New(o Options) (*Dispatcher, error) {
 		now:       o.Now,
 		log:       o.Log,
 		audit:     o.Audit,
+		creds:     o.Credentials,
 		inFlight:  map[string]bool{},
 	}, nil
 }
@@ -207,7 +222,9 @@ func samePermit(mp batch.MemberPermit, run Run) bool {
 // revalidated, including trust and risk, so a Lock, expiry, invalidation or
 // trust/risk change in between ends the run as OutcomeNotExecuted with
 // ErrNotClaimed (wrapping batch.ErrInvalidated for a trust or risk
-// change). A second call for the same execution ID —
+// change). A credential the member binds whose current version differs
+// (rotated since approval) or cannot be read ends the run the same way
+// with ErrCredentialRotated. A second call for the same execution ID —
 // concurrent, or after any outcome, in this process or after a restart —
 // is refused with ErrAlreadyDispatched. An uncertain outcome comes back as
 // OutcomeUnknown with the transport error.
@@ -260,6 +277,11 @@ func (d *Dispatcher) Dispatch(ctx context.Context, parent canonical.Digest, memb
 		d.finish(octx, run, OutcomeNotExecuted)
 		return OutcomeNotExecuted, fmt.Errorf("%w: revoked before dispatch: %s", ErrNotClaimed, run.ExecutionID)
 	}
+	if detail, ok := d.credentialsCurrent(cur.Member); !ok {
+		d.audit(Event{Time: d.now(), Kind: "refused", ExecutionID: run.ExecutionID, Detail: detail})
+		d.finish(octx, run, OutcomeNotExecuted)
+		return OutcomeNotExecuted, fmt.Errorf("%w: %s: %s", ErrCredentialRotated, run.ExecutionID, detail)
+	}
 	outcome, err := d.transport(ctx, run)
 	switch {
 	case err != nil:
@@ -275,6 +297,25 @@ func (d *Dispatcher) Dispatch(ctx context.Context, parent canonical.Digest, memb
 		return outcome, fmt.Errorf("dispatch %s: %w", run.ExecutionID, err)
 	}
 	return outcome, nil
+}
+
+// credentialsCurrent compares every credential version the member binds
+// with the executor's current version. It returns a secret-free detail for
+// the audit when the member must not run.
+func (d *Dispatcher) credentialsCurrent(m canonical.BatchMember) (string, bool) {
+	for _, v := range m.CredentialVersions {
+		if d.creds == nil {
+			return "no credential source configured; credential " + v.Reference + " cannot be checked", false
+		}
+		cur, err := d.creds(v.Reference)
+		if err != nil {
+			return "credential " + v.Reference + " cannot be read", false
+		}
+		if cur != v.Version {
+			return fmt.Sprintf("credential %s rotated since approval (bound version %d, current %d)", v.Reference, v.Version, cur), false
+		}
+	}
+	return "", true
 }
 
 // finish records the terminal outcome and audits it. A recording failure

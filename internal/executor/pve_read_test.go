@@ -25,7 +25,6 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/vault"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
 )
 
@@ -45,6 +44,9 @@ type fakePVE struct {
 	bodies   map[string]string
 	requests atomic.Int64
 	badAuth  atomic.Int64
+	// conns counts accepted connections, including credential-free
+	// probes that never send a request.
+	conns atomic.Int64
 	// before runs before each response (lock/revoke while in flight).
 	before func()
 	// tokens maps a path to the only token it accepts (default: the read
@@ -93,6 +95,11 @@ func newFakePVE(t *testing.T, cert tls.Certificate) *fakePVE {
 		}
 		_, _ = fmt.Fprint(w, body)
 	}))
+	f.srv.Config.ConnState = func(_ net.Conn, st http.ConnState) {
+		if st == http.StateNew {
+			f.conns.Add(1)
+		}
+	}
 	f.srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
 	f.srv.StartTLS()
 	t.Cleanup(f.srv.Close)
@@ -140,9 +147,9 @@ func newPveReadEnv(t *testing.T, kind pvecontract.Kind) *pveReadEnv {
 	if err := e.svc.auth.ResumeReadDispatch(); err != nil {
 		t.Fatal(err)
 	}
-	e.svc.SetVaultParams(vault.MinParams)
+	e.svc.SetVaultParams(testVaultParams)
 	pass := []byte(strings.Repeat("correct-horse-battery-staple-", 4))
-	if err := e.svc.vault.Init(pass, vault.MinParams, "test"); err != nil {
+	if err := e.svc.vault.Init(pass, testVaultParams, "test"); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.svc.vault.Unlock(pass); err != nil {
