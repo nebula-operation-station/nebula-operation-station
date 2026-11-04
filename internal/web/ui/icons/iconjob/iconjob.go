@@ -389,9 +389,33 @@ func (s Spool) PendingJobs() ([]Job, map[string]error, error) {
 	return jobs, bad, nil
 }
 
-// FinishedJobs lists the IDs of jobs with a result file (server side).
+// FinishedJobs lists, sorted by ID, the IDs of jobs that have a result
+// file and whose job file is still in jobs/ (server side). The server
+// removes the job file once it has handled the result and never writes
+// results/, so a result without its job (already imported or cancelled)
+// is skipped here until the helper prunes it; it never takes a place in
+// the caller's per-run budget. The check is two directory listings, no
+// file is opened.
 func (s Spool) FinishedJobs() ([]string, error) {
-	return s.list(s.ResultsDir())
+	results, err := s.list(s.ResultsDir())
+	if err != nil {
+		return nil, err
+	}
+	jobs, err := s.list(s.JobsDir())
+	if err != nil {
+		return nil, err
+	}
+	queued := make(map[string]struct{}, len(jobs))
+	for _, id := range jobs {
+		queued[id] = struct{}{}
+	}
+	var ids []string
+	for _, id := range results {
+		if _, ok := queued[id]; ok {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
 }
 
 func (s Spool) list(dir string) ([]string, error) {
@@ -447,7 +471,9 @@ func (s Spool) ReadResult(id string) (Result, error) {
 }
 
 // PruneResults removes result files and stale temporary files older than
-// age (helper side; the server normally removes results on import).
+// age (helper side). It is the only cleanup of results/: the server reads
+// that directory but never writes it, and skips results whose job it has
+// already removed (see FinishedJobs).
 func (s Spool) PruneResults(age time.Duration, now time.Time) {
 	entries, err := os.ReadDir(s.ResultsDir())
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -143,6 +144,44 @@ func TestRunAllStopsOnCancelledContext(t *testing.T) {
 	cancel()
 	if err := r.runAll(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// TestRunAllBoundsWork floods the spool: every fetch queues another job.
+// Each round answers at most perRound jobs (oldest first) and runAll
+// gives up after rounds rounds.
+func TestRunAllBoundsWork(t *testing.T) {
+	r, s := newRunner(t, &fakeFetch{})
+	r.rounds, r.perRound = 4, 3
+	n := 0
+	queue := func() {
+		n++
+		if err := s.WriteJob(job(fmt.Sprintf("%032x", n), fmt.Sprintf("https://upload.wikimedia.org/%d.png", n), int64(n))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 4 {
+		queue()
+	}
+	var calls []string
+	r.fetch = func(_ context.Context, u string) ([]byte, error) {
+		calls = append(calls, u)
+		queue()
+		return nil, errors.New("not found")
+	}
+	if err := r.runAll(context.Background()); err == nil || !strings.Contains(err.Error(), "keep arriving") {
+		t.Fatalf("got %v", err)
+	}
+	if len(calls) != 4*3 {
+		t.Fatalf("%d fetches, want %d", len(calls), 4*3)
+	}
+	for i, u := range calls[:3] {
+		if want := fmt.Sprintf("https://upload.wikimedia.org/%d.png", i+1); u != want {
+			t.Fatalf("fetch %d: %s, want %s", i, u, want)
+		}
+	}
+	if rounds, perRound := (&runner{}).limits(); rounds != maxRounds || perRound != maxJobsPerRound {
+		t.Fatalf("default limits %d %d", rounds, perRound)
 	}
 }
 

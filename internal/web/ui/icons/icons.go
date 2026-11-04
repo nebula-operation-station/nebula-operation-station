@@ -165,6 +165,11 @@ func permanent(err error) bool {
 // job's catalog key. Failed and invalid results are audited. A job is
 // removed from the spool once handled; a transient error (database, disk)
 // leaves it for the next call and is returned.
+//
+// The server never writes results/ (only the helper prunes it, after a
+// day); removing the job file is what marks a result as handled.
+// FinishedJobs skips results without a job file before MaxImportPerRun
+// is applied, so old, already imported results never crowd out new ones.
 func (s *Service) ImportResults(ctx context.Context) (ImportReport, error) {
 	rep := ImportReport{Imported: map[string]string{}, Failed: map[string]string{}}
 	ids, err := s.spool.FinishedJobs()
@@ -181,7 +186,7 @@ func (s *Service) ImportResults(ctx context.Context) (ImportReport, error) {
 		}
 		j, err := s.spool.ReadJob(id)
 		if errors.Is(err, os.ErrNotExist) {
-			continue // already imported or cancelled; the helper prunes the result
+			continue // removed since the listing (imported or cancelled); the helper prunes the result
 		}
 		if err != nil {
 			// A job file the server cannot read back is not trusted for
@@ -285,6 +290,15 @@ func (s *Service) Rollback(ctx context.Context, actor string, subject softwareca
 		}
 		return err
 	}
-	s.audit(ctx, "icon_rolled_back", actor, "subject_kind", string(subject.Kind), "subject", subject.ID, "change", changeID)
+	attrs := []any{"subject_kind", string(subject.Kind), "subject", subject.ID, "change", changeID}
+	// The rollback appended the newest history entry: it names the icon
+	// that was put back and the one it replaced ("" is the generic
+	// symbol). The lookup is for the log only; the rollback is done.
+	if h, err := s.catalog.IconHistory(ctx, subject, 1); err == nil && len(h) == 1 && h[0].RollbackOf == changeID {
+		attrs = append(attrs, "sha256", h[0].SHA, "replaced_sha256", h[0].PrevSHA)
+	} else {
+		attrs = append(attrs, "sha256", "unknown")
+	}
+	s.audit(ctx, "icon_rolled_back", actor, attrs...)
 	return nil
 }

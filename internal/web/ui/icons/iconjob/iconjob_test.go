@@ -111,7 +111,7 @@ func TestResultValidateRejectsMalformed(t *testing.T) {
 }
 
 func TestCleanErrorBoundsText(t *testing.T) {
-	if got := CleanError("a\x1b[31m‮b"); got != "a?[31m???b" {
+	if got := CleanError("a\x1b[31m\u202eb"); got != "a?[31m???b" {
 		t.Fatalf("got %q", got)
 	}
 	if got := CleanError(strings.Repeat("x", 2*MaxErrorLen)); len(got) != MaxErrorLen {
@@ -155,6 +155,12 @@ func TestSpoolRoundTrip(t *testing.T) {
 	}
 	if err := s.RemoveJob(id1); err != nil {
 		t.Fatal(err)
+	}
+	if ids, err := s.FinishedJobs(); err != nil || len(ids) != 0 {
+		t.Fatalf("result of a removed job still listed: %v %v", ids, err)
+	}
+	if _, err := s.ReadResult(id1); err != nil {
+		t.Fatalf("server must not remove the result: %v", err)
 	}
 	if _, err := s.ReadJob(id1); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("job after remove: %v", err)
@@ -216,6 +222,9 @@ func TestSpoolRejectsHostileFiles(t *testing.T) {
 
 func TestPruneResultsRemovesOldFiles(t *testing.T) {
 	s := newSpool(t)
+	if err := s.WriteJob(validJob(id1)); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.WriteResult(Result{Format: ResultFormat, Job: id1, Error: "x"}); err != nil {
 		t.Fatal(err)
 	}

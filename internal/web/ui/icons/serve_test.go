@@ -29,8 +29,10 @@ func serve(f *fixture, method, path string, hdr map[string]string) *httptest.Res
 func checkSafetyHeaders(t *testing.T, name string, w *httptest.ResponseRecorder) {
 	t.Helper()
 	for k, v := range map[string]string{
-		"X-Content-Type-Options":  "nosniff",
-		"Content-Security-Policy": "default-src 'none'",
+		"X-Content-Type-Options":       "nosniff",
+		"Content-Security-Policy":      "default-src 'none'",
+		"Cross-Origin-Resource-Policy": "same-origin",
+		"Referrer-Policy":              "no-referrer",
 	} {
 		if got := w.Header().Get(k); got != v {
 			t.Errorf("%s: %s = %q, want %q", name, k, got, v)
@@ -76,6 +78,7 @@ func TestServeIconSetsHeaders(t *testing.T) {
 	if head.Code != http.StatusOK || head.Body.Len() != 0 || head.Header().Get("Content-Type") != "image/png" {
 		t.Fatalf("HEAD %d %d", head.Code, head.Body.Len())
 	}
+	checkSafetyHeaders(t, "head", head)
 	nm := serve(f, http.MethodGet, "/icons/"+sha+".png", map[string]string{"If-None-Match": `"x", W/"` + sha + `"`})
 	if nm.Code != http.StatusNotModified || nm.Body.Len() != 0 {
 		t.Fatalf("conditional GET %d", nm.Code)

@@ -292,6 +292,61 @@ func TestImportResultsStoresIconAndSetsKey(t *testing.T) {
 	}
 }
 
+// spoolJob writes a job with a chosen ID, as QueueFetch would.
+func spoolJob(t *testing.T, f *fixture, id string) {
+	t.Helper()
+	if err := f.spool.WriteJob(iconjob.Job{Format: iconjob.JobFormat, ID: id, Key: "widgetd",
+		URL: "https://upload.wikimedia.org/w.png", RequestedBy: "alice", CreatedAt: t0.Unix()}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestImportResultsSkipsHandledResultsBeforeCap(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	// More handled results than one run may import, all sorting ahead of
+	// the new one: their job files are gone and results/ is only pruned
+	// by the helper after a day.
+	for i := 0; i < 2*MaxImportPerRun; i++ {
+		helperResult(t, f, fmt.Sprintf("%032x", i+1), testPNG(t, red))
+	}
+	id := strings.Repeat("f", 32)
+	spoolJob(t, f, id)
+	helperResult(t, f, id, testPNG(t, blue))
+	rep, err := f.svc.ImportResults(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Imported) != 1 || rep.Imported[id] == "" || len(rep.Failed) != 0 {
+		t.Fatalf("report %+v", rep)
+	}
+	if got := catalogIcon(t, f, "widgetd"); got != rep.Imported[id] {
+		t.Fatalf("catalog icon %q", got)
+	}
+}
+
+func TestImportResultsCapsOneRun(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	for i := 0; i <= MaxImportPerRun; i++ {
+		id := fmt.Sprintf("%032x", i+1)
+		spoolJob(t, f, id)
+		helperResult(t, f, id, testPNG(t, red))
+	}
+	rep, err := f.svc.ImportResults(ctx)
+	if err != nil || len(rep.Imported)+len(rep.Failed) != MaxImportPerRun {
+		t.Fatalf("first run handled %d+%d, want %d: %v", len(rep.Imported), len(rep.Failed), MaxImportPerRun, err)
+	}
+	rep, err = f.svc.ImportResults(ctx)
+	last := fmt.Sprintf("%032x", MaxImportPerRun+1)
+	if err != nil || len(rep.Imported) != 1 || rep.Imported[last] == "" {
+		t.Fatalf("second run %+v %v", rep, err)
+	}
+	if rep, err = f.svc.ImportResults(ctx); err != nil || len(rep.Imported)+len(rep.Failed) != 0 {
+		t.Fatalf("third run %+v %v", rep, err)
+	}
+}
+
 func TestImportResultsDistrustsHelperOutput(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
@@ -426,7 +481,8 @@ func TestRollbackRestoresPreviousIcon(t *testing.T) {
 	if got := catalogIcon(t, f, "widgetd"); got != shaA {
 		t.Fatalf("after rollback %q, want %q", got, shaA)
 	}
-	if ev := f.log.events(t, "icon_rolled_back"); len(ev) != 1 || ev[0]["user"] != "carol" {
+	if ev := f.log.events(t, "icon_rolled_back"); len(ev) != 1 || ev[0]["user"] != "carol" ||
+		ev[0]["sha256"] != shaA || ev[0]["replaced_sha256"] != shaB {
 		t.Fatalf("audit %v", ev)
 	}
 	if acts := auditActions(t, f); acts["icon_rollback"] != 1 {

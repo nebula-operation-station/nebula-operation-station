@@ -44,6 +44,21 @@ type runner struct {
 	fetch fetchFunc
 	now   func() time.Time
 	log   *slog.Logger
+	// rounds and perRound override maxRounds and maxJobsPerRound when
+	// positive (tests).
+	rounds, perRound int
+}
+
+// limits returns the round and per-round job limits.
+func (r *runner) limits() (rounds, perRound int) {
+	rounds, perRound = maxRounds, maxJobsPerRound
+	if r.rounds > 0 {
+		rounds = r.rounds
+	}
+	if r.perRound > 0 {
+		perRound = r.perRound
+	}
+	return rounds, perRound
 }
 
 func main() {
@@ -107,7 +122,8 @@ func (r *runner) watch(ctx context.Context, every time.Duration) {
 // fetching), and prunes old results.
 func (r *runner) runAll(ctx context.Context) error {
 	defer r.spool.PruneResults(keepResults, r.now())
-	for round := 0; round < maxRounds; round++ {
+	rounds, perRound := r.limits()
+	for round := 0; round < rounds; round++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -126,8 +142,8 @@ func (r *runner) runAll(ctx context.Context) error {
 				return err
 			}
 		}
-		if len(jobs) > maxJobsPerRound {
-			jobs = jobs[:maxJobsPerRound]
+		if len(jobs) > perRound {
+			jobs = jobs[:perRound]
 		}
 		for _, j := range jobs {
 			res := r.run(ctx, j)
