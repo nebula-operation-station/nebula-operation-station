@@ -81,13 +81,17 @@ func (c *powerClient) RecentTasks(context.Context, executordb.PveRemote, string,
 	return c.recent, nil
 }
 
-func (c *powerClient) TargetState(_ context.Context, _ executordb.PveRemote, _, _ string, _ uint64, _ pveapi.TokenSupplier) (PveTargetState, error) {
+func (c *powerClient) TargetState(ctx context.Context, _ executordb.PveRemote, _, _ string, _ uint64, _ pveapi.TokenSupplier) (PveTargetState, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.reads++
 	st := "running"
 	if c.statusFn != nil {
 		st = c.statusFn(c.reads)
+	}
+	// A read whose context ended fails, as a real read does.
+	if err := ctx.Err(); err != nil {
+		return PveTargetState{}, err
 	}
 	live := PveTargetState{Node: c.liveNode, Kind: c.liveKind, Status: st, ConfigDigest: c.digest, Generation: c.gen}
 	if c.liveKind == permit.ProviderKindQemu {
@@ -410,6 +414,45 @@ func TestGuestPowerStateMismatchRefusedBeforeSend(t *testing.T) {
 	}
 	if e.client.dispatchCount() != 0 {
 		t.Fatal("dispatched to a changed guest")
+	}
+}
+
+// TestGuestPowerRunEndedBeforeDispatchIsNotATargetChange: when the run's
+// context ends during the read right before the intent, the run stops with
+// ErrPveRunExpired, not ErrPveTargetChanged: nothing is recorded or sent,
+// no target change is logged, and the unused approval runs later.
+func TestGuestPowerRunEndedBeforeDispatchIsNotATargetChange(t *testing.T) {
+	e := newPowerEnv(t, "qemu")
+	req := e.approve(powerReq("qemu", "shutdown"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reads := e.client.reads
+	e.client.statusFn = func(n int) string {
+		if n == reads+3 {
+			// The engine's read right before the intent.
+			cancel()
+		}
+		return "running"
+	}
+	res, err := e.g.Run(ctx, req)
+	if !errors.Is(err, ErrPveRunExpired) || errors.Is(err, ErrPveTargetChanged) {
+		t.Fatalf("run: %v, want ErrPveRunExpired", err)
+	}
+	if e.client.reads != reads+3 {
+		t.Fatalf("%d reads, want the context to end during the pre-dispatch read", e.client.reads-reads)
+	}
+	if e.client.dispatchCount() != 0 || len(res.Steps) != 0 || res.PermitConsumed {
+		t.Fatalf("dispatched %d, steps %+v, permit consumed %v", e.client.dispatchCount(), res.Steps, res.PermitConsumed)
+	}
+	if logs := e.logs.String(); strings.Contains(logs, "pve_mutation_target_changed") || !strings.Contains(logs, "pve_mutation_run_expired") {
+		t.Fatalf("logs:\n%s", logs)
+	}
+	e.client.statusFn = nil
+	if _, err := e.g.Run(context.Background(), req); err != nil {
+		t.Fatalf("the unused approval does not run: %v", err)
+	}
+	if e.client.dispatchCount() != 1 {
+		t.Fatalf("dispatched %d, want 1", e.client.dispatchCount())
 	}
 }
 

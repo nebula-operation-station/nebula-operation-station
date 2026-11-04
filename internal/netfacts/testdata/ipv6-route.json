@@ -1,0 +1,38 @@
+[
+    {
+        "dst": "2001:db8:1::53",
+        "gateway": "fe80::1",
+        "dev": "eth0",
+        "protocol": "static",
+        "metric": 1024,
+        "flags": [],
+        "pref": "medium"
+    },
+    {
+        "dst": "2001:db8:1::/64",
+        "dev": "eth0",
+        "protocol": "ra",
+        "metric": 100,
+        "expires": 86391,
+        "flags": [],
+        "pref": "medium"
+    },
+    {
+        "dst": "fe80::/64",
+        "dev": "eth0",
+        "protocol": "kernel",
+        "metric": 256,
+        "flags": [],
+        "pref": "medium"
+    },
+    {
+        "dst": "default",
+        "gateway": "fe80::1",
+        "dev": "eth0",
+        "protocol": "ra",
+        "metric": 100,
+        "expires": 1791,
+        "flags": [],
+        "pref": "medium"
+    }
+]

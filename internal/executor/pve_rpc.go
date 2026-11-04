@@ -21,6 +21,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveapi"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
@@ -73,11 +74,47 @@ const (
 	// pveGuestProvisionLifetime is how long a proposed provisioning permit
 	// (and its VMID reservation) can be approved and run.
 	pveGuestProvisionLifetime = 30 * time.Minute
+	// pveGuestProvisionMaxSteps is the most steps one provisioning runs:
+	// clone, config, resize and start.
+	pveGuestProvisionMaxSteps = 4
+	// pveGuestProvisionReadSlack covers the reads and dispatches around the
+	// task waits of one provisioning (template, guest list, storage, the
+	// final guest read).
+	pveGuestProvisionReadSlack = 10 * time.Minute
+	// pveProvisionReplyMargin is how long before the caller's deadline a
+	// commit stops waiting for tasks, so the response with the execution
+	// and the step states still reaches the caller; an open step is
+	// reconciled, never resent.
+	pveProvisionReplyMargin = 30 * time.Second
 	// State files of provisioning in the executor's data directory.
 	pveTemplatesFile    = "pve-templates.json"
 	pveVMIDsFile        = "pve-vmids.json"
 	pveCatalogStateFile = "pve-catalog.json"
 )
+
+// PveGuestProvisionRunBound bounds one CommitPVEGuestProvision: every step
+// may wait up to the task wait bound (pveTaskMaxWait) for its PVE task,
+// plus the reads around them. A caller deadline at least this long sees
+// the end of the run; a shorter one gets the step states of the run so
+// far shortly before it passes (pveProvisionRunContext).
+const PveGuestProvisionRunBound = pveGuestProvisionMaxSteps*pveTaskMaxWait + pveGuestProvisionReadSlack
+
+// pveProvisionRunContext derives the context a commit runs under: it ends
+// pveProvisionReplyMargin (at most half the remaining time) before ctx's
+// deadline, so the run stops waiting and the response with the step
+// states is sent while the caller still listens. Without a deadline it
+// is ctx.
+func pveProvisionRunContext(ctx context.Context, now time.Time) (context.Context, context.CancelFunc) {
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return context.WithCancel(ctx)
+	}
+	margin := pveProvisionReplyMargin
+	if rem := dl.Sub(now); rem < 2*margin {
+		margin = rem / 2
+	}
+	return context.WithDeadline(ctx, dl.Add(-margin))
+}
 
 var (
 	pveGuestProvisionArtifact = []byte(PveGuestProvisionAction + " " + pveGuestProvisionVersion + "\nProvision one guest from a prepared template.\n")
@@ -109,11 +146,37 @@ func (s *Service) newPveProvisioner(m *PveMutations) *PveProvisioner {
 		AutomationKeys: s.automationKey, Artifact: pveGuestProvisionArtifact, ModuleVersion: pveGuestProvisionVersion}
 }
 
+// PveAutomationCredentialRef is the keyring credential reference designated
+// as the NOS automation key. ADR 0008 section 3 ("Access and password")
+// requires one NOS automation public key but does not name it; this
+// implementation fixes the ref "nos-automation", so the keyring must hold
+// the key as nos-automation.key (docs/operator/proxmox.md tells
+// operators). Provisioning installs only this credential's public key; a
+// request naming any other keyring credential is refused, so the key of an
+// unrelated host credential never reaches a new guest.
+const PveAutomationCredentialRef = "nos-automation"
+
+var (
+	// ErrPveAutomationCredential is returned for an AutomationCredentialRef
+	// that does not name the designated NOS automation credential
+	// (PveAutomationCredentialRef). Nothing is read from the keyring.
+	ErrPveAutomationCredential = errors.New("executor: credential is not the designated nos automation key")
+	// errNoKeyring is returned when the executor has no keyring; it counts
+	// as a locked keyring.
+	errNoKeyring = fmt.Errorf("executor: no keyring: %w", keyring.ErrLocked)
+)
+
 // automationKey returns the authorized_keys form of the public key of the
-// keyring credential ref. It fails while the keyring is locked.
+// keyring credential ref, which must be the designated NOS automation
+// credential (ErrPveAutomationCredential). It fails with keyring.ErrLocked
+// while the keyring is locked and keyring.ErrUnknownRef when the keyring
+// does not hold the credential.
 func (s *Service) automationKey(ref string) (string, error) {
+	if ref != PveAutomationCredentialRef {
+		return "", ErrPveAutomationCredential
+	}
 	if s.keys == nil {
-		return "", errors.New("executor: no keyring")
+		return "", errNoKeyring
 	}
 	signer, err := s.keys.Signer(ref)
 	if err != nil {
@@ -817,6 +880,14 @@ func pveGuestProvisionRPCError(err error) error {
 	switch {
 	case permit.CodeOf(err) != "":
 		return toStatus(err)
+	// The automation credential refusals come before the generic spec
+	// error they are wrapped in, so the caller can tell them apart.
+	case errors.Is(err, ErrPveAutomationCredential):
+		return status.Error(codes.PermissionDenied, "pve guest provision: the automation credential ref does not name the designated NOS automation key")
+	case errors.Is(err, keyring.ErrLocked):
+		return status.Error(codes.FailedPrecondition, "pve guest provision: keyring locked; unlock the executor")
+	case errors.Is(err, keyring.ErrUnknownRef):
+		return status.Error(codes.NotFound, "pve guest provision: the NOS automation credential is not in the keyring")
 	case errors.Is(err, ErrPveProvisionInvalid), errors.Is(err, ErrPveProvisionUnsupported), errors.Is(err, ErrPveMutationRequest):
 		return status.Error(codes.InvalidArgument, "pve guest provision: invalid or unsupported spec, template, network, key or password id")
 	case errors.Is(err, ErrPveTemplateNotPrepared), errors.Is(err, ErrPveTemplateChanged):
@@ -827,6 +898,8 @@ func pveGuestProvisionRPCError(err error) error {
 		return status.Error(codes.FailedPrecondition, "pve guest provision: the cluster guest list is incomplete; a free vmid cannot be proven")
 	case errors.Is(err, ErrPveGuestPassword):
 		return status.Error(codes.FailedPrecondition, "pve guest provision: the guest password is missing or changed")
+	case errors.Is(err, ErrPveRunExpired):
+		return status.Error(codes.DeadlineExceeded, "pve guest provision: the run ended before the next step was sent")
 	case errors.Is(err, ErrPveTargetChanged), errors.Is(err, ErrPveRemoteChanged):
 		return status.Error(codes.FailedPrecondition, "pve guest provision: the node, storage or remote changed; propose again")
 	case errors.Is(err, ErrPveReadOnly):
@@ -845,12 +918,16 @@ func pveGuestProvisionRPCError(err error) error {
 }
 
 // pveProvisionRunOutcome reports whether err is the outcome of steps this
-// run dispatched (reported with their durable states), not a refusal.
+// run dispatched (reported with their durable states), not a refusal. A
+// run whose context ended between steps or before the final guest read
+// (ErrPveRunExpired) reports its recorded steps like one that ended
+// during a task wait: guest_kept and no configuration digest.
 func pveProvisionRunOutcome(err error) bool {
 	if errors.Is(err, ErrPveMutationDenied) || errors.Is(err, ErrPveJobStore) || permit.CodeOf(err) != "" {
 		return false
 	}
-	return errors.Is(err, ErrPveStepFailed) || errors.Is(err, ErrPveStepRunning) || errors.Is(err, ErrPveDispatchUncertain)
+	return errors.Is(err, ErrPveStepFailed) || errors.Is(err, ErrPveStepRunning) || errors.Is(err, ErrPveDispatchUncertain) ||
+		errors.Is(err, ErrPveRunExpired)
 }
 
 // errPveProvisionUnavailable is returned when the executor has no
@@ -863,6 +940,12 @@ var errPveProvisionUnavailable = status.Error(codes.FailedPrecondition, "pve gue
 // permit at its own floor (base MEDIUM; the authority's risk policy raises
 // it for criticality). The caller's input cannot lower it.
 func (s *Service) ProposePVEGuestProvision(ctx context.Context, in *pb.ProposePVEGuestProvisionRequest) (*pb.ProposePVEGuestProvisionResponse, error) {
+	return s.proposePVEGuestProvision(ctx, in, s.permitResponse)
+}
+
+// proposePVEGuestProvision is ProposePVEGuestProvision with the step that
+// turns the registered permit into the response (permitResponse) passed in.
+func (s *Service) proposePVEGuestProvision(ctx context.Context, in *pb.ProposePVEGuestProvisionRequest, respond func(permit.Permit) (*pb.ProposeExecutionResponse, error)) (*pb.ProposePVEGuestProvisionResponse, error) {
 	req, err := provisionRequestFromProto(in.GetSpec())
 	if err != nil {
 		return nil, pveGuestProvisionRPCError(err)
@@ -885,8 +968,15 @@ func (s *Service) ProposePVEGuestProvision(ctx context.Context, in *pb.ProposePV
 		_ = p.VMIDs.ReleaseVMID(req.RemoteID, pp.VMID, id)
 		return nil, pveGuestProvisionRPCError(err)
 	}
-	out, err := s.permitResponse(res.Permit)
+	out, err := respond(res.Permit)
 	if err != nil {
+		// The caller never learns the execution or digest, so the pending
+		// permit cannot be approved through it; release the VMID as when
+		// the authority refused. The permit expires unused, and even if
+		// approved it cannot run: Provision requires the VMID reserved for
+		// this execution.
+		_ = p.VMIDs.ReleaseVMID(req.RemoteID, pp.VMID, id)
+		s.log.Warn("audit", "kind", "pve_guest_provision_proposal_dropped", "remote", req.RemoteID, "vmid", pp.VMID, "execution", id)
 		return nil, err
 	}
 	return &pb.ProposePVEGuestProvisionResponse{Permit: out, ExecutionId: id, Vmid: pp.VMID, CapacityWarnings: pp.Capacity.Warnings()}, nil
@@ -898,6 +988,8 @@ func (s *Service) ProposePVEGuestProvision(ctx context.Context, in *pb.ProposePV
 // provisioner rebuilds the parameters from fresh reads, so anything that
 // changed refuses the permit. Once a step is recorded the response carries
 // the durable step states; an uncertain step is reconciled, never resent.
+// The run stops waiting for tasks shortly before the caller's deadline
+// (pveProvisionRunContext), so the states still reach the caller.
 // A failed run leaves the guest for inspection (guest_kept).
 func (s *Service) CommitPVEGuestProvision(ctx context.Context, in *pb.CommitPVEGuestProvisionRequest) (*pb.CommitPVEGuestProvisionResponse, error) {
 	req, err := provisionRequestFromProto(in.GetSpec())
@@ -913,7 +1005,9 @@ func (s *Service) CommitPVEGuestProvision(ctx context.Context, in *pb.CommitPVEG
 	if p == nil {
 		return nil, errPveProvisionUnavailable
 	}
-	res, err := p.Provision(ctx, req)
+	runCtx, cancel := pveProvisionRunContext(ctx, s.clock())
+	defer cancel()
+	res, err := p.Provision(runCtx, req)
 	// Only this run's outcome is reported as step states: success, or a
 	// step that failed, is still running or is uncertain. Any other error
 	// (no approved permit, the permit already used, a changed spec) is

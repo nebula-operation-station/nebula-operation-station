@@ -12,6 +12,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -446,5 +447,52 @@ func TestDefaultAllowlistIsACopy(t *testing.T) {
 	}
 	if DefaultAllowlist()[0] == "evil.example" {
 		t.Fatal("DefaultAllowlist returned shared storage")
+	}
+}
+
+// eofAfterDeadline simulates the transport race behind the flaky slow-body
+// test: the response body ends with a clean io.EOF only after the request
+// context has expired, as when the stream is torn down at the deadline.
+type eofAfterDeadline struct{}
+
+func (eofAfterDeadline) RoundTrip(r *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode:    http.StatusOK,
+		Header:        http.Header{},
+		ContentLength: -1,
+		Body:          &ctxEOFBody{ctx: r.Context(), data: []byte("partial")},
+		Request:       r,
+	}, nil
+}
+
+type ctxEOFBody struct {
+	ctx  context.Context
+	data []byte
+}
+
+func (b *ctxEOFBody) Read(p []byte) (int, error) {
+	if len(b.data) > 0 {
+		n := copy(p, b.data)
+		b.data = b.data[n:]
+		return n, nil
+	}
+	<-b.ctx.Done()
+	return 0, io.EOF
+}
+
+func (b *ctxEOFBody) Close() error { return nil }
+
+func TestFetchCleanEOFAfterDeadline(t *testing.T) {
+	h := newHarness(t, http.NotFoundHandler(), publicResolver, 200*time.Millisecond)
+	h.client.hc.Transport = eofAfterDeadline{}
+	body, err := h.client.Fetch(context.Background(), "https://avatars.githubusercontent.com/slow")
+	if err == nil {
+		t.Fatalf("truncated body returned as success: %q", body)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err %v, want a deadline error", err)
+	}
+	if body != nil {
+		t.Fatalf("got %d bytes with error", len(body))
 	}
 }

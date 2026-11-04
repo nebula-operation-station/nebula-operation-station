@@ -94,6 +94,11 @@ var (
 	// ErrPveStepRunning is returned when a step's task is still running
 	// when the wait ends; reconciliation observes it later.
 	ErrPveStepRunning = errors.New("executor: pve mutation step still running; reconciling later")
+	// ErrPveRunExpired is returned when the run's context ended before the
+	// next step was recorded or sent (or, for a provisioning, before the
+	// final guest read): nothing more is dispatched, the steps recorded so
+	// far keep their durable states, and the target did not change.
+	ErrPveRunExpired = errors.New("executor: pve mutation run ended before the next step was sent")
 	// ErrPveJobStore is returned when the durable job record could not be
 	// written; nothing more is dispatched.
 	ErrPveJobStore = errors.New("executor: pve job record unavailable")
@@ -768,6 +773,12 @@ func (m *PveMutations) Run(ctx context.Context, req PveMutationRequest) (PveMuta
 			m.log().Info("audit", "kind", "pve_mutation_permit_released", "remote", t.RemoteID, "execution", claim.ExecutionID, "reason", "target busy")
 			res.PermitConsumed = false
 		}
+		if n == 1 && errors.Is(err, ErrPveRunExpired) && claim.Release("run ended") {
+			// Nothing was recorded or sent: the run ended before its first
+			// step. The approval stays usable for a later run.
+			m.log().Info("audit", "kind", "pve_mutation_permit_released", "remote", t.RemoteID, "execution", claim.ExecutionID, "reason", "run ended")
+			res.PermitConsumed = false
+		}
 		recorded, serr := m.DB.PveJobSteps(claim.ExecutionID)
 		if serr != nil {
 			// What was recorded is unknown: stop and report a store
@@ -790,6 +801,13 @@ func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, 
 	// Lock or revocation since authorization stops undispatched work.
 	if err := claim.Check(); err != nil {
 		return ErrPveMutationDenied
+	}
+	// A run whose context ended (the caller's deadline, or the shortened
+	// run context of a provisioning) records and sends nothing more; a
+	// request sent with a dead context would only leave an uncertain step.
+	if ctx.Err() != nil {
+		m.logRunExpired(t, claim.ExecutionID, n)
+		return ErrPveRunExpired
 	}
 	rm, ok, err := m.DB.GetRemote(t.RemoteID)
 	if err != nil {
@@ -823,6 +841,12 @@ func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, 
 		// Identity and state are read again right before the intent: a
 		// guest that changed since authorization gets nothing.
 		live, err := m.Client.TargetState(ctx, rm, t.Kind, t.Node, t.VMID, readTok)
+		if err != nil && ctx.Err() != nil {
+			// The read failed because the run ended, not because the
+			// target changed: nothing is recorded or sent.
+			m.logRunExpired(t, claim.ExecutionID, n)
+			return ErrPveRunExpired
+		}
 		if err != nil || !sameLiveTarget(live, t) {
 			m.log().Warn("audit", "kind", "pve_mutation_target_changed", "remote", t.RemoteID, "node", t.Node, "vmid", t.VMID, "execution", claim.ExecutionID, "step", n)
 			return ErrPveTargetChanged
@@ -899,6 +923,11 @@ func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, 
 	}
 	job.UPID, job.TaskNode = upid, u.Node
 	return m.await(ctx, rm, job, readTok)
+}
+
+// logRunExpired records that a run ended before step n was recorded.
+func (m *PveMutations) logRunExpired(t permit.ProviderMutationTarget, executionID string, n int) {
+	m.log().Warn("audit", "kind", "pve_mutation_run_expired", "remote", t.RemoteID, "node", t.Node, "vmid", t.VMID, "execution", executionID, "step", n)
 }
 
 // reconcileLost handles a step whose dispatch outcome is unknown.
@@ -1049,14 +1078,11 @@ func (m *PveMutations) identify(ctx context.Context, rm executordb.PveRemote, jo
 // await polls the task of a step with a stored UPID until it stops, the
 // wait bound passes or ctx ends (the step then stays open).
 func (m *PveMutations) await(ctx context.Context, rm executordb.PveRemote, job executordb.PveJob, read pveapi.TokenSupplier) error {
-	interval, maxWait := m.PollInterval, m.MaxWait
+	interval := m.PollInterval
 	if interval <= 0 {
 		interval = pveTaskPollInterval
 	}
-	if maxWait <= 0 {
-		maxWait = pveTaskMaxWait
-	}
-	deadline := m.now().Add(maxWait)
+	deadline := m.now().Add(m.taskMaxWait())
 	for {
 		done, err := m.observe(ctx, rm, job, read)
 		if done || err != nil {
@@ -1071,6 +1097,15 @@ func (m *PveMutations) await(ctx context.Context, rm executordb.PveRemote, job e
 		case <-time.After(interval):
 		}
 	}
+}
+
+// taskMaxWait is how long a Run waits for one step's task (MaxWait, or
+// pveTaskMaxWait when unset).
+func (m *PveMutations) taskMaxWait() time.Duration {
+	if m.MaxWait > 0 {
+		return m.MaxWait
+	}
+	return pveTaskMaxWait
 }
 
 // observe reads a step's task once and records a terminal state.

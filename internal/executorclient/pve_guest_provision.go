@@ -4,18 +4,22 @@ package executorclient
 
 import (
 	"context"
-	"time"
 
 	"google.golang.org/grpc"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
 // pveGuestProvisionCommitWait is the extra time a provisioning commit may
 // take: the executor waits for the clone, config, resize and start tasks
-// in turn (a full clone can take many minutes). A task still running when
-// the call ends stays open and is reconciled by the executor, never resent.
-const pveGuestProvisionCommitWait = 30 * time.Minute
+// in turn, each up to its task wait bound (a full clone can take many
+// minutes), so the deadline is the executor's whole run bound
+// (30 min before, shorter than one run). Should the call still end
+// earlier, the executor replies with the step states shortly before the
+// deadline; a task still running stays open and is reconciled by the
+// executor, never resent.
+const pveGuestProvisionCommitWait = executor.PveGuestProvisionRunBound
 
 // ProposePVEGuestProvision proposes a guest provisioning (server and admin
 // roles, ADR 0008 section 3). The executor binds the template record,

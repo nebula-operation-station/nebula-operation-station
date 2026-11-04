@@ -1,0 +1,19 @@
+[
+    {
+        "dst": "default",
+        "gateway": "192.168.178.1",
+        "dev": "eth0",
+        "protocol": "dhcp",
+        "prefsrc": "192.168.178.42",
+        "metric": 100,
+        "flags": []
+    },
+    {
+        "dst": "192.168.178.0/24",
+        "dev": "eth0",
+        "protocol": "kernel",
+        "scope": "link",
+        "prefsrc": "192.168.178.42",
+        "flags": []
+    }
+]
