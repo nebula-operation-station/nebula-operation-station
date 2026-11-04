@@ -108,6 +108,11 @@ export function startTrafficMap(root, opts = {}) {
   let layout = null;
   let scene = null;
   let nodeById = new Map();
+  // sceneNodeById is the nodeById of the model the installed scene was
+  // built from. The overlay uses it, not nodeById: while a rebuild for a
+  // newer model fails, the old scene keeps rendering and must not be
+  // paired with the newer model's nodes.
+  let sceneNodeById = new Map();
   let icons = new Map();
   let cam = null;
   let focus = null;
@@ -263,8 +268,8 @@ export function startTrafficMap(root, opts = {}) {
     }
   }
 
-  // clearOverlay wipes the overlay canvas so an incomplete base frame (no
-  // scene yet, or a half-finished upload) is not covered by labels from an
+  // clearOverlay wipes the overlay canvas when the base drew no scene (none
+  // yet, or a half-finished upload), so it is not covered by labels of an
   // earlier, different scene.
   function clearOverlay() {
     octx.setTransform(1, 0, 0, 1, 0, 0);
@@ -381,14 +386,15 @@ export function startTrafficMap(root, opts = {}) {
           const next = build(model, layout, { level, focus });
           backend.setScene(next);
           scene = next;
+          sceneNodeById = nodeById;
         } catch (err) {
           // The deadline is set only here, by an attempt that failed, so
           // backed-off frames cannot push it further out.
           rebuildFailures++;
           nextRebuildAt = ts + rebuildBackoffMs(rebuildFailures);
-          // The base may now be incomplete (a half-finished upload); do not
-          // leave labels of the previous scene on top of it.
-          clearOverlay();
+          // Nothing is drawn in this frame, so base and overlay keep showing
+          // the same last frame. Whether the overlay is drawn is decided only
+          // by render's completeness below, on every backend alike.
           throw err;
         }
         rebuildFailures = 0;
@@ -401,15 +407,16 @@ export function startTrafficMap(root, opts = {}) {
     if (redraw || !reduced) {
       const time = reduced ? 0 : ts / 1000;
       try {
-        // render reports whether the base frame is complete: WebGL2 only
-        // after a finished scene upload, Canvas 2D only with a scene.
+        // render reports whether it drew a complete scene. Without one
+        // (no scene yet, or a half-finished WebGL2 upload) it draws no
+        // scene at all and only clears the base to the background.
         const complete = backend.render(cam, dpr, time);
         if (complete) {
-          drawOverlay(octx, scene, cam, dpr, time, painter, icons, nodeById);
+          drawOverlay(octx, scene, cam, dpr, time, painter, icons, sceneNodeById);
           redraw = false;
         } else {
-          // Incomplete base (no scene or half-uploaded): do not draw the
-          // overlay, so labels of another scene are not mixed in.
+          // Empty base: clear the overlay too, so no labels of an earlier
+          // scene are left over it.
           clearOverlay();
         }
       } catch (err) {
