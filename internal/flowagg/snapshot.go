@@ -265,6 +265,10 @@ type Delta struct {
 	// Sockets holds one entry per socket of the current snapshot, sorted by
 	// protocol, local, remote and cookie.
 	Sockets []SocketDelta
+	// Vanished lists the sockets of the previous snapshot that are gone,
+	// sorted like Sockets. They carry no bytes but mark their flows as a
+	// lower bound.
+	Vanished []Socket
 	// LowerBound is set when bytes may be missing: a counter was reset or a
 	// socket vanished between the snapshots (its last bytes are unknown).
 	LowerBound bool
@@ -328,7 +332,18 @@ func Diff(prev, cur *Snapshot) (Delta, error) {
 		d.Sockets = append(d.Sockets, sd)
 	}
 	if matched < len(old) {
-		d.LowerBound = true // at least one socket vanished
+		// At least one socket vanished; its bytes since prev are unknown.
+		d.LowerBound = true
+		seen := make(map[socketID]struct{}, len(cur.Sockets))
+		for _, s := range cur.Sockets {
+			seen[normalizeSocket(s).id()] = struct{}{}
+		}
+		for id, s := range old {
+			if _, ok := seen[id]; !ok {
+				d.Vanished = append(d.Vanished, s)
+			}
+		}
+		slices.SortFunc(d.Vanished, func(a, b Socket) int { return compareSocketID(a.id(), b.id()) })
 	}
 	slices.SortFunc(d.Sockets, func(a, b SocketDelta) int {
 		return compareSocketID(a.Socket.id(), b.Socket.id())
