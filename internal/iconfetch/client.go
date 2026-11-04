@@ -123,6 +123,9 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// This deadline is created before hc.Do starts the client's own timer
+	// for the same duration, so it always expires first; the truncation
+	// guard after io.ReadAll relies on that (TestFetchCleanEOFAfterDeadline).
 	ctx, cancel := context.WithTimeout(ctx, c.hc.Timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
@@ -145,6 +148,12 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) ([]byte, error) {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxBodyBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("icon fetch %s: read body: %w", u.Host, err)
+	}
+	// When the deadline fires mid-body, the transport can end the stream so
+	// that ReadAll sees a clean EOF on a truncated body. A body read past the
+	// deadline is never trusted.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, fmt.Errorf("icon fetch %s: read body: %w", u.Host, ctxErr)
 	}
 	if len(body) > MaxBodyBytes {
 		return nil, fmt.Errorf("%w: more than %d bytes", ErrBodyTooLarge, MaxBodyBytes)
