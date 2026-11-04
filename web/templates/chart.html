@@ -191,6 +191,7 @@
     </ol>
     <form method="post" action="/inventory/chart/staged">
       <input type="hidden" name="confirm" value="1">
+      <input type="hidden" name="plan_digest" value="{{.Chart.Staged.Confirm.Digest}}">
       {{range .Chart.Staged.Confirm.Hosts}}<input type="hidden" name="host" value="{{.ID}}">
       {{end}}
       <input type="hidden" name="action" value="{{.Chart.Staged.Confirm.Action}}">

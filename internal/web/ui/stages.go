@@ -4,11 +4,14 @@ package ui
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -246,6 +249,12 @@ const (
 	// PROD environment cannot be selected: the preset has no stage
 	// for it.
 	stagedNoEnvironment = "no environment (DEV, QA or PROD), so it fits no stage"
+	// stagedNoEndpoints is why an enrolled host without endpoints
+	// cannot be selected: the executor has nowhere to reach it.
+	stagedNoEndpoints = "no endpoints, so the executor cannot reach it"
+	// stagedMaxDigest bounds a client-supplied plan digest: a sha256
+	// hex digest is 64 characters.
+	stagedMaxDigest = 64
 )
 
 // stagedPlan is the plan of every staged update from the chart: the
@@ -317,6 +326,9 @@ type stagedConfirmData struct {
 	Action string
 	// ActionLabel is the selected action label.
 	ActionLabel string
+	// Digest is the digest of the shown plan (Action, Stages, Hosts);
+	// the confirm form carries it and the confirmed POST checks it.
+	Digest string
 }
 
 // stagedUpdateData is the staged update section of the chart page: the
@@ -345,8 +357,11 @@ func (h *Handler) stagedUpdateSection(hosts []inventory.Host, pins map[string]*p
 			continue
 		}
 		sh := stagedHost{ID: host.ID, Name: inventoryShownName(host)}
-		if !executions.HasStageEnvironment(host.Environment) {
+		switch {
+		case !executions.HasStageEnvironment(host.Environment):
 			sh.Unselectable = stagedNoEnvironment
+		case len(host.Endpoints) == 0:
+			sh.Unselectable = stagedNoEndpoints
 		}
 		enrolled = append(enrolled, sh)
 	}
@@ -376,8 +391,9 @@ func stagedEcho(id string) string {
 
 // stagedStages lays out the stagedPlan stages over the frozen hosts
 // with executions.PlanStages, the layout CreateStaged proposes for
-// the same hosts and plan.
-func stagedStages(frozen []stagedHost, envOf map[string]inventory.Environment) ([]stagedStageView, error) {
+// the same hosts and plan. It returns the raw stages (for the plan
+// digest) and their view (for the confirmation page).
+func stagedStages(frozen []stagedHost, envOf map[string]inventory.Environment) ([]stageplan.Stage, []stagedStageView, error) {
 	ids := make([]string, len(frozen))
 	byID := make(map[string]stagedHost, len(frozen))
 	for i, host := range frozen {
@@ -386,7 +402,7 @@ func stagedStages(frozen []stagedHost, envOf map[string]inventory.Environment) (
 	}
 	stages, err := executions.PlanStages(stagedPlan, ids, envOf)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	out := make([]stagedStageView, len(stages))
 	for i, st := range stages {
@@ -400,7 +416,48 @@ func stagedStages(frozen []stagedHost, envOf map[string]inventory.Environment) (
 		}
 		out[i] = v
 	}
-	return out, nil
+	return stages, out, nil
+}
+
+// stagedDigest digests the plan the confirmation page shows: the
+// action, each stage's name, its hosts in plan order, its MaxFailed
+// and its gate (manual or auto), and the environment of every frozen
+// host. The confirm form carries it as plan_digest; the confirmed
+// POST recomputes it from the current inventory and refuses a
+// mismatch, so the proposal is bound to the plan that was shown.
+func stagedDigest(action string, stages []stageplan.Stage, frozen []stagedHost, envOf map[string]inventory.Environment) string {
+	var b strings.Builder
+	b.WriteString(action)
+	b.WriteByte('|')
+	for i, st := range stages {
+		if i > 0 {
+			b.WriteByte(';')
+		}
+		b.WriteString(st.Name)
+		b.WriteByte(':')
+		b.WriteString(strings.Join(st.Hosts, ","))
+		b.WriteByte('/')
+		b.WriteString(strconv.Itoa(st.MaxFailed))
+		b.WriteByte('/')
+		b.WriteString(st.Continue)
+	}
+	b.WriteByte('|')
+	for _, host := range frozen {
+		b.WriteString(host.ID)
+		b.WriteByte('=')
+		b.WriteString(string(envOf[host.ID]))
+		b.WriteByte(',')
+	}
+	sum := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(sum[:])
+}
+
+// stagedDigestOK reports whether digest is a well-formed plan digest
+// (64 hex characters); anything else is treated as no digest at all,
+// which never skips the confirmation page.
+func stagedDigestOK(digest string) bool {
+	b, err := hex.DecodeString(digest)
+	return err == nil && len(b) == stagedMaxDigest/2
 }
 
 // handleChartStaged is the staged OS update form of the inventory
@@ -409,9 +466,17 @@ func stagedStages(frozen []stagedHost, envOf map[string]inventory.Environment) (
 // the staged plan (stages in order, their hosts, the gates between
 // them); the confirmed POST proposes the frozen list with the same
 // plan and redirects to the operation page. Every host id is checked
-// against the inventory: unknown or unenrolled hosts, and hosts
-// without a DEV, QA or PROD environment, are refused before anything
-// is proposed.
+// against the inventory: unknown or unenrolled hosts, hosts without a
+// DEV, QA or PROD environment, and hosts without endpoints, are
+// refused before anything is proposed.
+//
+// The form reads its fields from the POST body only (r.PostForm):
+// URL query parameters cannot add hosts or skip confirmation. The
+// confirmation form carries a digest of the shown plan; the
+// confirmed POST recomputes it from the current inventory and
+// refuses a mismatch, so the proposal is bound to the plan that was
+// reviewed. A POST with confirm=1 but no valid digest shows the
+// confirmation page again.
 func (h *Handler) handleChartStaged(w http.ResponseWriter, r *http.Request) {
 	if !h.operationsEnabled(w, r) {
 		return
@@ -439,7 +504,7 @@ func (h *Handler) handleChartStaged(w http.ResponseWriter, r *http.Request) {
 	for _, host := range hosts {
 		byID[host.ID] = host
 	}
-	ids := r.Form["host"]
+	ids := r.PostForm["host"]
 	if len(ids) == 0 {
 		http.Error(w, "select at least one host", http.StatusBadRequest)
 		return
@@ -474,6 +539,10 @@ func (h *Handler) handleChartStaged(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "host "+stagedEcho(id)+" cannot be updated in stages: "+stagedNoEnvironment+"; set its environment in the inventory or leave it out", http.StatusBadRequest)
 			return
 		}
+		if len(host.Endpoints) == 0 {
+			http.Error(w, "host "+stagedEcho(id)+" cannot be updated in stages: "+stagedNoEndpoints+"; add an endpoint in the inventory or leave it out", http.StatusBadRequest)
+			return
+		}
 		envOf[id] = host.Environment
 		frozen = append(frozen, stagedHost{ID: host.ID, Name: inventoryShownName(host)})
 	}
@@ -481,25 +550,32 @@ func (h *Handler) handleChartStaged(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "select at least one host", http.StatusBadRequest)
 		return
 	}
-	action := r.FormValue("action")
+	action := r.PostFormValue("action")
 	label, ok := stagedActionLabel(action)
 	if !ok {
 		http.Error(w, "unknown action", http.StatusBadRequest)
 		return
 	}
 	// The plan shown and the plan proposed come from the same layout
-	// (executions.PlanStages with stagedPlan).
-	stages, err := stagedStages(frozen, envOf)
+	// (executions.PlanStages with stagedPlan); the digest of the
+	// shown plan binds the confirmed POST to the reviewed plan.
+	rawStages, stages, err := stagedStages(frozen, envOf)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if r.FormValue("confirm") != "1" {
+	shown := stagedDigest(action, rawStages, frozen, envOf)
+	digest := r.PostFormValue("plan_digest")
+	if r.PostFormValue("confirm") != "1" || !stagedDigestOK(digest) {
 		data := pageData{Title: "Confirm staged OS update", Active: "chart", Content: "chart"}
 		data.Chart = &chartData{Staged: &stagedUpdateData{Confirm: &stagedConfirmData{
-			Hosts: frozen, Stages: stages, Action: action, ActionLabel: label,
+			Hosts: frozen, Stages: stages, Action: action, ActionLabel: label, Digest: shown,
 		}}}
 		h.render(w, r, data)
+		return
+	}
+	if shown != digest {
+		http.Error(w, "the plan changed since you reviewed it; review it again", http.StatusBadRequest)
 		return
 	}
 	hostIDs := make([]string, len(frozen))
