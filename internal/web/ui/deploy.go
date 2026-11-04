@@ -54,7 +54,8 @@ import (
 // The run page follows the states of ADR 0008 section 6: proposed,
 // approved, creating, booting, enrolling (fingerprint review), bootstrapping,
 // done or failed, with the PVE task UPIDs and step outcomes. A server
-// without a batch planner ends a run with a staged plan at "joined"
+// without a batch planner, or whose executor does not take batches
+// (DeployBatchProbe), ends a run with a staged plan at "joined"
 // (enrolled, plan not run) instead of leaving it in bootstrapping. An idle
 // run that does not progress fails when its deadline passes (the
 // proposal's request expiry, deployEnrollWindow, deployBootstrapWindow),
@@ -101,6 +102,18 @@ type DeployIPAM interface {
 type DeployBatches interface {
 	ProposeBatch(ctx context.Context, user string, req executions.BatchRequest) (executions.BatchCreated, error)
 	Batch(ctx context.Context, id string) (executions.BatchView, error)
+}
+
+// DeployBatchProbe is optionally implemented by a DeployBatches value.
+// BatchesAvailable reports whether the executor takes batches at all
+// (executorclient.Client.BatchesAvailable): false means it lacks the
+// capability (no batch authority, or an executor without the
+// credential-version read), and a run with a staged plan then ends at
+// "joined" as on a server without a batch planner. An error is treated as
+// transient: the run stays in bootstrapping, where proposing the plan
+// reports the failure and may be retried.
+type DeployBatchProbe interface {
+	BatchesAvailable(ctx context.Context) (bool, error)
 }
 
 // Run states (ADR 0008 section 6).
@@ -1813,7 +1826,16 @@ func (h *Handler) commitDeployJoin(r *http.Request, run deployRun, user string) 
 		})
 		return errors.New(msg)
 	}
-	batches := h.deployBatches != nil
+	batches, noBatchesMsg := h.deployBatches != nil, deployNoBatchesMessage
+	if p, ok := h.deployBatches.(DeployBatchProbe); ok && hasBatchSteps(run.plan) {
+		avail, err := p.BatchesAvailable(ctx)
+		switch {
+		case err != nil:
+			h.log.Warn("deploy: probe batch support", "run", run.id, "error", err)
+		case !avail:
+			batches, noBatchesMsg = false, deployExecutorNoBatchesMessage
+		}
+	}
 	h.deployRuns.set(run.id, func(x *deployRun) {
 		x.joined, x.join.approving, x.message = &res, false, ""
 		switch {
@@ -1824,7 +1846,7 @@ func (h *Handler) commitDeployJoin(r *http.Request, run deployRun, user string) 
 			// instead of waiting in bootstrapping for a plan that can
 			// never be proposed.
 			x.state, x.expires = deployJoined, now.Add(deployRunTTL)
-			x.message = deployNoBatchesMessage
+			x.message = noBatchesMsg
 		default:
 			x.state, x.deadline = deployBootstrapping, now.Add(deployBootstrapWindow)
 		}
@@ -1837,6 +1859,11 @@ func (h *Handler) commitDeployJoin(r *http.Request, run deployRun, user string) 
 // deployNoBatchesMessage explains a run that ended at "joined".
 const deployNoBatchesMessage = "bootstrap steps not available: this server has no batch planner, so the staged plan was not run; " +
 	"the guest is enrolled, run the plan's steps as separate operations on the host"
+
+// deployExecutorNoBatchesMessage explains a run that ended at "joined"
+// because the executor does not take batches.
+const deployExecutorNoBatchesMessage = "bootstrap steps not available: the executor does not take batches (no batch authority or no credential-version read), " +
+	"so the staged plan was not run; the guest is enrolled, run the plan's steps as separate operations on the host"
 
 func hasBatchSteps(plan []deployPlanStep) bool {
 	for _, s := range plan {
@@ -1902,6 +1929,11 @@ func (h *Handler) handleDeployPlan(w http.ResponseWriter, r *http.Request) {
 			msg += ": " + cleanText(he.Error())
 		case errors.Is(err, executions.ErrBatchCritical):
 			msg += ": " + cleanText(err.Error())
+		case errors.Is(err, executions.ErrBatchCredentials):
+			// Usually a locked executor keyring; nothing was proposed and
+			// the plan may be proposed again once it is unlocked.
+			h.log.Warn("deploy: propose staged plan", "run", run.id, "error", err)
+			msg += ": " + executions.ErrBatchCredentials.Error() + " (is the executor unlocked?); propose it again"
 		default:
 			h.log.Error("deploy: propose staged plan", "run", run.id, "error", err)
 		}
