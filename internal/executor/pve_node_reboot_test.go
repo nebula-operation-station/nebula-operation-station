@@ -438,6 +438,38 @@ func TestNodeRebootClusterIsCriticalAndNeedsTargetCount(t *testing.T) {
 	}
 }
 
+// TestNodeRebootLXCEvacuationIsDowntime: HA moves a container by restart
+// migration, so an LXC guest listed for HA evacuation is listed with
+// effect downtime (and how HA moves it); a QEMU guest HA live-migrates.
+func TestNodeRebootLXCEvacuationIsDowntime(t *testing.T) {
+	e := newRebootEnv(t, pvecontract.KindCluster, true)
+	b := pveRebootBound{Guests: []PveRebootGuest{
+		{Kind: "lxc", VMID: 301, Status: "running", HAEvacuates: true},
+		{Kind: "lxc", VMID: 302, Status: "running", AcceptedDowntime: true},
+		{Kind: "qemu", VMID: 201, Status: "running", HAEvacuates: true},
+	}}
+	ts, ls, err := rebootTargets(e.rm, "pve1", b)
+	if err != nil || len(ts) != 4 || len(ls) != 4 {
+		t.Fatalf("targets %+v %v", ls, err)
+	}
+	want := map[string]PveRebootTarget{
+		"node/0":   {Effect: pveRebootEffectReboot},
+		"lxc/301":  {Effect: pveRebootEffectDowntime, HAMove: pveRebootHAMoveRestart},
+		"lxc/302":  {Effect: pveRebootEffectDowntime},
+		"qemu/201": {Effect: pveRebootEffectEvacuation},
+	}
+	for _, l := range ls {
+		w := want[fmt.Sprintf("%s/%d", l.Kind, l.VMID)]
+		if l.Effect != w.Effect || l.HAMove != w.HAMove {
+			t.Fatalf("target %+v, want effect %q ha_move %q", l, w.Effect, w.HAMove)
+		}
+	}
+	raw, err := json.Marshal(ls[1])
+	if err != nil || !strings.Contains(string(raw), `"effect":"downtime"`) || !strings.Contains(string(raw), `"ha_move":"restart_migration"`) {
+		t.Fatalf("listed target %s %v", raw, err)
+	}
+}
+
 func TestNodeRebootTypedCountCoversEveryImpactedGuest(t *testing.T) {
 	e := newRebootEnv(t, pvecontract.KindCluster, true)
 	e.client.facts.HA.Maintenance["pve1"] = false

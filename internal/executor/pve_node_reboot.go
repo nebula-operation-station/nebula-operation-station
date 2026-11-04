@@ -145,6 +145,10 @@ const (
 	pveRebootEffectReboot     = "reboot"
 	pveRebootEffectDowntime   = "downtime"
 	pveRebootEffectEvacuation = "ha_evacuation"
+	// pveRebootHAMoveRestart marks a guest HA moves by restart migration
+	// (a container): it is stopped, moved and started again, so its
+	// effect is downtime.
+	pveRebootHAMoveRestart = "restart_migration"
 )
 
 // HA shutdown policies (datacenter option ha: shutdown_policy=...).
@@ -396,6 +400,9 @@ type PveRebootTarget struct {
 	Node        string `json:"node"`
 	VMID        uint64 `json:"vmid,omitempty"`
 	Effect      string `json:"effect"`
+	// HAMove is set for a guest HA evacuates with downtime: how HA moves
+	// it (pveRebootHAMoveRestart for a container).
+	HAMove string `json:"ha_move,omitempty"`
 }
 
 // pveRebootParams are the action parameters bound in the approval.
@@ -812,7 +819,8 @@ func (m *PveMutations) rebootRemote(remoteID string) (executordb.PveRemote, erro
 
 // rebootTargets returns the permit targets of a reboot of node with the
 // bound facts b: the node, then every guest it takes down or HA moves, in
-// bound order.
+// bound order. An LXC guest listed for HA evacuation is listed with effect
+// downtime and HAMove pveRebootHAMoveRestart.
 func rebootTargets(rm executordb.PveRemote, node string, b pveRebootBound) ([]canonical.Target, []PveRebootTarget, error) {
 	add := func(ts []canonical.Target, ls []PveRebootTarget, kind string, vmid uint64, effect string) ([]canonical.Target, []PveRebootTarget, error) {
 		t, err := (permit.ProviderMutationTarget{RemoteID: rm.RemoteID, TrustPin: rm.TrustPin, Kind: kind, Node: node, VMID: vmid}).RiskTarget()
@@ -826,8 +834,11 @@ func rebootTargets(rm executordb.PveRemote, node string, b pveRebootBound) ([]ca
 		return nil, nil, err
 	}
 	for _, g := range b.Guests {
-		effect := ""
+		effect, move := "", ""
 		switch {
+		case g.HAEvacuates && g.Kind == permit.ProviderKindLXC:
+			// HA moves a container by restart migration: downtime.
+			effect, move = pveRebootEffectDowntime, pveRebootHAMoveRestart
 		case g.HAEvacuates:
 			effect = pveRebootEffectEvacuation
 		case g.AcceptedDowntime:
@@ -838,6 +849,7 @@ func rebootTargets(rm executordb.PveRemote, node string, b pveRebootBound) ([]ca
 		if ts, ls, err = add(ts, ls, g.Kind, g.VMID, effect); err != nil {
 			return nil, nil, err
 		}
+		ls[len(ls)-1].HAMove = move
 	}
 	return ts, ls, nil
 }
