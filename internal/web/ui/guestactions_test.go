@@ -305,7 +305,11 @@ func TestChartPowerHiddenWithoutExecutor(t *testing.T) {
 // gpPost posts a form directly to the handler (no middleware).
 func gpPost(t *testing.T, h http.Handler, path string, form url.Values) *httptest.ResponseRecorder {
 	t.Helper()
-	return postForm(t, h, path, form)
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
 }
 
 func gpForm(vmid, kind, verb string) url.Values {
@@ -336,7 +340,7 @@ func TestGuestPowerProposalPageShowsExactTargetAndRisk(t *testing.T) {
 		"web-vm", ">100<", ">pve1<", "QEMU VM", ">stop<", gpRemote,
 		`class="badge badge--critical">HIGH<`, gpDigest,
 		"hard power off", // the destructive verb is spelled out
-		`class="button schedule-approve"`, `data-commit="/pve/guests/power/commit"`,
+		`class="button schedule-approve button--danger"`, `data-commit="/pve/guests/power/commit"`,
 		"webauthn.js", "schedules.js",
 	} {
 		if !strings.Contains(body, want) {
@@ -492,7 +496,11 @@ func TestGuestPowerProposeRefusals(t *testing.T) {
 		{"wrong generation", func() url.Values { v := gpForm("100", "qemu", "stop"); v.Set("generation", "2"); return v }(), http.StatusConflict},
 		{"bad vmid", gpForm("abc", "qemu", "stop"), http.StatusBadRequest},
 		{"unknown remote", func() url.Values { v := gpForm("100", "qemu", "stop"); v.Set("remote", "other"); return v }(), http.StatusConflict},
-		{"oversized remote", func() url.Values { v := gpForm("100", "qemu", "stop"); v.Set("remote", strings.Repeat("r", 300)); return v }(), http.StatusBadRequest},
+		{"oversized remote", func() url.Values {
+			v := gpForm("100", "qemu", "stop")
+			v.Set("remote", strings.Repeat("r", 300))
+			return v
+		}(), http.StatusBadRequest},
 		{"invalid UTF-8", func() url.Values { v := gpForm("100", "qemu", "stop"); v.Set("node", "\xff"); return v }(), http.StatusBadRequest},
 	}
 	for _, tc := range cases {
@@ -531,6 +539,7 @@ func TestGuestPowerExecutorRefusalIsText(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
 		t.Errorf("content type %q", ct)
 	}
+	e = newGPEnv(t, gpGuests()) // a fresh throttle
 	e.exec.proposeErr = errors.New("connection refused")
 	if rec := gpPost(t, e.h.Handler(), "/pve/guests/power", gpForm("100", "qemu", "stop")); rec.Code != http.StatusBadGateway ||
 		strings.Contains(rec.Body.String(), "connection refused") {

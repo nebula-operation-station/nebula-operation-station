@@ -1,0 +1,65 @@
+{{define "content"}}{{$d := .GuestAction}}
+<h1>Guest power: {{$d.Verb.Verb}}</h1>
+<section class="panel" aria-label="Guest power proposal">
+  {{if eq $d.State "pending"}}
+  <p class="hint">Check the guest, the action and the risk the executor decided, then approve. Nothing runs before approval.</p>
+  {{end}}
+  <dl class="kv">
+    <dt>Guest</dt><dd>{{$d.Name}}</dd>
+    <dt>VMID</dt><dd class="mono">{{$d.VMID}}</dd>
+    <dt>Kind</dt><dd>{{$d.KindLabel}}</dd>
+    <dt>Node</dt><dd class="mono">{{$d.Node}}</dd>
+    <dt>PVE remote</dt><dd class="mono">{{$d.Remote}}</dd>
+    <dt>Incarnation</dt><dd class="mono">generation {{$d.Generation}}</dd>
+    <dt>Action</dt><dd><span class="mono">{{$d.Verb.Verb}}</span>{{if $d.Verb.Destructive}} <strong class="status status--error">destructive</strong>{{end}}: {{$d.Verb.Explain}}</dd>
+    <dt>Risk (decided by the executor)</dt><dd><span class="badge {{$d.RiskClass}}">{{$d.Risk}}</span></dd>
+    <dt>Digest</dt><dd class="mono">{{$d.Digest}}</dd>
+  </dl>
+  {{if $d.Canonical}}
+  <details>
+    <summary>Exact request bound by the executor</summary>
+    <pre class="mono">{{$d.Canonical}}</pre>
+  </details>
+  {{end}}
+  {{if $d.Message}}<p class="status status--error">{{$d.Message}}</p>{{end}}
+  {{if eq $d.State "pending"}}
+  <div class="actions">
+    {{if $d.CLICommand}}
+    {{if $d.TypedCount}}
+    <p>The executor raised this action to {{$d.Risk}}: it needs the typed number of targets, which only the CLI asks for. Approve it on the executor host; the command shows the complete request first:</p>
+    {{else}}
+    <p>This executor is in hardened mode. Approve the action on the executor host; the command shows the complete request first:</p>
+    {{end}}
+    <pre class="mono" id="guest-power-cli">{{$d.CLICommand}}</pre>
+    <form method="post" action="/pve/guests/power/run" class="inline-form" data-fetch>
+      <input type="hidden" name="digest" value="{{$d.Digest}}">
+      <button type="submit" class="button{{if $d.Verb.Destructive}} button--danger{{end}}">Run the approved action</button>
+    </form>
+    {{else}}
+    {{if not $d.ChallengeExpiry.IsZero}}<p class="hint">Approve before {{timeTag $d.ChallengeExpiry}}; after that, propose again from the chart.</p>{{end}}
+    <button type="button" class="button schedule-approve{{if $d.Verb.Destructive}} button--danger{{end}}" data-id="{{$d.Digest}}" data-options="{{$d.Options}}" data-commit="/pve/guests/power/commit">Approve {{$d.Verb.Verb}} of {{$d.Name}} with security key</button>
+    {{end}}
+    <a class="button button--small" href="/inventory/chart">Cancel</a>
+  </div>
+  {{else if eq $d.State "approving"}}
+  <p class="status">Approval in progress…</p>
+  {{else if eq $d.State "running"}}
+  <p class="status">Approved; the executor is running the action and waits for the PVE task. Reload this page for the result.</p>
+  {{else if eq $d.State "done"}}
+  <p class="status">The executor recorded the run{{if $d.ExecutionID}} <span class="mono">{{$d.ExecutionID}}</span>{{end}}.</p>
+  {{if $d.Steps}}
+  <table class="table">
+    <thead><tr><th>Step state</th><th>Task</th><th>UPID</th></tr></thead>
+    <tbody>
+      {{range $d.Steps}}<tr><td>{{.State}}</td><td class="mono">{{.TaskType}}</td><td class="mono">{{.UPID}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{end}}
+  <p><a class="button button--small" href="/inventory/chart">Back to the chart</a></p>
+  {{else}}
+  <p><a class="button button--small" href="/inventory/chart">Back to the chart</a></p>
+  {{end}}
+</section>
+<p id="message" class="message" role="status" aria-live="polite"></p>
+{{end}}
