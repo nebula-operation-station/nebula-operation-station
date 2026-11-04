@@ -12,8 +12,21 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
+
+// TestCommitPVEGuestProvisionDeadlineCoversTheRun: the commit wait is the
+// executor's whole run bound, which covers the task wait of every step,
+// not one step's wait (the 30 min wait before covered only one).
+func TestCommitPVEGuestProvisionDeadlineCoversTheRun(t *testing.T) {
+	if pveGuestProvisionCommitWait < executor.PveGuestProvisionRunBound {
+		t.Fatalf("commit wait %v shorter than the executor run bound %v", pveGuestProvisionCommitWait, executor.PveGuestProvisionRunBound)
+	}
+	if pveGuestProvisionCommitWait < 4*30*time.Minute {
+		t.Fatalf("commit wait %v does not cover four 30 min task waits", pveGuestProvisionCommitWait)
+	}
+}
 
 func TestProposePVEGuestProvisionForwardsWithDefaultTimeout(t *testing.T) {
 	checkPVEAdminRPC(t, "ProposePVEGuestProvision", (*Client).ProposePVEGuestProvision)

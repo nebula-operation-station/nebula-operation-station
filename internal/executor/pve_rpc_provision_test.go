@@ -650,6 +650,89 @@ func TestServiceGuestProvisionResponseFailureReleasesTheVMID(t *testing.T) {
 	}
 }
 
+// TestServiceGuestProvisionRepliesBeforeTheCallerDeadline: a clone task
+// that outlasts the caller's deadline does not swallow the run: the commit
+// stops waiting shortly before the deadline and returns the execution and
+// the step states (clone still running, UPID recorded) while the caller
+// still listens, so the run page can follow the execution.
+func TestServiceGuestProvisionRepliesBeforeTheCallerDeadline(t *testing.T) {
+	e := newProvisionRPCEnv(t)
+	prop, d := e.proposeApproved(t, context.Background())
+	e.svc.pveMutations().MaxWait = time.Hour
+	e.pc.status = func(string) (PveTaskStatus, error) { return PveTaskStatus{Running: true}, nil }
+	committed := testProvisionSpec(bindingOf(e.tpl), PveAutomationCredentialRef)
+	committed.Vmid = prop.GetVmid()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	res, err := e.svc.CommitPVEGuestProvision(ctx, &pb.CommitPVEGuestProvisionRequest{Spec: committed,
+		ExecutionId: prop.GetExecutionId(), ExecutionDigest: d.String()})
+	if ctx.Err() != nil {
+		t.Fatalf("commit returned after the caller deadline: %v", ctx.Err())
+	}
+	if err != nil {
+		t.Fatalf("commit: %v, want the step states", err)
+	}
+	if res.GetExecutionId() != prop.GetExecutionId() || len(res.GetSteps()) != 1 || !res.GetGuestKept() {
+		t.Fatalf("result %+v", res)
+	}
+	if st := res.GetSteps()[0]; st.GetState() != string(executordb.PveJobRunning) || st.GetUpid() == "" {
+		t.Fatalf("clone step %+v, want running with its UPID", st)
+	}
+}
+
+// TestPveProvisionRunContextEndsBeforeTheDeadline: the run context ends
+// the reply margin before the caller's deadline, at most half the
+// remaining time, and has no deadline when the caller has none.
+func TestPveProvisionRunContextEndsBeforeTheDeadline(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name   string
+		remain time.Duration
+		want   time.Duration
+	}{
+		{name: "long", remain: time.Hour, want: time.Hour - pveProvisionReplyMargin},
+		{name: "short", remain: 10 * time.Second, want: 5 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent, cancel := context.WithDeadline(context.Background(), now.Add(tc.remain))
+			defer cancel()
+			ctx, cancelRun := pveProvisionRunContext(parent, now)
+			defer cancelRun()
+			dl, ok := ctx.Deadline()
+			if !ok || !dl.Equal(now.Add(tc.want)) {
+				t.Fatalf("deadline %v (%v), want %v", dl.Sub(now), ok, tc.want)
+			}
+		})
+	}
+	ctx, cancel := pveProvisionRunContext(context.Background(), now)
+	defer cancel()
+	if _, ok := ctx.Deadline(); ok {
+		t.Fatal("deadline without a caller deadline")
+	}
+}
+
+// TestPveGuestProvisionRunBoundCoversEveryStep: the commit bound a client
+// sizes its deadline by covers the task wait of every step of a full
+// provisioning (clone, config, resize, start) plus slack for the reads.
+func TestPveGuestProvisionRunBoundCoversEveryStep(t *testing.T) {
+	e := newProvisionRPCEnv(t)
+	prop, d := e.proposeApproved(t, context.Background())
+	committed := testProvisionSpec(bindingOf(e.tpl), PveAutomationCredentialRef)
+	committed.Vmid = prop.GetVmid()
+	res, err := e.svc.CommitPVEGuestProvision(context.Background(), &pb.CommitPVEGuestProvisionRequest{Spec: committed,
+		ExecutionId: prop.GetExecutionId(), ExecutionDigest: d.String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(res.GetSteps()); n > pveGuestProvisionMaxSteps {
+		t.Fatalf("%d steps, more than pveGuestProvisionMaxSteps %d", n, pveGuestProvisionMaxSteps)
+	}
+	if PveGuestProvisionRunBound < time.Duration(pveGuestProvisionMaxSteps)*pveTaskMaxWait+pveProvisionReplyMargin {
+		t.Fatalf("run bound %v does not cover %d task waits of %v", PveGuestProvisionRunBound, pveGuestProvisionMaxSteps, pveTaskMaxWait)
+	}
+}
+
 // proposeApproved proposes the designated-key spec over the RPC and
 // approves it with the CLI.
 func (e *provisionRPCEnv) proposeApproved(t *testing.T, ctx context.Context) (*pb.ProposePVEGuestProvisionResponse, canonical.Digest) {

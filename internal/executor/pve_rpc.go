@@ -74,11 +74,47 @@ const (
 	// pveGuestProvisionLifetime is how long a proposed provisioning permit
 	// (and its VMID reservation) can be approved and run.
 	pveGuestProvisionLifetime = 30 * time.Minute
+	// pveGuestProvisionMaxSteps is the most steps one provisioning runs:
+	// clone, config, resize and start.
+	pveGuestProvisionMaxSteps = 4
+	// pveGuestProvisionReadSlack covers the reads and dispatches around the
+	// task waits of one provisioning (template, guest list, storage, the
+	// final guest read).
+	pveGuestProvisionReadSlack = 10 * time.Minute
+	// pveProvisionReplyMargin is how long before the caller's deadline a
+	// commit stops waiting for tasks, so the response with the execution
+	// and the step states still reaches the caller; an open step is
+	// reconciled, never resent.
+	pveProvisionReplyMargin = 30 * time.Second
 	// State files of provisioning in the executor's data directory.
 	pveTemplatesFile    = "pve-templates.json"
 	pveVMIDsFile        = "pve-vmids.json"
 	pveCatalogStateFile = "pve-catalog.json"
 )
+
+// PveGuestProvisionRunBound bounds one CommitPVEGuestProvision: every step
+// may wait up to the task wait bound (pveTaskMaxWait) for its PVE task,
+// plus the reads around them. A caller deadline at least this long sees
+// the end of the run; a shorter one gets the step states of the run so
+// far shortly before it passes (pveProvisionRunContext).
+const PveGuestProvisionRunBound = pveGuestProvisionMaxSteps*pveTaskMaxWait + pveGuestProvisionReadSlack
+
+// pveProvisionRunContext derives the context a commit runs under: it ends
+// pveProvisionReplyMargin (at most half the remaining time) before ctx's
+// deadline, so the run stops waiting and the response with the step
+// states is sent while the caller still listens. Without a deadline it
+// is ctx.
+func pveProvisionRunContext(ctx context.Context, now time.Time) (context.Context, context.CancelFunc) {
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return context.WithCancel(ctx)
+	}
+	margin := pveProvisionReplyMargin
+	if rem := dl.Sub(now); rem < 2*margin {
+		margin = rem / 2
+	}
+	return context.WithDeadline(ctx, dl.Add(-margin))
+}
 
 var (
 	pveGuestProvisionArtifact = []byte(PveGuestProvisionAction + " " + pveGuestProvisionVersion + "\nProvision one guest from a prepared template.\n")
@@ -944,6 +980,8 @@ func (s *Service) proposePVEGuestProvision(ctx context.Context, in *pb.ProposePV
 // provisioner rebuilds the parameters from fresh reads, so anything that
 // changed refuses the permit. Once a step is recorded the response carries
 // the durable step states; an uncertain step is reconciled, never resent.
+// The run stops waiting for tasks shortly before the caller's deadline
+// (pveProvisionRunContext), so the states still reach the caller.
 // A failed run leaves the guest for inspection (guest_kept).
 func (s *Service) CommitPVEGuestProvision(ctx context.Context, in *pb.CommitPVEGuestProvisionRequest) (*pb.CommitPVEGuestProvisionResponse, error) {
 	req, err := provisionRequestFromProto(in.GetSpec())
@@ -959,7 +997,9 @@ func (s *Service) CommitPVEGuestProvision(ctx context.Context, in *pb.CommitPVEG
 	if p == nil {
 		return nil, errPveProvisionUnavailable
 	}
-	res, err := p.Provision(ctx, req)
+	runCtx, cancel := pveProvisionRunContext(ctx, time.Now())
+	defer cancel()
+	res, err := p.Provision(runCtx, req)
 	// Only this run's outcome is reported as step states: success, or a
 	// step that failed, is still running or is uncertain. Any other error
 	// (no approved permit, the permit already used, a changed spec) is
