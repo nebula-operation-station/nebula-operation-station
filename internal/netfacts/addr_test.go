@@ -310,3 +310,16 @@ func TestParseAddrsAcceptsNonEthernetLinkAddress(t *testing.T) {
 		}
 	}
 }
+
+func TestParseAddrsEtherRequiresMAC(t *testing.T) {
+	for _, addr := range []string{"0.0.0.0", "::", "00:11:22:33"} {
+		doc := `[{"ifname":"eth0","link_type":"ether","address":"` + addr + `","addr_info":[]}]`
+		res, err := ParseAddrs([]byte(doc))
+		if err != nil {
+			t.Fatalf("ParseAddrs: %v", err)
+		}
+		if len(res.Entries) != 1 || len(res.Entries[0].MAC) != 0 || !res.Incomplete {
+			t.Fatalf("%q on ether: got %+v Incomplete=%v, want MAC dropped and Incomplete", addr, res.Entries, res.Incomplete)
+		}
+	}
+}

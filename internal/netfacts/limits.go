@@ -122,14 +122,40 @@ func parseHostAddr(s string) (netip.Addr, bool) {
 // colon-separated hex bytes of another length (e.g. a 20-byte InfiniBand
 // address), at most maxLinkAddrLen bytes. A known non-Ethernet address is
 // not kept but is not a loss either; anything else is malformed.
-func parseLinkLayerAddr(s string) (mac net.HardwareAddr, known bool) {
+//
+// linkType is the "link_type" iproute2 prints next to the address. For
+// "ether" only a 6-byte MAC is well-formed, so a host cannot hide an
+// Ethernet interface's MAC behind an IP literal or other hex bytes.
+func parseLinkLayerAddr(s, linkType string) (mac net.HardwareAddr, known bool) {
 	if hw, err := net.ParseMAC(s); err == nil && len(hw) == 6 {
 		return hw, true
+	}
+	if linkType == "ether" {
+		return nil, false
 	}
 	if _, ok := parseHostAddr(s); ok {
 		return nil, true
 	}
 	return nil, isHexBytes(s)
+}
+
+// validKind reports whether s is a link kind from `ip -j -d link`
+// ("vlan", "bridge", "vxlan", "ip6tnl", ...): 1..maxKindLen bytes of
+// [a-z0-9_-]. Anything else (control bytes, upper case, non-ASCII) is
+// dropped as a loss.
+func validKind(s string) bool {
+	if len(s) == 0 || len(s) > maxKindLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // isHexBytes reports whether s is 1..maxLinkAddrLen two-digit hex bytes

@@ -316,3 +316,44 @@ func TestParseLinksRejectsNonInterfaceName(t *testing.T) {
 		})
 	}
 }
+
+func TestParseLinksInvalidKindIsDroppedAndIncomplete(t *testing.T) {
+	long := strings.Repeat("a", maxKindLen+1)
+	for _, kind := range []string{long, "vl\\u001ban", "vlan\\n", "VLAN", "br\\u202eidge", "vl\u00e4n", "v l"} {
+		doc := `[{"ifname":"eth0","linkinfo":{"info_kind":"` + kind + `"}}]`
+		res, err := ParseLinks([]byte(doc))
+		if err != nil {
+			t.Fatalf("%q: ParseLinks: %v", kind, err)
+		}
+		if len(res.Entries) != 1 || res.Entries[0].Kind != "" || !res.Incomplete {
+			t.Fatalf("%q: got %+v Incomplete=%v, want kind dropped and Incomplete", kind, res.Entries, res.Incomplete)
+		}
+	}
+	for _, kind := range []string{"vlan", "bridge", "ip6tnl", "ip6_vti", "team-slave", strings.Repeat("a", maxKindLen)} {
+		doc := `[{"ifname":"eth0","linkinfo":{"info_kind":"` + kind + `","info_data":{"id":10}}}]`
+		res, err := ParseLinks([]byte(doc))
+		if err != nil {
+			t.Fatalf("%q: ParseLinks: %v", kind, err)
+		}
+		if len(res.Entries) != 1 || res.Entries[0].Kind != kind || res.Incomplete {
+			t.Fatalf("%q: got %+v Incomplete=%v, want kind kept and complete", kind, res.Entries, res.Incomplete)
+		}
+	}
+}
+
+func TestParseLinksEtherRequiresMAC(t *testing.T) {
+	for _, addr := range []string{"0.0.0.0", "192.0.2.1", "::", "00:11:22:33", "00:00:01:04:fe:80:00:00:00:00:00:00:00:02:c9:03:00:0a:bc:de"} {
+		doc := `[{"ifname":"eth0","link_type":"ether","address":"` + addr + `"}]`
+		res, err := ParseLinks([]byte(doc))
+		if err != nil {
+			t.Fatalf("ParseLinks: %v", err)
+		}
+		if len(res.Entries) != 1 || len(res.Entries[0].MAC) != 0 || !res.Incomplete {
+			t.Fatalf("%q on ether: got %+v Incomplete=%v, want MAC dropped and Incomplete", addr, res.Entries, res.Incomplete)
+		}
+	}
+	res, err := ParseLinks([]byte(`[{"ifname":"eth0","link_type":"ether","address":"02:00:00:00:00:01"}]`))
+	if err != nil || res.Incomplete || len(res.Entries) != 1 || res.Entries[0].MAC.String() != "02:00:00:00:00:01" {
+		t.Fatalf("ether MAC: %+v err=%v", res, err)
+	}
+}

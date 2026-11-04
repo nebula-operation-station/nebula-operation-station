@@ -16,7 +16,7 @@ type Link struct {
 	// Kind is the link kind the host reported (vlan, bridge, veth, tun,
 	// wireguard, ...); empty for a physical interface, which iproute2
 	// prints without a "linkinfo" object, or when the reported kind is
-	// longer than maxKindLen.
+	// not a valid kind (see validKind; the table is then incomplete).
 	Kind string
 	// VLANID is the 802.1Q VLAN id of a vlan device (info_kind "vlan")
 	// from linkinfo.info_data.id, when the host reported one within
@@ -48,7 +48,9 @@ type LinkTable struct {
 	Dropped int
 	// Incomplete is true when the host reported data the parser did not
 	// keep: a skipped element (Dropped > 0), an invalid link-layer
-	// address, or a vlan device whose VLAN id is missing or out of range. An incomplete table must be
+	// address (including a non-MAC address on an "ether" link), an
+	// invalid parent or master name, an invalid link kind, or a vlan
+	// device whose VLAN id is missing or out of range. An incomplete table must be
 	// presented as such, never as the complete table (spec 09).
 	Incomplete bool
 }
@@ -60,8 +62,9 @@ type LinkTable struct {
 type linkDoc struct {
 	IfName   string       `json:"ifname"`
 	Address  string       `json:"address"` // the interface's MAC
-	Link     string       `json:"link"`    // parent device name (null -> "")
-	Master   string       `json:"master"`  // master device name
+	LinkType string       `json:"link_type"`
+	Link     string       `json:"link"`   // parent device name (null -> "")
+	Master   string       `json:"master"` // master device name
 	LinkInfo *linkInfoDoc `json:"linkinfo"`
 }
 
@@ -136,7 +139,7 @@ func parseLinkEntry(e json.RawMessage) (l Link, lossy, ok bool) {
 	}
 	l = Link{Name: d.IfName}
 	if d.Address != "" {
-		mac, known := parseLinkLayerAddr(d.Address)
+		mac, known := parseLinkLayerAddr(d.Address, d.LinkType)
 		l.MAC = mac
 		if !known {
 			lossy = true
@@ -160,7 +163,7 @@ func parseLinkEntry(e json.RawMessage) (l Link, lossy, ok bool) {
 		}
 	}
 	if d.LinkInfo != nil {
-		if d.LinkInfo.InfoKind != "" && len(d.LinkInfo.InfoKind) <= maxKindLen {
+		if validKind(d.LinkInfo.InfoKind) {
 			l.Kind = d.LinkInfo.InfoKind
 		} else if d.LinkInfo.InfoKind != "" {
 			lossy = true

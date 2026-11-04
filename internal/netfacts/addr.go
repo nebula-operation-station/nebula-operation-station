@@ -51,6 +51,7 @@ type AddrTable struct {
 type addrDoc struct {
 	IfName    string        `json:"ifname"`
 	Address   string        `json:"address"` // the interface's MAC
+	LinkType  string        `json:"link_type"`
 	OperState string        `json:"operstate"`
 	AddrInfo  []addrInfoDoc `json:"addr_info"`
 }
@@ -133,7 +134,7 @@ func parseAddrEntry(e json.RawMessage) (a Addr, lossy, ok bool) {
 	}
 	a = Addr{Name: d.IfName}
 	if d.Address != "" {
-		mac, known := parseLinkLayerAddr(d.Address)
+		mac, known := parseLinkLayerAddr(d.Address, d.LinkType)
 		a.MAC = mac
 		if !known {
 			lossy = true
