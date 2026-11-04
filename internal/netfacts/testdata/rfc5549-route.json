@@ -1,0 +1,57 @@
+[
+    {
+        "dst": "default",
+        "via": {
+            "family": "inet6",
+            "host": "fe80::1"
+        },
+        "dev": "eth0",
+        "protocol": "dhcp",
+        "metric": 100,
+        "flags": []
+    },
+    {
+        "dst": "192.168.178.0/24",
+        "dev": "eth0",
+        "protocol": "kernel",
+        "scope": "link",
+        "flags": []
+    },
+    {
+        "dst": "10.10.0.0/24",
+        "via": {
+            "family": "inet6",
+            "host": "fe80::2"
+        },
+        "dev": "eth1",
+        "protocol": "static",
+        "metric": 50,
+        "flags": []
+    },
+    {
+        "dst": "10.20.0.0/24",
+        "protocol": "static",
+        "metric": 75,
+        "flags": [],
+        "nexthops": [
+            {
+                "via": {
+                    "family": "inet6",
+                    "host": "fe80::3"
+                },
+                "dev": "eth0",
+                "weight": 1,
+                "flags": []
+            },
+            {
+                "via": {
+                    "family": "inet6",
+                    "host": "fe80::4"
+                },
+                "dev": "eth1",
+                "weight": 1,
+                "flags": []
+            }
+        ]
+    }
+]
