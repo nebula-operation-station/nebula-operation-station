@@ -171,10 +171,7 @@ func newPveTestEnv(t *testing.T) *pveTestEnv {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	db, err := executordb.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	db := openTestDB(t, dir)
 	v := vault.New(db)
 	v.SetMinParams(testVaultParams)
 	pass := strings.Repeat("correct-horse-battery-staple-", 4)

@@ -335,23 +335,11 @@ func newReconcileEnv(t *testing.T) *reconcileEnv {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	db, err := executordb.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	db := openTestDB(t, dir)
 
 	// The keyring is shared (see sharedKeys); a test that locks it must
-	// switch to a private one first.
+	// call usePrivateKeyring first.
 	kr, userPub := sharedTestKeyring(t)
-	t.Cleanup(func() {
-		if !kr.Unlocked() {
-			t.Error("test locked the shared keyring; call usePrivateKeyring before locking")
-			if _, err := kr.Unlock([]byte(testPassphrase)); err != nil {
-				t.Errorf("re-unlock shared keyring: %v", err)
-			}
-		}
-	})
 
 	clk := &fakeClock{t: time.Now()}
 	verifier, err := webauthnverify.New(webauthnverify.Config{

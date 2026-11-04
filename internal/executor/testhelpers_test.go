@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vault"
 )
@@ -48,6 +49,8 @@ func TestMain(m *testing.M) {
 }
 
 // sharedTestKeyring returns the shared unlocked keyring and its public key.
+// It fails t if the keyring is locked when t ends; a test that locks the
+// keyring must use a private one (newPrivateTestKeyring).
 func sharedTestKeyring(t *testing.T) (*keyring.Keyring, ssh.PublicKey) {
 	t.Helper()
 	keyPEM, pub := testCredentialKey(t)
@@ -64,7 +67,78 @@ func sharedTestKeyring(t *testing.T) (*keyring.Keyring, ssh.PublicKey) {
 	if k.err != nil {
 		t.Fatal(k.err)
 	}
-	return k.kr, pub
+	kr := k.kr
+	t.Cleanup(func() {
+		if !kr.Unlocked() {
+			t.Error("test locked the shared keyring; use a private keyring before locking")
+			if _, err := kr.Unlock([]byte(testPassphrase)); err != nil {
+				t.Errorf("re-unlock shared keyring: %v", err)
+			}
+		}
+	})
+	return kr, pub
+}
+
+// templateDB holds the bytes of a freshly migrated executor database.
+// Applying all migrations takes about 0.4 s under -race; copying the
+// migrated file takes milliseconds. executordb's own tests cover migrating
+// an empty database.
+var templateDB struct {
+	once sync.Once
+	raw  []byte
+	err  error
+}
+
+// openTestDB opens the executor database in dir (a private directory). If
+// dir holds no database yet, it starts from a copy of the migrated
+// template instead of migrating an empty file. The database is closed when
+// t ends.
+func openTestDB(t *testing.T, dir string) *executordb.DB {
+	t.Helper()
+	path := filepath.Join(dir, executordb.FileName)
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		tp := &templateDB
+		tp.once.Do(func() { tp.raw, tp.err = buildTemplateDB() })
+		if tp.err != nil {
+			t.Fatal(tp.err)
+		}
+		if err := os.WriteFile(path, tp.raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, err := executordb.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// buildTemplateDB migrates an empty database in a scratch directory and
+// returns the closed database file.
+func buildTemplateDB() ([]byte, error) {
+	dir, err := os.MkdirTemp("", "executor-test-db-")
+	if err != nil {
+		return nil, fmt.Errorf("template directory: %w", err)
+	}
+	defer os.RemoveAll(dir)
+	db, err := executordb.Open(dir)
+	if err != nil {
+		return nil, fmt.Errorf("migrate template: %w", err)
+	}
+	if err := db.Close(); err != nil {
+		return nil, fmt.Errorf("close template: %w", err)
+	}
+	// Close checkpoints the WAL into the main file; a leftover WAL would
+	// mean the copy misses data.
+	if _, err := os.Lstat(filepath.Join(dir, executordb.FileName+"-wal")); err == nil {
+		return nil, fmt.Errorf("template database left a WAL file")
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, executordb.FileName))
+	if err != nil {
+		return nil, fmt.Errorf("read template: %w", err)
+	}
+	return raw, nil
 }
 
 // newPrivateTestKeyring returns an unlocked keyring of its own, with its key

@@ -20,7 +20,6 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vault"
@@ -275,10 +274,9 @@ func newProvisionRPCEnv(t *testing.T) *provisionRPCEnv {
 	if err := os.WriteFile(filepath.Join(keysDir, "cred.key"), keyPEM, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	kr := keyring.New(keysDir)
-	if _, err := kr.Unlock([]byte(testPassphrase)); err != nil {
-		t.Fatal(err)
-	}
+	// keysDir holds the key file for the backup paths; the Service uses
+	// the shared unlocked keyring with the same key.
+	kr, _ := sharedTestKeyring(t)
 	v, err := webauthnverify.New(webauthnverify.Config{RPID: "mut.test", Origins: []string{"https://mut.test"}, Counters: e.pe.db}, nil)
 	if err != nil {
 		t.Fatal(err)
