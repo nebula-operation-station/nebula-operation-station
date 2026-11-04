@@ -423,7 +423,8 @@ func (s *Store) observe(ctx context.Context, items []item, at time.Time) (Ingest
 // Cap count queries. Both are bounded by a LIMIT (the cap itself), so
 // the work under the write lock does not grow with the table; the
 // per-host count uses the partial index software_catalog_first_host
-// (the "first_host <> ''" term lets SQLite prove the index applies).
+// (the redundant non-empty first_host term lets SQLite prove that the
+// partial index applies).
 const (
 	countCatalogQuery     = `SELECT COUNT(*) FROM (SELECT 1 FROM software_catalog LIMIT ?)`
 	countHostEntriesQuery = `SELECT COUNT(*) FROM (SELECT 1 FROM software_catalog WHERE first_host = ? AND first_host <> '' LIMIT ?)`
