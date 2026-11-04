@@ -1109,18 +1109,21 @@ func TestDispatchNodeRebootStepRefusesMalformedSteps(t *testing.T) {
 }
 
 func TestDecodeHAOption(t *testing.T) {
+	// A named key keeps the literal's alignment identical under the gofmt
+	// of Go 1.26 (lint job) and Go 1.27 (test job).
+	const dupPolicy = `{"shutdown_policy":"migrate,shutdown_policy=freeze"}`
 	for in, want := range map[string]string{
-		`"shutdown_policy=migrate"`:                            pveHAPolicyMigrate,
-		`{"shutdown_policy":"migrate"}`:                        pveHAPolicyMigrate,
-		`{"shutdown_policy":"freeze","other":1}`:               "freeze",
-		`{}`:                                                   pveHAPolicyConditional,
-		`{"shutdown_policy":"bogus"}`:                          "",
-		`{"shutdown_policy":1}`:                                "",
-		`{"shutdown_policy":"migrate,x=y"}`:                    "",
-		`null`:                                                 "",
-		`["shutdown_policy=migrate"]`:                          "",
-		`"` + strings.Repeat("a", 300) + `"`:                   "",
-		`{"shutdown_policy":"migrate,shutdown_policy=freeze"}`: "",
+		`"shutdown_policy=migrate"`:              pveHAPolicyMigrate,
+		`{"shutdown_policy":"migrate"}`:          pveHAPolicyMigrate,
+		`{"shutdown_policy":"freeze","other":1}`: "freeze",
+		`{}`:                                     pveHAPolicyConditional,
+		`{"shutdown_policy":"bogus"}`:            "",
+		`{"shutdown_policy":1}`:                  "",
+		`{"shutdown_policy":"migrate,x=y"}`:      "",
+		`null`:                                   "",
+		`["shutdown_policy=migrate"]`:            "",
+		`"` + strings.Repeat("a", 300) + `"`:     "",
+		dupPolicy:                                "",
 	} {
 		got, err := decodeHAOption(json.RawMessage(in))
 		if want == "" {
