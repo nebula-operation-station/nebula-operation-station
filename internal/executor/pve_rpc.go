@@ -117,13 +117,14 @@ func (s *Service) newPveMutationClient() *pveMutationClient {
 // logPveMutationBlock logs the failing step of a mutation-path block
 // (blockPveMutation); a successful block logs nothing here.
 func (s *Service) logPveMutationBlock(remoteID string, err error) {
-	switch {
-	case err == nil:
-	case errors.Is(err, errPveTrustBlockNotRecorded):
-		s.log.Error("pve mutation trust block not recorded", "remote", remoteID, "err", err)
-	default:
-		s.log.Error("pve mutation trust block recorded; authority revocation failed", "remote", remoteID, "err", err)
+	if err == nil {
+		return
 	}
+	msg := "pve mutation trust block recorded; authority revocation failed"
+	if errors.Is(err, errPveTrustBlockNotRecorded) {
+		msg = "pve mutation trust block not recorded"
+	}
+	s.log.Error(msg, "remote", remoteID, "err", err)
 }
 
 // pveTrustFence returns the trust fence of the executor's mutation engine
