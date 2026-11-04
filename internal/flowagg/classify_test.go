@@ -173,3 +173,19 @@ func TestClassifyRejectsTooManyListeners(t *testing.T) {
 		t.Fatalf("Classify = %v, want ErrInvalidSnapshot", err)
 	}
 }
+
+func TestFlowKeyServerAddrAndProtoString(t *testing.T) {
+	k := FlowKey{A: addr("10.0.0.1"), B: addr("10.0.0.2"), Proto: TCP, ServerPort: 22, Server: SideA, Tier: "socket"}
+	if k.ServerAddr() != addr("10.0.0.1") {
+		t.Fatalf("ServerAddr side A = %v", k.ServerAddr())
+	}
+	k.Server = SideB
+	if k.ServerAddr() != addr("10.0.0.2") {
+		t.Fatalf("ServerAddr side B = %v", k.ServerAddr())
+	}
+	for p, want := range map[Proto]string{TCP: "tcp", UDP: "udp", 1: "proto(1)"} {
+		if p.String() != want {
+			t.Errorf("Proto(%d).String() = %q, want %q", uint8(p), p.String(), want)
+		}
+	}
+}
