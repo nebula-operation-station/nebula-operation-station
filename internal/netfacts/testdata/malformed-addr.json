@@ -1,0 +1,8 @@
+[
+  {"ifname":"eth0","address":"bc:24:11:aa:bb:01","operstate":"UP","addr_info":[{"family":"inet","local":"192.168.178.10","prefixlen":24}]},
+  {"ifname":"bad\u0001name","address":"bc:24:11:aa:bb:01","operstate":"UP","addr_info":[{"family":"inet","local":"10.0.0.1","prefixlen":24}]},
+  {"ifname":"eth1","address":"not-a-mac","operstate":"UP","addr_info":[{"family":"inet","local":"10.0.0.2","prefixlen":24}]},
+  {"ifname":"eth2","address":"bc:24:11:aa:bb:02","operstate":"SPOOFED","addr_info":[{"family":"inet","local":"10.0.0.3","prefixlen":24}]},
+  {"ifname":"eth3","address":"bc:24:11:aa:bb:03","operstate":"UP","addr_info":[{"family":"inet","local":"10.0.0.4","prefixlen":33},{"family":"inet6","local":"fe80::1","prefixlen":129},{"family":"inets","local":"10.0.0.5","prefixlen":24},{"family":"inet","local":"not-an-ip","prefixlen":24}]},
+  {"address":"bc:24:11:aa:bb:04","operstate":"UP","addr_info":[{"family":"inet","local":"10.0.0.6","prefixlen":24}]}
+]

@@ -1,0 +1,6 @@
+[
+  {"ifindex":1,"ifname":"lo","address":"00:00:00:00:00:00","operstate":"UNKNOWN","addr_info":[{"family":"inet","local":"127.0.0.1","prefixlen":8}]},
+  {"ifindex":2,"ifname":"eth0","address":"08:00:27:aa:bb:cc","operstate":"UP","addr_info":[{"family":"inet","local":"192.168.1.100","prefixlen":24}]},
+  {"ifindex":4,"ifname":"docker0","address":"02:42:ac:11:00:01","operstate":"UP","addr_info":[{"family":"inet","local":"172.17.0.1","prefixlen":16}]},
+  {"ifindex":6,"ifname":"br-1a2b3c4d5e6f","address":"02:42:ac:12:00:01","operstate":"UP","addr_info":[{"family":"inet","local":"172.18.0.1","prefixlen":16}]}
+]

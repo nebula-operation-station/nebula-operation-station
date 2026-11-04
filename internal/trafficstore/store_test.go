@@ -261,6 +261,47 @@ func TestQueryPlansUseIndexes(t *testing.T) {
 		{"lookup unowned address", lookupUnownedSQL, []any{"10.0.0.1"}, []string{"idx_net_endpoint_addresses_address"}, "SCAN net_endpoint_addresses"},
 		{"cap counter", `SELECT n FROM traffic_counts WHERE name = ? AND reporter = ?`, []any{"buckets", ""},
 			[]string{"SEARCH traffic_counts"}, "SCAN traffic_counts"},
+		// Write path of UpsertEndpoint.
+		{"find by mac", findByMACSQL, []any{"00:11:22:33:44:55"}, []string{"idx_net_endpoints_mac"}, "SCAN net_endpoints"},
+		{"lookup by mac", lookupByMACSQL, []any{"00:11:22:33:44:55"}, []string{"idx_net_endpoints_mac"}, "SCAN net_endpoints"},
+		{"learn mac by address", learnMACSQL("?,?"), []any{"10.0.0.1", "10.0.0.2", "r", true},
+			[]string{"idx_net_endpoint_addresses_address", "SEARCH e USING INDEX sqlite_autoindex_net_endpoints_1", "SEARCH r"},
+			"SCAN a"},
+		{"match by address", matchAddressSQL("?,?", "?"), []any{"10.0.0.1", "10.0.0.2", true, "00:11:22:33:44:55", "r", "r"},
+			[]string{"idx_net_endpoint_addresses_address", "SEARCH e USING INDEX sqlite_autoindex_net_endpoints_1"},
+			"SCAN a"},
+		{"match by address without macs", matchAddressSQL("?", ""), []any{"10.0.0.1", false, "r", "r"},
+			[]string{"idx_net_endpoint_addresses_address"}, "SCAN a"},
+		{"known addresses", knownAddressesSQL("?,?"), []any{"ep-x", "o", "o", "10.0.0.1", "10.0.0.2"},
+			[]string{"SEARCH net_endpoint_addresses USING"}, "SCAN net_endpoint_addresses"},
+		{"count addresses", countAddressesSQL("?,?"), []any{"10.0.0.1", "10.0.0.2", "ep-x", "r"},
+			[]string{"SEARCH net_endpoint_addresses USING", "(endpoint_id=? AND reporter=?)"}, "SCAN net_endpoint_addresses"},
+		{"count reporter addresses", countReporterAddressesSQL, []any{"ep-x", "r"},
+			[]string{"SEARCH net_endpoint_addresses USING", "(endpoint_id=? AND reporter=?)"}, "SCAN net_endpoint_addresses"},
+		{"drop unattested", dropUnattestedSQL("?"), []any{"ep-x", "r", "10.0.0.1"},
+			[]string{"SEARCH net_endpoint_addresses USING", "(endpoint_id=? AND reporter=?)"}, "SCAN net_endpoint_addresses"},
+		{"drop unattested without addresses", dropUnattestedSQL(""), []any{"ep-x", "r"},
+			[]string{"SEARCH net_endpoint_addresses USING", "(endpoint_id=? AND reporter=?)"}, "SCAN net_endpoint_addresses"},
+		{"count non-owner reporters", countNonOwnersSQL, []any{"ep-x", "o"},
+			[]string{"SEARCH net_endpoint_reporters USING", "(endpoint_id=?)"}, "SCAN net_endpoint_reporters"},
+		{"release stale attestations", releaseAttestedSQL("?,?"), []any{"10.0.0.1", "10.0.0.2", "ep-x", "o"},
+			[]string{"SEARCH net_endpoint_addresses USING INDEX idx_net_endpoint_addresses_address", "SEARCH e USING INDEX sqlite_autoindex_net_endpoints_1"},
+			"SCAN net_endpoint_addresses"},
+		{"clear unattested owner", clearUnattestedOwnerSQL, []any{"ep-x"},
+			[]string{"SEARCH net_endpoints USING INDEX sqlite_autoindex_net_endpoints_1", "SEARCH a USING"}, "SCAN"},
+		// ReconcileIdentities.
+		{"list owners", listOwnersSQL, nil, []string{"idx_net_endpoints_owner"}, "SCAN net_endpoints\n"},
+		{"reconcile addresses", reconcileAddrsSQL("?,?"), []any{"o", "o", "10.0.0.1", "10.0.0.2"},
+			[]string{"SEARCH net_endpoint_addresses USING", "(endpoint_id=? AND reporter=?)", "idx_net_endpoints_owner (owner=?)"},
+			"SCAN"},
+		{"reconcile addresses without addresses", reconcileAddrsSQL(""), []any{"o", "o"},
+			[]string{"SEARCH net_endpoint_addresses USING", "idx_net_endpoints_owner (owner=?)"}, "SCAN"},
+		{"release mac owner", releaseMACOwnerSQL("?,?"), []any{"o", "00:11:22:33:44:55", "00:11:22:33:44:56"},
+			[]string{"idx_net_endpoints_owner (owner=?)"}, "SCAN"},
+		{"release mac owner without macs", releaseMACOwnerSQL(""), []any{"o"},
+			[]string{"idx_net_endpoints_owner (owner=?)"}, "SCAN"},
+		{"release mac-less owner", releaseMACLessOwnerSQL, []any{"o"},
+			[]string{"idx_net_endpoints_owner (owner=?)", "SEARCH a USING"}, "SCAN"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -282,7 +323,8 @@ func TestUpsertEndpoint(t *testing.T) {
 	ctx := context.Background()
 
 	e := testEndpoint("10.0.0.1", "00:11:22:33:44:55", "reporter-a")
-	if err := s.UpsertEndpoint(ctx, e, macIdentity("00:11:22:33:44:55")); err != nil {
+	ownA := hostIdentity("00:11:22:33:44:55", "10.0.0.1", "10.0.0.2")
+	if err := s.UpsertEndpoint(ctx, e, ownA); err != nil {
 		t.Fatalf("upsert endpoint: %v", err)
 	}
 	got := mustLookup(t, s, "00:11:22:33:44:55", "")
@@ -311,7 +353,7 @@ func TestUpsertEndpoint(t *testing.T) {
 	e2.Hostname = ""
 	e2.FirstSeen = time.Time{}
 	e2.LastSeen = *now
-	if err := s.UpsertEndpoint(ctx, e2, Identity{}); err != nil {
+	if err := s.UpsertEndpoint(ctx, e2, ownA); err != nil {
 		t.Fatalf("re-upsert endpoint: %v", err)
 	}
 	got, err := s.Endpoint(ctx, id)
@@ -335,7 +377,7 @@ func TestUpsertEndpoint(t *testing.T) {
 	e3 := testEndpoint("10.0.0.1", "00:11:22:33:44:55", "reporter-a")
 	e3.FirstSeen = testNow.Add(-5 * time.Hour)
 	e3.LastSeen = testNow.Add(-4 * time.Hour)
-	if err := s.UpsertEndpoint(ctx, e3, Identity{}); err != nil {
+	if err := s.UpsertEndpoint(ctx, e3, ownA); err != nil {
 		t.Fatalf("upsert earlier observation: %v", err)
 	}
 	got, err = s.Endpoint(ctx, id)
@@ -491,7 +533,7 @@ func TestEndpointDHCPReuseCreatesNewEndpoint(t *testing.T) {
 	// address resolves to it.
 	self := fresh
 	self.Reporter = "new-device"
-	if err := s.UpsertEndpoint(ctx, self, macIdentity("aa:bb:cc:00:00:02")); err != nil {
+	if err := s.UpsertEndpoint(ctx, self, hostIdentity("aa:bb:cc:00:00:02", "10.0.0.9")); err != nil {
 		t.Fatalf("upsert owner: %v", err)
 	}
 	for range 3 {
@@ -564,7 +606,8 @@ func TestEndpointHostileFirstClaimer(t *testing.T) {
 	owner := testEndpoint("10.0.0.1", mac, "owner")
 	owner.Hostname = ""
 	owner.VLAN = 0
-	if err := s.UpsertEndpoint(ctx, owner, macIdentity("aa:aa:aa:aa:aa:aa", mac)); err != nil {
+	ownerID := Identity{MACs: []string{"aa:aa:aa:aa:aa:aa", mac}, Addrs: addrList("10.0.0.1", "10.0.0.2")}
+	if err := s.UpsertEndpoint(ctx, owner, ownerID); err != nil {
 		t.Fatalf("upsert owner: %v", err)
 	}
 	got = mustLookup(t, s, mac, "")
@@ -590,28 +633,37 @@ func TestEndpointHostileFirstClaimer(t *testing.T) {
 		t.Errorf("lookup of the owner's address = %s, want %s", g.ID, got.ID)
 	}
 
-	// The owner's updates keep working: its address slots are its own.
-	owner.Addresses = []netip.Addr{netip.MustParseAddr("10.0.0.2")}
+	// The owner's updates keep working: its address slots are its own,
+	// and only addresses in its records are attached.
+	owner.Addresses = []netip.Addr{netip.MustParseAddr("10.0.0.2"), netip.MustParseAddr("10.9.0.7")}
 	owner.Hostname = "real"
-	if err := s.UpsertEndpoint(ctx, owner, macIdentity(mac)); err != nil {
+	if err := s.UpsertEndpoint(ctx, owner, ownerID); err != nil {
 		t.Fatalf("owner update after intruder: %v", err)
 	}
 	got = mustLookup(t, s, mac, "")
-	if got.Hostname != "real" || len(got.Addresses) != 2 {
-		t.Errorf("hostname/addresses = %q/%v, want real and two addresses", got.Hostname, got.Addresses)
+	if got.Hostname != "real" || !slices.Equal(got.Addresses, addrList("10.0.0.1", "10.0.0.2")) {
+		t.Errorf("hostname/addresses = %q/%v, want real and the two attested addresses", got.Hostname, got.Addresses)
 	}
 	// The intruder's further addresses are refused at its own limit.
 	evil.Addresses = []netip.Addr{netip.MustParseAddr("10.9.1.1")}
 	if err := s.UpsertEndpoint(ctx, evil, Identity{}); !errors.Is(err, ErrLimit) {
 		t.Errorf("intruder beyond its address cap: err = %v, want ErrLimit", err)
 	}
-	// Another host claiming the same MAC by its records does not take
-	// over an owned endpoint (the caller leaves out shared MACs).
-	if err := s.UpsertEndpoint(ctx, testEndpoint("10.0.0.3", mac, "second-claimer"), macIdentity(mac)); err != nil {
+	// A reporter without the MAC in its records never takes over.
+	if err := s.UpsertEndpoint(ctx, testEndpoint("10.0.0.3", mac, "second-claimer"), hostIdentity("", "10.0.0.3")); err != nil {
 		t.Fatalf("upsert second claimer: %v", err)
 	}
 	if g := mustLookup(t, s, mac, ""); g.Owner != "owner" {
-		t.Errorf("owner = %q after a second claim, want owner", g.Owner)
+		t.Errorf("owner = %q after a claim without records, want owner", g.Owner)
+	}
+	// Ownership follows the server's current records: the host whose
+	// records now hold the MAC (the caller leaves out shared MACs) is the
+	// owner.
+	if err := s.UpsertEndpoint(ctx, testEndpoint("10.0.0.3", mac, "second-claimer"), hostIdentity(mac, "10.0.0.3")); err != nil {
+		t.Fatalf("upsert second claimer with records: %v", err)
+	}
+	if g := mustLookup(t, s, mac, ""); g.Owner != "second-claimer" || !slices.Equal(g.Addresses, addrList("10.0.0.3")) {
+		t.Errorf("owner/addresses = %q/%v, want second-claimer with 10.0.0.3", g.Owner, g.Addresses)
 	}
 
 	// Links come from server-side matching.
@@ -637,7 +689,7 @@ func TestEndpointAddressAttribution(t *testing.T) {
 
 	// An owned MAC endpoint.
 	owned := testEndpoint("10.0.0.1", "00:11:22:33:44:55", "owner")
-	if err := s.UpsertEndpoint(ctx, owned, macIdentity(owned.MAC)); err != nil {
+	if err := s.UpsertEndpoint(ctx, owned, hostIdentity(owned.MAC, "10.0.0.1")); err != nil {
 		t.Fatalf("upsert owned: %v", err)
 	}
 	ownedID := mustLookup(t, s, owned.MAC, "").ID
@@ -710,14 +762,26 @@ func TestEndpointAddressAttribution(t *testing.T) {
 		t.Errorf("address-only endpoint = %+v", g)
 	}
 
-	// The same address on two owned endpoints is ambiguous.
+	// An address the records move to another host resolves to its
+	// current holder: the former owner's attestation is released.
 	for i, rep := range []string{"host-1", "host-2"} {
 		e := testEndpoint("10.0.3.1", fmt.Sprintf("00:11:22:33:55:0%d", i), rep)
-		if err := s.UpsertEndpoint(ctx, e, macIdentity(e.MAC)); err != nil {
+		if err := s.UpsertEndpoint(ctx, e, hostIdentity(e.MAC, "10.0.3.1")); err != nil {
 			t.Fatalf("upsert %s: %v", rep, err)
 		}
 	}
-	if _, found, err := s.LookupEndpoint(ctx, "", addr("10.0.3.1")); found || !errors.Is(err, ErrAmbiguous) {
+	if g := mustLookup(t, s, "", "10.0.3.1"); g.Owner != "host-2" {
+		t.Errorf("moved owned address: owner %q, want host-2", g.Owner)
+	}
+	// The same address on two endpoints of one owner is ambiguous.
+	for i := range 2 {
+		e := testEndpoint("10.0.3.5", fmt.Sprintf("00:11:22:33:56:0%d", i), "host-5")
+		own := Identity{MACs: []string{"00:11:22:33:56:00", "00:11:22:33:56:01"}, Addrs: []netip.Addr{addr("10.0.3.5")}}
+		if err := s.UpsertEndpoint(ctx, e, own); err != nil {
+			t.Fatalf("upsert host-5: %v", err)
+		}
+	}
+	if _, found, err := s.LookupEndpoint(ctx, "", addr("10.0.3.5")); found || !errors.Is(err, ErrAmbiguous) {
 		t.Errorf("shared owned address: found=%v err=%v, want ErrAmbiguous", found, err)
 	}
 
