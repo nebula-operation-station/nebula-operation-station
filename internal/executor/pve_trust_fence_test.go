@@ -6,15 +6,21 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"net"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
@@ -372,4 +378,81 @@ func svcRemote(t *testing.T, e *pveReadEnv) executordb.PveRemote {
 		t.Fatalf("remote: %v %v", ok, err)
 	}
 	return rm
+}
+
+// rotateReadTokenAsAdmin rotates the read token of the env's remote over a
+// real Unix socket gRPC connection whose peer (this process) holds the
+// admin role, and returns the admin identity the executor sees.
+func rotateReadTokenAsAdmin(t *testing.T, e *pveReadEnv) (string, error) {
+	t.Helper()
+	sock := filepath.Join(t.TempDir(), "pve.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid := uint32(os.Getuid())
+	srv := NewGRPCServer(e.svc, peercred.NewPolicy(map[uint32][]peercred.Role{uid: {peercred.RoleAdmin}}, MethodRoles()), e.svc.log)
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { srv.Stop(); _ = ln.Close() })
+	conn, err := grpc.NewClient("passthrough:///executor", grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return peercred.DialVerified(ctx, sock, uid)
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err = pb.NewExecutorServiceClient(conn).RotatePVEToken(ctx, &pb.RotatePVETokenRequest{
+		RemoteId: pveReadRemote, Purpose: PvePurposeRead, Token: []byte(pveReadToken)})
+	return string(peercred.RoleAdmin) + ":uid" + strconv.FormatUint(uint64(uid), 10), err
+}
+
+// TestPveTrustBlockNamesWhoTriggeredIt: a trust block that an admin's
+// token rotation triggers names that admin in blocked_by; a block that a
+// read or a mutation connection triggers names the executor. The fence
+// behaviour (block recorded, not fenced, grants revoked) is the same.
+func TestPveTrustBlockNamesWhoTriggeredIt(t *testing.T) {
+	ctx := context.Background()
+	for _, path := range []string{"rotation", "read", "provision read", "mutation"} {
+		t.Run(path, func(t *testing.T) {
+			e := newPveReadEnv(t, pvecontract.KindStandalone)
+			e.approve(e.grantDoc(pveReadGrantID, 240, permit.ProviderMethodNodes))
+			rm := e.remote()
+			impostor := makeTestChain(t)
+			e.pve.srv.TLS.Certificates = []tls.Certificate{impostor.tls}
+			e.pve.srv.CloseClientConnections()
+
+			want := pveExecutorActor
+			var err error
+			switch path {
+			case "rotation":
+				want, err = rotateReadTokenAsAdmin(t, e)
+			case "read":
+				_, err = e.read(pb.PVEReadMethod_PVE_READ_METHOD_NODES)
+			case "provision read":
+				_, err = pveProvisionReaderAPI{agent: pveGuestAgentAPI{s: e.svc}}.ClusterInventory(ctx, rm, tokenOf(pveReadToken))
+			case "mutation":
+				_, err = e.svc.newPveMutationClient().RecentTasks(ctx, rm, "pve1", time.Time{}, tokenOf(mutReadToken))
+			}
+			if err == nil {
+				t.Fatal("connection to an impostor succeeded")
+			}
+			cur := svcRemote(t, e)
+			if cur.State != executordb.StateBlocked {
+				t.Fatalf("remote state = %s, want blocked", cur.State)
+			}
+			if cur.BlockedBy != want {
+				t.Fatalf("blocked_by = %q, want %q", cur.BlockedBy, want)
+			}
+			if _, fenced := e.svc.pveTrustFence().covers(rm); fenced {
+				t.Fatal("recorded block fenced")
+			}
+			assertGrantsRevoked(t, e)
+			if e.pve.requests.Load() != 0 || e.pve.badAuth.Load() != 0 {
+				t.Fatal("a request reached the impostor")
+			}
+		})
+	}
 }
