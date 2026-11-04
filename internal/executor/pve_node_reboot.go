@@ -1164,7 +1164,7 @@ func pveNodeRebootFacts(ctx context.Context, hc *http.Client, base string, read 
 	if f.Nodes, err = inv.ListNodes(ctx); err != nil {
 		return PveNodeRebootFacts{}, errPveMutationRead
 	}
-	cr := pveClusterReader(hc, base, read)
+	cr := pc // NewClient-built clients serve the cluster reads (#228)
 	if f.Cluster, err = cr.ClusterStatus(ctx); err != nil {
 		return PveNodeRebootFacts{}, errPveMutationRead
 	}
@@ -1553,7 +1553,7 @@ func (c *pveMutationClient) NodeBoot(ctx context.Context, rm executordb.PveRemot
 }
 
 func pveNodeBoot(ctx context.Context, hc *http.Client, base string, read pveapi.TokenSupplier, node string) (PveNodeBoot, error) {
-	inv, _, err := pveRebootInventory(hc, base, read)
+	inv, pc, err := pveRebootInventory(hc, base, read)
 	if err != nil {
 		return PveNodeBoot{}, err
 	}
@@ -1561,7 +1561,7 @@ func pveNodeBoot(ctx context.Context, hc *http.Client, base string, read pveapi.
 	if err != nil {
 		return PveNodeBoot{}, errPveMutationRead
 	}
-	cs, err := pveClusterReader(hc, base, read).ClusterStatus(ctx)
+	cs, err := pc.ClusterStatus(ctx)
 	if err != nil {
 		return PveNodeBoot{}, errPveMutationRead
 	}
