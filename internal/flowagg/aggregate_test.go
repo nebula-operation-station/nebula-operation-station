@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"net/netip"
 	"slices"
 	"testing"
@@ -938,51 +939,172 @@ func TestMaxIntervalClampedToRetention(t *testing.T) {
 	}
 }
 
-// TestForwardClockJumpDoesNotLockOutReports pins the fix for a forward
-// clock jump larger than the retention: the automatic prune must not
-// ratchet the floor past the newest accepted data hour, or every later
-// report gets ErrOutOfWindow until a restart.
+// TestForwardClockJumpDoesNotLockOutReports pins the floor invariant
+// for a forward clock jump larger than the retention that lasts several
+// hours, with reports accepted in more than one jumped hour: once the
+// clock returns, new reports are accepted again, and replays of the
+// hours pruned during the jump are still refused.
 func TestForwardClockJumpDoesNotLockOutReports(t *testing.T) {
 	cur := t0
 	a := NewAggregator(DefaultLimits(), func() time.Time { return cur })
 	obs := Observation{Key: key22, BytesAB: 1, ServerReported: true}
-	mustIngest(t, a, report("h", t0, t0.Add(time.Minute), obs))
-	// The clock jumps forward by more than the retention.
-	cur = t0.Add(Retention + 24*time.Hour)
-	mustIngest(t, a, report("h", cur, cur.Add(time.Minute), obs))
-	// The clock returns to shortly after t0.
-	cur = t0.Add(2 * time.Hour)
-	// A new report must be accepted, not locked out until a restart.
-	if res := mustIngest(t, a, report("h2", cur, cur.Add(time.Minute), Observation{Key: key22, BytesAB: 2})); res.Applied != 1 {
-		t.Fatalf("after clock jump and return: %+v", res)
-	}
-	// Replay protection must survive the jump: the pruned hour stays
-	// closed even after the clock returns.
 	old := report("h", t0, t0.Add(time.Minute), obs)
+	mustIngest(t, a, old)
+	// The clock jumps forward by more than the retention and stays there
+	// for several hours; every jumped hour accepts a report and runs the
+	// automatic prune, which removes the hour of t0.
+	jump := t0.Add(Retention + 24*time.Hour)
+	for i := range 5 {
+		cur = jump.Add(time.Duration(i) * time.Hour)
+		mustIngest(t, a, report("j", cur, cur.Add(time.Minute), obs))
+	}
+	if f := a.floorLocked(cur); f != t0.Add(time.Hour).Unix() {
+		t.Fatalf("floor during the jump = %d, want the end of the pruned hour %d", f, t0.Add(time.Hour).Unix())
+	}
+	// The clock returns to shortly after t0 and runs on for a few hours.
+	for i := range 4 {
+		cur = t0.Add(time.Duration(2+i)*time.Hour + 30*time.Minute)
+		r := report(fmt.Sprintf("back%d", i), cur.Add(-time.Minute), cur, Observation{Key: key22, BytesAB: 2})
+		if res := mustIngest(t, a, r); res.Applied != 1 {
+			t.Fatalf("report %d after the clock returned: %+v", i, res)
+		}
+	}
+	// Replay protection survives the jump: the pruned hour stays closed,
+	// for its own host and for a host the aggregator has not seen.
 	if _, err := a.Ingest(old, ownOf(old)); !errors.Is(err, ErrOutOfWindow) {
 		t.Fatalf("replay after jump = %v, want ErrOutOfWindow", err)
 	}
+	late := report("late", t0, t0.Add(time.Minute), obs)
+	if _, err := a.Ingest(late, ownOf(late)); !errors.Is(err, ErrOutOfWindow) {
+		t.Fatalf("late report into the pruned hour = %v, want ErrOutOfWindow", err)
+	}
+	// A jump lasting longer than the retention prunes jumped hours too;
+	// they lie ahead of the returned clock and must not raise its floor.
+	for i := range int(Retention/time.Hour) + 3 {
+		cur = jump.Add(time.Duration(i) * time.Hour)
+		if _, err := a.Ingest(report("j", cur, cur.Add(time.Minute), obs), ownOf(old)); err != nil && !errors.Is(err, ErrDuplicateReport) {
+			t.Fatalf("jumped report %d: %v", i, err)
+		}
+	}
+	cur = t0.Add(8*time.Hour + 30*time.Minute)
+	if res := mustIngest(t, a, report("back", cur.Add(-time.Minute), cur, Observation{Key: key22, BytesAB: 3})); res.Applied != 1 {
+		t.Fatalf("after a jump longer than the retention: %+v", res)
+	}
+	if _, err := a.Ingest(late, ownOf(late)); !errors.Is(err, ErrOutOfWindow) {
+		t.Fatalf("late report after the long jump = %v, want ErrOutOfWindow", err)
+	}
 }
 
-// TestFloorAdvanceOnMidHourCutoffKeepsLiveData pins the floor advance
-// when the cutoff is not on an hour boundary: the floor moves to the
-// start of the hour containing the cutoff, not one hour later, so a
-// report ending in the partly live cutoff hour is still applied.
+// TestClockJumpSequence drives random forward and backward clock jumps
+// against the floor invariant: a report ending in the current hour of the
+// clock is always accepted, and a report into a pruned hour before the
+// current one is always refused.
+func TestClockJumpSequence(t *testing.T) {
+	l := DefaultLimits()
+	retH := int64(Retention / time.Hour)
+	for seed := range uint64(4) {
+		rng := rand.New(rand.NewPCG(seed, 0x7a05c))
+		base := t0.Add(30 * time.Minute) // mid-hour, so [now-1m, now] is one part
+		cur := base
+		a := NewAggregator(l, func() time.Time { return cur })
+		type sent struct {
+			r    Report
+			hour int64
+		}
+		var accepted []sent
+		data := map[int64]bool{}   // model: hours holding buckets
+		pruned := map[int64]bool{} // model: hours pruned so far
+		prunedHour, havePruned := int64(0), false
+		real, offset := int64(0), int64(0) // hours since base
+		for step := range 1500 {
+			real++
+			switch p := rng.IntN(100); {
+			case p < 3: // jump far ahead, past the retention
+				offset = retH + 1 + rng.Int64N(3*retH)
+			case p < 6: // small jump ahead
+				offset = 1 + rng.Int64N(5)
+			case p < 10: // back to the real time
+				offset = 0
+			}
+			cur = base.Add(time.Duration(real+offset) * time.Hour)
+			h := hourOf(cur)
+			if !havePruned || h != prunedHour {
+				cutoff := cur.Add(-Retention).Unix()
+				for dh := range data {
+					if (dh+1)*secondsPerHour <= cutoff {
+						delete(data, dh)
+						pruned[dh] = true
+					}
+				}
+				prunedHour, havePruned = h, true
+			}
+			r := report(fmt.Sprintf("s%d", step), cur.Add(-time.Minute), cur, Observation{Key: key22, BytesAB: 1})
+			res, err := a.Ingest(r, ownOf(r))
+			// A conflict means another host already holds this flow end
+			// in the hour; the part was not skipped.
+			if err != nil || res.Applied+res.Conflicts != 1 {
+				t.Fatalf("seed %d step %d (real %dh, offset %dh): report in the current hour: %+v, %v", seed, step, real, offset, res, err)
+			}
+			data[h] = true
+			accepted = append(accepted, sent{r, h})
+			// Replay an earlier report under a fresh host.
+			old := accepted[rng.IntN(len(accepted))]
+			rp := old.r
+			rp.Host = fmt.Sprintf("r%d", step)
+			res, err = a.Ingest(rp, ownOf(rp))
+			inWindow := !rp.To.Before(cur.Add(-Retention)) && !rp.To.After(cur.Add(l.MaxClockSkew))
+			if inWindow && pruned[old.hour] && old.hour < h && err == nil {
+				t.Fatalf("seed %d step %d: replay into pruned hour %d accepted: %+v", seed, step, old.hour, res)
+			}
+			if err == nil && res.Applied+res.Conflicts > 0 {
+				data[old.hour] = true
+			}
+		}
+	}
+}
+
+// TestFloorAdvanceOnMidHourCutoffKeepsLiveData guards against an
+// off-by-one-hour floor when the cutoff is not on an hour boundary: the
+// automatic prune closes only the hours it removed, so a report ending in
+// the partly live cutoff hour, after the cutoff, is still applied.
 func TestFloorAdvanceOnMidHourCutoffKeepsLiveData(t *testing.T) {
-	cur := t0
+	cur := t0.Add(-time.Hour)
 	a := NewAggregator(DefaultLimits(), func() time.Time { return cur })
-	// Prior data so the floor advance is bounded by a real data hour.
-	mustIngest(t, a, report("h", t0, t0.Add(time.Minute), Observation{Key: key22, BytesAB: 1, ServerReported: true}))
+	obs := Observation{Key: key22, BytesAB: 1, ServerReported: true}
+	mustIngest(t, a, report("h", cur, cur.Add(time.Minute), obs))
+	cur = t0
+	mustIngest(t, a, report("h", cur, cur.Add(time.Minute), obs))
 	// The clock moves so the cutoff falls mid-hour: now-Retention is
-	// t0+30min, inside the hour that starts at t0.
+	// t0+30min, inside the hour that starts at t0. The hour before t0 is
+	// pruned, the hour of t0 is not.
 	cur = t0.Add(Retention + 30*time.Minute)
-	// A report ending in that partly live cutoff hour, after the cutoff,
-	// must still be applied.
 	if res := mustIngest(t, a, report("h2", t0.Add(40*time.Minute), t0.Add(45*time.Minute), Observation{Key: key22, BytesAB: 2})); res.Applied != 1 {
 		t.Fatalf("report in the partly live cutoff hour: %+v", res)
 	}
-	// The floor is at the start of the cutoff hour, not one hour later.
-	if a.floor != t0.Unix() {
-		t.Fatalf("floor = %d, want %d (start of the cutoff hour)", a.floor, t0.Unix())
+	if f := a.floorLocked(cur); f != t0.Unix() {
+		t.Fatalf("floor = %d, want %d (end of the pruned hour)", f, t0.Unix())
+	}
+}
+
+// TestClosedRangesBounded pins the memory bound of the closed hours: past
+// maxClosedRanges the oldest runs merge, which keeps every closed hour
+// closed.
+func TestClosedRangesBounded(t *testing.T) {
+	a := NewAggregator(DefaultLimits(), time.Now)
+	for i := range int64(3 * maxClosedRanges) {
+		a.closeHoursLocked(10*i, 10*i+2)
+	}
+	if len(a.closed) != maxClosedRanges {
+		t.Fatalf("closed runs = %d, want %d", len(a.closed), maxClosedRanges)
+	}
+	for i := range int64(3 * maxClosedRanges) {
+		f := a.floorLocked(time.Unix((10*i+3)*secondsPerHour, 0))
+		if f < (10*i+3)*secondsPerHour {
+			t.Fatalf("run %d reopened: floor %d", i, f)
+		}
+	}
+	a.closeHoursLocked(-5, 10*3*maxClosedRanges)
+	if len(a.closed) != 1 {
+		t.Fatalf("covering run left %d runs", len(a.closed))
 	}
 }
