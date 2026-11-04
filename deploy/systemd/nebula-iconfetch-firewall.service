@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Mandatory firewall setup for nebula-iconfetch (ADR 0009 D6, TM16b).
+# Separate from the unprivileged helper: root needs only CAP_NET_ADMIN to
+# apply the root-owned nftables file. Failure prevents helper startup.
+# The batch atomically replaces ONLY this helper's table and can be rerun.
+# Keep the rules after stop: removing them could open an egress window.
+# Stop the helper before manually changing/removing rules or deleting its
+# account. Do not reuse its UID. Restart this unit after firewall reloads;
+# the host firewall manager must preserve this table while the helper runs.
+[Unit]
+Description=Nebula Operation Station icon fetcher egress firewall
+Before=nebula-iconfetch.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+Group=root
+ExecStart=/usr/sbin/nft -f /etc/nebula/nebula-iconfetch.nft
+TimeoutStartSec=15s
+MemoryMax=64M
+TasksMax=8
+UMask=0077
+
+LimitCORE=0
+NoNewPrivileges=yes
+ProtectSystem=strict
+InaccessiblePaths=-/var/lib/nebula -/run/nebula
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=
+# Netlink is used to install nftables rules; no Internet sockets are needed.
+RestrictAddressFamilies=AF_NETLINK

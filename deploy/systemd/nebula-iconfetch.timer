@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Picks up pre-existing jobs and jobs queued as the one-shot helper exits.
+# It only processes queued work; it never proposes or fetches icons itself.
+[Unit]
+Description=Nebula Operation Station icon fetcher: queued-job fallback
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=1min
+Unit=nebula-iconfetch.service
+
+[Install]
+WantedBy=timers.target
