@@ -2,14 +2,24 @@
 
 // Package softwarecat normalizes observed software identifiers (OS
 // releases, container image references, package names, systemd units)
-// to bounded catalog keys and display names. It is a pure function
-// library: no I/O, no network, no global state besides the embedded
-// seed map.
+// to bounded catalog keys and display names, and persists the software
+// catalog (ADR 0009 D5, D6).
 //
-// All inputs are untrusted host data (spec 09): processing is bounded,
-// deterministic, and the output is always a valid key or the fallback
-// key "unknown". Unknown identifiers are reported with Known=false so
-// the caller can create an "observed" catalog entry.
+// The normalizers (FromOSRelease, FromImage, FromPackage, FromUnit) are
+// pure functions: no I/O, no network, no global state besides the
+// embedded seed map. All inputs are untrusted host data (spec 09):
+// processing is bounded, deterministic, and the output is always a
+// valid key or the fallback key "unknown". Unknown identifiers are
+// reported with Known=false.
+//
+// Store keeps the catalog in the server database (migration 0032): the
+// ingest functions turn core.facts, docker.list, gpu.status and
+// service.list results into observations per host, guest or container;
+// a key without a catalog entry creates one in state "observed" (the
+// unknown queue). Observations never create placements, assets or
+// hosts. Admin changes (rename, merge, ignore, icons, per-asset icon
+// overrides, rollback) are audited in the same transaction, and every
+// icon change is kept in a history that a rollback can return to.
 package softwarecat
 
 import (
