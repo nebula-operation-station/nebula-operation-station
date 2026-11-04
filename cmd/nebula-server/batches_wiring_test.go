@@ -50,13 +50,18 @@ type fakeBatchRPC struct {
 	// which the real executor answers without reading the keyring.
 	credErr  error
 	probeErr error
-	// execution is the advertised batch_execution_available; the shipped
-	// executor answers false (no batch dispatcher).
+	// execution is the advertised batch_execution_available; an executor
+	// without a batch dispatcher answers false.
 	execution bool
 	credRefs  [][]string
 	proposed  []canonical.Batch
 	// commits counts CommitBatch calls (approvals relayed to the executor).
 	commits int
+	// runs are the RunBatchMember requests; answer answers them (success
+	// when nil). openStage is the executor's open rollout stage.
+	runs      []*pb.RunBatchMemberRequest
+	answer    func(*pb.RunBatchMemberRequest) (*pb.RunBatchMemberResponse, error)
+	openStage uint32
 }
 
 func (f *fakeBatchRPC) ListHostKeys(context.Context, *pb.ListHostKeysRequest, ...grpc.CallOption) (*pb.ListHostKeysResponse, error) {
@@ -237,7 +242,7 @@ func TestServerBatchesWithoutCredentialVersions(t *testing.T) {
 }
 
 // An executor that serves credential versions and approves batches but does
-// not advertise batch execution (the shipped executor: no batch dispatcher)
+// not advertise batch execution (an executor without a batch dispatcher)
 // is reported as without batches, so a deployment with staged steps ends at
 // "joined" and no plan is ever proposed for it.
 func TestServerBatchesRequireExecutorExecution(t *testing.T) {
@@ -404,6 +409,10 @@ func TestServerDeployBatchesGated(t *testing.T) {
 	f := &fakeBatchRPC{}
 	b, _ := newWiringBatches(t, f)
 	var deploy ui.DeployBatches = b
+	// It says so, so the deployment run does not probe a second time.
+	if g, ok := deploy.(ui.DeployBatchGate); !ok || !g.ProposalsGated() {
+		t.Error("the gated planner does not report its gate")
+	}
 	if _, err := deploy.ProposeBatch(ctx, "alice", wiringRequest()); !errors.Is(err, executions.ErrBatchExecutionUnavailable) {
 		t.Errorf("propose = %v, want ErrBatchExecutionUnavailable", err)
 	}

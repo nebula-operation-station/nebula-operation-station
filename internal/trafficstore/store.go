@@ -30,6 +30,9 @@
 // reporter's Identity), never the first reporter; every reporter's
 // claims are kept under its own name and caps, reads prefer the owner's
 // and flag disagreements, and identity links come only from the server.
+// ReconcileIdentities drops ownership and owner attestations the
+// server's current records no longer back, also for hosts that stopped
+// reporting.
 //
 // Retention (D3): default 21 days, configurable lower only. Prune
 // removes flow bucket rows whose hour ends at or before now-retention
@@ -41,6 +44,9 @@
 // of rows per reporter, are bounded. The counts are kept by triggers in
 // traffic_counts, so a cap check is a primary-key lookup. A reporter that
 // reaches its cap is refused; other reporters' rows are never evicted.
+// An endpoint's seen-by set has one slot reserved for its authoritative
+// owner (MaxReportersPerEndpoint non-owners plus the owner), so the owner
+// is always admitted without evicting anyone.
 //
 // Queries (TopN, OverviewUnion) return internal/flowagg types and merge
 // the stored rows with flowagg semantics in SQL: per flow and hour the
@@ -73,7 +79,8 @@ const (
 	// MaxAddressesPerEndpoint bounds the addresses one reporter attaches
 	// to one endpoint.
 	MaxAddressesPerEndpoint = 64
-	// MaxReportersPerEndpoint bounds the seen-by set of one endpoint.
+	// MaxReportersPerEndpoint bounds the non-owner reporters in the
+	// seen-by set of one endpoint; the owner has a reserved slot on top.
 	MaxReportersPerEndpoint = 32
 	// MaxBuckets bounds the persisted flow bucket rows; it matches the
 	// in-memory aggregator's bound.

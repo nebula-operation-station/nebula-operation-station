@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -65,6 +66,20 @@ func (c *Client) GetBatchCredentialVersions(ctx context.Context, in *pb.GetBatch
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
 	resp, err := c.rpc.GetBatchCredentialVersions(ctx, in, opts...)
+	return resp, mapCallError(ctx, err)
+}
+
+// RunBatchMember runs one claimed member of an approved batch (server
+// role). Its deadline covers the member's run timeout plus a margin, like
+// RunAttached, never the short default call timeout.
+func (c *Client) RunBatchMember(ctx context.Context, in *pb.RunBatchMemberRequest, opts ...grpc.CallOption) (*pb.RunBatchMemberResponse, error) {
+	t := time.Duration(in.GetTimeoutSeconds()) * time.Second
+	if t <= 0 || t > 10*time.Minute {
+		t = 10 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(ctx, t+time.Minute)
+	defer cancel()
+	resp, err := c.rpc.RunBatchMember(ctx, in, opts...)
 	return resp, mapCallError(ctx, err)
 }
 

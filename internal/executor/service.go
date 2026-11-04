@@ -60,8 +60,11 @@ type Service struct {
 	// Unimplemented.
 	batchAuth *batch.Authority
 	// batchExecution reports that a production batch dispatcher runs
-	// approved batch members; false until SetBatchExecutionAvailable.
+	// approved batch members; false until EnableBatchExecution.
 	batchExecution bool
+	// batchRun is the production batch member dispatch
+	// (EnableBatchExecution); nil leaves RunBatchMember Unimplemented.
+	batchRun *batchExec
 	// builtinTrust is the local built-in trust transaction (ADR 0007, E19c);
 	// nil until SetBuiltinTrust wires it.
 	builtinTrust BuiltinTrust

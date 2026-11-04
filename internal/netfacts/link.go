@@ -88,17 +88,20 @@ type linkDataDoc struct {
 //
 // Each element is one interface. An element without a valid interface
 // name is skipped and counted in Dropped. The kind is read from
-// linkinfo.info_kind (empty for a physical interface), the VLAN id of a
-// vlan device from linkinfo.info_data.id (kept only when it is present and
-// within minVLANID..maxVLANID; ignored for every other kind), the
-// parent from the top-level "link" field and the master from the top-level
-// "master" field (both device names, validated as interface names). The
+// linkinfo.info_kind (empty for a physical interface; a non-empty kind
+// that is not a valid kind is a loss), the VLAN id of a vlan device from
+// linkinfo.info_data.id (kept only when it is present and within
+// minVLANID..maxVLANID; ignored for every other kind), the parent from
+// the top-level "link" field and the master from the top-level "master"
+// field (both device names, validated as interface names). The
 // link-layer address is kept only when it is a 6-byte Ethernet MAC
-// (another well-formed link-layer address, see parseLinkLayerAddr, is left
-// out without loss). Every
-// such loss sets Incomplete. Input above maxInputSize, a document that is
-// not a JSON array, or an array with more than maxEntries elements is an
-// error. One bad entry never discards the rest of the table.
+// (another well-formed link-layer address, see parseLinkLayerAddr, is
+// left out without loss, except on a link whose link_type is "ether",
+// where only a 6-byte MAC is well-formed and a non-MAC address is a
+// loss). Every such loss sets Incomplete. Input above maxInputSize, a
+// document that is not a JSON array, or an array with more than
+// maxEntries elements is an error. One bad entry never discards the rest
+// of the table.
 func ParseLinks(raw []byte) (LinkTable, error) {
 	if len(raw) > maxInputSize {
 		return LinkTable{}, fmt.Errorf("link document exceeds %d bytes", maxInputSize)

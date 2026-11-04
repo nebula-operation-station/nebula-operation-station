@@ -116,6 +116,16 @@ type DeployBatchProbe interface {
 	BatchesAvailable(ctx context.Context) (bool, error)
 }
 
+// DeployBatchGate is optionally implemented by a DeployBatches value whose
+// ProposeBatch itself refuses unless the executor runs batches at that
+// moment (executions.ErrBatchExecutionUnavailable or
+// executions.ErrBatchExecutionUnknown), probing under its own bounded
+// deadline. When ProposalsGated reports true, proposing the staged plan
+// relies on that check instead of probing a second time first.
+type DeployBatchGate interface {
+	ProposalsGated() bool
+}
+
 // Run states (ADR 0008 section 6).
 const (
 	deployProposed      = "proposed"
@@ -1920,13 +1930,21 @@ func (h *Handler) handleDeployPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer h.deployRuns.set(run.id, func(x *deployRun) { x.approving = false })
-	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
-	defer cancel()
 	// Probe again: the run may be in bootstrapping only because the probe
 	// at join time failed transiently. A plan is never proposed to an
-	// executor that would approve it and never run it.
-	if p, ok := h.deployBatches.(DeployBatchProbe); ok {
-		avail, err := p.BatchesAvailable(ctx)
+	// executor that would approve it and never run it. A planner that
+	// gates its own proposals (DeployBatchGate) probes once inside
+	// ProposeBatch, whose refusals are handled below; probing here as well
+	// would ask the executor twice. The probe has its own deadline, so it
+	// never shortens the proposal's.
+	gated := false
+	if g, ok := h.deployBatches.(DeployBatchGate); ok {
+		gated = g.ProposalsGated()
+	}
+	if p, ok := h.deployBatches.(DeployBatchProbe); ok && !gated {
+		pctx, pcancel := context.WithTimeout(r.Context(), deployBatchProbeTimeout)
+		avail, err := p.BatchesAvailable(pctx)
+		pcancel()
 		switch {
 		case err != nil:
 			h.log.Warn("deploy: probe batch support", "run", run.id, "error", err)
@@ -1939,6 +1957,14 @@ func (h *Handler) handleDeployPlan(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// A gated planner's probe runs inside the proposal under its own
+	// bound; the proposal keeps its full call budget on top of it.
+	budget := operationsCallTimeout
+	if gated {
+		budget += deployBatchProbeTimeout
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), budget)
+	defer cancel()
 	c, err := h.deployBatches.ProposeBatch(ctx, user, run.batchRequest())
 	if err != nil {
 		var ie *executions.BatchInputError
