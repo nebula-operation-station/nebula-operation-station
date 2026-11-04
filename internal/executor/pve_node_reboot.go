@@ -138,6 +138,11 @@ const (
 	pveRebootUnknownHold = 24 * time.Hour
 	// maxPveHARules bounds the HA groups and rules a reboot reads.
 	maxPveHARules = 256
+	// pveRebootFactsDeadline bounds one read of the reboot facts as a
+	// whole (node, cluster and guest lists, and one config read per HA
+	// guest, each also bounded by pveMutationRequestTimeout); a read that
+	// does not finish in time fails, so nothing is proposed or sent.
+	pveRebootFactsDeadline = 2 * time.Minute
 )
 
 // Effects of a reboot target, as listed in the parameters.
@@ -1167,7 +1172,30 @@ func pveRebootInventory(hc *http.Client, base string, read pveapi.TokenSupplier)
 	return inv, pc, nil
 }
 
+// pveNodeRebootFacts reads the facts of a reboot of node within
+// pveRebootFactsDeadline.
 func pveNodeRebootFacts(ctx context.Context, hc *http.Client, base string, read pveapi.TokenSupplier, node string) (PveNodeRebootFacts, error) {
+	return pveNodeRebootFactsWithin(ctx, pveRebootFactsDeadline, hc, base, read, node)
+}
+
+// pveNodeRebootFactsWithin reads the facts of a reboot of node. The whole
+// read, including one config read per HA guest, must finish within
+// deadline; a read that does not fails closed with errPveMutationRead.
+func pveNodeRebootFactsWithin(ctx context.Context, deadline time.Duration, hc *http.Client, base string, read pveapi.TokenSupplier, node string) (PveNodeRebootFacts, error) {
+	ctx, cancel := context.WithTimeout(ctx, deadline)
+	defer cancel()
+	f, err := readNodeRebootFacts(ctx, hc, base, read, node)
+	if err != nil {
+		return PveNodeRebootFacts{}, err
+	}
+	if ctx.Err() != nil {
+		// A placement read cut short is not a fact; never bind it.
+		return PveNodeRebootFacts{}, errPveMutationRead
+	}
+	return f, nil
+}
+
+func readNodeRebootFacts(ctx context.Context, hc *http.Client, base string, read pveapi.TokenSupplier, node string) (PveNodeRebootFacts, error) {
 	inv, pc, err := pveRebootInventory(hc, base, read)
 	if err != nil {
 		return PveNodeRebootFacts{}, err
@@ -1240,7 +1268,9 @@ func pveRebootPlacements(ctx context.Context, hc *http.Client, base string, read
 	ha := pveReadHAPlacement(ctx, hc, base, read)
 	for _, ref := range refs {
 		p := PveRebootPlacement{}
-		if shared != nil && ha.known {
+		// Past the facts deadline nothing more is read; the caller
+		// discards the facts.
+		if shared != nil && ha.known && ctx.Err() == nil {
 			cfg, err := pveGuestConfigStrings(ctx, hc, base, read, ref.Kind, node, ref.VMID, pveRebootPlacementKey)
 			if err == nil {
 				p.Restricted, p.AllowedNodes, p.Known = ha.placement(haSIDType(ref.Kind) + ":" + strconv.FormatUint(ref.VMID, 10))

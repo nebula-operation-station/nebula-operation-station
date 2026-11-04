@@ -1410,6 +1410,38 @@ func TestPveNodeRebootFactsProductionReader(t *testing.T) {
 		})
 	}
 
+	// A remote that stalls the guest config reads cannot hold one facts
+	// read beyond its overall deadline (each request alone could take
+	// pveMutationRequestTimeout): the read fails closed.
+	t.Run("slow config reads hit the facts deadline", func(t *testing.T) {
+		b := pveRebootAPIBodies()
+		fast, _ := pveRebootFakeAPI(t, b)
+		var slowReads atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/config") && strings.Contains(r.URL.Path, "/qemu/") {
+				slowReads.Add(1)
+				select {
+				case <-r.Context().Done():
+				case <-time.After(10 * time.Second):
+				}
+				return
+			}
+			fast.Config.Handler.ServeHTTP(w, r)
+		}))
+		t.Cleanup(srv.Close)
+		start := time.Now()
+		_, err := pveNodeRebootFactsWithin(context.Background(), 200*time.Millisecond, srv.Client(), srv.URL, read, "pve1")
+		if !errors.Is(err, errPveMutationRead) {
+			t.Fatalf("facts read past its deadline: %v", err)
+		}
+		if d := time.Since(start); d > 5*time.Second || slowReads.Load() != 1 {
+			t.Fatalf("facts read took %v with %d slow reads, want the deadline to stop it", d, slowReads.Load())
+		}
+		if pveRebootFactsDeadline <= 0 || pveRebootFactsDeadline >= maxPveRebootGuests*pveMutationRequestTimeout {
+			t.Fatalf("facts deadline %v does not bound the per-guest reads", pveRebootFactsDeadline)
+		}
+	})
+
 	t.Run("node boot", func(t *testing.T) {
 		b := pveRebootAPIBodies()
 		srv, mu := pveRebootFakeAPI(t, b)
