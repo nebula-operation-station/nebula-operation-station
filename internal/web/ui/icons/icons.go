@@ -164,7 +164,9 @@ func permanent(err error) bool {
 // sanitized again, stored, registered with its source URL and set on the
 // job's catalog key. Failed and invalid results are audited. A job is
 // removed from the spool once handled; a transient error (database, disk)
-// leaves it for the next call and is returned.
+// leaves it for the next call and is returned. A result that can never be
+// read (symbolic link, no read permission) is iconjob.ErrInvalid and fails
+// its job, so it cannot block later results.
 //
 // The server never writes results/ (only the helper prunes it, after a
 // day); removing the job file is what marks a result as handled.

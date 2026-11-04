@@ -24,6 +24,21 @@ func validGuestNetRecord() GuestNetRecord {
 	}
 }
 
+func TestGuestNetAcceptsPVEBridgeNames(t *testing.T) {
+	for _, bridge := range []string{"vmbr0.100", "br-lan", "0vmbr", "vnet_1", "abcdefghijklmno"} {
+		rec := validGuestNetRecord()
+		rec.NICs[0].Bridge = bridge
+		raw, err := MarshalGuestNet(rec)
+		if err != nil {
+			t.Fatalf("bridge %q rejected: %v", bridge, err)
+		}
+		got, err := DecodeGuestNet(raw)
+		if err != nil || got.NICs[0].Bridge != bridge {
+			t.Fatalf("bridge %q did not round trip: %+v, %v", bridge, got, err)
+		}
+	}
+}
+
 func TestGuestNICTapNameFollowsProxmoxNaming(t *testing.T) {
 	for _, tc := range []struct {
 		nic  GuestNIC
@@ -78,7 +93,12 @@ func TestGuestNetValidationRejectsMalformedRecords(t *testing.T) {
 		"bridge comma":     func(r *GuestNetRecord) { r.NICs[0].Bridge = "vmbr0,tag=5" },
 		"bridge long":      func(r *GuestNetRecord) { r.NICs[0].Bridge = "vmbr0123456789ab" },
 		"bridge control":   func(r *GuestNetRecord) { r.NICs[0].Bridge = "vmbr\x1b0" },
-		"bridge digit":     func(r *GuestNetRecord) { r.NICs[0].Bridge = "0vmbr" },
+		"bridge dot":       func(r *GuestNetRecord) { r.NICs[0].Bridge = "." },
+		"bridge dotdot":    func(r *GuestNetRecord) { r.NICs[0].Bridge = ".." },
+		"bridge slash":     func(r *GuestNetRecord) { r.NICs[0].Bridge = "br/0" },
+		"bridge space":     func(r *GuestNetRecord) { r.NICs[0].Bridge = "br 0" },
+		"bridge colon":     func(r *GuestNetRecord) { r.NICs[0].Bridge = "vmbr0:1" },
+		"bridge non-ascii": func(r *GuestNetRecord) { r.NICs[0].Bridge = "brü" },
 		"vlan negative":    func(r *GuestNetRecord) { r.NICs[0].VLAN = -1 },
 		"vlan high":        func(r *GuestNetRecord) { r.NICs[0].VLAN = pvecontract.MaxVLAN + 1 },
 		"mac empty":        func(r *GuestNetRecord) { r.NICs[0].MAC = "" },
