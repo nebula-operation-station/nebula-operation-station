@@ -467,12 +467,18 @@ test("FastModelUpdatesCannotPostponeTheDegrade", () => {
   // Models arrive faster than the failure streak can reset: every rebuild
   // fails, yet the degrade must still be reached. MAX_FRAME_FAILURES is 3
   // in main.js; two extra models must not postpone the degrade.
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < MAX_FRAME_FAILURES + 2; i++) {
     h.sendModel();
     h.tick(1);
   }
   assert.ok(bmp.closed, "the degrade is reached despite the new models");
-  assert.equal(h.status(), STATUS.frameError);
+  // The status after the last model message is the backend status (a model
+  // message reports the backend it will draw with); the failure streak is
+  // tracked separately and is what the error count below pins down.
+  assert.equal(h.status(), STATUS.fallback);
+  // The streak was never reset by the model messages, so the parent is told
+  // about the failure exactly once; a reset on every model would report it
+  // once per model.
   assert.equal(h.errorMessages().length, 1, "the parent is told once per failure streak");
   h.map.stop();
 });

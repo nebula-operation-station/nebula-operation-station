@@ -233,8 +233,9 @@ export function startTrafficMap(root, opts = {}) {
         }
         if (focus !== null && !nodeById.has(focus)) focus = null;
         dirty = true;
-        // A new model gets a fresh rebuild right away.
-        resetFailures();
+        // A new model gets a fresh rebuild right away; the failure streak is
+        // kept (see resetRebuildBackoff).
+        resetRebuildBackoff();
         if (backend) setStatus(backendStatus);
         break;
       }
@@ -260,6 +261,14 @@ export function startTrafficMap(root, opts = {}) {
       if (keep.has(bmp)) continue;
       if (typeof bmp.close === "function") bmp.close();
     }
+  }
+
+  // clearOverlay wipes the overlay canvas so an incomplete base frame (no
+  // scene yet, or a half-finished upload) is not covered by labels from an
+  // earlier, different scene.
+  function clearOverlay() {
+    octx.setTransform(1, 0, 0, 1, 0, 0);
+    octx.clearRect(0, 0, overlay.width, overlay.height);
   }
 
   function local(ev) {
@@ -377,6 +386,9 @@ export function startTrafficMap(root, opts = {}) {
           // backed-off frames cannot push it further out.
           rebuildFailures++;
           nextRebuildAt = ts + rebuildBackoffMs(rebuildFailures);
+          // The base may now be incomplete (a half-finished upload); do not
+          // leave labels of the previous scene on top of it.
+          clearOverlay();
           throw err;
         }
         rebuildFailures = 0;
@@ -389,7 +401,17 @@ export function startTrafficMap(root, opts = {}) {
     if (redraw || !reduced) {
       const time = reduced ? 0 : ts / 1000;
       try {
-        backend.render(cam, dpr, time);
+        // render reports whether the base frame is complete: WebGL2 only
+        // after a finished scene upload, Canvas 2D only with a scene.
+        const complete = backend.render(cam, dpr, time);
+        if (complete) {
+          drawOverlay(octx, scene, cam, dpr, time, painter, icons, nodeById);
+          redraw = false;
+        } else {
+          // Incomplete base (no scene or half-uploaded): do not draw the
+          // overlay, so labels of another scene are not mixed in.
+          clearOverlay();
+        }
       } catch (err) {
         if (backend.name === "canvas2d") throw err;
         // A failing WebGL2 draw is not retried: switch on the next frame.
@@ -397,8 +419,6 @@ export function startTrafficMap(root, opts = {}) {
         redraw = true;
         return;
       }
-      drawOverlay(octx, scene, cam, dpr, time, painter, icons, nodeById);
-      redraw = false;
     }
   }
 
@@ -433,6 +453,15 @@ export function startTrafficMap(root, opts = {}) {
   function resetFailures() {
     failures = 0;
     degradeAt = MAX_FRAME_FAILURES;
+    rebuildFailures = 0;
+    nextRebuildAt = 0;
+  }
+
+  // resetRebuildBackoff lets a new model be rebuilt right away. It must not
+  // touch the failure streak, which ends only with a successful frame (or
+  // an install): with models arriving faster than the degrade window,
+  // resetting the streak on every model would postpone the degrade forever.
+  function resetRebuildBackoff() {
     rebuildFailures = 0;
     nextRebuildAt = 0;
   }
