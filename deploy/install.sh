@@ -250,6 +250,9 @@ install -d -m 2750 -o nebula-discovery -g nebula-server "${var_lib}/discovery/re
 # read. The root is 0750 (not world-readable) because it holds PVE data.
 install -d -m 2750 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve"
 install -d -m 2770 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/results"
+# Guest NIC records (same handoff as results). Created here with its final
+# mode: the collector unit (RestrictSUIDSGID=yes) cannot set setgid itself.
+install -d -m 2770 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/guestnet"
 # Live handoff (ADR 0006 P1-37): the server writes the want-list to requests/
 # (group-writable; the server drop-in below makes only this one writable) and reads the
 # collector's samples from live/ (group read-only). The server never reads
