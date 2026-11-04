@@ -37,10 +37,11 @@ type AddrTable struct {
 	// Dropped counts array elements that were skipped as malformed.
 	Dropped int
 	// Incomplete is true when the host reported data the parser did not
-	// keep: a skipped element (Dropped > 0), an invalid link-layer
-	// address, an unknown state, or an address list truncated at
-	// maxAddrsPerIf. An incomplete table must be presented as such,
-	// never as the complete table (spec 09).
+	// keep: a skipped element (Dropped > 0), a non-MAC link-layer
+	// address on an "ether" interface, a malformed link-layer address,
+	// an unknown state, or an address list truncated at maxAddrsPerIf.
+	// An incomplete table must be presented as such, never as the
+	// complete table (spec 09).
 	Incomplete bool
 }
 
@@ -84,17 +85,17 @@ var operStates = map[string]bool{
 // Each element is one interface. An element without a valid interface
 // name is skipped and counted in Dropped. The link-layer address is kept
 // only when it is a 6-byte Ethernet MAC (another well-formed link-layer
-// address, see parseLinkLayerAddr, is left out without loss); the state
-// only when it is a
-// known operational state name. Each "addr_info" entry is combined into a
-// prefix from its bare "local" address and "prefixlen"; an entry with an
-// invalid address, a missing prefixlen or one outside the address
-// family's bit width, or
-// a family that is neither inet nor inet6 is dropped, and the list is
-// truncated at maxAddrsPerIf. Every such loss sets Incomplete. Input
-// above maxInputSize, a document that is not a JSON array, or an array
-// with more than maxEntries elements is an error. One bad entry never
-// discards the rest of the table.
+// address, see parseLinkLayerAddr, is left out without loss, except on
+// an interface whose link_type is "ether", where only a 6-byte MAC is
+// well-formed and a non-MAC address is a loss); the state only when it
+// is a known operational state name. Each "addr_info" entry is combined
+// into a prefix from its bare "local" address and "prefixlen"; an entry
+// with an invalid address, a missing prefixlen or one outside the
+// address family's bit width, or a family that is neither inet nor
+// inet6 is dropped, and the list is truncated at maxAddrsPerIf. Every
+// such loss sets Incomplete. Input above maxInputSize, a document that
+// is not a JSON array, or an array with more than maxEntries elements is
+// an error. One bad entry never discards the rest of the table.
 func ParseAddrs(raw []byte) (AddrTable, error) {
 	if len(raw) > maxInputSize {
 		return AddrTable{}, fmt.Errorf("addr document exceeds %d bytes", maxInputSize)
