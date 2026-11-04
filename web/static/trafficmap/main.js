@@ -19,6 +19,11 @@ import { PAINTERS } from "./symbols.js";
 export const MAX_DPR = 2;
 /** Pointer travel in CSS pixels after which a press is a drag, not a click. */
 export const DRAG_THRESHOLD_PX = 4;
+/**
+ * Consecutive failed frames after which the renderer degrades: WebGL2 is
+ * replaced by Canvas 2D, and on Canvas 2D the icons are dropped.
+ */
+export const MAX_FRAME_FAILURES = 3;
 
 /** User-facing status texts (English UI strings). */
 export const STATUS = Object.freeze({
@@ -29,6 +34,7 @@ export const STATUS = Object.freeze({
   failed: "WebGL2 stopped working; switched to Canvas 2D.",
   none: "This browser cannot draw the traffic map.",
   rejected: "Map data was rejected; showing the last valid data.",
+  frameError: "Drawing the traffic map failed; retrying.",
 });
 
 /**
@@ -89,6 +95,9 @@ export function startTrafficMap(root, opts = {}) {
   let switchToFallback = null;
   let backendStatus = STATUS.waiting;
   let stopped = false;
+  let generation = 0;
+  let failures = 0;
+  let degradeAt = MAX_FRAME_FAILURES;
 
   root.style.position = "relative";
   root.style.overflow = "hidden";
@@ -124,8 +133,10 @@ export function startTrafficMap(root, opts = {}) {
 
   function install(preferWebGL, reasonText) {
     if (backend) backend.dispose();
+    // A loss reported by an earlier, already replaced backend is ignored.
+    const gen = ++generation;
     const r = createBackend(makeCanvas, { webgl2: createWebGL2Backend, canvas2d: createCanvas2DBackend }, preferWebGL, () => {
-      switchToFallback = STATUS.lost;
+      if (gen === generation) switchToFallback = STATUS.lost;
     });
     if (base) {
       root.replaceChild(r.canvas, base);
@@ -196,6 +207,7 @@ export function startTrafficMap(root, opts = {}) {
         break;
       }
       case "icons":
+        releaseIcons(r.value);
         icons = r.value;
         redraw = true;
         break;
@@ -205,6 +217,16 @@ export function startTrafficMap(root, opts = {}) {
       default:
         setStatus(STATUS.rejected);
         send(win, OUT.error, { errors: r.errors });
+    }
+  }
+
+  // releaseIcons closes the bitmaps of the current icon map that are not
+  // reused by next, so replaced icon sets do not hold bitmap memory.
+  function releaseIcons(next) {
+    const keep = new Set(next.values());
+    for (const bmp of icons.values()) {
+      if (keep.has(bmp)) continue;
+      if (typeof bmp.close === "function") bmp.close();
     }
   }
 
@@ -292,38 +314,76 @@ export function startTrafficMap(root, opts = {}) {
     redraw = true;
   }
 
+  function step(ts) {
+    if (switchToFallback === null && backend && backend.name !== "canvas2d" && backend.isLost()) {
+      switchToFallback = STATUS.lost;
+    }
+    if (switchToFallback !== null) {
+      // Cleared only after a successful install, so a throwing install is
+      // retried on the next frame.
+      install(false, switchToFallback);
+      switchToFallback = null;
+    }
+    if (!backend || !cam || !model) return;
+    const lvl = cameraLevel(cam);
+    if (lvl !== level) {
+      level = lvl;
+      dirty = true;
+    }
+    if (dirty) {
+      scene = buildScene(model, layout, { level, focus });
+      backend.setScene(scene);
+      dirty = false;
+      redraw = true;
+    }
+    const reduced = motion !== null && motion.matches;
+    if (redraw || !reduced) {
+      const time = reduced ? 0 : ts / 1000;
+      try {
+        backend.render(cam, dpr, time);
+      } catch (err) {
+        if (backend.name === "canvas2d") throw err;
+        // A failing WebGL2 draw is not retried: switch on the next frame.
+        switchToFallback = STATUS.failed;
+        redraw = true;
+        return;
+      }
+      drawOverlay(octx, scene, cam, dpr, time, painter, icons, nodeById);
+      redraw = false;
+    }
+  }
+
+  // frame re-arms itself first, so no exception can stop the loop. Failed
+  // frames are retried; repeated failures degrade the renderer.
   function frame(ts) {
     if (stopped) return;
-    if (switchToFallback !== null) {
-      const reason = switchToFallback;
-      switchToFallback = null;
-      install(false, reason);
-    }
-    if (backend && cam && model) {
-      const lvl = cameraLevel(cam);
-      if (lvl !== level) {
-        level = lvl;
-        dirty = true;
-      }
-      if (dirty) {
-        scene = buildScene(model, layout, { level, focus });
-        backend.setScene(scene);
-        dirty = false;
-        redraw = true;
-      }
-      const reduced = motion !== null && motion.matches;
-      if (redraw || !reduced) {
-        const time = reduced ? 0 : ts / 1000;
-        try {
-          backend.render(cam, dpr, time);
-        } catch {
-          if (backend.name !== "canvas2d") switchToFallback = STATUS.failed;
-        }
-        drawOverlay(octx, scene, cam, dpr, time, painter, icons, nodeById);
-        redraw = false;
-      }
-    }
     win.requestAnimationFrame(frame);
+    try {
+      step(ts);
+    } catch {
+      failures++;
+      dirty = true;
+      redraw = true;
+      if (failures === 1) {
+        setStatus(STATUS.frameError);
+        send(win, OUT.error, { errors: ["render: drawing a frame failed"] });
+      }
+      if (failures >= degradeAt) {
+        degradeAt += MAX_FRAME_FAILURES;
+        if (backend && backend.name !== "canvas2d") {
+          switchToFallback = STATUS.failed;
+        } else if (icons.size > 0) {
+          releaseIcons(new Map());
+          icons = new Map();
+        }
+      }
+      return;
+    }
+    if (failures > 0) {
+      failures = 0;
+      degradeAt = MAX_FRAME_FAILURES;
+      setStatus(!backend ? STATUS.none : model ? backendStatus : STATUS.waiting);
+    }
   }
 
   const observer = typeof win.ResizeObserver === "function" ? new win.ResizeObserver(resize) : null;
@@ -359,6 +419,8 @@ export function startTrafficMap(root, opts = {}) {
       root.removeEventListener("wheel", onWheel);
       root.removeEventListener("keydown", onKey);
       if (backend) backend.dispose();
+      releaseIcons(new Map());
+      icons = new Map();
     },
   };
 }

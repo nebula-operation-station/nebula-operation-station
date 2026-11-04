@@ -3,7 +3,7 @@
 // Package trafficmap_test checks the traffic map renderer's JSON contract and
 // the security properties of its JavaScript sources (ADR 0009 D4, TM18). The
 // behavioural tests of the modules themselves are *.test.mjs files for the
-// node test runner (node --test web/static/trafficmap/).
+// node test runner; TestJavaScriptBehaviour runs them as part of go test.
 package trafficmap_test
 
 import (

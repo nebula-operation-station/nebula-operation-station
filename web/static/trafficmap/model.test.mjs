@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Run with: node --test web/static/trafficmap/
+// Run with: node --test web/static/trafficmap/*.test.mjs
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -80,8 +80,8 @@ const rejections = [
   ["prototype key", (m) => Object.defineProperty(m.nodes[1], "__proto__", { value: {}, enumerable: true }), "model.nodes[1]"],
   ["control character in label", (m) => (m.nodes[1].label = "a\u0007b"), "label"],
   ["newline in label", (m) => (m.nodes[1].label = "a\nb"), "label"],
-  ["bidi override in label", (m) => (m.nodes[1].label = "abc‮def"), "label"],
-  ["zero-width in label", (m) => (m.nodes[1].label = "a​b"), "label"],
+  ["bidi override in label", (m) => (m.nodes[1].label = "abc\u202edef"), "label"],
+  ["zero-width in label", (m) => (m.nodes[1].label = "a\u200bb"), "label"],
   ["lone surrogate in label", (m) => (m.nodes[1].label = "a\ud800b"), "label"],
   ["empty label", (m) => (m.nodes[1].label = ""), "label"],
   ["label too long", (m) => (m.nodes[1].label = "x".repeat(LIMITS.labelLength + 1)), "label"],
@@ -172,6 +172,11 @@ test("ValidatesIcons", () => {
   assert.throws(() => validateIcons({ type: MSG_ICONS, icons: { big: new FakeBitmap(4096, 64) } }, isBitmap), ValidationError);
   assert.throws(() => validateIcons({ type: "x", icons: {} }, isBitmap), ValidationError);
   assert.throws(() => validateIcons({ type: MSG_ICONS, icons: [] }, isBitmap), ValidationError);
+  const many = {};
+  for (let i = 0; i <= LIMITS.icons; i++) many["k" + i] = new FakeBitmap(8, 8);
+  assert.throws(() => validateIcons({ type: MSG_ICONS, icons: many }, isBitmap), (err) => err instanceof ValidationError && err.errors[0] === "icons.icons: too many entries");
+  delete many.k0;
+  assert.equal(validateIcons({ type: MSG_ICONS, icons: many }, isBitmap).size, LIMITS.icons);
 });
 
 test("ValidatesFocus", () => {

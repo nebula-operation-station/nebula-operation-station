@@ -55,7 +55,7 @@ const KEY_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const COLOR_RE = /^#[0-9a-f]{6}$/;
 // C0 and C1 controls, DEL, line/paragraph separators, bidi embeddings,
 // overrides and isolates, zero-width and BOM characters.
-const UNPRINTABLE_RE = /[\u0000-\u001f\u007f-\u009f  ‪-‮⁦-⁩​-‏﻿]/;
+const UNPRINTABLE_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069\u200b-\u200f\ufeff]/;
 
 /** ValidationError carries the list of problems found in a message. */
 export class ValidationError extends Error {
@@ -363,10 +363,15 @@ export function validateIcons(raw, isBitmap) {
   const m = c.object(raw, "icons", ["type", "icons"]);
   if (!m) throw new ValidationError(c.errors);
   if (m.type !== MSG_ICONS) c.fail("icons.type", "has an unsupported value");
-  const icons = c.object(m.icons, "icons.icons", Object.keys(m.icons || {}));
+  // The entry count is checked before any per-key work, so an oversized
+  // message is rejected before the (bounded) key scan below.
+  const iconsRaw = m.icons;
+  if (iconsRaw !== null && typeof iconsRaw === "object" && !Array.isArray(iconsRaw) && Object.keys(iconsRaw).length > LIMITS.icons) {
+    throw new ValidationError(["icons.icons: too many entries"]);
+  }
+  const icons = c.object(iconsRaw, "icons.icons", [], Object.keys(iconsRaw || {}));
   if (c.errors.length > 0) throw new ValidationError(c.errors);
   const keys = Object.keys(icons);
-  if (keys.length > LIMITS.icons) throw new ValidationError(["icons.icons: too many entries"]);
   const out = new Map();
   for (const k of keys) {
     const p = "icons.icons[" + out.size + "]";

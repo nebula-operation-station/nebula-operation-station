@@ -148,10 +148,13 @@ export function buildScene(model, layout, view) {
     }
 
     const h = spikesFor(n);
-    if (h && !dim) {
+    if (h && (!dim || h.ring || h.flicker)) {
       // Overview: only the markers that must stand out (critical patches
-      // pulse, unreachable flicker, host-key mismatch ring).
-      const spikes = level === ZOOM.overview ? h.spikes.filter((s) => s.pulse) : h.spikes;
+      // pulse, unreachable flicker, host-key mismatch ring). Dimmed nodes
+      // lose their spikes but keep the host-key ring and the unreachable
+      // flicker: those warnings must stay visible while a node is focused.
+      let spikes = level === ZOOM.overview ? h.spikes.filter((s) => s.pulse) : h.spikes;
+      if (dim) spikes = [];
       out.health.push({ id: n.id, x: p.x, y: p.y, r: p.r, spikes, flicker: h.flicker, ring: h.ring });
     }
   }

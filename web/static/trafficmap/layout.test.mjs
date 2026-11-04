@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Run with: node --test web/static/trafficmap/
+// Run with: node --test web/static/trafficmap/*.test.mjs
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -202,6 +202,25 @@ test("HealthMarkersInScene", () => {
   assert.equal(over.health.find((h) => h.id === "nas"), undefined, "unmanaged nodes have no spikes");
   const close = buildScene(m, l, { level: ZOOM.close, focus: null });
   assert.equal(close.health.find((h) => h.id === "pve1").spikes.length, 4);
+});
+
+test("DimmedNodesKeepSecurityMarkers", () => {
+  const r = raw();
+  r.nodes[1].health = { patches: "crit", hostKeyMismatch: true };
+  const m = validateModel(r);
+  const l = computeLayout(m);
+  const close = buildScene(m, l, { level: ZOOM.close, focus: null });
+  const brightness = close.stars.find((x) => x.id === "pve1").brightness;
+  // Find a focus under which pve1 is dimmed (not one of the highlighted nodes).
+  const dimmed = m.nodes
+    .map((n) => buildScene(m, l, { level: ZOOM.close, focus: n.id }))
+    .find((s) => s.stars.find((x) => x.id === "pve1").brightness < brightness);
+  assert.ok(dimmed, "fixture has a focus that dims pve1");
+  const pve = dimmed.health.find((h) => h.id === "pve1");
+  assert.ok(pve, "the host-key mismatch stays visible on a dimmed node");
+  assert.ok(pve.ring);
+  assert.deepEqual(pve.spikes, [], "a dimmed node shows no spikes");
+  assert.equal(dimmed.health.find((h) => h.id === "nas"), undefined);
 });
 
 test("SoftwareAggregatesOnProxmoxHostInOverview", () => {

@@ -62,7 +62,7 @@ export function starCorePainter() {
           ctx.font = Math.round(sizePx * 0.5) + "px sans-serif";
           ctx.textAlign = "left";
           ctx.textBaseline = "middle";
-          const t = "×" + (e.count > 999 ? "999+" : String(e.count));
+          const t = "\u00d7" + (e.count > 999 ? "999+" : String(e.count));
           ctx.fillText(t, x + sizePx + 1, sy);
           x += sizePx + ctx.measureText(t).width + 4;
         } else {

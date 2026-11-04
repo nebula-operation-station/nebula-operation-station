@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Run with: node --test web/static/trafficmap/
+// Run with: node --test web/static/trafficmap/*.test.mjs
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -40,7 +40,7 @@ test("RejectsUnknownAndInvalidMessages", () => {
   assert.equal(acceptMessage(ev("string"), win, () => false).kind, "error");
   assert.equal(acceptMessage(ev(null), win, () => false).kind, "error");
   const bad = modelMessage();
-  bad.nodes[1].label = "‮";
+  bad.nodes[1].label = "\u202e";
   const r = acceptMessage(ev(bad), win, () => false);
   assert.equal(r.kind, "error");
   assert.ok(r.errors.length > 0);

@@ -323,7 +323,19 @@ function freeTarget(gl, t) {
 export function createWebGL2Backend(canvas, onLost) {
   const gl = canvas.getContext("webgl2", { alpha: false, antialias: false, depth: false, stencil: false, premultipliedAlpha: false, preserveDrawingBuffer: false });
   if (!gl) return null;
+  try {
+    return buildBackend(canvas, gl, onLost);
+  } catch (err) {
+    // Release the half-built context so the browser does not keep it (and
+    // later evict it with a misleading loss event). No listener is
+    // registered yet, so the loss does not reach onLost.
+    const ext = gl.getExtension("WEBGL_lose_context");
+    if (ext) ext.loseContext();
+    throw err;
+  }
+}
 
+function buildBackend(canvas, gl, onLost) {
   let lost = false;
   const handleLost = (ev) => {
     ev.preventDefault();
@@ -331,7 +343,6 @@ export function createWebGL2Backend(canvas, onLost) {
     lost = true;
     onLost();
   };
-  canvas.addEventListener("webglcontextlost", handleLost);
 
   const bloom = gl.getExtension("EXT_color_buffer_float") !== null;
   const progs = {
@@ -399,6 +410,9 @@ export function createWebGL2Backend(canvas, onLost) {
     gl.uniform1i(prog.u(name), unit);
   }
 
+  // Registered only once the backend is complete; a loss before this point
+  // is still seen through isLost().
+  canvas.addEventListener("webglcontextlost", handleLost);
   return {
     name: bloom ? "webgl2" : "webgl2 (no bloom)",
     setScene(scene) {

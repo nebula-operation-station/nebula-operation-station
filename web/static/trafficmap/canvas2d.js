@@ -21,6 +21,14 @@ export function particleT(p, time) {
 }
 
 /**
+ * segmentVisible reports whether the bounding box of the segment, grown by
+ * margin, intersects the w x h viewport.
+ */
+export function segmentVisible(ax, ay, bx, by, w, h, margin) {
+  return Math.max(ax, bx) >= -margin && Math.min(ax, bx) <= w + margin && Math.max(ay, by) >= -margin && Math.min(ay, by) <= h + margin;
+}
+
+/**
  * createCanvas2DBackend returns a backend drawing into canvas, or null if
  * no 2D context can be created. Backend interface (shared with WebGL2):
  *   name, setScene(scene), render(cam, dpr, time), isLost(), dispose().
@@ -62,13 +70,16 @@ export function createCanvas2DBackend(canvas) {
       }
 
       ctx.lineCap = "round";
+      // Beams that are too thin or whose bounding box lies outside the
+      // viewport are culled; their particles are skipped too.
       const screen = scene.beams.map((b) => {
+        if (b.width < MIN_BEAM_PX) return null;
         const [ax, ay] = worldToScreen(cam, b.ax, b.ay);
         const [bx, by] = worldToScreen(cam, b.bx, b.by);
-        return [ax, ay, bx, by];
+        return segmentVisible(ax, ay, bx, by, cam.width, cam.height, b.width * 3) ? [ax, ay, bx, by] : null;
       });
       scene.beams.forEach((b, i) => {
-        if (b.width < MIN_BEAM_PX) return;
+        if (screen[i] === null) return;
         const [ax, ay, bx, by] = screen[i];
         ctx.strokeStyle = rgba(b.rgb, 0.12 * b.brightness);
         ctx.lineWidth = b.width * 3;
@@ -82,8 +93,10 @@ export function createCanvas2DBackend(canvas) {
       });
 
       for (const p of scene.particles) {
+        const seg = screen[p.beam];
+        if (!seg) continue;
         const b = scene.beams[p.beam];
-        const [ax, ay, bx, by] = screen[p.beam];
+        const [ax, ay, bx, by] = seg;
         const t = particleT(p, time);
         const x = ax + (bx - ax) * t;
         const y = ay + (by - ay) * t;
