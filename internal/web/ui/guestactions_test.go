@@ -758,3 +758,35 @@ func TestGuestPowerProposeIsPostOnly(t *testing.T) {
 		t.Errorf("GET proposed (status %d)", rec.Code)
 	}
 }
+
+// TestGuestPowerExpiredBindingsFreeTheUserCap fills the user's cap of open
+// proposals; once their executor bindings expired (the fake binds for five
+// minutes, the page lives fifteen) they no longer count: the user can
+// propose again, and the old page still shows the expired binding.
+func TestGuestPowerExpiredBindingsFreeTheUserCap(t *testing.T) {
+	clock := &gpClock{t: time.Now()}
+	e := newGPEnvClock(t, gpGuests(), clock.now)
+	h := e.h.Handler()
+	var first string
+	for i := 0; i < 32; i++ {
+		if rec := gpPost(t, h, "/pve/guests/power", gpForm("100", "qemu", "shutdown")); rec.Code != http.StatusSeeOther {
+			t.Fatalf("proposal %d = %d %q", i, rec.Code, rec.Body.String())
+		}
+		if i == 0 {
+			first = e.exec.lastDigest()
+		}
+		clock.add(2 * time.Second)
+	}
+	if rec := gpPost(t, h, "/pve/guests/power", gpForm("100", "qemu", "shutdown")); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("proposal over the cap = %d, want 429", rec.Code)
+	}
+	clock.add(6 * time.Minute) // past every binding, within the page TTL
+	if rec := gpPost(t, h, "/pve/guests/power", gpForm("100", "qemu", "shutdown")); rec.Code != http.StatusSeeOther {
+		t.Fatalf("proposal after the bindings expired = %d %q, want 303", rec.Code, rec.Body.String())
+	}
+	body := getBody(t, h, "/pve/guests/power/"+first)
+	if !strings.Contains(body, "has expired") {
+		t.Error("the first proposal's page does not show its expired binding")
+	}
+	gpNoApproval(t, body)
+}

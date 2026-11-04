@@ -88,7 +88,9 @@ type fakeGuestSnapshot struct {
 	// snapshot overrides the returned bound snapshot (nil: echo expect).
 	snapshot  *pb.PVESnapshotIdentity
 	runsAfter *bool // overrides GuestRunsAfter
-	commits   []*pb.CommitPVEGuestSnapshotRequest
+	// artifact overrides the bound artifact hash (empty: the op's).
+	artifact string
+	commits  []*pb.CommitPVEGuestSnapshotRequest
 }
 
 func (f *fakeGuestSnapshot) ProposePVEGuestSnapshot(_ context.Context, in *pb.ProposePVEGuestSnapshotRequest, _ ...grpc.CallOption) (*pb.ProposePVEGuestSnapshotResponse, error) {
@@ -106,6 +108,9 @@ func (f *fakeGuestSnapshot) ProposePVEGuestSnapshot(_ context.Context, in *pb.Pr
 		CredentialRefs: []string{"pve-lab-action"}, RiskClass: canonical.Risk(strings.TrimPrefix(f.risk.String(), "RISK_CLASS_")),
 		StagePlanHash: strings.Repeat("5f", 32), ExpiryUnix: time.Now().Add(5 * time.Minute).Unix(),
 		ResolvedTargets: []canonical.Target{target},
+	}
+	if f.artifact != "" {
+		rq.ArtifactSHA256 = f.artifact
 	}
 	c, err := canonical.Encode(rq)
 	if err != nil {
@@ -613,5 +618,245 @@ func TestGuestSnapshotProposalNotServedAsPowerProposal(t *testing.T) {
 	// It is still pending under its own route.
 	if page := getBody(t, e.h, "/pve/guests/snapshots/proposals/"+e.exec.lastDigest()); !strings.Contains(page, "schedule-approve") {
 		t.Error("the snapshot proposal is no longer approvable")
+	}
+}
+
+// gsIdentForm is a delete or rollback form of the stored snapshot
+// before-upgrade of VM 100.
+func gsIdentForm(op string) url.Values {
+	f := url.Values{"remote": {gpRemote}, "vmid": {"100"}, "generation": {"1"}, "node": {"pve1"}, "kind": {"qemu"},
+		"op": {op}, "name": {"before-upgrade"}, "snaptime": {strconv.FormatInt(gsSnapTime.Unix(), 10)}, "parent": {""}}
+	if op == "rollback" {
+		f.Set("start", "no")
+	}
+	return f
+}
+
+// gsCreateForm is a create form of snapshot name on VM 100.
+func gsCreateForm(name string) url.Values {
+	return url.Values{"remote": {gpRemote}, "vmid": {"100"}, "generation": {"1"}, "node": {"pve1"}, "kind": {"qemu"},
+		"op": {"create"}, "name": {name}}
+}
+
+// gsNoApproval checks that a snapshot proposal page offers no way to
+// approve or run.
+func gsNoApproval(t *testing.T, body string) {
+	t.Helper()
+	for _, bad := range []string{"schedule-approve", "nebula approve", `action="/pve/guests/snapshots/run"`, "webauthn.js"} {
+		if strings.Contains(body, bad) {
+			t.Errorf("page offers approval (%q)", bad)
+		}
+	}
+}
+
+// TestGuestSnapshotRiskFloorWithholdsApproval checks the UI's risk floor
+// (ADR 0006: create MEDIUM, delete and rollback HIGH): a binding below it
+// is a mismatch without approval; at or above it the page shows the risk
+// the executor bound, not a fixed HIGH.
+func TestGuestSnapshotRiskFloorWithholdsApproval(t *testing.T) {
+	cases := []struct {
+		op      string
+		risk    pb.RiskClass
+		allowed bool
+	}{
+		{"delete", pb.RiskClass_RISK_CLASS_LOW, false},
+		{"delete", pb.RiskClass_RISK_CLASS_MEDIUM, false},
+		{"rollback", pb.RiskClass_RISK_CLASS_LOW, false},
+		{"rollback", pb.RiskClass_RISK_CLASS_MEDIUM, false},
+		{"create", pb.RiskClass_RISK_CLASS_LOW, false},
+		{"delete", pb.RiskClass_RISK_CLASS_HIGH, true},
+		{"delete", pb.RiskClass_RISK_CLASS_CRITICAL, true},
+		{"rollback", pb.RiskClass_RISK_CLASS_HIGH, true},
+		{"rollback", pb.RiskClass_RISK_CLASS_CRITICAL, true},
+		{"create", pb.RiskClass_RISK_CLASS_MEDIUM, true},
+		{"create", pb.RiskClass_RISK_CLASS_HIGH, true},
+	}
+	for _, c := range cases {
+		risk := strings.TrimPrefix(c.risk.String(), "RISK_CLASS_")
+		t.Run(c.op+"/"+risk, func(t *testing.T) {
+			e := newGSEnv(t, gsDefaultSnaps())
+			e.exec.risk = c.risk
+			form := gsIdentForm(c.op)
+			if c.op == "create" {
+				form = gsCreateForm("new1")
+			}
+			rec := gpPost(t, e.h, "/pve/guests/snapshots/propose", form)
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("propose = %d %q", rec.Code, rec.Body.String())
+			}
+			page := getBody(t, e.h, rec.Header().Get("Location"))
+			if !strings.Contains(page, `class="badge `+riskBadge(risk)+`">`+risk+`<`) {
+				t.Errorf("page does not show the bound risk %s", risk)
+			}
+			below := strings.Contains(page, "below the floor of a snapshot "+c.op)
+			if c.allowed {
+				if below || strings.Contains(page, "approval withheld") || !strings.Contains(page, "schedule-approve") {
+					t.Errorf("risk %s at or above the floor is not approvable", risk)
+				}
+				return
+			}
+			if !below || !strings.Contains(page, "approval withheld") {
+				t.Errorf("risk %s below the floor is not shown as a mismatch", risk)
+			}
+			gsNoApproval(t, page)
+			if rec := gpPostJSON(t, e.h, "/pve/guests/snapshots/commit", map[string]any{"id": e.exec.lastDigest(), "assertion": map[string]string{"id": "x"}}); rec.Code != http.StatusNotFound {
+				t.Errorf("commit below the floor = %d", rec.Code)
+			}
+		})
+	}
+}
+
+// riskBadge is the badge class the page uses for risk.
+func riskBadge(risk string) string {
+	switch risk {
+	case "LOW":
+		return "badge--ok"
+	case "MEDIUM":
+		return "badge--warning"
+	default:
+		return "badge--critical"
+	}
+}
+
+// TestGuestSnapshotExpiredBindingWithholdsApproval checks the snapshot
+// routes with a binding that expired while the page waited, for the
+// security key and the CLI path.
+func TestGuestSnapshotExpiredBindingWithholdsApproval(t *testing.T) {
+	for _, requirement := range []pb.ApprovalRequirement{
+		pb.ApprovalRequirement_APPROVAL_REQUIREMENT_ASSERTION_VERIFIED, pb.ApprovalRequirement_APPROVAL_REQUIREMENT_CLI_ONLY,
+	} {
+		t.Run(requirement.String(), func(t *testing.T) {
+			e := newGSEnv(t, gsDefaultSnaps())
+			e.exec.requirement = requirement
+			rec := gpPost(t, e.h, "/pve/guests/snapshots/propose", gsIdentForm("delete"))
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("propose = %d %q", rec.Code, rec.Body.String())
+			}
+			d := e.exec.lastDigest()
+			if page := getBody(t, e.h, "/pve/guests/snapshots/proposals/"+d); strings.Contains(page, "has expired") {
+				t.Fatal("fresh binding shown as expired")
+			}
+			e.clock.add(6 * time.Minute) // the fake binds for five minutes
+			page := getBody(t, e.h, "/pve/guests/snapshots/proposals/"+d)
+			if !strings.Contains(page, "has expired") {
+				t.Error("expired binding not shown as expired")
+			}
+			gsNoApproval(t, page)
+			if rec := gpPostJSON(t, e.h, "/pve/guests/snapshots/commit", map[string]any{"id": d, "assertion": map[string]string{"id": "x"}}); rec.Code != http.StatusNotFound {
+				t.Errorf("commit of an expired binding = %d", rec.Code)
+			}
+			if rec := gpPost(t, e.h, "/pve/guests/snapshots/run", url.Values{"digest": {d}}); rec.Code != http.StatusNotFound {
+				t.Errorf("run of an expired binding = %d", rec.Code)
+			}
+			time.Sleep(10 * time.Millisecond)
+			if n := len(e.exec.commitList()); n != 0 {
+				t.Errorf("%d commits of an expired binding", n)
+			}
+		})
+	}
+}
+
+// TestGuestSnapshotSharesPerUserCapWithPower fills one user's cap with
+// power and snapshot proposals: both kinds share it, and it frees up once
+// the bindings expired.
+func TestGuestSnapshotSharesPerUserCapWithPower(t *testing.T) {
+	e := newGSEnv(t, gsDefaultSnaps())
+	for i := 0; i < 32; i++ {
+		var rec *httptest.ResponseRecorder
+		if i%2 == 0 {
+			rec = gpPost(t, e.h, "/pve/guests/power", gpForm("100", "qemu", "shutdown"))
+		} else {
+			rec = gpPost(t, e.h, "/pve/guests/snapshots/propose", gsCreateForm("s"+strconv.Itoa(i)))
+		}
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("proposal %d = %d %q", i, rec.Code, rec.Body.String())
+		}
+		e.clock.add(2 * time.Second)
+	}
+	if rec := gpPost(t, e.h, "/pve/guests/snapshots/propose", gsCreateForm("over")); rec.Code != http.StatusTooManyRequests {
+		t.Errorf("snapshot proposal over the shared cap = %d, want 429", rec.Code)
+	}
+	e.clock.add(2 * time.Second)
+	if rec := gpPost(t, e.h, "/pve/guests/power", gpForm("100", "qemu", "reboot")); rec.Code != http.StatusTooManyRequests {
+		t.Errorf("power proposal over the shared cap = %d, want 429", rec.Code)
+	}
+	e.clock.add(6 * time.Minute) // past every binding, within the page TTL
+	if rec := gpPost(t, e.h, "/pve/guests/snapshots/propose", gsCreateForm("after")); rec.Code != http.StatusSeeOther {
+		t.Errorf("snapshot proposal after the bindings expired = %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+// TestGuestSnapshotCLIRun checks the hardened-mode path: the page shows
+// the CLI command and the snapshot run form, the run commits the exact
+// proposed target, and the power run route refuses the snapshot digest.
+func TestGuestSnapshotCLIRun(t *testing.T) {
+	e := newGSEnv(t, gsDefaultSnaps())
+	e.exec.requirement = pb.ApprovalRequirement_APPROVAL_REQUIREMENT_CLI_ONLY
+	rec := gpPost(t, e.h, "/pve/guests/snapshots/propose", gsIdentForm("rollback"))
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("propose = %d %q", rec.Code, rec.Body.String())
+	}
+	d := e.exec.lastDigest()
+	page := getBody(t, e.h, "/pve/guests/snapshots/proposals/"+d)
+	for _, want := range []string{"nebula approve " + d, `action="/pve/guests/snapshots/run"`} {
+		if !strings.Contains(page, want) {
+			t.Errorf("CLI page lacks %q", want)
+		}
+	}
+	if strings.Contains(page, "schedule-approve") {
+		t.Error("CLI page offers the security key button")
+	}
+	if rec := gpPost(t, e.h, "/pve/guests/power/run", url.Values{"digest": {d}}); rec.Code != http.StatusNotFound {
+		t.Errorf("snapshot digest under the power run route = %d", rec.Code)
+	}
+	if rec := gpPost(t, e.h, "/pve/guests/snapshots/run", url.Values{"digest": {d}}); rec.Code != http.StatusSeeOther {
+		t.Fatalf("run = %d %q", rec.Code, rec.Body.String())
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(e.exec.commitList()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	c := e.exec.commitList()
+	if len(c) != 1 {
+		t.Fatalf("%d commits", len(c))
+	}
+	tg := c[0].GetTarget()
+	if c[0].GetExecutionDigest() != d || tg.GetOp() != "rollback" || tg.GetName() != "before-upgrade" || tg.GetStart() ||
+		tg.GetExpect().GetSnaptimeUnix() != gsSnapTime.Unix() {
+		t.Errorf("commit %v", c[0])
+	}
+	// A second run of the same proposal is refused.
+	if rec := gpPost(t, e.h, "/pve/guests/snapshots/run", url.Values{"digest": {d}}); rec.Code != http.StatusNotFound {
+		t.Errorf("second run = %d", rec.Code)
+	}
+}
+
+// TestGuestSnapshotUnknownArtifactWithholdsApproval checks that an
+// artifact hash the UI does not know, or another op's, is a mismatch.
+func TestGuestSnapshotUnknownArtifactWithholdsApproval(t *testing.T) {
+	cases := []struct {
+		name, artifact, want string
+	}{
+		{"unknown hash", strings.Repeat("ee", 32), "unknown snapshot operation"},
+		{"power artifact", gpArtifactSHA256("stop"), "unknown snapshot operation"},
+		{"another op", gsSnapArtifactSHA256("create"), "the executor bound the operation create, not delete"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newGSEnv(t, gsDefaultSnaps())
+			e.exec.artifact = c.artifact
+			rec := gpPost(t, e.h, "/pve/guests/snapshots/propose", gsIdentForm("delete"))
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("propose = %d %q", rec.Code, rec.Body.String())
+			}
+			page := getBody(t, e.h, rec.Header().Get("Location"))
+			if !strings.Contains(page, c.want) || !strings.Contains(page, "approval withheld") {
+				t.Errorf("page lacks the mismatch %q", c.want)
+			}
+			gsNoApproval(t, page)
+			if rec := gpPostJSON(t, e.h, "/pve/guests/snapshots/commit", map[string]any{"id": e.exec.lastDigest(), "assertion": map[string]string{"id": "x"}}); rec.Code != http.StatusNotFound {
+				t.Errorf("commit = %d", rec.Code)
+			}
+		})
 	}
 }

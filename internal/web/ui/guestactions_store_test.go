@@ -110,3 +110,126 @@ func TestGuestPowerPutCapsAndTableLimit(t *testing.T) {
 		t.Error("the settled proposal was not the one evicted")
 	}
 }
+
+// gpStoreProposal is a pending proposal whose executor binding expires at
+// bindingExpiry; the page itself lives guestPowerProposalTTL from now.
+func gpStoreProposal(user, digest string, now, bindingExpiry time.Time) *guestPowerProposal {
+	return &guestPowerProposal{user: user, digest: digest, state: "pending", expires: now.Add(guestPowerProposalTTL),
+		bound: guestPowerBinding{Expiry: bindingExpiry}}
+}
+
+// gpStoreDigest is a distinct digest per user and index.
+func gpStoreDigest(u, i int) string {
+	return strings.Repeat("0", 56) + strconv.Itoa(10000000+u*1000+i)
+}
+
+// TestGuestPowerExpiredBindingFreesUserCap fills alice's cap with pending
+// proposals whose executor binding lasts five minutes: once the bindings
+// expired (well before the 15-minute page TTL) they no longer count, so
+// alice can propose again while their pages stay visible.
+func TestGuestPowerExpiredBindingFreesUserCap(t *testing.T) {
+	now := time.Now()
+	p := newGuestPowerProposals()
+	for i := 0; i < maxGuestPowerProposalsPerUser; i++ {
+		if err := p.put(gpStoreProposal("alice", gpStoreDigest(0, i), now, now.Add(5*time.Minute)), now); err != nil {
+			t.Fatalf("put %d: %v", i, err)
+		}
+	}
+	if err := p.put(gpStoreProposal("alice", gpStoreDigest(0, 99), now, now.Add(5*time.Minute)), now); !errors.Is(err, errGuestPowerUserCap) {
+		t.Fatalf("alice over her cap with live bindings = %v", err)
+	}
+	// One second before the bindings expire, they still count.
+	before := now.Add(5*time.Minute - time.Second)
+	if err := p.put(gpStoreProposal("alice", gpStoreDigest(0, 99), before, before.Add(5*time.Minute)), before); !errors.Is(err, errGuestPowerUserCap) {
+		t.Fatalf("alice over her cap before the bindings expired = %v", err)
+	}
+	later := now.Add(5 * time.Minute) // binding expiry reached; page TTL not
+	if err := p.put(gpStoreProposal("alice", gpStoreDigest(0, 99), later, later.Add(5*time.Minute)), later); err != nil {
+		t.Fatalf("alice after her bindings expired = %v", err)
+	}
+	if x, ok := p.get("alice", gpStoreDigest(0, 0), later); !ok || x.state != "pending" {
+		t.Errorf("the expired proposal's page = %v %q, want still shown", ok, x.state)
+	}
+}
+
+// TestGuestPowerRunningProposalKeepsCountingAfterBindingExpiry checks that
+// only pending proposals lapse: an approving or running one still counts
+// after its binding's expiry.
+func TestGuestPowerRunningProposalKeepsCountingAfterBindingExpiry(t *testing.T) {
+	now := time.Now()
+	p := newGuestPowerProposals()
+	for i := 0; i < maxGuestPowerProposalsPerUser; i++ {
+		x := gpStoreProposal("alice", gpStoreDigest(0, i), now, now.Add(5*time.Minute))
+		x.state = []string{"approving", "running"}[i%2]
+		if err := p.put(x, now); err != nil {
+			t.Fatalf("put %d: %v", i, err)
+		}
+	}
+	later := now.Add(6 * time.Minute)
+	if err := p.put(gpStoreProposal("alice", gpStoreDigest(0, 99), later, later.Add(5*time.Minute)), later); !errors.Is(err, errGuestPowerUserCap) {
+		t.Errorf("alice with approving and running proposals past binding expiry = %v, want the cap", err)
+	}
+}
+
+// TestGuestPowerMismatchedProposalHoldsNoSlot checks that a pending
+// proposal whose binding differs from the request (never approvable) does
+// not count against the cap, also when the binding names no expiry.
+func TestGuestPowerMismatchedProposalHoldsNoSlot(t *testing.T) {
+	now := time.Now()
+	p := newGuestPowerProposals()
+	for i := 0; i < maxGuestPowerProposalsPerUser; i++ {
+		x := gpStoreProposal("alice", gpStoreDigest(0, i), now, time.Time{})
+		x.mismatch = []string{"the bound request has no expiry"}
+		if err := p.put(x, now); err != nil {
+			t.Fatalf("put %d: %v", i, err)
+		}
+	}
+	if err := p.put(gpStoreProposal("alice", gpStoreDigest(0, 99), now, now.Add(5*time.Minute)), now); err != nil {
+		t.Errorf("alice with only mismatched proposals = %v", err)
+	}
+}
+
+// TestGuestPowerFullTableEvictsExpiredBindingsNotLiveOnes fills the table
+// with eight users at their cap. Once most bindings expired, other users
+// get slots by evicting those, never one of u0's proposals whose binding
+// is still live; when every remaining proposal is live, the table refuses
+// again.
+func TestGuestPowerFullTableEvictsExpiredBindingsNotLiveOnes(t *testing.T) {
+	now := time.Now()
+	p := newGuestPowerProposals()
+	users := maxGuestPowerProposals / maxGuestPowerProposalsPerUser
+	for u := 0; u < users; u++ {
+		bindingExpiry := now.Add(5 * time.Minute)
+		if u == 0 {
+			bindingExpiry = now.Add(10 * time.Minute) // u0's stay live
+		}
+		for i := 0; i < maxGuestPowerProposalsPerUser; i++ {
+			if err := p.put(gpStoreProposal("u"+strconv.Itoa(u), gpStoreDigest(u, i), now, bindingExpiry), now); err != nil {
+				t.Fatalf("put u%d/%d: %v", u, i, err)
+			}
+		}
+	}
+	if err := p.put(gpStoreProposal("late0", gpStoreDigest(9, 0), now, now.Add(5*time.Minute)), now); !errors.Is(err, errGuestPowerFull) {
+		t.Fatalf("a ninth user with live bindings = %v", err)
+	}
+	later := now.Add(6 * time.Minute) // past the bindings, within the page TTL
+	freeable := (users - 1) * maxGuestPowerProposalsPerUser
+	for i := 0; i < freeable; i++ {
+		// Each late user stays within its cap.
+		k := i / maxGuestPowerProposalsPerUser
+		if err := p.put(gpStoreProposal("late"+strconv.Itoa(k), gpStoreDigest(9+k, i%maxGuestPowerProposalsPerUser), later, later.Add(5*time.Minute)), later); err != nil {
+			t.Fatalf("late put %d after bindings expired = %v", i, err)
+		}
+	}
+	for i := 0; i < maxGuestPowerProposalsPerUser; i++ {
+		if _, ok := p.get("u0", gpStoreDigest(0, i), later); !ok {
+			t.Fatalf("u0's live proposal %d was evicted", i)
+		}
+	}
+	if err := p.put(gpStoreProposal("last", gpStoreDigest(99, 0), later, later.Add(5*time.Minute)), later); !errors.Is(err, errGuestPowerFull) {
+		t.Errorf("a full table of live proposals = %v, want full", err)
+	}
+	if len(p.props) != maxGuestPowerProposals {
+		t.Errorf("%d proposals kept", len(p.props))
+	}
+}
