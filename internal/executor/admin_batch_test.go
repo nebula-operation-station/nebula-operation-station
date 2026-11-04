@@ -33,7 +33,7 @@ func newHardenedBatchEnv(t *testing.T, adminUID uint32) *batchRPCEnv {
 		t.Fatal(err)
 	}
 	a, err := batch.New(batch.Options{
-		Mode: permit.ModeHardened, Verifier: v, Policy: env.policy, AdminUID: adminUID, Now: env.clock.Now, Store: env.db,
+		Mode: permit.ModeHardened, Verifier: v, Policy: env.policy, AdminUIDs: []uint32{adminUID}, Now: env.clock.Now, Store: env.db,
 		Session: func() (bool, time.Time) { return true, env.clock.Now().Add(time.Hour) },
 	})
 	if err != nil {

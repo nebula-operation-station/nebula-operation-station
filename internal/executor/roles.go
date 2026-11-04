@@ -117,6 +117,9 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_ReviewBatch_FullMethodName:     {admin},
 		pb.ExecutorService_ApproveBatchCLI_FullMethodName: {admin},
 		pb.ExecutorService_GetBatchStatus_FullMethodName:  {server, admin},
+		// Read-only: credential versions/fingerprints for batch plans, no
+		// key material.
+		pb.ExecutorService_GetBatchCredentialVersions_FullMethodName: {server, admin},
 		// Built-in trust (ADR 0007, E19c). Review and commit are local-admin
 		// only; the server may read the trust status, nothing else. There is
 		// no server bulk trust.
