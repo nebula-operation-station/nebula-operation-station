@@ -171,6 +171,7 @@ func TestIngestRejectsInvalidReports(t *testing.T) {
 	}{
 		{"empty host", report("", t0, t0, ok), ErrInvalidReport},
 		{"bad tier", Report{Host: "h", Tier: "X", From: t0, To: t0}, ErrInvalidReport},
+		{"unknown tier", Report{Host: "h", Tier: "socket2", From: t0, To: t0}, ErrInvalidReport},
 		{"zero time", report("h", time.Time{}, time.Time{}, ok), ErrInvalidReport},
 		{"from after to", report("h", t0.Add(time.Minute), t0, ok), ErrInvalidReport},
 		{"keys not canonical", report("h", t0, t0, Observation{Key: swapped}), ErrInvalidReport},
@@ -725,20 +726,146 @@ func TestSplitHours(t *testing.T) {
 	}
 }
 
-func TestRejectedReportDoesNotPrune(t *testing.T) {
+func TestExpiredReportersDoNotBlockNewHosts(t *testing.T) {
 	cur := t0
 	l := DefaultLimits()
 	l.MaxReporters = 1
 	a := NewAggregator(l, func() time.Time { return cur })
 	mustIngest(t, a, report("h", cur, cur, Observation{Key: key22, BytesAB: 1, ServerReported: true}))
-	cur = cur.Add(Retention + 2*time.Hour)
 	if _, err := a.Ingest(report("other", cur, cur), ownOf(Report{})); !errors.Is(err, ErrLimit) {
 		t.Fatalf("Ingest = %v, want ErrLimit", err)
 	}
-	if a.Buckets() != 1 || a.Reporters() != 1 {
-		t.Fatalf("rejected report pruned: %d buckets, %d reporters", a.Buckets(), a.Reporters())
-	}
-	// Pruning frees the slot once the clock's hour has been pruned.
-	a.Cutoff(cur, Retention)
+	// Once h has expired, the hourly prune before the limit check frees
+	// its slot without a manual Cutoff.
+	cur = cur.Add(Retention + 2*time.Hour)
 	mustIngest(t, a, report("other", cur, cur))
+	if a.Buckets() != 0 || a.Reporters() != 1 {
+		t.Fatalf("expired state kept: %d buckets, %d reporters", a.Buckets(), a.Reporters())
+	}
+}
+
+// manyFlows returns n observations of distinct flows whose client end is
+// client, sorted.
+func manyFlows(client string, n int) []Observation {
+	obs := make([]Observation, n)
+	for i := range obs {
+		obs[i] = Observation{Key: FlowKey{A: addr(client), B: addr("203.0.113.1"), Proto: TCP, ServerPort: uint16(1000 + i), Server: SideB, Tier: TierSocket}, BytesAB: 1}
+	}
+	sortObservations(obs)
+	return obs
+}
+
+func TestIngestPerReporterBucketCap(t *testing.T) {
+	cur := t0.Add(time.Hour)
+	l := DefaultLimits()
+	l.MaxBuckets = 10
+	l.MaxBucketsPerReporter = 3
+	a := NewAggregator(l, func() time.Time { return cur })
+	noisy := manyFlows("10.0.0.1", 8)
+	res := mustIngest(t, a, report("noisy", t0, t0, noisy...))
+	if res.Applied != 3 || res.Capped != 5 || res.Dropped != 0 {
+		t.Fatalf("noisy result %+v", res)
+	}
+	// The host's existing buckets still accept data.
+	res = mustIngest(t, a, report("noisy", t0.Add(time.Second), t0.Add(time.Second), noisy[0]))
+	if res.Applied != 1 || res.Capped != 0 {
+		t.Fatalf("existing bucket refused: %+v", res)
+	}
+	// Another hour does not give the host more room.
+	res = mustIngest(t, a, report("noisy", t0.Add(time.Hour), t0.Add(time.Hour), noisy...))
+	if res.Applied != 0 || res.Capped != 8 {
+		t.Fatalf("noisy second hour %+v", res)
+	}
+	// Other hosts still get their own buckets; nothing is evicted.
+	res = mustIngest(t, a, report("quiet", t0, t0, manyFlows("10.0.0.2", 3)...))
+	if res.Applied != 3 || res.Capped != 0 || res.Dropped != 0 {
+		t.Fatalf("quiet result %+v", res)
+	}
+	if a.Buckets() != 6 || a.Capped() != 13 || a.Dropped() != 0 {
+		t.Fatalf("buckets %d, capped %d, dropped %d", a.Buckets(), a.Capped(), a.Dropped())
+	}
+	if got := a.CappedHosts(); !slices.Equal(got, []string{"noisy"}) {
+		t.Fatalf("CappedHosts = %v", got)
+	}
+	if got := a.TopN(addr("10.0.0.1"), Window{From: t0, To: cur.Add(time.Hour)}, 100); len(got) != 3 {
+		t.Fatalf("noisy flows = %d, want 3", len(got))
+	}
+	// Buckets that expire give the room back.
+	cur = t0.Add(Retention + time.Hour)
+	res = mustIngest(t, a, report("noisy", cur, cur, noisy...))
+	if res.Applied != 3 || res.Capped != 5 {
+		t.Fatalf("after expiry %+v", res)
+	}
+}
+
+func TestIngestPerReporterCapClampedToGlobal(t *testing.T) {
+	a := NewAggregator(Limits{MaxBuckets: 2, MaxBucketsPerReporter: 100}, func() time.Time { return t0 })
+	if a.limits.MaxBucketsPerReporter != 2 {
+		t.Fatalf("MaxBucketsPerReporter = %d", a.limits.MaxBucketsPerReporter)
+	}
+	if d := NewAggregator(Limits{}, time.Now).limits; d.MaxBucketsPerReporter != DefaultMaxBucketsPerReporter || d.MaxBucketsPerReporter >= d.MaxBuckets {
+		t.Fatalf("default per-reporter cap %d of %d", d.MaxBucketsPerReporter, d.MaxBuckets)
+	}
+}
+
+func TestReportersKeyedByHostAcrossTiers(t *testing.T) {
+	l := DefaultLimits()
+	l.MaxReporters = 1
+	a := newTestAgg(t0.Add(time.Hour), l)
+	for _, tier := range []string{TierSocket, TierConntrack, TierSensor} {
+		k := key22
+		k.Tier = tier
+		r := report("h", t0, t0.Add(time.Minute), Observation{Key: k, BytesAB: 1, ServerReported: true})
+		r.Tier = tier
+		mustIngest(t, a, r)
+		// Each tier keeps its own report sequence.
+		if _, err := a.Ingest(r, ownOf(r)); !errors.Is(err, ErrDuplicateReport) {
+			t.Fatalf("tier %s replay = %v, want ErrDuplicateReport", tier, err)
+		}
+	}
+	if a.Reporters() != 1 {
+		t.Fatalf("reporters = %d, want 1 per host", a.Reporters())
+	}
+	r := report("h", t0, t0.Add(time.Minute))
+	r.Tier = "invented"
+	if _, err := a.Ingest(r, ownOf(r)); !errors.Is(err, ErrInvalidReport) {
+		t.Fatalf("invented tier = %v, want ErrInvalidReport", err)
+	}
+}
+
+func TestShortCutoffKeepsReplayProtection(t *testing.T) {
+	now := t0.Add(10 * time.Hour)
+	a := newTestAgg(now, DefaultLimits())
+	old := report("h", t0, t0.Add(time.Minute), Observation{Key: key22, BytesAB: 1, ServerReported: true})
+	mustIngest(t, a, old)
+	// The admin shortens the retention to 2 hours.
+	if removed := a.Cutoff(now, 2*time.Hour); removed != 1 {
+		t.Fatalf("Cutoff removed %d", removed)
+	}
+	if a.Reporters() != 1 {
+		t.Fatalf("reporter inside the ingest window was removed")
+	}
+	if _, err := a.Ingest(old, ownOf(old)); err == nil {
+		t.Fatal("replayed report accepted after cutoff")
+	}
+	// A host the aggregator has not seen cannot bring the hours back either.
+	late := report("late", t0.Add(time.Hour), t0.Add(time.Hour+time.Minute), Observation{Key: key22, BytesAB: 5})
+	if _, err := a.Ingest(late, ownOf(late)); !errors.Is(err, ErrOutOfWindow) {
+		t.Fatalf("late report = %v, want ErrOutOfWindow", err)
+	}
+	// A report spanning the new floor keeps only the part after it.
+	span := report("span", now.Add(-2*time.Hour-30*time.Minute), now.Add(-2*time.Hour+30*time.Minute), Observation{Key: key22, BytesAB: 10})
+	res := mustIngest(t, a, span)
+	if res.Applied != 1 || a.Buckets() != 1 {
+		t.Fatalf("spanning report %+v, buckets %d", res, a.Buckets())
+	}
+}
+
+func TestMaxIntervalClampedToRetention(t *testing.T) {
+	now := t0.Add(10 * time.Hour)
+	a := newTestAgg(now, Limits{Retention: 2 * time.Hour, MaxInterval: 1000 * time.Hour})
+	r := report("h", now.Add(-3*time.Hour), now)
+	if _, err := a.Ingest(r, ownOf(r)); !errors.Is(err, ErrIntervalTooLong) {
+		t.Fatalf("Ingest = %v, want ErrIntervalTooLong", err)
+	}
 }

@@ -205,3 +205,25 @@ func TestFlowKeyServerAddrAndProtoString(t *testing.T) {
 		}
 	}
 }
+
+func TestClassifyHostInternalConnectionCountedOnce(t *testing.T) {
+	client := sock("10.0.0.1:51234", "10.0.0.2:22", 40, 500)
+	server := sock("10.0.0.2:22", "10.0.0.1:51234", 500, 40)
+	k := FlowKey{A: addr("10.0.0.1"), B: addr("10.0.0.2"), Proto: TCP, ServerPort: 22, Server: SideB, Tier: TierSocket}
+	for _, order := range [][]Socket{{client, server}, {server, client}} {
+		r := classifyOne(t, []Listener{{Proto: TCP, Addr: ap("10.0.0.2:22")}}, order...)
+		want := []Observation{{Key: k, BytesAB: 40, BytesBA: 500, Connections: 1, ServerReported: true}}
+		if len(r.Observations) != 1 || r.Observations[0] != want[0] {
+			t.Fatalf("observations = %+v, want %+v", r.Observations, want)
+		}
+	}
+	// Without a matching listener the end with the lower local address is
+	// kept, whatever the order.
+	for _, order := range [][]Socket{{client, server}, {server, client}} {
+		r := classifyOne(t, nil, order...)
+		want := Observation{Key: k, BytesAB: 40, BytesBA: 500, Connections: 1}
+		if len(r.Observations) != 1 || r.Observations[0] != want {
+			t.Fatalf("observations = %+v, want %+v", r.Observations, want)
+		}
+	}
+}

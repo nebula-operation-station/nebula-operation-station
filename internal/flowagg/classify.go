@@ -191,7 +191,8 @@ func flowOf(s Socket, tier string, listeners map[listenKey]struct{}) (key FlowKe
 // end of a socket is the local end if it matches one of listeners (the
 // listeners of the reporting host at d.To), otherwise the remote end. The
 // client port is dropped. Loopback sockets and sockets whose ends share one
-// address are skipped.
+// address are skipped. A connection between two addresses of the host is
+// counted once, from its server end when that is known.
 //
 // A host whose listener list is incomplete reports its served connections
 // as client-side flows keyed by the remote ephemeral port; collectors must
@@ -210,9 +211,44 @@ func Classify(d Delta, listeners []Listener) (Report, error) {
 		}
 		return o
 	}
+	// A connection between two addresses of the reporting host shows up as
+	// two sockets, one per end. Count it once: keep the end that is the
+	// server, or, if both or neither are, the end whose local address sorts
+	// first (endpoint A).
+	type sockEnds struct {
+		proto         Proto
+		local, remote netip.AddrPort
+	}
+	ends := func(s Socket) sockEnds {
+		n := func(a netip.AddrPort) netip.AddrPort {
+			return netip.AddrPortFrom(a.Addr().Unmap().WithZone(""), a.Port())
+		}
+		return sockEnds{proto: s.Proto, local: n(s.Local), remote: n(s.Remote)}
+	}
+	present := make(map[sockEnds]struct{}, len(d.Sockets))
+	for _, sd := range d.Sockets {
+		present[ends(sd.Socket)] = struct{}{}
+	}
+	vanished := make(map[sockEnds]struct{}, len(d.Vanished))
+	for _, s := range d.Vanished {
+		vanished[ends(s)] = struct{}{}
+	}
+	// otherEnd reports whether s is the end of a host-internal connection
+	// that is not counted.
+	otherEnd := func(s Socket, in map[sockEnds]struct{}, serverLocal, localIsA bool) bool {
+		e := ends(s)
+		if _, peer := in[sockEnds{proto: e.proto, local: e.remote, remote: e.local}]; !peer {
+			return false
+		}
+		peerServer := isListening(set, e.proto, e.remote)
+		return peerServer && !serverLocal || peerServer == serverLocal && !localIsA
+	}
 	for _, sd := range d.Sockets {
 		k, serverLocal, localIsA, ok := flowOf(sd.Socket, d.Tier, set)
 		if !ok {
+			continue
+		}
+		if otherEnd(sd.Socket, present, serverLocal, localIsA) {
 			continue
 		}
 		o := get(k, serverLocal)
@@ -229,8 +265,8 @@ func Classify(d Delta, listeners []Listener) (Report, error) {
 		}
 	}
 	for _, s := range d.Vanished {
-		k, serverLocal, _, ok := flowOf(s, d.Tier, set)
-		if !ok {
+		k, serverLocal, localIsA, ok := flowOf(s, d.Tier, set)
+		if !ok || otherEnd(s, vanished, serverLocal, localIsA) {
 			continue
 		}
 		get(k, serverLocal).LowerBound = true

@@ -39,6 +39,7 @@ func TestSnapshotValidateRejectsMalformedInput(t *testing.T) {
 		{"empty tier", Snapshot{Host: "h", Time: t0}},
 		{"tier bad chars", Snapshot{Host: "h", Tier: "Sock et", Time: t0}},
 		{"tier too long", Snapshot{Host: "h", Tier: strings.Repeat("t", MaxTierLen+1), Time: t0}},
+		{"unknown tier", Snapshot{Host: "h", Tier: "invented", Time: t0}},
 		{"zero time", Snapshot{Host: "h", Tier: "socket"}},
 		{"bad proto", Snapshot{Host: "h", Tier: "socket", Time: t0, Sockets: []Socket{{Proto: 9, Local: ap("10.0.0.1:1"), Remote: ap("10.0.0.2:2")}}}},
 		{"invalid local", Snapshot{Host: "h", Tier: "socket", Time: t0, Sockets: []Socket{{Proto: TCP, Remote: ap("10.0.0.2:2")}}}},

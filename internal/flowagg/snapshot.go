@@ -106,7 +106,7 @@ type Listener struct {
 type Snapshot struct {
 	// Host identifies the reporting host.
 	Host string
-	// Tier names the data source (for example "socket" or "conntrack").
+	// Tier names the data source: TierSocket, TierConntrack or TierSensor.
 	// Only reports of the same tier are merged.
 	Tier      string
 	Time      time.Time
@@ -170,16 +170,45 @@ func validName(s string, maxLen int) error {
 	return nil
 }
 
-// validTier accepts lower-case ASCII letters, digits, '-' and '_'.
+// Source tiers (ADR 0009 D1). The set is fixed: a tier is part of every
+// flow key and of the reporter state, so an open set would let one host
+// invent tiers to multiply its state. Tier 2 (provider enrichment) adds
+// placement data, not flows, and has no tier name here.
+const (
+	// TierSocket is the agentless snapshot read of the socket table
+	// (`ss -tinuaH`, tier 1).
+	TierSocket = "socket"
+	// TierConntrack is the agentless snapshot read of `conntrack -L`
+	// (tier 1).
+	TierConntrack = "conntrack"
+	// TierSensor is the passive sensor nebula-echo (tier 3).
+	TierSensor = "sensor"
+)
+
+// tiers lists the known tiers; the index is the tier's slot in per-reporter
+// state.
+var tiers = [...]string{TierSocket, TierConntrack, TierSensor}
+
+const numTiers = len(tiers)
+
+// tierIndex returns the slot of a known tier.
+func tierIndex(s string) (int, bool) {
+	for i, t := range tiers {
+		if t == s {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// validTier accepts only the fixed tiers of ADR 0009 D1 and fails closed
+// for anything else.
 func validTier(s string) error {
 	if err := validName(s, MaxTierLen); err != nil {
 		return err
 	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
-			return errors.New("only a-z, 0-9, '-' and '_' allowed")
-		}
+	if _, ok := tierIndex(s); !ok {
+		return fmt.Errorf("unknown tier (want %q, %q or %q)", TierSocket, TierConntrack, TierSensor)
 	}
 	return nil
 }
