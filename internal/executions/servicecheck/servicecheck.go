@@ -15,10 +15,11 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
-	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/netpolicy"
 )
 
 // Format is the result document format this action emits.
@@ -68,15 +69,6 @@ type Check struct {
 	InternalApproved bool
 }
 
-// numericHostRe rejects legacy inet_aton forms before a resolver can reinterpret them.
-var numericHostRe = regexp.MustCompile(`(?i)^(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+))*$`)
-
-// hostnameRe is a strict RFC 1123 hostname: labels of 1-63 characters of
-// [a-z0-9-], starting and ending with [a-z0-9], no trailing dot. It is
-// deliberately narrower than what a resolver would accept: the destination
-// is embedded in a URL, so it must stay a bare name.
-var hostnameRe = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$`)
-
 // ValidateCheck checks one probe destination. Hostnames are accepted as
 // written; the host probe also validates and pins every DNS answer before
 // connecting. IP literals are checked against reserved ranges unless approved.
@@ -95,7 +87,7 @@ func ValidateCheck(c Check) error {
 	}
 	if addr, err := netip.ParseAddr(d); err == nil {
 		if !c.InternalApproved {
-			if reason, reserved := reserved(addr); reserved {
+			if reason, reserved := netpolicy.Reserved(addr); reserved {
 				return fmt.Errorf("destination %s is an internal address (%s) and is not explicitly approved", d, reason)
 			}
 		}
@@ -103,43 +95,10 @@ func ValidateCheck(c Check) error {
 	}
 	// Hostnames are case-insensitive; the destination is embedded in a
 	// URL, so it must stay a bare name.
-	if !hostnameRe.MatchString(d) || numericHostRe.MatchString(d) {
+	if !netpolicy.IsHostname(d) {
 		return fmt.Errorf("destination must be a hostname or IP literal")
 	}
 	return nil
-}
-
-// reserved reports whether addr is in a range a probe must not touch
-// without explicit approval, with the fixed reason.
-func reserved(addr netip.Addr) (string, bool) {
-	if addr.Is4In6() {
-		addr = addr.Unmap()
-	}
-	if !addr.Is4() {
-		// Every IPv6 literal (loopback, link-local, unique local,
-		// multicast, …) needs the explicit approval.
-		return "IPv6 literal", true
-	}
-	o := addr.As4()
-	switch {
-	case o[0] == 0:
-		return "0.0.0.0/8 (this network)", true
-	case o[0] == 10:
-		return "10.0.0.0/8 (private)", true
-	case o[0] == 127:
-		return "127.0.0.0/8 (loopback)", true
-	case o[0] == 169 && o[1] == 254:
-		return "169.254.0.0/16 (link-local, incl. 169.254.169.254 metadata)", true
-	case o[0] == 100 && o[1] >= 64 && o[1] <= 127:
-		return "100.64.0.0/10 (CGNAT)", true
-	case o[0] == 172 && o[1] >= 16 && o[1] <= 31:
-		return "172.16.0.0/12 (private)", true
-	case o[0] == 192 && o[1] == 168:
-		return "192.168.0.0/16 (private)", true
-	case o[0] >= 224:
-		return "224.0.0.0/4 (multicast/reserved)", true
-	}
-	return "", false
 }
 
 // doc is the exact shape of a probe result; any other key (a body, a URL,
