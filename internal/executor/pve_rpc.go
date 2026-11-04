@@ -626,6 +626,8 @@ func pveGuestPowerRPCError(err error) error {
 		return status.Error(codes.InvalidArgument, "pve guest power: unsupported verb, kind, timeout or target")
 	case errors.Is(err, ErrPveGuestState):
 		return status.Error(codes.FailedPrecondition, "pve guest power: the guest is not running")
+	case errors.Is(err, ErrPveRunExpired):
+		return status.Error(codes.DeadlineExceeded, "pve guest power: the run ended before the next step was sent")
 	case errors.Is(err, ErrPveTargetChanged), errors.Is(err, ErrPveRemoteChanged):
 		return status.Error(codes.FailedPrecondition, "pve guest power: the guest or remote changed; propose again")
 	case errors.Is(err, ErrPveReadOnly):
@@ -727,6 +729,8 @@ func pveGuestSnapshotRPCError(err error) error {
 		return status.Error(codes.FailedPrecondition, "pve guest snapshot: not available")
 	case errors.Is(err, ErrPveSnapshotRisk):
 		return status.Error(codes.Internal, "pve guest snapshot: risk floor unavailable")
+	case errors.Is(err, ErrPveRunExpired):
+		return status.Error(codes.DeadlineExceeded, "pve guest snapshot: the run ended before the next step was sent")
 	case errors.Is(err, ErrPveTargetChanged), errors.Is(err, ErrPveRemoteChanged):
 		return status.Error(codes.FailedPrecondition, "pve guest snapshot: the guest or remote changed; propose again")
 	case errors.Is(err, ErrPveReadOnly):
