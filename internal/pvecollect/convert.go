@@ -2,9 +2,46 @@
 package pvecollect
 
 import (
+	"strconv"
+	"strings"
+
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
+
+const (
+	maxGuestNICBridgeBytes = 15
+	guestNICMACBytes       = 17
+)
+
+// convertGuestNICs validates one available config's network facts separately
+// from the inventory contract, which has no guest NIC configuration fields.
+func convertGuestNICs(p *pb.PVEGuestConfig, vmid uint64, kind pvecontract.GuestKind) ([]GuestNIC, error) {
+	if p == nil || p.Vmid != vmid || len(p.Nics) > MaxGuestNetNICIndex {
+		return nil, ErrGuestNetInvalid
+	}
+	nics := make([]GuestNIC, 0, len(p.Nics))
+	var seen [MaxGuestNetNICIndex]bool
+	for _, n := range p.Nics {
+		if n == nil || len(n.Device) > len("net31") || len(n.Bridge) > maxGuestNICBridgeBytes || len(n.Mac) != guestNICMACBytes || n.Vlan > pvecontract.MaxVLAN {
+			return nil, ErrGuestNetInvalid
+		}
+		suffix, ok := strings.CutPrefix(n.Device, "net")
+		index, err := strconv.Atoi(suffix)
+		if !ok || err != nil || index < 0 || index >= MaxGuestNetNICIndex || strconv.Itoa(index) != suffix || seen[index] {
+			return nil, ErrGuestNetInvalid
+		}
+		nic := GuestNIC{VMID: vmid, Kind: kind, Index: index, Bridge: n.Bridge, VLAN: int(n.Vlan), MAC: n.Mac}
+		valid := true
+		validateGuestNIC(nic, func(string, ...any) { valid = false })
+		if !valid {
+			return nil, ErrGuestNetInvalid
+		}
+		seen[index] = true
+		nics = append(nics, nic)
+	}
+	return nics, nil
+}
 
 // maxReasonBytes bounds a carried dataset reason. Reasons come from the
 // executor (itself sanitizing PVE output) but are still untrusted text, so

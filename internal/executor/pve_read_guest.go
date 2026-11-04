@@ -4,8 +4,10 @@ package executor
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 
@@ -23,7 +25,41 @@ const (
 	// pveTasksPerNode bounds the task summaries read from one node; the
 	// per-node share of MaxObjectsPerPage is used when it is smaller.
 	pveTasksPerNode = 100
+	// pveMaxGuestNICs bounds both the netN index range and NICs per guest.
+	pveMaxGuestNICs      = 32
+	pveMaxNICBridgeBytes = 15
+	pveNICMACBytes       = 17
 )
+
+var (
+	pveNICDeviceRe = regexp.MustCompile(`^net([0-9]|[12][0-9]|3[01])$`)
+	pveNICBridgeRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,14}$`)
+)
+
+// pveGuestNICs revalidates the parser's NICs before crossing the RPC boundary.
+// Reject the entire config on invalid or excess entries; truncation would
+// incorrectly present a partial NIC list as a complete snapshot.
+func pveGuestNICs(nics []pveapi.NIC) ([]*pb.PVEGuestNIC, bool) {
+	if len(nics) > pveMaxGuestNICs {
+		return nil, false
+	}
+	out := make([]*pb.PVEGuestNIC, 0, len(nics))
+	seen := make(map[string]bool, len(nics))
+	for _, n := range nics {
+		if len(n.Device) > len("net31") || !pveNICDeviceRe.MatchString(n.Device) || seen[n.Device] ||
+			len(n.Bridge) > pveMaxNICBridgeBytes || (n.Bridge != "" && !pveNICBridgeRe.MatchString(n.Bridge)) ||
+			n.VLAN < 0 || n.VLAN > pvecontract.MaxVLAN || len(n.MAC) != pveNICMACBytes {
+			return nil, false
+		}
+		mac, err := net.ParseMAC(n.MAC)
+		if err != nil || len(mac) != 6 || mac.String() != n.MAC || mac[0]&1 != 0 || n.MAC == "00:00:00:00:00:00" {
+			return nil, false
+		}
+		seen[n.Device] = true
+		out = append(out, &pb.PVEGuestNIC{Device: n.Device, Bridge: n.Bridge, Vlan: uint32(n.VLAN), Mac: n.MAC})
+	}
+	return out, true
+}
 
 // Fixed reasons for guest-detail reads; raw PVE text never reaches the caller.
 const (
@@ -124,6 +160,10 @@ func readPveGuestConfig(ctx context.Context, remoteID, base string, hc *http.Cli
 	if raw.Truncated {
 		return unavailable(pveReasonTruncated)
 	}
+	nics, ok := pveGuestNICs(raw.NICs)
+	if !ok {
+		return unavailable(pveReasonInvalid)
+	}
 	cfg := pveGuestConfig(raw)
 	if len(raw.HostPCI) > 0 {
 		cfg.HostPCI = pveHostPCI(ctx, base, hc, token, ref.guest.Node, raw.HostPCI)
@@ -134,7 +174,7 @@ func readPveGuestConfig(ctx context.Context, remoteID, base string, hc *http.Cli
 		return unavailable(pveReasonInvalid)
 	}
 	out := &pb.PVEGuestConfig{State: pveAvailable, Vmid: vmid, CpuCount: cfg.CPUCount, RamBytes: cfg.RAMBytes,
-		BootOrder: cfg.BootOrder, Tags: cfg.Tags, Pool: cfg.Pool,
+		BootOrder: cfg.BootOrder, Tags: cfg.Tags, Pool: cfg.Pool, Nics: nics,
 		Capabilities: &pb.PVEGuestCapabilities{Snapshots: string(cfg.Capabilities.Snapshots),
 			LiveMigration: string(cfg.Capabilities.LiveMigration), RamSnapshots: string(cfg.Capabilities.RAMSnapshots)}}
 	for _, d := range cfg.Disks {

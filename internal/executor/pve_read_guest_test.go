@@ -6,13 +6,18 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pveapi"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
@@ -21,6 +26,155 @@ const (
 	pveAvail = pb.PVEDatasetState_PVE_DATASET_STATE_AVAILABLE
 	pveUnav  = pb.PVEDatasetState_PVE_DATASET_STATE_UNAVAILABLE
 )
+
+func TestReadPVEGuestConfigCarriesNICsUsingOnlyGET(t *testing.T) {
+	for _, kind := range []string{"qemu", "lxc"} {
+		t.Run(kind, func(t *testing.T) {
+			configPath := "/api2/json/nodes/pve1/" + kind + "/100/config"
+			var requests atomic.Int64
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				if r.Method != http.MethodGet || r.URL.RawQuery != "" {
+					t.Errorf("unexpected request method or query")
+					w.WriteHeader(http.StatusMethodNotAllowed)
+					return
+				}
+				switch r.URL.Path {
+				case "/api2/json/nodes":
+					fmt.Fprint(w, `{"data":[{"node":"pve1","status":"online"}]}`)
+				case "/api2/json/nodes/pve1/" + kind:
+					fmt.Fprint(w, `{"data":[{"vmid":100,"status":"running"}]}`)
+				case "/api2/json/nodes/pve1/qemu", "/api2/json/nodes/pve1/lxc":
+					fmt.Fprint(w, `{"data":[]}`)
+				case configPath:
+					fmt.Fprint(w, `{"data":{"cores":1,"memory":512,
+						"net0":"virtio=AA:BB:CC:DD:EE:01,hwaddr=AA:BB:CC:DD:EE:01,bridge=vmbr0,tag=42",
+						"net31":"macaddr=02:00:00:00:00:31,bridge=vnet_1,tag=4094"}}`)
+				default:
+					t.Errorf("unexpected path %q", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+			got := readPveGuestConfig(context.Background(), "remote-a", srv.URL, srv.Client(),
+				func(context.Context) (string, error) { return "", nil }, 100, time.Now())
+			if got.State != pveAvail || len(got.Nics) != 2 {
+				t.Fatalf("config state=%v NIC count=%d", got.State, len(got.Nics))
+			}
+			wire, err := proto.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded pb.PVEGuestConfig
+			if err := proto.Unmarshal(wire, &decoded); err != nil || !proto.Equal(got, &decoded) {
+				t.Fatalf("NIC config did not survive protobuf round trip: %v", err)
+			}
+			if n := got.Nics[0]; n.Device != "net0" || n.Bridge != "vmbr0" || n.Vlan != 42 || n.Mac != "aa:bb:cc:dd:ee:01" {
+				t.Fatalf("NIC fields were not preserved: %v", n)
+			}
+			if n := got.Nics[1]; n.Device != "net31" || n.Bridge != "vnet_1" || n.Vlan != 4094 || n.Mac != "02:00:00:00:00:31" {
+				t.Fatalf("boundary NIC fields were not preserved: %v", n)
+			}
+			wantRequests := 3
+			if kind == "lxc" {
+				wantRequests++
+			}
+			if requests.Load() != int64(wantRequests) {
+				t.Fatalf("requests=%d want=%d", requests.Load(), wantRequests)
+			}
+		})
+	}
+}
+
+func TestPVEGuestNICsRejectsInvalidOrOversizedInput(t *testing.T) {
+	valid := pveapi.NIC{Device: "net0", Bridge: "vmbr0", VLAN: 42, MAC: "02:00:00:00:00:01"}
+	cases := map[string]func(*pveapi.NIC){
+		"negative index":     func(n *pveapi.NIC) { n.Device = "net-1" },
+		"index above limit":  func(n *pveapi.NIC) { n.Device = "net32" },
+		"noncanonical index": func(n *pveapi.NIC) { n.Device = "net00" },
+		"oversized device":   func(n *pveapi.NIC) { n.Device = "net" + strings.Repeat("1", 1024) },
+		"hostile bridge":     func(n *pveapi.NIC) { n.Bridge = "<script>" },
+		"oversized bridge":   func(n *pveapi.NIC) { n.Bridge = strings.Repeat("a", 16) },
+		"invalid utf8":       func(n *pveapi.NIC) { n.Bridge = "br\xff" },
+		"negative vlan":      func(n *pveapi.NIC) { n.VLAN = -1 },
+		"vlan above limit":   func(n *pveapi.NIC) { n.VLAN = 4095 },
+		"missing mac":        func(n *pveapi.NIC) { n.MAC = "" },
+		"malformed mac":      func(n *pveapi.NIC) { n.MAC = "<script>" },
+		"oversized mac":      func(n *pveapi.NIC) { n.MAC = strings.Repeat("a", 1024) },
+		"zero mac":           func(n *pveapi.NIC) { n.MAC = "00:00:00:00:00:00" },
+		"multicast mac":      func(n *pveapi.NIC) { n.MAC = "01:00:00:00:00:01" },
+		"uppercase mac":      func(n *pveapi.NIC) { n.MAC = "AA:BB:CC:DD:EE:01" },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			first := valid
+			first.Device = "net1"
+			n := valid
+			mutate(&n)
+			if got, ok := pveGuestNICs([]pveapi.NIC{first, n}); ok || len(got) != 0 {
+				t.Fatal("invalid NIC accepted or partial list returned")
+			}
+		})
+	}
+	t.Run("duplicate device", func(t *testing.T) {
+		if _, ok := pveGuestNICs([]pveapi.NIC{valid, valid}); ok {
+			t.Fatal("duplicate NIC accepted")
+		}
+	})
+	t.Run("count limit", func(t *testing.T) {
+		nics := make([]pveapi.NIC, 32)
+		for i := range nics {
+			nics[i] = valid
+			nics[i].Device = fmt.Sprintf("net%d", i)
+		}
+		if got, ok := pveGuestNICs(nics); !ok || len(got) != 32 {
+			t.Fatal("maximum NIC list rejected")
+		}
+		if got, ok := pveGuestNICs(append(nics, valid)); ok || len(got) != 0 {
+			t.Fatal("oversized NIC list accepted or truncated")
+		}
+	})
+	t.Run("no NICs", func(t *testing.T) {
+		if got, ok := pveGuestNICs(nil); !ok || len(got) != 0 {
+			t.Fatal("empty NIC list rejected")
+		}
+	})
+	t.Run("untagged without bridge", func(t *testing.T) {
+		n := valid
+		n.Bridge, n.VLAN = "", 0
+		if got, ok := pveGuestNICs([]pveapi.NIC{n}); !ok || len(got) != 1 || got[0].Bridge != "" || got[0].Vlan != 0 {
+			t.Fatal("untagged NIC without a bridge was not preserved")
+		}
+	})
+	t.Run("maximum bridge length", func(t *testing.T) {
+		n := valid
+		n.Bridge = strings.Repeat("a", 15)
+		if got, ok := pveGuestNICs([]pveapi.NIC{n}); !ok || len(got) != 1 || got[0].Bridge != n.Bridge {
+			t.Fatal("maximum bridge name was not preserved")
+		}
+	})
+}
+
+func TestReadPVEGuestConfigInvalidNICMakesConfigUnavailable(t *testing.T) {
+	for _, nic := range []string{
+		`"net0":"virtio=02:00:00:00:00:01,bridge=<script>"`,
+		`"net32":"virtio=02:00:00:00:00:01,bridge=vmbr0"`,
+		`"net0":"virtio=invalid,bridge=vmbr0"`,
+	} {
+		t.Run(nic, func(t *testing.T) {
+			e := guestPveEnv(t)
+			e.pve.set("/api2/json/nodes/pve1/qemu/100/config", `{"data":{"cores":1,`+nic+`}}`)
+			got, err := e.readGuest(pb.PVEReadMethod_PVE_READ_METHOD_GUEST_CONFIG, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := got.GetGuestConfig()
+			if cfg.State != pveUnav || cfg.Reason != pveReasonInvalid || len(cfg.Nics) != 0 {
+				t.Fatal("invalid NIC was exposed instead of a fixed unavailable reason")
+			}
+		})
+	}
+}
 
 func (e *pveReadEnv) readGuest(method pb.PVEReadMethod, vmid uint64) (*pb.ReadPVEResponse, error) {
 	return e.svc.ReadPVE(context.Background(), &pb.ReadPVERequest{RemoteId: pveReadRemote, Method: method,

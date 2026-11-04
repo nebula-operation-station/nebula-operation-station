@@ -209,7 +209,7 @@ func (c *Collector) due(remoteID string, now time.Time) bool {
 
 // pollRemote collects one remote and spools the observation.
 func (c *Collector) pollRemote(ctx context.Context, remoteID string, now time.Time) error {
-	obs, err := c.readRemote(ctx, remoteID, now)
+	obs, guestNet, err := c.readRemote(ctx, remoteID, now)
 	if err != nil {
 		return err
 	}
@@ -220,6 +220,11 @@ func (c *Collector) pollRemote(ctx context.Context, remoteID string, now time.Ti
 	obs.CollectionGeneration = gen
 	if _, err := c.spool.WriteFile(ctx, *obs); err != nil {
 		return fmt.Errorf("pvecollect: spool %s: %w", remoteID, err)
+	}
+	if guestNet != nil {
+		if _, err := c.spool.WriteGuestNet(ctx, *guestNet); err != nil {
+			return fmt.Errorf("pvecollect: spool guest network %s: %w", remoteID, err)
+		}
 	}
 	if !obs.Complete {
 		return errors.New("pvecollect: incomplete collection")
@@ -271,7 +276,7 @@ type readResult struct {
 // readRemote issues the typed reads for one remote and assembles the
 // observation. Node-scoped reads run first; per-guest detail reads run after
 // the guest list is known. Concurrency is bounded by MaxConcurrentReads.
-func (c *Collector) readRemote(ctx context.Context, remoteID string, now time.Time) (*pvecontract.Observation, error) {
+func (c *Collector) readRemote(ctx context.Context, remoteID string, now time.Time) (*pvecontract.Observation, *GuestNetRecord, error) {
 	obs := &pvecontract.Observation{
 		RemoteID:   remoteID,
 		ObservedAt: now,
@@ -318,7 +323,7 @@ func (c *Collector) readRemote(ctx context.Context, remoteID string, now time.Ti
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Finish node-scoped reads before rejecting the whole guest list.
 	// Validate every identity before conversion or detail scheduling.
@@ -326,12 +331,12 @@ func (c *Collector) readRemote(ctx context.Context, remoteID string, now time.Ti
 	guests := guestResult.resp.GetGuests()
 	if guests != nil {
 		if len(guests.Guests) > pvecontract.MaxObjectsPerPage || len(guests.Guests) > pvecontract.MaxGuestsPerRemote {
-			return nil, errors.New("pvecollect: guest list exceeds limit")
+			return nil, nil, errors.New("pvecollect: guest list exceeds limit")
 		}
 		seen := make(map[uint64]bool, len(guests.Guests))
 		for _, guest := range guests.Guests {
 			if guest == nil || guest.Vmid < pvecontract.MinVMID || guest.Vmid > pvecontract.MaxVMID || seen[guest.Vmid] {
-				return nil, errors.New("pvecollect: invalid guest identity")
+				return nil, nil, errors.New("pvecollect: invalid guest identity")
 			}
 			seen[guest.Vmid] = true
 		}
@@ -347,14 +352,21 @@ func (c *Collector) readRemote(ctx context.Context, remoteID string, now time.Ti
 		obs.Reason = "one or more datasets were not read"
 	}
 	if _, err := pvecontract.ValidateObservation(*obs); err != nil {
-		return nil, errors.New("pvecollect: invalid collection input")
+		return nil, nil, errors.New("pvecollect: invalid collection input")
 	}
+	guestNet := GuestNetRecord{Version: GuestNetVersion, Remote: remoteID, ObservedUnix: now.Unix(), NICs: []GuestNIC{}}
+	// An unavailable config cannot prove that a guest's NICs disappeared.
+	// Publish only complete network snapshots; other dataset failures (such
+	// as an offline guest agent) do not invalidate config network facts.
+	guestNetComplete := obs.Guests.IsAvailable()
 
 	// Phase 2: per-guest detail reads, only when the guest list is usable.
 	if obs.Guests.IsAvailable() && len(vmids) > 0 {
 		var phase2 []readReq
+		guestKinds := make(map[uint64]pvecontract.GuestKind, len(vmids))
 		for i := range obs.Guests.Value {
 			g := &obs.Guests.Value[i]
+			guestKinds[g.VMID] = g.Kind
 			phase2 = append(phase2, readReq{method: pb.PVEReadMethod_PVE_READ_METHOD_GUEST_CONFIG, vmid: g.VMID})
 			// Only a QEMU guest that is not stopped or paused can answer. For the
 			// others the dataset is not applicable rather than missing, so
@@ -373,6 +385,20 @@ func (c *Collector) readRemote(ctx context.Context, remoteID string, now time.Ti
 			if err := checkBudget(res); err != nil {
 				return err
 			}
+			if res.req.method == pb.PVEReadMethod_PVE_READ_METHOD_GUEST_CONFIG {
+				if datasetUnavailable(res) {
+					guestNetComplete = false
+				} else {
+					nics, err := convertGuestNICs(res.resp.GetGuestConfig(), res.req.vmid, guestKinds[res.req.vmid])
+					if err != nil {
+						return err
+					}
+					if len(guestNet.NICs)+len(nics) > MaxGuestNetNICs {
+						return ErrGuestNetInvalid
+					}
+					guestNet.NICs = append(guestNet.NICs, nics...)
+				}
+			}
 			c.applyGuestDetail(obs, res)
 			if res.err != nil || datasetUnavailable(res) {
 				obs.Complete = false
@@ -380,14 +406,21 @@ func (c *Collector) readRemote(ctx context.Context, remoteID string, now time.Ti
 			return nil
 		})
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	if !obs.Complete {
 		obs.Reason = "one or more datasets were not read"
 	}
-	return obs, nil
+	if !guestNetComplete {
+		return obs, nil, nil
+	}
+	validated, err := ValidateGuestNet(guestNet)
+	if err != nil {
+		return nil, nil, err
+	}
+	return obs, &validated, nil
 }
 
 // Reasons for a guest agent dataset that does not apply to the guest.

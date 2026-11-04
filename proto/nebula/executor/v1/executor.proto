@@ -1878,6 +1878,20 @@ message PVEGuestConfig {
   repeated string tags = 10;
   string pool = 11;
   PVEGuestCapabilities capabilities = 12;
+  // At most 32 validated net0..net31 devices, copied from the config read.
+  repeated PVEGuestNIC nics = 13;
+}
+
+// PVEGuestNIC carries only bounded guest network configuration facts.
+message PVEGuestNIC {
+  // Canonical netN device, where N is 0..31.
+  string device = 1;
+  // Linux bridge or SDN vnet (at most 15 ASCII characters); empty if absent.
+  string bridge = 2;
+  // 0 means untagged; otherwise an 802.1Q tag in 1..4094.
+  uint32 vlan = 3;
+  // Canonical lowercase, nonzero unicast Ethernet MAC address.
+  string mac = 4;
 }
 
 message PVEDisk {
