@@ -491,6 +491,12 @@ func (db *DB) OpenPveJobs() ([]PveJob, error) {
 	return db.queryPveJobs(`SELECT ` + pveJobColumns + ` FROM pve_jobs WHERE state IN ('dispatching', 'running', 'reconciling') ORDER BY created_at, execution_id, step`)
 }
 
+// UnknownPveJobs returns every step of action whose outcome is unknown,
+// oldest first.
+func (db *DB) UnknownPveJobs(action string) ([]PveJob, error) {
+	return db.queryPveJobs(`SELECT `+pveJobColumns+` FROM pve_jobs WHERE state = 'unknown' AND action = ? ORDER BY created_at, execution_id, step`, action)
+}
+
 func (db *DB) queryPveJobs(q string, args ...any) ([]PveJob, error) {
 	rows, err := db.sql.Query(q, args...)
 	if err != nil {

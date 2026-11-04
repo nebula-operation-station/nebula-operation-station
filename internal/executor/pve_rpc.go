@@ -194,7 +194,7 @@ func (r pveProvisionReaderAPI) NodeStorage(ctx context.Context, rm executordb.Pv
 	if err != nil {
 		return pveapi.Storage{}, err
 	}
-	c.RequestTimeout = pveReadRequestTimeout
+	c.Timeout = pveReadRequestTimeout
 	st, err := c.GetStorage(ctx, node, storage)
 	if terr := r.agent.checkTrust(rm, watch); terr != nil {
 		return pveapi.Storage{}, terr
@@ -234,7 +234,7 @@ func (s *Service) pveAdmin() *PveAdmin {
 }
 
 func pveAdminProto(r executordb.PveRemote) *pb.PVEAdminRemote {
-	out := &pb.PVEAdminRemote{RemoteId: r.RemoteID, Name: r.Name, Kind: string(r.Kind), TrustPin: r.TrustPin, TrustGeneration: r.TrustGeneration, State: string(r.State), ReadRef: r.Credentials.ReadRef, ReadVersion: r.Credentials.ReadVersion, ActionRef: r.Credentials.ActionRef, ActionVersion: r.Credentials.ActionVersion, UpdatedAtUnix: r.UpdatedAt.Unix()}
+	out := &pb.PVEAdminRemote{RemoteId: r.RemoteID, Name: r.Name, Kind: string(r.Kind), TrustPin: r.TrustPin, TrustGeneration: r.TrustGeneration, State: string(r.State), ReadRef: r.Credentials.ReadRef, ReadVersion: r.Credentials.ReadVersion, ActionRef: r.Credentials.ActionRef, ActionVersion: r.Credentials.ActionVersion, UpdatedAtUnix: r.UpdatedAt.Unix(), Site: r.Site}
 	for _, ep := range r.Endpoints {
 		out.Endpoints = append(out.Endpoints, &pb.PVEEndpoint{Host: ep.Host, Port: uint32(ep.Port)})
 	}
@@ -340,6 +340,17 @@ func (s *Service) RemovePVERemote(ctx context.Context, in *pb.RemovePVERemoteReq
 		return nil, pveRPCError(err)
 	}
 	return &pb.RemovePVERemoteResponse{Remote: pveAdminProto(r)}, nil
+}
+
+// SetPVERemoteSite records the admin-set site marker of a remote.
+func (s *Service) SetPVERemoteSite(ctx context.Context, in *pb.SetPVERemoteSiteRequest) (*pb.SetPVERemoteSiteResponse, error) {
+	s.pveMu.Lock()
+	defer s.pveMu.Unlock()
+	r, err := s.pveAdmin().SetSite(ctx, PveSetSite{RemoteID: in.GetRemoteId(), Site: in.GetSite(), By: callerName(ctx)})
+	if err != nil {
+		return nil, pveRPCError(err)
+	}
+	return &pb.SetPVERemoteSiteResponse{Remote: pveAdminProto(r)}, nil
 }
 
 // ListPVEAdminRemotes lists credential references, never their values.
