@@ -1,0 +1,9 @@
+{{define "deploy_tabs"}}
+<nav class="tabs" aria-label="Deploy">
+  <a class="tab{{if or (eq .Content "deploy_profiles") (eq .Content "deploy_profile") (eq .Content "deploy_profile_edit")}} tab--active{{end}}" href="/deploy">Profiles</a>
+  {{if .DeployEnabled}}
+  <a class="tab{{if eq .Content "deploy_wizard"}} tab--active{{end}}" href="/deployments/new">New deployment</a>
+  <a class="tab{{if or (eq .Content "deploy_runs") (eq .Content "deploy_run")}} tab--active{{end}}" href="/deployments">Deployment runs</a>
+  {{end}}
+</nav>
+{{end}}

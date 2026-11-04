@@ -1,0 +1,142 @@
+{{define "content"}}{{$d := .DeployWizard}}
+<h1>New deployment</h1>
+{{template "deploy_tabs" .}}
+{{range $d.Notes}}<p class="status status--warning">{{.}}</p>{{end}}
+<section class="panel" aria-label="Target and profile">
+  <h2>1. Target, profile and network</h2>
+  <p class="hint">Choose where the guest is created and, optionally, a deploy profile; the next step is pre-filled from it. Choosing an IPAM network shows a suggested free address. Nothing is reserved or proposed in this step.</p>
+  <form method="get" action="/deployments/new" class="form" id="deploy-target">
+    <label>PVE remote
+      <select name="remote" required>
+        <option value="">— choose —</option>
+        {{range $d.Remotes}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>
+        {{end}}
+      </select></label>
+    {{if $d.Remote}}
+    <label>Node
+      <select name="node" required>
+        <option value="">— choose —</option>
+        {{range $d.Nodes}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>
+        {{end}}
+      </select></label>
+    {{end}}
+    <label>Profile
+      <select name="profile">
+        <option value="">Ad-hoc (no profile)</option>
+        {{range $d.Profiles}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>
+        {{end}}
+      </select></label>
+    <label>IPAM network (for a static address)
+      <select name="network">
+        <option value="">— none (DHCP) —</option>
+        {{range $d.Networks}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>
+        {{end}}
+      </select></label>
+    {{if $d.Pools}}
+    <label>Pool
+      <select name="pool">
+        <option value="">whole network</option>
+        {{range $d.Pools}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>
+        {{end}}
+      </select></label>
+    {{end}}
+    <div class="actions"><button type="submit" class="button button--small">Continue</button></div>
+  </form>
+</section>
+{{if $d.Ready}}
+<section class="panel" aria-label="Deployment details">
+  <h2>2. Guest</h2>
+  <p class="hint">Proposing reserves the address in the IPAM and asks the executor to bind the template, reserve the next free VMID and decide the risk. The next page shows the frozen plan and its risk; nothing is created before you approve it.</p>
+  <form method="post" action="/deployments/propose" class="form" id="deploy-form" data-fetch>
+    <input type="hidden" name="remote" value="{{$d.Remote}}">
+    <input type="hidden" name="node" value="{{$d.Node}}">
+    {{if $d.Profile}}<input type="hidden" name="profile" value="{{$d.Profile}}"><input type="hidden" name="profile_version" value="{{$d.ProfileVersion}}">
+    <p class="status">Profile <span class="mono">{{$d.Profile}}</span>, version {{$d.ProfileVersion}}: module and runbook parameters come from this exact version.</p>
+    {{end}}
+    <fieldset>
+      <legend>Target</legend>
+      <p>Remote <span class="mono">{{$d.Remote}}</span>, node <span class="mono">{{$d.Node}}</span></p>
+      <label>Storage for the guest's disks
+        <input type="text" name="storage" value="{{$d.Storage}}" maxlength="64" required pattern="[a-z0-9][a-z0-9._\-]{0,63}"></label>
+    </fieldset>
+    <fieldset>
+      <legend>OS</legend>
+      <label>Image (catalog ID)
+        <input type="text" name="image" value="{{$d.Image}}" maxlength="64" required pattern="[a-z0-9][a-z0-9._\-]{0,63}"></label>
+      <label>Prepared template on this node (VMID)
+        <select name="template_vmid" required>
+          <option value="">— choose —</option>
+          {{range $d.Templates}}<option value="{{.Value}}">{{.Label}}</option>
+          {{end}}
+        </select></label>
+      <label>Image SHA-256 the template was prepared from
+        <input type="text" name="template_sha256" maxlength="64" required pattern="[0-9a-fA-F]{64}" autocomplete="off" class="mono"></label>
+      <p class="hint">The executor binds the template record (pve.image.prepare) at exactly this VMID, incarnation and image digest; a template that changed since it was prepared is refused.</p>
+    </fieldset>
+    <fieldset>
+      <legend>Size</legend>
+      {{range $d.Sizes}}<label class="inline"><input type="radio" name="size" value="{{.Value}}"{{if .Selected}} checked{{end}}> {{.Label}}</label>
+      {{end}}
+      <label class="inline"><input type="radio" name="size" value="custom"> custom</label>
+      <label>vCPU <input type="number" name="vcpu" min="1" max="32" value="{{if $d.VCPU}}{{$d.VCPU}}{{end}}"></label>
+      <label>RAM (GiB) <input type="number" name="ram_gib" min="1" max="64" value="{{if $d.RAMGiB}}{{$d.RAMGiB}}{{end}}"></label>
+      <label>Disk (GiB) <input type="number" name="disk_gib" min="1" max="1024" value="{{if $d.DiskGiB}}{{$d.DiskGiB}}{{end}}"></label>
+    </fieldset>
+    <fieldset>
+      <legend>Hostname and inventory</legend>
+      <label>Hostname (also the inventory host ID)
+        <input type="text" name="name" maxlength="63" required pattern="[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?" autocomplete="off"></label>
+      <label>Environment
+        <select name="environment">
+          {{range $d.Envs}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>
+          {{end}}
+        </select></label>
+      <p class="hint">The new host's criticality stays unset (counted as HIGH) until you record it.</p>
+    </fieldset>
+    <fieldset>
+      <legend>Network</legend>
+      <label>Bridge <input type="text" name="bridge" value="{{if $d.Bridge}}{{$d.Bridge}}{{else}}vmbr0{{end}}" maxlength="64" required></label>
+      <label>VLAN tag (empty: untagged) <input type="number" name="vlan" min="1" max="4094" value="{{if $d.VLAN}}{{$d.VLAN}}{{end}}"></label>
+      {{if $d.Network}}
+      <label class="inline"><input type="radio" name="ip_mode" value="ipam"{{if not $d.DHCP}} checked{{end}}> static address from IPAM network <span class="mono">{{$d.Network}}</span>{{if $d.Pool}}, pool <span class="mono">{{$d.Pool}}</span>{{end}}</label>
+      <input type="hidden" name="network" value="{{$d.Network}}">
+      <input type="hidden" name="pool" value="{{$d.Pool}}">
+      <label>Address (suggested: the first free one)
+        <input type="text" name="address" value="{{$d.Suggested}}" list="deploy-suggestions" maxlength="15" autocomplete="off" class="mono"></label>
+      <datalist id="deploy-suggestions">{{range $d.Suggestions}}<option value="{{.}}">{{end}}</datalist>
+      {{if $d.Suggestions}}<p class="hint">Free addresses: {{range $i, $a := $d.Suggestions}}{{if $i}}, {{end}}<span class="mono">{{$a}}</span>{{end}}. A suggestion is not a reservation: the address is reserved when you propose.</p>{{end}}
+      {{end}}
+      <label class="inline"><input type="radio" name="ip_mode" value="dhcp"{{if or $d.DHCP (not $d.Network)}} checked{{end}}> DHCP</label>
+      <label>Nameservers (comma-separated) <input type="text" name="nameservers" value="{{$d.Nameservers}}" maxlength="200"></label>
+      <label>Search domain <input type="text" name="search_domain" value="{{$d.SearchDomain}}" maxlength="253"></label>
+    </fieldset>
+    <fieldset>
+      <legend>Access</legend>
+      <label>Cloud-init user <input type="text" name="ci_user" value="{{$d.CIUserDefault}}" maxlength="32"></label>
+      <p class="hint">cloud-init always installs the NOS automation key; SSH-key-only access is the default.</p>
+      <label class="inline"><input type="radio" name="password" value="none" checked> no password (SSH keys only)</label>
+      <label class="inline"><input type="radio" name="password" value="executor"> a guest password entered on the executor</label>
+      <label>Password ID on the executor <input type="text" name="password_id" maxlength="64" autocomplete="off"></label>
+      <p class="hint">The password itself is never entered here: set it on the executor host (CLI secret input); this form only names it.</p>
+    </fieldset>
+    <fieldset>
+      <legend>Bootstrap modules (run after enrollment, in this order)</legend>
+      {{range $d.Modules}}<label class="inline"><input type="checkbox" name="bootstrap" value="{{.Value}}"{{if .Selected}} checked{{end}}> {{.Label}}</label>
+      {{end}}
+    </fieldset>
+    <fieldset>
+      <legend>Runbooks (after the bootstrap modules)</legend>
+      {{range $d.Runbooks}}<label class="inline"><input type="checkbox" name="runbook" value="{{.Value}}"{{if .Selected}} checked{{end}}> {{.Label}}</label>
+      {{else}}<p class="hint">No runbooks.</p>
+      {{end}}
+    </fieldset>
+    {{if not $d.Profile}}
+    <label>Save this ad-hoc deployment as a new profile (slug, optional)
+      <input type="text" name="save_as" maxlength="40" pattern="[a-z0-9][a-z0-9_]{0,39}" autocomplete="off"></label>
+    {{end}}
+    <div class="actions"><button type="submit" class="button">Review the deployment</button></div>
+  </form>
+</section>
+{{end}}
+<p id="message" class="message" role="status" aria-live="polite"></p>
+{{end}}
