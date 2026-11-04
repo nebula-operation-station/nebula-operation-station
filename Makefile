@@ -11,7 +11,7 @@ LDFLAGS       := -s -w \
   -X github.com/nebula-operation-station/nebula-operation-station/internal/version.Version=$(VERSION) \
   -X github.com/nebula-operation-station/nebula-operation-station/internal/version.Commit=$(COMMIT)
 
-.PHONY: all build test test-privileged test-integration test-browser lint fmt fmt-check generate generate-check vuln fuzz check hooks clean
+.PHONY: all build test test-deploy test-privileged test-integration test-browser lint fmt fmt-check generate generate-check vuln fuzz check hooks clean
 
 all: check build
 
@@ -20,6 +20,13 @@ build:
 
 test:
 	$(GO) test -race -timeout 40m ./...
+
+# Deployment policy tests for the systemd units and nftables files. Checks
+# that need systemd-analyze or root nft skip themselves when unavailable.
+test-deploy:
+	@if command -v python3 >/dev/null 2>&1; then \
+		python3 deploy/systemd/nebula-iconfetch_test.py; \
+	else echo "test-deploy: python3 not installed, skipped"; fi
 
 # Needs root: helper processes drop to other UIDs.
 test-privileged:
@@ -72,7 +79,7 @@ fuzz:
 	$(GO) test -run='^$$' -fuzz='^FuzzUnpack$$' -fuzztime=20s ./internal/modules/
 	$(GO) test -run='^$$' -fuzz='^FuzzParse$$' -fuzztime=20s ./internal/inventory/csvimport/
 
-check: lint generate-check test vuln
+check: lint generate-check test test-deploy vuln
 
 hooks:
 	git config core.hooksPath .githooks

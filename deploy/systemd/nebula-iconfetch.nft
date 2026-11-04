@@ -16,12 +16,15 @@ table inet nebula_iconfetch {
     }
 
     chain iconfetch {
-        # Includes loopback, RFC1918, CGNAT, metadata/link-local, multicast
-        # and IPv4-mapped IPv6. The application's stricter classification
-        # also rejects reserved/documentation ranges and DNS rebinding.
+        # The helper dials IPv4 only. All IPv6 is rejected: global IPv6
+        # includes NAT64 (64:ff9b::/96, 64:ff9b:1::/48) and 6to4 (2002::/16)
+        # prefixes that reach internal IPv4 hosts, and the lab's own hosts.
+        meta nfproto ipv6 reject
+        # Includes loopback, RFC1918, CGNAT, metadata/link-local and
+        # multicast. The application's stricter classification also rejects
+        # reserved/documentation ranges and DNS rebinding.
         ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } reject
-        ip6 daddr { ::/128, ::1/128, ::ffff:0:0/96, fc00::/7, fe80::/10, ff00::/8 } reject
-        meta l4proto tcp tcp dport 443 accept
+        meta nfproto ipv4 meta l4proto tcp tcp dport 443 accept
         reject
     }
 }

@@ -19,11 +19,17 @@
 #   public addresses for every allowlisted name (including redirect hosts)
 #   in root-owned /etc/hosts, maintained outside this helper. No DNS exception.
 #
-# The nftables output filter enforces destination TCP 443 for this UID on
-# both IPv4 and IPv6. SocketBindAllow would only restrict LOCAL bind ports.
-# IPAddressDeny is defense in depth on kernels with cgroup BPF support; the
-# nftables filter also denies private destinations when BPF is unavailable.
-# Application URL allowlisting and dial-time address checks remain required.
+# The nftables output filter enforces destination TCP 443 over IPv4 for this
+# UID and rejects all IPv6 (the helper dials IPv4 only; NAT64 and 6to4
+# prefixes could otherwise reach internal IPv4 hosts). SocketBindAllow would
+# only restrict LOCAL bind ports. IPAddressDeny is defense in depth on
+# kernels with cgroup BPF support; the nftables filter also denies private
+# destinations when BPF is unavailable. Application URL allowlisting and
+# dial-time address checks remain required.
+#
+# Fail closed: BindsTo= stops the helper whenever the firewall unit stops,
+# and ExecStartPre refuses to start it unless the nftables table is loaded
+# (a host firewall reload may have removed it behind systemd's back).
 [Unit]
 Description=Nebula Operation Station icon fetcher (queued HTTPS icons)
 Documentation=https://github.com/nebula-operation-station/nebula-operation-station/blob/main/docs/adr/0009-traffic-map.md
@@ -36,6 +42,9 @@ Type=oneshot
 User=nebula-iconfetch
 Group=nebula-iconfetch
 SupplementaryGroups=nebula-icons
+# "+": the fixed check runs with privileges (nfnetlink needs CAP_NET_ADMIN)
+# outside the sandbox; the helper itself still gets no capabilities.
+ExecStartPre=+/usr/sbin/nft list table inet nebula_iconfetch
 ExecStart=/usr/bin/nebula-iconfetch -spool /var/lib/nebula/iconfetch
 # Bound a whole queued batch as well as individual application fetch timeouts.
 TimeoutStartSec=15min
@@ -44,15 +53,20 @@ MemoryMax=256M
 TasksMax=32
 UMask=0027
 
-# Hardening: only results/ is writable; jobs/ is read-only. Explicit masks
-# prevent even read access to DBs, the executor vault, config and RPC sockets.
+# Hardening: all of /var/lib/nebula is replaced by an empty read-only tmpfs
+# (no DBs, executor vault or other spools); only jobs/ (read-only) and
+# results/ (writable) are bound back in. Explicit masks hide config and
+# RPC sockets.
 LimitCORE=0
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadOnlyPaths=/var/lib/nebula/iconfetch/jobs
-ReadWritePaths=/var/lib/nebula/iconfetch/results
-InaccessiblePaths=-/var/lib/nebula/server -/var/lib/nebula/executor -/etc/nebula -/run/nebula
+TemporaryFileSystem=/var/lib/nebula:ro
+BindReadOnlyPaths=/var/lib/nebula/iconfetch/jobs
+BindPaths=/var/lib/nebula/iconfetch/results
+InaccessiblePaths=-/etc/nebula -/run/nebula
 ProtectHome=yes
+ProtectProc=invisible
+ProcSubset=pid
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes
@@ -70,9 +84,9 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 CapabilityBoundingSet=
 AmbientCapabilities=
-# Only IP sockets: no raw/packet/netlink sockets or Unix-socket RPC access.
-# Name resolution uses the root-managed /etc/hosts entries described above.
-RestrictAddressFamilies=AF_INET AF_INET6
+# Only IPv4 sockets: no IPv6, raw/packet/netlink sockets or Unix-socket RPC
+# access. Name resolution uses the root-managed /etc/hosts entries above.
+RestrictAddressFamilies=AF_INET
 IPAddressDeny=localhost link-local multicast
 IPAddressDeny=0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 172.16.0.0/12 192.168.0.0/16 240.0.0.0/4
-IPAddressDeny=fc00::/7
+IPAddressDeny=::/0

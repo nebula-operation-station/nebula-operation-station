@@ -5,10 +5,19 @@
 # The batch atomically replaces ONLY this helper's table and can be rerun.
 # Keep the rules after stop: removing them could open an egress window.
 # Stop the helper before manually changing/removing rules or deleting its
-# account. Do not reuse its UID. Restart this unit after firewall reloads;
-# the host firewall manager must preserve this table while the helper runs.
+# account. Do not reuse its UID.
+#
+# Host firewall reloads: a `flush ruleset` (nftables.service) deletes this
+# table. PartOf= stops/restarts this unit with nftables.service or
+# firewalld.service (and BindsTo= then stops the helper); ReloadPropagatedFrom=
+# reapplies the table after their reloads. Anything else that flushes the
+# ruleset is caught by the helper's ExecStartPre table check, which refuses
+# to start the helper until this unit is restarted.
 [Unit]
 Description=Nebula Operation Station icon fetcher egress firewall
+After=nftables.service firewalld.service
+PartOf=nftables.service firewalld.service
+ReloadPropagatedFrom=nftables.service firewalld.service
 Before=nebula-iconfetch.service
 
 [Service]
@@ -17,6 +26,7 @@ RemainAfterExit=yes
 User=root
 Group=root
 ExecStart=/usr/sbin/nft -f /etc/nebula/nebula-iconfetch.nft
+ExecReload=/usr/sbin/nft -f /etc/nebula/nebula-iconfetch.nft
 TimeoutStartSec=15s
 MemoryMax=64M
 TasksMax=8

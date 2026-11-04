@@ -501,3 +501,36 @@ func TestNewRequiresStores(t *testing.T) {
 		t.Fatal("no error")
 	}
 }
+
+func TestImportResultsDropsUnreadableResults(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	// A full run's worth of results that can never be read (symlinks,
+	// ELOOP under O_NOFOLLOW), all sorting ahead of a good one.
+	for i := 0; i < MaxImportPerRun; i++ {
+		id := fmt.Sprintf("%032x", i+1)
+		spoolJob(t, f, id)
+		if err := os.Symlink("/etc/passwd", filepath.Join(f.spool.ResultsDir(), id+".json")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	good := strings.Repeat("f", 32)
+	spoolJob(t, f, good)
+	helperResult(t, f, good, testPNG(t, blue))
+	rep, err := f.svc.ImportResults(ctx)
+	if err != nil || len(rep.Failed) != MaxImportPerRun || len(rep.Imported) != 0 {
+		t.Fatalf("first run %d failed, %d imported: %v", len(rep.Failed), len(rep.Imported), err)
+	}
+	for id := range rep.Failed {
+		if _, err := f.spool.ReadJob(id); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("job %s with unreadable result kept: %v", id, err)
+		}
+	}
+	if ev := f.log.events(t, "icon_fetch_failed"); len(ev) != MaxImportPerRun {
+		t.Fatalf("audit %d failures", len(ev))
+	}
+	rep, err = f.svc.ImportResults(ctx)
+	if err != nil || len(rep.Imported) != 1 || rep.Imported[good] == "" {
+		t.Fatalf("second run %+v %v", rep, err)
+	}
+}

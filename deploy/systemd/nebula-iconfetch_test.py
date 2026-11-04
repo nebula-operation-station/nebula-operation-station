@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Unprivileged deployment policy tests: python3 deploy/systemd/nebula-iconfetch_test.py."""
 
+import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -49,28 +51,36 @@ class IconfetchPolicyTest(unittest.TestCase):
         self.assertEqual(self.values("[Service]", "ExecStart"), [
             "/usr/bin/nebula-iconfetch -spool /var/lib/nebula/iconfetch"
         ])
-        for key in ("ExecStartPre", "ExecStartPost", "ExecStop", "ExecStopPost"):
+        for key in ("ExecStartPost", "ExecStop", "ExecStopPost"):
             self.assertEqual(self.values("[Service]", key), [])
+        # The only privileged command is the fixed, read-only table check.
+        self.assertEqual(self.values("[Service]", "ExecStartPre"), [
+            "+/usr/sbin/nft list table inet nebula_iconfetch"
+        ])
 
     def test_filesystem_blocks_databases_vault_and_rpc(self):
         self.assertEqual(self.values("[Service]", "ProtectSystem"), ["strict"])
-        self.assertEqual(self.values("[Service]", "ReadWritePaths"), [
+        # All of /var/lib/nebula (DBs, vault, every other spool) is an empty
+        # read-only tmpfs; only the two spool directories are bound back.
+        self.assertEqual(self.values("[Service]", "TemporaryFileSystem"), ["/var/lib/nebula:ro"])
+        self.assertEqual(self.values("[Service]", "BindPaths"), [
             "/var/lib/nebula/iconfetch/results"
         ])
-        self.assertEqual(self.values("[Service]", "ReadOnlyPaths"), [
+        self.assertEqual(self.values("[Service]", "BindReadOnlyPaths"), [
             "/var/lib/nebula/iconfetch/jobs"
         ])
         denied = " ".join(self.values("[Service]", "InaccessiblePaths")).split()
-        for path in ("/var/lib/nebula/server", "/var/lib/nebula/executor",
-                     "/etc/nebula", "/run/nebula"):
+        for path in ("/etc/nebula", "/run/nebula"):
             self.assertIn("-" + path, denied)
         for key in ("StateDirectory", "RuntimeDirectory", "CacheDirectory", "LogsDirectory",
-                    "BindPaths", "BindReadOnlyPaths", "TemporaryFileSystem"):
+                    "ReadWritePaths", "ReadOnlyPaths"):
             self.assertEqual(self.values("[Service]", key), [], key)
         for key in ("ProtectHome", "PrivateTmp", "PrivateDevices", "ProtectKernelTunables",
                     "ProtectKernelModules", "ProtectKernelLogs", "ProtectControlGroups",
                     "RestrictNamespaces", "MemoryDenyWriteExecute"):
             self.assertEqual(self.values("[Service]", key), ["yes"], key)
+        self.assertEqual(self.values("[Service]", "ProtectProc"), ["invisible"])
+        self.assertEqual(self.values("[Service]", "ProcSubset"), ["pid"])
 
     def test_helper_has_bounded_resources_and_runs_once(self):
         for key, value in {"Type": "oneshot", "MemoryMax": "256M", "TasksMax": "32",
@@ -79,13 +89,12 @@ class IconfetchPolicyTest(unittest.TestCase):
             self.assertEqual(self.values("[Service]", key), [value], key)
 
     def test_network_address_families_and_private_ranges(self):
-        self.assertEqual(self.values("[Service]", "RestrictAddressFamilies"), [
-            "AF_INET AF_INET6"
-        ])
+        # IPv4 only: the helper never dials IPv6 (NAT64/6to4 reach IPv4 hosts).
+        self.assertEqual(self.values("[Service]", "RestrictAddressFamilies"), ["AF_INET"])
         denied = " ".join(self.values("[Service]", "IPAddressDeny")).split()
         for address in ("localhost", "link-local", "multicast", "0.0.0.0/8",
                         "10.0.0.0/8", "100.64.0.0/10", "172.16.0.0/12",
-                        "192.168.0.0/16", "240.0.0.0/4", "fc00::/7"):
+                        "192.168.0.0/16", "240.0.0.0/4", "::/0"):
             self.assertIn(address, denied)
         self.assertEqual(self.values("[Service]", "IPAddressAllow"), [])
 
@@ -107,6 +116,22 @@ class IconfetchPolicyTest(unittest.TestCase):
         self.assertFalse(any(key.startswith("Condition") for _, key in firewall))
         self.assertEqual(self.values("[Service]", "SocketBindAllow"), [])
 
+    def test_firewall_follows_host_firewall_reloads(self):
+        # A host `flush ruleset` deletes the table: the unit must stop or be
+        # reapplied together with the host firewall instead of staying
+        # "active" without rules.
+        firewall = settings("nebula-iconfetch-firewall.service")
+        for key in ("After", "PartOf", "ReloadPropagatedFrom"):
+            units = " ".join(firewall.get(("[Unit]", key), [])).split()
+            for unit in ("nftables.service", "firewalld.service"):
+                self.assertIn(unit, units, key)
+        self.assertEqual(firewall.get(("[Service]", "ExecReload")),
+                         firewall.get(("[Service]", "ExecStart")))
+        # The helper refuses to start when the table is gone anyway.
+        self.assertEqual(self.values("[Service]", "ExecStartPre"), [
+            "+/usr/sbin/nft list table inet nebula_iconfetch"
+        ])
+
     def test_firewall_accepts_only_tcp_destination_443(self):
         source = (ROOT / "nebula-iconfetch.nft").read_text()
         rules = "\n".join(line.split("#", 1)[0] for line in source.splitlines())
@@ -119,17 +144,32 @@ class IconfetchPolicyTest(unittest.TestCase):
         self.assertIn("type filter hook output priority 0; policy accept;", normalized)
         self.assertIn('meta skuid "nebula-iconfetch" jump iconfetch', normalized)
         self.assertEqual(re.findall(r"[^{};\n]*\baccept\b[^{};\n]*", rules), [
-            "        policy accept", "        meta l4proto tcp tcp dport 443 accept"
+            "        policy accept", "        meta nfproto ipv4 meta l4proto tcp tcp dport 443 accept"
         ])
-        for addresses in (
-            "0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, "
-            "172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4",
-            "::/128, ::1/128, ::ffff:0:0/96, fc00::/7, fe80::/10, ff00::/8",
-        ):
-            self.assertIn(addresses, normalized)
-        self.assertRegex(normalized, r"chain iconfetch \{ ip daddr \{[^}]+\} reject "
-                         r"ip6 daddr \{[^}]+\} reject "
-                         r"meta l4proto tcp tcp dport 443 accept reject \} \}")
+        self.assertIn("0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, "
+                      "172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4", normalized)
+        # All IPv6 is rejected first (NAT64, 6to4 and global lab hosts
+        # included); no IPv6 destination list can be accepted.
+        self.assertNotIn("ip6 ", normalized)
+        self.assertRegex(normalized, r"chain iconfetch \{ meta nfproto ipv6 reject "
+                         r"ip daddr \{[^}]+\} reject "
+                         r"meta nfproto ipv4 meta l4proto tcp tcp dport 443 accept reject \} \}")
+
+    def test_kernel_accepts_firewall_syntax(self):
+        # `nft -c` parses and checks without applying; it needs CAP_NET_ADMIN.
+        nft = shutil.which("nft") or ("/usr/sbin/nft" if os.path.exists("/usr/sbin/nft") else None)
+        if nft is None:
+            self.skipTest("nft not installed")
+        if os.geteuid() != 0:
+            self.skipTest("nft -c needs root")
+        with tempfile.TemporaryDirectory(prefix="iconfetch-nft-") as directory:
+            target = Path(directory) / "check.nft"
+            # The account may not exist here; check the rules for nobody's UID.
+            target.write_text((ROOT / "nebula-iconfetch.nft").read_text()
+                              .replace('"nebula-iconfetch"', "65534"))
+            result = subprocess.run([nft, "-c", "-f", str(target)],
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_activation_watches_jobs_and_retries_after_exit(self):
         path = settings("nebula-iconfetch.path")
@@ -143,8 +183,10 @@ class IconfetchPolicyTest(unittest.TestCase):
         self.assertEqual(timer.get(("[Install]", "WantedBy")), ["timers.target"])
 
     def test_systemd_accepts_unit_syntax(self):
-        # Verify all real settings without requiring an installed helper binary.
-        # The exact production ExecStart is checked separately above.
+        # Verify all real settings without requiring an installed helper binary
+        # or nft. The exact production commands are checked separately above.
+        if shutil.which("systemd-analyze") is None:
+            self.skipTest("systemd-analyze not installed")
         with tempfile.TemporaryDirectory(prefix="iconfetch-units-") as directory:
             units = []
             for suffix in (".service", "-firewall.service", ".path", ".timer"):
@@ -153,7 +195,7 @@ class IconfetchPolicyTest(unittest.TestCase):
                 target.write_text(source.read_text().replace(
                     "/usr/bin/nebula-iconfetch -spool /var/lib/nebula/iconfetch",
                     "/usr/bin/true",
-                ))
+                ).replace("/usr/sbin/nft", "/usr/bin/true"))
                 units.append(str(target))
             result = subprocess.run(["systemd-analyze", "verify", *units],
                                     capture_output=True, text=True, timeout=30)
