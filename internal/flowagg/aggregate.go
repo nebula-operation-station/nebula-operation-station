@@ -242,6 +242,12 @@ type Aggregator struct {
 	// accepted again, so replay protection survives a backwards clock
 	// step.
 	floor int64
+	// newestData is the unix second of the newest accepted report end.
+	// The automatic prune uses it to bound the floor advance (see
+	// advanceFloorBoundedLocked), so a forward clock jump larger than
+	// the retention cannot ratchet the floor past every live report and
+	// reject them all until a restart.
+	newestData int64
 	// cappedHours indexes, per hour, the reporters that had parts
 	// dropped in it, so pruning the hour drops their capped marker
 	// with it.
@@ -434,7 +440,7 @@ func (a *Aggregator) Ingest(r Report, own []netip.Addr) (IngestResult, error) {
 	// is refused even after a backwards clock step.
 	if h := hourOf(now); !a.pruned || h != a.prunedHour {
 		a.pruneLocked(cutoff, cutoff)
-		a.advanceFloorLocked(cutoff)
+		a.advanceFloorBoundedLocked(cutoff)
 		a.pruned, a.prunedHour = true, h
 	}
 	rs := a.reporters[r.Host]
@@ -453,6 +459,9 @@ func (a *Aggregator) Ingest(r Report, own []netip.Addr) (IngestResult, error) {
 		a.reporters[r.Host] = rs
 	}
 	rs.lastTo[ti] = r.To
+	if to := r.To.Unix(); to > a.newestData {
+		a.newestData = to
+	}
 
 	var res IngestResult
 	parts := splitHours(r.From, r.To)
@@ -562,6 +571,31 @@ func (a *Aggregator) dropCappedLocked(hour int64) {
 // t, whichever is later.
 func (a *Aggregator) advanceFloorLocked(t time.Time) {
 	if start := hourOf(t) * secondsPerHour; start > a.floor {
+		a.floor = start
+	}
+}
+
+// advanceFloorBoundedLocked moves the floor like advanceFloorLocked, but
+// never past the end of the newest accepted data hour. A forward clock
+// jump larger than the retention would otherwise move the automatic
+// prune's cutoff (now-Retention) into the future and ratchet the floor
+// past every live report, so every later report gets ErrOutOfWindow
+// until a restart. When the bound kicks in, the floor still lies past
+// the end of every report the prune removed (all of them end at or
+// before the newest accepted report), so replay protection survives and
+// the aggregator recovers when the clock returns; when it does not kick
+// in, the advance is identical to advanceFloorLocked. Cutoff is not
+// bounded: it is an explicit admin action with an explicit retention.
+func (a *Aggregator) advanceFloorBoundedLocked(t time.Time) {
+	if a.newestData == 0 {
+		return
+	}
+	bound := (hourOf(time.Unix(a.newestData, 0)) + 1) * secondsPerHour
+	start := hourOf(t) * secondsPerHour
+	if start > bound {
+		start = bound
+	}
+	if start > a.floor {
 		a.floor = start
 	}
 }
