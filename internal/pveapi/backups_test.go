@@ -76,8 +76,34 @@ func TestNewBackupClientRejectsInvalidBaseURL(t *testing.T) {
 	if _, err := NewBackupClient("http://127.0.0.1:8006/api2/json", nil, nil); err == nil {
 		t.Error("NewBackupClient with nil token supplier: expected error, got nil")
 	}
-	if _, err := NewBackupClient("http://127.0.0.1:8006/api2/json", nil, func() string { return "t" }); err != nil {
+	if _, err := NewBackupClient("http://127.0.0.1:8006/api2/json", &http.Client{}, func() string { return "t" }); err != nil {
 		t.Errorf("NewBackupClient(valid): %v", err)
+	}
+	// A nil client is refused: there is no unpinned default fallback.
+	if _, err := NewBackupClient("http://127.0.0.1:8006/api2/json", nil, func() string { return "t" }); err == nil {
+		t.Error("NewBackupClient with nil http client: expected error, got nil")
+	}
+}
+
+// TestBodyLimitDoesNotDependOnConstructor pins that general reads are
+// capped at DefaultMaxBody and ReadBackups at the backup default, whichever
+// constructor built the client.
+func TestBodyLimitDoesNotDependOnConstructor(t *testing.T) {
+	nc, err := NewClient(&http.Client{}, "https://pve1:8006/api2/json", func(context.Context) (string, error) { return "t", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	bc, err := NewBackupClient("https://pve1:8006/api2/json", &http.Client{}, func() string { return "t" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]*Client{"NewClient": nc, "NewBackupClient": bc} {
+		if got := c.maxBody(); got != DefaultMaxBody {
+			t.Errorf("%s: general limit = %d, want %d", name, got, DefaultMaxBody)
+		}
+		if got := c.backupMaxBody(); got != defaultMaxResponseBytes {
+			t.Errorf("%s: backup limit = %d, want %d", name, got, defaultMaxResponseBytes)
+		}
 	}
 }
 

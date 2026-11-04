@@ -127,12 +127,22 @@ func (c *Client) callTimeout() time.Duration {
 	return DefaultTimeout
 }
 
-// maxBody returns the response size limit.
+// maxBody returns the response size limit of the general read methods.
 func (c *Client) maxBody() int64 {
 	if c.MaxBody > 0 {
 		return c.MaxBody
 	}
 	return DefaultMaxBody
+}
+
+// backupMaxBody returns the response size limit of ReadBackups, whose
+// listings are larger: MaxBody when set, else the backup default. The
+// limit does not depend on which constructor built the client.
+func (c *Client) backupMaxBody() int64 {
+	if c.MaxBody > 0 {
+		return c.MaxBody
+	}
+	return defaultMaxResponseBytes
 }
 
 // endpoint returns the absolute URL for an API path below BaseURL. path

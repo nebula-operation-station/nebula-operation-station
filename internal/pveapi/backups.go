@@ -280,14 +280,15 @@ func NewBackupClient(baseURL string, httpc *http.Client, token func() string) (*
 		return nil, errors.New("pveapi: base URL must end with /api2/json")
 	}
 	if httpc == nil {
-		httpc = &http.Client{}
+		// Never fall back to an unpinned default client: every read method
+		// uses it.
+		return nil, errors.New("pveapi: httpClient is nil")
 	}
 	return &Client{
 		BaseURL: u.Scheme + "://" + u.Host + u.Path,
 		HTTP:    httpc,
 		Token:   func(context.Context) (string, error) { return token(), nil },
 		Timeout: backupDefaultTimeout,
-		MaxBody: defaultMaxResponseBytes,
 	}, nil
 }
 
@@ -432,7 +433,7 @@ func (c *Client) getJSON(ctx context.Context, path string, query url.Values, out
 	default:
 		return fmt.Errorf("pveapi: get %s: unexpected status %d", path, resp.StatusCode)
 	}
-	max := c.maxBody()
+	max := c.backupMaxBody()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
 	if err != nil {
 		return fmt.Errorf("pveapi: get %s: read: %w", path, err)

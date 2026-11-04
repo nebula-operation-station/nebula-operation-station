@@ -70,7 +70,9 @@ func (f *readerFakePVE) requests() []*http.Request {
 func newReaderFakePVE(t *testing.T) *readerFakePVE {
 	t.Helper()
 	f := &readerFakePVE{}
-	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// TLS: only the injected srv.Client() trusts the server, so a read path
+	// that used http.DefaultClient or another unpinned client fails.
+	f.srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.seen = append(f.seen, r.Clone(context.Background()))
 		f.mu.Unlock()
