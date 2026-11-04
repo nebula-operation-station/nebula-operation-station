@@ -1,0 +1,119 @@
+{{define "content"}}
+{{$v := .Icon}}
+{{if eq $v.Kind "asset"}}
+<h1>Icon override of asset <code>{{$v.ID}}</code></h1>
+<p class="hint">A per-asset override replaces the catalog symbol for this device only.</p>
+{{else}}
+<h1>Icon of <code>{{$v.ID}}</code></h1>
+<p>{{if $v.Display}}{{$v.Display}} · {{end}}state {{$v.State}} · <a href="/software">Back to the catalog</a></p>
+{{end}}
+{{with .Notice}}<p class="message" role="status">{{.}}</p>{{end}}
+
+{{if $v.MergedInto}}
+<p class="message" role="status">This key is merged into <a href="/software/icon/{{$v.MergedInto}}"><code>{{$v.MergedInto}}</code></a>; set the icon there.</p>
+{{end}}
+
+<section class="panel" aria-label="Current icon">
+  <h2>Current icon</h2>
+  {{if $v.Current}}
+  <p><img class="sw-icon sw-icon--large" src="{{$v.Current}}" alt="Current icon" width="64" height="64"></p>
+  <p class="hint">{{if $v.CurrentFrom}}{{$v.CurrentFrom}}{{end}}{{if $v.CurrentBy}} by {{$v.CurrentBy}}{{end}}{{if not $v.CurrentAt.IsZero}}, <time datetime="{{iso $v.CurrentAt}}">{{when $v.CurrentAt}}</time>{{end}}</p>
+  {{else}}
+  <p><span class="sw-icon sw-icon--generic sw-icon--large">·</span> Generic symbol{{if eq $v.Kind "asset"}} (no override){{end}}.</p>
+  {{end}}
+</section>
+
+{{if $v.Editable}}
+<section class="panel" aria-label="Upload an icon">
+  <h2>Upload</h2>
+  <form method="post" action="{{$v.UploadPath}}" data-sw-upload>
+    <label for="sw-upload-file">PNG, JPEG or GIF, at most 256 KiB and 1024×1024 pixels. The server re-encodes it; SVG and WebP are rejected.</label>
+    <input id="sw-upload-file" type="file" name="image" accept="image/png,image/jpeg,image/gif" required>
+    <button type="submit" class="button button--small">Upload and set</button>
+    <p class="message message--error" role="status" hidden></p>
+  </form>
+</section>
+
+{{if eq $v.Kind "catalog"}}
+<section class="panel" aria-label="Fetch from a URL">
+  <h2>Fetch from a URL</h2>
+  <p class="hint">HTTPS only, port 443, on an allowlisted host. The separate icon fetcher downloads and sanitizes the image; the browser never loads it. Allowed hosts:
+    {{range $i, $a := $v.Allow}}{{if $i}}, {{end}}<code>{{$a}}</code>{{end}}</p>
+  <form method="post" action="/software/icon/fetch" data-fetch>
+    <input type="hidden" name="key" value="{{$v.ID}}">
+    <label class="visually-hidden" for="sw-fetch-url">Image URL</label>
+    <input id="sw-fetch-url" type="url" name="url" maxlength="2048" required autocomplete="off" placeholder="Image URL on an allowed host">
+    <button type="submit" class="button button--small">Queue fetch</button>
+  </form>
+</section>
+
+<section class="panel" aria-label="Crawler candidates">
+  <h2>Crawler candidates</h2>
+  {{if not $v.CandidatesOn}}
+  <p class="hint">No crawler is configured.</p>
+  {{else if $v.CandidatesErr}}
+  <p class="message message--error" role="status">Candidates unavailable.</p>
+  {{else if $v.Candidates}}
+  <p class="hint">A crawler only proposes. Confirming queues a fetch through the icon fetcher; nothing is loaded before that.</p>
+  <table class="table sw-table">
+    <thead><tr><th scope="col">Host</th><th scope="col">File</th><th scope="col">Found by</th><th scope="col">Found</th><th scope="col"><span class="visually-hidden">Confirm</span></th></tr></thead>
+    <tbody>
+      {{range $v.Candidates}}
+      <tr>
+        <td><code>{{.Host}}</code></td>
+        <td><code>{{.File}}</code></td>
+        <td>{{.Source}}</td>
+        <td><time datetime="{{iso .Found}}">{{when .Found}}</time></td>
+        <td>
+          <form method="post" action="/software/icon/candidate" data-fetch>
+            <input type="hidden" name="key" value="{{$v.ID}}">
+            <input type="hidden" name="candidate" value="{{.ID}}">
+            <button type="submit" class="button button--small">Confirm</button>
+          </form>
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="hint">No candidates for this key.</p>
+  {{end}}
+</section>
+{{end}}
+{{end}}
+
+<section class="panel" aria-label="Icon history">
+  <h2>History</h2>
+  {{if $v.HistoryErr}}
+  <p class="message message--error" role="status">History unavailable.</p>
+  {{else if $v.History}}
+  {{if $v.HistoryMore}}<p class="hint" role="status">Only the newest {{len $v.History}} changes are shown; older changes exist. They cannot be restored from this page.</p>{{end}}
+  <table class="table sw-table">
+    <thead><tr><th scope="col">Change</th><th scope="col">Before</th><th scope="col">After</th><th scope="col">By</th><th scope="col">When</th><th scope="col"><span class="visually-hidden">Rollback</span></th></tr></thead>
+    <tbody>
+      {{range $v.History}}
+      <tr>
+        <td>#{{.ID}}{{if .RollbackOf}} (rollback of #{{.RollbackOf}}){{end}}{{if .AssetDeleted}} (asset deleted){{end}}</td>
+        <td>{{if .PrevSrc}}<img class="sw-icon" src="{{.PrevSrc}}" alt="Previous icon" width="24" height="24">{{else}}generic{{end}}</td>
+        <td>{{if .Src}}<img class="sw-icon" src="{{.Src}}" alt="New icon" width="24" height="24">{{else}}generic{{end}}</td>
+        <td>{{.By}}</td>
+        <td><time datetime="{{iso .At}}">{{when .At}}</time></td>
+        <td>
+          {{if .CanRollback}}
+          <form method="post" action="/software/icon/rollback" data-fetch>
+            <input type="hidden" name="kind" value="{{$v.Kind}}">
+            <input type="hidden" name="id" value="{{$v.ID}}">
+            <input type="hidden" name="change" value="{{.ID}}">
+            <button type="submit" class="button button--small{{if not .Newest}} button--secondary{{end}}">{{if .Newest}}Roll back{{else}}Restore the icon before this change{{end}}</button>
+          </form>
+          {{end}}
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="hint">No icon changes yet.</p>
+  {{end}}
+</section>
+{{end}}

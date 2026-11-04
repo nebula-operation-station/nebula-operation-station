@@ -28,6 +28,9 @@ ExecStart=/usr/bin/nebula-pve-collector \
   -spool /var/lib/nebula/pve \
   -interval 1m
 Restart=on-failure
+# Keep retrying while the executor restarts (for example during an
+# upgrade); the default 100 ms burst gives up after five tries.
+RestartSec=5s
 UMask=0077
 
 # Hardening

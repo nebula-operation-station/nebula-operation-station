@@ -60,7 +60,7 @@ func openLiveHandoff(root string, create bool) (*LiveHandoff, error) {
 	}
 	fail := func(err error) (*LiveHandoff, error) { dir.Close(); return nil, err }
 	if create {
-		if err := dir.Chmod(liveRootMode); err != nil {
+		if err := ensureDirMode(dir, liveRootMode); err != nil {
 			return fail(fmt.Errorf("pvecollect: chmod live handoff root: %w", err))
 		}
 		if err := unix.Mkdirat(int(dir.Fd()), requestsDirName, 0o770); err != nil && !errors.Is(err, unix.EEXIST) {
@@ -76,7 +76,7 @@ func openLiveHandoff(root string, create bool) (*LiveHandoff, error) {
 	}
 	requestsDir := os.NewFile(uintptr(reqFD), requestsDirName)
 	if create {
-		if err := requestsDir.Chmod(requestsDirMode); err != nil {
+		if err := ensureDirMode(requestsDir, requestsDirMode); err != nil {
 			requestsDir.Close()
 			return fail(fmt.Errorf("pvecollect: chmod requests directory: %w", err))
 		}
@@ -88,7 +88,7 @@ func openLiveHandoff(root string, create bool) (*LiveHandoff, error) {
 	}
 	liveDir := os.NewFile(uintptr(liveFD), liveDirName)
 	if create {
-		if err := liveDir.Chmod(liveDirMode); err != nil {
+		if err := ensureDirMode(liveDir, liveDirMode); err != nil {
 			requestsDir.Close()
 			liveDir.Close()
 			return fail(fmt.Errorf("pvecollect: chmod live directory: %w", err))

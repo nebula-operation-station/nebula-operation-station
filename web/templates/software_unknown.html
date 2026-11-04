@@ -1,0 +1,51 @@
+{{define "content"}}
+{{$v := .Unknown}}
+<h1>Unknown software</h1>
+<p class="hint">Identifiers without a reviewed catalog entry. Name an entry to make it known, merge it into an existing key, or ignore it. Observations never create placements.</p>
+<p><a href="/software">Back to the catalog</a></p>
+{{with .Notice}}<p class="message" role="status">{{.}}</p>{{end}}
+{{if $v.Full}}<p class="message message--error" role="status">Only the most recently seen entries are shown; review these first.</p>{{end}}
+{{if $v.Rows}}
+<table class="table sw-table">
+  <thead>
+    <tr><th scope="col">Icon</th><th scope="col">Key</th><th scope="col">Hosts</th><th scope="col">Observations</th><th scope="col">Last seen</th><th scope="col">Rename</th><th scope="col">Merge into</th><th scope="col"><span class="visually-hidden">Other actions</span></th></tr>
+  </thead>
+  <tbody>
+    {{range $v.Rows}}
+    <tr>
+      <td class="sw-icon-cell">{{if .IconSrc}}<img class="sw-icon" src="{{.IconSrc}}" alt="" width="24" height="24">{{else}}<span class="sw-icon sw-icon--generic" title="Generic symbol">·</span>{{end}}</td>
+      <td class="sw-key"><code>{{.Key}}</code>{{if .FirstHost}}<br><span class="hint">first from {{.FirstHost}}</span>{{end}}</td>
+      <td class="sw-hosts">{{.Hosts}}</td>
+      <td class="sw-observations">{{.Observations}}</td>
+      <td><time datetime="{{iso .LastSeen}}">{{when .LastSeen}}</time></td>
+      <td>
+        <form method="post" action="/software/rename" data-fetch class="sw-inline-form">
+          <input type="hidden" name="key" value="{{.Key}}">
+          <label class="visually-hidden" for="rename-{{.Key}}">Display name for {{.Key}}</label>
+          <input id="rename-{{.Key}}" type="text" name="display" maxlength="128" required placeholder="Display name">
+          <button type="submit" class="button button--small">Rename</button>
+        </form>
+      </td>
+      <td>
+        <form method="post" action="/software/merge" data-fetch class="sw-inline-form" data-confirm="Merge this entry into the other key? A merge cannot be undone here.">
+          <input type="hidden" name="key" value="{{.Key}}">
+          <label class="visually-hidden" for="merge-{{.Key}}">Merge {{.Key}} into key</label>
+          <input id="merge-{{.Key}}" type="text" name="into" maxlength="64" required pattern="[a-z0-9][a-z0-9._\-]{0,63}" placeholder="catalog key">
+          <button type="submit" class="button button--small button--secondary">Merge</button>
+        </form>
+      </td>
+      <td class="sw-actions">
+        <form method="post" action="/software/ignore" data-fetch class="sw-inline-form" data-confirm="Ignore this entry? Renaming it later makes it known again.">
+          <input type="hidden" name="key" value="{{.Key}}">
+          <button type="submit" class="button button--small button--secondary">Ignore</button>
+        </form>
+        <a class="button button--small button--secondary" href="/software/icon/{{.Key}}">Icon</a>
+      </td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="hint">The queue is empty.</p>
+{{end}}
+{{end}}
