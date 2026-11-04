@@ -231,6 +231,21 @@ type PveMutations struct {
 	// durable state (PveProvisioner implements it). Provisioning steps are
 	// never identified without it.
 	TaskIDs PveJobTaskIDs
+	// RebootPollInterval is the node read interval while waiting for a
+	// rebooted node to return. Default 10 s.
+	RebootPollInterval time.Duration
+	// RebootMaxWait bounds the wait for a rebooted node to return, from the
+	// step's intent; after it the outcome is unknown. Default 20 min.
+	RebootMaxWait time.Duration
+	// RebootEvacuationWait bounds how long a node reboot Run waits for HA
+	// to move the guests its approval lists for HA evacuation off the node
+	// before anything is authorized or sent. Default 15 min.
+	RebootEvacuationWait time.Duration
+
+	// rebootMu guards rebooting: the remotes with a node reboot Run in
+	// progress (at most one node of a remote at a time).
+	rebootMu  sync.Mutex
+	rebooting map[string]bool
 
 	// powerBindings are the guest power and snapshot bindings of this
 	// engine when the service has none shared with the authority (see
@@ -267,6 +282,36 @@ func (m *PveMutations) inflightRuns(executionID string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.inflight[executionID]
+}
+
+// lockNodeReboot reserves remoteID for one node reboot Run; false if a
+// reboot of the remote is already running in this engine.
+func (m *PveMutations) lockNodeReboot(remoteID string) (func(), bool) {
+	m.rebootMu.Lock()
+	defer m.rebootMu.Unlock()
+	if m.rebooting[remoteID] {
+		return nil, false
+	}
+	if m.rebooting == nil {
+		m.rebooting = make(map[string]bool)
+	}
+	m.rebooting[remoteID] = true
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.rebootMu.Lock()
+			defer m.rebootMu.Unlock()
+			delete(m.rebooting, remoteID)
+		})
+	}, true
+}
+
+// nodeRebootRunning reports whether a node reboot Run of remoteID is in
+// progress in this engine.
+func (m *PveMutations) nodeRebootRunning(remoteID string) bool {
+	m.rebootMu.Lock()
+	defer m.rebootMu.Unlock()
+	return m.rebooting[remoteID]
 }
 
 func (m *PveMutations) running(executionID string) bool {
@@ -532,6 +577,9 @@ func (m *PveMutations) taskType(step PveMutationStep) (string, error) {
 	} else if mTT, isMigrate := GuestMigrateStepTaskType(step.Method); isMigrate {
 		_, client := m.Client.(PveMigrateClient)
 		tt, ok = mTT, client
+	} else if rTT, isReboot := NodeRebootStepTaskType(step.Method); isReboot {
+		_, client := m.Client.(PveNodeRebootClient)
+		tt, ok = rTT, client
 	} else {
 		tt, ok = m.Client.TaskType(step.Method)
 	}
@@ -590,6 +638,14 @@ func (m *PveMutations) dispatch(ctx context.Context, rm executordb.PveRemote, no
 			return "", fmt.Errorf("dispatch %s: %w", step.Method, ErrPveRejected)
 		}
 		return mc.DispatchMigrate(ctx, rm, node, step, action, read)
+	}
+	if nodeRebootStep(step) {
+		rc, ok := m.Client.(PveNodeRebootClient)
+		if !ok {
+			return "", fmt.Errorf("dispatch %s: %w", step.Method, ErrPveRejected)
+		}
+		// A node reboot creates no task: success returns no UPID.
+		return "", rc.DispatchNodeReboot(ctx, rm, node, step, action, read)
 	}
 	return m.Client.Dispatch(ctx, rm, node, step, action)
 }
@@ -808,6 +864,18 @@ func (m *PveMutations) runStep(ctx context.Context, claim permit.MutationClaim, 
 	if errors.Is(err, ErrPveRejected) {
 		_ = m.DB.FinishPveJob(claim.ExecutionID, n, executordb.PveJobFailed, "refused by the remote")
 		return ErrPveStepFailed
+	}
+	if nodeRebootStep(step) {
+		// No task to match, sent or possibly sent: the step is observed
+		// through the node's return, never sent again.
+		if err := m.DB.MarkPveJobReconciling(claim.ExecutionID, n); err != nil {
+			return ErrPveJobStore
+		}
+		stored, ok, err := m.DB.PveJob(claim.ExecutionID, n)
+		if err != nil || !ok {
+			return ErrPveJobStore
+		}
+		return m.awaitNodeReboot(ctx, rm, stored, readTok)
 	}
 	if err != nil {
 		// Lost response: never retry, identify the task instead.
@@ -1085,6 +1153,13 @@ func (m *PveMutations) Reconcile(ctx context.Context) error {
 		}
 		read, err := m.readToken(rm)
 		if err != nil {
+			continue
+		}
+		if job.Action == PveNodeRebootAction {
+			// A node reboot has no task: it is observed through the node.
+			if err := m.reconcileNodeReboot(ctx, rm, job, read); errors.Is(err, ErrPveJobStore) {
+				return err
+			}
 			continue
 		}
 		if job.UPID == "" {

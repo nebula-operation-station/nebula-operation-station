@@ -36,7 +36,20 @@ const (
 	ChangeUnblocked      = "unblocked"
 	ChangeCredentials    = "credentials"
 	ChangeRemoved        = "removed"
+	ChangeSite           = "site"
 )
+
+// PVE remote site markers (admin-set, ADR 0006 P2-01). SiteUnset means the
+// admin has not said where the remote is: callers that depend on the site
+// treat it as unknown, never as onsite.
+const (
+	SiteUnset   = ""
+	SiteOnsite  = "onsite"
+	SiteOffsite = "offsite"
+)
+
+// ValidPveSite reports whether s is a site marker an admin may set.
+func ValidPveSite(s string) bool { return s == SiteOnsite || s == SiteOffsite }
 
 var (
 	// ErrRemoteNotFound is returned when a remote id is not in the registry.
@@ -91,6 +104,9 @@ type PveRemote struct {
 	UpdatedAt       time.Time
 	UpdatedBy       string
 	Credentials     PveRemoteCredentials
+	// Site is the admin-set site marker (SiteOnsite, SiteOffsite) or
+	// SiteUnset.
+	Site string
 }
 
 // PveRemoteChange is one entry of the append-only change trail. Detail is
@@ -547,6 +563,52 @@ func (db *DB) SetEndpoints(remoteID string, eps []pvecontract.Endpoint, by strin
 	return rm, nil
 }
 
+// SetRemoteSite records the admin-set site marker of a remote that is not
+// removed (SiteOnsite or SiteOffsite; it cannot be cleared) and logs the
+// change with the previous value.
+func (db *DB) SetRemoteSite(remoteID, site, by string) (PveRemote, error) {
+	if err := checkText("actor", by, maxActorLen, false); err != nil {
+		return PveRemote{}, err
+	}
+	if !ValidPveSite(site) {
+		return PveRemote{}, fmt.Errorf("executordb: %w: pve site %q is not onsite or offsite", ErrInvalid, site)
+	}
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return PveRemote{}, fmt.Errorf("executordb: pve remote site: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	rm, err := scanPveRemote(tx.QueryRow(`SELECT `+pveRemoteColumns+` FROM pve_remotes WHERE remote_id = ?`, remoteID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return PveRemote{}, fmt.Errorf("%w: %s", ErrRemoteNotFound, remoteID)
+	}
+	if err != nil {
+		return PveRemote{}, fmt.Errorf("executordb: pve remote site: %w", err)
+	}
+	if rm.State == StateRemoved {
+		return PveRemote{}, fmt.Errorf("%w: %s is %s", ErrRemoteState, remoteID, rm.State)
+	}
+	now := db.now().Truncate(time.Second)
+	if _, err := tx.Exec(`UPDATE pve_remotes SET site = ?, updated_at = ?, updated_by = ? WHERE remote_id = ?`, site, now.Unix(), by, remoteID); err != nil {
+		return PveRemote{}, fmt.Errorf("executordb: pve remote site: %w", err)
+	}
+	prev := rm.Site
+	if prev == SiteUnset {
+		prev = "unset"
+	}
+	if err := db.logPveChange(tx, remoteID, ChangeSite, fmt.Sprintf("site=%s (was %s)", site, prev), by, now); err != nil {
+		return PveRemote{}, err
+	}
+	if err := db.loadPveEndpoints(tx, &rm); err != nil {
+		return PveRemote{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return PveRemote{}, fmt.Errorf("executordb: pve remote site: %w", err)
+	}
+	rm.Site, rm.UpdatedAt, rm.UpdatedBy = site, now, by
+	return rm, nil
+}
+
 // RemoveRemote tombstones a remote (ADR 0006): it is disabled and its id
 // and trust identity stay reserved. The record, endpoints and change
 // trail are kept as nonsecret audit data. Revoking the remote's
@@ -703,7 +765,7 @@ func (db *DB) RemoteChanges(remoteID string) ([]PveRemoteChange, error) {
 
 const pveRemoteColumns = `remote_id, name, kind, trust_pin_kind, trust_pin, trust_generation, state,
 	read_credential_ref, read_credential_version, action_credential_ref, action_credential_version,
-	blocked_at, blocked_by, blocked_reason, removed_at, created_at, updated_at, updated_by`
+	blocked_at, blocked_by, blocked_reason, removed_at, created_at, updated_at, updated_by, site`
 
 func scanPveRemote(r rowScanner) (PveRemote, error) {
 	var (
@@ -718,7 +780,7 @@ func scanPveRemote(r rowScanner) (PveRemote, error) {
 	)
 	if err := r.Scan(&rm.RemoteID, &rm.Name, &kind, &pinKind, &rm.TrustPin, &gen, &rm.State,
 		&rm.Credentials.ReadRef, &rm.Credentials.ReadVersion, &rm.Credentials.ActionRef, &rm.Credentials.ActionVersion,
-		&blockedAt, &blockedBy, &blockedReason, &removedAt, &created, &up, &rm.UpdatedBy); err != nil {
+		&blockedAt, &blockedBy, &blockedReason, &removedAt, &created, &up, &rm.UpdatedBy, &rm.Site); err != nil {
 		return PveRemote{}, err
 	}
 	rm.Kind = pvecontract.Kind(kind)

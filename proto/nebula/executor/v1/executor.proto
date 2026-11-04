@@ -439,6 +439,9 @@ service ExecutorService {
   rpc RotatePVEToken(RotatePVETokenRequest) returns (RotatePVETokenResponse);
   rpc RemovePVERemote(RemovePVERemoteRequest) returns (RemovePVERemoteResponse);
   rpc ListPVEAdminRemotes(ListPVEAdminRemotesRequest) returns (ListPVEAdminRemotesResponse);
+  // Records where a remote is (onsite or offsite). Unset means unknown;
+  // node reboot refuses an offsite or unset remote (ADR 0006 P2-01).
+  rpc SetPVERemoteSite(SetPVERemoteSiteRequest) returns (SetPVERemoteSiteResponse);
   // Proposes a HIGH permit bound to current trust, endpoints and credentials.
   rpc ProposePVERepin(ProposePVERepinRequest) returns (ProposePVERepinResponse);
   rpc CommitPVERepin(CommitPVERepinRequest) returns (CommitPVERepinResponse);
@@ -2083,6 +2086,8 @@ message PVEAdminRemote {
   string action_ref = 10;
   int64 action_version = 11;
   int64 updated_at_unix = 12;
+  // site is "onsite", "offsite" or empty (not set by the admin).
+  string site = 13;
 }
 
 message AddPVERemoteRequest {
@@ -2106,6 +2111,16 @@ message RemovePVERemoteRequest {
 }
 
 message ListPVEAdminRemotesRequest {}
+
+message SetPVERemoteSiteRequest {
+  string remote_id = 1;
+  // site is "onsite" or "offsite".
+  string site = 2;
+}
+
+message SetPVERemoteSiteResponse {
+  PVEAdminRemote remote = 1;
+}
 
 message ListPVEAdminRemotesResponse {
   repeated PVEAdminRemote remotes = 1;
