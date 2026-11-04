@@ -139,6 +139,100 @@ func TestChartStagedConfirmShowsTheProposedPlan(t *testing.T) {
 	}
 }
 
+// digestRe extracts the plan digest of the confirmation form.
+var digestRe = regexp.MustCompile(`<input type="hidden" name="plan_digest" value="([0-9a-f]{64})">`)
+
+func TestChartStagedConfirmCarriesPlanDigest(t *testing.T) {
+	h, _ := stagedChartHandler(t, false)
+	rec := httptest.NewRecorder()
+	h.Handler().ServeHTTP(rec, formPost("/inventory/chart/staged", "host=ci-01&host=db-01&action=package.install_all"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("confirmation: status = %d, want 200", rec.Code)
+	}
+	if m := digestRe.FindStringSubmatch(rec.Body.String()); m == nil {
+		t.Fatal("the confirmation form carries no plan digest")
+	}
+}
+
+func TestChartStagedConfirmRefusesChangedPlan(t *testing.T) {
+	ops := &fakeOps{}
+	env := inventory.EnvProd
+	h := newTestHandler(t, ui.Options{
+		Hosts: func(context.Context) ([]inventory.Host, error) {
+			return []inventory.Host{{ID: "web-01", Environment: env, Endpoints: []inventory.Endpoint{{Address: "10.0.0.13", Port: 22}}}}, nil
+		},
+		HostKeys:     hostKeysFor("web-01", keyPinned),
+		Operations:   ops,
+		Log:          slog.New(slog.NewTextHandler(&strings.Builder{}, nil)),
+		PublicOrigin: "https://nebula.example",
+	})
+	rec := httptest.NewRecorder()
+	h.Handler().ServeHTTP(rec, formPost("/inventory/chart/staged", "host=web-01&action=package.install_all"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("confirmation: status = %d, want 200", rec.Code)
+	}
+	confirmBody := confirmFormBody(t, rec.Body.String())
+	// The environment changes after the plan was shown: the confirmed
+	// POST must refuse, not propose.
+	env = inventory.EnvQA
+	rec = httptest.NewRecorder()
+	h.Handler().ServeHTTP(rec, formPost("/inventory/chart/staged", confirmBody))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("changed plan: status = %d, want 400", rec.Code)
+	}
+	if msg := rec.Body.String(); !strings.Contains(msg, "plan changed") || !strings.Contains(msg, "review") {
+		t.Errorf("unclear error %q", msg)
+	}
+	if len(ops.createdCalls) != 0 {
+		t.Error("a proposal was made for a changed plan")
+	}
+}
+
+func TestChartStagedConfirmRefusesCorruptDigest(t *testing.T) {
+	h, ops := stagedChartHandler(t, false)
+	rec := httptest.NewRecorder()
+	h.Handler().ServeHTTP(rec, formPost("/inventory/chart/staged", "host=ci-01&action=package.install_all"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("confirmation: status = %d, want 200", rec.Code)
+	}
+	v, err := url.ParseQuery(confirmFormBody(t, rec.Body.String()))
+	if err != nil {
+		t.Fatalf("ParseQuery: %v", err)
+	}
+	v.Set("plan_digest", strings.Repeat("0", 64))
+	rec = httptest.NewRecorder()
+	h.Handler().ServeHTTP(rec, formPost("/inventory/chart/staged", v.Encode()))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("corrupt digest: status = %d, want 400", rec.Code)
+	}
+	if msg := rec.Body.String(); !strings.Contains(msg, "plan changed") {
+		t.Errorf("unclear error %q", msg)
+	}
+	if len(ops.createdCalls) != 0 {
+		t.Error("a proposal was made for a corrupt digest")
+	}
+}
+
+func TestChartStagedConfirmWithoutDigestShowsConfirmation(t *testing.T) {
+	h, ops := stagedChartHandler(t, false)
+	for _, form := range []string{
+		"confirm=1&host=ci-01&action=package.install_all",
+		"confirm=1&host=ci-01&plan_digest=bogus&action=package.install_all",
+	} {
+		rec := httptest.NewRecorder()
+		h.Handler().ServeHTTP(rec, formPost("/inventory/chart/staged", form))
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s: status = %d, want 200 (the confirmation page)", form, rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "Confirm staged OS update") {
+			t.Errorf("%s: confirmation page not shown", form)
+		}
+		if len(ops.createdCalls) != 0 {
+			t.Errorf("%s: a proposal was made", form)
+		}
+	}
+}
+
 // noEnvHandler serves web-01 (PROD) and noenv-01 (no environment), both
 // enrolled.
 func noEnvHandler(t *testing.T) (*ui.Handler, *fakeOps) {
@@ -147,7 +241,7 @@ func noEnvHandler(t *testing.T) (*ui.Handler, *fakeOps) {
 	h := newTestHandler(t, ui.Options{
 		Hosts: func(context.Context) ([]inventory.Host, error) {
 			return []inventory.Host{
-				{ID: "web-01", Environment: inventory.EnvProd},
+				{ID: "web-01", Environment: inventory.EnvProd, Endpoints: []inventory.Endpoint{{Address: "10.0.0.13", Port: 22}}},
 				{ID: "noenv-01", DisplayName: "No env"},
 			}, nil
 		},
@@ -191,6 +285,69 @@ func TestChartStagedRefusesHostWithoutEnvironment(t *testing.T) {
 			t.Errorf("%s: status = %d, want 400", form, rec.Code)
 		}
 		if msg := rec.Body.String(); !strings.Contains(msg, `"noenv-01"`) || !strings.Contains(msg, "no environment (DEV, QA or PROD)") {
+			t.Errorf("%s: unclear error %q", form, msg)
+		}
+		if strings.Contains(rec.Body.String(), "Confirm staged OS update") {
+			t.Errorf("%s: confirmation page shown", form)
+		}
+	}
+	if len(ops.createdCalls) != 0 {
+		t.Errorf("a proposal was made: %v", ops.createdCalls)
+	}
+}
+
+// noEndpointHandler serves web-01 (PROD, with an endpoint) and
+// noep-01 (PROD, no endpoints), both enrolled.
+func noEndpointHandler(t *testing.T) (*ui.Handler, *fakeOps) {
+	t.Helper()
+	ops := &fakeOps{}
+	h := newTestHandler(t, ui.Options{
+		Hosts: func(context.Context) ([]inventory.Host, error) {
+			return []inventory.Host{
+				{ID: "web-01", Environment: inventory.EnvProd, Endpoints: []inventory.Endpoint{{Address: "10.0.0.13", Port: 22}}},
+				{ID: "noep-01", DisplayName: "No endpoints", Environment: inventory.EnvProd, Criticality: inventory.CriticalityLow},
+			}, nil
+		},
+		HostKeys: func(context.Context) ([]*pb.HostKeyPin, error) {
+			return []*pb.HostKeyPin{
+				{HostId: "web-01", KeyType: "ssh-ed25519", Fingerprint: "SHA256:AAAA"},
+				{HostId: "noep-01", KeyType: "ssh-ed25519", Fingerprint: "SHA256:BBBB"},
+			}, nil
+		},
+		Operations:   ops,
+		Log:          slog.New(slog.NewTextHandler(&strings.Builder{}, nil)),
+		PublicOrigin: "https://nebula.example",
+	})
+	return h, ops
+}
+
+func TestChartStagedHostWithoutEndpointsNotSelectable(t *testing.T) {
+	h, _ := noEndpointHandler(t)
+	body := getBody(t, h.Handler(), "/inventory/chart")
+	if got := hostCheckboxes(t, body); !reflect.DeepEqual(got, []string{"web-01"}) {
+		t.Errorf("selectable hosts = %v, want [web-01]", got)
+	}
+	if !strings.Contains(body, `<input type="checkbox" value="noep-01" disabled>`) {
+		t.Error("no disabled checkbox for the host without endpoints")
+	}
+	if !strings.Contains(body, "not selectable: no endpoints") {
+		t.Error("the reason is not shown")
+	}
+}
+
+func TestChartStagedRefusesHostWithoutEndpoints(t *testing.T) {
+	h, ops := noEndpointHandler(t)
+	for _, form := range []string{
+		"host=noep-01&action=package.install_security",
+		"host=web-01&host=noep-01&action=package.install_security",
+		"confirm=1&host=web-01&host=noep-01&action=package.install_security",
+	} {
+		rec := httptest.NewRecorder()
+		h.Handler().ServeHTTP(rec, formPost("/inventory/chart/staged", form))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", form, rec.Code)
+		}
+		if msg := rec.Body.String(); !strings.Contains(msg, `"noep-01"`) || !strings.Contains(msg, "no endpoints") {
 			t.Errorf("%s: unclear error %q", form, msg)
 		}
 		if strings.Contains(rec.Body.String(), "Confirm staged OS update") {
@@ -288,7 +445,11 @@ func TestChartStagedRefusals(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			h, ops := stagedChartHandler(t, false)
 			ops.createErr = c.err
-			rec := post(h, "confirm=1&host=web-01&action=package.install_all")
+			rec := post(h, "host=web-01&action=package.install_all")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("confirmation: status = %d, want 200", rec.Code)
+			}
+			rec = post(h, confirmFormBody(t, rec.Body.String()))
 			if rec.Code != c.code {
 				t.Errorf("status = %d, want %d", rec.Code, c.code)
 			}
