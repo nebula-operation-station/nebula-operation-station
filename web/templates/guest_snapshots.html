@@ -1,0 +1,96 @@
+{{define "content"}}{{$d := .GuestSnapshots}}
+<h1>Snapshots of {{$d.KindLabel}} <span class="mono">{{$d.VMID}}</span></h1>
+<section class="panel" aria-label="Guest">
+  <dl class="kv">
+    <dt>Guest</dt><dd>{{$d.Name}} — {{$d.KindLabel}} <span class="mono">{{$d.VMID}}</span> on node <span class="mono">{{$d.Node}}</span> of PVE remote <span class="mono">{{$d.Remote}}</span></dd>
+    <dt>Status</dt><dd>{{$d.Status}}</dd>
+    <dt>Inventory incarnation</dt><dd class="mono">generation {{$d.Generation}}</dd>
+  </dl>
+  {{if $d.Note}}<p class="chart__unknown">{{$d.Note}}</p>{{end}}
+  <p><a class="button button--small" href="/inventory/chart">Back to the chart</a></p>
+</section>
+<section class="panel" aria-label="Snapshots">
+  <h2>Snapshots</h2>
+  <p class="hint">From the stored snapshot read (every 5 minutes). Each button only proposes one action on exactly one snapshot; the next page shows the snapshot and the risk the executor bound before you approve.</p>
+  {{if $d.SnapshotNote}}<p class="status status--error">{{$d.SnapshotNote}}</p>{{end}}
+  {{if $d.Snapshots}}
+  <table class="table">
+    <thead><tr><th>Name</th><th>Taken</th><th>Parent</th><th>RAM</th>{{if $d.Actions}}<th>Actions</th>{{end}}</tr></thead>
+    <tbody>
+      {{range $d.Snapshots}}
+      <tr>
+        <td class="mono">{{.Name}}</td>
+        <td>{{if .Time.IsZero}}unknown{{else}}{{timeTag .Time}}{{end}}</td>
+        <td class="mono">{{if .Parent}}{{.Parent}}{{else}}—{{end}}</td>
+        <td>{{if .RAM}}RAM included{{else}}disk only{{end}}</td>
+        {{if $d.Actions}}
+        <td>
+          {{if .Actionable}}
+          <form method="post" action="/pve/guests/snapshots/propose" class="inline-form" data-fetch>
+            <input type="hidden" name="remote" value="{{$d.Remote}}">
+            <input type="hidden" name="vmid" value="{{$d.VMID}}">
+            <input type="hidden" name="generation" value="{{$d.Generation}}">
+            <input type="hidden" name="node" value="{{$d.Node}}">
+            <input type="hidden" name="kind" value="{{$d.Kind}}">
+            <input type="hidden" name="op" value="delete">
+            <input type="hidden" name="name" value="{{.Name}}">
+            <input type="hidden" name="snaptime" value="{{.TimeUnix}}">
+            <input type="hidden" name="parent" value="{{.Parent}}">
+            {{if .RAM}}<input type="hidden" name="vmstate" value="1">{{end}}
+            <button type="submit" class="button button--small button--danger">Delete snapshot {{.Name}} (taken {{if .Time.IsZero}}at an unknown time{{else}}{{timeTag .Time}}{{end}}) — HIGH</button>
+          </form>
+          <form method="post" action="/pve/guests/snapshots/propose" class="form" data-fetch>
+            <input type="hidden" name="remote" value="{{$d.Remote}}">
+            <input type="hidden" name="vmid" value="{{$d.VMID}}">
+            <input type="hidden" name="generation" value="{{$d.Generation}}">
+            <input type="hidden" name="node" value="{{$d.Node}}">
+            <input type="hidden" name="kind" value="{{$d.Kind}}">
+            <input type="hidden" name="op" value="rollback">
+            <input type="hidden" name="name" value="{{.Name}}">
+            <input type="hidden" name="snaptime" value="{{.TimeUnix}}">
+            <input type="hidden" name="parent" value="{{.Parent}}">
+            {{if .RAM}}<input type="hidden" name="vmstate" value="1">{{end}}
+            <fieldset>
+              <legend>Start after rollback (choose one)</legend>
+              <label><input type="radio" name="start" value="yes" required> start the guest</label>
+              <label><input type="radio" name="start" value="no" required> leave it stopped</label>
+            </fieldset>
+            {{if .RAM}}<p class="hint">This snapshot includes RAM: PVE resumes the guest from it whatever you choose.</p>{{end}}
+            <button type="submit" class="button button--small button--danger">Roll back to snapshot {{.Name}} (taken {{if .Time.IsZero}}at an unknown time{{else}}{{timeTag .Time}}{{end}}) — HIGH</button>
+          </form>
+          {{else}}
+          <span class="chart__unknown">no actions on this snapshot</span>
+          {{end}}
+        </td>
+        {{end}}
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="chart__unknown">No snapshots stored for this guest.</p>
+  {{end}}
+</section>
+{{if $d.Actions}}
+<section class="panel" aria-label="Create snapshot">
+  <h2>Create snapshot</h2>
+  <form method="post" action="/pve/guests/snapshots/propose" class="form" data-fetch>
+    <input type="hidden" name="remote" value="{{$d.Remote}}">
+    <input type="hidden" name="vmid" value="{{$d.VMID}}">
+    <input type="hidden" name="generation" value="{{$d.Generation}}">
+    <input type="hidden" name="node" value="{{$d.Node}}">
+    <input type="hidden" name="kind" value="{{$d.Kind}}">
+    <input type="hidden" name="op" value="create">
+    <label for="snapshot-name">Name</label>
+    <input id="snapshot-name" type="text" name="name" required maxlength="{{$d.NameMax}}" pattern="{{$d.NamePattern}}" autocomplete="off" aria-describedby="snapshot-name-hint">
+    <p id="snapshot-name-hint" class="hint">A letter, then letters, digits, _ or -; at most {{$d.NameMax}} characters; not "current".</p>
+    {{if $d.RAMOption}}
+    <label><input type="checkbox" name="vmstate" value="1"> Include RAM (the running VM's memory is saved with the snapshot)</label>
+    {{else if $d.RAMNote}}
+    <p class="hint">{{$d.RAMNote}}</p>
+    {{end}}
+    <button type="submit" class="button button--small">Create snapshot (MEDIUM)</button>
+  </form>
+</section>
+{{end}}
+{{end}}

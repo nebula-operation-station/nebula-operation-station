@@ -170,6 +170,12 @@ type Options struct {
 	// Power section on running guests of active remotes. Nil hides the
 	// controls and the power endpoints answer 404.
 	GuestPower GuestPower
+	// GuestSnapshot proposes and runs typed guest snapshot actions (ADR
+	// 0006 P2-01, px02): GET /pve/guests/snapshots lists a guest's stored
+	// snapshots with create, delete and rollback forms. It needs PVE (which
+	// must also implement PVESnapshotStore) and PVERemotes. Nil hides the
+	// page and the snapshot endpoints answer 404.
+	GuestSnapshot GuestSnapshot
 	// Log receives executor status errors (the page itself only shows
 	// "Executor unavailable"). Nil means slog.Default().
 	Log *slog.Logger
@@ -215,6 +221,9 @@ type Handler struct {
 	// guestPower and guestPowerProposals serve the guest power controls.
 	guestPower          GuestPower
 	guestPowerProposals *guestPowerProposals
+	// guestSnapshot serves the guest snapshot page; its proposals share
+	// guestPowerProposals (throttle, caps and table).
+	guestSnapshot GuestSnapshot
 }
 
 // New parses the embedded templates and builds a Handler.
@@ -293,6 +302,7 @@ func New(o Options) (*Handler, error) {
 		pve:            o.PVE,
 		pveRemotes:     o.PVERemotes,
 		guestPower:     o.GuestPower,
+		guestSnapshot:  o.GuestSnapshot,
 		now:            o.Now,
 
 		guestPowerProposals: newGuestPowerProposals(),
@@ -382,6 +392,7 @@ var pageFiles = map[string]string{
 	"pve":                 "pve.html",
 	"pve_detail":          "pve_detail.html",
 	"guest_action":        "guest_action.html",
+	"guest_snapshots":     "guest_snapshots.html",
 }
 
 // pagePartials are extra template files a page uses.
@@ -508,6 +519,11 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("GET /pve/guests/power/{digest}", h.handleGuestPowerProposal)
 	mux.HandleFunc("POST /pve/guests/power/commit", h.handleGuestPowerCommit)
 	mux.HandleFunc("POST /pve/guests/power/run", h.handleGuestPowerRun)
+	mux.HandleFunc("GET /pve/guests/snapshots", h.handleGuestSnapshots)
+	mux.HandleFunc("POST /pve/guests/snapshots/propose", h.handleGuestSnapshotPropose)
+	mux.HandleFunc("GET /pve/guests/snapshots/proposals/{digest}", h.handleGuestSnapshotProposal)
+	mux.HandleFunc("POST /pve/guests/snapshots/commit", h.handleGuestSnapshotCommit)
+	mux.HandleFunc("POST /pve/guests/snapshots/run", h.handleGuestSnapshotRun)
 	mux.HandleFunc("POST /hostkeys/repin/propose", h.handleRepinPropose)
 	mux.HandleFunc("POST /hostkeys/repin/commit", h.handleRepinCommit)
 	mux.HandleFunc("GET /inventory/enroll", h.handleEnrollPage)
@@ -574,8 +590,11 @@ type pageData struct {
 	// GuestPower are the Power sections of the chart's guests, keyed by
 	// remote and VMID (guestPowerKey); render fills it. See PowerFor.
 	GuestPower map[string]*guestPowerView
-	// GuestAction is the data of the guest power proposal page.
+	// GuestAction is the data of the guest power and snapshot proposal
+	// page.
 	GuestAction *guestActionData
+	// GuestSnapshots is the data of a guest's snapshot page.
+	GuestSnapshots *guestSnapshotsData
 	// InventoryDialogOpen shows the add-host dialog with the open
 	// attribute (the no-JavaScript form at /inventory/new, or a form
 	// error).

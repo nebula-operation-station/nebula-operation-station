@@ -1,5 +1,5 @@
 {{define "content"}}{{$d := .GuestAction}}
-<h1>Guest power: {{if $d.Bound.Verb}}{{$d.Bound.Verb}}{{else}}unknown action{{end}}</h1>
+<h1>{{if $d.Snapshot}}Guest snapshot: {{else}}Guest power: {{end}}{{if $d.Bound.Verb}}{{$d.Bound.Verb}}{{else}}unknown action{{end}}</h1>
 {{if $d.Mismatch}}
 <section class="panel" role="alert" aria-label="Binding mismatch">
   <h2 class="status status--error">The executor bound something other than what was requested — approval withheld</h2>
@@ -7,17 +7,25 @@
     {{range $d.Mismatch}}<li class="status status--error">{{.}}</li>
     {{end}}
   </ul>
-  <p>Do not approve this digest on the executor host either. Reload the chart and propose again.</p>
+  <p>Do not approve this digest on the executor host either. Reload {{if $d.Snapshot}}the snapshot list{{else}}the chart{{end}} and propose again.</p>
 </section>
 {{end}}
-<section class="panel" aria-label="Guest power proposal">
+<section class="panel" aria-label="{{if $d.Snapshot}}Guest snapshot proposal{{else}}Guest power proposal{{end}}">
   {{if and (eq $d.State "pending") (not $d.Mismatch) (not $d.Expired)}}
-  <p class="hint">Check the request the executor bound — the guest, the action and the risk it decided — then approve. Nothing runs before approval.</p>
+  <p class="hint">Check the request the executor bound — the guest, the action{{if $d.Snapshot}}, the snapshot{{end}} and the risk it decided — then approve. Nothing runs before approval.</p>
   {{end}}
   <h2>Request bound by the executor</h2>
   <dl class="kv">
-    <dt>Action</dt><dd><span class="mono">{{$d.Bound.ActionID}}</span> <strong class="mono">{{if $d.Bound.Verb}}{{$d.Bound.Verb}}{{else}}unknown verb{{end}}</strong>{{if not $d.Mismatch}}{{if $d.Verb.Destructive}} <strong class="status status--error">destructive</strong>{{end}}: {{$d.Verb.Explain}}{{end}}</dd>
+    <dt>Action</dt><dd><span class="mono">{{$d.Bound.ActionID}}</span> <strong class="mono">{{if $d.Bound.Verb}}{{$d.Bound.Verb}}{{else}}unknown {{if $d.Snapshot}}operation{{else}}verb{{end}}{{end}}</strong>{{if not $d.Mismatch}}{{if $d.Verb.Destructive}} <strong class="status status--error">destructive</strong>{{end}}: {{$d.Verb.Explain}}{{end}}</dd>
     <dt>Guest</dt><dd>{{$d.KindLabel}} <span class="mono">{{$d.VMID}}</span> on node <span class="mono">{{$d.Node}}</span> of PVE remote <span class="mono">{{$d.Remote}}</span>{{if not $d.Mismatch}} (bound target matches){{end}}</dd>
+    {{with $d.Snapshot}}
+    <dt>Snapshot</dt><dd><strong class="mono">{{.Name}}</strong>{{if .HasIdentity}}, taken {{if .Time.IsZero}}at an unknown time{{else}}{{timeTag .Time}}{{end}}, parent {{if .Parent}}<span class="mono">{{.Parent}}</span>{{else}}none{{end}}, {{if .RAM}}includes RAM{{else}}disk only{{end}} (the exact snapshot the executor bound; checked again before the action runs){{else}} (new){{end}}</dd>
+    {{if eq .Op "create"}}<dt>RAM</dt><dd>{{if .IncludeRAM}}RAM included: the running VM's memory is saved with the snapshot{{else}}disk only{{end}}</dd>{{end}}
+    {{if eq .Op "rollback"}}
+    <dt>Start after rollback</dt><dd><strong>{{if .Start}}yes{{else}}no{{end}}</strong> (your explicit choice)</dd>
+    <dt>Guest after rollback</dt><dd><strong>{{if .RunsAfter}}runs{{else}}stays stopped{{end}}</strong> (bound by the executor){{if .RAM}}; the snapshot includes RAM, so PVE resumes the guest from it whatever the start choice{{end}}. A running guest is stopped by the rollback; everything written since the snapshot is lost.</dd>
+    {{end}}
+    {{end}}
     <dt>Bound target</dt><dd class="mono">{{$d.Bound.TargetID}}</dd>
     <dt>Risk (decided by the executor)</dt><dd><span class="badge {{$d.RiskClass}}">{{$d.Risk}}</span></dd>
     <dt>Guest configuration and generation</dt><dd>read and bound by the executor itself (parameters hash <span class="mono">{{$d.Bound.ParametersHash}}</span>) and checked again before the action runs</dd>
@@ -34,11 +42,12 @@
     <dt>Inventory incarnation</dt><dd class="mono">generation {{$d.UIGeneration}}</dd>
   </dl>
   {{if $d.Message}}<p class="status status--error">{{$d.Message}}</p>{{end}}
+  {{$back := "Back to the chart"}}{{if $d.Snapshot}}{{$back = "Back to the snapshot list"}}{{end}}
   {{if and (eq $d.State "pending") $d.Expired}}
-  <p class="status status--error">The executor's bound request has expired: it can no longer be approved. Propose again from the chart.</p>
-  <p><a class="button button--small" href="/inventory/chart">Back to the chart</a></p>
+  <p class="status status--error">The executor's bound request has expired: it can no longer be approved. Propose again from {{if $d.Snapshot}}the snapshot list{{else}}the chart{{end}}.</p>
+  <p><a class="button button--small" href="{{$d.BackURL}}">{{$back}}</a></p>
   {{else if and (eq $d.State "pending") $d.Mismatch}}
-  <p><a class="button button--small" href="/inventory/chart">Back to the chart</a></p>
+  <p><a class="button button--small" href="{{$d.BackURL}}">{{$back}}</a></p>
   {{else if eq $d.State "pending"}}
   <div class="actions">
     {{if $d.CLICommand}}
@@ -48,15 +57,15 @@
     <p>This executor is in hardened mode. Approve the action on the executor host; the command shows the complete request first:</p>
     {{end}}
     <pre class="mono" id="guest-power-cli">{{$d.CLICommand}}</pre>
-    <form method="post" action="/pve/guests/power/run" class="inline-form" data-fetch>
+    <form method="post" action="{{$d.RunURL}}" class="inline-form" data-fetch>
       <input type="hidden" name="digest" value="{{$d.Digest}}">
       <button type="submit" class="button{{if $d.Verb.Destructive}} button--danger{{end}}">Run the approved action</button>
     </form>
     {{else}}
-    {{if not $d.ChallengeExpiry.IsZero}}<p class="hint">Approve before {{timeTag $d.ChallengeExpiry}}; after that, propose again from the chart.</p>{{end}}
-    <button type="button" class="button schedule-approve{{if $d.Verb.Destructive}} button--danger{{end}}" data-id="{{$d.Digest}}" data-options="{{$d.Options}}" data-commit="/pve/guests/power/commit">Approve {{$d.Bound.Verb}} of VMID {{$d.VMID}} on {{$d.Node}} with security key</button>
+    {{if not $d.ChallengeExpiry.IsZero}}<p class="hint">Approve before {{timeTag $d.ChallengeExpiry}}; after that, propose again from {{if $d.Snapshot}}the snapshot list{{else}}the chart{{end}}.</p>{{end}}
+    <button type="button" class="button schedule-approve{{if $d.Verb.Destructive}} button--danger{{end}}" data-id="{{$d.Digest}}" data-options="{{$d.Options}}" data-commit="{{$d.CommitURL}}">{{with $d.Snapshot}}Approve {{$d.Bound.Verb}} of snapshot {{.Name}}{{if .HasIdentity}} (taken {{if .Time.IsZero}}at an unknown time{{else}}{{timeTag .Time}}{{end}}){{end}}{{if eq .Op "rollback"}}, {{if .Start}}then start{{else}}no start{{end}},{{end}} on VMID {{$d.VMID}} on {{$d.Node}} with security key{{else}}Approve {{$d.Bound.Verb}} of VMID {{$d.VMID}} on {{$d.Node}} with security key{{end}}</button>
     {{end}}
-    <a class="button button--small" href="/inventory/chart">Cancel</a>
+    <a class="button button--small" href="{{$d.BackURL}}">Cancel</a>
   </div>
   {{else if eq $d.State "approving"}}
   <p class="status">Approval in progress…</p>
@@ -73,9 +82,9 @@
     </tbody>
   </table>
   {{end}}
-  <p><a class="button button--small" href="/inventory/chart">Back to the chart</a></p>
+  <p><a class="button button--small" href="{{$d.BackURL}}">{{$back}}</a></p>
   {{else}}
-  <p><a class="button button--small" href="/inventory/chart">Back to the chart</a></p>
+  <p><a class="button button--small" href="{{$d.BackURL}}">{{$back}}</a></p>
   {{end}}
 </section>
 <p id="message" class="message" role="status" aria-live="polite"></p>
