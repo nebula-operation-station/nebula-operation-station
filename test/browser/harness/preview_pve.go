@@ -628,7 +628,15 @@ func seedPreviewDeployment(ctx context.Context, h http.Handler, pve *pveinventor
 		panic(fmt.Sprintf("preview deployment: approve = %d %s", code, body))
 	}
 	wait(run, "booting")
-	_, err := pve.IngestObservation(ctx, previewLabObservation(2, time.Now(), true))
+	// The run's background writes may still hold the database (SQLITE_BUSY);
+	// retry like the collector's next round would.
+	var err error
+	for range 100 {
+		if _, err = pve.IngestObservation(ctx, previewLabObservation(2, time.Now(), true)); err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	must(err)
 	if code, body, _ := do(http.MethodPost, "/deployments/join", form, url.Values{"id": {id}}.Encode()); code != http.StatusSeeOther {
 		panic(fmt.Sprintf("preview deployment: join = %d %s", code, body))
