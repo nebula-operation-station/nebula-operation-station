@@ -55,6 +55,8 @@ type fakeBatchRPC struct {
 	execution bool
 	credRefs  [][]string
 	proposed  []canonical.Batch
+	// commits counts CommitBatch calls (approvals relayed to the executor).
+	commits int
 }
 
 func (f *fakeBatchRPC) ListHostKeys(context.Context, *pb.ListHostKeysRequest, ...grpc.CallOption) (*pb.ListHostKeysResponse, error) {
@@ -107,7 +109,16 @@ func (f *fakeBatchRPC) ProposeBatch(_ context.Context, in *pb.ProposeBatchReques
 }
 
 func (f *fakeBatchRPC) CommitBatch(context.Context, *pb.CommitBatchRequest, ...grpc.CallOption) (*pb.CommitBatchResponse, error) {
-	return nil, status.Error(codes.PermissionDenied, "not in this test")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.commits++
+	return &pb.CommitBatchResponse{State: pb.PermitState_PERMIT_STATE_APPROVED}, nil
+}
+
+func (f *fakeBatchRPC) setExecution(execution bool, probeErr error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.execution, f.probeErr = execution, probeErr
 }
 
 func (f *fakeBatchRPC) GetBatchStatus(context.Context, *pb.GetBatchStatusRequest, ...grpc.CallOption) (*pb.GetBatchStatusResponse, error) {
@@ -209,7 +220,8 @@ func TestServerBatchesWithoutCredentialVersions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &fakeBatchRPC{credErr: tc.credErr, probeErr: tc.probeErr, execution: true}
 			b, _ := newWiringBatches(t, f)
-			_, err := b.ProposeBatch(ctx, "alice", wiringRequest())
+			// The planner itself (below the execution gate).
+			_, err := b.Batches.ProposeBatch(ctx, "alice", wiringRequest())
 			if !errors.Is(err, executions.ErrBatchCredentials) {
 				t.Errorf("propose = %v, want ErrBatchCredentials", err)
 			}
@@ -256,7 +268,7 @@ func TestServerBatchesBindRealCredentialVersions(t *testing.T) {
 			t.Fatal(err)
 		}
 		v := executor.CredentialVersionOf(k)
-		f := &fakeBatchRPC{version: v}
+		f := &fakeBatchRPC{version: v, execution: true}
 		b, _ := newWiringBatches(t, f)
 		if _, err := b.ProposeBatch(ctx, "alice", wiringRequest()); err != nil {
 			t.Fatalf("version %d: %v", v, err)
@@ -293,5 +305,113 @@ func TestServerBatchExecutorNotConnected(t *testing.T) {
 	avail, err := deployBatches{exec: e}.BatchesAvailable(ctx)
 	if avail || status.Code(err) != codes.Unavailable {
 		t.Errorf("available = %v %v", avail, err)
+	}
+}
+
+// wiringPost sends a batch page request through the server's batch pages.
+func wiringPost(t *testing.T, pages *ui.BatchPages, path, ct, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	mux := http.NewServeMux()
+	pages.Register(mux)
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+const wiringPlan = "plan=stage+automatic%0Apackage.install_all+" + wiringHost
+
+// The batch pages propose and approve through the gated planner: against
+// an executor that does not advertise batch execution (the shipped
+// executor), lacks the batch read (Unimplemented) or cannot be asked
+// (transient), POST /batches/create and POST /batches/approve are refused
+// and nothing is proposed or approved; against one that advertises it,
+// both work. Approval re-checks, so a batch proposed while the executor
+// ran batches is not approved after it stopped.
+func TestServerBatchPagesRequireExecution(t *testing.T) {
+	form := "application/x-www-form-urlencoded"
+	refusals := []struct {
+		name      string
+		execution bool
+		probeErr  error
+		code      int
+		want      string
+	}{
+		{"no execution", false, nil, http.StatusConflict, "does not run batches"},
+		{"unimplemented", true, status.Error(codes.Unimplemented, "batch: authority not configured"), http.StatusConflict, "does not run batches"},
+		{"transient", true, status.Error(codes.Unavailable, "executor down"), http.StatusServiceUnavailable, "could not be asked"},
+	}
+	for _, tc := range refusals {
+		t.Run("create/"+tc.name, func(t *testing.T) {
+			f := &fakeBatchRPC{execution: tc.execution, probeErr: tc.probeErr}
+			b, pages := newWiringBatches(t, f)
+			rec := wiringPost(t, pages, "/batches/create", form, wiringPlan)
+			if rec.Code != tc.code || !strings.Contains(rec.Body.String(), tc.want) {
+				t.Errorf("create = %d %q", rec.Code, rec.Body.String())
+			}
+			if len(f.proposed) != 0 {
+				t.Error("a batch was proposed to the executor")
+			}
+			if list, err := b.ListBatches(context.Background()); err != nil || len(list) != 0 {
+				t.Errorf("stored batches = %v %v", list, err)
+			}
+		})
+		t.Run("approve/"+tc.name, func(t *testing.T) {
+			f := &fakeBatchRPC{execution: true}
+			b, pages := newWiringBatches(t, f)
+			rec := wiringPost(t, pages, "/batches/create", form, wiringPlan)
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("create = %d %q", rec.Code, rec.Body.String())
+			}
+			id := strings.TrimPrefix(rec.Header().Get("Location"), "/batches/")
+			f.setExecution(tc.execution, tc.probeErr)
+			rec = wiringPost(t, pages, "/batches/approve", "application/json", `{"id":"`+id+`","assertion":{}}`)
+			if rec.Code != tc.code || !strings.Contains(rec.Body.String(), tc.want) {
+				t.Errorf("approve = %d %q", rec.Code, rec.Body.String())
+			}
+			if f.commits != 0 {
+				t.Error("the approval was relayed to the executor")
+			}
+			if v, err := b.Batch(context.Background(), id); err != nil || v.State != "pending" {
+				t.Errorf("batch = %q %v, want still pending", v.State, err)
+			}
+		})
+	}
+	t.Run("available", func(t *testing.T) {
+		f := &fakeBatchRPC{execution: true}
+		b, pages := newWiringBatches(t, f)
+		rec := wiringPost(t, pages, "/batches/create", form, wiringPlan)
+		if rec.Code != http.StatusSeeOther || len(f.proposed) != 1 {
+			t.Fatalf("create = %d %q, proposed %d", rec.Code, rec.Body.String(), len(f.proposed))
+		}
+		id := strings.TrimPrefix(rec.Header().Get("Location"), "/batches/")
+		rec = wiringPost(t, pages, "/batches/approve", "application/json", `{"id":"`+id+`","assertion":{}}`)
+		if rec.Code != http.StatusOK || f.commits != 1 {
+			t.Fatalf("approve = %d %q, commits %d", rec.Code, rec.Body.String(), f.commits)
+		}
+		if v, err := b.Batch(context.Background(), id); err != nil || v.State != "approved" {
+			t.Errorf("batch = %q %v, want approved", v.State, err)
+		}
+	})
+}
+
+// The deployment run's planner is the same gated value: a proposal
+// against an executor without batch execution is refused before it
+// reaches the executor.
+func TestServerDeployBatchesGated(t *testing.T) {
+	ctx := context.Background()
+	f := &fakeBatchRPC{}
+	b, _ := newWiringBatches(t, f)
+	var deploy ui.DeployBatches = b
+	if _, err := deploy.ProposeBatch(ctx, "alice", wiringRequest()); !errors.Is(err, executions.ErrBatchExecutionUnavailable) {
+		t.Errorf("propose = %v, want ErrBatchExecutionUnavailable", err)
+	}
+	f.setExecution(true, status.Error(codes.Unavailable, "executor down"))
+	if _, err := deploy.ProposeBatch(ctx, "alice", wiringRequest()); !errors.Is(err, executions.ErrBatchExecutionUnknown) {
+		t.Errorf("propose = %v, want ErrBatchExecutionUnknown", err)
+	}
+	if len(f.proposed) != 0 {
+		t.Error("a batch was proposed")
 	}
 }

@@ -173,6 +173,9 @@ const (
 	// deployJoinTimeout bounds the enrollment commit (an SSH probe and the
 	// inventory transaction).
 	deployJoinTimeout = 2 * time.Minute
+	// deployBatchProbeTimeout bounds the batch-support probe after the
+	// enrollment commit (its own budget, not what the commit left over).
+	deployBatchProbeTimeout = 10 * time.Second
 	// maxDeployNameLen is the longest guest name; it is also the inventory
 	// host ID, which allows 63 characters.
 	maxDeployNameLen = 63
@@ -1828,7 +1831,9 @@ func (h *Handler) commitDeployJoin(r *http.Request, run deployRun, user string) 
 	}
 	batches, noBatchesMsg := h.deployBatches != nil, deployNoBatchesMessage
 	if p, ok := h.deployBatches.(DeployBatchProbe); ok && hasBatchSteps(run.plan) {
-		avail, err := p.BatchesAvailable(ctx)
+		pctx, pcancel := context.WithTimeout(context.WithoutCancel(r.Context()), deployBatchProbeTimeout)
+		avail, err := p.BatchesAvailable(pctx)
+		pcancel()
 		switch {
 		case err != nil:
 			h.log.Warn("deploy: probe batch support", "run", run.id, "error", err)
@@ -1930,11 +1935,7 @@ func (h *Handler) handleDeployPlan(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, msg, http.StatusConflict)
 			return
 		case !avail:
-			now := time.Now()
-			h.deployRuns.set(run.id, func(x *deployRun) {
-				x.state, x.expires, x.message, x.batchErr = deployJoined, now.Add(deployRunTTL), deployExecutorNoBatchesMessage, ""
-			})
-			http.Error(w, deployExecutorNoBatchesMessage, http.StatusConflict)
+			h.endDeployWithoutBatches(w, run.id)
 			return
 		}
 	}
@@ -1944,6 +1945,14 @@ func (h *Handler) handleDeployPlan(w http.ResponseWriter, r *http.Request) {
 		var he *executions.HostError
 		msg := "the staged plan could not be proposed"
 		switch {
+		case errors.Is(err, executions.ErrBatchExecutionUnavailable):
+			// The planner's own gate: the executor stopped running
+			// batches since the probe above.
+			h.endDeployWithoutBatches(w, run.id)
+			return
+		case errors.Is(err, executions.ErrBatchExecutionUnknown):
+			h.log.Warn("deploy: propose staged plan", "run", run.id, "error", err)
+			msg += ": the executor could not be asked whether it runs batches; propose it again"
 		case errors.As(err, &ie):
 			msg += ": " + cleanText(ie.Reason)
 		case errors.As(err, &he):
@@ -1965,6 +1974,16 @@ func (h *Handler) handleDeployPlan(w http.ResponseWriter, r *http.Request) {
 	h.deployRuns.set(run.id, func(x *deployRun) { x.batchID, x.batchErr = c.ID, "" })
 	h.log.Info("audit", "kind", "deployment_plan_proposed", "run", run.id, "batch", c.ID, "user", user)
 	http.Redirect(w, r, "/batches/"+url.PathEscape(c.ID), http.StatusSeeOther)
+}
+
+// endDeployWithoutBatches ends a bootstrapping run at "joined" because the
+// executor does not run batches; nothing was proposed.
+func (h *Handler) endDeployWithoutBatches(w http.ResponseWriter, id string) {
+	now := time.Now()
+	h.deployRuns.set(id, func(x *deployRun) {
+		x.state, x.expires, x.message, x.batchErr = deployJoined, now.Add(deployRunTTL), deployExecutorNoBatchesMessage, ""
+	})
+	http.Error(w, deployExecutorNoBatchesMessage, http.StatusConflict)
 }
 
 // followBatch moves a bootstrapping run on from its batch:

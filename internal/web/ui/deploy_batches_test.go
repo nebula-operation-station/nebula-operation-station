@@ -158,3 +158,31 @@ func TestDeployPlanCredentialErrorCanBeRetried(t *testing.T) {
 	p.mu.Unlock()
 	e.proposePlan(t, id, "batch-1")
 }
+
+// The planner's own execution gate (the server's planner refuses every
+// proposal unless the executor runs batches at that moment) ends the run
+// at "joined" like the probe; a transient refusal keeps it retryable.
+func TestDeployPlanPlannerGateRefuses(t *testing.T) {
+	e, p := newProbedDPEnv(t, true, nil)
+	id, run := e.toBootstrapping(t)
+	e.waitState(t, run, "bootstrapping")
+	p.mu.Lock()
+	p.proposeErr = fmt.Errorf("%w: probe batch support: unavailable", executions.ErrBatchExecutionUnknown)
+	p.mu.Unlock()
+	code, body, _ := e.do(t, http.MethodPost, "/deployments/plan", gpFormCT, url.Values{"id": {id}}.Encode())
+	if code != http.StatusConflict || !strings.Contains(body, "whether it runs batches") {
+		t.Fatalf("plan with unknown execution = %d %q", code, body)
+	}
+	e.waitState(t, run, "bootstrapping")
+	p.mu.Lock()
+	p.proposeErr = executions.ErrBatchExecutionUnavailable
+	p.mu.Unlock()
+	code, body, _ = e.do(t, http.MethodPost, "/deployments/plan", gpFormCT, url.Values{"id": {id}}.Encode())
+	if code != http.StatusConflict || !strings.Contains(body, "bootstrap steps not available") {
+		t.Fatalf("plan without execution = %d %q", code, body)
+	}
+	if len(e.batches.requests) != 0 {
+		t.Fatal("a plan was proposed")
+	}
+	e.waitState(t, run, "joined")
+}

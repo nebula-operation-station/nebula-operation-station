@@ -301,7 +301,9 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	go ops.RunSchedules(connCtx)
 	// Batches (ADR 0007): planned here with the executor's credential
 	// versions (GetBatchCredentialVersions), approved once on the batch
-	// page; also the staged post-enrollment plan of a deployment.
+	// page; also the staged post-enrollment plan of a deployment. Proposing
+	// and approving are refused unless the executor advertises batch
+	// execution at that moment (deployBatches).
 	batches, batchPages, err := newBatches(connCtx, serverBatchExecutor{client: lazyBatchRPC(exec)}, db, store, ops, log)
 	if err != nil {
 		return err
@@ -517,8 +519,16 @@ func (s serverBatchExecutor) GetBatchCredentialVersions(ctx context.Context, in 
 	return nil, errNotConnected
 }
 
-// deployBatches is the batch planner with the executor probe the deploy
-// run uses before it waits in bootstrapping (ui.DeployBatchProbe).
+// batchProbeTimeout bounds the executor probe before a batch is proposed
+// or approved.
+const batchProbeTimeout = 10 * time.Second
+
+// deployBatches is the batch planner gated on the executor: every
+// proposal and approval, from the batch pages and from the deployment
+// run, first asks the executor whether it runs batches end to end
+// (executorclient.BatchesAvailable) and is refused fail-closed unless it
+// says so at that moment. It also serves the deployment run's probe
+// (ui.DeployBatchProbe). Reads (list, view, refresh, skip) are not gated.
 type deployBatches struct {
 	*executions.Batches
 	exec serverBatchExecutor
@@ -529,6 +539,40 @@ type deployBatches struct {
 // only serve credential versions); not connected is an error, not false.
 func (d deployBatches) BatchesAvailable(ctx context.Context) (bool, error) {
 	return executorclient.BatchesAvailable(ctx, d.exec)
+}
+
+// requireExecution refuses unless the executor runs batches now: a
+// missing capability is executions.ErrBatchExecutionUnavailable, any
+// probe failure executions.ErrBatchExecutionUnknown. The probe has its
+// own short deadline so it never consumes the caller's call budget.
+func (d deployBatches) requireExecution(ctx context.Context) error {
+	pctx, cancel := context.WithTimeout(ctx, batchProbeTimeout)
+	defer cancel()
+	avail, err := d.BatchesAvailable(pctx)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%w: %w", executions.ErrBatchExecutionUnknown, err)
+	case !avail:
+		return executions.ErrBatchExecutionUnavailable
+	}
+	return nil
+}
+
+// ProposeBatch proposes req only if the executor runs batches.
+func (d deployBatches) ProposeBatch(ctx context.Context, user string, req executions.BatchRequest) (executions.BatchCreated, error) {
+	if err := d.requireExecution(ctx); err != nil {
+		return executions.BatchCreated{}, err
+	}
+	return d.Batches.ProposeBatch(ctx, user, req)
+}
+
+// ApproveBatch relays the approval only if the executor runs batches, so
+// a batch proposed while it did is not approved after it stopped.
+func (d deployBatches) ApproveBatch(ctx context.Context, user, id string, assertion []byte) error {
+	if err := d.requireExecution(ctx); err != nil {
+		return err
+	}
+	return d.Batches.ApproveBatch(ctx, user, id, assertion)
 }
 
 // newBatches builds the batch planner with the executor's credential
@@ -549,9 +593,10 @@ func newBatches(ctx context.Context, exec serverBatchExecutor, db *sql.DB, hosts
 	} else if n > 0 {
 		log.Info("reconciled batches", "members", n)
 	}
-	pages, err := ui.NewBatchPages(b, log)
+	gated := deployBatches{Batches: b, exec: exec}
+	pages, err := ui.NewBatchPages(gated, log)
 	if err != nil {
 		return deployBatches{}, nil, fmt.Errorf("batch pages: %w", err)
 	}
-	return deployBatches{Batches: b, exec: exec}, pages, nil
+	return gated, pages, nil
 }
