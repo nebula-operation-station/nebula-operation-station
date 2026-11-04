@@ -18092,8 +18092,8 @@ func (x *GetBatchCredentialVersionsRequest) GetCredentialRefs() []string {
 type BatchCredentialVersion struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	CredentialRef string                 `protobuf:"bytes,1,opt,name=credential_ref,json=credentialRef,proto3" json:"credential_ref,omitempty"`
-	// Nonzero version derived from the public key; it changes when the key
-	// behind the reference changes.
+	// Version derived from the public key, in 1..2^53-1 so a canonical batch
+	// binds it exactly; it changes when the key behind the reference changes.
 	Version uint64 `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
 	// SHA-256 fingerprint of the public key ("SHA256:..."), for display.
 	PublicKeyFingerprint string `protobuf:"bytes,3,opt,name=public_key_fingerprint,json=publicKeyFingerprint,proto3" json:"public_key_fingerprint,omitempty"`

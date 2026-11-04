@@ -188,8 +188,11 @@ func (p *batchRPCPolicy) Evaluate(_ context.Context, m canonical.BatchMember) (b
 
 type batchRPCEnv struct {
 	*reconcileEnv
-	policy *batchRPCPolicy
-	sign   func([]byte) []byte
+	policy   *batchRPCPolicy
+	sign     func([]byte) []byte
+	verifier *webauthnverify.Verifier
+	adminUID uint32
+	auth     *batch.Authority
 }
 
 func newBatchRPCEnv(t *testing.T, adminUID uint32) *batchRPCEnv {
@@ -221,7 +224,7 @@ func newBatchRPCEnv(t *testing.T, adminUID uint32) *batchRPCEnv {
 		return []byte(virtualwebauthn.CreateAssertionResponse(virtualwebauthn.RelyingParty{Name: "Reconcile", ID: "reconcile.test", Origin: "https://reconcile.test"}, dev, cred,
 			virtualwebauthn.AssertionOptions{Challenge: ch, RelyingPartyID: "reconcile.test"}))
 	}
-	return &batchRPCEnv{reconcileEnv: e, policy: p, sign: sign}
+	return &batchRPCEnv{reconcileEnv: e, policy: p, sign: sign, verifier: v, adminUID: adminUID, auth: a}
 }
 
 // plan builds a complete two-stage plan with a dependency, one member per risk.
@@ -245,9 +248,9 @@ func (e *batchRPCEnv) plan(t *testing.T, risks ...canonical.Risk) *pb.ProposeBat
 		h := sha256.Sum256(art)
 		b.Members = append(b.Members, canonical.BatchMember{MemberID: id, Request: canonical.Request{
 			RequestVersion: canonical.RequestVersion, ExecutionID: fmt.Sprintf("00000000-0000-4000-8000-%012d", i+10), ActionID: "package.upgrade", ModuleVersion: "1.0.0",
-			ArtifactSHA256: canonical.Digest(h).String(), ParametersHash: ph, CredentialRefs: []string{"admin-key"}, RiskClass: r, ExpiryUnix: expiry,
+			ArtifactSHA256: canonical.Digest(h).String(), ParametersHash: ph, CredentialRefs: []string{"cred"}, RiskClass: r, ExpiryUnix: expiry,
 			ResolvedTargets: []canonical.Target{{HostID: fmt.Sprintf("host-%d", i), HostKeyFingerprint: "SHA256:" + strings.Repeat("A", 43)}}},
-			CredentialVersions: []canonical.CredentialVersion{{Reference: "admin-key", Version: 1}}, PreconditionHashes: []string{}})
+			CredentialVersions: []canonical.CredentialVersion{{Reference: "cred", Version: CredentialVersionOf(e.userPub)}}, PreconditionHashes: []string{}})
 		stage := 0
 		if i > 0 {
 			stage = 1

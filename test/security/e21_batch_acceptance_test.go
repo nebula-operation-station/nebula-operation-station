@@ -63,6 +63,15 @@ func (p *e21Policy) Evaluate(_ context.Context, m canonical.BatchMember) (batch.
 		m.Request.ArtifactSHA256, m.Request.ActionID, m.Request.ModuleVersion, trusted, declared))}, nil
 }
 
+// e21Credentials is the executor's current credential version as the
+// dispatcher reads it: the plans bind version 1 of credRef.
+func e21Credentials(ref string) (uint64, error) {
+	if ref != credRef {
+		return 0, errors.New("unknown credential reference")
+	}
+	return 1, nil
+}
+
 // e21Recorder is a durable dispatch.Recorder backed by one JSON file. A
 // crashed process's recorder is marked dead: it writes nothing afterwards.
 type e21Recorder struct {
@@ -386,7 +395,7 @@ func TestE21BatchLockRacesDoNotLetQueuedWorkEscape(t *testing.T) {
 			}
 			rec := &pausingRecorder{e21Recorder: openE21Recorder(t, h.dataDir), reached: make(chan struct{}), resume: make(chan struct{})}
 			var calls atomic.Int32
-			d, err := dispatch.New(dispatch.Options{Permits: b.a, Recorder: rec,
+			d, err := dispatch.New(dispatch.Options{Permits: b.a, Recorder: rec, Credentials: e21Credentials,
 				Transport: func(context.Context, dispatch.Run) (dispatch.Outcome, error) {
 					calls.Add(1)
 					return dispatch.OutcomeSuccess, nil
@@ -489,7 +498,7 @@ func TestE21BatchCrashReconciliationNeverRedispatches(t *testing.T) {
 	}
 	inTransport, never := make(chan struct{}), make(chan struct{})
 	t.Cleanup(func() { close(never) })
-	d, err := dispatch.New(dispatch.Options{Permits: b.a, Recorder: rec,
+	d, err := dispatch.New(dispatch.Options{Permits: b.a, Recorder: rec, Credentials: e21Credentials,
 		Transport: func(ctx context.Context, run dispatch.Run) (dispatch.Outcome, error) {
 			count(run.ExecutionID).Add(1)
 			if run.MemberID == members[0].id {
@@ -542,7 +551,7 @@ func TestE21BatchCrashReconciliationNeverRedispatches(t *testing.T) {
 	if got := rec2.get(members[1].execID); got != "intent" {
 		t.Fatalf("member 1 after restart: %q, want a dangling intent to reconcile", got)
 	}
-	d2, err := dispatch.New(dispatch.Options{Permits: b2.a, Recorder: rec2,
+	d2, err := dispatch.New(dispatch.Options{Permits: b2.a, Recorder: rec2, Credentials: e21Credentials,
 		Transport: func(_ context.Context, run dispatch.Run) (dispatch.Outcome, error) {
 			count(run.ExecutionID).Add(1)
 			return dispatch.OutcomeSuccess, nil
@@ -582,7 +591,7 @@ func TestE21BatchCrashReconciliationNeverRedispatches(t *testing.T) {
 	wantPermitCode(t, err, permit.CodeExecutionIDReused)
 	// Even if a dispatcher somehow held a permit for the same execution ID,
 	// the durable intent refuses it (simulated by a fake permit source).
-	d3, err := dispatch.New(dispatch.Options{Permits: stalePermits{approved}, Recorder: rec2,
+	d3, err := dispatch.New(dispatch.Options{Permits: stalePermits{approved}, Recorder: rec2, Credentials: e21Credentials,
 		Transport: func(_ context.Context, run dispatch.Run) (dispatch.Outcome, error) {
 			count(run.ExecutionID).Add(1)
 			return dispatch.OutcomeSuccess, nil

@@ -2628,8 +2628,8 @@ message GetBatchCredentialVersionsRequest {
 // credential reference. It carries no secret.
 message BatchCredentialVersion {
   string credential_ref = 1;
-  // Nonzero version derived from the public key; it changes when the key
-  // behind the reference changes.
+  // Version derived from the public key, in 1..2^53-1 so a canonical batch
+  // binds it exactly; it changes when the key behind the reference changes.
   uint64 version = 2;
   // SHA-256 fingerprint of the public key ("SHA256:..."), for display.
   string public_key_fingerprint = 3;

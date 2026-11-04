@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
@@ -75,8 +76,9 @@ type BatchCredentialReader interface {
 
 // CredentialVersion returns the executor's current batch version of one
 // credential reference (executions.BatchOptions.CredentialVersion). A
-// missing, mismatched or zero version is an error: a batch never binds a
-// guessed version.
+// missing, mismatched, zero or out-of-range version (above
+// canonical.MaxCredentialVersion, which a canonical batch rejects) is an
+// error: a batch never binds a guessed or truncated version.
 func CredentialVersion(ctx context.Context, r BatchCredentialReader, ref string) (uint64, error) {
 	resp, err := r.GetBatchCredentialVersions(ctx, &pb.GetBatchCredentialVersionsRequest{CredentialRefs: []string{ref}})
 	if err != nil {
@@ -85,6 +87,9 @@ func CredentialVersion(ctx context.Context, r BatchCredentialReader, ref string)
 	vs := resp.GetVersions()
 	if len(vs) != 1 || vs[0].GetCredentialRef() != ref || vs[0].GetVersion() == 0 {
 		return 0, errors.New("read credential version: the executor returned no version for the reference")
+	}
+	if vs[0].GetVersion() > canonical.MaxCredentialVersion {
+		return 0, errors.New("read credential version: the executor returned a version outside the batch range")
 	}
 	return vs[0].GetVersion(), nil
 }

@@ -90,7 +90,8 @@ func TestBatchCredentialVersionsReturnsPublicVersions(t *testing.T) {
 	}
 }
 
-// Malformed and oversize requests are refused before the keyring is read;
+// Malformed and oversize requests, and references a canonical batch would
+// reject, are refused before the keyring is read;
 // unknown references and a locked keyring are refused with distinct codes.
 func TestBatchCredentialVersionsRejections(t *testing.T) {
 	env := newBatchRPCEnv(t, uint32(os.Getuid()))
@@ -105,7 +106,9 @@ func TestBatchCredentialVersionsRejections(t *testing.T) {
 	}{
 		"too many":      {tooMany, codes.InvalidArgument},
 		"empty ref":     {[]string{""}, codes.InvalidArgument},
-		"oversize ref":  {[]string{strings.Repeat("a", maxBatchCredentialRefBytes+1)}, codes.InvalidArgument},
+		"oversize ref":  {[]string{strings.Repeat("a", 65)}, codes.InvalidArgument},
+		"uppercase ref": {[]string{"Cred"}, codes.InvalidArgument},
+		"space in ref":  {[]string{"my cred"}, codes.InvalidArgument},
 		"not UTF-8":     {[]string{"cred\xff"}, codes.InvalidArgument},
 		"control char":  {[]string{"cred\n"}, codes.InvalidArgument},
 		"duplicate ref": {[]string{"cred", "cred"}, codes.InvalidArgument},

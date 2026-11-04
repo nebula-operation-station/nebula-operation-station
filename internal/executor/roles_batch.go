@@ -168,6 +168,23 @@ func batchStatus(err error) error {
 	}
 }
 
+// checkProposedCredentials refuses a plan whose members bind another
+// credential version than the key the executor holds now (rotated since the
+// server read the versions), or whose keys cannot be read. A plan that does
+// not parse is left to the authority, which rejects it with its own error.
+func (s *Service) checkProposedCredentials(raw []byte) error {
+	plan, _, _, err := canonical.ParseBatch(raw, s.clock())
+	if err != nil {
+		return nil
+	}
+	for _, m := range plan.Members {
+		if err := s.checkMemberCredentials("propose", m); err != nil {
+			return credentialStatus(err)
+		}
+	}
+	return nil
+}
+
 // ProposeBatch validates the complete bounded plan and records a proposal
 // (server role). The authority alone derives risk and binds the approval
 // requirement; a LOW plan inside a privileged session is approved at once,
@@ -178,6 +195,9 @@ func (s *Service) ProposeBatch(ctx context.Context, req *pb.ProposeBatchRequest)
 	}
 	if s.batchAuth == nil {
 		return nil, errBatchUnconfigured
+	}
+	if err := s.checkProposedCredentials(req.GetBatchJson()); err != nil {
+		return nil, err
 	}
 	inputs := make([]batch.MemberInput, len(req.GetMembers()))
 	for i, m := range req.GetMembers() {

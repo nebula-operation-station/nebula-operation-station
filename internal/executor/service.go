@@ -400,6 +400,11 @@ func (s *Service) Lock(ctx context.Context, _ *pb.LockRequest) (*pb.LockResponse
 	// Revoke permits before wiping keys so that no AuthorizeRun can succeed
 	// in between.
 	s.auth.Lock(who)
+	// Batch approvals and member permits are revoked with the keyring
+	// (spec 05: lock revokes pending and approved batch authority).
+	if s.batchAuth != nil {
+		s.batchAuth.Lock()
+	}
 	s.keys.Lock()
 	s.vault.Lock()
 	s.reg.Reset("executor locked")

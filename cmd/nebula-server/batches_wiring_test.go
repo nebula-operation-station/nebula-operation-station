@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"io"
 	"log/slog"
@@ -15,12 +17,14 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
@@ -39,8 +43,13 @@ var wiringFP = "SHA256:" + strings.Repeat("A", 43)
 // answers credential versions (or credErr) and freezes proposals like the
 // executor (parse, canonicalize, answer the canonical bytes).
 type fakeBatchRPC struct {
-	mu       sync.Mutex
+	mu sync.Mutex
+	// version is the credential version answered (wiringVersion if 0).
+	version uint64
+	// credErr fails reads of references; probeErr fails the empty probe,
+	// which the real executor answers without reading the keyring.
 	credErr  error
+	probeErr error
 	credRefs [][]string
 	proposed []canonical.Batch
 }
@@ -53,13 +62,23 @@ func (f *fakeBatchRPC) GetBatchCredentialVersions(_ context.Context, in *pb.GetB
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.credRefs = append(f.credRefs, in.GetCredentialRefs())
+	if len(in.GetCredentialRefs()) == 0 {
+		if f.probeErr != nil {
+			return nil, f.probeErr
+		}
+		return &pb.GetBatchCredentialVersionsResponse{}, nil
+	}
 	if f.credErr != nil {
 		return nil, f.credErr
+	}
+	version := f.version
+	if version == 0 {
+		version = wiringVersion
 	}
 	out := &pb.GetBatchCredentialVersionsResponse{}
 	for _, ref := range in.GetCredentialRefs() {
 		if ref == wiringCredRef {
-			out.Versions = append(out.Versions, &pb.BatchCredentialVersion{CredentialRef: ref, Version: wiringVersion, PublicKeyFingerprint: "SHA256:pub"})
+			out.Versions = append(out.Versions, &pb.BatchCredentialVersion{CredentialRef: ref, Version: version, PublicKeyFingerprint: "SHA256:pub"})
 		}
 	}
 	return out, nil
@@ -165,20 +184,25 @@ func TestServerBatchesBindExecutorCredentialVersions(t *testing.T) {
 // Without the credential-version read (an older executor or no batch
 // authority: Unimplemented) the planner never guesses a version and the
 // probe reports no batches, so a deployment ends at "joined". A locked
-// keyring is transient: the probe returns an error, not "unavailable".
+// keyring does not affect the probe (the executor answers the empty probe
+// without reading keys) but fails every proposal; an unreachable executor
+// makes the probe return an error (transient), not "unavailable".
 func TestServerBatchesWithoutCredentialVersions(t *testing.T) {
 	ctx := context.Background()
+	unimplemented := status.Error(codes.Unimplemented, "batch: authority not configured")
 	for _, tc := range []struct {
-		name  string
-		err   error
-		avail bool
-		probe bool // probe returns an error
+		name     string
+		credErr  error
+		probeErr error
+		avail    bool
+		probe    bool // probe returns an error
 	}{
-		{"unimplemented", status.Error(codes.Unimplemented, "batch: authority not configured"), false, false},
-		{"locked", status.Error(codes.FailedPrecondition, "keyring is locked"), false, true},
+		{"unimplemented", unimplemented, unimplemented, false, false},
+		{"locked", status.Error(codes.FailedPrecondition, "keyring is locked; run `nebula unlock`"), nil, true, false},
+		{"unreachable", status.Error(codes.Unavailable, "executor down"), status.Error(codes.Unavailable, "executor down"), false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := &fakeBatchRPC{credErr: tc.err}
+			f := &fakeBatchRPC{credErr: tc.credErr, probeErr: tc.probeErr}
 			b, _ := newWiringBatches(t, f)
 			_, err := b.ProposeBatch(ctx, "alice", wiringRequest())
 			if !errors.Is(err, executions.ErrBatchCredentials) {
@@ -192,6 +216,33 @@ func TestServerBatchesWithoutCredentialVersions(t *testing.T) {
 				t.Errorf("available = %v %v", avail, err)
 			}
 		})
+	}
+}
+
+// End to end with real keys: the version the executor derives from a real
+// SSH public key (executor.CredentialVersionOf) is bound by the server's
+// planner and survives the executor-side canonical parsing and
+// canonicalization (the fake freezes proposals exactly like the executor).
+func TestServerBatchesBindRealCredentialVersions(t *testing.T) {
+	ctx := context.Background()
+	for range 16 {
+		pub, _, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		k, err := ssh.NewPublicKey(pub)
+		if err != nil {
+			t.Fatal(err)
+		}
+		v := executor.CredentialVersionOf(k)
+		f := &fakeBatchRPC{version: v}
+		b, _ := newWiringBatches(t, f)
+		if _, err := b.ProposeBatch(ctx, "alice", wiringRequest()); err != nil {
+			t.Fatalf("version %d: %v", v, err)
+		}
+		if len(f.proposed) != 1 || f.proposed[0].Members[0].CredentialVersions[0].Version != v {
+			t.Fatalf("version %d not bound: %+v", v, f.proposed)
+		}
 	}
 }
 

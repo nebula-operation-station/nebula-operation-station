@@ -64,6 +64,7 @@ func TestCredentialVersionNeverGuesses(t *testing.T) {
 		"no entry":       {resp: &pb.GetBatchCredentialVersionsResponse{}},
 		"other ref":      {resp: &pb.GetBatchCredentialVersionsResponse{Versions: []*pb.BatchCredentialVersion{{CredentialRef: "other", Version: 42}}}},
 		"zero version":   {resp: &pb.GetBatchCredentialVersionsResponse{Versions: []*pb.BatchCredentialVersion{{CredentialRef: "default"}}}},
+		"above 2^53-1":   {resp: &pb.GetBatchCredentialVersionsResponse{Versions: []*pb.BatchCredentialVersion{{CredentialRef: "default", Version: 1 << 53}}}},
 		"two entries":    {resp: &pb.GetBatchCredentialVersionsResponse{Versions: []*pb.BatchCredentialVersion{{CredentialRef: "default", Version: 1}, {CredentialRef: "default", Version: 2}}}},
 		"locked":         {err: status.Error(codes.FailedPrecondition, "keyring is locked")},
 		"unknown ref":    {err: status.Error(codes.NotFound, "not loaded")},
