@@ -3,7 +3,10 @@
 package ui
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -18,6 +21,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
@@ -31,7 +36,12 @@ import (
 // guest, refuses any difference, and asks the executor for a proposal.
 // The executor binds the guest and decides the risk; GET
 // /pve/guests/power/{digest} shows exactly that to the proposer before
-// approval. Approval reuses the schedule approval button (webauthn.js and
+// approval: the headline comes from the executor's canonical request
+// (action, verb, bound target, risk), which must hash to the digest and
+// match the requested guest; the UI's own inventory read is secondary. A
+// canonical request that cannot be shown refuses the proposal; one that
+// does not match the request is shown as a mismatch without approval.
+// Approval reuses the schedule approval button (webauthn.js and
 // schedules.js, posting to POST /pve/guests/power/commit); in hardened
 // mode, or when the executor requires the typed target count, the page
 // shows the `nebula approve` command and a form (POST
@@ -73,7 +83,8 @@ const (
 	// maxGuestPowerField is the longest remote ID, node or kind value the
 	// form accepts.
 	maxGuestPowerField = 128
-	// maxGuestPowerCanonical is the largest canonical request shown.
+	// maxGuestPowerCanonical is the largest canonical request shown; a
+	// larger one refuses the proposal.
 	maxGuestPowerCanonical = 16 << 10
 	// maxGuestPowerText is the longest executor text (step state, UPID,
 	// refusal) shown.
@@ -228,20 +239,139 @@ func (h *Handler) chartGuestPower(ctx context.Context, nodes []pveNodeView) map[
 	return out
 }
 
+// guestPowerAction is the executor's action ID of the power actions.
+const guestPowerAction = "pve.guest.power"
+
+// guestPowerArtifacts maps the SHA-256 (hex) of each verb's fixed executor
+// artifact to the verb: the canonical request names the verb only through
+// its artifact hash. The texts must equal the executor's
+// (internal/executor, pveGuestPowerArtifact, module version 1.0.0); an
+// artifact this table does not know is shown as a mismatch, never
+// approved.
+var guestPowerArtifacts = func() map[string]string {
+	texts := map[string]string{
+		"shutdown": "Graceful shutdown (ACPI, guest agent or LXC) of the exact running guest; never a force stop.",
+		"reboot":   "Graceful reboot of the exact running guest; never a force stop.",
+		"stop":     "Hard stop of the exact running guest (destructive: like pulling the power).",
+		"reset":    "Hard reset of the exact running QEMU guest (destructive: like pressing reset).",
+	}
+	out := make(map[string]string, len(texts))
+	for verb, text := range texts {
+		sum := sha256.Sum256([]byte(guestPowerAction + " 1.0.0\nverb: " + verb + "\n" + text + "\n"))
+		out[hex.EncodeToString(sum[:])] = verb
+	}
+	return out
+}()
+
+// guestPowerTargetID is the host ID the executor binds a guest target to
+// in the canonical request (permit.ProviderMutationTarget.canonicalTarget):
+// "pvm-" and the first 16 bytes (hex) of the SHA-256 of remote, kind, node
+// and VMID, NUL separated.
+func guestPowerTargetID(t *pb.PVEGuestPowerTarget) string {
+	sum := sha256.Sum256([]byte(t.GetRemoteId() + "\x00" + t.GetKind() + "\x00" + t.GetNode() + "\x00" + strconv.FormatUint(t.GetVmid(), 10)))
+	return "pvm-" + hex.EncodeToString(sum[:16])
+}
+
+// guestPowerBinding is what the executor's canonical request binds, as
+// shown in the headline of the proposal page.
+type guestPowerBinding struct {
+	ActionID       string
+	Verb           string // from the artifact hash; empty when unknown
+	Risk           string
+	TargetID       string
+	Fingerprint    string
+	ParametersHash string
+	Expiry         time.Time
+	Canonical      string // the exact canonical request, shown in full
+}
+
+// errGuestPowerCanonical is returned when the executor's canonical
+// request cannot be shown; the proposal is refused.
+var errGuestPowerCanonical = errors.New("the executor's bound request cannot be shown")
+
+// parseGuestPowerCanonical checks that c is the canonical request the
+// digest names and reads what it binds.
+func parseGuestPowerCanonical(c []byte, digest string) (guestPowerBinding, error) {
+	switch {
+	case len(c) == 0:
+		return guestPowerBinding{}, errGuestPowerCanonical
+	case len(c) > maxGuestPowerCanonical:
+		return guestPowerBinding{}, errors.New("the executor's bound request is too large to show")
+	case !utf8.Valid(c):
+		return guestPowerBinding{}, errors.New("the executor's bound request is not valid UTF-8")
+	}
+	if sum := sha256.Sum256(c); hex.EncodeToString(sum[:]) != digest {
+		return guestPowerBinding{}, errors.New("the executor's bound request does not match its digest")
+	}
+	var rq canonical.Request
+	dec := json.NewDecoder(bytes.NewReader(c))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&rq); err != nil || dec.More() {
+		return guestPowerBinding{}, errGuestPowerCanonical
+	}
+	b := guestPowerBinding{
+		ActionID: rq.ActionID, Verb: guestPowerArtifacts[rq.ArtifactSHA256], Risk: string(rq.RiskClass),
+		ParametersHash: rq.ParametersHash, Canonical: string(c),
+	}
+	if rq.ExpiryUnix > 0 {
+		b.Expiry = time.Unix(rq.ExpiryUnix, 0)
+	}
+	if len(rq.ResolvedTargets) == 1 {
+		b.TargetID, b.Fingerprint = rq.ResolvedTargets[0].HostID, rq.ResolvedTargets[0].HostKeyFingerprint
+	}
+	return b, nil
+}
+
+// guestPowerMismatch lists every difference between what the executor
+// bound and what was requested; any difference withholds approval.
+func guestPowerMismatch(b guestPowerBinding, t *pb.PVEGuestPowerTarget, risk, trustPin string) []string {
+	var out []string
+	if b.ActionID != guestPowerAction {
+		out = append(out, "the executor bound a different action ("+cleanText(b.ActionID)+")")
+	}
+	switch {
+	case b.Verb == "":
+		out = append(out, "the executor bound an unknown power verb")
+	case b.Verb != t.GetVerb():
+		out = append(out, "the executor bound the verb "+b.Verb+", not "+t.GetVerb())
+	}
+	if b.Risk != risk {
+		out = append(out, "the risk in the bound request ("+cleanText(b.Risk)+") differs from the executor's answer ("+risk+")")
+	}
+	want := guestPowerTargetID(t)
+	switch {
+	case b.TargetID == "":
+		out = append(out, "the bound request does not name exactly one target")
+	case b.TargetID != want:
+		out = append(out, "the executor bound a different guest ("+cleanText(b.TargetID)+", requested "+want+")")
+	default:
+		fp, err := permit.ProviderRiskFingerprint(trustPin, want)
+		if err != nil || fp != b.Fingerprint {
+			out = append(out, "the bound target does not belong to the PVE remote's current trust pin")
+		}
+	}
+	return out
+}
+
 // guestPowerProposal is one proposal, visible to its proposer only.
 type guestPowerProposal struct {
-	user        string
-	target      *pb.PVEGuestPowerTarget
-	name        string
-	generation  uint64
-	verb        guestPowerVerb
-	digest      string
-	risk        string
-	requirement string // "key", "typed_count" or "cli"
-	options     string
-	canonical   string
-	challengeAt time.Time
-	expires     time.Time
+	user   string
+	target *pb.PVEGuestPowerTarget
+	verb   guestPowerVerb
+	// bound is the executor's binding; mismatch lists its differences
+	// from the request (approval is withheld when non-empty).
+	bound    guestPowerBinding
+	mismatch []string
+	// uiName and uiGeneration are the UI's own inventory read at
+	// proposal time: secondary information, not part of the approval.
+	uiName       string
+	uiGeneration uint64
+	digest       string
+	risk         string
+	requirement  string // "key", "typed_count" or "cli"
+	options      string
+	challengeAt  time.Time
+	expires      time.Time
 	// state is "pending", "approving", "running", "done" (the executor
 	// returned the run's steps) or "failed".
 	state       string
@@ -288,7 +418,10 @@ func (p *guestPowerProposals) allow(user string, now time.Time) bool {
 }
 
 // put stores a proposal, dropping expired ones and, when full, the
-// settled or pending one that expires first (never a running commit).
+// settled one (done or failed) that expires first, else the proposer's own
+// pending one that expires first. It never drops a running commit or
+// another user's pending proposal, so one user cannot evict the proposals
+// others are about to approve.
 func (p *guestPowerProposals) put(x *guestPowerProposal, now time.Time) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -301,19 +434,23 @@ func (p *guestPowerProposals) put(x *guestPowerProposal, now time.Time) bool {
 		return false
 	}
 	if len(p.props) >= maxGuestPowerProposals {
-		var oldest string
-		for d, y := range p.props {
-			if y.state == "running" || y.state == "approving" {
-				continue
+		oldest := func(ok func(*guestPowerProposal) bool) string {
+			var d string
+			for k, y := range p.props {
+				if ok(y) && (d == "" || y.expires.Before(p.props[d].expires)) {
+					d = k
+				}
 			}
-			if oldest == "" || y.expires.Before(p.props[oldest].expires) {
-				oldest = d
-			}
+			return d
 		}
-		if oldest == "" {
+		d := oldest(func(y *guestPowerProposal) bool { return y.state == "done" || y.state == "failed" })
+		if d == "" {
+			d = oldest(func(y *guestPowerProposal) bool { return y.state == "pending" && y.user == x.user })
+		}
+		if d == "" {
 			return false
 		}
-		delete(p.props, oldest)
+		delete(p.props, d)
 	}
 	p.props[x.digest] = x
 	return true
@@ -369,14 +506,19 @@ func (p *guestPowerProposals) setResult(digest, state, message, executionID stri
 // guestPowerDigestRe is the executor's digest form.
 var guestPowerDigestRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-// guestActionData is the data of the proposal page.
+// guestActionData is the data of the proposal page. The headline is the
+// executor's binding (Bound, with the requested target it was checked
+// against); UIName and UIGeneration are the UI's own inventory read.
 type guestActionData struct {
-	Name, Remote, Node, KindLabel string
-	VMID, Generation              uint64
-	Verb                          guestPowerVerb
-	Digest, Risk, RiskClass       string
-	Canonical                     string
-	ChallengeExpiry               time.Time
+	Remote, Node, KindLabel string
+	VMID                    uint64
+	Verb                    guestPowerVerb
+	Bound                   guestPowerBinding
+	Mismatch                []string
+	UIName                  string
+	UIGeneration            uint64
+	Digest, Risk, RiskClass string
+	ChallengeExpiry         time.Time
 	// Approval: Options for the security key button, or CLICommand
 	// (hardened mode, or a typed count the button cannot send).
 	Options    string
@@ -471,9 +613,19 @@ func (h *Handler) handleGuestPowerPropose(w http.ResponseWriter, r *http.Request
 		http.Error(w, "this power action is not available for a "+guestKindLabel(kind), http.StatusBadRequest)
 		return
 	}
+	// Throttle before any store read, so repeated proposals cause no
+	// unthrottled work.
+	user := webUser(r)
+	now := h.clockNow()
+	if !h.guestPowerProposals.allow(user, now) {
+		w.Header().Set("Retry-After", strconv.Itoa(int(guestPowerProposeInterval/time.Second)))
+		http.Error(w, "too many power proposals: wait a moment and try again", http.StatusTooManyRequests)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
 	defer cancel()
-	if !remoteAllowsMutations(h.pveMeta(ctx), remote) {
+	meta := h.pveMeta(ctx)
+	if !remoteAllowsMutations(meta, remote) {
 		http.Error(w, "the PVE remote is not active: no power actions", http.StatusConflict)
 		return
 	}
@@ -501,13 +653,6 @@ func (h *Handler) handleGuestPowerPropose(w http.ResponseWriter, r *http.Request
 		http.Error(w, "the guest is not running: no power action", http.StatusConflict)
 		return
 	}
-	user := webUser(r)
-	now := h.clockNow()
-	if !h.guestPowerProposals.allow(user, now) {
-		w.Header().Set("Retry-After", strconv.Itoa(int(guestPowerProposeInterval/time.Second)))
-		http.Error(w, "too many power proposals: wait a moment and try again", http.StatusTooManyRequests)
-		return
-	}
 	target := &pb.PVEGuestPowerTarget{RemoteId: remote, Kind: kind, Node: node, Vmid: vmid, Verb: verb.Verb}
 	resp, err := h.guestPower.ProposePVEGuestPower(ctx, &pb.ProposePVEGuestPowerRequest{Target: target})
 	if err != nil {
@@ -521,27 +666,37 @@ func (h *Handler) handleGuestPowerPropose(w http.ResponseWriter, r *http.Request
 		http.Error(w, "the executor returned no usable proposal", http.StatusBadGateway)
 		return
 	}
+	// The operator approves what the executor bound: a canonical request
+	// that cannot be shown in full refuses the proposal.
+	bound, err := parseGuestPowerCanonical(perm.GetCanonicalRequest(), digest)
+	if err != nil {
+		h.log.Error("guest power: unusable canonical request", "remote", remote, "vmid", vmid, "error", err)
+		http.Error(w, err.Error()+": the proposal is refused, nothing can be approved", http.StatusBadGateway)
+		return
+	}
 	p := &guestPowerProposal{
-		user: user, target: target, name: g.Name, generation: g.Generation, verb: verb,
+		user: user, target: target, verb: verb, bound: bound,
+		mismatch: guestPowerMismatch(bound, target, risk, meta[remote].TrustPin),
+		uiName:   g.Name, uiGeneration: g.Generation,
 		digest: digest, risk: risk, requirement: requirementText(perm.GetApprovalRequirement()),
 		state: "pending", expires: now.Add(guestPowerProposalTTL),
 	}
 	if opts := perm.GetRequestOptionsJson(); len(opts) > 0 && json.Valid(opts) {
 		p.options = string(opts)
 	}
-	if c := perm.GetCanonicalRequest(); len(c) <= maxGuestPowerCanonical && utf8.Valid(c) {
-		p.canonical = string(c)
-	}
 	if e := perm.GetChallengeExpiryUnix(); e > 0 {
 		p.challengeAt = time.Unix(e, 0)
 	}
-	if p.requirement == "key" && p.options == "" {
+	if p.requirement == "key" && p.options == "" && len(p.mismatch) == 0 {
 		http.Error(w, "the executor returned no approval challenge", http.StatusBadGateway)
 		return
 	}
 	if !h.guestPowerProposals.put(p, now) {
 		http.Error(w, "too many power actions in progress", http.StatusServiceUnavailable)
 		return
+	}
+	if len(p.mismatch) > 0 {
+		h.log.Error("guest power: executor binding differs from the request", "remote", remote, "vmid", vmid, "mismatch", strings.Join(p.mismatch, "; "))
 	}
 	h.audit(r, "guest_power_proposed", guestPowerKey(remote, vmid)+" "+verb.Verb)
 	http.Redirect(w, r, "/pve/guests/power/"+digest, http.StatusSeeOther)
@@ -578,13 +733,14 @@ func (h *Handler) handleGuestPowerProposal(w http.ResponseWriter, r *http.Reques
 	}
 	t := p.target
 	d := &guestActionData{
-		Name: p.name, Remote: t.GetRemoteId(), Node: t.GetNode(), KindLabel: guestKindLabel(t.GetKind()),
-		VMID: t.GetVmid(), Generation: p.generation, Verb: p.verb,
-		Digest: p.digest, Risk: p.risk, RiskClass: riskBadgeClass(p.risk), Canonical: p.canonical,
+		Remote: t.GetRemoteId(), Node: t.GetNode(), KindLabel: guestKindLabel(t.GetKind()),
+		VMID: t.GetVmid(), Verb: p.verb, Bound: p.bound, Mismatch: p.mismatch,
+		UIName: p.uiName, UIGeneration: p.uiGeneration,
+		Digest: p.digest, Risk: p.bound.Risk, RiskClass: riskBadgeClass(p.bound.Risk),
 		ChallengeExpiry: p.challengeAt, State: p.state, Message: p.message, ExecutionID: p.executionID, Steps: p.steps,
 	}
 	data := pageData{Title: "Guest power: " + p.verb.Verb, Active: "pve", Content: "guest_action", GuestAction: d}
-	if p.state == "pending" {
+	if p.state == "pending" && len(p.mismatch) == 0 {
 		if p.requirement == "key" {
 			d.Options = p.options
 			data.Scripts = []string{"webauthn.js", "schedules.js"}
@@ -618,7 +774,7 @@ func (h *Handler) handleGuestPowerCommit(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	cur, ok := h.guestPowerProposals.get(user, in.ID, now)
-	if !ok || cur.requirement != "key" || len(in.Assertion) == 0 || string(in.Assertion) == "null" {
+	if !ok || cur.requirement != "key" || len(cur.mismatch) > 0 || len(in.Assertion) == 0 || string(in.Assertion) == "null" {
 		writeJSONError(w, http.StatusNotFound, "power proposal not found")
 		return
 	}
@@ -667,7 +823,7 @@ func (h *Handler) handleGuestPowerRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cur, ok := h.guestPowerProposals.get(user, digest, now)
-	if !ok || cur.requirement == "key" {
+	if !ok || cur.requirement == "key" || len(cur.mismatch) > 0 {
 		http.NotFound(w, r)
 		return
 	}
@@ -696,7 +852,9 @@ func (h *Handler) startGuestPowerCommit(r *http.Request, p guestPowerProposal) {
 		if err != nil {
 			st, _ := status.FromError(err)
 			switch st.Code() {
-			case codes.InvalidArgument, codes.FailedPrecondition, codes.PermissionDenied, codes.NotFound, codes.Aborted, codes.Unavailable:
+			// Unavailable is a transport error (its text names addresses):
+			// shown generically like any other non-refusal.
+			case codes.InvalidArgument, codes.FailedPrecondition, codes.PermissionDenied, codes.NotFound, codes.Aborted:
 				state := "failed"
 				if p.requirement != "key" && (st.Code() == codes.PermissionDenied || st.Code() == codes.FailedPrecondition) {
 					state = "pending" // approve with the CLI, then run again

@@ -3,6 +3,8 @@ package ui_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"html"
@@ -12,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -21,7 +24,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
@@ -50,7 +55,15 @@ type gpGuest struct {
 
 // fakeGPStore is an in-memory PVEStore for the power tests.
 type fakeGPStore struct {
-	guests []gpGuest
+	mu        sync.Mutex
+	guests    []gpGuest
+	listCalls int
+}
+
+func (f *fakeGPStore) lists() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.listCalls
 }
 
 func (f *fakeGPStore) ListRemotes(context.Context, int) ([]pveinventory.Remote, error) {
@@ -66,6 +79,9 @@ func (f *fakeGPStore) ListNodes(context.Context, string, int) ([]pveinventory.No
 }
 
 func (f *fakeGPStore) ListGuests(_ context.Context, remoteID string, flt pveinventory.GuestFilter, _ int) ([]pveinventory.Guest, error) {
+	f.mu.Lock()
+	f.listCalls++
+	f.mu.Unlock()
 	if remoteID != gpRemote {
 		return nil, nil
 	}
@@ -84,17 +100,58 @@ func (f *fakeGPStore) ListDatasetStatus(context.Context, string) ([]pveinventory
 	return nil, nil
 }
 
+// gpPin is the PVE remote's trust pin in the fake registry.
+var gpPin = strings.Repeat("c1", 32)
+
+// gpArtifactSHA256 is the hash of the executor's fixed artifact of verb
+// (internal/executor pveGuestPowerArtifact), written out independently of
+// the UI's table.
+func gpArtifactSHA256(verb string) string {
+	text := map[string]string{
+		"shutdown": "Graceful shutdown (ACPI, guest agent or LXC) of the exact running guest; never a force stop.",
+		"reboot":   "Graceful reboot of the exact running guest; never a force stop.",
+		"stop":     "Hard stop of the exact running guest (destructive: like pulling the power).",
+		"reset":    "Hard reset of the exact running QEMU guest (destructive: like pressing reset).",
+	}[verb]
+	sum := sha256.Sum256([]byte("pve.guest.power 1.0.0\nverb: " + verb + "\n" + text + "\n"))
+	return hex.EncodeToString(sum[:])
+}
+
+// gpCanonical builds the canonical request the executor binds for t
+// (permit.ProviderMutationRequest): the target's host ID, its synthetic
+// fingerprint under the trust pin, the verb's artifact and the risk.
+func gpCanonical(t *pb.PVEGuestPowerTarget, risk string, execID string) canonical.Request {
+	sum := sha256.Sum256([]byte(t.GetRemoteId() + "\x00" + t.GetKind() + "\x00" + t.GetNode() + "\x00" + strconv.FormatUint(t.GetVmid(), 10)))
+	hostID := "pvm-" + hex.EncodeToString(sum[:16])
+	fp, err := permit.ProviderRiskFingerprint(gpPin, hostID)
+	if err != nil {
+		panic(err)
+	}
+	return canonical.Request{
+		RequestVersion: 1, ExecutionID: execID, ActionID: "pve.guest.power", ModuleVersion: "1.0.0",
+		ArtifactSHA256: gpArtifactSHA256(t.GetVerb()), ParametersHash: strings.Repeat("0d", 32),
+		CredentialRefs: []string{"pve-lab-action"}, RiskClass: canonical.Risk(risk), StagePlanHash: strings.Repeat("5e", 32),
+		ExpiryUnix: time.Now().Add(5 * time.Minute).Unix(), ResolvedTargets: []canonical.Target{{HostID: hostID, HostKeyFingerprint: fp}},
+	}
+}
+
 // fakeGuestPower records the executor calls.
 type fakeGuestPower struct {
 	mu          sync.Mutex
 	proposed    []*pb.PVEGuestPowerTarget
+	digests     []string
 	risk        pb.RiskClass
 	requirement pb.ApprovalRequirement
 	proposeErr  error
-	assertions  []*pb.SubmitAssertionRequest
-	assertErr   error
-	commits     []*pb.CommitPVEGuestPowerRequest
-	commitErr   error
+	// mutate changes the canonical request before it is returned (an
+	// executor binding something else); raw replaces it entirely.
+	mutate     func(*canonical.Request)
+	raw        []byte
+	badDigest  bool // the digest is not the canonical request's hash
+	assertions []*pb.SubmitAssertionRequest
+	assertErr  error
+	commits    []*pb.CommitPVEGuestPowerRequest
+	commitErr  error
 }
 
 func (f *fakeGuestPower) ProposePVEGuestPower(_ context.Context, in *pb.ProposePVEGuestPowerRequest, _ ...grpc.CallOption) (*pb.ProposePVEGuestPowerResponse, error) {
@@ -104,14 +161,41 @@ func (f *fakeGuestPower) ProposePVEGuestPower(_ context.Context, in *pb.ProposeP
 	if f.proposeErr != nil {
 		return nil, f.proposeErr
 	}
+	rq := gpCanonical(in.GetTarget(), strings.TrimPrefix(f.risk.String(), "RISK_CLASS_"), "exec-"+strconv.Itoa(len(f.proposed)))
+	if f.mutate != nil {
+		f.mutate(&rq)
+	}
+	c, err := json.Marshal(rq)
+	if err != nil {
+		return nil, err
+	}
+	if f.raw != nil {
+		c = f.raw
+	}
+	sum := sha256.Sum256(c)
+	if f.badDigest {
+		sum = sha256.Sum256(append(c, ' '))
+	}
+	digest := hex.EncodeToString(sum[:])
+	f.digests = append(f.digests, digest)
 	return &pb.ProposePVEGuestPowerResponse{Permit: &pb.ProposeExecutionResponse{
-		ExecutionDigest:     gpDigest,
-		CanonicalRequest:    []byte(`{"action":"pve.guest.power"}`),
+		ExecutionDigest:     digest,
+		CanonicalRequest:    c,
 		ApprovalRequirement: f.requirement,
 		RiskClass:           f.risk,
 		ChallengeExpiryUnix: time.Now().Add(5 * time.Minute).Unix(),
 		RequestOptionsJson:  []byte(`{"challenge":"Y2hhbA"}`),
 	}}, nil
+}
+
+// lastDigest is the digest of the latest proposal.
+func (f *fakeGuestPower) lastDigest() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.digests) == 0 {
+		return gpDigest
+	}
+	return f.digests[len(f.digests)-1]
 }
 
 func (f *fakeGuestPower) SubmitAssertion(_ context.Context, in *pb.SubmitAssertionRequest, _ ...grpc.CallOption) (*pb.SubmitAssertionResponse, error) {
@@ -184,6 +268,12 @@ type gpEnv struct {
 
 func newGPEnv(t *testing.T, guests []gpGuest) *gpEnv {
 	t.Helper()
+	return newGPEnvClock(t, guests, nil)
+}
+
+// newGPEnvClock is newGPEnv with the UI clock now (nil: time.Now).
+func newGPEnvClock(t *testing.T, guests []gpGuest, now func() time.Time) *gpEnv {
+	t.Helper()
 	e := &gpEnv{exec: &fakeGuestPower{risk: pb.RiskClass_RISK_CLASS_MEDIUM,
 		requirement: pb.ApprovalRequirement_APPROVAL_REQUIREMENT_ASSERTION_VERIFIED},
 		store: &fakeGPStore{guests: guests}, state: "active"}
@@ -194,9 +284,10 @@ func newGPEnv(t *testing.T, guests []gpGuest) *gpEnv {
 		PVEChart:     func(context.Context) (pveinventory.Tree, error) { return tree, nil },
 		PVE:          e.store,
 		PVERemotes: func(context.Context) ([]ui.PVERemoteMeta, error) {
-			return []ui.PVERemoteMeta{{RemoteID: gpRemote, Name: "PVE lab", State: e.state}}, nil
+			return []ui.PVERemoteMeta{{RemoteID: gpRemote, Name: "PVE lab", State: e.state, TrustPin: gpPin}}, nil
 		},
 		GuestPower: e.exec,
+		Now:        now,
 		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	return e
@@ -324,7 +415,7 @@ func TestGuestPowerProposalPageShowsExactTargetAndRisk(t *testing.T) {
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("propose = %d %q", rec.Code, rec.Body.String())
 	}
-	if loc := rec.Header().Get("Location"); loc != "/pve/guests/power/"+gpDigest {
+	if loc := rec.Header().Get("Location"); loc != "/pve/guests/power/"+e.exec.lastDigest() {
 		t.Fatalf("redirect to %q", loc)
 	}
 	p := e.exec.proposals()
@@ -335,10 +426,10 @@ func TestGuestPowerProposalPageShowsExactTargetAndRisk(t *testing.T) {
 		p[0].GetVerb() != "stop" || p[0].GetTimeoutSec() != 0 {
 		t.Errorf("proposed target %v", p[0])
 	}
-	body := getBody(t, h, "/pve/guests/power/"+gpDigest)
+	body := getBody(t, h, "/pve/guests/power/"+e.exec.lastDigest())
 	for _, want := range []string{
 		"web-vm", ">100<", ">pve1<", "QEMU VM", ">stop<", gpRemote,
-		`class="badge badge--critical">HIGH<`, gpDigest,
+		`class="badge badge--critical">HIGH<`, e.exec.lastDigest(),
 		"hard power off", // the destructive verb is spelled out
 		`class="button schedule-approve button--danger"`, `data-commit="/pve/guests/power/commit"`,
 		"webauthn.js", "schedules.js",
@@ -360,14 +451,14 @@ func TestGuestPowerProposalShowsExecutorRiskNotUIBase(t *testing.T) {
 	if rec := gpPost(t, h, "/pve/guests/power", gpForm("100", "qemu", "shutdown")); rec.Code != http.StatusSeeOther {
 		t.Fatalf("propose = %d", rec.Code)
 	}
-	body := getBody(t, h, "/pve/guests/power/"+gpDigest)
+	body := getBody(t, h, "/pve/guests/power/"+e.exec.lastDigest())
 	if !strings.Contains(body, ">CRITICAL<") || strings.Contains(body, ">MEDIUM<") {
 		t.Error("page does not show the executor's risk")
 	}
 	if strings.Contains(body, "schedule-approve") {
 		t.Error("typed-count approval offered in the browser")
 	}
-	if !strings.Contains(body, "nebula approve "+gpDigest) {
+	if !strings.Contains(body, "nebula approve "+e.exec.lastDigest()) {
 		t.Error("no CLI approval command")
 	}
 }
@@ -379,18 +470,18 @@ func TestGuestPowerHardenedModeShowsCLI(t *testing.T) {
 	if rec := gpPost(t, h, "/pve/guests/power", gpForm("100", "qemu", "reboot")); rec.Code != http.StatusSeeOther {
 		t.Fatalf("propose = %d", rec.Code)
 	}
-	body := getBody(t, h, "/pve/guests/power/"+gpDigest)
+	body := getBody(t, h, "/pve/guests/power/"+e.exec.lastDigest())
 	if strings.Contains(body, "schedule-approve") || strings.Contains(body, "webauthn.js") {
 		t.Error("hardened mode shows the browser approval")
 	}
-	if !strings.Contains(body, "hardened mode") || !strings.Contains(body, "nebula approve "+gpDigest) {
+	if !strings.Contains(body, "hardened mode") || !strings.Contains(body, "nebula approve "+e.exec.lastDigest()) {
 		t.Error("hardened mode lacks the CLI text")
 	}
 	if !strings.Contains(body, `action="/pve/guests/power/run"`) {
 		t.Error("no run form after CLI approval")
 	}
 	// Run after CLI approval: commit without an assertion.
-	rec := gpPost(t, h, "/pve/guests/power/run", url.Values{"digest": {gpDigest}})
+	rec := gpPost(t, h, "/pve/guests/power/run", url.Values{"digest": {e.exec.lastDigest()}})
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("run = %d %q", rec.Code, rec.Body.String())
 	}
@@ -398,7 +489,7 @@ func TestGuestPowerHardenedModeShowsCLI(t *testing.T) {
 	if len(e.exec.assertions) != 0 {
 		t.Error("CLI run submitted an assertion")
 	}
-	if c := e.exec.commits[0]; c.GetExecutionDigest() != gpDigest || c.GetTarget().GetVerb() != "reboot" || c.GetTarget().GetVmid() != 100 {
+	if c := e.exec.commits[0]; c.GetExecutionDigest() != e.exec.lastDigest() || c.GetTarget().GetVerb() != "reboot" || c.GetTarget().GetVmid() != 100 {
 		t.Errorf("commit %v", c)
 	}
 }
@@ -431,12 +522,12 @@ func TestGuestPowerCommitWithSecurityKey(t *testing.T) {
 	if rec := gpPost(t, h, "/pve/guests/power", gpForm("101", "lxc", "shutdown")); rec.Code != http.StatusSeeOther {
 		t.Fatalf("propose = %d", rec.Code)
 	}
-	rec := gpPostJSON(t, h, "/pve/guests/power/commit", map[string]any{"id": gpDigest, "assertion": map[string]string{"id": "x"}})
+	rec := gpPostJSON(t, h, "/pve/guests/power/commit", map[string]any{"id": e.exec.lastDigest(), "assertion": map[string]string{"id": "x"}})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("commit = %d %q", rec.Code, rec.Body.String())
 	}
 	gpWaitCommit(t, e.exec)
-	if len(e.exec.assertions) != 1 || e.exec.assertions[0].GetExecutionDigest() != gpDigest {
+	if len(e.exec.assertions) != 1 || e.exec.assertions[0].GetExecutionDigest() != e.exec.lastDigest() {
 		t.Errorf("assertions %v", e.exec.assertions)
 	}
 	c := e.exec.commits[0]
@@ -446,7 +537,7 @@ func TestGuestPowerCommitWithSecurityKey(t *testing.T) {
 	// The page shows the result once the run is recorded.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		body := getBody(t, h, "/pve/guests/power/"+gpDigest)
+		body := getBody(t, h, "/pve/guests/power/"+e.exec.lastDigest())
 		if strings.Contains(body, "succeeded") && strings.Contains(body, "exec-1") {
 			if strings.Contains(body, "schedule-approve") {
 				t.Error("committed proposal still offers approval")
@@ -459,7 +550,7 @@ func TestGuestPowerCommitWithSecurityKey(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	// A second approval of the same proposal is refused.
-	if rec := gpPostJSON(t, h, "/pve/guests/power/commit", map[string]any{"id": gpDigest, "assertion": map[string]string{"id": "x"}}); rec.Code != http.StatusNotFound {
+	if rec := gpPostJSON(t, h, "/pve/guests/power/commit", map[string]any{"id": e.exec.lastDigest(), "assertion": map[string]string{"id": "x"}}); rec.Code != http.StatusNotFound {
 		t.Errorf("second commit = %d", rec.Code)
 	}
 }
@@ -469,14 +560,14 @@ func TestGuestPowerRejectedAssertionKeepsProposalPending(t *testing.T) {
 	e.exec.assertErr = status.Error(codes.PermissionDenied, "bad assertion")
 	h := e.h.Handler()
 	gpPost(t, h, "/pve/guests/power", gpForm("100", "qemu", "shutdown"))
-	rec := gpPostJSON(t, h, "/pve/guests/power/commit", map[string]any{"id": gpDigest, "assertion": map[string]string{"id": "x"}})
+	rec := gpPostJSON(t, h, "/pve/guests/power/commit", map[string]any{"id": e.exec.lastDigest(), "assertion": map[string]string{"id": "x"}})
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("commit = %d", rec.Code)
 	}
 	if e.exec.commitCount() != 0 {
 		t.Error("committed after a refused assertion")
 	}
-	if body := getBody(t, h, "/pve/guests/power/"+gpDigest); !strings.Contains(body, "schedule-approve") {
+	if body := getBody(t, h, "/pve/guests/power/"+e.exec.lastDigest()); !strings.Contains(body, "schedule-approve") {
 		t.Error("refused approval lost the button")
 	}
 }
@@ -575,7 +666,7 @@ func TestGuestPowerRunRefusedForBrowserApproval(t *testing.T) {
 	e := newGPEnv(t, gpGuests())
 	h := e.h.Handler()
 	gpPost(t, h, "/pve/guests/power", gpForm("100", "qemu", "stop"))
-	if rec := gpPost(t, h, "/pve/guests/power/run", url.Values{"digest": {gpDigest}}); rec.Code != http.StatusNotFound {
+	if rec := gpPost(t, h, "/pve/guests/power/run", url.Values{"digest": {e.exec.lastDigest()}}); rec.Code != http.StatusNotFound {
 		t.Errorf("run = %d", rec.Code)
 	}
 	time.Sleep(20 * time.Millisecond)
@@ -596,7 +687,7 @@ func TestGuestPowerEscapesGuestName(t *testing.T) {
 	if rec := gpPost(t, h, "/pve/guests/power", gpForm("100", "qemu", "stop")); rec.Code != http.StatusSeeOther {
 		t.Fatalf("propose = %d", rec.Code)
 	}
-	body := getBody(t, h, "/pve/guests/power/"+gpDigest)
+	body := getBody(t, h, "/pve/guests/power/"+e.exec.lastDigest())
 	if strings.Contains(body, "<script>alert(1)") {
 		t.Error("proposal page renders the guest name as HTML")
 	}
