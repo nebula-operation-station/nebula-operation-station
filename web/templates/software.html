@@ -1,0 +1,32 @@
+{{define "content"}}
+{{$v := .Catalog}}
+<h1>Software catalog</h1>
+<p class="hint">Software seen on managed hosts, guests and containers (ADR 0009 D5). Names are text from the catalog; icons come only from this server.</p>
+<nav class="actions" aria-label="Filter by state">
+  {{range $v.Filters}}<a class="button button--small{{if not .Active}} button--secondary{{end}}" href="{{.Href}}"{{if .Active}} aria-current="page"{{end}}>{{.Label}}</a>{{end}}
+  <a class="button button--small button--secondary" href="/software/unknown">Unknown software ({{$v.Unknown}})</a>
+</nav>
+{{if $v.Truncated}}<p class="message message--error" role="status">Only the first rows are shown; the catalog is larger.</p>{{end}}
+{{if $v.Rows}}
+<table class="table sw-table">
+  <thead>
+    <tr><th scope="col">Icon</th><th scope="col">Key</th><th scope="col">Name</th><th scope="col">State</th><th scope="col">Hosts</th><th scope="col">Observations</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
+  </thead>
+  <tbody>
+    {{range $v.Rows}}
+    <tr>
+      <td class="sw-icon-cell">{{if .IconSrc}}<img class="sw-icon" src="{{.IconSrc}}" alt="" width="24" height="24">{{else}}<span class="sw-icon sw-icon--generic" title="Generic symbol">·</span>{{end}}</td>
+      <td class="sw-key"><code>{{.Key}}</code></td>
+      <td class="sw-display">{{.Display}}</td>
+      <td class="sw-state">{{.State}}</td>
+      <td class="sw-hosts">{{.Hosts}}</td>
+      <td class="sw-observations">{{.Observations}}</td>
+      <td class="sw-actions">{{if .MergedInto}}merged into <a href="/software/icon/{{.MergedInto}}"><code>{{.MergedInto}}</code></a>{{else}}<a class="button button--small button--secondary" href="/software/icon/{{.Key}}">Icon</a>{{end}}</td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="hint">No catalog entries{{if $v.Filter}} in this state{{end}}.</p>
+{{end}}
+{{end}}
