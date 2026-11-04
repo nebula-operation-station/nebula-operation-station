@@ -180,7 +180,7 @@ func TestPveGuestJoinRefusesFencedTrust(t *testing.T) {
 	e := newGuestRPCEnv(t)
 	rm := e.remote()
 	rebuildServiceAuth(t, e.pveReadEnv, reopenServiceDB(t, e.pveReadEnv, rejectPveBlockTrigger))
-	e.svc.pveTrustFence().add(rm)
+	e.svc.pveTrustFence().add(rm, pveExecutorActor)
 	ctx := context.Background()
 
 	_, err := e.svc.ProposeGuestJoin(ctx, e.rpcRequest())
@@ -228,7 +228,7 @@ func TestPveGuestProvisionProposalRefusesFencedTrust(t *testing.T) {
 		_, err := e.svc.ProposePVEGuestProvision(context.Background(), &pb.ProposePVEGuestProvisionRequest{Spec: spec})
 		return err
 	}
-	e.svc.pveTrustFence().add(e.remote())
+	e.svc.pveTrustFence().add(e.remote(), pveExecutorActor)
 	if st := status.Convert(propose()); st.Code() != codes.FailedPrecondition || !strings.Contains(st.Message(), "failed trust verification") {
 		t.Fatalf("provisioning proposal against a fenced trust: %v", st.Err())
 	}
@@ -275,7 +275,7 @@ func TestPveRotateTokenRefusesFencedTrust(t *testing.T) {
 	e := newPveReadEnv(t, pvecontract.KindStandalone)
 	rm := e.remote()
 	rebuildServiceAuth(t, e, reopenServiceDB(t, e, rejectPveBlockTrigger))
-	e.svc.pveTrustFence().add(rm)
+	e.svc.pveTrustFence().add(rm, pveExecutorActor)
 	conns := e.pve.conns.Load()
 
 	err := rotateReadToken(e)
@@ -454,5 +454,123 @@ func TestPveTrustBlockNamesWhoTriggeredIt(t *testing.T) {
 				t.Fatal("a request reached the impostor")
 			}
 		})
+	}
+}
+
+// TestPveTrustFenceKeepsWhoDetectedTheFailure: the fence keeps, with the
+// failed trust, who detected the failure. A later failure of the same
+// trust keeps the first detector; a failure of another trust of the
+// remote replaces the entry with its own detector; an empty name is
+// recorded as the executor.
+func TestPveTrustFenceKeepsWhoDetectedTheFailure(t *testing.T) {
+	failed := executordb.PveRemote{RemoteID: "pve-a", TrustPin: strings.Repeat("aa", 32), TrustGeneration: 3}
+	f := &pveTrustFence{}
+	f.add(failed, "admin:uid1000")
+	f.add(failed, pveExecutorActor) // the same trust fails again on a reader
+	if k, by, ok := f.lookup(failed); !ok || k != pveTrustKeyOf(failed) || by != "admin:uid1000" {
+		t.Fatalf("lookup = %+v %q %v, want the first detector kept", k, by, ok)
+	}
+	stale := failed
+	stale.TrustGeneration = 2
+	f.add(stale, "admin:uid2000") // a stale failure keeps the newer entry
+	if _, by, _ := f.lookup(failed); by != "admin:uid1000" {
+		t.Fatalf("blocked_by after a stale failure = %q", by)
+	}
+	other := failed
+	other.TrustPin = strings.Repeat("cc", 32)
+	f.add(other, pveExecutorActor) // another trust of the same generation
+	if k, by, ok := f.lookup(failed); !ok || k != pveTrustKeyOf(other) || by != pveExecutorActor {
+		t.Fatalf("lookup = %+v %q %v, want the other trust and its detector", k, by, ok)
+	}
+	g := &pveTrustFence{}
+	g.add(failed, "")
+	if _, by, _ := g.lookup(failed); by != pveExecutorActor {
+		t.Fatalf("empty detector recorded as %q, want %q", by, pveExecutorActor)
+	}
+	var nilFence *pveTrustFence
+	if _, _, ok := nilFence.lookup(failed); ok {
+		t.Fatal("nil fence covers")
+	}
+}
+
+// TestPveFenceRetryNamesWhoDetectedTheFailure: when the block of a trust
+// failure cannot be persisted, the trust is fenced, and the block is
+// recorded later by a fence retry on another connection, blocked_by
+// names who detected the failure: the admin whose token rotation saw it,
+// or the executor for a reader connection. The connection that retries
+// (another caller's rotation, ReadPVE, a provisioning or guest join read,
+// the mutation client) does not change it.
+func TestPveFenceRetryNamesWhoDetectedTheFailure(t *testing.T) {
+	ctx := context.Background()
+	for _, detector := range []string{"rotation", "reader"} {
+		for _, retry := range []string{"rotation", "read", "provision read", "join", "mutation"} {
+			t.Run(detector+"/"+retry, func(t *testing.T) {
+				e := newPveReadEnv(t, pvecontract.KindStandalone)
+				e.approve(e.grantDoc(pveReadGrantID, 240, permit.ProviderMethodNodes))
+				rm := e.remote()
+				rebuildServiceAuth(t, e, reopenServiceDB(t, e, rejectPveBlockTrigger))
+				impostor := makeTestChain(t)
+				e.pve.srv.TLS.Certificates = []tls.Certificate{impostor.tls}
+				e.pve.srv.CloseClientConnections()
+
+				want := pveExecutorActor
+				var err error
+				switch detector {
+				case "rotation":
+					want, err = rotateReadTokenAsAdmin(t, e)
+				case "reader":
+					_, err = pveProvisionReaderAPI{agent: pveGuestAgentAPI{s: e.svc}}.ClusterInventory(ctx, rm, tokenOf(pveReadToken))
+				}
+				if !errors.Is(err, errPveTrustBlockNotRecorded) && status.Code(err) != codes.Internal {
+					t.Fatalf("connection to an impostor: %v", err)
+				}
+				if got := remoteState(t, e.svc.db, pveReadRemote); got != executordb.StateActive {
+					t.Fatalf("remote state = %s, want the injected failure to keep it active", got)
+				}
+				if k, by, fenced := e.svc.pveTrustFence().lookup(rm); !fenced || k != pveTrustKeyOf(rm) || by != want {
+					t.Fatalf("fence = %+v %q %v, want the failed trust detected by %q", k, by, fenced, want)
+				}
+
+				// The genuine endpoint and the store are back: the next
+				// connection, whoever makes it, records the block in the
+				// name of the detector and is still refused.
+				e.pve.srv.TLS.Certificates = []tls.Certificate{e.chain.tls}
+				e.pve.srv.CloseClientConnections()
+				rebuildServiceAuth(t, e, reopenServiceDB(t, e, `DROP TRIGGER reject_pve_block`))
+				switch retry {
+				case "rotation":
+					// A direct call has no peer, so its caller is neither
+					// the detecting admin nor the executor.
+					if c := callerName(ctx); c == want || c == pveExecutorActor {
+						t.Fatalf("retrying caller %q is not distinct", c)
+					}
+					err = rotateReadToken(e)
+				case "read":
+					_, err = e.read(pb.PVEReadMethod_PVE_READ_METHOD_NODES)
+				case "provision read":
+					_, err = pveProvisionReaderAPI{agent: pveGuestAgentAPI{s: e.svc}}.ClusterInventory(ctx, rm, tokenOf(pveReadToken))
+				case "join":
+					_, err = pveGuestAgentAPI{s: e.svc}.LiveGuest(ctx, rm, "pve1", 101, tokenOf(pveReadToken))
+				case "mutation":
+					_, err = e.svc.newPveMutationClient().RecentTasks(ctx, rm, "pve1", time.Time{}, tokenOf(mutReadToken))
+				}
+				if err == nil {
+					t.Fatal("fence retry was not refused")
+				}
+				cur := svcRemote(t, e)
+				if cur.State != executordb.StateBlocked {
+					t.Fatalf("remote state = %s, want blocked", cur.State)
+				}
+				if cur.BlockedBy != want {
+					t.Fatalf("blocked_by = %q, want the detector %q", cur.BlockedBy, want)
+				}
+				if _, fenced := e.svc.pveTrustFence().covers(rm); fenced {
+					t.Fatal("fence kept after the block was recorded")
+				}
+				if e.pve.requests.Load() != 0 || e.pve.badAuth.Load() != 0 {
+					t.Fatal("a request reached the endpoint")
+				}
+			})
+		}
 	}
 }
