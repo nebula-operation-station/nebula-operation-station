@@ -2,9 +2,14 @@
 package ui_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"net/url"
 	"strconv"
@@ -18,10 +23,13 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/deployprofile"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/ipam"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/middleware"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
 
@@ -349,6 +357,184 @@ func TestDeployProposeKeepsTheAddressWhenAPermitMayExist(t *testing.T) {
 			t.Error("the reservation of a refused proposal is kept")
 		}
 	})
+}
+
+// TestDeployProposeKeptAuditRecordsReasonRemoteAndVmid: the propose-time
+// deployment_address_kept audit entry records the path that kept the
+// reservation (reason), the remote, the VMID (0 before the executor
+// answered with one) and the user, so the owner of a left-behind
+// reservation can be found in the log.
+func TestDeployProposeKeptAuditRecordsReasonRemoteAndVmid(t *testing.T) {
+	e := newDPEnv(t)
+	e.prov.proposeErr = status.Error(codes.Unavailable, "connection reset")
+	code, body, _ := e.do(t, http.MethodPost, "/deployments/propose", gpFormCT, dpForm().Encode())
+	if code != http.StatusBadGateway || !strings.Contains(body, "stays reserved") {
+		t.Fatalf("propose = %d %q", code, body)
+	}
+	audit := e.logBuf.String()
+	for _, want := range []string{"kind=deployment_address_kept", "reason=unknown_outcome", "address=" + dpAddr,
+		"remote=" + dpRemote, "vmid=0", "user=unknown", "execution="} {
+		if !strings.Contains(audit, want) {
+			t.Errorf("audit log lacks %q: %s", want, audit)
+		}
+	}
+}
+
+// TestDeployProposeWithoutChallengeKeepsTheAddress: a key requirement
+// without request options gives the page nothing to approve, so it
+// refuses the proposal; the executor still holds a permit for the
+// execution, so the reserved address stays.
+func TestDeployProposeWithoutChallengeKeepsTheAddress(t *testing.T) {
+	e := newDPEnv(t)
+	e.prov.noOptions = true
+	code, body, _ := e.do(t, http.MethodPost, "/deployments/propose", gpFormCT, dpForm().Encode())
+	if code != http.StatusBadGateway || !strings.Contains(body, "no approval challenge") || !strings.Contains(body, "stays reserved") {
+		t.Fatalf("propose = %d %q", code, body)
+	}
+	if e.addressFree(t) {
+		t.Error("the address was released although the executor holds a permit")
+	}
+}
+
+// TestDeployProposeProfileSaveFailureKeepsTheAddress: saving the ad-hoc
+// profile after a usable proposal can fail (invalid profile, store
+// error); the proposal is refused, but the executor holds a permit for
+// the execution, so the reserved address stays.
+func TestDeployProposeProfileSaveFailureKeepsTheAddress(t *testing.T) {
+	t.Run("invalid profile", func(t *testing.T) {
+		e := newDPEnvWith(t, func(o *ui.Options) {
+			o.DeployProfiles = failingDeployProfiles{DeployProfiles: o.DeployProfiles, saveErr: &deployprofile.InvalidError{Err: errors.New("bogus")}}
+		})
+		f := dpForm()
+		f.Del("profile")
+		f.Del("profile_version")
+		f.Set("save_as", "adhoc_web")
+		code, body, _ := e.do(t, http.MethodPost, "/deployments/propose", gpFormCT, f.Encode())
+		if code != http.StatusBadRequest || !strings.Contains(body, "the profile could not be saved") || !strings.Contains(body, "stays reserved") {
+			t.Fatalf("propose = %d %q", code, body)
+		}
+		if e.addressFree(t) {
+			t.Error("the address was released although the executor holds a permit")
+		}
+	})
+	t.Run("store error", func(t *testing.T) {
+		e := newDPEnvWith(t, func(o *ui.Options) {
+			o.DeployProfiles = failingDeployProfiles{DeployProfiles: o.DeployProfiles, saveErr: errors.New("database is locked")}
+		})
+		f := dpForm()
+		f.Del("profile")
+		f.Del("profile_version")
+		f.Set("save_as", "adhoc_web")
+		code, body, _ := e.do(t, http.MethodPost, "/deployments/propose", gpFormCT, f.Encode())
+		if code != http.StatusInternalServerError || !strings.Contains(body, "the profile could not be saved") || !strings.Contains(body, "stays reserved") {
+			t.Fatalf("propose = %d %q", code, body)
+		}
+		if e.addressFree(t) {
+			t.Error("the address was released although the executor holds a permit")
+		}
+	})
+}
+
+// TestDeployProposeRunStoreFullKeepsTheAddress: the run store is full of
+// live runs while a proposal is in flight, so the proposal cannot be
+// stored; the executor still holds a permit for the execution, so the
+// reserved address stays.
+func TestDeployProposeRunStoreFullKeepsTheAddress(t *testing.T) {
+	e := newDPEnv(t)
+	sessions := auth.NewStore(e.db, time.Now)
+	a, err := auth.New(auth.Options{Executor: pveFakeExec{}, Sessions: sessions, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(middleware.Handler(middleware.Options{PublicOrigin: gpOrigin}, a.Wrap(e.h)))
+	t.Cleanup(srv.Close)
+	cookie := make(map[string]*http.Cookie)
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	for u := range 11 {
+		name := fmt.Sprintf("user%d", u+1)
+		token, _, err := sessions.Create(context.Background(), "cred-"+name, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cookie[name] = &http.Cookie{Name: auth.CookieName, Value: token}
+	}
+	do := func(name, ct, body string) (int, string, error) {
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/deployments/propose", strings.NewReader(body))
+		if err != nil {
+			return 0, "", err
+		}
+		req.AddCookie(cookie[name])
+		req.Header.Set("Origin", gpOrigin)
+		req.Header.Set("Content-Type", ct)
+		resp, err := client.Do(req)
+		if err != nil {
+			return 0, "", err
+		}
+		defer resp.Body.Close()
+		b := new(bytes.Buffer)
+		if _, err := b.ReadFrom(resp.Body); err != nil {
+			return 0, "", err
+		}
+		return resp.StatusCode, b.String(), nil
+	}
+	must := func(name, ct, body string) (int, string) {
+		t.Helper()
+		code, body, err := do(name, ct, body)
+		if err != nil {
+			t.Fatalf("%s propose: %v", name, err)
+		}
+		return code, body
+	}
+	// 127 live runs: user1..user8 with 15 each, user9 with 7.
+	for round := range 15 {
+		if round > 0 {
+			e.advance(3 * time.Second) // past the propose throttle
+		}
+		for u := range 8 {
+			name := fmt.Sprintf("user%d", u+1)
+			if code, body := must(name, gpFormCT, dhcpForm(fmt.Sprintf("fill%d-%d", u+1, round)).Encode()); code != http.StatusSeeOther {
+				t.Fatalf("%s fill propose = %d %q", name, code, body)
+			}
+		}
+		if round < 7 {
+			if code, body := must("user9", gpFormCT, dhcpForm(fmt.Sprintf("fill9-%d", round)).Encode()); code != http.StatusSeeOther {
+				t.Fatalf("user9 fill propose = %d %q", code, body)
+			}
+		}
+	}
+	e.prov.holdIPAM = make(chan struct{})
+	e.prov.holdIPAMStarted = make(chan struct{})
+	xres := make(chan struct {
+		code int
+		body string
+	})
+	go func() {
+		code, body, err := do("user10", gpFormCT, dpForm().Encode())
+		if err != nil {
+			xres <- struct {
+				code int
+				body string
+			}{0, err.Error()}
+			return
+		}
+		xres <- struct {
+			code int
+			body string
+		}{code, body}
+	}()
+	<-e.prov.holdIPAMStarted
+	// A second proposal fills the store while the first is in flight.
+	if code, body := must("user11", gpFormCT, dhcpForm("web16").Encode()); code != http.StatusSeeOther {
+		t.Fatalf("second propose = %d %q", code, body)
+	}
+	close(e.prov.holdIPAM)
+	res := <-xres
+	if res.code != http.StatusServiceUnavailable || !strings.Contains(res.body, "too many deployments in progress") || !strings.Contains(res.body, "stays reserved") {
+		t.Fatalf("full store propose = %d %q", res.code, res.body)
+	}
+	if e.addressFree(t) {
+		t.Error("the address was released although the executor holds a permit")
+	}
 }
 
 func TestDeployUnknownCommitOutcomeKeepsTheAddress(t *testing.T) {

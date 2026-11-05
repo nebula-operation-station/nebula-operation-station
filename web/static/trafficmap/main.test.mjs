@@ -77,11 +77,13 @@ function fakeGL(state, fail) {
     getProgramParameter: (p, k) => (k === "ACTIVE_UNIFORMS" ? 0 : true),
     getUniformLocation: () => null,
     drawArraysInstanced() {
+      state.instancedDraws++;
       if (fail.gl) throw new Error("fake GL failure");
     },
     bufferData() {
       state.bufferDataCalls++;
-      if (fail.upload) throw new Error("fake upload failure");
+      const up = fail.upload;
+      if (up && (typeof up !== "function" || up(state.bufferDataCalls))) throw new Error("fake upload failure");
     },
     createShader() {
       if (fail.compile) throw new Error("fake compile failure");
@@ -132,7 +134,7 @@ class FakeCanvas extends FakeElement {
     super(doc, "canvas");
     this.env = env;
     this.kind = null;
-    this.glState = { lost: false, released: false, bufferDataCalls: 0 };
+    this.glState = { lost: false, released: false, bufferDataCalls: 0, instancedDraws: 0 };
   }
   getContext(type) {
     if (this.kind !== null && this.kind !== type) return null;
@@ -143,7 +145,7 @@ class FakeCanvas extends FakeElement {
     }
     if (type === "2d") {
       this.kind = type;
-      return fake2d(this.env.fail);
+      return (this.ctx2d ??= fake2d(this.env.fail));
     }
     return null;
   }
@@ -235,7 +237,10 @@ function setup({ webgl = true, prepare = () => {}, build = undefined, reducedMot
     backendMessages: () => sent.filter((m) => m.data.type === OUT.backend).map((m) => m.data),
     errorMessages: () => sent.filter((m) => m.data.type === OUT.error),
     webglCanvas: () => env.canvases.find((c) => c.kind === "webgl2"),
-    sendModel: () => post(modelMessage()),
+    // The overlay canvas is the first canvas startTrafficMap creates.
+    overlay: () => env.canvases[0],
+    sendModel: (edit = (m) => m) => post(edit(modelMessage())),
+    key: (key) => root.dispatch("keydown", { key }),
     sendFocus: (id) => post({ type: "nos.trafficmap.focus", id }),
     sendIcons: (icons) => post({ type: "nos.trafficmap.icons", icons }),
   };
@@ -397,6 +402,163 @@ test("FailedFirstRebuildIsRetriedAfterTheBackoff", () => {
   assert.equal(b.calls, 2, "the rebuild is retried after the backoff");
   assert.equal(h.status(), STATUS.fallback, "the map draws again");
   assert.equal(h.errorMessages().length, 1);
+  h.map.stop();
+});
+
+// overlayCounts wraps the overlay's 2D context and records the text it
+// draws. blank is true while the overlay was wiped (clearRect) and nothing
+// was drawn on it since, so a test can tell an empty overlay from one that
+// shows labels.
+function overlayCounts(h) {
+  const octx = h.overlay().ctx2d;
+  const counts = { fillText: 0, texts: [], blank: true };
+  octx.fillText = (text) => {
+    counts.fillText++;
+    counts.texts.push(text);
+    counts.blank = false;
+  };
+  octx.clearRect = () => {
+    counts.blank = true;
+  };
+  counts.reset = () => {
+    counts.fillText = 0;
+    counts.texts = [];
+  };
+  return counts;
+}
+
+test("HalfUploadedWebGL2SceneDrawsNothing", () => {
+  const h = setup();
+  h.sendModel();
+  h.tick(1);
+  const gl = h.webglCanvas();
+  assert.equal(gl.glState.bufferDataCalls, 4, "the first scene is fully uploaded");
+  // Positive control: a complete frame of this model draws the scene and
+  // labels over it.
+  const counts = overlayCounts(h);
+  const before = gl.glState.instancedDraws;
+  h.tick(1);
+  assert.ok(gl.glState.instancedDraws > before, "a complete scene is drawn");
+  assert.ok(counts.fillText > 0, "a complete frame draws labels");
+  // From the next setScene on, the second upload fails: the buffers hold
+  // a mix of the new and the old scene.
+  h.env.fail.upload = (n) => n > 4 && n % 4 === 2;
+  h.sendModel();
+  h.tick(1);
+  assert.equal(gl.glState.bufferDataCalls, 6, "the upload fails halfway through the scene");
+  assert.equal(h.status(), STATUS.frameError);
+  counts.reset();
+  const drawsBefore = gl.glState.instancedDraws;
+  h.tick(1);
+  assert.equal(gl.glState.instancedDraws, drawsBefore, "none of the mixed buffers is drawn");
+  assert.equal(counts.fillText, 0, "no labels are drawn over the empty base");
+  assert.ok(counts.blank, "the overlay is left empty");
+  h.map.stop();
+});
+
+test("OverlayIsClearedOverAnEmptyFallbackBase", () => {
+  const b = flakyBuild((n) => n >= 2);
+  const h = setup({ build: b.build });
+  h.sendModel();
+  h.tick(1);
+  assert.equal(h.status(), STATUS.webgl, "the first scene draws");
+  const counts = overlayCounts(h);
+  h.tick(1);
+  assert.ok(counts.fillText > 0, "positive control: a complete frame draws labels");
+  h.sendModel();
+  h.tick(1);
+  let reset = false;
+  h.advance(1000, () => {
+    // Reset once, right after the frame that installs the fallback, so
+    // only the frames drawn on the new (empty) base are counted.
+    if (!reset && h.backendMessages().at(-1).backend === "canvas2d") {
+      reset = true;
+      counts.reset();
+    }
+  });
+  assert.equal(h.backendMessages().at(-1).backend, "canvas2d", "the degrade installs the fallback");
+  assert.equal(counts.fillText, 0, "no stale labels are drawn after the fallback install");
+  assert.ok(counts.blank, "the overlay over the empty base is empty");
+  h.map.stop();
+});
+
+// closeUp zooms the camera in until the scene is at the close level, where
+// the overlay paints each node's OS symbol into its star.
+function closeUp(h) {
+  for (let i = 0; i < 12; i++) h.key("+");
+  h.sendFocus("pve1");
+  h.tick(1);
+}
+
+test("StaleSceneIsDrawnWithItsOwnModel", () => {
+  let broken = false;
+  const b = flakyBuild(() => broken);
+  const h = setup({ webgl: false, build: b.build });
+  h.sendModel();
+  h.tick(1);
+  closeUp(h);
+  const counts = overlayCounts(h);
+  h.tick(1);
+  // Positive control: the os of pve1 ("proxmox") is painted as "P".
+  assert.ok(counts.texts.includes("P"), "the close-up paints the OS symbol of the scene's model");
+  // The next model changes the os of pve1, and its rebuild fails: the old
+  // scene keeps rendering and must keep its own model's symbols.
+  broken = true;
+  h.sendModel((m) => {
+    m.nodes.find((n) => n.id === "pve1").os = "zos";
+    return m;
+  });
+  h.tick(1);
+  counts.reset();
+  h.tick(1);
+  assert.ok(counts.texts.includes("P"), "the old scene still shows its own model's symbol");
+  assert.ok(!counts.texts.includes("Z"), "the new model's node is not painted onto the old scene");
+  h.map.stop();
+});
+
+test("FailedRebuildOnCanvas2DKeepsTheOverlay", () => {
+  let broken = false;
+  const b = flakyBuild(() => broken);
+  const h = setup({ webgl: false, build: b.build });
+  h.sendModel();
+  h.tick(1);
+  const counts = overlayCounts(h);
+  h.tick(1);
+  assert.ok(counts.fillText > 0 && !counts.blank, "positive control: the overlay shows labels");
+  // The old scene stays complete on Canvas 2D, so its overlay stays too:
+  // neither the failing frame nor the backed-off frames after it blank it.
+  broken = true;
+  h.sendModel();
+  h.tick(1);
+  assert.equal(h.status(), STATUS.frameError);
+  assert.ok(!counts.blank, "the failing frame does not wipe the overlay");
+  counts.reset();
+  h.tick(1);
+  assert.ok(counts.fillText > 0 && !counts.blank, "the backed-off frame draws the overlay again");
+  h.map.stop();
+});
+
+test("FastModelUpdatesCannotPostponeTheDegrade", () => {
+  const b = flakyBuild(() => true);
+  const h = setup({ webgl: false, build: b.build });
+  const bmp = new FakeBitmap();
+  h.sendIcons({ docker: bmp });
+  // Models arrive faster than the failure streak can reset: every rebuild
+  // fails, yet the degrade must still be reached. MAX_FRAME_FAILURES is 3
+  // in main.js; two extra models must not postpone the degrade.
+  for (let i = 0; i < MAX_FRAME_FAILURES + 2; i++) {
+    h.sendModel();
+    h.tick(1);
+  }
+  assert.ok(bmp.closed, "the degrade is reached despite the new models");
+  // The status after the last model message is the backend status (a model
+  // message reports the backend it will draw with); the failure streak is
+  // tracked separately and is what the error count below pins down.
+  assert.equal(h.status(), STATUS.fallback);
+  // The streak was never reset by the model messages, so the parent is told
+  // about the failure exactly once; a reset on every model would report it
+  // once per model.
+  assert.equal(h.errorMessages().length, 1, "the parent is told once per failure streak");
   h.map.stop();
 });
 

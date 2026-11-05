@@ -63,6 +63,7 @@ type Leases interface {
 	ReadGrants(ctx context.Context) ([]executions.ReadGrantView, error)
 	RevokeReadGrant(ctx context.Context, user, id string) error
 	ProposeReadGrant(ctx context.Context, user string, in executions.ReadGrantRequest) (executions.ReadGrantPreview, error)
+	ProposeProviderReadGrant(ctx context.Context, user string, in executions.ProviderReadGrantRequest) (executions.ReadGrantPreview, error)
 	CommitReadGrant(ctx context.Context, user, digest string, assertion []byte) error
 }
 
@@ -167,6 +168,11 @@ type leaseNewData struct {
 	Actions      []leaseActionOption
 	ScopeOptions []string
 	Refresh      string // short id of the lease being refreshed
+	// Provider scope (leases_provider.go): offered only when the PVE
+	// remote registry is configured.
+	ProviderOffered bool
+	Remotes         []leaseRemoteOption
+	Methods         []leaseMethodOption
 	// Preview (set on the proposal page).
 	Preview     *executions.ReadGrantPreview
 	Options     string // WebAuthn request options JSON
@@ -174,6 +180,9 @@ type leaseNewData struct {
 	MinInterval string
 	HostCount   int
 	ActionCount int
+	// Provider is set on the proposal page of a provider lease.
+	Provider    bool
+	RemoteCount int
 }
 
 // leaseRefreshURL is the form URL pre-filled with a grant's scope, or ""
@@ -182,6 +191,9 @@ type leaseNewData struct {
 func leaseRefreshURL(v executions.ReadGrantView) string {
 	if v.State != "active" && v.State != "expired" {
 		return ""
+	}
+	if v.ScopeKind == executions.ScopeProvider {
+		return providerLeaseRefreshURL(v)
 	}
 	switch v.ScopeKind {
 	case executions.ScopeAll, executions.ScopeTag, executions.ScopeEnvironment:
@@ -280,8 +292,10 @@ func (h *Handler) handleLeaseNew(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
 	defer cancel()
-	d := leaseFormFromQuery(r.URL.Query())
+	q := r.URL.Query()
+	d := leaseFormFromQuery(q)
 	d.ScopeOptions = h.leaseScopeOptions(ctx)
+	h.providerLeaseForm(ctx, d, q)
 	h.render(w, r, pageData{Title: "New read lease", Active: "operations", Content: "lease_new", LeaseNew: d,
 		Scripts: []string{"formpost.js"}})
 }
@@ -299,6 +313,10 @@ func (h *Handler) handleLeasePreview(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Error(w, "the form could not be read", http.StatusBadRequest)
+		return
+	}
+	if r.PostFormValue("scope") == executions.ScopeProvider {
+		h.handleProviderLeasePreview(w, r)
 		return
 	}
 	days, err := strconv.Atoi(r.PostFormValue("days"))
@@ -368,7 +386,8 @@ func (h *Handler) handleLeaseProposal(w http.ResponseWriter, r *http.Request) {
 	}
 	v := p.preview
 	d := &leaseNewData{Preview: &v, HostCount: len(v.Targets), ActionCount: len(v.Actions),
-		MinInterval: formatScheduleInterval(v.MinInterval)}
+		MinInterval: formatScheduleInterval(v.MinInterval),
+		Provider:    v.ScopeKind == executions.ScopeProvider || len(v.Providers) > 0, RemoteCount: len(v.Providers)}
 	data := pageData{Title: "Approve read lease", Active: "operations", Content: "lease_new", LeaseNew: d}
 	if v.CLI {
 		d.CLICommand = leaseCLICommand + v.Digest

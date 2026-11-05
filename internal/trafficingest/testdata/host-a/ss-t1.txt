@@ -1,0 +1,15 @@
+udp   UNCONN 0      0            127.0.0.1:323        0.0.0.0:*
+tcp   LISTEN 0      128            0.0.0.0:22         0.0.0.0:*
+	 cubic cwnd:10
+tcp   LISTEN 0      4096                 *:9100             *:*
+	 cubic cwnd:10
+tcp   ESTAB  0      0         192.168.10.37:22   192.168.10.20:51234
+	 cubic wscale:7,7 rto:204 rtt:1.512/0.734 ato:40 mss:1448 cwnd:10 bytes_sent:13600 bytes_acked:13600 bytes_received:2720 segs_out:153 segs_in:212
+tcp   ESTAB  0      0      [::ffff:192.168.10.37]:9100 [::ffff:192.168.20.5]:38512
+	 cubic wscale:7,7 rto:208 rtt:4.1/2.3 ato:40 mss:1448 cwnd:10 bytes_sent:860000 bytes_acked:860000 bytes_received:660 segs_out:12650 segs_in:6012
+tcp   ESTAB  0      0         192.168.10.37:40122 1.1.1.1:443
+	 cubic wscale:7,7 rto:204 rtt:9.1/1.2 ato:40 mss:1448 cwnd:10 bytes_sent:1860 bytes_acked:1860 bytes_received:126000 segs_out:40 segs_in:80
+tcp   TIME-WAIT 0   0         192.168.10.37:40130 151.101.2.132:443
+	 cubic
+tcp   ESTAB  0      0         127.0.0.1:5432 127.0.0.1:40000
+	 cubic bytes_sent:2 bytes_acked:2 bytes_received:2

@@ -203,6 +203,9 @@ type pveDetailData struct {
 	Guests []pveGuestRow
 	// Datasets lists the dataset availability states.
 	Datasets []pveDatasetRow
+	// LeaseRequestURL opens the lease form for this remote when it is
+	// active and no active provider read lease covers it; "" otherwise.
+	LeaseRequestURL string
 }
 
 var pveHostPattern = regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$`)
@@ -433,6 +436,8 @@ func (h *Handler) handlePVEDetail(w http.ResponseWriter, r *http.Request) {
 		Age:            pveAge(now, rm.LastObservedAt),
 		Source:         rm.LastSource,
 		Link:           pveDeepLink(rm.Kind, meta.Endpoints, ""),
+
+		LeaseRequestURL: h.pveLeaseRequestURL(ctx, id, meta),
 	}
 	if meta.TrustPin != "" {
 		d.PinText = meta.TrustPin

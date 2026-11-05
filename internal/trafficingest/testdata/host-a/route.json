@@ -1,0 +1,5 @@
+[
+    {"dst":"default","gateway":"192.168.10.1","dev":"eth0","protocol":"dhcp","prefsrc":"192.168.10.37","metric":100,"flags":[]},
+    {"dst":"10.99.0.0/16","gateway":"192.168.10.254","dev":"eth0","protocol":"static","flags":[]},
+    {"dst":"192.168.10.0/24","dev":"eth0","protocol":"kernel","scope":"link","prefsrc":"192.168.10.37","flags":[]}
+]

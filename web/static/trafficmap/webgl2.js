@@ -337,8 +337,10 @@ export function createWebGL2Backend(canvas, onLost) {
 
 function buildBackend(canvas, gl, onLost) {
   let lost = false;
-  // sceneComplete is true once a setScene upload finished; a render before
-  // that (or after a failed upload) draws nothing and reports false.
+  // sceneComplete is true once a setScene upload finished. A render before
+  // that (or after a failed upload, when the buffers hold a mix of two
+  // scenes) draws none of the buffers: it only clears to the background
+  // and reports false.
   let sceneComplete = false;
   const handleLost = (ev) => {
     ev.preventDefault();
@@ -454,6 +456,13 @@ function buildBackend(canvas, gl, onLost) {
       if (lost || gl.isContextLost()) return false;
       const w = gl.drawingBufferWidth;
       const h = gl.drawingBufferHeight;
+      if (!sceneComplete) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.viewport(0, 0, w, h);
+        gl.clearColor(BACKGROUND[0], BACKGROUND[1], BACKGROUND[2], 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        return false;
+      }
       const t = ensureTargets(w, h);
       gl.bindFramebuffer(gl.FRAMEBUFFER, t ? t.scene.fb : null);
       gl.viewport(0, 0, w, h);

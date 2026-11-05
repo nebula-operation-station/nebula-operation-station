@@ -1,0 +1,4 @@
+[
+  {"ifindex":1,"ifname":"lo","address":"00:00:00:00:00:00","operstate":"UNKNOWN","addr_info":[{"family":"inet","local":"127.0.0.1","prefixlen":8}]},
+  {"ifindex":2,"ifname":"ens18","address":"52:54:00:00:10:20","operstate":"UP","addr_info":[{"family":"inet","local":"192.168.10.20","prefixlen":24}]}
+]

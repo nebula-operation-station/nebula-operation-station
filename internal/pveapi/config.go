@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 )
 
 // secretKeyPattern matches config keys whose values are secrets and must
@@ -108,6 +110,10 @@ type GuestConfig struct {
 	UUID           string
 	DroppedSecrets int
 	Truncated      bool
+	// NICsIncomplete is true when a netN value could not be parsed (bad
+	// VLAN tag, hostile bridge name): only that NIC is dropped, the rest
+	// of the config is kept.
+	NICsIncomplete bool
 	Extras         map[string]string
 }
 
@@ -204,6 +210,10 @@ func parseGuestConfig(data json.RawMessage, node string, vmid int, kind GuestKin
 			// dropped by policy
 			continue
 		}
+		// NIC values are parsed from the raw text: the bridge name must
+		// be validated before any sanitizing, so a name that only becomes
+		// valid after control-byte stripping is rejected.
+		rawVal := val
 		val = sanitizeText(val, MaxTextFieldBytes)
 		switch {
 		case key == "name":
@@ -280,9 +290,12 @@ func parseGuestConfig(data json.RawMessage, node string, vmid int, kind GuestKin
 			}
 			cfg.Disks = append(cfg.Disks, d)
 		case nicDevicePattern.MatchString(key):
-			nic, err := parseNIC(key, val)
+			// A malformed NIC value drops only that NIC and flags the
+			// list incomplete; the rest of the guest config is kept.
+			nic, err := parseNIC(key, rawVal)
 			if err != nil {
-				return nil, err
+				cfg.NICsIncomplete = true
+				continue
 			}
 			cfg.NICs = append(cfg.NICs, nic)
 		case hostpciDevicePattern.MatchString(key):
@@ -483,13 +496,21 @@ func parseMount(device, val string) (Mount, error) {
 }
 
 // parseNIC decodes a netN value. QEMU uses model=MAC or macaddr=MAC;
-// LXC uses hwaddr=MAC. Both use tag= for the VLAN ID.
+// LXC uses hwaddr=MAC. Both use tag= for the VLAN ID. The bridge name is
+// validated with the shared PVE bridge validator against the raw value;
+// the error never carries the value.
 func parseNIC(device, val string) (NIC, error) {
+	if len(val) > MaxTextFieldBytes {
+		return NIC{}, fmt.Errorf("nic value too long for %s", device)
+	}
 	nic := NIC{Device: device}
 	for _, kv := range parseKVList(val) {
 		switch kv[0] {
 		case "bridge":
-			nic.Bridge = sanitizeText(kv[1], 64)
+			if !pvecontract.ValidBridgeName(kv[1]) {
+				return nic, fmt.Errorf("bad bridge for %s", device)
+			}
+			nic.Bridge = kv[1]
 		case "tag", "vlan":
 			n, err := parseBoundedInt(kv[1], 0, 4094)
 			if err != nil {
