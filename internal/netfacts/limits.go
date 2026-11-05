@@ -32,8 +32,11 @@ const (
 	// maxNexthops bounds the "nexthops" list of one multipath route.
 	maxNexthops = 64
 	// maxAddrLen bounds the text of one host-provided IP address: the
-	// longest IPv6 form (45 bytes), "%" and a maxZoneLen zone, rounded
-	// up. Longer text is rejected before it is parsed.
+	// longest IPv6 form (45 bytes), "%" and a maxZoneLen zone (61 bytes),
+	// rounded up. Longer text is rejected before it is parsed. This is a
+	// bound on the work spent on hostile input (defence in depth), not a
+	// separate validity rule: every such text is also rejected by the
+	// parser or by validZone.
 	maxAddrLen = 64
 	// maxAddrsPerIf bounds the "addr_info" list of one interface in an
 	// `ip -j addr` document. A single interface carrying more than this

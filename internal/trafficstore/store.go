@@ -190,6 +190,10 @@ func NewWithNowAndRetention(db *sql.DB, now func() time.Time, retention time.Dur
 	return newStore(db, now, retention), nil
 }
 
+// Retention returns how long the store keeps flow data; query windows
+// may be at most this wide.
+func (s *Store) Retention() time.Duration { return s.retention }
+
 func newStore(db *sql.DB, now func() time.Time, retention time.Duration) *Store {
 	if now == nil {
 		now = time.Now

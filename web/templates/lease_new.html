@@ -20,7 +20,9 @@
     <dt>Created</dt><dd>{{timeTag $p.Created}}</dd>
     <dt>Expires</dt><dd>{{timeTag $p.Expiry}}</dd>
     <dt>Trigger</dt><dd>{{$p.Trigger}}</dd>
-    {{if $d.Provider}}
+    {{if $d.Telemetry}}
+    <dt>Rate profile</dt><dd>{{$p.RateProfile}}, at most {{$p.RunBudget}} metrics requests per remote per hour, each node or guest at most every {{$d.MinInterval}}; live reads only while a box is on screen (trigger {{$p.Trigger}})</dd>
+    {{else if $d.Provider}}
     <dt>Rate profile</dt><dd>{{$p.RateProfile}}, at most {{$p.RunBudget}} requests per remote per hour, each method at most every {{$d.MinInterval}}</dd>
     {{else}}
     <dt>Rate profile</dt><dd>{{$p.RateProfile}}, at most {{$p.RunBudget}} runs per host per hour, each action at most every {{$d.MinInterval}}</dd>
@@ -38,6 +40,23 @@
     </tbody>
   </table>
   </div>
+  {{if $d.Telemetry}}
+  <h2>{{$d.TargetCount}} nodes and guests (live values)</h2>
+  <p class="hint">Each guest is bound with its current generation: a guest recreated with the same VMID is not covered.</p>
+  {{range $p.Providers}}
+  {{$r := .RemoteID}}
+  <div class="table-wrap">
+  <table class="inventory" aria-label="Metrics targets of {{$r}}">
+    <thead><tr><th>Remote</th><th>Node</th><th>Kind</th><th>VMID</th><th>Generation</th></tr></thead>
+    <tbody>
+      {{range .MetricsTargets}}
+      <tr class="lease-metrics-target"><td class="mono">{{$r}}</td><td class="mono">{{.Node}}</td><td>{{.Kind}}</td><td class="mono">{{if .VMID}}{{.VMID}}{{else}}—{{end}}</td><td class="mono">{{if .Generation}}{{.Generation}}{{else}}—{{end}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{end}}
+  {{end}}
   {{else}}
   <h2>{{$d.ActionCount}} actions</h2>
   <div class="table-wrap">

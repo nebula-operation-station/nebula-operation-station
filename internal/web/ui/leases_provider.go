@@ -233,6 +233,9 @@ func (h *Handler) handleProviderLeasePreview(w http.ResponseWriter, r *http.Requ
 // providerLeaseRefreshURL is the form URL pre-filled with a provider
 // lease's remotes, methods and lifetime, or "" when it cannot be refreshed.
 func providerLeaseRefreshURL(v executions.ReadGrantView) string {
+	if v.RateProfile == permit.ProviderTelemetryProfile {
+		return pveLiveRenewURL(v)
+	}
 	in, ok := v.ProviderRefresh()
 	if !ok {
 		return ""
@@ -256,6 +259,30 @@ func providerLeaseRefreshURL(v executions.ReadGrantView) string {
 type leaseProviderRow struct {
 	RemoteID, PinPrefix, Methods       string
 	TrustGeneration, CredentialVersion string
+	// Binding is executions.ProviderBindingCurrent, ProviderBindingStale
+	// or "" (unknown).
+	Binding string
+	// Targets are the exact metrics targets of a telemetry lease.
+	Targets []leaseMetricsTarget
+}
+
+// leaseMetricsTarget is one frozen metrics target, rendered as text.
+type leaseMetricsTarget struct {
+	Node, Kind, VMID, Generation string
+}
+
+// leaseMetricsTargets renders the metrics targets of one remote in
+// document order (a node has no VMID or generation).
+func leaseMetricsTargets(ms []permit.ProviderMetricsTarget) []leaseMetricsTarget {
+	out := make([]leaseMetricsTarget, 0, len(ms))
+	for _, m := range ms {
+		t := leaseMetricsTarget{Node: m.Node, Kind: m.Kind}
+		if m.Kind != permit.MetricsKindNode {
+			t.VMID, t.Generation = strconv.FormatUint(m.VMID, 10), strconv.FormatUint(m.Generation, 10)
+		}
+		out = append(out, t)
+	}
+	return out
 }
 
 // leaseProviderRows renders the frozen remotes of a provider lease.
@@ -266,9 +293,21 @@ func leaseProviderRows(v executions.ReadGrantView) []leaseProviderRow {
 			RemoteID: p.RemoteID, PinPrefix: p.PinPrefix, Methods: strings.Join(p.Methods, ", "),
 			TrustGeneration:   strconv.FormatUint(p.TrustGeneration, 10),
 			CredentialVersion: strconv.FormatInt(p.CredentialVersion, 10),
+			Binding:           p.Binding, Targets: leaseMetricsTargets(p.MetricsTargets),
 		})
 	}
 	return out
+}
+
+// pveLiveRenewURL is the PVE page of a telemetry lease's remote, where a
+// new live-values lease is chosen from the current inventory; "" when v is
+// not an active or expired telemetry lease of exactly one remote.
+func pveLiveRenewURL(v executions.ReadGrantView) string {
+	if (v.State != "active" && v.State != "expired") || v.RateProfile != permit.ProviderTelemetryProfile || len(v.Providers) != 1 ||
+		!pvecontract.ValidRemoteID(v.Providers[0].RemoteID) {
+		return ""
+	}
+	return "/pve/" + url.PathEscape(v.Providers[0].RemoteID) + "#live"
 }
 
 // leaseProviderMethodCount is the number of distinct methods over the
