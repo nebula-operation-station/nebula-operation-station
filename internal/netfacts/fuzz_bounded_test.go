@@ -112,43 +112,91 @@ func FuzzParseNeighBounds(f *testing.F) {
 	})
 }
 
-// oracleViaHosts returns the addresses named by a "via" host anywhere in
-// the route document (top-level or inside a "nexthops" list), decoded
-// independently of ParseRoutes. Only such an address may be an IPv6
-// gateway of an IPv4 destination (RFC 5549).
-func oracleViaHosts(b []byte) map[netip.Addr]bool {
-	type via struct {
-		Host string `json:"host"`
-	}
+// oracleRouteEntry is one route document element decoded independently
+// of ParseRoutes: its raw "dst" text and the addresses named by a "via"
+// host of that element (top-level or inside its "nexthops" list).
+type oracleRouteEntry struct {
+	dst string
+	via map[netip.Addr]bool
+}
+
+// oracleRouteEntries decodes the route document element by element.
+// Only an address from the element's own "via" fields may be an IPv6
+// gateway of an IPv4 destination (RFC 5549); collecting the "via" hosts
+// of the whole document would credit a plain "gateway" of one element
+// from the "via" of another.
+func oracleRouteEntries(b []byte) []oracleRouteEntry {
 	var elems []json.RawMessage
 	if json.Unmarshal(b, &elems) != nil {
 		return nil
 	}
-	hosts := map[netip.Addr]bool{}
-	add := func(v *via) {
-		if v == nil {
-			return
-		}
-		if a, err := netip.ParseAddr(v.Host); err == nil {
-			hosts[a] = true
-		}
-	}
+	entries := make([]oracleRouteEntry, 0, len(elems))
 	for _, e := range elems {
 		var d struct {
-			Via      *via `json:"via"`
+			Dst string `json:"dst"`
+			Via *struct {
+				Host string `json:"host"`
+			} `json:"via"`
 			Nexthops []struct {
-				Via *via `json:"via"`
+				Via *struct {
+					Host string `json:"host"`
+				} `json:"via"`
 			} `json:"nexthops"`
 		}
 		if json.Unmarshal(e, &d) != nil {
 			continue
 		}
-		add(d.Via)
+		oe := oracleRouteEntry{dst: d.Dst, via: map[netip.Addr]bool{}}
+		add := func(h string) {
+			if a, err := netip.ParseAddr(h); err == nil {
+				oe.via[a] = true
+			}
+		}
+		if d.Via != nil {
+			add(d.Via.Host)
+		}
 		for i := range d.Nexthops {
-			add(d.Nexthops[i].Via)
+			if d.Nexthops[i].Via != nil {
+				add(d.Nexthops[i].Via.Host)
+			}
+		}
+		entries = append(entries, oe)
+	}
+	return entries
+}
+
+// entryProducesDst reports whether a document element with the raw "dst"
+// text s can produce the destination p, mirroring parseDst: "default"
+// produces 0.0.0.0/0 or ::/0, an address its /32 or /128, and anything
+// else must parse as that prefix.
+func entryProducesDst(s string, p netip.Prefix) bool {
+	if s == "default" {
+		return p == defaultRouteV4 || p == defaultRouteV6
+	}
+	if !strings.Contains(s, "/") {
+		a, err := netip.ParseAddr(s)
+		if err != nil {
+			return false
+		}
+		return p == netip.PrefixFrom(a, a.BitLen())
+	}
+	q, err := netip.ParsePrefix(s)
+	if err != nil {
+		return false
+	}
+	return p == q
+}
+
+// entriesCreditGateway reports whether the gateway gw of a route to
+// destination dst may have come from a "via" of an element that
+// produces dst.
+func entriesCreditGateway(entries []oracleRouteEntry, dst netip.Prefix, gw netip.Addr) bool {
+	for _, e := range entries {
+		if e.via[gw] && entryProducesDst(e.dst, dst) {
+			return true
 		}
 	}
-	return hosts
+	return false
 }
 
 // FuzzParseRoutesBounds checks the hard bounds of ParseRoutes on arbitrary
@@ -167,13 +215,15 @@ func FuzzParseRoutesBounds(f *testing.F) {
 	f.Add([]byte(`[{"dst":"default","gateway":"fe80::1%eth0","dev":"eth0"},{"dst":"default","gateway":"fe80::2%\u202e","dev":"eth0"}]`))
 	f.Add([]byte(`[{"dst":"10.0.0.0/24","dev":"eth0"},{"dst":"default","nexthops":[{"via":{"family":"inet6","host":"fe80::1%eth0"},"dev":"eth0"},{"gateway":"10.0.0.1","dev":"eth1"}]},{"dst":"10.1.0.0/24","via":{"family":"inet","host":"10.0.0.2"},"dev":"eth0"}]`))
 	f.Add([]byte(`[{"dst":"2001:db8::/64","dev":"eth0"},{"dst":"default","via":{"family":"inet6","host":"fe80::1"},"dev":"eth0"},{"dst":"2001:db8:1::/48","via":{"family":"inet","host":"10.0.0.1"},"dev":"eth0"}]`))
+	f.Add([]byte(`[{"dst":"10.0.0.0/8","dev":"eth0"},{"dst":"default","via":{"family":"inet6","host":"fe80::1"},"dev":"eth0"},{"dst":"10.0.0.0/24","gateway":"fe80::1","dev":"eth0"}]`))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		res, err := ParseRoutes(b)
 		if err != nil {
 			return
 		}
 		rs := res.Entries
-		var viaHosts map[netip.Addr]bool
+		var entries []oracleRouteEntry
+		var haveEntries bool
 		if len(rs) > 1000 {
 			t.Fatalf("route list has %d entries, bound is 1000", len(rs))
 		}
@@ -194,11 +244,15 @@ func FuzzParseRoutesBounds(f *testing.F) {
 				if r.Gateway.Is4() || !r.Dst.Addr().Is4() {
 					t.Fatalf("route gateway %v family differs from dst %v", r.Gateway, r.Dst)
 				}
-				if viaHosts == nil {
-					viaHosts = oracleViaHosts(b)
+				// The "via" must belong to the very element that
+				// produced this route, not to another element of the
+				// document.
+				if !haveEntries {
+					entries = oracleRouteEntries(b)
+					haveEntries = true
 				}
-				if !viaHosts[r.Gateway] {
-					t.Fatalf("route gateway %v for IPv4 dst %v did not come from a via", r.Gateway, r.Dst)
+				if !entriesCreditGateway(entries, r.Dst, r.Gateway) {
+					t.Fatalf("route gateway %v for IPv4 dst %v did not come from a via of its own element", r.Gateway, r.Dst)
 				}
 			}
 			oracleIfName(t, "route dev", r.Dev)
@@ -207,6 +261,42 @@ func FuzzParseRoutesBounds(f *testing.F) {
 			}
 		}
 	})
+}
+
+// TestOracleViaHostsPerEntry pins the per-entry semantics of the fuzz
+// oracle: an address named by a "via" of one element must not credit a
+// plain "gateway" of another element with the same address.
+func TestOracleViaHostsPerEntry(t *testing.T) {
+	// Element 1 names fe80::1 as a "via" host; element 2 uses the same
+	// address as a plain "gateway" for an IPv4 destination, which
+	// ParseRoutes drops (RFC 5549 only from a "via").
+	doc := []byte(`[{"dst":"default","via":{"family":"inet6","host":"fe80::1"},"dev":"eth0"},{"dst":"10.0.0.0/24","gateway":"fe80::1","dev":"eth0"}]`)
+	entries := oracleRouteEntries(doc)
+	if len(entries) != 2 {
+		t.Fatalf("decoded %d elements, want 2", len(entries))
+	}
+	gw := netip.MustParseAddr("fe80::1")
+	// The default route to 0.0.0.0/0 may carry the gateway: its own
+	// element names it as a "via".
+	if !entriesCreditGateway(entries, defaultRouteV4, gw) {
+		t.Fatal("oracle does not credit the via of the default element itself")
+	}
+	// The 10.0.0.0/24 route may not: its element has no "via", and the
+	// whole-document collection would have credited it wrongly.
+	if entriesCreditGateway(entries, netip.MustParsePrefix("10.0.0.0/24"), gw) {
+		t.Fatal("oracle credits a plain gateway from another element's via")
+	}
+	// A route to a destination no element produces is never credited.
+	if entriesCreditGateway(entries, netip.MustParsePrefix("10.9.0.0/24"), gw) {
+		t.Fatal("oracle credits a gateway for a destination no element produces")
+	}
+	// The multipath form: the via hosts of the nexthops of the element
+	// itself count.
+	doc2 := []byte(`[{"dst":"10.0.0.0/24","nexthops":[{"via":{"family":"inet6","host":"fe80::1"},"dev":"eth0"},{"gateway":"10.0.0.1","dev":"eth1"}]}]`)
+	entries2 := oracleRouteEntries(doc2)
+	if !entriesCreditGateway(entries2, netip.MustParsePrefix("10.0.0.0/24"), gw) {
+		t.Fatal("oracle does not credit a nexthop via of the element itself")
+	}
 }
 
 // FuzzParseAddrsBounds checks the hard bounds of ParseAddrs on arbitrary
