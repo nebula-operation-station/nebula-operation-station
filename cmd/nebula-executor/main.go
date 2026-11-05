@@ -56,7 +56,7 @@ func run() error {
 		socketGroup   = flag.String("socket-group", "nebula-rpc", "group owning the socket file ('' to skip)")
 		serverUser    = flag.String("server-user", "nebula-server", "OS user of nebula-server")
 		adminUsers    = flag.String("admin-users", "", "comma-separated OS users allowed to unlock and approve")
-		collectorUser = flag.String("pve-collector-user", defaultPveCollectorUser, "OS user of nebula-pve-collector (gets the pve-collector role; '' disables it)")
+		collectorUser = flag.String("pve-collector-user", defaultPveCollectorUser, "OS user of nebula-pve-collector (gets the pve-collector role; '' disables it; a configured non-default user must exist)")
 		rpID          = flag.String("rp-id", "", "WebAuthn RP ID: the fixed hostname Nebula is served under")
 		hardened      = flag.Bool("hardened", false, "require `nebula approve` for HIGH and CRITICAL")
 		sessionMin    = flag.Int("session-minutes", int(permit.DefaultSessionLength/time.Minute), "privileged session length in minutes (15–240)")
@@ -253,10 +253,24 @@ func resolveRoles(serverUser, adminUsers, collectorUser string, log *slog.Logger
 	return resolveRolesWith(peercred.LookupUID, uint32(os.Getuid()), serverUser, adminUsers, collectorUser, log)
 }
 
+// Role assignment errors; resolveRolesWith wraps them with the user name.
+var (
+	// errRootUser means a role was configured for root.
+	errRootUser = errors.New("must not be root")
+	// errExecutorUser means a role was configured for the executor's own UID.
+	errExecutorUser = errors.New("must not be the executor user")
+	// errSharedUser means a UID would hold two roles.
+	errSharedUser = errors.New("must be a dedicated user, not shared with another role")
+	// errCollectorUserMissing means an explicitly configured
+	// -pve-collector-user does not exist.
+	errCollectorUserMissing = errors.New("configured pve-collector user does not exist")
+)
+
 // resolveRolesWith maps OS users to peercred roles. The server, every
-// admin and the pve-collector need distinct dedicated UIDs. A collector
-// user that does not exist (an install that predates the collector) leaves
-// the pve-collector role unassigned; any other lookup failure, or a
+// admin and the pve-collector need distinct dedicated UIDs. A missing
+// collector user with the default name (an install that predates the
+// collector) leaves the pve-collector role unassigned; a missing collector
+// user that was configured explicitly, any other lookup failure, or a
 // collector UID shared with root, the executor, the server or an admin,
 // stops the start.
 func resolveRolesWith(lookup func(string) (uint32, error), self uint32, serverUser, adminUsers, collectorUser string, log *slog.Logger) (map[uint32][]peercred.Role, error) {
@@ -266,8 +280,11 @@ func resolveRolesWith(lookup func(string) (uint32, error), self uint32, serverUs
 	if err != nil {
 		return nil, fmt.Errorf("server user %q: %w", serverUser, err)
 	}
-	if suid == 0 || suid == self {
-		return nil, fmt.Errorf("server user must be a dedicated non-root user distinct from the executor")
+	switch {
+	case suid == 0:
+		return nil, fmt.Errorf("server user %q %w", serverUser, errRootUser)
+	case suid == self:
+		return nil, fmt.Errorf("server user %q %w", serverUser, errExecutorUser)
 	}
 	roles[suid] = []peercred.Role{peercred.RoleServer}
 
@@ -280,14 +297,13 @@ func resolveRolesWith(lookup func(string) (uint32, error), self uint32, serverUs
 		if err != nil {
 			return nil, fmt.Errorf("admin user %q: %w", name, err)
 		}
-		if uid == suid {
-			return nil, fmt.Errorf("admin user %q must not be the server user", name)
-		}
-		if uid == self {
-			return nil, fmt.Errorf("admin user %q must not be the executor user", name)
-		}
-		if uid == 0 {
-			return nil, fmt.Errorf("root cannot be an admin user; use a personal account")
+		switch {
+		case uid == 0:
+			return nil, fmt.Errorf("admin user %q %w; use a personal account", name, errRootUser)
+		case uid == self:
+			return nil, fmt.Errorf("admin user %q %w", name, errExecutorUser)
+		case uid == suid:
+			return nil, fmt.Errorf("admin user %q %w: it is the server user", name, errSharedUser)
 		}
 		roles[uid] = []peercred.Role{peercred.RoleAdmin}
 	}
@@ -300,6 +316,9 @@ func resolveRolesWith(lookup func(string) (uint32, error), self uint32, serverUs
 	cuid, err := lookup(collectorUser)
 	var unknown user.UnknownUserError
 	if errors.As(err, &unknown) {
+		if collectorUser != defaultPveCollectorUser {
+			return nil, fmt.Errorf("pve-collector user %q: %w: %w", collectorUser, errCollectorUserMissing, err)
+		}
 		log.Warn("pve-collector user not found; the pve-collector role is not assigned", "user", collectorUser)
 		return roles, nil
 	}
@@ -308,11 +327,11 @@ func resolveRolesWith(lookup func(string) (uint32, error), self uint32, serverUs
 	}
 	switch {
 	case cuid == 0:
-		return nil, fmt.Errorf("pve-collector user %q must not be root", collectorUser)
+		return nil, fmt.Errorf("pve-collector user %q %w", collectorUser, errRootUser)
 	case cuid == self:
-		return nil, fmt.Errorf("pve-collector user %q must not be the executor user", collectorUser)
+		return nil, fmt.Errorf("pve-collector user %q %w", collectorUser, errExecutorUser)
 	case len(roles[cuid]) > 0:
-		return nil, fmt.Errorf("pve-collector user %q must be a dedicated user, not the server or an admin user", collectorUser)
+		return nil, fmt.Errorf("pve-collector user %q %w: it is the server or an admin user", collectorUser, errSharedUser)
 	}
 	roles[cuid] = []peercred.Role{peercred.RolePVECollector}
 	return roles, nil

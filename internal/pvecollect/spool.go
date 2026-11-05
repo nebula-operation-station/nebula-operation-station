@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -450,14 +451,75 @@ var chmodDir = func(dir *os.File, mode os.FileMode) error { return dir.Chmod(mod
 // dirModeMask covers the mode bits ensureDirMode compares.
 const dirModeMask = os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky
 
-// ensureDirMode leaves an open directory that already has exactly want
-// (permission bits plus setgid) untouched and changes it otherwise. The
-// collector's unit sets RestrictSUIDSGID=yes, under which every chmod that
-// sets the setgid bit fails with EPERM, even when the bit is already set.
-// Deployments therefore create the spool directories with their final
-// modes (install.sh, the container image), and a running collector never
-// needs to change them.
+// spoolGroupName is the shared group of the collector and the server that
+// install.sh and the container image give every spool directory.
+const spoolGroupName = "nebula-rpc"
+
+// ErrSpoolOwnership means a spool directory is not owned by the collector
+// UID and the shared server group.
+var ErrSpoolOwnership = errors.New("pvecollect: spool directory has foreign ownership")
+
+// spoolOwnership returns the UID and GID every collector spool directory
+// must have. It is a variable so that tests can simulate other owners.
+var spoolOwnership = defaultSpoolOwnership
+
+// defaultSpoolOwnership expects the effective UID as owner. The group is
+// spoolGroupName when this process is a member of it (the collector unit
+// adds it as a supplementary group); otherwise, where no shared group is
+// set up, it is the process's own effective GID. Any group the process
+// cannot resolve fails closed.
+func defaultSpoolOwnership() (uint32, uint32, error) {
+	uid, egid := uint32(os.Geteuid()), uint32(os.Getegid())
+	g, err := user.LookupGroup(spoolGroupName)
+	var unknown user.UnknownGroupError
+	if errors.As(err, &unknown) {
+		return uid, egid, nil
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("look up group %s: %w", spoolGroupName, err)
+	}
+	gid64, err := strconv.ParseUint(g.Gid, 10, 32)
+	if err != nil {
+		return 0, 0, fmt.Errorf("group %s has invalid gid %q", spoolGroupName, g.Gid)
+	}
+	gid := uint32(gid64)
+	if gid == egid {
+		return uid, gid, nil
+	}
+	groups, err := os.Getgroups()
+	if err != nil {
+		return 0, 0, fmt.Errorf("read supplementary groups: %w", err)
+	}
+	for _, sg := range groups {
+		if sg >= 0 && uint32(sg) == gid {
+			return uid, gid, nil
+		}
+	}
+	return uid, egid, nil
+}
+
+// ensureDirMode checks that an open spool directory is owned by the
+// collector UID and the shared group (spoolOwnership) and fails otherwise;
+// it never changes ownership. It leaves a directory that already has
+// exactly want (permission bits plus setgid, sticky and setuid compared)
+// untouched and changes any other mode, supersets included, to exactly
+// want. The collector's unit sets RestrictSUIDSGID=yes, under which every
+// chmod that sets the setgid bit fails with EPERM, even when the bit is
+// already set. Deployments therefore create the spool directories with
+// their final modes and ownership (install.sh, the container image), and a
+// running collector never needs to change them.
 func ensureDirMode(dir *os.File, want os.FileMode) error {
+	wantUID, wantGID, err := spoolOwnership()
+	if err != nil {
+		return fmt.Errorf("%s: expected ownership: %w", dir.Name(), err)
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(int(dir.Fd()), &st); err != nil {
+		return fmt.Errorf("%s: stat: %w", dir.Name(), err)
+	}
+	if st.Uid != wantUID || st.Gid != wantGID {
+		return fmt.Errorf("%w: %s is owned by %d:%d, want %d:%d (create it with install.sh)", ErrSpoolOwnership, dir.Name(), st.Uid, st.Gid, wantUID, wantGID)
+	}
 	fi, err := dir.Stat()
 	if err != nil {
 		return err
