@@ -1086,7 +1086,87 @@ afterwards), an existing one gets the address, MAC or hostname it lacks.
 Conflicts are never imported. Every host seen also feeds the address
 status. Names and banners come from the network and may lie.
 
-### 9.9 Search
+### 9.9 Traffic map
+
+The *Traffic map* in the sidebar (`/traffic`) shows your network as a node
+graph: one node per managed host, IPAM asset and network, and one edge per
+aggregated flow between two of them, with byte counts for the selected
+window. The window is 1 h, 24 h, 7 d or 21 d (default 24 h) and is clamped
+to the store's retention (below). Clicking a node shows its top
+connections and a link to the host or asset page. The graph is rendered in
+a sandboxed iframe without cookies, so it cannot read your session.
+
+**What the map shows.** Each edge is an aggregated flow: the two
+endpoints, the protocol, the server port and the byte count. The
+*Connections* tab of a host page (`/hosts/ID/connections`) and of an asset
+page (`/network/a/ID/connections`) lists the flows individually: peer
+(linked when the peer is a managed host or asset), direction, protocol and
+port, the process name when known, bytes in and out, first and last seen,
+the source tier and the host that reported the flow. Byte counts from
+socket snapshots are lower bounds and are marked as such; flows whose
+endpoints are not inventory nodes (for example internet peers) are counted
+as unmapped, not drawn.
+
+**Data sources and tiers.** The map is built from the server's own
+inventory records plus reports, and every row names its reporter and its
+tier, because a host can lie about its connections (spec 09):
+
+- *Managed hosts (tier 1)* — the built-in read-only action `net.facts`
+  (below): endpoints (`ip addr`/`ip link`), routes, neighbors, sockets
+  (`ss -tinuaH`, including TCP byte counters) and, where the tools exist,
+  bridge VLANs, LLDP and conntrack.
+- *Proxmox (tier 2)* — `nebula-pve-collector` reports each guest NIC's
+  bridge, VLAN and MAC; the server maps the MAC to the tap interface.
+  These are the provider's claims about guest configuration, not
+  observations of traffic.
+- *Sensors and DNS (tiers 3–4)* — planned, not implemented.
+
+**`net.facts`: lease and budget.** `net.facts` is a built-in LOW-risk
+read-only action on the read-only allowlist. Create a read lease
+(*Operations → Read leases → New read lease*, section 9.4) that includes
+`net.facts` with a 7- or 30-day duration and approve it with a security
+key (hardened: `nebula read-grant approve <digest>`). The server's
+scheduler then runs it under the lease's budget: a 15-minute minimum
+interval per action, 24 runs per host per rolling hour by default (max
+240), shared across all leased actions, no catch-up. The executor re-checks
+the allowlist and the LOW rating on every run.
+
+**Process names: no sudo rule.** `net.facts` runs `ss` without `-p`, so
+process names are never collected and the action needs no root or sudo on
+the host. The optional sudo rule for `ss -p` (ADR 0009, open question Q3)
+was not adopted: a sockets report that contains a process column — that is,
+one from a wrapped or replaced `ss` — is rejected as invalid, so a
+compromised host cannot inject process names.
+
+**Retention: 21 days.** The server stores hourly flow buckets and endpoint
+reports and prunes them during a full sync (at least once per clock hour).
+The retention is 21 days; the map's and
+the connections pages' windows are clamped to it. There is no setting to
+shorten it yet: the store only accepts a shorter retention (minimum 1 h),
+and `nebula-server` currently always runs with the 21-day default.
+
+**Icons.** Nodes and software entries can carry an icon from the software
+catalog (*Software* page, `/software`). The icon pages
+(`/software/icon/KEY`, per asset `/software/assets/icon?id=ASSET`) are
+read-only for now: the icon service is not yet configured in the server, so
+the icon-change routes return 404. Once enabled, icons are fetched by the
+one-shot `nebula-iconfetch` service from a host allowlist (default
+`avatars.githubusercontent.com` and `upload.wikimedia.org`, changed with
+its `-allow` flag; spool `/var/lib/nebula/iconfetch`, results kept 24 h) or
+uploaded directly. Every icon is sanitized: only PNG, JPEG or GIF input up
+to 256 KiB and 1024 px is accepted, re-encoded as fresh 64×64 and 128×128
+PNGs (SVG, WebP, ICO and BMP are rejected), and stored and served keyed by
+SHA-256.
+
+**Privacy.** The traffic store holds hourly aggregates only: endpoint
+addresses and MACs, protocol, port, byte counts, connection counts and the
+reporting host. It holds no packet contents, no DNS names, no process
+names and no credentials. Host-reported data (names, banners, LLDP text)
+is untrusted: size-limited, validated and rendered as text only. Raw LLDP
+and conntrack sections are not parsed and stay in the execution result
+(its normal lifecycle), not in the traffic store.
+
+### 9.10 Search
 
 The search box in the navigation finds hosts (ID, name, endpoint, tag
 `key=value`, group), assets (name, hostname, MAC, address), networks
@@ -1096,7 +1176,7 @@ actions (*Plan an operation* for a host, *Plan* for a runbook,
 *Add to managed hosts* for an asset) only open the page that does the
 work; nothing runs without the usual review and approval.
 
-### 9.10 Day-to-day checklist
+### 9.11 Day-to-day checklist
 
 | Situation | What to do |
 | --- | --- |
