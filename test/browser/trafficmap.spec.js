@@ -193,7 +193,8 @@ async function suite(base, state, s) {
         const img = document.createElement('img');
         img.onload = () => resolve('loaded');
         img.onerror = () => resolve('blocked');
-        setTimeout(() => resolve('blocked'), 2000);
+        // A slow load is not a block: only onerror (img-src) counts.
+        setTimeout(() => resolve('timeout'), 5000);
         img.src = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
       });
       return r;
@@ -204,7 +205,7 @@ async function suite(base, state, s) {
     check(iso.topURL === 'blocked', tag + 'the renderer cannot read the top URL');
     check(iso.storage === 'blocked', tag + 'the renderer has no storage');
     check(iso.fetch === 'blocked', tag + 'the renderer cannot use the network (connect-src)');
-    check(iso.image === 'blocked', tag + 'the renderer cannot load images (img-src)');
+    check(iso.image === 'blocked', tag + 'the renderer cannot load images (img-src): ' + iso.image);
     const cookies = await ctx.cookies();
     const httpOnly = cookies.filter((c) => c.httpOnly);
     const docCookie = await page.evaluate(() => document.cookie);

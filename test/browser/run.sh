@@ -9,7 +9,19 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d)
 chmod 700 "$work"
 pid=
-trap 'kill "${pid:-0}" 2>/dev/null || true; rm -rf "$work"' EXIT
+# Kill only a harness that is still running: an empty pid must never reach
+# kill, since "kill 0" signals the whole process group (this script and
+# the calling make). The trap keeps the script's exit status.
+cleanup() {
+  local rc=$?
+  if [ -n "${pid:-}" ]; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+  rm -rf "$work"
+  exit "$rc"
+}
+trap cleanup EXIT
 go build -o "$work/harness" "$root/test/browser/harness"
 
 run_spec() {

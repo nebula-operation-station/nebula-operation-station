@@ -21,7 +21,7 @@ import (
 const (
 	trafficHostLabel  = `<img src=x onerror="window.__pwned='img'">E2E host`
 	trafficTwoLabel   = `</script><script>window.__pwned='script'</script>`
-	trafficAssetLabel = "printer.local‮<svg onload=\"window.__pwned='svg'\">"
+	trafficAssetLabel = "printer.local\u202e<svg onload=\"window.__pwned='svg'\">"
 	trafficZoneName   = `<iframe srcdoc="<script>parent.__pwned='zone'</script>">`
 )
 

@@ -26,12 +26,14 @@ import (
 	"image/jpeg"
 	"image/png"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -78,7 +80,7 @@ func (noFlows) OverviewUnion(context.Context, []netip.Addr, flowagg.Window, int)
 // printable text.
 var hostileLabels = map[string]string{
 	"web":   `<img src=x onerror=alert(1)>`,
-	"mdns":  "printer.local‮​<script>alert(1)</script>\x00\x1b[31m⁦",
+	"mdns":  "printer.local\u202e\u200b<script>alert(1)</script>\x00\x1b[31m\u2066",
 	"utf8":  "caf\xff\xfe</script><svg/onload=alert(1)>",
 	"long":  strings.Repeat("<b>", 1000),
 	"ctr":   "db-<iframe srcdoc='<script>parent.alert(1)</script>'>",
@@ -177,7 +179,7 @@ func TestTrafficMapHostileNamesNeverBecomeMarkup(t *testing.T) {
 		if i := bytes.IndexAny(body, "<>&"); i >= 0 {
 			t.Fatalf("%s: raw markup character in the model at %d: %q", target, i, body[max(0, i-20):min(len(body), i+20)])
 		}
-		for _, bad := range []string{"‮", "​", "⁦", "\x1b"} {
+		for _, bad := range []string{"\u202e", "\u200b", "\u2066", "\x1b"} {
 			if bytes.Contains(body, []byte(bad)) {
 				t.Errorf("%s: model contains %q", target, bad)
 			}
@@ -256,12 +258,189 @@ func TestTrafficMapHostileNamesNeverBecomeMarkup(t *testing.T) {
 // only software name the map shows next to an icon.
 func TestContainerAndServiceNamesWithMarkupAreNoCatalogKeys(t *testing.T) {
 	for _, name := range []string{
-		"<script>alert(1)</script>", `evil"onload="x`, "redis‮", "a b", "../../etc", "", strings.Repeat("a", 65),
+		"<script>alert(1)</script>", `evil"onload="x`, "redis\u202e", "a b", "../../etc", "", strings.Repeat("a", 65),
 		"Nginx", "nginx\x00", "javascript:alert(1)",
 	} {
 		if k, err := softwarecat.NewKey(name); err == nil {
 			t.Errorf("NewKey(%q) = %q, want an error", name, k)
 		}
+	}
+}
+
+// crossHostFlows is a traffic store with flows of two hosts, an unrelated
+// pair and an address two nodes claim. With leaky set, TopN returns every
+// flow of the store whatever node is asked for, as a buggy or compromised
+// store would: the focus view must still show only the focus's own flows.
+type crossHostFlows struct {
+	leaky bool
+}
+
+var (
+	chHostA = netip.MustParseAddr("10.0.0.1")
+	chPeerA = netip.MustParseAddr("10.0.0.10")
+	chPeerB = netip.MustParseAddr("10.0.0.5")
+	chHostB = netip.MustParseAddr("10.0.0.12")
+	chX1    = netip.MustParseAddr("10.0.0.30")
+	chX2    = netip.MustParseAddr("10.0.0.31")
+	chAmb   = netip.MustParseAddr("10.0.0.99")
+)
+
+func chFlow(a, b netip.Addr, ab, ba, conns uint64) flowagg.FlowTotal {
+	return flowagg.FlowTotal{Key: flowagg.FlowKey{A: a, B: b, Proto: flowagg.TCP, ServerPort: 443, Server: flowagg.SideB},
+		BytesAB: ab, BytesBA: ba, Connections: conns, Confirmed: true}
+}
+
+// chAll is every flow of the store. Keys are canonical (A < B by address),
+// so host-b's flow has peer-b on side A.
+var chAll = []flowagg.FlowTotal{
+	chFlow(chHostA, chPeerA, 600, 400, 3),
+	chFlow(chPeerB, chHostB, 50, 1950, 5),
+	chFlow(chX1, chX2, 3000, 1, 7),
+	chFlow(chPeerB, chAmb, 500, 0, 1),
+	chFlow(chHostA, chAmb, 400, 0, 1),
+}
+
+func chTouching(addrs ...netip.Addr) []flowagg.FlowTotal {
+	var out []flowagg.FlowTotal
+	for _, f := range chAll {
+		for _, a := range addrs {
+			if f.Key.A == a || f.Key.B == a {
+				out = append(out, f)
+				break
+			}
+		}
+	}
+	return out
+}
+
+func (s crossHostFlows) TopN(_ context.Context, node netip.Addr, _ flowagg.Window, _ int) ([]flowagg.FlowTotal, error) {
+	if s.leaky {
+		return slices.Clone(chAll), nil
+	}
+	return chTouching(node), nil
+}
+
+func (crossHostFlows) OverviewUnion(_ context.Context, nodes []netip.Addr, _ flowagg.Window, _ int) ([]flowagg.FlowTotal, error) {
+	return chTouching(nodes...), nil
+}
+
+// crossHostInventory: host-a talks to peer-a, host-b to peer-b, x-1 to x-2;
+// amb-1 and amb-2 both claim 10.0.0.99, so flows to it belong to nobody.
+func crossHostInventory(context.Context) (tmapi.Inventory, error) {
+	n := func(id string, a netip.Addr) tmapi.NodeInput {
+		return tmapi.NodeInput{ID: id, Label: "label-of-" + id, Kind: tmapi.KindHost, Addrs: []netip.Addr{a}}
+	}
+	return tmapi.Inventory{Nodes: []tmapi.NodeInput{
+		n("host-a", chHostA), n("peer-a", chPeerA), n("host-b", chHostB), n("peer-b", chPeerB),
+		n("x-1", chX1), n("x-2", chX2), n("amb-1", chAmb), n("amb-2", chAmb),
+	}}, nil
+}
+
+var chNodeIDs = []string{"host-a", "peer-a", "host-b", "peer-b", "x-1", "x-2", "amb-1", "amb-2"}
+
+func crossHostModel(t *testing.T, flows tmapi.Flows, focus string) (tmapi.Model, []byte) {
+	t.Helper()
+	api, err := tmapi.New(tmapi.Options{Inventory: crossHostInventory, Flows: flows,
+		Authorize: func(*http.Request) bool { return true }, Log: slog.New(slog.DiscardHandler)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := middleware.Handler(middleware.Options{PublicOrigin: tmOrigin}, api)
+	target := "/?window=24h"
+	if focus != "" {
+		target += "&focus=" + focus
+	}
+	w := tmGet(h, target)
+	if w.Code != http.StatusOK {
+		t.Fatalf("focus %q: status %d: %s", focus, w.Code, w.Body.String())
+	}
+	var m tmapi.Model
+	if err := json.Unmarshal(w.Body.Bytes(), &m); err != nil {
+		t.Fatal(err)
+	}
+	return m, w.Body.Bytes()
+}
+
+// edgeSummary renders edges as "a-b ab/ba conns", sorted.
+func edgeSummary(es []tmapi.Edge) []string {
+	out := make([]string, 0, len(es))
+	for _, e := range es {
+		out = append(out, fmt.Sprintf("%s-%s %d/%d %d", e.A, e.B, e.BytesAB, e.BytesBA, e.Connections))
+	}
+	slices.Sort(out)
+	return out
+}
+
+func nodeIDs(ns []tmapi.Node) []string {
+	out := make([]string, 0, len(ns))
+	for _, n := range ns {
+		out = append(out, n.ID)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// TestTrafficMapFocusShowsNoCrossHostData: the focus view of a host holds
+// only that host, its peers and the flows between them, never another
+// host's nodes or flows, even when the store hands back more than the
+// focus's flows. The overview attributes each flow to the right pair and
+// direction and leaves flows to an ambiguous address unresolved.
+func TestTrafficMapFocusShowsNoCrossHostData(t *testing.T) {
+	want := map[string]struct {
+		nodes []string
+		edges []string
+	}{
+		"host-a": {[]string{"host-a", "peer-a"}, []string{"host-a-peer-a 600/400 3"}},
+		// Edge ends are ordered by ID: host-b < peer-b, so the bytes swap.
+		"host-b": {[]string{"host-b", "peer-b"}, []string{"host-b-peer-b 1950/50 5"}},
+	}
+	for _, leaky := range []bool{false, true} {
+		for focus, w := range want {
+			name := fmt.Sprintf("focus=%s/leaky=%v", focus, leaky)
+			m, body := crossHostModel(t, crossHostFlows{leaky: leaky}, focus)
+			if m.Focus != focus {
+				t.Errorf("%s: model focus %q", name, m.Focus)
+			}
+			if got := nodeIDs(m.Nodes); !slices.Equal(got, w.nodes) {
+				t.Errorf("%s: nodes %v, want %v", name, got, w.nodes)
+			}
+			if got := edgeSummary(m.Edges); !slices.Equal(got, w.edges) {
+				t.Errorf("%s: edges %v, want %v", name, got, w.edges)
+			}
+			if len(m.ZoneLinks) != 0 {
+				t.Errorf("%s: zone links %+v", name, m.ZoneLinks)
+			}
+			// Nothing of another node may reach the response, not even as
+			// a label or an ID in an edge.
+			for _, id := range chNodeIDs {
+				if slices.Contains(w.nodes, id) {
+					continue
+				}
+				if bytes.Contains(body, []byte(`"`+id+`"`)) || bytes.Contains(body, []byte("label-of-"+id)) {
+					t.Errorf("%s: response mentions node %s", name, id)
+				}
+			}
+		}
+	}
+
+	m, _ := crossHostModel(t, crossHostFlows{}, "")
+	if got := nodeIDs(m.Nodes); !slices.Equal(got, slices.Sorted(slices.Values(chNodeIDs))) {
+		t.Errorf("overview nodes %v", got)
+	}
+	wantEdges := []string{"host-a-peer-a 600/400 3", "host-b-peer-b 1950/50 5", "x-1-x-2 3000/1 7"}
+	if got := edgeSummary(m.Edges); !slices.Equal(got, wantEdges) {
+		t.Errorf("overview edges %v, want %v", got, wantEdges)
+	}
+	for _, e := range m.Edges {
+		if strings.HasPrefix(e.A, "amb-") || strings.HasPrefix(e.B, "amb-") {
+			t.Errorf("a flow to the ambiguous address was attributed: %+v", e)
+		}
+	}
+	if m.UnmappedFlows != 2 {
+		t.Errorf("overview unmapped flows = %d, want 2 (both flows to the ambiguous address)", m.UnmappedFlows)
+	}
+	if m.Omitted.Addresses < 1 {
+		t.Errorf("the ambiguous address is not reported as omitted: %+v", m.Omitted)
 	}
 }
 
@@ -345,9 +524,21 @@ func TestTrafficMapIframeIsIsolated(t *testing.T) {
 			t.Errorf("page has an inline script: %s", tag)
 		}
 	}
+	// The page's CSP is the server default; any widening (a frame-src,
+	// connect-src or script source beyond 'self') must show up here.
 	pageCSP := cspDirectives(t, w.Header().Get("Content-Security-Policy"))
-	if pageCSP["frame-ancestors"] != "'none'" || strings.Contains(pageCSP["script-src"], "unsafe") {
-		t.Errorf("page CSP weakened: %v", pageCSP)
+	wantPage := map[string]string{
+		"default-src":     "'self'",
+		"script-src":      "'self'",
+		"style-src":       "'self'",
+		"img-src":         "'self' data:",
+		"object-src":      "'none'",
+		"base-uri":        "'none'",
+		"frame-ancestors": "'none'",
+		"form-action":     "'self'",
+	}
+	if !maps.Equal(pageCSP, wantPage) {
+		t.Errorf("page CSP = %v, want exactly %v", pageCSP, wantPage)
 	}
 
 	f := tmGet(h, "/traffic/frame")
@@ -431,7 +622,7 @@ func jsWithoutComments(src string) string {
 func TestTrafficMapScriptsHaveNoMarkupSinks(t *testing.T) {
 	root := filepath.Join("..", "..", "web", "static")
 	markup := regexp.MustCompile(`\.innerHTML\b|\.outerHTML\b|insertAdjacentHTML|document\.write|\beval\s*\(|new\s+Function\b|\bFunction\s*\(|DOMParser|createContextualFragment|\bsrcdoc\b|setTimeout\s*\(\s*["'\x60]|setInterval\s*\(\s*["'\x60]`)
-	renderer := regexp.MustCompile(`\bfetch\s*\(|XMLHttpRequest|WebSocket|EventSource|sendBeacon|importScripts|new\s+Image\b|\.src\s*=|window\.open|document\.cookie|localStorage|sessionStorage|indexedDB|parent\.document|top\.document|opener|postMessage\([^)]*["']\*["']`)
+	renderer := regexp.MustCompile(`\bfetch\s*\(|XMLHttpRequest|WebSocket|EventSource|sendBeacon|importScripts|new\s+Image\b|\.src\s*=|window\.open|document\.cookie|localStorage|sessionStorage|indexedDB|parent\.document|top\.document|opener|postMessage\([^;\n]*["']\*["']`)
 	files, err := filepath.Glob(filepath.Join(root, "trafficmap", "*.js"))
 	if err != nil || len(files) < 5 {
 		t.Fatalf("renderer modules: %v %v", files, err)

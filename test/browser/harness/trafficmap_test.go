@@ -35,8 +35,14 @@ func TestHarnessTrafficMapNeedsASession(t *testing.T) {
 func TestHarnessTrafficMapServesHostileLabelsAsText(t *testing.T) {
 	h := newHarness(true, "8080", t.TempDir())
 	code, body := get(t, h, "/traffic?window=24h&focus=e2e-host")
-	if code != http.StatusOK || !strings.Contains(body, `sandbox="allow-scripts"`) || strings.Contains(body, "allow-same-origin") {
+	if code != http.StatusOK {
 		t.Fatalf("GET /traffic = %d", code)
+	}
+	if !strings.Contains(body, `sandbox="allow-scripts"`) {
+		t.Fatal(`GET /traffic: no iframe with sandbox="allow-scripts"`)
+	}
+	if strings.Contains(body, "allow-same-origin") {
+		t.Fatal("GET /traffic: the page grants allow-same-origin")
 	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/traffic/frame", nil))
@@ -62,7 +68,7 @@ func TestHarnessTrafficMapServesHostileLabelsAsText(t *testing.T) {
 	if labels["e2e-host"] != trafficHostLabel || labels["e2e-two"] != trafficTwoLabel {
 		t.Errorf("labels = %q", labels)
 	}
-	if got := labels["asset:prn"]; strings.ContainsRune(got, '‮') || !strings.HasPrefix(got, "printer.local<svg") {
+	if got := labels["asset:prn"]; strings.ContainsRune(got, '\u202e') || !strings.HasPrefix(got, "printer.local<svg") {
 		t.Errorf("asset label = %q, want the bidi override removed", got)
 	}
 	if len(m.Zones) != 1 || m.Zones[0].Name != trafficZoneName {
