@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
@@ -16,6 +17,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 )
 
 // Held batch targets (ADR 0007 E11). A target whose last batch member may
@@ -28,8 +31,15 @@ import (
 // A hold lasts at most batchHoldMax while the executor rechecks it
 // automatically. A target still held then (the run still visible, or its
 // visibility unknown) is never freed by time: the hold expires into a
-// terminal state that only an operator release (ReleaseHeldBatchTarget)
-// ends, and that release, too, needs the host to show the run gone.
+// terminal state that only an operator ends: the release
+// (ReleaseHeldBatchTarget), which, too, needs the host to show the run
+// gone, or, with the executor stopped, `nebula-executor batch-holds
+// rearm` (RearmHeldBatchTarget), which returns the hold to automatic
+// rechecks.
+//
+// A target is held from its member's reservation on, before the member
+// starts, so an executor crash or kill during an attached run restarts
+// with the target held, too.
 //
 // The file holds what reaching the target needs (host ID, pinned
 // fingerprint, endpoints) and the execution ID; never the run's secrets,
@@ -66,10 +76,14 @@ var (
 	// ErrBatchTargetStillRunning: the host shows the held run, or cannot
 	// tell; the target stays held.
 	ErrBatchTargetStillRunning = errors.New("batch: the held run is still running on the target, or the target cannot tell")
-	// ErrBatchHoldBusy: a recheck of the target is in flight.
+	// ErrBatchHoldBusy: a recheck of the target is in flight, or its
+	// member runs there now.
 	ErrBatchHoldBusy = errors.New("batch: the held target is being rechecked; try again")
 	// ErrBatchHoldReason: missing or malformed operator name or reason.
 	ErrBatchHoldReason = errors.New("batch: an operator name and a printable reason of at most 256 bytes are required")
+	// ErrBatchHoldNotExpired: the hold is still rechecked automatically;
+	// only an expired hold is re-armed.
+	ErrBatchHoldNotExpired = errors.New("batch: the hold has not expired; the executor still rechecks it")
 )
 
 // heldRecord is one persisted hold.
@@ -95,6 +109,9 @@ type HeldBatchTarget struct {
 	HeldAt      time.Time
 	// Expired: held past batchHoldMax; only an operator release ends it.
 	Expired bool
+	// Running: a batch member runs on the target now (its reservation is
+	// persisted as this hold).
+	Running bool
 }
 
 // validExecutionID reports whether id is a lowercase UUID.
@@ -298,7 +315,7 @@ func (s *Service) HeldBatchTargets() []HeldBatchTarget {
 	var out []HeldBatchTarget
 	for _, r := range x.heldRecordsLocked("") {
 		out = append(out, HeldBatchTarget{HostID: r.HostID, Fingerprint: r.Fingerprint, ExecutionID: r.ExecutionID,
-			HeldAt: time.Unix(r.HeldAtUnix, 0), Expired: r.Expired})
+			HeldAt: time.Unix(r.HeldAtUnix, 0), Expired: r.Expired, Running: x.held[r.HostID].running})
 	}
 	return out
 }
@@ -323,7 +340,7 @@ func (s *Service) ReleaseHeldBatchTarget(ctx context.Context, hostID, executionI
 	case h == nil || h.executionID != executionID:
 		x.mu.Unlock()
 		return ErrBatchTargetNotHeld
-	case h.checking:
+	case h.checking || h.running:
 		x.mu.Unlock()
 		return ErrBatchHoldBusy
 	}
@@ -356,5 +373,70 @@ func (s *Service) ReleaseHeldBatchTarget(ctx context.Context, hostID, executionI
 	delete(x.hosts, hostID)
 	s.log.Warn("audit", "kind", "batch_target_released_by_operator", "execution", executionID, "host", hostID, "by", by,
 		"reason", reason, "expired", h.expired, "detail", "the target shows the held run gone")
+	return nil
+}
+
+// Offline operator access to the held targets (`nebula-executor
+// batch-holds`). It needs the open executor.db of the data directory:
+// executordb.Open holds the directory's flock, so no executor runs on it
+// and none can start and overwrite the file meanwhile. It reads and writes
+// the file only through readHeld and the atomic write, never by hand.
+
+// errOfflineHoldsLock: the caller does not hold the data directory.
+var errOfflineHoldsLock = errors.New("batch: the held targets are changed only with the executor stopped and executor.db open")
+
+// OfflineHeldBatchTargets lists the held targets in dataDir, sorted by
+// host. db is the open executor.db of dataDir (see above).
+func OfflineHeldBatchTargets(db *executordb.DB, dataDir string) ([]HeldBatchTarget, error) {
+	if db == nil {
+		return nil, errOfflineHoldsLock
+	}
+	recs, err := readHeld(filepath.Join(dataDir, batchHeldFile))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrBatchHoldStore, err)
+	}
+	slices.SortFunc(recs, func(a, b heldRecord) int { return strings.Compare(a.HostID, b.HostID) })
+	out := make([]HeldBatchTarget, 0, len(recs))
+	for _, r := range recs {
+		out = append(out, HeldBatchTarget{HostID: r.HostID, Fingerprint: r.Fingerprint, ExecutionID: r.ExecutionID,
+			HeldAt: time.Unix(r.HeldAtUnix, 0), Expired: r.Expired})
+	}
+	return out, nil
+}
+
+// RearmHeldBatchTarget is the audited offline operator recovery of an
+// expired hold (the exact hold: host and execution ID, with the operator
+// and a reason). It never frees the target: it returns the hold to
+// automatic rechecks, counted from now, so the executor frees the target
+// once the host shows the run gone (rechecked before the next member
+// starts there) and keeps it held otherwise. db is the open executor.db
+// of dataDir (see above); the file is written atomically.
+func RearmHeldBatchTarget(db *executordb.DB, dataDir, hostID, executionID, by, reason string, now time.Time, log *slog.Logger) error {
+	if db == nil {
+		return errOfflineHoldsLock
+	}
+	if !validBatchReason(by, maxBatchHoldReason) || !validBatchReason(reason, maxBatchHoldReason) {
+		return ErrBatchHoldReason
+	}
+	path := filepath.Join(dataDir, batchHeldFile)
+	recs, err := readHeld(path)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrBatchHoldStore, err)
+	}
+	i := slices.IndexFunc(recs, func(r heldRecord) bool { return r.HostID == hostID && r.ExecutionID == executionID })
+	switch {
+	case i < 0:
+		return ErrBatchTargetNotHeld
+	case !recs[i].Expired:
+		return ErrBatchHoldNotExpired
+	}
+	recs[i].Expired = false
+	recs[i].HeldAtUnix = now.Unix()
+	x := &batchExec{holdPath: path, writeHeld: writeFileAtomic}
+	if err := x.writeHeldLocked(recs); err != nil {
+		return err
+	}
+	log.Warn("audit", "kind", "batch_target_hold_rearmed_by_operator", "execution", executionID, "host", hostID, "by", by,
+		"reason", reason, "detail", "the expired hold is rechecked again; the target is freed only once it shows the run gone")
 	return nil
 }

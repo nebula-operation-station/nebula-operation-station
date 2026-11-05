@@ -44,6 +44,11 @@ const (
 // target runs (or may still run) another batch member.
 const batchHostBusyCode = "batch_host_busy:"
 
+// batchHoldStoreCode prefixes the executor's refusal while it cannot
+// persist its held batch targets (also before the claim, so nothing ran).
+// It may be transient (a full disk), so it waits like a busy target.
+const batchHoldStoreCode = "batch_hold_store_unavailable:"
+
 // hostrunMaxAttached is the executor's limit for one member run (members
 // run attached).
 const hostrunMaxAttached = 10 * time.Minute
@@ -230,6 +235,7 @@ var (
 	errBatchHostMissing     = errors.New("the host is not in the inventory")
 	errBatchHostNoEndpoint  = errors.New("the host has no endpoint")
 	errBatchTargetStaysBusy = errors.New("the target stayed busy with another batch member")
+	errBatchHoldStoreDown   = errors.New("the executor could not persist its held batch targets")
 )
 
 // memberInputs returns the exact script of a member, its run timeout and
@@ -280,8 +286,9 @@ func (r *batchRunner) runMember(ctx context.Context, v executions.BatchView, m e
 }
 
 // handOver offers a dispatched member to the executor (attempts busy
-// refusals so far) and records its result. A busy target leaves the member
-// dispatched and waiting (bounded by batchBusyAttempts); inputs the server
+// refusals so far) and records its result. A busy target or an unavailable
+// hold store (waitRefusal) leaves the member dispatched and waiting
+// (bounded by batchBusyAttempts); inputs the server
 // cannot build end it not executed and are reported to the executor. It
 // reports whether the batch may continue now.
 func (r *batchRunner) handOver(ctx context.Context, v executions.BatchView, m executions.BatchMemberView, attempts int) bool {
@@ -296,8 +303,9 @@ func (r *batchRunner) handOver(ctx context.Context, v executions.BatchView, m ex
 		// Shutdown cancels the run; its outcome is then unknown.
 		resp, err := r.exec.RunBatchMember(ctx, &pb.RunBatchMemberRequest{BatchDigest: v.Digest, MemberId: m.MemberID,
 			Endpoints: eps, TimeoutSeconds: secs, Artifact: script})
+		wait := waitRefusal(err)
 		switch {
-		case hostBusy(err) && attempts+1 < batchBusyAttempts:
+		case wait != nil && attempts+1 < batchBusyAttempts:
 			next := r.clock().Add(busyBackoff(attempts + 1))
 			if r.waiting == nil {
 				r.waiting = map[string]*busyMember{}
@@ -306,8 +314,8 @@ func (r *batchRunner) handOver(ctx context.Context, v executions.BatchView, m ex
 			r.log.Info("audit", "kind", "batch_member_waiting_for_target", "batch", v.ID, "member", m.MemberID,
 				"attempt", attempts+1, "max_attempts", batchBusyAttempts, "next", next.UTC().Format(time.RFC3339))
 			return false
-		case hostBusy(err):
-			res = r.reportNotExecuted(ctx, v, m, errBatchTargetStaysBusy)
+		case wait != nil:
+			res = r.reportNotExecuted(ctx, v, m, wait)
 		default:
 			res = batchMemberResult(resp, err)
 		}
@@ -341,19 +349,28 @@ func (r *batchRunner) reportNotExecuted(ctx context.Context, v executions.BatchV
 	return executions.MemberResult{Outcome: executions.OutcomeFailed, Detail: "not executed: " + why.Error()}
 }
 
-// hostBusy reports whether err is the executor's batch_host_busy refusal,
-// as a raw status or mapped by the executor client (whose message is
-// "precondition_failed: batch_host_busy: ..."). Only that refusal is
-// offered again; every other refusal ends the member.
-func hostBusy(err error) bool {
+// waitRefusal reports whether err is one of the executor's refusals that
+// are offered again (batch_host_busy, batch_hold_store_unavailable), as a
+// raw status or mapped by the executor client (whose message is
+// "precondition_failed: <code> ..."). It returns the reason the member
+// ends with once the offers are used up, or nil: every other refusal ends
+// the member.
+func waitRefusal(err error) error {
 	if err == nil {
-		return false
+		return nil
 	}
 	st := status.Convert(err)
 	if st.Code() != codes.FailedPrecondition {
-		return false
+		return nil
 	}
-	return strings.HasPrefix(strings.TrimPrefix(st.Message(), "precondition_failed: "), batchHostBusyCode)
+	msg := strings.TrimPrefix(st.Message(), "precondition_failed: ")
+	switch {
+	case strings.HasPrefix(msg, batchHostBusyCode):
+		return errBatchTargetStaysBusy
+	case strings.HasPrefix(msg, batchHoldStoreCode):
+		return errBatchHoldStoreDown
+	}
+	return nil
 }
 
 // batchMemberResult maps the executor's answer to the server's member

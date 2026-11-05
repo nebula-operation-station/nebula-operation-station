@@ -278,7 +278,7 @@ func TestBatchRunnerRefusesChangedArtifact(t *testing.T) {
 // one the executor accepts (printable, bounded).
 func TestBatchNotExecutedReasonsAreValid(t *testing.T) {
 	for _, err := range []error{errBatchActionMissing, errBatchVersionMissing, errBatchScriptChanged, errBatchHostMissing,
-		errBatchHostNoEndpoint, errBatchTargetStaysBusy} {
+		errBatchHostNoEndpoint, errBatchTargetStaysBusy, errBatchHoldStoreDown} {
 		r := err.Error()
 		if r == "" || len(r) > 256 || strings.ContainsFunc(r, func(c rune) bool { return c < 0x20 || c == 0x7f }) {
 			t.Errorf("reason %q", r)
@@ -458,23 +458,77 @@ func TestBatchRunnerBusyMemberAfterRestart(t *testing.T) {
 	}
 }
 
-// Only the executor's batch_host_busy refusal is offered again, raw or as
-// the executor client maps it; any other refusal ends the member.
-func TestHostBusyRecognizesOnlyTheBusyRefusal(t *testing.T) {
+// Only the executor's batch_host_busy and batch_hold_store_unavailable
+// refusals are offered again, raw or as the executor client maps them; any
+// other refusal ends the member.
+func TestWaitRefusalRecognizesOnlyTheWaitRefusals(t *testing.T) {
+	store := status.Error(codes.FailedPrecondition, "batch_hold_store_unavailable: held batch targets cannot be persisted; see the executor log")
 	for _, tc := range []struct {
 		err  error
-		want bool
+		want error
 	}{
-		{busyErr, true},
-		{status.Error(codes.FailedPrecondition, "precondition_failed: batch_host_busy: another batch member runs on the target"), true},
-		{nil, false},
-		{status.Error(codes.FailedPrecondition, "credential_mismatch: batch_host_busy:"), false},
-		{status.Error(codes.PermissionDenied, "batch_host_busy: x"), false},
-		{status.Error(codes.Unavailable, "batch_host_busy: x"), false},
-		{status.Error(codes.FailedPrecondition, "host_key_mismatch: blocked"), false},
+		{busyErr, errBatchTargetStaysBusy},
+		{status.Error(codes.FailedPrecondition, "precondition_failed: batch_host_busy: another batch member runs on the target"), errBatchTargetStaysBusy},
+		{store, errBatchHoldStoreDown},
+		{status.Error(codes.FailedPrecondition, "precondition_failed: batch_hold_store_unavailable: x"), errBatchHoldStoreDown},
+		{nil, nil},
+		{status.Error(codes.FailedPrecondition, "credential_mismatch: batch_host_busy:"), nil},
+		{status.Error(codes.PermissionDenied, "batch_host_busy: x"), nil},
+		{status.Error(codes.Unavailable, "batch_hold_store_unavailable: x"), nil},
+		{status.Error(codes.FailedPrecondition, "host_key_mismatch: blocked"), nil},
 	} {
-		if got := hostBusy(tc.err); got != tc.want {
-			t.Errorf("hostBusy(%v) = %v", tc.err, got)
+		if got := waitRefusal(tc.err); got != tc.want {
+			t.Errorf("waitRefusal(%v) = %v", tc.err, got)
 		}
+	}
+}
+
+// A transient hold-store refusal waits like a busy target and the member
+// runs once the store recovers; one that stays ends the member not
+// executed after batchBusyAttempts offers, and the executor is told.
+func TestBatchRunnerRetriesHoldStoreRefusal(t *testing.T) {
+	storeErr := status.Error(codes.FailedPrecondition, "batch_hold_store_unavailable: held batch targets cannot be persisted; see the executor log")
+	f := &fakeBatchRPC{execution: true, openStage: 1}
+	b, _ := newWiringBatches(t, f)
+	v := approvedBatch(t, b, "automatic", "package.refresh")
+	down := 1
+	f.answer = func(*pb.RunBatchMemberRequest) (*pb.RunBatchMemberResponse, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if down > 0 {
+			down--
+			return nil, storeErr
+		}
+		return &pb.RunBatchMemberResponse{Outcome: pb.BatchMemberOutcome_BATCH_MEMBER_OUTCOME_SUCCESS, Class: "success"}, nil
+	}
+	clk := &testClock{t: time.Unix(1_800_000_000, 0)}
+	r := newRunner(t, f, b)
+	r.now = clk.now
+	ctx := context.Background()
+	r.runOnce(ctx)
+	clk.add(busyBackoff(1))
+	if n := r.runOnce(ctx); n != 1 || f.runCount() != 2 || len(f.reports()) != 0 {
+		t.Fatalf("after the store recovered: %d handed over, %d calls, %d reports", n, f.runCount(), len(f.reports()))
+	}
+	if after, _ := b.Batch(ctx, v.ID); after.Counts.Success != 1 {
+		t.Fatalf("after: %+v", after.Members)
+	}
+
+	f2 := &fakeBatchRPC{execution: true, openStage: 1}
+	b2, _ := newWiringBatches(t, f2)
+	v2 := approvedBatch(t, b2, "automatic", "package.refresh")
+	f2.answer = func(*pb.RunBatchMemberRequest) (*pb.RunBatchMemberResponse, error) { return nil, storeErr }
+	r2 := newRunner(t, f2, b2)
+	r2.now = clk.now
+	for range 3 * batchBusyAttempts {
+		r2.runOnce(ctx)
+		clk.add(batchBusyMaxBackoff)
+	}
+	rep := f2.reports()
+	if f2.runCount() != batchBusyAttempts+1 || len(rep) != 1 || rep[0].GetNotExecutedReason() != errBatchHoldStoreDown.Error() {
+		t.Fatalf("%d calls, %d reports", f2.runCount(), len(rep))
+	}
+	if after, _ := b2.Batch(ctx, v2.ID); after.Members[0].Outcome != executions.OutcomeFailed {
+		t.Fatalf("after: %+v", after.Members)
 	}
 }

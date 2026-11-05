@@ -192,25 +192,33 @@ func TestHeldStoreBrokenRefusesAllMembers(t *testing.T) {
 	}
 }
 
-// A hold that cannot be written is kept in memory and keeps every batch
-// member from starting, on every host, until a write succeeds.
+// A hold whose write after the member returned fails is kept in memory
+// and keeps every batch member from starting, on every host, until a
+// write succeeds; the file already holds the target from its reservation.
 func TestHeldStoreWriteFailureBlocksMembers(t *testing.T) {
 	e := newDispatchEnv(t, "web-1", "web-2")
 	e.failureThreshold = 1
-	var fail atomic.Bool
+	// allow is how many writes still succeed (-1: all).
+	var allow atomic.Int32
+	allow.Store(-1)
 	write := e.svc.batchRun.writeHeld
 	e.svc.batchRun.writeHeld = func(p string, b []byte) error {
-		if fail.Load() {
+		if allow.Load() == 0 {
 			return errors.New("no space left on device")
 		}
+		allow.Add(-1)
 		return write(p, b)
 	}
-	fail.Store(true)
+	// The reservation is written; the hold after the run is not.
+	allow.Store(1)
 	exec := e.holdTarget(t, "web-1")
+	if recs, err := readHeld(e.heldPath()); err != nil || len(recs) != 1 || recs[0].ExecutionID != exec {
+		t.Fatalf("held file while the store fails %+v %v", recs, err)
+	}
 	d, members, n := e.propose(t, canonical.BatchGateAutomatic, true, dispatchMember{host: "web-2"})
 	_, err := e.server.RunBatchMember(context.Background(), e.runReq(d, n, 0, "web-2"))
 	e.requireRefused(t, err, codes.FailedPrecondition, members[0], 1)
-	fail.Store(false)
+	allow.Store(-1)
 	if resp, err := e.server.RunBatchMember(context.Background(), e.runReq(d, n, 0, "web-2")); err != nil || resp.GetOutcome() != pb.BatchMemberOutcome_BATCH_MEMBER_OUTCOME_SUCCESS {
 		t.Fatalf("after the store recovered: %+v %v", resp, err)
 	}
@@ -330,5 +338,101 @@ func TestHeldTargetBeforeMaximumIsRechecked(t *testing.T) {
 	e.visible.set(false)
 	if resp, _, err := e.runOne(t, "web-1"); err != nil || resp.GetOutcome() != pb.BatchMemberOutcome_BATCH_MEMBER_OUTCOME_SUCCESS {
 		t.Fatalf("before the maximum hold: %+v %v", resp, err)
+	}
+}
+
+// The reservation is persisted before the member starts: an executor
+// crash or kill during the attached run restarts with the target held (no
+// longer running), so the next member there runs only after the target
+// shows the run gone. While the member runs, neither a recheck nor the
+// operator release frees the target.
+func TestReservationSurvivesCrashDuringRun(t *testing.T) {
+	e := newDispatchEnv(t, "web-1")
+	ctx := context.Background()
+	e.failureThreshold = 1
+	e.attached.started = make(chan string, 1)
+	e.attached.block = make(chan struct{})
+	d, members, n := e.propose(t, canonical.BatchGateAutomatic, true, dispatchMember{host: "web-1"})
+	exec := members[0].Request.ExecutionID
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.server.RunBatchMember(ctx, e.runReq(d, n, 0, "web-1"))
+		done <- err
+	}()
+	if got := <-e.attached.started; got != exec {
+		t.Fatalf("started %s", got)
+	}
+	recs, err := readHeld(e.heldPath())
+	if err != nil || len(recs) != 1 || recs[0].HostID != "web-1" || recs[0].ExecutionID != exec || recs[0].Expired {
+		t.Fatalf("held file during the run: %+v %v", recs, err)
+	}
+	if got := e.svc.HeldBatchTargets(); len(got) != 1 || !got[0].Running {
+		t.Fatalf("holds during the run: %+v", got)
+	}
+	e.visible.set(false)
+	if err := e.svc.ReleaseHeldBatchTarget(ctx, "web-1", exec, "alice", "looks done"); !errors.Is(err, ErrBatchHoldBusy) {
+		t.Fatalf("release during the run: %v", err)
+	}
+	if e.svc.recheckHeld(ctx, e.svc.batchRun, "web-1") {
+		t.Fatal("a recheck freed a running target")
+	}
+
+	// The process dies here: the old state never writes again.
+	old := e.svc.batchRun
+	old.mu.Lock()
+	old.writeHeld = func(string, []byte) error { return nil }
+	old.mu.Unlock()
+	e.restart(t)
+	close(e.attached.block)
+	<-done
+
+	if got := e.svc.HeldBatchTargets(); len(got) != 1 || got[0].HostID != "web-1" || got[0].ExecutionID != exec || got[0].Running || got[0].Expired {
+		t.Fatalf("holds after the restart: %+v", got)
+	}
+	e.attached.mu.Lock()
+	e.attached.started, e.attached.block = nil, nil
+	e.attached.mu.Unlock()
+	e.visible.set(true)
+	before := e.visible.count()
+	d2, members2, n2 := e.propose(t, canonical.BatchGateAutomatic, true, dispatchMember{host: "web-1"})
+	_, err = e.server.RunBatchMember(ctx, e.runReq(d2, n2, 0, "web-1"))
+	e.requireRefused(t, err, codes.FailedPrecondition, members2[0], 1)
+	if !strings.Contains(status.Convert(err).Message(), "batch_host_busy") || e.visible.count() == before {
+		t.Fatalf("after the restart: %v, %d checks", err, e.visible.count()-before)
+	}
+	e.visible.set(false)
+	if resp, err := e.server.RunBatchMember(ctx, e.runReq(d2, n2, 0, "web-1")); err != nil || resp.GetOutcome() != pb.BatchMemberOutcome_BATCH_MEMBER_OUTCOME_SUCCESS {
+		t.Fatalf("after the run is gone: %+v %v", resp, err)
+	}
+	if recs, err := readHeld(e.heldPath()); err != nil || len(recs) != 0 || len(e.svc.HeldBatchTargets()) != 0 {
+		t.Fatalf("held file after the member: %+v %v", recs, err)
+	}
+}
+
+// A reservation that cannot be persisted does not start the member (fail
+// closed): nothing is claimed or run and the target stays free.
+func TestReservationWriteFailureDoesNotStart(t *testing.T) {
+	e := newDispatchEnv(t, "web-1")
+	var fail atomic.Bool
+	write := e.svc.batchRun.writeHeld
+	e.svc.batchRun.writeHeld = func(p string, b []byte) error {
+		if fail.Load() {
+			return errors.New("no space left on device")
+		}
+		return write(p, b)
+	}
+	fail.Store(true)
+	d, members, n := e.propose(t, canonical.BatchGateAutomatic, true, dispatchMember{host: "web-1"})
+	_, err := e.server.RunBatchMember(context.Background(), e.runReq(d, n, 0, "web-1"))
+	e.requireRefused(t, err, codes.FailedPrecondition, members[0], 0)
+	if !strings.Contains(status.Convert(err).Message(), "batch_hold_store_unavailable") || len(e.svc.HeldBatchTargets()) != 0 {
+		t.Fatalf("refusal %v, holds %+v", err, e.svc.HeldBatchTargets())
+	}
+	fail.Store(false)
+	if resp, err := e.server.RunBatchMember(context.Background(), e.runReq(d, n, 0, "web-1")); err != nil || resp.GetOutcome() != pb.BatchMemberOutcome_BATCH_MEMBER_OUTCOME_SUCCESS {
+		t.Fatalf("after the store recovered: %+v %v", resp, err)
+	}
+	if recs, err := readHeld(e.heldPath()); err != nil || len(recs) != 0 {
+		t.Fatalf("held file after the member: %+v %v", recs, err)
 	}
 }
