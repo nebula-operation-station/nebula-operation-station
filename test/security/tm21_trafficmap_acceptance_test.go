@@ -54,6 +54,13 @@ import (
 // tmOrigin is the deployment origin of these tests.
 const tmOrigin = "https://nebula.test"
 
+// catalogKeyRE is the catalog key syntax (ADR 0009 D5); sha256RE an icon
+// hash as /icons/ serves it.
+var (
+	catalogKeyRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+	sha256RE     = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
+
 // noFlows is a traffic store without flows: the hostile-name tests are
 // about nodes and zones.
 type noFlows struct{}
@@ -195,10 +202,10 @@ func TestTrafficMapHostileNamesNeverBecomeMarkup(t *testing.T) {
 				t.Errorf("%s: hostile kind became %q, want %q", target, n.Kind, tmapi.KindUnknown)
 			}
 			for _, s := range n.Software {
-				if !regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`).MatchString(s.Key) {
+				if !catalogKeyRE.MatchString(s.Key) {
 					t.Errorf("%s: node %s software key %q", target, n.ID, s.Key)
 				}
-				if s.Icon != "" && !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(s.Icon) {
+				if s.Icon != "" && !sha256RE.MatchString(s.Icon) {
 					t.Errorf("%s: node %s icon reference %q", target, n.ID, s.Icon)
 				}
 			}
@@ -703,7 +710,7 @@ func TestPolyglotIconsAreReencoded(t *testing.T) {
 		}
 		checkCleanPNG(t, name+" 128", ic.PNG128, iconstore.LargeSize)
 		checkCleanPNG(t, name+" 64", ic.PNG64, iconstore.SmallSize)
-		if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(ic.SHA256) {
+		if !sha256RE.MatchString(ic.SHA256) {
 			t.Errorf("%s: hash %q", name, ic.SHA256)
 		}
 	}
