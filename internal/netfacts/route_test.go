@@ -334,6 +334,40 @@ func TestParseRoutesViaFamilies(t *testing.T) {
 	}
 }
 
+// TestParseHostAddrLengthBound pins maxAddrLen against the longest host
+// address that must be accepted: the longest IPv6 text netip accepts
+// (45 bytes), "%" and a zone of maxZoneLen bytes. The maxAddrLen check
+// in parseHostAddr is a cheap bound on the work done for hostile input,
+// applied before any parsing; since every acceptable address is shorter
+// than maxAddrLen, it never decides the outcome on its own (validZone
+// and the parser reject everything it would). This test catches a
+// maxAddrLen lowered so far that it would reject valid addresses.
+func TestParseHostAddrLengthBound(t *testing.T) {
+	const longestText = "1234:5678:9abc:def0:1234:5678:255.255.255.255"
+	if len(longestText) != 45 {
+		t.Fatalf("longest IPv6 text is %d bytes, want 45", len(longestText))
+	}
+	longest := longestText + "%" + strings.Repeat("e", maxZoneLen)
+	if len(longest) > maxAddrLen {
+		t.Fatalf("longest acceptable host is %d bytes, above maxAddrLen=%d", len(longest), maxAddrLen)
+	}
+	a, ok := parseHostAddr(longest)
+	if !ok || a != netip.MustParseAddr(longest) {
+		t.Fatalf("parseHostAddr(%q) = %v, %v; want it accepted", longest, a, ok)
+	}
+	// Text of exactly maxAddrLen and maxAddrLen+1 bytes: rejected either
+	// way, the latter before it reaches the parser.
+	for _, n := range []int{maxAddrLen, maxAddrLen + 1} {
+		s := longestText + "%" + strings.Repeat("e", n-len(longestText)-1)
+		if len(s) != n {
+			t.Fatalf("built %d bytes, want %d", len(s), n)
+		}
+		if a, ok := parseHostAddr(s); ok {
+			t.Fatalf("parseHostAddr of %d bytes = %v, want rejected", n, a)
+		}
+	}
+}
+
 func TestParseRoutesViaHostBounds(t *testing.T) {
 	maxZone := strings.Repeat("e", maxZoneLen)
 	doc := `[{"dst":"10.1.0.0/24","via":{"family":"inet6","host":"fe80::1%` + maxZone + `"},"dev":"eth0"}]`
@@ -352,11 +386,13 @@ func TestParseRoutesViaHostBounds(t *testing.T) {
 
 	rejected := map[string]string{
 		"zone of maxZoneLen+1 bytes": "fe80::1%" + strings.Repeat("e", maxZoneLen+1),
-		// The longest valid IPv6 text (45 bytes) plus a zone of
-		// maxZoneLen+5 bytes is a syntactically valid zoned address
-		// (netip accepts it) that exceeds maxAddrLen only through its
-		// zone; the boundary checks, not the parser, must reject it.
-		"host above maxAddrLen": "1234:5678:9abc:def0:1234:5678:255.255.255.255%" + strings.Repeat("e", maxZoneLen+5),
+		// The longest IPv6 text (45 bytes) with an over-long zone is a
+		// syntactically valid zoned address (netip accepts it) longer
+		// than maxAddrLen. Both the maxAddrLen pre-check and validZone
+		// reject it; this case cannot tell them apart, since no input
+		// with a valid zone exceeds maxAddrLen (see
+		// TestParseHostAddrLengthBound).
+		"longest text with zone above maxZoneLen": "1234:5678:9abc:def0:1234:5678:255.255.255.255%" + strings.Repeat("e", maxZoneLen+5),
 	}
 	for name, zone := range hostileZones() {
 		rejected["hostile zone "+name] = "fe80::1%" + zone
