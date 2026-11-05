@@ -30,11 +30,18 @@
 # Fail closed: BindsTo= stops the helper whenever the firewall unit stops,
 # and ExecStartPre refuses to start it unless the nftables table is loaded
 # (a host firewall reload may have removed it behind systemd's back).
-# The check runs only at start: the helper has no CAP_NET_ADMIN and cannot
-# re-check the table between batches, so a manual `nft flush ruleset`
-# during a batch leaves only the IPAddressDeny filters until the batch
-# ends. Host firewall reloads are covered (the firewall unit follows them
-# and BindsTo= stops the helper); the next start re-checks the table.
+# The check runs once per start, and every start is one bounded batch: the
+# helper starts no new fetch after 2 minutes (maxBatch in
+# cmd/nebula-iconfetch) and exits; the timer starts the next batch for
+# jobs left queued, so the privileged check runs again before every batch.
+# The helper itself has no CAP_NET_ADMIN and cannot check the table.
+# Residual window: a manual `nft flush ruleset` (or `nft delete table`)
+# that bypasses the firewall unit during a batch leaves only the
+# IPAddressDeny filters (and the application's allowlist and dial-time
+# address checks) until that batch ends: at most 2 minutes plus one
+# fetch (10 s), hard-capped by TimeoutStartSec=3min. Host firewall
+# reloads through nftables/firewalld are covered (the firewall unit
+# follows them and BindsTo= stops the helper).
 [Unit]
 Description=Nebula Operation Station icon fetcher (queued HTTPS icons)
 Documentation=https://github.com/nebula-operation-station/nebula-operation-station/blob/main/docs/adr/0009-traffic-map.md
@@ -51,8 +58,10 @@ SupplementaryGroups=nebula-icons
 # outside the sandbox; the helper itself still gets no capabilities.
 ExecStartPre=+/usr/sbin/nft list table inet nebula_iconfetch
 ExecStart=/usr/bin/nebula-iconfetch -spool /var/lib/nebula/iconfetch
-# Bound a whole queued batch as well as individual application fetch timeouts.
-TimeoutStartSec=15min
+# Bound a whole queued batch as well as individual application fetch
+# timeouts; the helper ends a batch after 2 minutes on its own (see the
+# firewall note above), this is the hard cap.
+TimeoutStartSec=3min
 TimeoutStopSec=15s
 MemoryMax=256M
 TasksMax=32

@@ -88,7 +88,7 @@ class IconfetchPolicyTest(unittest.TestCase):
 
     def test_helper_has_bounded_resources_and_runs_once(self):
         for key, value in {"Type": "oneshot", "MemoryMax": "256M", "TasksMax": "32",
-                           "TimeoutStartSec": "15min", "TimeoutStopSec": "15s",
+                           "TimeoutStartSec": "3min", "TimeoutStopSec": "15s",
                            "UMask": "0027"}.items():
             self.assertEqual(self.values("[Service]", key), [value], key)
 

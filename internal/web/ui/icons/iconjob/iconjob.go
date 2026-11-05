@@ -12,6 +12,7 @@ package iconjob
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -63,16 +64,42 @@ const (
 	openRetries = 3
 	// openRetryDelay is the pause between open retries.
 	openRetryDelay = 100 * time.Millisecond
+	// MaxRetryPauses bounds the open-retry pauses of one listing or one
+	// import run across all its files (see RetryBudget), so a directory
+	// full of unreadable files costs at most this many openRetryDelay
+	// pauses, not openRetries-1 per file.
+	MaxRetryPauses = 4
+	// UnreadableJobAge is how long the helper leaves a job file it may
+	// not read queued (a permission fix may land) before it answers the
+	// job with a failed result, so the server sees it finish.
+	UnreadableJobAge = 15 * time.Minute
 )
 
 // ErrInvalid marks a job or result that violates the spool format.
 var ErrInvalid = errors.New("iconjob: invalid spool file")
 
 // ErrUnreadable marks a spool file that this process may not read
-// (EACCES, EPERM). Unlike ErrInvalid it is transient: a group
-// membership or mode fix may make the file readable, so callers retry
-// it a bounded number of times and keep the job instead of dropping it.
+// (EACCES, EPERM). Unlike ErrInvalid it may be transient: a group
+// membership or mode fix may make the file readable. Callers keep the
+// job for a bounded time or number of attempts and then fail it (the
+// helper after UnreadableJobAge, the server after its own bound), so an
+// unreadable file never blocks the spool for good.
 var ErrUnreadable = errors.New("iconjob: file not readable")
+
+// RetryBudget bounds the open retries of unreadable spool files across
+// several reads (one listing, one import run): every pause between two
+// attempts spends one unit, and a done context ends retrying at once.
+// A nil budget never retries.
+type RetryBudget struct {
+	ctx    context.Context
+	pauses int
+}
+
+// NewRetryBudget returns a budget of at most pauses retry pauses that
+// ends early when ctx is done.
+func NewRetryBudget(ctx context.Context, pauses int) *RetryBudget {
+	return &RetryBudget{ctx: ctx, pauses: pauses}
+}
 
 // Job asks the helper to fetch one icon URL for a catalog key.
 // RequestedBy is for the server's audit trail only; the helper ignores it.
@@ -242,7 +269,7 @@ func (r *Result) Validate() error {
 type Spool struct {
 	Dir string
 	// sleep pauses between open retries of an unreadable file; nil
-	// uses time.Sleep.
+	// waits on a timer or the budget's context (tests).
 	sleep func(time.Duration)
 }
 
@@ -302,30 +329,49 @@ func writeAtomic(dir, name string, data []byte) (err error) {
 
 // readFile reads a regular file (no symlink) of at most limit bytes.
 // An open that fails with ErrUnreadable is retried, openRetryDelay
-// apart, until openRetries attempts are made: the permission may be
-// fixed in between.
-func (s Spool) readFile(path string, limit int64) ([]byte, error) {
+// apart, until openRetries attempts are made or budget b is spent or
+// done: the permission may be fixed in between.
+func (s Spool) readFile(b *RetryBudget, path string, limit int64) ([]byte, error) {
 	for attempt := 1; ; attempt++ {
-		b, err := readOnce(path, limit)
-		if err == nil || !errors.Is(err, ErrUnreadable) || attempt == openRetries {
-			return b, err
+		data, err := readOnce(path, limit)
+		if err == nil || !errors.Is(err, ErrUnreadable) || attempt == openRetries || !s.pause(b, openRetryDelay) {
+			return data, err
 		}
-		s.pause(openRetryDelay)
 	}
 }
 
-// pause waits d between open retries.
-func (s Spool) pause(d time.Duration) {
+// pause spends one unit of b and waits d; it reports false, without
+// waiting, when b is nil, spent or done, and false when b's context
+// ends during the wait.
+func (s Spool) pause(b *RetryBudget, d time.Duration) bool {
+	if b == nil || b.pauses <= 0 || b.ctx.Err() != nil {
+		return false
+	}
+	b.pauses--
 	if s.sleep != nil {
 		s.sleep(d)
-		return
+		return b.ctx.Err() == nil
 	}
-	time.Sleep(d)
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-b.ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
+
+// singleRead is the budget of one stand-alone read: openRetries attempts.
+func singleRead() *RetryBudget { return NewRetryBudget(context.Background(), openRetries-1) }
+
+// openFile opens spool files; tests replace it to simulate EACCES even
+// when they run as root.
+var openFile = os.OpenFile
 
 // readOnce reads a regular file (no symlink) of at most limit bytes.
 func readOnce(path string, limit int64) ([]byte, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	f, err := openFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, classifyOpen(err)
 	}
@@ -353,8 +399,8 @@ func readOnce(path string, limit int64) ([]byte, error) {
 // classifyOpen classifies open errors: a symbolic link (ELOOP from
 // O_NOFOLLOW) violates the spool format and stays ErrInvalid; a file
 // this process may not read (EACCES, EPERM) is ErrUnreadable, so the
-// caller retries it a bounded number of times instead of dropping the
-// job. Other errors are returned as they are (os.ErrNotExist in
+// caller keeps the job for a bounded time instead of dropping it at
+// once. Other errors are returned as they are (os.ErrNotExist in
 // particular stays recognizable).
 func classifyOpen(err error) error {
 	switch {
@@ -391,11 +437,14 @@ func (s Spool) WriteJob(j Job) error {
 }
 
 // ReadJob reads and validates one job (server side, on import).
-func (s Spool) ReadJob(id string) (Job, error) {
+func (s Spool) ReadJob(id string) (Job, error) { return s.ReadJobWith(singleRead(), id) }
+
+// ReadJobWith is ReadJob with the open retries drawn from budget rb.
+func (s Spool) ReadJobWith(rb *RetryBudget, id string) (Job, error) {
 	if !ValidID(id) {
 		return Job{}, fmt.Errorf("%w: job ID", ErrInvalid)
 	}
-	b, err := s.readFile(filepath.Join(s.JobsDir(), id+".json"), MaxJobBytes)
+	b, err := s.readFile(rb, filepath.Join(s.JobsDir(), id+".json"), MaxJobBytes)
 	if err != nil {
 		return Job{}, fmt.Errorf("read job %s: %w", id, err)
 	}
@@ -425,35 +474,67 @@ func (s Spool) RemoveJob(id string) error {
 	return nil
 }
 
-// PendingJobs lists the jobs without a result, oldest first (helper
-// side). Invalid job files are returned as errors by ID, so the helper
-// can answer them with a failed result. A job file the helper may not
-// read (ErrUnreadable) is left queued: it is neither returned nor
-// answered, so a permission fix before the next run does not lose the
-// work.
+// Pending is what ListPending found.
+type Pending struct {
+	// Jobs are the readable, valid jobs without a result, oldest first.
+	Jobs []Job
+	// Bad maps job IDs to the reason the helper must answer them with a
+	// failed result: invalid job files, and job files it may not read
+	// (ErrUnreadable) that are older than UnreadableJobAge.
+	Bad map[string]error
+	// Waiting lists, sorted, the job files the helper may not read that
+	// are younger than UnreadableJobAge: they stay queued, so a
+	// permission fix before a later run does not lose the work.
+	Waiting []string
+}
+
+// PendingJobs is ListPending with a background context and the current
+// time, returning only the jobs and the jobs to answer as failed (tests
+// and tools; the helper uses ListPending).
 func (s Spool) PendingJobs() ([]Job, map[string]error, error) {
+	p, err := s.ListPending(context.Background(), time.Now())
+	return p.Jobs, p.Bad, err
+}
+
+// ListPending lists the jobs without a result (helper side). All open
+// retries of one call share a budget of MaxRetryPauses pauses that ends
+// with ctx, so many unreadable files cannot stall a round. A job file
+// the helper may not read stays queued (Waiting) until its modification
+// time is UnreadableJobAge before now; then it is reported in Bad, so
+// the helper answers it and the job does not stay pending forever.
+func (s Spool) ListPending(ctx context.Context, now time.Time) (Pending, error) {
 	ids, err := s.list(s.JobsDir())
 	if err != nil {
-		return nil, nil, err
+		return Pending{}, err
 	}
-	var jobs []Job
-	bad := map[string]error{}
+	p := Pending{Bad: map[string]error{}}
+	rb := NewRetryBudget(ctx, MaxRetryPauses)
 	for _, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return Pending{}, err
+		}
 		if _, err := os.Lstat(filepath.Join(s.ResultsDir(), id+".json")); err == nil {
 			continue
 		}
-		j, err := s.ReadJob(id)
-		if err != nil {
-			if errors.Is(err, ErrUnreadable) {
+		j, err := s.ReadJobWith(rb, id)
+		switch {
+		case err == nil:
+			p.Jobs = append(p.Jobs, j)
+		case errors.Is(err, ErrUnreadable):
+			st, serr := os.Lstat(filepath.Join(s.JobsDir(), id+".json"))
+			if serr == nil && now.Sub(st.ModTime()) < UnreadableJobAge {
+				p.Waiting = append(p.Waiting, id)
 				continue
 			}
-			bad[id] = err
-			continue
+			p.Bad[id] = fmt.Errorf("unreadable for %s: %w", UnreadableJobAge, err)
+		case errors.Is(err, os.ErrNotExist):
+			// Removed since the listing (cancelled); nothing to answer.
+		default:
+			p.Bad[id] = err
 		}
-		jobs = append(jobs, j)
 	}
-	sort.Slice(jobs, func(i, k int) bool { return jobs[i].CreatedAt < jobs[k].CreatedAt })
-	return jobs, bad, nil
+	sort.Slice(p.Jobs, func(i, k int) bool { return p.Jobs[i].CreatedAt < p.Jobs[k].CreatedAt })
+	return p, nil
 }
 
 // FinishedJobs lists, sorted by ID, the IDs of jobs that have a result
@@ -526,11 +607,15 @@ func (s Spool) WriteResult(r Result) error {
 
 // ReadResult reads and validates the result of a job (server side); it
 // returns an error wrapping os.ErrNotExist while there is none.
-func (s Spool) ReadResult(id string) (Result, error) {
+func (s Spool) ReadResult(id string) (Result, error) { return s.ReadResultWith(singleRead(), id) }
+
+// ReadResultWith is ReadResult with the open retries drawn from budget
+// rb (one budget per import run bounds the run's retry pauses).
+func (s Spool) ReadResultWith(rb *RetryBudget, id string) (Result, error) {
 	if !ValidID(id) {
 		return Result{}, fmt.Errorf("%w: job ID", ErrInvalid)
 	}
-	b, err := s.readFile(filepath.Join(s.ResultsDir(), id+".json"), MaxResultBytes)
+	b, err := s.readFile(rb, filepath.Join(s.ResultsDir(), id+".json"), MaxResultBytes)
 	if err != nil {
 		return Result{}, fmt.Errorf("read result %s: %w", id, err)
 	}

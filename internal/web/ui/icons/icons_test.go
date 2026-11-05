@@ -534,3 +534,91 @@ func TestImportResultsDropsUnreadableResults(t *testing.T) {
 		t.Fatalf("second run %+v %v", rep, err)
 	}
 }
+
+// TestImportResultsBoundsUnreadableResults: results the server may not
+// read (EACCES) are kept for a permission fix, but they neither crowd out
+// later results nor stay forever.
+func TestImportResultsBoundsUnreadableResults(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file modes, so mode 0 gives no EACCES; runs in `make test` (unprivileged)")
+	}
+	f := newFixture(t)
+	ctx := context.Background()
+	n := MaxImportPerRun + 1
+	var unreadable []string
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("%032x", i+1)
+		spoolJob(t, f, id)
+		helperResult(t, f, id, testPNG(t, red))
+		if err := os.Chmod(filepath.Join(f.spool.ResultsDir(), id+".json"), 0); err != nil {
+			t.Fatal(err)
+		}
+		unreadable = append(unreadable, id)
+	}
+	good := strings.Repeat("f", 32)
+	spoolJob(t, f, good)
+	helperResult(t, f, good, testPNG(t, blue))
+
+	// First run: a full run of unreadable results, kept (transient).
+	start := time.Now()
+	rep, err := f.svc.ImportResults(ctx)
+	if !errors.Is(err, iconjob.ErrUnreadable) || len(rep.Failed) != 0 || len(rep.Imported) != 0 {
+		t.Fatalf("first run %+v %v", rep, err)
+	}
+	// One shared retry budget, not 2 pauses per file.
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("first run took %s", d)
+	}
+	// Second run: the known-unreadable results go last, the good one is
+	// imported.
+	rep, err = f.svc.ImportResults(ctx)
+	if !errors.Is(err, iconjob.ErrUnreadable) || rep.Imported[good] == "" || len(rep.Failed) != 0 {
+		t.Fatalf("second run %+v %v", rep, err)
+	}
+	// A permission fix within the grace time loses no work.
+	fixed := unreadable[0]
+	if err := os.Chmod(filepath.Join(f.spool.ResultsDir(), fixed+".json"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	// More attempts within the grace time fail nothing.
+	for range unreadableAttempts {
+		rep, err = f.svc.ImportResults(ctx)
+		if len(rep.Failed) != 0 {
+			t.Fatalf("failed within grace: %+v %v", rep, err)
+		}
+		if rep.Imported[fixed] != "" {
+			break
+		}
+	}
+	if _, err := f.spool.ReadJob(fixed); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fixed result not imported: %v", err)
+	}
+	// After the grace time each still unreadable job fails once it has
+	// enough attempts; all are gone after a bounded number of runs.
+	f.svc.now = func() time.Time { return t0.Add(unreadableGrace) }
+	failed := map[string]bool{}
+	for run := 0; run < 2*unreadableAttempts+2; run++ {
+		rep, _ = f.svc.ImportResults(ctx)
+		for id, msg := range rep.Failed {
+			if !strings.Contains(msg, "unreadable helper result") {
+				t.Fatalf("job %s: %s", id, msg)
+			}
+			failed[id] = true
+		}
+	}
+	if len(failed) != n-1 {
+		t.Fatalf("%d unreadable jobs failed, want %d", len(failed), n-1)
+	}
+	if ids, err := f.spool.FinishedJobs(); err != nil || len(ids) != 0 {
+		t.Fatalf("jobs left: %v %v", ids, err)
+	}
+	if ev := f.log.events(t, "icon_fetch_failed"); len(ev) != n-1 {
+		t.Fatalf("audit %d failures", len(ev))
+	}
+	f.svc.mu.Lock()
+	left := len(f.svc.unreadable)
+	f.svc.mu.Unlock()
+	if left != 0 {
+		t.Fatalf("unreadable state kept for %d jobs", left)
+	}
+}
