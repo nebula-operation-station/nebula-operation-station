@@ -57,10 +57,22 @@ const (
 	MaxListEntries = 4096
 	// listBatch is the number of entries read per ReadDir call.
 	listBatch = 256
+	// openRetries is how many times readFile tries to open a file that
+	// failed with ErrUnreadable before it gives up: a permission fix
+	// may land between attempts.
+	openRetries = 3
+	// openRetryDelay is the pause between open retries.
+	openRetryDelay = 100 * time.Millisecond
 )
 
 // ErrInvalid marks a job or result that violates the spool format.
 var ErrInvalid = errors.New("iconjob: invalid spool file")
+
+// ErrUnreadable marks a spool file that this process may not read
+// (EACCES, EPERM). Unlike ErrInvalid it is transient: a group
+// membership or mode fix may make the file readable, so callers retry
+// it a bounded number of times and keep the job instead of dropping it.
+var ErrUnreadable = errors.New("iconjob: file not readable")
 
 // Job asks the helper to fetch one icon URL for a catalog key.
 // RequestedBy is for the server's audit trail only; the helper ignores it.
@@ -227,7 +239,12 @@ func (r *Result) Validate() error {
 // Spool is the directory pair the server and the helper exchange files
 // in: jobs/ (server writes, helper reads) and results/ (helper writes,
 // server reads).
-type Spool struct{ Dir string }
+type Spool struct {
+	Dir string
+	// sleep pauses between open retries of an unreadable file; nil
+	// uses time.Sleep.
+	sleep func(time.Duration)
+}
 
 // JobsDir is the directory the server writes jobs into.
 func (s Spool) JobsDir() string { return filepath.Join(s.Dir, "jobs") }
@@ -284,7 +301,30 @@ func writeAtomic(dir, name string, data []byte) (err error) {
 }
 
 // readFile reads a regular file (no symlink) of at most limit bytes.
-func readFile(path string, limit int64) ([]byte, error) {
+// An open that fails with ErrUnreadable is retried, openRetryDelay
+// apart, until openRetries attempts are made: the permission may be
+// fixed in between.
+func (s Spool) readFile(path string, limit int64) ([]byte, error) {
+	for attempt := 1; ; attempt++ {
+		b, err := readOnce(path, limit)
+		if err == nil || !errors.Is(err, ErrUnreadable) || attempt == openRetries {
+			return b, err
+		}
+		s.pause(openRetryDelay)
+	}
+}
+
+// pause waits d between open retries.
+func (s Spool) pause(d time.Duration) {
+	if s.sleep != nil {
+		s.sleep(d)
+		return
+	}
+	time.Sleep(d)
+}
+
+// readOnce reads a regular file (no symlink) of at most limit bytes.
+func readOnce(path string, limit int64) ([]byte, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, classifyOpen(err)
@@ -310,17 +350,18 @@ func readFile(path string, limit int64) ([]byte, error) {
 	return b, nil
 }
 
-// classifyOpen marks open errors that a retry cannot fix as ErrInvalid:
-// a symbolic link (ELOOP from O_NOFOLLOW) or a file this process may not
-// read (EACCES, EPERM) violates the spool format, so the caller drops
-// the job instead of retrying it forever. Other errors are returned as
-// they are (os.ErrNotExist in particular stays recognizable).
+// classifyOpen classifies open errors: a symbolic link (ELOOP from
+// O_NOFOLLOW) violates the spool format and stays ErrInvalid; a file
+// this process may not read (EACCES, EPERM) is ErrUnreadable, so the
+// caller retries it a bounded number of times instead of dropping the
+// job. Other errors are returned as they are (os.ErrNotExist in
+// particular stays recognizable).
 func classifyOpen(err error) error {
 	switch {
 	case errors.Is(err, syscall.ELOOP):
 		return fmt.Errorf("%w: symbolic link: %w", ErrInvalid, err)
 	case errors.Is(err, syscall.EACCES), errors.Is(err, syscall.EPERM):
-		return fmt.Errorf("%w: not readable: %w", ErrInvalid, err)
+		return fmt.Errorf("%w: %w", ErrUnreadable, err)
 	}
 	return err
 }
@@ -354,7 +395,7 @@ func (s Spool) ReadJob(id string) (Job, error) {
 	if !ValidID(id) {
 		return Job{}, fmt.Errorf("%w: job ID", ErrInvalid)
 	}
-	b, err := readFile(filepath.Join(s.JobsDir(), id+".json"), MaxJobBytes)
+	b, err := s.readFile(filepath.Join(s.JobsDir(), id+".json"), MaxJobBytes)
 	if err != nil {
 		return Job{}, fmt.Errorf("read job %s: %w", id, err)
 	}
@@ -386,7 +427,10 @@ func (s Spool) RemoveJob(id string) error {
 
 // PendingJobs lists the jobs without a result, oldest first (helper
 // side). Invalid job files are returned as errors by ID, so the helper
-// can answer them with a failed result.
+// can answer them with a failed result. A job file the helper may not
+// read (ErrUnreadable) is left queued: it is neither returned nor
+// answered, so a permission fix before the next run does not lose the
+// work.
 func (s Spool) PendingJobs() ([]Job, map[string]error, error) {
 	ids, err := s.list(s.JobsDir())
 	if err != nil {
@@ -400,6 +444,9 @@ func (s Spool) PendingJobs() ([]Job, map[string]error, error) {
 		}
 		j, err := s.ReadJob(id)
 		if err != nil {
+			if errors.Is(err, ErrUnreadable) {
+				continue
+			}
 			bad[id] = err
 			continue
 		}
@@ -483,7 +530,7 @@ func (s Spool) ReadResult(id string) (Result, error) {
 	if !ValidID(id) {
 		return Result{}, fmt.Errorf("%w: job ID", ErrInvalid)
 	}
-	b, err := readFile(filepath.Join(s.ResultsDir(), id+".json"), MaxResultBytes)
+	b, err := s.readFile(filepath.Join(s.ResultsDir(), id+".json"), MaxResultBytes)
 	if err != nil {
 		return Result{}, fmt.Errorf("read result %s: %w", id, err)
 	}

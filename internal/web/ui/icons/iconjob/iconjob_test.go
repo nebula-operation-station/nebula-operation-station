@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -239,7 +240,7 @@ func TestPruneResultsRemovesOldFiles(t *testing.T) {
 	}
 }
 
-func TestReadResultClassifiesUnreadableAsInvalid(t *testing.T) {
+func TestReadResultClassifiesOpenErrors(t *testing.T) {
 	s := newSpool(t)
 	// A symlinked result (ELOOP from O_NOFOLLOW) can never be read.
 	if err := os.Symlink("/etc/passwd", filepath.Join(s.ResultsDir(), id1+".json")); err != nil {
@@ -261,8 +262,114 @@ func TestReadResultClassifiesUnreadableAsInvalid(t *testing.T) {
 	if err := os.Chmod(filepath.Join(s.ResultsDir(), id2+".json"), 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ReadResult(id2); !errors.Is(err, ErrInvalid) {
+	// An unreadable result is transient (a permission fix may land), not a
+	// format violation.
+	_, err := s.ReadResult(id2)
+	if !errors.Is(err, ErrUnreadable) || errors.Is(err, ErrInvalid) {
 		t.Fatalf("unreadable: %v", err)
+	}
+}
+
+func TestClassifyOpen(t *testing.T) {
+	for name, tc := range map[string]struct {
+		in   error
+		want error
+	}{
+		"eloop":  {syscall.ELOOP, ErrInvalid},
+		"eacces": {syscall.EACCES, ErrUnreadable},
+		"eperm":  {syscall.EPERM, ErrUnreadable},
+	} {
+		if got := classifyOpen(tc.in); !errors.Is(got, tc.want) {
+			t.Errorf("%s: got %v, want %v", name, got, tc.want)
+		}
+	}
+	// Other errors stay as they are.
+	if got := classifyOpen(os.ErrNotExist); !errors.Is(got, os.ErrNotExist) {
+		t.Errorf("enoent: %v", got)
+	}
+}
+
+func TestReadFileRetriesUnreadableBounded(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Log("running as root: EACCES case skipped")
+		return
+	}
+	s := newSpool(t)
+	if err := s.WriteResult(okResult(id1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(s.ResultsDir(), id1+".json"), 0); err != nil {
+		t.Fatal(err)
+	}
+	var sleeps int
+	s.sleep = func(time.Duration) { sleeps++ }
+	_, err := s.ReadResult(id1)
+	if !errors.Is(err, ErrUnreadable) || errors.Is(err, ErrInvalid) {
+		t.Fatalf("got %v", err)
+	}
+	if sleeps != openRetries-1 {
+		t.Fatalf("retried after %d pauses, want %d", sleeps, openRetries-1)
+	}
+}
+
+func TestReadFileRetriesUnreadableUntilFixed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Log("running as root: EACCES case skipped")
+		return
+	}
+	s := newSpool(t)
+	if err := s.WriteResult(okResult(id1)); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(s.ResultsDir(), id1+".json")
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	fixed := false
+	s.sleep = func(time.Duration) {
+		if !fixed {
+			fixed = true
+			if err := os.Chmod(path, 0o640); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	r, err := s.ReadResult(id1)
+	if err != nil || !r.OK {
+		t.Fatalf("retry after permission fix: %v", err)
+	}
+}
+
+func TestPendingJobsKeepsUnreadableJobQueued(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Log("running as root: EACCES case skipped")
+		return
+	}
+	s := newSpool(t)
+	if err := s.WriteJob(validJob(id1)); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(s.JobsDir(), id1+".json")
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	s.sleep = func(time.Duration) {}
+	// A job the helper may not read stays queued: it is neither returned
+	// nor answered, so no failed result drops the work.
+	jobs, bad, err := s.PendingJobs()
+	if err != nil || len(jobs) != 0 || len(bad) != 0 {
+		t.Fatalf("jobs %+v bad %v err %v", jobs, bad, err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("job file removed: %v", err)
+	}
+	// A permission fix before the next run makes the job readable again.
+	if err := os.Chmod(path, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	jobs, bad, err = s.PendingJobs()
+	if err != nil || len(bad) != 0 || len(jobs) != 1 || jobs[0].ID != id1 {
+		t.Fatalf("after fix: jobs %+v bad %v err %v", jobs, bad, err)
 	}
 }
 
