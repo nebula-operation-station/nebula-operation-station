@@ -366,8 +366,54 @@ func TestNICCanonicalModelsAndTag(t *testing.T) {
 			t.Errorf("tag %q accepted", tag)
 		}
 	}
+	// Bridge names are validated with the shared PVE bridge validator
+	// against the raw value, before any sanitizing: a name that only
+	// becomes valid after control-byte stripping is rejected.
+	for _, bridge := range []string{"br/0", "<x>", ".", "..", "vmbr 0", strings.Repeat("a", 16), "vmbr\x1b0", "vmbr\u007f0"} {
+		if _, err := parseNIC("net0", "virtio=AA:BB:CC:DD:EE:01,bridge="+bridge); err == nil {
+			t.Errorf("hostile bridge %q accepted", bridge)
+		}
+	}
+	for _, bridge := range []string{"vmbr0.100", "br-lan", "vnet_1", strings.Repeat("a", 15)} {
+		nic, err := parseNIC("net0", "virtio=AA:BB:CC:DD:EE:01,bridge="+bridge)
+		if err != nil || nic.Bridge != bridge {
+			t.Errorf("bridge %q: nic=%+v, err=%v", bridge, nic, err)
+		}
+	}
+	if _, err := parseNIC("net0", strings.Repeat("a", MaxTextFieldBytes+1)); err == nil {
+		t.Error("oversized NIC value accepted")
+	}
 	nic, err := parseNIC("net0", "virtio=invalid,bridge=vmbr0")
 	if err != nil || nic.MAC != "" {
 		t.Fatalf("invalid MAC retained: nic=%+v, err=%v", nic, err)
+	}
+}
+
+// A malformed NIC value (out-of-range or non-numeric tag, hostile or
+// control-byte bridge) drops only that NIC and flags the NIC list as
+// incomplete instead of hiding the whole guest config.
+func TestConfigToleratesPerNICErrors(t *testing.T) {
+	for _, body := range []string{
+		`{"cores":2,"memory":512,"net0":"virtio=AA:BB:CC:DD:EE:01,bridge=vmbr0,tag=4095","net5":"virtio=AA:BB:CC:DD:EE:05,bridge=vmbr0.100"}`,
+		`{"cores":2,"memory":512,"net0":"virtio=AA:BB:CC:DD:EE:01,bridge=vmbr0,tag=abc","net5":"virtio=AA:BB:CC:DD:EE:05,bridge=vmbr0.100"}`,
+		`{"cores":2,"memory":512,"net0":"virtio=AA:BB:CC:DD:EE:01,bridge=br/0","net5":"virtio=AA:BB:CC:DD:EE:05,bridge=vmbr0.100"}`,
+		`{"cores":2,"memory":512,"net0":"virtio=AA:BB:CC:DD:EE:01,bridge=vmbr\u001b0","net5":"virtio=AA:BB:CC:DD:EE:05,bridge=vmbr0.100"}`,
+		fmt.Sprintf(`{"cores":2,"memory":512,"net0":"virtio=AA:BB:CC:DD:EE:01,bridge=%s","net5":"virtio=AA:BB:CC:DD:EE:05,bridge=vmbr0.100"}`, strings.Repeat("a", 16)),
+	} {
+		cfg, err := parseGuestConfig(json.RawMessage(body), "pve1", 100, KindQemu)
+		if err != nil {
+			t.Fatalf("parseGuestConfig(%s): %v", body, err)
+		}
+		if cfg.CPUs != 2 || cfg.Memory != 512<<20 {
+			t.Fatalf("guest config hidden by a bad NIC: %+v", cfg)
+		}
+		if !cfg.NICsIncomplete || len(cfg.NICs) != 1 || cfg.NICs[0].Device != "net5" || cfg.NICs[0].Bridge != "vmbr0.100" {
+			t.Fatalf("NICs = %+v incomplete=%v; want only net5 and incomplete", cfg.NICs, cfg.NICsIncomplete)
+		}
+	}
+	// A clean config is not flagged.
+	cfg, err := parseGuestConfig(json.RawMessage(`{"net0":"virtio=AA:BB:CC:DD:EE:01,bridge=vmbr0.100,tag=42"}`), "pve1", 100, KindQemu)
+	if err != nil || cfg.NICsIncomplete || len(cfg.NICs) != 1 || cfg.NICs[0].Bridge != "vmbr0.100" {
+		t.Fatalf("clean config flagged: %+v, %v", cfg, err)
 	}
 }

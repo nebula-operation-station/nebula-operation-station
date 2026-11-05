@@ -10875,8 +10875,12 @@ type PVERemoteInfo struct {
 	TrustPin        string         `protobuf:"bytes,5,opt,name=trust_pin,json=trustPin,proto3" json:"trust_pin,omitempty"`
 	TrustGeneration uint64         `protobuf:"varint,6,opt,name=trust_generation,json=trustGeneration,proto3" json:"trust_generation,omitempty"`
 	State           PVERemoteState `protobuf:"varint,7,opt,name=state,proto3,enum=nebula.executor.v1.PVERemoteState" json:"state,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// The current read credential version (registry Credentials.ReadVersion);
+	// 0 when the remote has no valid read credential. A version number, not a
+	// secret: credential references and values are never exposed here.
+	ReadCredentialVersion int64 `protobuf:"varint,8,opt,name=read_credential_version,json=readCredentialVersion,proto3" json:"read_credential_version,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *PVERemoteInfo) Reset() {
@@ -10956,6 +10960,13 @@ func (x *PVERemoteInfo) GetState() PVERemoteState {
 		return x.State
 	}
 	return PVERemoteState_PVE_REMOTE_STATE_UNSPECIFIED
+}
+
+func (x *PVERemoteInfo) GetReadCredentialVersion() int64 {
+	if x != nil {
+		return x.ReadCredentialVersion
+	}
+	return 0
 }
 
 type ListPVERemotesRequest struct {
@@ -21074,7 +21085,7 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\aversion\x18\x03 \x01(\tR\aversion\"5\n" +
 	"\vPVEEndpoint\x12\x12\n" +
 	"\x04host\x18\x01 \x01(\tR\x04host\x12\x12\n" +
-	"\x04port\x18\x02 \x01(\rR\x04port\"\xb8\x02\n" +
+	"\x04port\x18\x02 \x01(\rR\x04port\"\xf0\x02\n" +
 	"\rPVERemoteInfo\x12\x1b\n" +
 	"\tremote_id\x18\x01 \x01(\tR\bremoteId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x125\n" +
@@ -21082,7 +21093,8 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\tendpoints\x18\x04 \x03(\v2\x1f.nebula.executor.v1.PVEEndpointR\tendpoints\x12\x1b\n" +
 	"\ttrust_pin\x18\x05 \x01(\tR\btrustPin\x12)\n" +
 	"\x10trust_generation\x18\x06 \x01(\x04R\x0ftrustGeneration\x128\n" +
-	"\x05state\x18\a \x01(\x0e2\".nebula.executor.v1.PVERemoteStateR\x05state\"\x17\n" +
+	"\x05state\x18\a \x01(\x0e2\".nebula.executor.v1.PVERemoteStateR\x05state\x126\n" +
+	"\x17read_credential_version\x18\b \x01(\x03R\x15readCredentialVersion\"\x17\n" +
 	"\x15ListPVERemotesRequest\"U\n" +
 	"\x16ListPVERemotesResponse\x12;\n" +
 	"\aremotes\x18\x01 \x03(\v2!.nebula.executor.v1.PVERemoteInfoR\aremotes\"'\n" +
