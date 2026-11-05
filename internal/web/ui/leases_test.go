@@ -31,6 +31,17 @@ type fakeLeases struct {
 	proposed   []executions.ReadGrantRequest
 	commitErr  error
 	committed  []string
+
+	providerPreview  executions.ReadGrantPreview
+	providerErr      error
+	providerProposed []executions.ProviderReadGrantRequest
+}
+
+// ProposeProviderReadGrant records the request and returns the configured
+// provider preview.
+func (f *fakeLeases) ProposeProviderReadGrant(_ context.Context, _ string, in executions.ProviderReadGrantRequest) (executions.ReadGrantPreview, error) {
+	f.providerProposed = append(f.providerProposed, in)
+	return f.providerPreview, f.providerErr
 }
 
 // ReadGrants returns the configured grants.
