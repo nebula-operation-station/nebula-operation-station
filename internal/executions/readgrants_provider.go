@@ -82,6 +82,9 @@ type ReadGrantPreviewProvider struct {
 	TrustGeneration   uint64
 	CredentialVersion int64
 	Methods           []string
+	// MetricsTargets are the exact metrics targets of a provider telemetry
+	// lease in document order; empty for a provider read lease.
+	MetricsTargets []permit.ProviderMetricsTarget
 }
 
 // providerRemoteLister reads the executor's PVE remote metadata (state,
@@ -228,16 +231,30 @@ func (s *Service) ProposeProviderReadGrant(ctx context.Context, user string, in 
 		}
 		doc.ProviderTargets = append(doc.ProviderTargets, t)
 	}
+	v, err := s.proposeProviderDoc(ctx, exec, doc, "provider read")
+	if err != nil {
+		return ReadGrantPreview{}, err
+	}
+	s.log.Info("audit", "kind", "provider_read_grant_proposed", "grant", v.ID, "digest", v.Digest, "user", user,
+		"remotes", len(v.Providers), "methods", len(methods))
+	return v, nil
+}
+
+// proposeProviderDoc proposes a built provider document (read or
+// telemetry) to the executor and returns the preview of its answer, which
+// must be exactly the proposed document (previewFromResponse). label names
+// the lease kind in log lines.
+func (s *Service) proposeProviderDoc(ctx context.Context, exec readGrantProposer, doc permit.ReadGrantDoc, label string) (ReadGrantPreview, error) {
 	raw, err := json.Marshal(doc)
 	if err != nil {
-		return ReadGrantPreview{}, fmt.Errorf("encode provider read grant: %w", err)
+		return ReadGrantPreview{}, fmt.Errorf("encode %s grant: %w", label, err)
 	}
 	cctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 	r, err := exec.ProposeReadGrant(cctx, &pb.ProposeReadGrantRequest{GrantJson: raw})
 	if err != nil {
 		code := status.Code(err)
-		s.log.Warn("provider read grant proposal refused", "code", code.String())
+		s.log.Warn(label+" grant proposal refused", "code", code.String())
 		if code == codes.Unimplemented {
 			return ReadGrantPreview{}, ErrReadGrantProposeUnsupported
 		}
@@ -245,25 +262,24 @@ func (s *Service) ProposeProviderReadGrant(ctx context.Context, user string, in 
 	}
 	v, err := previewFromResponse(r, doc)
 	if err != nil {
-		s.log.Warn("provider read grant proposal answer rejected", "error", err.Error())
+		s.log.Warn(label+" grant proposal answer rejected", "error", err.Error())
 		return ReadGrantPreview{}, err
 	}
 	v.ScopeKind = ScopeProvider
-	s.log.Info("audit", "kind", "provider_read_grant_proposed", "grant", v.ID, "digest", v.Digest, "user", user,
-		"remotes", len(v.Providers), "methods", len(methods))
 	return v, nil
 }
 
 // sameProviderTargets reports whether the executor's provider targets are
 // exactly the proposed ones: same order (the executor canonicalizes the
 // document in member order without reordering arrays), same remote, trust
-// pin, trust generation, credential version and method list, and no
-// metrics targets.
+// pin, trust generation, credential version and method list, and the same
+// metrics targets in the same order with the same node, kind, VMID and
+// generation (none for a provider read lease).
 func sameProviderTargets(a, b []permit.ProviderTarget) bool {
 	return slices.EqualFunc(a, b, func(x, y permit.ProviderTarget) bool {
 		return x.RemoteID == y.RemoteID && x.TrustPin == y.TrustPin && x.TrustGeneration == y.TrustGeneration &&
 			x.CredentialVersion == y.CredentialVersion && slices.Equal(x.Methods, y.Methods) &&
-			len(x.MetricsTargets) == 0 && len(y.MetricsTargets) == 0
+			slices.Equal(x.MetricsTargets, y.MetricsTargets)
 	})
 }
 
