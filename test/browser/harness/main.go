@@ -408,6 +408,7 @@ func newHarness(preview bool, port, dir string) http.Handler {
 	u, err := ui.New(opts)
 	must(err)
 	pages.Handle("/", u.Handler())
+	mountTrafficMap(pages, preview, origin, uiLog)
 	if preview {
 		seedPreviewDeployment(context.Background(), pages, pveStore, uiLog)
 	}
