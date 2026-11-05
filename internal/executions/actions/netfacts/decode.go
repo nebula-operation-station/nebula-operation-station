@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 
@@ -190,8 +191,18 @@ type resultDoc struct {
 	Conntrack  *sectionDoc `json:"conntrack"`
 }
 
+// maxInvalidDetail bounds the detail of an ErrInvalidResult message, so
+// no error path (including encoding/json's own messages, which quote
+// unknown field names and number literals) carries an unbounded amount of
+// host-supplied text.
+const maxInvalidDetail = 256
+
 func invalid(format string, a ...any) error {
-	return fmt.Errorf("%w: %s", ErrInvalidResult, fmt.Sprintf(format, a...))
+	detail := fmt.Sprintf(format, a...)
+	if len(detail) > maxInvalidDetail {
+		detail = strings.ToValidUTF8(detail[:maxInvalidDetail], "") + "..."
+	}
+	return fmt.Errorf("%w: %s", ErrInvalidResult, detail)
 }
 
 // Decode decodes and parses a net.facts result. Every contract violation
@@ -200,6 +211,13 @@ func invalid(format string, a ...any) error {
 func Decode(raw []byte) (Facts, error) {
 	if len(raw) > MaxDocument {
 		return Facts{}, invalid("document exceeds %d bytes", MaxDocument)
+	}
+	// encoding/json matches member names case-insensitively and lets the
+	// last of two equal members win; the schema is exact. The key check
+	// runs first, so the decoder never reports a host-supplied unknown
+	// member name.
+	if err := checkDocumentKeys(raw); err != nil {
+		return Facts{}, invalid("document: %v", err)
 	}
 	var d resultDoc
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -210,13 +228,8 @@ func Decode(raw []byte) (Facts, error) {
 	if _, err := dec.Token(); err != io.EOF {
 		return Facts{}, invalid("data after the document")
 	}
-	// encoding/json matches member names case-insensitively and lets the
-	// last of two equal members win; the schema is exact.
-	if err := checkDocumentKeys(raw); err != nil {
-		return Facts{}, invalid("document: %v", err)
-	}
 	if d.Format != Format || d.Phase != "done" {
-		return Facts{}, invalid("format %q phase %q", d.Format, d.Phase)
+		return Facts{}, invalid("format %s phase %s", quoteKey(d.Format), quoteKey(d.Phase))
 	}
 	docs := map[string]*sectionDoc{
 		SectionAddr: d.Addr, SectionLink: d.Link, SectionRoute: d.Route, SectionRoute6: d.Route6,

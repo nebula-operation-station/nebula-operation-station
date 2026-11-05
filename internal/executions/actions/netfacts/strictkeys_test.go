@@ -335,7 +335,7 @@ func FuzzStrictKeysMatchJSON(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, key string) {
 		if len(key) > 256 {
-			t.Skip()
+			return // bounded: longer keys add nothing
 		}
 		assertStrictAgainstJSON(t, key)
 		// Accepted names are ASCII and never a case variant of a field.
@@ -406,17 +406,29 @@ func TestParserFieldsMatchNetfactsParsers(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// Named struct types by their struct node; every other struct
+		// type (an anonymous inline struct such as []struct{...}) is
+		// walked as well.
+		named := map[*ast.StructType]string{}
 		ast.Inspect(file, func(n ast.Node) bool {
-			ts, isType := n.(*ast.TypeSpec)
-			if !isType {
-				return true
+			if ts, isType := n.(*ast.TypeSpec); isType {
+				if st, isStruct := ts.Type.(*ast.StructType); isStruct {
+					named[st] = ts.Name.Name
+				}
 			}
-			st, isStruct := ts.Type.(*ast.StructType)
+			return true
+		})
+		ast.Inspect(file, func(n ast.Node) bool {
+			st, isStruct := n.(*ast.StructType)
 			if !isStruct {
 				return true
 			}
+			name, isNamed := named[st]
+			if !isNamed {
+				name = "anonymous struct at " + fset.Position(st.Pos()).String()
+			}
 			// A JSON document struct: named *Doc or carrying a json tag.
-			isDoc := strings.HasSuffix(ts.Name.Name, "Doc")
+			isDoc := strings.HasSuffix(name, "Doc")
 			tags := make([]string, len(st.Fields.List))
 			for i, f := range st.Fields.List {
 				if f.Tag == nil {
@@ -436,7 +448,7 @@ func TestParserFieldsMatchNetfactsParsers(t *testing.T) {
 			}
 			for i, f := range st.Fields.List {
 				if len(f.Names) == 0 {
-					t.Errorf("%s: embedded field in a JSON struct is not supported by this check", ts.Name.Name)
+					t.Errorf("%s: embedded field in a JSON struct is not supported by this check", name)
 					continue
 				}
 				for _, id := range f.Names {
@@ -473,5 +485,39 @@ func TestFoldKeyIsASCIIFold(t *testing.T) {
 		if got := foldKey(tc.a) == foldKey(tc.b); got != tc.same {
 			t.Errorf("foldKey(%q)==foldKey(%q) is %v, want %v", tc.a, tc.b, got, tc.same)
 		}
+	}
+}
+
+// No rejection error carries an unbounded amount of host-supplied text:
+// a long unknown member, a long format or phase value or a long number
+// literal is quoted at most in part.
+func TestDecodeErrorsAreBounded(t *testing.T) {
+	doc := goodDoc(t)
+	long := strings.Repeat("x", 100<<10)
+	digits := "1" + strings.Repeat("0", 100<<10)
+	for _, tc := range []struct {
+		name string
+		raw  []byte
+	}{
+		{"top unknown key", []byte(`{"` + long + `":1,` + doc[1:])},
+		{"top unknown non-ASCII key", []byte(`{"İ` + long + `":1,` + doc[1:])},
+		{"section unknown key", splice(t, doc, failedConntrack, `"conntrack":{"status":"failed","truncated":false,"data":"","`+long+`":1}`)},
+		{"section case-variant key", splice(t, doc, failedConntrack, `"conntrack":{"status":"failed","truncated":false,"data":"","DATA`+long+`":1}`)},
+		{"long format", splice(t, doc, `"format":"net-facts-v1"`, `"format":"`+long+`"`)},
+		{"long status", splice(t, doc, failedConntrack, `"conntrack":{"status":"`+long+`","truncated":false,"data":""}`)},
+		{"long number", splice(t, doc, failedConntrack, `"conntrack":{"status":"failed","truncated":`+digits+`,"data":""}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Decode(tc.raw)
+			if !errors.Is(err, ErrInvalidResult) {
+				t.Fatalf("Decode = %v, want ErrInvalidResult", err)
+			}
+			if n := len(err.Error()); n > 512 {
+				t.Fatalf("error message is %d bytes: %.200s", n, err.Error())
+			}
+		})
+	}
+	if got := quoteKey(long); len(got) > maxQuotedKey+8 {
+		t.Fatalf("quoteKey returned %d bytes", len(got))
 	}
 }
