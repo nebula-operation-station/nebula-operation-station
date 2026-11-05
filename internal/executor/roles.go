@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
@@ -253,8 +254,21 @@ func ValidateReadPVERequest(req *pb.ReadPVERequest) error {
 	return nil
 }
 
+// pveReadCredentialVersion returns the read credential version of r when r
+// has a valid read credential, using the same condition as ReadPVE
+// (pve_read.go): the read reference is the remote's own read vault ID and
+// the version is at least 1. Otherwise it returns 0. Only the version
+// number leaves this function, never the reference.
+func pveReadCredentialVersion(r executordb.PveRemote) int64 {
+	if r.Credentials.ReadRef != PveVaultID(r.RemoteID, PvePurposeRead) || r.Credentials.ReadVersion < 1 {
+		return 0
+	}
+	return r.Credentials.ReadVersion
+}
+
 // ListPVERemotes returns public registry metadata for server and collector
-// reads. Credential references and values are excluded from this surface.
+// reads. Credential references and values are excluded from this surface;
+// only the read credential version number is reported.
 func (s *Service) ListPVERemotes(ctx context.Context, _ *pb.ListPVERemotesRequest) (*pb.ListPVERemotesResponse, error) {
 	s.pveMu.Lock()
 	defer s.pveMu.Unlock()
@@ -264,7 +278,8 @@ func (s *Service) ListPVERemotes(ctx context.Context, _ *pb.ListPVERemotesReques
 	}
 	out := &pb.ListPVERemotesResponse{}
 	for _, r := range rows {
-		info := &pb.PVERemoteInfo{RemoteId: r.RemoteID, Name: r.Name, TrustPin: r.TrustPin, TrustGeneration: r.TrustGeneration}
+		info := &pb.PVERemoteInfo{RemoteId: r.RemoteID, Name: r.Name, TrustPin: r.TrustPin, TrustGeneration: r.TrustGeneration,
+			ReadCredentialVersion: pveReadCredentialVersion(r)}
 		switch r.Kind {
 		case pvecontract.KindCluster:
 			info.Kind = pb.PVERemoteKind_PVE_REMOTE_KIND_CLUSTER

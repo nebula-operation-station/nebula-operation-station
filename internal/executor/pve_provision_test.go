@@ -975,26 +975,61 @@ func TestProvisionTemplateChangedRefusesRun(t *testing.T) {
 	}
 }
 
+// PVE bridge names (VLAN sub-bridges, hyphenated Linux bridges) pass
+// proposal validation and reach the PVE config call verbatim.
+func TestProvisionAcceptsPVEBridgeNames(t *testing.T) {
+	for _, bridge := range []string{"vmbr0.100", "br-lan"} {
+		t.Run(bridge, func(t *testing.T) {
+			e := newProvisionEnv(t, fixedRisk{})
+			e.setPassword()
+			req := e.request()
+			req.PasswordID = "web1"
+			req.NIC.Bridge = bridge
+			req = e.approve(req)
+			res, err := e.prov.Provision(context.Background(), req)
+			if err != nil || res.VMID != 101 {
+				t.Fatalf("Provision: %+v, %v", res, err)
+			}
+			gs := &guestServer{}
+			w := newGuestWriter(t, gs)
+			for _, s := range e.pc.provisionSteps() {
+				if _, err := DispatchProvisionStep(context.Background(), w, e.pe.vault, "pve1", s); err != nil {
+					t.Fatalf("%s: %v", s.Method, err)
+				}
+			}
+			if got := gs.forms[1].Get("net0"); got != "virtio,bridge="+bridge+",tag=10" {
+				t.Fatalf("net0 = %q", got)
+			}
+		})
+	}
+}
+
 func TestProvisionRejectsInvalidRequests(t *testing.T) {
 	e := newProvisionEnv(t, fixedRisk{})
 	cases := map[string]func(*PveProvisionRequest){
-		"name uppercase":     func(r *PveProvisionRequest) { r.Name = "Web1" },
-		"name with space":    func(r *PveProvisionRequest) { r.Name = "web 1" },
-		"no cores":           func(r *PveProvisionRequest) { r.Cores = 0 },
-		"too much memory":    func(r *PveProvisionRequest) { r.MemoryMiB = pveapi.MaxMemoryMiB + 1 },
-		"no disk":            func(r *PveProvisionRequest) { r.DiskGiB = 0 },
-		"bad disk slot":      func(r *PveProvisionRequest) { r.Disk = "nvme0" },
-		"bad storage":        func(r *PveProvisionRequest) { r.Storage = "../x" },
-		"bad bridge":         func(r *PveProvisionRequest) { r.NIC.Bridge = "vmbr0,firewall=1" },
-		"bad model":          func(r *PveProvisionRequest) { r.NIC.Model = "rtl8139" },
-		"multicast mac":      func(r *PveProvisionRequest) { r.NIC.MAC = "01:00:5e:00:00:01" },
-		"vlan mismatch":      func(r *PveProvisionRequest) { r.NIC.VLAN = 20 },
-		"address outside":    func(r *PveProvisionRequest) { r.IPAM.Address = netip.MustParseAddr("192.168.11.5") },
-		"broadcast address":  func(r *PveProvisionRequest) { r.IPAM.Address = netip.MustParseAddr("192.168.10.255") },
-		"network address":    func(r *PveProvisionRequest) { r.IPAM.Address = netip.MustParseAddr("192.168.10.0") },
-		"gateway is address": func(r *PveProvisionRequest) { r.IPAM.Gateway = r.IPAM.Address },
-		"gateway outside":    func(r *PveProvisionRequest) { r.IPAM.Gateway = netip.MustParseAddr("10.0.0.1") },
-		"unmasked prefix":    func(r *PveProvisionRequest) { r.IPAM.Prefix = netip.MustParsePrefix("192.168.10.7/24") },
+		"name uppercase":      func(r *PveProvisionRequest) { r.Name = "Web1" },
+		"name with space":     func(r *PveProvisionRequest) { r.Name = "web 1" },
+		"no cores":            func(r *PveProvisionRequest) { r.Cores = 0 },
+		"too much memory":     func(r *PveProvisionRequest) { r.MemoryMiB = pveapi.MaxMemoryMiB + 1 },
+		"no disk":             func(r *PveProvisionRequest) { r.DiskGiB = 0 },
+		"bad disk slot":       func(r *PveProvisionRequest) { r.Disk = "nvme0" },
+		"bad storage":         func(r *PveProvisionRequest) { r.Storage = "../x" },
+		"bad bridge":          func(r *PveProvisionRequest) { r.NIC.Bridge = "vmbr0,firewall=1" },
+		"bad bridge slash":    func(r *PveProvisionRequest) { r.NIC.Bridge = "br/0" },
+		"bad bridge angle":    func(r *PveProvisionRequest) { r.NIC.Bridge = "<x>" },
+		"bad bridge dot":      func(r *PveProvisionRequest) { r.NIC.Bridge = "." },
+		"bad bridge dotdot":   func(r *PveProvisionRequest) { r.NIC.Bridge = ".." },
+		"bad bridge 16 bytes": func(r *PveProvisionRequest) { r.NIC.Bridge = strings.Repeat("a", 16) },
+		"bad bridge control":  func(r *PveProvisionRequest) { r.NIC.Bridge = "vmbr\x1b0" },
+		"bad model":           func(r *PveProvisionRequest) { r.NIC.Model = "rtl8139" },
+		"multicast mac":       func(r *PveProvisionRequest) { r.NIC.MAC = "01:00:5e:00:00:01" },
+		"vlan mismatch":       func(r *PveProvisionRequest) { r.NIC.VLAN = 20 },
+		"address outside":     func(r *PveProvisionRequest) { r.IPAM.Address = netip.MustParseAddr("192.168.11.5") },
+		"broadcast address":   func(r *PveProvisionRequest) { r.IPAM.Address = netip.MustParseAddr("192.168.10.255") },
+		"network address":     func(r *PveProvisionRequest) { r.IPAM.Address = netip.MustParseAddr("192.168.10.0") },
+		"gateway is address":  func(r *PveProvisionRequest) { r.IPAM.Gateway = r.IPAM.Address },
+		"gateway outside":     func(r *PveProvisionRequest) { r.IPAM.Gateway = netip.MustParseAddr("10.0.0.1") },
+		"unmasked prefix":     func(r *PveProvisionRequest) { r.IPAM.Prefix = netip.MustParsePrefix("192.168.10.7/24") },
 		"ipv6 reservation": func(r *PveProvisionRequest) {
 			r.IPAM.Prefix, r.IPAM.Address = netip.MustParsePrefix("fd00::/64"), netip.MustParseAddr("fd00::5")
 		},

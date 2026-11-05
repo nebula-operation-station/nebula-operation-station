@@ -191,6 +191,9 @@ func TestReadPVEGuestConfigInvalidNICDropsOnlyThatNIC(t *testing.T) {
 		`"net0":"virtio=02:00:00:00:00:01,bridge=br/0"`,
 		`"net32":"virtio=02:00:00:00:00:01,bridge=vmbr0"`,
 		`"net0":"virtio=invalid,bridge=vmbr0"`,
+		`"net0":"virtio=02:00:00:00:00:01,bridge=vmbr0,tag=4095"`,
+		`"net0":"virtio=02:00:00:00:00:01,bridge=vmbr0,tag=abc"`,
+		`"net0":"virtio=02:00:00:00:00:01,bridge=vmbr\u001b0"`,
 	} {
 		t.Run(nic, func(t *testing.T) {
 			e := guestPveEnv(t)

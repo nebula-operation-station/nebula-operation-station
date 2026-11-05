@@ -193,6 +193,9 @@ func (a Action) SHA256() string {
 //go:embed scripts/core_facts.sh
 var coreFacts []byte
 
+//go:embed scripts/net_facts.sh
+var netFacts []byte
+
 //go:embed scripts/host_metrics.sh
 var hostMetrics []byte
 
@@ -272,6 +275,11 @@ var Builtin = []Action{
 		ID: "core.facts", Version: "1.0.0", Title: "Collect facts",
 		Description: "Reads /etc/os-release, kernel, hostname, uptime and whether the host is a Proxmox VE node. Read-only.",
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 30 * time.Second, ReadOnly: true, Script: coreFacts, Retry: RetrySafe,
+	},
+	{
+		ID: "net.facts", Version: "1.0.0", Title: "Collect network facts",
+		Description: "Unchanged output of ip -j addr/link/route/neigh (IPv4 and IPv6), bridge -j vlan, ss -tinuaH and, when installed, lldpcli neighbors and conntrack -L, each capped at 256 KiB and marked when cut. No sudo, no process names (ss without -p). Read-only.",
+		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: time.Minute, ReadOnly: true, Script: netFacts, Retry: RetrySafe,
 	},
 	{
 		ID: "host.metrics", Version: "1.0.0", Title: "Host metrics",

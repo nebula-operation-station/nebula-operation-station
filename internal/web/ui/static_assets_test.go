@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/middleware"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 	"github.com/nebula-operation-station/nebula-operation-station/web/static"
 )
@@ -96,11 +97,23 @@ func referencedStaticAssets(t *testing.T) []string {
 	return names
 }
 
+// strictCSP is the Content-Security-Policy of docs/spec/09 and 14 that
+// internal/web/middleware sets on every response.
+const strictCSP = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+
 // TestReferencedStaticAssetsAreEmbedded fails when a script or stylesheet
 // the UI loads is missing from the //go:embed list in web/static, which
-// would make it 404 in a real server.
+// would make it 404 in a real server. Every asset is fetched through the
+// full security chain (middleware.NewServer) and must carry the strict
+// CSP, nosniff and its real content type.
 func TestReferencedStaticAssetsAreEmbedded(t *testing.T) {
-	h := newTestHandler(t, ui.Options{PublicOrigin: "https://nebula.example.org"}).Handler()
+	const origin = "https://nebula.example.org"
+	srv, err := middleware.NewServer(middleware.Options{PublicOrigin: origin},
+		newTestHandler(t, ui.Options{PublicOrigin: origin}).Handler())
+	if err != nil {
+		t.Fatalf("middleware.NewServer: %v", err)
+	}
+	h := srv.Handler
 	names := referencedStaticAssets(t)
 	for _, want := range []string{"software.js", "formpost.js", "app.css"} {
 		if i := sort.SearchStrings(names, want); i >= len(names) || names[i] != want {
@@ -116,6 +129,20 @@ func TestReferencedStaticAssetsAreEmbedded(t *testing.T) {
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/static/"+name, nil))
 		if rec.Code != http.StatusOK {
 			t.Errorf("GET /static/%s: status %d, want 200", name, rec.Code)
+			continue
+		}
+		if csp := rec.Header().Get("Content-Security-Policy"); csp != strictCSP {
+			t.Errorf("GET /static/%s: CSP %q, want %q", name, csp, strictCSP)
+		}
+		if v := rec.Header().Get("X-Content-Type-Options"); v != "nosniff" {
+			t.Errorf("GET /static/%s: X-Content-Type-Options %q, want nosniff", name, v)
+		}
+		want := "text/css"
+		if strings.HasSuffix(name, ".js") {
+			want = "javascript"
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, want) {
+			t.Errorf("GET /static/%s: Content-Type %q, want %s", name, ct, want)
 		}
 	}
 }

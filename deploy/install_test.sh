@@ -173,6 +173,8 @@ check_line "install.sh provisions pve/requests 2770" "$install_sh" \
   'install -d -m 2770 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/requests"'
 check_line "install.sh provisions pve/live 2750" "$install_sh" \
   'install -d -m 2750 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/live"'
+check_line "install.sh provisions pve/guestnet 2770" "$install_sh" \
+  'install -d -m 2770 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/guestnet"'
 # The server drop-in grants exactly the discovery jobs and pve/requests;
 # the server unit itself grants no write path.
 rw=$(grep '^ReadWritePaths=' "$install_sh" | tr '\n' ' ')

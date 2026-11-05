@@ -51,7 +51,6 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/version"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/web/middleware"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui/live"
 )
@@ -422,22 +421,27 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		return err
 	}
 	go lc.run(connCtx)
+	// Software catalog (ADR 0009 TM17): admin pages behind the session.
+	softwarePages, err := newSoftwarePages(db, log)
+	if err != nil {
+		return err
+	}
 	pages := http.NewServeMux()
 	pages.Handle("/", h.Handler())
 	lc.handler.Register(pages)
 	batchPages.Register(pages)
+	softwarePages.Register(pages)
 
-	root := http.NewServeMux()
-	root.Handle("/", login.Wrap(pages))
+	var apiHandler http.Handler
 	if cfg.API.Enabled {
 		a, err := api.New(api.Options{Tokens: cfg.API.Tokens, Hosts: store.List, Operations: ops, Log: log})
 		if err != nil {
 			return err
 		}
-		root.Handle(api.Prefix, a)
+		apiHandler = a
 		log.Info("read-only API enabled", "tokens", len(cfg.API.Tokens))
 	}
-	srv, err := middleware.NewServer(middleware.Options{PublicOrigin: cfg.PublicOrigin}, root)
+	srv, err := webServer(cfg.PublicOrigin, login, pages, apiHandler)
 	if err != nil {
 		return err
 	}

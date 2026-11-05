@@ -11,11 +11,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -49,18 +51,19 @@ func main() {
 
 func run() error {
 	var (
-		dataDir     = flag.String("data-dir", "/var/lib/nebula/executor", "private executor state (mode 0700)")
-		socketPath  = flag.String("socket", "/run/nebula/executor.sock", "Unix socket path")
-		socketGroup = flag.String("socket-group", "nebula-rpc", "group owning the socket file ('' to skip)")
-		serverUser  = flag.String("server-user", "nebula-server", "OS user of nebula-server")
-		adminUsers  = flag.String("admin-users", "", "comma-separated OS users allowed to unlock and approve")
-		rpID        = flag.String("rp-id", "", "WebAuthn RP ID: the fixed hostname Nebula is served under")
-		hardened    = flag.Bool("hardened", false, "require `nebula approve` for HIGH and CRITICAL")
-		sessionMin  = flag.Int("session-minutes", int(permit.DefaultSessionLength/time.Minute), "privileged session length in minutes (15–240)")
-		trustDir    = flag.String("builtin-trust-dir", "", "built-in trust store (default <data-dir>/trust)")
-		bundleDir   = flag.String("builtin-bundle-dir", defaultBuiltinBundleDir, "locally verified NOS release bundle that `nebula artifact trust-builtins` reviews")
-		showVersion = flag.Bool("version", false, "print version and exit")
-		origins     stringList
+		dataDir       = flag.String("data-dir", "/var/lib/nebula/executor", "private executor state (mode 0700)")
+		socketPath    = flag.String("socket", "/run/nebula/executor.sock", "Unix socket path")
+		socketGroup   = flag.String("socket-group", "nebula-rpc", "group owning the socket file ('' to skip)")
+		serverUser    = flag.String("server-user", "nebula-server", "OS user of nebula-server")
+		adminUsers    = flag.String("admin-users", "", "comma-separated OS users allowed to unlock and approve")
+		collectorUser = flag.String("pve-collector-user", defaultPveCollectorUser, "OS user of nebula-pve-collector (gets the pve-collector role; '' disables it; a configured non-default user must exist)")
+		rpID          = flag.String("rp-id", "", "WebAuthn RP ID: the fixed hostname Nebula is served under")
+		hardened      = flag.Bool("hardened", false, "require `nebula approve` for HIGH and CRITICAL")
+		sessionMin    = flag.Int("session-minutes", int(permit.DefaultSessionLength/time.Minute), "privileged session length in minutes (15–240)")
+		trustDir      = flag.String("builtin-trust-dir", "", "built-in trust store (default <data-dir>/trust)")
+		bundleDir     = flag.String("builtin-bundle-dir", defaultBuiltinBundleDir, "locally verified NOS release bundle that `nebula artifact trust-builtins` reviews")
+		showVersion   = flag.Bool("version", false, "print version and exit")
+		origins       stringList
 	)
 	flag.Var(&origins, "origin", "allowed WebAuthn origin, e.g. https://nebula.example.org (repeatable)")
 	flag.Parse()
@@ -135,7 +138,7 @@ func run() error {
 		return err
 	}
 
-	uidRoles, err := resolveRoles(*serverUser, *adminUsers)
+	uidRoles, err := resolveRoles(*serverUser, *adminUsers, *collectorUser, log)
 	if err != nil {
 		return err
 	}
@@ -242,16 +245,46 @@ func run() error {
 // reconcileInterval is how often open durable runs are checked.
 const reconcileInterval = 15 * time.Second
 
-func resolveRoles(serverUser, adminUsers string) (map[uint32][]peercred.Role, error) {
-	self := uint32(os.Getuid())
+// defaultPveCollectorUser is the OS user that install.sh, the Debian
+// package and the container image create for nebula-pve-collector.
+const defaultPveCollectorUser = "nebula-pve-collector"
+
+func resolveRoles(serverUser, adminUsers, collectorUser string, log *slog.Logger) (map[uint32][]peercred.Role, error) {
+	return resolveRolesWith(peercred.LookupUID, uint32(os.Getuid()), serverUser, adminUsers, collectorUser, log)
+}
+
+// Role assignment errors; resolveRolesWith wraps them with the user name.
+var (
+	// errRootUser means a role was configured for root.
+	errRootUser = errors.New("must not be root")
+	// errExecutorUser means a role was configured for the executor's own UID.
+	errExecutorUser = errors.New("must not be the executor user")
+	// errSharedUser means a UID would hold two roles.
+	errSharedUser = errors.New("must be a dedicated user, not shared with another role")
+	// errCollectorUserMissing means an explicitly configured
+	// -pve-collector-user does not exist.
+	errCollectorUserMissing = errors.New("configured pve-collector user does not exist")
+)
+
+// resolveRolesWith maps OS users to peercred roles. The server, every
+// admin and the pve-collector need distinct dedicated UIDs. A missing
+// collector user with the default name (an install that predates the
+// collector) leaves the pve-collector role unassigned; a missing collector
+// user that was configured explicitly, any other lookup failure, or a
+// collector UID shared with root, the executor, the server or an admin,
+// stops the start.
+func resolveRolesWith(lookup func(string) (uint32, error), self uint32, serverUser, adminUsers, collectorUser string, log *slog.Logger) (map[uint32][]peercred.Role, error) {
 	roles := map[uint32][]peercred.Role{}
 
-	suid, err := peercred.LookupUID(serverUser)
+	suid, err := lookup(serverUser)
 	if err != nil {
 		return nil, fmt.Errorf("server user %q: %w", serverUser, err)
 	}
-	if suid == 0 || suid == self {
-		return nil, fmt.Errorf("server user must be a dedicated non-root user distinct from the executor")
+	switch {
+	case suid == 0:
+		return nil, fmt.Errorf("server user %q %w", serverUser, errRootUser)
+	case suid == self:
+		return nil, fmt.Errorf("server user %q %w", serverUser, errExecutorUser)
 	}
 	roles[suid] = []peercred.Role{peercred.RoleServer}
 
@@ -260,21 +293,47 @@ func resolveRoles(serverUser, adminUsers string) (map[uint32][]peercred.Role, er
 		if name == "" {
 			continue
 		}
-		uid, err := peercred.LookupUID(name)
+		uid, err := lookup(name)
 		if err != nil {
 			return nil, fmt.Errorf("admin user %q: %w", name, err)
 		}
-		if uid == suid {
-			return nil, fmt.Errorf("admin user %q must not be the server user", name)
-		}
-		if uid == self {
-			return nil, fmt.Errorf("admin user %q must not be the executor user", name)
-		}
-		if uid == 0 {
-			return nil, fmt.Errorf("root cannot be an admin user; use a personal account")
+		switch {
+		case uid == 0:
+			return nil, fmt.Errorf("admin user %q %w; use a personal account", name, errRootUser)
+		case uid == self:
+			return nil, fmt.Errorf("admin user %q %w", name, errExecutorUser)
+		case uid == suid:
+			return nil, fmt.Errorf("admin user %q %w: it is the server user", name, errSharedUser)
 		}
 		roles[uid] = []peercred.Role{peercred.RoleAdmin}
 	}
+
+	collectorUser = strings.TrimSpace(collectorUser)
+	if collectorUser == "" {
+		log.Info("pve-collector role disabled: -pve-collector-user is empty")
+		return roles, nil
+	}
+	cuid, err := lookup(collectorUser)
+	var unknown user.UnknownUserError
+	if errors.As(err, &unknown) {
+		if collectorUser != defaultPveCollectorUser {
+			return nil, fmt.Errorf("pve-collector user %q: %w: %w", collectorUser, errCollectorUserMissing, err)
+		}
+		log.Warn("pve-collector user not found; the pve-collector role is not assigned", "user", collectorUser)
+		return roles, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("pve-collector user %q: %w", collectorUser, err)
+	}
+	switch {
+	case cuid == 0:
+		return nil, fmt.Errorf("pve-collector user %q %w", collectorUser, errRootUser)
+	case cuid == self:
+		return nil, fmt.Errorf("pve-collector user %q %w", collectorUser, errExecutorUser)
+	case len(roles[cuid]) > 0:
+		return nil, fmt.Errorf("pve-collector user %q %w: it is the server or an admin user", collectorUser, errSharedUser)
+	}
+	roles[cuid] = []peercred.Role{peercred.RolePVECollector}
 	return roles, nil
 }
 

@@ -167,6 +167,9 @@ func readPveGuestConfig(ctx context.Context, remoteID, base string, hc *http.Cli
 		return unavailable(pveReasonTruncated)
 	}
 	nics, nicsComplete := pveGuestNICs(raw.NICs)
+	if raw.NICsIncomplete {
+		nicsComplete = false
+	}
 	cfg := pveGuestConfig(raw)
 	if len(raw.HostPCI) > 0 {
 		cfg.HostPCI = pveHostPCI(ctx, base, hc, token, ref.guest.Node, raw.HostPCI)
