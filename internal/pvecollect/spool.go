@@ -463,6 +463,15 @@ var ErrSpoolOwnership = errors.New("pvecollect: spool directory has foreign owne
 // must have. It is a variable so that tests can simulate other owners.
 var spoolOwnership = defaultSpoolOwnership
 
+// spoolGroupLookup resolves the shared spool group by name. It is a
+// variable so that tests can simulate the group database without
+// depending on the host's groups.
+var spoolGroupLookup = user.LookupGroup
+
+// spoolSupplementaryGroups returns the process's supplementary GIDs. It is
+// a variable so that tests can simulate group membership.
+var spoolSupplementaryGroups = os.Getgroups
+
 // defaultSpoolOwnership expects the effective UID as owner. The group is
 // spoolGroupName when this process is a member of it (the collector unit
 // adds it as a supplementary group); otherwise, where no shared group is
@@ -470,7 +479,7 @@ var spoolOwnership = defaultSpoolOwnership
 // cannot resolve fails closed.
 func defaultSpoolOwnership() (uint32, uint32, error) {
 	uid, egid := uint32(os.Geteuid()), uint32(os.Getegid())
-	g, err := user.LookupGroup(spoolGroupName)
+	g, err := spoolGroupLookup(spoolGroupName)
 	var unknown user.UnknownGroupError
 	if errors.As(err, &unknown) {
 		return uid, egid, nil
@@ -486,7 +495,7 @@ func defaultSpoolOwnership() (uint32, uint32, error) {
 	if gid == egid {
 		return uid, gid, nil
 	}
-	groups, err := os.Getgroups()
+	groups, err := spoolSupplementaryGroups()
 	if err != nil {
 		return 0, 0, fmt.Errorf("read supplementary groups: %w", err)
 	}
