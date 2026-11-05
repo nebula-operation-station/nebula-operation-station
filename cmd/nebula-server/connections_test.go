@@ -178,8 +178,8 @@ func TestConnectionsPagesReadOnly(t *testing.T) {
 			t.Errorf("POST with Origin %q: status %d, want 403", origin, rec.Code)
 		}
 	}
-	if rec := f.sw.do(t, http.MethodPost, "/hosts/web1/connections", f.sw.token, swOrigin, "x=1"); rec.Code == http.StatusOK {
-		t.Errorf("POST with the public origin: status %d, want a refusal", rec.Code)
+	if rec := f.sw.do(t, http.MethodPost, "/hosts/web1/connections", f.sw.token, swOrigin, "x=1"); rec.Code != http.StatusNotFound {
+		t.Errorf("POST with the public origin: status %d, want 404", rec.Code)
 	}
 }
 
