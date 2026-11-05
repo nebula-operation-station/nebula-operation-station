@@ -227,7 +227,7 @@ func decodeReadGrant(g *pb.ReadGrant, inv []inventory.Host, haveInv bool, now ti
 	sort.Slice(v.Providers, func(i, j int) bool { return v.Providers[i].RemoteID < v.Providers[j].RemoteID })
 	if len(v.Remotes) > 0 {
 		// A provider grant's scope is its PVE remotes, not SSH hosts.
-		v.ScopeKind = "provider"
+		v.ScopeKind = ScopeProvider
 	} else {
 		v.ScopeKind, v.ScopeValue = scopeLabel(v.Hosts, inv, haveInv)
 	}
