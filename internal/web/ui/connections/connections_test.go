@@ -5,6 +5,7 @@ package connections
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/flowagg"
+	"github.com/nebula-operation-station/nebula-operation-station/web/templates"
 )
 
 var testNow = time.Date(2026, 11, 5, 12, 30, 0, 0, time.UTC)
@@ -522,6 +524,23 @@ func TestOtherMethodsRejected(t *testing.T) {
 	h.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/hosts/web1/connections", nil))
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST status %d", rr.Code)
+	}
+}
+
+// TestHostAndAssetPagesLinkTheTab checks that the host and asset page
+// templates link the routes this package registers.
+func TestHostAndAssetPagesLinkTheTab(t *testing.T) {
+	for file, want := range map[string]string{
+		"host.html":  `href="/hosts/{{$hid}}/connections"`,
+		"asset.html": `href="/network/a/{{.ID}}/connections"`,
+	} {
+		b, err := fs.ReadFile(templates.FS, file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), want) {
+			t.Errorf("%s lacks %s", file, want)
+		}
 	}
 }
 
