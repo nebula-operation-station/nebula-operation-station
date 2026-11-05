@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/netip"
 	"slices"
+	"strings"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/ipam"
@@ -99,11 +100,20 @@ func trafficChrome(r *http.Request) tmui.Chrome {
 	return tmui.Chrome{Theme: c.Theme, NavCollapsed: c.NavCollapsed, PVENav: c.PVENav, DeployEnabled: c.DeployEnabled}
 }
 
+// trafficAssetPrefix starts the node ID of an IPAM asset. Host and asset
+// IDs are separate namespaces (an asset ID comes from a hostname the
+// network reported), so assets get their own: "asset:<asset id>". Host
+// IDs cannot contain ':' (inventory), so an asset can never take a host's
+// node ID and make the builder drop both as duplicates. The page builds
+// asset links from it (web/static/trafficmap-bridge.js pageFor).
+const trafficAssetPrefix = "asset:"
+
 // trafficInventory returns the map's nodes and zones from the server's
-// records: every inventory host with its literal IP endpoints, every IPAM
-// asset with its recorded addresses (an asset that became a known host
-// adds its addresses to that host instead), and every IPAM network as a
-// zone. A node lies in the most specific network containing one of its
+// records: every inventory host with its literal IP endpoints (node ID =
+// host ID), every IPAM asset with its recorded addresses (node ID =
+// trafficAssetPrefix + asset ID; an asset that became a known host adds
+// its addresses to that host instead), and every IPAM network as a zone.
+// A node lies in the most specific network containing one of its
 // addresses; a network's gateway is the node owning the gateway address
 // when exactly one node claims it.
 func trafficInventory(hosts func(ctx context.Context) ([]inventory.Host, error), ip trafficIPAM) func(ctx context.Context) (tmapi.Inventory, error) {
@@ -130,7 +140,9 @@ func trafficInventory(hosts func(ctx context.Context) ([]inventory.Host, error),
 		var inv tmapi.Inventory
 		hostNode := make(map[string]int, len(hs))
 		for _, h := range hs {
-			if _, dup := hostNode[h.ID]; dup {
+			// A host ID with ':' could collide with an asset node ID;
+			// the inventory never stores one.
+			if _, dup := hostNode[h.ID]; dup || strings.Contains(h.ID, ":") {
 				continue
 			}
 			hostNode[h.ID] = len(inv.Nodes)
@@ -156,7 +168,7 @@ func trafficInventory(hosts func(ctx context.Context) ([]inventory.Host, error),
 			if label == "" {
 				label = a.Hostname
 			}
-			inv.Nodes = append(inv.Nodes, tmapi.NodeInput{ID: a.ID, Label: label, Kind: tmapi.KindAsset, Addrs: slices.Clone(a.Addresses)})
+			inv.Nodes = append(inv.Nodes, tmapi.NodeInput{ID: trafficAssetPrefix + a.ID, Label: label, Kind: tmapi.KindAsset, Addrs: slices.Clone(a.Addresses)})
 		}
 
 		owners := make(map[netip.Addr][]string)

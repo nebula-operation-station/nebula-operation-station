@@ -17,9 +17,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/flowagg"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/ipam"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
+	tmapi "github.com/nebula-operation-station/nebula-operation-station/internal/web/api/trafficmap"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
 	"github.com/nebula-operation-station/nebula-operation-station/web/static"
 )
@@ -212,7 +214,7 @@ func TestTrafficMapModelUsesServerRecords(t *testing.T) {
 	for _, n := range m.Nodes {
 		nodes[n.ID] = n.Kind + "@" + n.Zone
 	}
-	want := map[string]string{"h1": "host@lan", "a1": "asset@lan", "a2": "asset@dmz"}
+	want := map[string]string{"h1": "host@lan", "asset:a1": "asset@lan", "asset:a2": "asset@dmz"}
 	if len(nodes) != len(want) {
 		t.Errorf("nodes %v, want %v", nodes, want)
 	}
@@ -225,11 +227,86 @@ func TestTrafficMapModelUsesServerRecords(t *testing.T) {
 	for _, z := range m.Zones {
 		gw[z.ID] = z.Gateway
 	}
-	if gw["lan"] != "" || gw["dmz"] != "a2" {
-		t.Errorf("gateways %v, want lan unresolved and dmz a2", gw)
+	if gw["lan"] != "" || gw["dmz"] != "asset:a2" {
+		t.Errorf("gateways %v, want lan unresolved and dmz asset:a2", gw)
 	}
 	if m.Omitted.Addresses != 1 {
 		t.Errorf("omitted addresses %d, want 1 (10.0.0.5 claimed twice)", m.Omitted.Addresses)
+	}
+}
+
+// tmFixedFlows serves the same flows for every query.
+type tmFixedFlows []flowagg.FlowTotal
+
+func (f tmFixedFlows) TopN(context.Context, netip.Addr, flowagg.Window, int) ([]flowagg.FlowTotal, error) {
+	return f, nil
+}
+
+func (f tmFixedFlows) OverviewUnion(context.Context, []netip.Addr, flowagg.Window, int) ([]flowagg.FlowTotal, error) {
+	return f, nil
+}
+
+// TestTrafficMapAssetCannotDisplaceHost: an unlinked IPAM asset whose ID
+// (derived from a hostname the network reported) equals a managed host's
+// ID gets its own node ID, so the host keeps its node and its flows and
+// the asset is a separate node; neither is dropped as a duplicate.
+func TestTrafficMapAssetCannotDisplaceHost(t *testing.T) {
+	hostAddr, assetAddr, peer := netip.MustParseAddr("10.0.0.5"), netip.MustParseAddr("10.0.0.9"), netip.MustParseAddr("10.0.0.7")
+	hosts := func(context.Context) ([]inventory.Host, error) {
+		return []inventory.Host{
+			{ID: "h1", DisplayName: "Web one", Endpoints: []inventory.Endpoint{{Address: hostAddr.String(), Port: 22}}},
+			{ID: "h2", DisplayName: "Web two", Endpoints: []inventory.Endpoint{{Address: peer.String(), Port: 22}}},
+		}, nil
+	}
+	ip := fakeTrafficIPAM{assets: []ipam.Asset{{ID: "h1", Hostname: "h1", Addresses: []netip.Addr{assetAddr}}}}
+	now := time.Now()
+	flow := func(a, b netip.Addr, bytes uint64) flowagg.FlowTotal {
+		return flowagg.FlowTotal{Key: flowagg.FlowKey{A: a, B: b, Proto: flowagg.TCP, ServerPort: 443, Server: flowagg.SideB},
+			BytesAB: bytes, BytesBA: bytes, Connections: 1, FirstSeen: now.Add(-time.Minute), LastSeen: now}
+	}
+	flows := tmFixedFlows{flow(hostAddr, peer, 100), flow(assetAddr, peer, 50)}
+	b, err := tmapi.NewBuilder(trafficInventory(hosts, ip), flows, nil, tmapi.Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := b.Build(context.Background(), tmapi.Query{Window: "1h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m struct {
+		Nodes []struct {
+			ID, Label, Kind string
+		} `json:"nodes"`
+		Edges []struct {
+			A, B string
+		} `json:"edges"`
+		Unmapped int `json:"unmapped_flows"`
+	}
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	nodes := map[string]string{}
+	for _, n := range m.Nodes {
+		nodes[n.ID] = n.Kind + "/" + n.Label
+	}
+	want := map[string]string{"h1": "host/Web one", "h2": "host/Web two", "asset:h1": "asset/h1"}
+	if len(nodes) != len(want) {
+		t.Errorf("nodes %v, want %v", nodes, want)
+	}
+	for id, w := range want {
+		if nodes[id] != w {
+			t.Errorf("node %s: %q, want %q (nodes %v)", id, nodes[id], w, nodes)
+		}
+	}
+	edges := map[string]bool{}
+	for _, e := range m.Edges {
+		edges[e.A+"-"+e.B], edges[e.B+"-"+e.A] = true, true
+	}
+	if !edges["h1-h2"] || !edges["asset:h1-h2"] || len(m.Edges) != 2 {
+		t.Errorf("edges %v, want h1-h2 and asset:h1-h2", m.Edges)
+	}
+	if m.Unmapped != 0 {
+		t.Errorf("unmapped flows %d, want 0", m.Unmapped)
 	}
 }
 

@@ -26,7 +26,8 @@
 // Navigation. A node id coming back from the iframe is looked up in the
 // parent's own copy of the model; the target is built from a fixed path
 // and the encoded id: host nodes open /hosts/<id>, asset nodes
-// /network/a/<id>, other nodes the focus view /traffic?window=..&focus=<id>.
+// ("asset:<id>") /network/a/<id>, other nodes the focus view
+// /traffic?window=..&focus=<id>.
 // Nothing from a message is ever used as a URL.
 "use strict";
 
@@ -78,6 +79,8 @@ const NOSTrafficMapBridge = (() => {
   const KINDS = Object.freeze({ router: "router", host: "managed", guest: "guest", container: "guest", asset: "asset", endpoint: "observed", unknown: "observed" });
   const KIND_TEXT = Object.freeze({ router: "Router", host: "Managed host", guest: "Guest", container: "Container", asset: "Asset", endpoint: "Observed endpoint", unknown: "Unknown node" });
   const UNZONED = "unzoned";
+  /** ASSET_PREFIX starts the node id of an IPAM asset. */
+  const ASSET_PREFIX = "asset:";
 
   const isPlain = (v) => v !== null && typeof v === "object" && !Array.isArray(v) && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null);
   const isID = (v) => typeof v === "string" && v.length > 0 && v.length <= LIMITS.idLength && ID_RE.test(v);
@@ -344,7 +347,12 @@ const NOSTrafficMapBridge = (() => {
   function pageFor(kind, id) {
     if (!isID(id)) return null;
     if (kind === "host") return { href: "/hosts/" + encodeURIComponent(id), text: "Open host page" };
-    if (kind === "asset") return { href: "/network/a/" + encodeURIComponent(id), text: "Open asset page" };
+    if (kind === "asset") {
+      // Asset nodes are "asset:<IPAM asset id>" (cmd/nebula-server
+      // trafficInventory), so an asset can never take a host's id.
+      if (!id.startsWith(ASSET_PREFIX) || !isID(id.slice(ASSET_PREFIX.length))) return null;
+      return { href: "/network/a/" + encodeURIComponent(id.slice(ASSET_PREFIX.length)), text: "Open asset page" };
+    }
     return null;
   }
 
@@ -382,14 +390,15 @@ const NOSTrafficMapBridge = (() => {
     el.hidden = text === "";
   }
 
-  // readBounded reads a response body as text and fails as soon as it
-  // grows beyond max bytes, also when no Content-Length was sent (chunked).
-  async function readBounded(res, max) {
+  // readBoundedBytes reads a response body and fails with tooLarge as soon
+  // as it grows beyond max bytes, also when no Content-Length was sent
+  // (chunked); the stream is cancelled then.
+  async function readBoundedBytes(res, max, tooLarge) {
     const body = res.body;
     if (!body || typeof body.getReader !== "function") {
-      const text = await res.text();
-      if (text.length > max) throw new Error("model too large");
-      return text;
+      const all = new Uint8Array(await res.arrayBuffer());
+      if (all.byteLength > max) throw new Error(tooLarge);
+      return all;
     }
     const reader = body.getReader();
     const chunks = [];
@@ -404,7 +413,7 @@ const NOSTrafficMapBridge = (() => {
         } catch {
           // The body is dropped either way.
         }
-        throw new Error("model too large");
+        throw new Error(tooLarge);
       }
       chunks.push(value);
     }
@@ -414,7 +423,12 @@ const NOSTrafficMapBridge = (() => {
       all.set(c, off);
       off += c.byteLength;
     }
-    return new TextDecoder("utf-8", { fatal: true }).decode(all);
+    return all;
+  }
+
+  // readBounded reads a response body of at most max bytes as UTF-8 text.
+  async function readBounded(res, max) {
+    return new TextDecoder("utf-8", { fatal: true }).decode(await readBoundedBytes(res, max, "model too large"));
   }
 
   async function fetchModel(fetchFn, span, focus) {
@@ -455,11 +469,10 @@ const NOSTrafficMapBridge = (() => {
       if (!res.ok) return null;
       if ((res.headers.get("Content-Type") || "").split(";")[0].trim() !== "image/png") return null;
       if (Number(res.headers.get("Content-Length")) > LIMITS.iconBytes) return null;
-      const blob = await res.blob();
-      if (blob.size > LIMITS.iconBytes) return null;
-      const size = pngSize(new Uint8Array(await blob.slice(0, 24).arrayBuffer()));
+      const bytes = await readBoundedBytes(res, LIMITS.iconBytes, "icon too large");
+      const size = pngSize(bytes.subarray(0, 24));
       if (!size || size.width < 1 || size.height < 1 || size.width > LIMITS.iconPixels || size.height > LIMITS.iconPixels) return null;
-      bmp = await env.createImageBitmap(blob);
+      bmp = await env.createImageBitmap(new Blob([bytes], { type: "image/png" }));
       // The decoder must agree with the header.
       if (!(bmp.width > 0 && bmp.height > 0 && bmp.width <= LIMITS.iconPixels && bmp.height <= LIMITS.iconPixels)) {
         bmp.close();

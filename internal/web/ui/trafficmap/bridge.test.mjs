@@ -35,12 +35,12 @@ function apiModel(over = {}) {
         health: { patches: "critical", reachable: true, host_key_mismatch: false, backup_fresh: true, failed_units: 0, disk_used_pct: 95, load: 4 },
         software: [{ key: "docker", count: 1, icon: SHA }, { key: "postgres", count: 2, icon: "not-a-hash" }] },
       { id: "vm101", label: "db01", kind: "guest", zone: "lan", vlan: 10, resources: { vcpu: 2 }, health: {}, software: [] },
-      { id: "nas", label: "nas", kind: "asset", zone: "lan", vlan: null, resources: {}, health: {}, software: [] },
+      { id: "asset:nas", label: "nas", kind: "asset", zone: "lan", vlan: null, resources: {}, health: {}, software: [] },
       { id: "cam", label: "camera", kind: "endpoint", zone: "", vlan: null, resources: {}, health: {}, software: [] },
     ],
     edges: [
-      { a: "h1", b: "nas", bytes_ab: 100, bytes_ba: 200, connections: 3, via: [], services: [{ proto: "tcp", port: 2049 }], lower_bound: false, confirmed: true },
-      { a: "cam", b: "nas", bytes_ab: 5, bytes_ba: 6, connections: 1, via: ["gw2"], services: [{ proto: "sctp", port: 9 }], lower_bound: true, confirmed: false },
+      { a: "h1", b: "asset:nas", bytes_ab: 100, bytes_ba: 200, connections: 3, via: [], services: [{ proto: "tcp", port: 2049 }], lower_bound: false, confirmed: true },
+      { a: "cam", b: "asset:nas", bytes_ab: 5, bytes_ba: 6, connections: 1, via: ["gw2"], services: [{ proto: "sctp", port: 9 }], lower_bound: true, confirmed: false },
       { a: "h1", b: "ghost", bytes_ab: 1, bytes_ba: 1, connections: 1, via: [], services: [] },
     ],
     zone_links: [],
@@ -57,7 +57,7 @@ test("converted model passes the renderer's validator", () => {
   const m = validateModel(r.message);
   assert.equal(m.window, "24h");
   const kinds = Object.fromEntries(m.nodes.map((n) => [n.id, n.kind]));
-  assert.deepEqual(kinds, { gw: "router", gw2: "asset", h1: "managed", vm101: "guest", nas: "asset", cam: "observed" });
+  assert.deepEqual(kinds, { gw: "router", gw2: "asset", h1: "managed", vm101: "guest", "asset:nas": "asset", cam: "observed" });
   assert.equal(m.nodes.find((n) => n.id === "gw").zone, null);
   // A node without a zone goes into the synthetic zone.
   const cam = m.nodes.find((n) => n.id === "cam");
@@ -199,7 +199,7 @@ test("frame messages: strict shapes and known node ids", () => {
 
 test("navigation targets: host page, asset page, else the focus view", () => {
   assert.equal(B.openTarget(index, "24h", "h1"), "/hosts/h1");
-  assert.equal(B.openTarget(index, "24h", "nas"), "/network/a/nas");
+  assert.equal(B.openTarget(index, "24h", "asset:nas"), "/network/a/nas");
   assert.equal(B.openTarget(index, "24h", "vm101"), "/traffic?window=24h&focus=vm101");
   assert.equal(B.openTarget(index, "24h", "gw"), "/traffic?window=24h&focus=gw");
   assert.equal(B.openTarget(index, "24h", "ghost"), null);
@@ -208,6 +208,23 @@ test("navigation targets: host page, asset page, else the focus view", () => {
   for (const id of ["/evil.example", "//evil.example", "javascript:alert(1)", "", "a b"]) {
     assert.equal(B.pageFor("host", id), null, id);
   }
+  // Asset node ids are "asset:<IPAM id>"; anything else has no asset page.
+  assert.deepEqual(B.pageFor("asset", "asset:nas"), { href: "/network/a/nas", text: "Open asset page" });
+  for (const id of ["nas", "asset:", "asset:/x", "asset::x", "host:nas"]) {
+    assert.equal(B.pageFor("asset", id), null, id);
+  }
+});
+
+test("navigation targets: an asset with a host's id keeps both pages apart", () => {
+  const nodes = [
+    { id: "h1", label: "pve1", kind: "host", zone: "lan", vlan: 10, resources: {}, health: {}, software: [] },
+    { id: "asset:h1", label: "h1", kind: "asset", zone: "lan", vlan: null, resources: {}, health: {}, software: [] },
+  ];
+  const edges = [{ a: "asset:h1", b: "h1", bytes_ab: 1, bytes_ba: 1, connections: 1, via: [], services: [], lower_bound: false, confirmed: true }];
+  const c = B.convertModel(apiModel({ zones: [{ id: "lan", name: "LAN", vlan: 10, nodes: 2 }], nodes, edges }));
+  assert.equal(c.index.size, 2);
+  assert.equal(B.openTarget(c.index, "24h", "h1"), "/hosts/h1");
+  assert.equal(B.openTarget(c.index, "24h", "asset:h1"), "/network/a/h1");
 });
 
 // --- start(): the wiring with a fake DOM, fetch and iframe ---------------
@@ -241,7 +258,7 @@ function fakeResponse(status, ctype, body) {
     status,
     headers: { get: (k) => (k === "Content-Type" ? ctype : k === "Content-Length" ? String(body.length) : null) },
     text: async () => body,
-    blob: async () => new Blob([body]),
+    arrayBuffer: async () => new Blob([body]).arrayBuffer(),
   };
 }
 
@@ -331,7 +348,7 @@ test("start: open navigates to the node's page, only for valid messages", async 
   t.deliver({ type: "nos.trafficmap.open", id: "h1", url: "https://evil.example" });
   assert.deepEqual(t.navigated, []);
   t.deliver({ type: "nos.trafficmap.open", id: "h1" });
-  t.deliver({ type: "nos.trafficmap.open", id: "nas" });
+  t.deliver({ type: "nos.trafficmap.open", id: "asset:nas" });
   t.deliver({ type: "nos.trafficmap.open", id: "vm101" });
   assert.deepEqual(t.navigated, ["/hosts/h1", "/network/a/nas", "/traffic?window=24h&focus=vm101"]);
 });
@@ -406,6 +423,53 @@ test("loadIcon refuses oversized or non-PNG images before decoding them", async 
   const ok = iconEnv(pngHead(128, 128));
   assert.ok(await B.loadIcon(ok, SHA));
   assert.equal(ok.decoded, 1);
+});
+
+test("loadIcon stops reading a chunked icon beyond the icon limit", async () => {
+  const chunk = new Uint8Array(64 << 10);
+  chunk.set(pngHead(16, 16));
+  let pulled = 0;
+  let cancelled = false;
+  const body = new ReadableStream({
+    pull(c) {
+      pulled++;
+      if (pulled > 64) c.close();
+      else c.enqueue(chunk);
+    },
+    cancel() { cancelled = true; },
+  });
+  let decoded = 0;
+  const env = {
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      headers: { get: (k) => (k === "Content-Type" ? "image/png" : null) },
+      body,
+      blob: async () => { throw new Error("must not buffer the whole body"); },
+      arrayBuffer: async () => { throw new Error("must not buffer the whole body"); },
+    }),
+    createImageBitmap: async () => { decoded++; return { width: 16, height: 16, close() {} }; },
+  };
+  assert.equal(await B.loadIcon(env, SHA), null);
+  assert.ok(cancelled, "the stream was not cancelled");
+  assert.equal(decoded, 0);
+  assert.ok(pulled <= B.LIMITS.iconBytes / chunk.byteLength + 3, "read " + pulled + " chunks");
+});
+
+test("loadIcon decodes a streamed icon within the limit", async () => {
+  let got = null;
+  const env = {
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      headers: { get: (k) => (k === "Content-Type" ? "image/png" : null) },
+      body: new Blob([pngHead(16, 16)]).stream(),
+    }),
+    createImageBitmap: async (blob) => { got = blob; return { width: 16, height: 16, close() {} }; },
+  };
+  assert.ok(await B.loadIcon(env, SHA));
+  assert.ok(got instanceof Blob);
+  assert.equal(got.size, 33);
 });
 
 test("loadIcon drops a bitmap whose decoded size disagrees with the limit", async () => {
