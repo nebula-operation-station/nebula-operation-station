@@ -88,6 +88,9 @@ var ReadOnlyAllowlist = []string{
 	"docker.check_updates",
 	"service.list",
 	"service.status",
+	// net.facts (ADR 0009 D1): fixed read-only network snapshot without
+	// process names (no `ss -p`, no sudo).
+	"net.facts",
 }
 
 // InReadOnlyAllowlist reports whether actionID is part of the approved
