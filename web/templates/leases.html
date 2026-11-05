@@ -19,7 +19,22 @@
     <dt>Expires</dt><dd>{{if $l.ExpirySet}}{{timeTag $l.Expiry}}{{else}}—{{end}}</dd>
     {{if $l.RevokedSet}}<dt>Revoked</dt><dd>{{timeTag $l.Revoked}}</dd>{{end}}
   </dl>
-  {{if $l.Hosts}}
+  {{if $l.Provider}}
+  <dl class="schedule-meta">
+    <dt>Rate profile</dt><dd>{{if $l.RateProfile}}{{$l.RateProfile}}{{else}}—{{end}}</dd>
+  </dl>
+  <h2>{{len $l.Providers}} Proxmox remotes</h2>
+  <div class="table-wrap">
+  <table class="inventory" aria-label="Proxmox remotes">
+    <thead><tr><th>Remote</th><th>Trust pin</th><th>Trust generation</th><th>Credential version</th><th>Methods</th></tr></thead>
+    <tbody>
+      {{range $l.Providers}}
+      <tr class="lease-remote"><td class="mono">{{.RemoteID}}</td><td class="mono">{{.PinPrefix}}…</td><td class="mono">{{.TrustGeneration}}</td><td class="mono">{{.CredentialVersion}}</td><td class="mono">{{.Methods}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else if $l.Hosts}}
   <details{{if $l.HostsOpen}} open{{end}}>
     <summary>{{len $l.Hosts}} hosts</summary>
     <ul class="mono">{{range $l.Hosts}}<li>{{.}}</li>{{end}}</ul>
@@ -67,8 +82,13 @@
       <tr>
         <td class="mono">{{if .ID}}<a href="/leases/{{.ID}}">{{.Short}}</a>{{else}}—{{end}}</td>
         <td>{{if .Scope}}{{.Scope}}{{else}}—{{end}}</td>
+        {{if .Provider}}
+        <td>{{.MethodCount}} methods</td>
+        <td>{{.RemoteCount}} remotes</td>
+        {{else}}
         <td>{{.ActionCount}}</td>
         <td>{{.HostCount}}</td>
+        {{end}}
         <td>{{if .ExpirySet}}{{timeTag .Expiry}}{{else}}—{{end}}</td>
         <td><span class="badge {{.StateClass}}">{{.State}}</span></td>
         <td>{{if .RefreshURL}}<a href="{{.RefreshURL}}">Refresh</a>{{end}}</td>
