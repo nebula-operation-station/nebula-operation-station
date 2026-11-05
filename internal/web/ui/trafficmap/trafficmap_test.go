@@ -28,7 +28,8 @@ func newTestHandler(t *testing.T, windows func() []string) http.Handler {
 		t.Fatalf("New: %v", err)
 	}
 	mux := http.NewServeMux()
-	h.Register(mux)
+	h.RegisterPages(mux)
+	h.RegisterModules(mux)
 	// The full security chain, as in the server: the middleware sets the
 	// strict CSP first and the handlers may only replace it.
 	srv, err := middleware.NewServer(middleware.Options{PublicOrigin: testOrigin}, mux)
@@ -382,5 +383,35 @@ func TestPageFailsClosedWithoutWindows(t *testing.T) {
 	h = newTestHandler(t, func() []string { return []string{"1h", "2h<script>"} })
 	if rec := get(t, h, "/traffic"); strings.Contains(rec.Body.String(), "2h<script>") || strings.Contains(rec.Body.String(), "window=2h") {
 		t.Error("unknown window names from the provider are rendered")
+	}
+}
+
+// TestRegisterSplitsPagesFromModules checks that the session-protected
+// routes and the cookieless module route are registered separately, so a
+// server mounts each where it belongs (pages behind the session check,
+// modules where /static/ is served without one).
+func TestRegisterSplitsPagesFromModules(t *testing.T) {
+	h, err := New(Options{PublicOrigin: testOrigin, Windows: allWindows})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pages, modules := http.NewServeMux(), http.NewServeMux()
+	h.RegisterPages(pages)
+	h.RegisterModules(modules)
+	for _, c := range []struct {
+		mux  *http.ServeMux
+		path string
+		want int
+	}{
+		{pages, PagePath, http.StatusOK},
+		{pages, FramePath, http.StatusOK},
+		{pages, ModulePrefix + "main.js", http.StatusNotFound},
+		{modules, ModulePrefix + "main.js", http.StatusOK},
+		{modules, PagePath, http.StatusNotFound},
+		{modules, FramePath, http.StatusNotFound},
+	} {
+		if rec := get(t, c.mux, c.path); rec.Code != c.want {
+			t.Errorf("GET %s on the %s mux: status %d, want %d", c.path, map[bool]string{true: "pages", false: "modules"}[c.mux == pages], rec.Code, c.want)
+		}
 	}
 }

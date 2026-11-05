@@ -69,9 +69,13 @@ type sessionGate interface {
 // middleware first (headers, origin check, body limit), then the session
 // check, then the pages. apiHandler, when not nil, serves the read-only
 // API under api.Prefix with its own token check instead of sessions.
+// The traffic map model (trafficMapAPIPath) lies under that prefix but is
+// read by a page, so it always goes to the session chain (pages).
 func webServer(publicOrigin string, login sessionGate, pages, apiHandler http.Handler) (*http.Server, error) {
 	root := http.NewServeMux()
-	root.Handle("/", login.Wrap(pages))
+	gated := login.Wrap(pages)
+	root.Handle("/", gated)
+	root.Handle(trafficMapAPIPath, gated)
 	if apiHandler != nil {
 		root.Handle(api.Prefix, apiHandler)
 	}

@@ -226,13 +226,22 @@ class FakeEl {
   addEventListener(t, f) { (this.listeners[t] ||= []).push(f); }
 }
 
+// pngHead returns the first bytes of a PNG with the given IHDR size.
+function pngHead(width, height) {
+  const b = new Uint8Array(33);
+  b.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
+  new DataView(b.buffer).setUint32(16, width);
+  new DataView(b.buffer).setUint32(20, height);
+  return b;
+}
+
 function fakeResponse(status, ctype, body) {
   return {
     ok: status >= 200 && status < 300,
     status,
     headers: { get: (k) => (k === "Content-Type" ? ctype : k === "Content-Length" ? String(body.length) : null) },
     text: async () => body,
-    blob: async () => ({ size: body.length, body }),
+    blob: async () => new Blob([body]),
   };
 }
 
@@ -253,7 +262,7 @@ function setup({ window = "24h", focus = "", api = apiModel(), apiStatus = 200 }
     fetch: async (url, opts) => {
       fetched.push({ url, opts });
       if (url.startsWith("/api/v1/trafficmap")) return fakeResponse(apiStatus, "application/json; charset=utf-8", JSON.stringify(api));
-      if (url === "/icons/" + SHA + ".png") return fakeResponse(200, "image/png", "png");
+      if (url === "/icons/" + SHA + ".png") return fakeResponse(200, "image/png", pngHead(32, 32));
       return fakeResponse(404, "text/plain", "");
     },
     createImageBitmap: async () => ({ width: 32, height: 32, close() {} }),
@@ -361,4 +370,85 @@ test("start: invalid page parameters stop before any request", () => {
     assert.equal(t.s, null);
     assert.equal(t.fetched.length, 0);
   }
+});
+
+test("pngSize reads the IHDR size and refuses anything else", () => {
+  assert.deepEqual(B.pngSize(pngHead(128, 64)), { width: 128, height: 64 });
+  assert.deepEqual(B.pngSize(pngHead(0xffffffff, 1)), { width: 0xffffffff, height: 1 });
+  assert.equal(B.pngSize(pngHead(1, 1).slice(0, 23)), null);
+  const notPNG = pngHead(1, 1);
+  notPNG[1] = 0x51;
+  assert.equal(B.pngSize(notPNG), null);
+  const notIHDR = pngHead(1, 1);
+  notIHDR[12] = 0x69;
+  assert.equal(B.pngSize(notIHDR), null);
+  assert.equal(B.pngSize("not bytes"), null);
+});
+
+function iconEnv(body) {
+  const env = {
+    decoded: 0,
+    fetch: async () => fakeResponse(200, "image/png", body),
+    createImageBitmap: async () => {
+      env.decoded++;
+      return { width: 128, height: 128, close() {} };
+    },
+  };
+  return env;
+}
+
+test("loadIcon refuses oversized or non-PNG images before decoding them", async () => {
+  for (const body of [pngHead(257, 16), pngHead(16, 257), pngHead(65535, 65535), pngHead(0, 16), new TextEncoder().encode("GIF89a-not-a-png-at-all")]) {
+    const env = iconEnv(body);
+    assert.equal(await B.loadIcon(env, SHA), null);
+    assert.equal(env.decoded, 0, "decoded an image the header already refuses");
+  }
+  const ok = iconEnv(pngHead(128, 128));
+  assert.ok(await B.loadIcon(ok, SHA));
+  assert.equal(ok.decoded, 1);
+});
+
+test("loadIcon drops a bitmap whose decoded size disagrees with the limit", async () => {
+  let closed = 0;
+  const env = {
+    fetch: async () => fakeResponse(200, "image/png", pngHead(16, 16)),
+    createImageBitmap: async () => ({ width: 4096, height: 4096, close() { closed++; } }),
+  };
+  assert.equal(await B.loadIcon(env, SHA), null);
+  assert.equal(closed, 1);
+});
+
+test("fetchModel stops reading a chunked body beyond the model limit", async () => {
+  const chunk = new Uint8Array(1 << 20).fill(0x20);
+  let pulled = 0;
+  let cancelled = false;
+  const body = new ReadableStream({
+    pull(c) {
+      pulled++;
+      if (pulled > 64) c.close();
+      else c.enqueue(chunk);
+    },
+    cancel() { cancelled = true; },
+  });
+  const res = {
+    ok: true,
+    status: 200,
+    headers: { get: (k) => (k === "Content-Type" ? "application/json" : null) },
+    body,
+    text: async () => { throw new Error("must not buffer the whole body"); },
+  };
+  await assert.rejects(B.fetchModel(async () => res, "24h", ""), /model too large/);
+  assert.ok(cancelled, "the stream was not cancelled");
+  assert.ok(pulled <= (B.LIMITS.modelBytes >> 20) + 3, "read " + pulled + " chunks");
+});
+
+test("fetchModel reads a streamed model within the limit", async () => {
+  const res = {
+    ok: true,
+    status: 200,
+    headers: { get: (k) => (k === "Content-Type" ? "application/json; charset=utf-8" : null) },
+    body: new Blob([JSON.stringify(apiModel())]).stream(),
+  };
+  const m = await B.fetchModel(async () => res, "24h", "");
+  assert.equal(m.window, "24h");
 });

@@ -434,6 +434,10 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		apiHandler = a
 		log.Info("read-only API enabled", "tokens", len(cfg.API.Tokens))
 	}
+	// Traffic map (ADR 0009 TM19): page, frame and model behind the session; renderer modules under /static/.
+	if err := mountTrafficMap(pages, cfg.PublicOrigin, db, store.List, ipamStore, log); err != nil {
+		return err
+	}
 	srv, err := webServer(cfg.PublicOrigin, login, pages, apiHandler)
 	if err != nil {
 		return err

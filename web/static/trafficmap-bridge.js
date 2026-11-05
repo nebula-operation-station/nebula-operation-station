@@ -382,6 +382,41 @@ const NOSTrafficMapBridge = (() => {
     el.hidden = text === "";
   }
 
+  // readBounded reads a response body as text and fails as soon as it
+  // grows beyond max bytes, also when no Content-Length was sent (chunked).
+  async function readBounded(res, max) {
+    const body = res.body;
+    if (!body || typeof body.getReader !== "function") {
+      const text = await res.text();
+      if (text.length > max) throw new Error("model too large");
+      return text;
+    }
+    const reader = body.getReader();
+    const chunks = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > max) {
+        try {
+          await reader.cancel();
+        } catch {
+          // The body is dropped either way.
+        }
+        throw new Error("model too large");
+      }
+      chunks.push(value);
+    }
+    const all = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) {
+      all.set(c, off);
+      off += c.byteLength;
+    }
+    return new TextDecoder("utf-8", { fatal: true }).decode(all);
+  }
+
   async function fetchModel(fetchFn, span, focus) {
     let url = "/api/v1/trafficmap?window=" + encodeURIComponent(span);
     if (focus) url += "&focus=" + encodeURIComponent(focus);
@@ -391,14 +426,30 @@ const NOSTrafficMapBridge = (() => {
     if (ct !== "application/json") throw new Error("unexpected content type");
     const len = Number(res.headers.get("Content-Length"));
     if (len > LIMITS.modelBytes) throw new Error("model too large");
-    const text = await res.text();
-    if (text.length > LIMITS.modelBytes) throw new Error("model too large");
-    return JSON.parse(text);
+    return JSON.parse(await readBounded(res, LIMITS.modelBytes));
+  }
+
+  // PNG_SIGNATURE is the 8-byte PNG file signature.
+  const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+  // pngSize returns the width and height from a PNG header (signature and
+  // IHDR chunk, the first 24 bytes), or null when it is not one. It lets
+  // loadIcon refuse oversized images before anything is decoded.
+  function pngSize(head) {
+    if (!(head instanceof Uint8Array) || head.length < 24) return null;
+    for (let i = 0; i < PNG_SIGNATURE.length; i++) if (head[i] !== PNG_SIGNATURE[i]) return null;
+    const be32 = (o) => ((head[o] << 24) >>> 0) + (head[o + 1] << 16) + (head[o + 2] << 8) + head[o + 3];
+    // IHDR is always the first chunk and 13 bytes long.
+    if (be32(8) !== 13 || head[12] !== 0x49 || head[13] !== 0x48 || head[14] !== 0x44 || head[15] !== 0x52) return null;
+    return { width: be32(16), height: be32(20) };
   }
 
   // loadIcon fetches and decodes one icon; it resolves to null on any
-  // problem (the renderer then draws the generic symbol).
+  // problem (the renderer then draws the generic symbol). The dimensions
+  // are read from the PNG header and checked before the image is decoded,
+  // so a small file with huge dimensions is never allocated.
   async function loadIcon(env, sha) {
+    let bmp = null;
     try {
       const res = await env.fetch("/icons/" + sha + ".png", { credentials: "same-origin", redirect: "error" });
       if (!res.ok) return null;
@@ -406,23 +457,17 @@ const NOSTrafficMapBridge = (() => {
       if (Number(res.headers.get("Content-Length")) > LIMITS.iconBytes) return null;
       const blob = await res.blob();
       if (blob.size > LIMITS.iconBytes) return null;
-      let bmp = await env.createImageBitmap(blob);
-      if (bmp.width > LIMITS.iconPixels || bmp.height > LIMITS.iconPixels) {
-        const scale = LIMITS.iconPixels / Math.max(bmp.width, bmp.height);
-        const small = await env.createImageBitmap(bmp, {
-          resizeWidth: Math.max(1, Math.floor(bmp.width * scale)),
-          resizeHeight: Math.max(1, Math.floor(bmp.height * scale)),
-          resizeQuality: "high",
-        });
-        bmp.close();
-        bmp = small;
-      }
-      if (!(bmp.width > 0 && bmp.height > 0)) {
+      const size = pngSize(new Uint8Array(await blob.slice(0, 24).arrayBuffer()));
+      if (!size || size.width < 1 || size.height < 1 || size.width > LIMITS.iconPixels || size.height > LIMITS.iconPixels) return null;
+      bmp = await env.createImageBitmap(blob);
+      // The decoder must agree with the header.
+      if (!(bmp.width > 0 && bmp.height > 0 && bmp.width <= LIMITS.iconPixels && bmp.height <= LIMITS.iconPixels)) {
         bmp.close();
         return null;
       }
       return bmp;
     } catch {
+      if (bmp) bmp.close();
       return null;
     }
   }
@@ -556,7 +601,7 @@ const NOSTrafficMapBridge = (() => {
     return { loaded, onMessage };
   }
 
-  return { MSG, LIMITS, convertModel, iconRefs, acceptFrameMessage, pageFor, openTarget, focusHref, summaryTexts, cleanText, start };
+  return { MSG, LIMITS, convertModel, iconRefs, acceptFrameMessage, pageFor, openTarget, focusHref, summaryTexts, cleanText, pngSize, loadIcon, fetchModel, start };
 })();
 
 if (typeof document !== "undefined" && typeof window !== "undefined" && typeof fetch === "function") {

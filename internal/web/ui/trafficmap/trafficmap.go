@@ -215,19 +215,22 @@ func frameCSP(origin, styleHash string) string {
 	}, "; ")
 }
 
-// Handler returns the routes. Authentication and the security headers are
-// the job of the surrounding chain (internal/web/auth, middleware); the
-// module route lies under /static/, which needs no session.
-func (h *Handler) Handler() http.Handler {
-	mux := http.NewServeMux()
-	h.Register(mux)
-	return mux
-}
-
-// Register adds the routes to mux.
-func (h *Handler) Register(mux *http.ServeMux) {
+// RegisterPages adds the session-protected routes, GET /traffic and GET
+// /traffic/frame, to mux. mux must sit behind the session check and the
+// security middleware (internal/web/auth, internal/web/middleware); the
+// renderer modules are not registered here (RegisterModules).
+func (h *Handler) RegisterPages(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+PagePath, h.handlePage)
 	mux.HandleFunc("GET "+FramePath, h.handleFrame)
+}
+
+// RegisterModules adds the cookieless renderer module route, GET
+// /static/trafficmap/{file}, to mux. The sandboxed renderer imports the
+// modules from an opaque origin (Origin: null, no cookies), so mux must
+// serve it without a session, like every other path under /static/
+// (auth.publicPath); behind a session redirect the renderer never loads.
+// The route reads nothing from the request but the file name.
+func (h *Handler) RegisterModules(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+ModulePrefix+"{file}", h.handleModule)
 }
 
