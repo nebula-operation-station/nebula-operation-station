@@ -62,6 +62,8 @@ type fakeBatchRPC struct {
 	runs      []*pb.RunBatchMemberRequest
 	answer    func(*pb.RunBatchMemberRequest) (*pb.RunBatchMemberResponse, error)
 	openStage uint32
+	// reportErr fails not-executed reports (RunBatchMember with a reason).
+	reportErr error
 }
 
 func (f *fakeBatchRPC) ListHostKeys(context.Context, *pb.ListHostKeysRequest, ...grpc.CallOption) (*pb.ListHostKeysResponse, error) {
