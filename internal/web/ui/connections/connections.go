@@ -297,11 +297,11 @@ func parseQuery(v url.Values) (query, error) {
 		}
 		q.sort, q.desc = sortKey(ss), d
 	}
-	os, err := one(v, "order")
+	ord, err := one(v, "order")
 	if err != nil {
 		return q, err
 	}
-	switch os {
+	switch ord {
 	case "":
 	case "asc":
 		q.desc = false
@@ -486,13 +486,12 @@ type rowView struct {
 	Evidence      string
 
 	// sort keys
-	peer       netip.Addr
-	proto      flowagg.Proto
-	port       uint16
-	first      time.Time
-	last       time.Time
-	tierRaw    string
-	processRaw string
+	peer    netip.Addr
+	proto   flowagg.Proto
+	port    uint16
+	first   time.Time
+	last    time.Time
+	tierRaw string
 }
 
 type viewInput struct {
@@ -619,7 +618,6 @@ func buildRow(in viewInput, r Record) (rowView, bool) {
 		last:          r.LastSeen,
 		tierRaw:       k.Tier,
 	}
-	row.processRaw = row.Process
 	switch {
 	case aLocal && bLocal:
 		row.Direction = "internal"
@@ -724,7 +722,7 @@ func sortRows(rows []rowView, key sortKey, desc bool) {
 		case sortService:
 			c = cmp.Or(cmp.Compare(a.proto, b.proto), cmp.Compare(a.port, b.port))
 		case sortProcess:
-			c = strings.Compare(a.processRaw, b.processRaw)
+			c = strings.Compare(a.Process, b.Process)
 		case sortIn:
 			c = cmp.Compare(a.BytesInExact, b.BytesInExact)
 		case sortOut:
@@ -753,13 +751,13 @@ func sortRows(rows []rowView, key sortKey, desc bool) {
 
 // cleanText makes untrusted text displayable: valid UTF-8 (invalid
 // bytes become U+FFFD), control and other non-printable characters
-// replaced by a space, trimmed and cut to max runes.
-func cleanText(s string, max int) string {
+// replaced by a space, trimmed and cut to limit runes.
+func cleanText(s string, limit int) string {
 	s = strings.ToValidUTF8(s, "�")
 	var b strings.Builder
 	n := 0
 	for _, r := range s {
-		if n == max {
+		if n == limit {
 			break
 		}
 		if !unicode.IsPrint(r) {
