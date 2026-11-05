@@ -178,8 +178,8 @@ func TestConnectionsPagesReadOnly(t *testing.T) {
 			t.Errorf("POST with Origin %q: status %d, want 403", origin, rec.Code)
 		}
 	}
-	if rec := f.sw.do(t, http.MethodPost, "/hosts/web1/connections", f.sw.token, swOrigin, "x=1"); rec.Code == http.StatusOK {
-		t.Errorf("POST with the public origin: status %d, want a refusal", rec.Code)
+	if rec := f.sw.do(t, http.MethodPost, "/hosts/web1/connections", f.sw.token, swOrigin, "x=1"); rec.Code != http.StatusNotFound {
+		t.Errorf("POST with the public origin: status %d, want 404", rec.Code)
 	}
 }
 
@@ -272,6 +272,28 @@ func TestConnDirectoryPeers(t *testing.T) {
 	}
 	if _, err := d.Asset(context.Background(), "nope"); err == nil {
 		t.Error("unknown asset resolved")
+	}
+}
+
+// TestConnDirectorySelfDuplicateNotAmbiguous checks that an unlinked
+// asset listing the same address twice is not ambiguous with itself: the
+// address still resolves to the asset, so its flows are not lost.
+func TestConnDirectorySelfDuplicateNotAmbiguous(t *testing.T) {
+	a := func(s string) netip.Addr { return netip.MustParseAddr(s) }
+	d := connDirectory{
+		hosts:  fakeConnHosts{},
+		assets: fakeConnAssets{{ID: "dup", Name: "dup", Addresses: []netip.Addr{a("10.0.0.50"), a("10.0.0.50")}}},
+	}
+	got, err := d.Peers(context.Background(), []netip.Addr{a("10.0.0.50")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, ok := got[a("10.0.0.50")]
+	if !ok {
+		t.Fatalf("address claimed twice by one asset not resolved: %v", got)
+	}
+	if p.Kind != connections.PeerAsset || p.ID != "dup" || p.Name != "dup" {
+		t.Errorf("peer = %+v, want asset dup", p)
 	}
 }
 

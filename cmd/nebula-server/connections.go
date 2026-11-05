@@ -38,12 +38,14 @@ type connAssets interface {
 // pages (ADR 0009 D3, TM20). They are mounted behind the same security
 // middleware and session check as every other page (webServer); the
 // handler also asks for the session itself (sessionAuthorized) and
-// fails closed. The server keeps flow data for the traffic store's
-// default retention (there is no setting to shorten it yet), so that is
-// the retention the window list is clamped to.
+// fails closed. The window list is clamped to the retention of the
+// traffic store built over the same database the server uses, not the
+// constant default: the page offers and accepts exactly the windows the
+// store keeps.
 func newConnectionsPages(db *sql.DB, hosts connHosts, assets connAssets, log *slog.Logger) (*connections.Handler, error) {
+	store := trafficstore.New(db)
 	h, err := connections.New(connections.Options{
-		Flows:     connections.SQLFlows(db, trafficstore.DefaultRetention),
+		Flows:     connections.SQLFlows(db, store.Retention()),
 		Directory: connDirectory{hosts: hosts, assets: assets},
 		Authorize: sessionAuthorized,
 		Chrome:    connectionsChrome,
@@ -224,7 +226,10 @@ func resolveOwners(want map[netip.Addr]bool, hosts []inventory.Host, as []ipam.A
 			addHost(a, h.ID)
 		}
 	}
-	assetAt := map[netip.Addr][]ipam.Asset{}
+	// assetAt maps each address to the unlinked assets that claim it,
+	// keyed by asset ID so an asset listing the same address twice is
+	// counted once and never ambiguous with itself.
+	assetAt := map[netip.Addr]map[string]ipam.Asset{}
 	for _, as := range as {
 		for _, a := range as.Addresses {
 			if _, known := hostName[as.HostID]; known {
@@ -232,7 +237,10 @@ func resolveOwners(want map[netip.Addr]bool, hosts []inventory.Host, as []ipam.A
 				continue
 			}
 			if a = a.Unmap().WithZone(""); want[a] {
-				assetAt[a] = append(assetAt[a], as)
+				if assetAt[a] == nil {
+					assetAt[a] = map[string]ipam.Asset{}
+				}
+				assetAt[a][as.ID] = as
 			}
 		}
 	}
@@ -244,15 +252,25 @@ func resolveOwners(want map[netip.Addr]bool, hosts []inventory.Host, as []ipam.A
 			out[a] = connections.Peer{Kind: connections.PeerHost, ID: id, Name: hostName[id]}
 		}
 	}
-	for a, list := range assetAt {
-		if _, ok := hostAt[a]; ok || len(list) != 1 {
+	// An address a managed host claims (directly or via a linked asset)
+	// resolves to that host even when an unlinked asset also claims it:
+	// the host is the authoritative owner of the address, so the asset is
+	// at best a stale or behind-the-host (NAT) record. This is safe for
+	// the no-cross-host-attribution property: an address is attributed to
+	// a host only when exactly one host claims it; two hosts claiming the
+	// same address leave it out as ambiguous, never assigned to the wrong
+	// host.
+	for a, m := range assetAt {
+		if _, ok := hostAt[a]; ok || len(m) != 1 {
 			continue
 		}
-		name := list[0].Name
-		if name == "" {
-			name = list[0].Hostname
+		for id, as := range m {
+			name := as.Name
+			if name == "" {
+				name = as.Hostname
+			}
+			out[a] = connections.Peer{Kind: connections.PeerAsset, ID: id, Name: name}
 		}
-		out[a] = connections.Peer{Kind: connections.PeerAsset, ID: list[0].ID, Name: name}
 	}
 	return out
 }
