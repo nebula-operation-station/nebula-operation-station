@@ -415,7 +415,7 @@ The executor is configured by flags in its unit. `install.sh` writes
 | `-socket-group` | `nebula-rpc` | Group of the socket file |
 | `-server-user` | `nebula-server` | Gets the server role |
 | `-admin-users` | `--admin-users` | Get the admin role (unlock, approve, trust, backup) |
-| `-pve-collector-user` | `nebula-pve-collector` | Gets the pve-collector role (typed PVE reads only); must be a dedicated user. If the user does not exist the role stays unassigned (logged at start); `''` disables it |
+| `-pve-collector-user` | `nebula-pve-collector` | Gets the pve-collector role (typed PVE reads only); must be a dedicated user. A configured non-default user that does not exist stops the executor at start; a missing default user leaves the role unassigned (warned at start); `''` disables it |
 | `-rp-id` | `--rp-id` | WebAuthn RP ID |
 | `-origin` | `https://<rp-id>` | Allowed WebAuthn origin (repeatable) |
 | `-hardened` | off | HIGH and CRITICAL operations need `nebula approve` on the machine; trusting from the browser is refused |
