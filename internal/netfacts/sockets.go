@@ -73,7 +73,9 @@ type Socket struct {
 	State string
 	// Local is the local address and port. A wildcard printed as "*"
 	// (an IPv6 socket without IPV6_V6ONLY, which also accepts IPv4) is
-	// stored as [::] with DualStack set. IPv4-mapped IPv6 addresses are
+	// stored as [::] with DualStack set; on a legacy iproute2 host
+	// (DualStackUnknown) "*" is IPv4 INADDR_ANY and stored as 0.0.0.0
+	// instead. IPv4-mapped IPv6 addresses are
 	// stored as IPv4. A link-local IPv6 address carries the bound
 	// interface as its zone.
 	Local netip.AddrPort
@@ -85,14 +87,17 @@ type Socket struct {
 	// "addr%dev:port" (SO_BINDTODEVICE or the IPv6 scope); empty when
 	// unbound. Always a valid interface name (see validIfName).
 	Dev string
-	// DualStack is true when Local was printed as the "*" wildcard.
+	// DualStack is true when Local was printed as the "*" wildcard on a
+	// modern iproute2 host. It is always false when DualStackUnknown is
+	// set.
 	DualStack bool
-	// DualStackUnknown is true when the dual-stack state of Local cannot
-	// be determined: the host prints the legacy iproute2 wildcard form
-	// ":::port" for every IPv6 wildcard regardless of V6ONLY (see
-	// parseSocketAddr), so a ":::port" socket and a "*" socket on it are
-	// ambiguous. When set, DualStack holds the raw printed form and must
-	// not be relied on (Listener.Serves does not claim IPv4 for it).
+	// DualStackUnknown is true when the socket comes from a legacy
+	// iproute2 host (see ParseSocketTable and parseSocketAddr), which
+	// prints ":::port" for every IPv6 wildcard regardless of V6ONLY and
+	// "*" for IPv4 INADDR_ANY. A ":::port" socket is stored as [::]
+	// serving IPv6 only (whether it also accepts IPv4 is unknown, so
+	// IPv4 is never claimed for it); a "*" socket is stored as 0.0.0.0
+	// serving IPv4 only. DualStack is false for both.
 	DualStackUnknown bool
 	// Listening is true for a server-side socket: a TCP socket in state
 	// LISTEN, or an unconnected UDP socket (state UNCONN, no peer). An
@@ -202,16 +207,24 @@ func ParseSocketTable(raw []byte) (SocketTable, error) {
 			break
 		}
 	}
-	// A legacy ":::port" wildcard means the host runs old iproute2, whose
-	// dual-stack state cannot be determined: mark the table Incomplete
-	// and flag the "*" wildcards as unknown instead of guessing them
-	// dual-stack.
+	// A legacy ":::port" wildcard means the host runs old iproute2: its
+	// "*" is IPv4 INADDR_ANY, not a dual-stack IPv6 wildcard, and the
+	// dual-stack state of its ":::port" sockets cannot be determined.
+	// Mark the table Incomplete, store every "*" socket as 0.0.0.0
+	// (IPv4 only) and flag it, so Listener.Serves neither inverts the
+	// families nor claims IPv4 for a ":::port" listener.
 	if p.hasLegacyWildcard() {
 		p.t.Incomplete = true
 		for i := range p.t.Entries {
-			if p.t.Entries[i].DualStack {
-				p.t.Entries[i].DualStackUnknown = true
+			e := &p.t.Entries[i]
+			if !e.DualStack {
+				continue
 			}
+			e.Local = netip.AddrPortFrom(netip.IPv4Unspecified(), e.Local.Port())
+			if e.Peer.Addr() == netip.IPv6Unspecified() {
+				e.Peer = netip.AddrPortFrom(netip.IPv4Unspecified(), e.Peer.Port())
+			}
+			e.DualStack, e.DualStackUnknown = false, true
 		}
 	}
 	return p.t, nil
@@ -220,6 +233,13 @@ func ParseSocketTable(raw []byte) (SocketTable, error) {
 // hasLegacyWildcard reports whether any socket was printed in the legacy
 // ":::port" form, i.e. the host runs old iproute2 whose dual-stack state
 // cannot be determined.
+//
+// Limit: detection needs at least one ":::port" socket among the kept
+// entries. A legacy host whose wildcard sockets are all IPv4 ("*:port")
+// prints exactly what a modern host prints for dual-stack wildcards, so
+// it goes undetected: its "*" sockets are treated as dual-stack and the
+// table is not marked Incomplete. Their IPv4 classification is still
+// correct; only IPv6 addresses on those ports may be attributed to them.
 func (p *socketParser) hasLegacyWildcard() bool {
 	for i := range p.t.Entries {
 		if p.t.Entries[i].DualStackUnknown {
@@ -525,7 +545,10 @@ func parseSocketPort(s string) (uint16, bool) {
 // ":::port" for every IPv6 wildcard regardless of V6ONLY and "*" for
 // IPv4 INADDR_ANY, so the dual-stack state cannot be determined; the
 // legacy ":::port" form is still accepted but flagged (legacy true) so
-// the caller marks the table Incomplete instead of guessing.
+// the caller (ParseSocketTable) marks the table Incomplete and maps
+// every "*" socket of that table to 0.0.0.0 instead of guessing. The
+// "*" form alone cannot tell a legacy host from a modern one (see
+// hasLegacyWildcard).
 //
 // dev is the interface name after "%" (or the zone of the address); dual
 // is true for the "*" wildcard, returned as [::]; legacy is true for the
@@ -614,9 +637,10 @@ type Listener struct {
 	// listener without DualStack (printed by `ss` as "[::]") is IPv6
 	// only.
 	DualStack bool
-	// DualStackUnknown is true when the dual-stack state is undetermined
-	// (Socket.DualStackUnknown): the host prints the legacy ":::port"
-	// wildcard form, so Serves does not claim IPv4 for a "*" listener.
+	// DualStackUnknown is true when the listener comes from a legacy
+	// iproute2 host (Socket.DualStackUnknown): a "*" listener is stored
+	// as 0.0.0.0 and serves IPv4 only, a ":::port" listener is stored
+	// as [::] and serves IPv6 only (Serves never claims IPv4 for it).
 	DualStackUnknown bool
 }
 
@@ -624,8 +648,8 @@ type Listener struct {
 // ends at this listener, i.e. local is the server side (ADR 0009 D3).
 // The ports must be equal; the address must be equal, or the listener
 // is a wildcard of the same family: 0.0.0.0 serves every IPv4 address,
-// [::] every IPv6 address, and [::] with DualStack also every IPv4
-// address. An IPv4-mapped local address is treated as IPv4. Dev is not
+// [::] every IPv6 address, and [::] with DualStack (never set together
+// with DualStackUnknown) also every IPv4 address. An IPv4-mapped local address is treated as IPv4. Dev is not
 // checked: the caller must compare it with the interface the connection
 // uses when it knows it.
 func (l Listener) Serves(local netip.AddrPort) bool {

@@ -392,11 +392,11 @@ func TestParseSocketAddrRejects(t *testing.T) {
 
 func TestParseSocketsLegacyWildcardMarksIncomplete(t *testing.T) {
 	// A host running old iproute2 prints ":::22" for an IPv6 wildcard
-	// regardless of V6ONLY. The parser must not guess the dual-stack
-	// state: the table is Incomplete, the ":::22" socket is flagged
-	// unknown, and a "*" socket on the same port is flagged unknown too
-	// (Serves does not claim IPv4 for it).
-	const raw = "tcp LISTEN 0 0 :::22 *:*\n" +
+	// regardless of V6ONLY and "*:22" for IPv4 INADDR_ANY. The parser
+	// must not guess the dual-stack state: the table is Incomplete, both
+	// sockets are flagged, "*:22" is stored as 0.0.0.0:22 (IPv4 only)
+	// and ":::22" as [::]:22 without DualStack (IPv6 only).
+	const raw = "tcp LISTEN 0 0 :::22 :::*\n" +
 		"tcp LISTEN 0 0 *:22 *:*\n"
 	tbl, err := ParseSocketTable([]byte(raw))
 	if err != nil {
@@ -405,16 +405,41 @@ func TestParseSocketsLegacyWildcardMarksIncomplete(t *testing.T) {
 	if !tbl.Incomplete {
 		t.Fatalf("table not Incomplete with a legacy :::22 wildcard")
 	}
-	if !tbl.Entries[0].DualStackUnknown {
-		t.Fatalf(":::22 socket not flagged DualStackUnknown")
+	if e := tbl.Entries[0]; !e.DualStackUnknown || e.DualStack || e.Local != ap("[::]:22") {
+		t.Fatalf(":::22 socket = %+v, want [::]:22 flagged, not DualStack", e)
 	}
-	if !tbl.Entries[1].DualStackUnknown {
-		t.Fatalf("*:22 socket not flagged DualStackUnknown")
+	if e := tbl.Entries[1]; !e.DualStackUnknown || e.DualStack || e.Local != ap("0.0.0.0:22") || e.Peer != ap("0.0.0.0:0") {
+		t.Fatalf("*:22 socket = %+v, want 0.0.0.0:22 flagged, not DualStack", e)
 	}
-	for _, l := range Listeners(tbl.Entries)[ProtoTCP] {
-		if l.DualStack && l.DualStackUnknown && l.Serves(ap("10.0.0.1:22")) {
-			t.Fatalf("flagged * listener claims IPv4")
+	ls := Listeners(tbl.Entries)[ProtoTCP]
+	if len(ls) != 2 {
+		t.Fatalf("listeners = %+v, want 2", ls)
+	}
+	var v4, v6 *Listener
+	for i := range ls {
+		switch ls[i].Local {
+		case ap("0.0.0.0:22"):
+			v4 = &ls[i]
+		case ap("[::]:22"):
+			v6 = &ls[i]
 		}
+	}
+	if v4 == nil || v6 == nil || !v4.DualStackUnknown || !v6.DualStackUnknown {
+		t.Fatalf("listeners = %+v, want flagged 0.0.0.0:22 and [::]:22", ls)
+	}
+	// The legacy "*" listener is IPv4 INADDR_ANY: it serves IPv4 only.
+	if !v4.Serves(ap("10.0.0.1:22")) {
+		t.Fatalf("legacy * listener does not serve IPv4")
+	}
+	if v4.Serves(ap("[2001:db8::1]:22")) {
+		t.Fatalf("legacy * listener claims IPv6")
+	}
+	// The legacy ":::" listener serves IPv6; IPv4 is never claimed.
+	if !v6.Serves(ap("[2001:db8::1]:22")) {
+		t.Fatalf("legacy ::: listener does not serve IPv6")
+	}
+	if v6.Serves(ap("10.0.0.1:22")) {
+		t.Fatalf("legacy ::: listener claims IPv4")
 	}
 
 	// A V6ONLY [::]:22 stays distinguishable from the legacy :::22.
