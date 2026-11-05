@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"os"
 	"os/exec"
@@ -24,6 +25,24 @@ import (
 
 const execID = "0b9c2f7e-4a51-4c8e-9a51-6f0d3c2b1a00"
 
+// newExecID returns a random execution ID. RunVisible scans every process
+// of the test user on this machine, so visibility tests use their own ID:
+// with the shared execID, a process another test (in this binary or in a
+// test binary running at the same time) left behind, such as the
+// detached loop of TestRunVisibleAfterTimeout or the sleep of
+// TestKilledBySignalMayRun, made the check report "running".
+func newExecID(t *testing.T) string {
+	t.Helper()
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		t.Fatal(err)
+	}
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	h := hex.EncodeToString(b[:])
+	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
+}
+
 func client(t *testing.T) *ssh.Client {
 	t.Helper()
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
@@ -40,7 +59,29 @@ func client(t *testing.T) *ssh.Client {
 
 func run(t *testing.T, c *ssh.Client, params, script string, timeout time.Duration) hostrun.Result {
 	t.Helper()
-	r, err := hostrun.Attached(context.Background(), c, execID, []byte(params), []byte(script), timeout)
+	return runID(t, c, execID, params, script, timeout)
+}
+
+// visible runs RunVisible against this machine's /proc. A single scan can
+// be "cannot tell" for reasons outside the test: another process of the
+// test user caught mid-exec or mid-exit (sudo, a setuid or capability
+// binary) has an environment it may not read, which the check rightly
+// treats as unknown. visible retries such outcomes a few times; "running"
+// and "not running" are returned at once.
+func visible(t *testing.T, c *ssh.Client, id string) (bool, error) {
+	t.Helper()
+	for i := 0; ; i++ {
+		running, err := hostrun.RunVisible(context.Background(), c, id)
+		if !errors.Is(err, hostrun.ErrVisibilityUnknown) || i == 4 {
+			return running, err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func runID(t *testing.T, c *ssh.Client, id, params, script string, timeout time.Duration) hostrun.Result {
+	t.Helper()
+	r, err := hostrun.Attached(context.Background(), c, id, []byte(params), []byte(script), timeout)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,17 +189,18 @@ func TestRunVisibleAfterTimeout(t *testing.T) {
 	if _, err := exec.LookPath("setsid"); err != nil {
 		t.Skip("needs setsid")
 	}
+	id := newExecID(t)
 	c := client(t)
-	if running, err := hostrun.RunVisible(context.Background(), c, execID); err != nil || running {
+	if running, err := visible(t, c, id); err != nil || running {
 		t.Fatalf("before the run: %v %v", running, err)
 	}
 	stop := filepath.Join(t.TempDir(), "stop")
-	r := run(t, c, `{}`, `setsid /bin/sh -c 'until [ -e "$1" ]; do sleep 0.1; done' sh `+stop+` </dev/null >/dev/null 2>&1 & sleep 30; echo '{}'`,
+	r := runID(t, c, id, `{}`, `setsid /bin/sh -c 'until [ -e "$1" ]; do sleep 0.1; done' sh `+stop+` </dev/null >/dev/null 2>&1 & sleep 30; echo '{}'`,
 		300*time.Millisecond)
 	if r.Class != hostrun.ClassExecutionTimeout || !r.RemoteMayRun {
 		t.Fatalf("timed-out run: %+v", r)
 	}
-	if running, err := hostrun.RunVisible(context.Background(), c, execID); err != nil || !running {
+	if running, err := visible(t, c, id); err != nil || !running {
 		t.Fatalf("detached remote process not seen: %v %v", running, err)
 	}
 	if err := os.WriteFile(stop, nil, 0o600); err != nil {
@@ -166,7 +208,7 @@ func TestRunVisibleAfterTimeout(t *testing.T) {
 	}
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		running, err := hostrun.RunVisible(context.Background(), c, execID)
+		running, err := hostrun.RunVisible(context.Background(), c, id)
 		if err == nil && !running {
 			break
 		}
@@ -175,7 +217,7 @@ func TestRunVisibleAfterTimeout(t *testing.T) {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	if r := run(t, c, `{}`, `echo '{}'`, 0); r.RemoteMayRun {
+	if r := runID(t, c, id, `{}`, `echo '{}'`, 0); r.RemoteMayRun {
 		t.Fatalf("finished run reported as possibly running: %+v", r)
 	}
 	if _, err := hostrun.RunVisible(context.Background(), c, "not-a-uuid"); err == nil {
@@ -215,13 +257,14 @@ func TestRunVisibleFailsClosed(t *testing.T) {
 			// The test host runs commands with this process's environment.
 			t.Setenv("PATH", stub(t, tc.files))
 			c := client(t)
-			running, err := hostrun.RunVisible(context.Background(), c, execID)
+			id := newExecID(t)
 			if tc.ok {
-				if err != nil || running {
+				if running, err := visible(t, c, id); err != nil || running {
 					t.Fatalf("running %v err %v", running, err)
 				}
 				return
 			}
+			running, err := hostrun.RunVisible(context.Background(), c, id)
 			if !errors.Is(err, hostrun.ErrVisibilityUnknown) {
 				t.Fatalf("running %v err %v, want ErrVisibilityUnknown", running, err)
 			}
@@ -232,7 +275,7 @@ func TestRunVisibleFailsClosed(t *testing.T) {
 // A remote shell killed by a signal may leave children running.
 func TestKilledBySignalMayRun(t *testing.T) {
 	c := client(t)
-	r := run(t, c, `{}`, `kill -KILL $PPID; sleep 1`, 0)
+	r := runID(t, c, newExecID(t), `{}`, `kill -KILL $PPID; sleep 1`, 0)
 	if r.Class != hostrun.ClassScriptInterrupted || !strings.Contains(r.Detail, "signal") || !r.RemoteMayRun {
 		t.Fatalf("%+v", r)
 	}
