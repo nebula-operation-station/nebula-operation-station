@@ -655,7 +655,7 @@ func TestDecodeReadGrantFormats(t *testing.T) {
 func providerDoc() permit.ReadGrantDoc {
 	return permit.ReadGrantDoc{Grant: schedgrant.ReadFormat, ID: testGrantID, Issuer: "test", CreatedUnix: decodeCreated.Unix(),
 		ExpiryUnix: decodeExpiry.Unix(), Trigger: permit.TriggerBoth, MinIntervalS: 900, RunBudget: 5,
-		RateProfile:     permit.ProviderReadProfile,
+		RateProfile: permit.ProviderReadProfile,
 		ProviderTargets: []permit.ProviderTarget{
 			{RemoteID: "pve-b", TrustPin: strings.Repeat("b2", 32), TrustGeneration: 2, CredentialVersion: 5, Methods: []string{"nodes", "tasks"}},
 			{RemoteID: "pve-a", TrustPin: strings.Repeat("a1", 32), TrustGeneration: 1, CredentialVersion: 3, Methods: []string{"guests"}},
