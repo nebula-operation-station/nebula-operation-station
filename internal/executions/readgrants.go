@@ -21,7 +21,6 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/schedgrant"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui/invsort"
@@ -48,6 +47,12 @@ type ReadGrantView struct {
 	// Remotes is the sorted PVE remote list of a provider grant; empty for
 	// SSH grants.
 	Remotes []string
+	// RateProfile is the document's rate profile ("ordinary", "telemetry",
+	// "provider", "provider_telemetry"; empty for older formats).
+	RateProfile string
+	// Providers are the frozen PVE remotes of a provider grant, sorted by
+	// remote ID; empty for SSH grants.
+	Providers []ReadGrantProviderView
 	// ApprovedBy and the times come from the executor's registry.
 	ApprovedBy string
 	Created    time.Time
@@ -207,18 +212,22 @@ func decodeReadGrant(g *pb.ReadGrant, inv []inventory.Host, haveInv bool, now ti
 		v.Actions = append(v.Actions, a.ActionID)
 	}
 	for _, p := range doc.ProviderTargets {
-		if !pvecontract.ValidRemoteID(p.RemoteID) || seen["p:"+p.RemoteID] {
+		pv, ok := providerView(p)
+		if !ok || seen["p:"+p.RemoteID] {
 			return invalidView(v)
 		}
 		seen["p:"+p.RemoteID] = true
 		v.Remotes = append(v.Remotes, p.RemoteID)
+		v.Providers = append(v.Providers, pv)
 	}
+	v.RateProfile = doc.RateProfile
 	v.Legacy = doc.Grant == schedgrant.Format
 	sort.Slice(v.Hosts, func(i, j int) bool { return invsort.Less(v.Hosts[i], v.Hosts[j]) })
 	sort.Strings(v.Remotes)
+	sort.Slice(v.Providers, func(i, j int) bool { return v.Providers[i].RemoteID < v.Providers[j].RemoteID })
 	if len(v.Remotes) > 0 {
 		// A provider grant's scope is its PVE remotes, not SSH hosts.
-		v.ScopeKind = "provider"
+		v.ScopeKind = ScopeProvider
 	} else {
 		v.ScopeKind, v.ScopeValue = scopeLabel(v.Hosts, inv, haveInv)
 	}
@@ -388,6 +397,8 @@ func invalidView(v ReadGrantView) ReadGrantView {
 	v.Hosts = nil
 	v.Actions = nil
 	v.Remotes = nil
+	v.Providers = nil
+	v.RateProfile = ""
 	return v
 }
 
