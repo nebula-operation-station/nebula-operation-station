@@ -292,16 +292,25 @@ test("start: nothing is posted before the iframe is ready; then model, focus and
   assert.deepEqual(t.posts[2].msg, { type: "nos.trafficmap.focus", id: "h1" });
 });
 
-test("start: a reloaded iframe gets nothing until it is ready again", async () => {
+test("start: ready before the iframe's load event still gets the data", async () => {
+  // The renderer posts "ready" while its module runs, before the iframe's
+  // load event fires in the parent; that event must not discard it.
+  const t = setup();
+  t.deliver({ type: "nos.trafficmap.ready" });
+  for (const f of t.els["trafficmap-frame"].listeners.load || []) f();
+  await t.s.loaded;
+  assert.deepEqual(t.posts.map((p) => p.msg.type), ["nos.trafficmap.model", "nos.trafficmap.icons"]);
+});
+
+test("start: a reloaded renderer that announces ready again gets everything again", async () => {
   const t = setup();
   await t.s.loaded;
   t.deliver({ type: "nos.trafficmap.ready" });
   const n = t.posts.length;
-  t.els["trafficmap-frame"].listeners.load.forEach((f) => f());
-  await t.s.loaded;
-  assert.equal(t.posts.length, n);
+  assert.ok(n >= 1);
   t.deliver({ type: "nos.trafficmap.ready" });
-  assert.ok(t.posts.length > n);
+  assert.equal(t.posts.length, 2 * n);
+  assert.equal(t.posts[n].msg.type, "nos.trafficmap.model");
 });
 
 test("start: open navigates to the node's page, only for valid messages", async () => {

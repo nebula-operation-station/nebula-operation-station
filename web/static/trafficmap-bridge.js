@@ -17,10 +17,11 @@
 //     current window AND ev.origin is "null"; then the shape is checked
 //     strictly (type, exact keys, node id syntax, id in the current model);
 //   - outgoing messages go only to the iframe's window. The target origin
-//     must be "*" because an opaque origin cannot be named; they are sent
-//     only after that window announced "ready" since its last load, so a
-//     frame that navigated elsewhere receives nothing until it is ours
-//     again (its CSP and sandbox keep it on the renderer document).
+//     must be "*" because an opaque origin cannot be named. Nothing is sent
+//     before the renderer in that window announced "ready" (with origin
+//     "null"). The window cannot hold a foreign document: the page's CSP
+//     (frame-src via default-src 'self') blocks cross-origin navigations
+//     of the iframe, and the iframe has no allow-top-navigation or popups.
 //
 // Navigation. A node id coming back from the iframe is looked up in the
 // parent's own copy of the model; the target is built from a fixed path
@@ -465,8 +466,8 @@ const NOSTrafficMapBridge = (() => {
     let backendText = "";
 
     const post = (msg) => {
-      // Only the iframe's window, only after it announced ready since its
-      // last load; "*" because its sandboxed origin is opaque.
+      // Only the iframe's window, only after its renderer announced ready;
+      // "*" because its sandboxed origin is opaque.
       if (ready && frame.contentWindow) frame.contentWindow.postMessage(msg, "*");
     };
     const sendAll = () => {
@@ -530,11 +531,11 @@ const NOSTrafficMapBridge = (() => {
           break;
       }
     };
+    // There is deliberately no reset on the iframe's load event: the
+    // renderer announces "ready" while its module runs, before that event
+    // fires, so a reset there would drop the only "ready". A reloaded
+    // renderer announces "ready" again and gets everything again.
     env.window.addEventListener("message", onMessage);
-    // A (re)load of the iframe needs a fresh "ready" before data is sent.
-    frame.addEventListener("load", () => {
-      ready = false;
-    });
 
     const loaded = (async () => {
       try {
