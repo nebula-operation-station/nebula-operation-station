@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Run only queued icon jobs, with no listener or URL-triggered invocation.
+# Enable alongside nebula-iconfetch.timer to recover jobs queued at exit.
+[Unit]
+Description=Nebula Operation Station icon fetcher: watch queued jobs
+
+[Path]
+PathChanged=/var/lib/nebula/iconfetch/jobs
+Unit=nebula-iconfetch.service
+
+[Install]
+WantedBy=multi-user.target

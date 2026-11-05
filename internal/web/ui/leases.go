@@ -33,6 +33,10 @@ type leaseRow struct {
 	// RefreshURL is the form pre-filled with this grant's scope (a new
 	// grant); empty when the grant cannot be refreshed.
 	RefreshURL string
+	// Provider marks a provider lease: the row counts remotes and
+	// methods instead of hosts and actions.
+	Provider                 bool
+	RemoteCount, MethodCount int
 }
 
 // leaseDetail is the data of one lease detail page.
@@ -48,6 +52,10 @@ type leaseDetail struct {
 	Legacy                              bool
 	Revocable                           bool // show the Revoke form
 	RefreshURL                          string
+	// Provider marks a provider lease with its frozen remotes.
+	Provider    bool
+	Providers   []leaseProviderRow
+	RateProfile string
 }
 
 // leasesData is the data of the lease list page.
@@ -106,6 +114,9 @@ func leaseShort(id string) string {
 
 // leaseScope renders the scope of a grant as "kind: value" or "kind".
 func leaseScope(v executions.ReadGrantView) string {
+	if v.ScopeKind == executions.ScopeProvider {
+		return "Proxmox remotes: " + strings.Join(v.Remotes, ", ")
+	}
 	if v.ScopeValue != "" {
 		return v.ScopeKind + ": " + v.ScopeValue
 	}
@@ -138,6 +149,8 @@ func (h *Handler) handleLeases(w http.ResponseWriter, r *http.Request) {
 			StateClass: leaseStateClass(v.State), Scope: leaseScope(v),
 			ActionCount: len(v.Actions), HostCount: len(v.Hosts),
 			Expiry: v.Expiry.UTC(), RefreshURL: leaseRefreshURL(v),
+			Provider:    v.ScopeKind == executions.ScopeProvider,
+			RemoteCount: len(v.Remotes), MethodCount: leaseProviderMethodCount(v),
 		}
 		if !v.Expiry.IsZero() {
 			row.ExpirySet = true
@@ -184,6 +197,8 @@ func (h *Handler) handleLease(w http.ResponseWriter, r *http.Request) {
 		HostsOpen: len(v.Hosts) > 0 && len(v.Hosts) <= leaseDetailOpenMax,
 		Digest:    v.Digest, ApprovedBy: v.ApprovedBy, Legacy: v.Legacy,
 		Revocable: leaseRevocable(v.State), RefreshURL: leaseRefreshURL(*v),
+		Provider: v.ScopeKind == executions.ScopeProvider, Providers: leaseProviderRows(*v),
+		RateProfile: v.RateProfile,
 	}
 	if !v.Created.IsZero() {
 		d.Created, d.CreatedSet = v.Created.UTC(), true

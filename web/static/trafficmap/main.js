@@ -21,9 +21,29 @@ export const MAX_DPR = 2;
 export const DRAG_THRESHOLD_PX = 4;
 /**
  * Consecutive failed frames after which the renderer degrades: WebGL2 is
- * replaced by Canvas 2D, and on Canvas 2D the icons are dropped.
+ * replaced by Canvas 2D, and on Canvas 2D the icons are dropped. A frame
+ * fails when a scene rebuild or a draw it attempted throws; a frame whose
+ * rebuild is backed off only fails if its draw throws.
  */
 export const MAX_FRAME_FAILURES = 3;
+
+/**
+ * REBUILD_BACKOFF_BASE_MS is the delay before a scene rebuild is retried
+ * after one failed rebuild; it doubles with every further failed rebuild.
+ * REBUILD_BACKOFF_MAX_MS caps that delay, so a persistently failing rebuild
+ * is not retried on every frame.
+ */
+export const REBUILD_BACKOFF_BASE_MS = 100;
+export const REBUILD_BACKOFF_MAX_MS = 4000;
+
+/**
+ * rebuildBackoffMs is the delay in ms before the next scene rebuild attempt
+ * after the failures-th consecutive failed rebuild: exponential from
+ * REBUILD_BACKOFF_BASE_MS up to REBUILD_BACKOFF_MAX_MS.
+ */
+export function rebuildBackoffMs(failures) {
+  return Math.min(REBUILD_BACKOFF_BASE_MS * 2 ** (failures - 1), REBUILD_BACKOFF_MAX_MS);
+}
 
 /** User-facing status texts (English UI strings). */
 export const STATUS = Object.freeze({
@@ -78,6 +98,9 @@ export function startTrafficMap(root, opts = {}) {
   const painter = (PAINTERS[opts.symbols] || PAINTERS["star-core"])();
   const motion = win.matchMedia ? win.matchMedia("(prefers-reduced-motion: reduce)") : null;
   const isBitmap = (b) => typeof win.ImageBitmap === "function" && b instanceof win.ImageBitmap;
+  // opts.buildScene replaces buildScene; the behaviour tests use it to make
+  // rebuilds fail.
+  const build = typeof opts.buildScene === "function" ? opts.buildScene : buildScene;
 
   let base = null;
   let backend = null;
@@ -85,6 +108,11 @@ export function startTrafficMap(root, opts = {}) {
   let layout = null;
   let scene = null;
   let nodeById = new Map();
+  // sceneNodeById is the nodeById of the model the installed scene was
+  // built from. The overlay uses it, not nodeById: while a rebuild for a
+  // newer model fails, the old scene keeps rendering and must not be
+  // paired with the newer model's nodes.
+  let sceneNodeById = new Map();
   let icons = new Map();
   let cam = null;
   let focus = null;
@@ -96,8 +124,14 @@ export function startTrafficMap(root, opts = {}) {
   let backendStatus = STATUS.waiting;
   let stopped = false;
   let generation = 0;
+  // failures counts consecutive failed frames and drives the status, the
+  // error report and the degrade; rebuildFailures counts consecutive failed
+  // scene rebuilds and drives the rebuild backoff. A failed rebuild sets
+  // nextRebuildAt once; frames before it neither retry nor fail.
   let failures = 0;
   let degradeAt = MAX_FRAME_FAILURES;
+  let rebuildFailures = 0;
+  let nextRebuildAt = 0;
 
   root.style.position = "relative";
   root.style.overflow = "hidden";
@@ -147,6 +181,7 @@ export function startTrafficMap(root, opts = {}) {
     backend = r.backend;
     resize();
     dirty = true;
+    resetFailures();
     if (!backend) {
       setStatus(STATUS.none);
       send(win, OUT.backend, { backend: "none", fallback: true });
@@ -203,6 +238,9 @@ export function startTrafficMap(root, opts = {}) {
         }
         if (focus !== null && !nodeById.has(focus)) focus = null;
         dirty = true;
+        // A new model gets a fresh rebuild right away; the failure streak is
+        // kept (see resetRebuildBackoff).
+        resetRebuildBackoff();
         if (backend) setStatus(backendStatus);
         break;
       }
@@ -228,6 +266,14 @@ export function startTrafficMap(root, opts = {}) {
       if (keep.has(bmp)) continue;
       if (typeof bmp.close === "function") bmp.close();
     }
+  }
+
+  // clearOverlay wipes the overlay canvas when the base drew no scene (none
+  // yet, or a half-finished upload), so it is not covered by labels of an
+  // earlier, different scene.
+  function clearOverlay() {
+    octx.setTransform(1, 0, 0, 1, 0, 0);
+    octx.clearRect(0, 0, overlay.width, overlay.height);
   }
 
   function local(ev) {
@@ -331,16 +377,48 @@ export function startTrafficMap(root, opts = {}) {
       dirty = true;
     }
     if (dirty) {
-      scene = buildScene(model, layout, { level, focus });
-      backend.setScene(scene);
-      dirty = false;
-      redraw = true;
+      if (rebuildFailures > 0 && ts < nextRebuildAt) {
+        // The rebuild is backed off: the last scene keeps rendering, and
+        // without one there is nothing to draw yet.
+        if (scene === null) return;
+      } else {
+        try {
+          const next = build(model, layout, { level, focus });
+          backend.setScene(next);
+          scene = next;
+          sceneNodeById = nodeById;
+        } catch (err) {
+          // The deadline is set only here, by an attempt that failed, so
+          // backed-off frames cannot push it further out.
+          rebuildFailures++;
+          nextRebuildAt = ts + rebuildBackoffMs(rebuildFailures);
+          // Nothing is drawn in this frame, so base and overlay keep showing
+          // the same last frame. Whether the overlay is drawn is decided only
+          // by render's completeness below, on every backend alike.
+          throw err;
+        }
+        rebuildFailures = 0;
+        nextRebuildAt = 0;
+        dirty = false;
+        redraw = true;
+      }
     }
     const reduced = motion !== null && motion.matches;
     if (redraw || !reduced) {
       const time = reduced ? 0 : ts / 1000;
       try {
-        backend.render(cam, dpr, time);
+        // render reports whether it drew a complete scene. Without one
+        // (no scene yet, or a half-finished WebGL2 upload) it draws no
+        // scene at all and only clears the base to the background.
+        const complete = backend.render(cam, dpr, time);
+        if (complete) {
+          drawOverlay(octx, scene, cam, dpr, time, painter, icons, sceneNodeById);
+          redraw = false;
+        } else {
+          // Empty base: clear the overlay too, so no labels of an earlier
+          // scene are left over it.
+          clearOverlay();
+        }
       } catch (err) {
         if (backend.name === "canvas2d") throw err;
         // A failing WebGL2 draw is not retried: switch on the next frame.
@@ -348,13 +426,14 @@ export function startTrafficMap(root, opts = {}) {
         redraw = true;
         return;
       }
-      drawOverlay(octx, scene, cam, dpr, time, painter, icons, nodeById);
-      redraw = false;
     }
   }
 
-  // frame re-arms itself first, so no exception can stop the loop. Failed
-  // frames are retried; repeated failures degrade the renderer.
+  // frame re-arms itself first, so no exception can stop the loop. A frame
+  // that throws is a failure; failed rebuilds are retried with a growing
+  // backoff, and repeated failures degrade the renderer. The streak ends
+  // only with a frame that throws nothing while no rebuild is failing, so
+  // drawing an outdated scene does not count as recovery.
   function frame(ts) {
     if (stopped) return;
     win.requestAnimationFrame(frame);
@@ -362,27 +441,50 @@ export function startTrafficMap(root, opts = {}) {
       step(ts);
     } catch {
       failures++;
-      dirty = true;
       redraw = true;
       if (failures === 1) {
+        // Reported once per streak, not per failed frame.
         setStatus(STATUS.frameError);
         send(win, OUT.error, { errors: ["render: drawing a frame failed"] });
       }
-      if (failures >= degradeAt) {
-        degradeAt += MAX_FRAME_FAILURES;
-        if (backend && backend.name !== "canvas2d") {
-          switchToFallback = STATUS.failed;
-        } else if (icons.size > 0) {
-          releaseIcons(new Map());
-          icons = new Map();
-        }
-      }
+      degrade();
       return;
     }
-    if (failures > 0) {
-      failures = 0;
-      degradeAt = MAX_FRAME_FAILURES;
+    if (failures > 0 && rebuildFailures === 0) {
+      resetFailures();
       setStatus(!backend ? STATUS.none : model ? backendStatus : STATUS.waiting);
+    }
+  }
+
+  // resetFailures ends a failure streak and clears the rebuild backoff.
+  function resetFailures() {
+    failures = 0;
+    degradeAt = MAX_FRAME_FAILURES;
+    rebuildFailures = 0;
+    nextRebuildAt = 0;
+  }
+
+  // resetRebuildBackoff lets a new model be rebuilt right away. It must not
+  // touch the failure streak, which ends only with a successful frame (or
+  // an install): with models arriving faster than the degrade window,
+  // resetting the streak on every model would postpone the degrade forever.
+  function resetRebuildBackoff() {
+    rebuildFailures = 0;
+    nextRebuildAt = 0;
+  }
+
+  // degrade applies the stepwise degradation for a persistent failure
+  // streak: WebGL2 is replaced by Canvas 2D, and on Canvas 2D the icons
+  // are dropped.
+  function degrade() {
+    if (failures >= degradeAt) {
+      degradeAt += MAX_FRAME_FAILURES;
+      if (backend && backend.name !== "canvas2d") {
+        switchToFallback = STATUS.failed;
+      } else if (icons.size > 0) {
+        releaseIcons(new Map());
+        icons = new Map();
+      }
     }
   }
 

@@ -31,7 +31,10 @@ export function segmentVisible(ax, ay, bx, by, w, h, margin) {
 /**
  * createCanvas2DBackend returns a backend drawing into canvas, or null if
  * no 2D context can be created. Backend interface (shared with WebGL2):
- *   name, setScene(scene), render(cam, dpr, time), isLost(), dispose().
+ *   name, setScene(scene), render(cam, dpr, time) -> bool, isLost(),
+ *   dispose(). render returns whether a scene was actually drawn; when it
+ *   returns false (before the first scene, or after a failed upload on
+ *   WebGL2) only the background was drawn.
  */
 export function createCanvas2DBackend(canvas) {
   const ctx = canvas.getContext("2d", { alpha: false });
@@ -52,7 +55,7 @@ export function createCanvas2DBackend(canvas) {
       ctx.globalAlpha = 1;
       ctx.fillStyle = BACKGROUND;
       ctx.fillRect(0, 0, cam.width, cam.height);
-      if (!scene) return;
+      if (!scene) return false;
       ctx.globalCompositeOperation = "lighter";
 
       for (const n of scene.nebulae) {
@@ -122,6 +125,7 @@ export function createCanvas2DBackend(canvas) {
         ctx.fill();
       }
       ctx.globalCompositeOperation = "source-over";
+      return true;
     },
     dispose() {
       scene = null;

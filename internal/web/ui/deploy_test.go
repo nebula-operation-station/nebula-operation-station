@@ -2,6 +2,7 @@
 package ui_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -79,9 +80,23 @@ type fakeProvision struct {
 	failStep    bool
 	// mutate changes the bound canonical request (a misbehaving executor).
 	mutate func(*canonical.Request)
+	// noOptions omits the permit's request options, so a key requirement
+	// has no challenge to approve.
+	noOptions bool
+	// holdIPAM pauses the first IPAM propose until closed; closing
+	// holdIPAMStarted signals that the pause has started.
+	holdIPAM        chan struct{}
+	holdIPAMStarted chan struct{}
+	holdIPAMOnce    sync.Once
 }
 
 func (f *fakeProvision) ProposePVEGuestProvision(_ context.Context, in *pb.ProposePVEGuestProvisionRequest, _ ...grpc.CallOption) (*pb.ProposePVEGuestProvisionResponse, error) {
+	if in.GetSpec().GetIpam() != nil && f.holdIPAM != nil {
+		f.holdIPAMOnce.Do(func() {
+			close(f.holdIPAMStarted)
+			<-f.holdIPAM
+		})
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.proposed = append(f.proposed, in.GetSpec())
@@ -104,14 +119,28 @@ func (f *fakeProvision) ProposePVEGuestProvision(_ context.Context, in *pb.Propo
 		return nil, err
 	}
 	sum := sha256.Sum256(c)
-	return &pb.ProposePVEGuestProvisionResponse{ExecutionId: dpExec, Vmid: dpVMID, CapacityWarnings: []string{"memory over-commit on p1"},
+	resp := &pb.ProposePVEGuestProvisionResponse{ExecutionId: dpExec, Vmid: dpVMID, CapacityWarnings: []string{"memory over-commit on p1"},
 		Permit: &pb.ProposeExecutionResponse{ExecutionDigest: hex.EncodeToString(sum[:]), CanonicalRequest: c,
 			ApprovalRequirement: f.requirement, RiskClass: riskPB(string(f.risk)),
-			ChallengeExpiryUnix: time.Now().Add(5 * time.Minute).Unix(), RequestOptionsJson: []byte(`{"challenge":"Y2hhbA"}`)}}, nil
+			ChallengeExpiryUnix: time.Now().Add(5 * time.Minute).Unix(), RequestOptionsJson: []byte(`{"challenge":"Y2hhbA"}`)}}
+	if f.noOptions {
+		resp.Permit.RequestOptionsJson = nil
+	}
+	return resp, nil
 }
 
 func riskPB(r string) pb.RiskClass {
 	return pb.RiskClass(pb.RiskClass_value["RISK_CLASS_"+r])
+}
+
+// failingDeployProfiles is a DeployProfiles whose Save fails with saveErr.
+type failingDeployProfiles struct {
+	ui.DeployProfiles
+	saveErr error
+}
+
+func (f failingDeployProfiles) Save(_ context.Context, _ string, _ deployprofile.Profile) (deployprofile.Version, error) {
+	return deployprofile.Version{}, f.saveErr
 }
 
 func (f *fakeProvision) SubmitAssertion(_ context.Context, in *pb.SubmitAssertionRequest, _ ...grpc.CallOption) (*pb.SubmitAssertionResponse, error) {
@@ -302,6 +331,8 @@ type dpEnv struct {
 	batches *fakeDeployBatches
 	state   string
 	gen     uint64
+	// logBuf captures the handler's log (audit entries).
+	logBuf bytes.Buffer
 
 	clockMu sync.Mutex
 	offset  time.Duration
@@ -376,7 +407,7 @@ func newDPEnvWith(t *testing.T, edit func(*ui.Options)) *dpEnv {
 		DeployJoin:    &pveinventory.GuestJoinFlow{Store: e.pve, Executor: e.join},
 		DeployIPAM:    e.ipam,
 		DeployBatches: e.batches,
-		Log:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Log:           slog.New(slog.NewTextHandler(&e.logBuf, nil)),
 	}
 	if edit != nil {
 		edit(&o)

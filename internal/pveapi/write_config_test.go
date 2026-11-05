@@ -105,6 +105,28 @@ func TestSetConfigMinimalAndDHCP(t *testing.T) {
 	}
 }
 
+// PVE bridge names (VLAN sub-bridges, SDN vnets, hyphenated Linux
+// bridges) are written verbatim; the shared validator accepts them.
+func TestSetConfigAcceptsPVEBridgeNames(t *testing.T) {
+	for _, bridge := range []string{"vmbr0.100", "br-lan", "vnet_1", strings.Repeat("a", 15)} {
+		t.Run(bridge, func(t *testing.T) {
+			f := &fakeWriteServer{body: upidBody(upidConfig)}
+			w := newTestWriter(t, f)
+			_, err := w.SetConfig(context.Background(), ConfigRequest{
+				Node: "pve1", VMID: 120,
+				Net0:      &NetConfig{Model: NICE1000, Bridge: bridge},
+				IPConfig0: &IPConfig{DHCP: true},
+			})
+			if err != nil {
+				t.Fatalf("SetConfig: %v", err)
+			}
+			if got := f.only(t).form.Get("net0"); got != "e1000,bridge="+bridge {
+				t.Fatalf("net0 = %q", got)
+			}
+		})
+	}
+}
+
 func TestSetConfigRejectsInvalidFields(t *testing.T) {
 	cases := map[string]func(*ConfigRequest){
 		"no fields":            func(r *ConfigRequest) { *r = ConfigRequest{Node: "pve1", VMID: 120} },
@@ -119,6 +141,12 @@ func TestSetConfigRejectsInvalidFields(t *testing.T) {
 		"net bridge comma":     func(r *ConfigRequest) { r.Net0.Bridge = "vmbr0,rate=1" },
 		"net bridge empty":     func(r *ConfigRequest) { r.Net0.Bridge = "" },
 		"net bridge long":      func(r *ConfigRequest) { r.Net0.Bridge = "vmbr0123456789ab" },
+		"net bridge slash":     func(r *ConfigRequest) { r.Net0.Bridge = "br/0" },
+		"net bridge angle":     func(r *ConfigRequest) { r.Net0.Bridge = "<x>" },
+		"net bridge dot":       func(r *ConfigRequest) { r.Net0.Bridge = "." },
+		"net bridge dotdot":    func(r *ConfigRequest) { r.Net0.Bridge = ".." },
+		"net bridge 16 bytes":  func(r *ConfigRequest) { r.Net0.Bridge = strings.Repeat("a", 16) },
+		"net bridge control":   func(r *ConfigRequest) { r.Net0.Bridge = "vmbr\x1b0" },
 		"net tag high":         func(r *ConfigRequest) { r.Net0.Tag = MaxVLANTag + 1 },
 		"net tag negative":     func(r *ConfigRequest) { r.Net0.Tag = -1 },
 		"net mac multicast":    func(r *ConfigRequest) { r.Net0.MAC = "01:00:5e:00:00:01" },

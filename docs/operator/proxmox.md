@@ -311,6 +311,56 @@ The collector is intended to run as its own Unix user with the
 P1-14); until it ships, run the binary directly or provide your own unit
 with the flags above.
 
+## Read lease for a remote
+
+**Why it is needed.** The executor answers a collector read for a remote only
+when an approved, unexpired **provider read lease** covers that remote and
+method. Registering a remote and storing its read token is not enough: without
+a lease every read is refused (`read_grant_does_not_cover`) and the PVE pages
+keep showing no or stale data. The lease is the operator's explicit approval
+of *what* the collector may read and *for how long*.
+
+**How to request it.**
+
+1. Open `/pve/<id>`. For an active remote that no active provider lease
+   covers, the page says "no approved read lease" and offers **Request read
+   lease**. The same form is at `/leases/new`, scope **Proxmox remote**.
+2. Choose the remotes (only `active` remotes are offered, at most 16), the
+   methods and the lifetime (7 or 30 days). The defaults are what the
+   collector reads on every pass: `nodes`, `guests`, `storage`, `cluster`,
+   `tasks`. The per-guest methods `guest_config`, `guest_agent`, `snapshots`
+   and `backups` are optional; check them only if you want those datasets
+   (see [What the collector reads](#what-the-collector-reads)).
+3. **Preview** freezes the request and shows the complete lease as the
+   executor will hold it: every remote with its full trust pin, trust
+   generation and read credential version, the methods, the trigger, the rate
+   profile with the per-remote request budget, the expiry and the digest.
+   Nothing is approved yet.
+
+**How to approve it.** On the preview page, approve with your security key.
+If the executor runs in hardened mode, the page shows the command instead;
+run it on the executor host, it shows the complete lease again before it
+asks for approval:
+
+```sh
+nebula read-grant approve <digest>
+```
+
+**What it covers.** Exactly the frozen remotes and methods, nothing else:
+no SSH hosts, actions or credentials, no write methods, and no other remote.
+A remote that is re-pinned (new trust generation) or whose read token is
+rotated (new credential version) is no longer covered; the reads fail with
+`read_grant_does_not_cover` until a new lease is approved.
+
+**Renewal and revoke.** `/leases` lists provider leases with their remotes
+and methods; the detail page shows each remote with pin prefix, trust
+generation, credential version and methods. **Refresh** (on an active or
+expired lease) opens the form pre-filled with the same remotes, methods and
+lifetime and proposes a *new* lease, which needs its own approval; the old
+one stays until it expires or is revoked. **Revoke** ends a lease at once.
+Renew before the expiry shown in the list, and after every re-pin or token
+rotation.
+
 ## Staleness and unknown labels in the UI
 
 The PVE pages show only stored observations, never live API data. Every row
@@ -353,6 +403,9 @@ history is merely evidence of a past run.
 | Token rejected at `add` or `rotate-token` | Check the effective permission profile: read tokens need exactly the four audit privileges on `/`, `/vms`, `/storage`, `/pool`; action tokens need only `VM.PowerMgmt` on `/vms/<vmid>`. The user must be enabled and not expired; the token needs `privsep=1` and an expiry; `*@pam`, `Administrator@*` and `PVEVMAdmin@*` are refused. Read and action tokens must use different PVE users. |
 | Remote state `blocked` in `list` / UI | The trust identity changed (new CA or leaf), the chain is invalid, or a SAN does not match. Verify the presented certificate out of band, then `nebula pve remote repin <id>`. A CA-preserving leaf renewal needs no re-pin. |
 | Remote rows labelled `unknown` in the UI | No observation ever arrived: the collector is not running, cannot reach the executor socket, or the remote is not `active`. Check the collector process and its JSON logs, the spool directory, and `nebula pve remote list`. |
+| Collector exits at start: `verify executor at /run/nebula/executor.sock: … connection reset by peer` | The executor does not know the collector's UID and drops the connection. The collector must run as the executor's `-pve-collector-user` (default `nebula-pve-collector`), and that user must exist when the executor starts: look for `pve-collector user not found` in `journalctl -u nebula-executor`, then restart `nebula-executor`, run `nebula unlock` and restart `nebula-pve-collector`. |
+| Collector exits at start: `chmod spool root: … operation not permitted` (or the same for `results`, `requests`, `live`, `guestnet`) | A spool directory does not have its final mode. The collector unit forbids setting the setgid bit (`RestrictSUIDSGID=yes`), so the directories must be created with their modes beforehand: re-run `install.sh` (it creates `/var/lib/nebula/pve` 2750, `results`, `guestnet`, `requests` 2770 and `live` 2750, owner `nebula-pve-collector`, group `nebula-rpc`). |
+| `read_grant_does_not_cover` in the collector or executor log (`journalctl -u nebula-pve-collector`, `journalctl -u nebula-executor`); PVE page says "no approved read lease" | No active provider read lease covers this remote and method: none was approved, it expired or was revoked, the remote was re-pinned, the read token was rotated, or the method (for example `snapshots`) was not chosen. Request a lease from `/pve/<id>` (**Request read lease**) or refresh the old one on `/leases`, with the methods you need, and approve it (see [Read lease for a remote](#read-lease-for-a-remote)). |
 | Rows labelled `stale` | The collector is down, backing off after failures, or the remote is blocked. Backoff is exponential from 1 m to 15 m after failed polls; a single pass can be forced with `nebula-pve-collector -once`. |
 | Dataset `unavailable: insufficient read privileges` (backups) | Expected with a read-only token (see above). Do not borrow the action token or add write privileges for inventory. |
 | Guest agent fields unavailable on PVE 8 | PVE 8's legacy `VM.Monitor` is too broad for a read-only token; agent-derived fields stay unavailable unless a separately reviewed mechanism is provided. PVE 9 informational agent methods work with the read token. |

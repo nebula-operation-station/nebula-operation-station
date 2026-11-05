@@ -52,6 +52,11 @@ const (
 	maxKeyLen = 64
 	// idLen is the length of a job ID in hex digits.
 	idLen = 32
+	// MaxListEntries bounds how many directory entries one spool listing
+	// reads, so a flooded directory cannot make a listing unbounded.
+	MaxListEntries = 4096
+	// listBatch is the number of entries read per ReadDir call.
+	listBatch = 256
 )
 
 // ErrInvalid marks a job or result that violates the spool format.
@@ -282,7 +287,7 @@ func writeAtomic(dir, name string, data []byte) (err error) {
 func readFile(path string, limit int64) ([]byte, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return nil, err
+		return nil, classifyOpen(err)
 	}
 	defer func() { _ = f.Close() }()
 	st, err := f.Stat()
@@ -303,6 +308,21 @@ func readFile(path string, limit int64) ([]byte, error) {
 		return nil, fmt.Errorf("%w: file too large", ErrInvalid)
 	}
 	return b, nil
+}
+
+// classifyOpen marks open errors that a retry cannot fix as ErrInvalid:
+// a symbolic link (ELOOP from O_NOFOLLOW) or a file this process may not
+// read (EACCES, EPERM) violates the spool format, so the caller drops
+// the job instead of retrying it forever. Other errors are returned as
+// they are (os.ErrNotExist in particular stays recognizable).
+func classifyOpen(err error) error {
+	switch {
+	case errors.Is(err, syscall.ELOOP):
+		return fmt.Errorf("%w: symbolic link: %w", ErrInvalid, err)
+	case errors.Is(err, syscall.EACCES), errors.Is(err, syscall.EPERM):
+		return fmt.Errorf("%w: not readable: %w", ErrInvalid, err)
+	}
+	return err
 }
 
 func decodeStrict(b []byte, v any) error {
@@ -394,41 +414,51 @@ func (s Spool) PendingJobs() ([]Job, map[string]error, error) {
 // removes the job file once it has handled the result and never writes
 // results/, so a result without its job (already imported or cancelled)
 // is skipped here until the helper prunes it; it never takes a place in
-// the caller's per-run budget. The check is two directory listings, no
-// file is opened.
+// the caller's per-run budget. Only jobs/ (written by the server) is
+// listed, at most MaxListEntries entries; each listed job costs one Lstat
+// in results/, so the helper cannot make this call unbounded by flooding
+// results/. No file is opened.
 func (s Spool) FinishedJobs() ([]string, error) {
-	results, err := s.list(s.ResultsDir())
-	if err != nil {
-		return nil, err
-	}
 	jobs, err := s.list(s.JobsDir())
 	if err != nil {
 		return nil, err
 	}
-	queued := make(map[string]struct{}, len(jobs))
-	for _, id := range jobs {
-		queued[id] = struct{}{}
-	}
 	var ids []string
-	for _, id := range results {
-		if _, ok := queued[id]; ok {
+	for _, id := range jobs {
+		if _, err := os.Lstat(filepath.Join(s.ResultsDir(), id+".json")); err == nil {
 			ids = append(ids, id)
 		}
 	}
 	return ids, nil
 }
 
+// list returns, sorted, the job IDs among the first MaxListEntries
+// entries of dir. Entries beyond the cap are left for a later call
+// (after earlier files are handled or pruned).
 func (s Spool) list(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
+	d, err := os.Open(dir)
 	if err != nil {
 		return nil, fmt.Errorf("list spool %s: %w", dir, err)
 	}
+	defer func() { _ = d.Close() }()
 	var ids []string
-	for _, e := range entries {
-		if id := fileID(e.Name()); id != "" {
-			ids = append(ids, id)
+	for seen := 0; seen < MaxListEntries; {
+		n := min(listBatch, MaxListEntries-seen)
+		entries, err := d.ReadDir(n)
+		seen += len(entries)
+		for _, e := range entries {
+			if id := fileID(e.Name()); id != "" {
+				ids = append(ids, id)
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list spool %s: %w", dir, err)
 		}
 	}
+	sort.Strings(ids)
 	return ids, nil
 }
 

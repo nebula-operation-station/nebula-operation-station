@@ -5,6 +5,7 @@ package pvecollect
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -181,5 +182,35 @@ func TestGuestNetImportStopsOnSymlinkedEntry(t *testing.T) {
 	}
 	if len(sink.got) != 0 {
 		t.Fatalf("imported despite tampered directory: %+v", sink.got)
+	}
+}
+
+func TestGuestNetImportDropsRecordsTheSinkCallsStaleOrInvalid(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		err  error
+		want GuestNetImportReport
+	}{
+		{"stale", fmt.Errorf("store: %w", ErrGuestNetStale), GuestNetImportReport{Files: 1, Replayed: 1}},
+		{"invalid", fmt.Errorf("store: %w", ErrGuestNetInvalid), GuestNetImportReport{Files: 1, Rejected: 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, im, sink := newGuestNetImportFixture(t)
+			if _, err := w.WriteGuestNet(ctx, validGuestNetRecord()); err != nil {
+				t.Fatal(err)
+			}
+			sink.fail = tc.err
+			rep, err := im.ImportOnce(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rep != tc.want {
+				t.Fatalf("report = %+v, want %+v", rep, tc.want)
+			}
+			if names, _ := w.ListGuestNet(ctx); len(names) != 0 {
+				t.Fatalf("record not dropped: %v", names)
+			}
+		})
 	}
 }

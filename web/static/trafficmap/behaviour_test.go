@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 	"unicode"
@@ -41,7 +42,10 @@ var tapCountRE = regexp.MustCompile(`(?m)^# (tests|pass|fail) (\d+)$`)
 // TestJavaScriptBehaviour runs the renderer's behavioural tests
 // (*.test.mjs: validator, layout, scene, bridge, backend fallback and the
 // frame loop) under node --test, so a wrong implementation fails the build
-// and not only a changed source string.
+// and not only a changed source string. Each file runs in its own node
+// process and must declare at least one test: node counts a file that
+// declares no tests as one passing test (the file itself), so a summary
+// over all files would stay green when a test file is emptied.
 func TestJavaScriptBehaviour(t *testing.T) {
 	node := nodeBinary(t)
 	files, err := filepath.Glob("*.test.mjs")
@@ -54,27 +58,76 @@ func TestJavaScriptBehaviour(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), nodeTimeout)
 	defer cancel()
-	args := append([]string{"--test", "--test-reporter=tap"}, files...)
-	cmd := exec.CommandContext(ctx, node, args...)
-	cmd.Env = []string{"PATH=/usr/bin:/bin", "NODE_OPTIONS=", "NO_COLOR=1"}
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("node --test failed: %v\n%s", err, out.String())
+	for _, f := range files {
+		t.Run(f, func(t *testing.T) {
+			// The file is passed as an absolute path so that node names the
+			// file entry (emitted for a file that declares no tests) the same
+			// way on every supported node version.
+			abs, err := filepath.Abs(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.CommandContext(ctx, node, "--test", "--test-reporter=tap", abs)
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "NODE_OPTIONS=", "NO_COLOR=1"}
+			var out bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &out, &out
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("node --test %s failed: %v\n%s", f, err, out.String())
+			}
+			counts := tapCounts(t, out.String())
+			tests := counts["tests"]
+			if jsFileEntry(out.String(), f) {
+				// Node lists a file that declares no tests as one passing
+				// test named after the file; that is not a declared test.
+				tests--
+			}
+			if tests < 1 {
+				t.Fatalf("%s declares no tests\n%s", f, out.String())
+			}
+			if counts["pass"] != tests || counts["fail"] != 0 {
+				t.Fatalf("node --test %s summary tests=%d pass=%d fail=%d; want all passing\n%s",
+					f, tests, counts["pass"], counts["fail"], out.String())
+			}
+		})
 	}
+}
+
+// tapCounts parses the "# tests / # pass / # fail" summary lines of
+// `node --test --test-reporter=tap`.
+func tapCounts(t *testing.T, tap string) map[string]int {
+	t.Helper()
 	counts := map[string]int{}
-	for _, m := range tapCountRE.FindAllStringSubmatch(out.String(), -1) {
+	for _, m := range tapCountRE.FindAllStringSubmatch(tap, -1) {
 		n, err := strconv.Atoi(m[2])
 		if err != nil {
 			t.Fatal(err)
 		}
 		counts[m[1]] = n
 	}
-	if counts["tests"] == 0 || counts["pass"] != counts["tests"] || counts["fail"] != 0 {
-		t.Fatalf("node --test summary tests=%d pass=%d fail=%d; want all passing and at least one\n%s",
-			counts["tests"], counts["pass"], counts["fail"], out.String())
+	return counts
+}
+
+// jsFileEntry reports whether the TAP output contains the entry node emits
+// for a file that declares no tests: an ok line named after the file's
+// absolute path.
+func jsFileEntry(tap, file string) bool {
+	abs, err := filepath.Abs(file)
+	if err != nil {
+		return false
 	}
-	t.Logf("node --test: %d JavaScript tests passed in %d files", counts["pass"], len(files))
+	for _, line := range strings.Split(tap, "\n") {
+		if !strings.HasPrefix(line, "ok ") {
+			continue
+		}
+		name := strings.TrimSpace(strings.TrimPrefix(line, "ok "))
+		if i := strings.Index(name, " - "); i >= 0 {
+			name = name[i+len(" - "):]
+		}
+		if name == abs {
+			return true
+		}
+	}
+	return false
 }
 
 // TestRendererSourcesAreASCII rejects non-ASCII characters in the renderer

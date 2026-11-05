@@ -8,9 +8,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { startTrafficMap, STATUS, MAX_FRAME_FAILURES } from "./main.js";
+import { startTrafficMap, STATUS, MAX_FRAME_FAILURES, REBUILD_BACKOFF_BASE_MS, REBUILD_BACKOFF_MAX_MS, rebuildBackoffMs } from "./main.js";
 import { OUT } from "./bridge.js";
 import { segmentVisible } from "./canvas2d.js";
+import { buildScene } from "./scene.js";
 
 const ORIGIN = "https://nos.example";
 
@@ -76,10 +77,13 @@ function fakeGL(state, fail) {
     getProgramParameter: (p, k) => (k === "ACTIVE_UNIFORMS" ? 0 : true),
     getUniformLocation: () => null,
     drawArraysInstanced() {
+      state.instancedDraws++;
       if (fail.gl) throw new Error("fake GL failure");
     },
     bufferData() {
-      if (fail.upload) throw new Error("fake upload failure");
+      state.bufferDataCalls++;
+      const up = fail.upload;
+      if (up && (typeof up !== "function" || up(state.bufferDataCalls))) throw new Error("fake upload failure");
     },
     createShader() {
       if (fail.compile) throw new Error("fake compile failure");
@@ -130,7 +134,7 @@ class FakeCanvas extends FakeElement {
     super(doc, "canvas");
     this.env = env;
     this.kind = null;
-    this.glState = { lost: false, released: false };
+    this.glState = { lost: false, released: false, bufferDataCalls: 0, instancedDraws: 0 };
   }
   getContext(type) {
     if (this.kind !== null && this.kind !== type) return null;
@@ -141,7 +145,7 @@ class FakeCanvas extends FakeElement {
     }
     if (type === "2d") {
       this.kind = type;
-      return fake2d(this.env.fail);
+      return (this.ctx2d ??= fake2d(this.env.fail));
     }
     return null;
   }
@@ -162,9 +166,24 @@ class FakeBitmap {
   }
 }
 
+// flakyBuild wraps buildScene: it throws while broken() is true for the
+// call number, and counts every call.
+function flakyBuild(broken) {
+  const b = {
+    calls: 0,
+    build(...args) {
+      b.calls++;
+      if (broken(b.calls)) throw new Error("fake buildScene failure");
+      return buildScene(...args);
+    },
+  };
+  return b;
+}
+
 // setup starts the map against a fake window. prepare may arm failures
-// before startTrafficMap runs.
-function setup({ webgl = true, prepare = () => {} } = {}) {
+// before startTrafficMap runs; build replaces buildScene and reducedMotion
+// makes prefers-reduced-motion match.
+function setup({ webgl = true, prepare = () => {}, build = undefined, reducedMotion = false } = {}) {
   const env = { webgl, fail: {}, canvases: [] };
   prepare(env);
   const sent = [];
@@ -175,6 +194,7 @@ function setup({ webgl = true, prepare = () => {} } = {}) {
   win.devicePixelRatio = 1;
   win.ImageBitmap = FakeBitmap;
   win.requestAnimationFrame = (fn) => frames.push(fn);
+  win.matchMedia = () => ({ matches: reducedMotion });
   const doc = {
     defaultView: win,
     createElement(tag) {
@@ -187,7 +207,7 @@ function setup({ webgl = true, prepare = () => {} } = {}) {
     },
   };
   const root = new FakeElement(doc, "div");
-  const map = startTrafficMap(root);
+  const map = startTrafficMap(root, build ? { buildScene: build } : {});
   let now = 0;
   const post = (data) => win.dispatch("message", { source: win.parent, origin: ORIGIN, data });
   return {
@@ -204,11 +224,24 @@ function setup({ webgl = true, prepare = () => {} } = {}) {
         frames.pop()(now);
       }
     },
+    // advance runs animation frames until at least ms have passed and
+    // calls each(status) after every frame.
+    advance(ms, each = () => {}) {
+      const until = now + ms;
+      while (now < until) {
+        this.tick(1);
+        each(this.status());
+      }
+    },
     status: () => root.children.find((c) => c.tagName === "p").textContent,
     backendMessages: () => sent.filter((m) => m.data.type === OUT.backend).map((m) => m.data),
     errorMessages: () => sent.filter((m) => m.data.type === OUT.error),
     webglCanvas: () => env.canvases.find((c) => c.kind === "webgl2"),
-    sendModel: () => post(modelMessage()),
+    // The overlay canvas is the first canvas startTrafficMap creates.
+    overlay: () => env.canvases[0],
+    sendModel: (edit = (m) => m) => post(edit(modelMessage())),
+    key: (key) => root.dispatch("keydown", { key }),
+    sendFocus: (id) => post({ type: "nos.trafficmap.focus", id }),
     sendIcons: (icons) => post({ type: "nos.trafficmap.icons", icons }),
   };
 }
@@ -296,7 +329,7 @@ test("RepeatedSetSceneFailuresKeepLoopAliveAndSwitchToCanvas2D", () => {
   h.tick(1);
   assert.equal(h.status(), STATUS.frameError, "a failing frame is shown");
   assert.equal(h.errorMessages().length, 1, "the parent is told once");
-  h.tick(MAX_FRAME_FAILURES);
+  h.advance(backoffUntilDegrade() + 32);
   assert.equal(h.errorMessages().length, 1, "no message per failed frame");
   assert.equal(h.backendMessages().at(-1).backend, "canvas2d");
   h.tick(2);
@@ -316,6 +349,300 @@ test("FailingCanvas2DFramesDoNotFreezeAndRecover", () => {
   h.env.fail.d2 = false;
   h.tick(1);
   assert.equal(h.status(), STATUS.fallback);
+  h.map.stop();
+});
+
+// backoffUntilDegrade is the time the backoffs of the failed rebuilds
+// before the degrade take.
+function backoffUntilDegrade() {
+  let ms = 0;
+  for (let i = 1; i < MAX_FRAME_FAILURES; i++) ms += rebuildBackoffMs(i);
+  return ms;
+}
+
+test("RebuildBackoffIsExponentialWithACap", () => {
+  assert.equal(rebuildBackoffMs(1), REBUILD_BACKOFF_BASE_MS);
+  assert.equal(rebuildBackoffMs(2), REBUILD_BACKOFF_BASE_MS * 2);
+  assert.equal(rebuildBackoffMs(3), REBUILD_BACKOFF_BASE_MS * 4);
+  assert.equal(rebuildBackoffMs(4), REBUILD_BACKOFF_BASE_MS * 8);
+  assert.equal(rebuildBackoffMs(5), REBUILD_BACKOFF_BASE_MS * 16);
+  assert.equal(rebuildBackoffMs(6), REBUILD_BACKOFF_BASE_MS * 32);
+  assert.equal(rebuildBackoffMs(7), REBUILD_BACKOFF_MAX_MS, "the delay is capped");
+  assert.equal(rebuildBackoffMs(100), REBUILD_BACKOFF_MAX_MS, "the delay stays capped");
+});
+
+test("FailingRebuildsAreBackedOffInsteadOfRetriedEveryFrame", () => {
+  const h = setup();
+  h.env.fail.upload = true;
+  h.sendModel();
+  h.tick(1);
+  const gl = h.webglCanvas();
+  assert.equal(gl.glState.bufferDataCalls, 1, "the first frame uploads the scene");
+  h.tick(6);
+  assert.equal(gl.glState.bufferDataCalls, 1, "the backoff suppresses scene rebuilds while failures persist");
+  assert.equal(h.backendMessages().length, 1, "backed-off frames are not failures");
+  h.advance(REBUILD_BACKOFF_BASE_MS);
+  assert.equal(gl.glState.bufferDataCalls, 2, "the rebuild is retried once the backoff has passed");
+  h.advance(backoffUntilDegrade());
+  assert.equal(h.backendMessages().at(-1).backend, "canvas2d", "the degrade still switches backends");
+  assert.equal(h.errorMessages().length, 1);
+  h.map.stop();
+});
+
+test("FailedFirstRebuildIsRetriedAfterTheBackoff", () => {
+  const b = flakyBuild((n) => n === 1);
+  const h = setup({ webgl: false, build: b.build });
+  h.sendModel();
+  h.tick(1);
+  assert.equal(b.calls, 1);
+  assert.equal(h.status(), STATUS.frameError);
+  h.advance(REBUILD_BACKOFF_BASE_MS / 2);
+  assert.equal(b.calls, 1, "the rebuild is backed off");
+  h.advance(REBUILD_BACKOFF_BASE_MS);
+  assert.equal(b.calls, 2, "the rebuild is retried after the backoff");
+  assert.equal(h.status(), STATUS.fallback, "the map draws again");
+  assert.equal(h.errorMessages().length, 1);
+  h.map.stop();
+});
+
+// overlayCounts wraps the overlay's 2D context and records the text it
+// draws. blank is true while the overlay was wiped (clearRect) and nothing
+// was drawn on it since, so a test can tell an empty overlay from one that
+// shows labels.
+function overlayCounts(h) {
+  const octx = h.overlay().ctx2d;
+  const counts = { fillText: 0, texts: [], blank: true };
+  octx.fillText = (text) => {
+    counts.fillText++;
+    counts.texts.push(text);
+    counts.blank = false;
+  };
+  octx.clearRect = () => {
+    counts.blank = true;
+  };
+  counts.reset = () => {
+    counts.fillText = 0;
+    counts.texts = [];
+  };
+  return counts;
+}
+
+test("HalfUploadedWebGL2SceneDrawsNothing", () => {
+  const h = setup();
+  h.sendModel();
+  h.tick(1);
+  const gl = h.webglCanvas();
+  assert.equal(gl.glState.bufferDataCalls, 4, "the first scene is fully uploaded");
+  // Positive control: a complete frame of this model draws the scene and
+  // labels over it.
+  const counts = overlayCounts(h);
+  const before = gl.glState.instancedDraws;
+  h.tick(1);
+  assert.ok(gl.glState.instancedDraws > before, "a complete scene is drawn");
+  assert.ok(counts.fillText > 0, "a complete frame draws labels");
+  // From the next setScene on, the second upload fails: the buffers hold
+  // a mix of the new and the old scene.
+  h.env.fail.upload = (n) => n > 4 && n % 4 === 2;
+  h.sendModel();
+  h.tick(1);
+  assert.equal(gl.glState.bufferDataCalls, 6, "the upload fails halfway through the scene");
+  assert.equal(h.status(), STATUS.frameError);
+  counts.reset();
+  const drawsBefore = gl.glState.instancedDraws;
+  h.tick(1);
+  assert.equal(gl.glState.instancedDraws, drawsBefore, "none of the mixed buffers is drawn");
+  assert.equal(counts.fillText, 0, "no labels are drawn over the empty base");
+  assert.ok(counts.blank, "the overlay is left empty");
+  h.map.stop();
+});
+
+test("OverlayIsClearedOverAnEmptyFallbackBase", () => {
+  const b = flakyBuild((n) => n >= 2);
+  const h = setup({ build: b.build });
+  h.sendModel();
+  h.tick(1);
+  assert.equal(h.status(), STATUS.webgl, "the first scene draws");
+  const counts = overlayCounts(h);
+  h.tick(1);
+  assert.ok(counts.fillText > 0, "positive control: a complete frame draws labels");
+  h.sendModel();
+  h.tick(1);
+  let reset = false;
+  h.advance(1000, () => {
+    // Reset once, right after the frame that installs the fallback, so
+    // only the frames drawn on the new (empty) base are counted.
+    if (!reset && h.backendMessages().at(-1).backend === "canvas2d") {
+      reset = true;
+      counts.reset();
+    }
+  });
+  assert.equal(h.backendMessages().at(-1).backend, "canvas2d", "the degrade installs the fallback");
+  assert.equal(counts.fillText, 0, "no stale labels are drawn after the fallback install");
+  assert.ok(counts.blank, "the overlay over the empty base is empty");
+  h.map.stop();
+});
+
+// closeUp zooms the camera in until the scene is at the close level, where
+// the overlay paints each node's OS symbol into its star.
+function closeUp(h) {
+  for (let i = 0; i < 12; i++) h.key("+");
+  h.sendFocus("pve1");
+  h.tick(1);
+}
+
+test("StaleSceneIsDrawnWithItsOwnModel", () => {
+  let broken = false;
+  const b = flakyBuild(() => broken);
+  const h = setup({ webgl: false, build: b.build });
+  h.sendModel();
+  h.tick(1);
+  closeUp(h);
+  const counts = overlayCounts(h);
+  h.tick(1);
+  // Positive control: the os of pve1 ("proxmox") is painted as "P".
+  assert.ok(counts.texts.includes("P"), "the close-up paints the OS symbol of the scene's model");
+  // The next model changes the os of pve1, and its rebuild fails: the old
+  // scene keeps rendering and must keep its own model's symbols.
+  broken = true;
+  h.sendModel((m) => {
+    m.nodes.find((n) => n.id === "pve1").os = "zos";
+    return m;
+  });
+  h.tick(1);
+  counts.reset();
+  h.tick(1);
+  assert.ok(counts.texts.includes("P"), "the old scene still shows its own model's symbol");
+  assert.ok(!counts.texts.includes("Z"), "the new model's node is not painted onto the old scene");
+  h.map.stop();
+});
+
+test("FailedRebuildOnCanvas2DKeepsTheOverlay", () => {
+  let broken = false;
+  const b = flakyBuild(() => broken);
+  const h = setup({ webgl: false, build: b.build });
+  h.sendModel();
+  h.tick(1);
+  const counts = overlayCounts(h);
+  h.tick(1);
+  assert.ok(counts.fillText > 0 && !counts.blank, "positive control: the overlay shows labels");
+  // The old scene stays complete on Canvas 2D, so its overlay stays too:
+  // neither the failing frame nor the backed-off frames after it blank it.
+  broken = true;
+  h.sendModel();
+  h.tick(1);
+  assert.equal(h.status(), STATUS.frameError);
+  assert.ok(!counts.blank, "the failing frame does not wipe the overlay");
+  counts.reset();
+  h.tick(1);
+  assert.ok(counts.fillText > 0 && !counts.blank, "the backed-off frame draws the overlay again");
+  h.map.stop();
+});
+
+test("FastModelUpdatesCannotPostponeTheDegrade", () => {
+  const b = flakyBuild(() => true);
+  const h = setup({ webgl: false, build: b.build });
+  const bmp = new FakeBitmap();
+  h.sendIcons({ docker: bmp });
+  // Models arrive faster than the failure streak can reset: every rebuild
+  // fails, yet the degrade must still be reached. MAX_FRAME_FAILURES is 3
+  // in main.js; two extra models must not postpone the degrade.
+  for (let i = 0; i < MAX_FRAME_FAILURES + 2; i++) {
+    h.sendModel();
+    h.tick(1);
+  }
+  assert.ok(bmp.closed, "the degrade is reached despite the new models");
+  // The status after the last model message is the backend status (a model
+  // message reports the backend it will draw with); the failure streak is
+  // tracked separately and is what the error count below pins down.
+  assert.equal(h.status(), STATUS.fallback);
+  // The streak was never reset by the model messages, so the parent is told
+  // about the failure exactly once; a reset on every model would report it
+  // once per model.
+  assert.equal(h.errorMessages().length, 1, "the parent is told once per failure streak");
+  h.map.stop();
+});
+
+test("SuccessfulRebuildEndsTheFailureStreak", () => {
+  let broken = (n) => n <= 2;
+  const b = flakyBuild((n) => broken(n));
+  const h = setup({ webgl: false, build: b.build });
+  h.sendModel();
+  h.tick(1);
+  h.advance(rebuildBackoffMs(1) + rebuildBackoffMs(2) + 16);
+  assert.equal(b.calls, 3, "two backed-off retries");
+  assert.equal(h.status(), STATUS.fallback, "a successful rebuild restores the status");
+  assert.equal(h.errorMessages().length, 1);
+  // A later failure starts a new streak: the parent is told again and the
+  // backoff starts over at its base delay.
+  const before = b.calls;
+  broken = (n) => n === before + 1;
+  h.sendFocus("pve1");
+  h.tick(1);
+  assert.equal(b.calls, before + 1);
+  assert.equal(h.status(), STATUS.frameError);
+  assert.equal(h.errorMessages().length, 2, "a new failure streak is reported");
+  h.advance(REBUILD_BACKOFF_BASE_MS + 16);
+  assert.equal(b.calls, before + 2, "the backoff was reset by the success");
+  assert.equal(h.status(), STATUS.fallback);
+  h.map.stop();
+});
+
+test("RebuildFailingWithAnOldSceneBacksOffAndDegrades", () => {
+  let broken = false;
+  const b = flakyBuild(() => broken);
+  const h = setup({ webgl: false, build: b.build });
+  h.sendModel();
+  const bmp = new FakeBitmap();
+  h.sendIcons({ docker: bmp });
+  h.tick(2);
+  assert.equal(h.status(), STATUS.fallback);
+  broken = true;
+  const before = b.calls;
+  h.sendModel();
+  h.tick(1);
+  assert.equal(b.calls, before + 1);
+  const seen = new Set();
+  h.advance(1000, (s) => seen.add(s));
+  assert.deepEqual([...seen], [STATUS.frameError], "drawing the old scene does not end the failure streak");
+  const attempts = b.calls - before;
+  assert.ok(attempts >= MAX_FRAME_FAILURES && attempts <= 5, "rebuilds are retried with a growing backoff, got " + attempts);
+  assert.ok(bmp.closed, "the degrade is reached");
+  h.advance(10 * REBUILD_BACKOFF_MAX_MS);
+  assert.ok(b.calls - before <= attempts + 11, "the backoff is capped, not reset: " + (b.calls - before));
+  assert.equal(h.errorMessages().length, 1, "the parent is told once per failure streak");
+  h.map.stop();
+});
+
+test("NewModelClearsTheRebuildBackoff", () => {
+  let broken = true;
+  const b = flakyBuild(() => broken);
+  const h = setup({ webgl: false, build: b.build });
+  h.sendModel();
+  h.tick(1);
+  h.advance(3000);
+  assert.ok(b.calls >= 3, "the rebuild was retried");
+  broken = false;
+  const before = b.calls;
+  h.sendModel();
+  h.tick(1);
+  assert.equal(b.calls, before + 1, "a new model is built at once");
+  assert.equal(h.status(), STATUS.fallback);
+  h.map.stop();
+});
+
+test("BackedOffFramesUnderReducedMotionAreNotFailures", () => {
+  const h = setup({ reducedMotion: true });
+  h.env.fail.upload = true;
+  h.sendModel();
+  h.tick(1);
+  h.env.fail.upload = false;
+  assert.equal(h.status(), STATUS.frameError);
+  h.advance(REBUILD_BACKOFF_BASE_MS / 2);
+  assert.equal(h.backendMessages().length, 1, "frames that attempt nothing do not degrade the renderer");
+  h.advance(REBUILD_BACKOFF_BASE_MS);
+  assert.equal(h.backendMessages().length, 1);
+  assert.equal(h.status(), STATUS.webgl, "the retried rebuild recovers on WebGL2");
+  assert.equal(h.errorMessages().length, 1);
   h.map.stop();
 });
 

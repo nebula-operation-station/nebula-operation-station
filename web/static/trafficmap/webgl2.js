@@ -337,6 +337,11 @@ export function createWebGL2Backend(canvas, onLost) {
 
 function buildBackend(canvas, gl, onLost) {
   let lost = false;
+  // sceneComplete is true once a setScene upload finished. A render before
+  // that (or after a failed upload, when the buffers hold a mix of two
+  // scenes) draws none of the buffers: it only clears to the background
+  // and reports false.
+  let sceneComplete = false;
   const handleLost = (ev) => {
     ev.preventDefault();
     if (lost) return;
@@ -417,6 +422,7 @@ function buildBackend(canvas, gl, onLost) {
     name: bloom ? "webgl2" : "webgl2 (no bloom)",
     setScene(scene) {
       if (lost) return;
+      sceneComplete = false;
       const s = new Float32Array(scene.stars.length * stars.floats);
       scene.stars.forEach((st, i) => {
         s.set([st.x, st.y, st.r, st.rgb[0], st.rgb[1], st.rgb[2], st.brightness], i * stars.floats);
@@ -441,14 +447,22 @@ function buildBackend(canvas, gl, onLost) {
         n.set([nb.x, nb.y, nb.r, nb.rgb[0], nb.rgb[1], nb.rgb[2], nb.seed], i * nebulae.floats);
       });
       upload(gl, nebulae, n, scene.nebulae.length);
+      sceneComplete = true;
     },
     isLost() {
       return lost || gl.isContextLost();
     },
     render(cam, dpr, time) {
-      if (lost || gl.isContextLost()) return;
+      if (lost || gl.isContextLost()) return false;
       const w = gl.drawingBufferWidth;
       const h = gl.drawingBufferHeight;
+      if (!sceneComplete) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.viewport(0, 0, w, h);
+        gl.clearColor(BACKGROUND[0], BACKGROUND[1], BACKGROUND[2], 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        return false;
+      }
       const t = ensureTargets(w, h);
       gl.bindFramebuffer(gl.FRAMEBUFFER, t ? t.scene.fb : null);
       gl.viewport(0, 0, w, h);
@@ -483,6 +497,7 @@ function buildBackend(canvas, gl, onLost) {
         fullscreen(progs.composite, null, w, h);
       }
       gl.bindVertexArray(null);
+      return sceneComplete;
     },
     dispose() {
       canvas.removeEventListener("webglcontextlost", handleLost);

@@ -14,6 +14,8 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 )
 
 // Config-set limits, named next to the code that enforces them.
@@ -41,8 +43,6 @@ const (
 )
 
 var (
-	// bridgeRe allowlists Linux bridge / SDN vnet names (IFNAMSIZ-1).
-	bridgeRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,14}$`)
 	// ciUserRe allowlists a Linux user name for cloud-init.
 	ciUserRe = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 )
@@ -255,7 +255,7 @@ func (n NetConfig) encode() (string, error) {
 	if model != NICVirtio && model != NICE1000 {
 		return "", invalid(op, "net0 model")
 	}
-	if !bridgeRe.MatchString(n.Bridge) {
+	if !pvecontract.ValidBridgeName(n.Bridge) {
 		return "", invalid(op, "net0 bridge")
 	}
 	if n.Tag < 0 || n.Tag > MaxVLANTag {
