@@ -87,6 +87,13 @@ type Socket struct {
 	Dev string
 	// DualStack is true when Local was printed as the "*" wildcard.
 	DualStack bool
+	// DualStackUnknown is true when the dual-stack state of Local cannot
+	// be determined: the host prints the legacy iproute2 wildcard form
+	// ":::port" for every IPv6 wildcard regardless of V6ONLY (see
+	// parseSocketAddr), so a ":::port" socket and a "*" socket on it are
+	// ambiguous. When set, DualStack holds the raw printed form and must
+	// not be relied on (Listener.Serves does not claim IPv4 for it).
+	DualStackUnknown bool
 	// Listening is true for a server-side socket: a TCP socket in state
 	// LISTEN, or an unconnected UDP socket (state UNCONN, no peer). An
 	// unconnected UDP client socket cannot be told apart and is
@@ -195,7 +202,31 @@ func ParseSocketTable(raw []byte) (SocketTable, error) {
 			break
 		}
 	}
+	// A legacy ":::port" wildcard means the host runs old iproute2, whose
+	// dual-stack state cannot be determined: mark the table Incomplete
+	// and flag the "*" wildcards as unknown instead of guessing them
+	// dual-stack.
+	if p.hasLegacyWildcard() {
+		p.t.Incomplete = true
+		for i := range p.t.Entries {
+			if p.t.Entries[i].DualStack {
+				p.t.Entries[i].DualStackUnknown = true
+			}
+		}
+	}
 	return p.t, nil
+}
+
+// hasLegacyWildcard reports whether any socket was printed in the legacy
+// ":::port" form, i.e. the host runs old iproute2 whose dual-stack state
+// cannot be determined.
+func (p *socketParser) hasLegacyWildcard() bool {
+	for i := range p.t.Entries {
+		if p.t.Entries[i].DualStackUnknown {
+			return true
+		}
+	}
+	return false
 }
 
 // socketParser holds the state of one ParseSocketTable run.
@@ -362,18 +393,18 @@ func parseSocketLine(line string) (s Socket, lossy, ok bool) {
 	if !isQueueLen(cols[2]) || !isQueueLen(cols[3]) {
 		return Socket{}, false, false
 	}
-	local, dev, dual, ok := parseSocketAddr(cols[4])
+	local, dev, dual, legacy, ok := parseSocketAddr(cols[4])
 	if !ok {
 		return Socket{}, false, false
 	}
-	peer, _, _, ok := parseSocketAddr(cols[5])
+	peer, _, _, _, ok := parseSocketAddr(cols[5])
 	if !ok {
 		return Socket{}, false, false
 	}
 	if a := peer.Addr(); dev != "" && a.Zone() == "" && isZoned(a) {
 		peer = netip.AddrPortFrom(a.WithZone(dev), peer.Port())
 	}
-	s.Local, s.Peer, s.Dev, s.DualStack = local, peer, dev, dual
+	s.Local, s.Peer, s.Dev, s.DualStack, s.DualStackUnknown = local, peer, dev, dual, legacy
 	switch s.Proto {
 	case ProtoTCP:
 		s.Listening = s.State == "LISTEN"
@@ -488,74 +519,87 @@ func parseSocketPort(s string) (uint16, bool) {
 //	[::1]:22  [fe80::1]%eth0:22  *:22  *:*      (iproute2 >= 4.x)
 //	[fe80::1%eth0]:22  fe80::1%eth0:22  :::22   (zone inside, older forms)
 //
+// Supported iproute2: 5.x (Debian 12, 5.15) and 6.x (Ubuntu 24.04)
+// print the bracketed "[::]:port" form and the "*" wildcard, so the
+// dual-stack state is determined. Older iproute2 (<= 4.x) prints
+// ":::port" for every IPv6 wildcard regardless of V6ONLY and "*" for
+// IPv4 INADDR_ANY, so the dual-stack state cannot be determined; the
+// legacy ":::port" form is still accepted but flagged (legacy true) so
+// the caller marks the table Incomplete instead of guessing.
+//
 // dev is the interface name after "%" (or the zone of the address); dual
-// is true for the "*" wildcard, returned as [::]. IPv4-mapped addresses
-// are unmapped; a link-local IPv6 address carries dev as its zone.
-func parseSocketAddr(s string) (ap netip.AddrPort, dev string, dual, ok bool) {
+// is true for the "*" wildcard, returned as [::]; legacy is true for the
+// unbracketed ":::port" form. IPv4-mapped addresses are unmapped; a
+// link-local IPv6 address carries dev as its zone.
+func parseSocketAddr(s string) (ap netip.AddrPort, dev string, dual, legacy, ok bool) {
 	if s == "" || len(s) > maxSockAddrLen {
-		return netip.AddrPort{}, "", false, false
+		return netip.AddrPort{}, "", false, false, false
 	}
 	i := strings.LastIndexByte(s, ':')
 	if i <= 0 {
-		return netip.AddrPort{}, "", false, false
+		return netip.AddrPort{}, "", false, false, false
 	}
 	host := s[:i]
 	port, ok := parseSocketPort(s[i+1:])
 	if !ok {
-		return netip.AddrPort{}, "", false, false
+		return netip.AddrPort{}, "", false, false, false
 	}
 	addrText := host
 	bracketed := strings.HasPrefix(host, "[")
 	if bracketed {
 		j := strings.IndexByte(host, ']')
 		if j < 0 {
-			return netip.AddrPort{}, "", false, false
+			return netip.AddrPort{}, "", false, false, false
 		}
 		addrText = host[1:j]
 		if after := host[j+1:]; after != "" {
 			d, found := strings.CutPrefix(after, "%")
 			if !found || !validIfName(d) {
-				return netip.AddrPort{}, "", false, false
+				return netip.AddrPort{}, "", false, false, false
 			}
 			dev = d
 		}
 		if strings.ContainsAny(addrText, "[]") {
-			return netip.AddrPort{}, "", false, false
+			return netip.AddrPort{}, "", false, false, false
 		}
 	} else {
 		if strings.ContainsAny(host, "[]") {
-			return netip.AddrPort{}, "", false, false
+			return netip.AddrPort{}, "", false, false, false
 		}
 		if k := strings.IndexByte(host, '%'); k >= 0 {
 			addrText, dev = host[:k], host[k+1:]
 			if !validIfName(dev) {
-				return netip.AddrPort{}, "", false, false
+				return netip.AddrPort{}, "", false, false, false
 			}
 		}
 	}
 	var a netip.Addr
 	if addrText == "*" {
 		if bracketed {
-			return netip.AddrPort{}, "", false, false
+			return netip.AddrPort{}, "", false, false, false
 		}
 		a, dual = netip.IPv6Unspecified(), true
 	} else {
 		a, ok = parseHostAddr(addrText)
 		if !ok || (bracketed && !a.Is6()) {
-			return netip.AddrPort{}, "", false, false
+			return netip.AddrPort{}, "", false, false, false
 		}
 		if z := a.Zone(); z != "" {
 			if dev != "" && dev != z {
-				return netip.AddrPort{}, "", false, false
+				return netip.AddrPort{}, "", false, false, false
 			}
 			dev = z
 		}
+		// The unbracketed unspecified-IPv6 form is the legacy
+		// iproute2 wildcard (":::port"); its dual-stack state is
+		// undetermined.
+		legacy = !bracketed && a.Is6() && a.IsUnspecified()
 	}
 	a = a.WithZone("").Unmap()
 	if dev != "" && isZoned(a) {
 		a = a.WithZone(dev)
 	}
-	return netip.AddrPortFrom(a, port), dev, dual, true
+	return netip.AddrPortFrom(a, port), dev, dual, legacy, true
 }
 
 // Listener is one listening socket address as returned by Listeners.
@@ -570,6 +614,10 @@ type Listener struct {
 	// listener without DualStack (printed by `ss` as "[::]") is IPv6
 	// only.
 	DualStack bool
+	// DualStackUnknown is true when the dual-stack state is undetermined
+	// (Socket.DualStackUnknown): the host prints the legacy ":::port"
+	// wildcard form, so Serves does not claim IPv4 for a "*" listener.
+	DualStackUnknown bool
 }
 
 // Serves reports whether a connection with local address:port local
@@ -595,7 +643,7 @@ func (l Listener) Serves(local netip.AddrPort) bool {
 	case a.Is6():
 		return true
 	default:
-		return a.Is4() && l.DualStack
+		return a.Is4() && l.DualStack && !l.DualStackUnknown
 	}
 }
 
@@ -632,7 +680,7 @@ func Listeners(socks []Socket) map[Proto][]Listener {
 		if !s.Listening {
 			continue
 		}
-		l := Listener{Local: s.Local, Dev: s.Dev, DualStack: s.DualStack}
+		l := Listener{Local: s.Local, Dev: s.Dev, DualStack: s.DualStack, DualStackUnknown: s.DualStackUnknown}
 		if seen[s.Proto] == nil {
 			seen[s.Proto] = map[Listener]bool{}
 		}

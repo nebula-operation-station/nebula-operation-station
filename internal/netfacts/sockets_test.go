@@ -157,6 +157,46 @@ func TestParseSocketsEntryLimitTruncatesAndMarks(t *testing.T) {
 	}
 }
 
+func TestParseSocketsExactlyMaxEntriesIsComplete(t *testing.T) {
+	// Exactly maxEntries sockets, with the info line on the last entry,
+	// must produce a complete table: the limit is "> maxEntries", so the
+	// maxEntries-th entry is kept and its info line counted.
+	var b strings.Builder
+	for i := 0; i < maxEntries; i++ {
+		fmt.Fprintf(&b, "tcp ESTAB 0 0 10.0.0.%d:1000 10.0.1.1:80\n", i%250)
+		b.WriteString("	 bytes_acked:100 bytes_received:200\n")
+	}
+	res, err := ParseSocketTable([]byte(b.String()))
+	if err != nil {
+		t.Fatalf("ParseSocketTable: %v", err)
+	}
+	if len(res.Entries) != maxEntries {
+		t.Fatalf("got %d entries, want %d", len(res.Entries), maxEntries)
+	}
+	if res.Incomplete {
+		t.Fatalf("table Incomplete with exactly maxEntries sockets (info line on the last)")
+	}
+	if res.Dropped != 0 {
+		t.Fatalf("got %d dropped, want 0", res.Dropped)
+	}
+	last := res.Entries[maxEntries-1]
+	if last.BytesAcked != 100 || last.BytesReceived != 200 {
+		t.Fatalf("last entry BytesAcked=%d BytesReceived=%d, want 100/200 (info line on the last entry)", last.BytesAcked, last.BytesReceived)
+	}
+	// One more socket over the limit must make the table incomplete.
+	b.WriteString("tcp ESTAB 0 0 10.0.0.99:1000 10.0.1.1:80\n")
+	res2, err := ParseSocketTable([]byte(b.String()))
+	if err != nil {
+		t.Fatalf("ParseSocketTable: %v", err)
+	}
+	if len(res2.Entries) != maxEntries {
+		t.Fatalf("got %d entries, want %d", len(res2.Entries), maxEntries)
+	}
+	if !res2.Incomplete {
+		t.Fatalf("table complete with maxEntries+1 sockets")
+	}
+}
+
 func TestParseSocketsOverlongLineIsDropped(t *testing.T) {
 	long := "tcp ESTAB 0 0 10.0.0.1:22 10.0.0.2:5000 " + strings.Repeat("x", maxSocketLineLen) + "\n"
 	info := "tcp ESTAB 0 0 10.0.0.1:22 10.0.0.3:5000\n\t cubic bytes_acked:5 " + strings.Repeat("y", maxSocketLineLen) + "\n"
@@ -297,37 +337,38 @@ func TestParseSocketsSplitLineAtCommLimit(t *testing.T) {
 
 func TestParseSocketAddr(t *testing.T) {
 	cases := []struct {
-		in   string
-		want string
-		dev  string
-		dual bool
+		in     string
+		want   string
+		dev    string
+		dual   bool
+		legacy bool
 	}{
-		{"0.0.0.0:22", "0.0.0.0:22", "", false},
-		{"0.0.0.0:*", "0.0.0.0:0", "", false},
-		{"*:22", "[::]:22", "", true},
-		{"*:*", "[::]:0", "", true},
-		{"*%eth0:22", "[::]:22", "eth0", true},
-		{"[::]:22", "[::]:22", "", false},
-		{"[::1]:22", "[::1]:22", "", false},
-		{":::22", "[::]:22", "", false},
-		{"::1:22", "[::1]:22", "", false},
-		{"[fe80::1%eth0]:123", "[fe80::1%eth0]:123", "eth0", false},
-		{"[fe80::1]%eth0:123", "[fe80::1%eth0]:123", "eth0", false},
-		{"fe80::1%eth0:123", "[fe80::1%eth0]:123", "eth0", false},
-		{"[ff02::1]%eth0:5353", "[ff02::1%eth0]:5353", "eth0", false},
-		{"[::]%vmbr0:22", "[::]:22", "vmbr0", false},
-		{"[2001:db8::1]%eth0:22", "[2001:db8::1]:22", "eth0", false},
-		{"127.0.0.53%lo:53", "127.0.0.53:53", "lo", false},
-		{"[::ffff:10.0.0.1]:80", "10.0.0.1:80", "", false},
-		{"10.0.0.1:65535", "10.0.0.1:65535", "", false},
+		{"0.0.0.0:22", "0.0.0.0:22", "", false, false},
+		{"0.0.0.0:*", "0.0.0.0:0", "", false, false},
+		{"*:22", "[::]:22", "", true, false},
+		{"*:*", "[::]:0", "", true, false},
+		{"*%eth0:22", "[::]:22", "eth0", true, false},
+		{"[::]:22", "[::]:22", "", false, false},
+		{"[::1]:22", "[::1]:22", "", false, false},
+		{":::22", "[::]:22", "", false, true},
+		{"::1:22", "[::1]:22", "", false, false},
+		{"[fe80::1%eth0]:123", "[fe80::1%eth0]:123", "eth0", false, false},
+		{"[fe80::1]%eth0:123", "[fe80::1%eth0]:123", "eth0", false, false},
+		{"fe80::1%eth0:123", "[fe80::1%eth0]:123", "eth0", false, false},
+		{"[ff02::1]%eth0:5353", "[ff02::1%eth0]:5353", "eth0", false, false},
+		{"[::]%vmbr0:22", "[::]:22", "vmbr0", false, false},
+		{"[2001:db8::1]%eth0:22", "[2001:db8::1]:22", "eth0", false, false},
+		{"127.0.0.53%lo:53", "127.0.0.53:53", "lo", false, false},
+		{"[::ffff:10.0.0.1]:80", "10.0.0.1:80", "", false, false},
+		{"10.0.0.1:65535", "10.0.0.1:65535", "", false, false},
 	}
 	for _, c := range cases {
-		got, dev, dual, ok := parseSocketAddr(c.in)
+		got, dev, dual, legacy, ok := parseSocketAddr(c.in)
 		if !ok {
 			t.Fatalf("%q rejected", c.in)
 		}
-		if got != ap(c.want) || dev != c.dev || dual != c.dual {
-			t.Fatalf("%q: got %v dev=%q dual=%v, want %v %q %v", c.in, got, dev, dual, c.want, c.dev, c.dual)
+		if got != ap(c.want) || dev != c.dev || dual != c.dual || legacy != c.legacy {
+			t.Fatalf("%q: got %v dev=%q dual=%v legacy=%v, want %v %q %v %v", c.in, got, dev, dual, legacy, c.want, c.dev, c.dual, c.legacy)
 		}
 	}
 }
@@ -343,9 +384,78 @@ func TestParseSocketAddrRejects(t *testing.T) {
 		"[::1]]:22", "[[::1]:22", "10.0.0.1%eth0%eth1:22",
 		strings.Repeat("1", 200) + ":22",
 	} {
-		if got, dev, _, ok := parseSocketAddr(in); ok {
+		if got, dev, _, _, ok := parseSocketAddr(in); ok {
 			t.Fatalf("%q accepted as %v dev=%q", in, got, dev)
 		}
+	}
+}
+
+func TestParseSocketsLegacyWildcardMarksIncomplete(t *testing.T) {
+	// A host running old iproute2 prints ":::22" for an IPv6 wildcard
+	// regardless of V6ONLY. The parser must not guess the dual-stack
+	// state: the table is Incomplete, the ":::22" socket is flagged
+	// unknown, and a "*" socket on the same port is flagged unknown too
+	// (Serves does not claim IPv4 for it).
+	const raw = "tcp LISTEN 0 0 :::22 *:*\n" +
+		"tcp LISTEN 0 0 *:22 *:*\n"
+	tbl, err := ParseSocketTable([]byte(raw))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !tbl.Incomplete {
+		t.Fatalf("table not Incomplete with a legacy :::22 wildcard")
+	}
+	if !tbl.Entries[0].DualStackUnknown {
+		t.Fatalf(":::22 socket not flagged DualStackUnknown")
+	}
+	if !tbl.Entries[1].DualStackUnknown {
+		t.Fatalf("*:22 socket not flagged DualStackUnknown")
+	}
+	for _, l := range Listeners(tbl.Entries)[ProtoTCP] {
+		if l.DualStack && l.DualStackUnknown && l.Serves(ap("10.0.0.1:22")) {
+			t.Fatalf("flagged * listener claims IPv4")
+		}
+	}
+
+	// A V6ONLY [::]:22 stays distinguishable from the legacy :::22.
+	const raw2 = "tcp LISTEN 0 0 [::]:22 *:*\n" +
+		"tcp LISTEN 0 0 :::22 *:*\n"
+	tbl2, err := ParseSocketTable([]byte(raw2))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !tbl2.Incomplete {
+		t.Fatalf("table2 not Incomplete")
+	}
+	if tbl2.Entries[0].DualStackUnknown {
+		t.Fatalf("V6ONLY [::]:22 wrongly flagged DualStackUnknown")
+	}
+	if !tbl2.Entries[1].DualStackUnknown {
+		t.Fatalf(":::22 socket not flagged")
+	}
+
+	// A modern host (bracketed form, no legacy wildcard) is complete and
+	// the * listener still claims IPv4.
+	const raw3 = "tcp LISTEN 0 0 [::]:22 *:*\n" +
+		"tcp LISTEN 0 0 *:22 *:*\n"
+	tbl3, err := ParseSocketTable([]byte(raw3))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if tbl3.Incomplete {
+		t.Fatalf("modern host table wrongly Incomplete")
+	}
+	var found bool
+	for _, l := range Listeners(tbl3.Entries)[ProtoTCP] {
+		if l.DualStack && !l.DualStackUnknown && !l.Serves(ap("10.0.0.1:22")) {
+			t.Fatalf("modern * listener does not claim IPv4")
+		}
+		if l.DualStack {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no dual-stack * listener found")
 	}
 }
 
@@ -412,6 +522,28 @@ func TestListeners(t *testing.T) {
 		if g := c.l.Serves(ap(c.local)); g != c.want {
 			t.Fatalf("%+v.Serves(%s) = %v, want %v", c.l, c.local, g, c.want)
 		}
+	}
+}
+
+func TestListenerOrderV6OnlyBeforeDualStack(t *testing.T) {
+	// On the same port, a V6ONLY "[::]:P" listener and a dual-stack
+	// "*:P" listener must be ordered with the V6ONLY one first
+	// (compareListeners tiebreak: V6ONLY before DualStack).
+	const raw = "tcp LISTEN 0 0 *:22 *:*\n" +
+		"tcp LISTEN 0 0 [::]:22 *:*\n"
+	tbl, err := ParseSocketTable([]byte(raw))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	ls := Listeners(tbl.Entries)[ProtoTCP]
+	if len(ls) != 2 {
+		t.Fatalf("got %d listeners, want 2", len(ls))
+	}
+	if ls[0].Local != ap("[::]:22") || ls[0].DualStack {
+		t.Fatalf("first listener %v dual=%v, want V6ONLY [::]:22", ls[0].Local, ls[0].DualStack)
+	}
+	if ls[1].Local != ap("[::]:22") || !ls[1].DualStack {
+		t.Fatalf("second listener %v dual=%v, want dual-stack *:22", ls[1].Local, ls[1].DualStack)
 	}
 }
 
