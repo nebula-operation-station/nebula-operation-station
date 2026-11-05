@@ -374,6 +374,12 @@ func TestNICCanonicalModelsAndTag(t *testing.T) {
 			t.Errorf("hostile bridge %q accepted", bridge)
 		}
 	}
+	// A quoted bridge value keeps its embedded options: parseKVList strips
+	// the quotes, so "vmbr0,firewall=1" reaches the validator as one value
+	// and the comma is rejected.
+	if _, err := parseNIC("net0", `virtio=AA:BB:CC:DD:EE:01,bridge="vmbr0,firewall=1"`); err == nil {
+		t.Error(`quoted bridge "vmbr0,firewall=1" accepted`)
+	}
 	for _, bridge := range []string{"vmbr0.100", "br-lan", "vnet_1", strings.Repeat("a", 15)} {
 		nic, err := parseNIC("net0", "virtio=AA:BB:CC:DD:EE:01,bridge="+bridge)
 		if err != nil || nic.Bridge != bridge {
@@ -399,6 +405,9 @@ func TestConfigToleratesPerNICErrors(t *testing.T) {
 		`{"cores":2,"memory":512,"net0":"virtio=AA:BB:CC:DD:EE:01,bridge=br/0","net5":"virtio=AA:BB:CC:DD:EE:05,bridge=vmbr0.100"}`,
 		`{"cores":2,"memory":512,"net0":"virtio=AA:BB:CC:DD:EE:01,bridge=vmbr\u001b0","net5":"virtio=AA:BB:CC:DD:EE:05,bridge=vmbr0.100"}`,
 		fmt.Sprintf(`{"cores":2,"memory":512,"net0":"virtio=AA:BB:CC:DD:EE:01,bridge=%s","net5":"virtio=AA:BB:CC:DD:EE:05,bridge=vmbr0.100"}`, strings.Repeat("a", 16)),
+		// Quoted bridge value with embedded options: quotes are stripped,
+		// the comma fails the bridge validator, net0 is dropped.
+		`{"cores":2,"memory":512,"net0":"virtio=AA:BB:CC:DD:EE:01,bridge=\"vmbr0,firewall=1\"","net5":"virtio=AA:BB:CC:DD:EE:05,bridge=vmbr0.100"}`,
 	} {
 		cfg, err := parseGuestConfig(json.RawMessage(body), "pve1", 100, KindQemu)
 		if err != nil {

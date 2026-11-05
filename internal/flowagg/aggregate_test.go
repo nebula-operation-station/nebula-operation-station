@@ -1115,6 +1115,37 @@ func TestSeqRunsBounded(t *testing.T) {
 	}
 }
 
+// TestSeqRunsNewestOnTie pins the fallback merge rule: when no preferred
+// pair exists (every gap is more than maxGap and no run starts after the
+// horizon), the two normal runs with the shortest gap merge, the newest
+// such pair on a tie. Flipping to oldest-on-tie must fail this test.
+func TestSeqRunsNewestOnTie(t *testing.T) {
+	horizon := t0
+	var runs []timeRun
+	add := func(from time.Time) {
+		t.Helper()
+		runs = addRun(runs, from, from.Add(time.Minute), horizon, DefaultMaxInterval)
+	}
+	// Five normal runs, each 2h-1m apart (more than DefaultMaxInterval),
+	// so no pair is preferred and every gap is equal (a tie).
+	for _, h := range []int{-10, -8, -6, -4, -2} {
+		add(t0.Add(time.Duration(h) * time.Hour))
+	}
+	if len(runs) != maxSeqRuns {
+		t.Fatalf("runs = %d, want %d", len(runs), maxSeqRuns)
+	}
+	// The newest pair (t0-4h, t0-2h) merged: the last run spans it.
+	last := runs[maxSeqRuns-1]
+	if !last.from.Equal(t0.Add(-4*time.Hour)) || !last.to.Equal(t0.Add(-2*time.Hour).Add(time.Minute)) {
+		t.Fatalf("last run %v..%v, want the newest pair merged (t0-4h..t0-2h+1m)", last.from, last.to)
+	}
+	// The oldest run is unchanged (not merged): oldest-on-tie would merge it.
+	first := runs[0]
+	if !first.from.Equal(t0.Add(-10*time.Hour)) || !first.to.Equal(t0.Add(-10*time.Hour).Add(time.Minute)) {
+		t.Fatalf("first run %v..%v, want unchanged (t0-10h..t0-10h+1m); oldest-on-tie merged it", first.from, first.to)
+	}
+}
+
 // TestContiguousExcursionReportRefusesOnlyItsSpan sends, while the clock
 // runs ahead by less than MaxInterval, a report that continues the host's
 // sequence. After the clock returns, reports overlapping that report's own

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/iconfetch"
@@ -28,6 +29,16 @@ import (
 
 // MaxImportPerRun bounds how many results one ImportResults call handles.
 const MaxImportPerRun = 64
+
+// Bounds for a job whose result (or job file) the server may not read
+// (iconjob.ErrUnreadable): ImportResults keeps it for a permission fix
+// until it has failed unreadableAttempts times AND unreadableGrace has
+// passed since the first failure, then fails the job like an invalid
+// result. Both are counted in memory; a restart starts them again.
+const (
+	unreadableAttempts = 3
+	unreadableGrace    = 5 * time.Minute
+)
 
 // Errors callers branch on.
 var (
@@ -62,6 +73,16 @@ type Service struct {
 	allow   []string
 	now     func() time.Time
 	log     *slog.Logger
+
+	// mu guards unreadable: per job ID, the first time and the number of
+	// times ImportResults could not read its files.
+	mu         sync.Mutex
+	unreadable map[string]*unreadableState
+}
+
+type unreadableState struct {
+	first    time.Time
+	attempts int
 }
 
 // New returns a Service.
@@ -70,7 +91,8 @@ func New(cfg Config) (*Service, error) {
 		return nil, errors.New("icons: icon store and catalog are required")
 	}
 	s := &Service{spool: cfg.Spool, store: cfg.Store, catalog: cfg.Catalog,
-		allow: append([]string(nil), cfg.Allow...), now: cfg.Now, log: cfg.Log}
+		allow: append([]string(nil), cfg.Allow...), now: cfg.Now, log: cfg.Log,
+		unreadable: map[string]*unreadableState{}}
 	if len(s.allow) == 0 {
 		s.allow = iconfetch.DefaultAllowlist()
 	}
@@ -165,8 +187,13 @@ func permanent(err error) bool {
 // job's catalog key. Failed and invalid results are audited. A job is
 // removed from the spool once handled; a transient error (database, disk)
 // leaves it for the next call and is returned. A result that can never be
-// read (symbolic link, no read permission) is iconjob.ErrInvalid and fails
-// its job, so it cannot block later results.
+// read (symbolic link) is iconjob.ErrInvalid and fails its job at once. A
+// result without read permission (iconjob.ErrUnreadable) may be fixed, so
+// it is kept, but bounded: it is moved behind every other result before
+// MaxImportPerRun is applied, so it cannot crowd out later results, and
+// it fails its job once it has failed unreadableAttempts times over at
+// least unreadableGrace. All open retries of one call share one
+// iconjob.RetryBudget, so unreadable files cannot stall a call.
 //
 // The server never writes results/ (only the helper prunes it, after a
 // day); removing the job file is what marks a result as handled.
@@ -178,19 +205,27 @@ func (s *Service) ImportResults(ctx context.Context) (ImportReport, error) {
 	if err != nil {
 		return rep, err
 	}
+	ids = s.unreadableLast(ids)
 	if len(ids) > MaxImportPerRun {
 		ids = ids[:MaxImportPerRun]
 	}
+	rb := iconjob.NewRetryBudget(ctx, iconjob.MaxRetryPauses)
 	var errs []error
 	for _, id := range ids {
 		if err := ctx.Err(); err != nil {
 			return rep, err
 		}
-		j, err := s.spool.ReadJob(id)
+		j, err := s.spool.ReadJobWith(rb, id)
 		if errors.Is(err, os.ErrNotExist) {
+			s.forgetUnreadable(id)
 			continue // removed since the listing (imported or cancelled); the helper prunes the result
 		}
+		if err != nil && errors.Is(err, iconjob.ErrUnreadable) && !s.giveUpUnreadable(id) {
+			errs = append(errs, err)
+			continue
+		}
 		if err != nil {
+			s.forgetUnreadable(id)
 			// A job file the server cannot read back is not trusted for
 			// key, URL or actor; drop it.
 			s.audit(ctx, "icon_fetch_failed", "nebula-server", "job", id, "error", err.Error())
@@ -200,11 +235,19 @@ func (s *Service) ImportResults(ctx context.Context) (ImportReport, error) {
 			}
 			continue
 		}
-		sha, err := s.importOne(ctx, j)
+		sha, err := s.importOne(ctx, rb, j)
+		if err != nil && errors.Is(err, iconjob.ErrUnreadable) {
+			if !s.giveUpUnreadable(id) {
+				errs = append(errs, fmt.Errorf("import icon job %s: %w", id, err))
+				continue
+			}
+			err = fmt.Errorf("%w: unreadable helper result after %d attempts: %w", ErrRejected, unreadableAttempts, err)
+		}
 		if err != nil && !permanent(err) {
 			errs = append(errs, fmt.Errorf("import icon job %s: %w", id, err))
 			continue
 		}
+		s.forgetUnreadable(id)
 		if err != nil {
 			s.audit(ctx, "icon_fetch_failed", j.RequestedBy, "job", id, "key", j.Key, "url", j.URL, "error", err.Error())
 			rep.Failed[id] = err.Error()
@@ -219,9 +262,56 @@ func (s *Service) ImportResults(ctx context.Context) (ImportReport, error) {
 	return rep, errors.Join(errs...)
 }
 
+// unreadableLast returns ids with the jobs that had unreadable files
+// moved behind all others (order kept otherwise), and forgets the state
+// of jobs no longer listed.
+func (s *Service) unreadableLast(ids []string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	listed := make(map[string]bool, len(ids))
+	out := make([]string, 0, len(ids))
+	var later []string
+	for _, id := range ids {
+		listed[id] = true
+		if s.unreadable[id] != nil {
+			later = append(later, id)
+		} else {
+			out = append(out, id)
+		}
+	}
+	for id := range s.unreadable {
+		if !listed[id] {
+			delete(s.unreadable, id)
+		}
+	}
+	return append(out, later...)
+}
+
+// giveUpUnreadable counts one unreadable attempt for job id and reports
+// whether the job is now to be failed (see unreadableAttempts).
+func (s *Service) giveUpUnreadable(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	st := s.unreadable[id]
+	if st == nil {
+		st = &unreadableState{first: now}
+		s.unreadable[id] = st
+	}
+	st.attempts++
+	return st.attempts >= unreadableAttempts && now.Sub(st.first) >= unreadableGrace
+}
+
+// forgetUnreadable drops the unreadable state of a handled job.
+func (s *Service) forgetUnreadable(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.unreadable, id)
+}
+
 // importOne imports the result of job j.
-func (s *Service) importOne(ctx context.Context, j iconjob.Job) (string, error) {
-	res, err := s.spool.ReadResult(j.ID)
+func (s *Service) importOne(ctx context.Context, rb *iconjob.RetryBudget, j iconjob.Job) (string, error) {
+	res, err := s.spool.ReadResultWith(rb, j.ID)
 	if err != nil {
 		if errors.Is(err, iconjob.ErrInvalid) {
 			return "", fmt.Errorf("invalid helper result: %w", err)
