@@ -419,11 +419,17 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// Connections tab of the host and asset pages (ADR 0009 TM20).
+	connPages, err := newConnectionsPages(db, store, ipamStore, log)
+	if err != nil {
+		return err
+	}
 	pages := http.NewServeMux()
 	pages.Handle("/", h.Handler())
 	lc.handler.Register(pages)
 	batchPages.Register(pages)
 	softwarePages.Register(pages)
+	connPages.Register(pages)
 
 	var apiHandler http.Handler
 	if cfg.API.Enabled {

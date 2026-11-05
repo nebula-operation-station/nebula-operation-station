@@ -11,8 +11,15 @@
 // server's own records), direction, protocol and server port, process
 // when known, bytes in and out, first and last seen, the source tier
 // and who reported it. Snapshot volumes are lower bounds and are marked
-// so (D3). The window is 1 h, 24 h, 7 d or 21 d (?window=); the table
-// sorts by any column (?sort=, ?order=) on the server.
+// so (D3). The window is 1 h, 24 h, 7 d or 21 d (?window=), but never
+// longer than the traffic store's retention: longer windows are not
+// offered and a request for one is refused (400), as the traffic map
+// does (flowagg.QueryWindows). The table sorts by any column (?sort=,
+// ?order=) on the server.
+//
+// The handler fails closed: it needs an Authorize check (the session
+// check of the surrounding chain is passed in) and refuses every
+// request it does not approve, also when mounted outside that chain.
 //
 // Flow data comes from managed hosts and is untrusted (spec 09): a host
 // can lie about its connections, so every row names its reporters and
@@ -135,9 +142,20 @@ type Chrome struct {
 
 // Options configure a Handler.
 type Options struct {
-	// Flows returns the flows. Required; SQLFlows(db) reads the server
-	// database.
+	// Flows returns the flows. Required; SQLFlows(db, retention) reads
+	// the server database.
 	Flows FlowSource
+	// Retention is the traffic store's retention (ADR 0009 D3: admins
+	// may shorten it); windows longer than it are neither offered nor
+	// accepted. Zero means flowagg.Retention. When Flows reports its own
+	// retention (flowagg.RetentionReporter), the shorter applies.
+	Retention time.Duration
+	// Authorize decides whether the request may read the page. It is
+	// required: the handler has no authentication of its own, so the
+	// caller passes the session check of its chain and the handler
+	// refuses (403) every request Authorize does not approve. It runs
+	// after the path ID is validated, so it may read r.PathValue("id").
+	Authorize func(r *http.Request) bool
 	// Directory resolves hosts, assets and peers. Required.
 	Directory Directory
 	// Now returns the current time; nil uses time.Now.
@@ -150,12 +168,14 @@ type Options struct {
 
 // Handler serves the connections pages.
 type Handler struct {
-	flows  FlowSource
-	dir    Directory
-	now    func() time.Time
-	chrome func(r *http.Request) Chrome
-	log    *slog.Logger
-	page   *template.Template
+	flows     FlowSource
+	dir       Directory
+	retention time.Duration
+	authorize func(r *http.Request) bool
+	now       func() time.Time
+	chrome    func(r *http.Request) Chrome
+	log       *slog.Logger
+	page      *template.Template
 }
 
 // New parses the template and returns a Handler.
@@ -163,7 +183,14 @@ func New(o Options) (*Handler, error) {
 	if o.Flows == nil || o.Directory == nil {
 		return nil, errors.New("connections: flows and directory are required")
 	}
-	h := &Handler{flows: o.Flows, dir: o.Directory, now: o.Now, chrome: o.Chrome, log: o.Log}
+	if o.Authorize == nil {
+		return nil, errors.New("connections: an authorization check is required")
+	}
+	ret, err := flowagg.EffectiveRetention(o.Retention, o.Flows)
+	if err != nil {
+		return nil, fmt.Errorf("connections: %w", err)
+	}
+	h := &Handler{flows: o.Flows, dir: o.Directory, retention: ret, authorize: o.Authorize, now: o.Now, chrome: o.Chrome, log: o.Log}
 	if h.now == nil {
 		h.now = time.Now
 	}
@@ -185,7 +212,8 @@ func New(o Options) (*Handler, error) {
 }
 
 // Handler returns the routes. Authentication and the Origin check are
-// the job of the surrounding chain (internal/web/auth, middleware).
+// the job of the surrounding chain (internal/web/auth, middleware); the
+// handler only asks Options.Authorize and fails closed.
 func (h *Handler) Handler() http.Handler {
 	mux := http.NewServeMux()
 	h.Register(mux)
@@ -217,14 +245,25 @@ type window struct {
 	Dur       time.Duration
 }
 
-var windows = []window{
-	{"1h", "1 h", time.Hour},
-	{"24h", "24 h", 24 * time.Hour},
-	{"7d", "7 d", 7 * 24 * time.Hour},
-	{"21d", "21 d", 21 * 24 * time.Hour},
+// windowLabels are the display labels of the flowagg query windows.
+var windowLabels = map[string]string{"1h": "1 h", "24h": "24 h", "7d": "7 d", "21d": "21 d"}
+
+func toWindow(w flowagg.QueryWindow) window {
+	label, ok := windowLabels[w.Name]
+	if !ok {
+		label = w.Name
+	}
+	return window{ID: w.Name, Label: label, Dur: w.Dur}
 }
 
-const defaultWindow = 1 // 24 h
+// windowsFor returns the windows offered under retention, shortest first.
+func windowsFor(retention time.Duration) []window {
+	var out []window
+	for _, w := range flowagg.QueryWindows(retention) {
+		out = append(out, toWindow(w))
+	}
+	return out
+}
 
 // sortKey names a sortable column.
 type sortKey string
@@ -273,18 +312,20 @@ func one(v url.Values, key string) (string, error) {
 	return vals[0], nil
 }
 
-func parseQuery(v url.Values) (query, error) {
-	q := query{window: windows[defaultWindow], sort: sortBytes, desc: true}
+// parseQuery validates the query; a window longer than retention is
+// invalid like an unknown one.
+func parseQuery(v url.Values, retention time.Duration) (query, error) {
+	q := query{window: toWindow(flowagg.DefaultQueryWindowFor(retention)), sort: sortBytes, desc: true}
 	ws, err := one(v, "window")
 	if err != nil {
 		return q, err
 	}
 	if ws != "" {
-		i := slices.IndexFunc(windows, func(w window) bool { return w.ID == ws })
-		if i < 0 {
+		w, ok := flowagg.LookupQueryWindow(ws, retention)
+		if !ok {
 			return q, fmt.Errorf("%w: window", errBadQuery)
 		}
-		q.window = windows[i]
+		q.window = toWindow(w)
 	}
 	ss, err := one(v, "sort")
 	if err != nil {
@@ -332,7 +373,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, kind subjectKind
 		http.NotFound(w, r)
 		return
 	}
-	q, err := parseQuery(r.URL.Query())
+	if !h.authorize(r) {
+		http.Error(w, "Forbidden.", http.StatusForbidden)
+		return
+	}
+	q, err := parseQuery(r.URL.Query(), h.retention)
 	if err != nil {
 		http.Error(w, "Invalid query.", http.StatusBadRequest)
 		return
@@ -353,7 +398,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, kind subjectKind
 		h.fail(w, r, "load subject", err)
 		return
 	}
-	in := viewInput{subject: subj, kind: kind, id: id, window: q.window, sort: q.sort, desc: q.desc}
+	in := viewInput{subject: subj, kind: kind, id: id, window: q.window, windows: windowsFor(h.retention), sort: q.sort, desc: q.desc}
 	nodes := subjectAddrs(subj.Addrs)
 	if len(nodes) > MaxSubjectAddrs {
 		nodes, in.addrsCut = nodes[:MaxSubjectAddrs], true
@@ -501,6 +546,7 @@ type viewInput struct {
 	recs      []Record
 	peers     map[netip.Addr]Peer
 	window    window
+	windows   []window // offered, shortest first
 	sort      sortKey
 	desc      bool
 	truncated bool
@@ -544,7 +590,7 @@ func buildView(in viewInput) *view {
 		}
 		return v.SelfHref + "?window=" + w.ID + "&sort=" + string(s) + "&order=" + order
 	}
-	for _, w := range windows {
+	for _, w := range in.windows {
 		v.Windows = append(v.Windows, windowLink{Label: w.Label, Href: href(w, in.sort, in.desc), Active: w.ID == in.window.ID})
 	}
 	for _, c := range columns {

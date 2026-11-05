@@ -20,6 +20,12 @@ import (
 
 var testNow = time.Date(2026, 11, 5, 12, 30, 0, 0, time.UTC)
 
+// windows are the windows offered under the full retention.
+var windows = windowsFor(flowagg.Retention)
+
+// allow is an Authorize that approves every request.
+func allow(*http.Request) bool { return true }
+
 var (
 	hostAddr  = netip.MustParseAddr("10.0.0.10")
 	hostAddr6 = netip.MustParseAddr("fd00::10")
@@ -107,7 +113,7 @@ func rec(a, b, server netip.Addr, port uint16, tier string, ab, ba uint64) Recor
 
 func newTestHandler(t *testing.T, f *fakeFlows) *Handler {
 	t.Helper()
-	h, err := New(Options{Flows: f, Directory: &fakeDir{}, Now: func() time.Time { return testNow }})
+	h, err := New(Options{Flows: f, Directory: &fakeDir{}, Authorize: allow, Now: func() time.Time { return testNow }})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -125,8 +131,111 @@ func TestNewRequiresSources(t *testing.T) {
 	if _, err := New(Options{Directory: &fakeDir{}}); err == nil {
 		t.Fatal("New without Flows: want error")
 	}
-	if _, err := New(Options{Flows: &fakeFlows{}}); err == nil {
+	if _, err := New(Options{Flows: &fakeFlows{}, Authorize: allow}); err == nil {
 		t.Fatal("New without Directory: want error")
+	}
+	if _, err := New(Options{Flows: &fakeFlows{}, Directory: &fakeDir{}}); err == nil {
+		t.Fatal("New without Authorize: want error")
+	}
+	for _, r := range []time.Duration{-time.Hour, 30 * time.Minute, flowagg.Retention + time.Hour} {
+		if _, err := New(Options{Flows: &fakeFlows{}, Directory: &fakeDir{}, Authorize: allow, Retention: r}); err == nil {
+			t.Errorf("retention %s accepted", r)
+		}
+	}
+}
+
+// TestUnauthorizedRequestIsRefused checks that the handler fails closed:
+// a request Authorize does not approve gets 403 and reads nothing.
+func TestUnauthorizedRequestIsRefused(t *testing.T) {
+	f := &fakeFlows{recs: []Record{rec(hostAddr, dnsAddr, dnsAddr, 53, flowagg.TierSocket, 1, 1)}}
+	var seen []string
+	h, err := New(Options{Flows: f, Directory: &fakeDir{}, Now: func() time.Time { return testNow },
+		Authorize: func(r *http.Request) bool { seen = append(seen, r.PathValue("id")); return false }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{"/hosts/web1/connections", "/network/a/a1/connections", "/hosts/web1/connections?window=1h"} {
+		rr := get(t, h, target)
+		if rr.Code != http.StatusForbidden || strings.Contains(rr.Body.String(), "web1.lab") {
+			t.Errorf("%s: status %d body %q, want 403 without data", target, rr.Code, rr.Body)
+		}
+	}
+	if f.calls != 0 {
+		t.Errorf("flow source queried %d times for refused requests", f.calls)
+	}
+	if strings.Join(seen, ",") != "web1,a1,web1" {
+		t.Errorf("Authorize saw path IDs %v", seen)
+	}
+}
+
+// retentionFlows is a FlowSource that reports a shortened retention,
+// like SQLFlows over a store an admin configured lower.
+type retentionFlows struct {
+	*fakeFlows
+	retention time.Duration
+}
+
+func (r retentionFlows) Retention() time.Duration { return r.retention }
+
+// TestWindowsRespectTheRetention checks that windows longer than the
+// store's retention are neither offered nor accepted (ADR 0009 D3), from
+// the configured retention and from the source's own.
+func TestWindowsRespectTheRetention(t *testing.T) {
+	cases := []struct {
+		name     string
+		opts     func(f *fakeFlows) Options
+		offered  []string
+		refused  []string
+		fallback time.Duration // default window
+	}{
+		{"configured 7d", func(f *fakeFlows) Options {
+			return Options{Flows: f, Retention: 7 * 24 * time.Hour}
+		}, []string{"1h", "24h", "7d"}, []string{"21d"}, 24 * time.Hour},
+		{"source 12h", func(f *fakeFlows) Options {
+			return Options{Flows: retentionFlows{f, 12 * time.Hour}}
+		}, []string{"1h"}, []string{"24h", "7d", "21d"}, time.Hour},
+		{"configured 21d, source 3d", func(f *fakeFlows) Options {
+			return Options{Flows: retentionFlows{f, 3 * 24 * time.Hour}, Retention: flowagg.Retention}
+		}, []string{"1h", "24h"}, []string{"7d", "21d"}, 24 * time.Hour},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeFlows{}
+			o := c.opts(f)
+			o.Directory, o.Authorize, o.Now = &fakeDir{}, allow, func() time.Time { return testNow }
+			h, err := New(o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rr := get(t, h, "/hosts/web1/connections")
+			if rr.Code != http.StatusOK {
+				t.Fatalf("default: status %d", rr.Code)
+			}
+			if got := f.window.To.Sub(f.window.From); got != c.fallback {
+				t.Errorf("default window %s, want %s", got, c.fallback)
+			}
+			body := rr.Body.String()
+			for _, id := range c.offered {
+				if !strings.Contains(body, "window="+id+"&") {
+					t.Errorf("window %s not offered", id)
+				}
+				if rr := get(t, h, "/hosts/web1/connections?window="+id); rr.Code != http.StatusOK {
+					t.Errorf("window %s: status %d, want 200", id, rr.Code)
+				}
+			}
+			calls := f.calls
+			for _, id := range c.refused {
+				if strings.Contains(body, "window="+id+"&") {
+					t.Errorf("window %s offered beyond the retention", id)
+				}
+				if rr := get(t, h, "/hosts/web1/connections?window="+id); rr.Code != http.StatusBadRequest {
+					t.Errorf("window %s: status %d, want 400", id, rr.Code)
+				}
+			}
+			if f.calls != calls {
+				t.Errorf("refused windows reached the flow source")
+			}
+		})
 	}
 }
 
@@ -200,7 +309,7 @@ func TestUnknownSubjectIsNotFound(t *testing.T) {
 }
 
 func TestDirectoryErrorIsInternalAndGeneric(t *testing.T) {
-	h, err := New(Options{Flows: &fakeFlows{}, Directory: &fakeDir{hostErr: errors.New("db path /secret")}, Now: func() time.Time { return testNow }})
+	h, err := New(Options{Flows: &fakeFlows{}, Directory: &fakeDir{hostErr: errors.New("db path /secret")}, Authorize: allow, Now: func() time.Time { return testNow }})
 	if err != nil {
 		t.Fatal(err)
 	}

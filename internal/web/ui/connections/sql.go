@@ -73,15 +73,30 @@ ORDER BY f.ab + f.ba DESC, f.ab_key, f.proto, f.server_port, f.server_side, f.ti
 LIMIT ?4`
 
 // SQLFlows returns a FlowSource that reads the server database's
-// flow_buckets table (internal/trafficstore). Process names are not
-// stored there, so Record.Process stays empty.
-func SQLFlows(db *sql.DB) FlowSource { return sqlFlows{db: db} }
+// flow_buckets table (internal/trafficstore), kept for retention (the
+// store's Retention(); zero or more than flowagg.Retention means
+// flowagg.Retention). The source reports that retention
+// (flowagg.RetentionReporter), so the Handler offers no longer window.
+// Process names are not stored there, so Record.Process stays empty.
+func SQLFlows(db *sql.DB, retention time.Duration) FlowSource {
+	if retention <= 0 || retention > flowagg.Retention {
+		retention = flowagg.Retention
+	}
+	return sqlFlows{db: db, retention: retention}
+}
 
-type sqlFlows struct{ db *sql.DB }
+type sqlFlows struct {
+	db        *sql.DB
+	retention time.Duration
+}
+
+// Retention implements flowagg.RetentionReporter.
+func (s sqlFlows) Retention() time.Duration { return s.retention }
 
 // Flows implements FlowSource. nodes must be at most MaxSubjectAddrs
 // valid addresses, limit in 1..MaxRows+1, w non-empty and no wider than
-// flowagg.Retention.
+// the retention. LastSeen is the end of the last hour bucket, but never
+// later than w.To: the current hour's bucket is still open.
 func (s sqlFlows) Flows(ctx context.Context, nodes []netip.Addr, w flowagg.Window, limit int) ([]Record, error) {
 	if len(nodes) == 0 || len(nodes) > MaxSubjectAddrs {
 		return nil, fmt.Errorf("connections: %d nodes, want 1..%d", len(nodes), MaxSubjectAddrs)
@@ -89,7 +104,7 @@ func (s sqlFlows) Flows(ctx context.Context, nodes []netip.Addr, w flowagg.Windo
 	if limit < 1 || limit > MaxRows+1 {
 		return nil, fmt.Errorf("connections: limit %d, want 1..%d", limit, MaxRows+1)
 	}
-	if !w.From.Before(w.To) || w.To.Sub(w.From) > flowagg.Retention {
+	if !w.From.Before(w.To) || w.To.Sub(w.From) > s.retention {
 		return nil, errors.New("connections: invalid window")
 	}
 	strs := make([]string, 0, len(nodes))
@@ -131,6 +146,9 @@ func (s sqlFlows) Flows(ctx context.Context, nodes []netip.Addr, w flowagg.Windo
 		r.Confirmed = minSides >= 2
 		r.FirstSeen = time.Unix(first*secondsPerHour, 0).UTC()
 		r.LastSeen = time.Unix((last+1)*secondsPerHour, 0).UTC()
+		if r.LastSeen.After(w.To) {
+			r.LastSeen = w.To.UTC()
+		}
 		r.Reporters = splitReporters(reps)
 		out = append(out, r)
 	}
