@@ -42,6 +42,9 @@ var windowDuration = map[string]time.Duration{
 	Window21d: 21 * 24 * time.Hour,
 }
 
+// windowOrder lists the window names, shortest first.
+var windowOrder = []string{Window1h, Window24h, Window7d, Window21d}
+
 // Top-set sizes (ADR 0009 D3).
 const (
 	// OverviewN is the per-node top set of the overview union.
@@ -146,9 +149,14 @@ type Model struct {
 	// LowerBound is set when any edge may miss bytes (snapshot volumes
 	// are a lower bound, ADR 0009 D3).
 	LowerBound bool `json:"lower_bound"`
-	// Truncated is set when anything was left out; Omitted says what.
+	// Truncated is set when a cap or the input cleaning left anything
+	// out; Omitted says what.
 	Truncated bool    `json:"truncated"`
 	Omitted   Omitted `json:"omitted"`
+	// UnmappedFlows counts selected flows that form no edge because an
+	// end is no inventory node (for example an internet peer) or both
+	// ends are one node. This is not a cap and does not set Truncated.
+	UnmappedFlows int `json:"unmapped_flows"`
 }
 
 // Omitted counts what a model left out.
@@ -164,7 +172,7 @@ type Omitted struct {
 	// Addresses were invalid, over the per-node cap, claimed by more
 	// than one node or over the query cap.
 	Addresses int `json:"addresses"`
-	// Flows had an end that maps to no node of the model.
+	// Flows had an end on a node that a cap left out of the model.
 	Flows int `json:"flows"`
 }
 

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -119,7 +120,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	q, err := parseQuery(r.URL.RawQuery)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "query: "+err.Error()+"; use window=1h|24h|7d|21d and focus=<node id>")
+		writeError(w, http.StatusBadRequest, "query: "+err.Error()+"; use window="+strings.Join(h.builder.Windows(), "|")+" and focus=<node id>")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), callTimeout)
@@ -127,7 +128,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	data, err := h.builder.Build(ctx, q)
 	switch {
 	case errors.Is(err, ErrBadWindow):
-		writeError(w, http.StatusBadRequest, "window must be 1h, 24h, 7d or 21d")
+		writeError(w, http.StatusBadRequest, "window must be one of "+strings.Join(h.builder.Windows(), ", "))
 		return
 	case errors.Is(err, ErrBadFocus):
 		writeError(w, http.StatusBadRequest, "focus is not a valid node id")

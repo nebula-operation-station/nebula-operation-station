@@ -30,11 +30,23 @@ type Limits struct {
 	Nodes         int
 	Edges         int
 	ResponseBytes int
+	// Retention is the traffic store's retention (ADR 0009 D3: admins
+	// may shorten it). Windows longer than it are not offered. Zero means
+	// flowagg.Retention; it must lie in [1h, flowagg.Retention]. When
+	// Flows reports its own retention (as *trafficstore.Store does), the
+	// shorter of the two applies.
+	Retention time.Duration
+}
+
+// retentionReporter is implemented by a Flows that knows its retention.
+type retentionReporter interface {
+	Retention() time.Duration
 }
 
 // Errors of Build. Callers branch on them for the HTTP status.
 var (
-	// ErrBadWindow: the window is not one of 1h, 24h, 7d, 21d.
+	// ErrBadWindow: the window is not one of 1h, 24h, 7d, 21d, or it is
+	// longer than the retention.
 	ErrBadWindow = errors.New("trafficmap: unknown window")
 	// ErrBadFocus: the focus is not a valid node ID.
 	ErrBadFocus = errors.New("trafficmap: invalid focus")
@@ -79,6 +91,15 @@ func NewBuilder(inventory func(ctx context.Context) (Inventory, error), flows Fl
 	if l.ResponseBytes, err = limit("response bytes", l.ResponseBytes, MaxResponseBytes); err != nil {
 		return nil, err
 	}
+	if l.Retention == 0 {
+		l.Retention = flowagg.Retention
+	}
+	if rr, ok := flows.(retentionReporter); ok {
+		l.Retention = min(l.Retention, rr.Retention())
+	}
+	if l.Retention < time.Hour || l.Retention > flowagg.Retention {
+		return nil, fmt.Errorf("trafficmap: retention %s outside %s..%s", l.Retention, time.Hour, flowagg.Retention)
+	}
 	return &Builder{inventory: inventory, flows: flows, now: now, limits: l}, nil
 }
 
@@ -90,6 +111,28 @@ func limit(name string, v, max int) (int, error) {
 		return 0, fmt.Errorf("trafficmap: limit %s %d outside 1..%d", name, v, max)
 	}
 	return v, nil
+}
+
+// Windows returns the window names the builder accepts, shortest first:
+// those no longer than the retention.
+func (b *Builder) Windows() []string {
+	out := make([]string, 0, len(windowOrder))
+	for _, name := range windowOrder {
+		if windowDuration[name] <= b.limits.Retention {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// defaultWindow is DefaultWindow, or the longest window the retention
+// allows when it is shorter.
+func (b *Builder) defaultWindow() string {
+	if windowDuration[DefaultWindow] <= b.limits.Retention {
+		return DefaultWindow
+	}
+	w := b.Windows()
+	return w[len(w)-1]
 }
 
 // nodeRec is a cleaned node with the addresses it owns.
@@ -118,10 +161,10 @@ func priority(a, b *nodeRec) int {
 // in size.
 func (b *Builder) Build(ctx context.Context, q Query) ([]byte, error) {
 	if q.Window == "" {
-		q.Window = DefaultWindow
+		q.Window = b.defaultWindow()
 	}
 	d, ok := windowDuration[q.Window]
-	if !ok {
+	if !ok || d > b.limits.Retention {
 		return nil, ErrBadWindow
 	}
 	if q.Focus != "" && !validID(q.Focus) {
@@ -151,7 +194,7 @@ func (b *Builder) Build(ctx context.Context, q Query) ([]byte, error) {
 		for _, r := range capNodes(nodes, b.limits.Nodes, &m.Omitted) {
 			keep[r.node.ID] = true
 		}
-		flows, err = b.overviewFlows(ctx, nodes, keep, w, &m.Omitted)
+		flows, err = b.overviewFlows(ctx, nodes, owner, keep, w, &m.Omitted)
 	} else {
 		f, ok := nodes[q.Focus]
 		if !ok {
@@ -167,7 +210,8 @@ func (b *Builder) Build(ctx context.Context, q Query) ([]byte, error) {
 	if q.Focus != "" {
 		accept = func(string) bool { return true }
 	}
-	edges, links := aggregate(flows, owner, nodes, zones, accept, q.Focus, &m.Omitted)
+	edges, links, unmapped := aggregate(flows, owner, nodes, zones, accept, q.Focus, &m.Omitted)
+	m.UnmappedFlows = unmapped
 	if len(edges) > b.limits.Edges {
 		m.Omitted.Edges += len(edges) - b.limits.Edges
 		edges = edges[:b.limits.Edges]
@@ -367,14 +411,17 @@ func capNodes(nodes map[string]*nodeRec, max int, om *Omitted) []*nodeRec {
 	return all
 }
 
-// overviewFlows returns the union of every kept node's top flows.
-func (b *Builder) overviewFlows(ctx context.Context, nodes map[string]*nodeRec, keep map[string]bool, w flowagg.Window, om *Omitted) ([]flowagg.FlowTotal, error) {
+// overviewFlows returns the union of every kept node's OverviewN largest
+// flows, each node's set taken over all its addresses (ADR 0009 D3).
+func (b *Builder) overviewFlows(ctx context.Context, nodes map[string]*nodeRec, owner map[netip.Addr]string, keep map[string]bool,
+	w flowagg.Window, om *Omitted) ([]flowagg.FlowTotal, error) {
 	kept := make([]*nodeRec, 0, len(keep))
 	for id := range keep {
 		kept = append(kept, nodes[id])
 	}
 	slices.SortFunc(kept, priority)
 	var addrs []netip.Addr
+	queried := make(map[netip.Addr]string)
 	for _, r := range kept {
 		for _, a := range r.addrs {
 			if len(addrs) >= maxQueryAddrs {
@@ -382,16 +429,46 @@ func (b *Builder) overviewFlows(ctx context.Context, nodes map[string]*nodeRec, 
 				continue
 			}
 			addrs = append(addrs, a)
+			queried[a] = owner[a]
 		}
 	}
 	if len(addrs) == 0 {
 		return nil, nil
 	}
-	flows, err := b.flows.OverviewUnion(ctx, addrs, w, OverviewN)
+	union, err := b.flows.OverviewUnion(ctx, addrs, w, OverviewN)
 	if err != nil {
 		return nil, fmt.Errorf("trafficmap: overview flows: %w", err)
 	}
-	return flows, nil
+	return topPerNode(union, queried, OverviewN), nil
+}
+
+// topPerNode keeps, per node, the n largest flows over all the node's
+// queried addresses and returns the union of these sets, largest first.
+// The store's union holds the top n of every single address; a node's top
+// n over all its addresses is a subset of it, so merging here gives the
+// per-node set of ADR 0009 D3 instead of n per address.
+func topPerNode(union []flowagg.FlowTotal, queried map[netip.Addr]string, n int) []flowagg.FlowTotal {
+	union = slices.Clone(union)
+	slices.SortFunc(union, compareTotal)
+	taken := make(map[string]int)
+	out := make([]flowagg.FlowTotal, 0, min(len(union), n*len(queried)))
+	for _, f := range union {
+		keepIt := false
+		ia, okA := queried[f.Key.A]
+		ib, okB := queried[f.Key.B]
+		if okA && taken[ia] < n {
+			taken[ia]++
+			keepIt = true
+		}
+		if okB && (!okA || ib != ia) && taken[ib] < n {
+			taken[ib]++
+			keepIt = true
+		}
+		if keepIt {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // focusFlows returns exactly the FocusN largest flows of the focus node
@@ -471,16 +548,24 @@ func via(zones map[string]*Zone, za, zb, a, b string) []string {
 }
 
 // aggregate turns flows into node-pair edges and zone links. Flows with
-// an end outside the model are counted as omitted. Edges and links come
+// an end on a node left out by a cap are counted as omitted; flows that
+// cannot form an edge at all (an end is no inventory node, such as an
+// internet peer, or both ends are one node) are only counted in unmapped:
+// they are not a cap and do not truncate the model. Edges and links come
 // back largest first.
 func aggregate(flows []flowagg.FlowTotal, owner map[netip.Addr]string, nodes map[string]*nodeRec, zones map[string]*Zone,
-	accept func(string) bool, focus string, om *Omitted) ([]Edge, []ZoneLink) {
+	accept func(string) bool, focus string, om *Omitted) ([]Edge, []ZoneLink, int) {
 	edges := make(map[pair]*edgeAcc)
 	links := make(map[pair]*linkAcc)
+	unmapped := 0
 	for _, f := range flows {
 		ia, okA := owner[f.Key.A]
 		ib, okB := owner[f.Key.B]
-		if !okA || !okB || ia == ib || !accept(ia) || !accept(ib) || (focus != "" && ia != focus && ib != focus) {
+		if !okA || !okB || ia == ib || (focus != "" && ia != focus && ib != focus) {
+			unmapped++
+			continue
+		}
+		if !accept(ia) || !accept(ib) {
 			om.Flows++
 			continue
 		}
@@ -564,7 +649,7 @@ func aggregate(flows []flowagg.FlowTotal, owner map[netip.Addr]string, nodes map
 		}
 		return strings.Compare(x.B, y.B)
 	})
-	return outE, outL
+	return outE, outL, unmapped
 }
 
 // encode finishes the model and encodes it within the response cap.

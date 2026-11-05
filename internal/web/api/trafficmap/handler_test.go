@@ -119,6 +119,31 @@ func TestHandlerRejectsBadQueries(t *testing.T) {
 	}
 }
 
+func TestHandlerRefusesWindowsBeyondTheRetention(t *testing.T) {
+	inv, f := starInventory()
+	h, err := New(Options{
+		Inventory: func(context.Context) (Inventory, error) { return inv, nil },
+		Flows:     f,
+		Authorize: func(*http.Request) bool { return true },
+		Now:       func() time.Time { return testNow },
+		Limits:    Limits{Retention: 7 * 24 * time.Hour},
+		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := serve(h, http.MethodGet, "/api/v1/trafficmap?window=21d")
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "1h, 24h, 7d") || strings.Contains(rec.Body.String(), "21d") {
+		t.Fatalf("21d over a 7d retention: %d %s", rec.Code, rec.Body)
+	}
+	if len(f.windows) != 0 {
+		t.Fatal("refused window reached the store")
+	}
+	if rec := serve(h, http.MethodGet, "/api/v1/trafficmap?window=7d"); rec.Code != http.StatusOK {
+		t.Fatalf("7d: %d %s", rec.Code, rec.Body)
+	}
+}
+
 func TestHandlerHidesStoreErrors(t *testing.T) {
 	f := &fakeFlows{err: errors.New("database /var/lib/nebula/traffic.db is locked")}
 	rec := serve(newTestHandler(t, true, f), http.MethodGet, "/api/v1/trafficmap")

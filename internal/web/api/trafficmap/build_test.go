@@ -19,7 +19,10 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/trafficstore"
 )
 
-var _ Flows = (*trafficstore.Store)(nil)
+var (
+	_ Flows             = (*trafficstore.Store)(nil)
+	_ retentionReporter = (*trafficstore.Store)(nil)
+)
 
 var testNow = time.Date(2026, 11, 5, 12, 30, 15, 0, time.UTC)
 
@@ -189,6 +192,78 @@ func TestSmallDevicesKeepTheirLinks(t *testing.T) {
 	}
 }
 
+func TestOverviewTopFiveIsPerNodeNotPerAddress(t *testing.T) {
+	// "multi" has 12 addresses, each with one flow to "peer"; "peer" has
+	// one address. Per address every flow is in a top 5, but per node
+	// only the five largest are: neither node may contribute more.
+	inv := Inventory{}
+	f := &fakeFlows{}
+	multi := node("multi", "")
+	for i := 1; i <= 12; i++ {
+		a := fmt.Sprintf("10.0.5.%d", i)
+		multi.Addrs = append(multi.Addrs, ip(a))
+		f.flows = append(f.flows, flow(a, "10.0.6.1", uint16(1000+i), uint64(100*i), 0))
+	}
+	inv.Nodes = append(inv.Nodes, multi, node("peer", "", "10.0.6.1"))
+	m, _ := build(t, newTestBuilder(t, inv, f, Limits{}), Query{})
+	if len(m.Edges) != 1 {
+		t.Fatalf("edges %v", edgeSet(m))
+	}
+	e := m.Edges[0]
+	if e.Connections != OverviewN || e.BytesAB+e.BytesBA != 100*(8+9+10+11+12) {
+		t.Fatalf("edge %+v: want the %d largest flows only", e, OverviewN)
+	}
+	if m.Truncated || m.Omitted.Flows != 0 || m.UnmappedFlows != 0 {
+		t.Fatalf("per-node selection counted as omitted: truncated %v omitted %+v unmapped %d", m.Truncated, m.Omitted, m.UnmappedFlows)
+	}
+
+	// A multi-homed node talking to many single-address peers: each peer
+	// keeps its link (its own top 5), but the multi-homed node's own top
+	// 5 over all its addresses is all it selects (the peers are outside
+	// the inventory here, so only its own selection is counted).
+	f = &fakeFlows{}
+	multi = node("multi", "")
+	for i := 1; i <= 12; i++ {
+		a := fmt.Sprintf("10.0.5.%d", i)
+		multi.Addrs = append(multi.Addrs, ip(a))
+		f.flows = append(f.flows, flow(a, fmt.Sprintf("192.0.2.%d", i), 443, uint64(100*i), 0))
+	}
+	owner := make(map[netip.Addr]string)
+	for _, a := range multi.Addrs {
+		owner[a] = "multi"
+	}
+	got, err := newTestBuilder(t, Inventory{}, f, Limits{}).overviewFlows(context.Background(),
+		map[string]*nodeRec{"multi": {node: Node{ID: "multi"}, addrs: multi.Addrs}},
+		owner, map[string]bool{"multi": true}, flowagg.Window{From: testNow.Add(-time.Hour), To: testNow}, &Omitted{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != OverviewN {
+		t.Fatalf("multi-homed node contributed %d flows, want %d", len(got), OverviewN)
+	}
+	for i, fl := range got {
+		if want := uint64(100 * (12 - i)); fl.Total() != want {
+			t.Fatalf("flow %d: %d bytes, want %d", i, fl.Total(), want)
+		}
+	}
+}
+
+func TestInternetPeersDoNotTruncate(t *testing.T) {
+	inv, f := starInventory()
+	f.flows = append(f.flows, flow("10.0.0.1", "203.0.113.7", 443, 1<<30, 1<<20), flow("10.0.2.1", "198.51.100.1", 53, 9, 9))
+	m, _ := build(t, newTestBuilder(t, inv, f, Limits{}), Query{})
+	if m.Truncated || m.Omitted != (Omitted{}) {
+		t.Fatalf("internet peers flagged as truncation: truncated %v omitted %+v", m.Truncated, m.Omitted)
+	}
+	if m.UnmappedFlows != 2 {
+		t.Fatalf("unmapped flows %d, want 2", m.UnmappedFlows)
+	}
+	m, _ = build(t, newTestBuilder(t, inv, f, Limits{}), Query{Focus: "p"})
+	if m.Truncated || m.UnmappedFlows != 1 {
+		t.Fatalf("focus: truncated %v omitted %+v unmapped %d", m.Truncated, m.Omitted, m.UnmappedFlows)
+	}
+}
+
 func TestFocusShowsExactlyItsTopFive(t *testing.T) {
 	inv := Inventory{}
 	f := &fakeFlows{}
@@ -230,6 +305,58 @@ func TestWindowsSelectTheRange(t *testing.T) {
 		}
 		if m.From != want.From.Format(time.RFC3339) || m.To != want.To.Format(time.RFC3339) {
 			t.Fatalf("window %q: model range %s..%s", name, m.From, m.To)
+		}
+	}
+}
+
+// shortFlows is a Flows that reports a shortened retention, like a store
+// opened with trafficstore.NewWithRetention.
+type shortFlows struct {
+	*fakeFlows
+	retention time.Duration
+}
+
+func (s shortFlows) Retention() time.Duration { return s.retention }
+
+func TestWindowsRespectTheRetention(t *testing.T) {
+	inv, f := starInventory()
+	b := newTestBuilder(t, inv, f, Limits{Retention: 7 * 24 * time.Hour})
+	if got := b.Windows(); !slices.Equal(got, []string{"1h", "24h", "7d"}) {
+		t.Fatalf("windows %v", got)
+	}
+	if _, err := b.Build(context.Background(), Query{Window: "21d"}); !errors.Is(err, ErrBadWindow) {
+		t.Fatalf("21d over a 7d retention: %v", err)
+	}
+	if m, _ := build(t, b, Query{Window: "7d"}); m.Window != "7d" {
+		t.Fatalf("window %q", m.Window)
+	}
+	if len(f.windows) != 1 {
+		t.Fatalf("refused window reached the store: %v", f.windows)
+	}
+
+	// The store's own retention applies without configuration, and the
+	// default window falls back to the longest one allowed.
+	inv, f = starInventory()
+	b, err := NewBuilder(func(context.Context) (Inventory, error) { return inv, nil }, shortFlows{f, 12 * time.Hour},
+		func() time.Time { return testNow }, Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := b.Windows(); !slices.Equal(got, []string{"1h"}) {
+		t.Fatalf("windows %v", got)
+	}
+	for _, w := range []string{"24h", "7d", "21d"} {
+		if _, err := b.Build(context.Background(), Query{Window: w}); !errors.Is(err, ErrBadWindow) {
+			t.Fatalf("%s over a 12h retention: %v", w, err)
+		}
+	}
+	if m, _ := build(t, b, Query{}); m.Window != "1h" {
+		t.Fatalf("default window %q, want 1h", m.Window)
+	}
+
+	for _, r := range []time.Duration{-time.Hour, 30 * time.Minute, flowagg.Retention + time.Hour} {
+		if _, err := NewBuilder(func(context.Context) (Inventory, error) { return inv, nil }, f, nil, Limits{Retention: r}); err == nil {
+			t.Errorf("retention %s accepted", r)
 		}
 	}
 }
@@ -443,9 +570,9 @@ func TestHostileInventoryIsCleaned(t *testing.T) {
 	if got := edgeSet(m); !slices.Equal(got, []string{"h1-liar"}) {
 		t.Fatalf("edges %v", got)
 	}
-	want := Omitted{Zones: 2, Nodes: 3, Software: 2, Addresses: 3, Flows: 2}
-	if m.Omitted != want || !m.Truncated {
-		t.Fatalf("omitted %+v, want %+v", m.Omitted, want)
+	want := Omitted{Zones: 2, Nodes: 3, Software: 2, Addresses: 3}
+	if m.Omitted != want || !m.Truncated || m.UnmappedFlows != 2 {
+		t.Fatalf("omitted %+v, want %+v, unmapped %d", m.Omitted, want, m.UnmappedFlows)
 	}
 	if len(m.Zones) != 1 || m.Zones[0].Name == "dup" {
 		t.Fatalf("zones %+v", m.Zones)
@@ -470,7 +597,7 @@ func TestModelCarriesNoRawFlows(t *testing.T) {
 		slices.Sort(out)
 		return out
 	}
-	if got := keys(raw); !slices.Equal(got, []string{"edges", "from", "lower_bound", "nodes", "omitted", "to", "truncated", "window", "zone_links", "zones"}) {
+	if got := keys(raw); !slices.Equal(got, []string{"edges", "from", "lower_bound", "nodes", "omitted", "to", "truncated", "unmapped_flows", "window", "zone_links", "zones"}) {
 		t.Fatalf("top-level keys %v", got)
 	}
 	edge := raw["edges"].([]any)[0]
