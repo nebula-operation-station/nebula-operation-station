@@ -252,6 +252,14 @@ func resolveOwners(want map[netip.Addr]bool, hosts []inventory.Host, as []ipam.A
 			out[a] = connections.Peer{Kind: connections.PeerHost, ID: id, Name: hostName[id]}
 		}
 	}
+	// An address a managed host claims (directly or via a linked asset)
+	// resolves to that host even when an unlinked asset also claims it:
+	// the host is the authoritative owner of the address, so the asset is
+	// at best a stale or behind-the-host (NAT) record. This is safe for
+	// the no-cross-host-attribution property: an address is attributed to
+	// a host only when exactly one host claims it; two hosts claiming the
+	// same address leave it out as ambiguous, never assigned to the wrong
+	// host.
 	for a, m := range assetAt {
 		if _, ok := hostAt[a]; ok || len(m) != 1 {
 			continue
