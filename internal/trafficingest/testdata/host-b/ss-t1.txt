@@ -1,0 +1,2 @@
+tcp   ESTAB  0      0         192.168.10.20:51234   192.168.10.37:22
+	 cubic wscale:7,7 rto:204 rtt:1.512/0.734 ato:40 mss:1448 cwnd:10 bytes_sent:2720 bytes_acked:2720 bytes_received:13600 segs_out:153 segs_in:212
