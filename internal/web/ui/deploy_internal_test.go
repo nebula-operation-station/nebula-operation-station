@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -302,5 +303,37 @@ func TestProposeRefusedThroughTheExecutorClient(t *testing.T) {
 				t.Errorf("proposeRefused(%v) = %v, want %v", err, got, c.release)
 			}
 		})
+	}
+}
+
+// TestProposeSpecRefusalMatchesTheExecutor pins the hand-copied refusal
+// text to the executor's actual status message: proposeRefused releases
+// a reserved address only for this exact answer, so a drift in either
+// copy would silently change which refusals release addresses. The
+// executor keeps the text as an inline literal in
+// pveGuestProvisionRPCError (internal/executor/pve_rpc.go, a protected
+// path), so this contract test reads that function and compares.
+func TestProposeSpecRefusalMatchesTheExecutor(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "executor", "pve_rpc.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(data)
+	start := strings.Index(src, "func pveGuestProvisionRPCError(")
+	if start < 0 {
+		t.Fatal("pveGuestProvisionRPCError not found in internal/executor/pve_rpc.go")
+	}
+	end := strings.Index(src[start:], "\nfunc ")
+	if end < 0 {
+		t.Fatal("end of pveGuestProvisionRPCError not found")
+	}
+	body := src[start : start+end]
+	re := regexp.MustCompile(`codes\.InvalidArgument,\s*"((?:[^"\\]|\\.)*)"`)
+	matches := re.FindAllStringSubmatch(body, -1)
+	if len(matches) != 1 {
+		t.Fatalf("pveGuestProvisionRPCError has %d InvalidArgument statuses, want 1", len(matches))
+	}
+	if matches[0][1] != proposeSpecRefusal {
+		t.Fatalf("proposeSpecRefusal = %q, the executor says %q", proposeSpecRefusal, matches[0][1])
 	}
 }

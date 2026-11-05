@@ -108,6 +108,11 @@ export function startTrafficMap(root, opts = {}) {
   let layout = null;
   let scene = null;
   let nodeById = new Map();
+  // sceneNodeById is the nodeById of the model the installed scene was
+  // built from. The overlay uses it, not nodeById: while a rebuild for a
+  // newer model fails, the old scene keeps rendering and must not be
+  // paired with the newer model's nodes.
+  let sceneNodeById = new Map();
   let icons = new Map();
   let cam = null;
   let focus = null;
@@ -233,8 +238,9 @@ export function startTrafficMap(root, opts = {}) {
         }
         if (focus !== null && !nodeById.has(focus)) focus = null;
         dirty = true;
-        // A new model gets a fresh rebuild right away.
-        resetFailures();
+        // A new model gets a fresh rebuild right away; the failure streak is
+        // kept (see resetRebuildBackoff).
+        resetRebuildBackoff();
         if (backend) setStatus(backendStatus);
         break;
       }
@@ -260,6 +266,14 @@ export function startTrafficMap(root, opts = {}) {
       if (keep.has(bmp)) continue;
       if (typeof bmp.close === "function") bmp.close();
     }
+  }
+
+  // clearOverlay wipes the overlay canvas when the base drew no scene (none
+  // yet, or a half-finished upload), so it is not covered by labels of an
+  // earlier, different scene.
+  function clearOverlay() {
+    octx.setTransform(1, 0, 0, 1, 0, 0);
+    octx.clearRect(0, 0, overlay.width, overlay.height);
   }
 
   function local(ev) {
@@ -372,11 +386,15 @@ export function startTrafficMap(root, opts = {}) {
           const next = build(model, layout, { level, focus });
           backend.setScene(next);
           scene = next;
+          sceneNodeById = nodeById;
         } catch (err) {
           // The deadline is set only here, by an attempt that failed, so
           // backed-off frames cannot push it further out.
           rebuildFailures++;
           nextRebuildAt = ts + rebuildBackoffMs(rebuildFailures);
+          // Nothing is drawn in this frame, so base and overlay keep showing
+          // the same last frame. Whether the overlay is drawn is decided only
+          // by render's completeness below, on every backend alike.
           throw err;
         }
         rebuildFailures = 0;
@@ -389,7 +407,18 @@ export function startTrafficMap(root, opts = {}) {
     if (redraw || !reduced) {
       const time = reduced ? 0 : ts / 1000;
       try {
-        backend.render(cam, dpr, time);
+        // render reports whether it drew a complete scene. Without one
+        // (no scene yet, or a half-finished WebGL2 upload) it draws no
+        // scene at all and only clears the base to the background.
+        const complete = backend.render(cam, dpr, time);
+        if (complete) {
+          drawOverlay(octx, scene, cam, dpr, time, painter, icons, sceneNodeById);
+          redraw = false;
+        } else {
+          // Empty base: clear the overlay too, so no labels of an earlier
+          // scene are left over it.
+          clearOverlay();
+        }
       } catch (err) {
         if (backend.name === "canvas2d") throw err;
         // A failing WebGL2 draw is not retried: switch on the next frame.
@@ -397,8 +426,6 @@ export function startTrafficMap(root, opts = {}) {
         redraw = true;
         return;
       }
-      drawOverlay(octx, scene, cam, dpr, time, painter, icons, nodeById);
-      redraw = false;
     }
   }
 
@@ -433,6 +460,15 @@ export function startTrafficMap(root, opts = {}) {
   function resetFailures() {
     failures = 0;
     degradeAt = MAX_FRAME_FAILURES;
+    rebuildFailures = 0;
+    nextRebuildAt = 0;
+  }
+
+  // resetRebuildBackoff lets a new model be rebuilt right away. It must not
+  // touch the failure streak, which ends only with a successful frame (or
+  // an install): with models arriving faster than the degrade window,
+  // resetting the streak on every model would postpone the degrade forever.
+  function resetRebuildBackoff() {
     rebuildFailures = 0;
     nextRebuildAt = 0;
   }
