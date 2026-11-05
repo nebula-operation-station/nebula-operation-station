@@ -74,6 +74,7 @@
   {{range .Tabs}}
   <a class="tab{{if eq $tab .ID}} tab--active{{end}}" href="/hosts/{{$hid}}?tab={{.ID}}">{{.Title}}</a>
   {{end}}
+  <a class="tab" href="/hosts/{{$hid}}/connections">Connections</a>
 </nav>
 {{if eq .Tab "overview"}}
 <section class="panel" aria-label="Overview">
