@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -60,6 +61,9 @@ const (
 	ScopeAll         = "all"
 	ScopeTag         = "tag"
 	ScopeEnvironment = "environment"
+	// ScopeProvider is the scope of a provider lease: the PVE remotes in
+	// ReadGrantPreview.Providers (ProposeProviderReadGrant).
+	ScopeProvider = "provider"
 )
 
 // Errors of read-grant proposals. The text is fixed; the executor's own
@@ -118,12 +122,15 @@ type ReadGrantPreview struct {
 	ScopeKind, ScopeValue string
 	Targets               []ReadGrantPreviewTarget // invsort order
 	Actions               []ReadGrantPreviewAction
-	Excluded              []ReadGrantExcluded
-	Issuer                string
-	Created, Expiry       time.Time
-	Trigger, RateProfile  string
-	MinInterval           time.Duration
-	RunBudget             int64
+	// Providers are the frozen PVE remotes of a provider lease in document
+	// order; empty for SSH leases (which have Targets and Actions).
+	Providers            []ReadGrantPreviewProvider
+	Excluded             []ReadGrantExcluded
+	Issuer               string
+	Created, Expiry      time.Time
+	Trigger, RateProfile string
+	MinInterval          time.Duration
+	RunBudget            int64
 	// CLI is set when the executor requires local CLI approval (hardened
 	// mode); Options are then empty.
 	CLI bool
@@ -403,6 +410,10 @@ func previewFromResponse(r *pb.ProposeReadGrantResponse, sent permit.ReadGrantDo
 	for _, a := range got.Actions {
 		v.Actions = append(v.Actions, ReadGrantPreviewAction(a))
 	}
+	for _, p := range got.ProviderTargets {
+		v.Providers = append(v.Providers, ReadGrantPreviewProvider{RemoteID: p.RemoteID, TrustPin: p.TrustPin,
+			TrustGeneration: p.TrustGeneration, CredentialVersion: p.CredentialVersion, Methods: slices.Clone(p.Methods)})
+	}
 	switch r.GetApprovalRequirement() {
 	case pb.ApprovalRequirement_APPROVAL_REQUIREMENT_CLI_ONLY:
 		v.CLI = true
@@ -423,13 +434,15 @@ func previewFromResponse(r *pb.ProposeReadGrantResponse, sent permit.ReadGrantDo
 }
 
 // sameReadGrant reports whether the executor's document is exactly the
-// proposed one: every scalar member equal, and the same targets, actions
-// and credential bindings (as sets: canonicalization may reorder them).
+// proposed one: every scalar member equal, the same targets, actions and
+// credential bindings (as sets: canonicalization may reorder them), and
+// exactly the same provider targets (sameProviderTargets; both empty for an
+// SSH lease).
 func sameReadGrant(a, b permit.ReadGrantDoc) bool {
 	if a.Grant != b.Grant || a.ID != b.ID || a.Issuer != b.Issuer || a.CreatedUnix != b.CreatedUnix ||
 		a.ExpiryUnix != b.ExpiryUnix || a.Trigger != b.Trigger || a.MinIntervalS != b.MinIntervalS ||
-		a.RunBudget != b.RunBudget || a.RateProfile != b.RateProfile || len(a.ProviderTargets) != 0 ||
-		len(b.ProviderTargets) != 0 {
+		a.RunBudget != b.RunBudget || a.RateProfile != b.RateProfile ||
+		!sameProviderTargets(a.ProviderTargets, b.ProviderTargets) {
 		return false
 	}
 	return sameSetOf(a.Targets, b.Targets) && sameSetOf(a.Actions, b.Actions) && sameSetOf(a.Credentials, b.Credentials)
