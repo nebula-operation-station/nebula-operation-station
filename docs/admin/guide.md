@@ -1139,7 +1139,8 @@ one from a wrapped or replaced `ss` — is rejected as invalid, so a
 compromised host cannot inject process names.
 
 **Retention: 21 days.** The server stores hourly flow buckets and endpoint
-reports and prunes them hourly. The retention is 21 days; the map's and
+reports and prunes them during a full sync (at least once per clock hour).
+The retention is 21 days; the map's and
 the connections pages' windows are clamped to it. There is no setting to
 shorten it yet: the store only accepts a shorter retention (minimum 1 h),
 and `nebula-server` currently always runs with the 21-day default.
