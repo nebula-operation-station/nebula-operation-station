@@ -33,6 +33,13 @@ const (
 	// maxJobsPerRound bounds the work of one round, so a flood of jobs
 	// cannot keep the helper fetching forever.
 	maxJobsPerRound = 64
+	// maxBatch bounds how long one run starts new fetches. The helper
+	// cannot check its nftables table itself (no CAP_NET_ADMIN); the
+	// unit's privileged ExecStartPre checks it before every start. Ending
+	// the run after maxBatch (plus at most one fetch, TotalTimeout) makes
+	// that check run again before the next batch; the timer starts the
+	// next run for jobs left queued.
+	maxBatch = 2 * time.Minute
 )
 
 // fetchFunc fetches an icon URL (iconfetch.Client.Fetch in production).
@@ -47,6 +54,8 @@ type runner struct {
 	// rounds and perRound override maxRounds and maxJobsPerRound when
 	// positive (tests).
 	rounds, perRound int
+	// batch overrides maxBatch when positive (tests).
+	batch time.Duration
 }
 
 // limits returns the round and per-round job limits.
@@ -119,33 +128,55 @@ func (r *runner) watch(ctx context.Context, every time.Duration) {
 }
 
 // runAll answers every pending job, then looks again (jobs queued while
-// fetching), and prunes old results.
+// fetching), and prunes old results. It starts no new fetch once the
+// batch time limit has passed and leaves the rest for the next run.
 func (r *runner) runAll(ctx context.Context) error {
 	defer r.spool.PruneResults(keepResults, r.now())
 	rounds, perRound := r.limits()
+	batch := maxBatch
+	if r.batch > 0 {
+		batch = r.batch
+	}
+	deadline := r.now().Add(batch)
 	for round := 0; round < rounds; round++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		jobs, bad, err := r.spool.PendingJobs()
+		p, err := r.spool.ListPending(ctx, r.now())
 		if err != nil {
 			return err
 		}
-		if len(jobs) == 0 && len(bad) == 0 {
+		for _, id := range p.Waiting {
+			if round > 0 {
+				break // logged once per run
+			}
+			r.log.Warn("job file not readable; left queued", "job", id,
+				"answered_after", iconjob.UnreadableJobAge.String())
+		}
+		if len(p.Jobs) == 0 && len(p.Bad) == 0 {
 			return nil
 		}
-		for id, e := range bad {
-			r.log.Warn("invalid job", "job", id, "error", e.Error())
+		for id, e := range p.Bad {
+			msg := "invalid job: "
+			if errors.Is(e, iconjob.ErrUnreadable) {
+				msg = "unreadable job: "
+			}
+			r.log.Warn(strings.TrimSuffix(msg, ": "), "job", id, "error", e.Error())
 			now := r.now().Unix()
 			if err := r.spool.WriteResult(iconjob.Result{Format: iconjob.ResultFormat, Job: id, StartedAt: now, FinishedAt: now,
-				Error: iconjob.CleanError("invalid job: " + e.Error())}); err != nil {
+				Error: iconjob.CleanError(msg + e.Error())}); err != nil {
 				return err
 			}
 		}
+		jobs := p.Jobs
 		if len(jobs) > perRound {
 			jobs = jobs[:perRound]
 		}
 		for _, j := range jobs {
+			if !r.now().Before(deadline) {
+				r.log.Info("batch time limit reached; queued jobs wait for the next start", "limit", batch.String())
+				return nil
+			}
 			res := r.run(ctx, j)
 			if err := r.spool.WriteResult(res); err != nil {
 				return err

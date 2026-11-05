@@ -91,15 +91,17 @@ type heldTarget struct {
 	// heldAt is when the hold began (persisted; batchHoldMax counts from
 	// it, across restarts).
 	heldAt time.Time
-	// expired: held past batchHoldMax; no automatic recheck frees it, only
-	// ReleaseHeldBatchTarget.
+	// expired: held past batchHoldMax; no automatic recheck frees it. The
+	// operator re-arms it offline (`nebula-executor batch-holds rearm`,
+	// RearmHeldBatchTarget), which returns it to automatic rechecks; the
+	// target is freed only once it shows the run gone.
 	expired bool
 	// checking: a recheck is in flight.
 	checking bool
 	// running: a member runs on the target in this process now. The
 	// reservation is persisted like any hold (a crash or kill during the
-	// run restarts with the target held), but neither a recheck nor an
-	// operator release frees it while the member runs.
+	// run restarts with the target held), but neither a recheck nor the
+	// reserved operator release frees it while the member runs.
 	running bool
 }
 
@@ -130,10 +132,12 @@ type batchExec struct {
 	// held is persisted (batch_hold.go) and restored at startup, so a
 	// restart does not free a held target. A target is in held from its
 	// reservation on (running while its member runs here), so a crash or
-	// kill during an attached run, too, restarts with the target held. Only the host showing the run
-	// gone (hostrun.RunVisible, which counts only the SSH user's own
-	// processes) ends a hold: automatically for at most batchHoldMax, then
-	// only through the audited operator release.
+	// kill during an attached run, too, restarts with the target held.
+	// Only the host showing the run gone (hostrun.RunVisible, which counts
+	// only the SSH user's own processes) ends a hold: automatically for at
+	// most batchHoldMax; past that the hold expires and the operator
+	// re-arms it offline (`nebula-executor batch-holds rearm`), after
+	// which the automatic rechecks end it.
 	hosts map[string]string
 	held  map[string]*heldTarget
 	// holdPath is the held-target file; holdErr makes the store unusable

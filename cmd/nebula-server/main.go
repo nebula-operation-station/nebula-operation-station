@@ -359,6 +359,15 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	disc := discovery.New(db, discoveryjob.Spool{Dir: cfg.DiscoveryDir}, ipamStore, hostAddrs, log)
 	go disc.Run(connCtx)
 
+	// Traffic map data (ADR 0009 TM12): net.facts results go into the
+	// traffic store; own addresses and MACs come only from the inventory
+	// and the IPAM assets linked to managed hosts.
+	traffic, err := newTrafficIngest(db, store.List, ipamStore.Assets, log, time.Now)
+	if err != nil {
+		return err
+	}
+	go traffic.run(connCtx, trafficCheckInterval)
+
 	h, err := ui.New(ui.Options{
 		PublicOrigin:   cfg.PublicOrigin,
 		Status:         exec,
