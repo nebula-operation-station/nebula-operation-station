@@ -367,3 +367,108 @@ func TestSameReadGrantSSHUnchanged(t *testing.T) {
 		t.Fatal("an SSH document with provider targets compares equal")
 	}
 }
+
+// TestReadGrantsListsProviderLeases pins that a provider lease is listed
+// with every remote's ID, pin prefix, trust generation, credential version
+// and methods, and its expiry, and that it can be revoked.
+func TestReadGrantsListsProviderLeases(t *testing.T) {
+	f := newProviderFake()
+	f.grants = []*pb.ReadGrant{pbGrant(decodeStored, decodeExpiry, time.Time{}, marshalDoc(t, providerDoc()))}
+	s := providerService(t, f)
+	s.now = func() time.Time { return decodeNow }
+	views, err := s.ReadGrants(context.Background())
+	if err != nil || len(views) != 1 {
+		t.Fatalf("views %+v err %v", views, err)
+	}
+	v := views[0]
+	if v.State != "active" || v.ScopeKind != ScopeProvider || v.RateProfile != permit.ProviderReadProfile ||
+		!v.Expiry.Equal(decodeExpiry) || len(v.Hosts) != 0 || len(v.Actions) != 0 {
+		t.Fatalf("view %+v", v)
+	}
+	want := []ReadGrantProviderView{
+		{RemoteID: "pve-a", PinPrefix: strings.Repeat("a1", 8), TrustGeneration: 1, CredentialVersion: 3, Methods: []string{"guests"}},
+		{RemoteID: "pve-b", PinPrefix: strings.Repeat("b2", 8), TrustGeneration: 2, CredentialVersion: 5, Methods: []string{"nodes", "tasks"}},
+	}
+	if len(v.Providers) != len(want) {
+		t.Fatalf("providers %+v", v.Providers)
+	}
+	for i, p := range v.Providers {
+		w := want[i]
+		if p.RemoteID != w.RemoteID || p.PinPrefix != w.PinPrefix || p.TrustGeneration != w.TrustGeneration ||
+			p.CredentialVersion != w.CredentialVersion || !sameStrings(p.Methods, w.Methods) {
+			t.Errorf("provider %d: %+v, want %+v", i, p, w)
+		}
+	}
+	if err := s.RevokeReadGrant(context.Background(), "alice", v.ID); err != nil || f.revokeID != testGrantID {
+		t.Fatalf("revoke: err %v id %q", err, f.revokeID)
+	}
+}
+
+// TestDecodeReadGrantRejectsMalformedProviderTarget pins that every
+// rendered provider member is checked; a bad one marks the grant invalid.
+func TestDecodeReadGrantRejectsMalformedProviderTarget(t *testing.T) {
+	cases := map[string]func(*permit.ProviderTarget){
+		"pin empty":           func(p *permit.ProviderTarget) { p.TrustPin = "" },
+		"pin uppercase":       func(p *permit.ProviderTarget) { p.TrustPin = strings.ToUpper(p.TrustPin) },
+		"pin short":           func(p *permit.ProviderTarget) { p.TrustPin = p.TrustPin[:10] },
+		"pin with newline":    func(p *permit.ProviderTarget) { p.TrustPin = "\n" + p.TrustPin[1:] },
+		"generation zero":     func(p *permit.ProviderTarget) { p.TrustGeneration = 0 },
+		"credential zero":     func(p *permit.ProviderTarget) { p.CredentialVersion = 0 },
+		"credential negative": func(p *permit.ProviderTarget) { p.CredentialVersion = -1 },
+		"no methods":          func(p *permit.ProviderTarget) { p.Methods = nil },
+		"unknown method":      func(p *permit.ProviderTarget) { p.Methods = []string{"nodes", "<b>x</b>"} },
+		"duplicate method":    func(p *permit.ProviderTarget) { p.Methods = []string{"nodes", "nodes"} },
+	}
+	for name, mutate := range cases {
+		d := providerDoc()
+		mutate(&d.ProviderTargets[0])
+		wantInvalid(t, name, decodeRaw(marshalDoc(t, d)))
+		if v := decodeRaw(marshalDoc(t, d)); len(v.Providers) != 0 || v.RateProfile != "" {
+			t.Errorf("%s: invalid grant still shows providers %+v", name, v.Providers)
+		}
+	}
+	// A provider telemetry grant lists its metrics method.
+	d := providerDoc()
+	d.RateProfile = permit.ProviderTelemetryProfile
+	d.ProviderTargets[0].Methods = []string{permit.ProviderMethodMetrics}
+	if v := decodeRaw(marshalDoc(t, d)); v.State != "active" || len(v.Providers) != 2 {
+		t.Fatalf("provider telemetry grant: %+v", v)
+	}
+}
+
+// TestProviderRefreshPrefillsRemotesAndMethods pins the refresh data of a
+// provider lease.
+func TestProviderRefreshPrefillsRemotesAndMethods(t *testing.T) {
+	v := decodeRaw(marshalDoc(t, providerDoc()))
+	in, ok := v.ProviderRefresh()
+	if !ok || !sameStrings(in.RemoteIDs, []string{"pve-a", "pve-b"}) || !sameStrings(in.Methods, []string{"guests", "nodes", "tasks"}) ||
+		in.Days != ReadGrantShortDays {
+		t.Fatalf("refresh %+v ok %v", in, ok)
+	}
+	long := providerDoc()
+	long.ExpiryUnix = decodeStored.Add(30 * 24 * time.Hour).Unix()
+	lv := decodeReadGrant(pbGrant(decodeStored, time.Unix(long.ExpiryUnix, 0), time.Time{}, marshalDoc(t, long)), nil, false, decodeNow)
+	if in, ok := lv.ProviderRefresh(); !ok || in.Days != ReadGrantLongDays {
+		t.Fatalf("30-day lease refresh %+v ok %v (state %q)", in, ok, lv.State)
+	}
+	expired := decodeReadGrant(pbGrant(decodeStored, decodeExpiry, time.Time{}, marshalDoc(t, providerDoc())), nil, false, decodeExpiry)
+	if _, ok := expired.ProviderRefresh(); !ok {
+		t.Fatal("an expired provider lease cannot be refreshed")
+	}
+	revoked := decodeReadGrant(pbGrant(decodeStored, decodeExpiry, decodeNow, marshalDoc(t, providerDoc())), nil, false, decodeNow)
+	if _, ok := revoked.ProviderRefresh(); ok {
+		t.Fatal("a revoked provider lease offers a refresh")
+	}
+	if _, ok := decodeRaw(marshalDoc(t, validDoc())).ProviderRefresh(); ok {
+		t.Fatal("an SSH lease offers a provider refresh")
+	}
+	tel := providerDoc()
+	tel.RateProfile = permit.ProviderTelemetryProfile
+	if _, ok := decodeRaw(marshalDoc(t, tel)).ProviderRefresh(); ok {
+		t.Fatal("a provider telemetry lease offers a provider read refresh")
+	}
+	// The pre-filled request is accepted by the proposal checks.
+	if _, _, err := checkProviderReadGrantRequest(in); err != nil {
+		t.Fatalf("refresh request refused: %v", err)
+	}
+}

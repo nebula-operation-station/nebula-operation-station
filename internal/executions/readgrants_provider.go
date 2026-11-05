@@ -266,3 +266,67 @@ func sameProviderTargets(a, b []permit.ProviderTarget) bool {
 			len(x.MetricsTargets) == 0 && len(y.MetricsTargets) == 0
 	})
 }
+
+// providerPinPrefixLen is how many hex characters of a trust pin the lease
+// list shows.
+const providerPinPrefixLen = 16
+
+// ReadGrantProviderView is one frozen PVE remote of a listed provider
+// grant.
+type ReadGrantProviderView struct {
+	RemoteID string
+	// PinPrefix is the first providerPinPrefixLen hex characters of the
+	// trust pin.
+	PinPrefix         string
+	TrustGeneration   uint64
+	CredentialVersion int64
+	// Methods are the document's methods in document order.
+	Methods []string
+}
+
+// providerView checks one provider target of an executor-held document
+// (untrusted input) and returns its list view. Every rendered member must
+// be well formed; anything else makes the whole grant invalid.
+func providerView(p permit.ProviderTarget) (ReadGrantProviderView, bool) {
+	if !pvecontract.ValidRemoteID(p.RemoteID) || !pvecontract.ValidTrustPin(p.TrustPin) ||
+		p.TrustGeneration < 1 || p.CredentialVersion < 1 || len(p.Methods) == 0 {
+		return ReadGrantProviderView{}, false
+	}
+	seen := map[string]bool{}
+	for _, m := range p.Methods {
+		if (!permit.ValidProviderMethod(m) && m != permit.ProviderMethodMetrics) || seen[m] {
+			return ReadGrantProviderView{}, false
+		}
+		seen[m] = true
+	}
+	return ReadGrantProviderView{RemoteID: p.RemoteID, PinPrefix: p.TrustPin[:providerPinPrefixLen],
+		TrustGeneration: p.TrustGeneration, CredentialVersion: p.CredentialVersion, Methods: slices.Clone(p.Methods)}, true
+}
+
+// ProviderRefresh returns the pre-filled request for a new provider lease
+// over the same remotes and methods (data for the lease form), and false
+// when v is not an active or expired provider read lease. The methods are
+// the union over the remotes, sorted; the lifetime follows the old lease
+// like a host lease refresh. The pin, generation and credential version
+// are not carried over: a new proposal reads them from the executor again.
+func (v ReadGrantView) ProviderRefresh() (ProviderReadGrantRequest, bool) {
+	if (v.State != "active" && v.State != "expired") || v.RateProfile != permit.ProviderReadProfile || len(v.Providers) == 0 {
+		return ProviderReadGrantRequest{}, false
+	}
+	in := ProviderReadGrantRequest{Days: ReadGrantShortDays}
+	seen := map[string]bool{}
+	for _, p := range v.Providers {
+		in.RemoteIDs = append(in.RemoteIDs, p.RemoteID)
+		for _, m := range p.Methods {
+			if !seen[m] && permit.ValidProviderMethod(m) {
+				seen[m] = true
+				in.Methods = append(in.Methods, m)
+			}
+		}
+	}
+	sort.Strings(in.Methods)
+	if !v.Created.IsZero() && v.Expiry.Sub(v.Created) > time.Duration(ReadGrantShortDays)*24*time.Hour+time.Hour {
+		in.Days = ReadGrantLongDays
+	}
+	return in, true
+}
