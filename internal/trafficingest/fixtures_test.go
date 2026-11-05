@@ -29,6 +29,8 @@ func mac(t *testing.T, s string) net.HardwareAddr {
 	return m
 }
 
+func b64(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
+
 type fixtureSection struct {
 	Status    string `json:"status"`
 	Truncated bool   `json:"truncated"`
