@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/softwarecat"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
@@ -221,7 +222,7 @@ func (f *swFixture) checkUnchanged(t *testing.T) {
 }
 
 // TestRunServesSoftwarePages starts the real server (run) and checks that
-// it mounts the software pages: a signed-in admin gets them with the
+// it mounts the software pages and the connections tab (TM20): a signed-in admin gets them with the
 // strict CSP, without a session they redirect to the login, and a change
 // with a null Origin is refused.
 func TestRunServesSoftwarePages(t *testing.T) {
@@ -236,6 +237,12 @@ func TestRunServesSoftwarePages(t *testing.T) {
 	}
 	token, _, err := auth.NewStore(db, nil).Create(context.Background(), "cred-1", "admin")
 	if err != nil {
+		t.Fatal(err)
+	}
+	// A host, so the connections tab (TM20) has a page to serve.
+	if _, err := inventory.New(db).Create(context.Background(), inventory.Host{ID: "web1", Environment: inventory.EnvProd,
+		Criticality: inventory.CriticalityMedium, CredentialRef: "web1",
+		Endpoints: []inventory.Endpoint{{Address: "10.0.0.10", Port: 22}}}, inventory.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -288,7 +295,7 @@ func TestRunServesSoftwarePages(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	for _, p := range []string{"/software", "/software/unknown"} {
+	for _, p := range []string{"/software", "/software/unknown", "/hosts/web1/connections"} {
 		if p != "/software" {
 			resp = send(http.MethodGet, p, token, "")
 		}

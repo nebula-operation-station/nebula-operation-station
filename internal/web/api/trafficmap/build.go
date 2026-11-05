@@ -39,9 +39,7 @@ type Limits struct {
 }
 
 // retentionReporter is implemented by a Flows that knows its retention.
-type retentionReporter interface {
-	Retention() time.Duration
-}
+type retentionReporter = flowagg.RetentionReporter
 
 // Errors of Build. Callers branch on them for the HTTP status.
 var (
@@ -91,14 +89,8 @@ func NewBuilder(inventory func(ctx context.Context) (Inventory, error), flows Fl
 	if l.ResponseBytes, err = limit("response bytes", l.ResponseBytes, MaxResponseBytes); err != nil {
 		return nil, err
 	}
-	if l.Retention == 0 {
-		l.Retention = flowagg.Retention
-	}
-	if rr, ok := flows.(retentionReporter); ok {
-		l.Retention = min(l.Retention, rr.Retention())
-	}
-	if l.Retention < time.Hour || l.Retention > flowagg.Retention {
-		return nil, fmt.Errorf("trafficmap: retention %s outside %s..%s", l.Retention, time.Hour, flowagg.Retention)
+	if l.Retention, err = flowagg.EffectiveRetention(l.Retention, flows); err != nil {
+		return nil, fmt.Errorf("trafficmap: %w", err)
 	}
 	return &Builder{inventory: inventory, flows: flows, now: now, limits: l}, nil
 }
@@ -116,11 +108,10 @@ func limit(name string, v, max int) (int, error) {
 // Windows returns the window names the builder accepts, shortest first:
 // those no longer than the retention.
 func (b *Builder) Windows() []string {
-	out := make([]string, 0, len(windowOrder))
-	for _, name := range windowOrder {
-		if windowDuration[name] <= b.limits.Retention {
-			out = append(out, name)
-		}
+	ws := flowagg.QueryWindows(b.limits.Retention)
+	out := make([]string, 0, len(ws))
+	for _, w := range ws {
+		out = append(out, w.Name)
 	}
 	return out
 }
@@ -128,11 +119,7 @@ func (b *Builder) Windows() []string {
 // defaultWindow is DefaultWindow, or the longest window the retention
 // allows when it is shorter.
 func (b *Builder) defaultWindow() string {
-	if windowDuration[DefaultWindow] <= b.limits.Retention {
-		return DefaultWindow
-	}
-	w := b.Windows()
-	return w[len(w)-1]
+	return flowagg.DefaultQueryWindowFor(b.limits.Retention).Name
 }
 
 // nodeRec is a cleaned node with the addresses it owns.
@@ -163,10 +150,11 @@ func (b *Builder) Build(ctx context.Context, q Query) ([]byte, error) {
 	if q.Window == "" {
 		q.Window = b.defaultWindow()
 	}
-	d, ok := windowDuration[q.Window]
-	if !ok || d > b.limits.Retention {
+	qw, ok := flowagg.LookupQueryWindow(q.Window, b.limits.Retention)
+	if !ok {
 		return nil, ErrBadWindow
 	}
+	d := qw.Dur
 	if q.Focus != "" && !validID(q.Focus) {
 		return nil, ErrBadFocus
 	}
