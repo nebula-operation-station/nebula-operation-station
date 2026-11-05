@@ -19,7 +19,9 @@ import (
 // pveinventory store in a temp database.
 func newTestImporter(t *testing.T) (*Importer, *Spool, *pveinventory.Store) {
 	t.Helper()
-	spool, err := NewSpool(t.TempDir())
+	root := t.TempDir()
+	expectTempDirOwnership(t, root)
+	spool, err := NewSpool(root)
 	if err != nil {
 		t.Fatalf("NewSpool: %v", err)
 	}
@@ -289,7 +291,9 @@ func TestImporterRunImportsAndStops(t *testing.T) {
 
 // TestNewImporterRejectsNilArgs guards the constructor.
 func TestNewImporterRejectsNilArgs(t *testing.T) {
-	spool, err := NewSpool(t.TempDir())
+	root := t.TempDir()
+	expectTempDirOwnership(t, root)
+	spool, err := NewSpool(root)
 	if err != nil {
 		t.Fatalf("NewSpool: %v", err)
 	}
