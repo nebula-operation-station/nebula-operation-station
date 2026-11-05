@@ -70,7 +70,7 @@ const NOSTrafficMapBridge = (() => {
   const BACKEND_RE = /^[a-z0-9 ()]+$/;
   // Same set as the renderer's UNPRINTABLE_RE: controls, line/paragraph
   // separators, bidi embeddings/overrides/isolates, zero-width and BOM.
-  const UNPRINTABLE_RE = /[\u0000-\u001f\u007f-\u009f  ‪-‮⁦-⁩​-‏﻿]/g;
+  const UNPRINTABLE_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069\u200b-\u200f\ufeff]/g;
   const PROTOCOLS = ["tcp", "udp", "icmp"];
   const ZONE_COLORS = ["#4fa3ff", "#ffb347", "#9b6bff", "#4fd1a5", "#ff6b8b", "#f2d95c", "#5ce1f2", "#c48bff", "#8fd16a", "#ff8f5c", "#6b8bff", "#e07bd8"];
   /** API node kind → renderer kind. */
