@@ -19,9 +19,12 @@ import (
 // (trust pin, trust generation and read credential version as the executor
 // reports them), the single method "metrics" and the exact metrics targets.
 // The server builds the targets from its current imported inventory: a
-// node must be stored for the remote, and a guest is bound with the node,
-// kind and local incarnation generation of its one active incarnation, so a
-// recreated guest with a reused VMID is not covered and needs a new lease.
+// node must be stored for the remote, and a guest must have exactly one
+// active incarnation whose node, kind and local incarnation generation are
+// the ones the page showed and posted. A guest recreated (same VMID, new
+// generation) since the page was loaded is refused, never re-bound to the
+// new incarnation; a lease bound to the old generation does not cover the
+// new one either.
 // The document goes through the same proposal, preview and approval flow as
 // every other read lease; nothing is read before it is approved.
 
@@ -32,20 +35,24 @@ const (
 	// each target's live reads at least this far apart).
 	providerTelemetryReadsPerHour = int64(time.Hour / permit.ProviderTelemetryLiveInterval)
 	// providerTelemetryLiveTargets is how many metrics targets of one
-	// remote the executor serves live at once (executor pve_metrics.go,
-	// pveMetricsMaxLiveTargets; spec 12 "Visible-target requests").
-	providerTelemetryLiveTargets = 4
+	// remote the executor serves live at once. It is the executor's own cap
+	// (executor pve_metrics.go uses the same permit constant; spec 12
+	// "Visible-target requests"), so raising that cap raises the budget.
+	providerTelemetryLiveTargets = permit.ProviderTelemetryMaxLiveTargets
 )
 
 // ProviderMetricsSelection is one metrics target the operator chose: a node
 // (Kind permit.MetricsKindNode, VMID 0) or a guest (Kind
 // permit.MetricsKindQEMU or permit.MetricsKindLXC with its VMID and the node
-// the page showed it on). The generation is never chosen: it is read from
-// the imported inventory when the lease is proposed.
+// the page showed it on). A guest also carries the local incarnation
+// generation the page showed (1 to pvecontract.MaxGuestGeneration; 0 for a
+// node): the proposal binds a guest only while the imported inventory still
+// has exactly that incarnation.
 type ProviderMetricsSelection struct {
-	Node string
-	Kind string
-	VMID uint64
+	Node       string
+	Kind       string
+	VMID       uint64
+	Generation uint64
 }
 
 // key is the selection's identity, the same as permit's metrics target key.
@@ -120,12 +127,15 @@ func checkProviderTelemetryRequest(in ProviderTelemetryGrantRequest) ([]Provider
 		}
 		switch m.Kind {
 		case permit.MetricsKindNode:
-			if m.VMID != 0 {
-				return nil, &ReadGrantInputError{"a node target has no VMID"}
+			if m.VMID != 0 || m.Generation != 0 {
+				return nil, &ReadGrantInputError{"a node target has no VMID or generation"}
 			}
 		case permit.MetricsKindQEMU, permit.MetricsKindLXC:
 			if m.VMID < pvecontract.MinVMID || m.VMID > pvecontract.MaxVMID {
 				return nil, &ReadGrantInputError{"a guest VMID is out of range"}
+			}
+			if m.Generation < 1 || m.Generation > pvecontract.MaxGuestGeneration {
+				return nil, &ReadGrantInputError{"a guest has no valid generation: reload the page"}
 			}
 		default:
 			return nil, &ReadGrantInputError{"a target is neither a node nor a QEMU or LXC guest"}
@@ -158,8 +168,9 @@ func metricsLess(a, b ProviderMetricsSelection) bool {
 // telemetryTargets resolves the selections against the imported inventory
 // of remoteID into exact metrics targets. Every selection must match the
 // inventory exactly: a node must be stored; a guest must have exactly one
-// active incarnation, of the chosen kind, on the chosen node; its
-// generation is that incarnation's.
+// active incarnation, of the chosen kind, on the chosen node, with the
+// generation the page posted. A guest recreated since the page was loaded
+// is refused, not bound to its new incarnation.
 func telemetryTargets(ctx context.Context, inv TelemetryInventory, remoteID string, sel []ProviderMetricsSelection) ([]permit.ProviderMetricsTarget, error) {
 	ok, err := inv.HasRemote(ctx, remoteID)
 	if err != nil {
@@ -194,7 +205,10 @@ func telemetryTargets(ctx context.Context, inv TelemetryInventory, remoteID stri
 		}
 		g := gs[0]
 		if g.VMID != m.VMID || g.Kind != m.Kind || g.Node != m.Node {
-			return nil, &ReadGrantInputError{fmt.Sprintf("guest %d changed (kind, node or incarnation): reload the page", m.VMID)}
+			return nil, &ReadGrantInputError{fmt.Sprintf("guest %d changed (kind or node): reload the page", m.VMID)}
+		}
+		if g.Generation != m.Generation {
+			return nil, &ReadGrantInputError{fmt.Sprintf("guest %d was recreated since the page was loaded: reload the page", m.VMID)}
 		}
 		t := permit.ProviderMetricsTarget{Node: g.Node, Kind: g.Kind, VMID: g.VMID, Generation: g.Generation}
 		if !t.Valid() {
@@ -217,8 +231,8 @@ func telemetryTargets(ctx context.Context, inv TelemetryInventory, remoteID stri
 // RunBudget providerTelemetryBudget, and one provider target with the trust
 // pin, trust generation and read credential version exactly as the
 // executor's registry reports them, the method "metrics" and the metrics
-// targets resolved from inv, the current imported inventory
-// (telemetryTargets).
+// targets checked against inv, the current imported inventory
+// (telemetryTargets; a guest's generation must match the posted one).
 func (s *Service) ProposeProviderTelemetryGrant(ctx context.Context, user string, in ProviderTelemetryGrantRequest, inv TelemetryInventory) (ReadGrantPreview, error) {
 	sel, err := checkProviderTelemetryRequest(in)
 	if err != nil {

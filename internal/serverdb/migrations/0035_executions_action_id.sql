@@ -1,0 +1,16 @@
+-- 0035_executions_action_id.sql
+-- The traffic ingest's change-mark query (cmd/nebula-server/traffic.go)
+-- counts the successful net.facts host runs and their latest finish
+-- time every 30 s:
+--   SELECT COUNT(*), COALESCE(MAX(h.finished_at), 0)
+--   FROM execution_hosts h JOIN executions e ON e.id = h.execution_id
+--   WHERE e.action_id = ? AND h.state = 'finished' AND h.class = 'success'
+--     AND h.finished_at IS NOT NULL
+-- Without an index on executions.action_id the planner scans the whole
+-- execution_hosts table (probing executions by primary key) on every
+-- check, so the poll's cost grows with the retained history of every
+-- action. The index starts on action_id and carries the join column id,
+-- so the executions side is answered from the index alone and the check
+-- walks only the net.facts executions, probing execution_hosts by its
+-- primary key.
+CREATE INDEX idx_executions_action_id ON executions (action_id, id);

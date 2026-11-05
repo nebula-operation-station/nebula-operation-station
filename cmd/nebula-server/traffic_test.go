@@ -66,15 +66,21 @@ func netFactsResult(t *testing.T, dir, ss string) []byte {
 	return b
 }
 
-// countingSyncer counts the Syncs the loop runs.
+// countingSyncer counts the Syncs the loop runs and keeps the last
+// result, so a test can assert what a Sync did.
 type countingSyncer struct {
 	trafficSyncer
-	n int
+	n    int
+	last trafficingest.SyncResult
 }
 
 func (c *countingSyncer) Sync(ctx context.Context) (trafficingest.SyncResult, error) {
 	c.n++
-	return c.trafficSyncer.Sync(ctx)
+	res, err := c.trafficSyncer.Sync(ctx)
+	if err == nil {
+		c.last = res
+	}
+	return res, err
 }
 
 // trafficEnv is a server database with inventory, IPAM, execution
@@ -134,20 +140,37 @@ func (e *trafficEnv) nic(id, mac, host string, addrs ...netip.Addr) {
 	}
 }
 
-// run records a finished, successful net.facts run of host, as the
-// executions service stores it.
-func (e *trafficEnv) run(host string, finished time.Time, result []byte) {
+// runAction records a finished, successful run of host for action, as
+// the executions service stores it. result may be nil.
+func (e *trafficEnv) runAction(action, host string, finished time.Time, result []byte) {
 	e.t.Helper()
 	e.n++
 	id := fmt.Sprintf("%08d-0000-4000-8000-%012d", e.n, e.n)
 	if _, err := e.db.Exec(`INSERT INTO executions (id, action_id, module_version, artifact_sha256, risk, state,
 		durable, timeout_s, created_by, created_at, finished_at) VALUES (?, ?, '1.0.0', ?, 'read', 'finished', 0, 60, 'test', ?, ?)`,
-		id, trafficingest.ActionID, strings.Repeat("a", 64), finished.Unix()-1, finished.Unix()); err != nil {
+		id, action, strings.Repeat("a", 64), finished.Unix()-1, finished.Unix()); err != nil {
 		e.t.Fatal(err)
 	}
 	if _, err := e.db.Exec(`INSERT INTO execution_hosts (execution_id, host_id, fingerprint, credential_ref, endpoints,
 		state, class, exit_code, result, started_at, finished_at) VALUES (?, ?, 'fp', 'cred', '[]', 'finished', 'success', 0, ?, ?, ?)`,
 		id, host, result, finished.Unix()-1, finished.Unix()); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// run records a finished, successful net.facts run of host, as the
+// executions service stores it.
+func (e *trafficEnv) run(host string, finished time.Time, result []byte) {
+	e.runAction(trafficingest.ActionID, host, finished, result)
+}
+
+// expiredBucket inserts a flow bucket row directly, bypassing the
+// store's retention validation, so the hourly prune has something
+// expired to remove.
+func (e *trafficEnv) expiredBucket(hour int64) {
+	e.t.Helper()
+	if _, err := e.db.Exec(`INSERT INTO flow_buckets (hour, a, b, proto, server_port, server_side, tier, server_reported, reporter)
+		VALUES (?, '10.99.0.1', '10.99.0.2', 6, 22, 0, 'socket', 1, 'host-x')`, hour); err != nil {
 		e.t.Fatal(err)
 	}
 }
@@ -267,6 +290,11 @@ func TestTrafficLoopSyncsOnlyOnChange(t *testing.T) {
 	if !e.loop.check(ctx) {
 		t.Fatal("new result not synced")
 	}
+	// The mark change alone neither reconciles nor prunes: both stay
+	// bound to record changes and the clock hour.
+	if e.sync.last.Reconciled || e.sync.last.Pruned {
+		t.Fatalf("mark-change sync reconciled or pruned: %+v", e.sync.last)
+	}
 	// An inventory change.
 	h, err := e.inv.Get(ctx, "host-b")
 	if err != nil {
@@ -279,13 +307,78 @@ func TestTrafficLoopSyncsOnlyOnChange(t *testing.T) {
 	if !e.loop.check(ctx) {
 		t.Fatal("inventory change not synced")
 	}
+	// The changed records reconcile, but the prune stays hourly.
+	if !e.sync.last.Reconciled || e.sync.last.Pruned {
+		t.Fatalf("record-change sync: %+v", e.sync.last)
+	}
 	if e.loop.check(ctx) {
 		t.Fatal("synced twice")
 	}
+	// A bucket older than the retention, outside anything the store
+	// would accept: the hourly prune must remove it.
+	expired := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC).Unix() / 3600
+	e.expiredBucket(expired)
 	// The next clock hour (hourly reconcile and prune in the ingester).
 	e.now = e.now.Add(time.Hour)
 	if !e.loop.check(ctx) {
 		t.Fatal("hourly sync missing")
+	}
+	// The hourly Sync must have reconciled and pruned.
+	if !e.sync.last.Reconciled || !e.sync.last.Pruned {
+		t.Fatalf("hourly sync skipped reconcile or prune: %+v", e.sync.last)
+	}
+	var n int
+	if err := e.db.QueryRow(`SELECT COUNT(*) FROM flow_buckets WHERE hour = ?`, expired).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("expired bucket survived the hourly prune: %d rows", n)
+	}
+	if n := e.count("flow_buckets"); n < 1 {
+		t.Fatalf("prune removed the fresh buckets: %d left", n)
+	}
+}
+
+// TestNetFactsMarkPlanUsesActionIndex pins the 30 s change-mark query
+// to the idx_executions_action_id index: without it the planner scans
+// the whole executions table (or all of execution_hosts) on every
+// check, so the poll's cost grows with the retained history of every
+// action instead of only the net.facts runs.
+func TestNetFactsMarkPlanUsesActionIndex(t *testing.T) {
+	e := newTrafficEnv(t)
+	ctx := context.Background()
+	// Retained history: many runs of other actions plus a handful of
+	// net.facts runs, as in a lab that keeps its execution history.
+	for i := 0; i < 300; i++ {
+		e.runAction("reboot", fmt.Sprintf("host-%02d", i%10), tfT0.Add(time.Duration(i)*time.Second), nil)
+	}
+	for i := 0; i < 20; i++ {
+		e.run("host-a", tfT0.Add(time.Duration(i)*time.Hour), nil)
+	}
+	var details []string
+	rows, err := e.db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+netFactsMarkSQL, trafficingest.ActionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		details = append(details, detail)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	plan := strings.Join(details, "\n")
+	if !strings.Contains(plan, "idx_executions_action_id") {
+		t.Fatalf("mark query does not use the action index:\n%s", plan)
+	}
+	for _, d := range details {
+		if strings.HasPrefix(d, "SCAN e") {
+			t.Fatalf("mark query scans all executions:\n%s", plan)
+		}
 	}
 }
 

@@ -38,6 +38,11 @@ const (
 	MaxProviderTelemetryBudget = schedgrant.MaxTelemetryRunBudget
 	// MaxProviderMetricsTargets bounds the metrics targets per remote.
 	MaxProviderMetricsTargets = 64
+	// ProviderTelemetryMaxLiveTargets is the number of distinct metrics
+	// targets one remote serves live at a time (spec 12 "Visible-target
+	// requests"). The executor enforces it and the server sizes telemetry
+	// lease budgets from it, so both always use the same value.
+	ProviderTelemetryMaxLiveTargets = 4
 )
 
 // Metrics target kinds: the node itself, or one QEMU or LXC guest.

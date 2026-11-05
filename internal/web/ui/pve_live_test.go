@@ -86,10 +86,11 @@ func TestPVEDetailOffersLiveValuesWithDefaults(t *testing.T) {
 		`<input type="hidden" name="scope" value="provider_telemetry">`,
 		`<input type="hidden" name="remote" value="remote-a">`,
 		">Enable live values</button>",
-		// Default: every node and every running guest.
+		// Default: every node and every running guest. A guest posts the
+		// incarnation generation the page shows (1 in the fixture).
 		liveBox("p1/node/0", true), liveBox("p2/node/0", true),
-		liveBox("p1/qemu/101", true), liveBox("p2/qemu/103", true),
-		liveBox("p2/lxc/102", false),
+		liveBox("p1/qemu/101/1", true), liveBox("p2/qemu/103/1", true),
+		liveBox("p2/lxc/102/1", false),
 		`<script src="/static/formpost.js`,
 	} {
 		if !strings.Contains(page, want) {
@@ -235,7 +236,7 @@ func telemetryPreview() executions.ReadGrantPreview {
 	}
 }
 
-const pveLiveForm = "scope=provider_telemetry&remote=remote-a&days=7&target=p1/node/0&target=p1/qemu/101"
+const pveLiveForm = "scope=provider_telemetry&remote=remote-a&days=7&target=p1/node/0&target=p1/qemu/101/1"
 
 func TestPVELivePreviewProposesChosenTargets(t *testing.T) {
 	f := &fakeLeases{telemetryPreview: telemetryPreview()}
@@ -248,7 +249,7 @@ func TestPVELivePreviewProposesChosenTargets(t *testing.T) {
 		t.Fatalf("%d proposals", len(f.telemetryProposed))
 	}
 	in := f.telemetryProposed[0]
-	want := []executions.ProviderMetricsSelection{{Node: "p1", Kind: "node"}, {Node: "p1", Kind: "qemu", VMID: 101}}
+	want := []executions.ProviderMetricsSelection{{Node: "p1", Kind: "node"}, {Node: "p1", Kind: "qemu", VMID: 101, Generation: 1}}
 	if in.RemoteID != "remote-a" || in.Days != 7 || !slices.Equal(in.Targets, want) {
 		t.Fatalf("request %+v", in)
 	}
@@ -275,24 +276,62 @@ func TestPVELivePreviewProposesChosenTargets(t *testing.T) {
 	}
 }
 
+// TestPVELiveFormCarriesPageGeneration is the #294 review case on the UI
+// side: the checkbox carries the guest generation the page rendered, and a
+// post is forwarded with exactly that generation, never the inventory's
+// current one, so the service can refuse a guest recreated in between
+// (executions TestProposeProviderTelemetryGrantRefusesRecreatedGuest).
+func TestPVELiveFormCarriesPageGeneration(t *testing.T) {
+	g := pveGuestObs(204, pvecontract.GuestLXC, "p1", "re", pvecontract.GuestRunning)
+	g.Generation = 3
+	f := &fakeLeases{telemetryPreview: telemetryPreview()}
+	h := pveLiveHandler(t, f, g)
+	if page := getBody(t, h, "/pve/remote-a"); !strings.Contains(page, liveBox("p1/lxc/204/3", true)) {
+		t.Fatal("page does not post the stored generation 3 of guest 204")
+	}
+	// A page rendered before the guest was recreated posts its old
+	// generation 2; the request keeps it while the inventory now has 3.
+	code, body := postLeaseForm(t, h, "/leases/preview", "scope=provider_telemetry&remote=remote-a&days=7&target=p1/lxc/204/2")
+	if code != http.StatusSeeOther {
+		t.Fatalf("status %d: %s", code, body)
+	}
+	want := []executions.ProviderMetricsSelection{{Node: "p1", Kind: "lxc", VMID: 204, Generation: 2}}
+	if len(f.telemetryProposed) != 1 || !slices.Equal(f.telemetryProposed[0].Targets, want) {
+		t.Fatalf("request %+v, want the posted generation 2", f.telemetryProposed)
+	}
+	if !slices.Equal(f.telemetryResolved[0], []executions.TelemetryGuest{{VMID: 204, Generation: 3, Kind: "lxc", Node: "p1"}}) {
+		t.Fatalf("inventory %+v", f.telemetryResolved[0])
+	}
+}
+
 func TestPVELivePreviewRejections(t *testing.T) {
 	var many strings.Builder
 	for i := range 65 {
-		fmt.Fprintf(&many, "&target=p1/qemu/%d", 200+i)
+		fmt.Fprintf(&many, "&target=p1/qemu/%d/1", 200+i)
 	}
+	tooLargeGen := fmt.Sprintf("scope=provider_telemetry&remote=remote-a&days=7&target=p1/qemu/101/%d", pvecontract.MaxGuestGeneration+1)
 	for _, tc := range []struct{ name, form string }{
 		{"bad days", "scope=provider_telemetry&remote=remote-a&days=9&target=p1/node/0"},
 		{"no targets", "scope=provider_telemetry&remote=remote-a&days=7"},
 		{"too many", "scope=provider_telemetry&remote=remote-a&days=7" + many.String()},
 		{"node with vmid", "scope=provider_telemetry&remote=remote-a&days=7&target=p1/node/5"},
 		{"unknown kind", "scope=provider_telemetry&remote=remote-a&days=7&target=p1/docker/101"},
-		{"vmid not a number", "scope=provider_telemetry&remote=remote-a&days=7&target=p1/qemu/abc"},
-		{"vmid leading zero", "scope=provider_telemetry&remote=remote-a&days=7&target=p1/qemu/0101"},
-		{"vmid too small", "scope=provider_telemetry&remote=remote-a&days=7&target=p1/qemu/99"},
+		{"vmid not a number", "scope=provider_telemetry&remote=remote-a&days=7&target=p1/qemu/abc/1"},
+		{"vmid leading zero", "scope=provider_telemetry&remote=remote-a&days=7&target=p1/qemu/0101/1"},
+		{"vmid too small", "scope=provider_telemetry&remote=remote-a&days=7&target=p1/qemu/99/1"},
 		{"short key", "scope=provider_telemetry&remote=remote-a&days=7&target=p1/node"},
-		{"long key", "scope=provider_telemetry&remote=remote-a&days=7&target=p1/qemu/101/1"},
+		{"guest without generation", "scope=provider_telemetry&remote=remote-a&days=7&target=p1/qemu/101"},
+		{"guest generation zero", "scope=provider_telemetry&remote=remote-a&days=7&target=p1/qemu/101/0"},
+		{"guest generation empty", "scope=provider_telemetry&remote=remote-a&days=7&target=p1/qemu/101/"},
+		{"guest generation not a number", "scope=provider_telemetry&remote=remote-a&days=7&target=p1/qemu/101/x"},
+		{"guest generation leading zero", "scope=provider_telemetry&remote=remote-a&days=7&target=p1/qemu/101/01"},
+		{"guest generation signed", "scope=provider_telemetry&remote=remote-a&days=7&target=p1/qemu/101/%2B1"},
+		{"guest generation too large", tooLargeGen},
+		{"node with generation", "scope=provider_telemetry&remote=remote-a&days=7&target=p1/node/0/1"},
+		{"long key", "scope=provider_telemetry&remote=remote-a&days=7&target=p1/qemu/101/1/1"},
 		{"bad node", "scope=provider_telemetry&remote=remote-a&days=7&target=p%201/node/0"},
 		{"duplicate", "scope=provider_telemetry&remote=remote-a&days=7&target=p1/node/0&target=p1/node/0"},
+		{"same guest two generations", "scope=provider_telemetry&remote=remote-a&days=7&target=p1/qemu/101/1&target=p1/qemu/101/2"},
 		{"blocked remote", "scope=provider_telemetry&remote=remote-b&days=7&target=p1/node/0"},
 		{"unknown remote", "scope=provider_telemetry&remote=remote-x&days=7&target=p1/node/0"},
 		{"two remotes", "scope=provider_telemetry&remote=remote-a&remote=remote-c&days=7&target=p1/node/0"},

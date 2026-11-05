@@ -24,8 +24,10 @@ import (
 // permit.MaxProviderMetricsTargets). The form posts scope=provider_telemetry
 // to POST /leases/preview, which proposes a provider telemetry lease via
 // Leases.ProposeProviderTelemetryGrant and redirects to the same proposal
-// page as every other lease. The service resolves each chosen target
-// against the stored inventory (node, kind and current generation) and the
+// page as every other lease. A guest checkbox posts the incarnation
+// generation the page showed; the service checks each chosen target against
+// the stored inventory (node, kind and that generation: a guest recreated
+// since the page was loaded is refused, not re-bound) and the
 // executor's remote binding; nothing is read before the lease is approved
 // with the security key (or the hardened-mode CLI).
 
@@ -34,7 +36,9 @@ const pveLiveScope = permit.ProviderTelemetryProfile
 
 // pveLiveOption is the live-values checkbox of one node or guest row.
 type pveLiveOption struct {
-	// Value is the target key "<node>/<kind>/<vmid>" (VMID 0 for a node).
+	// Value is the posted target: "<node>/node/0" for a node,
+	// "<node>/<kind>/<vmid>/<generation>" for a guest, with the guest
+	// incarnation generation the page showed (pveLiveValue).
 	Value string
 	// Checked pre-selects the row (default selection).
 	Checked bool
@@ -98,7 +102,7 @@ func (h *Handler) pveLiveOptions(id string, d *pveDetailData, live map[string][]
 		if !ok {
 			continue
 		}
-		g.Live = pveLiveOption{Value: t.Key(), Status: pveLiveStatus(t.Key(), t.Generation, live, stale)}
+		g.Live = pveLiveOption{Value: pveLiveValue(t), Status: pveLiveStatus(t.Key(), t.Generation, live, stale)}
 		if g.Status == string(pvecontract.GuestRunning) {
 			g.Live.Checked = pick()
 		}
@@ -106,29 +110,56 @@ func (h *Handler) pveLiveOptions(id string, d *pveDetailData, live map[string][]
 	}
 }
 
-// parsePVELiveTarget parses one posted target key "<node>/<kind>/<vmid>".
+// pveLiveValue is the posted checkbox value of a valid metrics target: the
+// target key, plus "/<generation>" for a guest so the proposal can refuse a
+// guest recreated since the page was rendered.
+func pveLiveValue(t permit.ProviderMetricsTarget) string {
+	if t.Kind == permit.MetricsKindNode {
+		return t.Key()
+	}
+	return t.Key() + "/" + strconv.FormatUint(t.Generation, 10)
+}
+
+// parsePVELiveUint parses a canonical decimal (no sign, no leading zeros).
+func parsePVELiveUint(s string) (uint64, bool) {
+	v, err := strconv.ParseUint(s, 10, 64)
+	if err != nil || strconv.FormatUint(v, 10) != s {
+		return 0, false
+	}
+	return v, true
+}
+
+// parsePVELiveTarget parses one posted target, "<node>/node/0" for a node
+// or "<node>/<kind>/<vmid>/<generation>" for a guest (pveLiveValue). A
+// guest without the generation the page showed is refused.
 func parsePVELiveTarget(s string) (executions.ProviderMetricsSelection, bool) {
 	parts := strings.Split(s, "/")
-	if len(parts) != 3 || !pvecontract.ValidNodeName(parts[0]) {
+	if len(parts) < 3 || !pvecontract.ValidNodeName(parts[0]) {
 		return executions.ProviderMetricsSelection{}, false
 	}
-	vmid, err := strconv.ParseUint(parts[2], 10, 64)
-	if err != nil || strconv.FormatUint(vmid, 10) != parts[2] {
+	vmid, ok := parsePVELiveUint(parts[2])
+	if !ok {
 		return executions.ProviderMetricsSelection{}, false
 	}
+	m := executions.ProviderMetricsSelection{Node: parts[0], Kind: parts[1], VMID: vmid}
 	switch parts[1] {
 	case permit.MetricsKindNode:
-		if vmid != 0 {
+		if len(parts) != 3 || vmid != 0 {
 			return executions.ProviderMetricsSelection{}, false
 		}
 	case permit.MetricsKindQEMU, permit.MetricsKindLXC:
-		if vmid < pvecontract.MinVMID || vmid > pvecontract.MaxVMID {
+		if len(parts) != 4 || vmid < pvecontract.MinVMID || vmid > pvecontract.MaxVMID {
 			return executions.ProviderMetricsSelection{}, false
 		}
+		gen, ok := parsePVELiveUint(parts[3])
+		if !ok || gen < 1 || gen > pvecontract.MaxGuestGeneration {
+			return executions.ProviderMetricsSelection{}, false
+		}
+		m.Generation = gen
 	default:
 		return executions.ProviderMetricsSelection{}, false
 	}
-	return executions.ProviderMetricsSelection{Node: parts[0], Kind: parts[1], VMID: vmid}, true
+	return m, true
 }
 
 // checkPVELiveForm turns the posted live-values form into a request, or
@@ -157,10 +188,12 @@ func checkPVELiveForm(form map[string][]string, active map[string]bool) (executi
 	in := executions.ProviderTelemetryGrantRequest{RemoteID: id, Days: days}
 	for _, s := range raw {
 		m, ok := parsePVELiveTarget(s)
-		if !ok || seen[s] {
+		// Twice is by identity: the same guest with two generations too.
+		key := permit.ProviderMetricsTarget{Node: m.Node, Kind: m.Kind, VMID: m.VMID}.Key()
+		if !ok || seen[key] {
 			return executions.ProviderTelemetryGrantRequest{}, "a node or guest is malformed or chosen twice"
 		}
-		seen[s] = true
+		seen[key] = true
 		in.Targets = append(in.Targets, m)
 	}
 	return in, ""
