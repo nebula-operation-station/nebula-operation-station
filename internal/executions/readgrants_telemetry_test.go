@@ -344,3 +344,97 @@ func TestProposeProviderTelemetryGrantInventoryFailure(t *testing.T) {
 		t.Fatalf("no inventory: err %v, proposals %d", err, f.proposeCalls)
 	}
 }
+
+// telemetryDoc is an approved provider telemetry grant of remote
+// proxmoxbai with a node and a guest target, at the decode times.
+func telemetryDoc() permit.ReadGrantDoc {
+	d := providerDoc()
+	d.Trigger, d.RateProfile, d.MinIntervalS, d.RunBudget = permit.TriggerOnDemand, permit.ProviderTelemetryProfile, 10, 720
+	d.ProviderTargets = []permit.ProviderTarget{{RemoteID: "proxmoxbai", TrustPin: testPinA, TrustGeneration: 3, CredentialVersion: 7,
+		Methods: []string{permit.ProviderMethodMetrics}, MetricsTargets: []permit.ProviderMetricsTarget{
+			{Node: "pve1", Kind: "node"}, {Node: "pve1", Kind: "qemu", VMID: 101, Generation: 5}}}}
+	return d
+}
+
+// TestDecodeReadGrantShowsMetricsTargets pins that a telemetry lease view
+// carries its exact metrics targets in document order.
+func TestDecodeReadGrantShowsMetricsTargets(t *testing.T) {
+	v := decodeRaw(marshalDoc(t, telemetryDoc()))
+	if v.State != "active" || v.RateProfile != permit.ProviderTelemetryProfile || len(v.Providers) != 1 {
+		t.Fatalf("view %+v", v)
+	}
+	if !slices.Equal(v.Providers[0].MetricsTargets, telemetryDoc().ProviderTargets[0].MetricsTargets) {
+		t.Fatalf("metrics targets %+v", v.Providers[0].MetricsTargets)
+	}
+}
+
+// TestDecodeReadGrantRejectsMalformedMetricsTargets marks a grant invalid
+// when any rendered metrics target is malformed, repeated, too many, or on
+// a remote whose methods are not exactly "metrics".
+func TestDecodeReadGrantRejectsMalformedMetricsTargets(t *testing.T) {
+	cases := map[string]func(*permit.ProviderTarget){
+		"node with vmid": func(p *permit.ProviderTarget) { p.MetricsTargets[0].VMID = 101 },
+		"guest no gen":   func(p *permit.ProviderTarget) { p.MetricsTargets[1].Generation = 0 },
+		"bad kind":       func(p *permit.ProviderTarget) { p.MetricsTargets[1].Kind = "<b>" },
+		"bad node":       func(p *permit.ProviderTarget) { p.MetricsTargets[0].Node = "pve 1\n" },
+		"vmid range":     func(p *permit.ProviderTarget) { p.MetricsTargets[1].VMID = 5 },
+		"duplicate":      func(p *permit.ProviderTarget) { p.MetricsTargets[1] = p.MetricsTargets[0] },
+		"same key new gen": func(p *permit.ProviderTarget) {
+			extra := p.MetricsTargets[1]
+			extra.Generation++
+			p.MetricsTargets = append(p.MetricsTargets, extra)
+		},
+		"read methods": func(p *permit.ProviderTarget) { p.Methods = []string{"nodes"} },
+		"extra method": func(p *permit.ProviderTarget) { p.Methods = []string{"metrics", "nodes"} },
+		"too many": func(p *permit.ProviderTarget) {
+			for i := range uint64(permit.MaxProviderMetricsTargets) {
+				p.MetricsTargets = append(p.MetricsTargets, permit.ProviderMetricsTarget{Node: "pve1", Kind: "lxc", VMID: 1000 + i, Generation: 1})
+			}
+		},
+	}
+	for name, mutate := range cases {
+		d := telemetryDoc()
+		mutate(&d.ProviderTargets[0])
+		wantInvalid(t, name, decodeRaw(marshalDoc(t, d)))
+	}
+}
+
+// TestReadGrantsMarksProviderBinding compares every frozen remote with the
+// executor's registry: matching pin, generation and read credential version
+// is current; a re-pinned, rotated or removed remote is stale; without the
+// registry the binding is unknown.
+func TestReadGrantsMarksProviderBinding(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*pb.PVEAdminRemote)
+		err    error
+		want   string
+	}{
+		{"current", nil, nil, ProviderBindingCurrent},
+		{"re-pinned", func(r *pb.PVEAdminRemote) { r.TrustGeneration, r.TrustPin = 4, testPinB }, nil, ProviderBindingStale},
+		{"generation only", func(r *pb.PVEAdminRemote) { r.TrustGeneration = 4 }, nil, ProviderBindingStale},
+		{"token rotated", func(r *pb.PVEAdminRemote) { r.ReadVersion = 8 }, nil, ProviderBindingStale},
+		{"removed", func(r *pb.PVEAdminRemote) { r.RemoteId = "gone" }, nil, ProviderBindingStale},
+		{"registry down", nil, errors.New("down"), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newProviderFake()
+			for _, r := range f.remotes {
+				if r.RemoteId == "proxmoxbai" && tc.mutate != nil {
+					tc.mutate(r)
+				}
+			}
+			f.remoteErr = tc.err
+			f.grants = []*pb.ReadGrant{pbGrant(decodeStored, decodeExpiry, time.Time{}, marshalDoc(t, telemetryDoc()))}
+			s := providerService(t, f)
+			s.now = func() time.Time { return decodeNow }
+			views, err := s.ReadGrants(context.Background())
+			if err != nil || len(views) != 1 || len(views[0].Providers) != 1 {
+				t.Fatalf("views %+v err %v", views, err)
+			}
+			if got := views[0].Providers[0].Binding; got != tc.want {
+				t.Fatalf("binding %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

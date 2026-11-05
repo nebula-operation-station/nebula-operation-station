@@ -298,11 +298,30 @@ type ReadGrantProviderView struct {
 	CredentialVersion int64
 	// Methods are the document's methods in document order.
 	Methods []string
+	// MetricsTargets are the exact metrics targets of a provider telemetry
+	// lease in document order; empty for a provider read lease.
+	MetricsTargets []permit.ProviderMetricsTarget
+	// Binding compares the frozen trust pin, trust generation and read
+	// credential version with the executor's current registry entry:
+	// ProviderBindingCurrent, ProviderBindingStale (the remote was re-pinned
+	// or removed, or its read token was rotated: the lease no longer covers
+	// any read) or "" when the registry could not be read.
+	Binding string
+	// trustPin is the full frozen trust pin (only its prefix is rendered).
+	trustPin string
 }
+
+// Provider lease bindings (ReadGrantProviderView.Binding).
+const (
+	ProviderBindingCurrent = "current"
+	ProviderBindingStale   = "stale"
+)
 
 // providerView checks one provider target of an executor-held document
 // (untrusted input) and returns its list view. Every rendered member must
-// be well formed; anything else makes the whole grant invalid.
+// be well formed; anything else makes the whole grant invalid. Metrics
+// targets belong to a remote whose only method is "metrics"; each must be
+// a valid target, listed once, at most permit.MaxProviderMetricsTargets.
 func providerView(p permit.ProviderTarget) (ReadGrantProviderView, bool) {
 	if !pvecontract.ValidRemoteID(p.RemoteID) || !pvecontract.ValidTrustPin(p.TrustPin) ||
 		p.TrustGeneration < 1 || p.CredentialVersion < 1 || len(p.Methods) == 0 {
@@ -315,8 +334,49 @@ func providerView(p permit.ProviderTarget) (ReadGrantProviderView, bool) {
 		}
 		seen[m] = true
 	}
+	if len(p.MetricsTargets) > 0 {
+		if !slices.Equal(p.Methods, []string{permit.ProviderMethodMetrics}) || len(p.MetricsTargets) > permit.MaxProviderMetricsTargets {
+			return ReadGrantProviderView{}, false
+		}
+		keys := map[string]bool{}
+		for _, m := range p.MetricsTargets {
+			if !m.Valid() || keys[m.Key()] {
+				return ReadGrantProviderView{}, false
+			}
+			keys[m.Key()] = true
+		}
+	}
 	return ReadGrantProviderView{RemoteID: p.RemoteID, PinPrefix: p.TrustPin[:providerPinPrefixLen],
-		TrustGeneration: p.TrustGeneration, CredentialVersion: p.CredentialVersion, Methods: slices.Clone(p.Methods)}, true
+		TrustGeneration: p.TrustGeneration, CredentialVersion: p.CredentialVersion, Methods: slices.Clone(p.Methods),
+		MetricsTargets: slices.Clone(p.MetricsTargets), trustPin: p.TrustPin}, true
+}
+
+// markProviderBindings sets the Binding of every provider remote of views
+// from the executor's registry. Without a registry listing the bindings
+// stay unknown (""): unknown is never reported as current or stale.
+func (s *Service) markProviderBindings(ctx context.Context, views []ReadGrantView) {
+	if !slices.ContainsFunc(views, func(v ReadGrantView) bool { return len(v.Providers) > 0 }) {
+		return
+	}
+	lister, ok := s.exec.(providerRemoteLister)
+	if !ok {
+		return
+	}
+	known, err := s.providerRemotes(ctx, lister)
+	if err != nil {
+		return
+	}
+	for i := range views {
+		for j := range views[i].Providers {
+			p := &views[i].Providers[j]
+			rm, ok := known[p.RemoteID]
+			if ok && rm.GetTrustPin() == p.trustPin && rm.GetTrustGeneration() == p.TrustGeneration && rm.GetReadVersion() == p.CredentialVersion {
+				p.Binding = ProviderBindingCurrent
+			} else {
+				p.Binding = ProviderBindingStale
+			}
+		}
+	}
 }
 
 // ProviderRefresh returns the pre-filled request for a new provider lease
