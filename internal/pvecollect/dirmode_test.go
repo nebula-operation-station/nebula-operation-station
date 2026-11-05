@@ -45,6 +45,7 @@ func TestEnsureDirModeLeavesProvisionedModeAlone(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "d")
 	want := os.FileMode(0o770) | os.ModeSetgid
 	mkdirMode(t, dir, want)
+	expectTempDirOwnership(t, dir)
 	blockSetgidChmod(t)
 	if err := ensureDirMode(openDir(t, dir), want); err != nil {
 		t.Fatalf("ensureDirMode on a provisioned directory: %v", err)
@@ -54,6 +55,7 @@ func TestEnsureDirModeLeavesProvisionedModeAlone(t *testing.T) {
 func TestEnsureDirModeRepairsWrongMode(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "d")
 	mkdirMode(t, dir, 0o700)
+	expectTempDirOwnership(t, dir)
 	want := os.FileMode(0o770) | os.ModeSetgid
 	if err := ensureDirMode(openDir(t, dir), want); err != nil {
 		t.Fatal(err)
@@ -70,6 +72,7 @@ func TestEnsureDirModeRepairsWrongMode(t *testing.T) {
 func TestEnsureDirModeExplainsBlockedChmod(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "d")
 	mkdirMode(t, dir, 0o700)
+	expectTempDirOwnership(t, dir)
 	blockSetgidChmod(t)
 	err := ensureDirMode(openDir(t, dir), os.FileMode(0o770)|os.ModeSetgid)
 	if !errors.Is(err, unix.EPERM) || !strings.Contains(err.Error(), "install.sh") {
@@ -103,6 +106,19 @@ func dirOwner(t *testing.T, path string) (uint32, uint32) {
 		t.Fatal(err)
 	}
 	return st.Uid, st.Gid
+}
+
+// expectTempDirOwnership makes ensureDirMode expect the owner of dir, which
+// is the owner of every directory created inside dir (a new directory gets
+// the process's primary GID, or the parent's GID under a setgid parent).
+// Without the stub, defaultSpoolOwnership expects the nebula-rpc GID on
+// hosts where the test user is a member of that group, and the TempDir
+// directories fail the ownership check; the stub keeps the tests
+// independent of the host's group database.
+func expectTempDirOwnership(t *testing.T, dir string) {
+	t.Helper()
+	uid, gid := dirOwner(t, dir)
+	expectOwnership(t, uid, gid)
 }
 
 // foreignDir returns a directory owned by a UID other than the test's:
@@ -214,6 +230,7 @@ func TestEnsureDirModeRejectsSupersetModeWhenChmodBlocked(t *testing.T) {
 		if got := mustMode(t, dir); got != mode {
 			t.Fatalf("setup: mode = %v, want %v", got, mode)
 		}
+		expectTempDirOwnership(t, dir)
 		orig := chmodDir
 		chmodDir = func(*os.File, os.FileMode) error { return unix.EPERM }
 		err := ensureDirMode(openDir(t, dir), want)
@@ -231,6 +248,7 @@ func TestEnsureDirModeRepairsSupersetModeExactly(t *testing.T) {
 	for _, mode := range supersetModes {
 		dir := filepath.Join(t.TempDir(), "d")
 		mkdirMode(t, dir, mode)
+		expectTempDirOwnership(t, dir)
 		if err := ensureDirMode(openDir(t, dir), want); err != nil {
 			t.Fatalf("mode %v: %v", mode, err)
 		}
@@ -277,6 +295,7 @@ func mustMode(t *testing.T, path string) os.FileMode {
 func TestSpoolsOpenUnderSetgidRestriction(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "pve")
 	mkdirMode(t, root, spoolRootMode)
+	expectTempDirOwnership(t, root)
 	mkdirMode(t, filepath.Join(root, resultsDirName), spoolDirMode)
 	mkdirMode(t, filepath.Join(root, guestNetDirName), spoolDirMode)
 	mkdirMode(t, filepath.Join(root, requestsDirName), requestsDirMode)

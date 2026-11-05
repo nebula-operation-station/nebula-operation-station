@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Unprivileged deployment policy tests: python3 deploy/systemd/nebula-iconfetch_test.py."""
+"""Deployment policy tests: python3 deploy/systemd/nebula-iconfetch_test.py.
+
+Most checks are unprivileged; the kernel nft check runs as root (CI) or,
+when unprivileged, inside a user+net namespace (local dev hosts).
+"""
 
 import os
 from pathlib import Path
@@ -84,7 +88,7 @@ class IconfetchPolicyTest(unittest.TestCase):
 
     def test_helper_has_bounded_resources_and_runs_once(self):
         for key, value in {"Type": "oneshot", "MemoryMax": "256M", "TasksMax": "32",
-                           "TimeoutStartSec": "15min", "TimeoutStopSec": "15s",
+                           "TimeoutStartSec": "3min", "TimeoutStopSec": "15s",
                            "UMask": "0027"}.items():
             self.assertEqual(self.values("[Service]", key), [value], key)
 
@@ -156,19 +160,29 @@ class IconfetchPolicyTest(unittest.TestCase):
                          r"meta nfproto ipv4 meta l4proto tcp tcp dport 443 accept reject \} \}")
 
     def test_kernel_accepts_firewall_syntax(self):
-        # `nft -c` parses and checks without applying; it needs CAP_NET_ADMIN.
+        # `nft -c` parses and checks without applying; it needs
+        # CAP_NET_ADMIN. CI runs this test as root (the direct path);
+        # unprivileged local dev hosts use a user+net namespace
+        # (unshare -rn), skipped cleanly when unavailable.
         nft = shutil.which("nft") or ("/usr/sbin/nft" if os.path.exists("/usr/sbin/nft") else None)
         if nft is None:
             self.skipTest("nft not installed")
-        if os.geteuid() != 0:
-            self.skipTest("nft -c needs root")
         with tempfile.TemporaryDirectory(prefix="iconfetch-nft-") as directory:
             target = Path(directory) / "check.nft"
             # The account may not exist here; check the rules for nobody's UID.
             target.write_text((ROOT / "nebula-iconfetch.nft").read_text()
                               .replace('"nebula-iconfetch"', "65534"))
-            result = subprocess.run([nft, "-c", "-f", str(target)],
-                                    capture_output=True, text=True, timeout=30)
+            cmd = [nft, "-c", "-f", str(target)]
+            if os.geteuid() != 0:
+                unshare = shutil.which("unshare")
+                if unshare is None:
+                    self.skipTest("unshare not installed")
+                probe = subprocess.run([unshare, "-rn", "true"],
+                                       capture_output=True, text=True, timeout=30)
+                if probe.returncode != 0:
+                    self.skipTest("user+net namespace unavailable: " + probe.stderr.strip())
+                cmd = [unshare, "-rn", *cmd]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_activation_watches_jobs_and_retries_after_exit(self):

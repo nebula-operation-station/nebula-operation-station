@@ -29,7 +29,12 @@ jobs:
       - run: make fmt-check
       - run: go vet ./...
       - run: make test
-      - run: make test-deploy
+      # The kernel nft check needs CAP_NET_ADMIN, and GitHub's
+      # ubuntu-24.04 runners block unprivileged user namespaces, so the
+      # deploy tests run as root there; the test's unshare fallback
+      # covers local dev hosts.
+      - run: sudo apt-get update && sudo apt-get install -y nftables
+      - run: sudo -E env "PATH=$PATH" make test-deploy
       - name: Privileged security tests (multi-UID)
         run: sudo -E env "PATH=$PATH" make test-privileged
 

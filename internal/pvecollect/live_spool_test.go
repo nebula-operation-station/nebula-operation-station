@@ -41,7 +41,9 @@ func testSamples(remote string) pvecontract.LiveSamples {
 
 func newTestHandoff(t *testing.T) *LiveHandoff {
 	t.Helper()
-	h, err := NewLiveHandoff(t.TempDir())
+	root := t.TempDir()
+	expectTempDirOwnership(t, root)
+	h, err := NewLiveHandoff(root)
 	if err != nil {
 		t.Fatalf("NewLiveHandoff: %v", err)
 	}
