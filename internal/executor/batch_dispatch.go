@@ -311,7 +311,13 @@ func (x *batchExec) setCall(executionID string, c *batchMemberCall) {
 // statuses and nothing ran.
 // After the claim every outcome is a response; the member is never run
 // again, whatever the outcome.
+//
+// A request with not_executed_reason is the server's report that it cannot
+// hand the member over (reportBatchMemberNotExecuted): nothing runs.
 func (s *Service) RunBatchMember(ctx context.Context, req *pb.RunBatchMemberRequest) (*pb.RunBatchMemberResponse, error) {
+	if req.GetNotExecutedReason() != "" {
+		return s.reportBatchMemberNotExecuted(ctx, req)
+	}
 	d, eps, timeout, err := validateRunBatchMember(req)
 	if err != nil {
 		return nil, err
