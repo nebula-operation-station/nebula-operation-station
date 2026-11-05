@@ -567,6 +567,19 @@ func TestIngestRefusesFutureFinishTime(t *testing.T) {
 	if h := hostResult(t, res, "host-a"); h.Outcome != OutcomeInvalid {
 		t.Fatalf("result = %+v", h)
 	}
+	// The unusable time does not hold back the next valid result.
+	e.run("host-a", t0.Add(time.Minute), netFactsDoc(t, "host-a", "ss-t0.txt"))
+	e.now = t0.Add(2 * time.Minute)
+	// The future run is still the latest; once the clock passes it, it is
+	// already marked seen and stays unchanged instead of being ingested.
+	if h := hostResult(t, e.sync(), "host-a"); h.Outcome != OutcomeUnchanged {
+		t.Fatalf("future run retried: %+v", h)
+	}
+	e.now = t0.Add(2 * time.Hour)
+	e.run("host-a", t0.Add(2*time.Hour-time.Minute), netFactsDoc(t, "host-a", "ss-t1.txt"))
+	if h := hostResult(t, e.sync(), "host-a"); h.Outcome != OutcomeBaseline {
+		t.Fatalf("valid result after unusable time = %+v", h)
+	}
 }
 
 func TestIngestHostileNeighborEntriesAreDropped(t *testing.T) {

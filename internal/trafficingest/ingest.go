@@ -320,13 +320,13 @@ func (in *Ingester) ingestHost(ctx context.Context, host string, own trafficstor
 	if res.Finished.IsZero() || res.Finished.After(now.Add(maxResultSkew)) {
 		hr.Outcome = OutcomeInvalid
 		hr.Err = fmt.Errorf("execution %s: finish time %s not usable", res.ExecutionID, res.Finished.UTC().Format(time.RFC3339))
-		in.markSeen(host, res, nil, HostNet{Reporter: host})
+		in.markInvalid(host, res.ExecutionID, prev)
 		return hr
 	}
 	facts, err := nfresult.Decode(res.Data)
 	if err != nil {
 		hr.Outcome, hr.Err = OutcomeInvalid, fmt.Errorf("execution %s: %w", res.ExecutionID, err)
-		in.markSeen(host, res, nil, HostNet{Reporter: host})
+		in.markInvalid(host, res.ExecutionID, prev)
 		return hr
 	}
 	hr.Incomplete = facts.Incomplete()
@@ -397,6 +397,18 @@ func (in *Ingester) ingestHost(ctx context.Context, host string, own trafficstor
 		hr.Err = fmt.Errorf("execution %s: %w", res.ExecutionID, err)
 	}
 	return hr
+}
+
+// markInvalid records an unusable execution so it is not retried every
+// round. The time cursor stays where it was (an unusable time must not
+// make later results look stale) and the next usable socket table is a
+// baseline.
+func (in *Ingester) markInvalid(host, execID string, prev *hostState) {
+	st := &hostState{execID: execID, net: HostNet{Reporter: host}}
+	if prev != nil {
+		st.at, st.net = prev.at, prev.net
+	}
+	in.hosts[host] = st
 }
 
 func (in *Ingester) markSeen(host string, res Result, snap *flowagg.Snapshot, hn HostNet) {
