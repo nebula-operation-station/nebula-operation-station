@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 )
 
 // Read lease proposals (ADR 0007 E06, part 3). GET /leases/new shows the
@@ -64,6 +65,7 @@ type Leases interface {
 	RevokeReadGrant(ctx context.Context, user, id string) error
 	ProposeReadGrant(ctx context.Context, user string, in executions.ReadGrantRequest) (executions.ReadGrantPreview, error)
 	ProposeProviderReadGrant(ctx context.Context, user string, in executions.ProviderReadGrantRequest) (executions.ReadGrantPreview, error)
+	ProposeProviderTelemetryGrant(ctx context.Context, user string, in executions.ProviderTelemetryGrantRequest, inv executions.TelemetryInventory) (executions.ReadGrantPreview, error)
 	CommitReadGrant(ctx context.Context, user, digest string, assertion []byte) error
 }
 
@@ -183,6 +185,10 @@ type leaseNewData struct {
 	// Provider is set on the proposal page of a provider lease.
 	Provider    bool
 	RemoteCount int
+	// Telemetry is set on the proposal page of a provider telemetry lease
+	// (live values); TargetCount counts its metrics targets.
+	Telemetry   bool
+	TargetCount int
 }
 
 // leaseRefreshURL is the form URL pre-filled with a grant's scope, or ""
@@ -315,8 +321,12 @@ func (h *Handler) handleLeasePreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "the form could not be read", http.StatusBadRequest)
 		return
 	}
-	if r.PostFormValue("scope") == executions.ScopeProvider {
+	switch r.PostFormValue("scope") {
+	case executions.ScopeProvider:
 		h.handleProviderLeasePreview(w, r)
+		return
+	case pveLiveScope:
+		h.handlePVELivePreview(w, r)
 		return
 	}
 	days, err := strconv.Atoi(r.PostFormValue("days"))
@@ -387,7 +397,15 @@ func (h *Handler) handleLeaseProposal(w http.ResponseWriter, r *http.Request) {
 	v := p.preview
 	d := &leaseNewData{Preview: &v, HostCount: len(v.Targets), ActionCount: len(v.Actions),
 		MinInterval: formatScheduleInterval(v.MinInterval),
-		Provider:    v.ScopeKind == executions.ScopeProvider || len(v.Providers) > 0, RemoteCount: len(v.Providers)}
+		Provider:    v.ScopeKind == executions.ScopeProvider || len(v.Providers) > 0, RemoteCount: len(v.Providers),
+		Telemetry: v.RateProfile == permit.ProviderTelemetryProfile}
+	for _, p := range v.Providers {
+		d.TargetCount += len(p.MetricsTargets)
+	}
+	if v.MinInterval > 0 && v.MinInterval < time.Minute {
+		// The live interval (10 s) is below the schedule format's minute.
+		d.MinInterval = v.MinInterval.String()
+	}
 	data := pageData{Title: "Approve read lease", Active: "operations", Content: "lease_new", LeaseNew: d}
 	if v.CLI {
 		d.CLICommand = leaseCLICommand + v.Digest
