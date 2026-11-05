@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
@@ -67,8 +68,10 @@ func nodeSel(n string) ProviderMetricsSelection {
 	return ProviderMetricsSelection{Node: n, Kind: permit.MetricsKindNode}
 }
 
-func guestSel(n, kind string, vmid uint64) ProviderMetricsSelection {
-	return ProviderMetricsSelection{Node: n, Kind: kind, VMID: vmid}
+// guestSel is a guest row as the page posts it, with the generation the
+// page showed.
+func guestSel(n, kind string, vmid, gen uint64) ProviderMetricsSelection {
+	return ProviderMetricsSelection{Node: n, Kind: kind, VMID: vmid, Generation: gen}
 }
 
 // TestProposeProviderTelemetryGrantBuildsExactDoc pins every member of the
@@ -82,7 +85,7 @@ func TestProposeProviderTelemetryGrantBuildsExactDoc(t *testing.T) {
 	s.log = slog.New(slog.NewTextHandler(&audit, nil))
 	v, err := s.ProposeProviderTelemetryGrant(context.Background(), "alice", ProviderTelemetryGrantRequest{
 		RemoteID: "proxmoxbai", Days: ReadGrantShortDays,
-		Targets: []ProviderMetricsSelection{guestSel("pve2", "lxc", 102), nodeSel("pve1"), guestSel("pve1", "qemu", 101)},
+		Targets: []ProviderMetricsSelection{guestSel("pve2", "lxc", 102, 1), nodeSel("pve1"), guestSel("pve1", "qemu", 101, 5)},
 	}, inv)
 	if err != nil {
 		t.Fatal(err)
@@ -153,6 +156,26 @@ func TestProviderTelemetryBudget(t *testing.T) {
 	}
 }
 
+// TestProviderTelemetryBudgetCoversExecutorLiveCap ties the lease budget to
+// the executor's live-target cap (the shared
+// permit.ProviderTelemetryMaxLiveTargets): a lease with at least that many
+// targets must afford every live target one read per live interval for a
+// whole hour, unless the permit ceiling caps it. Raising the executor's cap
+// therefore cannot leave leases undersized.
+func TestProviderTelemetryBudgetCoversExecutorLiveCap(t *testing.T) {
+	if providerTelemetryLiveTargets != permit.ProviderTelemetryMaxLiveTargets {
+		t.Fatalf("lease live targets %d, executor cap %d", providerTelemetryLiveTargets, permit.ProviderTelemetryMaxLiveTargets)
+	}
+	perTarget := int64(time.Hour / permit.ProviderTelemetryLiveInterval)
+	for n := 1; n <= permit.MaxProviderMetricsTargets; n++ {
+		live := int64(min(n, permit.ProviderTelemetryMaxLiveTargets))
+		want := min(live*perTarget, permit.MaxProviderTelemetryBudget)
+		if got := providerTelemetryBudget(n); got < want {
+			t.Fatalf("budget(%d) = %d, below %d live targets x %d reads", n, got, live, perTarget)
+		}
+	}
+}
+
 // TestProposeProviderTelemetryGrantMaxTargets proposes the largest allowed
 // lease and refuses one target more before the executor is asked.
 func TestProposeProviderTelemetryGrantMaxTargets(t *testing.T) {
@@ -160,7 +183,7 @@ func TestProposeProviderTelemetryGrantMaxTargets(t *testing.T) {
 	sel := []ProviderMetricsSelection{nodeSel("pve1")}
 	for i := range uint64(permit.MaxProviderMetricsTargets) {
 		inv.guests = append(inv.guests, TelemetryGuest{VMID: 200 + i, Generation: 1, Kind: "qemu", Node: "pve1"})
-		sel = append(sel, guestSel("pve1", "qemu", 200+i))
+		sel = append(sel, guestSel("pve1", "qemu", 200+i, 1))
 	}
 	_, err := s.ProposeProviderTelemetryGrant(context.Background(), "alice", ProviderTelemetryGrantRequest{
 		RemoteID: "proxmoxbai", Days: ReadGrantShortDays, Targets: sel}, inv)
@@ -182,16 +205,27 @@ func TestProposeProviderTelemetryGrantMaxTargets(t *testing.T) {
 	}
 }
 
-// TestProposeProviderTelemetryGrantBindsCurrentGeneration shows that the
-// generation comes from the current imported inventory: a recreated guest
-// (same VMID, new incarnation) is bound with its new generation, and a
-// guest that left the inventory is refused.
-func TestProposeProviderTelemetryGrantBindsCurrentGeneration(t *testing.T) {
+// TestProposeProviderTelemetryGrantRefusesRecreatedGuest is the #294
+// review case: the page showed guest 101 with generation 5, then the guest
+// was recreated (same VMID, kind and node, generation 6) before the form was
+// posted. The stale post is refused and never re-bound to the new
+// incarnation; a post from a reloaded page (generation 6) binds generation
+// 6. A guest that left the inventory is refused.
+func TestProposeProviderTelemetryGrantRefusesRecreatedGuest(t *testing.T) {
 	f, s, inv := telemetryFixture(t)
 	// The next inventory pass: 101 was recreated, 103 is gone.
 	inv.guests = []TelemetryGuest{{VMID: 101, Generation: 6, Kind: "qemu", Node: "pve1"}, {VMID: 102, Generation: 1, Kind: "lxc", Node: "pve2"}}
+	_, err := s.ProposeProviderTelemetryGrant(context.Background(), "alice", ProviderTelemetryGrantRequest{
+		RemoteID: "proxmoxbai", Days: ReadGrantShortDays, Targets: []ProviderMetricsSelection{nodeSel("pve1"), guestSel("pve1", "qemu", 101, 5)}}, inv)
+	var ie *ReadGrantInputError
+	if !errors.As(err, &ie) || !strings.Contains(ie.Reason, "recreated since the page was loaded") {
+		t.Fatalf("stale generation: err %v, want a recreated-guest refusal", err)
+	}
+	if f.proposeCalls != 0 {
+		t.Fatal("a stale generation reached the executor")
+	}
 	if _, err := s.ProposeProviderTelemetryGrant(context.Background(), "alice", ProviderTelemetryGrantRequest{
-		RemoteID: "proxmoxbai", Days: ReadGrantShortDays, Targets: []ProviderMetricsSelection{guestSel("pve1", "qemu", 101)}}, inv); err != nil {
+		RemoteID: "proxmoxbai", Days: ReadGrantShortDays, Targets: []ProviderMetricsSelection{guestSel("pve1", "qemu", 101, 6)}}, inv); err != nil {
 		t.Fatal(err)
 	}
 	got := f.sent.ProviderTargets[0].MetricsTargets
@@ -199,9 +233,8 @@ func TestProposeProviderTelemetryGrantBindsCurrentGeneration(t *testing.T) {
 		t.Fatalf("bound %+v, want generation 6", got)
 	}
 	calls := f.proposeCalls
-	_, err := s.ProposeProviderTelemetryGrant(context.Background(), "alice", ProviderTelemetryGrantRequest{
-		RemoteID: "proxmoxbai", Days: ReadGrantShortDays, Targets: []ProviderMetricsSelection{guestSel("pve2", "qemu", 103)}}, inv)
-	var ie *ReadGrantInputError
+	_, err = s.ProposeProviderTelemetryGrant(context.Background(), "alice", ProviderTelemetryGrantRequest{
+		RemoteID: "proxmoxbai", Days: ReadGrantShortDays, Targets: []ProviderMetricsSelection{guestSel("pve2", "qemu", 103, 2)}}, inv)
 	if !errors.As(err, &ie) || f.proposeCalls != calls {
 		t.Fatalf("removed guest: err %v", err)
 	}
@@ -222,11 +255,15 @@ func TestProposeProviderTelemetryGrantRefusals(t *testing.T) {
 		{"unknown node", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{nodeSel("pve9")}}, nil},
 		{"malformed node", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{nodeSel("pve_1/x")}}, nil},
 		{"node with vmid", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{{Node: "pve1", Kind: "node", VMID: 101}}}, nil},
-		{"unknown kind", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{guestSel("pve1", "docker", 101)}}, nil},
-		{"guest vmid out of range", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{guestSel("pve1", "qemu", 99)}}, nil},
-		{"guest not in inventory", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{guestSel("pve1", "qemu", 150)}}, nil},
-		{"guest kind changed", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{guestSel("pve1", "lxc", 101)}}, nil},
-		{"guest moved", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{guestSel("pve2", "qemu", 101)}}, nil},
+		{"node with generation", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{{Node: "pve1", Kind: "node", Generation: 1}}}, nil},
+		{"unknown kind", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{guestSel("pve1", "docker", 101, 5)}}, nil},
+		{"guest vmid out of range", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{guestSel("pve1", "qemu", 99, 1)}}, nil},
+		{"guest without generation", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{guestSel("pve1", "qemu", 101, 0)}}, nil},
+		{"guest generation out of range", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{guestSel("pve1", "qemu", 101, pvecontract.MaxGuestGeneration+1)}}, nil},
+		{"guest not in inventory", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{guestSel("pve1", "qemu", 150, 1)}}, nil},
+		{"guest kind changed", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{guestSel("pve1", "lxc", 101, 5)}}, nil},
+		{"guest moved", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{guestSel("pve2", "qemu", 101, 5)}}, nil},
+		{"guest recreated", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{guestSel("pve1", "qemu", 101, 4)}}, nil},
 		{"duplicate", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{nodeSel("pve1"), nodeSel("pve1")}}, nil},
 		{"remote blocked", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{nodeSel("pve1")}},
 			func(r *pb.PVEAdminRemote) { r.State = "blocked" }},
@@ -293,7 +330,7 @@ func TestProposeProviderTelemetryGrantRejectsAlteredAnswer(t *testing.T) {
 			}
 			_, err := s.ProposeProviderTelemetryGrant(context.Background(), "alice", ProviderTelemetryGrantRequest{
 				RemoteID: "proxmoxbai", Days: ReadGrantShortDays,
-				Targets: []ProviderMetricsSelection{nodeSel("pve1"), guestSel("pve1", "qemu", 101)}}, inv)
+				Targets: []ProviderMetricsSelection{nodeSel("pve1"), guestSel("pve1", "qemu", 101, 5)}}, inv)
 			if !errors.Is(err, ErrReadGrantProposalMismatch) {
 				t.Fatalf("err = %v, want mismatch", err)
 			}

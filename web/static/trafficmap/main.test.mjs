@@ -80,6 +80,9 @@ function fakeGL(state, fail) {
       state.instancedDraws++;
       if (fail.gl) throw new Error("fake GL failure");
     },
+    clear() {
+      state.clears++;
+    },
     bufferData() {
       state.bufferDataCalls++;
       const up = fail.upload;
@@ -134,7 +137,7 @@ class FakeCanvas extends FakeElement {
     super(doc, "canvas");
     this.env = env;
     this.kind = null;
-    this.glState = { lost: false, released: false, bufferDataCalls: 0, instancedDraws: 0 };
+    this.glState = { lost: false, released: false, bufferDataCalls: 0, instancedDraws: 0, clears: 0 };
   }
   getContext(type) {
     if (this.kind !== null && this.kind !== type) return null;
@@ -643,6 +646,55 @@ test("BackedOffFramesUnderReducedMotionAreNotFailures", () => {
   assert.equal(h.backendMessages().length, 1);
   assert.equal(h.status(), STATUS.webgl, "the retried rebuild recovers on WebGL2");
   assert.equal(h.errorMessages().length, 1);
+  h.map.stop();
+});
+
+test("FastModelUpdatesKeepGrowingTheRebuildBackoff", () => {
+  const b = flakyBuild(() => true);
+  const h = setup({ webgl: false, build: b.build });
+  // Models arrive every frame while every rebuild fails. Each new model may
+  // be rebuilt right away, but the failure streak must keep growing, so the
+  // backoff applied after each failure grows instead of restarting at the
+  // base delay.
+  for (let i = 0; i < 4; i++) {
+    h.sendModel();
+    h.tick(1);
+  }
+  assert.equal(b.calls, 4, "one attempt per model");
+  const before = b.calls;
+  // Four consecutive failures push the backoff to 100*2^3 = 800 ms. The
+  // base delay of 100 ms (the old behaviour, streak reset on every model)
+  // has long passed without a retry.
+  h.advance(REBUILD_BACKOFF_BASE_MS + 32);
+  assert.equal(b.calls, before, "the retry waits for the grown backoff, not the base delay");
+  h.advance(rebuildBackoffMs(4) + 16);
+  assert.equal(b.calls, before + 1, "the retry comes after the grown backoff");
+  h.map.stop();
+});
+
+test("ReducedMotionClearsAnIncompleteFrameOnce", () => {
+  const h = setup({ reducedMotion: true });
+  h.sendModel();
+  h.tick(1);
+  const gl = h.webglCanvas();
+  assert.equal(gl.glState.bufferDataCalls, 4, "the first scene is fully uploaded");
+  // The next setScene fails on its second upload: the buffers hold a mix of
+  // two scenes, so render reports an incomplete scene and clears the base
+  // to the background.
+  h.env.fail.upload = (n) => n === 6;
+  h.sendModel();
+  h.tick(1);
+  assert.equal(gl.glState.bufferDataCalls, 6, "the upload fails halfway through the scene");
+  assert.equal(h.status(), STATUS.frameError);
+  const clears = gl.glState.clears;
+  // While the rebuild is backed off, the empty base is static: reduced
+  // motion clears it once, and the next draw waits for the retried rebuild
+  // instead of clearing every frame.
+  h.advance(REBUILD_BACKOFF_BASE_MS / 2);
+  assert.equal(gl.glState.clears, clears + 1, "the incomplete frame is cleared once, not every frame");
+  h.advance(REBUILD_BACKOFF_BASE_MS);
+  assert.equal(gl.glState.bufferDataCalls, 10, "the retried upload completes");
+  assert.equal(h.status(), STATUS.webgl, "the map draws again");
   h.map.stop();
 });
 
