@@ -24,8 +24,9 @@ import (
 // restart starts with no live targets, which is the conservative state.
 const (
 	// pveMetricsMaxLiveTargets is the number of distinct live targets one
-	// remote serves at a time.
-	pveMetricsMaxLiveTargets = 4
+	// remote serves at a time; the server sizes telemetry lease budgets
+	// from the same permit constant.
+	pveMetricsMaxLiveTargets = permit.ProviderTelemetryMaxLiveTargets
 	// pveMetricsLiveRenewal is how long a live target stays registered
 	// without a further live request (a hidden or closed chart stops
 	// renewing and frees its slot after this time).

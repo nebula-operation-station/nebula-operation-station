@@ -31,11 +31,13 @@ import (
 // A hold lasts at most batchHoldMax while the executor rechecks it
 // automatically. A target still held then (the run still visible, or its
 // visibility unknown) is never freed by time: the hold expires into a
-// terminal state that only an operator ends: the release
-// (ReleaseHeldBatchTarget), which, too, needs the host to show the run
-// gone, or, with the executor stopped, `nebula-executor batch-holds
-// rearm` (RearmHeldBatchTarget), which returns the hold to automatic
-// rechecks.
+// terminal state that only an operator ends. The operator path is the
+// offline `nebula-executor batch-holds rearm` (RearmHeldBatchTarget),
+// which returns the hold to automatic rechecks counted from now; the
+// target is freed only once the host shows the run gone. The online
+// release (ReleaseHeldBatchTarget) is reserved for a future online
+// operator release; it has no production caller today and, too, needs
+// the host to show the run gone.
 //
 // A target is held from its member's reservation on, before the member
 // starts, so an executor crash or kill during an attached run restarts
@@ -107,7 +109,8 @@ type HeldBatchTarget struct {
 	Fingerprint string
 	ExecutionID string
 	HeldAt      time.Time
-	// Expired: held past batchHoldMax; only an operator release ends it.
+	// Expired: held past batchHoldMax; the operator re-arms it offline
+	// (`nebula-executor batch-holds rearm`) to end it.
 	Expired bool
 	// Running: a batch member runs on the target now (its reservation is
 	// persisted as this hold).
@@ -300,7 +303,7 @@ func (s *Service) holdExpiredLocked(x *batchExec, hostID string, h *heldTarget) 
 	h.expired = true
 	_ = s.saveHeldLocked(x) // a failure is audited and blocks all members
 	s.log.Error("audit", "kind", "batch_target_hold_expired", "execution", h.executionID, "host", hostID,
-		"detail", "held for the maximum time without the target showing the run gone; only an operator release (with the run gone) frees it")
+		"detail", "held for the maximum time without the target showing the run gone; end it with the offline `nebula-executor batch-holds rearm` (executor stopped); the target is freed once RunVisible shows the run gone")
 	return true
 }
 
@@ -321,7 +324,9 @@ func (s *Service) HeldBatchTargets() []HeldBatchTarget {
 }
 
 // ReleaseHeldBatchTarget is the audited operator release of a held target
-// (for example one whose hold expired). It names the exact hold (host and
+// (for example one whose hold expired). It is reserved for a future
+// online operator release; today the only operator path is the offline
+// rearm (RearmHeldBatchTarget). It names the exact hold (host and
 // execution ID), the operator and a reason. It never frees a target whose
 // run may still be there: the host must positively show the run gone now
 // (any error, or the run seen, is ErrBatchTargetStillRunning and the

@@ -128,6 +128,7 @@ func defaultReadFn(req *pb.ReadPVERequest) (*pb.ReadPVEResponse, error) {
 func newTestCollector(t *testing.T, fr Reader) (*Collector, *Spool, *time.Time) {
 	t.Helper()
 	dir := t.TempDir()
+	expectTempDirOwnership(t, dir)
 	spool, err := NewSpool(dir)
 	if err != nil {
 		t.Fatalf("NewSpool: %v", err)

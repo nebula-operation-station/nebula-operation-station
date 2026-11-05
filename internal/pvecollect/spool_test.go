@@ -41,7 +41,9 @@ func mkObs(remoteID string, gen uint64, at time.Time) pvecontract.Observation {
 
 func newTestSpool(t *testing.T) *Spool {
 	t.Helper()
-	s, err := NewSpool(filepath.Join(t.TempDir(), "spool"))
+	parent := t.TempDir()
+	expectTempDirOwnership(t, parent)
+	s, err := NewSpool(filepath.Join(parent, "spool"))
 	if err != nil {
 		t.Fatalf("NewSpool: %v", err)
 	}
@@ -420,6 +422,7 @@ func TestNewSpoolRefusesSymlinkRoot(t *testing.T) {
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	expectTempDirOwnership(t, root)
 	if err := os.Symlink(real, filepath.Join(root, resultsDirName)); err != nil {
 		t.Fatal(err)
 	}

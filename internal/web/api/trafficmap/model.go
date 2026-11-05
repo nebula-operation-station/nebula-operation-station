@@ -17,33 +17,22 @@ import (
 	"math"
 	"net/netip"
 	"strings"
-	"time"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/flowagg"
 )
 
-// Windows a client may select (ADR 0009 D3).
+// Windows a client may select (ADR 0009 D3); flowagg.QueryWindows is
+// the shared list with their lengths.
 const (
 	Window1h  = "1h"
 	Window24h = "24h"
 	Window7d  = "7d"
 	Window21d = "21d"
 	// DefaultWindow applies when the request names none.
-	DefaultWindow = Window24h
+	DefaultWindow = flowagg.DefaultQueryWindow
 )
-
-// windowDuration maps the window names to their length.
-var windowDuration = map[string]time.Duration{
-	Window1h:  time.Hour,
-	Window24h: 24 * time.Hour,
-	Window7d:  7 * 24 * time.Hour,
-	Window21d: 21 * 24 * time.Hour,
-}
-
-// windowOrder lists the window names, shortest first.
-var windowOrder = []string{Window1h, Window24h, Window7d, Window21d}
 
 // Top-set sizes (ADR 0009 D3).
 const (

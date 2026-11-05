@@ -359,6 +359,15 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	disc := discovery.New(db, discoveryjob.Spool{Dir: cfg.DiscoveryDir}, ipamStore, hostAddrs, log)
 	go disc.Run(connCtx)
 
+	// Traffic map data (ADR 0009 TM12): net.facts results go into the
+	// traffic store; own addresses and MACs come only from the inventory
+	// and the IPAM assets linked to managed hosts.
+	traffic, err := newTrafficIngest(db, store.List, ipamStore.Assets, log, time.Now)
+	if err != nil {
+		return err
+	}
+	go traffic.run(connCtx, trafficCheckInterval)
+
 	h, err := ui.New(ui.Options{
 		PublicOrigin:   cfg.PublicOrigin,
 		Status:         exec,
@@ -419,11 +428,17 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// Connections tab of the host and asset pages (ADR 0009 TM20).
+	connPages, err := newConnectionsPages(db, store, ipamStore, log)
+	if err != nil {
+		return err
+	}
 	pages := http.NewServeMux()
 	pages.Handle("/", h.Handler())
 	lc.handler.Register(pages)
 	batchPages.Register(pages)
 	softwarePages.Register(pages)
+	connPages.Register(pages)
 
 	var apiHandler http.Handler
 	if cfg.API.Enabled {

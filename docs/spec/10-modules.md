@@ -48,7 +48,7 @@ ui:
 
 <a id="v23-10-01"></a>
 <!-- Spec v2.3 (ADR 0006, ADR 0007): v23-10-01 -->
-**Read-only contract allowlist.** Standing grants initially cover `core.facts`, `package.list_updates`, `docker.list`, `docker.inspect`, `docker.check_updates`, `service.list` and `service.status`, only at effective LOW risk with an explicitly approved read-only contract. Bind exact container incarnation/unit parameters for inspection/status; enumeration does not authorize arbitrary follow-ups. Exclude `package.refresh` because it writes package metadata even if declared LOW, and exclude `docker.logs` and all secret-bearing actions. Neither declared LOW nor a clean scanner result proves harmlessness. Typed PVE readers are built-in provider methods, never generic HTTP proxies or server plugins.
+**Read-only contract allowlist.** Standing grants initially cover `core.facts`, `package.list_updates`, `docker.list`, `docker.inspect`, `docker.check_updates`, `service.list`, `service.status` and `net.facts` (the built-in traffic-map snapshot read, ADR 0009 D1; see [07-execution-model.md](07-execution-model.md) and [09-untrusted-host-data.md](09-untrusted-host-data.md)), only at effective LOW risk with an explicitly approved read-only contract. Bind exact container incarnation/unit parameters for inspection/status; enumeration does not authorize arbitrary follow-ups. Exclude `package.refresh` because it writes package metadata even if declared LOW, and exclude `docker.logs` and all secret-bearing actions. Neither declared LOW nor a clean scanner result proves harmlessness. Typed PVE readers are built-in provider methods, never generic HTTP proxies or server plugins.
 
 <a id="v23-10-02"></a>
 <!-- Spec v2.3 (ADR 0006, ADR 0007): v23-10-02 -->

@@ -400,11 +400,14 @@ covers nothing else.
    checked, at most **64** per lease (the page says so when it had to stop
    there). Change the selection and the lifetime (7 or 30 days).
 2. **Enable live values** proposes the lease and opens the same preview page
-   as every other lease. The server builds it from the stored inventory: a
-   node must be stored for the remote; a guest must have exactly one active
-   incarnation of the chosen kind on the chosen node, and is bound with that
-   incarnation's **generation**. A guest that was removed, moved or recreated
-   since the page was loaded is refused ("reload the page").
+   as every other lease. Each guest checkbox posts the incarnation
+   **generation** the page showed. The server checks the selection against
+   the stored inventory: a node must be stored for the remote; a guest must
+   have exactly one active incarnation of the chosen kind on the chosen node
+   with the posted generation, and is bound with that generation. A guest
+   that was removed, moved or recreated (same VMID, new generation) since
+   the page was loaded is refused ("reload the page"); it is never bound to
+   the new incarnation without you seeing it on a reloaded page.
 3. The preview shows the remote with its full trust pin, trust generation
    and read credential version, the single method `metrics`, every node and
    guest (node, kind, VMID, generation), the trigger `on_demand`, the 10 s
@@ -415,7 +418,9 @@ covers nothing else.
 reads) of exactly the listed nodes and guests on that remote, each at most
 every 10 seconds. The executor additionally serves at most four live boxes
 per remote at once, so the budget is `min(targets, 4) × 360` requests per
-remote per hour (at most 1440, below the 4096 limit of the profile).
+remote per hour (at most 1440, below the 4096 limit of the profile). The
+server sizes the budget from the same live-box limit the executor enforces,
+so the two cannot drift apart.
 
 **When it stops covering.** Like a read lease, a live-values lease no
 longer covers anything after the remote is re-pinned or its read token is
@@ -474,7 +479,7 @@ history is merely evidence of a past run.
 | Token rejected at `add` or `rotate-token` | Check the effective permission profile: read tokens need exactly the four audit privileges on `/`, `/vms`, `/storage`, `/pool`; action tokens need only `VM.PowerMgmt` on `/vms/<vmid>`. The user must be enabled and not expired; the token needs `privsep=1` and an expiry; `*@pam`, `Administrator@*` and `PVEVMAdmin@*` are refused. Read and action tokens must use different PVE users. |
 | Remote state `blocked` in `list` / UI | The trust identity changed (new CA or leaf), the chain is invalid, or a SAN does not match. Verify the presented certificate out of band, then `nebula pve remote repin <id>`. A CA-preserving leaf renewal needs no re-pin. |
 | Remote rows labelled `unknown` in the UI | No observation ever arrived: the collector is not running, cannot reach the executor socket, or the remote is not `active`. Check the collector process and its JSON logs, the spool directory, and `nebula pve remote list`. |
-| Collector exits at start: `verify executor at /run/nebula/executor.sock: … connection reset by peer` | The executor does not know the collector's UID and drops the connection. The collector must run as the executor's `-pve-collector-user` (default `nebula-pve-collector`), and that user must exist when the executor starts: look for `pve-collector user not found` in `journalctl -u nebula-executor`, then restart `nebula-executor`, run `nebula unlock` and restart `nebula-pve-collector`. |
+| Collector exits at start: `verify executor at /run/nebula/executor.sock: … connection reset by peer` | The executor does not know the collector's UID and drops the connection. The collector must run as the executor's `-pve-collector-user` (default `nebula-pve-collector`): a missing default user leaves the role unassigned (warning `pve-collector user not found` in `journalctl -u nebula-executor`), and a missing non-default user stops the executor at start. Create the user, restart `nebula-executor`, run `nebula unlock` and restart `nebula-pve-collector`. |
 | Collector exits at start: `chmod spool root: … operation not permitted` (or the same for `results`, `requests`, `live`, `guestnet`) | A spool directory does not have its final mode. The collector unit forbids setting the setgid bit (`RestrictSUIDSGID=yes`), so the directories must be created with their modes beforehand: re-run `install.sh` (it creates `/var/lib/nebula/pve` 2750, `results`, `guestnet`, `requests` 2770 and `live` 2750, owner `nebula-pve-collector`, group `nebula-rpc`). |
 | `read_grant_does_not_cover` in the collector or executor log (`journalctl -u nebula-pve-collector`, `journalctl -u nebula-executor`); PVE page says "no approved read lease" | No active provider read lease covers this remote and method: none was approved, it expired or was revoked, the remote was re-pinned, the read token was rotated, or the method (for example `snapshots`) was not chosen. Request a lease from `/pve/<id>` (**Request read lease**) or refresh the old one on `/leases`, with the methods you need, and approve it (see [Read lease for a remote](#read-lease-for-a-remote)). |
 | Rows labelled `stale` | The collector is down, backing off after failures, or the remote is blocked. Backoff is exponential from 1 m to 15 m after failed polls; a single pass can be forced with `nebula-pve-collector -once`. |
