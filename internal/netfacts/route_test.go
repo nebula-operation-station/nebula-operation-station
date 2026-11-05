@@ -251,55 +251,69 @@ func TestParseRoutesViaFamilies(t *testing.T) {
 		return Route{Dst: netip.MustParsePrefix(dst), Gateway: netip.MustParseAddr(gw), Dev: "eth0"}
 	}
 	cases := []struct {
-		name string
-		doc  string
-		want []Route
+		name    string
+		doc     string
+		want    []Route
+		dropped int
 	}{
 		// default x same family
 		{"default same-family inet via", `[{"dst":"default",` + via4 + `,"dev":"eth0"}]`,
-			[]Route{r("0.0.0.0/0", "10.0.0.1")}},
+			[]Route{r("0.0.0.0/0", "10.0.0.1")}, 0},
 		{"default same-family inet via in ipv4 document", `[` + v4 + `,{"dst":"default",` + via4 + `,"dev":"eth0"}]`,
-			[]Route{v4Route, r("0.0.0.0/0", "10.0.0.1")}},
+			[]Route{v4Route, r("0.0.0.0/0", "10.0.0.1")}, 0},
 		{"default same-family inet6 via in ipv6 document", `[` + v6 + `,{"dst":"default",` + via6 + `,"dev":"eth0"}]`,
-			[]Route{v6Route, r("::/0", "fe80::1")}},
+			[]Route{v6Route, r("::/0", "fe80::1")}, 0},
 		{"default same-family inet6 via, document family after it", `[{"dst":"default",` + via6 + `,"dev":"eth0"},` + v6 + `]`,
-			[]Route{r("::/0", "fe80::1"), v6Route}},
+			[]Route{r("::/0", "fe80::1"), v6Route}, 0},
 		// default x cross family
 		{"default rfc5549 inet6 via in ipv4 document", `[` + v4 + `,{"dst":"default",` + via6 + `,"dev":"eth0"}]`,
-			[]Route{v4Route, r("0.0.0.0/0", "fe80::1")}},
+			[]Route{v4Route, r("0.0.0.0/0", "fe80::1")}, 0},
 		{"default inet via in ipv6 document is an ipv4 default", `[` + v6 + `,{"dst":"default",` + via4 + `,"dev":"eth0"}]`,
-			[]Route{v6Route, r("0.0.0.0/0", "10.0.0.1")}},
+			[]Route{v6Route, r("0.0.0.0/0", "10.0.0.1")}, 0},
 		{"default inet6 via without family signal", `[{"dst":"default",` + via6 + `,"dev":"eth0"}]`,
-			nil},
+			nil, 0},
+		// A document that already contains a definite IPv4 default and a
+		// definite IPv6 route mixes families, so it is not a real route
+		// table; the later ambiguous default is dropped, not guessed as
+		// RFC 5549 from the IPv4 default's family.
+		{"default inet6 via in mixed-family document is dropped", `[{"dst":"default",` + via4 + `,"dev":"eth0"},` + v6 + `,{"dst":"default",` + via6 + `,"dev":"eth0"}]`,
+			[]Route{r("0.0.0.0/0", "10.0.0.1"), v6Route}, 1},
+		// The same guard for a "default" with no next hop at all: its
+		// family comes only from the document, and a mixed document has
+		// none.
+		{"bare default in mixed-family document is dropped", `[` + v4 + `,` + v6 + `,{"dst":"default","dev":"eth0"}]`,
+			[]Route{v4Route, v6Route}, 1},
+		{"bare default in ipv4 document", `[` + v4 + `,{"dst":"default","dev":"eth0"}]`,
+			[]Route{v4Route, {Dst: netip.MustParsePrefix("0.0.0.0/0"), Dev: "eth0"}}, 0},
 		// prefix x same family
 		{"prefix same-family inet via", `[{"dst":"10.1.0.0/24",` + via4 + `,"dev":"eth0"}]`,
-			[]Route{r("10.1.0.0/24", "10.0.0.1")}},
+			[]Route{r("10.1.0.0/24", "10.0.0.1")}, 0},
 		{"prefix same-family inet6 via", `[{"dst":"2001:db8:1::/48",` + via6 + `,"dev":"eth0"}]`,
-			[]Route{r("2001:db8:1::/48", "fe80::1")}},
+			[]Route{r("2001:db8:1::/48", "fe80::1")}, 0},
 		// prefix x cross family
 		{"prefix rfc5549 inet6 via", `[{"dst":"10.1.0.0/24",` + via6 + `,"dev":"eth0"}]`,
-			[]Route{r("10.1.0.0/24", "fe80::1")}},
+			[]Route{r("10.1.0.0/24", "fe80::1")}, 0},
 		{"prefix inet via on ipv6 dst", `[{"dst":"2001:db8:1::/48",` + via4 + `,"dev":"eth0"}]`,
-			nil},
+			nil, 0},
 		// multipath
 		{"multipath default inet6 vias in ipv6 document", `[` + v6 + `,{"dst":"default","nexthops":[{` + via6 + `,"dev":"eth0"},{` + via6b + `,"dev":"eth0"}]}]`,
-			[]Route{v6Route, r("::/0", "fe80::1"), r("::/0", "fe80::2")}},
+			[]Route{v6Route, r("::/0", "fe80::1"), r("::/0", "fe80::2")}, 0},
 		{"multipath default inet6 vias without family signal", `[{"dst":"default","nexthops":[{` + via6 + `,"dev":"eth0"},{` + via6b + `,"dev":"eth0"}]}]`,
-			nil},
+			nil, 0},
 		{"multipath default inet6 via then ipv4 gateway", `[{"dst":"default","nexthops":[{` + via6 + `,"dev":"eth0"},{"gateway":"10.0.0.1","dev":"eth0"}]}]`,
-			[]Route{r("0.0.0.0/0", "fe80::1"), r("0.0.0.0/0", "10.0.0.1")}},
+			[]Route{r("0.0.0.0/0", "fe80::1"), r("0.0.0.0/0", "10.0.0.1")}, 0},
 		{"multipath default ipv4 gateway then inet6 via", `[{"dst":"default","nexthops":[{"gateway":"10.0.0.1","dev":"eth0"},{` + via6 + `,"dev":"eth0"}]}]`,
-			[]Route{r("0.0.0.0/0", "10.0.0.1"), r("0.0.0.0/0", "fe80::1")}},
+			[]Route{r("0.0.0.0/0", "10.0.0.1"), r("0.0.0.0/0", "fe80::1")}, 0},
 		{"multipath default inet6 via then ipv6 gateway", `[{"dst":"default","nexthops":[{` + via6 + `,"dev":"eth0"},{"gateway":"fe80::2","dev":"eth0"}]}]`,
-			[]Route{r("::/0", "fe80::1"), r("::/0", "fe80::2")}},
+			[]Route{r("::/0", "fe80::1"), r("::/0", "fe80::2")}, 0},
 		{"multipath default ipv6 gateway then inet6 via", `[{"dst":"default","nexthops":[{"gateway":"fe80::2","dev":"eth0"},{` + via6 + `,"dev":"eth0"}]}]`,
-			[]Route{r("::/0", "fe80::2"), r("::/0", "fe80::1")}},
+			[]Route{r("::/0", "fe80::2"), r("::/0", "fe80::1")}, 0},
 		{"multipath default inet via and ipv6 gateway", `[{"dst":"default","nexthops":[{` + via4 + `,"dev":"eth0"},{"gateway":"fe80::2","dev":"eth0"}]}]`,
-			nil},
+			nil, 0},
 		{"multipath prefix inet via and inet6 via", `[{"dst":"10.1.0.0/24","nexthops":[{` + via4 + `,"dev":"eth0"},{` + via6 + `,"dev":"eth0"}]}]`,
-			[]Route{r("10.1.0.0/24", "10.0.0.1"), r("10.1.0.0/24", "fe80::1")}},
+			[]Route{r("10.1.0.0/24", "10.0.0.1"), r("10.1.0.0/24", "fe80::1")}, 0},
 		{"multipath ipv6 prefix with inet via", `[{"dst":"2001:db8:1::/48","nexthops":[{` + via6 + `,"dev":"eth0"},{` + via4 + `,"dev":"eth0"}]}]`,
-			nil},
+			nil, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -313,8 +327,8 @@ func TestParseRoutesViaFamilies(t *testing.T) {
 				}
 				return
 			}
-			if !reflect.DeepEqual(res.Entries, tc.want) || res.Incomplete {
-				t.Fatalf("got %+v (Incomplete=%v), want %+v", res.Entries, res.Incomplete, tc.want)
+			if !reflect.DeepEqual(res.Entries, tc.want) || res.Incomplete != (tc.dropped > 0) || res.Dropped != tc.dropped {
+				t.Fatalf("got %+v (Incomplete=%v Dropped=%d), want %+v (Dropped=%d)", res.Entries, res.Incomplete, res.Dropped, tc.want, tc.dropped)
 			}
 		})
 	}
