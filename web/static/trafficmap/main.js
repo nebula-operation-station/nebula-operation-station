@@ -238,9 +238,12 @@ export function startTrafficMap(root, opts = {}) {
         }
         if (focus !== null && !nodeById.has(focus)) focus = null;
         dirty = true;
-        // A new model gets a fresh rebuild right away; the failure streak is
-        // kept (see resetRebuildBackoff).
-        resetRebuildBackoff();
+        // A new model may be rebuilt right away even if the previous
+        // rebuild is backed off: only the deadline is cleared. The rebuild
+        // failure streak is kept, so the backoff keeps growing while
+        // consecutive rebuilds fail; it resets only after a successful
+        // rebuild (see step).
+        nextRebuildAt = 0;
         if (backend) setStatus(backendStatus);
         break;
       }
@@ -460,15 +463,6 @@ export function startTrafficMap(root, opts = {}) {
   function resetFailures() {
     failures = 0;
     degradeAt = MAX_FRAME_FAILURES;
-    rebuildFailures = 0;
-    nextRebuildAt = 0;
-  }
-
-  // resetRebuildBackoff lets a new model be rebuilt right away. It must not
-  // touch the failure streak, which ends only with a successful frame (or
-  // an install): with models arriving faster than the degrade window,
-  // resetting the streak on every model would postpone the degrade forever.
-  function resetRebuildBackoff() {
     rebuildFailures = 0;
     nextRebuildAt = 0;
   }

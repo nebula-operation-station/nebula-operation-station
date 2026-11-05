@@ -646,6 +646,29 @@ test("BackedOffFramesUnderReducedMotionAreNotFailures", () => {
   h.map.stop();
 });
 
+test("FastModelUpdatesKeepGrowingTheRebuildBackoff", () => {
+  const b = flakyBuild(() => true);
+  const h = setup({ webgl: false, build: b.build });
+  // Models arrive every frame while every rebuild fails. Each new model may
+  // be rebuilt right away, but the failure streak must keep growing, so the
+  // backoff applied after each failure grows instead of restarting at the
+  // base delay.
+  for (let i = 0; i < 4; i++) {
+    h.sendModel();
+    h.tick(1);
+  }
+  assert.equal(b.calls, 4, "one attempt per model");
+  const before = b.calls;
+  // Four consecutive failures push the backoff to 100*2^3 = 800 ms. The
+  // base delay of 100 ms (the old behaviour, streak reset on every model)
+  // has long passed without a retry.
+  h.advance(REBUILD_BACKOFF_BASE_MS + 32);
+  assert.equal(b.calls, before, "the retry waits for the grown backoff, not the base delay");
+  h.advance(rebuildBackoffMs(4) + 16);
+  assert.equal(b.calls, before + 1, "the retry comes after the grown backoff");
+  h.map.stop();
+});
+
 test("FailingOverlayDropsIconsAndRecovers", () => {
   const h = setup({ webgl: false });
   h.sendModel();
