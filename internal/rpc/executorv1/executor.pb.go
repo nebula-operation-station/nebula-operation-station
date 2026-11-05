@@ -18388,9 +18388,18 @@ type RunBatchMemberRequest struct {
 	TimeoutSeconds uint32 `protobuf:"varint,4,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
 	// The member's exact artifact bytes. Its SHA-256 must equal the frozen
 	// member's artifact hash; the approval binds only the hash.
-	Artifact      []byte `protobuf:"bytes,5,opt,name=artifact,proto3" json:"artifact,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Artifact []byte `protobuf:"bytes,5,opt,name=artifact,proto3" json:"artifact,omitempty"`
+	// Set only when the server cannot hand the member over (its approved
+	// action, script or host endpoints are not available): a short,
+	// secret-free, printable UTF-8 reason of at most 256 bytes. Endpoints,
+	// timeout and artifact must then be empty. The executor claims the
+	// member's single-use permit without running anything, records it failed
+	// (not executed) in the rollout, so the stop policy applies, audits the
+	// reason and answers BATCH_MEMBER_OUTCOME_NOT_EXECUTED. The member is
+	// never run afterwards.
+	NotExecutedReason string `protobuf:"bytes,6,opt,name=not_executed_reason,json=notExecutedReason,proto3" json:"not_executed_reason,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *RunBatchMemberRequest) Reset() {
@@ -18456,6 +18465,13 @@ func (x *RunBatchMemberRequest) GetArtifact() []byte {
 		return x.Artifact
 	}
 	return nil
+}
+
+func (x *RunBatchMemberRequest) GetNotExecutedReason() string {
+	if x != nil {
+		return x.NotExecutedReason
+	}
+	return ""
 }
 
 type RunBatchMemberResponse struct {
@@ -21657,13 +21673,14 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x16public_key_fingerprint\x18\x03 \x01(\tR\x14publicKeyFingerprint\"\xa8\x01\n" +
 	"\"GetBatchCredentialVersionsResponse\x12F\n" +
 	"\bversions\x18\x01 \x03(\v2*.nebula.executor.v1.BatchCredentialVersionR\bversions\x12:\n" +
-	"\x19batch_execution_available\x18\x02 \x01(\bR\x17batchExecutionAvailable\"\xba\x01\n" +
+	"\x19batch_execution_available\x18\x02 \x01(\bR\x17batchExecutionAvailable\"\xea\x01\n" +
 	"\x15RunBatchMemberRequest\x12!\n" +
 	"\fbatch_digest\x18\x01 \x01(\tR\vbatchDigest\x12\x1b\n" +
 	"\tmember_id\x18\x02 \x01(\tR\bmemberId\x12\x1c\n" +
 	"\tendpoints\x18\x03 \x03(\tR\tendpoints\x12'\n" +
 	"\x0ftimeout_seconds\x18\x04 \x01(\rR\x0etimeoutSeconds\x12\x1a\n" +
-	"\bartifact\x18\x05 \x01(\fR\bartifact\"\xf6\x02\n" +
+	"\bartifact\x18\x05 \x01(\fR\bartifact\x12.\n" +
+	"\x13not_executed_reason\x18\x06 \x01(\tR\x11notExecutedReason\"\xf6\x02\n" +
 	"\x16RunBatchMemberResponse\x12@\n" +
 	"\aoutcome\x18\x01 \x01(\x0e2&.nebula.executor.v1.BatchMemberOutcomeR\aoutcome\x12!\n" +
 	"\fexecution_id\x18\x02 \x01(\tR\vexecutionId\x12\x14\n" +

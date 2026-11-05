@@ -83,8 +83,9 @@ type RouteTable struct {
 // defaultFamily): the family of a plain gateway, IPv4 for an IPv4 "via";
 // when that leaves both families open (no gateway, or only IPv6 "via"
 // next hops, which fit an IPv6 default and an RFC 5549 IPv4 default),
-// the family of the first valid route in the document. An entry with no
-// family signal is skipped, never guessed. A multipath route (a "nexthops" list and no top-level
+// the family the document's valid routes share, when they all agree on
+// one. An entry with no family signal, or in a document whose valid
+// routes mix families, is skipped, never guessed. A multipath route (a "nexthops" list and no top-level
 // gateway or device) is expanded into one Route per next hop. Entries
 // with an invalid destination, gateway (including an IPv6 zone that is
 // not a short interface name, or a gateway whose family differs from the
@@ -338,17 +339,30 @@ func familyOf(a netip.Addr) (int, bool) {
 	return 6, true
 }
 
-// documentFamily returns the family of the first entry that is a valid
-// route on its own (a prefix or address destination, or a "default"
-// destination with a gateway), and ok=false when no entry provides one.
-// Entries that are later skipped as invalid never decide the family.
+// documentFamily returns the family (4 or 6) that every valid route in
+// the document shares, and ok=false when no route provides a family or
+// the document mixes families. iproute2 prints one family per document,
+// so a document whose valid routes agree on a family is a real route
+// table and that family decides an ambiguous "default" (only IPv6 "via"
+// hops, or no gateway at all): in an IPv4 document such a default is an
+// RFC 5549 route, in an IPv6 document a normal IPv6 default. A document
+// whose valid routes mix families is not a real route table; its
+// ambiguous "default" routes carry no family signal and are dropped,
+// never guessed. Entries that are later skipped as invalid never decide
+// the family.
 func documentFamily(docs []routeDoc) (int, bool) {
+	fam := 0
 	for _, d := range docs {
 		if rs, ok := parseRouteEntry(d, 0, false); ok && len(rs) > 0 {
-			return familyOf(rs[0].Dst.Addr())
+			f, _ := familyOf(rs[0].Dst.Addr())
+			if fam == 0 {
+				fam = f
+			} else if f != fam {
+				return 0, false
+			}
 		}
 	}
-	return 0, false
+	return fam, fam != 0
 }
 
 // DefaultGateways returns the default routes (0.0.0.0/0 or ::/0) that have

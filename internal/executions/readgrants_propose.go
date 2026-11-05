@@ -412,7 +412,8 @@ func previewFromResponse(r *pb.ProposeReadGrantResponse, sent permit.ReadGrantDo
 	}
 	for _, p := range got.ProviderTargets {
 		v.Providers = append(v.Providers, ReadGrantPreviewProvider{RemoteID: p.RemoteID, TrustPin: p.TrustPin,
-			TrustGeneration: p.TrustGeneration, CredentialVersion: p.CredentialVersion, Methods: slices.Clone(p.Methods)})
+			TrustGeneration: p.TrustGeneration, CredentialVersion: p.CredentialVersion, Methods: slices.Clone(p.Methods),
+			MetricsTargets: slices.Clone(p.MetricsTargets)})
 	}
 	switch r.GetApprovalRequirement() {
 	case pb.ApprovalRequirement_APPROVAL_REQUIREMENT_CLI_ONLY:

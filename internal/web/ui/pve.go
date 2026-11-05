@@ -137,6 +137,8 @@ type pveNodeRow struct {
 	Age string
 	// Link is the deep link to the node in the PVE web UI, or "".
 	Link string
+	// Live is the node's live-values checkbox and lease state.
+	Live pveLiveOption
 }
 
 // pveGuestRow is one guest row of the detail page.
@@ -159,6 +161,10 @@ type pveGuestRow struct {
 	Age string
 	// Link is the deep link to the guest in the PVE web UI, or "".
 	Link string
+	// Live is the guest's live-values checkbox and lease state.
+	Live pveLiveOption
+	// generation is the stored incarnation generation of the guest.
+	generation uint64
 }
 
 // pveDatasetRow is one dataset-status row of the detail page.
@@ -204,8 +210,14 @@ type pveDetailData struct {
 	// Datasets lists the dataset availability states.
 	Datasets []pveDatasetRow
 	// LeaseRequestURL opens the lease form for this remote when it is
-	// active and no active provider read lease covers it; "" otherwise.
+	// active and no active provider read lease lists it; "" otherwise.
 	LeaseRequestURL string
+	// ReadLeaseStale is set when every active provider read lease listing
+	// this remote is stale (the remote was re-pinned or its read token was
+	// rotated); LeaseRequestURL then opens the form for the renewal.
+	ReadLeaseStale bool
+	// Live is the "Enable live values" form (pve_live.go).
+	Live pveLiveData
 }
 
 var pveHostPattern = regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$`)
@@ -436,8 +448,6 @@ func (h *Handler) handlePVEDetail(w http.ResponseWriter, r *http.Request) {
 		Age:            pveAge(now, rm.LastObservedAt),
 		Source:         rm.LastSource,
 		Link:           pveDeepLink(rm.Kind, meta.Endpoints, ""),
-
-		LeaseRequestURL: h.pveLeaseRequestURL(ctx, id, meta),
 	}
 	if meta.TrustPin != "" {
 		d.PinText = meta.TrustPin
@@ -479,9 +489,11 @@ func (h *Handler) handlePVEDetail(w http.ResponseWriter, r *http.Request) {
 				ObservedAt: g.ObservedAt,
 				Age:        pveAge(now, g.ObservedAt),
 				Link:       pveDeepLink(rm.Kind, meta.Endpoints, g.Node, g.Kind, strconv.FormatUint(g.VMID, 10)),
+				generation: g.Generation,
 			})
 		}
 	}
+	h.pveLeaseState(ctx, id, meta, d)
 	if datasets, err := h.pve.ListDatasetStatus(ctx, id); err != nil {
 		h.log.Error("list PVE dataset status", "remote", id, "error", err)
 	} else {
@@ -496,7 +508,11 @@ func (h *Handler) handlePVEDetail(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
-	h.render(w, r, pageData{Title: "PVE remote " + rm.Name, Active: "pve", Content: "pve_detail", PVEDetail: d})
+	pd := pageData{Title: "PVE remote " + rm.Name, Active: "pve", Content: "pve_detail", PVEDetail: d}
+	if d.Live.Offered {
+		pd.Scripts = []string{"formpost.js"}
+	}
+	h.render(w, r, pd)
 }
 
 // clockNow is the handler clock (Options.Now, else time.Now).
