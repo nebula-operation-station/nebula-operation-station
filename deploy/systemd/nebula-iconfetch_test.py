@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Unprivileged deployment policy tests: python3 deploy/systemd/nebula-iconfetch_test.py."""
+"""Deployment policy tests: python3 deploy/systemd/nebula-iconfetch_test.py.
+
+Most checks are unprivileged; the kernel nft check runs as root (CI) or,
+when unprivileged, inside a user+net namespace (local dev hosts).
+"""
 
 import os
 from pathlib import Path
@@ -157,9 +161,9 @@ class IconfetchPolicyTest(unittest.TestCase):
 
     def test_kernel_accepts_firewall_syntax(self):
         # `nft -c` parses and checks without applying; it needs
-        # CAP_NET_ADMIN, which root has and an unprivileged user+net
-        # namespace (unshare -rn) grants, so the check runs in CI
-        # without sudo instead of being skipped.
+        # CAP_NET_ADMIN. CI runs this test as root (the direct path);
+        # unprivileged local dev hosts use a user+net namespace
+        # (unshare -rn), skipped cleanly when unavailable.
         nft = shutil.which("nft") or ("/usr/sbin/nft" if os.path.exists("/usr/sbin/nft") else None)
         if nft is None:
             self.skipTest("nft not installed")
