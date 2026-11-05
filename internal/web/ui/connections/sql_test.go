@@ -56,7 +56,7 @@ func seed(t *testing.T, s *trafficstore.Store) {
 func TestSQLFlowsListsEveryFlowOfTheNodeMerged(t *testing.T) {
 	db, s := newTestDB(t)
 	seed(t, s)
-	recs, err := SQLFlows(db).Flows(context.Background(), []netip.Addr{hostAddr, hostAddr6}, lastHours(24*time.Hour), MaxRows+1)
+	recs, err := SQLFlows(db, 0).Flows(context.Background(), []netip.Addr{hostAddr, hostAddr6}, lastHours(24*time.Hour), MaxRows+1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestSQLFlowsListsEveryFlowOfTheNodeMerged(t *testing.T) {
 func TestSQLFlowsWindowAndLimit(t *testing.T) {
 	db, s := newTestDB(t)
 	seed(t, s)
-	src := SQLFlows(db)
+	src := SQLFlows(db, 0)
 	recs, err := src.Flows(context.Background(), []netip.Addr{hostAddr}, lastHours(7*24*time.Hour), MaxRows+1)
 	if err != nil {
 		t.Fatal(err)
@@ -111,9 +111,49 @@ func TestSQLFlowsWindowAndLimit(t *testing.T) {
 	}
 }
 
+// TestSQLFlowsLastSeenNotInFuture checks that a flow of the current,
+// still open hour is last seen at the window end (now), not at the end
+// of its hour bucket.
+func TestSQLFlowsLastSeenNotInFuture(t *testing.T) {
+	db, s := newTestDB(t)
+	key := flowagg.FlowKey{A: hostAddr, B: dnsAddr, Proto: flowagg.TCP, ServerPort: 53, Server: flowagg.SideB, Tier: flowagg.TierSocket}
+	upsert(t, s, trafficstore.Bucket{Hour: testNow.Truncate(time.Hour), Key: key, Reporter: "web1", BytesAB: 1, BytesBA: 1, Connections: 1}, hostAddr)
+	recs, err := SQLFlows(db, 0).Flows(context.Background(), []netip.Addr{hostAddr}, lastHours(time.Hour), MaxRows+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("got %d records", len(recs))
+	}
+	if !recs[0].LastSeen.Equal(testNow) || !recs[0].FirstSeen.Equal(testNow.Truncate(time.Hour)) {
+		t.Errorf("seen %v..%v, want %v..%v", recs[0].FirstSeen, recs[0].LastSeen, testNow.Truncate(time.Hour), testNow)
+	}
+}
+
+// TestSQLFlowsRetention checks that the source reports its retention and
+// refuses wider windows.
+func TestSQLFlowsRetention(t *testing.T) {
+	db, _ := newTestDB(t)
+	for _, c := range []struct{ in, want time.Duration }{
+		{0, flowagg.Retention}, {-time.Hour, flowagg.Retention}, {flowagg.Retention + time.Hour, flowagg.Retention}, {7 * 24 * time.Hour, 7 * 24 * time.Hour},
+	} {
+		rr, ok := SQLFlows(db, c.in).(flowagg.RetentionReporter)
+		if !ok || rr.Retention() != c.want {
+			t.Errorf("SQLFlows(%s): retention reporter %v", c.in, rr)
+		}
+	}
+	src := SQLFlows(db, 7*24*time.Hour)
+	if _, err := src.Flows(context.Background(), []netip.Addr{hostAddr}, lastHours(7*24*time.Hour), 1); err != nil {
+		t.Errorf("7d window: %v", err)
+	}
+	if _, err := src.Flows(context.Background(), []netip.Addr{hostAddr}, lastHours(8*24*time.Hour), 1); err == nil {
+		t.Error("8d window over a 7d retention accepted")
+	}
+}
+
 func TestSQLFlowsRejectsBadArguments(t *testing.T) {
 	db, _ := newTestDB(t)
-	src := SQLFlows(db)
+	src := SQLFlows(db, 0)
 	many := make([]netip.Addr, MaxSubjectAddrs+1)
 	for i := range many {
 		many[i] = netip.AddrFrom4([4]byte{10, 1, byte(i >> 8), byte(i)})
@@ -158,7 +198,7 @@ func TestSQLFlowsRejectsCorruptStoredRows(t *testing.T) {
 			VALUES (?, ?, ?, 6, ?, ?, ?, 0, 'web1', 1, 1)`, hour, row.a, row.b, row.port, row.side, row.tier); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := SQLFlows(db).Flows(context.Background(), []netip.Addr{hostAddr}, lastHours(24*time.Hour), 10); err == nil {
+		if _, err := SQLFlows(db, 0).Flows(context.Background(), []netip.Addr{hostAddr}, lastHours(24*time.Hour), 10); err == nil {
 			t.Errorf("row %+v: want error", row)
 		}
 	}
@@ -169,10 +209,11 @@ func TestSplitReportersBounded(t *testing.T) {
 	for i := 0; i < maxRecordReporters+5; i++ {
 		parts = append(parts, "r")
 	}
-	if got := splitReporters(strings.Join(parts, reporterSep)); len(got) != maxRecordReporters {
-		t.Fatalf("got %d reporters", len(got))
+	got, n := splitReporters(strings.Join(parts, reporterSep))
+	if len(got) != maxRecordReporters || n != maxRecordReporters+5 {
+		t.Fatalf("got %d reporters, count %d", len(got), n)
 	}
-	if got := splitReporters(""); got != nil {
-		t.Fatalf("empty: %v", got)
+	if got, n := splitReporters(""); got != nil || n != 0 {
+		t.Fatalf("empty: %v %d", got, n)
 	}
 }
