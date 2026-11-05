@@ -311,6 +311,127 @@ The collector is intended to run as its own Unix user with the
 P1-14); until it ships, run the binary directly or provide your own unit
 with the flags above.
 
+## Read lease for a remote
+
+**Why it is needed.** The executor answers a collector read for a remote only
+when an approved, unexpired **provider read lease** covers that remote and
+method. Registering a remote and storing its read token is not enough: without
+a lease every read is refused (`read_grant_does_not_cover`) and the PVE pages
+keep showing no or stale data. The lease is the operator's explicit approval
+of *what* the collector may read and *for how long*.
+
+**How to request it.**
+
+1. Open `/pve/<id>`. For an active remote that no active provider read
+   lease lists, the page says "no approved read lease" and offers **Request
+   read lease**. When every active read lease that lists the remote is stale
+   (the remote was re-pinned or its read token rotated since the approval),
+   the page says "Read lease stale" and offers **Renew read lease** instead.
+   A live-values lease (see [Live values and their
+   lease](#live-values-and-their-lease)) is not a read lease and does not
+   hide the request. The same form is at `/leases/new`, scope **Proxmox
+   remote**.
+2. Choose the remotes (only `active` remotes are offered, at most 16), the
+   methods and the lifetime (7 or 30 days). The defaults are what the
+   collector reads on every pass: `nodes`, `guests`, `storage`, `cluster`,
+   `tasks`. The per-guest methods `guest_config`, `guest_agent`, `snapshots`
+   and `backups` are optional; check them only if you want those datasets
+   (see [What the collector reads](#what-the-collector-reads)).
+3. **Preview** freezes the request and shows the complete lease as the
+   executor will hold it: every remote with its full trust pin, trust
+   generation and read credential version, the methods, the trigger, the rate
+   profile with the per-remote request budget, the expiry and the digest.
+   Nothing is approved yet.
+
+**How to approve it.** On the preview page, approve with your security key.
+If the executor runs in hardened mode, the page shows the command instead;
+run it on the executor host, it shows the complete lease again before it
+asks for approval:
+
+```sh
+nebula read-grant approve <digest>
+```
+
+**What it covers.** Exactly the frozen remotes and methods, nothing else:
+no SSH hosts, actions or credentials, no write methods, and no other remote.
+A remote that is re-pinned (new trust generation) or whose read token is
+rotated (new credential version) is no longer covered; the reads fail with
+`read_grant_does_not_cover` until a new lease is approved.
+
+**Renewal and revoke.** `/leases` lists provider leases with their remotes
+and methods; the detail page shows each remote with pin prefix, trust
+generation, credential version and methods. **Refresh** (on an active or
+expired lease) opens the form pre-filled with the same remotes, methods and
+lifetime and proposes a *new* lease, which needs its own approval; the old
+one stays until it expires or is revoked. **Revoke** ends a lease at once.
+Renew before the expiry shown in the list, and after every re-pin or token
+rotation. The lease detail page marks a remote whose frozen binding no longer
+matches the executor's registry as "Lease stale".
+
+**Budget limit with per-guest methods.** The executor counts every read of
+a remote against the lease's per-remote budget per rolling hour. Without
+per-guest methods the budget is twice what the 60-second collection needs.
+As soon as one per-guest method (`guest_config`, `guest_agent`,
+`snapshots`, `backups`) is chosen, the number of guests is not known when
+the lease is proposed and the budget is the executor's maximum, **4096
+requests per remote per hour** (about 68 per 60-second pass). One pass
+spends one request per remote-wide method plus one per guest and chosen
+per-guest method, so with all four per-guest methods a remote with more than
+about **15 guests** runs out of budget within the hour (about 60 guests with
+one per-guest method). Reads past the budget are refused until the rolling
+hour frees requests; the affected datasets then show as unavailable or
+stale. On larger remotes choose only the per-guest methods you need.
+
+## Live values and their lease
+
+**What they are.** The 10-second live values on a Proxmox node or guest box
+are read by `nebula-pve-collector` through
+the executor while the box is on screen; the server never reads Proxmox
+itself (see the admin guide, "Live values for Proxmox nodes and guests").
+They need their own **live-values lease** (a provider telemetry lease): the
+inventory read lease above does not cover them, and a live-values lease
+covers nothing else.
+
+**How to request it.**
+
+1. Open `/pve/<id>` of an active remote. The **Live values** section and the
+   **Live** column of the node and guest tables list every stored node and
+   guest with a checkbox. By default every node and every *running* guest is
+   checked, at most **64** per lease (the page says so when it had to stop
+   there). Change the selection and the lifetime (7 or 30 days).
+2. **Enable live values** proposes the lease and opens the same preview page
+   as every other lease. The server builds it from the stored inventory: a
+   node must be stored for the remote; a guest must have exactly one active
+   incarnation of the chosen kind on the chosen node, and is bound with that
+   incarnation's **generation**. A guest that was removed, moved or recreated
+   since the page was loaded is refused ("reload the page").
+3. The preview shows the remote with its full trust pin, trust generation
+   and read credential version, the single method `metrics`, every node and
+   guest (node, kind, VMID, generation), the trigger `on_demand`, the 10 s
+   interval and the budget. Nothing is read before you approve it with your
+   security key (or `nebula read-grant approve <digest>` in hardened mode).
+
+**What it covers.** Live reads (trigger `on_demand`, no scheduled history
+reads) of exactly the listed nodes and guests on that remote, each at most
+every 10 seconds. The executor additionally serves at most four live boxes
+per remote at once, so the budget is `min(targets, 4) × 360` requests per
+remote per hour (at most 1440, below the 4096 limit of the profile).
+
+**When it stops covering.** Like a read lease, a live-values lease no
+longer covers anything after the remote is re-pinned or its read token is
+rotated. A guest recreated with the same VMID gets a new generation and is
+not covered either; other guests of the lease keep working. A guest that
+migrates to another node is not covered on the new node. The **Live** column
+shows **on** for a node or guest that a current lease covers exactly and
+**lease stale, renew** for one that only an outdated lease lists; the
+section above the tables counts both.
+
+**Renewal and revoke.** Choose the nodes and guests again on `/pve/<id>` and
+**Enable live values**: the new lease is built from the current inventory
+and needs its own approval; the old one stays until it expires or is
+revoked. **Refresh** on a live-values lease in `/leases` opens `/pve/<id>`
+for exactly that. **Revoke** stops the live reads within about 10 seconds.
+
 ## Staleness and unknown labels in the UI
 
 The PVE pages show only stored observations, never live API data. Every row
@@ -355,6 +476,7 @@ history is merely evidence of a past run.
 | Remote rows labelled `unknown` in the UI | No observation ever arrived: the collector is not running, cannot reach the executor socket, or the remote is not `active`. Check the collector process and its JSON logs, the spool directory, and `nebula pve remote list`. |
 | Collector exits at start: `verify executor at /run/nebula/executor.sock: … connection reset by peer` | The executor does not know the collector's UID and drops the connection. The collector must run as the executor's `-pve-collector-user` (default `nebula-pve-collector`), and that user must exist when the executor starts: look for `pve-collector user not found` in `journalctl -u nebula-executor`, then restart `nebula-executor`, run `nebula unlock` and restart `nebula-pve-collector`. |
 | Collector exits at start: `chmod spool root: … operation not permitted` (or the same for `results`, `requests`, `live`, `guestnet`) | A spool directory does not have its final mode. The collector unit forbids setting the setgid bit (`RestrictSUIDSGID=yes`), so the directories must be created with their modes beforehand: re-run `install.sh` (it creates `/var/lib/nebula/pve` 2750, `results`, `guestnet`, `requests` 2770 and `live` 2750, owner `nebula-pve-collector`, group `nebula-rpc`). |
+| `read_grant_does_not_cover` in the collector or executor log (`journalctl -u nebula-pve-collector`, `journalctl -u nebula-executor`); PVE page says "no approved read lease" | No active provider read lease covers this remote and method: none was approved, it expired or was revoked, the remote was re-pinned, the read token was rotated, or the method (for example `snapshots`) was not chosen. Request a lease from `/pve/<id>` (**Request read lease**) or refresh the old one on `/leases`, with the methods you need, and approve it (see [Read lease for a remote](#read-lease-for-a-remote)). |
 | Rows labelled `stale` | The collector is down, backing off after failures, or the remote is blocked. Backoff is exponential from 1 m to 15 m after failed polls; a single pass can be forced with `nebula-pve-collector -once`. |
 | Dataset `unavailable: insufficient read privileges` (backups) | Expected with a read-only token (see above). Do not borrow the action token or add write privileges for inventory. |
 | Guest agent fields unavailable on PVE 8 | PVE 8's legacy `VM.Monitor` is too broad for a read-only token; agent-derived fields stay unavailable unless a separately reviewed mechanism is provided. PVE 9 informational agent methods work with the read token. |

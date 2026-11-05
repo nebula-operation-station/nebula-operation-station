@@ -1405,6 +1405,9 @@ func TestRetentionConfigurableLowerOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new store 7d: %v", err)
 	}
+	if got := s7.Retention(); got != 7*24*time.Hour {
+		t.Errorf("Retention() = %s, want 168h", got)
+	}
 	old := testBucket("10.0.0.2", 443, 1)
 	old.Hour = testNow.Add(-10 * 24 * time.Hour)
 	if err := s7.UpsertBucket(ctx, old, ownOf(old)); !errors.Is(err, ErrOutOfRange) {

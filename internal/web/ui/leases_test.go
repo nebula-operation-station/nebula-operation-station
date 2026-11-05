@@ -31,6 +31,48 @@ type fakeLeases struct {
 	proposed   []executions.ReadGrantRequest
 	commitErr  error
 	committed  []string
+
+	providerPreview  executions.ReadGrantPreview
+	providerErr      error
+	providerProposed []executions.ProviderReadGrantRequest
+
+	telemetryPreview  executions.ReadGrantPreview
+	telemetryErr      error
+	telemetryProposed []executions.ProviderTelemetryGrantRequest
+	// telemetryResolved is what the real service would bind: every
+	// proposed target resolved through the inventory the handler passed.
+	telemetryResolved [][]executions.TelemetryGuest
+	telemetryInv      []bool // whether an inventory was passed
+}
+
+// ProposeProviderTelemetryGrant records the request, resolves its guest
+// targets through inv (as the service does) and returns the configured
+// telemetry preview.
+func (f *fakeLeases) ProposeProviderTelemetryGrant(ctx context.Context, _ string, in executions.ProviderTelemetryGrantRequest, inv executions.TelemetryInventory) (executions.ReadGrantPreview, error) {
+	f.telemetryProposed = append(f.telemetryProposed, in)
+	f.telemetryInv = append(f.telemetryInv, inv != nil)
+	var resolved []executions.TelemetryGuest
+	if inv != nil {
+		for _, m := range in.Targets {
+			if m.VMID == 0 {
+				continue
+			}
+			gs, err := inv.ActiveGuests(ctx, in.RemoteID, m.VMID, 2)
+			if err != nil {
+				return executions.ReadGrantPreview{}, err
+			}
+			resolved = append(resolved, gs...)
+		}
+	}
+	f.telemetryResolved = append(f.telemetryResolved, resolved)
+	return f.telemetryPreview, f.telemetryErr
+}
+
+// ProposeProviderReadGrant records the request and returns the configured
+// provider preview.
+func (f *fakeLeases) ProposeProviderReadGrant(_ context.Context, _ string, in executions.ProviderReadGrantRequest) (executions.ReadGrantPreview, error) {
+	f.providerProposed = append(f.providerProposed, in)
+	return f.providerPreview, f.providerErr
 }
 
 // ReadGrants returns the configured grants.
