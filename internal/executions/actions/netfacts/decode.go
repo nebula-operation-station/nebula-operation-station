@@ -210,6 +210,11 @@ func Decode(raw []byte) (Facts, error) {
 	if _, err := dec.Token(); err != io.EOF {
 		return Facts{}, invalid("data after the document")
 	}
+	// encoding/json matches member names case-insensitively and lets the
+	// last of two equal members win; the schema is exact.
+	if err := checkDocumentKeys(raw); err != nil {
+		return Facts{}, invalid("document: %v", err)
+	}
 	if d.Format != Format || d.Phase != "done" {
 		return Facts{}, invalid("format %q phase %q", d.Format, d.Phase)
 	}
@@ -315,41 +320,55 @@ func (f *Facts) parse(data map[string][]byte) {
 			f.tablesIncomplete = true
 		}
 	}
-	if usable(SectionAddr) {
-		t, err := hostnet.ParseAddrs(data[SectionAddr])
+	// jsonSection runs parse on an ok JSON section whose member names pass
+	// the strict key check; a failing check marks the section invalid and
+	// leaves its table empty.
+	jsonSection := func(name string, parse func([]byte) (incomplete bool, err error)) {
+		if !usable(name) {
+			return
+		}
+		if err := checkSectionKeys(data[name]); err != nil {
+			mark(name, err, false)
+			return
+		}
+		incomplete, err := parse(data[name])
+		mark(name, err, incomplete)
+	}
+	jsonSection(SectionAddr, func(b []byte) (bool, error) {
+		t, err := hostnet.ParseAddrs(b)
 		f.Addrs = t
-		mark(SectionAddr, err, t.Incomplete)
-	}
-	if usable(SectionLink) {
-		t, err := hostnet.ParseLinks(data[SectionLink])
+		return t.Incomplete, err
+	})
+	jsonSection(SectionLink, func(b []byte) (bool, error) {
+		t, err := hostnet.ParseLinks(b)
 		f.Links = t
-		mark(SectionLink, err, t.Incomplete)
-	}
-	if usable(SectionRoute) {
-		t, err := hostnet.ParseRoutes(data[SectionRoute])
+		return t.Incomplete, err
+	})
+	jsonSection(SectionRoute, func(b []byte) (bool, error) {
+		t, err := hostnet.ParseRoutes(b)
 		f.Routes = t
-		mark(SectionRoute, err, t.Incomplete)
-	}
-	if usable(SectionRoute6) {
-		t, err := hostnet.ParseRoutes(data[SectionRoute6])
+		return t.Incomplete, err
+	})
+	jsonSection(SectionRoute6, func(b []byte) (bool, error) {
+		t, err := hostnet.ParseRoutes(b)
 		f.Routes6 = t
-		mark(SectionRoute6, err, t.Incomplete)
-	}
-	if usable(SectionNeigh) {
-		t, err := hostnet.ParseNeigh(data[SectionNeigh])
+		return t.Incomplete, err
+	})
+	jsonSection(SectionNeigh, func(b []byte) (bool, error) {
+		t, err := hostnet.ParseNeigh(b)
 		f.Neigh = t
-		mark(SectionNeigh, err, t.Incomplete)
-	}
-	if usable(SectionNeigh6) {
-		t, err := hostnet.ParseNeigh(data[SectionNeigh6])
+		return t.Incomplete, err
+	})
+	jsonSection(SectionNeigh6, func(b []byte) (bool, error) {
+		t, err := hostnet.ParseNeigh(b)
 		f.Neigh6 = t
-		mark(SectionNeigh6, err, t.Incomplete)
-	}
-	if usable(SectionBridgeVLAN) {
-		t, err := hostnet.ParseBridgeVLAN(data[SectionBridgeVLAN])
+		return t.Incomplete, err
+	})
+	jsonSection(SectionBridgeVLAN, func(b []byte) (bool, error) {
+		t, err := hostnet.ParseBridgeVLAN(b)
 		f.BridgeVLAN = t
-		mark(SectionBridgeVLAN, err, t.Incomplete)
-	}
+		return t.Incomplete, err
+	})
 	if usable(SectionSockets) {
 		raw := data[SectionSockets]
 		if bytes.Contains(raw, []byte("users:(")) {
