@@ -12,6 +12,10 @@
     <tr><th>Last observed</th><td>{{timeTag .PVEDetail.LastObservedAt}}{{if .PVEDetail.Age}} ({{.PVEDetail.Age}}){{end}}</td></tr>
     <tr><th>Source</th><td>{{.PVEDetail.Source}}</td></tr>
   </table>
+  {{if .PVEDetail.LeaseRequestURL}}
+  <p class="status">No current data: no approved read lease for this remote. The collector reads nothing from it until a read lease is approved.</p>
+  <div class="actions"><a class="button button--small" href="{{.PVEDetail.LeaseRequestURL}}">Request read lease</a></div>
+  {{end}}
 
   <h3>Nodes</h3>
   {{if .PVEDetail.Nodes}}
