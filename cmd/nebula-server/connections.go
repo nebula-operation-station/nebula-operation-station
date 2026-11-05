@@ -224,7 +224,10 @@ func resolveOwners(want map[netip.Addr]bool, hosts []inventory.Host, as []ipam.A
 			addHost(a, h.ID)
 		}
 	}
-	assetAt := map[netip.Addr][]ipam.Asset{}
+	// assetAt maps each address to the unlinked assets that claim it,
+	// keyed by asset ID so an asset listing the same address twice is
+	// counted once and never ambiguous with itself.
+	assetAt := map[netip.Addr]map[string]ipam.Asset{}
 	for _, as := range as {
 		for _, a := range as.Addresses {
 			if _, known := hostName[as.HostID]; known {
@@ -232,7 +235,10 @@ func resolveOwners(want map[netip.Addr]bool, hosts []inventory.Host, as []ipam.A
 				continue
 			}
 			if a = a.Unmap().WithZone(""); want[a] {
-				assetAt[a] = append(assetAt[a], as)
+				if assetAt[a] == nil {
+					assetAt[a] = map[string]ipam.Asset{}
+				}
+				assetAt[a][as.ID] = as
 			}
 		}
 	}
@@ -244,15 +250,17 @@ func resolveOwners(want map[netip.Addr]bool, hosts []inventory.Host, as []ipam.A
 			out[a] = connections.Peer{Kind: connections.PeerHost, ID: id, Name: hostName[id]}
 		}
 	}
-	for a, list := range assetAt {
-		if _, ok := hostAt[a]; ok || len(list) != 1 {
+	for a, m := range assetAt {
+		if _, ok := hostAt[a]; ok || len(m) != 1 {
 			continue
 		}
-		name := list[0].Name
-		if name == "" {
-			name = list[0].Hostname
+		for id, as := range m {
+			name := as.Name
+			if name == "" {
+				name = as.Hostname
+			}
+			out[a] = connections.Peer{Kind: connections.PeerAsset, ID: id, Name: name}
 		}
-		out[a] = connections.Peer{Kind: connections.PeerAsset, ID: list[0].ID, Name: name}
 	}
 	return out
 }

@@ -275,6 +275,28 @@ func TestConnDirectoryPeers(t *testing.T) {
 	}
 }
 
+// TestConnDirectorySelfDuplicateNotAmbiguous checks that an unlinked
+// asset listing the same address twice is not ambiguous with itself: the
+// address still resolves to the asset, so its flows are not lost.
+func TestConnDirectorySelfDuplicateNotAmbiguous(t *testing.T) {
+	a := func(s string) netip.Addr { return netip.MustParseAddr(s) }
+	d := connDirectory{
+		hosts:  fakeConnHosts{},
+		assets: fakeConnAssets{{ID: "dup", Name: "dup", Addresses: []netip.Addr{a("10.0.0.50"), a("10.0.0.50")}}},
+	}
+	got, err := d.Peers(context.Background(), []netip.Addr{a("10.0.0.50")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, ok := got[a("10.0.0.50")]
+	if !ok {
+		t.Fatalf("address claimed twice by one asset not resolved: %v", got)
+	}
+	if p.Kind != connections.PeerAsset || p.ID != "dup" || p.Name != "dup" {
+		t.Errorf("peer = %+v, want asset dup", p)
+	}
+}
+
 // TestConnectionsSharedAddressNotAttributed checks that a host page does
 // not show another host's flows as its own through an address both
 // claim: hosts gwa and gwb sit behind the NAT address 10.0.0.77 (gwb by
