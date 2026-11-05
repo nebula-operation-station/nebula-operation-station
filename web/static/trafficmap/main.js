@@ -419,8 +419,12 @@ export function startTrafficMap(root, opts = {}) {
           redraw = false;
         } else {
           // Empty base: clear the overlay too, so no labels of an earlier
-          // scene are left over it.
+          // scene are left over it. The empty frame is static, so the redraw
+          // is not kept: under reduced motion it is cleared once, and the
+          // next draw waits for a change (a rebuilt scene, a resize, a
+          // camera move).
           clearOverlay();
+          redraw = false;
         }
       } catch (err) {
         if (backend.name === "canvas2d") throw err;
