@@ -21,12 +21,12 @@ build:
 test:
 	$(GO) test -race -timeout 40m ./...
 
-# Deployment policy tests for the systemd units and nftables files. Checks
-# that need systemd-analyze or root nft skip themselves when unavailable.
+# Deployment policy tests for the systemd units and nftables files.
+# python3 is required; the systemd-analyze and kernel nft checks skip
+# themselves when their tools are unavailable.
 test-deploy:
-	@if command -v python3 >/dev/null 2>&1; then \
-		python3 deploy/systemd/nebula-iconfetch_test.py; \
-	else echo "test-deploy: python3 not installed, skipped"; fi
+	@command -v python3 >/dev/null 2>&1 || { echo "test-deploy: python3 is required" >&2; exit 1; }
+	python3 deploy/systemd/nebula-iconfetch_test.py
 
 # Needs root: helper processes drop to other UIDs.
 test-privileged:
