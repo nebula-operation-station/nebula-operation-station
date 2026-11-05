@@ -183,14 +183,20 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	// locked executor is the normal state after a reboot.
 	exec := &lazyExecutor{}
 	defer exec.close()
-	// Background loops run under connCtx and in bg: run cancels and joins
-	// them before it returns (and before exec and db close), so none of
-	// them logs or uses the database after run.
+	// Background loops run under connCtx and in bg (each joins the
+	// goroutines it starts itself), and the operation dispatchers under
+	// ops. On return run cancels connCtx and waits for bg, then for the
+	// dispatchers (bg's schedules may start one), before exec and db
+	// close, so none of them logs or uses the database after run.
 	connCtx, stopConnect := context.WithCancel(ctx)
 	var bg sync.WaitGroup
+	var ops *executions.Service
 	defer func() {
 		stopConnect()
 		bg.Wait()
+		if ops != nil {
+			ops.Wait()
+		}
 	}()
 	bg.Go(func() {
 		exec.connect(connCtx, executorclient.Options{SocketPath: cfg.ExecutorSocket, ExecutorUser: cfg.ExecutorUser}, log)
@@ -293,7 +299,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	bg.Go(func() { lockWatcher.Run(connCtx) })
 
 	// Operations (M4): planned here, decided and run by the executor.
-	ops := executions.New(connCtx, exec, db, store, log)
+	ops = executions.New(connCtx, exec, db, store, log)
 	ops.SetNotifier(notifier)
 	// Runbooks (M7-2) are planned like built-in actions.
 	rb := runbooks.New(db)
@@ -478,9 +484,9 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	log.Info("started", "listen", ln.Addr().String(), "version", version.String())
 
 	serveErr := make(chan error, 1)
-	go func() {
+	bg.Go(func() {
 		serveErr <- srv.Serve(ln)
-	}()
+	})
 
 	select {
 	case <-ctx.Done():

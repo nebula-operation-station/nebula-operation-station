@@ -7,12 +7,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -101,6 +105,7 @@ func TestRunServesUIAndShutsDown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var stderr bytes.Buffer
+	before := moduleGoroutines()
 	done := make(chan error, 1)
 	go func() { done <- run(ctx, []string{"-config", path}, &stderr) }()
 
@@ -205,6 +210,13 @@ func TestRunServesUIAndShutsDown(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("run did not return within 5s of ctx cancel")
 	}
+	// run joins everything it started: no goroutine running this
+	// module's code may outlive it (a bare go statement in run fails here).
+	for id, stack := range moduleGoroutines() {
+		if _, ok := before[id]; !ok {
+			t.Errorf("goroutine outlived run:\n%s", stack)
+		}
+	}
 
 	// The startup line must carry the non-secret config attributes and
 	// the listen address, and must never carry the token value.
@@ -236,5 +248,57 @@ func TestLazyExecutorListHostKeysWithoutConnection(t *testing.T) {
 	var l lazyExecutor
 	if _, err := l.ListHostKeys(context.Background(), nil); err != errNotConnected {
 		t.Fatalf("ListHostKeys: %v", err)
+	}
+}
+
+// moduleGoroutines returns the stacks of the goroutines that run code of
+// this module, by goroutine header, leaving out test goroutines.
+func moduleGoroutines() map[string]string {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	out := map[string]string{}
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		if strings.Contains(g, "main.Test") || strings.Contains(g, "main.moduleGoroutines") {
+			continue
+		}
+		if !strings.Contains(g, "\nmain.") && !strings.Contains(g, "nebula-operation-station/internal/") {
+			continue
+		}
+		id, _, _ := strings.Cut(g, " [")
+		out[id] = g
+	}
+	return out
+}
+
+// TestNoBareGoStatements keeps every goroutine of the server joined: run
+// waits for the WaitGroups the loops are started in before it returns
+// (and before exec and db close), which a bare go statement would bypass.
+func TestNoBareGoStatements(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			if g, ok := n.(*ast.GoStmt); ok {
+				t.Errorf("%s: bare go statement; start it in a joined sync.WaitGroup (bg.Go in run)", fset.Position(g.Pos()))
+			}
+			return true
+		})
 	}
 }
