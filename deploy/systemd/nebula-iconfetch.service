@@ -30,6 +30,11 @@
 # Fail closed: BindsTo= stops the helper whenever the firewall unit stops,
 # and ExecStartPre refuses to start it unless the nftables table is loaded
 # (a host firewall reload may have removed it behind systemd's back).
+# The check runs only at start: the helper has no CAP_NET_ADMIN and cannot
+# re-check the table between batches, so a manual `nft flush ruleset`
+# during a batch leaves only the IPAddressDeny filters until the batch
+# ends. Host firewall reloads are covered (the firewall unit follows them
+# and BindsTo= stops the helper); the next start re-checks the table.
 [Unit]
 Description=Nebula Operation Station icon fetcher (queued HTTPS icons)
 Documentation=https://github.com/nebula-operation-station/nebula-operation-station/blob/main/docs/adr/0009-traffic-map.md
