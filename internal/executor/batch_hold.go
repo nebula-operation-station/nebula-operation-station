@@ -303,7 +303,7 @@ func (s *Service) holdExpiredLocked(x *batchExec, hostID string, h *heldTarget) 
 	h.expired = true
 	_ = s.saveHeldLocked(x) // a failure is audited and blocks all members
 	s.log.Error("audit", "kind", "batch_target_hold_expired", "execution", h.executionID, "host", hostID,
-		"detail", "held for the maximum time without the target showing the run gone; only an operator release (with the run gone) frees it")
+		"detail", "held for the maximum time without the target showing the run gone; end it with the offline `nebula-executor batch-holds rearm` (executor stopped); the target is freed once RunVisible shows the run gone")
 	return true
 }
 

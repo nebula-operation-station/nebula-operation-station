@@ -328,6 +328,35 @@ func TestHeldTargetExpiresAndNeedsOperatorRelease(t *testing.T) {
 	}
 }
 
+// The expiry audit names the operator path that exists today: the offline
+// rearm (executor stopped), and that the target is freed once RunVisible
+// shows the run gone.
+func TestHeldExpiryAuditNamesTheOfflineRearm(t *testing.T) {
+	e := newDispatchEnv(t, "web-1")
+	e.failureThreshold = 1
+	exec := e.holdTarget(t, "web-1")
+
+	e.clock.Add(batchHoldMax + time.Minute)
+	e.visible.set(false)
+	d, members, n := e.propose(t, canonical.BatchGateAutomatic, true, dispatchMember{host: "web-1"})
+	_, err := e.server.RunBatchMember(context.Background(), e.runReq(d, n, 0, "web-1"))
+	e.requireRefused(t, err, codes.FailedPrecondition, members[0], 1)
+
+	recs := e.logs.find("batch_target_hold_expired", exec)
+	if len(recs) != 1 {
+		t.Fatalf("expiry audit %+v", recs)
+	}
+	detail, _ := recs[0].attrs["detail"].(string)
+	for _, want := range []string{"nebula-executor batch-holds rearm", "executor stopped", "RunVisible"} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("expiry audit lacks %q: %s", want, detail)
+		}
+	}
+	if strings.Contains(detail, "operator release") {
+		t.Errorf("expiry audit names the non-existent operator release: %s", detail)
+	}
+}
+
 // Before the maximum hold the target is still freed automatically once it
 // shows the run gone (the expiry does not shorten a normal hold).
 func TestHeldTargetBeforeMaximumIsRechecked(t *testing.T) {
