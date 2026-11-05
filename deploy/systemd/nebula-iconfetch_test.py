@@ -156,19 +156,29 @@ class IconfetchPolicyTest(unittest.TestCase):
                          r"meta nfproto ipv4 meta l4proto tcp tcp dport 443 accept reject \} \}")
 
     def test_kernel_accepts_firewall_syntax(self):
-        # `nft -c` parses and checks without applying; it needs CAP_NET_ADMIN.
+        # `nft -c` parses and checks without applying; it needs
+        # CAP_NET_ADMIN, which root has and an unprivileged user+net
+        # namespace (unshare -rn) grants, so the check runs in CI
+        # without sudo instead of being skipped.
         nft = shutil.which("nft") or ("/usr/sbin/nft" if os.path.exists("/usr/sbin/nft") else None)
         if nft is None:
             self.skipTest("nft not installed")
-        if os.geteuid() != 0:
-            self.skipTest("nft -c needs root")
         with tempfile.TemporaryDirectory(prefix="iconfetch-nft-") as directory:
             target = Path(directory) / "check.nft"
             # The account may not exist here; check the rules for nobody's UID.
             target.write_text((ROOT / "nebula-iconfetch.nft").read_text()
                               .replace('"nebula-iconfetch"', "65534"))
-            result = subprocess.run([nft, "-c", "-f", str(target)],
-                                    capture_output=True, text=True, timeout=30)
+            cmd = [nft, "-c", "-f", str(target)]
+            if os.geteuid() != 0:
+                unshare = shutil.which("unshare")
+                if unshare is None:
+                    self.skipTest("unshare not installed")
+                probe = subprocess.run([unshare, "-rn", "true"],
+                                       capture_output=True, text=True, timeout=30)
+                if probe.returncode != 0:
+                    self.skipTest("user+net namespace unavailable: " + probe.stderr.strip())
+                cmd = [unshare, "-rn", *cmd]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_activation_watches_jobs_and_retries_after_exit(self):
