@@ -256,7 +256,8 @@ func TestProviderLeasePreviewNeedsSameOriginPost(t *testing.T) {
 		method, origin string
 		want           int
 	}{
-		{http.MethodGet, leaseOrigin, http.StatusMethodNotAllowed},
+		// GET matches the lease detail route: "preview" is no lease id.
+		{http.MethodGet, leaseOrigin, http.StatusNotFound},
 		{http.MethodPost, "null", http.StatusForbidden},
 		{http.MethodPost, "https://evil.example.org", http.StatusForbidden},
 		{http.MethodPost, leaseOrigin, http.StatusSeeOther},
