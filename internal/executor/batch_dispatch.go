@@ -88,8 +88,25 @@ type batchMemberCall struct {
 type heldTarget struct {
 	call        *batchMemberCall
 	executionID string
+	// heldAt is when the hold began (persisted; batchHoldMax counts from
+	// it, across restarts).
+	heldAt time.Time
+	// expired: held past batchHoldMax; no automatic recheck frees it, only
+	// ReleaseHeldBatchTarget.
+	expired bool
 	// checking: a recheck is in flight.
 	checking bool
+	// running: a member runs on the target in this process now. The
+	// reservation is persisted like any hold (a crash or kill during the
+	// run restarts with the target held), but neither a recheck nor an
+	// operator release frees it while the member runs.
+	running bool
+}
+
+// holdCall keeps only what reaching the target needs; the run's secrets
+// and artifact are not kept.
+func holdCall(call *batchMemberCall) *batchMemberCall {
+	return &batchMemberCall{hostID: call.hostID, fingerprint: call.fingerprint, endpoints: slices.Clone(call.endpoints), eps: slices.Clone(call.eps)}
 }
 
 // batchExec is the executor's production batch execution state.
@@ -110,14 +127,24 @@ type batchExec struct {
 	// target whose last member may still run there stays in it and in
 	// held until the host shows that run gone.
 	//
-	// Both live only in memory: an executor restart while a member may
-	// still run frees its target, and the next member there starts
-	// without a RunVisible check. Persisting the hold is follow-up pv08f.
-	// A hold has no time limit and no operator release; only the host
-	// showing the run gone (hostrun.RunVisible, which counts only the SSH
-	// user's own processes) or that restart ends it.
+	// held is persisted (batch_hold.go) and restored at startup, so a
+	// restart does not free a held target. A target is in held from its
+	// reservation on (running while its member runs here), so a crash or
+	// kill during an attached run, too, restarts with the target held. Only the host showing the run
+	// gone (hostrun.RunVisible, which counts only the SSH user's own
+	// processes) ends a hold: automatically for at most batchHoldMax, then
+	// only through the audited operator release.
 	hosts map[string]string
 	held  map[string]*heldTarget
+	// holdPath is the held-target file; holdErr makes the store unusable
+	// (no data directory, unreadable file): every member is refused.
+	// holdDirty: the file does not reflect held; no member starts until a
+	// save succeeds. writeHeld writes the file (writeFileAtomic; tests
+	// replace it).
+	holdPath  string
+	holdErr   error
+	holdDirty bool
+	writeHeld func(path string, data []byte) error
 }
 
 // EnableBatchExecution wires the production batch dispatcher and only then
@@ -129,7 +156,10 @@ func (s *Service) EnableBatchExecution() error {
 		return errors.New("executor: batch execution needs the batch authority")
 	}
 	x := &batchExec{attached: hostrun.Attached, visible: hostrun.RunVisible, holdWait: batchHoldWait, holdPoll: batchHoldPoll,
-		calls: map[string]*batchMemberCall{}, hosts: map[string]string{}, held: map[string]*heldTarget{}}
+		calls: map[string]*batchMemberCall{}, hosts: map[string]string{}, held: map[string]*heldTarget{}, writeHeld: writeFileAtomic}
+	// Holds from before a restart, rechecked before any member starts on
+	// their targets; without a usable store no member starts.
+	s.restoreHeld(x)
 	d, err := dispatch.New(dispatch.Options{
 		Permits:  s.batchAuth,
 		Recorder: batchRunRecorder{s: s, x: x},
@@ -227,37 +257,71 @@ func (s *Service) checkMemberTarget(m canonical.BatchMember) (canonical.Target, 
 	return t, nil
 }
 
-// reserveHost marks hostID as running a batch member; false when another
-// batch member runs there now.
-func (x *batchExec) reserveHost(hostID, executionID string) bool {
+// reserveTarget marks hostID as running the batch member executionID and
+// persists the reservation as a hold before the member starts, so an
+// executor crash or kill during the run restarts with the target held
+// (rechecked before the next member starts there). It reports false when
+// another batch member runs or is held there. An error means the hold
+// could not be persisted: nothing is reserved and the member must not
+// start (fail closed).
+func (s *Service) reserveTarget(x *batchExec, hostID, executionID string, call *batchMemberCall) (bool, error) {
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	if _, busy := x.hosts[hostID]; busy {
-		return false
+		return false, nil
 	}
 	x.hosts[hostID] = executionID
-	return true
+	x.held[hostID] = &heldTarget{executionID: executionID, heldAt: s.clock(), running: true, call: holdCall(call)}
+	if err := s.saveHeldLocked(x); err != nil {
+		delete(x.hosts, hostID)
+		delete(x.held, hostID)
+		return false, err
+	}
+	return true, nil
+}
+
+// releaseTarget frees hostID after its member's run is over and removes
+// the persisted reservation. A failed write leaves the stale hold in the
+// file (a restart holds the target again and rechecks it) and marks the
+// store dirty, so no member starts until a write succeeds.
+func (s *Service) releaseTarget(x *batchExec, hostID, executionID string) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if h := x.held[hostID]; h != nil && h.running && h.executionID == executionID {
+		delete(x.held, hostID)
+		_ = s.saveHeldLocked(x)
+	}
+	if x.hosts[hostID] == executionID {
+		delete(x.hosts, hostID)
+	}
 }
 
 // holdHost keeps hostID reserved after its member returned: the run may
-// still be running there.
-func (x *batchExec) holdHost(hostID, executionID string, call *batchMemberCall) {
+// still be running there. The hold (persisted since the reservation)
+// restarts its clock now and becomes rechecked; a failed write is audited
+// and keeps every member from starting until a write succeeds.
+func (s *Service) holdHost(x *batchExec, hostID, executionID string, call *batchMemberCall) {
 	x.mu.Lock()
 	defer x.mu.Unlock()
-	// Only what reaching the target needs; the run's secrets and
-	// artifact are not kept.
-	x.held[hostID] = &heldTarget{executionID: executionID,
-		call: &batchMemberCall{hostID: call.hostID, fingerprint: call.fingerprint, eps: slices.Clone(call.eps)}}
+	h := x.held[hostID]
+	if h == nil || h.executionID != executionID {
+		h = &heldTarget{executionID: executionID, call: holdCall(call)}
+		x.held[hostID] = h
+		x.hosts[hostID] = executionID
+	}
+	h.running = false
+	h.heldAt = s.clock()
+	_ = s.saveHeldLocked(x)
 }
 
 // recheckHeld asks a held target once more whether its run is still
 // running and frees the target when it is gone. It reports whether the
-// target was freed; a target that is not held, or is being rechecked
-// already, is not.
+// target was freed; a target that is not held, is being rechecked already
+// or whose hold expired (batchHoldMax) is not.
 func (s *Service) recheckHeld(ctx context.Context, x *batchExec, hostID string) bool {
 	x.mu.Lock()
 	h := x.held[hostID]
-	if h == nil || h.checking {
+	if h == nil || h.running || h.checking || s.holdExpiredLocked(x, hostID, h) {
 		x.mu.Unlock()
 		return false
 	}
@@ -270,19 +334,17 @@ func (s *Service) recheckHeld(ctx context.Context, x *batchExec, hostID string) 
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	h.checking = false
-	if gone && x.held[hostID] == h {
-		delete(x.held, hostID)
-		delete(x.hosts, hostID)
-		s.log.Info("audit", "kind", "batch_target_released", "execution", h.executionID, "host", hostID,
-			"detail", "the held run is no longer running on the target")
+	if !gone || x.held[hostID] != h {
+		return false
 	}
-	return gone
-}
-
-func (x *batchExec) releaseHost(hostID string) {
-	x.mu.Lock()
-	defer x.mu.Unlock()
+	delete(x.held, hostID)
 	delete(x.hosts, hostID)
+	// A failed write leaves the stale hold in the file (a restart holds
+	// the target again and rechecks it) and is audited.
+	_ = s.saveHeldLocked(x)
+	s.log.Info("audit", "kind", "batch_target_released", "execution", h.executionID, "host", hostID,
+		"detail", "the held run is no longer running on the target")
+	return true
 }
 
 func (x *batchExec) call(executionID string) (*batchMemberCall, bool) {
@@ -311,7 +373,13 @@ func (x *batchExec) setCall(executionID string, c *batchMemberCall) {
 // statuses and nothing ran.
 // After the claim every outcome is a response; the member is never run
 // again, whatever the outcome.
+//
+// A request with not_executed_reason is the server's report that it cannot
+// hand the member over (reportBatchMemberNotExecuted): nothing runs.
 func (s *Service) RunBatchMember(ctx context.Context, req *pb.RunBatchMemberRequest) (*pb.RunBatchMemberResponse, error) {
+	if req.GetNotExecutedReason() != "" {
+		return s.reportBatchMemberNotExecuted(ctx, req)
+	}
 	d, eps, timeout, err := validateRunBatchMember(req)
 	if err != nil {
 		return nil, err
@@ -347,7 +415,27 @@ func (s *Service) RunBatchMember(ctx context.Context, req *pb.RunBatchMemberRequ
 		return nil, err
 	}
 	execID := member.Request.ExecutionID
-	if !x.reserveHost(target.HostID, execID) && (!s.recheckHeld(ctx, x, target.HostID) || !x.reserveHost(target.HostID, execID)) {
+	// No member starts while the held targets are not persisted: a
+	// restart could otherwise forget a hold.
+	if err := s.holdStoreReady(x); err != nil {
+		s.log.Warn("audit", "kind", "batch_member_refused", "batch", d.String(), "member", member.MemberID, "host", target.HostID,
+			"detail", "held targets cannot be persisted")
+		return nil, status.Error(codes.FailedPrecondition, "batch_hold_store_unavailable: held batch targets cannot be persisted; see the executor log")
+	}
+	resp := &pb.RunBatchMemberResponse{ExecutionId: execID, ExitCode: -1}
+	call := &batchMemberCall{hostID: target.HostID, fingerprint: target.HostKeyFingerprint, endpoints: slices.Clone(req.GetEndpoints()),
+		eps: eps, artifact: req.GetArtifact(), secrets: secrets, timeout: timeout, resp: resp}
+	// The reservation is persisted before anything is claimed or started.
+	reserved, rerr := s.reserveTarget(x, target.HostID, execID, call)
+	if rerr == nil && !reserved && s.recheckHeld(ctx, x, target.HostID) {
+		reserved, rerr = s.reserveTarget(x, target.HostID, execID, call)
+	}
+	if rerr != nil {
+		s.log.Warn("audit", "kind", "batch_member_refused", "batch", d.String(), "member", member.MemberID, "host", target.HostID,
+			"detail", "the target's reservation cannot be persisted")
+		return nil, status.Error(codes.FailedPrecondition, "batch_hold_store_unavailable: held batch targets cannot be persisted; see the executor log")
+	}
+	if !reserved {
 		s.log.Warn("audit", "kind", "batch_member_refused", "batch", d.String(), "member", member.MemberID, "host", target.HostID,
 			"detail", "another batch member runs on the target")
 		return nil, status.Error(codes.FailedPrecondition, "batch_host_busy: another batch member runs on the target")
@@ -357,16 +445,13 @@ func (s *Service) RunBatchMember(ctx context.Context, req *pb.RunBatchMemberRequ
 	release := true
 	defer func() {
 		if release {
-			x.releaseHost(target.HostID)
+			s.releaseTarget(x, target.HostID, execID)
 		}
 	}()
 	if _, err := s.batchAuth.ClaimMember(ctx, d, index, member); err != nil {
 		return nil, batchStatus(err)
 	}
 	// From here the member is spent: every outcome is a response.
-	resp := &pb.RunBatchMemberResponse{ExecutionId: execID, ExitCode: -1}
-	call := &batchMemberCall{hostID: target.HostID, fingerprint: target.HostKeyFingerprint, endpoints: slices.Clone(req.GetEndpoints()),
-		eps: eps, artifact: req.GetArtifact(), secrets: secrets, timeout: timeout, resp: resp}
 	x.setCall(execID, call)
 	defer x.setCall(execID, nil)
 	// The reconciler leaves the run alone while it is in flight here.
@@ -404,7 +489,7 @@ func (s *Service) RunBatchMember(ctx context.Context, req *pb.RunBatchMemberRequ
 				"host", target.HostID, "detail", "the run is no longer running on the target")
 		} else {
 			release = false
-			x.holdHost(target.HostID, execID, call)
+			s.holdHost(x, target.HostID, execID, call)
 			resp.Detail += "; the target stays held: no batch member starts there until the target shows this run gone"
 			s.log.Warn("audit", "kind", "batch_target_held", "batch", d.String(), "member", member.MemberID, "execution", execID,
 				"host", target.HostID, "detail", "the run may still be running on the target; no batch member starts there until it is gone")

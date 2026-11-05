@@ -50,6 +50,10 @@ func main() {
 }
 
 func run() error {
+	// Offline operator subcommands run with the executor stopped.
+	if len(os.Args) > 1 && os.Args[1] == batchHoldsCommand {
+		return runBatchHolds(os.Args[2:], os.Stdout, os.Stderr, time.Now)
+	}
 	var (
 		dataDir       = flag.String("data-dir", "/var/lib/nebula/executor", "private executor state (mode 0700)")
 		socketPath    = flag.String("socket", "/run/nebula/executor.sock", "Unix socket path")
@@ -111,26 +115,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	// Signed events (M10-1): every audit line is also appended to the
-	// event chain in executor.db, signed with the event key.
-	eventKey, created, err := events.LoadOrCreateKey(*dataDir)
+	log, chain, err := signedLog(*dataDir, db, log)
 	if err != nil {
 		return err
-	}
-	chain := events.NewChain(db, eventKey)
-	// The key is registered before the handler goes live, so no event is
-	// ever signed by a key the chain does not know yet (review m102, F4).
-	added, previous, err := db.RegisterEventKey(chain.PublicKey())
-	if err != nil {
-		return err
-	}
-	log = slog.New(events.NewHandler(log.Handler(), chain))
-	if created || added {
-		attrs := []any{"kind", "event_key_created", "fingerprint", events.Fingerprint(chain.PublicKey())}
-		if previous != nil {
-			attrs = append(attrs, "previous", events.Fingerprint(previous))
-		}
-		log.Info("audit", attrs...)
 	}
 
 	keysDir := filepath.Join(*dataDir, "keys")
@@ -342,4 +329,30 @@ func modeName(m permit.Mode) string {
 		return "hardened"
 	}
 	return "standard"
+}
+
+// signedLog wires the signed events (M10-1): every audit line of the
+// returned logger is also appended to the event chain in executor.db,
+// signed with the event key.
+func signedLog(dataDir string, db *executordb.DB, log *slog.Logger) (*slog.Logger, *events.Chain, error) {
+	eventKey, created, err := events.LoadOrCreateKey(dataDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	chain := events.NewChain(db, eventKey)
+	// The key is registered before the handler goes live, so no event is
+	// ever signed by a key the chain does not know yet (review m102, F4).
+	added, previous, err := db.RegisterEventKey(chain.PublicKey())
+	if err != nil {
+		return nil, nil, err
+	}
+	log = slog.New(events.NewHandler(log.Handler(), chain))
+	if created || added {
+		attrs := []any{"kind", "event_key_created", "fingerprint", events.Fingerprint(chain.PublicKey())}
+		if previous != nil {
+			attrs = append(attrs, "previous", events.Fingerprint(previous))
+		}
+		log.Info("audit", attrs...)
+	}
+	return log, chain, nil
 }

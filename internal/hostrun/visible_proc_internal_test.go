@@ -32,6 +32,9 @@ const (
 // pfKthread is PF_KTHREAD in /proc/<pid>/stat field 9.
 const pfKthread = 0x200000
 
+// cannotTell as a wanted exit status accepts any status but 0 and 1.
+const cannotTell = -1
+
 type fakeProc struct {
 	cmdline string // NUL-separated
 	environ string // NUL-separated
@@ -210,13 +213,39 @@ func TestVisibleCheckFakeProc(t *testing.T) {
 		"at the process limit":     {procs: map[int]fakeProc{100: plain, 101: plain}, maxProcs: 3, want: 0},
 		"beyond the process limit": {procs: map[int]fakeProc{100: plain, 101: plain, 102: plain}, maxProcs: 3, want: 3},
 		"other users do not count": {procs: map[int]fakeProc{100: plain, 101: plain, 102: with(plain, func(p *fakeProc) { p.foreign = true })}, maxProcs: 3, want: 0},
+		// pstat cuts the stat line at the last ") ", so a comm that
+		// contains ") " cannot shift the fields: the process is still read
+		// and its marker found, and fields forged inside the comm (here a
+		// kernel-thread flag) are not taken.
+		"comm with ') '": {procs: map[int]fakeProc{100: with(plain, func(p *fakeProc) { p.name = "a) b" })}, want: 0},
+		"comm with ') ', ID on the cmdline": {procs: map[int]fakeProc{100: with(plain, func(p *fakeProc) {
+			p.name = ") S 1 1 1 0 -1 2097152"
+			p.cmdline = "sh\x00-c\x00" + marker + "\x00"
+		})}, want: 1},
+		// A newline in the comm ends the first line of stat early: the
+		// fields are missing and the live process is "cannot tell".
+		"comm with a newline":          {procs: map[int]fakeProc{100: with(plain, func(p *fakeProc) { p.name = "a\n) S 1 1 1" })}, want: 3},
+		"comm with a newline and ') '": {procs: map[int]fakeProc{100: with(plain, func(p *fakeProc) { p.name = ") 1 1 1 1 1 1\n) x" })}, want: 3},
+		// The capability skip compares hex sets: a CapPrm that is not hex
+		// ends the check with a shell error, never with "gone".
+		"systemd --user, CapPrm not hex": {procs: map[int]fakeProc{1: {cmdline: "/sbin/init\x00", foreign: true}, 100: with(systemdUser, func(p *fakeProc) {
+			p.capPrm = "zz"
+		})}, want: cannotTell},
 	} {
 		t.Run(name, func(t *testing.T) {
 			maxProcs := tc.maxProcs
 			if maxProcs == 0 {
 				maxProcs = visibleMaxProcs
 			}
-			if got := runFakeProc(t, tc.procs, maxProcs); got != tc.want {
+			got := runFakeProc(t, tc.procs, maxProcs)
+			if tc.want == cannotTell {
+				// Any status but 0 (gone) and 1 (running) is "cannot tell".
+				if got == 0 || got == 1 {
+					t.Fatalf("exit %d, want cannot tell", got)
+				}
+				return
+			}
+			if got != tc.want {
 				t.Fatalf("exit %d, want %d", got, tc.want)
 			}
 		})
@@ -229,7 +258,10 @@ func TestVisibleCommandUsesProc(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, _ := visibleCheck(procTestID, "/proc", visibleMaxProcs)
+	want, err := visibleCheck(procTestID, "/proc", visibleMaxProcs)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if cmd != "exec /bin/sh -c "+shellQuote(want) || !strings.Contains(want, "\nr='/proc'\n") ||
 		!strings.Contains(want, `[ "$n" -gt 4096 ]`) || !strings.Contains(want, `[ "$i" -gt 64 ]`) {
 		t.Fatalf("command %q", cmd)

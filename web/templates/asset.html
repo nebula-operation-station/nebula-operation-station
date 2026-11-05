@@ -1,6 +1,10 @@
 {{define "content"}}
 {{with .Network}}{{with .Asset}}
 <h1>Asset {{.Name}}</h1>
+<nav class="tabs" aria-label="Asset tabs">
+  <a class="tab tab--active" href="/network/a/{{.ID}}" aria-current="page">Asset</a>
+  <a class="tab" href="/network/a/{{.ID}}/connections">Connections</a>
+</nav>
 <section class="panel" aria-label="Asset">
   <p>{{.Kind}}{{if .Hostname}} · {{.Hostname}}{{end}}{{if .MAC}} · MAC {{.MAC}}{{end}} · <a href="/network">all assets</a></p>
   <p>Addresses: {{if .Addresses}}{{.Addresses}}{{else}}none{{end}}</p>
