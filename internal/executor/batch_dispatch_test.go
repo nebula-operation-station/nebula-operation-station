@@ -153,6 +153,7 @@ func newDispatchEnv(t *testing.T, hosts ...string) *dispatchEnv {
 	env := newBatchRPCEnv(t, uint32(os.Getuid()))
 	env.usePrivateKeyring()
 	env.productionBatchAuthority(t)
+	env.svc.SetBackupDirs(t.TempDir(), t.TempDir())
 	if err := env.svc.EnableBatchExecution(); err != nil {
 		t.Fatal(err)
 	}
