@@ -1227,12 +1227,15 @@ func (h *Handler) handleDeployPropose(w http.ResponseWriter, r *http.Request) {
 	// permit for the execution (the outcome of the call is unknown, or it
 	// answered with a proposal this page refuses): an admin may approve
 	// and commit it out of band, and the guest would use the address. It
-	// returns the note for the user.
-	keep := func(execution string) string {
+	// returns the note for the user. reason names the path that kept the
+	// reservation; vmid is 0 while the executor has not answered with a
+	// VMID.
+	keep := func(execution, reason string, vmid uint64) string {
 		if !reserved.IsValid() {
 			return ""
 		}
-		h.log.Warn("audit", "kind", "deployment_address_kept", "address", reserved.String(), "execution", execution, "user", user)
+		h.log.Warn("audit", "kind", "deployment_address_kept", "reason", reason, "address", reserved.String(), "execution", execution,
+			"remote", form.Remote, "vmid", vmid, "user", user)
 		return "; the address " + reserved.String() + " stays reserved because the executor may hold a permit for this deployment: clear it on the network page once no guest uses it"
 	}
 	resp, err := h.deploy.ProposePVEGuestProvision(ctx, &pb.ProposePVEGuestProvisionRequest{Spec: spec})
@@ -1249,9 +1252,9 @@ func (h *Handler) handleDeployPropose(w http.ResponseWriter, r *http.Request) {
 		switch st.Code() {
 		case codes.InvalidArgument, codes.FailedPrecondition, codes.PermissionDenied, codes.ResourceExhausted,
 			codes.AlreadyExists, codes.NotFound, codes.Aborted:
-			http.Error(w, "the executor refused: "+cleanText(st.Message())+keep(""), http.StatusConflict)
+			http.Error(w, "the executor refused: "+cleanText(st.Message())+keep("", "executor_refusal", 0), http.StatusConflict)
 		default:
-			http.Error(w, "the executor did not confirm the proposal (unavailable or busy); its outcome is unknown"+keep(""), http.StatusBadGateway)
+			http.Error(w, "the executor did not confirm the proposal (unavailable or busy); its outcome is unknown"+keep("", "unknown_outcome", 0), http.StatusBadGateway)
 		}
 		return
 	}
@@ -1268,13 +1271,13 @@ func (h *Handler) handleDeployPropose(w http.ResponseWriter, r *http.Request) {
 	risk := riskWord(perm.GetRiskClass())
 	if !guestPowerDigestRe.MatchString(digest) || perm.GetRiskClass() == pb.RiskClass_RISK_CLASS_UNSPECIFIED || strings.HasPrefix(risk, "RISK") ||
 		run.vmid == 0 || run.executionID == "" {
-		http.Error(w, "the executor returned no usable proposal"+keep(run.executionID), http.StatusBadGateway)
+		http.Error(w, "the executor returned no usable proposal"+keep(run.executionID, "no_usable_proposal", run.vmid), http.StatusBadGateway)
 		return
 	}
 	bound, err := parseGuestPowerCanonical(perm.GetCanonicalRequest(), digest)
 	if err != nil {
 		h.log.Error("deploy: unusable canonical request", "remote", form.Remote, "error", err)
-		http.Error(w, err.Error()+": the proposal is refused, nothing can be approved here"+keep(run.executionID), http.StatusBadGateway)
+		http.Error(w, err.Error()+": the proposal is refused, nothing can be approved here"+keep(run.executionID, "unusable_canonical_request", run.vmid), http.StatusBadGateway)
 		return
 	}
 	run.bound, run.digest, run.risk = bound, digest, risk
@@ -1287,7 +1290,7 @@ func (h *Handler) handleDeployPropose(w http.ResponseWriter, r *http.Request) {
 		run.challengeAt = time.Unix(e, 0)
 	}
 	if run.requirement == "key" && run.options == "" && len(run.mismatch) == 0 {
-		http.Error(w, "the executor returned no approval challenge"+keep(run.executionID), http.StatusBadGateway)
+		http.Error(w, "the executor returned no approval challenge"+keep(run.executionID, "no_approval_challenge", run.vmid), http.StatusBadGateway)
 		return
 	}
 	// Commit presents the proposed spec with the reserved VMID; the
@@ -1307,18 +1310,18 @@ func (h *Handler) handleDeployPropose(w http.ResponseWriter, r *http.Request) {
 		var ie *deployprofile.InvalidError
 		switch {
 		case errors.As(err, &ie):
-			http.Error(w, "the profile could not be saved: "+ie.Error()+keep(run.executionID), http.StatusBadRequest)
+			http.Error(w, "the profile could not be saved: "+ie.Error()+keep(run.executionID, "profile_save_refused", run.vmid), http.StatusBadRequest)
 			return
 		case err != nil:
 			h.log.Error("deploy: save ad-hoc profile", "error", err)
-			http.Error(w, "the profile could not be saved"+keep(run.executionID), http.StatusInternalServerError)
+			http.Error(w, "the profile could not be saved"+keep(run.executionID, "profile_save_failed", run.vmid), http.StatusInternalServerError)
 			return
 		}
 		run.form.ProfileSlug, run.form.ProfileVersion = saved.Profile.Slug, saved.Version
 		h.log.Info("audit", "kind", "deploy_profile_saved", "profile", saved.Profile.Slug, "version", saved.Version, "user", user)
 	}
 	if err := h.deployRuns.put(run, now); err != nil {
-		http.Error(w, err.Error()+keep(run.executionID), http.StatusServiceUnavailable)
+		http.Error(w, err.Error()+keep(run.executionID, "run_store_full", run.vmid), http.StatusServiceUnavailable)
 		return
 	}
 	if len(run.mismatch) > 0 {
