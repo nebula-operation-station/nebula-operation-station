@@ -57,8 +57,8 @@ const (
 	MaxNodes = 2048
 	// MaxZones bounds the zones of one model.
 	MaxZones = 256
-	// MaxEdges bounds the edges of one model; the top-5 union of
-	// MaxNodes nodes has at most 5*MaxNodes/2 node pairs per address.
+	// MaxEdges bounds the edges of one model; the top-5 union of the
+	// stress target has about 5,900 flows.
 	MaxEdges = 8192
 	// MaxZoneLinks bounds the zone aggregates of one model.
 	MaxZoneLinks = 1024
