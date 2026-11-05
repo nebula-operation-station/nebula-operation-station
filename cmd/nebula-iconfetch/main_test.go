@@ -185,6 +185,85 @@ func TestRunAllBoundsWork(t *testing.T) {
 	}
 }
 
+// TestRunAllEndsBatchAfterTimeLimit: a run starts no new fetch after
+// maxBatch, so the unit's privileged firewall check runs again before
+// the next batch; the remaining jobs stay queued for the next start.
+func TestRunAllEndsBatchAfterTimeLimit(t *testing.T) {
+	r, s := newRunner(t, &fakeFetch{})
+	clock := time.Unix(1000, 0)
+	r.now = func() time.Time { return clock }
+	for i := range 10 {
+		if err := s.WriteJob(job(fmt.Sprintf("%032x", i+1), fmt.Sprintf("https://upload.wikimedia.org/%d.png", i), int64(i+1))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fetches := 0
+	r.fetch = func(context.Context, string) ([]byte, error) {
+		fetches++
+		clock = clock.Add(maxBatch / 2) // each fetch takes half a batch
+		return nil, errors.New("not found")
+	}
+	if err := r.runAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if fetches != 2 {
+		t.Fatalf("%d fetches in one batch, want 2", fetches)
+	}
+	if jobs, _, err := s.PendingJobs(); err != nil || len(jobs) != 8 {
+		t.Fatalf("%d jobs left queued, want 8: %v", len(jobs), err)
+	}
+	// The next start runs the next batch.
+	if err := r.runAll(context.Background()); err != nil || fetches != 4 {
+		t.Fatalf("second batch: %d fetches, %v", fetches, err)
+	}
+}
+
+// TestRunAllAnswersLongUnreadableJob: a job file the helper may not read
+// stays queued with a warning, and is answered with a failed result once
+// it is older than iconjob.UnreadableJobAge, so the server sees it finish.
+func TestRunAllAnswersLongUnreadableJob(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file modes, so mode 0 gives no EACCES; iconjob covers the logic with a simulated EACCES")
+	}
+	r, s := newRunner(t, &fakeFetch{})
+	var logs bytes.Buffer
+	r.log = slog.New(slog.NewTextHandler(&logs, nil))
+	if err := s.WriteJob(job(idOK, "https://upload.wikimedia.org/a.png", 1)); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(s.JobsDir(), idOK+".json")
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	queued := r.now()
+	if err := os.Chtimes(path, queued, queued); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.runAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReadResult(idOK); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("young unreadable job answered: %v", err)
+	}
+	if !strings.Contains(logs.String(), "left queued") {
+		t.Fatalf("no warning: %s", logs.String())
+	}
+	r.now = func() time.Time { return queued.Add(iconjob.UnreadableJobAge) }
+	if err := r.runAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.ReadResult(idOK)
+	if err != nil || res.OK || !strings.Contains(res.Error, "unreadable job") {
+		t.Fatalf("result %+v %v", res, err)
+	}
+	if !strings.Contains(logs.String(), "level=WARN msg=\"unreadable job\"") {
+		t.Fatalf("no warning: %s", logs.String())
+	}
+	if ids, err := s.FinishedJobs(); err != nil || len(ids) != 1 || ids[0] != idOK {
+		t.Fatalf("server does not see the job finished: %v %v", ids, err)
+	}
+}
+
 func TestSplitAllow(t *testing.T) {
 	got := splitAllow(" a.example , ,b.example,")
 	if len(got) != 2 || got[0] != "a.example" || got[1] != "b.example" {

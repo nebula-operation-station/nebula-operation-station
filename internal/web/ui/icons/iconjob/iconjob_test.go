@@ -3,6 +3,7 @@
 package iconjob
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -10,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -239,7 +242,7 @@ func TestPruneResultsRemovesOldFiles(t *testing.T) {
 	}
 }
 
-func TestReadResultClassifiesUnreadableAsInvalid(t *testing.T) {
+func TestReadResultClassifiesOpenErrors(t *testing.T) {
 	s := newSpool(t)
 	// A symlinked result (ELOOP from O_NOFOLLOW) can never be read.
 	if err := os.Symlink("/etc/passwd", filepath.Join(s.ResultsDir(), id1+".json")); err != nil {
@@ -261,8 +264,223 @@ func TestReadResultClassifiesUnreadableAsInvalid(t *testing.T) {
 	if err := os.Chmod(filepath.Join(s.ResultsDir(), id2+".json"), 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ReadResult(id2); !errors.Is(err, ErrInvalid) {
+	// An unreadable result is transient (a permission fix may land), not a
+	// format violation.
+	_, err := s.ReadResult(id2)
+	if !errors.Is(err, ErrUnreadable) || errors.Is(err, ErrInvalid) {
 		t.Fatalf("unreadable: %v", err)
+	}
+}
+
+func TestClassifyOpen(t *testing.T) {
+	for name, tc := range map[string]struct {
+		in   error
+		want error
+	}{
+		"eloop":  {syscall.ELOOP, ErrInvalid},
+		"eacces": {syscall.EACCES, ErrUnreadable},
+		"eperm":  {syscall.EPERM, ErrUnreadable},
+	} {
+		if got := classifyOpen(tc.in); !errors.Is(got, tc.want) {
+			t.Errorf("%s: got %v, want %v", name, got, tc.want)
+		}
+	}
+	// Other errors stay as they are.
+	if got := classifyOpen(os.ErrNotExist); !errors.Is(got, os.ErrNotExist) {
+		t.Errorf("enoent: %v", got)
+	}
+}
+
+// denyOpen makes opens of the given paths fail with EACCES, as for a file
+// without read permission, independent of the test's UID (root bypasses
+// mode 0). allow lifts the denial of one path.
+func denyOpen(t *testing.T, paths ...string) (allow func(string)) {
+	t.Helper()
+	var mu sync.Mutex
+	denied := map[string]bool{}
+	for _, p := range paths {
+		denied[p] = true
+	}
+	orig := openFile
+	openFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
+		mu.Lock()
+		d := denied[name]
+		mu.Unlock()
+		if d {
+			return nil, &os.PathError{Op: "open", Path: name, Err: syscall.EACCES}
+		}
+		return orig(name, flag, perm)
+	}
+	t.Cleanup(func() { openFile = orig })
+	return func(p string) {
+		mu.Lock()
+		delete(denied, p)
+		mu.Unlock()
+	}
+}
+
+func TestReadFileRealEACCES(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file modes; the simulated EACCES tests below cover the logic")
+	}
+	s := newSpool(t)
+	if err := s.WriteResult(okResult(id1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(s.ResultsDir(), id1+".json"), 0); err != nil {
+		t.Fatal(err)
+	}
+	s.sleep = func(time.Duration) {}
+	if _, err := s.ReadResult(id1); !errors.Is(err, ErrUnreadable) || errors.Is(err, ErrInvalid) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestReadFileRetriesUnreadableBounded(t *testing.T) {
+	s := newSpool(t)
+	if err := s.WriteResult(okResult(id1)); err != nil {
+		t.Fatal(err)
+	}
+	denyOpen(t, filepath.Join(s.ResultsDir(), id1+".json"))
+	var sleeps int
+	s.sleep = func(time.Duration) { sleeps++ }
+	_, err := s.ReadResult(id1)
+	if !errors.Is(err, ErrUnreadable) || errors.Is(err, ErrInvalid) {
+		t.Fatalf("got %v", err)
+	}
+	if sleeps != openRetries-1 {
+		t.Fatalf("retried after %d pauses, want %d", sleeps, openRetries-1)
+	}
+}
+
+func TestReadFileRetriesUnreadableUntilFixed(t *testing.T) {
+	s := newSpool(t)
+	if err := s.WriteResult(okResult(id1)); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(s.ResultsDir(), id1+".json")
+	allow := denyOpen(t, path)
+	s.sleep = func(time.Duration) { allow(path) }
+	r, err := s.ReadResult(id1)
+	if err != nil || !r.OK {
+		t.Fatalf("retry after permission fix: %v", err)
+	}
+}
+
+// TestRetryBudgetBoundsManyFiles: one budget bounds the retry pauses of
+// many unreadable files, and a cancelled context stops retrying at once,
+// without sleeping.
+func TestRetryBudgetBoundsManyFiles(t *testing.T) {
+	s := newSpool(t)
+	var paths []string
+	var ids []string
+	for i := 0; i < 50; i++ {
+		id := fmt.Sprintf("%032x", i+1)
+		if err := s.WriteResult(okResult(id)); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+		paths = append(paths, filepath.Join(s.ResultsDir(), id+".json"))
+	}
+	denyOpen(t, paths...)
+	var sleeps int
+	s.sleep = func(time.Duration) { sleeps++ }
+	rb := NewRetryBudget(context.Background(), MaxRetryPauses)
+	for _, id := range ids {
+		if _, err := s.ReadResultWith(rb, id); !errors.Is(err, ErrUnreadable) {
+			t.Fatalf("%s: %v", id, err)
+		}
+	}
+	if sleeps != MaxRetryPauses {
+		t.Fatalf("%d pauses for %d files, want %d", sleeps, len(ids), MaxRetryPauses)
+	}
+
+	// A cancelled context: no pause at all, and the real timer path
+	// returns at once.
+	s.sleep = nil
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rb = NewRetryBudget(ctx, 1000)
+	start := time.Now()
+	for _, id := range ids {
+		if _, err := s.ReadResultWith(rb, id); !errors.Is(err, ErrUnreadable) {
+			t.Fatalf("%s: %v", id, err)
+		}
+	}
+	if d := time.Since(start); d > openRetryDelay {
+		t.Fatalf("cancelled budget still paused: %s", d)
+	}
+
+	// The listing shares one budget too.
+	jobDir := s.JobsDir()
+	var jobPaths []string
+	for _, id := range ids {
+		if err := s.WriteJob(validJob(id)); err != nil {
+			t.Fatal(err)
+		}
+		jobPaths = append(jobPaths, filepath.Join(jobDir, id+".json"))
+		if err := os.Remove(filepath.Join(s.ResultsDir(), id+".json")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	denyOpen(t, jobPaths...)
+	sleeps = 0
+	s.sleep = func(time.Duration) { sleeps++ }
+	p, err := s.ListPending(context.Background(), time.Now())
+	if err != nil || len(p.Waiting) != len(ids) || len(p.Jobs) != 0 || len(p.Bad) != 0 {
+		t.Fatalf("pending %+v %v", p, err)
+	}
+	if sleeps != MaxRetryPauses {
+		t.Fatalf("listing paused %d times, want %d", sleeps, MaxRetryPauses)
+	}
+}
+
+func TestPendingJobsKeepsUnreadableJobQueued(t *testing.T) {
+	s := newSpool(t)
+	if err := s.WriteJob(validJob(id1)); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(s.JobsDir(), id1+".json")
+	allow := denyOpen(t, path)
+	s.sleep = func(time.Duration) {}
+	// A job the helper may not read stays queued: it is not returned and
+	// not answered, so no failed result drops the work.
+	p, err := s.ListPending(context.Background(), time.Now())
+	if err != nil || len(p.Jobs) != 0 || len(p.Bad) != 0 || len(p.Waiting) != 1 || p.Waiting[0] != id1 {
+		t.Fatalf("pending %+v err %v", p, err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("job file removed: %v", err)
+	}
+	// A permission fix before the next run makes the job readable again.
+	allow(path)
+	p, err = s.ListPending(context.Background(), time.Now())
+	if err != nil || len(p.Bad) != 0 || len(p.Waiting) != 0 || len(p.Jobs) != 1 || p.Jobs[0].ID != id1 {
+		t.Fatalf("after fix: %+v err %v", p, err)
+	}
+}
+
+func TestPendingJobsAnswersLongUnreadableJob(t *testing.T) {
+	s := newSpool(t)
+	if err := s.WriteJob(validJob(id1)); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(s.JobsDir(), id1+".json")
+	denyOpen(t, path)
+	s.sleep = func(time.Duration) {}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Just before the bound: still queued.
+	p, err := s.ListPending(context.Background(), st.ModTime().Add(UnreadableJobAge-time.Second))
+	if err != nil || len(p.Waiting) != 1 || len(p.Bad) != 0 {
+		t.Fatalf("before bound: %+v %v", p, err)
+	}
+	// After the bound: reported for a failed result, as ErrUnreadable.
+	p, err = s.ListPending(context.Background(), st.ModTime().Add(UnreadableJobAge))
+	if err != nil || len(p.Waiting) != 0 || len(p.Jobs) != 0 || !errors.Is(p.Bad[id1], ErrUnreadable) {
+		t.Fatalf("after bound: %+v %v", p, err)
 	}
 }
 
