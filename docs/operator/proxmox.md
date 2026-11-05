@@ -322,9 +322,15 @@ of *what* the collector may read and *for how long*.
 
 **How to request it.**
 
-1. Open `/pve/<id>`. For an active remote that no active provider lease
-   covers, the page says "no approved read lease" and offers **Request read
-   lease**. The same form is at `/leases/new`, scope **Proxmox remote**.
+1. Open `/pve/<id>`. For an active remote that no active provider read
+   lease lists, the page says "no approved read lease" and offers **Request
+   read lease**. When every active read lease that lists the remote is stale
+   (the remote was re-pinned or its read token rotated since the approval),
+   the page says "Read lease stale" and offers **Renew read lease** instead.
+   A live-values lease (see [Live values and their
+   lease](#live-values-and-their-lease)) is not a read lease and does not
+   hide the request. The same form is at `/leases/new`, scope **Proxmox
+   remote**.
 2. Choose the remotes (only `active` remotes are offered, at most 16), the
    methods and the lifetime (7 or 30 days). The defaults are what the
    collector reads on every pass: `nodes`, `guests`, `storage`, `cluster`,
@@ -359,7 +365,72 @@ expired lease) opens the form pre-filled with the same remotes, methods and
 lifetime and proposes a *new* lease, which needs its own approval; the old
 one stays until it expires or is revoked. **Revoke** ends a lease at once.
 Renew before the expiry shown in the list, and after every re-pin or token
-rotation.
+rotation. The lease detail page marks a remote whose frozen binding no longer
+matches the executor's registry as "Lease stale".
+
+**Budget limit with per-guest methods.** The executor counts every read of
+a remote against the lease's per-remote budget per rolling hour. Without
+per-guest methods the budget is twice what the 60-second collection needs.
+As soon as one per-guest method (`guest_config`, `guest_agent`,
+`snapshots`, `backups`) is chosen, the number of guests is not known when
+the lease is proposed and the budget is the executor's maximum, **4096
+requests per remote per hour** (about 68 per 60-second pass). One pass
+spends one request per remote-wide method plus one per guest and chosen
+per-guest method, so with all four per-guest methods a remote with more than
+about **15 guests** runs out of budget within the hour (about 60 guests with
+one per-guest method). Reads past the budget are refused until the rolling
+hour frees requests; the affected datasets then show as unavailable or
+stale. On larger remotes choose only the per-guest methods you need.
+
+## Live values and their lease
+
+**What they are.** The 10-second live values on a Proxmox node or guest box
+are read by `nebula-pve-collector` through
+the executor while the box is on screen; the server never reads Proxmox
+itself (see the admin guide, "Live values for Proxmox nodes and guests").
+They need their own **live-values lease** (a provider telemetry lease): the
+inventory read lease above does not cover them, and a live-values lease
+covers nothing else.
+
+**How to request it.**
+
+1. Open `/pve/<id>` of an active remote. The **Live values** section and the
+   **Live** column of the node and guest tables list every stored node and
+   guest with a checkbox. By default every node and every *running* guest is
+   checked, at most **64** per lease (the page says so when it had to stop
+   there). Change the selection and the lifetime (7 or 30 days).
+2. **Enable live values** proposes the lease and opens the same preview page
+   as every other lease. The server builds it from the stored inventory: a
+   node must be stored for the remote; a guest must have exactly one active
+   incarnation of the chosen kind on the chosen node, and is bound with that
+   incarnation's **generation**. A guest that was removed, moved or recreated
+   since the page was loaded is refused ("reload the page").
+3. The preview shows the remote with its full trust pin, trust generation
+   and read credential version, the single method `metrics`, every node and
+   guest (node, kind, VMID, generation), the trigger `on_demand`, the 10 s
+   interval and the budget. Nothing is read before you approve it with your
+   security key (or `nebula read-grant approve <digest>` in hardened mode).
+
+**What it covers.** Live reads (trigger `on_demand`, no scheduled history
+reads) of exactly the listed nodes and guests on that remote, each at most
+every 10 seconds. The executor additionally serves at most four live boxes
+per remote at once, so the budget is `min(targets, 4) × 360` requests per
+remote per hour (at most 1440, below the 4096 limit of the profile).
+
+**When it stops covering.** Like a read lease, a live-values lease no
+longer covers anything after the remote is re-pinned or its read token is
+rotated. A guest recreated with the same VMID gets a new generation and is
+not covered either; other guests of the lease keep working. A guest that
+migrates to another node is not covered on the new node. The **Live** column
+shows **on** for a node or guest that a current lease covers exactly and
+**lease stale, renew** for one that only an outdated lease lists; the
+section above the tables counts both.
+
+**Renewal and revoke.** Choose the nodes and guests again on `/pve/<id>` and
+**Enable live values**: the new lease is built from the current inventory
+and needs its own approval; the old one stays until it expires or is
+revoked. **Refresh** on a live-values lease in `/leases` opens `/pve/<id>`
+for exactly that. **Revoke** stops the live reads within about 10 seconds.
 
 ## Staleness and unknown labels in the UI
 
