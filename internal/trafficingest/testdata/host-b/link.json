@@ -1,0 +1,4 @@
+[
+  {"ifindex":1,"ifname":"lo","address":"00:00:00:00:00:00","mtu":65536,"qdisc":"noqueue"},
+  {"ifindex":2,"ifname":"ens18","address":"52:54:00:00:10:20","mtu":1500,"qdisc":"fq_codel"}
+]
