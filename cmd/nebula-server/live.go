@@ -143,16 +143,19 @@ func buildLiveChart(exec liveExecutor, hosts pvecollect.TelemetryHosts, tree fun
 }
 
 // run refreshes the leases and runs the scheduler, the provider handoff
-// and the hub until ctx ends; then every viewer is closed.
+// and the hub until ctx ends; then it waits for them to stop and every
+// viewer is closed.
 func (lc *liveChart) run(ctx context.Context) {
 	defer lc.hub.Close()
-	go lc.hub.Start(ctx)
-	go func() {
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	wg.Go(func() { lc.hub.Start(ctx) })
+	wg.Go(func() {
 		if err := lc.sched.Run(ctx); err != nil && ctx.Err() == nil {
 			lc.log.Error("live chart scheduler stopped", "error", err)
 		}
-	}()
-	go lc.runProvider(ctx)
+	})
+	wg.Go(func() { lc.runProvider(ctx) })
 	t := time.NewTicker(liveLeaseRefresh)
 	defer t.Stop()
 	for {

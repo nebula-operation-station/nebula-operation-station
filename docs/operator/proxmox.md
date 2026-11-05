@@ -400,11 +400,14 @@ covers nothing else.
    checked, at most **64** per lease (the page says so when it had to stop
    there). Change the selection and the lifetime (7 or 30 days).
 2. **Enable live values** proposes the lease and opens the same preview page
-   as every other lease. The server builds it from the stored inventory: a
-   node must be stored for the remote; a guest must have exactly one active
-   incarnation of the chosen kind on the chosen node, and is bound with that
-   incarnation's **generation**. A guest that was removed, moved or recreated
-   since the page was loaded is refused ("reload the page").
+   as every other lease. Each guest checkbox posts the incarnation
+   **generation** the page showed. The server checks the selection against
+   the stored inventory: a node must be stored for the remote; a guest must
+   have exactly one active incarnation of the chosen kind on the chosen node
+   with the posted generation, and is bound with that generation. A guest
+   that was removed, moved or recreated (same VMID, new generation) since
+   the page was loaded is refused ("reload the page"); it is never bound to
+   the new incarnation without you seeing it on a reloaded page.
 3. The preview shows the remote with its full trust pin, trust generation
    and read credential version, the single method `metrics`, every node and
    guest (node, kind, VMID, generation), the trigger `on_demand`, the 10 s
@@ -415,7 +418,9 @@ covers nothing else.
 reads) of exactly the listed nodes and guests on that remote, each at most
 every 10 seconds. The executor additionally serves at most four live boxes
 per remote at once, so the budget is `min(targets, 4) × 360` requests per
-remote per hour (at most 1440, below the 4096 limit of the profile).
+remote per hour (at most 1440, below the 4096 limit of the profile). The
+server sizes the budget from the same live-box limit the executor enforces,
+so the two cannot drift apart.
 
 **When it stops covering.** Like a read lease, a live-values lease no
 longer covers anything after the remote is re-pinned or its read token is

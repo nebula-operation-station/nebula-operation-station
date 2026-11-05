@@ -51,6 +51,10 @@
           <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-globe"></use></svg>
           <span>Network</span>
         </a>
+        <a class="sidebar__item{{if eq .Active "traffic"}} sidebar__item--active{{end}}" href="/traffic"{{if .NavCollapsed}} title="Traffic map"{{end}}{{if eq .Active "traffic"}} aria-current="page"{{end}}>
+          <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-orbit"></use></svg>
+          <span>Traffic map</span>
+        </a>
         <a class="sidebar__item{{if eq .Active "operations"}} sidebar__item--active{{end}}" href="/operations"{{if .NavCollapsed}} title="Operations"{{end}}{{if eq .Active "operations"}} aria-current="page"{{end}}>
           <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-play"></use></svg>
           <span>Operations</span>

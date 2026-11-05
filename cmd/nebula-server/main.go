@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -181,15 +182,30 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	// background (and pages show "Executor unavailable" until then). A
 	// locked executor is the normal state after a reboot.
 	exec := &lazyExecutor{}
-	connCtx, stopConnect := context.WithCancel(ctx)
-	defer stopConnect()
-	go exec.connect(connCtx, executorclient.Options{SocketPath: cfg.ExecutorSocket, ExecutorUser: cfg.ExecutorUser}, log)
 	defer exec.close()
+	// Background loops run under connCtx and in bg (each joins the
+	// goroutines it starts itself), and the operation dispatchers under
+	// ops. On return run cancels connCtx and waits for bg, then for the
+	// dispatchers (bg's schedules may start one), before exec and db
+	// close, so none of them logs or uses the database after run.
+	connCtx, stopConnect := context.WithCancel(ctx)
+	var bg sync.WaitGroup
+	var ops *executions.Service
+	defer func() {
+		stopConnect()
+		bg.Wait()
+		if ops != nil {
+			ops.Wait()
+		}
+	}()
+	bg.Go(func() {
+		exec.connect(connCtx, executorclient.Options{SocketPath: cfg.ExecutorSocket, ExecutorUser: cfg.ExecutorUser}, log)
+	})
 
 	// Web sessions (M2): every page except login, setup and static assets
 	// needs one; logins are verified by the executor.
 	sessions := auth.NewStore(db, nil)
-	go pruneSessions(connCtx, sessions, log)
+	bg.Go(func() { pruneSessions(connCtx, sessions, log) })
 	login, err := auth.New(auth.Options{Executor: exec, Sessions: sessions, Log: log})
 	if err != nil {
 		return err
@@ -268,7 +284,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 
 	// Host key mismatches notify (spec 13: always sent, cannot be muted).
 	watcher := &notify.HostKeyWatcher{Notifier: notifier, List: hostKeys, DB: db, Interval: hostKeyPollInterval, Log: log}
-	go watcher.Run(connCtx)
+	bg.Go(func() { watcher.Run(connCtx) })
 	// A locked executor after a restart pauses all runs (spec 13).
 	lockWatcher := &notify.ExecutorWatcher{Notifier: notifier, Interval: hostKeyPollInterval, Log: log,
 		Unlocked: func(ctx context.Context) (bool, error) {
@@ -280,10 +296,10 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 			}
 			return st.GetUnlocked(), nil
 		}}
-	go lockWatcher.Run(connCtx)
+	bg.Go(func() { lockWatcher.Run(connCtx) })
 
 	// Operations (M4): planned here, decided and run by the executor.
-	ops := executions.New(connCtx, exec, db, store, log)
+	ops = executions.New(connCtx, exec, db, store, log)
 	ops.SetNotifier(notifier)
 	// Runbooks (M7-2) are planned like built-in actions.
 	rb := runbooks.New(db)
@@ -297,7 +313,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		log.Error("resume executions", "error", err)
 	}
 	// Scheduled read-only checks run under executor-held schedule grants.
-	go ops.RunSchedules(connCtx)
+	bg.Go(func() { ops.RunSchedules(connCtx) })
 	// Batches (ADR 0007): planned here with the executor's credential
 	// versions (GetBatchCredentialVersions), approved once on the batch
 	// page; also the staged post-enrollment plan of a deployment. Proposing
@@ -309,8 +325,8 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 	// Approved members are handed to the executor one at a time, after
 	// newBatches reconciled what the previous process left dispatched.
-	go (&batchRunner{batches: batches.Batches, exec: serverBatchExecutor{client: lazyBatchRPC(exec)}, hosts: store, actions: ops, log: log}).
-		run(connCtx, batchRunInterval)
+	runner := &batchRunner{batches: batches.Batches, exec: serverBatchExecutor{client: lazyBatchRPC(exec)}, hosts: store, actions: ops, log: log}
+	bg.Go(func() { runner.run(connCtx, batchRunInterval) })
 
 	// Expire pending operations whose approval window ended (issue #71): the
 	// executor drops the permit when the window closes but the server only
@@ -318,7 +334,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	if _, err := ops.ExpirePending(connCtx, time.Now()); err != nil {
 		log.Error("expire pending operations", "error", err)
 	}
-	go func() {
+	bg.Go(func() {
 		t := time.NewTicker(expireInterval)
 		defer t.Stop()
 		for {
@@ -331,11 +347,11 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 				log.Error("expire pending operations", "error", err)
 			}
 		}
-	}()
+	})
 
 	// Record approvals made on the executor host (issue #78): the check
 	// contacts the executor only while at least one operation is pending.
-	go func() {
+	bg.Go(func() {
 		t := time.NewTicker(cliApproveInterval)
 		defer t.Stop()
 		for {
@@ -350,14 +366,14 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 				log.Info("recorded CLI approvals", "count", n)
 			}
 		}
-	}()
+	})
 
 	// Network assets, IPAM and discovery (M9). nebula-discovery runs the
 	// scans; the server only queues jobs and reads results.
 	hostAddrs := ipam.FromInventory(store.List)
 	ipamStore := ipam.New(db, hostAddrs)
 	disc := discovery.New(db, discoveryjob.Spool{Dir: cfg.DiscoveryDir}, ipamStore, hostAddrs, log)
-	go disc.Run(connCtx)
+	bg.Go(func() { disc.Run(connCtx) })
 
 	// Traffic map data (ADR 0009 TM12): net.facts results go into the
 	// traffic store; own addresses and MACs come only from the inventory
@@ -366,7 +382,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	go traffic.run(connCtx, trafficCheckInterval)
+	bg.Go(func() { traffic.run(connCtx, trafficCheckInterval) })
 
 	h, err := ui.New(ui.Options{
 		PublicOrigin:   cfg.PublicOrigin,
@@ -422,7 +438,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	go lc.run(connCtx)
+	bg.Go(func() { lc.run(connCtx) })
 	// Software catalog (ADR 0009 TM17): admin pages behind the session.
 	softwarePages, err := newSoftwarePages(db, log)
 	if err != nil {
@@ -449,6 +465,10 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		apiHandler = a
 		log.Info("read-only API enabled", "tokens", len(cfg.API.Tokens))
 	}
+	// Traffic map (ADR 0009 TM19): page, frame and model behind the session; renderer modules under /static/.
+	if err := mountTrafficMap(pages, cfg.PublicOrigin, db, store.List, ipamStore, log); err != nil {
+		return err
+	}
 	srv, err := webServer(cfg.PublicOrigin, login, pages, apiHandler)
 	if err != nil {
 		return err
@@ -464,9 +484,9 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	log.Info("started", "listen", ln.Addr().String(), "version", version.String())
 
 	serveErr := make(chan error, 1)
-	go func() {
+	bg.Go(func() {
 		serveErr <- srv.Serve(ln)
-	}()
+	})
 
 	select {
 	case <-ctx.Done():
