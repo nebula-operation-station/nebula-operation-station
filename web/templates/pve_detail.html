@@ -13,15 +13,39 @@
     <tr><th>Source</th><td>{{.PVEDetail.Source}}</td></tr>
   </table>
   {{if .PVEDetail.LeaseRequestURL}}
+  {{if .PVEDetail.ReadLeaseStale}}
+  <p class="status">Read lease stale: the remote was re-pinned or its read token was rotated, so the approved read lease no longer covers it. The collector reads nothing from it until a new read lease is approved.</p>
+  <div class="actions"><a class="button button--small" href="{{.PVEDetail.LeaseRequestURL}}">Renew read lease</a></div>
+  {{else}}
   <p class="status">No current data: no approved read lease for this remote. The collector reads nothing from it until a read lease is approved.</p>
   <div class="actions"><a class="button button--small" href="{{.PVEDetail.LeaseRequestURL}}">Request read lease</a></div>
+  {{end}}
+  {{end}}
+  {{$live := .PVEDetail.Live}}
+  {{if $live.Offered}}
+  <h3 id="live">Live values</h3>
+  <p class="hint">The 10-second live values on node and guest boxes need an approved live-values lease that lists each node and guest
+     exactly (a recreated guest needs a new one). Choose them in the Live column below: by default every node and every running
+     guest, at most {{$live.Max}}. The next step shows the complete lease; nothing is read before you approve it.</p>
+  {{if $live.On}}<p class="status">Live values on for {{$live.On}} nodes and guests.</p>{{end}}
+  {{if $live.Stale}}<p class="status pve-live-stale">Live values lease stale for {{$live.Stale}} nodes and guests (remote re-pinned, read token rotated or guest recreated): renew it below.</p>{{end}}
+  {{if $live.Truncated}}<p class="hint">Only the first {{$live.Max}} nodes and guests are pre-selected.</p>{{end}}
+  <form id="pve-live" method="post" action="/leases/preview" class="form" data-fetch>
+    <input type="hidden" name="scope" value="provider_telemetry">
+    <input type="hidden" name="remote" value="{{$live.RemoteID}}">
+    <label>Lasts
+      <select name="days">
+        {{range $live.DayOptions}}<option value="{{.}}">{{.}} days</option>{{end}}
+      </select></label>
+    <div class="actions"><button type="submit" class="button button--small">Enable live values</button></div>
+  </form>
   {{end}}
 
   <h3>Nodes</h3>
   {{if .PVEDetail.Nodes}}
   <table class="inventory">
     <thead>
-      <tr><th>Node</th><th>Status</th><th>PVE</th><th>Kernel</th><th>Last observed</th><th>PVE UI</th></tr>
+      <tr><th>Node</th><th>Status</th><th>PVE</th><th>Kernel</th><th>Last observed</th><th>PVE UI</th>{{if $live.Offered}}<th>Live</th>{{end}}</tr>
     </thead>
     <tbody>
       {{range .PVEDetail.Nodes}}
@@ -32,6 +56,7 @@
         <td>{{if .KernelVersion}}{{.KernelVersion}}{{else}}—{{end}}{{if .DetailsLabel}} <span class="badge badge--warning">{{.DetailsLabel}}</span>{{end}} {{timeTag .DetailsObservedAt}}{{if .DetailsAge}} ({{.DetailsAge}}){{end}}</td>
         <td>{{timeTag .ObservedAt}}{{if .Age}} ({{.Age}}){{end}}</td>
         <td>{{if .Link}}<a href="{{.Link}}" target="_blank" rel="noopener noreferrer">Open</a>{{end}}</td>
+        {{if $live.Offered}}<td>{{if .Live.Value}}{{template "pve_live_cell" .Live}}{{end}}</td>{{end}}
       </tr>
       {{end}}
     </tbody>
@@ -44,7 +69,7 @@
   {{if .PVEDetail.Guests}}
   <table class="inventory">
     <thead>
-      <tr><th>VMID</th><th>Kind</th><th>Name</th><th>Node</th><th>Status</th><th>Last observed</th><th>PVE UI</th></tr>
+      <tr><th>VMID</th><th>Kind</th><th>Name</th><th>Node</th><th>Status</th><th>Last observed</th><th>PVE UI</th>{{if $live.Offered}}<th>Live</th>{{end}}</tr>
     </thead>
     <tbody>
       {{range .PVEDetail.Guests}}
@@ -56,6 +81,7 @@
         <td>{{.Status}}{{if .Label}} <span class="badge badge--warning">{{.Label}}</span>{{end}}</td>
         <td>{{timeTag .ObservedAt}}{{if .Age}} ({{.Age}}){{end}}</td>
         <td>{{if .Link}}<a href="{{.Link}}" target="_blank" rel="noopener noreferrer">Open</a>{{end}}</td>
+        {{if $live.Offered}}<td>{{if .Live.Value}}{{template "pve_live_cell" .Live}}{{end}}</td>{{end}}
       </tr>
       {{end}}
     </tbody>
@@ -87,3 +113,4 @@
   {{end}}
 </section>
 {{end}}
+{{define "pve_live_cell"}}<label class="choice"><input type="checkbox" name="target" value="{{.Value}}" form="pve-live"{{if .Checked}} checked{{end}}> live</label>{{if eq .Status "on"}} <span class="badge badge--ok">on</span>{{else if eq .Status "stale"}} <span class="badge badge--warning">lease stale, renew</span>{{end}}{{end}}

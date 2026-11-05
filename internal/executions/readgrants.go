@@ -106,6 +106,7 @@ func (s *Service) ReadGrants(ctx context.Context) ([]ReadGrantView, error) {
 	for _, g := range r.GetGrants() {
 		out = append(out, decodeReadGrant(g, inv, ok, s.now()))
 	}
+	s.markProviderBindings(ctx, out)
 	return out, nil
 }
 
