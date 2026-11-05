@@ -149,7 +149,7 @@ func (s sqlFlows) Flows(ctx context.Context, nodes []netip.Addr, w flowagg.Windo
 		if r.LastSeen.After(w.To) {
 			r.LastSeen = w.To.UTC()
 		}
-		r.Reporters = splitReporters(reps)
+		r.Reporters, r.ReporterCount = splitReporters(reps)
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
@@ -178,22 +178,25 @@ func storedRecord(a, b, tier string, proto, port, side int64) (Record, error) {
 }
 
 // splitReporters splits the aggregated reporter column, keeping at most
-// maxRecordReporters non-empty IDs.
-func splitReporters(s string) []string {
+// maxRecordReporters non-empty IDs. It also returns the number of
+// non-empty IDs before that cut, so the page counts the reporters it
+// does not name from the full list.
+func splitReporters(s string) ([]string, int) {
 	if s == "" {
-		return nil
+		return nil, 0
 	}
 	var out []string
+	n := 0
 	for rep := range strings.SplitSeq(s, reporterSep) {
 		if rep == "" {
 			continue
 		}
-		if len(out) == maxRecordReporters {
-			break
+		n++
+		if len(out) < maxRecordReporters {
+			out = append(out, rep)
 		}
-		out = append(out, rep)
 	}
-	return out
+	return out, n
 }
 
 func floorDiv(a, b int64) int64 {

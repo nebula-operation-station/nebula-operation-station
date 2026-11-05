@@ -79,6 +79,10 @@ type Record struct {
 	// the window, sorted. They are server-assigned host IDs but rendered
 	// as untrusted text.
 	Reporters []string
+	// ReporterCount is the number of distinct reporters before Reporters
+	// was cut to a bound; zero or less than len(Reporters) means
+	// len(Reporters).
+	ReporterCount int
 	// Process is the local process name, "" when not collected. It comes
 	// from a host and is untrusted.
 	Process string
@@ -691,7 +695,7 @@ func buildRow(in viewInput, r Record) (rowView, bool) {
 		row.PeerKind = "this " + strings.ToLower(kindLabel(in.kind))
 	}
 	row.Tier, row.LowerBound = tierLabel(k.Tier, r.LowerBound)
-	row.Reporters, row.MoreReporters = reporterViews(in, r.Reporters)
+	row.Reporters, row.MoreReporters = reporterViews(in, r.Reporters, r.ReporterCount)
 	switch {
 	case r.Confirmed:
 		row.Evidence = "both ends"
@@ -727,15 +731,17 @@ func tierLabel(tier string, lowerBound bool) (string, bool) {
 
 // reporterViews labels the reporters of a row: the subject host itself
 // as "this host", other hosts linked to their page, at most
-// MaxReportersShown, the rest counted.
-func reporterViews(in viewInput, reps []string) ([]reporterView, int) {
+// MaxReportersShown, the rest counted. total is the number of reporters
+// before the source cut the list (Record.ReporterCount).
+func reporterViews(in viewInput, reps []string, total int) ([]reporterView, int) {
 	if len(reps) == 0 {
 		return []reporterView{{Label: "unknown"}}, 0
 	}
-	more := 0
+	total = max(total, len(reps))
 	if len(reps) > MaxReportersShown {
-		reps, more = reps[:MaxReportersShown], len(reps)-MaxReportersShown
+		reps = reps[:MaxReportersShown]
 	}
+	more := total - len(reps)
 	out := make([]reporterView, 0, len(reps))
 	for _, rep := range reps {
 		if in.kind == kindHost && rep == in.id {

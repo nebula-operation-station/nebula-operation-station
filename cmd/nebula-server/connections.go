@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strings"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
@@ -90,6 +91,12 @@ func endpointAddrs(h inventory.Host) []netip.Addr {
 	return out
 }
 
+// Host returns a managed host with the addresses the server attributes
+// to it alone: its endpoint IP literals and the addresses of its linked
+// IPAM assets, minus every address another host also claims (two hosts
+// behind one NAT address, say). Such an address is ambiguous, as in
+// Peers and the traffic map (trafficmap addrOwners), so its flows are
+// shown on neither host's page instead of on both.
 func (d connDirectory) Host(ctx context.Context, id string) (connections.Subject, error) {
 	h, err := d.hosts.Get(ctx, id)
 	if errors.Is(err, inventory.ErrHostNotFound) {
@@ -98,22 +105,28 @@ func (d connDirectory) Host(ctx context.Context, id string) (connections.Subject
 	if err != nil {
 		return connections.Subject{}, err
 	}
-	s := connections.Subject{Name: h.DisplayName, Addrs: endpointAddrs(h)}
-	if s.Name == "" {
-		s.Name = h.ID
+	name := h.DisplayName
+	if name == "" {
+		name = h.ID
 	}
-	as, err := d.assets.Assets(ctx)
+	hosts, assets, err := d.records(ctx)
 	if err != nil {
 		return connections.Subject{}, err
 	}
-	for _, a := range as {
+	addrs := endpointAddrs(h)
+	for _, a := range assets {
 		if a.HostID == h.ID {
-			s.Addrs = append(s.Addrs, a.Addresses...)
+			addrs = append(addrs, a.Addresses...)
 		}
 	}
-	return s, nil
+	own := connections.Peer{Kind: connections.PeerHost, ID: h.ID}
+	return connections.Subject{Name: name, Addrs: ownedAddrs(addrs, own, hosts, assets)}, nil
 }
 
+// Asset returns an IPAM asset with the addresses the server attributes
+// to it alone. An asset linked to a managed host shares that host's
+// addresses; any other address claimed by more than one host or asset
+// is ambiguous and left out, by the same rule as Host and Peers.
 func (d connDirectory) Asset(ctx context.Context, id string) (connections.Subject, error) {
 	a, err := d.assets.Asset(ctx, id)
 	if errors.Is(err, ipam.ErrNotFound) {
@@ -126,29 +139,73 @@ func (d connDirectory) Asset(ctx context.Context, id string) (connections.Subjec
 	if name == "" {
 		name = a.Hostname
 	}
-	return connections.Subject{Name: name, Addrs: a.Addresses}, nil
+	hosts, assets, err := d.records(ctx)
+	if err != nil {
+		return connections.Subject{}, err
+	}
+	own := connections.Peer{Kind: connections.PeerAsset, ID: a.ID}
+	if a.HostID != "" && slices.ContainsFunc(hosts, func(h inventory.Host) bool { return h.ID == a.HostID }) {
+		own = connections.Peer{Kind: connections.PeerHost, ID: a.HostID}
+	}
+	return connections.Subject{Name: name, Addrs: ownedAddrs(a.Addresses, own, hosts, assets)}, nil
+}
+
+// records reads every host and asset.
+func (d connDirectory) records(ctx context.Context) ([]inventory.Host, []ipam.Asset, error) {
+	hosts, err := d.hosts.List(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	assets, err := d.assets.Assets(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return hosts, assets, nil
+}
+
+// ownedAddrs returns the addresses among addrs, normalised and without
+// duplicates, that resolveOwners attributes to own (kind and ID).
+func ownedAddrs(addrs []netip.Addr, own connections.Peer, hosts []inventory.Host, assets []ipam.Asset) []netip.Addr {
+	want := make(map[netip.Addr]bool, len(addrs))
+	for _, a := range addrs {
+		want[a.Unmap().WithZone("")] = true
+	}
+	owners := resolveOwners(want, hosts, assets)
+	var out []netip.Addr
+	for _, a := range addrs {
+		a = a.Unmap().WithZone("")
+		if p, ok := owners[a]; ok && p.Kind == own.Kind && p.ID == own.ID && !slices.Contains(out, a) {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // Peers resolves addrs to managed hosts first (endpoints and linked
 // assets), then to IPAM assets. An address that matches several hosts,
 // or several assets and no host, is ambiguous and left out.
 func (d connDirectory) Peers(ctx context.Context, addrs []netip.Addr) (map[netip.Addr]connections.Peer, error) {
-	out := make(map[netip.Addr]connections.Peer, len(addrs))
 	if len(addrs) == 0 {
-		return out, nil
+		return make(map[netip.Addr]connections.Peer), nil
 	}
 	want := make(map[netip.Addr]bool, len(addrs))
 	for _, a := range addrs {
 		want[a.Unmap().WithZone("")] = true
 	}
-	hosts, err := d.hosts.List(ctx)
+	hosts, as, err := d.records(ctx)
 	if err != nil {
 		return nil, err
 	}
-	as, err := d.assets.Assets(ctx)
-	if err != nil {
-		return nil, err
-	}
+	return resolveOwners(want, hosts, as), nil
+}
+
+// resolveOwners resolves the addresses in want to managed hosts first
+// (endpoints and linked assets), then to IPAM assets not linked to a
+// known host. An address that matches several hosts, or several assets
+// and no host, is ambiguous and left out. Addresses in want must be
+// unmapped and without zone.
+func resolveOwners(want map[netip.Addr]bool, hosts []inventory.Host, as []ipam.Asset) map[netip.Addr]connections.Peer {
+	out := make(map[netip.Addr]connections.Peer, len(want))
 	hostName := make(map[string]string, len(hosts))
 	hostAt := map[netip.Addr]map[string]bool{}
 	addHost := func(a netip.Addr, id string) {
@@ -197,5 +254,5 @@ func (d connDirectory) Peers(ctx context.Context, addrs []netip.Addr) (map[netip
 		}
 		out[a] = connections.Peer{Kind: connections.PeerAsset, ID: list[0].ID, Name: name}
 	}
-	return out, nil
+	return out
 }

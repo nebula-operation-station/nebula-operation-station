@@ -35,6 +35,9 @@ var (
 type connFixture struct {
 	sw    *swFixture // srv and token; cat unused
 	pages *http.ServeMux
+	inv   *inventory.Store
+	ipam  *ipam.Store
+	flows *trafficstore.Store
 }
 
 func newConnFixture(t *testing.T) *connFixture {
@@ -99,7 +102,7 @@ func newConnFixture(t *testing.T) *connFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &connFixture{sw: &swFixture{srv: srv, token: token}, pages: pages}
+	return &connFixture{sw: &swFixture{srv: srv, token: token}, pages: pages, inv: inv, ipam: ipamStore, flows: ts}
 }
 
 var connPages = []string{
@@ -229,9 +232,37 @@ func TestConnDirectoryPeers(t *testing.T) {
 		}
 	}
 
-	s, err := d.Host(context.Background(), "h2")
-	if err != nil || s.Name != "h2" || len(s.Addrs) != 3 {
-		t.Errorf("host h2 = %+v, %v; want endpoints and linked asset addresses", s, err)
+	// A subject keeps only the addresses Peers attributes to it: the
+	// 10.0.0.9 h2 shares with h3 belongs to neither, and as3's 10.0.0.1
+	// resolves to h1.
+	for _, c := range []struct {
+		host  bool
+		id    string
+		addrs string
+	}{
+		{true, "h1", "10.0.0.1,fd00::1"},
+		{true, "h2", "10.0.0.2,10.0.0.60"},
+		{true, "h3", ""},
+		{false, "as1", "10.0.0.50"},
+		{false, "as2", "10.0.0.60"},
+		{false, "as3", ""},
+	} {
+		var s connections.Subject
+		if c.host {
+			s, err = d.Host(context.Background(), c.id)
+		} else {
+			s, err = d.Asset(context.Background(), c.id)
+		}
+		var got []string
+		for _, a := range s.Addrs {
+			got = append(got, a.String())
+		}
+		if err != nil || strings.Join(got, ",") != c.addrs {
+			t.Errorf("subject %s = %v, %v; want addresses %q", c.id, got, err, c.addrs)
+		}
+	}
+	if s, err := d.Host(context.Background(), "h2"); err != nil || s.Name != "h2" {
+		t.Errorf("host h2 = %+v, %v", s, err)
 	}
 	if _, err := d.Host(context.Background(), "nope"); err == nil {
 		t.Error("unknown host resolved")
@@ -241,6 +272,67 @@ func TestConnDirectoryPeers(t *testing.T) {
 	}
 	if _, err := d.Asset(context.Background(), "nope"); err == nil {
 		t.Error("unknown asset resolved")
+	}
+}
+
+// TestConnectionsSharedAddressNotAttributed checks that a host page does
+// not show another host's flows as its own through an address both
+// claim: hosts gwa and gwb sit behind the NAT address 10.0.0.77 (gwb by
+// a linked IPAM asset), so gwb's flow from that address appears on
+// neither page, while each host's flow from its own address does.
+func TestConnectionsSharedAddressNotAttributed(t *testing.T) {
+	f := newConnFixture(t)
+	ctx := context.Background()
+	nat, gwa, gwb := netip.MustParseAddr("10.0.0.77"), netip.MustParseAddr("10.0.0.71"), netip.MustParseAddr("10.0.0.72")
+	for _, h := range []inventory.Host{
+		{ID: "gwa", DisplayName: "gwa.lab", Environment: inventory.EnvProd, Criticality: inventory.CriticalityMedium,
+			Endpoints: []inventory.Endpoint{{Address: gwa.String(), Port: 22}, {Address: nat.String(), Port: 2222}}, CredentialRef: "gwa"},
+		{ID: "gwb", DisplayName: "gwb.lab", Environment: inventory.EnvProd, Criticality: inventory.CriticalityMedium,
+			Endpoints: []inventory.Endpoint{{Address: gwb.String(), Port: 22}}, CredentialRef: "gwb"},
+	} {
+		if _, err := f.inv.Create(ctx, h, inventory.CreateOptions{}); err != nil {
+			t.Fatalf("create host %s: %v", h.ID, err)
+		}
+	}
+	if err := f.ipam.SaveAsset(ctx, ipam.Asset{ID: "gwb-nat", Name: "gwb NAT", Kind: ipam.KindServer, HostID: "gwb",
+		Addresses: []netip.Addr{nat}}); err != nil {
+		t.Fatal(err)
+	}
+	hour := time.Now().Add(-time.Hour).Truncate(time.Hour)
+	for _, b := range []struct {
+		from netip.Addr
+		port uint16
+		rep  string
+	}{
+		{nat, 8001, "gwb"},
+		{gwa, 8002, "gwa"},
+		{gwb, 8003, "gwb"},
+	} {
+		key := flowagg.FlowKey{A: connNASAddr, B: b.from, Proto: flowagg.TCP, ServerPort: b.port, Server: flowagg.SideA, Tier: flowagg.TierSocket}
+		if err := f.flows.UpsertBucket(ctx, trafficstore.Bucket{Hour: hour, Key: key, Reporter: b.rep, BytesAB: 100, BytesBA: 100, Connections: 1},
+			[]netip.Addr{b.from}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for p, c := range map[string]struct{ want, not []string }{
+		"/hosts/gwa/connections": {want: []string{"tcp/8002"}, not: []string{"tcp/8001", "tcp/8003", nat.String()}},
+		"/hosts/gwb/connections": {want: []string{"tcp/8003"}, not: []string{"tcp/8001", "tcp/8002", nat.String()}},
+	} {
+		rec := f.sw.do(t, http.MethodGet, p, f.sw.token, "", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s: status %d", p, rec.Code)
+		}
+		body := rec.Body.String()
+		for _, w := range c.want {
+			if !strings.Contains(body, w) {
+				t.Errorf("GET %s: own flow %s missing", p, w)
+			}
+		}
+		for _, n := range c.not {
+			if strings.Contains(body, n) {
+				t.Errorf("GET %s: shows %s, which is not the host's own", p, n)
+			}
+		}
 	}
 }
 

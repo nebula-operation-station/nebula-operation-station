@@ -5,6 +5,7 @@ package connections
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -522,8 +523,15 @@ func TestReporterLabels(t *testing.T) {
 	many.Reporters = []string{"r1", "r2", "r3", "r4", "r5", "r6"}
 	none := rec(hostAddr, webAddr, webAddr, 81, flowagg.TierSensor, 1, 2)
 	none.Reporters = nil
+	// The source cut the list to 16 of 30 reporters; the count still
+	// covers all 30.
+	cut := rec(hostAddr, webAddr, webAddr, 82, flowagg.TierSensor, 1, 2)
+	for i := range maxRecordReporters {
+		cut.Reporters = append(cut.Reporters, fmt.Sprintf("c%02d", i))
+	}
+	cut.ReporterCount = 30
 	v := buildView(viewInput{subject: Subject{Addrs: []netip.Addr{hostAddr}}, kind: kindHost, id: "web1",
-		recs: []Record{self, peerOnly, both, many, none}, window: windows[1], sort: sortService, desc: false})
+		recs: []Record{self, peerOnly, both, many, none, cut}, window: windows[1], sort: sortService, desc: false})
 	byService := map[string]rowView{}
 	for _, r := range v.Rows {
 		byService[r.Service] = r
@@ -539,6 +547,9 @@ func TestReporterLabels(t *testing.T) {
 	}
 	if r := byService["tcp/81"]; len(r.Reporters) != 1 || r.Reporters[0].Label != "unknown" {
 		t.Errorf("none row %+v", r)
+	}
+	if r := byService["tcp/82"]; len(r.Reporters) != MaxReportersShown || r.MoreReporters != 30-MaxReportersShown {
+		t.Errorf("cut row: shown %d, more %d", len(r.Reporters), r.MoreReporters)
 	}
 	// An asset page never labels a reporter "this host".
 	v = buildView(viewInput{subject: Subject{Addrs: []netip.Addr{hostAddr}}, kind: kindAsset, id: "web1",

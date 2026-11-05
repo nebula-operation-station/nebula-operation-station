@@ -209,10 +209,11 @@ func TestSplitReportersBounded(t *testing.T) {
 	for i := 0; i < maxRecordReporters+5; i++ {
 		parts = append(parts, "r")
 	}
-	if got := splitReporters(strings.Join(parts, reporterSep)); len(got) != maxRecordReporters {
-		t.Fatalf("got %d reporters", len(got))
+	got, n := splitReporters(strings.Join(parts, reporterSep))
+	if len(got) != maxRecordReporters || n != maxRecordReporters+5 {
+		t.Fatalf("got %d reporters, count %d", len(got), n)
 	}
-	if got := splitReporters(""); got != nil {
-		t.Fatalf("empty: %v", got)
+	if got, n := splitReporters(""); got != nil || n != 0 {
+		t.Fatalf("empty: %v %d", got, n)
 	}
 }
