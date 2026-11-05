@@ -48,6 +48,10 @@ import (
 // that deliberately imitates systemd --user (comm, command line, and a
 // parent chain without the ID, for example after being orphaned) is not
 // seen; that needs intent, not just a capability binary in the script.
+// The maintainer accepts this residual risk explicitly (#281 review); a
+// skipped process's command line is still checked for the ID first.
+// pstat cuts stat at the last ") ", so a comm containing ") " cannot shift
+// the fields; a comm with a newline leaves them missing ("cannot tell").
 // The marker is assembled at run time, so the check's own command line
 // does not contain it.
 const visibleScript = `m=NEBULA_EXECUTION

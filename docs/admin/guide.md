@@ -823,6 +823,29 @@ skipped (skipping needs the same approval as opening a stage);
 *Abort rollout* stops every host that has not run. A restart of the
 executor ends the rollout like any approval.
 
+**Held batch targets.** While a batch member runs on a host, and
+afterwards while its run may still be running there (for example after a
+timeout), the executor holds the host: no other batch member starts
+there until the host shows that run gone. Holds are kept in
+`batch-held-targets.json` in the executor's data directory, from before
+the member starts, so a crash or restart keeps them. After 24 hours
+without the host showing the run gone a hold expires and is no longer
+rechecked by itself. To see and recover holds, stop the executor and run,
+as the executor user:
+
+```
+sudo systemctl stop nebula-executor
+sudo -u nebula-executor nebula-executor batch-holds list
+sudo -u nebula-executor nebula-executor batch-holds rearm \
+  -execution <execution-id> -by alice -reason "checked on the console" web-1
+sudo systemctl start nebula-executor && nebula unlock
+```
+
+`rearm` returns an expired hold to automatic rechecks (audited in the
+event history); it never frees the host by itself: the next batch member
+there starts only once the host shows the run gone. Never edit the file
+by hand: a malformed file stops every batch member on every host.
+
 ### 9.3 Services and Docker
 
 **Services:** List services, Service status (unit plus last journal
@@ -1428,6 +1451,8 @@ CRITICAL built-in still needs the per-run approval (section 8.1).
 | `install.sh`: no pre-upgrade backup was made | Add a recipient to `/etc/nebula/backup-recipients` and run it through `sudo` from an admin account, or use `NEBULA_SKIP_BACKUP=1` knowingly. |
 | `nebula backup`: `run this with sudo` | Run `sudo nebula backup` from your admin login (not from a root shell). |
 | Restore refuses: schema newer than this binary | The backup comes from a newer Nebula; install that version first. |
+| Batch member refused: `batch_host_busy` for a long time, or a host listed as expired by `nebula-executor batch-holds list` | A batch run may still be running there, or its hold expired; see "Held batch targets" in section 9.2. |
+| Batch member refused: `batch_hold_store_unavailable` | The executor cannot write `batch-held-targets.json` (disk full, permissions) or cannot read it; see the executor log. The server offers the member again for a while. |
 | Operation result `precheck_failed` | Nothing ran. The reason is on the page: disk space, `dpkg` state, apt lock held (another apt run), read-only disk. |
 | Result `network_unreachable` | No endpoint answered; nothing was sent. Check the endpoints and the host's firewall; `nebula host test`. |
 | Result `host_not_returned` | The host did not come back within 20 minutes after a reboot; check its console. |

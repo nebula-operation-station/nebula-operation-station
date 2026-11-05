@@ -1,0 +1,56 @@
+{{define "content"}}
+{{with .Conn}}
+<div class="toolbar">
+  <h1>{{.SubjectName}}</h1>
+  <div class="actions">
+    <a class="button button--secondary" href="{{.BackHref}}">{{.BackLabel}}</a>
+  </div>
+</div>
+<nav class="tabs" aria-label="{{.KindLabel}} tabs">
+  <a class="tab" href="{{.BackHref}}">{{.KindLabel}}</a>
+  <a class="tab tab--active" href="{{.SelfHref}}" aria-current="page">Connections</a>
+</nav>
+<section class="panel" aria-label="Connections">
+  <div class="toolbar">
+    <h2>Connections and destinations</h2>
+    <nav class="actions" aria-label="Window">
+      {{range .Windows}}
+      <a class="button{{if not .Active}} button--secondary{{end}}" href="{{.Href}}"{{if .Active}} aria-current="true"{{end}}>{{.Label}}</a>
+      {{end}}
+    </nav>
+  </div>
+  <p class="hint">Window: last {{.WindowLabel}} (hourly aggregates). Every row names who reported it and the source tier; a host can misreport its own connections. Snapshot volumes (socket and conntrack tiers) are lower bounds and marked with ≥.</p>
+  {{range .Notices}}<p class="status status--warning">{{.}}</p>{{end}}
+  {{if .Rows}}
+  <div class="table-wrap">
+  <table class="inventory">
+    <thead><tr>
+      {{range .Columns}}
+      <th scope="col"{{if .Sort}} aria-sort="{{.Sort}}"{{end}}>{{if .Href}}<a href="{{.Href}}">{{.Label}}</a>{{else}}{{.Label}}{{end}}</th>
+      {{end}}
+    </tr></thead>
+    <tbody>
+    {{range .Rows}}
+    <tr>
+      <td>{{if .PeerHref}}<a href="{{.PeerHref}}">{{.PeerName}}</a> <span class="hint">{{.PeerKind}} · {{.PeerAddr}}</span>{{else}}{{.PeerAddr}} <span class="hint">{{.PeerKind}}</span>{{end}}</td>
+      <td>{{.Direction}}</td>
+      <td>{{.Service}}</td>
+      <td>{{if .Process}}{{.Process}}{{else}}<span class="hint">not known</span>{{end}}</td>
+      <td title="{{.BytesInExact}} bytes">{{if .LowerBound}}<abbr title="lower bound">≥</abbr> {{end}}{{.BytesIn}}</td>
+      <td title="{{.BytesOutExact}} bytes">{{if .LowerBound}}<abbr title="lower bound">≥</abbr> {{end}}{{.BytesOut}}</td>
+      <td title="{{.TotalExact}} bytes">{{if .LowerBound}}<abbr title="lower bound">≥</abbr> {{end}}{{.Total}}</td>
+      <td>{{.FirstSeen}}</td>
+      <td>{{.LastSeen}}</td>
+      <td>{{.Tier}}{{if .LowerBound}} <span class="hint">lower bound</span>{{end}}</td>
+      <td>{{range $i, $r := .Reporters}}{{if $i}}, {{end}}{{if $r.Href}}<a href="{{$r.Href}}">{{$r.Label}}</a>{{else}}{{$r.Label}}{{end}}{{end}}{{if .MoreReporters}} <span class="hint">+{{.MoreReporters}} more</span>{{end}} <span class="hint">{{.Evidence}}</span></td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p>No connections recorded in this window.</p>
+  {{end}}
+</section>
+{{end}}
+{{end}}

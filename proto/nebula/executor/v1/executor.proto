@@ -2692,6 +2692,15 @@ message RunBatchMemberRequest {
   // The member's exact artifact bytes. Its SHA-256 must equal the frozen
   // member's artifact hash; the approval binds only the hash.
   bytes artifact = 5;
+  // Set only when the server cannot hand the member over (its approved
+  // action, script or host endpoints are not available): a short,
+  // secret-free, printable UTF-8 reason of at most 256 bytes. Endpoints,
+  // timeout and artifact must then be empty. The executor claims the
+  // member's single-use permit without running anything, records it failed
+  // (not executed) in the rollout, so the stop policy applies, audits the
+  // reason and answers BATCH_MEMBER_OUTCOME_NOT_EXECUTED. The member is
+  // never run afterwards.
+  string not_executed_reason = 6;
 }
 
 enum BatchMemberOutcome {
