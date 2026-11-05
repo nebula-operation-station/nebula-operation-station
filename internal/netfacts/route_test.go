@@ -352,7 +352,11 @@ func TestParseRoutesViaHostBounds(t *testing.T) {
 
 	rejected := map[string]string{
 		"zone of maxZoneLen+1 bytes": "fe80::1%" + strings.Repeat("e", maxZoneLen+1),
-		"host above maxAddrLen":      "fe80:" + strings.Repeat("0", maxAddrLen) + "::1",
+		// The longest valid IPv6 text (45 bytes) plus a zone of
+		// maxZoneLen+5 bytes is a syntactically valid zoned address
+		// (netip accepts it) that exceeds maxAddrLen only through its
+		// zone; the boundary checks, not the parser, must reject it.
+		"host above maxAddrLen": "1234:5678:9abc:def0:1234:5678:255.255.255.255%" + strings.Repeat("e", maxZoneLen+5),
 	}
 	for name, zone := range hostileZones() {
 		rejected["hostile zone "+name] = "fe80::1%" + zone
