@@ -114,7 +114,8 @@ Gaps that the steps close:
 `docker.update_preview` (cu02) is LOW and read-only: its script writes nothing
 on the host, not even a salt file, and it does not authorize anything (ADR
 lines 423 and 439: LOW means read-only). The job directory of its durable
-transport is the only file activity, the same for every durable job.
+transport is the only file activity, the same for every durable job. That
+Compose itself writes nothing either depends on Q23.
 `docker.update_prepare` (cu02) creates the per-host
 salt of Q5, so it is MEDIUM and approved like any other host change. It touches
 no container and is not a container update.
@@ -381,9 +382,10 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     the 5-minute job (50 projects at 30 seconds are 25 minutes), so the script
     also keeps `maxPreviewWallClock = 4 * time.Minute`: it starts no further unit
     past that, and reports the rest as `truncated`. The one call still running
-    ends inside the job timeout, so a slow host loses units, not the preview. A
-    label-supplied path must be absolute, and the content of those
-    files never leaves the host. A unit cut off by a limit is reported without
+    ends inside the job timeout, so a slow host loses units, not the preview.
+    Every Compose call runs with the remote loaders switched off, and the limits
+    above cover the label-named files only (Q23). A label-supplied path must be
+    absolute, and the content of those files never leaves the host. A unit cut off by a limit is reported without
     facts, never half: a partial dependency set must not become a binding.
   - `docker.compose_update` 2.0.0 (durable, `reconcile-first`, 30 min, batch
     only), result `compose-update-v2`; `compose-update-v1` stays parseable for
@@ -698,7 +700,10 @@ Until they land, cu04 shows those targets as unavailable with a reason.
       after, including past the wait; no health check stays none; `unhealthy`
       before is no regression, and the page shows it;
     - the same published ports, the same mounts (type, source, destination,
-      mode) and the same network names;
+      mode) and the same network names. A mapping with a Docker-chosen host port
+      (`ports: "80"`) gets a new port on every recreate, so such a unit is
+      unavailable (`ephemeral_port`) and the judge needs no rule of its own: a
+      changed host port always fails;
     - the image of every replica lists the approved `new_platform_digest`.
 
     Each `dependencies` container keeps its ID and `configuration_digest`, has
@@ -734,8 +739,8 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     - `baseline`: the phase 1 snapshot, unchanged once stored; empty if no result
       was ever read;
     - `source_digest` (standalone: `definition_id` and `definition_version`),
-      and the replica count per service before the update, from the binding, so
-      it exists from `intent` on;
+      the bound `dependencies`, and the replica count per service before the
+      update, all from the binding, so they exist from `intent` on;
     - `recreation_definition`: the executor-owned definition of R9 (see below);
     - verdict, state, window expiry.
 
@@ -750,7 +755,7 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     | State | Meaning | Rollback |
     | --- | --- | --- |
     | `intent` | Written; the run is not finished | Refused |
-    | `not_recreated` | Stopped in phases 1 to 4; every container is as it was | Refused: nothing to undo |
+    | `not_recreated` | Stopped in phases 1 to 4, or resolved so; every container is as it was, while a job killed inside phase 5 may have left the override ahead of them (`override_ahead`, see Resolve) | Refused: nothing to undo |
     | `recreated` | Phase 6 passed and the verdict passed; only a run's own result reaches this state | Allowed |
     | `partial` | Phase 5 was reached, the after-snapshot exists, and `up` or the verdict failed; or Resolve found a changed container | Allowed, if the row has a baseline |
     | `uncertain` | The run closed with no result (`unknown`, `script_interrupted`, `execution_timeout`), or the after-snapshot is missing | Refused until resolved |
@@ -778,7 +783,12 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     or a result already released, is refused and the row stays `uncertain`. The
     match against the row: every frozen container unchanged gives
     `not_recreated`, otherwise `partial`, with the preview's IDs, image IDs,
-    references and `configuration_digest` as the new incarnations (R13). Resolve
+    references and `configuration_digest` as the new incarnations (R13). Phase 5
+    writes the override before `up`, so a job killed between the two leaves the
+    containers unchanged and the override ahead of them. The preview then reports
+    `override_drift` for that unit, and Resolve stores `override_ahead` on the
+    `not_recreated` row, so the page names the cause and the way out of Q2 (remove
+    the entry). Resolve
     **never** gives `recreated`: the preview has no health, ports, mounts or
     networks, so no verdict is possible, and unknown is not success. A project
     that really is fully recreated stays `partial`. Anything it cannot match
@@ -793,14 +803,15 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     the host, and `source_digest` proves at rollback that they are the same.
     Rows are not deleted, so the definition lasts through the window and
     afterwards remains history.
-  - `ListContainerRecreations` (server, admin): sanitized rows, with the targets
-    and `rollback` values a rollback binding must equal, and the current recovery
-    plan digest, so the UI can offer rollback and show why not. The definition
+  - `ListContainerRecreations` (server, admin): sanitized rows, with the targets,
+    `dependencies` and `rollback` values a rollback binding must equal, and the
+    current recovery plan digest, so the UI can offer rollback and show why not. The definition
     and the baseline are not returned.
   - `SetContainerRecoveryPlan` and `ClearContainerRecoveryPlan` (admin only):
-    per project or container, a free-text reference without secrets, recorded
-    with actor, time and version (see Q8). `recovery_plan_digest` is the SHA-256
-    of that record. A rollback binds it, and Evaluate compares it with the
+    per project or container, either a free-text reference without secrets or an
+    explicit `no_persistent_data` declaration by the operator, exactly one of the
+    two and never inferred from a missing volume, recorded with actor, time and
+    version (see Q8). `recovery_plan_digest` is the SHA-256 of that record. A rollback binds it, and Evaluate compares it with the
     current record, so a plan changed or cleared after approval fails
     revalidation.
   - `docker.compose_rollback` 1.0.0 (durable, `reconcile-first`, 30 min through
@@ -840,7 +851,8 @@ Until they land, cu04 shows those targets as unavailable with a reason.
   - Evaluate refuses a rollback unless the row is `recreated` or `partial`, the
     row has a baseline (`no_baseline`), the window is open, a recovery plan
     exists with the bound digest, and the binding equals the row (targets,
-    reversed images, the `rollback` blocks, `source_digest`). An entry without a
+    `dependencies`, reversed images, the `rollback` blocks, `source_digest`). An
+    entry without a
     target is accepted only if the row records every container of that service
     as `missing`. Phase 1 on the host adds the unchanged source and the retained
     image. A rollback's own row is never a rollback source; after a failed
@@ -849,7 +861,7 @@ Until they land, cu04 shows those targets as unavailable with a reason.
   floor applied to the reversed tags), CRITICAL refused.
 - **Tests:**
   - judge table per postcheck, including a lost mount, a changed network, a lost
-    published port, a replica fewer, a wrong digest on one of several services,
+    published port, a changed host port, a replica fewer, a wrong digest on one of several services,
     `starting` past the wait, a health regression, a dependency recreated, a
     dependency stopped, a dependency restarted without `restart_on_update`, a
     missing baseline, and a replica matched by number after its ID changed.
@@ -873,7 +885,10 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     another host, or the output of another action, is refused),
     `TestResolveRefusedForAttachedOrReleasedPreview`,
     `TestReleaseKeepsPreviewWhileHostUncertain`,
-    `TestResolveCannotReachRecreated`, `TestNoAutomaticRetryOrRollback`,
+    `TestResolveCannotReachRecreated`, `TestResolveNamesOverrideAhead`,
+    `TestRollbackRefusedWhenDependenciesDiffer`,
+    `TestRecoveryPlanNeedsExplicitNoDataDeclaration`,
+    `TestNoDataDeclarationBoundLikeAPlan`, `TestNoAutomaticRetryOrRollback`,
     `TestNoPruneInContainerActions`, and
     `TestComposeFailureLogHoldsNoEnvValue` extended to rollback.
   - store: migration, restart, Lock, clock moved backwards at the window edge,
@@ -1088,6 +1103,7 @@ operator brings the project back to what its files say.
 | Operator pin: a digest reference that is not the NOS override | cu02 phase 1 | `digest_pinned` | `TestOperatorPinRefused` |
 | Drift: the running state no longer follows the NOS override | cu02 phase 1 | `override_drift` | `TestOverrideDriftRefused` |
 | Applied configuration differs from what `up` would apply: a pending file edit, or a project brought up with `--env-file`, `--profile` or a shell variable (Q21) | Preview, cu02 phase 1 | `config_not_applied` | `TestPendingFileEditRefused`, `TestOperatorEnvFileRefused`, `TestOperatorProfileRefused`, `TestShellVariableRefused` |
+| A published port with a Docker-chosen host port, read from the same `docker compose config` | Preview, cu02 phase 1 | `ephemeral_port` | `TestEphemeralPortRefused` |
 | The local digest can be neither listed nor compared | Preview, cu01 (empty `old_digests`) | `old_digest_unknown` | `TestUnanswerableLocalDigestIsUnknown` |
 | A container whose snapshot entry exceeds its limit | cu02 phase 1 | `snapshot_too_large` | `TestOversizeSnapshotRefused` |
 | Rollback of a row without a baseline | cu03 Evaluate | `no_baseline` | `TestRollbackRefusedWithoutBaseline` |
@@ -1208,8 +1224,15 @@ cannot start without the answer.
    review?
 7. **Standalone definition format? Blocks cu05.** *Recommendation:* an exact
    argument list for `docker create`, which NOS completes only with the image.
-   No shell, no template, no inspect input. Alternative: a one-service Compose
-   document, which reuses cu02 but changes the container's labels.
+   No shell, no template, no inspect input. An argument list would put secret env
+   values on the host's process command line, the same exposure Q18 rejects for
+   `openssl dgst -hmac`. So the definition holds env values in a separate list,
+   which the script writes to a file in the run's tmpfs and passes as `--env-file`,
+   and an `-e` or `--env` argument with a value is a rejected shape
+   (`TestDefinitionEnvNotOnCommandLine`). To confirm: other arguments, such as a
+   label or a health command, stay on the command line, so the admin guide must
+   say they hold no secret. Alternative: a one-service Compose document, which
+   reuses cu02 and avoids this, but changes the container's labels.
 8. **Recovery plan: where, and is "stateless" allowed? Blocks cu03.**
    *Recommendation:* an admin-set executor record per project or container,
    with an explicit "no persistent data" declaration by the operator, never
@@ -1387,8 +1410,8 @@ cannot start without the answer.
     The fake host of `TestPreviewWritesNothing` cannot show that, so its claim
     covers the script's own commands only. Finding these targets before Compose
     runs would need a YAML parser on the host, which Q18 does not provide.
-    *Recommendation:* run every Compose call with the remote loaders switched off
-    through their environment variables, treat a failure as unit unsupported, and
+    *Recommendation, used by the steps:* run every Compose call with the remote
+    loaders switched off through their environment variables, treat a failure as unit unsupported, and
     prove it with an integration test on the supported Compose versions
     (`TestRemoteIncludeRefused`, no network and no cache). Accept the time and
     output bounds for local targets, since a host that hostile only harms its own
