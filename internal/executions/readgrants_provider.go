@@ -38,9 +38,6 @@ const (
 	// guest-join identity reads (which spend the same per-remote budget)
 	// and a poll pass running slightly early never exhaust the budget.
 	providerBudgetMargin = 2
-	// pveRemoteStateActive is the executor registry state of a usable
-	// remote (executordb.StateActive).
-	pveRemoteStateActive = "active"
 )
 
 // providerGuestMethods are the methods read once per guest; the number of
@@ -88,9 +85,11 @@ type ReadGrantPreviewProvider struct {
 }
 
 // providerRemoteLister reads the executor's PVE remote metadata (state,
-// trust pin and generation, read credential version; never a token).
+// trust pin and generation, read credential version; never a token). It is
+// ListPVERemotes because the server role may call that method and not
+// ListPVEAdminRemotes (executor.MethodRoles).
 type providerRemoteLister interface {
-	ListPVEAdminRemotes(ctx context.Context, in *pb.ListPVEAdminRemotesRequest, opts ...grpc.CallOption) (*pb.ListPVEAdminRemotesResponse, error)
+	ListPVERemotes(ctx context.Context, in *pb.ListPVERemotesRequest, opts ...grpc.CallOption) (*pb.ListPVERemotesResponse, error)
 }
 
 // checkProviderReadGrantRequest validates the form input and returns the
@@ -147,15 +146,15 @@ func providerRunBudget(methods []string) int64 {
 
 // providerRemotes reads the executor's PVE remote metadata keyed by remote
 // ID. A listing that names a remote twice is refused as ambiguous.
-func (s *Service) providerRemotes(ctx context.Context, l providerRemoteLister) (map[string]*pb.PVEAdminRemote, error) {
+func (s *Service) providerRemotes(ctx context.Context, l providerRemoteLister) (map[string]*pb.PVERemoteInfo, error) {
 	cctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	r, err := l.ListPVEAdminRemotes(cctx, &pb.ListPVEAdminRemotesRequest{})
+	r, err := l.ListPVERemotes(cctx, &pb.ListPVERemotesRequest{})
 	if err != nil {
 		s.log.Warn("provider read grant remotes", "code", status.Code(err).String())
 		return nil, ErrProviderRemotesUnavailable
 	}
-	out := make(map[string]*pb.PVEAdminRemote, len(r.GetRemotes()))
+	out := make(map[string]*pb.PVERemoteInfo, len(r.GetRemotes()))
 	for _, rm := range r.GetRemotes() {
 		if _, dup := out[rm.GetRemoteId()]; dup {
 			return nil, ErrProviderRemotesUnavailable
@@ -166,21 +165,23 @@ func (s *Service) providerRemotes(ctx context.Context, l providerRemoteLister) (
 }
 
 // providerTarget freezes one remote from the executor's metadata, or
-// explains why it cannot be part of a lease.
-func providerTarget(id string, rm *pb.PVEAdminRemote, ok bool, methods []string) (permit.ProviderTarget, error) {
+// explains why it cannot be part of a lease. The executor reports read
+// credential version 0 for a remote without a valid read credential; a
+// removed remote has no ACTIVE state to report.
+func providerTarget(id string, rm *pb.PVERemoteInfo, ok bool, methods []string) (permit.ProviderTarget, error) {
 	switch {
 	case !ok:
 		return permit.ProviderTarget{}, &ReadGrantInputError{fmt.Sprintf("PVE remote %s is not registered", id)}
-	case rm.GetState() != pveRemoteStateActive:
+	case rm.GetState() != pb.PVERemoteState_PVE_REMOTE_STATE_ACTIVE:
 		return permit.ProviderTarget{}, &ReadGrantInputError{fmt.Sprintf("PVE remote %s is not active (blocked until re-pinned, or removed)", id)}
 	case !pvecontract.ValidTrustPin(rm.GetTrustPin()) || rm.GetTrustGeneration() < 1:
 		return permit.ProviderTarget{}, &ReadGrantInputError{fmt.Sprintf("PVE remote %s has no valid trust pin", id)}
-	case rm.GetReadRef() == "" || rm.GetReadVersion() < 1:
+	case rm.GetReadCredentialVersion() < 1:
 		return permit.ProviderTarget{}, &ReadGrantInputError{fmt.Sprintf("PVE remote %s has no read credential", id)}
 	}
 	return permit.ProviderTarget{
 		RemoteID: id, TrustPin: rm.GetTrustPin(), TrustGeneration: rm.GetTrustGeneration(),
-		CredentialVersion: rm.GetReadVersion(), Methods: slices.Clone(methods),
+		CredentialVersion: rm.GetReadCredentialVersion(), Methods: slices.Clone(methods),
 	}, nil
 }
 
@@ -370,7 +371,7 @@ func (s *Service) markProviderBindings(ctx context.Context, views []ReadGrantVie
 		for j := range views[i].Providers {
 			p := &views[i].Providers[j]
 			rm, ok := known[p.RemoteID]
-			if ok && rm.GetTrustPin() == p.trustPin && rm.GetTrustGeneration() == p.TrustGeneration && rm.GetReadVersion() == p.CredentialVersion {
+			if ok && rm.GetTrustPin() == p.trustPin && rm.GetTrustGeneration() == p.TrustGeneration && rm.GetReadCredentialVersion() == p.CredentialVersion {
 				p.Binding = ProviderBindingCurrent
 			} else {
 				p.Binding = ProviderBindingStale
