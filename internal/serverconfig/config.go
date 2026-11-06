@@ -66,6 +66,10 @@ func (t Token) LogValue() slog.Value {
 // DefaultDiscoveryDir is the default discovery spool.
 const DefaultDiscoveryDir = "/var/lib/nebula/discovery"
 
+// DefaultPVESpoolDir is the default PVE spool root, the default -spool of
+// nebula-pve-collector.
+const DefaultPVESpoolDir = "/var/lib/nebula/pve"
+
 // DefaultTrafficRetentionDays is the default traffic.retention_days: how
 // many days of flow data the traffic map keeps. ADR 0009 D3: the
 // retention may only be shortened, never extended past the store's
@@ -95,6 +99,14 @@ type Config struct {
 	// with nebula-discovery. Default "/var/lib/nebula/discovery"; without
 	// it discovery shows as not installed.
 	DiscoveryDir string `json:"discovery_dir"`
+	// PVESpoolDir is the root of the spool shared with
+	// nebula-pve-collector; it must match the collector's -spool. The
+	// server imports results/ and guestnet/ below it (it needs to list,
+	// read and unlink there) and exchanges the live chart data through
+	// requests/ and live/. Default "/var/lib/nebula/pve"; while the spool
+	// is unavailable the server logs that once and keeps trying, and the
+	// PVE pages stay empty.
+	PVESpoolDir string `json:"pve_spool_dir"`
 	// AuditHashChain links each stored server audit line to the one
 	// before by hash (M10-1); off by default. The executor's own events are
 	// always signed and chained.
@@ -164,6 +176,9 @@ func (c *Config) applyDefaults() {
 	if c.DiscoveryDir == "" {
 		c.DiscoveryDir = DefaultDiscoveryDir
 	}
+	if c.PVESpoolDir == "" {
+		c.PVESpoolDir = DefaultPVESpoolDir
+	}
 }
 
 // Validate checks the configuration and returns a single error listing
@@ -205,6 +220,9 @@ func (c Config) Validate() error {
 	}
 	if c.DiscoveryDir != "" && !filepath.IsAbs(c.DiscoveryDir) {
 		problems = append(problems, fmt.Sprintf("discovery_dir: %q must be an absolute path", c.DiscoveryDir))
+	}
+	if c.PVESpoolDir != "" && !filepath.IsAbs(c.PVESpoolDir) {
+		problems = append(problems, fmt.Sprintf("pve_spool_dir: %q must be an absolute path", c.PVESpoolDir))
 	}
 
 	problems = append(problems, c.Notifications.problems()...)
