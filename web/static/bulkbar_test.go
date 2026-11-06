@@ -387,6 +387,28 @@ func TestInventoryTemplateBulkBarToggleA11y(t *testing.T) {
 	}
 }
 
+// TestInventoryLoadsBulkBarAfterInventoryJS: the bulk bar's filter
+// listener must be added after inventory.js's, so it unchecks the rows
+// inventory.js just hid (a host the filter hid must not stay selected
+// for Reboot / Install updates / Refresh). inventory.js is loaded
+// synchronously via the layout's Scripts list (end of body, after
+// "content"); the bulkbar.js tag sits in "content", which renders
+// before that list. A synchronous script there would therefore run
+// before inventory.js, so the tag must be deferred: a deferred script
+// runs after every synchronous script, including inventory.js. The
+// test fails if the tag is removed or if defer is dropped.
+func TestInventoryLoadsBulkBarAfterInventoryJS(t *testing.T) {
+	html := mustRead(t, templates.FS, "inventory.html")
+	re := regexp.MustCompile(`<script\b[^>]*\bsrc="/static/bulkbar\.js"[^>]*>`)
+	m := re.FindString(html)
+	if m == "" {
+		t.Fatal(`inventory.html: missing the <script src="/static/bulkbar.js"> tag; the bulk bar would not load`)
+	}
+	if !regexp.MustCompile(`\bdefer\b`).MatchString(m) {
+		t.Errorf(`inventory.html: the bulkbar.js tag must be deferred, got %q; a synchronous script in "content" runs before inventory.js (loaded via the layout's Scripts list), so the filter listener would uncheck rows before inventory.js hides them`, m)
+	}
+}
+
 // TestBulkBarSheetFitsViewport: a sheet taller than the viewport (high
 // browser zoom) must stay scrollable so its toggle and confirms at the
 // top remain reachable, and the script must clear the area the bar
