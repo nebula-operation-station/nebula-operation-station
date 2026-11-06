@@ -143,7 +143,8 @@ Until they land, cu04 shows those targets as unavailable with a reason.
   restart, stop and start, and a member carries at most one of the two. Host,
   key, SSH credential version and stage plan are already bound by the member.
   The new field adds:
-  - `kind` (update or rollback), `form` (compose or standalone);
+  - `kind` (update or rollback), `form` (compose or standalone), both fixed by
+    the action ID (see the action rule below);
   - `images`: sorted by `service`, exactly one entry per recreated service
     (standalone: one entry with an empty `service`). Two services with the same
     image have two entries, so nothing depends on how a project shares images.
@@ -231,8 +232,24 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     image ID and any other form are not comparable and are refused.
   - `registrymeta.CompareTags(old, new, policy)`: reuses the tag parser of
     `stable.go` and reports major change, variant change or not comparable.
-  - `docker.update` at `internal/canonical/batch.go:308` moves to the new
-    binding, and `docker.compose_update` joins it.
+- **Action rule:** `docker.update` leaves the `BatchContainer` list at
+  `internal/canonical/batch.go:308`, and `normalizeBatchMember` gets one fixed
+  table:
+
+  | Action | Required `kind` | Required `form` |
+  | --- | --- | --- |
+  | `docker.compose_update` | update | compose |
+  | `docker.compose_rollback` | rollback | compose |
+  | `docker.update` | update | standalone |
+  | `docker.rollback` | rollback | standalone |
+
+  A member of these four actions must carry `container_update` with exactly
+  these values, and `container` is refused on it. `container_update` on any other
+  action is refused. This validation runs whenever a batch is parsed, so leaving
+  the field out or naming another kind cannot skip Decision 3's rendering or
+  Evaluate's row, window and recovery plan checks. The table is complete in cu01,
+  before any of the rollback actions exists. It does not touch `docker.compose_update`
+  1.0.0, which is not a batch member until cu02 (`batchExcludedActions`).
 - **Enforcement:** `BatchPolicy.Evaluate` takes the maximum with the container
   floor and returns a typed `ErrContainerCritical` for CRITICAL, on every
   evaluation including member revalidation. For `kind=update` it also compares
@@ -270,6 +287,10 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     entry's `old_image_id`), `TestRunningReferenceMustMatchOldTag`,
     `TestRollbackEntryMayHaveNoTarget` (canonical allows it on `kind=rollback`
     only; Evaluate's check against the row is in cu03).
+  - action rule: `TestContainerActionRequiresUpdateBinding` (each of the four
+    IDs, with no binding and with `container` instead),
+    `TestContainerActionFixesKindAndForm` (all twelve wrong combinations),
+    `TestUpdateBindingRefusedOnOtherAction`.
   - unit: `ContainerUpdateFloor` is HIGH when one of several entries changes its
     tag; `CompareTags` table for major, minor, variant, date and non-version tags;
     `TestParseImageReference`, a table with `nginx` (implicit `latest`),
@@ -285,7 +306,10 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     `TestComposeUpdateV1StaysOnClassicPath` (removed by cu02 together with 1.0.0),
     `TestRestartMemberCannotCarryUpdateBinding`,
     `TestContainerPolicyMismatchRefused`, `TestContainerPolicyChangedAfterApproval`,
-    `TestImplicitMajorUpgradeRefused`, `TestContainerVariantChangeRefused`.
+    `TestImplicitMajorUpgradeRefused`, `TestContainerVariantChangeRefused`,
+    `TestRollbackMemberWithoutBindingRefused` and
+    `TestRollbackMemberWithKindUpdateRefused` (each for `docker.rollback` and
+    `docker.compose_rollback`).
 - **Real install:** nothing to enable. No action on the new list exists yet, and
   `docker.compose_update` 1.0.0 with the host page's update link works as before
   until cu02. `nebula batch review` prints every new field, per image and per
