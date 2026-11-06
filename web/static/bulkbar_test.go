@@ -152,8 +152,13 @@ func TestInventoryTemplateBulkBarToggleA11y(t *testing.T) {
 		t.Error("inventory.html: missing the #bulkbar-body group the toggle controls")
 	}
 	js := mustRead(t, static.FS, "inventory.js")
-	if !strings.Contains(js, `setAttribute('aria-expanded'`) {
-		t.Error("inventory.js: the script must keep the toggle's aria-expanded in sync with the sheet")
+	for _, want := range []string{
+		`setAttribute('aria-expanded', 'false')`,        // a fresh selection starts collapsed
+		`setAttribute('aria-expanded', String(expanded))`, // the toggle keeps the ARIA state in sync
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("inventory.js: missing %q; the script must keep the toggle's aria-expanded in sync with the sheet", want)
+		}
 	}
 }
 
@@ -168,7 +173,7 @@ func TestBulkBarSheetFitsViewport(t *testing.T) {
 		t.Error("app.css: the fixed .bulkbar needs max-height and overflow-y so a sheet taller than the viewport keeps its toggle and confirms reachable")
 	}
 	js := mustRead(t, static.FS, "inventory.js")
-	if !strings.Contains(js, "r.bottom") {
+	if !strings.Contains(js, "Math.min(r.bottom, innerHeight)") {
 		t.Error("inventory.js: when the bar's top is above the viewport (r.top <= 0) the clearance must cover the visible part of the bar (r.bottom), not 0")
 	}
 }
