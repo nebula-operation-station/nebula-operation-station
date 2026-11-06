@@ -274,16 +274,18 @@ install -d -m 0755 -o root -g root "${var_lib}/discovery"
 install -d -m 2750 -o nebula-server -g nebula-discovery "${var_lib}/discovery/jobs"
 install -d -m 2750 -o nebula-discovery -g nebula-server "${var_lib}/discovery/results"
 # PVE spool (ADR 0006, P1-14): the collector owns the root and writes the
-# results; the server group (nebula-rpc) reads the results. setgid so a file
-# written by the collector inherits the shared group, which the server can
-# read. The root is 0750 (not world-readable) because it holds PVE data.
+# results; the server group (nebula-rpc) lists, reads and, once imported,
+# unlinks them (internal/pvecollect/spool.go; the server drop-in below opens
+# results/ and guestnet/ for that). setgid so a file written by the collector
+# inherits the shared group, which the server can read. The root is 0750 (not
+# world-readable) because it holds PVE data.
 install -d -m 2750 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve"
 install -d -m 2770 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/results"
 # Guest NIC records (same handoff as results). Created here with its final
 # mode: the collector unit (RestrictSUIDSGID=yes) cannot set setgid itself.
 install -d -m 2770 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/guestnet"
 # Live handoff (ADR 0006 P1-37): the server writes the want-list to requests/
-# (group-writable; the server drop-in below makes only this one writable) and reads the
+# (group-writable, made writable by the server drop-in below) and reads the
 # collector's samples from live/ (group read-only). The server never reads
 # Proxmox itself.
 install -d -m 2770 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/requests"
@@ -431,8 +433,9 @@ rm -f "${tmp_drop_in}"
 
 # --- Server drop-in (rewritten on every run) -----------------------------
 # The server unit uses ProtectSystem=strict; it may write the discovery
-# job spool and the PVE live want-list (pve/requests) and nothing else
-# outside its state directory. pve/live and pve/results stay read-only.
+# job spool, the PVE live want-list (pve/requests) and the two directories
+# it consumes (pve/results, pve/guestnet), and nothing else outside its
+# state directory. The pve root and pve/live stay read-only.
 server_drop_in_dir="${systemd_dir}/nebula-server.service.d"
 server_drop_in="${server_drop_in_dir}/20-discovery.conf"
 server_drop_in_changed=1
@@ -446,6 +449,10 @@ ReadWritePaths=${var_lib}/discovery/jobs
 # nebula-server writes the live want-list for nebula-pve-collector here
 # (ADR 0006 P1-37); it never reads Proxmox itself.
 ReadWritePaths=${var_lib}/pve/requests
+# nebula-server unlinks the observations and guest NIC records it imported
+# (ADR 0006 P1-10); without this the spool only grows.
+ReadWritePaths=${var_lib}/pve/results
+ReadWritePaths=${var_lib}/pve/guestnet
 EOF
 if [[ -f "${server_drop_in}" ]] && cmp -s "${tmp_server_drop_in}" "${server_drop_in}"; then
   server_drop_in_changed=0
