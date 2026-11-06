@@ -1723,6 +1723,8 @@ html {
 .chart--pan { height: 75vh; min-height: 420px; overflow: hidden; overscroll-behavior-x: contain; cursor: grab; touch-action: pan-y; }
 .chart--pan:active { cursor: grabbing; }
 .chart--pan .chart__hosts { transform-origin: 0 0; will-change: transform; }
+/* A box is a drag handle on the canvas: a drag must not select its text. */
+.chart--pan .chart__details > summary { user-select: none; -webkit-user-select: none; }
 /* One line between the toolbar and the canvas, pan mode only. */
 .chart__hint { margin: calc(-1 * var(--space-1)) 0 var(--space-1); }
 .chart__dpanel-btn {

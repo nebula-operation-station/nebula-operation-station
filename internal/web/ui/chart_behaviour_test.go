@@ -73,6 +73,14 @@ func TestChartInteractionBehaviour(t *testing.T) {
 		"pinchsafari",    // gesture and pointer events do not zoom twice
 		"touchlist",      // list mode and a rotation into it
 		"mousedrag",      // a mouse drag is not a swipe
+		"clicktoggle",    // a click on a box toggles it, a shaky one too
+		"dragnotoggle",   // a drag from a box pans and leaves it as it was
+		"dragcontrol",    // links and buttons stay clickable
+		"dragslop",       // the drag threshold, a press lost outside the canvas
+		"touchbox",       // a tap on a box toggles, a swipe from it pans
+		"focusreveal",    // a mouse focus does not move the box from under the pointer
+		"expandall",      // Expand all and Collapse all, on the canvas and in the list
+		"expandkept",     // pan, zoom and mode changes keep the boxes as they are
 		"keys",           // keys through the real handler
 		"panbounds",      // part of the chart stays visible
 		"listmode",       // the plain list leaves every default alone
@@ -132,6 +140,21 @@ func TestChartHarnessCatchesBrokenBehaviour(t *testing.T) {
 		{"touchmove is taken in list mode", "if (!panning() || !e.cancelable) return;\n    const t = e.targetTouches[0];", "if (!e.cancelable) return;\n    const t = e.targetTouches[0];"},
 		{"toggle listener misses the capture phase", "if (panning()) place(tx, ty, scale);\n  }, true);", "if (panning()) place(tx, ty, scale);\n  });"},
 		{"zoom wheel reaches the browser", "e.preventDefault();\n      zoomAt(scale * d.zoom, e.clientX, e.clientY);", "zoomAt(scale * d.zoom, e.clientX, e.clientY);"},
+		{"drag does not start on a box", "e.target.closest('a, button, input,", "e.target.closest('a, button, summary, input,"},
+		{"drag starts on a link", "e.target.closest('a, button, input,", "e.target.closest('input,"},
+		{"no drag threshold", "if (Math.hypot(dx, dy) < dragSlop) return;\n", ""},
+		{"pointer captured on press", "drag = { x: e.clientX, y: e.clientY, tx, ty, held: !touch };", "drag = { x: e.clientX, y: e.clientY, tx, ty, held: !touch };\n    chartSection.setPointerCapture(e.pointerId);"},
+		{"pointer not captured for a drag", "drag.moved = true;\n        chartSection.setPointerCapture(e.pointerId);", "drag.moved = true;"},
+		{"drag toggles the box", "if (dragged && e.detail) e.preventDefault();", ""},
+		{"a drag swallows the keyboard", "if (dragged && e.detail) e.preventDefault();", "if (dragged) e.preventDefault();"},
+		{"a drag swallows every later click", "dragged = !!drag?.moved;", "dragged ||= !!drag?.moved;"},
+		{"press lost outside the canvas drags on", "if (e.buttons === 0) drag = null;", ""},
+		{"mouse focus pans the chart", "if (e.target.matches(':focus-visible')) revealFocus(e.target);", "revealFocus(e.target);"},
+		{"keyboard focus does not pan", "if (e.target.matches(':focus-visible')) revealFocus(e.target);", ""},
+		{"Collapse all opens", "['chart-collapse-all', false]", "['chart-collapse-all', true]"},
+		{"Expand all closes", "['chart-expand-all', true]", "['chart-expand-all', false]"},
+		{"buttons shown without boxes", "btn.hidden = !boxes.length;", "btn.hidden = false;"},
+		{"Expand all hidden in the list", "for (const el of panOnly) if (el) el.hidden = !pan;", "for (const el of panOnly) if (el) el.hidden = !pan;\n    document.getElementById('chart-expand-all').hidden = !pan;"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if !strings.Contains(script, tc.from) {

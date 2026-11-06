@@ -90,7 +90,7 @@ func TestChartNoJSPageStillWorks(t *testing.T) {
 	if !strings.Contains(body, `id="chart-sheet" hidden`) {
 		t.Errorf("details sheet must be hidden without JS")
 	}
-	for _, id := range []string{"chart-zoom-out", "chart-zoom-in", "chart-zoom-100"} {
+	for _, id := range []string{"chart-zoom-out", "chart-zoom-in", "chart-zoom-100", "chart-expand-all", "chart-collapse-all"} {
 		if !strings.Contains(body, `id="`+id+`" class="button button--secondary" hidden`) {
 			t.Errorf("%s must be hidden without JS", id)
 		}
@@ -426,6 +426,60 @@ func TestChartZoomControlsWired(t *testing.T) {
 		if !strings.Contains(block, want) {
 			t.Errorf("chart block lacks %q", want)
 		}
+	}
+}
+
+// Expand all and Collapse all sit in the toolbar next to the zoom controls,
+// before the way back to the list, and are wired by their template ids. They
+// work in list mode too, so setMode must leave them alone. Behaviour: harness
+// scenarios expandall and expandkept.
+func TestChartToolbarHasExpandAndCollapseAll(t *testing.T) {
+	body := getBody(t, chartHandler(t).Handler(), "/inventory/chart")
+	var last int
+	for _, want := range []string{`id="chart-zoom-100"`, `id="chart-expand-all"`, `>Expand all</button>`, `id="chart-collapse-all"`, `>Collapse all</button>`, `>Back to list</a>`} {
+		at := strings.Index(body, want)
+		if at < last {
+			t.Errorf("toolbar: %q at %d, want it after %d", want, at, last)
+		}
+		last = at
+	}
+	block := chartJS(t)
+	for _, id := range []string{"chart-expand-all", "chart-collapse-all"} {
+		if !strings.Contains(block, "'"+id+"'") {
+			t.Errorf("chart block does not reference #%s", id)
+		}
+	}
+	if setMode := jsFunc(t, block, "setMode"); strings.Contains(setMode, "expand") || strings.Contains(setMode, "collapse") {
+		t.Errorf("setMode hides the expand buttons in list mode:\n%s", setMode)
+	}
+}
+
+// A box must stay a native summary for the keyboard: Enter and Space send a
+// click with detail 0 that only a finished drag may cancel, and the canvas
+// keys stop at e.target. Behaviour: harness scenarios dragnotoggle and keys.
+func TestChartBoxesStayNativeSummaries(t *testing.T) {
+	body := getBody(t, chartHandler(t).Handler(), "/inventory/chart")
+	if !strings.Contains(body, `<summary class="chart__box chart__box--host">`) {
+		t.Error("the host box is no longer a summary")
+	}
+	block := chartJS(t)
+	if strings.Contains(block, "summary.click") || strings.Contains(block, "'Enter'") {
+		t.Error("chart block handles the summary keys itself; they belong to the browser")
+	}
+	if !strings.Contains(block, "if (!panning() || e.target !== chartSection) return;") {
+		t.Error("canvas keys must stay out of the elements inside the chart")
+	}
+}
+
+// Text under a drag must not get selected: a drag now starts on the boxes, and
+// list mode keeps normal selection.
+func TestChartCSSDoesNotSelectTextWhilePanning(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "web", "static", "app.css"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`\.chart--pan \.chart__details > summary \{[^}]*user-select: none;`).Match(raw) {
+		t.Error("app.css lets a drag from a box select its text")
 	}
 }
 

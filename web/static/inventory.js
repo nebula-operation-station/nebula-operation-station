@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Inventory page and org chart. The add-host dialog posts JSON to
-// /inventory/hosts (real Origin, decision 36). Server text is shown with
-// textContent only, never innerHTML.
+// Inventory page and org chart. The add-host dialog posts JSON (real Origin,
+// decision 36). Server text: textContent only, never innerHTML.
 'use strict';
 
 // Org chart geometry: pure functions, no DOM, tested by testdata/chart_client.js
@@ -12,8 +11,7 @@ const nosChartMath = (() => {
   const minScale = 0.015;
   const maxScale = 3;
   const zoomStep = 1.25;
-  // A trackpad pinch is ctrl+wheel with small deltas; a mouse notch (about
-  // 100) is capped to one zoom step.
+  // Trackpad pinch: ctrl+wheel, small deltas; a mouse notch: capped to a step.
   const wheelZoomCap = 22;
   const keyStep = 48;
   // Part of the chart that stays in the canvas, per axis.
@@ -45,8 +43,7 @@ const nosChartMath = (() => {
       }
       return e.shiftKey && !dx ? { dx: dy, dy: 0 } : { dx, dy };
     },
-    // A key as { zoom }, { fit } or a pan { dx, dy }; null leaves it alone,
-    // browser shortcuts (Ctrl+0, Cmd++) too.
+    // A key as { zoom }, { fit } or a pan { dx, dy }; null leaves it alone.
     keyAction(e) {
       if (e.ctrlKey || e.metaKey || e.altKey) return null;
       switch (e.key) {
@@ -185,8 +182,7 @@ const nosChartMath = (() => {
   };
 
   // Scroll pans (Shift+wheel sideways); Ctrl/Meta+scroll and pinch zoom around
-  // the pointer, never the page. A scroll the chart cannot follow or cancel
-  // stays with the page, so nothing below is out of reach.
+  // the pointer. A scroll the chart cannot follow or cancel stays with the page.
   chartSection.addEventListener('wheel', (e) => {
     if (!panning() || !e.cancelable) return;
     const d = M.wheelDelta(e, chartSection.clientHeight);
@@ -215,12 +211,14 @@ const nosChartMath = (() => {
     e.preventDefault();
   }, { passive: false });
 
-  // Drag pans the canvas; interactive elements keep their behaviour. A swipe
-  // (touch-action: pan-y) is decided once, like the wheel: the chart cancels
-  // the first touchmove if it can follow, else the page scrolls. Two fingers
-  // pinch from anywhere (Chrome has no gesture events) and carry the chart
-  // with their midpoint; the last one left drags on.
-  let drag = null, pinch = null;
+  // Drag pans, from boxes too: a press is a drag only past dragSlop, so a click
+  // still toggles, and a drag's own click is cancelled. Links and controls keep
+  // their behaviour. A swipe (touch-action: pan-y) is decided once, like the
+  // wheel: the chart cancels the first touchmove if it can follow, else the
+  // page scrolls. Two fingers pinch from anywhere (Chrome has no gesture
+  // events) and carry the chart with their midpoint; the last one drags on.
+  const dragSlop = 4;
+  let drag = null, pinch = null, dragged = false;
   const fingers = new Map();
   const startPinch = () => {
     const [a, b] = fingers.values();
@@ -245,13 +243,13 @@ const nosChartMath = (() => {
       fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (fingers.size > 1) return startPinch();
     }
-    if (e.target.closest('a, button, summary, input, select, textarea, meter')) return;
+    if (e.target.closest('a, button, input, select, textarea, meter')) return;
     unscroll();
     drag = { x: e.clientX, y: e.clientY, tx, ty, held: !touch };
-    chartSection.setPointerCapture(e.pointerId);
   });
   chartSection.addEventListener('pointermove', (e) => {
     if (!panning()) return;
+    if (e.buttons === 0) drag = null; // released outside, before the capture
     const f = fingers.get(e.pointerId);
     if (f) { f.x = e.clientX; f.y = e.clientY; }
     if (pinch) {
@@ -260,7 +258,13 @@ const nosChartMath = (() => {
       zoomAt(pinch.scale * p.dist / pinch.dist, p.x, p.y);
       pinch.x = p.x; pinch.y = p.y;
     } else if (drag && holdSwipe(e.clientX, e.clientY)) {
-      place(drag.tx + (e.clientX - drag.x), drag.ty + (e.clientY - drag.y), scale);
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      if (!drag.moved) {
+        if (Math.hypot(dx, dy) < dragSlop) return;
+        drag.moved = true;
+        chartSection.setPointerCapture(e.pointerId);
+      }
+      place(drag.tx + dx, drag.ty + dy, scale);
     }
   });
   chartSection.addEventListener('touchmove', (e) => {
@@ -270,6 +274,7 @@ const nosChartMath = (() => {
   }, { passive: false });
   const endDrag = (e) => {
     fingers.delete(e.pointerId);
+    dragged = !!drag?.moved;
     if (fingers.size > 1) return startPinch();
     const [f] = fingers.values();
     drag = null;
@@ -278,8 +283,12 @@ const nosChartMath = (() => {
   };
   chartSection.addEventListener('pointerup', endDrag);
   chartSection.addEventListener('pointercancel', endDrag);
+  // Keys click with detail 0 and pass; every pointerup sets `dragged` anew.
+  chartSection.addEventListener('click', (e) => {
+    if (dragged && e.detail) e.preventDefault();
+  }, true);
 
-  // Keys on the focused canvas; arrows behave like the wheel.
+  // Keys on the focused canvas.
   chartSection.addEventListener('keydown', (e) => {
     if (!panning() || e.target !== chartSection) return;
     const a = M.keyAction(e);
@@ -290,13 +299,13 @@ const nosChartMath = (() => {
     e.preventDefault();
   });
 
-  // Collapsing details shortens the chart; toggle does not bubble, hence the
-  // capture phase.
+  // Collapsing shortens the chart. toggle does not bubble: capture phase.
   chartSection.addEventListener('toggle', () => {
     if (panning()) place(tx, ty, scale);
   }, true);
 
   // Pan-to-focus: a focused element outside the clipped view moves into it.
+  // Not on a mouse press: the box would leave the pointer, the click miss it.
   const margin = 16;
   const shift = (lo, hi, min, max) => (lo < min ? min - lo : hi > max ? Math.max(min - lo, max - hi) : 0);
   const revealFocus = (el) => {
@@ -308,12 +317,23 @@ const nosChartMath = (() => {
     const dy = shift(r.top, r.bottom, view.top + margin, view.bottom - margin);
     if (dx || dy) place(tx + dx, ty + dy, scale);
   };
-  chartSection.addEventListener('focusin', (e) => revealFocus(e.target));
+  chartSection.addEventListener('focusin', (e) => {
+    if (e.target.matches(':focus-visible')) revealFocus(e.target);
+  });
 
   if (fitBtn) fitBtn.addEventListener('click', fit);
   if (actualBtn) actualBtn.addEventListener('click', actualSize);
   if (zoomOutBtn) zoomOutBtn.addEventListener('click', () => zoomBy(1 / zoomStep));
   if (zoomInBtn) zoomInBtn.addEventListener('click', () => zoomBy(zoomStep));
+
+  // Canvas and list alike.
+  const boxes = chartHosts.querySelectorAll('details');
+  for (const [id, open] of [['chart-expand-all', true], ['chart-collapse-all', false]]) {
+    const btn = document.getElementById(id);
+    if (!btn) continue;
+    btn.hidden = !boxes.length;
+    btn.addEventListener('click', () => { for (const d of boxes) d.open = open; });
+  }
 
   // Details: wide screens focus the side panel; narrow ones show a clone in
   // a modal bottom sheet (the rest of the page inert).
@@ -364,7 +384,7 @@ const nosChartMath = (() => {
       if (sheet.hidden) return;
       if (e.key === 'Escape') { e.preventDefault(); closeSheet(); return; }
       if (e.key !== 'Tab') return;
-      // Focus loop; the close button is always the first stop.
+      // Focus loop, close button first.
       const stops = [closeBtn, ...Array.from(sheet.querySelectorAll(
         'a[href], button, summary, input, select, textarea, [tabindex]:not([tabindex="-1"])'
       )).filter((el) => el !== closeBtn && !el.hidden)];
@@ -395,7 +415,6 @@ const nosChartMath = (() => {
       }
       const host = panel.closest('details');
       if (host && !host.open) host.open = true;
-      // No native scrolling: the canvas pans to it.
       panel.focus({ preventScroll: true });
       revealFocus(panel);
     });
@@ -407,8 +426,8 @@ const nosChartMath = (() => {
 
 // Live chart values (ADR 0006 P1-37): one SSE stream; visible boxes are
 // posted on change and every `renew` s, none while hidden, one POST at a
-// time. Values: textContent only. A box not granted loses its live line;
-// one without a value for 15 s shows its age (never a fresh look).
+// time. A box not granted loses its live line; one without a value for 15 s
+// shows its age (never a fresh look).
 (() => {
   const chart = document.querySelector('.chart');
   if (!chart || !window.EventSource || !window.IntersectionObserver) return;
@@ -425,7 +444,7 @@ const nosChartMath = (() => {
   }
   if (!els.size) return;
   let viewer = '', renew = 10, timer = 0, es = null, busy = 0, again = 0;
-  // Own clock: runs whatever the stream does (410, no hello, offline).
+  // Own clock: runs whatever the stream does.
   setInterval(() => {
     for (const b of els.values()) if (b.t && Date.now() - b.at > 15e3) show(b, Math.round((Date.now() - b.at) / 1e3));
   }, 1e3);
@@ -443,7 +462,7 @@ const nosChartMath = (() => {
       });
       gone = res.status === 410;
       const g = res.ok && new Set((await res.json()).granted);
-      // Denied (or over budget): drop the live line, the server value stays.
+      // Denied or over budget: the server value stays.
       for (const id of g ? ids : []) if (!g.has(id)) drop(els.get(id));
     } catch (_) { /* next renewal retries */ }
     busy = 0;
@@ -493,12 +512,10 @@ const nosChartMath = (() => {
 })();
 
 (() => {
-  // webauthn.js is loaded only on pages with the add-host dialog (not on
-  // the chart page); the dialog code below stops early without it.
+  // webauthn.js: only with the add-host dialog; that code stops without it.
   const w = typeof nebulaWebAuthn === 'undefined' ? null : nebulaWebAuthn;
 
-  // Client-side text filter: the row's search text (id, name, endpoint,
-  // OS) is built server side and lowercased there.
+  // Text filter; the search text is built and lowercased server side.
   const filter = document.getElementById('inventory-filter');
   if (filter) {
     filter.addEventListener('input', () => {
@@ -509,8 +526,7 @@ const nosChartMath = (() => {
     });
   }
 
-  // A row click goes to the host page; the links inside the row keep
-  // their own behaviour.
+  // A row click opens the host; links in the row keep their behaviour.
   for (const row of document.querySelectorAll('tbody tr[data-id]')) {
     row.addEventListener('click', (e) => {
       if (e.target.closest('a, button, input, select, textarea, td.select')) return;
@@ -518,9 +534,7 @@ const nosChartMath = (() => {
     });
   }
 
-  // IP-aware natural comparison, a port of internal/web/ui/invsort:
-  // IPs numerically (v4 before v6, IPs first), else case-insensitive
-  // with digit runs as numbers ("node2" < "node10").
+  // IP-aware natural comparison, a port of internal/web/ui/invsort.
   const v4Re = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
   const v6GroupRe = /^[0-9a-f]{1,4}$/;
   const parseIPv6 = (s) => {
@@ -614,9 +628,8 @@ const nosChartMath = (() => {
     return ra.length - rb.length;
   };
 
-  // Sortable columns: a header button toggles the order and sets
-  // aria-sort. Host uses the IP-aware order, Last seen the row's data-ts
-  // (ms, empty when never seen). Re-appending rows keeps the filter.
+  // Sortable columns: a header button toggles the order and sets aria-sort.
+  // data-ts: ms, empty when never seen. Re-appending rows keeps the filter.
   const table = document.querySelector('table.inventory');
   if (table) {
     const tbody = table.querySelector('tbody');
@@ -658,16 +671,10 @@ const nosChartMath = (() => {
     for (const btn of table.querySelectorAll('th button[data-sort]')) {
       btn.addEventListener('click', () => {
         const key = btn.dataset.sort;
-        if (sortKey === key) {
-          applySort(key, sortDir === 'ascending' ? 'descending' : 'ascending');
-        } else {
-          applySort(key, 'ascending');
-        }
+        applySort(key, sortKey === key && sortDir === 'ascending' ? 'descending' : 'ascending');
       });
     }
   }
-
-  // Selection and bulk actions: bulkbar.js.
 
   const dialog = document.getElementById('add-host-dialog');
   const form = document.getElementById('host-form');
@@ -682,8 +689,7 @@ const nosChartMath = (() => {
   const submit = document.getElementById('host-submit');
   const cancel = document.getElementById('host-cancel');
 
-  // "Add to managed hosts" from a network asset: prefill the dialog, and
-  // link the asset to the host once it exists.
+  // "Add to managed hosts" from an asset: prefill, link the asset afterwards.
   let prefillAsset = null;
   if (form.dataset.prefill) {
     try {
@@ -707,7 +713,6 @@ const nosChartMath = (() => {
     });
   }
   cancel.addEventListener('click', () => dialog.close());
-  // Coming from "Add to managed hosts": show the prefilled dialog right away.
   if (prefillAsset && !dialog.open) open();
   dialog.addEventListener('cancel', () => w.show('', false));
 
@@ -749,8 +754,7 @@ const nosChartMath = (() => {
         await w.post('/inventory/hosts', body);
       } catch (err) {
         if (err.data && err.data.duplicate_endpoint) {
-          // Warn, do not block: ask for the "Add anyway" confirmation
-          // and retry with the confirmation set.
+          // Warn, do not block.
           if (!confirm(err.message + '\n\nAdd anyway?')) return;
           await w.post('/inventory/hosts', Object.assign({}, body, { confirm_duplicate: true }));
         } else {
