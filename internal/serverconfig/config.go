@@ -66,6 +66,12 @@ func (t Token) LogValue() slog.Value {
 // DefaultDiscoveryDir is the default discovery spool.
 const DefaultDiscoveryDir = "/var/lib/nebula/discovery"
 
+// DefaultTrafficRetentionDays is the default traffic.retention_days: how
+// many days of flow data the traffic map keeps. ADR 0009 D3: the
+// retention may only be shortened, never extended past the store's
+// 21-day default.
+const DefaultTrafficRetentionDays = 21
+
 // DefaultListen is the default listen address.
 const DefaultListen = "127.0.0.1:8080"
 
@@ -93,6 +99,8 @@ type Config struct {
 	// before by hash (M10-1); off by default. The executor's own events are
 	// always signed and chained.
 	AuditHashChain bool `json:"audit_hash_chain"`
+	// Traffic configures the traffic map (section "traffic").
+	Traffic TrafficConfig `json:"traffic"`
 	// Notifications configures the providers (spec 13). Their tokens are
 	// low-privilege and live here, not in the executor vault; a config
 	// with any of them must not be readable by others.
@@ -201,6 +209,9 @@ func (c Config) Validate() error {
 
 	problems = append(problems, c.Notifications.problems()...)
 	problems = append(problems, c.API.Problems()...)
+	if d := c.Traffic.RetentionDays; d != nil && (*d < 1 || *d > DefaultTrafficRetentionDays) {
+		problems = append(problems, fmt.Sprintf("traffic.retention_days: %d is outside 1-%d", *d, DefaultTrafficRetentionDays))
+	}
 
 	if len(problems) == 0 {
 		return nil
@@ -322,6 +333,24 @@ func isValidHTTPSOrigin(s string) bool {
 		return false
 	}
 	return u.Scheme == "https" && u.Host != "" && u.User == nil && u.Path == ""
+}
+
+// TrafficConfig configures the traffic map (the "traffic" section of
+// server.json).
+type TrafficConfig struct {
+	// RetentionDays is how many days of flow data the traffic map
+	// keeps, 1-21. Absent (nil) means the default of 21 days; an
+	// explicit value outside 1-21 is a validation error.
+	RetentionDays *int `json:"retention_days,omitempty"`
+}
+
+// EffectiveRetentionDays returns the configured retention in days, or
+// the default when the key is absent.
+func (t TrafficConfig) EffectiveRetentionDays() int {
+	if t.RetentionDays != nil {
+		return *t.RetentionDays
+	}
+	return DefaultTrafficRetentionDays
 }
 
 // API scopes (spec 13).

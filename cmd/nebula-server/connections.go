@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/ipam"
@@ -38,12 +39,15 @@ type connAssets interface {
 // pages (ADR 0009 D3, TM20). They are mounted behind the same security
 // middleware and session check as every other page (webServer); the
 // handler also asks for the session itself (sessionAuthorized) and
-// fails closed. The window list is clamped to the retention of the
-// traffic store built over the same database the server uses, not the
-// constant default: the page offers and accepts exactly the windows the
+// fails closed. The window list is clamped to the configured retention
+// (traffic.retention_days), the same value the traffic map and the
+// ingest store use: the page offers and accepts exactly the windows the
 // store keeps.
-func newConnectionsPages(db *sql.DB, hosts connHosts, assets connAssets, log *slog.Logger) (*connections.Handler, error) {
-	store := trafficstore.New(db)
+func newConnectionsPages(db *sql.DB, hosts connHosts, assets connAssets, log *slog.Logger, retention time.Duration) (*connections.Handler, error) {
+	store, err := trafficstore.NewWithRetention(db, retention)
+	if err != nil {
+		return nil, fmt.Errorf("connections pages: %w", err)
+	}
 	h, err := connections.New(connections.Options{
 		Flows:     connections.SQLFlows(db, store.Retention()),
 		Directory: connDirectory{hosts: hosts, assets: assets},
