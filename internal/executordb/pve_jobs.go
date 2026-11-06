@@ -73,9 +73,9 @@ var (
 	// stays lenient so that no task disappears from a listing. This record
 	// decides which task a mutation step is bound to, so it only takes what
 	// a PVE mutation of this engine can produce:
-	//   - node: permit.PveNodePattern, the same rule as the permit target
-	//     and validatePveJob. The pveapi listing also takes uppercase and
-	//     any length; the pveapi writer takes '_' but no uppercase;
+	//   - node: permit.PveNodePattern, the same rule as the permit target,
+	//     validatePveJob and the pveapi writer, with the case kept. The
+	//     pveapi listing also takes any length;
 	//   - pid, pstart, starttime: uppercase hex as PVE writes it; pstart
 	//     (clock ticks since boot) has eight or nine digits, because it grows
 	//     to nine once a node's uptime passes about 497 days at USER_HZ=100
