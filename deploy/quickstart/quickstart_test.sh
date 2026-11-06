@@ -365,39 +365,85 @@ else
   bad "install.sh install loop installs all five binaries ($out)"
 fi
 
-# --- 9. The .deb ships every file install.sh reads ---------------------------
-# On a packaged install install.sh runs from /usr/share/nebula/deploy
-# (--from-package), so every file it reads under ${script_dir} must be in
-# the nfpm contents of .goreleaser.yaml (the tarball carries the whole
-# deploy/ tree, so only the package can lose a file).
+# --- 9. The .deb and the image ship exactly the list ------------------------
+# binaries.txt is the single source of truth (its own header says so), so
+# every consumer must agree with it exactly; a drift breaks the packaged or
+# container install while the tarball install still works:
+#   9a  every file install.sh reads under ${script_dir} is in the nfpm
+#       contents, with the src paired to the dst (a commented-out entry or a
+#       dst with the wrong src must not count as shipped);
+#   9b  the nfpm ids (the binaries the .deb puts in bindir) match the list;
+#   9c  the Dockerfile COPY list (the binaries the image ships) matches it.
 goreleaser="${real_repo}/.goreleaser.yaml"
-if [[ -f "$goreleaser" ]]; then
+dockerfile="${real_repo}/deploy/container/Dockerfile"
+if [[ -f "$goreleaser" && -f "$dockerfile" ]]; then
+  # The nfpms block: from 'nfpms:' to the next top-level key.
+  nfpms_block=$(awk '/^nfpms:/{f=1;next} f&&/^[a-z]/{f=0} f' "$goreleaser")
+  # 9a: every file install.sh reads is in the nfpm contents (src/dst paired).
+  install_dst=$(grep -oE 'dst: [^ ]+/install\.sh$' <<< "$nfpms_block" | head -1 | awk '{print $2}')
   mapfile -t install_reads < <(grep -oE '\$\{script_dir\}/[A-Za-z0-9_./-]+' "$install_sh" | sed 's|.*script_dir}/||' | sort -u)
-  install_dst=$(grep -oE 'dst: [^ ]+/install\.sh$' "$goreleaser" | head -1 | awk '{print $2}')
+  contents_block=$(awk '/^[[:space:]]*contents:/{f=1;next} f&&/^[[:space:]]*scripts:/{f=0} f' <<< "$nfpms_block")
   if [[ -n "$install_dst" && ${#install_reads[@]} -gt 0 ]]; then
     base="${install_dst%/*}"
-    mapfile -t nfpm_dsts < <(grep -oE 'dst: [^ ]+' "$goreleaser" | awk '{print $2}')
     missing=()
     for rel in "${install_reads[@]}"; do
-      covered=0
-      for dst in "${nfpm_dsts[@]}"; do
-        if [[ "$dst" == "${base}/${rel}" || "$dst" == "${base}/${rel}/" ]]; then
-          covered=1
-          break
+      rel_n="${rel%/}"
+      cur_src=""
+      hit=0
+      while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        if [[ "$line" =~ -[[:space:]]*src:[[:space:]]*(.*)$ ]]; then
+          cur_src="${BASH_REMATCH[1]%%[[:space:]]*}"
+        elif [[ "$line" =~ dst:[[:space:]]*(.*)$ ]]; then
+          dst="${BASH_REMATCH[1]%%[[:space:]]*}"
+          if [[ "$dst" == "${base}/${rel_n}" && "$cur_src" == "deploy/${rel_n}" ]]; then
+            hit=1; break
+          elif [[ "$dst" == "${base}/${rel_n}/" && "$cur_src" == "deploy/${rel_n}/*" ]]; then
+            hit=1; break
+          elif [[ "$dst" == */ && "$cur_src" == deploy/* ]]; then
+            cdir="${cur_src#deploy/}"; cdir="${cdir%/*}"
+            if [[ "$rel_n" == "${cdir}"/* && "$dst" == "${base}/${cdir}/" ]]; then
+              hit=1; break
+            fi
+          fi
         fi
-      done
-      [[ $covered -eq 1 ]] || missing+=("$rel")
+      done <<< "$contents_block"
+      [[ $hit -eq 1 ]] || missing+=("$rel")
     done
     if [[ ${#missing[@]} -eq 0 ]]; then
-      ok ".deb nfpm contents include every file install.sh reads"
+      ok ".deb nfpm contents include every file install.sh reads (src/dst paired)"
     else
       bad ".deb nfpm contents include every file install.sh reads (missing under ${base}: ${missing[*]})"
     fi
   else
     bad ".deb nfpm contents include every file install.sh reads (could not derive the install.sh dst or the read paths)"
   fi
+  # 9b: the nfpm ids (binaries the .deb puts in bindir) match the list.
+  nfpm_ids_line=$(grep -E '^[[:space:]]*ids:' <<< "$nfpms_block" | head -1)
+  nfpm_ids=$(sed -E 's/^[[:space:]]*ids:[[:space:]]*\[//; s/\][[:space:]]*$//' <<< "$nfpm_ids_line" | tr ',' '\n' | tr -d ' \t' | grep -v '^$' | sort)
+  list_sorted=$(printf '%s\n' "${expected[@]}" | sort)
+  if [[ -n "$nfpm_ids" && "$nfpm_ids" == "$list_sorted" ]]; then
+    ok ".deb nfpm ids match binaries.txt exactly"
+  else
+    bad ".deb nfpm ids match binaries.txt exactly (nfpm: ${nfpm_ids:-<none>}; list: ${expected[*]})"
+  fi
+  # 9c: the Dockerfile COPY list (binaries the image ships) matches the list.
+  copy_line=$(grep -E '^[[:space:]]*COPY[[:space:]]' "$dockerfile" | head -1)
+  read -r -a copy_words <<< "$copy_line"
+  copy_files=()
+  if [[ ${#copy_words[@]} -ge 3 ]]; then
+    for ((i = 1; i < ${#copy_words[@]} - 1; i++)); do
+      copy_files+=("${copy_words[i]}")
+    done
+  fi
+  copy_sorted=$(printf '%s\n' "${copy_files[@]}" | sort)
+  if [[ ${#copy_files[@]} -gt 0 && "$copy_sorted" == "$list_sorted" ]]; then
+    ok "Dockerfile COPY list matches binaries.txt exactly"
+  else
+    bad "Dockerfile COPY list matches binaries.txt exactly (copy: ${copy_files[*]:-<none>}; list: ${expected[*]})"
+  fi
 else
-  bad ".goreleaser.yaml exists"
+  bad ".goreleaser.yaml and the Dockerfile exist"
 fi
 
 # --- 10. Syntax of the scripts ------------------------------------------------
