@@ -372,6 +372,64 @@ func TestParseAllowsTrailingWhitespace(t *testing.T) {
 	}
 }
 
+func TestTrafficRetentionDefault(t *testing.T) {
+	// No "traffic" key (or an empty section): the 21-day default applies.
+	for _, json := range []string{validJSON, validJSON[:len(validJSON)-1] + `,"traffic":{}}`} {
+		cfg, err := Parse([]byte(json))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Traffic.RetentionDays != nil {
+			t.Errorf("RetentionDays = %v, want nil (key absent)", *cfg.Traffic.RetentionDays)
+		}
+		if got := cfg.Traffic.EffectiveRetentionDays(); got != DefaultTrafficRetentionDays {
+			t.Errorf("EffectiveRetentionDays = %d, want %d", got, DefaultTrafficRetentionDays)
+		}
+	}
+}
+
+func TestTrafficRetentionValid(t *testing.T) {
+	for _, n := range []int{1, 7, 21} {
+		ok := fmt.Sprintf(`{"public_origin":"https://n.example","data_dir":"/d","executor_socket":"/s","executor_user":"u","traffic":{"retention_days":%d}}`, n)
+		cfg, err := Parse([]byte(ok))
+		if err != nil {
+			t.Fatalf("retention_days %d: %v", n, err)
+		}
+		if got := cfg.Traffic.EffectiveRetentionDays(); got != n {
+			t.Errorf("retention_days %d: effective %d", n, got)
+		}
+	}
+}
+
+func TestTrafficRetentionZeroRefused(t *testing.T) {
+	// An explicit 0 is not "use the default"; it is an invalid value and
+	// must stop the start with a clear error naming the key.
+	bad := `{"public_origin":"https://n.example","data_dir":"/d","executor_socket":"/s","executor_user":"u","traffic":{"retention_days":0}}`
+	_, err := Parse([]byte(bad))
+	if err == nil {
+		t.Fatal("Parse accepted retention_days 0")
+	}
+	if !strings.Contains(err.Error(), "traffic.retention_days") {
+		t.Errorf("error does not name the key: %v", err)
+	}
+}
+
+func TestTrafficRetentionAboveMaxRefused(t *testing.T) {
+	for _, n := range []int{22, 100} {
+		bad := fmt.Sprintf(`{"public_origin":"https://n.example","data_dir":"/d","executor_socket":"/s","executor_user":"u","traffic":{"retention_days":%d}}`, n)
+		if _, err := Parse([]byte(bad)); err == nil {
+			t.Errorf("Parse accepted retention_days %d", n)
+		}
+	}
+}
+
+func TestTrafficRetentionWrongType(t *testing.T) {
+	bad := `{"public_origin":"https://n.example","data_dir":"/d","executor_socket":"/s","executor_user":"u","traffic":{"retention_days":"7"}}`
+	if _, err := Parse([]byte(bad)); err == nil {
+		t.Fatal("Parse accepted a string retention_days")
+	}
+}
+
 func TestAPIConfigValidation(t *testing.T) {
 	good := strings.Repeat("a", 64)
 	for name, tc := range map[string]struct {
