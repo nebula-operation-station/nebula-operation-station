@@ -476,6 +476,8 @@ func ValidateObservation(o Observation) (Observation, error) {
 	}
 	if o.ObservedAt.IsZero() {
 		add("observed_at is required")
+	} else if y := o.ObservedAt.UTC().Year(); y < MinObservedYear || y > MaxObservedYear {
+		add("observed_at is out of range")
 	}
 	if !slugRe.MatchString(o.Source) {
 		add("source %q is malformed", o.Source)

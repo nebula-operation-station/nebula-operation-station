@@ -92,12 +92,23 @@ func storedState(state pvecontract.Availability, datasetReason string, complete 
 	}
 }
 
+// lockWriteSQL takes the database write lock without changing a row.
+const lockWriteSQL = `UPDATE pve_remotes SET remote_id = remote_id WHERE 0`
+
 // withTx runs fn in a single transaction, committing on success and rolling
-// back on any error.
+// back on any error. The transaction takes the database write lock with its
+// first statement, before any read: SQLite fails a read-to-write upgrade at
+// once while another connection writes, without applying busy_timeout, and
+// the server database has other writers. Taken first, the lock waits for
+// them, so concurrent writers are serialized instead of failing.
 func (s *Store) withTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("pveinventory: begin: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, lockWriteSQL); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("pveinventory: take write lock: %w", err)
 	}
 	if err := fn(tx); err != nil {
 		tx.Rollback()
