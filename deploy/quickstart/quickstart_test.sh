@@ -216,15 +216,23 @@ else
 fi
 
 # --- 6. Functional: the remove block of uninstall.sh removes all five -------
-# The block must remove every binary from the shared list, not a
-# hardcoded copy (the old copy lacked nebula-pve-collector).
+# The remove block must remove every binary from the array the CHECK block
+# produces (not a list the test fills itself): the check block is the real
+# code path from the list file to the remove loop, so a truncation inside it
+# (binaries=("${binaries[@]:0:4}")) or an omission (the block no longer
+# setting binaries) must leave a binary behind here.
 mkdir -p "$sandbox/usrbin"
 for b in "${expected[@]}"; do
   printf '#!/bin/sh\n' > "$sandbox/usrbin/$b"
 done
 script_dir="$sandbox/deploy"
 bin_dir="$sandbox/usrbin"
-mapfile -t binaries < <(read_binaries "$sandbox/deploy/quickstart/binaries.txt")
+# the check block of uninstall.sh, without its begin/end markers
+mapfile -t ucheck_block < <(sed -n '/^# begin: check binary list/,/^# end: check binary list/p' "$uninstall_sh" | grep -v '^# \(begin\|end\): check binary list$')
+# run the check block in a subshell (binaries unset) and print the array it
+# sets: the end-to-end link from the list file to the remove loop
+ucheck_yield() { ( unset binaries; eval "$(printf '%s\n' "${ucheck_block[@]}")"; if [[ ${#binaries[@]} -gt 0 ]]; then printf '%s\n' "${binaries[@]}"; fi ); }
+mapfile -t binaries < <(ucheck_yield)
 mapfile -t remove_block < <(sed -n '/^# begin: remove binaries/,/^# end: remove binaries/p' "$uninstall_sh" | grep -v '^# \(begin\|end\): remove binaries$')
 if [[ ${#remove_block[@]} -gt 0 ]] && ( eval "$(printf '%s\n' "${remove_block[@]}")" ); then
   left=()
@@ -241,16 +249,18 @@ else
 fi
 
 # --- 6b. Functional: the list check of uninstall.sh runs before removal -----
-# The check must pass on the valid list, fail on a missing, comments-only or
-# invalid list, and it must be placed before the first removal in the script:
-# a missing list must not leave the system half uninstalled (units stopped,
-# binaries still to go).
+# The check must yield exactly the five names on the valid list (the
+# end-to-end link from the list file to the remove block), fail on a
+# missing, comments-only or invalid list, and it must be placed before the
+# first removal in the script: a missing list must not leave the system half
+# uninstalled (units stopped, binaries still to go).
 mapfile -t ucheck_block < <(sed -n '/^# begin: check binary list/,/^# end: check binary list/p' "$uninstall_sh" | grep -v '^# \(begin\|end\): check binary list$')
 script_dir="$sandbox/deploy"
-if [[ ${#ucheck_block[@]} -gt 0 ]] && ( eval "$(printf '%s\n' "${ucheck_block[@]}")" ); then
-  ok "uninstall.sh list check passes on the valid list"
+ucheck_out=$(ucheck_yield 2>/dev/null)
+if [[ "$ucheck_out" == "$(printf '%s\n' "${expected[@]}")" ]]; then
+  ok "uninstall.sh list check yields exactly the five binaries"
 else
-  bad "uninstall.sh list check passes on the valid list (block missing or failed)"
+  bad "uninstall.sh list check yields exactly the five binaries (got: ${ucheck_out@Q})"
 fi
 mv "$sandbox/deploy/quickstart/binaries.txt" "$sandbox/blist.bak"
 if ( eval "$(printf '%s\n' "${ucheck_block[@]}")" ); then
