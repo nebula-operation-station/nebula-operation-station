@@ -33,6 +33,16 @@ const (
 	MaxObjectsPerDocument = 100000
 )
 
+// Bounds of observed_at, compared in UTC: the store keeps the time as RFC 3339
+// in UTC, which cannot represent a year outside four digits, so a neighbouring
+// offset must not carry a value across them.
+const (
+	// MinObservedYear is the earliest accepted UTC year.
+	MinObservedYear = 1
+	// MaxObservedYear is the latest accepted UTC year.
+	MaxObservedYear = 9999
+)
+
 // Identity and record limits.
 const (
 	// MaxRemoteIDBytes bounds a remote_id slug.
