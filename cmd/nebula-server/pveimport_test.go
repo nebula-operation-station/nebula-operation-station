@@ -182,6 +182,77 @@ func TestRunImportsConfiguredPVESpool(t *testing.T) {
 	assertImported(t, db)
 }
 
+// handoffLogRoots returns the root of every failed live handoff open.
+func handoffLogRoots(t *testing.T, logs string) []string {
+	t.Helper()
+	var roots []string
+	for line := range strings.Lines(logs) {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		if rec["msg"] == "live chart: provider handoff unavailable" {
+			root, _ := rec["root"].(string)
+			roots = append(roots, root)
+		}
+	}
+	return roots
+}
+
+// One collector, one spool root: run must point the live handoff at
+// pve_spool_dir too, or a custom root silently leaves the live chart on the
+// default path. The spool here has no requests/ or live/, so the failed open
+// names the root it used.
+func TestRunUsesPVESpoolDirForLiveHandoff(t *testing.T) {
+	dir := t.TempDir()
+	u, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(dir, "elsewhere", "pve")
+	makeSpoolDirs(t, root)
+	path := writeConfig(t, dir, map[string]any{
+		"listen":          freeListenAddr(t),
+		"public_origin":   "https://nebula.example.org",
+		"data_dir":        dir,
+		"executor_socket": filepath.Join(dir, "no-executor.sock"),
+		"executor_user":   u.Username,
+		"pve_spool_dir":   root,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stderr syncBuffer
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, []string{"-config", path}, &stderr) }()
+
+	deadline := time.Now().Add(15 * time.Second)
+	for !strings.Contains(stderr.String(), "provider handoff unavailable") {
+		if time.Now().After(deadline) {
+			t.Fatalf("live handoff never opened:\n%s", stderr.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("run did not stop")
+	}
+	roots := handoffLogRoots(t, stderr.String())
+	if len(roots) == 0 {
+		t.Fatalf("no handoff line:\n%s", stderr.String())
+	}
+	for _, got := range roots {
+		if got != root {
+			t.Errorf("live handoff opened %q, want pve_spool_dir %q", got, root)
+		}
+	}
+}
+
 func newTestPVEImport(t *testing.T, root string, logs *syncBuffer) (*pveImport, *sql.DB) {
 	t.Helper()
 	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
