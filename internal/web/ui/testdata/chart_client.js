@@ -54,7 +54,8 @@ class El {
   closest() { return null; }
   querySelector() { return null; }
   querySelectorAll() { return []; }
-  setPointerCapture() {}
+  setPointerCapture(id) { this.captured = id; }
+  matches() { return false; }
 }
 
 // A 1000x600 canvas at (100,200) with a 1px border and 16px padding: the chart
@@ -66,10 +67,14 @@ const page = (opts) => {
   const layout = { x: 117, y: 217 };
   Object.assign(section, {
     clientWidth: o.clientW, clientHeight: o.clientH, clientLeft: 1, clientTop: 1,
-    getBoundingClientRect: () => ({ left: 100, top: 200, width: o.clientW + 2, height: o.clientH + 2 }),
+    getBoundingClientRect: () => ({
+      left: 100, top: 200, right: 102 + o.clientW, bottom: 202 + o.clientH, width: o.clientW + 2, height: o.clientH + 2,
+    }),
     querySelector: (sel) => (sel === '.chart__hosts' ? hosts : null),
   });
   hosts.children = [new El()];
+  const boxes = Array.from({ length: o.boxes ?? 2 }, () => new El());
+  hosts.querySelectorAll = (sel) => (sel === 'details' ? boxes : []);
   hosts.scrollWidth = o.chartW;
   hosts.scrollHeight = o.chartH;
   const state = () => {
@@ -81,7 +86,7 @@ const page = (opts) => {
     return { left: layout.x + s.tx - section.scrollLeft, top: layout.y + s.ty - section.scrollTop };
   };
   const byID = {};
-  for (const id of ['chart-fit', 'chart-zoom-out', 'chart-zoom-in', 'chart-zoom-100', 'chart-hint']) byID[id] = new El(true);
+  for (const id of ['chart-fit', 'chart-zoom-out', 'chart-zoom-in', 'chart-zoom-100', 'chart-hint', 'chart-expand-all', 'chart-collapse-all']) byID[id] = new El(true);
   const document = {
     querySelector: (sel) => (sel === '.chart' ? section : null),
     querySelectorAll: () => [],
@@ -103,22 +108,59 @@ const page = (opts) => {
     };
   };
   return {
-    section, hosts, state, visible, math: vm.runInContext('nosChartMath', ctx),
+    section, hosts, boxes, state, visible, math: vm.runInContext('nosChartMath', ctx),
     click: (id) => byID[id].dispatch('click'),
     wheel: (init) => section.dispatch('wheel', init),
     key: (key, init) => section.dispatch('keydown', { key, ...init }),
     controlHidden: (id) => byID[id].hidden,
     setNarrow: (on) => { media.matches = on; media.change(); },
     touch: (opts) => touchScreen(section, opts),
+    mouse: (clickOnPress) => mouseOn(section, clickOnPress),
   };
 };
 const math = () => page().math;
 
-// A box, link or button inside the chart: the mouse leaves those alone.
+// A link inside the chart: the mouse leaves those alone.
 const control = () => {
   const el = new El();
-  el.closest = () => el;
+  el.closest = (sel) => (sel.split(', ').includes('a') ? el : null);
   return el;
+};
+
+// A box's <summary>: not one of the controls, and it toggles on a click whose
+// default is not cancelled, like the native element.
+const summary = () => {
+  const el = new El();
+  el.open = false;
+  el.closest = (sel) => (sel.split(', ').includes('summary') ? el : null);
+  el.activate = () => { el.open = !el.open; };
+  return el;
+};
+
+// A mouse as a browser plays it: click follows pointerup. A captured pointer's
+// click goes to the capture target; clickOnPress keeps it on the pressed
+// element, for browsers that do.
+const mouseOn = (section, clickOnPress) => {
+  const at = { pointerType: 'mouse', pointerId: 1, buttons: 1, clientX: 0, clientY: 0 };
+  let target = section;
+  return {
+    down(x, y, el) {
+      target = el || section;
+      section.captured = undefined;
+      Object.assign(at, { clientX: x, clientY: y });
+      section.dispatch('pointerdown', { ...at, target });
+    },
+    move(x, y, init) {
+      Object.assign(at, { clientX: x, clientY: y });
+      section.dispatch('pointermove', { ...at, ...init });
+    },
+    up() {
+      section.dispatch('pointerup', { ...at, buttons: 0 });
+      const clicked = section.captured !== undefined && !clickOnPress ? section : target;
+      const e = section.dispatch('click', { target: clicked, detail: 1 });
+      if (!e.defaultPrevented) clicked.activate?.();
+    },
+  };
 };
 
 // A touch screen on a canvas with touch-action: pan-y. As in Chrome, a move
@@ -591,6 +633,157 @@ const scenarios = {
     p.section.dispatch('pointerup', { pointerType: 'mouse', pointerId: 1 });
     p.section.dispatch('pointermove', { pointerType: 'mouse', pointerId: 1, clientX: 300, clientY: 400 });
     near(p.state().ty, 30, 'a released mouse drags nothing');
+  },
+
+  // A press on a box that stays within the slop is a click: the box toggles,
+  // the chart stays and the pointer is not captured.
+  clicktoggle() {
+    for (const clickOnPress of [false, true]) {
+      const p = page();
+      const m = p.mouse(clickOnPress);
+      const box = summary();
+      m.down(300, 300, box);
+      expect(p.section.captured === undefined, 'a press does not capture the pointer');
+      m.up();
+      expect(box.open, 'a click opens the box');
+      m.down(300, 300, box);
+      m.move(302, 301);
+      m.up();
+      expect(!box.open, 'a shaky click closes it again');
+      expect(p.section.captured === undefined, 'a shaky click does not capture the pointer');
+      near(p.state().tx, 0, 'a click does not pan');
+      near(p.state().ty, 0, 'a click does not pan');
+    }
+  },
+
+  // A drag from a box pans, with the box left as it was; the next click and
+  // Enter or Space on the focused summary (a click with detail 0) toggle again.
+  dragnotoggle() {
+    for (const clickOnPress of [false, true]) {
+      const p = page();
+      const m = p.mouse(clickOnPress);
+      const box = summary();
+      m.down(300, 300, box);
+      m.move(304, 300);
+      expect(p.section.captured === 1, 'the drag captures the pointer at the threshold');
+      m.move(330, 340);
+      near(p.state().tx, 30, 'a drag from a box pans');
+      near(p.state().ty, 40, 'a drag from a box pans');
+      m.up();
+      expect(!box.open, 'the drag leaves the box as it was');
+      m.down(300, 300, box);
+      m.up();
+      expect(box.open, 'the next click toggles');
+      m.down(300, 300, box);
+      m.move(350, 300);
+      m.up();
+      expect(box.open, 'a drag leaves an open box open');
+      const key = p.section.dispatch('click', { target: box, detail: 0 });
+      expect(!key.defaultPrevented, 'Enter or Space after a drag toggles');
+    }
+  },
+
+  // Links and buttons in a box stay clickable; a drag from them does not pan.
+  dragcontrol() {
+    const p = page();
+    const m = p.mouse();
+    m.down(300, 300, control());
+    expect(p.section.captured === undefined, 'a link is not captured');
+    m.move(340, 340);
+    near(p.state().tx, 0, 'a press on a link does not pan');
+    m.up();
+    const e = p.section.dispatch('click', { target: control(), detail: 1 });
+    expect(!e.defaultPrevented, 'the click on a link stays');
+  },
+
+  // Free space below the threshold: nothing moves. Released outside the canvas
+  // before the capture, the press is over: coming back must not drag.
+  dragslop() {
+    const p = page();
+    const m = p.mouse();
+    m.down(300, 300);
+    m.move(303, 300);
+    near(p.state().tx, 0, 'under the threshold the chart stays');
+    m.move(304, 300);
+    near(p.state().tx, 4, 'at the threshold it follows');
+    m.up();
+
+    const q = page();
+    const n = q.mouse();
+    n.down(300, 300);
+    n.move(302, 300);
+    n.move(340, 340, { buttons: 0 });
+    near(q.state().tx, 0, 'no button, no drag');
+    n.move(350, 350);
+    near(q.state().tx, 0, 'the press is over');
+  },
+
+  // A finger on a box: a tap stays with the summary, a swipe moves the chart.
+  touchbox() {
+    const p = page();
+    const t = p.touch();
+    const box = summary();
+    const e = t.down(1, 500, 300, box);
+    expect(!e.defaultPrevented, 'a tap is not cancelled');
+    t.up(1);
+    t.swipe(500, 300, 500, 100, box);
+    near(p.state().ty, -200, 'a swipe from a box moves the chart');
+    near(t.pageY, 0, 'and not the page');
+  },
+
+  // A mouse focus must not move the box from under the pointer between press
+  // and release: the click would miss it. Keyboard focus still pans to it.
+  focusreveal() {
+    const p = page();
+    const box = summary();
+    box.getBoundingClientRect = () => ({ left: 200, right: 420, top: 700, bottom: 900 });
+    p.section.dispatch('focusin', { target: box });
+    near(p.state().ty, 0, 'a mouse focus does not pan');
+    box.matches = (sel) => sel === ':focus-visible';
+    p.section.dispatch('focusin', { target: box });
+    near(p.state().ty, 802 - 16 - 900, 'a keyboard focus pans to the box');
+  },
+
+  // Expand all and Collapse all set every box, on the canvas and in the list,
+  // and leave the view alone. Nothing to expand: no buttons.
+  expandall() {
+    const p = page();
+    expect(!p.controlHidden('chart-expand-all') && !p.controlHidden('chart-collapse-all'), 'the buttons are shown');
+    p.boxes[0].open = true;
+    p.wheel({ deltaY: 100 });
+    const view = p.hosts.style.transform;
+    p.click('chart-expand-all');
+    expect(p.boxes.every((b) => b.open), 'Expand all opens every box');
+    p.click('chart-collapse-all');
+    expect(p.boxes.every((b) => !b.open), 'Collapse all closes every box');
+    expect(p.hosts.style.transform === view, 'the view stays: ' + p.hosts.style.transform);
+
+    const list = page({ narrow: true });
+    expect(!list.controlHidden('chart-expand-all'), 'the list has the buttons too');
+    list.click('chart-expand-all');
+    expect(list.boxes.every((b) => b.open), 'Expand all works in the list');
+
+    const empty = page({ boxes: 0 });
+    expect(empty.controlHidden('chart-expand-all') && empty.controlHidden('chart-collapse-all'), 'no boxes, no buttons');
+  },
+
+  // The boxes keep their state: nothing but a click, Enter or Space and the
+  // two buttons touches it, whatever happens to the view.
+  expandkept() {
+    const p = page();
+    p.boxes[0].open = true;
+    const m = p.mouse();
+    m.down(300, 300);
+    m.move(340, 340);
+    m.up();
+    p.wheel({ deltaY: 100, ctrlKey: true, clientX: 300, clientY: 400 });
+    p.click('chart-zoom-in');
+    p.click('chart-fit');
+    p.click('chart-zoom-100');
+    p.setNarrow(true);
+    p.setNarrow(false);
+    p.section.dispatchCaptured('toggle', { target: new El() });
+    expect(p.boxes[0].open === true && !p.boxes[1].open, 'view changes keep the boxes as they are');
   },
 
   // Keys on the focused canvas, through the real handler.
