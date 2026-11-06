@@ -18,6 +18,8 @@ set -u
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo=$(cd -- "${script_dir}/../.." && pwd)
+# Cases below reuse `repo` for their sandbox; keep the real one.
+real_repo="$repo"
 list_file="${script_dir}/binaries.txt"
 install_sh="${repo}/deploy/install.sh"
 uninstall_sh="${repo}/deploy/uninstall.sh"
@@ -135,8 +137,43 @@ else
   bad "uninstall.sh remove block removes all five binaries (block missing or failed)"
 fi
 
-# --- 7. Syntax of the scripts ------------------------------------------------
-for s in "$setup_sh" "$install_sh" "$uninstall_sh" "$repo/deploy/quickstart/binaries_lib.sh"; do
+# --- 7. The .deb ships every file install.sh reads ---------------------------
+# On a packaged install install.sh runs from /usr/share/nebula/deploy
+# (--from-package), so every file it reads under ${script_dir} must be in
+# the nfpm contents of .goreleaser.yaml (the tarball carries the whole
+# deploy/ tree, so only the package can lose a file).
+goreleaser="${real_repo}/.goreleaser.yaml"
+if [[ -f "$goreleaser" ]]; then
+  mapfile -t install_reads < <(grep -oE '\$\{script_dir\}/[A-Za-z0-9_./-]+' "$install_sh" | sed 's|.*script_dir}/||' | sort -u)
+  install_dst=$(grep -oE 'dst: [^ ]+/install\.sh$' "$goreleaser" | head -1 | awk '{print $2}')
+  if [[ -n "$install_dst" && ${#install_reads[@]} -gt 0 ]]; then
+    base="${install_dst%/*}"
+    mapfile -t nfpm_dsts < <(grep -oE 'dst: [^ ]+' "$goreleaser" | awk '{print $2}')
+    missing=()
+    for rel in "${install_reads[@]}"; do
+      covered=0
+      for dst in "${nfpm_dsts[@]}"; do
+        if [[ "$dst" == "${base}/${rel}" || "$dst" == "${base}/${rel}/" ]]; then
+          covered=1
+          break
+        fi
+      done
+      [[ $covered -eq 1 ]] || missing+=("$rel")
+    done
+    if [[ ${#missing[@]} -eq 0 ]]; then
+      ok ".deb nfpm contents include every file install.sh reads"
+    else
+      bad ".deb nfpm contents include every file install.sh reads (missing under ${base}: ${missing[*]})"
+    fi
+  else
+    bad ".deb nfpm contents include every file install.sh reads (could not derive the install.sh dst or the read paths)"
+  fi
+else
+  bad ".goreleaser.yaml exists"
+fi
+
+# --- 8. Syntax of the scripts ------------------------------------------------
+for s in "$setup_sh" "$install_sh" "$uninstall_sh" "$real_repo/deploy/quickstart/binaries_lib.sh"; do
   if bash -n "$s" 2>/dev/null; then
     ok "bash -n $(basename -- "$s")"
   else
