@@ -1148,15 +1148,23 @@ and `nebula-server` currently always runs with the 21-day default.
 **Icons.** Nodes and software entries can carry an icon from the software
 catalog (*Software* page, `/software`). The icon pages
 (`/software/icon/KEY`, per asset `/software/assets/icon?id=ASSET`) are
-read-only for now: the icon service is not yet configured in the server, so
-the icon-change routes return 404. Once enabled, icons are fetched by the
+read-only for now: the server does not start the icon service yet, so the
+icon-change routes return 404. Once enabled, icons are fetched by the
 one-shot `nebula-iconfetch` service from a host allowlist (default
-`avatars.githubusercontent.com` and `upload.wikimedia.org`, changed with
-its `-allow` flag; spool `/var/lib/nebula/iconfetch`, results kept 24 h) or
-uploaded directly. Every icon is sanitized: only PNG, JPEG or GIF input up
-to 256 KiB and 1024 px is accepted, re-encoded as fresh 64×64 and 128×128
-PNGs (SVG, WebP, ICO and BMP are rejected), and stored and served keyed by
-SHA-256.
+`avatars.githubusercontent.com` and `upload.wikimedia.org`; spool
+`/var/lib/nebula/iconfetch`, results kept 24 h) or uploaded directly. The
+server applies the default allowlist too, so the helper's `-allow` flag can
+narrow it but not extend it. Fetch URLs must not have a query string (for
+GitHub avatars, leave off `?v=4`). `deploy/install.sh` does not set up the
+spool; without it a fetch reports that the fetcher is not installed, while
+uploads and rollbacks still work. To use fetches, follow the provisioning
+notes in `nebula-iconfetch.service` and add
+`ReadWritePaths=/var/lib/nebula/iconfetch/jobs` to the `nebula-server`
+drop-in. Every icon is sanitized: only PNG, JPEG or GIF input up to 256 KiB
+and 1024 px is accepted, re-encoded as fresh 64×64 and 128×128 PNGs (SVG,
+WebP, ICO and BMP are rejected), and stored in `<data_dir>/icons` and served
+keyed by SHA-256. Every change is an audited admin action and can be rolled
+back from the icon page.
 
 **Privacy.** The traffic store holds hourly aggregates only: endpoint
 addresses and MACs, protocol, port, byte counts, connection counts and the

@@ -100,12 +100,27 @@ about its connections (spec 09).
   software catalog (`/software`), the unknown queue
   (`/software/unknown`) and the icon pages (`/software/icon/KEY`, per asset
   `/software/assets/icon?id=ASSET`).
-- **The icon service is not yet wired into the server**: the icon pages are
-  read-only and the icon-change routes return 404.
+- `cmd/nebula-server/software.go` holds the icon service wiring
+  (`newIconWiring`: store in `<data_dir>/icons`, spool, import loop every
+  15 s) and `software.Handler` mounts `/icons/` with it. **`run` does not
+  start it yet**: until it calls `newIconWiring` and `softwarePagesWith`, the
+  icon pages of a running server stay read-only and the icon-change routes
+  return 404. The wiring is tested through the full middleware and session
+  chain (`cmd/nebula-server/software_icons_test.go`).
+- Admin means a web session with a user name: sessions have no roles. The
+  change routes are refused without a session (401), without a user name
+  (403) and without the public `Origin` (403, the CSRF check of all forms).
 - `internal/iconfetch` + `cmd/nebula-iconfetch` is the one-shot fetcher
   (like `nebula-discovery`): spool `/var/lib/nebula/iconfetch`, results kept
   24 h, host allowlist via `-allow` (default `avatars.githubusercontent.com`
-  and `upload.wikimedia.org`).
+  and `upload.wikimedia.org`). The server checks the same URL policy with the
+  default list; it has no allowlist setting, so `-allow` can only narrow
+  what is fetched. Fetch URLs with a query string are refused: the catalog
+  records none (signed URLs carry their secret there).
+- `deploy/install.sh` does not provision the spool. Without it a fetch
+  answers 503 and uploads and rollbacks still work. Provisioning needs what
+  `nebula-iconfetch.service` lists, plus `ReadWritePaths` for `jobs/` in the
+  server's drop-in (the server unit is `ProtectSystem=strict`).
 - `internal/iconstore` sanitizes every icon: only PNG, JPEG or GIF input up
   to 256 KiB and 1024 px is accepted, re-encoded as fresh 64×64 and 128×128
   PNGs (SVG, WebP, ICO and BMP are rejected), stored and served keyed by
@@ -124,5 +139,7 @@ size-limited, validated and rendered as text only.
 - Tiers 3–4 (sensors, DNS) and their parsers.
 - An admin setting to shorten the 21-day retention (the store API already
   supports a shorter retention; the server does not expose it).
-- The icon service in `nebula-server` (fetch/upload/rollback routes).
+- Starting the icon service in `nebula-server`'s `run` (the fetch, upload
+  and rollback routes are built and tested, but not enabled).
+- An allowlist setting in the server configuration.
 - A sudo rule for `ss -p` (deliberately not adopted; see above).

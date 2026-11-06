@@ -434,6 +434,22 @@ func TestIconImportLoopWaitsForSpool(t *testing.T) {
 	}
 }
 
+// TestIconDefaultsMatchTheHelper: the server looks for the spool where the
+// helper's unit runs it, and imports results before the helper's fallback
+// timer (1 min) can start another batch.
+func TestIconDefaultsMatchTheHelper(t *testing.T) {
+	unit, err := os.ReadFile(filepath.Join("..", "..", "deploy", "systemd", "nebula-iconfetch.service"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(unit), "-spool "+defaultIconSpool+"\n") {
+		t.Errorf("helper unit does not use the spool %s", defaultIconSpool)
+	}
+	if iconImportInterval <= 0 || iconImportInterval >= time.Minute {
+		t.Errorf("import interval %s", iconImportInterval)
+	}
+}
+
 // TestNewIconWiringCreatesPrivateStore: the icon store directory is created
 // below the data directory, private to the server, and a data directory
 // that cannot hold it is an error.
