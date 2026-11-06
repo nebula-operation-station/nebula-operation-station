@@ -642,6 +642,53 @@ func TestFetchFromAllowlistedURLOnly(t *testing.T) {
 	}
 }
 
+// TestFetchRefusesQueryStrings: an icon source URL with a query string
+// cannot be recorded (softwarecat keeps none, signed URLs carry their
+// secret there), so it is refused before a job is queued, not after the
+// helper fetched it.
+func TestFetchRefusesQueryStrings(t *testing.T) {
+	f := newFixture(t)
+	for _, u := range []string{"https://avatars.githubusercontent.com/u/1?v=4", "https://upload.wikimedia.org/a.png?"} {
+		mustStatus(t, f.post(t, "/software/icon/fetch", url.Values{"key": {"widgetd"}, "url": {u}}), http.StatusBadRequest)
+	}
+	pending, _, err := f.spool.PendingJobs()
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending %+v, %v", pending, err)
+	}
+}
+
+// TestCandidateWithQueryStringIsNotOffered: the same rule for a crawler
+// candidate: not shown, and refused when picked by its ID.
+func TestCandidateWithQueryStringIsNotOffered(t *testing.T) {
+	f := newFixture(t)
+	f.cands.byKey["widgetd"] = []Candidate{{ID: "c1", URL: "https://avatars.githubusercontent.com/u/1?v=4", Source: "crawler", FoundAt: t0}}
+	if _, body := f.get(t, "/software/icon/widgetd"); strings.Contains(body, `name="candidate"`) {
+		t.Error("icon page offers a candidate with a query string")
+	}
+	mustStatus(t, f.post(t, "/software/icon/candidate", url.Values{"key": {"widgetd"}, "candidate": {"c1"}}), http.StatusBadRequest)
+	pending, _, err := f.spool.PendingJobs()
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending %+v, %v", pending, err)
+	}
+}
+
+// TestIconFilesMountedWithTheService: /icons/ exists exactly when the icon
+// service does.
+func TestIconFilesMountedWithTheService(t *testing.T) {
+	path := "/icons/" + strings.Repeat("a", 64) + ".png"
+	for _, c := range []struct {
+		name string
+		f    *fixture
+		csp  string
+	}{{"service", newFixture(t), "default-src 'none'"}, {"no service", newFixture(t, withoutIcons()), ""}} {
+		rec := httptest.NewRecorder()
+		c.f.h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusNotFound || rec.Header().Get("Content-Security-Policy") != c.csp {
+			t.Errorf("%s: status %d CSP %q, want 404 %q", c.name, rec.Code, rec.Header().Get("Content-Security-Policy"), c.csp)
+		}
+	}
+}
+
 func TestFetchUnavailableWithoutSpool(t *testing.T) {
 	f := newFixture(t)
 	if err := os.RemoveAll(f.spool.JobsDir()); err != nil {
