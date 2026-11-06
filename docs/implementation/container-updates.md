@@ -146,7 +146,8 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     - `old_index_digest`, `old_platform_digest`, `new_index_digest`,
       `new_platform_digest`. Platform digests are required; index digests are
       empty only for an image without an index;
-    - `old_image_id`: the local image ID phase 1 compares and phase 3 retains;
+    - `old_image_id`: the local image ID cu02 compares in phase 1 and retains
+      in phase 4;
     - `policy_version`, `policy_digest`, `major_change`: required on an entry
       whose tags differ and refused on a same-tag entry (R8, spec v23-11-09).
       `policy_version` is `registrymeta.Result.PolicyVersion`; `policy_digest`
@@ -234,78 +235,174 @@ Until they land, cu04 shows those targets as unavailable with a reason.
 
 ### cu02 Pinned Compose recreate as a durable member (P2-03 executor)
 
-- **Rules:** R1, R2, R4, R6, R13 (emission), and the running half of R11.
-  **Gaps:** G1, G7, G8, G9, G11.
+- **Rules:** R1, R2, R4, R6, R8 (enforcement on the host), R9 (the retained
+  image), R13 (emission), and the running half of R11. **Gaps:** G1, G5a (the
+  comparison with the host), G7, G8, G9, G11.
 - **Paths:** `internal/executions/actions/` and its scripts,
   `internal/executions/dockerhost/`, `internal/executions/batchplan.go`,
   `internal/executions/batchoutcome.go`, `cmd/nebula-server/batchrun.go`,
   `web/templates/host.html`; protected: `internal/executor/`,
-  `internal/executor/dispatch/`, `proto/`, `test/security/`,
-  `test/integration/`.
-- **Protected: yes** for the executor, proto and test parts; the actions and
-  planner are not protected.
+  `internal/executor/dispatch/`, `internal/hostrun/` (the job probe of the
+  hold rule), `proto/`, `test/security/`, `test/integration/`.
+- **Protected: yes** for the executor, hostrun, proto and test parts; the
+  actions and planner are not protected.
 - **Contracts and RPCs:**
+  - `docker.update_prepare` 1.0.0 (MEDIUM, not read-only, no parameters, not a
+    container mutation under Decision 5): creates the per-host salt of Q5 as a
+    root-only file if it is absent and never replaces an existing one. It
+    touches no container. Result format `docker-update-prepare-v1` reports
+    `created` or `present`, never the salt.
   - `docker.update_preview` 1.0.0 (LOW, read-only), one parameter
-    `target_tags` that may be empty. For the host's containers it reports the
-    identity and image facts a binding needs: full ID, name, Compose project,
-    service, working directory and config file labels, dependency labels,
-    `configuration_digest`, image ID, repository digests, platform, and for a
-    requested tag the index and platform digests, resolved anonymously on the
-    host as `docker.check_updates` does. Stopped containers are included. It
-    never returns env, command line or other label values. Result format
-    `docker-update-preview-v1`, with a strict parser and a fuzz target.
+    `target_tags` that may be empty. It writes nothing on the host. For the
+    host's containers it reports the identity and image facts a binding needs:
+    full ID, name, Compose project, service, working directory and config file
+    labels, the dependency sets, per-container `configuration_digest`, per-unit
+    `source_digest`, image ID, the repository and tag of the running reference,
+    repository digests, platform, and for a requested tag the index and platform
+    digests, resolved anonymously on the host with the same request as
+    `docker.check_updates`, plus a GET of the index to find the platform entry.
+    Stopped containers are included. It never returns env, command line or other
+    label values. Reading the salt and the config files needs root, as durable
+    jobs do. Without a salt it reports `prepare_required` and no digests, and
+    those units are unavailable. Result format `docker-update-preview-v1`, with
+    a strict parser and a fuzz target.
   - `docker.compose_update` 2.0.0 (durable, `reconcile-first`, 30 min, batch
     only), result `compose-update-v2`; `compose-update-v1` stays parseable for
-    history. Phases, each stopping on failure:
-    1. Precheck, nothing changed yet: labels match the bound project and
-       config identities; the frozen containers are exactly the service's
-       containers, by full ID and name; configuration and current digests
-       match; no service uses `build:`. Mismatch is exit 10 with a typed reason.
-    2. `docker pull repo@new_digest` per image, then verify digest and
-       platform. It never pulls by tag and never runs `docker compose pull`.
-    3. Retain the old image under a NOS tag (so that the later rollback step
-       needs no script change), and tag the new image locally as `new_tag`.
-    4. `docker compose ... -f <reviewed digest override> up -d --no-deps
-       --no-build --pull never <frozen services>`.
-    5. Bounded health wait and a full after-snapshot: new IDs, state, health,
-       ports, mounts and networks. Exit status covers pull and up only; the
-       verdict comes in cu03.
+    history. Phases, each stopping on failure except where noted:
+    1. **Precheck, nothing changed yet.** Each check is a typed reason with
+       exit 10:
+       - labels match the bound project and config identities, and
+         `source_digest` recomputes to the bound value;
+       - no service uses `build:`;
+       - the containers of each frozen service are exactly the bound targets,
+         by full ID and name, each with its bound `image_id` and
+         `configuration_digest`;
+       - `old_tag`: the running reference of every target (`Config.Image`,
+         normalized as Docker does) has the entry's `repository` and `old_tag`.
+         A reference without a tag does not match. A forged `old_tag` therefore
+         stops here, so the risk derived from it cannot have been wrong for
+         anything that runs (reason `old_tag_mismatch`);
+       - the image `old_image_id` lists `repository@old_index_digest` or
+         `repository@old_platform_digest` in its repository digests;
+       - the dependency closure, recomputed as in the preview, equals the bound
+         `dependencies`, and each dependency container has its bound ID, name
+         and `configuration_digest`.
+    2. **Resolve, nothing changed yet.** For **every** entry, resolve
+       `repository:new_tag` with the preview's anonymous request and compare the
+       index and platform digests with the entry. A difference is exit 10 with
+       `tag_moved`; no answer or an unusable one is exit 10 with
+       `tag_unresolved` (unknown is not success). All entries are resolved before
+       the first pull. This is what makes a moved tag stop before any change;
+       the digest pull alone would hide it.
+    3. **Pull.** `docker pull repository@new_platform_digest` for each distinct
+       digest, then verify for each entry that the image lists that digest and
+       has the bound platform. It never pulls by tag and never runs `docker
+       compose pull`. One failed image stops the member; nothing was recreated
+       yet, and images already pulled stay as harmless unreferenced images.
+    4. **Retain.** For each entry `docker tag <old_image_id>
+       nos-retained:<execution-id>-<entry-index>`, then verify that the tag
+       resolves to `old_image_id`. A failure stops before any recreate (exit 10,
+       `retain_failed`). These tags are new names only. No other local tag is
+       created or moved, in particular **not** `new_tag`: a local retag would
+       change what an unfrozen container of that tag gets on its next recreate,
+       and it would stay moved after a failed phase 5 (R2).
+    5. **Recreate.** Atomically update the NOS override (Q2): set `image:
+       repository:new_tag@new_platform_digest` for each frozen service and leave
+       other services' entries as they are. Then `docker compose ... -f
+       <operator files> -f <override> up -d --no-deps --no-build --pull never
+       <frozen services>`.
+    6. **After-snapshot.** It runs whenever phase 5 was reached, **also when `up`
+       failed**: bounded health wait, then for every container of the frozen
+       services and of `dependencies` the ID, name, state, start time, health,
+       ports, mounts, networks, image ID, running reference and
+       `configuration_digest`. The result states the last phase reached and
+       `up_exit`. Exit status covers pull and up only; the verdict comes in cu03.
   - `docker.check_updates` 1.1.0: stopped containers, platform-manifest
-    comparison, and a tag that survives a NOS digest override (see Q2). Fixes
-    G11.
+    comparison, and a reference `repo:tag@digest` reads as updatable with that
+    tag when the container's `config_files` label names the NOS override, and
+    as `pinned` otherwise (see Q2). Fixes G11.
   - `InspectBindings` gets a sibling `UpdateBindings` over the latest preview,
-    at most `maxContainerBindingAge` old. Compose leaves
-    `batchExcludedActions`.
+    at most `maxContainerBindingAge` old. It fills `images`, `targets`,
+    `dependencies` and `source_digest`, and the policy values of Q13. Compose
+    leaves `batchExcludedActions`.
   - **Durable batch members:** the executor picks `hostrun.Dispatch` for the
     frozen action IDs of Decision 5. `RunBatchMember` returns once the job is
     dispatched, and the server follows it through a new
     `GetBatchMemberRun` (server, admin; added to `roles.go`) instead of
-    holding one RPC open. Reconciliation routes a member run's outcome to the
-    batch rollout. The target stays held while the job runs, and a busy
-    target of a durable member does not expire the waiting member after
-    16 minutes.
-- **Risk classes:** enforces cu01. Update MEDIUM or HIGH, preview LOW,
-  CRITICAL refused.
+    holding one RPC open. After a server restart `ReconcileBatches` asks
+    `GetBatchMemberRun` before it marks a dispatched durable member unknown.
+    Reconciliation routes a member run's outcome to the batch rollout, where
+    an unknown outcome counts as a failure for the stop rule.
+  - **Hold of a durable member's target (see Q15):** the hold starts at the
+    reservation, as for attached members, and is persisted with a `durable`
+    mark. `hostrun.RunVisible` cannot end it, because it counts only the SSH
+    user's own processes and the job runs as root. The hold ends:
+    - when reconciliation closes the run with a definite class (result read,
+      or not executed): the job is over;
+    - when the class is **unknown** (job directory gone, or host not checkable
+      before the reconcile deadline), it does **not** end. The job may still
+      run, so the target stays held until a new `hostrun.DurableJobGone` probe
+      (sudo, complete check of unit `nebula-job-<execution-id>`; an error counts
+      as running) shows it gone. It uses the existing recheck and the
+      `batchHoldMax` and `batch-holds rearm` path unchanged: re-arming frees
+      nothing by itself. The reconcile deadline (job timeout plus 24 h) lies
+      beyond `batchHoldMax` (24 h), so a host that stays away reaches `expired`
+      first.
+  - **Waiting for such a target:** the executor refuses with the new code
+    `batch_host_busy_durable:`, whatever kind of member is asking, because the
+    waiter cannot know what holds the target. For that code the server replaces
+    the attempts limit with `batchBusyDurableWait = 45 * time.Minute` (the
+    30-minute job timeout plus margin), measured on the injected clock from the
+    first refusal, with the existing backoff. Past it, or past the permit
+    expiry, the member ends not executed through `reportNotExecuted`, and the
+    stop rule applies. A target held after an unknown run therefore stops the
+    waiting rollout with nothing run, instead of waiting without end.
+- **Risk classes:** enforces cu01. Update MEDIUM or HIGH, preview LOW, prepare
+  MEDIUM, CRITICAL refused.
 - **Tests:**
   - script tests with the fake host of `docker_test.go`, pinning the call
-    order: changed ID, changed name, extra or missing replica, changed config
-    digest, moved label, moved tag and wrong pulled digest each stop before
-    any recreate; `TestComposeUpdateNeverPullsByTag`,
-    `TestComposeUpdateTouchesOnlyFrozenServices`; no `down`, `rm -v`, `prune`
-    or restart-only path; injection through names and paths; preview output
-    never contains a planted env value.
+    order: changed ID, changed name, extra or missing replica, changed
+    configuration digest, changed source digest, moved label, wrong `old_tag`,
+    wrong current digest, moved tag, unanswered resolve, and a wrong pulled
+    digest or platform on the **second** image each stop before any recreate;
+    `TestComposeUpdateNeverPullsByTag`,
+    `TestComposeUpdatePullsEveryImageByDigest`,
+    `TestComposeUpdateTouchesOnlyFrozenServices`,
+    `TestRetentionFailureStopsBeforeRecreate`,
+    `TestComposeUpdateMovesNoLocalTag` (only `nos-retained` tags appear, also
+    when phase 5 fails), `TestComposeUpdateAddsOnlyImageToOverride`,
+    `TestDependencySetChangedRefused`, `TestDependencyContainerChangedRefused`,
+    `TestFailedUpStillReportsAfterSnapshot`; no `down`, `rm -v`, `prune` or
+    restart-only path; injection through names and paths; preview output never
+    contains a planted env value; `TestPreviewWritesNothing` (a read-only fake
+    host, with and without a salt); `TestPrepareKeepsExistingSalt`;
+    `TestSourceDigestSurvivesUpdate` (equal before and after an image change and
+    a NOS override).
   - parsers: bounds, malformed UTF-8, unsafe characters, fuzz.
   - executor: crash between intent and dispatch, lost session during dispatch,
     restart while the job runs (each reconciled and never redispatched, and
     the batch rollout gets the outcome); `TestServerCannotChooseAttachedForContainerMember`;
-    target held past the old 16-minute limit; Lock during a running job.
-  - security: `TestContainerSubstitutionRefused`, `TestTagDriftRefused`.
-  - integration: real Docker and Compose, with a registry on loopback.
+    target held past the old 16-minute limit; Lock during a running job;
+    `TestRunVisibleCannotEndDurableHold`, `TestUnknownDurableRunKeepsTargetHeld`,
+    `TestRearmDoesNotFreeDurableHold`, `TestHoldEndsWhenDurableJobGone`,
+    `TestBusyDurableTargetEndsWaiterNotExecuted` (at the new limit, with an
+    attached waiter too); `TestServerRestartFollowsDurableMember`.
+  - security: `TestContainerSubstitutionRefused`, `TestTagDriftRefused` (the
+    registry answers another digest for `new_tag`; no pull, retain or `up`
+    runs), `TestForgedOldTagStopsBeforePull` (a tag change labelled same-tag
+    with a forged `old_tag`, approved at MEDIUM, stops in phase 1).
+  - integration: real Docker and Compose, with a registry on loopback, on both
+    image stores (classic and containerd), including that `--pull never` finds
+    a `repo:tag@digest` reference (Q2), and a `depends_on` project.
 - **Real install:**
   - **`nebula artifact trust-builtins` must approve the new scripts**, or they
     stay at the HIGH floor. The server and executor must be upgraded together.
-  - Durable jobs need root (sudo) on the host; the Compose plugin must be
-    present, otherwise preview reports it and the update is unavailable.
+  - **`docker.update_prepare` must run once per host**, approved like any
+    MEDIUM action, or preview reports `prepare_required` and updates stay
+    unavailable.
+  - Durable jobs and the preview need root (sudo) on the host; the Compose
+    plugin must be present, otherwise preview reports it and the update is
+    unavailable.
   - The host page loses its unbound "update project" link. Do not release
     between cu02 and cu04, or the feature has no front end (see Q3).
 - **Size note:** this is the largest step. Commit the durable member first; if
