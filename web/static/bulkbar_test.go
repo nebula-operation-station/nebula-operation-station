@@ -319,7 +319,7 @@ func TestBulkBarClearanceKeepsFocusClear(t *testing.T) {
 func TestBulkBarJSKeepsClearanceInSync(t *testing.T) {
 	js := stripJSComments(mustRead(t, static.FS, "bulkbar.js"))
 	for _, re := range []string{
-		`setProperty\(\s*--bulkbar-h`, // the variable the stylesheet consumes
+		`setProperty\(\s*['"]--bulkbar-h['"]`, // the variable the stylesheet consumes
 		`getBoundingClientRect`,       // the bar's position, not just its size
 		`new\s+ResizeObserver\(\s*setBarClearance\s*\)\s*\.\s*observe\(\s*bulkbar\s*\)`,
 		`addEventListener\(\s*'resize'`,

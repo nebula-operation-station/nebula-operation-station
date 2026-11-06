@@ -1293,8 +1293,11 @@ details[open] summary { color: var(--text); margin-bottom: var(--space-2); }
   max-width: calc(100% - 2rem);
   /* A sheet taller than the viewport (high browser zoom) must stay
      scrollable, so its toggle and confirms at the top remain
-     reachable. */
-  max-height: min(80vh, 24rem);
+     reachable. The third cap also leaves at least 4rem for a focused
+     row below the sticky topbar, the --space-3 scroll padding and the
+     bar's bottom offset, so focus keeps an unobscured place to land
+     (e.g. a 1280x1024 screen at 400% zoom with the sheet expanded). */
+  max-height: min(80vh, 24rem, calc(100vh - 11rem));
   overflow-y: auto;
   z-index: 20;
   display: flex;
