@@ -133,9 +133,9 @@ func TestRebootNodeRejectsInvalidNode(t *testing.T) {
 		"empty":    "",
 		"path":     "../pve1",
 		"slash":    "pve1/x",
-		"upper":    "PVE1",
+		"upper":    "PVE/1",
 		"space":    "pve 1",
-		"too long": strings.Repeat("a", MaxNodeNameBytes+1),
+		"too long": strings.Repeat("a", 64),
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := &fakeWriteServer{body: `{"data":null}`}

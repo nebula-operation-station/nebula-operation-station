@@ -1,32 +1,149 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Inventory page and org chart. The add-host dialog posts JSON to
-// /inventory/hosts (real Origin, decision 36). Server text is shown with
-// textContent only, never innerHTML.
+// Inventory page and org chart. The add-host dialog posts JSON (real Origin,
+// decision 36). Server text: textContent only, never innerHTML.
 'use strict';
 
-// Org chart interaction (ADR 0006 P1-35): pan, Ctrl+wheel zoom, fit,
-// list mode, details panel/sheet. Runs first and on its own; the chart
-// is never re-rendered (expansion and focus are kept).
+// Org chart geometry: pure functions, no DOM, tested by testdata/chart_client.js
+// in internal/web/ui. Offsets: the chart's top-left corner relative to its
+// layout position. dx, dy > 0 move the view right and down.
+const nosChartMath = (() => {
+  // Fit must reach 100 hosts of about 200px on the 420px minimum canvas.
+  const minScale = 0.015;
+  const maxScale = 3;
+  const zoomStep = 1.25;
+  // Trackpad pinch: ctrl+wheel, small deltas; a mouse notch: capped to a step.
+  const wheelZoomCap = 22;
+  const keyStep = 48;
+  // Part of the chart that stays in the canvas, per axis.
+  const keepVisible = 48;
+
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const clampScale = (s) => (Number.isFinite(s) ? Math.min(maxScale, Math.max(minScale, s)) : 1);
+  return {
+    minScale, maxScale, zoomStep,
+    // Transform for scale `next` that keeps the point (mx, my) in place.
+    zoomAt(t, next, mx, my) {
+      const scale = clampScale(next);
+      const f = scale / t.scale;
+      return { tx: mx - (mx - t.tx) * f, ty: my - (my - t.ty) * f, scale };
+    },
+    // Transform that shows a chart of chartW x chartH in w x h; never enlarges.
+    fitTransform(b) {
+      const scale = clampScale(Math.min(1, b.w / b.chartW, b.h / b.chartH));
+      return { tx: Math.max(0, (b.w - b.chartW * scale) / 2), ty: 0, scale };
+    },
+    // A wheel event as { zoom } or a pan in px { dx, dy }. Deltas may count
+    // lines or pages (Firefox with a mouse).
+    wheelDelta(e, pageHeight) {
+      const px = (d) => (e.deltaMode === 1 ? d * 16 : e.deltaMode === 2 ? d * pageHeight : d);
+      const dx = px(e.deltaX), dy = px(e.deltaY);
+      if (e.ctrlKey || e.metaKey) {
+        const d = clamp(dy, -wheelZoomCap, wheelZoomCap);
+        return { zoom: Math.exp(-d * 0.01) };
+      }
+      return e.shiftKey && !dx ? { dx: dy, dy: 0 } : { dx, dy };
+    },
+    // A key as { zoom }, { fit } or a pan { dx, dy }; null leaves it alone.
+    keyAction(e) {
+      if (e.ctrlKey || e.metaKey || e.altKey) return null;
+      switch (e.key) {
+        case 'ArrowLeft': return { dx: -keyStep, dy: 0 };
+        case 'ArrowRight': return { dx: keyStep, dy: 0 };
+        case 'ArrowUp': return { dx: 0, dy: -keyStep };
+        case 'ArrowDown': return { dx: 0, dy: keyStep };
+        case '+':
+        case '=': return { zoom: zoomStep };
+        case '-': return { zoom: 1 / zoomStep };
+        case '0': return { fit: true };
+        default: return null;
+      }
+    },
+    // Distance (never 0, it divides) and midpoint of two fingers.
+    pinchOf(a, b) {
+      return { dist: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    },
+    // Offset t on one axis with part of the chart kept visible.
+    clampPan(t, view, size) {
+      const keep = Math.min(keepVisible, size);
+      return clamp(t, keep - size, view - keep);
+    },
+    // Offset after scrolling by d on one axis: ends at the chart's edges, a
+    // chart dragged past them only comes back. Same offset: the page scrolls.
+    wheelPan(t, d, view, size) {
+      const lo = Math.min(0, view - size), hi = Math.max(0, view - size);
+      if (size <= view && t >= lo && t <= hi) return t;
+      return clamp(t - d, Math.min(t, lo), Math.max(t, hi));
+    },
+  };
+})();
+
+// Org chart interaction (ADR 0006 P1-35): drag and scroll pan; pinch,
+// Ctrl+scroll, buttons and keys zoom; fit, list mode, details panel/sheet.
+// Runs first and on its own; the chart is never re-rendered. Moves are
+// instant, so reduced motion needs no extra case.
 (() => {
   const chartSection = document.querySelector('.chart');
   if (!chartSection) return;
   const chartHosts = chartSection.querySelector('.chart__hosts');
   if (!chartHosts) return;
   const fitBtn = document.getElementById('chart-fit');
+  const zoomOutBtn = document.getElementById('chart-zoom-out');
+  const zoomInBtn = document.getElementById('chart-zoom-in');
+  const actualBtn = document.getElementById('chart-zoom-100');
+  const panOnly = [fitBtn, zoomOutBtn, zoomInBtn, actualBtn, document.getElementById('chart-hint')];
   const sheet = document.getElementById('chart-sheet');
   const narrow = window.matchMedia('(max-width: 600px)');
+  const M = nosChartMath;
+  const { zoomStep } = M;
   let tx = 0, ty = 0, scale = 1;
 
   const panning = () => chartSection.classList.contains('chart--pan');
   const applyTransform = () => {
     chartHosts.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
   };
-  // The clipped canvas can still scroll natively (focus, find); fit()
-  // drops that offset, unscroll() folds it into the transform.
+  // Layout position of the chart's top-left corner (the transform origin).
+  const origin = () => {
+    const r = chartHosts.getBoundingClientRect();
+    return { x: r.left - tx + chartSection.scrollLeft, y: r.top - ty + chartSection.scrollTop };
+  };
+  // The area the chart can use (padding kept on all sides) and its size at
+  // 100%. Reads the layout: tx and ty must match the page.
+  const box = () => {
+    const view = chartSection.getBoundingClientRect();
+    const o = origin();
+    const left = o.x - view.left - chartSection.clientLeft;
+    const top = o.y - view.top - chartSection.clientTop;
+    return {
+      w: chartSection.clientWidth - 2 * left,
+      h: chartSection.clientHeight - top - left,
+      chartW: chartHosts.scrollWidth,
+      chartH: chartHosts.scrollHeight,
+    };
+  };
+  // Every move ends here, so no path can lose the chart.
+  const place = (x, y, s) => {
+    const b = box();
+    tx = M.clampPan(x, b.w, b.chartW * s);
+    ty = M.clampPan(y, b.h, b.chartH * s);
+    scale = s;
+    applyTransform();
+  };
+  // Scroll-style pan; false at the chart's edge.
+  const panBy = (dx, dy) => {
+    unscroll();
+    const b = box();
+    const x = M.wheelPan(tx, dx, b.w, b.chartW * scale);
+    const y = M.wheelPan(ty, dy, b.h, b.chartH * scale);
+    if (x === tx && y === ty) return false;
+    place(x, y, scale);
+    return true;
+  };
+  // The clipped canvas can still scroll natively (focus, find): fit() drops
+  // that offset, unscroll() folds it into the transform.
   const fit = () => {
-    tx = 0; ty = 0; scale = 1;
     chartSection.scrollTop = 0;
     chartSection.scrollLeft = 0;
+    ({ tx, ty, scale } = M.fitTransform(box()));
     applyTransform();
   };
   const unscroll = () => {
@@ -37,6 +154,22 @@
     chartSection.scrollTop = 0;
     applyTransform();
   };
+  const actualSize = () => {
+    unscroll();
+    tx = 0; ty = 0; scale = 1;
+    applyTransform();
+  };
+  // Zoom keeping the point under (x, y) in place; default the canvas centre.
+  const zoomAt = (next, x, y) => {
+    unscroll();
+    const view = chartSection.getBoundingClientRect();
+    const o = origin();
+    const mx = (x ?? view.left + view.width / 2) - o.x;
+    const my = (y ?? view.top + view.height / 2) - o.y;
+    const t = M.zoomAt({ tx, ty, scale }, next, mx, my);
+    place(t.tx, t.ty, t.scale);
+  };
+  const zoomBy = (factor) => zoomAt(scale * factor);
 
   // Pan canvas on wide screens (a tab stop), plain list below 600px.
   const setMode = () => {
@@ -44,80 +177,166 @@
     chartSection.classList.toggle('chart--pan', pan);
     if (pan) chartSection.tabIndex = 0;
     else chartSection.removeAttribute('tabindex');
-    if (fitBtn) fitBtn.hidden = !pan;
+    for (const el of panOnly) if (el) el.hidden = !pan;
     if (!pan) { tx = 0; ty = 0; scale = 1; chartHosts.style.transform = ''; }
   };
 
-  // Ctrl+wheel zooms around the cursor; a plain wheel keeps scrolling.
+  // Scroll pans (Shift+wheel sideways); Ctrl/Meta+scroll and pinch zoom around
+  // the pointer. A scroll the chart cannot follow or cancel stays with the page.
   chartSection.addEventListener('wheel', (e) => {
-    if (!e.ctrlKey || !panning()) return;
-    e.preventDefault();
-    const rect = chartSection.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-    const next = Math.min(3, Math.max(0.4, scale * Math.exp(-e.deltaY * 0.0015)));
-    const f = next / scale;
-    tx = mx - (mx - tx) * f;
-    ty = my - (my - ty) * f;
-    scale = next;
-    applyTransform();
+    if (!panning() || !e.cancelable) return;
+    const d = M.wheelDelta(e, chartSection.clientHeight);
+    if (d.zoom) {
+      e.preventDefault();
+      zoomAt(scale * d.zoom, e.clientX, e.clientY);
+      return;
+    }
+    if (panBy(d.dx, d.dy)) e.preventDefault();
   }, { passive: false });
 
-  // Drag pans the canvas; interactive elements keep their behaviour.
-  let drag = null;
+  // Safari's trackpad pinch: gesture events, e.scale counts from their start.
+  let gestureBase = 1;
+  chartSection.addEventListener('gesturestart', (e) => {
+    if (!panning()) return;
+    e.preventDefault();
+    gestureBase = scale;
+  }, { passive: false });
+  chartSection.addEventListener('gesturechange', (e) => {
+    if (!panning()) return;
+    e.preventDefault();
+    if (!pinch) zoomAt(gestureBase * e.scale, e.clientX, e.clientY);
+  }, { passive: false });
+  chartSection.addEventListener('gestureend', (e) => {
+    if (!panning()) return;
+    e.preventDefault();
+  }, { passive: false });
+
+  // Drag pans, from boxes too: a press is a drag only past dragSlop, so a click
+  // still toggles, and a drag's own click is cancelled. Links and controls keep
+  // their behaviour. A swipe (touch-action: pan-y) is decided once, like the
+  // wheel: the chart cancels the first touchmove if it can follow, else the
+  // page scrolls. Two fingers pinch from anywhere (Chrome has no gesture
+  // events) and carry the chart with their midpoint; the last one drags on.
+  const dragSlop = 4;
+  let drag = null, pinch = null, dragged = false;
+  const fingers = new Map();
+  const startPinch = () => {
+    const [a, b] = fingers.values();
+    unscroll();
+    drag = null;
+    pinch = { ...M.pinchOf(a, b), scale };
+  };
+  const holdSwipe = (x, y) => {
+    const dx = x - drag.x, dy = y - drag.y;
+    if (!drag.held && (dx || dy)) {
+      const b = box();
+      drag.held = Math.abs(dx) > Math.abs(dy) || M.wheelPan(ty, -dy, b.h, b.chartH * scale) !== ty;
+      if (!drag.held) drag = null;
+    }
+    return drag?.held;
+  };
   chartSection.addEventListener('pointerdown', (e) => {
     if (!panning() || e.button !== 0) return;
-    if (e.target.closest('a, button, summary, input, select, textarea, meter')) return;
-    drag = { x: e.clientX, y: e.clientY, tx, ty };
-    chartSection.setPointerCapture(e.pointerId);
+    const touch = e.pointerType === 'touch';
+    if (touch) {
+      if (e.isPrimary) { fingers.clear(); pinch = null; } // a lost pointerup
+      fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (fingers.size > 1) return startPinch();
+    }
+    if (e.target.closest('a, button, input, select, textarea, meter')) return;
+    unscroll();
+    drag = { x: e.clientX, y: e.clientY, tx, ty, held: !touch };
   });
   chartSection.addEventListener('pointermove', (e) => {
-    if (!drag) return;
-    tx = drag.tx + (e.clientX - drag.x);
-    ty = drag.ty + (e.clientY - drag.y);
-    applyTransform();
+    if (!panning()) return;
+    if (e.buttons === 0) drag = null; // released outside, before the capture
+    const f = fingers.get(e.pointerId);
+    if (f) { f.x = e.clientX; f.y = e.clientY; }
+    if (pinch) {
+      const [a, b] = fingers.values(), p = M.pinchOf(a, b);
+      place(tx + p.x - pinch.x, ty + p.y - pinch.y, scale);
+      zoomAt(pinch.scale * p.dist / pinch.dist, p.x, p.y);
+      pinch.x = p.x; pinch.y = p.y;
+    } else if (drag && holdSwipe(e.clientX, e.clientY)) {
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      if (!drag.moved) {
+        if (Math.hypot(dx, dy) < dragSlop) return;
+        drag.moved = true;
+        chartSection.setPointerCapture(e.pointerId);
+      }
+      place(drag.tx + dx, drag.ty + dy, scale);
+    }
   });
-  const endDrag = () => { drag = null; };
+  chartSection.addEventListener('touchmove', (e) => {
+    if (!panning() || !e.cancelable) return;
+    const t = e.targetTouches[0];
+    if (pinch || (drag && holdSwipe(t.clientX, t.clientY))) e.preventDefault();
+  }, { passive: false });
+  const endDrag = (e) => {
+    fingers.delete(e.pointerId);
+    dragged = !!drag?.moved;
+    if (fingers.size > 1) return startPinch();
+    const [f] = fingers.values();
+    drag = null;
+    if (f && pinch) drag = { x: f.x, y: f.y, tx, ty, held: true };
+    pinch = null;
+  };
   chartSection.addEventListener('pointerup', endDrag);
   chartSection.addEventListener('pointercancel', endDrag);
+  // Keys click with detail 0 and pass; every pointerup sets `dragged` anew.
+  chartSection.addEventListener('click', (e) => {
+    if (dragged && e.detail) e.preventDefault();
+  }, true);
 
-  // Keyboard pan on the focused canvas: arrows pan, 0 fits.
+  // Keys on the focused canvas.
   chartSection.addEventListener('keydown', (e) => {
     if (!panning() || e.target !== chartSection) return;
-    const step = 48;
-    let handled = true;
-    switch (e.key) {
-      case 'ArrowLeft': tx += step; break;
-      case 'ArrowRight': tx -= step; break;
-      case 'ArrowUp': ty += step; break;
-      case 'ArrowDown': ty -= step; break;
-      case '0': fit(); break;
-      default: handled = false;
-    }
-    if (handled) { e.preventDefault(); applyTransform(); }
+    const a = M.keyAction(e);
+    if (!a) return;
+    if (a.zoom) zoomBy(a.zoom);
+    else if (a.fit) fit();
+    else if (!panBy(a.dx, a.dy)) return;
+    e.preventDefault();
   });
 
-  // Pan-to-focus: a focused element outside the clipped view is moved
-  // into view.
+  // Collapsing shortens the chart. toggle does not bubble: capture phase.
+  chartSection.addEventListener('toggle', () => {
+    if (panning()) place(tx, ty, scale);
+  }, true);
+
+  // Pan-to-focus: a focused element outside the clipped view moves into it.
+  // Not on a mouse press: the box would leave the pointer, the click miss it.
   const margin = 16;
+  const shift = (lo, hi, min, max) => (lo < min ? min - lo : hi > max ? Math.max(min - lo, max - hi) : 0);
   const revealFocus = (el) => {
     if (!panning() || !chartHosts.contains(el)) return;
     unscroll();
     const view = chartSection.getBoundingClientRect();
     const r = el.getBoundingClientRect();
-    let dx = 0, dy = 0;
-    if (r.left < view.left + margin) dx = view.left + margin - r.left;
-    else if (r.right > view.right - margin) dx = Math.max(view.left + margin - r.left, view.right - margin - r.right);
-    if (r.top < view.top + margin) dy = view.top + margin - r.top;
-    else if (r.bottom > view.bottom - margin) dy = Math.max(view.top + margin - r.top, view.bottom - margin - r.bottom);
-    if (dx || dy) { tx += dx; ty += dy; applyTransform(); }
+    const dx = shift(r.left, r.right, view.left + margin, view.right - margin);
+    const dy = shift(r.top, r.bottom, view.top + margin, view.bottom - margin);
+    if (dx || dy) place(tx + dx, ty + dy, scale);
   };
-  chartSection.addEventListener('focusin', (e) => revealFocus(e.target));
+  chartSection.addEventListener('focusin', (e) => {
+    if (e.target.matches(':focus-visible')) revealFocus(e.target);
+  });
 
   if (fitBtn) fitBtn.addEventListener('click', fit);
+  if (actualBtn) actualBtn.addEventListener('click', actualSize);
+  if (zoomOutBtn) zoomOutBtn.addEventListener('click', () => zoomBy(1 / zoomStep));
+  if (zoomInBtn) zoomInBtn.addEventListener('click', () => zoomBy(zoomStep));
 
-  // Details: wide screens open and focus the side panel; narrow ones
-  // show a clone in a modal bottom sheet (the rest of the page inert).
+  // Canvas and list alike.
+  const boxes = chartHosts.querySelectorAll('details');
+  for (const [id, open] of [['chart-expand-all', true], ['chart-collapse-all', false]]) {
+    const btn = document.getElementById(id);
+    if (!btn) continue;
+    btn.hidden = !boxes.length;
+    btn.addEventListener('click', () => { for (const d of boxes) d.open = open; });
+  }
+
+  // Details: wide screens focus the side panel; narrow ones show a clone in
+  // a modal bottom sheet (the rest of the page inert).
   const backdrop = document.getElementById('chart-sheet-backdrop');
   let lastOpener = null;
   let closeBtn = null;
@@ -165,7 +384,7 @@
       if (sheet.hidden) return;
       if (e.key === 'Escape') { e.preventDefault(); closeSheet(); return; }
       if (e.key !== 'Tab') return;
-      // Focus loop; the close button is always the first stop.
+      // Focus loop, close button first.
       const stops = [closeBtn, ...Array.from(sheet.querySelectorAll(
         'a[href], button, summary, input, select, textarea, [tabindex]:not([tabindex="-1"])'
       )).filter((el) => el !== closeBtn && !el.hidden)];
@@ -196,22 +415,19 @@
       }
       const host = panel.closest('details');
       if (host && !host.open) host.open = true;
-      // Focus without native scrolling, then pan the canvas to it.
       panel.focus({ preventScroll: true });
       revealFocus(panel);
     });
   }
 
-  const onModeChange = () => { closeSheet(); setMode(); };
   setMode();
-  if (typeof narrow.addEventListener === 'function') narrow.addEventListener('change', onModeChange);
-  else narrow.addListener(onModeChange);
+  narrow.addEventListener('change', () => { closeSheet(); setMode(); });
 })();
 
 // Live chart values (ADR 0006 P1-37): one SSE stream; visible boxes are
 // posted on change and every `renew` s, none while hidden, one POST at a
-// time. Values: textContent only. A box not granted loses its live line;
-// one without a value for 15 s shows its age (never a fresh look).
+// time. A box not granted loses its live line; one without a value for 15 s
+// shows its age (never a fresh look).
 (() => {
   const chart = document.querySelector('.chart');
   if (!chart || !window.EventSource || !window.IntersectionObserver) return;
@@ -228,7 +444,7 @@
   }
   if (!els.size) return;
   let viewer = '', renew = 10, timer = 0, es = null, busy = 0, again = 0;
-  // Own clock: runs whatever the stream does (410, no hello, offline).
+  // Own clock: runs whatever the stream does.
   setInterval(() => {
     for (const b of els.values()) if (b.t && Date.now() - b.at > 15e3) show(b, Math.round((Date.now() - b.at) / 1e3));
   }, 1e3);
@@ -246,7 +462,7 @@
       });
       gone = res.status === 410;
       const g = res.ok && new Set((await res.json()).granted);
-      // Denied (or over budget): drop the live line, the server value stays.
+      // Denied or over budget: the server value stays.
       for (const id of g ? ids : []) if (!g.has(id)) drop(els.get(id));
     } catch (_) { /* next renewal retries */ }
     busy = 0;
@@ -296,12 +512,10 @@
 })();
 
 (() => {
-  // webauthn.js is loaded only on pages with the add-host dialog (not on
-  // the chart page); the dialog code below stops early without it.
+  // webauthn.js: only with the add-host dialog; that code stops without it.
   const w = typeof nebulaWebAuthn === 'undefined' ? null : nebulaWebAuthn;
 
-  // Client-side text filter: the row's search text (id, name, endpoint,
-  // OS) is built server side and lowercased there.
+  // Text filter; the search text is built and lowercased server side.
   const filter = document.getElementById('inventory-filter');
   if (filter) {
     filter.addEventListener('input', () => {
@@ -312,8 +526,7 @@
     });
   }
 
-  // A row click goes to the host page; the links inside the row keep
-  // their own behaviour.
+  // A row click opens the host; links in the row keep their behaviour.
   for (const row of document.querySelectorAll('tbody tr[data-id]')) {
     row.addEventListener('click', (e) => {
       if (e.target.closest('a, button, input, select, textarea, td.select')) return;
@@ -321,9 +534,7 @@
     });
   }
 
-  // IP-aware natural comparison, a port of internal/web/ui/invsort:
-  // IPs numerically (v4 before v6, IPs first), else case-insensitive
-  // with digit runs as numbers ("node2" < "node10").
+  // IP-aware natural comparison, a port of internal/web/ui/invsort.
   const v4Re = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
   const v6GroupRe = /^[0-9a-f]{1,4}$/;
   const parseIPv6 = (s) => {
@@ -417,9 +628,8 @@
     return ra.length - rb.length;
   };
 
-  // Sortable columns: a header button toggles the order and sets
-  // aria-sort. Host uses the IP-aware order, Last seen the row's data-ts
-  // (ms, empty when never seen). Re-appending rows keeps the filter.
+  // Sortable columns: a header button toggles the order and sets aria-sort.
+  // data-ts: ms, empty when never seen. Re-appending rows keeps the filter.
   const table = document.querySelector('table.inventory');
   if (table) {
     const tbody = table.querySelector('tbody');
@@ -461,17 +671,10 @@
     for (const btn of table.querySelectorAll('th button[data-sort]')) {
       btn.addEventListener('click', () => {
         const key = btn.dataset.sort;
-        if (sortKey === key) {
-          applySort(key, sortDir === 'ascending' ? 'descending' : 'ascending');
-        } else {
-          applySort(key, 'ascending');
-        }
+        applySort(key, sortKey === key && sortDir === 'ascending' ? 'descending' : 'ascending');
       });
     }
   }
-
-  // Selection and bulk actions live in bulkbar.js (loaded after this
-  // file on the inventory page).
 
   const dialog = document.getElementById('add-host-dialog');
   const form = document.getElementById('host-form');
@@ -486,8 +689,7 @@
   const submit = document.getElementById('host-submit');
   const cancel = document.getElementById('host-cancel');
 
-  // "Add to managed hosts" from a network asset: prefill the dialog, and
-  // link the asset to the host once it exists.
+  // "Add to managed hosts" from an asset: prefill, link the asset afterwards.
   let prefillAsset = null;
   if (form.dataset.prefill) {
     try {
@@ -511,7 +713,6 @@
     });
   }
   cancel.addEventListener('click', () => dialog.close());
-  // Coming from "Add to managed hosts": show the prefilled dialog right away.
   if (prefillAsset && !dialog.open) open();
   dialog.addEventListener('cancel', () => w.show('', false));
 
@@ -553,8 +754,7 @@
         await w.post('/inventory/hosts', body);
       } catch (err) {
         if (err.data && err.data.duplicate_endpoint) {
-          // Warn, do not block: ask for the "Add anyway" confirmation
-          // and retry with the confirmation set.
+          // Warn, do not block.
           if (!confirm(err.message + '\n\nAdd anyway?')) return;
           await w.post('/inventory/hosts', Object.assign({}, body, { confirm_duplicate: true }));
         } else {

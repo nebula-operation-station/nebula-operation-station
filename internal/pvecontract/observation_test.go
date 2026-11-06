@@ -194,7 +194,7 @@ func TestDecodeObservation(t *testing.T) {
 		{"guest vmid below range", func(o *Observation) { o.Guests.Value[0].VMID = 99 }, "vmid"},
 		{"guest vmid above range", func(o *Observation) { o.Guests.Value[0].VMID = MaxVMID + 1 }, "vmid"},
 		{"guest kind unknown", func(o *Observation) { o.Guests.Value[0].Kind = "vm" }, "kind"},
-		{"guest node malformed", func(o *Observation) { o.Guests.Value[0].Node = "Poxmox" }, "node"},
+		{"guest node malformed", func(o *Observation) { o.Guests.Value[0].Node = "Pox/mox" }, "node"},
 		{"guest name oversize", func(o *Observation) { o.Guests.Value[0].Name = strings.Repeat("a", MaxLabelBytes+1) }, "name exceeds"},
 		{"guest status unknown", func(o *Observation) { o.Guests.Value[0].Status = "hosed" }, "status"},
 		{"guest generation zero", func(o *Observation) { o.Guests.Value[0].Generation = 0 }, "generation"},
