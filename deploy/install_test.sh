@@ -9,10 +9,11 @@
 #
 #   ./deploy/install_test.sh
 #
-# The last cases run the real scripts (unit recovery and server.json
-# handling on install, drop-in handling on uninstall) and are therefore
-# gated on root plus a running systemd; they are skipped with a message
-# everywhere else.
+# The unit refresh cases run the real refresh block of install.sh in a
+# temporary directory, which needs no root either. The last cases run the
+# real scripts (unit recovery and server.json handling on install, drop-in
+# handling on uninstall) and are therefore gated on root plus a running
+# systemd; they are skipped with a message everywhere else.
 #
 # Exit status: 0 if all cases pass, 1 otherwise.
 
@@ -305,6 +306,318 @@ else
   echo "FAIL leftover iconfetch units are not disabled and removed on upgrade"
   fail=$((fail + 1))
 fi
+
+# --- Unit refresh (WA-09), functional, no root needed -------------------------
+# Runs the real refresh block of install.sh against a sandbox: the paths point
+# into a temporary directory and the only stub is `install`, which drops the
+# -o/-g options so that no root is needed. Three cases carry the design: a
+# unit nobody edited follows the shipped version, an edited one is never
+# replaced, and a new one is installed.
+refresh_block=$(sed -n '/^# begin: unit refresh/,/^# end: unit refresh/p' "$install_sh")
+refresh_sb=$(mktemp -d)
+trap 'rm -rf "$refresh_sb"' EXIT
+mkdir -p "$refresh_sb/deploy/systemd" "$refresh_sb/etc" "$refresh_sb/var"
+
+# ship <unit> <content>: this "tarball" now ships <content> for <unit>.
+ship() {
+  printf '%s\n' "$2" > "$refresh_sb/deploy/systemd/$1"
+}
+# sum_of <file>: the sha256 of a file.
+sum_of() {
+  sha256sum "$1" | cut -d' ' -f1
+}
+# text_sum <content>: the sha256 of ship's or an admin's file with <content>.
+text_sum() {
+  printf '%s\n' "$1" | sha256sum | cut -d' ' -f1
+}
+# reset_refresh: an empty host and an empty tarball.
+reset_refresh() {
+  rm -rf "$refresh_sb/etc" "$refresh_sb/var" "$refresh_sb/deploy/systemd"
+  mkdir -p "$refresh_sb/deploy/systemd" "$refresh_sb/etc" "$refresh_sb/var"
+}
+# run_refresh [legacy line]: one install.sh unit step for the units in
+# refresh_units_list, under set -e like the real script. The output (with
+# stderr) lands in $refresh_out, the exit status in $refresh_rc. A legacy
+# line replaces the embedded list of pre-manifest checksums.
+refresh_units_list=(a.service b.service)
+run_refresh() {
+  local legacy="${1:-}"
+  refresh_out=$(
+    exec 2>&1
+    set -euo pipefail
+    install() { command install -m 0644 "${@: -2:1}" "${@: -1}"; }
+    script_dir="$refresh_sb/deploy"
+    systemd_dir="$refresh_sb/etc"
+    var_lib="$refresh_sb/var"
+    tarball_units=("${refresh_units_list[@]}")
+    enable_units=()
+    eval "$refresh_block"
+    if [[ -n "$legacy" ]]; then
+      legacy_unit_sums=("$legacy")
+    fi
+    refresh_units
+    echo "ENABLE=${enable_units[*]}"
+    echo "REFRESHED=${refreshed_units[*]:-}"
+    echo "END"
+  )
+  refresh_rc=$?
+}
+# expect <name> <shell condition...>: pass if the condition holds.
+expect() {
+  local name="$1"
+  shift
+  if "$@"; then
+    echo "ok   ${name}"
+    pass=$((pass + 1))
+  else
+    echo "FAIL ${name}"
+    printf '%s\n' "$refresh_out" | sed 's/^/     /'
+    fail=$((fail + 1))
+  fi
+}
+has_content() { [[ "$(cat "$1")" == "$2" ]]; }
+out_has() { [[ "$refresh_out" == *"$1"* ]]; }
+out_lacks() { [[ "$refresh_out" != *"$1"* ]]; }
+manifest_has() { grep -qxF "$1  $2" "$refresh_sb/var/units.sha256"; }
+manifest_lacks_unit() { ! grep -q " $1\$" "$refresh_sb/var/units.sha256"; }
+manifest_lacks_sum() { ! grep -q "^$1 " "$refresh_sb/var/units.sha256"; }
+rc_is() { [[ "$refresh_rc" -eq "$1" ]]; }
+
+if [[ -z "$refresh_block" ]]; then
+  echo "FAIL install.sh has no unit refresh block"
+  fail=$((fail + 1))
+else
+  # Case 1: new units are installed and recorded.
+  reset_refresh
+  ship a.service 'A v1'
+  ship b.service 'B v1'
+  run_refresh
+  expect "fresh install succeeds" rc_is 0
+  expect "fresh install: a new unit is installed" has_content "$refresh_sb/etc/a.service" 'A v1'
+  expect "fresh install: every unit is recorded" manifest_has "$(text_sum 'A v1')" a.service
+  expect "fresh install: every unit is recorded (second)" manifest_has "$(text_sum 'B v1')" b.service
+  expect "fresh install: every unit is enabled" out_has 'ENABLE=a.service b.service'
+  if [[ $(stat -c '%a' "$refresh_sb/var/units.sha256") == "644" ]]; then
+    echo "ok   the checksum file has mode 0644"
+    pass=$((pass + 1))
+  else
+    echo "FAIL the checksum file has mode $(stat -c '%a' "$refresh_sb/var/units.sha256"), want 0644"
+    fail=$((fail + 1))
+  fi
+  if [[ $(find "$refresh_sb/var" -type f | wc -l) -eq 1 ]]; then
+    echo "ok   no temporary file is left next to the checksum file"
+    pass=$((pass + 1))
+  else
+    echo "FAIL a temporary file was left next to the checksum file"
+    fail=$((fail + 1))
+  fi
+
+  # Case 2: a re-run with nothing new changes nothing.
+  run_refresh
+  expect "unchanged unit: nothing is reported refreshed" out_has $'REFRESHED=\nEND'
+  expect "unchanged unit: no warning" out_lacks 'warning'
+
+  # Case 3: a shipped fix replaces a unit nobody edited.
+  ship a.service 'A v2'
+  run_refresh
+  expect "unedited unit: the shipped fix arrives" has_content "$refresh_sb/etc/a.service" 'A v2'
+  expect "unedited unit: reported as refreshed" out_has 'REFRESHED=a.service'
+  expect "unedited unit: the new checksum is recorded" manifest_has "$(text_sum 'A v2')" a.service
+  expect "unedited unit: the old checksum is gone" manifest_lacks_sum "$(text_sum 'A v1')"
+  expect "unedited unit: still enabled" out_has 'ENABLE=a.service b.service'
+
+  # Case 4: an edited unit is kept, the warning says how to compare, and
+  # its checksum stays the shipped one: recording the edit would make the
+  # next upgrade take it for an unedited unit and overwrite it.
+  printf 'A admin edit\n' > "$refresh_sb/etc/a.service"
+  ship a.service 'A v3'
+  run_refresh
+  expect "edited unit: the run succeeds" rc_is 0
+  expect "edited unit: the admin's content is kept" has_content "$refresh_sb/etc/a.service" 'A admin edit'
+  expect "edited unit: warned about" out_has "warning: $refresh_sb/etc/a.service"
+  expect "edited unit: the warning has a diff hint" out_has "diff -u $refresh_sb/deploy/systemd/a.service $refresh_sb/etc/a.service"
+  expect "edited unit: not reported as refreshed" out_has $'REFRESHED=\nEND'
+  expect "edited unit: the edit is not recorded" manifest_lacks_sum "$(text_sum 'A admin edit')"
+  expect "edited unit: the shipped baseline stays recorded" manifest_has "$(text_sum 'A v2')" a.service
+  expect "edited unit: still enabled" out_has 'ENABLE=a.service b.service'
+  # The same on every later upgrade, not only the first.
+  ship a.service 'A v4'
+  run_refresh
+  expect "edited unit: kept again on the next upgrade" has_content "$refresh_sb/etc/a.service" 'A admin edit'
+  # Back on the recorded version, the unit counts as unedited again.
+  printf 'A v2\n' > "$refresh_sb/etc/a.service"
+  run_refresh
+  expect "reverted unit: the shipped version arrives again" has_content "$refresh_sb/etc/a.service" 'A v4'
+  expect "reverted unit: the new checksum is recorded" manifest_has "$(text_sum 'A v4')" a.service
+
+  # Case 5: a unit that is new in this version is installed on an upgrade.
+  refresh_units_list=(a.service b.service c.service)
+  ship c.service 'C v1'
+  run_refresh
+  expect "new unit on upgrade: installed" has_content "$refresh_sb/etc/c.service" 'C v1'
+  expect "new unit on upgrade: recorded" manifest_has "$(text_sum 'C v1')" c.service
+  refresh_units_list=(a.service b.service)
+
+  # An admin who copied the shipped version in by hand made it unedited.
+  printf 'A v9\n' > "$refresh_sb/etc/a.service"
+  ship a.service 'A v9'
+  run_refresh
+  expect "unit already equal to the shipped one: recorded" manifest_has "$(text_sum 'A v9')" a.service
+
+  # An install that stopped after replacing a unit, before writing the
+  # checksum file, recovers on the next run.
+  reset_refresh
+  ship a.service 'A v1'
+  ship b.service 'B v1'
+  run_refresh
+  ship a.service 'A v2'
+  printf 'A v2\n' > "$refresh_sb/etc/a.service"
+  run_refresh
+  expect "interrupted upgrade: the checksum catches up" manifest_has "$(text_sum 'A v2')" a.service
+  printf 'A later edit\n' > "$refresh_sb/etc/a.service"
+  ship a.service 'A v3'
+  run_refresh
+  expect "interrupted upgrade: a later edit is still protected" has_content "$refresh_sb/etc/a.service" 'A later edit'
+
+  # A host installed before the checksum file existed. Identical units are
+  # adopted, a known older version is replaced, anything else counts as
+  # edited and must never become a recorded baseline.
+  reset_refresh
+  ship a.service 'A v2'
+  ship b.service 'B v2'
+  printf 'A v2\n' > "$refresh_sb/etc/a.service"
+  printf 'B v1\n' > "$refresh_sb/etc/b.service"
+  run_refresh "$(text_sum 'B v1')  b.service"
+  expect "pre-manifest host: an identical unit is adopted" manifest_has "$(text_sum 'A v2')" a.service
+  expect "pre-manifest host: a known old version gets the shipped fix" has_content "$refresh_sb/etc/b.service" 'B v2'
+  expect "pre-manifest host: the refreshed unit is recorded" manifest_has "$(text_sum 'B v2')" b.service
+
+  reset_refresh
+  ship a.service 'A v2'
+  ship b.service 'B v2'
+  printf 'A v2\n' > "$refresh_sb/etc/a.service"
+  printf 'B admin edit\n' > "$refresh_sb/etc/b.service"
+  run_refresh "$(text_sum 'B v1')  b.service"
+  expect "pre-manifest host: an unknown unit is kept" has_content "$refresh_sb/etc/b.service" 'B admin edit'
+  expect "pre-manifest host: an unknown unit is warned about" out_has "warning: $refresh_sb/etc/b.service"
+  expect "pre-manifest host: an unknown unit is not recorded" manifest_lacks_unit b.service
+  ship b.service 'B v3'
+  run_refresh "$(text_sum 'B v1')  b.service"
+  expect "pre-manifest host: still kept on the next upgrade" has_content "$refresh_sb/etc/b.service" 'B admin edit'
+  expect "pre-manifest host: still not recorded" manifest_lacks_unit b.service
+
+  # A known old version in another unit's name proves nothing.
+  reset_refresh
+  ship a.service 'A v2'
+  ship b.service 'B v2'
+  printf 'B v1\n' > "$refresh_sb/etc/a.service"
+  run_refresh "$(text_sum 'B v1')  b.service"
+  expect "legacy checksum of another unit does not match" has_content "$refresh_sb/etc/a.service" 'B v1'
+
+  # Once a unit has a recorded baseline, the list of old versions no longer
+  # applies: going back to one of them is an edit.
+  reset_refresh
+  ship a.service 'A v2'
+  ship b.service 'B v1'
+  run_refresh
+  printf 'A v1\n' > "$refresh_sb/etc/a.service"
+  ship a.service 'A v3'
+  run_refresh "$(text_sum 'A v1')  a.service"
+  expect "recorded baseline wins over the legacy list" has_content "$refresh_sb/etc/a.service" 'A v1'
+
+  # A symlink is an admin's decision (systemctl mask, a unit kept elsewhere).
+  # It is not followed and not replaced, even if the target looks unedited.
+  reset_refresh
+  ship a.service 'A v1'
+  ship b.service 'B v1'
+  run_refresh
+  printf 'A v1\n' > "$refresh_sb/target"
+  ln -sf "$refresh_sb/target" "$refresh_sb/etc/a.service"
+  ln -sf /nonexistent/unit "$refresh_sb/etc/b.service"
+  ship a.service 'A v2'
+  ship b.service 'B v2'
+  run_refresh
+  if [[ -L "$refresh_sb/etc/a.service" ]] && has_content "$refresh_sb/target" 'A v1' && [[ -L "$refresh_sb/etc/b.service" ]]; then
+    echo "ok   symlinked units are left in place"
+    pass=$((pass + 1))
+  else
+    echo "FAIL a symlinked unit was replaced or followed"
+    printf '%s\n' "$refresh_out" | sed 's/^/     /'
+    fail=$((fail + 1))
+  fi
+  expect "symlinked unit: warned about" out_has "warning: $refresh_sb/etc/a.service"
+  expect "symlinked unit: the recorded baseline stays" manifest_has "$(text_sum 'A v1')" a.service
+
+  # A damaged checksum file cannot turn an edited unit into an unedited one.
+  reset_refresh
+  ship a.service 'A v1'
+  ship b.service 'B v1'
+  printf 'A admin edit\n' > "$refresh_sb/etc/a.service"
+  printf 'not-a-checksum  a.service\n\nx\n' > "$refresh_sb/var/units.sha256"
+  run_refresh
+  expect "damaged checksum file: the run succeeds" rc_is 0
+  expect "damaged checksum file: the unit is kept" has_content "$refresh_sb/etc/a.service" 'A admin edit'
+
+  # An entry only counts for exactly the unit it names.
+  reset_refresh
+  ship a.service 'A v2'
+  ship b.service 'B v1'
+  printf 'A admin edit\n' > "$refresh_sb/etc/a.service"
+  printf '%s  xa.service\n' "$(text_sum 'A admin edit')" > "$refresh_sb/var/units.sha256"
+  run_refresh
+  expect "checksum of a similarly named unit does not match" has_content "$refresh_sb/etc/a.service" 'A admin edit'
+
+  # A tarball that lacks a listed unit stops the install.
+  reset_refresh
+  ship a.service 'A v1'
+  run_refresh
+  expect "missing shipped unit: the run fails" rc_is 1
+
+  # The real list of pre-manifest checksums: the collector version without
+  # RestartSec is in it, and the entries are well formed.
+  legacy_list=$(awk '/^legacy_unit_sums=\(/{f=1;next} f&&/^\)/{exit} f{print}' "$install_sh")
+  if printf '%s\n' "$legacy_list" | grep -qF '"cd452ec9eb40017e6ae6da044ef04034d8031f5137c7ed7b757c7039cde34f42  nebula-pve-collector.service"'; then
+    echo "ok   the collector unit from before RestartSec is a known old version"
+    pass=$((pass + 1))
+  else
+    echo "FAIL the collector unit from before RestartSec is not in legacy_unit_sums"
+    fail=$((fail + 1))
+  fi
+  if [[ $(printf '%s\n' "$legacy_list" | wc -l) -ge 7 ]] \
+     && ! printf '%s\n' "$legacy_list" | grep -qvE '^  "[0-9a-f]{64}  nebula-[a-z-]+\.(service|path|timer)"$'; then
+    echo "ok   legacy_unit_sums holds well-formed entries for the shipped versions"
+    pass=$((pass + 1))
+  else
+    echo "FAIL legacy_unit_sums is malformed"
+    fail=$((fail + 1))
+  fi
+fi
+
+# --- Unit refresh wiring in install.sh (static) -------------------------------
+# refresh_units runs for tarball installs only: under --from-package the
+# package manager owns the units in /lib/systemd/system. It runs before the
+# daemon-reload, and a replaced unit reaches the services that are running.
+call_line=$(grep -n '^  refresh_units$' "$install_sh" | cut -d: -f1)
+package_branch=$(grep -n '^if \[\[ \${from_package} -eq 1 \]\]; then$' "$install_sh" | tail -n 1 | cut -d: -f1)
+else_line=$(awk -v s="${package_branch:-0}" 'NR>s && /^else$/{print NR; exit}' "$install_sh")
+reload_line=$(grep -n '^systemctl daemon-reload$' "$install_sh" | cut -d: -f1)
+if [[ -n "$call_line" && -n "$else_line" && -n "$reload_line" && "$call_line" -gt "$else_line" && "$call_line" -lt "$reload_line" ]]; then
+  echo "ok   refresh_units runs in the tarball branch, before the daemon-reload"
+  pass=$((pass + 1))
+else
+  echo "FAIL refresh_units must run in the tarball branch, before the daemon-reload"
+  fail=$((fail + 1))
+fi
+restart_block=$(awk '/^# --- Start\/restart/{f=1} /^# --- Next steps/{f=0} f{print}' "$install_sh")
+for want in 'unit_refreshed nebula-server.service' 'unit_refreshed nebula-executor.service' 'systemctl try-restart'; do
+  if printf '%s\n' "$restart_block" | grep -qF -- "$want"; then
+    echo "ok   the restart step uses: ${want}"
+    pass=$((pass + 1))
+  else
+    echo "FAIL the restart step does not use: ${want}"
+    fail=$((fail + 1))
+  fi
+done
 
 # --- Root-gated: real runs of install.sh and uninstall.sh -------------------
 # These two cases exercise the systemd handling, which the dry-run mode

@@ -27,7 +27,9 @@
 # The script is idempotent: re-running it updates the binaries and
 # rewrites the drop-in, but never overwrites unit files you have edited,
 # never touches the data directories, and never overwrites an existing
-# /etc/nebula/server.json.
+# /etc/nebula/server.json. Unit files you did not edit follow the shipped
+# version; /var/lib/nebula/units.sha256 records what was installed, so
+# that an edit can be told from an older shipped version.
 #
 # Dry run (no root needed, changes nothing):
 #
@@ -325,7 +327,7 @@ bin_changed=0
 done
 # end: install binaries
 
-# --- Units (installed only if absent: never clobber admin edits) -----------
+# --- Units (refreshed only if unedited: never clobber admin edits) ---------
 # The units this install provisions are listed explicitly (WA-04). The
 # iconfetch units (nebula-iconfetch.service/.path/.timer and
 # nebula-iconfetch-firewall.service) are deliberately left out: the icon
@@ -362,6 +364,132 @@ package_units=(
   nebula-discovery.timer
 )
 
+# begin: unit refresh
+# units_manifest records, per unit, the checksum of the shipped version this
+# script last installed: never the checksum of an edited file. A unit that
+# still has that checksum was not edited and may follow the shipped version;
+# any other content is the admin's and stays (WA-09).
+units_manifest="${var_lib}/units.sha256"
+
+# Every version shipped before units_manifest existed. Hosts installed then
+# have no recorded checksum, and without this list their units would all
+# count as edited, so no shipped fix would ever reach them. It applies only
+# to a unit with no recorded checksum. Frozen: a unit changed from now on is
+# covered by units_manifest and does not belong here.
+legacy_unit_sums=(
+  "e7a42fc29dc5aeae3e854001f06cd0efeaef8458dd273e7a4ff74607a73de8c4  nebula-server.service"
+  "fbce1de5c0888db5927d5a34333214f57e6239c987b9c7be41f21e7c761a1beb  nebula-executor.service"
+  "cd452ec9eb40017e6ae6da044ef04034d8031f5137c7ed7b757c7039cde34f42  nebula-pve-collector.service"
+  "60c0ef3dc3f3fc0ca54e528fd9b41d82571fbb0bb5637e1779a78e4ad8f0c2b7  nebula-pve-collector.service"
+  "4ad18a7e6a7270588e6dbe6a04d2f6fd7a7ccd0730b2ff6989da4136d8acbf11  nebula-discovery.path"
+  "be046e71c5f0585c7b0abe93d41a5e698dc47a69affd939761b4c968996a8a50  nebula-discovery.service"
+  "2a88aab97acc72e9752b2c259c2f6f2dfccb9804d751cee77d138a0563df2c61  nebula-discovery.timer"
+)
+
+# Units refresh_units replaced, so that the restart step can apply them. A
+# unit installed for the first time is not listed: the enable step starts it.
+refreshed_units=()
+
+# stored_unit_sum NAME prints the recorded checksum of NAME, nothing if there
+# is none. Malformed lines count as no record, so damage to the file can only
+# make a unit look edited, which keeps it.
+stored_unit_sum() {
+  local sum entry
+  [[ -f "${units_manifest}" ]] || return 0
+  while read -r sum entry; do
+    if [[ "${entry}" == "$1" && "${sum}" =~ ^[0-9a-f]{64}$ ]]; then
+      printf '%s\n' "${sum}"
+      return 0
+    fi
+  done < "${units_manifest}"
+}
+
+# is_legacy_unit NAME SUM succeeds if SUM is a version of NAME shipped before
+# units_manifest existed.
+is_legacy_unit() {
+  local entry
+  for entry in "${legacy_unit_sums[@]}"; do
+    if [[ "${entry}" == "$2  $1" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# warn_kept_unit NAME REASON says that a unit was kept and how to look at it.
+warn_kept_unit() {
+  local shipped="${script_dir}/systemd/$1" target="${systemd_dir}/$1"
+  echo "install.sh: warning: ${target} $2; keeping it, shipped changes to it do not apply" >&2
+  echo "install.sh:   compare: diff -u ${shipped} ${target}" >&2
+  echo "install.sh:   to take the shipped version, remove the file and run install.sh again" >&2
+}
+
+# refresh_units installs what is absent and replaces what is unedited, then
+# rewrites units_manifest. A kept unit keeps its old record (or none): were
+# its current checksum recorded, the next upgrade would overwrite the edit.
+# An install that stops before the rewrite is safe: a replaced unit equals
+# the shipped version on the next run, which records it.
+refresh_units() {
+  local name shipped target shipped_sum stored_sum current_sum record manifest_lines=""
+  for name in "${tarball_units[@]}"; do
+    shipped="${script_dir}/systemd/${name}"
+    target="${systemd_dir}/${name}"
+    shipped_sum=$(sha256sum "${shipped}" | cut -d' ' -f1)
+    stored_sum=$(stored_unit_sum "${name}")
+    record="${shipped_sum}"
+    if [[ -e "${target}" || -L "${target}" ]]; then
+      if [[ -L "${target}" || ! -f "${target}" ]]; then
+        # A symlink (systemctl mask, a unit kept elsewhere) or something
+        # stranger is a decision, whatever it points at.
+        warn_kept_unit "${name}" "is not a regular file"
+        record="${stored_sum}"
+      else
+        current_sum=$(sha256sum "${target}" | cut -d' ' -f1)
+        if [[ "${current_sum}" == "${shipped_sum}" ]]; then
+          : # Up to date; recording it also adopts it on a pre-manifest host.
+        elif [[ "${current_sum}" == "${stored_sum}" ]] \
+          || { [[ -z "${stored_sum}" ]] && is_legacy_unit "${name}" "${current_sum}"; }; then
+          install -m 0644 -o root -g root "${shipped}" "${target}"
+          refreshed_units+=("${name}")
+          echo "install.sh: updated ${target} to the shipped version"
+        else
+          warn_kept_unit "${name}" "differs from the version Nebula installed"
+          record="${stored_sum}"
+        fi
+      fi
+    else
+      install -m 0644 -o root -g root "${shipped}" "${target}"
+    fi
+    if [[ -n "${record}" ]]; then
+      manifest_lines+="${record}  ${name}"$'\n'
+    fi
+    # Enable it whether or not it was just installed: a re-run after an
+    # aborted install must still enable the units, not only the ones whose
+    # file is absent.
+    enable_units+=("${name}")
+  done
+  # Same directory, so the rename is atomic; root-owned, so nobody else can
+  # plant a file here.
+  tmp_units_manifest=$(mktemp "${units_manifest}.XXXXXX")
+  trap 'rm -f "${tmp_units_manifest}"' EXIT
+  printf '%s' "${manifest_lines}" > "${tmp_units_manifest}"
+  chmod 0644 "${tmp_units_manifest}"
+  mv -fT "${tmp_units_manifest}" "${units_manifest}"
+  trap - EXIT
+}
+
+# unit_refreshed NAME succeeds if refresh_units replaced NAME.
+unit_refreshed() {
+  local name
+  for name in "${refreshed_units[@]}"; do
+    if [[ "${name}" == "$1" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+# end: unit refresh
+
 # enable_units is the list the enable loop below walks, in the order above.
 # In tarball mode every provisioned unit is enabled whether or not it was
 # just installed, so a re-run after an aborted install still enables the
@@ -376,17 +504,7 @@ if [[ ${from_package} -eq 1 ]]; then
     fi
   done
 else
-  for name in "${tarball_units[@]}"; do
-    if [[ -e "${systemd_dir}/${name}" ]]; then
-      echo "install.sh: ${systemd_dir}/${name} already exists; leaving it untouched"
-    else
-      install -m 0644 -o root -g root "${script_dir}/systemd/${name}" "${systemd_dir}/${name}"
-    fi
-    # Enable it whether or not it was just installed: a re-run after an
-    # aborted install must still enable the units, not only the ones whose
-    # file is absent.
-    enable_units+=("${name}")
-  done
+  refresh_units
 fi
 
 # Remove iconfetch units left behind by an earlier install (WA-04): the
@@ -492,16 +610,17 @@ for name in "${enable_units[@]}"; do
   fi
 done
 
-if systemctl is-active --quiet nebula-server.service && [[ ${bin_changed} -eq 1 || ${server_drop_in_changed} -eq 1 ]]; then
+if systemctl is-active --quiet nebula-server.service \
+  && { [[ ${bin_changed} -eq 1 || ${server_drop_in_changed} -eq 1 ]] || unit_refreshed nebula-server.service; }; then
   systemctl restart nebula-server.service
-  echo "install.sh: restarted nebula-server (binaries or drop-in changed)"
+  echo "install.sh: restarted nebula-server (binaries, unit or drop-in changed)"
 fi
 
 if systemctl is-active --quiet nebula-executor.service; then
-  if [[ ${bin_changed} -eq 1 || ${drop_in_changed} -eq 1 ]]; then
+  if [[ ${bin_changed} -eq 1 || ${drop_in_changed} -eq 1 ]] || unit_refreshed nebula-executor.service; then
     # Running with old binaries or an old drop-in: apply the new ones.
     systemctl restart nebula-executor.service
-    echo "install.sh: restarted nebula-executor (binaries or drop-in changed)"
+    echo "install.sh: restarted nebula-executor (binaries, unit or drop-in changed)"
   fi
 else
   # Not active: a fresh install (the server's Wants= did not start it, or
@@ -511,6 +630,20 @@ else
   systemctl restart nebula-executor.service
   echo "install.sh: started nebula-executor (was not active)"
 fi
+
+# The other replaced units: try-restart touches only what is running. The
+# server and the executor were handled above. nebula-discovery.service is a
+# oneshot: its next run uses the new unit, and a restart would kill a scan.
+# The install itself is done by now, so a failure here warns.
+for name in "${refreshed_units[@]}"; do
+  case "${name}" in
+    nebula-server.service|nebula-executor.service|nebula-discovery.service) ;;
+    *)
+      systemctl try-restart "${name}" \
+        || echo "install.sh: warning: could not restart ${name}; check: systemctl status ${name}" >&2
+      ;;
+  esac
+done
 
 # --- Next steps --------------------------------------------------------------
 cat <<EOF
