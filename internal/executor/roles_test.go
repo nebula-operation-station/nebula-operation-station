@@ -281,6 +281,8 @@ func TestValidateReadPVERequest(t *testing.T) {
 		{name: "unknown method", req: &pb.ReadPVERequest{RemoteId: "pve-1", Method: pb.PVEReadMethod(99)}, wantErr: true},
 		{name: "nodes ok", req: &pb.ReadPVERequest{RemoteId: "pve-1", Method: pb.PVEReadMethod_PVE_READ_METHOD_NODES}, wantErr: false},
 		{name: "nodes with valid node", req: &pb.ReadPVERequest{RemoteId: "pve-1", Method: pb.PVEReadMethod_PVE_READ_METHOD_NODES, Params: &pb.ReadPVERequest_Node{Node: node("node1")}}, wantErr: false},
+		{name: "nodes with mixed-case node", req: &pb.ReadPVERequest{RemoteId: "pve-1", Method: pb.PVEReadMethod_PVE_READ_METHOD_NODES, Params: &pb.ReadPVERequest_Node{Node: node("ProxmoxBAI")}}, wantErr: false},
+		{name: "nodes with malformed mixed-case node", req: &pb.ReadPVERequest{RemoteId: "pve-1", Method: pb.PVEReadMethod_PVE_READ_METHOD_NODES, Params: &pb.ReadPVERequest_Node{Node: node("../ProxmoxBAI")}}, wantErr: true},
 		{name: "nodes with empty node", req: &pb.ReadPVERequest{RemoteId: "pve-1", Method: pb.PVEReadMethod_PVE_READ_METHOD_NODES, Params: &pb.ReadPVERequest_Node{Node: node("")}}, wantErr: true},
 		{name: "nodes with bad node", req: &pb.ReadPVERequest{RemoteId: "pve-1", Method: pb.PVEReadMethod_PVE_READ_METHOD_NODES, Params: &pb.ReadPVERequest_Node{Node: node("Node 1")}}, wantErr: true},
 		{name: "nodes with guest", req: &pb.ReadPVERequest{RemoteId: "pve-1", Method: pb.PVEReadMethod_PVE_READ_METHOD_NODES, Params: &pb.ReadPVERequest_Guest{Guest: guest(100)}}, wantErr: true},

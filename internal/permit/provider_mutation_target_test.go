@@ -24,13 +24,45 @@ func TestProviderMutationNodeTargetHasNoGeneration(t *testing.T) {
 func TestValidPveNodeNameIsOneLabel(t *testing.T) {
 	cases := map[string]bool{
 		"pve1": true, "a": true, "pve-node-2": true, strings.Repeat("a", 63): true,
-		"PVE1": false, "": false, "-pve": false, "pve-": false, "pve1.lab": false, "pve_1": false,
-		strings.Repeat("a", 64): false, "pve 1": false, "pve1\n": false,
+		"ProxmoxBAI": true, "PVE1": true, "Pve-Node-2": true, strings.Repeat("A", 63): true,
+		"": false, "-pve": false, "pve-": false, "pve1.lab": false, "pve_1": false,
+		"-PVE": false, "PVE-": false, "ProxmoxBAI.lab": false, "PVE_1": false, "PVE/1": false, "..": false,
+		strings.Repeat("a", 64): false, strings.Repeat("A", 64): false, "pve 1": false, "pve1\n": false,
 	}
 	for name, want := range cases {
 		if got := ValidPveNodeName(name); got != want {
 			t.Errorf("ValidPveNodeName(%q) = %v, want %v", name, got, want)
 		}
+	}
+}
+
+func TestPveNodePatternIsTheContractLabel(t *testing.T) {
+	if PveNodePattern != pvecontract.NodeLabelPattern {
+		t.Fatalf("PveNodePattern = %q, want the pvecontract label pattern", PveNodePattern)
+	}
+}
+
+// A node name keeps its case in a permit: a target for "ProxmoxBAI" is valid
+// and is a different target from the lower-case name.
+func TestProviderMutationTargetKeepsNodeCase(t *testing.T) {
+	if err := ValidateProviderMutationShape(ProviderKindQemu, "ProxmoxBAI", 101); err != nil {
+		t.Fatalf("shape refused: %v", err)
+	}
+	mixed, lower := mutationTarget(), mutationTarget()
+	mixed.Node, lower.Node = "ProxmoxBAI", "proxmoxbai"
+	if err := mixed.Validate(); err != nil {
+		t.Fatalf("target refused: %v", err)
+	}
+	m, err := json.Marshal(mixed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := json.Marshal(lower)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(m) == string(l) || !strings.Contains(string(m), `"ProxmoxBAI"`) {
+		t.Fatalf("target lost the node case: %s", m)
 	}
 }
 

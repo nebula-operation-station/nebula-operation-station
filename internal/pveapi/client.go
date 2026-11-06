@@ -29,6 +29,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 )
 
 // Response and result limits (ADR 0006, phase 1 read path).
@@ -315,8 +317,6 @@ func sanitizeText(s string, max int) string {
 
 // Identity and record limits.
 const (
-	// MaxNodeNameBytes bounds a PVE node name.
-	MaxNodeNameBytes = 253
 	// MaxRefBytes bounds short machine references (storage id).
 	MaxRefBytes = 64
 	// MaxSnapshotNameBytes bounds a guest snapshot name.
@@ -547,17 +547,12 @@ func schemaErr(path string) error {
 	return &UnavailableError{Endpoint: path, Reason: ReasonSchema}
 }
 
-// validNodeName validates a PVE node name: 1..MaxNodeNameBytes bytes of
-// [a-z0-9_-].
+// validNodeName validates a PVE node name used in a request path: one
+// pvecontract node label. The case is kept, because PVE API paths are
+// case-sensitive.
 func validNodeName(node string) error {
-	if node == "" || len(node) > MaxNodeNameBytes {
+	if !pvecontract.ValidNodeLabel(node) {
 		return fmt.Errorf("pveapi: invalid node name (length %d)", len(node))
-	}
-	for i := 0; i < len(node); i++ {
-		ch := node[i]
-		if !(ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '_' || ch == '-') {
-			return fmt.Errorf("pveapi: invalid node name %q", node)
-		}
 	}
 	return nil
 }

@@ -48,7 +48,7 @@ type TaskStatusResult struct {
 func (w *Writer) TaskStatus(ctx context.Context, upid string) (TaskStatusResult, error) {
 	const op = "task-status"
 	task, err := parseUPID(upid)
-	if err != nil || validNodeName(task.Node) != nil {
+	if err != nil {
 		return TaskStatusResult{}, invalid(op, "upid")
 	}
 	path := "/nodes/" + url.PathEscape(task.Node) + "/tasks/" + url.PathEscape(upid) + "/status"
