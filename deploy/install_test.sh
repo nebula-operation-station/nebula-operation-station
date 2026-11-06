@@ -223,7 +223,7 @@ fi
 # The list must be exactly the set of non-iconfetch units shipped in
 # deploy/systemd/ (order-insensitive). This fails if a provisioned unit is
 # missing from the list or an unprovisioned (iconfetch) unit is added.
-dir_units=$(cd "${script_dir}/systemd" && ls -1 | grep -E '\.(service|path|timer)$' | grep -v iconfetch | sort)
+dir_units=$(find "${script_dir}/systemd" -maxdepth 1 -type f \( -name '*.service' -o -name '*.path' -o -name '*.timer' \) ! -name '*iconfetch*' -printf '%f\n' | sort)
 list_units=$(printf '%s\n' "$tarball_list" | sort)
 if [[ -n "$tarball_list" && "$dir_units" == "$list_units" ]]; then
   echo "ok   the explicit unit list matches the provisioned units (no iconfetch)"
