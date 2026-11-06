@@ -304,13 +304,44 @@ else
   ok "uninstall.sh list check fails on an invalid line"
 fi
 cp "$list_file" "$sandbox/deploy/quickstart/binaries.txt"
-check_ln=$(grep -n '^# begin: check binary list' "$uninstall_sh" | head -1 | cut -d: -f1)
-first_rm_ln=$(grep -nE '^[[:space:]]*(systemctl (stop|disable)|rm -f --|rmdir --)' "$uninstall_sh" | head -1 | cut -d: -f1)
-if [[ -n "${check_ln:-}" && -n "${first_rm_ln:-}" && $check_ln -lt $first_rm_ln ]]; then
+# The check must run before the first removal. Run a sandboxed copy of
+# uninstall.sh with stub systemctl/rm/rmdir that record their calls and a
+# binaries_lib.sh that records when it is sourced (the check block sources
+# it); the check must appear before the first removal in the call log. A
+# removal placed above the check block (rm -rf, rm -f without --, or
+# [[ -e x ]] && systemctl stop y) or a check wrapped in a function called
+# after the removals must break the order.
+order_sandbox=$(mktemp -d)
+mkdir -p "$order_sandbox/deploy/quickstart" "$order_sandbox/deploy/systemd" \
+         "$order_sandbox/bin" "$order_sandbox/etc/systemd/system" "$order_sandbox/usr/bin"
+cp "$list_file" "$order_sandbox/deploy/quickstart/binaries.txt"
+{ echo 'echo "check" >> "${NEBULA_CALL_LOG}"'; cat "$(dirname "$list_file")/binaries_lib.sh"; } > "$order_sandbox/deploy/quickstart/binaries_lib.sh"
+for u in nebula-server.service nebula-executor.service nebula-pve-collector.service nebula-discovery.path nebula-discovery.timer; do
+  : > "$order_sandbox/deploy/systemd/$u"
+  : > "$order_sandbox/etc/systemd/system/$u"
+done
+for b in "${expected[@]}"; do : > "$order_sandbox/usr/bin/$b"; done
+for stub in systemctl rm rmdir; do
+  printf '#!/bin/sh\necho "%s $*" >> "${NEBULA_CALL_LOG}"\nexit 0\n' "$stub" > "$order_sandbox/bin/$stub"
+  chmod +x "$order_sandbox/bin/$stub"
+done
+sed -e 's|^systemd_dir=/etc/systemd/system$|systemd_dir="${NEBULA_SYSTEMD_DIR:-/etc/systemd/system}"|' \
+    -e 's|^bin_dir=/usr/bin$|bin_dir="${NEBULA_BIN_DIR:-/usr/bin}"|' \
+    -e 's|\[\[ ${EUID} -ne 0 \]\]|false|' \
+    "$uninstall_sh" > "$order_sandbox/deploy/uninstall.sh"
+chmod +x "$order_sandbox/deploy/uninstall.sh"
+NEBULA_CALL_LOG="$order_sandbox/call.log" \
+NEBULA_SYSTEMD_DIR="$order_sandbox/etc/systemd/system" \
+NEBULA_BIN_DIR="$order_sandbox/usr/bin" \
+PATH="$order_sandbox/bin:$PATH" bash "$order_sandbox/deploy/uninstall.sh" >/dev/null 2>&1 || true
+check_idx=$(grep -n '^check$' "$order_sandbox/call.log" | head -1 | cut -d: -f1)
+first_rm_idx=$(grep -nE '^(systemctl|rm|rmdir) ' "$order_sandbox/call.log" | head -1 | cut -d: -f1)
+if [[ -n "${check_idx:-}" && -n "${first_rm_idx:-}" && $check_idx -lt $first_rm_idx ]]; then
   ok "uninstall.sh checks the list before the first removal"
 else
-  bad "uninstall.sh checks the list before the first removal (check at ${check_ln:-?}, first removal at ${first_rm_ln:-?})"
+  bad "uninstall.sh checks the list before the first removal (check at ${check_idx:-?}, first removal at ${first_rm_idx:-?})"
 fi
+rm -rf "$order_sandbox"
 
 # --- 7. Functional: the layout check of install.sh (both paths) -------------
 # from-package: the five binaries must exist in bin_dir; a missing one must
