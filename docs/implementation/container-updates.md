@@ -426,6 +426,8 @@ Until they land, cu04 shows those targets as unavailable with a reason.
          with any of these stops here, as does a pending file edit. The hash is
          unkeyed (Q5), so it is compared on the host only and appears in no
          result, snapshot or log;
+       - no frozen service publishes a port with a Docker-chosen host port
+         (`ephemeral_port`), read from the same `docker compose config`;
        - the image `old_image_id` still lists every digest of `old_digests`;
        - the dependency closure, recomputed as in the preview, equals the bound
          `dependencies`, and each dependency container has its bound ID, name
@@ -622,7 +624,8 @@ Until they land, cu04 shows those targets as unavailable with a reason.
   - check_updates: `TestCheckUpdatesFirstUpdateListsIndex` (tag pull),
     `TestCheckUpdatesSecondUpdateListsPlatform` (digest pull),
     `TestIndexChangeOnOtherArchitectureIsCurrent`,
-    `TestUnanswerableLocalDigestIsUnknown`.
+    `TestUnanswerableLocalDigestIsUnknown`, `TestCheckUpdatesRequestCapIsUnknown`
+    (a used-up cap and a 429 both leave the remaining images `unknown`).
   - planner: `TestContainerBatchLifetimeCoversSerialMembers` (8 members of 30
     minutes get at least 305 minutes), `TestContainerBatchOverLifetimeRefused`,
     `TestContainerActionsShareMutationTimeout`,
@@ -787,8 +790,9 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     writes the override before `up`, so a job killed between the two leaves the
     containers unchanged and the override ahead of them. The preview then reports
     `override_drift` for that unit, and Resolve stores `override_ahead` on the
-    `not_recreated` row, so the page names the cause and the way out of Q2 (remove
-    the entry). Resolve
+    `not_recreated` row, so the page names the cause and the way out: the operator
+    sets the entry back to the running reference, or removes it if the service had
+    none before. Resolve
     **never** gives `recreated`: the preview has no health, ports, mounts or
     networks, so no verdict is possible, and unknown is not success. A project
     that really is fully recreated stays `partial`. Anything it cannot match
@@ -1010,7 +1014,8 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     stays as it is. This is the second layer; the first is the silent output of
     cu02, and snapshots hold no env.
   - Format: see Q7. The definition must exactly name the container and may
-    leave only the image to NOS.
+    leave only the image to NOS. A published port with a Docker-chosen host port
+    is a rejected shape, for the same reason as `ephemeral_port`.
 - **Risk classes:** as cu01; a container without a definition is unavailable.
 - **Tests:** `TestStandaloneWithoutDefinitionUnavailable`,
   `TestNoInspectReconstruction` (no inspect field reaches a create argument),
@@ -1108,8 +1113,9 @@ operator brings the project back to what its files say.
 | A container whose snapshot entry exceeds its limit | cu02 phase 1 | `snapshot_too_large` | `TestOversizeSnapshotRefused` |
 | Rollback of a row without a baseline | cu03 Evaluate | `no_baseline` | `TestRollbackRefusedWithoutBaseline` |
 
-Rollback is the one exception to the first three rows: it starts from what a
-failed update left, so it binds the recorded state instead (cu03).
+Rollback is the one exception to the first three rows and to
+`config_not_applied`: it starts from what a failed update left, so it binds the
+recorded state instead (cu03).
 
 Out of scope for this plan (no ADR rule; stated so that nobody assumes them):
 
