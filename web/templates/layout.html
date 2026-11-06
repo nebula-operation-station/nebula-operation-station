@@ -81,7 +81,7 @@
         </button>
         <form class="topbar__search nav__search" action="/search" method="get" role="search">
           <svg aria-hidden="true"><use href="/static/icons.svg#i-search"></use></svg>
-          <input type="search" name="q" maxlength="100" placeholder="Search hosts…" aria-label="Search"{{with .Search}} value="{{.Query}}"{{end}}>
+          <input type="search" name="q" maxlength="100" placeholder="Search hosts, IPs, assets …" aria-label="Search"{{with .Search}} value="{{.Query}}"{{end}}>
         </form>
         <!-- Privileged session display (ADR 0007 E20): the executor-reported
              state, remaining time and the single Extend action. Driven by

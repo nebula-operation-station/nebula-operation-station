@@ -97,7 +97,7 @@
   const search = document.querySelector('.topbar__search input');
   if (search) {
     const long = search.getAttribute('placeholder') || '';
-    const short = 'Search hosts, IPs …';
+    const short = 'Search hosts…';
     const narrow = window.matchMedia('(max-width: 600px)');
     const apply = () => {
       search.placeholder = narrow.matches ? short : long;
