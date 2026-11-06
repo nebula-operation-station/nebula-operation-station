@@ -1718,8 +1718,9 @@ html {
    Without JS the buttons and the sheet carry the hidden attribute and
    the page stays the plain server-rendered chart. */
 /* Sideways contained (no swipe back in history). Vertically the page takes
-   over when the chart hands a scroll on at its edge (inventory.js). */
-.chart--pan { height: 75vh; min-height: 420px; overflow: hidden; overscroll-behavior-x: contain; cursor: grab; touch-action: none; }
+   over when the chart hands a scroll or swipe on at its edge (inventory.js);
+   pan-y lets the browser do that, and leaves pinch to the script. */
+.chart--pan { height: 75vh; min-height: 420px; overflow: hidden; overscroll-behavior-x: contain; cursor: grab; touch-action: pan-y; }
 .chart--pan:active { cursor: grabbing; }
 .chart--pan .chart__hosts { transform-origin: 0 0; will-change: transform; }
 /* One line between the toolbar and the canvas, pan mode only. */

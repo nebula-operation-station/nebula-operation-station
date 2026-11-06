@@ -52,21 +52,30 @@ func runChartHarness(t *testing.T, script, scenario string) (string, error) {
 func TestChartInteractionBehaviour(t *testing.T) {
 	script := inventoryJS(t)
 	for _, scenario := range []string{
-		"zoommath",      // zoomAt: direction, fixed point, both caps
-		"fitmath",       // fitTransform: known box sizes
-		"wheelmath",     // wheelDelta: signs, units, pinch cap, Shift
-		"keymath",       // keyAction: mapping, browser shortcuts
-		"panmath",       // clampPan and wheelPan
-		"buttons",       // toolbar buttons drive the real handlers
-		"hundredhosts",  // Fit shows 100 hosts on the smallest canvas
-		"wheelpan",      // scroll pans, in the right direction
-		"wheelrelease",  // at the edge the page scrolls
-		"wheelzoom",     // Ctrl/Meta+scroll and pinch zoom around the pointer
-		"wheelnocancel", // a wheel event that cannot be cancelled stays with the page
-		"gesture",       // Safari gesture events
-		"keys",          // keys through the real handler
-		"panbounds",     // part of the chart stays visible
-		"listmode",      // the plain list leaves every default alone
+		"zoommath",       // zoomAt: direction, fixed point, both caps
+		"fitmath",        // fitTransform: known box sizes
+		"wheelmath",      // wheelDelta: signs, units, pinch cap, Shift
+		"keymath",        // keyAction: mapping, browser shortcuts
+		"panmath",        // clampPan and wheelPan
+		"buttons",        // toolbar buttons drive the real handlers
+		"hundredhosts",   // Fit shows 100 hosts on the smallest canvas
+		"wheelpan",       // scroll pans, in the right direction
+		"wheelrelease",   // at the edge the page scrolls
+		"wheelzoom",      // Ctrl/Meta+scroll and pinch zoom around the pointer
+		"wheelnocancel",  // a wheel event that cannot be cancelled stays with the page
+		"gesture",        // Safari gesture events
+		"touchswipe",     // one finger: the chart while it can follow, then the page
+		"touchlandscape", // a landscape phone reaches the form below the canvas
+		"touchcontrol",   // a swipe from a control is the page's
+		"touchnocancel",  // an uncancelable touchmove is left alone
+		"pinch",          // two fingers zoom and move, on boxes too
+		"pinchfingers",   // fingers landing and lifting during a pinch
+		"pinchsafari",    // gesture and pointer events do not zoom twice
+		"touchlist",      // list mode and a rotation into it
+		"mousedrag",      // a mouse drag is not a swipe
+		"keys",           // keys through the real handler
+		"panbounds",      // part of the chart stays visible
+		"listmode",       // the plain list leaves every default alone
 	} {
 		t.Run(scenario, func(t *testing.T) {
 			out, err := runChartHarness(t, script, scenario)
@@ -107,6 +116,20 @@ func TestChartHarnessCatchesBrokenBehaviour(t *testing.T) {
 		{"wheel never releases", "if (panBy(d.dx, d.dy)) e.preventDefault();", "panBy(d.dx, d.dy); e.preventDefault();"},
 		{"wheel pans without being cancelable", "if (!panning() || !e.cancelable) return;\n    const d = M.wheelDelta", "if (!panning()) return;\n    const d = M.wheelDelta"},
 		{"Fit of a very wide chart starts off-screen", "tx: Math.max(0, (b.w - b.chartW * scale) / 2)", "tx: (b.w - b.chartW * scale) / 2"},
+		{"swipe never releases at the edge", "drag.held = Math.abs(dx) > Math.abs(dy) || M.wheelPan(ty, -dy, b.h, b.chartH * scale) !== ty;", "drag.held = true;"},
+		{"vertical swipe always leaves the chart", "drag.held = Math.abs(dx) > Math.abs(dy) || M.wheelPan(ty, -dy, b.h, b.chartH * scale) !== ty;", "drag.held = Math.abs(dx) > Math.abs(dy);"},
+		{"held swipe is not cancelled", "if (pinch || (drag && holdSwipe(t.clientX, t.clientY))) e.preventDefault();", "if (pinch) e.preventDefault();"},
+		{"pinch is not cancelled", "if (pinch || (drag && holdSwipe(t.clientX, t.clientY))) e.preventDefault();", "if (drag && holdSwipe(t.clientX, t.clientY)) e.preventDefault();"},
+		{"uncancelable touchmove cancelled", "if (!panning() || !e.cancelable) return;\n    const t = e.targetTouches[0];", "if (!panning()) return;\n    const t = e.targetTouches[0];"},
+		{"pinch only from free space", "if (touch) {\n      if (e.isPrimary)", "if (touch && !e.target.closest('a, button, summary')) {\n      if (e.isPrimary)"},
+		{"pinch ignores the midpoint", "place(tx + p.x - pinch.x, ty + p.y - pinch.y, scale);\n      ", ""},
+		{"pinch zooms before it moves", "place(tx + p.x - pinch.x, ty + p.y - pinch.y, scale);\n      zoomAt(pinch.scale * p.dist / pinch.dist, p.x, p.y);", "zoomAt(pinch.scale * p.dist / pinch.dist, p.x, p.y);\n      place(tx + p.x - pinch.x, ty + p.y - pinch.y, scale);"},
+		{"pinch distance can be zero", "dist: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y))", "dist: Math.hypot(a.x - b.x, a.y - b.y)"},
+		{"lost finger stays tracked", "if (e.isPrimary) { fingers.clear(); pinch = null; }", ""},
+		{"last finger of a pinch stops", "drag = { x: f.x, y: f.y, tx, ty, held: true };", ""},
+		{"gesture events zoom on top of the pinch", "if (!pinch) zoomAt(gestureBase * e.scale, e.clientX, e.clientY);", "zoomAt(gestureBase * e.scale * 2, e.clientX, e.clientY);"},
+		{"pointer moves ignore list mode", "chartSection.addEventListener('pointermove', (e) => {\n    if (!panning()) return;", "chartSection.addEventListener('pointermove', (e) => {"},
+		{"touchmove is taken in list mode", "if (!panning() || !e.cancelable) return;\n    const t = e.targetTouches[0];", "if (!e.cancelable) return;\n    const t = e.targetTouches[0];"},
 		{"toggle listener misses the capture phase", "if (panning()) place(tx, ty, scale);\n  }, true);", "if (panning()) place(tx, ty, scale);\n  });"},
 		{"zoom wheel reaches the browser", "e.preventDefault();\n      zoomAt(scale * d.zoom, e.clientX, e.clientY);", "zoomAt(scale * d.zoom, e.clientX, e.clientY);"},
 	} {

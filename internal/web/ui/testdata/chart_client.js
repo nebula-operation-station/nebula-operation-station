@@ -35,7 +35,7 @@ class El {
     const e = {
       type: name, target: this, button: 0, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false,
       deltaX: 0, deltaY: 0, deltaMode: 0, cancelable: true, defaultPrevented: false,
-      preventDefault() { if (this.cancelable) this.defaultPrevented = true; }, ...init,
+      preventDefault() { this.tried = true; if (this.cancelable) this.defaultPrevented = true; }, ...init,
     };
     for (const l of this.listeners[name] || []) l.fn(e);
     return e;
@@ -89,7 +89,8 @@ const page = (opts) => {
     addEventListener() {},
     body: { children: [], appendChild() {} },
   };
-  const window = { matchMedia: () => ({ matches: o.narrow, addEventListener() {} }) };
+  const media = { matches: o.narrow, change() {}, addEventListener(_, fn) { this.change = fn; } };
+  const window = { matchMedia: () => media };
   const ctx = vm.createContext({ document, window, CSS: { escape: (s) => s } });
   vm.runInContext(source, ctx);
   // Visible part of the chart inside the canvas, in px per axis.
@@ -107,9 +108,69 @@ const page = (opts) => {
     wheel: (init) => section.dispatch('wheel', init),
     key: (key, init) => section.dispatch('keydown', { key, ...init }),
     controlHidden: (id) => byID[id].hidden,
+    setNarrow: (on) => { media.matches = on; media.change(); },
+    touch: (opts) => touchScreen(section, opts),
   };
 };
 const math = () => page().math;
+
+// A box, link or button inside the chart: the mouse leaves those alone.
+const control = () => {
+  const el = new El();
+  el.closest = () => el;
+  return el;
+};
+
+// A touch screen on a canvas with touch-action: pan-y. As in Chrome, a move
+// sends pointermove, then touchmove (touchFirst swaps them for browsers with
+// the other order). A vertical move or a two-finger move whose touchmove is
+// not cancelled starts the browser's own pan: every finger gets pointercancel,
+// the page scrolls and the chart hears no more of it. pageY is the page scroll.
+const touchScreen = (section, opts) => {
+  const fingers = new Map();
+  const t = { pageY: 0, panning: false };
+  const lift = (name, id) => {
+    fingers.delete(id);
+    section.dispatch(name, { pointerType: 'touch', pointerId: id });
+  };
+  t.down = (id, x, y, target) => {
+    const f = { clientX: x, clientY: y, target: target || section };
+    const isPrimary = fingers.size === 0;
+    fingers.set(id, f);
+    t.panning = t.panning && !isPrimary;
+    return section.dispatch('pointerdown', { pointerType: 'touch', pointerId: id, isPrimary, ...f });
+  };
+  // Returns the touchmove event.
+  t.move = (id, x, y, init) => {
+    const f = fingers.get(id);
+    const dx = x - f.clientX, dy = y - f.clientY;
+    f.clientX = x; f.clientY = y;
+    const pointer = () => section.dispatch('pointermove', { pointerType: 'touch', pointerId: id, ...f });
+    const touch = () => section.dispatch('touchmove', {
+      target: f.target, targetTouches: [...fingers.values()].filter((g) => g.target === f.target), ...init,
+    });
+    let e;
+    if (opts?.touchFirst) { e = touch(); pointer(); } else { pointer(); e = touch(); }
+    if (!e.defaultPrevented && (fingers.size > 1 || Math.abs(dy) >= Math.abs(dx))) {
+      t.panning = true;
+      t.pageY -= dy;
+      for (const fid of [...fingers.keys()]) lift('pointercancel', fid);
+    }
+    return e;
+  };
+  t.up = (id) => lift('pointerup', id);
+  // One finger in steps of 10px, as a real swipe arrives.
+  t.swipe = (x0, y0, x1, y1, target) => {
+    t.down(1, x0, y0, target);
+    const n = Math.ceil(Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0)) / 10);
+    for (let i = 1; i <= n; i++) {
+      if (t.panning) t.pageY -= (y1 - y0) / n;
+      else t.move(1, x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * i / n);
+    }
+    if (fingers.has(1)) t.up(1);
+  };
+  return t;
+};
 
 const scenarios = {
   // Pure zoom: the direction follows the requested scale, the point (mx, my)
@@ -317,6 +378,219 @@ const scenarios = {
     near(p.state().scale, 2.5, 'pinch multiplies the starting scale');
     p.section.dispatch('gesturechange', { scale: 0.5, clientX: 300, clientY: 400 });
     near(p.state().scale, 0.625, 'pinch in zooms out');
+  },
+
+  // One finger: the chart follows while it can, the swipe goes to the page
+  // where it cannot, as with the wheel. In both browser event orders.
+  touchswipe() {
+    for (const opts of [{}, { touchFirst: true }]) {
+      const p = page({ chartW: 2000 });
+      const t = p.touch(opts);
+      t.swipe(500, 300, 500, 100);
+      near(p.state().ty, -200, 'a swipe up moves the chart up');
+      near(t.pageY, 0, 'while the chart moves the page stays');
+      t.swipe(500, 300, 200, 300);
+      near(p.state().tx, -300, 'a swipe left moves the chart left');
+      t.swipe(500, 100, 500, 200);
+      near(p.state().ty, -100, 'a swipe down moves the chart back');
+      t.down(1, 500, 300);
+      t.move(1, 500, 280);
+      expect(t.move(1, 500, 320).defaultPrevented, 'a held swipe stays held when it turns');
+      near(p.state().ty, -80, 'and follows the finger');
+      t.up(1);
+
+      // At the top a swipe down is the page's, and the chart does not twitch.
+      const q = page();
+      const u = q.touch(opts);
+      u.swipe(500, 100, 500, 300);
+      expect(q.state().ty === 0 && q.state().tx === 0, 'released swipe moved the chart: ' + q.hosts.style.transform);
+      near(u.pageY, -200, 'the page scrolls instead');
+      u.swipe(500, 300, 500, 100);
+      near(q.state().ty, -200, 'the next swipe the chart can follow is its own again');
+
+      for (const prepared of [page({ chartH: 300 }), page()]) {
+        if (prepared.hosts.scrollHeight === 2000) prepared.click('chart-fit');
+        const before = prepared.hosts.style.transform;
+        const v = prepared.touch(opts);
+        v.swipe(500, 300, 500, 100);
+        near(v.pageY, 200, 'a chart that fits never holds a swipe');
+        expect(prepared.hosts.style.transform === before, 'and does not move');
+      }
+    }
+  },
+
+  // A landscape phone: the 420px canvas fills the 390px viewport, and the form
+  // below it must be reachable by swiping on the canvas alone.
+  touchlandscape() {
+    const p = page({ clientW: 844, clientH: 420, chartW: 1600, chartH: 2000 });
+    const t = p.touch();
+    let swipes = 0;
+    while (t.pageY === 0 && swipes < 40) { t.swipe(400, 360, 400, 60); swipes++; }
+    expect(t.pageY > 0, 'no swipe reached the page in ' + swipes + ' swipes');
+    near(p.visible().y >= 48 ? 1 : 0, 1, 'the chart stays in view');
+    const scrolled = t.pageY;
+    t.swipe(400, 360, 400, 60);
+    near(t.pageY, scrolled + 300, 'further swipes keep scrolling the page');
+    // Back up: the chart first, then the page above it.
+    swipes = 0;
+    while (t.pageY === scrolled + 300 && swipes < 40) { t.swipe(400, 60, 400, 360); swipes++; }
+    expect(t.pageY < scrolled + 300, 'no swipe reached the page on the way back');
+  },
+
+  // A swipe that starts on a link or button is the page's; the tap stays a tap.
+  touchcontrol() {
+    const p = page();
+    const t = p.touch();
+    t.swipe(500, 300, 500, 100, control());
+    near(t.pageY, 200, 'the page scrolls');
+    near(p.state().ty, 0, 'the chart stays');
+    const e = t.down(1, 500, 300, control());
+    expect(!e.defaultPrevented, 'a tap is not cancelled');
+    t.up(1);
+  },
+
+  // A touchmove the browser will not cancel (it is scrolling already) is left
+  // alone: calling preventDefault on one only logs an intervention warning.
+  touchnocancel() {
+    const p = page();
+    const t = p.touch();
+    t.down(1, 500, 300);
+    t.move(1, 500, 280);
+    const e = t.move(1, 500, 260, { cancelable: false });
+    expect(!e.tried, 'preventDefault on an uncancelable touchmove');
+  },
+
+  // Two fingers pinch on Chrome Android (pointer events only), wherever they
+  // land: the chart is mostly boxes and links. The midpoint carries the chart.
+  pinch() {
+    for (const opts of [{}, { touchFirst: true }]) {
+      const p = page();
+      const t = p.touch(opts);
+      t.down(1, 300, 400, control());
+      t.down(2, 400, 400, control());
+      near(p.state().scale, 1, 'landing does not zoom');
+      expect(t.move(2, 500, 400).defaultPrevented, 'a pinch is cancelled: the browser must not scroll');
+      near(p.state().scale, 2, 'twice the distance is twice the size');
+      // The point under the first midpoint (350,400) follows it to (400,400).
+      near(p.state().tx, 283 - 233 * 2, 'the point between the fingers stays there');
+      near(p.state().ty, 183 - 183 * 2, 'the point between the fingers stays there');
+      near(t.pageY, 0, 'the page stays');
+      t.move(2, 350, 400);
+      near(p.state().scale, 0.5, 'half the distance is half the size');
+      t.move(1, 300, 300);
+      t.move(2, 350, 300);
+      near(p.state().scale, 0.5, 'two fingers moving together keep the scale');
+      near(p.state().ty, 183 - 183 * 0.5 - 100, 'and move the chart');
+      t.move(2, 1e5, 300);
+      near(p.state().scale, p.math.maxScale, 'a pinch stops at maxScale');
+      t.up(2);
+      t.up(1);
+    }
+  },
+
+  // Fingers that land or lift during a pinch do not make the chart jump, and
+  // the last finger carries on as a drag.
+  pinchfingers() {
+    const p = page();
+    const t = p.touch();
+    t.down(1, 300, 400);
+    t.move(1, 300, 380);
+    near(p.state().ty, -20, 'one finger drags');
+    t.down(2, 400, 380);
+    near(p.state().ty, -20, 'the second finger does not move the chart');
+    t.move(2, 500, 380);
+    near(p.state().scale, 2, 'a drag turns into a pinch');
+    const s = p.hosts.style.transform;
+    t.down(3, 600, 600);
+    t.move(3, 700, 700);
+    expect(p.hosts.style.transform === s, 'a third finger changes nothing: ' + p.hosts.style.transform);
+    t.up(3);
+    expect(p.hosts.style.transform === s, 'nor does lifting it');
+    t.up(2);
+    expect(p.hosts.style.transform === s, 'lifting a pinch finger does not jump');
+    const before = p.state();
+    expect(t.move(1, 280, 370).defaultPrevented, 'the last finger still holds the gesture');
+    near(p.state().tx, before.tx - 20, 'and drags sideways');
+    near(p.state().ty, before.ty - 10, 'and up');
+    near(p.state().scale, 2, 'at the pinched scale');
+    t.up(1);
+    t.swipe(500, 300, 500, 200);
+    near(p.state().ty, before.ty - 110, 'afterwards one finger drags as before');
+
+    // Two fingers in one spot: the distance must not divide by zero.
+    const q = page();
+    const u = q.touch();
+    u.down(1, 300, 400);
+    u.down(2, 300, 400);
+    u.move(2, 310, 400);
+    near(q.state().scale, q.math.maxScale, 'zero distance stays a number');
+
+    // A finger whose pointerup never came (its element left the page) must
+    // not turn the next touch into a pinch.
+    const r = page();
+    const pointer = (name, id, isPrimary, clientY) => r.section.dispatch(name, { pointerType: 'touch', pointerId: id, isPrimary, clientX: 500, clientY });
+    pointer('pointerdown', 7, true, 400);
+    pointer('pointerdown', 8, false, 500);
+    pointer('pointerdown', 9, true, 300);
+    pointer('pointermove', 9, true, 200);
+    near(r.state().scale, 1, 'a new touch starts clean');
+    near(r.state().ty, -100, 'and drags');
+
+    // pure helper
+    const M = p.math;
+    const m = M.pinchOf({ x: 0, y: 0 }, { x: 30, y: 40 });
+    near(m.dist, 50, 'distance');
+    near(m.x, 15, 'midpoint x');
+    near(m.y, 20, 'midpoint y');
+    near(M.pinchOf({ x: 5, y: 5 }, { x: 5, y: 5 }).dist, 1, 'distance floor');
+  },
+
+  // iOS sends gesture and pointer events for one pinch: only one of them may
+  // zoom. preventDefault stays, or the page itself would zoom.
+  pinchsafari() {
+    const p = page();
+    const t = p.touch();
+    t.down(1, 300, 400);
+    t.down(2, 400, 400);
+    p.section.dispatch('gesturestart', {});
+    t.move(2, 500, 400);
+    const s = p.hosts.style.transform;
+    const e = p.section.dispatch('gesturechange', { scale: 3, clientX: 400, clientY: 400 });
+    expect(e.defaultPrevented, 'the page must not zoom');
+    expect(p.hosts.style.transform === s, 'the pointer pinch owns the zoom: ' + p.hosts.style.transform);
+  },
+
+  // Below 600px nothing touch is touched, and a rotation into list mode in the
+  // middle of a gesture leaves the list alone.
+  touchlist() {
+    const p = page({ narrow: true });
+    const t = p.touch();
+    t.swipe(500, 300, 500, 100);
+    near(t.pageY, 200, 'the page scrolls');
+    t.down(1, 300, 400);
+    t.down(2, 400, 400);
+    expect(t.move(2, 500, 400).defaultPrevented === false, 'two fingers stay with the browser');
+    expect(p.hosts.style.transform === '', 'list mode sets no transform');
+
+    const q = page();
+    const u = q.touch();
+    u.down(1, 300, 400);
+    u.down(2, 400, 400);
+    u.move(2, 500, 400);
+    q.setNarrow(true);
+    expect(!u.move(2, 600, 400).defaultPrevented, 'the list scrolls again at once');
+    expect(q.hosts.style.transform === '', 'a pinch does not survive the rotation');
+  },
+
+  // A mouse drag is not a swipe: it does not ask the page first.
+  mousedrag() {
+    const p = page();
+    p.section.dispatch('pointerdown', { pointerType: 'mouse', pointerId: 1, clientX: 300, clientY: 300 });
+    p.section.dispatch('pointermove', { pointerType: 'mouse', pointerId: 1, clientX: 300, clientY: 330 });
+    near(p.state().ty, 30, 'a mouse may drag past the top');
+    p.section.dispatch('pointerup', { pointerType: 'mouse', pointerId: 1 });
+    p.section.dispatch('pointermove', { pointerType: 'mouse', pointerId: 1, clientX: 300, clientY: 400 });
+    near(p.state().ty, 30, 'a released mouse drags nothing');
   },
 
   // Keys on the focused canvas, through the real handler.

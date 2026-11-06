@@ -505,6 +505,35 @@ func TestChartCSSContainsOverscrollSidewaysOnly(t *testing.T) {
 	}
 }
 
+// The canvas must leave the vertical pan to the browser: with touch-action:
+// none no swipe could reach the page, and a landscape phone is all canvas.
+// Pinch stays off so that two fingers reach the chart's own handler; list
+// mode gets every default back. Harness scenarios: touchswipe, touchlandscape.
+func TestChartCSSLeavesVerticalSwipeToThePage(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "web", "static", "app.css"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pan, list int
+	for line := range strings.Lines(string(raw)) {
+		if !strings.Contains(line, ".chart--pan {") {
+			continue
+		}
+		if strings.Contains(line, "touch-action: pan-y;") {
+			pan++
+		}
+		if strings.Contains(line, "touch-action: auto;") {
+			list++
+		}
+		if strings.Contains(line, "touch-action: none") {
+			t.Errorf("touch-action: none traps touch users on the canvas: %s", line)
+		}
+	}
+	if pan != 1 || list != 1 {
+		t.Errorf("touch-action: pan-y in pan mode %d times, auto in list mode %d times, want once each", pan, list)
+	}
+}
+
 // Strict CSP and untrusted text: inventory.js builds no markup from
 // strings, evaluates no code and sets styles through CSSOM only.
 func TestInventoryJSUsesNoMarkupStrings(t *testing.T) {
