@@ -1147,9 +1147,8 @@ and `nebula-server` currently always runs with the 21-day default.
 
 **Icons.** Nodes and software entries can carry an icon from the software
 catalog (*Software* page, `/software`). The icon pages
-(`/software/icon/KEY`, per asset `/software/assets/icon?id=ASSET`) are
-read-only for now: the server does not start the icon service yet, so the
-icon-change routes return 404. Once enabled, icons are fetched by the
+(`/software/icon/KEY`, per asset `/software/assets/icon?id=ASSET`) change
+them. Icons are fetched by the
 one-shot `nebula-iconfetch` service from a host allowlist (default
 `avatars.githubusercontent.com` and `upload.wikimedia.org`; spool
 `/var/lib/nebula/iconfetch`, results kept 24 h) or uploaded directly. The

@@ -102,11 +102,11 @@ about its connections (spec 09).
   `/software/assets/icon?id=ASSET`).
 - `cmd/nebula-server/software.go` holds the icon service wiring
   (`newIconWiring`: store in `<data_dir>/icons`, spool, import loop every
-  15 s) and `software.Handler` mounts `/icons/` with it. **`run` does not
-  start it yet**: until it calls `newIconWiring` and `softwarePagesWith`, the
-  icon pages of a running server stay read-only and the icon-change routes
-  return 404. The wiring is tested through the full middleware and session
-  chain (`cmd/nebula-server/software_icons_test.go`).
+  15 s), `run` starts it, and `software.Handler` mounts `/icons/` with it.
+  The icon pages offer fetch, upload and rollback; each change logs an
+  `audit` event. The wiring is tested through the full middleware and
+  session chain (`cmd/nebula-server/software_icons_test.go`) and through
+  the real `run` (`cmd/nebula-server/software_run_icons_test.go`).
 - Admin means a web session with a user name: sessions have no roles. The
   change routes are refused without a session (401), without a user name
   (403) and without the public `Origin` (403, the CSRF check of all forms).
@@ -139,7 +139,5 @@ size-limited, validated and rendered as text only.
 - Tiers 3–4 (sensors, DNS) and their parsers.
 - An admin setting to shorten the 21-day retention (the store API already
   supports a shorter retention; the server does not expose it).
-- Starting the icon service in `nebula-server`'s `run` (the fetch, upload
-  and rollback routes are built and tested, but not enabled).
 - An allowlist setting in the server configuration.
 - A sudo rule for `ss -p` (deliberately not adopted; see above).
