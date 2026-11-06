@@ -25,7 +25,8 @@ more Proxmox VE environments:
   itself, opens no network listener, touches no database and holds no
   credentials. It writes sanitized observations to a spool directory.
 - **`nebula-server`** imports the spool into its own database and renders the
-  PVE pages. It never performs PVE API calls.
+  PVE pages. It starts the import itself, reads the spool every 30 seconds and
+  removes each file once it has processed it. It never performs PVE API calls.
 - The web UI shows a remote list (`/pve`) and a detail page per remote
   (`/pve/<id>`) with nodes, guests and per-dataset availability, plus deep
   links into the PVE web UI built only from the approved endpoint metadata.
@@ -36,7 +37,8 @@ snippets, descriptions, hook scripts, storage credentials) are discarded
 before anything is spooled.
 
 **Phase 1** is read-only inventory. Remote management (add, probe, rotate,
-re-pin, remove), the spool import and the web pages are merged. **Live
+re-pin, remove) and the web pages are merged, and `nebula-server` runs the
+spool import from its start on (see [Spool import](#spool-import)). **Live
 collection is planned:** the executor's typed `ReadPVE` method still answers
 `Unimplemented` (provider read profile, ADR 0007 E08), so a running collector
 cannot fill the inventory yet and the PVE pages show no or stale data until
@@ -310,6 +312,40 @@ The collector is intended to run as its own Unix user with the
 `deploy/systemd/nebula-pve-collector.service` unit is **planned** (ADR 0006,
 P1-14); until it ships, run the binary directly or provide your own unit
 with the flags above.
+
+## Spool import
+
+`nebula-server` imports `results/` (observations) and `guestnet/` (guest NIC
+records) below the spool root. There is nothing to start: the import runs as
+long as the server runs, and a missing spool is logged once and tried again.
+
+`pve_spool_dir` in `/etc/nebula/server.json` names the spool root. It defaults
+to `/var/lib/nebula/pve` and must match the collector's `-spool`. The server
+keeps a file only until it has processed it, so it needs these rights:
+
+| Path | Mode (owner `nebula-pve-collector`, group `nebula-rpc`) | Server |
+| --- | --- | --- |
+| `pve/` | 2750 | reads, never writes |
+| `pve/results/`, `pve/guestnet/` | 2770 | lists, reads, unlinks |
+| `pve/requests/` | 2770 | writes the live want-list |
+| `pve/live/` | 2750 | reads only |
+
+- `install.sh` provisions these directories and writes
+  `nebula-server.service.d/20-discovery.conf`, whose `ReadWritePaths` open
+  `pve/results`, `pve/guestnet` and `pve/requests` for the server under
+  `ProtectSystem=strict`. The drop-in names these three default paths, so a
+  custom `pve_spool_dir` also needs your own directories with these modes and
+  your own drop-in.
+- `compose.yaml` shares the `pve-results` and `pve-guestnet` volumes between
+  the collector and the server, writable because the server unlinks there.
+  When you update an older compose deployment, files still pending in the
+  `pve-spool` volume are not imported; the collector publishes fresh ones
+  within one interval.
+
+If the server cannot unlink, it logs one warning (`remove spool file`, or
+`remove guest nic record`, with `reason=remove_failed` and the number of
+files) and keeps importing new files, but `results/` grows until the rights
+are fixed. The backlog then drains without a restart.
 
 ## Read lease for a remote
 

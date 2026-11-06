@@ -159,7 +159,8 @@ fi
 
 # --- Live handoff provisioning (static) ---------------------------------------
 # The server writes only requests/ and reads only live/; the collector owns
-# both. The modes match internal/pvecollect/live_spool.go.
+# both. It lists, reads and unlinks in results/ and guestnet/. The modes match
+# internal/pvecollect/live_spool.go and spool.go.
 # check_line <name> <file> <exact line>
 check_line() {
   if grep -qxF -- "$3" "$2"; then
@@ -174,13 +175,16 @@ check_line "install.sh provisions pve/requests 2770" "$install_sh" \
   'install -d -m 2770 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/requests"'
 check_line "install.sh provisions pve/live 2750" "$install_sh" \
   'install -d -m 2750 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/live"'
+check_line "install.sh provisions pve/results 2770" "$install_sh" \
+  'install -d -m 2770 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/results"'
 check_line "install.sh provisions pve/guestnet 2770" "$install_sh" \
   'install -d -m 2770 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/guestnet"'
-# The server drop-in grants exactly the discovery jobs and pve/requests;
-# the server unit itself grants no write path.
+# The server drop-in grants exactly the discovery jobs, pve/requests and the
+# two directories the importers unlink in; the server unit itself grants no
+# write path.
 rw=$(grep '^ReadWritePaths=' "$install_sh" | tr '\n' ' ')
-if [[ "$rw" == 'ReadWritePaths=${var_lib}/discovery/jobs ReadWritePaths=${var_lib}/pve/requests ' ]]; then
-  echo "ok   server drop-in may write only discovery/jobs and pve/requests"
+if [[ "$rw" == 'ReadWritePaths=${var_lib}/discovery/jobs ReadWritePaths=${var_lib}/pve/requests ReadWritePaths=${var_lib}/pve/results ReadWritePaths=${var_lib}/pve/guestnet ' ]]; then
+  echo "ok   server drop-in may write only discovery/jobs, pve/requests, pve/results and pve/guestnet"
   pass=$((pass + 1))
 else
   echo "FAIL server drop-in ReadWritePaths: ${rw:-none}"
@@ -191,6 +195,18 @@ if ! grep -q '^ReadWritePaths=' "${script_dir}/systemd/nebula-server.service"; t
   pass=$((pass + 1))
 else
   echo "FAIL server unit has a ReadWritePaths line"
+  fail=$((fail + 1))
+fi
+# Compose gives the server the same rights: it shares the collector's results
+# and guestnet volumes writable, and never the spool root.
+compose_yaml="${script_dir}/container/compose.yaml"
+if [[ $(grep -cxF '      - pve-results:/var/lib/nebula/pve/results' "$compose_yaml") == 2 &&
+      $(grep -cxF '      - pve-guestnet:/var/lib/nebula/pve/guestnet' "$compose_yaml") == 2 &&
+      $(grep -c 'pve-spool:/var/lib/nebula/pve$' "$compose_yaml") == 1 ]]; then
+  echo "ok   compose mounts results and guestnet in both services, the root only in the collector"
+  pass=$((pass + 1))
+else
+  echo "FAIL compose PVE spool mounts differ from server and collector sharing"
   fail=$((fail + 1))
 fi
 
