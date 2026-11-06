@@ -562,6 +562,20 @@ if read_binaries "$libtmp/trail.txt" >/dev/null 2>&1; then
 else
   ok "read_binaries rejects trailing whitespace in a name"
 fi
+# A leading dash or dot is not a name: -rf would reach rm as a flag and ..
+# as a path, so the first-character rule [A-Za-z0-9] must reject them.
+printf -- '-rf\n' > "$libtmp/lead-dash.txt"
+if read_binaries "$libtmp/lead-dash.txt" >/dev/null 2>&1; then
+  bad "read_binaries rejects a name with a leading dash"
+else
+  ok "read_binaries rejects a name with a leading dash"
+fi
+printf -- '..\n' > "$libtmp/lead-dot.txt"
+if read_binaries "$libtmp/lead-dot.txt" >/dev/null 2>&1; then
+  bad "read_binaries rejects a name with a leading dot"
+else
+  ok "read_binaries rejects a name with a leading dot"
+fi
 # Blank, whitespace-only and comment lines are ignored; the result may be
 # empty (the callers then fail the zero-entries check).
 printf '   \n\n# only comments\n' > "$libtmp/empty.txt"
