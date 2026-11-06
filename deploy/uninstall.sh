@@ -81,7 +81,14 @@ if [[ ! -s "$binaries_file" ]]; then
 fi
 # shellcheck source=deploy/quickstart/binaries_lib.sh
 . "${script_dir}/quickstart/binaries_lib.sh"
-mapfile -t binaries < <(read_binaries "$binaries_file")
+if ! binaries_out=$(read_binaries "$binaries_file"); then
+  echo "uninstall.sh: ${binaries_file} contains an invalid line (see above)" >&2
+  exit 1
+fi
+binaries=()
+if [[ -n "$binaries_out" ]]; then
+  mapfile -t binaries <<< "$binaries_out"
+fi
 for bin in "${binaries[@]}"; do
   if [[ -e "${bin_dir}/${bin}" ]]; then
     rm -f -- "${bin_dir}/${bin}"

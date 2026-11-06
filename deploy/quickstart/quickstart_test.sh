@@ -20,6 +20,7 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo=$(cd -- "${script_dir}/../.." && pwd)
 # Cases below reuse `repo` for their sandbox; keep the real one.
 real_repo="$repo"
+libtmp=""
 list_file="${script_dir}/binaries.txt"
 install_sh="${repo}/deploy/install.sh"
 uninstall_sh="${repo}/deploy/uninstall.sh"
@@ -91,7 +92,7 @@ fi
 # markers) and run it against a sandbox checkout: bin/ holds the five
 # built binaries, and the block must copy all of them next to deploy/.
 sandbox=$(mktemp -d)
-trap 'rm -rf "$sandbox"' EXIT
+trap 'rm -rf "$sandbox" "$libtmp"' EXIT
 mkdir -p "$sandbox/bin" "$sandbox/deploy/quickstart"
 cp "$list_file" "$sandbox/deploy/quickstart/binaries.txt"
 cp "$script_dir/binaries_lib.sh" "$sandbox/deploy/quickstart/binaries_lib.sh"
@@ -275,6 +276,68 @@ for s in "$setup_sh" "$install_sh" "$uninstall_sh" "$real_repo/deploy/quickstart
     bad "bash -n $(basename -- "$s")"
   fi
 done
+
+# --- 11. read_binaries: the format edge cases --------------------------------
+# The parser is the only gate between the list file and root install(1) and
+# rm -f, so every malformed line must be handled deterministically: a valid
+# name is [A-Za-z0-9][A-Za-z0-9._-]*, anything else is an error, not a guess.
+libtmp=$(mktemp -d)
+# A last line without a trailing newline must not be dropped (read returns
+# non-zero before the loop body runs without the guard).
+printf 'nebula\nnebula-server' > "$libtmp/no-trailing-nl.txt"
+out=$(read_binaries "$libtmp/no-trailing-nl.txt")
+if [[ "$out" == $'nebula\nnebula-server' ]]; then
+  ok "read_binaries keeps a last line without a trailing newline"
+else
+  bad "read_binaries keeps a last line without a trailing newline (got: ${out@Q})"
+fi
+# CRLF endings: the CR must not survive into the name.
+printf 'nebula\r\nnebula-server\r\n' > "$libtmp/crlf.txt"
+out=$(read_binaries "$libtmp/crlf.txt")
+if [[ "$out" == $'nebula\nnebula-server' ]]; then
+  ok "read_binaries strips CR from CRLF lines"
+else
+  bad "read_binaries strips CR from CRLF lines (got: ${out@Q})"
+fi
+# Inline comments are not part of the format: the line is invalid and the
+# parser must stop, not silently truncate it to the name.
+printf 'nebula # inline\n' > "$libtmp/inline.txt"
+if out=$(read_binaries "$libtmp/inline.txt" 2>/dev/null); then
+  bad "read_binaries rejects an inline comment (got: ${out@Q})"
+else
+  ok "read_binaries rejects an inline comment"
+fi
+# Path separators and whitespace are not binary names (they would reach
+# root install and rm -f).
+printf 'bad/name\n' > "$libtmp/path.txt"
+if read_binaries "$libtmp/path.txt" >/dev/null 2>&1; then
+  bad "read_binaries rejects a path separator in a name"
+else
+  ok "read_binaries rejects a path separator in a name"
+fi
+printf 'nebula \n' > "$libtmp/trail.txt"
+if read_binaries "$libtmp/trail.txt" >/dev/null 2>&1; then
+  bad "read_binaries rejects trailing whitespace in a name"
+else
+  ok "read_binaries rejects trailing whitespace in a name"
+fi
+# Blank, whitespace-only and comment lines are ignored; the result may be
+# empty (the callers then fail the zero-entries check).
+printf '   \n\n# only comments\n' > "$libtmp/empty.txt"
+out=$(read_binaries "$libtmp/empty.txt")
+if [[ -z "$out" ]]; then
+  ok "read_binaries ignores blank, whitespace-only and comment lines"
+else
+  bad "read_binaries ignores blank, whitespace-only and comment lines (got: ${out@Q})"
+fi
+# A valid list still parses, with or without a trailing newline.
+printf 'nebula\nnebula-server\nnebula-executor\nnebula-discovery\nnebula-pve-collector' > "$libtmp/valid.txt"
+out=$(read_binaries "$libtmp/valid.txt")
+if [[ "$out" == "$(printf '%s\n' "${expected[@]}")" ]]; then
+  ok "read_binaries parses a valid five-name list"
+else
+  bad "read_binaries parses a valid five-name list (got: ${out@Q})"
+fi
 
 echo
 echo "quickstart_test: ${pass} passed, ${fail} failed"

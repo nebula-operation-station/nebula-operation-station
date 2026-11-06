@@ -188,7 +188,13 @@ binaries_file="$repo/deploy/quickstart/binaries.txt"
 [[ -s "$binaries_file" ]] || die "missing $binaries_file (the binary list)"
 # shellcheck source=deploy/quickstart/binaries_lib.sh
 . "$repo/deploy/quickstart/binaries_lib.sh"
-mapfile -t binaries < <(read_binaries "$binaries_file")
+if ! binaries_out=$(read_binaries "$binaries_file"); then
+  die "$binaries_file contains an invalid line (see above)"
+fi
+binaries=()
+if [[ -n "$binaries_out" ]]; then
+  mapfile -t binaries <<< "$binaries_out"
+fi
 for b in "${binaries[@]}"; do
   install -m 0755 "$repo/bin/$b" "$repo/$b"
 done
