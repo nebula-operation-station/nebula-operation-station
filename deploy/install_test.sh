@@ -193,6 +193,48 @@ else
   fail=$((fail + 1))
 fi
 
+# --- Explicit unit list (WA-04) ----------------------------------------------
+# install.sh must install and enable an explicit list of units, not a glob of
+# deploy/systemd/. The iconfetch units are not provisioned by this install:
+# the icon service is not wired into the server yet, and
+# nebula-iconfetch-firewall.service's ExecStart needs
+# /etc/nebula/nebula-iconfetch.nft, which nothing creates. Enabling one of
+# them under set -e could abort install.sh before nebula-server, the
+# collector or the executor are enabled. So the list must be explicit, must
+# contain no iconfetch unit, and must match exactly the units the install
+# provisions (the non-iconfetch units in deploy/systemd/).
+if grep -q 'systemd/\*\.service' "$install_sh"; then
+  echo "FAIL install.sh still globs the systemd directory"
+  fail=$((fail + 1))
+else
+  echo "ok   install.sh does not glob the systemd directory"
+  pass=$((pass + 1))
+fi
+# Extract the explicit tarball unit list (one unit per line between the
+# 'tarball_units=(' line and the closing ')').
+tarball_list=$(awk '/^tarball_units=\(/{f=1;next} f&&/^\)/{exit} f{gsub(/^[[:space:]]+/,"");gsub(/[[:space:]]+$/,"");if(length($0))print}' "$install_sh")
+if printf '%s\n' "$tarball_list" | grep -q iconfetch; then
+  echo "FAIL the explicit unit list contains an iconfetch unit"
+  fail=$((fail + 1))
+else
+  echo "ok   the explicit unit list has no iconfetch unit"
+  pass=$((pass + 1))
+fi
+# The list must be exactly the set of non-iconfetch units shipped in
+# deploy/systemd/ (order-insensitive). This fails if a provisioned unit is
+# missing from the list or an unprovisioned (iconfetch) unit is added.
+dir_units=$(cd "${script_dir}/systemd" && ls -1 | grep -E '\.(service|path|timer)$' | grep -v iconfetch | sort)
+list_units=$(printf '%s\n' "$tarball_list" | sort)
+if [[ -n "$tarball_list" && "$dir_units" == "$list_units" ]]; then
+  echo "ok   the explicit unit list matches the provisioned units (no iconfetch)"
+  pass=$((pass + 1))
+else
+  echo "FAIL the explicit unit list does not match the provisioned units"
+  echo "     list:";      printf '%s\n' "$list_units" | sed 's/^/       /'
+  echo "     directory (non-iconfetch):"; printf '%s\n' "$dir_units" | sed 's/^/       /'
+  fail=$((fail + 1))
+fi
+
 # --- Root-gated: real runs of install.sh and uninstall.sh -------------------
 # These two cases exercise the systemd handling, which the dry-run mode
 # exits before reaching. They need root and a running systemd; the first
