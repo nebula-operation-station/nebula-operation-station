@@ -133,6 +133,13 @@ nfpms:
         file_info: {mode: 0755}
       - src: deploy/systemd/*
         dst: /usr/share/nebula/deploy/systemd/
+      # install.sh --from-package reads the binary list (and the shared
+      # parser) next to itself, so the package must ship them.
+      - src: deploy/quickstart/binaries.txt
+        dst: /usr/share/nebula/deploy/quickstart/binaries.txt
+      - src: deploy/quickstart/binaries_lib.sh
+        dst: /usr/share/nebula/deploy/quickstart/binaries_lib.sh
+        file_info: {mode: 0644}
       - src: docs/admin/guide.md
         dst: /usr/share/doc/nebula-operation-station/guide.md
     scripts:
