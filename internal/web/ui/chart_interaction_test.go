@@ -283,11 +283,14 @@ func chartJS(t *testing.T) string {
 	t.Helper()
 	src := inventoryJS(t)
 	start := strings.Index(src, "document.querySelector('.chart')")
-	end := strings.Index(src, "\n})();")
-	if start < 0 || end < start {
-		t.Fatalf("chart block not found (start %d, end %d)", start, end)
+	if start < 0 {
+		t.Fatal("chart block not found")
 	}
-	return src[start:end]
+	end := strings.Index(src[start:], "\n})();")
+	if end < 0 {
+		t.Fatal("chart block is not closed")
+	}
+	return src[start : start+end]
 }
 
 // jsFunc returns the body of an arrow function declared at block level as
@@ -426,53 +429,37 @@ func TestChartZoomControlsWired(t *testing.T) {
 	}
 }
 
-// Fit computes the scale from the chart's real size and the visible
-// canvas, instead of resetting to 100%; 100% is the separate reset.
-func TestChartFitFitsTheWholeChart(t *testing.T) {
-	block := chartJS(t)
-	fit := jsFunc(t, block, "fit")
-	for _, want := range []string{"chartHosts.scrollWidth", "chartHosts.scrollHeight", "chartSection.clientWidth", "chartSection.clientHeight"} {
-		if !strings.Contains(fit, want) {
-			t.Errorf("fit() lacks %q:\n%s", want, fit)
-		}
-	}
-	actual := jsFunc(t, block, "actualSize")
-	for _, want := range []string{"unscroll()", "scale = 1"} {
-		if !strings.Contains(actual, want) {
-			t.Errorf("actualSize lacks %q:\n%s", want, actual)
-		}
-	}
-}
-
 // The minimum scale lets Fit show 100 hosts: they stack vertically, a host
-// box is at least 110px high (app.css) and the canvas at least 420px.
+// with its Details button, padding and gap is about 200px high, and the
+// smallest canvas (420px) has 388px left inside its 16px padding. The harness
+// checks the same through Fit (scenario hundredhosts).
 func TestChartMinScaleFitsHundredHosts(t *testing.T) {
-	m := regexp.MustCompile(`const minScale = ([0-9.]+);`).FindStringSubmatch(chartJS(t))
+	const (
+		hostHeight = 200.0
+		canvas     = 420.0 - 2*16
+	)
+	m := regexp.MustCompile(`const minScale = ([0-9.]+);`).FindStringSubmatch(inventoryJS(t))
 	if m == nil {
-		t.Fatal("chart block has no minScale constant")
+		t.Fatal("inventory.js has no minScale constant")
 	}
 	minScale, err := strconv.ParseFloat(m[1], 64)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if minScale <= 0 || minScale*100*110 > 420 {
+	if minScale <= 0 || minScale*100*hostHeight > canvas {
 		t.Errorf("minScale %v cannot fit 100 hosts into the canvas", minScale)
 	}
 }
 
-// Scroll pans, Ctrl or Meta scroll zooms, Safari's gesture events zoom, and
-// all of them leave the browser defaults alone in list mode.
-func TestChartWheelAndGestureHandlers(t *testing.T) {
+// Safari's gesture events zoom and leave the browser defaults alone in list
+// mode. The wheel handler cancels only what the chart uses, see the harness
+// scenarios wheelpan, wheelrelease, wheelzoom and listmode.
+func TestChartGestureHandlers(t *testing.T) {
 	block := chartJS(t)
-	for _, name := range []string{"wheel", "gesturestart", "gesturechange", "gestureend"} {
+	for _, name := range []string{"gesturestart", "gesturechange", "gestureend"} {
 		re := regexp.MustCompile(`(?s)chartSection\.addEventListener\('` + name + `', \(e\) => \{\n    if \(!panning\(\)\) return;\n    e\.preventDefault\(\);.*?\}, \{ passive: false \}\);`)
 		if !re.MatchString(block) {
 			t.Errorf("%s handler must stop in list mode, call preventDefault and be non-passive", name)
-		}
-	}
-	for _, want := range []string{"e.ctrlKey || e.metaKey", "e.shiftKey", "e.deltaX", "e.deltaMode", "e.scale"} {
-		if !strings.Contains(block, want) {
-			t.Errorf("chart block lacks %q", want)
 		}
 	}
 }
@@ -493,20 +480,11 @@ func TestChartStagedSectionSitsOutsideTheCanvas(t *testing.T) {
 	}
 }
 
-// Keys work on the focused canvas only, and browser shortcuts (Ctrl+0,
-// Cmd++) are never taken over.
-func TestChartKeyboardZoom(t *testing.T) {
-	block := chartJS(t)
-	for _, want := range []string{"case '+':", "case '=':", "case '-':", "case '0':", "e.target !== chartSection", "e.ctrlKey || e.metaKey || e.altKey"} {
-		if !strings.Contains(block, want) {
-			t.Errorf("keyboard handler lacks %q", want)
-		}
-	}
-}
-
-// A trackpad scroll at the canvas edge must not chain to the page or swipe
-// back in history; list mode gets that default back.
-func TestChartCSSContainsOverscrollInPanModeOnly(t *testing.T) {
+// A sideways trackpad scroll at the canvas edge must not swipe back in
+// history, but the vertical scroll must chain: the wheel handler hands it on
+// at the edge, and a contained axis would swallow it (a page scroll trap).
+// List mode gets every default back.
+func TestChartCSSContainsOverscrollSidewaysOnly(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "web", "static", "app.css"))
 	if err != nil {
 		t.Fatal(err)
@@ -516,11 +494,14 @@ func TestChartCSSContainsOverscrollInPanModeOnly(t *testing.T) {
 		if !strings.Contains(line, ".chart--pan {") {
 			continue
 		}
-		pan = pan || strings.Contains(line, "overscroll-behavior: contain")
+		pan = pan || strings.Contains(line, "overscroll-behavior-x: contain")
 		list = list || strings.Contains(line, "overscroll-behavior: auto")
+		if strings.Contains(line, "overscroll-behavior: contain") || strings.Contains(line, "overscroll-behavior-y: contain") {
+			t.Errorf("vertical overscroll is contained, the page cannot take over: %s", line)
+		}
 	}
 	if !pan || !list {
-		t.Errorf("overscroll-behavior: contain in pan mode %v, auto in list mode %v", pan, list)
+		t.Errorf("overscroll-behavior-x: contain in pan mode %v, auto in list mode %v", pan, list)
 	}
 }
 

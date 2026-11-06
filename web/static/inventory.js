@@ -4,6 +4,83 @@
 // textContent only, never innerHTML.
 'use strict';
 
+// Org chart geometry: pure functions, no DOM. The interaction block below uses
+// them; internal/web/ui/testdata/chart_client.js checks them. Offsets are the
+// chart's top-left corner relative to its layout position; dx and dy > 0 move
+// the view right and down, so the chart moves the other way.
+const nosChartMath = (() => {
+  // Fit must reach 100 hosts of about 200px (details button, padding, gap)
+  // on the 420px minimum canvas, 388px without its padding.
+  const minScale = 0.015;
+  const maxScale = 3;
+  const zoomStep = 1.25;
+  // Chrome and Firefox report a trackpad pinch as ctrl+wheel with small
+  // deltas; a mouse notch is about 100, so it is capped to one zoom step.
+  const wheelZoomCap = 22;
+  const keyStep = 48;
+  // Part of the chart that stays in the canvas, per axis.
+  const keepVisible = 48;
+
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const clampScale = (s) => (Number.isFinite(s) ? Math.min(maxScale, Math.max(minScale, s)) : 1);
+  return {
+    minScale, maxScale, zoomStep,
+    // Transform for scale `next` that keeps the point (mx, my) in place.
+    zoomAt(t, next, mx, my) {
+      const scale = clampScale(next);
+      const f = scale / t.scale;
+      return { tx: mx - (mx - t.tx) * f, ty: my - (my - t.ty) * f, scale };
+    },
+    // Transform that shows a chart of chartW x chartH in a free area of w x h.
+    // Never enlarges.
+    fitTransform(b) {
+      const scale = clampScale(Math.min(1, b.w / b.chartW, b.h / b.chartH));
+      return { tx: Math.max(0, (b.w - b.chartW * scale) / 2), ty: 0, scale };
+    },
+    // A wheel event as a zoom factor ({ zoom }) or a pan in px ({ dx, dy }).
+    // Deltas may count lines or pages (Firefox with a mouse).
+    wheelDelta(e, pageHeight) {
+      const px = (d) => (e.deltaMode === 1 ? d * 16 : e.deltaMode === 2 ? d * pageHeight : d);
+      const dx = px(e.deltaX), dy = px(e.deltaY);
+      if (e.ctrlKey || e.metaKey) {
+        const d = clamp(dy, -wheelZoomCap, wheelZoomCap);
+        return { zoom: Math.exp(-d * 0.01) };
+      }
+      return e.shiftKey && !dx ? { dx: dy, dy: 0 } : { dx, dy };
+    },
+    // The action of a key on the canvas: { zoom }, { fit } or a pan { dx, dy };
+    // null leaves it alone. Browser shortcuts (Ctrl+0, Cmd++) stay with the
+    // browser.
+    keyAction(e) {
+      if (e.ctrlKey || e.metaKey || e.altKey) return null;
+      switch (e.key) {
+        case 'ArrowLeft': return { dx: -keyStep, dy: 0 };
+        case 'ArrowRight': return { dx: keyStep, dy: 0 };
+        case 'ArrowUp': return { dx: 0, dy: -keyStep };
+        case 'ArrowDown': return { dx: 0, dy: keyStep };
+        case '+':
+        case '=': return { zoom: zoomStep };
+        case '-': return { zoom: 1 / zoomStep };
+        case '0': return { fit: true };
+        default: return null;
+      }
+    },
+    // Offset t on one axis, limited so that part of the chart stays visible.
+    clampPan(t, view, size) {
+      const keep = Math.min(keepVisible, size);
+      return clamp(t, keep - size, view - keep);
+    },
+    // Offset after scrolling by d on one axis. Scrolling ends at the chart's
+    // edges like a native scroller; a chart dragged past them can come back
+    // but not go further out. Same offset: the page should scroll instead.
+    wheelPan(t, d, view, size) {
+      const lo = Math.min(0, view - size), hi = Math.max(0, view - size);
+      if (size <= view && t >= lo && t <= hi) return t;
+      return clamp(t - d, Math.min(t, lo), Math.max(t, hi));
+    },
+  };
+})();
+
 // Org chart interaction (ADR 0006 P1-35): drag and scroll pan; pinch,
 // Ctrl+scroll, buttons and keys zoom; fit, list mode, details panel/sheet.
 // Runs first and on its own; the chart is never re-rendered (expansion and
@@ -20,38 +97,59 @@
   const panOnly = [fitBtn, zoomOutBtn, zoomInBtn, actualBtn, document.getElementById('chart-hint')];
   const sheet = document.getElementById('chart-sheet');
   const narrow = window.matchMedia('(max-width: 600px)');
-  // Hosts stack vertically, so Fit needs far less than 0.1 for 100 hosts.
-  const minScale = 0.02;
-  const maxScale = 3;
-  const zoomStep = 1.25;
+  const M = nosChartMath;
+  const { zoomStep } = M;
   let tx = 0, ty = 0, scale = 1;
 
   const panning = () => chartSection.classList.contains('chart--pan');
   const applyTransform = () => {
     chartHosts.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
   };
-  const clampScale = (s) => Math.min(maxScale, Math.max(minScale, s));
   // Layout position of the chart's top-left corner (the transform origin):
-  // its current position without the pan offset.
+  // its current position without the pan offset and native scroll.
   const origin = () => {
     const r = chartHosts.getBoundingClientRect();
-    return { x: r.left - tx, y: r.top - ty };
+    return { x: r.left - tx + chartSection.scrollLeft, y: r.top - ty + chartSection.scrollTop };
+  };
+  // The area the chart can use (the padding kept on all sides) and its size
+  // at 100%. Reads the layout, so call it while tx and ty match the page.
+  const box = () => {
+    const view = chartSection.getBoundingClientRect();
+    const o = origin();
+    const left = o.x - view.left - chartSection.clientLeft;
+    const top = o.y - view.top - chartSection.clientTop;
+    return {
+      w: chartSection.clientWidth - 2 * left,
+      h: chartSection.clientHeight - top - left,
+      chartW: chartHosts.scrollWidth,
+      chartH: chartHosts.scrollHeight,
+    };
+  };
+  // Every move ends here, so no path can lose the chart.
+  const place = (x, y, s) => {
+    const b = box();
+    tx = M.clampPan(x, b.w, b.chartW * s);
+    ty = M.clampPan(y, b.h, b.chartH * s);
+    scale = s;
+    applyTransform();
+  };
+  // Scroll-style pan; false when the chart is at its edge in that direction.
+  const panBy = (dx, dy) => {
+    unscroll();
+    const b = box();
+    const x = M.wheelPan(tx, dx, b.w, b.chartW * scale);
+    const y = M.wheelPan(ty, dy, b.h, b.chartH * scale);
+    if (x === tx && y === ty) return false;
+    place(x, y, scale);
+    return true;
   };
   // The clipped canvas can still scroll natively (focus, find); fit()
   // drops that offset, unscroll() folds it into the transform.
   const fit = () => {
     chartSection.scrollTop = 0;
     chartSection.scrollLeft = 0;
-    const view = chartSection.getBoundingClientRect();
-    const o = origin();
-    const left = o.x - view.left - chartSection.clientLeft;
-    const top = o.y - view.top - chartSection.clientTop;
-    // Visible size with the padding kept on all sides. Never enlarges.
-    const w = chartSection.clientWidth - 2 * left;
-    const h = chartSection.clientHeight - top - left;
-    scale = clampScale(Math.min(1, w / chartHosts.scrollWidth, h / chartHosts.scrollHeight));
-    tx = Math.max(0, (w - chartHosts.scrollWidth * scale) / 2);
-    ty = 0;
+    const t = M.fitTransform(box());
+    tx = t.tx; ty = t.ty; scale = t.scale;
     applyTransform();
   };
   const unscroll = () => {
@@ -75,12 +173,8 @@
     const o = origin();
     const mx = (x ?? view.left + view.width / 2) - o.x;
     const my = (y ?? view.top + view.height / 2) - o.y;
-    const s = clampScale(next);
-    const f = s / scale;
-    tx = mx - (mx - tx) * f;
-    ty = my - (my - ty) * f;
-    scale = s;
-    applyTransform();
+    const t = M.zoomAt({ tx, ty, scale }, next, mx, my);
+    place(t.tx, t.ty, t.scale);
   };
   const zoomBy = (factor) => zoomAt(scale * factor);
 
@@ -94,28 +188,18 @@
     if (!pan) { tx = 0; ty = 0; scale = 1; chartHosts.style.transform = ''; }
   };
 
-  // Wheel deltas may count lines or pages (Firefox with a mouse).
-  const wheelPx = (d, mode) => (mode === 1 ? d * 16 : mode === 2 ? d * chartSection.clientHeight : d);
-  // Chrome and Firefox report a trackpad pinch as ctrl+wheel with small
-  // deltas; a mouse notch is about 100, so it is capped to one zoom step.
-  const wheelZoomCap = 22;
-
   // Scroll pans (Shift+wheel sideways); Ctrl/Meta+scroll and pinch zoom
-  // around the pointer.
+  // around the pointer and never reach the browser's page zoom. A scroll the
+  // chart cannot follow stays with the page, so nothing below is out of reach.
   chartSection.addEventListener('wheel', (e) => {
     if (!panning()) return;
-    e.preventDefault();
-    let dx = wheelPx(e.deltaX, e.deltaMode);
-    let dy = wheelPx(e.deltaY, e.deltaMode);
-    if (e.ctrlKey || e.metaKey) {
-      const d = Math.max(-wheelZoomCap, Math.min(wheelZoomCap, dy));
-      zoomAt(scale * Math.exp(-d * 0.01), e.clientX, e.clientY);
+    const d = M.wheelDelta(e, chartSection.clientHeight);
+    if (d.zoom) {
+      e.preventDefault();
+      zoomAt(scale * d.zoom, e.clientX, e.clientY);
       return;
     }
-    if (e.shiftKey && !dx) { dx = dy; dy = 0; }
-    tx -= dx;
-    ty -= dy;
-    applyTransform();
+    if (panBy(d.dx, d.dy) && e.cancelable) e.preventDefault();
   }, { passive: false });
 
   // Safari reports a trackpad pinch only as gesture events; e.scale counts
@@ -141,39 +225,35 @@
   chartSection.addEventListener('pointerdown', (e) => {
     if (!panning() || e.button !== 0) return;
     if (e.target.closest('a, button, summary, input, select, textarea, meter')) return;
+    unscroll();
     drag = { x: e.clientX, y: e.clientY, tx, ty };
     chartSection.setPointerCapture(e.pointerId);
   });
   chartSection.addEventListener('pointermove', (e) => {
     if (!drag) return;
-    tx = drag.tx + (e.clientX - drag.x);
-    ty = drag.ty + (e.clientY - drag.y);
-    applyTransform();
+    place(drag.tx + (e.clientX - drag.x), drag.ty + (e.clientY - drag.y), scale);
   });
   const endDrag = () => { drag = null; };
   chartSection.addEventListener('pointerup', endDrag);
   chartSection.addEventListener('pointercancel', endDrag);
 
-  // Keys on the focused canvas: arrows pan, + and - zoom, 0 fits. Browser
-  // shortcuts (Ctrl+0, Cmd++) stay with the browser.
+  // Keys on the focused canvas: arrows pan, + and - zoom, 0 fits. As with the
+  // wheel, an arrow key the chart cannot follow stays with the page.
   chartSection.addEventListener('keydown', (e) => {
     if (!panning() || e.target !== chartSection) return;
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
-    const step = 48;
-    let handled = true;
-    switch (e.key) {
-      case 'ArrowLeft': tx += step; break;
-      case 'ArrowRight': tx -= step; break;
-      case 'ArrowUp': ty += step; break;
-      case 'ArrowDown': ty -= step; break;
-      case '+':
-      case '=': zoomBy(zoomStep); break;
-      case '-': zoomBy(1 / zoomStep); break;
-      case '0': fit(); break;
-      default: handled = false;
-    }
-    if (handled) { e.preventDefault(); applyTransform(); }
+    const a = M.keyAction(e);
+    if (!a) return;
+    if (a.zoom) zoomBy(a.zoom);
+    else if (a.fit) fit();
+    else if (!panBy(a.dx, a.dy)) return;
+    e.preventDefault();
   });
+
+  // Collapsing details shortens the chart under a panned view. toggle does
+  // not bubble, so this listens in the capture phase.
+  chartSection.addEventListener('toggle', () => {
+    if (panning()) place(tx, ty, scale);
+  }, true);
 
   // Pan-to-focus: a focused element outside the clipped view is moved
   // into view.
@@ -188,7 +268,7 @@
     else if (r.right > view.right - margin) dx = Math.max(view.left + margin - r.left, view.right - margin - r.right);
     if (r.top < view.top + margin) dy = view.top + margin - r.top;
     else if (r.bottom > view.bottom - margin) dy = Math.max(view.top + margin - r.top, view.bottom - margin - r.bottom);
-    if (dx || dy) { tx += dx; ty += dy; applyTransform(); }
+    if (dx || dy) place(tx + dx, ty + dy, scale);
   };
   chartSection.addEventListener('focusin', (e) => revealFocus(e.target));
 
