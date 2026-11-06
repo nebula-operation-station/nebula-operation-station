@@ -2,7 +2,8 @@
 # deploy/install.sh checks and installs exactly this list, and
 # deploy/quickstart/setup-nebula.sh copies exactly this list next to
 # deploy/ before running install.sh. One name per line; lines starting
-# with # are ignored.
+# with # are ignored. A name is letters, digits, . _ - (no whitespace,
+# no path separators, no inline comments).
 nebula
 nebula-server
 nebula-executor

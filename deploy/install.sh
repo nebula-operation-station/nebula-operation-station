@@ -181,7 +181,16 @@ if [[ ! -s "$binaries_file" ]]; then
 fi
 # shellcheck source=deploy/quickstart/binaries_lib.sh
 . "${script_dir}/quickstart/binaries_lib.sh"
-mapfile -t binaries < <(read_binaries "$binaries_file")
+# read_binaries stops on the first invalid line; the list is the single
+# source of truth, so a mangled line must abort, not install a partial set.
+if ! binaries_out=$(read_binaries "$binaries_file"); then
+  echo "install.sh: ${binaries_file} contains an invalid line (see above)" >&2
+  exit 1
+fi
+binaries=()
+if [[ -n "$binaries_out" ]]; then
+  mapfile -t binaries <<< "$binaries_out"
+fi
 if [[ ${#binaries[@]} -eq 0 ]]; then
   echo "install.sh: ${binaries_file} lists no binaries" >&2
   exit 1
