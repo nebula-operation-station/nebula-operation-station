@@ -71,11 +71,23 @@ if [[ ${removed_units} -eq 1 || ${drop_in_removed} -eq 1 ]]; then
 fi
 
 # --- Remove the binaries ------------------------------------------------------
-for bin in nebula nebula-server nebula-executor nebula-discovery; do
+# The list comes from the same file install.sh reads (WA-03), so a binary
+# install.sh ships is never left behind.
+# begin: remove binaries
+binaries_file="${script_dir}/quickstart/binaries.txt"
+if [[ ! -s "$binaries_file" ]]; then
+  echo "uninstall.sh: ${binaries_file} not found; is this a release tarball or a package install?" >&2
+  exit 1
+fi
+# shellcheck source=deploy/quickstart/binaries_lib.sh
+. "${script_dir}/quickstart/binaries_lib.sh"
+mapfile -t binaries < <(read_binaries "$binaries_file")
+for bin in "${binaries[@]}"; do
   if [[ -e "${bin_dir}/${bin}" ]]; then
     rm -f -- "${bin_dir}/${bin}"
   fi
 done
+# end: remove binaries
 
 echo "Nebula Operation Station binaries and units removed."
 echo "The users (nebula-server, nebula-executor, nebula-discovery), the group (nebula-rpc),"
