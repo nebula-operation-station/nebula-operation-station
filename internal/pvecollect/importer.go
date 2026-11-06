@@ -12,8 +12,10 @@
 // re-collects each remote within one interval, and a kept file could never
 // be re-applied once the store's collection watermark has advanced, so
 // keeping it would only grow the spool. A file that cannot be removed is
-// not processed again (stuckFiles); only the unlink is retried. A pass
-// interrupted by shutdown leaves its remaining files for the next start.
+// not processed again (stuckFiles); only the unlink is retried. A file below
+// its remote's stored generation is dropped by name, unread, so a backlog
+// left behind costs no decoding after a restart either. A pass interrupted
+// by shutdown leaves its remaining files for the next start.
 
 package pvecollect
 
@@ -25,7 +27,6 @@ import (
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
-	"golang.org/x/sys/unix"
 )
 
 // fileOutcome is the processing result of one spool file.
@@ -64,7 +65,7 @@ type ImportReport struct {
 	// Rejected is the number of files that failed validation and were
 	// dropped.
 	Rejected int
-	// Skipped is the number of files processed by an earlier pass that
+	// Skipped is the number of files this importer processed earlier that
 	// could not be removed yet.
 	Skipped int
 	// Errors carries one short line per partial or rejected file.
@@ -81,6 +82,9 @@ type Importer struct {
 	remove func(context.Context, string) error
 	// stuck holds processed files whose removal failed.
 	stuck stuckFiles
+	// blocked is set for the rest of a pass once the directory refused an
+	// unlink; warned once the current stuck files were reported.
+	blocked, warned bool
 }
 
 // NewImporter builds an Importer. spool and store must be non-nil; a nil
@@ -100,7 +104,8 @@ func NewImporter(spool *Spool, store *pveinventory.Store, log *slog.Logger) (*Im
 
 // ImportOnce processes every spool file: revalidate, replay-check, ingest,
 // remove. Files an earlier pass processed but could not remove are only
-// removed again. Per-file failures are recorded in the report and do not
+// removed again, and files below their remote's stored generation are
+// dropped unread. Per-file failures are recorded in the report and do not
 // abort the pass. It returns an error when the spool itself cannot be
 // listed or ctx ends; files not reached stay in the spool.
 func (im *Importer) ImportOnce(ctx context.Context) (ImportReport, error) {
@@ -109,6 +114,8 @@ func (im *Importer) ImportOnce(ctx context.Context) (ImportReport, error) {
 		return ImportReport{}, fmt.Errorf("pvecollect: list spool: %w", err)
 	}
 	im.stuck.prune(names)
+	im.blocked = false
+	marks := map[string]uint64{}
 	rep := ImportReport{Files: len(names)}
 	for _, name := range names {
 		if err := ctx.Err(); err != nil {
@@ -116,7 +123,12 @@ func (im *Importer) ImportOnce(ctx context.Context) (ImportReport, error) {
 		}
 		if _, stuck := im.stuck[name]; stuck {
 			rep.Skipped++
-			im.stuck.retry(ctx, name, im.remove)
+			im.stuck.unlink(ctx, name, im.remove, &im.blocked)
+			continue
+		}
+		if im.superseded(ctx, name, marks) {
+			rep.Replayed++
+			im.drop(ctx, name, nil)
 			continue
 		}
 		outcome, msg := im.importFile(ctx, name)
@@ -133,7 +145,30 @@ func (im *Importer) ImportOnce(ctx context.Context) (ImportReport, error) {
 			rep.Errors = append(rep.Errors, name+": "+msg)
 		}
 	}
+	im.stuck.warn(im.log, "pvecollect: remove spool file", &im.warned)
 	return rep, nil
+}
+
+// superseded reports, from the file name alone, whether the store already
+// holds a newer generation of the file's remote, which would refuse this
+// file as stale anyway. The generation itself is not superseded: an
+// interrupted ingest may have advanced the watermark without finishing its
+// datasets, so that file still gets its full ingest. marks caches the
+// store's answer for one pass; a remote the store cannot answer for is
+// processed normally. Only the name's validated remote reaches the store.
+func (im *Importer) superseded(ctx context.Context, name string, marks map[string]uint64) bool {
+	remote, generation, err := parseSpoolName(name)
+	if err != nil {
+		return false
+	}
+	mark, known := marks[remote]
+	if !known {
+		if r, err := im.store.GetRemote(ctx, remote); err == nil {
+			mark = r.LastCollectionGeneration
+		}
+		marks[remote] = mark
+	}
+	return generation < mark
 }
 
 // Run imports the spool every interval until ctx is cancelled. The first
@@ -207,20 +242,11 @@ func (im *Importer) importFile(ctx context.Context, name string) (fileOutcome, s
 	}
 }
 
-// drop removes a processed spool file. A removal failure is logged once and
-// not fatal: the file moves to stuck, so later passes only retry the unlink.
-// A file that is already gone needs nothing.
+// drop removes a processed spool file. A removal failure is not fatal: the
+// file moves to stuck, so later passes only retry the unlink, and the pass
+// reports all such files in one warning.
 func (im *Importer) drop(ctx context.Context, name string, why error) {
-	err := im.remove(ctx, name)
-	if errors.Is(err, unix.ENOENT) {
-		return
-	}
-	if err != nil {
-		im.stuck[name] = struct{}{}
-		im.log.Warn("pvecollect: remove spool file", "file", name, "reason", "remove_failed")
-		return
-	}
-	if why != nil {
+	if im.stuck.unlink(ctx, name, im.remove, &im.blocked) && why != nil {
 		im.log.Info("pvecollect: dropped spool file", "file", name, "reason", rejectionCode(why))
 	}
 }

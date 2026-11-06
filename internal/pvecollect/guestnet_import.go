@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 // GuestNetClockSkew bounds how far in the future a record's observation
@@ -46,7 +44,7 @@ type GuestNetImportReport struct {
 	// Failed is the number of records the sink refused; they stay for the
 	// next pass.
 	Failed int
-	// Skipped is the number of records processed by an earlier pass that
+	// Skipped is the number of records this importer processed earlier that
 	// could not be removed yet.
 	Skipped int
 }
@@ -67,6 +65,9 @@ type GuestNetImporter struct {
 	remove func(context.Context, string) error
 	// stuck holds processed records whose removal failed.
 	stuck stuckFiles
+	// blocked is set for the rest of a pass once the directory refused an
+	// unlink; warned once the current stuck records were reported.
+	blocked, warned bool
 }
 
 // NewGuestNetImporter builds an importer on a server-side spool. spool and
@@ -122,6 +123,7 @@ func (im *GuestNetImporter) ImportOnce(ctx context.Context) (GuestNetImportRepor
 		return GuestNetImportReport{}, fmt.Errorf("pvecollect: list guest nic records: %w", err)
 	}
 	im.stuck.prune(names)
+	im.blocked = false
 	rep := GuestNetImportReport{Files: len(names)}
 	for _, name := range names {
 		if err := ctx.Err(); err != nil {
@@ -129,7 +131,7 @@ func (im *GuestNetImporter) ImportOnce(ctx context.Context) (GuestNetImportRepor
 		}
 		if _, stuck := im.stuck[name]; stuck {
 			rep.Skipped++
-			im.stuck.retry(ctx, name, im.remove)
+			im.stuck.unlink(ctx, name, im.remove, &im.blocked)
 			continue
 		}
 		rec, err := im.spool.ReadGuestNet(ctx, name)
@@ -170,25 +172,17 @@ func (im *GuestNetImporter) ImportOnce(ctx context.Context) (GuestNetImportRepor
 		rep.Imported++
 		im.drop(ctx, name, "")
 	}
+	im.stuck.warn(im.log, "pvecollect: remove guest nic record", &im.warned)
 	return rep, nil
 }
 
-// drop removes a processed record. A removal failure is logged once; the
-// record moves to stuck, so later passes only retry the unlink. A record
-// that is already gone (the collector supersedes older ones) needs nothing.
-// File names are logged only after parsing, so they match the fixed name
-// pattern.
+// drop removes a processed record. A removal failure moves it to stuck, so
+// later passes only retry the unlink, and the pass reports all such records
+// in one warning. A record that is already gone (the collector supersedes
+// older ones) needs nothing. File names are logged only after parsing, so
+// they match the fixed name pattern.
 func (im *GuestNetImporter) drop(ctx context.Context, name, reason string) {
-	err := im.remove(ctx, name)
-	if errors.Is(err, unix.ENOENT) {
-		return
-	}
-	if err != nil {
-		im.stuck[name] = struct{}{}
-		im.log.Warn("pvecollect: remove guest nic record", "file", name, "reason", "remove_failed")
-		return
-	}
-	if reason != "" {
+	if im.stuck.unlink(ctx, name, im.remove, &im.blocked) && reason != "" {
 		im.log.Info("pvecollect: dropped guest nic record", "file", name, "reason", reason)
 	}
 }
