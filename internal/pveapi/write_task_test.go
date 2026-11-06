@@ -66,7 +66,7 @@ func TestTaskStatusRejectsInvalidUPID(t *testing.T) {
 	for _, upid := range []string{
 		"", "UPID:pve1", "../../nodes", upidClone + "/../../x",
 		"UPID:pve1:00001234:00ABCDEF:6900A000:qmclone:9000:nos@pve!action:extra",
-		"UPID:PVE1:00001234:00ABCDEF:6900A000:qmclone:9000:nos@pve!action:",
+		"UPID:" + strings.Repeat("A", 64) + ":00001234:00ABCDEF:6900A000:qmclone:9000:nos@pve!action:",
 	} {
 		if _, err := w.TaskStatus(context.Background(), upid); !errors.Is(err, ErrInvalidArgument) {
 			t.Errorf("TaskStatus(%q) err = %v", upid, err)

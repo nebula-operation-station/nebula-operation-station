@@ -194,7 +194,7 @@ func TestDecodeObservation(t *testing.T) {
 		{"guest vmid below range", func(o *Observation) { o.Guests.Value[0].VMID = 99 }, "vmid"},
 		{"guest vmid above range", func(o *Observation) { o.Guests.Value[0].VMID = MaxVMID + 1 }, "vmid"},
 		{"guest kind unknown", func(o *Observation) { o.Guests.Value[0].Kind = "vm" }, "kind"},
-		{"guest node malformed", func(o *Observation) { o.Guests.Value[0].Node = "Poxmox" }, "node"},
+		{"guest node malformed", func(o *Observation) { o.Guests.Value[0].Node = "Pox/mox" }, "node"},
 		{"guest name oversize", func(o *Observation) { o.Guests.Value[0].Name = strings.Repeat("a", MaxLabelBytes+1) }, "name exceeds"},
 		{"guest status unknown", func(o *Observation) { o.Guests.Value[0].Status = "hosed" }, "status"},
 		{"guest generation zero", func(o *Observation) { o.Guests.Value[0].Generation = 0 }, "generation"},
@@ -510,6 +510,34 @@ func TestValidateObservationClones(t *testing.T) {
 	if v.Nodes.Value[0].Node == "mutated" || v.Guests.Value[0].Name == "mutated" ||
 		v.Storages.Value[0].Name == "mutated" || v.Tasks.Value[0].Actor == "mutated" {
 		t.Fatal("validated copy shares backing arrays with input")
+	}
+}
+
+// A time whose offset carries it past a four-digit UTC year could be stored
+// but never read back.
+func TestDecodeObservationBoundsObservedAt(t *testing.T) {
+	for _, tc := range []struct {
+		observed string
+		ok       bool
+	}{
+		{"0000-01-01T00:00:00+01:00", false},
+		{"0000-06-01T00:00:00Z", false},
+		{"0001-01-01T00:00:00+01:00", false},
+		{"9999-12-31T23:30:00-01:00", false},
+		{"0001-01-01T00:00:01Z", true},
+		{"9999-12-31T23:59:59Z", true},
+	} {
+		t.Run(tc.observed, func(t *testing.T) {
+			raw := mustMarshal(t, baseObservation())
+			raw = []byte(strings.Replace(string(raw), `"2026-10-29T12:00:00Z"`, `"`+tc.observed+`"`, 1))
+			_, err := DecodeObservation(raw)
+			if tc.ok && err != nil {
+				t.Fatalf("DecodeObservation = %v", err)
+			}
+			if !tc.ok && !errors.Is(err, ErrInvalid) {
+				t.Fatalf("DecodeObservation = %v, want ErrInvalid", err)
+			}
+		})
 	}
 }
 
