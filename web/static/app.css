@@ -456,6 +456,10 @@ code {
   max-width: var(--content-max);
   margin: 0 auto;
   padding: var(--space-3);
+  /* The fixed bulk bar covers the bottom at every width; inventory.js
+     measures its clearance into --bulkbar-h (0 while the bar is
+     hidden). */
+  padding-bottom: calc(var(--space-3) + var(--bulkbar-h, 0px));
 }
 
 .main--bare {
@@ -925,7 +929,12 @@ time { white-space: nowrap; }
   }
   html.js .app--drawer-open .sidebar__backdrop { display: block; }
 
-  .main { padding: var(--space-2); }
+  /* The padding shorthand above would drop the bulk bar clearance, so
+     re-add it on top of the phone's own space-2 base. */
+  .main {
+    padding: var(--space-2);
+    padding-bottom: calc(var(--space-2) + var(--bulkbar-h, 0px));
+  }
   .form-grid { grid-template-columns: 1fr; }
 }
 .sidebar__backdrop {
@@ -1282,6 +1291,11 @@ details[open] summary { color: var(--text); margin-bottom: var(--space-2); }
   transform: translateX(-50%);
   width: max-content;
   max-width: calc(100% - 2rem);
+  /* A sheet taller than the viewport (high browser zoom) must stay
+     scrollable, so its toggle and confirms at the top remain
+     reachable. */
+  max-height: min(80vh, 24rem);
+  overflow-y: auto;
   z-index: 20;
   display: flex;
   flex-wrap: wrap;
@@ -1341,12 +1355,16 @@ details[open] summary { color: var(--text); margin-bottom: var(--space-2); }
   }
   .bulkbar:not(.bulkbar--expanded) .bulkbar__body { display: none; }
 }
-/* The bar is fixed, so it would cover the last rows on narrow screens.
-   inventory.js measures the distance from the bar's top to the bottom of
-   the viewport into --bulkbar-h (0 while the bar is hidden); the content
-   area uses it as extra bottom padding so no row is hidden behind it. */
-@media (max-width: 640px) {
-  .main { padding-bottom: calc(var(--space-3) + var(--bulkbar-h, 0px)); }
+/* The bar is fixed at every width, so it would cover the last rows and
+   focused controls at every width. inventory.js measures the distance
+   from the bar's top to the bottom of the viewport into --bulkbar-h
+   (0 while the bar is hidden); .main uses it as extra bottom padding
+   (see the .main rules) and the scroll container uses it as
+   scroll-padding-bottom, so tabbing to a focused row checkbox or host
+   link never lands it under the bar (WCAG 2.2 2.4.11 Focus Not
+   Obscured). */
+html {
+  scroll-padding-bottom: calc(var(--space-3) + var(--bulkbar-h, 0px));
 }
 
 /* --- Inventory freshness: hosts without a read in 24 h. --- */

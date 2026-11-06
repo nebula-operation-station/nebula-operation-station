@@ -499,14 +499,25 @@
         toggle.setAttribute('aria-expanded', String(expanded));
       });
     }
-    // The bar is fixed, so on narrow screens it would cover the last rows.
-    // Measure the distance from the bar's top to the bottom of the viewport
-    // into --bulkbar-h; app.css uses it as bottom padding of .main
-    // (≤ 640px). The ResizeObserver catches height changes (toggle, inline
-    // confirms, text wrap, hidden); resize catches viewport changes.
+    // The bar is fixed at every width, so it would cover the last rows.
+    // Measure the distance from the bar's top to the bottom of the
+    // viewport into --bulkbar-h; app.css uses it as bottom padding of
+    // .main and scroll-padding-bottom of the scroll container. The
+    // ResizeObserver catches height changes (toggle, inline confirms,
+    // text wrap, hidden); resize catches viewport changes.
     const setBarClearance = () => {
       const r = bulkbar.getBoundingClientRect();
-      const h = bulkbar.hidden || r.top <= 0 ? 0 : Math.max(0, Math.ceil(innerHeight - r.top));
+      let h = 0;
+      if (!bulkbar.hidden) {
+        if (r.top <= 0) {
+          // The sheet is at least as tall as the viewport (high browser
+          // zoom): it covers the visible bottom area, so clear up to its
+          // bottom edge instead of 0.
+          h = Math.max(0, Math.ceil(Math.min(r.bottom, innerHeight)));
+        } else {
+          h = Math.max(0, Math.ceil(innerHeight - r.top));
+        }
+      }
       document.documentElement.style.setProperty('--bulkbar-h', h + 'px');
     };
     setBarClearance();
