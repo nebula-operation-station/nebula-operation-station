@@ -91,7 +91,8 @@ Gaps that the steps close:
   differ, and it needs no parser for server-supplied parameters.
 - **Decision 4 (default):** the risk rule is Go code in a protected path,
   derived from the binding by the executor. It is never trusted from the
-  proposal and never left to a shell script.
+  proposal and never left to a shell script. The script's only part is to prove
+  the binding's `old_tag` against the running container (cu02 phase 1).
 - **Decision 5 (default):** container mutations run only as batch members. The
   executor refuses these action IDs on the classic propose and run paths, and
   it picks the durable transport from the frozen action ID. The server cannot
@@ -102,7 +103,7 @@ Gaps that the steps close:
 | Case | Base | Result after floors |
 | --- | --- | --- |
 | Same-tag digest refresh, update or rollback | MEDIUM | MEDIUM on a recorded host with a trusted artifact; approval by presence |
-| Tag or version change, or tag reversal on rollback | HIGH | HIGH; user verification, manual stage gates (`internal/permit/batch/batch.go:237`), CLI when hardened |
+| Tag or version change on any image of the member, or tag reversal on rollback | HIGH | HIGH; user verification, manual stage gates (`internal/permit/batch/batch.go:237`), CLI when hardened |
 | Unrecorded host or untrusted artifact | as above | At least HIGH (`internal/riskpolicy/riskpolicy.go:45-49`) |
 | Any floor reaches CRITICAL: recorded host, scanner, linked-host floor | none | **Refused**, at proposal and again at approval and claim. No separate approval path and no downgrade |
 | Digest-pinned image, unsupported or incomplete definition, unknown digest | none | **Unavailable**: no proposal is offered (ADR line 363, R3) |
@@ -279,9 +280,9 @@ Until they land, cu04 shows those targets as unavailable with a reason.
          `configuration_digest`;
        - `old_tag`: the running reference of every target (`Config.Image`,
          normalized as Docker does) has the entry's `repository` and `old_tag`.
-         A reference without a tag does not match. A forged `old_tag` therefore
-         stops here, so the risk derived from it cannot have been wrong for
-         anything that runs (reason `old_tag_mismatch`);
+         A reference without a tag does not match. A forged `old_tag` stops here
+         (reason `old_tag_mismatch`), so nothing runs under a risk class derived
+         from it;
        - the image `old_image_id` lists `repository@old_index_digest` or
          `repository@old_platform_digest` in its repository digests;
        - the dependency closure, recomputed as in the preview, equals the bound
@@ -411,52 +412,134 @@ Until they land, cu04 shows those targets as unavailable with a reason.
 
 ### cu03 Postchecks, retention and rollback (P2-04, public images)
 
-- **Rules:** R9, R10, R11, R12, R13. **Gaps:** G10, G14, G15.
+- **Rules:** R8 (the reversed floor), R9, R10, R11, R12, R13. **Gaps:** G10,
+  G14, G15.
 - **Paths:** protected: `internal/executordb/` (migration 0020 and store),
   `internal/executor/`, `internal/canonical/`, `internal/permit/batch/`,
-  `proto/`, `cmd/nebula/`, `test/security/`; not protected:
+  `proto/`, `cmd/nebula/`, `test/security/`, `test/integration/`; not protected:
   `internal/executions/dockerhost/`, `internal/executions/actions/`,
   `internal/executions/batchplan.go`.
 - **Protected: yes** for the executor side.
 - **Contracts and RPCs:**
   - A pure `dockerhost.JudgeContainerUpdate` over the after-snapshot: health,
     ports, mounts and networks, service and replica count, and the running
-    digest equals the approved one. Unknown is not success. The verdict of
-    `compose-update-v1` is left as it is.
+    digest equals the approved one, per service. Each `dependencies` container
+    keeps its ID and `configuration_digest`, still runs and has not lost health;
+    its start time may change only with `restart_on_update`. Unknown is not
+    success. The verdict of `compose-update-v1` is left as it is.
   - The **executor** judges, then calls `RecordPostcheck`, with a fixed hash
     in `RequiredPostchecks`. A failed verdict is `OutcomeFailed`.
   - Canonical validation requires `failure_threshold` and
     `unreachable_threshold` of 0 for stages with `container_update` members,
     so any failure or unreachable member stops the rollout.
-  - `executor.db` table `container_recreations`: execution, host and key,
-    form, project or name, old and new incarnations, repository, tags, digests,
-    configuration digest, state, window expiry. The row is written before
-    dispatch and completed by the result or by reconciliation. Window constant
-    `DefaultRollbackWindow = 7 * 24h`, with injected time.
-  - `ListContainerRecreations` (server, admin): sanitized rows, so the UI can
-    offer rollback and show why not.
+  - `executor.db` table `container_recreations`, one row per member run:
+    - execution, `kind`, `rollback_of`, host and key, form, project or name;
+    - the bound `images`, each with its retained tag and `retained_reference`
+      (`repository:old_tag@` the digest the retained image lists, index or
+      platform, because a classic store may list only the digest it was pulled
+      by);
+    - per container: service, name, ID and `configuration_digest` before and
+      after, image ID after, replica number, and `recreated`, `unchanged` or
+      `missing`;
+    - `source_digest`, and the replica count per service before the update;
+    - `recreation_definition`: the executor-owned definition of R9 (see below);
+    - state, window expiry.
+
+    The row is written before dispatch and completed by the result or by
+    reconciliation. Window constant `DefaultRollbackWindow = 7 * 24h`, with
+    injected time; expiry is set once, when the row first leaves `intent`.
+  - **States:**
+
+    | State | Meaning | Rollback |
+    | --- | --- | --- |
+    | `intent` | Written; the run is not finished | Refused |
+    | `not_recreated` | Stopped in phases 1 to 4; every container is as it was | Refused: nothing to undo |
+    | `recreated` | Phase 6 passed and the verdict passed | Allowed |
+    | `partial` | Phase 5 was reached, the after-snapshot exists, and `up` or the verdict failed | Allowed |
+    | `uncertain` | The run is unknown, or the after-snapshot is missing | Refused until resolved |
+    | `rolled_back` | A later rollback of this row succeeded | Refused |
+
+  - **Partly recreated project (R10, R13):** the after-snapshot is the record
+    of what exists, whatever `up_exit` says. A recreated container is bound by
+    its new ID, one that was not recreated by its old ID, and one that is gone is
+    `missing`. These are the incarnations for any later action. A rollback of a
+    `partial` row binds in `targets` every present container of the frozen
+    services, with the `image_id` and `configuration_digest` from the snapshot,
+    so mixed replicas are exact. Rollback's postcheck expects the replica count
+    from **before** the update, so it also restores a `missing` replica.
+  - **Resolving `uncertain` (R11):** `ResolveContainerRecreation` (server, admin)
+    takes the execution ID of a completed `docker.update_preview` of that host
+    that started after the target's hold ended. The executor reads that result
+    from its own run table, never from the request, and matches it against the
+    row: every frozen container unchanged gives `not_recreated`, otherwise the
+    row becomes `partial`, or `recreated` if every container is on the approved
+    digest and the judge passes. Anything it cannot match stays `uncertain`. It
+    changes nothing on the host, is audited, and does not extend the window.
+  - **Recreation definition (R9, see Q16):** `recreation_definition` holds what a
+    rollback recreates from: project, service set, per service the prior
+    reference and prior NOS override entry, and `source_digest`. It contains no
+    secret, because it holds no file content or env. The operator's files stay on
+    the host, and `source_digest` proves at rollback that they are the same.
+    Rows are not deleted, so the definition lasts through the window and
+    afterwards remains history.
+  - `ListContainerRecreations` (server, admin): sanitized rows, the retained
+    tags and the current recovery plan digest, so the UI can offer rollback and
+    show why not. The definition is not returned.
   - `SetContainerRecoveryPlan` and `ClearContainerRecoveryPlan` (admin only):
     per project or container, a free-text reference without secrets, recorded
-    with actor and time (see Q8). The plan state is bound into rollback.
+    with actor, time and version (see Q8). `recovery_plan_digest` is the SHA-256
+    of that record. A rollback binds it, and Evaluate compares it with the
+    current record, so a plan changed or cleared after approval fails
+    revalidation.
   - `docker.compose_rollback` 1.0.0 (durable, `reconcile-first`, batch only):
-    binding `kind=rollback`, `rollback_of` the recorded execution. Its `old_*`
-    fields are the recorded new incarnation and its `new_*` fields are the
-    prior digests and tag.
-  - Evaluate refuses a rollback unless the row is terminal and not uncertain,
-    the window is open, the source is unchanged, a recovery plan exists, and
-    the retained image is present (precheck on the host).
+    binding `kind=rollback`, `rollback_of` the recorded execution,
+    `recovery_plan_digest` required. In each image entry the `old_*` fields are
+    the recorded new state and the `new_*` fields are the prior digests and tag.
+    `policy_*` and `major_change` are copied from the update, because a rollback
+    selects no new version; Evaluate compares the whole binding with the row
+    instead of running `CompareTags`. Differences from cu02's phases:
+    - phase 1 compares each target's running reference with the snapshot in the
+      row, because replicas may differ after `partial`; it also recomputes
+      `source_digest`, the unchanged-source check;
+    - phases 2 and 3 do not run: nothing is resolved or pulled, so a tag that
+      moved since the update does not matter;
+    - phase 4 verifies that each retained tag still resolves to the prior image
+      ID (exit 10, `retained_image_missing`, before any recreate);
+    - phase 5 writes `retained_reference` into the override.
+  - **Unchanged source:** `source_digest` of the row equals the recomputed one,
+    and each target's `configuration_digest` equals the after-value of the row.
+    Before-values are not compared with after-values, since an image change
+    alters the container's merged env, labels and defaults (Q5).
+  - Evaluate refuses a rollback unless the row is `recreated` or `partial`, the
+    window is open, a recovery plan exists with the bound digest, and the binding
+    equals the row (targets, reversed images, `source_digest`). Phase 1 on the
+    host adds the unchanged source and the retained image. A rollback's own row
+    is never a rollback source; after a failed rollback the way forward is a new
+    update proposal.
 - **Risk classes:** rollback same-tag MEDIUM, tag reversal HIGH (the cu01
   floor applied to the reversed tags), CRITICAL refused.
 - **Tests:**
   - judge table per postcheck, including a lost mount, a changed network, a
-    replica fewer, a wrong digest and `starting` past the wait.
+    replica fewer, a wrong digest on one of several services, `starting` past
+    the wait, a dependency recreated, a dependency stopped, a dependency
+    restarted without `restart_on_update`.
   - security: `TestFailedPostcheckStopsRollout`,
     `TestUncertainRecreationBlocksRollback`, `TestRollbackNeedsOwnApproval`
     (no reuse of the update's permit), `TestRollbackBindsNewIncarnation`,
-    `TestRollbackRefusedWithoutRecoveryPlan`, `TestRollbackRefusedAfterWindow`,
+    `TestRollbackRefusedWithoutRecoveryPlan`,
+    `TestRollbackRefusedWhenRecoveryPlanChanged`, `TestRollbackRefusedAfterWindow`,
     `TestRollbackRefusedWhenConfigurationChanged`,
-    `TestNoAutomaticRetryOrRollback`, `TestNoPruneInContainerActions`.
-  - store: migration, restart, Lock, clock moved backwards at the window edge.
+    `TestRollbackRefusedWhenSourceChanged`,
+    `TestRollbackRefusedWhenRetainedImageGone` (nothing is pulled, no recreate),
+    `TestRollbackOfPartialBindsMixedReplicas`,
+    `TestPartialUpRecordsNewIncarnations`, `TestRollbackOfRollbackRefused`,
+    `TestResolveUsesExecutorOwnPreview` (a preview from before the hold ended, or
+    of another host, is refused), `TestNoAutomaticRetryOrRollback`,
+    `TestNoPruneInContainerActions`.
+  - store: migration, restart, Lock, clock moved backwards at the window edge,
+    every state transition, definition present until after the window.
+  - integration: update then rollback, for a multi-service project and for a
+    failed `up` that left it partly recreated.
 - **Real install:**
   - The migration runs at executor start; rows are in `executor.db`, so backups
     already cover them.
@@ -469,8 +552,8 @@ Until they land, cu04 shows those targets as unavailable with a reason.
 
 ### cu04 Tree controls (P2-05)
 
-- **Rules:** R14, and the display of R8, R10, R12, R13. **Gaps:** G15 (UI),
-  G12 for typed tags.
+- **Rules:** R14, R4 (nothing secret-bearing reaches the tree or the forms), and
+  the display of R8, R10, R12, R13. **Gaps:** G15 (UI), G12 for typed tags.
 - **Paths:** `internal/web/ui/` (new `container_update.go`, `chart.go`,
   `chart_patch.go`, `hosts.go`, `operations.go`, `batch.go`),
   `web/templates/{chart,inventory,host,operation,batch}.html`, external files
@@ -484,13 +567,17 @@ Until they land, cu04 shows those targets as unavailable with a reason.
 - **Flow:**
   1. Containers and Compose groups in the tree get checkboxes in a no-JavaScript
      form. Selecting a parent selects nothing below it.
-  2. For a tag change the operator names the target tag explicitly. A latest
-     stable tag is only ever a suggestion.
+  2. For a tag change the operator names the target tag explicitly, per service.
+     A latest stable tag is only ever a suggestion. A major change needs a second
+     explicit choice, which sets `major_change`; a variant change or tags that
+     cannot be compared are not offered.
   3. Fresh previews are run where the binding is too old.
-  4. The confirmation shows current to approved per unit: repository, tag,
-     index and platform digest, platform, configuration digest, the exact
-     services, containers and dependencies, stage, and the rollback state
-     including the text that volume and database migrations are not undone.
+  4. The confirmation shows current to approved per unit and **per image**:
+     repository, tag, index and platform digest, platform, for a tag change the
+     policy and its version. It also shows the configuration and source digests,
+     the exact services and containers, the dependencies marked "affected, not
+     recreated", the stage, and the rollback state including the text that
+     volume and database migrations are not undone.
   5. The confirm POST is bound to the shown plan (the ou02b pattern, PostForm
      only), then proposed; approval happens on the existing batch page with
      the executor-derived risk.
@@ -498,21 +585,28 @@ Until they land, cu04 shows those targets as unavailable with a reason.
      `ListContainerRecreations` as a new proposal.
 - **Unavailable, with reason and no button:** digest-pinned, unknown digest,
   CRITICAL, unsupported or `build:` project, no definition (until cu05),
-  private image (until cu06), not enrolled or blocked, rollback window over,
-  no recovery plan, retained image gone.
+  private image (until cu06), not enrolled or blocked, host not prepared
+  (`prepare_required`, with a link to propose `docker.update_prepare`), a
+  service sharing a namespace with a selected one (Q12), a unit over the
+  binding limits, rollback window over, no recovery plan, retained image gone,
+  recreation uncertain (with a pointer to resolve it).
 - **Risk classes:** shown from the executor. A proposal refused for CRITICAL
   states that no separate approval exists, instead of the batch default text.
 - **Tests:** ou02 style handler tests: tampered POST, stale preview, selection
   outside the shown plan, parent without children, escaped host strings,
-  every unavailable reason; `test/browser`: CSP without violations, keyboard
-  use, state not shown by color alone, no JavaScript needed.
+  every unavailable reason, a major change without the second choice, a
+  planted env value absent from every page; `test/browser`: CSP without
+  violations, keyboard use, state not shown by color alone, no JavaScript
+  needed.
 - **Real install:** the route and the wiring in `main.go`. After this step the
-  public Compose path works end to end, provided cu02's trust step is done
-  and `docker.update_preview` has run. Admin guide and handbook pages.
+  public Compose path works end to end, provided cu02's trust step is done,
+  `docker.update_prepare` has run on the host and `docker.update_preview` has
+  run. Admin guide and handbook pages.
 
 ### cu05 Standalone definitions (P2-03, split out)
 
-- **Rules:** R1, R3, R4, R6 for standalone containers.
+- **Rules:** R1, R3, R4, R6, R8, R9, R10, R11, R12, R13 for standalone
+  containers. **Gaps:** G2.
 - **Paths:** `internal/executions/actions/`, `internal/executions/batchplan.go`,
   `internal/web/ui/`; protected: `internal/executor/`, `proto/`, `cmd/nebula/`,
   `test/security/`.
@@ -520,9 +614,16 @@ Until they land, cu04 shows those targets as unavailable with a reason.
 - **Contracts and RPCs:**
   - `Put`, `Remove` and `ListContainerDefinition` (admin only, list metadata
     only). The definition is a vault secret `container.<id>.definition`, and
-    its version and digest are bound as `definition_version`.
+    its version and digest are bound as `definition_version`. `source_digest`
+    is that digest.
+  - **Definition retention (R9):** `Put` adds a version and keeps the previous
+    one. `Remove` is refused, and a version may not be dropped, while a
+    `container_recreations` row inside its window references it. For a
+    standalone row `recreation_definition` names that version.
   - `docker.update` 1.0.0 and `docker.rollback` 1.0.0 (durable,
-    `reconcile-first`, batch only), same phases as cu02. The executor adds the
+    `reconcile-first`, batch only), same phases as cu02, including the `old_tag`
+    check, the resolve, retention, after-snapshot and the row states of cu03. A
+    standalone member has one target and no `dependencies`. The executor adds the
     definition as a run secret, delivered over the existing tmpfs secret
     channel (`internal/hostrun/secrets.go`, 64 KiB). The planner sees no
     secret slot, which is what keeps batches possible (G8).
@@ -533,7 +634,9 @@ Until they land, cu04 shows those targets as unavailable with a reason.
   `TestNoInspectReconstruction` (no inspect field reaches a create argument),
   definition absent from results, logs, audit and errors; rejected definition
   shapes; definition changed after approval refused; injection through the
-  definition.
+  definition; `TestDefinitionVersionKeptThroughWindow`,
+  `TestDefinitionRemoveRefusedInsideWindow`,
+  `TestStandaloneRollbackUsesBoundVersion`.
 - **Real install:** the operator supplies a definition per container with the
   vault unlocked. Without that, nothing changes.
 
@@ -542,7 +645,8 @@ Until they land, cu04 shows those targets as unavailable with a reason.
 **Do not start before Q6 is answered.** The ADR requires a reviewed profile
 before enablement.
 
-- **Rules:** R7, R5 (registry credential), R4.
+- **Rules:** R7, R5 (registry credential), R4, R6 (resolve and verify for
+  private images). **Gaps:** G13.
 - **Paths:** protected: `internal/executor/`, `cmd/nebula-executor/`,
   `proto/`, `docs/threat-model.md`, `.github/protected-paths.txt`,
   `test/security/`; a new package `internal/registrypull/` beside
@@ -556,9 +660,14 @@ before enablement.
   session into `docker load` on the target. The target gets image bytes, no
   credential and no token. The registry record digest, credential ID and
   version are bound in `registry` and rechecked around the transfer, with the
-  same Lock, rotation and expiry rules as `ReadPrivateRegistry`. `docker
+  same Lock, rotation and expiry rules as `ReadPrivateRegistry`. For a member
+  with `registry` set, cu02's phase 2 runs in the executor over that read path,
+  because the host has no credential, and phase 3 is this transfer. `docker
   load` does not set repository digests, so verification needs its own
-  defined evidence, tested per image store (classic and containerd).
+  defined evidence, tested per image store (classic and containerd). The same
+  evidence must serve phase 1's current-digest check, `retained_reference`, and
+  a `repo:tag@digest` reference that `--pull never` can find. Until that is
+  shown, private images stay unavailable.
 - **Risk classes:** unchanged. A private image is not a separate class.
 - **Tests:** credential never on the host, in args, env, results or logs;
   wrong blob digest; oversize manifest or blob; out-of-scope repository;
@@ -608,15 +717,18 @@ Out of scope for this plan (no ADR rule; stated so that nobody assumes them):
 | R3 standalone definition | | | | | x | |
 | R4 secrets stay out | | x | | x | x | x |
 | R5 binding | x | | | | | x |
-| R6 recheck and verify | x | x | | | x | |
+| R6 recheck and verify | x | x | | | x | x |
 | R7 private transfer | | | | | | x |
 | R8 risk and CRITICAL refusal | x | x | x | x | x | |
-| R9 retention window | | x | x | | | |
-| R10 rollback and postchecks | | | x | x | | |
-| R11 stop and reconcile | | x | x | | | |
-| R12 volume limitation | | | x | x | | |
-| R13 new incarnation | | x | x | x | | |
+| R9 retention window | | x | x | | x | |
+| R10 rollback and postchecks | | | x | x | x | |
+| R11 stop and reconcile | | x | x | | x | |
+| R12 volume limitation | | | x | x | x | |
+| R13 new incarnation | | x | x | x | x | |
 | R14 tree controls | | | | x | | |
+
+Each mark matches the step's "Rules" line. Every gap is on a step's "Gaps"
+line, except G5b, which stays open (Q14).
 
 ## Order and release
 
@@ -643,8 +755,16 @@ cannot start without the answer.
    back to what the files say. *Recommendation:* a NOS-owned root-only file per
    project, kept and named in Compose's `config_files` label, never in the
    operator's directory; treat later differences as a changed configuration
-   that refuses the next update. Also confirm the `pinned` handling: NOS
-   override means "updatable", an operator pin stays pinned.
+   that refuses the next update. The override sets only `image:
+   repository:new_tag@new_platform_digest`, so the tag survives in the running
+   reference without moving any local tag, and it is kept out of
+   `config_files_hash` and `source_digest`. Also confirm the `pinned` handling:
+   NOS override (the `config_files` label names it) means "updatable", an
+   operator pin stays pinned. That Compose with `--pull never` accepts a
+   reference with both tag and digest on both image stores is assumed here and
+   must be shown by cu02's first integration test. If it fails, the fallback is
+   `repository@digest` plus an executor-side record of the tag, and
+   `docker.check_updates` needs that tag as a parameter.
 3. **Does `docker.compose_update` 1.0.0 go away? Blocks cu02.** Only one version
    per built-in ID exists, so 2.0.0 replaces it, and the unbound manual update
    of spec 11 ends. Today it also uses the host's own Docker login.
@@ -652,17 +772,35 @@ cannot start without the answer.
    so public-only stays true until cu06, and accept that hosts relying on an
    operator login wait for cu06.
 4. **Does "executor rechecks before dispatch" allow the precheck inside the
-   approved script? Blocks cu02.** The plan runs it as phase 1 of the bound,
-   trusted artifact as root, immediately before the mutation, and the executor
-   reads the typed result. That leaves no gap between check and change, but
+   approved script? Blocks cu02.** The plan runs it as phases 1 and 2 of the
+   bound, trusted artifact as root, immediately before the mutation, and the
+   executor reads the typed result. That leaves no gap between check and change
+   (the `old_tag` check that backs the risk class is one of these), but
    the executor itself does not read the host first. *Recommendation:* accept;
    the executor still rechecks trust, risk, pin, credentials, Lock and expiry.
-5. **What exactly is the configuration digest? Blocks cu02.** It must cover
-   what secrets may be in (env, compose files, `.env`), and even a digest can
-   confirm a guessed low-entropy secret. *Recommendation:* hash on the host
-   over the complete container config and the bytes of the config files, keyed
-   with a root-only random per-host salt that never leaves the host. The salt
-   makes a LOW read create one small file; please confirm that is acceptable.
+5. **What exactly is the configuration digest, and who creates the salt? Blocks
+   cu02.** It must cover what secrets may be in (env, compose files, `.env`), and
+   even a digest can confirm a guessed low-entropy secret. A single value does not
+   work: an image change alters the container's merged env, labels and defaults,
+   and a NOS override alters the Compose result, so one digest could not be
+   compared across an update, and excluding "the image" from it is not definable.
+   *Recommendation, used by the steps:* two values, both keyed on the host with a
+   root-only random per-host salt that never leaves the host.
+   - `configuration_digest`, per container: over the complete `.Config` and
+     `.HostConfig` of **that incarnation**, with no exclusions. It is compared
+     only with the same incarnation. After an update the after-snapshot gives
+     the new value, which is what a rollback binds.
+   - `source_digest`, per unit: over the output of `docker compose config` run on
+     the operator's files **without** the NOS override, so it includes `.env`
+     and `env_file` values and stays the same across an update. Standalone: the
+     definition digest (cu05), not keyed.
+
+   A LOW read may not create the salt (ADR lines 423 and 439), so the MEDIUM
+   `docker.update_prepare` does, and preview without a salt reports
+   `prepare_required`. A lost salt makes every digest differ, which refuses
+   updates and rollbacks (fail closed) until new previews are taken. Alternative:
+   an executor-held per-host key delivered as a run secret, which leaves nothing
+   on the host, but gives a LOW read a secret and every member a secret channel.
 6. **Which private transfer profile? Blocks cu06.** Options: (a) executor
    fetches, `docker load` over SSH (recommended: no credential or token on the
    host, no sshd change); (b) an executor-side authenticating proxy over an
@@ -677,7 +815,8 @@ cannot start without the answer.
 8. **Recovery plan: where, and is "stateless" allowed? Blocks cu03.**
    *Recommendation:* an admin-set executor record per project or container,
    with an explicit "no persistent data" declaration by the operator, never
-   inferred from a missing volume.
+   inferred from a missing volume. Either form is versioned and bound through
+   `recovery_plan_digest`.
 9. **Rollback window and a missing image. Blocks cu03.** Is 7 days fixed or
    per-install? If an operator pruned the retained image, is rollback
    unavailable or may it pull by digest? *Recommendation:* fixed at 7 days for
@@ -692,3 +831,46 @@ cannot start without the answer.
     the standard library. Alternative: move the judge to a new protected
     package. *Recommendation:* the judge decides rollout outcomes, so move it
     to a small package added to the protected list.
+12. **What counts as a dependency? Blocks cu01.** The ADR says to freeze
+    dependencies but not what they are. *Recommendation, used by the steps:* the
+    transitive closure in both directions over `depends_on`, `links` and
+    `volumes_from`, taken from the same `docker compose config` as `source_digest`.
+    A service that shares a namespace with a recreated one (`network_mode`, `pid`
+    or `ipc` set to `service:<name>`) cannot stay running through the recreate,
+    so it must be selected too, otherwise the unit is unavailable. Other Compose
+    projects (external networks, shared volumes) are not frozen and the
+    confirmation does not claim they are.
+13. **Where does the tag policy come from? Blocks cu01.** ADR line 372 wants
+    per-image reviewed overrides, but `registrymeta.Policy` is only a struct and
+    no store or review path for overrides exists. *Recommendation, used by the
+    steps:* the first release knows only the zero policy, version `stable-v1`
+    (`registrymeta.DefaultPolicyVersion`), with its digest computed by the
+    executor. The planner fills these values and Evaluate compares them.
+    Reviewed overrides become an executor-side record later, and the binding
+    needs no change for them. Consequence to confirm: without an override,
+    non-version tags can only get a same-tag refresh.
+14. **G5b: enforce `BatchContainer` on restart, stop and start? Does not block.**
+    This plan does not change those members, so they stay bound on paper only,
+    and G5 is not closed for them. *Recommendation:* a separate job after cu03: a
+    check of container ID and image in the `docker_control.sh.tmpl` scripts, with
+    its own version bump. Their configuration hash cannot be compared with the
+    host (G4), so that needs a decision of its own.
+15. **Holds and waiting for durable members. Blocks cu02.** *Recommendation, used
+    by the steps:* a reconciled unknown run keeps the target held until a complete
+    root probe shows the job unit gone, because the job may still run; there is no
+    operator release without that evidence, in line with today's rearm rule. A
+    waiter is bounded by `batchBusyDurableWait`, 45 minutes. Consequence to
+    confirm: a host that never answers keeps its target held, and the operator's
+    only way out is to bring the host back. A forced release would be a new
+    operator action with its own audit, and it is not planned.
+16. **What does "executor-owned recreation definition" require for Compose?
+    Blocks cu03.** ADR line 482 could mean a copy of the Compose files in the
+    executor, but those may hold secrets and live on the host (R4 allows that).
+    *Recommendation, used by the steps:* the executor owns a secret-free
+    definition (services, prior references, prior override entries,
+    `source_digest`), the host keeps the operator's files, and rollback is refused
+    if `source_digest` shows they changed. The cost: editing a Compose file during
+    the window ends rollback for that project, until the operator restores it.
+    Alternative: a sealed copy of the files in the vault per update, which keeps
+    rollback available after an edit but adds secret storage and still restores a
+    configuration the operator has since changed.
