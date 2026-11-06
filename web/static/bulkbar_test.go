@@ -153,7 +153,7 @@ func TestInventoryTemplateBulkBarToggleA11y(t *testing.T) {
 	}
 	js := mustRead(t, static.FS, "inventory.js")
 	for _, want := range []string{
-		`setAttribute('aria-expanded', 'false')`,        // a fresh selection starts collapsed
+		`setAttribute('aria-expanded', 'false')`,          // a fresh selection starts collapsed
 		`setAttribute('aria-expanded', String(expanded))`, // the toggle keeps the ARIA state in sync
 	} {
 		if !strings.Contains(js, want) {
