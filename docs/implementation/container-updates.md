@@ -21,10 +21,10 @@ noted.
 | R2 | Compose: extend the versioned action; validate labels against approved project and config-file identities; freeze every affected service, replica and dependency; no implicit project-wide update; reviewed digest override | 457-464 |
 | R3 | Standalone: only an operator-supplied complete reproducible definition; never reconstruct from `docker inspect`; incomplete means disabled | 465-467 |
 | R4 | Secret-bearing configuration stays executor- or host-side, never in the tree or results | 468 |
-| R5 | Bind host ID and key, full container ID **and** name, repository, platform, old and new tag, digest from and to (index and platform manifest), configuration digest, exact affected set, credential version, stage plan | 470-473 |
+| R5 | Bind host ID and key, full container ID **and** name, repository, platform, old and new tag, digest from and to (index and platform manifest), configuration digest, exact affected set, credential version, stage plan; for a tag change also the policy and its version. A Compose member binds all of this per image | 372, 435, 470-473; spec v23-11-09 |
 | R6 | The executor rechecks identity, configuration and current digest before dispatch and verifies the pulled digest; changed targets are refused; a moved tag needs a new proposal | 473-476 |
 | R7 | Private pulls are executor-mediated over SSH to the target engine; credentials stay in the executor, never in host Docker login files; the transfer/load profile is reviewed before it is enabled | 476-478 |
-| R8 | Same-tag refresh MEDIUM base, tag change HIGH base with explicit version selection and no implicit major upgrade; normal trust, scanner and host floors apply; **no CRITICAL variant**, refuse and never downgrade | 434-435, 437-443, 479-480 |
+| R8 | Same-tag refresh MEDIUM base, tag change HIGH base with bound policy and version, explicit version selection and no implicit major upgrade; normal trust, scanner and host floors apply; **no CRITICAL variant**, refuse and never downgrade | 372-373, 434-435, 437-443, 479-480; spec v23-11-09 |
 | R9 | Keep the previous image by digest and the recreation definition through a rollback window (default 7 days); no automatic prune; cleanup must not delete a retained image | 482-483, 489 |
 | R10 | Rollback is a separately approved exact-target recreation (same-tag MEDIUM, tag reversal HIGH) with health, ports, mounts/network and service/replica-count postchecks | 484-486 |
 | R11 | A failed update stops its rollout; uncertain recreation is reconciled before any retry or rollback | 486-487, P2-04 row |
@@ -59,17 +59,17 @@ Gaps that the steps close:
 
 | # | Gap | Where |
 | --- | --- | --- |
-| G1 | `docker.compose_update` 1.0.0 is project-only: `pull`, then `up -d`. The tag resolves at run time, so the update cannot bind images or containers | `scripts/docker_compose_update.sh:44-48` |
+| G1 | `docker.compose_update` 1.0.0 is project-only: `pull`, then `up -d`. The tag resolves at run time, so the update cannot bind images or containers | `internal/executions/actions/scripts/docker_compose_update.sh:44-48` |
 | G2 | No standalone recreate exists. `docker.update` is named in canonical code but is not in the catalog | `internal/canonical/batch.go:308` |
 | G3 | `BatchContainer` has four fields only. Name, repository, platform, tags, index and platform digests, affected set and registry credential are missing | `internal/canonical/batch.go:77-82` |
 | G4 | Its `ConfigurationHash` is the server's SHA-256 of a stored sanitized inspect result, and old and new digest are both the image ID. That is fine for restart, but it is not a configuration digest (the inspect text holds state fields, not env or labels) and it cannot express a transition | `internal/executions/batchoutcome.go:516-517` |
-| G5 | The binding is never enforced: it is cloned and printed, but nothing in the executor compares it with the host | `internal/permit/batch/batch.go:595`, `cmd/nebula/batch.go:157` |
+| G5 | The binding is never enforced: it is cloned and printed, but nothing in the executor compares it with the host. **G5a** is the new update binding (closed by cu01 and cu02). **G5b** is `BatchContainer` on existing restart, stop and start members: this plan leaves it open (Q14) | `internal/permit/batch/batch.go:595`, `cmd/nebula/batch.go:157` |
 | G6 | Risk cannot tell a digest refresh from a tag change: `MinimumRisk` sees artifact and host only, and `BatchPolicy.Evaluate` does not get the parameters. A CRITICAL member is told to be approved separately, which ADR 0006 forbids for containers | `internal/riskpolicy/riskpolicy.go:79`, `internal/executor/batch_policy.go:50`, `internal/executions/batchplan.go:80-82` |
 | G7 | Classic staged proposals have one parameter set for all hosts, so they cannot carry per-container plans | `internal/executions/executions.go:177` |
 | G8 | Batch members run **attached only**, at most 10 minutes. The server caps the timeout too, Compose is excluded, actions with secrets are refused, and a busy target gives up after about 16 minutes | `internal/executor/batch_dispatch.go:37,579`, `cmd/nebula-server/batchrun.go:38-40,302`, `internal/executions/batchplan.go:209,327` |
 | G9 | Reconciliation reports to the classic authority only, not to the batch rollout | `internal/executor/durable.go:140` |
-| G10 | Postchecks do not gate anything. The Compose verdict is computed for display on the server; the script's exit status covers only pull and up. `RequiredPostchecks` is always empty and `RecordPostcheck` has no production caller | `internal/web/ui/operations.go:537`, `scripts/docker_compose_update.sh:61`, `internal/executions/batchplan.go:274`, `internal/permit/batch/rollout.go:456` |
-| G11 | `docker.check_updates` covers running containers only, is anonymous, and compares against the index digest, so an index change on another architecture reads as an update (ADR lines 359-362). A container recreated by digest would read as `pinned` from then on | `scripts/docker_check_updates.sh:21-22,60,64` |
+| G10 | Postchecks do not gate anything. The Compose verdict is computed for display on the server; the script's exit status covers only pull and up. `RequiredPostchecks` is always empty and `RecordPostcheck` has no production caller | `internal/web/ui/operations.go:537`, `internal/executions/actions/scripts/docker_compose_update.sh:61`, `internal/executions/batchplan.go:274`, `internal/permit/batch/rollout.go:456` |
+| G11 | `docker.check_updates` covers running containers only, is anonymous, and compares against the index digest, so an index change on another architecture reads as an update (ADR lines 359-362). A container recreated by digest would read as `pinned` from then on | `internal/executions/actions/scripts/docker_check_updates.sh:21-22,60,64` |
 | G12 | No candidate source for tag changes in a real install: nothing produces `registry.tags`, and `registrymeta.NewClient` has no production caller, so the chart's stable version stays "unknown" | `internal/web/ui/chart.go:446-451` |
 | G13 | Private reads fail closed in a real install: `SetRegistryReadAuthorizer` has no production caller, and the server never calls `ReadPrivateRegistry`. `PrivateClient` cannot fetch blobs by design | `internal/executor/registry_private.go:137`, `internal/registrymeta/private.go:48` |
 | G14 | No rollback state, action or image retention exists. `executor.db` migrations end at 0019 | `internal/executordb/migrations/` |
@@ -107,8 +107,11 @@ Gaps that the steps close:
 | Any floor reaches CRITICAL: recorded host, scanner, linked-host floor | none | **Refused**, at proposal and again at approval and claim. No separate approval path and no downgrade |
 | Digest-pinned image, unsupported or incomplete definition, unknown digest | none | **Unavailable**: no proposal is offered (ADR line 363, R3) |
 
-`docker.update_preview` (cu02) is LOW and read-only. It changes nothing and
-does not authorize anything.
+`docker.update_preview` (cu02) is LOW and read-only: it writes nothing on the
+host, not even a salt file, and does not authorize anything (ADR lines 423 and
+439: LOW means read-only). `docker.update_prepare` (cu02) creates the per-host
+salt of Q5, so it is MEDIUM and approved like any other host change. It touches
+no container and is not a container update.
 
 ## Steps, in order
 
@@ -120,13 +123,14 @@ Until they land, cu04 shows those targets as unavailable with a reason.
 
 ### cu01 Container permit contract (P2-03 contracts)
 
-- **Rules:** R5, R8, and the contract half of R6 and R2. **Gaps:** G3, G4, G5,
-  G6.
+- **Rules:** R5, R8, and the contract half of R6 and R2. **Gaps:** G3, G4, G6,
+  and the contract half of G5a. cu01 does not touch G5b (Q14).
 - **Paths:** `internal/canonical/`, `internal/permit/`,
   `internal/permit/batch/`, `internal/executor/batch_policy.go`,
-  `cmd/nebula/batch.go`, `test/security/`; `proto/` only if a typed view is
-  needed (the plan travels as `batch_json`).
-- **Protected: yes**, every production path.
+  `internal/registrymeta/` (the tag comparison), `cmd/nebula/batch.go`,
+  `test/security/`; `proto/` only if a typed view is needed (the plan travels
+  as `batch_json`).
+- **Protected: yes**, every production path except `internal/registrymeta/`.
 - **Contract:** a new optional member field `container_update`
   (`BatchContainerUpdate`). It is absent on existing members, so existing
   digests and golden values do not change; `BatchContainer` stays as it is for
@@ -134,42 +138,99 @@ Until they land, cu04 shows those targets as unavailable with a reason.
   key, SSH credential version and stage plan are already bound by the member.
   The new field adds:
   - `kind` (update or rollback), `form` (compose or standalone);
-  - `repository`, `platform`, `old_tag`, `new_tag`;
-  - `old_index_digest`, `old_platform_digest`, `new_index_digest`,
-    `new_platform_digest`;
-  - `configuration_digest`;
-  - `targets`: sorted `{service, container_id, container_name}`, with the
-    limit a named constant (proposal 50); full 64-hex IDs only;
-  - compose only: `project`, `working_dir_hash`, `config_files_hash`,
-    `dependencies`;
+  - `images`: sorted by `service`, exactly one entry per recreated service
+    (standalone: one entry with an empty `service`). Two services with the same
+    image have two entries, so nothing depends on how a project shares images.
+    Each entry is:
+    - `service`, `repository`, `platform`, `old_tag`, `new_tag`;
+    - `old_index_digest`, `old_platform_digest`, `new_index_digest`,
+      `new_platform_digest`. Platform digests are required; index digests are
+      empty only for an image without an index;
+    - `old_image_id`: the local image ID phase 1 compares and phase 3 retains;
+    - `policy_version`, `policy_digest`, `major_change`: required on an entry
+      whose tags differ and refused on a same-tag entry (R8, spec v23-11-09).
+      `policy_version` is `registrymeta.Result.PolicyVersion`; `policy_digest`
+      is the SHA-256 of the canonical `registrymeta.Policy`, so that two
+      policies cannot share a version string unnoticed (see Q13).
+  - `targets`: sorted `{service, container_id, container_name, image_id,
+    configuration_digest}`, full 64-hex IDs only. Every target's `service` has
+    an `images` entry and every entry has at least one target. `image_id` is
+    per target, because a rollback of a partly recreated project starts from
+    mixed replicas (cu03);
+  - `source_digest` (see Q5): what the containers were created from, unchanged
+    by the image change;
+  - compose only: `project`, `working_dir_hash`, `config_files_hash` (over the
+    operator's paths with the NOS override left out, so the value is the same
+    before and after an update), `dependencies`;
+  - `dependencies`: sorted `{service, relation, restart_on_update, containers}`
+    for every project service **outside** `images` that is connected to a
+    recreated service, directly or transitively. `relation` is `requires` (a
+    recreated service depends on it) or `required_by` (it depends on a recreated
+    service, so it is affected although it is not recreated).
+    `restart_on_update` is true when Compose's `depends_on.restart` says so.
+    `containers` is sorted `{container_id, container_name,
+    configuration_digest}`. An empty list is explicit: no dependencies. Targets
+    and dependencies together are R5's exact affected set (see Q12);
   - `registry`: empty for public images, otherwise registry ID, record digest,
     credential ID and credential version (cu06);
-  - `definition_version` (cu05), `rollback_of` (cu03).
-- **Functions:** `canonical.ContainerUpdateFloor` (MEDIUM when the tags match,
-  otherwise HIGH) and `canonical.ContainerUpdateParameters` (the rendering of
-  Decision 3). `docker.update` at `internal/canonical/batch.go:308` moves to
-  the new binding, and `docker.compose_update` joins it.
+  - `definition_version` (cu05), `rollback_of` and `recovery_plan_digest`
+    (cu03), each required exactly where those steps say and refused elsewhere.
+- **Limits:** named constants beside the validation:
+  `maxContainerUpdateImages = 20` and `maxContainerUpdateContainers = 50` over
+  targets and dependency containers together. The existing
+  `canonical.MaxParametersSize` (64 KiB) and `MaxBatchSize` (1 MiB) still apply.
+  A plan over any of them is refused; the operator splits it into more
+  batches, or the unit is shown as unavailable if one member alone is too large.
+- **Validity:** an entry with equal tags and equal platform digests is refused,
+  since it would recreate for nothing. A service whose image does not change
+  belongs in `dependencies`, or nowhere.
+- **Functions:**
+  - `canonical.ContainerUpdateFloor`: MEDIUM when **every** entry has equal
+    tags, otherwise HIGH. One tag change makes the whole member HIGH.
+  - `canonical.ContainerUpdateParameters`: the rendering of Decision 3.
+  - `registrymeta.CompareTags(old, new, policy)`: reuses the tag parser of
+    `stable.go` and reports major change, variant change or not comparable.
+  - `docker.update` at `internal/canonical/batch.go:308` moves to the new
+    binding, and `docker.compose_update` joins it.
 - **Enforcement:** `BatchPolicy.Evaluate` takes the maximum with the container
   floor and returns a typed `ErrContainerCritical` for CRITICAL, on every
-  evaluation including member revalidation. Both authorities refuse the
-  container mutation IDs on the classic path. The rule keys on the action ID,
-  so a module cannot pick the name to avoid it.
+  evaluation including member revalidation. For `kind=update` it also compares
+  each entry's `policy_version` and `policy_digest` with the executor's own
+  policy for that repository and recomputes `CompareTags`: a wrong
+  `major_change`, a variant change, or tags that cannot be compared is a refusal
+  (R8: unsupported conventions are unknown, no implicit major upgrade). A
+  same-tag refresh of `latest` needs no comparison. The policy values go into
+  the trust hash, so a policy changed after approval fails revalidation. Both
+  authorities refuse the container mutation IDs on the classic path. The rule
+  keys on the action ID, so a module cannot pick the name to avoid it.
+- **Limit of the floor:** `ContainerUpdateFloor` trusts the binding's tags. They
+  come from a server-side preview, so a forged `old_tag` could turn a tag change
+  into MEDIUM here. Evaluate cannot see the host; cu02's phase 1 closes this by
+  checking `old_tag` against the running container before anything changes.
 - **Risk classes:** defines MEDIUM, HIGH and the CRITICAL refusal. Nothing can
   run yet.
 - **Tests:**
   - canonical: table of malformed bindings (digest shape, short ID, leading
-    `-` in a name, duplicate target, unsorted targets, oversize, unknown key);
-    a mutation of any bound field changes the digest; new golden files, and
-    the existing ones byte-identical.
+    `-` in a name, duplicate target, unsorted targets, unsorted images, a target
+    without an image entry, an entry without a target, a second entry for one
+    service, a no-op entry, policy missing on a tag change, policy set on a
+    same-tag entry, malformed dependency relation, a service in both `images`
+    and `dependencies`, each limit exceeded, unknown key); a mutation of any
+    bound field in any image entry, target or dependency changes the digest; new
+    golden files, and the existing ones byte-identical.
+  - unit: `ContainerUpdateFloor` is HIGH when one of several entries changes its
+    tag; `CompareTags` table for major, minor, variant, date and non-version tags.
   - security (`test/security`): `TestContainerTagChangeBelowHighRefused`
     (server labels a tag change MEDIUM), `TestContainerBindingDiffersFromParameters`,
     `TestContainerCriticalFloorRefusedNotDowngraded` at proposal, approval and
     claim, `TestContainerCriticalAfterApprovalStopsMember`,
     `TestContainerMutationRefusedOnClassicPath`,
-    `TestRestartMemberCannotCarryUpdateBinding`.
+    `TestRestartMemberCannotCarryUpdateBinding`,
+    `TestContainerPolicyMismatchRefused`, `TestContainerPolicyChangedAfterApproval`,
+    `TestImplicitMajorUpgradeRefused`, `TestContainerVariantChangeRefused`.
 - **Real install:** nothing to enable; no action exists yet. `nebula batch
-  review` prints every new field, because the hardened path reads the plan
-  there.
+  review` prints every new field, per image and per container, because the
+  hardened path reads the plan there.
 
 ### cu02 Pinned Compose recreate as a durable member (P2-03 executor)
 
