@@ -118,14 +118,22 @@ type trafficLoop struct {
 	lastHour int64
 }
 
-// newTrafficIngest wires the ingester over the server database.
+// newTrafficIngest wires the ingester over the server database. The
+// store keeps data for retention (traffic.retention_days), the same
+// value the read-side stores use: the hourly prune removes exactly the
+// data the pages stop offering, never the 21-day default.
 func newTrafficIngest(db *sql.DB, hosts func(context.Context) ([]inventory.Host, error),
-	assets func(context.Context) ([]ipam.Asset, error), log *slog.Logger, now func() time.Time) (*trafficLoop, error) {
+	assets func(context.Context) ([]ipam.Asset, error), log *slog.Logger, now func() time.Time,
+	retention time.Duration) (*trafficLoop, error) {
 	recs := trafficRecords{hosts: hosts, assets: assets, maxHosts: maxTrafficHosts}
+	store, err := trafficstore.NewWithNowAndRetention(db, now, retention)
+	if err != nil {
+		return nil, fmt.Errorf("traffic ingest: %w", err)
+	}
 	ing, err := trafficingest.New(trafficingest.Config{
 		Source:  trafficingest.ExecutionSource{DB: db},
 		Records: recs,
-		Store:   trafficstore.NewWithNow(db, now),
+		Store:   store,
 		Now:     now,
 		Log:     log,
 	})

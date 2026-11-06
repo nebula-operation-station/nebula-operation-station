@@ -21,12 +21,14 @@ build:
 test:
 	$(GO) test -race -timeout 40m ./...
 
-# Deployment policy tests for the systemd units and nftables files.
+# Deployment policy tests for the systemd units and nftables files, and
+# for the shared quickstart binary list (deploy/quickstart/quickstart_test.sh).
 # python3 is required; the systemd-analyze and kernel nft checks skip
 # themselves when their tools are unavailable.
 test-deploy:
 	@command -v python3 >/dev/null 2>&1 || { echo "test-deploy: python3 is required" >&2; exit 1; }
 	python3 deploy/systemd/nebula-iconfetch_test.py
+	bash deploy/quickstart/quickstart_test.sh
 
 # Needs root: helper processes drop to other UIDs.
 test-privileged:

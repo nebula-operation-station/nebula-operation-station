@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/ipam"
@@ -46,20 +47,23 @@ type trafficIPAM interface {
 //     sandboxed renderer imports them from an opaque origin without
 //     cookies.
 //
-// Flows come from the traffic store with its default retention. Nodes and
+// Flows come from the traffic store with the configured retention
+// (traffic.retention_days, default 21 days); the model offers no window
+// longer than it. Nodes and
 // their addresses come only from the server's own records (inventory
 // hosts, IPAM assets and networks), never from what agents report; an
 // address claimed by more than one node stays unresolved (the builder
 // drops it, tmapi.Builder).
 func mountTrafficMap(pages *http.ServeMux, publicOrigin string, db *sql.DB,
 	hosts func(ctx context.Context) ([]inventory.Host, error), ip trafficIPAM, log *slog.Logger,
+	retention time.Duration,
 ) error {
-	flows, err := trafficstore.NewWithRetention(db, trafficstore.DefaultRetention)
+	flows, err := trafficstore.NewWithRetention(db, retention)
 	if err != nil {
 		return fmt.Errorf("traffic map: %w", err)
 	}
 	inv := trafficInventory(hosts, ip)
-	limits := tmapi.Limits{Retention: trafficstore.DefaultRetention}
+	limits := tmapi.Limits{Retention: retention}
 	builder, err := tmapi.NewBuilder(inv, flows, nil, limits)
 	if err != nil {
 		return fmt.Errorf("traffic map: %w", err)
