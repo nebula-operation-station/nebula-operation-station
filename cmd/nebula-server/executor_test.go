@@ -37,8 +37,8 @@ func TestLazyExecutorPVEAdminRPCsNotConnected(t *testing.T) {
 			t.Fatalf("got (%v, %v), want (nil, errNotConnected)", response, err)
 		}
 	})
-	t.Run("ListPVEAdminRemotes", func(t *testing.T) {
-		response, err := l.ListPVEAdminRemotes(context.Background(), &pb.ListPVEAdminRemotesRequest{})
+	t.Run("ListPVERemotes", func(t *testing.T) {
+		response, err := l.ListPVERemotes(context.Background(), &pb.ListPVERemotesRequest{})
 		if response != nil || err != errNotConnected {
 			t.Fatalf("got (%v, %v), want (nil, errNotConnected)", response, err)
 		}
@@ -74,6 +74,26 @@ func TestLazyExecutorReadGrants(t *testing.T) {
 	}
 	if r, err := rg.RevokeReadGrant(context.Background(), &pb.RevokeReadGrantRequest{GrantId: "x"}); r != nil || err != errNotConnected {
 		t.Fatalf("RevokeReadGrant = (%v, %v), want (nil, errNotConnected)", r, err)
+	}
+}
+
+// TestLazyExecutorReadGrantProposals guards the lease forms the same way:
+// without these methods every proposal reports that the executor does not
+// support read grants.
+func TestLazyExecutorReadGrantProposals(t *testing.T) {
+	var exec any = new(lazyExecutor)
+	rg, ok := exec.(interface {
+		ProposeReadGrant(context.Context, *pb.ProposeReadGrantRequest, ...grpc.CallOption) (*pb.ProposeReadGrantResponse, error)
+		CommitReadGrant(context.Context, *pb.CommitReadGrantRequest, ...grpc.CallOption) (*pb.CommitReadGrantResponse, error)
+	})
+	if !ok {
+		t.Fatal("lazyExecutor does not implement the read-grant proposal RPCs; the lease forms would be unavailable")
+	}
+	if r, err := rg.ProposeReadGrant(context.Background(), &pb.ProposeReadGrantRequest{}); r != nil || err != errNotConnected {
+		t.Fatalf("ProposeReadGrant = (%v, %v), want (nil, errNotConnected)", r, err)
+	}
+	if r, err := rg.CommitReadGrant(context.Background(), &pb.CommitReadGrantRequest{}); r != nil || err != errNotConnected {
+		t.Fatalf("CommitReadGrant = (%v, %v), want (nil, errNotConnected)", r, err)
 	}
 }
 
