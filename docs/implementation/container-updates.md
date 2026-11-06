@@ -181,9 +181,12 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     `old_tag` per entry could not express them. There an entry may have no
     target, but only when the row records every container of that service as
     `missing` (cu03);
-  - compose only, `source_digest` (see Q5): what the containers were created
-    from, unchanged by the image change. It is refused on a standalone member,
-    which binds `definition_id` and `definition_version` instead (Q20);
+  - compose only, `source_digest` (see Q5): what the operator's files render to
+    at preview time, unchanged by the image change. It shows that the files did
+    not change since the preview. It does **not** show that the containers were
+    created from them: cu02's phase 1 proves that on the host (Q21). It is
+    refused on a standalone member, which binds `definition_id` and
+    `definition_version` instead (Q20);
   - compose only: `project`, `working_dir_hash`, `config_files_hash` (over the
     operator's paths with the NOS override left out, so the value is the same
     before and after an update), `dependencies`;
@@ -379,6 +382,16 @@ Until they land, cu04 shows those targets as unavailable with a reason.
          `config_files` label names it and each frozen service's override entry
          equals its targets' reference (`override_drift`). A plain `docker
          compose up -d` after an update stops here;
+       - **applied configuration (Q21):** `docker compose ... config --hash
+         <frozen services>`, with the arguments of phase 5 and the override as it
+         is now, must print for each frozen service the value of the
+         `com.docker.compose.config-hash` label on every target. A difference, a
+         service missing from the output or a failed call is
+         `config_not_applied`. Neither call passes `--env-file` or `--profile`,
+         and the job does not run in an operator's shell, so a project brought up
+         with any of these stops here, as does a pending file edit. The hash is
+         unkeyed (Q5), so it is compared on the host only and appears in no
+         result, snapshot or log;
        - the image `old_image_id` still lists every digest of `old_digests`;
        - the dependency closure, recomputed as in the preview, equals the bound
          `dependencies`, and each dependency container has its bound ID, name
@@ -527,7 +540,9 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     names and paths; preview output never contains a planted env value;
     `TestPreviewWritesNothing` (a read-only fake host, with and without a salt);
     `TestPrepareKeepsExistingSalt`; `TestSourceDigestSurvivesUpdate` (equal before
-    and after an image change and a NOS override).
+    and after an image change and a NOS override);
+    `TestConfigHashCheckUsesPhaseFiveArguments` (same files, no `--env-file`, no
+    `--profile`), `TestConfigHashNeverLeavesHost`.
   - log (R4): `TestComposeFailureLogHoldsNoEnvValue`, a table where a fake
     `docker compose config`, `pull` and `up` fail and print a planted env value
     on stdout and stderr: neither result nor log may hold it, for preview and
@@ -563,6 +578,10 @@ Until they land, cu04 shows those targets as unavailable with a reason.
   - integration: real Docker and Compose, with a registry on loopback, on both
     image stores (classic and containerd), including that `--pull never` finds
     a `repo:tag@digest` reference (Q2), and a `depends_on` project.
+    `TestConfigHashMatchesLabelAcrossUpdates`: `config --hash` equals the label
+    before a first update, after it with the override in place, and after a
+    rollback (Q21). `TestConfigHashCoverage` lists what the hash leaves out on
+    the supported Compose versions.
 - **Real install:**
   - **`nebula artifact trust-builtins` must approve the new scripts**, or they
     stay at the HIGH floor. The server and executor must be upgraded together.
@@ -723,8 +742,11 @@ Until they land, cu04 shows those targets as unavailable with a reason.
       `running_reference` and `image_id`, because replicas may differ after
       `partial`. The set of present containers must equal the bound targets, in
       whatever state they are: the `target_not_running` and `scale_mismatch`
-      checks do not apply to a broken project. It recomputes `source_digest`, the
-      unchanged-source check, and captures its own baseline;
+      checks do not apply to a broken project. Nor does `config_not_applied`: the
+      labels of a partly recreated project differ by design, and the update's
+      phase 1 proved the applied configuration for this same `source_digest`
+      (only a row with a baseline reaches this point). It recomputes
+      `source_digest`, the unchanged-source check, and captures its own baseline;
     - phases 2 and 3 do not run: nothing is resolved or pulled, so a tag that
       moved since the update does not matter;
     - phase 4 verifies that each `retained_tag` still resolves to
@@ -974,6 +996,7 @@ operator brings the project back to what its files say.
 | Replicas of one service on different images, on an update | cu01 validation, cu02 phase 1 (`image_id`) | `mixed_images` | `TestUpdateRefusesMixedReplicaImages`, `TestMixedReplicasRefusedOnHost` |
 | Operator pin: a digest reference that is not the NOS override | cu02 phase 1 | `digest_pinned` | `TestOperatorPinRefused` |
 | Drift: the running state no longer follows the NOS override | cu02 phase 1 | `override_drift` | `TestOverrideDriftRefused` |
+| Applied configuration differs from what `up` would apply: a pending file edit, or a project brought up with `--env-file`, `--profile` or a shell variable (Q21) | Preview, cu02 phase 1 | `config_not_applied` | `TestPendingFileEditRefused`, `TestOperatorEnvFileRefused`, `TestOperatorProfileRefused`, `TestShellVariableRefused` |
 | The local digest can be neither listed nor compared | Preview, cu01 (empty `old_digests`) | `old_digest_unknown` | `TestUnanswerableLocalDigestIsUnknown` |
 | A container whose snapshot entry exceeds its limit | cu02 phase 1 | `snapshot_too_large` | `TestOversizeSnapshotRefused` |
 | Rollback of a row without a baseline | cu03 Evaluate | `no_baseline` | `TestRollbackRefusedWithoutBaseline` |
@@ -1075,8 +1098,9 @@ cannot start without the answer.
      the new value, which is what a rollback binds.
    - `source_digest`, per unit: over the output of `docker compose config` run on
      the operator's files **without** the NOS override, so it includes `.env`
-     and `env_file` values and stays the same across an update. A standalone
-     unit has no `source_digest` (Q20).
+     and `env_file` values and stays the same across an update. It says what
+     the files render to now, not what the containers were created from (Q21). A
+     standalone unit has no `source_digest` (Q20).
 
    A LOW read may not create the salt (ADR lines 423 and 439), so the MEDIUM
    `docker.update_prepare` does, and preview without a salt reports
@@ -1211,3 +1235,33 @@ cannot start without the answer.
     vault secret, so the digest adds nothing, and no digest of a definition
     leaves the executor. Alternative: an HMAC with an executor-held key, which
     gives the review a value to compare but needs a new key for no added binding.
+21. **What enforces "the same complete configuration"? Blocks cu02.** R1, ADR
+    lines 456-457 and spec v23-11-12 allow only the image to change. `source_digest`
+    hashes the current files and phase 1 compares it with the preview's value, so
+    it shows only that nothing changed since the preview. A pending file edit, an
+    operator `--env-file` or `--profile`, or a shell variable from the original
+    `up` passes that comparison, phase 5 passes none of them, and `up` would
+    apply the difference to the frozen containers together with the image. The
+    judge sees ports, mounts and networks only. *Recommendation, used by the
+    steps:* narrow the scope with phase 1's `config_not_applied` check, over the
+    same files and environment as phase 5, and report the same reason in preview,
+    so the unit is unavailable. Compose writes this label when it creates a
+    container and decides on a recreate by this hash, so an equal hash means the
+    file set renders what the container already runs, and the override's image is
+    what `up` changes. The way out is on the host: bring the project back with a
+    plain `docker compose up -d`, moving any `--env-file` or `--profile` use into
+    `.env`, then take a new preview. No new state, action or evidence format is
+    added. Consequences to confirm:
+    - A project that needs `--env-file` or `--profile` at every `up` cannot be
+      updated by NOS. Passing them on would need them bound and approved, which
+      this plan does not do.
+    - A Compose upgrade that changes how the hash is computed reads as
+      `config_not_applied` until the next plain `up`. That fails closed.
+    - An edit between phase 1 and phase 5 is not caught.
+    - Fields Compose leaves out of the hash are not proved. cu02's
+      `TestConfigHashCoverage` must list them. If one of them can reach a recreated
+      container, it needs its own check or the maintainer accepts it.
+    - That `config --hash` equals the label for a service recreated through the
+      override is assumed here and must be shown by cu02's first integration test,
+      as in Q2. If it fails, the first update would be the only provable one, and
+      the Compose path stops for a maintainer decision.
