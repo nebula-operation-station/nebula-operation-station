@@ -30,6 +30,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
 )
 
@@ -40,8 +41,8 @@ const (
 	// fileImported means the observation was ingested without dataset
 	// errors.
 	fileImported fileOutcome = iota
-	// filePartial means the store failed at least one dataset; the applied
-	// datasets are kept and the file stays for the next pass.
+	// filePartial means the store failed on the observation, wholly or for
+	// some datasets; applied datasets are kept and the file stays for a retry.
 	filePartial
 	// fileReplayed means the observation was rejected as a replay or a
 	// stale collection.
@@ -64,8 +65,8 @@ type ImportReport struct {
 	// Imported is the number of observations ingested without dataset
 	// errors.
 	Imported int
-	// Partial is the number of observations the store failed at least one
-	// dataset of; their files stay for the next pass.
+	// Partial is the number of observations the store failed on, wholly or
+	// for some datasets; their files stay for a retry.
 	Partial int
 	// Replayed is the number of observations rejected as replay or stale.
 	Replayed int
@@ -88,6 +89,9 @@ type Importer struct {
 	spool *Spool
 	store *pveinventory.Store
 	log   *slog.Logger
+	// ingest applies an observation; it is Store.IngestObservation outside
+	// tests.
+	ingest func(context.Context, pvecontract.Observation) (pveinventory.IngestReport, error)
 	// remove unlinks a processed file; it is Spool.Remove outside tests.
 	remove func(context.Context, string) error
 	// stuck holds processed files whose removal failed.
@@ -109,7 +113,7 @@ func NewImporter(spool *Spool, store *pveinventory.Store, log *slog.Logger) (*Im
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Importer{spool: spool, store: store, log: log, remove: spool.Remove, stuck: stuckFiles{}}, nil
+	return &Importer{spool: spool, store: store, log: log, ingest: store.IngestObservation, remove: spool.Remove, stuck: stuckFiles{}}, nil
 }
 
 // ImportOnce processes every spool file: revalidate, replay-check, ingest,
@@ -237,7 +241,7 @@ func (im *Importer) importFile(ctx context.Context, name string) (fileOutcome, s
 		im.drop(ctx, name, err)
 		return fileReplayed, "replayed_observation"
 	}
-	irep, err := im.store.IngestObservation(ctx, obs)
+	irep, err := im.ingest(ctx, obs)
 	switch {
 	case err != nil && ctx.Err() != nil:
 		return fileInterrupted, ""
@@ -247,18 +251,18 @@ func (im *Importer) importFile(ctx context.Context, name string) (fileOutcome, s
 	case errors.Is(err, pveinventory.ErrStaleObservation):
 		im.drop(ctx, name, err)
 		return fileReplayed, "replayed_observation"
-	case len(irep.Errors) > 0:
-		// The observation passed validation, so these are store failures.
-		// The applied datasets are committed; the file stays, because the
-		// watermark admits its own generation and ingest is idempotent, so
-		// the next pass applies the failed datasets. Store errors can quote
-		// observation values, so only a fixed code is logged.
-		im.log.Warn("pvecollect: observation kept for retry", "file", name, "reason", "store_failed")
-		return filePartial, "partial_observation"
-	default:
+	case len(irep.Errors) == 0 && errors.Is(err, pvecontract.ErrInvalid):
 		// Whole-observation validation failed; nothing was applied.
 		im.drop(ctx, name, err)
 		return fileRejected, "invalid_observation"
+	default:
+		// Any other failure lies with the store, not the file. Datasets that
+		// were applied are committed; the file stays, because the watermark
+		// admits its own generation and ingest is idempotent, so a retry
+		// applies the failed datasets. Store errors can quote observation
+		// values, so only a fixed code is logged.
+		im.log.Warn("pvecollect: observation kept for retry", "file", name, "reason", "store_failed")
+		return filePartial, "partial_observation"
 	}
 }
 
