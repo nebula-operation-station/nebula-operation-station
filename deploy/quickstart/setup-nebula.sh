@@ -195,6 +195,7 @@ binaries=()
 if [[ -n "$binaries_out" ]]; then
   mapfile -t binaries <<< "$binaries_out"
 fi
+[[ ${#binaries[@]} -gt 0 ]] || die "$binaries_file lists no binaries"
 for b in "${binaries[@]}"; do
   install -m 0755 "$repo/bin/$b" "$repo/$b"
 done

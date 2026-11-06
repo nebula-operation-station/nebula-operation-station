@@ -115,6 +115,22 @@ if [[ ${#copy_block[@]} -gt 0 ]] && eval "$(printf '%s\n' "${copy_block[@]}")"; 
 else
   bad "setup-nebula.sh copy block copies all five binaries next to deploy/ (block missing or failed)"
 fi
+# A comments-only list is not a list: the block must stop instead of
+# copying nothing (install.sh would then fail on a list it cannot see).
+printf '# only comments\n\n' > "$sandbox/deploy/quickstart/binaries.txt"
+if ( eval "$(printf '%s\n' "${copy_block[@]}")" ); then
+  bad "setup-nebula.sh copy block fails on a comments-only list"
+else
+  ok "setup-nebula.sh copy block fails on a comments-only list"
+fi
+# An invalid line must stop the block too (the parser rejects it).
+printf 'bad/name\n' > "$sandbox/deploy/quickstart/binaries.txt"
+if ( eval "$(printf '%s\n' "${copy_block[@]}")" ); then
+  bad "setup-nebula.sh copy block fails on an invalid line"
+else
+  ok "setup-nebula.sh copy block fails on an invalid line"
+fi
+cp "$list_file" "$sandbox/deploy/quickstart/binaries.txt"
 
 # --- 5. Functional: the load block of install.sh yields the five names ------
 # Same idea for install.sh: run its real load block with a sandbox
