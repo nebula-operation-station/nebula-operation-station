@@ -1480,7 +1480,10 @@ and compares the file in `/etc/systemd/system` with it:
 
 A masked unit stays masked: `install.sh` warns, does not enable, start or
 restart it, and carries on with the other units. `systemctl unmask` and
-another run of `install.sh` bring it back.
+another run of `install.sh` bring it back. The same goes for a path or timer
+unit whose target is masked, for example `nebula-discovery.path` and
+`nebula-discovery.timer` when `nebula-discovery.service` is masked, because
+systemd refuses to start them.
 
 If an install stops halfway, `/var/lib/nebula/units.pending` keeps the shipped
 versions it wrote. The next run, also from a newer tarball, treats them as

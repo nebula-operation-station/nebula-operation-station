@@ -660,6 +660,21 @@ unit_masked() {
   [[ "${state}" == "masked" || "${state}" == "masked-runtime" ]]
 }
 
+# masked_target NAME prints the unit that the path or timer unit NAME starts
+# if that unit is masked, nothing otherwise. systemd refuses to start such a
+# trigger, and to restart it once stopped, so it is treated like a masked unit.
+# Triggers is what systemd resolved, so Unit= in a drop-in counts as well.
+masked_target() {
+  local target
+  [[ "$1" == *.path || "$1" == *.timer ]] || return 0
+  for target in $(systemctl show --property=Triggers --value "$1" 2>/dev/null); do
+    if unit_masked "${target}"; then
+      printf '%s\n' "${target}"
+      return 0
+    fi
+  done
+}
+
 for name in "${enable_units[@]}"; do
   # nebula-discovery.service is started by its path unit and timer and has
   # no [Install] section, so it is not enabled.
@@ -668,6 +683,11 @@ for name in "${enable_units[@]}"; do
   fi
   if unit_masked "${name}"; then
     echo "install.sh: warning: ${name} is masked; not enabling or starting it (undo: systemctl unmask ${name})" >&2
+    continue
+  fi
+  masked=$(masked_target "${name}")
+  if [[ -n "${masked}" ]]; then
+    echo "install.sh: warning: ${name} starts ${masked}, which is masked; not enabling or starting it (undo: systemctl unmask ${masked}, then run install.sh again)" >&2
     continue
   fi
   # The executor is enabled here (before the discovery units) so its boot
@@ -712,6 +732,10 @@ for name in "${refreshed_units[@]}"; do
   case "${name}" in
     nebula-server.service|nebula-executor.service|nebula-discovery.service) ;;
     *)
+      # Warned about above: the stop would work, the start would be refused.
+      if [[ -n "$(masked_target "${name}")" ]]; then
+        continue
+      fi
       systemctl try-restart "${name}" \
         || echo "install.sh: warning: could not restart ${name}; check: systemctl status ${name}" >&2
       ;;

@@ -692,7 +692,9 @@ done
 # Runs the real unit selection and the real enable and restart steps of
 # install.sh after the refresh block, against the sandbox above, with a
 # systemctl stub that logs every call and refuses masked units like the real
-# one: `enable` and `restart` fail, which under set -e aborts the script.
+# one: `enable` and `restart` fail, which under set -e aborts the script. It
+# also refuses to start a path or timer unit whose target is masked, as
+# systemd does, while `enable` alone and a start of a running unit succeed.
 select_block=$(sed -n '/^# begin: select units/,/^# end: select units/p' "$install_sh")
 start_block=$(sed -n '/^# begin: start units/,/^# end: start units/p' "$install_sh")
 systemctl_log="$refresh_sb/systemctl.log"
@@ -724,6 +726,40 @@ stub_unit_state() {
     echo disabled
   fi
 }
+# stub_trigger_target <unit>: what a path or timer unit starts: its Unit= line
+# or the service of the same name, nothing for any other unit.
+stub_trigger_target() {
+  local line target="${1%.*}.service"
+  if [[ "$1" != *.path && "$1" != *.timer ]]; then
+    return 0
+  fi
+  if [[ -f "$refresh_sb/etc/$1" ]]; then
+    while IFS= read -r line; do
+      if [[ "$line" == Unit=* ]]; then
+        target="${line#Unit=}"
+      fi
+    done < "$refresh_sb/etc/$1"
+  fi
+  printf '%s\n' "$target"
+}
+# stub_start_refused <systemctl call...>: succeeds if the call has to start a
+# trigger whose target is masked. A start of a running unit changes nothing,
+# `enable` alone starts nothing, and try-restart touches only a running unit.
+stub_start_refused() {
+  local unit="${*: -1}" target running=0
+  target=$(stub_trigger_target "$unit")
+  if [[ -z "$target" || "$(stub_unit_state "$target")" != masked* ]]; then
+    return 1
+  fi
+  if [[ " $stub_active " == *" $unit "* ]]; then
+    running=1
+  fi
+  case "$1 $running" in
+    "enable 0") [[ "$2" == --now ]] ;;
+    "restart "*|"try-restart 1") return 0 ;;
+    *) return 1 ;;
+  esac
+}
 stub_systemctl() {
   local unit="${*: -1}" state
   printf '%s\n' "$*" >> "$systemctl_log"
@@ -742,9 +778,16 @@ stub_systemctl() {
     is-active)
       [[ " $stub_active " == *" $unit "* ]]
       ;;
+    show)
+      stub_trigger_target "$unit"
+      ;;
     enable|restart|try-restart)
       if [[ "$state" == masked* ]]; then
         echo "stub: Unit ${unit} is masked." >&2
+        return 1
+      fi
+      if stub_start_refused "$@"; then
+        echo "stub: Refusing to start ${unit}, the unit it triggers is not loaded." >&2
         return 1
       fi
       ;;
@@ -807,6 +850,8 @@ not_called() { ! called "$1"; }
 restarts_are() { [[ "$(grep -E '^(restart|try-restart) ' "$systemctl_log")" == "$1" ]]; }
 is_mask_link() { [[ -L "$1" && "$(readlink "$1")" == /dev/null ]]; }
 rc_not_zero() { [[ "$refresh_rc" -ne 0 ]]; }
+stub_accepts() { stub_systemctl "$@" 2>/dev/null; }
+stub_refuses() { ! stub_accepts "$@"; }
 nothing_pending() { [[ ! -e "$refresh_sb/var/units.pending" ]]; }
 pending_has() { grep -qxF "$1  $2" "$refresh_sb/var/units.pending"; }
 
@@ -902,6 +947,87 @@ CASES
   expect "masked timer: the warning says how to undo it" out_has 'systemctl unmask nebula-discovery.timer'
   expect "masked timer: the other units are still enabled" called 'enable --now nebula-discovery.path'
   expect "masked timer: the services still restart" restarts_are $'restart nebula-server.service\nrestart nebula-executor.service'
+
+  # The stub must refuse what systemd refuses, or the cases below prove nothing.
+  discovery=nebula-discovery.service
+  installed_host
+  ln -sf /dev/null "$refresh_sb/etc/$discovery"
+  for trigger in nebula-discovery.path nebula-discovery.timer; do
+    stub_active="$both_services"
+    expect "stub: refuses enable --now on stopped ${trigger}, target masked" stub_refuses enable --now "$trigger"
+    expect "stub: refuses restart of stopped ${trigger}, target masked" stub_refuses restart "$trigger"
+    expect "stub: enable alone starts nothing on ${trigger}" stub_accepts enable "$trigger"
+    expect "stub: try-restart leaves stopped ${trigger} alone" stub_accepts try-restart "$trigger"
+    stub_active="$both_services $trigger"
+    expect "stub: enable --now on running ${trigger} starts nothing" stub_accepts enable --now "$trigger"
+    expect "stub: refuses try-restart of running ${trigger}, target masked" stub_refuses try-restart "$trigger"
+  done
+  rm -f "$refresh_sb/etc/$discovery"
+  stub_active="$both_services"
+  expect "stub: accepts enable --now without a mask" stub_accepts enable --now nebula-discovery.path
+
+  # systemd refuses to start a stopped path or timer unit whose target is
+  # masked, so both stay as they are and the run reaches the executor restart
+  # and the pending cleanup. <how> names one way to mask nebula-discovery.service.
+  while read -r how; do
+    installed_host
+    ship nebula-server.service 'nebula-server.service v2'
+    case "$how" in
+      link) ln -sf /dev/null "$refresh_sb/etc/$discovery" ;;
+      empty) : > "$refresh_sb/etc/$discovery" ;;
+      runtime) stub_runtime_masked="$discovery" ;;
+    esac
+    inst_bin_changed=1
+    run_install
+    expect "masked target (${how}): the install runs to its end" rc_is 0
+    expect "masked target (${how}): the end is reached" out_has $'\nEND'
+    expect "masked target (${how}): the path unit is not enabled" not_called 'enable --now nebula-discovery.path'
+    expect "masked target (${how}): the timer is not enabled" not_called 'enable --now nebula-discovery.timer'
+    expect "masked target (${how}): the warning names the path unit" out_has "warning: nebula-discovery.path starts $discovery, which is masked"
+    expect "masked target (${how}): the warning names the timer" out_has "warning: nebula-discovery.timer starts $discovery, which is masked"
+    expect "masked target (${how}): the warning says how to undo it" out_has "systemctl unmask $discovery"
+    expect "masked target (${how}): the services still restart" restarts_are $'restart nebula-server.service\nrestart nebula-executor.service'
+    expect "masked target (${how}): nothing stays pending" nothing_pending
+  done <<'CASES'
+link
+empty
+runtime
+CASES
+
+  # What counts is the Unit= systemd reports, not the name of the trigger.
+  installed_host
+  printf 'Unit=nebula-pve-collector.service\n' > "$refresh_sb/etc/nebula-discovery.path"
+  ln -sf /dev/null "$refresh_sb/etc/nebula-pve-collector.service"
+  run_install
+  expect "other Unit= masked: the install runs to its end" rc_is 0
+  expect "other Unit= masked: the trigger is not enabled" not_called 'enable --now nebula-discovery.path'
+  expect "other Unit= masked: the warning names the target" out_has 'nebula-discovery.path starts nebula-pve-collector.service, which is masked'
+  expect "other Unit= masked: the timer of an unmasked target is enabled" called 'enable --now nebula-discovery.timer'
+
+  # A running trigger stays running: a restart would stop it for good.
+  installed_host
+  ln -sf /dev/null "$refresh_sb/etc/$discovery"
+  ship nebula-discovery.path 'nebula-discovery.path v2'
+  stub_active="$both_services nebula-discovery.path"
+  run_install
+  expect "running trigger, masked target: the install runs to its end" rc_is 0
+  expect "running trigger, masked target: not try-restarted" not_called 'try-restart nebula-discovery.path'
+  expect "running trigger, masked target: no failed restart reported" out_lacks 'could not restart'
+
+  # Package mode walks the same loop, and unmasking brings the triggers back.
+  installed_host
+  ln -sf /dev/null "$refresh_sb/etc/$discovery"
+  inst_from_package=1
+  run_install
+  expect "package mode, masked target: the install runs to its end" rc_is 0
+  expect "package mode, masked target: the path unit is not enabled" not_called 'enable --now nebula-discovery.path'
+  expect "package mode, masked target: the timer is not enabled" not_called 'enable --now nebula-discovery.timer'
+  expect "package mode, masked target: the others are enabled" called 'enable --now nebula-server.service'
+  inst_from_package=0
+  rm -f "$refresh_sb/etc/$discovery"
+  run_install
+  expect "unmasked target: the path unit is enabled again" called 'enable --now nebula-discovery.path'
+  expect "unmasked target: the timer is enabled again" called 'enable --now nebula-discovery.timer'
 
   installed_host
   ln -sf /dev/null "$refresh_sb/etc/nebula-executor.service"
