@@ -64,58 +64,70 @@ done
 # --- 3. No hardcoded second copy of the list remains ------------------------
 # A for-loop over literal binary names, or a literal array of them, is the
 # drift this guards against: the scripts must iterate the loaded array.
+#
+# count_names prints how many of the expected binary names appear as whole
+# tokens in the given text. Names are extracted as runs of [A-Za-z0-9.-], so
+# quoted names, names at the start or end of an array, and backslash-
+# continued word lists all match; keeping the dot inside the token means a
+# unit file like nebula-server.service does not match the binary nebula-server.
+count_names() {
+  local text="$1" name tok found
+  local -a toks=()
+  mapfile -t toks < <(printf '%s' "$text" | grep -oE '[A-Za-z0-9.-]+' || true)
+  local n=0
+  for name in "${expected[@]}"; do
+    found=0
+    for tok in "${toks[@]}"; do
+      if [[ "$tok" == "$name" ]]; then found=1; break; fi
+    done
+    (( found )) && n=$((n + 1))
+  done
+  printf '%s' "$n"
+}
 # find_hardcoded prints one line per hardcoded list it finds:
-#   - a for-loop (quoted or unquoted) whose word list names a binary,
-#   - an array literal (single- or multi-line) holding two or more names.
+#   - a for-loop (quoted or unquoted, backslash-continued) whose word list
+#     names at least one binary,
+#   - an array literal (plain name=(, name+=(, or declare -a name=,
+#     single- or multi-line) holding two or more names.
 # Message lines may name binaries in prose; only loops and arrays count.
 find_hardcoded() {
-  local s="$1" line rest tok name n
-  local -a block=()
-  while IFS= read -r line; do
-    if [[ ${#block[@]} -gt 0 ]]; then
-      block+=("$line")
-      if [[ "$line" == *")"* ]]; then
-        n=0
-        for name in "${expected[@]}"; do
-          for l in "${block[@]}"; do
-            [[ " $l " == *" $name "* ]] && n=$((n + 1))
-          done
-        done
-        if [[ $n -ge 2 ]]; then
-          printf '%s: %s\n' "$(basename -- "$s")" "${block[0]}"
-        fi
-        block=()
-      fi
-      continue
-    fi
-    if [[ "$line" =~ ^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=\( ]]; then
+  local s="$1" line rest n
+  local -a lines=() block=()
+  mapfile -t lines < <(grep -vE '^[[:space:]]*#' "$s")
+  local i=0
+  while (( i < ${#lines[@]} )); do
+    line="${lines[i]}"
+    i=$((i + 1))
+    # array literal: name=(, name+=(, or declare -a name=(
+    if [[ "$line" =~ ^[[:space:]]*(declare[[:space:]]+(-[aA][[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*)[+]?=\( ]]; then
       block=("$line")
-      if [[ "$line" == *")"* ]]; then
-        n=0
-        for name in "${expected[@]}"; do
-          [[ " $line " == *" $name "* ]] && n=$((n + 1))
+      if [[ "$line" != *")"* ]]; then
+        while (( i < ${#lines[@]} )); do
+          line="${lines[i]}"
+          i=$((i + 1))
+          block+=("$line")
+          [[ "$line" == *")"* ]] && break
         done
-        if [[ $n -ge 2 ]]; then
-          printf '%s: %s\n' "$(basename -- "$s")" "$line"
-        fi
-        block=()
+      fi
+      n=$(count_names "$(printf '%s\n' "${block[@]}")")
+      if (( n >= 2 )); then
+        printf '%s: %s\n' "$(basename -- "$s")" "${block[0]}"
       fi
       continue
     fi
+    # for-loop over literal names (possibly backslash-continued)
     if [[ "$line" =~ ^[[:space:]]*for[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+in[[:space:]]+(.*)$ ]]; then
-      rest=${BASH_REMATCH[1]//\"/}
-      rest=${rest//\'/}
-      n=0
-      for tok in $rest; do
-        for name in "${expected[@]}"; do
-          [[ "$tok" == "$name" ]] && n=1
-        done
+      rest="${BASH_REMATCH[1]}"
+      while [[ "$rest" == *"\\" ]] && (( i < ${#lines[@]} )); do
+        rest="$rest ${lines[i]}"
+        i=$((i + 1))
       done
-      if [[ $n -eq 1 ]]; then
+      n=$(count_names "$rest")
+      if (( n >= 1 )); then
         printf '%s: %s\n' "$(basename -- "$s")" "$line"
       fi
     fi
-  done < <(grep -vE '^[[:space:]]*#' "$s")
+  done
 }
 hardcoded=()
 for s in "$setup_sh" "$install_sh" "$uninstall_sh"; do
@@ -129,7 +141,8 @@ else
   bad "no hardcoded binary list loop remains in the scripts (${hardcoded[*]})"
 fi
 # The guard must catch the variants it exists for: unquoted and quoted
-# loops, single-line and multi-line array literals.
+# loops (including a backslash-continued one), single-line and multi-line
+# array literals (plain, fully-quoted, declare -a, and += forms).
 fixture=$(mktemp)
 cat > "$fixture" <<'FIX'
 for bin in nebula nebula-server nebula-executor nebula-discovery nebula-pve-collector; do
@@ -138,18 +151,27 @@ done
 for bin in "nebula" "nebula-server" "nebula-executor" "nebula-discovery" "nebula-pve-collector"; do
   rm -f /usr/bin/$bin
 done
+for bin in \
+  nebula \
+  nebula-server; do
+  rm -f /usr/bin/$bin
+done
 binaries=(nebula nebula-server nebula-executor nebula-discovery nebula-pve-collector)
+binaries=("nebula" "nebula-server" "nebula-executor" "nebula-discovery" "nebula-pve-collector")
 units=(
   nebula
   nebula-server
 )
+declare -a units2=(nebula nebula-server)
+units3=()
+units3+=(nebula nebula-server)
 FIX
 hits=$(find_hardcoded "$fixture")
 rm -f "$fixture"
-if [[ $(printf '%s\n' "$hits" | grep -c .) -eq 4 ]]; then
-  ok "case 3 guard catches all four hardcoded variants"
+if [[ $(printf '%s\n' "$hits" | grep -c .) -eq 8 ]]; then
+  ok "case 3 guard catches all eight hardcoded variants"
 else
-  bad "case 3 guard catches all four hardcoded variants (got: ${hits@Q})"
+  bad "case 3 guard catches all eight hardcoded variants (got: ${hits@Q})"
 fi
 
 # --- 4. Functional: the copy block of setup-nebula.sh copies all five -------
