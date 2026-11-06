@@ -10,5 +10,5 @@ import "embed"
 
 // FS contains the static assets served under /static/.
 //
-//go:embed htmx.min.js app.css chart-indicators.css icons.svg webauthn.js login.js setup.js nav.js time.js settings.js dashboard.js inventory.js operations.js inventory-import.js repin.js inventory-enroll.js schedules.js runbooks.js modules.js network.js discovery.js host.js formpost.js runop.js pinhosts.js software.js deployprofiles.js trafficmap-bridge.js trafficmap/*.js
+//go:embed htmx.min.js app.css chart-indicators.css icons.svg webauthn.js login.js setup.js nav.js time.js settings.js dashboard.js inventory.js bulkbar.js operations.js inventory-import.js repin.js inventory-enroll.js schedules.js runbooks.js modules.js network.js discovery.js host.js formpost.js runop.js pinhosts.js software.js deployprofiles.js trafficmap-bridge.js trafficmap/*.js
 var FS embed.FS
