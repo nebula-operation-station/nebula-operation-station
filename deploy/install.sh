@@ -512,6 +512,15 @@ else
   echo "install.sh: started nebula-executor (was not active)"
 fi
 
+# The collector has no drop-in of its own; restart it when the binaries
+# changed, the same way as the server and the executor (WA-08). It exits
+# only on failure, so without this it would keep running the old binary
+# against the new executor.
+if systemctl is-active --quiet nebula-pve-collector.service && [[ ${bin_changed} -eq 1 ]]; then
+  systemctl restart nebula-pve-collector.service
+  echo "install.sh: restarted nebula-pve-collector (binaries changed)"
+fi
+
 # --- Next steps --------------------------------------------------------------
 cat <<EOF
 

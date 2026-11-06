@@ -27,7 +27,7 @@ EOF
     cat <<EOF
 nebula: the new version is installed; the services keep running the old one.
 nebula: back up, then restart (the new version migrates the databases):
-nebula:   sudo nebula backup && sudo systemctl restart nebula-executor nebula-server
+nebula:   sudo nebula backup && sudo systemctl restart nebula-executor nebula-server nebula-pve-collector
 nebula: then run nebula unlock.
 EOF
     ;;

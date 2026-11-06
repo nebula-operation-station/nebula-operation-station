@@ -306,6 +306,25 @@ else
   fail=$((fail + 1))
 fi
 
+# --- Restart on upgrade (WA-08) ----------------------------------------------
+# install.sh must restart nebula-pve-collector when the binaries changed, the
+# same way as the server and the executor: only when the unit is active and
+# bin_changed is set, never unconditionally. The collector has no drop-in of
+# its own, so bin_changed is its only trigger. The .deb postinst hint must
+# name the collector alongside the executor and the server.
+check_line "install.sh restarts the collector only when active and binaries changed" "$install_sh" \
+  'if systemctl is-active --quiet nebula-pve-collector.service && [[ ${bin_changed} -eq 1 ]]; then'
+if grep -qF 'systemctl restart nebula-pve-collector.service' "$install_sh"; then
+  echo "ok   install.sh restarts the collector service"
+  pass=$((pass + 1))
+else
+  echo "FAIL install.sh restarts the collector service: line not found in $install_sh"
+  fail=$((fail + 1))
+fi
+postinst="${script_dir}/deb/postinst"
+check_line "postinst hint names the collector" "$postinst" \
+  'nebula:   sudo nebula backup && sudo systemctl restart nebula-executor nebula-server nebula-pve-collector'
+
 # --- Root-gated: real runs of install.sh and uninstall.sh -------------------
 # These two cases exercise the systemd handling, which the dry-run mode
 # exits before reaching. They need root and a running systemd; the first
