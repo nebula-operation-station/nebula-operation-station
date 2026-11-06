@@ -8,14 +8,17 @@
 // itself; the spool is its only input.
 //
 // The spool is a one-shot handoff: every file is removed after it has been
-// processed (imported, partial, replayed or rejected). The collector
-// re-collects each remote within one interval, and a kept file could never
-// be re-applied once the store's collection watermark has advanced, so
-// keeping it would only grow the spool. A file that cannot be removed is
-// not processed again (stuckFiles); only the unlink is retried. A file below
-// its remote's stored generation is dropped by name, unread, so a backlog
-// left behind costs no decoding after a restart either. A pass interrupted
-// by shutdown leaves its remaining files for the next start.
+// processed (imported, replayed or rejected). The collector re-collects each
+// remote within one interval, and a file could never be re-applied once the
+// store's collection watermark has passed it, so keeping such a file would
+// only grow the spool. A file the store failed on stays: the failure says
+// nothing about the observation, and its own generation may be ingested
+// again, so the next pass retries it until it applies or a newer generation
+// supersedes it. A file that cannot be removed is not processed again
+// (stuckFiles); only the unlink is retried. A file below its remote's stored
+// generation is dropped by name, unread, so a backlog left behind costs no
+// decoding after a restart either. A pass interrupted by shutdown leaves its
+// remaining files for the next start.
 
 package pvecollect
 
@@ -36,8 +39,8 @@ const (
 	// fileImported means the observation was ingested without dataset
 	// errors.
 	fileImported fileOutcome = iota
-	// filePartial means the observation was ingested with at least one
-	// dataset error; the applied datasets are kept.
+	// filePartial means the store failed at least one dataset; the applied
+	// datasets are kept and the file stays for the next pass.
 	filePartial
 	// fileReplayed means the observation was rejected as a replay or a
 	// stale collection.
@@ -57,8 +60,8 @@ type ImportReport struct {
 	// Imported is the number of observations ingested without dataset
 	// errors.
 	Imported int
-	// Partial is the number of observations ingested with at least one
-	// dataset error.
+	// Partial is the number of observations the store failed at least one
+	// dataset of; their files stay for the next pass.
 	Partial int
 	// Replayed is the number of observations rejected as replay or stale.
 	Replayed int
@@ -106,8 +109,9 @@ func NewImporter(spool *Spool, store *pveinventory.Store, log *slog.Logger) (*Im
 // remove. Files an earlier pass processed but could not remove are only
 // removed again, and files below their remote's stored generation are
 // dropped unread. Per-file failures are recorded in the report and do not
-// abort the pass. It returns an error when the spool itself cannot be
-// listed or ctx ends; files not reached stay in the spool.
+// abort the pass; a file the store failed on stays for the next pass. It
+// returns an error when the spool itself cannot be listed or ctx ends; files
+// not reached stay in the spool.
 func (im *Importer) ImportOnce(ctx context.Context) (ImportReport, error) {
 	names, err := im.spool.List(ctx)
 	if err != nil {
@@ -199,8 +203,8 @@ func (im *Importer) Run(ctx context.Context, interval time.Duration) error {
 }
 
 // importFile processes one spool file and removes it afterwards, unless ctx
-// ended during ingest: every failure then comes from the shutdown, not from
-// the file, and the store's watermark may not have advanced.
+// ended during ingest or the store failed: the failure then does not come
+// from the file, and a retry of the same generation applies what is missing.
 // The returned message is short and safe to log: it comes from the spool's
 // fixed rejection codes, never decoder or validation text.
 func (im *Importer) importFile(ctx context.Context, name string) (fileOutcome, string) {
@@ -229,11 +233,12 @@ func (im *Importer) importFile(ctx context.Context, name string) (fileOutcome, s
 		im.drop(ctx, name, err)
 		return fileReplayed, "replayed_observation"
 	case len(irep.Errors) > 0:
-		// Per-dataset failures: the applied datasets are committed, the
-		// failed ones are recorded in the report. The file is dropped
-		// because the collection watermark has advanced and a retry
-		// would be rejected as stale.
-		im.drop(ctx, name, err)
+		// The observation passed validation, so these are store failures.
+		// The applied datasets are committed; the file stays, because the
+		// watermark admits its own generation and ingest is idempotent, so
+		// the next pass applies the failed datasets. Store errors can quote
+		// observation values, so only a fixed code is logged.
+		im.log.Warn("pvecollect: observation kept for retry", "file", name, "reason", "store_failed")
 		return filePartial, "partial_observation"
 	default:
 		// Whole-observation validation failed; nothing was applied.
