@@ -52,7 +52,9 @@
       const button = form.querySelector('button[type="submit"]');
       if (button) button.disabled = true;
       try {
-        const res = await fetch(form.action, {
+        // The attribute, because a field named "action" would shadow the property.
+        const target = new URL(form.getAttribute('action') || window.location.href, window.location.href);
+        const res = await fetch(target, {
           method: 'POST',
           credentials: 'same-origin',
           headers: { 'Content-Type': file.type },
