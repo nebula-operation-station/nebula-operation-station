@@ -190,16 +190,17 @@ const nosChartMath = (() => {
 
   // Scroll pans (Shift+wheel sideways); Ctrl/Meta+scroll and pinch zoom
   // around the pointer and never reach the browser's page zoom. A scroll the
-  // chart cannot follow stays with the page, so nothing below is out of reach.
+  // chart cannot follow, or the browser will not let it cancel, stays with the
+  // page, so nothing below is out of reach.
   chartSection.addEventListener('wheel', (e) => {
-    if (!panning()) return;
+    if (!panning() || !e.cancelable) return;
     const d = M.wheelDelta(e, chartSection.clientHeight);
     if (d.zoom) {
       e.preventDefault();
       zoomAt(scale * d.zoom, e.clientX, e.clientY);
       return;
     }
-    if (panBy(d.dx, d.dy) && e.cancelable) e.preventDefault();
+    if (panBy(d.dx, d.dy)) e.preventDefault();
   }, { passive: false });
 
   // Safari reports a trackpad pinch only as gesture events; e.scale counts

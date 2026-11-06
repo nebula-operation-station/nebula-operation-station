@@ -35,9 +35,18 @@ class El {
     const e = {
       type: name, target: this, button: 0, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false,
       deltaX: 0, deltaY: 0, deltaMode: 0, cancelable: true, defaultPrevented: false,
-      preventDefault() { this.defaultPrevented = true; }, ...init,
+      preventDefault() { if (this.cancelable) this.defaultPrevented = true; }, ...init,
     };
     for (const l of this.listeners[name] || []) l.fn(e);
+    return e;
+  }
+  // An event from a child that does not bubble (toggle): only the capture
+  // phase reaches this element.
+  dispatchCaptured(name, init) {
+    const listeners = this.listeners[name] || [];
+    this.listeners[name] = listeners.filter((l) => l.opts === true || l.opts?.capture === true);
+    const e = this.dispatch(name, init);
+    this.listeners[name] = listeners;
     return e;
   }
   removeAttribute() {}
@@ -134,6 +143,7 @@ const scenarios = {
     check({ w: 500, h: 568, chartW: 1000, chartH: 200 }, 0.5, 0, 'width bound');
     check({ w: 968, h: 568, chartW: 484, chartH: 100 }, 1, 242, 'never enlarges');
     check({ w: 968, h: 568, chartW: 968, chartH: 1e7 }, M.minScale, (968 - 968 * M.minScale) / 2, 'floor at minScale');
+    check({ w: 100, h: 568, chartW: 1e5, chartH: 100 }, M.minScale, 0, 'wider than the area at minScale starts at the left');
     check({ w: 0, h: 0, chartW: 0, chartH: 0 }, 1, 0, 'empty box stays a number');
   },
 
@@ -284,6 +294,20 @@ const scenarios = {
     near(p.state().scale, p.math.minScale, 'stops at minScale');
   },
 
+  // A wheel event the browser will not cancel scrolls the page anyway, so the
+  // chart must not move or zoom along with it.
+  wheelnocancel() {
+    const p = page({ chartW: 2000 });
+    for (const init of [{ deltaY: 100 }, { deltaX: 30 }, { deltaY: -100, ctrlKey: true, clientX: 300, clientY: 400 }]) {
+      const e = p.wheel({ ...init, cancelable: false });
+      expect(!e.defaultPrevented, 'nothing to cancel');
+      const s = p.state();
+      expect(s.tx === 0 && s.ty === 0 && s.scale === 1, 'the chart stays put: ' + p.hosts.style.transform);
+    }
+    p.wheel({ deltaY: 100 });
+    near(p.state().ty, -100, 'the next cancelable event pans again');
+  },
+
   // Safari's gesture events scale from the start of the gesture.
   gesture() {
     const p = page();
@@ -344,7 +368,7 @@ const scenarios = {
     const q = page();
     q.wheel({ deltaY: 1400 });
     q.hosts.scrollHeight = 300;
-    q.section.dispatch('toggle', { target: new El() });
+    q.section.dispatchCaptured('toggle', { target: new El() });
     expect(q.visible().y >= 48, 'collapsing details keeps the chart in view');
   },
 
@@ -356,7 +380,7 @@ const scenarios = {
     expect(!p.wheel({ deltaY: 100 }).defaultPrevented, 'wheel stays with the page');
     expect(!p.wheel({ deltaY: 100, ctrlKey: true }).defaultPrevented, 'browser zoom stays with the browser');
     expect(!p.key('+').defaultPrevented, 'keys stay with the page');
-    p.section.dispatch('toggle', { target: new El() });
+    p.section.dispatchCaptured('toggle', { target: new El() });
     expect(p.hosts.style.transform === '', 'list mode sets no transform');
   },
 };

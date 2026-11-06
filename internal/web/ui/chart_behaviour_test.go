@@ -52,20 +52,21 @@ func runChartHarness(t *testing.T, script, scenario string) (string, error) {
 func TestChartInteractionBehaviour(t *testing.T) {
 	script := inventoryJS(t)
 	for _, scenario := range []string{
-		"zoommath",     // zoomAt: direction, fixed point, both caps
-		"fitmath",      // fitTransform: known box sizes
-		"wheelmath",    // wheelDelta: signs, units, pinch cap, Shift
-		"keymath",      // keyAction: mapping, browser shortcuts
-		"panmath",      // clampPan and wheelPan
-		"buttons",      // toolbar buttons drive the real handlers
-		"hundredhosts", // Fit shows 100 hosts on the smallest canvas
-		"wheelpan",     // scroll pans, in the right direction
-		"wheelrelease", // at the edge the page scrolls
-		"wheelzoom",    // Ctrl/Meta+scroll and pinch zoom around the pointer
-		"gesture",      // Safari gesture events
-		"keys",         // keys through the real handler
-		"panbounds",    // part of the chart stays visible
-		"listmode",     // the plain list leaves every default alone
+		"zoommath",      // zoomAt: direction, fixed point, both caps
+		"fitmath",       // fitTransform: known box sizes
+		"wheelmath",     // wheelDelta: signs, units, pinch cap, Shift
+		"keymath",       // keyAction: mapping, browser shortcuts
+		"panmath",       // clampPan and wheelPan
+		"buttons",       // toolbar buttons drive the real handlers
+		"hundredhosts",  // Fit shows 100 hosts on the smallest canvas
+		"wheelpan",      // scroll pans, in the right direction
+		"wheelrelease",  // at the edge the page scrolls
+		"wheelzoom",     // Ctrl/Meta+scroll and pinch zoom around the pointer
+		"wheelnocancel", // a wheel event that cannot be cancelled stays with the page
+		"gesture",       // Safari gesture events
+		"keys",          // keys through the real handler
+		"panbounds",     // part of the chart stays visible
+		"listmode",      // the plain list leaves every default alone
 	} {
 		t.Run(scenario, func(t *testing.T) {
 			out, err := runChartHarness(t, script, scenario)
@@ -103,7 +104,10 @@ func TestChartHarnessCatchesBrokenBehaviour(t *testing.T) {
 		{"Fit does not centre", "tx: Math.max(0, (b.w - b.chartW * scale) / 2)", "tx: 0"},
 		{"min scale too large for 100 hosts", "const minScale = 0.015;", "const minScale = 0.02;"},
 		{"pan without bounds", "const place = (x, y, s) => {\n    const b = box();", "const place = (x, y, s) => {\n    const b = { w: 1e9, h: 1e9, chartW: 1e9, chartH: 1e9 };"},
-		{"wheel never releases", "if (panBy(d.dx, d.dy) && e.cancelable) e.preventDefault();", "panBy(d.dx, d.dy); e.preventDefault();"},
+		{"wheel never releases", "if (panBy(d.dx, d.dy)) e.preventDefault();", "panBy(d.dx, d.dy); e.preventDefault();"},
+		{"wheel pans without being cancelable", "if (!panning() || !e.cancelable) return;\n    const d = M.wheelDelta", "if (!panning()) return;\n    const d = M.wheelDelta"},
+		{"Fit of a very wide chart starts off-screen", "tx: Math.max(0, (b.w - b.chartW * scale) / 2)", "tx: (b.w - b.chartW * scale) / 2"},
+		{"toggle listener misses the capture phase", "if (panning()) place(tx, ty, scale);\n  }, true);", "if (panning()) place(tx, ty, scale);\n  });"},
 		{"zoom wheel reaches the browser", "e.preventDefault();\n      zoomAt(scale * d.zoom, e.clientX, e.clientY);", "zoomAt(scale * d.zoom, e.clientX, e.clientY);"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
