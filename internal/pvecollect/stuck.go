@@ -11,12 +11,14 @@ import (
 )
 
 // stuckFiles holds the processed spool files an importer could not unlink,
-// for example because the server's mount of the spool is read-only. A file
-// name fixes its remote and generation (or observation time), and the
-// collector never republishes a name while the file exists, so a name listed
-// here needs no further processing: the importer only retries the unlink,
-// without importing again. The set is pruned to the directory listing on
-// every pass, so it never outgrows the spool.
+// for example because the server's mount of the spool is read-only. Only a
+// file that was read to a verdict gets here; one that could not be read stays
+// out, so it is imported once it can be. A file name fixes its remote and
+// generation (or observation time), and the collector never republishes a
+// name while the file exists, so a name listed here needs no further
+// processing: the importer only retries the unlink, without importing again.
+// The set is pruned to the directory listing on every pass, so it never
+// outgrows the spool.
 //
 // It lives in memory. After a restart the observation importer recognizes
 // the backlog by name against the store's durable generation, and guest NIC

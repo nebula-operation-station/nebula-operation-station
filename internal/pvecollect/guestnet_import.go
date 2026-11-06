@@ -41,8 +41,8 @@ type GuestNetImportReport struct {
 	// Rejected is the number of records that failed validation or were
 	// dated in the future; they are dropped.
 	Rejected int
-	// Failed is the number of records the sink refused; they stay for the
-	// next pass.
+	// Failed is the number of records that could not be read or that the
+	// sink refused; they stay for the next pass.
 	Failed int
 	// Skipped is the number of records this importer processed earlier that
 	// could not be removed yet.
@@ -115,8 +115,9 @@ func (im *GuestNetImporter) Run(ctx context.Context, interval time.Duration) err
 // ImportOnce processes every pending record in name order (per remote,
 // oldest first). Records an earlier pass processed but could not remove are
 // only removed again. Per-file outcomes are counted and do not abort the
-// pass; it returns an error only when the directory cannot be listed,
-// including a symlinked entry (tampering), or ctx ends.
+// pass; a record is only discarded for a fault of its own, so one that could
+// not be read stays. ImportOnce returns an error only when the directory
+// cannot be listed, including a symlinked entry (tampering), or ctx ends.
 func (im *GuestNetImporter) ImportOnce(ctx context.Context) (GuestNetImportReport, error) {
 	names, err := im.spool.ListGuestNet(ctx)
 	if err != nil {
@@ -135,9 +136,14 @@ func (im *GuestNetImporter) ImportOnce(ctx context.Context) (GuestNetImportRepor
 			continue
 		}
 		rec, err := im.spool.ReadGuestNet(ctx, name)
-		if err != nil {
+		if errors.Is(err, ErrGuestNetInvalid) {
 			rep.Rejected++
 			im.drop(ctx, name, "invalid_record")
+			continue
+		}
+		if err != nil {
+			rep.Failed++
+			im.log.Warn("pvecollect: guest nic import failed", "file", name, "reason", "read_failed")
 			continue
 		}
 		if rec.ObservedUnix > im.Now().Add(GuestNetClockSkew).Unix() {

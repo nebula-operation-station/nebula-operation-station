@@ -11,14 +11,15 @@
 // processed (imported, replayed or rejected). The collector re-collects each
 // remote within one interval, and a file could never be re-applied once the
 // store's collection watermark has passed it, so keeping such a file would
-// only grow the spool. A file the store failed on stays: the failure says
-// nothing about the observation, and its own generation may be ingested
-// again, so the next pass retries it until it applies or a newer generation
-// supersedes it. A file that cannot be removed is not processed again
-// (stuckFiles); only the unlink is retried. A file below its remote's stored
-// generation is dropped by name, unread, so a backlog left behind costs no
-// decoding after a restart either. A pass interrupted by shutdown leaves its
-// remaining files for the next start.
+// only grow the spool. A file that could not be read or that the store failed
+// on stays: the failure says nothing about the observation, and its own
+// generation may be ingested again, so the next pass retries it until it
+// applies or a newer generation supersedes it. Only a fault of the file itself
+// (ErrInvalidObservation) rejects it. A processed file that cannot be removed
+// is not processed again (stuckFiles); only the unlink is retried. A file
+// below its remote's stored generation is dropped by name, unread, so a
+// backlog left behind costs no decoding after a restart either. A pass
+// interrupted by shutdown leaves its remaining files for the next start.
 
 package pvecollect
 
@@ -51,6 +52,9 @@ const (
 	// fileInterrupted means the context ended during ingest; the file
 	// stays for the next run.
 	fileInterrupted
+	// fileUnread means the file could not be read, which says nothing about
+	// it; it stays for the next pass.
+	fileUnread
 )
 
 // ImportReport summarizes one ImportOnce pass.
@@ -68,10 +72,13 @@ type ImportReport struct {
 	// Rejected is the number of files that failed validation and were
 	// dropped.
 	Rejected int
+	// Failed is the number of files that could not be read; they stay for
+	// the next pass.
+	Failed int
 	// Skipped is the number of files this importer processed earlier that
 	// could not be removed yet.
 	Skipped int
-	// Errors carries one short line per partial or rejected file.
+	// Errors carries one short line per partial, rejected or failed file.
 	Errors []string
 }
 
@@ -109,9 +116,9 @@ func NewImporter(spool *Spool, store *pveinventory.Store, log *slog.Logger) (*Im
 // remove. Files an earlier pass processed but could not remove are only
 // removed again, and files below their remote's stored generation are
 // dropped unread. Per-file failures are recorded in the report and do not
-// abort the pass; a file the store failed on stays for the next pass. It
-// returns an error when the spool itself cannot be listed or ctx ends; files
-// not reached stay in the spool.
+// abort the pass; a file that could not be read or that the store failed on
+// stays for the next pass. It returns an error when the spool itself cannot
+// be listed or ctx ends; files not reached stay in the spool.
 func (im *Importer) ImportOnce(ctx context.Context) (ImportReport, error) {
 	names, err := im.spool.List(ctx)
 	if err != nil {
@@ -146,6 +153,9 @@ func (im *Importer) ImportOnce(ctx context.Context) (ImportReport, error) {
 			rep.Replayed++
 		case fileRejected:
 			rep.Rejected++
+			rep.Errors = append(rep.Errors, name+": "+msg)
+		case fileUnread:
+			rep.Failed++
 			rep.Errors = append(rep.Errors, name+": "+msg)
 		}
 	}
@@ -192,7 +202,7 @@ func (im *Importer) Run(ctx context.Context, interval time.Duration) error {
 			im.log.Info("pvecollect: import pass",
 				"files", rep.Files, "imported", rep.Imported,
 				"partial", rep.Partial, "replayed", rep.Replayed,
-				"rejected", rep.Rejected)
+				"rejected", rep.Rejected, "failed", rep.Failed)
 		}
 		select {
 		case <-ctx.Done():
@@ -202,9 +212,10 @@ func (im *Importer) Run(ctx context.Context, interval time.Duration) error {
 	}
 }
 
-// importFile processes one spool file and removes it afterwards, unless ctx
-// ended during ingest or the store failed: the failure then does not come
-// from the file, and a retry of the same generation applies what is missing.
+// importFile processes one spool file and removes it afterwards, unless it
+// could not be read, ctx ended during ingest or the store failed: the failure
+// then does not come from the file, and a retry of the same generation applies
+// what is missing.
 // The returned message is short and safe to log: it comes from the spool's
 // fixed rejection codes, never decoder or validation text.
 func (im *Importer) importFile(ctx context.Context, name string) (fileOutcome, string) {
@@ -212,9 +223,13 @@ func (im *Importer) importFile(ctx context.Context, name string) (fileOutcome, s
 	// name shape, regular file, size limit, strict decode, and that the
 	// document matches its file name.
 	obs, err := im.spool.ReadFile(ctx, name)
-	if err != nil {
+	if errors.Is(err, ErrInvalidObservation) {
 		im.drop(ctx, name, err)
 		return fileRejected, "invalid_observation"
+	}
+	if err != nil {
+		im.log.Warn("pvecollect: observation kept for retry", "file", name, "reason", "read_failed")
+		return fileUnread, "read_failed"
 	}
 	// Fast in-memory replay guard; the store's transactional freshness
 	// check is the durable one.

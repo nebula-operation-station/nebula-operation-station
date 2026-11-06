@@ -160,6 +160,8 @@ func listGuestNet(dir *os.File) ([]string, error) {
 
 // ReadGuestNet reads and revalidates a named record through the pinned
 // directory. The record's remote and observation time must match its name.
+// Errors that condemn the record wrap ErrGuestNetInvalid; any other error,
+// such as a directory that cannot be opened, leaves it unjudged.
 func (s *Spool) ReadGuestNet(_ context.Context, name string) (GuestNetRecord, error) {
 	remote, at, err := parseGuestNetName(name)
 	if err != nil {
@@ -170,8 +172,11 @@ func (s *Spool) ReadGuestNet(_ context.Context, name string) (GuestNetRecord, er
 		return GuestNetRecord{}, err
 	}
 	defer dir.Close()
-	raw, err := readAt(dir, name, MaxGuestNetBytes)
+	raw, err := s.read(dir, name, MaxGuestNetBytes)
 	if err != nil {
+		if fileFault(err) {
+			return GuestNetRecord{}, fmt.Errorf("%w: %w", ErrGuestNetInvalid, err)
+		}
 		return GuestNetRecord{}, err
 	}
 	rec, err := DecodeGuestNet(raw)
