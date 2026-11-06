@@ -3,10 +3,14 @@
 <div class="toolbar">
   <h1>Inventory chart</h1>
   <div class="actions">
-    <button type="button" id="chart-fit" class="button button--secondary" hidden>Fit</button>
+    <button type="button" id="chart-zoom-out" class="button button--secondary" hidden aria-label="Zoom out" title="Zoom out">−</button>
+    <button type="button" id="chart-zoom-in" class="button button--secondary" hidden aria-label="Zoom in" title="Zoom in">+</button>
+    <button type="button" id="chart-fit" class="button button--secondary" hidden title="Fit the whole chart into the view">Fit</button>
+    <button type="button" id="chart-zoom-100" class="button button--secondary" hidden aria-label="Zoom to 100%" title="Zoom to 100%">100%</button>
     <a class="button button--secondary" href="/inventory">Back to list</a>
   </div>
 </div>
+<p id="chart-hint" class="hint chart__hint" hidden>Drag or scroll to move · pinch or Ctrl+scroll to zoom</p>
 {{if .Chart.Unavailable}}
 <section class="panel" aria-label="Inventory chart">
   <p class="status status--error">Inventory unavailable</p>
@@ -193,6 +197,7 @@
   </ul>
   <div class="dpanel-backdrop" id="chart-sheet-backdrop" hidden></div>
   <div class="dpanel-sheet" id="chart-sheet" hidden role="dialog" aria-modal="true" aria-label="Host details"></div>
+</section>
   {{if .Chart.Staged}}
   {{if .Chart.Staged.Confirm}}
   <section class="panel staged-confirm" aria-label="Confirm staged OS update">
@@ -243,7 +248,6 @@
   </section>
   {{end}}
   {{end}}
-</section>
 {{else}}
 <section class="panel" aria-label="Inventory chart">
   <p class="chart__empty">No managed hosts yet.</p>

@@ -1717,9 +1717,14 @@ html {
    fit control, per-host details buttons and the mobile details sheet.
    Without JS the buttons and the sheet carry the hidden attribute and
    the page stays the plain server-rendered chart. */
-.chart--pan { height: 75vh; min-height: 420px; overflow: hidden; cursor: grab; touch-action: none; }
+/* Sideways contained (no swipe back in history). Vertically the page takes
+   over when the chart hands a scroll or swipe on at its edge (inventory.js);
+   pan-y lets the browser do that, and leaves pinch to the script. */
+.chart--pan { height: 75vh; min-height: 420px; overflow: hidden; overscroll-behavior-x: contain; cursor: grab; touch-action: pan-y; }
 .chart--pan:active { cursor: grabbing; }
 .chart--pan .chart__hosts { transform-origin: 0 0; will-change: transform; }
+/* One line between the toolbar and the canvas, pan mode only. */
+.chart__hint { margin: calc(-1 * var(--space-1)) 0 var(--space-1); }
 .chart__dpanel-btn {
   align-self: flex-start;
   font-size: 0.75rem; color: var(--text-muted);
@@ -1761,7 +1766,7 @@ html {
 @media (max-width: 600px) {
   /* The pan/zoom canvas is a desktop enhancement; the list mode owns
      the page scroll on narrow screens. */
-  .chart--pan { height: auto; min-height: 0; overflow: visible; cursor: auto; touch-action: auto; }
+  .chart--pan { height: auto; min-height: 0; overflow: visible; overscroll-behavior: auto; cursor: auto; touch-action: auto; }
   .chart__details { flex-direction: column; }
   .chart__box--host { flex-basis: auto; width: 100%; min-height: 0; }
   .chart__box--node { flex-basis: auto; width: 100%; min-height: 0; }
