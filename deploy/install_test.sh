@@ -317,6 +317,15 @@ refresh_block=$(sed -n '/^# begin: unit refresh/,/^# end: unit refresh/p' "$inst
 refresh_sb=$(mktemp -d)
 trap 'rm -rf "$refresh_sb"' EXIT
 mkdir -p "$refresh_sb/deploy/systemd" "$refresh_sb/etc" "$refresh_sb/var"
+# The real units, for the cases that run more than the refresh block.
+install_units=(
+  nebula-server.service
+  nebula-executor.service
+  nebula-pve-collector.service
+  nebula-discovery.path
+  nebula-discovery.service
+  nebula-discovery.timer
+)
 
 # ship <unit> <content>: this "tarball" now ships <content> for <unit>.
 ship() {
@@ -356,6 +365,7 @@ run_refresh() {
       legacy_unit_sums=("$legacy")
     fi
     refresh_units
+    clear_pending_units # a run that reached its end
     echo "ENABLE=${enable_units[*]}"
     echo "REFRESHED=${refreshed_units[*]:-}"
     echo "END"
@@ -591,6 +601,49 @@ else
     echo "FAIL legacy_unit_sums is malformed"
     fail=$((fail + 1))
   fi
+  # The list is frozen, entry for entry. A wrong checksum would make that
+  # unit count as edited on a pre-manifest host as soon as it changes.
+  expected_legacy='  "e7a42fc29dc5aeae3e854001f06cd0efeaef8458dd273e7a4ff74607a73de8c4  nebula-server.service"
+  "fbce1de5c0888db5927d5a34333214f57e6239c987b9c7be41f21e7c761a1beb  nebula-executor.service"
+  "cd452ec9eb40017e6ae6da044ef04034d8031f5137c7ed7b757c7039cde34f42  nebula-pve-collector.service"
+  "60c0ef3dc3f3fc0ca54e528fd9b41d82571fbb0bb5637e1779a78e4ad8f0c2b7  nebula-pve-collector.service"
+  "4ad18a7e6a7270588e6dbe6a04d2f6fd7a7ccd0730b2ff6989da4136d8acbf11  nebula-discovery.path"
+  "be046e71c5f0585c7b0abe93d41a5e698dc47a69affd939761b4c968996a8a50  nebula-discovery.service"
+  "2a88aab97acc72e9752b2c259c2f6f2dfccb9804d751cee77d138a0563df2c61  nebula-discovery.timer"'
+  if [[ "$legacy_list" == "$expected_legacy" ]]; then
+    echo "ok   legacy_unit_sums is unchanged, entry for entry"
+    pass=$((pass + 1))
+  else
+    echo "FAIL legacy_unit_sums differs from the frozen list"
+    fail=$((fail + 1))
+  fi
+  # The source of truth for that list is the repository: at the last commit
+  # before units.sha256 existed, it must name every committed version of every
+  # unit and nothing else. CI's test job has a shallow checkout and the release
+  # tarball no history at all, so this runs in full clones only; the frozen
+  # copy above keeps the list from drifting everywhere else.
+  freeze_commit=bdb6998
+  repo_root=$(dirname -- "$script_dir")
+  if [[ "$(git -C "$repo_root" rev-parse --is-shallow-repository 2>/dev/null)" == "false" ]] \
+     && git -C "$repo_root" cat-file -e "${freeze_commit}^{commit}" 2>/dev/null; then
+    history_list=""
+    for unit in "${install_units[@]}"; do
+      while read -r commit; do
+        blob=$(git -C "$repo_root" rev-parse -q --verify "${commit}:deploy/systemd/${unit}") || continue
+        history_list+="  \"$(git -C "$repo_root" cat-file blob "$blob" | sha256sum | cut -d' ' -f1)  ${unit}\""$'\n'
+      done < <(git -C "$repo_root" log --format=%H "$freeze_commit" -- "deploy/systemd/${unit}")
+    done
+    if [[ "$(printf '%s' "$history_list" | sort -u)" == "$(printf '%s\n' "$legacy_list" | sort -u)" ]]; then
+      echo "ok   legacy_unit_sums is exactly the unit versions committed before the freeze"
+      pass=$((pass + 1))
+    else
+      echo "FAIL legacy_unit_sums does not match the committed unit versions"
+      diff <(printf '%s' "$history_list" | sort -u) <(printf '%s\n' "$legacy_list" | sort -u) | sed 's/^/     /'
+      fail=$((fail + 1))
+    fi
+  else
+    echo "skip legacy_unit_sums against the unit history (needs a full clone)"
+  fi
 fi
 
 # --- Unit refresh wiring in install.sh (static) -------------------------------
@@ -618,6 +671,399 @@ for want in 'unit_refreshed nebula-server.service' 'unit_refreshed nebula-execut
     fail=$((fail + 1))
   fi
 done
+
+# --- Enable and restart steps, functional, no root needed ---------------------
+# Runs the real unit selection and the real enable and restart steps of
+# install.sh after the refresh block, against the sandbox above, with a
+# systemctl stub that logs every call and refuses masked units like the real
+# one: `enable` and `restart` fail, which under set -e aborts the script.
+select_block=$(sed -n '/^# begin: select units/,/^# end: select units/p' "$install_sh")
+start_block=$(sed -n '/^# begin: start units/,/^# end: start units/p' "$install_sh")
+systemctl_log="$refresh_sb/systemctl.log"
+both_services="nebula-server.service nebula-executor.service"
+
+# What the next run_install sees; reset_install restores the defaults.
+reset_install() {
+  inst_bin_changed=0
+  inst_drop_in_changed=0
+  inst_server_drop_in_changed=0
+  inst_from_package=0
+  stub_active="$both_services" # units that are running
+  stub_runtime_masked=""       # units masked under /run
+  stub_fail=""                 # the one systemctl call that fails
+  stub_stop_at_manifest=0      # 1: the run stops before units_manifest moves
+  stub_stop_at_unit=""         # the unit file whose write stops the run
+  inst_legacy=""               # replaces the list of pre-manifest checksums
+}
+
+# stub_unit_state <unit>: what systemctl is-enabled prints. Masked means what
+# it means to systemd: a link to /dev/null or an empty file.
+stub_unit_state() {
+  local file="$refresh_sb/etc/$1"
+  if [[ " $stub_runtime_masked " == *" $1 "* ]]; then
+    echo masked-runtime
+  elif [[ -L "$file" && "$(readlink "$file")" == /dev/null ]] || [[ -f "$file" && ! -s "$file" ]]; then
+    echo masked
+  else
+    echo disabled
+  fi
+}
+stub_systemctl() {
+  local unit="${*: -1}" state
+  printf '%s\n' "$*" >> "$systemctl_log"
+  if [[ -n "$stub_fail" && "$*" == "$stub_fail" ]]; then
+    echo "stub: $* failed" >&2
+    return 1
+  fi
+  state=$(stub_unit_state "$unit")
+  case "$1" in
+    is-enabled)
+      if [[ "$2" != --quiet ]]; then
+        printf '%s\n' "$state"
+      fi
+      return 1
+      ;;
+    is-active)
+      [[ " $stub_active " == *" $unit "* ]]
+      ;;
+    enable|restart|try-restart)
+      if [[ "$state" == masked* ]]; then
+        echo "stub: Unit ${unit} is masked." >&2
+        return 1
+      fi
+      ;;
+  esac
+}
+# run_install: the unit, enable and restart steps of one install.sh run, under
+# set -e like the real script. refresh_out and refresh_rc as in run_refresh.
+run_install() {
+  : > "$systemctl_log"
+  refresh_out=$(
+    exec 2>&1
+    set -euo pipefail
+    install() {
+      if [[ -n "$stub_stop_at_unit" && "${@: -1}" == *"/$stub_stop_at_unit" ]]; then
+        return 1
+      fi
+      command install -m 0644 "${@: -2:1}" "${@: -1}"
+    }
+    if [[ "$stub_stop_at_manifest" -eq 1 ]]; then
+      mv() { return 1; }
+    fi
+    systemctl() { stub_systemctl "$@"; }
+    script_dir="$refresh_sb/deploy"
+    systemd_dir="$refresh_sb/etc"
+    var_lib="$refresh_sb/var"
+    from_package="$inst_from_package"
+    bin_changed="$inst_bin_changed"
+    drop_in_changed="$inst_drop_in_changed"
+    server_drop_in_changed="$inst_server_drop_in_changed"
+    tarball_units=("${install_units[@]}")
+    package_units=(
+      nebula-server.service
+      nebula-executor.service
+      nebula-pve-collector.service
+      nebula-discovery.path
+      nebula-discovery.timer
+    )
+    eval "$refresh_block"
+    if [[ -n "$inst_legacy" ]]; then
+      legacy_unit_sums=("$inst_legacy")
+    fi
+    eval "$select_block"
+    eval "$start_block"
+    echo "END"
+  )
+  refresh_rc=$?
+}
+# installed_host: a host that went through one complete install of v1.
+installed_host() {
+  local unit
+  reset_refresh
+  reset_install
+  for unit in "${install_units[@]}"; do
+    ship "$unit" "$unit v1"
+  done
+  run_install
+}
+called() { grep -qxF -- "$1" "$systemctl_log"; }
+not_called() { ! called "$1"; }
+restarts_are() { [[ "$(grep -E '^(restart|try-restart) ' "$systemctl_log")" == "$1" ]]; }
+is_mask_link() { [[ -L "$1" && "$(readlink "$1")" == /dev/null ]]; }
+rc_not_zero() { [[ "$refresh_rc" -ne 0 ]]; }
+nothing_pending() { [[ ! -e "$refresh_sb/var/units.pending" ]]; }
+pending_has() { grep -qxF "$1  $2" "$refresh_sb/var/units.pending"; }
+
+if [[ -z "$select_block" || -z "$start_block" ]]; then
+  echo "FAIL install.sh has no unit selection or start block"
+  fail=$((fail + 1))
+else
+  installed_host
+  expect "install: a complete run succeeds" rc_is 0
+  expect "install: the server is enabled and started" called 'enable --now nebula-server.service'
+  expect "install: the executor is enabled" called 'enable nebula-executor.service'
+  expect "install: the discovery timer is enabled and started" called 'enable --now nebula-discovery.timer'
+  expect "install: the discovery service is never enabled" not_called 'enable --now nebula-discovery.service'
+
+  # Which restarts a run makes, exactly: a broken unit_refreshed, an inverted
+  # condition or a loop that restarts too much all change this list.
+  run_install
+  expect "nothing changed: nothing is restarted" restarts_are ''
+  # <unit> <the only restart that may follow when a shipped fix replaces it>
+  while read -r unit want_restart; do
+    installed_host
+    ship "$unit" "$unit v2"
+    run_install
+    expect "refreshed ${unit}: the run succeeds" rc_is 0
+    expect "refreshed ${unit}: exactly '${want_restart}' follows" restarts_are "$want_restart"
+  done <<'CASES'
+nebula-server.service restart nebula-server.service
+nebula-executor.service restart nebula-executor.service
+nebula-pve-collector.service try-restart nebula-pve-collector.service
+nebula-discovery.path try-restart nebula-discovery.path
+nebula-discovery.timer try-restart nebula-discovery.timer
+nebula-discovery.service
+CASES
+
+  installed_host
+  ship nebula-server.service 'nebula-server.service v2'
+  stub_active=nebula-executor.service
+  run_install
+  expect "refreshed but stopped server: not restarted" restarts_are ''
+
+  installed_host
+  printf 'admin edit\n' > "$refresh_sb/etc/nebula-server.service"
+  ship nebula-server.service 'nebula-server.service v2'
+  run_install
+  expect "edited server unit: not restarted" restarts_are ''
+
+  installed_host
+  inst_bin_changed=1
+  run_install
+  expect "new binaries: both services restart" restarts_are $'restart nebula-server.service\nrestart nebula-executor.service'
+
+  installed_host
+  inst_drop_in_changed=1
+  run_install
+  expect "executor drop-in changed: only the executor restarts" restarts_are 'restart nebula-executor.service'
+
+  installed_host
+  inst_server_drop_in_changed=1
+  run_install
+  expect "server drop-in changed: only the server restarts" restarts_are 'restart nebula-server.service'
+
+  installed_host
+  stub_active=nebula-server.service
+  run_install
+  expect "stopped executor: started" restarts_are 'restart nebula-executor.service'
+  expect "stopped executor: reported as started" out_has 'started nebula-executor (was not active)'
+
+  # A masked unit is the admin's decision: it is kept, not enabled, not
+  # started, and the install runs to its end, so that the other units still
+  # get their restart. Masking a running unit does not stop it, hence the
+  # stubbed services stay active.
+  for unit in "${install_units[@]}"; do
+    installed_host
+    ln -sf /dev/null "$refresh_sb/etc/$unit"
+    ship "$unit" "$unit v2"
+    inst_bin_changed=1
+    run_install
+    expect "masked ${unit}: the install runs to its end" rc_is 0
+    expect "masked ${unit}: the end is reached" out_has $'\nEND'
+    expect "masked ${unit}: the mask is kept" is_mask_link "$refresh_sb/etc/$unit"
+    expect "masked ${unit}: the shipped baseline stays recorded" manifest_has "$(text_sum "$unit v1")" "$unit"
+    expect "masked ${unit}: not enabled" not_called "enable --now $unit"
+    expect "masked ${unit}: not enabled (executor form)" not_called "enable $unit"
+    expect "masked ${unit}: not restarted" not_called "restart $unit"
+    expect "masked ${unit}: not try-restarted" not_called "try-restart $unit"
+  done
+
+  installed_host
+  ln -sf /dev/null "$refresh_sb/etc/nebula-discovery.timer"
+  inst_bin_changed=1
+  run_install
+  expect "masked timer: the warning names the unit" out_has 'warning: nebula-discovery.timer is masked'
+  expect "masked timer: the warning says how to undo it" out_has 'systemctl unmask nebula-discovery.timer'
+  expect "masked timer: the other units are still enabled" called 'enable --now nebula-discovery.path'
+  expect "masked timer: the services still restart" restarts_are $'restart nebula-server.service\nrestart nebula-executor.service'
+
+  installed_host
+  ln -sf /dev/null "$refresh_sb/etc/nebula-executor.service"
+  stub_active=nebula-server.service
+  run_install
+  expect "masked, stopped executor: the install runs to its end" rc_is 0
+  expect "masked, stopped executor: not started" not_called 'restart nebula-executor.service'
+
+  # systemd also takes an empty file for a mask, and a mask under /run leaves
+  # the file in /etc as it is.
+  installed_host
+  : > "$refresh_sb/etc/nebula-discovery.path"
+  run_install
+  expect "empty unit file: the install runs to its end" rc_is 0
+  expect "empty unit file: not enabled" not_called 'enable --now nebula-discovery.path'
+  expect "empty unit file: kept" has_content "$refresh_sb/etc/nebula-discovery.path" ''
+
+  installed_host
+  stub_runtime_masked=nebula-server.service
+  inst_bin_changed=1
+  run_install
+  expect "runtime-masked server: the install runs to its end" rc_is 0
+  expect "runtime-masked server: not enabled" not_called 'enable --now nebula-server.service'
+  expect "runtime-masked server: not restarted" not_called 'restart nebula-server.service'
+  expect "runtime-masked server: the executor still restarts" called 'restart nebula-executor.service'
+
+  # The same in package mode, where the units are not looked at otherwise.
+  installed_host
+  ln -sf /dev/null "$refresh_sb/etc/nebula-pve-collector.service"
+  ln -sf /dev/null "$refresh_sb/etc/nebula-executor.service"
+  inst_from_package=1
+  run_install
+  expect "package mode, masked units: the install runs to its end" rc_is 0
+  expect "package mode, masked units: not enabled" not_called 'enable --now nebula-pve-collector.service'
+  expect "package mode, masked executor: not enabled" not_called 'enable nebula-executor.service'
+  expect "package mode, masked units: the others are enabled" called 'enable --now nebula-server.service'
+
+  # A run that stops after units_manifest moved must not lose the restart it
+  # owes: the next run finds the unit up to date, and nothing else says that
+  # the running service still has the old unit.
+  # <replaced unit> <the failing call> <the restart the next run must make>
+  while IFS='|' read -r unit failing want_restart; do
+    installed_host
+    ship "$unit" "$unit v2"
+    stub_fail="$failing"
+    run_install
+    expect "stopped at '${failing}': the run fails" rc_not_zero
+    expect "stopped at '${failing}': the checksum file moved on" manifest_has "$(text_sum "$unit v2")" "$unit"
+    expect "stopped at '${failing}': the restart stays pending" pending_has "$(text_sum "$unit v2")" "$unit"
+    stub_fail=""
+    run_install
+    expect "stopped at '${failing}': the next run succeeds" rc_is 0
+    expect "stopped at '${failing}': the next run restarts ${unit}" restarts_are "$want_restart"
+    expect "stopped at '${failing}': nothing stays pending" nothing_pending
+    run_install
+    expect "stopped at '${failing}': the run after that restarts nothing" restarts_are ''
+  done <<'CASES'
+nebula-server.service|restart nebula-server.service|restart nebula-server.service
+nebula-executor.service|restart nebula-executor.service|restart nebula-executor.service
+nebula-pve-collector.service|enable --now nebula-discovery.timer|try-restart nebula-pve-collector.service
+CASES
+
+  # A complete run leaves nothing behind.
+  installed_host
+  ship nebula-server.service 'nebula-server.service v2'
+  run_install
+  expect "complete run: nothing stays pending" nothing_pending
+
+  # A package run does not look at the units, so it leaves the record alone.
+  installed_host
+  ship nebula-server.service 'nebula-server.service v2'
+  stub_fail='restart nebula-server.service'
+  run_install
+  stub_fail=""
+  inst_from_package=1
+  run_install
+  expect "package run: a pending restart stays recorded" pending_has "$(text_sum 'nebula-server.service v2')" nebula-server.service
+  inst_from_package=0
+  run_install
+  expect "package run: the next tarball run still restarts" restarts_are 'restart nebula-server.service'
+
+  # A unit a run stopped on is masked before the next run: no restart then.
+  installed_host
+  ship nebula-server.service 'nebula-server.service v2'
+  stub_fail='restart nebula-server.service'
+  run_install
+  stub_fail=""
+  ln -sf /dev/null "$refresh_sb/etc/nebula-server.service"
+  run_install
+  expect "masked after a stop: the install runs to its end" rc_is 0
+  expect "masked after a stop: not restarted" restarts_are ''
+  expect "masked after a stop: nothing stays pending" nothing_pending
+
+  # A run that stops between replacing a unit and rewriting units_manifest
+  # leaves a shipped version that the record does not know. A newer tarball
+  # must still replace it: it was never edited.
+  installed_host
+  server=nebula-server.service
+  ship "$server" "$server v2"
+  stub_stop_at_manifest=1
+  run_install
+  expect "stopped before the rewrite: the run fails" rc_not_zero
+  expect "stopped before the rewrite: the unit was replaced" has_content "$refresh_sb/etc/$server" "$server v2"
+  expect "stopped before the rewrite: the checksum file is old" manifest_has "$(text_sum "$server v1")" "$server"
+  stub_stop_at_manifest=0
+  ship "$server" "$server v3"
+  run_install
+  expect "newer tarball after a stop: the run succeeds" rc_is 0
+  expect "newer tarball after a stop: the shipped fix arrives" has_content "$refresh_sb/etc/$server" "$server v3"
+  expect "newer tarball after a stop: no warning" out_lacks 'warning'
+  expect "newer tarball after a stop: the new checksum is recorded" manifest_has "$(text_sum "$server v3")" "$server"
+  expect "newer tarball after a stop: the service restarts" restarts_are "restart $server"
+  expect "newer tarball after a stop: nothing stays pending" nothing_pending
+
+  # The record does not protect less than before: an edit made after the stop
+  # is the admin's, and it does not become a baseline.
+  installed_host
+  ship "$server" "$server v2"
+  stub_stop_at_manifest=1
+  run_install
+  stub_stop_at_manifest=0
+  printf 'admin edit\n' > "$refresh_sb/etc/$server"
+  ship "$server" "$server v3"
+  run_install
+  expect "edit after a stop: kept" has_content "$refresh_sb/etc/$server" 'admin edit'
+  expect "edit after a stop: warned about" out_has "warning: $refresh_sb/etc/$server"
+  expect "edit after a stop: the old baseline stays recorded" manifest_has "$(text_sum "$server v1")" "$server"
+  expect "edit after a stop: the edit is not recorded" manifest_lacks_sum "$(text_sum 'admin edit')"
+  expect "edit after a stop: not restarted" restarts_are ''
+
+  # The same for a unit installed for the first time, which has no record at
+  # all, and on a pre-manifest host, where the old version came from the list.
+  reset_refresh
+  reset_install
+  for unit in "${install_units[@]}"; do
+    ship "$unit" "$unit v1"
+  done
+  stub_stop_at_manifest=1
+  run_install
+  stub_stop_at_manifest=0
+  ship "$server" "$server v2"
+  run_install
+  expect "first install after a stop: the shipped fix arrives" has_content "$refresh_sb/etc/$server" "$server v2"
+  expect "first install after a stop: no warning" out_lacks 'warning'
+
+  installed_host
+  rm -f "$refresh_sb/var/units.sha256"
+  inst_legacy="$(text_sum "$server v1")  $server"
+  ship "$server" "$server v2"
+  stub_stop_at_manifest=1
+  run_install
+  stub_stop_at_manifest=0
+  ship "$server" "$server v3"
+  run_install
+  expect "pre-manifest host after a stop: the shipped fix arrives" has_content "$refresh_sb/etc/$server" "$server v3"
+  expect "pre-manifest host after a stop: the unit is recorded" manifest_has "$(text_sum "$server v3")" "$server"
+
+  # The checksum goes on record before the file is written, not after.
+  installed_host
+  ship "$server" "$server v2"
+  stub_stop_at_unit="$server"
+  run_install
+  stub_stop_at_unit=""
+  expect "stopped while writing a unit: the run fails" rc_not_zero
+  expect "stopped while writing a unit: the file is unchanged" has_content "$refresh_sb/etc/$server" "$server v1"
+  expect "stopped while writing a unit: the version is on record" pending_has "$(text_sum "$server v2")" "$server"
+  run_install
+  expect "stopped while writing a unit: the next run finishes it" has_content "$refresh_sb/etc/$server" "$server v2"
+
+  # Damage to the record can only make a unit look edited.
+  installed_host
+  printf 'admin edit\n' > "$refresh_sb/etc/$server"
+  ship "$server" "$server v2"
+  printf 'not-a-checksum  %s\n\nx\n%s  x%s\n' "$server" "$(text_sum 'admin edit')" "$server" > "$refresh_sb/var/units.pending"
+  run_install
+  expect "damaged pending file: the run succeeds" rc_is 0
+  expect "damaged pending file: the unit is kept" has_content "$refresh_sb/etc/$server" 'admin edit'
+fi
 
 # --- Root-gated: real runs of install.sh and uninstall.sh -------------------
 # These two cases exercise the systemd handling, which the dry-run mode

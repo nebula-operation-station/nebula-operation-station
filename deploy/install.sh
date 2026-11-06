@@ -371,6 +371,14 @@ package_units=(
 # any other content is the admin's and stays (WA-09).
 units_manifest="${var_lib}/units.sha256"
 
+# units_pending is the write-ahead record of a run: the checksum of a shipped
+# version goes in before that version is written to its unit file, and the
+# file goes away once the restart steps are through. What a stopped run leaves
+# behind tells the next run what units_manifest cannot: a unit with one of
+# these checksums is unedited even if the tarball has moved on, and its restart
+# may still be due. Like units_manifest it holds shipped checksums only.
+units_pending="${var_lib}/units.pending"
+
 # Every version shipped before units_manifest existed. Hosts installed then
 # have no recorded checksum, and without this list their units would all
 # count as edited, so no shipped fix would ever reach them. It applies only
@@ -386,8 +394,10 @@ legacy_unit_sums=(
   "2a88aab97acc72e9752b2c259c2f6f2dfccb9804d751cee77d138a0563df2c61  nebula-discovery.timer"
 )
 
-# Units refresh_units replaced, so that the restart step can apply them. A
-# unit installed for the first time is not listed: the enable step starts it.
+# Units whose new version a running service may not have yet, so that the
+# restart step can apply it: the ones refresh_units replaced, and the ones a
+# stopped run left pending. A unit installed for the first time in this run is
+# not listed: the enable step starts it.
 refreshed_units=()
 
 # stored_unit_sum NAME prints the recorded checksum of NAME, nothing if there
@@ -416,6 +426,33 @@ is_legacy_unit() {
   return 1
 }
 
+# unit_pending NAME [SUM] succeeds if a stopped run left NAME on record, with
+# the checksum SUM if one is given. Malformed lines do not count, so damage to
+# the file can only make a unit look edited, which keeps it.
+unit_pending() {
+  local sum entry
+  [[ -f "${units_pending}" ]] || return 1
+  while read -r sum entry; do
+    if [[ "${entry}" == "$1" && "${sum}" =~ ^[0-9a-f]{64}$ ]] \
+      && [[ $# -lt 2 || "${sum}" == "$2" ]]; then
+      return 0
+    fi
+  done < "${units_pending}"
+  return 1
+}
+
+# install_unit NAME SUM installs the shipped NAME, whose checksum is SUM. The
+# record comes first: at no point is a shipped version in place unrecorded.
+install_unit() {
+  printf '%s  %s\n' "$2" "$1" >> "${units_pending}"
+  install -m 0644 -o root -g root "${script_dir}/systemd/$1" "${systemd_dir}/$1"
+}
+
+# clear_pending_units forgets the record once nothing of it is due any more.
+clear_pending_units() {
+  rm -f "${units_pending}"
+}
+
 # warn_kept_unit NAME REASON says that a unit was kept and how to look at it.
 warn_kept_unit() {
   local shipped="${script_dir}/systemd/$1" target="${systemd_dir}/$1"
@@ -427,8 +464,9 @@ warn_kept_unit() {
 # refresh_units installs what is absent and replaces what is unedited, then
 # rewrites units_manifest. A kept unit keeps its old record (or none): were
 # its current checksum recorded, the next upgrade would overwrite the edit.
-# An install that stops before the rewrite is safe: a replaced unit equals
-# the shipped version on the next run, which records it.
+# An install that stops at any point is safe: units_pending names the versions
+# it wrote, so the next run takes them for unedited, whichever tarball it uses,
+# and makes the restarts that are still due.
 refresh_units() {
   local name shipped target shipped_sum stored_sum current_sum record manifest_lines=""
   for name in "${tarball_units[@]}"; do
@@ -446,10 +484,15 @@ refresh_units() {
       else
         current_sum=$(sha256sum "${target}" | cut -d' ' -f1)
         if [[ "${current_sum}" == "${shipped_sum}" ]]; then
-          : # Up to date; recording it also adopts it on a pre-manifest host.
+          # Up to date; recording it also adopts it on a pre-manifest host. A
+          # stopped run may have left the restart for it to this one.
+          if unit_pending "${name}"; then
+            refreshed_units+=("${name}")
+          fi
         elif [[ "${current_sum}" == "${stored_sum}" ]] \
-          || { [[ -z "${stored_sum}" ]] && is_legacy_unit "${name}" "${current_sum}"; }; then
-          install -m 0644 -o root -g root "${shipped}" "${target}"
+          || { [[ -z "${stored_sum}" ]] && is_legacy_unit "${name}" "${current_sum}"; } \
+          || unit_pending "${name}" "${current_sum}"; then
+          install_unit "${name}" "${shipped_sum}"
           refreshed_units+=("${name}")
           echo "install.sh: updated ${target} to the shipped version"
         else
@@ -458,7 +501,7 @@ refresh_units() {
         fi
       fi
     else
-      install -m 0644 -o root -g root "${shipped}" "${target}"
+      install_unit "${name}" "${shipped_sum}"
     fi
     if [[ -n "${record}" ]]; then
       manifest_lines+="${record}  ${name}"$'\n'
@@ -490,6 +533,7 @@ unit_refreshed() {
 }
 # end: unit refresh
 
+# begin: select units
 # enable_units is the list the enable loop below walks, in the order above.
 # In tarball mode every provisioned unit is enabled whether or not it was
 # just installed, so a re-run after an aborted install still enables the
@@ -506,6 +550,7 @@ if [[ ${from_package} -eq 1 ]]; then
 else
   refresh_units
 fi
+# end: select units
 
 # Remove iconfetch units left behind by an earlier install (WA-04): the
 # lists above no longer install them, but a host upgraded from an earlier
@@ -595,28 +640,49 @@ EOF
 fi
 
 # --- Start/restart (only after the drop-in is in place) ---------------------
+# begin: start units
 systemctl daemon-reload
 
+# unit_masked NAME succeeds if systemd reports NAME as masked: a link to
+# /dev/null or an empty file, in /etc or under /run. Masking is the admin's
+# decision, and systemctl enable and restart both fail on such a unit, which
+# under set -e would abort the install before the steps that are still due.
+unit_masked() {
+  local state
+  state=$(systemctl is-enabled "$1" 2>/dev/null) || true
+  [[ "${state}" == "masked" || "${state}" == "masked-runtime" ]]
+}
+
 for name in "${enable_units[@]}"; do
+  # nebula-discovery.service is started by its path unit and timer and has
+  # no [Install] section, so it is not enabled.
+  if [[ "${name}" == "nebula-discovery.service" ]]; then
+    continue
+  fi
+  if unit_masked "${name}"; then
+    echo "install.sh: warning: ${name} is masked; not enabling or starting it (undo: systemctl unmask ${name})" >&2
+    continue
+  fi
   # The executor is enabled here (before the discovery units) so its boot
   # start does not depend on the server's Wants=, but it is started or
   # restarted below, where the drop-in-aware handling lives.
-  # nebula-discovery.service is started by its path unit and timer and has
-  # no [Install] section, so it is not enabled.
   if [[ "${name}" == "nebula-executor.service" ]]; then
     systemctl enable "${name}"
-  elif [[ "${name}" != "nebula-discovery.service" ]]; then
+  else
     systemctl enable --now "${name}"
   fi
 done
 
-if systemctl is-active --quiet nebula-server.service \
+if ! unit_masked nebula-server.service \
+  && systemctl is-active --quiet nebula-server.service \
   && { [[ ${bin_changed} -eq 1 || ${server_drop_in_changed} -eq 1 ]] || unit_refreshed nebula-server.service; }; then
   systemctl restart nebula-server.service
   echo "install.sh: restarted nebula-server (binaries, unit or drop-in changed)"
 fi
 
-if systemctl is-active --quiet nebula-executor.service; then
+if unit_masked nebula-executor.service; then
+  : # Warned about above: a masked unit is neither started nor restarted.
+elif systemctl is-active --quiet nebula-executor.service; then
   if [[ ${bin_changed} -eq 1 || ${drop_in_changed} -eq 1 ]] || unit_refreshed nebula-executor.service; then
     # Running with old binaries or an old drop-in: apply the new ones.
     systemctl restart nebula-executor.service
@@ -644,6 +710,12 @@ for name in "${refreshed_units[@]}"; do
       ;;
   esac
 done
+
+# Everything a stopped run left is done. A package run looked at no unit.
+if [[ ${from_package} -eq 0 ]]; then
+  clear_pending_units
+fi
+# end: start units
 
 # --- Next steps --------------------------------------------------------------
 cat <<EOF
