@@ -196,6 +196,7 @@ drop_in_dir="${systemd_dir}/nebula-executor.service.d"
 drop_in="${drop_in_dir}/10-local.conf"
 
 # --- Check the tarball layout ---------------------------------------------
+# begin: check layout
 unit_dir="${systemd_dir}"
 if [[ ${from_package} -eq 1 ]]; then
   unit_dir=/lib/systemd/system
@@ -218,6 +219,7 @@ if [[ ! -d "${script_dir}/systemd" ]]; then
   echo "install.sh: ${script_dir}/systemd not found; is this a release tarball?" >&2
   exit 1
 fi
+# end: check layout
 
 # --- Users and group (idempotent) ------------------------------------------
 if ! getent group "${group_name}" >/dev/null; then
@@ -299,6 +301,7 @@ if [[ ${from_package} -eq 0 && -x "${bin_dir}/nebula-executor" && "${NEBULA_SKIP
 fi
 
 # --- Binaries (replaced on every run; detect real changes) ------------------
+# begin: install binaries
 bin_changed=0
 [[ ${from_package} -eq 1 ]] || for bin in "${binaries[@]}"; do
   old_sum=""
@@ -311,6 +314,7 @@ bin_changed=0
     bin_changed=1
   fi
 done
+# end: install binaries
 
 # --- Units (installed only if absent: never clobber admin edits) -----------
 shopt -s nullglob

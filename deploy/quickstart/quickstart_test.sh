@@ -59,11 +59,31 @@ done
 
 # --- 3. No hardcoded second copy of the list remains ------------------------
 # A loop over a literal list of binary names is the drift this guards
-# against; the loops must iterate the loaded array instead.
-if grep -nE '^[[:space:]]*for (b|bin) in nebula( |$)' "$setup_sh" "$install_sh" "$uninstall_sh"; then
-  bad "no hardcoded binary list loop remains in the scripts"
-else
+# against; the loops must iterate the loaded array instead. Any for-loop
+# whose word list contains a bare token that is a binary name from
+# binaries.txt (case 1) is a hardcoded copy. Loops over variables,
+# arrays and globs carry quotes and are skipped.
+hardcoded=()
+for s in "$setup_sh" "$install_sh" "$uninstall_sh"; do
+  while IFS= read -r hit; do
+    line=${hit#*:}
+    case "$line" in
+      *\"*|*\'*) continue ;;
+    esac
+    rest=${line#* in }
+    for tok in $rest; do
+      for name in "${expected[@]}"; do
+        if [[ "$tok" == "$name" ]]; then
+          hardcoded+=("$(basename -- "$s"): $line")
+        fi
+      done
+    done
+  done < <(grep -nE '^[[:space:]]*for [A-Za-z_][A-Za-z0-9_]* in ' "$s" || true)
+done
+if [[ ${#hardcoded[@]} -eq 0 ]]; then
   ok "no hardcoded binary list loop remains in the scripts"
+else
+  bad "no hardcoded binary list loop remains in the scripts (${hardcoded[*]})"
 fi
 
 # --- 4. Functional: the copy block of setup-nebula.sh copies all five -------
@@ -137,7 +157,82 @@ else
   bad "uninstall.sh remove block removes all five binaries (block missing or failed)"
 fi
 
-# --- 7. The .deb ships every file install.sh reads ---------------------------
+# --- 7. Functional: the layout check of install.sh (both paths) -------------
+# from-package: the five binaries must exist in bin_dir; a missing one must
+# stop the script. tarball: the five binaries must exist at tarball_root.
+mkdir -p "$sandbox/pkgbin" "$sandbox/deploy/systemd" "$sandbox/tarball"
+for b in "${expected[@]}"; do
+  printf '#!/bin/sh\n' > "$sandbox/pkgbin/$b"
+  chmod +x "$sandbox/pkgbin/$b"
+  printf '#!/bin/sh\n' > "$sandbox/tarball/$b"
+done
+mapfile -t binaries < <(read_binaries "$sandbox/deploy/quickstart/binaries.txt")
+from_package=1
+bin_dir="$sandbox/pkgbin"
+systemd_dir="$sandbox/etc/systemd/system"
+script_dir="$sandbox/deploy"
+mapfile -t check_block < <(sed -n '/^# begin: check layout/,/^# end: check layout/p' "$install_sh" | grep -v '^# \(begin\|end\): check layout$')
+if [[ ${#check_block[@]} -gt 0 ]] && ( eval "$(printf '%s\n' "${check_block[@]}")" ); then
+  ok "install.sh layout check passes with all five binaries (from-package)"
+else
+  bad "install.sh layout check passes with all five binaries (from-package)"
+fi
+mv "$sandbox/pkgbin/nebula-pve-collector" "$sandbox/gone"
+if ( eval "$(printf '%s\n' "${check_block[@]}")" ); then
+  bad "install.sh layout check fails when a binary is missing (from-package)"
+else
+  ok "install.sh layout check fails when a binary is missing (from-package)"
+fi
+mv "$sandbox/gone" "$sandbox/pkgbin/nebula-pve-collector"
+from_package=0
+tarball_root="$sandbox/tarball"
+if ( eval "$(printf '%s\n' "${check_block[@]}")" ); then
+  ok "install.sh layout check passes with all five binaries (tarball)"
+else
+  bad "install.sh layout check passes with all five binaries (tarball)"
+fi
+
+# --- 8. Functional: the binary install loop of install.sh -------------------
+# Runs the real loop with a fake `install` (no root): all five binaries
+# must land in bin_dir and the change must be detected.
+mkdir -p "$sandbox/fakebin" "$sandbox/usrbin"
+cat > "$sandbox/fakebin/install" <<'FAKE'
+#!/bin/sh
+# fake install(1): skip -m/-o/-g pairs, copy the last two arguments
+while [ $# -gt 0 ]; do
+  case $1 in
+    -m|-o|-g) shift 2 ;;
+    *) break ;;
+  esac
+done
+cp -f "$1" "$2"
+FAKE
+chmod +x "$sandbox/fakebin/install"
+from_package=0
+bin_dir="$sandbox/usrbin"
+tarball_root="$sandbox/tarball"
+mapfile -t install_block < <(sed -n '/^# begin: install binaries/,/^# end: install binaries/p' "$install_sh" | grep -v '^# \(begin\|end\): install binaries$')
+out=$( (
+  PATH="$sandbox/fakebin:$PATH"
+  eval "$(printf '%s\n' "${install_block[@]}")"
+  missing=()
+  for b in "${expected[@]}"; do
+    [[ -f "$sandbox/usrbin/$b" ]] || missing+=("$b")
+  done
+  if [[ ${#missing[@]} -eq 0 && ${bin_changed} -eq 1 ]]; then
+    echo ok
+  else
+    echo "missing: ${missing[*]:-none}; bin_changed=${bin_changed}"
+    exit 1
+  fi
+) 2>&1 )
+if [[ "$out" == ok ]]; then
+  ok "install.sh install loop installs all five binaries"
+else
+  bad "install.sh install loop installs all five binaries ($out)"
+fi
+
+# --- 9. The .deb ships every file install.sh reads ---------------------------
 # On a packaged install install.sh runs from /usr/share/nebula/deploy
 # (--from-package), so every file it reads under ${script_dir} must be in
 # the nfpm contents of .goreleaser.yaml (the tarball carries the whole
@@ -172,7 +267,7 @@ else
   bad ".goreleaser.yaml exists"
 fi
 
-# --- 8. Syntax of the scripts ------------------------------------------------
+# --- 10. Syntax of the scripts ------------------------------------------------
 for s in "$setup_sh" "$install_sh" "$uninstall_sh" "$real_repo/deploy/quickstart/binaries_lib.sh"; do
   if bash -n "$s" 2>/dev/null; then
     ok "bash -n $(basename -- "$s")"
