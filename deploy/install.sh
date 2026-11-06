@@ -327,9 +327,16 @@ done
 # collector or the executor are enabled. Re-add them here once the icon
 # service is provisioned.
 #
-# In the tarball list, nebula-server and nebula-pve-collector come before
-# the discovery units so that a failing unit cannot abort the install
-# (set -e) before the server or the collector are enabled.
+# In both lists, nebula-server, nebula-executor and nebula-pve-collector
+# come before the discovery units, and the enable loop below enables the
+# executor within that loop (before the discovery units, not after it), so
+# a failing discovery unit cannot abort the install (set -e) before the
+# server, the executor or the collector are enabled.
+#
+# tarball_units is the set of unit files this install provisions; it
+# includes nebula-discovery.service, which has no [Install] section and is
+# therefore installed but never enabled. package_units is the set the
+# package enables: the installable subset (no nebula-discovery.service).
 tarball_units=(
   nebula-server.service
   nebula-executor.service
@@ -338,12 +345,25 @@ tarball_units=(
   nebula-discovery.service
   nebula-discovery.timer
 )
-installed_units=()
+package_units=(
+  nebula-server.service
+  nebula-executor.service
+  nebula-pve-collector.service
+  nebula-discovery.path
+  nebula-discovery.timer
+)
+
+# enable_units is the list the enable loop below walks, in the order above.
+# In tarball mode every provisioned unit is enabled whether or not it was
+# just installed, so a re-run after an aborted install still enables the
+# units even when their files are already present. In package mode only the
+# units the package has not enabled yet are listed.
+enable_units=()
 if [[ ${from_package} -eq 1 ]]; then
   # The package ships the units; enable the ones not enabled yet.
-  for name in nebula-server.service nebula-discovery.path nebula-discovery.timer nebula-executor.service nebula-pve-collector.service; do
+  for name in "${package_units[@]}"; do
     if ! systemctl is-enabled --quiet "${name}" 2>/dev/null; then
-      installed_units+=("${name}")
+      enable_units+=("${name}")
     fi
   done
 else
@@ -352,10 +372,25 @@ else
       echo "install.sh: ${systemd_dir}/${name} already exists; leaving it untouched"
     else
       install -m 0644 -o root -g root "${script_dir}/systemd/${name}" "${systemd_dir}/${name}"
-      installed_units+=("${name}")
     fi
+    # Enable it whether or not it was just installed: a re-run after an
+    # aborted install must still enable the units, not only the ones whose
+    # file is absent.
+    enable_units+=("${name}")
   done
 fi
+
+# Remove iconfetch units left behind by an earlier install (WA-04): the
+# lists above no longer install them, but a host upgraded from an earlier
+# install still has them in /etc/systemd/system, possibly enabled. Disable
+# and remove them so they do not run at boot.
+for name in nebula-iconfetch.service nebula-iconfetch.path nebula-iconfetch.timer nebula-iconfetch-firewall.service; do
+  if [[ -e "${systemd_dir}/${name}" ]]; then
+    echo "install.sh: removing leftover ${name} from an earlier install"
+    systemctl disable --now "${name}" 2>/dev/null || true
+    rm -f "${systemd_dir}/${name}"
+  fi
+done
 
 # --- Executor drop-in (rewritten on every run; never edit the unit) --------
 # The reference unit ships a placeholder ExecStart that would crash-loop
@@ -435,10 +470,15 @@ fi
 # --- Start/restart (only after the drop-in is in place) ---------------------
 systemctl daemon-reload
 
-for name in "${installed_units[@]}"; do
-  # The executor starts below; nebula-discovery.service is started by its
-  # path unit and timer and has no [Install] section.
-  if [[ "${name}" != "nebula-executor.service" && "${name}" != "nebula-discovery.service" ]]; then
+for name in "${enable_units[@]}"; do
+  # The executor is enabled here (before the discovery units) so its boot
+  # start does not depend on the server's Wants=, but it is started or
+  # restarted below, where the drop-in-aware handling lives.
+  # nebula-discovery.service is started by its path unit and timer and has
+  # no [Install] section, so it is not enabled.
+  if [[ "${name}" == "nebula-executor.service" ]]; then
+    systemctl enable "${name}"
+  elif [[ "${name}" != "nebula-discovery.service" ]]; then
     systemctl enable --now "${name}"
   fi
 done
@@ -454,15 +494,13 @@ if systemctl is-active --quiet nebula-executor.service; then
     systemctl restart nebula-executor.service
     echo "install.sh: restarted nebula-executor (binaries or drop-in changed)"
   fi
-elif printf '%s\n' "${installed_units[@]}" | grep -qx 'nebula-executor.service'; then
-  systemctl enable --now nebula-executor.service
-elif [[ -e "${unit_dir}/nebula-executor.service" ]]; then
-  # The unit exists from an earlier install but is not active (for
-  # example it failed to start before this run): enable it and start it
-  # now that the drop-in is in place.
-  systemctl enable nebula-executor.service
+else
+  # Not active: a fresh install (the server's Wants= did not start it, or
+  # it is a new host) or an earlier install whose executor did not start.
+  # It is already enabled (in the loop above, or from a previous run);
+  # start it now that the drop-in is in place.
   systemctl restart nebula-executor.service
-  echo "install.sh: enabled and restarted nebula-executor (was not active)"
+  echo "install.sh: started nebula-executor (was not active)"
 fi
 
 # --- Next steps --------------------------------------------------------------
