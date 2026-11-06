@@ -295,7 +295,27 @@ bin_changed=0
 done
 
 # --- Units (installed only if absent: never clobber admin edits) -----------
-shopt -s nullglob
+# The units this install provisions are listed explicitly (WA-04). The
+# iconfetch units (nebula-iconfetch.service/.path/.timer and
+# nebula-iconfetch-firewall.service) are deliberately left out: the icon
+# service is not wired into the server yet, and
+# nebula-iconfetch-firewall.service's ExecStart needs
+# /etc/nebula/nebula-iconfetch.nft, which nothing provisions. Enabling one
+# of them under set -e could abort the install before nebula-server, the
+# collector or the executor are enabled. Re-add them here once the icon
+# service is provisioned.
+#
+# In the tarball list, nebula-server and nebula-pve-collector come before
+# the discovery units so that a failing unit cannot abort the install
+# (set -e) before the server or the collector are enabled.
+tarball_units=(
+  nebula-server.service
+  nebula-executor.service
+  nebula-pve-collector.service
+  nebula-discovery.path
+  nebula-discovery.service
+  nebula-discovery.timer
+)
 installed_units=()
 if [[ ${from_package} -eq 1 ]]; then
   # The package ships the units; enable the ones not enabled yet.
@@ -304,17 +324,16 @@ if [[ ${from_package} -eq 1 ]]; then
       installed_units+=("${name}")
     fi
   done
+else
+  for name in "${tarball_units[@]}"; do
+    if [[ -e "${systemd_dir}/${name}" ]]; then
+      echo "install.sh: ${systemd_dir}/${name} already exists; leaving it untouched"
+    else
+      install -m 0644 -o root -g root "${script_dir}/systemd/${name}" "${systemd_dir}/${name}"
+      installed_units+=("${name}")
+    fi
+  done
 fi
-[[ ${from_package} -eq 1 ]] || for unit in "${script_dir}"/systemd/*.service "${script_dir}"/systemd/*.path "${script_dir}"/systemd/*.timer; do
-  name=$(basename -- "${unit}")
-  if [[ -e "${systemd_dir}/${name}" ]]; then
-    echo "install.sh: ${systemd_dir}/${name} already exists; leaving it untouched"
-  else
-    install -m 0644 -o root -g root "${unit}" "${systemd_dir}/${name}"
-    installed_units+=("${name}")
-  fi
-done
-shopt -u nullglob
 
 # --- Executor drop-in (rewritten on every run; never edit the unit) --------
 # The reference unit ships a placeholder ExecStart that would crash-loop
