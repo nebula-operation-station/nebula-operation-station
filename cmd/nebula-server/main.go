@@ -391,6 +391,15 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 	bg.Go(func() { traffic.run(connCtx, trafficCheckInterval) })
 
+	// PVE spool import (ADR 0006, P1-10): the collector's observations
+	// and guest NIC records; without it /pve and the chart stay empty and
+	// the spool only grows.
+	imports, err := newPVEImport(db, cfg.PVESpoolDir, retention, log)
+	if err != nil {
+		return err
+	}
+	bg.Go(func() { imports.run(connCtx) })
+
 	h, err := ui.New(ui.Options{
 		PublicOrigin:   cfg.PublicOrigin,
 		Status:         exec,
@@ -445,6 +454,9 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// One collector, one spool root: the live handoff lives next to the
+	// imported directories.
+	lc.handoffRoot = cfg.PVESpoolDir
 	bg.Go(func() { lc.run(connCtx) })
 	// Software catalog (ADR 0009 TM17): admin pages behind the session.
 	// Icon changes go through the icon service (TM16); results of the

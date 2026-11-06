@@ -21,6 +21,17 @@ import (
 // unlink in the spool yet.
 func failRemove(context.Context, string) error { return unix.EROFS }
 
+// cancelAfterWrite ends a Run loop from its first log line.
+type cancelAfterWrite struct {
+	buf    *bytes.Buffer
+	cancel context.CancelFunc
+}
+
+func (c cancelAfterWrite) Write(p []byte) (int, error) {
+	defer c.cancel()
+	return c.buf.Write(p)
+}
+
 func oneObservation(t *testing.T, spool *Spool) {
 	t.Helper()
 	collectInto(t, spool, &fakeReader{
@@ -198,11 +209,17 @@ func TestImporterRunStaysQuietOnSkippedPasses(t *testing.T) {
 	im, spool, _ := newTestImporter(t)
 	var logs bytes.Buffer
 	im.log = slog.New(slog.NewTextHandler(&logs, nil))
-	im.remove = failRemove
-	oneObservation(t, spool)
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := im.Run(ctx, 5*time.Millisecond); err != nil {
+	removals := 0
+	im.remove = func(context.Context, string) error {
+		if removals++; removals == 4 {
+			cancel() // three skipped passes after the importing one
+		}
+		return unix.EROFS
+	}
+	oneObservation(t, spool)
+	if err := im.Run(ctx, time.Millisecond); err != nil {
 		t.Fatal(err)
 	}
 	if n := strings.Count(logs.String(), "import pass"); n != 1 {
@@ -365,8 +382,11 @@ func TestGuestNetImporterRunImportsAndStops(t *testing.T) {
 
 func TestGuestNetImporterRunLogsListFailure(t *testing.T) {
 	w, im, _ := newGuestNetImportFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Run stops as soon as it has logged the failed pass.
 	var logs bytes.Buffer
-	im.log = slog.New(slog.NewTextHandler(&logs, nil))
+	im.log = slog.New(slog.NewTextHandler(cancelAfterWrite{&logs, cancel}, nil))
 	path := guestNetPath(w, "pve-q.obs-00000000001700000000.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0o770); err != nil {
 		t.Fatal(err)
@@ -374,8 +394,6 @@ func TestGuestNetImporterRunLogsListFailure(t *testing.T) {
 	if err := os.Symlink("/etc/passwd", path); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
 	if err := im.Run(ctx, time.Hour); err != nil {
 		t.Fatal(err)
 	}
