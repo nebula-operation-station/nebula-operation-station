@@ -249,7 +249,7 @@ func TestListStoragesRejectsBadNodeName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	for _, node := range []string{"", "UP/PER", "has space", strings.Repeat("a", MaxNodeNameBytes+1)} {
+	for _, node := range []string{"", "UP/PER", "has space", strings.Repeat("a", 64)} {
 		if _, err := c.ListStorages(context.Background(), node); err == nil {
 			t.Fatalf("ListStorages(%q): expected error", node)
 		}

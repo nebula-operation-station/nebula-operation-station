@@ -26,8 +26,6 @@ const (
 )
 
 var (
-	// nodeNameRe validates a PVE node name.
-	nodeNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 	// The node field is the shared pvecontract label, so its grammar and its
 	// 63-character bound match every node check that addresses PVE.
 	// UPID numeric fields are hexadecimal; pstart can grow to nine digits.
@@ -123,7 +121,7 @@ type taskData struct {
 // log endpoints under /nodes/{node}/tasks/{upid}, and it has no mutation
 // endpoints.
 func (c *Client) NodeTasks(ctx context.Context, node string, f TaskFilter) (TaskList, error) {
-	if !nodeNameRe.MatchString(node) {
+	if !pvecontract.ValidNodeLabel(node) {
 		return TaskList{}, fmt.Errorf("pveapi: invalid node name")
 	}
 	limit := f.Limit

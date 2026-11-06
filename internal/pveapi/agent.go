@@ -135,7 +135,7 @@ func (c *Client) AgentFSInfo(ctx context.Context, node string, vmid int) (*Agent
 
 // agentGet runs one QEMU guest agent command.
 func (c *Client) agentGet(ctx context.Context, node string, vmid int, cmd string) (json.RawMessage, error) {
-	if err := validateNodeName(node); err != nil {
+	if err := validNodeName(node); err != nil {
 		return nil, err
 	}
 	if err := validateVMID(vmid); err != nil {
