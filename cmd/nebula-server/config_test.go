@@ -68,7 +68,11 @@ func TestRunRefusesInvalidTrafficRetention(t *testing.T) {
 		"traffic":         map[string]any{"retention_days": 0},
 	})
 	var stderr bytes.Buffer
-	err = run(context.Background(), []string{"-config", path}, &stderr)
+	// A short timeout so a regression that serves anyway fails the
+	// test instead of hanging it.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	err = run(ctx, []string{"-config", path}, &stderr)
 	if err == nil {
 		t.Fatal("run accepted retention_days 0")
 	}

@@ -414,6 +414,17 @@ func TestTrafficRetentionZeroRefused(t *testing.T) {
 	}
 }
 
+// TestTrafficRetentionNegativeRefused checks that negative values are
+// refused by Parse as well, not only by the range check at start.
+func TestTrafficRetentionNegativeRefused(t *testing.T) {
+	for _, n := range []int{-1, -21} {
+		bad := fmt.Sprintf(`{"public_origin":"https://n.example","data_dir":"/d","executor_socket":"/s","executor_user":"u","traffic":{"retention_days":%d}}`, n)
+		if _, err := Parse([]byte(bad)); err == nil {
+			t.Errorf("Parse accepted retention_days %d", n)
+		}
+	}
+}
+
 func TestTrafficRetentionAboveMaxRefused(t *testing.T) {
 	for _, n := range []int{22, 100} {
 		bad := fmt.Sprintf(`{"public_origin":"https://n.example","data_dir":"/d","executor_socket":"/s","executor_user":"u","traffic":{"retention_days":%d}}`, n)

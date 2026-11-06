@@ -354,7 +354,7 @@ func TestTrafficIngestPrunesToConfiguredRetention(t *testing.T) {
 	ctx := context.Background()
 	// A bucket 10 days before the first check: inside the 21-day
 	// default, outside the 7-day retention.
-	old := tfT0.Add(-10 * 24 * time.Hour).Truncate(time.Hour).Unix() / 3600
+	old := tfT0.Add(-10*24*time.Hour).Truncate(time.Hour).Unix() / 3600
 	e.expiredBucket(old)
 	if !e.loop.check(ctx) {
 		t.Fatal("first check did not sync")
