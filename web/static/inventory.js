@@ -499,6 +499,19 @@
         toggle.setAttribute('aria-expanded', String(expanded));
       });
     }
+    // The bar is fixed, so on narrow screens it would cover the last rows.
+    // Measure the distance from the bar's top to the bottom of the viewport
+    // into --bulkbar-h; app.css uses it as bottom padding of .main
+    // (≤ 640px). The ResizeObserver catches height changes (toggle, inline
+    // confirms, text wrap, hidden); resize catches viewport changes.
+    const setBarClearance = () => {
+      const r = bulkbar.getBoundingClientRect();
+      const h = bulkbar.hidden || r.top <= 0 ? 0 : Math.max(0, Math.ceil(innerHeight - r.top));
+      document.documentElement.style.setProperty('--bulkbar-h', h + 'px');
+    };
+    setBarClearance();
+    new ResizeObserver(setBarClearance).observe(bulkbar);
+    window.addEventListener('resize', setBarClearance);
     for (const b of boxes()) b.addEventListener('change', update);
     all.addEventListener('change', () => {
       for (const b of boxes()) {

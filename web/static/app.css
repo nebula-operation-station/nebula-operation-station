@@ -1341,6 +1341,13 @@ details[open] summary { color: var(--text); margin-bottom: var(--space-2); }
   }
   .bulkbar:not(.bulkbar--expanded) .bulkbar__body { display: none; }
 }
+/* The bar is fixed, so it would cover the last rows on narrow screens.
+   inventory.js measures the distance from the bar's top to the bottom of
+   the viewport into --bulkbar-h (0 while the bar is hidden); the content
+   area uses it as extra bottom padding so no row is hidden behind it. */
+@media (max-width: 640px) {
+  .main { padding-bottom: calc(var(--space-3) + var(--bulkbar-h, 0px)); }
+}
 
 /* --- Inventory freshness: hosts without a read in 24 h. --- */
 .stale { color: var(--warn); font-weight: 600; }
