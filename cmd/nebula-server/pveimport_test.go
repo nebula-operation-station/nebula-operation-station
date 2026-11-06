@@ -198,9 +198,8 @@ func newTestPVEImport(t *testing.T, root string, logs *syncBuffer) (*pveImport, 
 	return p, db
 }
 
-// A spool that is not there yet (no collector installed, a container
-// without the volumes) must not stop the server: the wait is logged once
-// and ends as soon as the directories exist.
+// A spool that is not there yet (no collector installed) must not stop the
+// server: the wait is logged once and ends as soon as the directories exist.
 func TestPVEImportWaitsForSpool(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "pve")
 	var logs syncBuffer

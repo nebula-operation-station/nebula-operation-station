@@ -105,7 +105,9 @@ type Config struct {
 	// read and unlink there) and exchanges the live chart data through
 	// requests/ and live/. Default "/var/lib/nebula/pve"; while the spool
 	// is unavailable the server logs that once and keeps trying, and the
-	// PVE pages stay empty.
+	// PVE pages stay empty. install.sh provisions and opens only the
+	// default path for the server (ReadWritePaths), so another root needs
+	// the same directories, modes and write access set up by hand.
 	PVESpoolDir string `json:"pve_spool_dir"`
 	// AuditHashChain links each stored server audit line to the one
 	// before by hash (M10-1); off by default. The executor's own events are
