@@ -375,10 +375,17 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	disc := discovery.New(db, discoveryjob.Spool{Dir: cfg.DiscoveryDir}, ipamStore, hostAddrs, log)
 	bg.Go(func() { disc.Run(connCtx) })
 
+	// Traffic retention (traffic.retention_days): one value for every
+	// traffic store the server opens — the ingest store that prunes,
+	// the connections pages and the traffic map.
+	retention, err := trafficRetention(cfg)
+	if err != nil {
+		return err
+	}
 	// Traffic map data (ADR 0009 TM12): net.facts results go into the
 	// traffic store; own addresses and MACs come only from the inventory
 	// and the IPAM assets linked to managed hosts.
-	traffic, err := newTrafficIngest(db, store.List, ipamStore.Assets, log, time.Now)
+	traffic, err := newTrafficIngest(db, store.List, ipamStore.Assets, log, time.Now, retention)
 	if err != nil {
 		return err
 	}
@@ -445,7 +452,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		return err
 	}
 	// Connections tab of the host and asset pages (ADR 0009 TM20).
-	connPages, err := newConnectionsPages(db, store, ipamStore, log)
+	connPages, err := newConnectionsPages(db, store, ipamStore, log, retention)
 	if err != nil {
 		return err
 	}
@@ -466,7 +473,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		log.Info("read-only API enabled", "tokens", len(cfg.API.Tokens))
 	}
 	// Traffic map (ADR 0009 TM19): page, frame and model behind the session; renderer modules under /static/.
-	if err := mountTrafficMap(pages, cfg.PublicOrigin, db, store.List, ipamStore, log); err != nil {
+	if err := mountTrafficMap(pages, cfg.PublicOrigin, db, store.List, ipamStore, log, retention); err != nil {
 		return err
 	}
 	srv, err := webServer(cfg.PublicOrigin, login, pages, apiHandler)

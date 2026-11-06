@@ -389,6 +389,7 @@ start.
 | `executor_user` | (required) | `nebula-executor`; the server checks that the socket is served by this user. |
 | `discovery_dir` | `/var/lib/nebula/discovery` | Discovery spool (`jobs/`, `results/`). Without the directory, discovery shows as not installed. |
 | `audit_hash_chain` | `false` | Chain the server's own audit lines by hash (section 10.3). |
+| `traffic` | 21 days | Traffic map retention: `"traffic": {"retention_days": N}` keeps N days of flow data (1-21). A value outside the range stops the start. |
 | `notifications` | none | Providers, section 10.1. |
 | `api` | disabled | Read-only API, section 10.2. |
 
@@ -1138,12 +1139,14 @@ was not adopted: a sockets report that contains a process column — that is,
 one from a wrapped or replaced `ss` — is rejected as invalid, so a
 compromised host cannot inject process names.
 
-**Retention: 21 days.** The server stores hourly flow buckets and endpoint
-reports and prunes them during a full sync (at least once per clock hour).
-The retention is 21 days; the map's and
-the connections pages' windows are clamped to it. There is no setting to
-shorten it yet: the store only accepts a shorter retention (minimum 1 h),
-and `nebula-server` currently always runs with the 21-day default.
+**Retention: 21 days by default, configurable.** The server stores hourly
+flow buckets and endpoint reports and prunes them during a full sync (at
+least once per clock hour). The retention is 21 days by default; the
+map's and the connections pages' windows are clamped to it. To shorten
+it, set `"traffic": {"retention_days": N}` in `server.json` (1-21 days,
+default 21); a value outside the range stops the start with an error
+naming the key. The store itself only accepts a shorter retention
+(minimum 1 h), never a longer one.
 
 **Icons.** Nodes and software entries can carry an icon from the software
 catalog (*Software* page, `/software`). The icon pages
