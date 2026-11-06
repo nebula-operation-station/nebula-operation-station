@@ -88,7 +88,10 @@ Gaps that the steps close:
 - **Decision 3 (default):** the binding decides, the parameters follow. The
   executor renders the parameter document from the binding and compares its
   hash with `ParametersHash`, so what was reviewed and what runs cannot
-  differ, and it needs no parser for server-supplied parameters.
+  differ, and it needs no parser for server-supplied parameters. Every value a
+  script needs is therefore a binding field, for rollback too (`running_reference`
+  per target, the `rollback` block per image). Nothing reaches a script any
+  other way.
 - **Decision 4 (default):** the risk rule is Go code in a protected path,
   derived from the binding by the executor. It is never trusted from the
   proposal and never left to a shell script. The script's only part is to prove
@@ -108,9 +111,11 @@ Gaps that the steps close:
 | Any floor reaches CRITICAL: recorded host, scanner, linked-host floor | none | **Refused**, at proposal and again at approval and claim. No separate approval path and no downgrade |
 | Digest-pinned image, unsupported or incomplete definition, unknown digest | none | **Unavailable**: no proposal is offered (ADR line 363, R3) |
 
-`docker.update_preview` (cu02) is LOW and read-only: it writes nothing on the
-host, not even a salt file, and does not authorize anything (ADR lines 423 and
-439: LOW means read-only). `docker.update_prepare` (cu02) creates the per-host
+`docker.update_preview` (cu02) is LOW and read-only: its script writes nothing
+on the host, not even a salt file, and it does not authorize anything (ADR
+lines 423 and 439: LOW means read-only). The job directory of its durable
+transport is the only file activity, the same for every durable job.
+`docker.update_prepare` (cu02) creates the per-host
 salt of Q5, so it is MEDIUM and approved like any other host change. It touches
 no container and is not a container update.
 
@@ -143,24 +148,42 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     (standalone: one entry with an empty `service`). Two services with the same
     image have two entries, so nothing depends on how a project shares images.
     Each entry is:
-    - `service`, `repository`, `platform`, `old_tag`, `new_tag`;
-    - `old_index_digest`, `old_platform_digest`, `new_index_digest`,
-      `new_platform_digest`. Platform digests are required; index digests are
-      empty only for an image without an index;
-    - `old_image_id`: the local image ID cu02 compares in phase 1 and retains
-      in phase 4;
+    - `service`, `repository`, `platform`, `old_tag`, `new_tag`. `repository`
+      is in the canonical form of `canonical.ParseImageReference` (below);
+    - `old_digests`: sorted, at least one, the digests the local image lists
+      for `repository` at preview time. A classic store lists only the digest
+      the image was pulled by, so this may be an index digest, a platform
+      digest or both (see Q17);
+    - update only, `new_index_digest` and `new_platform_digest`: the platform
+      digest is required, the index digest is empty only for an image without
+      an index;
+    - update only, `old_image_id`: the local image ID cu02 compares in phase 1
+      and retains in phase 4;
     - `policy_version`, `policy_digest`, `major_change`: required on an entry
       whose tags differ and refused on a same-tag entry (R8, spec v23-11-09).
       `policy_version` is `registrymeta.Result.PolicyVersion`; `policy_digest`
       is the SHA-256 of the canonical `registrymeta.Policy`, so that two
-      policies cannot share a version string unnoticed (see Q13).
+      policies cannot share a version string unnoticed (see Q13);
+    - rollback only, `rollback`: `{prior_image_id, retained_tag,
+      retained_reference}`, copied from the row (cu03). The digest fields above
+      describe the update's result; these three describe what the rollback
+      returns to.
   - `targets`: sorted `{service, container_id, container_name, image_id,
-    configuration_digest}`, full 64-hex IDs only. Every target's `service` has
-    an `images` entry and every entry has at least one target. `image_id` is
-    per target, because a rollback of a partly recreated project starts from
-    mixed replicas (cu03);
-  - `source_digest` (see Q5): what the containers were created from, unchanged
-    by the image change;
+    running_reference, configuration_digest}`, full 64-hex IDs only.
+    `running_reference` is the container's `Config.Image`, byte for byte. Every
+    target's `service` has an `images` entry. On `kind=update` every entry has
+    at least one target, each target's `image_id` equals its entry's
+    `old_image_id`, and its `running_reference` parses to the entry's
+    `repository` and `old_tag`. Replicas of one service on different images are
+    therefore not a valid update (see [What phase 2 does not support](#what-phase-2-does-not-support)).
+    On `kind=rollback` `image_id` and `running_reference` come from the row per
+    target, because a partly recreated project has mixed replicas, and one
+    `old_tag` per entry could not express them. There an entry may have no
+    target, but only when the row records every container of that service as
+    `missing` (cu03);
+  - compose only, `source_digest` (see Q5): what the containers were created
+    from, unchanged by the image change. It is refused on a standalone member,
+    which binds `definition_id` and `definition_version` instead (Q20);
   - compose only: `project`, `working_dir_hash`, `config_files_hash` (over the
     operator's paths with the NOS override left out, so the value is the same
     before and after an update), `dependencies`;
@@ -175,21 +198,34 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     and dependencies together are R5's exact affected set (see Q12);
   - `registry`: empty for public images, otherwise registry ID, record digest,
     credential ID and credential version (cu06);
-  - `definition_version` (cu05), `rollback_of` and `recovery_plan_digest`
-    (cu03), each required exactly where those steps say and refused elsewhere.
+  - `definition_id`, `definition_version` (cu05), `rollback_of` and
+    `recovery_plan_digest` (cu03), each required exactly where those steps say
+    and refused elsewhere.
 - **Limits:** named constants beside the validation:
   `maxContainerUpdateImages = 20` and `maxContainerUpdateContainers = 50` over
   targets and dependency containers together. The existing
   `canonical.MaxParametersSize` (64 KiB) and `MaxBatchSize` (1 MiB) still apply.
   A plan over any of them is refused; the operator splits it into more
   batches, or the unit is shown as unavailable if one member alone is too large.
-- **Validity:** an entry with equal tags and equal platform digests is refused,
-  since it would recreate for nothing. A service whose image does not change
-  belongs in `dependencies`, or nowhere.
+- **Validity:** an entry with equal tags whose `new_platform_digest` or
+  `new_index_digest` is in `old_digests` is refused, since it would recreate
+  for nothing. A service whose image does not change belongs in `dependencies`,
+  or nowhere.
 - **Functions:**
   - `canonical.ContainerUpdateFloor`: MEDIUM when **every** entry has equal
     tags, otherwise HIGH. One tag change makes the whole member HIGH.
-  - `canonical.ContainerUpdateParameters`: the rendering of Decision 3.
+  - `canonical.ContainerUpdateParameters`: the rendering of Decision 3. It
+    covers `running_reference` and the `rollback` block.
+  - `canonical.ParseImageReference`: the single normalization rule, so no
+    script has its own. The canonical repository keeps the registry host:
+    `nginx`, `library/nginx` and `docker.io/nginx` all give
+    `docker.io/library/nginx`, `index.docker.io` gives `docker.io`, and a first
+    path part with `.` or `:`, or `localhost`, is a registry host, as in
+    `docker_check_updates.sh`. A reference without a tag has the implicit tag
+    `latest`, so `image: nginx` matches `old_tag=latest`. `repo:tag@digest`
+    gives that repository and tag; cu02's phase 1 then decides whether the digest
+    is the NOS override or an operator pin. `repo@digest` without a tag, a bare
+    image ID and any other form are not comparable and are refused.
   - `registrymeta.CompareTags(old, new, policy)`: reuses the tag parser of
     `stable.go` and reports major change, variant change or not comparable.
   - `docker.update` at `internal/canonical/batch.go:308` moves to the new
@@ -204,35 +240,53 @@ Until they land, cu04 shows those targets as unavailable with a reason.
   same-tag refresh of `latest` needs no comparison. The policy values go into
   the trust hash, so a policy changed after approval fails revalidation. Both
   authorities refuse the container mutation IDs on the classic path. The rule
-  keys on the action ID, so a module cannot pick the name to avoid it.
+  keys on the action ID, so a module cannot pick the name to avoid it. cu01's
+  list is `docker.update`, `docker.rollback` and `docker.compose_rollback`, none
+  of which exists yet. `docker.compose_update` joins the list in **cu02**, in the
+  change that replaces 1.0.0: until then it stays a classic-only action, and the
+  host page keeps its link.
 - **Limit of the floor:** `ContainerUpdateFloor` trusts the binding's tags. They
-  come from a server-side preview, so a forged `old_tag` could turn a tag change
-  into MEDIUM here. Evaluate cannot see the host; cu02's phase 1 closes this by
-  checking `old_tag` against the running container before anything changes.
+  come from a server-side preview, so a forged `old_tag` with a matching forged
+  `running_reference` could turn a tag change into MEDIUM here. Evaluate cannot
+  see the host; cu02's phase 1 closes this by comparing `running_reference` with
+  the running container before anything changes.
 - **Risk classes:** defines MEDIUM, HIGH and the CRITICAL refusal. Nothing can
   run yet.
 - **Tests:**
   - canonical: table of malformed bindings (digest shape, short ID, leading
     `-` in a name, duplicate target, unsorted targets, unsorted images, a target
-    without an image entry, an entry without a target, a second entry for one
-    service, a no-op entry, policy missing on a tag change, policy set on a
-    same-tag entry, malformed dependency relation, a service in both `images`
-    and `dependencies`, each limit exceeded, unknown key); a mutation of any
-    bound field in any image entry, target or dependency changes the digest; new
+    without an image entry, an entry without a target on `kind=update`, a second
+    entry for one service, a no-op entry, empty `old_digests`, policy missing on
+    a tag change, policy set on a same-tag entry, a `rollback` block on an update,
+    an update without `new_platform_digest`, `source_digest` on a standalone
+    member, malformed dependency relation, a service in both `images` and
+    `dependencies`, each limit exceeded, unknown key); a mutation of any bound
+    field in any image entry, target or dependency changes the digest; new
     golden files, and the existing ones byte-identical.
+  - `TestUpdateRefusesMixedReplicaImages` (a target's `image_id` differs from its
+    entry's `old_image_id`), `TestRunningReferenceMustMatchOldTag`,
+    `TestRollbackEntryMayHaveNoTarget` (canonical allows it on `kind=rollback`
+    only; Evaluate's check against the row is in cu03).
   - unit: `ContainerUpdateFloor` is HIGH when one of several entries changes its
-    tag; `CompareTags` table for major, minor, variant, date and non-version tags.
+    tag; `CompareTags` table for major, minor, variant, date and non-version tags;
+    `TestParseImageReference`, a table with `nginx` (implicit `latest`),
+    `nginx:1.27`, `library/nginx`, `docker.io/nginx:1`, `index.docker.io/a/b:1`,
+    `ghcr.io/a/b:1`, `localhost:5000/a:1`, `repo:tag@sha256:…`, and the refused
+    `repo@sha256:…`, bare image ID, uppercase path and empty tag.
   - security (`test/security`): `TestContainerTagChangeBelowHighRefused`
     (server labels a tag change MEDIUM), `TestContainerBindingDiffersFromParameters`,
     `TestContainerCriticalFloorRefusedNotDowngraded` at proposal, approval and
     claim, `TestContainerCriticalAfterApprovalStopsMember`,
-    `TestContainerMutationRefusedOnClassicPath`,
+    `TestContainerMutationRefusedOnClassicPath` (for `docker.update` here; cu02
+    extends it to `docker.compose_update`),
+    `TestComposeUpdateV1StaysOnClassicPath` (removed by cu02 together with 1.0.0),
     `TestRestartMemberCannotCarryUpdateBinding`,
     `TestContainerPolicyMismatchRefused`, `TestContainerPolicyChangedAfterApproval`,
     `TestImplicitMajorUpgradeRefused`, `TestContainerVariantChangeRefused`.
-- **Real install:** nothing to enable; no action exists yet. `nebula batch
-  review` prints every new field, per image and per container, because the
-  hardened path reads the plan there.
+- **Real install:** nothing to enable. No action on the new list exists yet, and
+  `docker.compose_update` 1.0.0 with the host page's update link works as before
+  until cu02. `nebula batch review` prints every new field, per image and per
+  container, because the hardened path reads the plan there.
 
 ### cu02 Pinned Compose recreate as a durable member (P2-03 executor)
 
@@ -243,30 +297,62 @@ Until they land, cu04 shows those targets as unavailable with a reason.
   `internal/executions/dockerhost/`, `internal/executions/batchplan.go`,
   `internal/executions/batchoutcome.go`, `cmd/nebula-server/batchrun.go`,
   `web/templates/host.html`; protected: `internal/executor/`,
-  `internal/executor/dispatch/`, `internal/hostrun/` (the job probe of the
-  hold rule), `proto/`, `test/security/`, `test/integration/`.
-- **Protected: yes** for the executor, hostrun, proto and test parts; the
-  actions and planner are not protected.
+  `internal/executor/dispatch/`, `internal/executordb/` (migration 0020:
+  `runs.member_id` and `runs.action_id`), `internal/hostrun/` (the job probe of
+  the hold rule), `proto/`, `test/security/`, `test/integration/`.
+- **Protected: yes** for the executor, executordb, hostrun, proto and test
+  parts; the actions and planner are not protected.
+- **Output of all new scripts (R4):** `docker compose` and `docker pull` can
+  echo interpolated values on stderr, and stderr is the job log that is returned
+  and displayed. So every `docker` and `docker compose` call in these scripts
+  sends stderr to `/dev/null`, and stdout too unless the script parses it; none
+  uses `>&2` as 1.0.0 does. The log holds fixed phase lines only. A failure is a
+  typed reason plus an exit code in the result. The cost is that the Compose
+  error text stays on the host: the operator reruns the command there.
 - **Contracts and RPCs:**
-  - `docker.update_prepare` 1.0.0 (MEDIUM, not read-only, no parameters, not a
-    container mutation under Decision 5): creates the per-host salt of Q5 as a
-    root-only file if it is absent and never replaces an existing one. It
-    touches no container. Result format `docker-update-prepare-v1` reports
-    `created` or `present`, never the salt.
-  - `docker.update_preview` 1.0.0 (LOW, read-only), one parameter
-    `target_tags` that may be empty. It writes nothing on the host. For the
-    host's containers it reports the identity and image facts a binding needs:
-    full ID, name, Compose project, service, working directory and config file
-    labels, the dependency sets, per-container `configuration_digest`, per-unit
-    `source_digest`, image ID, the repository and tag of the running reference,
-    repository digests, platform, and for a requested tag the index and platform
-    digests, resolved anonymously on the host with the same request as
-    `docker.check_updates`, plus a GET of the index to find the platform entry.
-    Stopped containers are included. It never returns env, command line or other
-    label values. Reading the salt and the config files needs root, as durable
-    jobs do. Without a salt it reports `prepare_required` and no digests, and
-    those units are unavailable. Result format `docker-update-preview-v1`, with
-    a strict parser and a fuzz target.
+  - `docker.update_prepare` 1.0.0 (MEDIUM, durable, 2 min, not read-only, no
+    parameters, not a container mutation under Decision 5): creates the per-host
+    salt of Q5 as a root-only file if it is absent and never replaces an
+    existing one. It touches no container. Result format
+    `docker-update-prepare-v1` reports `created` or `present`, never the salt.
+  - `docker.update_preview` 1.0.0 (LOW, read-only, **durable**, 5 min, classic
+    path, not a batch member), one parameter `target_tags` that may be empty. It
+    is durable because reading the salt and the config files needs root, as
+    durable jobs do, and because only a durable run has a `runs` row that Resolve
+    can read (cu03, Q19). Its script writes nothing on the host. For the host's
+    containers it reports the identity and image facts a binding needs: full ID,
+    name, run state, Compose project, service, working directory and config file
+    labels, the file's scale per service, the dependency sets, per-container
+    `configuration_digest`, per-unit `source_digest`, image ID, the running
+    reference verbatim, repository digests, platform, and for a requested tag the
+    index and platform digests, resolved anonymously on the host with the same
+    request as `docker.check_updates`, plus a GET of the index to find the
+    platform entry. A unit that cannot be bound carries its reason (see
+    [What phase 2 does not support](#what-phase-2-does-not-support)). It never
+    returns env, command line or other label values. Without a salt it reports
+    `prepare_required` and no digests, and those units are unavailable. Without
+    a required host tool it reports `tooling_missing` (Q18). Result format
+    `docker-update-preview-v1`, with a strict parser and a fuzz target.
+
+    **Limits**, named constants in `internal/executions/dockerhost/`, enforced by
+    the script and again by the parser, because everything here comes from a
+    hostile host and runs as root on label-supplied paths:
+
+    | Constant | Value | Over the limit |
+    | --- | --- | --- |
+    | `maxPreviewContainers` | 200 | Units not reached are reported `truncated`, so unavailable |
+    | `maxPreviewProjects` | 50 | Same |
+    | `maxPreviewTargetTags` | 20 | Refused at proposal |
+    | `maxPreviewConfigFiles` | 16, each a regular file of at most 1 MiB | Unit unsupported |
+    | `maxPreviewComposeConfigBytes` | 4 MiB of `docker compose config` output | Unit unsupported |
+    | `maxPreviewIndexBytes` | 256 KiB per manifest or index GET | `tag_unresolved` |
+    | `maxPreviewResultBytes` | 768 KiB, below the 1 MiB `hostrun.MaxResult` | Remaining units are `truncated` |
+
+    Each external call has its own bound (`timeout 30` for Compose and Docker,
+    the `curl` limits of `docker_check_updates.sh`), inside the 5-minute job
+    timeout. A label-supplied path must be absolute, and the content of those
+    files never leaves the host. A unit cut off by a limit is reported without
+    facts, never half: a partial dependency set must not become a binding.
   - `docker.compose_update` 2.0.0 (durable, `reconcile-first`, 30 min, batch
     only), result `compose-update-v2`; `compose-update-v1` stays parseable for
     history. Phases, each stopping on failure except where noted:
@@ -278,16 +364,33 @@ Until they land, cu04 shows those targets as unavailable with a reason.
        - the containers of each frozen service are exactly the bound targets,
          by full ID and name, each with its bound `image_id` and
          `configuration_digest`;
-       - `old_tag`: the running reference of every target (`Config.Image`,
-         normalized as Docker does) has the entry's `repository` and `old_tag`.
-         A reference without a tag does not match. A forged `old_tag` stops here
-         (reason `old_tag_mismatch`), so nothing runs under a risk class derived
-         from it;
-       - the image `old_image_id` lists `repository@old_index_digest` or
-         `repository@old_platform_digest` in its repository digests;
+       - every target's state is `running` (`target_not_running`), and for each
+         frozen service the number of targets equals the file's scale, the value
+         `up` will converge to (`scale_mismatch`);
+       - `old_tag`: every target's `Config.Image` equals its bound
+         `running_reference`, byte for byte. Evaluate has proved that this
+         reference parses to the entry's `repository` and `old_tag`, so the
+         script normalizes nothing. A forged `old_tag` stops here (reason
+         `old_tag_mismatch`), so nothing runs under a risk class derived from it;
+       - a reference with a digest is accepted only as the NOS override: the
+         `config_files` label names it and its entry for that service equals the
+         reference. Otherwise it is an operator pin (`digest_pinned`);
+       - **drift (Q2):** when a NOS override file exists for the project, the
+         `config_files` label names it and each frozen service's override entry
+         equals its targets' reference (`override_drift`). A plain `docker
+         compose up -d` after an update stops here;
+       - the image `old_image_id` still lists every digest of `old_digests`;
        - the dependency closure, recomputed as in the preview, equals the bound
          `dependencies`, and each dependency container has its bound ID, name
          and `configuration_digest`.
+
+       As its last step, after these checks passed, phase 1 captures the
+       **baseline** with the same code and format as the after-snapshot of phase
+       6, for every target and dependency container. The result carries it from
+       here on, so `not_recreated` and failed runs have it too. A container whose
+       entry exceeds `maxSnapshotContainerBytes` (8 KiB) stops the member
+       (`snapshot_too_large`); with `maxContainerUpdateContainers` that keeps both
+       snapshots within `hostrun.MaxResult`.
     2. **Resolve, nothing changed yet.** For **every** entry, resolve
        `repository:new_tag` with the preview's anonymous request and compare the
        index and platform digests with the entry. A difference is exit 10 with
@@ -311,29 +414,73 @@ Until they land, cu04 shows those targets as unavailable with a reason.
        repository:new_tag@new_platform_digest` for each frozen service and leave
        other services' entries as they are. Then `docker compose ... -f
        <operator files> -f <override> up -d --no-deps --no-build --pull never
-       <frozen services>`.
+       <frozen services>`. There is no `--scale`: phase 1 proved that each frozen
+       service runs exactly the file's scale, so `up` keeps every replica and
+       starts none that was stopped.
     6. **After-snapshot.** It runs whenever phase 5 was reached, **also when `up`
        failed**: bounded health wait, then for every container of the frozen
-       services and of `dependencies` the ID, name, state, start time, health,
-       ports, mounts, networks, image ID, running reference and
-       `configuration_digest`. The result states the last phase reached and
-       `up_exit`. Exit status covers pull and up only; the verdict comes in cu03.
+       services and of `dependencies` the ID, name, service, replica number,
+       state, start time, health, ports, mounts, networks, image ID, running
+       reference and `configuration_digest`. The result states the last phase
+       reached and `up_exit`. Exit status covers pull and up only; the verdict
+       comes in cu03.
   - `docker.check_updates` 1.1.0: stopped containers, platform-manifest
     comparison, and a reference `repo:tag@digest` reads as updatable with that
     tag when the container's `config_files` label names the NOS override, and
-    as `pinned` otherwise (see Q2). Fixes G11.
+    as `pinned` otherwise (see Q2). The comparison follows Q17 and needs no bound
+    old digest: `current` if the tag's index or platform digest is among the
+    local digests; otherwise one bounded GET of each local digest, and `current`
+    if it is an index whose entry for the platform is the tag's platform digest,
+    so an index change on another architecture is not an update. A different
+    entry or a local platform digest is `update`; no answer is `unknown` (ADR
+    line 361). That costs at most one more request per changed image, inside the
+    budget of spec v23-11-02. The 50-image and 64-KiB caps stay. Fixes G11.
   - `InspectBindings` gets a sibling `UpdateBindings` over the latest preview,
     at most `maxContainerBindingAge` old. It fills `images`, `targets`,
-    `dependencies` and `source_digest`, and the policy values of Q13. Compose
-    leaves `batchExcludedActions`.
+    `dependencies` and `source_digest`, and the policy values of Q13, and it
+    refuses a unit that carries a reason or was truncated. Compose leaves
+    `batchExcludedActions`, and `docker.compose_update` joins the list that is
+    refused on the classic path (cu01), which ends 1.0.0's manual path (Q3).
+  - **Timeouts:** `docker.compose_update`, `docker.compose_rollback`,
+    `docker.update` and `docker.rollback` all use one named
+    `containerMutationTimeout = 30 * time.Minute`, the value
+    `batchBusyDurableWait` is derived from.
   - **Durable batch members:** the executor picks `hostrun.Dispatch` for the
     frozen action IDs of Decision 5. `RunBatchMember` returns once the job is
     dispatched, and the server follows it through a new
     `GetBatchMemberRun` (server, admin; added to `roles.go`) instead of
-    holding one RPC open. After a server restart `ReconcileBatches` asks
-    `GetBatchMemberRun` before it marks a dispatched durable member unknown.
-    Reconciliation routes a member run's outcome to the batch rollout, where
-    an unknown outcome counts as a failure for the stop rule.
+    holding one RPC open. It looks the run up by batch digest and member ID
+    through `runs.member_id`, which survives a restart of either side, and
+    reports `finished` only when the run is finished and, from cu03 on, judged.
+    After a server restart `ReconcileBatches` asks `GetBatchMemberRun` before it
+    marks a dispatched durable member unknown, and an open run stays followed.
+  - **One member at a time (R11):** the server keeps the member `dispatched`
+    until `GetBatchMemberRun` gives its final outcome. `runOnce` and `runBatch`
+    already skip a batch with a dispatched member (`batchrun.go:143,192`), so the
+    next member is offered only after the previous one has ended, and a failed
+    update stops the rollout before the next host starts. A container batch is
+    strictly serial.
+  - **Batch lifetime:** `batchplan.go:292` assumes `parallelHosts` hosts at once,
+    which is wrong for this serial runner: 8 members of 30 minutes would get 125
+    minutes against 240 worst case. For a stage with `container_update` members
+    the planner counts one round per member, so that case gets 305 minutes.
+    Other batches keep their formula, and their digests are unchanged. The
+    existing 24-hour check then refuses a plan of more than about 45 such
+    members; the operator splits it. Time spent at a manual gate is not
+    planned, as for all batches: a member reached after expiry ends not executed
+    and changes nothing. A running job is not cut off by expiry.
+  - **Where an outcome goes:** the executor's finished run is the record, not the
+    rollout. Rollout state and `batchExecIndex` are memory-only and cleared by
+    Lock and restart (ADR 0007 line 177, `internal/permit/batch/batch.go:555`).
+    - While the permit lives, the reconciler calls the batch `RecordOutcome`
+      with `runs.member_id`, and an unknown outcome counts as a failure for the
+      stop rule.
+    - After Lock or an executor restart there is no rollout to tell, and that
+      call is ignored by design. The outcome stays in `runs` (cu03: also in the
+      row), and the server gets it through `GetBatchMemberRun`, records it in
+      `batch_members` and applies its stop policy. The stop rule still holds,
+      because the revoked permit cannot claim another member: the next offer is
+      refused and the member ends not executed.
   - **Hold of a durable member's target (see Q15):** the hold starts at the
     reservation, as for attached members, and is persisted with a `durable`
     mark. `hostrun.RunVisible` cannot end it, because it counts only the SSH
@@ -373,16 +520,37 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     `TestComposeUpdateMovesNoLocalTag` (only `nos-retained` tags appear, also
     when phase 5 fails), `TestComposeUpdateAddsOnlyImageToOverride`,
     `TestDependencySetChangedRefused`, `TestDependencyContainerChangedRefused`,
-    `TestFailedUpStillReportsAfterSnapshot`; no `down`, `rm -v`, `prune` or
-    restart-only path; injection through names and paths; preview output never
-    contains a planted env value; `TestPreviewWritesNothing` (a read-only fake
-    host, with and without a salt); `TestPrepareKeepsExistingSalt`;
-    `TestSourceDigestSurvivesUpdate` (equal before and after an image change and
-    a NOS override).
+    `TestFailedUpStillReportsAfterSnapshot`, `TestBaselineUsesAfterSnapshotFormat`,
+    `TestBaselineInResultWhenStoppedBeforePull`; each row of
+    [What phase 2 does not support](#what-phase-2-does-not-support) by its named
+    test; no `down`, `rm -v`, `prune` or restart-only path; injection through
+    names and paths; preview output never contains a planted env value;
+    `TestPreviewWritesNothing` (a read-only fake host, with and without a salt);
+    `TestPrepareKeepsExistingSalt`; `TestSourceDigestSurvivesUpdate` (equal before
+    and after an image change and a NOS override).
+  - log (R4): `TestComposeFailureLogHoldsNoEnvValue`, a table where a fake
+    `docker compose config`, `pull` and `up` fail and print a planted env value
+    on stdout and stderr: neither result nor log may hold it, for preview and
+    update here and for rollback in cu03.
+  - preview limits: `TestPreviewBoundsHostileHost`, a table with one case over
+    each constant and no partial unit in the result;
+    `TestPreviewOversizeIndexIsUnresolved`; `TestPreviewResultStaysUnderLimit` at
+    the maximum of every field.
+  - check_updates: `TestCheckUpdatesFirstUpdateListsIndex` (tag pull),
+    `TestCheckUpdatesSecondUpdateListsPlatform` (digest pull),
+    `TestIndexChangeOnOtherArchitectureIsCurrent`,
+    `TestUnanswerableLocalDigestIsUnknown`.
+  - planner: `TestContainerBatchLifetimeCoversSerialMembers` (8 members of 30
+    minutes get at least 305 minutes), `TestContainerBatchOverLifetimeRefused`,
+    `TestContainerActionsShareMutationTimeout`.
   - parsers: bounds, malformed UTF-8, unsafe characters, fuzz.
   - executor: crash between intent and dispatch, lost session during dispatch,
-    restart while the job runs (each reconciled and never redispatched, and
-    the batch rollout gets the outcome); `TestServerCannotChooseAttachedForContainerMember`;
+    restart while the job runs (each reconciled and never redispatched);
+    `TestDurableOutcomeReachesLiveRollout`,
+    `TestDurableOutcomeAfterExecutorRestartReachesServer` (no rollout exists; the
+    server records it and stops the batch), `TestLockedExecutorCannotClaimNextMember`,
+    `TestNextMemberNotOfferedWhileDurableMemberRuns`,
+    `TestServerCannotChooseAttachedForContainerMember`;
     target held past the old 16-minute limit; Lock during a running job;
     `TestRunVisibleCannotEndDurableHold`, `TestUnknownDurableRunKeepsTargetHeld`,
     `TestRearmDoesNotFreeDurableHold`, `TestHoldEndsWhenDurableJobGone`,
@@ -401,11 +569,12 @@ Until they land, cu04 shows those targets as unavailable with a reason.
   - **`docker.update_prepare` must run once per host**, approved like any
     MEDIUM action, or preview reports `prepare_required` and updates stay
     unavailable.
-  - Durable jobs and the preview need root (sudo) on the host; the Compose
-    plugin must be present, otherwise preview reports it and the update is
-    unavailable.
-  - The host page loses its unbound "update project" link. Do not release
-    between cu02 and cu04, or the feature has no front end (see Q3).
+  - Durable jobs and the preview need root (sudo) on the host. The Compose
+    plugin, `curl` and `python3` must be present (Q18), otherwise preview reports
+    `tooling_missing` and the update is unavailable.
+  - The host page loses its unbound "update project" link in this step, not
+    earlier. Do not release between cu02 and cu04, or the feature has no front
+    end (see Q3).
 - **Size note:** this is the largest step. Commit the durable member first; if
   review wants it smaller, that part becomes its own PR without changing any
   contract.
