@@ -129,6 +129,71 @@ func TestTaskStatusKeepsMixedCaseNode(t *testing.T) {
 	}
 }
 
+// upidOn builds a well-formed UPID whose node field is node.
+func upidOn(node string) string {
+	return "UPID:" + node + ":00001234:00ABCDEF:6900A000:qmstart:120:nos@pve!action:"
+}
+
+// The node field of a UPID is the contract's single label, so a task read
+// back from PVE can always be matched to a node that can be addressed.
+func TestParseUPIDNodeIsTheContractLabel(t *testing.T) {
+	for _, node := range []string{
+		mixedCaseNode, "proxmoxbai", "pve1", "Pve-1", "7", strings.Repeat("A", 63),
+		"", ".", "..", "-a", "a-", "pve_1", "pve1.lab", "ProxmoxBAI.lab", "a/b", "has space", "pröxmox",
+		strings.Repeat("A", 64), strings.Repeat("a", 65), strings.Repeat("a", 254),
+	} {
+		task, err := parseUPID(upidOn(node))
+		if !pvecontract.ValidNodeLabel(node) {
+			if !errors.Is(err, ErrMalformed) {
+				t.Errorf("parseUPID on node %q err = %v, want ErrMalformed", node, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("parseUPID on node %q: %v", node, err)
+			continue
+		}
+		if task.Node != node {
+			t.Errorf("parseUPID node = %q, want %q", task.Node, node)
+		}
+	}
+}
+
+func TestParseUPIDBoundsTheNodeLabel(t *testing.T) {
+	if task, err := parseUPID(upidOn(mixedCaseNode)); err != nil || task.Node != mixedCaseNode {
+		t.Fatalf("mixed-case node: task %+v, err %v", task, err)
+	}
+	longest := strings.Repeat("a", 63)
+	if task, err := parseUPID(upidOn(longest)); err != nil || task.Node != longest {
+		t.Fatalf("63-character node: task %+v, err %v", task, err)
+	}
+	if _, err := parseUPID(upidOn(longest + "a")); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("64-character node err = %v, want ErrMalformed", err)
+	}
+}
+
+// The UPID names the same node the caller asked for, so only the grammar can
+// refuse it.
+func TestDispatchRefusesOverlongNodeInUPID(t *testing.T) {
+	node := strings.Repeat("a", 64)
+	f := &fakeWriteServer{body: upidBody(upidOn(node))}
+	r := writeRequest{op: "test", method: http.MethodPost, path: "/nodes/x/test"}
+	if _, err := newTestWriter(t, f).dispatch(context.Background(), r, node, "qmstart", "120"); err == nil {
+		t.Fatal("dispatch accepted a UPID with a 64-character node")
+	}
+}
+
+func TestTaskStatusRefusesOverlongNodeInUPID(t *testing.T) {
+	f := &fakeWriteServer{body: `{"data":null}`}
+	_, err := newTestWriter(t, f).TaskStatus(context.Background(), upidOn(strings.Repeat("a", 64)))
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("err = %v, want ErrInvalidArgument", err)
+	}
+	if f.count() != 0 {
+		t.Fatal("UPID with an overlong node reached the server")
+	}
+}
+
 // A malformed name never leaves the process, whatever its case.
 func TestWriterRefusesMalformedMixedCaseNode(t *testing.T) {
 	for _, node := range []string{"Proxmox/BAI", "../ProxmoxBAI", "-ProxmoxBAI", "ProxmoxBAI-", "Proxmox_BAI", "ProxmoxBAI.lab"} {

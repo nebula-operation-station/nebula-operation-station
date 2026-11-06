@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strconv"
 	"time"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 )
 
 // Limits for task reading, named next to the code that enforces them.
@@ -26,12 +28,14 @@ const (
 var (
 	// nodeNameRe validates a PVE node name.
 	nodeNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	// The node field is the shared pvecontract label, so its grammar and its
+	// 63-character bound match every node check that addresses PVE.
 	// UPID numeric fields are hexadecimal; pstart can grow to nine digits.
 	// The target may be empty or nonnumeric and the final colon is required.
 	upidRe = regexp.MustCompile(fmt.Sprintf(
-		`^UPID:([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?):([0-9A-Fa-f]{8}):([0-9A-Fa-f]{8,9}):([0-9A-Fa-f]{8}):`+
+		`^UPID:(%s):([0-9A-Fa-f]{8}):([0-9A-Fa-f]{8,9}):([0-9A-Fa-f]{8}):`+
 			`([^:\s/]{1,%d}):([^:\s/]*):([^:\s/]{1,%d}):$`,
-		maxUPIDTypeLen, maxUPIDUserLen))
+		pvecontract.NodeLabelPattern, maxUPIDTypeLen, maxUPIDUserLen))
 )
 
 // TaskFilter selects and bounds the task summaries returned by NodeTasks.
