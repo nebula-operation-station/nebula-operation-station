@@ -314,6 +314,16 @@ if ( eval "$(printf '%s\n' "${check_block[@]}")" ); then
 else
   bad "install.sh layout check passes with all five binaries (tarball)"
 fi
+# Negative: a tarball missing one binary must fail the layout check. This is
+# the case a truncated list (the original four-of-five bug) or a disabled
+# check would pass and stay green: the check must see all five, not a subset.
+mv "$sandbox/tarball/nebula-pve-collector" "$sandbox/gone-tarball"
+if ( eval "$(printf '%s\n' "${check_block[@]}")" ); then
+  bad "install.sh layout check fails when a binary is missing (tarball)"
+else
+  ok "install.sh layout check fails when a binary is missing (tarball)"
+fi
+mv "$sandbox/gone-tarball" "$sandbox/tarball/nebula-pve-collector"
 
 # --- 8. Functional: the binary install loop of install.sh -------------------
 # Runs the real loop with a fake `install` (no root): all five binaries
