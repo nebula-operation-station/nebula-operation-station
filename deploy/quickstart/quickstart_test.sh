@@ -83,8 +83,8 @@ for b in "${expected[@]}"; do
 done
 die()  { echo "sandbox die: $*" >&2; exit 1; }
 repo="$sandbox"
-mapfile -t copy_block < <(sed -n '/^# begin: copy binaries/,/^# end: copy binaries/p' "$setup_sh")
-if [[ ${#copy_block[@]} -gt 0 ]] && eval "${copy_block[*]}"; then
+mapfile -t copy_block < <(sed -n '/^# begin: copy binaries/,/^# end: copy binaries/p' "$setup_sh" | grep -v '^# \(begin\|end\): copy binaries$')
+if [[ ${#copy_block[@]} -gt 0 ]] && eval "$(printf '%s\n' "${copy_block[@]}")"; then
   missing=()
   for b in "${expected[@]}"; do
     [[ -f "$sandbox/$b" ]] || missing+=("$b")
@@ -103,9 +103,10 @@ fi
 # script_dir and check the array it produces.
 mkdir -p "$sandbox/deploy/quickstart"
 script_dir="$sandbox/deploy"
-mapfile -t load_block < <(sed -n '/^# begin: load binary list/,/^# end: load binary list/p' "$install_sh")
+mapfile -t load_block < <(sed -n '/^# begin: load binary list/,/^# end: load binary list/p' "$install_sh" | grep -v '^# \(begin\|end\): load binary list$')
 if [[ ${#load_block[@]} -gt 0 ]]; then
-  eval "${load_block[*]}"
+  eval "$(printf '%s\n' "${load_block[@]}")"
+  # shellcheck disable=SC2154 # assigned inside the eval'd block
   if [[ "${binaries[*]}" == "${expected[*]}" ]]; then
     ok "install.sh load block yields exactly the five binaries"
   else

@@ -170,6 +170,26 @@ fi
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 tarball_root=$(dirname -- "$script_dir")
 
+# The binary list is shared with deploy/quickstart (setup-nebula.sh copies
+# exactly these before running this script): one file, so the two cannot
+# drift (WA-03). The release tarball carries the whole deploy/ tree.
+# begin: load binary list
+binaries_file="${script_dir}/quickstart/binaries.txt"
+if [[ ! -s "$binaries_file" ]]; then
+  echo "install.sh: ${binaries_file} not found; is this a release tarball?" >&2
+  exit 1
+fi
+binaries=()
+while IFS= read -r b; do
+  b="${b%%#*}"
+  [[ -n "$b" ]] && binaries+=("$b")
+done < "$binaries_file"
+if [[ ${#binaries[@]} -eq 0 ]]; then
+  echo "install.sh: ${binaries_file} lists no binaries" >&2
+  exit 1
+fi
+# end: load binary list
+
 bin_dir=/usr/bin
 systemd_dir=/etc/systemd/system
 var_lib=/var/lib/nebula
@@ -181,14 +201,14 @@ drop_in="${drop_in_dir}/10-local.conf"
 unit_dir="${systemd_dir}"
 if [[ ${from_package} -eq 1 ]]; then
   unit_dir=/lib/systemd/system
-  for bin in nebula nebula-server nebula-executor nebula-discovery nebula-pve-collector; do
+  for bin in "${binaries[@]}"; do
     if [[ ! -x "${bin_dir}/${bin}" ]]; then
       echo "install.sh: ${bin_dir}/${bin} not found; is the package installed?" >&2
       exit 1
     fi
   done
 else
-  for bin in nebula nebula-server nebula-executor nebula-discovery nebula-pve-collector; do
+  for bin in "${binaries[@]}"; do
     if [[ ! -f "${tarball_root}/${bin}" ]]; then
       echo "install.sh: ${tarball_root}/${bin} not found" >&2
       echo "install.sh: run this script from the extracted release tarball" >&2
@@ -282,7 +302,7 @@ fi
 
 # --- Binaries (replaced on every run; detect real changes) ------------------
 bin_changed=0
-[[ ${from_package} -eq 1 ]] || for bin in nebula nebula-server nebula-executor nebula-discovery nebula-pve-collector; do
+[[ ${from_package} -eq 1 ]] || for bin in "${binaries[@]}"; do
   old_sum=""
   if [[ -f "${bin_dir}/${bin}" ]]; then
     old_sum=$(sha256sum "${bin_dir}/${bin}" | cut -d' ' -f1)
