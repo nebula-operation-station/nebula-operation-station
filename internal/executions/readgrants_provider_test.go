@@ -25,21 +25,23 @@ var (
 )
 
 // providerFake is a read-grant executor that also lists PVE remote
-// metadata, as the executor's ListPVEAdminRemotes reports it.
+// metadata, as the executor's ListPVERemotes reports it. It says nothing
+// about who may call that method; cmd/nebula-server's
+// TestProviderReadLeaseThroughRoleTable covers the executor's role table.
 type providerFake struct {
 	*proposeFake
-	remotes      []*pb.PVEAdminRemote
+	remotes      []*pb.PVERemoteInfo
 	remoteErr    error
 	remoteCalls  int
 	proposeCalls int
 }
 
-func (f *providerFake) ListPVEAdminRemotes(_ context.Context, _ *pb.ListPVEAdminRemotesRequest, _ ...grpc.CallOption) (*pb.ListPVEAdminRemotesResponse, error) {
+func (f *providerFake) ListPVERemotes(_ context.Context, _ *pb.ListPVERemotesRequest, _ ...grpc.CallOption) (*pb.ListPVERemotesResponse, error) {
 	f.remoteCalls++
 	if f.remoteErr != nil {
 		return nil, f.remoteErr
 	}
-	return &pb.ListPVEAdminRemotesResponse{Remotes: f.remotes}, nil
+	return &pb.ListPVERemotesResponse{Remotes: f.remotes}, nil
 }
 
 func (f *providerFake) ProposeReadGrant(ctx context.Context, in *pb.ProposeReadGrantRequest, opts ...grpc.CallOption) (*pb.ProposeReadGrantResponse, error) {
@@ -49,14 +51,17 @@ func (f *providerFake) ProposeReadGrant(ctx context.Context, in *pb.ProposeReadG
 }
 
 func newProviderFake() *providerFake {
-	return &providerFake{proposeFake: newProposeFake(), remotes: []*pb.PVEAdminRemote{
-		{RemoteId: "proxmoxbai", Name: "bai", Kind: "cluster", TrustPin: testPinA, TrustGeneration: 3, State: "active",
-			ReadRef: "pve.proxmoxbai.read", ReadVersion: 7, ActionRef: "pve.proxmoxbai.action", ActionVersion: 2},
-		{RemoteId: "pve-lab", Name: "lab", Kind: "standalone", TrustPin: testPinB, TrustGeneration: 1, State: "active",
-			ReadRef: "pve.pve-lab.read", ReadVersion: 1},
-		{RemoteId: "pve-blocked", Name: "blocked", Kind: "standalone", TrustPin: testPinB, TrustGeneration: 2, State: "blocked",
-			ReadRef: "pve.pve-blocked.read", ReadVersion: 4},
-		{RemoteId: "pve-noread", Name: "noread", Kind: "standalone", TrustPin: testPinB, TrustGeneration: 2, State: "active"},
+	const (
+		cluster    = pb.PVERemoteKind_PVE_REMOTE_KIND_CLUSTER
+		standalone = pb.PVERemoteKind_PVE_REMOTE_KIND_STANDALONE
+		active     = pb.PVERemoteState_PVE_REMOTE_STATE_ACTIVE
+		blocked    = pb.PVERemoteState_PVE_REMOTE_STATE_BLOCKED
+	)
+	return &providerFake{proposeFake: newProposeFake(), remotes: []*pb.PVERemoteInfo{
+		{RemoteId: "proxmoxbai", Name: "bai", Kind: cluster, TrustPin: testPinA, TrustGeneration: 3, State: active, ReadCredentialVersion: 7},
+		{RemoteId: "pve-lab", Name: "lab", Kind: standalone, TrustPin: testPinB, TrustGeneration: 1, State: active, ReadCredentialVersion: 1},
+		{RemoteId: "pve-blocked", Name: "blocked", Kind: standalone, TrustPin: testPinB, TrustGeneration: 2, State: blocked, ReadCredentialVersion: 4},
+		{RemoteId: "pve-noread", Name: "noread", Kind: standalone, TrustPin: testPinB, TrustGeneration: 2, State: active},
 	}}
 }
 
@@ -196,18 +201,18 @@ func TestProposeProviderReadGrantRefusesRemotes(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		remote string
-		mutate func(*pb.PVEAdminRemote)
+		mutate func(*pb.PVERemoteInfo)
 	}{
 		{"unknown", "pve-gone", nil},
 		{"blocked", "pve-blocked", nil},
 		{"no read credential", "pve-noread", nil},
-		{"removed", "pve-lab", func(r *pb.PVEAdminRemote) { r.State = "removed" }},
-		{"empty state", "pve-lab", func(r *pb.PVEAdminRemote) { r.State = "" }},
-		{"malformed pin", "pve-lab", func(r *pb.PVEAdminRemote) { r.TrustPin = "SHA256:abc" }},
-		{"zero generation", "pve-lab", func(r *pb.PVEAdminRemote) { r.TrustGeneration = 0 }},
-		{"zero credential version", "pve-lab", func(r *pb.PVEAdminRemote) { r.ReadVersion = 0 }},
-		{"negative credential version", "pve-lab", func(r *pb.PVEAdminRemote) { r.ReadVersion = -1 }},
-		{"no read reference", "pve-lab", func(r *pb.PVEAdminRemote) { r.ReadRef = "" }},
+		// The executor maps a tombstoned remote to the unspecified state.
+		{"removed", "pve-lab", func(r *pb.PVERemoteInfo) { r.State = pb.PVERemoteState_PVE_REMOTE_STATE_UNSPECIFIED }},
+		{"unknown state", "pve-lab", func(r *pb.PVERemoteInfo) { r.State = pb.PVERemoteState(99) }},
+		{"malformed pin", "pve-lab", func(r *pb.PVERemoteInfo) { r.TrustPin = "SHA256:abc" }},
+		{"zero generation", "pve-lab", func(r *pb.PVERemoteInfo) { r.TrustGeneration = 0 }},
+		{"zero credential version", "pve-lab", func(r *pb.PVERemoteInfo) { r.ReadCredentialVersion = 0 }},
+		{"negative credential version", "pve-lab", func(r *pb.PVERemoteInfo) { r.ReadCredentialVersion = -1 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newProviderFake()
@@ -232,7 +237,7 @@ func TestProposeProviderReadGrantRefusesRemotes(t *testing.T) {
 	}
 	// An executor listing that names one remote twice is ambiguous.
 	f := newProviderFake()
-	dup := proto.Clone(f.remotes[0]).(*pb.PVEAdminRemote)
+	dup := proto.Clone(f.remotes[0]).(*pb.PVERemoteInfo)
 	dup.TrustGeneration = 4
 	f.remotes = append(f.remotes, dup)
 	s := providerService(t, f)
