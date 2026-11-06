@@ -17,9 +17,11 @@
 // newer generation supersedes it. Only a fault of the file itself
 // (ErrInvalidObservation, pvecontract.ErrInvalid) rejects it. While a remote
 // fails, a watermark that does not move supersedes nothing, so keptRemotes
-// bounds what stays: the remote's store attempts back off, and only its newest
-// files stay, because the generations above an older file supersede it
-// whatever the outcome of its own retry. A processed file that cannot be
+// bounds what stays: the remote's store attempts back off, and its files above
+// the cap go once a newer file still in the spool is judged valid, because
+// that generation supersedes them whatever the outcome of their own retry.
+// Nothing else removes them: until a newer file is judged, the older ones may
+// be the last valid observation of the remote. A processed file that cannot be
 // removed is not processed again (stuckFiles); only the unlink is retried. A
 // file below its remote's stored generation is dropped by name, unread, so a
 // backlog left behind costs no decoding after a restart either. A pass
@@ -87,8 +89,13 @@ type ImportReport struct {
 	// failed on their remote; they stay for a retry.
 	Deferred int
 	// Pruned is the number of kept files dropped unread because enough newer
-	// generations of their remote wait on disk.
+	// generations of their remote wait on disk, one of them already judged
+	// valid.
 	Pruned int
+	// Held is the number of files above the cap left alone because the reads
+	// of their remote kept failing and no newer file is judged valid; they
+	// stay for a retry.
+	Held int
 	// Errors carries one short line per partial, rejected or failed file.
 	Errors []string
 }
@@ -149,6 +156,7 @@ func (im *Importer) ImportOnce(ctx context.Context) (ImportReport, error) {
 	now := im.now()
 	halted := map[string]struct{}{}
 	marks := map[string]uint64{}
+	unread := map[string]int{}
 	rep := ImportReport{Files: len(names)}
 	for _, name := range order {
 		if err := ctx.Err(); err != nil {
@@ -164,14 +172,19 @@ func (im *Importer) ImportOnce(ctx context.Context) (ImportReport, error) {
 			im.drop(ctx, name, nil)
 			continue
 		}
-		if _, over := excess[name]; over {
+		remote, generation, _ := parseSpoolName(name)
+		_, over := excess[name]
+		if over && im.kept.covered(remote, generation) {
 			rep.Pruned++
 			im.drop(ctx, name, nil)
 			continue
 		}
-		remote, generation, _ := parseSpoolName(name)
 		if _, stop := halted[remote]; stop || !im.kept.due(remote, now) {
 			rep.Deferred++
+			continue
+		}
+		if over && unread[remote] >= maxKeptPerRemote {
+			rep.Held++
 			continue
 		}
 		outcome, msg := im.importFile(ctx, name)
@@ -185,16 +198,19 @@ func (im *Importer) ImportOnce(ctx context.Context) (ImportReport, error) {
 			rep.Partial++
 			rep.Errors = append(rep.Errors, name+": "+msg)
 			im.kept.storeFailed(remote, now)
+			im.kept.judgedValid(remote, generation)
 			halted[remote] = struct{}{}
 		case fileReplayed:
 			rep.Replayed++
 		case fileRejected:
 			rep.Rejected++
 			rep.Errors = append(rep.Errors, name+": "+msg)
+			im.kept.rejected(remote, generation)
 		case fileUnread:
 			rep.Failed++
 			rep.Errors = append(rep.Errors, name+": "+msg)
 			im.kept.readFailed(remote)
+			unread[remote]++
 		}
 	}
 	im.stuck.warn(im.log, "pvecollect: remove spool file", &im.warned)
@@ -205,7 +221,7 @@ func (im *Importer) ImportOnce(ctx context.Context) (ImportReport, error) {
 // warnKept logs the one warning a pass gives for the files it kept. File
 // names stay out of it: one line must do, however many there are.
 func (im *Importer) warnKept(rep ImportReport) {
-	if rep.Partial+rep.Failed+rep.Deferred+rep.Pruned == 0 {
+	if rep.Partial+rep.Failed+rep.Deferred+rep.Pruned+rep.Held == 0 {
 		return
 	}
 	reason := "read_failed"
@@ -214,7 +230,7 @@ func (im *Importer) warnKept(rep ImportReport) {
 	}
 	im.log.Warn("pvecollect: observations kept for retry", "reason", reason,
 		"remotes", len(im.kept), "store_failed", rep.Partial, "read_failed", rep.Failed,
-		"deferred", rep.Deferred, "pruned", rep.Pruned)
+		"deferred", rep.Deferred, "pruned", rep.Pruned, "held", rep.Held)
 }
 
 // superseded reports, from the file name alone, whether the store already
@@ -252,7 +268,7 @@ func (im *Importer) Run(ctx context.Context, interval time.Duration) error {
 			if ctx.Err() == nil {
 				im.log.Warn("pvecollect: import pass failed", "reason", "spool_unavailable")
 			}
-		} else if rep.Files > rep.Skipped+rep.Deferred {
+		} else if rep.Files > rep.Skipped+rep.Deferred+rep.Held {
 			im.log.Info("pvecollect: import pass",
 				"files", rep.Files, "imported", rep.Imported,
 				"partial", rep.Partial, "replayed", rep.Replayed,

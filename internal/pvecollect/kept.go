@@ -9,8 +9,11 @@ import (
 
 const (
 	// maxKeptPerRemote is how many files a remote with a failure on record
-	// keeps. Older ones are superseded: the store refuses a generation below
-	// its watermark, so they could only ever apply if no newer file does.
+	// keeps, and how many failed reads a pass spends on its files. Older ones
+	// are superseded once a newer file is judged valid: the store refuses a
+	// generation below its watermark, so they could only ever apply if no
+	// newer file does. Until then they may be the remote's last valid
+	// observation and stay.
 	maxKeptPerRemote = 3
 	// keptRetryBase is the delay after the second store failure in a row. The
 	// first is retried on the next pass, because most are transient.
@@ -26,6 +29,10 @@ type keptRemote struct {
 	notBefore time.Time
 	// delay is the wait after the next store failure.
 	delay time.Duration
+	// valid is the newest generation judged valid whose file still waits in
+	// the spool, or 0 when there is none. Reaching the store's dataset writes
+	// is what judges a file: validation comes first there.
+	valid uint64
 }
 
 // keptRemotes tracks, in memory, the remotes whose latest attempt failed. It
@@ -33,18 +40,21 @@ type keptRemote struct {
 // would retry all of them, and because the watermark of a failing remote may
 // not move, superseded would never remove any.
 //
-// A remote listed here keeps only its newest files, and the importer tries
-// those newest first, so one success supersedes the rest. Its store attempts
-// back off; failed reads do not, because they never reach the store and
-// the cap already bounds them. After a restart the state is empty and the first
-// failure of each remote rebuilds it, at the cost of one more attempt.
+// A remote listed here is tried newest first, so one success supersedes the
+// rest, and it keeps only its newest files plus whatever no valid file covers
+// yet: a file above the cap goes only when it is older than a file still in
+// the spool that was judged valid. Its store attempts back off; failed reads
+// do not, because they never reach the store and a pass stops reading the
+// remote after maxKeptPerRemote of them. After a restart the state is empty and
+// the first failure of each remote rebuilds it, at the cost of one more attempt.
 type keptRemotes map[string]keptRemote
 
-// plan forgets remotes without listed files and returns the listing in
-// processing order, with every remote's run of names still contiguous, plus
-// the names above the cap. names must be sorted, which orders a remote's
-// generations; healthy remotes stay oldest first, so a backlog applies in
-// order.
+// plan forgets remotes without listed files and judged files that left the
+// spool, and returns the listing in processing order, with every remote's run
+// of names still contiguous, plus the names above the cap. Those come last in
+// their run, so the newer files can be judged first. names must be sorted,
+// which orders a remote's generations; healthy remotes stay oldest first, so a
+// backlog applies in order.
 func (k keptRemotes) plan(names []string) (order []string, excess map[string]struct{}) {
 	listed := make(map[string]struct{}, len(k))
 	order = make([]string, 0, len(names))
@@ -62,12 +72,11 @@ func (k keptRemotes) plan(names []string) (order []string, excess map[string]str
 			order = append(order, run...)
 			continue
 		}
-		over := max(len(run)-maxKeptPerRemote, 0)
-		for _, name := range run[:over] {
+		k.confirmValid(remote, run)
+		for _, name := range run[:max(len(run)-maxKeptPerRemote, 0)] {
 			excess[name] = struct{}{}
-			order = append(order, name)
 		}
-		newestFirst := slices.Clone(run[over:])
+		newestFirst := slices.Clone(run)
 		slices.Reverse(newestFirst)
 		order = append(order, newestFirst...)
 	}
@@ -77,6 +86,39 @@ func (k keptRemotes) plan(names []string) (order []string, excess map[string]str
 		}
 	}
 	return order, excess
+}
+
+// confirmValid forgets the remote's judged file unless run still lists it.
+func (k keptRemotes) confirmValid(remote string, run []string) {
+	r := k[remote]
+	for _, name := range run {
+		if _, generation, err := parseSpoolName(name); err == nil && generation == r.valid {
+			return
+		}
+	}
+	r.valid = 0
+	k[remote] = r
+}
+
+// judgedValid records that the file of generation passed validation and stays.
+func (k keptRemotes) judgedValid(remote string, generation uint64) {
+	r := k[remote]
+	r.valid = max(r.valid, generation)
+	k[remote] = r
+}
+
+// rejected forgets a judged file that a later look found invalid.
+func (k keptRemotes) rejected(remote string, generation uint64) {
+	if r, ok := k[remote]; ok && r.valid == generation {
+		r.valid = 0
+		k[remote] = r
+	}
+}
+
+// covered reports whether a file judged valid and newer than generation waits
+// in the spool, which is what allows the cap to remove that generation.
+func (k keptRemotes) covered(remote string, generation uint64) bool {
+	return generation < k[remote].valid
 }
 
 // spoolRemote returns the remote of a spool name, or "" for a malformed one.

@@ -180,55 +180,43 @@ func TestImporterBacksOffOnlyTheFailingRemote(t *testing.T) {
 	}
 }
 
-// A failing remote keeps its newest files only, whatever fails and however
-// long: each is superseded by the generations above it, and the newest stays.
+// A remote the store fails on keeps its newest files only, however long: each
+// is valid and superseded by the generations above it, and the newest stays.
+// Read failures judge nothing, see TestImporterKeepsAllFilesWhileReadsFail.
 func TestImporterKeepsOnlyNewestFilesOfFailingRemote(t *testing.T) {
 	gens := []uint64{1, 2, 3, 4, 5, 6, 7}
 	newest := gens[len(gens)-maxKeptPerRemote:]
-	cases := []struct {
-		name  string
-		setup func(f *keptFixture) (restore func())
-	}{
-		{"store fails", func(*keptFixture) func() { return func() {} }},
-		{"reads fail", func(f *keptFixture) func() { return failReads(f.spool, unix.EIO) }},
+	f := newKeptFixture(t)
+	spoolGenerations(t, f.spool, "remote-a", gens...)
+	f.pass(t)
+	if got := f.generations(t, "remote-a"); !equalGens(got, gens) {
+		t.Fatalf("first failure dropped files: spool = %v", got)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newKeptFixture(t)
-			spoolGenerations(t, f.spool, "remote-a", gens...)
-			restore := tc.setup(f)
-			f.pass(t)
-			if got := f.generations(t, "remote-a"); !equalGens(got, gens) {
-				t.Fatalf("first failure dropped files: spool = %v", got)
-			}
 
-			rep := f.pass(t)
-			if rep.Pruned != len(gens)-maxKeptPerRemote {
-				t.Fatalf("report = %+v, want the older files pruned", rep)
-			}
-			if got := f.generations(t, "remote-a"); !equalGens(got, newest) {
-				t.Fatalf("spool = %v, want %v", got, newest)
-			}
-			spoolGenerations(t, f.spool, "remote-a", 8)
-			f.now = f.now.Add(keptRetryMax)
-			f.pass(t)
-			want := append(append([]uint64{}, newest[1:]...), 8)
-			if got := f.generations(t, "remote-a"); !equalGens(got, want) {
-				t.Fatalf("spool = %v, want %v", got, want)
-			}
+	rep := f.pass(t)
+	if rep.Pruned != len(gens)-maxKeptPerRemote {
+		t.Fatalf("report = %+v, want the older files pruned", rep)
+	}
+	if got := f.generations(t, "remote-a"); !equalGens(got, newest) {
+		t.Fatalf("spool = %v, want %v", got, newest)
+	}
+	spoolGenerations(t, f.spool, "remote-a", 8)
+	f.now = f.now.Add(keptRetryMax)
+	f.pass(t)
+	want := append(append([]uint64{}, newest[1:]...), 8)
+	if got := f.generations(t, "remote-a"); !equalGens(got, want) {
+		t.Fatalf("spool = %v, want %v", got, want)
+	}
 
-			restore()
-			f.fail = func(pvecontract.Observation) bool { return false }
-			f.ingests = nil
-			f.now = f.now.Add(keptRetryMax)
-			rep = f.pass(t)
-			if !equalGens(f.ingests, []uint64{8}) || rep.Imported != 1 || rep.Replayed != len(want)-1 {
-				t.Fatalf("ingests = %v, report = %+v, want the newest applied and the rest superseded", f.ingests, rep)
-			}
-			if got := f.generations(t, "remote-a"); len(got) != 0 {
-				t.Fatalf("spool = %v, want empty", got)
-			}
-		})
+	f.fail = func(pvecontract.Observation) bool { return false }
+	f.ingests = nil
+	f.now = f.now.Add(keptRetryMax)
+	rep = f.pass(t)
+	if !equalGens(f.ingests, []uint64{8}) || rep.Imported != 1 || rep.Replayed != len(want)-1 {
+		t.Fatalf("ingests = %v, report = %+v, want the newest applied and the rest superseded", f.ingests, rep)
+	}
+	if got := f.generations(t, "remote-a"); len(got) != 0 {
+		t.Fatalf("spool = %v, want empty", got)
 	}
 }
 
