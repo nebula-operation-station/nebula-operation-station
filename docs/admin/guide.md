@@ -959,7 +959,11 @@ The 10-second live values on a Proxmox node or guest box come from
 `nebula-pve-collector`, never from the server: **the server never reads
 Proxmox itself** and has no way to. Only the executor holds the Proxmox
 API credentials; the collector asks it for each read, and the executor
-re-checks every read against the approved lease.
+re-checks every read against the approved lease. That lease is a separate
+**live-values lease** (a provider telemetry lease with the single method
+`metrics`), enabled per node and guest on `/pve/<id>`; the inventory read
+lease does not cover live values. See "Live values and their lease" in
+`docs/operator/proxmox.md`.
 
 How it flows:
 
@@ -968,7 +972,7 @@ How it flows:
    boxes, with a short expiry; rewritten every 10 seconds, emptied when
    the server stops).
 2. The collector reads the want-list every second. A box is read only if
-   an approved, unexpired, unrevoked read lease with the `on_demand`
+   an approved, unexpired, unrevoked live-values lease with the `on_demand`
    trigger covers exactly that remote, node and guest, and the remote is
    configured and active. The want-list itself grants nothing.
 3. The collector reads the metrics through the executor (at most every
@@ -986,11 +990,12 @@ both directories; in containers the server mounts only the `pve-requests`
 volume and `pve-live` read-only. The collector runs the live reads by
 default; `-live=false` on its command line turns them off.
 
-A read lease is required: without an approved lease with the `on_demand`
-trigger that lists the box, the box shows no live values. Revoking the
-lease, or a box leaving the screen, stops its reads within about
-10 seconds; stale samples are removed after 30 seconds and all of them
-when the collector stops.
+A live-values lease is required: without an approved one that lists the
+box, the box shows no live values. Rotating either PVE token or re-pinning
+the remote ends it; a guest recreated with the same VMID or moved to
+another node is no longer covered. Revoking the lease, or a box leaving
+the screen, stops its reads within about 10 seconds; stale samples are
+removed after 30 seconds and all of them when the collector stops.
 
 Troubleshooting (no live values on a Proxmox box):
 
@@ -1006,8 +1011,9 @@ Troubleshooting (no live values on a Proxmox box):
 - `systemctl cat nebula-server` — the drop-in must list
   `ReadWritePaths=/var/lib/nebula/pve/requests`; otherwise the server
   cannot publish the want-list (re-run `install.sh`).
-- Check the lease on *Operations → Read leases*: approved, not expired,
-  `on_demand` trigger, and the box among its targets.
+- Check the live-values lease on *Operations → Read leases*: approved, not
+  expired, `on_demand` trigger, and the box among its targets. The **Live**
+  column on `/pve/<id>` shows **on** or **lease stale, renew** per box.
 
 ### 9.5 Runbooks
 

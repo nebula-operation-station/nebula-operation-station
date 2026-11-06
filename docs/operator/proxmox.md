@@ -1,17 +1,18 @@
 # Proxmox VE operator guide
 
-This guide covers the Proxmox VE (PVE) integration as merged in ADR 0006
-(`docs/adr/0006-proxmox-integration.md`). It describes what the integration
+This guide covers the Proxmox VE (PVE) integration as merged on main (ADR
+0006, `docs/adr/0006-proxmox-integration.md`, and ADR 0008,
+`docs/adr/0008-guest-provisioning.md`). It describes what the integration
 does today, how to create the least-privilege PVE API tokens, how to manage
-remotes with the `nebula` CLI, what the collector reads, how to read the
-staleness labels in the web UI, and how to troubleshoot common problems.
-
-Features that are designed but **not merged yet** are marked **planned**.
+remotes with the `nebula` CLI, which leases the collector needs, what the
+collector needs to run, which guest actions exist with their risk classes,
+how to read the staleness labels in the web UI, and how to troubleshoot
+common problems.
 
 ## What the integration does today
 
-The integration gives Nebula Operation Station a **read-only** view of one or
-more Proxmox VE environments:
+The integration connects Nebula Operation Station to one or more Proxmox VE
+environments:
 
 - A **remote** is exactly one PVE cluster with its ordered node API endpoints,
   or one standalone PVE host with a single endpoint. VPN routing does not
@@ -29,23 +30,27 @@ more Proxmox VE environments:
 - The web UI shows a remote list (`/pve`) and a detail page per remote
   (`/pve/<id>`) with nodes, guests and per-dataset availability, plus deep
   links into the PVE web UI built only from the approved endpoint metadata.
+  Guests also appear on the inventory chart (`/inventory/chart`).
 
 Everything PVE returns is treated as untrusted input: responses are size- and
 schema-bounded, and secret-bearing fields (Cloud-Init passwords, SSH keys,
 snippets, descriptions, hook scripts, storage credentials) are discarded
 before anything is spooled.
 
-**Phase 1** is read-only inventory. Remote management (add, probe, rotate,
-re-pin, remove), the spool import and the web pages are merged. **Live
-collection is planned:** the executor's typed `ReadPVE` method still answers
-`Unimplemented` (provider read profile, ADR 0007 E08), so a running collector
-cannot fill the inventory yet and the PVE pages show no or stale data until
-that lands. **Phase 2 (planned)** adds
-typed VM/LXC actions (start, graceful shutdown, hard stop, snapshots,
-backups, configuration changes, intra-cluster migration, node reboot) with
-their own permits and risk classes. The action token can already be stored
-(see `--action-token` below) so that phase 2 does not require a second
-onboarding pass, but no mutation is exposed today.
+What is usable on main:
+
+| Feature | State on main | Needs |
+| --- | --- | --- |
+| Remote management (add, probe, rotate, re-pin, remove, site) | Available | Local admin on the executor host |
+| Inventory collection | Available | Read token and an approved [read lease](#read-lease-for-a-remote) |
+| Live values on node and guest boxes | Available | Read token and an approved [live-values lease](#live-values-and-their-lease) |
+| [Guest power actions](#guest-power) | Available | Action token and an approval per action |
+| [Guest snapshot actions](#guest-snapshots) | UI and executor merged; **not usable with an accepted action token** (see [Action token](#action-token-required-for-guest-actions)) | Action token and an approval per action |
+| [Guest provisioning](#guest-provisioning) | Deploy pages and executor merged; **not usable end to end yet** (see that section) | Action token, prepared template, NOS automation key |
+| [Staged OS updates from the tree](#staged-os-updates-from-the-tree) | Available | Enrolled hosts; the PVE tokens are not used |
+| `pve.guest.backup`, `pve.guest.migrate`, `pve.node.reboot` | Implemented in the executor, **not reachable**: no RPC, web page or CLI command calls them | — |
+| Template preparation (`pve.image.prepare`) | Implemented in the executor, **not reachable**, as above | — |
+| Container updates and rollback from the tree (ADR 0006 P2-03 to P2-05) | **In progress:** planned in `docs/implementation/container-updates.md`, no code merged yet | — |
 
 ## Creating a least-privilege PVE API token
 
@@ -104,10 +109,15 @@ The four required entries are `Sys.Audit` on `/`, `VM.Audit` on `/vms`,
 of the same four privileges are accepted; any other privilege or path is
 rejected.
 
-### Action token (optional, for planned phase 2)
+### Action token (required for guest actions)
 
-The action token must be a **different PVE user** from the read token and may
-carry only `VM.PowerMgmt` on explicitly enabled `/vms/<vmid>` paths:
+Without an action token a remote stays read-only: its actions are refused
+("the remote has no action credential"). Every PVE write of an action carries
+only this token; prechecks and task observation use the read token.
+
+The action token must be a **different PVE user** from the read token. The
+executor accepts it only if its effective permissions are `VM.PowerMgmt` on
+one or more `/vms/<vmid>` paths and nothing else, so grant one ACL per guest:
 
 ```sh
 pveum role add NOSAction --privs "VM.PowerMgmt"
@@ -118,7 +128,23 @@ pveum acl modify /vms/101 --users nos-action@pve --roles NOSAction
 pveum acl modify /vms/101 --tokens 'nos-action@pve!nosaction1' --roles NOSAction
 ```
 
-Add one `/vms/<vmid>` entry per guest you want to be able to operate later.
+Add one `/vms/<vmid>` entry per guest you want to be able to operate. The
+token's profile is checked only at `add` and `rotate-token`, so a new guest's
+ACL entry of the same role needs no change in NOS.
+
+- **Per VMID only, never per pool.** A grant on `/vms` or on `/pool/<pool>` is
+  refused at `add` and `rotate-token`: a pool whose membership changes must
+  not widen the action token's scope (ADR 0006).
+- **Only `VM.PowerMgmt`.** The privileges of the ADR 0006 extensions
+  (`VM.Snapshot`, `VM.Backup`, `VM.Migrate`, `Sys.PowerMgmt`, `VM.Config.*`,
+  `Datastore.AllocateSpace`) are refused as well. An accepted token therefore
+  covers guest power, but it lacks what a snapshot or a provisioning needs:
+  the proposal and the approval succeed, then PVE refuses the step and the
+  run fails. Do not work around this by widening the ACL after `add`: the
+  next `rotate-token` would be refused, and ADR 0006 keeps an additional
+  privilege disabled until its ACL checks are documented for each supported
+  PVE version.
+
 No console, guest exec, guest file access, permission administration,
 storage deletion or HA-configuration privileges belong to either token.
 
@@ -156,7 +182,7 @@ nebula pve remote add <id> --kind cluster|standalone \
 | `--kind` | `cluster` (ordered node endpoints) or `standalone` (one endpoint). Required. |
 | `--endpoint` | One `host:port` endpoint (normally port 8006). Repeatable; order is the failover order. At least one. |
 | `--name` | Display label only; names never authenticate a remote. |
-| `--action-token` | Also ask for the action-purpose token (see above). |
+| `--action-token` | Also ask for the action-purpose token (see above). To add one to an existing remote later, use `rotate-token --purpose action`, which also revokes the remote's leases (see [Rotating a token](#rotating-a-token)). |
 
 ### Fingerprint confirmation
 
@@ -196,10 +222,12 @@ nebula pve remote rotate-token <id> --purpose read|action
 The CLI asks for the new token without echo. The executor validates the new
 token against the pinned TLS identity and the permission profile **before**
 any change; the old credential version stays authoritative until the new one
-is validated and stored (atomic swap). Read grants and permits bound to the
-old version are revoked. If the trust pin no longer matches at rotation
-time, the remote is blocked and its grants are revoked. After a successful
-rotation, revoke the old token in PVE yourself.
+is validated and stored (atomic swap). A successful rotation of **either**
+token revokes every read lease and live-values lease that names the remote
+and every action permit of the remote, including those of a job in flight:
+approve new leases afterwards. If the trust pin no longer matches at
+rotation time, the remote is blocked and its grants are revoked. After a
+successful rotation, revoke the old token in PVE yourself.
 
 ## Re-pinning the trust identity
 
@@ -241,11 +269,12 @@ nebula pve remote set-site <id> onsite|offsite
 ```
 
 Type `yes` to confirm. The marker is executor-owned and set only by the
-local admin; it starts unset. A node reboot is refused for a remote marked
-`offsite` (ADR 0006: an offsite node reboot is CRITICAL, manual and needs an
-agreed recovery path, so NOS does not offer it) and for a remote whose site
-is still unset, even when the remote has an action token. Mark offsite hosts
-such as `ProxmoxOFS1` `offsite`.
+local admin; it starts unset. The executor's node reboot refuses a remote
+marked `offsite` (ADR 0006: an offsite node reboot is CRITICAL, manual and
+needs an agreed recovery path, so NOS does not offer it) and a remote whose
+site is still unset, even when the remote has an action token. Node reboot is
+not reachable from any page or command yet, but set the marker when you add a
+remote: mark offsite hosts such as `ProxmoxOFS1` `offsite`.
 
 ## Listing remotes
 
@@ -259,13 +288,10 @@ works while the vault is locked.
 
 ## What the collector reads
 
-> **Planned:** the collector's reads are answered `Unimplemented` by the
-> executor until the provider read profile (ADR 0007 E08) is merged. The
-> schedule below is what the collector requests; no live data arrives yet.
-
 `nebula-pve-collector` polls every **active** remote once per interval.
-Blocked or removed remotes are skipped. One pass per remote issues two
-phases of typed reads:
+Blocked or removed remotes are skipped. The executor answers each read only
+under an approved [read lease](#read-lease-for-a-remote) and only while its
+vault is unlocked. One pass per remote issues two phases of typed reads:
 
 - Phase 1 (node-scoped): **nodes**, **guests**, **storage**, **cluster**
   (membership, quorum, HA states where readable), **tasks** (bounded
@@ -273,11 +299,11 @@ phases of typed reads:
 - Phase 2 (per guest, only when the guest list is usable): **guest
   configuration** (CPU, RAM, disk/storage references, NIC MAC/bridge/VLAN,
   boot order, `hostpci` passthrough mappings, tags, pool membership),
-  **guest agent** data (IP/MAC/hostname/OS/filesystem summary; on PVE 8 the
-  informational agent methods are not available with a read-only token, so
-  these fields stay unavailable), **snapshots** (names, time, parent, RAM
-  flag) and **backups** (available nonsecret `vzdump`/PBS metadata and recent
-  task summaries).
+  **guest agent** data (IP/MAC/hostname/OS/filesystem summary; requested only
+  for running QEMU guests, and see the guest agent row under
+  [Troubleshooting](#troubleshooting)), **snapshots** (names, time, parent,
+  RAM flag) and **backups** (available nonsecret `vzdump`/PBS metadata and
+  recent task summaries).
 
 Defaults (from the code):
 
@@ -294,22 +320,51 @@ Collector flags:
 nebula-pve-collector [-socket /run/nebula/executor.sock]
                      [-executor-user nebula-executor]
                      [-spool /var/lib/nebula/pve]
-                     [-interval 1m] [-once]
+                     [-interval 1m] [-live=true] [-once]
 ```
 
-`-once` runs a single collection pass and exits (useful for testing). The
-collector logs JSON to stderr, including a per-pass report with remote,
-polled, skipped, failed and error counts.
+`-once` runs a single collection pass and exits (useful for testing); it does
+not serve live values. `-live=false` turns the live values off. The collector
+logs JSON to stderr; a `-once` run ends with a report of remote, polled,
+skipped, failed and error counts.
 
 A partial poll does not erase unseen guests; only a complete enumeration can
 tombstone them. A dataset that could not be read is marked unavailable with a
 reason instead of being dropped silently.
 
-The collector is intended to run as its own Unix user with the
-`pve-collector` peercred role and no capabilities. A bundled
-`deploy/systemd/nebula-pve-collector.service` unit is **planned** (ADR 0006,
-P1-14); until it ships, run the binary directly or provide your own unit
-with the flags above.
+## What the collector needs
+
+`install.sh` (also with `--from-package`) sets all of this up and enables the
+unit; the container image and `deploy/container/compose.yaml` have their own
+`pve-collector` service. Re-run `install.sh` after an upgrade if any of it is
+missing.
+
+- **User.** A system user `nebula-pve-collector`, member of `nebula-rpc` so it
+  can reach `/run/nebula/executor.sock`. The executor gives this user the
+  `pve-collector` role through `-pve-collector-user` (default
+  `nebula-pve-collector`); the role may only list remotes and read. A missing
+  default user leaves the role unassigned, a missing non-default user stops
+  the executor at start, and an empty value disables the role.
+- **Unit.** `deploy/systemd/nebula-pve-collector.service`, which starts after
+  `nebula-executor.service`, with `Restart=on-failure` and `RestartSec=5s`, so
+  it keeps retrying while the executor restarts instead of giving up after
+  the default burst. It has no capabilities, only `AF_UNIX` sockets and
+  `ReadWritePaths=/var/lib/nebula/pve`, and `RestrictSUIDSGID=yes` forbids it
+  to set the setgid bit.
+- **Spool directories**, created with their final modes before the unit starts
+  because the collector cannot set them itself. All have owner
+  `nebula-pve-collector` and group `nebula-rpc`:
+
+  | Directory under `/var/lib/nebula/pve` | Mode | Holds |
+  | --- | --- | --- |
+  | `.` | 2750 | The spool root |
+  | `results/` | 2770 | Observations for the server to import |
+  | `guestnet/` | 2770 | Guest NIC records for the traffic map |
+  | `requests/` | 2770 | The server's live want-list; the server may write only here (`20-discovery.conf` drop-in) |
+  | `live/` | 2750 | Live samples, read only by the server |
+
+- **An unlocked executor.** After an executor restart, run `nebula unlock`;
+  until then every read is refused.
 
 ## Read lease for a remote
 
@@ -356,14 +411,17 @@ nebula read-grant approve <digest>
 no SSH hosts, actions or credentials, no write methods, and no other remote.
 A remote that is re-pinned (new trust generation) or whose read token is
 rotated (new credential version) is no longer covered; the reads fail with
-`read_grant_does_not_cover` until a new lease is approved.
+`read_grant_does_not_cover` until a new lease is approved. Rotating the
+action token leaves the binding intact but revokes the lease as well (see
+[Rotating a token](#rotating-a-token)).
 
 **Renewal and revoke.** `/leases` lists provider leases with their remotes
 and methods; the detail page shows each remote with pin prefix, trust
 generation, credential version and methods. **Refresh** (on an active or
 expired lease) opens the form pre-filled with the same remotes, methods and
 lifetime and proposes a *new* lease, which needs its own approval; the old
-one stays until it expires or is revoked. **Revoke** ends a lease at once.
+one stays until it expires or is revoked. **Revoke** ends a lease at once;
+`nebula read-grant revoke <id>` does the same on the executor host.
 Renew before the expiry shown in the list, and after every re-pin or token
 rotation. The lease detail page marks a remote whose frozen binding no longer
 matches the executor's registry as "Lease stale".
@@ -376,7 +434,8 @@ As soon as one per-guest method (`guest_config`, `guest_agent`,
 the lease is proposed and the budget is the executor's maximum, **4096
 requests per remote per hour** (about 68 per 60-second pass). One pass
 spends one request per remote-wide method plus one per guest and chosen
-per-guest method, so with all four per-guest methods a remote with more than
+per-guest method (guest-join identity reads spend the same budget), so with
+all four per-guest methods a remote with more than
 about **15 guests** runs out of budget within the hour (about 60 guests with
 one per-guest method). Reads past the budget are refused until the rolling
 hour frees requests; the affected datasets then show as unavailable or
@@ -437,10 +496,91 @@ and needs its own approval; the old one stays until it expires or is
 revoked. **Refresh** on a live-values lease in `/leases` opens `/pve/<id>`
 for exactly that. **Revoke** stops the live reads within about 10 seconds.
 
+## Guest actions and risk classes
+
+Each action binds the exact target the operator saw. The executor re-reads it,
+decides the risk itself and shows the bound request on a proposal page;
+nothing runs before approval, and a target that changed since the proposal
+needs a new approval. Approve on the proposal page with your security key. In
+hardened mode, or when the executor requires the typed target count, the page
+shows `nebula approve <digest>` for the executor host instead; then use **Run
+the approved action** on the page. The run continues in the background and the
+page shows its state. Lost responses are reconciled through the PVE task list;
+a step is never sent twice.
+
+| Action | Base risk | Reachable |
+| --- | --- | --- |
+| `pve.guest.power` shutdown, reboot | MEDIUM | Yes |
+| `pve.guest.power` stop, reset | HIGH | Yes |
+| `pve.guest.snapshot` create | MEDIUM | Yes, but see [Action token](#action-token-required-for-guest-actions) |
+| `pve.guest.snapshot` delete, rollback | HIGH | Yes, but see [Action token](#action-token-required-for-guest-actions) |
+| `pve.guest.provision` | MEDIUM | Yes, but see [Guest provisioning](#guest-provisioning) |
+| `pve.image.prepare` | HIGH | No |
+| `pve.guest.backup` | MEDIUM | No |
+| `pve.guest.migrate` | HIGH | No |
+| `pve.node.reboot` | HIGH standalone, CRITICAL in a cluster | No |
+
+The base risk is a floor. For power and snapshots the executor raises it to
+the highest criticality of the guest, its node, its remote and any managed
+host linked to them; for provisioning, of the node, the remote and the linked
+hosts. **A target without an exact criticality record counts as HIGH**, so a
+shutdown normally shows HIGH until those records exist. The floor is checked
+again at approval and before the run, and the request cannot lower it.
+
+### Guest power
+
+The chart shows a **Power** section on every running guest of an active
+remote: **Shutdown** and **Reboot** (graceful), **Stop** and **Reset** (hard;
+Reset for QEMU only). Every verb needs the guest running, and a paused or
+suspended QEMU guest does not count as running. A failed or timed-out shutdown
+is never followed by a stop. There is no start action: start a stopped guest
+in PVE.
+
+### Guest snapshots
+
+`/pve/guests/snapshots?remote=<id>&vmid=<vmid>` lists a guest's stored
+snapshots with a create form and, per snapshot, **Delete** and **Roll back**.
+No other page links to it yet. One form names one snapshot; there is no bulk,
+pattern or age-based deletion. Create binds the name, the RAM choice (running
+QEMU guests only) and the disk set, and refuses a disk on storage without a
+verified snapshot capability. Delete and rollback bind the exact snapshot
+(name, time, parent, RAM flag). Rollback needs an explicit start choice; it
+stops a running guest and everything written since the snapshot is lost, and a
+RAM snapshot resumes the guest whatever the start choice.
+
+### Guest provisioning
+
+Provisioning (ADR 0008) creates a guest from a deploy profile: `/deploy` holds
+the profiles, `/deployments/new` is the wizard (**Deploy here** on a node of
+the chart preselects it) and `/deployments` lists the runs. A run clones the
+template, sets the allowlisted configuration, resizes the disk and optionally
+starts the guest; a failed run keeps the guest for inspection. Blocked remotes
+are not offered. A remote without an action token is offered, but the executor
+refuses its provisioning. It needs the
+[NOS automation key](#nos-automation-key-guest-provisioning).
+
+Two gaps keep it from working end to end today: a provisioning binds a
+prepared template record, and `pve.image.prepare`, the only way to create
+one, is not reachable; and an accepted
+[action token](#action-token-required-for-guest-actions) lacks the privileges
+of the clone, configuration and resize steps.
+
+### Staged OS updates from the tree
+
+The **Staged OS update** panel on the chart proposes the existing package
+actions (`package.install_security`, `package.install_all`) for the hosts you
+check, in stages by inventory environment (DEV, then QA, then PROD) with a
+manual gate between stages. The next page shows the frozen plan before
+anything is proposed. The update runs over SSH and uses neither PVE token.
+Only enrolled managed hosts with a DEV, QA or PROD environment are selectable;
+PVE nodes and guests are never offered as such, and selecting a host never
+includes what runs on it.
+
 ## Staleness and unknown labels in the UI
 
-The PVE pages show only stored observations, never live API data. Every row
-carries a label:
+The inventory columns of the PVE pages show stored observations, never live
+API data; live values have their own [lease](#live-values-and-their-lease).
+Every row carries a label:
 
 - **no label** — fresh: the observation is recent.
 - **`stale`** — the last observation is older than three poll intervals
@@ -476,14 +616,19 @@ history is merely evidence of a past run.
 | Symptom | Likely cause / action |
 | --- | --- |
 | `confirmation does not match the presented trust identity; nothing stored` | The typed fingerprint was wrong. Re-run `add`; compare the fingerprint out of band again. |
-| Token rejected at `add` or `rotate-token` | Check the effective permission profile: read tokens need exactly the four audit privileges on `/`, `/vms`, `/storage`, `/pool`; action tokens need only `VM.PowerMgmt` on `/vms/<vmid>`. The user must be enabled and not expired; the token needs `privsep=1` and an expiry; `*@pam`, `Administrator@*` and `PVEVMAdmin@*` are refused. Read and action tokens must use different PVE users. |
+| Token rejected at `add` or `rotate-token` | Check the effective permission profile: read tokens need exactly the four audit privileges on `/`, `/vms`, `/storage`, `/pool`; action tokens need only `VM.PowerMgmt` on `/vms/<vmid>` (no `/vms`, no pool path, no other privilege). The user must be enabled and not expired; the token needs `privsep=1` and an expiry; `*@pam`, `Administrator@*` and `PVEVMAdmin@*` are refused. Read and action tokens must use different PVE users. |
 | Remote state `blocked` in `list` / UI | The trust identity changed (new CA or leaf), the chain is invalid, or a SAN does not match. Verify the presented certificate out of band, then `nebula pve remote repin <id>`. A CA-preserving leaf renewal needs no re-pin. |
 | Remote rows labelled `unknown` in the UI | No observation ever arrived: the collector is not running, cannot reach the executor socket, or the remote is not `active`. Check the collector process and its JSON logs, the spool directory, and `nebula pve remote list`. |
 | Collector exits at start: `verify executor at /run/nebula/executor.sock: … connection reset by peer` | The executor does not know the collector's UID and drops the connection. The collector must run as the executor's `-pve-collector-user` (default `nebula-pve-collector`): a missing default user leaves the role unassigned (warning `pve-collector user not found` in `journalctl -u nebula-executor`), and a missing non-default user stops the executor at start. Create the user, restart `nebula-executor`, run `nebula unlock` and restart `nebula-pve-collector`. |
 | Collector exits at start: `chmod spool root: … operation not permitted` (or the same for `results`, `requests`, `live`, `guestnet`) | A spool directory does not have its final mode. The collector unit forbids setting the setgid bit (`RestrictSUIDSGID=yes`), so the directories must be created with their modes beforehand: re-run `install.sh` (it creates `/var/lib/nebula/pve` 2750, `results`, `guestnet`, `requests` 2770 and `live` 2750, owner `nebula-pve-collector`, group `nebula-rpc`). |
-| `read_grant_does_not_cover` in the collector or executor log (`journalctl -u nebula-pve-collector`, `journalctl -u nebula-executor`); PVE page says "no approved read lease" | No active provider read lease covers this remote and method: none was approved, it expired or was revoked, the remote was re-pinned, the read token was rotated, or the method (for example `snapshots`) was not chosen. Request a lease from `/pve/<id>` (**Request read lease**) or refresh the old one on `/leases`, with the methods you need, and approve it (see [Read lease for a remote](#read-lease-for-a-remote)). |
+| `read_grant_does_not_cover` in the executor log (`journalctl -u nebula-executor`); PVE page says "no approved read lease" | No active provider read lease covers this remote and method: none was approved, it expired or was revoked, the remote was re-pinned, a token was rotated, or the method (for example `snapshots`) was not chosen. Request a lease from `/pve/<id>` (**Request read lease**) or refresh the old one on `/leases`, with the methods you need, and approve it (see [Read lease for a remote](#read-lease-for-a-remote)). |
+| Datasets `unavailable` or rows `stale` after an executor restart | The executor refuses every read until it is unlocked: run `nebula unlock` on the executor host. |
+| No live values on a box; **Live** column shows nothing or **lease stale, renew** | No current live-values lease lists the box. Enable it on `/pve/<id>` (see [Live values and their lease](#live-values-and-their-lease)); a read lease does not cover it. The admin guide, "Live values for Proxmox nodes and guests", lists the log messages to check. |
+| Action refused: "the remote has no action credential" | The remote is read-only: add the action token with `nebula pve remote rotate-token <id> --purpose action`, then approve new leases. |
+| Snapshot or provisioning approved, then the run fails | An accepted action token holds only `VM.PowerMgmt`, so PVE refuses the step (see [Action token](#action-token-required-for-guest-actions)). |
+| Shutdown shows risk HIGH instead of MEDIUM | The guest, its node or its remote has no exact criticality record, which counts as HIGH (see [Guest actions and risk classes](#guest-actions-and-risk-classes)). |
 | Rows labelled `stale` | The collector is down, backing off after failures, or the remote is blocked. Backoff is exponential from 1 m to 15 m after failed polls; a single pass can be forced with `nebula-pve-collector -once`. |
 | Dataset `unavailable: insufficient read privileges` (backups) | Expected with a read-only token (see above). Do not borrow the action token or add write privileges for inventory. |
-| Guest agent fields unavailable on PVE 8 | PVE 8's legacy `VM.Monitor` is too broad for a read-only token; agent-derived fields stay unavailable unless a separately reviewed mechanism is provided. PVE 9 informational agent methods work with the read token. |
+| Guest agent fields unavailable | Expected. PVE 8's legacy `VM.Monitor` is too broad for a read-only token. PVE 9's `VM.GuestAgent.Audit` is the ADR 0006 extension, but the executor's read profile accepts exactly the four audit privileges, so a read token holding it is refused. Agent-derived fields stay unavailable until that profile changes. |
 | `add`/`rotate-token`/`remove`/`repin` refuse to run | The executor vault is locked: run `nebula unlock` on the executor host first. |
 | CLI cannot dial the executor | Check `NEBULA_EXECUTOR_SOCKET` and that the socket is served by the `NEBULA_EXECUTOR_USER` user (default `nebula-executor`). |
