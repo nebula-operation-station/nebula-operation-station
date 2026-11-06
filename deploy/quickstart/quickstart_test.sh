@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Tests for the shared binary list (deploy/quickstart/binaries.txt) that
+# deploy/install.sh and deploy/quickstart/setup-nebula.sh both use, so the
+# two cannot drift (WA-03: a quickstart run stopped at step 5 because
+# setup-nebula.sh copied four binaries but install.sh required five).
+#
+# No root needed. Run it from anywhere:
+#
+#   bash deploy/quickstart/quickstart_test.sh
+#
+# Exit status: 0 if all cases pass, 1 otherwise.
+
+set -u
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo=$(cd -- "${script_dir}/../.." && pwd)
+list_file="${script_dir}/binaries.txt"
+install_sh="${repo}/deploy/install.sh"
+setup_sh="${script_dir}/setup-nebula.sh"
+
+pass=0
+fail=0
+ok()  { echo "ok   $1"; pass=$((pass + 1)); }
+bad() { echo "FAIL $1"; fail=$((fail + 1)); }
+
+expected=(nebula nebula-server nebula-executor nebula-discovery nebula-pve-collector)
+
+# read_list <file>: the same parsing the scripts use (skip blanks, strip
+# trailing comments). Prints one name per line.
+read_list() {
+  local b
+  while IFS= read -r b; do
+    b="${b%%#*}"
+    [[ -n "$b" ]] && printf '%s\n' "$b"
+  done < "$1"
+}
+
+# --- 1. The list file names exactly the five binaries ----------------------
+if [[ -f "$list_file" ]]; then
+  mapfile -t got < <(read_list "$list_file")
+  if [[ "${got[*]}" == "${expected[*]}" ]]; then
+    ok "binaries.txt lists exactly the five binaries"
+  else
+    bad "binaries.txt lists exactly the five binaries (got: ${got[*]})"
+  fi
+else
+  bad "binaries.txt exists"
+fi
+
+# --- 2. Both scripts load the list from that one file -----------------------
+if grep -q 'binaries\.txt' "$setup_sh"; then
+  ok "setup-nebula.sh loads the list from binaries.txt"
+else
+  bad "setup-nebula.sh loads the list from binaries.txt"
+fi
+if grep -q 'binaries\.txt' "$install_sh"; then
+  ok "install.sh loads the list from binaries.txt"
+else
+  bad "install.sh loads the list from binaries.txt"
+fi
+
+# --- 3. No hardcoded second copy of the list remains ------------------------
+# A loop over a literal list of binary names is the drift this guards
+# against; the loops must iterate the loaded array instead.
+if grep -nE '^[[:space:]]*for (b|bin) in nebula( |$)' "$setup_sh" "$install_sh"; then
+  bad "no hardcoded binary list loop remains in the scripts"
+else
+  ok "no hardcoded binary list loop remains in the scripts"
+fi
+
+# --- 4. Functional: the copy block of setup-nebula.sh copies all five -------
+# Extract the real copy block from the script (between the begin/end
+# markers) and run it against a sandbox checkout: bin/ holds the five
+# built binaries, and the block must copy all of them next to deploy/.
+sandbox=$(mktemp -d)
+trap 'rm -rf "$sandbox"' EXIT
+mkdir -p "$sandbox/bin" "$sandbox/deploy/quickstart"
+cp "$list_file" "$sandbox/deploy/quickstart/binaries.txt"
+for b in "${expected[@]}"; do
+  printf '#!/bin/sh\n' > "$sandbox/bin/$b"
+done
+die()  { echo "sandbox die: $*" >&2; exit 1; }
+repo="$sandbox"
+mapfile -t copy_block < <(sed -n '/^# begin: copy binaries/,/^# end: copy binaries/p' "$setup_sh")
+if [[ ${#copy_block[@]} -gt 0 ]] && eval "${copy_block[*]}"; then
+  missing=()
+  for b in "${expected[@]}"; do
+    [[ -f "$sandbox/$b" ]] || missing+=("$b")
+  done
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    ok "setup-nebula.sh copy block copies all five binaries next to deploy/"
+  else
+    bad "setup-nebula.sh copy block copies all five binaries next to deploy/ (missing: ${missing[*]})"
+  fi
+else
+  bad "setup-nebula.sh copy block copies all five binaries next to deploy/ (block missing or failed)"
+fi
+
+# --- 5. Functional: the load block of install.sh yields the five names ------
+# Same idea for install.sh: run its real load block with a sandbox
+# script_dir and check the array it produces.
+mkdir -p "$sandbox/deploy/quickstart"
+script_dir="$sandbox/deploy"
+mapfile -t load_block < <(sed -n '/^# begin: load binary list/,/^# end: load binary list/p' "$install_sh")
+if [[ ${#load_block[@]} -gt 0 ]]; then
+  eval "${load_block[*]}"
+  if [[ "${binaries[*]}" == "${expected[*]}" ]]; then
+    ok "install.sh load block yields exactly the five binaries"
+  else
+    bad "install.sh load block yields exactly the five binaries (got: ${binaries[*]})"
+  fi
+else
+  bad "install.sh load block yields exactly the five binaries (block missing)"
+fi
+
+# --- 6. Syntax of the scripts ------------------------------------------------
+for s in "$setup_sh" "$install_sh"; do
+  if bash -n "$s" 2>/dev/null; then
+    ok "bash -n $(basename -- "$s")"
+  else
+    bad "bash -n $(basename -- "$s")"
+  fi
+done
+
+echo
+echo "quickstart_test: ${pass} passed, ${fail} failed"
+[[ $fail -eq 0 ]]
