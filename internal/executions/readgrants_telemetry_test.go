@@ -246,7 +246,7 @@ func TestProposeProviderTelemetryGrantRefusals(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		in     ProviderTelemetryGrantRequest
-		mutate func(*pb.PVEAdminRemote)
+		mutate func(*pb.PVERemoteInfo)
 	}{
 		{"bad days", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 3, Targets: []ProviderMetricsSelection{nodeSel("pve1")}}, nil},
 		{"no targets", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7}, nil},
@@ -266,11 +266,11 @@ func TestProposeProviderTelemetryGrantRefusals(t *testing.T) {
 		{"guest recreated", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{guestSel("pve1", "qemu", 101, 4)}}, nil},
 		{"duplicate", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{nodeSel("pve1"), nodeSel("pve1")}}, nil},
 		{"remote blocked", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{nodeSel("pve1")}},
-			func(r *pb.PVEAdminRemote) { r.State = "blocked" }},
+			func(r *pb.PVERemoteInfo) { r.State = pb.PVERemoteState_PVE_REMOTE_STATE_BLOCKED }},
 		{"no read credential", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{nodeSel("pve1")}},
-			func(r *pb.PVEAdminRemote) { r.ReadVersion = 0 }},
+			func(r *pb.PVERemoteInfo) { r.ReadCredentialVersion = 0 }},
 		{"remote not registered", ProviderTelemetryGrantRequest{RemoteID: "proxmoxbai", Days: 7, Targets: []ProviderMetricsSelection{nodeSel("pve1")}},
-			func(r *pb.PVEAdminRemote) { r.RemoteId = "other" }},
+			func(r *pb.PVERemoteInfo) { r.RemoteId = "other" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, s, inv := telemetryFixture(t)
@@ -443,15 +443,15 @@ func TestDecodeReadGrantRejectsMalformedMetricsTargets(t *testing.T) {
 func TestReadGrantsMarksProviderBinding(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		mutate func(*pb.PVEAdminRemote)
+		mutate func(*pb.PVERemoteInfo)
 		err    error
 		want   string
 	}{
 		{"current", nil, nil, ProviderBindingCurrent},
-		{"re-pinned", func(r *pb.PVEAdminRemote) { r.TrustGeneration, r.TrustPin = 4, testPinB }, nil, ProviderBindingStale},
-		{"generation only", func(r *pb.PVEAdminRemote) { r.TrustGeneration = 4 }, nil, ProviderBindingStale},
-		{"token rotated", func(r *pb.PVEAdminRemote) { r.ReadVersion = 8 }, nil, ProviderBindingStale},
-		{"removed", func(r *pb.PVEAdminRemote) { r.RemoteId = "gone" }, nil, ProviderBindingStale},
+		{"re-pinned", func(r *pb.PVERemoteInfo) { r.TrustGeneration, r.TrustPin = 4, testPinB }, nil, ProviderBindingStale},
+		{"generation only", func(r *pb.PVERemoteInfo) { r.TrustGeneration = 4 }, nil, ProviderBindingStale},
+		{"token rotated", func(r *pb.PVERemoteInfo) { r.ReadCredentialVersion = 8 }, nil, ProviderBindingStale},
+		{"removed", func(r *pb.PVERemoteInfo) { r.RemoteId = "gone" }, nil, ProviderBindingStale},
 		{"registry down", nil, errors.New("down"), ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -390,13 +390,6 @@ func (l *lazyExecutor) RemovePVERemote(ctx context.Context, in *pb.RemovePVERemo
 	return nil, errNotConnected
 }
 
-func (l *lazyExecutor) ListPVEAdminRemotes(ctx context.Context, in *pb.ListPVEAdminRemotesRequest, opts ...grpc.CallOption) (*pb.ListPVEAdminRemotesResponse, error) {
-	if c := l.c.Load(); c != nil {
-		return c.ListPVEAdminRemotes(ctx, in, opts...)
-	}
-	return nil, errNotConnected
-}
-
 func (l *lazyExecutor) ListPVERemotes(ctx context.Context, in *pb.ListPVERemotesRequest, opts ...grpc.CallOption) (*pb.ListPVERemotesResponse, error) {
 	if c := l.c.Load(); c != nil {
 		return c.ListPVERemotes(ctx, in, opts...)
@@ -431,6 +424,23 @@ func (l *lazyExecutor) ListReadGrants(ctx context.Context, in *pb.ListReadGrants
 func (l *lazyExecutor) RevokeReadGrant(ctx context.Context, in *pb.RevokeReadGrantRequest, opts ...grpc.CallOption) (*pb.RevokeReadGrantResponse, error) {
 	if c := l.c.Load(); c != nil {
 		return c.RevokeReadGrant(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+// ProposeReadGrant and CommitReadGrant back the lease forms (ADR 0007 E06).
+// executions.Service reaches them through a type assertion, like the two
+// methods above.
+func (l *lazyExecutor) ProposeReadGrant(ctx context.Context, in *pb.ProposeReadGrantRequest, opts ...grpc.CallOption) (*pb.ProposeReadGrantResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ProposeReadGrant(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) CommitReadGrant(ctx context.Context, in *pb.CommitReadGrantRequest, opts ...grpc.CallOption) (*pb.CommitReadGrantResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.CommitReadGrant(ctx, in, opts...)
 	}
 	return nil, errNotConnected
 }
