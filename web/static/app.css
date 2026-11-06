@@ -591,10 +591,13 @@ code {
   color: var(--text-muted);
 }
 
+/* The topbar search field is styled by .topbar__search input (borderless,
+   transparent: the form element itself carries the single frame). It must
+   not join this rule — a later equal-specificity match would re-add a
+   border, background and padding and draw a second frame inside the box. */
 .form input,
 .form select,
-.form textarea,
-.topbar__search input {
+.form textarea {
   font: inherit;
   font-size: var(--fs-base);
   color: var(--text);
