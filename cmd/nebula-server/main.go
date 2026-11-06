@@ -447,7 +447,14 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 	bg.Go(func() { lc.run(connCtx) })
 	// Software catalog (ADR 0009 TM17): admin pages behind the session.
-	softwarePages, err := newSoftwarePages(db, log)
+	// Icon changes go through the icon service (TM16); results of the
+	// one-shot nebula-iconfetch are imported in the background.
+	iconService, err := newIconWiring(db, cfg.DataDir, defaultIconSpool, log)
+	if err != nil {
+		return err
+	}
+	bg.Go(func() { iconService.run(connCtx, iconImportInterval) })
+	softwarePages, err := softwarePagesWith(db, log, iconService)
 	if err != nil {
 		return err
 	}

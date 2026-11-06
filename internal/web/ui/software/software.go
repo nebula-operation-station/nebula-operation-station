@@ -93,8 +93,10 @@ type Catalog interface {
 	AssetIcon(ctx context.Context, assetID string) (string, error)
 }
 
-// IconService changes icons. *icons.Service satisfies it.
+// IconService changes icons and serves the stored ones under
+// icons.PathPrefix. *icons.Service satisfies it.
 type IconService interface {
+	http.Handler
 	QueueFetch(ctx context.Context, actor, key, rawURL string) (string, error)
 	Upload(ctx context.Context, actor string, subject softwarecat.IconSubject, data []byte) (string, error)
 	Rollback(ctx context.Context, actor string, subject softwarecat.IconSubject, changeID int64) error
@@ -153,8 +155,9 @@ type Options struct {
 	// List lists the catalog. Required; SQLList(db) reads the server
 	// database.
 	List ListFunc
-	// Icons changes icons. Nil leaves the icon pages read-only: no
-	// forms, and the icon change routes answer 404.
+	// Icons changes icons and serves them. Nil leaves the icon pages
+	// read-only: no forms, the icon change routes answer 404 and /icons/
+	// is not mounted.
 	Icons IconService
 	// Candidates lists crawler candidates. Nil shows "no crawler".
 	Candidates Candidates
@@ -253,6 +256,11 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /software/icon/candidate", h.post(h.handleCandidate))
 	mux.HandleFunc("POST /software/icon/rollback", h.post(h.handleRollback))
 	mux.HandleFunc("POST /software/icon/upload", h.handleUpload)
+	// Every <img> of these pages points here. Stored icons are the
+	// sanitized PNGs only; the icon service sets the inert headers.
+	if h.icons != nil {
+		mux.Handle(icons.PathPrefix, h.icons)
+	}
 }
 
 // --- views ---------------------------------------------------------------
@@ -640,7 +648,7 @@ func (h *Handler) validCandidate(c Candidate) (*url.URL, bool) {
 		return nil, false
 	}
 	u, err := iconfetch.ValidateURL(c.URL, h.allow)
-	if err != nil {
+	if err != nil || strings.Contains(c.URL, "?") {
 		return nil, false
 	}
 	return u, true
@@ -806,6 +814,14 @@ func (h *Handler) handleFetch(w http.ResponseWriter, r *http.Request, actor stri
 	defer cancel()
 	if err := h.editableKey(ctx, key); err != nil {
 		h.fail(w, r, "queue icon fetch", err)
+		return
+	}
+	// softwarecat records no source URL with a query string (signed URLs
+	// carry their secret there): refuse it here, before it reaches the
+	// spool and the audit log, not after the helper fetched it.
+	if strings.Contains(raw, "?") {
+		h.audit(ctx, "icon_fetch_rejected", actor, "key", string(key), "error", "URL with a query string")
+		http.Error(w, "URL rejected: use a URL without a query string.", http.StatusBadRequest)
 		return
 	}
 	if _, err := h.icons.QueueFetch(ctx, actor, string(key), raw); err != nil {
