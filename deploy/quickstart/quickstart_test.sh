@@ -50,8 +50,11 @@ else
 fi
 
 # --- 2. All three scripts load the list from that one file -------------------
+# The reference must be in working code, not a comment: a script that only
+# mentions binaries.txt in a comment loads nothing.
 for s in "$setup_sh" "$install_sh" "$uninstall_sh"; do
-  if grep -q 'binaries\.txt' "$s"; then
+  if grep -vE '^[[:space:]]*#' "$s" | grep -q 'binaries\.txt' \
+     && grep -vE '^[[:space:]]*#' "$s" | grep -q 'binaries_lib\.sh'; then
     ok "$(basename -- "$s") loads the list from binaries.txt"
   else
     bad "$(basename -- "$s") loads the list from binaries.txt"
@@ -59,32 +62,94 @@ for s in "$setup_sh" "$install_sh" "$uninstall_sh"; do
 done
 
 # --- 3. No hardcoded second copy of the list remains ------------------------
-# A loop over a literal list of binary names is the drift this guards
-# against; the loops must iterate the loaded array instead. Any for-loop
-# whose word list contains a bare token that is a binary name from
-# binaries.txt (case 1) is a hardcoded copy. Loops over variables,
-# arrays and globs carry quotes and are skipped.
+# A for-loop over literal binary names, or a literal array of them, is the
+# drift this guards against: the scripts must iterate the loaded array.
+# find_hardcoded prints one line per hardcoded list it finds:
+#   - a for-loop (quoted or unquoted) whose word list names a binary,
+#   - an array literal (single- or multi-line) holding two or more names.
+# Message lines may name binaries in prose; only loops and arrays count.
+find_hardcoded() {
+  local s="$1" line rest tok name n
+  local -a block=()
+  while IFS= read -r line; do
+    if [[ ${#block[@]} -gt 0 ]]; then
+      block+=("$line")
+      if [[ "$line" == *")"* ]]; then
+        n=0
+        for name in "${expected[@]}"; do
+          for l in "${block[@]}"; do
+            [[ " $l " == *" $name "* ]] && n=$((n + 1))
+          done
+        done
+        if [[ $n -ge 2 ]]; then
+          printf '%s: %s\n' "$(basename -- "$s")" "${block[0]}"
+        fi
+        block=()
+      fi
+      continue
+    fi
+    if [[ "$line" =~ ^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=\( ]]; then
+      block=("$line")
+      if [[ "$line" == *")"* ]]; then
+        n=0
+        for name in "${expected[@]}"; do
+          [[ " $line " == *" $name "* ]] && n=$((n + 1))
+        done
+        if [[ $n -ge 2 ]]; then
+          printf '%s: %s\n' "$(basename -- "$s")" "$line"
+        fi
+        block=()
+      fi
+      continue
+    fi
+    if [[ "$line" =~ ^[[:space:]]*for[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+in[[:space:]]+(.*)$ ]]; then
+      rest=${BASH_REMATCH[1]//\"/}
+      rest=${rest//\'/}
+      n=0
+      for tok in $rest; do
+        for name in "${expected[@]}"; do
+          [[ "$tok" == "$name" ]] && n=1
+        done
+      done
+      if [[ $n -eq 1 ]]; then
+        printf '%s: %s\n' "$(basename -- "$s")" "$line"
+      fi
+    fi
+  done < <(grep -vE '^[[:space:]]*#' "$s")
+}
 hardcoded=()
 for s in "$setup_sh" "$install_sh" "$uninstall_sh"; do
   while IFS= read -r hit; do
-    line=${hit#*:}
-    case "$line" in
-      *\"*|*\'*) continue ;;
-    esac
-    rest=${line#* in }
-    for tok in $rest; do
-      for name in "${expected[@]}"; do
-        if [[ "$tok" == "$name" ]]; then
-          hardcoded+=("$(basename -- "$s"): $line")
-        fi
-      done
-    done
-  done < <(grep -nE '^[[:space:]]*for [A-Za-z_][A-Za-z0-9_]* in ' "$s" || true)
+    [[ -n "$hit" ]] && hardcoded+=("$hit")
+  done < <(find_hardcoded "$s")
 done
 if [[ ${#hardcoded[@]} -eq 0 ]]; then
   ok "no hardcoded binary list loop remains in the scripts"
 else
   bad "no hardcoded binary list loop remains in the scripts (${hardcoded[*]})"
+fi
+# The guard must catch the variants it exists for: unquoted and quoted
+# loops, single-line and multi-line array literals.
+fixture=$(mktemp)
+cat > "$fixture" <<'FIX'
+for bin in nebula nebula-server nebula-executor nebula-discovery nebula-pve-collector; do
+  rm -f /usr/bin/$bin
+done
+for bin in "nebula" "nebula-server" "nebula-executor" "nebula-discovery" "nebula-pve-collector"; do
+  rm -f /usr/bin/$bin
+done
+binaries=(nebula nebula-server nebula-executor nebula-discovery nebula-pve-collector)
+units=(
+  nebula
+  nebula-server
+)
+FIX
+hits=$(find_hardcoded "$fixture")
+rm -f "$fixture"
+if [[ $(printf '%s\n' "$hits" | grep -c .) -eq 4 ]]; then
+  ok "case 3 guard catches all four hardcoded variants"
+else
+  bad "case 3 guard catches all four hardcoded variants (got: ${hits@Q})"
 fi
 
 # --- 4. Functional: the copy block of setup-nebula.sh copies all five -------
