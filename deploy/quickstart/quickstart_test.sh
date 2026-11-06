@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Tests for the shared binary list (deploy/quickstart/binaries.txt) that
-# deploy/install.sh and deploy/quickstart/setup-nebula.sh both use, so the
-# two cannot drift (WA-03: a quickstart run stopped at step 5 because
-# setup-nebula.sh copied four binaries but install.sh required five).
+# deploy/install.sh, deploy/uninstall.sh and
+# deploy/quickstart/setup-nebula.sh all use (one parser,
+# deploy/quickstart/binaries_lib.sh), so the scripts cannot drift
+# (WA-03: a quickstart run stopped at step 5 because setup-nebula.sh
+# copied four binaries but install.sh required five).
 #
 # No root needed. Run it from anywhere:
 #
@@ -27,19 +29,13 @@ bad() { echo "FAIL $1"; fail=$((fail + 1)); }
 
 expected=(nebula nebula-server nebula-executor nebula-discovery nebula-pve-collector)
 
-# read_list <file>: the same parsing the scripts use (skip blanks, strip
-# trailing comments). Prints one name per line.
-read_list() {
-  local b
-  while IFS= read -r b; do
-    b="${b%%#*}"
-    [[ -n "$b" ]] && printf '%s\n' "$b"
-  done < "$1"
-}
+# The same parser the scripts use (one copy, sourced here and there).
+# shellcheck source=binaries_lib.sh
+. "$script_dir/binaries_lib.sh"
 
 # --- 1. The list file names exactly the five binaries ----------------------
 if [[ -f "$list_file" ]]; then
-  mapfile -t got < <(read_list "$list_file")
+  mapfile -t got < <(read_binaries "$list_file")
   if [[ "${got[*]}" == "${expected[*]}" ]]; then
     ok "binaries.txt lists exactly the five binaries"
   else
@@ -78,6 +74,7 @@ sandbox=$(mktemp -d)
 trap 'rm -rf "$sandbox"' EXIT
 mkdir -p "$sandbox/bin" "$sandbox/deploy/quickstart"
 cp "$list_file" "$sandbox/deploy/quickstart/binaries.txt"
+cp "$script_dir/binaries_lib.sh" "$sandbox/deploy/quickstart/binaries_lib.sh"
 for b in "${expected[@]}"; do
   printf '#!/bin/sh\n' > "$sandbox/bin/$b"
 done

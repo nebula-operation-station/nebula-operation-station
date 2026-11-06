@@ -186,10 +186,10 @@ as_admin env PATH="$(dirname "$GO"):/usr/bin:/bin" GOTOOLCHAIN=local make -C "$r
 # begin: copy binaries
 binaries_file="$repo/deploy/quickstart/binaries.txt"
 [[ -s "$binaries_file" ]] || die "missing $binaries_file (the binary list)"
-mapfile -t binaries < "$binaries_file"
+# shellcheck source=deploy/quickstart/binaries_lib.sh
+. "$repo/deploy/quickstart/binaries_lib.sh"
+mapfile -t binaries < <(read_binaries "$binaries_file")
 for b in "${binaries[@]}"; do
-  b="${b%%#*}"
-  [[ -n "$b" ]] || continue
   install -m 0755 "$repo/bin/$b" "$repo/$b"
 done
 # end: copy binaries

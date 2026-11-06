@@ -179,11 +179,9 @@ if [[ ! -s "$binaries_file" ]]; then
   echo "install.sh: ${binaries_file} not found; is this a release tarball?" >&2
   exit 1
 fi
-binaries=()
-while IFS= read -r b; do
-  b="${b%%#*}"
-  [[ -n "$b" ]] && binaries+=("$b")
-done < "$binaries_file"
+# shellcheck source=deploy/quickstart/binaries_lib.sh
+. "${script_dir}/quickstart/binaries_lib.sh"
+mapfile -t binaries < <(read_binaries "$binaries_file")
 if [[ ${#binaries[@]} -eq 0 ]]; then
   echo "install.sh: ${binaries_file} lists no binaries" >&2
   exit 1
