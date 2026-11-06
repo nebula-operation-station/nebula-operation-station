@@ -452,7 +452,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		return err
 	}
 	// Connections tab of the host and asset pages (ADR 0009 TM20).
-	connPages, err := newConnectionsPages(db, store, ipamStore, log)
+	connPages, err := newConnectionsPages(db, store, ipamStore, log, retention)
 	if err != nil {
 		return err
 	}
