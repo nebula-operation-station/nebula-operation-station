@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"time"
 )
 
@@ -18,17 +17,6 @@ const (
 	KindQemu GuestKind = "qemu"
 	KindLxc  GuestKind = "lxc"
 )
-
-// nodeNamePattern accepts PVE node names and rejects path separators and
-// other characters that could alter the request path.
-var nodeNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
-
-func validateNodeName(name string) error {
-	if !nodeNamePattern.MatchString(name) {
-		return fmt.Errorf("pveapi: invalid node name %q", sanitizeText(name, 64))
-	}
-	return nil
-}
 
 func validateVMID(vmid int) error {
 	if vmid <= 0 || vmid >= 1<<31 {
@@ -126,7 +114,7 @@ func (c *Client) ListNodes(ctx context.Context) ([]Node, error) {
 	}
 	nodes := make([]Node, 0, len(raw))
 	for _, n := range raw {
-		if err := validateNodeName(n.Node); err != nil {
+		if err := validNodeName(n.Node); err != nil {
 			return nil, err
 		}
 		nd := Node{
@@ -156,7 +144,7 @@ func (c *Client) ListNodes(ctx context.Context) ([]Node, error) {
 
 // ListQemu returns the QEMU guests on node.
 func (c *Client) ListQemu(ctx context.Context, node string) ([]Guest, error) {
-	if err := validateNodeName(node); err != nil {
+	if err := validNodeName(node); err != nil {
 		return nil, err
 	}
 	data, err := c.do(ctx, "/nodes/"+node+"/qemu")
@@ -168,7 +156,7 @@ func (c *Client) ListQemu(ctx context.Context, node string) ([]Guest, error) {
 
 // ListLxc returns the LXC containers on node.
 func (c *Client) ListLxc(ctx context.Context, node string) ([]Guest, error) {
-	if err := validateNodeName(node); err != nil {
+	if err := validNodeName(node); err != nil {
 		return nil, err
 	}
 	data, err := c.do(ctx, "/nodes/"+node+"/lxc")

@@ -317,8 +317,6 @@ func sanitizeText(s string, max int) string {
 
 // Identity and record limits.
 const (
-	// MaxNodeNameBytes bounds a PVE node name.
-	MaxNodeNameBytes = 253
 	// MaxRefBytes bounds short machine references (storage id).
 	MaxRefBytes = 64
 	// MaxSnapshotNameBytes bounds a guest snapshot name.

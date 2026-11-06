@@ -120,7 +120,7 @@ type GuestConfig struct {
 // GetQemuConfig returns the sanitized configuration of QEMU guest vmid on
 // node.
 func (c *Client) GetQemuConfig(ctx context.Context, node string, vmid int) (*GuestConfig, error) {
-	if err := validateNodeName(node); err != nil {
+	if err := validNodeName(node); err != nil {
 		return nil, err
 	}
 	if err := validateVMID(vmid); err != nil {
@@ -140,7 +140,7 @@ func (c *Client) GetQemuConfig(ctx context.Context, node string, vmid int) (*Gue
 // GetLxcConfig returns the sanitized configuration of LXC container vmid
 // on node.
 func (c *Client) GetLxcConfig(ctx context.Context, node string, vmid int) (*GuestConfig, error) {
-	if err := validateNodeName(node); err != nil {
+	if err := validNodeName(node); err != nil {
 		return nil, err
 	}
 	if err := validateVMID(vmid); err != nil {
