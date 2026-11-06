@@ -371,6 +371,47 @@ func TestTrafficIngestPrunesToConfiguredRetention(t *testing.T) {
 	}
 }
 
+func TestTrafficIngestAggregatorUsesConfiguredRetention(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		retention time.Duration
+		age       time.Duration
+		wantFlows bool
+	}{
+		{"recent with seven days", 7 * 24 * time.Hour, 2 * 24 * time.Hour, true},
+		{"expired with seven days", 7 * 24 * time.Hour, 10 * 24 * time.Hour, false},
+		{"expired with one day", 24 * time.Hour, 2 * 24 * time.Hour, false},
+		{"retained with default", trafficstore.DefaultRetention, 10 * 24 * time.Hour, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTrafficEnvWithRetention(t, tc.retention)
+			e.host("host-a", tfAddrA.String())
+			at := e.now.Add(-tc.age)
+			e.run("host-a", at, netFactsResult(t, "host-a", "ss-t0.txt"))
+			if !e.loop.check(context.Background()) {
+				t.Fatal("first result not synced")
+			}
+			e.run("host-a", at.Add(5*time.Minute), netFactsResult(t, "host-a", "ss-t1.txt"))
+			if !e.loop.check(context.Background()) || len(e.sync.last.Hosts) != 1 {
+				t.Fatalf("second result not synced: %+v", e.sync.last)
+			}
+			hr := e.sync.last.Hosts[0]
+			if hr.Err != nil {
+				t.Fatal(hr.Err)
+			}
+			if tc.wantFlows {
+				if hr.Outcome != trafficingest.OutcomeFlows || hr.Buckets == 0 || hr.Limited != 0 {
+					t.Fatalf("retained report did not produce flows: %+v", hr)
+				}
+			} else if hr.Outcome != trafficingest.OutcomeBaseline || hr.Buckets != 0 || hr.Limited != 0 {
+				// A store refusal alone is insufficient: the aggregator must
+				// reject the old report before it retains flow keys in memory.
+				t.Fatalf("expired report reached bucket writes: %+v", hr)
+			}
+		})
+	}
+}
+
 // TestNetFactsMarkPlanUsesActionIndex pins the 30 s change-mark query
 // to the idx_executions_action_id index: without it the planner scans
 // the whole executions table (or all of execution_hosts) on every
