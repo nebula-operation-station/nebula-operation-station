@@ -20,6 +20,7 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo=$(cd -- "${script_dir}/../.." && pwd)
 # Cases below reuse `repo` for their sandbox; keep the real one.
 real_repo="$repo"
+libtmp=""
 list_file="${script_dir}/binaries.txt"
 install_sh="${repo}/deploy/install.sh"
 uninstall_sh="${repo}/deploy/uninstall.sh"
@@ -49,8 +50,11 @@ else
 fi
 
 # --- 2. All three scripts load the list from that one file -------------------
+# The reference must be in working code, not a comment: a script that only
+# mentions binaries.txt in a comment loads nothing.
 for s in "$setup_sh" "$install_sh" "$uninstall_sh"; do
-  if grep -q 'binaries\.txt' "$s"; then
+  if grep -vE '^[[:space:]]*#' "$s" | grep -q 'binaries\.txt' \
+     && grep -vE '^[[:space:]]*#' "$s" | grep -q 'binaries_lib\.sh'; then
     ok "$(basename -- "$s") loads the list from binaries.txt"
   else
     bad "$(basename -- "$s") loads the list from binaries.txt"
@@ -58,32 +62,94 @@ for s in "$setup_sh" "$install_sh" "$uninstall_sh"; do
 done
 
 # --- 3. No hardcoded second copy of the list remains ------------------------
-# A loop over a literal list of binary names is the drift this guards
-# against; the loops must iterate the loaded array instead. Any for-loop
-# whose word list contains a bare token that is a binary name from
-# binaries.txt (case 1) is a hardcoded copy. Loops over variables,
-# arrays and globs carry quotes and are skipped.
+# A for-loop over literal binary names, or a literal array of them, is the
+# drift this guards against: the scripts must iterate the loaded array.
+# find_hardcoded prints one line per hardcoded list it finds:
+#   - a for-loop (quoted or unquoted) whose word list names a binary,
+#   - an array literal (single- or multi-line) holding two or more names.
+# Message lines may name binaries in prose; only loops and arrays count.
+find_hardcoded() {
+  local s="$1" line rest tok name n
+  local -a block=()
+  while IFS= read -r line; do
+    if [[ ${#block[@]} -gt 0 ]]; then
+      block+=("$line")
+      if [[ "$line" == *")"* ]]; then
+        n=0
+        for name in "${expected[@]}"; do
+          for l in "${block[@]}"; do
+            [[ " $l " == *" $name "* ]] && n=$((n + 1))
+          done
+        done
+        if [[ $n -ge 2 ]]; then
+          printf '%s: %s\n' "$(basename -- "$s")" "${block[0]}"
+        fi
+        block=()
+      fi
+      continue
+    fi
+    if [[ "$line" =~ ^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=\( ]]; then
+      block=("$line")
+      if [[ "$line" == *")"* ]]; then
+        n=0
+        for name in "${expected[@]}"; do
+          [[ " $line " == *" $name "* ]] && n=$((n + 1))
+        done
+        if [[ $n -ge 2 ]]; then
+          printf '%s: %s\n' "$(basename -- "$s")" "$line"
+        fi
+        block=()
+      fi
+      continue
+    fi
+    if [[ "$line" =~ ^[[:space:]]*for[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+in[[:space:]]+(.*)$ ]]; then
+      rest=${BASH_REMATCH[1]//\"/}
+      rest=${rest//\'/}
+      n=0
+      for tok in $rest; do
+        for name in "${expected[@]}"; do
+          [[ "$tok" == "$name" ]] && n=1
+        done
+      done
+      if [[ $n -eq 1 ]]; then
+        printf '%s: %s\n' "$(basename -- "$s")" "$line"
+      fi
+    fi
+  done < <(grep -vE '^[[:space:]]*#' "$s")
+}
 hardcoded=()
 for s in "$setup_sh" "$install_sh" "$uninstall_sh"; do
   while IFS= read -r hit; do
-    line=${hit#*:}
-    case "$line" in
-      *\"*|*\'*) continue ;;
-    esac
-    rest=${line#* in }
-    for tok in $rest; do
-      for name in "${expected[@]}"; do
-        if [[ "$tok" == "$name" ]]; then
-          hardcoded+=("$(basename -- "$s"): $line")
-        fi
-      done
-    done
-  done < <(grep -nE '^[[:space:]]*for [A-Za-z_][A-Za-z0-9_]* in ' "$s" || true)
+    [[ -n "$hit" ]] && hardcoded+=("$hit")
+  done < <(find_hardcoded "$s")
 done
 if [[ ${#hardcoded[@]} -eq 0 ]]; then
   ok "no hardcoded binary list loop remains in the scripts"
 else
   bad "no hardcoded binary list loop remains in the scripts (${hardcoded[*]})"
+fi
+# The guard must catch the variants it exists for: unquoted and quoted
+# loops, single-line and multi-line array literals.
+fixture=$(mktemp)
+cat > "$fixture" <<'FIX'
+for bin in nebula nebula-server nebula-executor nebula-discovery nebula-pve-collector; do
+  rm -f /usr/bin/$bin
+done
+for bin in "nebula" "nebula-server" "nebula-executor" "nebula-discovery" "nebula-pve-collector"; do
+  rm -f /usr/bin/$bin
+done
+binaries=(nebula nebula-server nebula-executor nebula-discovery nebula-pve-collector)
+units=(
+  nebula
+  nebula-server
+)
+FIX
+hits=$(find_hardcoded "$fixture")
+rm -f "$fixture"
+if [[ $(printf '%s\n' "$hits" | grep -c .) -eq 4 ]]; then
+  ok "case 3 guard catches all four hardcoded variants"
+else
+  bad "case 3 guard catches all four hardcoded variants (got: ${hits@Q})"
 fi
 
 # --- 4. Functional: the copy block of setup-nebula.sh copies all five -------
@@ -91,7 +157,7 @@ fi
 # markers) and run it against a sandbox checkout: bin/ holds the five
 # built binaries, and the block must copy all of them next to deploy/.
 sandbox=$(mktemp -d)
-trap 'rm -rf "$sandbox"' EXIT
+trap 'rm -rf "$sandbox" "$libtmp"' EXIT
 mkdir -p "$sandbox/bin" "$sandbox/deploy/quickstart"
 cp "$list_file" "$sandbox/deploy/quickstart/binaries.txt"
 cp "$script_dir/binaries_lib.sh" "$sandbox/deploy/quickstart/binaries_lib.sh"
@@ -114,6 +180,22 @@ if [[ ${#copy_block[@]} -gt 0 ]] && eval "$(printf '%s\n' "${copy_block[@]}")"; 
 else
   bad "setup-nebula.sh copy block copies all five binaries next to deploy/ (block missing or failed)"
 fi
+# A comments-only list is not a list: the block must stop instead of
+# copying nothing (install.sh would then fail on a list it cannot see).
+printf '# only comments\n\n' > "$sandbox/deploy/quickstart/binaries.txt"
+if ( eval "$(printf '%s\n' "${copy_block[@]}")" ); then
+  bad "setup-nebula.sh copy block fails on a comments-only list"
+else
+  ok "setup-nebula.sh copy block fails on a comments-only list"
+fi
+# An invalid line must stop the block too (the parser rejects it).
+printf 'bad/name\n' > "$sandbox/deploy/quickstart/binaries.txt"
+if ( eval "$(printf '%s\n' "${copy_block[@]}")" ); then
+  bad "setup-nebula.sh copy block fails on an invalid line"
+else
+  ok "setup-nebula.sh copy block fails on an invalid line"
+fi
+cp "$list_file" "$sandbox/deploy/quickstart/binaries.txt"
 
 # --- 5. Functional: the load block of install.sh yields the five names ------
 # Same idea for install.sh: run its real load block with a sandbox
@@ -142,6 +224,7 @@ for b in "${expected[@]}"; do
 done
 script_dir="$sandbox/deploy"
 bin_dir="$sandbox/usrbin"
+mapfile -t binaries < <(read_binaries "$sandbox/deploy/quickstart/binaries.txt")
 mapfile -t remove_block < <(sed -n '/^# begin: remove binaries/,/^# end: remove binaries/p' "$uninstall_sh" | grep -v '^# \(begin\|end\): remove binaries$')
 if [[ ${#remove_block[@]} -gt 0 ]] && ( eval "$(printf '%s\n' "${remove_block[@]}")" ); then
   left=()
@@ -155,6 +238,46 @@ if [[ ${#remove_block[@]} -gt 0 ]] && ( eval "$(printf '%s\n' "${remove_block[@]
   fi
 else
   bad "uninstall.sh remove block removes all five binaries (block missing or failed)"
+fi
+
+# --- 6b. Functional: the list check of uninstall.sh runs before removal -----
+# The check must pass on the valid list, fail on a missing, comments-only or
+# invalid list, and it must be placed before the first removal in the script:
+# a missing list must not leave the system half uninstalled (units stopped,
+# binaries still to go).
+mapfile -t ucheck_block < <(sed -n '/^# begin: check binary list/,/^# end: check binary list/p' "$uninstall_sh" | grep -v '^# \(begin\|end\): check binary list$')
+script_dir="$sandbox/deploy"
+if [[ ${#ucheck_block[@]} -gt 0 ]] && ( eval "$(printf '%s\n' "${ucheck_block[@]}")" ); then
+  ok "uninstall.sh list check passes on the valid list"
+else
+  bad "uninstall.sh list check passes on the valid list (block missing or failed)"
+fi
+mv "$sandbox/deploy/quickstart/binaries.txt" "$sandbox/blist.bak"
+if ( eval "$(printf '%s\n' "${ucheck_block[@]}")" ); then
+  bad "uninstall.sh list check fails when the list is missing"
+else
+  ok "uninstall.sh list check fails when the list is missing"
+fi
+mv "$sandbox/blist.bak" "$sandbox/deploy/quickstart/binaries.txt"
+printf '# only comments\n\n' > "$sandbox/deploy/quickstart/binaries.txt"
+if ( eval "$(printf '%s\n' "${ucheck_block[@]}")" ); then
+  bad "uninstall.sh list check fails on a comments-only list"
+else
+  ok "uninstall.sh list check fails on a comments-only list"
+fi
+printf 'bad/name\n' > "$sandbox/deploy/quickstart/binaries.txt"
+if ( eval "$(printf '%s\n' "${ucheck_block[@]}")" ); then
+  bad "uninstall.sh list check fails on an invalid line"
+else
+  ok "uninstall.sh list check fails on an invalid line"
+fi
+cp "$list_file" "$sandbox/deploy/quickstart/binaries.txt"
+check_ln=$(grep -n '^# begin: check binary list' "$uninstall_sh" | head -1 | cut -d: -f1)
+first_rm_ln=$(grep -nE '^[[:space:]]*(systemctl (stop|disable)|rm -f --|rmdir --)' "$uninstall_sh" | head -1 | cut -d: -f1)
+if [[ -n "${check_ln:-}" && -n "${first_rm_ln:-}" && $check_ln -lt $first_rm_ln ]]; then
+  ok "uninstall.sh checks the list before the first removal"
+else
+  bad "uninstall.sh checks the list before the first removal (check at ${check_ln:-?}, first removal at ${first_rm_ln:-?})"
 fi
 
 # --- 7. Functional: the layout check of install.sh (both paths) -------------
@@ -191,6 +314,16 @@ if ( eval "$(printf '%s\n' "${check_block[@]}")" ); then
 else
   bad "install.sh layout check passes with all five binaries (tarball)"
 fi
+# Negative: a tarball missing one binary must fail the layout check. This is
+# the case a truncated list (the original four-of-five bug) or a disabled
+# check would pass and stay green: the check must see all five, not a subset.
+mv "$sandbox/tarball/nebula-pve-collector" "$sandbox/gone-tarball"
+if ( eval "$(printf '%s\n' "${check_block[@]}")" ); then
+  bad "install.sh layout check fails when a binary is missing (tarball)"
+else
+  ok "install.sh layout check fails when a binary is missing (tarball)"
+fi
+mv "$sandbox/gone-tarball" "$sandbox/tarball/nebula-pve-collector"
 
 # --- 8. Functional: the binary install loop of install.sh -------------------
 # Runs the real loop with a fake `install` (no root): all five binaries
@@ -232,39 +365,85 @@ else
   bad "install.sh install loop installs all five binaries ($out)"
 fi
 
-# --- 9. The .deb ships every file install.sh reads ---------------------------
-# On a packaged install install.sh runs from /usr/share/nebula/deploy
-# (--from-package), so every file it reads under ${script_dir} must be in
-# the nfpm contents of .goreleaser.yaml (the tarball carries the whole
-# deploy/ tree, so only the package can lose a file).
+# --- 9. The .deb and the image ship exactly the list ------------------------
+# binaries.txt is the single source of truth (its own header says so), so
+# every consumer must agree with it exactly; a drift breaks the packaged or
+# container install while the tarball install still works:
+#   9a  every file install.sh reads under ${script_dir} is in the nfpm
+#       contents, with the src paired to the dst (a commented-out entry or a
+#       dst with the wrong src must not count as shipped);
+#   9b  the nfpm ids (the binaries the .deb puts in bindir) match the list;
+#   9c  the Dockerfile COPY list (the binaries the image ships) matches it.
 goreleaser="${real_repo}/.goreleaser.yaml"
-if [[ -f "$goreleaser" ]]; then
+dockerfile="${real_repo}/deploy/container/Dockerfile"
+if [[ -f "$goreleaser" && -f "$dockerfile" ]]; then
+  # The nfpms block: from 'nfpms:' to the next top-level key.
+  nfpms_block=$(awk '/^nfpms:/{f=1;next} f&&/^[a-z]/{f=0} f' "$goreleaser")
+  # 9a: every file install.sh reads is in the nfpm contents (src/dst paired).
+  install_dst=$(grep -oE 'dst: [^ ]+/install\.sh$' <<< "$nfpms_block" | head -1 | awk '{print $2}')
   mapfile -t install_reads < <(grep -oE '\$\{script_dir\}/[A-Za-z0-9_./-]+' "$install_sh" | sed 's|.*script_dir}/||' | sort -u)
-  install_dst=$(grep -oE 'dst: [^ ]+/install\.sh$' "$goreleaser" | head -1 | awk '{print $2}')
+  contents_block=$(awk '/^[[:space:]]*contents:/{f=1;next} f&&/^[[:space:]]*scripts:/{f=0} f' <<< "$nfpms_block")
   if [[ -n "$install_dst" && ${#install_reads[@]} -gt 0 ]]; then
     base="${install_dst%/*}"
-    mapfile -t nfpm_dsts < <(grep -oE 'dst: [^ ]+' "$goreleaser" | awk '{print $2}')
     missing=()
     for rel in "${install_reads[@]}"; do
-      covered=0
-      for dst in "${nfpm_dsts[@]}"; do
-        if [[ "$dst" == "${base}/${rel}" || "$dst" == "${base}/${rel}/" ]]; then
-          covered=1
-          break
+      rel_n="${rel%/}"
+      cur_src=""
+      hit=0
+      while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        if [[ "$line" =~ -[[:space:]]*src:[[:space:]]*(.*)$ ]]; then
+          cur_src="${BASH_REMATCH[1]%%[[:space:]]*}"
+        elif [[ "$line" =~ dst:[[:space:]]*(.*)$ ]]; then
+          dst="${BASH_REMATCH[1]%%[[:space:]]*}"
+          if [[ "$dst" == "${base}/${rel_n}" && "$cur_src" == "deploy/${rel_n}" ]]; then
+            hit=1; break
+          elif [[ "$dst" == "${base}/${rel_n}/" && "$cur_src" == "deploy/${rel_n}/*" ]]; then
+            hit=1; break
+          elif [[ "$dst" == */ && "$cur_src" == deploy/* ]]; then
+            cdir="${cur_src#deploy/}"; cdir="${cdir%/*}"
+            if [[ "$rel_n" == "${cdir}"/* && "$dst" == "${base}/${cdir}/" ]]; then
+              hit=1; break
+            fi
+          fi
         fi
-      done
-      [[ $covered -eq 1 ]] || missing+=("$rel")
+      done <<< "$contents_block"
+      [[ $hit -eq 1 ]] || missing+=("$rel")
     done
     if [[ ${#missing[@]} -eq 0 ]]; then
-      ok ".deb nfpm contents include every file install.sh reads"
+      ok ".deb nfpm contents include every file install.sh reads (src/dst paired)"
     else
       bad ".deb nfpm contents include every file install.sh reads (missing under ${base}: ${missing[*]})"
     fi
   else
     bad ".deb nfpm contents include every file install.sh reads (could not derive the install.sh dst or the read paths)"
   fi
+  # 9b: the nfpm ids (binaries the .deb puts in bindir) match the list.
+  nfpm_ids_line=$(grep -E '^[[:space:]]*ids:' <<< "$nfpms_block" | head -1)
+  nfpm_ids=$(sed -E 's/^[[:space:]]*ids:[[:space:]]*\[//; s/\][[:space:]]*$//' <<< "$nfpm_ids_line" | tr ',' '\n' | tr -d ' \t' | grep -v '^$' | sort)
+  list_sorted=$(printf '%s\n' "${expected[@]}" | sort)
+  if [[ -n "$nfpm_ids" && "$nfpm_ids" == "$list_sorted" ]]; then
+    ok ".deb nfpm ids match binaries.txt exactly"
+  else
+    bad ".deb nfpm ids match binaries.txt exactly (nfpm: ${nfpm_ids:-<none>}; list: ${expected[*]})"
+  fi
+  # 9c: the Dockerfile COPY list (binaries the image ships) matches the list.
+  copy_line=$(grep -E '^[[:space:]]*COPY[[:space:]]' "$dockerfile" | head -1)
+  read -r -a copy_words <<< "$copy_line"
+  copy_files=()
+  if [[ ${#copy_words[@]} -ge 3 ]]; then
+    for ((i = 1; i < ${#copy_words[@]} - 1; i++)); do
+      copy_files+=("${copy_words[i]}")
+    done
+  fi
+  copy_sorted=$(printf '%s\n' "${copy_files[@]}" | sort)
+  if [[ ${#copy_files[@]} -gt 0 && "$copy_sorted" == "$list_sorted" ]]; then
+    ok "Dockerfile COPY list matches binaries.txt exactly"
+  else
+    bad "Dockerfile COPY list matches binaries.txt exactly (copy: ${copy_files[*]:-<none>}; list: ${expected[*]})"
+  fi
 else
-  bad ".goreleaser.yaml exists"
+  bad ".goreleaser.yaml and the Dockerfile exist"
 fi
 
 # --- 10. Syntax of the scripts ------------------------------------------------
@@ -275,6 +454,68 @@ for s in "$setup_sh" "$install_sh" "$uninstall_sh" "$real_repo/deploy/quickstart
     bad "bash -n $(basename -- "$s")"
   fi
 done
+
+# --- 11. read_binaries: the format edge cases --------------------------------
+# The parser is the only gate between the list file and root install(1) and
+# rm -f, so every malformed line must be handled deterministically: a valid
+# name is [A-Za-z0-9][A-Za-z0-9._-]*, anything else is an error, not a guess.
+libtmp=$(mktemp -d)
+# A last line without a trailing newline must not be dropped (read returns
+# non-zero before the loop body runs without the guard).
+printf 'nebula\nnebula-server' > "$libtmp/no-trailing-nl.txt"
+out=$(read_binaries "$libtmp/no-trailing-nl.txt")
+if [[ "$out" == $'nebula\nnebula-server' ]]; then
+  ok "read_binaries keeps a last line without a trailing newline"
+else
+  bad "read_binaries keeps a last line without a trailing newline (got: ${out@Q})"
+fi
+# CRLF endings: the CR must not survive into the name.
+printf 'nebula\r\nnebula-server\r\n' > "$libtmp/crlf.txt"
+out=$(read_binaries "$libtmp/crlf.txt")
+if [[ "$out" == $'nebula\nnebula-server' ]]; then
+  ok "read_binaries strips CR from CRLF lines"
+else
+  bad "read_binaries strips CR from CRLF lines (got: ${out@Q})"
+fi
+# Inline comments are not part of the format: the line is invalid and the
+# parser must stop, not silently truncate it to the name.
+printf 'nebula # inline\n' > "$libtmp/inline.txt"
+if out=$(read_binaries "$libtmp/inline.txt" 2>/dev/null); then
+  bad "read_binaries rejects an inline comment (got: ${out@Q})"
+else
+  ok "read_binaries rejects an inline comment"
+fi
+# Path separators and whitespace are not binary names (they would reach
+# root install and rm -f).
+printf 'bad/name\n' > "$libtmp/path.txt"
+if read_binaries "$libtmp/path.txt" >/dev/null 2>&1; then
+  bad "read_binaries rejects a path separator in a name"
+else
+  ok "read_binaries rejects a path separator in a name"
+fi
+printf 'nebula \n' > "$libtmp/trail.txt"
+if read_binaries "$libtmp/trail.txt" >/dev/null 2>&1; then
+  bad "read_binaries rejects trailing whitespace in a name"
+else
+  ok "read_binaries rejects trailing whitespace in a name"
+fi
+# Blank, whitespace-only and comment lines are ignored; the result may be
+# empty (the callers then fail the zero-entries check).
+printf '   \n\n# only comments\n' > "$libtmp/empty.txt"
+out=$(read_binaries "$libtmp/empty.txt")
+if [[ -z "$out" ]]; then
+  ok "read_binaries ignores blank, whitespace-only and comment lines"
+else
+  bad "read_binaries ignores blank, whitespace-only and comment lines (got: ${out@Q})"
+fi
+# A valid list still parses, with or without a trailing newline.
+printf 'nebula\nnebula-server\nnebula-executor\nnebula-discovery\nnebula-pve-collector' > "$libtmp/valid.txt"
+out=$(read_binaries "$libtmp/valid.txt")
+if [[ "$out" == "$(printf '%s\n' "${expected[@]}")" ]]; then
+  ok "read_binaries parses a valid five-name list"
+else
+  bad "read_binaries parses a valid five-name list (got: ${out@Q})"
+fi
 
 echo
 echo "quickstart_test: ${pass} passed, ${fail} failed"
