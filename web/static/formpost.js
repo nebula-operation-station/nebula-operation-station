@@ -4,6 +4,8 @@
 // navigation sends "Origin: null" and the middleware refuses it. These forms
 // are therefore submitted with fetch (which sends the real Origin), and the
 // page then follows the server's redirect. Errors are shown as text.
+// The target comes from the action attribute: a field named "action" or
+// "method" shadows the form's properties of that name (lease form).
 'use strict';
 
 (() => {
@@ -14,7 +16,8 @@
       if (button) button.disabled = true;
       let msg = form.querySelector('.message');
       try {
-        const res = await fetch(form.action, {
+        const target = new URL(form.getAttribute('action') || window.location.href, window.location.href);
+        const res = await fetch(target, {
           method: 'POST',
           credentials: 'same-origin',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
