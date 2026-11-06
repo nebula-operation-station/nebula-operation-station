@@ -374,10 +374,15 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     | `maxPreviewComposeConfigBytes` | 4 MiB of `docker compose config` output | Unit unsupported |
     | `maxPreviewIndexBytes` | 256 KiB per manifest or index GET | `tag_unresolved` |
     | `maxPreviewResultBytes` | 768 KiB, below the 1 MiB `hostrun.MaxResult` | Remaining units are `truncated` |
+    | `maxRunRegistryRequests` | 120 per run, one at a time and at least 1 second apart per registry (Q22) | `tag_unresolved` for the rest; stops at the first 429 |
 
     Each external call has its own bound (`timeout 30` for Compose and Docker,
-    the `curl` limits of `docker_check_updates.sh`), inside the 5-minute job
-    timeout. A label-supplied path must be absolute, and the content of those
+    the `curl` limits of `docker_check_updates.sh`). The calls alone do not fit
+    the 5-minute job (50 projects at 30 seconds are 25 minutes), so the script
+    also keeps `maxPreviewWallClock = 4 * time.Minute`: it starts no further unit
+    past that, and reports the rest as `truncated`. The one call still running
+    ends inside the job timeout, so a slow host loses units, not the preview. A
+    label-supplied path must be absolute, and the content of those
     files never leaves the host. A unit cut off by a limit is reported without
     facts, never half: a partial dependency set must not become a binding.
   - `docker.compose_update` 2.0.0 (durable, `reconcile-first`, 30 min, batch
@@ -402,10 +407,13 @@ Until they land, cu04 shows those targets as unavailable with a reason.
        - a reference with a digest is accepted only as the NOS override: the
          `config_files` label names it and its entry for that service equals the
          reference. Otherwise it is an operator pin (`digest_pinned`);
-       - **drift (Q2):** when a NOS override file exists for the project, the
-         `config_files` label names it and each frozen service's override entry
-         equals its targets' reference (`override_drift`). A plain `docker
-         compose up -d` after an update stops here;
+       - **drift (Q2):** when a NOS override file exists for the project, each
+         frozen service is one of two cases, otherwise `override_drift`. With an
+         override entry, the targets' `config_files` label names the override and
+         the entry equals their reference; a plain `docker compose up -d` after
+         an update stops here. With no entry, the label does not name the
+         override and the reference has no digest: the service never used the
+         override, or the operator removed its entry (Q2);
        - **applied configuration (Q21):** `docker compose ... config --hash
          <frozen services>`, with the arguments of phase 5 and the override as it
          is now, must print for each frozen service the value of the
@@ -431,15 +439,19 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     2. **Resolve, nothing changed yet.** For **every** entry, resolve
        `repository:new_tag` with the preview's anonymous request and compare the
        index and platform digests with the entry. A difference is exit 10 with
-       `tag_moved`; no answer or an unusable one is exit 10 with
-       `tag_unresolved` (unknown is not success). All entries are resolved before
-       the first pull. This is what makes a moved tag stop before any change;
-       the digest pull alone would hide it.
+       `tag_moved`; no answer, an unusable one or a used-up
+       `maxRunRegistryRequests` (Q22) is exit 10 with `tag_unresolved` (unknown
+       is not success). All entries are resolved before the first pull. This is
+       what makes a moved tag stop before any change; the digest pull alone would
+       hide it.
     3. **Pull.** `docker pull repository@new_platform_digest` for each distinct
        digest, then verify for each entry that the image lists that digest and
-       has the bound platform. It never pulls by tag and never runs `docker
-       compose pull`. One failed image stops the member; nothing was recreated
-       yet, and images already pulled stay as harmless unreferenced images.
+       has the bound platform. Each pull runs with `DOCKER_CONFIG` set to an empty
+       directory inside `NEBULA_RUN_DIR`, so the host's Docker login cannot serve
+       it (R7, Q3); only the pull, because the Compose plugin may be found through
+       that variable too. It never pulls by tag and never runs `docker compose
+       pull`. One failed image stops the member; nothing was recreated yet, and
+       images already pulled stay as harmless unreferenced images.
     4. **Retain.** For each entry `docker tag <old_image_id>
        nos-retained:<execution-id>-<entry-index>`, then verify that the tag
        resolves to `old_image_id`. A failure stops before any recreate (exit 10,
@@ -470,8 +482,9 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     if it is an index whose entry for the platform is the tag's platform digest,
     so an index change on another architecture is not an update. A different
     entry or a local platform digest is `update`; no answer is `unknown` (ADR
-    line 361). That costs at most one more request per changed image, inside the
-    budget of spec v23-11-02. The 50-image and 64-KiB caps stay. Fixes G11.
+    line 361). Those GETs count against `maxRunRegistryRequests` like every HEAD
+    and token request (spec v23-11-02 and v23-11-06, Q22), and images not reached
+    are `unknown`. The 50-image and 64-KiB caps stay. Fixes G11.
   - `InspectBindings` gets a sibling `UpdateBindings` over the latest preview,
     at most `maxContainerBindingAge` old. It fills `images`, `targets`,
     `dependencies` and `source_digest`, and the policy values of Q13, and it
@@ -481,7 +494,24 @@ Until they land, cu04 shows those targets as unavailable with a reason.
   - **Timeouts:** `docker.compose_update`, `docker.compose_rollback`,
     `docker.update` and `docker.rollback` all use one named
     `containerMutationTimeout = 30 * time.Minute`, the value
-    `batchBusyDurableWait` is derived from.
+    `batchBusyDurableWait` is derived from. Inside it each phase has a named
+    budget, so a hung call ends in a typed stop and leaves time for phase 6,
+    instead of ending in `RuntimeMaxSec` with no result:
+
+    | Constant | Value | Covers | When it runs out |
+    | --- | --- | --- | --- |
+    | `mutationCheckBudget` | 3 min | Phases 1 and 2 | Exit 10, `budget_exceeded` in phase 1 and `tag_unresolved` in phase 2; nothing changed |
+    | `mutationPullBudget` | 12 min | All pulls of phase 3 | Exit 10, `pull_timeout`; nothing recreated |
+    | `mutationRetainBudget` | 1 min | Phase 4 | Exit 10, `retain_failed` |
+    | `mutationUpBudget` | 8 min | `up` in phase 5 | `up_exit` 124 with reason `up_timeout`; phase 6 still runs |
+    | `mutationSnapshotBudget` | 5 min | Phase 6, including the 3-minute `mutationHealthWait` | The after-snapshot is missing, so the row is `uncertain` |
+
+    Every call runs under `timeout -k 10` with the rest of its phase's budget, at
+    most 30 seconds outside pulls and `up`. Together they take 29 minutes, which
+    leaves room for the `-k` grace of each phase. A killed `up` may leave a
+    project partly recreated; the after-snapshot records that as for any failed
+    `up`. Rollback and cu05's actions use the same budgets for the phases they
+    run.
   - **Durable batch members:** the executor picks `hostrun.Dispatch` for the
     frozen action IDs of Decision 5. `RunBatchMember` returns once the job is
     dispatched, and the server follows it through a new
@@ -510,8 +540,8 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     rollout. Rollout state and `batchExecIndex` are memory-only and cleared by
     Lock and restart (ADR 0007 line 177, `internal/permit/batch/batch.go:555`).
     - While the permit lives, the reconciler calls the batch `RecordOutcome`
-      with `runs.member_id`, and an unknown outcome counts as a failure for the
-      stop rule.
+      with `runs.member_id`, and a run with no result counts as a failure for the
+      stop rule (`permit.OutcomeOfClass`).
     - After Lock or an executor restart there is no rollout to tell, and that
       call is ignored by design. The outcome stays in `runs` (cu03: also in the
       row), and the server gets it through `GetBatchMemberRun`, records it in
@@ -522,13 +552,18 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     reservation, as for attached members, and is persisted with a `durable`
     mark. `hostrun.RunVisible` cannot end it, because it counts only the SSH
     user's own processes and the job runs as root. The hold ends:
-    - when reconciliation closes the run with a definite class (result read,
-      or not executed): the job is over;
-    - when the class is **unknown** (job directory gone, or host not checkable
-      before the reconcile deadline), it does **not** end. The job may still
-      run, so the target stays held until a new `hostrun.DurableJobGone` probe
+    - when reconciliation closes the run with a result read, or as not executed:
+      the job is over;
+    - when the run closes with **no result**, it does **not** end. That covers
+      `unknown` (job directory gone, or host not checkable before the reconcile
+      deadline), and `script_interrupted` and `execution_timeout`: the wrapper
+      publishes `result.json` only at its end, and `hostrun.Remove` deletes the
+      `.tmp`, so a killed job leaves nothing to read. Those two classes come from
+      a dead wrapper PID, which does not prove that the script's own processes are
+      gone. So the target stays held until a new `hostrun.DurableJobGone` probe
       (sudo, complete check of unit `nebula-job-<execution-id>`; an error counts
-      as running) shows it gone. It uses the existing recheck and the
+      as running) shows the unit gone, which after a reboot is the next pass. It
+      uses the existing recheck and the
       `batchHoldMax` and `batch-holds rearm` path unchanged: re-arming frees
       nothing by itself. The reconcile deadline (job timeout plus 24 h) lies
       beyond `batchHoldMax` (24 h), so a host that stays away reaches `expired`
@@ -566,7 +601,12 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     `TestPrepareKeepsExistingSalt`; `TestSourceDigestSurvivesUpdate` (equal before
     and after an image change and a NOS override);
     `TestConfigHashCheckUsesPhaseFiveArguments` (same files, no `--env-file`, no
-    `--profile`), `TestConfigHashNeverLeavesHost`.
+    `--profile`), `TestConfigHashNeverLeavesHost`;
+    `TestNeverUpdatedServiceBesideOverridePasses` (update `web`, then update
+    `db`, which has no entry), `TestRemovedOverrideEntryPasses`,
+    `TestNoEntryWithOverrideLabelIsDrift`;
+    `TestComposeUpdatePullHasEmptyDockerConfig` (a fake `docker` records
+    `DOCKER_CONFIG` and that the directory is empty).
   - log (R4): `TestComposeFailureLogHoldsNoEnvValue`, a table where a fake
     `docker compose config`, `pull` and `up` fail and print a planted env value
     on stdout and stderr: neither result nor log may hold it, for preview and
@@ -574,14 +614,21 @@ Until they land, cu04 shows those targets as unavailable with a reason.
   - preview limits: `TestPreviewBoundsHostileHost`, a table with one case over
     each constant and no partial unit in the result;
     `TestPreviewOversizeIndexIsUnresolved`; `TestPreviewResultStaysUnderLimit` at
-    the maximum of every field.
+    the maximum of every field; `TestPreviewWallClockTruncatesRemainingUnits` (a
+    fake host where every Compose call hangs until its timeout);
+    `TestPreviewRequestCapGivesTagUnresolved`.
   - check_updates: `TestCheckUpdatesFirstUpdateListsIndex` (tag pull),
     `TestCheckUpdatesSecondUpdateListsPlatform` (digest pull),
     `TestIndexChangeOnOtherArchitectureIsCurrent`,
     `TestUnanswerableLocalDigestIsUnknown`.
   - planner: `TestContainerBatchLifetimeCoversSerialMembers` (8 members of 30
     minutes get at least 305 minutes), `TestContainerBatchOverLifetimeRefused`,
-    `TestContainerActionsShareMutationTimeout`.
+    `TestContainerActionsShareMutationTimeout`,
+    `TestMutationBudgetsFitTimeout` (their sum plus the `-k` grace stays below
+    `containerMutationTimeout`, and the scripts use the same values).
+  - budgets: `TestHungPullStopsBeforeRecreate`,
+    `TestHungUpStillReportsAfterSnapshot`, `TestHungPrecheckStopsWithTypedReason`,
+    and for rollback in cu03 `TestHungRollbackUpStillReportsAfterSnapshot`.
   - parsers: bounds, malformed UTF-8, unsafe characters, fuzz.
   - executor: crash between intent and dispatch, lost session during dispatch,
     restart while the job runs (each reconciled and never redispatched);
@@ -592,7 +639,8 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     `TestServerCannotChooseAttachedForContainerMember`;
     target held past the old 16-minute limit; Lock during a running job;
     `TestRunVisibleCannotEndDurableHold`, `TestUnknownDurableRunKeepsTargetHeld`,
-    `TestRearmDoesNotFreeDurableHold`, `TestHoldEndsWhenDurableJobGone`,
+    `TestKilledDurableRunKeepsTargetHeldUntilGone` (for `script_interrupted` and
+    `execution_timeout`), `TestRearmDoesNotFreeDurableHold`, `TestHoldEndsWhenDurableJobGone`,
     `TestBusyDurableTargetEndsWaiterNotExecuted` (at the new limit, with an
     attached waiter too); `TestServerRestartFollowsDurableMember`.
   - security: `TestContainerSubstitutionRefused`, `TestTagDriftRefused` (the
@@ -629,14 +677,20 @@ Until they land, cu04 shows those targets as unavailable with a reason.
   G14, G15.
 - **Paths:** protected: `internal/executordb/` (migration 0021 and store),
   `internal/executor/`, `internal/canonical/`, `internal/permit/batch/`,
-  `proto/`, `cmd/nebula/`, `test/security/`, `test/integration/`; not protected:
-  `internal/executions/dockerhost/`, `internal/executions/actions/`,
-  `internal/executions/batchplan.go`.
+  `proto/`, `cmd/nebula/`, `test/security/`, `test/integration/`,
+  `.github/protected-paths.txt`; a new package `internal/containerjudge/` (Q11);
+  not protected: `internal/executions/dockerhost/`,
+  `internal/executions/actions/`, `internal/executions/batchplan.go`.
+  **That package decides rollout outcomes and must be added to the protected
+  list by a maintainer.**
 - **Protected: yes** for the executor side.
 - **Contracts and RPCs:**
-  - A pure `dockerhost.JudgeContainerUpdate(baseline, binding, after)`: the
-    before/after postflight of spec 11 v23-11-02, which the v1 script does today,
-    over the snapshots of cu02's phases 1 and 6. Containers are matched by service
+  - A pure `containerjudge.JudgeContainerUpdate(baseline, binding, after)` in the
+    new protected package (Q11), which also takes over the two strict parsers the
+    executor needs, for `compose-update-v2` and `docker-update-preview-v1`, from
+    cu02's `internal/executions/dockerhost/`. It is
+    the before/after postflight of spec 11 v23-11-02, which the v1 script does
+    today, over the snapshots of cu02's phases 1 and 6. Containers are matched by service
     and replica number, because IDs change. Per frozen service, against the
     baseline:
     - the same replica count, each `running`;
@@ -699,7 +753,7 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     | `not_recreated` | Stopped in phases 1 to 4; every container is as it was | Refused: nothing to undo |
     | `recreated` | Phase 6 passed and the verdict passed; only a run's own result reaches this state | Allowed |
     | `partial` | Phase 5 was reached, the after-snapshot exists, and `up` or the verdict failed; or Resolve found a changed container | Allowed, if the row has a baseline |
-    | `uncertain` | The run is unknown, or the after-snapshot is missing | Refused until resolved |
+    | `uncertain` | The run closed with no result (`unknown`, `script_interrupted`, `execution_timeout`), or the after-snapshot is missing | Refused until resolved |
     | `rolled_back` | A later rollback of this row succeeded | Refused |
 
   - **Partly recreated project (R10, R13):** the after-snapshot is the record
@@ -729,9 +783,8 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     networks, so no verdict is possible, and unknown is not success. A project
     that really is fully recreated stays `partial`. Anything it cannot match
     stays `uncertain`. It changes nothing on the host, is audited, and does not
-    extend the window. An unknown run left no result, so such a row has no
-    baseline, and rollback from it is refused (`no_baseline`); Q19 names the
-    consequence.
+    extend the window. A run with no result left no baseline either, so rollback
+    from such a row is refused (`no_baseline`); Q19 names the consequence.
   - **Recreation definition (R9, see Q16):** `recreation_definition` holds what a
     rollback recreates from: project, service set, per service the prior
     reference and prior NOS override entry, and `source_digest` (standalone: the
@@ -929,6 +982,18 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     secret, delivered over the existing tmpfs secret channel
     (`internal/hostrun/secrets.go`, 64 KiB). The planner sees no secret slot,
     which is what keeps batches possible (G8).
+  - **Redaction of a batch member:** `redactDurable` returns early without
+    `run.SecretRefs`, and those come from `permit.SecretRefs` over parameters,
+    which hold no secret here and which the batch `CreateRun` does not read
+    (`internal/executor/batch_dispatch.go:658`). So the executor derives the
+    refs from the binding and passes them to `CreateRun`: slot `definition` to
+    `ctrdef.<definition_id>.<version>`. Vault locked or secret gone then behave
+    as for every durable run (wait, or withhold the output). `hostrun.Redact`
+    matches a whole secret value, not an env value inside the definition, so
+    `redactDurable` adds each env value of the definition as its own redaction
+    entry, which is never delivered to the host. A value below Redact's 4 bytes
+    stays as it is. This is the second layer; the first is the silent output of
+    cu02, and snapshots hold no env.
   - Format: see Q7. The definition must exactly name the container and may
     leave only the image to NOS.
 - **Risk classes:** as cu01; a container without a definition is unavailable.
@@ -941,7 +1006,9 @@ Until they land, cu04 shows those targets as unavailable with a reason.
   `TestStandaloneRollbackUsesBoundVersion`,
   `TestDefinitionIDSurvivesRecreate`, `TestDefinitionSecretIDFitsVaultLimit` (at
   the longest version number), `TestNoDefinitionDigestLeavesExecutor` (binding,
-  list and results).
+  list and results), `TestBatchMemberRecordsDefinitionSecretRefs`,
+  `TestBatchMemberOutputRedactedWithLockedVaultWaits`,
+  `TestEnvValueInsideDefinitionRedacted`.
 - **Real install:** the operator supplies a definition per container with the
   vault unlocked. Without that, nothing changes.
 
@@ -1160,8 +1227,9 @@ cannot start without the answer.
 11. **May the executor import `internal/executions/dockerhost`? Blocks cu03.**
     It would be the first import of that tree, although the package uses only
     the standard library. Alternative: move the judge to a new protected
-    package. *Recommendation:* the judge decides rollout outcomes, so move it
-    to a small package added to the protected list.
+    package. *Recommendation, used by the steps:* the judge decides rollout
+    outcomes, so it goes to a small package, `internal/containerjudge/`, added to
+    the protected list, with the two parsers the executor reads results through.
 12. **What counts as a dependency? Blocks cu01.** The ADR says to freeze
     dependencies but not what they are. *Recommendation, used by the steps:* the
     transitive closure in both directions over `depends_on`, `links` and
@@ -1245,11 +1313,15 @@ cannot start without the answer.
     Alternatives: a separate evidence action with its own format, which could
     reach `recreated` but adds an action; or no Resolve at all, so a row stays
     `uncertain` and the only way on is a new update proposal. Consequence to
-    confirm: a run that ended unknown left no result, so its row has no baseline
-    and rollback from it is refused (`no_baseline`). The operator repairs the
-    project on the host, for example with `docker compose up -d`, and then
-    proposes a new update, which R11 permits after Resolve. Keeping rollback in
-    that case would need phase 1 to store the baseline on the host as well.
+    confirm: every run that closes with no result has a row without a baseline,
+    and rollback from it is refused (`no_baseline`). That is not only `unknown`:
+    a reboot, a kill or a job timeout during an update closes as
+    `script_interrupted` or `execution_timeout`, also with no result. The call
+    budgets of cu02 keep a hung call out of this case, but a reboot during phases
+    5 or 6 stays in it. The operator repairs the project on the host, for example
+    with `docker compose up -d`, and then proposes a new update, which R11 permits
+    after Resolve. Keeping rollback in that case would need phase 1 to store the
+    baseline on the host as well.
 20. **`source_digest` of a standalone unit: key it or keep it in the executor?
     Blocks cu05.** It would be a digest of a secret-bearing definition, travelling
     to the server in the binding, and Q5 rejects unkeyed digests because they can
@@ -1289,3 +1361,36 @@ cannot start without the answer.
       override is assumed here and must be shown by cu02's first integration test,
       as in Q2. If it fails, the first update would be the only provable one, and
       the Compose path stops for a maintainer decision.
+22. **How do host-side registry requests share the budget? Blocks cu02.** Spec
+    v23-11-02 and v23-11-06 count every HEAD and GET and allow one request per
+    second and two at once per registry, with a pause of at least 15 minutes
+    after a 429. Preview, phase 2 and `docker.check_updates` run on the hosts,
+    where no server cache or budget reaches them. One tag can cost four requests
+    (HEAD, token, HEAD, index GET), so 20 entries cost up to 80 and 50 images in
+    `docker.check_updates` more than that. *Recommendation, used by the steps:* a
+    per-run cap only, `maxRunRegistryRequests = 120`, with requests in sequence
+    and at least 1 second apart per registry, which fits the budgets of preview,
+    phase 2 and the 5-minute check. A used-up cap or a 429 ends that run's
+    requests: preview and phase 2 report `tag_unresolved`, the check `unknown`,
+    never "current". The result names `rate_limited`, and a script keeps nothing
+    between runs, so `Retry-After` and the 15-minute pause are honoured only by
+    the operator not rerunning. Consequences to confirm: several hosts behind one
+    address, or two runs in a row, are not summed, so the per-registry budget of
+    spec v23-11-06 is met per run and not across a lab. Sharing it would need the
+    server to order host-side runs or a server-side lookup (Q10), a separate
+    change. An operator with many images sees `unknown` for those past the cap.
+23. **Is `docker compose config` as root on host-supplied paths acceptable? Blocks
+    cu02.** `maxPreviewConfigFiles` and its 1 MiB limit cover only the files the
+    label names. `.env`, `env_file`, `extends` and `include` targets are read by
+    Compose as root, under `timeout 30` and the output cap alone, and a remote
+    `include` can reach the network and write a cache, despite "writes nothing".
+    The fake host of `TestPreviewWritesNothing` cannot show that, so its claim
+    covers the script's own commands only. Finding these targets before Compose
+    runs would need a YAML parser on the host, which Q18 does not provide.
+    *Recommendation:* run every Compose call with the remote loaders switched off
+    through their environment variables, treat a failure as unit unsupported, and
+    prove it with an integration test on the supported Compose versions
+    (`TestRemoteIncludeRefused`, no network and no cache). Accept the time and
+    output bounds for local targets, since a host that hostile only harms its own
+    preview. To confirm: whether a Compose version without such a switch counts as
+    `tooling_missing`.
