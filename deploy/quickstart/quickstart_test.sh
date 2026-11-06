@@ -505,6 +505,17 @@ if [[ -f "$goreleaser" && -f "$dockerfile" ]]; then
   else
     bad "Dockerfile COPY list matches binaries.txt exactly (copy: ${copy_files[*]:-<none>}; list: ${expected[*]})"
   fi
+  # 9d: the dockers ids (binaries the image build expects) match the list;
+  # a binary added to the list, nfpm ids and COPY but not the dockers ids
+  # breaks the image build at release, so it must be checked here too.
+  dockers_block=$(awk '/^dockers:/{f=1;next} f&&/^[a-z]/{f=0} f' "$goreleaser")
+  dockers_ids_line=$(grep -E '^[[:space:]]*ids:' <<< "$dockers_block" | head -1)
+  dockers_ids=$(sed -E 's/^[[:space:]]*ids:[[:space:]]*\[//; s/\][[:space:]]*$//' <<< "$dockers_ids_line" | tr ',' '\n' | tr -d ' \t' | grep -v '^$' | sort)
+  if [[ -n "$dockers_ids" && "$dockers_ids" == "$list_sorted" ]]; then
+    ok ".goreleaser.yaml dockers ids match binaries.txt exactly"
+  else
+    bad ".goreleaser.yaml dockers ids match binaries.txt exactly (dockers: ${dockers_ids:-<none>}; list: ${expected[*]})"
+  fi
 else
   bad ".goreleaser.yaml and the Dockerfile exist"
 fi
