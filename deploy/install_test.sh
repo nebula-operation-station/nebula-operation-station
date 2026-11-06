@@ -200,38 +200,109 @@ fi
 # nebula-iconfetch-firewall.service's ExecStart needs
 # /etc/nebula/nebula-iconfetch.nft, which nothing creates. Enabling one of
 # them under set -e could abort install.sh before nebula-server, the
-# collector or the executor are enabled. So the list must be explicit, must
-# contain no iconfetch unit, and must match exactly the units the install
-# provisions (the non-iconfetch units in deploy/systemd/).
-if grep -q 'systemd/\*\.service' "$install_sh"; then
+# collector or the executor are enabled.
+#
+# The checks are order-sensitive and cover both the tarball list and the
+# --from-package list, and that the install/enable loops actually use them,
+# so a *.path/*.timer glob, a discovery-first ordering, or an iconfetch
+# unit in either list all fail.
+if grep -Eq 'systemd/\*\.(service|path|timer)' "$install_sh"; then
   echo "FAIL install.sh still globs the systemd directory"
   fail=$((fail + 1))
 else
   echo "ok   install.sh does not glob the systemd directory"
   pass=$((pass + 1))
 fi
-# Extract the explicit tarball unit list (one unit per line between the
-# 'tarball_units=(' line and the closing ')').
+# Extract an explicit unit list (one unit per line between the '<name>=('
+# line and the closing ')').
 tarball_list=$(awk '/^tarball_units=\(/{f=1;next} f&&/^\)/{exit} f{gsub(/^[[:space:]]+/,"");gsub(/[[:space:]]+$/,"");if(length($0))print}' "$install_sh")
-if printf '%s\n' "$tarball_list" | grep -q iconfetch; then
-  echo "FAIL the explicit unit list contains an iconfetch unit"
+package_list=$(awk '/^package_units=\(/{f=1;next} f&&/^\)/{exit} f{gsub(/^[[:space:]]+/,"");gsub(/[[:space:]]+$/,"");if(length($0))print}' "$install_sh")
+# The tarball list must be exactly the provisioned units, in this order:
+# the server, executor and collector come before the discovery units so a
+# failing discovery unit cannot abort the install before they are enabled.
+expected_tarball=$'nebula-server.service\nnebula-executor.service\nnebula-pve-collector.service\nnebula-discovery.path\nnebula-discovery.service\nnebula-discovery.timer'
+if [[ "$tarball_list" == "$expected_tarball" ]]; then
+  echo "ok   tarball unit list is exact and ordered (server/executor/collector before discovery)"
+  pass=$((pass + 1))
+else
+  echo "FAIL the tarball unit list is not the expected ordered list"
+  echo "     got:";      printf '%s\n' "$tarball_list" | sed 's/^/       /'
+  echo "     expected:"; printf '%s\n' "$expected_tarball" | sed 's/^/       /'
+  fail=$((fail + 1))
+fi
+# The --from-package list must be exactly the installable units (no
+# nebula-discovery.service, which has no [Install] section), with the
+# collector before the discovery units.
+expected_package=$'nebula-server.service\nnebula-executor.service\nnebula-pve-collector.service\nnebula-discovery.path\nnebula-discovery.timer'
+if [[ "$package_list" == "$expected_package" ]]; then
+  echo "ok   package unit list is exact and ordered (collector before discovery, no discovery.service)"
+  pass=$((pass + 1))
+else
+  echo "FAIL the --from-package unit list is not the expected ordered list"
+  echo "     got:";      printf '%s\n' "$package_list" | sed 's/^/       /'
+  echo "     expected:"; printf '%s\n' "$expected_package" | sed 's/^/       /'
+  fail=$((fail + 1))
+fi
+# Neither list may contain an iconfetch unit.
+if printf '%s\n%s\n' "$tarball_list" "$package_list" | grep -q iconfetch; then
+  echo "FAIL a unit list contains an iconfetch unit"
   fail=$((fail + 1))
 else
-  echo "ok   the explicit unit list has no iconfetch unit"
+  echo "ok   neither unit list contains an iconfetch unit"
   pass=$((pass + 1))
 fi
-# The list must be exactly the set of non-iconfetch units shipped in
-# deploy/systemd/ (order-insensitive). This fails if a provisioned unit is
-# missing from the list or an unprovisioned (iconfetch) unit is added.
-dir_units=$(find "${script_dir}/systemd" -maxdepth 1 -type f \( -name '*.service' -o -name '*.path' -o -name '*.timer' \) ! -name '*iconfetch*' -printf '%f\n' | sort)
-list_units=$(printf '%s\n' "$tarball_list" | sort)
-if [[ -n "$tarball_list" && "$dir_units" == "$list_units" ]]; then
-  echo "ok   the explicit unit list matches the provisioned units (no iconfetch)"
+# The install loops must actually use the explicit lists, not a hardcoded
+# word list or a glob.
+if grep -qF 'for name in "${tarball_units[@]}"; do' "$install_sh"; then
+  echo "ok   the tarball install loop uses tarball_units"
   pass=$((pass + 1))
 else
-  echo "FAIL the explicit unit list does not match the provisioned units"
-  echo "     list:";      printf '%s\n' "$list_units" | sed 's/^/       /'
-  echo "     directory (non-iconfetch):"; printf '%s\n' "$dir_units" | sed 's/^/       /'
+  echo "FAIL the tarball install loop does not iterate over tarball_units"
+  fail=$((fail + 1))
+fi
+if grep -qF 'for name in "${package_units[@]}"; do' "$install_sh"; then
+  echo "ok   the package install loop uses package_units"
+  pass=$((pass + 1))
+else
+  echo "FAIL the --from-package install loop does not iterate over package_units"
+  fail=$((fail + 1))
+fi
+# The enable loop must enable the executor (not skip it), so that a failing
+# discovery unit later in the list cannot abort the install before the
+# executor is enabled. The old code skipped the executor in the loop and
+# enabled it only after the loop.
+enable_loop=$(awk '/for name in/ && /enable_units/{f=1} f{print} f&&/^done$/{exit}' "$install_sh")
+if printf '%s\n' "$enable_loop" | grep -qF '!= "nebula-executor.service"'; then
+  echo "FAIL the enable loop still skips nebula-executor.service"
+  fail=$((fail + 1))
+else
+  echo "ok   the enable loop does not skip nebula-executor.service"
+  pass=$((pass + 1))
+fi
+# The tarball branch must enable every provisioned unit whether or not it was
+# just installed: a re-run after an aborted install (which copies all the
+# units first) must still enable them, not only the ones whose file is
+# absent. The append to enable_units must sit at the loop-body level (same
+# indent as the 'if [[ -e' line), not inside the install if/else.
+tu_if_indent=$(awk '/for name in "\$\{tarball_units\[@\]\}"; do/{f=1} f&&/if \[\[ -e/{match($0,/^ */);print RLENGTH;exit} f&&/^  done$/{exit}' "$install_sh")
+tu_append_indent=$(awk '/for name in "\$\{tarball_units\[@\]\}"; do/{f=1} f&&/enable_units\+=/{match($0,/^ */);print RLENGTH;exit} f&&/^  done$/{exit}' "$install_sh")
+if [[ -n "$tu_append_indent" && -n "$tu_if_indent" && "$tu_append_indent" -le "$tu_if_indent" ]]; then
+  echo "ok   the tarball branch enables every provisioned unit (re-run safe)"
+  pass=$((pass + 1))
+else
+  echo "FAIL the tarball branch only enables units it just installed (re-run enables nothing)"
+  fail=$((fail + 1))
+fi
+# A host upgraded from an earlier install still has the iconfetch units in
+# /etc/systemd/system (possibly enabled). install.sh must disable and remove
+# them, not just stop installing them.
+if grep -qF 'for name in nebula-iconfetch.service nebula-iconfetch.path nebula-iconfetch.timer nebula-iconfetch-firewall.service' "$install_sh" \
+   && grep -q 'systemctl disable --now' "$install_sh" \
+   && grep -qE 'rm -f "\$\{systemd_dir\}/\$\{name\}"' "$install_sh"; then
+  echo "ok   leftover iconfetch units are disabled and removed on upgrade"
+  pass=$((pass + 1))
+else
+  echo "FAIL leftover iconfetch units are not disabled and removed on upgrade"
   fail=$((fail + 1))
 fi
 
@@ -266,7 +337,7 @@ if [[ ${systemd_root} -eq 1 ]] && [[ -f "$(dirname -- "$script_dir")/nebula-exec
     systemctl is-active --quiet nebula-executor.service && break
     sleep 1
   done
-  if [[ $rc -eq 0 && "$out" == *"enabled and restarted nebula-executor (was not active)"* ]] \
+  if [[ $rc -eq 0 && "$out" == *"started nebula-executor (was not active)"* ]] \
      && systemctl is-active --quiet nebula-executor.service; then
     echo "ok   inactive unit enabled and restarted"
     pass=$((pass + 1))
