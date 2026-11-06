@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // GuestNetClockSkew bounds how far in the future a record's observation
@@ -44,6 +46,9 @@ type GuestNetImportReport struct {
 	// Failed is the number of records the sink refused; they stay for the
 	// next pass.
 	Failed int
+	// Skipped is the number of records processed by an earlier pass that
+	// could not be removed yet.
+	Skipped int
 }
 
 // GuestNetImporter is the server side of the guest NIC handoff: it only
@@ -57,6 +62,11 @@ type GuestNetImporter struct {
 	Now func() time.Time
 	// seen is the last imported observation time per remote.
 	seen map[string]int64
+	// remove unlinks a processed record; it is Spool.RemoveGuestNet
+	// outside tests.
+	remove func(context.Context, string) error
+	// stuck holds processed records whose removal failed.
+	stuck stuckFiles
 }
 
 // NewGuestNetImporter builds an importer on a server-side spool. spool and
@@ -71,22 +81,56 @@ func NewGuestNetImporter(spool *Spool, sink GuestNetSink, log *slog.Logger) (*Gu
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &GuestNetImporter{spool: spool, sink: sink, log: log, Now: time.Now, seen: make(map[string]int64)}, nil
+	return &GuestNetImporter{spool: spool, sink: sink, log: log, Now: time.Now, seen: make(map[string]int64), remove: spool.RemoveGuestNet, stuck: stuckFiles{}}, nil
+}
+
+// Run imports pending records every interval until ctx is cancelled. The
+// first pass runs immediately. It returns nil when ctx is done.
+func (im *GuestNetImporter) Run(ctx context.Context, interval time.Duration) error {
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		if rep, err := im.ImportOnce(ctx); err != nil {
+			if ctx.Err() == nil {
+				im.log.Warn("pvecollect: guest nic import pass failed", "reason", "spool_unavailable")
+			}
+		} else if rep.Files > rep.Skipped {
+			im.log.Info("pvecollect: guest nic import pass",
+				"files", rep.Files, "imported", rep.Imported,
+				"replayed", rep.Replayed, "rejected", rep.Rejected,
+				"failed", rep.Failed)
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-t.C:
+		}
+	}
 }
 
 // ImportOnce processes every pending record in name order (per remote,
-// oldest first). Per-file outcomes are counted and do not abort the pass;
-// it returns an error only when the directory cannot be listed, including
-// a symlinked entry (tampering).
+// oldest first). Records an earlier pass processed but could not remove are
+// only removed again. Per-file outcomes are counted and do not abort the
+// pass; it returns an error only when the directory cannot be listed,
+// including a symlinked entry (tampering), or ctx ends.
 func (im *GuestNetImporter) ImportOnce(ctx context.Context) (GuestNetImportReport, error) {
 	names, err := im.spool.ListGuestNet(ctx)
 	if err != nil {
 		return GuestNetImportReport{}, fmt.Errorf("pvecollect: list guest nic records: %w", err)
 	}
+	im.stuck.prune(names)
 	rep := GuestNetImportReport{Files: len(names)}
 	for _, name := range names {
 		if err := ctx.Err(); err != nil {
 			return rep, err
+		}
+		if _, stuck := im.stuck[name]; stuck {
+			rep.Skipped++
+			im.stuck.retry(ctx, name, im.remove)
+			continue
 		}
 		rec, err := im.spool.ReadGuestNet(ctx, name)
 		if err != nil {
@@ -129,11 +173,18 @@ func (im *GuestNetImporter) ImportOnce(ctx context.Context) (GuestNetImportRepor
 	return rep, nil
 }
 
-// drop removes a processed record. A removal failure is logged; the next
-// pass sees the file again and drops it as replayed or invalid. File names
-// are logged only after parsing, so they match the fixed name pattern.
+// drop removes a processed record. A removal failure is logged once; the
+// record moves to stuck, so later passes only retry the unlink. A record
+// that is already gone (the collector supersedes older ones) needs nothing.
+// File names are logged only after parsing, so they match the fixed name
+// pattern.
 func (im *GuestNetImporter) drop(ctx context.Context, name, reason string) {
-	if err := im.spool.RemoveGuestNet(ctx, name); err != nil {
+	err := im.remove(ctx, name)
+	if errors.Is(err, unix.ENOENT) {
+		return
+	}
+	if err != nil {
+		im.stuck[name] = struct{}{}
 		im.log.Warn("pvecollect: remove guest nic record", "file", name, "reason", "remove_failed")
 		return
 	}
