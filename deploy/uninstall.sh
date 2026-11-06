@@ -31,6 +31,32 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 systemd_dir=/etc/systemd/system
 bin_dir=/usr/bin
 
+# --- The binary list, checked before the first removal -----------------------
+# Checked up front: without a usable list the uninstall would stop the units
+# and only then fail, leaving the system half uninstalled. A comments-only
+# file is not a list either (the same check install.sh makes).
+# begin: check binary list
+binaries_file="${script_dir}/quickstart/binaries.txt"
+if [[ ! -s "$binaries_file" ]]; then
+  echo "uninstall.sh: ${binaries_file} not found; is this a release tarball or a package install?" >&2
+  exit 1
+fi
+# shellcheck source=deploy/quickstart/binaries_lib.sh
+. "${script_dir}/quickstart/binaries_lib.sh"
+if ! binaries_out=$(read_binaries "$binaries_file"); then
+  echo "uninstall.sh: ${binaries_file} contains an invalid line (see above)" >&2
+  exit 1
+fi
+binaries=()
+if [[ -n "$binaries_out" ]]; then
+  mapfile -t binaries <<< "$binaries_out"
+fi
+if [[ ${#binaries[@]} -eq 0 ]]; then
+  echo "uninstall.sh: ${binaries_file} lists no binaries" >&2
+  exit 1
+fi
+# end: check binary list
+
 # --- Stop and remove the units ----------------------------------------------
 shopt -s nullglob
 removed_units=0
@@ -72,23 +98,9 @@ fi
 
 # --- Remove the binaries ------------------------------------------------------
 # The list comes from the same file install.sh reads (WA-03), so a binary
-# install.sh ships is never left behind.
+# install.sh ships is never left behind. The list itself was checked above,
+# before the first removal.
 # begin: remove binaries
-binaries_file="${script_dir}/quickstart/binaries.txt"
-if [[ ! -s "$binaries_file" ]]; then
-  echo "uninstall.sh: ${binaries_file} not found; is this a release tarball or a package install?" >&2
-  exit 1
-fi
-# shellcheck source=deploy/quickstart/binaries_lib.sh
-. "${script_dir}/quickstart/binaries_lib.sh"
-if ! binaries_out=$(read_binaries "$binaries_file"); then
-  echo "uninstall.sh: ${binaries_file} contains an invalid line (see above)" >&2
-  exit 1
-fi
-binaries=()
-if [[ -n "$binaries_out" ]]; then
-  mapfile -t binaries <<< "$binaries_out"
-fi
 for bin in "${binaries[@]}"; do
   if [[ -e "${bin_dir}/${bin}" ]]; then
     rm -f -- "${bin_dir}/${bin}"

@@ -143,6 +143,7 @@ for b in "${expected[@]}"; do
 done
 script_dir="$sandbox/deploy"
 bin_dir="$sandbox/usrbin"
+mapfile -t binaries < <(read_binaries "$sandbox/deploy/quickstart/binaries.txt")
 mapfile -t remove_block < <(sed -n '/^# begin: remove binaries/,/^# end: remove binaries/p' "$uninstall_sh" | grep -v '^# \(begin\|end\): remove binaries$')
 if [[ ${#remove_block[@]} -gt 0 ]] && ( eval "$(printf '%s\n' "${remove_block[@]}")" ); then
   left=()
@@ -156,6 +157,46 @@ if [[ ${#remove_block[@]} -gt 0 ]] && ( eval "$(printf '%s\n' "${remove_block[@]
   fi
 else
   bad "uninstall.sh remove block removes all five binaries (block missing or failed)"
+fi
+
+# --- 6b. Functional: the list check of uninstall.sh runs before removal -----
+# The check must pass on the valid list, fail on a missing, comments-only or
+# invalid list, and it must be placed before the first removal in the script:
+# a missing list must not leave the system half uninstalled (units stopped,
+# binaries still to go).
+mapfile -t ucheck_block < <(sed -n '/^# begin: check binary list/,/^# end: check binary list/p' "$uninstall_sh" | grep -v '^# \(begin\|end\): check binary list$')
+script_dir="$sandbox/deploy"
+if [[ ${#ucheck_block[@]} -gt 0 ]] && ( eval "$(printf '%s\n' "${ucheck_block[@]}")" ); then
+  ok "uninstall.sh list check passes on the valid list"
+else
+  bad "uninstall.sh list check passes on the valid list (block missing or failed)"
+fi
+mv "$sandbox/deploy/quickstart/binaries.txt" "$sandbox/blist.bak"
+if ( eval "$(printf '%s\n' "${ucheck_block[@]}")" ); then
+  bad "uninstall.sh list check fails when the list is missing"
+else
+  ok "uninstall.sh list check fails when the list is missing"
+fi
+mv "$sandbox/blist.bak" "$sandbox/deploy/quickstart/binaries.txt"
+printf '# only comments\n\n' > "$sandbox/deploy/quickstart/binaries.txt"
+if ( eval "$(printf '%s\n' "${ucheck_block[@]}")" ); then
+  bad "uninstall.sh list check fails on a comments-only list"
+else
+  ok "uninstall.sh list check fails on a comments-only list"
+fi
+printf 'bad/name\n' > "$sandbox/deploy/quickstart/binaries.txt"
+if ( eval "$(printf '%s\n' "${ucheck_block[@]}")" ); then
+  bad "uninstall.sh list check fails on an invalid line"
+else
+  ok "uninstall.sh list check fails on an invalid line"
+fi
+cp "$list_file" "$sandbox/deploy/quickstart/binaries.txt"
+check_ln=$(grep -n '^# begin: check binary list' "$uninstall_sh" | head -1 | cut -d: -f1)
+first_rm_ln=$(grep -nE '^[[:space:]]*(systemctl (stop|disable)|rm -f --|rmdir --)' "$uninstall_sh" | head -1 | cut -d: -f1)
+if [[ -n "${check_ln:-}" && -n "${first_rm_ln:-}" && $check_ln -lt $first_rm_ln ]]; then
+  ok "uninstall.sh checks the list before the first removal"
+else
+  bad "uninstall.sh checks the list before the first removal (check at ${check_ln:-?}, first removal at ${first_rm_ln:-?})"
 fi
 
 # --- 7. Functional: the layout check of install.sh (both paths) -------------
