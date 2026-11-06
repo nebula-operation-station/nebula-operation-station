@@ -8,12 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
 
-// P1-35: the org chart gets its interaction layer (pan, Ctrl+wheel zoom,
-// fit, automatic list mode, details sheet) from the existing
+// P1-35: the org chart gets its interaction layer (pan, zoom, fit,
+// automatic list mode, details sheet) from the existing
 // web/static/inventory.js — one small script under the strict CSP. These
 // tests pin the page contract: only embedded scripts, JS-only controls
 // hidden without JS, native no-JS links and collapse intact, no
@@ -89,6 +90,14 @@ func TestChartNoJSPageStillWorks(t *testing.T) {
 	if !strings.Contains(body, `id="chart-sheet" hidden`) {
 		t.Errorf("details sheet must be hidden without JS")
 	}
+	for _, id := range []string{"chart-zoom-out", "chart-zoom-in", "chart-zoom-100"} {
+		if !strings.Contains(body, `id="`+id+`" class="button button--secondary" hidden`) {
+			t.Errorf("%s must be hidden without JS", id)
+		}
+	}
+	if !strings.Contains(body, `id="chart-hint" class="hint chart__hint" hidden`) {
+		t.Errorf("zoom hint must be hidden without JS")
+	}
 	btns := regexp.MustCompile(`class="chart__dpanel-btn"[^>]*>`).FindAllString(body, -1)
 	if len(btns) != 4 {
 		t.Fatalf("want 4 details buttons (one per managed host), got %d", len(btns))
@@ -97,6 +106,42 @@ func TestChartNoJSPageStillWorks(t *testing.T) {
 		if !strings.Contains(b, "hidden") {
 			t.Errorf("details button must be hidden without JS: %s", b)
 		}
+	}
+}
+
+// The toolbar offers Zoom out, Zoom in, Fit and 100% with accessible names,
+// and the one-line hint sits under the toolbar, above the canvas.
+func TestChartToolbarHasZoomControlsAndHint(t *testing.T) {
+	body := getBody(t, chartHandler(t).Handler(), "/inventory/chart")
+	for _, want := range []string{
+		`aria-label="Zoom out"`, `>−</button>`,
+		`aria-label="Zoom in"`, `>+</button>`,
+		`>Fit</button>`,
+		`aria-label="Zoom to 100%"`, `>100%</button>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("chart toolbar lacks %q", want)
+		}
+	}
+	toolbar := strings.Index(body, `<div class="toolbar">`)
+	hint := strings.Index(body, "Drag or scroll to move · pinch or Ctrl+scroll to zoom")
+	canvas := strings.Index(body, `<section class="panel chart"`)
+	if toolbar < 0 || hint < toolbar || canvas < hint {
+		t.Errorf("hint must sit between toolbar and canvas: toolbar %d, hint %d, canvas %d", toolbar, hint, canvas)
+	}
+}
+
+// Strict CSP: the new controls carry no inline style or inline handler;
+// they are wired from inventory.js only.
+func TestChartToolbarHasNoInlineStyleOrHandler(t *testing.T) {
+	body := getBody(t, chartHandler(t).Handler(), "/inventory/chart")
+	start := strings.Index(body, `<div class="toolbar">`)
+	end := strings.Index(body, `<section class="panel chart"`)
+	if start < 0 || end < start {
+		t.Fatalf("toolbar not found: %d, %d", start, end)
+	}
+	if bad := regexp.MustCompile(`(?i)\s(style|on[a-z]+)=`).FindString(body[start:end]); bad != "" {
+		t.Errorf("inline attribute in the chart toolbar: %q", bad)
 	}
 }
 
@@ -131,7 +176,7 @@ func TestChartCSSHasPanModeAndSheet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{".chart--pan", ".dpanel-sheet", ".chart__dpanel-btn"} {
+	for _, want := range []string{".chart--pan", ".dpanel-sheet", ".chart__dpanel-btn", ".chart__hint"} {
 		if !strings.Contains(string(css), want) {
 			t.Errorf("app.css missing %s", want)
 		}
@@ -355,6 +400,127 @@ func TestChartSheetInertAndBackdropClose(t *testing.T) {
 		if !strings.Contains(setInert, want) {
 			t.Errorf("setInert lacks %q:\n%s", want, setInert)
 		}
+	}
+}
+
+// Every zoom control is wired by its template id, and in list mode the
+// controls and the hint are hidden again.
+func TestChartZoomControlsWired(t *testing.T) {
+	block := chartJS(t)
+	body := getBody(t, chartHandler(t).Handler(), "/inventory/chart")
+	for _, id := range []string{"chart-zoom-out", "chart-zoom-in", "chart-fit", "chart-zoom-100", "chart-hint"} {
+		if !strings.Contains(body, `id="`+id+`"`) {
+			t.Errorf("template lacks #%s", id)
+		}
+		if !strings.Contains(block, "'"+id+"'") {
+			t.Errorf("chart block does not reference #%s", id)
+		}
+	}
+	if !strings.Contains(jsFunc(t, block, "setMode"), ".hidden = !pan") {
+		t.Error("setMode does not hide the pan controls in list mode")
+	}
+	for _, want := range []string{"zoomBy(1 / zoomStep)", "zoomBy(zoomStep)", "actualSize"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("chart block lacks %q", want)
+		}
+	}
+}
+
+// Fit computes the scale from the chart's real size and the visible
+// canvas, instead of resetting to 100%; 100% is the separate reset.
+func TestChartFitFitsTheWholeChart(t *testing.T) {
+	block := chartJS(t)
+	fit := jsFunc(t, block, "fit")
+	for _, want := range []string{"chartHosts.scrollWidth", "chartHosts.scrollHeight", "chartSection.clientWidth", "chartSection.clientHeight"} {
+		if !strings.Contains(fit, want) {
+			t.Errorf("fit() lacks %q:\n%s", want, fit)
+		}
+	}
+	actual := jsFunc(t, block, "actualSize")
+	for _, want := range []string{"unscroll()", "scale = 1"} {
+		if !strings.Contains(actual, want) {
+			t.Errorf("actualSize lacks %q:\n%s", want, actual)
+		}
+	}
+}
+
+// The minimum scale lets Fit show 100 hosts: they stack vertically, a host
+// box is at least 110px high (app.css) and the canvas at least 420px.
+func TestChartMinScaleFitsHundredHosts(t *testing.T) {
+	m := regexp.MustCompile(`const minScale = ([0-9.]+);`).FindStringSubmatch(chartJS(t))
+	if m == nil {
+		t.Fatal("chart block has no minScale constant")
+	}
+	minScale, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if minScale <= 0 || minScale*100*110 > 420 {
+		t.Errorf("minScale %v cannot fit 100 hosts into the canvas", minScale)
+	}
+}
+
+// Scroll pans, Ctrl or Meta scroll zooms, Safari's gesture events zoom, and
+// all of them leave the browser defaults alone in list mode.
+func TestChartWheelAndGestureHandlers(t *testing.T) {
+	block := chartJS(t)
+	for _, name := range []string{"wheel", "gesturestart", "gesturechange", "gestureend"} {
+		re := regexp.MustCompile(`(?s)chartSection\.addEventListener\('` + name + `', \(e\) => \{\n    if \(!panning\(\)\) return;\n    e\.preventDefault\(\);.*?\}, \{ passive: false \}\);`)
+		if !re.MatchString(block) {
+			t.Errorf("%s handler must stop in list mode, call preventDefault and be non-passive", name)
+		}
+	}
+	for _, want := range []string{"e.ctrlKey || e.metaKey", "e.shiftKey", "e.deltaX", "e.deltaMode", "e.scale"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("chart block lacks %q", want)
+		}
+	}
+}
+
+// The staged update form and its confirmation are not part of the chart:
+// inside the clipped canvas they could not be reached or scrolled to.
+func TestChartStagedSectionSitsOutsideTheCanvas(t *testing.T) {
+	h, _ := stagedChartHandler(t, false)
+	body := getBody(t, h.Handler(), "/inventory/chart")
+	start := strings.Index(body, `<section class="panel chart"`)
+	end := strings.Index(body, `<section class="panel staged-update"`)
+	if start < 0 || end < start {
+		t.Fatalf("chart or staged section missing: %d, %d", start, end)
+	}
+	between := body[start:end]
+	if opened, closed := strings.Count(between, "<section"), strings.Count(between, "</section>"); opened != closed {
+		t.Errorf("staged section is nested in the canvas: %d sections opened, %d closed", opened, closed)
+	}
+}
+
+// Keys work on the focused canvas only, and browser shortcuts (Ctrl+0,
+// Cmd++) are never taken over.
+func TestChartKeyboardZoom(t *testing.T) {
+	block := chartJS(t)
+	for _, want := range []string{"case '+':", "case '=':", "case '-':", "case '0':", "e.target !== chartSection", "e.ctrlKey || e.metaKey || e.altKey"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("keyboard handler lacks %q", want)
+		}
+	}
+}
+
+// A trackpad scroll at the canvas edge must not chain to the page or swipe
+// back in history; list mode gets that default back.
+func TestChartCSSContainsOverscrollInPanModeOnly(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "web", "static", "app.css"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pan, list bool
+	for line := range strings.Lines(string(raw)) {
+		if !strings.Contains(line, ".chart--pan {") {
+			continue
+		}
+		pan = pan || strings.Contains(line, "overscroll-behavior: contain")
+		list = list || strings.Contains(line, "overscroll-behavior: auto")
+	}
+	if !pan || !list {
+		t.Errorf("overscroll-behavior: contain in pan mode %v, auto in list mode %v", pan, list)
 	}
 }
 
