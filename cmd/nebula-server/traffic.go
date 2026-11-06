@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/flowagg"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/ipam"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/trafficingest"
@@ -119,9 +120,9 @@ type trafficLoop struct {
 }
 
 // newTrafficIngest wires the ingester over the server database. The
-// store keeps data for retention (traffic.retention_days), the same
-// value the read-side stores use: the hourly prune removes exactly the
-// data the pages stop offering, never the 21-day default.
+// store and in-memory aggregator keep data for retention
+// (traffic.retention_days), the same value the read-side stores use:
+// the hourly prune removes exactly the data the pages stop offering.
 func newTrafficIngest(db *sql.DB, hosts func(context.Context) ([]inventory.Host, error),
 	assets func(context.Context) ([]ipam.Asset, error), log *slog.Logger, now func() time.Time,
 	retention time.Duration) (*trafficLoop, error) {
@@ -134,6 +135,7 @@ func newTrafficIngest(db *sql.DB, hosts func(context.Context) ([]inventory.Host,
 		Source:  trafficingest.ExecutionSource{DB: db},
 		Records: recs,
 		Store:   store,
+		Limits:  flowagg.Limits{Retention: retention},
 		Now:     now,
 		Log:     log,
 	})
