@@ -61,9 +61,7 @@ func spoolTestFiles(t *testing.T, root string) []string {
 		t.Fatal(err)
 	}
 	result := filepath.Join(root, "results", testObservationName)
-	if err := os.WriteFile(result, raw, 0o640); err != nil {
-		t.Fatal(err)
-	}
+	publishSpoolFile(t, result, raw)
 	rec, err := pvecollect.MarshalGuestNet(pvecollect.GuestNetRecord{
 		Version:      pvecollect.GuestNetVersion,
 		Remote:       "remote-a",
@@ -76,10 +74,22 @@ func spoolTestFiles(t *testing.T, root string) []string {
 		t.Fatal(err)
 	}
 	guest := filepath.Join(root, "guestnet", fmt.Sprintf("remote-a.obs-%020d.json", now.Unix()))
-	if err := os.WriteFile(guest, rec, 0o640); err != nil {
+	publishSpoolFile(t, guest, rec)
+	return []string{result, guest}
+}
+
+// publishSpoolFile writes data under a temporary name and renames it into
+// place, as the collector does: the importers poll the directory and must
+// never see a final name on a half-written file.
+func publishSpoolFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	tmp := filepath.Join(filepath.Dir(path), ".tmp-"+filepath.Base(path))
+	if err := os.WriteFile(tmp, data, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	return []string{result, guest}
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // waitConsumed waits until the importers unlinked every path.
@@ -103,12 +113,23 @@ func waitConsumed(t *testing.T, paths []string, diag func() string) {
 	}
 }
 
-// assertImported checks both destinations of the spool.
+// assertImported checks both destinations of the spool. An observation
+// counts only with every dataset applied: each one commits on its own, so
+// the remote alone does not prove it arrived whole.
 func assertImported(t *testing.T, db *sql.DB) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := pveinventory.New(db).GetRemote(ctx, "remote-a"); err != nil {
+	store := pveinventory.New(db)
+	if _, err := store.GetRemote(ctx, "remote-a"); err != nil {
 		t.Errorf("observation did not reach the inventory: %v", err)
+	}
+	for _, dataset := range []string{
+		pveinventory.DatasetNodes, pveinventory.DatasetGuests, pveinventory.DatasetStorages,
+		pveinventory.DatasetCluster, pveinventory.DatasetTasks,
+	} {
+		if _, err := store.GetDatasetStatus(ctx, "remote-a", dataset); err != nil {
+			t.Errorf("dataset %s did not reach the inventory: %v", dataset, err)
+		}
 	}
 	traffic, err := trafficstore.NewWithRetention(db, testRetention)
 	if err != nil {
