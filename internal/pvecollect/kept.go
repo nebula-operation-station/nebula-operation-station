@@ -95,7 +95,9 @@ func (k keptRemotes) due(remote string, now time.Time) bool {
 
 // readFailed records a file of remote that could not be read.
 func (k keptRemotes) readFailed(remote string) {
-	k[remote] = k[remote]
+	if _, ok := k[remote]; !ok {
+		k[remote] = keptRemote{}
+	}
 }
 
 // storeFailed records a store failure on remote and schedules the next try.
