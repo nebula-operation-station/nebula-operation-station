@@ -133,7 +133,7 @@ func TestRebootNodeRejectsInvalidNode(t *testing.T) {
 		"empty":    "",
 		"path":     "../pve1",
 		"slash":    "pve1/x",
-		"upper":    "PVE1",
+		"upper":    "PVE/1",
 		"space":    "pve 1",
 		"too long": strings.Repeat("a", MaxNodeNameBytes+1),
 	} {

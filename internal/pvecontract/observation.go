@@ -415,16 +415,33 @@ var (
 	windowsMountRe = regexp.MustCompile(`^[A-Za-z]:\\`)
 )
 
-// ValidNodeName reports whether s is a valid PVE node name (DNS host name).
+// NodeLabelPattern is the one grammar of a PVE node name label, unanchored so
+// that other grammars can embed it (permit.PveNodePattern and through it the
+// stored UPID). PVE allows upper-case node names and its API paths
+// (/nodes/{node}) are case-sensitive, so a name is matched and kept exactly
+// as reported and never case-folded.
+const NodeLabelPattern = `[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?`
+
+// nodeLabelRe matches one label of a PVE node name.
+var nodeLabelRe = regexp.MustCompile(`^` + NodeLabelPattern + `$`)
+
+// ValidNodeLabel reports whether s is one label of a PVE node name. API calls
+// and mutation targets take a single label: a PVE node is addressed by its
+// host name without a domain.
+func ValidNodeLabel(s string) bool { return nodeLabelRe.MatchString(s) }
+
+// ValidNodeName reports whether s is a valid PVE node name: dot-separated
+// labels of letters, digits and inner hyphens. Names differing only in case
+// are different nodes.
 func ValidNodeName(s string) bool { return validNodeName(s) }
 
-// validNodeName reports whether s is a valid PVE node name (DNS host name).
+// validNodeName reports whether s is a valid PVE node name; see ValidNodeName.
 func validNodeName(s string) bool {
 	if s == "" || len(s) > MaxNodeNameBytes {
 		return false
 	}
 	for _, l := range strings.Split(s, ".") {
-		if !dnsLabelRe.MatchString(l) {
+		if !nodeLabelRe.MatchString(l) {
 			return false
 		}
 	}

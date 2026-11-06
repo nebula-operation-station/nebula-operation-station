@@ -143,7 +143,7 @@ func TestClosePveJobsRejectsBadActorOrReason(t *testing.T) {
 }
 
 func TestPveJobNodeGrammarIsThePermitRule(t *testing.T) {
-	for _, node := range []string{"pve1.lab.test", "PVE1", "pve-", "pve_1", strings.Repeat("a", 64)} {
+	for _, node := range []string{"pve1.lab.test", "ProxmoxBAI.lab", "pve-", "PVE-", "pve_1", "PVE_1", strings.Repeat("a", 64), strings.Repeat("A", 64)} {
 		j := testPveJob(1)
 		j.Node = node
 		if err := validatePveJob(j); !errors.Is(err, ErrInvalid) {
@@ -157,6 +157,21 @@ func TestPveJobNodeGrammarIsThePermitRule(t *testing.T) {
 	j.Node = strings.Repeat("a", 63)
 	if err := validatePveJob(j); err != nil {
 		t.Errorf("63-character node refused: %v", err)
+	}
+	j.Node = "ProxmoxBAI"
+	if err := validatePveJob(j); err != nil {
+		t.Errorf("mixed-case node refused: %v", err)
+	}
+}
+
+// The task of a mutation on "ProxmoxBAI" is bound to the exact node name.
+func TestPveUPIDKeepsNodeCase(t *testing.T) {
+	u, ok := ParsePveUPID(strings.Replace(testUPID, "UPID:pve1:", "UPID:ProxmoxBAI:", 1))
+	if !ok {
+		t.Fatal("UPID of a mixed-case node refused")
+	}
+	if u.Node != "ProxmoxBAI" {
+		t.Fatalf("node = %q", u.Node)
 	}
 }
 
@@ -191,6 +206,8 @@ func TestPveUPIDGrammarIsSubsetOfPveapi(t *testing.T) {
 		"UPID:" + strings.Repeat("n", 63) + ":FFFFFFFF:FFFFFFFFF:F4865700:" + strings.Repeat("z", 32) + ":" + strings.Repeat("i", 30) + ":" + strings.Repeat("u", 40) + "@pve!" + strings.Repeat("t", 40) + ":",
 		"UPID:a:00000001:00000001:00000001:aptupdate::nebula@pve!action:",
 		"UPID:pve-2:000A1B2C:0123ABCD:65F0A1B2:vzdump:local.zfs_1-a:nebula@pve!action:",
+		"UPID:ProxmoxBAI:00001234:00ABCDEF:65F0A1B2:qmclone:9000:nebula@pve!action:",
+		"UPID:" + strings.Repeat("N", 63) + ":00001234:00ABCDEF:65F0A1B2:qmclone:9000:nebula@pve!action:",
 	}
 	for _, upid := range accepted {
 		if _, ok := ParsePveUPID(upid); !ok {

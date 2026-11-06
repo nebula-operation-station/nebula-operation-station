@@ -4,8 +4,6 @@ package executor
 
 import (
 	"context"
-	"regexp"
-	"strings"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -182,24 +180,6 @@ func MethodRoles() map[string][]peercred.Role {
 	}
 }
 
-// pveNodeLabelRe matches one DNS label of a PVE node name (mirrors
-// pvecontract's check).
-var pveNodeLabelRe = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
-
-// validPVENodeName reports whether s is a valid PVE node name (DNS host
-// name), mirroring pvecontract's check.
-func validPVENodeName(s string) bool {
-	if s == "" || len(s) > pvecontract.MaxNodeNameBytes {
-		return false
-	}
-	for _, l := range strings.Split(s, ".") {
-		if !pveNodeLabelRe.MatchString(l) {
-			return false
-		}
-	}
-	return true
-}
-
 // ValidateReadPVERequest validates a ReadPVE request (ADR 0006, P1-05) and
 // returns a codes.InvalidArgument status error for malformed requests.
 // ReadPVE (pve_read.go) calls it before anything else; the rules are final:
@@ -226,7 +206,7 @@ func ValidateReadPVERequest(req *pb.ReadPVERequest) error {
 		case *pb.ReadPVERequest_Guest, *pb.ReadPVERequest_Metrics:
 			return status.Error(codes.InvalidArgument, "read pve: nodes method takes only a node parameter")
 		}
-		if p := req.GetNode(); p != nil && !validPVENodeName(p.Node) {
+		if p := req.GetNode(); p != nil && !pvecontract.ValidNodeName(p.Node) {
 			return status.Error(codes.InvalidArgument, "read pve: malformed node name")
 		}
 	case pb.PVEReadMethod_PVE_READ_METHOD_GUEST_CONFIG,
