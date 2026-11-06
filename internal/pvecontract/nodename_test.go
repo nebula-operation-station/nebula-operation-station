@@ -160,6 +160,23 @@ func TestLiveSamplesKeepMixedCaseNode(t *testing.T) {
 	}
 }
 
+// A mutation target and a stored UPID take one label of the node grammar.
+func TestValidNodeLabelIsOneLabelOfTheNodeGrammar(t *testing.T) {
+	cases := map[string]bool{
+		mixedCaseNode: true, "pve1": true, "PVE": true, "7": true, "Node-1": true, strings.Repeat("A", 63): true,
+		"": false, ".": false, "..": false, "ProxmoxBAI.lab": false, "../X": false, "A/B": false, "-A": false, "A-": false,
+		"Proxmox_BAI": false, "Proxmox BAI": false, "ProxmoxBAI\n": false, strings.Repeat("A", 64): false, "Pröxmox": false,
+	}
+	for name, want := range cases {
+		if got := ValidNodeLabel(name); got != want {
+			t.Errorf("ValidNodeLabel(%q) = %v, want %v", name, got, want)
+		}
+		if want && !ValidNodeName(name) {
+			t.Errorf("ValidNodeName(%q) = false for a valid label", name)
+		}
+	}
+}
+
 func TestLiveTargetsRefuseMalformedNodes(t *testing.T) {
 	for _, node := range []string{"", ".", "..", "../x", "a/b", "-a", strings.Repeat("A", 64)} {
 		if _, err := ValidateLiveWant(mkLiveWant(1000, 1030, LiveTarget{Remote: "remote-a", Kind: LiveKindNode, Node: node})); err == nil {
