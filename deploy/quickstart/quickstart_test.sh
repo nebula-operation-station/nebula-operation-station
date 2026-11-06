@@ -20,6 +20,7 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo=$(cd -- "${script_dir}/../.." && pwd)
 list_file="${script_dir}/binaries.txt"
 install_sh="${repo}/deploy/install.sh"
+uninstall_sh="${repo}/deploy/uninstall.sh"
 setup_sh="${script_dir}/setup-nebula.sh"
 
 pass=0
@@ -45,22 +46,19 @@ else
   bad "binaries.txt exists"
 fi
 
-# --- 2. Both scripts load the list from that one file -----------------------
-if grep -q 'binaries\.txt' "$setup_sh"; then
-  ok "setup-nebula.sh loads the list from binaries.txt"
-else
-  bad "setup-nebula.sh loads the list from binaries.txt"
-fi
-if grep -q 'binaries\.txt' "$install_sh"; then
-  ok "install.sh loads the list from binaries.txt"
-else
-  bad "install.sh loads the list from binaries.txt"
-fi
+# --- 2. All three scripts load the list from that one file -------------------
+for s in "$setup_sh" "$install_sh" "$uninstall_sh"; do
+  if grep -q 'binaries\.txt' "$s"; then
+    ok "$(basename -- "$s") loads the list from binaries.txt"
+  else
+    bad "$(basename -- "$s") loads the list from binaries.txt"
+  fi
+done
 
 # --- 3. No hardcoded second copy of the list remains ------------------------
 # A loop over a literal list of binary names is the drift this guards
 # against; the loops must iterate the loaded array instead.
-if grep -nE '^[[:space:]]*for (b|bin) in nebula( |$)' "$setup_sh" "$install_sh"; then
+if grep -nE '^[[:space:]]*for (b|bin) in nebula( |$)' "$setup_sh" "$install_sh" "$uninstall_sh"; then
   bad "no hardcoded binary list loop remains in the scripts"
 else
   ok "no hardcoded binary list loop remains in the scripts"
@@ -113,8 +111,32 @@ else
   bad "install.sh load block yields exactly the five binaries (block missing)"
 fi
 
-# --- 6. Syntax of the scripts ------------------------------------------------
-for s in "$setup_sh" "$install_sh"; do
+# --- 6. Functional: the remove block of uninstall.sh removes all five -------
+# The block must remove every binary from the shared list, not a
+# hardcoded copy (the old copy lacked nebula-pve-collector).
+mkdir -p "$sandbox/usrbin"
+for b in "${expected[@]}"; do
+  printf '#!/bin/sh\n' > "$sandbox/usrbin/$b"
+done
+script_dir="$sandbox/deploy"
+bin_dir="$sandbox/usrbin"
+mapfile -t remove_block < <(sed -n '/^# begin: remove binaries/,/^# end: remove binaries/p' "$uninstall_sh" | grep -v '^# \(begin\|end\): remove binaries$')
+if [[ ${#remove_block[@]} -gt 0 ]] && ( eval "$(printf '%s\n' "${remove_block[@]}")" ); then
+  left=()
+  for b in "${expected[@]}"; do
+    [[ -e "$sandbox/usrbin/$b" ]] && left+=("$b")
+  done
+  if [[ ${#left[@]} -eq 0 ]]; then
+    ok "uninstall.sh remove block removes all five binaries"
+  else
+    bad "uninstall.sh remove block removes all five binaries (left: ${left[*]})"
+  fi
+else
+  bad "uninstall.sh remove block removes all five binaries (block missing or failed)"
+fi
+
+# --- 7. Syntax of the scripts ------------------------------------------------
+for s in "$setup_sh" "$install_sh" "$uninstall_sh" "$repo/deploy/quickstart/binaries_lib.sh"; do
   if bash -n "$s" 2>/dev/null; then
     ok "bash -n $(basename -- "$s")"
   else
