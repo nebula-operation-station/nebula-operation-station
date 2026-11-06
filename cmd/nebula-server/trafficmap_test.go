@@ -21,6 +21,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/ipam"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/trafficstore"
 	tmapi "github.com/nebula-operation-station/nebula-operation-station/internal/web/api/trafficmap"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
 	"github.com/nebula-operation-station/nebula-operation-station/web/static"
@@ -71,6 +72,12 @@ func tmInventory() (func(context.Context) ([]inventory.Host, error), fakeTraffic
 // newTMFixture is the server's HTTP chain (webServer) with the traffic map
 // mounted as in run, the token API enabled (a stub) and a real session.
 func newTMFixture(t *testing.T) *swFixture {
+	return newTMFixtureWithRetention(t, trafficstore.DefaultRetention)
+}
+
+// newTMFixtureWithRetention is newTMFixture with a configured traffic
+// retention.
+func newTMFixtureWithRetention(t *testing.T, retention time.Duration) *swFixture {
 	t.Helper()
 	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
 	if err != nil {
@@ -81,7 +88,7 @@ func newTMFixture(t *testing.T) *swFixture {
 	pages := http.NewServeMux()
 	pages.Handle("/", http.NotFoundHandler())
 	hosts, ip := tmInventory()
-	if err := mountTrafficMap(pages, swOrigin, db, hosts, ip, log); err != nil {
+	if err := mountTrafficMap(pages, swOrigin, db, hosts, ip, log, retention); err != nil {
 		t.Fatal(err)
 	}
 	sessions := auth.NewStore(db, nil)
@@ -307,6 +314,21 @@ func TestTrafficMapAssetCannotDisplaceHost(t *testing.T) {
 	}
 	if m.Unmapped != 0 {
 		t.Errorf("unmapped flows %d, want 0", m.Unmapped)
+	}
+}
+
+// TestTrafficMapRetentionShortened checks that the configured retention
+// is used where the store is opened: with a 7-day retention the model
+// offers 7d at most and refuses a 21d window.
+func TestTrafficMapRetentionShortened(t *testing.T) {
+	f := newTMFixtureWithRetention(t, 7*24*time.Hour)
+	rec := f.do(t, http.MethodGet, "/api/v1/trafficmap?window=7d", f.token, "", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("window=7d: status %d: %s", rec.Code, rec.Body)
+	}
+	rec = f.do(t, http.MethodGet, "/api/v1/trafficmap?window=21d", f.token, "", "")
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("window=21d over a 7d retention: status %d, want 400: %s", rec.Code, rec.Body)
 	}
 }
 

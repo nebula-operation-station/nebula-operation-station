@@ -41,6 +41,12 @@ type connFixture struct {
 }
 
 func newConnFixture(t *testing.T) *connFixture {
+	return newConnFixtureWithRetention(t, trafficstore.DefaultRetention)
+}
+
+// newConnFixtureWithRetention is newConnFixture with the configured
+// traffic retention passed to the connections pages.
+func newConnFixtureWithRetention(t *testing.T, retention time.Duration) *connFixture {
 	t.Helper()
 	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
 	if err != nil {
@@ -81,7 +87,7 @@ func newConnFixture(t *testing.T) *connFixture {
 	}
 
 	log := slog.New(slog.DiscardHandler)
-	cp, err := newConnectionsPages(db, inv, ipamStore, log)
+	cp, err := newConnectionsPages(db, inv, ipamStore, log, retention)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,6 +152,24 @@ func TestConnectionsPagesServedToSignedInAdmin(t *testing.T) {
 		if rec := f.sw.do(t, http.MethodGet, p, f.sw.token, "", ""); rec.Code != want {
 			t.Errorf("GET %s: status %d, want %d", p, rec.Code, want)
 		}
+	}
+}
+
+// TestConnectionsPagesRetentionShortened checks that the connections
+// pages use the configured retention, not the 21-day default: with a
+// 7-day retention the page offers 7d at most and refuses a 21d window.
+func TestConnectionsPagesRetentionShortened(t *testing.T) {
+	f := newConnFixtureWithRetention(t, 7*24*time.Hour)
+	rec := f.sw.do(t, http.MethodGet, "/hosts/web1/connections?window=7d", f.sw.token, "", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("window=7d: status %d, want 200: %s", rec.Code, rec.Body)
+	}
+	if strings.Contains(rec.Body.String(), "window=21d") {
+		t.Error("21d window offered over a 7d retention")
+	}
+	rec = f.sw.do(t, http.MethodGet, "/hosts/web1/connections?window=21d", f.sw.token, "", "")
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("window=21d over a 7d retention: status %d, want 400: %s", rec.Code, rec.Body)
 	}
 }
 

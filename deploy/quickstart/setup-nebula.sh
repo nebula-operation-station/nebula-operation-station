@@ -181,10 +181,18 @@ say "Building Nebula"
 chown -R "$first_admin": "$repo"
 as_admin env PATH="$(dirname "$GO"):/usr/bin:/bin" GOTOOLCHAIN=local make -C "$repo" build
 # deploy/install.sh takes the binaries from the directory above deploy/
-# (ignored by git there).
-for b in nebula nebula-server nebula-executor nebula-discovery; do
+# (ignored by git there). The list comes from binaries.txt, the same file
+# install.sh reads, so the two cannot drift (WA-03).
+# begin: copy binaries
+binaries_file="$repo/deploy/quickstart/binaries.txt"
+[[ -s "$binaries_file" ]] || die "missing $binaries_file (the binary list)"
+# shellcheck source=deploy/quickstart/binaries_lib.sh
+. "$repo/deploy/quickstart/binaries_lib.sh"
+mapfile -t binaries < <(read_binaries "$binaries_file")
+for b in "${binaries[@]}"; do
   install -m 0755 "$repo/bin/$b" "$repo/$b"
 done
+# end: copy binaries
 
 # --- 5. Install (users, directories, units, server.json; backup on upgrade) ---
 say "Installing Nebula (deploy/install.sh)"

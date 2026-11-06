@@ -98,6 +98,12 @@ type trafficEnv struct {
 }
 
 func newTrafficEnv(t *testing.T) *trafficEnv {
+	return newTrafficEnvWithRetention(t, trafficstore.DefaultRetention)
+}
+
+// newTrafficEnvWithRetention is newTrafficEnv with a configured traffic
+// retention passed to the wired ingest loop.
+func newTrafficEnvWithRetention(t *testing.T, retention time.Duration) *trafficEnv {
 	t.Helper()
 	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
 	if err != nil {
@@ -108,7 +114,7 @@ func newTrafficEnv(t *testing.T) *trafficEnv {
 	e.ipam = ipam.New(db, ipam.FromInventory(e.inv.List))
 	clock := func() time.Time { return e.now }
 	e.store = trafficstore.NewWithNow(db, clock)
-	e.loop, err = newTrafficIngest(db, e.inv.List, e.ipam.Assets, slog.New(slog.DiscardHandler), clock)
+	e.loop, err = newTrafficIngest(db, e.inv.List, e.ipam.Assets, slog.New(slog.DiscardHandler), clock, retention)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,6 +342,73 @@ func TestTrafficLoopSyncsOnlyOnChange(t *testing.T) {
 	}
 	if n := e.count("flow_buckets"); n < 1 {
 		t.Fatalf("prune removed the fresh buckets: %d left", n)
+	}
+}
+
+// TestTrafficIngestPrunesToConfiguredRetention checks that the ingest
+// store prunes to the configured retention, not the 21-day default:
+// with a 7-day retention the first (hourly) Sync removes a 10-day-old
+// bucket that the default retention would keep.
+func TestTrafficIngestPrunesToConfiguredRetention(t *testing.T) {
+	e := newTrafficEnvWithRetention(t, 7*24*time.Hour)
+	ctx := context.Background()
+	// A bucket 10 days before the first check: inside the 21-day
+	// default, outside the 7-day retention.
+	old := tfT0.Add(-10*24*time.Hour).Truncate(time.Hour).Unix() / 3600
+	e.expiredBucket(old)
+	if !e.loop.check(ctx) {
+		t.Fatal("first check did not sync")
+	}
+	if !e.sync.last.Pruned {
+		t.Fatalf("first sync did not prune: %+v", e.sync.last)
+	}
+	var n int
+	if err := e.db.QueryRow(`SELECT COUNT(*) FROM flow_buckets WHERE hour = ?`, old).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("10d-old bucket survived the prune with a 7d retention: %d rows", n)
+	}
+}
+
+func TestTrafficIngestAggregatorUsesConfiguredRetention(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		retention time.Duration
+		age       time.Duration
+		wantFlows bool
+	}{
+		{"recent with seven days", 7 * 24 * time.Hour, 2 * 24 * time.Hour, true},
+		{"expired with seven days", 7 * 24 * time.Hour, 10 * 24 * time.Hour, false},
+		{"expired with one day", 24 * time.Hour, 2 * 24 * time.Hour, false},
+		{"retained with default", trafficstore.DefaultRetention, 10 * 24 * time.Hour, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTrafficEnvWithRetention(t, tc.retention)
+			e.host("host-a", tfAddrA.String())
+			at := e.now.Add(-tc.age)
+			e.run("host-a", at, netFactsResult(t, "host-a", "ss-t0.txt"))
+			if !e.loop.check(context.Background()) {
+				t.Fatal("first result not synced")
+			}
+			e.run("host-a", at.Add(5*time.Minute), netFactsResult(t, "host-a", "ss-t1.txt"))
+			if !e.loop.check(context.Background()) || len(e.sync.last.Hosts) != 1 {
+				t.Fatalf("second result not synced: %+v", e.sync.last)
+			}
+			hr := e.sync.last.Hosts[0]
+			if hr.Err != nil {
+				t.Fatal(hr.Err)
+			}
+			if tc.wantFlows {
+				if hr.Outcome != trafficingest.OutcomeFlows || hr.Buckets == 0 || hr.Limited != 0 {
+					t.Fatalf("retained report did not produce flows: %+v", hr)
+				}
+			} else if hr.Outcome != trafficingest.OutcomeBaseline || hr.Buckets != 0 || hr.Limited != 0 {
+				// A store refusal alone is insufficient: the aggregator must
+				// reject the old report before it retains flow keys in memory.
+				t.Fatalf("expired report reached bucket writes: %+v", hr)
+			}
+		})
 	}
 }
 

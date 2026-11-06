@@ -389,6 +389,7 @@ start.
 | `executor_user` | (required) | `nebula-executor`; the server checks that the socket is served by this user. |
 | `discovery_dir` | `/var/lib/nebula/discovery` | Discovery spool (`jobs/`, `results/`). Without the directory, discovery shows as not installed. |
 | `audit_hash_chain` | `false` | Chain the server's own audit lines by hash (section 10.3). |
+| `traffic` | 21 days | Traffic map retention: `"traffic": {"retention_days": N}` keeps N days of flow data (1-21). A value outside the range stops the start. |
 | `notifications` | none | Providers, section 10.1. |
 | `api` | disabled | Read-only API, section 10.2. |
 
@@ -1138,25 +1139,34 @@ was not adopted: a sockets report that contains a process column — that is,
 one from a wrapped or replaced `ss` — is rejected as invalid, so a
 compromised host cannot inject process names.
 
-**Retention: 21 days.** The server stores hourly flow buckets and endpoint
-reports and prunes them during a full sync (at least once per clock hour).
-The retention is 21 days; the map's and
-the connections pages' windows are clamped to it. There is no setting to
-shorten it yet: the store only accepts a shorter retention (minimum 1 h),
-and `nebula-server` currently always runs with the 21-day default.
+**Retention: 21 days by default, configurable.** The server stores hourly
+flow buckets and endpoint reports and prunes them during a full sync (at
+least once per clock hour). The retention is 21 days by default; the
+map's and the connections pages' windows are clamped to it. To shorten
+it, set `"traffic": {"retention_days": N}` in `server.json` (1-21 days,
+default 21); a value outside the range stops the start with an error
+naming the key. The store itself only accepts a shorter retention
+(minimum 1 h), never a longer one.
 
 **Icons.** Nodes and software entries can carry an icon from the software
 catalog (*Software* page, `/software`). The icon pages
-(`/software/icon/KEY`, per asset `/software/assets/icon?id=ASSET`) are
-read-only for now: the icon service is not yet configured in the server, so
-the icon-change routes return 404. Once enabled, icons are fetched by the
+(`/software/icon/KEY`, per asset `/software/assets/icon?id=ASSET`) change
+them. Icons are fetched by the
 one-shot `nebula-iconfetch` service from a host allowlist (default
-`avatars.githubusercontent.com` and `upload.wikimedia.org`, changed with
-its `-allow` flag; spool `/var/lib/nebula/iconfetch`, results kept 24 h) or
-uploaded directly. Every icon is sanitized: only PNG, JPEG or GIF input up
-to 256 KiB and 1024 px is accepted, re-encoded as fresh 64×64 and 128×128
-PNGs (SVG, WebP, ICO and BMP are rejected), and stored and served keyed by
-SHA-256.
+`avatars.githubusercontent.com` and `upload.wikimedia.org`; spool
+`/var/lib/nebula/iconfetch`, results kept 24 h) or uploaded directly. The
+server applies the default allowlist too, so the helper's `-allow` flag can
+narrow it but not extend it. Fetch URLs must not have a query string (for
+GitHub avatars, leave off `?v=4`). `deploy/install.sh` does not set up the
+spool; without it a fetch reports that the fetcher is not installed, while
+uploads and rollbacks still work. To use fetches, follow the provisioning
+notes in `nebula-iconfetch.service` and add
+`ReadWritePaths=/var/lib/nebula/iconfetch/jobs` to the `nebula-server`
+drop-in. Every icon is sanitized: only PNG, JPEG or GIF input up to 256 KiB
+and 1024 px is accepted, re-encoded as fresh 64×64 and 128×128 PNGs (SVG,
+WebP, ICO and BMP are rejected), and stored in `<data_dir>/icons` and served
+keyed by SHA-256. Every change is an audited admin action and can be rolled
+back from the icon page.
 
 **Privacy.** The traffic store holds hourly aggregates only: endpoint
 addresses and MACs, protocol, port, byte counts, connection counts and the
