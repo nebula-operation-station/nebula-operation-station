@@ -95,6 +95,9 @@ type Options struct {
 	// Store durably spends execution IDs (internal/executordb implements it).
 	// Without it, Propose and ClaimMember fail closed.
 	Store permit.Store
+	// TagPolicy is the executor's tag policy for container tag changes.
+	// Without it, every container member that changes a tag is refused.
+	TagPolicy TagPolicy
 }
 
 // Approval is a detached, complete review copy. Parameters and Findings use
@@ -222,6 +225,16 @@ func (a *Authority) Propose(ctx context.Context, raw []byte, inputs []MemberInpu
 		risk := canonical.MaxRisk(m.Request.RiskClass, canonical.MaxRisk(snapshot.Risk, scanRisk))
 		if len(refs) > 0 {
 			risk = canonical.MaxRisk(risk, canonical.RiskMedium)
+		}
+		if m.ContainerUpdate != nil {
+			// The server's label must already carry the binding's floor, and
+			// no container member is ever CRITICAL (R8).
+			if m.Request.RiskClass.Rank() < canonical.ContainerUpdateFloor(*m.ContainerUpdate).Rank() {
+				return Approval{}, refuse(m, ErrContainerRiskBelowFloor)
+			}
+			if risk == canonical.RiskCritical {
+				return Approval{}, refuse(m, ErrContainerCritical)
+			}
 		}
 		plan.Members[i].Request.RiskClass = risk
 		p.Parameters[i] = params
@@ -362,6 +375,11 @@ func (a *Authority) evaluate(ctx context.Context, m canonical.BatchMember) (Snap
 	if err != nil || s.Risk.Rank() == 0 || s.Trust == (canonical.Digest{}) {
 		return Snapshot{}, failure(permit.CodeStorage, "executor trust/risk state unavailable")
 	}
+	// Container rules run for every policy on every evaluation: proposal,
+	// approval, claim and member revalidation.
+	if m.ContainerUpdate != nil {
+		return a.containerSnapshot(m, s)
+	}
 	return s, nil
 }
 
@@ -402,6 +420,14 @@ func (a *Authority) freshLocked(ctx context.Context, d canonical.Digest, e *entr
 				return
 			}
 			s, err := a.evaluate(ctx, m)
+			var refusal *ContainerRefusal
+			if errors.As(err, &refusal) {
+				// A container rule that fails after proposal (CRITICAL floor,
+				// changed tag policy) revokes the whole plan.
+				changed = true
+				checkErr = err
+				return
+			}
 			if err != nil {
 				checkErr = err
 				return
@@ -421,6 +447,9 @@ func (a *Authority) freshLocked(ctx context.Context, d canonical.Digest, e *entr
 	if changed {
 		a.removeLocked(d)
 		a.emit("batch_invalidated", d, permit.CodeRiskAboveApproval, "")
+		if checkErr != nil {
+			return fmt.Errorf("%w: %w", ErrInvalidated, checkErr)
+		}
 		return ErrInvalidated
 	}
 	// A concurrent approval must not hide an observed trust or risk change.
@@ -600,6 +629,10 @@ func cloneMember(m canonical.BatchMember) canonical.BatchMember {
 		p := *m.ProviderTarget
 		p.APIEndpoints = slices.Clone(p.APIEndpoints)
 		m.ProviderTarget = &p
+	}
+	if m.ContainerUpdate != nil {
+		u := m.ContainerUpdate.Clone()
+		m.ContainerUpdate = &u
 	}
 	return m
 }

@@ -90,6 +90,11 @@ func scheduleChallengeFor(digest string, expiry time.Time) ([]byte, error) {
 // lowEverywhere checks that the executor rates an action LOW on every
 // target. Shared by schedule grants and read grants.
 func (a *Authority) lowEverywhere(actionID, version, artifactSHA256 string, targets []canonical.Target) error {
+	// No schedule or read grant over container mutations (no unattended
+	// mutation), whatever risk a module declares.
+	if canonical.IsBatchOnlyContainerAction(actionID) {
+		return fail(CodeGrantInvalid, "%s runs only as an approved batch member and cannot be granted", actionID)
+	}
 	r := canonical.Request{ActionID: actionID, ModuleVersion: version, ArtifactSHA256: artifactSHA256}
 	for _, t := range targets {
 		floor, why, err := a.floor(r, []canonical.Target{t}, nil)
