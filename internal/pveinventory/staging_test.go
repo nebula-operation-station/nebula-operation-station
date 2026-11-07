@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"reflect"
 	"testing"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/ipam"
@@ -240,5 +241,33 @@ func TestImportStagedUnknownHostRefused(t *testing.T) {
 	}
 	if _, err := s.GetLink(ctx, "remote-a", 100, 1); !errors.Is(err, ErrLinkNotFound) {
 		t.Fatalf("failed import must not create a link, got %v", err)
+	}
+}
+
+// TestSweepStagingReadsHostsAndIPAMOncePerPage checks that the sweep
+// computes the candidates of a page of guests with one suggestion batch
+// (managed hosts and IPAM assets read once, not once per guest) and that
+// the staged candidates equal the per-guest SuggestHosts golden.
+func TestSweepStagingReadsHostsAndIPAMOncePerPage(t *testing.T) {
+	s, refs := suggestFixture(t)
+	counts := countSuggestReads(t)
+	entries, err := s.SweepStaging(context.Background(), "remote-a")
+	if err != nil {
+		t.Fatalf("SweepStaging: %v", err)
+	}
+	if counts[suggestReadHosts] != 1 || counts[suggestReadAssets] != 1 {
+		t.Fatalf("sweep of %d guests reads = %v, want hosts and assets once", len(refs), counts)
+	}
+	if len(entries) != len(refs) {
+		t.Fatalf("staged %d guests, want %d", len(entries), len(refs))
+	}
+	for i, e := range entries {
+		ref := GuestRef{VMID: e.VMID, Generation: e.Generation}
+		if ref != refs[i] {
+			t.Fatalf("entry %d = guest %+v, want %+v (vmid order)", i, ref, refs[i])
+		}
+		if !reflect.DeepEqual(e.Candidates, suggestGolden[ref]) {
+			t.Errorf("guest %d candidates =\n%+v\nwant\n%+v", e.VMID, e.Candidates, suggestGolden[ref])
+		}
 	}
 }

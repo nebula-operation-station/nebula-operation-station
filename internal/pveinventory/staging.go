@@ -92,13 +92,32 @@ func (s *Store) SweepStaging(ctx context.Context, remoteID string) ([]StagingEnt
 		if len(guests) == 0 {
 			break
 		}
+		var unlinked []Guest
+		var refs []GuestRef
 		for _, g := range guests {
 			if _, err := s.GetLink(ctx, remoteID, g.VMID, g.Generation); err == nil {
 				continue // actively linked: managed
 			} else if !errors.Is(err, ErrLinkNotFound) {
 				return nil, err
 			}
-			entry, err := s.computeStaging(ctx, remoteID, g)
+			unlinked = append(unlinked, g)
+			refs = append(refs, GuestRef{VMID: g.VMID, Generation: g.Generation})
+		}
+		// One suggestion batch per page (MaxGuestsQuery <= MaxSuggestBatch):
+		// managed hosts and IPAM assets are read once, not once per guest.
+		candidates, err := s.SuggestHostsBatch(ctx, remoteID, refs)
+		if err != nil {
+			return nil, err
+		}
+		for _, g := range unlinked {
+			ref := GuestRef{VMID: g.VMID, Generation: g.Generation}
+			cands, ok := candidates[ref]
+			if !ok {
+				// Not an active incarnation any more: fail the sweep as
+				// the per-guest SuggestHosts did.
+				return nil, fmt.Errorf("pveinventory: staging suggest %s/%d/%d: %w", remoteID, g.VMID, g.Generation, ErrGuestNotFound)
+			}
+			entry, err := s.computeStaging(ctx, remoteID, g, cands)
 			if err != nil {
 				return nil, err
 			}
@@ -138,8 +157,13 @@ func (s *Store) stagingGuestBatch(ctx context.Context, remoteID string, afterVMI
 	return out, rows.Err()
 }
 
-// computeStaging classifies one unlinked guest.
-func (s *Store) computeStaging(ctx context.Context, remoteID string, g Guest) (StagingEntry, error) {
+// A staging page (MaxGuestsQuery guests) must fit into one suggestion
+// batch; this does not compile otherwise.
+var _ [MaxSuggestBatch - MaxGuestsQuery]struct{}
+
+// computeStaging classifies one unlinked guest from its SuggestHosts
+// candidates.
+func (s *Store) computeStaging(ctx context.Context, remoteID string, g Guest, candidates []Candidate) (StagingEntry, error) {
 	entry := StagingEntry{
 		RemoteID:   remoteID,
 		VMID:       g.VMID,
@@ -148,10 +172,6 @@ func (s *Store) computeStaging(ctx context.Context, remoteID string, g Guest) (S
 		Name:       g.Name,
 		Node:       g.Node,
 		State:      g.Status,
-	}
-	candidates, err := s.SuggestHosts(ctx, remoteID, g.VMID, g.Generation)
-	if err != nil {
-		return StagingEntry{}, err
 	}
 	entry.Candidates = candidates
 	ifaces, err := s.ListInterfaces(ctx, remoteID, g.VMID, g.Generation, 0)

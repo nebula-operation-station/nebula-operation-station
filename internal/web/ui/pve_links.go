@@ -52,7 +52,9 @@ import (
 )
 
 // pveSuggestGuestLimit caps the unlinked guests a detail page computes
-// suggestions for; each suggestion reads the inventory and IPAM assets.
+// suggestions for. The inventory and IPAM assets are read once per page
+// (pveinventory.Store.SuggestHostsBatch); the per-guest reads (interfaces,
+// conflicts) still scale with it.
 const pveSuggestGuestLimit = 100
 
 // pveLinkStateTimeout bounds all link reads of one detail page. It is a
@@ -93,6 +95,7 @@ type PVELinkStore interface {
 	ListLinks(ctx context.Context, remoteID string, limit int) ([]pveinventory.Link, error)
 	LinksForHost(ctx context.Context, hostID string) ([]pveinventory.Link, error)
 	SuggestHosts(ctx context.Context, remoteID string, vmid, generation uint64) ([]pveinventory.Candidate, error)
+	SuggestHostsBatch(ctx context.Context, remoteID string, guests []pveinventory.GuestRef) (map[pveinventory.GuestRef][]pveinventory.Candidate, error)
 	GuestConflicts(ctx context.Context, remoteID string, vmid, generation uint64) ([]string, error)
 	CreateLink(ctx context.Context, remoteID string, vmid, generation uint64, hostID, actor string) (pveinventory.Link, error)
 	Unlink(ctx context.Context, remoteID string, vmid, generation uint64, actor, reason string) (pveinventory.Link, error)
@@ -273,7 +276,12 @@ func (h *Handler) pveLinkState(ctx context.Context, id string, d *pveDetailData)
 	sctx, scancel := context.WithTimeout(ctx, pveSuggestBudget)
 	defer scancel()
 	base := "/pve/" + url.PathEscape(id) + "/links"
-	suggested := 0
+	// Unlinked guests that get suggestions, in page order.
+	type pendingSuggest struct {
+		ref pveinventory.GuestRef
+		v   *pveGuestLinkView
+	}
+	var pending []pendingSuggest
 	for i := range d.Guests {
 		g := &d.Guests[i]
 		vmid, err := strconv.ParseUint(g.VMIDText, 10, 64)
@@ -304,22 +312,51 @@ func (h *Handler) pveLinkState(ctx context.Context, id string, d *pveDetailData)
 		if v.Linked {
 			continue
 		}
-		if suggested >= pveSuggestGuestLimit {
+		if len(pending) >= pveSuggestGuestLimit {
 			v.SuggestNote = fmt.Sprintf("Suggestions are computed for the first %d unlinked guests only.", pveSuggestGuestLimit)
 			continue
 		}
+		pending = append(pending, pendingSuggest{ref: pveinventory.GuestRef{VMID: vmid, Generation: g.generation}, v: v})
+	}
+	if len(pending) == 0 {
+		return
+	}
+
+	// One batch for the page: managed hosts and IPAM assets are read once,
+	// not once per guest. A guest missing from the result is no longer an
+	// active incarnation (SuggestHosts' ErrGuestNotFound).
+	refs := make([]pveinventory.GuestRef, len(pending))
+	for i, p := range pending {
+		refs[i] = p.ref
+	}
+	batch, batchErr := ls.SuggestHostsBatch(sctx, id, refs)
+	if batchErr != nil && sctx.Err() == nil {
+		h.log.Error("suggest PVE guest links", "remote", id, "guests", len(refs), "error", batchErr)
+	}
+	for _, p := range pending {
+		v := p.v
 		if sctx.Err() != nil {
 			v.SuggestNote = pveSuggestSkippedNote
 			continue
 		}
-		suggested++
-		if err := h.pveSuggest(sctx, ls, id, vmid, g.generation, names, hostLinks, v); err != nil {
+		if batchErr != nil {
+			v.SuggestNote = "Suggestions unavailable."
+			continue
+		}
+		cands, ok := batch[p.ref]
+		var err error
+		if !ok {
+			err = fmt.Errorf("suggest hosts %s/%d/%d: %w", id, p.ref.VMID, p.ref.Generation, pveinventory.ErrGuestNotFound)
+		} else {
+			err = h.pveSuggest(sctx, ls, id, p.ref.VMID, p.ref.Generation, cands, names, hostLinks, v)
+		}
+		if err != nil {
 			v.Candidates, v.Conflicts, v.NeedsConfirm = nil, nil, false
 			if sctx.Err() != nil {
 				v.SuggestNote = pveSuggestSkippedNote
 				continue
 			}
-			h.log.Error("suggest PVE guest links", "remote", id, "vmid", vmid, "error", err)
+			h.log.Error("suggest PVE guest links", "remote", id, "vmid", p.ref.VMID, "error", err)
 			v.SuggestNote = "Suggestions unavailable."
 		}
 		for _, c := range v.Candidates {
@@ -330,15 +367,12 @@ func (h *Handler) pveLinkState(ctx context.Context, id string, d *pveDetailData)
 	}
 }
 
-// pveSuggest fills the candidates and conflicts of one unlinked guest.
-// The guest conflicts are read only when there is a candidate: they decide
-// whether a suggested link needs the review confirmation, and the link
-// POST checks them again in any case.
-func (h *Handler) pveSuggest(ctx context.Context, ls PVELinkStore, id string, vmid, gen uint64, names *pveHostNames, hostLinks *pveHostLinks, v *pveGuestLinkView) error {
-	cands, err := ls.SuggestHosts(ctx, id, vmid, gen)
-	if err != nil {
-		return err
-	}
+// pveSuggest fills the candidates and conflicts of one unlinked guest from
+// its SuggestHosts candidates cands. The guest conflicts are read only
+// when there is a candidate: they decide whether a suggested link needs
+// the review confirmation, and the link POST checks them again in any
+// case.
+func (h *Handler) pveSuggest(ctx context.Context, ls PVELinkStore, id string, vmid, gen uint64, cands []pveinventory.Candidate, names *pveHostNames, hostLinks *pveHostLinks, v *pveGuestLinkView) error {
 	if len(cands) == 0 {
 		return nil
 	}

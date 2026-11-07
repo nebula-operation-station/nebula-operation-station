@@ -1572,6 +1572,15 @@ html {
   width: calc(var(--space-2) + 2px);
   border-top: 2px solid var(--border);
 }
+/* Managed host linked to a PVE guest: secondary, so dimmed and dashed. */
+.chart__ghost {
+  display: inline-block; max-width: 100%;
+  padding: 0 0.375rem;
+  font-size: var(--fs-sm); color: var(--text-faint);
+  border: 1px dashed var(--border-strong); border-radius: var(--radius-sm);
+  opacity: 0.8;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .chart__cname { font-weight: 600; color: var(--text); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .chart__cname:hover { color: var(--brand); }
 .chart__cimg { font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
@@ -1800,3 +1809,18 @@ html {
 .staged-confirm__stage { margin-bottom: var(--space-2); }
 .staged-confirm__stage h3 { margin: 0 0 var(--space-1); }
 .staged-confirm__gate { border-left: 3px solid var(--border-strong); padding-left: var(--space-1); }
+
+/* PVE guest/host links (PR #346): link candidates as a compact list,
+   a VMID-reuse notice in the warning colours. */
+.pve-link-candidate { margin: 0 0 var(--space-1); }
+.pve-link-candidate:last-child { margin-bottom: 0; }
+.pve-link-candidate p, .pve-link-candidate ul { margin: 0 0 0.25rem; }
+.pve-link-candidate ul { padding-left: var(--space-2); }
+.pve-link-reused {
+  margin: 0 0 var(--space-1);
+  padding: var(--space-1);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  border-radius: var(--radius-sm);
+}
+.pve-link-reused .status { margin: 0 0 var(--space-1); color: var(--warn); }

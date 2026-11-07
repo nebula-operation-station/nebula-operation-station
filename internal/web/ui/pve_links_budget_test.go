@@ -26,18 +26,38 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
 
-// fakeSuggestStore is the real store with SuggestHosts and GuestConflicts
-// replaced, counting the SuggestHosts calls.
+// fakeSuggestStore is the real store with the suggestions and
+// GuestConflicts replaced. The page computes suggestions with one
+// SuggestHostsBatch call; suggest answers for the whole batch (an error
+// fails the batch) or, when it succeeds, gives every guest the same
+// candidates. calls counts the batch calls, guests the guests asked for,
+// single the per-guest SuggestHosts calls.
 type fakeSuggestStore struct {
 	*pveinventory.Store
 	suggest   func(ctx context.Context) ([]pveinventory.Candidate, error)
 	conflicts func(ctx context.Context) ([]string, error)
 	calls     atomic.Int64
+	guests    atomic.Int64
+	single    atomic.Int64
 }
 
 func (f *fakeSuggestStore) SuggestHosts(ctx context.Context, _ string, _, _ uint64) ([]pveinventory.Candidate, error) {
-	f.calls.Add(1)
+	f.single.Add(1)
 	return f.suggest(ctx)
+}
+
+func (f *fakeSuggestStore) SuggestHostsBatch(ctx context.Context, _ string, guests []pveinventory.GuestRef) (map[pveinventory.GuestRef][]pveinventory.Candidate, error) {
+	f.calls.Add(1)
+	f.guests.Add(int64(len(guests)))
+	cands, err := f.suggest(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[pveinventory.GuestRef][]pveinventory.Candidate, len(guests))
+	for _, g := range guests {
+		out[g] = cands
+	}
+	return out, nil
 }
 
 func (f *fakeSuggestStore) GuestConflicts(ctx context.Context, remoteID string, vmid, gen uint64) ([]string, error) {
@@ -92,7 +112,10 @@ func TestPVESlowSuggestionsKeepDatasetTable(t *testing.T) {
 		t.Errorf("dataset table missing after slow suggestions")
 	}
 	if n := f.calls.Load(); n != 1 {
-		t.Errorf("SuggestHosts calls = %d, want 1 (later guests skipped once the budget is used up)", n)
+		t.Errorf("SuggestHostsBatch calls = %d, want 1 (later guests skipped once the budget is used up)", n)
+	}
+	if n := f.single.Load(); n != 0 {
+		t.Errorf("per-guest SuggestHosts calls = %d, want 0", n)
 	}
 	if n := strings.Count(body, skippedNote); n != 100 {
 		t.Errorf("skipped notes = %d, want 100", n)
@@ -110,8 +133,14 @@ func TestPVESuggestionsCappedAt100Guests(t *testing.T) {
 	e.guests(1, manyGuests(101)...)
 
 	body := e.page()
-	if n := f.calls.Load(); n != 100 {
-		t.Errorf("SuggestHosts calls = %d, want 100", n)
+	if n := f.calls.Load(); n != 1 {
+		t.Errorf("SuggestHostsBatch calls = %d, want 1 for the page", n)
+	}
+	if n := f.guests.Load(); n != 100 {
+		t.Errorf("guests in the suggestion batch = %d, want 100", n)
+	}
+	if n := f.single.Load(); n != 0 {
+		t.Errorf("per-guest SuggestHosts calls = %d, want 0", n)
 	}
 	if n := strings.Count(body, capNote); n != 1 {
 		t.Errorf("cap notes = %d, want 1", n)
