@@ -79,7 +79,12 @@ if [ "$1" = daemon-reload ] && [ -f "$WATCH_FILE" ]; then
   cp "$WATCH_FILE" "$WATCH_COPY"
 fi
 if [ "$1" = is-active ]; then
-  [ -n "$EXECUTOR_ACTIVE" ]
+  for last; do :; done
+  case "$last" in
+    nebula-executor.service) [ -n "$EXECUTOR_ACTIVE" ] ;;
+    nebula-pve-collector.service) [ -n "$COLLECTOR_ACTIVE" ] ;;
+    *) false ;;
+  esac
 else
   true
 fi
@@ -363,20 +368,25 @@ func TestUpgradeReloadsSystemdAfterTheDropIn(t *testing.T) {
 
 // Migrations run when the new binaries start, and the backup before that
 // needs the admin (review m105): the postinst must never restart the
-// services. With the executor running it reaches the running-services branch
-// and must tell the admin to back up and restart instead; with it stopped it
-// stays quiet. Both branches are pinned, so a restart added in either is
-// caught. The stubbed systemctl is not the only restart path:
-// deb-systemd-invoke, service and invoke-rc.d all reach systemd, so calls
-// through any of them are caught as well.
+// services. With the executor or the collector running it reaches the
+// running-services branch and must tell the admin to back up and restart
+// instead, the collector included: a collector that runs while the executor
+// is stopped or failed stays on the old binary as well. With both stopped it
+// stays quiet. All branches are pinned, so a restart added in any is caught.
+// The stubbed systemctl is not the only restart path: deb-systemd-invoke,
+// service and invoke-rc.d all reach systemd, so calls through any of them are
+// caught as well.
 func TestUpgradeNeverRestartsServices(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		active     bool
-		wantNotice bool
+		name            string
+		executorActive  bool
+		collectorActive bool
+		wantNotice      bool
 	}{
-		{"executor stopped", false, false},
-		{"executor running", true, true},
+		{"executor and collector stopped", false, false, false},
+		{"executor running", true, false, true},
+		{"executor and collector running", true, true, true},
+		{"executor stopped, collector running", false, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newSandbox(t)
@@ -384,8 +394,11 @@ func TestUpgradeNeverRestartsServices(t *testing.T) {
 				s.requireStub(t, name)
 			}
 			s.installed(t)
-			if tc.active {
+			if tc.executorActive {
 				s.env = append(s.env, "EXECUTOR_ACTIVE=1")
+			}
+			if tc.collectorActive {
+				s.env = append(s.env, "COLLECTOR_ACTIVE=1")
 			}
 			out := s.run(t, "configure", "1.0.0")
 			for _, line := range strings.Split(s.calls(t), "\n") {
@@ -405,6 +418,9 @@ func TestUpgradeNeverRestartsServices(t *testing.T) {
 			}
 			if got := strings.Contains(out, "back up, then restart"); got != tc.wantNotice {
 				t.Errorf("admin notice present = %v, want %v:\n%s", got, tc.wantNotice, out)
+			}
+			if tc.wantNotice && !strings.Contains(out, "systemctl restart nebula-executor nebula-server nebula-pve-collector") {
+				t.Errorf("admin notice does not name the collector restart:\n%s", out)
 			}
 		})
 	}
