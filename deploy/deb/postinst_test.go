@@ -39,7 +39,10 @@ type sandbox struct {
 
 // stubs records every call in $STUB_LOG. install creates the directory
 // that is its last argument, and setpriv runs the command after --clear-groups,
-// so the real effect of both stays observable without root.
+// so the real effect of both stays observable without root. stat passes the
+// real mode through but reports the owner and group from STAT_OWNERS,
+// because the test cannot chown; the service commands only record, so a
+// restart through any of them is visible.
 const stubs = `
 install|#!/bin/sh
 printf 'install %s\n' "$*" >>"$STUB_LOG"
@@ -77,6 +80,27 @@ if [ "$1" = is-active ]; then
 else
   true
 fi
+---
+stat|#!/bin/sh
+[ -n "$REAL_STAT" ] || exit 127
+out=$("$REAL_STAT" "$@") || exit 1
+if [ -n "$STAT_OWNERS" ]; then
+  printf '%s %s\n' "${out%% *}" "$STAT_OWNERS"
+else
+  printf '%s\n' "$out"
+fi
+---
+chown|#!/bin/sh
+printf 'chown %s\n' "$*" >>"$STUB_LOG"
+---
+deb-systemd-invoke|#!/bin/sh
+printf 'deb-systemd-invoke %s\n' "$*" >>"$STUB_LOG"
+---
+service|#!/bin/sh
+printf 'service %s\n' "$*" >>"$STUB_LOG"
+---
+invoke-rc.d|#!/bin/sh
+printf 'invoke-rc.d %s\n' "$*" >>"$STUB_LOG"
 `
 
 func newSandbox(t *testing.T) *sandbox {
@@ -87,6 +111,10 @@ func newSandbox(t *testing.T) *sandbox {
 		varLib:     filepath.Join(dir, "var-lib-nebula"),
 		systemdDir: filepath.Join(dir, "etc-systemd-system"),
 		log:        filepath.Join(dir, "calls.log"),
+	}
+	realStat, err := exec.LookPath("stat")
+	if err != nil {
+		t.Fatal(err)
 	}
 	bin := filepath.Join(dir, "bin")
 	if err := os.Mkdir(bin, 0o755); err != nil {
@@ -127,11 +155,23 @@ func newSandbox(t *testing.T) *sandbox {
 		"WATCH_FILE="+s.dropIn(),
 		"WATCH_COPY="+s.dropInAtReload(),
 		"KNOWN_USERS=nebula-pve-collector",
+		"REAL_STAT="+realStat,
 	)
 	return s
 }
 
 func (s *sandbox) dropIn() string { return filepath.Join(s.systemdDir, serverDropIn) }
+
+// requireStub fails unless the sandbox's PATH intercepts name: the sandbox
+// bin directory comes first, so without the stub a call from the postinst
+// would reach the real command and escape the test.
+func (s *sandbox) requireStub(t *testing.T, name string) {
+	t.Helper()
+	stub := filepath.Join(s.root, "bin", name)
+	if fi, err := os.Stat(stub); err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf("no sandbox stub for %s: a call through it would escape the test", name)
+	}
+}
 
 // dropInAtReload is the copy of the drop-in the systemctl stub takes.
 func (s *sandbox) dropInAtReload() string { return filepath.Join(s.root, "at-reload.conf") }
@@ -298,7 +338,9 @@ func TestUpgradeReloadsSystemdAfterTheDropIn(t *testing.T) {
 // services. With the executor running it reaches the running-services branch
 // and must tell the admin to back up and restart instead; with it stopped it
 // stays quiet. Both branches are pinned, so a restart added in either is
-// caught.
+// caught. The stubbed systemctl is not the only restart path:
+// deb-systemd-invoke, service and invoke-rc.d all reach systemd, so calls
+// through any of them are caught as well.
 func TestUpgradeNeverRestartsServices(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -310,13 +352,26 @@ func TestUpgradeNeverRestartsServices(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newSandbox(t)
+			for _, name := range []string{"systemctl", "deb-systemd-invoke", "service", "invoke-rc.d"} {
+				s.requireStub(t, name)
+			}
 			s.installed(t)
 			if tc.active {
 				s.env = append(s.env, "EXECUTOR_ACTIVE=1")
 			}
 			out := s.run(t, "configure", "1.0.0")
 			for _, line := range strings.Split(s.calls(t), "\n") {
-				if strings.HasPrefix(line, "systemctl ") && !strings.Contains(line, "daemon-reload") && !strings.Contains(line, "is-active") {
+				switch {
+				case strings.HasPrefix(line, "systemctl "):
+					if !strings.Contains(line, "daemon-reload") && !strings.Contains(line, "is-active") {
+						t.Errorf("unexpected call: %s", line)
+					}
+				case strings.HasPrefix(line, "deb-systemd-invoke "),
+					strings.HasPrefix(line, "service "),
+					strings.HasPrefix(line, "invoke-rc.d "):
+					// These reach systemd like systemctl: a postinst using any
+					// of them would restart the services before the admin's
+					// backup (review m105).
 					t.Errorf("unexpected call: %s", line)
 				}
 			}
@@ -340,6 +395,9 @@ func TestUpgradeProvisionsMissingSpoolDirectories(t *testing.T) {
 			s.installed(t)
 			mode, _ := spoolMode(existing)
 			s.mkdirAt(t, existing, mode)
+			// The existing directory is in install.sh's state, owner included:
+			// the test cannot chown, so the stat stub reports it.
+			s.env = append(s.env, "STAT_OWNERS=nebula-pve-collector nebula-rpc")
 			s.run(t, "configure", "1.0.0")
 
 			calls := s.calls(t)
@@ -387,6 +445,9 @@ func TestUpgradeRepairsSpoolDirectoryModes(t *testing.T) {
 			s := newSandbox(t)
 			s.installed(t)
 			s.mkdirAt(t, tc.dir, tc.wrong)
+			// Only the mode is wrong here: the stat stub reports
+			// install.sh's owner and group, which the test cannot set.
+			s.env = append(s.env, "STAT_OWNERS=nebula-pve-collector nebula-rpc")
 			s.run(t, "configure", "1.0.0")
 
 			fi, err := os.Stat(filepath.Join(s.varLib, tc.dir))
@@ -399,6 +460,124 @@ func TestUpgradeRepairsSpoolDirectoryModes(t *testing.T) {
 			want := fmt.Sprintf("setpriv --reuid=nebula-pve-collector --regid=nebula-rpc --clear-groups install -d -m %s %s\n", tc.want, filepath.Join(s.varLib, tc.dir))
 			if !strings.Contains(s.calls(t), want) {
 				t.Errorf("missing repair call %q in:\n%s", want, s.calls(t))
+			}
+		})
+	}
+}
+
+// install.sh re-applies the mode, owner and group of every spool directory
+// on every run; the postinst must converge to the same state, so a
+// directory with the right mode but the wrong owner or group is repaired,
+// not skipped. The pve root is re-applied as root, like install.sh. Below
+// it the owner and group are fixed as root with chown --no-dereference, so
+// a symlink swapped in there cannot redirect them to its target, and the
+// collector re-applies the mode after. The test cannot chown, so it checks
+// the recorded calls and re-reads the mode from disk.
+func TestUpgradeRepairsSpoolOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		dir     string
+		mode    os.FileMode
+		modeStr string
+		owners  string
+		// want is the call that must appear in the log; nil means the
+		// directory must not be touched at all.
+		want func(s *sandbox) string
+	}{
+		{
+			name:    "pve root with wrong mode",
+			dir:     "pve",
+			mode:    0o0755,
+			modeStr: "2750",
+			owners:  "nebula-pve-collector nebula-rpc",
+			want: func(s *sandbox) string {
+				return fmt.Sprintf("install -d -m 2750 -o nebula-pve-collector -g nebula-rpc %s\n", filepath.Join(s.varLib, "pve"))
+			},
+		},
+		{
+			name:    "pve root with wrong owner",
+			dir:     "pve",
+			mode:    0o2750,
+			modeStr: "2750",
+			owners:  "root root",
+			want: func(s *sandbox) string {
+				return fmt.Sprintf("install -d -m 2750 -o nebula-pve-collector -g nebula-rpc %s\n", filepath.Join(s.varLib, "pve"))
+			},
+		},
+		{
+			name:    "pve root with wrong group",
+			dir:     "pve",
+			mode:    0o2750,
+			modeStr: "2750",
+			owners:  "nebula-pve-collector root",
+			want: func(s *sandbox) string {
+				return fmt.Sprintf("install -d -m 2750 -o nebula-pve-collector -g nebula-rpc %s\n", filepath.Join(s.varLib, "pve"))
+			},
+		},
+		{
+			name:    "pve root in install.sh's state",
+			dir:     "pve",
+			mode:    0o2750,
+			modeStr: "2750",
+			owners:  "nebula-pve-collector nebula-rpc",
+			want:    nil,
+		},
+		{
+			name:    "subdirectory with wrong owner",
+			dir:     "pve/results",
+			mode:    0o2770,
+			modeStr: "2770",
+			owners:  "root root",
+			want: func(s *sandbox) string {
+				return fmt.Sprintf("chown --no-dereference nebula-pve-collector:nebula-rpc %s\n", filepath.Join(s.varLib, "pve/results"))
+			},
+		},
+		{
+			name:    "subdirectory with wrong group",
+			dir:     "pve/results",
+			mode:    0o2770,
+			modeStr: "2770",
+			owners:  "nebula-pve-collector root",
+			want: func(s *sandbox) string {
+				return fmt.Sprintf("chown --no-dereference nebula-pve-collector:nebula-rpc %s\n", filepath.Join(s.varLib, "pve/results"))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newSandbox(t)
+			s.installed(t)
+			s.mkdirAt(t, tc.dir, tc.mode)
+			s.env = append(s.env, "STAT_OWNERS="+tc.owners)
+			s.run(t, "configure", "1.0.0")
+
+			calls := s.calls(t)
+			if tc.want == nil {
+				if strings.Contains(calls, filepath.Join(s.varLib, tc.dir)+"\n") {
+					t.Errorf("directory in install.sh's state was touched:\n%s", calls)
+				}
+				return
+			}
+			if !strings.Contains(calls, tc.want(s)) {
+				t.Errorf("missing repair call %q in:\n%s", tc.want(s), calls)
+			}
+			if tc.dir != "pve" {
+				// The chown must precede the collector's mode re-apply: while
+				// the directory is not the collector's, the collector cannot
+				// chmod it.
+				installCall := fmt.Sprintf("setpriv --reuid=nebula-pve-collector --regid=nebula-rpc --clear-groups install -d -m %s %s\n", tc.modeStr, filepath.Join(s.varLib, tc.dir))
+				chownIdx, installIdx := strings.Index(calls, tc.want(s)), strings.Index(calls, installCall)
+				if chownIdx < 0 || installIdx < 0 || chownIdx > installIdx {
+					t.Errorf("chown must precede the collector's mode re-apply:\n%s", calls)
+				}
+			}
+			// Re-read the mode from disk: the stub install applies it, so the
+			// repair's result is observable.
+			fi, err := os.Stat(filepath.Join(s.varLib, tc.dir))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := octalMode(fi); got != tc.modeStr {
+				t.Errorf("%s mode = %s, want %s", tc.dir, got, tc.modeStr)
 			}
 		})
 	}
