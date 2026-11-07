@@ -472,7 +472,7 @@ func (s *Store) SuggestHostsBatch(ctx context.Context, remoteID string, guests [
 	if len(facts) == 0 {
 		return out, nil
 	}
-	idx, err := s.loadSuggestIndex(ctx, remoteID)
+	idx, err := s.loadSuggestIndex(ctx, remoteID, facts)
 	if err != nil {
 		return nil, err
 	}
@@ -531,14 +531,17 @@ type suggestIndex struct {
 	hostByEndpoint  map[string][]string // lowercased address -> host ids
 	hostsByAssetMAC map[string][]string // normalized mac -> host ids
 	hostsByAssetIP  map[string][]string // lowercased ip -> host ids
-	// guestsByMAC lists, per MAC, the active guests of the remote carrying
-	// it, one entry per interface, ordered by vmid and generation.
+	// guestsByMAC lists, per MAC seen on a batch guest, the active guests
+	// of the remote carrying it, one entry per interface, ordered by vmid
+	// and generation.
 	guestsByMAC map[string][]GuestRef
 }
 
-// loadSuggestIndex reads managed hosts, IPAM assets and the interface
-// MACs of the remote's active guests once.
-func (s *Store) loadSuggestIndex(ctx context.Context, remoteID string) (suggestIndex, error) {
+// loadSuggestIndex reads managed hosts and IPAM assets once, and the
+// active guests carrying each distinct MAC of the batch guests once per
+// MAC (not the whole remote, so a single-guest call stays as cheap as
+// before).
+func (s *Store) loadSuggestIndex(ctx context.Context, remoteID string, facts map[GuestRef]guestFacts) (suggestIndex, error) {
 	// Managed hosts: endpoint addresses.
 	hosts, err := s.hostStore().List(ctx)
 	if err != nil {
@@ -573,9 +576,18 @@ func (s *Store) loadSuggestIndex(ctx context.Context, remoteID string) (suggestI
 		}
 	}
 
-	idx.guestsByMAC, err = s.activeGuestMACs(ctx, remoteID)
-	if err != nil {
-		return suggestIndex{}, err
+	idx.guestsByMAC = map[string][]GuestRef{}
+	for _, f := range facts {
+		for mac := range f.macs {
+			if _, ok := idx.guestsByMAC[mac]; ok {
+				continue
+			}
+			refs, err := s.guestRefsWithMAC(ctx, remoteID, mac)
+			if err != nil {
+				return suggestIndex{}, err
+			}
+			idx.guestsByMAC[mac] = refs
+		}
 	}
 	return idx, nil
 }
@@ -635,37 +647,8 @@ func (idx suggestIndex) candidates(vmid uint64, f guestFacts) []Candidate {
 	return candidates
 }
 
-// activeGuestMACs reads, in one query, the interface MACs of all active
-// guests of the remote, grouped by MAC and ordered by vmid and generation
-// (the order guestsWithMAC uses).
-func (s *Store) activeGuestMACs(ctx context.Context, remoteID string) (map[string][]GuestRef, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT i.mac, g.vmid, g.generation
-		FROM pve_interfaces i
-		JOIN pve_guests g ON g.remote_id = i.remote_id AND g.vmid = i.vmid AND g.generation = i.generation
-		WHERE i.remote_id = ? AND i.mac != '' AND g.tombstoned = 0
-		ORDER BY g.vmid, g.generation`, remoteID)
-	if err != nil {
-		return nil, fmt.Errorf("pveinventory: active guest macs %s: %w", remoteID, err)
-	}
-	defer rows.Close()
-	out := map[string][]GuestRef{}
-	for rows.Next() {
-		var mac string
-		var ref GuestRef
-		if err := rows.Scan(&mac, &ref.VMID, &ref.Generation); err != nil {
-			return nil, fmt.Errorf("pveinventory: scan active guest macs %s: %w", remoteID, err)
-		}
-		out[mac] = append(out[mac], ref)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("pveinventory: active guest macs %s: %w", remoteID, err)
-	}
-	return out, nil
-}
-
 // otherGuestLabels renders the "vmid (gen N)" labels of the guests other
-// than selfVMID, exactly as guestsWithMAC does.
+// than selfVMID.
 func otherGuestLabels(guests []GuestRef, selfVMID uint64) []string {
 	var out []string
 	for _, g := range guests {
@@ -757,6 +740,16 @@ func (s *Store) GuestConflicts(ctx context.Context, remoteID string, vmid, gener
 // guestsWithMAC returns the "vmid (gen)" labels of other active guests
 // of the same remote carrying the MAC.
 func (s *Store) guestsWithMAC(ctx context.Context, remoteID, mac string, selfVMID uint64) ([]string, error) {
+	refs, err := s.guestRefsWithMAC(ctx, remoteID, mac)
+	if err != nil {
+		return nil, err
+	}
+	return otherGuestLabels(refs, selfVMID), nil
+}
+
+// guestRefsWithMAC returns the active guests of the remote carrying the
+// MAC, one entry per interface, ordered by vmid and generation.
+func (s *Store) guestRefsWithMAC(ctx context.Context, remoteID, mac string) ([]GuestRef, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT g.vmid, g.generation
 		FROM pve_interfaces i
@@ -767,18 +760,18 @@ func (s *Store) guestsWithMAC(ctx context.Context, remoteID, mac string, selfVMI
 		return nil, fmt.Errorf("pveinventory: guests with mac %s: %w", mac, err)
 	}
 	defer rows.Close()
-	var out []string
+	var out []GuestRef
 	for rows.Next() {
-		var vmid, gen uint64
-		if err := rows.Scan(&vmid, &gen); err != nil {
-			return nil, err
+		var ref GuestRef
+		if err := rows.Scan(&ref.VMID, &ref.Generation); err != nil {
+			return nil, fmt.Errorf("pveinventory: scan guests with mac %s: %w", mac, err)
 		}
-		if vmid == selfVMID {
-			continue
-		}
-		out = append(out, fmt.Sprintf("%d (gen %d)", vmid, gen))
+		out = append(out, ref)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("pveinventory: guests with mac %s: %w", mac, err)
+	}
+	return out, nil
 }
 
 // parseGuestIP parses a stored interface IP ("10.0.0.5" or
