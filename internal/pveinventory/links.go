@@ -433,10 +433,11 @@ type guestIPs struct {
 // IPs, guest-agent IPs and the cloud-init IP). Candidates are
 // suggestions only; they never create a link. Conflicts (one MAC on two
 // guests, one IP on two hosts) are flagged in the candidates.
-// It is SuggestHostsBatch for a single guest.
+// It is SuggestHostsBatch for a single guest, except that a guest which
+// is not an active incarnation of the remote is ErrGuestNotFound.
 func (s *Store) SuggestHosts(ctx context.Context, remoteID string, vmid, generation uint64) ([]Candidate, error) {
 	ref := GuestRef{VMID: vmid, Generation: generation}
-	out, err := s.SuggestHostsBatch(ctx, remoteID, []GuestRef{ref})
+	out, err := s.suggestHosts(ctx, remoteID, []GuestRef{ref}, true)
 	if err != nil {
 		return nil, err
 	}
@@ -444,26 +445,58 @@ func (s *Store) SuggestHosts(ctx context.Context, remoteID string, vmid, generat
 }
 
 // SuggestHostsBatch computes the SuggestHosts candidates for every listed
-// guest incarnation of the remote. Managed hosts, IPAM assets and the
-// MACs of the remote's active guests are read once for the whole batch
-// instead of once per guest; the candidates are identical to calling
-// SuggestHosts per guest. Duplicate refs are computed once. The batch
-// fails as a whole (no partial result) when any guest is not an active
-// incarnation of the remote, and with ErrSuggestBatchTooLarge when more
-// than MaxSuggestBatch guests are listed.
+// guest incarnation of the remote. Managed hosts and IPAM assets are read
+// once for the whole batch, and the guests carrying a MAC once per
+// distinct MAC of the batch, instead of once per guest; the candidates
+// are identical to calling SuggestHosts per guest. Duplicate refs are
+// computed once. A guest that is not (or no longer) an active incarnation
+// of the remote is left out of the result, so callers treat a missing ref
+// as SuggestHosts' ErrGuestNotFound and one vanished guest does not fail
+// the others. Any other error fails the batch as a whole (no partial
+// result), as does listing more than MaxSuggestBatch guests
+// (ErrSuggestBatchTooLarge).
 func (s *Store) SuggestHostsBatch(ctx context.Context, remoteID string, guests []GuestRef) (map[GuestRef][]Candidate, error) {
+	return s.suggestHosts(ctx, remoteID, guests, false)
+}
+
+// Kinds of remote-wide suggestion reads reported to suggestReadHook.
+const (
+	suggestReadHosts  = "hosts"
+	suggestReadAssets = "assets"
+	suggestReadMAC    = "mac"
+)
+
+// suggestReadHook is nil in production. Tests set it to count the
+// remote-wide reads of the suggestion code (suggestRead* kinds).
+var suggestReadHook func(kind string)
+
+func suggestRead(kind string) {
+	if suggestReadHook != nil {
+		suggestReadHook(kind)
+	}
+}
+
+// suggestHosts implements SuggestHosts (strict: a guest that is not an
+// active incarnation fails the call) and SuggestHostsBatch (not strict:
+// such a guest is left out).
+func (s *Store) suggestHosts(ctx context.Context, remoteID string, guests []GuestRef, strict bool) (map[GuestRef][]Candidate, error) {
 	if len(guests) > MaxSuggestBatch {
 		return nil, fmt.Errorf("%w: %d guests, max %d", ErrSuggestBatchTooLarge, len(guests), MaxSuggestBatch)
 	}
-	// Per-guest facts first, so an unknown guest fails before the
+	// Per-guest facts first, so an unknown guest is known before the
 	// remote-wide reads (as SuggestHosts always did).
 	facts := make(map[GuestRef]guestFacts, len(guests))
+	seen := make(map[GuestRef]bool, len(guests))
 	for _, ref := range guests {
-		if _, ok := facts[ref]; ok {
+		if seen[ref] {
 			continue
 		}
+		seen[ref] = true
 		f, err := s.loadGuestFacts(ctx, remoteID, ref)
 		if err != nil {
+			if !strict && errors.Is(err, ErrGuestNotFound) {
+				continue
+			}
 			return nil, err
 		}
 		facts[ref] = f
@@ -543,6 +576,7 @@ type suggestIndex struct {
 // before).
 func (s *Store) loadSuggestIndex(ctx context.Context, remoteID string, facts map[GuestRef]guestFacts) (suggestIndex, error) {
 	// Managed hosts: endpoint addresses.
+	suggestRead(suggestReadHosts)
 	hosts, err := s.hostStore().List(ctx)
 	if err != nil {
 		return suggestIndex{}, fmt.Errorf("pveinventory: list managed hosts: %w", err)
@@ -559,6 +593,7 @@ func (s *Store) loadSuggestIndex(ctx context.Context, remoteID string, facts map
 	}
 
 	// IPAM assets: MACs and addresses with a managed host.
+	suggestRead(suggestReadAssets)
 	assets, err := s.ipamStore().Assets(ctx)
 	if err != nil {
 		return suggestIndex{}, fmt.Errorf("pveinventory: list ipam assets: %w", err)
@@ -582,6 +617,7 @@ func (s *Store) loadSuggestIndex(ctx context.Context, remoteID string, facts map
 			if _, ok := idx.guestsByMAC[mac]; ok {
 				continue
 			}
+			suggestRead(suggestReadMAC)
 			refs, err := s.guestRefsWithMAC(ctx, remoteID, mac)
 			if err != nil {
 				return suggestIndex{}, err

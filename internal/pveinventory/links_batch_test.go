@@ -149,29 +149,80 @@ func TestSuggestHostsBatchEmpty(t *testing.T) {
 	}
 }
 
-func TestSuggestHostsBatchRejectsUnknownGuest(t *testing.T) {
+// TestSuggestHostsBatchSkipsVanishedGuest checks that a guest which is not
+// (or no longer) an active incarnation of the remote is left out of the
+// batch result while the other guests keep their candidates, so one guest
+// vanishing during a page refresh does not blank every suggestion.
+// SuggestHosts still reports ErrGuestNotFound for that guest.
+func TestSuggestHostsBatchSkipsVanishedGuest(t *testing.T) {
 	s, refs := suggestFixture(t)
 	ctx := context.Background()
 	for name, tc := range map[string]struct {
 		remote string
 		ref    GuestRef
+		known  bool // refs[0] is an active guest of tc.remote
 	}{
-		"unknown vmid":       {"remote-a", GuestRef{VMID: 999, Generation: 1}},
-		"unknown generation": {"remote-a", GuestRef{VMID: 100, Generation: 2}},
-		"other remote":       {"remote-b", refs[0]},
+		"unknown vmid":       {"remote-a", GuestRef{VMID: 999, Generation: 1}, true},
+		"unknown generation": {"remote-a", GuestRef{VMID: 100, Generation: 2}, true},
+		"other remote":       {"remote-b", refs[1], false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got, err := s.SuggestHostsBatch(ctx, tc.remote, append([]GuestRef{refs[1]}, tc.ref))
-			if !errors.Is(err, ErrGuestNotFound) {
-				t.Fatalf("SuggestHostsBatch = %v, want ErrGuestNotFound", err)
+			got, err := s.SuggestHostsBatch(ctx, tc.remote, []GuestRef{refs[0], tc.ref})
+			if err != nil {
+				t.Fatalf("SuggestHostsBatch: %v", err)
 			}
-			if got != nil {
-				t.Fatalf("failed batch must not return partial results: %+v", got)
+			if _, ok := got[tc.ref]; ok {
+				t.Fatalf("vanished guest %+v in batch result: %+v", tc.ref, got)
+			}
+			if tc.known {
+				if len(got) != 1 || !reflect.DeepEqual(got[refs[0]], suggestGolden[refs[0]]) {
+					t.Fatalf("batch = %+v, want only guest 100 with its golden candidates", got)
+				}
+			} else if len(got) != 0 {
+				t.Fatalf("batch for unknown remote = %+v, want empty", got)
 			}
 			if _, err := s.SuggestHosts(ctx, tc.remote, tc.ref.VMID, tc.ref.Generation); !errors.Is(err, ErrGuestNotFound) {
 				t.Fatalf("SuggestHosts = %v, want ErrGuestNotFound", err)
 			}
 		})
+	}
+}
+
+// countSuggestReads counts the remote-wide reads of the suggestion code
+// (managed hosts, IPAM assets, guests per MAC) for the rest of the test.
+// Tests of this package do not run in parallel.
+func countSuggestReads(t *testing.T) map[string]int {
+	t.Helper()
+	counts := map[string]int{}
+	prev := suggestReadHook
+	suggestReadHook = func(kind string) { counts[kind]++ }
+	t.Cleanup(func() { suggestReadHook = prev })
+	return counts
+}
+
+// TestSuggestHostsBatchReadsHostsAndIPAMOnce pins the point of the batch:
+// for N guests the managed hosts and IPAM assets are read once and each
+// distinct MAC is looked up once, while N SuggestHosts calls read them N
+// times.
+func TestSuggestHostsBatchReadsHostsAndIPAMOnce(t *testing.T) {
+	s, refs := suggestFixture(t)
+	ctx := context.Background()
+	counts := countSuggestReads(t)
+	if _, err := s.SuggestHostsBatch(ctx, "remote-a", refs); err != nil {
+		t.Fatalf("SuggestHostsBatch: %v", err)
+	}
+	// Five distinct MACs: ee:01, ee:02, ee:03 (on 300 and 400), ee:05, ee:06.
+	if want := map[string]int{suggestReadHosts: 1, suggestReadAssets: 1, suggestReadMAC: 5}; !reflect.DeepEqual(counts, want) {
+		t.Fatalf("batch of %d guests reads = %v, want %v", len(refs), counts, want)
+	}
+	clear(counts)
+	for _, ref := range refs {
+		if _, err := s.SuggestHosts(ctx, "remote-a", ref.VMID, ref.Generation); err != nil {
+			t.Fatalf("SuggestHosts: %v", err)
+		}
+	}
+	if counts[suggestReadHosts] != len(refs) || counts[suggestReadAssets] != len(refs) {
+		t.Fatalf("per-guest reads = %v, want %d hosts and assets reads", counts, len(refs))
 	}
 }
 
