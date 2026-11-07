@@ -662,6 +662,116 @@ else
   fi
 fi
 
+# --- PVE spool guard, functional, no root needed ------------------------------
+# Runs the real guard block of install.sh against a sandbox var_lib: a file
+# or symlink swapped in at the pve root or a spool path must stop the
+# install before install -d -o -g follows it as root. The guard is the
+# install-side twin of the postinst's check (deploy/deb/postinst), which
+# refuses the same objects and points the admin to install.sh.
+pve_guard_block=$(sed -n '/^# begin: pve spool guard/,/^# end: pve spool guard/p' "$install_sh")
+pve_sb=$(mktemp -d)
+trap 'rm -rf "$refresh_sb" "$pve_sb"' EXIT
+
+# run_pve_guard: the real guard block against pve_sb/var, under set -e like
+# the real script. The output (with stderr) lands in pve_out, the exit
+# status in pve_rc.
+run_pve_guard() {
+  pve_out=$(
+    exec 2>&1
+    set -euo pipefail
+    var_lib="$pve_sb/var"
+    eval "$pve_guard_block"
+    echo "END"
+  )
+  pve_rc=$?
+  refresh_out="$pve_out" # expect prints it on a failure
+}
+pve_reset() {
+  rm -rf "$pve_sb/var"
+  mkdir -p "$pve_sb/var"
+}
+pve_rc_is() { [[ "$pve_rc" -eq "$1" ]]; }
+pve_out_has() { [[ "$pve_out" == *"$1"* ]]; }
+pve_out_lacks() { [[ "$pve_out" != *"$1"* ]]; }
+
+if [[ -z "$pve_guard_block" ]]; then
+  echo "FAIL install.sh has no pve spool guard block"
+  fail=$((fail + 1))
+else
+  # The guard must use the postinst's directory/link check, on every pve
+  # path, before install -d runs on the pve root.
+  if printf '%s\n' "$pve_guard_block" | grep -qF 'if [[ -L "$pve_path" ]] || { [[ -e "$pve_path" ]] && [[ ! -d "$pve_path" ]]; }; then'; then
+    echo "ok   the pve spool guard uses the postinst's directory/link check"
+    pass=$((pass + 1))
+  else
+    echo "FAIL the pve spool guard does not use the postinst's directory/link check"
+    fail=$((fail + 1))
+  fi
+  guard_paths=$(printf '%s\n' "$pve_guard_block" | grep -o '"\${var_lib}/pve[^"]*"')
+  expected_pve_paths=$(printf '"%s"\n' '${var_lib}/pve' '${var_lib}/pve/results' '${var_lib}/pve/guestnet' '${var_lib}/pve/requests' '${var_lib}/pve/live')
+  if [[ "$guard_paths" == "$expected_pve_paths" ]]; then
+    echo "ok   the pve spool guard covers the pve root and every spool path"
+    pass=$((pass + 1))
+  else
+    echo "FAIL the pve spool guard does not cover the pve root and every spool path"
+    printf '%s\n' "$guard_paths" | sed 's/^/     got: /'
+    fail=$((fail + 1))
+  fi
+  guard_end_line=$(grep -n '^# end: pve spool guard$' "$install_sh" | cut -d: -f1)
+  pve_install_line=$(grep -n '^install -d -m 2750 -o nebula-pve-collector -g nebula-rpc "\${var_lib}/pve"$' "$install_sh" | cut -d: -f1)
+  if [[ -n "$guard_end_line" && -n "$pve_install_line" && "$guard_end_line" -lt "$pve_install_line" ]]; then
+    echo "ok   the pve spool guard runs before install -d on the pve root"
+    pass=$((pass + 1))
+  else
+    echo "FAIL the pve spool guard must run before install -d on the pve root"
+    fail=$((fail + 1))
+  fi
+
+  # A fresh host: nothing at the pve paths, the guard passes.
+  pve_reset
+  run_pve_guard
+  expect "pve guard: a fresh host passes" pve_rc_is 0
+  expect "pve guard: a fresh host reaches the end" pve_out_has 'END'
+
+  # Real directories at every pve path: the guard passes.
+  pve_reset
+  mkdir -p "$pve_sb/var/pve/results" "$pve_sb/var/pve/guestnet" "$pve_sb/var/pve/requests" "$pve_sb/var/pve/live"
+  run_pve_guard
+  expect "pve guard: real directories pass" pve_rc_is 0
+
+  # A symlink or a file at the pve root or a spool path stops the install
+  # before install -d follows it. <path relative to var_lib> <how>
+  while read -r rel how; do
+    pve_reset
+    parent=$(dirname "$pve_sb/var/$rel")
+    mkdir -p "$parent"
+    case "$how" in
+      link)
+        mkdir -p "$pve_sb/target"
+        ln -s "$pve_sb/target" "$pve_sb/var/$rel"
+        ;;
+      file)
+        printf 'swapped in\n' > "$pve_sb/var/$rel"
+        ;;
+    esac
+    run_pve_guard
+    expect "pve guard: ${how} at ${rel} is refused" pve_rc_is 1
+    expect "pve guard: ${how} at ${rel} names the path" pve_out_has "$pve_sb/var/$rel"
+    expect "pve guard: ${how} at ${rel} does not reach the end" pve_out_lacks 'END'
+  done <<'CASES'
+pve link
+pve file
+pve/results link
+pve/results file
+pve/guestnet link
+pve/guestnet file
+pve/requests link
+pve/requests file
+pve/live link
+pve/live file
+CASES
+fi
+
 # --- Unit refresh wiring in install.sh (static) -------------------------------
 # refresh_units runs for tarball installs only: under --from-package the
 # package manager owns the units in /lib/systemd/system. It runs before the

@@ -281,6 +281,20 @@ install -d -m 2750 -o nebula-discovery -g nebula-server "${var_lib}/discovery/re
 # results/ and guestnet/ for that). setgid so a file written by the collector
 # inherits the shared group, which the server can read. The root is 0750 (not
 # world-readable) because it holds PVE data.
+# begin: pve spool guard
+# install -d follows a symlink, so a link swapped in at the pve root or a
+# spool path would hand its target to the collector (mode, owner and group
+# applied as root), and a file is not a directory the spool can use. The
+# postinst's guard refuses both and points the admin to this install, so the
+# install must refuse them too, before install -d runs (follow-up to #343).
+for pve_path in "${var_lib}/pve" "${var_lib}/pve/results" "${var_lib}/pve/guestnet" "${var_lib}/pve/requests" "${var_lib}/pve/live"; do
+  if [[ -L "$pve_path" ]] || { [[ -e "$pve_path" ]] && [[ ! -d "$pve_path" ]]; }; then
+    echo "install.sh: ${pve_path} is a file or a symlink, not a directory; refusing to follow it" >&2
+    echo "install.sh: inspect it (ls -ld ${pve_path}), remove it if it is not yours, and run install.sh again" >&2
+    exit 1
+  fi
+done
+# end: pve spool guard
 install -d -m 2750 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve"
 install -d -m 2770 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/results"
 # Guest NIC records (same handoff as results). Created here with its final
