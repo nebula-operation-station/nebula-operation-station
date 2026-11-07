@@ -54,11 +54,21 @@ func (h *Handler) privilegedFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess, _ := SessionFrom(r.Context())
+	// Wrap only routes here with a valid session cookie; the opener becomes
+	// the holder of exactly this executor session (holder.go).
+	if c, err := r.Cookie(CookieName); err == nil {
+		h.recordHolder(c.Value, sess, res.GetSessionExpiryUnix())
+	} else {
+		h.clearHolder()
+	}
 	h.log.Info("audit", "kind", "privileged_session_opened", "user", sess.UserName, "credential", sess.CredentialID)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "expiry_unix": res.GetSessionExpiryUnix()})
 }
 
 func (h *Handler) executorLock(w http.ResponseWriter, r *http.Request) {
+	// The holder ends with the lock; it is dropped even if the lock call
+	// fails (fail closed: the opener can open a new session).
+	h.clearHolder()
 	ctx, cancel := context.WithTimeout(r.Context(), executorCallTimeout)
 	defer cancel()
 	if _, err := h.exec.Lock(ctx, &pb.LockRequest{}); err != nil {

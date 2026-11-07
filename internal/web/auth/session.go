@@ -119,6 +119,7 @@ func (h *Handler) PeekRegistered(ctx context.Context, token string) (Session, er
 		return Session{}, err
 	}
 	if !h.credentialStillRegistered(ctx, token, sess) {
+		h.clearHolderOf(token)
 		if err := h.sessions.Delete(ctx, token); err != nil {
 			h.log.Error("delete revoked session", "error", err)
 		}
