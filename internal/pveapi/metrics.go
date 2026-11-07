@@ -23,9 +23,10 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"regexp"
 	"strings"
 	"time"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 )
 
 // Sentinel errors. Callers branch on these with errors.Is.
@@ -142,14 +143,6 @@ func NewMetricsClient(base string, hc *http.Client, auth AuthHeaderSupplier, opt
 		return nil, fmt.Errorf("%w: per-call timeout %s below 1 ms", ErrBadParam, c.timeout)
 	}
 	return c, nil
-}
-
-// nodeRe accepts PVE node names (hostnames) and rejects anything that
-// could escape the /nodes/{node} path segment.
-var nodeRe = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$`)
-
-func validNode(node string) bool {
-	return nodeRe.MatchString(node)
 }
 
 func (k GuestKind) valid() bool {
@@ -377,7 +370,7 @@ func checkStatusString(field string, v *string) (string, error) {
 // response with out-of-domain values returns ErrInvalidRange.
 func (c *MetricsClient) NodeStatus(ctx context.Context, node string) (NodeMetrics, error) {
 	var zero NodeMetrics
-	if !validNode(node) {
+	if !pvecontract.ValidNodeLabel(node) {
 		return zero, fmt.Errorf("%w: node %q", ErrBadParam, node)
 	}
 	endpointPath := "/nodes/" + node + "/status"
@@ -432,7 +425,7 @@ func (c *MetricsClient) NodeStatus(ctx context.Context, node string) (NodeMetric
 // fields then stay nil (missing), which is not an error.
 func (c *MetricsClient) GuestStatus(ctx context.Context, node string, kind GuestKind, vmid int) (GuestMetrics, error) {
 	var zero GuestMetrics
-	if !validNode(node) {
+	if !pvecontract.ValidNodeLabel(node) {
 		return zero, fmt.Errorf("%w: node %q", ErrBadParam, node)
 	}
 	if !kind.valid() {
@@ -582,7 +575,7 @@ func (p guestRRDPointRaw) validate(endpointPath string, i int) error {
 // A successful response with no points returns an empty slice, not an
 // error (empty is distinct from unavailable).
 func (c *MetricsClient) NodeRRDData(ctx context.Context, node string, tf Timeframe, memTotalBytes int64) ([]RRDPoint, error) {
-	if !validNode(node) {
+	if !pvecontract.ValidNodeLabel(node) {
 		return nil, fmt.Errorf("%w: node %q", ErrBadParam, node)
 	}
 	if !tf.valid() {
@@ -630,7 +623,7 @@ func (c *MetricsClient) NodeRRDData(ctx context.Context, node string, tf Timefra
 // A successful response with no points returns an empty slice, not an
 // error (empty is distinct from unavailable).
 func (c *MetricsClient) GuestRRDData(ctx context.Context, node string, kind GuestKind, vmid int, tf Timeframe) ([]RRDPoint, error) {
-	if !validNode(node) {
+	if !pvecontract.ValidNodeLabel(node) {
 		return nil, fmt.Errorf("%w: node %q", ErrBadParam, node)
 	}
 	if !kind.valid() {

@@ -45,7 +45,15 @@ var (
 	ErrReplayed = errors.New("pvecollect: replayed observation")
 	// ErrBadName means a spool file name is malformed.
 	ErrBadName = errors.New("pvecollect: malformed spool file name")
+	// ErrInvalidObservation means a spool file itself is at fault: its
+	// content was read completely and failed validation, or it is not a
+	// regular file within the size limit. Only such a file may be discarded;
+	// any other read error says nothing about the observation.
+	ErrInvalidObservation = errors.New("pvecollect: invalid spool observation")
 )
+
+// errNonRegular means an operation refused a file that is not regular.
+var errNonRegular = errors.New("pvecollect: nonregular spool file")
 
 var spoolNameRe = regexp.MustCompile(`^([a-z0-9][a-z0-9-]{0,63})\.gen-([0-9]{20})\.json$`)
 
@@ -57,8 +65,11 @@ type Spool struct {
 	rootDir    *os.File
 	resultsDir *os.File
 	writer     bool
-	mu         sync.Mutex
-	seen       map[string]watermark
+	// read loads a pending file for the importers; it is readAt outside
+	// tests.
+	read func(dir *os.File, name string, limit int64) ([]byte, error)
+	mu   sync.Mutex
+	seen map[string]watermark
 }
 
 type watermark struct {
@@ -103,7 +114,7 @@ func openSpool(root string, writer bool) (*Spool, error) {
 			return fail(err)
 		}
 	}
-	return &Spool{root: root, results: filepath.Join(root, resultsDirName), rootDir: dir, resultsDir: results, writer: writer, seen: make(map[string]watermark)}, nil
+	return &Spool{root: root, results: filepath.Join(root, resultsDirName), rootDir: dir, resultsDir: results, writer: writer, read: readAt, seen: make(map[string]watermark)}, nil
 }
 
 // openDirPath walks from /, pinning and rejecting symlinks at every component.
@@ -191,7 +202,7 @@ func readAt(dir *os.File, name string, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	if !fi.Mode().IsRegular() {
-		return nil, errors.New("pvecollect: nonregular spool file")
+		return nil, errNonRegular
 	}
 	if fi.Size() > limit {
 		return nil, ErrOversize
@@ -204,6 +215,12 @@ func readAt(dir *os.File, name string, limit int64) ([]byte, error) {
 		return nil, ErrOversize
 	}
 	return raw, nil
+}
+
+// fileFault reports whether a readAt error is a fault of the file itself
+// rather than of the attempt to open or read it.
+func fileFault(err error) bool {
+	return errors.Is(err, ErrSymlink) || errors.Is(err, ErrOversize) || errors.Is(err, errNonRegular)
 }
 
 // writeAt publishes a fully written file relative to the pinned directory.
@@ -280,22 +297,27 @@ func (s *Spool) WriteFile(_ context.Context, obs pvecontract.Observation) (strin
 }
 
 // ReadFile reads and revalidates a named observation, including its identity
-// and generation, through the pinned results directory descriptor.
+// and generation, through the pinned results directory descriptor. Errors
+// that condemn the file wrap ErrInvalidObservation; any other error leaves
+// the observation unjudged.
 func (s *Spool) ReadFile(_ context.Context, name string) (pvecontract.Observation, error) {
 	remoteID, gen, err := parseSpoolName(name)
 	if err != nil {
 		return pvecontract.Observation{}, err
 	}
-	raw, err := readAt(s.resultsDir, name, maxSpoolFileBytes)
+	raw, err := s.read(s.resultsDir, name, maxSpoolFileBytes)
 	if err != nil {
+		if fileFault(err) {
+			return pvecontract.Observation{}, fmt.Errorf("%w: %w", ErrInvalidObservation, err)
+		}
 		return pvecontract.Observation{}, err
 	}
 	obs, err := pvecontract.DecodeObservation(raw)
 	if err != nil {
-		return pvecontract.Observation{}, fmt.Errorf("pvecollect: decode observation: %w", err)
+		return pvecontract.Observation{}, fmt.Errorf("%w: decode: %w", ErrInvalidObservation, err)
 	}
 	if obs.RemoteID != remoteID || obs.CollectionGeneration != gen {
-		return pvecontract.Observation{}, errors.New("pvecollect: observation identity mismatch")
+		return pvecontract.Observation{}, fmt.Errorf("%w: identity does not match the file name", ErrInvalidObservation)
 	}
 	return obs, nil
 }

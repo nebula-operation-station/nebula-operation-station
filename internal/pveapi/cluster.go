@@ -25,6 +25,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 )
 
 // Limits, named next to the code that enforces them (ADR 0006 response
@@ -301,7 +303,7 @@ func (c *Client) ClusterNodeVotes(ctx context.Context) (NodeVotes, error) {
 	}
 	out := NodeVotes{Available: true, Votes: make(map[string]int, len(*entries))}
 	for _, e := range *entries {
-		if !nodeNameRe.MatchString(e.Node) {
+		if !pvecontract.ValidNodeLabel(e.Node) {
 			return NodeVotes{}, fmt.Errorf("%w: invalid cluster config node name", ErrMalformed)
 		}
 		if _, dup := out.Votes[e.Node]; dup {
@@ -383,7 +385,7 @@ const lrmMaintenanceMarker = "(maintenance mode,"
 
 // haLRM records one lrm entry of /cluster/ha/status/current into modes.
 func haLRM(e haStatusEntry, modes map[string]bool) error {
-	if !nodeNameRe.MatchString(e.Node) || e.ID != "lrm:"+e.Node {
+	if !pvecontract.ValidNodeLabel(e.Node) || e.ID != "lrm:"+e.Node {
 		return fmt.Errorf("%w: inconsistent ha lrm entry", ErrMalformed)
 	}
 	if _, dup := modes[e.Node]; dup {
