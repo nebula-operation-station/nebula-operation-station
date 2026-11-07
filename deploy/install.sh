@@ -350,29 +350,43 @@ fi
 # Like units_manifest it holds shipped checksums only.
 units_pending="${var_lib}/units.pending"
 
-# record_collector_restart puts the collector restart on the pending record,
-# with the shipped checksum of its unit (as clear_pending_units does), so that
-# a run that stops before the restart leaves it due for the next run.
-record_collector_restart() {
+# restart_units are the units that new binaries make due for a restart, in
+# the order the restart step restarts them: the executor before the collector.
+restart_units=(
+  nebula-server.service
+  nebula-executor.service
+  nebula-pve-collector.service
+)
+
+# record_restart NAME puts the restart of NAME on the pending record, with the
+# shipped checksum of its unit (as clear_pending_units does), so that a run
+# that stops before the restart leaves it due for the next run.
+record_restart() {
   local sum
-  sum=$(sha256sum "${script_dir}/systemd/nebula-pve-collector.service" | cut -d' ' -f1)
-  printf '%s  %s\n' "${sum}" nebula-pve-collector.service >> "${units_pending}"
+  sum=$(sha256sum "${script_dir}/systemd/$1" | cut -d' ' -f1)
+  printf '%s  %s\n' "${sum}" "$1" >> "${units_pending}"
 }
 # end: pending record
 
 # --- Binaries (replaced on every run; detect real changes) ------------------
 # begin: install binaries
-# New binaries make the collector restart due (bin_changed below), but
-# bin_changed lives only in this run: once the binaries are in place, a re-run
-# of the same tarball sees none changed. So when an installed collector binary
-# exists and any binary will change, the restart goes on the pending record
-# first, before a binary is replaced; the restart step clears it once the
-# restart happened (or the unit is stopped), and keeps it if it was skipped.
+# New binaries make the server, executor and collector restarts due
+# (bin_changed below), but bin_changed lives only in this run: once the
+# binaries are in place, a re-run of the same tarball sees none changed. So
+# when any binary will change, the restart of each of these units whose binary
+# is installed (an upgrade, not a first install) goes on the pending record
+# first, before a binary is replaced. The record is cleared only at the end of
+# the restart step, after each restart happened (or found the unit stopped);
+# a skipped collector restart stays on it.
 bin_changed=0
-if [[ ${from_package} -eq 0 && -e "${bin_dir}/nebula-pve-collector" ]]; then
+if [[ ${from_package} -eq 0 ]]; then
   for bin in "${binaries[@]}"; do
     if ! cmp -s "${tarball_root}/${bin}" "${bin_dir}/${bin}"; then
-      record_collector_restart
+      for name in "${restart_units[@]}"; do
+        if [[ -e "${bin_dir}/${name%.service}" ]]; then
+          record_restart "${name}"
+        fi
+      done
       break
     fi
   done
@@ -435,7 +449,7 @@ package_units=(
 units_manifest="${var_lib}/units.sha256"
 
 # units_pending (the write-ahead record of a run) is defined above the binary
-# install, which may already put the collector restart on it.
+# install, which may already put the restarts of restart_units on it.
 
 # Every version shipped before units_manifest existed. Hosts installed then
 # have no recorded checksum, and without this list their units would all
@@ -547,9 +561,11 @@ refresh_units() {
   # up to date); so does one the binary install of this run put on record.
   # Looked up before the loop, which puts the units it installs on record, or
   # a first install would count as well.
-  if unit_pending nebula-pve-collector.service; then
-    refreshed_units+=(nebula-pve-collector.service)
-  fi
+  for name in "${restart_units[@]}"; do
+    if unit_pending "${name}"; then
+      refreshed_units+=("${name}")
+    fi
+  done
   for name in "${tarball_units[@]}"; do
     shipped="${script_dir}/systemd/${name}"
     target="${systemd_dir}/${name}"
@@ -835,7 +851,17 @@ fi
 # stubbed systemctl and runuser).
 # begin: collector restart on upgrade
 executor_sock="${NEBULA_EXECUTOR_SOCK:-/run/nebula/executor.sock}"
-collector_restart_wait_s="${NEBULA_COLLECTOR_RESTART_WAIT_S:-30}"
+# The wait goes into bash arithmetic, which evaluates expressions (and command
+# substitutions in array subscripts): only a plain non-negative integer of at
+# most 6 digits (collector_restart_wait_pattern; no leading zero, which would
+# be octal) is used; anything else falls back to the default with a warning.
+collector_restart_wait_default_s=30
+collector_restart_wait_pattern='^(0|[1-9][0-9]{0,5})$'
+collector_restart_wait_s="${NEBULA_COLLECTOR_RESTART_WAIT_S:-${collector_restart_wait_default_s}}"
+if [[ ! "${collector_restart_wait_s}" =~ ${collector_restart_wait_pattern} ]]; then
+  echo "install.sh: warning: NEBULA_COLLECTOR_RESTART_WAIT_S is not a non-negative integer of at most 6 digits; using ${collector_restart_wait_default_s}s" >&2
+  collector_restart_wait_s="${collector_restart_wait_default_s}"
+fi
 collector_restart_skipped=0
 # executor_answers succeeds only if the executor served a status call. The
 # timeout bounds a listener that accepts and then hangs.
