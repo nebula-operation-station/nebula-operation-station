@@ -39,7 +39,7 @@ func newHolderEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	e :=&env{t: t, exec: &fakeExec{}, db: db, clk: &clock{t: time.Now()}}
+	e := &env{t: t, exec: &fakeExec{}, db: db, clk: &clock{t: time.Now()}}
 	e.store = auth.NewStore(db, e.clk.now)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	a, err := auth.New(auth.Options{Executor: e.exec, Sessions: e.store, Log: log})
