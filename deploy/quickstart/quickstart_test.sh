@@ -64,58 +64,70 @@ done
 # --- 3. No hardcoded second copy of the list remains ------------------------
 # A for-loop over literal binary names, or a literal array of them, is the
 # drift this guards against: the scripts must iterate the loaded array.
+#
+# count_names prints how many of the expected binary names appear as whole
+# tokens in the given text. Names are extracted as runs of [A-Za-z0-9.-], so
+# quoted names, names at the start or end of an array, and backslash-
+# continued word lists all match; keeping the dot inside the token means a
+# unit file like nebula-server.service does not match the binary nebula-server.
+count_names() {
+  local text="$1" name tok found
+  local -a toks=()
+  mapfile -t toks < <(printf '%s' "$text" | grep -oE '[A-Za-z0-9.-]+' || true)
+  local n=0
+  for name in "${expected[@]}"; do
+    found=0
+    for tok in "${toks[@]}"; do
+      if [[ "$tok" == "$name" ]]; then found=1; break; fi
+    done
+    (( found )) && n=$((n + 1))
+  done
+  printf '%s' "$n"
+}
 # find_hardcoded prints one line per hardcoded list it finds:
-#   - a for-loop (quoted or unquoted) whose word list names a binary,
-#   - an array literal (single- or multi-line) holding two or more names.
+#   - a for-loop (quoted or unquoted, backslash-continued) whose word list
+#     names at least one binary,
+#   - an array literal (plain name=(, name+=(, or declare -a name=,
+#     single- or multi-line) holding two or more names.
 # Message lines may name binaries in prose; only loops and arrays count.
 find_hardcoded() {
-  local s="$1" line rest tok name n
-  local -a block=()
-  while IFS= read -r line; do
-    if [[ ${#block[@]} -gt 0 ]]; then
-      block+=("$line")
-      if [[ "$line" == *")"* ]]; then
-        n=0
-        for name in "${expected[@]}"; do
-          for l in "${block[@]}"; do
-            [[ " $l " == *" $name "* ]] && n=$((n + 1))
-          done
-        done
-        if [[ $n -ge 2 ]]; then
-          printf '%s: %s\n' "$(basename -- "$s")" "${block[0]}"
-        fi
-        block=()
-      fi
-      continue
-    fi
-    if [[ "$line" =~ ^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=\( ]]; then
+  local s="$1" line rest n
+  local -a lines=() block=()
+  mapfile -t lines < <(grep -vE '^[[:space:]]*#' "$s")
+  local i=0
+  while (( i < ${#lines[@]} )); do
+    line="${lines[i]}"
+    i=$((i + 1))
+    # array literal: name=(, name+=(, or declare -a name=(
+    if [[ "$line" =~ ^[[:space:]]*(declare[[:space:]]+(-[aA][[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*)[+]?=\( ]]; then
       block=("$line")
-      if [[ "$line" == *")"* ]]; then
-        n=0
-        for name in "${expected[@]}"; do
-          [[ " $line " == *" $name "* ]] && n=$((n + 1))
+      if [[ "$line" != *")"* ]]; then
+        while (( i < ${#lines[@]} )); do
+          line="${lines[i]}"
+          i=$((i + 1))
+          block+=("$line")
+          [[ "$line" == *")"* ]] && break
         done
-        if [[ $n -ge 2 ]]; then
-          printf '%s: %s\n' "$(basename -- "$s")" "$line"
-        fi
-        block=()
+      fi
+      n=$(count_names "$(printf '%s\n' "${block[@]}")")
+      if (( n >= 2 )); then
+        printf '%s: %s\n' "$(basename -- "$s")" "${block[0]}"
       fi
       continue
     fi
+    # for-loop over literal names (possibly backslash-continued)
     if [[ "$line" =~ ^[[:space:]]*for[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+in[[:space:]]+(.*)$ ]]; then
-      rest=${BASH_REMATCH[1]//\"/}
-      rest=${rest//\'/}
-      n=0
-      for tok in $rest; do
-        for name in "${expected[@]}"; do
-          [[ "$tok" == "$name" ]] && n=1
-        done
+      rest="${BASH_REMATCH[1]}"
+      while [[ "$rest" == *"\\" ]] && (( i < ${#lines[@]} )); do
+        rest="$rest ${lines[i]}"
+        i=$((i + 1))
       done
-      if [[ $n -eq 1 ]]; then
+      n=$(count_names "$rest")
+      if (( n >= 1 )); then
         printf '%s: %s\n' "$(basename -- "$s")" "$line"
       fi
     fi
-  done < <(grep -vE '^[[:space:]]*#' "$s")
+  done
 }
 hardcoded=()
 for s in "$setup_sh" "$install_sh" "$uninstall_sh"; do
@@ -129,7 +141,8 @@ else
   bad "no hardcoded binary list loop remains in the scripts (${hardcoded[*]})"
 fi
 # The guard must catch the variants it exists for: unquoted and quoted
-# loops, single-line and multi-line array literals.
+# loops (including a backslash-continued one), single-line and multi-line
+# array literals (plain, fully-quoted, declare -a, and += forms).
 fixture=$(mktemp)
 cat > "$fixture" <<'FIX'
 for bin in nebula nebula-server nebula-executor nebula-discovery nebula-pve-collector; do
@@ -138,18 +151,27 @@ done
 for bin in "nebula" "nebula-server" "nebula-executor" "nebula-discovery" "nebula-pve-collector"; do
   rm -f /usr/bin/$bin
 done
+for bin in \
+  nebula \
+  nebula-server; do
+  rm -f /usr/bin/$bin
+done
 binaries=(nebula nebula-server nebula-executor nebula-discovery nebula-pve-collector)
+binaries=("nebula" "nebula-server" "nebula-executor" "nebula-discovery" "nebula-pve-collector")
 units=(
   nebula
   nebula-server
 )
+declare -a units2=(nebula nebula-server)
+units3=()
+units3+=(nebula nebula-server)
 FIX
 hits=$(find_hardcoded "$fixture")
 rm -f "$fixture"
-if [[ $(printf '%s\n' "$hits" | grep -c .) -eq 4 ]]; then
-  ok "case 3 guard catches all four hardcoded variants"
+if [[ $(printf '%s\n' "$hits" | grep -c .) -eq 8 ]]; then
+  ok "case 3 guard catches all eight hardcoded variants"
 else
-  bad "case 3 guard catches all four hardcoded variants (got: ${hits@Q})"
+  bad "case 3 guard catches all eight hardcoded variants (got: ${hits@Q})"
 fi
 
 # --- 4. Functional: the copy block of setup-nebula.sh copies all five -------
@@ -216,15 +238,23 @@ else
 fi
 
 # --- 6. Functional: the remove block of uninstall.sh removes all five -------
-# The block must remove every binary from the shared list, not a
-# hardcoded copy (the old copy lacked nebula-pve-collector).
+# The remove block must remove every binary from the array the CHECK block
+# produces (not a list the test fills itself): the check block is the real
+# code path from the list file to the remove loop, so a truncation inside it
+# (binaries=("${binaries[@]:0:4}")) or an omission (the block no longer
+# setting binaries) must leave a binary behind here.
 mkdir -p "$sandbox/usrbin"
 for b in "${expected[@]}"; do
   printf '#!/bin/sh\n' > "$sandbox/usrbin/$b"
 done
 script_dir="$sandbox/deploy"
 bin_dir="$sandbox/usrbin"
-mapfile -t binaries < <(read_binaries "$sandbox/deploy/quickstart/binaries.txt")
+# the check block of uninstall.sh, without its begin/end markers
+mapfile -t ucheck_block < <(sed -n '/^# begin: check binary list/,/^# end: check binary list/p' "$uninstall_sh" | grep -v '^# \(begin\|end\): check binary list$')
+# run the check block in a subshell (binaries unset) and print the array it
+# sets: the end-to-end link from the list file to the remove loop
+ucheck_yield() { ( unset binaries; eval "$(printf '%s\n' "${ucheck_block[@]}")"; if [[ ${#binaries[@]} -gt 0 ]]; then printf '%s\n' "${binaries[@]}"; fi ); }
+mapfile -t binaries < <(ucheck_yield)
 mapfile -t remove_block < <(sed -n '/^# begin: remove binaries/,/^# end: remove binaries/p' "$uninstall_sh" | grep -v '^# \(begin\|end\): remove binaries$')
 if [[ ${#remove_block[@]} -gt 0 ]] && ( eval "$(printf '%s\n' "${remove_block[@]}")" ); then
   left=()
@@ -241,16 +271,18 @@ else
 fi
 
 # --- 6b. Functional: the list check of uninstall.sh runs before removal -----
-# The check must pass on the valid list, fail on a missing, comments-only or
-# invalid list, and it must be placed before the first removal in the script:
-# a missing list must not leave the system half uninstalled (units stopped,
-# binaries still to go).
+# The check must yield exactly the five names on the valid list (the
+# end-to-end link from the list file to the remove block), fail on a
+# missing, comments-only or invalid list, and it must be placed before the
+# first removal in the script: a missing list must not leave the system half
+# uninstalled (units stopped, binaries still to go).
 mapfile -t ucheck_block < <(sed -n '/^# begin: check binary list/,/^# end: check binary list/p' "$uninstall_sh" | grep -v '^# \(begin\|end\): check binary list$')
 script_dir="$sandbox/deploy"
-if [[ ${#ucheck_block[@]} -gt 0 ]] && ( eval "$(printf '%s\n' "${ucheck_block[@]}")" ); then
-  ok "uninstall.sh list check passes on the valid list"
+ucheck_out=$(ucheck_yield 2>/dev/null)
+if [[ "$ucheck_out" == "$(printf '%s\n' "${expected[@]}")" ]]; then
+  ok "uninstall.sh list check yields exactly the five binaries"
 else
-  bad "uninstall.sh list check passes on the valid list (block missing or failed)"
+  bad "uninstall.sh list check yields exactly the five binaries (got: ${ucheck_out@Q})"
 fi
 mv "$sandbox/deploy/quickstart/binaries.txt" "$sandbox/blist.bak"
 if ( eval "$(printf '%s\n' "${ucheck_block[@]}")" ); then
@@ -272,13 +304,44 @@ else
   ok "uninstall.sh list check fails on an invalid line"
 fi
 cp "$list_file" "$sandbox/deploy/quickstart/binaries.txt"
-check_ln=$(grep -n '^# begin: check binary list' "$uninstall_sh" | head -1 | cut -d: -f1)
-first_rm_ln=$(grep -nE '^[[:space:]]*(systemctl (stop|disable)|rm -f --|rmdir --)' "$uninstall_sh" | head -1 | cut -d: -f1)
-if [[ -n "${check_ln:-}" && -n "${first_rm_ln:-}" && $check_ln -lt $first_rm_ln ]]; then
+# The check must run before the first removal. Run a sandboxed copy of
+# uninstall.sh with stub systemctl/rm/rmdir that record their calls and a
+# binaries_lib.sh that records when it is sourced (the check block sources
+# it); the check must appear before the first removal in the call log. A
+# removal placed above the check block (rm -rf, rm -f without --, or
+# [[ -e x ]] && systemctl stop y) or a check wrapped in a function called
+# after the removals must break the order.
+order_sandbox=$(mktemp -d)
+mkdir -p "$order_sandbox/deploy/quickstart" "$order_sandbox/deploy/systemd" \
+         "$order_sandbox/bin" "$order_sandbox/etc/systemd/system" "$order_sandbox/usr/bin"
+cp "$list_file" "$order_sandbox/deploy/quickstart/binaries.txt"
+{ echo 'echo "check" >> "${NEBULA_CALL_LOG}"'; cat "$(dirname "$list_file")/binaries_lib.sh"; } > "$order_sandbox/deploy/quickstart/binaries_lib.sh"
+for u in nebula-server.service nebula-executor.service nebula-pve-collector.service nebula-discovery.path nebula-discovery.timer; do
+  : > "$order_sandbox/deploy/systemd/$u"
+  : > "$order_sandbox/etc/systemd/system/$u"
+done
+for b in "${expected[@]}"; do : > "$order_sandbox/usr/bin/$b"; done
+for stub in systemctl rm rmdir; do
+  printf '#!/bin/sh\necho "%s $*" >> "${NEBULA_CALL_LOG}"\nexit 0\n' "$stub" > "$order_sandbox/bin/$stub"
+  chmod +x "$order_sandbox/bin/$stub"
+done
+sed -e 's|^systemd_dir=/etc/systemd/system$|systemd_dir="${NEBULA_SYSTEMD_DIR:-/etc/systemd/system}"|' \
+    -e 's|^bin_dir=/usr/bin$|bin_dir="${NEBULA_BIN_DIR:-/usr/bin}"|' \
+    -e 's|\[\[ ${EUID} -ne 0 \]\]|false|' \
+    "$uninstall_sh" > "$order_sandbox/deploy/uninstall.sh"
+chmod +x "$order_sandbox/deploy/uninstall.sh"
+NEBULA_CALL_LOG="$order_sandbox/call.log" \
+NEBULA_SYSTEMD_DIR="$order_sandbox/etc/systemd/system" \
+NEBULA_BIN_DIR="$order_sandbox/usr/bin" \
+PATH="$order_sandbox/bin:$PATH" bash "$order_sandbox/deploy/uninstall.sh" >/dev/null 2>&1 || true
+check_idx=$(grep -n '^check$' "$order_sandbox/call.log" | head -1 | cut -d: -f1)
+first_rm_idx=$(grep -nE '^(systemctl|rm|rmdir) ' "$order_sandbox/call.log" | head -1 | cut -d: -f1)
+if [[ -n "${check_idx:-}" && -n "${first_rm_idx:-}" && $check_idx -lt $first_rm_idx ]]; then
   ok "uninstall.sh checks the list before the first removal"
 else
-  bad "uninstall.sh checks the list before the first removal (check at ${check_ln:-?}, first removal at ${first_rm_ln:-?})"
+  bad "uninstall.sh checks the list before the first removal (check at ${check_idx:-?}, first removal at ${first_rm_idx:-?})"
 fi
+rm -rf "$order_sandbox"
 
 # --- 7. Functional: the layout check of install.sh (both paths) -------------
 # from-package: the five binaries must exist in bin_dir; a missing one must
@@ -442,6 +505,17 @@ if [[ -f "$goreleaser" && -f "$dockerfile" ]]; then
   else
     bad "Dockerfile COPY list matches binaries.txt exactly (copy: ${copy_files[*]:-<none>}; list: ${expected[*]})"
   fi
+  # 9d: the dockers ids (binaries the image build expects) match the list;
+  # a binary added to the list, nfpm ids and COPY but not the dockers ids
+  # breaks the image build at release, so it must be checked here too.
+  dockers_block=$(awk '/^dockers:/{f=1;next} f&&/^[a-z]/{f=0} f' "$goreleaser")
+  dockers_ids_line=$(grep -E '^[[:space:]]*ids:' <<< "$dockers_block" | head -1)
+  dockers_ids=$(sed -E 's/^[[:space:]]*ids:[[:space:]]*\[//; s/\][[:space:]]*$//' <<< "$dockers_ids_line" | tr ',' '\n' | tr -d ' \t' | grep -v '^$' | sort)
+  if [[ -n "$dockers_ids" && "$dockers_ids" == "$list_sorted" ]]; then
+    ok ".goreleaser.yaml dockers ids match binaries.txt exactly"
+  else
+    bad ".goreleaser.yaml dockers ids match binaries.txt exactly (dockers: ${dockers_ids:-<none>}; list: ${expected[*]})"
+  fi
 else
   bad ".goreleaser.yaml and the Dockerfile exist"
 fi
@@ -498,6 +572,20 @@ if read_binaries "$libtmp/trail.txt" >/dev/null 2>&1; then
   bad "read_binaries rejects trailing whitespace in a name"
 else
   ok "read_binaries rejects trailing whitespace in a name"
+fi
+# A leading dash or dot is not a name: -rf would reach rm as a flag and ..
+# as a path, so the first-character rule [A-Za-z0-9] must reject them.
+printf -- '-rf\n' > "$libtmp/lead-dash.txt"
+if read_binaries "$libtmp/lead-dash.txt" >/dev/null 2>&1; then
+  bad "read_binaries rejects a name with a leading dash"
+else
+  ok "read_binaries rejects a name with a leading dash"
+fi
+printf -- '..\n' > "$libtmp/lead-dot.txt"
+if read_binaries "$libtmp/lead-dot.txt" >/dev/null 2>&1; then
+  bad "read_binaries rejects a name with a leading dot"
+else
+  ok "read_binaries rejects a name with a leading dot"
 fi
 # Blank, whitespace-only and comment lines are ignored; the result may be
 # empty (the callers then fail the zero-entries check).
