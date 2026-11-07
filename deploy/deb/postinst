@@ -138,7 +138,10 @@ EOF
     refresh_server_drop_in
     [ -d /run/systemd/system ] || exit 0
     systemctl daemon-reload || true
-    if ! systemctl is-active --quiet nebula-executor.service; then
+    # The hint, never a restart: also when the executor is stopped or failed,
+    # a running collector stays on the old binary until the admin restarts it.
+    if ! systemctl is-active --quiet nebula-executor.service \
+      && ! systemctl is-active --quiet nebula-pve-collector.service; then
       exit 0
     fi
     cat <<EOF
