@@ -384,6 +384,21 @@ func pveProfileGET(ctx context.Context, client *http.Client, path string, out an
 	return nil
 }
 
+// pveGuestAgentAuditPrivilege is the only privilege a read token may hold
+// beyond the four required audit privileges (spec 06, ADR 0006).
+const pveGuestAgentAuditPrivilege = "VM.GuestAgent.Audit"
+
+// isPveVMIDPath reports whether path is exactly /vms/<vmid> with a canonical
+// non-zero 32-bit VMID.
+func isPveVMIDPath(path string) bool {
+	vmid, ok := strings.CutPrefix(path, "/vms/")
+	if !ok {
+		return false
+	}
+	id, err := strconv.ParseUint(vmid, 10, 32)
+	return err == nil && id != 0 && strconv.FormatUint(id, 10) == vmid
+}
+
 func validatePvePermissions(perms map[string]map[string]int, purpose string) error {
 	read := map[string]string{"Sys.Audit": "/", "VM.Audit": "/vms", "Datastore.Audit": "/storage", "Pool.Audit": "/pool"}
 	if len(perms) == 0 {
@@ -402,14 +417,21 @@ func validatePvePermissions(perms map[string]map[string]int, purpose string) err
 				return ErrPveTokenRejected
 			}
 			if purpose == PvePurposeRead {
+				if privilege == pveGuestAgentAuditPrivilege {
+					// Optional PVE 9 informational guest-agent extension
+					// (spec 06, ADR 0006): only on /vms or one /vms/<vmid>.
+					// PVE 8's broader VM.Monitor stays rejected below.
+					if path != "/vms" && !isPveVMIDPath(path) {
+						return ErrPveTokenRejected
+					}
+					continue
+				}
 				base, ok := read[privilege]
 				if !ok || !(path == base || (base == "/" && strings.HasPrefix(path, "/")) || strings.HasPrefix(path, base+"/")) {
 					return ErrPveTokenRejected
 				}
 			} else {
-				vmid := strings.TrimPrefix(path, "/vms/")
-				id, err := strconv.ParseUint(vmid, 10, 32)
-				if privilege != "VM.PowerMgmt" || !strings.HasPrefix(path, "/vms/") || err != nil || id == 0 || strconv.FormatUint(id, 10) != vmid {
+				if privilege != "VM.PowerMgmt" || !isPveVMIDPath(path) {
 					return ErrPveTokenRejected
 				}
 				action = true
