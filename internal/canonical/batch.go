@@ -65,6 +65,10 @@ type BatchMember struct {
 	PreconditionHashes []string             `json:"precondition_hashes"`
 	Container          *BatchContainer      `json:"container,omitempty"`
 	ProviderTarget     *BatchProviderTarget `json:"provider_target,omitempty"`
+	// ContainerUpdate binds a container update or rollback unit. It is
+	// required on exactly the container update actions and refused elsewhere;
+	// a member carries at most one of Container and ContainerUpdate.
+	ContainerUpdate *BatchContainerUpdate `json:"container_update,omitempty"`
 }
 
 // CredentialVersion pins an exact executor credential version, not its secret.
@@ -303,9 +307,28 @@ func normalizeBatchMember(m BatchMember, now time.Time) (BatchMember, error) {
 		}
 		n.Container = &c
 	}
+	// Container update actions carry the update binding, never the incarnation
+	// binding, and the parameter document is rendered from the binding.
+	if IsContainerUpdateAction(m.Request.ActionID) || m.ContainerUpdate != nil {
+		if m.ContainerUpdate == nil || m.Container != nil || m.ProviderTarget != nil {
+			return BatchMember{}, batchError("container update action requires exactly its update binding")
+		}
+		u, err := normalizeContainerUpdate(m.Request.ActionID, *m.ContainerUpdate)
+		if err != nil {
+			return BatchMember{}, err
+		}
+		_, hash, err := ContainerUpdateParameters(u)
+		if err != nil {
+			return BatchMember{}, cuError("parameters cannot be rendered: %v", err)
+		}
+		if hash != n.Request.ParametersHash {
+			return BatchMember{}, cuError("parameters_hash differs from the binding's rendering")
+		}
+		n.ContainerUpdate = &u
+	}
 	// Enumeration actions do not address an existing container incarnation.
 	switch m.Request.ActionID {
-	case "docker.inspect", "docker.restart", "docker.stop", "docker.start", "docker.update", "docker.remove", "docker.logs", "docker.stats", "docker.check_updates":
+	case "docker.inspect", "docker.restart", "docker.stop", "docker.start", "docker.remove", "docker.logs", "docker.stats", "docker.check_updates":
 		if n.Container == nil {
 			return BatchMember{}, batchError("container action requires an incarnation binding")
 		}
