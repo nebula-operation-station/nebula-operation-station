@@ -33,9 +33,14 @@ EOF
 
 # provision_pve_spool creates what a version older than the drop-in did not:
 # ReadWritePaths on a missing directory stops the unit (226/NAMESPACE).
-# Existing directories stay as they are. Below the pve root, which the
+# install -d -m also re-applies the mode of an existing directory, so this
+# repairs what a collector unit left behind: with UMask=0077 and
+# RestrictSUIDSGID=yes it cannot give its spool directories the setgid/group
+# bits the server needs to list and unlink what it imported (install.sh
+# creates them with their final mode for that reason). A directory that
+# already has the right mode is left alone. Below the pve root, which the
 # collector owns, it works as the collector: as root, a symlink swapped in
-# there would redirect the mode and owner change.
+# there would redirect the mode change.
 provision_pve_spool() {
   if ! getent passwd nebula-pve-collector >/dev/null; then
     useradd --system --home-dir "${var_lib}/pve" --shell /usr/sbin/nologin -G nebula-rpc nebula-pve-collector || return 1
@@ -45,9 +50,12 @@ provision_pve_spool() {
   fi
   for entry in results:2770 guestnet:2770 requests:2770 live:2750; do
     dir="${var_lib}/pve/${entry%:*}"
-    [ -d "${dir}" ] && continue
+    mode="${entry#*:}"
+    if [ -d "${dir}" ] && [ "$(stat -c %a "${dir}")" = "${mode}" ]; then
+      continue
+    fi
     setpriv --reuid=nebula-pve-collector --regid=nebula-rpc --clear-groups \
-      install -d -m "${entry#*:}" "${dir}" || return 1
+      install -d -m "${mode}" "${dir}" || return 1
   done
 }
 

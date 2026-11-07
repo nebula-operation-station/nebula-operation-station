@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -43,8 +44,15 @@ const stubs = `
 install|#!/bin/sh
 printf 'install %s\n' "$*" >>"$STUB_LOG"
 [ -n "$FAIL_INSTALL" ] && exit 1
+mode=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-m" ]; then mode="$a"; fi
+  prev="$a"
+done
 for last; do :; done
-exec mkdir -p "$last"
+mkdir -p "$last"
+[ -n "$mode" ] && chmod "$mode" "$last"
 ---
 setpriv|#!/bin/sh
 printf 'setpriv %s\n' "$*" >>"$STUB_LOG"
@@ -191,6 +199,47 @@ func heredoc(t *testing.T, script, marker string) string {
 	return body + "\n"
 }
 
+// octalMode formats a directory mode the way `stat -c %a` does, with the
+// setgid bit shown as a leading 2, so it can be compared with the modes the
+// postinst provisions. fi.Mode().Perm() alone would hide the setgid bit.
+func octalMode(fi os.FileInfo) string {
+	perm := fi.Mode().Perm()
+	if fi.Mode()&os.ModeSetgid != 0 {
+		return fmt.Sprintf("2%03o", perm)
+	}
+	return fmt.Sprintf("%03o", perm)
+}
+
+// spoolMode is the mode install.sh gives each pve spool directory.
+func spoolMode(dir string) (os.FileMode, bool) {
+	switch dir {
+	case "pve/results", "pve/guestnet", "pve/requests":
+		return 0o2770, true
+	case "pve/live":
+		return 0o2750, true
+	}
+	return 0, false
+}
+
+// mkdirAt creates a directory at an exact mode, setgid included. os.Chmod
+// would drop the setgid bit (it applies mode.Perm()), so it uses fchmod,
+// like the coreutils install the postinst runs.
+func (s *sandbox) mkdirAt(t *testing.T, dir string, mode os.FileMode) {
+	t.Helper()
+	path := filepath.Join(s.varLib, dir)
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := syscall.Fchmod(int(f.Fd()), uint32(mode)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func installScript(t *testing.T) string {
 	t.Helper()
 	return readFile(t, filepath.Join("..", "install.sh"))
@@ -257,13 +306,15 @@ func TestUpgradeNeverRestartsServices(t *testing.T) {
 // so an upgrade from before pve/guestnet must create what the drop-in names,
 // with the modes and owner of install.sh. Directories below the collector's
 // pve root are made as the collector: as root, a swapped-in symlink would hand
-// it the chown.
+// it the chown. A directory that already has install.sh's mode is left alone.
 func TestUpgradeProvisionsMissingSpoolDirectories(t *testing.T) {
 	spool := []string{"pve/results", "pve/guestnet", "pve/requests", "pve/live"}
 	for _, existing := range spool {
 		t.Run("with "+existing, func(t *testing.T) {
 			s := newSandbox(t)
-			s.installed(t, existing)
+			s.installed(t)
+			mode, _ := spoolMode(existing)
+			s.mkdirAt(t, existing, mode)
 			s.run(t, "configure", "1.0.0")
 
 			calls := s.calls(t)
@@ -285,6 +336,44 @@ func TestUpgradeProvisionsMissingSpoolDirectories(t *testing.T) {
 				if !strings.Contains(calls, want) {
 					t.Errorf("missing call %q in:\n%s", want, calls)
 				}
+			}
+		})
+	}
+}
+
+// A package-upgraded host whose collector created a spool directory under
+// UMask=0077 left it without the setgid/group bits the server needs
+// (RestrictSUIDSGID keeps the collector from fixing it, so install.sh creates
+// them with their final mode). install.sh's install -d -m re-applies the mode
+// of an existing directory; the postinst must do the same, so the upgraded
+// server can list and unlink what it imported. The repair runs as the
+// collector, so a symlink swapped in below the pve root cannot redirect it.
+func TestUpgradeRepairsSpoolDirectoryModes(t *testing.T) {
+	for _, tc := range []struct {
+		dir   string
+		wrong os.FileMode
+		want  string
+	}{
+		{"pve/guestnet", 0o0700, "2770"},
+		{"pve/results", 0o2700, "2770"},
+		{"pve/live", 0o0750, "2750"},
+	} {
+		t.Run(tc.dir, func(t *testing.T) {
+			s := newSandbox(t)
+			s.installed(t)
+			s.mkdirAt(t, tc.dir, tc.wrong)
+			s.run(t, "configure", "1.0.0")
+
+			fi, err := os.Stat(filepath.Join(s.varLib, tc.dir))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := octalMode(fi); got != tc.want {
+				t.Errorf("%s mode = %s, want %s", tc.dir, got, tc.want)
+			}
+			want := fmt.Sprintf("setpriv --reuid=nebula-pve-collector --regid=nebula-rpc --clear-groups install -d -m %s %s\n", tc.want, filepath.Join(s.varLib, tc.dir))
+			if !strings.Contains(s.calls(t), want) {
+				t.Errorf("missing repair call %q in:\n%s", want, s.calls(t))
 			}
 		})
 	}
