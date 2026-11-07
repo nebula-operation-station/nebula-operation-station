@@ -660,6 +660,8 @@ check_line "postinst hint names the collector" "$postinst" \
 # unit nobody edited follows the shipped version, an edited one is never
 # replaced, and a new one is installed.
 refresh_block=$(sed -n '/^# begin: unit refresh/,/^# end: unit refresh/p' "$install_sh")
+# The pending record is defined above the binary install, which writes to it.
+pending_block=$(sed -n '/^# begin: pending record/,/^# end: pending record/p' "$install_sh")
 refresh_sb=$(mktemp -d)
 trap 'rm -rf "$refresh_sb"' EXIT
 mkdir -p "$refresh_sb/deploy/systemd" "$refresh_sb/etc" "$refresh_sb/var"
@@ -672,6 +674,11 @@ install_units=(
   nebula-discovery.service
   nebula-discovery.timer
 )
+# The binaries of the sandbox tarball, for the cases that run the binary
+# install: the collector's and one other.
+sandbox_binaries=(nebula nebula-pve-collector)
+# bin_build counts the builds run_install has shipped (inst_bin_changed=1).
+bin_build=0
 
 # ship <unit> <content>: this "tarball" now ships <content> for <unit>.
 ship() {
@@ -685,10 +692,16 @@ sum_of() {
 text_sum() {
   printf '%s\n' "$1" | sha256sum | cut -d' ' -f1
 }
-# reset_refresh: an empty host and an empty tarball.
+# reset_refresh: an empty host and an empty tarball, whose binaries (for the
+# cases that run the binary install) are the ones the host already has.
 reset_refresh() {
-  rm -rf "$refresh_sb/etc" "$refresh_sb/var" "$refresh_sb/deploy/systemd"
-  mkdir -p "$refresh_sb/deploy/systemd" "$refresh_sb/etc" "$refresh_sb/var"
+  local bin
+  rm -rf "$refresh_sb/etc" "$refresh_sb/var" "$refresh_sb/deploy/systemd" "$refresh_sb/bin" "$refresh_sb/tarball"
+  mkdir -p "$refresh_sb/deploy/systemd" "$refresh_sb/etc" "$refresh_sb/var" "$refresh_sb/bin" "$refresh_sb/tarball"
+  for bin in "${sandbox_binaries[@]}"; do
+    printf '%s build 0\n' "$bin" > "$refresh_sb/bin/$bin"
+    cp "$refresh_sb/bin/$bin" "$refresh_sb/tarball/$bin"
+  done
 }
 # run_refresh [legacy line]: one install.sh unit step for the units in
 # refresh_units_list, under set -e like the real script. The output (with
@@ -706,6 +719,7 @@ run_refresh() {
     var_lib="$refresh_sb/var"
     tarball_units=("${refresh_units_list[@]}")
     enable_units=()
+    eval "$pending_block"
     eval "$refresh_block"
     if [[ -n "$legacy" ]]; then
       legacy_unit_sums=("$legacy")
@@ -1137,6 +1151,7 @@ done
 # systemd does, while `enable` alone and a start of a running unit succeed.
 # The status probe of the collector restart goes through a stubbed runuser,
 # which logs to the same file, so that a run shows the order of the two.
+binaries_block=$(sed -n '/^# begin: install binaries/,/^# end: install binaries/p' "$install_sh")
 select_block=$(sed -n '/^# begin: select units/,/^# end: select units/p' "$install_sh")
 start_block=$(sed -n '/^# begin: start units/,/^# end: start units/p' "$install_sh")
 systemctl_log="$refresh_sb/systemctl.log"
@@ -1248,6 +1263,12 @@ stub_systemctl() {
 # set -e like the real script. refresh_out and refresh_rc as in run_refresh.
 run_install() {
   : > "$systemctl_log"
+  # New binaries are a new collector build in the tarball; the binary install
+  # of the run below finds it, and sets bin_changed as install.sh does.
+  if [[ "$inst_bin_changed" -eq 1 ]]; then
+    bin_build=$((bin_build + 1))
+    printf 'nebula-pve-collector build %s\n' "$bin_build" > "$refresh_sb/tarball/nebula-pve-collector"
+  fi
   refresh_out=$(
     exec 2>&1
     set -euo pipefail
@@ -1268,8 +1289,9 @@ run_install() {
     systemd_dir="$refresh_sb/etc"
     var_lib="$refresh_sb/var"
     bin_dir="$refresh_sb/bin"
+    tarball_root="$refresh_sb/tarball"
+    binaries=("${sandbox_binaries[@]}")
     from_package="$inst_from_package"
-    bin_changed="$inst_bin_changed"
     drop_in_changed="$inst_drop_in_changed"
     server_drop_in_changed="$inst_server_drop_in_changed"
     tarball_units=("${install_units[@]}")
@@ -1280,6 +1302,8 @@ run_install() {
       nebula-discovery.path
       nebula-discovery.timer
     )
+    eval "$pending_block"
+    eval "$binaries_block"
     eval "$refresh_block"
     if [[ -n "$inst_legacy" ]]; then
       legacy_unit_sums=("$inst_legacy")
@@ -1508,6 +1532,61 @@ CASES
   expect "stopped after a skip: not restarted" collector_restarts_are 0
   expect "stopped after a skip: nothing asked" not_probed
   expect "stopped after a skip: nothing stays pending" nothing_pending
+
+  # New binaries alone, and the run stops after they are in place but before
+  # the collector restart. bin_changed is gone with the run, and the re-run of
+  # the same tarball finds no binary changed, so only the record written
+  # before the binaries were replaced still makes the restart due.
+  # <the failing systemctl call>
+  while read -r failing; do
+    name="binaries only, stopped at '${failing}'"
+    installed_host
+    stub_active="$all_services"
+    inst_bin_changed=1
+    stub_fail="$failing"
+    run_install
+    expect "${name}: the run fails" rc_not_zero
+    expect "${name}: the new binary is in place" has_content "$refresh_sb/bin/nebula-pve-collector" "nebula-pve-collector build $bin_build"
+    expect "${name}: the collector is not restarted yet" collector_restarts_are 0
+    expect "${name}: the collector restart is on record" pending_has "$(text_sum "$collector v1")" "$collector"
+    inst_bin_changed=0
+    stub_fail=""
+    run_install
+    expect "${name}: the re-run succeeds" rc_is 0
+    expect "${name}: the re-run restarts the collector, once" collector_restarts_are 1
+    expect "${name}: the re-run asks the executor first" probe_precedes_collector_restart
+    expect "${name}: nothing stays pending" nothing_pending
+    run_install
+    expect "${name}: the run after that restarts no collector" collector_restarts_are 0
+  done <<'CASES'
+enable --now nebula-discovery.timer
+restart nebula-server.service
+restart nebula-executor.service
+CASES
+
+  # A stop while the binaries are replaced: the record came first.
+  installed_host
+  stub_active="$all_services"
+  inst_bin_changed=1
+  stub_stop_at_unit=nebula-pve-collector # the binary, not the unit
+  run_install
+  expect "stopped installing the collector binary: the run fails" rc_not_zero
+  expect "stopped installing the collector binary: the restart is on record" pending_has "$(text_sum "$collector v1")" "$collector"
+  stub_stop_at_unit=""
+  inst_bin_changed=0
+  run_install
+  expect "stopped installing the collector binary: the re-run restarts it, once" collector_restarts_are 1
+  expect "stopped installing the collector binary: nothing stays pending" nothing_pending
+
+  # Same binaries: nothing goes on record, so nothing is restarted.
+  installed_host
+  stub_active="$all_services"
+  stub_fail='enable --now nebula-discovery.timer'
+  run_install
+  expect "same binaries, stopped: nothing on record" nothing_pending
+  stub_fail=""
+  run_install
+  expect "same binaries, re-run: no collector restart" collector_restarts_are 0
 
   installed_host
   inst_drop_in_changed=1

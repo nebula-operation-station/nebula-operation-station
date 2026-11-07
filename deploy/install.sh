@@ -339,9 +339,44 @@ if [[ ${from_package} -eq 0 && -x "${bin_dir}/nebula-executor" && "${NEBULA_SKIP
   fi
 fi
 
+# --- Pending record (write-ahead; also read by the unit refresh below) ------
+# begin: pending record
+# units_pending is the write-ahead record of a run: the checksum of a shipped
+# version goes in before that version is written to its unit file, and the
+# file goes away once the restart steps are through, unless a restart had to
+# be skipped: then that one line stays. What a run leaves behind tells the next
+# run what units_manifest cannot: a unit with one of these checksums is
+# unedited even if the tarball has moved on, and its restart may still be due.
+# Like units_manifest it holds shipped checksums only.
+units_pending="${var_lib}/units.pending"
+
+# record_collector_restart puts the collector restart on the pending record,
+# with the shipped checksum of its unit (as clear_pending_units does), so that
+# a run that stops before the restart leaves it due for the next run.
+record_collector_restart() {
+  local sum
+  sum=$(sha256sum "${script_dir}/systemd/nebula-pve-collector.service" | cut -d' ' -f1)
+  printf '%s  %s\n' "${sum}" nebula-pve-collector.service >> "${units_pending}"
+}
+# end: pending record
+
 # --- Binaries (replaced on every run; detect real changes) ------------------
 # begin: install binaries
+# New binaries make the collector restart due (bin_changed below), but
+# bin_changed lives only in this run: once the binaries are in place, a re-run
+# of the same tarball sees none changed. So when an installed collector binary
+# exists and any binary will change, the restart goes on the pending record
+# first, before a binary is replaced; the restart step clears it once the
+# restart happened (or the unit is stopped), and keeps it if it was skipped.
 bin_changed=0
+if [[ ${from_package} -eq 0 && -e "${bin_dir}/nebula-pve-collector" ]]; then
+  for bin in "${binaries[@]}"; do
+    if ! cmp -s "${tarball_root}/${bin}" "${bin_dir}/${bin}"; then
+      record_collector_restart
+      break
+    fi
+  done
+fi
 [[ ${from_package} -eq 1 ]] || for bin in "${binaries[@]}"; do
   old_sum=""
   if [[ -f "${bin_dir}/${bin}" ]]; then
@@ -399,14 +434,8 @@ package_units=(
 # any other content is the admin's and stays (WA-09).
 units_manifest="${var_lib}/units.sha256"
 
-# units_pending is the write-ahead record of a run: the checksum of a shipped
-# version goes in before that version is written to its unit file, and the
-# file goes away once the restart steps are through, unless a restart had to
-# be skipped: then that one line stays. What a run leaves behind tells the next
-# run what units_manifest cannot: a unit with one of these checksums is
-# unedited even if the tarball has moved on, and its restart may still be due.
-# Like units_manifest it holds shipped checksums only.
-units_pending="${var_lib}/units.pending"
+# units_pending (the write-ahead record of a run) is defined above the binary
+# install, which may already put the collector restart on it.
 
 # Every version shipped before units_manifest existed. Hosts installed then
 # have no recorded checksum, and without this list their units would all
@@ -513,9 +542,11 @@ warn_kept_unit() {
 # and makes the restarts that are still due.
 refresh_units() {
   local name shipped target shipped_sum stored_sum current_sum record manifest_lines=""
-  # A restart an earlier run skipped stays due whatever became of the unit file
-  # since (kept, masked, up to date). Looked up before the loop, which puts the
-  # units it installs on record, or a first install would count as well.
+  # A restart an earlier run skipped, or left due by stopping after new
+  # binaries, stays due whatever became of the unit file since (kept, masked,
+  # up to date); so does one the binary install of this run put on record.
+  # Looked up before the loop, which puts the units it installs on record, or
+  # a first install would count as well.
   if unit_pending nebula-pve-collector.service; then
     refreshed_units+=(nebula-pve-collector.service)
   fi
