@@ -169,6 +169,28 @@ type ContainerUpdateRegistry struct {
 	CredentialVersion uint64 `json:"credential_version"`
 }
 
+// Clone returns a deep copy of u.
+func (u BatchContainerUpdate) Clone() BatchContainerUpdate {
+	u.Images = slices.Clone(u.Images)
+	for i := range u.Images {
+		u.Images[i].OldDigests = slices.Clone(u.Images[i].OldDigests)
+		if rb := u.Images[i].Rollback; rb != nil {
+			c := *rb
+			u.Images[i].Rollback = &c
+		}
+	}
+	u.Targets = slices.Clone(u.Targets)
+	u.Dependencies = slices.Clone(u.Dependencies)
+	for i := range u.Dependencies {
+		u.Dependencies[i].Containers = slices.Clone(u.Dependencies[i].Containers)
+	}
+	if u.Registry != nil {
+		r := *u.Registry
+		u.Registry = &r
+	}
+	return u
+}
+
 func cuError(format string, args ...any) error {
 	return batchError("container update: "+format, args...)
 }

@@ -411,6 +411,12 @@ func (a *Authority) propose(r canonical.Request, parametersJSON, planJSON []byte
 	if err != nil {
 		return ProposeResult{}, fail(CodeInvalidRequest, "%v", err)
 	}
+	// Container mutations bind per-container plans and run only as batch
+	// members (container update plan, Decision 5).
+	if canonical.IsBatchOnlyContainerAction(norm.ActionID) {
+		a.emit(Event{Kind: "rejected", Digest: digest.String(), Code: CodeActionMismatch, Detail: "container mutation is batch-only"})
+		return ProposeResult{}, fail(CodeActionMismatch, "action %s runs only as a batch member", norm.ActionID)
+	}
 	if raise {
 		floor, _, err := a.floor(norm, norm.ResolvedTargets, parametersJSON)
 		if err != nil {
