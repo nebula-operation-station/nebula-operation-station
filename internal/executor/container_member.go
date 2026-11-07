@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -28,16 +29,47 @@ import (
 // request names. What the job gets is exactly the parameter document
 // rendered from the member's frozen binding (Decision 3): the executor
 // re-renders it and refuses the member when the approved parameters are not
-// those bytes. Nothing is read back from the host to reconstruct a
-// container's configuration (no `docker inspect` definition): the binding
-// and the approved, hash-checked artifact are the only inputs, and the
-// artifact recreates exactly the bound targets from the operator's Compose
-// files with the bound image digests.
+// those bytes.
+//
+// The parameters only bind what runs if the script consumes them, so the
+// executor also pins the script: a member runs only with the module version
+// and the exact artifact digest the executor pins (composePins), never with
+// some other artifact the operator happens to trust for the action ID. The
+// inspect-based docker.compose_update 1.0.0, which reads the project's
+// directory and Compose files from `docker inspect` labels and pulls
+// floating tags, is therefore never a container member's artifact. Until the
+// 2.0.0 artifact that recreates the bound targets with the bound digests
+// exists and its digest is pinned here (composeUpdateArtifactSHA256), every
+// compose update member is refused.
 
 // composeUpdateAction is the only container mutation that runs in cu02.
 // Rollback (cu03), standalone definitions (cu05) and private registry
 // transfer (cu06) are refused here until their executor-side checks exist.
 const composeUpdateAction = "docker.compose_update"
+
+const (
+	// composeUpdateVersion is the docker.compose_update module version whose
+	// artifact consumes the update binding (result compose-update-v2).
+	composeUpdateVersion = "2.0.0"
+	// composeUpdateArtifactSHA256 is the lowercase hex SHA-256 of that
+	// artifact. Empty: the binding-consuming script is not in the tree yet,
+	// so no compose update member runs. Setting it is a reviewed change of
+	// this protected package.
+	composeUpdateArtifactSHA256 = ""
+)
+
+// containerArtifact pins the one module version and artifact digest a
+// container member must name.
+type containerArtifact struct {
+	ModuleVersion string
+	SHA256        string
+}
+
+// shippedComposeUpdatePin is the binding-consuming docker.compose_update
+// artifact of the shipped executor (empty digest: none yet).
+func shippedComposeUpdatePin() containerArtifact {
+	return containerArtifact{ModuleVersion: composeUpdateVersion, SHA256: composeUpdateArtifactSHA256}
+}
 
 const (
 	// containerMutationTimeout bounds one container mutation job on the
@@ -68,6 +100,9 @@ var (
 	// errContainerParameters: the approved parameters are not the
 	// rendering of the frozen binding.
 	errContainerParameters = errors.New("parameters are not the rendering of the frozen binding")
+	// errContainerArtifact: the member's module version and artifact are
+	// not the pinned, binding-consuming ones (or none is pinned).
+	errContainerArtifact = errors.New("module version and artifact are not the pinned binding-consuming docker.compose_update artifact")
 )
 
 // isContainerMember reports whether m is a container mutation member: its
@@ -79,9 +114,11 @@ func isContainerMember(m canonical.BatchMember) bool {
 
 // checkContainerMember checks a container member and its approved
 // parameters before anything is claimed, and again on the claimed permit
-// immediately before the host: only a public compose update runs, and only
-// with exactly the parameters rendered from its frozen binding.
-func checkContainerMember(m canonical.BatchMember, params []byte) error {
+// immediately before the host: only a public compose update runs, only with
+// a module version and artifact digest equal to one of pins (an entry with
+// an empty digest pins nothing), and only with exactly the parameters
+// rendered from its frozen binding.
+func checkContainerMember(m canonical.BatchMember, params []byte, pins ...containerArtifact) error {
 	if m.ContainerUpdate == nil || m.Container != nil {
 		return errContainerBinding
 	}
@@ -89,6 +126,12 @@ func checkContainerMember(m canonical.BatchMember, params []byte) error {
 	if m.Request.ActionID != composeUpdateAction || u.Kind != canonical.ContainerUpdateKindUpdate ||
 		u.Form != canonical.ContainerUpdateFormCompose || u.Registry != nil {
 		return errContainerUnsupported
+	}
+	if !slices.ContainsFunc(pins, func(p containerArtifact) bool {
+		return p.SHA256 != "" && p.ModuleVersion != "" &&
+			p.ModuleVersion == m.Request.ModuleVersion && p.SHA256 == m.Request.ArtifactSHA256
+	}) {
+		return errContainerArtifact
 	}
 	want, hash, err := canonical.ContainerUpdateParameters(u)
 	if err != nil {
@@ -123,7 +166,7 @@ func durableJobOver(class string) bool {
 // dispatching.
 func (s *Service) durableMemberTransport(ctx context.Context, x *batchExec, call *batchMemberCall, run dispatch.Run, c *sshtransport.Client) (dispatch.Outcome, error) {
 	resp := call.resp
-	if err := checkContainerMember(run.Member, run.Parameters); err != nil {
+	if err := checkContainerMember(run.Member, run.Parameters, x.composePins...); err != nil {
 		c.Close()
 		resp.Class, resp.Detail = classBatchNotExecuted, "not started: "+err.Error()
 		return dispatch.OutcomeFailure, nil

@@ -43,22 +43,47 @@ func newContainerEnv(t *testing.T, hosts ...string) *containerEnv {
 
 // script is a stand-in recreate job: it copies the parameters it got to
 // <dir>/params-<tag>.json, waits while <dir>/block exists and exits with
-// code. It is trusted as MEDIUM, so the plan stays on an automatic gate.
+// code. It is trusted as MEDIUM, so the plan stays on an automatic gate, and
+// the executor pins it as a binding-consuming 2.0.0 artifact (the shipped
+// executor pins none yet).
 func (e *containerEnv) script(t *testing.T, tag string, code int) []byte {
 	t.Helper()
-	s := fmt.Appendf(nil, "#!/bin/sh\ncp \"$NEBULA_PARAMS\" %q\nwhile [ -e %q ]; do sleep 0.05; done\nprintf '{\"format\":\"test\"}\\n'\nexit %d\n",
-		filepath.Join(e.dir, "params-"+tag+".json"), filepath.Join(e.dir, "block"), code)
-	h := sha256.Sum256(s)
-	if err := e.db.TrustArtifact(executordb.TrustedArtifact{SHA256: canonical.Digest(h).String(), ActionID: composeUpdateAction,
-		ModuleVersion: "2.0.0", Risk: canonical.RiskMedium, TrustedBy: "test"}); err != nil {
-		t.Fatal(err)
-	}
+	s := e.trustedScript(t, tag, code, composeUpdateVersion)
+	e.svc.batchRun.composePins = append(e.svc.batchRun.composePins, containerArtifact{ModuleVersion: composeUpdateVersion, SHA256: sha256Hex(s)})
 	return s
 }
 
+// trustedScript is script without the pin: trusted for docker.compose_update
+// at version, but not an artifact the executor runs for a container member.
+func (e *containerEnv) trustedScript(t *testing.T, tag string, code int, version string) []byte {
+	t.Helper()
+	s := fmt.Appendf(nil, "#!/bin/sh\ncp \"$NEBULA_PARAMS\" %q\nwhile [ -e %q ]; do sleep 0.05; done\nprintf '{\"format\":\"test\"}\\n'\nexit %d\n",
+		filepath.Join(e.dir, "params-"+tag+".json"), filepath.Join(e.dir, "block"), code)
+	e.trust(t, s, version)
+	return s
+}
+
+// trust trusts art for docker.compose_update at version as MEDIUM.
+func (e *containerEnv) trust(t *testing.T, art []byte, version string) {
+	t.Helper()
+	h := sha256.Sum256(art)
+	if err := e.db.TrustArtifact(executordb.TrustedArtifact{SHA256: canonical.Digest(h).String(), ActionID: composeUpdateAction,
+		ModuleVersion: version, Risk: canonical.RiskMedium, TrustedBy: "test"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // proposeContainer proposes and approves a one-stage plan of compose update
-// members, one per artifact, each on host with binding u.
+// members, one per artifact, each on host with binding u, at the pinned
+// module version.
 func (e *containerEnv) proposeContainer(t *testing.T, host string, u canonical.BatchContainerUpdate, arts ...[]byte) (string, []canonical.BatchMember) {
+	t.Helper()
+	return e.proposeContainerVersion(t, host, composeUpdateVersion, u, arts...)
+}
+
+// proposeContainerVersion is proposeContainer with the members' module
+// version.
+func (e *containerEnv) proposeContainerVersion(t *testing.T, host, version string, u canonical.BatchContainerUpdate, arts ...[]byte) (string, []canonical.BatchMember) {
 	t.Helper()
 	e.next++
 	n := e.next
@@ -85,7 +110,7 @@ func (e *containerEnv) proposeContainer(t *testing.T, host string, u canonical.B
 		}
 		b.Members = append(b.Members, canonical.BatchMember{MemberID: id, ContainerUpdate: &bu, Request: canonical.Request{
 			RequestVersion: canonical.RequestVersion, ExecutionID: fmt.Sprintf("00000000-0000-4000-8%03d-%012d", n, i+100), ActionID: composeUpdateAction,
-			ModuleVersion: "2.0.0", ArtifactSHA256: canonical.Digest(h).String(), ParametersHash: ph, CredentialRefs: []string{"cred"},
+			ModuleVersion: version, ArtifactSHA256: canonical.Digest(h).String(), ParametersHash: ph, CredentialRefs: []string{"cred"},
 			RiskClass: canonical.RiskMedium, ExpiryUnix: expiry,
 			ResolvedTargets: []canonical.Target{{HostID: host, HostKeyFingerprint: hk.Fingerprint}}},
 			CredentialVersions: []canonical.CredentialVersion{{Reference: "cred", Version: CredentialVersionOf(e.userPub)}}, PreconditionHashes: []string{}})
@@ -324,6 +349,85 @@ func TestContainerMemberNotStartedReleasesTarget(t *testing.T) {
 	}
 	if held := e.svc.HeldBatchTargets(); len(held) != 0 {
 		t.Fatalf("target held after a refused start: %+v", held)
+	}
+}
+
+// A container member runs only with the pinned module version and the
+// pinned, binding-consuming artifact. Trust alone is not enough: a member
+// whose artifact the executor trusts for docker.compose_update but has not
+// pinned (another script, the inspect-based 1.0.0 script, under 1.0.0 or
+// labelled 2.0.0), or the pinned artifact under another module version, is
+// refused before the claim. Nothing runs, no run is recorded, the target
+// stays free, and the member is not spent.
+func TestContainerMemberRefusedWithUnpinnedArtifactOrVersion(t *testing.T) {
+	e := newContainerEnv(t, "web-1")
+	pinned := e.script(t, "pinned", 0)
+	other := e.trustedScript(t, "other", 0, composeUpdateVersion)
+	v1 := composeUpdateV1(t)
+	e.trust(t, v1, "1.0.0")
+	e.trust(t, v1, composeUpdateVersion)
+	e.trust(t, pinned, "2.0.1")
+	cases := []struct {
+		name, version string
+		art           []byte
+	}{
+		{"another trusted artifact at 2.0.0", composeUpdateVersion, other},
+		{"inspect-based 1.0.0 artifact at 1.0.0", "1.0.0", v1},
+		{"inspect-based 1.0.0 artifact trusted as 2.0.0", composeUpdateVersion, v1},
+		{"pinned artifact at another version", "2.0.1", pinned},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d, members := e.proposeContainerVersion(t, "web-1", c.version, testComposeUpdate(), c.art)
+			_, err := e.server.RunBatchMember(context.Background(), e.req(d, 0, "web-1", c.art))
+			if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "container_member_refused") ||
+				!strings.Contains(err.Error(), errContainerArtifact.Error()) {
+				t.Fatalf("err = %v, want the container member refused for its artifact", err)
+			}
+			if _, err := e.db.GetRun(members[0].Request.ExecutionID, "web-1"); err == nil {
+				t.Fatal("a refused member left a run")
+			}
+			if held := e.svc.HeldBatchTargets(); len(held) != 0 {
+				t.Fatalf("target held after a refusal: %+v", held)
+			}
+			if e.attached.count() != 0 {
+				t.Fatal("a refused container member ran attached")
+			}
+			// Refused before the claim: the same request is refused again
+			// for the same reason, not as spent.
+			if _, err := e.server.RunBatchMember(context.Background(), e.req(d, 0, "web-1", c.art)); status.Code(err) != codes.FailedPrecondition ||
+				!strings.Contains(err.Error(), "container_member_refused") {
+				t.Fatalf("second attempt: %v", err)
+			}
+		})
+	}
+	if _, err := os.Stat(filepath.Join(e.dir, "params-other.json")); err == nil {
+		t.Fatal("the unpinned artifact ran")
+	}
+	// The pinned artifact at the pinned version runs (control).
+	d, _ := e.proposeContainer(t, "web-1", testComposeUpdate(), pinned)
+	resp, err := e.server.RunBatchMember(context.Background(), e.req(d, 0, "web-1", pinned))
+	if err != nil || resp.GetOutcome() != pb.BatchMemberOutcome_BATCH_MEMBER_OUTCOME_SUCCESS {
+		t.Fatalf("pinned member: %+v %v", resp, err)
+	}
+}
+
+// The executor as shipped pins no binding-consuming artifact, so even a
+// trusted 2.0.0 artifact is refused: no compose update member runs until the
+// artifact that recreates the frozen definition exists and is pinned.
+func TestShippedExecutorRefusesContainerMembers(t *testing.T) {
+	e := newContainerEnv(t, "web-1")
+	if len(e.svc.batchRun.composePins) != 1 || e.svc.batchRun.composePins[0] != shippedComposeUpdatePin() {
+		t.Fatalf("pins %+v", e.svc.batchRun.composePins)
+	}
+	art := e.trustedScript(t, "shipped", 0, composeUpdateVersion)
+	d, _ := e.proposeContainer(t, "web-1", testComposeUpdate(), art)
+	if _, err := e.server.RunBatchMember(context.Background(), e.req(d, 0, "web-1", art)); status.Code(err) != codes.FailedPrecondition ||
+		!strings.Contains(err.Error(), errContainerArtifact.Error()) {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(e.dir, "params-shipped.json")); err == nil {
+		t.Fatal("an unpinned artifact ran")
 	}
 }
 

@@ -3,7 +3,10 @@
 package executor
 
 import (
+	"crypto/sha256"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -29,8 +32,18 @@ func testComposeUpdate() canonical.BatchContainerUpdate {
 	}
 }
 
+// testComposeArtifact stands in for the binding-consuming
+// docker.compose_update artifact in unit tests: the pin names its digest.
+var testComposeArtifact = []byte("#!/bin/sh\n# binding-consuming stand-in\nexit 0\n")
+
+// testComposePin pins testComposeArtifact as the 2.0.0 artifact.
+func testComposePin() containerArtifact {
+	return containerArtifact{ModuleVersion: composeUpdateVersion, SHA256: sha256Hex(testComposeArtifact)}
+}
+
 // testContainerMember returns a compose update member and its parameter
-// document, rendered from the binding as the approved plan holds them.
+// document, rendered from the binding as the approved plan holds them. The
+// member names the pinned module version and artifact.
 func testContainerMember(t *testing.T, u canonical.BatchContainerUpdate) (canonical.BatchMember, []byte) {
 	t.Helper()
 	params, hash, err := canonical.ContainerUpdateParameters(u)
@@ -38,7 +51,24 @@ func testContainerMember(t *testing.T, u canonical.BatchContainerUpdate) (canoni
 		t.Fatal(err)
 	}
 	return canonical.BatchMember{MemberID: "member-0", ContainerUpdate: &u,
-		Request: canonical.Request{ActionID: composeUpdateAction, ParametersHash: hash}}, params
+		Request: canonical.Request{ActionID: composeUpdateAction, ModuleVersion: composeUpdateVersion,
+			ArtifactSHA256: sha256Hex(testComposeArtifact), ParametersHash: hash}}, params
+}
+
+// composeUpdateV1 is the inspect-based docker.compose_update 1.0.0 script, a
+// byte copy of internal/executions/actions/scripts/docker_compose_update.sh
+// as of this branch: it reads the project's directory and Compose files from
+// `docker inspect` labels and pulls floating tags.
+func composeUpdateV1(t *testing.T) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", "docker_compose_update_1.0.0.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "docker.compose_update 1.0.0") || !strings.Contains(string(b), "docker inspect") {
+		t.Fatal("testdata is not the inspect-based 1.0.0 script")
+	}
+	return b
 }
 
 // A compose update member passes only with its binding and exactly the
@@ -46,7 +76,7 @@ func testContainerMember(t *testing.T, u canonical.BatchContainerUpdate) (canoni
 // claim, one refusal per case.
 func TestContainerMemberRefusals(t *testing.T) {
 	good, goodParams := testContainerMember(t, testComposeUpdate())
-	if err := checkContainerMember(good, goodParams); err != nil {
+	if err := checkContainerMember(good, goodParams, testComposePin()); err != nil {
 		t.Fatalf("valid member refused: %v", err)
 	}
 	cases := []struct {
@@ -94,15 +124,69 @@ func TestContainerMemberRefusals(t *testing.T) {
 		{"parameters hash not the binding's", errContainerParameters, func(m *canonical.BatchMember, _ *[]byte) {
 			m.Request.ParametersHash = hexOf("9")
 		}},
+		{"inspect-based 1.0.0 artifact as 1.0.0", errContainerArtifact, func(m *canonical.BatchMember, _ *[]byte) {
+			m.Request.ModuleVersion = "1.0.0"
+			m.Request.ArtifactSHA256 = sha256Hex(composeUpdateV1(t))
+		}},
+		{"inspect-based 1.0.0 artifact labelled 2.0.0", errContainerArtifact, func(m *canonical.BatchMember, _ *[]byte) {
+			m.Request.ArtifactSHA256 = sha256Hex(composeUpdateV1(t))
+		}},
+		{"another artifact", errContainerArtifact, func(m *canonical.BatchMember, _ *[]byte) {
+			m.Request.ArtifactSHA256 = hexOf("a")
+		}},
+		{"pinned artifact under another version", errContainerArtifact, func(m *canonical.BatchMember, _ *[]byte) {
+			m.Request.ModuleVersion = "2.0.1"
+		}},
+		{"pinned artifact under the old version", errContainerArtifact, func(m *canonical.BatchMember, _ *[]byte) {
+			m.Request.ModuleVersion = "1.0.0"
+		}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			m, params := testContainerMember(t, testComposeUpdate())
 			c.mut(&m, &params)
-			if err := checkContainerMember(m, params); !errors.Is(err, c.want) {
+			if err := checkContainerMember(m, params, testComposePin()); !errors.Is(err, c.want) {
 				t.Fatalf("err = %v, want %v", err, c.want)
 			}
 		})
+	}
+}
+
+// As shipped, the executor pins no binding-consuming artifact (the
+// docker.compose_update 2.0.0 script does not exist yet), so every compose
+// update member is refused, whatever artifact and version it names: there is
+// no fallback to some other trusted artifact. An empty pin refuses too.
+func TestContainerMemberRefusedWithoutPinnedArtifact(t *testing.T) {
+	m, params := testContainerMember(t, testComposeUpdate())
+	for _, pin := range []containerArtifact{shippedComposeUpdatePin(), {}, {ModuleVersion: composeUpdateVersion}} {
+		if err := checkContainerMember(m, params, pin); !errors.Is(err, errContainerArtifact) {
+			t.Fatalf("pin %+v: err = %v, want %v", pin, err, errContainerArtifact)
+		}
+	}
+	v1 := composeUpdateV1(t)
+	for _, version := range []string{"1.0.0", composeUpdateVersion} {
+		m.Request.ModuleVersion, m.Request.ArtifactSHA256 = version, sha256Hex(v1)
+		if err := checkContainerMember(m, params, shippedComposeUpdatePin()); !errors.Is(err, errContainerArtifact) {
+			t.Fatalf("1.0.0 artifact as %s: err = %v", version, err)
+		}
+	}
+}
+
+// The shipped pin names module version 2.0.0 and never the inspect-based
+// 1.0.0 script; a set digest is well-formed.
+func TestShippedComposeUpdatePin(t *testing.T) {
+	pin := shippedComposeUpdatePin()
+	if pin.ModuleVersion != "2.0.0" {
+		t.Fatalf("pin %+v", pin)
+	}
+	v1 := sha256.Sum256(composeUpdateV1(t))
+	if pin.SHA256 == canonical.Digest(v1).String() {
+		t.Fatal("the inspect-based 1.0.0 script is pinned as the binding-consuming artifact")
+	}
+	if pin.SHA256 != "" {
+		if _, err := canonical.ParseDigest(pin.SHA256); err != nil {
+			t.Fatalf("pinned digest %q: %v", pin.SHA256, err)
+		}
 	}
 }
 

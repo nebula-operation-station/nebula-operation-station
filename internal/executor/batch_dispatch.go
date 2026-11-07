@@ -134,6 +134,9 @@ type batchExec struct {
 	// durablePoll is how often a dispatched container job is checked
 	// (containerRunPoll; tests shorten it).
 	durablePoll time.Duration
+	// composePins are the binding-consuming artifacts a container member
+	// may name (shippedComposeUpdatePin; tests pin stand-ins).
+	composePins []containerArtifact
 
 	mu sync.Mutex
 	// calls are the claimed member runs in flight, by execution ID.
@@ -175,7 +178,7 @@ func (s *Service) EnableBatchExecution() error {
 		return errors.New("executor: batch execution needs the batch authority")
 	}
 	x := &batchExec{attached: hostrun.Attached, visible: hostrun.RunVisible, durable: hostrun.Dispatch, durablePoll: containerRunPoll,
-		holdWait: batchHoldWait, holdPoll: batchHoldPoll,
+		composePins: []containerArtifact{shippedComposeUpdatePin()}, holdWait: batchHoldWait, holdPoll: batchHoldPoll,
 		calls: map[string]*batchMemberCall{}, hosts: map[string]string{}, held: map[string]*heldTarget{}, writeHeld: writeFileAtomic}
 	// Holds from before a restart, rechecked before any member starts on
 	// their targets; without a usable store no member starts.
@@ -438,10 +441,11 @@ func (s *Service) RunBatchMember(ctx context.Context, req *pb.RunBatchMemberRequ
 		return nil, err
 	}
 	// A container mutation runs durable with the fixed timeout, and only with
-	// the parameters rendered from its frozen binding (container_member.go).
+	// the pinned binding-consuming artifact and version, and the parameters
+	// rendered from its frozen binding (container_member.go).
 	durable := isContainerMember(member)
 	if durable {
-		if err := checkContainerMember(member, ap.Parameters[index]); err != nil {
+		if err := checkContainerMember(member, ap.Parameters[index], x.composePins...); err != nil {
 			s.log.Warn("audit", "kind", "batch_member_refused", "batch", d.String(), "member", member.MemberID, "host", target.HostID,
 				"detail", err.Error())
 			return nil, status.Error(codes.FailedPrecondition, "container_member_refused: "+err.Error())
