@@ -171,14 +171,22 @@ check_line() {
     fail=$((fail + 1))
   fi
 }
-check_line "install.sh provisions pve/requests 2770" "$install_sh" \
-  'install -d -m 2770 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/requests"'
-check_line "install.sh provisions pve/live 2750" "$install_sh" \
-  'install -d -m 2750 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/live"'
-check_line "install.sh provisions pve/results 2770" "$install_sh" \
-  'install -d -m 2770 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/results"'
-check_line "install.sh provisions pve/guestnet 2770" "$install_sh" \
-  'install -d -m 2770 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/guestnet"'
+check_line "install.sh provisions the pve spool paths with their modes" "$install_sh" \
+  'for entry in results:2770 guestnet:2770 requests:2770 live:2750; do'
+# The spool paths sit below the collector-owned pve root, so a link can be
+# swapped in after the guard: they must never get a root install -d (which
+# follows it), only chown --no-dereference and an install -d as the collector.
+check_line "install.sh fixes spool owner/group without following a link" "$install_sh" \
+  '    chown --no-dereference nebula-pve-collector:nebula-rpc "$pve_dir"'
+check_line "install.sh applies the spool mode as the collector" "$install_sh" \
+  '  setpriv --reuid=nebula-pve-collector --regid=nebula-rpc --clear-groups \'
+if grep -qE '^install -d .*"\$\{var_lib\}/pve/' "$install_sh"; then
+  echo "FAIL install.sh runs a root install -d on a pve spool path (follows a swapped-in link)"
+  fail=$((fail + 1))
+else
+  echo "ok   install.sh runs no root install -d on a pve spool path"
+  pass=$((pass + 1))
+fi
 # The server drop-in grants exactly the discovery jobs, pve/requests and the
 # two directories the importers unlink in; the server unit itself grants no
 # write path.

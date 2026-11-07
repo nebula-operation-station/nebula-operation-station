@@ -296,16 +296,26 @@ for pve_path in "${var_lib}/pve" "${var_lib}/pve/results" "${var_lib}/pve/guestn
 done
 # end: pve spool guard
 install -d -m 2750 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve"
-install -d -m 2770 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/results"
-# Guest NIC records (same handoff as results). Created here with its final
-# mode: the collector unit (RestrictSUIDSGID=yes) cannot set setgid itself.
-install -d -m 2770 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/guestnet"
-# Live handoff (ADR 0006 P1-37): the server writes the want-list to requests/
-# (group-writable, made writable by the server drop-in below) and reads the
-# collector's samples from live/ (group read-only). The server never reads
-# Proxmox itself.
-install -d -m 2770 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/requests"
-install -d -m 2750 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve/live"
+# results/ and guestnet/ (2770): the collector writes, the server reads and,
+# once imported, unlinks. requests/ (2770): the server writes the want-list
+# (ADR 0006 P1-37, made writable by the server drop-in below). live/ (2750):
+# the collector's samples, read-only for the server. setgid is set here: the
+# collector unit (RestrictSUIDSGID=yes) cannot set it itself.
+# The pve root is collector-owned, so the collector could swap a symlink in
+# at a spool path after the guard above. Like the postinst, these paths are
+# therefore never touched by a root install -d: a wrong owner or group is
+# fixed with chown --no-dereference (never follows a link), and the mode is
+# applied by install -d running as the collector, which cannot reach
+# anything the collector could not already reach.
+for entry in results:2770 guestnet:2770 requests:2770 live:2750; do
+  pve_dir="${var_lib}/pve/${entry%:*}"
+  pve_mode="${entry#*:}"
+  if [[ -d "$pve_dir" && ! -L "$pve_dir" ]]; then
+    chown --no-dereference nebula-pve-collector:nebula-rpc "$pve_dir"
+  fi
+  setpriv --reuid=nebula-pve-collector --regid=nebula-rpc --clear-groups \
+    install -d -m "$pve_mode" "$pve_dir"
+done
 
 # --- Pre-upgrade backup (spec 15) --------------------------------------------
 # Before an existing install is replaced, the new CLI makes a backup (as

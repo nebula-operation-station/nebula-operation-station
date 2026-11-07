@@ -473,7 +473,9 @@ func TestUpgradeProvisionsMissingSpoolDirectories(t *testing.T) {
 				if fi, err := os.Stat(filepath.Join(s.varLib, d)); err != nil || !fi.IsDir() {
 					t.Errorf("%s not created: %v", d, err)
 				}
-				m := regexp.MustCompile(`install -d -m (\d+) -o nebula-pve-collector -g nebula-rpc "\$\{var_lib\}/` + d + `"`).FindStringSubmatch(installScript(t))
+				// install.sh provisions the spool paths in one loop over
+				// name:mode entries, as the collector (setpriv).
+				m := regexp.MustCompile(`(?m)^for entry in [^\n]*\b` + strings.TrimPrefix(d, "pve/") + `:(\d+)\b`).FindStringSubmatch(installScript(t))
 				if m == nil {
 					t.Fatalf("install.sh does not provision %s", d)
 				}
