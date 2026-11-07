@@ -264,6 +264,8 @@ func TestPveTokenValidationRequiresVerifiedProfile(t *testing.T) {
 		{"extra mutation privilege", `{"privsep":1,"expire":2000000000}`, `{"/":{"Sys.Audit":1},"/vms":{"VM.Audit":1},"/storage":{"Datastore.Audit":1},"/pool":{"Pool.Audit":1},"/vms/100":{"VM.PowerMgmt":0}}`, PvePurposeRead, false},
 		{"action storage allocation", `{"privsep":1,"expire":2000000000}`, `{"/vms/100":{"VM.PowerMgmt":0},"/storage/local":{"Datastore.AllocateSpace":0}}`, PvePurposeAction, false},
 		{"read at wrong scope", `{"privsep":1,"expire":2000000000}`, `{"/":{"Sys.Audit":1,"VM.Audit":1},"/vms":{"VM.Audit":1},"/storage":{"Datastore.Audit":1},"/pool":{"Pool.Audit":1}}`, PvePurposeRead, false},
+		{"read with guest-agent audit", `{"privsep":1,"expire":2000000000}`, `{"/":{"Sys.Audit":1},"/vms":{"VM.Audit":1,"VM.GuestAgent.Audit":1},"/storage":{"Datastore.Audit":1},"/pool":{"Pool.Audit":1}}`, PvePurposeRead, true},
+		{"read with guest monitor", `{"privsep":1,"expire":2000000000}`, `{"/":{"Sys.Audit":1},"/vms":{"VM.Audit":1,"VM.Monitor":1},"/storage":{"Datastore.Audit":1},"/pool":{"Pool.Audit":1}}`, PvePurposeRead, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			chain := makeTestChain(t)
@@ -318,6 +320,94 @@ func TestPveTokenValidationRequiresVerifiedProfile(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestPveReadTokenGuestAgentAuditExtension pins spec 06 / ADR 0006: the read
+// token may additionally hold VM.GuestAgent.Audit on /vms or a single
+// /vms/<vmid>, and nothing else beyond the four required audit privileges.
+func TestPveReadTokenGuestAgentAuditExtension(t *testing.T) {
+	base := map[string]map[string]int{
+		"/":        {"Sys.Audit": 1},
+		"/vms":     {"VM.Audit": 1},
+		"/storage": {"Datastore.Audit": 1},
+		"/pool":    {"Pool.Audit": 1},
+	}
+	with := func(extra map[string]map[string]int) map[string]map[string]int {
+		out := map[string]map[string]int{}
+		for p, r := range base {
+			out[p] = map[string]int{}
+			for k, v := range r {
+				out[p][k] = v
+			}
+		}
+		for p, r := range extra {
+			if out[p] == nil {
+				out[p] = map[string]int{}
+			}
+			for k, v := range r {
+				out[p][k] = v
+			}
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name   string
+		perms  map[string]map[string]int
+		accept bool
+	}{
+		{"without extension", with(nil), true},
+		{"on /vms propagated", with(map[string]map[string]int{"/vms": {"VM.GuestAgent.Audit": 1}}), true},
+		{"on /vms not propagated", with(map[string]map[string]int{"/vms": {"VM.GuestAgent.Audit": 0}}), true},
+		{"on selected vmid", with(map[string]map[string]int{"/vms/100": {"VM.GuestAgent.Audit": 0}}), true},
+		{"on several vmids", with(map[string]map[string]int{"/vms/100": {"VM.GuestAgent.Audit": 1}, "/vms/4294967295": {"VM.GuestAgent.Audit": 1}}), true},
+		{"on root", with(map[string]map[string]int{"/": {"VM.GuestAgent.Audit": 1}}), false},
+		{"on storage", with(map[string]map[string]int{"/storage": {"VM.GuestAgent.Audit": 1}}), false},
+		{"on pool", with(map[string]map[string]int{"/pool": {"VM.GuestAgent.Audit": 1}}), false},
+		{"on pool member", with(map[string]map[string]int{"/pool/lab": {"VM.GuestAgent.Audit": 1}}), false},
+		{"on nodes", with(map[string]map[string]int{"/nodes/pve1": {"VM.GuestAgent.Audit": 1}}), false},
+		{"below vmid", with(map[string]map[string]int{"/vms/100/x": {"VM.GuestAgent.Audit": 1}}), false},
+		{"vmid zero", with(map[string]map[string]int{"/vms/0": {"VM.GuestAgent.Audit": 1}}), false},
+		{"vmid leading zero", with(map[string]map[string]int{"/vms/0100": {"VM.GuestAgent.Audit": 1}}), false},
+		{"vmid not numeric", with(map[string]map[string]int{"/vms/abc": {"VM.GuestAgent.Audit": 1}}), false},
+		{"vmid overflow", with(map[string]map[string]int{"/vms/4294967296": {"VM.GuestAgent.Audit": 1}}), false},
+		{"vms prefix lookalike", with(map[string]map[string]int{"/vmsx": {"VM.GuestAgent.Audit": 1}}), false},
+		{"vms trailing slash", with(map[string]map[string]int{"/vms/": {"VM.GuestAgent.Audit": 1}}), false},
+		{"bad propagate flag", with(map[string]map[string]int{"/vms": {"VM.GuestAgent.Audit": 2}}), false},
+		{"extension replaces required VM.Audit", map[string]map[string]int{"/": {"Sys.Audit": 1}, "/vms": {"VM.GuestAgent.Audit": 1}, "/storage": {"Datastore.Audit": 1}, "/pool": {"Pool.Audit": 1}}, false},
+		{"extension alone", map[string]map[string]int{"/vms": {"VM.GuestAgent.Audit": 1}}, false},
+		{"VM.Monitor on /vms", with(map[string]map[string]int{"/vms": {"VM.Monitor": 1}}), false},
+		{"VM.Monitor on vmid", with(map[string]map[string]int{"/vms/100": {"VM.Monitor": 1}}), false},
+		{"VM.Monitor with extension", with(map[string]map[string]int{"/vms": {"VM.GuestAgent.Audit": 1, "VM.Monitor": 1}}), false},
+		{"GuestAgent.Unrestricted", with(map[string]map[string]int{"/vms": {"VM.GuestAgent.Unrestricted": 1}}), false},
+		{"GuestAgent.FileRead", with(map[string]map[string]int{"/vms": {"VM.GuestAgent.FileRead": 1}}), false},
+		{"GuestAgent.FileWrite", with(map[string]map[string]int{"/vms/100": {"VM.GuestAgent.FileWrite": 1}}), false},
+		{"GuestAgent.FileSystemMgmt", with(map[string]map[string]int{"/vms": {"VM.GuestAgent.FileSystemMgmt": 1}}), false},
+		{"VM.Console", with(map[string]map[string]int{"/vms": {"VM.Console": 1}}), false},
+		{"VM.PowerMgmt on vmid", with(map[string]map[string]int{"/vms/100": {"VM.PowerMgmt": 1}}), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validatePvePermissions(tc.perms, PvePurposeRead)
+			if (err == nil) != tc.accept {
+				t.Fatalf("accepted=%v, want %v (err=%v)", err == nil, tc.accept, err)
+			}
+			if err != nil && !errors.Is(err, ErrPveTokenRejected) {
+				t.Fatalf("err=%v, want ErrPveTokenRejected", err)
+			}
+		})
+	}
+}
+
+// TestPveActionTokenRejectsGuestAgentAudit keeps the action token to
+// VM.PowerMgmt only; the read-token extension does not leak into it.
+func TestPveActionTokenRejectsGuestAgentAudit(t *testing.T) {
+	for _, perms := range []map[string]map[string]int{
+		{"/vms/100": {"VM.PowerMgmt": 0, "VM.GuestAgent.Audit": 0}},
+		{"/vms/100": {"VM.GuestAgent.Audit": 0}},
+	} {
+		if err := validatePvePermissions(perms, PvePurposeAction); !errors.Is(err, ErrPveTokenRejected) {
+			t.Fatalf("action token with %v: err=%v, want ErrPveTokenRejected", perms, err)
+		}
 	}
 }
 
