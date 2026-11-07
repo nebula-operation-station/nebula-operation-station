@@ -81,7 +81,7 @@ before anything is stored:
 ### Read-only token (required)
 
 The read token must have exactly these four audit privileges and nothing
-else. Granting a broader built-in role (for example `PVEAuditor`, which
+else, apart from the optional guest-agent extension described below. Granting a broader built-in role (for example `PVEAuditor`, which
 includes additional audit privileges) fails validation. On the PVE side:
 
 ```sh
@@ -120,6 +120,32 @@ The four required entries are `Sys.Audit` on `/`, `VM.Audit` on `/vms`,
 `Datastore.Audit` on `/storage` and `Pool.Audit` on `/pool`. Sub-path grants
 of the same four privileges are accepted; any other privilege or path is
 rejected.
+
+#### Optional: guest-agent extension (PVE 9)
+
+The collector's `guest_agent` method (guest IPs, MACs, hostname, OS and
+filesystem summary) needs one more privilege on PVE 9:
+`VM.GuestAgent.Audit`, which allows only the informational guest-agent
+methods. Grant it on `/vms`, or only on selected `/vms/<vmid>`, to both the
+user and the token:
+
+```sh
+pveum role add NOSGuestAgentAudit --privs "VM.GuestAgent.Audit"
+pveum acl modify /vms --users nos-read@pve --roles NOSGuestAgentAudit
+pveum acl modify /vms --tokens 'nos-read@pve!nosread1' --roles NOSGuestAgentAudit
+```
+
+The executor accepts `VM.GuestAgent.Audit` only on `/vms` or on an exact
+`/vms/<vmid>`; on `/` or any other path the token is rejected. Never grant
+`VM.Monitor` (PVE 8's way to reach the guest agent, much broader) or any
+other `VM.GuestAgent.*` privilege (for example `VM.GuestAgent.Unrestricted`
+or `VM.GuestAgent.FileRead`) to the read token: the executor rejects it.
+On PVE 8 there is no such privilege, so leave the extension out there.
+
+The guest itself must run `qemu-guest-agent`, and the VM's QEMU guest agent
+option must be enabled (`qm set <vmid> --agent enabled=1`, takes effect
+after a full stop and start of the VM). Without that, `guest_agent` reports
+the agent as unavailable even with the privilege.
 
 ### Action token (optional, nothing uses it yet)
 
@@ -698,7 +724,7 @@ history is merely evidence of a past run.
 | Datasets `unavailable` or `partial` on `/pve/<id>`; `read_grant_does_not_cover` in `journalctl -u nebula-executor`; PVE page says "no approved read lease" | Refused reads still produce an observation, so the remote stays listed on `/pve` with source `pve-api` and is not labelled `unknown` (it turns `stale` while the collector backs off). The **Datasets** table on `/pve/<id>` shows the effect: a refused `nodes`, `guests`, `storage`, `cluster` or `tasks` read is `unavailable` with a reason such as `nodes unavailable`, and any refused read leaves the node, guest, storage and task lists that were read `partial` with `one or more datasets were not read`. These reasons do not name the cause (a locked vault or an unreachable remote looks the same), and the collector does not log it. Confirm it in the executor log: an audit line with `"kind":"denied"`, `"digest":"provider:<id>"`, `"code":"read_grant_does_not_cover"` and the method in `detail`. No active provider read lease covers this remote and method: none was approved, it expired or was revoked, the remote was re-pinned, the read token was rotated, or the method (for example `snapshots`) was not chosen. Request a lease from `/pve/<id>` (**Request read lease**) or refresh the old one on `/leases`, with the methods you need, and approve it (see [Read lease for a remote](#read-lease-for-a-remote)). |
 | Rows labelled `stale` | The collector is down, backing off after failures, or the remote is blocked. Backoff is exponential from 1 m to 15 m after failed polls; a single pass can be forced with `sudo -u nebula-pve-collector nebula-pve-collector -once` (as the service user, not root). |
 | Dataset `unavailable: insufficient read privileges` (backups) | Expected with a read-only token (see above). Do not borrow the action token or add write privileges for inventory. |
-| Guest agent fields unavailable on PVE 8 | PVE 8's legacy `VM.Monitor` is too broad for a read-only token; agent-derived fields stay unavailable unless a separately reviewed mechanism is provided. PVE 9 informational agent methods work with the read token. |
+| Guest agent fields unavailable on PVE 8 | PVE 8's legacy `VM.Monitor` is too broad for a read-only token; agent-derived fields stay unavailable unless a separately reviewed mechanism is provided. On PVE 9 the informational agent methods work with the read token once it holds the optional `VM.GuestAgent.Audit` extension (see [Read-only token](#read-only-token-required)). |
 | `add`/`rotate-token`/`remove`/`repin` refuse to run | The executor vault is locked: run `nebula unlock` on the executor host first. |
 | `the stored cluster CA of the remote is missing or unusable` | The vault entry of a leaf-only cluster's CA is lost or damaged. Copy `/etc/pve/pve-root-ca.pem` out of band and run `nebula pve remote repin <id> --ca-file pve-root-ca.pem`, typing the unchanged current pin as the new fingerprint (see [Restoring a missing or unusable stored cluster CA](#restoring-a-missing-or-unusable-stored-cluster-ca)). |
 | CLI cannot dial the executor | Check `NEBULA_EXECUTOR_SOCKET` and that the socket is served by the `NEBULA_EXECUTOR_USER` user (default `nebula-executor`). |
