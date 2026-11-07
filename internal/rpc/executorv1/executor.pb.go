@@ -13649,9 +13649,15 @@ func (x *PVEMetric) GetValue() float64 {
 
 // ProbePVERemoteRequest names approved endpoints for credential-free probing.
 type ProbePVERemoteRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Kind          string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`
-	Endpoints     []*PVEEndpoint         `protobuf:"bytes,2,rep,name=endpoints,proto3" json:"endpoints,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Kind      string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`
+	Endpoints []*PVEEndpoint         `protobuf:"bytes,2,rep,name=endpoints,proto3" json:"endpoints,omitempty"`
+	// ca_pem is the optional, admin-supplied cluster CA certificate (PEM,
+	// at most 64 KiB, exactly one certificate), copied out of band from
+	// /etc/pve/pve-root-ca.pem on a node. Cluster only. It is needed when
+	// the endpoints present only their leaf; it never replaces the typed
+	// fingerprint confirmation, and every endpoint's leaf must chain to it.
+	CaPem         []byte `protobuf:"bytes,3,opt,name=ca_pem,json=caPem,proto3" json:"ca_pem,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -13696,6 +13702,13 @@ func (x *ProbePVERemoteRequest) GetKind() string {
 func (x *ProbePVERemoteRequest) GetEndpoints() []*PVEEndpoint {
 	if x != nil {
 		return x.Endpoints
+	}
+	return nil
+}
+
+func (x *ProbePVERemoteRequest) GetCaPem() []byte {
+	if x != nil {
+		return x.CaPem
 	}
 	return nil
 }
@@ -13963,14 +13976,17 @@ func (x *PVEAdminRemote) GetSite() string {
 }
 
 type AddPVERemoteRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RemoteId      string                 `protobuf:"bytes,1,opt,name=remote_id,json=remoteId,proto3" json:"remote_id,omitempty"`
-	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	Kind          string                 `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
-	Endpoints     []*PVEEndpoint         `protobuf:"bytes,4,rep,name=endpoints,proto3" json:"endpoints,omitempty"`
-	ConfirmedPin  string                 `protobuf:"bytes,5,opt,name=confirmed_pin,json=confirmedPin,proto3" json:"confirmed_pin,omitempty"`
-	ReadToken     []byte                 `protobuf:"bytes,6,opt,name=read_token,json=readToken,proto3" json:"read_token,omitempty"`
-	ActionToken   []byte                 `protobuf:"bytes,7,opt,name=action_token,json=actionToken,proto3" json:"action_token,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	RemoteId     string                 `protobuf:"bytes,1,opt,name=remote_id,json=remoteId,proto3" json:"remote_id,omitempty"`
+	Name         string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Kind         string                 `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
+	Endpoints    []*PVEEndpoint         `protobuf:"bytes,4,rep,name=endpoints,proto3" json:"endpoints,omitempty"`
+	ConfirmedPin string                 `protobuf:"bytes,5,opt,name=confirmed_pin,json=confirmedPin,proto3" json:"confirmed_pin,omitempty"`
+	ReadToken    []byte                 `protobuf:"bytes,6,opt,name=read_token,json=readToken,proto3" json:"read_token,omitempty"`
+	ActionToken  []byte                 `protobuf:"bytes,7,opt,name=action_token,json=actionToken,proto3" json:"action_token,omitempty"`
+	// ca_pem: see ProbePVERemoteRequest.ca_pem. Its fingerprint is the pin
+	// the admin confirms; the executor keeps it in the vault.
+	CaPem         []byte `protobuf:"bytes,8,opt,name=ca_pem,json=caPem,proto3" json:"ca_pem,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -14050,6 +14066,13 @@ func (x *AddPVERemoteRequest) GetReadToken() []byte {
 func (x *AddPVERemoteRequest) GetActionToken() []byte {
 	if x != nil {
 		return x.ActionToken
+	}
+	return nil
+}
+
+func (x *AddPVERemoteRequest) GetCaPem() []byte {
+	if x != nil {
+		return x.CaPem
 	}
 	return nil
 }
@@ -14340,8 +14363,10 @@ type ProposePVERepinRequest struct {
 	RemoteId        string                 `protobuf:"bytes,1,opt,name=remote_id,json=remoteId,proto3" json:"remote_id,omitempty"`
 	OldPin          string                 `protobuf:"bytes,2,opt,name=old_pin,json=oldPin,proto3" json:"old_pin,omitempty"`
 	ConfirmedNewPin string                 `protobuf:"bytes,3,opt,name=confirmed_new_pin,json=confirmedNewPin,proto3" json:"confirmed_new_pin,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// ca_pem: see ProbePVERemoteRequest.ca_pem.
+	CaPem         []byte `protobuf:"bytes,4,opt,name=ca_pem,json=caPem,proto3" json:"ca_pem,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ProposePVERepinRequest) Reset() {
@@ -14395,14 +14420,24 @@ func (x *ProposePVERepinRequest) GetConfirmedNewPin() string {
 	return ""
 }
 
+func (x *ProposePVERepinRequest) GetCaPem() []byte {
+	if x != nil {
+		return x.CaPem
+	}
+	return nil
+}
+
 type CommitPVERepinRequest struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	RemoteId        string                 `protobuf:"bytes,1,opt,name=remote_id,json=remoteId,proto3" json:"remote_id,omitempty"`
 	OldPin          string                 `protobuf:"bytes,2,opt,name=old_pin,json=oldPin,proto3" json:"old_pin,omitempty"`
 	ConfirmedNewPin string                 `protobuf:"bytes,3,opt,name=confirmed_new_pin,json=confirmedNewPin,proto3" json:"confirmed_new_pin,omitempty"`
 	ExecutionDigest string                 `protobuf:"bytes,4,opt,name=execution_digest,json=executionDigest,proto3" json:"execution_digest,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// ca_pem: see ProbePVERemoteRequest.ca_pem. It must be the same
+	// certificate as in the proposal (its fingerprint is the new pin).
+	CaPem         []byte `protobuf:"bytes,5,opt,name=ca_pem,json=caPem,proto3" json:"ca_pem,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CommitPVERepinRequest) Reset() {
@@ -14461,6 +14496,13 @@ func (x *CommitPVERepinRequest) GetExecutionDigest() string {
 		return x.ExecutionDigest
 	}
 	return ""
+}
+
+func (x *CommitPVERepinRequest) GetCaPem() []byte {
+	if x != nil {
+		return x.CaPem
+	}
+	return nil
 }
 
 type AddPVERemoteResponse struct {
@@ -21328,10 +21370,11 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\tPVEMetric\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04unit\x18\x02 \x01(\tR\x04unit\x12\x14\n" +
-	"\x05value\x18\x03 \x01(\x01R\x05value\"j\n" +
+	"\x05value\x18\x03 \x01(\x01R\x05value\"\x81\x01\n" +
 	"\x15ProbePVERemoteRequest\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\tR\x04kind\x12=\n" +
-	"\tendpoints\x18\x02 \x03(\v2\x1f.nebula.executor.v1.PVEEndpointR\tendpoints\"\x8c\x01\n" +
+	"\tendpoints\x18\x02 \x03(\v2\x1f.nebula.executor.v1.PVEEndpointR\tendpoints\x12\x15\n" +
+	"\x06ca_pem\x18\x03 \x01(\fR\x05caPem\"\x8c\x01\n" +
 	"\x10PVEProbeEndpoint\x12\x12\n" +
 	"\x04host\x18\x01 \x01(\tR\x04host\x12\x12\n" +
 	"\x04port\x18\x02 \x01(\rR\x04port\x12)\n" +
@@ -21355,7 +21398,7 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	" \x01(\tR\tactionRef\x12%\n" +
 	"\x0eaction_version\x18\v \x01(\x03R\ractionVersion\x12&\n" +
 	"\x0fupdated_at_unix\x18\f \x01(\x03R\rupdatedAtUnix\x12\x12\n" +
-	"\x04site\x18\r \x01(\tR\x04site\"\x80\x02\n" +
+	"\x04site\x18\r \x01(\tR\x04site\"\x97\x02\n" +
 	"\x13AddPVERemoteRequest\x12\x1b\n" +
 	"\tremote_id\x18\x01 \x01(\tR\bremoteId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
@@ -21364,7 +21407,8 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\rconfirmed_pin\x18\x05 \x01(\tR\fconfirmedPin\x12\x1d\n" +
 	"\n" +
 	"read_token\x18\x06 \x01(\fR\treadToken\x12!\n" +
-	"\faction_token\x18\a \x01(\fR\vactionToken\"d\n" +
+	"\faction_token\x18\a \x01(\fR\vactionToken\x12\x15\n" +
+	"\x06ca_pem\x18\b \x01(\fR\x05caPem\"d\n" +
 	"\x15RotatePVETokenRequest\x12\x1b\n" +
 	"\tremote_id\x18\x01 \x01(\tR\bremoteId\x12\x18\n" +
 	"\apurpose\x18\x02 \x01(\tR\apurpose\x12\x14\n" +
@@ -21378,16 +21422,18 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x18SetPVERemoteSiteResponse\x12:\n" +
 	"\x06remote\x18\x01 \x01(\v2\".nebula.executor.v1.PVEAdminRemoteR\x06remote\"[\n" +
 	"\x1bListPVEAdminRemotesResponse\x12<\n" +
-	"\aremotes\x18\x01 \x03(\v2\".nebula.executor.v1.PVEAdminRemoteR\aremotes\"z\n" +
+	"\aremotes\x18\x01 \x03(\v2\".nebula.executor.v1.PVEAdminRemoteR\aremotes\"\x91\x01\n" +
 	"\x16ProposePVERepinRequest\x12\x1b\n" +
 	"\tremote_id\x18\x01 \x01(\tR\bremoteId\x12\x17\n" +
 	"\aold_pin\x18\x02 \x01(\tR\x06oldPin\x12*\n" +
-	"\x11confirmed_new_pin\x18\x03 \x01(\tR\x0fconfirmedNewPin\"\xa4\x01\n" +
+	"\x11confirmed_new_pin\x18\x03 \x01(\tR\x0fconfirmedNewPin\x12\x15\n" +
+	"\x06ca_pem\x18\x04 \x01(\fR\x05caPem\"\xbb\x01\n" +
 	"\x15CommitPVERepinRequest\x12\x1b\n" +
 	"\tremote_id\x18\x01 \x01(\tR\bremoteId\x12\x17\n" +
 	"\aold_pin\x18\x02 \x01(\tR\x06oldPin\x12*\n" +
 	"\x11confirmed_new_pin\x18\x03 \x01(\tR\x0fconfirmedNewPin\x12)\n" +
-	"\x10execution_digest\x18\x04 \x01(\tR\x0fexecutionDigest\"R\n" +
+	"\x10execution_digest\x18\x04 \x01(\tR\x0fexecutionDigest\x12\x15\n" +
+	"\x06ca_pem\x18\x05 \x01(\fR\x05caPem\"R\n" +
 	"\x14AddPVERemoteResponse\x12:\n" +
 	"\x06remote\x18\x01 \x01(\v2\".nebula.executor.v1.PVEAdminRemoteR\x06remote\"T\n" +
 	"\x16RotatePVETokenResponse\x12:\n" +
