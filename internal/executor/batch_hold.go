@@ -96,6 +96,9 @@ type heldRecord struct {
 	Endpoints   []string `json:"endpoints"`
 	HeldAtUnix  int64    `json:"held_at_unix"`
 	Expired     bool     `json:"expired,omitempty"`
+	// Durable: the hold waits for a durable job (container member); only
+	// its reconciled run ends it.
+	Durable bool `json:"durable,omitempty"`
 }
 
 type heldDocument struct {
@@ -115,6 +118,9 @@ type HeldBatchTarget struct {
 	// Running: a batch member runs on the target now (its reservation is
 	// persisted as this hold).
 	Running bool
+	// Durable: the hold waits for a durable container job; only the
+	// executor's reconciled run showing the job over ends it.
+	Durable bool
 }
 
 // validExecutionID reports whether id is a lowercase UUID.
@@ -222,8 +228,8 @@ func (s *Service) restoreHeld(x *batchExec) {
 	}
 	for _, r := range recs {
 		eps, _ := parseEndpoints(r.Endpoints) // validated by readHeld
-		x.held[r.HostID] = &heldTarget{executionID: r.ExecutionID, heldAt: time.Unix(r.HeldAtUnix, 0), expired: r.Expired,
-			call: &batchMemberCall{hostID: r.HostID, fingerprint: r.Fingerprint, endpoints: slices.Clone(r.Endpoints), eps: eps}}
+		x.held[r.HostID] = &heldTarget{executionID: r.ExecutionID, heldAt: time.Unix(r.HeldAtUnix, 0), expired: r.Expired, durable: r.Durable,
+			call: &batchMemberCall{hostID: r.HostID, fingerprint: r.Fingerprint, endpoints: slices.Clone(r.Endpoints), eps: eps, durable: r.Durable}}
 		x.hosts[r.HostID] = r.ExecutionID
 		s.log.Warn("audit", "kind", "batch_target_held_restored", "execution", r.ExecutionID, "host", r.HostID, "expired", r.Expired,
 			"detail", "held before the restart: no batch member starts there until the target shows the run gone")
@@ -240,7 +246,7 @@ func (x *batchExec) heldRecordsLocked(skip string) []heldRecord {
 		}
 		h := x.held[host]
 		out = append(out, heldRecord{HostID: host, Fingerprint: h.call.fingerprint, ExecutionID: h.executionID,
-			Endpoints: slices.Clone(h.call.endpoints), HeldAtUnix: h.heldAt.Unix(), Expired: h.expired})
+			Endpoints: slices.Clone(h.call.endpoints), HeldAtUnix: h.heldAt.Unix(), Expired: h.expired, Durable: h.durable})
 	}
 	return out
 }
@@ -318,7 +324,7 @@ func (s *Service) HeldBatchTargets() []HeldBatchTarget {
 	var out []HeldBatchTarget
 	for _, r := range x.heldRecordsLocked("") {
 		out = append(out, HeldBatchTarget{HostID: r.HostID, Fingerprint: r.Fingerprint, ExecutionID: r.ExecutionID,
-			HeldAt: time.Unix(r.HeldAtUnix, 0), Expired: r.Expired, Running: x.held[r.HostID].running})
+			HeldAt: time.Unix(r.HeldAtUnix, 0), Expired: r.Expired, Running: x.held[r.HostID].running, Durable: r.Durable})
 	}
 	return out
 }
@@ -352,9 +358,16 @@ func (s *Service) ReleaseHeldBatchTarget(ctx context.Context, hostID, executionI
 	h.checking = true
 	x.mu.Unlock()
 
-	cctx, cancel := context.WithTimeout(ctx, batchHoldRecheck)
-	running, verr := s.remoteRunVisible(cctx, x, h.call, executionID)
-	cancel()
+	var running bool
+	var verr error
+	if h.durable {
+		// A durable job runs as root: RunVisible cannot show it gone.
+		running = !s.durableHoldGone(hostID, executionID)
+	} else {
+		cctx, cancel := context.WithTimeout(ctx, batchHoldRecheck)
+		running, verr = s.remoteRunVisible(cctx, x, h.call, executionID)
+		cancel()
+	}
 
 	x.mu.Lock()
 	defer x.mu.Unlock()
@@ -404,7 +417,7 @@ func OfflineHeldBatchTargets(db *executordb.DB, dataDir string) ([]HeldBatchTarg
 	out := make([]HeldBatchTarget, 0, len(recs))
 	for _, r := range recs {
 		out = append(out, HeldBatchTarget{HostID: r.HostID, Fingerprint: r.Fingerprint, ExecutionID: r.ExecutionID,
-			HeldAt: time.Unix(r.HeldAtUnix, 0), Expired: r.Expired})
+			HeldAt: time.Unix(r.HeldAtUnix, 0), Expired: r.Expired, Durable: r.Durable})
 	}
 	return out, nil
 }
