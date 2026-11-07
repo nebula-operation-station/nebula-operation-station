@@ -408,6 +408,14 @@ func (s *Store) SweepVMIDReuse(ctx context.Context, remoteID string) ([]ReuseNot
 	return notices, nil
 }
 
+// GuestRef names one guest incarnation of a remote.
+type GuestRef struct {
+	// VMID is the PVE guest ID.
+	VMID uint64
+	// Generation is the incarnation of the VMID.
+	Generation uint64
+}
+
 // guestIPs are the IP addresses observed on one guest incarnation:
 // plain interface IPs, guest-agent IPs and the cloud-init IP.
 type guestIPs struct {
