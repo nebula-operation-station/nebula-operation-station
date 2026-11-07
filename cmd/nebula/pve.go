@@ -23,7 +23,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvetransport"
-	pb"github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
 const maxPveConfirmationBytes = 64
