@@ -97,6 +97,24 @@ func TestLazyExecutorReadGrantProposals(t *testing.T) {
 	}
 }
 
+// TestLazyExecutorCredentialVersioner guards the credential binding of
+// host read lease proposals: executions.Service finds GetSSHPublicKey by
+// type assertion on the executor it gets, and in nebula-server that
+// executor is a *lazyExecutor. Without it every proposal for an SSH host
+// reports the executor's SSH credential versions could not be read.
+func TestLazyExecutorCredentialVersioner(t *testing.T) {
+	var exec any = new(lazyExecutor)
+	cv, ok := exec.(interface {
+		GetSSHPublicKey(context.Context, *pb.GetSSHPublicKeyRequest, ...grpc.CallOption) (*pb.GetSSHPublicKeyResponse, error)
+	})
+	if !ok {
+		t.Fatal("lazyExecutor does not implement GetSSHPublicKey; host read lease proposals would fail before any RPC")
+	}
+	if r, err := cv.GetSSHPublicKey(context.Background(), &pb.GetSSHPublicKeyRequest{CredentialRef: "x"}); r != nil || err != errNotConnected {
+		t.Fatalf("GetSSHPublicKey = (%v, %v), want (nil, errNotConnected)", r, err)
+	}
+}
+
 // TestLazyExecutorGuestProvision: the provisioning pass-throughs exist
 // (the PV-08 run page finds them by type assertion like the read grants)
 // and fail with errNotConnected without an executor.
