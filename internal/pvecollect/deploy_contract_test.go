@@ -53,11 +53,24 @@ func TestDeploymentsProvisionSpoolModes(t *testing.T) {
 	for _, d := range consumedDirs() {
 		want["/"+d] = octalMode(spoolDirMode)
 	}
+	// install.sh creates the root as root, and the spool paths below it in a
+	// loop over name:mode entries as the collector (so no root install -d
+	// follows a link swapped in below the collector-owned root).
+	installLines := strings.Split(install, "\n")
+	var entries []string
+	for _, l := range installLines {
+		if rest, ok := strings.CutPrefix(l, "for entry in "); ok && strings.Contains(rest, ":") {
+			entries = strings.Fields(strings.TrimSuffix(rest, "; do"))
+		}
+	}
 	for sub, mode := range want {
 		prefix := fmt.Sprintf("install -d -m %s -o nebula-pve-collector -g %s ", mode, spoolGroupName)
-		line := prefix + `"${var_lib}/pve` + sub + `"`
-		if !slices.Contains(strings.Split(install, "\n"), line) {
-			t.Errorf("install.sh misses %q", line)
+		if sub == "" {
+			if line := prefix + `"${var_lib}/pve"`; !slices.Contains(installLines, line) {
+				t.Errorf("install.sh misses %q", line)
+			}
+		} else if entry := strings.TrimPrefix(sub, "/") + ":" + mode; !slices.Contains(entries, entry) {
+			t.Errorf("install.sh spool loop misses %q (got %q)", entry, entries)
 		}
 		if !strings.Contains(docker, prefix+spoolMount+sub+" ") {
 			t.Errorf("Dockerfile misses %s%s%s", prefix, spoolMount, sub)

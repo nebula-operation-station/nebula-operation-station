@@ -180,7 +180,9 @@ check_line "install.sh fixes spool owner/group without following a link" "$insta
   '    chown --no-dereference nebula-pve-collector:nebula-rpc "$pve_dir"'
 check_line "install.sh applies the spool mode as the collector" "$install_sh" \
   '  setpriv --reuid=nebula-pve-collector --regid=nebula-rpc --clear-groups \'
-if grep -qE '^install -d .*"\$\{var_lib\}/pve/' "$install_sh"; then
+# Any root install -d with an owner (-o) on a spool path, at any indent and
+# also through the loop variable, would follow a swapped-in link.
+if grep -qE '^[[:space:]]*install -d .*-o .*("\$\{var_lib\}/pve/|\$pve_dir)' "$install_sh"; then
   echo "FAIL install.sh runs a root install -d on a pve spool path (follows a swapped-in link)"
   fail=$((fail + 1))
 else

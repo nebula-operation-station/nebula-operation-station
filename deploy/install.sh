@@ -282,9 +282,11 @@ install -d -m 2750 -o nebula-discovery -g nebula-server "${var_lib}/discovery/re
 # inherits the shared group, which the server can read. The root is 0750 (not
 # world-readable) because it holds PVE data.
 # begin: pve spool guard
-# install -d follows a symlink, so a link swapped in at the pve root or a
-# spool path would hand its target to the collector (mode, owner and group
-# applied as root), and a file is not a directory the spool can use. The
+# install -d follows a symlink, so a link swapped in at the pve root would
+# hand its target to the collector (mode, owner and group applied as root);
+# the spool paths are only touched by chown --no-dereference and an install
+# -d as the collector below, but get the same check, like the postinst. A
+# file is not a directory the spool can use. The
 # postinst's guard refuses both and points the admin to this install, so the
 # install must refuse them too, before install -d runs (follow-up to #343).
 for pve_path in "${var_lib}/pve" "${var_lib}/pve/results" "${var_lib}/pve/guestnet" "${var_lib}/pve/requests" "${var_lib}/pve/live"; do
