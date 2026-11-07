@@ -44,7 +44,47 @@ var (
 	// ErrPveCAFileMismatch means an endpoint presented a CA that differs
 	// from the supplied one. It is always joined with ErrPvePinMismatch.
 	ErrPveCAFileMismatch = errors.New("executor: endpoint presents a CA that differs from the supplied CA file")
+	// ErrPveCARestoreRefused means a re-pin to the unchanged pin is not a
+	// CA restore (pveCheckCARestore). It is always joined with
+	// ErrPvePinMismatch, the refusal of a re-pin to the same pin.
+	ErrPveCARestoreRefused = errors.New("executor: a re-pin to the current pin only restores a missing or unusable stored cluster CA of an active cluster, with --ca-file")
 )
+
+// pveCARestoreHint names the way out of a missing or unusable stored
+// cluster CA of remoteID: a re-pin to the unchanged pin with the CA file
+// (PveAdmin.Repin restores it), or removing and adding the remote again.
+func pveCARestoreHint(remoteID string) string {
+	return "restore it with `nebula pve remote repin " + remoteID + " --ca-file pve-root-ca.pem` (the file copied out of band from /etc/pve/pve-root-ca.pem), typing the unchanged current pin as the new fingerprint"
+}
+
+// pveCheckCARestore decides whether a re-pin of rm to its unchanged pin is
+// a CA restore: rm is an active cluster, a CA file was supplied, and the
+// CA stored for the pin is missing or unusable. A locked vault returns
+// vault.ErrLocked; every other refusal wraps ErrPveCARestoreRefused and
+// ErrPvePinMismatch. That the CA file is the pinned CA and that every
+// endpoint's leaf chains to it is checked by the caller's probe
+// (TrustIdentityWithCA must yield the unchanged pin).
+func (a *PveAdmin) pveCheckCARestore(rm executordb.PveRemote, ca *x509.Certificate) error {
+	refused := func(why string) error {
+		return fmt.Errorf("%w: %w: %s", ErrPvePinMismatch, ErrPveCARestoreRefused, why)
+	}
+	switch {
+	case rm.Kind != pvecontract.KindCluster:
+		return refused("not a cluster")
+	case ca == nil:
+		return refused("no CA file supplied")
+	case rm.State != executordb.StateActive:
+		return refused("remote is " + rm.State)
+	}
+	stored, err := a.StoredClusterCA(rm)
+	switch {
+	case errors.Is(err, vault.ErrLocked):
+		return fmt.Errorf("executor: pve stored CA of %s: %w", rm.RemoteID, err)
+	case err == nil && stored != nil:
+		return refused("the stored CA is usable")
+	}
+	return nil
+}
 
 // ParsePveSuppliedCA parses an admin-supplied cluster CA file: at most
 // MaxPveCAFileBytes of PEM holding exactly one CERTIFICATE block (only

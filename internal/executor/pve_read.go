@@ -64,10 +64,13 @@ var (
 	errPveReadTrust       = errors.New("executor: pve remote no longer presents its pinned trust identity")
 	errPveReadUnreachable = errors.New("executor: no pve endpoint reachable")
 	// errPveStoredCA means the admin-supplied cluster CA stored for the
-	// remote's pin could not be used (unreadable, corrupt or not matching
-	// the pin). It is a local failure: the connection is refused, but the
-	// remote is not blocked, because it presented nothing different.
-	errPveStoredCA = errors.New("executor: stored cluster CA of the pve remote is unusable")
+	// remote's pin is missing (endpoints present only their leaf, but no
+	// CA is stored) or could not be used (unreadable, corrupt or not
+	// matching the pin). It is a local failure: the connection is refused,
+	// but the remote is not blocked, because it presented nothing
+	// different. The admin restores the CA with a re-pin to the unchanged
+	// pin and the CA file (PveAdmin.Repin).
+	errPveStoredCA = errors.New("executor: stored cluster CA of the pve remote is missing or unusable; restore it with `nebula pve remote repin <id> --ca-file`, typing the unchanged current pin as the new fingerprint")
 )
 
 // pveReadState holds per-remote request slots and the verified cluster CA
@@ -214,7 +217,7 @@ func (s *Service) ReadPVE(ctx context.Context, in *pb.ReadPVERequest) (*pb.ReadP
 		return nil, status.Error(codes.FailedPrecondition, "read pve: the vault is locked; the stored cluster CA cannot be loaded")
 	case errors.Is(err, errPveStoredCA):
 		s.log.Error("pve read: stored cluster CA unusable", "remote", rm.RemoteID, "error", err.Error())
-		return nil, status.Error(codes.Internal, "read pve: the stored cluster CA of the remote is unusable; re-pin it with --ca-file")
+		return nil, status.Error(codes.Internal, "read pve: the stored cluster CA of the remote is missing or unusable; "+pveCARestoreHint(rm.RemoteID))
 	case err != nil:
 		return nil, status.Error(codes.Unavailable, "read pve: remote unreachable")
 	}
@@ -355,9 +358,9 @@ func (s *Service) pveReadTrust(ctx context.Context, rm executordb.PveRemote) (pv
 // cache miss (executor restart, new trust generation) whose endpoints
 // answer with leaves only, it is loaded from there and re-checked against
 // the pin before it is used. A presented CA other than the pin stays a
-// trust failure. A locked vault returns vault.ErrLocked and an unusable
-// stored CA errPveStoredCA; neither is a trust failure, so neither blocks
-// the remote.
+// trust failure. A locked vault returns vault.ErrLocked and a missing or
+// unusable stored CA errPveStoredCA; neither is a trust failure, so
+// neither blocks the remote.
 func (s *Service) pvePinnedTrust(ctx context.Context, rm executordb.PveRemote) (pvetransport.Trust, error) {
 	raw, err := hex.DecodeString(rm.TrustPin)
 	if err != nil || len(raw) != 32 {
@@ -406,7 +409,10 @@ func (s *Service) pvePinnedTrust(ctx context.Context, rm executordb.PveRemote) (
 	}
 	// The endpoints present only their leaf: the trust is the CA file the
 	// admin supplied, stored under the pin. The transport verifies every
-	// leaf against it before a request is sent.
+	// leaf against it before a request is sent. Without a stored CA there
+	// is nothing to verify the leaves against, so the connection is
+	// refused; nothing different was presented, so it does not block the
+	// remote, and the admin restores the CA (errPveStoredCA).
 	ca, err := s.pveStoredClusterCA(rm)
 	switch {
 	case errors.Is(err, vault.ErrLocked):
@@ -414,7 +420,7 @@ func (s *Service) pvePinnedTrust(ctx context.Context, rm executordb.PveRemote) (
 	case err != nil:
 		return pvetransport.Trust{}, fmt.Errorf("pve remote %s: %w: %w", rm.RemoteID, errPveStoredCA, err)
 	case ca == nil:
-		return pvetransport.Trust{}, errPveReadTrust
+		return pvetransport.Trust{}, fmt.Errorf("pve remote %s: %w: none stored for the pin", rm.RemoteID, errPveStoredCA)
 	}
 	s.pveRead.storeCA(rm, ca)
 	return pvetransport.Trust{CA: ca}, nil

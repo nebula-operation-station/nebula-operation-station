@@ -513,6 +513,8 @@ func pveRPCError(err error) error {
 		return status.Error(codes.Internal, "pve trust verification failed; the failure could not be recorded and the remote stays refused")
 	case errors.Is(err, errPveTrustAuthorityNotRevoked):
 		return status.Error(codes.Internal, "pve trust verification failed; the remote is blocked but revoking its authority failed")
+	case errors.Is(err, ErrPveCARestoreRefused):
+		return status.Error(codes.FailedPrecondition, "the new fingerprint equals the current pin: that is only accepted with --ca-file to restore a missing or unusable stored cluster CA of an active cluster; otherwise confirm the new trust identity the endpoints present")
 	case errors.Is(err, vault.ErrLocked), errors.Is(err, ErrPveApprovalRequired), errors.Is(err, executordb.ErrRemoteState):
 		return status.Error(codes.FailedPrecondition, "pve operation requires an unlocked vault and valid remote state or approval")
 	case errors.Is(err, executordb.ErrRemoteNotFound):
@@ -605,7 +607,7 @@ func (s *Service) seedPveClusterCA(a *PveAdmin, r executordb.PveRemote) error {
 		if errors.Is(err, vault.ErrLocked) {
 			return status.Error(codes.FailedPrecondition, "pve remote stored, but the vault was locked before its cluster CA could be loaded; unlock and read it")
 		}
-		return status.Error(codes.Internal, "pve remote stored, but its cluster CA cannot be loaded; re-pin it with --ca-file")
+		return status.Error(codes.Internal, "pve remote stored, but its cluster CA cannot be loaded; "+pveCARestoreHint(r.RemoteID))
 	}
 	if ca != nil {
 		s.pveRead.storeCA(r, ca)
@@ -700,12 +702,20 @@ func (s *Service) ProposePVERepin(ctx context.Context, in *pb.ProposePVERepinReq
 	if !ok || r.State == executordb.StateRemoved {
 		return nil, pveRPCError(executordb.ErrRemoteNotFound)
 	}
-	if r.TrustPin != in.GetOldPin() || !pvecontract.ValidTrustPin(in.GetConfirmedNewPin()) || r.TrustPin == in.GetConfirmedNewPin() {
+	if r.TrustPin != in.GetOldPin() || !pvecontract.ValidTrustPin(in.GetConfirmedNewPin()) {
 		return nil, pveRPCError(ErrPvePinMismatch)
 	}
 	ca, err := a.suppliedCA(in.GetCaPem())
 	if err != nil {
 		return nil, pveRPCError(err)
+	}
+	// A re-pin to the unchanged pin only restores a missing or unusable
+	// stored cluster CA (PveAdmin.Repin); the probe below still has to
+	// yield exactly that pin from the CA file.
+	if r.TrustPin == in.GetConfirmedNewPin() {
+		if err := a.pveCheckCARestore(r, ca); err != nil {
+			return nil, pveRPCError(err)
+		}
 	}
 	probe, err := a.probeFn()(ctx, r.Endpoints)
 	if err != nil {

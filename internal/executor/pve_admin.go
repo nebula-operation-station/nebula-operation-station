@@ -978,6 +978,14 @@ func (a *PveAdmin) Repin(ctx context.Context, in PveRepin) (executordb.PveRemote
 	if err != nil {
 		return executordb.PveRemote{}, err
 	}
+	// A re-pin to the unchanged pin never changes trust: it is only
+	// accepted as the restore of a missing or unusable stored cluster CA.
+	restore := in.ConfirmedNewPin == rm.TrustPin
+	if restore {
+		if err := a.pveCheckCARestore(rm, ca); err != nil {
+			return executordb.PveRemote{}, fmt.Errorf("executor: pve repin: %w", err)
+		}
+	}
 	res, err := a.probeFn()(ctx, rm.Endpoints)
 	if err != nil {
 		return executordb.PveRemote{}, err
@@ -997,6 +1005,9 @@ func (a *PveAdmin) Repin(ctx context.Context, in PveRepin) (executordb.PveRemote
 	}
 	if err := a.checkDeps(); err != nil {
 		return executordb.PveRemote{}, err
+	}
+	if restore {
+		return a.restoreClusterCA(rm, ca, in.By)
 	}
 	// The new CA is stored under the new pin before the registry switches,
 	// so the current pin's CA stays intact if the switch fails; a failed
@@ -1027,6 +1038,18 @@ func (a *PveAdmin) Repin(ctx context.Context, in PveRepin) (executordb.PveRemote
 		return executordb.PveRemote{}, fmt.Errorf("executor: pve repin: revoke grants: %w", err)
 	}
 	a.log().Info("pve remote re-pinned", "remote", in.RemoteID, "pin", pin, "gen", rm.TrustGeneration)
+	return rm, nil
+}
+
+// restoreClusterCA stores ca, the admin-supplied CA whose fingerprint is
+// rm's unchanged pin and to which every endpoint's leaf chains (checked by
+// Repin), as rm's stored cluster CA. Pin, trust generation, state and
+// authority stay as they are: the trust identity did not change.
+func (a *PveAdmin) restoreClusterCA(rm executordb.PveRemote, ca *x509.Certificate, by string) (executordb.PveRemote, error) {
+	if _, err := a.storeClusterCA(rm.RemoteID, rm.TrustPin, ca, by); err != nil {
+		return executordb.PveRemote{}, fmt.Errorf("executor: pve repin: restore cluster CA: %w", err)
+	}
+	a.log().Info("pve cluster CA restored", "remote", rm.RemoteID, "pin", rm.TrustPin, "gen", rm.TrustGeneration)
 	return rm, nil
 }
 

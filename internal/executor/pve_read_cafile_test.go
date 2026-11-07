@@ -180,22 +180,6 @@ func TestPveLeafOnlyClusterReadAfterRestartLoadsStoredCA(t *testing.T) {
 	e.requireActive(leafOnlyRemote)
 }
 
-// TestPveLeafOnlyClusterWithoutStoredCAStillFailsTrust: the stored CA is
-// the only trust source of a leaf-only cluster; without it the endpoints
-// present nothing matching the pin, which stays a trust failure.
-func TestPveLeafOnlyClusterWithoutStoredCAStillFailsTrust(t *testing.T) {
-	e := newPveReadEnv(t, pvecontract.KindCluster)
-	c := makeLeafOnlyCluster(t, "127.0.0.1")
-	pve := newSwitchableLeafPVE(t, c.tls["127.0.0.1"])
-	rm := registerLeafOnlyCluster(t, e, c, pve.ep)
-	if err := e.svc.vault.Delete(pveCAVaultID(rm.RemoteID, rm.TrustPin)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := e.svc.pveReadTrust(context.Background(), rm); !errors.Is(err, errPveReadTrust) {
-		t.Fatalf("pveReadTrust without stored CA = %v, want errPveReadTrust", err)
-	}
-}
-
 // TestPveLeafOnlyClusterPresentingForeignCAFailsTrust: a node of a cluster
 // with a stored CA that now presents another CA is a trust failure, as
 // at add time; the stored CA does not cover it.
