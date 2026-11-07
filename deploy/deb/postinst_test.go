@@ -72,7 +72,11 @@ printf 'systemctl %s\n' "$*" >>"$STUB_LOG"
 if [ "$1" = daemon-reload ] && [ -f "$WATCH_FILE" ]; then
   cp "$WATCH_FILE" "$WATCH_COPY"
 fi
-[ "$1" != is-active ]
+if [ "$1" = is-active ]; then
+  [ -n "$EXECUTOR_ACTIVE" ]
+else
+  true
+fi
 `
 
 func newSandbox(t *testing.T) *sandbox {
@@ -290,15 +294,36 @@ func TestUpgradeReloadsSystemdAfterTheDropIn(t *testing.T) {
 }
 
 // Migrations run when the new binaries start, and the backup before that
-// needs the admin (review m105): the drop-in must not cost that guarantee.
+// needs the admin (review m105): the postinst must never restart the
+// services. With the executor running it reaches the running-services branch
+// and must tell the admin to back up and restart instead; with it stopped it
+// stays quiet. Both branches are pinned, so a restart added in either is
+// caught.
 func TestUpgradeNeverRestartsServices(t *testing.T) {
-	s := newSandbox(t)
-	s.installed(t)
-	s.run(t, "configure", "1.0.0")
-	for _, line := range strings.Split(s.calls(t), "\n") {
-		if strings.HasPrefix(line, "systemctl ") && !strings.Contains(line, "daemon-reload") && !strings.Contains(line, "is-active") {
-			t.Errorf("unexpected call: %s", line)
-		}
+	for _, tc := range []struct {
+		name       string
+		active     bool
+		wantNotice bool
+	}{
+		{"executor stopped", false, false},
+		{"executor running", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newSandbox(t)
+			s.installed(t)
+			if tc.active {
+				s.env = append(s.env, "EXECUTOR_ACTIVE=1")
+			}
+			out := s.run(t, "configure", "1.0.0")
+			for _, line := range strings.Split(s.calls(t), "\n") {
+				if strings.HasPrefix(line, "systemctl ") && !strings.Contains(line, "daemon-reload") && !strings.Contains(line, "is-active") {
+					t.Errorf("unexpected call: %s", line)
+				}
+			}
+			if got := strings.Contains(out, "back up, then restart"); got != tc.wantNotice {
+				t.Errorf("admin notice present = %v, want %v:\n%s", got, tc.wantNotice, out)
+			}
+		})
 	}
 }
 
