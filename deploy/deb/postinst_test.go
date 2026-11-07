@@ -38,11 +38,13 @@ type sandbox struct {
 }
 
 // stubs records every call in $STUB_LOG. install creates the directory
-// that is its last argument, and setpriv runs the command after --clear-groups,
-// so the real effect of both stays observable without root. stat passes the
-// real mode through but reports the owner and group from STAT_OWNERS,
-// because the test cannot chown; the service commands only record, so a
-// restart through any of them is visible.
+// that is its last argument and fails when it cannot, and setpriv runs the
+// command after --clear-groups, so the real effect of both stays observable
+// without root. stat passes the real mode through but reports the owner and
+// group from STAT_OWNERS, because the test cannot chown. chown records and
+// then fails like the real one when the target is missing or FAIL_CHOWN is
+// set, so a chown the postinst must not issue fails the upgrade. The service
+// commands only record, so a restart through any of them is visible.
 const stubs = `
 install|#!/bin/sh
 printf 'install %s\n' "$*" >>"$STUB_LOG"
@@ -54,8 +56,9 @@ for a in "$@"; do
   prev="$a"
 done
 for last; do :; done
-mkdir -p "$last"
-[ -n "$mode" ] && chmod "$mode" "$last"
+mkdir -p "$last" || exit 1
+if [ -n "$mode" ]; then chmod "$mode" "$last"; fi
+exit 0
 ---
 setpriv|#!/bin/sh
 printf 'setpriv %s\n' "$*" >>"$STUB_LOG"
@@ -92,6 +95,10 @@ fi
 ---
 chown|#!/bin/sh
 printf 'chown %s\n' "$*" >>"$STUB_LOG"
+for last; do :; done
+[ -e "$last" ] || exit 1
+if [ -n "$FAIL_CHOWN" ]; then exit 1; fi
+exit 0
 ---
 deb-systemd-invoke|#!/bin/sh
 printf 'deb-systemd-invoke %s\n' "$*" >>"$STUB_LOG"
@@ -145,6 +152,7 @@ func newSandbox(t *testing.T) *sandbox {
 		}
 		raw = strings.ReplaceAll(raw, r[0], r[1])
 	}
+	raw = s.relocate(raw)
 	s.script = filepath.Join(dir, "postinst")
 	if err := os.WriteFile(s.script, []byte(raw), 0o755); err != nil {
 		t.Fatal(err)
@@ -161,6 +169,26 @@ func newSandbox(t *testing.T) *sandbox {
 }
 
 func (s *sandbox) dropIn() string { return filepath.Join(s.systemdDir, serverDropIn) }
+
+// relocate moves the absolute paths of the service commands onto the
+// sandbox stubs. A postinst reaching them by absolute path, also behind a
+// [ -x ... ] check, would otherwise bypass the PATH stubs and restart the
+// real services on the test machine; relocated, the call is logged instead.
+// The longer paths are replaced first: /usr/bin/systemctl contains
+// /bin/systemctl.
+func (s *sandbox) relocate(raw string) string {
+	stub := func(name string) string { return filepath.Join(s.root, "bin", name) }
+	for _, r := range [][2]string{
+		{"/usr/bin/systemctl", stub("systemctl")},
+		{"/bin/systemctl", stub("systemctl")},
+		{"/usr/sbin/service", stub("service")},
+		{"/usr/bin/deb-systemd-invoke", stub("deb-systemd-invoke")},
+		{"/usr/sbin/invoke-rc.d", stub("invoke-rc.d")},
+	} {
+		raw = strings.ReplaceAll(raw, r[0], r[1])
+	}
+	return raw
+}
 
 // requireStub fails unless the sandbox's PATH intercepts name: the sandbox
 // bin directory comes first, so without the stub a call from the postinst
@@ -379,6 +407,34 @@ func TestUpgradeNeverRestartsServices(t *testing.T) {
 				t.Errorf("admin notice present = %v, want %v:\n%s", got, tc.wantNotice, out)
 			}
 		})
+	}
+}
+
+// An absolute path to a service command would bypass the PATH stubs and
+// restart the real services on the test machine, with no log line; the
+// sandbox relocates it onto the stub, so the call is logged and the real
+// command never runs. The restart is hidden behind a [ -x ... ] check, the
+// way a regression would hide it.
+func TestSandboxRelocatesAbsoluteServicePaths(t *testing.T) {
+	s := newSandbox(t)
+	s.installed(t)
+	s.env = append(s.env, "EXECUTOR_ACTIVE=1")
+	raw := readFile(t, s.script)
+	if !strings.HasSuffix(raw, "exit 0\n") {
+		t.Fatalf("postinst no longer ends with exit 0; the test appends before it")
+	}
+	raw = strings.TrimSuffix(raw, "exit 0\n") + `
+if [ -x /usr/sbin/invoke-rc.d ]; then
+  /usr/sbin/invoke-rc.d nebula-server restart
+fi
+exit 0
+`
+	if err := os.WriteFile(s.script, []byte(s.relocate(raw)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s.run(t, "configure", "1.0.0")
+	if !strings.Contains(s.calls(t), "invoke-rc.d nebula-server restart") {
+		t.Fatalf("absolute-path restart not caught by the sandbox:\n%s", s.calls(t))
 	}
 }
 
