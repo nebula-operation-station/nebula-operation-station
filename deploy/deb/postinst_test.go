@@ -473,7 +473,9 @@ func TestUpgradeProvisionsMissingSpoolDirectories(t *testing.T) {
 				if fi, err := os.Stat(filepath.Join(s.varLib, d)); err != nil || !fi.IsDir() {
 					t.Errorf("%s not created: %v", d, err)
 				}
-				m := regexp.MustCompile(`install -d -m (\d+) -o nebula-pve-collector -g nebula-rpc "\$\{var_lib\}/` + d + `"`).FindStringSubmatch(installScript(t))
+				// install.sh provisions the spool paths in one loop over
+				// name:mode entries, as the collector (setpriv).
+				m := regexp.MustCompile(`(?m)^for entry in [^\n]*\b` + strings.TrimPrefix(d, "pve/") + `:(\d+)\b`).FindStringSubmatch(installScript(t))
 				if m == nil {
 					t.Fatalf("install.sh does not provision %s", d)
 				}
@@ -716,15 +718,18 @@ func TestUpgradeKeepsOldDropInWhenChownFails(t *testing.T) {
 // --no-dereference would follow it. The swapped-in object is left alone,
 // link and target, and the upgrade keeps the old drop-in and points the
 // admin to install.sh. A link to a directory that already has install.sh's
-// state is refused the same way: the state check follows the link, so the
-// link check must come first.
+// state is refused the same way: the state check does not follow the link
+// (stat without -L reports the link's own mode), so the link check is what
+// refuses it, and the target stays in install.sh's state, untouched.
 func TestUpgradeLeavesANonDirectorySpoolPathAlone(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		path string
 		link bool
-		// targetInState puts the symlink target in install.sh's state, so
-		// only the link check can stop the postinst from accepting it.
+		// targetInState puts the symlink target in install.sh's state: the
+		// link must still be refused, because the state check does not
+		// follow it (stat without -L reports the link's own mode, never
+		// the target's).
 		targetInState bool
 	}{
 		{"file at pve root", "pve", false, false},
