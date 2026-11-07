@@ -389,6 +389,7 @@ start.
 | `executor_socket` | (required) | `/run/nebula/executor.sock`. |
 | `executor_user` | (required) | `nebula-executor`; the server checks that the socket is served by this user. |
 | `discovery_dir` | `/var/lib/nebula/discovery` | Discovery spool (`jobs/`, `results/`). Without the directory, discovery shows as not installed. |
+| `pve_spool_dir` | `/var/lib/nebula/pve` | Root of the PVE spool; an absolute path that must match the collector's `-spool`. The drop-in `20-discovery.conf` names the default paths, so another root needs your own directories and drop-in. |
 | `audit_hash_chain` | `false` | Chain the server's own audit lines by hash (section 10.3). |
 | `traffic` | 21 days | Traffic map retention: `"traffic": {"retention_days": N}` keeps N days of flow data (1-21). A value outside the range stops the start. |
 | `notifications` | none | Providers, section 10.1. |
@@ -979,13 +980,16 @@ How it flows:
 
 | Directory | Mode | Collector | Server |
 | --- | --- | --- | --- |
-| `/var/lib/nebula/pve/requests/` | `nebula-pve-collector:nebula-rpc`, 2770 | reads | writes (only this path, via the `20-discovery.conf` drop-in) |
+| `/var/lib/nebula/pve/requests/` | `nebula-pve-collector:nebula-rpc`, 2770 | reads | writes (via the `20-discovery.conf` drop-in) |
 | `/var/lib/nebula/pve/live/` | `nebula-pve-collector:nebula-rpc`, 2750 | writes | reads only |
 
 `install.sh` (also with `--from-package`) and the container image create
-both directories; in containers the server mounts only the `pve-requests`
-volume and `pve-live` read-only. The collector runs the live reads by
-default; `-live=false` on its command line turns them off.
+both directories; in containers the server mounts the `pve-requests` volume
+and `pve-live` read-only. The collector runs the live reads by default;
+`-live=false` on its command line turns them off. `results/` and `guestnet/`
+next to them belong to the spool import, not to the live values: the server
+may also unlink there (section 17.1, and "Spool import" in the
+[Proxmox operator guide](../operator/proxmox.md#spool-import)).
 
 A read lease is required: without an approved lease with the `on_demand`
 trigger that lists the box, the box shows no live values. Revoking the
@@ -1002,8 +1006,8 @@ Troubleshooting (no live values on a Proxmox box):
   requests refused` (no lease covers the box, or the live limits are
   reached), `publish live samples` (cannot write `live/`).
 - `ls -ld /var/lib/nebula/pve/requests /var/lib/nebula/pve/live` — both
-  must exist with the modes above; re-run `install.sh` after an upgrade
-  if they are missing.
+  must exist with the modes above. A package upgrade creates and repairs
+  them (section 13); otherwise re-run `install.sh`.
 - `systemctl cat nebula-server` — the drop-in must list
   `ReadWritePaths=/var/lib/nebula/pve/requests`; otherwise the server
   cannot publish the want-list (re-run `install.sh`).
@@ -1465,8 +1469,9 @@ stops without changing anything if it cannot make one (no backup
 recipients, no `sudo` from an admin, an executor older than backups) or
 if the backup fails. `NEBULA_SKIP_BACKUP=1` upgrades without a backup.
 Then it replaces the binaries and the unit files you did not edit, and
-restarts the services whose binaries, units or drop-ins changed. Run
-`nebula unlock`.
+restarts the server and the executor when their binaries, units or drop-ins
+changed. Other running services, `nebula-pve-collector` among them, restart
+only when their unit changed. Run `nebula unlock`.
 
 Unit files follow these rules on every run. `install.sh` records the
 checksum of each shipped unit it installs in `/var/lib/nebula/units.sha256`
@@ -1510,13 +1515,20 @@ sudo nebula backup && sudo systemctl restart nebula-executor nebula-server
 nebula unlock
 ```
 
-The upgrade also rewrites the server drop-in
-`nebula-server.service.d/20-discovery.conf` to the version `install.sh`
-writes, creates the PVE spool directories it names if they are missing, and
-leaves existing ones as they are. It applies at the restart above, so you do
-not need to run `install.sh` for it. Only if the upgrade warns that it could
-not update the drop-in, run `install.sh --from-package` with your
-`--admin-users` and `--rp-id`. The executor drop-in `10-local.conf` holds your
+On a host where `install.sh` has run, the upgrade also rewrites the server
+drop-in `nebula-server.service.d/20-discovery.conf` to the version `install.sh`
+writes, and looks after the PVE spool directories: it creates `results/`,
+`guestnet/`, `requests/` and `live/` below `/var/lib/nebula/pve` if they are
+missing, and changes the mode of an existing one that deviates back to its
+documented mode (2770, `live/` 2750; section 17.1). A directory that already
+has the right mode stays untouched, and `pve/` itself is only created if it is
+missing. The mode repair happens during the upgrade; the drop-in applies at
+the restart above, so you do not need to run `install.sh` for it. Only if the
+upgrade warns that it could not update the drop-in, run
+`install.sh --from-package` with your `--admin-users` and `--rp-id`. The
+restart above does not include the collector; a new `nebula-pve-collector`
+binary runs after `sudo systemctl restart nebula-pve-collector`. The executor
+drop-in `10-local.conf` holds your
 own values and stays as it is; keep local changes to it in `20-local.conf`
 (section 6.2), and to the server in a drop-in of your own, because
 `20-discovery.conf` is rewritten.
@@ -1628,11 +1640,11 @@ from `~nebula/.ssh/authorized_keys` (or the user: `userdel -r nebula`),
 
 | Path | Owner, mode | Content |
 | --- | --- | --- |
-| `/usr/bin/nebula`, `nebula-server`, `nebula-executor`, `nebula-discovery` | root, 0755 | The binaries |
+| `/usr/bin/nebula`, `nebula-server`, `nebula-executor`, `nebula-discovery`, `nebula-pve-collector` | root, 0755 | The binaries |
 | `/etc/systemd/system/nebula-*.service`, `nebula-discovery.path`, `.timer` | root, 0644 | Units (package: `/lib/systemd/system/`) |
 | `/etc/systemd/system/nebula-executor.service.d/10-local.conf` | root, 0644 | Executor flags, rewritten by `install.sh` |
 | `/etc/systemd/system/nebula-executor.service.d/20-local.conf` | root, 0644 | Your own executor flags (optional) |
-| `/etc/systemd/system/nebula-server.service.d/20-discovery.conf` | root, 0644 | Lets the server write the job spool and `pve/requests/` |
+| `/etc/systemd/system/nebula-server.service.d/20-discovery.conf` | root, 0644 | Lets the server write the job spool and `pve/requests/`, and unlink in `pve/results/` and `pve/guestnet/` |
 | `/var/lib/nebula/units.sha256` | root, 0644 | Checksums of the shipped units `install.sh` installed (section 13; not used by the package) |
 | `/etc/nebula/server.json` | `root:nebula-server`, 0640 | Server configuration |
 | `/etc/nebula/backup-recipients` | root | age recipients for backups |
@@ -1640,6 +1652,8 @@ from `~nebula/.ssh/authorized_keys` (or the user: `userdel -r nebula`),
 | `/var/lib/nebula/server/` | `nebula-server`, 0750 | `server.db` (inventory, operations, logs, runbooks, modules, IPAM, audit) |
 | `/var/lib/nebula/discovery/jobs/` | `nebula-server:nebula-discovery`, 2750 | Queued scans |
 | `/var/lib/nebula/discovery/results/` | `nebula-discovery:nebula-server`, 2750 | Scan results |
+| `/var/lib/nebula/pve/` | `nebula-pve-collector:nebula-rpc`, 2750 | PVE spool root (`pve_spool_dir`; the server only reads it) |
+| `/var/lib/nebula/pve/results/`, `guestnet/` | `nebula-pve-collector:nebula-rpc`, 2770 | Observations and guest NIC records (collector writes, server imports and unlinks) |
 | `/var/lib/nebula/pve/requests/` | `nebula-pve-collector:nebula-rpc`, 2770 | Live want-list `live.json` (server writes, collector reads; section 9.4) |
 | `/var/lib/nebula/pve/live/` | `nebula-pve-collector:nebula-rpc`, 2750 | Live samples `<remote>.json` (collector writes, server reads) |
 | `/run/nebula/executor.sock` | `nebula-executor:nebula-rpc`, 0660 | The executor's socket |
