@@ -664,18 +664,31 @@ host in the inventory, not only to a suggested one (the page shows buttons
 only for suggestions). The conflict confirmation still applies when the
 guest has a conflict or the chosen host is a conflicting candidate.
 
-**Known limitation.** The privileged session is held by the executor for
-the whole installation, and the executor does not say which user opened
-it. While any admin has a privileged session open, every logged-in web
-user can link and release guests; the audit line records the user who
-clicked. Close the privileged session when you are done.
+**Who may link.** Only the web session that opened the current
+privileged session may link and release guests: the same login, the same
+credential, and the executor still reporting the expiry that this session
+opened. Another logged-in user, a second web session of the same
+credential, a privileged session opened or reopened outside the web (for
+example with the CLI), an expired session and one ended by a web lock are
+refused. After a server restart nobody may link until the privileged
+session is opened again from the web. The audit line records the user.
+Earlier versions let every logged-in web user link while any admin had a
+privileged session open; that gap is closed. Close the privileged session
+when you are done.
 
 **What a link means.** A link is display and drift information only: the
 inventory chart shows the host inside the guest box. It is never an SSH identity: the host keeps its own SSH
 enrollment, endpoints and pinned host key, and guest IPs never replace its
 SSH endpoints.
 
-A `nebula pve link` CLI is not available yet; use the PVE page.
+**No CLI for links.** Links can only be managed on the PVE page; there is
+no `nebula pve link` command. Links live in the server database, and the
+`nebula` CLI talks only to the executor socket, which cannot reach that
+database. The server has no local admin endpoint, and a CLI path would
+need its own binding to the privileged session, equal to the web rule
+above. Do not edit `pve_host_links` in the server database by hand: that
+skips the privileged-session check, the conflict confirmation and the
+audit line.
 
 ## Staleness and unknown labels in the UI
 
