@@ -196,9 +196,14 @@ func TestPVECollectorSpoolProvisioning(t *testing.T) {
 	if !root.MatchString(install) {
 		t.Error("install.sh does not provision the PVE spool root (2750, nebula-pve-collector:nebula-rpc)")
 	}
-	results := regexp.MustCompile(`(?m)^install -d -m 2770 -o nebula-pve-collector -g nebula-rpc .*pve/results"\s*$`)
-	if !results.MatchString(install) {
-		t.Error("install.sh does not provision the PVE results dir (2770, nebula-pve-collector:nebula-rpc)")
+	// results/ is created with 2770 as the collector (setpriv, never a root
+	// install -d that would follow a swapped-in link), with the owner and
+	// group fixed by chown --no-dereference.
+	results := regexp.MustCompile(`(?m)^for entry in results:2770 `)
+	asCollector := regexp.MustCompile(`(?m)^  setpriv --reuid=nebula-pve-collector --regid=nebula-rpc --clear-groups \\\n    install -d -m "\$pve_mode" "\$pve_dir"$`)
+	chown := regexp.MustCompile(`(?m)^    chown --no-dereference nebula-pve-collector:nebula-rpc "\$pve_dir"$`)
+	if !results.MatchString(install) || !asCollector.MatchString(install) || !chown.MatchString(install) {
+		t.Error("install.sh does not provision the PVE results dir (2770, nebula-pve-collector:nebula-rpc, as the collector)")
 	}
 }
 
