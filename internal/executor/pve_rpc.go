@@ -629,6 +629,12 @@ func (s *Service) RotatePVEToken(ctx context.Context, in *pb.RotatePVETokenReque
 	// be recorded. s.pveMu is held, so the locked variants are used.
 	a.TrustGate, a.TrustFailed = s.pveTrustFenceGateLocked, s.pveTrustFailedLocked
 	r, err := a.RotateToken(ctx, PveRotateToken{RemoteID: in.GetRemoteId(), Purpose: in.GetPurpose(), Token: in.GetToken(), By: callerName(ctx)})
+	if errors.Is(err, errPveStoredCA) {
+		// Same report as read and mutation: not a trust failure, and the
+		// message names the restore.
+		s.log.Error("pve rotate token: stored cluster CA unusable", "remote", in.GetRemoteId(), "error", err.Error())
+		return nil, status.Error(codes.Internal, "rotate pve token: the stored cluster CA of the remote is missing or unusable; "+pveCARestoreHint(in.GetRemoteId()))
+	}
 	if err != nil {
 		return nil, pveRPCError(err)
 	}

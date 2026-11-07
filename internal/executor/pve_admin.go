@@ -805,14 +805,23 @@ func (a *PveAdmin) RotateToken(ctx context.Context, in PveRotateToken) (executor
 	if errors.Is(err, ErrPveClusterNoCA) {
 		// A cluster added with a CA file: its leaf-only endpoints are
 		// verified against that stored CA; nothing is sent when it cannot
-		// be loaded.
+		// be loaded. A missing or unusable stored CA is a local failure,
+		// not a trust failure (as for read and mutation, errPveStoredCA):
+		// the endpoints presented nothing different, so the remote is not
+		// blocked and keeps its grants, and the admin restores the CA by
+		// a re-pin to the unchanged pin, which needs it active. The cause
+		// is not wrapped, so that it is not reported as a pin or CA-file
+		// error.
 		ca, caErr := a.StoredClusterCA(rm)
-		if caErr != nil {
-			return executordb.PveRemote{}, caErr
+		switch {
+		case errors.Is(caErr, vault.ErrLocked):
+			return executordb.PveRemote{}, fmt.Errorf("executor: pve rotate token: load stored cluster CA: %w", caErr)
+		case caErr != nil:
+			return executordb.PveRemote{}, fmt.Errorf("executor: pve rotate token: %s: %w: %v", rm.RemoteID, errPveStoredCA, caErr)
+		case ca == nil:
+			return executordb.PveRemote{}, fmt.Errorf("executor: pve rotate token: %s: %w: none stored for the pin", rm.RemoteID, errPveStoredCA)
 		}
-		if ca != nil {
-			pin, trust, err = res.TrustIdentityWithCA(rm.Kind, ca, a.now())
-		}
+		pin, trust, err = res.TrustIdentityWithCA(rm.Kind, ca, a.now())
 	}
 	if err != nil {
 		return executordb.PveRemote{}, a.rotateTrustFailure(rm, in.By, ErrPvePinMismatch)
