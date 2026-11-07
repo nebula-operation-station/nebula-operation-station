@@ -512,14 +512,43 @@ else
   echo "install.sh: started nebula-executor (was not active)"
 fi
 
+# --- Collector restart on upgrade (WA-08) -----------------------------------
 # The collector has no drop-in of its own; restart it when the binaries
-# changed, the same way as the server and the executor (WA-08). It exits
-# only on failure, so without this it would keep running the old binary
-# against the new executor.
+# changed, the same way as the server and the executor. It exits only on
+# failure, so without this it would keep running the old binary against
+# the new executor.
+#
+# The restart must wait for the executor socket: the executor is
+# Type=simple, so the restart above returns before the socket exists, and
+# the collector's startup probe (ListPVERemotes) exits fatally without it.
+# On a tarball upgrade that keeps an older collector unit (units are
+# installed only if absent) without RestartSec=5s, a restart while the
+# socket is missing can hit the start limit and leave the collector failed
+# while this script still exits 0. If the socket does not appear in time,
+# leave the collector on the old binary (it retries inside its poll loop)
+# and warn instead of restarting. NEBULA_EXECUTOR_SOCK and
+# NEBULA_COLLECTOR_RESTART_WAIT_S override the socket path and the wait
+# (deploy/install_test.sh runs this block with a stubbed systemctl).
+# begin: collector restart on upgrade
+executor_sock="${NEBULA_EXECUTOR_SOCK:-/run/nebula/executor.sock}"
+collector_restart_wait_s="${NEBULA_COLLECTOR_RESTART_WAIT_S:-30}"
 if systemctl is-active --quiet nebula-pve-collector.service && [[ ${bin_changed} -eq 1 ]]; then
-  systemctl restart nebula-pve-collector.service
-  echo "install.sh: restarted nebula-pve-collector (binaries changed)"
+  sock_ready=0
+  for _ in $(seq 1 $((collector_restart_wait_s * 4))); do
+    if [[ -S "${executor_sock}" ]]; then
+      sock_ready=1
+      break
+    fi
+    sleep 0.25
+  done
+  if [[ ${sock_ready} -eq 1 ]]; then
+    systemctl restart nebula-pve-collector.service
+    echo "install.sh: restarted nebula-pve-collector (binaries changed)"
+  else
+    echo "install.sh: ${executor_sock} not present after ${collector_restart_wait_s}s; leaving nebula-pve-collector on the old binary (restart it once the executor is up)" >&2
+  fi
 fi
+# end: collector restart on upgrade
 
 # --- Next steps --------------------------------------------------------------
 cat <<EOF
