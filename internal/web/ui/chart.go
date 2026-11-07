@@ -632,6 +632,7 @@ func (h *Handler) handleInventoryChart(w http.ResponseWriter, r *http.Request) {
 			data.Chart.PVEUnavailable = true
 		} else {
 			data.Chart.PVENodes = pveTreeToView(tree)
+			h.addPVELinks(ctx, data.Chart.PVENodes, hosts)
 			h.addPVELines(ctx, data.Chart.PVENodes, res, h.clockNow())
 			addPVEUpdates(data.Chart.PVENodes, hosts, pins, pinsUnavailable)
 		}

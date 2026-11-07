@@ -560,6 +560,9 @@ func (h *Handler) Handler() http.Handler {
 	// PVE remotes (ADR 0006, P1-13): read-only, stored inventory only.
 	mux.HandleFunc("GET /pve", h.handlePVEList)
 	mux.HandleFunc("GET /pve/{id}", h.handlePVEDetail)
+	// Guest/host links (ADR 0006 P1-12, pve_links.go): explicit, audited.
+	mux.HandleFunc("POST /pve/{id}/links", h.handlePVELink)
+	mux.HandleFunc("POST /pve/{id}/links/remove", h.handlePVEUnlink)
 	// Guest power actions (ADR 0006 P2-01): the chart's fetch-posted
 	// forms propose, the proposal page shows the executor's binding and
 	// risk, approval reuses the schedule button (JSON) or the CLI.
