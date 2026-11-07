@@ -139,12 +139,13 @@ ACL entry of the same role needs no change in NOS.
 - **Only `VM.PowerMgmt`.** The privileges of the ADR 0006 extensions
   (`VM.Snapshot`, `VM.Backup`, `VM.Migrate`, `Sys.PowerMgmt`, `VM.Config.*`,
   `Datastore.AllocateSpace`) are refused as well. An accepted token therefore
-  covers guest power, but it lacks what a snapshot or a provisioning needs:
-  the proposal and the approval succeed, then PVE refuses the step and the
-  run fails. Do not work around this by widening the ACL after `add`: the
-  next `rotate-token` would be refused, and ADR 0006 keeps an additional
-  privilege disabled until its ACL checks are documented for each supported
-  PVE version.
+  covers guest power, but it lacks what a snapshot needs: the proposal and
+  the approval succeed, then PVE refuses the step and the run fails. It also
+  lacks what a provisioning needs, but today a provisioning stops earlier, at
+  the proposal (see [Guest provisioning](#guest-provisioning)). Do not work
+  around this by widening the ACL after `add`: the next `rotate-token` would
+  be refused, and ADR 0006 keeps an additional privilege disabled until its
+  ACL checks are documented for each supported PVE version.
 
 No console, guest exec, guest file access, permission administration,
 storage deletion or HA-configuration privileges belong to either token.
@@ -359,10 +360,13 @@ missing.
   | Directory under `/var/lib/nebula/pve` | Mode | Holds |
   | --- | --- | --- |
   | `.` | 2750 | The spool root |
-  | `results/` | 2770 | Observations for the server to import |
-  | `guestnet/` | 2770 | Guest NIC records for the traffic map |
-  | `requests/` | 2770 | The server's live want-list; the server may write only here (`20-discovery.conf` drop-in) |
+  | `results/` | 2770 | Observations for the server to import; it unlinks each file afterwards |
+  | `guestnet/` | 2770 | Guest NIC records for the traffic map, imported and unlinked the same way |
+  | `requests/` | 2770 | The server's live want-list |
   | `live/` | 2750 | Live samples, read only by the server |
+
+  The `20-discovery.conf` drop-in opens `results/`, `guestnet/` and
+  `requests/` for the server; [Spool import](#spool-import) lists its rights.
 
 - **An unlocked executor.** After an executor restart, run `nebula unlock`;
   until then every read is refused.
@@ -414,10 +418,12 @@ of *what* the collector may read and *for how long*.
 
 1. Open `/pve/<id>`. For an active remote that no active provider read
    lease lists, the page says "no approved read lease" and offers **Request
-   read lease**. When every active read lease that lists the remote is stale
-   (the remote was re-pinned or its read token rotated since the approval),
-   the page says "Read lease stale" and offers **Renew read lease** instead.
-   A live-values lease (see [Live values and their
+   read lease**. That is also what you see after a re-pin or a token rotation,
+   because both revoke the lease. The page says "Read lease stale" and offers
+   **Renew read lease** instead only when a lease is still active but every
+   active read lease that lists the remote no longer matches the registry:
+   for example, the rotation stored the new token but its revocation step
+   failed. A live-values lease (see [Live values and their
    lease](#live-values-and-their-lease)) is not a read lease and does not
    hide the request. The same form is at `/leases/new`, scope **Proxmox
    remote**.
@@ -444,11 +450,11 @@ nebula read-grant approve <digest>
 
 **What it covers.** Exactly the frozen remotes and methods, nothing else:
 no SSH hosts, actions or credentials, no write methods, and no other remote.
-A remote that is re-pinned (new trust generation) or whose read token is
-rotated (new credential version) is no longer covered; the reads fail with
-`read_grant_does_not_cover` until a new lease is approved. Rotating the
-action token leaves the binding intact but revokes the lease as well (see
-[Rotating a token](#rotating-a-token)).
+A re-pin and a rotation of **either** token revoke every lease that names the
+remote (see [Rotating a token](#rotating-a-token)), so the reads fail with
+`read_grant_does_not_cover` until a new lease is approved. The binding is a
+second check: a lease that is still active covers nothing once the trust pin,
+trust generation or read credential version it froze has changed.
 
 **Renewal and revoke.** `/leases` lists provider leases with their remotes
 and methods; the detail page shows each remote with pin prefix, trust
@@ -516,9 +522,9 @@ remote per hour (at most 1440, below the 4096 limit of the profile). The
 server sizes the budget from the same live-box limit the executor enforces,
 so the two cannot drift apart.
 
-**When it stops covering.** Like a read lease, a live-values lease no
-longer covers anything after the remote is re-pinned or its read token is
-rotated. A guest recreated with the same VMID gets a new generation and is
+**When it stops covering.** Like a read lease, a live-values lease is revoked
+when the remote is re-pinned or either token is rotated, and then covers
+nothing. A guest recreated with the same VMID gets a new generation and is
 not covered either; other guests of the lease keep working. A guest that
 migrates to another node is not covered on the new node. The **Live** column
 shows **on** for a node or guest that a current lease covers exactly and
@@ -594,9 +600,11 @@ are not offered. A remote without an action token is offered, but the executor
 refuses its provisioning. It needs the
 [NOS automation key](#nos-automation-key-guest-provisioning).
 
-Two gaps keep it from working end to end today: a provisioning binds a
-prepared template record, and `pve.image.prepare`, the only way to create
-one, is not reachable; and an accepted
+Two gaps keep it from working end to end today. A provisioning binds a
+prepared template record, and `pve.image.prepare`, the only way to create one,
+is not reachable, so no record can exist and the executor refuses the proposal
+("the template is not prepared or changed; prepare it again"). Nothing reaches
+approval or PVE. Past that gap, an accepted
 [action token](#action-token-required-for-guest-actions) lacks the privileges
 of the clone, configuration and resize steps.
 
@@ -660,7 +668,8 @@ history is merely evidence of a past run.
 | Datasets `unavailable` or rows `stale` after an executor restart | The executor refuses every read until it is unlocked: run `nebula unlock` on the executor host. |
 | No live values on a box; **Live** column shows nothing or **lease stale, renew** | No current live-values lease lists the box. Enable it on `/pve/<id>` (see [Live values and their lease](#live-values-and-their-lease)); a read lease does not cover it. The admin guide, "Live values for Proxmox nodes and guests", lists the log messages to check. |
 | Action refused: "the remote has no action credential" | The remote is read-only: add the action token with `nebula pve remote rotate-token <id> --purpose action`, then approve new leases. |
-| Snapshot or provisioning approved, then the run fails | An accepted action token holds only `VM.PowerMgmt`, so PVE refuses the step (see [Action token](#action-token-required-for-guest-actions)). |
+| Snapshot approved, then the run fails | An accepted action token holds only `VM.PowerMgmt`, so PVE refuses the step (see [Action token](#action-token-required-for-guest-actions)). |
+| Provisioning refused at the proposal: "the template is not prepared or changed; prepare it again" | Expected today: no template record can exist while `pve.image.prepare` is not reachable (see [Guest provisioning](#guest-provisioning)). |
 | Shutdown shows risk HIGH instead of MEDIUM | The guest, its node or its remote has no exact criticality record, which counts as HIGH (see [Guest actions and risk classes](#guest-actions-and-risk-classes)). |
 | Rows labelled `stale` | The collector is down, backing off after failures, or the remote is blocked. Backoff is exponential from 1 m to 15 m after failed polls; a single pass can be forced with `nebula-pve-collector -once`. |
 | Dataset `unavailable: insufficient read privileges` (backups) | Expected with a read-only token (see above). Do not borrow the action token or add write privileges for inventory. |

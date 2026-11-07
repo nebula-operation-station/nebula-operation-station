@@ -983,13 +983,14 @@ How it flows:
 
 | Directory | Mode | Collector | Server |
 | --- | --- | --- | --- |
-| `/var/lib/nebula/pve/requests/` | `nebula-pve-collector:nebula-rpc`, 2770 | reads | writes (only this path, via the `20-discovery.conf` drop-in) |
+| `/var/lib/nebula/pve/requests/` | `nebula-pve-collector:nebula-rpc`, 2770 | reads | writes (via the `20-discovery.conf` drop-in, which also opens `pve/results/` and `pve/guestnet/` for the spool import) |
 | `/var/lib/nebula/pve/live/` | `nebula-pve-collector:nebula-rpc`, 2750 | writes | reads only |
 
 `install.sh` (also with `--from-package`) and the container image create
-both directories; in containers the server mounts only the `pve-requests`
-volume and `pve-live` read-only. The collector runs the live reads by
-default; `-live=false` on its command line turns them off.
+both directories; in containers the server mounts the `pve-requests` volume,
+`pve-live` read-only, and `pve-results` and `pve-guestnet` writable for the
+spool import. The collector runs the live reads by default; `-live=false` on
+its command line turns them off.
 
 A live-values lease is required: without an approved one that lists the
 box, the box shows no live values. Rotating either PVE token or re-pinning
@@ -1627,7 +1628,7 @@ from `~nebula/.ssh/authorized_keys` (or the user: `userdel -r nebula`),
 | `/etc/systemd/system/nebula-*.service`, `nebula-discovery.path`, `.timer` | root, 0644 | Units (package: `/lib/systemd/system/`) |
 | `/etc/systemd/system/nebula-executor.service.d/10-local.conf` | root, 0644 | Executor flags, rewritten by `install.sh` |
 | `/etc/systemd/system/nebula-executor.service.d/20-local.conf` | root, 0644 | Your own executor flags (optional) |
-| `/etc/systemd/system/nebula-server.service.d/20-discovery.conf` | root, 0644 | Lets the server write the job spool and `pve/requests/` |
+| `/etc/systemd/system/nebula-server.service.d/20-discovery.conf` | root, 0644 | Lets the server write the job spool and `pve/requests/`, and unlink imported files in `pve/results/` and `pve/guestnet/` |
 | `/var/lib/nebula/units.sha256` | root, 0644 | Checksums of the shipped units `install.sh` installed (section 13; not used by the package) |
 | `/etc/nebula/server.json` | `root:nebula-server`, 0640 | Server configuration |
 | `/etc/nebula/backup-recipients` | root | age recipients for backups |
