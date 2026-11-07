@@ -163,6 +163,9 @@ type pveGuestRow struct {
 	Link string
 	// Live is the guest's live-values checkbox and lease state.
 	Live pveLiveOption
+	// HostLink is the managed-host link cell (pve_links.go); nil when
+	// links are not available.
+	HostLink *pveGuestLinkView
 	// generation is the stored incarnation generation of the guest.
 	generation uint64
 }
@@ -218,6 +221,17 @@ type pveDetailData struct {
 	ReadLeaseStale bool
 	// Live is the "Enable live values" form (pve_live.go).
 	Live pveLiveData
+	// Links is set when the guest rows carry the managed-host link cells
+	// (pve_links.go).
+	Links bool
+	// LinkAdmin is set when a privileged session is open, so the link
+	// and unlink buttons will be accepted.
+	LinkAdmin bool
+	// LinksUnavailable is set when the stored links could not be read.
+	LinksUnavailable bool
+	// LinkForms is set when at least one link or unlink form is shown,
+	// so the page loads the fetch-post script.
+	LinkForms bool
 }
 
 var pveHostPattern = regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$`)
@@ -494,6 +508,7 @@ func (h *Handler) handlePVEDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	h.pveLeaseState(ctx, id, meta, d)
+	h.pveLinkState(ctx, id, d)
 	if datasets, err := h.pve.ListDatasetStatus(ctx, id); err != nil {
 		h.log.Error("list PVE dataset status", "remote", id, "error", err)
 	} else {
@@ -509,7 +524,7 @@ func (h *Handler) handlePVEDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	pd := pageData{Title: "PVE remote " + rm.Name, Active: "pve", Content: "pve_detail", PVEDetail: d}
-	if d.Live.Offered {
+	if d.Live.Offered || d.LinkForms {
 		pd.Scripts = []string{"formpost.js"}
 	}
 	h.render(w, r, pd)

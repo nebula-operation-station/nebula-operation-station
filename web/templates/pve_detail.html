@@ -66,14 +66,21 @@
   {{end}}
 
   <h3>Guests</h3>
+  {{$links := .PVEDetail.Links}}
+  {{if $links}}
+  <p class="hint">Managed host: a guest is linked to the NOS host it really is only when you click "Verknüpfen"; suggestions never link by themselves.
+     MAC matches come from IPAM assets, IP matches are only a POSSIBLE MATCH. A link is display and drift information, never an SSH identity.</p>
+  {{if not .PVEDetail.LinkAdmin}}<p class="status">Linking and releasing need an open privileged session.</p>{{end}}
+  {{if .PVEDetail.LinksUnavailable}}<p class="status">Guest links are unavailable right now.</p>{{end}}
+  {{end}}
   {{if .PVEDetail.Guests}}
   <table class="inventory">
     <thead>
-      <tr><th>VMID</th><th>Kind</th><th>Name</th><th>Node</th><th>Status</th><th>Last observed</th><th>PVE UI</th>{{if $live.Offered}}<th>Live</th>{{end}}</tr>
+      <tr><th>VMID</th><th>Kind</th><th>Name</th><th>Node</th><th>Status</th><th>Last observed</th><th>PVE UI</th>{{if $live.Offered}}<th>Live</th>{{end}}{{if $links}}<th>Managed host</th>{{end}}</tr>
     </thead>
     <tbody>
       {{range .PVEDetail.Guests}}
-      <tr>
+      <tr id="guest-{{.VMIDText}}">
         <td class="mono">{{.VMIDText}}</td>
         <td>{{.Kind}}</td>
         <td>{{.Name}}</td>
@@ -82,6 +89,7 @@
         <td>{{timeTag .ObservedAt}}{{if .Age}} ({{.Age}}){{end}}</td>
         <td>{{if .Link}}<a href="{{.Link}}" target="_blank" rel="noopener noreferrer">Open</a>{{end}}</td>
         {{if $live.Offered}}<td>{{if .Live.Value}}{{template "pve_live_cell" .Live}}{{end}}</td>{{end}}
+        {{if $links}}<td>{{with .HostLink}}{{template "pve_link_cell" .}}{{end}}</td>{{end}}
       </tr>
       {{end}}
     </tbody>
@@ -112,5 +120,51 @@
   <p class="status">No dataset status stored.</p>
   {{end}}
 </section>
+{{end}}
+{{define "pve_link_cell"}}
+{{$v := .}}
+{{range .Reused}}
+<div class="pve-link-reused">
+  <p class="status">{{.Notice}}</p>
+  <form method="post" action="{{$v.UnlinkAction}}" class="form" data-fetch>
+    <input type="hidden" name="vmid" value="{{$v.VMIDText}}">
+    <input type="hidden" name="generation" value="{{.GenerationText}}">
+    <label>Reason <input type="text" name="reason" required maxlength="200" value=""></label>
+    <button type="submit" class="button button--small button--secondary">Lösen</button>
+  </form>
+</div>
+{{end}}
+{{if .Linked}}
+<p>Linked to <a href="{{.HostURL}}">{{.HostName}}</a> (<span class="mono">{{.HostID}}</span>) since {{timeTag .Since}} by {{.By}}</p>
+<form method="post" action="{{.UnlinkAction}}" class="form" data-fetch>
+  <input type="hidden" name="vmid" value="{{.VMIDText}}">
+  <input type="hidden" name="generation" value="{{.GenerationText}}">
+  <label>Reason <input type="text" name="reason" required maxlength="200" value=""></label>
+  <button type="submit" class="button button--small button--secondary">Lösen</button>
+</form>
+{{else}}
+{{range .Conflicts}}<p class="status"><span class="badge badge--warning">conflict</span> {{.}}</p>{{end}}
+{{range .Candidates}}
+<div class="pve-link-candidate">
+  <p><span class="badge{{if eq .Kind "MAC"}} badge--ok{{else}} badge--warning{{end}}">{{.Kind}}</span>{{if .Conflict}} <span class="badge badge--warning">conflict</span>{{end}}
+     {{.HostName}} (<span class="mono">{{.HostID}}</span>)</p>
+  <ul class="hint">{{range .Details}}<li>{{.}}</li>{{end}}</ul>
+  {{if .LinkedElsewhere}}
+  <p class="hint">Already linked to {{.LinkedElsewhere}}.</p>
+  {{else}}
+  <form method="post" action="{{$v.LinkAction}}" class="form" data-fetch>
+    <input type="hidden" name="vmid" value="{{$v.VMIDText}}">
+    <input type="hidden" name="generation" value="{{$v.GenerationText}}">
+    <input type="hidden" name="host" value="{{.HostID}}">
+    {{if or $v.NeedsConfirm .Conflict}}<label class="choice"><input type="checkbox" name="confirm_conflict" value="1" required> I reviewed the conflict</label>{{end}}
+    <button type="submit" class="button button--small">Verknüpfen</button>
+  </form>
+  {{end}}
+</div>
+{{else}}
+<p class="hint">{{if .SuggestNote}}{{.SuggestNote}}{{else}}No suggestions.{{end}}</p>
+{{end}}
+{{if and .Candidates .SuggestNote}}<p class="hint">{{.SuggestNote}}</p>{{end}}
+{{end}}
 {{end}}
 {{define "pve_live_cell"}}<label class="choice"><input type="checkbox" name="target" value="{{.Value}}" form="pve-live"{{if .Checked}} checked{{end}}> live</label>{{if eq .Status "on"}} <span class="badge badge--ok">on</span>{{else if eq .Status "stale"}} <span class="badge badge--warning">lease stale, renew</span>{{end}}{{end}}

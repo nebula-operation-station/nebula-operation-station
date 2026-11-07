@@ -43,6 +43,7 @@
               <span class="chart__dot {{.StateClass}}" aria-hidden="true"></span>
               <span class="chart__gname" title="{{.Name}}">{{.Name}}</span>
               <span class="chart__vmid">VM {{.VMID}}</span>
+              {{if .HostID}}<span class="chart__ghost" title="Linked managed host">Host {{.HostID}}</span>{{end}}
               {{template "chart_lines" .Lines}}
               <span class="chart__pveupd">{{template "chart_updates" .}}</span>
               {{with $.PowerFor $n.RemoteID .VMID}}
