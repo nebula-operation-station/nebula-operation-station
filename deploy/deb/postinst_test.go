@@ -709,42 +709,94 @@ func TestUpgradeKeepsOldDropInWhenChownFails(t *testing.T) {
 	}
 }
 
-// A file or symlink swapped in at a spool path with a foreign owner must
-// not be chowned to the collector as root: only a real directory is.
-// Without the directory check the chown would hand the swapped-in object
-// to the collector before install -d fails.
-func TestUpgradeDoesNotChownANonDirectorySpoolPath(t *testing.T) {
+// A file or symlink swapped in at the pve root or a spool path is not a
+// directory the spool can use, and touching it could hand its target to the
+// collector: install -d follows a symlink and would re-apply the mode to
+// its target, install -d -o would re-own it, and a chown without
+// --no-dereference would follow it. The swapped-in object is left alone,
+// link and target, and the upgrade keeps the old drop-in and points the
+// admin to install.sh. A link to a directory that already has install.sh's
+// state is refused the same way: the state check follows the link, so the
+// link check must come first.
+func TestUpgradeLeavesANonDirectorySpoolPathAlone(t *testing.T) {
 	for _, tc := range []struct {
 		name string
+		path string
 		link bool
+		// targetInState puts the symlink target in install.sh's state, so
+		// only the link check can stop the postinst from accepting it.
+		targetInState bool
 	}{
-		{"file", false},
-		{"symlink", true},
+		{"file at pve root", "pve", false, false},
+		{"symlink at pve root", "pve", true, false},
+		{"symlink at pve root to a directory in install.sh's state", "pve", true, true},
+		{"file at pve/results", "pve/results", false, false},
+		{"symlink at pve/results", "pve/results", true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newSandbox(t)
 			s.installed(t)
-			path := filepath.Join(s.varLib, "pve/results")
+			path := filepath.Join(s.varLib, tc.path)
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				t.Fatal(err)
 			}
+			var target string
 			if tc.link {
-				if err := os.MkdirAll(filepath.Join(s.varLib, "target"), 0o755); err != nil {
-					t.Fatal(err)
+				target = filepath.Join(s.varLib, "target")
+				if tc.targetInState {
+					s.mkdirAt(t, "target", 0o2750)
+					s.env = append(s.env, "STAT_OWNERS=nebula-pve-collector nebula-rpc")
+				} else {
+					if err := os.MkdirAll(target, 0o755); err != nil {
+						t.Fatal(err)
+					}
+					s.env = append(s.env, "STAT_OWNERS=root root")
 				}
-				if err := os.Symlink(filepath.Join(s.varLib, "target"), path); err != nil {
+				if err := os.Symlink(target, path); err != nil {
 					t.Fatal(err)
 				}
 			} else {
+				s.env = append(s.env, "STAT_OWNERS=root root")
 				if err := os.WriteFile(path, []byte("swapped in"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
-			s.env = append(s.env, "STAT_OWNERS=root root")
-			s.run(t, "configure", "1.0.0")
+			out := s.run(t, "configure", "1.0.0")
 
-			if strings.Contains(s.calls(t), "chown ") {
-				t.Errorf("non-directory spool path was chowned:\n%s", s.calls(t))
+			calls := s.calls(t)
+			if strings.Contains(calls, "chown ") {
+				t.Errorf("non-directory spool path was chowned:\n%s", calls)
+			}
+			if strings.Contains(calls, path+"\n") {
+				t.Errorf("install ran on the swapped-in path:\n%s", calls)
+			}
+			if got := readFile(t, s.dropIn()); got != oldDropIn {
+				t.Errorf("drop-in changed although the spool path is not a directory:\n%s", got)
+			}
+			if !strings.Contains(out, "install.sh --from-package") {
+				t.Errorf("no hint to install.sh in:\n%s", out)
+			}
+			if tc.link {
+				fi, err := os.Stat(target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := "755"
+				if tc.targetInState {
+					want = "2750"
+				}
+				if got := octalMode(fi); got != want {
+					t.Errorf("symlink target mode = %s, want %s: the target must stay unchanged", got, want)
+				}
+				entries, err := os.ReadDir(target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(entries) != 0 {
+					t.Errorf("symlink target was written: %v", entries)
+				}
+			} else if got, err := os.ReadFile(path); err != nil || string(got) != "swapped in" {
+				t.Errorf("swapped-in file changed: %q, %v", got, err)
 			}
 		})
 	}
