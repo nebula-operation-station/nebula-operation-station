@@ -87,8 +87,9 @@ count_names() {
 # find_hardcoded prints one line per hardcoded list it finds:
 #   - a for-loop (quoted or unquoted, backslash-continued) whose word list
 #     names at least one binary,
-#   - an array literal (plain name=(, name+=(, or declare -a name=,
-#     single- or multi-line) holding two or more names.
+#   - an array literal (plain name=(, name+=(, or declare/local/readonly
+#     with flags such as -a, -A or -ar, single- or multi-line) holding two
+#     or more names.
 # Message lines may name binaries in prose; only loops and arrays count.
 find_hardcoded() {
   local s="$1" line rest n
@@ -98,8 +99,8 @@ find_hardcoded() {
   while (( i < ${#lines[@]} )); do
     line="${lines[i]}"
     i=$((i + 1))
-    # array literal: name=(, name+=(, or declare -a name=(
-    if [[ "$line" =~ ^[[:space:]]*(declare[[:space:]]+(-[aA][[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*)[+]?=\( ]]; then
+    # array literal: name=(, name+=(, or declare/local/readonly with flags
+    if [[ "$line" =~ ^[[:space:]]*((declare|local|readonly)[[:space:]]+(-[a-zA-Z]+[[:space:]]*)*)?[A-Za-z_][A-Za-z0-9_]*[+]?=\( ]]; then
       block=("$line")
       if [[ "$line" != *")"* ]]; then
         while (( i < ${#lines[@]} )); do
@@ -141,8 +142,10 @@ else
   bad "no hardcoded binary list loop remains in the scripts (${hardcoded[*]})"
 fi
 # The guard must catch the variants it exists for: unquoted and quoted
-# loops (including a backslash-continued one), single-line and multi-line
-# array literals (plain, fully-quoted, declare -a, and += forms).
+# loops (including a backslash-continued one and a single-name loop, which
+# pins the "at least one binary" threshold), single-line and multi-line
+# array literals (plain, fully-quoted, declare -a, declare -ar, local -a,
+# readonly, and += forms).
 fixture=$(mktemp)
 cat > "$fixture" <<'FIX'
 for bin in nebula nebula-server nebula-executor nebula-discovery nebula-pve-collector; do
@@ -156,6 +159,9 @@ for bin in \
   nebula-server; do
   rm -f /usr/bin/$bin
 done
+for bin in nebula; do
+  rm -f /usr/bin/$bin
+done
 binaries=(nebula nebula-server nebula-executor nebula-discovery nebula-pve-collector)
 binaries=("nebula" "nebula-server" "nebula-executor" "nebula-discovery" "nebula-pve-collector")
 units=(
@@ -163,15 +169,18 @@ units=(
   nebula-server
 )
 declare -a units2=(nebula nebula-server)
+declare -ar units6=(nebula nebula-server)
+local -a units4=(nebula nebula-server)
+readonly units5=(nebula nebula-server)
 units3=()
 units3+=(nebula nebula-server)
 FIX
 hits=$(find_hardcoded "$fixture")
 rm -f "$fixture"
-if [[ $(printf '%s\n' "$hits" | grep -c .) -eq 8 ]]; then
-  ok "case 3 guard catches all eight hardcoded variants"
+if [[ $(printf '%s\n' "$hits" | grep -c .) -eq 12 ]]; then
+  ok "case 3 guard catches all twelve hardcoded variants"
 else
-  bad "case 3 guard catches all eight hardcoded variants (got: ${hits@Q})"
+  bad "case 3 guard catches all twelve hardcoded variants (got: ${hits@Q})"
 fi
 
 # --- 4. Functional: the copy block of setup-nebula.sh copies all five -------
@@ -305,21 +314,30 @@ else
 fi
 cp "$list_file" "$sandbox/deploy/quickstart/binaries.txt"
 # The check must run before the first removal. Run a sandboxed copy of
-# uninstall.sh with stub systemctl/rm/rmdir that record their calls and a
-# binaries_lib.sh that records when it is sourced (the check block sources
-# it); the check must appear before the first removal in the call log. A
-# removal placed above the check block (rm -rf, rm -f without --, or
-# [[ -e x ]] && systemctl stop y) or a check wrapped in a function called
-# after the removals must break the order.
+# uninstall.sh with stub systemctl/rm/rmdir that record their calls; the
+# sandbox holds every unit and drop-in the script removes, so each removal
+# executes and lands in the call log. A marker line is inserted after the
+# check block (not when binaries_lib.sh is sourced, which fires before the
+# list is validated); the marker must appear before the first removal in
+# the call log. A removal placed above the check block (rm -rf, rm -f
+# without --, or [[ -e x ]] && systemctl stop y) or a check moved below
+# the removals must break the order.
 order_sandbox=$(mktemp -d)
 mkdir -p "$order_sandbox/deploy/quickstart" "$order_sandbox/deploy/systemd" \
          "$order_sandbox/bin" "$order_sandbox/etc/systemd/system" "$order_sandbox/usr/bin"
 cp "$list_file" "$order_sandbox/deploy/quickstart/binaries.txt"
-{ echo 'echo "check" >> "${NEBULA_CALL_LOG}"'; cat "$(dirname "$list_file")/binaries_lib.sh"; } > "$order_sandbox/deploy/quickstart/binaries_lib.sh"
-for u in nebula-server.service nebula-executor.service nebula-pve-collector.service nebula-discovery.path nebula-discovery.timer; do
-  : > "$order_sandbox/deploy/systemd/$u"
-  : > "$order_sandbox/etc/systemd/system/$u"
+cp "$(dirname "$list_file")/binaries_lib.sh" "$order_sandbox/deploy/quickstart/binaries_lib.sh"
+# Every unit the real release ships, so a [[ -e unit ]] && systemctl stop
+# placed above the check executes and is logged.
+for u in "$real_repo"/deploy/systemd/*.service "$real_repo"/deploy/systemd/*.path "$real_repo"/deploy/systemd/*.timer; do
+  : > "$order_sandbox/deploy/systemd/$(basename -- "$u")"
+  : > "$order_sandbox/etc/systemd/system/$(basename -- "$u")"
 done
+# The drop-ins install.sh writes, so the drop-in removal executes too.
+mkdir -p "$order_sandbox/etc/systemd/system/nebula-executor.service.d" \
+         "$order_sandbox/etc/systemd/system/nebula-server.service.d"
+: > "$order_sandbox/etc/systemd/system/nebula-executor.service.d/10-local.conf"
+: > "$order_sandbox/etc/systemd/system/nebula-server.service.d/20-discovery.conf"
 for b in "${expected[@]}"; do : > "$order_sandbox/usr/bin/$b"; done
 for stub in systemctl rm rmdir; do
   printf '#!/bin/sh\necho "%s $*" >> "${NEBULA_CALL_LOG}"\nexit 0\n' "$stub" > "$order_sandbox/bin/$stub"
@@ -328,6 +346,7 @@ done
 sed -e 's|^systemd_dir=/etc/systemd/system$|systemd_dir="${NEBULA_SYSTEMD_DIR:-/etc/systemd/system}"|' \
     -e 's|^bin_dir=/usr/bin$|bin_dir="${NEBULA_BIN_DIR:-/usr/bin}"|' \
     -e 's|\[\[ ${EUID} -ne 0 \]\]|false|' \
+    -e '/^# end: check binary list$/a echo "check" >> "${NEBULA_CALL_LOG}"' \
     "$uninstall_sh" > "$order_sandbox/deploy/uninstall.sh"
 chmod +x "$order_sandbox/deploy/uninstall.sh"
 NEBULA_CALL_LOG="$order_sandbox/call.log" \
@@ -341,6 +360,37 @@ if [[ -n "${check_idx:-}" && -n "${first_rm_idx:-}" && $check_idx -lt $first_rm_
 else
   bad "uninstall.sh checks the list before the first removal (check at ${check_idx:-?}, first removal at ${first_rm_idx:-?})"
 fi
+# A missing, comments-only or invalid list must stop the whole script
+# before any removal. The marker above cannot catch a check block that
+# only sources the lib above the removals and validates below them (the
+# marker would still fire first), so run the script on each bad list and
+# assert the removal log stays empty instead of a half-uninstalled system.
+for bad_list in missing comments invalid; do
+  case $bad_list in
+    missing) mv "$order_sandbox/deploy/quickstart/binaries.txt" "$order_sandbox/blist.bak" ;;
+    comments) printf '# only comments\n\n' > "$order_sandbox/deploy/quickstart/binaries.txt" ;;
+    invalid) printf 'bad/name\n' > "$order_sandbox/deploy/quickstart/binaries.txt" ;;
+  esac
+  rm -f "$order_sandbox/call.log"
+  if NEBULA_CALL_LOG="$order_sandbox/call.log" \
+     NEBULA_SYSTEMD_DIR="$order_sandbox/etc/systemd/system" \
+     NEBULA_BIN_DIR="$order_sandbox/usr/bin" \
+     PATH="$order_sandbox/bin:$PATH" bash "$order_sandbox/deploy/uninstall.sh" >/dev/null 2>&1; then
+    bad "uninstall.sh exits non-zero on a $bad_list list"
+  else
+    ok "uninstall.sh exits non-zero on a $bad_list list"
+  fi
+  removals=$(grep -cE '^(systemctl|rm|rmdir) ' "$order_sandbox/call.log" 2>/dev/null) || true
+  if [[ -z "${removals:-}" || $removals -eq 0 ]]; then
+    ok "uninstall.sh removes nothing on a $bad_list list"
+  else
+    bad "uninstall.sh removes nothing on a $bad_list list ($removals removals logged)"
+  fi
+  case $bad_list in
+    missing) mv "$order_sandbox/blist.bak" "$order_sandbox/deploy/quickstart/binaries.txt" ;;
+    *) cp "$list_file" "$order_sandbox/deploy/quickstart/binaries.txt" ;;
+  esac
+done
 rm -rf "$order_sandbox"
 
 # --- 7. Functional: the layout check of install.sh (both paths) -------------
@@ -482,13 +532,19 @@ if [[ -f "$goreleaser" && -f "$dockerfile" ]]; then
     bad ".deb nfpm contents include every file install.sh reads (could not derive the install.sh dst or the read paths)"
   fi
   # 9b: the nfpm ids (binaries the .deb puts in bindir) match the list.
-  nfpm_ids_line=$(grep -E '^[[:space:]]*ids:' <<< "$nfpms_block" | head -1)
-  nfpm_ids=$(sed -E 's/^[[:space:]]*ids:[[:space:]]*\[//; s/\][[:space:]]*$//' <<< "$nfpm_ids_line" | tr ',' '\n' | tr -d ' \t' | grep -v '^$' | sort)
+  # Every ids line in the block must match: a second nfpm entry with an
+  # incomplete list must not slip past the first one.
   list_sorted=$(printf '%s\n' "${expected[@]}" | sort)
-  if [[ -n "$nfpm_ids" && "$nfpm_ids" == "$list_sorted" ]]; then
+  mapfile -t nfpm_ids_lines < <(grep -E '^[[:space:]]*ids:' <<< "$nfpms_block")
+  nfpm_bad=()
+  for ids_line in "${nfpm_ids_lines[@]}"; do
+    ids=$(sed -E 's/^[[:space:]]*ids:[[:space:]]*\[//; s/\][[:space:]]*$//' <<< "$ids_line" | tr ',' '\n' | tr -d ' \t' | grep -v '^$' | sort)
+    [[ -n "$ids" && "$ids" == "$list_sorted" ]] || nfpm_bad+=("$ids_line")
+  done
+  if [[ ${#nfpm_ids_lines[@]} -gt 0 && ${#nfpm_bad[@]} -eq 0 ]]; then
     ok ".deb nfpm ids match binaries.txt exactly"
   else
-    bad ".deb nfpm ids match binaries.txt exactly (nfpm: ${nfpm_ids:-<none>}; list: ${expected[*]})"
+    bad ".deb nfpm ids match binaries.txt exactly (bad: ${nfpm_bad[*]:-<none>}; list: ${expected[*]})"
   fi
   # 9c: the Dockerfile COPY list (binaries the image ships) matches the list.
   copy_line=$(grep -E '^[[:space:]]*COPY[[:space:]]' "$dockerfile" | head -1)
@@ -508,13 +564,19 @@ if [[ -f "$goreleaser" && -f "$dockerfile" ]]; then
   # 9d: the dockers ids (binaries the image build expects) match the list;
   # a binary added to the list, nfpm ids and COPY but not the dockers ids
   # breaks the image build at release, so it must be checked here too.
+  # Every ids line in the block must match: a second docker entry with an
+  # incomplete list must not slip past the first one.
   dockers_block=$(awk '/^dockers:/{f=1;next} f&&/^[a-z]/{f=0} f' "$goreleaser")
-  dockers_ids_line=$(grep -E '^[[:space:]]*ids:' <<< "$dockers_block" | head -1)
-  dockers_ids=$(sed -E 's/^[[:space:]]*ids:[[:space:]]*\[//; s/\][[:space:]]*$//' <<< "$dockers_ids_line" | tr ',' '\n' | tr -d ' \t' | grep -v '^$' | sort)
-  if [[ -n "$dockers_ids" && "$dockers_ids" == "$list_sorted" ]]; then
+  mapfile -t dockers_ids_lines < <(grep -E '^[[:space:]]*ids:' <<< "$dockers_block")
+  dockers_bad=()
+  for ids_line in "${dockers_ids_lines[@]}"; do
+    ids=$(sed -E 's/^[[:space:]]*ids:[[:space:]]*\[//; s/\][[:space:]]*$//' <<< "$ids_line" | tr ',' '\n' | tr -d ' \t' | grep -v '^$' | sort)
+    [[ -n "$ids" && "$ids" == "$list_sorted" ]] || dockers_bad+=("$ids_line")
+  done
+  if [[ ${#dockers_ids_lines[@]} -gt 0 && ${#dockers_bad[@]} -eq 0 ]]; then
     ok ".goreleaser.yaml dockers ids match binaries.txt exactly"
   else
-    bad ".goreleaser.yaml dockers ids match binaries.txt exactly (dockers: ${dockers_ids:-<none>}; list: ${expected[*]})"
+    bad ".goreleaser.yaml dockers ids match binaries.txt exactly (bad: ${dockers_bad[*]:-<none>}; list: ${expected[*]})"
   fi
 else
   bad ".goreleaser.yaml and the Dockerfile exist"
