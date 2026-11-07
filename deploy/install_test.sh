@@ -1390,7 +1390,7 @@ stub_accepts() { stub_systemctl "$@" 2>/dev/null; }
 stub_refuses() { ! stub_accepts "$@"; }
 nothing_pending() { [[ ! -e "$refresh_sb/var/units.pending" ]]; }
 pending_has() { grep -qxF "$1  $2" "$refresh_sb/var/units.pending"; }
-# pending_is <sum> <unit>: that line is all the record holds.
+# pending_is <sum or "restart"> <unit>: that line is all the record holds.
 pending_is() { [[ "$(cat "$refresh_sb/var/units.pending" 2>/dev/null)" == "$1  $2" ]]; }
 # bins_current: every installed binary is the tarball's, so the next run of
 # the same tarball replaces none and has bin_changed 0.
@@ -1508,14 +1508,14 @@ CASES
   expect "silent executor: the collector is not restarted" collector_restarts_are 0
   expect "silent executor: it was asked" probed
   expect "silent executor: the warning says so" out_has 'not answering'
-  expect "silent executor: only the collector stays pending" pending_is "$(text_sum "$collector v2")" "$collector"
+  expect "silent executor: only the collector stays pending" pending_is restart "$collector"
   inst_bin_changed=0
   run_install
   expect "silent again: the run succeeds" rc_is 0
   expect "silent again: nothing is restarted" restarts_are ''
   expect "silent again: it was asked" probed
   expect "silent again: the warning comes again" out_has 'not answering'
-  expect "silent again: the collector stays pending" pending_is "$(text_sum "$collector v2")" "$collector"
+  expect "silent again: the collector stays pending" pending_is restart "$collector"
   inst_probe_rc=0
   run_install
   expect "answering after a skip: the run succeeds" rc_is 0
@@ -1533,22 +1533,23 @@ CASES
   inst_bin_changed=1
   inst_probe_rc=1
   run_install
-  expect "silent, binaries only: the collector goes on record" pending_is "$(text_sum "$collector v1")" "$collector"
+  expect "silent, binaries only: the collector goes on record" pending_is restart "$collector"
   inst_bin_changed=0
   inst_probe_rc=0
   run_install
   expect "silent, binaries only: the next run restarts it, once" restarts_are "restart $collector"
   expect "silent, binaries only: nothing stays pending" nothing_pending
 
-  # An edited unit keeps the restart it is owed. The record holds the shipped
-  # checksum, never the edit's, which would make the edit look unedited.
+  # An edited unit keeps the restart it is owed. The record holds a restart
+  # line, no checksum: never the edit's, which would make the edit look
+  # unedited.
   installed_host
   printf 'admin edit\n' > "$refresh_sb/etc/$collector"
   stub_active="$all_services"
   inst_bin_changed=1
   inst_probe_rc=1
   run_install
-  expect "silent, edited unit: the shipped checksum goes on record" pending_is "$(text_sum "$collector v1")" "$collector"
+  expect "silent, edited unit: the restart goes on record" pending_is restart "$collector"
   inst_bin_changed=0
   inst_probe_rc=0
   ship "$collector" "$collector v2"
@@ -1578,9 +1579,12 @@ CASES
   # server's and the executor's as well as the collector's, or the collector
   # would come up on the new binary against the old executor. One case
   # rebuilds the server binary alone, so a record step that looked at the
-  # collector binary only would fail it.
+  # collector binary only would fail it; another rebuilds only the CLI
+  # (nebula), which belongs to none of the three units and still makes all
+  # three restarts due.
   # <the failing systemctl call>
-  for new_bins in "nebula-server" "nebula-server nebula-pve-collector"; do
+  for new_bins in "nebula" "nebula-server" "nebula-server nebula-pve-collector"; do
+    first_new_bin="${new_bins%% *}"
     while read -r failing; do
       name="binaries only (new: ${new_bins}), stopped at '${failing}'"
       installed_host
@@ -1590,7 +1594,7 @@ CASES
       stub_fail="$failing"
       run_install
       expect "${name}: the run fails" rc_not_zero
-      expect "${name}: the new server binary is in place" has_content "$refresh_sb/bin/nebula-server" "nebula-server build $bin_build"
+      expect "${name}: the new ${first_new_bin} binary is in place" has_content "$refresh_sb/bin/$first_new_bin" "$first_new_bin build $bin_build"
       expect "${name}: the next run of this tarball changes no binary" bins_current
       expect "${name}: the collector is not restarted yet" collector_restarts_are 0
       expect "${name}: the server restart is on record" pending_has restart nebula-server.service
@@ -1812,7 +1816,8 @@ CASES
 
   # A masked collector that still runs: the restart is due and systemd would
   # refuse it, which under set -e would end the run before the pending record
-  # is cleared. The skipped restart stays on record and nothing else does, so
+  # is cleared. The skipped restart stays on record as a restart line, like the
+  # server's and the executor's, and nothing else does, so
   # the next run warns again, and restarts it once the mask is gone. <how> names
   # one way to mask it, <inputs> what makes it due.
   for how in link runtime; do
@@ -1822,10 +1827,8 @@ CASES
       ship nebula-server.service 'nebula-server.service v2'
       if [[ "$inputs" == unit ]]; then
         ship nebula-pve-collector.service 'nebula-pve-collector.service v2'
-        collector_sum=$(text_sum 'nebula-pve-collector.service v2')
       else
         inst_bin_changed=1
-        collector_sum=$(text_sum 'nebula-pve-collector.service v1')
       fi
       case "$how" in
         link) ln -sf /dev/null "$refresh_sb/etc/nebula-pve-collector.service" ;;
@@ -1844,12 +1847,12 @@ CASES
         expect "${name}: nothing was due, nothing to warn about" out_lacks 'not restarting it'
       else
         expect "${name}: the warning says it was not restarted" out_has 'nebula-pve-collector.service is masked; not restarting it'
-        expect "${name}: only the collector stays pending" pending_is "$collector_sum" nebula-pve-collector.service
+        expect "${name}: only the collector stays pending" pending_is restart nebula-pve-collector.service
         inst_bin_changed=0
         run_install
         expect "${name}: the next run warns again" out_has 'nebula-pve-collector.service is masked; not restarting it'
         expect "${name}: the next run restarts nothing" restarts_are ''
-        expect "${name}: it stays pending" pending_is "$collector_sum" nebula-pve-collector.service
+        expect "${name}: it stays pending" pending_is restart nebula-pve-collector.service
         if [[ "$how" == runtime ]]; then
           stub_runtime_masked=""
           run_install
@@ -1964,6 +1967,29 @@ CASES
   expect "edit after a stop: the old baseline stays recorded" manifest_has "$(text_sum "$server v1")" "$server"
   expect "edit after a stop: the edit is not recorded" manifest_lacks_sum "$(text_sum 'admin edit')"
   expect "edit after a stop: not restarted" restarts_are ''
+
+  # The same for the collector: a first install that stopped after the
+  # collector was enabled and started leaves its unit version on record, which
+  # is no restart. An edit made after that stop is kept and owes no restart.
+  reset_refresh
+  reset_install
+  for unit in "${install_units[@]}"; do
+    ship "$unit" "$unit v1"
+  done
+  stub_active="$all_services"
+  stub_fail='enable --now nebula-discovery.timer'
+  run_install
+  expect "collector edit after a first-install stop: the run fails" rc_not_zero
+  expect "collector edit after a first-install stop: the collector was started" called "enable --now $collector"
+  expect "collector edit after a first-install stop: its unit version is on record" pending_has "$(text_sum "$collector v1")" "$collector"
+  stub_fail=""
+  printf 'admin edit\n' > "$refresh_sb/etc/$collector"
+  run_install
+  expect "collector edit after a first-install stop: the re-run succeeds" rc_is 0
+  expect "collector edit after a first-install stop: kept" has_content "$refresh_sb/etc/$collector" 'admin edit'
+  expect "collector edit after a first-install stop: not restarted in any form" collector_restarts_are 0
+  expect "collector edit after a first-install stop: nothing asked" not_probed
+  expect "collector edit after a first-install stop: nothing stays pending" nothing_pending
 
   # The same for a unit installed for the first time, which has no record at
   # all, and on a pre-manifest host, where the old version came from the list.
