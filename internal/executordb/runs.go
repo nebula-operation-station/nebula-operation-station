@@ -43,13 +43,27 @@ type Run struct {
 	// SecretRefs maps each secret slot of the run to its vault secret ID
 	// (never a value); empty for runs without secrets.
 	SecretRefs map[string]string
+	// MemberID and ActionID are set for a batch member's run (migration
+	// 0020): the member of the batch named by Digest and its frozen action.
+	// Both are empty for classic runs.
+	MemberID string
+	ActionID string
 }
+
+// Limits of the batch member columns of a run (migration 0020).
+const (
+	maxRunMemberID = 128
+	maxRunActionID = 128
+)
 
 // CreateRun records an authorized durable run in state dispatching.
 func (db *DB) CreateRun(r Run) error {
 	eps, err := json.Marshal(r.Endpoints)
 	if err != nil {
 		return err
+	}
+	if len(r.MemberID) > maxRunMemberID || len(r.ActionID) > maxRunActionID {
+		return fmt.Errorf("executordb: create run: member or action ID too long")
 	}
 	refs := ""
 	if len(r.SecretRefs) > 0 {
@@ -59,9 +73,10 @@ func (db *DB) CreateRun(r Run) error {
 		}
 		refs = string(b)
 	}
-	_, err = db.sql.Exec(`INSERT INTO runs (execution_id, host_id, digest, state, endpoints, fingerprint, timeout_s, created_at, secret_refs)
-		VALUES (?, ?, ?, 'dispatching', ?, ?, ?, ?, ?)`, r.ExecutionID, r.HostID, r.Digest, string(eps), r.Fingerprint,
-		int64(r.Timeout/time.Second), db.now().Unix(), refs)
+	_, err = db.sql.Exec(`INSERT INTO runs (execution_id, host_id, digest, state, endpoints, fingerprint, timeout_s, created_at, secret_refs,
+			member_id, action_id)
+		VALUES (?, ?, ?, 'dispatching', ?, ?, ?, ?, ?, ?, ?)`, r.ExecutionID, r.HostID, r.Digest, string(eps), r.Fingerprint,
+		int64(r.Timeout/time.Second), db.now().Unix(), refs, r.MemberID, r.ActionID)
 	if err != nil {
 		return fmt.Errorf("executordb: create run: %w", err)
 	}
@@ -102,7 +117,7 @@ func boolInt(b bool) int {
 }
 
 const runColumns = `execution_id, host_id, digest, state, class, detail, exit_code, endpoints, fingerprint, timeout_s, endpoint,
-	result, log, log_truncated, created_at, dispatched_at, finished_at, released_at, secret_refs`
+	result, log, log_truncated, created_at, dispatched_at, finished_at, released_at, secret_refs, member_id, action_id`
 
 func scanRun(sc interface{ Scan(...any) error }) (Run, error) {
 	var r Run
@@ -112,7 +127,7 @@ func scanRun(sc interface{ Scan(...any) error }) (Run, error) {
 	var trunc int
 	var refs string
 	if err := sc.Scan(&r.ExecutionID, &r.HostID, &r.Digest, &r.State, &r.Class, &r.Detail, &r.ExitCode, &eps, &r.Fingerprint, &timeout,
-		&r.Endpoint, &r.Result, &r.Log, &trunc, &created, &dispatched, &finished, &released, &refs); err != nil {
+		&r.Endpoint, &r.Result, &r.Log, &trunc, &created, &dispatched, &finished, &released, &refs, &r.MemberID, &r.ActionID); err != nil {
 		return Run{}, err
 	}
 	if refs != "" {
@@ -141,6 +156,24 @@ func (db *DB) GetRun(executionID, hostID string) (Run, error) {
 	}
 	if err != nil {
 		return Run{}, fmt.Errorf("executordb: get run: %w", err)
+	}
+	return r, nil
+}
+
+// RunByMember returns the run of batch member memberID of the batch with
+// digest batchDigest, or ErrNoRun. A member is claimed once, so it has at
+// most one run.
+func (db *DB) RunByMember(batchDigest, memberID string) (Run, error) {
+	if memberID == "" {
+		return Run{}, ErrNoRun
+	}
+	r, err := scanRun(db.sql.QueryRow(`SELECT `+runColumns+` FROM runs WHERE digest = ? AND member_id = ? ORDER BY created_at LIMIT 1`,
+		batchDigest, memberID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Run{}, ErrNoRun
+	}
+	if err != nil {
+		return Run{}, fmt.Errorf("executordb: run by member: %w", err)
 	}
 	return r, nil
 }
