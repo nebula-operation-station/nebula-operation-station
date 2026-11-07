@@ -33,17 +33,18 @@ EOF
 
 # provision_pve_spool creates what a version older than the drop-in did not:
 # ReadWritePaths on a missing directory stops the unit (226/NAMESPACE). It
-# converges every spool directory to install.sh's state - mode, owner and
-# group, re-applied on every run like install.sh's install -d -m - so an
-# upgraded host ends with what install.sh would give it. That also repairs
-# what a collector unit left behind: with UMask=0077 and
+# converges the pve spool directories to install.sh's state - mode, owner
+# and group, re-applied on every run like install.sh's install -d -m - so
+# an upgraded host ends with what install.sh would give them. That also
+# repairs what a collector unit left behind: with UMask=0077 and
 # RestrictSUIDSGID=yes it cannot give its spool directories the setgid/group
 # bits the server needs to list and unlink what it imported. A directory
 # that already has install.sh's state is left alone. The owner and group
-# only root can fix; the postinst chowns as root with --no-dereference, so a
-# symlink swapped in below the pve root cannot redirect it to its target.
-# The mode is re-applied as the collector: as root, a symlink swapped in
-# there would redirect the mode change.
+# only root can fix; the postinst chowns only a real directory, as root
+# with --no-dereference, so a file or symlink swapped in below the pve root
+# is left alone and cannot redirect the chown to its target. The mode is
+# re-applied as the collector: as root, a symlink swapped in there would
+# redirect the mode change.
 provision_pve_spool() {
   if ! getent passwd nebula-pve-collector >/dev/null; then
     useradd --system --home-dir "${var_lib}/pve" --shell /usr/sbin/nologin -G nebula-rpc nebula-pve-collector || return 1
@@ -67,9 +68,13 @@ provision_pve_spool() {
         # directory).
         ;;
       *)
-        # A wrong owner or group only root can fix; --no-dereference keeps a
-        # swapped-in symlink from redirecting it to its target.
-        chown --no-dereference nebula-pve-collector:nebula-rpc "${dir}" || return 1
+        # A wrong owner or group only root can fix. Only a real directory is
+        # chowned: a file or link swapped in at the spool path must not be
+        # handed to the collector, and --no-dereference keeps a symlink from
+        # redirecting the chown to its target.
+        if [ -d "${dir}" ] && [ ! -L "${dir}" ]; then
+          chown --no-dereference nebula-pve-collector:nebula-rpc "${dir}" || return 1
+        fi
         ;;
     esac
     setpriv --reuid=nebula-pve-collector --regid=nebula-rpc --clear-groups \

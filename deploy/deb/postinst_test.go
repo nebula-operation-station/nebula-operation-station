@@ -460,6 +460,12 @@ func TestUpgradeProvisionsMissingSpoolDirectories(t *testing.T) {
 			if strings.Contains(calls, existing) {
 				t.Errorf("existing directory was touched:\n%s", calls)
 			}
+			// No directory has a wrong owner here: the existing one is in
+			// install.sh's state, the rest are absent. A chown would hit a
+			// missing path and fail the upgrade on a real host.
+			if strings.Contains(calls, "chown ") {
+				t.Errorf("chown called although no directory has a wrong owner:\n%s", calls)
+			}
 			for _, d := range spool {
 				if d == existing {
 					continue
@@ -512,6 +518,11 @@ func TestUpgradeRepairsSpoolDirectoryModes(t *testing.T) {
 			}
 			if got := octalMode(fi); got != tc.want {
 				t.Errorf("%s mode = %s, want %s", tc.dir, got, tc.want)
+			}
+			// Only the mode is wrong: the collector can chmod its own
+			// directory, so root must not chown it.
+			if strings.Contains(s.calls(t), "chown ") {
+				t.Errorf("chown called although only the mode is wrong:\n%s", s.calls(t))
 			}
 			want := fmt.Sprintf("setpriv --reuid=nebula-pve-collector --regid=nebula-rpc --clear-groups install -d -m %s %s\n", tc.want, filepath.Join(s.varLib, tc.dir))
 			if !strings.Contains(s.calls(t), want) {
@@ -672,6 +683,70 @@ func TestUpgradeKeepsOldDropInWhenProvisioningFails(t *testing.T) {
 	}
 	if !strings.Contains(out, "install.sh --from-package") {
 		t.Fatalf("no hint to install.sh in:\n%s", out)
+	}
+}
+
+// A chown that fails (the owner is wrong and root cannot fix it) must not
+// refresh the drop-in: the new drop-in would name a directory the server
+// cannot list or unlink. The old drop-in only keeps the spool growing, and
+// the admin is pointed to install.sh.
+func TestUpgradeKeepsOldDropInWhenChownFails(t *testing.T) {
+	s := newSandbox(t)
+	s.installed(t, "pve/results")
+	s.mkdirAt(t, "pve/results", 0o2770)
+	s.env = append(s.env, "STAT_OWNERS=root root", "FAIL_CHOWN=1")
+	out := s.run(t, "configure", "1.0.0")
+
+	want := "chown --no-dereference nebula-pve-collector:nebula-rpc " + filepath.Join(s.varLib, "pve/results") + "\n"
+	if !strings.Contains(s.calls(t), want) {
+		t.Fatalf("chown not attempted for the wrong owner:\n%s", s.calls(t))
+	}
+	if got := readFile(t, s.dropIn()); got != oldDropIn {
+		t.Fatalf("drop-in changed although chown failed:\n%s", got)
+	}
+	if !strings.Contains(out, "install.sh --from-package") {
+		t.Fatalf("no hint to install.sh in:\n%s", out)
+	}
+}
+
+// A file or symlink swapped in at a spool path with a foreign owner must
+// not be chowned to the collector as root: only a real directory is.
+// Without the directory check the chown would hand the swapped-in object
+// to the collector before install -d fails.
+func TestUpgradeDoesNotChownANonDirectorySpoolPath(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		link bool
+	}{
+		{"file", false},
+		{"symlink", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newSandbox(t)
+			s.installed(t)
+			path := filepath.Join(s.varLib, "pve/results")
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tc.link {
+				if err := os.MkdirAll(filepath.Join(s.varLib, "target"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join(s.varLib, "target"), path); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.WriteFile(path, []byte("swapped in"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s.env = append(s.env, "STAT_OWNERS=root root")
+			s.run(t, "configure", "1.0.0")
+
+			if strings.Contains(s.calls(t), "chown ") {
+				t.Errorf("non-directory spool path was chowned:\n%s", s.calls(t))
+			}
+		})
 	}
 }
 
