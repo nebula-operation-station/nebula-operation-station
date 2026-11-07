@@ -71,6 +71,35 @@ func TestBatchHoldsList(t *testing.T) {
 	}
 }
 
+// A hold of a durable container job is listed as such, and a rearm keeps
+// the mark: only its reconciled run ends it.
+func TestBatchHoldsListMarksDurableJob(t *testing.T) {
+	dir := privateTempDir(t)
+	doc := map[string]any{"version": 1, "targets": []map[string]any{
+		{"host_id": "web-1", "fingerprint": "SHA256:a", "execution_id": testHeldExec, "endpoints": []string{"192.0.2.1:22"},
+			"held_at_unix": 1_700_000_000, "expired": true, "durable": true},
+	}}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "batch-held-targets.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := runHolds(t, time.Now(), "list", "-data-dir", dir)
+	if err != nil || !strings.Contains(out, "durable job") {
+		t.Fatalf("list: %q %v", out, err)
+	}
+	if _, _, err := runHolds(t, time.Now(), "rearm", "-data-dir", dir, "-execution", testHeldExec,
+		"-by", "alice", "-reason", "host back", "web-1"); err != nil {
+		t.Fatalf("rearm: %v", err)
+	}
+	out, _, err = runHolds(t, time.Now(), "list", "-data-dir", dir)
+	if err != nil || !strings.Contains(out, "held (rechecked), durable job") {
+		t.Fatalf("list after rearm: %q %v", out, err)
+	}
+}
+
 // rearm returns exactly the named expired hold to automatic rechecks,
 // counted from now, keeps the target held, writes the file atomically in
 // the executor's format and audits the change in the signed event chain.

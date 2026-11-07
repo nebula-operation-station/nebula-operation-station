@@ -102,6 +102,11 @@ func writeHeldTargets(w io.Writer, held []executor.HeldBatchTarget) {
 		if h.Expired {
 			state = "expired (rearm to recheck)"
 		}
+		if h.Durable {
+			// A container job runs as root: only its reconciled run ends
+			// the hold, a rearm frees nothing by itself.
+			state += ", durable job: freed once reconciled as over"
+		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", h.HostID, h.ExecutionID, h.HeldAt.UTC().Format(time.RFC3339), state)
 	}
 	tw.Flush()
