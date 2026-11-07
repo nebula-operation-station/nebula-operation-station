@@ -539,6 +539,50 @@ does not help, and neither do more privileges on the PVE side. A second gap
 waits behind this one: provisioning runs with the action token, which may hold
 only `VM.PowerMgmt`, and that is not enough to clone a guest.
 
+## Linking guests to hosts
+
+A VM or LXC on a remote can be linked to the managed NOS host it really is,
+even when the names differ. The **Managed host** column of the guest table
+on `/pve/<remote>` shows, per guest, either the current link (host, since
+when, linked by whom) or the suggested hosts.
+
+**Where the suggestions come from.** Suggestions are computed from stored
+data only:
+
+- **MAC**: a NIC MAC from the guest configuration matches the MAC of an
+  IPAM asset that is linked to a managed host (assets get their MAC from the
+  network page or a discovery import). The guest's MACs are only known when
+  the [read lease](#read-lease-for-a-remote) for the remote includes the
+  per-guest method `guest_config`; without it there are no MAC suggestions.
+- **POSSIBLE MATCH**: a guest IP matches an endpoint of a managed host or an
+  address of its IPAM asset. Guest IPs come from the guest agent
+  (`guest_agent`; unavailable with a read-only token on PVE 8), the
+  interface data and the cloud-init IP in the guest configuration. An IP
+  match is never more than a possible match.
+
+Conflicts are shown, never resolved: a MAC present on two guests of the same
+remote (for example a cloned VM) or an IP that is an endpoint of several
+managed hosts. Linking a guest or candidate with a conflict needs the
+"I reviewed the conflict" confirmation. When a VMID was reused (the guest
+was recreated, new incarnation), an active link of the old incarnation is
+shown as a notice on the new guest and does not apply to it; release it
+with **Lösen**.
+
+**Linking and releasing.** Nothing is linked automatically, not by MAC, IP,
+hostname or VMID. **Verknüpfen** links the guest to that candidate,
+**Lösen** releases a link and needs a short reason; the released link stays
+in the link history with the reason. Both buttons need a logged-in user and
+an open privileged session, and each change is written to the server log as
+an audit line (`pve_guest_linked` / `pve_guest_unlinked`, with the user). A
+host can be linked to one guest at a time.
+
+**What a link means.** A link is display and drift information only: the
+inventory chart shows the host inside the guest box. It is never an SSH identity: the host keeps its own SSH
+enrollment, endpoints and pinned host key, and guest IPs never replace its
+SSH endpoints.
+
+A `nebula pve link` CLI is not available yet; use the PVE page.
+
 ## Staleness and unknown labels in the UI
 
 The PVE pages show only stored observations, never live API data. Every row
