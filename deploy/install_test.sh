@@ -1218,6 +1218,8 @@ stub_accepts() { stub_systemctl "$@" 2>/dev/null; }
 stub_refuses() { ! stub_accepts "$@"; }
 nothing_pending() { [[ ! -e "$refresh_sb/var/units.pending" ]]; }
 pending_has() { grep -qxF "$1  $2" "$refresh_sb/var/units.pending"; }
+# pending_is <sum> <unit>: that line is all the record holds.
+pending_is() { [[ "$(cat "$refresh_sb/var/units.pending" 2>/dev/null)" == "$1  $2" ]]; }
 
 if [[ -z "$select_block" || -z "$start_block" ]]; then
   echo "FAIL install.sh has no unit selection or start block"
@@ -1295,9 +1297,26 @@ CASES
   expect "refreshed but stopped collector: not restarted" collector_restarts_are 0
   expect "refreshed but stopped collector: nothing asked" not_probed
 
+  # A first install is not an upgrade: the enable step starts the collector,
+  # although the unit went on record in this run.
+  reset_refresh
+  reset_install
+  for unit in "${install_units[@]}"; do
+    ship "$unit" "$unit v1"
+  done
+  stub_active="$all_services"
+  run_install
+  expect "first install, running collector: not restarted" collector_restarts_are 0
+  expect "first install, running collector: nothing asked" not_probed
+
   # Nobody answers: no restart in any form, a warning, and the install ends.
+  # The restart is still due, so it stays on record, and only that: the server
+  # restarted, so its line goes. The run after that asks again, and warns again
+  # or restarts, once, with the same tarball and nothing changed.
+  collector=nebula-pve-collector.service
   installed_host
-  ship nebula-pve-collector.service 'nebula-pve-collector.service v2'
+  ship nebula-server.service 'nebula-server.service v2'
+  ship "$collector" "$collector v2"
   stub_active="$all_services"
   inst_bin_changed=1
   inst_probe_rc=1
@@ -1307,6 +1326,68 @@ CASES
   expect "silent executor: the collector is not restarted" collector_restarts_are 0
   expect "silent executor: it was asked" probed
   expect "silent executor: the warning says so" out_has 'not answering'
+  expect "silent executor: only the collector stays pending" pending_is "$(text_sum "$collector v2")" "$collector"
+  inst_bin_changed=0
+  run_install
+  expect "silent again: the run succeeds" rc_is 0
+  expect "silent again: nothing is restarted" restarts_are ''
+  expect "silent again: it was asked" probed
+  expect "silent again: the warning comes again" out_has 'not answering'
+  expect "silent again: the collector stays pending" pending_is "$(text_sum "$collector v2")" "$collector"
+  inst_probe_rc=0
+  run_install
+  expect "answering after a skip: the run succeeds" rc_is 0
+  expect "answering after a skip: the collector alone restarts, once" restarts_are "restart $collector"
+  expect "answering after a skip: the probe comes first" probe_precedes_collector_restart
+  expect "answering after a skip: no warning" out_lacks 'not answering'
+  expect "answering after a skip: nothing stays pending" nothing_pending
+  run_install
+  expect "after the retry: nothing is restarted" restarts_are ''
+
+  # New binaries alone: the run replaced no unit and wrote no record, so the
+  # skipped restart has to go on record by itself.
+  installed_host
+  stub_active="$all_services"
+  inst_bin_changed=1
+  inst_probe_rc=1
+  run_install
+  expect "silent, binaries only: the collector goes on record" pending_is "$(text_sum "$collector v1")" "$collector"
+  inst_bin_changed=0
+  inst_probe_rc=0
+  run_install
+  expect "silent, binaries only: the next run restarts it, once" restarts_are "restart $collector"
+  expect "silent, binaries only: nothing stays pending" nothing_pending
+
+  # An edited unit keeps the restart it is owed. The record holds the shipped
+  # checksum, never the edit's, which would make the edit look unedited.
+  installed_host
+  printf 'admin edit\n' > "$refresh_sb/etc/$collector"
+  stub_active="$all_services"
+  inst_bin_changed=1
+  inst_probe_rc=1
+  run_install
+  expect "silent, edited unit: the shipped checksum goes on record" pending_is "$(text_sum "$collector v1")" "$collector"
+  inst_bin_changed=0
+  inst_probe_rc=0
+  ship "$collector" "$collector v2"
+  run_install
+  expect "silent, edited unit: the edit is kept" has_content "$refresh_sb/etc/$collector" 'admin edit'
+  expect "silent, edited unit: the next run restarts it, once" restarts_are "restart $collector"
+  expect "silent, edited unit: nothing stays pending" nothing_pending
+
+  # Stopped by the next run: nothing runs the old binary, nothing is left due.
+  installed_host
+  stub_active="$all_services"
+  inst_bin_changed=1
+  inst_probe_rc=1
+  run_install
+  inst_bin_changed=0
+  inst_probe_rc=0
+  stub_active="$both_services"
+  run_install
+  expect "stopped after a skip: not restarted" collector_restarts_are 0
+  expect "stopped after a skip: nothing asked" not_probed
+  expect "stopped after a skip: nothing stays pending" nothing_pending
 
   installed_host
   inst_drop_in_changed=1
@@ -1461,7 +1542,9 @@ CASES
 
   # A masked collector that still runs: the restart is due and systemd would
   # refuse it, which under set -e would end the run before the pending record
-  # is cleared. <how> names one way to mask it, <inputs> what makes it due.
+  # is cleared. The skipped restart stays on record and nothing else does, so
+  # the next run warns again, and restarts it once the mask is gone. <how> names
+  # one way to mask it, <inputs> what makes it due.
   for how in link runtime; do
     for inputs in bin unit; do
       name="masked running collector (${how}, ${inputs})"
@@ -1469,8 +1552,10 @@ CASES
       ship nebula-server.service 'nebula-server.service v2'
       if [[ "$inputs" == unit ]]; then
         ship nebula-pve-collector.service 'nebula-pve-collector.service v2'
+        collector_sum=$(text_sum 'nebula-pve-collector.service v2')
       else
         inst_bin_changed=1
+        collector_sum=$(text_sum 'nebula-pve-collector.service v1')
       fi
       case "$how" in
         link) ln -sf /dev/null "$refresh_sb/etc/nebula-pve-collector.service" ;;
@@ -1483,12 +1568,24 @@ CASES
       expect "${name}: not restarted in any form" collector_restarts_are 0
       expect "${name}: the executor is not asked for it" not_probed
       expect "${name}: the server still restarts" called 'restart nebula-server.service'
-      expect "${name}: nothing stays pending" nothing_pending
       if [[ "$how" == link && "$inputs" == unit ]]; then
         # The link keeps the unit, so nothing makes the restart due.
+        expect "${name}: nothing stays pending" nothing_pending
         expect "${name}: nothing was due, nothing to warn about" out_lacks 'not restarting it'
       else
         expect "${name}: the warning says it was not restarted" out_has 'nebula-pve-collector.service is masked; not restarting it'
+        expect "${name}: only the collector stays pending" pending_is "$collector_sum" nebula-pve-collector.service
+        inst_bin_changed=0
+        run_install
+        expect "${name}: the next run warns again" out_has 'nebula-pve-collector.service is masked; not restarting it'
+        expect "${name}: the next run restarts nothing" restarts_are ''
+        expect "${name}: it stays pending" pending_is "$collector_sum" nebula-pve-collector.service
+        if [[ "$how" == runtime ]]; then
+          stub_runtime_masked=""
+          run_install
+          expect "${name}: unmasked, it restarts once" restarts_are 'restart nebula-pve-collector.service'
+          expect "${name}: unmasked, nothing stays pending" nothing_pending
+        fi
       fi
     done
   done

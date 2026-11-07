@@ -375,10 +375,11 @@ units_manifest="${var_lib}/units.sha256"
 
 # units_pending is the write-ahead record of a run: the checksum of a shipped
 # version goes in before that version is written to its unit file, and the
-# file goes away once the restart steps are through. What a stopped run leaves
-# behind tells the next run what units_manifest cannot: a unit with one of
-# these checksums is unedited even if the tarball has moved on, and its restart
-# may still be due. Like units_manifest it holds shipped checksums only.
+# file goes away once the restart steps are through, unless a restart had to
+# be skipped: then that one line stays. What a run leaves behind tells the next
+# run what units_manifest cannot: a unit with one of these checksums is
+# unedited even if the tarball has moved on, and its restart may still be due.
+# Like units_manifest it holds shipped checksums only.
 units_pending="${var_lib}/units.pending"
 
 # Every version shipped before units_manifest existed. Hosts installed then
@@ -397,8 +398,8 @@ legacy_unit_sums=(
 )
 
 # Units whose new version a running service may not have yet, so that the
-# restart step can apply it: the ones refresh_units replaced, and the ones a
-# stopped run left pending. A unit installed for the first time in this run is
+# restart step can apply it: the ones refresh_units replaced, and the ones an
+# earlier run left pending. A unit installed for the first time in this run is
 # not listed: the enable step starts it.
 refreshed_units=()
 
@@ -428,7 +429,7 @@ is_legacy_unit() {
   return 1
 }
 
-# unit_pending NAME [SUM] succeeds if a stopped run left NAME on record, with
+# unit_pending NAME [SUM] succeeds if an earlier run left NAME on record, with
 # the checksum SUM if one is given. Malformed lines do not count, so damage to
 # the file can only make a unit look edited, which keeps it.
 unit_pending() {
@@ -450,9 +451,24 @@ install_unit() {
   install -m 0644 -o root -g root "${script_dir}/systemd/$1" "${systemd_dir}/$1"
 }
 
-# clear_pending_units forgets the record once nothing of it is due any more.
+# clear_pending_units [NAME] forgets what the run has done: the whole record,
+# or all of it but the restart of NAME, which the run had to skip. That line
+# holds the shipped checksum, also if the unit on disk is an edit, which must
+# not look unedited. The rename means that a stop here leaves the old record
+# or the new one, and either way the restart stays due.
 clear_pending_units() {
-  rm -f "${units_pending}"
+  local sum
+  if [[ $# -eq 0 ]]; then
+    rm -f "${units_pending}"
+    return 0
+  fi
+  sum=$(sha256sum "${script_dir}/systemd/$1" | cut -d' ' -f1)
+  tmp_units_pending=$(mktemp "${units_pending}.XXXXXX")
+  trap 'rm -f "${tmp_units_pending}"' EXIT
+  printf '%s  %s\n' "${sum}" "$1" > "${tmp_units_pending}"
+  chmod 0644 "${tmp_units_pending}"
+  mv -fT "${tmp_units_pending}" "${units_pending}"
+  trap - EXIT
 }
 
 # warn_kept_unit NAME REASON says that a unit was kept and how to look at it.
@@ -471,6 +487,12 @@ warn_kept_unit() {
 # and makes the restarts that are still due.
 refresh_units() {
   local name shipped target shipped_sum stored_sum current_sum record manifest_lines=""
+  # A restart an earlier run skipped stays due whatever became of the unit file
+  # since (kept, masked, up to date). Looked up before the loop, which puts the
+  # units it installs on record, or a first install would count as well.
+  if unit_pending nebula-pve-collector.service; then
+    refreshed_units+=(nebula-pve-collector.service)
+  fi
   for name in "${tarball_units[@]}"; do
     shipped="${script_dir}/systemd/${name}"
     target="${systemd_dir}/${name}"
@@ -523,7 +545,7 @@ refresh_units() {
   trap - EXIT
 }
 
-# unit_refreshed NAME succeeds if refresh_units replaced NAME.
+# unit_refreshed NAME succeeds if refreshed_units lists NAME.
 unit_refreshed() {
   local name
   for name in "${refreshed_units[@]}"; do
@@ -748,13 +770,16 @@ fi
 # block must stay below the executor restart, or the old executor answers.
 #
 # If nothing answers in time, leave the collector as it is (it retries
-# inside its poll loop) and warn instead of restarting.
+# inside its poll loop) and warn instead of restarting. A restart skipped
+# here, or because of a mask, is still due: collector_restart_skipped keeps it
+# on the pending record, so the next run restarts it or warns again.
 # NEBULA_EXECUTOR_SOCK and NEBULA_COLLECTOR_RESTART_WAIT_S override the
 # socket path and the wait (deploy/install_test.sh runs this block with a
 # stubbed systemctl and runuser).
 # begin: collector restart on upgrade
 executor_sock="${NEBULA_EXECUTOR_SOCK:-/run/nebula/executor.sock}"
 collector_restart_wait_s="${NEBULA_COLLECTOR_RESTART_WAIT_S:-30}"
+collector_restart_skipped=0
 # executor_answers succeeds only if the executor served a status call. The
 # timeout bounds a listener that accepts and then hangs.
 executor_answers() {
@@ -765,6 +790,7 @@ if { [[ ${bin_changed} -eq 1 ]] || unit_refreshed nebula-pve-collector.service; 
   && systemctl is-active --quiet nebula-pve-collector.service; then
   if unit_masked nebula-pve-collector.service; then
     echo "install.sh: warning: nebula-pve-collector.service is masked; not restarting it, it keeps running the old version (undo: systemctl unmask nebula-pve-collector.service, then restart it)" >&2
+    collector_restart_skipped=1
   else
     executor_ready=0
     wait_deadline=$((SECONDS + collector_restart_wait_s))
@@ -779,7 +805,8 @@ if { [[ ${bin_changed} -eq 1 ]] || unit_refreshed nebula-pve-collector.service; 
       systemctl restart nebula-pve-collector.service
       echo "install.sh: restarted nebula-pve-collector (binaries or unit changed)"
     else
-      echo "install.sh: the executor on ${executor_sock} is not answering after ${collector_restart_wait_s}s; leaving nebula-pve-collector on the old version (restart it once the executor is up)" >&2
+      echo "install.sh: the executor on ${executor_sock} is not answering after ${collector_restart_wait_s}s; leaving nebula-pve-collector on the old version (restart it once the executor is up, or run install.sh again)" >&2
+      collector_restart_skipped=1
     fi
   fi
 fi
@@ -803,9 +830,15 @@ for name in "${refreshed_units[@]}"; do
   esac
 done
 
-# Everything a stopped run left is done. A package run looked at no unit.
+# Everything a stopped run left is done, except a collector restart that was
+# skipped above: it stays on record for the next run. A package run looked at
+# no unit, and has no collector restart to skip.
 if [[ ${from_package} -eq 0 ]]; then
-  clear_pending_units
+  if [[ ${collector_restart_skipped} -eq 1 ]]; then
+    clear_pending_units nebula-pve-collector.service
+  else
+    clear_pending_units
+  fi
 fi
 # end: start units
 
