@@ -315,6 +315,30 @@ Until they land, cu04 shows those targets as unavailable with a reason.
   until cu02. `nebula batch review` prints every new field, per image and per
   container, because the hardened path reads the plan there.
 
+- **As implemented (07.11.2026, branch `agent/cu01-container-update-contracts`):**
+  - `internal/canonical/container_update.go` and `imageref.go`: the binding,
+    the action table, limits, `ParseImageReference`, `ContainerUpdateFloor`,
+    `ContainerUpdateParameters`; `normalizeBatchMember` refuses a
+    `parameters_hash` that is not the binding's rendering.
+  - Enforcement sits in the batch authority (`internal/permit/batch/container.go`),
+    wrapped around **every** `Policy.Evaluate`, not inside the executor's
+    `BatchPolicy.Evaluate`: no policy can forget it. It adds the floor, refuses
+    CRITICAL (`ErrContainerCritical`, never `CriticalError`), refuses a
+    proposed label below the floor, checks each tag change through a
+    `TagPolicy` option and folds the verdicts into the trust digest. A refusal
+    after proposal revokes the whole plan. Without a `TagPolicy` every tag
+    change is refused. Rollback, standalone and `registry` members are refused
+    with `ErrContainerUnsupported` until cu03, cu05 and cu06 add their checks.
+  - The classic authority refuses `docker.update`, `docker.rollback` and
+    `docker.compose_rollback` on propose and in schedule and read grants.
+  - Left for a follow-up outside cu01's path scope: `registrymeta.CompareTags`
+    and the executor's `TagPolicy` wiring (until then tag changes fail
+    closed), `nebula batch review` output (`cmd/nebula/batch.go`), and copies
+    of the named security tests in `test/security/` (they live next to the
+    code in `internal/permit/batch/container_test.go`,
+    `internal/permit/container_classic_test.go` and
+    `internal/canonical/container_update_test.go`).
+
 ### cu02 Pinned Compose recreate as a durable member (P2-03 executor)
 
 - **Rules:** R1, R2, R4, R6, R8 (enforcement on the host), R9 (the retained
@@ -363,7 +387,15 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     checks override drift as well as applied configuration;
     `override_drift` takes precedence over `config_not_applied` if both fail
     (Q27). Either reason disables an update but does not discard complete
-    identity facts needed by Resolve. A limit still discards the whole unit.
+    identity facts needed by Resolve. The same holds for `scale_mismatch` and
+    `target_not_running`, which a job killed during `up` can also leave: they
+    are observations of a complete unit, so their facts are retained too
+    (review of #325, finding 8). A limit or a deadline still discards the whole
+    unit (`truncated`). `override_drift` is judged **per unit** (the Compose
+    project): drift on any of its services disables every update of that
+    project, even of a sibling phase 1 would accept, because the next `up` with
+    the override would apply the stale entry as well. This fails closed; the
+    operator repairs the drifted service first (finding 10).
 
     **Limits**, named constants initially in `internal/executions/dockerhost/`
     and moved with the parsers in cu03 (Q11), enforced by
@@ -381,8 +413,11 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     | `maxPreviewResultBytes` | 768 KiB, below the 1 MiB `hostrun.MaxResult` | Remaining units are `truncated` |
     | `maxRunRegistryRequests` | 120 per run, one at a time and at least 1 second apart per registry (Q22) | `tag_unresolved` for the rest; stops at the first 429 |
 
-    Each external call has its own bound (`timeout 30` for Compose and Docker,
-    the `curl` limits of `docker_check_updates.sh`). These bounds alone do not fit
+    Each external call has its own bound (`timeout -k 10 30` for Compose and
+    Docker, so a binary that ignores SIGTERM is killed 10 seconds later, and
+    the `curl` limits of `docker_check_updates.sh`). As in cu02, the call's
+    bound including its 10-second kill grace must fit the remaining deadline
+    (review of #325, finding 2). These bounds alone do not fit
     the 5-minute job: even one 30-second call per project totals 25 minutes for
     50 projects, and one unit can need several calls and registry requests.
     *Recommendation, pending Q24:* keep the existing
@@ -534,7 +569,15 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     added for each call after the budget. Preserve the raw exit status and
     classify an expired `up` as `up_timeout` whether it obeys SIGTERM or
     ignores SIGTERM and needs SIGKILL; an arbitrary non-timeout exit 137
-    alone does not prove timeout. A killed `up` may leave a project partly
+    alone does not prove timeout. The script tells them apart by elapsed
+    time on a monotonic clock (`/proc/uptime` read before and after the call):
+    `up_timeout` only when the exit is 124 or 137 **and** the call ran at least
+    its bound; any earlier 124 or 137 (OOM kill, external SIGKILL) is
+    `up_failed` with the raw `up_exit` (review of #325, finding 4). Phase 2
+    checks the remaining `mutationCheckBudget` before every registry request,
+    token request and spacing wait, and limits each `curl` to that remaining
+    time, so a stalling registry ends phase 2 with `tag_unresolved` instead of
+    running into the job timeout (finding 3). A killed `up` may leave a project partly
     recreated; phase 6 still records that as for any failed `up`. Rollback
     and cu05's actions use the same budgets for the phases they run.
   - **Durable batch members:** the executor picks `hostrun.Dispatch` for the
@@ -643,10 +686,20 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     fake host where every Compose call hangs until its timeout);
     `TestPreviewDeadlineInsideUnit` (several slow daemon calls and stalling
     registry requests in one unit, no partial facts, a result before 5 minutes);
-    `TestPreviewRequestCapGivesTagUnresolved`.
+    `TestPreviewSigtermIgnoringCallIsKilled` (a fake `docker compose` that
+    ignores SIGTERM: killed after the grace, the unit and the rest `truncated`,
+    a result before 5 minutes);
+    `TestPreviewRequestCapGivesTagUnresolved`;
+    `TestPreviewRetainsFactsForObservedReasons` (units refused with
+    `override_drift`, `config_not_applied`, `scale_mismatch` or
+    `target_not_running` keep complete identity facts; truncated units keep none).
   - phase 2 registry stops: `TestResolveRequestCapStopsBeforePull` and
     `TestResolve429StopsBeforePull` (including token requests in the count,
-    no later request, pull, retain or recreate).
+    no later request, pull, retain or recreate);
+    `TestResolveStallingRegistryStopsAtCheckBudget` (every request stalls to
+    curl's limit, so `mutationCheckBudget` runs out before the request cap:
+    `tag_unresolved`, no later request, pull or recreate, and the phase ends
+    within its 3 minutes including grace).
   - check_updates: `TestCheckUpdatesFirstUpdateListsIndex` (tag pull),
     `TestCheckUpdatesSecondUpdateListsPlatform` (digest pull),
     `TestIndexChangeOnOtherArchitectureIsCurrent`,
@@ -664,7 +717,10 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     `TestHungUpStillReportsAfterSnapshot`, `TestHungPrecheckStopsWithTypedReason`,
     and for rollback in cu03 `TestHungRollbackUpStillReportsAfterSnapshot`;
     both hung-`up` tests cover SIGTERM exit 124 and SIGKILL exit 137, preserve
-    `up_exit`, report `up_timeout` and still run phase 6.
+    `up_exit`, report `up_timeout` and still run phase 6. Negative cases:
+    `TestUpKilledBeforeDeadlineIsNotTimeout` (a fake `up` exits 137 at once,
+    as after an OOM or external SIGKILL, and another exits 124 at once: both
+    `up_failed` with the raw `up_exit`, never `up_timeout`, phase 6 still runs).
   - parsers: bounds, malformed UTF-8, unsafe characters, fuzz.
   - executor: crash between intent and dispatch, lost session during dispatch,
     restart while the job runs (each reconciled and never redispatched);
@@ -931,6 +987,11 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     `TestRollbackOfPartialWithUnreachedReplica` (override entry already written,
     one replica still has its old reference and label without the override;
     phase 1 passes and rollback restores the update's baseline),
+    `TestRollbackOfPartialWithMovedOverrideEntry` (Q2's second case: a
+    replica's recorded running reference is a NOS digest reference whose label
+    names the override, while the override entry has since moved to another
+    digest; phase 1 accepts it by the exact recorded-reference check, not by
+    equality with the entry; review of #325, finding 6),
     `TestRollbackBindsAllMissingService` (a service with no target left is bound
     and restored; the same entry is refused while the row shows a present
     container), `TestRollbackParametersRenderOnlyFromBinding`,
@@ -945,6 +1006,12 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     remain for Resolve, but UpdateBindings refuses the unit),
     `TestResolveUnchangedWithOverrideDrift` (killed between override write and
     `up`, or identical operator drift: `not_recreated`, no inferred cause),
+    `TestResolveTruncatedPreviewStaysUncertain` (the row's unit is `truncated`,
+    or containers are absent from an incomplete unit: the row stays
+    `uncertain`, never `partial` or `not_recreated`; review of #325, finding 5),
+    `TestResolveUsesFactsOfScaleMismatchUnit` (a job killed during `up` leaves
+    `scale_mismatch` or `target_not_running`; the retained facts let Resolve
+    reach `partial`),
     `TestRollbackRefusedWhenDependenciesDiffer`,
     `TestRecoveryPlanNeedsExplicitNoDataDeclaration`,
     `TestNoDataDeclarationBoundLikeAPlan`, `TestNoAutomaticRetryOrRollback`,
@@ -1073,7 +1140,18 @@ Until they land, cu04 shows those targets as unavailable with a reason.
     leave only the image to NOS. A published port with a Docker-chosen host port
     is a rejected shape, for the same reason as `ephemeral_port`. An env value
     containing a newline is also rejected: `--env-file` cannot reproduce it
-    (Q7), and NOS must not split or silently change it.
+    (Q7), and NOS must not split or silently change it. A value containing a
+    carriage return (anywhere, including at its end) or a NUL byte is rejected
+    the same way, before storage and again before dispatch, because Docker's
+    line-based env-file reader strips a trailing CR and cannot carry a NUL
+    (review of #325, finding 11).
+  - Single env values (review of #325, finding 1): with per-value redaction
+    dropped (Q26), the scripts' only guard for one env value is that no
+    Docker or Compose output reaches the result or the log. Every call of
+    `docker.update` and `docker.rollback` therefore sends stdout and stderr to
+    a bounded buffer that is never returned; only typed reasons and exit
+    statuses leave the host. `TestStandaloneFailureOutputHoldsNoEnvValue`
+    proves it per value, not only for the whole definition.
 - **Risk classes:** as cu01; a container without a definition is unavailable.
 - **Tests:** `TestStandaloneWithoutDefinitionUnavailable`,
   `TestNoInspectReconstruction` (no inspect field reaches a create argument),
@@ -1088,7 +1166,13 @@ Until they land, cu04 shows those targets as unavailable with a reason.
   `TestBatchMemberOutputRedactedWithLockedVaultWaits`,
   `TestCommonEnvValuesDoNotRewriteSnapshot` (env values `8080`, `1000` and
   `state` do not alter env-free result JSON before parsing or judging),
-  `TestDefinitionEnvNotOnCommandLine`, `TestDefinitionNewlineEnvRefused`.
+  `TestDefinitionEnvNotOnCommandLine`, `TestDefinitionNewlineEnvRefused`,
+  `TestDefinitionCarriageReturnEnvRefused` (trailing CR, inner CR and NUL, at
+  storage and at dispatch, without echoing the value),
+  `TestStandaloneFailureOutputHoldsNoEnvValue` (a table where fake `docker
+  pull`, `create`, `start` and `rm` fail and print **one** planted env value of
+  the definition, not the whole definition, on stdout and stderr, for
+  `docker.update` and `docker.rollback`: neither result nor log may hold it).
 - **Real install:** the operator supplies a definition per container with the
   vault unlocked. Without that, nothing changes.
 
@@ -1173,8 +1257,9 @@ operator brings the project back to what its files say.
 | A container whose snapshot entry exceeds its limit | cu02 phase 1 | `snapshot_too_large` | `TestOversizeSnapshotRefused` |
 | Rollback of a row without a baseline | cu03 Evaluate | `no_baseline` | `TestRollbackRefusedWithoutBaseline` |
 
-Rollback is the one exception to the first three rows, `override_drift` and
-`config_not_applied`: it starts from what a failed update left, so it binds the
+Rollback is the one exception to the first four rows (`scale_mismatch`,
+`target_not_running`, `mixed_images` and `digest_pinned`), `override_drift`
+and `config_not_applied`: it starts from what a failed update left, so it binds the
 recorded state instead (cu03, Q2, Q21). Unchanged source and exact recorded
 identities and configuration digests still apply; this is not an exemption
 from checking operator changes since the recorded after-snapshot.
@@ -1226,9 +1311,10 @@ recommended. One line per question; the background follows the list.
 1. **Batch, not classic stages:** container updates run on the `batch-v1`
    rollout engine; `PlanStages` only supplies the layout (ADR note below).
 2. **Override:** a NOS-owned root-only file per project, named in `config_files`,
-   setting `repository:new_tag@new_platform_digest`; drift gives `override_drift`;
-   operator pins stay pinned; rollback skips `override_drift` and
-   `config_not_applied` but keeps the exact recorded checks.
+   setting `repository:new_tag@new_platform_digest`; drift gives `override_drift`,
+   judged per project; operator pins stay pinned; rollback skips `override_drift`
+   and `config_not_applied` but keeps the exact recorded checks. The repair that
+   removes entries runs `up -d` for those services with the override still named.
 3. **`docker.compose_update` 1.0.0:** replaced by 2.0.0 in cu02, pulling with an
    empty `DOCKER_CONFIG`; hosts that need an operator login wait for cu06.
 4. **Precheck inside the approved script:** accepted as phases 1 and 2; the
@@ -1239,7 +1325,8 @@ recommended. One line per question; the background follows the list.
 6. **Private transfer profile:** option (a), executor fetch plus `docker load`
    over SSH. Who signs off the profile review is asked again before cu06.
 7. **Standalone definition:** an exact `docker create` argument list, env values
-   through a tmpfs `--env-file`; values with a newline are refused.
+   through a tmpfs `--env-file`; values with a newline, a carriage return or a
+   NUL are refused.
 8. **Recovery plan:** an admin-set executor record or an explicit "no persistent
    data" declaration, versioned and bound through `recovery_plan_digest`.
 9. **Rollback window:** fixed 7 days; a pruned retained image makes rollback unavailable.
@@ -1269,14 +1356,20 @@ recommended. One line per question; the background follows the list.
 23. **`docker compose config` as root:** remote loaders switched off, failure
     means unsupported; a Compose without the switch counts as `tooling_missing`.
 24. **Preview and check deadlines:** 4 minutes of work checked before every call
-    and spacing wait, the last minute for result handling.
+    and spacing wait, the last minute for result handling; every call under
+    `timeout -k 10`.
 25. **Mutation budgets:** cu02's table (3, 12, 1, 8 and 5 minutes), kill grace
-    charged per call.
+    charged per call; `up_timeout` only for exit 124 or 137 after the full bound
+    on a monotonic clock.
 26. **Env redaction in definitions:** no per-value redaction entries; silent
-    output and env-free snapshots.
+    output and env-free snapshots, tested per single env value in cu05.
 27. **Resolve evidence:** no persisted cause; `override_drift` before
-    `config_not_applied`; retained facts for unavailable units; incomplete facts
-    keep the row `uncertain`.
+    `config_not_applied`; retained facts for every observed-reason unit,
+    including `scale_mismatch` and `target_not_running`; truncated or incomplete
+    facts keep the row `uncertain`.
+
+The eleven findings of the plan review of #325 are resolved in the step texts
+above (each marked "review of #325, finding N").
 
 ### ADR note for Q1 (for ADR 0006, added by a maintainer)
 
@@ -1497,8 +1590,12 @@ The text below is the proposal of 2026-11-06 that the decisions accept.
     budgets of cu02 aim to keep a hung call out of this case (Q25), but a reboot
     during phases 5 or 6 stays in it. The operator repairs the project on the
     host using Q2: either reconcile the entries and recreate with the override,
-    or remove the affected NOS override entries before a plain
-    `docker compose up -d` from the operator's files. The latter deliberately
+    or remove the affected NOS override entries and run `docker compose up -d`
+    for **those services only**, with the operator's files **and** the NOS
+    override file named in the `config_files` label. (Corrected 07.11.2026,
+    review of #325, finding 7: a plain `up -d` without the override would
+    also recreate every other service that still has an entry and move it off
+    its reviewed digest into `override_drift`.) The latter deliberately
     returns those services to the files' image tags; it is not an exact-digest
     rollback, and the operator must review that image change. Take a new
     preview, then propose a new update, which R11 permits after Resolve.
@@ -1529,9 +1626,11 @@ The text below is the proposal of 2026-11-06 that the decisions accept.
     what `up` changes. The way out is on the host: first make the required
     environment and service selection reproducible without an operator's
     `--env-file`, `--profile` or shell variables. Then use the override as in Q2,
-    or remove the affected NOS override entries before a plain
-    `docker compose up -d` from the operator's files. Removing entries and
-    using the plain command deliberately returns those services to the files'
+    or remove the affected NOS override entries and run `docker compose up -d`
+    for those services only, with the operator's files and the NOS override
+    (corrected 07.11.2026, finding 7: a plain `up -d` without the override
+    moves every other service with an entry off its reviewed digest). Removing
+    entries deliberately returns those services to the files'
     image tags, so the operator must review that image change. Leaving stale
     entries would still give `override_drift`. Take a new preview afterwards.
     No new state, action or evidence format is added. Consequences to confirm:
@@ -1540,7 +1639,7 @@ The text below is the proposal of 2026-11-06 that the decisions accept.
       this plan does not do.
     - A Compose upgrade that changes how the hash is computed reads as
       `config_not_applied` until the next `up` with the reconciled override, or
-      the entry-removal and plain-`up` repair above. That fails closed.
+      the entry-removal repair above. That fails closed.
     - An edit between phase 1 and phase 5 is not caught.
     - Fields Compose leaves out of the hash are not proved. cu02's
       `TestConfigHashCoverage` must list them. If one of them can reach a recreated
