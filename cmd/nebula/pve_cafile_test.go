@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -113,6 +114,34 @@ func TestPveReadCAFileLimits(t *testing.T) {
 	}
 	if _, _, err := readPveCAFile(writeTestFile(t, "two.pem", append(append([]byte{}, c.caPEM...), other.caPEM...)), time.Now()); !errors.Is(err, executor.ErrPveSuppliedCA) {
 		t.Fatalf("two certificates: err = %v, want ErrPveSuppliedCA", err)
+	}
+}
+
+// TestPveReadCAFileRefusesFIFOAndDeviceWithoutBlocking: a FIFO or device
+// is refused before it is opened, so the CLI never waits for a writer.
+func TestPveReadCAFileRefusesFIFOAndDeviceWithoutBlocking(t *testing.T) {
+	fifo := filepath.Join(t.TempDir(), "ca.fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{fifo, os.DevNull} {
+		done := make(chan error, 1)
+		go func() {
+			_, _, err := readPveCAFile(path, time.Now())
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+				t.Fatalf("%s: err = %v, want not a regular file", path, err)
+			}
+		case <-time.After(5 * time.Second):
+			// Unblock the reader so the test can finish.
+			if w, err := os.OpenFile(fifo, os.O_WRONLY, 0); err == nil {
+				_ = w.Close()
+			}
+			t.Fatalf("%s: readPveCAFile blocked", path)
+		}
 	}
 }
 

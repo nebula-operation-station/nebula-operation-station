@@ -55,6 +55,13 @@ const maxPveCAFileBytes = executor.MaxPveCAFileBytes
 // maxPveCAFileBytes holding exactly one currently valid, self-signed CA
 // certificate in PEM. It returns the PEM and its SHA-256 fingerprint.
 func readPveCAFile(path string, now time.Time) ([]byte, string, error) {
+	// Refuse a FIFO, device or directory before opening it: opening a
+	// FIFO blocks until a writer appears. The opened file is checked again.
+	if st, err := os.Stat(path); err != nil {
+		return nil, "", fmt.Errorf("--ca-file: %w", err)
+	} else if !st.Mode().IsRegular() {
+		return nil, "", fmt.Errorf("--ca-file %s: not a regular file", path)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, "", fmt.Errorf("--ca-file: %w", err)
