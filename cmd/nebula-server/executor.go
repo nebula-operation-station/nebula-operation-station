@@ -453,3 +453,14 @@ func (l *lazyExecutor) RunReadGrant(ctx context.Context, in *pb.RunReadGrantRequ
 	}
 	return nil, errNotConnected
 }
+
+// GetSSHPublicKey backs the credential binding of host read lease
+// proposals (ADR 0007 E06): executions.Service reads the executor's SSH
+// key fingerprint by type assertion, so a missing method here would make
+// every proposal for an SSH host fail before any RPC.
+func (l *lazyExecutor) GetSSHPublicKey(ctx context.Context, in *pb.GetSSHPublicKeyRequest, opts ...grpc.CallOption) (*pb.GetSSHPublicKeyResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.GetSSHPublicKey(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
