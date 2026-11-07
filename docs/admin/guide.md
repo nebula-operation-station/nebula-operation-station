@@ -160,7 +160,8 @@ What it does (details in [section 17](#17-reference)):
   to `nebula-rpc` (**log out and in again** for that to take effect);
 - creates the data directories under `/var/lib/nebula` with their modes;
 - installs the four binaries to `/usr/bin` and the units to
-  `/etc/systemd/system` (unit files you edited are left alone);
+  `/etc/systemd/system` (unit files you edited are left alone, the others
+  follow the shipped version; section 13);
 - writes the executor drop-in
   `/etc/systemd/system/nebula-executor.service.d/10-local.conf` with your
   admin users and RP ID (rewritten on every run: never edit it; see
@@ -1463,8 +1464,41 @@ admin user through `sudo`. It makes a backup with the new CLI first and
 stops without changing anything if it cannot make one (no backup
 recipients, no `sudo` from an admin, an executor older than backups) or
 if the backup fails. `NEBULA_SKIP_BACKUP=1` upgrades without a backup.
-Then it replaces the binaries and restarts the services whose binaries or
-drop-ins changed. Run `nebula unlock`.
+Then it replaces the binaries and the unit files you did not edit, and
+restarts the services whose binaries, units or drop-ins changed. Run
+`nebula unlock`.
+
+Unit files follow these rules on every run. `install.sh` records the
+checksum of each shipped unit it installs in `/var/lib/nebula/units.sha256`
+and compares the file in `/etc/systemd/system` with it:
+
+| The unit file | What happens |
+| --- | --- |
+| does not exist | The shipped version is installed |
+| still has the recorded checksum | Replaced by the shipped version, so shipped fixes arrive |
+| has any other content, or is a symlink (for example from `systemctl mask`) | Kept, with a warning and a `diff -u` command that compares it with the shipped version |
+
+A masked unit stays masked: `install.sh` warns, does not enable, start or
+restart it, and carries on with the other units. `systemctl unmask` and
+another run of `install.sh` bring it back. The same goes for a path or timer
+unit whose target is masked, for example `nebula-discovery.path` and
+`nebula-discovery.timer` when `nebula-discovery.service` is masked, because
+systemd refuses to start them.
+
+If an install stops halfway, `/var/lib/nebula/units.pending` keeps the shipped
+versions it wrote. The next run, also from a newer tarball, treats them as
+unedited and makes the restarts that were still due, then removes the file.
+
+An edited unit does not get shipped fixes: check the warning after each
+upgrade. To take the shipped version, remove the file and run `install.sh`
+again. Changes in a drop-in (`systemctl edit nebula-server`) avoid this
+altogether, because the unit file itself stays unedited. The executor flags
+have their own drop-in (section 6.2).
+
+A host installed before `units.sha256` existed has no recorded checksums.
+There a unit counts as unedited if it matches a version Nebula shipped
+earlier; any other content is treated as edited and kept. A file you changed
+back to exactly such a version is therefore replaced on that first upgrade.
 
 **Debian package:** `apt upgrade` installs the new version but never
 restarts the services: the backup needs your `sudo`, which the package
@@ -1588,6 +1622,7 @@ from `~nebula/.ssh/authorized_keys` (or the user: `userdel -r nebula`),
 | `/etc/systemd/system/nebula-executor.service.d/10-local.conf` | root, 0644 | Executor flags, rewritten by `install.sh` |
 | `/etc/systemd/system/nebula-executor.service.d/20-local.conf` | root, 0644 | Your own executor flags (optional) |
 | `/etc/systemd/system/nebula-server.service.d/20-discovery.conf` | root, 0644 | Lets the server write the job spool and `pve/requests/` |
+| `/var/lib/nebula/units.sha256` | root, 0644 | Checksums of the shipped units `install.sh` installed (section 13; not used by the package) |
 | `/etc/nebula/server.json` | `root:nebula-server`, 0640 | Server configuration |
 | `/etc/nebula/backup-recipients` | root | age recipients for backups |
 | `/var/lib/nebula/executor/` | `nebula-executor`, 0700 | `executor.db` (permits, pins, counters, vault, events), `executor.db.installed`, `events.key`, `keys/<ref>.key` |

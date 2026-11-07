@@ -63,7 +63,7 @@ func validAgentFilePath(p string) bool {
 // 1..MaxAgentFileReadBytes. An unavailable agent returns an error wrapping
 // ErrAgentUnavailable. The content is untrusted.
 func (c *Client) AgentFileRead(ctx context.Context, node string, vmid int, file string, maxBytes int) ([]byte, error) {
-	if err := validateNodeName(node); err != nil {
+	if err := validNodeName(node); err != nil {
 		return nil, err
 	}
 	if err := validateVMID(vmid); err != nil {

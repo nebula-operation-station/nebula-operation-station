@@ -60,13 +60,13 @@ var (
 )
 
 // PveNodePattern is the one node-name grammar of PVE mutations: a single
-// lowercase DNS label of 1..63 characters. PVE node names are host names
-// without a domain, and the pveapi writer that dispatches mutations takes
-// only lowercase node names. The permit target, the durable job record
-// (executordb) and the node field of a stored UPID all use this pattern.
-// So a target that passes authorization can always be recorded,
-// dispatched and matched to its tasks.
-const PveNodePattern = `[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?`
+// label of 1..63 characters, pvecontract.NodeLabelPattern. PVE node names are
+// host names without a domain, they keep their case, and names differing
+// only in case are different targets. The permit target, the durable job
+// record (executordb), the node field of a stored UPID and the pveapi writer
+// that dispatches mutations all use this label. So a target that passes
+// authorization can always be recorded, dispatched and matched to its tasks.
+const PveNodePattern = pvecontract.NodeLabelPattern
 
 // ValidPveNodeName reports whether s matches PveNodePattern.
 func ValidPveNodeName(s string) bool { return len(s) <= 63 && pveNodeRe.MatchString(s) }

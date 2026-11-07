@@ -75,7 +75,7 @@ type liveChart struct {
 	now     func() time.Time
 	leases  atomic.Pointer[[]pvecollect.TelemetryLease]
 
-	// handoffRoot is liveHandoffRoot.
+	// handoffRoot is liveHandoffRoot unless run sets pve_spool_dir.
 	handoffRoot string
 	// Want-list writer state; only the provider loop touches it.
 	wantSig   string

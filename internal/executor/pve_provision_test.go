@@ -454,7 +454,7 @@ func (s *guestServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	typ := map[string]string{"clone": "qmclone", "config": "qmconfig", "resize": "resize", "start": "qmstart"}[parts[len(parts)-1]]
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = fmt.Fprintf(w, `{"data":"%s"}`, testTaskUPID("pve1", time.Now(), typ, vmid, mutActionUser, n))
+	_, _ = fmt.Fprintf(w, `{"data":"%s"}`, testTaskUPID(parts[4], time.Now(), typ, vmid, mutActionUser, n))
 }
 
 func (s *guestServer) count() int {

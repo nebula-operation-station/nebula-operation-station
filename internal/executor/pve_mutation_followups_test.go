@@ -22,7 +22,7 @@ import (
 func TestPveMutationMalformedRequestNeverReadsRemote(t *testing.T) {
 	cases := map[string]func(*PveMutationRequest){
 		"dotted node":    func(r *PveMutationRequest) { r.Node = "pve1.lab.test" },
-		"uppercase node": func(r *PveMutationRequest) { r.Node = "PVE1" },
+		"uppercase node": func(r *PveMutationRequest) { r.Node = "PVE/1" },
 		"path node":      func(r *PveMutationRequest) { r.Node = "../nodes" },
 		"unknown kind":   func(r *PveMutationRequest) { r.Kind = "storage" },
 		"guest no vmid":  func(r *PveMutationRequest) { r.VMID = 0 },

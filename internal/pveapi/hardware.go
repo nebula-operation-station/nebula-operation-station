@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 )
 
 // maxPCIDevices bounds the entries of one node's PCI device list.
@@ -50,7 +52,7 @@ type pciDeviceRaw struct {
 // NodePCIDevices reads GET /nodes/{node}/hardware/pci with PVE's default
 // class filter. A denied or missing list is Available=false, never empty.
 func (c *Client) NodePCIDevices(ctx context.Context, node string) (PCIDevices, error) {
-	if !nodeNameRe.MatchString(node) {
+	if !pvecontract.ValidNodeLabel(node) {
 		return PCIDevices{}, fmt.Errorf("pveapi: invalid node name")
 	}
 	body, reason, err := c.clusterGet(ctx, "/nodes/"+url.PathEscape(node)+"/hardware/pci")
