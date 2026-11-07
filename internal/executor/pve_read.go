@@ -63,6 +63,11 @@ var pveReadMethods = map[pb.PVEReadMethod]string{
 var (
 	errPveReadTrust       = errors.New("executor: pve remote no longer presents its pinned trust identity")
 	errPveReadUnreachable = errors.New("executor: no pve endpoint reachable")
+	// errPveStoredCA means the admin-supplied cluster CA stored for the
+	// remote's pin could not be used (unreadable, corrupt or not matching
+	// the pin). It is a local failure: the connection is refused, but the
+	// remote is not blocked, because it presented nothing different.
+	errPveStoredCA = errors.New("executor: stored cluster CA of the pve remote is unusable")
 )
 
 // pveReadState holds per-remote request slots and the verified cluster CA
@@ -205,6 +210,11 @@ func (s *Service) ReadPVE(ctx context.Context, in *pb.ReadPVERequest) (*pb.ReadP
 		return nil, s.blockPveRead(rm)
 	case errors.Is(err, errPveTrustFenced):
 		return nil, pveReadFencedStatus
+	case errors.Is(err, vault.ErrLocked):
+		return nil, status.Error(codes.FailedPrecondition, "read pve: the vault is locked; the stored cluster CA cannot be loaded")
+	case errors.Is(err, errPveStoredCA):
+		s.log.Error("pve read: stored cluster CA unusable", "remote", rm.RemoteID, "error", err.Error())
+		return nil, status.Error(codes.Internal, "read pve: the stored cluster CA of the remote is unusable; re-pin it with --ca-file")
 	case err != nil:
 		return nil, status.Error(codes.Unavailable, "read pve: remote unreachable")
 	}
@@ -339,6 +349,13 @@ func (s *Service) pveReadTrust(ctx context.Context, rm executordb.PveRemote) (pv
 // presented chains credential-free and uses the self-signed certificate
 // whose SHA-256 equals the pin. If endpoints answer but none presents it,
 // the trust identity changed.
+//
+// A cluster added or re-pinned with an admin-supplied CA file (its nodes
+// present only their leaf) has that CA in the vault under its pin. On a
+// cache miss (executor restart, new trust generation) it is loaded from
+// there and re-checked against the pin before any endpoint is contacted.
+// A locked vault returns vault.ErrLocked and an unusable stored CA
+// errPveStoredCA; neither is a trust failure, so neither blocks the remote.
 func (s *Service) pvePinnedTrust(ctx context.Context, rm executordb.PveRemote) (pvetransport.Trust, error) {
 	raw, err := hex.DecodeString(rm.TrustPin)
 	if err != nil || len(raw) != 32 {
@@ -354,6 +371,20 @@ func (s *Service) pvePinnedTrust(ctx context.Context, rm executordb.PveRemote) (
 		return pvetransport.Trust{}, errPveReadTrust
 	}
 	if ca := s.pveRead.cachedCA(rm); ca != nil {
+		return pvetransport.Trust{CA: ca}, nil
+	}
+	ca, err := s.pveStoredClusterCA(rm)
+	var locked error
+	switch {
+	case errors.Is(err, vault.ErrLocked):
+		// Whether a CA file was stored is unknown: a cluster that presents
+		// its CA still connects, but a missing CA is never reported as a
+		// changed trust identity.
+		locked = fmt.Errorf("pve remote %s: load stored cluster CA: %w", rm.RemoteID, err)
+	case err != nil:
+		return pvetransport.Trust{}, fmt.Errorf("pve remote %s: %w: %w", rm.RemoteID, errPveStoredCA, err)
+	case ca != nil:
+		s.pveRead.storeCA(rm, ca)
 		return pvetransport.Trust{CA: ca}, nil
 	}
 	presented := false
@@ -373,10 +404,27 @@ func (s *Service) pvePinnedTrust(ctx context.Context, rm executordb.PveRemote) (
 			}
 		}
 	}
+	if locked != nil {
+		return pvetransport.Trust{}, locked
+	}
 	if presented {
 		return pvetransport.Trust{}, errPveReadTrust
 	}
 	return pvetransport.Trust{}, errPveReadUnreachable
+}
+
+// pveStoredClusterCA returns the admin-supplied CA stored for rm's pin
+// (PveAdmin.StoredClusterCA), or nil when none is stored. An uninitialized
+// vault holds none.
+func (s *Service) pveStoredClusterCA(rm executordb.PveRemote) (*x509.Certificate, error) {
+	if rm.Kind != pvecontract.KindCluster || s.vault == nil {
+		return nil, nil
+	}
+	ca, err := (&PveAdmin{Vault: s.vault}).StoredClusterCA(rm)
+	if errors.Is(err, vault.ErrNotInitialized) {
+		return nil, nil
+	}
+	return ca, err
 }
 
 // pveReadHTTP builds the pinned HTTP client for one read. The base URL is

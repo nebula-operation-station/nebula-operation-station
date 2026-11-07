@@ -188,6 +188,29 @@ func (a *PveAdmin) StoredClusterCA(rm executordb.PveRemote) (*x509.Certificate, 
 	return cert, nil
 }
 
+// storeClusterCA stores ca as the supplied CA of cluster remoteID pinned to
+// pin and reads it back exactly as every later connection loads it
+// (StoredClusterCA), so a CA that is stored is also usable. It returns the
+// compensation that removes this version again; on a failed read-back the
+// version is already removed and the error is returned.
+func (a *PveAdmin) storeClusterCA(remoteID, pin string, ca *x509.Certificate, by string) (func(), error) {
+	id := pveCAVaultID(remoteID, pin)
+	version, err := a.Vault.Put(id, ca.Raw, by)
+	if err != nil {
+		return nil, fmt.Errorf("store cluster CA: %w", err)
+	}
+	compensate := func() { a.compensateVault(id, version) }
+	got, err := a.StoredClusterCA(executordb.PveRemote{RemoteID: remoteID, Kind: pvecontract.KindCluster, TrustPin: pin})
+	if err == nil && (got == nil || !bytes.Equal(got.Raw, ca.Raw)) {
+		err = fmt.Errorf("executor: pve stored CA of %s: read back differs", remoteID)
+	}
+	if err != nil {
+		compensate()
+		return nil, fmt.Errorf("load stored cluster CA: %w", err)
+	}
+	return compensate, nil
+}
+
 // deleteStoredCAs removes every stored CA of remoteID except the one for
 // keepPin ("" removes all).
 func (a *PveAdmin) deleteStoredCAs(remoteID, keepPin string) error {

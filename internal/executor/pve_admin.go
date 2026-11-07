@@ -661,12 +661,11 @@ func (a *PveAdmin) AddRemote(ctx context.Context, in PveAddRemote) (executordb.P
 	// it with the remote's secrets, removed again if the add fails.
 	compensateCA := func() {}
 	if ca != nil {
-		caID := pveCAVaultID(remote.RemoteID, pin)
-		caVersion, err := a.Vault.Put(caID, ca.Raw, in.By)
+		undo, err := a.storeClusterCA(remote.RemoteID, pin, ca, in.By)
 		if err != nil {
-			return executordb.PveRemote{}, fmt.Errorf("executor: pve add remote: store cluster CA: %w", err)
+			return executordb.PveRemote{}, fmt.Errorf("executor: pve add remote: %w", err)
 		}
-		compensateCA = func() { a.compensateVault(caID, caVersion) }
+		compensateCA = undo
 	}
 	readID := PveVaultID(remote.RemoteID, PvePurposeRead)
 	readVersion, err := a.Vault.Put(readID, in.ReadToken, in.By)
@@ -1000,14 +999,21 @@ func (a *PveAdmin) Repin(ctx context.Context, in PveRepin) (executordb.PveRemote
 		return executordb.PveRemote{}, err
 	}
 	// The new CA is stored under the new pin before the registry switches,
-	// so the current pin's CA stays intact if the switch fails.
+	// so the current pin's CA stays intact if the switch fails; a failed
+	// switch removes the new one again. Once the registry is switched, the
+	// new CA is the trust of the current pin and is kept whatever fails
+	// later.
+	compensateCA := func() {}
 	if ca != nil {
-		if _, err := a.Vault.Put(pveCAVaultID(in.RemoteID, pin), ca.Raw, in.By); err != nil {
-			return executordb.PveRemote{}, fmt.Errorf("executor: pve repin: store cluster CA: %w", err)
+		undo, err := a.storeClusterCA(in.RemoteID, pin, ca, in.By)
+		if err != nil {
+			return executordb.PveRemote{}, fmt.Errorf("executor: pve repin: %w", err)
 		}
+		compensateCA = undo
 	}
 	rm, err = a.DB.RepinRemote(in.RemoteID, in.OldPin, pin, in.By)
 	if err != nil {
+		compensateCA()
 		return executordb.PveRemote{}, fmt.Errorf("executor: pve repin: %w", err)
 	}
 	keep := ""
@@ -1015,7 +1021,7 @@ func (a *PveAdmin) Repin(ctx context.Context, in PveRepin) (executordb.PveRemote
 		keep = pin
 	}
 	if err := a.deleteStoredCAs(in.RemoteID, keep); err != nil {
-		a.log().Warn("pve repin: stale cluster CA not removed", "remote", in.RemoteID)
+		a.log().Warn("pve repin: stale cluster CA not removed", "remote", in.RemoteID, "error", err.Error())
 	}
 	if err := a.revoke(in.RemoteID, "pve trust re-pin: generation "+strconv.FormatUint(rm.TrustGeneration, 10)); err != nil {
 		return executordb.PveRemote{}, fmt.Errorf("executor: pve repin: revoke grants: %w", err)

@@ -585,7 +585,9 @@ func (s *Service) AddPVERemote(ctx context.Context, in *pb.AddPVERemoteRequest) 
 	if err != nil {
 		return nil, pveRPCError(err)
 	}
-	s.seedPveClusterCA(a, r)
+	if err := s.seedPveClusterCA(a, r); err != nil {
+		return nil, err
+	}
 	return &pb.AddPVERemoteResponse{Remote: pveAdminProto(r)}, nil
 }
 
@@ -593,12 +595,22 @@ func (s *Service) AddPVERemote(ctx context.Context, in *pb.AddPVERemoteRequest) 
 // re-pinned with a CA file to the connection trust cache, keyed by pin
 // and trust generation, so connections to nodes that present only their
 // leaf verify against it. Nothing is seeded for a remote without one.
-func (s *Service) seedPveClusterCA(a *PveAdmin, r executordb.PveRemote) {
+// The cache is only a shortcut (pvePinnedTrust loads the stored CA on a
+// miss), but a CA that cannot be loaded now fails the RPC: a successful
+// add or re-pin means its CA is usable.
+func (s *Service) seedPveClusterCA(a *PveAdmin, r executordb.PveRemote) error {
 	ca, err := a.StoredClusterCA(r)
-	if err != nil || ca == nil {
-		return
+	if err != nil {
+		s.log.Error("pve: stored cluster CA unusable after add or re-pin", "remote", r.RemoteID, "error", err.Error())
+		if errors.Is(err, vault.ErrLocked) {
+			return status.Error(codes.FailedPrecondition, "pve remote stored, but the vault was locked before its cluster CA could be loaded; unlock and read it")
+		}
+		return status.Error(codes.Internal, "pve remote stored, but its cluster CA cannot be loaded; re-pin it with --ca-file")
 	}
-	s.pveRead.storeCA(r, ca)
+	if ca != nil {
+		s.pveRead.storeCA(r, ca)
+	}
+	return nil
 }
 
 // RotatePVEToken atomically replaces a purpose's encrypted credential.
@@ -755,7 +767,9 @@ func (s *Service) CommitPVERepin(ctx context.Context, in *pb.CommitPVERepinReque
 	if err != nil {
 		return nil, pveRPCError(err)
 	}
-	s.seedPveClusterCA(a, r)
+	if err := s.seedPveClusterCA(a, r); err != nil {
+		return nil, err
+	}
 	return &pb.CommitPVERepinResponse{Remote: pveAdminProto(r)}, nil
 }
 
