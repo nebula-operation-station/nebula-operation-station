@@ -200,3 +200,67 @@ func TestPveRemoteAddLeafOnlyClusterWithCAFile(t *testing.T) {
 		t.Fatalf("repin with a foreign CA file: %v", err)
 	}
 }
+
+// pveStoredCAIDs returns the vault ids of the stored cluster CAs of
+// remoteID.
+func pveStoredCAIDs(t *testing.T, dir, remoteID string) []string {
+	t.Helper()
+	secrets, err := pveTestDB(t, dir).ListSecrets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, s := range secrets {
+		if strings.HasPrefix(s.ID, executor.PveVaultID(remoteID, "ca-")) {
+			ids = append(ids, s.ID)
+		}
+	}
+	return ids
+}
+
+// TestPveRemoteRepinToCurrentPinRestoresMissingStoredCA: the way out the
+// executor names for a missing stored CA, `repin --ca-file` with the
+// unchanged pin typed back, restores it through the approval; with a
+// usable stored CA the same command is refused.
+func TestPveRemoteRepinToCurrentPinRestoresMissingStoredCA(t *testing.T) {
+	dir := pveTestDataDir(t)
+	c := newPveLeafOnlyCluster(t)
+	endpoint, _ := pvePinningServer(t, c.leaf)
+	caPath := writeTestFile(t, "pve-root-ca.pem", c.caPEM)
+	var out bytes.Buffer
+	if err := pveCmd([]string{"remote", "add", "nebulanetwork", "--kind", "cluster", "--endpoint", endpoint, "--ca-file", caPath},
+		strings.NewReader(c.caFP+"\n"), pveTestAsk(t), &out); err != nil {
+		t.Fatalf("add with --ca-file: %v", err)
+	}
+	ids := pveStoredCAIDs(t, dir, "nebulanetwork")
+	if len(ids) != 1 {
+		t.Fatalf("stored CAs after add = %v, want one", ids)
+	}
+
+	// The stored CA is usable: a re-pin to the same pin is refused.
+	err := pveCmd([]string{"remote", "repin", "nebulanetwork", "--ca-file", caPath},
+		strings.NewReader(c.caFP+"\n"+c.caFP+"\nyes\n"), pveTestAsk(t), &out)
+	if err == nil || !strings.Contains(err.Error(), "FailedPrecondition") || !strings.Contains(err.Error(), "missing or unusable") {
+		t.Fatalf("same-pin repin with a usable stored CA: %v", err)
+	}
+
+	// The stored CA is lost: the same command restores it.
+	if _, err := pveTestDB(t, dir).DeleteSecret(ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := pveCmd([]string{"remote", "repin", "nebulanetwork", "--ca-file", caPath},
+		strings.NewReader(c.caFP+"\n"+c.caFP+"\nyes\n"), pveTestAsk(t), &out); err != nil {
+		t.Fatalf("restore by same-pin repin: %v", err)
+	}
+	if !strings.Contains(out.String(), "stored cluster CA restored") {
+		t.Fatalf("restore not reported: %s", out.String())
+	}
+	if got := pveStoredCAIDs(t, dir, "nebulanetwork"); len(got) != 1 || got[0] != ids[0] {
+		t.Fatalf("stored CAs after restore = %v, want %v", got, ids)
+	}
+	rm, ok, err := pveTestDB(t, dir).GetRemote("nebulanetwork")
+	if err != nil || !ok || rm.TrustPin != c.caFP || rm.TrustGeneration != 1 || rm.State != "active" {
+		t.Fatalf("remote after restore = %+v ok=%v err=%v; want pin, generation 1 and state unchanged", rm, ok, err)
+	}
+}

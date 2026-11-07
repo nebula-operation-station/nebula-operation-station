@@ -46,7 +46,11 @@ and for one whose site is not set.
 own certificate, not the cluster CA. Copy /etc/pve/pve-root-ca.pem
 from a node out of band (scp over a trusted SSH session, or the
 console) and pass it here; every node's certificate must chain to it,
-and its fingerprint is the one to type back.`
+and its fingerprint is the one to type back.
+
+If the executor reports the stored cluster CA as missing or unusable,
+restore it with repin --ca-file and type the unchanged current pin as
+the new fingerprint; pin, generation and grants stay as they are.`
 
 // maxPveCAFileBytes bounds the --ca-file (the executor enforces the same).
 const maxPveCAFileBytes = executor.MaxPveCAFileBytes
@@ -451,6 +455,11 @@ func pveRemoteRepin(args []string, stdin io.Reader, ask prompter, w io.Writer) e
 		return err
 	}
 	rm := response.GetRemote()
+	if rm.TrustPin == stored.TrustPin {
+		// A re-pin to the unchanged pin only restores the stored cluster CA.
+		fmt.Fprintf(w, "remote %s: stored cluster CA restored from --ca-file (pin %s… and generation %d unchanged)\n", rm.RemoteId, prefix64(rm.TrustPin), rm.TrustGeneration)
+		return nil
+	}
 	fmt.Fprintf(w, "remote %s re-pinned to generation %d (new pin %s…)\n", rm.RemoteId, rm.TrustGeneration, prefix64(rm.TrustPin))
 	return nil
 }
