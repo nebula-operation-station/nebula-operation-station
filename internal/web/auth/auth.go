@@ -90,6 +90,7 @@ type Handler struct {
 	sessions *Store
 	log      *slog.Logger
 	checks   credentialChecks
+	holder   holderState
 }
 
 // New returns a Handler. Executor and Sessions are required.
@@ -167,6 +168,7 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 			return
 		}
 		if !h.credentialStillRegistered(r.Context(), c.Value, sess) {
+			h.clearHolderOf(c.Value)
 			if err := h.sessions.Delete(r.Context(), c.Value); err != nil {
 				h.log.Error("delete revoked session", "error", err)
 			}
@@ -176,7 +178,7 @@ func (h *Handler) Wrap(next http.Handler) http.Handler {
 			h.unauthenticated(w, r)
 			return
 		}
-		r = r.WithContext(context.WithValue(r.Context(), ctxKey{}, sess))
+		r = r.WithContext(h.withHolderCtx(context.WithValue(r.Context(), ctxKey{}, sess), c.Value, sess))
 		if protectedAPI[r.URL.Path] {
 			protected.ServeHTTP(w, r)
 			return
@@ -375,6 +377,7 @@ func (h *Handler) setupFinish(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(CookieName); err == nil {
+		h.clearHolderOf(c.Value)
 		if err := h.sessions.Delete(r.Context(), c.Value); err != nil {
 			h.log.Error("logout", "error", err)
 		}

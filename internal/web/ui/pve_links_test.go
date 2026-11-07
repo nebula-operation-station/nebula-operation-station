@@ -41,11 +41,13 @@ import (
 
 const linkRemote = "remote-a"
 
-// linkStatus is a fake executor status: whether a privileged session is
-// open, or an error.
+// linkStatus is a fake executor: whether a privileged session is open and
+// until when (the expiry CompletePrivilegedSession reports too), or an
+// error.
 type linkStatus struct {
 	mu     sync.Mutex
 	active bool
+	expiry int64
 	err    error
 }
 
@@ -55,7 +57,11 @@ func (s *linkStatus) GetStatus(context.Context, *pb.GetStatusRequest, ...grpc.Ca
 	if s.err != nil {
 		return nil, s.err
 	}
-	return &pb.GetStatusResponse{PrivilegedSessionActive: s.active}, nil
+	res := &pb.GetStatusResponse{PrivilegedSessionActive: s.active}
+	if s.active {
+		res.PrivilegedSessionExpiryUnix = s.expiry
+	}
+	return res, nil
 }
 
 func (s *linkStatus) set(active bool, err error) {
@@ -63,6 +69,43 @@ func (s *linkStatus) set(active bool, err error) {
 	defer s.mu.Unlock()
 	s.active, s.err = active, err
 }
+
+// setExpiry changes the executor's privileged session expiry, as a session
+// opened or reopened outside the web would.
+func (s *linkStatus) setExpiry(exp int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expiry = exp
+}
+
+// linkExec is the login executor of the link tests: a privileged session
+// completes with the expiry linkStatus reports.
+type linkExec struct {
+	pveFakeExec
+	status *linkStatus
+}
+
+func (x linkExec) CompletePrivilegedSession(context.Context, *pb.CompletePrivilegedSessionRequest, ...grpc.CallOption) (*pb.CompletePrivilegedSessionResponse, error) {
+	x.status.mu.Lock()
+	defer x.status.mu.Unlock()
+	x.status.active = true
+	return &pb.CompletePrivilegedSessionResponse{SessionExpiryUnix: x.status.expiry}, nil
+}
+
+// Lock succeeds without touching linkStatus, so a test can check that a web
+// lock ends the holder even while the reported status is stale.
+func (linkExec) Lock(context.Context, *pb.LockRequest, ...grpc.CallOption) (*pb.LockResponse, error) {
+	return &pb.LockResponse{}, nil
+}
+
+// linkClock is the web session clock of the link tests.
+type linkClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *linkClock) now() time.Time      { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
+func (c *linkClock) add(d time.Duration) { c.mu.Lock(); c.t = c.t.Add(d); c.mu.Unlock() }
 
 // lockedBuffer is a log sink safe for the server goroutines.
 type lockedBuffer struct {
@@ -92,8 +135,10 @@ type linkEnv struct {
 	ipam     *ipam.Store
 	sessions *auth.Store
 	status   *linkStatus
+	clk      *linkClock
 	logs     *lockedBuffer
-	cookie   *http.Cookie
+	// cookie is alice's web session, which opened the privileged session.
+	cookie *http.Cookie
 }
 
 func newLinkEnv(t *testing.T) *linkEnv {
@@ -110,9 +155,11 @@ func newLinkEnvWith(t *testing.T, wrap func(*pveinventory.Store) ui.PVEStore) *l
 		t.Fatalf("open server DB: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
+	clk := &linkClock{t: time.Now()}
 	e := &linkEnv{
 		t: t, pve: pveinventory.New(db), inv: inventory.New(db), ipam: ipam.New(db, nil),
-		sessions: auth.NewStore(db, time.Now), status: &linkStatus{active: true}, logs: &lockedBuffer{},
+		sessions: auth.NewStore(db, clk.now), clk: clk,
+		status: &linkStatus{expiry: clk.now().Add(15 * time.Minute).Unix()}, logs: &lockedBuffer{},
 	}
 	log := slog.New(slog.NewTextHandler(e.logs, nil))
 	var pveStore ui.PVEStore = e.pve
@@ -135,21 +182,70 @@ func newLinkEnvWith(t *testing.T, wrap func(*pveinventory.Store) ui.PVEStore) *l
 	if err != nil {
 		t.Fatalf("ui.New: %v", err)
 	}
-	a, err := auth.New(auth.Options{Executor: pveFakeExec{}, Sessions: e.sessions, Log: log})
+	a, err := auth.New(auth.Options{Executor: linkExec{status: e.status}, Sessions: e.sessions, Log: log})
 	if err != nil {
 		t.Fatalf("auth.New: %v", err)
 	}
 	e.srv = httptest.NewServer(middleware.Handler(middleware.Options{PublicOrigin: pveOrigin}, a.Wrap(u.Handler())))
 	t.Cleanup(e.srv.Close)
-	token, _, err := e.sessions.Create(context.Background(), "cred-alice", "alice")
-	if err != nil {
-		t.Fatalf("create session: %v", err)
-	}
-	e.cookie = &http.Cookie{Name: auth.CookieName, Value: token}
+	e.cookie = e.session("cred-alice", "alice")
+	e.openPrivileged(e.cookie)
 	seedRemote(t, e.pve, pvecontract.Remote{RemoteID: linkRemote, Name: "Lab", Kind: pvecontract.KindStandalone,
 		Endpoints: []pvecontract.Endpoint{{Host: "pve1.lab", Port: 8006}},
 		TrustPin:  pvePin(0), TrustGeneration: 1})
 	return e
+}
+
+// session opens a web session for credential cred of user.
+func (e *linkEnv) session(cred, user string) *http.Cookie {
+	e.t.Helper()
+	token, _, err := e.sessions.Create(context.Background(), cred, user)
+	if err != nil {
+		e.t.Fatalf("create session: %v", err)
+	}
+	return &http.Cookie{Name: auth.CookieName, Value: token}
+}
+
+// postJSON sends a JSON POST with the right Origin from the web session c.
+func (e *linkEnv) postJSON(path, body string, c *http.Cookie) int {
+	e.t.Helper()
+	req, err := http.NewRequest(http.MethodPost, e.srv.URL+path, strings.NewReader(body))
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", pveOrigin)
+	req.AddCookie(c)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	res.Body.Close()
+	return res.StatusCode
+}
+
+// openPrivileged opens the executor privileged session from the web
+// session c (POST /privileged/finish); c becomes its holder.
+func (e *linkEnv) openPrivileged(c *http.Cookie) {
+	e.t.Helper()
+	if code := e.postJSON("/privileged/finish", `{"assertion":{"id":"k"}}`, c); code != http.StatusOK {
+		e.t.Fatalf("privileged finish = %d", code)
+	}
+}
+
+// linkAs and unlinkAs post a link or unlink from the web session c.
+func (e *linkEnv) linkAs(c *http.Cookie, vmid, gen, host string) (int, string) {
+	e.t.Helper()
+	code, body, _ := e.do(http.MethodPost, "/pve/"+linkRemote+"/links", pveOrigin, c,
+		url.Values{"vmid": {vmid}, "generation": {gen}, "host": {host}})
+	return code, body
+}
+
+func (e *linkEnv) unlinkAs(c *http.Cookie, vmid, gen, reason string) (int, string) {
+	e.t.Helper()
+	code, body, _ := e.do(http.MethodPost, "/pve/"+linkRemote+"/links/remove", pveOrigin, c,
+		url.Values{"vmid": {vmid}, "generation": {gen}, "reason": {reason}})
+	return code, body
 }
 
 // guests stores one observation with the given guests.
@@ -546,5 +642,87 @@ func TestPVEGuestLinkShowsHostInChart(t *testing.T) {
 	box := guestBox(t, chart(), "vm-web")
 	if !strings.Contains(box, `class="chart__ghost"`) || !strings.Contains(box, "web1") {
 		t.Errorf("linked guest box does not show the host:\n%s", box)
+	}
+}
+
+// TestPVEGuestLinkOnlyByPrivilegedHolder checks that the executor-wide
+// privileged session lets only the web session that opened it link and
+// unlink: another logged-in user, a second web session of the same
+// credential, a session reopened outside the web, an expired one and one
+// ended by a web lock are refused with 403 and change nothing.
+func TestPVEGuestLinkOnlyByPrivilegedHolder(t *testing.T) {
+	e := newLinkEnv(t)
+	e.guests(1, agentGuest(101, 1, "vm-web", "aa:bb:cc:dd:ee:01", "10.77.10.101"),
+		agentGuest(102, 1, "vm-db", "aa:bb:cc:dd:ee:02", "10.77.10.102"))
+	e.host("web1", "Web one", "10.77.10.101")
+	e.host("db1", "DB one", "10.77.10.102")
+	bob := e.session("cred-bob", "bob")
+	alice2 := e.session("cred-alice", "alice")
+
+	refused := func(name string, c *http.Cookie) {
+		t.Helper()
+		if code, body := e.linkAs(c, "102", "1", "db1"); code != http.StatusForbidden || !strings.Contains(body, "privileged session") {
+			t.Errorf("%s: link = %d %q, want 403 naming the privileged session", name, code, body)
+		}
+		if code, body := e.unlinkAs(c, "101", "1", "x"); code != http.StatusForbidden {
+			t.Errorf("%s: unlink = %d, want 403\n%s", name, code, body)
+		}
+	}
+
+	// Alice opened the privileged session: she links.
+	if code, body := e.linkAs(e.cookie, "101", "1", "web1"); code != http.StatusSeeOther {
+		t.Fatalf("holder: link = %d, want 303\n%s", code, body)
+	}
+	// Bob is logged in while alice holds the session: refused, and his page
+	// does not offer the link controls.
+	refused("other user", bob)
+	code, body, _ := e.do(http.MethodGet, "/pve/"+linkRemote, "", bob, nil)
+	if code != http.StatusOK || !strings.Contains(body, "Linking and releasing need an open privileged session.") {
+		t.Errorf("other user's page = %d, want the not-admin note", code)
+	}
+	if !strings.Contains(e.page(), `action="/pve/remote-a/links"`) {
+		t.Errorf("holder's page does not offer the link controls")
+	}
+	// A second web session of alice's credential did not open it.
+	refused("second session of the holder's credential", alice2)
+
+	// The executor session was reopened outside the web (new expiry).
+	exp := e.status.expiry
+	e.status.setExpiry(exp + 60)
+	refused("session reopened elsewhere", e.cookie)
+	e.status.setExpiry(exp)
+	if code, body := e.unlinkAs(e.cookie, "101", "1", "check"); code != http.StatusSeeOther {
+		t.Fatalf("holder: unlink = %d, want 303\n%s", code, body)
+	}
+
+	// Bob opens his own privileged session: now he holds it, alice does not.
+	e.status.setExpiry(exp + 120)
+	e.openPrivileged(bob)
+	refused("previous holder", e.cookie)
+	if code, body := e.linkAs(bob, "102", "1", "db1"); code != http.StatusSeeOther {
+		t.Fatalf("new holder: link = %d, want 303\n%s", code, body)
+	}
+
+	// A web lock ends the holder even while the executor still reports the
+	// session (the status is stale here on purpose).
+	if code := e.postJSON("/executor/lock", `{}`, alice2); code != http.StatusOK {
+		t.Fatalf("lock = %d", code)
+	}
+	refused("after a web lock", bob)
+
+	// Expiry: the holder ends when the executor expiry passes.
+	e.status.setExpiry(e.clk.now().Add(time.Minute).Unix())
+	e.openPrivileged(bob)
+	if code, body := e.unlinkAs(bob, "102", "1", "check"); code != http.StatusSeeOther {
+		t.Fatalf("holder before expiry: unlink = %d, want 303\n%s", code, body)
+	}
+	e.clk.add(time.Minute)
+	refused("after expiry", bob)
+
+	if logs := e.logs.String(); strings.Count(logs, "kind=pve_guest_linked") != 2 || strings.Count(logs, "kind=pve_guest_unlinked") != 2 {
+		t.Errorf("want exactly the holders' two links and two unlinks audited:\n%s", logs)
+	}
+	if l, err := e.pve.GetLink(context.Background(), linkRemote, 101, 1); !errors.Is(err, pveinventory.ErrLinkNotFound) {
+		t.Errorf("guest 101 link = %+v, %v; want released", l, err)
 	}
 }

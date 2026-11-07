@@ -10,8 +10,10 @@ package ui
 // is linked by rendering: a link is created or released only by a POST
 // from the page (fetch-posted form, Origin checked by the middleware like
 // every state change), by a logged-in user while a privileged session is
-// open, and every change is written as an audit line with that user. A
-// link is display and drift information only, never an SSH identity.
+// open that this very web session opened (POST /privileged/finish, see
+// auth.HoldsPrivilegedSession), and every change is written as an audit
+// line with that user. A link is display and drift information only,
+// never an SSH identity.
 //
 // Suggestions are help, not a whitelist: the link POST accepts any
 // inventory host ID, so an admin may link a guest to a host that was not
@@ -19,10 +21,14 @@ package ui
 // conflict confirmation is still enforced for the guest's own conflicts
 // and for a suggested candidate flagged as conflicting.
 //
-// Known gap (review of PR #346): the privileged session is executor-wide
-// and the executor does not report which user opened it, so the gate is
-// not bound to the requesting web user. Closing it needs a change outside
-// this package (see docs/operator/proxmox.md).
+// The privileged session is executor-wide and the executor does not report
+// who opened it, so the server records the opening web session (internal/
+// web/auth) and the gate requires both: the executor reports the session
+// active, and the request comes from the web session that opened exactly
+// that session (same token, credential and executor expiry). Another
+// logged-in user, a second web session of the same credential, a session
+// opened outside the web, an expired one and one ended by a web lock are
+// refused (closes the PR #346 review gap).
 
 import (
 	"context"
@@ -42,6 +48,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
 )
 
 // pveSuggestGuestLimit caps the unlinked guests a detail page computes
@@ -415,19 +422,21 @@ func (h *Handler) addPVELinks(ctx context.Context, nodes []pveNodeView, hosts []
 }
 
 // pvePrivileged reports whether a privileged session is open on the
-// executor. An unreadable status counts as not open (fail closed).
+// executor and the requesting web session is the one that opened it
+// (auth.HoldsPrivilegedSession, bound to the executor's current expiry).
+// An unreadable status counts as not open (fail closed).
 func (h *Handler) pvePrivileged(ctx context.Context) bool {
 	if h.status == nil {
 		return false
 	}
-	ctx, cancel := context.WithTimeout(ctx, statusCallTimeout)
+	sctx, cancel := context.WithTimeout(ctx, statusCallTimeout)
 	defer cancel()
-	st, err := h.status.GetStatus(ctx, &pb.GetStatusRequest{})
+	st, err := h.status.GetStatus(sctx, &pb.GetStatusRequest{})
 	if err != nil {
 		h.log.Error("privileged session check for PVE link", "error", err)
 		return false
 	}
-	return st.GetPrivilegedSessionActive()
+	return st.GetPrivilegedSessionActive() && auth.HoldsPrivilegedSession(ctx, st.GetPrivilegedSessionExpiryUnix())
 }
 
 // pveLinkRequest holds the checked common fields of a link or unlink POST.
@@ -459,7 +468,7 @@ func (h *Handler) pveLinkPrecheck(ctx context.Context, w http.ResponseWriter, r 
 		return pveLinkRequest{}, false
 	}
 	if !h.pvePrivileged(ctx) {
-		http.Error(w, "linking guests to hosts needs an open privileged session: open one on the dashboard and try again", http.StatusForbidden)
+		http.Error(w, "linking guests to hosts needs an open privileged session opened from this login: open one on the dashboard and try again", http.StatusForbidden)
 		return pveLinkRequest{}, false
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, pveLinkFormMax)
