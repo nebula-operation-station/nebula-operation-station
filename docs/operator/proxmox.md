@@ -336,6 +336,11 @@ keeps a file only until it has processed it, so it needs these rights:
   `ProtectSystem=strict`. The drop-in names these three default paths, so a
   custom `pve_spool_dir` also needs your own directories with these modes and
   your own drop-in.
+- A Debian package upgrade writes the same drop-in and creates missing
+  directories, without `install.sh`. It applies when you restart the server
+  after your backup (admin guide, section 13); until then the running server
+  keeps the old paths and `results/` grows. If the upgrade warns that it could
+  not update the drop-in, run `install.sh --from-package`.
 - `compose.yaml` shares the `pve-results` and `pve-guestnet` volumes between
   the collector and the server, writable because the server unlinks there.
   When you update an older compose deployment, files still pending in the

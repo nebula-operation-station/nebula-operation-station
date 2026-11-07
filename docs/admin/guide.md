@@ -1510,6 +1510,17 @@ sudo nebula backup && sudo systemctl restart nebula-executor nebula-server
 nebula unlock
 ```
 
+The upgrade also rewrites the server drop-in
+`nebula-server.service.d/20-discovery.conf` to the version `install.sh`
+writes, creates the PVE spool directories it names if they are missing, and
+leaves existing ones as they are. It applies at the restart above, so you do
+not need to run `install.sh` for it. Only if the upgrade warns that it could
+not update the drop-in, run `install.sh --from-package` with your
+`--admin-users` and `--rp-id`. The executor drop-in `10-local.conf` holds your
+own values and stays as it is; keep local changes to it in `20-local.conf`
+(section 6.2), and to the server in a drop-in of your own, because
+`20-discovery.conf` is rewritten.
+
 **Containers:** build or pull the new image, back up the volumes
 (section 12.4), set `NEBULA_IMAGE` in `.env` to the new tag,
 `docker compose up -d`, then unlock.
