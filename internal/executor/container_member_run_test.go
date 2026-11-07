@@ -203,12 +203,23 @@ func TestDurableOutcomeReconciledAfterRequestEnds(t *testing.T) {
 	}
 	// Code that asked RunVisible would free the target.
 	e.visible.set(false)
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	// The server hangs up once the job runs on the host.
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		defer cancel()
+		deadline := time.Now().Add(20 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(filepath.Join(e.dir, "params-slow.json")); err == nil {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}()
 	resp, err := e.server.RunBatchMember(ctx, e.req(d, 0, "web-1", art))
 	cancel()
 	if err != nil {
 		// The RPC itself may end with the context; the run must be open.
-		if status.Code(err) != codes.DeadlineExceeded {
+		if status.Code(err) != codes.Canceled {
 			t.Fatal(err)
 		}
 	} else if resp.GetOutcome() != pb.BatchMemberOutcome_BATCH_MEMBER_OUTCOME_UNKNOWN {
@@ -231,6 +242,11 @@ func TestDurableOutcomeReconciledAfterRequestEnds(t *testing.T) {
 	}
 	if e.visible.count() != 0 {
 		t.Fatal("a durable hold was rechecked with RunVisible")
+	}
+	// The server hanging up is not a host failure: no attempt was counted,
+	// so the run is not backed off.
+	if f := e.logs.find("reconcile_unreachable", execID); len(f) != 0 {
+		t.Fatalf("the hang-up counted as an unreachable host: %v", f[0].attrs)
 	}
 	if err := os.Remove(block); err != nil {
 		t.Fatal(err)

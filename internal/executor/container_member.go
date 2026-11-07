@@ -50,6 +50,12 @@ const (
 	// containerRunPoll is how often a dispatched container job is checked
 	// while RunBatchMember waits for it.
 	containerRunPoll = 10 * time.Second
+	// containerDispatchTimeout bounds handing a container job to its host;
+	// the handoff runs to this bound even when the request ends.
+	containerDispatchTimeout = 2 * time.Minute
+	// containerReconcileAttempt bounds one reconcile attempt of a waiting
+	// container member (connect, check, collect).
+	containerReconcileAttempt = 2 * time.Minute
 )
 
 var (
@@ -124,7 +130,11 @@ func (s *Service) durableMemberTransport(ctx context.Context, x *batchExec, call
 	}
 	// From here the job may be on the host: the reconciler owns the run.
 	call.dispatched = true
-	outcome, detail, err := x.durable(ctx, c.Client, s.jobs, run.ExecutionID, run.Parameters, call.artifact, call.timeout)
+	// The handoff is not cut by the caller hanging up: a cut-off dispatch
+	// leaves a half-stored job that only ends after stuckDispatched.
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), containerDispatchTimeout)
+	outcome, detail, err := x.durable(dctx, c.Client, s.jobs, run.ExecutionID, run.Parameters, call.artifact, call.timeout)
+	cancel()
 	switch {
 	case err != nil:
 		// The connection broke during dispatch: the reconciler finds out
@@ -156,8 +166,13 @@ func (s *Service) awaitDurableMember(ctx context.Context, x *batchExec, call *ba
 	defer cancel()
 	for {
 		r, err := s.db.GetRun(run.ExecutionID, call.hostID)
-		if err == nil && r.State != executordb.RunFinished && s.keys.Unlocked() {
-			s.reconcile(wctx, r)
+		if err == nil && r.State != executordb.RunFinished && s.keys.Unlocked() && wctx.Err() == nil {
+			// One attempt runs to its own bound: a caller hanging up must not
+			// read as an unreachable host (that would back the run off and
+			// count toward its reconcile deadline).
+			actx, acancel := context.WithTimeout(context.WithoutCancel(ctx), containerReconcileAttempt)
+			s.reconcile(actx, r)
+			acancel()
 			r, err = s.db.GetRun(run.ExecutionID, call.hostID)
 		}
 		if err == nil && r.State == executordb.RunFinished {
