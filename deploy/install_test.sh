@@ -308,23 +308,26 @@ fi
 
 # --- Restart on upgrade (WA-08) ----------------------------------------------
 # install.sh must restart nebula-pve-collector only when the unit is active
-# and the binaries changed, and only after the executor socket exists. The
-# executor is Type=simple, so its restart above returns before the socket
-# exists, and the collector's startup probe (ListPVERemotes) exits fatally
-# without it: on a tarball upgrade that keeps an older collector unit
-# (units are installed only if absent) without RestartSec=5s, a restart
-# before the socket exists can hit the start limit and leave the collector
-# failed while install.sh still prints "restarted" and exits 0. The
+# and the binaries changed, and only after the executor answers on its
+# socket. The executor is Type=simple, so its restart above returns before
+# it listens, and the collector's startup probe (ListPVERemotes) exits
+# fatally without it: on a tarball upgrade that keeps an older collector
+# unit (units are installed only if absent) without RestartSec=5s, an early
+# restart can hit the start limit and leave the collector failed while
+# install.sh still prints "restarted" and exits 0. The socket file alone
+# proves nothing: a crashed or SIGKILLed executor leaves it behind, and
+# nobody answers on it until the new executor has replaced it. The
 # collector has no drop-in of its own, so bin_changed is its only trigger.
 #
 # The restart therefore sits in a block delimited by the
 # '# begin: collector restart on upgrade' and '# end: ...' markers, which
 # the checks below extract. The static checks pin the structure (the
 # condition, exactly one restart inside the block, after the binaries are
-# installed); the behaviour cases run the block with a stubbed systemctl
-# and a fake socket for bin_changed 0 and 1, an active and an inactive
-# unit, and a socket that exists, appears late, or never appears. A
-# restart while the socket is missing fails every case.
+# installed and after the last executor restart); the behaviour cases run
+# the block with a stubbed systemctl and runuser and a real Unix socket for
+# bin_changed 0 and 1, an active and an inactive unit, and a socket that
+# listens, listens late, is stale, is stale and then replaced, or never
+# appears. A restart while nothing answers on the socket fails every case.
 collector_block=$(awk '/^# begin: collector restart on upgrade$/{f=1;next} /^# end: collector restart on upgrade$/{f=0} f' "$install_sh")
 if [[ -n "$collector_block" ]]; then
   echo "ok   collector restart block is delimited by markers"
@@ -354,38 +357,111 @@ else
   echo "FAIL collector restart count: ${restarts_in_block} in the block, ${restarts_in_file} in the file (want 1 and 1)"
   fail=$((fail + 1))
 fi
-# The block must run after the binaries are installed: bin_changed is set
-# in that loop, so a restart placed earlier would run before it exists.
-binaries_end_line=$(grep -nF '# end: install binaries' "$install_sh" | cut -d: -f1)
-collector_block_line=$(grep -nF '# begin: collector restart on upgrade' "$install_sh" | cut -d: -f1)
-if [[ -n "$binaries_end_line" && -n "$collector_block_line" && "$collector_block_line" -gt "$binaries_end_line" ]]; then
-  echo "ok   the collector restart runs after the binaries are installed"
+# collector_order_error <file> prints why the collector restart block of
+# <file> is in the wrong place, nothing if it is in the right one. It must
+# run after the binaries are installed (bin_changed is set in that loop)
+# and after the last executor restart: above it, the wait is answered by
+# the old executor, and the collector restarts before the executor does.
+collector_order_error() {
+  local file="$1" binaries_line block_line executor_line
+  binaries_line=$(grep -nF '# end: install binaries' "$file" | cut -d: -f1)
+  block_line=$(grep -nF '# begin: collector restart on upgrade' "$file" | cut -d: -f1)
+  executor_line=$(grep -nE '^[[:space:]]*systemctl restart nebula-executor\.service$' "$file" | tail -n 1 | cut -d: -f1)
+  if [[ -z "$binaries_line" || -z "$block_line" || -z "$executor_line" ]]; then
+    echo "a landmark is missing (binaries ${binaries_line:-?}, block ${block_line:-?}, executor restart ${executor_line:-?})"
+  elif [[ "$block_line" -le "$binaries_line" ]]; then
+    echo "block (line ${block_line}) is not after the binary install (line ${binaries_line})"
+  elif [[ "$block_line" -le "$executor_line" ]]; then
+    echo "block (line ${block_line}) is not after the last executor restart (line ${executor_line})"
+  fi
+}
+order_error=$(collector_order_error "$install_sh")
+if [[ -z "$order_error" ]]; then
+  echo "ok   the collector restart runs after the binaries and the executor restart"
   pass=$((pass + 1))
 else
-  echo "FAIL the collector restart block (line ${collector_block_line:-?}) is not after the binary install (line ${binaries_end_line:-?})"
+  echo "FAIL collector restart order: ${order_error}"
   fail=$((fail + 1))
 fi
+# The check above must catch the whole block moved above the executor
+# restart, which is still after the binary install.
+order_mutant=$(mktemp)
+COLLECTOR_BLOCK="$collector_block" awk '
+  /^# begin: collector restart on upgrade$/ { skip=1 }
+  skip { if ($0 == "# end: collector restart on upgrade") skip=0; next }
+  !moved && /^[[:space:]]*systemctl restart nebula-executor\.service$/ {
+    print "# begin: collector restart on upgrade"
+    print ENVIRON["COLLECTOR_BLOCK"]
+    print "# end: collector restart on upgrade"
+    moved=1
+  }
+  { print }' "$install_sh" > "$order_mutant"
+order_error=$(collector_order_error "$order_mutant")
+if [[ "$order_error" == *"last executor restart"* ]]; then
+  echo "ok   the order check rejects the block above the executor restart"
+  pass=$((pass + 1))
+else
+  echo "FAIL the order check accepts the block above the executor restart: ${order_error:-no error}"
+  fail=$((fail + 1))
+fi
+rm -f "$order_mutant"
 # run_collector_block <name> <bin_changed> <is_active_rc> <socket_mode> <want> [want_msg]
-# Runs the extracted collector restart block with a stubbed systemctl and a
-# fake socket, and checks the restart decision.
+# Runs the extracted collector restart block under install.sh's shell
+# options, with a stubbed systemctl and runuser and a real Unix socket, and
+# checks the restart decision.
 #   bin_changed   0 or 1, as install.sh sets it
 #   is_active_rc  exit code the stubbed 'systemctl is-active' returns
-#   socket_mode   present | late (appears 0.5 s later) | absent
+#   socket_mode   live (listens) | late (listens 0.5 s later) | stale (file
+#                 left by a dead process, nobody listens) | stale-late
+#                 (stale, replaced by a listener 0.5 s later) | absent
 #   want          none | restart
 #   want_msg      optional output substring (empty: no message check)
-# The stub records whether the socket existed at restart time: a restart
-# while the socket is missing fails the case whatever <want> says.
+# The stubbed runuser and systemctl really connect to the socket, so a stale
+# file is refused as it would be on a host. systemctl records the outcome
+# at restart time: a restart while nothing answers fails the case whatever
+# <want> says. runuser insists on the probe's exact command line.
 run_collector_block() {
   local name="$1" bin_changed="$2" is_active_rc="$3" socket_mode="$4" want="$5" want_msg="${6:-}"
-  local dir sock calls block_file driver out rc late_pid restarts ok=1 reason=""
+  local dir sock calls block_file driver connect_py listen_py out rc listener_pid="" restarts ok=1 reason=""
   dir=$(mktemp -d)
   sock="${dir}/executor.sock"
   calls="${dir}/calls"
   block_file="${dir}/block.sh"
   driver="${dir}/driver.sh"
+  connect_py="${dir}/connect.py"
+  listen_py="${dir}/listen.py"
   : > "$calls"
   printf '%s\n' "$collector_block" > "$block_file"
+  cat > "$connect_py" <<'EOF'
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(1)
+s.connect(sys.argv[1])
+EOF
+  cat > "$listen_py" <<'EOF'
+import os, signal, socket, sys, time
+time.sleep(float(sys.argv[2]))
+try:
+    os.unlink(sys.argv[1])
+except FileNotFoundError:
+    pass
+s = socket.socket(socket.AF_UNIX)
+s.bind(sys.argv[1])
+s.listen(8)
+signal.pause()
+EOF
+  mkdir "${dir}/bin"
+  cat > "${dir}/bin/runuser" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" != "-u nebula-server -- ${bin_dir}/nebula status" || "${NEBULA_EXECUTOR_SOCKET:-}" != "$NEBULA_EXECUTOR_SOCK" ]]; then
+  printf 'runuser:unexpected %s\n' "$*" >> "$CALLS_FILE"
+  exit 2
+fi
+exec python3 "$CONNECT_PY" "$NEBULA_EXECUTOR_SOCKET" 2>/dev/null
+EOF
+  chmod 0755 "${dir}/bin/runuser"
   cat > "$driver" <<'EOF'
+set -euo pipefail
 calls_file="$CALLS_FILE"
 is_active_rc="$IS_ACTIVE_RC"
 sock="$NEBULA_EXECUTOR_SOCK"
@@ -395,34 +471,39 @@ systemctl() {
     return "$is_active_rc"
   fi
   if [[ "$1" == "restart" ]]; then
-    if [[ -S "$sock" ]]; then
-      printf 'restart:socket-present\n' >> "$calls_file"
+    if python3 "$CONNECT_PY" "$sock" 2>/dev/null; then
+      printf 'restart:executor-answers\n' >> "$calls_file"
     else
-      printf 'restart:socket-missing\n' >> "$calls_file"
+      printf 'restart:executor-silent\n' >> "$calls_file"
     fi
   fi
   return 0
 }
 . "$BLOCK_FILE"
 EOF
-  if [[ "$socket_mode" == "present" ]]; then
+  if [[ "$socket_mode" == "stale" || "$socket_mode" == "stale-late" ]]; then
     python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$sock"
-  elif [[ "$socket_mode" == "late" ]]; then
-    ( sleep 0.5; python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$sock" ) &
-    late_pid=$!
   fi
-  out=$(bin_changed="$bin_changed" IS_ACTIVE_RC="$is_active_rc" CALLS_FILE="$calls" BLOCK_FILE="$block_file" \
-        NEBULA_EXECUTOR_SOCK="$sock" NEBULA_COLLECTOR_RESTART_WAIT_S=2 \
-        bash "$driver" 2>&1)
+  case "$socket_mode" in
+    live) python3 "$listen_py" "$sock" 0 & listener_pid=$! ;;
+    late|stale-late) python3 "$listen_py" "$sock" 0.5 & listener_pid=$! ;;
+  esac
+  out=$(bin_changed="$bin_changed" bin_dir=/usr/bin IS_ACTIVE_RC="$is_active_rc" CALLS_FILE="$calls" BLOCK_FILE="$block_file" \
+        CONNECT_PY="$connect_py" NEBULA_EXECUTOR_SOCK="$sock" NEBULA_COLLECTOR_RESTART_WAIT_S=3 \
+        PATH="${dir}/bin:${PATH}" bash "$driver" 2>&1)
   rc=$?
-  if [[ "$socket_mode" == "late" ]]; then
-    wait "$late_pid" 2>/dev/null || true
+  if [[ -n "$listener_pid" ]]; then
+    kill "$listener_pid" 2>/dev/null || true
+    wait "$listener_pid" 2>/dev/null || true
   fi
   if [[ $rc -ne 0 ]]; then
     ok=0; reason="the block exited ${rc}"
   fi
-  if grep -q 'restart:socket-missing' "$calls"; then
-    ok=0; reason="restarted before the executor socket existed"
+  if grep -q 'restart:executor-silent' "$calls"; then
+    ok=0; reason="restarted while nothing answered on the executor socket"
+  fi
+  if grep -q '^runuser:unexpected' "$calls"; then
+    ok=0; reason="${reason:+${reason}; }the probe is not 'nebula status' as nebula-server on the socket"
   fi
   restarts=$(grep -c '^restart nebula-pve-collector.service$' "$calls")
   if [[ "$want" == "restart" && "$restarts" -ne 1 ]]; then
@@ -445,17 +526,23 @@ EOF
 }
 # bin_changed 0 (a re-run without new binaries): the active collector keeps
 # the binary it is already running; no restart, no socket wait.
-run_collector_block "bin_changed 0: active collector is not restarted" 0 0 present none
-# bin_changed 1, socket already there: exactly one restart.
-run_collector_block "bin_changed 1: active collector restarted once the socket exists" 1 0 present restart "restarted nebula-pve-collector (binaries changed)"
+run_collector_block "bin_changed 0: active collector is not restarted" 0 0 live none
+# bin_changed 1, the executor already answers: exactly one restart.
+run_collector_block "bin_changed 1: active collector restarted once the executor answers" 1 0 live restart "restarted nebula-pve-collector (binaries changed)"
 # bin_changed 1, unit not active: nothing to restart.
-run_collector_block "bin_changed 1: inactive collector is not restarted" 1 3 present none
+run_collector_block "bin_changed 1: inactive collector is not restarted" 1 3 live none
 # bin_changed 1, the executor (Type=simple) is still coming up: the block
-# must wait for the socket, not restart before it exists.
+# must wait for it, not restart before it listens.
 run_collector_block "bin_changed 1: waits for a late executor socket" 1 0 late restart
+# bin_changed 1, a crashed executor left its socket file and the new one has
+# not replaced it yet: the file must not pass, the listener must.
+run_collector_block "bin_changed 1: waits past a stale socket for the new executor" 1 0 stale-late restart
+# bin_changed 1, the stale file is all there is: no restart, and a warning
+# instead of "restarted".
+run_collector_block "bin_changed 1: a stale socket is not restarted on and warns" 1 0 stale none "not answering"
 # bin_changed 1, the socket never appears (broken executor): leave the
 # collector on the old binary (it retries inside its poll loop) and warn.
-run_collector_block "bin_changed 1: no socket in time is not restarted and warns" 1 0 absent none "not present"
+run_collector_block "bin_changed 1: no socket in time is not restarted and warns" 1 0 absent none "not answering"
 postinst="${script_dir}/deb/postinst"
 check_line "postinst hint names the collector" "$postinst" \
   'nebula:   sudo nebula backup && sudo systemctl restart nebula-executor nebula-server nebula-pve-collector'

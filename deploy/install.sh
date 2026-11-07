@@ -518,34 +518,49 @@ fi
 # failure, so without this it would keep running the old binary against
 # the new executor.
 #
-# The restart must wait for the executor socket: the executor is
-# Type=simple, so the restart above returns before the socket exists, and
-# the collector's startup probe (ListPVERemotes) exits fatally without it.
-# On a tarball upgrade that keeps an older collector unit (units are
-# installed only if absent) without RestartSec=5s, a restart while the
-# socket is missing can hit the start limit and leave the collector failed
-# while this script still exits 0. If the socket does not appear in time,
-# leave the collector on the old binary (it retries inside its poll loop)
-# and warn instead of restarting. NEBULA_EXECUTOR_SOCK and
-# NEBULA_COLLECTOR_RESTART_WAIT_S override the socket path and the wait
-# (deploy/install_test.sh runs this block with a stubbed systemctl).
+# The restart must wait until the executor answers: the executor is
+# Type=simple, so the restart above returns before it listens, and the
+# collector's startup probe (ListPVERemotes) exits fatally without it. On a
+# tarball upgrade that keeps an older collector unit (units are installed
+# only if absent) without RestartSec=5s, an early restart can hit the start
+# limit and leave the collector failed while this script still exits 0.
+#
+# The socket file proves nothing: /run/nebula survives a restart and only a
+# clean close unlinks the socket, so a crashed or SIGKILLed executor leaves
+# a stale file until the new one replaces it. So ask for an answer over the
+# same way in as the collector: nebula status as nebula-server, a member of
+# nebula-rpc with a role that may call GetStatus (root has none). This
+# block must stay below the executor restart, or the old executor answers.
+#
+# If nothing answers in time, leave the collector on the old binary (it
+# retries inside its poll loop) and warn instead of restarting.
+# NEBULA_EXECUTOR_SOCK and NEBULA_COLLECTOR_RESTART_WAIT_S override the
+# socket path and the wait (deploy/install_test.sh runs this block with a
+# stubbed systemctl and runuser).
 # begin: collector restart on upgrade
 executor_sock="${NEBULA_EXECUTOR_SOCK:-/run/nebula/executor.sock}"
 collector_restart_wait_s="${NEBULA_COLLECTOR_RESTART_WAIT_S:-30}"
+# executor_answers succeeds only if the executor served a status call. The
+# timeout bounds a listener that accepts and then hangs.
+executor_answers() {
+  NEBULA_EXECUTOR_SOCKET="${executor_sock}" timeout 5 \
+    runuser -u nebula-server -- "${bin_dir}/nebula" status >/dev/null 2>&1
+}
 if systemctl is-active --quiet nebula-pve-collector.service && [[ ${bin_changed} -eq 1 ]]; then
-  sock_ready=0
-  for _ in $(seq 1 $((collector_restart_wait_s * 4))); do
-    if [[ -S "${executor_sock}" ]]; then
-      sock_ready=1
+  executor_ready=0
+  wait_deadline=$((SECONDS + collector_restart_wait_s))
+  while [[ ${SECONDS} -lt ${wait_deadline} ]]; do
+    if executor_answers; then
+      executor_ready=1
       break
     fi
     sleep 0.25
   done
-  if [[ ${sock_ready} -eq 1 ]]; then
+  if [[ ${executor_ready} -eq 1 ]]; then
     systemctl restart nebula-pve-collector.service
     echo "install.sh: restarted nebula-pve-collector (binaries changed)"
   else
-    echo "install.sh: ${executor_sock} not present after ${collector_restart_wait_s}s; leaving nebula-pve-collector on the old binary (restart it once the executor is up)" >&2
+    echo "install.sh: the executor on ${executor_sock} is not answering after ${collector_restart_wait_s}s; leaving nebula-pve-collector on the old binary (restart it once the executor is up)" >&2
   fi
 fi
 # end: collector restart on upgrade
