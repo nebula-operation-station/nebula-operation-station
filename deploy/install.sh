@@ -725,17 +725,20 @@ else
 fi
 
 # --- Collector restart on upgrade (WA-08) -----------------------------------
-# The collector has no drop-in of its own; restart it when the binaries
-# changed, the same way as the server and the executor. It exits only on
-# failure, so without this it would keep running the old binary against
-# the new executor.
+# The collector has no drop-in of its own; restart it when the binaries or
+# its unit changed, the same way as the server and the executor. It exits
+# only on failure, so without this it would keep running the old binary
+# against the new executor. This block owns that restart: the loop below
+# leaves the collector out, or it would restart a second time, unwaited. A
+# masked unit cannot be restarted, and under set -e the attempt would abort
+# the install before the steps that are still due.
 #
 # The restart must wait until the executor answers: the executor is
 # Type=simple, so the restart above returns before it listens, and the
 # collector's startup probe (ListPVERemotes) exits fatally without it. On a
-# tarball upgrade that keeps an older collector unit (units are installed
-# only if absent) without RestartSec=5s, an early restart can hit the start
-# limit and leave the collector failed while this script still exits 0.
+# tarball upgrade that keeps an edited collector unit without RestartSec=5s,
+# an early restart can hit the start limit and leave the collector failed
+# while this script still exits 0.
 #
 # The socket file proves nothing: /run/nebula survives a restart and only a
 # clean close unlinks the socket, so a crashed or SIGKILLed executor leaves
@@ -744,8 +747,8 @@ fi
 # nebula-rpc with a role that may call GetStatus (root has none). This
 # block must stay below the executor restart, or the old executor answers.
 #
-# If nothing answers in time, leave the collector on the old binary (it
-# retries inside its poll loop) and warn instead of restarting.
+# If nothing answers in time, leave the collector as it is (it retries
+# inside its poll loop) and warn instead of restarting.
 # NEBULA_EXECUTOR_SOCK and NEBULA_COLLECTOR_RESTART_WAIT_S override the
 # socket path and the wait (deploy/install_test.sh runs this block with a
 # stubbed systemctl and runuser).
@@ -758,31 +761,37 @@ executor_answers() {
   NEBULA_EXECUTOR_SOCKET="${executor_sock}" timeout 5 \
     runuser -u nebula-server -- "${bin_dir}/nebula" status >/dev/null 2>&1
 }
-if systemctl is-active --quiet nebula-pve-collector.service && [[ ${bin_changed} -eq 1 ]]; then
-  executor_ready=0
-  wait_deadline=$((SECONDS + collector_restart_wait_s))
-  while [[ ${SECONDS} -lt ${wait_deadline} ]]; do
-    if executor_answers; then
-      executor_ready=1
-      break
-    fi
-    sleep 0.25
-  done
-  if [[ ${executor_ready} -eq 1 ]]; then
-    systemctl restart nebula-pve-collector.service
-    echo "install.sh: restarted nebula-pve-collector (binaries changed)"
+if { [[ ${bin_changed} -eq 1 ]] || unit_refreshed nebula-pve-collector.service; } \
+  && systemctl is-active --quiet nebula-pve-collector.service; then
+  if unit_masked nebula-pve-collector.service; then
+    echo "install.sh: warning: nebula-pve-collector.service is masked; not restarting it, it keeps running the old version (undo: systemctl unmask nebula-pve-collector.service, then restart it)" >&2
   else
-    echo "install.sh: the executor on ${executor_sock} is not answering after ${collector_restart_wait_s}s; leaving nebula-pve-collector on the old binary (restart it once the executor is up)" >&2
+    executor_ready=0
+    wait_deadline=$((SECONDS + collector_restart_wait_s))
+    while [[ ${SECONDS} -lt ${wait_deadline} ]]; do
+      if executor_answers; then
+        executor_ready=1
+        break
+      fi
+      sleep 0.25
+    done
+    if [[ ${executor_ready} -eq 1 ]]; then
+      systemctl restart nebula-pve-collector.service
+      echo "install.sh: restarted nebula-pve-collector (binaries or unit changed)"
+    else
+      echo "install.sh: the executor on ${executor_sock} is not answering after ${collector_restart_wait_s}s; leaving nebula-pve-collector on the old version (restart it once the executor is up)" >&2
+    fi
   fi
 fi
 # end: collector restart on upgrade
 # The other replaced units: try-restart touches only what is running. The
-# server and the executor were handled above. nebula-discovery.service is a
-# oneshot: its next run uses the new unit, and a restart would kill a scan.
-# The install itself is done by now, so a failure here warns.
+# server, the executor and the collector were handled above.
+# nebula-discovery.service is a oneshot: its next run uses the new unit, and a
+# restart would kill a scan. The install itself is done by now, so a failure
+# here warns.
 for name in "${refreshed_units[@]}"; do
   case "${name}" in
-    nebula-server.service|nebula-executor.service|nebula-discovery.service) ;;
+    nebula-server.service|nebula-executor.service|nebula-pve-collector.service|nebula-discovery.service) ;;
     *)
       # Warned about above: the stop would work, the start would be refused.
       if [[ -n "$(masked_target "${name}")" ]]; then

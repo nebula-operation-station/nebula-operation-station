@@ -324,17 +324,17 @@ else
 fi
 
 # --- Restart on upgrade (WA-08) ----------------------------------------------
-# install.sh must restart nebula-pve-collector only when the unit is active
-# and the binaries changed, and only after the executor answers on its
-# socket. The executor is Type=simple, so its restart above returns before
-# it listens, and the collector's startup probe (ListPVERemotes) exits
-# fatally without it: on a tarball upgrade that keeps an older collector
-# unit (units are installed only if absent) without RestartSec=5s, an early
-# restart can hit the start limit and leave the collector failed while
-# install.sh still prints "restarted" and exits 0. The socket file alone
-# proves nothing: a crashed or SIGKILLed executor leaves it behind, and
-# nobody answers on it until the new executor has replaced it. The
-# collector has no drop-in of its own, so bin_changed is its only trigger.
+# install.sh must restart nebula-pve-collector only when the unit is active,
+# not masked, and the binaries or its unit changed, and only after the
+# executor answers on its socket. The executor is Type=simple, so its restart
+# above returns before it listens, and the collector's startup probe
+# (ListPVERemotes) exits fatally without it: on a tarball upgrade that keeps
+# an edited collector unit without RestartSec=5s, an early restart can hit
+# the start limit and leave the collector failed while install.sh still
+# prints "restarted" and exits 0. The socket file alone proves nothing: a
+# crashed or SIGKILLed executor leaves it behind, and nobody answers on it
+# until the new executor has replaced it. The collector has no drop-in of
+# its own, so bin_changed and a refreshed unit are its only triggers.
 #
 # The restart therefore sits in a block delimited by the
 # '# begin: collector restart on upgrade' and '# end: ...' markers, which
@@ -342,9 +342,12 @@ fi
 # condition, exactly one restart inside the block, after the binaries are
 # installed and after the last executor restart); the behaviour cases run
 # the block with a stubbed systemctl and runuser and a real Unix socket for
-# bin_changed 0 and 1, an active and an inactive unit, and a socket that
-# listens, listens late, is stale, is stale and then replaced, or never
-# appears. A restart while nothing answers on the socket fails every case.
+# bin_changed 0 and 1, a refreshed, an active, an inactive and a masked unit,
+# and a socket that listens, listens late, is stale, is stale and then
+# replaced, accepts and hangs, or never appears. A restart while nothing
+# answers on the socket fails every case. The restart step cases further down
+# run the whole step, which the block alone cannot show: the collector
+# restarts once, whatever else the step does with a refreshed unit.
 collector_block=$(awk '/^# begin: collector restart on upgrade$/{f=1;next} /^# end: collector restart on upgrade$/{f=0} f' "$install_sh")
 if [[ -n "$collector_block" ]]; then
   echo "ok   collector restart block is delimited by markers"
@@ -357,16 +360,31 @@ fi
 # too: exactly one restart in the whole file, and it must be the one in the
 # block. A restart anywhere else — before the binaries are installed, or
 # unconditionally after an empty if-block — would add a second occurrence
-# or leave the block without one.
-if printf '%s\n' "$collector_block" | grep -qxF 'if systemctl is-active --quiet nebula-pve-collector.service && [[ ${bin_changed} -eq 1 ]]; then'; then
-  echo "ok   the collector restart is conditional on active and bin_changed"
+# or leave the block without one. Any form counts (try-restart,
+# reload-or-restart, flags before the verb); a loop that names the unit only
+# through a variable is the case of the restart step tests below.
+if printf '%s\n' "$collector_block" | grep -qxF 'if { [[ ${bin_changed} -eq 1 ]] || unit_refreshed nebula-pve-collector.service; } \' \
+  && printf '%s\n' "$collector_block" | grep -qxF '  && systemctl is-active --quiet nebula-pve-collector.service; then'; then
+  echo "ok   the collector restart is conditional on active and on new binaries or a refreshed unit"
   pass=$((pass + 1))
 else
-  echo "FAIL the active+bin_changed condition is not inside the collector restart block"
+  echo "FAIL the active and changed condition is not inside the collector restart block"
   fail=$((fail + 1))
 fi
-restarts_in_block=$(printf '%s\n' "$collector_block" | grep -cF 'systemctl restart nebula-pve-collector.service')
-restarts_in_file=$(grep -cF 'systemctl restart nebula-pve-collector.service' "$install_sh")
+if printf '%s\n' "$collector_block" | grep -qxF '  if unit_masked nebula-pve-collector.service; then'; then
+  echo "ok   the collector restart looks for a mask"
+  pass=$((pass + 1))
+else
+  echo "FAIL the masked guard is not inside the collector restart block"
+  fail=$((fail + 1))
+fi
+# count_collector_restarts counts the lines on stdin that restart the collector
+# in any form. Comment lines say what the code does and do not count.
+count_collector_restarts() {
+  grep -v '^[[:space:]]*#' | grep -E 'systemctl.*[a-z-]*restart.*nebula-pve-collector' | grep -c . || true
+}
+restarts_in_block=$(printf '%s\n' "$collector_block" | count_collector_restarts)
+restarts_in_file=$(count_collector_restarts < "$install_sh")
 if [[ "$restarts_in_block" -eq 1 && "$restarts_in_file" -eq 1 ]]; then
   echo "ok   exactly one collector restart, inside the conditional block"
   pass=$((pass + 1))
@@ -422,24 +440,36 @@ else
   fail=$((fail + 1))
 fi
 rm -f "$order_mutant"
-# run_collector_block <name> <bin_changed> <is_active_rc> <socket_mode> <want> [want_msg]
+# [collector_refreshed=1] [collector_masked=1] run_collector_block <name> <bin_changed> <is_active_rc> <socket_mode> <want> [want_msg]
 # Runs the extracted collector restart block under install.sh's shell
 # options, with a stubbed systemctl and runuser and a real Unix socket, and
 # checks the restart decision.
+#   collector_refreshed  1: refresh_units replaced the collector unit
+#   collector_masked     1: the unit is masked, and restart fails as on a host
 #   bin_changed   0 or 1, as install.sh sets it
 #   is_active_rc  exit code the stubbed 'systemctl is-active' returns
-#   socket_mode   live (listens) | late (listens 0.5 s later) | stale (file
-#                 left by a dead process, nobody listens) | stale-late
-#                 (stale, replaced by a listener 0.5 s later) | absent
+#   socket_mode   live (listens and answers) | late (the same 0.5 s later) |
+#                 stale (file left by a dead process, nobody listens) |
+#                 stale-late (stale, replaced by a listener 0.5 s later) |
+#                 hang (accepts, never answers) | absent
 #   want          none | restart
 #   want_msg      optional output substring (empty: no message check)
-# The stubbed runuser and systemctl really connect to the socket, so a stale
-# file is refused as it would be on a host. systemctl records the outcome
-# at restart time: a restart while nothing answers fails the case whatever
-# <want> says. runuser insists on the probe's exact command line.
+# The stubbed runuser and systemctl really connect to the socket and wait for
+# a reply, so a stale file and a silent listener fail as they would on a host.
+# systemctl records the outcome at restart time: a restart while nothing
+# answers fails the case whatever <want> says. runuser insists on the probe's
+# exact command line and logs each call: whenever a restart is due, the wait
+# must have run that probe, and a restart must follow an answer to it, so a
+# wait that only connects to the socket fails. The probe waits up to
+# collector_probe_block_s for a reply, as nebula status blocks on its context,
+# and collector_block_limit_s bounds the whole block: it passes with the
+# 3 s wait of these cases plus one 5 s probe timeout, not without that timeout.
+collector_probe_block_s=20
+collector_block_limit_s=14
 run_collector_block() {
   local name="$1" bin_changed="$2" is_active_rc="$3" socket_mode="$4" want="$5" want_msg="${6:-}"
-  local dir sock calls block_file driver connect_py listen_py out rc listener_pid="" restarts ok=1 reason=""
+  local refreshed="${collector_refreshed:-0}" masked="${collector_masked:-0}"
+  local dir sock calls block_file driver connect_py listen_py out rc listener_pid="" restarts probes elapsed started ok=1 reason=""
   dir=$(mktemp -d)
   sock="${dir}/executor.sock"
   calls="${dir}/calls"
@@ -452,11 +482,12 @@ run_collector_block() {
   cat > "$connect_py" <<'EOF'
 import socket, sys
 s = socket.socket(socket.AF_UNIX)
-s.settimeout(1)
+s.settimeout(float(sys.argv[2]))
 s.connect(sys.argv[1])
+sys.exit(0 if s.recv(1) else 1)
 EOF
   cat > "$listen_py" <<'EOF'
-import os, signal, socket, sys, time
+import os, socket, sys, time
 time.sleep(float(sys.argv[2]))
 try:
     os.unlink(sys.argv[1])
@@ -465,7 +496,12 @@ except FileNotFoundError:
 s = socket.socket(socket.AF_UNIX)
 s.bind(sys.argv[1])
 s.listen(8)
-signal.pause()
+held = []
+while True:
+    conn, _ = s.accept()
+    held.append(conn)
+    if sys.argv[3] == "answer":
+        conn.send(b"k")
 EOF
   mkdir "${dir}/bin"
   cat > "${dir}/bin/runuser" <<'EOF'
@@ -474,7 +510,12 @@ if [[ "$*" != "-u nebula-server -- ${bin_dir}/nebula status" || "${NEBULA_EXECUT
   printf 'runuser:unexpected %s\n' "$*" >> "$CALLS_FILE"
   exit 2
 fi
-exec python3 "$CONNECT_PY" "$NEBULA_EXECUTOR_SOCKET" 2>/dev/null
+printf 'runuser:probe\n' >> "$CALLS_FILE"
+if python3 "$CONNECT_PY" "$NEBULA_EXECUTOR_SOCKET" "$PROBE_BLOCK_S" 2>/dev/null; then
+  printf 'runuser:answered\n' >> "$CALLS_FILE"
+  exit 0
+fi
+exit 1
 EOF
   chmod 0755 "${dir}/bin/runuser"
   cat > "$driver" <<'EOF'
@@ -482,13 +523,19 @@ set -euo pipefail
 calls_file="$CALLS_FILE"
 is_active_rc="$IS_ACTIVE_RC"
 sock="$NEBULA_EXECUTOR_SOCK"
+unit_refreshed() { [[ "$1" == nebula-pve-collector.service && "$COLLECTOR_REFRESHED" -eq 1 ]]; }
+unit_masked() { [[ "$1" == nebula-pve-collector.service && "$COLLECTOR_MASKED" -eq 1 ]]; }
 systemctl() {
   printf '%s\n' "$*" >> "$calls_file"
   if [[ "$1" == "is-active" ]]; then
     return "$is_active_rc"
   fi
   if [[ "$1" == "restart" ]]; then
-    if python3 "$CONNECT_PY" "$sock" 2>/dev/null; then
+    if [[ "$COLLECTOR_MASKED" -eq 1 ]]; then
+      echo "stub: Unit $2 is masked." >&2
+      return 1
+    fi
+    if python3 "$CONNECT_PY" "$sock" 1 2>/dev/null; then
       printf 'restart:executor-answers\n' >> "$calls_file"
     else
       printf 'restart:executor-silent\n' >> "$calls_file"
@@ -502,13 +549,17 @@ EOF
     python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$sock"
   fi
   case "$socket_mode" in
-    live) python3 "$listen_py" "$sock" 0 & listener_pid=$! ;;
-    late|stale-late) python3 "$listen_py" "$sock" 0.5 & listener_pid=$! ;;
+    live) python3 "$listen_py" "$sock" 0 answer & listener_pid=$! ;;
+    late|stale-late) python3 "$listen_py" "$sock" 0.5 answer & listener_pid=$! ;;
+    hang) python3 "$listen_py" "$sock" 0 hang & listener_pid=$! ;;
   esac
+  started=$SECONDS
   out=$(bin_changed="$bin_changed" bin_dir=/usr/bin IS_ACTIVE_RC="$is_active_rc" CALLS_FILE="$calls" BLOCK_FILE="$block_file" \
-        CONNECT_PY="$connect_py" NEBULA_EXECUTOR_SOCK="$sock" NEBULA_COLLECTOR_RESTART_WAIT_S=3 \
+        COLLECTOR_REFRESHED="$refreshed" COLLECTOR_MASKED="$masked" \
+        CONNECT_PY="$connect_py" PROBE_BLOCK_S="$collector_probe_block_s" NEBULA_EXECUTOR_SOCK="$sock" NEBULA_COLLECTOR_RESTART_WAIT_S=3 \
         PATH="${dir}/bin:${PATH}" bash "$driver" 2>&1)
   rc=$?
+  elapsed=$((SECONDS - started))
   if [[ -n "$listener_pid" ]]; then
     kill "$listener_pid" 2>/dev/null || true
     wait "$listener_pid" 2>/dev/null || true
@@ -521,6 +572,21 @@ EOF
   fi
   if grep -q '^runuser:unexpected' "$calls"; then
     ok=0; reason="${reason:+${reason}; }the probe is not 'nebula status' as nebula-server on the socket"
+  fi
+  probes=$(grep -c '^runuser:probe$' "$calls")
+  if [[ "$is_active_rc" -eq 0 && "$masked" -eq 0 ]] && [[ "$bin_changed" -eq 1 || "$refreshed" -eq 1 ]]; then
+    if [[ "$probes" -eq 0 ]]; then
+      ok=0; reason="${reason:+${reason}; }a restart was due and the wait never ran nebula status"
+    fi
+  elif [[ "$probes" -ne 0 ]]; then
+    ok=0; reason="${reason:+${reason}; }no restart was due and the wait still ran ${probes} probes"
+  fi
+  # The call right before the restart is the answer it waited for.
+  if awk '$0 == "restart nebula-pve-collector.service" && prev != "runuser:answered" { found=1 } { prev=$0 } END { exit !found }' "$calls"; then
+    ok=0; reason="${reason:+${reason}; }the restart does not follow an answer to the probe"
+  fi
+  if [[ "$elapsed" -gt "$collector_block_limit_s" ]]; then
+    ok=0; reason="${reason:+${reason}; }the block took ${elapsed}s, limit ${collector_block_limit_s}s: a hanging probe is not bounded"
   fi
   restarts=$(grep -c '^restart nebula-pve-collector.service$' "$calls")
   if [[ "$want" == "restart" && "$restarts" -ne 1 ]]; then
@@ -545,7 +611,7 @@ EOF
 # the binary it is already running; no restart, no socket wait.
 run_collector_block "bin_changed 0: active collector is not restarted" 0 0 live none
 # bin_changed 1, the executor already answers: exactly one restart.
-run_collector_block "bin_changed 1: active collector restarted once the executor answers" 1 0 live restart "restarted nebula-pve-collector (binaries changed)"
+run_collector_block "bin_changed 1: active collector restarted once the executor answers" 1 0 live restart "restarted nebula-pve-collector (binaries or unit changed)"
 # bin_changed 1, unit not active: nothing to restart.
 run_collector_block "bin_changed 1: inactive collector is not restarted" 1 3 live none
 # bin_changed 1, the executor (Type=simple) is still coming up: the block
@@ -560,6 +626,20 @@ run_collector_block "bin_changed 1: a stale socket is not restarted on and warns
 # bin_changed 1, the socket never appears (broken executor): leave the
 # collector on the old binary (it retries inside its poll loop) and warn.
 run_collector_block "bin_changed 1: no socket in time is not restarted and warns" 1 0 absent none "not answering"
+# bin_changed 1, a listener that accepts and never answers: a connect is no
+# answer, and nebula status would block for its whole context on each attempt,
+# so the probe has to give up on its own.
+run_collector_block "bin_changed 1: a listener that hangs is not restarted on, in bounded time" 1 0 hang none "not answering"
+# The refreshed unit is a trigger of its own, with the same wait.
+collector_refreshed=1 run_collector_block "refreshed unit: active collector restarted once the executor answers" 0 0 live restart "restarted nebula-pve-collector (binaries or unit changed)"
+collector_refreshed=1 run_collector_block "refreshed unit: waits past a stale socket for the new executor" 0 0 stale-late restart
+collector_refreshed=1 run_collector_block "refreshed unit: inactive collector is not restarted" 0 3 live none
+collector_refreshed=1 run_collector_block "refreshed unit and new binaries: restarted once" 1 0 live restart
+# A masked collector that still runs: systemctl restart would fail, and under
+# set -e end the install. It stays as it is, and the executor is not asked.
+collector_masked=1 run_collector_block "masked: new binaries are skipped with a warning" 1 0 live none "is masked; not restarting it"
+collector_masked=1 collector_refreshed=1 run_collector_block "masked: a refreshed unit is skipped with a warning" 0 0 live none "is masked; not restarting it"
+collector_masked=1 run_collector_block "masked and stopped: nothing to say" 1 3 live none
 postinst="${script_dir}/deb/postinst"
 check_line "postinst hint names the collector" "$postinst" \
   'nebula:   sudo nebula backup && sudo systemctl restart nebula-executor nebula-server nebula-pve-collector'
@@ -935,14 +1015,25 @@ done
 # one: `enable` and `restart` fail, which under set -e aborts the script. It
 # also refuses to start a path or timer unit whose target is masked, as
 # systemd does, while `enable` alone and a start of a running unit succeed.
+# The status probe of the collector restart goes through a stubbed runuser,
+# which logs to the same file, so that a run shows the order of the two.
 select_block=$(sed -n '/^# begin: select units/,/^# end: select units/p' "$install_sh")
 start_block=$(sed -n '/^# begin: start units/,/^# end: start units/p' "$install_sh")
 systemctl_log="$refresh_sb/systemctl.log"
 both_services="nebula-server.service nebula-executor.service"
+all_services="$both_services nebula-pve-collector.service"
+mkdir -p "$refresh_sb/stub-bin"
+cat > "$refresh_sb/stub-bin/runuser" <<'EOF'
+#!/usr/bin/env bash
+printf 'probe %s\n' "$*" >> "$STUB_SYSTEMCTL_LOG"
+exit "$STUB_PROBE_RC"
+EOF
+chmod 0755 "$refresh_sb/stub-bin/runuser"
 
 # What the next run_install sees; reset_install restores the defaults.
 reset_install() {
   inst_bin_changed=0
+  inst_probe_rc=0              # what the status probe exits with
   inst_drop_in_changed=0
   inst_server_drop_in_changed=0
   inst_from_package=0
@@ -1050,9 +1141,13 @@ run_install() {
       mv() { return 1; }
     fi
     systemctl() { stub_systemctl "$@"; }
+    export PATH="$refresh_sb/stub-bin:$PATH"
+    export STUB_SYSTEMCTL_LOG="$systemctl_log" STUB_PROBE_RC="$inst_probe_rc"
+    export NEBULA_COLLECTOR_RESTART_WAIT_S=1
     script_dir="$refresh_sb/deploy"
     systemd_dir="$refresh_sb/etc"
     var_lib="$refresh_sb/var"
+    bin_dir="$refresh_sb/bin"
     from_package="$inst_from_package"
     bin_changed="$inst_bin_changed"
     drop_in_changed="$inst_drop_in_changed"
@@ -1088,6 +1183,35 @@ installed_host() {
 called() { grep -qxF -- "$1" "$systemctl_log"; }
 not_called() { ! called "$1"; }
 restarts_are() { [[ "$(grep -E '^(restart|try-restart) ' "$systemctl_log")" == "$1" ]]; }
+# collector_restarts_are <n>: the run restarted the collector <n> times, in
+# any form: a verb ending in restart, with or without flags.
+collector_restarts_are() {
+  [[ "$(grep -E '(^| )[a-z-]*restart( |$)' "$systemctl_log" | grep -c 'nebula-pve-collector')" -eq "$1" ]]
+}
+# The runuser stub logs each status probe as "probe <its arguments>".
+probed() { grep -qxF "probe -u nebula-server -- $refresh_sb/bin/nebula status" "$systemctl_log"; }
+not_probed() { ! grep -q '^probe ' "$systemctl_log"; }
+# log_order <line...>: each line occurs, each after the one before it.
+log_order() {
+  local want="$1" line
+  shift
+  while IFS= read -r line; do
+    if [[ "$line" == "$want" ]]; then
+      if [[ $# -eq 0 ]]; then
+        return 0
+      fi
+      want="$1"
+      shift
+    fi
+  done < "$systemctl_log"
+  return 1
+}
+probe_precedes_collector_restart() {
+  log_order "probe -u nebula-server -- $refresh_sb/bin/nebula status" 'restart nebula-pve-collector.service'
+}
+collector_restarts_after_probe() {
+  log_order 'restart nebula-executor.service' "probe -u nebula-server -- $refresh_sb/bin/nebula status" 'restart nebula-pve-collector.service'
+}
 is_mask_link() { [[ -L "$1" && "$(readlink "$1")" == /dev/null ]]; }
 rc_not_zero() { [[ "$refresh_rc" -ne 0 ]]; }
 stub_accepts() { stub_systemctl "$@" 2>/dev/null; }
@@ -1114,13 +1238,14 @@ else
   while read -r unit want_restart; do
     installed_host
     ship "$unit" "$unit v2"
+    stub_active="$all_services"
     run_install
     expect "refreshed ${unit}: the run succeeds" rc_is 0
     expect "refreshed ${unit}: exactly '${want_restart}' follows" restarts_are "$want_restart"
   done <<'CASES'
 nebula-server.service restart nebula-server.service
 nebula-executor.service restart nebula-executor.service
-nebula-pve-collector.service try-restart nebula-pve-collector.service
+nebula-pve-collector.service restart nebula-pve-collector.service
 nebula-discovery.path try-restart nebula-discovery.path
 nebula-discovery.timer try-restart nebula-discovery.timer
 nebula-discovery.service
@@ -1142,6 +1267,46 @@ CASES
   inst_bin_changed=1
   run_install
   expect "new binaries: both services restart" restarts_are $'restart nebula-server.service\nrestart nebula-executor.service'
+
+  # The collector restart belongs to one block, also with new binaries and a
+  # refreshed unit at once, when two steps of the run have a reason for it. It
+  # follows the executor restart and an answer, or nothing would come up.
+  installed_host
+  ship nebula-pve-collector.service 'nebula-pve-collector.service v2'
+  stub_active="$all_services"
+  inst_bin_changed=1
+  run_install
+  expect "new binaries and collector unit: the run succeeds" rc_is 0
+  expect "new binaries and collector unit: each service restarts once" restarts_are $'restart nebula-server.service\nrestart nebula-executor.service\nrestart nebula-pve-collector.service'
+  expect "new binaries and collector unit: one collector restart in any form" collector_restarts_are 1
+  expect "new binaries and collector unit: executor, answer, collector" collector_restarts_after_probe
+
+  # No new binaries: the refreshed unit alone asks for the same waited restart.
+  installed_host
+  ship nebula-pve-collector.service 'nebula-pve-collector.service v2'
+  stub_active="$all_services"
+  run_install
+  expect "collector unit only: one collector restart in any form" collector_restarts_are 1
+  expect "collector unit only: the probe comes first" probe_precedes_collector_restart
+
+  installed_host
+  ship nebula-pve-collector.service 'nebula-pve-collector.service v2'
+  run_install
+  expect "refreshed but stopped collector: not restarted" collector_restarts_are 0
+  expect "refreshed but stopped collector: nothing asked" not_probed
+
+  # Nobody answers: no restart in any form, a warning, and the install ends.
+  installed_host
+  ship nebula-pve-collector.service 'nebula-pve-collector.service v2'
+  stub_active="$all_services"
+  inst_bin_changed=1
+  inst_probe_rc=1
+  run_install
+  expect "silent executor: the install runs to its end" rc_is 0
+  expect "silent executor: the end is reached" out_has $'\nEND'
+  expect "silent executor: the collector is not restarted" collector_restarts_are 0
+  expect "silent executor: it was asked" probed
+  expect "silent executor: the warning says so" out_has 'not answering'
 
   installed_host
   inst_drop_in_changed=1
@@ -1294,6 +1459,40 @@ CASES
   expect "runtime-masked server: not restarted" not_called 'restart nebula-server.service'
   expect "runtime-masked server: the executor still restarts" called 'restart nebula-executor.service'
 
+  # A masked collector that still runs: the restart is due and systemd would
+  # refuse it, which under set -e would end the run before the pending record
+  # is cleared. <how> names one way to mask it, <inputs> what makes it due.
+  for how in link runtime; do
+    for inputs in bin unit; do
+      name="masked running collector (${how}, ${inputs})"
+      installed_host
+      ship nebula-server.service 'nebula-server.service v2'
+      if [[ "$inputs" == unit ]]; then
+        ship nebula-pve-collector.service 'nebula-pve-collector.service v2'
+      else
+        inst_bin_changed=1
+      fi
+      case "$how" in
+        link) ln -sf /dev/null "$refresh_sb/etc/nebula-pve-collector.service" ;;
+        runtime) stub_runtime_masked=nebula-pve-collector.service ;;
+      esac
+      stub_active="$all_services"
+      run_install
+      expect "${name}: the install runs to its end" rc_is 0
+      expect "${name}: the end is reached" out_has $'\nEND'
+      expect "${name}: not restarted in any form" collector_restarts_are 0
+      expect "${name}: the executor is not asked for it" not_probed
+      expect "${name}: the server still restarts" called 'restart nebula-server.service'
+      expect "${name}: nothing stays pending" nothing_pending
+      if [[ "$how" == link && "$inputs" == unit ]]; then
+        # The link keeps the unit, so nothing makes the restart due.
+        expect "${name}: nothing was due, nothing to warn about" out_lacks 'not restarting it'
+      else
+        expect "${name}: the warning says it was not restarted" out_has 'nebula-pve-collector.service is masked; not restarting it'
+      fi
+    done
+  done
+
   # The same in package mode, where the units are not looked at otherwise.
   installed_host
   ln -sf /dev/null "$refresh_sb/etc/nebula-pve-collector.service"
@@ -1312,6 +1511,7 @@ CASES
   while IFS='|' read -r unit failing want_restart; do
     installed_host
     ship "$unit" "$unit v2"
+    stub_active="$all_services"
     stub_fail="$failing"
     run_install
     expect "stopped at '${failing}': the run fails" rc_not_zero
@@ -1327,7 +1527,7 @@ CASES
   done <<'CASES'
 nebula-server.service|restart nebula-server.service|restart nebula-server.service
 nebula-executor.service|restart nebula-executor.service|restart nebula-executor.service
-nebula-pve-collector.service|enable --now nebula-discovery.timer|try-restart nebula-pve-collector.service
+nebula-pve-collector.service|enable --now nebula-discovery.timer|restart nebula-pve-collector.service
 CASES
 
   # A complete run leaves nothing behind.
