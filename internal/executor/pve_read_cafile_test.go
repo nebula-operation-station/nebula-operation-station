@@ -196,6 +196,29 @@ func TestPveLeafOnlyClusterWithoutStoredCAStillFailsTrust(t *testing.T) {
 	}
 }
 
+// TestPveLeafOnlyClusterPresentingForeignCAFailsTrust: a node of a cluster
+// with a stored CA that now presents another CA is a trust failure, as
+// at add time; the stored CA does not cover it.
+func TestPveLeafOnlyClusterPresentingForeignCAFailsTrust(t *testing.T) {
+	e := newPveReadEnv(t, pvecontract.KindCluster)
+	c := makeLeafOnlyCluster(t, "127.0.0.1")
+	impostor := makeTestChain(t)
+	pve := newSwitchableLeafPVE(t, impostor.tls)
+	rm := registerLeafOnlyCluster(t, e, c, pve.ep)
+	if _, err := e.svc.pveReadTrust(context.Background(), rm); !errors.Is(err, errPveReadTrust) {
+		t.Fatalf("pveReadTrust with a foreign presented CA = %v, want errPveReadTrust", err)
+	}
+	// With a locked vault it is still a trust failure: the vault is not
+	// needed to see it.
+	e.svc.vault.Lock()
+	if _, err := e.svc.pveReadTrust(context.Background(), rm); !errors.Is(err, errPveReadTrust) {
+		t.Fatalf("pveReadTrust with a foreign presented CA, vault locked = %v, want errPveReadTrust", err)
+	}
+	if n := pve.requests.Load(); n != 0 {
+		t.Fatalf("%d authenticated requests to an impostor", n)
+	}
+}
+
 // TestPveLeafOnlyClusterLockedVaultOnCacheMissIsNotTrustFailure: a locked
 // vault on a cache miss returns the locked error on every connection path
 // and never blocks the remote.

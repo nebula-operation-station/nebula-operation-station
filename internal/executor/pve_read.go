@@ -352,10 +352,12 @@ func (s *Service) pveReadTrust(ctx context.Context, rm executordb.PveRemote) (pv
 //
 // A cluster added or re-pinned with an admin-supplied CA file (its nodes
 // present only their leaf) has that CA in the vault under its pin. On a
-// cache miss (executor restart, new trust generation) it is loaded from
-// there and re-checked against the pin before any endpoint is contacted.
-// A locked vault returns vault.ErrLocked and an unusable stored CA
-// errPveStoredCA; neither is a trust failure, so neither blocks the remote.
+// cache miss (executor restart, new trust generation) whose endpoints
+// answer with leaves only, it is loaded from there and re-checked against
+// the pin before it is used. A presented CA other than the pin stays a
+// trust failure. A locked vault returns vault.ErrLocked and an unusable
+// stored CA errPveStoredCA; neither is a trust failure, so neither blocks
+// the remote.
 func (s *Service) pvePinnedTrust(ctx context.Context, rm executordb.PveRemote) (pvetransport.Trust, error) {
 	raw, err := hex.DecodeString(rm.TrustPin)
 	if err != nil || len(raw) != 32 {
@@ -373,21 +375,7 @@ func (s *Service) pvePinnedTrust(ctx context.Context, rm executordb.PveRemote) (
 	if ca := s.pveRead.cachedCA(rm); ca != nil {
 		return pvetransport.Trust{CA: ca}, nil
 	}
-	ca, err := s.pveStoredClusterCA(rm)
-	var locked error
-	switch {
-	case errors.Is(err, vault.ErrLocked):
-		// Whether a CA file was stored is unknown: a cluster that presents
-		// its CA still connects, but a missing CA is never reported as a
-		// changed trust identity.
-		locked = fmt.Errorf("pve remote %s: load stored cluster CA: %w", rm.RemoteID, err)
-	case err != nil:
-		return pvetransport.Trust{}, fmt.Errorf("pve remote %s: %w: %w", rm.RemoteID, errPveStoredCA, err)
-	case ca != nil:
-		s.pveRead.storeCA(rm, ca)
-		return pvetransport.Trust{CA: ca}, nil
-	}
-	presented := false
+	presented, foreignCA := false, false
 	for _, ep := range rm.Endpoints {
 		certs, err := fetchPresentedChain(ctx, ep.Host, ep.Port)
 		if err != nil {
@@ -398,19 +386,38 @@ func (s *Service) pvePinnedTrust(ctx context.Context, rm executordb.PveRemote) (
 		}
 		presented = true
 		for _, c := range certs {
-			if bytes.Equal(c.RawIssuer, c.RawSubject) && pvetransport.Fingerprint(c) == pin {
+			if !bytes.Equal(c.RawIssuer, c.RawSubject) {
+				continue
+			}
+			if pvetransport.Fingerprint(c) == pin {
 				s.pveRead.storeCA(rm, c)
 				return pvetransport.Trust{CA: c}, nil
 			}
+			foreignCA = true
 		}
 	}
-	if locked != nil {
-		return pvetransport.Trust{}, locked
-	}
-	if presented {
+	switch {
+	case !presented:
+		return pvetransport.Trust{}, errPveReadUnreachable
+	case foreignCA:
+		// A presented CA must be the pinned one, with or without a CA
+		// file (TrustIdentityWithCA).
 		return pvetransport.Trust{}, errPveReadTrust
 	}
-	return pvetransport.Trust{}, errPveReadUnreachable
+	// The endpoints present only their leaf: the trust is the CA file the
+	// admin supplied, stored under the pin. The transport verifies every
+	// leaf against it before a request is sent.
+	ca, err := s.pveStoredClusterCA(rm)
+	switch {
+	case errors.Is(err, vault.ErrLocked):
+		return pvetransport.Trust{}, fmt.Errorf("pve remote %s: load stored cluster CA: %w", rm.RemoteID, err)
+	case err != nil:
+		return pvetransport.Trust{}, fmt.Errorf("pve remote %s: %w: %w", rm.RemoteID, errPveStoredCA, err)
+	case ca == nil:
+		return pvetransport.Trust{}, errPveReadTrust
+	}
+	s.pveRead.storeCA(rm, ca)
+	return pvetransport.Trust{CA: ca}, nil
 }
 
 // pveStoredClusterCA returns the admin-supplied CA stored for rm's pin
