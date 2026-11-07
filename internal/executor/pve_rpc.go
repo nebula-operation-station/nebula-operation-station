@@ -513,12 +513,22 @@ func pveRPCError(err error) error {
 		return status.Error(codes.Internal, "pve trust verification failed; the failure could not be recorded and the remote stays refused")
 	case errors.Is(err, errPveTrustAuthorityNotRevoked):
 		return status.Error(codes.Internal, "pve trust verification failed; the remote is blocked but revoking its authority failed")
+	case errors.Is(err, ErrPveCARestoreRefused):
+		return status.Error(codes.FailedPrecondition, "the new fingerprint equals the current pin: that is only accepted with --ca-file to restore a missing or unusable stored cluster CA of an active cluster; otherwise confirm the new trust identity the endpoints present")
 	case errors.Is(err, vault.ErrLocked), errors.Is(err, ErrPveApprovalRequired), errors.Is(err, executordb.ErrRemoteState):
 		return status.Error(codes.FailedPrecondition, "pve operation requires an unlocked vault and valid remote state or approval")
 	case errors.Is(err, executordb.ErrRemoteNotFound):
 		return status.Error(codes.NotFound, "pve remote not found")
 	case errors.Is(err, executordb.ErrSecretVersion), errors.Is(err, vault.ErrConcurrentChange):
 		return status.Error(codes.Aborted, "pve remote changed; retry")
+	case errors.Is(err, ErrPveClusterNoCA):
+		return status.Error(codes.InvalidArgument, "cluster endpoint presents no CA; pass --ca-file with /etc/pve/pve-root-ca.pem (copied from a node out of band)")
+	case errors.Is(err, ErrPveCAFileMismatch):
+		return status.Error(codes.InvalidArgument, "a cluster endpoint presents a CA that differs from the --ca-file; nothing stored")
+	case errors.Is(err, ErrPveLeafNotChained):
+		return status.Error(codes.InvalidArgument, "a cluster endpoint's certificate does not chain to the --ca-file (is it /etc/pve/pve-root-ca.pem of this cluster?); nothing stored")
+	case errors.Is(err, ErrPveSuppliedCA):
+		return status.Error(codes.InvalidArgument, "--ca-file must be exactly one currently valid, self-signed CA certificate in PEM (at most 64 KiB), and only for a cluster")
 	case errors.Is(err, ErrPveTokenFormat), errors.Is(err, ErrPveTokenRejected), errors.Is(err, ErrPveTokenInvalid), errors.Is(err, ErrPvePurpose), errors.Is(err, ErrPvePinMismatch), errors.Is(err, pvecontract.ErrInvalid), errors.Is(err, executordb.ErrInvalid):
 		return status.Error(codes.InvalidArgument, "pve token, profile, trust confirmation or remote is invalid")
 	default:
@@ -543,11 +553,15 @@ func (s *Service) ProbePVERemote(ctx context.Context, in *pb.ProbePVERemoteReque
 	if err != nil {
 		return nil, pveRPCError(err)
 	}
+	ca, err := a.suppliedCA(in.GetCaPem())
+	if err != nil {
+		return nil, pveRPCError(err)
+	}
 	res, err := a.probeFn()(ctx, r.Endpoints)
 	if err != nil {
 		return nil, pveRPCError(err)
 	}
-	pin, _, err := res.TrustIdentity(r.Kind)
+	pin, _, err := res.TrustIdentityWithCA(r.Kind, ca, a.now())
 	if err != nil {
 		return nil, pveRPCError(err)
 	}
@@ -568,11 +582,37 @@ func (s *Service) AddPVERemote(ctx context.Context, in *pb.AddPVERemoteRequest) 
 	if err != nil {
 		return nil, err
 	}
-	r, err := s.pveAdmin().AddRemote(ctx, PveAddRemote{RemoteID: in.GetRemoteId(), Name: in.GetName(), Kind: pvecontract.Kind(in.GetKind()), Endpoints: eps, ConfirmedPin: in.GetConfirmedPin(), ReadToken: in.GetReadToken(), ActionToken: in.GetActionToken(), By: callerName(ctx)})
+	a := s.pveAdmin()
+	r, err := a.AddRemote(ctx, PveAddRemote{RemoteID: in.GetRemoteId(), Name: in.GetName(), Kind: pvecontract.Kind(in.GetKind()), Endpoints: eps, ConfirmedPin: in.GetConfirmedPin(), ReadToken: in.GetReadToken(), ActionToken: in.GetActionToken(), CAPEM: in.GetCaPem(), By: callerName(ctx)})
 	if err != nil {
 		return nil, pveRPCError(err)
 	}
+	if err := s.seedPveClusterCA(a, r); err != nil {
+		return nil, err
+	}
 	return &pb.AddPVERemoteResponse{Remote: pveAdminProto(r)}, nil
+}
+
+// seedPveClusterCA hands the admin-confirmed CA of a cluster added or
+// re-pinned with a CA file to the connection trust cache, keyed by pin
+// and trust generation, so connections to nodes that present only their
+// leaf verify against it. Nothing is seeded for a remote without one.
+// The cache is only a shortcut (pvePinnedTrust loads the stored CA on a
+// miss), but a CA that cannot be loaded now fails the RPC: a successful
+// add or re-pin means its CA is usable.
+func (s *Service) seedPveClusterCA(a *PveAdmin, r executordb.PveRemote) error {
+	ca, err := a.StoredClusterCA(r)
+	if err != nil {
+		s.log.Error("pve: stored cluster CA unusable after add or re-pin", "remote", r.RemoteID, "error", err.Error())
+		if errors.Is(err, vault.ErrLocked) {
+			return status.Error(codes.FailedPrecondition, "pve remote stored, but the vault was locked before its cluster CA could be loaded; unlock and read it")
+		}
+		return status.Error(codes.Internal, "pve remote stored, but its cluster CA cannot be loaded; "+pveCARestoreHint(r.RemoteID))
+	}
+	if ca != nil {
+		s.pveRead.storeCA(r, ca)
+	}
+	return nil
 }
 
 // RotatePVEToken atomically replaces a purpose's encrypted credential.
@@ -662,14 +702,29 @@ func (s *Service) ProposePVERepin(ctx context.Context, in *pb.ProposePVERepinReq
 	if !ok || r.State == executordb.StateRemoved {
 		return nil, pveRPCError(executordb.ErrRemoteNotFound)
 	}
-	if r.TrustPin != in.GetOldPin() || !pvecontract.ValidTrustPin(in.GetConfirmedNewPin()) || r.TrustPin == in.GetConfirmedNewPin() {
+	if r.TrustPin != in.GetOldPin() || !pvecontract.ValidTrustPin(in.GetConfirmedNewPin()) {
 		return nil, pveRPCError(ErrPvePinMismatch)
+	}
+	ca, err := a.suppliedCA(in.GetCaPem())
+	if err != nil {
+		return nil, pveRPCError(err)
+	}
+	// A re-pin to the unchanged pin only restores a missing or unusable
+	// stored cluster CA (PveAdmin.Repin); the probe below still has to
+	// yield exactly that pin from the CA file.
+	if r.TrustPin == in.GetConfirmedNewPin() {
+		if err := a.pveCheckCARestore(r, ca); err != nil {
+			return nil, pveRPCError(err)
+		}
 	}
 	probe, err := a.probeFn()(ctx, r.Endpoints)
 	if err != nil {
 		return nil, pveRPCError(err)
 	}
-	pin, _, err := probe.TrustIdentity(r.Kind)
+	pin, _, err := probe.TrustIdentityWithCA(r.Kind, ca, a.now())
+	if pveCAFileError(err) {
+		return nil, pveRPCError(err)
+	}
 	if err != nil || pin != in.GetConfirmedNewPin() {
 		return nil, pveRPCError(ErrPvePinMismatch)
 	}
@@ -717,9 +772,13 @@ func (s *Service) authorizePVERepin(_ context.Context, r executordb.PveRemote, i
 func (s *Service) CommitPVERepin(ctx context.Context, in *pb.CommitPVERepinRequest) (*pb.CommitPVERepinResponse, error) {
 	s.pveMu.Lock()
 	defer s.pveMu.Unlock()
-	r, err := s.pveAdmin().Repin(ctx, PveRepin{RemoteID: in.GetRemoteId(), OldPin: in.GetOldPin(), ConfirmedNewPin: in.GetConfirmedNewPin(), ApprovalDigest: in.GetExecutionDigest(), By: callerName(ctx)})
+	a := s.pveAdmin()
+	r, err := a.Repin(ctx, PveRepin{RemoteID: in.GetRemoteId(), OldPin: in.GetOldPin(), ConfirmedNewPin: in.GetConfirmedNewPin(), ApprovalDigest: in.GetExecutionDigest(), CAPEM: in.GetCaPem(), By: callerName(ctx)})
 	if err != nil {
 		return nil, pveRPCError(err)
+	}
+	if err := s.seedPveClusterCA(a, r); err != nil {
+		return nil, err
 	}
 	return &pb.CommitPVERepinResponse{Remote: pveAdminProto(r)}, nil
 }

@@ -142,7 +142,7 @@ func (r PveProbeResult) TrustIdentity(kind pvecontract.Kind) (string, pvetranspo
 		pin, ca := "", (*x509.Certificate)(nil)
 		for i, ep := range r.Endpoints {
 			if ep.CA == nil {
-				return "", pvetransport.Trust{}, fmt.Errorf("executor: endpoint %s:%d presented no self-signed CA certificate", ep.Host, ep.Port)
+				return "", pvetransport.Trust{}, fmt.Errorf("%w (endpoint %s:%d)", ErrPveClusterNoCA, ep.Host, ep.Port)
 			}
 			if i == 0 {
 				pin, ca = ep.CAFingerprint, ep.CA
@@ -590,6 +590,10 @@ type PveAddRemote struct {
 	ReadToken []byte
 	// ActionToken is the optional PVE API token for the action purpose.
 	ActionToken []byte
+	// CAPEM is the optional admin-supplied cluster CA (PEM), copied out of
+	// band from /etc/pve/pve-root-ca.pem. Cluster only. Its fingerprint
+	// is the trust identity the admin confirms; it is kept in the vault.
+	CAPEM []byte
 	// By is the authenticated admin identity. The RPC layer sets it from
 	// peercred and ignores any client-supplied value.
 	By string
@@ -635,11 +639,15 @@ func (a *PveAdmin) AddRemote(ctx context.Context, in PveAddRemote) (executordb.P
 	if len(in.ActionToken) > 0 && bytes.Equal(pveTokenPattern.FindSubmatch(in.ReadToken)[1], pveTokenPattern.FindSubmatch(in.ActionToken)[1]) {
 		return executordb.PveRemote{}, ErrPveTokenRejected
 	}
+	ca, err := a.suppliedCA(in.CAPEM)
+	if err != nil {
+		return executordb.PveRemote{}, err
+	}
 	res, err := a.probeFn()(ctx, remote.Endpoints)
 	if err != nil {
 		return executordb.PveRemote{}, err
 	}
-	pin, trust, err := res.TrustIdentity(remote.Kind)
+	pin, trust, err := res.TrustIdentityWithCA(remote.Kind, ca, a.now())
 	if err != nil {
 		return executordb.PveRemote{}, err
 	}
@@ -649,25 +657,39 @@ func (a *PveAdmin) AddRemote(ctx context.Context, in PveAddRemote) (executordb.P
 	if err := a.validateTokenFn(PvePurposeRead, in.ReadToken)(ctx, remote.Endpoints, trust, in.ReadToken); err != nil {
 		return executordb.PveRemote{}, err
 	}
+	// The supplied CA is the pinned trust of every later connection: keep
+	// it with the remote's secrets, removed again if the add fails.
+	compensateCA := func() {}
+	if ca != nil {
+		undo, err := a.storeClusterCA(remote.RemoteID, pin, ca, in.By)
+		if err != nil {
+			return executordb.PveRemote{}, fmt.Errorf("executor: pve add remote: %w", err)
+		}
+		compensateCA = undo
+	}
 	readID := PveVaultID(remote.RemoteID, PvePurposeRead)
 	readVersion, err := a.Vault.Put(readID, in.ReadToken, in.By)
 	if err != nil {
+		compensateCA()
 		return executordb.PveRemote{}, fmt.Errorf("executor: pve add remote: store read token: %w", err)
 	}
 	creds := executordb.PveRemoteCredentials{ReadRef: readID, ReadVersion: readVersion}
 	if len(in.ActionToken) > 0 {
 		if err := validatePveTokenFormat(in.ActionToken); err != nil {
 			a.compensateVault(readID, readVersion)
+			compensateCA()
 			return executordb.PveRemote{}, err
 		}
 		if err := a.validateTokenFn(PvePurposeAction, in.ReadToken)(ctx, remote.Endpoints, trust, in.ActionToken); err != nil {
 			a.compensateVault(readID, readVersion)
+			compensateCA()
 			return executordb.PveRemote{}, err
 		}
 		actionID := PveVaultID(remote.RemoteID, PvePurposeAction)
 		actionVersion, err := a.Vault.Put(actionID, in.ActionToken, in.By)
 		if err != nil {
 			a.compensateVault(readID, readVersion)
+			compensateCA()
 			return executordb.PveRemote{}, fmt.Errorf("executor: pve add remote: store action token: %w", err)
 		}
 		creds.ActionRef, creds.ActionVersion = actionID, actionVersion
@@ -678,6 +700,7 @@ func (a *PveAdmin) AddRemote(ctx context.Context, in PveAddRemote) (executordb.P
 		if creds.ActionRef != "" {
 			a.compensateVault(creds.ActionRef, creds.ActionVersion)
 		}
+		compensateCA()
 		return executordb.PveRemote{}, fmt.Errorf("executor: pve add remote: %w", err)
 	}
 	a.log().Info("pve remote added",
@@ -757,6 +780,18 @@ func (a *PveAdmin) RotateToken(ctx context.Context, in PveRotateToken) (executor
 		return executordb.PveRemote{}, err
 	}
 	pin, trust, err := res.TrustIdentity(rm.Kind)
+	if errors.Is(err, ErrPveClusterNoCA) {
+		// A cluster added with a CA file: its leaf-only endpoints are
+		// verified against that stored CA; nothing is sent when it cannot
+		// be loaded.
+		ca, caErr := a.StoredClusterCA(rm)
+		if caErr != nil {
+			return executordb.PveRemote{}, caErr
+		}
+		if ca != nil {
+			pin, trust, err = res.TrustIdentityWithCA(rm.Kind, ca, a.now())
+		}
+	}
 	if err != nil {
 		return executordb.PveRemote{}, a.rotateTrustFailure(rm, in.By, ErrPvePinMismatch)
 	}
@@ -889,6 +924,9 @@ func (a *PveAdmin) RemoveRemote(ctx context.Context, in PveRemove) (executordb.P
 			return executordb.PveRemote{}, fmt.Errorf("executor: pve remove remote: remove vault secret: %w", err)
 		}
 	}
+	if err := a.deleteStoredCAs(in.RemoteID, ""); err != nil {
+		return executordb.PveRemote{}, fmt.Errorf("executor: pve remove remote: %w", err)
+	}
 	rm, err = a.DB.RemoveRemote(in.RemoteID, in.By)
 	if err != nil {
 		return executordb.PveRemote{}, fmt.Errorf("executor: pve remove remote: %w", err)
@@ -910,6 +948,9 @@ type PveRepin struct {
 	By string
 	// ApprovalDigest identifies the approved, single-use HIGH permit.
 	ApprovalDigest string
+	// CAPEM is the optional admin-supplied cluster CA (PEM) of the new
+	// trust identity; see PveAddRemote.CAPEM.
+	CAPEM []byte
 }
 
 // Repin re-pins a remote to the trust identity its endpoints present
@@ -933,11 +974,23 @@ func (a *PveAdmin) Repin(ctx context.Context, in PveRepin) (executordb.PveRemote
 	if in.OldPin != rm.TrustPin {
 		return executordb.PveRemote{}, fmt.Errorf("executor: pve repin: %w: the remote is pinned to %s", executordb.ErrInvalid, rm.TrustPin)
 	}
+	ca, err := a.suppliedCA(in.CAPEM)
+	if err != nil {
+		return executordb.PveRemote{}, err
+	}
+	// A re-pin to the unchanged pin never changes trust: it is only
+	// accepted as the restore of a missing or unusable stored cluster CA.
+	restore := in.ConfirmedNewPin == rm.TrustPin
+	if restore {
+		if err := a.pveCheckCARestore(rm, ca); err != nil {
+			return executordb.PveRemote{}, fmt.Errorf("executor: pve repin: %w", err)
+		}
+	}
 	res, err := a.probeFn()(ctx, rm.Endpoints)
 	if err != nil {
 		return executordb.PveRemote{}, err
 	}
-	pin, _, err := res.TrustIdentity(rm.Kind)
+	pin, _, err := res.TrustIdentityWithCA(rm.Kind, ca, a.now())
 	if err != nil {
 		return executordb.PveRemote{}, err
 	}
@@ -953,14 +1006,50 @@ func (a *PveAdmin) Repin(ctx context.Context, in PveRepin) (executordb.PveRemote
 	if err := a.checkDeps(); err != nil {
 		return executordb.PveRemote{}, err
 	}
+	if restore {
+		return a.restoreClusterCA(rm, ca, in.By)
+	}
+	// The new CA is stored under the new pin before the registry switches,
+	// so the current pin's CA stays intact if the switch fails; a failed
+	// switch removes the new one again. Once the registry is switched, the
+	// new CA is the trust of the current pin and is kept whatever fails
+	// later.
+	compensateCA := func() {}
+	if ca != nil {
+		undo, err := a.storeClusterCA(in.RemoteID, pin, ca, in.By)
+		if err != nil {
+			return executordb.PveRemote{}, fmt.Errorf("executor: pve repin: %w", err)
+		}
+		compensateCA = undo
+	}
 	rm, err = a.DB.RepinRemote(in.RemoteID, in.OldPin, pin, in.By)
 	if err != nil {
+		compensateCA()
 		return executordb.PveRemote{}, fmt.Errorf("executor: pve repin: %w", err)
+	}
+	keep := ""
+	if ca != nil {
+		keep = pin
+	}
+	if err := a.deleteStoredCAs(in.RemoteID, keep); err != nil {
+		a.log().Warn("pve repin: stale cluster CA not removed", "remote", in.RemoteID, "error", err.Error())
 	}
 	if err := a.revoke(in.RemoteID, "pve trust re-pin: generation "+strconv.FormatUint(rm.TrustGeneration, 10)); err != nil {
 		return executordb.PveRemote{}, fmt.Errorf("executor: pve repin: revoke grants: %w", err)
 	}
 	a.log().Info("pve remote re-pinned", "remote", in.RemoteID, "pin", pin, "gen", rm.TrustGeneration)
+	return rm, nil
+}
+
+// restoreClusterCA stores ca, the admin-supplied CA whose fingerprint is
+// rm's unchanged pin and to which every endpoint's leaf chains (checked by
+// Repin), as rm's stored cluster CA. Pin, trust generation, state and
+// authority stay as they are: the trust identity did not change.
+func (a *PveAdmin) restoreClusterCA(rm executordb.PveRemote, ca *x509.Certificate, by string) (executordb.PveRemote, error) {
+	if _, err := a.storeClusterCA(rm.RemoteID, rm.TrustPin, ca, by); err != nil {
+		return executordb.PveRemote{}, fmt.Errorf("executor: pve repin: restore cluster CA: %w", err)
+	}
+	a.log().Info("pve cluster CA restored", "remote", rm.RemoteID, "pin", rm.TrustPin, "gen", rm.TrustGeneration)
 	return rm, nil
 }
 

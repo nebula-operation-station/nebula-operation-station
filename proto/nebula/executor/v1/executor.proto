@@ -2101,6 +2101,12 @@ message PVEMetric {
 message ProbePVERemoteRequest {
   string kind = 1;
   repeated PVEEndpoint endpoints = 2;
+  // ca_pem is the optional, admin-supplied cluster CA certificate (PEM,
+  // at most 64 KiB, exactly one certificate), copied out of band from
+  // /etc/pve/pve-root-ca.pem on a node. Cluster only. It is needed when
+  // the endpoints present only their leaf; it never replaces the typed
+  // fingerprint confirmation, and every endpoint's leaf must chain to it.
+  bytes ca_pem = 3;
 }
 
 message PVEProbeEndpoint {
@@ -2141,6 +2147,9 @@ message AddPVERemoteRequest {
   string confirmed_pin = 5;
   bytes read_token = 6;
   bytes action_token = 7;
+  // ca_pem: see ProbePVERemoteRequest.ca_pem. Its fingerprint is the pin
+  // the admin confirms; the executor keeps it in the vault.
+  bytes ca_pem = 8;
 }
 
 message RotatePVETokenRequest {
@@ -2173,6 +2182,8 @@ message ProposePVERepinRequest {
   string remote_id = 1;
   string old_pin = 2;
   string confirmed_new_pin = 3;
+  // ca_pem: see ProbePVERemoteRequest.ca_pem.
+  bytes ca_pem = 4;
 }
 
 message CommitPVERepinRequest {
@@ -2180,6 +2191,9 @@ message CommitPVERepinRequest {
   string old_pin = 2;
   string confirmed_new_pin = 3;
   string execution_digest = 4;
+  // ca_pem: see ProbePVERemoteRequest.ca_pem. It must be the same
+  // certificate as in the proposal (its fingerprint is the new pin).
+  bytes ca_pem = 5;
 }
 
 message AddPVERemoteResponse {

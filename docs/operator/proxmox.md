@@ -216,6 +216,25 @@ envelope-encrypted. Success prints:
 remote <id> added: active, pin generation 1, read credential <ref>@1
 ```
 
+### Clusters whose nodes serve only their leaf (`--ca-file`)
+
+A default PVE cluster node serves only its own certificate
+(`pve-ssl.pem`), not the cluster CA that issued it, so the probe shows no
+CA and `add` refuses with `cluster endpoint presents no CA; pass --ca-file`.
+Copy `/etc/pve/pve-root-ca.pem` from a node **out of band** (scp over a
+trusted SSH session, or the console) and pass it:
+
+```sh
+nebula pve remote add <id> --kind cluster --endpoint pve1.lab:8006 --ca-file pve-root-ca.pem
+```
+
+The file never establishes trust on its own: the CLI prints its
+fingerprint, you type it back after comparing it out of band, and every
+endpoint's leaf must chain to it. The pin is the CA's fingerprint. The
+executor stores the CA in its vault under that pin and verifies every
+later connection's leaf against it; `repin --ca-file` works the same way
+for a cluster whose CA changed.
+
 ## Rotating a token
 
 ```sh
@@ -250,6 +269,37 @@ incremented, affected grants and permits are revoked, and the remote is
 unblocked.
 
 A leaf renewal that preserves the cluster CA does **not** require a re-pin.
+
+### Restoring a missing or unusable stored cluster CA
+
+If the CA stored for a leaf-only cluster is missing or unusable (for
+example a lost or damaged vault entry), every connection to the remote is
+refused before a token is sent, with an error such as:
+
+```text
+read pve: the stored cluster CA of the remote is missing or unusable; restore it with `nebula pve remote repin <id> --ca-file pve-root-ca.pem` …
+```
+
+The remote is **not** blocked: its endpoints presented nothing different.
+Restore the CA with the same command as a re-pin, typing the **unchanged
+current pin** as the new fingerprint:
+
+```sh
+nebula pve remote repin <id> --ca-file pve-root-ca.pem
+```
+
+Copy `pve-root-ca.pem` from a node out of band as for `add`. The executor
+accepts a re-pin to the current pin only in this case: the remote is an
+active cluster, a CA file is given, the stored CA is missing or unusable,
+the CA file's fingerprint equals the pin and every endpoint's leaf chains
+to it. It still needs the HIGH-risk approval. On success the CLI prints
+`stored cluster CA restored from --ca-file (pin … and generation N
+unchanged)`; pin, trust generation, grants and permits stay as they are.
+Every other re-pin to the current pin is refused (`the new fingerprint
+equals the current pin: that is only accepted with --ca-file to restore a
+missing or unusable stored cluster CA …`). If the restore is not possible
+(for example the remote is blocked), remove the remote and add it again
+with `--ca-file`.
 
 ## Removing a remote
 
@@ -650,6 +700,7 @@ history is merely evidence of a past run.
 | Dataset `unavailable: insufficient read privileges` (backups) | Expected with a read-only token (see above). Do not borrow the action token or add write privileges for inventory. |
 | Guest agent fields unavailable on PVE 8 | PVE 8's legacy `VM.Monitor` is too broad for a read-only token; agent-derived fields stay unavailable unless a separately reviewed mechanism is provided. PVE 9 informational agent methods work with the read token. |
 | `add`/`rotate-token`/`remove`/`repin` refuse to run | The executor vault is locked: run `nebula unlock` on the executor host first. |
+| `the stored cluster CA of the remote is missing or unusable` | The vault entry of a leaf-only cluster's CA is lost or damaged. Copy `/etc/pve/pve-root-ca.pem` out of band and run `nebula pve remote repin <id> --ca-file pve-root-ca.pem`, typing the unchanged current pin as the new fingerprint (see [Restoring a missing or unusable stored cluster CA](#restoring-a-missing-or-unusable-stored-cluster-ca)). |
 | CLI cannot dial the executor | Check `NEBULA_EXECUTOR_SOCKET` and that the socket is served by the `NEBULA_EXECUTOR_USER` user (default `nebula-executor`). |
 | `the template is not prepared or changed; prepare it again` on the deployment wizard | Expected today: no release can prepare a template (see [Guest provisioning](#guest-provisioning)). PVE was not changed; clear a static address on the network page if the message says it stays reserved. |
 | No Power section on the chart; `/pve/guests/power` or `/pve/guests/snapshots` answers 404 | Expected today: guest power and snapshots are not available (see [What you can use today](#what-you-can-use-today)). |
