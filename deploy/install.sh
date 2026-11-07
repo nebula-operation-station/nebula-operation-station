@@ -347,7 +347,8 @@ fi
 # be skipped: then that one line stays. What a run leaves behind tells the next
 # run what units_manifest cannot: a unit with one of these checksums is
 # unedited even if the tarball has moved on, and its restart may still be due.
-# Like units_manifest it holds shipped checksums only.
+# Like units_manifest it holds shipped checksums only, plus "restart  NAME"
+# lines for the restarts new binaries make due (record_restart).
 units_pending="${var_lib}/units.pending"
 
 # restart_units are the units that new binaries make due for a restart, in
@@ -358,13 +359,26 @@ restart_units=(
   nebula-pve-collector.service
 )
 
-# record_restart NAME puts the restart of NAME on the pending record, with the
-# shipped checksum of its unit (as clear_pending_units does), so that a run
-# that stops before the restart leaves it due for the next run.
+# record_restart NAME puts the restart of NAME on the pending record, so that
+# a run that stops before the restart leaves it due for the next run. The
+# line is "restart  NAME", not a checksum: it says nothing about the unit
+# file, so it can never make an edited unit look unedited (unit_pending skips
+# it), and it is told apart from the unit versions install_unit records.
 record_restart() {
-  local sum
-  sum=$(sha256sum "${script_dir}/systemd/$1" | cut -d' ' -f1)
-  printf '%s  %s\n' "${sum}" "$1" >> "${units_pending}"
+  printf 'restart  %s\n' "$1" >> "${units_pending}"
+}
+
+# restart_pending NAME succeeds if the record holds a restart of NAME that new
+# binaries made due (record_restart).
+restart_pending() {
+  local tag entry
+  [[ -f "${units_pending}" ]] || return 1
+  while read -r tag entry; do
+    if [[ "${tag}" == restart && "${entry}" == "$1" ]]; then
+      return 0
+    fi
+  done < "${units_pending}"
+  return 1
 }
 # end: pending record
 
@@ -556,13 +570,15 @@ warn_kept_unit() {
 # and makes the restarts that are still due.
 refresh_units() {
   local name shipped target shipped_sum stored_sum current_sum record manifest_lines=""
-  # A restart an earlier run skipped, or left due by stopping after new
-  # binaries, stays due whatever became of the unit file since (kept, masked,
-  # up to date); so does one the binary install of this run put on record.
-  # Looked up before the loop, which puts the units it installs on record, or
-  # a first install would count as well.
+  # A restart left due by stopping after new binaries stays due whatever
+  # became of the unit file since (kept, masked, up to date); so does one the
+  # binary install of this run put on record, and a collector restart an
+  # earlier run skipped (clear_pending_units keeps that one as a checksum
+  # line). Looked up before the loop, which puts the units it installs on
+  # record, or a first install would count as well.
   for name in "${restart_units[@]}"; do
-    if unit_pending "${name}"; then
+    if restart_pending "${name}" \
+      || { [[ "${name}" == nebula-pve-collector.service ]] && unit_pending "${name}"; }; then
       refreshed_units+=("${name}")
     fi
   done

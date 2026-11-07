@@ -1593,9 +1593,9 @@ CASES
       expect "${name}: the new server binary is in place" has_content "$refresh_sb/bin/nebula-server" "nebula-server build $bin_build"
       expect "${name}: the next run of this tarball changes no binary" bins_current
       expect "${name}: the collector is not restarted yet" collector_restarts_are 0
-      expect "${name}: the server restart is on record" pending_has "$(text_sum 'nebula-server.service v1')" nebula-server.service
-      expect "${name}: the executor restart is on record" pending_has "$(text_sum 'nebula-executor.service v1')" nebula-executor.service
-      expect "${name}: the collector restart is on record" pending_has "$(text_sum "$collector v1")" "$collector"
+      expect "${name}: the server restart is on record" pending_has restart nebula-server.service
+      expect "${name}: the executor restart is on record" pending_has restart nebula-executor.service
+      expect "${name}: the collector restart is on record" pending_has restart "$collector"
       inst_bin_changed=0
       stub_fail=""
       run_install
@@ -1623,9 +1623,9 @@ CASES
   run_install
   expect "stopped installing the collector binary: the run fails" rc_not_zero
   expect "stopped installing the collector binary: nothing is restarted" restarts_are ''
-  expect "stopped installing the collector binary: the server restart is on record" pending_has "$(text_sum 'nebula-server.service v1')" nebula-server.service
-  expect "stopped installing the collector binary: the executor restart is on record" pending_has "$(text_sum 'nebula-executor.service v1')" nebula-executor.service
-  expect "stopped installing the collector binary: the collector restart is on record" pending_has "$(text_sum "$collector v1")" "$collector"
+  expect "stopped installing the collector binary: the server restart is on record" pending_has restart nebula-server.service
+  expect "stopped installing the collector binary: the executor restart is on record" pending_has restart nebula-executor.service
+  expect "stopped installing the collector binary: the collector restart is on record" pending_has restart "$collector"
   expect "stopped installing the collector binary: the new collector binary is in place" has_content "$refresh_sb/bin/nebula-pve-collector" "nebula-pve-collector build $bin_build"
   expect "stopped installing the collector binary: the re-run changes no binary" bins_current
   stub_stop_at_unit=""
@@ -2012,6 +2012,18 @@ CASES
   run_install
   expect "damaged pending file: the run succeeds" rc_is 0
   expect "damaged pending file: the unit is kept" has_content "$refresh_sb/etc/$server" 'admin edit'
+
+  # A restart that new binaries left due says nothing about the unit file: an
+  # edited unit stays, and still gets its restart.
+  installed_host
+  printf 'admin edit\n' > "$refresh_sb/etc/$server"
+  ship "$server" "$server v2"
+  printf 'restart  %s\n' "$server" > "$refresh_sb/var/units.pending"
+  run_install
+  expect "restart on record, edited unit: the run succeeds" rc_is 0
+  expect "restart on record, edited unit: the edit is kept" has_content "$refresh_sb/etc/$server" 'admin edit'
+  expect "restart on record, edited unit: it restarts, once" restarts_are "restart $server"
+  expect "restart on record, edited unit: nothing stays pending" nothing_pending
 fi
 
 # --- Root-gated: real runs of install.sh and uninstall.sh -------------------
