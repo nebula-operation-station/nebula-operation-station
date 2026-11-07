@@ -32,28 +32,46 @@ EOF
 }
 
 # provision_pve_spool creates what a version older than the drop-in did not:
-# ReadWritePaths on a missing directory stops the unit (226/NAMESPACE).
-# install -d -m also re-applies the mode of an existing directory, so this
-# repairs what a collector unit left behind: with UMask=0077 and
+# ReadWritePaths on a missing directory stops the unit (226/NAMESPACE). It
+# converges every spool directory to install.sh's state - mode, owner and
+# group, re-applied on every run like install.sh's install -d -m - so an
+# upgraded host ends with what install.sh would give it. That also repairs
+# what a collector unit left behind: with UMask=0077 and
 # RestrictSUIDSGID=yes it cannot give its spool directories the setgid/group
-# bits the server needs to list and unlink what it imported (install.sh
-# creates them with their final mode for that reason). A directory that
-# already has the right mode is left alone. Below the pve root, which the
-# collector owns, it works as the collector: as root, a symlink swapped in
+# bits the server needs to list and unlink what it imported. A directory
+# that already has install.sh's state is left alone. The owner and group
+# only root can fix; the postinst chowns as root with --no-dereference, so a
+# symlink swapped in below the pve root cannot redirect it to its target.
+# The mode is re-applied as the collector: as root, a symlink swapped in
 # there would redirect the mode change.
 provision_pve_spool() {
   if ! getent passwd nebula-pve-collector >/dev/null; then
     useradd --system --home-dir "${var_lib}/pve" --shell /usr/sbin/nologin -G nebula-rpc nebula-pve-collector || return 1
   fi
-  if [ ! -d "${var_lib}/pve" ]; then
+  if [ -d "${var_lib}/pve" ] && [ "$(stat -c '%a %U %G' "${var_lib}/pve")" = "2750 nebula-pve-collector nebula-rpc" ]; then
+    :
+  else
     install -d -m 2750 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve" || return 1
   fi
   for entry in results:2770 guestnet:2770 requests:2770 live:2750; do
     dir="${var_lib}/pve/${entry%:*}"
     mode="${entry#*:}"
-    if [ -d "${dir}" ] && [ "$(stat -c %a "${dir}")" = "${mode}" ]; then
+    state="$(stat -c '%a %U %G' "${dir}" 2>/dev/null)" || state=""
+    if [ "${state}" = "${mode} nebula-pve-collector nebula-rpc" ]; then
       continue
     fi
+    case "${state}" in
+      ""|*"nebula-pve-collector nebula-rpc")
+        # Absent (the collector creates it with the right owner and group)
+        # or only the mode is wrong (the collector can chmod its own
+        # directory).
+        ;;
+      *)
+        # A wrong owner or group only root can fix; --no-dereference keeps a
+        # swapped-in symlink from redirecting it to its target.
+        chown --no-dereference nebula-pve-collector:nebula-rpc "${dir}" || return 1
+        ;;
+    esac
     setpriv --reuid=nebula-pve-collector --regid=nebula-rpc --clear-groups \
       install -d -m "${mode}" "${dir}" || return 1
   done
