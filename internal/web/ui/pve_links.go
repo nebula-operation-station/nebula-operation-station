@@ -62,11 +62,6 @@ const pveSuggestBudget = 2 * time.Second
 // computed because the page budget was used up.
 const pveSuggestSkippedNote = "Suggestions skipped: the time budget of this page was used up. Reload the page to try again."
 
-// pveUnlinkReasonMaxChars is the character (rune) limit of an unlink
-// reason, the same as the form's maxlength. The store additionally limits
-// the UTF-8 encoding to pveinventory.MaxUnlinkReasonLen bytes.
-const pveUnlinkReasonMaxChars = 200
-
 // pveLinkFormMax bounds the link and unlink form bodies.
 const pveLinkFormMax = 4 << 10
 
@@ -589,8 +584,8 @@ func (h *Handler) handlePVEUnlink(w http.ResponseWriter, r *http.Request) {
 	}
 	reason, ok := pveUnlinkReason(r.PostFormValue("reason"))
 	if !ok {
-		http.Error(w, fmt.Sprintf("a reason of 1 to %d characters without control characters is required; it is stored in at most %d bytes, so umlauts and other non-ASCII characters count twice or more",
-			pveUnlinkReasonMaxChars, pveinventory.MaxUnlinkReasonLen), http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("a reason of 1 to %d bytes (UTF-8) without control characters is required: an ASCII character is one byte, umlauts and other non-ASCII characters are two or more",
+			pveinventory.MaxUnlinkReasonLen), http.StatusBadRequest)
 		return
 	}
 	l, err := in.store.Unlink(ctx, in.remoteID, in.vmid, in.generation, in.user, reason)
@@ -604,13 +599,13 @@ func (h *Handler) handlePVEUnlink(w http.ResponseWriter, r *http.Request) {
 }
 
 // pveUnlinkReason trims and checks an unlink reason: valid UTF-8, not
-// empty, at most pveUnlinkReasonMaxChars characters (runes, as the form's
-// maxlength) and at most pveinventory.MaxUnlinkReasonLen bytes (the
-// store's limit, so a valid reason never fails in the store), no control
-// characters.
+// empty, at most pveinventory.MaxUnlinkReasonLen bytes (the store's limit,
+// so a valid reason never fails in the store; the only limit, since a
+// character limit of the same size could never apply first), no control
+// characters. The form's maxlength only stops ASCII text early.
 func pveUnlinkReason(s string) (string, bool) {
 	s = strings.TrimSpace(s)
-	if s == "" || !utf8.ValidString(s) || utf8.RuneCountInString(s) > pveUnlinkReasonMaxChars || len(s) > pveinventory.MaxUnlinkReasonLen {
+	if s == "" || !utf8.ValidString(s) || len(s) > pveinventory.MaxUnlinkReasonLen {
 		return "", false
 	}
 	for _, c := range s {

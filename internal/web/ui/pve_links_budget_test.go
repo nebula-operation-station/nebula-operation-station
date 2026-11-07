@@ -223,10 +223,11 @@ func TestPVEHostileConflictAndMatchTextEscaped(t *testing.T) {
 	}
 }
 
-// TestPVEUnlinkReasonCountsCharacters checks the reason limit: umlauts
-// count as one character each (form maxlength), and a reason over the
-// store's byte limit is a 400 with a clear message, never a store error.
-func TestPVEUnlinkReasonCountsCharacters(t *testing.T) {
+// TestPVEUnlinkReasonCountsBytes checks the reason limit: it is the
+// store's byte limit, so 100 umlauts (200 bytes) fit and 101 umlauts
+// (202 bytes, only 101 characters) are rejected with a message that names
+// bytes, before anything reaches the store.
+func TestPVEUnlinkReasonCountsBytes(t *testing.T) {
 	e := newLinkEnv(t)
 	e.guests(1, agentGuest(101, 1, "vm-a", "aa:bb:cc:dd:ee:01", "10.77.10.101"))
 	e.host("web1", "Web one", "10.77.10.101")
@@ -238,9 +239,8 @@ func TestPVEUnlinkReasonCountsCharacters(t *testing.T) {
 		reason string
 	}{
 		{"201 ASCII characters", strings.Repeat("a", 201)},
-		{"201 umlauts", strings.Repeat("ä", 201)},
-		{"200 umlauts, 400 bytes", strings.Repeat("ä", 200)},
 		{"101 umlauts, 202 bytes", strings.Repeat("ü", 101)},
+		{"199 ASCII and one umlaut, 201 bytes", strings.Repeat("a", 199) + "ä"},
 		{"umlaut with control character", "Grund ö\x07"},
 	} {
 		code, body, _ := e.unlink("101", "1", tc.reason)
@@ -248,7 +248,7 @@ func TestPVEUnlinkReasonCountsCharacters(t *testing.T) {
 			t.Errorf("%s: unlink = %d, want 400\n%s", tc.name, code, body)
 			continue
 		}
-		if !strings.Contains(body, "200 characters") || !strings.Contains(body, "200 bytes") {
+		if !strings.Contains(body, "1 to 200 bytes") || strings.Contains(body, "200 characters") {
 			t.Errorf("%s: message %q does not explain the limit", tc.name, body)
 		}
 	}

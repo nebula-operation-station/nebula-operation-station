@@ -575,9 +575,9 @@ budget show "Suggestions skipped"; reload the page to try again.
 
 **Linking and releasing.** Nothing is linked automatically, not by MAC, IP,
 hostname or VMID. **Verknüpfen** links the guest to that candidate,
-**Lösen** releases a link and needs a reason of 1 to 200 characters; the
-reason is stored in at most 200 bytes, so umlauts and other non-ASCII
-characters count twice or more. The released link stays in the link
+**Lösen** releases a link and needs a reason of 1 to 200 bytes (UTF-8):
+an ASCII character is one byte, umlauts and other non-ASCII characters
+count twice or more, so at most 100 umlauts fit. The released link stays in the link
 history with the reason. Both buttons need a logged-in user and an open
 privileged session, and each change is written to the server log as an
 audit line (`pve_guest_linked` / `pve_guest_unlinked`, with the user). A
