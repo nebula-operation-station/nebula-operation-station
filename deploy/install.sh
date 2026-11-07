@@ -348,11 +348,13 @@ fi
 # run what units_manifest cannot: a unit with one of these checksums is
 # unedited even if the tarball has moved on, and its restart may still be due.
 # Like units_manifest it holds shipped checksums only, plus "restart  NAME"
-# lines for the restarts new binaries make due (record_restart).
+# lines for the restarts new binaries make due (record_restart) and for a
+# skipped collector restart (clear_pending_units).
 units_pending="${var_lib}/units.pending"
 
-# restart_units are the units that new binaries make due for a restart, in
-# the order the restart step restarts them: the executor before the collector.
+# restart_units are the units that new binaries make due for a restart. The
+# order here does not matter: the start step restarts them in the order of its
+# server, executor and collector blocks, the executor before the collector.
 restart_units=(
   nebula-server.service
   nebula-executor.service
@@ -391,7 +393,7 @@ restart_pending() {
 # is installed (an upgrade, not a first install) goes on the pending record
 # first, before a binary is replaced. The record is cleared only at the end of
 # the restart step, after each restart happened (or found the unit stopped);
-# a skipped collector restart stays on it.
+# a skipped collector restart stays on it, as a restart line as well.
 bin_changed=0
 if [[ ${from_package} -eq 0 ]]; then
   for bin in "${binaries[@]}"; do
@@ -535,20 +537,19 @@ install_unit() {
 }
 
 # clear_pending_units [NAME] forgets what the run has done: the whole record,
-# or all of it but the restart of NAME, which the run had to skip. That line
-# holds the shipped checksum, also if the unit on disk is an edit, which must
-# not look unedited. The rename means that a stop here leaves the old record
-# or the new one, and either way the restart stays due.
+# or all of it but the restart of NAME, which the run had to skip. That one is
+# kept as a "restart  NAME" line (record_restart), like the restarts new
+# binaries make due: it says nothing about the unit file, so an edit on disk
+# can never look unedited. The rename means that a stop here leaves the old
+# record or the new one, and either way the restart stays due.
 clear_pending_units() {
-  local sum
   if [[ $# -eq 0 ]]; then
     rm -f "${units_pending}"
     return 0
   fi
-  sum=$(sha256sum "${script_dir}/systemd/$1" | cut -d' ' -f1)
   tmp_units_pending=$(mktemp "${units_pending}.XXXXXX")
   trap 'rm -f "${tmp_units_pending}"' EXIT
-  printf '%s  %s\n' "${sum}" "$1" > "${tmp_units_pending}"
+  printf 'restart  %s\n' "$1" > "${tmp_units_pending}"
   chmod 0644 "${tmp_units_pending}"
   mv -fT "${tmp_units_pending}" "${units_pending}"
   trap - EXIT
@@ -573,12 +574,11 @@ refresh_units() {
   # A restart left due by stopping after new binaries stays due whatever
   # became of the unit file since (kept, masked, up to date); so does one the
   # binary install of this run put on record, and a collector restart an
-  # earlier run skipped (clear_pending_units keeps that one as a checksum
-  # line). Looked up before the loop, which puts the units it installs on
+  # earlier run skipped (clear_pending_units keeps that one as a restart line
+  # too). Looked up before the loop, which puts the units it installs on
   # record, or a first install would count as well.
   for name in "${restart_units[@]}"; do
-    if restart_pending "${name}" \
-      || { [[ "${name}" == nebula-pve-collector.service ]] && unit_pending "${name}"; }; then
+    if restart_pending "${name}"; then
       refreshed_units+=("${name}")
     fi
   done
