@@ -57,7 +57,7 @@ provision_pve_spool() {
   fi
   # install -d follows a symlink, so it must not run on one: a link swapped
   # in at the pve root would hand its target to the collector. A file is
-  # not a directory either. Both are left alone and stop the upgrade.
+  # not a directory either. Both are left alone and skip the drop-in refresh.
   if [ -L "${var_lib}/pve" ] || { [ -e "${var_lib}/pve" ] && [ ! -d "${var_lib}/pve" ]; }; then
     return 1
   fi
@@ -71,7 +71,7 @@ provision_pve_spool() {
     mode="${entry#*:}"
     # The same guard as the pve root: install -d follows a symlink and
     # would re-apply the mode to its target, and a file is not a spool
-    # directory. Both are left alone and stop the upgrade.
+    # directory. Both are left alone and skip the drop-in refresh.
     if [ -L "${dir}" ] || { [ -e "${dir}" ] && [ ! -d "${dir}" ]; }; then
       return 1
     fi
