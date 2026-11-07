@@ -140,6 +140,11 @@ func TestSetupBatchAuthorityServesBatches(t *testing.T) {
 	if _, err := e.svc.RunBatchMember(ctx, member); status.Code(err) != codes.NotFound {
 		t.Fatalf("member run of an unknown batch: %v", err)
 	}
+	// Container update members run as durable jobs through the production
+	// transport (hostrun.Dispatch) and are reconciled, never attached.
+	if !e.svc.BatchContainerMembersDurable() {
+		t.Fatal("the shipped executor does not run container members durable")
+	}
 	resp, err := e.svc.GetBatchCredentialVersions(ctx, read)
 	if err != nil {
 		t.Fatal(err)

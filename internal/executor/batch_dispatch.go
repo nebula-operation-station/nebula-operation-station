@@ -81,6 +81,11 @@ type batchMemberCall struct {
 	// remoteMayRun: the attached run ended without the remote shell's
 	// exit status, so it may still be running on the target.
 	remoteMayRun bool
+	// durable: a container member, run as a durable job (chosen from the
+	// frozen action ID, container_member.go). dispatched: its job may be on
+	// the host, so the run is the reconciler's to finish. jobOver: its run
+	// finished with proof that the job is over (durableJobOver).
+	durable, dispatched, jobOver bool
 }
 
 // heldTarget is a target whose last batch member may still be running
@@ -103,12 +108,17 @@ type heldTarget struct {
 	// run restarts with the target held), but neither a recheck nor the
 	// reserved operator release frees it while the member runs.
 	running bool
+	// durable: the hold waits for a durable job (a container member). Only
+	// the executor's run record ending with the job over frees it
+	// (durableHoldGone), never hostrun.RunVisible.
+	durable bool
 }
 
 // holdCall keeps only what reaching the target needs; the run's secrets
 // and artifact are not kept.
 func holdCall(call *batchMemberCall) *batchMemberCall {
-	return &batchMemberCall{hostID: call.hostID, fingerprint: call.fingerprint, endpoints: slices.Clone(call.endpoints), eps: slices.Clone(call.eps)}
+	return &batchMemberCall{hostID: call.hostID, fingerprint: call.fingerprint, endpoints: slices.Clone(call.endpoints), eps: slices.Clone(call.eps),
+		durable: call.durable}
 }
 
 // batchExec is the executor's production batch execution state.
@@ -116,9 +126,17 @@ type batchExec struct {
 	disp     *dispatch.Dispatcher
 	attached attachedRunner
 	visible  runVisibleFunc
+	// durable starts a container member's durable job (hostrun.Dispatch).
+	durable durableRunner
 	// holdWait and holdPoll bound the wait for a possibly still running
 	// remote process (batchHoldWait, batchHoldPoll; tests shorten them).
 	holdWait, holdPoll time.Duration
+	// durablePoll is how often a dispatched container job is checked
+	// (containerRunPoll; tests shorten it).
+	durablePoll time.Duration
+	// composePins are the binding-consuming artifacts a container member
+	// may name (shippedComposeUpdatePin; tests pin stand-ins).
+	composePins []containerArtifact
 
 	mu sync.Mutex
 	// calls are the claimed member runs in flight, by execution ID.
@@ -159,7 +177,8 @@ func (s *Service) EnableBatchExecution() error {
 	if s.batchAuth == nil {
 		return errors.New("executor: batch execution needs the batch authority")
 	}
-	x := &batchExec{attached: hostrun.Attached, visible: hostrun.RunVisible, holdWait: batchHoldWait, holdPoll: batchHoldPoll,
+	x := &batchExec{attached: hostrun.Attached, visible: hostrun.RunVisible, durable: hostrun.Dispatch, durablePoll: containerRunPoll,
+		composePins: []containerArtifact{shippedComposeUpdatePin()}, holdWait: batchHoldWait, holdPoll: batchHoldPoll,
 		calls: map[string]*batchMemberCall{}, hosts: map[string]string{}, held: map[string]*heldTarget{}, writeHeld: writeFileAtomic}
 	// Holds from before a restart, rechecked before any member starts on
 	// their targets; without a usable store no member starts.
@@ -275,7 +294,7 @@ func (s *Service) reserveTarget(x *batchExec, hostID, executionID string, call *
 		return false, nil
 	}
 	x.hosts[hostID] = executionID
-	x.held[hostID] = &heldTarget{executionID: executionID, heldAt: s.clock(), running: true, call: holdCall(call)}
+	x.held[hostID] = &heldTarget{executionID: executionID, heldAt: s.clock(), running: true, durable: call.durable, call: holdCall(call)}
 	if err := s.saveHeldLocked(x); err != nil {
 		delete(x.hosts, hostID)
 		delete(x.held, hostID)
@@ -313,6 +332,7 @@ func (s *Service) holdHost(x *batchExec, hostID, executionID string, call *batch
 		x.held[hostID] = h
 		x.hosts[hostID] = executionID
 	}
+	h.durable = h.durable || call.durable
 	h.running = false
 	h.heldAt = s.clock()
 	_ = s.saveHeldLocked(x)
@@ -331,10 +351,16 @@ func (s *Service) recheckHeld(ctx context.Context, x *batchExec, hostID string) 
 	}
 	h.checking = true
 	x.mu.Unlock()
-	cctx, cancel := context.WithTimeout(ctx, batchHoldRecheck)
-	running, err := s.remoteRunVisible(cctx, x, h.call, h.executionID)
-	cancel()
-	gone := err == nil && !running
+	var gone bool
+	if h.durable {
+		// A durable job runs as root: only its reconciled run shows it over.
+		gone = s.durableHoldGone(hostID, h.executionID)
+	} else {
+		cctx, cancel := context.WithTimeout(ctx, batchHoldRecheck)
+		running, err := s.remoteRunVisible(cctx, x, h.call, h.executionID)
+		cancel()
+		gone = err == nil && !running
+	}
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	h.checking = false
@@ -414,6 +440,18 @@ func (s *Service) RunBatchMember(ctx context.Context, req *pb.RunBatchMemberRequ
 	if err != nil {
 		return nil, err
 	}
+	// A container mutation runs durable with the fixed timeout, and only with
+	// the pinned binding-consuming artifact and version, and the parameters
+	// rendered from its frozen binding (container_member.go).
+	durable := isContainerMember(member)
+	if durable {
+		if err := checkContainerMember(member, ap.Parameters[index], x.composePins...); err != nil {
+			s.log.Warn("audit", "kind", "batch_member_refused", "batch", d.String(), "member", member.MemberID, "host", target.HostID,
+				"detail", err.Error())
+			return nil, status.Error(codes.FailedPrecondition, "container_member_refused: "+err.Error())
+		}
+		timeout = containerMutationTimeout
+	}
 	secrets, err := s.runSecrets(ap.Parameters[index])
 	if err != nil {
 		return nil, err
@@ -428,7 +466,7 @@ func (s *Service) RunBatchMember(ctx context.Context, req *pb.RunBatchMemberRequ
 	}
 	resp := &pb.RunBatchMemberResponse{ExecutionId: execID, ExitCode: -1}
 	call := &batchMemberCall{hostID: target.HostID, fingerprint: target.HostKeyFingerprint, endpoints: slices.Clone(req.GetEndpoints()),
-		eps: eps, artifact: req.GetArtifact(), secrets: secrets, timeout: timeout, resp: resp}
+		eps: eps, artifact: req.GetArtifact(), secrets: secrets, timeout: timeout, resp: resp, durable: durable}
 	// The reservation is persisted before anything is claimed or started.
 	reserved, rerr := s.reserveTarget(x, target.HostID, execID, call)
 	if rerr == nil && !reserved && s.recheckHeld(ctx, x, target.HostID) {
@@ -487,7 +525,15 @@ func (s *Service) RunBatchMember(ctx context.Context, req *pb.RunBatchMemberRequ
 	// A run that may still be running keeps the target held until the
 	// host shows it gone, so no other batch member starts there meanwhile
 	// (whatever the stop policy decides for the rest of the rollout).
-	if call.remoteMayRun {
+	if call.durable && call.dispatched && !call.jobOver {
+		// A durable job without a reconciled end may still run as root;
+		// only its run record ending with the job over frees the target.
+		release = false
+		s.holdHost(x, target.HostID, execID, call)
+		resp.Detail += "; the target stays held until the executor has reconciled this durable job as over"
+		s.log.Warn("audit", "kind", "batch_target_held", "batch", d.String(), "member", member.MemberID, "execution", execID,
+			"host", target.HostID, "detail", "the durable job is not reconciled as over; no batch member starts there until it is")
+	} else if call.remoteMayRun {
 		if s.awaitRemoteEnd(ctx, x, call, execID) {
 			s.log.Info("audit", "kind", "batch_target_released", "batch", d.String(), "member", member.MemberID, "execution", execID,
 				"host", target.HostID, "detail", "the run is no longer running on the target")
@@ -568,8 +614,11 @@ func (s *Service) batchTransport(ctx context.Context, x *batchExec, run dispatch
 		resp.Unreachable = class == classNetworkUnreachable
 		return fail(class, detail)
 	}
-	defer c.Close()
 	resp.Endpoint = c.Endpoint.String()
+	if call.durable {
+		return s.durableMemberTransport(ctx, x, call, run, c)
+	}
+	defer c.Close()
 	// Marked running before the script is handed over: a crash from here
 	// on is reconciled as unknown (no job directory), never as not run.
 	if err := s.db.MarkRunRunning(run.ExecutionID, call.hostID, resp.Endpoint); err != nil {
@@ -656,7 +705,7 @@ func (r batchRunRecorder) RecordIntent(_ context.Context, run dispatch.Run) erro
 		return fmt.Errorf("batch: read run: %w", err)
 	}
 	if err := r.s.db.CreateRun(executordb.Run{ExecutionID: run.ExecutionID, HostID: call.hostID, Digest: run.ParentDigest,
-		Endpoints: call.endpoints, Fingerprint: call.fingerprint, Timeout: call.timeout}); err != nil {
+		Endpoints: call.endpoints, Fingerprint: call.fingerprint, Timeout: call.timeout, MemberID: run.MemberID, ActionID: run.ActionID}); err != nil {
 		if _, gerr := r.s.db.GetRun(run.ExecutionID, call.hostID); gerr == nil {
 			return dispatch.ErrIntentRecorded
 		}
@@ -672,6 +721,11 @@ func (r batchRunRecorder) RecordOutcome(_ context.Context, run dispatch.Run, o d
 	call, ok := r.x.call(run.ExecutionID)
 	if !ok {
 		return errors.New("batch: no call state for the run")
+	}
+	if call.dispatched {
+		// A durable job may be on the host: only reconciliation, which reads
+		// the host, finishes its run (it may have finished it already).
+		return nil
 	}
 	resp := call.resp
 	fin := executordb.Run{ExecutionID: run.ExecutionID, HostID: call.hostID, Class: resp.GetClass(), Detail: resp.GetDetail(),

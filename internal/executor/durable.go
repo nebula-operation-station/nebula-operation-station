@@ -138,6 +138,8 @@ func (s *Service) finishRun(r executordb.Run) {
 		"result_bytes", len(r.Result), "log_bytes", len(r.Log), "log_truncated", r.LogTruncated)
 	// The stage engine decides on the executor's own record of the run.
 	s.auth.RecordOutcome(r.ExecutionID, r.HostID, permit.OutcomeOfClass(r.Class))
+	// So does the batch rollout, for a durable batch member's run.
+	s.memberRunFinished(r.ExecutionID, r.HostID, r.Class)
 }
 
 // Reconcile runs reconciliation passes until ctx ends (spec 07). A pass
