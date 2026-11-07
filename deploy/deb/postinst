@@ -6,6 +6,82 @@
 # the backup before that needs the admin's own sudo, which dpkg does not
 # have (review m105). The services keep running the old version until the
 # admin has made a backup and restarts them.
+#
+# Only install.sh knows the executor's flags, but the server drop-in is the
+# same on every host, so an upgrade refreshes it here: it takes effect at the
+# admin's restart, and the upgraded server can unlink what it imported. It
+# must equal the one in install.sh (pinned by deploy/deb/postinst_test.go).
+var_lib=/var/lib/nebula
+systemd_dir=/etc/systemd/system
+server_drop_in="${systemd_dir}/nebula-server.service.d/20-discovery.conf"
+
+render_server_drop_in() {
+  cat <<EOF
+# Written by deploy/install.sh on every run; do not edit by hand.
+# nebula-server queues discovery scans here (spec 12).
+[Service]
+ReadWritePaths=${var_lib}/discovery/jobs
+# nebula-server writes the live want-list for nebula-pve-collector here
+# (ADR 0006 P1-37); it never reads Proxmox itself.
+ReadWritePaths=${var_lib}/pve/requests
+# nebula-server unlinks the observations and guest NIC records it imported
+# (ADR 0006 P1-10); without this the spool only grows.
+ReadWritePaths=${var_lib}/pve/results
+ReadWritePaths=${var_lib}/pve/guestnet
+EOF
+}
+
+# provision_pve_spool creates what a version older than the drop-in did not:
+# ReadWritePaths on a missing directory stops the unit (226/NAMESPACE).
+# install -d -m also re-applies the mode of an existing directory, so this
+# repairs what a collector unit left behind: with UMask=0077 and
+# RestrictSUIDSGID=yes it cannot give its spool directories the setgid/group
+# bits the server needs to list and unlink what it imported (install.sh
+# creates them with their final mode for that reason). A directory that
+# already has the right mode is left alone. Below the pve root, which the
+# collector owns, it works as the collector: as root, a symlink swapped in
+# there would redirect the mode change.
+provision_pve_spool() {
+  if ! getent passwd nebula-pve-collector >/dev/null; then
+    useradd --system --home-dir "${var_lib}/pve" --shell /usr/sbin/nologin -G nebula-rpc nebula-pve-collector || return 1
+  fi
+  if [ ! -d "${var_lib}/pve" ]; then
+    install -d -m 2750 -o nebula-pve-collector -g nebula-rpc "${var_lib}/pve" || return 1
+  fi
+  for entry in results:2770 guestnet:2770 requests:2770 live:2750; do
+    dir="${var_lib}/pve/${entry%:*}"
+    mode="${entry#*:}"
+    if [ -d "${dir}" ] && [ "$(stat -c %a "${dir}")" = "${mode}" ]; then
+      continue
+    fi
+    setpriv --reuid=nebula-pve-collector --regid=nebula-rpc --clear-groups \
+      install -d -m "${mode}" "${dir}" || return 1
+  done
+}
+
+# refresh_server_drop_in acts only where install.sh has run: without the
+# drop-in the host is not configured yet. It never fails the upgrade: the old
+# drop-in still lets the server start, the spool just keeps growing.
+refresh_server_drop_in() {
+  [ -f "${server_drop_in}" ] || return 0
+  tmp="${server_drop_in}.dpkg-tmp"
+  if provision_pve_spool && render_server_drop_in > "${tmp}" && chmod 0644 "${tmp}"; then
+    if cmp -s "${tmp}" "${server_drop_in}"; then
+      rm -f "${tmp}"
+      return 0
+    fi
+    if mv -f "${tmp}" "${server_drop_in}"; then
+      echo "nebula: updated ${server_drop_in}; it applies when nebula-server restarts."
+      return 0
+    fi
+  fi
+  rm -f "${tmp}"
+  cat >&2 <<EOF
+nebula: warning: could not update ${server_drop_in}; imported PVE spool files
+nebula: stay until you run: sudo /usr/share/nebula/deploy/install.sh --from-package --admin-users USER --rp-id HOST
+EOF
+}
+
 case "$1" in
   configure)
     if [ -z "$2" ]; then
@@ -19,6 +95,7 @@ not start until it is. Configure it with:
 EOF
       exit 0
     fi
+    refresh_server_drop_in
     [ -d /run/systemd/system ] || exit 0
     systemctl daemon-reload || true
     if ! systemctl is-active --quiet nebula-executor.service; then
