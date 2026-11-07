@@ -508,7 +508,6 @@ func (h *Handler) handlePVEDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	h.pveLeaseState(ctx, id, meta, d)
-	h.pveLinkState(ctx, id, d)
 	if datasets, err := h.pve.ListDatasetStatus(ctx, id); err != nil {
 		h.log.Error("list PVE dataset status", "remote", id, "error", err)
 	} else {
@@ -523,6 +522,9 @@ func (h *Handler) handlePVEDetail(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
+	// Last, and on the request context: the link cells have their own
+	// time budget and cannot expire the page context used above.
+	h.pveLinkState(r.Context(), id, d)
 	pd := pageData{Title: "PVE remote " + rm.Name, Active: "pve", Content: "pve_detail", PVEDetail: d}
 	if d.Live.Offered || d.LinkForms {
 		pd.Scripts = []string{"formpost.js"}

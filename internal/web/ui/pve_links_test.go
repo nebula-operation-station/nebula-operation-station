@@ -98,6 +98,13 @@ type linkEnv struct {
 
 func newLinkEnv(t *testing.T) *linkEnv {
 	t.Helper()
+	return newLinkEnvWith(t, nil)
+}
+
+// newLinkEnvWith is newLinkEnv with the PVE store the UI sees wrapped by
+// wrap (nil: the real store).
+func newLinkEnvWith(t *testing.T, wrap func(*pveinventory.Store) ui.PVEStore) *linkEnv {
+	t.Helper()
 	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
 	if err != nil {
 		t.Fatalf("open server DB: %v", err)
@@ -108,13 +115,17 @@ func newLinkEnv(t *testing.T) *linkEnv {
 		sessions: auth.NewStore(db, time.Now), status: &linkStatus{active: true}, logs: &lockedBuffer{},
 	}
 	log := slog.New(slog.NewTextHandler(e.logs, nil))
+	var pveStore ui.PVEStore = e.pve
+	if wrap != nil {
+		pveStore = wrap(e.pve)
+	}
 	u, err := ui.New(ui.Options{
 		PublicOrigin: pveOrigin,
 		Log:          log,
 		Status:       e.status,
 		Inventory:    e.inv,
 		Hosts:        func(ctx context.Context) ([]inventory.Host, error) { return e.inv.List(ctx) },
-		PVE:          e.pve,
+		PVE:          pveStore,
 		PVEChart:     func(ctx context.Context) (pveinventory.Tree, error) { return e.pve.ChartTree(ctx, time.Now()) },
 		PVERemotes: func(context.Context) ([]ui.PVERemoteMeta, error) {
 			return []ui.PVERemoteMeta{{RemoteID: linkRemote, Name: "Lab", Kind: string(pvecontract.KindStandalone),

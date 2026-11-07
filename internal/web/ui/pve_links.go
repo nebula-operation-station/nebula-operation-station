@@ -12,6 +12,17 @@ package ui
 // every state change), by a logged-in user while a privileged session is
 // open, and every change is written as an audit line with that user. A
 // link is display and drift information only, never an SSH identity.
+//
+// Suggestions are help, not a whitelist: the link POST accepts any
+// inventory host ID, so an admin may link a guest to a host that was not
+// suggested (for example a guest without guest agent or IPAM asset). The
+// conflict confirmation is still enforced for the guest's own conflicts
+// and for a suggested candidate flagged as conflicting.
+//
+// Known gap (review of PR #346): the privileged session is executor-wide
+// and the executor does not report which user opened it, so the gate is
+// not bound to the requesting web user. Closing it needs a change outside
+// this package (see docs/operator/proxmox.md).
 
 import (
 	"context"
@@ -36,6 +47,25 @@ import (
 // pveSuggestGuestLimit caps the unlinked guests a detail page computes
 // suggestions for; each suggestion reads the inventory and IPAM assets.
 const pveSuggestGuestLimit = 100
+
+// pveLinkStateTimeout bounds all link reads of one detail page. It is a
+// context of its own, so the link cells can never expire the context of
+// the other page reads.
+const pveLinkStateTimeout = 4 * time.Second
+
+// pveSuggestBudget bounds the suggestion computation of one detail page
+// (inside pveLinkStateTimeout, so the active links and names still load).
+// Guests not reached within it show pveSuggestSkippedNote.
+const pveSuggestBudget = 2 * time.Second
+
+// pveSuggestSkippedNote is shown for guests whose suggestions were not
+// computed because the page budget was used up.
+const pveSuggestSkippedNote = "Suggestions skipped: the time budget of this page was used up. Reload the page to try again."
+
+// pveUnlinkReasonMaxChars is the character (rune) limit of an unlink
+// reason, the same as the form's maxlength. The store additionally limits
+// the UTF-8 encoding to pveinventory.MaxUnlinkReasonLen bytes.
+const pveUnlinkReasonMaxChars = 200
 
 // pveLinkFormMax bounds the link and unlink form bodies.
 const pveLinkFormMax = 4 << 10
@@ -135,11 +165,34 @@ type pveReusedLink struct {
 	Notice string
 }
 
-// pveHostNames resolves display names of inventory hosts, once per page.
+// pveHostNames resolves display names of inventory hosts. The managed
+// host list is read once per page; a host missing from it (or a failed
+// list) falls back to one Get per host, memoized.
 type pveHostNames struct {
 	h     *Handler
 	ctx   context.Context
 	names map[string]string
+}
+
+// newPVEHostNames preloads the display names of all managed hosts.
+func (h *Handler) newPVEHostNames(ctx context.Context) *pveHostNames {
+	n := &pveHostNames{h: h, ctx: ctx, names: map[string]string{}}
+	if h.hosts == nil {
+		return n
+	}
+	hosts, err := h.hosts(ctx)
+	if err != nil {
+		h.log.Error("list managed hosts for PVE links", "error", err)
+		return n
+	}
+	for _, host := range hosts {
+		if host.DisplayName != "" {
+			n.names[host.ID] = host.DisplayName
+		} else {
+			n.names[host.ID] = host.ID
+		}
+	}
+	return n
 }
 
 func (n *pveHostNames) name(id string) string {
@@ -156,16 +209,51 @@ func (n *pveHostNames) name(id string) string {
 	return name
 }
 
+// pveHostLinks memoizes LinksForHost per host for one page: a host that
+// is a candidate of several guests is read once.
+type pveHostLinks struct {
+	ls   PVELinkStore
+	seen map[string]string
+}
+
+// elsewhere returns the guest the host is already linked to ("" when
+// none).
+func (p *pveHostLinks) elsewhere(ctx context.Context, hostID string) (string, error) {
+	if v, ok := p.seen[hostID]; ok {
+		return v, nil
+	}
+	other, err := p.ls.LinksForHost(ctx, hostID)
+	if err != nil {
+		return "", err
+	}
+	v := ""
+	if len(other) > 0 {
+		v = fmt.Sprintf("%s VMID %d (incarnation %d)", other[0].RemoteID, other[0].VMID, other[0].Generation)
+	}
+	p.seen[hostID] = v
+	return v, nil
+}
+
 // pveHostURL is the host page of a managed host.
 func pveHostURL(id string) string { return "/hosts/" + url.PathEscape(id) }
 
 // pveLinkState fills the "Managed host" cells of the guest rows. Store
 // errors are logged and shown as "unavailable"; nothing is written.
+//
+// ctx should be the request context, not the page's read context: the
+// link reads get their own pveLinkStateTimeout, and the suggestions their
+// own pveSuggestBudget inside it, so a slow store or a large lab leaves
+// later guests with pveSuggestSkippedNote instead of expiring the rest of
+// the page. Active links, host names and host links are read once per
+// page; suggestions are computed only for unlinked guests (at most
+// pveSuggestGuestLimit).
 func (h *Handler) pveLinkState(ctx context.Context, id string, d *pveDetailData) {
 	ls := h.pveLinkStore()
 	if ls == nil || len(d.Guests) == 0 {
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, pveLinkStateTimeout)
+	defer cancel()
 	d.Links = true
 	d.LinkAdmin = h.pvePrivileged(ctx)
 	links, err := ls.ListLinks(ctx, id, pveinventory.MaxLinksQuery)
@@ -178,7 +266,10 @@ func (h *Handler) pveLinkState(ctx context.Context, id string, d *pveDetailData)
 	for _, l := range links {
 		byVMID[l.VMID] = append(byVMID[l.VMID], l)
 	}
-	names := &pveHostNames{h: h, ctx: ctx, names: map[string]string{}}
+	names := h.newPVEHostNames(ctx)
+	hostLinks := &pveHostLinks{ls: ls, seen: map[string]string{}}
+	sctx, scancel := context.WithTimeout(ctx, pveSuggestBudget)
+	defer scancel()
 	base := "/pve/" + url.PathEscape(id) + "/links"
 	suggested := 0
 	for i := range d.Guests {
@@ -215,11 +306,19 @@ func (h *Handler) pveLinkState(ctx context.Context, id string, d *pveDetailData)
 			v.SuggestNote = fmt.Sprintf("Suggestions are computed for the first %d unlinked guests only.", pveSuggestGuestLimit)
 			continue
 		}
+		if sctx.Err() != nil {
+			v.SuggestNote = pveSuggestSkippedNote
+			continue
+		}
 		suggested++
-		if err := h.pveSuggest(ctx, ls, id, vmid, g.generation, names, v); err != nil {
+		if err := h.pveSuggest(sctx, ls, id, vmid, g.generation, names, hostLinks, v); err != nil {
+			v.Candidates, v.Conflicts, v.NeedsConfirm = nil, nil, false
+			if sctx.Err() != nil {
+				v.SuggestNote = pveSuggestSkippedNote
+				continue
+			}
 			h.log.Error("suggest PVE guest links", "remote", id, "vmid", vmid, "error", err)
 			v.SuggestNote = "Suggestions unavailable."
-			v.Candidates, v.Conflicts = nil, nil
 		}
 		for _, c := range v.Candidates {
 			if c.LinkedElsewhere == "" {
@@ -230,10 +329,16 @@ func (h *Handler) pveLinkState(ctx context.Context, id string, d *pveDetailData)
 }
 
 // pveSuggest fills the candidates and conflicts of one unlinked guest.
-func (h *Handler) pveSuggest(ctx context.Context, ls PVELinkStore, id string, vmid, gen uint64, names *pveHostNames, v *pveGuestLinkView) error {
+// The guest conflicts are read only when there is a candidate: they decide
+// whether a suggested link needs the review confirmation, and the link
+// POST checks them again in any case.
+func (h *Handler) pveSuggest(ctx context.Context, ls PVELinkStore, id string, vmid, gen uint64, names *pveHostNames, hostLinks *pveHostLinks, v *pveGuestLinkView) error {
 	cands, err := ls.SuggestHosts(ctx, id, vmid, gen)
 	if err != nil {
 		return err
+	}
+	if len(cands) == 0 {
+		return nil
 	}
 	conflicts, err := ls.GuestConflicts(ctx, id, vmid, gen)
 	if err != nil {
@@ -262,11 +367,11 @@ func (h *Handler) pveSuggest(ctx context.Context, ls PVELinkStore, id string, vm
 		if pc.Conflict {
 			v.NeedsConfirm = true
 		}
-		if other, err := ls.LinksForHost(ctx, hostID); err != nil {
+		other, err := hostLinks.elsewhere(ctx, hostID)
+		if err != nil {
 			return err
-		} else if len(other) > 0 {
-			pc.LinkedElsewhere = fmt.Sprintf("%s VMID %d (incarnation %d)", other[0].RemoteID, other[0].VMID, other[0].Generation)
 		}
+		pc.LinkedElsewhere = other
 		v.Candidates = append(v.Candidates, *pc)
 	}
 	return nil
@@ -416,7 +521,10 @@ func pveLinkRedirect(w http.ResponseWriter, r *http.Request, in pveLinkRequest) 
 
 // handlePVELink creates one explicit link (POST /pve/{id}/links: vmid,
 // generation, host, confirm_conflict). A guest or candidate with a MAC/IP
-// conflict needs confirm_conflict=1, the reviewed confirmation.
+// conflict needs confirm_conflict=1, the reviewed confirmation. host may
+// be any inventory host, not only a suggested one: the admin decides,
+// suggestions are help (the store still refuses unknown hosts and a host
+// already linked to another guest).
 func (h *Handler) handlePVELink(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), pveCallTimeout)
 	defer cancel()
@@ -481,7 +589,8 @@ func (h *Handler) handlePVEUnlink(w http.ResponseWriter, r *http.Request) {
 	}
 	reason, ok := pveUnlinkReason(r.PostFormValue("reason"))
 	if !ok {
-		http.Error(w, fmt.Sprintf("a reason of 1 to %d characters without control characters is required", pveinventory.MaxUnlinkReasonLen), http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("a reason of 1 to %d characters without control characters is required; it is stored in at most %d bytes, so umlauts and other non-ASCII characters count twice or more",
+			pveUnlinkReasonMaxChars, pveinventory.MaxUnlinkReasonLen), http.StatusBadRequest)
 		return
 	}
 	l, err := in.store.Unlink(ctx, in.remoteID, in.vmid, in.generation, in.user, reason)
@@ -495,10 +604,13 @@ func (h *Handler) handlePVEUnlink(w http.ResponseWriter, r *http.Request) {
 }
 
 // pveUnlinkReason trims and checks an unlink reason: valid UTF-8, not
-// empty, at most MaxUnlinkReasonLen bytes, no control characters.
+// empty, at most pveUnlinkReasonMaxChars characters (runes, as the form's
+// maxlength) and at most pveinventory.MaxUnlinkReasonLen bytes (the
+// store's limit, so a valid reason never fails in the store), no control
+// characters.
 func pveUnlinkReason(s string) (string, bool) {
 	s = strings.TrimSpace(s)
-	if s == "" || len(s) > pveinventory.MaxUnlinkReasonLen || !utf8.ValidString(s) {
+	if s == "" || !utf8.ValidString(s) || utf8.RuneCountInString(s) > pveUnlinkReasonMaxChars || len(s) > pveinventory.MaxUnlinkReasonLen {
 		return "", false
 	}
 	for _, c := range s {
