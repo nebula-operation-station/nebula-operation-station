@@ -49,6 +49,12 @@ type fakeExec struct {
 
 	recoveryCode string
 	recoveryErr  error
+
+	// loginCred and loginUser override the identity FinishLogin reports;
+	// privExpiry overrides the session expiry CompletePrivilegedSession
+	// reports (zero: the defaults).
+	loginCred, loginUser string
+	privExpiry           int64
 }
 
 func (f *fakeExec) BeginLogin(context.Context, *pb.BeginLoginRequest, ...grpc.CallOption) (*pb.BeginLoginResponse, error) {
@@ -61,9 +67,13 @@ func (f *fakeExec) BeginLogin(context.Context, *pb.BeginLoginRequest, ...grpc.Ca
 func (f *fakeExec) FinishLogin(_ context.Context, in *pb.FinishLoginRequest, _ ...grpc.CallOption) (*pb.FinishLoginResponse, error) {
 	f.mu.Lock()
 	f.gotFinish = in
+	cred, user := f.loginCred, f.loginUser
 	f.mu.Unlock()
 	if f.finishErr != nil {
 		return nil, f.finishErr
+	}
+	if cred != "" {
+		return &pb.FinishLoginResponse{CredentialId: cred, UserName: user}, nil
 	}
 	return &pb.FinishLoginResponse{CredentialId: "Y3JlZA", UserName: "axel"}, nil
 }
@@ -89,9 +99,13 @@ func (f *fakeExec) BeginPrivilegedSession(context.Context, *pb.BeginPrivilegedSe
 func (f *fakeExec) CompletePrivilegedSession(_ context.Context, in *pb.CompletePrivilegedSessionRequest, _ ...grpc.CallOption) (*pb.CompletePrivilegedSessionResponse, error) {
 	f.mu.Lock()
 	f.gotPrivileged = in
+	privErr, exp := f.privErr, f.privExpiry
 	f.mu.Unlock()
-	if f.privErr != nil {
-		return nil, f.privErr
+	if privErr != nil {
+		return nil, privErr
+	}
+	if exp != 0 {
+		return &pb.CompletePrivilegedSessionResponse{SessionExpiryUnix: exp}, nil
 	}
 	return &pb.CompletePrivilegedSessionResponse{SessionExpiryUnix: 1234}, nil
 }
