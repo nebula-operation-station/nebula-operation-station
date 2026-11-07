@@ -42,6 +42,9 @@ var (
 	// ErrManagedHostNotFound is returned when the referenced inventory
 	// host does not exist.
 	ErrManagedHostNotFound = errors.New("pveinventory: managed host not found")
+	// ErrSuggestBatchTooLarge is returned when SuggestHostsBatch is asked
+	// for more than MaxSuggestBatch guests.
+	ErrSuggestBatchTooLarge = errors.New("pveinventory: too many guests in suggestion batch")
 )
 
 // Link match kinds (Candidate.Match).
@@ -62,6 +65,8 @@ const (
 	MaxUnlinkReasonLen = 200
 	// MaxLinksQuery caps a ListLinks result.
 	MaxLinksQuery = 1000
+	// MaxSuggestBatch caps the guests of one SuggestHostsBatch call.
+	MaxSuggestBatch = 1000
 )
 
 var actorRe = regexp.MustCompile(`^[a-zA-Z0-9._-]{1,64}$`)
@@ -428,9 +433,67 @@ type guestIPs struct {
 // IPs, guest-agent IPs and the cloud-init IP). Candidates are
 // suggestions only; they never create a link. Conflicts (one MAC on two
 // guests, one IP on two hosts) are flagged in the candidates.
+// It is SuggestHostsBatch for a single guest.
 func (s *Store) SuggestHosts(ctx context.Context, remoteID string, vmid, generation uint64) ([]Candidate, error) {
-	if _, err := s.getIncarnation(ctx, remoteID, vmid, generation); err != nil {
+	ref := GuestRef{VMID: vmid, Generation: generation}
+	out, err := s.SuggestHostsBatch(ctx, remoteID, []GuestRef{ref})
+	if err != nil {
 		return nil, err
+	}
+	return out[ref], nil
+}
+
+// SuggestHostsBatch computes the SuggestHosts candidates for every listed
+// guest incarnation of the remote. Managed hosts, IPAM assets and the
+// MACs of the remote's active guests are read once for the whole batch
+// instead of once per guest; the candidates are identical to calling
+// SuggestHosts per guest. Duplicate refs are computed once. The batch
+// fails as a whole (no partial result) when any guest is not an active
+// incarnation of the remote, and with ErrSuggestBatchTooLarge when more
+// than MaxSuggestBatch guests are listed.
+func (s *Store) SuggestHostsBatch(ctx context.Context, remoteID string, guests []GuestRef) (map[GuestRef][]Candidate, error) {
+	if len(guests) > MaxSuggestBatch {
+		return nil, fmt.Errorf("%w: %d guests, max %d", ErrSuggestBatchTooLarge, len(guests), MaxSuggestBatch)
+	}
+	// Per-guest facts first, so an unknown guest fails before the
+	// remote-wide reads (as SuggestHosts always did).
+	facts := make(map[GuestRef]guestFacts, len(guests))
+	for _, ref := range guests {
+		if _, ok := facts[ref]; ok {
+			continue
+		}
+		f, err := s.loadGuestFacts(ctx, remoteID, ref)
+		if err != nil {
+			return nil, err
+		}
+		facts[ref] = f
+	}
+	out := make(map[GuestRef][]Candidate, len(facts))
+	if len(facts) == 0 {
+		return out, nil
+	}
+	idx, err := s.loadSuggestIndex(ctx, remoteID)
+	if err != nil {
+		return nil, err
+	}
+	for ref, f := range facts {
+		out[ref] = idx.candidates(ref.VMID, f)
+	}
+	return out, nil
+}
+
+// guestFacts are the MACs and IPs observed on one guest incarnation.
+type guestFacts struct {
+	macs map[string]bool
+	ips  guestIPs
+}
+
+// loadGuestFacts checks that the guest is an active incarnation and reads
+// its interface MACs and IPs and its cloud-init IP.
+func (s *Store) loadGuestFacts(ctx context.Context, remoteID string, ref GuestRef) (guestFacts, error) {
+	vmid, generation := ref.VMID, ref.Generation
+	if _, err := s.getIncarnation(ctx, remoteID, vmid, generation); err != nil {
+		return guestFacts{}, err
 	}
 
 	// Guest MACs and IPs.
@@ -438,7 +501,7 @@ func (s *Store) SuggestHosts(ctx context.Context, remoteID string, vmid, generat
 	ips := guestIPs{agent: map[string]bool{}, plain: map[string]bool{}}
 	ifaces, err := s.ListInterfaces(ctx, remoteID, vmid, generation, 0)
 	if err != nil {
-		return nil, err
+		return guestFacts{}, err
 	}
 	for _, in := range ifaces {
 		if in.MAC != "" {
@@ -460,38 +523,68 @@ func (s *Store) SuggestHosts(ctx context.Context, remoteID string, vmid, generat
 			ips.plain[a] = true
 		}
 	}
+	return guestFacts{macs: macs, ips: ips}, nil
+}
 
+// suggestIndex holds the remote-wide lookups SuggestHostsBatch reads once.
+type suggestIndex struct {
+	hostByEndpoint  map[string][]string // lowercased address -> host ids
+	hostsByAssetMAC map[string][]string // normalized mac -> host ids
+	hostsByAssetIP  map[string][]string // lowercased ip -> host ids
+	// guestsByMAC lists, per MAC, the active guests of the remote carrying
+	// it, one entry per interface, ordered by vmid and generation.
+	guestsByMAC map[string][]GuestRef
+}
+
+// loadSuggestIndex reads managed hosts, IPAM assets and the interface
+// MACs of the remote's active guests once.
+func (s *Store) loadSuggestIndex(ctx context.Context, remoteID string) (suggestIndex, error) {
 	// Managed hosts: endpoint addresses.
 	hosts, err := s.hostStore().List(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("pveinventory: list managed hosts: %w", err)
+		return suggestIndex{}, fmt.Errorf("pveinventory: list managed hosts: %w", err)
 	}
-	hostByEndpoint := map[string][]string{} // lowercased address -> host ids
+	idx := suggestIndex{
+		hostByEndpoint:  map[string][]string{},
+		hostsByAssetMAC: map[string][]string{},
+		hostsByAssetIP:  map[string][]string{},
+	}
 	for _, h := range hosts {
 		for _, e := range h.Endpoints {
-			hostByEndpoint[strings.ToLower(e.Address)] = append(hostByEndpoint[strings.ToLower(e.Address)], h.ID)
+			idx.hostByEndpoint[strings.ToLower(e.Address)] = append(idx.hostByEndpoint[strings.ToLower(e.Address)], h.ID)
 		}
 	}
 
 	// IPAM assets: MACs and addresses with a managed host.
 	assets, err := s.ipamStore().Assets(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("pveinventory: list ipam assets: %w", err)
+		return suggestIndex{}, fmt.Errorf("pveinventory: list ipam assets: %w", err)
 	}
-	hostsByAssetMAC := map[string][]string{} // normalized mac -> host ids
-	hostsByAssetIP := map[string][]string{}  // lowercased ip -> host ids
 	for _, a := range assets {
 		if a.HostID == "" {
 			continue
 		}
 		if a.MAC != "" {
-			hostsByAssetMAC[a.MAC] = append(hostsByAssetMAC[a.MAC], a.HostID)
+			idx.hostsByAssetMAC[a.MAC] = append(idx.hostsByAssetMAC[a.MAC], a.HostID)
 		}
 		for _, addr := range a.Addresses {
 			low := strings.ToLower(addr.String())
-			hostsByAssetIP[low] = append(hostsByAssetIP[low], a.HostID)
+			idx.hostsByAssetIP[low] = append(idx.hostsByAssetIP[low], a.HostID)
 		}
 	}
+
+	idx.guestsByMAC, err = s.activeGuestMACs(ctx, remoteID)
+	if err != nil {
+		return suggestIndex{}, err
+	}
+	return idx, nil
+}
+
+// candidates computes the sorted candidates of one guest (vmid) from its
+// facts and the shared index.
+func (idx suggestIndex) candidates(vmid uint64, f guestFacts) []Candidate {
+	macs, ips := f.macs, f.ips
+	hostByEndpoint, hostsByAssetMAC, hostsByAssetIP := idx.hostByEndpoint, idx.hostsByAssetMAC, idx.hostsByAssetIP
 
 	out := map[string]*Candidate{} // host|match -> candidate
 	add := func(hostID, match, detail string, conflict bool) {
@@ -507,10 +600,7 @@ func (s *Store) SuggestHosts(ctx context.Context, remoteID string, vmid, generat
 	// MAC matches: a guest MAC present on another guest of the same
 	// remote is a conflict (cloned MAC), flagged not resolved.
 	for mac := range macs {
-		others, err := s.guestsWithMAC(ctx, remoteID, mac, vmid)
-		if err != nil {
-			return nil, err
-		}
+		others := otherGuestLabels(idx.guestsByMAC[mac], vmid)
 		macConflict := len(others) > 0
 		for _, hostID := range hostsByAssetMAC[mac] {
 			detail := fmt.Sprintf("MAC %s matches an IPAM asset of host %s", mac, hostID)
@@ -523,13 +613,13 @@ func (s *Store) SuggestHosts(ctx context.Context, remoteID string, vmid, generat
 
 	// IP matches: agent IPs first (stronger), then plain IPs.
 	for ip := range ips.agent {
-		s.addIPCandidate(ip, MatchAgentIP, hostByEndpoint, hostsByAssetIP, add)
+		addIPCandidate(ip, MatchAgentIP, hostByEndpoint, hostsByAssetIP, add)
 	}
 	for ip := range ips.plain {
 		if ips.agent[ip] {
 			continue
 		}
-		s.addIPCandidate(ip, MatchIP, hostByEndpoint, hostsByAssetIP, add)
+		addIPCandidate(ip, MatchIP, hostByEndpoint, hostsByAssetIP, add)
 	}
 
 	var candidates []Candidate
@@ -542,10 +632,52 @@ func (s *Store) SuggestHosts(ctx context.Context, remoteID string, vmid, generat
 		}
 		return candidates[i].Match < candidates[j].Match
 	})
-	return candidates, nil
+	return candidates
 }
 
-func (s *Store) addIPCandidate(ip, match string, hostByEndpoint, hostsByAssetIP map[string][]string, add func(hostID, match, detail string, conflict bool)) {
+// activeGuestMACs reads, in one query, the interface MACs of all active
+// guests of the remote, grouped by MAC and ordered by vmid and generation
+// (the order guestsWithMAC uses).
+func (s *Store) activeGuestMACs(ctx context.Context, remoteID string) (map[string][]GuestRef, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT i.mac, g.vmid, g.generation
+		FROM pve_interfaces i
+		JOIN pve_guests g ON g.remote_id = i.remote_id AND g.vmid = i.vmid AND g.generation = i.generation
+		WHERE i.remote_id = ? AND i.mac != '' AND g.tombstoned = 0
+		ORDER BY g.vmid, g.generation`, remoteID)
+	if err != nil {
+		return nil, fmt.Errorf("pveinventory: active guest macs %s: %w", remoteID, err)
+	}
+	defer rows.Close()
+	out := map[string][]GuestRef{}
+	for rows.Next() {
+		var mac string
+		var ref GuestRef
+		if err := rows.Scan(&mac, &ref.VMID, &ref.Generation); err != nil {
+			return nil, fmt.Errorf("pveinventory: scan active guest macs %s: %w", remoteID, err)
+		}
+		out[mac] = append(out[mac], ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("pveinventory: active guest macs %s: %w", remoteID, err)
+	}
+	return out, nil
+}
+
+// otherGuestLabels renders the "vmid (gen N)" labels of the guests other
+// than selfVMID, exactly as guestsWithMAC does.
+func otherGuestLabels(guests []GuestRef, selfVMID uint64) []string {
+	var out []string
+	for _, g := range guests {
+		if g.VMID == selfVMID {
+			continue
+		}
+		out = append(out, fmt.Sprintf("%d (gen %d)", g.VMID, g.Generation))
+	}
+	return out
+}
+
+func addIPCandidate(ip, match string, hostByEndpoint, hostsByAssetIP map[string][]string, add func(hostID, match, detail string, conflict bool)) {
 	low := strings.ToLower(ip)
 	hostSet := map[string]bool{}
 	for _, h := range hostByEndpoint[low] {
