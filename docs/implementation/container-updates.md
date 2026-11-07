@@ -1,14 +1,13 @@
 # Container update and rollback plan (ADR 0006 P2-03 to P2-05)
 
-Status: **plan, not started** (2026-11-06). No code exists for it yet.
+Status: **decided, cu01 in progress** (2026-11-07; previously: plan, not started, 2026-11-06).
 It turns ADR 0006, section "Phase 2 actions, permits and reconciliation", the
 rows P2-03, P2-04 and P2-05, and spec 11 (markers v23-11-02 and v23-11-12)
 into PR-sized steps. P2-01 (provider actions, px01 to px04) and P2-02 (tree
 staged OS updates, ou02, #218) are done.
 
-Each step below uses the recommended default. Anything that needs a
-maintainer decision is in [Open questions for Axel](#open-questions-for-axel);
-those are not settled by this plan.
+Each step below uses the recommended default. The open questions were decided
+as recommended on 07.11.2026; see [Decisions](#decisions-07112026).
 
 ## What the ADR asks for
 
@@ -1219,10 +1218,82 @@ cu04, not before: cu02 removes that link. Protected documents (`docs/spec/`, `do
 `docs/threat-model.md`) are changed by a maintainer, and the answers below may
 need that.
 
-## Open questions for Axel
+## Decisions (07.11.2026)
 
-Each has a recommendation; none is decided. "Blocks" names the first step that
-cannot start without the answer.
+Axel decided on 07.11.2026 (15:35) that every question below is settled as
+recommended. One line per question; the background follows the list.
+
+1. **Batch, not classic stages:** container updates run on the `batch-v1`
+   rollout engine; `PlanStages` only supplies the layout (ADR note below).
+2. **Override:** a NOS-owned root-only file per project, named in `config_files`,
+   setting `repository:new_tag@new_platform_digest`; drift gives `override_drift`;
+   operator pins stay pinned; rollback skips `override_drift` and
+   `config_not_applied` but keeps the exact recorded checks.
+3. **`docker.compose_update` 1.0.0:** replaced by 2.0.0 in cu02, pulling with an
+   empty `DOCKER_CONFIG`; hosts that need an operator login wait for cu06.
+4. **Precheck inside the approved script:** accepted as phases 1 and 2; the
+   executor still rechecks trust, risk, pin, credentials, lock and expiry.
+5. **Configuration digest and salt:** two host-side HMAC-SHA-256 values
+   (`configuration_digest` per incarnation, `source_digest` per unit), keyed with
+   a root-only per-host salt created by the MEDIUM `docker.update_prepare`.
+6. **Private transfer profile:** option (a), executor fetch plus `docker load`
+   over SSH. Who signs off the profile review is asked again before cu06.
+7. **Standalone definition:** an exact `docker create` argument list, env values
+   through a tmpfs `--env-file`; values with a newline are refused.
+8. **Recovery plan:** an admin-set executor record or an explicit "no persistent
+   data" declaration, versioned and bound through `recovery_plan_digest`.
+9. **Rollback window:** fixed 7 days; a pruned retained image makes rollback unavailable.
+10. **Stable-tag wiring (G12):** a separate job; typed tags are enough.
+11. **Judge location:** new protected `internal/containerjudge/` with the two
+    parsers and their limits.
+12. **Dependencies:** transitive closure in both directions over `depends_on`,
+    `links` and `volumes_from`; namespace sharers must be selected too.
+13. **Tag policy:** only the zero policy `stable-v1`, digest computed by the
+    executor; non-version tags get same-tag refreshes only.
+14. **G5b:** a separate job after cu03.
+15. **Holds:** a reconciled unknown run keeps its target held until a root probe
+    shows the job unit gone; waiters bounded by 45 minutes; no forced release.
+16. **Compose recreation definition:** the executor keeps a secret-free
+    definition, the host keeps the files; a changed `source_digest` refuses rollback.
+17. **Old digests:** relaxed binding, `old_digests` as listed plus `old_image_id`;
+    new index and platform digests fully bound.
+18. **Host tooling:** `python3 -I` with stdlib `hmac` and `hashlib` is allowed;
+    no `python3` means `tooling_missing`.
+19. **`uncertain` evidence:** durable preview kept by `ReleaseRun`; Resolve
+    reaches `not_recreated` or `partial` only; a run without result has no baseline.
+20. **Standalone `source_digest`:** none; the binding carries `definition_id`
+    and `definition_version`.
+21. **Same complete configuration:** preview and phase 1 check `config_not_applied`.
+22. **Registry budget:** per-run cap `maxRunRegistryRequests = 120`, sequential,
+    1 s apart per registry, plus the Q24 and Q25 deadlines.
+23. **`docker compose config` as root:** remote loaders switched off, failure
+    means unsupported; a Compose without the switch counts as `tooling_missing`.
+24. **Preview and check deadlines:** 4 minutes of work checked before every call
+    and spacing wait, the last minute for result handling.
+25. **Mutation budgets:** cu02's table (3, 12, 1, 8 and 5 minutes), kill grace
+    charged per call.
+26. **Env redaction in definitions:** no per-value redaction entries; silent
+    output and env-free snapshots.
+27. **Resolve evidence:** no persisted cause; `override_drift` before
+    `config_not_applied`; retained facts for unavailable units; incomplete facts
+    keep the row `uncertain`.
+
+### ADR note for Q1 (for ADR 0006, added by a maintainer)
+
+ADR 0006 line 449 says staged container rollouts reuse
+`internal/executions/stages.go` and the executor stage engine. Decided on
+07.11.2026: container updates and rollbacks are `batch-v1` members (ADR 0007)
+and run on the batch rollout engine. `executions.PlanStages` supplies the
+DEV/QA/PROD layout, which becomes `BatchStageSpec` entries with manual gates.
+Reason: a classic staged permit carries one parameter set for every host (G7)
+and cannot bind per-container plans, while ADR 0007 already reserves the member
+container binding for batches. `docs/adr/` is protected, so the note waits here
+until a maintainer copies it into the ADR.
+
+### Background per question
+
+The text below is the proposal of 2026-11-06 that the decisions accept.
+"Blocks" names the first step that could not start without the answer.
 
 1. **Batch or classic stages? Blocks cu01.** ADR line 449 says to reuse
    `internal/executions/stages.go` and the executor stage engine; the plan
