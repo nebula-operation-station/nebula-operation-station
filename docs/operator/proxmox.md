@@ -568,13 +568,31 @@ was recreated, new incarnation), an active link of the old incarnation is
 shown as a notice on the new guest and does not apply to it; release it
 with **Lösen**.
 
+Suggestions are computed for at most 100 unlinked guests per page and
+within a short time budget, so a large lab or a slow database never keeps
+the rest of the page (nodes, datasets) from loading. Guests beyond the
+budget show "Suggestions skipped"; reload the page to try again.
+
 **Linking and releasing.** Nothing is linked automatically, not by MAC, IP,
 hostname or VMID. **Verknüpfen** links the guest to that candidate,
-**Lösen** releases a link and needs a short reason; the released link stays
-in the link history with the reason. Both buttons need a logged-in user and
-an open privileged session, and each change is written to the server log as
-an audit line (`pve_guest_linked` / `pve_guest_unlinked`, with the user). A
+**Lösen** releases a link and needs a reason of 1 to 200 characters; the
+reason is stored in at most 200 bytes, so umlauts and other non-ASCII
+characters count twice or more. The released link stays in the link
+history with the reason. Both buttons need a logged-in user and an open
+privileged session, and each change is written to the server log as an
+audit line (`pve_guest_linked` / `pve_guest_unlinked`, with the user). A
 host can be linked to one guest at a time.
+
+Suggestions are help, not a restriction: the server accepts a link to any
+host in the inventory, not only to a suggested one (the page shows buttons
+only for suggestions). The conflict confirmation still applies when the
+guest has a conflict or the chosen host is a conflicting candidate.
+
+**Known limitation.** The privileged session is held by the executor for
+the whole installation, and the executor does not say which user opened
+it. While any admin has a privileged session open, every logged-in web
+user can link and release guests; the audit line records the user who
+clicked. Close the privileged session when you are done.
 
 **What a link means.** A link is display and drift information only: the
 inventory chart shows the host inside the guest box. It is never an SSH identity: the host keeps its own SSH
