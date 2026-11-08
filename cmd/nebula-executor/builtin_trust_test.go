@@ -393,6 +393,62 @@ func TestBrokenBundleStatusStaysUnavailable(t *testing.T) {
 	}
 }
 
+// The wired status RPC itself answers NOT_INSTALLED for a missing bundle
+// directory or one holding none of the bundle files, and UNAVAILABLE for a
+// partial bundle: the classification reaches the server, not only the log.
+func TestWiredStatusReportsNotInstalled(t *testing.T) {
+	k := newTestRoot(t)
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, dir string) // dir does not exist yet
+		want  pb.BuiltinTrustState
+	}{
+		{"missing dir", func(t *testing.T, dir string) {}, pb.BuiltinTrustState_BUILTIN_TRUST_STATE_NOT_INSTALLED},
+		{"empty dir", func(t *testing.T, dir string) { mkdir(t, dir) }, pb.BuiltinTrustState_BUILTIN_TRUST_STATE_NOT_INSTALLED},
+		{"unrelated file only", func(t *testing.T, dir string) {
+			mkdir(t, dir)
+			writeFile(t, filepath.Join(dir, "README"))
+		}, pb.BuiltinTrustState_BUILTIN_TRUST_STATE_NOT_INSTALLED},
+		{"partial dir", func(t *testing.T, dir string) {
+			mkdir(t, dir)
+			writeFile(t, filepath.Join(dir, release.ManifestFile))
+			writeFile(t, filepath.Join(dir, release.BundleArtifact))
+		}, pb.BuiltinTrustState_BUILTIN_TRUST_STATE_UNAVAILABLE},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := privateTempDir(t)
+			bundleDir := filepath.Join(t.TempDir(), "release")
+			tc.setup(t, bundleDir)
+			s := &executor.Service{}
+			now := func() time.Time { return time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC) }
+			if err := wireBuiltinTrust(s, filepath.Join(dir, builtinTrustDirName), bundleDir, k.anchors(), now, openDB(t, dir)); err != nil {
+				t.Fatal(err)
+			}
+			if got := trustStatus(t, s); got != tc.want {
+				t.Fatalf("status = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	// Installing the bundle later is picked up: the next status reads it.
+	t.Run("installed later", func(t *testing.T) {
+		dir := privateTempDir(t)
+		bundleDir := filepath.Join(t.TempDir(), "release")
+		s := &executor.Service{}
+		now := func() time.Time { return time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC) }
+		if err := wireBuiltinTrust(s, filepath.Join(dir, builtinTrustDirName), bundleDir, k.anchors(), now, openDB(t, dir)); err != nil {
+			t.Fatal(err)
+		}
+		if got := trustStatus(t, s); got != pb.BuiltinTrustState_BUILTIN_TRUST_STATE_NOT_INSTALLED {
+			t.Fatalf("status before install = %v, want NOT_INSTALLED", got)
+		}
+		writeBundle(t, k, bundleDir)
+		if got := trustStatus(t, s); got != pb.BuiltinTrustState_BUILTIN_TRUST_STATE_UNTRUSTED {
+			t.Fatalf("status after install = %v, want UNTRUSTED", got)
+		}
+	})
+}
+
 // Startup reports a missing bundle as "no release bundle installed", not
 // as a failure, and still wires built-in trust (built-ins stay untrusted).
 func TestSetupBuiltinTrustLogsNotInstalled(t *testing.T) {

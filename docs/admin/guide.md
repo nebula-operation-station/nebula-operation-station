@@ -683,6 +683,14 @@ bind mount under the **executor** service's `volumes` and recreate it:
 Keep `read_only: true` and the existing hardening settings. No mount is
 needed for an empty directory; it is already present in the image.
 
+While the bundle directory is missing, or holds none of the three files,
+the web UI shows "No release bundle is installed on this executor host" and
+built-ins stay untrusted; this is the normal state of a source or
+quickstart install. A partial set (one or two of the files), a symlinked
+bundle file, an unreadable directory or a bundle that fails
+signature verification is reported as built-in trust status unavailable
+instead; the executor log names the cause.
+
 While the directory is empty, `nebula artifact trust-builtins` fails and
 the web banner still says **Built-in trust status is unreachable**. This is
 expected on a source/quickstart install without release attachments: the

@@ -44,6 +44,37 @@ const (
 // bundle is present in the executor-configured directory.
 var ErrBuiltinTrustUnavailable = errors.New("built-in trust: no local release bundle available")
 
+// ErrBuiltinBundleNotInstalled is returned by the directory-backed Status
+// when no release bundle is installed at all (see BuiltinBundleNotInstalled).
+// The status RPC reports it as NOT_INSTALLED; it says nothing about trust,
+// built-ins stay at their untrusted floor.
+var ErrBuiltinBundleNotInstalled = errors.New("built-in trust: no release bundle installed")
+
+// builtinBundleFiles are the three release attachments of a bundle.
+var builtinBundleFiles = [...]string{release.ManifestFile, release.SignatureFile, release.BundleArtifact}
+
+// BuiltinBundleNotInstalled reports whether no release bundle is installed
+// in dir. Only an unambiguous absence counts: dir does not exist, or dir is
+// a real directory (not a symlink) in which none of the three bundle names
+// exists as any kind of entry. Any other outcome, including any error other
+// than "does not exist", is false, so a partial, unreadable or otherwise
+// unexpected bundle is left to the verifying reader (fail closed).
+func BuiltinBundleNotInstalled(dir string) bool {
+	fi, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	if err != nil || !fi.IsDir() {
+		return false
+	}
+	for _, name := range builtinBundleFiles {
+		if _, err := os.Lstat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
+			return false // exists, or cannot tell
+		}
+	}
+	return true
+}
+
 // ErrBuiltinArtifactTrust is a built-in trust commit whose store commit
 // succeeded but whose new artifact trust could not be recorded: the new
 // built-in versions stay untrusted for risk (fail closed) until the next
@@ -349,10 +380,20 @@ func (d *dirBuiltinTrust) ConfirmReview(_ context.Context, digest string, genera
 
 // Status implements BuiltinTrust. The dry run is cached under the store
 // generation and the bundle files' identity, size and times, so polling
-// does not repeat it while nothing changed; Commit drops the cache.
+// does not repeat it while nothing changed; Commit drops the cache. A
+// bundle directory that is missing or holds none of the bundle files is
+// ErrBuiltinBundleNotInstalled, provided the store itself still opens; any
+// other failure (store, partial or unverifiable bundle) is returned as is.
 func (d *dirBuiltinTrust) Status(_ context.Context) (trust.BulkAdmitResult, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if BuiltinBundleNotInstalled(d.bundleDir) {
+		d.status = nil
+		if _, err := trust.OpenExisting(d.storeDir, d.now); err != nil {
+			return trust.BulkAdmitResult{}, fmt.Errorf("built-in trust: open store: %w", err)
+		}
+		return trust.BulkAdmitResult{}, ErrBuiltinBundleNotInstalled
+	}
 	st, err := d.openStore()
 	if err != nil {
 		return trust.BulkAdmitResult{}, err
@@ -1030,8 +1071,9 @@ func (s *Service) UnpinBuiltinVersion(ctx context.Context, req *pb.UnpinBuiltinV
 // GetBuiltinTrustStatus reports which built-in versions are trusted and which
 // are not (server and admin roles). It is a dry-run review reduced to
 // per-module versions and hashes: no diffs, scripts, scanner excerpts or
-// paths, and it never commits or grants anything. Any failure is reported as
-// UNAVAILABLE without detail; the detail is logged locally.
+// paths, and it never commits or grants anything. No installed release
+// bundle (ErrBuiltinBundleNotInstalled) is NOT_INSTALLED; any other failure
+// is reported as UNAVAILABLE without detail; the detail is logged locally.
 func (s *Service) GetBuiltinTrustStatus(ctx context.Context, req *pb.GetBuiltinTrustStatusRequest) (*pb.GetBuiltinTrustStatusResponse, error) {
 	if err := validateBuiltinTrustMessage(req); err != nil {
 		return nil, err
@@ -1041,6 +1083,9 @@ func (s *Service) GetBuiltinTrustStatus(ctx context.Context, req *pb.GetBuiltinT
 		return unavailable, nil
 	}
 	res, err := s.builtinTrust.Status(ctx)
+	if errors.Is(err, ErrBuiltinBundleNotInstalled) {
+		return &pb.GetBuiltinTrustStatusResponse{State: pb.BuiltinTrustState_BUILTIN_TRUST_STATE_NOT_INSTALLED}, nil
+	}
 	if err != nil {
 		if s.log != nil {
 			s.log.Warn("built-in trust status unavailable", "err", err)

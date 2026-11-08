@@ -3,11 +3,8 @@
 package main
 
 import (
-	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -70,28 +67,16 @@ func (p builtinBundlePresence) String() string {
 	return "present"
 }
 
-// builtinBundleFiles are the three release attachments of a bundle.
-var builtinBundleFiles = [...]string{release.ManifestFile, release.SignatureFile, release.BundleArtifact}
-
 // classifyBuiltinBundle reports whether no release bundle is installed in
-// dir. Only an unambiguous absence counts: dir does not exist, or dir is a
-// real directory (not a symlink) in which none of the three bundle names
-// exists as any kind of entry. Every other outcome, including any error
-// other than "does not exist", is builtinBundlePresent.
+// dir, by the same rule the status RPC uses for NOT_INSTALLED
+// (executor.BuiltinBundleNotInstalled): only a missing directory, or a real
+// directory holding none of the three bundle files, is not installed;
+// everything else is builtinBundlePresent.
 func classifyBuiltinBundle(dir string) builtinBundlePresence {
-	fi, err := os.Lstat(dir)
-	if errors.Is(err, fs.ErrNotExist) {
+	if executor.BuiltinBundleNotInstalled(dir) {
 		return builtinBundleNotInstalled
 	}
-	if err != nil || !fi.IsDir() {
-		return builtinBundlePresent
-	}
-	for _, name := range builtinBundleFiles {
-		if _, err := os.Lstat(filepath.Join(dir, name)); !errors.Is(err, fs.ErrNotExist) {
-			return builtinBundlePresent // exists, or cannot tell
-		}
-	}
-	return builtinBundleNotInstalled
+	return builtinBundlePresent
 }
 
 // setupBuiltinTrust wires built-in trust with the compiled release anchors
