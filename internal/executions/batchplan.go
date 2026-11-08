@@ -69,25 +69,61 @@ var (
 )
 
 // BatchInputError describes an invalid batch request (shown to the user).
-type BatchInputError struct{ Reason string }
+// Err, when set, is the sentinel the refusal stands for (for example
+// ErrBatchPreviewStale), so callers can branch with errors.Is.
+type BatchInputError struct {
+	Reason string
+	Err    error
+}
 
 func (e *BatchInputError) Error() string { return e.Reason }
+
+// Unwrap permits errors.Is with the sentinel the refusal stands for.
+func (e *BatchInputError) Unwrap() error { return e.Err }
 
 func batchInput(format string, args ...any) error {
 	return &BatchInputError{Reason: fmt.Sprintf(format, args...)}
 }
 
-// BatchCriticalError names the CRITICAL members of a refused proposal.
-// The admin must remove them and approve them separately; nothing of the
-// batch was approved.
+// BatchCriticalError names the CRITICAL members of a refused proposal;
+// nothing of the batch was approved. Other members may be removed and
+// approved separately. A CRITICAL container update or rollback has no
+// separate approval at all (ADR 0006; container update plan, Decision 4
+// and the risk table): Container is then set and Advice says so instead
+// of the batch default text.
 type BatchCriticalError struct {
 	Members []BatchMemberView
+	// Container is set when a CRITICAL member is a container update or
+	// rollback.
+	Container bool
+}
+
+// Refusal texts for CRITICAL members.
+const (
+	// BatchCriticalAdvice is the default text: remove the members and
+	// approve each separately.
+	BatchCriticalAdvice = "CRITICAL members cannot be approved in a batch. Remove them and approve each separately."
+	// BatchCriticalContainerAdvice replaces it when a container update or
+	// rollback is CRITICAL: no separate approval exists for it.
+	BatchCriticalContainerAdvice = "CRITICAL container updates and rollbacks are refused. There is no separate approval for them and the risk is never lowered; remove them from the batch."
+)
+
+// Advice is the text that tells the admin what to do with the refused
+// members.
+func (e *BatchCriticalError) Advice() string {
+	if e.Container {
+		return BatchCriticalContainerAdvice
+	}
+	return BatchCriticalAdvice
 }
 
 func (e *BatchCriticalError) Error() string {
 	ids := make([]string, len(e.Members))
 	for i, m := range e.Members {
 		ids[i] = m.MemberID
+	}
+	if e.Container {
+		return fmt.Sprintf("%v: %s; %s", ErrBatchCritical, strings.Join(ids, ", "), BatchCriticalContainerAdvice)
 	}
 	return fmt.Sprintf("%v: %s", ErrBatchCritical, strings.Join(ids, ", "))
 }
@@ -127,6 +163,9 @@ type BatchOptions struct {
 	// Actions resolves module and runbook actions at an exact version
 	// (Service.Action). Nil limits batches to the built-in actions.
 	Actions ActionResolver
+	// Recreations lists the executor's container recreation rows, the
+	// source of a docker.compose_rollback binding. Nil refuses rollbacks.
+	Recreations RecreationLister
 }
 
 // ActionResolver resolves a module or runbook action at an exact version.
@@ -138,14 +177,15 @@ type ActionResolver interface {
 // Batches plans, proposes and follows batches. It is safe for concurrent
 // use.
 type Batches struct {
-	exec       BatchExecutor
-	db         *sql.DB
-	hosts      Hosts
-	log        *slog.Logger
-	now        func() time.Time
-	credVer    func(ctx context.Context, ref string) (uint64, error)
-	containers ContainerBindings
-	actions    ActionResolver
+	exec        BatchExecutor
+	db          *sql.DB
+	hosts       Hosts
+	log         *slog.Logger
+	now         func() time.Time
+	credVer     func(ctx context.Context, ref string) (uint64, error)
+	containers  ContainerBindings
+	actions     ActionResolver
+	recreations RecreationLister
 }
 
 // NewBatches returns a batch planner.
@@ -153,7 +193,8 @@ func NewBatches(o BatchOptions) (*Batches, error) {
 	if o.Exec == nil || o.DB == nil || o.Hosts == nil {
 		return nil, errors.New("batches: executor, database and inventory are required")
 	}
-	b := &Batches{exec: o.Exec, db: o.DB, hosts: o.Hosts, log: o.Log, now: o.Now, credVer: o.CredentialVersion, containers: o.Containers, actions: o.Actions}
+	b := &Batches{exec: o.Exec, db: o.DB, hosts: o.Hosts, log: o.Log, now: o.Now, credVer: o.CredentialVersion, containers: o.Containers, actions: o.Actions,
+		recreations: o.Recreations}
 	if b.log == nil {
 		b.log = slog.New(slog.DiscardHandler)
 	}
@@ -176,6 +217,12 @@ type BatchMemberSpec struct {
 	Version string
 	HostID  string
 	Params  map[string]string
+	// Update selects the unit of a docker.compose_update member and
+	// Rollback the recorded update of a docker.compose_rollback member;
+	// both are refused on every other action. Their bindings are built
+	// from a fresh docker.update_preview run, never taken from the request.
+	Update   *ContainerUpdateSpec
+	Rollback *ContainerRollbackSpec
 }
 
 // BatchStageSpec is one requested stage. Thresholds are absolute counts;
@@ -202,13 +249,13 @@ var containerActions = map[string]bool{
 }
 
 // batchExcludedActions are never batch members: docker.logs returns host
-// output that may hold secrets, and docker.compose_update recreates
-// containers without an incarnation binding the batch contract can freeze.
-// docker.update_preview runs only as a durable job (its runs row is the
-// evidence Resolve reads); the executor refuses it as a batch member.
+// output that may hold secrets. docker.update_preview runs only as a
+// durable job (its runs row is the evidence Resolve reads); the executor
+// refuses it as a batch member. docker.compose_update 2.0.0 and
+// docker.compose_rollback 1.0.0 are members with a container update
+// binding built from a fresh preview (batchcontainer.go).
 var batchExcludedActions = map[string]string{
 	"docker.logs":           "container logs are not available in a batch",
-	"docker.compose_update": "Compose updates recreate containers and are not available in a batch",
 	"docker.update_preview": "the update preview runs only as a durable job and is not available in a batch",
 }
 
@@ -261,6 +308,7 @@ func (b *Batches) plan(ctx context.Context, req BatchRequest) (canonical.Batch, 
 	var stages []canonical.BatchStage
 	versions := map[string]uint64{}
 	tuples := map[string]int{}
+	units := map[string]int{}
 	var planned time.Duration
 	for si, st := range req.Stages {
 		if len(st.Members) == 0 {
@@ -279,7 +327,7 @@ func (b *Batches) plan(ctx context.Context, req BatchRequest) (canonical.Batch, 
 		var longest time.Duration
 		for _, spec := range st.Members {
 			n := len(members) + 1
-			pm, err := b.planMember(ctx, spec, pinOf, versions, si+1, n)
+			pm, err := b.planMember(ctx, spec, pinOf, versions, units, si+1, n)
 			if err != nil {
 				return canonical.Batch{}, nil, err
 			}
@@ -319,7 +367,8 @@ func (b *Batches) plan(ctx context.Context, req BatchRequest) (canonical.Batch, 
 
 // planMember resolves one member against the inventory and the executor's
 // pins. n is the member's 1-based plan position.
-func (b *Batches) planMember(ctx context.Context, spec BatchMemberSpec, pinOf map[string]*pb.HostKeyPin, versions map[string]uint64, stage, n int) (plannedMember, error) {
+func (b *Batches) planMember(ctx context.Context, spec BatchMemberSpec, pinOf map[string]*pb.HostKeyPin, versions map[string]uint64,
+	units map[string]int, stage, n int) (plannedMember, error) {
 	a, err := b.lookupAction(ctx, spec, n)
 	if err != nil {
 		return plannedMember{}, err
@@ -330,20 +379,18 @@ func (b *Batches) planMember(ctx context.Context, spec BatchMemberSpec, pinOf ma
 	if len(a.Secrets) > 0 {
 		return plannedMember{}, batchInput("member %d: actions with secrets are not available in a batch", n)
 	}
+	container := isContainerMutation(a.ID)
+	if !container && (spec.Update != nil || spec.Rollback != nil) {
+		return plannedMember{}, batchInput("member %d (%s): a container update or rollback selection is not allowed on this action", n, a.ID)
+	}
 	params := spec.Params
 	if params == nil {
 		params = map[string]string{}
 	}
-	if err := a.ValidParams(params); err != nil {
-		return plannedMember{}, batchInput("member %d (%s): %v", n, a.ID, err)
-	}
-	paramsJSON, err := a.ParametersJSON(params, nil)
-	if err != nil {
-		return plannedMember{}, err
-	}
-	ph, err := canonical.HashParameters(paramsJSON)
-	if err != nil {
-		return plannedMember{}, err
+	if !container {
+		if err := a.ValidParams(params); err != nil {
+			return plannedMember{}, batchInput("member %d (%s): %v", n, a.ID, err)
+		}
 	}
 	if _, err := b.hosts.Get(ctx, spec.HostID); errors.Is(err, inventory.ErrHostNotFound) {
 		return plannedMember{}, &HostError{Host: spec.HostID, Reason: "not in the inventory"}
@@ -356,6 +403,32 @@ func (b *Batches) planMember(ctx context.Context, spec BatchMemberSpec, pinOf ma
 	}
 	if p.GetBlocked() {
 		return plannedMember{}, &HostError{Host: spec.HostID, Reason: "blocked after a host key mismatch"}
+	}
+	var (
+		paramsJSON []byte
+		ph         string
+		update     *canonical.BatchContainerUpdate
+		risk       = canonical.Risk(riskName(a.Risk))
+	)
+	if container {
+		// The binding decides, the parameters follow (Decision 3), and the
+		// label carries at least the binding's floor (a tag change is HIGH).
+		u, err := b.planContainerMember(ctx, a, spec, units, n)
+		if err != nil {
+			return plannedMember{}, err
+		}
+		if paramsJSON, ph, err = canonical.ContainerUpdateParameters(u); err != nil {
+			return plannedMember{}, err
+		}
+		update = &u
+		risk = canonical.MaxRisk(risk, canonical.ContainerUpdateFloor(u))
+	} else {
+		if paramsJSON, err = a.ParametersJSON(params, nil); err != nil {
+			return plannedMember{}, err
+		}
+		if ph, err = canonical.HashParameters(paramsJSON); err != nil {
+			return plannedMember{}, err
+		}
 	}
 	ref := p.GetCredentialRef()
 	ver, ok := versions[ref]
@@ -379,11 +452,12 @@ func (b *Batches) planMember(ctx context.Context, spec BatchMemberSpec, pinOf ma
 		Request: canonical.Request{
 			RequestVersion: canonical.RequestVersion, ExecutionID: execID, ActionID: a.ID, ModuleVersion: a.Version,
 			ArtifactSHA256: a.SHA256(), ParametersHash: ph, CredentialRefs: []string{ref},
-			RiskClass:       canonical.Risk(riskName(a.Risk)),
+			RiskClass:       risk,
 			ResolvedTargets: []canonical.Target{{HostID: spec.HostID, HostKeyFingerprint: p.GetFingerprint()}},
 		},
 		CredentialVersions: []canonical.CredentialVersion{{Reference: ref, Version: ver}},
 		PreconditionHashes: []string{},
+		ContainerUpdate:    update,
 	}
 	if containerActions[a.ID] {
 		id := params["container"]
@@ -485,21 +559,36 @@ func (b *Batches) ProposeBatch(ctx context.Context, user string, req BatchReques
 	return c, nil
 }
 
+// containerCriticalText is the executor's refusal of a CRITICAL container
+// update or rollback (permit/batch ErrContainerCritical), which reaches
+// the server as "batch member <id>: <text>".
+const containerCriticalText = "CRITICAL container update or rollback is refused"
+
 // proposeError maps an executor refusal. A CRITICAL refusal names the
-// members; only IDs of this plan are taken from the executor's text.
+// members; only IDs of this plan are taken from the executor's text. A
+// refusal that names a CRITICAL container member says that no separate
+// approval exists.
 func (b *Batches) proposeError(err error, members []plannedMember) error {
 	st, ok := status.FromError(err)
-	if ok && st.Code() == codes.InvalidArgument && strings.Contains(st.Message(), ErrBatchCritical.Error()) {
-		ce := &BatchCriticalError{}
-		msg := st.Message()
-		for _, m := range members {
-			if regexp.MustCompile(`\b` + regexp.QuoteMeta(m.member.MemberID) + `\b`).MatchString(msg) {
-				ce.Members = append(ce.Members, memberViewOf(m))
+	if !ok {
+		return fmt.Errorf("propose batch: %w", err)
+	}
+	msg := st.Message()
+	batchCritical := st.Code() == codes.InvalidArgument && strings.Contains(msg, ErrBatchCritical.Error())
+	containerCritical := strings.Contains(msg, containerCriticalText)
+	if !batchCritical && !containerCritical {
+		return fmt.Errorf("propose batch: %w", err)
+	}
+	ce := &BatchCriticalError{Container: containerCritical}
+	for _, m := range members {
+		if regexp.MustCompile(`\b` + regexp.QuoteMeta(m.member.MemberID) + `\b`).MatchString(msg) {
+			ce.Members = append(ce.Members, memberViewOf(m))
+			if m.member.ContainerUpdate != nil {
+				ce.Container = true
 			}
 		}
-		return ce
 	}
-	return fmt.Errorf("propose batch: %w", err)
+	return ce
 }
 
 // checkAnswer verifies that the executor froze exactly the proposed plan:
@@ -539,7 +628,8 @@ func sameMember(a, b canonical.BatchMember) bool {
 		strings.Join(ra.CredentialRefs, "\x00") != strings.Join(rb.CredentialRefs, "\x00") ||
 		len(ra.ResolvedTargets) != len(rb.ResolvedTargets) || len(a.CredentialVersions) != len(b.CredentialVersions) ||
 		strings.Join(a.PreconditionHashes, "\x00") != strings.Join(b.PreconditionHashes, "\x00") ||
-		(a.Container == nil) != (b.Container == nil) || a.ProviderTarget != nil || b.ProviderTarget != nil {
+		(a.Container == nil) != (b.Container == nil) || a.ProviderTarget != nil || b.ProviderTarget != nil ||
+		!sameContainerUpdate(a.ContainerUpdate, b.ContainerUpdate) {
 		return false
 	}
 	for i := range ra.ResolvedTargets {

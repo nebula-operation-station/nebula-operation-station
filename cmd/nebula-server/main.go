@@ -400,7 +400,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 	bg.Go(func() { imports.run(connCtx) })
 
-	h, err := ui.New(ui.Options{
+	h, err := ui.New(withBatchPlanner(ui.Options{
 		PublicOrigin:   cfg.PublicOrigin,
 		Status:         exec,
 		HostNames:      hostNames,
@@ -439,14 +439,14 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		// executor (ui.DeployBatchProbe): an executor without batches
 		// (no batch authority, or no credential-version read) ends such
 		// a run at "joined" (enrolled, plan not run) and says so.
-		Deploy:        exec,
-		DeployJoin:    &pveinventory.GuestJoinFlow{Store: pveStore, Executor: exec},
-		DeployIPAM:    ipamStore,
-		DeployBatches: batches,
-		SecurityKeys:  securityKeys,
-		TOTPStatus:    totpStatus,
-		Log:           log,
-	})
+		// DeployBatches and ContainerBatches: withBatchPlanner.
+		Deploy:       exec,
+		DeployJoin:   &pveinventory.GuestJoinFlow{Store: pveStore, Executor: exec},
+		DeployIPAM:   ipamStore,
+		SecurityKeys: securityKeys,
+		TOTPStatus:   totpStatus,
+		Log:          log,
+	}, batches))
 	if err != nil {
 		return err
 	}
@@ -543,6 +543,9 @@ type batchRPC interface {
 	RunBatchMember(ctx context.Context, in *pb.RunBatchMemberRequest, opts ...grpc.CallOption) (*pb.RunBatchMemberResponse, error)
 	// GetRollout reads which batch stage the executor has open.
 	GetRollout(ctx context.Context, in *pb.GetRolloutRequest, opts ...grpc.CallOption) (*pb.GetRolloutResponse, error)
+	// ListContainerRecreations lists the recorded container updates a
+	// docker.compose_rollback member is bound to (executions.RecreationLister).
+	ListContainerRecreations(ctx context.Context, in *pb.ListContainerRecreationsRequest, opts ...grpc.CallOption) (*pb.ListContainerRecreationsResponse, error)
 }
 
 // lazyBatchRPC returns the server's executor client once it is connected,
@@ -612,6 +615,13 @@ func (s serverBatchExecutor) GetRollout(ctx context.Context, in *pb.GetRolloutRe
 	return nil, errNotConnected
 }
 
+func (s serverBatchExecutor) ListContainerRecreations(ctx context.Context, in *pb.ListContainerRecreationsRequest, opts ...grpc.CallOption) (*pb.ListContainerRecreationsResponse, error) {
+	if c := s.client(); c != nil {
+		return c.ListContainerRecreations(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
 // batchProbeTimeout bounds the executor probe before a batch is proposed
 // or approved.
 const batchProbeTimeout = 10 * time.Second
@@ -672,12 +682,23 @@ func (d deployBatches) ApproveBatch(ctx context.Context, user, id string, assert
 	return d.Batches.ApproveBatch(ctx, user, id, assertion)
 }
 
+// withBatchPlanner gives the UI the gated batch planner b for both the
+// staged deployment plan (DeployBatches) and the container update
+// controls (ContainerBatches, cu04): one planner, one execution gate.
+func withBatchPlanner(o ui.Options, b deployBatches) ui.Options {
+	o.DeployBatches = b
+	o.ContainerBatches = b
+	return o
+}
+
 // newBatches builds the batch planner with the executor's credential
 // versions, reconciles batches left by the previous process (before
 // anything is dispatched) and parses the batch pages.
 func newBatches(ctx context.Context, exec serverBatchExecutor, db *sql.DB, hosts executions.Hosts, acts executions.ActionResolver, log *slog.Logger) (deployBatches, *ui.BatchPages, error) {
 	b, err := executions.NewBatches(executions.BatchOptions{
 		Exec: exec, DB: db, Hosts: hosts, Log: log, Actions: acts,
+		// Compose rollbacks bind the executor's recorded update (cu04).
+		Recreations: exec,
 		CredentialVersion: func(ctx context.Context, ref string) (uint64, error) {
 			return executorclient.CredentialVersion(ctx, exec, ref)
 		},

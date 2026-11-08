@@ -326,6 +326,67 @@ func TestBatchCreateReportsErrorsAsText(t *testing.T) {
 	}
 }
 
+// TestBatchCreateCriticalContainerStatesNoSeparateApproval: a proposal
+// refused for a CRITICAL container update or rollback shows the planner's
+// advice (no separate approval exists) instead of the batch default text,
+// and still lists the members; a non-container refusal keeps the default.
+func TestBatchCreateCriticalContainerStatesNoSeparateApproval(t *testing.T) {
+	cases := []struct {
+		name      string
+		err       *executions.BatchCriticalError
+		want      string
+		forbidden string
+	}{
+		{"container", &executions.BatchCriticalError{Container: true, Members: []executions.BatchMemberView{
+			{MemberID: "m-002", ActionID: "docker.compose_update", HostID: "<i>web</i>", Params: "{}"}}},
+			executions.BatchCriticalContainerAdvice, "approve each separately"},
+		{"other", &executions.BatchCriticalError{Members: []executions.BatchMemberView{
+			{MemberID: "m-003", ActionID: "system.reboot", HostID: "db", Params: "{}"}}},
+			executions.BatchCriticalAdvice, "no separate approval"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeBatchPlanner{proposeErr: c.err}
+			rec := postForm(t, batchServer(t, f), "/batches/create", url.Values{"plan": {"core.facts web\n"}})
+			body := rec.Body.String()
+			if rec.Code != http.StatusUnprocessableEntity || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/plain") {
+				t.Fatalf("%d %q", rec.Code, rec.Header().Get("Content-Type"))
+			}
+			if !strings.Contains(body, c.want) {
+				t.Errorf("body %q lacks the advice %q", body, c.want)
+			}
+			if strings.Contains(strings.ToLower(body), c.forbidden) {
+				t.Errorf("body %q contains %q", body, c.forbidden)
+			}
+			m := c.err.Members[0]
+			if !strings.Contains(body, m.MemberID+": "+m.ActionID+" on "+m.HostID) {
+				t.Errorf("body %q does not name the member", body)
+			}
+		})
+	}
+}
+
+// TestNewKeepsContainerBatches: ui.New hands Options.ContainerBatches to
+// the handler (the container update controls propose through it), and nil
+// leaves it unset.
+func TestNewKeepsContainerBatches(t *testing.T) {
+	cb := &fakeBatchPlanner{}
+	h, err := New(Options{PublicOrigin: "https://nebula.example.org", ContainerBatches: cb})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := h.containerBatches.(*fakeBatchPlanner); !ok || got != cb {
+		t.Fatalf("containerBatches = %#v, want the option's planner", h.containerBatches)
+	}
+	h, err = New(Options{PublicOrigin: "https://nebula.example.org"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.containerBatches != nil {
+		t.Fatalf("containerBatches = %#v without the option", h.containerBatches)
+	}
+}
+
 func TestBatchApproveRelaysAssertionJSON(t *testing.T) {
 	f := &fakeBatchPlanner{}
 	mux := batchServer(t, f)

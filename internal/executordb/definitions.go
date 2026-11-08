@@ -162,57 +162,61 @@ func (db *DB) NextContainerDefinition(hostID, name, newID string) (ContainerDefi
 // NextContainerDefinition returned (a concurrent Put gives
 // ErrSecretVersion) and secret must be the first version of d's vault
 // secret ID (an existing secret is never replaced: ErrDefinitionExists).
-// Earlier versions are kept.
-func (db *DB) AddContainerDefinition(d ContainerDefinition, secret VaultSecret) error {
+// Earlier versions are kept. It returns the stored metadata (d with
+// CreatedAt as stored), so the caller answers from what it committed and
+// not from a later read that a concurrent remove may already have changed.
+func (db *DB) AddContainerDefinition(d ContainerDefinition, secret VaultSecret) (ContainerDefinition, error) {
 	if err := d.check(); err != nil {
-		return err
+		return ContainerDefinition{}, err
 	}
 	if secret.ID != d.VaultSecretID {
-		return fmt.Errorf("executordb: container definition: vault secret ID does not match")
+		return ContainerDefinition{}, fmt.Errorf("executordb: container definition: vault secret ID does not match")
 	}
 	if secret.Version != 1 {
-		return ErrDefinitionExists
+		return ContainerDefinition{}, ErrDefinitionExists
 	}
 	tx, err := db.sql.Begin()
 	if err != nil {
-		return fmt.Errorf("executordb: add container definition: %w", err)
+		return ContainerDefinition{}, fmt.Errorf("executordb: add container definition: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	id, version, kept, err := nextDefinition(tx, d.HostID, d.ContainerName, d.DefinitionID)
 	if err != nil {
-		return err
+		return ContainerDefinition{}, err
 	}
 	if id != d.DefinitionID || version != d.Version {
-		return ErrSecretVersion
+		return ContainerDefinition{}, ErrSecretVersion
 	}
 	if kept >= MaxContainerDefinitionVersionsKept {
-		return fmt.Errorf("%w: at most %d kept versions per container", ErrDefinitionLimit, MaxContainerDefinitionVersionsKept)
+		return ContainerDefinition{}, fmt.Errorf("%w: at most %d kept versions per container", ErrDefinitionLimit, MaxContainerDefinitionVersionsKept)
 	}
 	if kept == 0 {
 		var defs int
 		if err := tx.QueryRow(`SELECT COUNT(DISTINCT definition_id) FROM container_definitions`).Scan(&defs); err != nil {
-			return fmt.Errorf("executordb: add container definition: %w", err)
+			return ContainerDefinition{}, fmt.Errorf("executordb: add container definition: %w", err)
 		}
 		if defs >= MaxContainerDefinitions {
-			return fmt.Errorf("%w: at most %d container definitions", ErrDefinitionLimit, MaxContainerDefinitions)
+			return ContainerDefinition{}, fmt.Errorf("%w: at most %d container definitions", ErrDefinitionLimit, MaxContainerDefinitions)
 		}
 	}
 	now := db.now().Truncate(time.Second)
 	if err := putSecret(tx, secret, now); err != nil {
 		if errors.Is(err, ErrSecretVersion) {
-			return ErrDefinitionExists
+			return ContainerDefinition{}, ErrDefinitionExists
 		}
-		return err
+		return ContainerDefinition{}, err
 	}
 	if _, err := tx.Exec(`INSERT INTO container_definitions (host_id, container_name, definition_id, version,
 		vault_secret_id, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		d.HostID, d.ContainerName, d.DefinitionID, int64(d.Version), d.VaultSecretID, d.CreatedBy, now.Unix()); err != nil {
-		return fmt.Errorf("executordb: add container definition %s/%s: %w", d.HostID, d.ContainerName, err)
+		return ContainerDefinition{}, fmt.Errorf("executordb: add container definition %s/%s: %w", d.HostID, d.ContainerName, err)
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("executordb: add container definition: %w", err)
+		return ContainerDefinition{}, fmt.Errorf("executordb: add container definition: %w", err)
 	}
-	return nil
+	// As queryDefinitions reads it back.
+	d.CreatedAt = time.Unix(now.Unix(), 0)
+	return d, nil
 }
 
 // definitionInWindow reports whether a container recreation that is still
@@ -237,12 +241,21 @@ func definitionInWindow(q definitionQuerier, definitionID string, version uint64
 // is 0, otherwise that one version, which must not be the newest
 // (ErrDefinitionLatest). It is refused with ErrDefinitionInWindow while a
 // container recreation in intent or inside its rollback window references
-// a version it would drop. It returns the dropped versions. The caller
-// must have checked that the vault is unlocked: a locked executor must not
-// lose secrets.
-func (db *DB) RemoveContainerDefinition(hostID, name string, version uint64) ([]ContainerDefinition, error) {
+// a version it would drop. It returns the dropped versions.
+//
+// A locked executor must not lose secrets, like a vault delete: after
+// deleting the rows and secrets and right before committing, the
+// transaction calls vaultUnlocked, and any error from it rolls everything
+// back and is returned. So a vault lock that lands after the caller's own
+// check still removes nothing. A nil vaultUnlocked is refused.
+// vaultUnlocked runs while the transaction holds the only database
+// connection, so it must not use the database.
+func (db *DB) RemoveContainerDefinition(hostID, name string, version uint64, vaultUnlocked func() error) ([]ContainerDefinition, error) {
 	if err := checkDefinitionUnit(hostID, name); err != nil {
 		return nil, err
+	}
+	if vaultUnlocked == nil {
+		return nil, fmt.Errorf("executordb: remove container definition: no vault check")
 	}
 	tx, err := db.sql.Begin()
 	if err != nil {
@@ -286,6 +299,11 @@ func (db *DB) RemoveContainerDefinition(hostID, name string, version uint64) ([]
 			d.DefinitionID, int64(d.Version)); err != nil {
 			return nil, fmt.Errorf("executordb: remove container definition: %w", err)
 		}
+	}
+	// The last step before the commit: the deferred rollback keeps every
+	// secret if the vault was locked meanwhile.
+	if err := vaultUnlocked(); err != nil {
+		return nil, fmt.Errorf("executordb: remove container definition: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("executordb: remove container definition: %w", err)

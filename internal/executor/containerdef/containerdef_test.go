@@ -41,6 +41,30 @@ func TestDefinitionGoodShapeRoundTrips(t *testing.T) {
 	}
 }
 
+// TestDecodeTrailingDataRefused: dec.More reports false for a trailing `]`
+// or `}`, so the strict decode must check for the end of input itself.
+func TestDecodeTrailingDataRefused(t *testing.T) {
+	raw, err := Encode(good(), "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tail := range []string{"]", "}", "]]", "}{", "{}", "[]", "1", `"x"`, " ]", "\n}", "x"} {
+		in := append(append([]byte(nil), raw...), tail...)
+		_, err := Decode(in, "web")
+		if !errors.Is(err, ErrShape) {
+			t.Errorf("trailing %q accepted: %v", tail, err)
+			continue
+		}
+		if strings.Contains(err.Error(), planted) {
+			t.Errorf("error echoes the value: %v", err)
+		}
+	}
+	// Trailing whitespace is not data; it was accepted before and still is.
+	if _, err := Decode(append(append([]byte(nil), raw...), " \n"...), "web"); err != nil {
+		t.Fatalf("trailing whitespace: %v", err)
+	}
+}
+
 // refused asserts a shape rejection whose message holds no planted value.
 func refused(t *testing.T, d Definition, secret string) {
 	t.Helper()
