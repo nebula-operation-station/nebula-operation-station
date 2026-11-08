@@ -2810,6 +2810,11 @@ enum BuiltinTrustState {
   BUILTIN_TRUST_STATE_UNTRUSTED = 2;
   // No verified local release bundle or trust store is available.
   BUILTIN_TRUST_STATE_UNAVAILABLE = 3;
+  // No release bundle is installed: the bundle directory is missing or
+  // holds none of the three bundle files. Not a fault and not a trust
+  // verdict; built-ins stay at their untrusted floor. A partial,
+  // unreadable or unverifiable bundle is UNAVAILABLE, never this.
+  BUILTIN_TRUST_STATE_NOT_INSTALLED = 4;
 }
 
 enum BuiltinDiffOp {

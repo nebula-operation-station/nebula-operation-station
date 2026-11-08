@@ -131,6 +131,57 @@ func TestBuiltinTrustBannerUnavailableIsDistinct(t *testing.T) {
 	}
 }
 
+// NOT_INSTALLED (no release bundle on the executor host) is its own
+// banner: not a fault, not a trust verdict, and it says the built-ins
+// stay at their untrusted floor and how to place the bundle. It never
+// lists versions or offers the trust command, even if the response
+// carries modules.
+func TestBuiltinTrustBannerNotInstalledIsDistinct(t *testing.T) {
+	v := builtinTrustBanner(&pb.GetBuiltinTrustStatusResponse{
+		State:   pb.BuiltinTrustState_BUILTIN_TRUST_STATE_NOT_INSTALLED,
+		Modules: []*pb.BuiltinTrustEntry{{Name: "core", ReleaseVersion: "1.0.0"}},
+	})
+	if v == nil {
+		t.Fatal("not installed state: banner nil, want non-nil (never shown as trusted)")
+	}
+	if v.Kind != "not_installed" {
+		t.Errorf("Kind %q, want not_installed", v.Kind)
+	}
+	if v.Headline != "No release bundle is installed on this executor host." {
+		t.Errorf("Headline %q", v.Headline)
+	}
+	if v.Command != "" || v.Limitation != "" || len(v.Affected) != 0 {
+		t.Errorf("not installed banner must name no command or versions, got %+v", v)
+	}
+	for _, want := range []string{"untrusted", "risk floor", "release-manifest.json", "release-manifest.json.sig", "builtins.tar", "/usr/share/nebula/release", "docs/admin/guide.md section 8.2"} {
+		if !strings.Contains(v.Detail, want) {
+			t.Errorf("Detail %q does not mention %q", v.Detail, want)
+		}
+	}
+	u := unavailableBuiltinTrust()
+	if v.Headline == u.Headline || v.Kind == u.Kind {
+		t.Error("not installed and unavailable banners are not distinct")
+	}
+	if strings.Contains(v.Headline, "unreachable") || strings.Contains(v.Headline, "could not") {
+		t.Errorf("not installed banner reads like a fault: %q", v.Headline)
+	}
+}
+
+// Adding NOT_INSTALLED leaves the unavailable banner byte-for-byte as it
+// was.
+func TestBuiltinTrustBannerUnavailableUnchanged(t *testing.T) {
+	want := builtinTrustView{
+		Kind:     "unavailable",
+		Headline: "Built-in trust status is unreachable: the executor could not read its local release bundle or trust store.",
+		Detail:   "This is not a trust verdict: whether the built-ins are trusted is unknown. Check the executor on its host.",
+	}
+	v := builtinTrustBanner(&pb.GetBuiltinTrustStatusResponse{State: pb.BuiltinTrustState_BUILTIN_TRUST_STATE_UNAVAILABLE})
+	if v == nil || v.Kind != want.Kind || v.Headline != want.Headline || v.Detail != want.Detail ||
+		v.Command != "" || v.Limitation != "" || len(v.Affected) != 0 {
+		t.Errorf("unavailable banner changed: %+v", v)
+	}
+}
+
 // The executor's per-module verdict decides what is affected: a module
 // marked CHANGED with identical versions and hashes (retained bytes
 // missing or corrupt) must be listed, not re-derived away as trusted.

@@ -115,6 +115,32 @@ func TestTrustBannerUnavailableIsDistinct(t *testing.T) {
 	}
 }
 
+func TestTrustBannerNotInstalledRendersOwnBanner(t *testing.T) {
+	body := getBody(t, trustHandler(t, &pb.GetBuiltinTrustStatusResponse{
+		State: pb.BuiltinTrustState_BUILTIN_TRUST_STATE_NOT_INSTALLED,
+	}, nil), "/dashboard")
+	for _, want := range []string{
+		`class="trust-banner trust-banner--not_installed"`,
+		"No release bundle is installed on this executor host",
+		"risk floor",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dashboard missing %q", want)
+		}
+	}
+	for _, not := range []string{
+		"trust-banner--unavailable",
+		"unreachable",
+		"Built-ins are untrusted",
+		"Affected built-ins",
+		"trust-builtins",
+	} {
+		if strings.Contains(body, not) {
+			t.Errorf("not installed banner shows %q", not)
+		}
+	}
+}
+
 func TestTrustBannerHiddenWhenTrusted(t *testing.T) {
 	body := getBody(t, trustHandler(t, &pb.GetBuiltinTrustStatusResponse{
 		State: pb.BuiltinTrustState_BUILTIN_TRUST_STATE_TRUSTED,

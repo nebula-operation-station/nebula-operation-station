@@ -563,6 +563,107 @@ func TestDirBuiltinTrustMissingBundleIsUnavailable(t *testing.T) {
 	}
 }
 
+// Only ErrBuiltinBundleNotInstalled maps to NOT_INSTALLED; every other
+// status failure, including a bare ErrBuiltinTrustUnavailable, stays
+// UNAVAILABLE (fail closed).
+func TestServerBuiltinTrustStatusNotInstalled(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		want pb.BuiltinTrustState
+	}{
+		"not installed":         {ErrBuiltinBundleNotInstalled, pb.BuiltinTrustState_BUILTIN_TRUST_STATE_NOT_INSTALLED},
+		"wrapped not installed": {fmt.Errorf("x: %w", ErrBuiltinBundleNotInstalled), pb.BuiltinTrustState_BUILTIN_TRUST_STATE_NOT_INSTALLED},
+		"unavailable":           {ErrBuiltinTrustUnavailable, pb.BuiltinTrustState_BUILTIN_TRUST_STATE_UNAVAILABLE},
+		"read failure":          {errors.New("built-in trust: read bundle: bad signature"), pb.BuiltinTrustState_BUILTIN_TRUST_STATE_UNAVAILABLE},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := &Service{}
+			s.SetBuiltinTrust(&fakeBuiltinTrust{review: sampleReview(), reviewErr: tc.err})
+			out, err := callAs(t, trustTestServerUID, pb.ExecutorService_GetBuiltinTrustStatus_FullMethodName, &pb.GetBuiltinTrustStatusRequest{}, s.GetBuiltinTrustStatus)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out.State != tc.want || len(out.Modules) != 0 || out.ManifestDigest != "" {
+				t.Fatalf("status = %+v, want only state %v", out, tc.want)
+			}
+		})
+	}
+}
+
+// The directory-backed Status reports a missing bundle directory, or one
+// holding none of the bundle files, as ErrBuiltinBundleNotInstalled; a
+// partial bundle is a read failure, never "not installed". Review and
+// Commit keep reporting ErrBuiltinTrustUnavailable.
+func TestDirBuiltinTrustStatusNotInstalled(t *testing.T) {
+	anchors, err := release.Anchors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		setup        func(t *testing.T, dir string)
+		notInstalled bool
+	}{
+		"missing dir": {func(*testing.T, string) {}, true},
+		"empty dir":   {func(t *testing.T, dir string) { mkdirTrustTest(t, dir) }, true},
+		"unrelated file only": {func(t *testing.T, dir string) {
+			mkdirTrustTest(t, dir)
+			writeTrustTestFile(t, filepath.Join(dir, "README"))
+		}, true},
+		"partial dir": {func(t *testing.T, dir string) {
+			mkdirTrustTest(t, dir)
+			writeTrustTestFile(t, filepath.Join(dir, release.ManifestFile))
+		}, false},
+		"symlinked bundle file": {func(t *testing.T, dir string) {
+			mkdirTrustTest(t, dir)
+			if err := os.Symlink("/nonexistent", filepath.Join(dir, release.SignatureFile)); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		"symlinked bundle dir": {func(t *testing.T, dir string) {
+			target := filepath.Join(filepath.Dir(dir), "elsewhere")
+			mkdirTrustTest(t, target)
+			if err := os.Symlink(target, dir); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		"bundle path is a file": {func(t *testing.T, dir string) { writeTrustTestFile(t, dir) }, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			bundleDir := filepath.Join(root, "release")
+			tc.setup(t, bundleDir)
+			bt, err := NewDirBuiltinTrust(filepath.Join(root, "trust"), bundleDir, anchors, func() time.Time { return time.Unix(1_800_000_000, 0) }, openTrustTestDB(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = bt.Status(context.Background())
+			if err == nil {
+				t.Fatal("status of an absent or broken bundle succeeded")
+			}
+			if got := errors.Is(err, ErrBuiltinBundleNotInstalled); got != tc.notInstalled {
+				t.Fatalf("status err = %v; not installed = %v, want %v", err, got, tc.notInstalled)
+			}
+			if _, err := bt.Review(context.Background()); err == nil || errors.Is(err, ErrBuiltinBundleNotInstalled) {
+				t.Fatalf("review err = %v, want a failure other than not installed", err)
+			}
+		})
+	}
+}
+
+func mkdirTrustTest(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeTrustTestFile(t *testing.T, path string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Relative or empty directories are refused at construction.
 func TestNewDirBuiltinTrustRejectsBadDirs(t *testing.T) {
 	abs := t.TempDir()
