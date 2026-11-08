@@ -44,7 +44,8 @@ usage() {
 Usage: install.sh --admin-users USER[,USER...] --rp-id HOST
 
   --admin-users  comma-separated OS users allowed to unlock and approve
-                 (each must exist on this system; not root, not the
+                 (each must have a line in /etc/passwd - NSS-only users
+                 such as LDAP/SSSD are not supported; not root, not the
                  nebula-server/nebula-executor system users; each entry
                  must match ^[a-z_][a-z0-9_-]{0,31}$)
   --rp-id        WebAuthn RP ID: the fixed hostname Nebula is served
@@ -127,6 +128,17 @@ fi
 # executor refuses to start with a missing, root or reserved admin user
 # (cmd/nebula-executor), which would crash-loop the service, so reject
 # the same set here at install time.
+#
+# The executor is built CGO_ENABLED=0 and resolves admin users from the
+# passwd file only (Go's user.Lookup, internal/peercred); getent asks
+# NSS, so an LDAP/SSSD-only user would pass it and then crash-loop the
+# executor. NEBULA_PASSWD_FILE is a test-only override for the file the
+# check reads; production always uses /etc/passwd.
+passwd_file="${NEBULA_PASSWD_FILE:-/etc/passwd}"
+if [[ ! -r "$passwd_file" ]]; then
+  echo "install.sh: cannot read ${passwd_file}; admin users must be resolvable from it" >&2
+  exit 1
+fi
 IFS=',' read -r -a raw_users <<< "$admin_users"
 admin_list=()
 for user in "${raw_users[@]}"; do
@@ -144,6 +156,12 @@ for user in "${raw_users[@]}"; do
   fi
   if ! getent passwd "$user" >/dev/null; then
     echo "install.sh: admin user does not exist: $user" >&2
+    exit 1
+  fi
+  # Exact name match on field 1, like Go's user.Lookup without cgo. The
+  # pattern above guarantees $user has no regex metacharacters.
+  if ! grep -q "^${user}:" "$passwd_file"; then
+    echo "install.sh: admin user ${user} is not in ${passwd_file}; NSS-only users (LDAP, SSSD) are not supported: the executor resolves admin users from /etc/passwd only" >&2
     exit 1
   fi
   case "$user" in
