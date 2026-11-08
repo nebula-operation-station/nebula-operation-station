@@ -1,0 +1,136 @@
+{{define "content"}}{{$d := .ContainerUpdate}}
+{{if $d.Confirm}}{{$c := $d.Confirm}}
+<h1>Confirm container updates</h1>
+<section class="panel ctr-confirm" aria-label="Confirm container updates">
+  <p>{{$c.Count}} member(s) in {{len $c.Stages}} stage(s) by inventory environment (DEV, then QA, then PROD), proposed as one batch. Each member is bound exactly as shown below, built from the update preview named with it. Nothing is proposed before you confirm; approval happens on the batch page, where the executor decides the final risk class.</p>
+  <p>A stage tolerates no failed or unreachable member: the first failure or failed postcheck (a regression) stops all work not yet started. A rollback is never automatic; it is a new proposal from the container update page.</p>
+  <ol class="ctr-confirm__stages">
+    {{range $c.Stages}}<li class="ctr-confirm__stage">
+      <h2>Stage {{.Num}}: {{.Name}}</h2>
+      {{range .Members}}
+      <article class="ctr-confirm__member" aria-label="{{.Kind}} of {{.Project}} on {{.HostName}}">
+        <h3>{{.Kind}} of Compose project <span class="mono">{{.Project}}</span> on {{.HostName}}</h3>
+        <dl class="kv">
+          <dt>Host</dt><dd class="mono">{{.HostID}}</dd>
+          <dt>Risk</dt><dd><span class="badge {{if eq .Risk "HIGH"}}badge--critical{{else}}badge--warning{{end}}">{{.Risk}}</span> at least{{if .TagChange}}: a tag change is HIGH, with user verification and manual stage gates{{else}}: a same-tag digest {{if eq .Kind "Rollback"}}return{{else}}refresh{{end}} is MEDIUM{{end}}. The executor may raise it (unrecorded host, untrusted artifact, scanner); a CRITICAL member is refused, there is no separate approval for it.</dd>
+          <dt>Update preview</dt><dd><span class="mono">{{.PreviewID}}</span>{{if .PreviewAge}}, {{.PreviewAge}}{{end}}</dd>
+          <dt>Source digest</dt><dd class="mono">{{.SourceDigest}}</dd>
+          <dt>Working directory hash</dt><dd class="mono">{{.WorkingDirHash}}</dd>
+          <dt>Config files hash</dt><dd class="mono">{{.ConfigFilesHash}}</dd>
+          {{if .RollbackOf}}<dt>Rolls back update</dt><dd class="mono">{{.RollbackOf}}</dd>
+          <dt>Recovery plan</dt><dd class="mono">{{.RecoveryPlanDigest}}</dd>{{end}}
+        </dl>
+        <h4>Images: current to approved</h4>
+        <table class="ctr-confirm__images">
+          <thead><tr><th scope="col">Service</th><th scope="col">Repository</th><th scope="col">Platform</th><th scope="col">Current</th><th scope="col">Approved</th><th scope="col">Tag policy</th></tr></thead>
+          <tbody>
+          {{range .Images}}<tr>
+            <th scope="row" class="mono">{{.Service}}</th>
+            <td class="mono">{{.Repository}}</td>
+            <td class="mono">{{.Platform}}</td>
+            <td>tag <span class="mono">{{.OldTag}}</span>{{if .OldImageID}}<br>image <span class="mono">{{.OldImageID}}</span>{{end}}{{range .OldDigests}}<br>digest <span class="mono">{{.}}</span>{{end}}</td>
+            <td>tag <strong class="mono">{{.NewTag}}</strong>{{if ne .OldTag .NewTag}} <span class="badge badge--critical">tag change</span>{{else}} <span class="badge badge--grey">same tag</span>{{end}}{{if .NewIndexDigest}}<br>index digest <span class="mono">{{.NewIndexDigest}}</span>{{end}}{{if .NewPlatformDigest}}<br>platform digest <span class="mono">{{.NewPlatformDigest}}</span>{{end}}{{with .Rollback}}<br>retained image <span class="mono">{{.RetainedReference}}</span> (<span class="mono">{{.PriorImageID}}</span>){{end}}</td>
+            <td>{{if .PolicyVersion}}<span class="mono">{{.PolicyVersion}}</span> <span class="mono">{{.PolicyDigest}}</span>{{if .MajorChange}} <strong>major version change</strong>{{end}}{{else}}none (same tag){{end}}</td>
+          </tr>
+          {{end}}
+          </tbody>
+        </table>
+        <h4>Recreated containers</h4>
+        <ul>
+          {{range .Targets}}<li><span class="mono">{{.ContainerName}}</span> (service <span class="mono">{{.Service}}</span>, container <span class="mono">{{.ContainerID}}</span>, image <span class="mono">{{.ImageID}}</span> from <span class="mono">{{.RunningReference}}</span>, configuration digest <span class="mono">{{.ConfigurationDigest}}</span>)</li>
+          {{end}}
+        </ul>
+        <h4>Dependencies: affected, not recreated</h4>
+        {{if .Dependencies}}<ul>
+          {{range .Dependencies}}<li><span class="mono">{{.Service}}</span>: {{if eq .Relation "requires"}}required by the update{{else}}requires an updated service{{end}}{{if .RestartOnUpdate}}, restarted by Compose{{end}}; containers {{range $i, $m := .Containers}}{{if $i}}, {{end}}<span class="mono">{{$m.ContainerName}}</span>{{end}}</li>
+          {{end}}
+        </ul>{{else}}<p>None.</p>{{end}}
+        <h4>Rollback</h4>
+        {{if eq .Kind "Rollback"}}<p>This returns the services to the retained images of the recorded update. It is bound to the containers that update created.</p>
+        {{else}}<p>The old images are retained on the host. While the rollback window is open, a rollback is offered on the container update page as a new proposal, bound to the containers this update creates.</p>{{end}}
+        <p><strong>Volume and database migrations are not undone</strong> by an update or a rollback.</p>
+      </article>
+      {{end}}
+      {{if .GateManual}}<p class="ctr-confirm__gate">Gate: stage {{.Num}} must pass, then you continue to the next stage manually on the batch page.</p>{{end}}
+    </li>
+    {{end}}
+  </ol>
+  <form method="post" action="/inventory/containers/plan">
+    <input type="hidden" name="confirm" value="1">
+    <input type="hidden" name="plan_digest" value="{{$c.Digest}}">
+    {{range $c.Hidden}}<input type="hidden" name="{{.Name}}" value="{{.Value}}">
+    {{end}}
+    <button type="submit">Confirm and propose batch</button>
+    <a class="button button--secondary" href="/inventory/containers">Cancel</a>
+  </form>
+</section>
+{{else}}
+<h1>Container updates</h1>
+<section class="panel" aria-label="About container updates">
+  <p class="muted">Select the Compose services to update or the recorded updates to roll back. Selecting a project selects nothing below it: every service has its own checkbox, and services that share a namespace must be selected together. What cannot be updated shows why, without a checkbox. The next page shows exactly what will be proposed, per image from current to approved; nothing is proposed before you confirm.{{if not $d.TagChanges}} Tag changes are not offered: they need the executor's tag policy, which this server does not have; only same-tag digest refreshes are offered.{{end}}</p>
+</section>
+{{if $d.Hosts}}
+<form method="post" action="/inventory/containers/plan" class="ctr-tree">
+  {{range $d.Hosts}}{{$h := .}}
+  <fieldset class="panel ctr-host">
+    <legend>{{.Name}}{{if .Env}} ({{.Env}}){{end}}</legend>
+    {{if .Unavailable}}<p>Not available: {{.Unavailable}}.</p>
+    {{else}}
+    {{if .PreviewID}}<input type="hidden" name="preview:{{.ID}}" value="{{.PreviewID}}">
+    <p class="muted">Update preview <span class="mono">{{.PreviewID}}</span>{{if .PreviewAge}}, {{.PreviewAge}}{{end}}.</p>{{end}}
+    {{if .PreviewNote}}<p>Not available: {{.PreviewNote}}.</p>{{end}}
+    {{if .PrepareURL}}<p><a href="{{.PrepareURL}}">Propose docker.update_prepare for this host</a></p>{{end}}
+    {{if .PreviewURL}}<p><a href="{{.PreviewURL}}">Run a fresh update preview</a></p>{{end}}
+    {{if .Units}}
+    <ul class="ctr-tree__units">
+      {{range .Units}}<li class="ctr-tree__unit">
+        <span class="ctr-tree__project">Compose project <span class="mono">{{.Label}}</span></span>
+        {{if .Unavailable}}<p>Not available: {{.Unavailable}}.</p>
+        {{else}}
+        <ul class="ctr-tree__services">
+          {{range .Services}}<li class="ctr-tree__service">
+            {{if .Unavailable}}<span class="mono">{{.Service}}</span> <span class="badge badge--grey">not available</span> {{.Unavailable}}
+            {{else}}<label><input type="checkbox" name="svc" value="{{.Key}}"> <span class="mono">{{.Service}}</span></label>{{if .Refresh}} <span class="badge badge--warning">new digest for this tag</span>{{end}}
+            {{if .Tags}}<label>Target tag
+              <select name="tag:{{.Key}}">
+                <option value="" selected>keep the running tag (digest refresh)</option>
+                {{range .Tags}}<option value="{{.}}">{{.}}</option>
+                {{end}}
+              </select></label>
+            <label><input type="checkbox" name="major:{{.Key}}" value="1"> I confirm a major version change</label>{{end}}
+            {{end}}
+            {{if .Image}}<span class="muted">image <span class="mono">{{.Image}}</span></span>{{end}}
+            {{if .Containers}}<span class="muted">containers {{range $i, $n := .Containers}}{{if $i}}, {{end}}<span class="mono">{{$n}}</span>{{end}}</span>{{end}}
+            {{if .Shares}}<span class="muted">shares a namespace with {{range $i, $n := .Shares}}{{if $i}}, {{end}}<span class="mono">{{$n}}</span>{{end}}; select them together</span>{{end}}
+          </li>
+          {{end}}
+        </ul>
+        {{end}}
+      </li>
+      {{end}}
+    </ul>
+    {{end}}
+    <h3>Rollback</h3>
+    {{if .RollbackNote}}<p>Not available: {{.RollbackNote}}.</p>
+    {{else if .Rollbacks}}
+    <ul class="ctr-tree__rollbacks">
+      {{range .Rollbacks}}<li>
+        {{if .Unavailable}}Update <span class="mono">{{.ExecutionID}}</span> of <span class="mono">{{.Unit}}</span> ({{.State}}) <span class="badge badge--grey">not available</span> {{.Unavailable}}
+        {{else}}<label><input type="checkbox" name="rollback" value="{{.Key}}"> Roll back update <span class="mono">{{.ExecutionID}}</span> of <span class="mono">{{.Unit}}</span> ({{.State}})</label>{{end}}
+        {{if .Window}}<span class="muted">rollback window until {{.Window}}</span>{{end}}
+        {{range .Images}}<span class="muted mono">{{.}}</span>{{end}}
+      </li>
+      {{end}}
+    </ul>
+    {{else}}<p class="muted">No recorded update.</p>{{end}}
+    {{end}}
+  </fieldset>
+  {{end}}
+  {{if $d.More}}<p>{{$d.More}} more host(s) not shown; open the page for one host from the chart.</p>{{end}}
+  {{if $d.Selectable}}<button type="submit">Review the plan</button>{{end}}
+</form>
+{{else}}
+<section class="panel"><p>No managed host.</p></section>
+{{end}}
+{{end}}
+{{end}}

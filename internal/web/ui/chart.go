@@ -159,6 +159,9 @@ type chartData struct {
 	// 2): the selection form on the chart page, or the frozen host
 	// list on the confirmation page. Nil hides the section.
 	Staged *stagedUpdateData
+	// ContainerUpdates links each host to its container update controls
+	// (cu04); false without a container batch planner.
+	ContainerUpdates bool
 }
 
 // pveNodeView is one PVE node box in the org chart, with its guest and
@@ -617,7 +620,7 @@ func (h *Handler) handleInventoryChart(w http.ResponseWriter, r *http.Request) {
 	pins, pinsUnavailable := h.hostKeyPins(ctx)
 	b := h.batchData(ctx)
 	res := h.loadChartResults(ctx)
-	data.Chart = &chartData{Hosts: h.chartHosts(ctx, hosts, pins, pinsUnavailable, b, res)}
+	data.Chart = &chartData{Hosts: h.chartHosts(ctx, hosts, pins, pinsUnavailable, b, res), ContainerUpdates: h.containerBatches != nil}
 	// Staged OS update selection (ADR 0006, P2-02 part 2): one
 	// checkbox per enrolled managed host; hidden when operations are
 	// off or enrollment cannot be determined.

@@ -165,6 +165,7 @@
           {{if not .ContainerCount}}
           <p class="chart__none">No stored container list.</p>
           {{end}}
+          {{if $.Chart.ContainerUpdates}}<p class="chart__ctr-link"><a href="/inventory/containers?host={{$h.ID}}">Container and Compose updates and rollbacks</a></p>{{end}}
           {{range .Groups}}
           {{if .Name}}
           <div class="chart__project">

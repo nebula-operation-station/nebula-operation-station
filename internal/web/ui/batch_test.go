@@ -13,7 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
+	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
 const testBatchID = "11111111-2222-4333-8444-555555555555"
@@ -29,6 +31,22 @@ type fakeBatchPlanner struct {
 	refreshed  []string
 	skipped    []string
 	skipErr    error
+}
+
+func (f *fakeBatchPlanner) LatestContainerPreview(context.Context, string) (executions.ContainerPreview, error) {
+	return executions.ContainerPreview{}, nil
+}
+
+func (f *fakeBatchPlanner) ContainerRecreations(context.Context, string) ([]*pb.ContainerRecreationInfo, error) {
+	return nil, nil
+}
+
+func (f *fakeBatchPlanner) PlanContainerUpdate(context.Context, string, executions.ContainerUpdateSpec) (canonical.BatchContainerUpdate, error) {
+	return canonical.BatchContainerUpdate{}, executions.ErrBatchPreviewUnit
+}
+
+func (f *fakeBatchPlanner) PlanContainerRollback(context.Context, string, executions.ContainerRollbackSpec) (canonical.BatchContainerUpdate, error) {
+	return canonical.BatchContainerUpdate{}, executions.ErrBatchRollbackSource
 }
 
 func (f *fakeBatchPlanner) ListBatches(context.Context) ([]executions.BatchSummary, error) {
