@@ -54,6 +54,15 @@ const (
 	maxRecoveryReference = 2048
 )
 
+// Column limits a caller checks before completing a row, so a record that
+// cannot fit is left out deliberately instead of failing the completion.
+const (
+	// MaxRecreationBaselineBytes bounds a completion's baseline.
+	MaxRecreationBaselineBytes = maxRecreationBaseline
+	// MaxRecreationContainersBytes bounds a completion's containers, as JSON.
+	MaxRecreationContainersBytes = maxRecreationContainers
+)
+
 var (
 	// ErrNoRecreation means no recreation row exists for the execution.
 	ErrNoRecreation = errors.New("executordb: no container recreation")
