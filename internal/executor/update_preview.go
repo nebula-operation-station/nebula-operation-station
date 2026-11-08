@@ -45,7 +45,7 @@ const (
 	// embedded in the server's catalog (checked by
 	// TestShippedUpdatePreviewPinMatchesEmbeddedScript). Changing it is a
 	// reviewed change of this protected package.
-	updatePreviewArtifactSHA256 = "ab543a795187aaa1db1e5396034cbf14dd7b5487a5e0fe42345bd8488af09813"
+	updatePreviewArtifactSHA256 = "7775738be3dab225799482aaea60da5ad4f0911fe2ae1593b01af627cf70a640"
 	// updatePreviewTimeout bounds one preview job on the host; the request
 	// cannot change it. The script stops its own work a minute earlier.
 	updatePreviewTimeout = 5 * time.Minute

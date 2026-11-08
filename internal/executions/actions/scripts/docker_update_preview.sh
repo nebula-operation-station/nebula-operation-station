@@ -78,6 +78,7 @@ MAX_PREVIEW_WALL_CLOCK = 4 * 60
 KILL_GRACE = 10
 CALL_BOUND = 30
 CURL_BOUND = 10
+TOOL_NOT_FOUND = 127
 
 L_PROJECT = "com.docker.compose.project"
 L_SERVICE = "com.docker.compose.service"
@@ -258,10 +259,18 @@ def call(args, budget, bound=CALL_BOUND, cap=MAX_INSPECT_BYTES, env=None, cwd=No
     return p.returncode, out, time.monotonic() - start, limit
 
 
+def missing(rc):
+    """A tool that is gone: `timeout` exits 127 when it cannot find the
+    command (Q18). The whole preview then reports tooling_missing."""
+    if rc == TOOL_NOT_FOUND:
+        raise Stop("tooling_missing")
+
+
 def pcall(args, budget, reason, cap=MAX_INSPECT_BYTES, cwd=None):
     """A call whose failure is reason, unless the budget ran out meanwhile:
     then the unit is cut off (truncated), never reported half."""
     rc, out, _, _ = call(args, budget, cap=cap, cwd=cwd)
+    missing(rc)
     if rc != 0 or out is None:
         if budget.left() - KILL_GRACE < 1:
             raise Stop(budget.reason)
@@ -543,6 +552,7 @@ class Registry:
         rc, out, _, _ = call(["curl", "-q", "--proto", "=https", "--max-redirs", "0", "--connect-timeout", "5",
                               "--max-time", str(limit), "-s", "-i"] + args, self.budget, bound=limit + 1,
                              cap=MAX_INDEX_BYTES + 64 * 1024)
+        missing(rc)
         if rc != 0 or out is None:
             raise Stop("tag_unresolved")
         head, sep, body = out.partition(b"\r\n\r\n")
@@ -777,6 +787,7 @@ class Preview:
             order = sorted(by_svc)
             rc, out, _, _ = call(compose_base(unit, with_override) + ["config", "--hash=" + ",".join(order)], self.budget,
                                  cwd=unit.workdir)
+            missing(rc)
             if (rc != 0 or out is None) and self.budget.left() - KILL_GRACE < 1:
                 raise Stop(self.budget.reason)
             hashes = {}
@@ -805,6 +816,14 @@ class Preview:
         return {"form": "compose", "project": project, "container_id": "", "reason": "override_drift" if drift else "",
                 "working_dir_hash": unit.working_dir_hash, "config_files_hash": unit.config_files_hash,
                 "source_digest": source_digest, "services": svc_out, "targets": targets, "images": self.images(targets)}
+
+
+def compose_present(budget):
+    """The Compose plugin is a required tool (Q18): a docker without it
+    makes the preview tooling_missing, not every project unsupported."""
+    rc, out, _, _ = call(["docker", "compose", "version"], budget)
+    if rc != 0 or out is None:
+        raise Stop("tooling_missing")
 
 
 def list_containers(budget):
@@ -847,6 +866,7 @@ def main():
         emit(result, 0 if e.reason == "prepare_required" else 1)
     log("phase: list")
     try:
+        compose_present(budget)
         rows = list_containers(budget)
     except Stop as e:
         result["status"] = "host_unreadable" if e.reason != "tooling_missing" else e.reason
@@ -877,11 +897,19 @@ def main():
             try:
                 unit = pv.standalone(ids[0]) if form == "standalone" else pv.compose(project, ids)
             except Stop as e:
-                if e.reason in ("truncated", "tooling_missing"):
+                if e.reason == "tooling_missing":
+                    # A tool gone mid-run: no unit can be trusted (Q18).
+                    emit({"format": FORMAT, "status": "tooling_missing", "units": []}, 1)
+                if e.reason == "truncated":
                     cut = True
                     unit = head
                 else:
                     unit = dict(head, reason=e.reason)
+            except Exception:
+                # Well-formed but unexpected JSON for this unit (a
+                # non-scalar value where a scalar belongs): only this unit
+                # is unavailable, without facts.
+                unit = dict(head, reason="host_unreadable")
             n = size(unit) + 1
             # Room stays for the truncated head of every later unit.
             if used + n + HEAD_RESERVE * (len(plan) - i - 1) > MAX_PREVIEW_RESULT_BYTES:

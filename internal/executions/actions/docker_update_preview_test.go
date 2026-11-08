@@ -44,6 +44,12 @@ func (c *composeV2) previewScript(t *testing.T) string {
 		}
 		s = strings.Replace(s, pvWallClockLine, "MAX_PREVIEW_WALL_CLOCK = "+c.previewWallClock, 1)
 	}
+	for old, repl := range c.previewLines {
+		if strings.Count(s, "\n"+old+"\n") != 1 {
+			t.Fatalf("line %q is not unique in the preview script", old)
+		}
+		s = strings.Replace(s, "\n"+old+"\n", "\n"+repl+"\n", 1)
+	}
 	return s
 }
 
@@ -429,6 +435,7 @@ func TestPreviewWritesNothing(t *testing.T) {
 					t.Errorf("curl GET %s", k.URL)
 				}
 			case slices.ContainsFunc(previewAllowed, func(p string) bool { return strings.HasPrefix(line, p) }):
+			case line == "compose version":
 			case k.Argv[0] == "compose" && slices.Contains(k.Argv, "config") && !slices.ContainsFunc(k.Argv, func(a string) bool {
 				return slices.Contains([]string{"up", "pull", "down", "rm", "stop", "start", "restart", "create", "run", "kill", "build"}, a)
 			}):

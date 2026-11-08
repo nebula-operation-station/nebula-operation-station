@@ -6,6 +6,7 @@
 # up) update the state.
 import json
 import os
+import signal
 import sys
 import time
 
@@ -115,6 +116,20 @@ def docker(argv):
             i += 2
         sub = argv[i:]
         override = st["override"]
+        if sub == ["version"]:
+            # A host without the Compose plugin: docker knows no "compose".
+            if st.get("no_compose"):
+                sys.exit(1)
+            print("Docker Compose version v2.29.0")
+            return
+        if sub[:1] == ["config"] and st.get("compose_exit"):
+            # E.g. 127: the plugin vanished between calls.
+            sys.exit(st["compose_exit"])
+        if sub[:1] == ["config"] and st.get("ignore_term"):
+            # A call that ignores SIGTERM; only SIGKILL ends it.
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            with open(os.path.join(HERE, "hung.pid"), "w") as f:
+                f.write(str(os.getpid()))
         if sub[:1] == ["config"] and st.get("hang_config"):
             time.sleep(st["hang_config"])
         if sub[:1] == ["config"] and st.get("fail_config"):
@@ -159,7 +174,7 @@ def curl(argv):
     st = load()
     url = argv[argv.index("--") + 1]
     record("curl", argv, {"url": url, "head": "-I" in argv})
-    ans = st.get("registry", {}).get(url)
+    ans = st.get("registry", {}).get(url, st.get("registry_default"))
     if ans is None:
         sys.exit(7)
     sys.stdout.write("HTTP/1.1 %d X\r\n" % ans["status"])
