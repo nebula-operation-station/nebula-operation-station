@@ -30,6 +30,13 @@ fi
 pass=0
 fail=0
 
+# WA-07: rootless provisioning tests shared with the quickstart checks.
+if python3 "${script_dir}/quickstart/release_bundle_test.py"; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1))
+fi
+
 # run_rc <want_rc> <name> -- <args...>
 # Runs install.sh in dry-run mode and checks the exit status.
 run_rc() {
@@ -88,6 +95,12 @@ if [[ -z "$test_user" ]]; then
   exit 1
 fi
 echo "# using local user: ${test_user}"
+
+# Explicit bundle source options must parse before any system changes.
+run_rc 0 "release bundle source option" --admin-users "$test_user" --rp-id nebula.test --release-bundle-dir /tmp/attachments
+run_rc 0 "release bundle source equals option" --admin-users "$test_user" --rp-id nebula.test --release-bundle-dir=/tmp/attachments
+run_rc 2 "release bundle source missing value" --admin-users "$test_user" --rp-id nebula.test --release-bundle-dir
+run_rc 2 "release bundle source empty value" --admin-users "$test_user" --rp-id nebula.test --release-bundle-dir=
 
 # --- Argument parsing: missing or unknown options exit 2 with usage --------
 out=$(NEBULA_INSTALL_DRY_RUN=1 bash "$install_sh" 2>&1)

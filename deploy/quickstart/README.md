@@ -98,3 +98,10 @@ fingerprints. Then in the web UI: **Inventory** → add the host →
 | Upgrade | `git checkout main && git pull`, then `sudo ./deploy/quickstart/setup-nebula.sh --rp-id …` again (it backs up first) |
 | Backup | `sudo nebula backup`, copy `~/nebula-backups/` off the machine |
 | Anything else | [handbook](../../docs/admin/guide.md) |
+
+The source install creates an empty `/usr/share/nebula/release` (root:root
+0755). Without the three signed release attachments the web banner
+“Built-in trust status is unreachable” is expected; the directory alone
+provides no provenance. See admin guide section 8.2 for provisioning a
+matching release bundle, including `NEBULA_RELEASE_BUNDLE_DIR`. Quickstart
+never downloads or signs a bundle.

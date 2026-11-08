@@ -31,6 +31,13 @@ fail=0
 ok()  { echo "ok   $1"; pass=$((pass + 1)); }
 bad() { echo "FAIL $1"; fail=$((fail + 1)); }
 
+# WA-07: all installer paths share bundle provisioning and package policy.
+if python3 "${script_dir}/release_bundle_test.py"; then
+  ok "release bundle provisioning and packaging"
+else
+  bad "release bundle provisioning and packaging"
+fi
+
 expected=(nebula nebula-server nebula-executor nebula-discovery nebula-pve-collector)
 
 # The same parser the scripts use (one copy, sourced here and there).

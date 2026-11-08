@@ -314,7 +314,7 @@ vendor-data.
 
 | Path | Needs | Failure modes | Verdict |
 | --- | --- | --- | --- |
-| (i) Operator-provisioned snippet storage plus a per-guest `cicustom` vendor-data file that NOS writes on the node | Once, by the operator: a node-local `dir` storage with content `snippets`, recorded in the executor registry. Each time: the PVE node is an enrolled managed host (spec 16 item 3, ADR 0006 "node's ordinary NOS SSH enrollment") and a new typed SSH action writes or removes exactly one file in that directory. The action token gets the `cicustom` field under `VM.Config.Cloudinit` (already part of the configuration extension) and, *verify*, the volume access check on `/storage/<snippets>` (expected `Datastore.Audit`). No new broad PVE privilege; no guest privilege. | Node not enrolled, blocked or keyring locked; storage absent on the target node; HA or manual move to a node without the file before cleanup (PVE regenerates the cloud-init drive at start and refuses a missing volume, *verify*); image with vendor-data disabled; changing `cicustom` later changes the NoCloud instance-id (*verify*); **the rendered vendor-data is probably readable by every `VM.Audit` holder through `cloudinit/dump` until cleanup (*verify*, PK-10a)** | Chosen, conditional on M1 and M2 together |
+| (i) Operator-provisioned snippet storage plus a per-guest `cicustom` vendor-data file that NOS writes on the node | Once, by the operator: a node-local `dir` storage with content `snippets`, recorded in the executor registry. Each time: the PVE node is an enrolled managed host (spec 16 item 3, ADR 0006 "node's ordinary NOS SSH enrollment") and a new typed SSH action writes or removes exactly one file in that directory. The action token gets the `cicustom` field under `VM.Config.Cloudinit` (already part of the configuration extension) and, *verify*, the volume access check on `/storage/<snippets>` (expected `Datastore.Audit`). No new broad PVE privilege; no guest privilege. | Node not enrolled, blocked or keyring locked; storage absent on the target node; HA or manual move to a node without the file before cleanup (PVE regenerates the cloud-init drive at start and refuses a missing volume, *verify*); image with vendor-data disabled; changing `cicustom` later changes the NoCloud instance-id (*verify*); **the rendered vendor-data may be readable by every `VM.Audit` holder through `cloudinit/dump` until cleanup** (PVE 9.2.24, lab 08.11.2026: no snippet marker seen in the dump with restricted tokens, `type=vendor` rejected, no root positive control, so not ruled out; PVE 8.x not tested; previously "on versions not lab-checked" with "dump returns no snippet content") | Chosen, conditional on M1 and M2 together |
 | (ii) A generic, secret-free snippet that makes the guest fetch its key once from NOS over an authenticated one-time channel | A NOS endpoint the guest can reach: the executor has no network listener (spec 02) and the server must not hold secrets, so either rule would have to break. A per-guest one-time token still has to reach the guest through a PVE field or snippet, which is as exposed as the key itself. A network path from every new guest to NOS. | Guest network or DNS not ready at first boot; listener exposed to every guest network; token theft before the real guest fetches (see variant V3 below for what one-time use does and does not buy) | Rejected: adds a network-facing endpoint and does not remove the exposure of (i) |
 | (iii-a) Per-guest NoCloud seed ISO (`cidata`) uploaded through the API and attached as a CD-ROM | `Datastore.AllocateTemplate` on a dedicated ISO storage, `VM.Config.CDROM`, a volume delete right (*verify*); NOS replaces PVE's cloud-init drive, so it must render user-data and network-config itself; an ISO9660 writer in Go without a new dependency | Any PVE user who can attach ISOs from that storage can read the key; two `cidata` sources when the template keeps its cloud-init drive; more generated format code | Not now; alternative for remotes whose nodes cannot be enrolled (open question 2) |
 | (iii-b) Guest agent `file-write`, `args`/`fw_cfg`, SMBIOS strings | Guest file access (forbidden by spec 06); `args` is `root@pam` only; SMBIOS values sit in the VM config that every `VM.Audit` holder, including the read token, can read | — | Rejected. Note: if PK-10a shows that `cloudinit/dump` renders `cicustom` content, path (i) has the same `VM.Audit` exposure as SMBIOS and is not better on that axis |
@@ -347,6 +347,24 @@ The same question applies to any storage content or download endpoint that
 can return a `snippets` volume, and to attaching the generated cloud-init
 volume to another guest (PK-10a).
 
+Observed in PK-10a on PVE 9.2.24 (lab 08.11.2026; results in
+[preset-host-key.md](../implementation/preset-host-key.md#pk-10a-lab-results)),
+with limits: `cloudinit/dump` with `VM.Audit` (alone or with any
+`Datastore.*` privilege) returned HTTP 200 for `user`, `network` and
+`meta` with no snippet marker in the output, and HTTP 400 for `vendor`;
+the tested storage requests (content lists, `GET` of the two volume IDs,
+`GET` with `?volume=` on some sub-endpoints, all with `GET` only) showed no
+snippet marker and did not list the snippet or the `vm-<vmid>-cloudinit`
+volume for any tested privilege profile. None of these negative results
+had a positive control: no root dump ran while `cicustom` was set and no
+root listing of the two storages ran, so a test artifact (for example a
+pattern that would not have matched) looks the same as "not exposed". The
+results are therefore "no exposure seen", not "not exposed" (previously
+stated as observed fact). Endpoints and methods not called (see the
+results table) and attaching the cloud-init volume to another guest were
+not tested. The worst case above stays for PVE 9.2.24 as well as for PVE
+8.x (not tested) and any version not lab-checked; M1 and M2 stay required.
+
 ### Variants and residual risk
 
 The attacker that matters for every variant is: someone who learns the
@@ -362,7 +380,7 @@ the real guest stays unenrolled.
 | Variant | Secret in cloud-init | Who learns it (worst case of PK-10a) | Theft detectable | Residual risk vs fingerprint review | vs option (a) |
 | --- | --- | --- | --- | --- | --- |
 | V1: (c) as specified (preset key in vendor-data, cleanup after rotation) | Host private key, minutes to hours | Node root, node backups, and every `VM.Audit` holder | No. A thief at the join is indistinguishable from the guest | Better than review as practiced (operators rarely compare on the console): the attacker needs `VM.Audit` *and* a network position, not just a network position. Worse than review done properly on the console, and worse in kind because the failure is silent and also leaks to read-only users | Worse: (a) reads the key over the authenticated PVE channel with no secret at rest; its cost is a credential that can read any guest file |
-| V2: V1 plus **M1** (early cleanup) and **M2** (`VM.Audit` precondition), see below | Host private key, from config set until the start task returns | Node root and node backups; no other `VM.Audit` holder, because M2 refuses `preset` when one exists | No | Better than review in both forms against everyone but node root, whom review does not protect against either (node root controls the console) | Comparable: no guest-file credential, but a short-lived secret on the node |
+| V2: V1 plus **M1** (early cleanup) and **M2** (`VM.Audit` precondition), see below | Host private key: snippet from config set until the start task returns, generated drive until the gated M1 regenerate (previously "from config set until the start task returns") | Node root and node backups; no other `VM.Audit` holder, because M2 refuses `preset` when one exists | No | Better than review in both forms against everyone but node root, whom review does not protect against either (node root controls the console) | Comparable: no guest-file credential, but a short-lived secret on the node |
 | V3: guest generates its own host key, one-time registration secret in cloud-init, NOS accepts exactly one registration per VMID and generation | One-time token | Same readers as V1 | Partly: a thief who registers first makes the real guest's registration fail loudly, but a thief with a network position simply blocks the real guest's attempt and nothing is seen | None gained against the attacker that matters (needs a network position in both); needs a guest-to-NOS listener that spec 02 forbids | Worse (listener) |
 | V4: guest generates its own host key, nothing secret in cloud-init | Nothing | Nobody | — | Equal to review: without a secret or a hypervisor-mediated read, nothing binds the presented key to the VM. Values readable inside the guest (`product_uuid`, MAC address) are visible to `VM.Audit` holders too and prove nothing | Worse; (a) is exactly the hypervisor-mediated read V4 lacks |
 
@@ -378,14 +396,56 @@ mitigations M1 and M2.
 - **M1, early cleanup.** The snippet is needed only when PVE generates the
   cloud-init drive at start. As soon as the start task has returned OK,
   the executor clears `cicustom` and removes the snippet, before the join
-  (previously: after rotation). The key then lives on in the generated
-  cloud-init drive on VM storage (root and storage admins only, *verify*)
-  and in the guest. *Verify:* clearing `cicustom` on a running guest does
-  not regenerate the drive before cloud-init has read it, and the drive is
-  readable through no `VM.Audit` endpoint. If the guest reboots before
-  cloud-init ran, the new drive has no vendor-data, the guest generates its
+  (previously: after rotation). Neither step touches the drive PVE
+  generated at start, so the booting guest can still read it. Clearing
+  `cicustom` alone leaves the secret on the attached drive: on PVE 9.2.24
+  (lab 08.11.2026) the drive still held all four snippet markers 20 s after
+  `qm set --delete cicustom`, and only an explicit `qm cloudinit update`
+  rewrote it (previously: *verify* that clearing `cicustom` does not
+  regenerate the drive before cloud-init has read it, with no regenerate
+  step). The executor therefore regenerates the cloud-init drive
+  (`PUT /nodes/{node}/qemu/{vmid}/cloudinit`; privilege per PVE API docs
+  `VM.Config.Cloudinit` on `/vms/<vmid>`, *verify* in PK-10a for the action
+  token; the API call itself was not exercised in the lab, only
+  `qm cloudinit update`), but only after the `cicustom` clear returned OK
+  **and** the *regenerate gate* is met (previously: right after the
+  `cicustom` clear, which in the normal case replaces the drive before the
+  guest has booted, so the vendor-data would be gone and every preset
+  join would fail closed). The gate is the first of:
+  (a) the preset join probe sees the guest present the recorded public key
+  and pins it, which is only possible once cloud-init has applied the
+  vendor-data from the drive; (b) the probe sees any other key (the join
+  stops with the key mismatch, as without the gate); (c)
+  `presetRegenerateMaxWait` (named constant, injected clock) has passed
+  since start OK without (a) or (b): the preset join is then ended fail
+  closed for this run (no later preset pin; the guest can only be enrolled
+  by an explicit review) and the run is flagged. The regenerate counts as
+  confirmed OK when the endpoint's task ends OK, or, if the version returns
+  no task, on a success response; a lost response or an unreadable task is
+  `unknown` (previously "confirms the regenerate task OK" without the
+  no-task case). The join is marked done only after the regenerate is
+  confirmed OK. The regenerate is a cleanup step under the same rules as
+  the other two (decision 7: listed in the approval with its gate, bound to
+  the recorded node and VMID proof, single-use claim with persisted intent,
+  dispatched at most once, no automatic retry, "snippet cleanup pending"
+  and PK-08 on failure); a gate met after a restart, lock or permit end
+  dispatches nothing and only flags. Until the regenerate the key also
+  lives in the generated cloud-init drive on VM storage (root and storage
+  admins; for storage endpoints on PVE 9.2.24 see the "Observed in PK-10a"
+  paragraph above, with its limits) and in the guest; the gate lengthens that window from
+  "until start OK" to "until the guest's first boot reached sshd, at most
+  `presetRegenerateMaxWait`". **Not tested:** the PK-10a lab VM had no disk,
+  so no guest ever booted and read the drive; neither the race this gate
+  closes nor the gate itself was observed. The gate, the value of
+  `presetRegenerateMaxWait` and whether a slow first boot makes (c) end
+  preset joins too often are open for PK-10 and are a maintainer decision
+  in PK-00; if no sound gate holds there, M1 does not work (see *If the lab
+  check fails*). If the guest reboots before cloud-init ran, or (c) ends
+  the wait before cloud-init has read the drive, the guest generates its
   own keys and the join fails closed with a key mismatch. M1 shrinks the
-  window from minutes or hours to the clone-to-start interval, but a
+  window for the snippet and `cicustom` from minutes or hours to the
+  clone-to-start interval, and for the generated drive to the gate above
+  (previously "the window" without the drive), but a
   `VM.Audit` holder polling for new guests can still win the race, so M1
   alone is not sufficient.
 - **M2, `VM.Audit` precondition.** At proposal time, and again right
@@ -396,11 +456,15 @@ mitigations M1 and M2.
   these propagate `Datastore.Audit` to the snippet storage; previously only
   `/storage/<snippets>`) through the
   read token (`GET /access/acl` needs `Sys.Audit` on `/access`, which the
-  read token's `Sys.Audit` on `/` propagates to, *verify*). `preset` is
+  read token's `Sys.Audit` on `/` propagates to; on PVE 9.2.24, lab
+  08.11.2026, a token with `Sys.Audit` on `/` read all ACL entries of the
+  other principals; previously *verify*). `preset` is
   offered only if every principal with `VM.Audit` (or, on the snippet
   storage, `Datastore.Audit` or any other `Datastore.*` privilege, because
   which of them allow listing or downloading `snippets` content is
-  unverified, PK-10a; previously only `Datastore.Audit`) there is the NOS read
+  unverified on versions not lab-checked; on PVE 9.2.24, lab 08.11.2026,
+  none of the four defined `Datastore.*` privileges showed it in the tested
+  requests, without a positive control, and the rule stays unchanged; previously only `Datastore.Audit`) there is the NOS read
   token, the NOS action token or `root@pam` (previously also holders of a
   role with `VM.Console`; removed, because console access alone neither
   gives root in a cloud-image guest nor lets the holder impersonate it, so
@@ -417,7 +481,8 @@ endpoint M1/M2 do not cover (previously "if M1 and M2 cannot both hold").
 That is the case when PK-10a shows any of: M2 cannot be implemented reliably (ACL read
 not permitted, roles not resolvable); M1 does not work (for example,
 clearing `cicustom` regenerates the cloud-init drive before cloud-init has
-read it, or the snippet cannot be removed in time); or a `VM.Audit` or
+read it, the snippet cannot be removed in time, or no sound gate for the
+M1 regenerate exists); or a `VM.Audit` or
 `Datastore.Audit` endpoint returns the snippet content in a way M1 and M2
 do not cover. (Previously: only when dump exposure was confirmed and M2
 could not be built.) The maintainer then chooses among:
@@ -576,10 +641,16 @@ unnecessary").
    from inside the real guest (open question 4); none is part of this
    amendment.
 7. **Cleanup.** Early cleanup (M1) clears `cicustom` (a new typed delete of
-   that one field) and removes the snippet with the node action right after
-   the start task returns OK (previously: after rotation). Both are
-   audited. A bootstrap step removes the cached vendor-data in the guest
-   after rotation. If either step fails (for example node unreachable),
+   that one field) and removes the snippet with the node action right
+   after the start task returns OK (previously: after rotation), then,
+   after the `cicustom` clear returned OK and the M1 regenerate gate is met
+   (preset key pinned, other key seen, or `presetRegenerateMaxWait`; see
+   M1), regenerates the cloud-init drive (typed `PUT .../cloudinit`,
+   confirmed OK as defined in M1; previously regenerated right after the
+   clear, and before that no regenerate, which leaves the secret on the
+   attached drive, PK-10a on PVE 9.2.24). All three are audited. A bootstrap step removes the cached vendor-data in the guest
+   after rotation. If any of these steps fails (for example node
+   unreachable; previously "either step"),
    the same single-dispatch rule and "snippet cleanup pending" flag apply
    as for failure cleanup below (previously: retry and flag were defined
    only for failures before start; later an automatic retry with backoff,
@@ -593,7 +664,11 @@ unnecessary").
    live private key on the node until an operator acted and let a later
    reconciliation adopt it). On every failure path before start, the
    executor removes the snippet automatically and, if it was set, clears
-   `cicustom`, within the limits of *Authority for cleanup* and *External
+   `cicustom` and, after that clear returned OK, regenerates the cloud-init
+   drive (no gate: no join follows a failed provisioning; previously no
+   regenerate, which left the secret on a drive PVE had already generated
+   when, for example, the start task failed after generating it), within
+   the limits of *Authority for cleanup* and *External
    change and compensation authority* below. That covers a failed or
    refused snippet write, clone, M2 recheck, config set or resize, a
    forward step refused because of an external change that keeps
@@ -801,9 +876,10 @@ unnecessary").
      current object, the other step keeps its authority if its own binding
      holds, the run is flagged): for `pve.snippet.remove`, the recorded
      node gone, re-enrolled or presenting another fingerprint; for the
-     `cicustom` delete, a VMID proof mismatch or the guest relocated to
-     another node than the recorded one (ADR 0006: moving nodes needs a new
-     proposal).
+     `cicustom` delete and the cloud-init regenerate (previously the
+     `cicustom` delete only), a VMID proof mismatch or the guest relocated
+     to another node than the recorded one (ADR 0006: moving nodes needs a
+     new proposal).
    A change not listed here ends compensation authority (fail closed).
 
    *Recorded target.* The snippet storage ID, directory and file name are
@@ -815,8 +891,9 @@ unnecessary").
    - `pve.snippet.remove` is bound only to the recorded node (enrolled host
      ID and fingerprint) and the recorded path. It runs whether or not a
      guest exists.
-   - The `cicustom` delete also requires that the VMID still belongs to
-     this job's guest. The proof is the SMBIOS UUID (`smbios1 uuid`) and
+   - The `cicustom` delete and the cloud-init regenerate (previously the
+     `cicustom` delete only) also require that the VMID still belongs to
+     this job's guest on the recorded node. The proof is the SMBIOS UUID (`smbios1 uuid`) and
      `vmgenid` read from the guest config right after the clone and
      recorded in the job, never the guest name. The proof assumes that
      every clone (full and linked) gets a fresh `smbios1 uuid` and
@@ -825,7 +902,7 @@ unnecessary").
      fact). Until PK-10 confirms this per supported PVE version, `preset`
      stays disabled; if it does not hold, or a recorded value is empty, the
      `cicustom` delete is refused (flagged) and the proof needs a
-     replacement. A PVE user with
+     replacement; the regenerate is then refused too. A PVE user with
      `VM.Config.*` rights on the guest can change those values, so a match
      is not proof against such a user (M2 already refuses `preset` when a
      foreign principal can see the guest; config rights are not checked
@@ -845,9 +922,10 @@ unnecessary").
    for every retry, and an approval cannot pre-approve one. Instead:
    - The approval of `pve.guest.provision` with `preset` lists every
      cleanup step it authorizes, each with its exact recorded target
-     (`cicustom` delete on the recorded node and VMID; `pve.snippet.remove`
-     on the recorded node and path), and the condition under which it runs
-     (M1 after start OK; failure cleanup on the failure paths above). These
+     (`cicustom` delete and cloud-init regenerate on the recorded node and
+     VMID; `pve.snippet.remove` on the recorded node and path), and the
+     condition under which it runs (M1 after start OK, the regenerate also
+     behind the M1 gate; failure cleanup on the failure paths above). These
      are the only compensating dispatches the approval covers.
    - Each listed step is its own single-use authorization derived from the
      job's permit (like an ADR 0007 member permit: bound to the job digest,
@@ -1013,8 +1091,9 @@ unnecessary").
    operator resolves a pending flag with the PK-08 action, under a fresh
    approval, in one of two ways: (a) manual removal bound only to the
    node identity shown in that approval (the recorded host, or its
-   re-enrolled successor named explicitly) and the recorded path (plus the `cicustom` delete when the
-   VMID proof still matches); or (b) an explicit acknowledgement "key
+   re-enrolled successor named explicitly) and the recorded path (plus the `cicustom` delete and, after
+   it, the cloud-init regenerate when the VMID proof still matches;
+   previously the `cicustom` delete only); or (b) an explicit acknowledgement "key
    remains on node, rotate/destroy", audited as
    `guest_hostkey_cleanup_acknowledged`. The flag clears only when removal
    is confirmed (stat shows absent) or the acknowledgement is recorded.
@@ -1044,8 +1123,8 @@ to rotation.
 | Executor memory | From generation until the snippet write returns | Executor process (already holds every SSH key) | Never persisted; same "stated limit" as spec 06 |
 | SSH channel to the node | Snippet write | Nobody outside the pinned, authenticated node session | stdin, not argv (not visible in `ps`) |
 | Snippet file on the node | From write until early cleanup or automatic failure cleanup (normally seconds to minutes); while "snippet cleanup pending" is set (node unreachable, restart, expired permit, target mismatch, start outcome unresolved) it stays until the operator removes it or acknowledges it (previously: "seconds to minutes" only) | Root on that node; admins of the storage if it were shared; node filesystem backups | Node-local storage only: registry refuses shared types (nfs, cifs, cephfs, glusterfs, pbs) **and** any storage flagged `shared 1`; the put action refuses a network filesystem; mode 0600; M1 |
-| **PVE API: `cloudinit/dump` and any storage read of the snippet (*verify*, PK-10a)** | While `cicustom` is set and the snippet exists | Worst case: every `VM.Audit` holder on the guest, including the NOS read token and read-only users or monitoring | M2 refuses `preset` when any principal other than the NOS tokens and `root@pam` holds `VM.Audit` on the guest path or `Datastore.Audit` (or any other `Datastore.*` privilege) on the snippet storage (`/storage/<snippets>`, inherited from `/storage`, `/` or a pool containing the storage); M1 shortens the window; executor never calls the endpoint for preset guests |
-| Generated cloud-init drive (`vm-<vmid>-cloudinit`) on VM storage | Until the next regeneration after cleanup | Root on the node, storage admins; PVE users able to attach that volume elsewhere (*verify* ACL) | Rotation limits later use; vzdump skips cloud-init drives (*verify*) |
+| **PVE API: `cloudinit/dump` and any storage read of the snippet** (PVE 9.2.24, lab 08.11.2026: no snippet marker seen with the restricted tokens in dump or the tested storage requests, no root positive control, not all endpoints and methods called, so not ruled out; previously *verify*, PK-10a) | While `cicustom` is set and the snippet exists | Worst case on versions not lab-checked (PVE 8.x not tested): every `VM.Audit` holder on the guest, including the NOS read token and read-only users or monitoring | M2 refuses `preset` when any principal other than the NOS tokens and `root@pam` holds `VM.Audit` on the guest path or `Datastore.Audit` (or any other `Datastore.*` privilege) on the snippet storage (`/storage/<snippets>`, inherited from `/storage`, `/` or a pool containing the storage); M1 shortens the window; executor never calls the endpoint for preset guests |
+| Generated cloud-init drive (`vm-<vmid>-cloudinit`) on VM storage | From the first generation (at start, *verify* whether also earlier) until the confirmed regenerate in M1 (behind the M1 gate, at most `presetRegenerateMaxWait` after start OK) or in failure cleanup; while "snippet cleanup pending" is set because the regenerate failed, was refused (VMID proof mismatch, relocation) or could not be dispatched for lack of authority (restart, lock, permit end), it stays until a PK-08 regenerate or acknowledgement (clearing `cicustom` alone does not regenerate it, PVE 9.2.24, lab 08.11.2026; previously "until M1's explicit regenerate", before that "until the next regeneration after cleanup") | Root on the node, storage admins; PVE users able to attach that volume elsewhere (*verify* ACL) | Rotation limits later use; vzdump skips cloud-init drives (*verify*) |
 | Guest: `/etc/ssh`, `/var/lib/cloud/instance/vendor-data.txt*`, CD-ROM device | Until rotation; the cache until the bootstrap cleanup step | Guest root; members of group `cdrom` while the drive is attached (the Ubuntu default user is one, and is a sudoer anyway) | Rotation; bootstrap removes the cached vendor-data |
 | PVE config, `/etc/pve`, config reads, read-token spool | Always | Only the `cicustom` reference, no key material | — |
 | PVE backups | Guest disk backups hold the *current* host key, as for every VM today | Backup operators | Not new; a backup taken before rotation holds the preset key, which rotation makes useless for later impersonation |
@@ -1053,9 +1132,14 @@ to rotation.
 PVE administrators and node root are not new readers in substance: they
 already control the guest (console, disks, snapshots) and could take over
 any VM. The readers this design adds are storage admins of a shared snippet
-store, node backup operators and, unless PK-10a rules it out, every
-`VM.Audit` holder. Node-local storage excludes the first; M1 limits the
-second to backups taken in a seconds-long window; M2 excludes the third.
+store, node backup operators and, because PK-10a has not ruled it out on
+any version, every `VM.Audit` holder (no exposure seen with restricted
+tokens on PVE 9.2.24, lab 08.11.2026, but without a root positive
+control; PVE 8.x not tested; previously "on versions where PK-10a has not
+ruled it out ... not observed on PVE 9.2.24"). Node-local storage excludes
+the first; M1 limits the second to backups taken while the snippet or the
+not yet regenerated drive exists (previously "a seconds-long window"); M2
+excludes the third.
 Without M2 the third group is a real and silent exposure.
 
 **Comparison.**
