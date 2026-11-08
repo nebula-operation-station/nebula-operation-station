@@ -405,8 +405,8 @@ mitigations M1 and M2.
   regenerate the drive before cloud-init has read it, with no regenerate
   step). The executor therefore regenerates the cloud-init drive
   (`PUT /nodes/{node}/qemu/{vmid}/cloudinit`; privilege per PVE API docs
-  `VM.Config.Cloudinit` on `/vms/<vmid>`, *verify* in PK-10a for the action
-  token; the API call itself was not exercised in the lab, only
+  `VM.Config.Cloudinit` on `/vms/<vmid>`, *verify* in PK-10b for the action
+  token (previously PK-10a, where it stayed open); the API call itself was not exercised in the lab, only
   `qm cloudinit update`), but only after the `cicustom` clear returned OK
   **and** the *regenerate gate* is met (previously: right after the
   `cicustom` clear, which in the normal case replaces the drive before the
@@ -438,9 +438,11 @@ mitigations M1 and M2.
   so no guest ever booted and read the drive; neither the race this gate
   closes nor the gate itself was observed. The gate, the value of
   `presetRegenerateMaxWait` and whether a slow first boot makes (c) end
-  preset joins too often are open for PK-10 and are a maintainer decision
-  in PK-00; if no sound gate holds there, M1 does not work (see *If the lab
-  check fails*). If the guest reboots before cloud-init ran, or (c) ends
+  preset joins too often are checked in the lab step PK-10b, which runs
+  before PK-00, and are a maintainer decision in PK-00 (previously open
+  for PK-10, which runs after PK-00); if no sound gate holds there, M1
+  does not work (see *If the lab check fails*) and PK-00 records that
+  before any implementation ticket starts. If the guest reboots before cloud-init ran, or (c) ends
   the wait before cloud-init has read the drive, the guest generates its
   own keys and the join fails closed with a key mismatch. M1 shrinks the
   window for the snippet and `cicustom` from minutes or hours to the
@@ -478,7 +480,7 @@ mitigations M1 and M2.
 
 (c) is not viable whenever M1 or M2 cannot hold, including M1 failing or an
 endpoint M1/M2 do not cover (previously "if M1 and M2 cannot both hold").
-That is the case when PK-10a shows any of: M2 cannot be implemented reliably (ACL read
+That is the case when PK-10a or PK-10b (M1 regenerate gate; previously PK-10a only) shows any of: M2 cannot be implemented reliably (ACL read
 not permitted, roles not resolvable); M1 does not work (for example,
 clearing `cicustom` regenerates the cloud-init drive before cloud-init has
 read it, the snippet cannot be removed in time, or no sound gate for the
@@ -803,9 +805,10 @@ unnecessary").
      executor lifetime while the permit is still valid, M1 (or failure
      cleanup) still runs automatically, because the reason for waiting
      (the guest may still read the drive) is gone and removal shortens the
-     exposure; the flag clears only when removal is confirmed (stat
-     absent). Once the permit ends, polling no longer leads to any
-     mutation.
+     exposure; the flag clears only under the rule in *Resolving the
+     flag* below (snippet stat absent and the regenerate confirmed OK;
+     previously "only when removal is confirmed (stat absent)"). Once the
+     permit ends, polling no longer leads to any mutation.
 
    *Authority for cleanup* (previously: "the permit authorizes the job's
    compensating steps" with automatic cleanup and retry across a restart,
@@ -1095,8 +1098,24 @@ unnecessary").
    it, the cloud-init regenerate when the VMID proof still matches;
    previously the `cicustom` delete only); or (b) an explicit acknowledgement "key
    remains on node, rotate/destroy", audited as
-   `guest_hostkey_cleanup_acknowledged`. The flag clears only when removal
-   is confirmed (stat shows absent) or the acknowledgement is recorded.
+   `guest_hostkey_cleanup_acknowledged`. The flag clears only when every
+   cleanup step the run still owes is confirmed, that is the snippet
+   removal (stat shows absent) and, whenever the regenerate is owed and
+   not yet confirmed (failed, refused, `unknown` or never dispatched),
+   the regenerate confirmed OK, or when the acknowledgement is recorded
+   (previously "when removal is confirmed (stat shows absent)", which
+   cleared a run flagged for the regenerate once only the snippet was
+   gone). A regenerate is owed only once the config step set `cicustom`,
+   matching failure cleanup ("clear `cicustom` if set, then regenerate"):
+   the config step resolved OK, or its outcome is `unknown` or an outcome
+   conflict, which counts as set (fail closed). A run that failed before
+   the config step set `cicustom` (for example a failed or refused clone,
+   with no VMID proof and no drive, or a config step resolved failed)
+   owes no regenerate and clears on the normal removal path, snippet stat
+   absent (previously a regenerate counted as owed whenever it was never
+   dispatched, so such a run owed a regenerate that can never run and
+   could clear only by acknowledgement). A run that owes the regenerate
+   but whose VMID proof no longer matches clears only by acknowledgement.
 8. **Audit.** Executor events `guest_hostkey_generated`,
    `guest_hostkey_snippet_written`, `guest_hostkey_snippet_replaced`,
    `guest_hostkey_pinned`, `guest_hostkey_rotated`,
@@ -1197,4 +1216,4 @@ Without M2 the third group is a real and silent exposure.
 | PV-06 | Join: inventory host creation, enrollment with agent-read pin or fingerprint review, guest link | PV-05 |
 | PV-07 | First-party bootstrap modules from the toolkit, secrets via vault references | PV-00 |
 | PV-08 | Deploy wizard, run page, post-enrollment staged bootstrap/runbook plan with batch approval | PV-05, PV-06, PV-07 |
-| PK-00 … PK-10 | Amendment 1 (Proposed), preset guest host key; PK-10a gates acceptance: see [docs/implementation/preset-host-key.md](../implementation/preset-host-key.md) | PV-05, PV-06 |
+| PK-00 … PK-10 | Amendment 1 (Proposed), preset guest host key; PK-10a and PK-10b gate acceptance (previously PK-10a only): see [docs/implementation/preset-host-key.md](../implementation/preset-host-key.md) | PV-05, PV-06 |
