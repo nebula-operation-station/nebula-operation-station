@@ -15,6 +15,7 @@
 //	nebula webauthn code|list|remove
 //	nebula totp setup|status|remove
 //	nebula pve remote add|rotate-token|remove|repin|list
+//	nebula container definition put|remove|list
 package main
 
 import (
@@ -119,6 +120,12 @@ commands:
   pve remote repin <id>
                       re-pin the trust identity after a certificate change
   pve remote list     metadata only (never secrets)
+  container definition put HOST CONTAINER [FILE|-]
+                      store a standalone container's definition (JSON from FILE or stdin; never an argument)
+  container definition remove [--version N] HOST CONTAINER
+                      remove a definition, or one older version (refused inside a rollback window)
+  container definition list [HOST]
+                      definition metadata (version, author, time; never content)
   version             print version
 
 environment:
@@ -213,6 +220,8 @@ func run(cmd string, args []string) error {
 		return totpCmd(ctx, c, args)
 	case "vault":
 		return vaultCmd(ctx, c, args, ttyPrompter, os.Stdout)
+	case "container":
+		return containerCmd(ctx, c, args, os.Stdin, openDefinitionFile, os.Stdout)
 	case "secret":
 		return secretCmd(ctx, c, args, func() ([]byte, error) { return readSecretValue(os.Stdin, ttyPrompter) }, os.Stdin, os.Stdout)
 	default:
