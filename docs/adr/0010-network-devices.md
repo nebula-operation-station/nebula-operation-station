@@ -697,9 +697,11 @@ refused.
    reconciliation attempt (default at most 10 minutes, a named limit), so
    no other admin commits while NOS cannot tell what was committed. Then it
    releases both locks without a revert, whatever the outcome, and
-   notifies. Releasing does not weaken later rollbacks: every later NOS
-   write on the device (rollback or corrective change) takes fresh locks
-   and re-runs the step-2 check against the then-current state. If the
+   notifies. Releasing does not weaken later rollbacks: every later
+   approved NOS write on the device (rollback or corrective change) takes
+   fresh locks and re-runs the step-2 check against the then-current state.
+   An `unknown` change has no dead-man any more; the automatic inverse never
+   takes fresh locks (lock rule for the dead-man, below). If the
    executor cannot release the locks (no session, change credential wiped
    by a vault lock), the UI says so and names the device-side way to
    remove them (a superuser removes the lock on the firewall, *verify*).
@@ -734,11 +736,32 @@ cut NOS's path **to the firewall**; it can cut NOS's path to everything
 behind it. CRITICAL firewall changes in phase 2b therefore use an
 **executor-side dead-man**: after commit and postchecks the admin must
 confirm within the window; without confirmation the executor applies the
-bound inverse change. Preconditions: NOS keeps the config and commit locks
-for the whole window (so no other admin can commit in between); at expiry
-the running version and `raw_digest` still equal the NOS commit's and no
-foreign candidate change is pending. If any precondition fails, the
-executor writes nothing, marks the change `unknown` and notifies. If the
+bound inverse change.
+
+**Lock rule for the dead-man (one rule for the window, the expiry and a
+restart).** The automatic inverse is sent only under the config and commit
+locks that `nos-change` took in step 2 of the change and held **without a
+gap** until expiry; step 7 does not release them for a CRITICAL change, and
+they are released only after the admin's confirmation or after the
+dead-man has finished. The executor **never takes fresh locks for the
+automatic inverse** (previously: the restart rule took fresh locks if NOS
+no longer held them, which contradicted this precondition). The locks live
+on the firewall, not in the executor process (*verify* that they survive
+the end of an API session and an executor restart). Preconditions at
+expiry, checked in this order:
+
+1. both locks are still held by `nos-change` (read from the device,
+   *verify* the lock list calls); a lock that is missing, held by someone
+   else, or whose state cannot be read fails the check;
+2. the running config version and `raw_digest` still equal those of the
+   NOS commit;
+3. no foreign candidate change is pending.
+
+If any precondition fails, the executor writes nothing, marks the change
+`unknown` and notifies; it then releases whatever locks it still holds,
+without a revert. Fresh locks are taken only for writes an admin approves
+afterwards (a step-8 rollback or a corrective change), never by the
+dead-man. If the
 inverse is applied and verified, the change is `rolled_back`; if applying it
 fails or its outcome is uncertain, the change is `unknown`.
 
@@ -751,9 +774,11 @@ while the executor runs with an unlocked vault. Its rules:
 - **Executor restart in the window.** On start the executor finds the open
   dead-man in the durable intent. A confirmation that arrives after the
   deadline is refused. If the deadline has passed or passes later and the
-  vault is unlocked, the executor runs the expiry check above (fresh locks
-  if NOS no longer holds them, then the step-2 check) and applies the
-  inverse only if every precondition holds. If the vault is still locked
+  vault is unlocked, the executor runs the expiry check above under the
+  lock rule: it reads whether `nos-change` still holds both locks and does
+  **not** take fresh ones (previously: fresh locks, then the step-2 check);
+  if a lock is gone, nothing is written and the change is `unknown`. It
+  applies the inverse only if every precondition holds. If the vault is still locked
   after the restart, the next point applies.
 - **Vault locked in the window, or at expiry.** A vault lock wipes the
   change credential, so the inverse cannot be sent. The executor does not
@@ -766,7 +791,8 @@ while the executor runs with an unlocked vault. Its rules:
   rollback again runs under the dead-man). The locks held by `nos-change` cannot be
   released without the credential; the UI states this as in step 7.
 - **Stated limit.** The dead-man is fail-open: an executor crash that does
-  not come back, or a vault lock, leaves the CRITICAL change in place. This
+  not come back, a vault lock, or a superuser removing `nos-change`'s locks
+  in the window, leaves the CRITICAL change in place. This
   is weaker than the CBS device-side timer and is part of what Q6 decides.
 
 This is an automatic rollback and an explicit,
