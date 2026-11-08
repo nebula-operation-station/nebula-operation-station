@@ -114,6 +114,9 @@ type Service struct {
 	// registry holds private registry administration, read authority and
 	// clients (ADR 0006, P1-32).
 	registry privateRegistryState
+	// previewKeep is the newest retained docker.update_preview result per
+	// host (update_preview.go).
+	previewKeep previewRetention
 	// reconcileInterval is the interval passed to Reconcile; ReconcileOnce
 	// uses it to compute the backoff between failed attempts (issue #70).
 	reconcileInterval time.Duration

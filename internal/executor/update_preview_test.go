@@ -190,7 +190,12 @@ func TestUpdatePreviewDurableStartRecordsActionAndTimeout(t *testing.T) {
 // finishedRun stores a finished durable run of e.host with a result.
 func (e *reconcileEnv) finishedRun(actionID, memberID string) string {
 	e.t.Helper()
-	id := newTestUUID()
+	return e.finishedRunID(newTestUUID(), actionID, memberID)
+}
+
+// finishedRunID is finishedRun with a given execution ID.
+func (e *reconcileEnv) finishedRunID(id, actionID, memberID string) string {
+	e.t.Helper()
 	if err := e.db.CreateRun(executordb.Run{ExecutionID: id, HostID: e.host, Digest: strings.Repeat("b", 64),
 		Endpoints: []string{"127.0.0.1:22"}, Fingerprint: e.fp, Timeout: updatePreviewTimeout, ActionID: actionID, MemberID: memberID}); err != nil {
 		e.t.Fatal(err)
@@ -267,5 +272,45 @@ func TestReleaseRunKeepsPreviewWhileHostUncertain(t *testing.T) {
 	}
 	if len(e.logs.find("preview_result_retained", preview)) == 0 {
 		t.Fatal("retention not audited")
+	}
+}
+
+// Only the newest preview of an uncertain host keeps its result (Q19):
+// keeping a newer preview releases the one kept before, an older preview
+// asked for release afterwards is released.
+func TestReleaseRunKeepsOnlyNewestPreview(t *testing.T) {
+	e := newReconcileEnv(t)
+	e.uncertainRow()
+	// Created in this order (same second or later), so the IDs and the
+	// start times order the runs alike.
+	first := e.finishedRunID("00000000-0000-4000-8000-000000000001", updatePreviewAction, "")
+	second := e.finishedRunID("00000000-0000-4000-8000-000000000002", updatePreviewAction, "")
+	third := e.finishedRunID("00000000-0000-4000-8000-000000000003", updatePreviewAction, "")
+
+	if st := e.release(second); len(st.GetResult()) == 0 || st.GetReleased() {
+		t.Fatalf("second preview %+v", st)
+	}
+	if r := e.getRun(second); r.Released || len(r.Result) == 0 {
+		t.Fatal("the newest preview so far was released")
+	}
+	// An older preview is released: a newer one is kept.
+	e.release(first)
+	if r := e.getRun(first); !r.Released || r.Result != nil {
+		t.Fatal("an older preview was kept beside the newest")
+	}
+	// A newer preview supersedes the kept one.
+	e.release(third)
+	if r := e.getRun(third); r.Released || len(r.Result) == 0 {
+		t.Fatal("the newest preview was released")
+	}
+	if r := e.getRun(second); !r.Released || r.Result != nil {
+		t.Fatal("the superseded preview is still kept")
+	}
+	if len(e.logs.find("preview_result_released", second)) == 0 {
+		t.Fatal("supersession not audited")
+	}
+	// Asking again keeps the newest.
+	if st := e.release(third); len(st.GetResult()) == 0 || st.GetReleased() {
+		t.Fatalf("newest preview asked again %+v", st)
 	}
 }
