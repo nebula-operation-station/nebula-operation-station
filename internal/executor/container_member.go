@@ -37,10 +37,9 @@ import (
 // some other artifact the operator happens to trust for the action ID. The
 // inspect-based docker.compose_update 1.0.0, which reads the project's
 // directory and Compose files from `docker inspect` labels and pulls
-// floating tags, is therefore never a container member's artifact. Until the
-// 2.0.0 artifact that recreates the bound targets with the bound digests
-// exists and its digest is pinned here (composeUpdateArtifactSHA256), every
-// compose update member is refused.
+// floating tags, is therefore never a container member's artifact: only the
+// 2.0.0 artifact that recreates the bound targets with the bound digests,
+// whose digest is pinned here (composeUpdateArtifactSHA256), runs.
 
 // composeUpdateAction is the only container mutation that runs in cu02.
 // Rollback (cu03), standalone definitions (cu05) and private registry
@@ -52,10 +51,11 @@ const (
 	// artifact consumes the update binding (result compose-update-v2).
 	composeUpdateVersion = "2.0.0"
 	// composeUpdateArtifactSHA256 is the lowercase hex SHA-256 of that
-	// artifact. Empty: the binding-consuming script is not in the tree yet,
-	// so no compose update member runs. Setting it is a reviewed change of
-	// this protected package.
-	composeUpdateArtifactSHA256 = ""
+	// artifact, internal/executions/actions/scripts/docker_compose_update_v2.sh
+	// as embedded in the server's catalog (checked by
+	// TestShippedComposeUpdatePinMatchesEmbeddedScript). Changing it is a
+	// reviewed change of this protected package.
+	composeUpdateArtifactSHA256 = "ccba72b92d7ac0b2fdfc909861e46182c23ffb849f59337579cd8179f3c9327c"
 )
 
 // containerArtifact pins the one module version and artifact digest a
@@ -66,7 +66,7 @@ type containerArtifact struct {
 }
 
 // shippedComposeUpdatePin is the binding-consuming docker.compose_update
-// artifact of the shipped executor (empty digest: none yet).
+// artifact of the shipped executor.
 func shippedComposeUpdatePin() containerArtifact {
 	return containerArtifact{ModuleVersion: composeUpdateVersion, SHA256: composeUpdateArtifactSHA256}
 }
