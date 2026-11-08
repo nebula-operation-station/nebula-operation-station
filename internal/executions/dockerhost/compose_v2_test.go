@@ -77,6 +77,7 @@ func TestComposeUpdateV2Verdicts(t *testing.T) {
 		{"extra container", "FAILED", "2 containers before, 3 after", done(0, []any{web(), db()}, []any{webNew(), db(), v2Entry("4", "web", "2", "healthy")})},
 		{"oversize after entry", "FAILED", "too large", done(0, []any{web(), db()}, []any{map[string]any{"id": strings.Repeat("2", 64), "oversize": true}, db()})},
 		{"up timeout reason", "FAILED", "up_timeout", with(done(124, []any{web()}, []any{webNew()}), "reason", "up_timeout")},
+		{"truncated after-snapshot", "FAILED", "after-snapshot was truncated", with(done(0, []any{web(), db()}, []any{webNew(), db()}), "after_truncated", true)},
 	}
 	for _, tc := range cases {
 		c, err := ParseComposeUpdate(v2Result(t, tc.doc))

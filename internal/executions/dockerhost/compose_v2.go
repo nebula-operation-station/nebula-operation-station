@@ -70,6 +70,9 @@ type composeV2Doc struct {
 	After    *[]composeV2Entry `json:"after"`
 	Pulled   json.RawMessage   `json:"pulled"`
 	Retained json.RawMessage   `json:"retained"`
+	// AfterTruncated marks an after-snapshot the script cut at its total
+	// bound: the list is incomplete.
+	AfterTruncated bool `json:"after_truncated"`
 }
 
 // composeV2Key is the replica identity across a recreate: IDs change.
@@ -167,17 +170,20 @@ func parseComposeUpdateV2(result []byte) (ComposeUpdate, error) {
 			c.After = append(c.After, x)
 		}
 	}
-	c.judgeV2(before, after, doc.Baseline != nil, doc.After != nil)
+	c.judgeV2(before, after, doc.Baseline != nil, doc.After != nil, doc.AfterTruncated)
 	return c, nil
 }
 
 // judgeV2 sets the display verdict of a compose-update-v2 result that
 // reached the recreate: FAILED unless up succeeded, the after-snapshot
-// exists, and every replica of the baseline is running again with no
-// health regression and the same ports, mounts and networks. Unknown is
-// not success.
-func (c *ComposeUpdate) judgeV2(before, after []composeV2Entry, haveBefore, haveAfter bool) {
+// exists and is complete, and every replica of the baseline is running
+// again with no health regression and the same ports, mounts and
+// networks. Unknown is not success.
+func (c *ComposeUpdate) judgeV2(before, after []composeV2Entry, haveBefore, haveAfter, afterTruncated bool) {
 	failed := func(f string, a ...any) { c.Findings = append(c.Findings, "FAILED: "+fmt.Sprintf(f, a...)) }
+	if afterTruncated {
+		failed("the after-snapshot was truncated; the recreation cannot be judged in full")
+	}
 	if c.UpExit != 0 {
 		failed("docker compose up -d exited with %d", c.UpExit)
 	}
