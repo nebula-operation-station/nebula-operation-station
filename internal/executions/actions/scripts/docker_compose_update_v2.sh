@@ -20,7 +20,7 @@
 #                the frozen services, then `up -d --no-deps --no-build
 #                --pull never <frozen services>`
 #   6 snapshot   bounded health wait, then the after-snapshot (also after a
-#                failed up)
+#                failed up), bounded in total (after_truncated)
 # Every docker and docker compose call is silent (R4): stderr goes to
 # /dev/null, stdout is read only where parsed, and the log holds fixed phase
 # lines only. Env values, command lines, labels and the unkeyed Compose
@@ -72,6 +72,8 @@ MAX_COMPOSE_CONFIG_BYTES = 4 * 1024 * 1024
 MAX_INSPECT_BYTES = 1024 * 1024
 MAX_INDEX_BYTES = 256 * 1024
 MAX_SNAPSHOT_CONTAINER_BYTES = 8 * 1024
+# The whole after-snapshot; entries past it are left out (after_truncated).
+MAX_AFTER_SNAPSHOT_BYTES = 256 * 1024
 MAX_OVERRIDE_BYTES = 256 * 1024
 MAX_RUN_REGISTRY_REQUESTS = 120
 REGISTRY_SPACING = 1.0
@@ -909,7 +911,8 @@ class Registry:
             raise Stop("tag_unresolved")
         self.count += 1
         self.last[host] = time.monotonic()
-        rc, out, _, _ = call(["curl", "--proto", "=https", "--max-redirs", "0", "--connect-timeout", "5",
+        # -q first: no ~/.curlrc may add a proxy, -L or -k.
+        rc, out, _, _ = call(["curl", "-q", "--proto", "=https", "--max-redirs", "0", "--connect-timeout", "5",
                               "--max-time", str(limit), "-s", "-i"] + args, self.budget, bound=limit + 1,
                              cap=MAX_INDEX_BYTES + 64 * 1024)
         if rc != 0 or out is None:
@@ -1103,10 +1106,16 @@ def phase6(u, unit, salt, budget):
             break
         time.sleep(HEALTH_POLL)
     after = []
+    size = 2
     for c in found:
         e = bounded_entry(c, salt)
-        after.append(e if e is not None else {"id": s(c.get("Id"), 64), "oversize": True})
-    return after
+        e = e if e is not None else {"id": s(c.get("Id"), 64), "oversize": True}
+        # Measured as emit writes it (ASCII escapes), plus the separator.
+        size += len(json.dumps(e, sort_keys=True, separators=(",", ":"))) + 1
+        if size > MAX_AFTER_SNAPSHOT_BYTES:
+            return after, True
+        after.append(e)
+    return after, False
 
 
 # --- main ------------------------------------------------------------------------------------
@@ -1153,12 +1162,16 @@ def main():
         result["reason"] = e.reason
         if e.service:
             result["service"] = e.service
-        emit(result, 10)
+        # A stop in phase 5 (override write) may have changed the override:
+        # exit 10 only while nothing changed.
+        emit(result, 10 if result["phase"] in STOPPING_PHASES else 1)
     result["up_exit"] = up_exit
     result["reason"] = reason
     result["phase"] = "after_snapshot"
     try:
-        result["after"] = phase6(u, unit, salt, Budget(SNAPSHOT_BUDGET, "snapshot_failed"))
+        result["after"], truncated = phase6(u, unit, salt, Budget(SNAPSHOT_BUDGET, "snapshot_failed"))
+        if truncated:
+            result["after_truncated"] = True
     except Stop:
         if not reason:
             result["reason"] = "snapshot_failed"
