@@ -84,8 +84,24 @@
     {{if .Units}}
     <ul class="ctr-tree__units">
       {{range .Units}}<li class="ctr-tree__unit">
+        {{if .Standalone}}
+        <span class="ctr-tree__project">Standalone container {{if .ContainerName}}<span class="mono">{{.ContainerName}}</span> {{end}}<span class="muted">(<span class="mono">{{.Label}}</span>)</span></span>
+        <p class="ctr-tree__update">Update and rollback <span class="badge badge--grey">unavailable</span> {{.Unavailable}}.</p>
+        {{if or .Definition .DefinitionNote}}<dl class="kv ctr-tree__definition">
+          <dt>Definition</dt>
+          <dd>{{with .Definition}}<span class="badge badge--ok">stored</span> version {{.Version}}{{if .CreatedBy}}, by <span class="mono">{{.CreatedBy}}</span>{{end}}{{if .CreatedAt}}, at {{.CreatedAt}}{{end}}{{else}}{{.DefinitionNote}}{{end}}</dd>
+        </dl>{{end}}
+        {{if .PutCommand}}<details class="ctr-tree__definition-admin">
+          <summary>Store or remove the definition (administrators, on the executor host)</summary>
+          <p class="muted">The definition holds environment values, so it never passes this server: an administrator stores it with the vault unlocked, from a file or stdin. Each put adds a version and keeps the earlier ones; a version a rollback window still needs cannot be removed.</p>
+          <p><code>{{.PutCommand}}</code></p>
+          <p><code>{{.RemoveCommand}}</code></p>
+        </details>{{end}}
+        {{else}}
         <span class="ctr-tree__project">Compose project <span class="mono">{{.Label}}</span></span>
-        {{if .Unavailable}}<p>Not available: {{.Unavailable}}.</p>
+        {{end}}
+        {{if .Standalone}}
+        {{else if .Unavailable}}<p>Not available: {{.Unavailable}}.</p>
         {{else}}
         <ul class="ctr-tree__services">
           {{range .Services}}<li class="ctr-tree__service">
