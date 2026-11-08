@@ -131,6 +131,8 @@ type dispatchMember struct {
 	host      string
 	stage     int
 	dependsOn []string
+	// action is the member's action ID; "" is package.upgrade.
+	action string
 }
 
 // dispatchEnv is a batch environment with the production batch authority,
@@ -213,19 +215,23 @@ func (e *dispatchEnv) propose(t *testing.T, gate string, approve bool, members .
 			t.Fatalf("host %s not pinned: %v", m.host, err)
 		}
 		h := sha256.Sum256(art)
+		action := "package.upgrade"
+		if m.action != "" {
+			action = m.action
+		}
 		// Automatic gates (as in the deployment plan) need a plan below
 		// HIGH: the artifacts are trusted as MEDIUM. Manual-gate plans use
 		// untrusted artifacts, which the production policy makes HIGH.
 		risk := canonical.RiskHigh
 		if gate == canonical.BatchGateAutomatic {
 			risk = canonical.RiskMedium
-			if err := e.db.TrustArtifact(executordb.TrustedArtifact{SHA256: canonical.Digest(h).String(), ActionID: "package.upgrade",
+			if err := e.db.TrustArtifact(executordb.TrustedArtifact{SHA256: canonical.Digest(h).String(), ActionID: action,
 				ModuleVersion: "1.0.0", Risk: risk, TrustedBy: "test"}); err != nil {
 				t.Fatal(err)
 			}
 		}
 		b.Members = append(b.Members, canonical.BatchMember{MemberID: id, Request: canonical.Request{
-			RequestVersion: canonical.RequestVersion, ExecutionID: fmt.Sprintf("00000000-0000-4000-8%03d-%012d", n, i+100), ActionID: "package.upgrade",
+			RequestVersion: canonical.RequestVersion, ExecutionID: fmt.Sprintf("00000000-0000-4000-8%03d-%012d", n, i+100), ActionID: action,
 			ModuleVersion: "1.0.0", ArtifactSHA256: canonical.Digest(h).String(), ParametersHash: ph, CredentialRefs: []string{"cred"},
 			RiskClass: risk, ExpiryUnix: expiry,
 			ResolvedTargets: []canonical.Target{{HostID: m.host, HostKeyFingerprint: hk.Fingerprint}}},

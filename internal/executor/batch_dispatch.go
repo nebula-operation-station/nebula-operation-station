@@ -443,6 +443,13 @@ func (s *Service) RunBatchMember(ctx context.Context, req *pb.RunBatchMemberRequ
 	// A container mutation runs durable with the fixed timeout, and only with
 	// the pinned binding-consuming artifact and version, and the parameters
 	// rendered from its frozen binding (container_member.go).
+	// The preview is classic and durable only (update_preview.go): a batch
+	// member would run attached, without the runs row Resolve reads.
+	if isUpdatePreview(member.Request.ActionID) {
+		s.log.Warn("audit", "kind", "batch_member_refused", "batch", d.String(), "member", member.MemberID, "host", target.HostID,
+			"detail", errPreviewTransport.Error())
+		return nil, previewStatus(errPreviewTransport)
+	}
 	durable := isContainerMember(member)
 	if durable {
 		if err := checkContainerMember(member, ap.Parameters[index], x.composePins...); err != nil {

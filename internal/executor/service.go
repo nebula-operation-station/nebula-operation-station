@@ -217,6 +217,12 @@ func (s *Service) ProposeExecution(_ context.Context, req *pb.ProposeExecutionRe
 	if strings.HasPrefix(r.ActionID, reservedActionPrefix) {
 		return nil, status.Errorf(codes.InvalidArgument, "action_id %q is reserved for the executor", r.ActionID)
 	}
+	// A preview is only ever approved for its pinned artifact.
+	if isUpdatePreview(r.ActionID) {
+		if err := checkPreviewPin(r.ModuleVersion, r.ArtifactSHA256); err != nil {
+			return nil, previewStatus(err)
+		}
+	}
 	// The Safety Scanner sees the bytes before the risk is decided.
 	if art := req.GetArtifact(); len(art) > 0 {
 		sum, err := s.auth.ObserveArtifact(art)
