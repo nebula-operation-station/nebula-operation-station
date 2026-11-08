@@ -198,6 +198,11 @@ type Options struct {
 	// a container tag change (cu04). Nil offers same-tag digest refreshes
 	// only and shows tag changes as unavailable.
 	ContainerTagPolicy ContainerTagPolicy
+	// ContainerDefinitions reads the metadata of standalone container
+	// definitions (cu05) to show whether a container has one. Nil, or a
+	// connection the executor refuses (the RPC is admin-only), shows the
+	// status as unknown; the controls never change a definition.
+	ContainerDefinitions ContainerDefinitionLister
 	// Log receives executor status errors (the page itself only shows
 	// "Executor unavailable"). Nil means slog.Default().
 	Log *slog.Logger
@@ -257,6 +262,9 @@ type Handler struct {
 	// containerTagPolicy compares tags for a tag change; nil offers
 	// same-tag digest refreshes only.
 	containerTagPolicy ContainerTagPolicy
+	// containerDefinitions reads definition metadata; nil shows the
+	// definition status as unknown.
+	containerDefinitions ContainerDefinitionLister
 }
 
 // New parses the embedded templates and builds a Handler.
@@ -304,46 +312,47 @@ func New(o Options) (*Handler, error) {
 		}
 	}
 	h := &Handler{
-		publicOrigin:       o.PublicOrigin,
-		pages:              pages,
-		staticFS:           staticFS,
-		status:             o.Status,
-		hostNames:          o.HostNames,
-		hosts:              hosts,
-		hostKeys:           o.HostKeys,
-		inventory:          o.Inventory,
-		operations:         o.Operations,
-		pins:               o.Pins,
-		schedules:          o.Schedules,
-		leases:             o.Leases,
-		leaseProposals:     newLeaseProposals(),
-		runbooks:           o.Runbooks,
-		deployProfiles:     o.DeployProfiles,
-		trust:              o.Trust,
-		modules:            o.Modules,
-		lastResult:         o.LastResult,
-		network:            o.Network,
-		discovery:          o.Discovery,
-		events:             o.Events,
-		auditLog:           o.Audit,
-		repin:              o.Repin,
-		enroll:             o.Enroll,
-		serverIP:           serverIP,
-		securityKeys:       o.SecurityKeys,
-		totpStatus:         o.TOTPStatus,
-		pveChart:           o.PVEChart,
-		pve:                o.PVE,
-		pveRemotes:         o.PVERemotes,
-		guestPower:         o.GuestPower,
-		guestSnapshot:      o.GuestSnapshot,
-		deploy:             o.Deploy,
-		deployJoin:         o.DeployJoin,
-		deployIPAM:         o.DeployIPAM,
-		deployBatches:      o.DeployBatches,
-		deployRuns:         newDeployRuns(log),
-		containerBatches:   o.ContainerBatches,
-		containerTagPolicy: o.ContainerTagPolicy,
-		now:                o.Now,
+		publicOrigin:         o.PublicOrigin,
+		pages:                pages,
+		staticFS:             staticFS,
+		status:               o.Status,
+		hostNames:            o.HostNames,
+		hosts:                hosts,
+		hostKeys:             o.HostKeys,
+		inventory:            o.Inventory,
+		operations:           o.Operations,
+		pins:                 o.Pins,
+		schedules:            o.Schedules,
+		leases:               o.Leases,
+		leaseProposals:       newLeaseProposals(),
+		runbooks:             o.Runbooks,
+		deployProfiles:       o.DeployProfiles,
+		trust:                o.Trust,
+		modules:              o.Modules,
+		lastResult:           o.LastResult,
+		network:              o.Network,
+		discovery:            o.Discovery,
+		events:               o.Events,
+		auditLog:             o.Audit,
+		repin:                o.Repin,
+		enroll:               o.Enroll,
+		serverIP:             serverIP,
+		securityKeys:         o.SecurityKeys,
+		totpStatus:           o.TOTPStatus,
+		pveChart:             o.PVEChart,
+		pve:                  o.PVE,
+		pveRemotes:           o.PVERemotes,
+		guestPower:           o.GuestPower,
+		guestSnapshot:        o.GuestSnapshot,
+		deploy:               o.Deploy,
+		deployJoin:           o.DeployJoin,
+		deployIPAM:           o.DeployIPAM,
+		deployBatches:        o.DeployBatches,
+		deployRuns:           newDeployRuns(log),
+		containerBatches:     o.ContainerBatches,
+		containerTagPolicy:   o.ContainerTagPolicy,
+		containerDefinitions: o.ContainerDefinitions,
+		now:                  o.Now,
 
 		guestPowerProposals: newGuestPowerProposals(),
 		log:                 log,

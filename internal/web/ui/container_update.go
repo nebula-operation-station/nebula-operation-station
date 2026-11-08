@@ -157,10 +157,18 @@ type ctrHostView struct {
 }
 
 type ctrUnitView struct {
-	// Label is the project name, or "standalone container <name>".
+	// Label is the project name, or the standalone container's ID.
 	Label       string
 	Unavailable string
 	Services    []ctrServiceView
+	// Standalone units (cu05): the container name, the newest definition
+	// version's metadata or why it is not shown, and the commands an
+	// administrator runs on the executor host. Never definition content.
+	Standalone                bool
+	ContainerName             string
+	Definition                *ctrDefinitionView
+	DefinitionNote            string
+	PutCommand, RemoveCommand string
 }
 
 type ctrServiceView struct {
@@ -303,7 +311,15 @@ func (h *Handler) ctrHost(ctx context.Context, host inventory.Host, keyStatus st
 		}
 	default:
 		v.PreviewID, v.PreviewAge = p.ID, ageText(h.clockNow(), p.StartedAt)
+		var (
+			defs   ctrDefinitions
+			loaded bool
+		)
 		for _, u := range p.Units {
+			if u.Form == canonical.ContainerUpdateFormAlone {
+				v.Units = append(v.Units, h.ctrStandaloneUnit(ctx, host.ID, u, &defs, &loaded))
+				continue
+			}
 			v.Units = append(v.Units, ctrUnit(host.ID, u, h.containerTagPolicy != nil))
 		}
 		if len(v.Units) == 0 {
@@ -328,9 +344,10 @@ func (h *Handler) ctrHost(ctx context.Context, host inventory.Host, keyStatus st
 
 // ctrUnit builds one unit of the tree.
 func ctrUnit(hostID string, u dockerhost.PreviewUnit, tagChanges bool) ctrUnitView {
-	if u.Form != "compose" {
-		return ctrUnitView{Label: "standalone container " + u.ContainerID,
-			Unavailable: "standalone containers are not offered here yet (no batch planner for docker.update)"}
+	if u.Form != canonical.ContainerUpdateFormCompose {
+		// Standalone units go through ctrStandaloneUnit; any other form
+		// is never offered.
+		return ctrUnitView{Standalone: true, Label: u.ContainerID, Unavailable: ctrNoPlanner}
 	}
 	v := ctrUnitView{Label: u.Project}
 	if u.Reason != "" {
