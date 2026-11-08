@@ -269,6 +269,48 @@ func TestOversizeRecordCompletesBounded(t *testing.T) {
 	}
 }
 
+// A run that stopped in phases 1 to 4 changed nothing: a baseline or
+// container record over its column limit is left out, but the row stays
+// not_recreated instead of becoming uncertain.
+func TestStoppedRunWithOversizeRecordStaysNotRecreated(t *testing.T) {
+	u := testComposeUpdate()
+	run := testDispatchRun(t, u)
+	row, err := recreationIntent(run, "web-1", "SHA256:k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtures := []struct {
+		name    string
+		result  composeUpdateResult
+		finding string
+	}{
+		{"baseline over its limit", oversizeBaselineResult(t, u), "baseline is over its"},
+		{"containers over their limit", oversizeContainersResult(t, u), "container record is over its"},
+	}
+	for _, fx := range fixtures {
+		for _, phase := range []string{phasePrecheck, phaseResolve, phasePull, phaseRetain} {
+			t.Run(fx.name+"/"+phase, func(t *testing.T) {
+				r := fx.result
+				r.Phase, r.Reason, r.After, r.UpExit = phase, "pull_failed", nil, nil
+				raw := mustResultJSON(t, r)
+				if _, err := parseComposeUpdateResult(raw); err != nil {
+					t.Fatalf("fixture not well-formed: %v", err)
+				}
+				c := recreationCompletion(row, hostrun.ClassPrecheckFailed, raw)
+				all := strings.Join(c.Verdict.Findings, "|")
+				if c.State != executordb.RecreationNotRecreated || c.Verdict.Passed ||
+					!strings.Contains(all, fx.finding) || !strings.Contains(all, "nothing was recreated") {
+					t.Fatalf("completion %s passed=%v findings %v", c.State, c.Verdict.Passed, c.Verdict.Findings)
+				}
+				if b, _ := json.Marshal(c.Containers); len(c.Baseline) > executordb.MaxRecreationBaselineBytes ||
+					len(b) > executordb.MaxRecreationContainersBytes {
+					t.Fatalf("completion over its column limits: baseline %d, containers %d", len(c.Baseline), len(b))
+				}
+			})
+		}
+	}
+}
+
 // rollbackFixture is an update row in state recreated with a baseline, its
 // recovery plan and the rollback binding that equals it.
 func rollbackFixture(t *testing.T, now time.Time) (executordb.ContainerRecreation, executordb.RecoveryPlan, canonical.BatchContainerUpdate) {
