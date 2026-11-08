@@ -47,6 +47,9 @@ type composeV2 struct {
 	beforeRun            func(t *testing.T) // after the salt is written
 	params               []byte
 	indexBody, idxDigest string
+	// previewWallClock, when set, replaces the preview script's wall
+	// clock (seconds) in the copy that runs.
+	previewWallClock string
 }
 
 // cuContainer is one container as `docker inspect` shows it.

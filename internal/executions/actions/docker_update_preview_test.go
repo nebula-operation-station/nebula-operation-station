@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/dockerhost"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
@@ -36,7 +37,47 @@ func (c *composeV2) previewScript(t *testing.T) string {
 	if strings.Count(s, cuStateDirLine) != 1 {
 		t.Fatal("the state directory line is not unique in the preview script")
 	}
-	return strings.Replace(s, cuStateDirLine, `STATE_DIR = "`+c.state+`"`, 1)
+	s = strings.Replace(s, cuStateDirLine, `STATE_DIR = "`+c.state+`"`, 1)
+	if c.previewWallClock != "" {
+		if strings.Count(s, pvWallClockLine) != 1 {
+			t.Fatal("the wall clock line is not unique in the preview script")
+		}
+		s = strings.Replace(s, pvWallClockLine, "MAX_PREVIEW_WALL_CLOCK = "+c.previewWallClock, 1)
+	}
+	return s
+}
+
+const pvWallClockLine = "MAX_PREVIEW_WALL_CLOCK = 4 * 60"
+
+// The wall clock is checked before every external call, inside a unit
+// too: a Compose call that hangs is killed within the remaining budget,
+// and that unit and every later one are truncated without facts. (The
+// copy that runs has a 13-second wall clock instead of 4 minutes.)
+func TestPreviewWallClockTruncatesRemainingUnits(t *testing.T) {
+	c := newComposeV2(t)
+	c.previewWallClock = "13"
+	c.st["hang_config"] = 60
+	solo := cuContainer(cuHex("5"), "solo", "", cuDigest("d"), "nginx:1.27", "", c.dir)
+	solo["Config"].(map[string]any)["Labels"] = map[string]any{}
+	c.containers()[cuHex("5")] = solo
+	start := time.Now()
+	r := c.preview(t, "")
+	if took := time.Since(start); took > 30*time.Second {
+		t.Fatalf("the preview took %s", took)
+	}
+	if r.code != 0 || r.doc["status"] != "ok" {
+		t.Fatalf("%d %s", r.code, r.out)
+	}
+	units := r.doc["units"].([]any)
+	if len(units) != 2 {
+		t.Fatalf("%s", r.out)
+	}
+	for _, x := range units {
+		u := x.(map[string]any)
+		if u["reason"] != "truncated" || u["targets"] != nil || u["source_digest"] != nil {
+			t.Fatalf("unit %v", u)
+		}
+	}
 }
 
 // preview runs the preview script with target_tags tags. Like exec, it

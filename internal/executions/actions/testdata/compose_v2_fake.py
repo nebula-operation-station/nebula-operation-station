@@ -7,6 +7,7 @@
 import json
 import os
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE = os.path.join(HERE, "state.json")
@@ -114,6 +115,8 @@ def docker(argv):
             i += 2
         sub = argv[i:]
         override = st["override"]
+        if sub[:1] == ["config"] and st.get("hang_config"):
+            time.sleep(st["hang_config"])
         if sub[:1] == ["config"] and st.get("fail_config"):
             noisy(st)
             sys.exit(st["fail_config"])
