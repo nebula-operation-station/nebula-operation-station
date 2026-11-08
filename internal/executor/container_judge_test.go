@@ -117,6 +117,13 @@ func twoServiceUpdate() canonical.BatchContainerUpdate {
 	return u
 }
 
+// withCacheDependency binds a second dependency service, cache, with one
+// container.
+func withCacheDependency(u *canonical.BatchContainerUpdate) {
+	u.Dependencies = append(u.Dependencies, canonical.ContainerUpdateDependency{Service: "cache", Relation: canonical.ContainerDependencyRequires,
+		Containers: []canonical.ContainerDependencyMember{{ContainerID: hexOf("8"), ContainerName: "site-cache-1", ConfigurationDigest: hexOf("4")}}})
+}
+
 func TestJudgeComposeUpdatePostchecks(t *testing.T) {
 	u := twoServiceUpdate()
 	webAfter := func(r *composeUpdateResult, replica string) *snapshotEntry {
@@ -257,6 +264,22 @@ func TestJudgeComposeUpdatePostchecks(t *testing.T) {
 				}
 			}
 		}, "reported under service web, bound to api"},
+
+		// Bound dependencies: a dependency container is reported under the
+		// dependency service it is bound to, before and after.
+		{"dependency reported under another service in the baseline", withCacheDependency, func(r *composeUpdateResult) {
+			b := baseline(r, "db", "1")
+			b.Service, b.Replica = "cache", "2"
+		}, "baseline container site-db-1 is reported under service cache, bound to db"},
+		{"dependency reported under another dependency service after the update", withCacheDependency, func(r *composeUpdateResult) {
+			d := dep(r)
+			d.Service, d.Replica = "cache", "2"
+		}, "dependency site-db-1 is reported under service cache, bound to db"},
+		{"dependency reported under a frozen service after the update", nil, func(r *composeUpdateResult) {
+			d := dep(r)
+			d.Service, d.Replica = "web", "3"
+		}, "dependency site-db-1 is reported under service web, bound to db"},
+		{"second dependency service, clean", withCacheDependency, func(*composeUpdateResult) {}, ""},
 
 		// The result must be about the bound Compose project.
 		{"result about another project", nil, func(r *composeUpdateResult) { r.Project = "other" }, "project other, not the bound project site"},
