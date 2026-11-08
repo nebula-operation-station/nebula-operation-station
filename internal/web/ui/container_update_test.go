@@ -550,6 +550,18 @@ func TestContainerPagesNeverShowSecrets(t *testing.T) {
 	}
 }
 
+func TestChartLinksEachHostToItsContainerUpdates(t *testing.T) {
+	h, _ := ctrHandler(t, false)
+	body := getBody(t, h.Handler(), "/inventory/chart")
+	if !strings.Contains(body, `href="/inventory/containers?host=web-01"`) {
+		t.Error("the chart does not link web-01 to its container updates")
+	}
+	plain, _ := stagedChartHandler(t, false)
+	if strings.Contains(getBody(t, plain.Handler(), "/inventory/chart"), "/inventory/containers") {
+		t.Error("the chart links container updates without a planner")
+	}
+}
+
 func TestContainerControlsAbsentWithoutPlanner(t *testing.T) {
 	h := newTestHandler(t, ui.Options{PublicOrigin: "https://nebula.example", Hosts: func(context.Context) ([]inventory.Host, error) { return ctrHosts(), nil }})
 	for _, req := range []*http.Request{

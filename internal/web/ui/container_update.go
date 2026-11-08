@@ -295,14 +295,14 @@ func (h *Handler) ctrHost(ctx context.Context, host inventory.Host, keyStatus st
 	case p.ID == "":
 		v.PreviewNote = "no update preview yet; run one to see what can be updated"
 	case p.Stale != "":
-		v.PreviewID, v.PreviewAge, v.PreviewNote = p.ID, ageText(h.clock(), p.StartedAt), p.Stale
+		v.PreviewID, v.PreviewAge, v.PreviewNote = p.ID, ageText(h.clockNow(), p.StartedAt), p.Stale
 	case p.Status != dockerhost.PreviewOK:
-		v.PreviewID, v.PreviewAge, v.PreviewNote = p.ID, ageText(h.clock(), p.StartedAt), ctrReason(p.Status)
+		v.PreviewID, v.PreviewAge, v.PreviewNote = p.ID, ageText(h.clockNow(), p.StartedAt), ctrReason(p.Status)
 		if p.Status == dockerhost.PreviewPrepareRequired {
 			v.PrepareURL = "/operations/new?action=docker.update_prepare&host=" + id
 		}
 	default:
-		v.PreviewID, v.PreviewAge = p.ID, ageText(h.clock(), p.StartedAt)
+		v.PreviewID, v.PreviewAge = p.ID, ageText(h.clockNow(), p.StartedAt)
 		for _, u := range p.Units {
 			v.Units = append(v.Units, ctrUnit(host.ID, u, h.containerTagPolicy != nil))
 		}
@@ -316,7 +316,7 @@ func (h *Handler) ctrHost(ctx context.Context, host inventory.Host, keyStatus st
 		v.RollbackNote = "the executor's recreation list could not be read; no rollback is offered"
 		return v
 	}
-	now := h.clock()
+	now := h.clockNow()
 	for _, row := range rows {
 		if row.GetKind() != canonical.ContainerUpdateKindUpdate {
 			continue
@@ -324,14 +324,6 @@ func (h *Handler) ctrHost(ctx context.Context, host inventory.Host, keyStatus st
 		v.Rollbacks = append(v.Rollbacks, ctrRollback(host.ID, row, now, v.PreviewID != "" && v.PreviewNote == "" && len(v.Units) > 0))
 	}
 	return v
-}
-
-// clock is the handler's time source.
-func (h *Handler) clock() time.Time {
-	if h.now != nil {
-		return h.now()
-	}
-	return time.Now()
 }
 
 // ctrUnit builds one unit of the tree.
@@ -605,7 +597,7 @@ func (h *Handler) ctrPlan(ctx context.Context, form url.Values) ([]ctrStageView,
 	}
 	for i := range views {
 		for j := range views[i].Members {
-			views[i].Members[j].PreviewAge = ageText(h.clock(), sel[views[i].Members[j].HostID].preview.StartedAt)
+			views[i].Members[j].PreviewAge = ageText(h.clockNow(), sel[views[i].Members[j].HostID].preview.StartedAt)
 		}
 	}
 	return views, req, nil
