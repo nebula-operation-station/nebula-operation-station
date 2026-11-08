@@ -27,7 +27,9 @@ import (
 // the commands an administrator runs to store or remove a definition.
 //
 // A container without a definition shows the update as unavailable with
-// that reason. One with a definition is still unavailable until the batch
+// that reason when the server can read the definitions. In production it
+// cannot (see ctrNoteNotRead), so the tree shows the definition status as
+// unknown and points to the CLI. One with a definition is still unavailable until the batch
 // planner binds docker.update members.
 
 // ContainerDefinitionLister reads definition metadata (the executor's
@@ -66,27 +68,49 @@ type ctrDefinitions struct {
 	Latest map[string]ctrDefinitionView
 }
 
-// ctrLoadDefinitions reads the definition metadata of hostID.
+// Notes shown when the definition status is unknown.
+const (
+	// ctrNoteNotRead is the production state: cmd/nebula-server sets no
+	// ContainerDefinitions reader, because the executor lets only the
+	// admin role call ListContainerDefinitions and the server role gets no
+	// new permission for it (docs/implementation/m0.md, known gaps).
+	ctrNoteNotRead      = "this server does not read container definitions (the executor lets only an administrator list them); an administrator checks them with nebula container definition list"
+	ctrNoteDenied       = "the executor lets only an administrator read container definitions; check them with nebula container definition list"
+	ctrNoteFailed       = "the executor's container definitions could not be read"
+	ctrNoteTooMany      = "too many container definitions to show here; an administrator checks them with nebula container definition list"
+	ctrNoteInconsistent = "the executor's answer about container definitions is inconsistent; an administrator checks them with nebula container definition list"
+)
+
+// ctrLoadDefinitions reads the definition metadata of hostID. An answer
+// over ctrMaxDefinitions rows, or with two newest versions of one
+// container, leaves the status unknown instead of showing a partial or
+// wrong one.
 func (h *Handler) ctrLoadDefinitions(ctx context.Context, hostID string) ctrDefinitions {
 	if h.containerDefinitions == nil {
-		return ctrDefinitions{Note: "this server cannot read the executor's container definitions; an administrator checks them with nebula container definition list"}
+		return ctrDefinitions{Note: ctrNoteNotRead}
 	}
 	resp, err := h.containerDefinitions.ListContainerDefinitions(ctx, &pb.ListContainerDefinitionsRequest{HostId: hostID})
 	switch {
 	case status.Code(err) == codes.PermissionDenied:
-		return ctrDefinitions{Note: "the executor lets only an administrator read container definitions; check them with nebula container definition list"}
+		return ctrDefinitions{Note: ctrNoteDenied}
 	case err != nil:
 		h.log.Warn("container definitions", "host", hostID, "error", err)
-		return ctrDefinitions{Note: "the executor's container definitions could not be read"}
+		return ctrDefinitions{Note: ctrNoteFailed}
+	}
+	rows := resp.GetDefinitions()
+	if len(rows) > ctrMaxDefinitions {
+		h.log.Warn("container definitions over the limit", "host", hostID, "rows", len(rows), "limit", ctrMaxDefinitions)
+		return ctrDefinitions{Note: ctrNoteTooMany}
 	}
 	d := ctrDefinitions{Latest: map[string]ctrDefinitionView{}}
-	for i, info := range resp.GetDefinitions() {
-		if i == ctrMaxDefinitions {
-			break
-		}
+	for _, info := range rows {
 		// Only the newest version of this host's containers is shown.
 		if !info.GetLatest() || info.GetHostId() != hostID || info.GetVersion() == 0 {
 			continue
+		}
+		if _, dup := d.Latest[info.GetContainerName()]; dup {
+			h.log.Warn("container definitions with two newest versions", "host", hostID)
+			return ctrDefinitions{Note: ctrNoteInconsistent}
 		}
 		v := ctrDefinitionView{Version: info.GetVersion(), CreatedBy: ctrShownText(info.GetCreatedBy())}
 		if at := info.GetCreatedAtUnix(); at > 0 {

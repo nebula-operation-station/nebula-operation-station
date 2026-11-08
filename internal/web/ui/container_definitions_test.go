@@ -142,11 +142,25 @@ func TestStandaloneWithoutDefinitionUnavailable(t *testing.T) {
 // When the server may not read definitions, the status is unknown and
 // says why; the update stays unavailable with its reason.
 func TestStandaloneDefinitionStatusUnknown(t *testing.T) {
+	// One row past the limit: the last row is "worker"'s definition, so a
+	// truncated read would wrongly show "none stored" for it.
+	overLimit := make([]*pb.ContainerDefinitionInfo, 0, 1001)
+	for i := range 1000 {
+		overLimit = append(overLimit, &pb.ContainerDefinitionInfo{HostId: "web-01", ContainerName: "app", DefinitionId: ctrDefID, Version: uint64(i + 1)})
+	}
+	overLimit = append(overLimit, &pb.ContainerDefinitionInfo{HostId: "web-01", ContainerName: "worker", DefinitionId: ctrDefID, Version: 1, Latest: true})
 	cases := map[string]struct {
 		lister ui.ContainerDefinitionLister
 		want   string
 	}{
-		"no lister":        {nil, "this server cannot read the executor&#39;s container definitions"},
+		// Production: cmd/nebula-server sets no lister, because the
+		// executor lets only the admin role list definitions.
+		"no lister":      {nil, "this server does not read container definitions (the executor lets only an administrator list them)"},
+		"over the limit": {&fakeDefinitions{defs: overLimit}, "too many container definitions to show here"},
+		"two latest rows": {&fakeDefinitions{defs: []*pb.ContainerDefinitionInfo{
+			{HostId: "web-01", ContainerName: "app", DefinitionId: ctrDefID, Version: 2, CreatedBy: "alice", Latest: true},
+			{HostId: "web-01", ContainerName: "app", DefinitionId: ctrDefID, Version: 3, CreatedBy: "bob", Latest: true},
+		}}, "the executor&#39;s answer about container definitions is inconsistent"},
 		"admin only":       {&fakeDefinitions{err: status.Error(codes.PermissionDenied, "role server may not call")}, "the executor lets only an administrator read container definitions"},
 		"executor failure": {&fakeDefinitions{err: errors.New("dial: " + ctrPlanted)}, "the executor&#39;s container definitions could not be read"},
 	}

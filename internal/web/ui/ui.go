@@ -202,6 +202,8 @@ type Options struct {
 	// definitions (cu05) to show whether a container has one. Nil, or a
 	// connection the executor refuses (the RPC is admin-only), shows the
 	// status as unknown; the controls never change a definition.
+	// cmd/nebula-server leaves it nil: the server role has no permission
+	// for ListContainerDefinitions (known gap, docs/implementation/m0.md).
 	ContainerDefinitions ContainerDefinitionLister
 	// Log receives executor status errors (the page itself only shows
 	// "Executor unavailable"). Nil means slog.Default().
