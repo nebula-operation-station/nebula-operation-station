@@ -17,6 +17,7 @@
 #   sudo userdel nebula-server
 #   sudo userdel nebula-executor
 #   sudo userdel nebula-discovery
+#   sudo userdel nebula-pve-collector
 #   sudo groupdel nebula-rpc
 
 set -euo pipefail
@@ -109,7 +110,7 @@ done
 # end: remove binaries
 
 echo "Nebula Operation Station binaries and units removed."
-echo "The users (nebula-server, nebula-executor, nebula-discovery), the group (nebula-rpc),"
+echo "The users (nebula-server, nebula-executor, nebula-discovery, nebula-pve-collector), the group (nebula-rpc),"
 echo "the data directories under /var/lib/nebula and the server"
 echo "configuration under /etc/nebula were left in place."
 echo "See the header of this script for manual cleanup."
