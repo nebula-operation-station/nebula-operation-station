@@ -803,9 +803,10 @@ unnecessary").
      executor lifetime while the permit is still valid, M1 (or failure
      cleanup) still runs automatically, because the reason for waiting
      (the guest may still read the drive) is gone and removal shortens the
-     exposure; the flag clears only when removal is confirmed (stat
-     absent). Once the permit ends, polling no longer leads to any
-     mutation.
+     exposure; the flag clears only under the rule in *Resolving the
+     flag* below (snippet stat absent and the regenerate confirmed OK;
+     previously "only when removal is confirmed (stat absent)"). Once the
+     permit ends, polling no longer leads to any mutation.
 
    *Authority for cleanup* (previously: "the permit authorizes the job's
    compensating steps" with automatic cleanup and retry across a restart,
@@ -1095,8 +1096,15 @@ unnecessary").
    it, the cloud-init regenerate when the VMID proof still matches;
    previously the `cicustom` delete only); or (b) an explicit acknowledgement "key
    remains on node, rotate/destroy", audited as
-   `guest_hostkey_cleanup_acknowledged`. The flag clears only when removal
-   is confirmed (stat shows absent) or the acknowledgement is recorded.
+   `guest_hostkey_cleanup_acknowledged`. The flag clears only when every
+   cleanup step the run still owes is confirmed, that is the snippet
+   removal (stat shows absent) and, whenever the regenerate is owed
+   (failed, refused, `unknown` or never dispatched), the regenerate
+   confirmed OK, or when the acknowledgement is recorded (previously
+   "when removal is confirmed (stat shows absent)", which cleared a run
+   flagged for the regenerate once only the snippet was gone). A run
+   whose regenerate cannot run because the VMID proof no longer matches
+   clears only by acknowledgement.
 8. **Audit.** Executor events `guest_hostkey_generated`,
    `guest_hostkey_snippet_written`, `guest_hostkey_snippet_replaced`,
    `guest_hostkey_pinned`, `guest_hostkey_rotated`,
