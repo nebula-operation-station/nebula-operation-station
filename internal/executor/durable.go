@@ -187,6 +187,9 @@ func (s *Service) ReconcileOnce(ctx context.Context) {
 		}
 		s.reconcile(ctx, run)
 	}
+	// A container run finished before its recreation row was completed
+	// (a crash in between) is judged now, from its stored result.
+	s.judgeFinishedIntents()
 }
 
 func (s *Service) setDispatching(key string, on bool) {
