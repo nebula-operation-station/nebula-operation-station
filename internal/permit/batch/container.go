@@ -26,8 +26,9 @@ var (
 	// major_change, a variant change or tags that cannot be compared.
 	ErrContainerPolicy = errors.New("container tag change does not match the executor's tag policy")
 	// ErrContainerUnsupported refuses a binding whose executor-side checks
-	// do not exist yet: rollback (cu03), standalone definitions (cu05) and
-	// private registry transfer (cu06).
+	// do not exist yet: standalone definitions (cu05) and private registry
+	// transfer (cu06). A public compose rollback (cu03) is admitted: the
+	// executor checks it against its recreation row before anything runs.
 	ErrContainerUnsupported = errors.New("container update form is not supported yet")
 )
 
@@ -66,13 +67,18 @@ func refuse(m canonical.BatchMember, err error) error {
 
 // containerSnapshot applies the container rules to a policy snapshot: the
 // risk is at least the binding's floor, CRITICAL is refused, every tag change
-// must match the executor's tag policy, and the policy verdicts go into the
-// trust digest so a policy changed after approval fails revalidation.
+// of an update must match the executor's tag policy, and the policy verdicts
+// go into the trust digest so a policy changed after approval fails
+// revalidation. A rollback selects no new version: its tag policy is the
+// recorded update's, which the executor compares together with the rest of
+// the binding against its recreation row (window, baseline, recovery plan)
+// before the rollback is dispatched, instead of running CompareTags.
 func (a *Authority) containerSnapshot(m canonical.BatchMember, s Snapshot) (Snapshot, error) {
 	u := m.ContainerUpdate
+	rollback := u.Kind == canonical.ContainerUpdateKindRollback
 	switch {
-	case u.Kind != canonical.ContainerUpdateKindUpdate:
-		return Snapshot{}, refuse(m, fmt.Errorf("%w: rollback needs the recorded-row checks of cu03", ErrContainerUnsupported))
+	case u.Kind != canonical.ContainerUpdateKindUpdate && !rollback:
+		return Snapshot{}, refuse(m, fmt.Errorf("%w: kind %q", ErrContainerUnsupported, u.Kind))
 	case u.Form != canonical.ContainerUpdateFormCompose:
 		return Snapshot{}, refuse(m, fmt.Errorf("%w: standalone definitions arrive with cu05", ErrContainerUnsupported))
 	case u.Registry != nil:
@@ -86,7 +92,7 @@ func (a *Authority) containerSnapshot(m canonical.BatchMember, s Snapshot) (Snap
 	field(h, "nebula-batch-container-trust-v1")
 	h.Write(s.Trust[:])
 	for _, img := range u.Images {
-		if img.OldTag == img.NewTag {
+		if img.OldTag == img.NewTag || rollback {
 			continue
 		}
 		if a.options.TagPolicy == nil {

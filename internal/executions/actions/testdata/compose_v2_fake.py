@@ -159,7 +159,7 @@ def docker(argv):
                 for cid in [k for k, c in st["containers"].items() if c["Config"]["Labels"].get("com.docker.compose.service") == svc]:
                     del st["containers"][cid]
                 new = st["recreate"][svc]
-                new["Config"]["Image"] = entries[svc]
+                new["Config"]["Image"] = entries[svc]["image"]
                 new["Config"]["Labels"]["com.docker.compose.project.config_files"] = ",".join(files)
                 st["containers"][new["Id"]] = new
             # Containers that appear with the up (for after-snapshot bounds).

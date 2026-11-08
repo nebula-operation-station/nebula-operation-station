@@ -135,7 +135,7 @@ type batchExec struct {
 	// (containerRunPoll; tests shorten it).
 	durablePoll time.Duration
 	// composePins are the binding-consuming artifacts a container member
-	// may name (shippedComposeUpdatePin; tests pin stand-ins).
+	// may name (shippedContainerPins; tests pin stand-ins).
 	composePins []containerArtifact
 
 	mu sync.Mutex
@@ -178,7 +178,7 @@ func (s *Service) EnableBatchExecution() error {
 		return errors.New("executor: batch execution needs the batch authority")
 	}
 	x := &batchExec{attached: hostrun.Attached, visible: hostrun.RunVisible, durable: hostrun.Dispatch, durablePoll: containerRunPoll,
-		composePins: []containerArtifact{shippedComposeUpdatePin()}, holdWait: batchHoldWait, holdPoll: batchHoldPoll,
+		composePins: shippedContainerPins(), holdWait: batchHoldWait, holdPoll: batchHoldPoll,
 		calls: map[string]*batchMemberCall{}, hosts: map[string]string{}, held: map[string]*heldTarget{}, writeHeld: writeFileAtomic}
 	// Holds from before a restart, rechecked before any member starts on
 	// their targets; without a usable store no member starts.

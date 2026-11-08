@@ -40,12 +40,20 @@ import (
 // directory and Compose files from `docker inspect` labels and pulls
 // floating tags, is therefore never a container member's artifact: only the
 // 2.0.0 artifact that recreates the bound targets with the bound digests,
-// whose digest is pinned here (composeUpdateArtifactSHA256), runs.
+// whose digest is pinned here (composeUpdateArtifactSHA256), runs. A
+// rollback member (cu03) runs only the pinned docker.compose_rollback 1.0.0
+// artifact (composeRollbackArtifactSHA256), which recreates the bound
+// earlier definition from the retained images and pulls nothing, and only
+// after checkRollbackMember accepted it against the recorded update.
 
-// composeUpdateAction is the only container mutation that runs in cu02.
-// Rollback (cu03), standalone definitions (cu05) and private registry
-// transfer (cu06) are refused here until their executor-side checks exist.
-const composeUpdateAction = "docker.compose_update"
+// composeUpdateAction and composeRollbackAction are the container mutations
+// that run: a public compose update (cu02) and its rollback (cu03).
+// Standalone definitions (cu05) and private registry transfer (cu06) are
+// refused here until their executor-side checks exist.
+const (
+	composeUpdateAction   = "docker.compose_update"
+	composeRollbackAction = "docker.compose_rollback"
+)
 
 const (
 	// composeUpdateVersion is the docker.compose_update module version whose
@@ -57,11 +65,25 @@ const (
 	// TestShippedComposeUpdatePinMatchesEmbeddedScript). Changing it is a
 	// reviewed change of this protected package.
 	composeUpdateArtifactSHA256 = "2b466a5323341bb5012d1417f67c747e0fa0f05fc65748e379356c15df3416f1"
+
+	// composeRollbackVersion is the docker.compose_rollback module version
+	// whose artifact consumes the rollback binding (result
+	// compose-rollback-v1).
+	composeRollbackVersion = "1.0.0"
+	// composeRollbackArtifactSHA256 is the lowercase hex SHA-256 of
+	// internal/executions/actions/scripts/docker_compose_rollback.sh as
+	// embedded in the server's catalog (checked by
+	// TestShippedComposeRollbackPinMatchesEmbeddedScript). Changing it is a
+	// reviewed change of this protected package.
+	composeRollbackArtifactSHA256 = "ac628df0cf626e85ba01b89095bf8c8a51b0316af1ea90921f19d0b2a7a45d79"
 )
 
-// containerArtifact pins the one module version and artifact digest a
-// container member must name.
+// containerArtifact pins the one action, module version and artifact
+// digest a container member must name: a pin admits its artifact only for
+// its own action, so an update member never runs the rollback script or
+// the other way round.
 type containerArtifact struct {
+	ActionID      string
 	ModuleVersion string
 	SHA256        string
 }
@@ -69,7 +91,25 @@ type containerArtifact struct {
 // shippedComposeUpdatePin is the binding-consuming docker.compose_update
 // artifact of the shipped executor.
 func shippedComposeUpdatePin() containerArtifact {
-	return containerArtifact{ModuleVersion: composeUpdateVersion, SHA256: composeUpdateArtifactSHA256}
+	return containerArtifact{ActionID: composeUpdateAction, ModuleVersion: composeUpdateVersion, SHA256: composeUpdateArtifactSHA256}
+}
+
+// shippedComposeRollbackPin is the binding-consuming docker.compose_rollback
+// artifact of the shipped executor.
+func shippedComposeRollbackPin() containerArtifact {
+	return containerArtifact{ActionID: composeRollbackAction, ModuleVersion: composeRollbackVersion, SHA256: composeRollbackArtifactSHA256}
+}
+
+// shippedContainerPins are the pins of the shipped executor.
+func shippedContainerPins() []containerArtifact {
+	return []containerArtifact{shippedComposeUpdatePin(), shippedComposeRollbackPin()}
+}
+
+// containerMemberForms is what a container member may be: per action ID,
+// the binding kind it must carry (always form compose, public).
+var containerMemberForms = map[string]string{
+	composeUpdateAction:   canonical.ContainerUpdateKindUpdate,
+	composeRollbackAction: canonical.ContainerUpdateKindRollback,
 }
 
 const (
@@ -95,15 +135,16 @@ var (
 	// errContainerBinding: a container member without its update binding,
 	// or with an inspect-derived container binding instead.
 	errContainerBinding = errors.New("container member needs its frozen update binding and no inspect-derived binding")
-	// errContainerUnsupported: rollback, standalone and private registry
-	// members are not executed yet.
-	errContainerUnsupported = errors.New("only public compose updates are executed (rollback: cu03, standalone: cu05, private registry: cu06)")
+	// errContainerUnsupported: standalone and private registry members are
+	// not executed yet, and an action carries only its own binding kind.
+	errContainerUnsupported = errors.New("only public compose updates and their rollbacks are executed (standalone: cu05, private registry: cu06)")
 	// errContainerParameters: the approved parameters are not the
 	// rendering of the frozen binding.
 	errContainerParameters = errors.New("parameters are not the rendering of the frozen binding")
 	// errContainerArtifact: the member's module version and artifact are
-	// not the pinned, binding-consuming ones (or none is pinned).
-	errContainerArtifact = errors.New("module version and artifact are not the pinned binding-consuming docker.compose_update artifact")
+	// not the pinned, binding-consuming ones of its action (or none is
+	// pinned).
+	errContainerArtifact = errors.New("module version and artifact are not the pinned binding-consuming artifact of the action")
 )
 
 // isContainerMember reports whether m is a container mutation member: its
@@ -115,21 +156,23 @@ func isContainerMember(m canonical.BatchMember) bool {
 
 // checkContainerMember checks a container member and its approved
 // parameters before anything is claimed, and again on the claimed permit
-// immediately before the host: only a public compose update runs, only with
-// a module version and artifact digest equal to one of pins (an entry with
-// an empty digest pins nothing), and only with exactly the parameters
-// rendered from its frozen binding.
+// immediately before the host: only a public compose update or rollback
+// runs, each with its own binding kind, only with an action, module version
+// and artifact digest equal to one of pins (an entry with an empty action,
+// version or digest pins nothing), and only with exactly the parameters
+// rendered from its frozen binding. A rollback member is checked against
+// its recorded update separately (checkRollbackMember).
 func checkContainerMember(m canonical.BatchMember, params []byte, pins ...containerArtifact) error {
 	if m.ContainerUpdate == nil || m.Container != nil {
 		return errContainerBinding
 	}
 	u := *m.ContainerUpdate
-	if m.Request.ActionID != composeUpdateAction || u.Kind != canonical.ContainerUpdateKindUpdate ||
-		u.Form != canonical.ContainerUpdateFormCompose || u.Registry != nil {
+	kind, ok := containerMemberForms[m.Request.ActionID]
+	if !ok || u.Kind != kind || u.Form != canonical.ContainerUpdateFormCompose || u.Registry != nil {
 		return errContainerUnsupported
 	}
 	if !slices.ContainsFunc(pins, func(p containerArtifact) bool {
-		return p.SHA256 != "" && p.ModuleVersion != "" &&
+		return p.ActionID != "" && p.SHA256 != "" && p.ModuleVersion != "" && p.ActionID == m.Request.ActionID &&
 			p.ModuleVersion == m.Request.ModuleVersion && p.SHA256 == m.Request.ArtifactSHA256
 	}) {
 		return errContainerArtifact

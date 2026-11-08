@@ -7,8 +7,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
@@ -39,7 +41,82 @@ var testComposeArtifact = []byte("#!/bin/sh\n# binding-consuming stand-in\nexit 
 
 // testComposePin pins testComposeArtifact as the 2.0.0 artifact.
 func testComposePin() containerArtifact {
-	return containerArtifact{ModuleVersion: composeUpdateVersion, SHA256: sha256Hex(testComposeArtifact)}
+	return containerArtifact{ActionID: composeUpdateAction, ModuleVersion: composeUpdateVersion, SHA256: sha256Hex(testComposeArtifact)}
+}
+
+// testRollbackArtifact stands in for the docker.compose_rollback artifact.
+var testRollbackArtifact = []byte("#!/bin/sh\n# rollback stand-in\nexit 0\n")
+
+// testRollbackPin pins testRollbackArtifact as the rollback 1.0.0 artifact.
+func testRollbackPin() containerArtifact {
+	return containerArtifact{ActionID: composeRollbackAction, ModuleVersion: composeRollbackVersion, SHA256: sha256Hex(testRollbackArtifact)}
+}
+
+// testRollbackMember is a rollback member of binding rb with its rendered
+// parameters, naming the rollback stand-in artifact.
+func testRollbackMember(t *testing.T, rb canonical.BatchContainerUpdate) (canonical.BatchMember, []byte) {
+	t.Helper()
+	params, hash, err := canonical.ContainerUpdateParameters(rb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical.BatchMember{MemberID: "member-0", ContainerUpdate: &rb,
+		Request: canonical.Request{ActionID: composeRollbackAction, ModuleVersion: composeRollbackVersion,
+			ArtifactSHA256: sha256Hex(testRollbackArtifact), ParametersHash: hash}}, params
+}
+
+// A rollback member passes the member check only as docker.compose_rollback
+// with a rollback binding, with the rollback pin (never the update's, and
+// an update member never with the rollback's), and with exactly the
+// parameters rendered from its binding.
+func TestRollbackMemberNeedsItsOwnPin(t *testing.T) {
+	_, _, rb := rollbackFixture(t, time.Now())
+	m, params := testRollbackMember(t, rb)
+	if err := checkContainerMember(m, params, testComposePin(), testRollbackPin()); err != nil {
+		t.Fatalf("valid rollback member refused: %v", err)
+	}
+	if err := checkContainerMember(m, params, testComposePin()); !errors.Is(err, errContainerArtifact) {
+		t.Fatalf("rollback member with only the update pin: %v", err)
+	}
+	// The rollback stand-in pinned for the update action admits nothing here.
+	crossed := testRollbackPin()
+	crossed.ActionID = composeUpdateAction
+	if err := checkContainerMember(m, params, crossed); !errors.Is(err, errContainerArtifact) {
+		t.Fatalf("rollback artifact pinned for the update action: %v", err)
+	}
+	// The update pin's artifact named by a rollback member.
+	m2 := m
+	m2.Request.ArtifactSHA256, m2.Request.ModuleVersion = sha256Hex(testComposeArtifact), composeUpdateVersion
+	if err := checkContainerMember(m2, params, testComposePin(), testRollbackPin()); !errors.Is(err, errContainerArtifact) {
+		t.Fatalf("rollback member naming the update artifact: %v", err)
+	}
+	// An update member naming the rollback artifact.
+	um, uparams := testContainerMember(t, testComposeUpdate())
+	um.Request.ArtifactSHA256, um.Request.ModuleVersion = sha256Hex(testRollbackArtifact), composeRollbackVersion
+	if err := checkContainerMember(um, uparams, testComposePin(), testRollbackPin()); !errors.Is(err, errContainerArtifact) {
+		t.Fatalf("update member naming the rollback artifact: %v", err)
+	}
+	// A pin without an action admits nothing.
+	noAction := testRollbackPin()
+	noAction.ActionID = ""
+	if err := checkContainerMember(m, params, noAction); !errors.Is(err, errContainerArtifact) {
+		t.Fatalf("pin without action: %v", err)
+	}
+	// Parameters of another rollback binding.
+	other := rb.Clone()
+	other.RecoveryPlanDigest = hexOf("0")
+	op, _, err := canonical.ContainerUpdateParameters(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkContainerMember(m, op, testRollbackPin()); !errors.Is(err, errContainerParameters) {
+		t.Fatalf("parameters of another rollback: %v", err)
+	}
+	// docker.compose_rollback with an update binding.
+	um.Request.ActionID = composeRollbackAction
+	if err := checkContainerMember(um, uparams, testRollbackPin()); !errors.Is(err, errContainerUnsupported) {
+		t.Fatalf("rollback action with an update binding: %v", err)
+	}
 }
 
 // testContainerMember returns a compose update member and its parameter
@@ -161,7 +238,8 @@ func TestContainerMemberRefusals(t *testing.T) {
 // script is refused under 1.0.0 and when labelled 2.0.0.
 func TestContainerMemberRefusedWithoutPinnedArtifact(t *testing.T) {
 	m, params := testContainerMember(t, testComposeUpdate())
-	for _, pin := range []containerArtifact{shippedComposeUpdatePin(), {}, {ModuleVersion: composeUpdateVersion}} {
+	for _, pin := range []containerArtifact{shippedComposeUpdatePin(), shippedComposeRollbackPin(), {}, {ModuleVersion: composeUpdateVersion},
+		{ModuleVersion: composeUpdateVersion, SHA256: sha256Hex(testComposeArtifact)}} {
 		if err := checkContainerMember(m, params, pin); !errors.Is(err, errContainerArtifact) {
 			t.Fatalf("pin %+v: err = %v, want %v", pin, err, errContainerArtifact)
 		}
@@ -222,6 +300,48 @@ func TestShippedComposeUpdatePinMatchesEmbeddedScript(t *testing.T) {
 		m.Request.ModuleVersion = version
 		if err := checkContainerMember(m, params, shippedComposeUpdatePin()); !errors.Is(err, errContainerArtifact) {
 			t.Fatalf("shipped artifact as %s: err = %v", version, err)
+		}
+	}
+}
+
+// The rollback pin is the digest of the docker.compose_rollback 1.0.0
+// script the server ships (the bytes embedded in the actions catalog), for
+// that action and version only. Changing the script without a reviewed pin
+// update fails here.
+func TestShippedComposeRollbackPinMatchesEmbeddedScript(t *testing.T) {
+	a, ok := actions.Lookup(composeRollbackAction)
+	if !ok {
+		t.Fatal("docker.compose_rollback is not in the catalog")
+	}
+	if a.Version != composeRollbackVersion || !a.Durable || a.Timeout != containerMutationTimeout {
+		t.Fatalf("catalog has %s %s (durable %v, %v), the executor pins %s", a.ID, a.Version, a.Durable, a.Timeout, composeRollbackVersion)
+	}
+	if got := sha256Hex(a.Script); got != composeRollbackArtifactSHA256 || a.SHA256() != composeRollbackArtifactSHA256 {
+		t.Fatalf("the embedded docker.compose_rollback %s script has digest %s, the executor pins %q: update composeRollbackArtifactSHA256 after review",
+			a.Version, got, composeRollbackArtifactSHA256)
+	}
+	s := string(a.Script)
+	if !strings.Contains(s, "docker.compose_rollback 1.0.0") || !strings.Contains(s, `"container_update"`) ||
+		!strings.Contains(s, composeRollbackFormat) || !strings.Contains(s, `u["kind"] == "rollback"`) {
+		t.Fatal("the pinned script is not the binding-consuming rollback 1.0.0")
+	}
+	pin := shippedComposeRollbackPin()
+	if pin.ActionID != composeRollbackAction || pin.ModuleVersion != "1.0.0" || pin.SHA256 == composeUpdateArtifactSHA256 {
+		t.Fatalf("pin %+v", pin)
+	}
+	if !slices.Equal(shippedContainerPins(), []containerArtifact{shippedComposeUpdatePin(), pin}) {
+		t.Fatalf("shipped pins %+v", shippedContainerPins())
+	}
+	_, _, rb := rollbackFixture(t, time.Now())
+	m, params := testRollbackMember(t, rb)
+	m.Request.ArtifactSHA256 = sha256Hex(a.Script)
+	if err := checkContainerMember(m, params, shippedContainerPins()...); err != nil {
+		t.Fatalf("shipped rollback artifact refused: %v", err)
+	}
+	for _, version := range []string{"1.0.1", "2.0.0"} {
+		m.Request.ModuleVersion = version
+		if err := checkContainerMember(m, params, shippedContainerPins()...); !errors.Is(err, errContainerArtifact) {
+			t.Fatalf("shipped rollback artifact as %s: err = %v", version, err)
 		}
 	}
 }

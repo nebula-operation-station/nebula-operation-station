@@ -53,6 +53,9 @@ type composeV2 struct {
 	// previewLines replaces whole lines (old -> new) of the preview script
 	// in the copy that runs; each old line must occur exactly once.
 	previewLines map[string]string
+	// actionID is the catalog action whose script exec runs
+	// (docker.compose_update when empty).
+	actionID string
 }
 
 // cuContainer is one container as `docker inspect` shows it.
@@ -217,13 +220,17 @@ func (r cuRun) mutated() bool {
 	})
 }
 
-// script is the shipped 2.0.0 artifact with its state directory moved into
-// the test's directory.
+// script is the shipped 2.0.0 artifact (or the shipped artifact of
+// c.actionID) with its state directory moved into the test's directory.
 func (c *composeV2) script(t *testing.T) string {
 	t.Helper()
-	a, ok := Lookup("docker.compose_update")
+	id := c.actionID
+	if id == "" {
+		id = "docker.compose_update"
+	}
+	a, ok := Lookup(id)
 	if !ok {
-		t.Fatal("docker.compose_update missing")
+		t.Fatalf("%s missing", id)
 	}
 	s := string(a.Script)
 	if strings.Count(s, cuStateDirLine) != 1 {

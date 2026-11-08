@@ -408,9 +408,12 @@ func rollbackFixture(t *testing.T, now time.Time) (executordb.ContainerRecreatio
 	rb := canonical.BatchContainerUpdate{Kind: canonical.ContainerUpdateKindRollback, Form: u.Form, Project: u.Project,
 		SourceDigest: u.SourceDigest, WorkingDirHash: u.WorkingDirHash, ConfigFilesHash: u.ConfigFilesHash,
 		Dependencies: u.Dependencies, RollbackOf: row.ExecutionID, RecoveryPlanDigest: plan.Digest()}
-	for _, img := range row.Images {
-		rb.Images = append(rb.Images, canonical.ContainerUpdateImage{Service: img.Service, Repository: img.Repository, OldTag: img.NewTag,
-			NewTag: img.OldTag, Rollback: &canonical.ContainerRollbackImage{PriorImageID: img.PriorImageID, RetainedTag: img.RetainedTag,
+	for i, img := range row.Images {
+		// The binding names the bare retained tag (canonical's
+		// retained_tag), the row the full nos-retained reference.
+		rb.Images = append(rb.Images, canonical.ContainerUpdateImage{Service: img.Service, Repository: img.Repository,
+			Platform: u.Images[i].Platform, OldTag: img.NewTag, NewTag: img.OldTag, OldDigests: []string{u.Images[i].NewPlatformDigest},
+			Rollback: &canonical.ContainerRollbackImage{PriorImageID: img.PriorImageID, RetainedTag: strings.TrimPrefix(img.RetainedTag, retainedRepository+":"),
 				RetainedReference: img.RetainedReference}})
 	}
 	for _, x := range row.Containers {
@@ -478,7 +481,29 @@ func TestRollbackSourceChecks(t *testing.T) {
 			u.Targets[0].ContainerID = hexOf("1")
 		}, errRollbackBindingDiffers},
 		{"retained tag differs", func(_ *executordb.ContainerRecreation, _ **executordb.RecoveryPlan, u *canonical.BatchContainerUpdate) {
-			u.Images[0].Rollback.RetainedTag = "nos-retained:00000000-0000-4000-8000-000000000009-0"
+			u.Images[0].Rollback.RetainedTag = "00000000-0000-4000-8000-000000000009-0"
+		}, errRollbackBindingDiffers},
+		{"retained tag as the full reference", func(_ *executordb.ContainerRecreation, _ **executordb.RecoveryPlan, u *canonical.BatchContainerUpdate) {
+			u.Images[0].Rollback.RetainedTag = retainedTag(testUpdateExec, 0)
+		}, errRollbackBindingDiffers},
+		{"prior image differs", func(_ *executordb.ContainerRecreation, _ **executordb.RecoveryPlan, u *canonical.BatchContainerUpdate) {
+			u.Images[0].Rollback.PriorImageID = digestOf("0")
+		}, errRollbackBindingDiffers},
+		{"retained reference differs", func(_ *executordb.ContainerRecreation, _ **executordb.RecoveryPlan, u *canonical.BatchContainerUpdate) {
+			u.Images[0].Rollback.RetainedReference = "docker.io/library/nginx:1.27@" + digestOf("0")
+		}, errRollbackBindingDiffers},
+		{"row without a retained reference", func(r *executordb.ContainerRecreation, _ **executordb.RecoveryPlan, u *canonical.BatchContainerUpdate) {
+			r.Images[0].RetainedReference = ""
+			u.Images[0].Rollback.RetainedReference = ""
+		}, errRollbackBindingDiffers},
+		{"platform differs", func(_ *executordb.ContainerRecreation, _ **executordb.RecoveryPlan, u *canonical.BatchContainerUpdate) {
+			u.Images[0].Platform = "linux/arm64"
+		}, errRollbackBindingDiffers},
+		{"policy added", func(_ *executordb.ContainerRecreation, _ **executordb.RecoveryPlan, u *canonical.BatchContainerUpdate) {
+			u.Images[0].PolicyVersion, u.Images[0].PolicyDigest = "v1", hexOf("0")
+		}, errRollbackBindingDiffers},
+		{"old digests are not the update's result", func(_ *executordb.ContainerRecreation, _ **executordb.RecoveryPlan, u *canonical.BatchContainerUpdate) {
+			u.Images[0].OldDigests = []string{digestOf("a")}
 		}, errRollbackBindingDiffers},
 		{"tags not reversed", func(_ *executordb.ContainerRecreation, _ **executordb.RecoveryPlan, u *canonical.BatchContainerUpdate) {
 			u.Images[0].NewTag = "1.28"
@@ -514,9 +539,10 @@ func TestRollbackSourceChecks(t *testing.T) {
 	}
 }
 
-// A rollback member is still never executed (no rollback script is
-// pinned), but the executor refuses it first for its row: a rollback
-// without a recorded update, or of an uncertain one, names the reason.
+// The executor checks a rollback member against its own row: a rollback
+// without a recorded update, or of an uncertain one, names the reason; the
+// equal rollback passes the row check and, with the rollback pin, the
+// member check.
 func TestRollbackMemberCheckedAgainstOwnRow(t *testing.T) {
 	e := newContainerEnv(t, "web-1")
 	now := e.clock.Now()
@@ -546,9 +572,13 @@ func TestRollbackMemberCheckedAgainstOwnRow(t *testing.T) {
 	if err := e.svc.checkRollbackMember(m, "web-1"); err != nil {
 		t.Fatalf("equal rollback refused by the row check: %v", err)
 	}
-	// It still does not run: no rollback artifact is pinned.
-	if err := checkContainerMember(m, nil, shippedComposeUpdatePin()); !errors.Is(err, errContainerUnsupported) {
-		t.Fatalf("rollback member: %v", err)
+	// The update pin alone does not run it; the rollback pin does.
+	rm, params := testRollbackMember(t, rb)
+	if err := checkContainerMember(rm, params, shippedComposeUpdatePin()); !errors.Is(err, errContainerArtifact) {
+		t.Fatalf("rollback member with the update pin: %v", err)
+	}
+	if err := checkContainerMember(rm, params, testRollbackPin()); err != nil {
+		t.Fatalf("rollback member with the rollback pin: %v", err)
 	}
 }
 
@@ -570,7 +600,18 @@ func TestNoPruneInContainerActions(t *testing.T) {
 	if !strings.Contains(s, `env["DOCKER_CONFIG"] = empty`) || !strings.Contains(s, `"docker", "pull", "-q", "--", ref`) {
 		t.Error("the pinned artifact does not pull by digest with an empty DOCKER_CONFIG")
 	}
-	for _, f := range []string{"container_member.go", "container_judge.go", "container_recreation.go"} {
+	// The pinned rollback artifact pulls, tags and resolves nothing.
+	ra, ok := actions.Lookup(composeRollbackAction)
+	if !ok || sha256Hex(ra.Script) != composeRollbackArtifactSHA256 {
+		t.Fatal("the pinned docker.compose_rollback artifact is not in the catalog")
+	}
+	for _, banned := range []string{`"prune"`, `"rmi"`, `"down"`, `"rm"`, `"untag"`, `"login"`, "docker login", "--rm", "rm -v",
+		"compose pull", `"pull"`, `"tag"`, "curl", "DOCKER_CONFIG"} {
+		if strings.Contains(string(ra.Script), banned) {
+			t.Errorf("the pinned rollback artifact contains %q", banned)
+		}
+	}
+	for _, f := range []string{"container_member.go", "container_judge.go", "container_judges.go", "container_recreation.go"} {
 		b, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatal(err)
@@ -689,7 +730,18 @@ func TestNoPruneInContainerArgv(t *testing.T) {
 	if v := argvViolations(literalWords(scriptLiterals(string(a.Script)))); len(v) != 0 {
 		t.Errorf("the pinned update artifact names %v", v)
 	}
-	for _, f := range []string{"container_member.go", "container_judge.go", "container_recreation.go"} {
+	ra, ok := actions.Lookup(composeRollbackAction)
+	if !ok || sha256Hex(ra.Script) != composeRollbackArtifactSHA256 {
+		t.Fatal("the pinned docker.compose_rollback artifact is not in the catalog")
+	}
+	words := literalWords(scriptLiterals(string(ra.Script)))
+	if v := argvViolations(words); len(v) != 0 {
+		t.Errorf("the pinned rollback artifact names %v", v)
+	}
+	if slices.Contains(words, "pull") || slices.Contains(words, "tag") {
+		t.Error("the pinned rollback artifact names pull or tag as a command word")
+	}
+	for _, f := range []string{"container_member.go", "container_judge.go", "container_judges.go", "container_recreation.go"} {
 		if v := argvViolations(literalWords(goLiterals(t, f))); len(v) != 0 {
 			t.Errorf("%s names %v", f, v)
 		}

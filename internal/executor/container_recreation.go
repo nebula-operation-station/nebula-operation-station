@@ -81,9 +81,22 @@ type definitionService struct {
 	ReplicasBefore int `json:"replicas_before"`
 }
 
-// retainedTag is the tag phase 4 gives the prior image of entry index.
+// retainedRepository is the local repository name phase 4 of an update
+// tags each prior image under.
+const retainedRepository = "nos-retained"
+
+// retainedTagName is the tag (without repository) phase 4 gives the prior
+// image of entry index. A rollback binding names this bare tag
+// (canonical's retained_tag is a tag); the rollback script resolves it
+// under retainedRepository.
+func retainedTagName(executionID string, index int) string {
+	return fmt.Sprintf("%s-%d", executionID, index)
+}
+
+// retainedTag is the full reference phase 4 gives the prior image of entry
+// index, as the row records it: nos-retained:<execution>-<index>.
 func retainedTag(executionID string, index int) string {
-	return fmt.Sprintf("nos-retained:%s-%d", executionID, index)
+	return retainedRepository + ":" + retainedTagName(executionID, index)
 }
 
 // recreationIntent builds the intent row of an update member from its
@@ -125,6 +138,11 @@ func recreationIntent(run dispatch.Run, hostID, hostKey string) (executordb.Cont
 		if len(img.OldDigests) > 0 {
 			ri.RetainedReference = img.Repository + ":" + img.OldTag + "@" + img.OldDigests[0]
 		}
+		if rb := img.Rollback; u.Kind == canonical.ContainerUpdateKindRollback && rb != nil {
+			// A rollback retains nothing: its row records the image it
+			// returns to, under the update's retained tag and reference.
+			ri.PriorImageID, ri.RetainedTag, ri.RetainedReference = rb.PriorImageID, retainedRepository+":"+rb.RetainedTag, rb.RetainedReference
+		}
 		images = append(images, ri)
 	}
 	defJSON, err := json.Marshal(def)
@@ -164,6 +182,14 @@ func (s *Service) recordRecreationIntent(run dispatch.Run, hostID, hostKey strin
 // after-snapshot is recreated only with class success and a passing
 // verdict, otherwise partial; without an after-snapshot it is uncertain.
 func recreationCompletion(row executordb.ContainerRecreation, class string, result []byte) executordb.RecreationCompletion {
+	return recreationCompletionWith(row, nil, class, result)
+}
+
+// recreationCompletionWith is recreationCompletion for a row of either
+// kind. A rollback row's run is read as compose-rollback-v1 and judged by
+// judgeComposeRollback against updateBaseline, the baseline the recorded
+// update's row holds (none: the verdict fails).
+func recreationCompletionWith(row executordb.ContainerRecreation, updateBaseline []byte, class string, result []byte) executordb.RecreationCompletion {
 	c := executordb.RecreationCompletion{State: executordb.RecreationUncertain}
 	if !durableJobOver(class) {
 		c.Verdict.Findings = []string{"the run closed without a result (" + class + "); the recreation is uncertain"}
@@ -174,7 +200,12 @@ func recreationCompletion(row executordb.ContainerRecreation, class string, resu
 		c.Verdict.Findings = []string{"the recorded binding cannot be read"}
 		return c
 	}
-	res, err := parseComposeUpdateResult(result)
+	rollback := u.Kind == canonical.ContainerUpdateKindRollback
+	format := composeUpdateFormat
+	if rollback {
+		format = composeRollbackFormat
+	}
+	res, err := parseContainerResult(result, format)
 	if err != nil {
 		if class == hostrun.ClassPrecheckFailed {
 			// Exit 10 is the script's stop while nothing changed.
@@ -213,12 +244,21 @@ func recreationCompletion(row executordb.ContainerRecreation, class string, resu
 		c.Verdict.Findings = []string{"the after-snapshot was truncated; the recreation is uncertain"}
 		return boundCompletion(c)
 	}
-	// The retained tag of each service is the one the intent row recorded.
-	retained := map[string]string{}
-	for _, img := range row.Images {
-		retained[img.Service] = img.RetainedTag
+	var v containerVerdict
+	if rollback {
+		var restore []snapshotEntry
+		if len(updateBaseline) > 0 && json.Unmarshal(updateBaseline, &restore) != nil {
+			restore = nil
+		}
+		v = judgeComposeRollback(u, restore, res)
+	} else {
+		// The retained tag of each service is the one the intent row recorded.
+		retained := map[string]string{}
+		for _, img := range row.Images {
+			retained[img.Service] = img.RetainedTag
+		}
+		v = judgeComposeUpdate(u, retained, res)
 	}
-	v := judgeComposeUpdate(u, retained, res)
 	c.Verdict = executordb.RecreationVerdict{Judged: true, Passed: v.Passed, Findings: boundFindings(v.Findings)}
 	c.Containers = recreationContainers(res.Baseline, res.After)
 	c.State = executordb.RecreationPartial
@@ -330,7 +370,7 @@ func (s *Service) completeRecreation(r executordb.Run) (executordb.ContainerRecr
 	if row.State != executordb.RecreationIntent || r.State != executordb.RunFinished {
 		return row, true
 	}
-	c := recreationCompletion(row, r.Class, r.Result)
+	c := recreationCompletionWith(row, s.rollbackSourceBaseline(row), r.Class, r.Result)
 	if err := s.db.CompleteContainerRecreation(r.ExecutionID, c, s.clock(), DefaultRollbackWindow); err != nil && !errors.Is(err, executordb.ErrRecreationState) {
 		s.log.Error("audit", "kind", "store_error", "op", "complete_container_recreation", "execution", r.ExecutionID, "detail", err.Error())
 		return row, true
@@ -340,7 +380,31 @@ func (s *Service) completeRecreation(r executordb.Run) (executordb.ContainerRecr
 	}
 	s.log.Info("audit", "kind", "container_recreation_judged", "execution", r.ExecutionID, "member", row.MemberID, "host", row.HostID,
 		"state", row.State, "verdict_passed", row.Verdict.Passed, "findings", len(row.Verdict.Findings))
+	if row.Kind == canonical.ContainerUpdateKindRollback && row.State == executordb.RecreationRecreated && row.Verdict.Passed {
+		// The recorded update is rolled back: it is no rollback source
+		// any more. A failed rollback leaves it as it was.
+		if err := s.db.MarkContainerRecreationRolledBack(row.RollbackOf); err != nil {
+			s.log.Error("audit", "kind", "store_error", "op", "mark_container_recreation_rolled_back", "execution", row.RollbackOf, "detail", err.Error())
+		} else {
+			s.log.Info("audit", "kind", "container_recreation_rolled_back", "execution", row.RollbackOf, "rollback", row.ExecutionID, "host", row.HostID)
+		}
+	}
 	return row, true
+}
+
+// rollbackSourceBaseline is the baseline of the update a rollback row
+// rolls back (nil for an update row, or when that row is not the same
+// host's update): what the rollback judge compares the recreated services
+// with.
+func (s *Service) rollbackSourceBaseline(row executordb.ContainerRecreation) []byte {
+	if row.Kind != canonical.ContainerUpdateKindRollback {
+		return nil
+	}
+	src, err := s.db.GetContainerRecreation(row.RollbackOf)
+	if err != nil || src.Kind != canonical.ContainerUpdateKindUpdate || src.HostID != row.HostID {
+		return nil
+	}
+	return src.Baseline
 }
 
 // completeNotStarted completes the row of a job that never started on the
@@ -446,16 +510,26 @@ func checkRollbackSource(u canonical.BatchContainerUpdate, row executordb.Contai
 	if !jsonEqual(u.Dependencies, upd.Dependencies) {
 		return differs("dependencies")
 	}
-	if len(u.Images) != len(row.Images) {
+	if len(u.Images) != len(row.Images) || len(upd.Images) != len(row.Images) {
 		return differs("images")
 	}
 	for i, img := range u.Images {
-		ri := row.Images[i]
+		ri, ui := row.Images[i], upd.Images[i]
+		// The binding names the bare tag; the row records the full
+		// nos-retained reference phase 4 created.
 		if img.Rollback == nil || img.Service != ri.Service || img.Repository != ri.Repository ||
-			img.OldTag != ri.NewTag || img.NewTag != ri.OldTag ||
-			img.Rollback.PriorImageID != ri.PriorImageID || img.Rollback.RetainedTag != ri.RetainedTag ||
+			img.OldTag != ri.NewTag || img.NewTag != ri.OldTag || ri.PriorImageID == "" || ri.RetainedReference == "" ||
+			img.Rollback.PriorImageID != ri.PriorImageID || retainedRepository+":"+img.Rollback.RetainedTag != ri.RetainedTag ||
 			img.Rollback.RetainedReference != ri.RetainedReference {
 			return differs("image " + ri.Service)
+		}
+		// Platform and tag policy are copied from the update (a rollback
+		// selects no new version); old_digests is the update's result,
+		// exactly its approved platform digest.
+		if ui.Service != img.Service || img.Platform != ui.Platform || img.PolicyVersion != ui.PolicyVersion ||
+			img.PolicyDigest != ui.PolicyDigest || img.MajorChange != ui.MajorChange ||
+			!slices.Equal(img.OldDigests, []string{ui.NewPlatformDigest}) {
+			return differs("image " + ri.Service + " platform, policy or digests")
 		}
 	}
 	var want []canonical.ContainerUpdateTarget
