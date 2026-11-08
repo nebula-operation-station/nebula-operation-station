@@ -4,9 +4,16 @@ package executor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +23,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor/dispatch"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
@@ -144,6 +152,120 @@ func TestFinishedRunJudgedAfterCrashInIntent(t *testing.T) {
 	again, _ := e.db.GetContainerRecreation(run.ExecutionID)
 	if !again.UpdatedAt.Equal(got.UpdatedAt) || !again.WindowExpiresAt.Equal(got.WindowExpiresAt) {
 		t.Fatalf("row changed on a second pass: %+v", again)
+	}
+}
+
+// oversizeBaselineResult is a well-formed result within the result limit
+// whose baseline is over the row's baseline limit: extra baseline entries
+// with the most and longest mounts the parser allows.
+func oversizeBaselineResult(t *testing.T, u canonical.BatchContainerUpdate) composeUpdateResult {
+	t.Helper()
+	r := passingComposeResult(u)
+	mounts := make([]snapshotMount, maxSnapshotMounts)
+	for i := range mounts {
+		p := "/" + strings.Repeat(string(rune('a'+i%26)), maxSnapshotPath-1)
+		mounts[i] = snapshotMount{Type: "bind", Source: p, Destination: p, Mode: "rw", RW: true}
+	}
+	for i := 0; i < 4; i++ {
+		x := r.Baseline[0]
+		x.ID, x.Name, x.Replica, x.Mounts = fmt.Sprintf("%064x", 1000+i), "site-pad-"+strconv.Itoa(i+1), strconv.Itoa(i+1), mounts
+		x.Service = "pad"
+		r.Baseline = append(r.Baseline, x)
+	}
+	return r
+}
+
+// oversizeContainersResult is a well-formed result within the result limit
+// whose per-container record is over the row's containers limit: the most
+// snapshot entries with the longest names and references.
+func oversizeContainersResult(t *testing.T, u canonical.BatchContainerUpdate) composeUpdateResult {
+	t.Helper()
+	r := passingComposeResult(u)
+	r.Baseline, r.After = nil, nil
+	ref := "nginx:" + strings.Repeat("a", maxSnapshotReference-len("nginx:"))
+	for i := 1; i <= maxSnapshotEntries; i++ {
+		replica := strconv.Itoa(i)
+		name := "site-web-" + replica + "-"
+		name += strings.Repeat("x", 130-len(name))
+		b := snapshotEntry{ID: fmt.Sprintf("%064x", i), Name: name, Service: "web", Replica: replica, State: "running",
+			StartedAt: "2026-11-08T01:00:00Z", Health: "none", ImageID: digestOf("d"), RunningReference: ref, ConfigurationDigest: hexOf("2")}
+		a := b
+		a.ID, a.ImageID = newIncarnation(b.ID), pulledImageID
+		r.Baseline, r.After = append(r.Baseline, b), append(r.After, a)
+	}
+	return r
+}
+
+// A host-controlled result within the result limit whose baseline or
+// container record is over its column limit still completes the row, once:
+// as uncertain, without the record that does not fit, so the row leaves
+// intent and is not judged again on every reconcile pass.
+func TestOversizeRecordCompletesBounded(t *testing.T) {
+	u := testComposeUpdate()
+	cases := []struct {
+		name    string
+		result  composeUpdateResult
+		finding string
+		over    func(composeUpdateResult) bool
+	}{
+		{"baseline over its limit", oversizeBaselineResult(t, u), "baseline is over its", func(r composeUpdateResult) bool {
+			b, _ := json.Marshal(r.Baseline)
+			return len(b) > executordb.MaxRecreationBaselineBytes
+		}},
+		{"containers over their limit", oversizeContainersResult(t, u), "container record is over its", func(r composeUpdateResult) bool {
+			b, _ := json.Marshal(recreationContainers(r.Baseline, r.After))
+			return len(b) > executordb.MaxRecreationContainersBytes
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := mustResultJSON(t, tc.result)
+			if len(raw) > maxJudgedResultBytes || !tc.over(tc.result) {
+				t.Fatalf("fixture: %d result bytes, over the column limit %v", len(raw), tc.over(tc.result))
+			}
+			if _, err := parseComposeUpdateResult(raw); err != nil {
+				t.Fatalf("fixture not well-formed: %v", err)
+			}
+			e := newContainerEnv(t, "web-1")
+			run := testDispatchRun(t, u)
+			row, err := recreationIntent(run, "web-1", "SHA256:k")
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := recreationCompletion(row, hostrun.ClassSuccess, raw)
+			if c.State != executordb.RecreationUncertain || c.Verdict.Passed ||
+				!strings.Contains(strings.Join(c.Verdict.Findings, "|"), tc.finding) {
+				t.Fatalf("completion %s passed=%v findings %v", c.State, c.Verdict.Passed, c.Verdict.Findings)
+			}
+			if err := e.db.CreateContainerRecreation(row); err != nil {
+				t.Fatal(err)
+			}
+			r := executordb.Run{ExecutionID: run.ExecutionID, HostID: "web-1", Digest: hexOf("f"), Endpoints: []string{"127.0.0.1:22"},
+				Timeout: containerMutationTimeout, MemberID: "member-0", ActionID: composeUpdateAction}
+			if err := e.db.CreateRun(r); err != nil {
+				t.Fatal(err)
+			}
+			r.State, r.Class, r.Result = executordb.RunFinished, hostrun.ClassSuccess, raw
+			if err := e.db.FinishRun(r); err != nil {
+				t.Fatal(err)
+			}
+			e.svc.ReconcileOnce(context.Background())
+			got, err := e.db.GetContainerRecreation(run.ExecutionID)
+			if err != nil || got.State != executordb.RecreationUncertain || got.Verdict.Passed {
+				t.Fatalf("row %+v %v", got.State, err)
+			}
+			if containerMemberOutcome(hostrun.ClassSuccess, got) == permit.OutcomeSucceeded {
+				t.Fatal("an unrecorded update succeeded")
+			}
+			if left, err := e.db.ContainerRecreationsInIntent(); err != nil || len(left) != 0 {
+				t.Fatalf("still in intent: %d %v", len(left), err)
+			}
+			e.svc.ReconcileOnce(context.Background())
+			again, _ := e.db.GetContainerRecreation(run.ExecutionID)
+			if !again.UpdatedAt.Equal(got.UpdatedAt) || again.State != got.State {
+				t.Fatalf("row changed on a second pass: %+v", again.State)
+			}
+		})
 	}
 }
 
@@ -334,6 +456,119 @@ func TestNoPruneInContainerActions(t *testing.T) {
 			if strings.Contains(string(b), banned) {
 				t.Errorf("%s names %q", f, banned)
 			}
+		}
+	}
+}
+
+// argvBannedWords are docker subcommands and verbs no container action may
+// name in any argument vector or command string: removing, untagging or
+// pruning an image or container, taking a project down, logging in.
+var argvBannedWords = map[string]bool{"prune": true, "rmi": true, "rm": true, "remove": true, "untag": true,
+	"login": true, "logout": true, "down": true, "kill": true}
+
+// argvViolations reads words, the words of every string literal of a
+// source in order, as one argument stream and returns each banned word,
+// and each docker or compose "pull" that is not the one allowed form,
+// docker pull -q -- <ref> (a pull by digest; compose pull would use the
+// project's credentials). "pull" as a bare phase name is no command.
+func argvViolations(words []string) []string {
+	const window = 6
+	var out []string
+	for i, w := range words {
+		if argvBannedWords[w] {
+			out = append(out, w)
+		}
+		if w != "pull" {
+			continue
+		}
+		allowed := i > 0 && words[i-1] == "docker" && i+2 < len(words) && words[i+1] == "-q" && words[i+2] == "--"
+		command := i > 0 && (words[i-1] == "docker" || words[i-1] == "image")
+		for j := max(0, i-window); j < i; j++ {
+			command = command || words[j] == "compose"
+		}
+		if command && !allowed {
+			out = append(out, words[max(0, i-1)]+" pull")
+		}
+	}
+	return out
+}
+
+func literalWords(lits []string) []string {
+	var words []string
+	for _, l := range lits {
+		words = append(words, strings.Fields(l)...)
+	}
+	return words
+}
+
+// scriptLiterals returns the string literals of the shipped script (shell
+// with embedded Python), in order, skipping comment lines.
+func scriptLiterals(s string) []string {
+	re := regexp.MustCompile(`"((?:[^"\\\n]|\\.)*)"|'((?:[^'\\\n]|\\.)*)'`)
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		for _, m := range re.FindAllStringSubmatch(line, -1) {
+			out = append(out, m[1]+m[2])
+		}
+	}
+	return out
+}
+
+// goLiterals returns the string literals of a Go file, in source order.
+func goLiterals(t *testing.T, path string) []string {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		if l, ok := n.(*ast.BasicLit); ok && l.Kind == token.STRING {
+			s, err := strconv.Unquote(l.Value)
+			if err != nil {
+				t.Fatalf("%s: %v", path, err)
+			}
+			out = append(out, s)
+		}
+		return true
+	})
+	return out
+}
+
+// TestNoPruneInContainerArgv checks the argument vectors, not substrings:
+// "image", "remove" or "compose", "pull" as separate elements is caught as
+// well as a command string.
+func TestNoPruneInContainerArgv(t *testing.T) {
+	// The detector itself catches every argv form the substring list missed.
+	for name, src := range map[string]string{
+		"image remove":     `call(["docker", "image", "remove", iid], budget)`,
+		"container remove": `call(["docker", "container", "remove", "-f", cid], budget)`,
+		"compose pull":     `call(["docker", "compose", "-p", p, "pull"], budget)`,
+		"image prune":      `call(["docker", "image", "prune", "-af"], budget)`,
+		"login string":     `call(["sh", "-c", "docker login ghcr.io"], budget)`,
+		"compose down":     `call(["docker", "compose", "down"], budget)`,
+	} {
+		if v := argvViolations(literalWords(scriptLiterals(src))); len(v) == 0 {
+			t.Errorf("%s: not caught", name)
+		}
+	}
+	if v := argvViolations(literalWords(scriptLiterals(`call(["docker", "pull", "-q", "--", ref], budget)`))); len(v) != 0 {
+		t.Errorf("the allowed pull by digest is flagged: %v", v)
+	}
+
+	a, ok := actions.Lookup(composeUpdateAction)
+	if !ok || sha256Hex(a.Script) != composeUpdateArtifactSHA256 {
+		t.Fatal("the pinned docker.compose_update artifact is not in the catalog")
+	}
+	if v := argvViolations(literalWords(scriptLiterals(string(a.Script)))); len(v) != 0 {
+		t.Errorf("the pinned update artifact names %v", v)
+	}
+	for _, f := range []string{"container_member.go", "container_judge.go", "container_recreation.go"} {
+		if v := argvViolations(literalWords(goLiterals(t, f))); len(v) != 0 {
+			t.Errorf("%s names %v", f, v)
 		}
 	}
 }

@@ -138,6 +138,9 @@ type composeUpdateResult struct {
 	After    []snapshotEntry  `json:"after"`
 	Pulled   []resultImage    `json:"pulled"`
 	Retained []resultRetained `json:"retained"`
+	// AfterTruncated is set when the script cut the after-snapshot at its
+	// total bound (cu02t): the list is incomplete.
+	AfterTruncated bool `json:"after_truncated"`
 }
 
 // stopped reports whether the run stopped in phases 1 to 4, before any
@@ -302,12 +305,17 @@ func expectedReference(img canonical.ContainerUpdateImage) string {
 // matched by service and replica number against the baseline: the same
 // replica count, each running, no health regression, the same published
 // ports, mounts and networks, and the image the run pulled and verified
-// for the approved digest, under the approved reference. Each dependency
-// container keeps its ID, configuration digest and run state, has no
-// health regression, and restarts only with restart_on_update. A missing
+// for the approved digest, under the approved reference. Each bound target
+// is in the baseline with its bound service, image, running reference and
+// configuration digest. Each frozen service's prior image is retained under
+// exactly the tag recorded for it (retained: service to
+// nos-retained:<execution>-<index>), and nothing else is reported retained.
+// The result is about the bound project. Each dependency container keeps
+// its ID, configuration digest and run state, has no health regression,
+// and restarts only with restart_on_update. A missing, or truncated,
 // baseline or after-snapshot, an unreadable entry and an unmatched
 // container fail.
-func judgeComposeUpdate(u canonical.BatchContainerUpdate, r composeUpdateResult) containerVerdict {
+func judgeComposeUpdate(u canonical.BatchContainerUpdate, retained map[string]string, r composeUpdateResult) containerVerdict {
 	var findings []string
 	fail := func(f string, a ...any) { findings = append(findings, fmt.Sprintf(f, a...)) }
 	verdict := func() containerVerdict {
@@ -338,9 +346,32 @@ func judgeComposeUpdate(u canonical.BatchContainerUpdate, r composeUpdateResult)
 		fail("no after-snapshot; the recreation is uncertain")
 		return verdict()
 	}
+	if r.AfterTruncated {
+		fail("the after-snapshot was truncated; the recreation cannot be judged in full")
+	}
+	if r.Project != u.Project {
+		fail("the result is about project %s, not the bound project %s", r.Project, u.Project)
+	}
 	frozen := map[string]canonical.ContainerUpdateImage{}
 	for _, img := range u.Images {
 		frozen[img.Service] = img
+	}
+	gotRetained := map[string]string{}
+	for _, t := range r.Retained {
+		switch _, dup := gotRetained[t.Service]; {
+		case frozen[t.Service].Service == "":
+			fail("the run retained an image for %s, which is no frozen service", t.Service)
+		case dup:
+			fail("service %s: prior image retained twice", t.Service)
+		default:
+			gotRetained[t.Service] = t.Tag
+		}
+	}
+	for _, img := range u.Images {
+		want := retained[img.Service]
+		if got, ok := gotRetained[img.Service]; !ok || want == "" || got != want {
+			fail("service %s: prior image not retained under %s", img.Service, want)
+		}
 	}
 	pulled := map[string]string{}
 	for _, p := range r.Pulled {
@@ -358,8 +389,10 @@ func judgeComposeUpdate(u canonical.BatchContainerUpdate, r composeUpdateResult)
 		}
 	}
 	targets := map[string]bool{}
+	boundTarget := map[string]canonical.ContainerUpdateTarget{}
 	for _, t := range u.Targets {
 		targets[t.ContainerID] = true
+		boundTarget[t.ContainerID] = t
 	}
 
 	// The baseline must be exactly the bound targets and dependency
@@ -381,9 +414,27 @@ func judgeComposeUpdate(u canonical.BatchContainerUpdate, r composeUpdateResult)
 			continue
 		}
 		if targets[e.ID] {
+			t := boundTarget[e.ID]
+			if e.Service != t.Service {
+				fail("baseline container %s is reported under service %s, bound to %s", e.Name, e.Service, t.Service)
+				continue
+			}
 			if _, ok := frozen[e.Service]; !ok {
 				fail("baseline container %s belongs to no frozen service", e.Name)
 				continue
+			}
+			var drift []string
+			if e.ImageID != t.ImageID {
+				drift = append(drift, "image")
+			}
+			if e.RunningReference != t.RunningReference {
+				drift = append(drift, "running reference")
+			}
+			if e.ConfigurationDigest != t.ConfigurationDigest {
+				drift = append(drift, "configuration")
+			}
+			if len(drift) > 0 {
+				fail("target %s drifted from the approved binding: %s", e.Name, strings.Join(drift, ", "))
 			}
 			k := replicaKey(e.Service, e.Replica)
 			if _, dup := before[k]; dup {

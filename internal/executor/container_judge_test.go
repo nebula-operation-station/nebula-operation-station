@@ -31,6 +31,22 @@ var pulledImageID = digestOf("e")
 // the same ports, mounts and networks, the pulled image and the approved
 // reference; every dependency untouched.
 func passingComposeResult(u canonical.BatchContainerUpdate) composeUpdateResult {
+	return passingComposeResultFor(u, testUpdateExec)
+}
+
+// expectedRetained is the retained tag per service the intent row of
+// execution records for u.
+func expectedRetained(u canonical.BatchContainerUpdate, execution string) map[string]string {
+	m := map[string]string{}
+	for i, img := range u.Images {
+		m[img.Service] = retainedTag(execution, i)
+	}
+	return m
+}
+
+// passingComposeResultFor is passingComposeResult of the run execution: the
+// retained tags are that execution's.
+func passingComposeResultFor(u canonical.BatchContainerUpdate, execution string) composeUpdateResult {
 	zero := 0
 	r := composeUpdateResult{Format: composeUpdateFormat, Phase: phaseAfterSnapshot, Project: u.Project, UpExit: &zero,
 		Baseline: []snapshotEntry{}, After: []snapshotEntry{}, Pulled: []resultImage{}, Retained: []resultRetained{}}
@@ -46,7 +62,7 @@ func passingComposeResult(u canonical.BatchContainerUpdate) composeUpdateResult 
 	for i, img := range u.Images {
 		images[img.Service] = img
 		r.Pulled = append(r.Pulled, resultImage{Service: img.Service, ImageID: pulledImageID})
-		r.Retained = append(r.Retained, resultRetained{Service: img.Service, Tag: retainedTag("00000000-0000-4000-8000-000000000001", i)})
+		r.Retained = append(r.Retained, resultRetained{Service: img.Service, Tag: retainedTag(execution, i)})
 	}
 	for _, t := range u.Targets {
 		b := entry(t.ContainerID, t.ContainerName, t.Service, "healthy")
@@ -110,6 +126,15 @@ func TestJudgeComposeUpdatePostchecks(t *testing.T) {
 			}
 		}
 		t.Fatalf("no web replica %s", replica)
+		return nil
+	}
+	baseline := func(r *composeUpdateResult, svc, replica string) *snapshotEntry {
+		for i := range r.Baseline {
+			if r.Baseline[i].Service == svc && r.Baseline[i].Replica == replica {
+				return &r.Baseline[i]
+			}
+		}
+		t.Fatalf("no baseline %s replica %s", svc, replica)
 		return nil
 	}
 	dep := func(r *composeUpdateResult) *snapshotEntry {
@@ -187,6 +212,57 @@ func TestJudgeComposeUpdatePostchecks(t *testing.T) {
 		{"up timeout", nil, func(r *composeUpdateResult) { x := 124; r.UpExit, r.Reason = &x, "up_timeout" }, "up_timeout"},
 		{"snapshot failed reason", nil, func(r *composeUpdateResult) { r.Reason = "snapshot_failed" }, "snapshot_failed"},
 		{"stopped before recreate", nil, func(r *composeUpdateResult) { r.Phase, r.Reason = phasePull, "pull_failed" }, "ended in phase pull"},
+
+		// Retention (R9): every frozen service's prior image is retained
+		// under exactly the tag the intent row recorded for this execution.
+		{"retained tag of another execution", nil, func(r *composeUpdateResult) {
+			for i := range r.Retained {
+				r.Retained[i].Tag = retainedTag("00000000-0000-4000-8000-000000000009", i)
+			}
+		}, "not retained under nos-retained:" + testUpdateExec},
+		{"retained tags of the other entry index", nil, func(r *composeUpdateResult) {
+			r.Retained[0].Tag, r.Retained[1].Tag = r.Retained[1].Tag, r.Retained[0].Tag
+		}, "service api: prior image not retained under nos-retained:" + testUpdateExec + "-0"},
+		{"prior image of a service not retained", nil, func(r *composeUpdateResult) { r.Retained = r.Retained[1:] }, "service api: prior image not retained"},
+		{"nothing retained", nil, func(r *composeUpdateResult) { r.Retained = nil }, "prior image not retained"},
+		{"retained twice", nil, func(r *composeUpdateResult) { r.Retained = append(r.Retained, r.Retained[0]) }, "retained twice"},
+		{"retained for an unbound service", nil, func(r *composeUpdateResult) {
+			r.Retained = append(r.Retained, resultRetained{Service: "cache", Tag: retainedTag(testUpdateExec, 2)})
+		}, "retained an image for cache"},
+
+		// Bound targets (R11): the baseline entry of a target carries the
+		// bound service, image, running reference and configuration digest.
+		{"target drifted to another image", nil, func(r *composeUpdateResult) {
+			baseline(r, "web", "1").ImageID = digestOf("0")
+		}, "site-web-1 drifted from the approved binding: image"},
+		{"target drifted to another reference", nil, func(r *composeUpdateResult) {
+			baseline(r, "web", "2").RunningReference = "nginx:1.26"
+		}, "site-web-2 drifted from the approved binding: running reference"},
+		{"target drifted to another configuration", nil, func(r *composeUpdateResult) {
+			baseline(r, "api", "1").ConfigurationDigest = hexOf("0")
+		}, "site-api-1 drifted from the approved binding: configuration"},
+		{"target reported under another frozen service", nil, func(r *composeUpdateResult) {
+			b := baseline(r, "api", "1")
+			b.Service, b.Replica = "web", "3"
+			ref := webAfter(r, "1").RunningReference
+			for i := range r.After {
+				if r.After[i].Service == "api" {
+					r.After[i].Service, r.After[i].Replica, r.After[i].RunningReference = "web", "3", ref
+				}
+			}
+			for i := range r.Pulled {
+				if r.Pulled[i].Service == "api" {
+					r.Pulled = append(r.Pulled[:i], r.Pulled[i+1:]...)
+					break
+				}
+			}
+		}, "reported under service web, bound to api"},
+
+		// The result must be about the bound Compose project.
+		{"result about another project", nil, func(r *composeUpdateResult) { r.Project = "other" }, "project other, not the bound project site"},
+
+		// A truncated after-snapshot is incomplete: never a pass.
+		{"truncated after-snapshot", nil, func(r *composeUpdateResult) { r.AfterTruncated = true }, "after-snapshot was truncated"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -196,7 +272,7 @@ func TestJudgeComposeUpdatePostchecks(t *testing.T) {
 			}
 			r := passingComposeResult(bu)
 			tc.mutate(&r)
-			v := judgeComposeUpdate(bu, r)
+			v := judgeComposeUpdate(bu, expectedRetained(bu, testUpdateExec), r)
 			if tc.finding == "" {
 				if !v.Passed || len(v.Findings) != 0 {
 					t.Fatalf("clean case failed: %v", v.Findings)
@@ -212,7 +288,7 @@ func TestJudgeComposeUpdatePostchecks(t *testing.T) {
 	// never passes this update postcheck.
 	rb := u.Clone()
 	rb.Kind = canonical.ContainerUpdateKindRollback
-	if v := judgeComposeUpdate(rb, passingComposeResult(u)); v.Passed {
+	if v := judgeComposeUpdate(rb, expectedRetained(u, testUpdateExec), passingComposeResult(u)); v.Passed {
 		t.Fatal("a rollback passed the update judge")
 	}
 }
@@ -255,10 +331,21 @@ func TestComposeResultParserRejectsHostileInput(t *testing.T) {
 		"bad pulled image":           mut(func(r *composeUpdateResult) { r.Pulled[0].ImageID = "x" }),
 		"bad retained tag":           mut(func(r *composeUpdateResult) { r.Retained[0].Tag = "latest" }),
 	}
+	cases["after_truncated not a bool"] = []byte(`{"format":"compose-update-v2","phase":"after_snapshot","project":"site","after_truncated":"yes"}`)
 	for name, b := range cases {
 		if _, err := parseComposeUpdateResult(b); !errors.Is(err, errComposeResult) {
 			t.Errorf("%s: accepted (%v)", name, err)
 		}
+	}
+	// cu02t's bounded after-snapshot marks a cut list with after_truncated.
+	truncated := passingComposeResult(testComposeUpdate())
+	truncated.AfterTruncated = true
+	b := mustResultJSON(t, truncated)
+	if !strings.Contains(string(b), `"after_truncated":true`) {
+		t.Fatalf("fixture does not carry the marker: %s", b)
+	}
+	if r, err := parseComposeUpdateResult(b); err != nil || !r.AfterTruncated {
+		t.Fatalf("truncated result: %+v %v", r.AfterTruncated, err)
 	}
 }
 
@@ -279,6 +366,9 @@ func TestRecreationCompletionStates(t *testing.T) {
 	noAfter := passingComposeResult(u)
 	noAfter.After, noAfter.Phase = nil, phaseRecreate
 	stopped := composeUpdateResult{Format: composeUpdateFormat, Phase: phaseResolve, Reason: "tag_moved", Baseline: passingComposeResult(u).Baseline}
+	truncated := passingComposeResult(u)
+	truncated.AfterTruncated = true
+	otherExec := passingComposeResultFor(u, "00000000-0000-4000-8000-000000000009")
 	cases := []struct {
 		name, class, state string
 		result             []byte
@@ -286,6 +376,8 @@ func TestRecreationCompletionStates(t *testing.T) {
 	}{
 		{"clean", hostrun.ClassSuccess, "recreated", pass, true, true},
 		{"verdict failed", hostrun.ClassSuccess, "partial", mustResultJSON(t, failing), false, true},
+		{"truncated after-snapshot is uncertain", hostrun.ClassSuccess, "uncertain", mustResultJSON(t, truncated), false, true},
+		{"retained under another execution's tag", hostrun.ClassSuccess, "partial", mustResultJSON(t, otherExec), false, true},
 		{"passing snapshot, failed class", hostrun.ClassScriptFailed, "partial", pass, false, true},
 		{"up failed, replica missing", hostrun.ClassScriptFailed, "partial", mustResultJSON(t, partialUp), false, true},
 		{"no after-snapshot", hostrun.ClassScriptFailed, "uncertain", mustResultJSON(t, noAfter), false, true},

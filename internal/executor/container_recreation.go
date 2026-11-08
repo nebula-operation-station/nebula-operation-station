@@ -203,12 +203,22 @@ func recreationCompletion(row executordb.ContainerRecreation, class string, resu
 		c.State = executordb.RecreationNotRecreated
 		c.Containers = recreationContainers(res.Baseline, res.Baseline)
 		c.Verdict.Findings = []string{"stopped in phase " + res.Phase + " (" + reasonText(res.Reason) + "); nothing was recreated"}
-		return c
+		return boundCompletion(c)
 	case res.After == nil:
 		c.Verdict.Findings = []string{"no after-snapshot; the recreation is uncertain"}
-		return c
+		return boundCompletion(c)
+	case res.AfterTruncated:
+		// An incomplete after-snapshot cannot say which containers exist:
+		// no per-container record is derived from it.
+		c.Verdict.Findings = []string{"the after-snapshot was truncated; the recreation is uncertain"}
+		return boundCompletion(c)
 	}
-	v := judgeComposeUpdate(u, res)
+	// The retained tag of each service is the one the intent row recorded.
+	retained := map[string]string{}
+	for _, img := range row.Images {
+		retained[img.Service] = img.RetainedTag
+	}
+	v := judgeComposeUpdate(u, retained, res)
 	c.Verdict = executordb.RecreationVerdict{Judged: true, Passed: v.Passed, Findings: boundFindings(v.Findings)}
 	c.Containers = recreationContainers(res.Baseline, res.After)
 	c.State = executordb.RecreationPartial
@@ -217,6 +227,38 @@ func recreationCompletion(row executordb.ContainerRecreation, class string, resu
 	} else if v.Passed {
 		c.Verdict.Passed = false
 		c.Verdict.Findings = append(c.Verdict.Findings, "the run's class is "+class+", not success")
+	}
+	return boundCompletion(c)
+}
+
+// boundCompletion keeps a completion within the row's column limits. A
+// baseline or container record over its limit (a host-controlled result
+// can be within the result limit and still produce one) is left out and
+// the row is completed as uncertain: an update without its baseline or
+// incarnations can be neither confirmed nor rolled back, and a completion
+// that cannot be stored would leave the row in intent to be judged again
+// on every reconcile pass.
+func boundCompletion(c executordb.RecreationCompletion) executordb.RecreationCompletion {
+	var over []string
+	if len(c.Baseline) > executordb.MaxRecreationBaselineBytes {
+		c.Baseline = nil
+		over = append(over, fmt.Sprintf("the baseline is over its %d-byte limit and was not recorded; no rollback is possible", executordb.MaxRecreationBaselineBytes))
+	}
+	if b, err := json.Marshal(c.Containers); err != nil || len(b) > executordb.MaxRecreationContainersBytes {
+		c.Containers = nil
+		over = append(over, fmt.Sprintf("the container record is over its %d-byte limit and was not recorded", executordb.MaxRecreationContainersBytes))
+	}
+	if len(over) == 0 {
+		return c
+	}
+	if c.State != executordb.RecreationNotRecreated {
+		// A stop before any recreate stays not_recreated: nothing changed.
+		c.State = executordb.RecreationUncertain
+	}
+	c.Verdict.Passed = false
+	c.Verdict.Findings = append(boundFindings(over), c.Verdict.Findings...)
+	if len(c.Verdict.Findings) > maxVerdictFindings+2 {
+		c.Verdict.Findings = c.Verdict.Findings[:maxVerdictFindings+2]
 	}
 	return c
 }

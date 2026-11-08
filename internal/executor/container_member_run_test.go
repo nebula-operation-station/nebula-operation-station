@@ -78,6 +78,13 @@ func (e *containerEnv) trust(t *testing.T, art []byte, version string) {
 	}
 }
 
+// nextExecution is the execution ID the next proposeContainer gives member
+// i, so a test can write the result of that run (with its retained tags)
+// before proposing.
+func (e *containerEnv) nextExecution(i int) string {
+	return fmt.Sprintf("00000000-0000-4000-8%03d-%012d", e.next+1, i+100)
+}
+
 // proposeContainer proposes and approves a one-stage plan of compose update
 // members, one per artifact, each on host with binding u, at the pinned
 // module version.
@@ -161,8 +168,12 @@ func TestContainerMemberRunsDurableWithFrozenBindingOnly(t *testing.T) {
 	e := newContainerEnv(t, "web-1")
 	art := e.script(t, "ok", 0)
 	u := testComposeUpdate()
-	e.writeResult(t, passingComposeResult(u))
+	exec := e.nextExecution(0)
+	e.writeResult(t, passingComposeResultFor(u, exec))
 	d, members := e.proposeContainer(t, "web-1", u, art)
+	if members[0].Request.ExecutionID != exec {
+		t.Fatalf("execution %s, the result was written for %s", members[0].Request.ExecutionID, exec)
+	}
 
 	resp, err := e.server.RunBatchMember(context.Background(), e.req(d, 0, "web-1", art))
 	if err != nil {
@@ -415,7 +426,7 @@ func TestContainerMemberRefusedWithUnpinnedArtifactOrVersion(t *testing.T) {
 		t.Fatal("the unpinned artifact ran")
 	}
 	// The pinned artifact at the pinned version runs (control).
-	e.writeResult(t, passingComposeResult(testComposeUpdate()))
+	e.writeResult(t, passingComposeResultFor(testComposeUpdate(), e.nextExecution(0)))
 	d, _ := e.proposeContainer(t, "web-1", testComposeUpdate(), pinned)
 	resp, err := e.server.RunBatchMember(context.Background(), e.req(d, 0, "web-1", pinned))
 	if err != nil || resp.GetOutcome() != pb.BatchMemberOutcome_BATCH_MEMBER_OUTCOME_SUCCESS {
