@@ -30,6 +30,7 @@ RUN groupadd --system --gid 10010 nebula-rpc \
  && useradd --system --uid 10004 --gid 10004 --groups nebula-rpc --home-dir /var/lib/nebula/pve --shell /usr/sbin/nologin nebula-pve-collector \
  && useradd --uid 10100 --gid 10100 --groups nebula-rpc --create-home --shell /bin/bash nebula-admin \
  && install -d -m 0755 /var/lib/nebula /etc/nebula \
+ && install -d -m 0755 -o root -g root /usr/share/nebula/release \
  && install -d -m 0700 -o nebula-executor -g nebula-executor /var/lib/nebula/executor /var/lib/nebula/executor/keys \
  && install -d -m 0750 -o nebula-server -g nebula-server /var/lib/nebula/server \
  && install -d -m 0755 /var/lib/nebula/discovery \

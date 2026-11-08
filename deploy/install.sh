@@ -52,6 +52,10 @@ Usage: install.sh --admin-users USER[,USER...] --rp-id HOST
                  under (lowercase hostname)
 
   --from-package  the .deb installed binaries and units; only configure
+  --release-bundle-dir DIR
+                 copy the three local release attachments from DIR
+                 (or NEBULA_RELEASE_BUNDLE_DIR); defaults to next to install.sh
+                 when any attachment is present; never downloads or verifies
 
 Both options are required. They are written into the systemd drop-in
 /etc/systemd/system/nebula-executor.service.d/10-local.conf, which
@@ -65,6 +69,7 @@ rp_id=""
 # (/lib/systemd/system); configure only users, directories, drop-ins and
 # server.json, then enable and start.
 from_package=0
+bundle_source_dir="${NEBULA_RELEASE_BUNDLE_DIR:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -92,6 +97,22 @@ while [[ $# -gt 0 ]]; do
       ;;
     --rp-id=*)
       rp_id="${1#*=}"
+      shift
+      ;;
+    --release-bundle-dir)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "install.sh: --release-bundle-dir requires a directory" >&2
+        exit 2
+      fi
+      bundle_source_dir="$2"
+      shift 2
+      ;;
+    --release-bundle-dir=*)
+      bundle_source_dir="${1#*=}"
+      if [[ -z "$bundle_source_dir" ]]; then
+        echo "install.sh: --release-bundle-dir requires a directory" >&2
+        exit 2
+      fi
       shift
       ;;
     --from-package)
@@ -178,6 +199,7 @@ admin_users_norm=$(IFS=','; printf '%s' "${admin_list[*]}")
 if [[ "${NEBULA_INSTALL_DRY_RUN:-0}" == "1" ]]; then
   echo "install.sh: dry run: options valid (admin users: ${admin_users_norm}; rp-id: ${rp_id})"
   echo "install.sh: dry run: would install binaries, units, the executor drop-in and the server config; no changes made"
+  echo "install.sh: dry run: would create /usr/share/nebula/release; release attachments source: ${bundle_source_dir:-adjacent attachments, if present}"
   exit 0
 fi
 
@@ -249,6 +271,65 @@ if [[ ! -d "${script_dir}/systemd" ]]; then
   exit 1
 fi
 # end: check layout
+
+# --- Local release attachments (spec 10; never embedded in packages) --------
+# begin: release bundle
+release_dir=/usr/share/nebula/release
+# Stage without following source symlinks, then inspect the private copies.
+# The executor verifies provenance; the installer only provisions the files.
+provision_release_bundle() (
+  set -euo pipefail
+  names=(release-manifest.json release-manifest.json.sig builtins.tar)
+  if [[ -L "$release_dir" || ( -e "$release_dir" && ! -d "$release_dir" ) ]]; then
+    echo "install.sh: release bundle destination must be a real directory: $release_dir" >&2
+    exit 1
+  fi
+  install -d -m 0755 -o root -g root -- "$release_dir"
+  if [[ -z "$bundle_source_dir" ]]; then
+    for name in "${names[@]}"; do
+      if [[ -e "$script_dir/$name" || -L "$script_dir/$name" ]]; then
+        bundle_source_dir="$script_dir"
+        break
+      fi
+    done
+  fi
+  if [[ -n "$bundle_source_dir" ]]; then
+    # A trailing slash would make -L inspect the link's target instead.
+    bundle_source_dir="${bundle_source_dir%"${bundle_source_dir##*[!/]}"}"
+    bundle_source_dir="${bundle_source_dir:-/}"
+    if [[ -L "$bundle_source_dir" || ! -d "$bundle_source_dir" ]]; then
+      echo "install.sh: release bundle source must be a real directory: $bundle_source_dir" >&2
+      exit 1
+    fi
+    stage=$(mktemp -d "$release_dir/.bundle.XXXXXXXX")
+    trap 'rm -rf -- "$stage"' EXIT
+    for name in "${names[@]}"; do
+      if [[ -L "$bundle_source_dir/$name" || ! -f "$bundle_source_dir/$name" ]]; then
+        echo "install.sh: release bundle requires three regular files; refusing $bundle_source_dir/$name" >&2
+        exit 1
+      fi
+      # cp -P preserves a link swapped in after the check, rather than reading
+      # its target. Only a regular staged copy may reach install(1).
+      cp --no-dereference --no-preserve=mode,ownership -T -- "$bundle_source_dir/$name" "$stage/$name"
+      if [[ -L "$stage/$name" || ! -f "$stage/$name" ]]; then
+        echo "install.sh: release bundle source changed; refusing $bundle_source_dir/$name" >&2
+        exit 1
+      fi
+      install -m 0644 -o root -g root -- "$stage/$name" "$stage/$name.ready"
+    done
+    for name in "${names[@]}"; do
+      # Rename replaces a destination symlink without touching its target.
+      mv -fT -- "$stage/$name.ready" "$release_dir/$name"
+    done
+    echo "install.sh: copied three release attachments to $release_dir; the executor verifies trust"
+  fi
+  if [[ ! -e "$release_dir/release-manifest.json" && ! -e "$release_dir/release-manifest.json.sig" && ! -e "$release_dir/builtins.tar" ]]; then
+    echo "install.sh: $release_dir is empty; built-in release provenance is not provisioned (expected for source/quickstart installs)."
+    echo "install.sh: the web banner 'Built-in trust status is unreachable' remains until the three matching release attachments are supplied. See guide section 8.2."
+  fi
+)
+provision_release_bundle
+# end: release bundle
 
 # --- Users and group (idempotent) ------------------------------------------
 if ! getent group "${group_name}" >/dev/null; then

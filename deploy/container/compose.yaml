@@ -34,6 +34,10 @@ services:
       - -admin-users=nebula-admin
       - -rp-id=${NEBULA_RP_ID:?set NEBULA_RP_ID}
       - -origin=https://${NEBULA_RP_ID}
+    # The image provides an empty /usr/share/nebula/release on the read-only
+    # root. To supply the three release attachments, add an executor bind:
+    #   - /srv/nebula/release:/usr/share/nebula/release:ro
+    # See admin guide section 8.2; never mount it read-write.
     volumes:
       - executor-data:/var/lib/nebula/executor
       - rpc:/run/nebula

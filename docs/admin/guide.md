@@ -635,9 +635,66 @@ directory must hold the new release's verified built-in bundle — exactly
 `release-manifest.json.sig` — taken from the locally verified NOS release,
 not a server-exported directory (a server directory alone is not proof of
 built-in provenance; neither the server nor the command can pass a path).
-If it is missing, the command fails and the web banner says the trust
-status is unreachable. The executor checks the bundle against the release
-trust root, then the command shows, action by action: the old and new version, the
+The directory is provisioned as follows; it is root-owned with mode 0755
+and is empty by default:
+
+| Install path | Where `/usr/share/nebula/release` comes from |
+| --- | --- |
+| Debian package | The package owns the empty directory; `install.sh --from-package` also ensures it exists. |
+| Release tarball | `deploy/install.sh` creates the directory on installation. |
+| Source / quickstart | The same installer creates the directory; a source build has no signed release attachments. |
+| Container | The image creates the directory, readable on the executor's read-only root. Mount an operator-provided bundle there read-only. |
+
+Packages, tarballs and images contain none of the three bundle files. The
+manifest records the exact hashes of the published payloads, so embedding
+it in those payloads would make it reference itself. Obtain the three
+separate attachments from the **same release** through your normal release
+verification procedure. Never generate a substitute manifest or signature
+for a source build.
+
+For a host install, put all three regular files beside `deploy/install.sh`
+before running it, or select a directory explicitly:
+
+```sh
+sudo ./deploy/install.sh --admin-users alice --rp-id nebula.lab.example.org \
+  --release-bundle-dir /path/to/release-attachments
+# For a package install, add --from-package and use
+# /usr/share/nebula/deploy/install.sh instead.
+```
+
+`NEBULA_RELEASE_BUNDLE_DIR` is the equivalent environment variable (pass it
+through `sudo env NEBULA_RELEASE_BUNDLE_DIR=/path/to/release-attachments ...`
+for quickstart). The option takes precedence. The installer copies only
+`release-manifest.json`, `release-manifest.json.sig` and `builtins.tar` as
+root:root 0644, refuses symlinks and incomplete sets, and never downloads
+attachments or verifies their trust. Without a source it preserves any
+existing bundle. To provision an already installed host, rerun the matching
+installer with the directory option, or place exactly those three regular
+files in `/usr/share/nebula/release` as root:root 0644.
+
+For Compose, prepare a root-owned directory such as `/srv/nebula/release`
+(mode 0755) with exactly the three attachments (root:root 0644). Add this
+bind mount under the **executor** service's `volumes` and recreate it:
+
+```yaml
+- /srv/nebula/release:/usr/share/nebula/release:ro
+```
+
+Keep `read_only: true` and the existing hardening settings. No mount is
+needed for an empty directory; it is already present in the image.
+
+While the directory is empty, `nebula artifact trust-builtins` fails and
+the web banner still says **Built-in trust status is unreachable**. This is
+expected on a source/quickstart install without release attachments: the
+built-in provenance input has not been provisioned. Creating the directory
+does not grant trust. If the message persists with all three attachments
+present, check their readability, matching release, and the executor's
+trust store and logs; the message can also indicate a bundle or store read
+failure. A distinct web state for an intentionally empty directory is not
+currently available.
+
+The executor checks the bundle against the release trust root, then the
+command shows, action by action: the old and new version, the
 first 12 hex characters of both hashes, the artifact SHA-256 that will be
 trusted, the risk, the full script diff and
 the executor Safety Scanner's findings. Each displayed diff line is cut at

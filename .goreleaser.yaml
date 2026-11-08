@@ -92,8 +92,36 @@ archives:
   - id: nebula
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
-      - src: deploy/**
+      # Allowlist deployment files so locally staged release attachments
+      # never enter a payload whose hash their manifest must record.
+      - src: deploy/*.sh
         dst: deploy/
+      - src: deploy/*.md
+        dst: deploy/
+      - src: deploy/systemd/*
+        dst: deploy/systemd/
+      - src: deploy/quickstart/*.sh
+        dst: deploy/quickstart/
+      - src: deploy/quickstart/*.txt
+        dst: deploy/quickstart/
+      - src: deploy/quickstart/*.md
+        dst: deploy/quickstart/
+      - src: deploy/quickstart/*.py
+        dst: deploy/quickstart/
+      - src: deploy/deb/postinst
+        dst: deploy/deb/postinst
+      - src: deploy/deb/prerm
+        dst: deploy/deb/prerm
+      - src: deploy/deb/*_test.go
+        dst: deploy/deb/
+      - src: deploy/container/Dockerfile
+        dst: deploy/container/Dockerfile
+      - src: deploy/container/compose.yaml
+        dst: deploy/container/compose.yaml
+      - src: deploy/container/server.json
+        dst: deploy/container/server.json
+      - src: deploy/apt/*.md
+        dst: deploy/apt/
 
 # The .deb (decision 4 of the M10 plan): binaries, units and deploy/ for
 # `install.sh --from-package`; the APT repository is built and signed
@@ -113,6 +141,11 @@ nfpms:
     bindir: /usr/bin
     recommends: [nmap]
     contents:
+      # The signed manifest and bundle are separate release attachments:
+      # embedding them would make the manifest reference its own payload.
+      - dst: /usr/share/nebula/release
+        type: dir
+        file_info: {mode: 0755, owner: root, group: root}
       - src: deploy/systemd/nebula-executor.service
         dst: /lib/systemd/system/nebula-executor.service
       - src: deploy/systemd/nebula-server.service
