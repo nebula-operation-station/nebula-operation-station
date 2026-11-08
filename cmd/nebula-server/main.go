@@ -426,6 +426,12 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		Audit:          audit,
 		Repin:          exec,
 		Enroll:         exec,
+		// Typed guest power and snapshots (ADR 0006 P2-01, WA-05): the
+		// server proposes, relays the user's security key assertion and
+		// commits; the executor dispatches only an approved permit at its
+		// own risk floor (decision WA-05 variant (a), 2026-11-07).
+		GuestPower:    exec,
+		GuestSnapshot: exec,
 		// Deployments (ADR 0008 section 6, PV-08): provisioning on the
 		// executor, enrollment through the PV-06 join flow, the static
 		// address from the IPAM. The staged plan (bootstrap modules,

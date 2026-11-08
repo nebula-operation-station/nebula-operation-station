@@ -25,7 +25,9 @@ func (c *Client) ProposePVEGuestPower(ctx context.Context, in *pb.ProposePVEGues
 	return resp, mapCallError(ctx, err)
 }
 
-// CommitPVEGuestPower runs an approved guest power action (admin role).
+// CommitPVEGuestPower runs an approved guest power action (server and
+// admin roles, decision WA-05 variant (a); the executor requires the
+// approved permit).
 // It waits for the PVE task, so it gets a longer timeout.
 func (c *Client) CommitPVEGuestPower(ctx context.Context, in *pb.CommitPVEGuestPowerRequest, opts ...grpc.CallOption) (*pb.CommitPVEGuestPowerResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout+pveGuestPowerCommitWait)

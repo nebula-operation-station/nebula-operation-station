@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
@@ -412,9 +413,8 @@ func TestContainerMemberRefusedWithUnpinnedArtifactOrVersion(t *testing.T) {
 	}
 }
 
-// The executor as shipped pins no binding-consuming artifact, so even a
-// trusted 2.0.0 artifact is refused: no compose update member runs until the
-// artifact that recreates the frozen definition exists and is pinned.
+// The executor as shipped pins only the shipped 2.0.0 script, so another
+// trusted 2.0.0 artifact is refused and never runs.
 func TestShippedExecutorRefusesContainerMembers(t *testing.T) {
 	e := newContainerEnv(t, "web-1")
 	if len(e.svc.batchRun.composePins) != 1 || e.svc.batchRun.composePins[0] != shippedComposeUpdatePin() {
@@ -428,6 +428,70 @@ func TestShippedExecutorRefusesContainerMembers(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(e.dir, "params-shipped.json")); err == nil {
 		t.Fatal("an unpinned artifact ran")
+	}
+}
+
+// The shipped docker.compose_update 2.0.0 artifact, with nothing but the
+// shipped pin, runs end-to-end over RunBatchMember: claimed, dispatched as a
+// durable job with the rendered binding, executed on the host and
+// reconciled. The test host is no prepared Docker host (no root, no salt,
+// none of the bound containers), so the script stops in its precheck with
+// its typed v2 result and changes nothing. The same artifact under 1.0.0 or
+// another version, and the inspect-based 1.0.0 script, are refused before
+// the claim.
+func TestShippedComposeUpdateArtifactRunsOverRunBatchMember(t *testing.T) {
+	e := newContainerEnv(t, "web-1")
+	if len(e.svc.batchRun.composePins) != 1 || e.svc.batchRun.composePins[0] != shippedComposeUpdatePin() {
+		t.Fatalf("pins %+v", e.svc.batchRun.composePins)
+	}
+	a, ok := actions.Lookup(composeUpdateAction)
+	if !ok {
+		t.Fatal("docker.compose_update missing")
+	}
+	art := a.Script
+	v1 := composeUpdateV1(t)
+	for _, v := range []string{composeUpdateVersion, "1.0.0", "2.0.1"} {
+		e.trust(t, art, v)
+	}
+	e.trust(t, v1, "1.0.0")
+	for _, c := range []struct {
+		version string
+		art     []byte
+	}{{"1.0.0", art}, {"2.0.1", art}, {"1.0.0", v1}} {
+		d, members := e.proposeContainerVersion(t, "web-1", c.version, testComposeUpdate(), c.art)
+		_, err := e.server.RunBatchMember(context.Background(), e.req(d, 0, "web-1", c.art))
+		if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), errContainerArtifact.Error()) {
+			t.Fatalf("%s: err = %v, want refused for its artifact", c.version, err)
+		}
+		if _, err := e.db.GetRun(members[0].Request.ExecutionID, "web-1"); err == nil {
+			t.Fatalf("%s: a refused member left a run", c.version)
+		}
+	}
+
+	d, members := e.proposeContainer(t, "web-1", testComposeUpdate(), art)
+	resp, err := e.server.RunBatchMember(context.Background(), e.req(d, 0, "web-1", art))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(resp.GetResult(), &result); err != nil {
+		t.Fatalf("result %q: %v (%+v)", resp.GetResult(), err, resp)
+	}
+	if resp.GetOutcome() != pb.BatchMemberOutcome_BATCH_MEMBER_OUTCOME_FAILURE || resp.GetClass() != hostrun.ClassPrecheckFailed ||
+		result["format"] != "compose-update-v2" || result["phase"] != "precheck" || result["reason"] == "" || result["reason"] == "binding_invalid" {
+		t.Fatalf("response %+v result %v", resp, result)
+	}
+	t.Logf("the shipped artifact stopped in its precheck: %v", result["reason"])
+	if e.attached.count() != 0 {
+		t.Fatal("the member ran attached")
+	}
+	run, err := e.db.GetRun(members[0].Request.ExecutionID, "web-1")
+	if err != nil || run.State != executordb.RunFinished || run.Class != hostrun.ClassPrecheckFailed || run.MemberID != "member-0" ||
+		run.ActionID != composeUpdateAction || run.Timeout != containerMutationTimeout {
+		t.Fatalf("run %+v %v", run, err)
+	}
+	if held := e.svc.HeldBatchTargets(); len(held) != 0 {
+		t.Fatalf("target still held: %+v", held)
 	}
 }
 

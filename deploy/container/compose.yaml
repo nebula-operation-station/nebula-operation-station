@@ -84,7 +84,9 @@ services:
     depends_on: [executor]
     # The collector has no network listener and no capabilities: it only
     # reaches the executor socket (on the shared rpc volume) and the spool.
-    # No cap_add, no host network — the default bridge is unused.
+    # No cap_add, no host network — network_mode: none removes even the
+    # default bridge, matching the unit's AF_UNIX-only grant.
+    network_mode: none
     command:
       - nebula-pve-collector
       - -socket=/run/nebula/executor.sock

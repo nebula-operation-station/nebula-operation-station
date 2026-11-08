@@ -630,12 +630,14 @@ func TestDispatchGuestPowerStepCallsTypedWriter(t *testing.T) {
 	}
 }
 
-// TestMethodRolesGuestPower: the server may propose a power action, only
-// the admin commits (dispatches) it.
+// TestMethodRolesGuestPower: the server and the admin may propose and
+// commit (dispatch) a power action (decision WA-05 variant (a),
+// 2026-11-07, like guest provisioning); the executor runs only a permit
+// approved under the normal approval semantics.
 func TestMethodRolesGuestPower(t *testing.T) {
 	want := map[string][]peercred.Role{
 		pb.ExecutorService_ProposePVEGuestPower_FullMethodName: {peercred.RoleServer, peercred.RoleAdmin},
-		pb.ExecutorService_CommitPVEGuestPower_FullMethodName:  {peercred.RoleAdmin},
+		pb.ExecutorService_CommitPVEGuestPower_FullMethodName:  {peercred.RoleServer, peercred.RoleAdmin},
 	}
 	roles := MethodRoles()
 	for method, w := range want {

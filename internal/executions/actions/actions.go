@@ -151,11 +151,6 @@ var containerRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 
 var containerParam = []Param{{Name: "container", Label: "Container (name or ID)", Pattern: containerRe}}
 
-// projectRe is a Compose project name (docker compose's own rule).
-var projectRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,99}$`)
-
-var projectParam = []Param{{Name: "project", Label: "Compose project", Pattern: projectRe}}
-
 // imageRe is a digest-pinned image reference (repo@sha256:…): the scan
 // target is immutable, and no tag lookup or pull is possible.
 var imageRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._/:-]{0,254}@sha256:[0-9a-f]{64}$`)
@@ -232,7 +227,12 @@ var dockerLogs []byte
 //go:embed scripts/docker_inspect.sh
 var dockerInspect []byte
 
-//go:embed scripts/docker_compose_update.sh
+// dockerComposeUpdate is docker.compose_update 2.0.0, the binding-consuming
+// recreate of container update plan cu02. Its SHA-256 is pinned in the
+// executor (internal/executor, composeUpdateArtifactSHA256), so a change of
+// these bytes needs a reviewed pin update.
+//
+//go:embed scripts/docker_compose_update_v2.sh
 var dockerComposeUpdate []byte
 
 //go:embed scripts/docker_check_updates.sh
@@ -379,9 +379,9 @@ var Builtin = []Action{
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 10 * time.Minute, ReadOnly: true, Script: imageVulns, Params: imageParam, Retry: RetrySafe,
 	},
 	{
-		ID: "docker.compose_update", Version: "1.0.0", Title: "Update Compose project",
-		Description: "Manual update of one Compose project, as a durable job: docker compose pull, then up -d, with the containers listed before and after (postflight: running containers, health, published ports, count). Nothing else is changed.",
-		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Durable: true, Timeout: 30 * time.Minute, Script: dockerComposeUpdate, Params: projectParam, Retry: RetryReconcileFirst,
+		ID: "docker.compose_update", Version: "2.0.0", Title: "Update Compose project",
+		Description: "Batch member only, as a durable job: recreates exactly the frozen update binding of one Compose project. Prechecks the bound containers, configuration and source digests, the NOS override and the applied configuration; resolves each new tag against the bound digests; pulls by digest only (no registry login); keeps the old image as nos-retained; then up -d --no-deps for the frozen services, with a baseline and an after-snapshot. Needs root, python3 and curl, and docker.update_prepare once per host.",
+		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Durable: true, Timeout: 30 * time.Minute, Script: dockerComposeUpdate, Retry: RetryReconcileFirst,
 	},
 	{
 		ID: "docker.start", Version: "1.0.0", Title: "Start container", Description: "docker start of one container (docker group or sudo); nothing is recreated or pulled.",
