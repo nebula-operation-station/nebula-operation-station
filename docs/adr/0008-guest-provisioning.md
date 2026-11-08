@@ -1100,13 +1100,22 @@ unnecessary").
    remains on node, rotate/destroy", audited as
    `guest_hostkey_cleanup_acknowledged`. The flag clears only when every
    cleanup step the run still owes is confirmed, that is the snippet
-   removal (stat shows absent) and, whenever the regenerate is owed
-   (failed, refused, `unknown` or never dispatched), the regenerate
-   confirmed OK, or when the acknowledgement is recorded (previously
-   "when removal is confirmed (stat shows absent)", which cleared a run
-   flagged for the regenerate once only the snippet was gone). A run
-   whose regenerate cannot run because the VMID proof no longer matches
-   clears only by acknowledgement.
+   removal (stat shows absent) and, whenever the regenerate is owed and
+   not yet confirmed (failed, refused, `unknown` or never dispatched),
+   the regenerate confirmed OK, or when the acknowledgement is recorded
+   (previously "when removal is confirmed (stat shows absent)", which
+   cleared a run flagged for the regenerate once only the snippet was
+   gone). A regenerate is owed only once the config step set `cicustom`,
+   matching failure cleanup ("clear `cicustom` if set, then regenerate"):
+   the config step resolved OK, or its outcome is `unknown` or an outcome
+   conflict, which counts as set (fail closed). A run that failed before
+   the config step set `cicustom` (for example a failed or refused clone,
+   with no VMID proof and no drive, or a config step resolved failed)
+   owes no regenerate and clears on the normal removal path, snippet stat
+   absent (previously a regenerate counted as owed whenever it was never
+   dispatched, so such a run owed a regenerate that can never run and
+   could clear only by acknowledgement). A run that owes the regenerate
+   but whose VMID proof no longer matches clears only by acknowledgement.
 8. **Audit.** Executor events `guest_hostkey_generated`,
    `guest_hostkey_snippet_written`, `guest_hostkey_snippet_replaced`,
    `guest_hostkey_pinned`, `guest_hostkey_rotated`,
