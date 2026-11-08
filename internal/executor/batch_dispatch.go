@@ -450,6 +450,12 @@ func (s *Service) RunBatchMember(ctx context.Context, req *pb.RunBatchMemberRequ
 			"detail", errPreviewTransport.Error())
 		return nil, previewStatus(errPreviewTransport)
 	}
+	// Prepare is classic and durable only as well (update_prepare.go).
+	if isUpdatePrepare(member.Request.ActionID) {
+		s.log.Warn("audit", "kind", "batch_member_refused", "batch", d.String(), "member", member.MemberID, "host", target.HostID,
+			"detail", errPrepareTransport.Error())
+		return nil, prepareStatus(errPrepareTransport)
+	}
 	durable := isContainerMember(member)
 	if durable {
 		if err := checkContainerMember(member, ap.Parameters[index], x.composePins...); err != nil {

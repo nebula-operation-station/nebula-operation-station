@@ -226,6 +226,13 @@ func (s *Service) ProposeExecution(_ context.Context, req *pb.ProposeExecutionRe
 			return nil, previewStatus(err)
 		}
 	}
+	// Prepare (it writes the host's salt) only for its pinned artifact and
+	// never below MEDIUM (update_prepare.go).
+	if isUpdatePrepare(r.ActionID) {
+		if err := checkPrepareProposal(r); err != nil {
+			return nil, prepareStatus(err)
+		}
+	}
 	// The Safety Scanner sees the bytes before the risk is decided.
 	if art := req.GetArtifact(); len(art) > 0 {
 		sum, err := s.auth.ObserveArtifact(art)

@@ -247,6 +247,15 @@ var dockerCheckUpdates []byte
 //go:embed scripts/docker_update_preview.sh
 var dockerUpdatePreview []byte
 
+// dockerUpdatePrepare is docker.update_prepare 1.0.0, which creates the
+// per-host salt of the keyed digests (container update plan cu02, Q5). Its
+// SHA-256 is pinned in the executor (internal/executor,
+// updatePrepareArtifactSHA256), so a change of these bytes needs a
+// reviewed pin update.
+//
+//go:embed scripts/docker_update_prepare.sh
+var dockerUpdatePrepare []byte
+
 // targetTagsRe is the character gate of docker.update_preview's
 // target_tags parameter; targetTagsValidate applies the list rules.
 var targetTagsRe = regexp.MustCompile(`^[A-Za-z0-9_.,-]*$`)
@@ -431,6 +440,11 @@ var Builtin = []Action{
 		Description: "Durable and read-only: for every Compose project and standalone container, the container identities, keyed configuration and source digests, image and platform digests, the dependency graph and why a unit cannot be updated (override_drift, config_not_applied, scale_mismatch, ...). Resolves the current and the given target tags anonymously; pulls nothing and writes nothing on the host. Needs root, python3 and curl, and docker.update_prepare once per host.",
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Durable: true, Timeout: 5 * time.Minute, ReadOnly: true, Script: dockerUpdatePreview,
 		Params: targetTagsParam, Validate: targetTagsValidate, Retry: RetryReconcileFirst,
+	},
+	{
+		ID: "docker.update_prepare", Version: "1.0.0", Title: "Prepare container updates",
+		Description: "Durable, once per host: creates the root-only per-host salt that keys the configuration and source digests of docker.update_preview and docker.compose_update, if it is absent. Never replaces or shows an existing salt and touches no container. Reports created or present. Needs root and python3.",
+		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Durable: true, Timeout: 2 * time.Minute, Script: dockerUpdatePrepare, Retry: RetryReconcileFirst,
 	},
 	{
 		ID: "docker.start", Version: "1.0.0", Title: "Start container", Description: "docker start of one container (docker group or sudo); nothing is recreated or pulled.",
