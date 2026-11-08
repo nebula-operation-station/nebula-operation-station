@@ -523,6 +523,19 @@ service ExecutorService {
   // credential under a read grant. Never pulls manifests bodies or layers;
   // results are sanitized; lock, rotation and expiry pause reads.
   rpc ReadPrivateRegistry(ReadPrivateRegistryRequest) returns (ReadPrivateRegistryResponse);
+
+  // Standalone container definitions (ADR 0006 P2-03, container updates
+  // cu05). Role: admin only. A definition holds env values and enters the
+  // executor vault here; it never leaves the executor: no response, result
+  // or log carries its content or a digest of it. Each Put stores a new
+  // version as its own write-once vault secret and keeps the earlier ones.
+  // Remove and dropping a version are refused while a container recreation
+  // in intent or inside its rollback window references the version.
+  rpc PutContainerDefinition(PutContainerDefinitionRequest) returns (PutContainerDefinitionResponse);
+  rpc RemoveContainerDefinition(RemoveContainerDefinitionRequest) returns (RemoveContainerDefinitionResponse);
+  // Metadata only: host, container name, definition ID, version, author
+  // and time.
+  rpc ListContainerDefinitions(ListContainerDefinitionsRequest) returns (ListContainerDefinitionsResponse);
 }
 
 enum RiskClass {
@@ -3014,4 +3027,64 @@ message ReadPrivateRegistryResponse {
   // The configuration and credential versions the read used.
   int64 config_version = 8;
   int64 credential_version = 9;
+}
+
+// PutContainerDefinitionRequest is the operator's exact `docker create`
+// argument list for one standalone container, which NOS completes only
+// with the image. Every option has the form --flag=value; --name must name
+// the container exactly once; env values go only in env (never --env or
+// --env-file) and may not contain a newline, carriage return or NUL; a
+// published port must fix its host port. Options and command stay on the
+// host's command line and must hold no secret.
+message PutContainerDefinitionRequest {
+  string host_id = 1;
+  string container_name = 2;
+  repeated string options = 3;
+  repeated string command = 4;
+  repeated ContainerDefinitionEnv env = 5;
+}
+
+// ContainerDefinitionEnv is one environment variable; value is secret.
+message ContainerDefinitionEnv {
+  string name = 1;
+  string value = 2;
+}
+
+message PutContainerDefinitionResponse {
+  ContainerDefinitionInfo definition = 1;
+}
+
+message RemoveContainerDefinitionRequest {
+  string host_id = 1;
+  string container_name = 2;
+  // 0 removes every version; otherwise the one older version to drop (the
+  // newest version is only removed with the whole definition).
+  uint64 version = 3;
+}
+
+message RemoveContainerDefinitionResponse {
+  // The versions removed.
+  repeated uint64 versions = 1;
+}
+
+message ListContainerDefinitionsRequest {
+  // Empty lists every host.
+  string host_id = 1;
+}
+
+message ListContainerDefinitionsResponse {
+  repeated ContainerDefinitionInfo definitions = 1;
+}
+
+// ContainerDefinitionInfo is the metadata of one stored version. It never
+// carries the content or a digest of it.
+message ContainerDefinitionInfo {
+  string host_id = 1;
+  string container_name = 2;
+  string definition_id = 3;
+  uint64 version = 4;
+  string created_by = 5;
+  int64 created_at_unix = 6;
+  // True for the newest version, the one a new update binds.
+  bool latest = 7;
 }

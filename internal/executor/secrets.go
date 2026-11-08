@@ -25,6 +25,14 @@ func (s *Service) runSecrets(parametersJSON []byte) ([]hostrun.Secret, error) {
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "parameters: "+err.Error())
 	}
+	// A container definition holds env values and never leaves the
+	// executor through a run's own parameters; only the executor itself
+	// adds it to a container update run, from the bound definition (cu05b).
+	for _, id := range refs {
+		if executordb.IsContainerDefinitionSecretID(id) {
+			return nil, status.Error(codes.InvalidArgument, "parameters: container definition secrets cannot be named in nebula_secrets")
+		}
+	}
 	return s.openSecrets(refs)
 }
 

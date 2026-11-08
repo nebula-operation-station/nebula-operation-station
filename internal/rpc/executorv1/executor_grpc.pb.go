@@ -132,6 +132,9 @@ const (
 	ExecutorService_RemovePrivateRegistry_FullMethodName           = "/nebula.executor.v1.ExecutorService/RemovePrivateRegistry"
 	ExecutorService_ListPrivateRegistries_FullMethodName           = "/nebula.executor.v1.ExecutorService/ListPrivateRegistries"
 	ExecutorService_ReadPrivateRegistry_FullMethodName             = "/nebula.executor.v1.ExecutorService/ReadPrivateRegistry"
+	ExecutorService_PutContainerDefinition_FullMethodName          = "/nebula.executor.v1.ExecutorService/PutContainerDefinition"
+	ExecutorService_RemoveContainerDefinition_FullMethodName       = "/nebula.executor.v1.ExecutorService/RemoveContainerDefinition"
+	ExecutorService_ListContainerDefinitions_FullMethodName        = "/nebula.executor.v1.ExecutorService/ListContainerDefinitions"
 )
 
 // ExecutorServiceClient is the client API for ExecutorService service.
@@ -542,6 +545,18 @@ type ExecutorServiceClient interface {
 	// credential under a read grant. Never pulls manifests bodies or layers;
 	// results are sanitized; lock, rotation and expiry pause reads.
 	ReadPrivateRegistry(ctx context.Context, in *ReadPrivateRegistryRequest, opts ...grpc.CallOption) (*ReadPrivateRegistryResponse, error)
+	// Standalone container definitions (ADR 0006 P2-03, container updates
+	// cu05). Role: admin only. A definition holds env values and enters the
+	// executor vault here; it never leaves the executor: no response, result
+	// or log carries its content or a digest of it. Each Put stores a new
+	// version as its own write-once vault secret and keeps the earlier ones.
+	// Remove and dropping a version are refused while a container recreation
+	// in intent or inside its rollback window references the version.
+	PutContainerDefinition(ctx context.Context, in *PutContainerDefinitionRequest, opts ...grpc.CallOption) (*PutContainerDefinitionResponse, error)
+	RemoveContainerDefinition(ctx context.Context, in *RemoveContainerDefinitionRequest, opts ...grpc.CallOption) (*RemoveContainerDefinitionResponse, error)
+	// Metadata only: host, container name, definition ID, version, author
+	// and time.
+	ListContainerDefinitions(ctx context.Context, in *ListContainerDefinitionsRequest, opts ...grpc.CallOption) (*ListContainerDefinitionsResponse, error)
 }
 
 type executorServiceClient struct {
@@ -1662,6 +1677,36 @@ func (c *executorServiceClient) ReadPrivateRegistry(ctx context.Context, in *Rea
 	return out, nil
 }
 
+func (c *executorServiceClient) PutContainerDefinition(ctx context.Context, in *PutContainerDefinitionRequest, opts ...grpc.CallOption) (*PutContainerDefinitionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PutContainerDefinitionResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_PutContainerDefinition_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) RemoveContainerDefinition(ctx context.Context, in *RemoveContainerDefinitionRequest, opts ...grpc.CallOption) (*RemoveContainerDefinitionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RemoveContainerDefinitionResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_RemoveContainerDefinition_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ListContainerDefinitions(ctx context.Context, in *ListContainerDefinitionsRequest, opts ...grpc.CallOption) (*ListContainerDefinitionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListContainerDefinitionsResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ListContainerDefinitions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExecutorServiceServer is the server API for ExecutorService service.
 // All implementations must embed UnimplementedExecutorServiceServer
 // for forward compatibility.
@@ -2070,6 +2115,18 @@ type ExecutorServiceServer interface {
 	// credential under a read grant. Never pulls manifests bodies or layers;
 	// results are sanitized; lock, rotation and expiry pause reads.
 	ReadPrivateRegistry(context.Context, *ReadPrivateRegistryRequest) (*ReadPrivateRegistryResponse, error)
+	// Standalone container definitions (ADR 0006 P2-03, container updates
+	// cu05). Role: admin only. A definition holds env values and enters the
+	// executor vault here; it never leaves the executor: no response, result
+	// or log carries its content or a digest of it. Each Put stores a new
+	// version as its own write-once vault secret and keeps the earlier ones.
+	// Remove and dropping a version are refused while a container recreation
+	// in intent or inside its rollback window references the version.
+	PutContainerDefinition(context.Context, *PutContainerDefinitionRequest) (*PutContainerDefinitionResponse, error)
+	RemoveContainerDefinition(context.Context, *RemoveContainerDefinitionRequest) (*RemoveContainerDefinitionResponse, error)
+	// Metadata only: host, container name, definition ID, version, author
+	// and time.
+	ListContainerDefinitions(context.Context, *ListContainerDefinitionsRequest) (*ListContainerDefinitionsResponse, error)
 	mustEmbedUnimplementedExecutorServiceServer()
 }
 
@@ -2412,6 +2469,15 @@ func (UnimplementedExecutorServiceServer) ListPrivateRegistries(context.Context,
 }
 func (UnimplementedExecutorServiceServer) ReadPrivateRegistry(context.Context, *ReadPrivateRegistryRequest) (*ReadPrivateRegistryResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReadPrivateRegistry not implemented")
+}
+func (UnimplementedExecutorServiceServer) PutContainerDefinition(context.Context, *PutContainerDefinitionRequest) (*PutContainerDefinitionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PutContainerDefinition not implemented")
+}
+func (UnimplementedExecutorServiceServer) RemoveContainerDefinition(context.Context, *RemoveContainerDefinitionRequest) (*RemoveContainerDefinitionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RemoveContainerDefinition not implemented")
+}
+func (UnimplementedExecutorServiceServer) ListContainerDefinitions(context.Context, *ListContainerDefinitionsRequest) (*ListContainerDefinitionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListContainerDefinitions not implemented")
 }
 func (UnimplementedExecutorServiceServer) mustEmbedUnimplementedExecutorServiceServer() {}
 func (UnimplementedExecutorServiceServer) testEmbeddedByValue()                         {}
@@ -4432,6 +4498,60 @@ func _ExecutorService_ReadPrivateRegistry_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_PutContainerDefinition_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PutContainerDefinitionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).PutContainerDefinition(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_PutContainerDefinition_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).PutContainerDefinition(ctx, req.(*PutContainerDefinitionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_RemoveContainerDefinition_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveContainerDefinitionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).RemoveContainerDefinition(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_RemoveContainerDefinition_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).RemoveContainerDefinition(ctx, req.(*RemoveContainerDefinitionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ListContainerDefinitions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListContainerDefinitionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ListContainerDefinitions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ListContainerDefinitions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ListContainerDefinitions(ctx, req.(*ListContainerDefinitionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ExecutorService_ServiceDesc is the grpc.ServiceDesc for ExecutorService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -4882,6 +5002,18 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReadPrivateRegistry",
 			Handler:    _ExecutorService_ReadPrivateRegistry_Handler,
+		},
+		{
+			MethodName: "PutContainerDefinition",
+			Handler:    _ExecutorService_PutContainerDefinition_Handler,
+		},
+		{
+			MethodName: "RemoveContainerDefinition",
+			Handler:    _ExecutorService_RemoveContainerDefinition_Handler,
+		},
+		{
+			MethodName: "ListContainerDefinitions",
+			Handler:    _ExecutorService_ListContainerDefinitions_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
