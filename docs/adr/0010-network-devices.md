@@ -3,6 +3,8 @@
 Status: proposed (draft by Claude for maintainer review), 2026-11-08. Awaiting
 the maintainer's answers to the open questions at the end. Before
 acceptance only the lab verification ND-03 may run; no code is written.
+Revised after review round 1 (keyed config digests, PAN-OS allowlist, CBS
+reload precondition, object edits under the path rule, parse limits).
 
 ## Context
 
@@ -400,7 +402,7 @@ digest of any candidate text.
 | VLANs | `ipam.Network.VLAN`: switch VLAN IDs and names are shown next to IPAM networks; mismatch (VLAN on the switch without an IPAM network, or the reverse) is a hint, never an automatic edit |
 | MAC table | ADR 0009 observed endpoints (`internal/trafficstore` endpoints, `internal/trafficingest`): MAC → switch port and VLAN, tier "switch", reporter = device; IPAM `Seen`-style hints for addresses |
 | LLDP | ADR 0009 "LLDP switch-port mapping": which managed host or PVE node (`internal/trafficstore/guestnics.go` bridge data) sits on which port; uplinks between switches; source-labelled, never a placement |
-| Firewall zones and interfaces | traffic map zones and the hop of ADR 0009 D3 (the firewall becomes the named gateway node of `192.168.0.0/24`) |
+| Firewall zones and interfaces | traffic map zones and the hop of ADR 0009 D3 (the firewall becomes the named gateway node of `<lab-net>`) |
 | Firewall rules | a new read-only firewall page; later possibly ADR 0009 segmentation hints, which are a separate decision |
 
 Neighbor data from LLDP is doubly untrusted: any device on any port can send
@@ -456,8 +458,8 @@ revision. Rules for every change:
 | Shut / no shut an access port | CBS | MEDIUM on an edge port, HIGH otherwise |
 | Add or remove a VLAN on a trunk's allowed list | CBS | HIGH |
 | Persist running to startup config (`copy running-config startup-config`, *verify* prompt) | CBS | MEDIUM, separate approval bound to the verified `raw_digest` |
-| Add / edit an address object or group not referenced by any rule | PAN-OS | MEDIUM |
-| Edit an address object or group referenced by a rule | PAN-OS | HIGH |
+| Add / edit an address object or group not referenced by any rule, before or after the change (also not through nested groups or a dynamic group tag match) | PAN-OS | MEDIUM |
+| Edit an address object or group referenced by a rule (directly, through nested groups, or through a dynamic group whose filter matches its tags) | PAN-OS | HIGH; CRITICAL through the path rule below |
 | Add a security rule at an exact position | PAN-OS | HIGH |
 | Disable / enable a security rule | PAN-OS | HIGH |
 | Move a security rule to an exact position | PAN-OS | HIGH |
@@ -475,10 +477,27 @@ revision. Rules for every change:
   switch on NOS's path was learned in the last 24 h; the management VLAN or
   the switch's own IP interface; any firewall rule change whose source or
   destination overlaps the NOS machine's addresses, the management
-  networks of devices or the path from NOS to managed hosts (Q4); moving or
-  adding a deny/drop rule above a rule that allows that traffic. If the MAC
-  table or LLDP data needed to decide is stale or missing, the floor is
-  CRITICAL.
+  networks of devices or the path from NOS to managed hosts (Q4) (the
+  **NOS path**); disabling a rule that allows NOS-path traffic; moving,
+  adding or enabling a deny/drop rule above a rule that allows NOS-path
+  traffic. A deny
+  above an allow that does not carry NOS-path traffic is not raised by this
+  rule. If the MAC table, LLDP data or firewall policy needed to decide is
+  stale, incomplete or missing, the floor is CRITICAL.
+- **Object edits go through the rules that use them** (previously: a
+  referenced object edit was fixed at HIGH). An address object, address
+  group or service object/group changes the effective match of every rule
+  that references it. For such an edit the executor, from its own fresh read
+  bound by the precheck digest, finds every security and NAT rule that
+  references the object directly, through nested groups (to the group depth
+  limit), or through a dynamic address group whose tag filter matches the
+  object before or after the edit (a tag edit is an edit of every such
+  group). For each referencing rule it evaluates the match with the old and
+  the new object value; if either overlaps the NOS path, the edit is
+  CRITICAL. An object whose addresses NOS cannot evaluate (FQDN objects,
+  external dynamic lists, unresolvable references, depth limit reached)
+  counts as overlapping. Only an object that no rule references, directly
+  or indirectly, keeps the MEDIUM base.
 - Risk is the maximum of operation base, port role, device criticality
   (executor-owned, default HIGH for firewalls) and the path rule above.
 - **CRITICAL in phase 2a is refused**, as ADR 0006 does for containers. Phase
@@ -498,9 +517,19 @@ admin out, or that need secrets.
 
 1. Precheck (D5). Store durable intent.
 2. If the change is CRITICAL (phase 2b only) and `reload in <minutes>`
-   exists on the firmware (*verify*), arm it first. The startup config is
-   untouched, so a reload restores the pre-change state on the device
-   itself, without NOS.
+   exists on the firmware (*verify*), arm it first. A reload restores the
+   pre-change state only if the startup config **is** the pre-change state,
+   so before arming the executor requires, from one fresh read of both
+   configs:
+   - the running `raw_digest` equals the bound pre-change digest, and
+   - the startup config's keyed digest equals the running one (running ==
+     startup after normalization; previously assumed, not checked).
+   If running differs from startup (unsaved earlier or foreign changes), the
+   CRITICAL change is refused; the admin first persists or reverts that
+   state through its own approval and proposes again. After arming, the
+   executor confirms the timer is pending (`show reload`, *verify*) and
+   re-reads running and startup; if either changed, it cancels the reload
+   and aborts without sending any change line.
 3. Enter `configure`, send the exact bound lines, `end`. The startup config
    is **never** written in the same permit.
 4. Read the running config again. Success means `raw_digest` equals the
@@ -510,8 +539,11 @@ admin out, or that need secrets.
    records). Postchecks: the device is reachable, port state and VLAN as
    expected, NOS still reaches its own path (gateway ARP, the switch).
 5. CRITICAL: `reload cancel` (*verify*) only after the postchecks pass and
-   the admin confirms within the confirm window (default 5 min). Without
-   confirmation the switch reloads into the unchanged startup config.
+   the admin confirms within the confirm window (default 5 min). Before
+   cancelling, the executor re-reads the startup config; if its digest is no
+   longer the pre-change one (someone saved during the window), the change
+   is marked `unknown` (below) and the admin decides. Without confirmation
+   the switch reloads into the unchanged startup config.
 6. Persisting to startup is the separate MEDIUM approval listed in D5,
    bound to the verified running `raw_digest`. Until then a power cycle
    also restores the previous state; the UI shows "running differs from
@@ -519,6 +551,11 @@ admin out, or that need secrets.
 7. **Rollback** of a non-persisted or persisted change is the inverse lines
    bound in the original permit, executed under its own approval with the
    same risk (never automatic, except the device-side reload in step 5).
+   Precondition: the current running `raw_digest` equals the verified
+   post-change digest of the original change; otherwise the inverse no
+   longer describes the way back and is refused, and a new typed change
+   must be proposed. The inverse never writes the startup config; persisting
+   it is again the separate MEDIUM approval.
 
 If `reload in` does not exist on the lab firmware, CRITICAL CBS changes stay
 refused.
@@ -545,12 +582,18 @@ refused.
    rule appears in order, optional hit-count movement is a hint only).
 7. Release both locks. Any failure before commit: `revert` the candidate
    (`<revert><config/></revert>`, PAN-OS 9.0+, *verify*) and release locks.
+   Precondition: NOS still holds the config lock, so the candidate holds
+   only `nos-change`'s edits; if the lock was lost, the executor does not
+   revert (it could discard another admin's work) and marks the change
+   `unknown`.
 8. **Rollback** after a commit: load the previous running config version
    into the candidate (`<load><config><version>N</version></config></load>`,
    *verify*) is coarse: it also reverts changes by other admins made later.
    The default rollback is therefore the bound inverse operation, under its
-   own approval; "load version N" is offered only when the running version
-   is still exactly the one NOS committed.
+   own approval, with the D5 precheck against the post-change state: the
+   running config version is the one NOS committed and `raw_digest` equals
+   the verified post-change digest, and no foreign candidate changes are
+   pending. "Load version N" is offered only under the same preconditions.
 
 PAN-OS has no device-side commit-confirmed timer like Junos (*verify*). The
 management interface is out of band, and security rules do not apply to
@@ -559,7 +602,12 @@ cut NOS's path **to the firewall**; it can cut NOS's path to everything
 behind it. CRITICAL firewall changes in phase 2b therefore use an
 **executor-side dead-man**: after commit and postchecks the admin must
 confirm within the window; without confirmation the executor applies the
-bound inverse change. This is an automatic rollback and an explicit,
+bound inverse change. Preconditions: NOS keeps the config and commit locks
+for the whole window (so no other admin can commit in between); at expiry
+the running version and `raw_digest` still equal the NOS commit's and no
+foreign candidate change is pending. If any precondition fails, the
+executor writes nothing, marks the change `unknown` and notifies. This is an
+automatic rollback and an explicit,
 bounded exception to ADR 0007 ("no automatic rollback"), so it needs the
 maintainer's decision Q6 and the spec revision.
 
@@ -580,7 +628,7 @@ other endpoint is tried for a mutation.
 | Threat | Defence |
 | --- | --- |
 | New credential class (switch passwords/keys, firewall API keys) leaking | Executor vault only, per device and purpose, read and change credentials separate, local CLI entry, header-only API key, no secret in results/logs/events/spool, rotation and revocation as for PVE tokens |
-| Config backups containing hashes, PSKs, communities, private keys | Redaction in the executor before anything leaves it, fail-closed keyword rule, unparseable configs not stored, salted value fingerprints, admin-only pages, age-encrypted instance backups; raw configs never stored in phase 1 |
+| Config backups containing hashes, PSKs, communities, private keys | Redaction in the executor before anything leaves it: PAN-OS element allowlist, CBS keyword list (limit stated, Q13), fail-closed keyword rule, unparseable or over-limit configs not stored; config digests and value fingerprints are HMAC-SHA-256 under per-device executor keys, so the server cannot confirm guessed secrets; admin-only pages, age-encrypted instance backups; raw configs never stored in phase 1 |
 | Lock-out of NOS's (or the admin's) management path | Read-only first; out-of-scope list in D5; executor-owned port roles and path floor; CRITICAL refused in phase 2a; device-side reload timer (CBS) or executor dead-man (PAN-OS) only in phase 2b; startup config untouched until a separate approval |
 | Compromised or spoofed device feeding the UI (names, descriptions, LLDP, rule comments, banners) | Spec 09: bounded, UTF-8, printable text only, rendered as escaped text; LLDP labelled by source; device data never creates assets, roles, placements or permits |
 | Man in the middle on the management path | Pinned SSH host key / TLS certificate, hard stop on mismatch, explicit re-pin |
@@ -680,7 +728,8 @@ Tickets: [docs/implementation/network-devices.md](../implementation/network-devi
   CRITICAL path rule.
 - **Q5: Firewall management address.** The internal address of the PAN-OS
   management interface; confirm management is not reachable on the WAN side
-  of `nebulanetwork.de`.
+  of `<public-name>`. (Answer privately; the ADR records only that the
+  address is internal.)
 - **Q6: CRITICAL changes.** Refuse them for good, or allow phase 2b with a
   CBS reload timer and a PAN-OS executor dead-man (an exception to ADR
   0007's "no automatic rollback")?
@@ -699,3 +748,10 @@ Tickets: [docs/implementation/network-devices.md](../implementation/network-devi
 - **Q12: Protected paths.** Should the new redaction and device-change
   packages (`internal/netdevredact/`, `internal/netdevchange/`) be added to
   `.github/protected-paths.txt`? Recommended: yes, in ND-02.
+- **Q13: CBS redaction model.** PAN-OS output passes an element allowlist;
+  CBS output passes a keyword denylist plus the fail-closed keyword rule,
+  which cannot catch a secret in a positional field of an unlisted command.
+  Should CBS also switch to an allowlist of command keywords (unlisted lines
+  dropped with a marker)? Recommended: yes, once ND-03 has recorded the
+  command vocabulary of the lab configs; until then the limit stands as
+  stated in D4.
