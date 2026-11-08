@@ -141,6 +141,52 @@ func TestUpdatePreviewNeverRunsAsBatchMember(t *testing.T) {
 	}
 }
 
+// An accepted durable preview start records its runs row through
+// StartDurable itself: action_id is docker.update_preview (the evidence
+// Resolve checks) and the timeout is the fixed 5 minutes, whatever the
+// request asked for. The host is unreachable, so the run closes as not
+// dispatched, after the row was written.
+func TestUpdatePreviewDurableStartRecordsActionAndTimeout(t *testing.T) {
+	e := newReconcileEnv(t)
+	e.pin(mustReadSigner(t))
+	a, _ := actions.Lookup(updatePreviewAction)
+	params := []byte(`{"target_tags":""}`)
+	prop := listPendingRequest(t, 7, a.Script)
+	prop.Request.ActionId, prop.Request.ModuleVersion = updatePreviewAction, updatePreviewVersion
+	prop.Request.CredentialRefs = []string{"cred"}
+	prop.Request.ResolvedTargets = []*pb.Target{{HostId: e.host, HostKeyFingerprint: e.fp}}
+	ph, err := canonical.HashParameters(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prop.Request.ParametersHash, prop.ParametersJson = ph, params
+	resp, err := e.svc.ProposeExecution(context.Background(), prop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := canonical.ParseDigest(resp.GetExecutionDigest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.auth.ApproveCLI(d, 0, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := e.svc.StartDurable(context.Background(), &pb.StartDurableRequest{
+		Run: &pb.AuthorizeRunRequest{ExecutionDigest: resp.GetExecutionDigest(), HostId: e.host, HostKeyFingerprint: e.fp,
+			ActionId: updatePreviewAction, ModuleVersion: updatePreviewVersion, Artifact: a.Script, ParametersJson: params,
+			CredentialRef: "cred"},
+		Endpoints: []string{"127.0.0.1:1"}, TimeoutSeconds: 3600,
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	r := e.getRun(st.GetRun().GetExecutionId())
+	if r.ActionID != updatePreviewAction || r.MemberID != "" || r.Timeout != updatePreviewTimeout {
+		t.Fatalf("runs row action %q member %q timeout %s, want %s and %s", r.ActionID, r.MemberID, r.Timeout,
+			updatePreviewAction, updatePreviewTimeout)
+	}
+}
+
 // finishedRun stores a finished durable run of e.host with a result.
 func (e *reconcileEnv) finishedRun(actionID, memberID string) string {
 	e.t.Helper()
