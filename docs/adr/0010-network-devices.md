@@ -529,7 +529,14 @@ admin out, or that need secrets.
    state through its own approval and proposes again. After arming, the
    executor confirms the timer is pending (`show reload`, *verify*) and
    re-reads running and startup; if either changed, it cancels the reload
-   and aborts without sending any change line.
+   and aborts without sending any change line (`not_applied`). If that
+   cancel cannot be confirmed (`show reload` still pending, or the session
+   is lost), the change is `unknown` and the admin is notified at once: no
+   change line was sent, but the switch may reload.
+   **While a NOS reload timer is pending on a switch**, the executor refuses
+   every other NOS write to it, in particular a persist approval (step 6)
+   and a rollback (step 7): persisting would make the reload boot into the
+   changed state, so the rollback would silently stop being one.
 3. Enter `configure`, send the exact bound lines, `end`. The startup config
    is **never** written in the same permit.
 4. Read the running config again. Success means `raw_digest` equals the
@@ -539,13 +546,31 @@ admin out, or that need secrets.
    records). Postchecks: the device is reachable, port state and VLAN as
    expected, NOS still reaches its own path (gateway ARP, the switch).
 5. CRITICAL: `reload cancel` (*verify*) only after the postchecks pass and
-   the admin confirms within the confirm window (default 5 min). Before
-   cancelling, the executor re-reads the startup config; if its digest is no
-   longer the pre-change one (someone saved during the window), the change
-   is marked `unknown` (below) and the admin decides. Without confirmation
-   the switch reloads into the unchanged startup config.
+   the admin confirms within the confirm window (default 5 min). Without
+   confirmation the switch reloads into the startup config, which is the
+   rollback. **Precondition of that rollback: startup is still the
+   pre-change config.** NOS cannot lock the CBS startup config, so another
+   admin (or a `write memory` on the console) can save during the window.
+   The executor therefore re-reads the startup digest during the window (at
+   least every 60 s and once more no later than 60 s before the deadline,
+   named limits) and before any cancel. If the startup digest is no longer
+   the pre-change one, the reload would boot into a config nobody approved
+   (not the pre-change state, and possibly not the change either), so the
+   executor **cancels the reload at once** (previously: the timer stayed
+   armed), marks the change `unknown` and notifies; the change stays in
+   running and the admin decides. If the executor cannot read the startup
+   config or cannot cancel (session lost, vault locked, executor down), the
+   timer fires on the device: the switch boots into whatever startup holds,
+   and reconciliation afterwards records `rolled_back` only if running
+   equals the pre-change digest, otherwise `unknown`. The timer runs on the
+   device, so an executor restart or a vault lock does not stop it; after a
+   restart the executor reconciles from the durable intent and `show
+   reload`.
 6. Persisting to startup is the separate MEDIUM approval listed in D5,
-   bound to the verified running `raw_digest`. Until then a power cycle
+   bound to the verified running `raw_digest`. Its precondition: the
+   current running `raw_digest` equals the bound one and no reload timer is
+   pending (`show reload` shows none, *verify*); otherwise it is refused
+   and nothing is written. Until then a power cycle
    also restores the previous state; the UI shows "running differs from
    startup" prominently.
 7. **Rollback** of a non-persisted or persisted change is the inverse lines
@@ -554,8 +579,11 @@ admin out, or that need secrets.
    Precondition: the current running `raw_digest` equals the verified
    post-change digest of the original change; otherwise the inverse no
    longer describes the way back and is refused, and a new typed change
-   must be proposed. The inverse never writes the startup config; persisting
-   it is again the separate MEDIUM approval.
+   must be proposed. It is also refused while a reload timer is pending
+   (step 2). The inverse runs through steps 1, 3 and 4; if a line fails or
+   the outcome is uncertain, the rollback is `unknown`. The inverse never
+   writes the startup config; persisting it is again the separate MEDIUM
+   approval.
 
 If `reload in` does not exist on the lab firmware, CRITICAL CBS changes stay
 refused.
