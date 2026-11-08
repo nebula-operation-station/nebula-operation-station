@@ -59,23 +59,20 @@ func (s *Service) PutContainerDefinition(ctx context.Context, in *pb.PutContaine
 	next.CreatedBy = who
 	// The secret and the metadata row commit together; a secret that
 	// already exists is never replaced (version 1 only).
+	var stored executordb.ContainerDefinition
 	if _, err := s.vault.PutWithCommit(next.VaultSecretID, raw, who, func(sec executordb.VaultSecret) error {
-		return s.db.AddContainerDefinition(next, sec)
+		var err error
+		stored, err = s.db.AddContainerDefinition(next, sec)
+		return err
 	}); err != nil {
 		return nil, s.definitionError("put_container_definition", err)
 	}
 	s.log.Info("audit", "kind", "container_definition_put", "by", who, "host", host, "container", name,
-		"definition_id", next.DefinitionID, "version", next.Version)
-	versions, err := s.db.ContainerDefinitionVersions(host, name)
-	if err != nil {
-		return nil, s.definitionError("put_container_definition", err)
-	}
-	for _, v := range versions {
-		if v.Version == next.Version {
-			return &pb.PutContainerDefinitionResponse{Definition: definitionInfo(v, true)}, nil
-		}
-	}
-	return nil, status.Error(codes.Aborted, "the container definition changed concurrently")
+		"definition_id", stored.DefinitionID, "version", stored.Version)
+	// The answer is what was committed (the newest version at that
+	// moment). It is not read back: a concurrent remove could make a
+	// committed Put look failed, and a retry would add a version.
+	return &pb.PutContainerDefinitionResponse{Definition: definitionInfo(stored, true)}, nil
 }
 
 // RemoveContainerDefinition removes every version of a definition
@@ -92,10 +89,13 @@ func (s *Service) RemoveContainerDefinition(ctx context.Context, in *pb.RemoveCo
 		return nil, status.Error(codes.InvalidArgument, "invalid version")
 	}
 	// Like a vault delete: a locked executor cannot be made to lose secrets.
+	// The store checks again inside its transaction, right before the
+	// commit, so a lock after this check removes nothing.
+	epoch := s.vault.LockGeneration()
 	if st, err := s.vault.State(); err != nil || st != vault.StateUnlocked {
 		return nil, status.Error(codes.FailedPrecondition, "the executor vault is locked")
 	}
-	dropped, err := s.db.RemoveContainerDefinition(host, name, in.GetVersion())
+	dropped, err := s.db.RemoveContainerDefinition(host, name, in.GetVersion(), s.vaultUnlockedSince(epoch))
 	if err != nil {
 		return nil, s.definitionError("remove_container_definition", err)
 	}
@@ -124,6 +124,21 @@ func (s *Service) ListContainerDefinitions(_ context.Context, in *pb.ListContain
 		out.Definitions = append(out.Definitions, definitionInfo(d, latest))
 	}
 	return out, nil
+}
+
+// vaultUnlockedSince returns the store's in-transaction vault check: it
+// fails with vault.ErrLocked if the vault was locked (and perhaps unlocked
+// again) since epoch. The caller takes epoch before it sees the vault
+// unlocked, and every Lock raises the generation, so an unchanged one
+// means still unlocked. It reads memory only: vault.State reads the
+// database while locked, which the open transaction would block.
+func (s *Service) vaultUnlockedSince(epoch uint64) func() error {
+	return func() error {
+		if s.vault.LockGeneration() != epoch {
+			return vault.ErrLocked
+		}
+		return nil
+	}
 }
 
 // definitionInfo is the metadata a response may carry: no content, no
