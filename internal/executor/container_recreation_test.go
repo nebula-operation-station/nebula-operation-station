@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -155,6 +156,44 @@ func TestFinishedRunJudgedAfterCrashInIntent(t *testing.T) {
 	}
 }
 
+// The reconcile pass reloads finished intent rows in bounded pages and
+// still judges every one of them in one pass.
+func TestFinishedIntentsJudgedAcrossPages(t *testing.T) {
+	e := newContainerEnv(t, "web-1")
+	u := testComposeUpdate()
+	n := 2*intentReloadPage + 1
+	var execs []string
+	for i := 0; i < n; i++ {
+		exec := fmt.Sprintf("00000000-0000-4000-8000-%012d", 500+i)
+		execs = append(execs, exec)
+		run := testDispatchRun(t, u)
+		run.ExecutionID, run.Member.Request.ExecutionID = exec, exec
+		row, err := recreationIntent(run, "web-1", "SHA256:k")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := e.db.CreateContainerRecreation(row); err != nil {
+			t.Fatal(err)
+		}
+		r := executordb.Run{ExecutionID: exec, HostID: "web-1", Digest: hexOf("f"), Endpoints: []string{"127.0.0.1:22"},
+			Timeout: containerMutationTimeout, MemberID: fmt.Sprintf("member-%d", i), ActionID: composeUpdateAction}
+		if err := e.db.CreateRun(r); err != nil {
+			t.Fatal(err)
+		}
+		r.State, r.Class, r.Result = executordb.RunFinished, hostrun.ClassSuccess, mustResultJSON(t, passingComposeResultFor(u, exec))
+		if err := e.db.FinishRun(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.svc.ReconcileOnce(context.Background())
+	for _, exec := range execs {
+		got, err := e.db.GetContainerRecreation(exec)
+		if err != nil || got.State != executordb.RecreationRecreated || !got.Verdict.Passed {
+			t.Fatalf("row %s: %s %v %v", exec, got.State, got.Verdict.Findings, err)
+		}
+	}
+}
+
 // oversizeBaselineResult is a well-formed result within the result limit
 // whose baseline is over the row's baseline limit: extra baseline entries
 // with the most and longest mounts the parser allows.
@@ -267,6 +306,90 @@ func TestOversizeRecordCompletesBounded(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A run that stopped in phases 1 to 4 changed nothing: a baseline or
+// container record over its column limit is left out, but the row stays
+// not_recreated instead of becoming uncertain.
+func TestStoppedRunWithOversizeRecordStaysNotRecreated(t *testing.T) {
+	u := testComposeUpdate()
+	run := testDispatchRun(t, u)
+	row, err := recreationIntent(run, "web-1", "SHA256:k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtures := []struct {
+		name    string
+		result  composeUpdateResult
+		finding string
+	}{
+		{"baseline over its limit", oversizeBaselineResult(t, u), "baseline is over its"},
+		{"containers over their limit", oversizeContainersResult(t, u), "container record is over its"},
+	}
+	for _, fx := range fixtures {
+		for _, phase := range []string{phasePrecheck, phaseResolve, phasePull, phaseRetain} {
+			t.Run(fx.name+"/"+phase, func(t *testing.T) {
+				r := fx.result
+				r.Phase, r.Reason, r.After, r.UpExit = phase, "pull_failed", nil, nil
+				raw := mustResultJSON(t, r)
+				if _, err := parseComposeUpdateResult(raw); err != nil {
+					t.Fatalf("fixture not well-formed: %v", err)
+				}
+				c := recreationCompletion(row, hostrun.ClassPrecheckFailed, raw)
+				all := strings.Join(c.Verdict.Findings, "|")
+				if c.State != executordb.RecreationNotRecreated || c.Verdict.Passed ||
+					!strings.Contains(all, fx.finding) || !strings.Contains(all, "nothing was recreated") {
+					t.Fatalf("completion %s passed=%v findings %v", c.State, c.Verdict.Passed, c.Verdict.Findings)
+				}
+				if b, _ := json.Marshal(c.Containers); len(c.Baseline) > executordb.MaxRecreationBaselineBytes ||
+					len(b) > executordb.MaxRecreationContainersBytes {
+					t.Fatalf("completion over its column limits: baseline %d, containers %d", len(c.Baseline), len(b))
+				}
+			})
+		}
+	}
+}
+
+// A completion over a column limit prepends its own findings to a full
+// verdict; the bound keeps the "more findings omitted" marker and the
+// trailing class finding.
+func TestBoundCompletionKeepsTrailingFindings(t *testing.T) {
+	judged := make([]string, 0, maxVerdictFindings+2)
+	for i := 0; i < maxVerdictFindings; i++ {
+		judged = append(judged, fmt.Sprintf("finding %02d", i))
+	}
+	judged = append(judged, "more findings omitted", "the run's class is script_failed, not success")
+	c := executordb.RecreationCompletion{State: executordb.RecreationPartial,
+		Baseline:   make([]byte, executordb.MaxRecreationBaselineBytes+1),
+		Containers: oversizeContainersCompletion(t),
+		Verdict:    executordb.RecreationVerdict{Judged: true, Findings: slices.Clone(judged)}}
+	got := boundCompletion(c)
+	f := got.Verdict.Findings
+	if got.State != executordb.RecreationUncertain || len(f) != len(judged)+2 {
+		t.Fatalf("state %s, %d findings %v", got.State, len(f), f)
+	}
+	if !strings.Contains(f[0], "baseline is over its") || !strings.Contains(f[1], "container record is over its") ||
+		!slices.Equal(f[2:], judged) {
+		t.Fatalf("findings %v", f)
+	}
+	// A list longer than any judge produces is still bounded, keeping its
+	// last two findings.
+	long := slices.Clone(judged[:maxVerdictFindings])
+	long = append(long, "extra 1", "extra 2", "extra 3")
+	long = append(long, judged[maxVerdictFindings:]...)
+	c.Verdict.Findings = long
+	f = boundCompletion(c).Verdict.Findings
+	if len(f) != maxVerdictFindings+4 || !slices.Equal(f[len(f)-2:], judged[maxVerdictFindings:]) {
+		t.Fatalf("%d findings, tail %v", len(f), f[len(f)-2:])
+	}
+}
+
+// oversizeContainersCompletion is a container record over the row's
+// containers limit.
+func oversizeContainersCompletion(t *testing.T) []executordb.RecreationContainer {
+	t.Helper()
+	r := oversizeContainersResult(t, testComposeUpdate())
+	return recreationContainers(r.Baseline, r.After)
 }
 
 // rollbackFixture is an update row in state recreated with a baseline, its

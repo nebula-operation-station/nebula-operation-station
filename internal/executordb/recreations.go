@@ -345,11 +345,62 @@ func (db *DB) queryRecreations(query string, args ...any) ([]ContainerRecreation
 	return out, nil
 }
 
-// ContainerRecreationsInIntent returns every row still in intent, oldest
-// first, so a run that finished before its row was completed (a crash in
-// between) is judged on the next reconcile pass.
+// ContainerRecreationsInIntent returns the oldest rows still in intent, at
+// most maxRecreationsListed. The reconcile pass uses
+// FinishedRecreationIntents instead.
 func (db *DB) ContainerRecreationsInIntent() ([]ContainerRecreation, error) {
-	return db.queryRecreations(`SELECT ` + recreationColumns + ` FROM container_recreations WHERE state = 'intent' ORDER BY created_at, execution_id`)
+	return db.queryRecreations(`SELECT `+recreationColumns+` FROM container_recreations WHERE state = 'intent' ORDER BY created_at, execution_id LIMIT ?`,
+		maxRecreationsListed)
+}
+
+// maxIntentPage bounds one FinishedRecreationIntents page.
+const maxIntentPage = 100
+
+// RecreationIntentKey identifies an intent row whose run has finished. It
+// is also the cursor of the next page.
+type RecreationIntentKey struct {
+	ExecutionID, HostID string
+	CreatedAt           time.Time
+}
+
+// FinishedRecreationIntents returns, oldest first and after the cursor
+// after (the zero key starts at the beginning), the keys of at most limit
+// rows still in intent whose run has finished, so a run that finished
+// before its row was completed (a crash in between) is judged on the next
+// reconcile pass. A limit outside 1..maxIntentPage is maxIntentPage. Only
+// the keys are loaded; a row whose run has not finished, or that has no
+// run, is not returned.
+func (db *DB) FinishedRecreationIntents(after RecreationIntentKey, limit int) ([]RecreationIntentKey, error) {
+	if limit <= 0 || limit > maxIntentPage {
+		limit = maxIntentPage
+	}
+	var since int64
+	if !after.CreatedAt.IsZero() {
+		since = after.CreatedAt.Unix()
+	}
+	rows, err := db.sql.Query(`SELECT c.execution_id, c.host_id, c.created_at FROM container_recreations c
+		JOIN runs r ON r.execution_id = c.execution_id AND r.host_id = c.host_id
+		WHERE c.state = 'intent' AND r.state = 'finished'
+			AND (c.created_at > ? OR (c.created_at = ? AND c.execution_id > ?))
+		ORDER BY c.created_at, c.execution_id LIMIT ?`, since, since, after.ExecutionID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("executordb: finished recreation intents: %w", err)
+	}
+	defer rows.Close()
+	var out []RecreationIntentKey
+	for rows.Next() {
+		var k RecreationIntentKey
+		var created int64
+		if err := rows.Scan(&k.ExecutionID, &k.HostID, &created); err != nil {
+			return nil, fmt.Errorf("executordb: finished recreation intents: %w", err)
+		}
+		k.CreatedAt = time.Unix(created, 0).UTC()
+		out = append(out, k)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("executordb: finished recreation intents: %w", err)
+	}
+	return out, nil
 }
 
 // ListContainerRecreations returns the newest rows of a host, at most

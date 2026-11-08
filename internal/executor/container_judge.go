@@ -310,7 +310,8 @@ func expectedReference(img canonical.ContainerUpdateImage) string {
 // configuration digest. Each frozen service's prior image is retained under
 // exactly the tag recorded for it (retained: service to
 // nos-retained:<execution>-<index>), and nothing else is reported retained.
-// The result is about the bound project. Each dependency container keeps
+// The result is about the bound project. Each dependency container is
+// reported under its bound dependency service in both snapshots, keeps
 // its ID, configuration digest and run state, has no health regression,
 // and restarts only with restart_on_update. A missing, or truncated,
 // baseline or after-snapshot, an unreadable entry and an unmatched
@@ -413,6 +414,10 @@ func judgeComposeUpdate(u canonical.BatchContainerUpdate, retained map[string]st
 			fail("baseline container %s is neither a bound target nor a bound dependency", e.Name)
 			continue
 		}
+		if d, ok := depByID[e.ID]; ok && !targets[e.ID] && e.Service != d.Service {
+			fail("baseline container %s is reported under service %s, bound to %s", e.Name, e.Service, d.Service)
+			continue
+		}
 		if targets[e.ID] {
 			t := boundTarget[e.ID]
 			if e.Service != t.Service {
@@ -467,6 +472,12 @@ func judgeComposeUpdate(u canonical.BatchContainerUpdate, retained map[string]st
 			continue
 		}
 		afterByID[e.ID] = e
+		if d, ok := depByID[e.ID]; ok && e.Service != d.Service {
+			// A bound dependency container stays under its bound service;
+			// it is still judged as that dependency below.
+			fail("dependency %s is reported under service %s, bound to %s", e.Name, e.Service, d.Service)
+			continue
+		}
 		switch {
 		case frozen[e.Service].Service != "":
 			k := replicaKey(e.Service, e.Replica)
