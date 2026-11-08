@@ -135,6 +135,10 @@ const (
 	ExecutorService_PutContainerDefinition_FullMethodName          = "/nebula.executor.v1.ExecutorService/PutContainerDefinition"
 	ExecutorService_RemoveContainerDefinition_FullMethodName       = "/nebula.executor.v1.ExecutorService/RemoveContainerDefinition"
 	ExecutorService_ListContainerDefinitions_FullMethodName        = "/nebula.executor.v1.ExecutorService/ListContainerDefinitions"
+	ExecutorService_ListContainerRecreations_FullMethodName        = "/nebula.executor.v1.ExecutorService/ListContainerRecreations"
+	ExecutorService_SetContainerRecoveryPlan_FullMethodName        = "/nebula.executor.v1.ExecutorService/SetContainerRecoveryPlan"
+	ExecutorService_ClearContainerRecoveryPlan_FullMethodName      = "/nebula.executor.v1.ExecutorService/ClearContainerRecoveryPlan"
+	ExecutorService_ResolveContainerRecreation_FullMethodName      = "/nebula.executor.v1.ExecutorService/ResolveContainerRecreation"
 )
 
 // ExecutorServiceClient is the client API for ExecutorService service.
@@ -557,6 +561,27 @@ type ExecutorServiceClient interface {
 	// Metadata only: host, container name, definition ID, version, author
 	// and time.
 	ListContainerDefinitions(ctx context.Context, in *ListContainerDefinitionsRequest, opts ...grpc.CallOption) (*ListContainerDefinitionsResponse, error)
+	// Container recreation records (ADR 0006 P2-04/P2-05, container updates
+	// cu03). Role: server, admin. Sanitized rows of one host (or every host),
+	// newest first: identity, state, window, verdict, the images and targets
+	// a rollback binding must equal, and the unit's current recovery plan.
+	// Never the executor-owned recreation definition or the baseline.
+	ListContainerRecreations(ctx context.Context, in *ListContainerRecreationsRequest, opts ...grpc.CallOption) (*ListContainerRecreationsResponse, error)
+	// Recovery plan of one unit (R12, Q8). Role: admin only. Exactly one of
+	// a free-text reference without secrets or the explicit
+	// no_persistent_data declaration; recorded with actor, time and version.
+	// A rollback binds the record's digest, so changing or clearing it after
+	// approval fails revalidation.
+	SetContainerRecoveryPlan(ctx context.Context, in *SetContainerRecoveryPlanRequest, opts ...grpc.CallOption) (*SetContainerRecoveryPlanResponse, error)
+	ClearContainerRecoveryPlan(ctx context.Context, in *ClearContainerRecoveryPlanRequest, opts ...grpc.CallOption) (*ClearContainerRecoveryPlanResponse, error)
+	// Resolve an uncertain recreation row (R11, Q19). Role: server, admin;
+	// a server call needs an active privileged session. The executor reads
+	// the evidence from its own runs table: a finished, retained
+	// docker.update_preview of the row's host that started after the row's
+	// run finished and its hold ended. Only an uncertain row is resolved, to
+	// not_recreated or partial, never recreated. Nothing runs on the host and
+	// the rollback window is not extended.
+	ResolveContainerRecreation(ctx context.Context, in *ResolveContainerRecreationRequest, opts ...grpc.CallOption) (*ResolveContainerRecreationResponse, error)
 }
 
 type executorServiceClient struct {
@@ -1707,6 +1732,46 @@ func (c *executorServiceClient) ListContainerDefinitions(ctx context.Context, in
 	return out, nil
 }
 
+func (c *executorServiceClient) ListContainerRecreations(ctx context.Context, in *ListContainerRecreationsRequest, opts ...grpc.CallOption) (*ListContainerRecreationsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListContainerRecreationsResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ListContainerRecreations_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) SetContainerRecoveryPlan(ctx context.Context, in *SetContainerRecoveryPlanRequest, opts ...grpc.CallOption) (*SetContainerRecoveryPlanResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetContainerRecoveryPlanResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_SetContainerRecoveryPlan_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ClearContainerRecoveryPlan(ctx context.Context, in *ClearContainerRecoveryPlanRequest, opts ...grpc.CallOption) (*ClearContainerRecoveryPlanResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ClearContainerRecoveryPlanResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ClearContainerRecoveryPlan_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ResolveContainerRecreation(ctx context.Context, in *ResolveContainerRecreationRequest, opts ...grpc.CallOption) (*ResolveContainerRecreationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResolveContainerRecreationResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ResolveContainerRecreation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExecutorServiceServer is the server API for ExecutorService service.
 // All implementations must embed UnimplementedExecutorServiceServer
 // for forward compatibility.
@@ -2127,6 +2192,27 @@ type ExecutorServiceServer interface {
 	// Metadata only: host, container name, definition ID, version, author
 	// and time.
 	ListContainerDefinitions(context.Context, *ListContainerDefinitionsRequest) (*ListContainerDefinitionsResponse, error)
+	// Container recreation records (ADR 0006 P2-04/P2-05, container updates
+	// cu03). Role: server, admin. Sanitized rows of one host (or every host),
+	// newest first: identity, state, window, verdict, the images and targets
+	// a rollback binding must equal, and the unit's current recovery plan.
+	// Never the executor-owned recreation definition or the baseline.
+	ListContainerRecreations(context.Context, *ListContainerRecreationsRequest) (*ListContainerRecreationsResponse, error)
+	// Recovery plan of one unit (R12, Q8). Role: admin only. Exactly one of
+	// a free-text reference without secrets or the explicit
+	// no_persistent_data declaration; recorded with actor, time and version.
+	// A rollback binds the record's digest, so changing or clearing it after
+	// approval fails revalidation.
+	SetContainerRecoveryPlan(context.Context, *SetContainerRecoveryPlanRequest) (*SetContainerRecoveryPlanResponse, error)
+	ClearContainerRecoveryPlan(context.Context, *ClearContainerRecoveryPlanRequest) (*ClearContainerRecoveryPlanResponse, error)
+	// Resolve an uncertain recreation row (R11, Q19). Role: server, admin;
+	// a server call needs an active privileged session. The executor reads
+	// the evidence from its own runs table: a finished, retained
+	// docker.update_preview of the row's host that started after the row's
+	// run finished and its hold ended. Only an uncertain row is resolved, to
+	// not_recreated or partial, never recreated. Nothing runs on the host and
+	// the rollback window is not extended.
+	ResolveContainerRecreation(context.Context, *ResolveContainerRecreationRequest) (*ResolveContainerRecreationResponse, error)
 	mustEmbedUnimplementedExecutorServiceServer()
 }
 
@@ -2478,6 +2564,18 @@ func (UnimplementedExecutorServiceServer) RemoveContainerDefinition(context.Cont
 }
 func (UnimplementedExecutorServiceServer) ListContainerDefinitions(context.Context, *ListContainerDefinitionsRequest) (*ListContainerDefinitionsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListContainerDefinitions not implemented")
+}
+func (UnimplementedExecutorServiceServer) ListContainerRecreations(context.Context, *ListContainerRecreationsRequest) (*ListContainerRecreationsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListContainerRecreations not implemented")
+}
+func (UnimplementedExecutorServiceServer) SetContainerRecoveryPlan(context.Context, *SetContainerRecoveryPlanRequest) (*SetContainerRecoveryPlanResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetContainerRecoveryPlan not implemented")
+}
+func (UnimplementedExecutorServiceServer) ClearContainerRecoveryPlan(context.Context, *ClearContainerRecoveryPlanRequest) (*ClearContainerRecoveryPlanResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ClearContainerRecoveryPlan not implemented")
+}
+func (UnimplementedExecutorServiceServer) ResolveContainerRecreation(context.Context, *ResolveContainerRecreationRequest) (*ResolveContainerRecreationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResolveContainerRecreation not implemented")
 }
 func (UnimplementedExecutorServiceServer) mustEmbedUnimplementedExecutorServiceServer() {}
 func (UnimplementedExecutorServiceServer) testEmbeddedByValue()                         {}
@@ -4552,6 +4650,78 @@ func _ExecutorService_ListContainerDefinitions_Handler(srv interface{}, ctx cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_ListContainerRecreations_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListContainerRecreationsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ListContainerRecreations(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ListContainerRecreations_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ListContainerRecreations(ctx, req.(*ListContainerRecreationsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_SetContainerRecoveryPlan_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetContainerRecoveryPlanRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).SetContainerRecoveryPlan(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_SetContainerRecoveryPlan_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).SetContainerRecoveryPlan(ctx, req.(*SetContainerRecoveryPlanRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ClearContainerRecoveryPlan_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClearContainerRecoveryPlanRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ClearContainerRecoveryPlan(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ClearContainerRecoveryPlan_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ClearContainerRecoveryPlan(ctx, req.(*ClearContainerRecoveryPlanRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ResolveContainerRecreation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolveContainerRecreationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ResolveContainerRecreation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ResolveContainerRecreation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ResolveContainerRecreation(ctx, req.(*ResolveContainerRecreationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ExecutorService_ServiceDesc is the grpc.ServiceDesc for ExecutorService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -5014,6 +5184,22 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListContainerDefinitions",
 			Handler:    _ExecutorService_ListContainerDefinitions_Handler,
+		},
+		{
+			MethodName: "ListContainerRecreations",
+			Handler:    _ExecutorService_ListContainerRecreations_Handler,
+		},
+		{
+			MethodName: "SetContainerRecoveryPlan",
+			Handler:    _ExecutorService_SetContainerRecoveryPlan_Handler,
+		},
+		{
+			MethodName: "ClearContainerRecoveryPlan",
+			Handler:    _ExecutorService_ClearContainerRecoveryPlan_Handler,
+		},
+		{
+			MethodName: "ResolveContainerRecreation",
+			Handler:    _ExecutorService_ResolveContainerRecreation_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

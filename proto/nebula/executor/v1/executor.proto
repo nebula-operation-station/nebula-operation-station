@@ -536,6 +536,28 @@ service ExecutorService {
   // Metadata only: host, container name, definition ID, version, author
   // and time.
   rpc ListContainerDefinitions(ListContainerDefinitionsRequest) returns (ListContainerDefinitionsResponse);
+
+  // Container recreation records (ADR 0006 P2-04/P2-05, container updates
+  // cu03). Role: server, admin. Sanitized rows of one host (or every host),
+  // newest first: identity, state, window, verdict, the images and targets
+  // a rollback binding must equal, and the unit's current recovery plan.
+  // Never the executor-owned recreation definition or the baseline.
+  rpc ListContainerRecreations(ListContainerRecreationsRequest) returns (ListContainerRecreationsResponse);
+  // Recovery plan of one unit (R12, Q8). Role: admin only. Exactly one of
+  // a free-text reference without secrets or the explicit
+  // no_persistent_data declaration; recorded with actor, time and version.
+  // A rollback binds the record's digest, so changing or clearing it after
+  // approval fails revalidation.
+  rpc SetContainerRecoveryPlan(SetContainerRecoveryPlanRequest) returns (SetContainerRecoveryPlanResponse);
+  rpc ClearContainerRecoveryPlan(ClearContainerRecoveryPlanRequest) returns (ClearContainerRecoveryPlanResponse);
+  // Resolve an uncertain recreation row (R11, Q19). Role: server, admin;
+  // a server call needs an active privileged session. The executor reads
+  // the evidence from its own runs table: a finished, retained
+  // docker.update_preview of the row's host that started after the row's
+  // run finished and its hold ended. Only an uncertain row is resolved, to
+  // not_recreated or partial, never recreated. Nothing runs on the host and
+  // the rollback window is not extended.
+  rpc ResolveContainerRecreation(ResolveContainerRecreationRequest) returns (ResolveContainerRecreationResponse);
 }
 
 enum RiskClass {
@@ -3087,4 +3109,153 @@ message ContainerDefinitionInfo {
   int64 created_at_unix = 6;
   // True for the newest version, the one a new update binds.
   bool latest = 7;
+}
+
+message ListContainerRecreationsRequest {
+  // Empty lists every host.
+  string host_id = 1;
+}
+
+message ListContainerRecreationsResponse {
+  repeated ContainerRecreationInfo recreations = 1;
+}
+
+// ContainerRecreationInfo is one sanitized recreation row. It carries no
+// recreation definition, no baseline and no file content or env.
+message ContainerRecreationInfo {
+  string execution_id = 1;
+  string member_id = 2;
+  // "update" or "rollback".
+  string kind = 3;
+  // Rollback only: the recorded update execution.
+  string rollback_of = 4;
+  string host_id = 5;
+  // "compose" or "standalone"; unit is the project or container name.
+  string form = 6;
+  string unit = 7;
+  // intent, not_recreated, recreated, partial, uncertain or rolled_back.
+  string state = 8;
+  // 0 while the row is in intent.
+  int64 window_expires_at_unix = 9;
+  int64 created_at_unix = 10;
+  int64 updated_at_unix = 11;
+  // Whether the row holds a baseline (a rollback without one is refused
+  // as no_baseline); the baseline itself never leaves the executor.
+  bool has_baseline = 12;
+  ContainerRecreationVerdict verdict = 13;
+  repeated ContainerRecreationImage images = 14;
+  repeated ContainerRecreationTarget targets = 15;
+  // The values of the recorded binding a rollback binding must equal.
+  string source_digest = 16;
+  string working_dir_hash = 17;
+  string config_files_hash = 18;
+  repeated ContainerRecreationDependency dependencies = 19;
+  // The unit's current recovery plan; absent when none is recorded.
+  ContainerRecoveryPlanInfo recovery_plan = 20;
+}
+
+// ContainerRecreationVerdict is the executor's postcheck verdict.
+message ContainerRecreationVerdict {
+  bool judged = 1;
+  bool passed = 2;
+  repeated string findings = 3;
+}
+
+// ContainerRecreationImage is one recorded image entry with the values a
+// rollback entry is built from.
+message ContainerRecreationImage {
+  string service = 1;
+  string repository = 2;
+  string old_tag = 3;
+  string new_tag = 4;
+  // The update's approved platform digest (a rollback's old_digests).
+  string new_platform_digest = 5;
+  // Copied from the update binding; a rollback must repeat them.
+  string platform = 6;
+  string policy_version = 7;
+  string policy_digest = 8;
+  bool major_change = 9;
+  // The rollback block: the retained prior image.
+  string prior_image_id = 10;
+  // The bare tag under the nos-retained repository.
+  string retained_tag = 11;
+  string retained_reference = 12;
+}
+
+// ContainerRecreationTarget is one recorded container with its current
+// incarnation (the after-values a rollback binds) and status.
+message ContainerRecreationTarget {
+  string service = 1;
+  string replica = 2;
+  string container_name = 3;
+  // recreated, unchanged or missing.
+  string status = 4;
+  string container_id = 5;
+  string image_id = 6;
+  string running_reference = 7;
+  string configuration_digest = 8;
+}
+
+// ContainerRecreationDependency is one frozen dependency of the binding.
+message ContainerRecreationDependency {
+  string service = 1;
+  string relation = 2;
+  bool restart_on_update = 3;
+  repeated ContainerRecreationDependencyMember containers = 4;
+}
+
+// ContainerRecreationDependencyMember is one frozen dependency container.
+message ContainerRecreationDependencyMember {
+  string container_id = 1;
+  string container_name = 2;
+  string configuration_digest = 3;
+}
+
+// ContainerRecoveryPlanInfo is one recovery plan record.
+message ContainerRecoveryPlanInfo {
+  string host_id = 1;
+  string unit = 2;
+  // "plan" or "no_persistent_data".
+  string kind = 3;
+  string reference = 4;
+  string actor = 5;
+  uint64 version = 6;
+  int64 recorded_at_unix = 7;
+  // SHA-256 of the record, the recovery_plan_digest a rollback binds.
+  string digest = 8;
+}
+
+message SetContainerRecoveryPlanRequest {
+  string host_id = 1;
+  // The Compose project or standalone container name.
+  string unit = 2;
+  // Exactly one: a reference to the backup or recovery procedure (no
+  // secrets), or the explicit declaration that the unit keeps no
+  // persistent data.
+  oneof plan {
+    string reference = 3;
+    bool no_persistent_data = 4;
+  }
+}
+
+message SetContainerRecoveryPlanResponse {
+  ContainerRecoveryPlanInfo plan = 1;
+}
+
+message ClearContainerRecoveryPlanRequest {
+  string host_id = 1;
+  string unit = 2;
+}
+
+message ClearContainerRecoveryPlanResponse {}
+
+message ResolveContainerRecreationRequest {
+  // The uncertain row's execution.
+  string execution_id = 1;
+  // A finished docker.update_preview run of the row's host.
+  string preview_execution_id = 2;
+}
+
+message ResolveContainerRecreationResponse {
+  ContainerRecreationInfo recreation = 1;
 }
