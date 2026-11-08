@@ -808,6 +808,11 @@ const (
 	BuiltinTrustState_BUILTIN_TRUST_STATE_UNTRUSTED BuiltinTrustState = 2
 	// No verified local release bundle or trust store is available.
 	BuiltinTrustState_BUILTIN_TRUST_STATE_UNAVAILABLE BuiltinTrustState = 3
+	// No release bundle is installed: the bundle directory is missing or
+	// holds none of the three bundle files. Not a fault and not a trust
+	// verdict; built-ins stay at their untrusted floor. A partial,
+	// unreadable or unverifiable bundle is UNAVAILABLE, never this.
+	BuiltinTrustState_BUILTIN_TRUST_STATE_NOT_INSTALLED BuiltinTrustState = 4
 )
 
 // Enum value maps for BuiltinTrustState.
@@ -817,12 +822,14 @@ var (
 		1: "BUILTIN_TRUST_STATE_TRUSTED",
 		2: "BUILTIN_TRUST_STATE_UNTRUSTED",
 		3: "BUILTIN_TRUST_STATE_UNAVAILABLE",
+		4: "BUILTIN_TRUST_STATE_NOT_INSTALLED",
 	}
 	BuiltinTrustState_value = map[string]int32{
-		"BUILTIN_TRUST_STATE_UNSPECIFIED": 0,
-		"BUILTIN_TRUST_STATE_TRUSTED":     1,
-		"BUILTIN_TRUST_STATE_UNTRUSTED":   2,
-		"BUILTIN_TRUST_STATE_UNAVAILABLE": 3,
+		"BUILTIN_TRUST_STATE_UNSPECIFIED":   0,
+		"BUILTIN_TRUST_STATE_TRUSTED":       1,
+		"BUILTIN_TRUST_STATE_UNTRUSTED":     2,
+		"BUILTIN_TRUST_STATE_UNAVAILABLE":   3,
+		"BUILTIN_TRUST_STATE_NOT_INSTALLED": 4,
 	}
 )
 
@@ -23751,12 +23758,13 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x1cBUILTIN_TRUST_CHANGE_CHANGED\x10\x02\x12\"\n" +
 	"\x1eBUILTIN_TRUST_CHANGE_UNCHANGED\x10\x03\x12$\n" +
 	" BUILTIN_TRUST_CHANGE_REACTIVATED\x10\x04\x12 \n" +
-	"\x1cBUILTIN_TRUST_CHANGE_REMOVED\x10\x05*\xa1\x01\n" +
+	"\x1cBUILTIN_TRUST_CHANGE_REMOVED\x10\x05*\xc8\x01\n" +
 	"\x11BuiltinTrustState\x12#\n" +
 	"\x1fBUILTIN_TRUST_STATE_UNSPECIFIED\x10\x00\x12\x1f\n" +
 	"\x1bBUILTIN_TRUST_STATE_TRUSTED\x10\x01\x12!\n" +
 	"\x1dBUILTIN_TRUST_STATE_UNTRUSTED\x10\x02\x12#\n" +
-	"\x1fBUILTIN_TRUST_STATE_UNAVAILABLE\x10\x03*\x83\x01\n" +
+	"\x1fBUILTIN_TRUST_STATE_UNAVAILABLE\x10\x03\x12%\n" +
+	"!BUILTIN_TRUST_STATE_NOT_INSTALLED\x10\x04*\x83\x01\n" +
 	"\rBuiltinDiffOp\x12\x1f\n" +
 	"\x1bBUILTIN_DIFF_OP_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15BUILTIN_DIFF_OP_EQUAL\x10\x01\x12\x1a\n" +
