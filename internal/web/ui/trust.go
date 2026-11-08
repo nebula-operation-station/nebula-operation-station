@@ -59,7 +59,8 @@ type BuiltinTrustProvider interface {
 // for display. Module names and versions come from the executor and are
 // untrusted text: the template renders them escaped, as text only.
 type builtinTrustView struct {
-	// Kind is "untrusted" or "unavailable"; it selects the banner style.
+	// Kind is "untrusted", "unavailable" or "not_installed"; it selects
+	// the banner style.
 	Kind string
 	// Headline is the banner's first sentence.
 	Headline string
@@ -99,12 +100,28 @@ func unavailableBuiltinTrust() *builtinTrustView {
 	}
 }
 
+// notInstalledBuiltinTrust is the "no release bundle installed" banner:
+// the executor host simply has no bundle (source/quickstart installs, or
+// a package install before the attachments were placed). Not a fault and
+// not a trust verdict over any release; it names no versions.
+func notInstalledBuiltinTrust() *builtinTrustView {
+	return &builtinTrustView{
+		Kind:     "not_installed",
+		Headline: "No release bundle is installed on this executor host.",
+		Detail: "Built-ins stay untrusted (their risk floor is unchanged) until a verified release bundle is installed: " +
+			"place the three attachments of the same release (release-manifest.json, release-manifest.json.sig and builtins.tar) " +
+			"in /usr/share/nebula/release on the executor host. See docs/admin/guide.md section 8.2.",
+	}
+}
+
 // builtinTrustBanner maps the executor's built-in trust status to the
 // layout banner (ADR 0007 E17). A fully trusted status yields nil (no
 // banner). Untrusted names the affected modules, the local CLI command
 // (run with sudo), that the command does not change risk decisions today,
 // and the lease-replacement rule. Unavailable is a distinct
 // "unreachable" state: it is not a trust verdict and names no versions.
+// Not installed (no release bundle on the executor host) is distinct from
+// both: it is not a fault, and the built-ins stay at their untrusted floor.
 //
 // Which modules are affected is the executor's per-module verdict
 // (Change), not re-derived from versions and hashes: the executor can
@@ -146,6 +163,8 @@ func builtinTrustBanner(st *pb.GetBuiltinTrustStatusResponse) *builtinTrustView 
 		return v
 	case pb.BuiltinTrustState_BUILTIN_TRUST_STATE_TRUSTED:
 		return nil // the executor says trusted: no banner
+	case pb.BuiltinTrustState_BUILTIN_TRUST_STATE_NOT_INSTALLED:
+		return notInstalledBuiltinTrust()
 	default:
 		// Unavailable, unspecified, a nil response or a state this
 		// build does not know: fail closed, never shown as trusted.
