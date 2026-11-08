@@ -10,8 +10,10 @@ The maintainer asked on 2026-11-08 for a new milestone: NOS manages network
 devices next to hosts and Proxmox. The reference lab has:
 
 - Cisco Business switches (CBS series, for example CBS250 and CBS350);
-- a Palo Alto Networks firewall running PAN-OS, the edge of the home net
-  `192.168.0.0/24`, publicly named `nebulanetwork.de`;
+- a Palo Alto Networks firewall running PAN-OS, the edge of the lab
+  network (a private /24, written `<lab-net>` here) and of the lab's public
+  name (written `<public-name>`); the concrete subnet and domain are kept
+  out of this public document (previously named here verbatim);
 - later a pfSense firewall (previously OPNsense: the maintainer first wrote
   OPNsense and corrected it to pfSense the same day).
 
@@ -91,9 +93,17 @@ claim that fails the check changes the design here first, not the code.
   generation and revokes every lease and permit for the device.
 - **Management endpoints are internal only.** NOS reaches the PAN-OS
   firewall on its management interface address inside the lab, never through
-  the public name `nebulanetwork.de` or a WAN address. An endpoint that
-  resolves to a public address is refused at registration. Which address the
-  management interface has is open question Q5.
+  `<public-name>` or a WAN address. Endpoints are **stored and dialled as IP
+  literals**: if the admin enters a host name, the executor resolves it once
+  at registration, shows the addresses, and stores the confirmed literal; the
+  name is kept only as a label and, for PAN-OS, as the expected TLS server
+  name for the SAN check. No dial ever resolves DNS, so a later DNS change
+  cannot redirect a credentialed connection. The executor also re-checks the
+  stored literal at every dial and refuses public, loopback, link-local,
+  multicast and unspecified addresses (previously: a public address was
+  refused once at registration only). Changing an endpoint is an explicit
+  admin CLI operation handled like a re-pin (below).
+  Which address the management interface has is open question Q5.
 - Discovery (`internal/discovery`) and IPAM never add dial targets for
   devices; they can only suggest that an IPAM asset of kind `switch` or
   `firewall` be registered by the admin.
@@ -169,6 +179,7 @@ executor.
   `show lldp neighbors <if>`, `show ip interface`.
 - Connect 10 s, command 60 s, 4 MiB per `show running-config`, 1 MiB for
   other commands, one session per device, two commands per second at most.
+  Count limits are in "Parse limits" below.
 
 **PAN-OS (XML API over HTTPS).**
 
@@ -204,6 +215,35 @@ executor.
   URL.
 - Panorama, multi-vsys and HA pairs are out of scope until asked (Q2).
 
+**Parse limits (both families).** Every parser enforces named limits next to
+its code (ND-04 defines the constants); the values below are upper bounds
+far above a lab device and are checked against the ND-03 fixtures. Bytes
+are capped before parsing (above); counts and depth while parsing.
+
+| Limit | Value |
+| --- | --- |
+| Line length (CBS output, any command) | 4 KiB |
+| Lines per CBS `show running-config` / `show startup-config` | 100,000 |
+| Interfaces per device | 1,024 |
+| VLANs per device | 4,094 |
+| MAC table entries per device | 8,192 |
+| LLDP neighbors per device / per port | 1,024 / 16 |
+| XML nesting depth (PAN-OS) | 64 |
+| XML elements per response (PAN-OS) | 500,000 |
+| Text length of one XML element or attribute (PAN-OS) | 4 KiB |
+| Security rules / NAT rules | 10,000 / 5,000 |
+| Address and service objects (each) | 20,000 |
+| Address and service groups (each) | 5,000 |
+| Members per group / group nesting depth | 2,500 / 8 |
+| Zones / interfaces (PAN-OS) | 256 / 1,024 |
+| Hit-count entries | security-rule limit |
+
+A list over its limit marks the observation `incomplete` (never silently
+truncated, never treated as "deleted"); a configuration over a limit, or
+an XML document over the depth or element limit, is refused and not stored,
+like an unparseable one. Risk derivation (D5) treats incomplete or refused
+data as missing, which raises the floor to CRITICAL.
+
 ### D4: Phase 1, read only
 
 All phase-1 reads are **LOW** and run under a **device read lease**, a new
@@ -238,11 +278,46 @@ weak: one session or request per device at a time, jitter, exponential
 backoff to 15 min, stale after three missed intervals.
 
 **Redaction (in the executor, before anything leaves it).** The raw device
-config never leaves the executor. The executor computes the SHA-256 of the
-raw config (`raw_digest`, used for drift and permits in D5), redacts it,
-computes `redacted_digest`, and returns only the redacted text and both
-digests.
+config never leaves the executor, and neither does any unkeyed digest of
+it. Per read the executor:
 
+1. **normalizes** the raw config: it drops volatile lines or elements that
+   change without a configuration change (CBS header lines with the current
+   time or uptime, PAN-OS response timestamps and similar, *verify* in
+   ND-03), using a reviewed, family-specific list fixed in ND-07. The list
+   only removes content proven volatile in the ND-03 fixtures; it never
+   removes a configuration statement. Without this, every read would create
+   a new version and every change precheck would fail;
+2. computes `raw_digest` = **HMAC-SHA-256** over the normalized raw config
+   under the device's **digest key**;
+3. redacts the normalized config (rules below) and computes
+   `redacted_digest` = SHA-256 of the redacted text (the server holds that
+   text anyway);
+4. returns only the redacted text and both digests.
+
+**Why keyed (previously: an unkeyed SHA-256).** The server holds the
+redacted text, which is the raw config with only the secret tokens
+replaced. With an unkeyed SHA-256 of the raw config next to it, a
+compromised server (or anyone holding a server backup) could rebuild the
+raw config for each guess of a low-entropy secret (SNMP community, RADIUS
+or TACACS+ key, PSK, local password) and confirm the guess offline. That
+would leak secrets that "never leave the executor". With an HMAC under a key
+that exists only in the executor, the server cannot compute or test the
+digest of any candidate text.
+
+- **Digest and fingerprint keys.** At device registration the executor
+  generates two independent 32-byte keys with `crypto/rand`, the **digest
+  key** and the **fingerprint key**, and stores them in the executor vault
+  with the device credentials (D2: envelope-encrypted, wiped on lock, never
+  exported, never in results, logs or backups in plain text). They are
+  per device, so digests and fingerprints cannot be correlated across
+  devices. They are not rotated with credentials or pins (a rotation would
+  turn every stored version into a "new" one); they are deleted with the
+  device. If they are lost (vault restore without them), the next read is
+  a new version and the approved baseline must be approved again.
+- **No digest oracle.** The executor computes keyed digests and fingerprints
+  only over text it read from the device itself or rendered itself for a
+  permit; no RPC accepts caller-supplied text to hash, compare or redact.
 - CBS (line based, *verify* every keyword against the lab config): replace
   the secret token, keeping the keyword, in lines starting with or
   containing `username ... password`, `enable password`, `enable secret`,
@@ -252,21 +327,48 @@ digests.
   `password`, `secret`, `passphrase`, `wpa`, and drop entire blocks between
   `crypto key import`/`crypto certificate ... import` and their end marker
   (*verify* whether CBS prints key material in the running config).
-- PAN-OS (element based on the parsed XML): replace the text of
-  `phash`, `password`, `pre-shared-key`, `key`, `secret`, `community`,
-  `auth-password`, `priv-password`, `private-key`, `bind-password`,
-  `shared-secret`, `ike-crypto ... key` (*verify* the full list against the
-  PAN-OS schema of the installed release) and drop
-  `/config/shared/certificate/entry/private-key` completely.
-- **Fail closed.** Any line or element whose keyword is not on the reviewed
-  list but whose name or content matches `key|pass|secret|community|hash|psk|
+- PAN-OS (**allowlist** on the parsed XML; previously a keyword denylist):
+  only elements on a reviewed allowlist of known-safe element paths leave
+  the executor; every other element is dropped together with its subtree
+  and replaced by one marker `<dropped:ELEMENT-NAME count=N>` so the reader
+  sees that something was removed. The initial allowlist covers what phase 1
+  shows: system info fields (model, serial, sw-version, uptime, management
+  addresses); under `vsys`/`shared`: `rulebase/security` and `rulebase/nat`
+  rule entries with their name, uuid, from, to, source, destination,
+  source-user, application, service, category, action, disabled,
+  description, tag, NAT translation fields; `address`, `address-group`
+  (static members and dynamic filter), `service`, `service-group`, `tag`,
+  `zone` (name and member interfaces only) and the interface names, units,
+  VLAN tags and IP addresses under `network/interface` (exact paths
+  *verify* against the PAN-OS schema of the installed release, fixed in
+  ND-07). Attributes other than `name` and `uuid` are dropped. Everything
+  else (`mgt-config`, `shared/certificate`, `ssl-tls-service-profile`,
+  `authentication-profile`, `server-profile`, `network/ike`,
+  `network/tunnel`, `global-protect`, `deviceconfig`, and every element a
+  newer release adds) is dropped by default. Inside allowed elements the
+  keyword rule below still applies as defence in depth.
+- **Fail closed (keyword rule).** For CBS, and inside allowed PAN-OS
+  elements, any line or element whose keyword is not on the reviewed list
+  but whose name or content matches `key|pass|secret|community|hash|psk|
   private|token|cert` (case-insensitive) is also redacted and flagged
   `redacted:unknown` so the list gets reviewed. An unparseable config is not
   stored at all.
-- Redaction replaces values with `<redacted:sha256-prefix>` (the first
-  8 hex characters of the SHA-256 of the value with a per-device salt held
-  in the executor), so a changed secret still shows up as a diff line
-  without revealing the value or allowing dictionary checks across devices.
+- **Stated limit for CBS.** CBS redaction stays a keyword denylist plus the
+  keyword rule: a secret in a positional field of a command whose keyword is
+  not listed and does not match the pattern would pass. ND-03 records the
+  full command vocabulary of the lab configs so the list can be reviewed;
+  whether CBS should also switch to an allowlist of command keywords is open
+  question Q13.
+- Redaction replaces values with `<redacted:FP>`, where FP is the first
+  8 hex characters of **HMAC-SHA-256** under the device's fingerprint key
+  over the field identity (CBS keyword, PAN-OS element path) and the value
+  (previously: a salted SHA-256). A changed secret still shows up as a diff
+  line; without the key the server can neither test guesses nor compare
+  values across devices or fields. No hand-made salting or other
+  construction is used (AGENTS.md rule 4); HMAC comes from `crypto/hmac`.
+- PAN-OS drift outside the allowlist changes `raw_digest` but not the
+  redacted text; the UI then shows "configuration changed in elements not
+  displayed" instead of an empty diff.
 
 **Config versions, diff and drift.**
 
