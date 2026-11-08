@@ -503,17 +503,40 @@ def owned_private(st, kind):
     return kind(st.st_mode) and st.st_uid == os.geteuid() and (st.st_mode & 0o077) == 0
 
 
+def read_private(path, limit):
+    """Reads a root-only regular file without following a symlink; the
+    checks apply to the opened file itself. FileNotFoundError passes on;
+    any other problem is ValueError."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        raise
+    except OSError:
+        raise ValueError(path)
+    try:
+        st = os.fstat(fd)
+        if not owned_private(st, stat.S_ISREG) or st.st_size > limit:
+            raise ValueError(path)
+        data = os.read(fd, limit + 1)
+    except OSError:
+        raise ValueError(path)
+    finally:
+        os.close(fd)
+    if len(data) > limit:
+        raise ValueError(path)
+    return data
+
+
 def read_salt():
     try:
-        st = os.lstat(SALT_FILE)
+        salt = read_private(SALT_FILE, 4096)
     except FileNotFoundError:
         raise Stop("prepare_required")
-    except OSError:
+    except ValueError:
         raise Stop("salt_unsafe")
-    if not owned_private(st, stat.S_ISREG) or not 32 <= st.st_size <= 4096:
+    if len(salt) < 32:
         raise Stop("salt_unsafe")
-    with open(SALT_FILE, "rb") as f:
-        return f.read(4097)
+    return salt
 
 
 def override_path(project):
@@ -524,19 +547,15 @@ def read_override(project):
     """The NOS override's entries {service: reference}, or None when the
     project has none. Only this script writes it, so any other shape, owner
     or mode is drift."""
-    p = override_path(project)
     try:
-        st = os.lstat(p)
+        raw = read_private(override_path(project), MAX_OVERRIDE_BYTES)
     except FileNotFoundError:
         return None
-    except OSError:
-        raise Stop("override_drift")
-    if not owned_private(st, stat.S_ISREG) or st.st_size > MAX_OVERRIDE_BYTES:
+    except ValueError:
         raise Stop("override_drift")
     try:
-        with open(p, "rb") as f:
-            doc = json.loads(f.read(MAX_OVERRIDE_BYTES + 1).decode("utf-8"), object_pairs_hook=no_dupes)
-    except (OSError, UnicodeDecodeError, ValueError, Stop):
+        doc = json.loads(raw.decode("utf-8"), object_pairs_hook=no_dupes)
+    except (UnicodeDecodeError, ValueError, Stop):
         raise Stop("override_drift")
     if not isinstance(doc, dict) or set(doc) != {"services"} or not isinstance(doc["services"], dict):
         raise Stop("override_drift")

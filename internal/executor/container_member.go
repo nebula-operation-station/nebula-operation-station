@@ -55,7 +55,7 @@ const (
 	// as embedded in the server's catalog (checked by
 	// TestShippedComposeUpdatePinMatchesEmbeddedScript). Changing it is a
 	// reviewed change of this protected package.
-	composeUpdateArtifactSHA256 = "17780c85c1f97630a0d474eabe07f6e7bac2b13760b014309095f37a2cef1a6f"
+	composeUpdateArtifactSHA256 = "ccba72b92d7ac0b2fdfc909861e46182c23ffb849f59337579cd8179f3c9327c"
 )
 
 // containerArtifact pins the one module version and artifact digest a

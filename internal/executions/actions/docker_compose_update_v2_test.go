@@ -43,6 +43,7 @@ type composeV2 struct {
 	st                   map[string]any
 	u                    canonical.BatchContainerUpdate
 	noSalt, rawParams    bool
+	beforeRun            func(t *testing.T) // after the salt is written
 	params               []byte
 	indexBody, idxDigest string
 }
@@ -233,6 +234,9 @@ func (c *composeV2) exec(t *testing.T) cuRun {
 		if err := os.WriteFile(filepath.Join(c.state, "salt"), c.salt, 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if c.beforeRun != nil {
+		c.beforeRun(t)
 	}
 	st, err := json.Marshal(c.st)
 	if err != nil {
@@ -606,6 +610,37 @@ func TestComposeUpdateUnsupportedHostStatesRefused(t *testing.T) {
 		edit         func(c *composeV2)
 	}{
 		{"no salt", "prepare_required", func(c *composeV2) { c.noSalt = true }},
+		{"group-readable salt", "salt_unsafe", func(c *composeV2) {
+			c.beforeRun = func(t *testing.T) {
+				if err := os.Chmod(filepath.Join(c.state, "salt"), 0o640); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}},
+		{"symlinked salt", "salt_unsafe", func(c *composeV2) {
+			c.beforeRun = func(t *testing.T) {
+				p := filepath.Join(c.state, "salt")
+				if err := os.Rename(p, p+".real"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(p+".real", p); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}},
+		{"short salt", "salt_unsafe", func(c *composeV2) { c.salt = []byte("short") }},
+		{"symlinked override", "override_drift", func(c *composeV2) {
+			c.beforeRun = func(t *testing.T) {
+				c.writeOverride(t, map[string]string{})
+				p := filepath.Join(c.state, "overrides", "site.yaml")
+				if err := os.Rename(p, p+".real"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(p+".real", p); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}},
 		{"stopped replica", "target_not_running", func(c *composeV2) {
 			c.container(cuHex("1"))["State"] = map[string]any{"Status": "exited"}
 		}},
