@@ -260,6 +260,20 @@ func TestDefinitionSecretsOnlyThroughDefinitionRPCs(t *testing.T) {
 	}
 }
 
+func TestDefinitionSecretNotNamedByRunParameters(t *testing.T) {
+	e := newDefinitionEnv(t)
+	put, err := e.svc.PutContainerDefinition(context.Background(), putDefinitionRequest("web"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := executordb.ContainerDefinitionSecretID(put.GetDefinition().GetDefinitionId(), 1)
+	secrets, err := e.svc.runSecrets([]byte(`{"nebula_secrets":{"def":"` + id + `"}}`))
+	wantCode(t, err, codes.InvalidArgument)
+	if len(secrets) != 0 || strings.Contains(err.Error(), defPlanted) {
+		t.Fatalf("definition reached a run: %v", err)
+	}
+}
+
 func TestDefinitionPutRefusedWhileVaultLocked(t *testing.T) {
 	e := newDefinitionEnv(t)
 	ctx := context.Background()
