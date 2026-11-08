@@ -858,52 +858,65 @@ func TestComposeUpdateCurlIgnoresCurlrc(t *testing.T) {
 // past the bound are left out and the result says so, and the result line
 // stays far below the 1 MiB server result limit (review of #358).
 func TestComposeUpdateAfterSnapshotIsBoundedInTotal(t *testing.T) {
-	c := newComposeV2(t)
-	long := func(p string, i, j int) string { return "/" + p + strings.Repeat("x", 1000) + fmt.Sprintf("/%d/%d", i, j) }
-	adds := map[string]any{}
-	const extra = 45
-	for i := range extra {
-		id := fmt.Sprintf("%064x", 0x1000+i)
-		ctr := cuContainer(id, fmt.Sprintf("site-db-%d", i+2), "db", cuDigest("e"), "postgres:16", "hdb", c.dir)
-		var mounts []any
-		for j := range 3 {
-			mounts = append(mounts, map[string]any{"Type": "bind", "Source": long("s", i, j), "Destination": long("d", i, j), "RW": true})
-		}
-		ctr["Mounts"] = mounts
-		adds[id] = ctr
-	}
-	c.st["up_adds"] = adds
-	r := c.exec(t)
-	if r.code != 0 || r.doc["phase"] != "after_snapshot" || r.doc["reason"] != "" {
-		t.Fatalf("%d %.300s", r.code, r.out)
-	}
-	after := r.doc["after"].([]any)
-	if r.doc["after_truncated"] != true {
-		t.Fatalf("no truncation marker; %d entries", len(after))
-	}
-	if len(after) == 0 || len(after) >= extra+2 {
-		t.Fatalf("%d after entries", len(after))
-	}
-	b, err := json.Marshal(after)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(b) > 256*1024 {
-		t.Fatalf("after-snapshot %d bytes", len(b))
-	}
-	if len(r.out) > 512*1024 {
-		t.Fatalf("result line %d bytes", len(r.out))
-	}
-	// Kept entries are whole entries, not cut ones.
-	for _, e := range after {
-		if _, ok := e.(map[string]any)["configuration_digest"]; !ok {
-			t.Fatalf("partial entry %v", e)
-		}
+	// Non-ASCII values count as the result line writes them (\uXXXX), not
+	// as their UTF-8 bytes.
+	for _, tc := range []struct {
+		name   string
+		filler string
+		mounts int
+	}{{"ascii", "x", 3}, {"non-ascii", "ä", 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newComposeV2(t)
+			long := func(p string, i, j int) string {
+				return "/" + p + strings.Repeat(tc.filler, 1000) + fmt.Sprintf("/%d/%d", i, j)
+			}
+			adds := map[string]any{}
+			const extra = 45
+			for i := range extra {
+				id := fmt.Sprintf("%064x", 0x1000+i)
+				ctr := cuContainer(id, fmt.Sprintf("site-db-%d", i+2), "db", cuDigest("e"), "postgres:16", "hdb", c.dir)
+				var mounts []any
+				for j := range tc.mounts {
+					mounts = append(mounts, map[string]any{"Type": "bind", "Source": long("s", i, j), "Destination": long("d", i, j), "RW": true})
+				}
+				ctr["Mounts"] = mounts
+				adds[id] = ctr
+			}
+			c.st["up_adds"] = adds
+			r := c.exec(t)
+			if r.code != 0 || r.doc["phase"] != "after_snapshot" || r.doc["reason"] != "" {
+				t.Fatalf("%d %.300s", r.code, r.out)
+			}
+			after := r.doc["after"].([]any)
+			if r.doc["after_truncated"] != true {
+				t.Fatalf("no truncation marker; %d entries", len(after))
+			}
+			if len(after) == 0 || len(after) >= extra+2 {
+				t.Fatalf("%d after entries", len(after))
+			}
+			// The after-snapshot as written on the result line.
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(r.out, &raw); err != nil {
+				t.Fatal(err)
+			}
+			if len(raw["after"]) > 256*1024 {
+				t.Fatalf("after-snapshot %d bytes", len(raw["after"]))
+			}
+			if len(r.out) > 512*1024 {
+				t.Fatalf("result line %d bytes", len(r.out))
+			}
+			// Kept entries are whole entries, not cut or oversize ones.
+			for _, e := range after {
+				if _, ok := e.(map[string]any)["configuration_digest"]; !ok {
+					t.Fatalf("partial entry %.200v", e)
+				}
+			}
+		})
 	}
 
 	// Below the bound there is no marker.
-	c = newComposeV2(t)
-	r = c.exec(t)
+	c := newComposeV2(t)
+	r := c.exec(t)
 	if _, ok := r.doc["after_truncated"]; ok || r.code != 0 {
 		t.Fatalf("%d %s", r.code, r.out)
 	}
