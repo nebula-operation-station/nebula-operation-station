@@ -279,6 +279,7 @@ func TestBatchPlanRefusesInvalidRequests(t *testing.T) {
 		"unknown action":   {one(member("nope.nope", "h01", nil)), "unknown action"},
 		"logs excluded":    {one(member("docker.logs", "h01", map[string]string{"container": containerID(1)})), "logs"},
 		"compose excluded": {one(member("docker.compose_update", "h01", map[string]string{"project": "web"})), "Compose"},
+		"preview excluded": {one(member("docker.update_preview", "h01", map[string]string{"target_tags": ""})), "durable job"},
 		"bad gate":         {BatchRequest{Stages: []BatchStageSpec{{Gate: "auto", Members: []BatchMemberSpec{member("core.facts", "h01", nil)}}}}, "gate"},
 		"threshold":        {BatchRequest{Stages: []BatchStageSpec{{Gate: "manual", FailureThreshold: 2, Members: []BatchMemberSpec{member("core.facts", "h01", nil)}}}}, "thresholds"},
 		"bad parameter":    {one(member("service.restart", "h01", map[string]string{"unit": "-x"})), "service.restart"},
