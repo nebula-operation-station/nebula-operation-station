@@ -942,6 +942,68 @@ healthy and is not anymore is FAILED; a container that is not healthy,
 changed published ports or a different number of containers is a
 WARNING. Run Check image updates first to see what will change.
 
+**Container and Compose updates and rollbacks.** Each host box on the
+inventory chart links to *Container and Compose updates and rollbacks*
+(`/inventory/containers`). Before it offers anything, a host needs:
+
+1. the built-ins trusted (section 8.2);
+2. *Prepare container updates* (`docker.update_prepare`, MEDIUM) run once;
+   until then the page says the host is not prepared and links to the
+   proposal;
+3. a *Preview container updates* run (`docker.update_preview`, LOW,
+   read-only) that finished at most one hour ago and is the host's newest.
+   The page links to a fresh preview when there is none or it is older. To
+   change a tag, give the target tags in the preview's `target_tags`
+   parameter: only tags the preview resolved are offered.
+
+The page shows each Compose project of the preview with its services and
+containers. Every service that can be updated has its own checkbox;
+selecting a project selects nothing below it, and services that share a
+namespace must be selected together. A service that cannot be updated
+shows why and has no checkbox: pinned by digest, built locally (`build:`),
+hand-scaled, a stopped replica, a pending file edit or another applied
+configuration, a Docker-chosen host port, an unknown local digest, a
+private image (not yet supported), a project cut off by a preview limit,
+override drift, or "up to date" when the running tag has no new digest.
+Standalone containers are not offered here yet. Hosts that are not
+enrolled, blocked or without a DEV, QA or PROD environment offer nothing.
+
+A tag change is chosen per service from the resolved tags; a major
+version change also needs the checkbox "I confirm a major version change",
+and a variant change (for example `1.27` to `1.27-alpine`) or tags that
+cannot be compared are refused. Tag changes need the executor's tag
+policy; while the server has none, only same-tag digest refreshes are
+offered and the page says so.
+
+*Review the plan* shows exactly what will be proposed, per member: per
+image the repository, platform, current tag, image and digests, the
+approved tag, index and platform digest, and for a tag change the tag
+policy and whether it is a major change; the source and configuration
+digests; the containers that are recreated; the dependencies that are
+affected but not recreated; the stage; and the risk. A same-tag refresh
+is at least MEDIUM, a tag change (or a rollback across tags) at least
+HIGH with user verification and manual stage gates. The executor decides
+the final class on the batch page and may raise it; a CRITICAL member is
+refused, and there is no separate approval for it. Nothing is proposed
+before *Confirm and propose batch*; if the preview, the inventory or the
+selection changed since you reviewed it, the confirmation is refused and
+you review again. The batch runs by environment (DEV, then QA, then PROD)
+with a manual gate between stages and no tolerated failure: the first
+failed member or failed postcheck stops all work not yet started. Approve
+it on the batch page, which also shows the progress of every member.
+
+**Rollback.** The old images are kept on the host (`nos-retained`) for the
+rollback window. Recorded updates appear under *Rollback* on the same
+page; a rollback is a new proposal, approved like an update and bound to
+the containers that update created. It is not offered when the window is
+over (the retained image may be gone), no recovery plan or no baseline was
+recorded, the update was already rolled back, or its outcome is uncertain:
+an administrator must resolve an uncertain recreation first. A rollback
+also needs a fresh preview that shows the project exactly as the update
+left it. **Volume and database migrations are not undone** by an update
+or a rollback; back up data that a new version migrates. NOS deletes no
+retained image; remove them on the host when you no longer need them.
+
 ### 9.4 Read leases and scheduled checks
 
 A **read lease** (a read grant) is a standing, executor-held authority to
