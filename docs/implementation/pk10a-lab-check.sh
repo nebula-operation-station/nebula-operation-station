@@ -201,23 +201,28 @@ log ""
 log "## storage sub-endpoints (pvesh ls as root): $STEPS"
 log ""
 log "$(printf '%-28s %-58s %-4s %s' PROFILE REQUEST HTTP 'MARKER/RESULT')"
+SUMMARY=()
+M1SUM="M1 nicht getestet"
 for p in "${PROFILES[@]}"; do
-  n=${p%%|*}
+  n=${p%%|*}; sd=""; ss=-; sc=-; sv=-
   for t in user network meta vendor; do
-    call "$n" "/nodes/$NODE/qemu/$VMID/cloudinit/dump?type=$t"; row "$n" "dump type=$t" "$CODE" "[$(hits)]"
+    call "$n" "/nodes/$NODE/qemu/$VMID/cloudinit/dump?type=$t"; h=$(hits); row "$n" "dump type=$t" "$CODE" "[$h]"
+    [ -n "$h" ] && sd="$sd$t,"
   done
   call "$n" "/nodes/$NODE/qemu/$VMID/config"; row "$n" "qemu config (cicustom visible?)" "$CODE" "$(grep -q cicustom "$BODY" && echo cicustom-visible || echo -)"
-  call "$n" "/nodes/$NODE/storage/$SNIP/content"; row "$n" "list $SNIP" "$CODE" "$(grep -q "${PREFIX}-" "$BODY" && echo snippet-listed || echo -)"
-  call "$n" "/nodes/$NODE/storage/$CI/content"; row "$n" "list $CI" "$CODE" "$(grep -q "$VMID-cloudinit" "$BODY" && echo cloudinit-listed || echo -)"
-  call "$n" "/nodes/$NODE/storage/$SNIP/content/$(enc "$SNIPVOL")"; row "$n" "volume $SNIPVOL" "$CODE" "[$(hits)]"
-  call "$n" "/nodes/$NODE/storage/$CI/content/$(enc "$CIVOL")"; row "$n" "volume $CIVOL" "$CODE" "[$(hits)]"
+  call "$n" "/nodes/$NODE/storage/$SNIP/content"; row "$n" "list $SNIP" "$CODE" "$(grep -q "${PREFIX}-" "$BODY" && echo snippet-listed || echo -)"; grep -q "${PREFIX}-" "$BODY" && ss=JA
+  call "$n" "/nodes/$NODE/storage/$CI/content"; row "$n" "list $CI" "$CODE" "$(grep -q "$VMID-cloudinit" "$BODY" && echo cloudinit-listed || echo -)"; grep -q "$VMID-cloudinit" "$BODY" && sc=JA
+  call "$n" "/nodes/$NODE/storage/$SNIP/content/$(enc "$SNIPVOL")"; h=$(hits); row "$n" "volume $SNIPVOL" "$CODE" "[$h]"; [ -n "$h" ] && sv=JA
+  call "$n" "/nodes/$NODE/storage/$CI/content/$(enc "$CIVOL")"; h=$(hits); row "$n" "volume $CIVOL" "$CODE" "[$h]"; [ -n "$h" ] && sv=JA
   for s in $STEPS; do
     case $s in content|status|rrd|rrddata) continue ;; esac
-    call "$n" "/nodes/$NODE/storage/$SNIP/$s?volume=$(enc "$SNIPVOL")"; row "$n" "storage/$SNIP/$s?volume=snippet" "$CODE" "[$(hits)]"
+    call "$n" "/nodes/$NODE/storage/$SNIP/$s?volume=$(enc "$SNIPVOL")"; h=$(hits); row "$n" "storage/$SNIP/$s?volume=snippet" "$CODE" "[$h]"; [ -n "$h" ] && sv=JA
   done
   call "$n" "/access/acl"; row "$n" "access/acl" "$CODE" "entries=$(python3 -c 'import json,sys
 try: print(len(json.load(open(sys.argv[1])).get("data") or []))
 except Exception: print("?")' "$BODY") foreign-test-users=$(grep -o "${PREFIX}-p[0-9]*@pve" "$BODY" | sort -u | wc -l)"
+  sa="$CODE/$(grep -o "${PREFIX}-p[0-9]*@pve" "$BODY" | sort -u | wc -l)"
+  SUMMARY+=("$(printf '%-20s dump:%-20s snipL:%-2s ciL:%-2s inh:%-2s acl:%s' "${n//Datastore./DS.}" "${sd:--}" "$ss" "$sc" "$sv" "$sa")")
   call "$n" "/access/roles"; row "$n" "access/roles" "$CODE" "$(grep -q "${ROLEPFX}-" "$BODY" && echo test-roles-visible || echo -)"
   call "$n" "/pools/$POOL"; row "$n" "pools/$POOL" "$CODE" "$(grep -q "\"vmid\":$VMID" "$BODY" && echo vm-member-visible || echo -)"
 done
@@ -231,9 +236,10 @@ if [ "$STARTED" = 1 ]; then
   log "config cicustom (current): $(qm config "$VMID" --current 1 2>/dev/null | grep -c '^cicustom') ; pending: $(qm pending "$VMID" 2>/dev/null | grep -i cicustom | tr -s ' ' | tr '\n' ' ')"
   log "drive right after delete: $(drive_marker)"
   sleep 20
-  log "drive 20 s after delete:  $(drive_marker)"
+  dm=$(drive_marker); log "drive 20 s after delete:  $dm"
   pvesh get "/nodes/$NODE/qemu/$VMID/cloudinit/dump" --type user > "$BODY" 2>&1; log "dump user (root) after delete: [$(hits)]"
-  if qm cloudinit update "$VMID" >/dev/null 2>&1; then log "drive after 'qm cloudinit update': $(drive_marker)"
+  M1SUM="M1: Laufwerk 20s nach Löschen: $dm"
+  if qm cloudinit update "$VMID" >/dev/null 2>&1; then du=$(drive_marker); log "drive after 'qm cloudinit update': $du"; M1SUM="$M1SUM | nach update: $du"
   else log "'qm cloudinit update' not available or failed"; fi
   qm stop "$VMID" >/dev/null 2>&1
 else
@@ -242,4 +248,9 @@ fi
 rm -f "$BODY"
 
 log ""
-log "# done. Bitte diese Datei an Claude geben: $OUT"
+log "================ KURZFASSUNG (Foto davon an Claude) ================"
+log "$(pveversion | cut -d/ -f2) $NODE  DS-Privs: $DSPRIVS"
+for l in "${SUMMARY[@]}"; do log "$l"; done
+log "$M1SUM"
+log "acl = HTTP/Anzahl fremder Test-User sichtbar; JA = Inhalt/Volume sichtbar"
+log "Volle Datei: $OUT"
