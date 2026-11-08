@@ -149,6 +149,41 @@ func TestDefinitionRemoveRefusedInsideWindow(t *testing.T) {
 	}
 }
 
+// TestDefinitionWindowBlocksOnlyItsVersion: a recreation in its window
+// pins the version it names, not every version of the definition.
+func TestDefinitionWindowBlocksOnlyItsVersion(t *testing.T) {
+	t1 := time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)
+	now := t1
+	db := openAtT(t, privateDir(t), t1)
+	db.now = func() time.Time { return now }
+	v1 := putDefinition(t, db, "web-1", "web", defIDA)
+	v2 := putDefinition(t, db, "web-1", "web", defIDA)
+	v3 := putDefinition(t, db, "web-1", "web", defIDA)
+	// Only version 2 is referenced, in intent and then inside its window.
+	standaloneRecreation(t, db, recExec, v2.DefinitionID, v2.Version)
+	complete(t, db, recExec, t1)
+	now = t1.Add(24 * time.Hour)
+	if _, err := db.RemoveContainerDefinition("web-1", "web", v2.Version); !errors.Is(err, ErrDefinitionInWindow) {
+		t.Fatalf("drop the pinned version: %v", err)
+	}
+	dropped, err := db.RemoveContainerDefinition("web-1", "web", v1.Version)
+	if err != nil || len(dropped) != 1 || dropped[0].Version != v1.Version {
+		t.Fatalf("drop an unpinned version: %+v %v", dropped, err)
+	}
+	if _, err := db.GetSecret(v1.VaultSecretID); !errors.Is(err, ErrNoSecret) {
+		t.Fatalf("dropped version's secret: %v", err)
+	}
+	for _, v := range []ContainerDefinition{v2, v3} {
+		if _, err := db.GetSecret(v.VaultSecretID); err != nil {
+			t.Fatalf("kept version %d lost its secret: %v", v.Version, err)
+		}
+	}
+	// The whole definition still holds the pinned version, so it stays.
+	if _, err := db.RemoveContainerDefinition("web-1", "web", 0); !errors.Is(err, ErrDefinitionInWindow) {
+		t.Fatalf("remove with a pinned version: %v", err)
+	}
+}
+
 func TestDefinitionIDSurvivesRecreate(t *testing.T) {
 	t1 := time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)
 	db := openAtT(t, privateDir(t), t1)
