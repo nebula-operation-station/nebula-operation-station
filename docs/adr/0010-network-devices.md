@@ -467,6 +467,29 @@ revision. Rules for every change:
 | Add a security rule at an exact position | PAN-OS | HIGH |
 | Disable / enable a security rule | PAN-OS | HIGH |
 | Move a security rule to an exact position | PAN-OS | HIGH |
+| Delete a security rule, **only as the bound inverse** of an "add a security rule" | PAN-OS | HIGH |
+| Delete an address object or group, **only as the bound inverse** of an "add", and only while no rule references it (directly, nested or through a dynamic group); otherwise refused | PAN-OS | MEDIUM (effective HIGH under the default firewall criticality) |
+
+**Inverse operations.** Every bound inverse is itself one of the typed
+operations in this table (previously: inverses were bound but not listed,
+so "delete rule" had no stated risk). Port description, access VLAN,
+shut/no shut, trunk VLAN add/remove, rule disable/enable, rule move and
+object edit are their own inverses (the old value, the old state, the old
+position); "add" on PAN-OS is undone by the two delete rows above, which are
+not offered as standalone operations in phase 2. A change whose inverse
+cannot be expressed as an operation in this table is refused.
+
+**A rollback is a change** (previously: "the same risk" as the original).
+Its effective risk is the **maximum of the original change's effective risk
+and the risk the executor re-derives at rollback time** for the inverse
+operation, with the rules below applied to the then-current port roles,
+device criticality and a fresh read of MAC, LLDP and firewall policy data.
+A rollback is never approved below the original change's risk, and is
+raised if the device or the NOS path changed since (for example a rule
+whose deletion now removes an allow for NOS-path traffic). Every rule for
+changes of that risk applies to the rollback unchanged: CRITICAL is refused
+in phase 2a, and in phase 2b it runs only with the same device-side reload
+timer (CBS) or executor dead-man (PAN-OS) and confirm window (D6).
 
 **Risk floors (executor-derived, never lowered by the server).**
 
@@ -491,7 +514,8 @@ revision. Rules for every change:
   the switch's own IP interface; any firewall rule change whose source or
   destination overlaps the NOS machine's addresses, the management
   networks of devices or the path from NOS to managed hosts (Q4) (the
-  **NOS path**); disabling a rule that allows NOS-path traffic; moving,
+  **NOS path**); disabling or deleting a rule that allows NOS-path
+  traffic; moving,
   adding or enabling a deny/drop rule above a rule that allows NOS-path
   traffic. A deny
   above an allow that does not carry NOS-path traffic is not raised by this
@@ -595,16 +619,37 @@ admin out, or that need secrets.
    also restores the previous state; the UI shows "running differs from
    startup" prominently.
 7. **Rollback** of a non-persisted or persisted change is the inverse lines
-   bound in the original permit, executed under its own approval with the
-   same risk (never automatic, except the device-side reload in step 5).
+   bound in the original permit, executed under its own approval (never
+   automatic, except the device-side reload in step 5). Its risk is the
+   maximum of the original change's effective risk and the risk re-derived
+   at rollback time (D5, "A rollback is a change"; previously: "the same
+   risk").
    Precondition: the current running `raw_digest` equals the verified
    post-change digest of the original change; otherwise the inverse no
    longer describes the way back and is refused, and a new typed change
    must be proposed. It is also refused while a reload timer is pending
-   (step 2). The inverse runs through steps 1, 3 and 4; if a line fails or
-   the outcome is uncertain, the rollback is `unknown`. The inverse never
-   writes the startup config; persisting it is again the separate MEDIUM
-   approval.
+   (step 2). A rollback below CRITICAL runs through steps 1, 3 and 4.
+   **A CRITICAL rollback** (phase 2b only) runs through steps 1 to 5 like
+   any CRITICAL change (previously: steps 1, 3 and 4 only, so the rollback
+   of a CRITICAL change had no reload timer and no confirm window): the
+   reload timer is armed first, under the step-2 preconditions applied to
+   the rollback's own pre-state, i.e. running equals the verified
+   post-change digest **and** startup equals running. The reload must boot
+   into the state NOS last confirmed, not into the rollback's target; a
+   reload into a startup that already is the rollback's target is no safety
+   net if the rollback cuts the path. A CRITICAL rollback of a
+   non-persisted change is therefore refused until the admin has persisted
+   the confirmed post-change state (step 6); the other way back is a
+   reload into the pre-change startup done by the admin on the device
+   (NOS never sends `reload` without a timer; reboot is out of scope).
+   After arming, the startup re-reads,
+   the immediate cancel on a startup change, the confirm window and the
+   `reload cancel` only after postchecks and confirmation (step 5) apply
+   unchanged. Without confirmation the switch reloads into the post-change
+   state: the rollback is undone, its result is `rolled_back`, and the
+   original change stays in place. If a line fails or the outcome is
+   uncertain, the rollback is `unknown`. The inverse never writes the
+   startup config; persisting it is again the separate MEDIUM approval.
 
 If `reload in` does not exist on the lab firmware, CRITICAL CBS changes stay
 refused.
@@ -652,9 +697,11 @@ refused.
    reconciliation attempt (default at most 10 minutes, a named limit), so
    no other admin commits while NOS cannot tell what was committed. Then it
    releases both locks without a revert, whatever the outcome, and
-   notifies. Releasing does not weaken later rollbacks: every later NOS
-   write on the device (rollback or corrective change) takes fresh locks
-   and re-runs the step-2 check against the then-current state. If the
+   notifies. Releasing does not weaken later rollbacks: every later
+   approved NOS write on the device (rollback or corrective change) takes
+   fresh locks and re-runs the step-2 check against the then-current state.
+   An `unknown` change has no dead-man any more; the automatic inverse never
+   takes fresh locks (lock rule for the dead-man, below). If the
    executor cannot release the locks (no session, change credential wiped
    by a vault lock), the UI says so and names the device-side way to
    remove them (a superuser removes the lock on the firewall, *verify*).
@@ -662,7 +709,9 @@ refused.
    into the candidate (`<load><config><version>N</version></config></load>`,
    *verify*) is coarse: it also reverts changes by other admins made later.
    The default rollback is therefore the bound inverse operation, under its
-   own approval, run through steps 1 to 7 with the precheck against the
+   own approval at the maximum of the original change's effective risk and
+   the risk re-derived at rollback time (D5, "A rollback is a change"), run
+   through steps 1 to 7 with the precheck against the
    post-change state: the running config version is the one NOS committed,
    `raw_digest` equals the verified post-change digest, and no foreign
    candidate change is pending (checked again under the locks). If any of
@@ -670,6 +719,15 @@ refused.
    change must be proposed. "Load version N" is offered only under the same
    preconditions and is refused the same way. A rollback that fails during
    apply or whose outcome is uncertain is `unknown` like any change.
+   **A CRITICAL rollback** (phase 2b only) also uses the executor dead-man
+   below with its confirm window and lock rule (previously: steps 1 to 7
+   only, so it had no dead-man): step 7 does not release the locks; the
+   admin must confirm within the window; without confirmation the executor
+   applies the rollback's own bound inverse, which is the original change
+   as committed and verified before, under the dead-man preconditions. The
+   rollback permit binds that inverse like any change permit (D5). "Load
+   version N" is not offered for a CRITICAL rollback, because its inverse
+   is not a typed operation.
 
 PAN-OS has no device-side commit-confirmed timer like Junos (*verify*). The
 management interface is out of band, and security rules do not apply to
@@ -678,11 +736,32 @@ cut NOS's path **to the firewall**; it can cut NOS's path to everything
 behind it. CRITICAL firewall changes in phase 2b therefore use an
 **executor-side dead-man**: after commit and postchecks the admin must
 confirm within the window; without confirmation the executor applies the
-bound inverse change. Preconditions: NOS keeps the config and commit locks
-for the whole window (so no other admin can commit in between); at expiry
-the running version and `raw_digest` still equal the NOS commit's and no
-foreign candidate change is pending. If any precondition fails, the
-executor writes nothing, marks the change `unknown` and notifies. If the
+bound inverse change.
+
+**Lock rule for the dead-man (one rule for the window, the expiry and a
+restart).** The automatic inverse is sent only under the config and commit
+locks that `nos-change` took in step 2 of the change and held **without a
+gap** until expiry; step 7 does not release them for a CRITICAL change, and
+they are released only after the admin's confirmation or after the
+dead-man has finished. The executor **never takes fresh locks for the
+automatic inverse** (previously: the restart rule took fresh locks if NOS
+no longer held them, which contradicted this precondition). The locks live
+on the firewall, not in the executor process (*verify* that they survive
+the end of an API session and an executor restart). Preconditions at
+expiry, checked in this order:
+
+1. both locks are still held by `nos-change` (read from the device,
+   *verify* the lock list calls); a lock that is missing, held by someone
+   else, or whose state cannot be read fails the check;
+2. the running config version and `raw_digest` still equal those of the
+   NOS commit;
+3. no foreign candidate change is pending.
+
+If any precondition fails, the executor writes nothing, marks the change
+`unknown` and notifies; it then releases whatever locks it still holds,
+without a revert. Fresh locks are taken only for writes an admin approves
+afterwards (a step-8 rollback or a corrective change), never by the
+dead-man. If the
 inverse is applied and verified, the change is `rolled_back`; if applying it
 fails or its outcome is uncertain, the change is `unknown`.
 
@@ -695,9 +774,11 @@ while the executor runs with an unlocked vault. Its rules:
 - **Executor restart in the window.** On start the executor finds the open
   dead-man in the durable intent. A confirmation that arrives after the
   deadline is refused. If the deadline has passed or passes later and the
-  vault is unlocked, the executor runs the expiry check above (fresh locks
-  if NOS no longer holds them, then the step-2 check) and applies the
-  inverse only if every precondition holds. If the vault is still locked
+  vault is unlocked, the executor runs the expiry check above under the
+  lock rule: it reads whether `nos-change` still holds both locks and does
+  **not** take fresh ones (previously: fresh locks, then the step-2 check);
+  if a lock is gone, nothing is written and the change is `unknown`. It
+  applies the inverse only if every precondition holds. If the vault is still locked
   after the restart, the next point applies.
 - **Vault locked in the window, or at expiry.** A vault lock wipes the
   change credential, so the inverse cannot be sent. The executor does not
@@ -705,11 +786,13 @@ while the executor runs with an unlocked vault. Its rules:
   lock (or at expiry if it finds the vault locked), records "dead-man not
   executed: change credential unavailable", and notifies. The change then
   stays applied. After unlock, the admin reviews and either confirms the
-  state as a new baseline or approves the bound inverse as an ordinary
-  rollback (step 8 preconditions). The locks held by `nos-change` cannot be
+  state as a new baseline or approves the bound inverse as a rollback
+  (step 8 preconditions, at its re-derived risk; if that is CRITICAL, the
+  rollback again runs under the dead-man). The locks held by `nos-change` cannot be
   released without the credential; the UI states this as in step 7.
 - **Stated limit.** The dead-man is fail-open: an executor crash that does
-  not come back, or a vault lock, leaves the CRITICAL change in place. This
+  not come back, a vault lock, or a superuser removing `nos-change`'s locks
+  in the window, leaves the CRITICAL change in place. This
   is weaker than the CBS device-side timer and is part of what Q6 decides.
 
 This is an automatic rollback and an explicit,
