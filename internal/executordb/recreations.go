@@ -279,6 +279,31 @@ func (db *DB) MarkContainerRecreationRolledBack(executionID string) error {
 	return expectOneRecreation(res, err, executionID)
 }
 
+// ResolveContainerRecreation records the resolve of an uncertain row from
+// a preview (R11): the state, not_recreated or partial (never recreated),
+// the containers matched from the preview, and the verdict. Only an
+// uncertain row changes; the baseline and the window expiry stay as they
+// are, so a resolve never extends the window.
+func (db *DB) ResolveContainerRecreation(executionID, state string, containers []RecreationContainer, v RecreationVerdict) error {
+	if state != RecreationNotRecreated && state != RecreationPartial {
+		return fmt.Errorf("executordb: resolve recreation %s: state %q is not a resolve", executionID, state)
+	}
+	cs, err := marshalBounded("containers", nonNilContainers(containers), maxRecreationContainers)
+	if err != nil {
+		return err
+	}
+	if v.Findings == nil {
+		v.Findings = []string{}
+	}
+	verdict, err := marshalBounded("verdict", v, maxRecreationVerdict)
+	if err != nil {
+		return err
+	}
+	res, err := db.sql.Exec(`UPDATE container_recreations SET state = ?, containers = ?, verdict = ?, updated_at = ?
+		WHERE execution_id = ? AND state = 'uncertain'`, state, cs, verdict, db.now().Unix(), executionID)
+	return expectOneRecreation(res, err, executionID)
+}
+
 const recreationColumns = `execution_id, batch_digest, member_id, kind, rollback_of, host_id, host_key, form, unit,
 	binding, definition, images, containers, baseline, verdict, state, window_expires_at, created_at, updated_at`
 

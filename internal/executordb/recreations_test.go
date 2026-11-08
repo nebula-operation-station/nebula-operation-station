@@ -232,6 +232,53 @@ func TestContainerRecreationRefusesMalformed(t *testing.T) {
 	}
 }
 
+// A resolve changes only an uncertain row, only to not_recreated or
+// partial, and keeps the baseline and the window expiry.
+func TestResolveChangesOnlyUncertainRows(t *testing.T) {
+	t1 := time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)
+	db := openAtT(t, privateDir(t), t1)
+	states := map[string]string{
+		"00000000-0000-4000-9000-000000000301": RecreationUncertain,
+		"00000000-0000-4000-9000-000000000302": RecreationRecreated,
+		"00000000-0000-4000-9000-000000000303": RecreationPartial,
+		"00000000-0000-4000-9000-000000000304": RecreationNotRecreated,
+	}
+	for exec, state := range states {
+		if err := db.CreateContainerRecreation(recRow(exec)); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.CompleteContainerRecreation(exec, RecreationCompletion{State: state, Baseline: []byte(`[{"id":"x"}]`)}, t1, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	intent := "00000000-0000-4000-9000-000000000305"
+	if err := db.CreateContainerRecreation(recRow(intent)); err != nil {
+		t.Fatal(err)
+	}
+	cs := []RecreationContainer{{Service: "web", Name: "site-web-1", Status: ContainerRecreated, IDAfter: "n"}}
+	v := RecreationVerdict{Findings: []string{"resolved"}}
+	for exec, state := range states {
+		err := db.ResolveContainerRecreation(exec, RecreationPartial, cs, v)
+		if (state == RecreationUncertain) != (err == nil) {
+			t.Fatalf("%s: resolve %v", state, err)
+		}
+	}
+	if err := db.ResolveContainerRecreation(intent, RecreationNotRecreated, nil, v); !errors.Is(err, ErrRecreationState) {
+		t.Fatalf("intent resolved: %v", err)
+	}
+	got, err := db.GetContainerRecreation("00000000-0000-4000-9000-000000000301")
+	if err != nil || got.State != RecreationPartial || string(got.Baseline) != `[{"id":"x"}]` ||
+		!got.WindowExpiresAt.Equal(t1.Add(time.Hour)) || len(got.Containers) != 1 || got.Verdict.Findings[0] != "resolved" {
+		t.Fatalf("resolved row %+v %v", got, err)
+	}
+	// Never to recreated, intent or rolled_back.
+	for _, bad := range []string{RecreationRecreated, RecreationIntent, RecreationRolledBack, RecreationUncertain, ""} {
+		if err := db.ResolveContainerRecreation("00000000-0000-4000-9000-000000000301", bad, nil, v); err == nil {
+			t.Fatalf("resolve to %q accepted", bad)
+		}
+	}
+}
+
 func TestRecoveryPlanNeedsExplicitNoDataDeclaration(t *testing.T) {
 	t1 := time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)
 	db := openAtT(t, privateDir(t), t1)
