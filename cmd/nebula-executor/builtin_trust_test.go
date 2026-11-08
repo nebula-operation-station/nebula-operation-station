@@ -272,6 +272,156 @@ func TestWireBuiltinTrustServesStatusAndRisk(t *testing.T) {
 	}
 }
 
+// Only a missing bundle directory, or one holding none of the three
+// bundle files, is "not installed". Anything else (a partial bundle, a
+// symlink, an unreadable directory, a complete bundle with a bad
+// signature) is present and left to the verifying reader, so a broken
+// bundle stays UNAVAILABLE and nothing is ever trusted from an empty
+// directory.
+func TestClassifyBuiltinBundle(t *testing.T) {
+	k := newTestRoot(t)
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, dir string) // dir does not exist yet
+		want  builtinBundlePresence
+	}{
+		{"missing dir", func(t *testing.T, dir string) {}, builtinBundleNotInstalled},
+		{"empty dir", func(t *testing.T, dir string) { mkdir(t, dir) }, builtinBundleNotInstalled},
+		{"unrelated file only", func(t *testing.T, dir string) {
+			mkdir(t, dir)
+			writeFile(t, filepath.Join(dir, "README"))
+		}, builtinBundleNotInstalled},
+		{"1 of 3 files", func(t *testing.T, dir string) {
+			mkdir(t, dir)
+			writeFile(t, filepath.Join(dir, release.ManifestFile))
+		}, builtinBundlePresent},
+		{"2 of 3 files", func(t *testing.T, dir string) {
+			mkdir(t, dir)
+			writeFile(t, filepath.Join(dir, release.ManifestFile))
+			writeFile(t, filepath.Join(dir, release.BundleArtifact))
+		}, builtinBundlePresent},
+		{"all 3 with bad signature", func(t *testing.T, dir string) {
+			writeBundle(t, k, dir)
+			if err := os.WriteFile(filepath.Join(dir, release.SignatureFile), []byte("bad"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, builtinBundlePresent},
+		{"symlinked bundle file", func(t *testing.T, dir string) {
+			mkdir(t, dir)
+			if err := os.Symlink("/nonexistent", filepath.Join(dir, release.SignatureFile)); err != nil {
+				t.Fatal(err)
+			}
+		}, builtinBundlePresent},
+		{"symlinked bundle dir", func(t *testing.T, dir string) {
+			target := filepath.Join(filepath.Dir(dir), "elsewhere")
+			mkdir(t, target)
+			if err := os.Symlink(target, dir); err != nil {
+				t.Fatal(err)
+			}
+		}, builtinBundlePresent},
+		{"dangling symlinked bundle dir", func(t *testing.T, dir string) {
+			if err := os.Symlink("/nonexistent", dir); err != nil {
+				t.Fatal(err)
+			}
+		}, builtinBundlePresent},
+		{"bundle path is a file", func(t *testing.T, dir string) { writeFile(t, dir) }, builtinBundlePresent},
+		{"unreadable dir", func(t *testing.T, dir string) {
+			mkdir(t, dir)
+			if err := os.Chmod(dir, 0); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+		}, builtinBundlePresent},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "unreadable dir" && os.Geteuid() == 0 {
+				// root reads a 0000 directory; the case only holds
+				// for the unprivileged test user.
+				return
+			}
+			dir := filepath.Join(t.TempDir(), "release")
+			tc.setup(t, dir)
+			if got := classifyBuiltinBundle(dir); got != tc.want {
+				t.Fatalf("classifyBuiltinBundle = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Every broken bundle the classifier leaves to the reader is reported
+// UNAVAILABLE by the wired status RPC: never TRUSTED or UNTRUSTED, so no
+// trust is derived from it.
+func TestBrokenBundleStatusStaysUnavailable(t *testing.T) {
+	k := newTestRoot(t)
+	for name, setup := range map[string]func(t *testing.T, dir string){
+		"1 of 3 files": func(t *testing.T, dir string) {
+			mkdir(t, dir)
+			writeFile(t, filepath.Join(dir, release.ManifestFile))
+		},
+		"all 3 with bad signature": func(t *testing.T, dir string) {
+			writeBundle(t, k, dir)
+			if err := os.WriteFile(filepath.Join(dir, release.SignatureFile), []byte("bad"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"symlinked bundle file": func(t *testing.T, dir string) {
+			writeBundle(t, k, dir)
+			sig := filepath.Join(dir, release.SignatureFile)
+			moved := filepath.Join(filepath.Dir(dir), "sig")
+			if err := os.Rename(sig, moved); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(moved, sig); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := privateTempDir(t)
+			bundleDir := filepath.Join(t.TempDir(), "release")
+			setup(t, bundleDir)
+			s := &executor.Service{}
+			now := func() time.Time { return time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC) }
+			if err := wireBuiltinTrust(s, filepath.Join(dir, builtinTrustDirName), bundleDir, k.anchors(), now, openDB(t, dir)); err != nil {
+				t.Fatal(err)
+			}
+			if got := trustStatus(t, s); got != pb.BuiltinTrustState_BUILTIN_TRUST_STATE_UNAVAILABLE {
+				t.Fatalf("status = %v, want UNAVAILABLE", got)
+			}
+		})
+	}
+}
+
+// Startup reports a missing bundle as "no release bundle installed", not
+// as a failure, and still wires built-in trust (built-ins stay untrusted).
+func TestSetupBuiltinTrustLogsNotInstalled(t *testing.T) {
+	dir := privateTempDir(t)
+	var buf bytes.Buffer
+	s := &executor.Service{}
+	setupBuiltinTrust(s, dir, "", filepath.Join(t.TempDir(), "release"), openDB(t, dir), slog.New(slog.NewJSONHandler(&buf, nil)))
+	if !bytes.Contains(buf.Bytes(), []byte("no release bundle installed")) {
+		t.Fatalf("no not-installed notice logged: %s", buf.String())
+	}
+	if bytes.Contains(buf.Bytes(), []byte(`"level":"WARN"`)) || bytes.Contains(buf.Bytes(), []byte("unavailable")) {
+		t.Fatalf("a missing bundle is logged like a fault: %s", buf.String())
+	}
+}
+
+func mkdir(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeFile(t *testing.T, path string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Production setup uses <data-dir>/trust by default and the compiled
 // release anchors: the store is bootstrapped at startup and the admin
 // review reaches the transaction (a missing bundle is a precondition

@@ -3,8 +3,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -43,6 +46,54 @@ func wireBuiltinTrust(svc builtinTrustSetter, storeDir, bundleDir string, anchor
 	return nil
 }
 
+// builtinBundlePresence says whether a release bundle is installed in the
+// bundle directory at all. It never says anything about trust: a present
+// bundle is still read and verified in full, and an absent one leaves the
+// built-ins at their untrusted floor.
+type builtinBundlePresence int
+
+const (
+	// builtinBundlePresent: something is in the bundle location (complete,
+	// partial, unreadable, symlinked or otherwise unexpected). The
+	// verifying reader decides; a broken bundle is UNAVAILABLE. It is the
+	// zero value, so any doubt falls on the verifying path.
+	builtinBundlePresent builtinBundlePresence = iota
+	// builtinBundleNotInstalled: the directory is missing, or it is a
+	// real directory holding none of the three bundle files.
+	builtinBundleNotInstalled
+)
+
+func (p builtinBundlePresence) String() string {
+	if p == builtinBundleNotInstalled {
+		return "not installed"
+	}
+	return "present"
+}
+
+// builtinBundleFiles are the three release attachments of a bundle.
+var builtinBundleFiles = [...]string{release.ManifestFile, release.SignatureFile, release.BundleArtifact}
+
+// classifyBuiltinBundle reports whether no release bundle is installed in
+// dir. Only an unambiguous absence counts: dir does not exist, or dir is a
+// real directory (not a symlink) in which none of the three bundle names
+// exists as any kind of entry. Every other outcome, including any error
+// other than "does not exist", is builtinBundlePresent.
+func classifyBuiltinBundle(dir string) builtinBundlePresence {
+	fi, err := os.Lstat(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return builtinBundleNotInstalled
+	}
+	if err != nil || !fi.IsDir() {
+		return builtinBundlePresent
+	}
+	for _, name := range builtinBundleFiles {
+		if _, err := os.Lstat(filepath.Join(dir, name)); !errors.Is(err, fs.ErrNotExist) {
+			return builtinBundlePresent // exists, or cannot tell
+		}
+	}
+	return builtinBundleNotInstalled
+}
+
 // setupBuiltinTrust wires built-in trust with the compiled release anchors
 // and the executor's configured directories; an empty storeDir means
 // <dataDir>/trust. A failure is logged, not fatal: the executor keeps
@@ -58,6 +109,13 @@ func setupBuiltinTrust(svc builtinTrustSetter, dataDir, storeDir, bundleDir stri
 	}
 	if err != nil {
 		log.Warn("built-in trust unavailable; built-ins stay untrusted", "err", err)
+		return
+	}
+	if classifyBuiltinBundle(bundleDir) == builtinBundleNotInstalled {
+		// Not a fault (source/quickstart installs ship no bundle): say
+		// so plainly. Built-ins stay at their untrusted floor.
+		log.Info("built-in trust configured; no release bundle installed, built-ins stay untrusted",
+			"store", storeDir, "bundle", bundleDir)
 		return
 	}
 	log.Info("built-in trust configured", "store", storeDir, "bundle", bundleDir)
