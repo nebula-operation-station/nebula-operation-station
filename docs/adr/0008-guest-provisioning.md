@@ -578,6 +578,25 @@ unnecessary").
       first put could land after the stat). If the bound cannot be
       established, the put stays `unknown`, no start is dispatched and
       the run is flagged "snippet cleanup pending" (PK-08).
+      The put's `unknown` belongs to the removal target, because a late put
+      lands on exactly the file `pve.snippet.remove` would remove
+      (previously it stayed on the put alone, so a PK-08 removal could see
+      the file absent, clear the flag, and a late put could then leave a
+      private key on the node). The claim of every `pve.snippet.put`
+      (first put and replace-put) takes the per-target cleanup lock of the
+      removal target (recorded node host ID plus snippet path) and
+      increments its dispatch generation in the claim transaction, as a
+      removal claim does (decision 7, *Serialization with PK-08*,
+      *Two-way invalidation*). It holds the lock until the put's outcome
+      is resolved (its result, or the node bound as above) or recorded
+      `unknown` on that removal target, which is then an unresolved prior
+      mutation there (decision 7, *Unresolved prior mutation*): no snippet
+      removal is claimed or dispatched on that target, automatic or PK-08,
+      until the put is resolved read-only by the bound, measured from the
+      put's persisted intent, or the operator records the acknowledgement
+      (b). A put in flight across a restart becomes `unknown` on the
+      removal target at startup (decision 7, *Restart with a dispatch in
+      flight*).
    2. Present, the fingerprint equals the recorded one, the recorded key
       was generated less than the preset key age bound ago (a named
       constant next to the reconciler, `presetKeyMaxAge`, proposed 15
@@ -831,7 +850,8 @@ unnecessary").
    `unknown` written at startup, see *Restart with a dispatch in flight*),
    the flag reason, for an "outcome conflict" both observations (task
    state and config read), and the spent step claims with their fsynced
-   intents (including the node action version, its enforcement flag and
+   intents (forward claims and snippet puts included, previously
+   cleanup claims only; including the node action version, its enforcement flag and
    the pre-claim node clock read, see *Unresolved prior mutation*;
    previously the flag reason, the conflict observations, the action
    version, the enforcement flag and the clock read were not listed), which the read-only
@@ -949,8 +969,9 @@ unnecessary").
      both dispatch on one recorded target under different step IDs, which
      the spent-ID check does not catch). The executor holds one cleanup
      lock per recorded target (recorded node host ID plus snippet path for
-     `pve.snippet.remove`; remote, node and VMID for the `cicustom`
-     delete). Every cleanup dispatch, automatic or PK-08, takes that lock
+     `pve.snippet.remove`, also taken by every `pve.snippet.put` claim, see
+     *Reconciling a lost snippet write* (previously the put took no lock);
+     remote, node and VMID for the `cicustom` delete). Every cleanup dispatch, automatic or PK-08, takes that lock
      in the same atomic step as its claim and holds it until the outcome of
      that dispatch is resolved (task identified and terminal, or for
      `pve.snippet.remove` the action's result or the node-side
@@ -1046,7 +1067,10 @@ unnecessary").
      apply to `pve.snippet.put` (previously defined only for remove), and
      the stat of *Reconciling a lost snippet write* treats a put as lost
      only once the same bound has passed, so a late put cannot land after
-     the stat.
+     the stat; while the put is unresolved it holds the removal target's
+     lock or its `unknown` is recorded on that target, either of which
+     blocks every removal claim there (previously recorded on the put
+     only).
      For the `cicustom` delete it is resolved only
      by an identified terminal task as for forward steps. Until then the
      operator's only PK-08 choice for that step is the acknowledgement (b)
@@ -1074,17 +1098,33 @@ unnecessary").
      after a crash, a PK-08 approval made against the already incremented
      generation could redispatch an uncertain mutation). The persisted
      claims replace the lock across a restart: at startup, before any
-     cleanup claim is accepted, every spent claim (automatic or PK-08) with
-     an fsynced intent and no recorded outcome is recorded as outcome
-     `unknown` on its target, which is then an unresolved prior mutation
-     as above, and the run is flagged "snippet cleanup pending". A PK-08
-     claim on that target refuses (not spent) until the outcome is
-     reconciled read-only (for `pve.snippet.remove` by the bound above,
+     claim is accepted, every spent claim of the job with an fsynced
+     intent and no recorded outcome is recorded as outcome `unknown` and
+     the run is flagged "snippet cleanup pending" (previously only cleanup
+     claims, automatic or PK-08, so a forward step or snippet put in
+     flight at the crash left no `unknown` and a PK-08 removal was not
+     blocked by a late put). That covers cleanup claims (snippet removal,
+     `cicustom` delete, regenerate; automatic or PK-08) and forward
+     claims (snippet put and replace-put, clone, config set, resize,
+     start). The `unknown` is recorded on the target the late mutation
+     could touch: a cleanup claim on its own target; a snippet put on the
+     removal target (recorded node host ID plus snippet path, see
+     *Reconciling a lost snippet write*); a clone, config set, resize or
+     start on the guest (recorded remote, node and VMID), the target of
+     the `cicustom` delete and the regenerate, with the rules of *Forward
+     step outcome unknown* and *Start outcome unknown*. Each is then an
+     unresolved prior mutation as above. A PK-08 claim on that target
+     refuses (not spent) until the outcome is reconciled read-only (for
+     `pve.snippet.remove` and `pve.snippet.put` by the bound above,
      measured from the persisted intent timestamp; for the `cicustom`
-     delete by an identified terminal task) or the operator records the
-     acknowledgement (b). Read-only reconciliation is allowed in any
-     lifetime and grants no authority; a resolution after the restart only
-     lifts the refusal and never triggers a mutation by itself.
+     delete and the regenerate by an identified terminal task; for the
+     forward steps by the rules of *Forward step outcome unknown* and
+     *Start outcome unknown*, where a conflict counts as terminal as
+     stated there) or the operator records the acknowledgement (b). Read-only
+     reconciliation is allowed in any lifetime and grants no authority; a
+     resolution after the restart only lifts the refusal and never
+     triggers a mutation by itself (no replace-put, no next forward step,
+     no start).
    - Read-only checks (for example `pve.snippet.stat`, reading the guest
      config for the VMID proof, polling a stored UPID) are not mutations and
      may repeat; they never grant or extend mutation authority.
