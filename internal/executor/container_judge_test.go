@@ -241,7 +241,7 @@ func TestComposeResultParserRejectsHostileInput(t *testing.T) {
 		"bad state":        mut(func(r *composeUpdateResult) { r.After[0].State = "running; rm -rf /" }),
 		"bad health":       mut(func(r *composeUpdateResult) { r.After[0].Health = "fine" }),
 		"zero replica":     mut(func(r *composeUpdateResult) { r.After[0].Replica = "0" }),
-		"unsafe reference": mut(func(r *composeUpdateResult) { r.After[0].RunningReference = "nginx‮" }),
+		"unsafe reference": mut(func(r *composeUpdateResult) { r.After[0].RunningReference = "nginx" + string(rune(0x202e)) }),
 		"control in port":  mut(func(r *composeUpdateResult) { r.After[0].Ports = []string{"80\n"} }),
 		"too many ports": mut(func(r *composeUpdateResult) {
 			r.After[0].Ports = make([]string, maxSnapshotPorts+1)

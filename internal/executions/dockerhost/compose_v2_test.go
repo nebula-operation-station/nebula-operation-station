@@ -112,7 +112,7 @@ func TestComposeUpdateV2RejectsMalformed(t *testing.T) {
 		}
 	}
 	// Unsafe display values are dropped, never shown.
-	e := v2Entry("1", "web", "1", "none", "80/tcp‮->x")
+	e := v2Entry("1", "web", "1", "none", "80/tcp"+string(rune(0x202e))+"->x")
 	e["running_reference"] = "nginx\x1b[31m"
 	c, err := ParseComposeUpdate(v2Result(t, map[string]any{"phase": "after_snapshot", "up_exit": 0, "baseline": []any{e}, "after": []any{e}}))
 	if err != nil || len(c.After) != 1 || c.After[0].Ports != "" || c.After[0].Image != "" {
