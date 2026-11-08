@@ -454,12 +454,14 @@ func TestContainerMemberRefusedWithUnpinnedArtifactOrVersion(t *testing.T) {
 	}
 }
 
-// The executor as shipped pins only the shipped 2.0.0 update script and
-// the shipped 1.0.0 rollback script, so another trusted 2.0.0 artifact is
-// refused and never runs.
+// The executor as shipped pins only the shipped 2.0.0 update script, the
+// shipped 1.0.0 rollback script and the shipped standalone 1.0.0 update and
+// rollback scripts, so another trusted 2.0.0 artifact is refused and never
+// runs.
 func TestShippedExecutorRefusesContainerMembers(t *testing.T) {
 	e := newContainerEnv(t, "web-1")
-	if !slices.Equal(e.svc.batchRun.composePins, []containerArtifact{shippedComposeUpdatePin(), shippedComposeRollbackPin()}) {
+	if !slices.Equal(e.svc.batchRun.composePins, []containerArtifact{shippedComposeUpdatePin(), shippedComposeRollbackPin(),
+		shippedStandaloneUpdatePin(), shippedStandaloneRollbackPin()}) {
 		t.Fatalf("pins %+v", e.svc.batchRun.composePins)
 	}
 	art := e.trustedScript(t, "shipped", 0, composeUpdateVersion)

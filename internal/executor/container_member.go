@@ -45,14 +45,21 @@ import (
 // artifact (composeRollbackArtifactSHA256), which recreates the bound
 // earlier definition from the retained images and pulls nothing, and only
 // after checkRollbackMember accepted it against the recorded update.
+// A standalone member (cu05) runs only the pinned docker.update or
+// docker.rollback 1.0.0 artifact, which recreates the container from the
+// operator's stored definition; the executor adds that definition as the
+// run secret "definition" (container_standalone.go).
 
 // composeUpdateAction and composeRollbackAction are the container mutations
 // that run: a public compose update (cu02) and its rollback (cu03).
-// Standalone definitions (cu05) and private registry transfer (cu06) are
-// refused here until their executor-side checks exist.
+// standaloneUpdateAction and standaloneRollbackAction are their standalone
+// forms (cu05). Private registry transfer (cu06) is refused here until its
+// executor-side checks exist.
 const (
-	composeUpdateAction   = "docker.compose_update"
-	composeRollbackAction = "docker.compose_rollback"
+	composeUpdateAction      = "docker.compose_update"
+	composeRollbackAction    = "docker.compose_rollback"
+	standaloneUpdateAction   = "docker.update"
+	standaloneRollbackAction = "docker.rollback"
 )
 
 const (
@@ -76,6 +83,23 @@ const (
 	// TestShippedComposeRollbackPinMatchesEmbeddedScript). Changing it is a
 	// reviewed change of this protected package.
 	composeRollbackArtifactSHA256 = "ac628df0cf626e85ba01b89095bf8c8a51b0316af1ea90921f19d0b2a7a45d79"
+
+	// standaloneUpdateVersion and standaloneRollbackVersion are the
+	// docker.update and docker.rollback module versions whose artifacts
+	// consume the standalone binding and the definition run secret (results
+	// standalone-update-v1 and standalone-rollback-v1).
+	standaloneUpdateVersion   = "1.0.0"
+	standaloneRollbackVersion = "1.0.0"
+	// standaloneUpdateArtifactSHA256 is the lowercase hex SHA-256 of
+	// internal/executions/actions/scripts/docker_update.sh as embedded in
+	// the server's catalog (checked by
+	// TestShippedStandalonePinsMatchEmbeddedScripts). Changing it is a
+	// reviewed change of this protected package.
+	standaloneUpdateArtifactSHA256 = "735f8b078985c5b0edbc983c8e74a5e789067560d0f7af517e26cda0b1ead6a4"
+	// standaloneRollbackArtifactSHA256 is the lowercase hex SHA-256 of
+	// internal/executions/actions/scripts/docker_rollback.sh, checked the
+	// same way.
+	standaloneRollbackArtifactSHA256 = "9d21136b63488f5d6b855e76ea1dabc842f7cf232761515a0aced05a4a8e1c3b"
 )
 
 // containerArtifact pins the one action, module version and artifact
@@ -100,16 +124,33 @@ func shippedComposeRollbackPin() containerArtifact {
 	return containerArtifact{ActionID: composeRollbackAction, ModuleVersion: composeRollbackVersion, SHA256: composeRollbackArtifactSHA256}
 }
 
-// shippedContainerPins are the pins of the shipped executor.
-func shippedContainerPins() []containerArtifact {
-	return []containerArtifact{shippedComposeUpdatePin(), shippedComposeRollbackPin()}
+// shippedStandaloneUpdatePin is the docker.update artifact of the shipped
+// executor.
+func shippedStandaloneUpdatePin() containerArtifact {
+	return containerArtifact{ActionID: standaloneUpdateAction, ModuleVersion: standaloneUpdateVersion, SHA256: standaloneUpdateArtifactSHA256}
 }
 
-// containerMemberForms is what a container member may be: per action ID,
-// the binding kind it must carry (always form compose, public).
-var containerMemberForms = map[string]string{
-	composeUpdateAction:   canonical.ContainerUpdateKindUpdate,
-	composeRollbackAction: canonical.ContainerUpdateKindRollback,
+// shippedStandaloneRollbackPin is the docker.rollback artifact of the
+// shipped executor.
+func shippedStandaloneRollbackPin() containerArtifact {
+	return containerArtifact{ActionID: standaloneRollbackAction, ModuleVersion: standaloneRollbackVersion, SHA256: standaloneRollbackArtifactSHA256}
+}
+
+// shippedContainerPins are the pins of the shipped executor.
+func shippedContainerPins() []containerArtifact {
+	return []containerArtifact{shippedComposeUpdatePin(), shippedComposeRollbackPin(), shippedStandaloneUpdatePin(), shippedStandaloneRollbackPin()}
+}
+
+// containerMemberForm is the binding kind and form a container action must
+// carry (always public).
+type containerMemberForm struct{ kind, form string }
+
+// containerMemberForms is what a container member may be, per action ID.
+var containerMemberForms = map[string]containerMemberForm{
+	composeUpdateAction:      {canonical.ContainerUpdateKindUpdate, canonical.ContainerUpdateFormCompose},
+	composeRollbackAction:    {canonical.ContainerUpdateKindRollback, canonical.ContainerUpdateFormCompose},
+	standaloneUpdateAction:   {canonical.ContainerUpdateKindUpdate, canonical.ContainerUpdateFormAlone},
+	standaloneRollbackAction: {canonical.ContainerUpdateKindRollback, canonical.ContainerUpdateFormAlone},
 }
 
 const (
@@ -135,9 +176,9 @@ var (
 	// errContainerBinding: a container member without its update binding,
 	// or with an inspect-derived container binding instead.
 	errContainerBinding = errors.New("container member needs its frozen update binding and no inspect-derived binding")
-	// errContainerUnsupported: standalone and private registry members are
-	// not executed yet, and an action carries only its own binding kind.
-	errContainerUnsupported = errors.New("only public compose updates and their rollbacks are executed (standalone: cu05, private registry: cu06)")
+	// errContainerUnsupported: private registry members are not executed
+	// yet, and an action carries only its own binding kind and form.
+	errContainerUnsupported = errors.New("only public compose and standalone updates and their rollbacks are executed, each with its own binding kind and form (private registry: cu06)")
 	// errContainerParameters: the approved parameters are not the
 	// rendering of the frozen binding.
 	errContainerParameters = errors.New("parameters are not the rendering of the frozen binding")
@@ -167,8 +208,8 @@ func checkContainerMember(m canonical.BatchMember, params []byte, pins ...contai
 		return errContainerBinding
 	}
 	u := *m.ContainerUpdate
-	kind, ok := containerMemberForms[m.Request.ActionID]
-	if !ok || u.Kind != kind || u.Form != canonical.ContainerUpdateFormCompose || u.Registry != nil {
+	f, ok := containerMemberForms[m.Request.ActionID]
+	if !ok || u.Kind != f.kind || u.Form != f.form || u.Registry != nil {
 		return errContainerUnsupported
 	}
 	if !slices.ContainsFunc(pins, func(p containerArtifact) bool {
@@ -215,6 +256,11 @@ func (s *Service) durableMemberTransport(ctx context.Context, x *batchExec, call
 		err = checkContainerMember(run.Member, run.Parameters, x.composePins...)
 	}
 	if err == nil {
+		// A standalone member's definition again, right before the host:
+		// unchanged since the claim and still of an accepted shape.
+		err = s.recheckStandaloneDefinition(run.Member.ContainerUpdate, call.hostID, call.secrets)
+	}
+	if err == nil {
 		// The row that keeps the prior image and definition exists before
 		// anything can change on the host (R9).
 		err = s.recordRecreationIntent(run, call.hostID, call.fingerprint)
@@ -229,8 +275,13 @@ func (s *Service) durableMemberTransport(ctx context.Context, x *batchExec, call
 	// The handoff is not cut by the caller hanging up: a cut-off dispatch
 	// leaves a half-stored job that only ends after stuckDispatched.
 	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), containerDispatchTimeout)
-	outcome, detail, err := x.durable(dctx, c.Client, s.jobs, run.ExecutionID, run.Parameters, call.artifact, call.timeout)
+	outcome, detail, err := x.durable(dctx, c.Client, s.jobs, run.ExecutionID, run.Parameters, call.artifact, call.timeout, call.secrets...)
 	cancel()
+	// The definition was handed over (or not); the executor keeps no copy.
+	for _, sec := range call.secrets {
+		clear(sec.Value)
+	}
+	call.secrets = nil
 	switch {
 	case err != nil:
 		// The connection broke during dispatch: the reconciler finds out

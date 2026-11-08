@@ -329,7 +329,8 @@ func TestShippedComposeRollbackPinMatchesEmbeddedScript(t *testing.T) {
 	if pin.ActionID != composeRollbackAction || pin.ModuleVersion != "1.0.0" || pin.SHA256 == composeUpdateArtifactSHA256 {
 		t.Fatalf("pin %+v", pin)
 	}
-	if !slices.Equal(shippedContainerPins(), []containerArtifact{shippedComposeUpdatePin(), pin}) {
+	if !slices.Equal(shippedContainerPins(), []containerArtifact{shippedComposeUpdatePin(), pin,
+		shippedStandaloneUpdatePin(), shippedStandaloneRollbackPin()}) {
 		t.Fatalf("shipped pins %+v", shippedContainerPins())
 	}
 	_, _, rb := rollbackFixture(t, time.Now())
