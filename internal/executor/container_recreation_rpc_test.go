@@ -5,6 +5,7 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -319,9 +320,26 @@ func previewResult(t *testing.T, reason string, targets []pvTarget) []byte {
 }
 
 // resolveRow writes an uncertain update row of e.host whose run finished
-// now and returns its execution ID. With open, the row's run is left
-// unfinished.
+// now, with its target's hold ended now, and returns its execution ID.
+// With open, the row's run is left unfinished and no hold end is recorded.
 func resolveRow(t *testing.T, e *reconcileEnv, state string, open bool) string {
+	t.Helper()
+	class := "unknown"
+	if open {
+		class = ""
+	}
+	exec := resolveRowOf(t, e, state, class)
+	if !open {
+		if err := e.db.MarkContainerRecreationHoldEnded(exec, e.host); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return exec
+}
+
+// resolveRowOf writes a row of e.host in state whose run finished now with
+// class ("" leaves it unfinished). No hold end is recorded.
+func resolveRowOf(t *testing.T, e *reconcileEnv, state, class string) string {
 	t.Helper()
 	run := testDispatchRun(t, testComposeUpdate())
 	run.ExecutionID = newTestUUID()
@@ -336,8 +354,8 @@ func resolveRow(t *testing.T, e *reconcileEnv, state string, open bool) string {
 		Endpoints: []string{"127.0.0.1:22"}, Fingerprint: e.fp, Timeout: time.Hour, ActionID: composeUpdateAction, MemberID: "member-0"}); err != nil {
 		t.Fatal(err)
 	}
-	if !open {
-		if err := e.db.FinishRun(executordb.Run{ExecutionID: run.ExecutionID, HostID: e.host, Class: "unknown"}); err != nil {
+	if class != "" {
+		if err := e.db.FinishRun(executordb.Run{ExecutionID: run.ExecutionID, HostID: e.host, Class: class}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -513,6 +531,112 @@ func TestResolveRefusesWrongEvidence(t *testing.T) {
 	}
 	if len(e.logs.find("container_recreation_resolved", "")) != 0 {
 		t.Fatal("a refused resolve was audited as resolved")
+	}
+}
+
+// testHoldExec gives e's service a batch execution state that only holds
+// targets (persisted in a temporary directory).
+func testHoldExec(t *testing.T, e *reconcileEnv) *batchExec {
+	t.Helper()
+	x := &batchExec{calls: map[string]*batchMemberCall{}, hosts: map[string]string{}, held: map[string]*heldTarget{},
+		holdPath: filepath.Join(t.TempDir(), batchHeldFile), writeHeld: writeFileAtomic}
+	e.svc.batchRun = x
+	return x
+}
+
+// A resolve needs a preview that started after the row's target's hold
+// ended (R11), not only after the row's run finished: holdHost keeps the
+// target held after the member returned while the job may still change
+// containers. While the target is held every resolve is refused; a preview
+// taken during the hold stays refused after the hold ended, by every path
+// that ends a hold; only a preview started after the hold ended resolves.
+func TestResolveNeedsPreviewAfterHoldEnded(t *testing.T) {
+	ctx := context.Background()
+	for name, c := range map[string]struct {
+		durable bool
+		end     func(t *testing.T, e *reconcileEnv, x *batchExec, exec string)
+	}{
+		// The member's run is over while it runs here: the reservation ends.
+		"reservation released": {false, func(_ *testing.T, e *reconcileEnv, x *batchExec, exec string) { e.svc.releaseTarget(x, e.host, exec) }},
+		// The durable job is reconciled as over after the member returned.
+		"durable job reconciled": {true, func(_ *testing.T, e *reconcileEnv, _ *batchExec, exec string) {
+			e.svc.memberRunFinished(exec, e.host, "failed")
+		}},
+		// A recheck finds the durable job's run over.
+		"durable hold rechecked": {true, func(t *testing.T, e *reconcileEnv, x *batchExec, _ string) {
+			if !e.svc.recheckHeld(ctx, x, e.host) {
+				t.Fatal("recheck did not free the target")
+			}
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newReconcileEnv(t)
+			x := testHoldExec(t, e)
+			exec := resolveRowOf(t, e, executordb.RecreationUncertain, "failed")
+			// An earlier hold end is recorded (a stale hold file restored
+			// after a restart holds the target again), so the held check
+			// alone refuses below.
+			if err := e.db.MarkContainerRecreationHoldEnded(exec, e.host); err != nil {
+				t.Fatal(err)
+			}
+			call := &batchMemberCall{hostID: e.host, fingerprint: "SHA256:k", endpoints: []string{"127.0.0.1:22"}, durable: c.durable}
+			if ok, err := e.svc.reserveTarget(x, e.host, exec, call); !ok || err != nil {
+				t.Fatalf("reserve %v %v", ok, err)
+			}
+			if c.durable {
+				// The member returned; the durable job may still run.
+				e.svc.holdHost(x, e.host, exec, call)
+			}
+			nextSecond()
+			during := previewRunOn(t, e, e.host, updatePreviewAction, "", "success", previewResult(t, "", frozenTargets()))
+
+			// The target is held: refused, whatever the preview.
+			_, err := resolveAs(t, e, trustTestAdminUID, exec, during)
+			wantRefusal(t, "held target", err, errResolveRunOpen)
+			requireState(t, e, exec, executordb.RecreationUncertain)
+
+			nextSecond()
+			c.end(t, e, x, exec)
+			if held := e.svc.HeldBatchTargets(); len(held) != 0 {
+				t.Fatalf("still held: %+v", held)
+			}
+			row := requireState(t, e, exec, executordb.RecreationUncertain)
+			if row.HoldEndedAt.IsZero() {
+				t.Fatal("the hold end was not recorded")
+			}
+			// The preview from during the hold stays refused.
+			_, err = resolveAs(t, e, trustTestAdminUID, exec, during)
+			wantRefusal(t, "preview during the hold", err, errResolveTooEarly)
+			requireState(t, e, exec, executordb.RecreationUncertain)
+
+			nextSecond()
+			after := previewRunOn(t, e, e.host, updatePreviewAction, "", "success", previewResult(t, "", frozenTargets()))
+			if _, err := resolveAs(t, e, trustTestAdminUID, exec, after); err != nil {
+				t.Fatalf("preview after the hold: %v", err)
+			}
+			requireState(t, e, exec, executordb.RecreationNotRecreated)
+		})
+	}
+}
+
+// A row whose target's hold end is unknown (none recorded, for example a
+// row from before the hold end was kept) is never resolved (fail closed).
+func TestResolveRefusesUnknownHoldEnd(t *testing.T) {
+	e := newReconcileEnv(t)
+	exec := resolveRowOf(t, e, executordb.RecreationUncertain, "failed")
+	nextSecond()
+	preview := previewRunOn(t, e, e.host, updatePreviewAction, "", "success", previewResult(t, "", frozenTargets()))
+	_, err := resolveAs(t, e, trustTestAdminUID, exec, preview)
+	wantRefusal(t, "unknown hold end", err, errResolveHoldUnknown)
+	requireState(t, e, exec, executordb.RecreationUncertain)
+}
+
+// wantRefusal fails unless err is exactly the refusal want (code and
+// message).
+func wantRefusal(t *testing.T, what string, err, want error) {
+	t.Helper()
+	if status.Code(err) != status.Code(want) || status.Convert(err).Message() != status.Convert(want).Message() {
+		t.Fatalf("%s: %v, want %v", what, err, want)
 	}
 }
 

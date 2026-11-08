@@ -311,8 +311,12 @@ func (s *Service) releaseTarget(x *batchExec, hostID, executionID string) {
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	if h := x.held[hostID]; h != nil && h.running && h.executionID == executionID {
-		delete(x.held, hostID)
-		_ = s.saveHeldLocked(x)
+		if !s.endHoldLocked(x, hostID, executionID) {
+			// The hold end is not recorded: the target stays held and is
+			// rechecked before the next member starts there.
+			h.running = false
+		}
+		return
 	}
 	if x.hosts[hostID] == executionID {
 		delete(x.hosts, hostID)
@@ -364,14 +368,9 @@ func (s *Service) recheckHeld(ctx context.Context, x *batchExec, hostID string) 
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	h.checking = false
-	if !gone || x.held[hostID] != h {
+	if !gone || x.held[hostID] != h || !s.endHoldLocked(x, hostID, h.executionID) {
 		return false
 	}
-	delete(x.held, hostID)
-	delete(x.hosts, hostID)
-	// A failed write leaves the stale hold in the file (a restart holds
-	// the target again and rechecks it) and is audited.
-	_ = s.saveHeldLocked(x)
 	s.log.Info("audit", "kind", "batch_target_released", "execution", h.executionID, "host", hostID,
 		"detail", "the held run is no longer running on the target")
 	return true

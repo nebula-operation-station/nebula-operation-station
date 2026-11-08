@@ -48,14 +48,15 @@ const (
 
 // Resolve refusals. Each leaves the row as it is.
 var (
-	errResolveSession   = status.Error(codes.FailedPrecondition, "resolve_refused: a privileged session is required")
-	errResolveNotRow    = status.Error(codes.NotFound, "resolve_refused: no container recreation for the execution")
-	errResolveState     = status.Error(codes.FailedPrecondition, "resolve_refused: only an uncertain row is resolved")
-	errResolveRunOpen   = status.Error(codes.FailedPrecondition, "resolve_refused: the row's run is not finished or its target is still held")
-	errResolveNoPreview = status.Error(codes.FailedPrecondition, "resolve_refused: no finished durable docker.update_preview run of the row's host with that execution ID")
-	errResolveReleased  = status.Error(codes.FailedPrecondition, "resolve_refused: the preview's result was released or is empty")
-	errResolveTooEarly  = status.Error(codes.FailedPrecondition, "resolve_refused: the preview did not start after the row's run finished")
-	errResolveEvidence  = status.Error(codes.FailedPrecondition, "resolve_refused: the preview cannot resolve the row; it stays uncertain")
+	errResolveSession     = status.Error(codes.FailedPrecondition, "resolve_refused: a privileged session is required")
+	errResolveNotRow      = status.Error(codes.NotFound, "resolve_refused: no container recreation for the execution")
+	errResolveState       = status.Error(codes.FailedPrecondition, "resolve_refused: only an uncertain row is resolved")
+	errResolveRunOpen     = status.Error(codes.FailedPrecondition, "resolve_refused: the row's run is not finished or its target is still held")
+	errResolveNoPreview   = status.Error(codes.FailedPrecondition, "resolve_refused: no finished durable docker.update_preview run of the row's host with that execution ID")
+	errResolveReleased    = status.Error(codes.FailedPrecondition, "resolve_refused: the preview's result was released or is empty")
+	errResolveHoldUnknown = status.Error(codes.FailedPrecondition, "resolve_refused: when the row's target's hold ended is unknown")
+	errResolveTooEarly    = status.Error(codes.FailedPrecondition, "resolve_refused: the preview did not start after the row's run finished and its target's hold ended")
+	errResolveEvidence    = status.Error(codes.FailedPrecondition, "resolve_refused: the preview cannot resolve the row; it stays uncertain")
 )
 
 // ListContainerRecreations lists sanitized recreation rows of one host, or
@@ -318,6 +319,11 @@ func (s *Service) ResolveContainerRecreation(ctx context.Context, in *pb.Resolve
 			return nil, errResolveRunOpen
 		}
 	}
+	if row.HoldEndedAt.IsZero() {
+		// When the target's hold ended is unknown: no preview is known to
+		// have started after it (fail closed).
+		return nil, errResolveHoldUnknown
+	}
 	// The evidence comes from the runs table only: an attached run has no
 	// row there, so it can never resolve.
 	pv, err := s.db.GetRun(previewID, row.HostID)
@@ -328,7 +334,9 @@ func (s *Service) ResolveContainerRecreation(ctx context.Context, in *pb.Resolve
 	if pv.Released || len(pv.Result) == 0 {
 		return nil, errResolveReleased
 	}
-	if !pv.CreatedAt.After(own.FinishedAt) {
+	// The hold end is recorded when the target's hold ends, which is never
+	// before the run finished; both bound the preview's start.
+	if !pv.CreatedAt.After(own.FinishedAt) || !pv.CreatedAt.After(row.HoldEndedAt) {
 		return nil, errResolveTooEarly
 	}
 	var u canonical.BatchContainerUpdate
