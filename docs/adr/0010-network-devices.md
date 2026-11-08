@@ -363,8 +363,12 @@ digest of any candidate text.
   question Q13.
 - Redaction replaces values with `<redacted:FP>`, where FP is the first
   8 hex characters of **HMAC-SHA-256** under the device's fingerprint key
-  over the field identity (CBS keyword, PAN-OS element path) and the value
-  (previously: a salted SHA-256). A changed secret still shows up as a diff
+  over the field identity and the value (previously: a salted SHA-256).
+  The field identity is the full line identity, not only the keyword: for
+  CBS the keyword plus the identifying fields of the line (for example
+  `username <name>`, the RADIUS server address), for PAN-OS the element
+  path with all names (previously: the CBS keyword only, which gave the
+  same fingerprint for one password reused by two local users). A changed secret still shows up as a diff
   line; without the key the server can neither test guesses nor compare
   values across devices or fields. No hand-made salting or other
   construction is used (AGENTS.md rule 4); HMAC comes from `crypto/hmac`.
@@ -458,7 +462,7 @@ revision. Rules for every change:
 | Shut / no shut an access port | CBS | MEDIUM on an edge port, HIGH otherwise |
 | Add or remove a VLAN on a trunk's allowed list | CBS | HIGH |
 | Persist running to startup config (`copy running-config startup-config`, *verify* prompt) | CBS | MEDIUM, separate approval bound to the verified `raw_digest` |
-| Add / edit an address object or group not referenced by any rule, before or after the change (also not through nested groups or a dynamic group tag match) | PAN-OS | MEDIUM |
+| Add / edit an address object or group not referenced by any rule, before or after the change (also not through nested groups or a dynamic group tag match) | PAN-OS | MEDIUM (effective HIGH under the default firewall criticality, see below) |
 | Edit an address object or group referenced by a rule (directly, through nested groups, or through a dynamic group whose filter matches its tags) | PAN-OS | HIGH; CRITICAL through the path rule below |
 | Add a security rule at an exact position | PAN-OS | HIGH |
 | Disable / enable a security rule | PAN-OS | HIGH |
@@ -468,10 +472,19 @@ revision. Rules for every change:
 
 - **Port roles** are executor-owned, like host criticality: `edge`,
   `uplink`, `management`, `nos-path`, `unknown`. The admin sets them through
-  the CLI or a MEDIUM-approved change; LLDP or MAC data can only *suggest*
-  a role. `unknown` counts as `uplink`.
+  the CLI or an approved change; LLDP or MAC data can only *suggest* a
+  role. `unknown` counts as `uplink`. Raising a role (towards a higher
+  floor) is a MEDIUM change; lowering one is approved at the floor of the
+  **old** role (previously: any role change was MEDIUM, so one MEDIUM
+  approval could unlock MEDIUM changes on an uplink), and a `nos-path` role
+  is removed only through the executor CLI by the admin UID, never through a
+  server-proposed change.
+- **Role floors apply to every operation on the port, independent of MAC
+  age** (previously: only the 24-hour MAC rule below reached CRITICAL):
+  `nos-path` **CRITICAL**; `management` at least **HIGH**; `uplink` and
+  `unknown` **HIGH**; `edge` no floor.
 - Uplinks, trunks, LAG members and any port carrying the switch's
-  management VLAN: **HIGH**.
+  management VLAN: **HIGH**, whatever their role.
 - **CRITICAL: anything that can cut NOS's own management path**: a port
   where the MAC of the NOS machine, its default gateway or another managed
   switch on NOS's path was learned in the last 24 h; the management VLAN or
@@ -485,9 +498,11 @@ revision. Rules for every change:
   rule. If the MAC table, LLDP data or firewall policy needed to decide is
   stale, incomplete or missing, the floor is CRITICAL.
 - **Object edits go through the rules that use them** (previously: a
-  referenced object edit was fixed at HIGH). An address object, address
-  group or service object/group changes the effective match of every rule
-  that references it. For such an edit the executor, from its own fresh read
+  referenced object edit was fixed at HIGH). An address object or address
+  group changes the effective match of every rule that references it.
+  Service objects and service groups are **not** in the initial operation
+  set; if a later revision adds them, the same rule applies with the NOS
+  path's ports and protocols as the overlap test. For such an edit the executor, from its own fresh read
   bound by the precheck digest, finds every security and NAT rule that
   references the object directly, through nested groups (to the group depth
   limit), or through a dynamic address group whose tag filter matches the
@@ -499,7 +514,13 @@ revision. Rules for every change:
   counts as overlapping. Only an object that no rule references, directly
   or indirectly, keeps the MEDIUM base.
 - Risk is the maximum of operation base, port role, device criticality
-  (executor-owned, default HIGH for firewalls) and the path rule above.
+  (executor-owned, default HIGH for firewalls and MEDIUM for switches) and
+  the path rule above. With the default firewall criticality **every
+  PAN-OS change is at least HIGH**, including the MEDIUM-base unreferenced
+  object add or edit; that base matters only if the admin lowers the
+  firewall's criticality (executor-owned and changed like host
+  criticality, never by the server).
+  The plan's risk summary repeats exactly these classes.
 - **CRITICAL in phase 2a is refused**, as ADR 0006 does for containers. Phase
   2b may allow CRITICAL only with the dead-man rollback below and only after
   the maintainer decides Q6.
