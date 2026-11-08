@@ -443,7 +443,9 @@ mitigations M1 and M2.
   check fails*). If the guest reboots before cloud-init ran, or (c) ends
   the wait before cloud-init has read the drive, the guest generates its
   own keys and the join fails closed with a key mismatch. M1 shrinks the
-  window from minutes or hours to the clone-to-start interval, but a
+  window for the snippet and `cicustom` from minutes or hours to the
+  clone-to-start interval, and for the generated drive to the gate above
+  (previously "the window" without the drive), but a
   `VM.Audit` holder polling for new guests can still win the race, so M1
   alone is not sufficient.
 - **M2, `VM.Audit` precondition.** At proposal time, and again right
