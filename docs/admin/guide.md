@@ -683,23 +683,21 @@ bind mount under the **executor** service's `volumes` and recreate it:
 Keep `read_only: true` and the existing hardening settings. No mount is
 needed for an empty directory; it is already present in the image.
 
-While the bundle directory is missing, or holds none of the three files,
-the web UI shows "No release bundle is installed on this executor host" and
-built-ins stay untrusted; this is the normal state of a source or
-quickstart install. A partial set (one or two of the files), a symlinked
-bundle file, an unreadable directory or a bundle that fails
-signature verification is reported as built-in trust status unavailable
-instead; the executor log names the cause.
+While the bundle directory is missing, or is a real directory that holds
+none of the three files, the web banner says **No release bundle is
+installed on this executor host**, `nebula artifact trust-builtins` fails
+because there is nothing to review, and the built-ins stay untrusted. This is the normal
+state of a source or quickstart install without release attachments; it is
+not an error, and creating an empty directory does not grant trust.
 
-While the directory is empty, `nebula artifact trust-builtins` fails and
-the web banner still says **Built-in trust status is unreachable**. This is
-expected on a source/quickstart install without release attachments: the
-built-in provenance input has not been provisioned. Creating the directory
-does not grant trust. If the message persists with all three attachments
-present, check their readability, matching release, and the executor's
-trust store and logs; the message can also indicate a bundle or store read
-failure. A distinct web state for an intentionally empty directory is not
-currently available.
+Every other problem shows **Built-in trust status is unreachable**: a
+partial set (one or two of the files), a symlinked bundle directory or
+bundle file, an unreadable directory or file, attachments from different
+releases, a bundle that fails signature verification, or a trust store the
+executor cannot open (this last case wins even when no bundle is
+installed). The executor log names the cause; check the files' ownership
+and readability, that all three come from the same release, and the trust
+store.
 
 The executor checks the bundle against the release trust root, then the
 command shows, action by action: the old and new version, the
