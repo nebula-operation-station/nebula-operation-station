@@ -564,10 +564,19 @@ refused.
 
 1. Precheck (D5): running config version and `raw_digest` match, no
    pending candidate changes from anyone (*verify* the change-list call),
-   no config or commit lock held by another admin.
+   no config or commit lock held by another admin. This first check only
+   avoids taking locks needlessly; it is not relied on.
 2. Take a **config lock** and a **commit lock** for `nos-change`
    (`<request><config-lock><add>` and `<request><commit-lock><add>`,
-   *verify*).
+   *verify*). **Then repeat the whole precheck under the locks** (previously:
+   only before the locks, so another admin could add candidate edits in
+   between): running config version and `raw_digest` still equal the bound
+   ones and the candidate holds no pending change from anyone. Only this
+   second check makes the step-7 `revert` safe. If it fails, the executor
+   releases both locks **without** a revert (the pending edits belong to
+   someone else), sends nothing else and refuses the change (a new proposal
+   is needed); nothing was applied, so the result is `not_applied`. If a
+   lock cannot be taken, the change is refused the same way.
 3. Apply the bound `set`/`edit`/`move`/`delete` calls to the candidate
    config.
 4. Read the candidate subtree back and compare it with the bound expected
@@ -582,18 +591,36 @@ refused.
    rule appears in order, optional hit-count movement is a hint only).
 7. Release both locks. Any failure before commit: `revert` the candidate
    (`<revert><config/></revert>`, PAN-OS 9.0+, *verify*) and release locks.
-   Precondition: NOS still holds the config lock, so the candidate holds
-   only `nos-change`'s edits; if the lock was lost, the executor does not
-   revert (it could discard another admin's work) and marks the change
-   `unknown`.
+   Precondition: NOS still holds the config lock taken in step 2, and the
+   step-2 re-check showed an empty candidate, so the candidate holds only
+   `nos-change`'s edits. If the lock was lost or its state cannot be read,
+   the executor does not revert (it could discard another admin's work),
+   marks the change `unknown` and notifies. If the revert call itself fails,
+   the change is also `unknown`; the executor still tries to release the
+   locks.
+   **Locks when a change becomes `unknown`** (for example the commit job ID
+   was lost): the executor keeps both locks only for one bounded
+   reconciliation attempt (default at most 10 minutes, a named limit), so
+   no other admin commits while NOS cannot tell what was committed. Then it
+   releases both locks without a revert, whatever the outcome, and
+   notifies. Releasing does not weaken later rollbacks: every later NOS
+   write on the device (rollback or corrective change) takes fresh locks
+   and re-runs the step-2 check against the then-current state. If the
+   executor cannot release the locks (no session, change credential wiped
+   by a vault lock), the UI says so and names the device-side way to
+   remove them (a superuser removes the lock on the firewall, *verify*).
 8. **Rollback** after a commit: load the previous running config version
    into the candidate (`<load><config><version>N</version></config></load>`,
    *verify*) is coarse: it also reverts changes by other admins made later.
    The default rollback is therefore the bound inverse operation, under its
-   own approval, with the D5 precheck against the post-change state: the
-   running config version is the one NOS committed and `raw_digest` equals
-   the verified post-change digest, and no foreign candidate changes are
-   pending. "Load version N" is offered only under the same preconditions.
+   own approval, run through steps 1 to 7 with the precheck against the
+   post-change state: the running config version is the one NOS committed,
+   `raw_digest` equals the verified post-change digest, and no foreign
+   candidate change is pending (checked again under the locks). If any of
+   these fails, the rollback is refused, nothing is written, and a new typed
+   change must be proposed. "Load version N" is offered only under the same
+   preconditions and is refused the same way. A rollback that fails during
+   apply or whose outcome is uncertain is `unknown` like any change.
 
 PAN-OS has no device-side commit-confirmed timer like Junos (*verify*). The
 management interface is out of band, and security rules do not apply to
@@ -606,8 +633,37 @@ bound inverse change. Preconditions: NOS keeps the config and commit locks
 for the whole window (so no other admin can commit in between); at expiry
 the running version and `raw_digest` still equal the NOS commit's and no
 foreign candidate change is pending. If any precondition fails, the
-executor writes nothing, marks the change `unknown` and notifies. This is an
-automatic rollback and an explicit,
+executor writes nothing, marks the change `unknown` and notifies. If the
+inverse is applied and verified, the change is `rolled_back`; if applying it
+fails or its outcome is uncertain, the change is `unknown`.
+
+The dead-man lives in the executor, not on the device, so it only works
+while the executor runs with an unlocked vault. Its rules:
+
+- **Durable deadline.** The absolute deadline (wall-clock time from the
+  injected clock) is stored in the durable intent in `executor.db` before
+  the commit is sent. It does not live only in memory.
+- **Executor restart in the window.** On start the executor finds the open
+  dead-man in the durable intent. A confirmation that arrives after the
+  deadline is refused. If the deadline has passed or passes later and the
+  vault is unlocked, the executor runs the expiry check above (fresh locks
+  if NOS no longer holds them, then the step-2 check) and applies the
+  inverse only if every precondition holds. If the vault is still locked
+  after the restart, the next point applies.
+- **Vault locked in the window, or at expiry.** A vault lock wipes the
+  change credential, so the inverse cannot be sent. The executor does not
+  wait for an unlock: it marks the change `unknown` at the moment of the
+  lock (or at expiry if it finds the vault locked), records "dead-man not
+  executed: change credential unavailable", and notifies. The change then
+  stays applied. After unlock, the admin reviews and either confirms the
+  state as a new baseline or approves the bound inverse as an ordinary
+  rollback (step 8 preconditions). The locks held by `nos-change` cannot be
+  released without the credential; the UI states this as in step 7.
+- **Stated limit.** The dead-man is fail-open: an executor crash that does
+  not come back, or a vault lock, leaves the CRITICAL change in place. This
+  is weaker than the CBS device-side timer and is part of what Q6 decides.
+
+This is an automatic rollback and an explicit,
 bounded exception to ADR 0007 ("no automatic rollback"), so it needs the
 maintainer's decision Q6 and the spec revision.
 
@@ -618,6 +674,12 @@ Reconciliation reads the device with the read credential: if `raw_digest`
 equals the expected post-change digest, the result is `success`; if it
 equals the pre-change digest (and, for PAN-OS, no candidate change and no
 NOS commit job exist), it is `not_applied`; anything else stays `unknown`.
+A change with an open confirm window (CBS reload timer, PAN-OS dead-man) is
+never `success` before the admin's confirmation: reconciliation first
+checks the timer (CBS `show reload`, *verify*; PAN-OS the durable deadline),
+and while it is pending the change stays "awaiting confirmation". The
+rollback outcome governs: after a device reload or an applied inverse,
+running equal to the pre-change digest is `rolled_back`.
 An `unknown` device is blocked for further changes until the admin reviews
 the redacted diff and either accepts the current state as a new baseline or
 approves a corrective change. Nothing is ever re-sent automatically and no
