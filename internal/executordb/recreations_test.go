@@ -4,6 +4,8 @@ package executordb
 
 import (
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -108,6 +110,94 @@ func TestContainerRecreationStates(t *testing.T) {
 	all, err := db.ListContainerRecreations("web-1")
 	if err != nil || len(all) != 5 {
 		t.Fatalf("list %d %v", len(all), err)
+	}
+}
+
+// The reconcile pass reloads only intent rows whose run has finished, by
+// key, in bounded pages: a row whose run never finishes (or never ran) is
+// never loaded, and paging visits every finished row exactly once.
+func TestFinishedRecreationIntentsArePagedAndSkipUnfinished(t *testing.T) {
+	db := openAtT(t, privateDir(t), time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC))
+	exec := func(i int) string { return fmt.Sprintf("00000000-0000-4000-9000-%012d", 300+i) }
+	const finished = 7
+	var want []string
+	for i := 0; i < finished+3; i++ {
+		id := exec(i)
+		if err := db.CreateContainerRecreation(recRow(id)); err != nil {
+			t.Fatal(err)
+		}
+		if i == finished+2 {
+			continue // intent without a run
+		}
+		r := memberRun(id, fmt.Sprintf("m-%02d", i))
+		if err := db.CreateRun(r); err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case i == finished:
+			// dispatching forever
+		case i == finished+1:
+			if err := db.MarkRunRunning(id, r.HostID, "10.0.0.1:22"); err != nil {
+				t.Fatal(err)
+			}
+		default:
+			r.Class = "success"
+			if err := db.FinishRun(r); err != nil {
+				t.Fatal(err)
+			}
+			want = append(want, id)
+		}
+	}
+	// A finished run whose row already left intent is not listed.
+	done := exec(99)
+	if err := db.CreateContainerRecreation(recRow(done)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateRun(memberRun(done, "m-99")); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.FinishRun(Run{ExecutionID: done, HostID: "web-1", Class: "success"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CompleteContainerRecreation(done, RecreationCompletion{State: RecreationUncertain}, time.Now(), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	var got []string
+	var after RecreationIntentKey
+	pages := 0
+	for {
+		keys, err := db.FinishedRecreationIntents(after, 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pages++
+		if len(keys) > 3 {
+			t.Fatalf("page of %d keys over the limit 3", len(keys))
+		}
+		for _, k := range keys {
+			if k.HostID != "web-1" {
+				t.Fatalf("key %+v", k)
+			}
+			got = append(got, k.ExecutionID)
+		}
+		if len(keys) < 3 {
+			break
+		}
+		after = keys[len(keys)-1]
+		if pages > 10 {
+			t.Fatal("paging does not end")
+		}
+	}
+	if !slices.Equal(got, want) || pages != 3 {
+		t.Fatalf("%d pages, got %v, want %v", pages, got, want)
+	}
+	// A page size out of range is the maximum page.
+	for _, limit := range []int{0, -1, maxIntentPage + 1} {
+		keys, err := db.FinishedRecreationIntents(RecreationIntentKey{}, limit)
+		if err != nil || len(keys) != finished {
+			t.Fatalf("limit %d: %d keys %v", limit, len(keys), err)
+		}
 	}
 }
 

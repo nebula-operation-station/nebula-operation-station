@@ -156,6 +156,44 @@ func TestFinishedRunJudgedAfterCrashInIntent(t *testing.T) {
 	}
 }
 
+// The reconcile pass reloads finished intent rows in bounded pages and
+// still judges every one of them in one pass.
+func TestFinishedIntentsJudgedAcrossPages(t *testing.T) {
+	e := newContainerEnv(t, "web-1")
+	u := testComposeUpdate()
+	n := 2*intentReloadPage + 1
+	var execs []string
+	for i := 0; i < n; i++ {
+		exec := fmt.Sprintf("00000000-0000-4000-8000-%012d", 500+i)
+		execs = append(execs, exec)
+		run := testDispatchRun(t, u)
+		run.ExecutionID, run.Member.Request.ExecutionID = exec, exec
+		row, err := recreationIntent(run, "web-1", "SHA256:k")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := e.db.CreateContainerRecreation(row); err != nil {
+			t.Fatal(err)
+		}
+		r := executordb.Run{ExecutionID: exec, HostID: "web-1", Digest: hexOf("f"), Endpoints: []string{"127.0.0.1:22"},
+			Timeout: containerMutationTimeout, MemberID: fmt.Sprintf("member-%d", i), ActionID: composeUpdateAction}
+		if err := e.db.CreateRun(r); err != nil {
+			t.Fatal(err)
+		}
+		r.State, r.Class, r.Result = executordb.RunFinished, hostrun.ClassSuccess, mustResultJSON(t, passingComposeResultFor(u, exec))
+		if err := e.db.FinishRun(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.svc.ReconcileOnce(context.Background())
+	for _, exec := range execs {
+		got, err := e.db.GetContainerRecreation(exec)
+		if err != nil || got.State != executordb.RecreationRecreated || !got.Verdict.Passed {
+			t.Fatalf("row %s: %s %v %v", exec, got.State, got.Verdict.Findings, err)
+		}
+	}
+}
+
 // oversizeBaselineResult is a well-formed result within the result limit
 // whose baseline is over the row's baseline limit: extra baseline entries
 // with the most and longest mounts the parser allows.

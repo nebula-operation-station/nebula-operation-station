@@ -366,21 +366,33 @@ func containerMemberOutcome(class string, row executordb.ContainerRecreation) pe
 	return permit.OutcomeFailed
 }
 
+// intentReloadPage is the number of finished intent rows the reconcile
+// pass loads at a time.
+const intentReloadPage = 25
+
 // judgeFinishedIntents completes every intent row whose run has finished:
 // a crash between finishing the run and completing its row is judged on
-// the next reconcile pass, from the run's stored result.
+// the next reconcile pass, from the run's stored result. Rows are loaded
+// by key, page by page; a row whose run has not finished is not loaded.
 func (s *Service) judgeFinishedIntents() {
-	rows, err := s.db.ContainerRecreationsInIntent()
-	if err != nil {
-		s.log.Error("audit", "kind", "store_error", "op", "container_recreations_in_intent", "detail", err.Error())
-		return
-	}
-	for _, row := range rows {
-		r, err := s.db.GetRun(row.ExecutionID, row.HostID)
-		if err != nil || r.State != executordb.RunFinished {
-			continue
+	var after executordb.RecreationIntentKey
+	for {
+		keys, err := s.db.FinishedRecreationIntents(after, intentReloadPage)
+		if err != nil {
+			s.log.Error("audit", "kind", "store_error", "op", "finished_recreation_intents", "detail", err.Error())
+			return
 		}
-		s.memberRunFinished(r.ExecutionID, r.HostID, r.Class)
+		for _, k := range keys {
+			r, err := s.db.GetRun(k.ExecutionID, k.HostID)
+			if err != nil || r.State != executordb.RunFinished {
+				continue
+			}
+			s.memberRunFinished(r.ExecutionID, r.HostID, r.Class)
+		}
+		if len(keys) < intentReloadPage {
+			return
+		}
+		after = keys[len(keys)-1]
 	}
 }
 
