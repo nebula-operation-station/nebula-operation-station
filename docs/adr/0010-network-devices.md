@@ -628,10 +628,28 @@ admin out, or that need secrets.
    post-change digest of the original change; otherwise the inverse no
    longer describes the way back and is refused, and a new typed change
    must be proposed. It is also refused while a reload timer is pending
-   (step 2). The inverse runs through steps 1, 3 and 4; if a line fails or
-   the outcome is uncertain, the rollback is `unknown`. The inverse never
-   writes the startup config; persisting it is again the separate MEDIUM
-   approval.
+   (step 2). A rollback below CRITICAL runs through steps 1, 3 and 4.
+   **A CRITICAL rollback** (phase 2b only) runs through steps 1 to 5 like
+   any CRITICAL change (previously: steps 1, 3 and 4 only, so the rollback
+   of a CRITICAL change had no reload timer and no confirm window): the
+   reload timer is armed first, under the step-2 preconditions applied to
+   the rollback's own pre-state, i.e. running equals the verified
+   post-change digest **and** startup equals running. The reload must boot
+   into the state NOS last confirmed, not into the rollback's target; a
+   reload into a startup that already is the rollback's target is no safety
+   net if the rollback cuts the path. A CRITICAL rollback of a
+   non-persisted change is therefore refused until the admin has persisted
+   the confirmed post-change state (step 6); the other way back is a
+   reload into the pre-change startup done by the admin on the device
+   (NOS never sends `reload` without a timer; reboot is out of scope).
+   After arming, the startup re-reads,
+   the immediate cancel on a startup change, the confirm window and the
+   `reload cancel` only after postchecks and confirmation (step 5) apply
+   unchanged. Without confirmation the switch reloads into the post-change
+   state: the rollback is undone, its result is `rolled_back`, and the
+   original change stays in place. If a line fails or the outcome is
+   uncertain, the rollback is `unknown`. The inverse never writes the
+   startup config; persisting it is again the separate MEDIUM approval.
 
 If `reload in` does not exist on the lab firmware, CRITICAL CBS changes stay
 refused.
@@ -699,6 +717,15 @@ refused.
    change must be proposed. "Load version N" is offered only under the same
    preconditions and is refused the same way. A rollback that fails during
    apply or whose outcome is uncertain is `unknown` like any change.
+   **A CRITICAL rollback** (phase 2b only) also uses the executor dead-man
+   below with its confirm window and lock rule (previously: steps 1 to 7
+   only, so it had no dead-man): step 7 does not release the locks; the
+   admin must confirm within the window; without confirmation the executor
+   applies the rollback's own bound inverse, which is the original change
+   as committed and verified before, under the dead-man preconditions. The
+   rollback permit binds that inverse like any change permit (D5). "Load
+   version N" is not offered for a CRITICAL rollback, because its inverse
+   is not a typed operation.
 
 PAN-OS has no device-side commit-confirmed timer like Junos (*verify*). The
 management interface is out of band, and security rules do not apply to
@@ -734,8 +761,9 @@ while the executor runs with an unlocked vault. Its rules:
   lock (or at expiry if it finds the vault locked), records "dead-man not
   executed: change credential unavailable", and notifies. The change then
   stays applied. After unlock, the admin reviews and either confirms the
-  state as a new baseline or approves the bound inverse as an ordinary
-  rollback (step 8 preconditions). The locks held by `nos-change` cannot be
+  state as a new baseline or approves the bound inverse as a rollback
+  (step 8 preconditions, at its re-derived risk; if that is CRITICAL, the
+  rollback again runs under the dead-man). The locks held by `nos-change` cannot be
   released without the credential; the UI states this as in step 7.
 - **Stated limit.** The dead-man is fail-open: an executor crash that does
   not come back, or a vault lock, leaves the CRITICAL change in place. This
