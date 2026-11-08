@@ -467,6 +467,29 @@ revision. Rules for every change:
 | Add a security rule at an exact position | PAN-OS | HIGH |
 | Disable / enable a security rule | PAN-OS | HIGH |
 | Move a security rule to an exact position | PAN-OS | HIGH |
+| Delete a security rule, **only as the bound inverse** of an "add a security rule" | PAN-OS | HIGH |
+| Delete an address object or group, **only as the bound inverse** of an "add", and only while no rule references it (directly, nested or through a dynamic group); otherwise refused | PAN-OS | MEDIUM (effective HIGH under the default firewall criticality) |
+
+**Inverse operations.** Every bound inverse is itself one of the typed
+operations in this table (previously: inverses were bound but not listed,
+so "delete rule" had no stated risk). Port description, access VLAN,
+shut/no shut, trunk VLAN add/remove, rule disable/enable, rule move and
+object edit are their own inverses (the old value, the old state, the old
+position); "add" on PAN-OS is undone by the two delete rows above, which are
+not offered as standalone operations in phase 2. A change whose inverse
+cannot be expressed as an operation in this table is refused.
+
+**A rollback is a change** (previously: "the same risk" as the original).
+Its effective risk is the **maximum of the original change's effective risk
+and the risk the executor re-derives at rollback time** for the inverse
+operation, with the rules below applied to the then-current port roles,
+device criticality and a fresh read of MAC, LLDP and firewall policy data.
+A rollback is never approved below the original change's risk, and is
+raised if the device or the NOS path changed since (for example a rule
+whose deletion now removes an allow for NOS-path traffic). Every rule for
+changes of that risk applies to the rollback unchanged: CRITICAL is refused
+in phase 2a, and in phase 2b it runs only with the same device-side reload
+timer (CBS) or executor dead-man (PAN-OS) and confirm window (D6).
 
 **Risk floors (executor-derived, never lowered by the server).**
 
@@ -491,7 +514,8 @@ revision. Rules for every change:
   the switch's own IP interface; any firewall rule change whose source or
   destination overlaps the NOS machine's addresses, the management
   networks of devices or the path from NOS to managed hosts (Q4) (the
-  **NOS path**); disabling a rule that allows NOS-path traffic; moving,
+  **NOS path**); disabling or deleting a rule that allows NOS-path
+  traffic; moving,
   adding or enabling a deny/drop rule above a rule that allows NOS-path
   traffic. A deny
   above an allow that does not carry NOS-path traffic is not raised by this
@@ -595,8 +619,11 @@ admin out, or that need secrets.
    also restores the previous state; the UI shows "running differs from
    startup" prominently.
 7. **Rollback** of a non-persisted or persisted change is the inverse lines
-   bound in the original permit, executed under its own approval with the
-   same risk (never automatic, except the device-side reload in step 5).
+   bound in the original permit, executed under its own approval (never
+   automatic, except the device-side reload in step 5). Its risk is the
+   maximum of the original change's effective risk and the risk re-derived
+   at rollback time (D5, "A rollback is a change"; previously: "the same
+   risk").
    Precondition: the current running `raw_digest` equals the verified
    post-change digest of the original change; otherwise the inverse no
    longer describes the way back and is refused, and a new typed change
@@ -662,7 +689,9 @@ refused.
    into the candidate (`<load><config><version>N</version></config></load>`,
    *verify*) is coarse: it also reverts changes by other admins made later.
    The default rollback is therefore the bound inverse operation, under its
-   own approval, run through steps 1 to 7 with the precheck against the
+   own approval at the maximum of the original change's effective risk and
+   the risk re-derived at rollback time (D5, "A rollback is a change"), run
+   through steps 1 to 7 with the precheck against the
    post-change state: the running config version is the one NOS committed,
    `raw_digest` equals the verified post-change digest, and no foreign
    candidate change is pending (checked again under the locks). If any of
