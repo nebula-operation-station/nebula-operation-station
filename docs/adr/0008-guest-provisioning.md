@@ -801,7 +801,12 @@ unnecessary").
      none, so a later NOS `qmstart` for the same VMID with an unrecorded
      UPID could be adopted): the task must have started no later than the
      persisted dispatch-end timestamp (written when the request returned
-     or timed out) plus `taskClockSkewMax`. Exactly one match →
+     or timed out) plus `taskClockSkewMax`. With no dispatch-end
+     timestamp persisted (the executor crashed mid-dispatch, before the
+     request returned or timed out; previously undefined) the window has
+     no upper bound, so no task is adopted, even a single match, and the
+     outcome stays `unknown` as below; for a clone, config set or resize
+     the same missing timestamp means no identifiable task. Exactly one match →
      its UPID is persisted and reconciliation continues as above. Zero or
      several matches, an unreadable task list, or an expired task record →
      the outcome stays `unknown`: no cleanup step runs (the guest may be
@@ -1112,7 +1117,10 @@ unnecessary").
      *Reconciling a lost snippet write*); a clone, config set, resize or
      start on the guest (recorded remote, node and VMID), the target of
      the `cicustom` delete and the regenerate, with the rules of *Forward
-     step outcome unknown* and *Start outcome unknown*. Each is then an
+     step outcome unknown* and *Start outcome unknown*; a claim with no
+     persisted dispatch-end timestamp adopts no task from the node task
+     list, so without a stored UPID it has no identifiable task (a start
+     or clone stays `unknown`). Each is then an
      unresolved prior mutation as above. A PK-08 claim on that target
      refuses (not spent) until the outcome is reconciled read-only (for
      `pve.snippet.remove` and `pve.snippet.put` by the bound above,
