@@ -146,16 +146,20 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_SetPVERemoteSite_FullMethodName:    {admin},
 		pb.ExecutorService_ProposePVERepin_FullMethodName:     {admin},
 		pb.ExecutorService_CommitPVERepin_FullMethodName:      {admin},
-		// Typed guest power actions (ADR 0006 P2-01): the server may
-		// propose (the executor binds the exact guest and sets the risk);
-		// only the local admin commits, which dispatches the approved
-		// action. The server can never commit.
+		// Typed guest power actions (ADR 0006 P2-01): server and admin
+		// may propose (the executor binds the exact guest and sets the
+		// risk). Server and admin may commit (decision WA-05 variant (a),
+		// 2026-11-07, like guest provisioning below; before: admin only),
+		// which dispatches the action only with a permit approved for
+		// exactly this execution under the normal approval semantics (the
+		// user's security key assertion, user-verified from HIGH, or the
+		// CLI in hardened mode). The server can never approve.
 		pb.ExecutorService_ProposePVEGuestPower_FullMethodName: {server, admin},
-		pb.ExecutorService_CommitPVEGuestPower_FullMethodName:  {admin},
+		pb.ExecutorService_CommitPVEGuestPower_FullMethodName:  {server, admin},
 		// Typed guest snapshots (ADR 0006 P2-01): exactly like guest
-		// power. The server may propose; only the local admin commits.
+		// power, with the same commit decision (before: admin only).
 		pb.ExecutorService_ProposePVEGuestSnapshot_FullMethodName: {server, admin},
-		pb.ExecutorService_CommitPVEGuestSnapshot_FullMethodName:  {admin},
+		pb.ExecutorService_CommitPVEGuestSnapshot_FullMethodName:  {server, admin},
 		// Guest provisioning (ADR 0008 section 3, amendment 2026-11-03,
 		// variant B like guest join): server and admin may propose; server
 		// and admin may commit, which runs the provisioning only with a
