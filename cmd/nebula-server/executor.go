@@ -494,6 +494,26 @@ func (l *lazyExecutor) RunReadGrant(ctx context.Context, in *pb.RunReadGrantRequ
 	return nil, errNotConnected
 }
 
+// ListContainerRecreations and ResolveContainerRecreation back the
+// container rollback and resolve controls (ADR 0006 P2-04/P2-05, cu03,
+// cu04). The executor answers the list with sanitized rows and refuses a
+// resolve without its privileged session. The recovery plan RPCs are
+// admin only in the executor's role table, so the server has no
+// pass-through for them.
+func (l *lazyExecutor) ListContainerRecreations(ctx context.Context, in *pb.ListContainerRecreationsRequest, opts ...grpc.CallOption) (*pb.ListContainerRecreationsResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ListContainerRecreations(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) ResolveContainerRecreation(ctx context.Context, in *pb.ResolveContainerRecreationRequest, opts ...grpc.CallOption) (*pb.ResolveContainerRecreationResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ResolveContainerRecreation(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
 // GetSSHPublicKey backs the credential binding of host read lease
 // proposals (ADR 0007 E06): executions.Service reads the executor's SSH
 // key fingerprint by type assertion, so a missing method here would make
