@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"regexp"
 	"strconv"
@@ -305,7 +306,12 @@ func Decode(raw []byte, containerName string) (Definition, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var d Definition
-	if err := dec.Decode(&d); err != nil || dec.More() {
+	if err := dec.Decode(&d); err != nil {
+		return Definition{}, shapeErr("malformed encoding")
+	}
+	// Only whitespace may follow the object. dec.More is not enough: it
+	// reports false for a trailing `]` or `}`.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return Definition{}, shapeErr("malformed encoding")
 	}
 	if err := d.Validate(containerName); err != nil {
