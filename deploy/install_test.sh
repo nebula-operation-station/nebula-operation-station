@@ -138,6 +138,53 @@ run_rc 0 "valid multi-label rp-id" -- --admin-users "$test_user" --rp-id sub.dom
 run_rc 0 "valid single-label rp-id" -- --admin-users "$test_user" --rp-id nebula
 run_rc 0 "equals-form options" -- "--admin-users=${test_user}" "--rp-id=nebula.example.org"
 
+# --- Admin users must be in /etc/passwd (WA-12) --------------------------------
+# The executor is built CGO_ENABLED=0, so Go's user.Lookup reads /etc/passwd
+# only: an NSS-only admin (LDAP, SSSD) would pass getent but crash-loop the
+# executor. NEBULA_PASSWD_FILE points the check at a temporary file; a getent
+# stub on PATH simulates an NSS-only user.
+wa12_tmp=$(mktemp -d)
+wa12_passwd="${wa12_tmp}/passwd"
+getent passwd "$test_user" > "$wa12_passwd"
+real_getent=$(command -v getent)
+cat > "${wa12_tmp}/getent" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "passwd" && "\${2:-}" == "nssonly" ]]; then
+  printf 'nssonly:x:12345:12345:NSS only user:/home/nssonly:/bin/bash\n'
+  exit 0
+fi
+exec ${real_getent} "\$@"
+EOF
+chmod +x "${wa12_tmp}/getent"
+
+# NSS-only admin: getent resolves it, but the passwd file has no line for it.
+out=$(PATH="${wa12_tmp}:${PATH}" NEBULA_PASSWD_FILE="$wa12_passwd" \
+  NEBULA_INSTALL_DRY_RUN=1 bash "$install_sh" \
+  --admin-users nssonly --rp-id nebula.example.org 2>&1)
+rc=$?
+if [[ "$rc" -eq 1 && "$out" == *"nssonly"* && "$out" == *"NSS-only"* ]]; then
+  echo "ok   NSS-only admin user rejected"
+  pass=$((pass + 1))
+else
+  echo "FAIL NSS-only admin user rejected: exit ${rc}, want 1 naming the user and NSS-only"
+  printf '%s\n' "$out" | sed 's/^/     /'
+  fail=$((fail + 1))
+fi
+
+# A user with a line in the passwd file is accepted (dry run).
+out=$(NEBULA_PASSWD_FILE="$wa12_passwd" NEBULA_INSTALL_DRY_RUN=1 \
+  bash "$install_sh" --admin-users "$test_user" --rp-id nebula.example.org 2>&1)
+rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  echo "ok   admin user with a passwd-file line accepted"
+  pass=$((pass + 1))
+else
+  echo "FAIL admin user with a passwd-file line accepted: exit ${rc}, want 0"
+  printf '%s\n' "$out" | sed 's/^/     /'
+  fail=$((fail + 1))
+fi
+rm -rf "$wa12_tmp"
+
 # --- Dry run changes nothing --------------------------------------------------
 drop_in=/etc/systemd/system/nebula-executor.service.d/10-local.conf
 before=""
