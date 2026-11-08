@@ -52,6 +52,10 @@ const (
 // ErrShape is wrapped by every shape rejection.
 var ErrShape = errors.New("containerdef: rejected definition shape")
 
+// errDockerChosenPort refuses a published port whose host port Docker
+// would choose (the same reason as ephemeral_port).
+var errDockerChosenPort = errors.New("the host port would be chosen by Docker")
+
 var (
 	containerNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`)
 	// optionRe is the only option form accepted: a long flag with its value
@@ -187,7 +191,7 @@ func checkPublish(v string) error {
 		}
 		parts = strings.Split(ports, ":")
 		if len(parts) != 2 {
-			return errors.New("Docker would choose the host port")
+			return errDockerChosenPort
 		}
 	} else {
 		parts = strings.Split(v, ":")
@@ -199,27 +203,27 @@ func checkPublish(v string) error {
 			}
 			parts = parts[1:]
 		case 1:
-			return errors.New("Docker would choose the host port")
+			return errDockerChosenPort
 		default:
 			return errors.New("malformed value")
 		}
 	}
 	if parts[0] == "" {
-		return errors.New("Docker would choose the host port")
+		return errDockerChosenPort
 	}
 	hostLo, hostHi, err := portRange(parts[0])
 	if err != nil {
 		return err
 	}
 	if hostLo == 0 {
-		return errors.New("Docker would choose the host port")
+		return errDockerChosenPort
 	}
 	ctrLo, ctrHi, err := portRange(parts[1])
 	if err != nil || ctrLo == 0 {
 		return errors.New("malformed container port")
 	}
 	if hostHi-hostLo != ctrHi-ctrLo {
-		return errors.New("Docker would choose the host port inside the range")
+		return errDockerChosenPort
 	}
 	return nil
 }
