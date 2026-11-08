@@ -181,6 +181,13 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_RemovePrivateRegistry_FullMethodName:           {admin},
 		pb.ExecutorService_ListPrivateRegistries_FullMethodName:           {server, admin},
 		pb.ExecutorService_ReadPrivateRegistry_FullMethodName:             {server, admin},
+
+		// Standalone container definitions (ADR 0006 P2-03, cu05). They
+		// hold env values: admin only, and even the metadata list is not
+		// offered to the server.
+		pb.ExecutorService_PutContainerDefinition_FullMethodName:    {admin},
+		pb.ExecutorService_RemoveContainerDefinition_FullMethodName: {admin},
+		pb.ExecutorService_ListContainerDefinitions_FullMethodName:  {admin},
 	}
 }
 
