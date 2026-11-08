@@ -58,8 +58,12 @@ func (e *containerEnv) script(t *testing.T, tag string, code int) []byte {
 // at version, but not an artifact the executor runs for a container member.
 func (e *containerEnv) trustedScript(t *testing.T, tag string, code int, version string) []byte {
 	t.Helper()
-	s := fmt.Appendf(nil, "#!/bin/sh\ncp \"$NEBULA_PARAMS\" %q\nwhile [ -e %q ]; do sleep 0.05; done\nprintf '{\"format\":\"test\"}\\n'\nexit %d\n",
-		filepath.Join(e.dir, "params-"+tag+".json"), filepath.Join(e.dir, "block"), code)
+	// The job prints <dir>/result.json when the test wrote one (a
+	// compose-update-v2 result), otherwise a result no judge accepts.
+	s := fmt.Appendf(nil, "#!/bin/sh\ncp \"$NEBULA_PARAMS\" %q\nwhile [ -e %q ]; do sleep 0.05; done\n"+
+		"if [ -f %q ]; then cat %q; else printf '{\"format\":\"test\"}\\n'; fi\nexit %d\n",
+		filepath.Join(e.dir, "params-"+tag+".json"), filepath.Join(e.dir, "block"),
+		filepath.Join(e.dir, "result.json"), filepath.Join(e.dir, "result.json"), code)
 	e.trust(t, s, version)
 	return s
 }
@@ -157,6 +161,7 @@ func TestContainerMemberRunsDurableWithFrozenBindingOnly(t *testing.T) {
 	e := newContainerEnv(t, "web-1")
 	art := e.script(t, "ok", 0)
 	u := testComposeUpdate()
+	e.writeResult(t, passingComposeResult(u))
 	d, members := e.proposeContainer(t, "web-1", u, art)
 
 	resp, err := e.server.RunBatchMember(context.Background(), e.req(d, 0, "web-1", art))
@@ -164,8 +169,12 @@ func TestContainerMemberRunsDurableWithFrozenBindingOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	if resp.GetOutcome() != pb.BatchMemberOutcome_BATCH_MEMBER_OUTCOME_SUCCESS || resp.GetClass() != hostrun.ClassSuccess ||
-		!strings.Contains(string(resp.GetResult()), `"format":"test"`) {
+		!strings.Contains(string(resp.GetResult()), `"format":"compose-update-v2"`) {
 		t.Fatalf("response %+v", resp)
+	}
+	if row, err := e.db.GetContainerRecreation(members[0].Request.ExecutionID); err != nil || row.State != executordb.RecreationRecreated ||
+		!row.Verdict.Passed || len(row.Baseline) == 0 || row.WindowExpiresAt.IsZero() {
+		t.Fatalf("recreation row %+v %v", row, err)
 	}
 	if e.attached.count() != 0 {
 		t.Fatal("a container member ran attached")
@@ -406,6 +415,7 @@ func TestContainerMemberRefusedWithUnpinnedArtifactOrVersion(t *testing.T) {
 		t.Fatal("the unpinned artifact ran")
 	}
 	// The pinned artifact at the pinned version runs (control).
+	e.writeResult(t, passingComposeResult(testComposeUpdate()))
 	d, _ := e.proposeContainer(t, "web-1", testComposeUpdate(), pinned)
 	resp, err := e.server.RunBatchMember(context.Background(), e.req(d, 0, "web-1", pinned))
 	if err != nil || resp.GetOutcome() != pb.BatchMemberOutcome_BATCH_MEMBER_OUTCOME_SUCCESS {

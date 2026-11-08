@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -166,7 +167,16 @@ func durableJobOver(class string) bool {
 // dispatching.
 func (s *Service) durableMemberTransport(ctx context.Context, x *batchExec, call *batchMemberCall, run dispatch.Run, c *sshtransport.Client) (dispatch.Outcome, error) {
 	resp := call.resp
-	if err := checkContainerMember(run.Member, run.Parameters, x.composePins...); err != nil {
+	err := s.checkRollbackMember(run.Member, call.hostID)
+	if err == nil {
+		err = checkContainerMember(run.Member, run.Parameters, x.composePins...)
+	}
+	if err == nil {
+		// The row that keeps the prior image and definition exists before
+		// anything can change on the host (R9).
+		err = s.recordRecreationIntent(run, call.hostID, call.fingerprint)
+	}
+	if err != nil {
 		c.Close()
 		resp.Class, resp.Detail = classBatchNotExecuted, "not started: "+err.Error()
 		return dispatch.OutcomeFailure, nil
@@ -185,6 +195,7 @@ func (s *Service) durableMemberTransport(ctx context.Context, x *batchExec, call
 		s.log.Warn("audit", "kind", "batch_member_dispatch_uncertain", "execution", run.ExecutionID, "host", call.hostID, "detail", err.Error())
 	case outcome == hostrun.NotStarted:
 		call.dispatched = false
+		s.completeNotStarted(run.ExecutionID, detail)
 		c.Close()
 		resp.Class, resp.Detail = hostrun.ClassPrecheckFailed, "not started: "+detail
 		return dispatch.OutcomeFailure, nil
@@ -227,6 +238,17 @@ func (s *Service) awaitDurableMember(ctx context.Context, x *batchExec, call *ba
 			call.jobOver = durableJobOver(r.Class)
 			switch {
 			case r.Class == hostrun.ClassSuccess:
+				// Class success alone is not a succeeded member: the
+				// executor's verdict on the completed row decides.
+				row, _ := s.completeRecreation(r)
+				if containerMemberOutcome(r.Class, row) != permit.OutcomeSucceeded {
+					resp.Class = hostrun.ClassPostcheckFailed
+					resp.Detail = "the executor's postcheck verdict did not pass (recreation " + row.State + ")"
+					if len(row.Verdict.Findings) > 0 {
+						resp.Detail += ": " + strings.Join(row.Verdict.Findings, "; ")
+					}
+					return dispatch.OutcomeFailure, nil
+				}
 				return dispatch.OutcomeSuccess, nil
 			case !call.jobOver:
 				return dispatch.OutcomeUnknown, fmt.Errorf("%s: %s; the job may still run on the target", r.Class, r.Detail)
@@ -248,17 +270,27 @@ func (s *Service) awaitDurableMember(ctx context.Context, x *batchExec, call *ba
 	}
 }
 
-// memberRunFinished is called for every finished durable run. A batch
-// member's outcome goes to the live rollout (the rollout ignores an
-// outcome it has already, or an unknown execution), and a durable hold on
-// its target ends once the job is over.
+// memberRunFinished is called for every finished durable run. A container
+// member's run is judged and its recreation row completed first (cu03);
+// then the member's outcome goes to the live rollout (the rollout ignores
+// an outcome it has already, or an unknown execution): succeeded only with
+// class success and a passing verdict, which also records the member's own
+// postcheck. A durable hold on its target ends once the job is over.
 func (s *Service) memberRunFinished(executionID, hostID, class string) {
 	r, err := s.db.GetRun(executionID, hostID)
 	if err != nil || r.MemberID == "" {
 		return
 	}
+	outcome := permit.OutcomeOfClass(class)
+	row, container := s.completeRecreation(r)
+	if container {
+		outcome = containerMemberOutcome(class, row)
+	}
 	if s.batchAuth != nil {
-		s.batchAuth.RecordOutcome(executionID, r.MemberID, permit.OutcomeOfClass(class))
+		if container && outcome == permit.OutcomeSucceeded {
+			s.batchAuth.RecordPostcheck(executionID, r.MemberID, containerPostcheckHash(r.MemberID))
+		}
+		s.batchAuth.RecordOutcome(executionID, r.MemberID, outcome)
 	}
 	x := s.batchRun
 	if x == nil || !durableJobOver(class) {
