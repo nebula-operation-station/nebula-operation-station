@@ -49,6 +49,16 @@ const (
 	batchCLICommand   = "nebula approve "
 )
 
+// ContainerBatches proposes and follows Compose update and rollback
+// batches (ADR 0006 P2-05, container update plan cu04): the same planner
+// as DeployBatches, whose ProposeBatch refuses unless the executor runs
+// batches. A container update or rollback is always a batch member; its
+// approval happens on the batch page.
+type ContainerBatches interface {
+	ProposeBatch(ctx context.Context, user string, req executions.BatchRequest) (executions.BatchCreated, error)
+	Batch(ctx context.Context, id string) (executions.BatchView, error)
+}
+
 // BatchPlanner plans, proposes and follows batches.
 // executions.Batches satisfies it. The server passes a planner whose
 // ProposeBatch and ApproveBatch refuse with
@@ -280,7 +290,12 @@ func (p *BatchPages) handleCreate(w http.ResponseWriter, r *http.Request) {
 			textError(w, http.StatusServiceUnavailable, "Refused: the executor could not be asked whether it runs batches; nothing was proposed, try again")
 		case errors.As(err, &ce):
 			var b strings.Builder
-			b.WriteString("Refused: CRITICAL members cannot be approved in a batch. Remove them and approve each separately:")
+			// The planner's advice: a CRITICAL container update or
+			// rollback has no separate approval (cu04), so the default
+			// "approve each separately" must not be shown for it.
+			b.WriteString("Refused: ")
+			b.WriteString(ce.Advice())
+			b.WriteString(" Members:")
 			for _, m := range ce.Members {
 				fmt.Fprintf(&b, "\n%s: %s on %s %s", m.MemberID, m.ActionID, m.HostID, m.Params)
 			}

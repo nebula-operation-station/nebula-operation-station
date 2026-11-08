@@ -190,6 +190,10 @@ type Options struct {
 	// DeployBatches proposes the staged post-enrollment plan as one batch.
 	// Nil shows the plan without a way to propose it.
 	DeployBatches DeployBatches
+	// ContainerBatches proposes Compose updates and rollbacks as batches
+	// (cu04); the server passes the same gated planner as DeployBatches.
+	// Nil leaves the container update controls without a way to propose.
+	ContainerBatches ContainerBatches
 	// Log receives executor status errors (the page itself only shows
 	// "Executor unavailable"). Nil means slog.Default().
 	Log *slog.Logger
@@ -244,6 +248,8 @@ type Handler struct {
 	deployIPAM    DeployIPAM
 	deployBatches DeployBatches
 	deployRuns    *deployRuns
+	// containerBatches proposes container update and rollback batches.
+	containerBatches ContainerBatches
 }
 
 // New parses the embedded templates and builds a Handler.
@@ -291,44 +297,45 @@ func New(o Options) (*Handler, error) {
 		}
 	}
 	h := &Handler{
-		publicOrigin:   o.PublicOrigin,
-		pages:          pages,
-		staticFS:       staticFS,
-		status:         o.Status,
-		hostNames:      o.HostNames,
-		hosts:          hosts,
-		hostKeys:       o.HostKeys,
-		inventory:      o.Inventory,
-		operations:     o.Operations,
-		pins:           o.Pins,
-		schedules:      o.Schedules,
-		leases:         o.Leases,
-		leaseProposals: newLeaseProposals(),
-		runbooks:       o.Runbooks,
-		deployProfiles: o.DeployProfiles,
-		trust:          o.Trust,
-		modules:        o.Modules,
-		lastResult:     o.LastResult,
-		network:        o.Network,
-		discovery:      o.Discovery,
-		events:         o.Events,
-		auditLog:       o.Audit,
-		repin:          o.Repin,
-		enroll:         o.Enroll,
-		serverIP:       serverIP,
-		securityKeys:   o.SecurityKeys,
-		totpStatus:     o.TOTPStatus,
-		pveChart:       o.PVEChart,
-		pve:            o.PVE,
-		pveRemotes:     o.PVERemotes,
-		guestPower:     o.GuestPower,
-		guestSnapshot:  o.GuestSnapshot,
-		deploy:         o.Deploy,
-		deployJoin:     o.DeployJoin,
-		deployIPAM:     o.DeployIPAM,
-		deployBatches:  o.DeployBatches,
-		deployRuns:     newDeployRuns(log),
-		now:            o.Now,
+		publicOrigin:     o.PublicOrigin,
+		pages:            pages,
+		staticFS:         staticFS,
+		status:           o.Status,
+		hostNames:        o.HostNames,
+		hosts:            hosts,
+		hostKeys:         o.HostKeys,
+		inventory:        o.Inventory,
+		operations:       o.Operations,
+		pins:             o.Pins,
+		schedules:        o.Schedules,
+		leases:           o.Leases,
+		leaseProposals:   newLeaseProposals(),
+		runbooks:         o.Runbooks,
+		deployProfiles:   o.DeployProfiles,
+		trust:            o.Trust,
+		modules:          o.Modules,
+		lastResult:       o.LastResult,
+		network:          o.Network,
+		discovery:        o.Discovery,
+		events:           o.Events,
+		auditLog:         o.Audit,
+		repin:            o.Repin,
+		enroll:           o.Enroll,
+		serverIP:         serverIP,
+		securityKeys:     o.SecurityKeys,
+		totpStatus:       o.TOTPStatus,
+		pveChart:         o.PVEChart,
+		pve:              o.PVE,
+		pveRemotes:       o.PVERemotes,
+		guestPower:       o.GuestPower,
+		guestSnapshot:    o.GuestSnapshot,
+		deploy:           o.Deploy,
+		deployJoin:       o.DeployJoin,
+		deployIPAM:       o.DeployIPAM,
+		deployBatches:    o.DeployBatches,
+		deployRuns:       newDeployRuns(log),
+		containerBatches: o.ContainerBatches,
+		now:              o.Now,
 
 		guestPowerProposals: newGuestPowerProposals(),
 		log:                 log,
