@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor/dispatch"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
@@ -303,6 +304,37 @@ func TestRollbackMemberCheckedAgainstOwnRow(t *testing.T) {
 	// It still does not run: no rollback artifact is pinned.
 	if err := checkContainerMember(m, nil, shippedComposeUpdatePin()); !errors.Is(err, errContainerUnsupported) {
 		t.Fatalf("rollback member: %v", err)
+	}
+}
+
+// The pinned update artifact never prunes, removes or untags an image or
+// container, never logs in to a registry, and pulls only with an empty
+// DOCKER_CONFIG, so no host credential serves a pull (R7, R9). The
+// executor's own container code names no such command either.
+func TestNoPruneInContainerActions(t *testing.T) {
+	a, ok := actions.Lookup(composeUpdateAction)
+	if !ok || sha256Hex(a.Script) != composeUpdateArtifactSHA256 {
+		t.Fatal("the pinned docker.compose_update artifact is not in the catalog")
+	}
+	s := string(a.Script)
+	for _, banned := range []string{`"prune"`, `"rmi"`, `"down"`, `"rm"`, `"untag"`, `"login"`, "docker login", "--rm", "rm -v", "compose pull"} {
+		if strings.Contains(s, banned) {
+			t.Errorf("the pinned update artifact contains %q", banned)
+		}
+	}
+	if !strings.Contains(s, `env["DOCKER_CONFIG"] = empty`) || !strings.Contains(s, `"docker", "pull", "-q", "--", ref`) {
+		t.Error("the pinned artifact does not pull by digest with an empty DOCKER_CONFIG")
+	}
+	for _, f := range []string{"container_member.go", "container_judge.go", "container_recreation.go"} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, banned := range []string{`"prune"`, `"rmi"`, `"rm"`, `"login"`, "docker login", "image prune", "system prune"} {
+			if strings.Contains(string(b), banned) {
+				t.Errorf("%s names %q", f, banned)
+			}
+		}
 	}
 }
 
