@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
 )
 
 func hexOf(c string) string    { return strings.Repeat(c, 64) }
@@ -57,8 +58,9 @@ func testContainerMember(t *testing.T, u canonical.BatchContainerUpdate) (canoni
 
 // composeUpdateV1 is the inspect-based docker.compose_update 1.0.0 script, a
 // byte copy of internal/executions/actions/scripts/docker_compose_update.sh
-// as of this branch: it reads the project's directory and Compose files from
-// `docker inspect` labels and pulls floating tags.
+// before 2.0.0 replaced it in the catalog (Q3): it reads the project's
+// directory and Compose files from `docker inspect` labels and pulls
+// floating tags. Hosts or servers may still hold it, so it stays refused.
 func composeUpdateV1(t *testing.T) []byte {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join("testdata", "docker_compose_update_1.0.0.sh"))
@@ -152,10 +154,11 @@ func TestContainerMemberRefusals(t *testing.T) {
 	}
 }
 
-// As shipped, the executor pins no binding-consuming artifact (the
-// docker.compose_update 2.0.0 script does not exist yet), so every compose
-// update member is refused, whatever artifact and version it names: there is
-// no fallback to some other trusted artifact. An empty pin refuses too.
+// A compose update member whose artifact is not the pinned one is refused,
+// whatever artifact and version it names: the shipped pin admits only the
+// shipped 2.0.0 script, there is no fallback to some other trusted artifact,
+// and an empty or digest-less pin admits nothing. The inspect-based 1.0.0
+// script is refused under 1.0.0 and when labelled 2.0.0.
 func TestContainerMemberRefusedWithoutPinnedArtifact(t *testing.T) {
 	m, params := testContainerMember(t, testComposeUpdate())
 	for _, pin := range []containerArtifact{shippedComposeUpdatePin(), {}, {ModuleVersion: composeUpdateVersion}} {
@@ -183,9 +186,42 @@ func TestShippedComposeUpdatePin(t *testing.T) {
 	if pin.SHA256 == canonical.Digest(v1).String() {
 		t.Fatal("the inspect-based 1.0.0 script is pinned as the binding-consuming artifact")
 	}
-	if pin.SHA256 != "" {
-		if _, err := canonical.ParseDigest(pin.SHA256); err != nil {
-			t.Fatalf("pinned digest %q: %v", pin.SHA256, err)
+	if _, err := canonical.ParseDigest(pin.SHA256); err != nil {
+		t.Fatalf("pinned digest %q: %v", pin.SHA256, err)
+	}
+}
+
+// The pin is the digest of the docker.compose_update 2.0.0 script the server
+// ships (the bytes embedded in the actions catalog). Changing the script
+// without a reviewed pin update fails here, and the pinned artifact is the
+// binding-consuming 2.0.0, not some other version.
+func TestShippedComposeUpdatePinMatchesEmbeddedScript(t *testing.T) {
+	a, ok := actions.Lookup(composeUpdateAction)
+	if !ok {
+		t.Fatal("docker.compose_update is not in the catalog")
+	}
+	if a.Version != composeUpdateVersion || !a.Durable {
+		t.Fatalf("catalog has %s %s (durable %v), the executor pins %s", a.ID, a.Version, a.Durable, composeUpdateVersion)
+	}
+	if got := sha256Hex(a.Script); got != composeUpdateArtifactSHA256 || a.SHA256() != composeUpdateArtifactSHA256 {
+		t.Fatalf("the embedded docker.compose_update %s script has digest %s, the executor pins %q: update composeUpdateArtifactSHA256 after review",
+			a.Version, got, composeUpdateArtifactSHA256)
+	}
+	s := string(a.Script)
+	if !strings.Contains(s, "docker.compose_update 2.0.0") || !strings.Contains(s, `"container_update"`) ||
+		!strings.Contains(s, "compose-update-v2") {
+		t.Fatal("the pinned script is not the binding-consuming 2.0.0")
+	}
+	// The pin admits exactly that artifact at exactly that version.
+	m, params := testContainerMember(t, testComposeUpdate())
+	m.Request.ArtifactSHA256 = sha256Hex(a.Script)
+	if err := checkContainerMember(m, params, shippedComposeUpdatePin()); err != nil {
+		t.Fatalf("shipped artifact refused: %v", err)
+	}
+	for _, version := range []string{"1.0.0", "2.0.1", "2.1.0", "3.0.0"} {
+		m.Request.ModuleVersion = version
+		if err := checkContainerMember(m, params, shippedComposeUpdatePin()); !errors.Is(err, errContainerArtifact) {
+			t.Fatalf("shipped artifact as %s: err = %v", version, err)
 		}
 	}
 }
