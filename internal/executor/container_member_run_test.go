@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -50,7 +51,8 @@ func newContainerEnv(t *testing.T, hosts ...string) *containerEnv {
 func (e *containerEnv) script(t *testing.T, tag string, code int) []byte {
 	t.Helper()
 	s := e.trustedScript(t, tag, code, composeUpdateVersion)
-	e.svc.batchRun.composePins = append(e.svc.batchRun.composePins, containerArtifact{ModuleVersion: composeUpdateVersion, SHA256: sha256Hex(s)})
+	e.svc.batchRun.composePins = append(e.svc.batchRun.composePins, containerArtifact{ActionID: composeUpdateAction,
+		ModuleVersion: composeUpdateVersion, SHA256: sha256Hex(s)})
 	return s
 }
 
@@ -58,20 +60,42 @@ func (e *containerEnv) script(t *testing.T, tag string, code int) []byte {
 // at version, but not an artifact the executor runs for a container member.
 func (e *containerEnv) trustedScript(t *testing.T, tag string, code int, version string) []byte {
 	t.Helper()
-	s := fmt.Appendf(nil, "#!/bin/sh\ncp \"$NEBULA_PARAMS\" %q\nwhile [ -e %q ]; do sleep 0.05; done\nprintf '{\"format\":\"test\"}\\n'\nexit %d\n",
-		filepath.Join(e.dir, "params-"+tag+".json"), filepath.Join(e.dir, "block"), code)
+	s := e.stubScript(tag, code)
 	e.trust(t, s, version)
 	return s
+}
+
+// stubScript is the stand-in job's bytes: it prints <dir>/result.json when
+// the test wrote one (a compose-update-v2 or compose-rollback-v1 result),
+// otherwise a result no judge accepts.
+func (e *containerEnv) stubScript(tag string, code int) []byte {
+	return fmt.Appendf(nil, "#!/bin/sh\ncp \"$NEBULA_PARAMS\" %q\nwhile [ -e %q ]; do sleep 0.05; done\n"+
+		"if [ -f %q ]; then cat %q; else printf '{\"format\":\"test\"}\\n'; fi\nexit %d\n",
+		filepath.Join(e.dir, "params-"+tag+".json"), filepath.Join(e.dir, "block"),
+		filepath.Join(e.dir, "result.json"), filepath.Join(e.dir, "result.json"), code)
 }
 
 // trust trusts art for docker.compose_update at version as MEDIUM.
 func (e *containerEnv) trust(t *testing.T, art []byte, version string) {
 	t.Helper()
+	e.trustFor(t, art, composeUpdateAction, version)
+}
+
+// trustFor trusts art for action at version as MEDIUM.
+func (e *containerEnv) trustFor(t *testing.T, art []byte, action, version string) {
+	t.Helper()
 	h := sha256.Sum256(art)
-	if err := e.db.TrustArtifact(executordb.TrustedArtifact{SHA256: canonical.Digest(h).String(), ActionID: composeUpdateAction,
+	if err := e.db.TrustArtifact(executordb.TrustedArtifact{SHA256: canonical.Digest(h).String(), ActionID: action,
 		ModuleVersion: version, Risk: canonical.RiskMedium, TrustedBy: "test"}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// nextExecution is the execution ID the next proposeContainer gives member
+// i, so a test can write the result of that run (with its retained tags)
+// before proposing.
+func (e *containerEnv) nextExecution(i int) string {
+	return fmt.Sprintf("00000000-0000-4000-8%03d-%012d", e.next+1, i+100)
 }
 
 // proposeContainer proposes and approves a one-stage plan of compose update
@@ -85,6 +109,13 @@ func (e *containerEnv) proposeContainer(t *testing.T, host string, u canonical.B
 // proposeContainerVersion is proposeContainer with the members' module
 // version.
 func (e *containerEnv) proposeContainerVersion(t *testing.T, host, version string, u canonical.BatchContainerUpdate, arts ...[]byte) (string, []canonical.BatchMember) {
+	t.Helper()
+	return e.proposeContainerAction(t, host, composeUpdateAction, version, u, arts...)
+}
+
+// proposeContainerAction is proposeContainerVersion for the members'
+// action ID.
+func (e *containerEnv) proposeContainerAction(t *testing.T, host, action, version string, u canonical.BatchContainerUpdate, arts ...[]byte) (string, []canonical.BatchMember) {
 	t.Helper()
 	e.next++
 	n := e.next
@@ -110,7 +141,7 @@ func (e *containerEnv) proposeContainerVersion(t *testing.T, host, version strin
 			t.Fatal(err)
 		}
 		b.Members = append(b.Members, canonical.BatchMember{MemberID: id, ContainerUpdate: &bu, Request: canonical.Request{
-			RequestVersion: canonical.RequestVersion, ExecutionID: fmt.Sprintf("00000000-0000-4000-8%03d-%012d", n, i+100), ActionID: composeUpdateAction,
+			RequestVersion: canonical.RequestVersion, ExecutionID: fmt.Sprintf("00000000-0000-4000-8%03d-%012d", n, i+100), ActionID: action,
 			ModuleVersion: version, ArtifactSHA256: canonical.Digest(h).String(), ParametersHash: ph, CredentialRefs: []string{"cred"},
 			RiskClass: canonical.RiskMedium, ExpiryUnix: expiry,
 			ResolvedTargets: []canonical.Target{{HostID: host, HostKeyFingerprint: hk.Fingerprint}}},
@@ -157,15 +188,24 @@ func TestContainerMemberRunsDurableWithFrozenBindingOnly(t *testing.T) {
 	e := newContainerEnv(t, "web-1")
 	art := e.script(t, "ok", 0)
 	u := testComposeUpdate()
+	exec := e.nextExecution(0)
+	e.writeResult(t, passingComposeResultFor(u, exec))
 	d, members := e.proposeContainer(t, "web-1", u, art)
+	if members[0].Request.ExecutionID != exec {
+		t.Fatalf("execution %s, the result was written for %s", members[0].Request.ExecutionID, exec)
+	}
 
 	resp, err := e.server.RunBatchMember(context.Background(), e.req(d, 0, "web-1", art))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resp.GetOutcome() != pb.BatchMemberOutcome_BATCH_MEMBER_OUTCOME_SUCCESS || resp.GetClass() != hostrun.ClassSuccess ||
-		!strings.Contains(string(resp.GetResult()), `"format":"test"`) {
+		!strings.Contains(string(resp.GetResult()), `"format":"compose-update-v2"`) {
 		t.Fatalf("response %+v", resp)
+	}
+	if row, err := e.db.GetContainerRecreation(members[0].Request.ExecutionID); err != nil || row.State != executordb.RecreationRecreated ||
+		!row.Verdict.Passed || len(row.Baseline) == 0 || row.WindowExpiresAt.IsZero() {
+		t.Fatalf("recreation row %+v %v", row, err)
 	}
 	if e.attached.count() != 0 {
 		t.Fatal("a container member ran attached")
@@ -406,6 +446,7 @@ func TestContainerMemberRefusedWithUnpinnedArtifactOrVersion(t *testing.T) {
 		t.Fatal("the unpinned artifact ran")
 	}
 	// The pinned artifact at the pinned version runs (control).
+	e.writeResult(t, passingComposeResultFor(testComposeUpdate(), e.nextExecution(0)))
 	d, _ := e.proposeContainer(t, "web-1", testComposeUpdate(), pinned)
 	resp, err := e.server.RunBatchMember(context.Background(), e.req(d, 0, "web-1", pinned))
 	if err != nil || resp.GetOutcome() != pb.BatchMemberOutcome_BATCH_MEMBER_OUTCOME_SUCCESS {
@@ -413,11 +454,12 @@ func TestContainerMemberRefusedWithUnpinnedArtifactOrVersion(t *testing.T) {
 	}
 }
 
-// The executor as shipped pins only the shipped 2.0.0 script, so another
-// trusted 2.0.0 artifact is refused and never runs.
+// The executor as shipped pins only the shipped 2.0.0 update script and
+// the shipped 1.0.0 rollback script, so another trusted 2.0.0 artifact is
+// refused and never runs.
 func TestShippedExecutorRefusesContainerMembers(t *testing.T) {
 	e := newContainerEnv(t, "web-1")
-	if len(e.svc.batchRun.composePins) != 1 || e.svc.batchRun.composePins[0] != shippedComposeUpdatePin() {
+	if !slices.Equal(e.svc.batchRun.composePins, []containerArtifact{shippedComposeUpdatePin(), shippedComposeRollbackPin()}) {
 		t.Fatalf("pins %+v", e.svc.batchRun.composePins)
 	}
 	art := e.trustedScript(t, "shipped", 0, composeUpdateVersion)
@@ -441,7 +483,7 @@ func TestShippedExecutorRefusesContainerMembers(t *testing.T) {
 // the claim.
 func TestShippedComposeUpdateArtifactRunsOverRunBatchMember(t *testing.T) {
 	e := newContainerEnv(t, "web-1")
-	if len(e.svc.batchRun.composePins) != 1 || e.svc.batchRun.composePins[0] != shippedComposeUpdatePin() {
+	if !slices.Equal(e.svc.batchRun.composePins, shippedContainerPins()) {
 		t.Fatalf("pins %+v", e.svc.batchRun.composePins)
 	}
 	a, ok := actions.Lookup(composeUpdateAction)

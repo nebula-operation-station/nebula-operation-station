@@ -114,6 +114,9 @@ type Service struct {
 	// registry holds private registry administration, read authority and
 	// clients (ADR 0006, P1-32).
 	registry privateRegistryState
+	// previewKeep is the newest retained docker.update_preview result per
+	// host (update_preview.go).
+	previewKeep previewRetention
 	// reconcileInterval is the interval passed to Reconcile; ReconcileOnce
 	// uses it to compute the backoff between failed attempts (issue #70).
 	reconcileInterval time.Duration
@@ -216,6 +219,19 @@ func (s *Service) ProposeExecution(_ context.Context, req *pb.ProposeExecutionRe
 	// request from the executor's records.
 	if strings.HasPrefix(r.ActionID, reservedActionPrefix) {
 		return nil, status.Errorf(codes.InvalidArgument, "action_id %q is reserved for the executor", r.ActionID)
+	}
+	// A preview is only ever approved for its pinned artifact.
+	if isUpdatePreview(r.ActionID) {
+		if err := checkPreviewPin(r.ModuleVersion, r.ArtifactSHA256); err != nil {
+			return nil, previewStatus(err)
+		}
+	}
+	// Prepare (it writes the host's salt) only for its pinned artifact and
+	// never below MEDIUM (update_prepare.go).
+	if isUpdatePrepare(r.ActionID) {
+		if err := checkPrepareProposal(r); err != nil {
+			return nil, prepareStatus(err)
+		}
 	}
 	// The Safety Scanner sees the bytes before the risk is decided.
 	if art := req.GetArtifact(); len(art) > 0 {

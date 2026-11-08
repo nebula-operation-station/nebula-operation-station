@@ -235,6 +235,10 @@ func FuzzParseComposeUpdateBounds(f *testing.F) {
 		f.Add(s)
 	}
 	f.Add([]byte(`{"format":"compose-update-v1","phase":"precheck","reason":"no compose"}`))
+	f.Add([]byte(`{"format":"compose-update-v2","phase":"pull","reason":"pull_failed","service":"web"}`))
+	f.Add([]byte(`{"format":"compose-update-v2","phase":"after_snapshot","up_exit":0,"project":"p",` +
+		`"baseline":[{"id":"a","name":"p-web-1","service":"web","replica":"1","state":"running","health":"healthy","ports":["80/tcp->:8080"]}],` +
+		`"after":[{"id":"b","name":"p-web-1","service":"web","replica":"1","state":"running","health":"starting","ports":[]}]}`))
 	f.Add([]byte(`{}`))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		c, err := ParseComposeUpdate(b)

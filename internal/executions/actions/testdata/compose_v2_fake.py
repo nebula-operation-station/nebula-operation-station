@@ -6,7 +6,9 @@
 # up) update the state.
 import json
 import os
+import signal
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE = os.path.join(HERE, "state.json")
@@ -65,6 +67,14 @@ def docker(argv):
             sys.exit(1)
         print(json.dumps([public(c)]))
         return
+    if argv[:1] == ["ps"] and "--format" in argv:
+        # docker.update_preview's listing: ID, project and oneoff labels.
+        for cid, c in sorted(st["containers"].items()):
+            lb = c["Config"].get("Labels") or {}
+            print("%s\t%s\t%s" % (cid, lb.get("com.docker.compose.project", ""), lb.get("com.docker.compose.oneoff", "")))
+        for cid, project in sorted(st.get("listed_only", {}).items()):
+            print("%s\t%s\tFalse" % (cid, project))
+        return
     if argv[:1] == ["ps"]:
         filters = [argv[i + 1][len("label="):] for i, a in enumerate(argv) if a == "--filter"]
         for cid, c in sorted(st["containers"].items()):
@@ -106,6 +116,25 @@ def docker(argv):
             i += 2
         sub = argv[i:]
         override = st["override"]
+        if sub == ["version"]:
+            # A host without the Compose plugin: docker knows no "compose".
+            if st.get("no_compose"):
+                sys.exit(1)
+            print("Docker Compose version v2.29.0")
+            return
+        if sub[:1] == ["config"] and st.get("compose_exit"):
+            # E.g. 127: the plugin vanished between calls.
+            sys.exit(st["compose_exit"])
+        if sub[:1] == ["config"] and st.get("ignore_term"):
+            # A call that ignores SIGTERM; only SIGKILL ends it.
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            with open(os.path.join(HERE, "hung.pid"), "w") as f:
+                f.write(str(os.getpid()))
+        if sub[:1] == ["config"] and st.get("hang_config"):
+            time.sleep(st["hang_config"])
+        if sub[:1] == ["config"] and st.get("fail_config"):
+            noisy(st)
+            sys.exit(st["fail_config"])
         if sub == ["config"]:
             if override in files:
                 print("rendered-with-override")
@@ -130,9 +159,12 @@ def docker(argv):
                 for cid in [k for k, c in st["containers"].items() if c["Config"]["Labels"].get("com.docker.compose.service") == svc]:
                     del st["containers"][cid]
                 new = st["recreate"][svc]
-                new["Config"]["Image"] = entries[svc]
+                new["Config"]["Image"] = entries[svc]["image"]
                 new["Config"]["Labels"]["com.docker.compose.project.config_files"] = ",".join(files)
                 st["containers"][new["Id"]] = new
+            # Containers that appear with the up (for after-snapshot bounds).
+            for cid, c in st.get("up_adds", {}).items():
+                st["containers"][cid] = c
             save(st)
             return
     sys.exit(2)
@@ -142,7 +174,7 @@ def curl(argv):
     st = load()
     url = argv[argv.index("--") + 1]
     record("curl", argv, {"url": url, "head": "-I" in argv})
-    ans = st.get("registry", {}).get(url)
+    ans = st.get("registry", {}).get(url, st.get("registry_default"))
     if ans is None:
         sys.exit(7)
     sys.stdout.write("HTTP/1.1 %d X\r\n" % ans["status"])

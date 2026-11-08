@@ -82,6 +82,14 @@ func authorizeRequest(r *pb.AuthorizeRunRequest) permit.Run {
 // checked first; after AuthorizeGrant every outcome is a response class.
 func (s *Service) RunAttached(ctx context.Context, req *pb.RunAttachedRequest) (*pb.RunAttachedResponse, error) {
 	r := req.GetRun()
+	// The preview's result is evidence only as a durable run's row.
+	if isUpdatePreview(r.GetActionId()) {
+		return nil, previewStatus(errPreviewTransport)
+	}
+	// Prepare writes the salt as root: a durable job only.
+	if isUpdatePrepare(r.GetActionId()) {
+		return nil, prepareStatus(errPrepareTransport)
+	}
 	timeout := time.Duration(req.GetTimeoutSeconds()) * time.Second
 	if timeout > hostrun.MaxTimeout {
 		return nil, status.Errorf(codes.InvalidArgument, "timeout above %s; long work is a durable job", hostrun.MaxTimeout)

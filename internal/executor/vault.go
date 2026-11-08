@@ -9,6 +9,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vault"
 )
@@ -60,6 +61,10 @@ func (s *Service) InitVault(ctx context.Context, req *pb.InitVaultRequest) (*pb.
 
 func (s *Service) SetSecret(ctx context.Context, req *pb.SetSecretRequest) (*pb.SetSecretResponse, error) {
 	who := callerName(ctx)
+	// A container definition version is written once, by its own RPC.
+	if executordb.IsContainerDefinitionSecretID(req.GetId()) {
+		return nil, errDefinitionSecretManaged
+	}
 	v, err := s.vault.Put(req.GetId(), req.GetValue(), who)
 	if err != nil {
 		return nil, s.vaultError("set_secret", err)
@@ -82,6 +87,11 @@ func (s *Service) ListSecrets(_ context.Context, _ *pb.ListSecretsRequest) (*pb.
 
 func (s *Service) DeleteSecret(ctx context.Context, req *pb.DeleteSecretRequest) (*pb.DeleteSecretResponse, error) {
 	who := callerName(ctx)
+	// A container definition version is kept through its recreation
+	// window; only RemoveContainerDefinition checks that.
+	if executordb.IsContainerDefinitionSecretID(req.GetId()) {
+		return nil, errDefinitionSecretManaged
+	}
 	if err := s.vault.Delete(req.GetId()); err != nil {
 		return nil, s.vaultError("delete_secret", err)
 	}

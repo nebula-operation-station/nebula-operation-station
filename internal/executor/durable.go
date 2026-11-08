@@ -33,6 +33,22 @@ func (s *Service) StartDurable(ctx context.Context, req *pb.StartDurableRequest)
 	if timeout == 0 {
 		timeout = defaultDurable
 	}
+	// The preview runs only with its pinned artifact and fixed timeout,
+	// and its row records the action ID (update_preview.go).
+	runActionID := ""
+	if isUpdatePreview(r.GetActionId()) {
+		if err := checkPreviewArtifact(r.GetModuleVersion(), r.GetArtifact()); err != nil {
+			return nil, previewStatus(err)
+		}
+		timeout, runActionID = updatePreviewTimeout, updatePreviewAction
+	}
+	// So does prepare (update_prepare.go).
+	if isUpdatePrepare(r.GetActionId()) {
+		if err := checkPrepareArtifact(r.GetModuleVersion(), r.GetArtifact()); err != nil {
+			return nil, prepareStatus(err)
+		}
+		timeout, runActionID = updatePrepareTimeout, updatePrepareAction
+	}
 	if timeout > hostrun.MaxDurableTimeout {
 		return nil, status.Errorf(codes.InvalidArgument, "timeout above %s", hostrun.MaxDurableTimeout)
 	}
@@ -52,7 +68,8 @@ func (s *Service) StartDurable(ctx context.Context, req *pb.StartDurableRequest)
 	// Recorded before anything goes to the host: a crash from here on is
 	// reconciled, never dispatched again.
 	if err := s.db.CreateRun(executordb.Run{ExecutionID: grant.ExecutionID, HostID: r.GetHostId(), Digest: d.String(),
-		Endpoints: req.GetEndpoints(), Fingerprint: r.GetHostKeyFingerprint(), Timeout: timeout, SecretRefs: refs}); err != nil {
+		Endpoints: req.GetEndpoints(), Fingerprint: r.GetHostKeyFingerprint(), Timeout: timeout, SecretRefs: refs,
+		ActionID: runActionID}); err != nil {
 		s.log.Error("audit", "kind", "store_error", "op", "create_run", "digest", d.String(), "host", r.GetHostId(), "detail", err.Error())
 		return nil, status.Error(codes.Unavailable, "storage_error: the run was authorized but could not be recorded; it was not started")
 	}
@@ -112,7 +129,7 @@ func (s *Service) runStatus(executionID, hostID string, release bool) (*pb.RunSt
 	if !run.FinishedAt.IsZero() {
 		st.FinishedAtUnix = run.FinishedAt.Unix()
 	}
-	if release && run.State == executordb.RunFinished && !run.Released {
+	if release && run.State == executordb.RunFinished && !run.Released && !s.retainPreviewResult(run) {
 		if err := s.db.ReleaseRun(executionID, hostID); err != nil {
 			return nil, s.adminStoreError("release_run", err)
 		}
@@ -187,6 +204,9 @@ func (s *Service) ReconcileOnce(ctx context.Context) {
 		}
 		s.reconcile(ctx, run)
 	}
+	// A container run finished before its recreation row was completed
+	// (a crash in between) is judged now, from its stored result.
+	s.judgeFinishedIntents()
 }
 
 func (s *Service) setDispatching(key string, on bool) {

@@ -135,7 +135,7 @@ type batchExec struct {
 	// (containerRunPoll; tests shorten it).
 	durablePoll time.Duration
 	// composePins are the binding-consuming artifacts a container member
-	// may name (shippedComposeUpdatePin; tests pin stand-ins).
+	// may name (shippedContainerPins; tests pin stand-ins).
 	composePins []containerArtifact
 
 	mu sync.Mutex
@@ -178,7 +178,7 @@ func (s *Service) EnableBatchExecution() error {
 		return errors.New("executor: batch execution needs the batch authority")
 	}
 	x := &batchExec{attached: hostrun.Attached, visible: hostrun.RunVisible, durable: hostrun.Dispatch, durablePoll: containerRunPoll,
-		composePins: []containerArtifact{shippedComposeUpdatePin()}, holdWait: batchHoldWait, holdPoll: batchHoldPoll,
+		composePins: shippedContainerPins(), holdWait: batchHoldWait, holdPoll: batchHoldPoll,
 		calls: map[string]*batchMemberCall{}, hosts: map[string]string{}, held: map[string]*heldTarget{}, writeHeld: writeFileAtomic}
 	// Holds from before a restart, rechecked before any member starts on
 	// their targets; without a usable store no member starts.
@@ -443,6 +443,19 @@ func (s *Service) RunBatchMember(ctx context.Context, req *pb.RunBatchMemberRequ
 	// A container mutation runs durable with the fixed timeout, and only with
 	// the pinned binding-consuming artifact and version, and the parameters
 	// rendered from its frozen binding (container_member.go).
+	// The preview is classic and durable only (update_preview.go): a batch
+	// member would run attached, without the runs row Resolve reads.
+	if isUpdatePreview(member.Request.ActionID) {
+		s.log.Warn("audit", "kind", "batch_member_refused", "batch", d.String(), "member", member.MemberID, "host", target.HostID,
+			"detail", errPreviewTransport.Error())
+		return nil, previewStatus(errPreviewTransport)
+	}
+	// Prepare is classic and durable only as well (update_prepare.go).
+	if isUpdatePrepare(member.Request.ActionID) {
+		s.log.Warn("audit", "kind", "batch_member_refused", "batch", d.String(), "member", member.MemberID, "host", target.HostID,
+			"detail", errPrepareTransport.Error())
+		return nil, prepareStatus(errPrepareTransport)
+	}
 	durable := isContainerMember(member)
 	if durable {
 		if err := checkContainerMember(member, ap.Parameters[index], x.composePins...); err != nil {

@@ -204,9 +204,12 @@ var containerActions = map[string]bool{
 // batchExcludedActions are never batch members: docker.logs returns host
 // output that may hold secrets, and docker.compose_update recreates
 // containers without an incarnation binding the batch contract can freeze.
+// docker.update_preview runs only as a durable job (its runs row is the
+// evidence Resolve reads); the executor refuses it as a batch member.
 var batchExcludedActions = map[string]string{
 	"docker.logs":           "container logs are not available in a batch",
 	"docker.compose_update": "Compose updates recreate containers and are not available in a batch",
+	"docker.update_preview": "the update preview runs only as a durable job and is not available in a batch",
 }
 
 var fullContainerIDRe = regexp.MustCompile(`^[0-9a-f]{64}$`)

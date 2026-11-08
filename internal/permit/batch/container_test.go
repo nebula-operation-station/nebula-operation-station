@@ -414,15 +414,80 @@ func TestRollbackMemberWithKindUpdateRefused(t *testing.T) {
 	}
 }
 
-func TestContainerFormsWithoutExecutorChecksRefused(t *testing.T) {
+// composeRollback is a compose rollback of sameTagUpdate's unit to newTag
+// (the update moved it from newTag to 1.27).
+func composeRollback(newTag string) canonical.BatchContainerUpdate {
 	rollback := sameTagUpdate()
 	rollback.Kind = canonical.ContainerUpdateKindRollback
 	rollback.RollbackOf = "00000000-0000-4000-8000-000000000099"
 	rollback.RecoveryPlanDigest = hx("6")
 	img := &rollback.Images[0]
 	img.NewIndexDigest, img.NewPlatformDigest, img.OldImageID = "", "", ""
-	img.Rollback = &canonical.ContainerRollbackImage{PriorImageID: sd("4"), RetainedTag: "nos-retained-1", RetainedReference: "nginx:nos-retained-1"}
+	img.NewTag = newTag
+	if newTag != img.OldTag {
+		img.PolicyVersion, img.PolicyDigest = testPolicyVersion, testPolicyDigest
+	}
+	img.Rollback = &canonical.ContainerRollbackImage{PriorImageID: sd("4"), RetainedTag: "00000000-0000-4000-8000-000000000099-0",
+		RetainedReference: "docker.io/library/nginx:" + newTag + "@" + sd("1")}
+	return rollback
+}
 
+// A public compose rollback (cu03) is admitted, because the executor checks
+// it against its recreation row before it runs: a same-tag rollback is
+// MEDIUM, a tag reversal is at least HIGH (the floor applied to the
+// reversed tags) and is not re-judged by the tag policy (the rollback
+// copies the update's policy, which the executor compares with the row),
+// CRITICAL is refused, and a standalone rollback still is not supported.
+func TestComposeRollbackAdmittedWithFloor(t *testing.T) {
+	e := setup(t, permit.ModeStandard)
+	same := composeRollback("1.27")
+	raw, in := e.containerPlan(t, "docker.compose_rollback", canonical.RiskMedium, canonical.RiskMedium, &same)
+	p, err := e.a.Propose(ctx, raw, in)
+	if err != nil || p.Risk != canonical.RiskMedium {
+		t.Fatalf("same-tag rollback: %+v %v", p.Risk, err)
+	}
+	e.approve(t, p)
+	if _, err := e.a.ClaimMember(ctx, p.Digest, 0, p.Plan.Members[0]); err != nil {
+		t.Fatalf("claim same-tag rollback: %v", err)
+	}
+
+	// A tag reversal: the tag policy is never asked, the floor is HIGH.
+	tp := &tagPolicy{err: errors.New("tags cannot be compared")}
+	e = setup(t, permit.ModeStandard)
+	e.withTagPolicy(t, tp)
+	rev := composeRollback("1.26")
+	raw, in = e.containerPlan(t, "docker.compose_rollback", canonical.RiskMedium, canonical.RiskMedium, &rev)
+	_, err = e.a.Propose(ctx, raw, in)
+	wantRefusal(t, err, ErrContainerRiskBelowFloor)
+	raw, in = e.containerPlan(t, "docker.compose_rollback", canonical.RiskHigh, canonical.RiskMedium, &rev)
+	if p, err = e.a.Propose(ctx, raw, in); err != nil || p.Risk != canonical.RiskHigh {
+		t.Fatalf("tag reversal at HIGH: %+v %v", p.Risk, err)
+	}
+	if tp.calls != 0 {
+		t.Fatalf("the tag policy was asked %d times for a rollback", tp.calls)
+	}
+
+	// CRITICAL is refused, never downgraded.
+	e = setup(t, permit.ModeStandard)
+	raw, in = e.containerPlan(t, "docker.compose_rollback", canonical.RiskMedium, canonical.RiskCritical, &same)
+	_, err = e.a.Propose(ctx, raw, in)
+	wantRefusal(t, err, ErrContainerCritical)
+
+	// A standalone rollback (cu05) is still refused.
+	alone := same
+	alone.Form = canonical.ContainerUpdateFormAlone
+	alone.SourceDigest, alone.Project, alone.WorkingDirHash, alone.ConfigFilesHash = "", "", "", ""
+	alone.Images = append([]canonical.ContainerUpdateImage(nil), same.Images...)
+	alone.Targets = append([]canonical.ContainerUpdateTarget(nil), same.Targets...)
+	alone.Images[0].Service, alone.Targets[0].Service = "", ""
+	alone.DefinitionID, alone.DefinitionVersion = "00000000-0000-4000-8000-000000000098", 1
+	e = setup(t, permit.ModeStandard)
+	raw, in = e.containerPlan(t, "docker.rollback", canonical.RiskMedium, canonical.RiskMedium, &alone)
+	_, err = e.a.Propose(ctx, raw, in)
+	wantRefusal(t, err, ErrContainerUnsupported)
+}
+
+func TestContainerFormsWithoutExecutorChecksRefused(t *testing.T) {
 	standalone := sameTagUpdate()
 	standalone.Form = canonical.ContainerUpdateFormAlone
 	standalone.SourceDigest, standalone.Project, standalone.WorkingDirHash, standalone.ConfigFilesHash = "", "", "", ""
@@ -436,7 +501,6 @@ func TestContainerFormsWithoutExecutorChecksRefused(t *testing.T) {
 		action string
 		u      canonical.BatchContainerUpdate
 	}{
-		"compose rollback (cu03)":  {"docker.compose_rollback", rollback},
 		"standalone update (cu05)": {"docker.update", standalone},
 		"private registry (cu06)":  {"docker.compose_update", private},
 	}
