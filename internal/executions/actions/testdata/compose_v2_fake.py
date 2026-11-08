@@ -65,6 +65,14 @@ def docker(argv):
             sys.exit(1)
         print(json.dumps([public(c)]))
         return
+    if argv[:1] == ["ps"] and "--format" in argv:
+        # docker.update_preview's listing: ID, project and oneoff labels.
+        for cid, c in sorted(st["containers"].items()):
+            lb = c["Config"].get("Labels") or {}
+            print("%s\t%s\t%s" % (cid, lb.get("com.docker.compose.project", ""), lb.get("com.docker.compose.oneoff", "")))
+        for cid, project in sorted(st.get("listed_only", {}).items()):
+            print("%s\t%s\tFalse" % (cid, project))
+        return
     if argv[:1] == ["ps"]:
         filters = [argv[i + 1][len("label="):] for i, a in enumerate(argv) if a == "--filter"]
         for cid, c in sorted(st["containers"].items()):
@@ -106,6 +114,9 @@ def docker(argv):
             i += 2
         sub = argv[i:]
         override = st["override"]
+        if sub[:1] == ["config"] and st.get("fail_config"):
+            noisy(st)
+            sys.exit(st["fail_config"])
         if sub == ["config"]:
             if override in files:
                 print("rendered-with-override")

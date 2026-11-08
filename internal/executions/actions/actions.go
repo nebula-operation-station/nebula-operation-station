@@ -238,6 +238,49 @@ var dockerComposeUpdate []byte
 //go:embed scripts/docker_check_updates.sh
 var dockerCheckUpdates []byte
 
+// dockerUpdatePreview is docker.update_preview 1.0.0, the read-only source
+// of a container update binding (container update plan cu02). Its SHA-256
+// is pinned in the executor (internal/executor,
+// updatePreviewArtifactSHA256), so a change of these bytes needs a
+// reviewed pin update.
+//
+//go:embed scripts/docker_update_preview.sh
+var dockerUpdatePreview []byte
+
+// targetTagsRe is the character gate of docker.update_preview's
+// target_tags parameter; targetTagsValidate applies the list rules.
+var targetTagsRe = regexp.MustCompile(`^[A-Za-z0-9_.,-]*$`)
+
+// maxTargetTags is the script's MAX_PREVIEW_TARGET_TAGS
+// (dockerhost.MaxPreviewTargetTags).
+const maxTargetTags = 20
+
+// dockerTagRe is one Docker tag: it cannot start with '-' or '.'.
+var dockerTagRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
+
+// targetTagsValidate: target_tags is empty, or up to maxTargetTags
+// distinct Docker tags separated by commas.
+func targetTagsValidate(params map[string]string) error {
+	v := params["target_tags"]
+	if v == "" {
+		return nil
+	}
+	tags := strings.Split(v, ",")
+	if len(tags) > maxTargetTags {
+		return fmt.Errorf("parameter target_tags names more than %d tags", maxTargetTags)
+	}
+	seen := map[string]bool{}
+	for _, t := range tags {
+		if !dockerTagRe.MatchString(t) || seen[t] {
+			return fmt.Errorf("parameter target_tags is not valid")
+		}
+		seen[t] = true
+	}
+	return nil
+}
+
+var targetTagsParam = []Param{{Name: "target_tags", Label: "Target tags (comma-separated, may be empty)", Pattern: targetTagsRe}}
+
 //go:embed scripts/image_vulns.sh
 var imageVulns []byte
 
@@ -382,6 +425,12 @@ var Builtin = []Action{
 		ID: "docker.compose_update", Version: "2.0.0", Title: "Update Compose project",
 		Description: "Batch member only, as a durable job: recreates exactly the frozen update binding of one Compose project. Prechecks the bound containers, configuration and source digests, the NOS override and the applied configuration; resolves each new tag against the bound digests; pulls by digest only (no registry login); keeps the old image as nos-retained; then up -d --no-deps for the frozen services, with a baseline and an after-snapshot. Needs root, python3 and curl, and docker.update_prepare once per host.",
 		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Durable: true, Timeout: 30 * time.Minute, Script: dockerComposeUpdate, Retry: RetryReconcileFirst,
+	},
+	{
+		ID: "docker.update_preview", Version: "1.0.0", Title: "Preview container updates",
+		Description: "Durable and read-only: for every Compose project and standalone container, the container identities, keyed configuration and source digests, image and platform digests, the dependency graph and why a unit cannot be updated (override_drift, config_not_applied, scale_mismatch, ...). Resolves the current and the given target tags anonymously; pulls nothing and writes nothing on the host. Needs root, python3 and curl, and docker.update_prepare once per host.",
+		Risk:        pb.RiskClass_RISK_CLASS_LOW, Durable: true, Timeout: 5 * time.Minute, ReadOnly: true, Script: dockerUpdatePreview,
+		Params: targetTagsParam, Validate: targetTagsValidate, Retry: RetryReconcileFirst,
 	},
 	{
 		ID: "docker.start", Version: "1.0.0", Title: "Start container", Description: "docker start of one container (docker group or sudo); nothing is recreated or pulled.",
