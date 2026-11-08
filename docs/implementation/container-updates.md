@@ -514,14 +514,28 @@ Until they land, cu04 shows those targets as unavailable with a reason.
        <operator files> -f <override> up -d --no-deps --no-build --pull never
        <frozen services>`. There is no `--scale`: phase 1 proved that each frozen
        service runs exactly the file's scale, so `up` keeps every replica and
-       starts none that was stopped.
-    6. **After-snapshot.** It runs whenever phase 5 was reached, **also when `up`
-       failed**: bounded health wait, then for every container of the frozen
-       services and of `dependencies` the ID, name, service, replica number,
-       state, start time, health, ports, mounts, networks, image ID, running
-       reference and `configuration_digest`. The result states the last phase
-       reached and `up_exit`. Exit status covers pull and up only; the verdict
-       comes in cu03.
+       starts none that was stopped. A stop in phase `recreate` exits 1,
+       because the override may already have changed, even if `up` has not
+       started (`up_exit: -1`). Exit 10 is reserved for stops in `precheck`,
+       `resolve`, `pull` and `retain`.
+    6. **After-snapshot.** After phase 5 returns, **also when `up` failed**, a
+       bounded health wait precedes collecting containers of the frozen services
+       and of `dependencies`. Each entry records the ID, name, service, replica
+       number, state, start time, health, ports, mounts, networks, image ID,
+       running reference and `configuration_digest`. An entry exceeding the
+       per-container 8 KiB limit is replaced by `{id, oversize: true}`.
+       The `after` array has a **256 KiB total bound**
+       (`MAX_AFTER_SNAPSHOT_BYTES`), measured using the emitted JSON's ASCII
+       escapes and including array brackets and separators. Entries are kept
+       first by ascending service name across the union of frozen services and
+       dependencies, then by ascending full container ID within each service.
+       Before the next entry would exceed the bound, the array stops growing
+       and the result sets `after_truncated: true`, retaining only that prefix;
+       the marker is absent when the array is complete. The result states the
+       last phase reached and `up_exit`. After the snapshot attempt, exit status
+       is 0 when `up_exit` is 0 and 1 otherwise; truncation does not change it.
+       The verdict comes in cu03. A stop during the phase 5 override write
+       returns immediately without an after-snapshot.
   - `docker.check_updates` 1.1.0: stopped containers, platform-manifest
     comparison, and a reference `repo:tag@digest` reads as updatable with that
     tag when the container's `config_files` label names the NOS override, and
