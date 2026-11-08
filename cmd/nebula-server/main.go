@@ -543,6 +543,9 @@ type batchRPC interface {
 	RunBatchMember(ctx context.Context, in *pb.RunBatchMemberRequest, opts ...grpc.CallOption) (*pb.RunBatchMemberResponse, error)
 	// GetRollout reads which batch stage the executor has open.
 	GetRollout(ctx context.Context, in *pb.GetRolloutRequest, opts ...grpc.CallOption) (*pb.GetRolloutResponse, error)
+	// ListContainerRecreations lists the recorded container updates a
+	// docker.compose_rollback member is bound to (executions.RecreationLister).
+	ListContainerRecreations(ctx context.Context, in *pb.ListContainerRecreationsRequest, opts ...grpc.CallOption) (*pb.ListContainerRecreationsResponse, error)
 }
 
 // lazyBatchRPC returns the server's executor client once it is connected,
@@ -608,6 +611,13 @@ func (s serverBatchExecutor) RunBatchMember(ctx context.Context, in *pb.RunBatch
 func (s serverBatchExecutor) GetRollout(ctx context.Context, in *pb.GetRolloutRequest, opts ...grpc.CallOption) (*pb.GetRolloutResponse, error) {
 	if c := s.client(); c != nil {
 		return c.GetRollout(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (s serverBatchExecutor) ListContainerRecreations(ctx context.Context, in *pb.ListContainerRecreationsRequest, opts ...grpc.CallOption) (*pb.ListContainerRecreationsResponse, error) {
+	if c := s.client(); c != nil {
+		return c.ListContainerRecreations(ctx, in, opts...)
 	}
 	return nil, errNotConnected
 }
@@ -678,6 +688,8 @@ func (d deployBatches) ApproveBatch(ctx context.Context, user, id string, assert
 func newBatches(ctx context.Context, exec serverBatchExecutor, db *sql.DB, hosts executions.Hosts, acts executions.ActionResolver, log *slog.Logger) (deployBatches, *ui.BatchPages, error) {
 	b, err := executions.NewBatches(executions.BatchOptions{
 		Exec: exec, DB: db, Hosts: hosts, Log: log, Actions: acts,
+		// Compose rollbacks bind the executor's recorded update (cu04).
+		Recreations: exec,
 		CredentialVersion: func(ctx context.Context, ref string) (uint64, error) {
 			return executorclient.CredentialVersion(ctx, exec, ref)
 		},
