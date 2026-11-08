@@ -133,6 +133,9 @@ def docker(argv):
                 new["Config"]["Image"] = entries[svc]
                 new["Config"]["Labels"]["com.docker.compose.project.config_files"] = ",".join(files)
                 st["containers"][new["Id"]] = new
+            # Containers that appear with the up (for after-snapshot bounds).
+            for cid, c in st.get("up_adds", {}).items():
+                st["containers"][cid] = c
             save(st)
             return
     sys.exit(2)
