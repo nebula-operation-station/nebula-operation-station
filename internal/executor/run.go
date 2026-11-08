@@ -86,6 +86,10 @@ func (s *Service) RunAttached(ctx context.Context, req *pb.RunAttachedRequest) (
 	if isUpdatePreview(r.GetActionId()) {
 		return nil, previewStatus(errPreviewTransport)
 	}
+	// Prepare writes the salt as root: a durable job only.
+	if isUpdatePrepare(r.GetActionId()) {
+		return nil, prepareStatus(errPrepareTransport)
+	}
 	timeout := time.Duration(req.GetTimeoutSeconds()) * time.Second
 	if timeout > hostrun.MaxTimeout {
 		return nil, status.Errorf(codes.InvalidArgument, "timeout above %s; long work is a durable job", hostrun.MaxTimeout)

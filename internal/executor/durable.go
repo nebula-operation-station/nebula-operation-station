@@ -42,6 +42,13 @@ func (s *Service) StartDurable(ctx context.Context, req *pb.StartDurableRequest)
 		}
 		timeout, runActionID = updatePreviewTimeout, updatePreviewAction
 	}
+	// So does prepare (update_prepare.go).
+	if isUpdatePrepare(r.GetActionId()) {
+		if err := checkPrepareArtifact(r.GetModuleVersion(), r.GetArtifact()); err != nil {
+			return nil, prepareStatus(err)
+		}
+		timeout, runActionID = updatePrepareTimeout, updatePrepareAction
+	}
 	if timeout > hostrun.MaxDurableTimeout {
 		return nil, status.Errorf(codes.InvalidArgument, "timeout above %s", hostrun.MaxDurableTimeout)
 	}
