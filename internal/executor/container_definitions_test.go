@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vault"
 )
 
 const (
@@ -289,6 +291,52 @@ func TestDefinitionPutRefusedWhileVaultLocked(t *testing.T) {
 	list, err := e.svc.ListContainerDefinitions(ctx, &pb.ListContainerDefinitionsRequest{HostId: "web-1"})
 	if err != nil || len(list.GetDefinitions()) != 1 {
 		t.Fatalf("list while locked %+v %v", list, err)
+	}
+}
+
+// TestDefinitionRemoveLockAfterCheckKeepsSecrets: the remove's
+// in-transaction vault check refuses a vault that was locked after the
+// RPC's own check, even if it was unlocked again, and nothing is lost.
+func TestDefinitionRemoveLockAfterCheckKeepsSecrets(t *testing.T) {
+	e := newDefinitionEnv(t)
+	ctx := context.Background()
+	put, err := e.svc.PutContainerDefinition(ctx, putDefinitionRequest("web"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := executordb.ContainerDefinitionSecretID(put.GetDefinition().GetDefinitionId(), 1)
+	epoch := e.svc.vault.LockGeneration()
+	check := e.svc.vaultUnlockedSince(epoch)
+	if err := check(); err != nil {
+		t.Fatalf("unlocked vault refused: %v", err)
+	}
+	// The vault locks between the RPC's check and the store's transaction.
+	e.svc.vault.Lock()
+	_, err = e.db.RemoveContainerDefinition("web-1", "web", 0, check)
+	if !errors.Is(err, vault.ErrLocked) {
+		t.Fatalf("remove after a lock: %v", err)
+	}
+	wantCode(t, e.svc.definitionError("remove_container_definition", err), codes.FailedPrecondition)
+	// Unlocked again: the epoch moved, so the stale check still refuses.
+	if err := e.svc.vault.Unlock([]byte(strings.Repeat("correct-horse-battery-staple-", 4))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.db.RemoveContainerDefinition("web-1", "web", 0, check); !errors.Is(err, vault.ErrLocked) {
+		t.Fatalf("remove across a lock and unlock: %v", err)
+	}
+	raw, err := e.svc.vault.Open(id)
+	if err != nil || !strings.Contains(string(raw), defPlanted) {
+		t.Fatalf("secret lost after refused removes: %v", err)
+	}
+	if vs, err := e.db.ContainerDefinitionVersions("web-1", "web"); err != nil || len(vs) != 1 {
+		t.Fatalf("versions after refused removes: %+v %v", vs, err)
+	}
+	// A remove that starts after the unlock goes through.
+	if _, err := e.svc.RemoveContainerDefinition(ctx, &pb.RemoveContainerDefinitionRequest{HostId: "web-1", ContainerName: "web"}); err != nil {
+		t.Fatalf("remove while unlocked: %v", err)
+	}
+	if _, err := e.svc.vault.Open(id); !errors.Is(err, vault.ErrNotFound) {
+		t.Fatalf("removed secret: %v", err)
 	}
 }
 

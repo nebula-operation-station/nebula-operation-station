@@ -237,12 +237,21 @@ func definitionInWindow(q definitionQuerier, definitionID string, version uint64
 // is 0, otherwise that one version, which must not be the newest
 // (ErrDefinitionLatest). It is refused with ErrDefinitionInWindow while a
 // container recreation in intent or inside its rollback window references
-// a version it would drop. It returns the dropped versions. The caller
-// must have checked that the vault is unlocked: a locked executor must not
-// lose secrets.
-func (db *DB) RemoveContainerDefinition(hostID, name string, version uint64) ([]ContainerDefinition, error) {
+// a version it would drop. It returns the dropped versions.
+//
+// A locked executor must not lose secrets, like a vault delete: after
+// deleting the rows and secrets and right before committing, the
+// transaction calls vaultUnlocked, and any error from it rolls everything
+// back and is returned. So a vault lock that lands after the caller's own
+// check still removes nothing. A nil vaultUnlocked is refused.
+// vaultUnlocked runs while the transaction holds the only database
+// connection, so it must not use the database.
+func (db *DB) RemoveContainerDefinition(hostID, name string, version uint64, vaultUnlocked func() error) ([]ContainerDefinition, error) {
 	if err := checkDefinitionUnit(hostID, name); err != nil {
 		return nil, err
+	}
+	if vaultUnlocked == nil {
+		return nil, fmt.Errorf("executordb: remove container definition: no vault check")
 	}
 	tx, err := db.sql.Begin()
 	if err != nil {
@@ -286,6 +295,11 @@ func (db *DB) RemoveContainerDefinition(hostID, name string, version uint64) ([]
 			d.DefinitionID, int64(d.Version)); err != nil {
 			return nil, fmt.Errorf("executordb: remove container definition: %w", err)
 		}
+	}
+	// The last step before the commit: the deferred rollback keeps every
+	// secret if the vault was locked meanwhile.
+	if err := vaultUnlocked(); err != nil {
+		return nil, fmt.Errorf("executordb: remove container definition: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("executordb: remove container definition: %w", err)

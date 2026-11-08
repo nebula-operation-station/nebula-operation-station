@@ -92,10 +92,13 @@ func (s *Service) RemoveContainerDefinition(ctx context.Context, in *pb.RemoveCo
 		return nil, status.Error(codes.InvalidArgument, "invalid version")
 	}
 	// Like a vault delete: a locked executor cannot be made to lose secrets.
+	// The store checks again inside its transaction, right before the
+	// commit, so a lock after this check removes nothing.
+	epoch := s.vault.LockGeneration()
 	if st, err := s.vault.State(); err != nil || st != vault.StateUnlocked {
 		return nil, status.Error(codes.FailedPrecondition, "the executor vault is locked")
 	}
-	dropped, err := s.db.RemoveContainerDefinition(host, name, in.GetVersion())
+	dropped, err := s.db.RemoveContainerDefinition(host, name, in.GetVersion(), s.vaultUnlockedSince(epoch))
 	if err != nil {
 		return nil, s.definitionError("remove_container_definition", err)
 	}
@@ -124,6 +127,21 @@ func (s *Service) ListContainerDefinitions(_ context.Context, in *pb.ListContain
 		out.Definitions = append(out.Definitions, definitionInfo(d, latest))
 	}
 	return out, nil
+}
+
+// vaultUnlockedSince returns the store's in-transaction vault check: it
+// fails with vault.ErrLocked if the vault was locked (and perhaps unlocked
+// again) since epoch. The caller takes epoch before it sees the vault
+// unlocked, and every Lock raises the generation, so an unchanged one
+// means still unlocked. It reads memory only: vault.State reads the
+// database while locked, which the open transaction would block.
+func (s *Service) vaultUnlockedSince(epoch uint64) func() error {
+	return func() error {
+		if s.vault.LockGeneration() != epoch {
+			return vault.ErrLocked
+		}
+		return nil
+	}
 }
 
 // definitionInfo is the metadata a response may carry: no content, no
