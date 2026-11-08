@@ -16,7 +16,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
+	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/web/templates"
 )
 
@@ -54,9 +56,18 @@ const (
 // as DeployBatches, whose ProposeBatch refuses unless the executor runs
 // batches. A container update or rollback is always a batch member; its
 // approval happens on the batch page.
+//
+// The read methods feed the container update controls
+// (container_update.go): the newest usable update preview of a host, the
+// executor's recreation rows, and the exact binding a selection would be
+// proposed with, built by the same code as ProposeBatch.
 type ContainerBatches interface {
 	ProposeBatch(ctx context.Context, user string, req executions.BatchRequest) (executions.BatchCreated, error)
 	Batch(ctx context.Context, id string) (executions.BatchView, error)
+	LatestContainerPreview(ctx context.Context, hostID string) (executions.ContainerPreview, error)
+	ContainerRecreations(ctx context.Context, hostID string) ([]*pb.ContainerRecreationInfo, error)
+	PlanContainerUpdate(ctx context.Context, hostID string, spec executions.ContainerUpdateSpec) (canonical.BatchContainerUpdate, error)
+	PlanContainerRollback(ctx context.Context, hostID string, spec executions.ContainerRollbackSpec) (canonical.BatchContainerUpdate, error)
 }
 
 // BatchPlanner plans, proposes and follows batches.

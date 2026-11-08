@@ -194,6 +194,10 @@ type Options struct {
 	// (cu04); the server passes the same gated planner as DeployBatches.
 	// Nil leaves the container update controls without a way to propose.
 	ContainerBatches ContainerBatches
+	// ContainerTagPolicy compares tags under the executor's tag policy for
+	// a container tag change (cu04). Nil offers same-tag digest refreshes
+	// only and shows tag changes as unavailable.
+	ContainerTagPolicy ContainerTagPolicy
 	// Log receives executor status errors (the page itself only shows
 	// "Executor unavailable"). Nil means slog.Default().
 	Log *slog.Logger
@@ -250,6 +254,9 @@ type Handler struct {
 	deployRuns    *deployRuns
 	// containerBatches proposes container update and rollback batches.
 	containerBatches ContainerBatches
+	// containerTagPolicy compares tags for a tag change; nil offers
+	// same-tag digest refreshes only.
+	containerTagPolicy ContainerTagPolicy
 }
 
 // New parses the embedded templates and builds a Handler.
@@ -297,45 +304,46 @@ func New(o Options) (*Handler, error) {
 		}
 	}
 	h := &Handler{
-		publicOrigin:     o.PublicOrigin,
-		pages:            pages,
-		staticFS:         staticFS,
-		status:           o.Status,
-		hostNames:        o.HostNames,
-		hosts:            hosts,
-		hostKeys:         o.HostKeys,
-		inventory:        o.Inventory,
-		operations:       o.Operations,
-		pins:             o.Pins,
-		schedules:        o.Schedules,
-		leases:           o.Leases,
-		leaseProposals:   newLeaseProposals(),
-		runbooks:         o.Runbooks,
-		deployProfiles:   o.DeployProfiles,
-		trust:            o.Trust,
-		modules:          o.Modules,
-		lastResult:       o.LastResult,
-		network:          o.Network,
-		discovery:        o.Discovery,
-		events:           o.Events,
-		auditLog:         o.Audit,
-		repin:            o.Repin,
-		enroll:           o.Enroll,
-		serverIP:         serverIP,
-		securityKeys:     o.SecurityKeys,
-		totpStatus:       o.TOTPStatus,
-		pveChart:         o.PVEChart,
-		pve:              o.PVE,
-		pveRemotes:       o.PVERemotes,
-		guestPower:       o.GuestPower,
-		guestSnapshot:    o.GuestSnapshot,
-		deploy:           o.Deploy,
-		deployJoin:       o.DeployJoin,
-		deployIPAM:       o.DeployIPAM,
-		deployBatches:    o.DeployBatches,
-		deployRuns:       newDeployRuns(log),
-		containerBatches: o.ContainerBatches,
-		now:              o.Now,
+		publicOrigin:       o.PublicOrigin,
+		pages:              pages,
+		staticFS:           staticFS,
+		status:             o.Status,
+		hostNames:          o.HostNames,
+		hosts:              hosts,
+		hostKeys:           o.HostKeys,
+		inventory:          o.Inventory,
+		operations:         o.Operations,
+		pins:               o.Pins,
+		schedules:          o.Schedules,
+		leases:             o.Leases,
+		leaseProposals:     newLeaseProposals(),
+		runbooks:           o.Runbooks,
+		deployProfiles:     o.DeployProfiles,
+		trust:              o.Trust,
+		modules:            o.Modules,
+		lastResult:         o.LastResult,
+		network:            o.Network,
+		discovery:          o.Discovery,
+		events:             o.Events,
+		auditLog:           o.Audit,
+		repin:              o.Repin,
+		enroll:             o.Enroll,
+		serverIP:           serverIP,
+		securityKeys:       o.SecurityKeys,
+		totpStatus:         o.TOTPStatus,
+		pveChart:           o.PVEChart,
+		pve:                o.PVE,
+		pveRemotes:         o.PVERemotes,
+		guestPower:         o.GuestPower,
+		guestSnapshot:      o.GuestSnapshot,
+		deploy:             o.Deploy,
+		deployJoin:         o.DeployJoin,
+		deployIPAM:         o.DeployIPAM,
+		deployBatches:      o.DeployBatches,
+		deployRuns:         newDeployRuns(log),
+		containerBatches:   o.ContainerBatches,
+		containerTagPolicy: o.ContainerTagPolicy,
+		now:                o.Now,
 
 		guestPowerProposals: newGuestPowerProposals(),
 		log:                 log,
@@ -428,6 +436,7 @@ var pageFiles = map[string]string{
 	"pve_detail":          "pve_detail.html",
 	"guest_action":        "guest_action.html",
 	"guest_snapshots":     "guest_snapshots.html",
+	"container_update":    "container_update.html",
 }
 
 // pagePartials are extra template files a page uses.
@@ -455,6 +464,11 @@ func (h *Handler) Handler() http.Handler {
 	// Staged OS update (ADR 0006, P2-02 part 2): the no-JavaScript
 	// checkbox form on the chart page posts the frozen host list here.
 	mux.HandleFunc("POST /inventory/chart/staged", h.handleChartStaged)
+	// Container and Compose update and rollback (ADR 0006 P2-05, cu04):
+	// the tree with its no-JavaScript checkbox form, and the plan form
+	// (confirmation page, then the confirmed proposal).
+	mux.HandleFunc("GET /inventory/containers", h.handleContainerUpdates)
+	mux.HandleFunc("POST /inventory/containers/plan", h.handleContainerPlan)
 	mux.HandleFunc("/inventory/new", h.handleInventoryNew)
 	// Host changes are JSON POSTs only (decision 36: never plain form
 	// posts). Without Options.Inventory they answer 404.
@@ -653,6 +667,9 @@ type pageData struct {
 	GuestAction *guestActionData
 	// GuestSnapshots is the data of a guest's snapshot page.
 	GuestSnapshots *guestSnapshotsData
+	// ContainerUpdate is the data of the container update tree and its
+	// confirmation page (cu04).
+	ContainerUpdate *containerUpdateData
 	// DeployWizard, DeployRuns and DeployRun are the data of the
 	// deployment pages; DeployEnabled shows their tabs and the chart's
 	// "Deploy here" shortcut (render fills it).
