@@ -333,7 +333,7 @@ func TestContainerTreeHostGates(t *testing.T) {
 
 func TestContainerConfirmShowsCurrentToApprovedAndProposesIt(t *testing.T) {
 	h, f := ctrHandler(t, false)
-	rec := ctrPost(t, h, selection("svc", "web-01/site/web", "rollback", "web-01/"+ctrUpdateID))
+	rec := ctrPost(t, h, selection("svc", "web-01/site/web"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("confirmation: %d %s", rec.Code, rec.Body.String())
 	}
@@ -349,7 +349,6 @@ func TestContainerConfirmShowsCurrentToApprovedAndProposesIt(t *testing.T) {
 		"Dependencies: affected, not recreated", "site-db-1",
 		"Stage 1: prod", "MEDIUM",
 		"Volume and database migrations are not undone",
-		"Rolls back update", ctrUpdateID, "docker.io/library/nginx:1.26", "bound to the containers that update created",
 		"&lt;b&gt;web&lt;/b&gt; &#34;one&#34;", // escaped host name
 	} {
 		if !strings.Contains(body, want) {
@@ -367,14 +366,34 @@ func TestContainerConfirmShowsCurrentToApprovedAndProposesIt(t *testing.T) {
 		t.Fatalf("proposed %+v", f.proposed)
 	}
 	st := f.proposed[0].Stages[0]
-	if st.Gate != "manual" || st.FailureThreshold != 0 || st.UnreachableThreshold != 0 || len(st.Members) != 2 {
+	if st.Gate != "manual" || st.FailureThreshold != 0 || st.UnreachableThreshold != 0 || len(st.Members) != 1 {
 		t.Fatalf("stage %+v", st)
 	}
-	up, rb := st.Members[0], st.Members[1]
+	up := st.Members[0]
 	if up.ActionID != "docker.compose_update" || up.Version != "2.0.0" || up.HostID != "web-01" || up.Update == nil ||
 		up.Update.PreviewExecutionID != ctrPreviewID || up.Update.Project != "site" || len(up.Update.Services) != 1 || up.Update.Services[0] != (executions.ContainerServiceSpec{Service: "web"}) {
 		t.Errorf("update member %+v %+v", up, up.Update)
 	}
+}
+
+func TestContainerRollbackConfirmIsBoundToTheRecreatedContainers(t *testing.T) {
+	h, f := ctrHandler(t, false)
+	rec := ctrPost(t, h, selection("rollback", "web-01/"+ctrUpdateID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("confirmation: %d %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"Rolls back update", ctrUpdateID, "docker.io/library/nginx:1.26", ctrDigest("2"),
+		"bound to the containers that update created", ctrHex("1"), "HIGH", "Volume and database migrations are not undone"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("confirmation lacks %q", want)
+		}
+	}
+	rec = ctrPost(t, h, ctrConfirmBody(t, body).Encode())
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("confirm: %d %s", rec.Code, rec.Body.String())
+	}
+	rb := f.proposed[0].Stages[0].Members[0]
 	if rb.ActionID != "docker.compose_rollback" || rb.Version != "1.0.0" || rb.Rollback == nil || rb.Rollback.RollbackOf != ctrUpdateID || rb.Rollback.PreviewExecutionID != ctrPreviewID {
 		t.Errorf("rollback member %+v", rb)
 	}
@@ -473,6 +492,7 @@ func TestContainerPlanRefusals(t *testing.T) {
 		{"stale preview", url.Values{"svc": {"web-01/site/web"}, "preview:web-01": {ctrOtherID}}.Encode(), "no longer the newest"},
 		{"repeated selection", selection("svc", "web-01/site/web", "svc", "web-01/site/web"), "repeated"},
 		{"malformed key", selection("svc", "web-01"), "invalid selection"},
+		{"update and rollback of one project", selection("svc", "web-01/site/web", "rollback", "web-01/"+ctrUpdateID), "changes a project once"},
 		{"unknown rollback", selection("rollback", "web-01/00000000-0000-4000-8000-0000000000ff"), "no recorded update"},
 	}
 	for _, c := range cases {

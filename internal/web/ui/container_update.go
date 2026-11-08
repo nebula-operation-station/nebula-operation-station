@@ -587,9 +587,14 @@ func (h *Handler) ctrPlan(ctx context.Context, form url.Values) ([]ctrStageView,
 				if err != nil {
 					return nil, executions.BatchRequest{}, h.ctrPlanError(id, err)
 				}
+				// One batch changes a unit once (the planner refuses it
+				// too); say so before the confirmation page.
+				if _, updated := s.projects[b.Project]; updated {
+					return nil, executions.BatchRequest{}, ctrBad("host %s: project %s is selected for an update and a rollback; one batch changes a project once",
+						stagedEcho(id), stagedEcho(b.Project))
+				}
 				spec.Members = append(spec.Members, executions.BatchMemberSpec{ActionID: "docker.compose_rollback", Version: "1.0.0", HostID: id, Rollback: &rs})
-				m := ctrMember("Rollback", s, b)
-				sv.Members = append(sv.Members, m)
+				sv.Members = append(sv.Members, ctrMember("Rollback", s, b))
 			}
 		}
 		req.Stages = append(req.Stages, spec)
