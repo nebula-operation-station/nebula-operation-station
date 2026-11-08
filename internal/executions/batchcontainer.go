@@ -167,10 +167,10 @@ func (b *Batches) planContainerMember(ctx context.Context, a actions.Action, spe
 	return u, nil
 }
 
-// freshPreview loads the named preview of hostID and checks that it is the
-// host's newest successful preview, of the shipped preview artifact, and
-// started at most maxPreviewBindingAge before now.
-func (b *Batches) freshPreview(ctx context.Context, hostID, id string, n int) (dockerhost.UpdatePreview, error) {
+// freshPreviewAnyStatus loads the named preview of hostID and checks that
+// it is the host's newest successful preview, of the shipped preview
+// artifact, and started at most maxPreviewBindingAge before now.
+func (b *Batches) freshPreviewAnyStatus(ctx context.Context, hostID, id string, n int) (dockerhost.UpdatePreview, error) {
 	if !executionIDRe.MatchString(id) {
 		return dockerhost.UpdatePreview{}, containerInput(n, ErrBatchPreviewMissing, "name the docker.update_preview run to plan from")
 	}
@@ -219,6 +219,16 @@ func (b *Batches) freshPreview(ctx context.Context, hostID, id string, n int) (d
 	if err != nil {
 		b.log.Warn("batch preview unreadable", "preview", id, "host", hostID)
 		return dockerhost.UpdatePreview{}, containerInput(n, ErrBatchPreviewMissing, "the update preview's result cannot be read")
+	}
+	return p, nil
+}
+
+// freshPreview is freshPreviewAnyStatus for a preview with status ok: only
+// such a preview carries units a binding can be built from.
+func (b *Batches) freshPreview(ctx context.Context, hostID, id string, n int) (dockerhost.UpdatePreview, error) {
+	p, err := b.freshPreviewAnyStatus(ctx, hostID, id, n)
+	if err != nil {
+		return p, err
 	}
 	if p.Status != dockerhost.PreviewOK {
 		return dockerhost.UpdatePreview{}, containerInput(n, ErrBatchPreviewUnit, "the update preview of %s reports %s", hostID, p.Status)
