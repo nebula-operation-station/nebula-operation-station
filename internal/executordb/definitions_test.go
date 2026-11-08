@@ -24,10 +24,26 @@ func putDefinition(t *testing.T, db *DB, host, name, newID string) ContainerDefi
 		t.Fatal(err)
 	}
 	d.CreatedBy = "admin:uid0"
-	if err := db.AddContainerDefinition(d, sealedSecret(d.VaultSecretID, 1)); err != nil {
+	stored, err := db.AddContainerDefinition(d, sealedSecret(d.VaultSecretID, 1))
+	if err != nil {
 		t.Fatal(err)
 	}
-	return d
+	return stored
+}
+
+// TestAddContainerDefinitionReturnsStoredRow: Put answers from what Add
+// returns, so it must equal the row a later read gives.
+func TestAddContainerDefinitionReturnsStoredRow(t *testing.T) {
+	t1 := time.Date(2026, 11, 8, 10, 0, 0, 500, time.UTC)
+	db := openAtT(t, privateDir(t), t1)
+	stored := putDefinition(t, db, "web-1", "web", defIDA)
+	vs, err := db.ContainerDefinitionVersions("web-1", "web")
+	if err != nil || len(vs) != 1 {
+		t.Fatalf("versions %+v %v", vs, err)
+	}
+	if stored != vs[0] || stored.CreatedAt.IsZero() {
+		t.Fatalf("returned %+v, stored %+v", stored, vs[0])
+	}
 }
 
 // sealedSecret is a stand-in encrypted secret of the sizes the vault
@@ -290,7 +306,7 @@ func TestDefinitionVersionsAreWriteOnce(t *testing.T) {
 	// Adding the same version again (a stale Next) is refused.
 	sec := sealedSecret(v1.VaultSecretID, 1)
 	v1.CreatedBy = "x"
-	if err := db.AddContainerDefinition(v1, sec); !errors.Is(err, ErrSecretVersion) {
+	if _, err := db.AddContainerDefinition(v1, sec); !errors.Is(err, ErrSecretVersion) {
 		t.Fatalf("stale add: %v", err)
 	}
 	// A vault secret that would replace an existing one is refused.
@@ -302,10 +318,10 @@ func TestDefinitionVersionsAreWriteOnce(t *testing.T) {
 	if err := db.PutSecret(sealedSecret(next.VaultSecretID, 1)); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AddContainerDefinition(next, sealedSecret(next.VaultSecretID, 2)); !errors.Is(err, ErrDefinitionExists) {
+	if _, err := db.AddContainerDefinition(next, sealedSecret(next.VaultSecretID, 2)); !errors.Is(err, ErrDefinitionExists) {
 		t.Fatalf("replacing secret: %v", err)
 	}
-	if err := db.AddContainerDefinition(next, sealedSecret(next.VaultSecretID, 1)); !errors.Is(err, ErrDefinitionExists) {
+	if _, err := db.AddContainerDefinition(next, sealedSecret(next.VaultSecretID, 1)); !errors.Is(err, ErrDefinitionExists) {
 		t.Fatalf("existing secret: %v", err)
 	}
 	if vs, _ := db.ContainerDefinitionVersions("web-1", "web"); len(vs) != 1 {
@@ -313,7 +329,7 @@ func TestDefinitionVersionsAreWriteOnce(t *testing.T) {
 	}
 	// A mismatched secret ID is refused.
 	next.VaultSecretID = "ctrdef.other"
-	if err := db.AddContainerDefinition(next, sec); err == nil {
+	if _, err := db.AddContainerDefinition(next, sec); err == nil {
 		t.Fatal("mismatched secret ID accepted")
 	}
 }
@@ -328,7 +344,7 @@ func TestDefinitionVersionLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	d.CreatedBy = "x"
-	if err := db.AddContainerDefinition(d, sealedSecret(d.VaultSecretID, 1)); !errors.Is(err, ErrDefinitionLimit) {
+	if _, err := db.AddContainerDefinition(d, sealedSecret(d.VaultSecretID, 1)); !errors.Is(err, ErrDefinitionLimit) {
 		t.Fatalf("version over the limit: %v", err)
 	}
 	if _, err := db.GetSecret(d.VaultSecretID); !errors.Is(err, ErrNoSecret) {
