@@ -1,8 +1,8 @@
 # ADR 0010: Network devices: switch configuration and firewall
 
 Status: proposed (draft by Claude for maintainer review), 2026-11-08. Awaiting
-the maintainer's answers to the open questions at the end; do not implement
-past ND-04 before acceptance.
+the maintainer's answers to the open questions at the end. Before
+acceptance only the lab verification ND-03 may run; no code is written.
 
 ## Context
 
