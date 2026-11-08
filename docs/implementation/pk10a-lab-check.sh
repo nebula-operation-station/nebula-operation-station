@@ -161,8 +161,8 @@ for p in "${PROFILES[@]}"; do
     pveum role add "$r" --privs "$privs" >/dev/null || die "role add $r ($privs)"
     pveum acl modify "$path" --users "$u" --roles "$r" --propagate 1 >/dev/null || die "acl $path $u"
   done
-  sec=$(pveum user token add "$u" t --privsep 0 --output-format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])') || die "token $u"
-  TOK[$name]="$u!t=$sec"
+  sec=$(pveum user token add "$u" chk --privsep 0 --output-format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])') || die "token $u"
+  TOK[$name]="$u!chk=$sec"
 done
 log "# profiles: $(for p in "${PROFILES[@]}"; do printf '%s  ' "${p%%|*}"; done)"
 
