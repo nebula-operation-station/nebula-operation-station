@@ -360,9 +360,11 @@ func TestMethodRolesCoverEveryRPC(t *testing.T) {
 }
 
 // TestMethodRolesGuestSnapshotThroughInterceptor: through the real
-// interceptor and role table, the server and the admin may propose a
-// guest snapshot action, only the admin may commit it, and every other
-// role (and an unknown UID) is denied before the handler runs.
+// interceptor and role table, the server and the admin may propose and
+// commit a guest snapshot action (decision WA-05 variant (a), 2026-11-07:
+// the server commits like provisioning; the executor runs only a permit
+// approved under the normal approval semantics), and every other role
+// (and an unknown UID) is denied before the handler runs.
 func TestMethodRolesGuestSnapshotThroughInterceptor(t *testing.T) {
 	const (
 		serverUID uint32 = 30001
@@ -381,7 +383,7 @@ func TestMethodRolesGuestSnapshotThroughInterceptor(t *testing.T) {
 	commit := pb.ExecutorService_CommitPVEGuestSnapshot_FullMethodName
 	allowed := map[string]map[uint32]bool{
 		propose: {serverUID: true, adminUID: true},
-		commit:  {adminUID: true},
+		commit:  {serverUID: true, adminUID: true},
 	}
 	for method, ok := range allowed {
 		for _, uid := range []uint32{serverUID, adminUID, collUID, discUID, otherUID} {

@@ -173,6 +173,46 @@ func (l *lazyExecutor) CommitPVEGuestProvision(ctx context.Context, in *pb.Commi
 	return nil, errNotConnected
 }
 
+// ProposePVEGuestPower passes a typed guest power proposal through (ADR
+// 0006 P2-01; the chart's Power section is its caller). The executor binds
+// the guest and sets the risk.
+func (l *lazyExecutor) ProposePVEGuestPower(ctx context.Context, in *pb.ProposePVEGuestPowerRequest, opts ...grpc.CallOption) (*pb.ProposePVEGuestPowerResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ProposePVEGuestPower(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+// CommitPVEGuestPower passes the run of an approved guest power action
+// through (decision WA-05 variant (a)); the executor checks the approved
+// permit.
+func (l *lazyExecutor) CommitPVEGuestPower(ctx context.Context, in *pb.CommitPVEGuestPowerRequest, opts ...grpc.CallOption) (*pb.CommitPVEGuestPowerResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.CommitPVEGuestPower(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+// ProposePVEGuestSnapshot passes a typed guest snapshot proposal through
+// (ADR 0006 P2-01; the snapshot page is its caller). The executor binds
+// the disk set or the exact snapshot and sets the risk.
+func (l *lazyExecutor) ProposePVEGuestSnapshot(ctx context.Context, in *pb.ProposePVEGuestSnapshotRequest, opts ...grpc.CallOption) (*pb.ProposePVEGuestSnapshotResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ProposePVEGuestSnapshot(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+// CommitPVEGuestSnapshot passes the run of an approved guest snapshot
+// action through (decision WA-05 variant (a)); the executor checks the
+// approved permit.
+func (l *lazyExecutor) CommitPVEGuestSnapshot(ctx context.Context, in *pb.CommitPVEGuestSnapshotRequest, opts ...grpc.CallOption) (*pb.CommitPVEGuestSnapshotResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.CommitPVEGuestSnapshot(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
 func (l *lazyExecutor) CommitEnroll(ctx context.Context, in *pb.CommitEnrollRequest, opts ...grpc.CallOption) (*pb.CommitEnrollResponse, error) {
 	if c := l.c.Load(); c != nil {
 		return c.CommitEnroll(ctx, in, opts...)

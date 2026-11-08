@@ -20,7 +20,9 @@ func (c *Client) ProposePVEGuestSnapshot(ctx context.Context, in *pb.ProposePVEG
 	return resp, mapCallError(ctx, err)
 }
 
-// CommitPVEGuestSnapshot runs an approved guest snapshot action. It waits
+// CommitPVEGuestSnapshot runs an approved guest snapshot action (server and
+// admin roles, decision WA-05 variant (a); the executor requires the
+// approved permit). It waits
 // for the PVE task, so it gets the longer power commit timeout.
 func (c *Client) CommitPVEGuestSnapshot(ctx context.Context, in *pb.CommitPVEGuestSnapshotRequest, opts ...grpc.CallOption) (*pb.CommitPVEGuestSnapshotResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout+pveGuestPowerCommitWait)
