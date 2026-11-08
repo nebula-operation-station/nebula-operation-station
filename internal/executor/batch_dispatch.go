@@ -76,8 +76,12 @@ type batchMemberCall struct {
 	eps         []sshtransport.Endpoint
 	artifact    []byte
 	secrets     []hostrun.Secret
-	timeout     time.Duration
-	resp        *pb.RunBatchMemberResponse
+	// secretRefs is the run's slot -> vault secret ID mapping the executor
+	// derived from a standalone member's binding (container_standalone.go);
+	// the run records it so its durable output is redacted.
+	secretRefs map[string]string
+	timeout    time.Duration
+	resp       *pb.RunBatchMemberResponse
 	// remoteMayRun: the attached run ended without the remote shell's
 	// exit status, so it may still be running on the target.
 	remoteMayRun bool
@@ -468,6 +472,20 @@ func (s *Service) RunBatchMember(ctx context.Context, req *pb.RunBatchMemberRequ
 	if err != nil {
 		return nil, err
 	}
+	// A standalone member's definition is the executor's own run secret,
+	// read and shape-checked before the claim: a locked vault, a missing,
+	// replaced or malformed definition refuses the member without using
+	// it up. Its parameters name no secret (checkContainerMember).
+	var secretRefs map[string]string
+	if durable {
+		def, refs, err := s.standaloneMemberSecrets(member, target.HostID)
+		if err != nil {
+			s.log.Warn("audit", "kind", "batch_member_refused", "batch", d.String(), "member", member.MemberID, "host", target.HostID,
+				"detail", err.Error())
+			return nil, status.Error(codes.FailedPrecondition, "container_member_refused: "+err.Error())
+		}
+		secrets, secretRefs = append(secrets, def...), refs
+	}
 	execID := member.Request.ExecutionID
 	// No member starts while the held targets are not persisted: a
 	// restart could otherwise forget a hold.
@@ -478,7 +496,7 @@ func (s *Service) RunBatchMember(ctx context.Context, req *pb.RunBatchMemberRequ
 	}
 	resp := &pb.RunBatchMemberResponse{ExecutionId: execID, ExitCode: -1}
 	call := &batchMemberCall{hostID: target.HostID, fingerprint: target.HostKeyFingerprint, endpoints: slices.Clone(req.GetEndpoints()),
-		eps: eps, artifact: req.GetArtifact(), secrets: secrets, timeout: timeout, resp: resp, durable: durable}
+		eps: eps, artifact: req.GetArtifact(), secrets: secrets, secretRefs: secretRefs, timeout: timeout, resp: resp, durable: durable}
 	// The reservation is persisted before anything is claimed or started.
 	reserved, rerr := s.reserveTarget(x, target.HostID, execID, call)
 	if rerr == nil && !reserved && s.recheckHeld(ctx, x, target.HostID) {
@@ -717,7 +735,8 @@ func (r batchRunRecorder) RecordIntent(_ context.Context, run dispatch.Run) erro
 		return fmt.Errorf("batch: read run: %w", err)
 	}
 	if err := r.s.db.CreateRun(executordb.Run{ExecutionID: run.ExecutionID, HostID: call.hostID, Digest: run.ParentDigest,
-		Endpoints: call.endpoints, Fingerprint: call.fingerprint, Timeout: call.timeout, MemberID: run.MemberID, ActionID: run.ActionID}); err != nil {
+		Endpoints: call.endpoints, Fingerprint: call.fingerprint, Timeout: call.timeout, MemberID: run.MemberID, ActionID: run.ActionID,
+		SecretRefs: call.secretRefs}); err != nil {
 		if _, gerr := r.s.db.GetRun(run.ExecutionID, call.hostID); gerr == nil {
 			return dispatch.ErrIntentRecorded
 		}

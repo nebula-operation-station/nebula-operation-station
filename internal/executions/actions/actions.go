@@ -244,6 +244,22 @@ var dockerComposeUpdate []byte
 //go:embed scripts/docker_compose_rollback.sh
 var dockerComposeRollback []byte
 
+// dockerUpdate is docker.update 1.0.0, the standalone recreate of container
+// update plan cu05: the bound container from the operator's stored
+// definition, which the executor adds as a run secret. Its SHA-256 is
+// pinned in the executor (internal/executor, standaloneUpdateArtifactSHA256),
+// so a change of these bytes needs a reviewed pin update.
+//
+//go:embed scripts/docker_update.sh
+var dockerUpdate []byte
+
+// dockerRollback is docker.rollback 1.0.0, the rollback of a recorded
+// docker.update 1.0.0 run (cu05). Its SHA-256 is pinned in the executor
+// (internal/executor, standaloneRollbackArtifactSHA256).
+//
+//go:embed scripts/docker_rollback.sh
+var dockerRollback []byte
+
 //go:embed scripts/docker_check_updates.sh
 var dockerCheckUpdates []byte
 
@@ -448,6 +464,18 @@ var Builtin = []Action{
 		ID: "docker.compose_rollback", Version: "1.0.0", Title: "Roll back Compose update",
 		Description: "Batch member only, as a durable job: returns one Compose project to the definition a recorded docker.compose_update replaced, exactly as the rollback binding names it, inside the update's rollback window and with a recovery plan. Prechecks the recorded containers, configuration and source digests and that each retained nos-retained image still exists; pulls and resolves nothing; points the NOS override at the retained images, then up -d --no-deps for the bound services, with a baseline and an after-snapshot. Needs root and python3.",
 		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Durable: true, Timeout: 30 * time.Minute, Script: dockerComposeRollback, Retry: RetryReconcileFirst,
+	},
+	{
+		// No secret slot: the executor alone adds the bound definition as a
+		// run secret, so the planner never names one (G8).
+		ID: "docker.update", Version: "1.0.0", Title: "Update standalone container",
+		Description: "Batch member only, as a durable job: recreates exactly one standalone container from the operator's stored definition (bound by ID and version, delivered by the executor as a run secret) and the bound image digest. Prechecks the bound container and its configuration digest; resolves the new tag against the bound digests; pulls by digest only (no registry login); keeps the old image as nos-retained; then stops, renames and replaces the container, with a baseline and an after-snapshot. Env values go through an env file on the run's tmpfs, never a command line; no Docker output leaves the host. Needs root, python3 and curl, and docker.update_prepare once per host.",
+		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Durable: true, Timeout: 30 * time.Minute, Script: dockerUpdate, Retry: RetryReconcileFirst,
+	},
+	{
+		ID: "docker.rollback", Version: "1.0.0", Title: "Roll back standalone container update",
+		Description: "Batch member only, as a durable job: returns one standalone container to the image a recorded docker.update replaced, from the same definition version, inside the update's rollback window and with a recovery plan. Prechecks the recorded container and that the retained nos-retained image still exists; resolves and pulls nothing; then stops, renames and replaces the container, with a baseline and an after-snapshot. No Docker output leaves the host. Needs root and python3.",
+		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Durable: true, Timeout: 30 * time.Minute, Script: dockerRollback, Retry: RetryReconcileFirst,
 	},
 	{
 		ID: "docker.update_preview", Version: "1.0.0", Title: "Preview container updates",

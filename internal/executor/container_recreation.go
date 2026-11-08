@@ -186,9 +186,10 @@ func recreationCompletion(row executordb.ContainerRecreation, class string, resu
 }
 
 // recreationCompletionWith is recreationCompletion for a row of either
-// kind. A rollback row's run is read as compose-rollback-v1 and judged by
-// judgeComposeRollback against updateBaseline, the baseline the recorded
-// update's row holds (none: the verdict fails).
+// kind and form. A rollback row's run is read as compose-rollback-v1 (or
+// standalone-rollback-v1) and judged by judgeComposeRollback (or
+// judgeStandaloneRollback) against updateBaseline, the baseline the
+// recorded update's row holds (none: the verdict fails).
 func recreationCompletionWith(row executordb.ContainerRecreation, updateBaseline []byte, class string, result []byte) executordb.RecreationCompletion {
 	c := executordb.RecreationCompletion{State: executordb.RecreationUncertain}
 	if !durableJobOver(class) {
@@ -201,11 +202,8 @@ func recreationCompletionWith(row executordb.ContainerRecreation, updateBaseline
 		return c
 	}
 	rollback := u.Kind == canonical.ContainerUpdateKindRollback
-	format := composeUpdateFormat
-	if rollback {
-		format = composeRollbackFormat
-	}
-	res, err := parseContainerResult(result, format)
+	standalone := u.Form == canonical.ContainerUpdateFormAlone
+	res, err := parseContainerResult(result, containerResultFormat(u))
 	if err != nil {
 		if class == hostrun.ClassPrecheckFailed {
 			// Exit 10 is the script's stop while nothing changed.
@@ -250,14 +248,22 @@ func recreationCompletionWith(row executordb.ContainerRecreation, updateBaseline
 		if len(updateBaseline) > 0 && json.Unmarshal(updateBaseline, &restore) != nil {
 			restore = nil
 		}
-		v = judgeComposeRollback(u, restore, res)
+		if standalone {
+			v = judgeStandaloneRollback(u, restore, res)
+		} else {
+			v = judgeComposeRollback(u, restore, res)
+		}
 	} else {
 		// The retained tag of each service is the one the intent row recorded.
 		retained := map[string]string{}
 		for _, img := range row.Images {
 			retained[img.Service] = img.RetainedTag
 		}
-		v = judgeComposeUpdate(u, retained, res)
+		if standalone {
+			v = judgeStandaloneUpdate(u, retained[""], res)
+		} else {
+			v = judgeComposeUpdate(u, retained, res)
+		}
 	}
 	c.Verdict = executordb.RecreationVerdict{Judged: true, Passed: v.Passed, Findings: boundFindings(v.Findings)}
 	c.Containers = recreationContainers(res.Baseline, res.After)
@@ -480,7 +486,8 @@ func (s *Service) ContainerRecreations(hostID string) ([]executordb.ContainerRec
 // open at now, a recovery plan with the bound digest exists, and the
 // binding equals the row: the reversed images with their rollback blocks,
 // the present containers as targets with their recorded after-values, the
-// dependencies and the source digest. An image entry without a target is
+// dependencies, the source digest and (standalone) the definition ID and
+// version. An image entry without a target is
 // accepted only when the row records every container of that service as
 // missing.
 func checkRollbackSource(u canonical.BatchContainerUpdate, row executordb.ContainerRecreation, plan *executordb.RecoveryPlan, hostID string, now time.Time) error {
@@ -506,6 +513,11 @@ func checkRollbackSource(u canonical.BatchContainerUpdate, row executordb.Contai
 	if u.Form != upd.Form || u.Project != upd.Project || u.SourceDigest != upd.SourceDigest ||
 		u.WorkingDirHash != upd.WorkingDirHash || u.ConfigFilesHash != upd.ConfigFilesHash {
 		return differs("unit or source")
+	}
+	// A standalone rollback recreates from exactly the definition version
+	// the update used, never a later one (R9).
+	if u.DefinitionID != upd.DefinitionID || u.DefinitionVersion != upd.DefinitionVersion {
+		return differs("definition")
 	}
 	if !jsonEqual(u.Dependencies, upd.Dependencies) {
 		return differs("dependencies")

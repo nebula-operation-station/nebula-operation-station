@@ -41,6 +41,31 @@ const composeUpdateFormat = "compose-update-v2"
 // and without pulled or retained images.
 const composeRollbackFormat = "compose-rollback-v1"
 
+// standaloneUpdateFormat and standaloneRollbackFormat are the result
+// formats of docker.update and docker.rollback 1.0.0 (cu05): the shapes of
+// compose-update-v2 and compose-rollback-v1 for one container, with no
+// project, the recreate's exit status in recreate_exit instead of up_exit,
+// and every snapshot entry, pulled and retained image under service ""
+// (the one container is matched by name; its replica is "1").
+const (
+	standaloneUpdateFormat   = "standalone-update-v1"
+	standaloneRollbackFormat = "standalone-rollback-v1"
+)
+
+// containerResultFormat is the result format of a binding's kind and form.
+func containerResultFormat(u canonical.BatchContainerUpdate) string {
+	rollback := u.Kind == canonical.ContainerUpdateKindRollback
+	switch {
+	case u.Form == canonical.ContainerUpdateFormAlone && rollback:
+		return standaloneRollbackFormat
+	case u.Form == canonical.ContainerUpdateFormAlone:
+		return standaloneUpdateFormat
+	case rollback:
+		return composeRollbackFormat
+	}
+	return composeUpdateFormat
+}
+
 // Limits of a judged compose-update-v2 result, enforced by the parser.
 const (
 	// maxJudgedResultBytes is the result limit of a durable job.
@@ -133,16 +158,19 @@ type resultRetained struct {
 // composeUpdateResult is a parsed compose-update-v2 result. Baseline and
 // After are nil when the result does not carry them.
 type composeUpdateResult struct {
-	Format   string           `json:"format"`
-	Phase    string           `json:"phase"`
-	Reason   string           `json:"reason"`
-	Service  string           `json:"service"`
-	Project  string           `json:"project"`
-	UpExit   *int             `json:"up_exit"`
-	Baseline []snapshotEntry  `json:"baseline"`
-	After    []snapshotEntry  `json:"after"`
-	Pulled   []resultImage    `json:"pulled"`
-	Retained []resultRetained `json:"retained"`
+	Format  string `json:"format"`
+	Phase   string `json:"phase"`
+	Reason  string `json:"reason"`
+	Service string `json:"service"`
+	Project string `json:"project"`
+	UpExit  *int   `json:"up_exit"`
+	// RecreateExit is the standalone recreate's exit status (standalone
+	// formats only).
+	RecreateExit *int             `json:"recreate_exit"`
+	Baseline     []snapshotEntry  `json:"baseline"`
+	After        []snapshotEntry  `json:"after"`
+	Pulled       []resultImage    `json:"pulled"`
+	Retained     []resultRetained `json:"retained"`
 	// AfterTruncated is set when the script cut the after-snapshot at its
 	// total bound (cu02t): the list is incomplete.
 	AfterTruncated bool `json:"after_truncated"`
@@ -170,7 +198,10 @@ func boundedText(s string, limit int) bool {
 	return true
 }
 
-func checkSnapshotEntry(e snapshotEntry) error {
+// checkSnapshotEntry checks one snapshot entry. A standalone entry has
+// service "" and replica "1"; a compose entry a service name and replica
+// number.
+func checkSnapshotEntry(e snapshotEntry, standalone bool) error {
 	if !snapHex64Re.MatchString(e.ID) {
 		return errors.New("entry without a full container ID")
 	}
@@ -181,8 +212,12 @@ func checkSnapshotEntry(e snapshotEntry) error {
 		}
 		return nil
 	}
+	unit := snapServiceRe.MatchString(e.Service) && snapReplicaRe.MatchString(e.Replica)
+	if standalone {
+		unit = e.Service == "" && e.Replica == "1"
+	}
 	switch {
-	case !snapNameRe.MatchString(e.Name), !snapServiceRe.MatchString(e.Service), !snapReplicaRe.MatchString(e.Replica):
+	case !snapNameRe.MatchString(e.Name), !unit:
 		return errors.New("entry with a malformed name, service or replica")
 	case !snapStates[e.State], !snapHealth[e.Health], !snapStartedAtRe.MatchString(e.StartedAt):
 		return errors.New("entry with a malformed state, health or start time")
@@ -217,11 +252,16 @@ func parseComposeUpdateResult(b []byte) (composeUpdateResult, error) {
 	return parseContainerResult(b, composeUpdateFormat)
 }
 
-// parseContainerResult reads a result of format (compose-update-v2 or
-// compose-rollback-v1) with the same strict rules. A rollback result has
-// no resolve or pull phase and reports no pulled or retained image.
+// parseContainerResult reads a result of format (compose-update-v2,
+// compose-rollback-v1, standalone-update-v1 or standalone-rollback-v1)
+// with the same strict rules. A rollback result has no resolve or pull
+// phase and reports no pulled or retained image. A compose result carries
+// no recreate_exit; a standalone result no project, service or up_exit,
+// and only service "" entries and images.
 func parseContainerResult(b []byte, format string) (composeUpdateResult, error) {
-	if format != composeUpdateFormat && format != composeRollbackFormat {
+	standalone := format == standaloneUpdateFormat || format == standaloneRollbackFormat
+	rollback := format == composeRollbackFormat || format == standaloneRollbackFormat
+	if format != composeUpdateFormat && format != composeRollbackFormat && !standalone {
 		return composeUpdateResult{}, fmt.Errorf("%w: unknown format", errComposeResult)
 	}
 	if len(b) == 0 || len(b) > maxJudgedResultBytes || !utf8.Valid(b) {
@@ -239,8 +279,12 @@ func parseContainerResult(b []byte, format string) (composeUpdateResult, error) 
 	switch {
 	case r.Format != format || !resultPhases[r.Phase]:
 		return composeUpdateResult{}, fmt.Errorf("%w: format or phase", errComposeResult)
-	case format == composeRollbackFormat && (r.Phase == phaseResolve || r.Phase == phasePull || r.Pulled != nil || r.Retained != nil):
+	case rollback && (r.Phase == phaseResolve || r.Phase == phasePull || r.Pulled != nil || r.Retained != nil):
 		return composeUpdateResult{}, fmt.Errorf("%w: a rollback resolves, pulls and retains nothing", errComposeResult)
+	case standalone && (r.Project != "" || r.Service != "" || r.UpExit != nil):
+		return composeUpdateResult{}, fmt.Errorf("%w: a standalone result names no project or service and has no up_exit", errComposeResult)
+	case !standalone && r.RecreateExit != nil:
+		return composeUpdateResult{}, fmt.Errorf("%w: a compose result has no recreate_exit", errComposeResult)
 	case r.Reason != "" && !resultReasonRe.MatchString(r.Reason):
 		return composeUpdateResult{}, fmt.Errorf("%w: reason", errComposeResult)
 	case r.Service != "" && !snapServiceRe.MatchString(r.Service):
@@ -253,18 +297,24 @@ func parseContainerResult(b []byte, format string) (composeUpdateResult, error) 
 	}
 	for _, side := range [][]snapshotEntry{r.Baseline, r.After} {
 		for _, e := range side {
-			if err := checkSnapshotEntry(e); err != nil {
+			if err := checkSnapshotEntry(e, standalone); err != nil {
 				return composeUpdateResult{}, fmt.Errorf("%w: %w", errComposeResult, err)
 			}
 		}
 	}
+	service := func(s string) bool {
+		if standalone {
+			return s == ""
+		}
+		return snapServiceRe.MatchString(s)
+	}
 	for _, p := range r.Pulled {
-		if !snapServiceRe.MatchString(p.Service) || !snapImageIDRe.MatchString(p.ImageID) {
+		if !service(p.Service) || !snapImageIDRe.MatchString(p.ImageID) {
 			return composeUpdateResult{}, fmt.Errorf("%w: pulled image", errComposeResult)
 		}
 	}
 	for _, t := range r.Retained {
-		if !snapServiceRe.MatchString(t.Service) || !snapRetainedTagR.MatchString(t.Tag) {
+		if !service(t.Service) || !snapRetainedTagR.MatchString(t.Tag) {
 			return composeUpdateResult{}, fmt.Errorf("%w: retained image", errComposeResult)
 		}
 	}
