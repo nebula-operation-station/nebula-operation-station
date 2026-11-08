@@ -400,7 +400,7 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 	bg.Go(func() { imports.run(connCtx) })
 
-	h, err := ui.New(ui.Options{
+	h, err := ui.New(withBatchPlanner(ui.Options{
 		PublicOrigin:   cfg.PublicOrigin,
 		Status:         exec,
 		HostNames:      hostNames,
@@ -439,14 +439,14 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		// executor (ui.DeployBatchProbe): an executor without batches
 		// (no batch authority, or no credential-version read) ends such
 		// a run at "joined" (enrolled, plan not run) and says so.
-		Deploy:        exec,
-		DeployJoin:    &pveinventory.GuestJoinFlow{Store: pveStore, Executor: exec},
-		DeployIPAM:    ipamStore,
-		DeployBatches: batches,
-		SecurityKeys:  securityKeys,
-		TOTPStatus:    totpStatus,
-		Log:           log,
-	})
+		// DeployBatches and ContainerBatches: withBatchPlanner.
+		Deploy:       exec,
+		DeployJoin:   &pveinventory.GuestJoinFlow{Store: pveStore, Executor: exec},
+		DeployIPAM:   ipamStore,
+		SecurityKeys: securityKeys,
+		TOTPStatus:   totpStatus,
+		Log:          log,
+	}, batches))
 	if err != nil {
 		return err
 	}
@@ -680,6 +680,15 @@ func (d deployBatches) ApproveBatch(ctx context.Context, user, id string, assert
 		return err
 	}
 	return d.Batches.ApproveBatch(ctx, user, id, assertion)
+}
+
+// withBatchPlanner gives the UI the gated batch planner b for both the
+// staged deployment plan (DeployBatches) and the container update
+// controls (ContainerBatches, cu04): one planner, one execution gate.
+func withBatchPlanner(o ui.Options, b deployBatches) ui.Options {
+	o.DeployBatches = b
+	o.ContainerBatches = b
+	return o
 }
 
 // newBatches builds the batch planner with the executor's credential

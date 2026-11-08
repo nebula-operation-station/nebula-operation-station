@@ -18,6 +18,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
 
 // ListContainerRecreations: the plain batch fake records no updates.
@@ -111,5 +112,34 @@ func TestServerBatchExecutorForwardsRecreations(t *testing.T) {
 	lister = serverBatchExecutor{client: func() batchRPC { return r }}
 	if _, err := lister.ListContainerRecreations(context.Background(), &pb.ListContainerRecreationsRequest{HostId: "web1"}); err != nil || len(r.asked) != 1 {
 		t.Fatalf("connected = %v, asked %v", err, r.asked)
+	}
+}
+
+// TestServerUIGetsGatedContainerBatches: main hands the UI the batch
+// planner twice, as DeployBatches and as ContainerBatches (cu04), both the
+// gated planner, so a container proposal is refused while the executor
+// does not run batches and nothing reaches it.
+func TestServerUIGetsGatedContainerBatches(t *testing.T) {
+	r := &recreationBatchRPC{fakeBatchRPC: &fakeBatchRPC{execution: false}}
+	b := newContainerWiringBatches(t, func() batchRPC { return r })
+	o := withBatchPlanner(ui.Options{PublicOrigin: "https://nebula.example.org"}, b)
+	cb, ok := o.ContainerBatches.(deployBatches)
+	if !ok || cb.Batches != b.Batches {
+		t.Fatalf("ContainerBatches = %#v, want the gated planner", o.ContainerBatches)
+	}
+	if db, ok := o.DeployBatches.(deployBatches); !ok || db.Batches != b.Batches {
+		t.Fatalf("DeployBatches = %#v, want the gated planner", o.DeployBatches)
+	}
+	update := executions.BatchMemberSpec{ActionID: "docker.compose_update", HostID: wiringHost,
+		Update: &executions.ContainerUpdateSpec{PreviewExecutionID: "00000000-0000-4000-8000-0000000000a1", Project: "site",
+			Services: []executions.ContainerServiceSpec{{Service: "web"}}}}
+	if _, err := o.ContainerBatches.ProposeBatch(context.Background(), "alice", containerRequest(update)); !errors.Is(err, executions.ErrBatchExecutionUnavailable) {
+		t.Fatalf("container proposal without batch execution = %v, want ErrBatchExecutionUnavailable", err)
+	}
+	if len(r.proposed) != 0 || len(r.asked) != 0 {
+		t.Fatal("an ungated container proposal reached the executor")
+	}
+	if _, err := ui.New(o); err != nil {
+		t.Fatalf("ui.New with the server's batch options: %v", err)
 	}
 }
