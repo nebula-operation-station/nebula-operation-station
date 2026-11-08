@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -309,6 +310,48 @@ func TestStoppedRunWithOversizeRecordStaysNotRecreated(t *testing.T) {
 			})
 		}
 	}
+}
+
+// A completion over a column limit prepends its own findings to a full
+// verdict; the bound keeps the "more findings omitted" marker and the
+// trailing class finding.
+func TestBoundCompletionKeepsTrailingFindings(t *testing.T) {
+	judged := make([]string, 0, maxVerdictFindings+2)
+	for i := 0; i < maxVerdictFindings; i++ {
+		judged = append(judged, fmt.Sprintf("finding %02d", i))
+	}
+	judged = append(judged, "more findings omitted", "the run's class is script_failed, not success")
+	c := executordb.RecreationCompletion{State: executordb.RecreationPartial,
+		Baseline:   make([]byte, executordb.MaxRecreationBaselineBytes+1),
+		Containers: oversizeContainersCompletion(t),
+		Verdict:    executordb.RecreationVerdict{Judged: true, Findings: slices.Clone(judged)}}
+	got := boundCompletion(c)
+	f := got.Verdict.Findings
+	if got.State != executordb.RecreationUncertain || len(f) != len(judged)+2 {
+		t.Fatalf("state %s, %d findings %v", got.State, len(f), f)
+	}
+	if !strings.Contains(f[0], "baseline is over its") || !strings.Contains(f[1], "container record is over its") ||
+		!slices.Equal(f[2:], judged) {
+		t.Fatalf("findings %v", f)
+	}
+	// A list longer than any judge produces is still bounded, keeping its
+	// last two findings.
+	long := slices.Clone(judged[:maxVerdictFindings])
+	long = append(long, "extra 1", "extra 2", "extra 3")
+	long = append(long, judged[maxVerdictFindings:]...)
+	c.Verdict.Findings = long
+	f = boundCompletion(c).Verdict.Findings
+	if len(f) != maxVerdictFindings+4 || !slices.Equal(f[len(f)-2:], judged[maxVerdictFindings:]) {
+		t.Fatalf("%d findings, tail %v", len(f), f[len(f)-2:])
+	}
+}
+
+// oversizeContainersCompletion is a container record over the row's
+// containers limit.
+func oversizeContainersCompletion(t *testing.T) []executordb.RecreationContainer {
+	t.Helper()
+	r := oversizeContainersResult(t, testComposeUpdate())
+	return recreationContainers(r.Baseline, r.After)
 }
 
 // rollbackFixture is an update row in state recreated with a baseline, its

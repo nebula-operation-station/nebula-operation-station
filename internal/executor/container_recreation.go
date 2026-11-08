@@ -256,10 +256,14 @@ func boundCompletion(c executordb.RecreationCompletion) executordb.RecreationCom
 		c.State = executordb.RecreationUncertain
 	}
 	c.Verdict.Passed = false
-	c.Verdict.Findings = append(boundFindings(over), c.Verdict.Findings...)
-	if len(c.Verdict.Findings) > maxVerdictFindings+2 {
-		c.Verdict.Findings = c.Verdict.Findings[:maxVerdictFindings+2]
+	// The judge's findings are at most maxVerdictFindings, the "more
+	// findings omitted" marker and the class finding. A longer list is cut
+	// in the middle, so the trailing marker and class finding are kept.
+	findings := c.Verdict.Findings
+	if len(findings) > maxVerdictFindings+2 {
+		findings = append(findings[:maxVerdictFindings:maxVerdictFindings], findings[len(findings)-2:]...)
 	}
+	c.Verdict.Findings = append(boundFindings(over), findings...)
 	return c
 }
 
