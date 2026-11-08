@@ -53,6 +53,9 @@ type fakeBatchExec struct {
 	statusAns *pb.GetBatchStatusResponse
 	frozen    canonical.Batch
 	digest    string
+	// proposeErr, when set, is returned by ProposeBatch after recording
+	// the request.
+	proposeErr error
 }
 
 func (f *fakeBatchExec) ListHostKeys(context.Context, *pb.ListHostKeysRequest, ...grpc.CallOption) (*pb.ListHostKeysResponse, error) {
@@ -63,6 +66,9 @@ func (f *fakeBatchExec) ProposeBatch(_ context.Context, in *pb.ProposeBatchReque
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.proposed = append(f.proposed, in)
+	if f.proposeErr != nil {
+		return nil, f.proposeErr
+	}
 	plan, _, _, err := canonical.ParseBatch(in.GetBatchJson(), batchNow)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid canonical batch")
