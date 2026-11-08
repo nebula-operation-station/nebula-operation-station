@@ -22,6 +22,11 @@ type ComposeContainer struct {
 // server's postflight verdict (spec 11: running containers, health,
 // published ports and container count before and after).
 type ComposeUpdate struct {
+	// Format is compose-update-v1 (docker.compose_update 1.0.0, kept
+	// parseable for history) or compose-update-v2 (2.0.0). A v2 result
+	// stopped in phases 1 to 4 has Phase "precheck" and names its phase in
+	// Reason.
+	Format                 string
 	Phase, Reason, Project string
 	PullExit, UpExit       int
 	Before, After          []ComposeContainer
@@ -56,8 +61,15 @@ func parseComposeList(s string) []ComposeContainer {
 	return out
 }
 
-// ParseComposeUpdate reads a docker.compose_update result and judges it.
+// ParseComposeUpdate reads a docker.compose_update result (format
+// compose-update-v1 or compose-update-v2) and judges it for display.
 func ParseComposeUpdate(result []byte) (ComposeUpdate, error) {
+	var head struct {
+		Format string `json:"format"`
+	}
+	if len(result) <= maxComposeV2Bytes && json.Unmarshal(result, &head) == nil && head.Format == "compose-update-v2" {
+		return parseComposeUpdateV2(result)
+	}
 	var doc struct {
 		Format   string `json:"format"`
 		Phase    string `json:"phase"`
@@ -71,7 +83,7 @@ func ParseComposeUpdate(result []byte) (ComposeUpdate, error) {
 	if json.Unmarshal(result, &doc) != nil || doc.Format != "compose-update-v1" || (doc.Phase != "done" && doc.Phase != "precheck") {
 		return ComposeUpdate{}, ErrComposeFormat
 	}
-	c := ComposeUpdate{Phase: doc.Phase}
+	c := ComposeUpdate{Format: doc.Format, Phase: doc.Phase}
 	if doc.Phase == "precheck" {
 		c.Reason, c.Verdict = text(doc.Reason, 300), "FAILED"
 		return c, nil
