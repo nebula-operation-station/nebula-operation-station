@@ -188,6 +188,18 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_PutContainerDefinition_FullMethodName:    {admin},
 		pb.ExecutorService_RemoveContainerDefinition_FullMethodName: {admin},
 		pb.ExecutorService_ListContainerDefinitions_FullMethodName:  {admin},
+
+		// Container recreation records (ADR 0006 P2-04/P2-05, cu03). The
+		// recovery plan is the operator's own declaration that a rollback
+		// binds: admin only, the server can neither set nor clear it. The
+		// sanitized list (no definition, no baseline) and the resolve of an
+		// uncertain row are server and admin; the executor refuses a
+		// server resolve without an active privileged session and reads
+		// the evidence only from its own runs table.
+		pb.ExecutorService_SetContainerRecoveryPlan_FullMethodName:   {admin},
+		pb.ExecutorService_ClearContainerRecoveryPlan_FullMethodName: {admin},
+		pb.ExecutorService_ListContainerRecreations_FullMethodName:   {server, admin},
+		pb.ExecutorService_ResolveContainerRecreation_FullMethodName: {server, admin},
 	}
 }
 

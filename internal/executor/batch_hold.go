@@ -313,6 +313,42 @@ func (s *Service) holdExpiredLocked(x *batchExec, hostID string, h *heldTarget) 
 	return true
 }
 
+// recordHoldEnd records on the execution's container recreation row, if
+// any, that the hold of hostID ended now: a resolve of the row accepts
+// only a preview that started after it (ADR 0006 R11). A failure is
+// audited and returned.
+func (s *Service) recordHoldEnd(executionID, hostID string) error {
+	if s.db == nil {
+		return nil
+	}
+	if err := s.db.MarkContainerRecreationHoldEnded(executionID, hostID); err != nil {
+		s.log.Error("audit", "kind", "store_error", "op", "record_hold_end", "execution", executionID, "host", hostID, "detail", err.Error())
+		return err
+	}
+	return nil
+}
+
+// endHoldLocked frees hostID from its hold of executionID and reports
+// whether it did. The hold end is recorded first: when that fails the
+// target stays held (and is rechecked later), so a freed target never
+// leaves its row without a hold end. It is recorded again once the release
+// is persisted, so the record is not earlier than the release. x.mu is
+// held.
+func (s *Service) endHoldLocked(x *batchExec, hostID, executionID string) bool {
+	if s.recordHoldEnd(executionID, hostID) != nil {
+		return false
+	}
+	delete(x.held, hostID)
+	if x.hosts[hostID] == executionID {
+		delete(x.hosts, hostID)
+	}
+	// A failed write leaves the stale hold in the file (a restart holds
+	// the target again and rechecks it) and is audited.
+	_ = s.saveHeldLocked(x)
+	_ = s.recordHoldEnd(executionID, hostID)
+	return true
+}
+
 // HeldBatchTargets lists the held targets, sorted by host.
 func (s *Service) HeldBatchTargets() []HeldBatchTarget {
 	x := s.batchRun
@@ -383,12 +419,16 @@ func (s *Service) ReleaseHeldBatchTarget(ctx context.Context, hostID, executionI
 	if x.held[hostID] != h {
 		return ErrBatchTargetNotHeld
 	}
+	if err := s.recordHoldEnd(executionID, hostID); err != nil {
+		return fmt.Errorf("%w: the hold end cannot be recorded: %w", ErrBatchHoldStore, err)
+	}
 	if err := x.writeHeldLocked(x.heldRecordsLocked(hostID)); err != nil {
 		s.log.Error("audit", "kind", "batch_hold_store_error", "detail", err.Error())
 		return err
 	}
 	delete(x.held, hostID)
 	delete(x.hosts, hostID)
+	_ = s.recordHoldEnd(executionID, hostID) // not earlier than the release
 	s.log.Warn("audit", "kind", "batch_target_released_by_operator", "execution", executionID, "host", hostID, "by", by,
 		"reason", reason, "expired", h.expired, "detail", "the target shows the held run gone")
 	return nil

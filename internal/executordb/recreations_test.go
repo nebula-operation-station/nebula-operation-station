@@ -232,6 +232,104 @@ func TestContainerRecreationRefusesMalformed(t *testing.T) {
 	}
 }
 
+// A resolve changes only an uncertain row, only to not_recreated or
+// partial, and keeps the baseline and the window expiry.
+func TestResolveChangesOnlyUncertainRows(t *testing.T) {
+	t1 := time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)
+	db := openAtT(t, privateDir(t), t1)
+	states := map[string]string{
+		"00000000-0000-4000-9000-000000000301": RecreationUncertain,
+		"00000000-0000-4000-9000-000000000302": RecreationRecreated,
+		"00000000-0000-4000-9000-000000000303": RecreationPartial,
+		"00000000-0000-4000-9000-000000000304": RecreationNotRecreated,
+	}
+	for exec, state := range states {
+		if err := db.CreateContainerRecreation(recRow(exec)); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.CompleteContainerRecreation(exec, RecreationCompletion{State: state, Baseline: []byte(`[{"id":"x"}]`)}, t1, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	intent := "00000000-0000-4000-9000-000000000305"
+	if err := db.CreateContainerRecreation(recRow(intent)); err != nil {
+		t.Fatal(err)
+	}
+	cs := []RecreationContainer{{Service: "web", Name: "site-web-1", Status: ContainerRecreated, IDAfter: "n"}}
+	v := RecreationVerdict{Findings: []string{"resolved"}}
+	for exec, state := range states {
+		err := db.ResolveContainerRecreation(exec, RecreationPartial, cs, v)
+		if (state == RecreationUncertain) != (err == nil) {
+			t.Fatalf("%s: resolve %v", state, err)
+		}
+	}
+	if err := db.ResolveContainerRecreation(intent, RecreationNotRecreated, nil, v); !errors.Is(err, ErrRecreationState) {
+		t.Fatalf("intent resolved: %v", err)
+	}
+	got, err := db.GetContainerRecreation("00000000-0000-4000-9000-000000000301")
+	if err != nil || got.State != RecreationPartial || string(got.Baseline) != `[{"id":"x"}]` ||
+		!got.WindowExpiresAt.Equal(t1.Add(time.Hour)) || len(got.Containers) != 1 || got.Verdict.Findings[0] != "resolved" {
+		t.Fatalf("resolved row %+v %v", got, err)
+	}
+	// Never to recreated, intent or rolled_back.
+	for _, bad := range []string{RecreationRecreated, RecreationIntent, RecreationRolledBack, RecreationUncertain, ""} {
+		if err := db.ResolveContainerRecreation("00000000-0000-4000-9000-000000000301", bad, nil, v); err == nil {
+			t.Fatalf("resolve to %q accepted", bad)
+		}
+	}
+}
+
+// The hold end is unknown (zero) until recorded, is recorded only for the
+// row's own host, and only ever moves forward: a later hold end (a hold
+// restored after a restart and ended again) replaces an earlier one, an
+// earlier one never replaces a later one. An execution without a row is
+// no error.
+func TestRecreationHoldEndMovesOnlyForward(t *testing.T) {
+	now := time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)
+	db, err := open(privateDir(t), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	exec := "00000000-0000-4000-9000-000000000401"
+	if err := db.CreateContainerRecreation(recRow(exec)); err != nil {
+		t.Fatal(err)
+	}
+	holdEnd := func() time.Time {
+		t.Helper()
+		got, err := db.GetContainerRecreation(exec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got.HoldEndedAt
+	}
+	if !holdEnd().IsZero() {
+		t.Fatalf("hold end %v before any was recorded", holdEnd())
+	}
+	if err := db.MarkContainerRecreationHoldEnded(exec, "db-1"); err != nil {
+		t.Fatal(err)
+	}
+	if !holdEnd().IsZero() {
+		t.Fatal("another host's hold end was recorded on the row")
+	}
+	now = now.Add(time.Minute)
+	if err := db.MarkContainerRecreationHoldEnded(exec, "web-1"); err != nil || !holdEnd().Equal(now) {
+		t.Fatalf("hold end %v %v, want %v", holdEnd(), err, now)
+	}
+	later := now
+	now = now.Add(-30 * time.Second)
+	if err := db.MarkContainerRecreationHoldEnded(exec, "web-1"); err != nil || !holdEnd().Equal(later) {
+		t.Fatalf("an earlier hold end replaced a later one: %v %v", holdEnd(), err)
+	}
+	now = later.Add(time.Hour)
+	if err := db.MarkContainerRecreationHoldEnded(exec, "web-1"); err != nil || !holdEnd().Equal(now) {
+		t.Fatalf("hold end %v %v, want %v", holdEnd(), err, now)
+	}
+	if err := db.MarkContainerRecreationHoldEnded("00000000-0000-4000-9000-000000000402", "web-1"); err != nil {
+		t.Fatalf("no row: %v", err)
+	}
+}
+
 func TestRecoveryPlanNeedsExplicitNoDataDeclaration(t *testing.T) {
 	t1 := time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)
 	db := openAtT(t, privateDir(t), t1)

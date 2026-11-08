@@ -137,8 +137,11 @@ type ContainerRecreation struct {
 	Verdict         RecreationVerdict
 	State           string
 	WindowExpiresAt time.Time
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	// HoldEndedAt is when the batch hold of the row's target last ended;
+	// zero while unknown (MarkContainerRecreationHoldEnded).
+	HoldEndedAt time.Time
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // RecreationCompletion is what a finished run adds to its intent row.
@@ -279,16 +282,54 @@ func (db *DB) MarkContainerRecreationRolledBack(executionID string) error {
 	return expectOneRecreation(res, err, executionID)
 }
 
+// ResolveContainerRecreation records the resolve of an uncertain row from
+// a preview (R11): the state, not_recreated or partial (never recreated),
+// the containers matched from the preview, and the verdict. Only an
+// uncertain row changes; the baseline and the window expiry stay as they
+// are, so a resolve never extends the window.
+func (db *DB) ResolveContainerRecreation(executionID, state string, containers []RecreationContainer, v RecreationVerdict) error {
+	if state != RecreationNotRecreated && state != RecreationPartial {
+		return fmt.Errorf("executordb: resolve recreation %s: state %q is not a resolve", executionID, state)
+	}
+	cs, err := marshalBounded("containers", nonNilContainers(containers), maxRecreationContainers)
+	if err != nil {
+		return err
+	}
+	if v.Findings == nil {
+		v.Findings = []string{}
+	}
+	verdict, err := marshalBounded("verdict", v, maxRecreationVerdict)
+	if err != nil {
+		return err
+	}
+	res, err := db.sql.Exec(`UPDATE container_recreations SET state = ?, containers = ?, verdict = ?, updated_at = ?
+		WHERE execution_id = ? AND state = 'uncertain'`, state, cs, verdict, db.now().Unix(), executionID)
+	return expectOneRecreation(res, err, executionID)
+}
+
+// MarkContainerRecreationHoldEnded records that the batch hold of hostID
+// for the execution ended now. Only the row of that execution on that
+// host changes, and its hold end only moves forward (a hold restored after
+// a restart and ended again records the later end). An execution without
+// a row (not a container member) is no error.
+func (db *DB) MarkContainerRecreationHoldEnded(executionID, hostID string) error {
+	if _, err := db.sql.Exec(`UPDATE container_recreations SET hold_ended_at = MAX(hold_ended_at, ?)
+		WHERE execution_id = ? AND host_id = ?`, db.now().Unix(), executionID, hostID); err != nil {
+		return fmt.Errorf("executordb: record hold end of recreation %s: %w", executionID, err)
+	}
+	return nil
+}
+
 const recreationColumns = `execution_id, batch_digest, member_id, kind, rollback_of, host_id, host_key, form, unit,
-	binding, definition, images, containers, baseline, verdict, state, window_expires_at, created_at, updated_at`
+	binding, definition, images, containers, baseline, verdict, state, window_expires_at, hold_ended_at, created_at, updated_at`
 
 func scanRecreation(row interface{ Scan(...any) error }) (ContainerRecreation, error) {
 	var r ContainerRecreation
 	var binding, definition, images, containers, baseline, verdict string
-	var expires, created, updated int64
+	var expires, holdEnded, created, updated int64
 	if err := row.Scan(&r.ExecutionID, &r.BatchDigest, &r.MemberID, &r.Kind, &r.RollbackOf, &r.HostID, &r.HostKey,
 		&r.Form, &r.Unit, &binding, &definition, &images, &containers, &baseline, &verdict, &r.State,
-		&expires, &created, &updated); err != nil {
+		&expires, &holdEnded, &created, &updated); err != nil {
 		return ContainerRecreation{}, err
 	}
 	r.Binding, r.Definition = []byte(binding), []byte(definition)
@@ -308,6 +349,9 @@ func scanRecreation(row interface{ Scan(...any) error }) (ContainerRecreation, e
 	}
 	if expires != 0 {
 		r.WindowExpiresAt = time.Unix(expires, 0).UTC()
+	}
+	if holdEnded != 0 {
+		r.HoldEndedAt = time.Unix(holdEnded, 0).UTC()
 	}
 	r.CreatedAt, r.UpdatedAt = time.Unix(created, 0).UTC(), time.Unix(updated, 0).UTC()
 	return r, nil

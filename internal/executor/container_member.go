@@ -345,11 +345,9 @@ func (s *Service) memberRunFinished(executionID, hostID, class string) {
 	if h == nil || !h.durable || h.running || h.executionID != executionID {
 		return
 	}
-	delete(x.held, hostID)
-	if x.hosts[hostID] == executionID {
-		delete(x.hosts, hostID)
+	if !s.endHoldLocked(x, hostID, executionID) {
+		return // still held; a recheck frees it once the hold end is recorded
 	}
-	_ = s.saveHeldLocked(x)
 	s.log.Info("audit", "kind", "batch_target_released", "execution", executionID, "host", hostID,
 		"detail", "the durable job is over")
 }
