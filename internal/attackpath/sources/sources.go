@@ -472,6 +472,11 @@ func Merge(b *attackpath.Builder, results ...Result) (Report, error) {
 			rep.Rejected++
 		}
 	}
+	// A node offered by several sources keeps a non-empty label: a source
+	// that only knows the ID (Docker hosts, flow owners without a name)
+	// must not blank the inventory's label. Among non-empty labels the
+	// Builder's rule (first in sort order) decides.
+	nodes := map[string]attackpath.Node{}
 	for _, r := range results {
 		rep.Sources = append(rep.Sources, SourceReport{Source: r.Source, Status: r.Status, Coverage: r.Coverage})
 		for _, u := range r.Uncertain {
@@ -482,8 +487,14 @@ func Merge(b *attackpath.Builder, results ...Result) (Report, error) {
 			if _, aliased := alias[n.ID]; aliased {
 				continue
 			}
-			note(b.AddNode(n))
+			old, seen := nodes[n.ID]
+			if !seen || old.Label == "" || (n.Label != "" && n.Label < old.Label) {
+				nodes[n.ID] = n
+			}
 		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(nodes)) {
+		note(b.AddNode(nodes[id]))
 	}
 	for _, r := range results {
 		for _, e := range r.Edges {
