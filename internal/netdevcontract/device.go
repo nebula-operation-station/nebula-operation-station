@@ -16,7 +16,8 @@ import (
 // Callers can branch on it with errors.Is.
 var ErrInvalid = errors.New("netdevcontract: invalid document")
 
-// ValidationError lists every problem found in a device or observation.
+// ValidationError lists the problems found in a device or observation: the
+// first MaxProblems, then one entry counting the rest.
 type ValidationError struct {
 	// Problems describes each failed check; it never contains secrets.
 	Problems  []string
@@ -34,14 +35,23 @@ func (e *ValidationError) Is(target error) bool {
 	return target == ErrInvalid || (e.overLimit && target == ErrOverLimit)
 }
 
+// MaxProblems bounds the problems listed in a ValidationError, so a hostile
+// maximum-size observation cannot produce a multi-megabyte error. Further
+// problems are counted in one final entry.
+const MaxProblems = 32
+
 // problems collects validation problems.
 type problems struct {
 	list      []string
+	total     int // problems found, including those beyond MaxProblems
 	overLimit bool
 }
 
 func (p *problems) add(format string, args ...any) {
-	p.list = append(p.list, fmt.Sprintf(format, args...))
+	p.total++
+	if len(p.list) < MaxProblems {
+		p.list = append(p.list, fmt.Sprintf(format, args...))
+	}
 }
 
 // count records a list count problem, marked as over limit.
@@ -53,10 +63,14 @@ func (p *problems) count(what string, n, limit int) {
 }
 
 func (p *problems) err() error {
-	if len(p.list) == 0 {
+	if p.total == 0 {
 		return nil
 	}
-	return &ValidationError{Problems: p.list, overLimit: p.overLimit}
+	list := p.list
+	if more := p.total - len(list); more > 0 {
+		list = append(slices.Clip(list), fmt.Sprintf("and %d more problems", more))
+	}
+	return &ValidationError{Problems: list, overLimit: p.overLimit}
 }
 
 // decodeError wraps a strict decoding failure so that it matches ErrInvalid

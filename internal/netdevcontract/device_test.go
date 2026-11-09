@@ -217,6 +217,50 @@ func TestDecodeDeviceRejectsMalformedDocuments(t *testing.T) {
 	}
 }
 
+func TestValidationErrorProblemListIsCapped(t *testing.T) {
+	for _, c := range []struct {
+		n, want int
+	}{
+		{MaxProblems, MaxProblems},
+		{MaxProblems + 1, MaxProblems + 1},
+		{100 * MaxProblems, MaxProblems + 1},
+	} {
+		var p problems
+		for i := range c.n {
+			p.add("problem %d", i)
+		}
+		var ve *ValidationError
+		if !errors.As(p.err(), &ve) {
+			t.Fatalf("n=%d: no ValidationError", c.n)
+		}
+		if len(ve.Problems) != c.want {
+			t.Fatalf("n=%d: %d problems listed, want %d", c.n, len(ve.Problems), c.want)
+		}
+		if c.n > MaxProblems {
+			last := ve.Problems[len(ve.Problems)-1]
+			if want := fmt.Sprintf("and %d more problems", c.n-MaxProblems); last != want {
+				t.Fatalf("n=%d: last entry %q, want %q", c.n, last, want)
+			}
+		}
+	}
+}
+
+func TestOverlongListsAreNotWalkedWhenProblemsAreCapped(t *testing.T) {
+	var p problems
+	for range MaxProblems {
+		p.add("filler")
+	}
+	validatePolicy(&p, FirewallPolicy{SecurityRules: make([]SecurityRule, MaxSecurityRules+1)})
+	var ve *ValidationError
+	if err := p.err(); !errors.As(err, &ve) || !errors.Is(err, ErrOverLimit) {
+		t.Fatalf("got %v, want ErrOverLimit", err)
+	}
+	// only the count problem is added; the empty rules are not walked
+	if got := ve.Problems[len(ve.Problems)-1]; got != "and 1 more problems" {
+		t.Fatalf("last entry %q: the overlong rule list was walked", got)
+	}
+}
+
 func TestDeviceErrorsDoNotEchoUntrustedText(t *testing.T) {
 	d := baseCBSDevice()
 	d.Family = Family(strings.Repeat("secret", 20))

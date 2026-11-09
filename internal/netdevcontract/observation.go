@@ -887,7 +887,7 @@ func common(p *problems, where, name, uuid, description string, tags []string, u
 }
 
 func validatePolicy(p *problems, fp FirewallPolicy) {
-	before := len(p.list)
+	before := p.total
 	p.count("security_rules", len(fp.SecurityRules), MaxSecurityRules)
 	p.count("nat_rules", len(fp.NATRules), MaxNATRules)
 	p.count("addresses", len(fp.Addresses), MaxAddressObjects)
@@ -896,7 +896,7 @@ func validatePolicy(p *problems, fp FirewallPolicy) {
 	p.count("service_groups", len(fp.ServiceGroups), MaxServiceGroups)
 	p.count("zones", len(fp.Zones), MaxZones)
 	p.count("interfaces", len(fp.Interfaces), MaxFirewallInterfaces)
-	if len(p.list) > before {
+	if p.total > before {
 		return // do not walk lists that are already too long
 	}
 
