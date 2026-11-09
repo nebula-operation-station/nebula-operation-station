@@ -11,19 +11,28 @@ import (
 func TestListBoundsAndReportsTruncation(t *testing.T) {
 	e := newEnv(t)
 	e.seed(t, "h1", 3)
-	all, trunc, err := e.st.List(e.ctx, 10)
-	if err != nil || trunc || len(all) != 3 {
-		t.Fatalf("List(10) = %d rows, truncated %v, err %v; want 3, false", len(all), trunc, err)
+	e.seed(t, "h2", 1)
+	all, trunc, err := e.st.List(e.ctx, ListQuery{Limit: 10})
+	if err != nil || trunc || len(all) != 4 {
+		t.Fatalf("List(10) = %d rows, truncated %v, err %v; want 4, false", len(all), trunc, err)
 	}
-	two, trunc, err := e.st.List(e.ctx, 2)
+	two, trunc, err := e.st.List(e.ctx, ListQuery{Limit: 2})
 	if err != nil || !trunc || len(two) != 2 {
 		t.Fatalf("List(2) = %d rows, truncated %v, err %v; want 2, true", len(two), trunc, err)
 	}
-	if _, _, err := e.st.List(e.ctx, 0); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("List(0) err = %v, want ErrInvalidInput", err)
+	byCVE, _, err := e.st.List(e.ctx, ListQuery{VulnID: cve(0), Limit: 10})
+	if err != nil || len(byCVE) != 2 {
+		t.Fatalf("List(vuln %s) = %d rows, err %v; want 2", cve(0), len(byCVE), err)
 	}
-	if _, _, err := e.st.List(e.ctx, MaxListFindings+1); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("List(max+1) err = %v, want ErrInvalidInput", err)
+	h2 := hostSubj("h2")
+	bySubj, _, err := e.st.List(e.ctx, ListQuery{Subject: &h2, Limit: 10})
+	if err != nil || len(bySubj) != 1 || bySubj[0].Subject != h2 {
+		t.Fatalf("List(subject h2) = %+v, err %v; want 1 row of h2", bySubj, err)
+	}
+	for _, lim := range []int{0, -1, MaxListFindings + 1} {
+		if _, _, err := e.st.List(e.ctx, ListQuery{Limit: lim}); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("List(limit %d) err = %v, want ErrInvalidInput", lim, err)
+		}
 	}
 }
 

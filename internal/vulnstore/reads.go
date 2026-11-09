@@ -13,18 +13,38 @@ import (
 // MaxListFindings bounds one List or RunAlertFindings read.
 const MaxListFindings = 200_000
 
-// List returns at most limit findings in key order and whether more
-// exist. It is the read behind the findings pages and the admin export.
-func (s *Store) List(ctx context.Context, limit int) ([]Finding, bool, error) {
-	if limit <= 0 || limit > MaxListFindings {
-		return nil, false, fmt.Errorf("vulnstore: list: limit %d: %w", limit, ErrInvalidInput)
+// ListQuery scopes a List read.
+type ListQuery struct {
+	// VulnID limits the read to one vulnerability ID; empty for all.
+	VulnID string
+	// Subject limits the read to one subject; nil for all.
+	Subject *Subject
+	// Limit is the most findings returned, 1 to MaxListFindings.
+	Limit int
+}
+
+// List returns at most q.Limit findings in key order and whether more
+// matched. It is the read behind the findings pages and the admin export.
+func (s *Store) List(ctx context.Context, q ListQuery) ([]Finding, bool, error) {
+	if q.Limit <= 0 || q.Limit > MaxListFindings {
+		return nil, false, fmt.Errorf("vulnstore: list: limit %d: %w", q.Limit, ErrInvalidInput)
 	}
-	fs, err := queryFindings(ctx, s.db, `SELECT `+findingColumns+` FROM vuln_findings ORDER BY finding_key LIMIT ?`, limit+1)
+	where, args := "1 = 1", []any{}
+	if q.VulnID != "" {
+		where += ` AND json_extract(record, '$.vuln.id') = ?`
+		args = append(args, q.VulnID)
+	}
+	if q.Subject != nil {
+		where += ` AND subject = ?`
+		args = append(args, q.Subject.String())
+	}
+	args = append(args, q.Limit+1)
+	fs, err := queryFindings(ctx, s.db, `SELECT `+findingColumns+` FROM vuln_findings WHERE `+where+` ORDER BY finding_key LIMIT ?`, args...)
 	if err != nil {
 		return nil, false, err
 	}
-	if len(fs) > limit {
-		return fs[:limit], true, nil
+	if len(fs) > q.Limit {
+		return fs[:q.Limit], true, nil
 	}
 	return fs, false, nil
 }

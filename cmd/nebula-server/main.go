@@ -400,6 +400,20 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 	bg.Go(func() { imports.run(connCtx) })
 
+	// Vulnerability management (ADR 0011, ticket vu14w): the findings
+	// store on server.db, its sweeps (ResumeCompleting at startup, then
+	// Prune periodically) and the D9 notifications through the notify
+	// providers (run events, staleness ticks, Flush, last Flush on
+	// shutdown).
+	vuln, err := newVulnService(db, notifier, log, nil)
+	if err != nil {
+		return err
+	}
+	bg.Go(func() { vuln.runSweeps(connCtx, vulnSweepInterval) })
+	bg.Go(func() { vuln.runEvents(connCtx) })
+	bg.Go(func() { vuln.runNotify(connCtx, vulnNotifyInterval) })
+	isAdmin := vulnAdmin(exec)
+
 	h, err := ui.New(withBatchPlanner(ui.Options{
 		PublicOrigin:   cfg.PublicOrigin,
 		Status:         exec,
@@ -445,7 +459,9 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		DeployIPAM:   ipamStore,
 		SecurityKeys: securityKeys,
 		TOTPStatus:   totpStatus,
-		Log:          log,
+		// Findings pages over the real store.
+		Vuln: vulnPages{v: vuln, admin: isAdmin},
+		Log:  log,
 	}, batches))
 	if err != nil {
 		return err
@@ -487,6 +503,8 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	batchPages.Register(pages)
 	softwarePages.Register(pages)
 	connPages.Register(pages)
+	// Findings export (ADR 0011 D9): admin only, audited, streamed.
+	pages.Handle("GET "+vulnExportPath, vulnExport{v: vuln, admin: isAdmin, audit: audit, log: log})
 
 	var apiHandler http.Handler
 	if cfg.API.Enabled {
@@ -496,6 +514,16 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 		}
 		apiHandler = a
 		log.Info("read-only API enabled", "tokens", len(cfg.API.Tokens))
+		// Vulnerability agent API (ADR 0011 D3, D5) under /api/v1/vuln/,
+		// only for the one vuln token, from its allowed addresses.
+		vh, err := newVulnAPI(cfg.API, vuln, vulnInventory{now: time.Now}, log)
+		if err != nil {
+			return err
+		}
+		if vh != nil {
+			apiHandler = api.Mount(a, vh)
+			log.Info("vulnerability agent API enabled")
+		}
 	}
 	// Traffic map (ADR 0009 TM19): page, frame and model behind the session; renderer modules under /static/.
 	if err := mountTrafficMap(pages, cfg.PublicOrigin, db, store.List, ipamStore, log, retention); err != nil {
