@@ -47,8 +47,10 @@ type Target struct {
 
 // Options configure one computation.
 type Options struct {
-	// Now is the clock for the wall-clock budget. Nil disables the budget,
-	// which keeps the computation a pure function of its inputs.
+	// Now is the clock for the wall-clock budget; nil means time.Now, so the
+	// budget is always enforced. A frozen clock (one that always returns the
+	// same time) is the explicit opt-out that keeps the computation a pure
+	// function of its inputs, for tests.
 	Now func() time.Time
 	// Budget is the wall-clock budget; zero means DefaultBudget.
 	Budget time.Duration
@@ -68,6 +70,11 @@ type Step struct {
 	// Possible is set when the finding's port mapping is unknown, so the
 	// step may not be usable (ADR 0011 D10).
 	Possible bool
+	// Owns is set when the step leaves the attacker owning To: a network
+	// step whose finding may grant code execution, a local step, or a
+	// control, credential or escape step. A network step without it only
+	// reaches To.
+	Owns bool
 	// Terms explains e(step).
 	Terms Terms
 }
@@ -317,14 +324,15 @@ func (s *searcher) path(c *cand, impact int) Path {
 	for _, ai := range c.slice() {
 		a := s.arcs[ai]
 		if a.from < 0 {
-			p.Entry = s.g.nodes[a.to/2].ID
+			p.Entry = s.g.nodes[s.node(a.to)].ID
 			continue
 		}
 		st := Step{
 			Kind:     a.kind,
 			From:     s.g.nodes[a.from].ID,
-			To:       s.g.nodes[a.to/2].ID,
+			To:       s.g.nodes[s.node(a.to)].ID,
 			Possible: a.possible,
+			Owns:     s.owns(a.to),
 			Terms:    a.terms,
 		}
 		if a.edge >= 0 {

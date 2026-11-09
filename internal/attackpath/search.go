@@ -31,10 +31,12 @@ type StepKind uint8
 // Step kinds.
 const (
 	// StepNetwork exploits a network or adjacent finding on the edge's
-	// target over a network or L2 edge; it reaches the target.
+	// target over a network or L2 edge. It owns the target if the finding
+	// may grant code execution (integrity impact low or high), otherwise it
+	// only reaches it.
 	StepNetwork StepKind = iota + 1
 	// StepLocal exploits a local-vector finding as privilege escalation on
-	// a node already reached; it owns the node.
+	// a node reached without owning it; it owns the node.
 	StepLocal
 	// StepControl follows a control edge from an owned parent.
 	StepControl
@@ -61,16 +63,27 @@ func (k StepKind) String() string {
 	return "invalid"
 }
 
-// The attacker's state on a node. A network step reaches a node (code
-// execution); a local step or a control, credential or escape step owns it.
-// Control, credential and escape steps need the owned state of their source
-// (ADR 0011 D10: "owning the parent owns the child"). A local step is only
-// followed by such a step: a network step after it would be dominated by
-// the same path without it (same continuation, one factor e ≤ 1 fewer),
-// and would only crowd the top paths.
+// The attacker's state on a node (ADR 0011 D10). A network step whose
+// finding may grant code execution owns the node; one whose finding cannot
+// (integrity impact none) only reaches it. A local step on a reached node,
+// and a control, credential or escape step, owns the node. Control,
+// credential and escape steps need no finding but an owned source ("owning
+// the parent owns the child"), so a node owned by a network RCE leads on
+// without a local finding.
+//
+// A local step is only followed by a control, credential or escape step: a
+// network step after it would be dominated by the same path without it
+// (same continuation, one factor e ≤ 1 fewer) and would only crowd the top
+// paths. Whether a network step may follow therefore depends on how the
+// owned state was entered, so that is part of the state: levelOwnedLocal is
+// "owned, entered by a local step", and only proven steps leave it. With
+// the rule in the state, the continuations of a search path depend on its
+// last state alone, which keeps the spur search exact.
 const (
-	levelReached = 0
-	levelOwned   = 1
+	levelReached    = 0
+	levelOwned      = 1
+	levelOwnedLocal = 2
+	levels          = 3
 )
 
 // arc is one step of the state graph.
@@ -84,9 +97,9 @@ type arc struct {
 	terms    Terms
 }
 
-// searcher holds the state graph of one computation. States are 2·node +
-// level; the virtual source, from which one arc leads to each entry node,
-// is the last state.
+// searcher holds the state graph of one computation. States are
+// levels·node + level; the virtual source, from which one arc leads to each
+// entry node, is the last state.
 type searcher struct {
 	g        *Graph
 	findings []scoredFinding
@@ -113,7 +126,13 @@ type cand struct {
 
 func (c *cand) slice() []int32 { return c.arcs[:c.n] }
 
-func (s *searcher) state(node int32, level int) int32 { return 2*node + int32(level) }
+func (s *searcher) state(node int32, level int) int32 { return levels*node + int32(level) }
+
+// node returns the node index of state st (not the virtual source).
+func (s *searcher) node(st int32) int32 { return st / levels }
+
+// owns reports whether state st is an owned state.
+func (s *searcher) owns(st int32) bool { return st%levels != levelReached }
 
 func (s *searcher) addArc(a arc, fromStates ...int32) {
 	id := int32(len(s.arcs))
@@ -128,12 +147,12 @@ func (s *searcher) addArc(a arc, fromStates ...int32) {
 // the canonical edge order, so ties are broken the same way every time.
 func newSearcher(g *Graph, findings []scoredFinding) *searcher {
 	n := int32(len(g.nodes))
-	states := 2*n + 1
+	states := levels*n + 1
 	s := &searcher{
 		g:        g,
 		findings: findings,
 		out:      make([][]int32, states),
-		src:      2 * n,
+		src:      levels * n,
 		best:     make([]cand, states),
 		has:      make([]bool, states),
 		nextAt:   make([]int32, states),
@@ -155,12 +174,20 @@ func newSearcher(g *Graph, findings []scoredFinding) *searcher {
 		switch e.Kind {
 		case EdgeControl, EdgeCredential, EdgeEscape:
 			s.addArc(arc{to: s.state(to, levelOwned), from: from, edge: int32(ei), finding: -1, kind: provenStep(e.Kind), terms: Terms{E: 1}},
-				s.state(from, levelOwned))
+				s.state(from, levelOwned), s.state(from, levelOwnedLocal))
 			continue
 		}
-		for _, a := range s.networkArcs(e, byNode[to]) {
-			a.to, a.from, a.edge = s.state(to, levelReached), from, int32(ei)
-			s.addArc(a, s.state(from, levelReached), s.state(from, levelOwned))
+		// One group per target state, so MaxStepsPerGroup cuts only among
+		// steps with the same continuations.
+		for _, exec := range []bool{false, true} {
+			level := levelReached
+			if exec {
+				level = levelOwned
+			}
+			for _, a := range s.networkArcs(e, byNode[to], exec) {
+				a.to, a.from, a.edge = s.state(to, level), from, int32(ei)
+				s.addArc(a, s.state(from, levelReached), s.state(from, levelOwned))
+			}
 		}
 	}
 	for ni := range n {
@@ -172,7 +199,7 @@ func newSearcher(g *Graph, findings []scoredFinding) *searcher {
 			}
 		}
 		for _, a := range s.bestOf(group) {
-			a.to, a.from, a.edge = s.state(ni, levelOwned), ni, -1
+			a.to, a.from, a.edge = s.state(ni, levelOwnedLocal), ni, -1
 			s.addArc(a, s.state(ni, levelReached))
 		}
 	}
@@ -195,11 +222,15 @@ func provenStep(k EdgeKind) StepKind {
 // with the findings fs (ADR 0011 D10, usable step): a network-vector finding
 // whose port the edge allows, or with an unknown port mapping ("possible");
 // over an L2 edge (all ports, assumed) also adjacent-vector findings, at
-// half value.
-func (s *searcher) networkArcs(e Edge, fs []int32) []arc {
+// half value. It returns the steps whose findings may grant code execution
+// if exec is set, the others otherwise.
+func (s *searcher) networkArcs(e Edge, fs []int32, exec bool) []arc {
 	var group []arc
 	for _, fi := range fs {
 		f := s.findings[fi]
+		if f.cvss.exec != exec {
+			continue
+		}
 		switch {
 		case e.Kind == EdgeL2Adjacency && (f.cvss.av == AVNetwork || f.cvss.av == AVAdjacent):
 			group = append(group, arc{finding: fi, kind: StepNetwork, terms: f.terms(true)})
@@ -274,32 +305,49 @@ func (s *searcher) visits(c *cand, st int32) bool {
 	return false
 }
 
+// spurStatus is the outcome of one spur search.
+type spurStatus uint8
+
+const (
+	spurFound spurStatus = iota
+	spurNone
+	spurDeadline
+)
+
 // spur returns the best path that starts with root, continues from root's
 // last state without the removed arcs there, stays simple (so it avoids
-// the root's states), has at most maxArcs arcs and ends at the first state of
-// target. It is a hop-bounded Bellman-Ford over the frontier: round r
-// extends exactly the paths changed in round r−1, so every path within the
-// bound is considered and the result is exact for the order of better.
-func (s *searcher) spur(root cand, target int32, removed []int32) (cand, bool) {
+// the root's states), has at most maxArcs arcs and ends at the first state
+// of target. It is a hop-bounded Bellman-Ford over the frontier that keeps
+// the best path per state: round r extends exactly the paths changed in
+// round r−1. The arcs out of a state do not depend on the path that reached
+// it (the local-step rule is part of the state), so a path dropped at a
+// state for a better one there has a continuation that is at least as good
+// on the better one: either the same arcs, or, if those would repeat a
+// state, the same arcs with the cycle cut out, which is better still (e ≤ 1
+// per step, fewer arcs). The result is therefore exact for the order of
+// better. The deadline is checked before every round.
+func (s *searcher) spur(root cand, target int32, removed []int32) (cand, spurStatus) {
 	defer s.reset()
 	start := s.lastState(&root)
 	s.frontier = append(s.frontier[:0], root)
 	s.set(start, root)
 	for len(s.frontier) > 0 {
+		if s.deadline() {
+			return cand{}, spurDeadline
+		}
 		s.next = s.next[:0]
 		for i := range s.frontier {
 			c := &s.frontier[i]
 			u := s.lastState(c)
-			if c.n >= maxArcs || (u != s.src && u/2 == target) {
+			if c.n >= maxArcs || (u != s.src && s.node(u) == target) {
 				continue
 			}
-			afterLocal := c.n > 0 && s.arcs[c.arcs[c.n-1]].kind == StepLocal
 			for _, ai := range s.out[u] {
 				if u == start && slices.Contains(removed, ai) {
 					continue
 				}
 				a := &s.arcs[ai]
-				if (afterLocal && a.kind == StepNetwork) || s.visits(c, a.to) {
+				if s.visits(c, a.to) {
 					continue
 				}
 				nc := *c
@@ -325,19 +373,17 @@ func (s *searcher) spur(root cand, target int32, removed []int32) (cand, bool) {
 		}
 		s.frontier, s.next = s.next, s.frontier
 	}
-	r, o := s.state(target, levelReached), s.state(target, levelOwned)
-	switch {
-	case s.has[r] && s.has[o]:
-		if better(&s.best[o], &s.best[r]) {
-			return s.best[o], true
+	var best *cand
+	for level := range levels {
+		st := s.state(target, level)
+		if s.has[st] && (best == nil || better(&s.best[st], best)) {
+			best = &s.best[st]
 		}
-		return s.best[r], true
-	case s.has[r]:
-		return s.best[r], true
-	case s.has[o]:
-		return s.best[o], true
 	}
-	return cand{}, false
+	if best == nil {
+		return cand{}, spurNone
+	}
+	return *best, spurFound
 }
 
 func (s *searcher) set(st int32, c cand) {
@@ -363,8 +409,11 @@ func (s *searcher) topPaths(target int32, k int) ([]cand, bool) {
 	if s.deadline() {
 		return nil, false
 	}
-	first, ok := s.spur(cand{l: 1}, target, nil)
-	if !ok {
+	first, st := s.spur(cand{l: 1}, target, nil)
+	switch st {
+	case spurDeadline:
+		return nil, false
+	case spurNone:
 		return nil, true
 	}
 	a := []cand{first}
@@ -389,8 +438,11 @@ func (s *searcher) topPaths(target int32, k int) ([]cand, bool) {
 					removed = append(removed, a[j].arcs[i])
 				}
 			}
-			c, ok := s.spur(root, target, removed)
-			if ok && !seen[c.key()] {
+			c, st := s.spur(root, target, removed)
+			if st == spurDeadline {
+				return a, false
+			}
+			if st == spurFound && !seen[c.key()] {
 				seen[c.key()] = true
 				b = append(b, c)
 			}
@@ -419,11 +471,12 @@ func (c *cand) key() [maxArcs]int32 {
 	return k
 }
 
-// deadlineFunc returns a function reporting whether the budget is spent;
-// without a clock the budget is not enforced.
+// deadlineFunc returns a function reporting whether the budget is spent. A
+// nil clock is the wall clock, so the budget is always enforced; a frozen
+// clock is the explicit opt-out.
 func deadlineFunc(now func() time.Time, budget time.Duration) func() bool {
 	if now == nil {
-		return func() bool { return false }
+		now = time.Now
 	}
 	end := now().Add(budget)
 	return func() bool { return !now().Before(end) }

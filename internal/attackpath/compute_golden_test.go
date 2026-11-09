@@ -12,10 +12,17 @@ import (
 // X = 8.22 × 0.85 × 0.44 × 0.27 × 0.62 = 0.514634472, prior 0.0395872…
 const (
 	strongN = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H" // X 3.887042775
-	weakN   = "CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:U/C:L/I:N/A:N" // prior 0.0396
-	weakA   = "CVSS:3.1/AV:A/AC:H/PR:H/UI:R/S:U/C:L/I:N/A:N" // prior 0.0289
-	weakL   = "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:L/I:N/A:N" // prior 0.0256
-	weakP   = "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+	// strongNoExecN has strongN's X but no integrity impact.
+	strongNoExecN = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:H"
+	weakN         = "CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:U/C:L/I:N/A:N" // prior 0.0396
+	weakA         = "CVSS:3.1/AV:A/AC:H/PR:H/UI:R/S:U/C:L/I:N/A:N" // prior 0.0289
+	weakL         = "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:L/I:N/A:N" // prior 0.0256
+	weakP         = "CVSS:3.1/AV:P/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+	// rceN, rceLowN and rceA have the weak priors but an integrity impact,
+	// so a network step with them may grant code execution and owns.
+	rceN    = "CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:U/C:L/I:H/A:N"
+	rceLowN = "CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:U/C:L/I:L/A:N"
+	rceA    = "CVSS:3.1/AV:A/AC:H/PR:H/UI:R/S:U/C:L/I:H/A:N"
 	// cE5 is e of CVE-E5: no KEV, no EPSS, so 0.3 × 3.887042775 / 3.9.
 	cE5 = 0.2990032903846154
 )
@@ -65,8 +72,11 @@ func pathLabInputs() ([]Node, []Edge, []Finding, []Target) {
 		{Node: "host:app", Key: "CVE-A8", Vector: weakN, EPSS: 0.05, EPSSKnown: true, Ports: tcp(8080), State: FindingAcceptedRisk},
 		// Physical vector: never usable.
 		{Node: "host:app", Key: "CVE-A9", Vector: weakP, KEV: true, State: FindingOpen},
-		// e = cE5 on tcp/22 (CVSS prior only).
-		{Node: "host:exec", Key: "CVE-E5", Vector: strongN, Ports: tcp(22), State: FindingOpen},
+		// e = cE5 on tcp/22 (CVSS prior only). Integrity impact none: it
+		// cannot grant code execution, so it only reaches exec and the
+		// credential step needs CVE-E6 first. (An RCE here would own exec
+		// at once; see TestKEVRCEOnExecutorOwnsEveryManagedHost.)
+		{Node: "host:exec", Key: "CVE-E5", Vector: strongNoExecN, Ports: tcp(22), State: FindingOpen},
 		// Local privilege escalation on exec: e 0.6.
 		{Node: "host:exec", Key: "CVE-E6", Vector: weakL, EPSS: 0.6, EPSSKnown: true, State: FindingOpen},
 		// Local finding on app: app has no owned-only exits, so it never helps.
@@ -97,7 +107,7 @@ func computeLab(t *testing.T, seed uint64) *Result {
 	for _, e := range edges {
 		mustEdge(t, b, e)
 	}
-	res, err := Compute(b.Build(), findings, targets, Options{})
+	res, err := Compute(b.Build(), findings, targets, frozen)
 	if err != nil {
 		t.Fatalf("compute: %v", err)
 	}
@@ -219,21 +229,22 @@ func TestGoldenLabStepsExplainNumbers(t *testing.T) {
 		from  string
 		to    string
 		edge  EdgeKind
+		owns  bool
 		terms Terms
 	}{
-		{StepNetwork, InternetID, "host:web", EdgeNetworkPolicy, Terms{KEV: true, Exploitability: 0.514634472, Vector: AVNetwork, E: 0.9}},
-		{StepNetwork, "host:web", "host:app", EdgeL2Adjacency, Terms{EPSS: 0.4, EPSSKnown: true, Exploitability: 0.3753804384, Vector: AVAdjacent, Assumed: true, E: 0.2}},
-		{StepNetwork, "host:app", "host:exec", EdgeNetworkPolicy, Terms{Exploitability: 3.887042775, Vector: AVNetwork, E: cE5}},
-		{StepLocal, "host:exec", "host:exec", 0, Terms{EPSS: 0.6, EPSSKnown: true, Exploitability: 0.332998776, Vector: AVLocal, E: 0.6}},
-		{StepCredential, "host:exec", "pve:pve1", EdgeCredential, Terms{E: 1}},
+		{StepNetwork, InternetID, "host:web", EdgeNetworkPolicy, false, Terms{KEV: true, Exploitability: 0.514634472, Vector: AVNetwork, E: 0.9}},
+		{StepNetwork, "host:web", "host:app", EdgeL2Adjacency, false, Terms{EPSS: 0.4, EPSSKnown: true, Exploitability: 0.3753804384, Vector: AVAdjacent, Assumed: true, E: 0.2}},
+		{StepNetwork, "host:app", "host:exec", EdgeNetworkPolicy, false, Terms{Exploitability: 3.887042775, Vector: AVNetwork, E: cE5}},
+		{StepLocal, "host:exec", "host:exec", 0, true, Terms{EPSS: 0.6, EPSSKnown: true, Exploitability: 0.332998776, Vector: AVLocal, E: 0.6}},
+		{StepCredential, "host:exec", "pve:pve1", EdgeCredential, true, Terms{E: 1}},
 	}
 	if len(p.Steps) != len(want) {
 		t.Fatalf("steps %d, want %d", len(p.Steps), len(want))
 	}
 	for i, w := range want {
 		s := p.Steps[i]
-		if s.Kind != w.kind || s.From != w.from || s.To != w.to || s.Edge.Kind != w.edge {
-			t.Errorf("step %d: %v %s->%s %v", i, s.Kind, s.From, s.To, s.Edge.Kind)
+		if s.Kind != w.kind || s.From != w.from || s.To != w.to || s.Edge.Kind != w.edge || s.Owns != w.owns {
+			t.Errorf("step %d: %v %s->%s %v owns %v", i, s.Kind, s.From, s.To, s.Edge.Kind, s.Owns)
 		}
 		g, wt := s.Terms, w.terms
 		if g.KEV != wt.KEV || g.EPSS != wt.EPSS || g.EPSSKnown != wt.EPSSKnown || g.Vector != wt.Vector ||

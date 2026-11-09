@@ -134,6 +134,11 @@ type Terms struct {
 type cvss3 struct {
 	av AttackVector
 	x  float64 // exploitability sub-score
+	// exec is set when the vector's integrity impact is low or high, so the
+	// finding may grant code execution. Code execution modifies the system,
+	// so I:N rules it out; I:L or I:H is read as "may", the reading that
+	// finds more paths.
+	exec bool
 }
 
 // CVSS v3.1 specification, section 7.4, metric values.
@@ -191,7 +196,7 @@ func parseCVSS3(v string) (cvss3, bool) {
 		pr = cvssPRChanged
 	}
 	x := 8.22 * cvssAV[got["AV"]] * cvssAC[got["AC"]] * pr[got["PR"]] * cvssUI[got["UI"]]
-	return cvss3{av: avOf[got["AV"]], x: x}, true
+	return cvss3{av: avOf[got["AV"]], x: x, exec: got["I"] != "N"}, true
 }
 
 // scoredFinding is a validated, scorable finding.

@@ -26,12 +26,16 @@ func buildGraph(t *testing.T, nodes []Node, edges []Edge) *Graph {
 
 func mustCompute(t *testing.T, g *Graph, fs []Finding, ts []Target) *Result {
 	t.Helper()
-	res, err := Compute(g, fs, ts, Options{})
+	res, err := Compute(g, fs, ts, frozen)
 	if err != nil {
 		t.Fatalf("compute: %v", err)
 	}
 	return res
 }
+
+// frozen opts out of the wall-clock budget, so results never depend on the
+// speed of the test machine.
+var frozen = Options{Now: func() time.Time { return time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC) }}
 
 func host(id string) Node { return Node{ID: "host:" + id, Kind: NodeHost} }
 
@@ -98,69 +102,6 @@ func TestUsableStepRules(t *testing.T) {
 	}
 }
 
-func TestProvenStepsNeedNoFindingButAnOwnedSource(t *testing.T) {
-	nodes := []Node{
-		host("exec"), host("m"),
-		{ID: "pve:p", Kind: NodePVENode}, {ID: "guest:g", Kind: NodeGuest},
-		{ID: "ctr:c", Kind: NodeContainer},
-	}
-	edges := []Edge{
-		policy(InternetID, "host:exec", 22),
-		policy(InternetID, "pve:p", 8006),
-		policy(InternetID, "ctr:c", 80),
-		{From: "host:exec", To: "host:m", Kind: EdgeCredential},
-		{From: "pve:p", To: "guest:g", Kind: EdgeControl},
-		{From: "ctr:c", To: "host:m", Kind: EdgeEscape, Escape: EscapeDockerSocket},
-	}
-	net := func(node string, port uint16) Finding {
-		return Finding{Node: node, Key: "N", Vector: weakN, EPSS: 0.5, EPSSKnown: true, Ports: []Port{{ProtoTCP, port}}, State: FindingOpen}
-	}
-	local := func(node string) Finding {
-		return Finding{Node: node, Key: "L", Vector: weakL, EPSS: 0.25, EPSSKnown: true, State: FindingOpen}
-	}
-	targets := []Target{{Node: "host:m", Impact: 1}, {Node: "guest:g", Impact: 2}}
-
-	// Reached only: no proven step is usable.
-	res := mustCompute(t, buildGraph(t, nodes, edges),
-		[]Finding{net("host:exec", 22), net("pve:p", 8006), net("ctr:c", 80)}, targets)
-	for _, tp := range res.Targets {
-		if len(tp.Paths) != 0 {
-			t.Fatalf("%s reached without owning a source: %s", tp.Node, describe(tp.Paths[0]))
-		}
-	}
-
-	// With local escalation each proven step is usable at e = 1.
-	res = mustCompute(t, buildGraph(t, nodes, edges), []Finding{
-		net("host:exec", 22), net("pve:p", 8006), net("ctr:c", 80),
-		local("host:exec"), local("pve:p"), local("ctr:c"),
-	}, targets)
-	want := map[string][]string{
-		"guest:g": {"internet network:N local:L control:-"},
-		// Equal L and length: the canonical edge order breaks the tie, and
-		// internet -> ctr:c sorts before internet -> host:exec.
-		"host:m": {
-			"internet network:N local:L escape:-",
-			"internet network:N local:L credential:-",
-		},
-	}
-	for _, tp := range res.Targets {
-		var got []string
-		for _, p := range tp.Paths {
-			got = append(got, describe(p))
-			// 0.5 × 0.25 × 1, × impact
-			if !near(p.Likelihood, 0.125) || !near(p.Risk, 0.125*float64(tp.Impact)) {
-				t.Fatalf("%s: L %v R %v", describe(p), p.Likelihood, p.Risk)
-			}
-			if last := p.Steps[len(p.Steps)-1]; last.Terms.E != 1 || last.Finding != "" {
-				t.Fatalf("proven step %+v", last)
-			}
-		}
-		if !slices.Equal(got, want[tp.Node]) {
-			t.Fatalf("%s: %q, want %q", tp.Node, got, want[tp.Node])
-		}
-	}
-}
-
 func TestDepthIsAtMostSix(t *testing.T) {
 	// internet -> h1 -> h2 -> ... -> h7, each hop one usable finding.
 	var nodes []Node
@@ -217,7 +158,7 @@ func enumerate(s *searcher, target int32) []cand {
 	var walk func(c cand)
 	walk = func(c cand) {
 		u := s.lastState(&c)
-		if u != s.src && u/2 == target {
+		if u != s.src && s.node(u) == target {
 			all = append(all, c)
 			return
 		}
@@ -270,6 +211,12 @@ func randomLab(r *rand.Rand) ([]Node, []Edge, []Finding) {
 		{From: "ctr:c0", To: "host:h0", Kind: EdgeEscape, Escape: EscapePrivileged},
 		{From: "host:h1", To: "pve:p0", Kind: EdgeCredential},
 		{From: "host:h1", To: "host:h2", Kind: EdgeCredential},
+		// The counter-lab shape: a container reached over the network
+		// reaches its Docker host, whose control edge owns the container
+		// again, which then continues over the network.
+		policy(InternetID, "ctr:c0", 80),
+		policy("ctr:c0", "host:h0", 80),
+		policy("ctr:c0", "host:h3", 81),
 	}
 	seen := map[edgeKey]bool{}
 	for range 22 {
@@ -294,8 +241,18 @@ func randomLab(r *rand.Rand) ([]Node, []Edge, []Finding) {
 	// Exact binary values keep products exact, so the brute-force order
 	// and Yen's order agree to the last bit.
 	epss := []float64{0.25, 0.5, 0.75, 0.875, 0.625, 1}
-	vectors := []string{weakN, weakN, weakA, weakL}
-	var fs []Finding
+	vectors := []string{weakN, rceN, weakA, rceA, weakL, weakL}
+	// The counter-lab shape's findings: c0 and h0 reached only, each with
+	// a local escalation (c0's at e 1, so its owned state is best entered
+	// by the local step), and h3 reachable from c0 on tcp/81.
+	tcp := func(p uint16) []Port { return []Port{{ProtoTCP, p}} }
+	fs := []Finding{
+		{Node: "ctr:c0", Key: "SN", Vector: weakN, EPSS: 0.5, EPSSKnown: true, Ports: tcp(80), State: FindingOpen},
+		{Node: "ctr:c0", Key: "SL", Vector: weakL, EPSS: 1, EPSSKnown: true, State: FindingOpen},
+		{Node: "host:h0", Key: "SN", Vector: weakN, EPSS: 0.5, EPSSKnown: true, Ports: tcp(80), State: FindingOpen},
+		{Node: "host:h0", Key: "SL", Vector: weakL, EPSS: 0.5, EPSSKnown: true, State: FindingOpen},
+		{Node: "host:h3", Key: "SN", Vector: weakN, EPSS: 0.5, EPSSKnown: true, Ports: tcp(81), State: FindingOpen},
+	}
 	for _, id := range hosts[2:] {
 		for k := range r.IntN(4) {
 			f := Finding{Node: id, Key: fmt.Sprintf("F%d", k), Vector: vectors[r.IntN(len(vectors))],
@@ -309,41 +266,52 @@ func randomLab(r *rand.Rand) ([]Node, []Edge, []Finding) {
 	return nodes, edges, fs
 }
 
+// checkYen compares topPaths with the brute-force enumeration for every
+// non-entry node of g and returns the number of paths compared.
+func checkYen(t *testing.T, g *Graph, fs []Finding, name string) int {
+	t.Helper()
+	usable, err := prepareFindings(g, fs, &Result{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newSearcher(g, usable)
+	s.deadline = func() bool { return false }
+	checked := 0
+	for _, n := range g.nodes {
+		if n.Kind.Entry() {
+			continue
+		}
+		ti := int32(g.index[n.ID])
+		want := enumerate(s, ti)
+		if len(want) > PathsPerTarget {
+			want = want[:PathsPerTarget]
+		}
+		got, complete := s.topPaths(ti, PathsPerTarget)
+		if !complete || len(got) != len(want) {
+			t.Fatalf("%s target %s: %d paths, want %d", name, n.ID, len(got), len(want))
+		}
+		for i := range want {
+			if got[i].key() != want[i].key() || got[i].l != want[i].l {
+				t.Fatalf("%s target %s path %d: %v (L %v), want %v (L %v)", name, n.ID, i,
+					got[i].slice(), got[i].l, want[i].slice(), want[i].l)
+			}
+		}
+		checked += len(want)
+	}
+	return checked
+}
+
 func TestYenMatchesBruteForce(t *testing.T) {
 	checked := 0
 	for seed := uint64(1); seed <= 150; seed++ {
 		r := rand.New(rand.NewPCG(seed, 99))
 		nodes, edges, fs := randomLab(r)
-		g := buildGraph(t, nodes, edges)
-		res := &Result{}
-		usable, err := prepareFindings(g, fs, res)
-		if err != nil {
-			t.Fatal(err)
-		}
-		s := newSearcher(g, usable)
-		s.deadline = func() bool { return false }
-		for _, n := range g.nodes {
-			if n.Kind.Entry() {
-				continue
-			}
-			ti := int32(g.index[n.ID])
-			want := enumerate(s, ti)
-			if len(want) > PathsPerTarget {
-				want = want[:PathsPerTarget]
-			}
-			got, complete := s.topPaths(ti, PathsPerTarget)
-			if !complete || len(got) != len(want) {
-				t.Fatalf("seed %d target %s: %d paths, want %d", seed, n.ID, len(got), len(want))
-			}
-			for i := range want {
-				if got[i].key() != want[i].key() || got[i].l != want[i].l {
-					t.Fatalf("seed %d target %s path %d: %v (L %v), want %v (L %v)", seed, n.ID, i,
-						got[i].slice(), got[i].l, want[i].slice(), want[i].l)
-				}
-			}
-			checked += len(want)
-		}
+		checked += checkYen(t, buildGraph(t, nodes, edges), fs, fmt.Sprintf("seed %d", seed))
 	}
+	// The counter lab alone: its best route into an owned state ends in a
+	// local step, and only a worse one may continue over the network.
+	g, fs := counterLab(t)
+	checked += checkYen(t, g, fs, "counter lab")
 	if checked < 500 {
 		t.Fatalf("only %d paths checked; the random labs are too sparse", checked)
 	}

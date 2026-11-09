@@ -22,27 +22,28 @@ func TestParseCVSS3ExploitabilityHandComputed(t *testing.T) {
 		vector string
 		av     AttackVector
 		x      float64
+		exec   bool // integrity impact low or high: may grant code execution
 	}{
 		// 8.22 × 0.85 × 0.77 × 0.85 × 0.85
-		{"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", AVNetwork, 3.887042775},
+		{"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", AVNetwork, 3.887042775, true},
 		// 8.22 × 0.55 × 0.77 × 0.62 × 0.85
-		{"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H", AVLocal, 1.83457659},
+		{"CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H", AVLocal, 1.83457659, true},
 		// changed scope: PR:L is 0.68. 8.22 × 0.85 × 0.44 × 0.68 × 0.62
-		{"CVSS:3.0/AV:N/AC:H/PR:L/UI:R/S:C/C:L/I:L/A:N", AVNetwork, 1.296116448},
+		{"CVSS:3.0/AV:N/AC:H/PR:L/UI:R/S:C/C:L/I:L/A:N", AVNetwork, 1.296116448, true},
 		// 8.22 × 0.62 × 0.77 × 0.85 × 0.85
-		{"CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H", AVAdjacent, 2.83525473},
+		{"CVSS:3.1/AV:A/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H", AVAdjacent, 2.83525473, false},
 		// 8.22 × 0.2 × 0.44 × 0.27 × 0.62; temporal metrics are ignored
-		{"CVSS:3.1/AV:P/AC:H/PR:H/UI:R/S:U/C:H/I:N/A:N/E:P/RL:O/RC:C", AVPhysical, 0.121090464},
+		{"CVSS:3.1/AV:P/AC:H/PR:H/UI:R/S:U/C:H/I:N/A:N/E:P/RL:O/RC:C", AVPhysical, 0.121090464, false},
 		// metric order does not matter
-		{"CVSS:3.1/S:U/UI:N/PR:N/AC:L/AV:N/A:H/I:H/C:H", AVNetwork, 3.887042775},
+		{"CVSS:3.1/S:U/UI:N/PR:N/AC:L/AV:N/A:H/I:H/C:H", AVNetwork, 3.887042775, true},
 	}
 	for _, c := range cases {
 		got, ok := parseCVSS3(c.vector)
 		if !ok {
 			t.Fatalf("%s: rejected", c.vector)
 		}
-		if got.av != c.av || !near(got.x, c.x) {
-			t.Fatalf("%s: av %v x %v, want %v %v", c.vector, got.av, got.x, c.av, c.x)
+		if got.av != c.av || !near(got.x, c.x) || got.exec != c.exec {
+			t.Fatalf("%s: av %v x %v exec %v, want %v %v %v", c.vector, got.av, got.x, got.exec, c.av, c.x, c.exec)
 		}
 	}
 }
