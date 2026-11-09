@@ -30,16 +30,29 @@ func (c *clock) Add(d time.Duration) {
 	c.mu.Unlock()
 }
 
+// sink records delivered events; while down every provider rejects.
 type sink struct {
-	mu sync.Mutex
-	es []notify.Event
+	mu       sync.Mutex
+	es       []notify.Event
+	down     bool
+	attempts int
 }
 
 func (s *sink) Notify(_ context.Context, e notify.Event) int {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.attempts++
+	if s.down {
+		return 0
+	}
 	s.es = append(s.es, e)
-	s.mu.Unlock()
 	return 1
+}
+
+func (s *sink) setDown(down bool) {
+	s.mu.Lock()
+	s.down = down
+	s.mu.Unlock()
 }
 
 func (s *sink) kinds() []string {

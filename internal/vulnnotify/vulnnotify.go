@@ -11,6 +11,16 @@
 // vuln.feed_mark_reset (every reset). At most MaxPerHour messages leave
 // per hour; the rest are counted into one hourly digest.
 //
+// Delivery: a message counts as sent only when at least one provider
+// accepted it. De-duplication state is set only after that delivery. A
+// message no provider accepts stays queued (at most MaxPending) and is
+// retried by the next call, including Flush; a queued alert whose episode
+// ends before delivery is dropped. When the queue overflows, the oldest
+// alert is dropped and reported as undelivered in the next digest. A digest
+// that fails keeps its counts for the next attempt. Messages held by the
+// rate limit are accounted for by the digest, so their de-duplication
+// state is set when they are held.
+//
 // Every string that came from Hermes or a feed is untrusted: messages carry
 // structured fields only (CVE ID, subject, tier, KEV, source ID), never the
 // LLM assessment or an admin reason, and each field is reduced to bounded
@@ -20,7 +30,7 @@
 // De-duplication state is held in memory: after a restart an open
 // KEV-listed or critical finding notifies once more (inside the rate
 // limit). Unknown source IDs never create state, so it stays bounded by
-// NOS's source list and MaxTrackedFindings.
+// NOS's source list, MaxTrackedFindings and MaxPending.
 package vulnnotify
 
 import (
@@ -61,11 +71,24 @@ const (
 	// MaxTrackedFindings bounds the per-finding de-duplication state; the
 	// oldest entries are dropped first.
 	MaxTrackedFindings = 100_000
+	// MaxPending bounds the messages queued for another delivery attempt
+	// after no provider accepted them; the oldest are dropped first.
+	MaxPending = 100
 	// maxText bounds one untrusted field in a message.
 	maxText = 128
+	// maxSubjectID bounds the readable subject ID in a message, so that an
+	// image subject keeps its full digest inside the sender's field limits.
+	maxSubjectID = 40
+	// maxImageDigest is the length of "sha256:" plus 64 hex digits.
+	maxImageDigest = 71
+	// maxVulnID bounds the CVE ID in a message.
+	maxVulnID = 64
+	// undeliveredSuffix marks digest counts of dropped undelivered alerts.
+	undeliveredSuffix = " undelivered"
 )
 
-// Sink sends one notification; *notify.Notifier implements it.
+// Sink sends one notification and returns how many providers accepted it;
+// *notify.Notifier implements it.
 type Sink interface {
 	Notify(ctx context.Context, e notify.Event) int
 }
@@ -88,6 +111,34 @@ type findingEvent struct {
 	kind string
 }
 
+// alertKey identifies a de-duplicated alert: kind plus finding key or
+// source ID. The episode is kept in pendingRef.
+type alertKey struct {
+	kind    string
+	finding vulnfinding.Key
+	source  string
+}
+
+// pendingRef marks an alert that is queued or being delivered.
+type pendingRef struct {
+	token   uint64
+	episode int64
+}
+
+// outMsg is one message on its way to the sink.
+type outMsg struct {
+	ev    notify.Event
+	keyed bool
+	key   alertKey
+	token uint64
+	// commit sets the de-duplication state; called under n.mu after
+	// delivery. Nil for messages without de-duplication.
+	commit func()
+	// digest holds the counts of a digest message, restored when it fails.
+	digest      map[string]int
+	digestSince time.Time
+}
+
 // Notifier decides which vulnerability events to send. It is safe for
 // concurrent use; messages are sent outside its lock.
 type Notifier struct {
@@ -96,13 +147,16 @@ type Notifier struct {
 	hermesMax  time.Duration
 	sources    map[string]bool
 	mu         sync.Mutex
-	notified   map[findingEvent]int64 // episode last notified
+	notified   map[findingEvent]int64 // episode last delivered
 	order      []findingEvent         // insertion order for eviction
-	feedStale  map[string]bool        // source in a notified stale episode
-	feedRegr   map[string]bool        // source in a notified regression episode
-	hermesMark time.Time              // last complete run of the notified offline episode
-	sent       []time.Time            // send times inside RateWindow
-	held       map[string]int         // kind -> messages held for the digest
+	feedStale  map[string]bool        // source in a delivered stale episode
+	feedRegr   map[string]bool        // source in a delivered regression episode
+	hermesMark time.Time              // last complete run of the delivered offline episode
+	inflight   map[alertKey]pendingRef
+	pending    []outMsg // undelivered, waiting for the next attempt
+	seq        uint64
+	sent       []time.Time    // send times inside RateWindow
+	held       map[string]int // kind -> messages held for the digest
 	heldSince  time.Time
 }
 
@@ -113,7 +167,8 @@ func New(cfg Config) (*Notifier, error) {
 	}
 	n := &Notifier{sink: cfg.Sink, now: cfg.Now, hermesMax: cfg.HermesStaleAfter,
 		sources: map[string]bool{}, notified: map[findingEvent]int64{},
-		feedStale: map[string]bool{}, feedRegr: map[string]bool{}, held: map[string]int{}}
+		feedStale: map[string]bool{}, feedRegr: map[string]bool{}, held: map[string]int{},
+		inflight: map[alertKey]pendingRef{}}
 	if n.now == nil {
 		n.now = time.Now
 	}
@@ -172,15 +227,26 @@ func kevListed(f vulnstore.Finding) bool {
 	return f.EpisodeKEV() || f.Record.Scores.KEV != nil
 }
 
+// subjectText returns the readable subject (kind and shortened ID) and the
+// full subject for the message reason, which keeps an image digest whole.
+func subjectText(s vulnstore.Subject) (short, full string) {
+	short = plain(string(s.Kind), 16) + "/" + plain(s.ID, maxSubjectID)
+	full = short
+	if s.Kind == vulnfinding.SubjectImage {
+		full += "/" + plain(s.ImageDigest, maxImageDigest)
+	}
+	return short, full
+}
+
 func findingMessage(kind string, f vulnstore.Finding, at time.Time) notify.Event {
-	subj := plain(f.Subject.String(), maxText)
+	short, full := subjectText(f.Subject)
 	tier := TierName(f.EpisodePeakTier)
 	kev := "no"
 	if kevListed(f) {
 		kev = "yes"
 	}
-	reason := "CVE: " + plain(f.Record.Vuln.ID, maxText) + "; subject: " + subj + "; tier: " + tier + "; KEV: " + kev
-	return notify.Event{Kind: kind, Host: subj, State: tier, Reason: reason, Time: at}
+	reason := "CVE: " + plain(f.Record.Vuln.ID, maxVulnID) + "; subject: " + full + "; tier: " + tier + "; KEV: " + kev
+	return notify.Event{Kind: kind, Host: short, State: tier, Reason: reason, Time: at}
 }
 
 // Findings raises vuln.kev_new and vuln.critical_new for the given
@@ -188,61 +254,82 @@ func findingMessage(kind string, f vulnstore.Finding, at time.Time) notify.Event
 // open findings notify; each (finding key, event type) notifies once per
 // episode, so a re-open (new episode) notifies again and tier or KEV
 // flapping inside an episode does not. It returns how many messages were
-// sent (not held for the digest).
+// delivered, including queued ones retried now.
 func (n *Notifier) Findings(ctx context.Context, fs []vulnstore.Finding) int {
 	now := n.now()
-	var out []notify.Event
 	n.mu.Lock()
+	out := n.retries()
 	for _, f := range fs {
 		if f.State != vulnstore.StateOpen {
 			continue
 		}
-		if kevListed(f) && n.firstInEpisode(f, KindKEVNew) {
-			out = append(out, n.admit(findingMessage(KindKEVNew, f, now), now)...)
+		if kevListed(f) {
+			out = append(out, n.findingAlert(KindKEVNew, f, now)...)
 		}
-		if f.EpisodePeakTier == vulnstore.TierCritical && n.firstInEpisode(f, KindCriticalNew) {
-			out = append(out, n.admit(findingMessage(KindCriticalNew, f, now), now)...)
+		if f.EpisodePeakTier == vulnstore.TierCritical {
+			out = append(out, n.findingAlert(KindCriticalNew, f, now)...)
 		}
 	}
 	n.mu.Unlock()
 	return n.send(ctx, out)
 }
 
-// firstInEpisode records (key, kind) for f's episode and reports whether it
-// had not been recorded yet. Caller holds n.mu.
-func (n *Notifier) firstInEpisode(f vulnstore.Finding, kind string) bool {
-	k := findingEvent{key: f.Key, kind: kind}
-	if ep, ok := n.notified[k]; ok {
-		if f.Episode <= ep {
-			return false
+// findingAlert queues (kind, f) unless its episode was delivered or is
+// already queued; a queued older episode is replaced. Caller holds n.mu.
+func (n *Notifier) findingAlert(kind string, f vulnstore.Finding, now time.Time) []outMsg {
+	fe := findingEvent{key: f.Key, kind: kind}
+	if ep, ok := n.notified[fe]; ok && f.Episode <= ep {
+		return nil
+	}
+	k := alertKey{kind: kind, finding: f.Key}
+	if ref, ok := n.inflight[k]; ok {
+		if f.Episode <= ref.episode {
+			return nil
 		}
-		n.notified[k] = f.Episode
-		return true
+		n.cancel(k)
+	}
+	ep := f.Episode
+	return n.admit(outMsg{ev: findingMessage(kind, f, now), keyed: true, key: k,
+		commit: func() { n.markNotified(fe, ep) }}, ep, now)
+}
+
+// markNotified records fe's delivered episode. Caller holds n.mu.
+func (n *Notifier) markNotified(fe findingEvent, ep int64) {
+	if old, ok := n.notified[fe]; ok {
+		if ep > old {
+			n.notified[fe] = ep
+		}
+		return
 	}
 	for len(n.order) >= MaxTrackedFindings {
 		delete(n.notified, n.order[0])
 		n.order = n.order[1:]
 	}
-	n.notified[k] = f.Episode
-	n.order = append(n.order, k)
-	return true
+	n.notified[fe] = ep
+	n.order = append(n.order, fe)
 }
 
 // Hermes raises vuln.hermes_stale once per offline episode: when the last
 // complete run is older than the threshold. A newer complete run ends the
-// episode. A zero lastComplete (no complete run yet) raises nothing; the
-// UI shows "not assessed".
+// episode and drops an undelivered alert of the old one. A zero
+// lastComplete (no complete run yet) raises nothing; the UI shows "not
+// assessed".
 func (n *Notifier) Hermes(ctx context.Context, lastComplete time.Time) int {
-	if lastComplete.IsZero() {
-		return 0
-	}
 	now := n.now()
-	var out []notify.Event
 	n.mu.Lock()
-	if now.Sub(lastComplete) > n.hermesMax && !lastComplete.Equal(n.hermesMark) {
-		n.hermesMark = lastComplete
-		out = n.admit(notify.Event{Kind: KindHermesStale, State: "stale",
-			Reason: "no complete Hermes run since " + lastComplete.UTC().Format(time.RFC3339), Time: now}, now)
+	out := n.retries()
+	if !lastComplete.IsZero() {
+		k := alertKey{kind: KindHermesStale}
+		mark := lastComplete.UnixNano()
+		if ref, ok := n.inflight[k]; ok && ref.episode != mark {
+			n.cancel(k)
+		}
+		_, queued := n.inflight[k]
+		if now.Sub(lastComplete) > n.hermesMax && !lastComplete.Equal(n.hermesMark) && !queued {
+			out = append(out, n.admit(outMsg{ev: notify.Event{Kind: KindHermesStale, State: "stale",
+				Reason: "no complete Hermes run since " + lastComplete.UTC().Format(time.RFC3339), Time: now},
+				keyed: true, key: k, commit: func() { n.hermesMark = lastComplete }}, mark, now)...)
+		}
 	}
 	n.mu.Unlock()
 	return n.send(ctx, out)
@@ -258,31 +345,34 @@ type FeedStatus struct {
 }
 
 // Feeds raises vuln.feed_stale once per listed source and stale episode.
-// A non-stale status ends the source's episode; unknown source IDs are
-// ignored and create no state.
+// A non-stale status ends the source's episode and drops its undelivered
+// alert; unknown source IDs are ignored and create no state.
 func (n *Notifier) Feeds(ctx context.Context, st []FeedStatus) int {
 	now := n.now()
-	var out []notify.Event
 	n.mu.Lock()
+	out := n.retries()
 	for _, s := range st {
 		if !n.sources[s.SourceID] {
 			continue
 		}
+		k := alertKey{kind: KindFeedStale, source: s.SourceID}
 		if !s.Stale {
 			delete(n.feedStale, s.SourceID)
+			n.cancel(k)
 			continue
 		}
-		if n.feedStale[s.SourceID] {
+		if _, queued := n.inflight[k]; n.feedStale[s.SourceID] || queued {
 			continue
 		}
-		n.feedStale[s.SourceID] = true
 		reason := "feed " + plain(s.SourceID, maxText) + " stale"
 		if !s.Since.IsZero() {
 			reason += " since " + s.Since.UTC().Format(time.RFC3339)
 		} else {
 			reason += " (undated)"
 		}
-		out = append(out, n.admit(notify.Event{Kind: KindFeedStale, State: "stale", Reason: reason, Time: now}, now)...)
+		src := s.SourceID
+		out = append(out, n.admit(outMsg{ev: notify.Event{Kind: KindFeedStale, State: "stale", Reason: reason, Time: now},
+			keyed: true, key: k, commit: func() { n.feedStale[src] = true }}, 0, now)...)
 	}
 	n.mu.Unlock()
 	return n.send(ctx, out)
@@ -290,31 +380,34 @@ func (n *Notifier) Feeds(ctx context.Context, st []FeedStatus) int {
 
 // Run raises vuln.feed_regressed for the listed sources a started run named
 // below their high-water mark or dated in the future: once per source and
-// regression episode, which ends when a run accepts the source again.
-// Undated verdicts neither open nor end an episode; unknown source IDs
-// raise nothing.
+// regression episode, which ends when a run accepts the source again (and
+// drops an undelivered alert). Undated verdicts neither open nor end an
+// episode; unknown source IDs raise nothing.
 func (n *Notifier) Run(ctx context.Context, r vulnstore.Run) int {
 	now := n.now()
-	var out []notify.Event
 	n.mu.Lock()
+	out := n.retries()
 	for _, v := range r.Sources {
 		if !n.sources[v.ID] {
 			continue
 		}
+		k := alertKey{kind: KindFeedRegressed, source: v.ID}
 		switch v.Status {
 		case vulnstore.SourceAccepted:
 			delete(n.feedRegr, v.ID)
+			n.cancel(k)
 		case vulnstore.SourceRegressed, vulnstore.SourceInvalid:
-			if n.feedRegr[v.ID] {
+			if _, queued := n.inflight[k]; n.feedRegr[v.ID] || queued {
 				continue
 			}
-			n.feedRegr[v.ID] = true
 			what := "behind its high-water mark"
 			if v.Status == vulnstore.SourceInvalid {
 				what = "dated in the future"
 			}
-			out = append(out, n.admit(notify.Event{Kind: KindFeedRegressed, State: string(v.Status),
-				Reason: "feed " + plain(v.ID, maxText) + " " + what + "; run " + plain(r.ID, maxText), Time: now}, now)...)
+			src := v.ID
+			out = append(out, n.admit(outMsg{ev: notify.Event{Kind: KindFeedRegressed, State: string(v.Status),
+				Reason: "feed " + plain(v.ID, maxText) + " " + what + "; run " + plain(r.ID, maxText), Time: now},
+				keyed: true, key: k, commit: func() { n.feedRegr[src] = true }}, 0, now)...)
 		}
 	}
 	n.mu.Unlock()
@@ -328,26 +421,62 @@ func (n *Notifier) MarkReset(ctx context.Context, m vulnstore.MarkReset) int {
 	reason := "high-water mark of feed " + plain(m.SourceID, maxText) + " reset by " + plain(m.Admin, maxText) +
 		" from " + m.OldDate.UTC().Format(time.RFC3339) + " to " + m.NewDate.UTC().Format(time.RFC3339)
 	n.mu.Lock()
-	out := n.admit(notify.Event{Kind: KindFeedMarkReset, State: "reset", Reason: reason, Time: now}, now)
+	out := n.retries()
+	out = append(out, n.admit(outMsg{ev: notify.Event{Kind: KindFeedMarkReset, State: "reset", Reason: reason, Time: now}}, 0, now)...)
 	n.mu.Unlock()
 	return n.send(ctx, out)
 }
 
-// Flush sends the pending digest when a full RateWindow has passed since
-// the first held message. Call it periodically (e.g. every few minutes);
-// every other method also flushes when due.
+// Flush retries the queued undelivered messages and sends the pending
+// digest when a full RateWindow has passed since the first held message.
+// Call it periodically (e.g. every few minutes); every other method also
+// retries and flushes when due. It returns how many messages were
+// delivered.
 func (n *Notifier) Flush(ctx context.Context) int {
 	now := n.now()
 	n.mu.Lock()
-	out := n.digestDue(now)
+	out := append(n.retries(), n.digestDue(now)...)
 	n.mu.Unlock()
 	return n.send(ctx, out)
 }
 
-// admit applies the rate limit to e: it returns the messages to send now
-// (a due digest, then e if it is inside the limit) and counts e into the
-// digest otherwise. Caller holds n.mu.
-func (n *Notifier) admit(e notify.Event, now time.Time) []notify.Event {
+// Pending returns how many undelivered messages wait for another attempt.
+func (n *Notifier) Pending() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return len(n.pending)
+}
+
+// retries takes the queued messages for another attempt. Their keys stay
+// in n.inflight, so no copy is queued meanwhile. Caller holds n.mu.
+func (n *Notifier) retries() []outMsg {
+	out := n.pending
+	n.pending = nil
+	return out
+}
+
+// cancel drops the queued or in-flight alert k: it is not retried and its
+// delivery sets no state. Caller holds n.mu.
+func (n *Notifier) cancel(k alertKey) {
+	if _, ok := n.inflight[k]; !ok {
+		return
+	}
+	delete(n.inflight, k)
+	kept := n.pending[:0]
+	for _, m := range n.pending {
+		if !m.keyed || m.key != k {
+			kept = append(kept, m)
+		}
+	}
+	clear(n.pending[len(kept):])
+	n.pending = kept
+}
+
+// admit applies the rate limit to m: it returns the messages to send now
+// (a due digest, then m if it is inside the limit) and counts m into the
+// digest otherwise. A held message is accounted for by the digest, so its
+// de-duplication state is set now. Caller holds n.mu.
+func (n *Notifier) admit(m outMsg, episode int64, now time.Time) []outMsg {
 	out := n.digestDue(now)
 	cut := 0
 	for cut < len(n.sent) && now.Sub(n.sent[cut]) >= RateWindow {
@@ -356,19 +485,32 @@ func (n *Notifier) admit(e notify.Event, now time.Time) []notify.Event {
 	n.sent = n.sent[cut:]
 	if len(n.sent) < MaxPerHour {
 		n.sent = append(n.sent, now)
-		return append(out, e)
+		if m.keyed {
+			n.seq++
+			m.token = n.seq
+			n.inflight[m.key] = pendingRef{token: n.seq, episode: episode}
+		}
+		return append(out, m)
 	}
+	n.hold(m.ev.Kind, 1, now)
+	if m.commit != nil {
+		m.commit()
+	}
+	return out
+}
+
+// hold counts c messages of kind into the digest. Caller holds n.mu.
+func (n *Notifier) hold(kind string, c int, now time.Time) {
 	if len(n.held) == 0 {
 		n.heldSince = now
 	}
-	n.held[e.Kind]++
-	return out
+	n.held[kind] += c
 }
 
 // digestDue returns the digest message when one is due and resets the
 // held counts. The digest is sent at most once per RateWindow and does not
 // count against MaxPerHour. Caller holds n.mu.
-func (n *Notifier) digestDue(now time.Time) []notify.Event {
+func (n *Notifier) digestDue(now time.Time) []outMsg {
 	if len(n.held) == 0 || now.Sub(n.heldSince) < RateWindow {
 		return nil
 	}
@@ -383,16 +525,72 @@ func (n *Notifier) digestDue(now time.Time) []notify.Event {
 	for _, k := range kinds {
 		parts = append(parts, fmt.Sprintf("%s: %d", k, n.held[k]))
 	}
+	m := outMsg{ev: notify.Event{Kind: KindDigest, State: "digest",
+		Reason: fmt.Sprintf("%d vulnerability notifications held by the hourly limit or undelivered (%s)", total, strings.Join(parts, ", ")), Time: now},
+		digest: n.held, digestSince: n.heldSince}
 	n.held = map[string]int{}
 	n.heldSince = time.Time{}
-	return []notify.Event{{Kind: KindDigest, State: "digest",
-		Reason: fmt.Sprintf("%d vulnerability notifications held by the hourly limit (%s)", total, strings.Join(parts, ", ")), Time: now}}
+	return []outMsg{m}
 }
 
-// send hands the messages to the sink and returns how many were sent.
-func (n *Notifier) send(ctx context.Context, es []notify.Event) int {
-	for _, e := range es {
-		n.sink.Notify(ctx, e)
+// send hands the messages to the sink and returns how many at least one
+// provider accepted. Delivered alerts set their de-duplication state;
+// undelivered ones are queued again (bounded), a failed digest returns its
+// counts.
+func (n *Notifier) send(ctx context.Context, ms []outMsg) int {
+	if len(ms) == 0 {
+		return 0
 	}
-	return len(es)
+	ok := make([]bool, len(ms))
+	sent := 0
+	for i, m := range ms {
+		ok[i] = n.sink.Notify(ctx, m.ev) > 0
+		if ok[i] {
+			sent++
+		}
+	}
+	now := n.now()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for i, m := range ms {
+		live := true
+		if m.keyed {
+			ref, found := n.inflight[m.key]
+			live = found && ref.token == m.token
+		}
+		switch {
+		case ok[i]:
+			if live && m.keyed {
+				delete(n.inflight, m.key)
+			}
+			if live && m.commit != nil {
+				m.commit()
+			}
+		case m.digest != nil:
+			for k, c := range m.digest {
+				n.hold(k, c, now)
+			}
+			if m.digestSince.Before(n.heldSince) {
+				n.heldSince = m.digestSince
+			}
+		case live:
+			n.requeue(m, now)
+		}
+	}
+	return sent
+}
+
+// requeue queues an undelivered message; when the queue is full the oldest
+// is dropped and counted as undelivered in the digest. Caller holds n.mu.
+func (n *Notifier) requeue(m outMsg, now time.Time) {
+	n.pending = append(n.pending, m)
+	for len(n.pending) > MaxPending {
+		old := n.pending[0]
+		n.pending[0] = outMsg{}
+		n.pending = n.pending[1:]
+		if old.keyed {
+			delete(n.inflight, old.key)
+		}
+		n.hold(old.ev.Kind+undeliveredSuffix, 1, now)
+	}
 }
