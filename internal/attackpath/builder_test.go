@@ -103,8 +103,8 @@ func TestAddNodeRejectsInvalidInput(t *testing.T) {
 		{"invalid utf-8 label", Node{ID: "h1", Kind: NodeHost, Label: "a\xffb"}, ErrInvalidNode},
 		{"control char label", Node{ID: "h1", Kind: NodeHost, Label: "a\nb"}, ErrInvalidNode},
 		{"nul label", Node{ID: "h1", Kind: NodeHost, Label: "a\x00b"}, ErrInvalidNode},
-		{"bidi override label", Node{ID: "h1", Kind: NodeHost, Label: "a‮b"}, ErrInvalidNode},
-		{"bidi isolate label", Node{ID: "h1", Kind: NodeHost, Label: "a⁦b"}, ErrInvalidNode},
+		{"bidi override label", Node{ID: "h1", Kind: NodeHost, Label: "a" + string(rune(0x202e)) + "b"}, ErrInvalidNode},
+		{"bidi isolate label", Node{ID: "h1", Kind: NodeHost, Label: "a" + string(rune(0x2066)) + "b"}, ErrInvalidNode},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
