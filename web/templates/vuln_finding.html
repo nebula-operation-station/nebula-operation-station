@@ -18,6 +18,7 @@
     <dt>Ecosystem</dt><dd class="mono">{{.Ecosystem}}</dd>
     <dt>Component</dt><dd class="mono">{{.Component}} {{.Version}}</dd>
     <dt>Fix</dt><dd class="mono">{{.Fix}}</dd>
+    {{with .FixWith}}<dt>Fix with</dt><dd>{{template "vuln_fix_with" .}}</dd>{{end}}
     <dt>CVSS</dt><dd class="mono">{{.CVSS}}</dd>
     <dt>KEV</dt><dd>{{if .KEV}}{{.KEV}}{{else}}not listed{{end}}</dd>
     <dt>EPSS</dt><dd class="mono">{{if .EPSS}}{{.EPSS}}{{else}}unknown{{end}}</dd>
