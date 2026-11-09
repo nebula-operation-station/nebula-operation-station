@@ -284,11 +284,11 @@ func CheckXML(data []byte, maxBytes int) error {
 	return nil
 }
 
-// validText reports whether s is valid UTF-8 of at most max bytes without
-// control characters or replacement characters. Untrusted device text is
-// always checked with it.
-func validText(s string, max int) bool {
-	if len(s) > max || !utf8.ValidString(s) {
+// validText reports whether s is valid UTF-8 of at most limit bytes
+// without control characters or replacement characters. Untrusted device
+// text is always checked with it.
+func validText(s string, limit int) bool {
+	if len(s) > limit || !utf8.ValidString(s) {
 		return false
 	}
 	for _, r := range s {
