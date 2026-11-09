@@ -87,8 +87,15 @@ func (s *Store) CloseByInventory(ctx context.Context, read InventoryRead) ([]vul
 				continue
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE vuln_findings SET state = 'fixed', closed_by = 'nos_inventory', closed_note = '',
-			closed_at = ?, rev = rev + 1, updated_at = ? WHERE finding_key = ? AND rev = ?`, n, n, f.Key[:], f.Rev); err != nil {
+		res, err := tx.ExecContext(ctx, `UPDATE vuln_findings SET state = 'fixed', closed_by = 'nos_inventory', closed_note = '',
+			closed_at = ?, rev = rev + 1, updated_at = ? WHERE finding_key = ? AND rev = ?`, n, n, f.Key[:], f.Rev)
+		if err != nil {
+			return nil, fmt.Errorf("vulnstore: inventory close: %w", err)
+		}
+		if k, _ := res.RowsAffected(); k != 1 {
+			continue
+		}
+		if err := logHistory(ctx, tx, f.Key, read.Subject.String(), n, 0, EventClosed, true, ClosedByNOSInventory); err != nil {
 			return nil, fmt.Errorf("vulnstore: inventory close: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM vuln_held_closures WHERE finding_key = ?`, f.Key[:]); err != nil {
@@ -120,6 +127,11 @@ func (s *Store) CloseSubjectRemoved(ctx context.Context, subj Subject) (int, err
 	}
 	defer tx.Rollback()
 	n := unix(now)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO vuln_finding_history (finding_key, subject, at, event, was_open, is_open, closed_by)
+		SELECT finding_key, subject, ?, 'closed', state = 'open', 0, 'subject_removed' FROM vuln_findings
+		WHERE subject = ? AND state <> 'fixed' ORDER BY finding_key`, n, subj.String()); err != nil {
+		return 0, fmt.Errorf("vulnstore: subject removed: history: %w", err)
+	}
 	res, err := tx.ExecContext(ctx, `UPDATE vuln_findings SET state = 'fixed', closed_by = 'subject_removed', closed_note = '',
 		closed_at = ?, human_by = NULL, human_reason = NULL, human_category = NULL, human_expires_at = NULL,
 		human_basis_version = NULL, human_kev = NULL, human_at = NULL, rev = rev + 1, updated_at = ?

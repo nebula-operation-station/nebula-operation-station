@@ -52,8 +52,11 @@ type BatchResult struct {
 	// Ignored lists changes a raise-only record could not apply.
 	Ignored []IgnoredChange
 	// Downgrades counts KEV flags dropped or tiers fallen inside an
-	// episode, applied as current values (the caller audits them).
+	// episode, applied as current values; Dropped lists them by key with
+	// field "kev_dropped" or "tier_fell" (the caller audits them; they are
+	// also in the finding history).
 	Downgrades int
+	Dropped    []IgnoredChange
 }
 
 // RejectBatch records a batch rejected as a whole: the run then requests

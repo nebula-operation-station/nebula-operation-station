@@ -188,3 +188,28 @@ CREATE TABLE vuln_held_closures (
 );
 CREATE INDEX idx_vuln_held_subject ON vuln_held_closures (subject, run_seq);
 CREATE INDEX idx_vuln_held_finding ON vuln_held_closures (finding_key);
+
+-- vuln_finding_history: per finding the state changes (opened, re-opened,
+-- closed with its closure path, human state set or re-opened) and the drops
+-- an applied record made inside an episode (KEV flag removed, tier fell).
+-- was_open/is_open are set for state changes only. The window guard (D5)
+-- reads it: a finding was open at the window start when its first state
+-- change after the start left 'open', or it had none and is open now;
+-- unevidenced closures are counted when applied, from their 'closed' rows.
+-- Rows go with their finding and are pruned after the fixed retention.
+CREATE TABLE vuln_finding_history (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    finding_key BLOB NOT NULL REFERENCES vuln_findings (finding_key) ON DELETE CASCADE,
+    subject     TEXT NOT NULL CHECK (length(subject) BETWEEN 1 AND 200),
+    at          INTEGER NOT NULL,
+    run_seq     INTEGER CHECK (run_seq IS NULL OR run_seq > 0),
+    event       TEXT NOT NULL CHECK (event IN ('opened', 'reopened', 'closed', 'human_set', 'human_reopened', 'kev_dropped', 'tier_fell')),
+    was_open    INTEGER CHECK (was_open IS NULL OR was_open IN (0, 1)),
+    is_open     INTEGER CHECK (is_open IS NULL OR is_open IN (0, 1)),
+    closed_by   TEXT CHECK (closed_by IS NULL OR closed_by IN ('nos_inventory', 'subject_removed', 'hermes_unconfirmed', 'admin_confirmed')),
+    CHECK ((event IN ('kev_dropped', 'tier_fell')) = (was_open IS NULL)),
+    CHECK ((was_open IS NULL) = (is_open IS NULL)),
+    CHECK ((event = 'closed') = (closed_by IS NOT NULL))
+);
+CREATE INDEX idx_vuln_history_window ON vuln_finding_history (subject, at);
+CREATE INDEX idx_vuln_history_finding ON vuln_finding_history (finding_key, id);

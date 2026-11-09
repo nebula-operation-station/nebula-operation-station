@@ -128,6 +128,9 @@ func (s *Store) setHuman(ctx context.Context, key vulnfinding.Key, st State, by,
 		WHERE finding_key = ?`, string(st), by, reason, category, expires, basis, boolInt(f.EpisodeKEV()), unix(now), unix(now), key[:]); err != nil {
 		return fmt.Errorf("vulnstore: set %s: %w", st, err)
 	}
+	if err := logHistory(ctx, tx, key, f.Subject.String(), unix(now), 0, EventHumanSet, true, ""); err != nil {
+		return fmt.Errorf("vulnstore: set %s: %w", st, err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("vulnstore: set %s: commit: %w", st, err)
 	}
@@ -213,6 +216,11 @@ func (s *Store) reopenHuman(ctx context.Context, f Finding, now time.Time) (bool
 		return false, fmt.Errorf("vulnstore: reopen human state: %w", err)
 	}
 	n, _ := res.RowsAffected()
+	if n == 1 {
+		if err := logHistory(ctx, tx, f.Key, f.Subject.String(), unix(now), 0, EventHumanReopened, false, ""); err != nil {
+			return false, fmt.Errorf("vulnstore: reopen human state: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("vulnstore: reopen human state: commit: %w", err)
 	}
@@ -327,6 +335,10 @@ func (s *Store) ConfirmHeld(ctx context.Context, runID string, key vulnfinding.K
 		closed_admin = ?, closed_reason = ?, rev = rev + 1, updated_at = ? WHERE finding_key = ?`,
 		string(by), n, admCol, reasonCol, n, key[:]); err != nil {
 		return "", fmt.Errorf("vulnstore: confirm hold: close: %w", err)
+	}
+	// Counted by the window guard when applied (closure row 6).
+	if err := logHistory(ctx, tx, key, subject, n, 0, EventClosed, true, by); err != nil {
+		return "", fmt.Errorf("vulnstore: confirm hold: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM vuln_held_closures WHERE finding_key = ?`, key[:]); err != nil {
 		return "", fmt.Errorf("vulnstore: confirm hold: drop: %w", err)

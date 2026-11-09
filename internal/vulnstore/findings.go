@@ -274,7 +274,7 @@ func (s *Store) insertFinding(ctx context.Context, tx *sql.Tx, run runRow, subj 
 	if err != nil {
 		return fmt.Errorf("insert finding: %w", err)
 	}
-	return nil
+	return logHistory(ctx, tx, it.Finding.Key, subj.String(), n, run.seq, EventOpened, false, "")
 }
 
 // reopenFinding re-opens a fixed finding: a new episode whose current
@@ -303,7 +303,7 @@ func (s *Store) reopenFinding(ctx context.Context, tx *sql.Tx, run runRow, subj 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM vuln_held_closures WHERE finding_key = ?`, cur.Key[:]); err != nil {
 		return fmt.Errorf("reopen finding: drop holds: %w", err)
 	}
-	return nil
+	return logHistory(ctx, tx, cur.Key, subj.String(), n, run.seq, EventReopened, false, "")
 }
 
 // updateFinding applies a record to an open or human-state finding. The
@@ -318,12 +318,25 @@ func (s *Store) updateFinding(ctx context.Context, tx *sql.Tx, run runRow, subj 
 		for _, field := range ignored {
 			res.Ignored = append(res.Ignored, IgnoredChange{Key: keyHex, Field: field})
 		}
-	} else {
+	}
+	n := unix(now)
+	if !raise {
+		// Drops inside an episode are applied as current values (the
+		// episode marks keep them for closure checks) and are written to
+		// the finding history; the caller audits BatchResult.Dropped.
+		var drops []HistoryEvent
 		if cur.Record.Scores.KEV != nil && in.Scores.KEV == nil {
-			res.Downgrades++
+			drops = append(drops, EventKEVDropped)
 		}
 		if s.tier(subj, in) < s.tier(subj, cur.Record) {
+			drops = append(drops, EventTierFell)
+		}
+		for _, ev := range drops {
 			res.Downgrades++
+			res.Dropped = append(res.Dropped, IgnoredChange{Key: keyHex, Field: string(ev)})
+			if err := logHistory(ctx, tx, cur.Key, subj.String(), n, run.seq, ev, false, ""); err != nil {
+				return err
+			}
 		}
 	}
 	t := s.tier(subj, out)
@@ -332,7 +345,6 @@ func (s *Store) updateFinding(ctx context.Context, tx *sql.Tx, run runRow, subj 
 	if err != nil {
 		return err
 	}
-	n := unix(now)
 	_, err = tx.ExecContext(ctx, `UPDATE vuln_findings SET record = ?, assessment = ?, nos_checked = ?, state_run_seq = ?, rev = rev + 1,
 		episode_fixed_version = ?, episode_kev_date = ?, episode_peak_tier = ?, last_seen_at = ?, updated_at = ?
 		WHERE finding_key = ? AND state_run_seq <= ?`,

@@ -16,6 +16,7 @@ type PruneResult struct {
 	DeletedFindings   int
 	ClearedAssessment int
 	DeletedRuns       int
+	DeletedHistory    int
 }
 
 // Prune applies the D6 retention (Q3): fixed findings are deleted 365 days
@@ -49,6 +50,9 @@ func (s *Store) Prune(ctx context.Context) (PruneResult, error) {
 		{&res.ClearedAssessment, `UPDATE vuln_findings SET assessment = NULL WHERE state = 'fixed' AND closed_at <= ? AND assessment IS NOT NULL`,
 			unix(now.Add(-RetainClosedAssessment))},
 		{&res.DeletedRuns, `DELETE FROM vuln_runs WHERE state <> 'running' AND ended_at <= ?`, unix(now.Add(-RetainRuns))},
+		// History older than the fixed retention: far past the guard
+		// window, which reads only the last WindowGuardSpan.
+		{&res.DeletedHistory, `DELETE FROM vuln_finding_history WHERE at <= ?`, unix(now.Add(-RetainFixed))},
 	}
 	for _, st := range steps {
 		r, err := tx.ExecContext(ctx, st.query, st.arg)

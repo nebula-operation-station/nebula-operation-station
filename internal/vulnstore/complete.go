@@ -56,7 +56,7 @@ type candidate struct {
 	f      Finding
 	class  Class
 	hold   HoldReason
-	inWin  bool // finding open at the start of the guard window
+	inWin  bool // in the window baseline and not yet counted as applied
 	counts bool // unevidenced: counted by the guards
 }
 
@@ -64,8 +64,8 @@ type candidate struct {
 type subjectPlan struct {
 	subject string
 	scope   int // run guard scope
-	base    int // window guard baseline
-	applied int // unevidenced closures applied in the window
+	base    int // window guard baseline: open at the window start
+	applied int // baseline findings with an unevidenced closure applied in the window
 	cands   []candidate
 }
 
@@ -180,13 +180,11 @@ func (s *Store) planClosures(ctx context.Context, run runRow, now time.Time, com
 			subj, run.seq, unix(run.started), run.seq).Scan(&p.scope); err != nil {
 			return nil, fmt.Errorf("run guard scope: %w", err)
 		}
-		if err := s.db.QueryRowContext(ctx, `SELECT
-			COALESCE(SUM(episode_opened_at <= ?1 AND (state <> 'fixed' OR closed_at > ?1)), 0),
-			COALESCE(SUM(episode_opened_at <= ?1 AND state = 'fixed' AND closed_at > ?1
-				AND closed_by IN ('hermes_unconfirmed', 'admin_confirmed')), 0)
-			FROM vuln_findings WHERE subject = ?2`, winStart, subj).Scan(&p.base, &p.applied); err != nil {
-			return nil, fmt.Errorf("window baseline: %w", err)
+		win, err := loadWindow(ctx, s.db, subj, winStart)
+		if err != nil {
+			return nil, err
 		}
+		p.base, p.applied = win.base, len(win.applied)
 		open, err := queryFindings(ctx, s.db, `SELECT `+findingColumns+` FROM vuln_findings
 			WHERE subject = ? AND state = 'open' AND state_run_seq <= ? ORDER BY finding_key`, subj, run.seq)
 		if err != nil {
@@ -198,7 +196,9 @@ func (s *Store) planClosures(ctx context.Context, run runRow, now time.Time, com
 				return nil, err
 			}
 			if ok {
-				c.inWin = unix(f.EpisodeOpenedAt) <= winStart
+				// Counted by the window guard only when the finding is in
+				// the baseline and not already counted as applied.
+				c.inWin = win.inBaseline(f.Key) && !win.applied[f.Key]
 				p.cands = append(p.cands, c)
 			}
 		}
@@ -381,6 +381,9 @@ func (s *Store) applySubject(ctx context.Context, run runRow, p *subjectPlan, no
 		if k, _ := res.RowsAffected(); k != 1 {
 			comp.Superseded++
 			continue
+		}
+		if err := logHistory(ctx, tx, c.f.Key, p.subject, n, run.seq, EventClosed, true, by); err != nil {
+			return err
 		}
 		if by == ClosedByNOSInventory {
 			comp.ClosedEvidenced++
