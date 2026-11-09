@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"io"
 	"regexp"
 	"strconv"
 	"strings"
@@ -20,13 +19,15 @@ import (
 // (ecosystem, name, version, source name, source version) tuples. The raw
 // output is never kept, logged or quoted in a result or error.
 //
-// The document is decoded as a token stream, never materialised as a whole:
-// package entries are decoded one at a time into a reused struct and reduced
-// at once, and every streamed array and object is capped. Allocation of one
-// read is bounded by the decoder buffer for the largest single value (a
-// small multiple of MaxImagePackagesOutput, for one huge skipped value or
-// string) plus maxImagePkgEntries decoded entries; it never grows per
-// element of hostile output.
+// The document is checked with json.Valid and then walked on its raw bytes
+// (trivyScan), never materialised or buffered: skipped values are stepped
+// over, and a string, key or number is decoded only when the parser keeps
+// it and only after its raw length was checked against the field limit.
+// Package entries are reduced one at a time and every walked array and
+// object is capped. Allocation of one read is therefore bounded by small
+// fixed amounts (maxImagePkgEntries entries of bounded fields, the kept
+// packages) whatever a single value of the output holds; it never grows
+// with the size of one value or per element of hostile output.
 
 const (
 	// MaxImagePackages is the per-image package limit (ADR 0011 D3). A read
@@ -66,6 +67,13 @@ const (
 	maxTrivyObjectKeys = 64
 	// maxTrivyRepoDigests bounds Metadata.RepoDigests. More are unparseable.
 	maxTrivyRepoDigests = 256
+	// maxTrivyKey bounds a decoded key of an object the parser walks key by
+	// key (document, Metadata, result). A longer key is unparseable; Trivy
+	// keys are short identifiers.
+	maxTrivyKey = 64
+	// maxTrivyFieldKey bounds a key of a package entry or OS object that
+	// can name a field. Longer keys are ignored like any unknown field.
+	maxTrivyFieldKey = 16
 )
 
 // Fixed reason codes for an image.packages read that is not complete. A
@@ -146,20 +154,22 @@ type ImagePackages struct {
 	Reason   string // comma-separated Reason* codes, "" when complete
 }
 
+// trivyPkgDoc holds the fields of one package entry (trivyPkgFields).
 type trivyPkgDoc struct {
-	Name       string `json:"Name"`
-	Version    string `json:"Version"`
-	Release    string `json:"Release"`
-	Epoch      int    `json:"Epoch"`
-	SrcName    string `json:"SrcName"`
-	SrcVersion string `json:"SrcVersion"`
-	SrcRelease string `json:"SrcRelease"`
-	SrcEpoch   int    `json:"SrcEpoch"`
+	Name       string
+	Version    string
+	Release    string
+	Epoch      int
+	SrcName    string
+	SrcVersion string
+	SrcRelease string
+	SrcEpoch   int
 }
 
+// trivyOSDoc holds the fields of Metadata.OS (trivyOSFields).
 type trivyOSDoc struct {
-	Family string `json:"Family"`
-	Name   string `json:"Name"`
+	Family string
+	Name   string
 }
 
 // partialSet collects the partial conditions of one read.
@@ -259,8 +269,9 @@ type keptPkg struct {
 
 // trivyDecoder is the state of one streaming decode.
 type trivyDecoder struct {
-	dec         *json.Decoder
-	ref         refJSON // reused for every reference, holds the digest suffix
+	s           trivyScan
+	buf         []byte  // reused unescape buffer, bounded by the field limits
+	ref         refJSON // holds the digest suffix
 	schemaOK    bool
 	digestMatch bool
 	os          ImageOS
@@ -293,10 +304,12 @@ func decodeTrivy(digest string, b []byte) (*trivyDecoder, bool) {
 		osTypes: make(map[string]bool),
 		seen:    make(map[keptPkg]bool),
 	}
-	if len(b) == 0 || len(b) > MaxImagePackagesOutput || !utf8.Valid(b) {
+	// json.Valid allocates nothing per value; after it the raw bytes are
+	// walked in place.
+	if len(b) == 0 || len(b) > MaxImagePackagesOutput || !utf8.Valid(b) || !json.Valid(b) {
 		return t, false
 	}
-	t.dec = json.NewDecoder(bytes.NewReader(b))
+	t.s = trivyScan{b: b}
 	err := t.document()
 	if errors.Is(err, errTrivyStop) {
 		t.p.limit = true
@@ -305,24 +318,21 @@ func decodeTrivy(digest string, b []byte) (*trivyDecoder, bool) {
 	if err != nil || !t.schemaOK {
 		return t, false
 	}
-	if _, err := t.dec.Token(); !errors.Is(err, io.EOF) {
+	if t.s.peek() != 0 {
 		return t, false // trailing data
 	}
 	return t, true
 }
 
 func (t *trivyDecoder) document() error {
-	if err := t.expect(json.Delim('{')); err != nil {
-		return err
-	}
 	return t.object(func(key string) error {
 		switch key {
 		case "SchemaVersion":
-			var v int
-			if err := t.dec.Decode(&v); err != nil {
+			v, ok, err := t.intValue()
+			if err != nil {
 				return err
 			}
-			t.schemaOK = v == trivySchemaVersion
+			t.schemaOK = ok && v == trivySchemaVersion
 			if !t.schemaOK {
 				return errTrivyShape
 			}
@@ -338,171 +348,216 @@ func (t *trivyDecoder) document() error {
 	})
 }
 
-// object walks the keys of an object whose '{' was consumed, through the
-// closing '}'. Keys are capped and must be unique.
+// object walks the object at the cursor key by key. Keys are capped in
+// number and length and must be unique; field must consume the value.
 func (t *trivyDecoder) object(field func(key string) error) error {
 	var keys []string
-	for t.dec.More() {
-		if len(keys) >= maxTrivyObjectKeys {
+	return t.s.members(func(raw []byte) error {
+		if len(keys) >= maxTrivyObjectKeys || len(raw) > maxJSONEscapeRatio*maxTrivyKey {
 			return errTrivyShape
 		}
-		tok, err := t.dec.Token()
-		if err != nil {
-			return err
-		}
-		key, ok := tok.(string)
+		k, ok := t.unescape(raw, maxTrivyKey)
 		if !ok {
 			return errTrivyShape
 		}
-		for _, k := range keys {
-			if k == key {
+		for _, seen := range keys {
+			if seen == string(k) {
 				return errTrivyShape // duplicate key: which value counts is ambiguous
 			}
 		}
+		key := string(k)
 		keys = append(keys, key)
-		if err := field(key); err != nil {
-			return err
-		}
-	}
-	return t.expect(json.Delim('}'))
-}
-
-// open consumes the start of an optional array or object: it reports false
-// for null and fails for any other value.
-func (t *trivyDecoder) open(d json.Delim) (bool, error) {
-	tok, err := t.dec.Token()
-	if err != nil {
-		return false, err
-	}
-	if tok == nil {
-		return false, nil
-	}
-	if tok != d {
-		return false, errTrivyShape
-	}
-	return true, nil
-}
-
-func (t *trivyDecoder) expect(d json.Delim) error {
-	tok, err := t.dec.Token()
-	if err != nil {
-		return err
-	}
-	if tok != d {
-		return errTrivyShape
-	}
-	return nil
+		return field(key)
+	})
 }
 
 // skip consumes one value of a key the parser does not use, without
-// allocating per element.
-func (t *trivyDecoder) skip() error {
-	return t.dec.Decode(&skipJSON{})
+// allocating.
+func (t *trivyDecoder) skip() error { return t.s.skip() }
+
+// unescape decodes a raw JSON string of at most limit decoded bytes into
+// the reused buffer. The result is valid until the next call.
+func (t *trivyDecoder) unescape(raw []byte, limit int) ([]byte, bool) {
+	if len(raw) > maxJSONEscapeRatio*limit {
+		return nil, false
+	}
+	if bytes.IndexByte(raw, '\\') < 0 {
+		return raw, len(raw) <= limit
+	}
+	buf, ok := unescapeJSON(t.buf[:0], raw)
+	t.buf = buf[:0]
+	return buf, ok && len(buf) <= limit
 }
 
-// skipJSON accepts and discards any JSON value.
-type skipJSON struct{}
+// stringValue consumes the value at the cursor. A string of at most limit
+// decoded bytes is returned; null is "". Any other type or a longer string
+// is reported as not ok without being decoded.
+func (t *trivyDecoder) stringValue(limit int) (string, bool, error) {
+	switch t.s.peek() {
+	case '"':
+		raw, err := t.s.str()
+		if err != nil {
+			return "", false, err
+		}
+		v, ok := t.unescape(raw, limit)
+		if !ok {
+			return "", false, nil
+		}
+		return string(v), true, nil
+	case 'n':
+		return "", true, t.s.skip()
+	}
+	return "", false, t.s.skip()
+}
 
-// UnmarshalJSON discards the value.
-func (*skipJSON) UnmarshalJSON([]byte) error { return nil }
+// intValue consumes the value at the cursor. A small integer is returned;
+// null is 0. Any other type or number is reported as not ok.
+func (t *trivyDecoder) intValue() (int, bool, error) {
+	switch c := t.s.peek(); {
+	case c == '-' || (c >= '0' && c <= '9'):
+		raw, err := t.s.span()
+		if err != nil {
+			return 0, false, err
+		}
+		v, ok := smallInt(raw)
+		return v, ok, nil
+	case c == 'n':
+		return 0, true, t.s.skip()
+	}
+	return 0, false, t.s.skip()
+}
+
+// fieldIndex returns the index of a raw entry or OS key in names, -1 for
+// an unknown key. Long keys are unknown without being decoded.
+func (t *trivyDecoder) fieldIndex(raw []byte, names []string) int {
+	k, ok := t.unescape(raw, maxTrivyFieldKey)
+	if !ok {
+		return -1
+	}
+	for i, n := range names {
+		if string(k) == n {
+			return i
+		}
+	}
+	return -1
+}
 
 // refJSON checks a reference value against the requested digest suffix on
-// the raw JSON bytes, without allocating per element. Escaped or non-string
-// values never match.
+// the raw JSON bytes. Escaped or non-string values never match.
 type refJSON struct {
-	suffix  []byte
-	matched bool
+	suffix []byte
 }
 
-// UnmarshalJSON records whether the value is the requested digest.
-func (r *refJSON) UnmarshalJSON(b []byte) error {
+// match reports whether the raw value is the requested digest.
+func (r *refJSON) match(b []byte) bool {
 	if len(b) < 2 || len(b) > maxImageRef+2 || b[0] != '"' || b[len(b)-1] != '"' {
-		return nil
+		return false
 	}
 	ref := b[1 : len(b)-1]
-	if bytes.IndexByte(ref, '\\') < 0 && digestRe.Match(ref) && bytes.HasSuffix(ref, r.suffix) {
-		r.matched = true
-	}
-	return nil
+	return bytes.IndexByte(ref, '\\') < 0 && digestRe.Match(ref) && bytes.HasSuffix(ref, r.suffix)
 }
 
-// refMatch decodes one artifact or repo digest reference: it matches when it
-// ends in the requested "@sha256:<hex>" (the repository part may be spelled
-// differently).
+// refMatch consumes one artifact or repo digest reference: it matches when
+// it ends in the requested "@sha256:<hex>" (the repository part may be
+// spelled differently).
 func (t *trivyDecoder) refMatch() error {
-	t.ref.matched = false
-	if err := t.dec.Decode(&t.ref); err != nil {
+	raw, err := t.s.span()
+	if err != nil {
 		return err
 	}
-	t.digestMatch = t.digestMatch || t.ref.matched
+	t.digestMatch = t.digestMatch || t.ref.match(raw)
 	return nil
 }
 
 func (t *trivyDecoder) metadata() error {
-	ok, err := t.open(json.Delim('{'))
+	ok, err := t.s.open('{')
 	if err != nil || !ok {
 		return err
 	}
 	return t.object(func(key string) error {
 		switch key {
 		case "OS":
-			var o *trivyOSDoc
-			err := t.dec.Decode(&o)
-			if typeMismatch(err) {
-				return nil // OS stays undetected
-			}
-			if err != nil {
-				return err
-			}
-			if o != nil {
-				t.os, t.osOK = trivyOS(o.Family, o.Name)
-			}
-			return nil
+			return t.osValue()
 		case "RepoDigests":
-			ok, err := t.open(json.Delim('['))
+			ok, err := t.s.open('[')
 			if err != nil || !ok {
 				return err
 			}
-			for n := 0; t.dec.More(); n++ {
+			n := 0
+			return t.s.elements(func() error {
 				if n >= maxTrivyRepoDigests {
 					return errTrivyShape
 				}
-				if err := t.refMatch(); err != nil {
-					return err
-				}
-			}
-			return t.expect(json.Delim(']'))
+				n++
+				return t.refMatch()
+			})
 		}
 		return t.skip()
 	})
 }
 
+// trivyOSFields are the OS keys the parser reads, in trivyOSDoc order.
+var trivyOSFields = []string{"Family", "Name"}
+
+// osValue consumes Metadata.OS. A value of the wrong JSON type, a field of
+// the wrong type or length and a repeated field leave the OS undetected.
+func (t *trivyDecoder) osValue() error {
+	if t.s.peek() != '{' {
+		return t.skip() // null or wrong type: OS stays undetected
+	}
+	var o trivyOSDoc
+	var seen [2]bool
+	valid := true
+	err := t.s.members(func(raw []byte) error {
+		f := t.fieldIndex(raw, trivyOSFields)
+		if f < 0 || !valid {
+			return t.skip()
+		}
+		if seen[f] {
+			valid = false
+			return t.skip()
+		}
+		seen[f] = true
+		var ok bool
+		var err error
+		if f == 0 {
+			o.Family, ok, err = t.stringValue(maxImageOSFamily)
+		} else {
+			o.Name, ok, err = t.stringValue(maxImageOSName)
+		}
+		valid = valid && ok
+		return err
+	})
+	if err != nil || !valid {
+		return err
+	}
+	t.os, t.osOK = trivyOS(o.Family, o.Name)
+	return nil
+}
+
 func (t *trivyDecoder) resultList() error {
-	ok, err := t.open(json.Delim('['))
+	ok, err := t.s.open('[')
 	if err != nil || !ok {
 		return err
 	}
-	for t.dec.More() {
+	return t.s.elements(func() error {
 		if t.results >= maxTrivyResults {
 			return errTrivyStop
 		}
 		t.results++
-		obj, err := t.open(json.Delim('{'))
+		obj, err := t.s.open('{')
 		if err != nil {
 			return err
 		}
 		if !obj {
 			t.p.dropped = true // null result
-			continue
+			return nil
 		}
-		if err := t.result(); err != nil {
-			return err
-		}
-	}
-	return t.expect(json.Delim(']'))
+		return t.result()
+	})
 }
 
-// result decodes one result object whose '{' was consumed.
+// result decodes the result object at the cursor.
 func (t *trivyDecoder) result() error {
 	var r resultState
 	err := t.object(func(key string) error {
@@ -527,45 +582,96 @@ func (t *trivyDecoder) result() error {
 	return err
 }
 
+// resultString reads Class or Type; a value of the wrong JSON type or
+// longer than any valid one marks the result bad.
 func (t *trivyDecoder) resultString(dst *string, bad *bool) error {
-	err := t.dec.Decode(dst)
-	if typeMismatch(err) {
+	v, ok, err := t.stringValue(maxImageEcosystem)
+	if !ok {
 		*bad = true
-		return nil
 	}
+	*dst = v
 	return err
 }
 
 // packages decodes the entries of one result one at a time; an entry of the
 // wrong JSON type is dropped, the rest of the result is still read.
 func (t *trivyDecoder) packages(r *resultState) error {
-	ok, err := t.open(json.Delim('['))
+	ok, err := t.s.open('[')
 	if err != nil || !ok {
 		return err
 	}
-	for t.dec.More() {
+	return t.s.elements(func() error {
 		if t.entries >= maxImagePkgEntries {
 			return errTrivyStop
 		}
 		t.entries++
 		r.entries++
-		t.pkgDoc = trivyPkgDoc{}
-		err := t.dec.Decode(&t.pkgDoc)
-		if typeMismatch(err) {
-			r.dropped = true
-			continue
+		if t.s.peek() != '{' {
+			r.dropped = true // null or wrong type
+			return t.skip()
 		}
+		valid, err := t.entry()
 		if err != nil {
 			return err
 		}
-		pkg, ok := imagePackage(&t.pkgDoc)
-		if !ok {
+		var pkg ImagePackage
+		if valid {
+			pkg, valid = imagePackage(&t.pkgDoc)
+		}
+		if !valid {
 			r.dropped = true
-			continue
+			return nil
 		}
 		r.pending = append(r.pending, pkg)
-	}
-	return t.expect(json.Delim(']'))
+		return nil
+	})
+}
+
+// trivyPkgFields are the entry keys the parser reads; matching is exact.
+var trivyPkgFields = []string{"Name", "Version", "Release", "Epoch", "SrcName", "SrcVersion", "SrcRelease", "SrcEpoch"}
+
+// entry decodes the package entry object at the cursor into t.pkgDoc. It
+// reports false for a field of the wrong type or length or a repeated
+// field; after that, the remaining values are only skipped.
+func (t *trivyDecoder) entry() (bool, error) {
+	d := &t.pkgDoc
+	*d = trivyPkgDoc{}
+	var seen [8]bool
+	valid := true
+	err := t.s.members(func(raw []byte) error {
+		f := t.fieldIndex(raw, trivyPkgFields)
+		if f < 0 || !valid {
+			return t.skip()
+		}
+		if seen[f] {
+			valid = false // repeated field: which value counts is ambiguous
+			return t.skip()
+		}
+		seen[f] = true
+		var ok bool
+		var err error
+		switch f {
+		case 0:
+			d.Name, ok, err = t.stringValue(maxImagePkgName)
+		case 1:
+			d.Version, ok, err = t.stringValue(maxImagePkgVersion)
+		case 2:
+			d.Release, ok, err = t.stringValue(maxImagePkgVersion)
+		case 3:
+			d.Epoch, ok, err = t.intValue()
+		case 4:
+			d.SrcName, ok, err = t.stringValue(maxImagePkgName)
+		case 5:
+			d.SrcVersion, ok, err = t.stringValue(maxImagePkgVersion)
+		case 6:
+			d.SrcRelease, ok, err = t.stringValue(maxImagePkgVersion)
+		default:
+			d.SrcEpoch, ok, err = t.intValue()
+		}
+		valid = valid && ok
+		return err
+	})
+	return valid, err
 }
 
 // finishResult validates a result's class and type and keeps its packages.
@@ -602,13 +708,6 @@ func (t *trivyDecoder) finishResult(r *resultState) bool {
 		t.kept = append(t.kept, k)
 	}
 	return len(t.kept) >= MaxImagePackages
-}
-
-// typeMismatch reports a JSON value of the wrong type; the decoder has
-// consumed the value and can continue.
-func typeMismatch(err error) bool {
-	var te *json.UnmarshalTypeError
-	return errors.As(err, &te)
 }
 
 // trivyOS returns the detected OS when Trivy reported a valid family and

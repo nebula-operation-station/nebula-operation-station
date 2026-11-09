@@ -539,9 +539,9 @@ func TestImagePackagesOtherFloodsBounded(t *testing.T) {
 		"null results": {pre + `"Metadata":{` + osMeta + `},"Results":[`, `null,`, `null]}`, small},
 		"keys":         {pre + `"Metadata":{` + osMeta + `,`, `"k":0,`, `"k":0},"Results":[]}`, small},
 		"result keys":  {pre + `"Metadata":{` + osMeta + `},"Results":[{`, `"k":0,`, `"k":0}]}`, small},
-		// One skipped value is buffered whole by the decoder (once, not per
-		// element): bounded by the output limit, not by the element count.
-		"skipped tree": {pre + `"Metadata":{` + osMeta + `,"ImageConfig":[`, `"aa",`, `"a"]},"Results":[]}`, 2*MaxImagePackagesOutput + small},
+		// A skipped value is walked on the raw bytes, never buffered.
+		"skipped tree": {pre + `"Metadata":{` + osMeta + `,"ImageConfig":[`, `"aa",`, `"a"]},"Results":[]}`, small},
+		"entry keys":   {pre + `"Metadata":{` + osMeta + `},"Results":[{"Class":"os-pkgs","Type":"alpine","Packages":[{`, `"k":0,`, `"k":0}]}]}`, small},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -564,6 +564,144 @@ func TestImagePackagesOtherFloodsBounded(t *testing.T) {
 				t.Fatalf("one read allocated %d bytes, budget %d", alloc, c.budget)
 			}
 		})
+	}
+}
+
+// hugeValueSize is the size of the single hostile value in
+// TestImagePackagesHugeSingleValueBounded: close to the output limit.
+const hugeValueSize = 30 << 20
+
+// jsonEsc spells JSON escapes in test documents: every '~' becomes a
+// backslash, so "~u0061" is the JSON escape of "a".
+func jsonEsc(s string) string { return strings.ReplaceAll(s, "~", `\`) }
+
+// One huge string, key, number or skipped value must never be copied into
+// memory: a read allocates at most a small fixed amount beyond the raw
+// output it is given, whatever a single value in it holds.
+func TestImagePackagesHugeSingleValueBounded(t *testing.T) {
+	const budget = 1 << 20
+	osMeta := `"Metadata":{"OS":{"Family":"alpine","Name":"3.19.1"}}`
+	pre := `{"SchemaVersion":2,"ArtifactName":"` + pkgDigest + `",`
+	musl := `{"Name":"musl","Version":"1.2.4-r2"}`
+	pkgsHead := pre + osMeta + `,"Results":[{"Class":"os-pkgs","Type":"alpine","Packages":[`
+	pkgsTail := `]}]}`
+	results := `"Results":[{"Class":"os-pkgs","Type":"alpine","Packages":[` + musl + `]}]}`
+	escA := jsonEsc("~u0061") // JSON escape of "a"
+	type check func(t *testing.T, got ImagePackages)
+	partial := func(reason string, pkgs int) check {
+		return func(t *testing.T, got ImagePackages) {
+			if !got.Known || got.Complete || !hasReason(got.Reason, reason) || len(got.Packages) != pkgs {
+				t.Fatalf("want known partial %q with %d packages, got known=%v complete=%v reason=%q packages=%d",
+					reason, pkgs, got.Known, got.Complete, got.Reason, len(got.Packages))
+			}
+		}
+	}
+	unparseable := func(t *testing.T, got ImagePackages) {
+		if got.Known || got.Complete || got.Reason != ReasonUnparseable || got.Packages != nil {
+			t.Fatalf("want unparseable, got known=%v complete=%v reason=%q", got.Known, got.Complete, got.Reason)
+		}
+	}
+	complete := func(t *testing.T, got ImagePackages) {
+		if !got.Complete || len(got.Packages) != 1 || got.Packages[0].Name != "musl" {
+			t.Fatalf("want complete read of musl, got complete=%v reason=%q packages=%d", got.Complete, got.Reason, len(got.Packages))
+		}
+	}
+	// Each case is head + unit repeated up to hugeValueSize + tail.
+	cases := map[string]struct {
+		head, unit, tail string
+		check            check
+	}{
+		"package name":         {pkgsHead + `{"Name":"`, "a", `","Version":"1"},` + musl + pkgsTail, partial(ReasonEntryDropped, 1)},
+		"escaped package name": {pkgsHead + `{"Name":"`, escA, `","Version":"1"},` + musl + pkgsTail, partial(ReasonEntryDropped, 1)},
+		"package version":      {pkgsHead + `{"Name":"x","Version":"`, "1", `"},` + musl + pkgsTail, partial(ReasonEntryDropped, 1)},
+		"source name":          {pkgsHead + `{"Name":"x","Version":"1","SrcName":"`, "s", `"},` + musl + pkgsTail, partial(ReasonEntryDropped, 1)},
+		"package epoch":        {pkgsHead + `{"Name":"x","Version":"1","Epoch":1`, "0", `},` + musl + pkgsTail, partial(ReasonEntryDropped, 1)},
+		"entry key":            {pkgsHead + `{"`, "k", `":1,"Name":"musl","Version":"1.2.4-r2"}` + pkgsTail, complete},
+		"escaped entry key":    {pkgsHead + `{"`, escA, `":1,"Name":"musl","Version":"1.2.4-r2"}` + pkgsTail, complete},
+		"entry skipped value":  {pkgsHead + `{"Licenses":["`, "l", `"],"Name":"musl","Version":"1.2.4-r2"}` + pkgsTail, complete},
+		"result type": {pre + osMeta + `,"Results":[{"Class":"os-pkgs","Type":"`, "a",
+			`","Packages":[` + musl + `]}]}`, partial(ReasonEntryDropped, 0)},
+		"result class": {pre + osMeta + `,"Results":[{"Type":"alpine","Class":"`, "c",
+			`","Packages":[` + musl + `]}]}`, partial(ReasonEntryDropped, 0)},
+		"result key": {pre + osMeta + `,"Results":[{"`, "k",
+			`":0,"Class":"os-pkgs","Type":"alpine","Packages":[` + musl + `]}]}`, unparseable},
+		"escaped result key": {pre + osMeta + `,"Results":[{"`, escA,
+			`":0,"Class":"os-pkgs","Type":"alpine","Packages":[` + musl + `]}]}`, unparseable},
+		"document key":    {pre + `"`, "k", `":0,` + osMeta + `,` + results, unparseable},
+		"metadata key":    {pre + `"Metadata":{"`, "k", `":0,"OS":{"Family":"alpine","Name":"3.19.1"}},` + results, unparseable},
+		"os family":       {pre + `"Metadata":{"OS":{"Name":"3.19.1","Family":"`, "a", `"}},` + results, partial(ReasonOSUndetected, 1)},
+		"os key":          {pre + `"Metadata":{"OS":{"Family":"alpine","Name":"3.19.1","`, "k", `":0}},` + results, complete},
+		"artifact name":   {`{"SchemaVersion":2,"ArtifactName":"`, "a", `",` + osMeta + `,` + results, partial(ReasonDigestMismatch, 1)},
+		"schema version":  {`{"SchemaVersion":2`, "0", `,` + osMeta + `,` + results, unparseable},
+		"skipped string":  {pre + `"Metadata":{"OS":{"Family":"alpine","Name":"3.19.1"},"ImageConfig":"`, "x", `"},` + results, complete},
+		"skipped escapes": {pre + `"Metadata":{"OS":{"Family":"alpine","Name":"3.19.1"},"ImageConfig":"`, jsonEsc("~n"), `"},` + results, complete},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			var sb strings.Builder
+			sb.Grow(len(c.head) + hugeValueSize + len(c.tail))
+			sb.WriteString(c.head)
+			for n := 0; n+len(c.unit) <= hugeValueSize; n += len(c.unit) {
+				sb.WriteString(c.unit)
+			}
+			sb.WriteString(c.tail)
+			b := []byte(sb.String())
+			sb.Reset()
+			if len(b) > MaxImagePackagesOutput {
+				t.Fatalf("output %d over limit", len(b))
+			}
+			var got ImagePackages
+			alloc := allocatedBytes(func() { got, _ = ParseImagePackages(pkgDigest, okRun(b)) })
+			c.check(t, got)
+			t.Logf("one read allocated %d bytes", alloc)
+			if alloc > budget {
+				t.Fatalf("one read allocated %d bytes, budget %d", alloc, budget)
+			}
+		})
+	}
+}
+
+// Escaped JSON strings (keys and values, including surrogate pairs) decode
+// to the same values as unescaped ones.
+func TestImagePackagesEscapedValues(t *testing.T) {
+	// The skipped ImageConfig holds escaped quotes and backslashes next to
+	// brackets, which must not end the string or the object early.
+	b := []byte(jsonEsc(`{"SchemaVersion":2,"ArtifactName":"` + pkgDigest + `","Metadata":{"O~u0053":{"Family":"alp~u0069ne","Name":"3.19.1"},` +
+		`"ImageConfig":{"k":"~~~"}]~~","l":["]~"",{"~~":"}"}]}},` +
+		`"Results":[{"Cl~u0061ss":"os-pkgs","Type":"alpine","Packages":[{"N~u0061me":"mus~u006c","Version":"1.2.4~/r2","SrcName":"~u00e9t~u00E9~ud83d~ude00"}]}]}`))
+	got, _ := ParseImagePackages(pkgDigest, okRun(b))
+	if !got.Complete || len(got.Packages) != 1 {
+		t.Fatalf("got %+v", got)
+	}
+	want := ImagePackage{Ecosystem: "alpine", Name: "musl", Version: "1.2.4/r2", SrcName: string([]rune{0xe9, 't', 0xe9, 0x1f600})}
+	if got.Packages[0] != want || got.OS.Family != "alpine" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+// Field names match exactly; a repeated package field is ambiguous and
+// drops the entry; a repeated OS field leaves the OS undetected.
+func TestImagePackagesEntryFieldsExact(t *testing.T) {
+	meta := `"Metadata":{"OS":{"Family":"alpine","Name":"3.19.1"}}`
+	for name, entry := range map[string]string{
+		"lower-case name": `{"name":"x","Version":"1"}`,
+		"repeated name":   `{"Name":"x","Name":"y","Version":"1"}`,
+		"repeated epoch":  `{"Name":"x","Version":"1","Epoch":1,"Epoch":2}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := []byte(`{"SchemaVersion":2,"ArtifactName":"` + pkgDigest + `",` + meta + `,` +
+				`"Results":[{"Class":"os-pkgs","Type":"alpine","Packages":[` + entry + `,{"Name":"musl","Version":"1.2.4-r2"}]}]}`)
+			got, _ := ParseImagePackages(pkgDigest, okRun(b))
+			if !got.Known || got.Complete || got.Reason != ReasonEntryDropped || len(got.Packages) != 1 {
+				t.Fatalf("got %+v", got)
+			}
+		})
+	}
+	b := []byte(`{"SchemaVersion":2,"ArtifactName":"` + pkgDigest + `","Metadata":{"OS":{"Family":"alpine","Family":"debian","Name":"3.19.1"}},` +
+		`"Results":[{"Class":"os-pkgs","Type":"alpine","Packages":[{"Name":"musl","Version":"1"}]}]}`)
+	got, _ := ParseImagePackages(pkgDigest, okRun(b))
+	if got.Complete || got.Reason != ReasonOSUndetected {
+		t.Fatalf("got %+v", got)
 	}
 }
 
