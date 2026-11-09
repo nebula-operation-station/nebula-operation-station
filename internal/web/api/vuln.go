@@ -56,6 +56,14 @@ const (
 	maxRunStates = 32
 	// maxListedSubjects bounds subject refs listed in an error response.
 	maxListedSubjects = 16
+	// completeTimeout bounds one run complete. The store applies a
+	// complete in one transaction, so a complete that runs out of time
+	// applies nothing; the budget is sized for MaxCoveredPerRun subjects
+	// (about 5 s measured for 10000 subjects with one closure each, see
+	// vulnstore TestCompleteLargestRunIsAtomic) with ample headroom for
+	// subjects with many findings and slow disks. The complete is not
+	// cancelled when the client goes away, so a retry finds it saved.
+	completeTimeout = 2 * time.Minute
 )
 
 // VulnStore is the findings store (internal/vulnstore).
@@ -64,6 +72,7 @@ type VulnStore interface {
 	SubmitBatch(ctx context.Context, runID string, b vulnstore.Batch) (vulnstore.BatchResult, error)
 	RejectBatch(ctx context.Context, runID string, seq int64, bodySHA256 [32]byte) error
 	Complete(ctx context.Context, runID string) (vulnstore.Completion, error)
+	CompletionOf(ctx context.Context, runID, tokenID string) (vulnstore.Completion, error)
 }
 
 // VulnOptions configure the vulnerability agent API.
@@ -222,7 +231,8 @@ func (h *VulnHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		serve = func() { h.submitBatch(ctx, w, r, t, parts[1]) }
 	case len(parts) == 3 && parts[0] == "runs" && runIDRe.MatchString(parts[1]) && parts[2] == "complete":
 		scope, method, limiter = serverconfig.ScopeVulnFindingsWrite, http.MethodPost, &h.write
-		serve = func() { h.completeRun(ctx, w, r, t, parts[1]) }
+		// complete runs under its own budget, not callTimeout.
+		serve = func() { h.completeRun(r, w, t, parts[1]) }
 	default:
 		writeError(w, http.StatusNotFound, "no such endpoint")
 		return

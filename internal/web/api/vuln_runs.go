@@ -30,7 +30,9 @@ const unparsedBatchSeq = 1 << 62
 // runState is what the handler keeps per run: the inventory snapshot it
 // started on (for the re-check and the part counts) and the parts of each
 // subject the run named so far. It is in memory: after a restart a run
-// cannot complete and times out without closures (fail closed).
+// that had not completed cannot complete and times out without closures
+// (fail closed); a run that had completed answers a retried complete with
+// the completion the store saved.
 type runState struct {
 	token   string
 	started time.Time
@@ -316,6 +318,9 @@ func (h *VulnHandler) rejectWhole(ctx context.Context, w http.ResponseWriter, t 
 }
 
 func (h *VulnHandler) submitBatch(ctx context.Context, w http.ResponseWriter, r *http.Request, t *token, runID string) {
+	// The body is read before batchMu, so a slow upload does not hold up
+	// other batches or complete.
+	body, err := readBody(r, MaxBatchBytes)
 	// Batches of one handler are applied one at a time, so the part
 	// bookkeeping follows the store's order.
 	h.batchMu.Lock()
@@ -324,7 +329,6 @@ func (h *VulnHandler) submitBatch(ctx context.Context, w http.ResponseWriter, r 
 	st := h.runs[runID]
 	h.mu.Unlock()
 
-	body, err := readBody(r, MaxBatchBytes)
 	if errors.Is(err, errBodyTooLarge) {
 		h.rejectWhole(ctx, w, t, runID, unparsedBatchSeq, body, http.StatusRequestEntityTooLarge, "body over 1 MiB")
 		return
@@ -538,12 +542,22 @@ type completeResultJSON struct {
 	Completion *vulnstore.Completion `json:"completion"`
 }
 
-func (h *VulnHandler) completeRun(ctx context.Context, w http.ResponseWriter, r *http.Request, t *token, runID string) {
-	h.batchMu.Lock()
-	defer h.batchMu.Unlock()
+// completeRun completes a run. The store applies the complete in one
+// transaction under its own budget (completeTimeout), detached from the
+// client's request, so a complete either applies fully or not at all and
+// a client that gave up finds it saved on retry. A retry gets the saved
+// completion, from the run state or, after a restart or eviction, from
+// the store.
+func (h *VulnHandler) completeRun(r *http.Request, w http.ResponseWriter, t *token, runID string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), completeTimeout)
+	defer cancel()
 	body, err := readBody(r, maxCompleteBytes)
-	if err != nil {
+	if errors.Is(err, errBodyTooLarge) {
 		writeError(w, http.StatusRequestEntityTooLarge, "complete takes an empty body or {}")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "could not read the body")
 		return
 	}
 	if len(body) > 0 {
@@ -553,10 +567,15 @@ func (h *VulnHandler) completeRun(ctx context.Context, w http.ResponseWriter, r 
 			return
 		}
 	}
+	h.batchMu.Lock()
+	defer h.batchMu.Unlock()
 	h.mu.Lock()
 	st := h.runs[runID]
 	h.mu.Unlock()
 	if st == nil || st.token != t.name {
+		if h.savedCompletion(ctx, w, t, runID) {
+			return
+		}
 		h.log.Warn("audit", "kind", "vuln_complete_refused", "token", t.name, "run", runID, "reason", "run state not held")
 		writeError(w, http.StatusConflict, "run state not held by this server; start a new run")
 		return
@@ -585,6 +604,9 @@ func (h *VulnHandler) completeRun(ctx context.Context, w http.ResponseWriter, r 
 		return
 	}
 	comp, err := h.store.Complete(ctx, runID)
+	if errors.Is(err, vulnstore.ErrRunNotRunning) && h.savedCompletion(ctx, w, t, runID) {
+		return
+	}
 	if err != nil {
 		code, msg := storeError(err)
 		h.log.Warn("audit", "kind", "vuln_complete_refused", "token", t.name, "run", runID, "reason", msg)
@@ -599,4 +621,19 @@ func (h *VulnHandler) completeRun(ctx context.Context, w http.ResponseWriter, r 
 		"blocked_rejected", comp.BlockedRejected, "superseded", comp.Superseded, "batch_rejected", comp.BatchRejected,
 		"run_guard", comp.RunGuard, "window_guard", comp.WindowGuard)
 	writeJSON(w, http.StatusOK, completeResultJSON{RunID: runID, Completion: &comp})
+}
+
+// savedCompletion answers a retried complete with the completion the store
+// saved for a completed run of t. It reports whether it answered.
+func (h *VulnHandler) savedCompletion(ctx context.Context, w http.ResponseWriter, t *token, runID string) bool {
+	comp, err := h.store.CompletionOf(ctx, runID, t.name)
+	if err != nil {
+		if !errors.Is(err, vulnstore.ErrRunNotFound) && !errors.Is(err, vulnstore.ErrRunNotRunning) {
+			h.log.Error("vuln complete: saved completion", "run", runID, "error", err)
+		}
+		return false
+	}
+	h.log.Info("audit", "kind", "vuln_run_complete_repeat", "token", t.name, "run", runID)
+	writeJSON(w, http.StatusOK, completeResultJSON{RunID: runID, Repeat: true, Completion: &comp})
+	return true
 }
