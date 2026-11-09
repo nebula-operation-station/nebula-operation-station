@@ -12,6 +12,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/attackpath"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/flowagg"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/trafficstore"
 )
 
@@ -61,6 +62,7 @@ func owner(addr, id string, kind attackpath.NodeKind) AddressOwner {
 func labFlowConfig(r FlowReader) FlowConfig {
 	return FlowConfig{
 		Reader: r,
+		Hosts:  inventoryOf("web", "nas", "exec", "quiet"),
 		Owners: []AddressOwner{
 			owner("10.0.0.10", "host:web", attackpath.NodeHost),
 			owner("10.0.0.20", "host:nas", attackpath.NodeHost),
@@ -194,7 +196,7 @@ func TestFlowsRejectInvalidOwners(t *testing.T) {
 		"loopback":       owner("127.0.0.1", "host:lo", attackpath.NodeHost),
 		"invalid addr":   {NodeID: "host:z", Kind: attackpath.NodeHost},
 	} {
-		r, err := Flows(context.Background(), FlowConfig{Reader: &fakeFlows{}, Owners: []AddressOwner{o}, Now: func() time.Time { return fixedNow }})
+		r, err := Flows(context.Background(), FlowConfig{Reader: &fakeFlows{}, Hosts: fakeHosts{}, Owners: []AddressOwner{o}, Now: func() time.Time { return fixedNow }})
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -212,7 +214,7 @@ func TestFlowsChunkQueriesByStoreLimit(t *testing.T) {
 		owners = append(owners, AddressOwner{Addr: a, NodeID: id, Kind: attackpath.NodeHost})
 	}
 	ff := &fakeFlows{}
-	r, err := Flows(context.Background(), FlowConfig{Reader: ff, Owners: owners, Now: func() time.Time { return fixedNow }})
+	r, err := Flows(context.Background(), FlowConfig{Reader: ff, Hosts: fakeHosts{}, Owners: owners, Now: func() time.Time { return fixedNow }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,6 +229,7 @@ func TestFlowsChunkQueriesByStoreLimit(t *testing.T) {
 func TestFlowsSelfFlowAndIPv4MappedOwner(t *testing.T) {
 	cfg := FlowConfig{
 		Reader: &fakeFlows{flows: []flowagg.FlowTotal{flow("10.0.0.10", "10.0.0.11", flowagg.TCP, 80)}},
+		Hosts:  inventoryOf("web"),
 		Owners: []AddressOwner{
 			owner("::ffff:10.0.0.10", "host:web", attackpath.NodeHost),
 			owner("10.0.0.11", "host:web", attackpath.NodeHost),
@@ -239,5 +242,132 @@ func TestFlowsSelfFlowAndIPv4MappedOwner(t *testing.T) {
 	}
 	if len(r.Edges) != 0 || r.Coverage != (Coverage{Covered: 2, Total: 2}) {
 		t.Fatalf("edges %v coverage %+v", r.Edges, r.Coverage)
+	}
+}
+
+// inventoryOf returns a fixture inventory of the managed hosts ids.
+func inventoryOf(ids ...string) fakeHosts {
+	var hs []inventory.Host
+	for _, id := range ids {
+		hs = append(hs, inventory.Host{ID: id})
+	}
+	return fakeHosts{hosts: hs}
+}
+
+func TestFlowsManagedNodeWithoutAddressIsUncertain(t *testing.T) {
+	cfg := labFlowConfig(labFlows())
+	// hv1 is a managed host without an owner address; it is PVE node
+	// pve1. Guest 101 and PVE node pve2 have no address either. Guest
+	// 100 is host web, which has one.
+	cfg.Hosts = inventoryOf("web", "nas", "exec", "quiet", "hv1")
+	cfg.Managed = []string{"guest:lab/100", "guest:lab/101", "pve:lab/pve1", "pve:lab/pve2"}
+	cfg.Aliases = map[string]string{"host:hv1": "pve:lab/pve1", "host:web": "guest:lab/100"}
+	r, err := Flows(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"guest:lab/101", "pve:lab/pve1", "pve:lab/pve2", "host:quiet"} {
+		if !hasUncertainty(r.Uncertain, UncertainNoFlows, id) {
+			t.Errorf("no_flows_observed %s missing in %v", id, r.Uncertain)
+		}
+	}
+	for _, id := range []string{"host:hv1", "guest:lab/100", "host:web"} {
+		if hasUncertainty(r.Uncertain, UncertainNoFlows, id) {
+			t.Errorf("no_flows_observed %s: %v", id, r.Uncertain)
+		}
+	}
+	// 4 owner addresses (1 covered) and 3 managed nodes without one.
+	if r.Status != StatusPartial || r.Coverage != (Coverage{Covered: 1, Total: 7}) {
+		t.Fatalf("status %s coverage %+v", r.Status, r.Coverage)
+	}
+}
+
+func TestFlowsEmptyOwnersWithManagedHostsIsNotComplete(t *testing.T) {
+	// No owner address at all: every managed node is unknown, never a
+	// complete source with nothing to cover.
+	cfg := FlowConfig{Reader: &fakeFlows{}, Hosts: inventoryOf("a", "b"), Managed: []string{"guest:r/1"},
+		Now: func() time.Time { return fixedNow }}
+	r, err := Flows(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status == StatusComplete || r.Coverage != (Coverage{Covered: 0, Total: 3}) {
+		t.Fatalf("status %s coverage %+v", r.Status, r.Coverage)
+	}
+	for _, id := range []string{"host:a", "host:b", "guest:r/1"} {
+		if !hasUncertainty(r.Uncertain, UncertainNoFlows, id) {
+			t.Errorf("no_flows_observed %s missing in %v", id, r.Uncertain)
+		}
+	}
+}
+
+func TestFlowsEveryManagedNodeCoveredIsComplete(t *testing.T) {
+	cfg := FlowConfig{
+		Reader: &fakeFlows{flows: []flowagg.FlowTotal{
+			flow("10.0.0.10", "10.0.0.11", flowagg.TCP, 22),
+			flow("10.0.0.11", "10.0.0.12", flowagg.TCP, 22),
+		}},
+		Hosts:   inventoryOf("a", "b"),
+		Managed: []string{"guest:r/1", "pve:r/n1"},
+		Aliases: map[string]string{"host:b": "guest:r/1"},
+		Owners: []AddressOwner{
+			owner("10.0.0.10", "host:a", attackpath.NodeHost),
+			owner("10.0.0.11", "guest:r/1", attackpath.NodeGuest),
+			owner("10.0.0.12", "pve:r/n1", attackpath.NodePVENode),
+		},
+		Now: func() time.Time { return fixedNow },
+	}
+	r, err := Flows(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != StatusComplete || len(r.Uncertain) != 0 || r.Coverage != (Coverage{Covered: 3, Total: 3}) {
+		t.Fatalf("status %s uncertain %v coverage %+v", r.Status, r.Uncertain, r.Coverage)
+	}
+}
+
+func TestFlowsRejectInvalidManagedNodes(t *testing.T) {
+	for _, id := range []string{"unk:x", "ctr:a/bbbbbbbbbbbb", "guest:a b", "pve:", "internet", ""} {
+		cfg := FlowConfig{Reader: &fakeFlows{}, Hosts: fakeHosts{}, Managed: []string{id}, Now: func() time.Time { return fixedNow }}
+		r, err := Flows(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("%q: %v", id, err)
+		}
+		if !hasUncertainty(r.Uncertain, UncertainInvalidRecord, "") || r.Status != StatusPartial || r.Coverage.Total != 0 {
+			t.Fatalf("%q: %+v", id, r)
+		}
+	}
+	// A bad alias target is not used as a subject.
+	cfg := FlowConfig{Reader: &fakeFlows{}, Hosts: inventoryOf("a"), Aliases: map[string]string{"host:a": "guest:a b"},
+		Now: func() time.Time { return fixedNow }}
+	r, err := Flows(context.Background(), cfg)
+	if err != nil || !hasUncertainty(r.Uncertain, UncertainNoFlows, "host:a") {
+		t.Fatalf("bad alias: %v %v", err, r.Uncertain)
+	}
+}
+
+func TestFlowsHostListErrorIsUnknown(t *testing.T) {
+	cfg := labFlowConfig(labFlows())
+	cfg.Hosts = fakeHosts{err: errors.New("db")}
+	r, err := Flows(context.Background(), cfg)
+	if !errors.Is(err, ErrSourceUnavailable) || r.Status != StatusUnknown || len(r.Nodes) != 0 {
+		t.Fatalf("err %v result %+v", err, r)
+	}
+	cfg.Hosts = nil
+	if _, err := Flows(context.Background(), cfg); !errors.Is(err, ErrSourceUnavailable) {
+		t.Fatalf("no host lister: %v", err)
+	}
+}
+
+func TestManagedNodesListsHostsGuestsAndPVENodes(t *testing.T) {
+	r := Result{Nodes: []attackpath.Node{
+		{ID: "pve:r/n1", Kind: attackpath.NodePVENode},
+		{ID: "guest:r/1", Kind: attackpath.NodeGuest},
+		{ID: "ctr:h/aaaaaaaaaaaa", Kind: attackpath.NodeContainer},
+		{ID: "unk:10.0.0.1", Kind: attackpath.NodeUnmanaged},
+		{ID: "host:a", Kind: attackpath.NodeHost},
+	}}
+	if got, want := ManagedNodes(r), []string{"guest:r/1", "host:a", "pve:r/n1"}; !slices.Equal(got, want) {
+		t.Fatalf("got %v want %v", got, want)
 	}
 }

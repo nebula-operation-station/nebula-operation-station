@@ -14,6 +14,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/attackpath"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/flowagg"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/trafficstore"
 )
 
@@ -49,6 +50,17 @@ type AddressOwner struct {
 type FlowConfig struct {
 	// Reader reads the flows.
 	Reader FlowReader
+	// Hosts reads the managed hosts. Each is expected to own an address
+	// in Owners; one without is UncertainNoFlows.
+	Hosts HostLister
+	// Managed are the IDs of the other managed nodes, the guests and PVE
+	// nodes (ManagedNodes of the Placements result). Each is expected to
+	// own an address in Owners, like the hosts.
+	Managed []string
+	// Aliases maps a managed host node ID to the node of the same machine
+	// (the Placements result's Aliases), so a host and its guest or PVE
+	// node are one expected node.
+	Aliases map[string]string
 	// Owners are the managed addresses; their flows are queried.
 	Owners []AddressOwner
 	// NetBird are the prefixes of NetBird peers; a client there is the
@@ -77,7 +89,13 @@ type FlowConfig struct {
 // managed address: covered when it had flows below the cut. An address
 // claimed by several nodes is ambiguous and not queried.
 //
-// A read error yields StatusUnknown and an error wrapping
+// Every managed host (cfg.Hosts), guest and PVE node (cfg.Managed) is
+// expected to own a queried address. One that does not (no owner entry,
+// an ambiguous address, or cut by MaxFlowOwners) has no flow data at all:
+// it is UncertainNoFlows and one more uncovered unit, so a missing owner
+// list never makes "no edge" out of "unknown".
+//
+// A read error of either store yields StatusUnknown and an error wrapping
 // ErrSourceUnavailable; the Result is still meant to be merged.
 func Flows(ctx context.Context, cfg FlowConfig) (Result, error) {
 	c := newCollector(SourceFlows)
@@ -85,6 +103,16 @@ func Flows(ctx context.Context, cfg FlowConfig) (Result, error) {
 		c.unavailable()
 		return c.result(), fmt.Errorf("flow source: no reader: %w", ErrSourceUnavailable)
 	}
+	if cfg.Hosts == nil {
+		c.unavailable()
+		return c.result(), fmt.Errorf("flow source: no host lister: %w", ErrSourceUnavailable)
+	}
+	hosts, err := cfg.Hosts.List(ctx)
+	if err != nil {
+		c.unavailable()
+		return c.result(), fmt.Errorf("flow source: list hosts: %w: %w", ErrSourceUnavailable, err)
+	}
+	expected := expectedNodes(c, hosts, cfg.Managed, cfg.Aliases)
 	now := cfg.Now
 	if now == nil {
 		now = time.Now
@@ -184,10 +212,98 @@ func Flows(ctx context.Context, cfg FlowConfig) (Result, error) {
 			c.r.Coverage.Covered++
 		}
 	}
+	queried := make(map[string]bool, len(addrs))
+	for _, a := range addrs {
+		queried[resolveAlias(cfg.Aliases, book[a].NodeID)] = true
+	}
+	for _, id := range expected {
+		if !queried[id] {
+			c.r.Coverage.Total++
+			c.uncertain(UncertainNoFlows, id)
+		}
+	}
 	if c.r.Coverage.Covered < c.r.Coverage.Total {
 		c.partial()
 	}
 	return c.result(), nil
+}
+
+// expectedNodes returns the managed node IDs that must own a queried
+// address, after aliasing, sorted and unique: every managed host and every
+// valid guest or PVE node of managed. Invalid records are reported and
+// skipped; beyond MaxResultNodes the result is truncated.
+func expectedNodes(c *collector, hosts []inventory.Host, managed []string, aliases map[string]string) []string {
+	set := map[string]struct{}{}
+	add := func(id string) {
+		id = resolveAlias(aliases, id)
+		if _, ok := set[id]; ok {
+			return
+		}
+		if len(set) >= MaxResultNodes {
+			c.truncated = true
+			return
+		}
+		set[id] = struct{}{}
+	}
+	for _, h := range hosts {
+		id, ok := nodeID("host:", h.ID)
+		if !ok {
+			c.uncertain(UncertainInvalidRecord, "")
+			c.partial()
+			continue
+		}
+		add(id)
+	}
+	for _, id := range managed {
+		if !validManagedID(id) {
+			c.uncertain(UncertainInvalidRecord, "")
+			c.partial()
+			continue
+		}
+		add(id)
+	}
+	return slices.Sorted(maps.Keys(set))
+}
+
+// managedPrefixes are the node ID namespaces of managed nodes.
+var managedPrefixes = []string{
+	attackpath.NodeHost.IDPrefix(),
+	attackpath.NodeGuest.IDPrefix(),
+	attackpath.NodePVENode.IDPrefix(),
+}
+
+// validManagedID reports whether id is a valid node ID of a managed kind.
+func validManagedID(id string) bool {
+	for _, p := range managedPrefixes {
+		if rest, ok := strings.CutPrefix(id, p); ok {
+			_, valid := nodeID(p, rest)
+			return valid
+		}
+	}
+	return false
+}
+
+// resolveAlias returns the alias target of a managed host ID if it is a
+// valid managed node ID, else id itself: a bad target never becomes an
+// uncertainty subject.
+func resolveAlias(aliases map[string]string, id string) string {
+	if to, ok := aliases[id]; ok && strings.HasPrefix(id, attackpath.NodeHost.IDPrefix()) && validManagedID(to) {
+		return to
+	}
+	return id
+}
+
+// ManagedNodes returns the IDs of r's managed nodes (hosts, guests and
+// PVE nodes), sorted: the Managed input of FlowConfig.
+func ManagedNodes(r Result) []string {
+	var ids []string
+	for _, n := range r.Nodes {
+		if n.Kind.Managed() {
+			ids = append(ids, n.ID)
+		}
+	}
+	slices.Sort(ids)
+	return slices.Compact(ids)
 }
 
 // ownerBook validates the owners and returns the unambiguous ones by

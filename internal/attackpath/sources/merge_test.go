@@ -39,11 +39,13 @@ func labResults(t *testing.T) []Result {
 	if err != nil {
 		t.Fatal(err)
 	}
-	flows, err := Flows(ctx, labFlowConfig(labFlows()))
+	place, err := Placements(ctx, labPlacementConfig(labPVE()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	place, err := Placements(ctx, labPlacementConfig(labPVE()))
+	fc := labFlowConfig(labFlows())
+	fc.Hosts, fc.Managed, fc.Aliases = hosts, ManagedNodes(place), place.Aliases
+	flows, err := Flows(ctx, fc)
 	if err != nil {
 		t.Fatal(err)
 	}
