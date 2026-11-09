@@ -158,28 +158,33 @@ const (
 	// the executor's credential edge to it, and so to its guests, cannot be
 	// placed.
 	UncertainPVEHostUnknown
+	// UncertainDirectionUnverified: a flow from a managed node to an entry
+	// whose server end only the client guessed (no server report); it may
+	// be inbound, so it is no proof of "outbound only".
+	UncertainDirectionUnverified
 )
 
 var uncertaintyNames = [...]string{
-	UncertainSourceUnavailable:  "source_unavailable",
-	UncertainSourceMissing:      "source_missing",
-	UncertainUnmanagedEndpoint:  "unmanaged_endpoint",
-	UncertainNoFlows:            "no_flows_observed",
-	UncertainFlowsIncomplete:    "flows_incomplete",
-	UncertainAmbiguousAddress:   "ambiguous_address",
-	UncertainPartialData:        "partial_data",
-	UncertainPlacementUnknown:   "placement_unknown",
-	UncertainEscapeUnverified:   "escape_unverified",
-	UncertainExecutorUnassigned: "executor_unassigned",
-	UncertainInvalidRecord:      "invalid_record",
-	UncertainTruncated:          "truncated",
-	UncertainAliasConflict:      "alias_conflict",
-	UncertainPVEHostUnknown:     "pve_host_unknown",
+	UncertainSourceUnavailable:   "source_unavailable",
+	UncertainSourceMissing:       "source_missing",
+	UncertainUnmanagedEndpoint:   "unmanaged_endpoint",
+	UncertainNoFlows:             "no_flows_observed",
+	UncertainFlowsIncomplete:     "flows_incomplete",
+	UncertainAmbiguousAddress:    "ambiguous_address",
+	UncertainPartialData:         "partial_data",
+	UncertainPlacementUnknown:    "placement_unknown",
+	UncertainEscapeUnverified:    "escape_unverified",
+	UncertainExecutorUnassigned:  "executor_unassigned",
+	UncertainInvalidRecord:       "invalid_record",
+	UncertainTruncated:           "truncated",
+	UncertainAliasConflict:       "alias_conflict",
+	UncertainPVEHostUnknown:      "pve_host_unknown",
+	UncertainDirectionUnverified: "direction_unverified",
 }
 
 // String returns the stable name of k, or "invalid".
 func (k UncertaintyKind) String() string {
-	if k >= UncertainSourceUnavailable && k <= UncertainPVEHostUnknown {
+	if k >= UncertainSourceUnavailable && k <= UncertainDirectionUnverified {
 		return uncertaintyNames[k]
 	}
 	return "invalid"

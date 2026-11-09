@@ -16,6 +16,7 @@ uncertain flows no_flows_observed host:quiet
 uncertain flows flows_incomplete guest:lab/100
 uncertain flows flows_incomplete host:nas
 uncertain flows invalid_record
+uncertain flows direction_unverified host:nas
 uncertain placements partial_data pve:lab/pve2
 uncertain placements placement_unknown guest:lab/102
 uncertain placements pve_host_unknown pve:lab/pve2

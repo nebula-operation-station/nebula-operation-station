@@ -68,7 +68,8 @@ type FlowConfig struct {
 // entry, one in a NetBird prefix the netbird entry; a flow end that is
 // neither managed nor an entry becomes an unmanaged node and an
 // UncertainUnmanagedEndpoint. Flows to an entry (outbound) are no attack
-// step and are skipped.
+// step and are skipped; one whose server end only the client reported
+// may be inbound and is UncertainDirectionUnverified for its managed end.
 //
 // The store keeps the top-N flows per address only, so an address with N
 // flows may have more (UncertainFlowsIncomplete), and one without flows is
@@ -152,8 +153,18 @@ func Flows(ctx context.Context, cfg FlowConfig) (Result, error) {
 			}
 		}
 		to, toEntry, ok := flowEnd(c, book, netbird, server)
-		if !ok || toEntry {
-			continue // outbound to an entry is no attack step
+		if !ok {
+			continue
+		}
+		if toEntry {
+			// Outbound to an entry is no attack step. Without a server
+			// report the server end is the client's guess (an incomplete
+			// listener table), so the flow may be inbound: say so.
+			if o, managed := book[client]; managed && !f.ServerReported {
+				c.uncertain(UncertainDirectionUnverified, o.NodeID)
+				c.partial()
+			}
+			continue
 		}
 		from, _, ok := flowEnd(c, book, netbird, client)
 		if !ok || from == to {

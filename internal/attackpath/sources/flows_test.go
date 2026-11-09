@@ -127,6 +127,31 @@ func TestFlowsMapEndsToEntriesManagedAndUnmanaged(t *testing.T) {
 	}
 }
 
+func TestFlowsClientGuessedOutboundIsUncertain(t *testing.T) {
+	for name, c := range map[string]struct {
+		serverReported, uncertain bool
+	}{
+		"client guessed":  {false, true},
+		"server reported": {true, false},
+	} {
+		f := flow("10.0.0.20", "203.0.113.9", flowagg.TCP, 443) // nas -> internet
+		f.ServerReported = c.serverReported
+		r, err := Flows(context.Background(), labFlowConfig(&fakeFlows{flows: []flowagg.FlowTotal{f}}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(r.Edges) != 0 {
+			t.Fatalf("%s: outbound flow became an edge: %v", name, r.Edges)
+		}
+		if got := hasUncertainty(r.Uncertain, UncertainDirectionUnverified, "host:nas"); got != c.uncertain {
+			t.Fatalf("%s: direction_unverified = %v, want %v: %v", name, got, c.uncertain, r.Uncertain)
+		}
+		if c.uncertain && r.Status != StatusPartial {
+			t.Fatalf("%s: status %s", name, r.Status)
+		}
+	}
+}
+
 func TestFlowsReadErrorIsUnknownNotEmpty(t *testing.T) {
 	ff := &fakeFlows{err: errors.New("disk")}
 	r, err := Flows(context.Background(), labFlowConfig(ff))
