@@ -12,7 +12,8 @@
       e.preventDefault();
       const body = { kind: form.dataset.kind };
       for (const [k, v] of new FormData(form).entries()) {
-        if (typeof v === 'string') body[k] = v;
+        // The server rejects '\r'; send textarea line breaks as '\n'.
+        if (typeof v === 'string') body[k] = v.replace(/\r\n?/g, '\n');
       }
       const buttons = form.querySelectorAll('button');
       buttons.forEach((b) => { b.disabled = true; });

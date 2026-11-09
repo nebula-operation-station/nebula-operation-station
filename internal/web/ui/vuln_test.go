@@ -284,6 +284,75 @@ func TestVulnNotAssessedAndStaleNeverGreen(t *testing.T) {
 	}
 }
 
+func TestVulnTruncatedPageNeverGreen(t *testing.T) {
+	clean := hostSubject("clean")
+	busy := hostSubject("busy")
+	f := &fakeVuln{page: ui.VulnPage{
+		Rows:         []ui.VulnRow{vulnRow(8, busy, "CVE-2024-0008", vulnstore.StateOpen, vulnstore.TierLow, "kev")},
+		Truncated:    true,
+		Subjects:     []ui.VulnSubjectStatus{freshSubject(clean), freshSubject(busy)},
+		Feeds:        []ui.VulnFeedStatus{okFeed("kev")},
+		LastComplete: vulnNow,
+	}}
+	h := vulnHandler(t, f)
+	_, body := vulnGet(t, h, "/vulnerabilities?view=subject")
+	if strings.Contains(body, "badge--ok") || strings.Contains(body, "no open findings") {
+		t.Error("truncated list by subject shows a subject green")
+	}
+	rows := subjectRows(body)
+	if got := rows["clean"]; !strings.Contains(got, "incomplete") {
+		t.Errorf("subject without rows on a truncated page = %q, want incomplete", got)
+	}
+	if got := rows["busy"]; !strings.Contains(got, "at least 1 open") {
+		t.Errorf("subject with rows on a truncated page = %q, want a lower bound", got)
+	}
+	if strings.Contains(body, "narrow the filter") || !strings.Contains(body, "incomplete") {
+		t.Error("truncation banner gives filter advice or does not say the page is incomplete")
+	}
+	_, body = vulnGet(t, h, "/vulnerabilities/subject/host/clean")
+	if strings.Contains(body, "badge--ok") || !strings.Contains(body, "incomplete") {
+		t.Error("subject tab of a truncated read shows green or does not say incomplete")
+	}
+	// The same page without truncation shows the clean subject green.
+	f.page.Truncated = false
+	_, body = vulnGet(t, h, "/vulnerabilities?view=subject")
+	if got := subjectRows(body)["clean"]; !strings.Contains(got, "badge--ok") {
+		t.Errorf("clean subject on a complete page = %q, want green", got)
+	}
+}
+
+func TestVulnSubjectWithoutFindingsNotGreenOnFeedIssue(t *testing.T) {
+	tests := []struct {
+		name string
+		feed ui.VulnFeedStatus
+	}{
+		{"stale", ui.VulnFeedStatus{SourceID: "nvd", Listed: true, Stale: true, LastVerdict: vulnstore.SourceAccepted}},
+		{"regressed", ui.VulnFeedStatus{SourceID: "kev", Listed: true, LastVerdict: vulnstore.SourceRegressed}},
+		{"future", ui.VulnFeedStatus{SourceID: "cisco-csaf", Listed: true, LastVerdict: vulnstore.SourceInvalid}},
+		{"undated", ui.VulnFeedStatus{SourceID: "osv", Listed: true, LastVerdict: vulnstore.SourceUndated}},
+		{"unlisted", ui.VulnFeedStatus{SourceID: "mystery", LastVerdict: vulnstore.SourceAccepted}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := hostSubject("quiet")
+			f := &fakeVuln{page: ui.VulnPage{
+				Subjects:     []ui.VulnSubjectStatus{freshSubject(s)},
+				Feeds:        []ui.VulnFeedStatus{okFeed("debian-tracker"), tc.feed},
+				LastComplete: vulnNow,
+			}}
+			h := vulnHandler(t, f)
+			_, body := vulnGet(t, h, "/vulnerabilities?view=subject")
+			if got := subjectRows(body)["quiet"]; strings.Contains(got, "badge--ok") || !strings.Contains(got, "feed issue") {
+				t.Errorf("subject without findings under a %s feed = %q, want feed issue and not green", tc.name, got)
+			}
+			_, body = vulnGet(t, h, "/vulnerabilities/subject/host/quiet")
+			if strings.Contains(body, "badge--ok") {
+				t.Errorf("subject tab under a %s feed shows green", tc.name)
+			}
+		})
+	}
+}
+
 // subjectRows maps subject ID to its table row in the list by subject.
 func subjectRows(body string) map[string]string {
 	out := map[string]string{}
@@ -470,6 +539,7 @@ func TestVulnDecisionInputRules(t *testing.T) {
 		{"reason missing", `{"kind":"accept_risk","key":"` + key + `","approver":"garm","expires":"2027-01-01"}`, "reason is required"},
 		{"reason too long", `{"kind":"false_positive","key":"` + key + `","category":"other","reason":"` + long + `"}`, "longer than 1 KiB"},
 		{"reason control char", `{"kind":"false_positive","key":"` + key + `","category":"other","reason":"a\u0000b"}`, "control characters"},
+		{"reason carriage return", `{"kind":"false_positive","key":"` + key + `","category":"other","reason":"a\r\nb"}`, "control characters"},
 		{"reason invalid utf8", "{\"kind\":\"false_positive\",\"key\":\"" + key + "\",\"category\":\"other\",\"reason\":\"a\xffb\"}", "not valid UTF-8"},
 		{"category missing", `{"kind":"false_positive","key":"` + key + `","reason":"r"}`, "category"},
 		{"category unknown", `{"kind":"false_positive","key":"` + key + `","category":"trust_me","reason":"r"}`, "category"},

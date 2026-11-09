@@ -142,7 +142,7 @@ func checkVulnReason(s string) error {
 		return vulnInputError("the reason is not valid UTF-8")
 	}
 	for _, r := range s {
-		if r == utf8.RuneError || (r < 0x20 && r != '\n' && r != '\t' && r != '\r') || r == 0x7f {
+		if r == utf8.RuneError || (r < 0x20 && r != '\n' && r != '\t') || r == 0x7f {
 			return vulnInputError("the reason contains control characters")
 		}
 	}

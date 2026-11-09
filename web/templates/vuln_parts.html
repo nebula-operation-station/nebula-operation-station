@@ -10,7 +10,7 @@
   {{if .ResetURL}}<p class="trust-banner__detail"><a href="{{.ResetURL}}">Review the high-water mark</a></p>{{end}}
 </div>
 {{end}}
-{{if .Truncated}}<p class="status status--warning vuln-truncated">More findings matched than this page shows; narrow the filter.</p>{{end}}
+{{if .Truncated}}<p class="status status--warning vuln-truncated">More findings exist than NOS reads for one page, so this page is incomplete: counts are lower bounds and no subject is shown as clean. Filters do not bring back the rows that were cut off.</p>{{end}}
 {{end}}
 {{end}}
 

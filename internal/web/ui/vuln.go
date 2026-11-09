@@ -233,6 +233,7 @@ const (
 	labelNotAssessed = "not assessed"
 	labelUnconfirmed = "closed by Hermes, not confirmed by NOS"
 	labelNotChecked  = "version reported by Hermes, not checked by NOS"
+	labelIncomplete  = "unknown: list incomplete"
 	classUnknown     = "badge--unknown"
 	classWarning     = "badge--warning"
 	classCritical    = "badge--critical"
@@ -870,22 +871,45 @@ func groupByCVE(rows []VulnRow, views []vulnFindingView, fl vulnFilter) []vulnCV
 
 // subjectStatus is the overall status of a subject. Green only when the
 // subject is freshly assessed, has no open finding, no closure Hermes
-// alone made and no feed issue on its findings.
-func subjectStatus(g vulnSubjectGroup, st VulnSubjectStatus, feedIssue bool, critical bool, now time.Time) vulnLabel {
+// alone made, no feed issue on its findings, no feed issue on the page
+// (pageFeedIssue: a subject without findings may rest on that feed) and
+// the read was complete. truncated: rows were cut off by the row limit,
+// so the subject's counts are lower bounds and its state is unknown.
+func subjectStatus(g vulnSubjectGroup, st VulnSubjectStatus, feedIssue, pageFeedIssue, truncated, critical bool, now time.Time) vulnLabel {
 	if l, stale := subjectLabel(st, now); stale {
 		return l
 	}
+	atLeast := ""
+	if truncated {
+		atLeast = "at least "
+	}
 	switch {
 	case g.Open > 0 && critical:
-		return vulnLabel{strconv.Itoa(g.Open) + " open, critical", classCritical}
+		return vulnLabel{atLeast + strconv.Itoa(g.Open) + " open, critical", classCritical}
 	case g.Open > 0:
-		return vulnLabel{strconv.Itoa(g.Open) + " open", classWarning}
+		return vulnLabel{atLeast + strconv.Itoa(g.Open) + " open", classWarning}
 	case g.Unconfirmed > 0:
-		return vulnLabel{strconv.Itoa(g.Unconfirmed) + " " + labelUnconfirmed, classWarning}
-	case feedIssue:
+		return vulnLabel{atLeast + strconv.Itoa(g.Unconfirmed) + " " + labelUnconfirmed, classWarning}
+	case truncated:
+		return vulnLabel{labelIncomplete, classUnknown}
+	case feedIssue, pageFeedIssue:
 		return vulnLabel{"feed issue", classWarning}
 	}
 	return vulnLabel{"no open findings", classOK}
+}
+
+// feedHasIssue reports whether a source is stale, undated, behind its
+// mark, dated in the future or not on NOS's source list: a run cannot be
+// trusted to have found everything that rests on it.
+func feedHasIssue(f VulnFeedStatus) bool {
+	if !f.Listed || f.Stale {
+		return true
+	}
+	switch f.LastVerdict {
+	case vulnstore.SourceRegressed, vulnstore.SourceInvalid, vulnstore.SourceUndated:
+		return true
+	}
+	return false
 }
 
 // groupBySubject builds the list by subject: every subject in scope, also
@@ -947,10 +971,14 @@ func groupBySubject(c vulnContext, page VulnPage, views []vulnFindingView, fl vu
 			a.g.Shown++
 		}
 	}
+	pageFeedIssue := false
+	for _, f := range c.feeds {
+		pageFeedIssue = pageFeedIssue || feedHasIssue(f)
+	}
 	out := make([]vulnSubjectGroup, 0, len(order))
 	for _, k := range order {
 		a := m[k]
-		a.g.Status = subjectStatus(a.g, a.st, a.feedIssue, a.critical, c.now)
+		a.g.Status = subjectStatus(a.g, a.st, a.feedIssue, pageFeedIssue, page.Truncated, a.critical, c.now)
 		if l, stale := subjectLabel(a.st, c.now); !stale {
 			a.g.Labels = append(a.g.Labels, l)
 		}
@@ -1058,7 +1086,7 @@ func (h *Handler) handleVulnSubject(w http.ResponseWriter, r *http.Request) {
 	for i, row := range rows {
 		views[i] = c.view(row)
 	}
-	groups := groupBySubject(c, VulnPage{Rows: rows, Subjects: []VulnSubjectStatus{c.subject(s)}}, views, vulnFilter{State: vulnStateAll})
+	groups := groupBySubject(c, VulnPage{Rows: rows, Truncated: page.Truncated, Subjects: []VulnSubjectStatus{c.subject(s)}}, views, vulnFilter{State: vulnStateAll})
 	if len(groups) == 1 {
 		d.Subject = &groups[0]
 	}
