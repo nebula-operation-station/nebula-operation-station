@@ -105,7 +105,8 @@ func TestDeviceAdaptersAreUnknownStubs(t *testing.T) {
 			t.Fatalf("%s: uncertainty %v", r.Source, r.Uncertain)
 		}
 	}
-	rep, err := Merge(attackpath.NewBuilder(), FirewallPolicy())
+	others := completeStubs(SourceCredentials, SourceDocker, SourceFlows, SourcePlacements, SourceVLAN)
+	rep, err := Merge(attackpath.NewBuilder(), append(others, FirewallPolicy())...)
 	if err != nil {
 		t.Fatal(err)
 	}

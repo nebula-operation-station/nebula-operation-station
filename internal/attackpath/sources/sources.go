@@ -67,6 +67,22 @@ const (
 	SourceVLAN        = "vlan"
 )
 
+// requiredSources are the data sources ADR 0011 D10 builds the graph from,
+// sorted. A merge without any of them is never complete.
+var requiredSources = []string{
+	SourceCredentials,
+	SourceDocker,
+	SourceFirewall,
+	SourceFlows,
+	SourcePlacements,
+	SourceVLAN,
+}
+
+// RequiredSources returns the names of the sources every complete merge
+// needs (ADR 0011 D10), sorted. A source that does not exist yet (firewall,
+// VLAN) is still required: its stub reports it unknown.
+func RequiredSources() []string { return slices.Clone(requiredSources) }
+
 // ErrSourceUnavailable is wrapped by adapter errors when the store could not
 // be read; the Result then has StatusUnknown.
 var ErrSourceUnavailable = errors.New("attack-path source unavailable")
@@ -366,21 +382,26 @@ type SourceReport struct {
 // Report is what Merge did: per-source status, the union of uncertainty and
 // the overall coverage figure.
 type Report struct {
-	Sources   []SourceReport
+	Sources []SourceReport
+	// Missing names the required sources (RequiredSources) no result was
+	// merged for, sorted; each is also an UncertainSourceMissing record.
+	Missing   []string
 	Uncertain []Uncertainty
 	Overflow  int
 	// Rejected counts nodes and edges the Builder refused as invalid.
 	Rejected int
-	// InputLimited counts inputs the Builder dropped at its input caps; the
-	// graph is then marked truncated.
+	// InputLimited counts inputs the Builder dropped or evicted at its
+	// input caps, and edges lost with them; the graph is then marked
+	// truncated.
 	InputLimited int
 }
 
 // Coverage returns the overall coverage figure: the sum of all sources'
 // covered and total units, where a source with StatusUnknown and no units
-// counts as one uncovered unit, so a missing source always lowers it.
+// and a missing required source each count as one uncovered unit, so a
+// missing source always lowers it.
 func (r Report) Coverage() Coverage {
-	var c Coverage
+	c := Coverage{Total: len(r.Missing)}
 	for _, s := range r.Sources {
 		if s.Status == StatusUnknown && s.Coverage.Total == 0 {
 			c.Total++
@@ -392,10 +413,12 @@ func (r Report) Coverage() Coverage {
 	return c
 }
 
-// Complete reports whether every source was read completely and nothing is
-// uncertain. Only then may "no path found" read as "no path".
+// Complete reports whether every required source was merged and read
+// completely, nothing is uncertain and the Builder neither rejected nor
+// dropped any input. Only then may "no path found" read as "no path".
 func (r Report) Complete() bool {
-	if len(r.Uncertain) > 0 || r.Overflow > 0 || r.InputLimited > 0 || len(r.Sources) == 0 {
+	if len(r.Missing) > 0 || len(r.Uncertain) > 0 || r.Overflow > 0 ||
+		r.Rejected > 0 || r.InputLimited > 0 || len(r.Sources) == 0 {
 		return false
 	}
 	for _, s := range r.Sources {
@@ -411,10 +434,19 @@ func (r Report) Complete() bool {
 // guest is one node. A host linked to several targets is not aliased and is
 // reported as UncertainAliasConflict. Builder conflicts (same ID, other
 // label) are resolved by the Builder and not counted; invalid inputs are
-// counted in Rejected and input-limit drops in InputLimited.
+// counted in Rejected and input-limit drops and evictions in InputLimited.
+// A required source without a result is listed in Missing and reported as
+// UncertainSourceMissing.
+//
+// b must be fresh from attackpath.NewBuilder: Merge counts the nodes the
+// Builder evicts at its input cap from what it offered, which is exact only
+// when nothing else is held.
 func Merge(b *attackpath.Builder, results ...Result) (Report, error) {
 	if b == nil {
 		return Report{}, errors.New("merge attack-path sources: nil builder")
+	}
+	if g := b.Build(); len(g.Nodes()) != len(entryIDs) || len(g.Edges()) != 0 || g.Truncated() {
+		return Report{}, errors.New("merge attack-path sources: builder not fresh")
 	}
 	var rep Report
 	uncertain := map[Uncertainty]struct{}{}
@@ -460,24 +492,14 @@ func Merge(b *attackpath.Builder, results ...Result) (Report, error) {
 		return id
 	}
 
-	note := func(err error) {
-		switch {
-		case err == nil, errors.Is(err, attackpath.ErrConflict):
-		case errors.Is(err, attackpath.ErrInputLimit),
-			errors.Is(err, attackpath.ErrUnknownNode) && rep.InputLimited > 0:
-			// An edge into a node the input cap dropped is part of the
-			// same truncation.
-			rep.InputLimited++
-		default:
-			rep.Rejected++
-		}
-	}
 	// A node offered by several sources keeps a non-empty label: a source
 	// that only knows the ID (Docker hosts, flow owners without a name)
 	// must not blank the inventory's label. Among non-empty labels the
 	// Builder's rule (first in sort order) decides.
 	nodes := map[string]attackpath.Node{}
+	present := map[string]bool{}
 	for _, r := range results {
+		present[r.Source] = true
 		rep.Sources = append(rep.Sources, SourceReport{Source: r.Source, Status: r.Status, Coverage: r.Coverage})
 		for _, u := range r.Uncertain {
 			u.Subject = resolve(u.Subject)
@@ -494,16 +516,52 @@ func Merge(b *attackpath.Builder, results ...Result) (Report, error) {
 			}
 		}
 	}
-	for _, id := range slices.Sorted(maps.Keys(nodes)) {
-		note(b.AddNode(nodes[id]))
+	for _, s := range requiredSources {
+		if !present[s] {
+			rep.Missing = append(rep.Missing, s)
+			addU(Uncertainty{Source: s, Kind: UncertainSourceMissing})
+		}
 	}
+
+	// valid holds the offered nodes the Builder accepted as valid, whether
+	// it holds them, dropped them or later evicted them at its input cap.
+	valid := map[string]bool{}
+	accepted := 0
+	for _, id := range slices.Sorted(maps.Keys(nodes)) {
+		switch err := b.AddNode(nodes[id]); {
+		case err == nil:
+			valid[id] = true
+			accepted++
+		case errors.Is(err, attackpath.ErrConflict):
+			valid[id] = true // already held: the label rule decided
+		case errors.Is(err, attackpath.ErrInputLimit):
+			valid[id] = true
+			rep.InputLimited++
+		default:
+			rep.Rejected++
+		}
+	}
+	// Each node accepted beyond the input cap evicted one held node
+	// without an error (b was fresh, holding only the entries).
+	rep.InputLimited += max(0, len(entryIDs)+accepted-attackpath.MaxInputNodes)
+
 	for _, r := range results {
 		for _, e := range r.Edges {
 			e.From, e.To = resolve(e.From), resolve(e.To)
 			if e.From == e.To {
 				continue
 			}
-			note(b.AddEdge(e))
+			switch err := b.AddEdge(e); {
+			case err == nil:
+			case errors.Is(err, attackpath.ErrInputLimit),
+				errors.Is(err, attackpath.ErrUnknownNode) && validEnd(valid, e.From) && validEnd(valid, e.To):
+				// An edge between valid nodes that is unknown to the
+				// Builder lost an endpoint to the input cap: the same
+				// truncation, not a rejection.
+				rep.InputLimited++
+			default:
+				rep.Rejected++
+			}
 		}
 	}
 	slices.SortFunc(rep.Sources, func(x, y SourceReport) int { return cmp.Compare(x.Source, y.Source) })
@@ -512,4 +570,13 @@ func Merge(b *attackpath.Builder, results ...Result) (Report, error) {
 		return rep, fmt.Errorf("merge attack-path sources: %d inputs: %w", rep.Rejected, ErrRejectedInput)
 	}
 	return rep, nil
+}
+
+// entryIDs are the synthetic entry nodes every Builder holds from the start.
+var entryIDs = []string{attackpath.InternetID, attackpath.NetBirdID}
+
+// validEnd reports whether id is an entry or an offered node the Builder
+// accepted as valid.
+func validEnd(valid map[string]bool, id string) bool {
+	return valid[id] || slices.Contains(entryIDs, id)
 }

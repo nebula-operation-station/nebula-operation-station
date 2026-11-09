@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -168,16 +169,118 @@ func TestMergeUnknownSourceIsNeverComplete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rep, err := Merge(attackpath.NewBuilder(), creds)
-	if err != nil || !rep.Complete() {
-		t.Fatalf("complete credential source: %v %+v", err, rep)
-	}
-	rep, err = Merge(attackpath.NewBuilder(), creds, FirewallPolicy())
+	others := completeStubs(SourceDocker, SourceFlows, SourcePlacements, SourceVLAN)
+	rep, err := Merge(attackpath.NewBuilder(), append(others, creds, FirewallPolicy())...)
 	if err != nil || rep.Complete() || rep.Coverage() != (Coverage{Covered: 2, Total: 3}) {
-		t.Fatalf("with missing firewall: %v complete=%v coverage %+v", err, rep.Complete(), rep.Coverage())
+		t.Fatalf("with unknown firewall: %v complete=%v coverage %+v", err, rep.Complete(), rep.Coverage())
 	}
 	if rep, _ := Merge(attackpath.NewBuilder()); rep.Complete() {
 		t.Fatal("no sources reads complete")
+	}
+}
+
+// completeStubs returns an empty, completely read Result per source.
+func completeStubs(names ...string) []Result {
+	var rs []Result
+	for _, n := range names {
+		rs = append(rs, Result{Source: n, Status: StatusComplete})
+	}
+	return rs
+}
+
+func TestMergeAllRequiredSourcesCompleteIsComplete(t *testing.T) {
+	rep, err := Merge(attackpath.NewBuilder(), completeStubs(RequiredSources()...)...)
+	if err != nil || !rep.Complete() || len(rep.Missing) != 0 {
+		t.Fatalf("all required sources complete: %v %+v", err, rep)
+	}
+}
+
+func TestMergeMissingRequiredSourceIsNeverComplete(t *testing.T) {
+	creds, err := Credentials(context.Background(), CredentialConfig{
+		Hosts:          fakeHosts{hosts: []inventory.Host{{ID: "a"}, {ID: "b"}}},
+		ExecutorHostID: "a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := Merge(attackpath.NewBuilder(), creds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{SourceDocker, SourceFirewall, SourceFlows, SourcePlacements, SourceVLAN}
+	if rep.Complete() || !slices.Equal(rep.Missing, want) {
+		t.Fatalf("credentials only: complete=%v missing %v", rep.Complete(), rep.Missing)
+	}
+	for _, s := range want {
+		if !slices.Contains(rep.Uncertain, Uncertainty{Source: s, Kind: UncertainSourceMissing}) {
+			t.Errorf("missing source %s not named in %v", s, rep.Uncertain)
+		}
+	}
+	// Each missing source is one uncovered unit.
+	if c := rep.Coverage(); c != (Coverage{Covered: 2, Total: 7}) {
+		t.Fatalf("coverage %+v", c)
+	}
+	// Leaving out any single required source is never complete.
+	for _, skip := range RequiredSources() {
+		var rs []Result
+		for _, s := range RequiredSources() {
+			if s != skip {
+				rs = append(rs, completeStubs(s)...)
+			}
+		}
+		rep, err := Merge(attackpath.NewBuilder(), rs...)
+		if err != nil || rep.Complete() || !slices.Equal(rep.Missing, []string{skip}) {
+			t.Errorf("without %s: %v complete=%v missing %v", skip, err, rep.Complete(), rep.Missing)
+		}
+	}
+}
+
+func TestMergeCountsEvictedNodesAsInputLimited(t *testing.T) {
+	// Fill the Builder's input cap with hosts, then offer a PVE node: it
+	// ranks before every host, so the host kept last is evicted silently.
+	r := Result{Source: SourceCredentials, Status: StatusComplete}
+	for i := range attackpath.MaxInputNodes - 2 {
+		r.Nodes = append(r.Nodes, attackpath.Node{ID: fmt.Sprintf("host:h%06d", i), Kind: attackpath.NodeHost})
+	}
+	last := r.Nodes[len(r.Nodes)-1].ID
+	r.Nodes = append(r.Nodes, attackpath.Node{ID: "pve:lab/pve1", Kind: attackpath.NodePVENode})
+	r.Edges = []attackpath.Edge{{From: "host:h000000", To: last, Kind: attackpath.EdgeCredential}}
+	rs := append(completeStubs(SourceDocker, SourceFirewall, SourceFlows, SourcePlacements, SourceVLAN), r)
+	b := attackpath.NewBuilder()
+	rep, err := Merge(b, rs...)
+	if err != nil || rep.Rejected != 0 {
+		t.Fatalf("eviction counted as rejection: %v rejected %d", err, rep.Rejected)
+	}
+	// One evicted node and the edge into it.
+	if rep.InputLimited != 2 || rep.Complete() {
+		t.Fatalf("input_limited %d complete %v", rep.InputLimited, rep.Complete())
+	}
+	if _, ok := b.Build().Node(last); ok {
+		t.Fatalf("%s not evicted", last)
+	}
+}
+
+func TestMergeEdgeToRejectedNodeIsRejected(t *testing.T) {
+	r := Result{Source: "test", Status: StatusComplete,
+		Nodes: []attackpath.Node{
+			{ID: "host:a", Kind: attackpath.NodeHost},
+			{ID: "host:b", Kind: attackpath.NodeGuest}, // wrong namespace
+		},
+		Edges: []attackpath.Edge{{From: "host:a", To: "host:b", Kind: attackpath.EdgeCredential}},
+	}
+	rep, err := Merge(attackpath.NewBuilder(), r)
+	if !errors.Is(err, ErrRejectedInput) || rep.Rejected != 2 || rep.InputLimited != 0 {
+		t.Fatalf("err %v rejected %d input_limited %d", err, rep.Rejected, rep.InputLimited)
+	}
+}
+
+func TestMergeRefusesUsedBuilder(t *testing.T) {
+	b := attackpath.NewBuilder()
+	if err := b.AddNode(attackpath.Node{ID: "host:x", Kind: attackpath.NodeHost}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Merge(b, completeStubs(RequiredSources()...)...); err == nil {
+		t.Fatal("non-empty builder accepted")
 	}
 }
 
@@ -188,9 +291,12 @@ func TestMergeRejectsInvalidInput(t *testing.T) {
 		Nodes:  []attackpath.Node{{ID: "host:a", Kind: attackpath.NodeGuest}},
 		Edges:  []attackpath.Edge{{From: "internet", To: "host:zz", Kind: attackpath.EdgeCredential}},
 	}
-	rep, err := Merge(attackpath.NewBuilder(), bad)
+	rep, err := Merge(attackpath.NewBuilder(), append(completeStubs(RequiredSources()...), bad)...)
 	if !errors.Is(err, ErrRejectedInput) || rep.Rejected != 2 {
 		t.Fatalf("err %v rejected %d", err, rep.Rejected)
+	}
+	if rep.Complete() || len(rep.Uncertain) != 0 || rep.InputLimited != 0 {
+		t.Fatalf("rejected input reads complete: %+v", rep)
 	}
 	if _, err := Merge(nil); err == nil {
 		t.Fatal("nil builder accepted")
