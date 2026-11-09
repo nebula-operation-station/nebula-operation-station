@@ -334,12 +334,13 @@ func TestDigestFlushedByNextEvent(t *testing.T) {
 func TestMessagesArePlainStructuredText(t *testing.T) {
 	ctx := context.Background()
 	n, s, _ := newTest(t)
-	hostile := "CVE-1\n<b>x</b>‮*[link](http://evil)*\x00\xff" + strings.Repeat("A", 500)
+	rlo, lri := string(rune(0x202e)), string(rune(0x2066))
+	hostile := "CVE-1\n<b>x</b>" + rlo + "*[link](http://evil)*\x00\xff" + strings.Repeat("A", 500)
 	f := finding(1, 1, vulnstore.TierCritical, true)
 	f.Record.Vuln.ID = hostile
 	f.Subject.ID = "web1\r\nInjected: header"
 	n.Findings(ctx, []vulnstore.Finding{f})
-	n.MarkReset(ctx, vulnstore.MarkReset{SourceID: "osv", Admin: "eve\n⁦evil"})
+	n.MarkReset(ctx, vulnstore.MarkReset{SourceID: "osv", Admin: "eve\n" + lri + "evil"})
 	if len(s.es) != 3 {
 		t.Fatalf("sent %d", len(s.es))
 	}
