@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
@@ -155,10 +156,11 @@ func Row(f vulnstore.Finding) ExportRow {
 }
 
 // csvCell is the CSV form of an untrusted value: the formula prefix is
-// decided on the raw value, because plain turns tab and CR into '?'.
+// decided on the raw value too, because plain turns tab, CR and NBSP into
+// '?'.
 func csvCell(s string) string {
 	c := plain(s, maxCell)
-	if s != "" && csvSafe(s[:1]) != s[:1] {
+	if formulaLike(s) || formulaLike(c) {
 		return "'" + c
 	}
 	return c
@@ -191,10 +193,24 @@ func row(f vulnstore.Finding, p func(string) string) ExportRow {
 	return row
 }
 
-// csvSafe neutralises spreadsheet formulas (D9): a cell starting with '=',
-// '+', '-', '@', tab or CR gets a leading "'".
+// formulaLike reports whether a spreadsheet may read s as a formula: it
+// starts with tab or CR, or its first character after leading whitespace
+// (including NBSP and other Unicode spaces) is '=', '+', '-' or '@'.
+func formulaLike(s string) bool {
+	if s == "" {
+		return false
+	}
+	if s[0] == '\t' || s[0] == '\r' {
+		return true
+	}
+	t := strings.TrimLeftFunc(s, unicode.IsSpace)
+	return t != "" && strings.ContainsRune("=+-@", rune(t[0]))
+}
+
+// csvSafe neutralises spreadsheet formulas (D9): a formula-like cell (see
+// formulaLike) gets a leading "'".
 func csvSafe(s string) string {
-	if s != "" && strings.ContainsRune("=+-@\t\r", rune(s[0])) {
+	if formulaLike(s) {
 		return "'" + s
 	}
 	return s
@@ -217,16 +233,7 @@ func Export(ctx context.Context, a Auditor, w io.Writer, req ExportRequest) erro
 		return fmt.Errorf("vulnnotify: audit export: %w", err)
 	}
 	if req.Format == FormatJSON {
-		rows := make([]ExportRow, 0, len(req.Findings))
-		for _, f := range req.Findings {
-			rows = append(rows, Row(f))
-		}
-		enc := json.NewEncoder(w)
-		enc.SetEscapeHTML(true)
-		if err := enc.Encode(struct {
-			Format   string      `json:"format"`
-			Findings []ExportRow `json:"findings"`
-		}{"nos-vuln-findings-v1", rows}); err != nil {
+		if err := exportJSON(w, req.Findings); err != nil {
 			return fmt.Errorf("vulnnotify: write json export: %w", err)
 		}
 		return nil
@@ -249,4 +256,26 @@ func Export(ctx context.Context, a Auditor, w io.Writer, req ExportRequest) erro
 		return fmt.Errorf("vulnnotify: write csv export: %w", err)
 	}
 	return nil
+}
+
+// exportJSON streams {"format":"nos-vuln-findings-v1","findings":[...]}
+// to w one row at a time, so memory stays bounded by one row.
+func exportJSON(w io.Writer, fs []vulnstore.Finding) error {
+	if _, err := io.WriteString(w, `{"format":"nos-vuln-findings-v1","findings":[`); err != nil {
+		return err
+	}
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(true)
+	for i, f := range fs {
+		if i > 0 {
+			if _, err := io.WriteString(w, ","); err != nil {
+				return err
+			}
+		}
+		if err := enc.Encode(Row(f)); err != nil {
+			return err
+		}
+	}
+	_, err := io.WriteString(w, "]}\n")
+	return err
 }

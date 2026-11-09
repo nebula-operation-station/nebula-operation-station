@@ -183,3 +183,104 @@ func TestFixFlowPerSubjectKind(t *testing.T) {
 		}
 	}
 }
+
+// TestExportCSVInjectionPrefixAfterWhitespace: whitespace (ASCII, NBSP,
+// ideographic space) before a formula character does not bypass the guard.
+func TestExportCSVInjectionPrefixAfterWhitespace(t *testing.T) {
+	nbsp, ideo := string(rune(0x00a0)), string(rune(0x3000))
+	for _, bad := range []string{" =1+1", "  +cmd", nbsp + "=HYPERLINK(\"x\")", ideo + "@SUM(A1)", " \t-2+3"} {
+		f := exportFinding()
+		f.Record.Vuln.ID = bad
+		f.Record.Component.SourcePackage = bad
+		var buf bytes.Buffer
+		if err := Export(context.Background(), &audit{}, &buf, ExportRequest{Format: FormatCSV, Actor: "admin", Findings: []vulnstore.Finding{f}}); err != nil {
+			t.Fatal(err)
+		}
+		recs, err := csv.NewReader(&buf).ReadAll()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, col := range []int{7, 10} {
+			if cell := recs[1][col]; !strings.HasPrefix(cell, "'") {
+				t.Fatalf("%q: column %s not prefixed: %q", bad, recs[0][col], cell)
+			}
+		}
+	}
+	// Plain text with leading space keeps no prefix.
+	f := exportFinding()
+	f.Record.Component.SourcePackage = " openssl"
+	var buf bytes.Buffer
+	if err := Export(context.Background(), &audit{}, &buf, ExportRequest{Format: FormatCSV, Actor: "admin", Findings: []vulnstore.Finding{f}}); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := csv.NewReader(&buf).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recs[1][10] != " openssl" {
+		t.Fatalf("component %q", recs[1][10])
+	}
+}
+
+// writeRecorder records the size of every Write.
+type writeRecorder struct {
+	buf     bytes.Buffer
+	writes  int
+	largest int
+}
+
+func (w *writeRecorder) Write(p []byte) (int, error) {
+	w.writes++
+	w.largest = max(w.largest, len(p))
+	return w.buf.Write(p)
+}
+
+// TestExportJSONStreamsRows: the JSON export is written row by row (no
+// write holds more than one row) and stays one valid document.
+func TestExportJSONStreamsRows(t *testing.T) {
+	const rows = 50
+	fs := make([]vulnstore.Finding, 0, rows)
+	for i := 0; i < rows; i++ {
+		f := exportFinding()
+		f.Key[1] = byte(i)
+		f.Record.Vuln.Aliases = []string{strings.Repeat("A", 300), "GHSA-1"}
+		fs = append(fs, f)
+	}
+	var w writeRecorder
+	if err := Export(context.Background(), &audit{}, &w, ExportRequest{Format: FormatJSON, Actor: "admin", Findings: fs}); err != nil {
+		t.Fatal(err)
+	}
+	one, err := json.Marshal(Row(fs[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.writes < rows || w.largest > len(one)+16 {
+		t.Fatalf("not streamed: %d writes, largest %d bytes (row %d)", w.writes, w.largest, len(one))
+	}
+	var doc struct {
+		Format   string      `json:"format"`
+		Findings []ExportRow `json:"findings"`
+	}
+	if err := json.Unmarshal(w.buf.Bytes(), &doc); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if doc.Format != "nos-vuln-findings-v1" || len(doc.Findings) != rows || doc.Findings[rows-1].FindingKey != fs[rows-1].Key.String() {
+		t.Fatalf("doc %s with %d rows", doc.Format, len(doc.Findings))
+	}
+}
+
+// TestExportJSONEmpty: an export without findings is a document with an
+// empty list.
+func TestExportJSONEmpty(t *testing.T) {
+	var buf bytes.Buffer
+	if err := Export(context.Background(), &audit{}, &buf, ExportRequest{Format: FormatJSON, Actor: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatalf("invalid json %q: %v", buf.String(), err)
+	}
+	if string(doc["findings"]) != "[]" {
+		t.Fatalf("findings %s", doc["findings"])
+	}
+}
