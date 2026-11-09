@@ -34,6 +34,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/dockerhost"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
@@ -1005,4 +1006,258 @@ func TestVulnRolledBackDataUnderNewSourceIDClosesNothing(t *testing.T) {
 		t.Errorf("mark of dsa %v, want %v", got, d)
 	}
 	e.wantNoMark("dsa-rebuilt")
+}
+
+// --- mark reset and notifications (V12) ---
+
+// The hermes-vuln token cannot reset a high-water mark: the agent API has
+// no such endpoint and no reset-shaped request changes the mark. Only the
+// admin path (the store reset the UI calls after its WebAuthn check)
+// lowers it.
+func TestVulnMarkResetImpossibleWithAgentToken(t *testing.T) {
+	e := newVulnEnv(t, nil)
+	d := e.clk.Now().Add(-time.Hour)
+	e.run(e.fresh(nil), nil)
+	s, _, _ := e.run(e.fresh([]string{"dsa"}, regressedDSA(d)), nil)
+	if v, err := e.st.MarkResetCandidate(t.Context(), "dsa"); err != nil || v.RunID != s.RunID {
+		t.Fatalf("no reset candidate (%+v, %v); the test needs a regressed run to reset to", v, err)
+	}
+	if code, body := e.do(http.MethodGet, "/api/v1/vuln/inventory", nil); code != http.StatusOK {
+		t.Fatalf("the agent token is not accepted: %d %s", code, body)
+	}
+
+	body := mustMarshal(t, map[string]any{"kind": "mark_reset", "source_id": "dsa", "run_id": s.RunID,
+		"content_date": d.Add(-48 * time.Hour).Format(time.RFC3339), "reason": "reset by the agent"})
+	for _, req := range []struct{ method, path string }{
+		{http.MethodPost, "/api/v1/vuln/sources/dsa/reset"},
+		{http.MethodPost, "/api/v1/vuln/feeds/dsa/reset"},
+		{http.MethodPost, "/api/v1/vuln/marks/dsa"},
+		{http.MethodPost, "/api/v1/vuln/marks/dsa/reset"},
+		{http.MethodPut, "/api/v1/vuln/marks/dsa"},
+		{http.MethodPatch, "/api/v1/vuln/marks/dsa"},
+		{http.MethodDelete, "/api/v1/vuln/marks/dsa"},
+		{http.MethodPost, "/api/v1/vuln/reset"},
+		{http.MethodPost, "/api/v1/vuln/decide"},
+		{http.MethodPost, "/api/v1/vuln/runs/" + s.RunID + "/reset"},
+		{http.MethodPost, "/api/v1/vuln/runs/" + s.RunID + "/mark"},
+		{http.MethodPost, "/api/v1/vuln/runs"}, // the run start refuses the unknown fields
+		{http.MethodPut, "/api/v1/vuln/runs/" + s.RunID + "/complete"},
+	} {
+		code, out := e.do(req.method, req.path, body)
+		if code < 400 || code == http.StatusUnauthorized {
+			t.Errorf("%s %s: %d %s, want refused with the token accepted", req.method, req.path, code, out)
+		}
+	}
+	v, err := e.st.MarkResetCandidate(t.Context(), "dsa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !v.MarkDate.Equal(d) || v.Probation {
+		t.Fatalf("mark changed by the agent token: %+v", v)
+	}
+	for _, ev := range e.sink.all() {
+		if ev.Kind == vulnnotify.KindFeedMarkReset {
+			t.Errorf("mark reset event without a reset: %+v", ev)
+		}
+	}
+
+	// Control: the admin path does reset it.
+	if _, err := e.st.ResetMark(t.Context(), vulnstore.MarkResetRequest{SourceID: "dsa", RunID: s.RunID,
+		ContentDate: d.Add(-48 * time.Hour), Admin: "admin", Reason: "feed rebuilt from an older mirror"}); err != nil {
+		t.Fatalf("admin reset: %v", err)
+	}
+	if v, _ := e.st.MarkResetCandidate(t.Context(), "dsa"); !v.MarkDate.Equal(d.Add(-48*time.Hour)) || !v.Probation {
+		t.Fatalf("admin reset not applied: %+v", v)
+	}
+}
+
+// 50 unknown source IDs in one run are reported once (16 shown, the rest
+// counted), get no mark and raise no notification; a listed source behind
+// its mark raises vuln.feed_regressed through the same wiring. A run names
+// at most as many sources as NOS's list holds, so this test uses a list of
+// 60 listed sources.
+func TestVulnFiftyUnknownSourceIDsRaiseNoNotification(t *testing.T) {
+	listed := append([]vulnstore.Source{}, vulnListedSources...)
+	for i := len(listed); i < 60; i++ {
+		listed = append(listed, vulnstore.Source{ID: fmt.Sprintf("listed-%d", i), MaxAge: 72 * time.Hour})
+	}
+	e := newVulnEnv(t, listed)
+	at := e.clk.Now().Add(-time.Hour)
+	var unknown []srcSpec
+	for i := 0; i < 50; i++ {
+		unknown = append(unknown, srcSpec{id: fmt.Sprintf("unknown-%02d", i), at: at})
+	}
+	s, _, _ := e.run(unknown, nil)
+	if s.UnknownCount != 50 || len(s.UnknownSources) != vulnstore.MaxUnknownSourcesShown || len(s.Sources) != 0 {
+		t.Fatalf("start: %d unknown, %d shown, %d verdicts", s.UnknownCount, len(s.UnknownSources), len(s.Sources))
+	}
+	if n := strings.Count(e.log.String(), `"kind":"vuln_run_unknown_sources"`); n != 1 {
+		t.Fatalf("%d unknown-source audit entries, want 1", n)
+	}
+	e.notifyTick()
+	if evs := e.sink.all(); len(evs) != 0 {
+		t.Fatalf("unknown source IDs raised notifications: %+v", evs)
+	}
+	for _, u := range unknown {
+		e.wantNoMark(u.id)
+	}
+
+	// Control: a listed source behind its mark notifies once.
+	e.run([]srcSpec{{id: "dsa", at: e.clk.Now().Add(-time.Hour)}}, nil)
+	e.run([]srcSpec{{id: "dsa", at: e.clk.Now().Add(-48 * time.Hour)}}, nil)
+	e.notifyTick()
+	evs := e.sink.all()
+	if len(evs) != 1 || evs[0].Kind != vulnnotify.KindFeedRegressed || !strings.Contains(evs[0].Reason, "dsa") {
+		t.Fatalf("regressed listed source: %+v", evs)
+	}
+}
+
+// notifyTick is cmd/nebula-server's notification tick for feeds: the
+// staleness check on the store's feed statuses, then Flush.
+func (e *vulnEnv) notifyTick() {
+	e.t.Helper()
+	st, err := e.st.FeedStatuses(e.t.Context())
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	in := make([]vulnnotify.FeedStatus, len(st))
+	for i, s := range st {
+		in[i] = vulnnotify.FeedStatus{SourceID: s.SourceID, Stale: s.Stale && s.Seen, Since: s.StaleSince}
+	}
+	e.notifier.Feeds(e.t.Context(), in)
+	e.notifier.Flush(e.t.Context())
+}
+
+// --- image.packages completeness (V11) ---
+
+type trivyTestPkg struct {
+	Name       string `json:"Name"`
+	Version    string `json:"Version"`
+	Release    string `json:"Release"`
+	SrcName    string `json:"SrcName"`
+	SrcVersion string `json:"SrcVersion"`
+	SrcRelease string `json:"SrcRelease"`
+}
+
+// trivyListing is a Trivy --list-all-pkgs JSON document (schema 2, in
+// Trivy's field order) of a Debian 12 image with n filler packages, plus
+// openssl when withOpenSSL is set, and parses it as NOS does.
+func trivyListing(t *testing.T, n int, withOpenSSL bool) dockerhost.ImagePackages {
+	t.Helper()
+	var pkgs []trivyTestPkg
+	if withOpenSSL {
+		pkgs = append(pkgs, trivyTestPkg{Name: "libssl3", Version: "3.0.15", Release: "1~deb12u1", SrcName: "openssl", SrcVersion: "3.0.15", SrcRelease: "1~deb12u1"})
+	}
+	for i := len(pkgs); i < n; i++ {
+		pkgs = append(pkgs, trivyTestPkg{Name: fmt.Sprintf("pkg%04d", i), Version: "1.0", Release: "1", SrcName: fmt.Sprintf("src%04d", i), SrcVersion: "1.0", SrcRelease: "1"})
+	}
+	type osDoc struct {
+		Family string `json:"Family"`
+		Name   string `json:"Name"`
+	}
+	type meta struct {
+		OS          osDoc    `json:"OS"`
+		ImageID     string   `json:"ImageID"`
+		RepoDigests []string `json:"RepoDigests"`
+	}
+	type result struct {
+		Target   string         `json:"Target"`
+		Class    string         `json:"Class"`
+		Type     string         `json:"Type"`
+		Packages []trivyTestPkg `json:"Packages"`
+	}
+	doc := struct {
+		SchemaVersion int      `json:"SchemaVersion"`
+		ArtifactName  string   `json:"ArtifactName"`
+		ArtifactType  string   `json:"ArtifactType"`
+		Metadata      meta     `json:"Metadata"`
+		Results       []result `json:"Results"`
+	}{2, vulnImageRef, "container_image",
+		meta{OS: osDoc{"debian", "12.5"}, ImageID: "sha256:" + strings.Repeat("3", 64), RepoDigests: []string{vulnImageRef}},
+		[]result{{Target: "app (debian 12.5)", Class: "os-pkgs", Type: "debian", Packages: pkgs}}}
+	got, err := dockerhost.ParseImagePackages(vulnImageRef, dockerhost.TrivyPackagesRun{Present: true, Output: mustMarshal(t, doc)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+// imageSubject turns a parsed image.packages read into the inventory
+// subject NOS exports (completeness carried over).
+func imageSubject(p dockerhost.ImagePackages) api.VulnSubject {
+	var comps []api.VulnComponent
+	for _, k := range p.Packages {
+		comps = append(comps, vulnComp(k.SrcName, k.SrcVersion))
+	}
+	return imageOnWeb01(p.Complete, comps...)
+}
+
+func sourceVersions(p dockerhost.ImagePackages) map[string]string {
+	m := map[string]string{}
+	for _, k := range p.Packages {
+		m[k.SrcName] = k.SrcVersion
+	}
+	return m
+}
+
+// An image.packages read cut at the 5,000-package limit is partial: it
+// closes no image finding, neither as NOS's own inventory evidence (paths
+// 1 and 2) nor by letting a run cover the image; a complete read does both.
+func TestVulnTruncatedImagePackagesClosesNoImageFinding(t *testing.T) {
+	cut := trivyListing(t, dockerhost.MaxImagePackages, false)
+	if !cut.Known || cut.Complete || !strings.Contains(cut.Reason, dockerhost.ReasonLimitReached) {
+		t.Fatalf("fixture: read cut at the limit is %+v", cut.Reason)
+	}
+	whole := trivyListing(t, 3, false)
+	if !whole.Complete {
+		t.Fatalf("fixture: small read not complete: %s", whole.Reason)
+	}
+	cve := cveN(1)
+
+	t.Run("inventory read", func(t *testing.T) {
+		e := newVulnEnv(t, nil)
+		e.run(e.fresh(nil), []vulnstore.Subject{subjImage}, vulnRecord(cve, onImage()))
+		e.wantOpen(subjImage, cve)
+		e.clk.Add(time.Minute)
+		closed, err := e.st.CloseByInventory(t.Context(), vulnstore.InventoryRead{Subject: subjImage, Complete: cut.Complete,
+			ReadAt: e.clk.Now(), SourceVersions: sourceVersions(cut)})
+		if err != nil || len(closed) != 0 {
+			t.Fatalf("truncated read closed %d (%v)", len(closed), err)
+		}
+		e.wantOpen(subjImage, cve)
+		// Control: a complete read without openssl closes it (path 2).
+		closed, err = e.st.CloseByInventory(t.Context(), vulnstore.InventoryRead{Subject: subjImage, Complete: whole.Complete,
+			ReadAt: e.clk.Now(), SourceVersions: sourceVersions(whole)})
+		if err != nil || len(closed) != 1 {
+			t.Fatalf("complete read closed %d (%v)", len(closed), err)
+		}
+		if f := e.finding(cve, subjImage); f.State != vulnstore.StateFixed || f.ClosedBy != vulnstore.ClosedByNOSInventory {
+			t.Fatalf("control: %s by %s", f.State, f.ClosedBy)
+		}
+	})
+
+	t.Run("run coverage", func(t *testing.T) {
+		cutWith, wholeWith := trivyListing(t, dockerhost.MaxImagePackages, true), trivyListing(t, 3, true)
+		if cutWith.Complete || !wholeWith.Complete {
+			t.Fatalf("fixture: %s / %s", cutWith.Reason, wholeWith.Reason)
+		}
+		e := newVulnEnv(t, nil)
+		img := []vulnstore.Subject{subjImage}
+		e.inv.setSubjects(hostWeb01(), imageSubject(wholeWith))
+		e.run(e.fresh(nil), img, vulnRecord(cve, onImage()))
+
+		e.inv.setSubjects(hostWeb01(), imageSubject(cutWith))
+		_, b, c := e.run(e.fresh(nil), img)
+		if b.Covered != 0 || b.NotCoverable != 1 || c.ClosedUnconfirmed != 0 || len(c.Held) != 0 {
+			t.Fatalf("truncated image read: batch %+v completion %+v", b, c)
+		}
+		e.wantOpen(subjImage, cve)
+
+		// Control: with a complete read the same omission closes.
+		e.inv.setSubjects(hostWeb01(), imageSubject(wholeWith))
+		if _, b, c = e.run(e.fresh(nil), img); b.Covered != 1 || c.ClosedUnconfirmed != 1 {
+			t.Fatalf("complete image read: batch %+v completion %+v", b, c)
+		}
+		e.wantClosedUnconfirmed(subjImage, cve)
+	})
 }
