@@ -85,7 +85,7 @@ func TestLineLengthLimit(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := CheckLines(c.text, MaxConfigLines)
+			err := CheckLines(c.text, MaxCBSCommandOutputBytes, MaxConfigLines)
 			if c.over != (err != nil) {
 				t.Fatalf("over=%v, err=%v", c.over, err)
 			}
@@ -97,16 +97,53 @@ func TestLineLengthLimit(t *testing.T) {
 }
 
 func TestConfigLinesLimit(t *testing.T) {
-	if err := CheckLines(lines(MaxConfigLines, 1), MaxConfigLines); err != nil {
+	if err := CheckLines(lines(MaxConfigLines, 1), MaxCBSConfigOutputBytes, MaxConfigLines); err != nil {
 		t.Fatalf("at limit: %v", err)
 	}
-	if err := CheckLines(lines(MaxConfigLines+1, 1), MaxConfigLines); !errors.Is(err, ErrOverLimit) {
+	if err := CheckLines(lines(MaxConfigLines+1, 1), MaxCBSConfigOutputBytes, MaxConfigLines); !errors.Is(err, ErrOverLimit) {
 		t.Fatalf("limit+1: got %v, want ErrOverLimit", err)
 	}
 }
 
+// TestCBSOutputByteCaps checks both CBS transport caps at the cap and one
+// byte over, with lines short enough that only the byte cap can trip.
+func TestCBSOutputByteCaps(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		cap  int
+	}{
+		{"show running-config", MaxCBSConfigOutputBytes},
+		{"other command", MaxCBSCommandOutputBytes},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			at := lines(c.cap/64, 63) // 64 bytes per line including newline
+			if len(at) != c.cap {
+				t.Fatalf("built %d bytes, want %d", len(at), c.cap)
+			}
+			if err := CheckLines(at, c.cap, MaxConfigLines); err != nil {
+				t.Fatalf("at cap: %v", err)
+			}
+			over := append(at, 'a')
+			if err := CheckLines(over, c.cap, MaxConfigLines); !errors.Is(err, ErrOverLimit) {
+				t.Fatalf("cap+1: got %v, want ErrOverLimit", err)
+			}
+		})
+	}
+}
+
+func TestPANOSConfigResponseByteCap(t *testing.T) {
+	body := bytes.Repeat([]byte(" "), MaxPANOSConfigResponseBytes-len("<r/>"))
+	at := append([]byte("<r/>"), body...)
+	if err := CheckXML(at, MaxPANOSConfigResponseBytes); err != nil {
+		t.Fatalf("at cap: %v", err)
+	}
+	if err := CheckXML(append(at, ' '), MaxPANOSConfigResponseBytes); !errors.Is(err, ErrOverLimit) {
+		t.Fatalf("cap+1: got %v, want ErrOverLimit", err)
+	}
+}
+
 func TestCheckLinesRejectsInvalidUTF8(t *testing.T) {
-	if err := CheckLines([]byte("ok\n\xff\xfe\n"), MaxConfigLines); err == nil {
+	if err := CheckLines([]byte("ok\n\xff\xfe\n"), MaxCBSCommandOutputBytes, MaxConfigLines); err == nil {
 		t.Fatal("invalid UTF-8 accepted")
 	}
 }

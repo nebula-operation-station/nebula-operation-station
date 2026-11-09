@@ -91,6 +91,6 @@ func FuzzCheckLines(f *testing.F) {
 	f.Add([]byte(strings.Repeat("a", MaxLineBytes+1)))
 	f.Add([]byte("\r\n\r\n\xff"))
 	f.Fuzz(func(t *testing.T, data []byte) {
-		_ = CheckLines(data, 16)
+		_ = CheckLines(data, 1<<16, 16)
 	})
 }

@@ -173,10 +173,14 @@ func CheckCount(what string, n, limit int) error {
 	return nil
 }
 
-// CheckLines enforces MaxLineBytes on every line of text and maxLines on
-// the line count (MaxConfigLines for configurations). A trailing newline
-// does not start another line. text must already be capped in bytes.
-func CheckLines(text []byte, maxLines int) error {
+// CheckLines enforces the CBS output limits on text: at most maxBytes bytes
+// (MaxCBSConfigOutputBytes or MaxCBSCommandOutputBytes), valid UTF-8,
+// MaxLineBytes per line and at most maxLines lines (MaxConfigLines for
+// configurations). A trailing newline does not start another line.
+func CheckLines(text []byte, maxBytes, maxLines int) error {
+	if len(text) > maxBytes {
+		return overLimit("output bytes", len(text), maxBytes)
+	}
 	if !utf8.Valid(text) {
 		return errors.New("netdevcontract: text is not valid UTF-8")
 	}
